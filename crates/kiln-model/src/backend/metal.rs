@@ -5715,9 +5715,9 @@ kernel void kiln_paged_kv_write_token_major_batch_bf16(
 "#;
 
 fn metal_shared_library(
-    device: &candle_core::metal_backend::MetalDevice,
+    device: &kiln_tensor::metal_types::MetalDevice,
 ) -> Result<kiln_tensor::metal_types::Library> {
-    use candle_core::metal_backend::DeviceId;
+    use kiln_tensor::metal_types::DeviceId;
     use kiln_tensor::metal_types::Library;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
@@ -5768,9 +5768,9 @@ fn metal_shared_library(
 }
 
 fn metal_rms_norm_pipeline(
-    device: &candle_core::metal_backend::MetalDevice,
+    device: &kiln_tensor::metal_types::MetalDevice,
 ) -> Result<kiln_tensor::metal_types::ComputePipeline> {
-    use candle_core::metal_backend::DeviceId;
+    use kiln_tensor::metal_types::DeviceId;
     use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
@@ -5797,9 +5797,9 @@ fn metal_rms_norm_pipeline(
 }
 
 fn metal_rotary_qk_pipeline(
-    device: &candle_core::metal_backend::MetalDevice,
+    device: &kiln_tensor::metal_types::MetalDevice,
 ) -> Result<kiln_tensor::metal_types::ComputePipeline> {
-    use candle_core::metal_backend::DeviceId;
+    use kiln_tensor::metal_types::DeviceId;
     use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
@@ -5826,9 +5826,9 @@ fn metal_rotary_qk_pipeline(
 }
 
 fn metal_gdn_qk_norm_pipeline(
-    device: &candle_core::metal_backend::MetalDevice,
+    device: &kiln_tensor::metal_types::MetalDevice,
 ) -> Result<kiln_tensor::metal_types::ComputePipeline> {
-    use candle_core::metal_backend::DeviceId;
+    use kiln_tensor::metal_types::DeviceId;
     use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
@@ -5855,9 +5855,9 @@ fn metal_gdn_qk_norm_pipeline(
 }
 
 fn metal_gdn_qk_norm_gqa_pipeline(
-    device: &candle_core::metal_backend::MetalDevice,
+    device: &kiln_tensor::metal_types::MetalDevice,
 ) -> Result<kiln_tensor::metal_types::ComputePipeline> {
-    use candle_core::metal_backend::DeviceId;
+    use kiln_tensor::metal_types::DeviceId;
     use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
@@ -5884,9 +5884,9 @@ fn metal_gdn_qk_norm_gqa_pipeline(
 }
 
 fn metal_gdn_decode_qkv_conv_norm_pipeline(
-    device: &candle_core::metal_backend::MetalDevice,
+    device: &kiln_tensor::metal_types::MetalDevice,
 ) -> Result<kiln_tensor::metal_types::ComputePipeline> {
-    use candle_core::metal_backend::DeviceId;
+    use kiln_tensor::metal_types::DeviceId;
     use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
@@ -5913,9 +5913,9 @@ fn metal_gdn_decode_qkv_conv_norm_pipeline(
 }
 
 fn metal_lm_head_pipeline(
-    device: &candle_core::metal_backend::MetalDevice,
+    device: &kiln_tensor::metal_types::MetalDevice,
 ) -> Result<kiln_tensor::metal_types::ComputePipeline> {
-    use candle_core::metal_backend::DeviceId;
+    use kiln_tensor::metal_types::DeviceId;
     use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
@@ -5942,9 +5942,9 @@ fn metal_lm_head_pipeline(
 }
 
 fn metal_lm_head_argmax_pipeline(
-    device: &candle_core::metal_backend::MetalDevice,
+    device: &kiln_tensor::metal_types::MetalDevice,
 ) -> Result<kiln_tensor::metal_types::ComputePipeline> {
-    use candle_core::metal_backend::DeviceId;
+    use kiln_tensor::metal_types::DeviceId;
     use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
@@ -5971,9 +5971,9 @@ fn metal_lm_head_argmax_pipeline(
 }
 
 fn metal_lm_head_argmax_reduce_pipeline(
-    device: &candle_core::metal_backend::MetalDevice,
+    device: &kiln_tensor::metal_types::MetalDevice,
 ) -> Result<kiln_tensor::metal_types::ComputePipeline> {
-    use candle_core::metal_backend::DeviceId;
+    use kiln_tensor::metal_types::DeviceId;
     use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
@@ -6000,9 +6000,9 @@ fn metal_lm_head_argmax_reduce_pipeline(
 }
 
 fn metal_lm_head_argmax_batch_pipeline(
-    device: &candle_core::metal_backend::MetalDevice,
+    device: &kiln_tensor::metal_types::MetalDevice,
 ) -> Result<kiln_tensor::metal_types::ComputePipeline> {
-    use candle_core::metal_backend::DeviceId;
+    use kiln_tensor::metal_types::DeviceId;
     use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
@@ -6029,9 +6029,9 @@ fn metal_lm_head_argmax_batch_pipeline(
 }
 
 fn metal_lm_head_argmax_reduce_batch_pipeline(
-    device: &candle_core::metal_backend::MetalDevice,
+    device: &kiln_tensor::metal_types::MetalDevice,
 ) -> Result<kiln_tensor::metal_types::ComputePipeline> {
-    use candle_core::metal_backend::DeviceId;
+    use kiln_tensor::metal_types::DeviceId;
     use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
@@ -6058,9 +6058,9 @@ fn metal_lm_head_argmax_reduce_batch_pipeline(
 }
 
 fn metal_mlp_gate_up_pipeline(
-    device: &candle_core::metal_backend::MetalDevice,
+    device: &kiln_tensor::metal_types::MetalDevice,
 ) -> Result<kiln_tensor::metal_types::ComputePipeline> {
-    use candle_core::metal_backend::DeviceId;
+    use kiln_tensor::metal_types::DeviceId;
     use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
@@ -6087,9 +6087,9 @@ fn metal_mlp_gate_up_pipeline(
 }
 
 fn metal_mlp_gate_up_serial_pipeline(
-    device: &candle_core::metal_backend::MetalDevice,
+    device: &kiln_tensor::metal_types::MetalDevice,
 ) -> Result<kiln_tensor::metal_types::ComputePipeline> {
-    use candle_core::metal_backend::DeviceId;
+    use kiln_tensor::metal_types::DeviceId;
     use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
@@ -6116,9 +6116,9 @@ fn metal_mlp_gate_up_serial_pipeline(
 }
 
 fn metal_mlp_silu_mul_pipeline(
-    device: &candle_core::metal_backend::MetalDevice,
+    device: &kiln_tensor::metal_types::MetalDevice,
 ) -> Result<kiln_tensor::metal_types::ComputePipeline> {
-    use candle_core::metal_backend::DeviceId;
+    use kiln_tensor::metal_types::DeviceId;
     use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
@@ -6145,9 +6145,9 @@ fn metal_mlp_silu_mul_pipeline(
 }
 
 fn metal_attn_gate_sigmoid_mul_pipeline(
-    device: &candle_core::metal_backend::MetalDevice,
+    device: &kiln_tensor::metal_types::MetalDevice,
 ) -> Result<kiln_tensor::metal_types::ComputePipeline> {
-    use candle_core::metal_backend::DeviceId;
+    use kiln_tensor::metal_types::DeviceId;
     use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
@@ -6174,10 +6174,10 @@ fn metal_attn_gate_sigmoid_mul_pipeline(
 }
 
 fn metal_transposed_coop_gemv_pipeline(
-    device: &candle_core::metal_backend::MetalDevice,
+    device: &kiln_tensor::metal_types::MetalDevice,
     tile: MetalTransposedCoopGemvTile,
 ) -> Result<kiln_tensor::metal_types::ComputePipeline> {
-    use candle_core::metal_backend::DeviceId;
+    use kiln_tensor::metal_types::DeviceId;
     use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
@@ -6207,9 +6207,9 @@ fn metal_transposed_coop_gemv_pipeline(
 }
 
 fn metal_transposed_coop_gemv_batch_pipeline(
-    device: &candle_core::metal_backend::MetalDevice,
+    device: &kiln_tensor::metal_types::MetalDevice,
 ) -> Result<kiln_tensor::metal_types::ComputePipeline> {
-    use candle_core::metal_backend::DeviceId;
+    use kiln_tensor::metal_types::DeviceId;
     use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
@@ -6236,9 +6236,9 @@ fn metal_transposed_coop_gemv_batch_pipeline(
 }
 
 fn metal_transposed_coop_gemv_batch_row_triple_tile8_pipeline(
-    device: &candle_core::metal_backend::MetalDevice,
+    device: &kiln_tensor::metal_types::MetalDevice,
 ) -> Result<kiln_tensor::metal_types::ComputePipeline> {
-    use candle_core::metal_backend::DeviceId;
+    use kiln_tensor::metal_types::DeviceId;
     use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
@@ -6276,9 +6276,9 @@ fn metal_transposed_coop_gemv_batch_row_triple_tile8_pipeline(
 }
 
 fn metal_transposed_coop_gemv_batch_row_quad_tile8_pipeline(
-    device: &candle_core::metal_backend::MetalDevice,
+    device: &kiln_tensor::metal_types::MetalDevice,
 ) -> Result<kiln_tensor::metal_types::ComputePipeline> {
-    use candle_core::metal_backend::DeviceId;
+    use kiln_tensor::metal_types::DeviceId;
     use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
@@ -6309,9 +6309,9 @@ fn metal_transposed_coop_gemv_batch_row_quad_tile8_pipeline(
 }
 
 fn metal_fused_qkv_transposed_coop_gemv_pipeline(
-    device: &candle_core::metal_backend::MetalDevice,
+    device: &kiln_tensor::metal_types::MetalDevice,
 ) -> Result<kiln_tensor::metal_types::ComputePipeline> {
-    use candle_core::metal_backend::DeviceId;
+    use kiln_tensor::metal_types::DeviceId;
     use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
@@ -6338,9 +6338,9 @@ fn metal_fused_qkv_transposed_coop_gemv_pipeline(
 }
 
 fn metal_lora_hidden_decode_pipeline(
-    device: &candle_core::metal_backend::MetalDevice,
+    device: &kiln_tensor::metal_types::MetalDevice,
 ) -> Result<kiln_tensor::metal_types::ComputePipeline> {
-    use candle_core::metal_backend::DeviceId;
+    use kiln_tensor::metal_types::DeviceId;
     use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
@@ -6367,9 +6367,9 @@ fn metal_lora_hidden_decode_pipeline(
 }
 
 fn metal_lora_add_decode_pipeline(
-    device: &candle_core::metal_backend::MetalDevice,
+    device: &kiln_tensor::metal_types::MetalDevice,
 ) -> Result<kiln_tensor::metal_types::ComputePipeline> {
-    use candle_core::metal_backend::DeviceId;
+    use kiln_tensor::metal_types::DeviceId;
     use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
@@ -6396,9 +6396,9 @@ fn metal_lora_add_decode_pipeline(
 }
 
 fn metal_gdn_in_proj_pipeline(
-    device: &candle_core::metal_backend::MetalDevice,
+    device: &kiln_tensor::metal_types::MetalDevice,
 ) -> Result<kiln_tensor::metal_types::ComputePipeline> {
-    use candle_core::metal_backend::DeviceId;
+    use kiln_tensor::metal_types::DeviceId;
     use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
@@ -6425,9 +6425,9 @@ fn metal_gdn_in_proj_pipeline(
 }
 
 fn metal_paged_kv_head_major_read_pipeline(
-    device: &candle_core::metal_backend::MetalDevice,
+    device: &kiln_tensor::metal_types::MetalDevice,
 ) -> Result<kiln_tensor::metal_types::ComputePipeline> {
-    use candle_core::metal_backend::DeviceId;
+    use kiln_tensor::metal_types::DeviceId;
     use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
@@ -6454,9 +6454,9 @@ fn metal_paged_kv_head_major_read_pipeline(
 }
 
 fn metal_paged_kv_head_major_read_append_token_major_pipeline(
-    device: &candle_core::metal_backend::MetalDevice,
+    device: &kiln_tensor::metal_types::MetalDevice,
 ) -> Result<kiln_tensor::metal_types::ComputePipeline> {
-    use candle_core::metal_backend::DeviceId;
+    use kiln_tensor::metal_types::DeviceId;
     use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
@@ -6486,9 +6486,9 @@ fn metal_paged_kv_head_major_read_append_token_major_pipeline(
 }
 
 fn metal_paged_attn_decode_contiguous_pipeline(
-    device: &candle_core::metal_backend::MetalDevice,
+    device: &kiln_tensor::metal_types::MetalDevice,
 ) -> Result<kiln_tensor::metal_types::ComputePipeline> {
-    use candle_core::metal_backend::DeviceId;
+    use kiln_tensor::metal_types::DeviceId;
     use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
@@ -6515,9 +6515,9 @@ fn metal_paged_attn_decode_contiguous_pipeline(
 }
 
 fn metal_paged_attn_decode_contiguous_batch_pipeline(
-    device: &candle_core::metal_backend::MetalDevice,
+    device: &kiln_tensor::metal_types::MetalDevice,
 ) -> Result<kiln_tensor::metal_types::ComputePipeline> {
-    use candle_core::metal_backend::DeviceId;
+    use kiln_tensor::metal_types::DeviceId;
     use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
@@ -6548,9 +6548,9 @@ fn metal_paged_attn_decode_contiguous_batch_pipeline(
 }
 
 fn metal_paged_attn_decode_contiguous_batch_dyn_seqlen_pipeline(
-    device: &candle_core::metal_backend::MetalDevice,
+    device: &kiln_tensor::metal_types::MetalDevice,
 ) -> Result<kiln_tensor::metal_types::ComputePipeline> {
-    use candle_core::metal_backend::DeviceId;
+    use kiln_tensor::metal_types::DeviceId;
     use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
@@ -6584,9 +6584,9 @@ fn metal_paged_attn_decode_contiguous_batch_dyn_seqlen_pipeline(
 }
 
 fn metal_paged_kv_write_token_major_pipeline(
-    device: &candle_core::metal_backend::MetalDevice,
+    device: &kiln_tensor::metal_types::MetalDevice,
 ) -> Result<kiln_tensor::metal_types::ComputePipeline> {
-    use candle_core::metal_backend::DeviceId;
+    use kiln_tensor::metal_types::DeviceId;
     use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
@@ -6613,9 +6613,9 @@ fn metal_paged_kv_write_token_major_pipeline(
 }
 
 fn metal_paged_kv_write_token_major_batch_pipeline(
-    device: &candle_core::metal_backend::MetalDevice,
+    device: &kiln_tensor::metal_types::MetalDevice,
 ) -> Result<kiln_tensor::metal_types::ComputePipeline> {
-    use candle_core::metal_backend::DeviceId;
+    use kiln_tensor::metal_types::DeviceId;
     use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
@@ -6734,15 +6734,15 @@ pub(crate) fn metal_lm_head_bf16(x: &Tensor, weight_t: &Tensor) -> Result<Tensor
         let (o_storage, o_layout) = out.storage_and_layout();
 
         let x_metal = match &*x_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal lm head x must be on Metal"),
         };
         let w_metal = match &*w_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal lm head weight must be on Metal"),
         };
         let out_metal = match &*o_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal lm head out must be on Metal"),
         };
 
@@ -6816,23 +6816,23 @@ pub(crate) fn metal_lm_head_argmax_bf16(x: &Tensor, weight_t: &Tensor) -> Result
         let final_storage_and_layout = final_index.as_ref().map(Tensor::storage_and_layout);
 
         let x_metal = match &*x_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal lm head argmax x must be on Metal"),
         };
         let w_metal = match &*w_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal lm head argmax weight must be on Metal"),
         };
         let ps_metal = match &*ps_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal lm head argmax partial scores must be on Metal"),
         };
         let pi_metal = match &*pi_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal lm head argmax partial indices must be on Metal"),
         };
         let final_metal = match final_storage_and_layout.as_ref().map(|(s, l)| (&**s, l)) {
-            Some((candle_core::Storage::Metal(s), layout)) => Some((s, layout)),
+            Some((kiln_tensor::metal_types::Storage::Metal(s), layout)) => Some((s, layout)),
             Some(_) => anyhow::bail!("metal lm head argmax final index must be on Metal"),
             None => None,
         };
@@ -6972,23 +6972,23 @@ pub(crate) fn metal_lm_head_argmax_rows_bf16(x: &Tensor, weight_t: &Tensor) -> R
         let final_storage_and_layout = final_indices.as_ref().map(Tensor::storage_and_layout);
 
         let x_metal = match &*x_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal lm head row argmax x must be on Metal"),
         };
         let w_metal = match &*w_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal lm head row argmax weight must be on Metal"),
         };
         let ps_metal = match &*ps_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal lm head row argmax partial scores must be on Metal"),
         };
         let pi_metal = match &*pi_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal lm head row argmax partial indices must be on Metal"),
         };
         let final_metal = match final_storage_and_layout.as_ref().map(|(s, l)| (&**s, l)) {
-            Some((candle_core::Storage::Metal(s), layout)) => Some((s, layout)),
+            Some((kiln_tensor::metal_types::Storage::Metal(s), layout)) => Some((s, layout)),
             Some(_) => anyhow::bail!("metal lm head row argmax final indices must be on Metal"),
             None => None,
         };
@@ -7174,19 +7174,19 @@ pub(crate) fn metal_mlp_gate_up_bf16(x: &Tensor, gate_t: &Tensor, up_t: &Tensor)
         let (out_storage, out_layout) = out.storage_and_layout();
 
         let x_metal = match &*x_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal mlp gate/up x must be on Metal"),
         };
         let gate_metal = match &*gate_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal mlp gate/up gate_t must be on Metal"),
         };
         let up_metal = match &*up_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal mlp gate/up up_t must be on Metal"),
         };
         let out_metal = match &*out_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal mlp gate/up out must be on Metal"),
         };
 
@@ -7303,15 +7303,15 @@ pub(crate) fn metal_mlp_silu_mul_bf16(gate: &Tensor, up: &Tensor) -> Result<Tens
         let (out_storage, out_layout) = out.storage_and_layout();
 
         let gate_metal = match &*gate_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal mlp silu*mul gate must be on Metal"),
         };
         let up_metal = match &*up_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal mlp silu*mul up must be on Metal"),
         };
         let out_metal = match &*out_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal mlp silu*mul out must be on Metal"),
         };
 
@@ -7404,15 +7404,15 @@ pub(crate) fn metal_attn_gate_sigmoid_mul_bf16(x: &Tensor, gate: &Tensor) -> Res
         let (out_storage, out_layout) = out.storage_and_layout();
 
         let x_metal = match &*x_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal attn gate sigmoid/mul x must be on Metal"),
         };
         let gate_metal = match &*gate_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal attn gate sigmoid/mul gate must be on Metal"),
         };
         let out_metal = match &*out_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal attn gate sigmoid/mul out must be on Metal"),
         };
 
@@ -7554,15 +7554,15 @@ fn metal_transposed_coop_gemv_bf16_with_tile(
         let (o_storage, o_layout) = out.storage_and_layout();
 
         let x_metal = match &*x_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal transposed coop GEMV x must be on Metal"),
         };
         let w_metal = match &*w_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal transposed coop GEMV weight_t must be on Metal"),
         };
         let out_metal = match &*o_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal transposed coop GEMV out must be on Metal"),
         };
 
@@ -7655,15 +7655,15 @@ fn metal_transposed_coop_gemv_batch_bf16(x: &Tensor, weight_t: &Tensor) -> Resul
         let (o_storage, o_layout) = out.storage_and_layout();
 
         let x_metal = match &*x_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal batch transposed coop GEMV x must be on Metal"),
         };
         let w_metal = match &*w_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal batch transposed coop GEMV weight_t must be on Metal"),
         };
         let out_metal = match &*o_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal batch transposed coop GEMV out must be on Metal"),
         };
 
@@ -7789,31 +7789,31 @@ pub(crate) fn metal_fused_qkv_transposed_coop_gemv_bf16(
         let (v_out_storage, v_out_layout) = v_out.storage_and_layout();
 
         let x_metal = match &*x_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal fused QKV projection x must be on Metal"),
         };
         let q_metal = match &*q_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal fused QKV projection q_t must be on Metal"),
         };
         let k_metal = match &*k_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal fused QKV projection k_t must be on Metal"),
         };
         let v_metal = match &*v_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal fused QKV projection v_t must be on Metal"),
         };
         let q_out_metal = match &*q_out_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal fused QKV projection q_out must be on Metal"),
         };
         let k_out_metal = match &*k_out_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal fused QKV projection k_out must be on Metal"),
         };
         let v_out_metal = match &*v_out_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal fused QKV projection v_out must be on Metal"),
         };
 
@@ -7975,15 +7975,15 @@ pub(crate) fn metal_lora_add_decode_bf16(
         let (hidden_storage, hidden_layout) = hidden.storage_and_layout();
 
         let x_metal = match &*x_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal LoRA hidden x must be on Metal"),
         };
         let a_metal = match &*a_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal LoRA hidden A must be on Metal"),
         };
         let hidden_metal = match &*hidden_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal LoRA hidden output must be on Metal"),
         };
 
@@ -8030,19 +8030,19 @@ pub(crate) fn metal_lora_add_decode_bf16(
         let (out_storage, out_layout) = out.storage_and_layout();
 
         let hidden_metal = match &*hidden_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal LoRA add hidden must be on Metal"),
         };
         let b_metal = match &*b_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal LoRA add B must be on Metal"),
         };
         let base_metal = match &*base_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal LoRA add base must be on Metal"),
         };
         let out_metal = match &*out_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal LoRA add output must be on Metal"),
         };
 
@@ -8230,39 +8230,39 @@ fn metal_gdn_in_proj_decode_bf16(
         let (b_o_storage, b_o_layout) = b_out.storage_and_layout();
 
         let x_metal = match &*x_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn in-proj x must be on Metal"),
         };
         let qkv_metal = match &*qkv_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn in-proj qkv_t must be on Metal"),
         };
         let z_metal = match &*z_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn in-proj z_t must be on Metal"),
         };
         let a_metal = match &*a_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn in-proj a_t must be on Metal"),
         };
         let b_metal = match &*b_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn in-proj b_t must be on Metal"),
         };
         let qkv_o_metal = match &*qkv_o_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn in-proj qkv_out must be on Metal"),
         };
         let z_o_metal = match &*z_o_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn in-proj z_out must be on Metal"),
         };
         let a_o_metal = match &*a_o_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn in-proj a_out must be on Metal"),
         };
         let b_o_metal = match &*b_o_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn in-proj b_out must be on Metal"),
         };
 
@@ -8392,27 +8392,27 @@ pub(crate) fn metal_rotary_embedding_bf16(
         let (ko_storage, ko_layout) = k_out.storage_and_layout();
 
         let q_metal = match &*q_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal rotary q must be on Metal"),
         };
         let k_metal = match &*k_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal rotary k must be on Metal"),
         };
         let cos_metal = match &*c_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal rotary cos must be on Metal"),
         };
         let sin_metal = match &*s_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal rotary sin must be on Metal"),
         };
         let q_out_metal = match &*qo_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal rotary q_out must be on Metal"),
         };
         let k_out_metal = match &*ko_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal rotary k_out must be on Metal"),
         };
 
@@ -8542,19 +8542,19 @@ fn metal_paged_kv_head_major_read_bf16(
         let (vo_storage, vo_layout) = v_out.storage_and_layout();
 
         let k_metal = match &*k_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal paged kv read k_pool must be on Metal"),
         };
         let v_metal = match &*v_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal paged kv read v_pool must be on Metal"),
         };
         let ko_metal = match &*ko_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal paged kv read k_out must be on Metal"),
         };
         let vo_metal = match &*vo_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal paged kv read v_out must be on Metal"),
         };
 
@@ -8684,19 +8684,19 @@ fn metal_paged_attn_decode_contiguous_bf16_d256(
         let (out_storage, out_layout) = out.storage_and_layout();
 
         let q_metal = match &*q_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal contiguous paged attention q must be on Metal"),
         };
         let k_metal = match &*k_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal contiguous paged attention k_pool must be on Metal"),
         };
         let v_metal = match &*v_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal contiguous paged attention v_pool must be on Metal"),
         };
         let out_metal = match &*out_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal contiguous paged attention out must be on Metal"),
         };
 
@@ -8833,23 +8833,23 @@ fn metal_paged_attn_decode_contiguous_batch_bf16_d256(
         let (slot_storage, slot_layout) = start_slots.storage_and_layout();
 
         let q_metal = match &*q_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal contiguous paged batch attention q must be on Metal"),
         };
         let k_metal = match &*k_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal contiguous paged batch attention k_pool must be on Metal"),
         };
         let v_metal = match &*v_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal contiguous paged batch attention v_pool must be on Metal"),
         };
         let out_metal = match &*out_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal contiguous paged batch attention out must be on Metal"),
         };
         let slot_metal = match &*slot_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal contiguous paged batch attention slots must be on Metal"),
         };
 
@@ -9019,27 +9019,27 @@ fn metal_paged_attn_decode_contiguous_batch_dyn_seqlen_bf16_d256(
         let (seq_storage, seq_layout) = seqused_k.storage_and_layout();
 
         let q_metal = match &*q_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal dyn-seqlen batch attention q must be on Metal"),
         };
         let k_metal = match &*k_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal dyn-seqlen batch attention k_pool must be on Metal"),
         };
         let v_metal = match &*v_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal dyn-seqlen batch attention v_pool must be on Metal"),
         };
         let out_metal = match &*out_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal dyn-seqlen batch attention out must be on Metal"),
         };
         let table_metal = match &*table_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal dyn-seqlen batch attention block_table must be on Metal"),
         };
         let seq_metal = match &*seq_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal dyn-seqlen batch attention seqused_k must be on Metal"),
         };
 
@@ -9192,27 +9192,27 @@ fn metal_paged_kv_head_major_read_append_token_major_bf16(
         let (vo_storage, vo_layout) = v_out.storage_and_layout();
 
         let k_metal = match &*k_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal paged kv read+append k_pool must be on Metal"),
         };
         let v_metal = match &*v_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal paged kv read+append v_pool must be on Metal"),
         };
         let kt_metal = match &*kt_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal paged kv read+append k_tail must be on Metal"),
         };
         let vt_metal = match &*vt_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal paged kv read+append v_tail must be on Metal"),
         };
         let ko_metal = match &*ko_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal paged kv read+append k_out must be on Metal"),
         };
         let vo_metal = match &*vo_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal paged kv read+append v_out must be on Metal"),
         };
 
@@ -9351,19 +9351,19 @@ pub(crate) fn metal_paged_kv_write_token_major_bf16(
         let (vp_storage, vp_layout) = v_pool.storage_and_layout();
 
         let ks_metal = match &*ks_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal paged kv write k source must be on Metal"),
         };
         let vs_metal = match &*vs_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal paged kv write v source must be on Metal"),
         };
         let kp_metal = match &*kp_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal paged kv write k pool must be on Metal"),
         };
         let vp_metal = match &*vp_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal paged kv write v pool must be on Metal"),
         };
 
@@ -9506,23 +9506,23 @@ pub(crate) fn metal_paged_kv_write_token_major_batch_bf16(
         let (slot_storage, slot_layout) = slots.storage_and_layout();
 
         let ks_metal = match &*ks_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal paged kv batch write k source must be on Metal"),
         };
         let vs_metal = match &*vs_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal paged kv batch write v source must be on Metal"),
         };
         let kp_metal = match &*kp_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal paged kv batch write k pool must be on Metal"),
         };
         let vp_metal = match &*vp_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal paged kv batch write v pool must be on Metal"),
         };
         let slot_metal = match &*slot_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal paged kv batch write slots must be on Metal"),
         };
 
@@ -9602,15 +9602,15 @@ pub(crate) fn metal_rms_norm_bf16(x: &Tensor, weight: &Tensor, eps: f32) -> Resu
         let (o_storage, o_layout) = out.storage_and_layout();
 
         let x_metal = match &*x_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal rmsnorm x must be on Metal"),
         };
         let w_metal = match &*w_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal rmsnorm weight must be on Metal"),
         };
         let out_metal = match &*o_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal rmsnorm out must be on Metal"),
         };
 
@@ -9692,19 +9692,19 @@ pub(crate) fn metal_gdn_qk_norm_f32_bf16(
         let (ko_storage, ko_layout) = k_out.storage_and_layout();
 
         let q_metal = match &*q_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn qk norm q must be on Metal"),
         };
         let k_metal = match &*k_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn qk norm k must be on Metal"),
         };
         let qo_metal = match &*qo_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn qk norm q_out must be on Metal"),
         };
         let ko_metal = match &*ko_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn qk norm k_out must be on Metal"),
         };
 
@@ -9793,19 +9793,19 @@ pub(crate) fn metal_gdn_qk_norm_gqa_f32_bf16(
         let (ko_storage, ko_layout) = k_out.storage_and_layout();
 
         let q_metal = match &*q_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn qk norm gqa q must be on Metal"),
         };
         let k_metal = match &*k_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn qk norm gqa k must be on Metal"),
         };
         let qo_metal = match &*qo_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn qk norm gqa q_out must be on Metal"),
         };
         let ko_metal = match &*ko_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn qk norm gqa k_out must be on Metal"),
         };
 
@@ -9921,27 +9921,27 @@ pub(crate) fn metal_gdn_decode_qkv_conv_norm_bf16(
         let (vo_storage, vo_layout) = v_out.storage_and_layout();
 
         let x_metal = match &*x_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn decode qkv conv/norm mixed_qkv must be on Metal"),
         };
         let w_metal = match &*w_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn decode qkv conv/norm weight must be on Metal"),
         };
         let s_metal = match &*s_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn decode qkv conv/norm state must be on Metal"),
         };
         let qo_metal = match &*qo_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn decode qkv conv/norm q_out must be on Metal"),
         };
         let ko_metal = match &*ko_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn decode qkv conv/norm k_out must be on Metal"),
         };
         let vo_metal = match &*vo_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn decode qkv conv/norm v_out must be on Metal"),
         };
 
@@ -10277,9 +10277,9 @@ kernel void kiln_gdn_decode_gates_recurrent_rmsnorm_bf16(
 "#;
 
 fn metal_gdn_gates_pipeline(
-    device: &candle_core::metal_backend::MetalDevice,
+    device: &kiln_tensor::metal_types::MetalDevice,
 ) -> Result<kiln_tensor::metal_types::ComputePipeline> {
-    use candle_core::metal_backend::DeviceId;
+    use kiln_tensor::metal_types::DeviceId;
     use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
@@ -10306,9 +10306,9 @@ fn metal_gdn_gates_pipeline(
 }
 
 fn metal_gdn_gates_decay_pipeline(
-    device: &candle_core::metal_backend::MetalDevice,
+    device: &kiln_tensor::metal_types::MetalDevice,
 ) -> Result<kiln_tensor::metal_types::ComputePipeline> {
-    use candle_core::metal_backend::DeviceId;
+    use kiln_tensor::metal_types::DeviceId;
     use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
@@ -10335,9 +10335,9 @@ fn metal_gdn_gates_decay_pipeline(
 }
 
 fn metal_gdn_gates_decay_ab_pipeline(
-    device: &candle_core::metal_backend::MetalDevice,
+    device: &kiln_tensor::metal_types::MetalDevice,
 ) -> Result<kiln_tensor::metal_types::ComputePipeline> {
-    use candle_core::metal_backend::DeviceId;
+    use kiln_tensor::metal_types::DeviceId;
     use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
@@ -10364,9 +10364,9 @@ fn metal_gdn_gates_decay_ab_pipeline(
 }
 
 fn metal_gdn_decode_gates_recurrent_pipeline(
-    device: &candle_core::metal_backend::MetalDevice,
+    device: &kiln_tensor::metal_types::MetalDevice,
 ) -> Result<kiln_tensor::metal_types::ComputePipeline> {
-    use candle_core::metal_backend::DeviceId;
+    use kiln_tensor::metal_types::DeviceId;
     use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
@@ -10393,9 +10393,9 @@ fn metal_gdn_decode_gates_recurrent_pipeline(
 }
 
 fn metal_gdn_decode_gates_recurrent_rmsnorm_pipeline(
-    device: &candle_core::metal_backend::MetalDevice,
+    device: &kiln_tensor::metal_types::MetalDevice,
 ) -> Result<kiln_tensor::metal_types::ComputePipeline> {
-    use candle_core::metal_backend::DeviceId;
+    use kiln_tensor::metal_types::DeviceId;
     use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
@@ -10467,27 +10467,27 @@ fn metal_gdn_gates_bf16(
         let (g_storage, g_layout) = g.storage_and_layout();
 
         let a_metal = match &*a_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn_gates a must be on Metal"),
         };
         let b_metal = match &*b_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn_gates b must be on Metal"),
         };
         let al_metal = match &*al_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn_gates a_log must be on Metal"),
         };
         let dt_metal = match &*dt_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn_gates dt_bias must be on Metal"),
         };
         let beta_metal = match &*beta_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn_gates beta output must be on Metal"),
         };
         let g_metal = match &*g_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn_gates g output must be on Metal"),
         };
 
@@ -10594,27 +10594,27 @@ pub(crate) fn metal_gdn_gates_decay_bf16(
         let (decay_storage, decay_layout) = decay.storage_and_layout();
 
         let a_metal = match &*a_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn_gates decay a must be on Metal"),
         };
         let b_metal = match &*b_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn_gates decay b must be on Metal"),
         };
         let al_metal = match &*al_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn_gates decay a_log must be on Metal"),
         };
         let dt_metal = match &*dt_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn_gates decay dt_bias must be on Metal"),
         };
         let beta_metal = match &*beta_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn_gates decay beta output must be on Metal"),
         };
         let decay_metal = match &*decay_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn_gates decay output must be on Metal"),
         };
 
@@ -10707,23 +10707,23 @@ pub(crate) fn metal_gdn_gates_decay_ab_bf16(
         let (decay_storage, decay_layout) = decay.storage_and_layout();
 
         let ab_metal = match &*ab_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn_gates decay A/B input must be on Metal"),
         };
         let al_metal = match &*al_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn_gates decay A/B a_log must be on Metal"),
         };
         let dt_metal = match &*dt_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn_gates decay A/B dt_bias must be on Metal"),
         };
         let beta_metal = match &*beta_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn_gates decay A/B beta output must be on Metal"),
         };
         let decay_metal = match &*decay_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn_gates decay A/B output must be on Metal"),
         };
 
@@ -10824,39 +10824,39 @@ pub(crate) fn metal_gdn_decode_gates_recurrent_bf16(
         let (out_storage, out_layout) = out.storage_and_layout();
 
         let q_metal = match &*q_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn decode gates+recurrent q must be on Metal"),
         };
         let k_metal = match &*k_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn decode gates+recurrent k must be on Metal"),
         };
         let v_metal = match &*v_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn decode gates+recurrent v must be on Metal"),
         };
         let a_metal = match &*a_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn decode gates+recurrent a must be on Metal"),
         };
         let b_metal = match &*b_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn decode gates+recurrent b must be on Metal"),
         };
         let al_metal = match &*al_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn decode gates+recurrent a_log must be on Metal"),
         };
         let dt_metal = match &*dt_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn decode gates+recurrent dt_bias must be on Metal"),
         };
         let state_metal = match &*state_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn decode gates+recurrent state must be on Metal"),
         };
         let out_metal = match &*out_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn decode gates+recurrent out must be on Metal"),
         };
 
@@ -10979,47 +10979,47 @@ pub(crate) fn metal_gdn_decode_gates_recurrent_rmsnorm_bf16(
         let (out_storage, out_layout) = out.storage_and_layout();
 
         let q_metal = match &*q_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn decode gates+recurrent+rmsnorm q must be on Metal"),
         };
         let k_metal = match &*k_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn decode gates+recurrent+rmsnorm k must be on Metal"),
         };
         let v_metal = match &*v_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn decode gates+recurrent+rmsnorm v must be on Metal"),
         };
         let a_metal = match &*a_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn decode gates+recurrent+rmsnorm a must be on Metal"),
         };
         let b_metal = match &*b_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn decode gates+recurrent+rmsnorm b must be on Metal"),
         };
         let al_metal = match &*al_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn decode gates+recurrent+rmsnorm a_log must be on Metal"),
         };
         let dt_metal = match &*dt_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn decode gates+recurrent+rmsnorm dt_bias must be on Metal"),
         };
         let state_metal = match &*state_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn decode gates+recurrent+rmsnorm state must be on Metal"),
         };
         let z_metal = match &*z_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn decode gates+recurrent+rmsnorm z must be on Metal"),
         };
         let w_metal = match &*w_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn decode gates+recurrent+rmsnorm weight must be on Metal"),
         };
         let out_metal = match &*out_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn decode gates+recurrent+rmsnorm out must be on Metal"),
         };
 
@@ -11133,9 +11133,9 @@ kernel void kiln_gated_rmsnorm_bf16(
 "#;
 
 fn metal_gated_rms_norm_pipeline(
-    device: &candle_core::metal_backend::MetalDevice,
+    device: &kiln_tensor::metal_types::MetalDevice,
 ) -> Result<kiln_tensor::metal_types::ComputePipeline> {
-    use candle_core::metal_backend::DeviceId;
+    use kiln_tensor::metal_types::DeviceId;
     use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
@@ -11198,19 +11198,19 @@ fn metal_gated_rms_norm_bf16(x: &Tensor, z: &Tensor, weight: &Tensor, eps: f32) 
         let (o_storage, o_layout) = out.storage_and_layout();
 
         let x_metal = match &*x_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gated rmsnorm x must be on Metal"),
         };
         let z_metal = match &*z_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gated rmsnorm z must be on Metal"),
         };
         let w_metal = match &*w_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gated rmsnorm weight must be on Metal"),
         };
         let out_metal = match &*o_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gated rmsnorm out must be on Metal"),
         };
 
@@ -11827,9 +11827,9 @@ kernel void kiln_gdn_full_chunk_forward_bf16(
 "#;
 
 fn metal_gdn_recurrent_pipeline(
-    device: &candle_core::metal_backend::MetalDevice,
+    device: &kiln_tensor::metal_types::MetalDevice,
 ) -> Result<kiln_tensor::metal_types::ComputePipeline> {
-    use candle_core::metal_backend::DeviceId;
+    use kiln_tensor::metal_types::DeviceId;
     use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
@@ -11856,9 +11856,9 @@ fn metal_gdn_recurrent_pipeline(
 }
 
 fn metal_gdn_recurrent_prefill_head_last_pipeline(
-    device: &candle_core::metal_backend::MetalDevice,
+    device: &kiln_tensor::metal_types::MetalDevice,
 ) -> Result<kiln_tensor::metal_types::ComputePipeline> {
-    use candle_core::metal_backend::DeviceId;
+    use kiln_tensor::metal_types::DeviceId;
     use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
@@ -11885,9 +11885,9 @@ fn metal_gdn_recurrent_prefill_head_last_pipeline(
 }
 
 fn metal_gdn_forward_substitution_pipeline(
-    device: &candle_core::metal_backend::MetalDevice,
+    device: &kiln_tensor::metal_types::MetalDevice,
 ) -> Result<kiln_tensor::metal_types::ComputePipeline> {
-    use candle_core::metal_backend::DeviceId;
+    use kiln_tensor::metal_types::DeviceId;
     use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
@@ -11914,9 +11914,9 @@ fn metal_gdn_forward_substitution_pipeline(
 }
 
 fn metal_gdn_forward_substitution_f32_pipeline(
-    device: &candle_core::metal_backend::MetalDevice,
+    device: &kiln_tensor::metal_types::MetalDevice,
 ) -> Result<kiln_tensor::metal_types::ComputePipeline> {
-    use candle_core::metal_backend::DeviceId;
+    use kiln_tensor::metal_types::DeviceId;
     use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
@@ -11943,9 +11943,9 @@ fn metal_gdn_forward_substitution_f32_pipeline(
 }
 
 fn metal_gdn_chunk_prep_pipeline(
-    device: &candle_core::metal_backend::MetalDevice,
+    device: &kiln_tensor::metal_types::MetalDevice,
 ) -> Result<kiln_tensor::metal_types::ComputePipeline> {
-    use candle_core::metal_backend::DeviceId;
+    use kiln_tensor::metal_types::DeviceId;
     use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
@@ -11972,9 +11972,9 @@ fn metal_gdn_chunk_prep_pipeline(
 }
 
 fn metal_gdn_recurrent_prefill_head_last_decay_pipeline(
-    device: &candle_core::metal_backend::MetalDevice,
+    device: &kiln_tensor::metal_types::MetalDevice,
 ) -> Result<kiln_tensor::metal_types::ComputePipeline> {
-    use candle_core::metal_backend::DeviceId;
+    use kiln_tensor::metal_types::DeviceId;
     use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
@@ -12001,9 +12001,9 @@ fn metal_gdn_recurrent_prefill_head_last_decay_pipeline(
 }
 
 fn metal_gdn_full_chunk_forward_pipeline(
-    device: &candle_core::metal_backend::MetalDevice,
+    device: &kiln_tensor::metal_types::MetalDevice,
 ) -> Result<kiln_tensor::metal_types::ComputePipeline> {
-    use candle_core::metal_backend::DeviceId;
+    use kiln_tensor::metal_types::DeviceId;
     use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
@@ -12071,19 +12071,19 @@ fn metal_gdn_forward_substitution_bf16(
         let (out_storage, out_layout) = out.storage_and_layout();
 
         let a_metal = match &*a_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn forward-substitution a_strict must be on Metal"),
         };
         let v_metal = match &*v_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn forward-substitution v_prime must be on Metal"),
         };
         let beta_metal = match &*beta_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn forward-substitution beta must be on Metal"),
         };
         let out_metal = match &*out_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn forward-substitution out must be on Metal"),
         };
 
@@ -12165,19 +12165,19 @@ fn metal_gdn_forward_substitution_f32(
         let (out_storage, out_layout) = out.storage_and_layout();
 
         let a_metal = match &*a_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn forward-substitution f32 a_strict must be on Metal"),
         };
         let v_metal = match &*v_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn forward-substitution f32 v_prime must be on Metal"),
         };
         let beta_metal = match &*beta_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn forward-substitution f32 beta must be on Metal"),
         };
         let out_metal = match &*out_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn forward-substitution f32 out must be on Metal"),
         };
 
@@ -12289,51 +12289,51 @@ fn metal_gdn_chunk_prep_bf16(
         let (pl_storage, pl_layout) = p_last.storage_and_layout();
 
         let g_metal = match &*g_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn chunk-prep g must be on Metal"),
         };
         let v_metal = match &*v_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn chunk-prep v must be on Metal"),
         };
         let kkt_metal = match &*kkt_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn chunk-prep kkt must be on Metal"),
         };
         let qkt_metal = match &*qkt_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn chunk-prep qkt must be on Metal"),
         };
         let ks_metal = match &*ks_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn chunk-prep ks_entry must be on Metal"),
         };
         let qs_metal = match &*qs_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn chunk-prep q_s must be on Metal"),
         };
         let a_metal = match &*a_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn chunk-prep a_strict must be on Metal"),
         };
         let b_metal = match &*b_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn chunk-prep b_mask must be on Metal"),
         };
         let vp_metal = match &*vp_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn chunk-prep v_prime must be on Metal"),
         };
         let qss_metal = match &*qss_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn chunk-prep q_s_scaled must be on Metal"),
         };
         let dl_metal = match &*dl_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn chunk-prep decay_last_col must be on Metal"),
         };
         let pl_metal = match &*pl_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn chunk-prep p_last must be on Metal"),
         };
 
@@ -12465,43 +12465,43 @@ fn metal_gdn_full_chunk_forward_bf16(
         let (out_storage, out_layout) = out.storage_and_layout();
 
         let g_metal = match &*g_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn full-chunk g must be on Metal"),
         };
         let v_metal = match &*v_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn full-chunk v must be on Metal"),
         };
         let kkt_metal = match &*kkt_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn full-chunk kkt must be on Metal"),
         };
         let qkt_metal = match &*qkt_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn full-chunk qkt must be on Metal"),
         };
         let ks_metal = match &*ks_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn full-chunk ks_entry must be on Metal"),
         };
         let qs_metal = match &*qs_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn full-chunk q_s must be on Metal"),
         };
         let beta_metal = match &*beta_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn full-chunk beta must be on Metal"),
         };
         let kt_metal = match &*kt_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn full-chunk k_t must be on Metal"),
         };
         let state_metal = match &*state_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn full-chunk state must be on Metal"),
         };
         let out_metal = match &*out_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn full-chunk out must be on Metal"),
         };
 
@@ -12654,43 +12654,43 @@ fn metal_gdn_full_chunk_forward_head_last_into_bf16(
         let (out_storage, out_layout) = out.storage_and_layout();
 
         let g_metal = match &*g_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn full-chunk head-last g must be on Metal"),
         };
         let v_metal = match &*v_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn full-chunk head-last v must be on Metal"),
         };
         let kkt_metal = match &*kkt_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn full-chunk head-last kkt must be on Metal"),
         };
         let qkt_metal = match &*qkt_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn full-chunk head-last qkt must be on Metal"),
         };
         let ks_metal = match &*ks_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn full-chunk head-last ks_entry must be on Metal"),
         };
         let qs_metal = match &*qs_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn full-chunk head-last q_s must be on Metal"),
         };
         let beta_metal = match &*beta_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn full-chunk head-last beta must be on Metal"),
         };
         let kt_metal = match &*kt_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn full-chunk head-last k_t must be on Metal"),
         };
         let state_metal = match &*state_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn full-chunk head-last state must be on Metal"),
         };
         let out_metal = match &*out_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn full-chunk head-last out must be on Metal"),
         };
 
@@ -12827,31 +12827,31 @@ fn metal_gdn_recurrent_bf16(
         let (out_storage, out_layout) = out.storage_and_layout();
 
         let q_metal = match &*q_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn recurrent q must be on Metal"),
         };
         let k_metal = match &*k_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn recurrent k must be on Metal"),
         };
         let v_metal = match &*v_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn recurrent v must be on Metal"),
         };
         let beta_metal = match &*beta_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn recurrent beta must be on Metal"),
         };
         let g_metal = match &*g_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn recurrent g must be on Metal"),
         };
         let state_metal = match &*state_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn recurrent state must be on Metal"),
         };
         let out_metal = match &*out_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn recurrent out must be on Metal"),
         };
 
@@ -12956,31 +12956,31 @@ fn metal_gdn_recurrent_prefill_head_last_bf16(
         let (out_storage, out_layout) = out.storage_and_layout();
 
         let q_metal = match &*q_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn recurrent prefill q must be on Metal"),
         };
         let k_metal = match &*k_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn recurrent prefill k must be on Metal"),
         };
         let v_metal = match &*v_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn recurrent prefill v must be on Metal"),
         };
         let beta_metal = match &*beta_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn recurrent prefill beta must be on Metal"),
         };
         let g_metal = match &*g_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn recurrent prefill g must be on Metal"),
         };
         let state_metal = match &*state_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn recurrent prefill state must be on Metal"),
         };
         let out_metal = match &*out_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn recurrent prefill out must be on Metal"),
         };
 
@@ -13092,31 +13092,31 @@ fn metal_gdn_recurrent_prefill_native_head_last_bf16(
         let (out_storage, out_layout) = out.storage_and_layout();
 
         let q_metal = match &*q_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn recurrent native prefill q must be on Metal"),
         };
         let k_metal = match &*k_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn recurrent native prefill k must be on Metal"),
         };
         let v_metal = match &*v_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn recurrent native prefill v must be on Metal"),
         };
         let beta_metal = match &*beta_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn recurrent native prefill beta must be on Metal"),
         };
         let g_metal = match &*g_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn recurrent native prefill g must be on Metal"),
         };
         let state_metal = match &*state_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn recurrent native prefill state must be on Metal"),
         };
         let out_metal = match &*out_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn recurrent native prefill out must be on Metal"),
         };
 
@@ -13226,31 +13226,31 @@ pub(crate) fn metal_gdn_recurrent_prefill_native_head_last_decay_bf16(
         let (out_storage, out_layout) = out.storage_and_layout();
 
         let q_metal = match &*q_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn recurrent native prefill decay q must be on Metal"),
         };
         let k_metal = match &*k_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn recurrent native prefill decay k must be on Metal"),
         };
         let v_metal = match &*v_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn recurrent native prefill decay v must be on Metal"),
         };
         let beta_metal = match &*beta_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn recurrent native prefill decay beta must be on Metal"),
         };
         let decay_metal = match &*decay_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn recurrent native prefill decay tensor must be on Metal"),
         };
         let state_metal = match &*state_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn recurrent native prefill decay state must be on Metal"),
         };
         let out_metal = match &*out_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn recurrent native prefill decay out must be on Metal"),
         };
 
@@ -13496,9 +13496,9 @@ kernel void kiln_causal_conv1d_update_bf16_f32_k4(
 "#;
 
 fn metal_conv1d_prefill_pipeline(
-    device: &candle_core::metal_backend::MetalDevice,
+    device: &kiln_tensor::metal_types::MetalDevice,
 ) -> Result<kiln_tensor::metal_types::ComputePipeline> {
-    use candle_core::metal_backend::DeviceId;
+    use kiln_tensor::metal_types::DeviceId;
     use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
@@ -13525,9 +13525,9 @@ fn metal_conv1d_prefill_pipeline(
 }
 
 fn metal_gdn_prefill_qkv_conv_split_pipeline(
-    device: &candle_core::metal_backend::MetalDevice,
+    device: &kiln_tensor::metal_types::MetalDevice,
 ) -> Result<kiln_tensor::metal_types::ComputePipeline> {
-    use candle_core::metal_backend::DeviceId;
+    use kiln_tensor::metal_types::DeviceId;
     use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
@@ -13554,9 +13554,9 @@ fn metal_gdn_prefill_qkv_conv_split_pipeline(
 }
 
 fn metal_conv1d_update_pipeline(
-    device: &candle_core::metal_backend::MetalDevice,
+    device: &kiln_tensor::metal_types::MetalDevice,
 ) -> Result<kiln_tensor::metal_types::ComputePipeline> {
-    use candle_core::metal_backend::DeviceId;
+    use kiln_tensor::metal_types::DeviceId;
     use kiln_tensor::metal_types::ComputePipeline;
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
@@ -13697,27 +13697,27 @@ pub(crate) fn metal_gdn_prefill_qkv_conv_split_bf16_f32_k4(
         let (v_storage, v_layout) = v.storage_and_layout();
 
         let x_metal = match &*x_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn prefill qkv conv-split x must be on Metal"),
         };
         let w_metal = match &*w_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn prefill qkv conv-split weight must be on Metal"),
         };
         let s_metal = match &*s_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn prefill qkv conv-split state must be on Metal"),
         };
         let q_metal = match &*q_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn prefill qkv conv-split q output must be on Metal"),
         };
         let k_metal = match &*k_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn prefill qkv conv-split k output must be on Metal"),
         };
         let v_metal = match &*v_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal gdn prefill qkv conv-split v output must be on Metal"),
         };
 
@@ -13806,19 +13806,19 @@ fn metal_causal_conv1d_prefill_bf16_f32_k4(
         let (o_storage, o_layout) = out.storage_and_layout();
 
         let x_metal = match &*x_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal conv1d prefill x must be on Metal"),
         };
         let w_metal = match &*w_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal conv1d prefill weight must be on Metal"),
         };
         let s_metal = match &*s_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal conv1d prefill state must be on Metal"),
         };
         let o_metal = match &*o_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal conv1d prefill output must be on Metal"),
         };
 
@@ -13898,19 +13898,19 @@ fn metal_causal_conv1d_update_bf16_f32_k4(
         let (o_storage, o_layout) = out.storage_and_layout();
 
         let x_metal = match &*x_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal conv1d update x must be on Metal"),
         };
         let w_metal = match &*w_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal conv1d update weight must be on Metal"),
         };
         let s_metal = match &*s_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal conv1d update state must be on Metal"),
         };
         let o_metal = match &*o_storage {
-            candle_core::Storage::Metal(s) => s,
+            kiln_tensor::metal_types::Storage::Metal(s) => s,
             _ => anyhow::bail!("metal conv1d update output must be on Metal"),
         };
 

@@ -69,6 +69,42 @@ pub use candle_metal_kernels::metal::Library;
 /// `kiln-model::backend::metal` that construct one.
 pub use candle_metal_kernels::utils::BufferOffset;
 
+/// Candle `MetalDevice` re-export — used by every pipeline-builder
+/// helper in `kiln-model::backend::metal` as a function parameter
+/// (`device: &kiln_tensor::metal_types::MetalDevice`).
+///
+/// The wire type is candle's `MetalDevice` wrapper; the kt-side path
+/// lets the model crate stop naming `candle_core::metal_backend::*`
+/// in its helper signatures so the eventual substrate lift to a raw
+/// `MTLDevice` + `MTLCommandQueue` handle pair is a single edit
+/// here, not 46 separate signature edits in `metal.rs`.
+///
+/// # Phase 7 follow-up
+///
+/// Substrate lift retires the candle wrapper itself — this re-export
+/// then flips to a `kiln_tensor::MetalRawDevice` companion that holds
+/// `(Retained<ProtocolObject<dyn MTLDevice>>,
+///   Retained<ProtocolObject<dyn MTLCommandQueue>>)` directly. The
+/// helper-function bodies (which only call `device.id()`,
+/// `device.device()`, `device.command_buffer()`, etc.) get migrated
+/// alongside that flip.
+pub use candle_core::metal_backend::MetalDevice;
+
+/// Candle `DeviceId` re-export — the `usize` newtype used as the cache
+/// key in every per-device pipeline / library `HashMap` in the
+/// `metal_*_pipeline` helpers. Same Phase-7 rationale as `MetalDevice`:
+/// keep the wire type identical, move the path through `kiln_tensor`.
+pub use candle_core::metal_backend::DeviceId;
+
+/// Candle `Storage` enum re-export — pattern-matched in every kernel
+/// helper to downcast `Storage::Metal(s) => s` and extract the
+/// candle `MetalStorage` for the `.buffer()` / `.dtype()` accessors.
+/// Phase 7 substrate-lift replaces the match arm with a direct
+/// `kiln_tensor::MetalStorage` downcast off `kiln_tensor::Storage`
+/// (already in flight on the kt-side); the chokepoint here is the
+/// path-naming bookkeeping step.
+pub use candle_core::Storage;
+
 /// Build a `BufferOffset` from a candle `Buffer` + `Layout` + `DType`.
 ///
 /// This is a mirror of `candle_core::metal_backend::buffer_o` — same
