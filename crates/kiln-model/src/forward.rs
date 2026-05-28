@@ -14,8 +14,7 @@ use anyhow::{Context, Result};
 // - vulkan-only type (CustomOp1, used by the autograd-safe Vulkan RMSNorm op).
 // `Result` would clash with `anyhow::Result` at top level so the candle one is
 // aliased to `CandleResult`.
-use candle_core::backend::BackendDevice;
-use candle_core::{D, DType, Device, Tensor};
+use candle_core::{backend::BackendDevice, D, DType, Device, Tensor};
 #[cfg(any(feature = "cuda", feature = "vulkan"))]
 use candle_core::{
     bail, op::BackpropOp, CpuStorage, Error, Layout, Result as CandleResult, Shape, Storage,
