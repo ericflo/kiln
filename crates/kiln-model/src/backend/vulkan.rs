@@ -3571,20 +3571,46 @@ impl BackendRuntime for VulkanBackend {
             return Ok(Some(out));
         }
         let skip_state_readback = crate::forward::vulkan_skip_gdn_state_readback_active();
-        let (out, new_state) =
-            kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_native_head_last_with_options(
+        let (batch, _seq, q_heads, dk) = q.dims4()?;
+        let (_, _, heads, dv) = v.dims4()?;
+        let q_dtype = q.dtype();
+        let state_dtype = state.dtype();
+        let state_dims = state.dims().to_vec();
+        let q_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(q)?.0;
+        let k_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(k)?.0;
+        let v_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(v)?.0;
+        let beta_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(beta)?.0;
+        let g_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(g)?.0;
+        let state_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(state)?.0;
+        let (out_data, new_state_data) =
+            kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_native_head_last_with_options_bytes(
                 vk_device,
-                q,
-                k,
-                v,
-                beta,
-                g,
-                state,
+                &q_data,
+                &k_data,
+                &v_data,
+                &beta_data,
+                &g_data,
+                &state_data,
+                batch,
+                q_heads,
+                heads,
+                dk,
+                dv,
                 skip_state_readback,
             )
             .context("gdn_recurrent_step native-head Vulkan kernel failed")?;
-        if let Some(new_state) = new_state {
-            *state = new_state;
+        let out = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+            &out_data,
+            &[batch, heads, dv],
+            q_dtype,
+        )?
+        .unsqueeze(1)?;
+        if let Some(sd) = new_state_data {
+            *state = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+                &sd,
+                &state_dims,
+                state_dtype,
+            )?;
         }
         Ok(Some(out))
     }

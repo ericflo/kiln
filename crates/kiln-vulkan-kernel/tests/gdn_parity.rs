@@ -106,6 +106,62 @@ fn maybe_vulkan() -> Option<VulkanDevice> {
     VulkanDevice::new().ok()
 }
 
+/// Test-only candle wrapper for the `_bytes` recurrent dispatch — keeps the
+/// candle-typed parity tests readable without reintroducing a candle-typed
+/// pub fn on the kernel crate.
+#[allow(clippy::too_many_arguments)]
+fn dispatch_gdn_recurrent_step_native_head_last_with_options_tensor(
+    vk: &VulkanDevice,
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    beta: &Tensor,
+    g: &Tensor,
+    state: &Tensor,
+    skip_state_readback: bool,
+) -> Result<(Tensor, Option<Tensor>)> {
+    let (batch, _seq, q_heads, dk) = q.dims4()?;
+    let (_, _, heads, dv) = v.dims4()?;
+    let q_dtype = q.dtype();
+    let state_dtype = state.dtype();
+    let state_dims = state.dims().to_vec();
+    let q_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(q)?.0;
+    let k_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(k)?.0;
+    let v_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(v)?.0;
+    let beta_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(beta)?.0;
+    let g_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(g)?.0;
+    let state_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(state)?.0;
+    let (out_data, new_state_data) =
+        kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_native_head_last_with_options_bytes(
+            vk,
+            &q_data,
+            &k_data,
+            &v_data,
+            &beta_data,
+            &g_data,
+            &state_data,
+            batch,
+            q_heads,
+            heads,
+            dk,
+            dv,
+            skip_state_readback,
+        )?;
+    let out = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+        &out_data,
+        &[batch, heads, dv],
+        q_dtype,
+    )?
+    .unsqueeze(1)?;
+    let new_state = new_state_data
+        .as_ref()
+        .map(|sd| {
+            kiln_vulkan_kernel::kernels::create_tensor_from_data(sd, &state_dims, state_dtype)
+        })
+        .transpose()?;
+    Ok((out, new_state))
+}
+
 #[test]
 fn linear_decode_matches_cpu_reference() -> Result<()> {
     let Some(vk) = maybe_vulkan() else {
@@ -631,7 +687,7 @@ fn gdn_recurrent_step_native_head_last_matches_expanded_reference() -> Result<()
         (out, state.context("dispatch_gdn_recurrent_step expanded reference")?)
     };
     let (got_out, got_state) =
-        kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_native_head_last_with_options(
+        dispatch_gdn_recurrent_step_native_head_last_with_options_tensor(
             &vk, &q, &k, &v, &beta, &g, &state, false,
         )
         .context("dispatch_gdn_recurrent_step_native_head_last_with_options")?;
@@ -716,7 +772,7 @@ fn gdn_recurrent_qk_norm_native_head_last_matches_split_path() -> Result<()> {
         .to_dtype(DType::BF16)?;
 
     let (expected_out, expected_state) =
-        kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_native_head_last_with_options(
+        dispatch_gdn_recurrent_step_native_head_last_with_options_tensor(
             &vk, &q_norm, &k_norm, &v, &beta, &g, &state, false,
         )
         .context("native-head split qk_norm recurrent")?;
@@ -844,13 +900,13 @@ fn gdn_recurrent_step_native_head_last_resident_state_matches_readback_path() ->
     let g2 = make_g(-0.02)?;
 
     let (expected_out1, expected_state1) =
-        kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_native_head_last_with_options(
+        dispatch_gdn_recurrent_step_native_head_last_with_options_tensor(
             &vk, &q1, &k1, &v1, &beta1, &g1, &state0, false,
         )
         .context("native-head readback step 1")?;
     let expected_state1 = expected_state1.context("native-head readback state 1")?;
     let (expected_out2, expected_state2) =
-        kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_native_head_last_with_options(
+        dispatch_gdn_recurrent_step_native_head_last_with_options_tensor(
             &vk,
             &q2,
             &k2,
