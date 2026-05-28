@@ -124,9 +124,12 @@ impl MetalStorage {
     /// `MTLDevice` + `MTLCommandQueue` surface (out of scope here),
     /// the storage's `candle_device` field can be dropped entirely
     /// and this constructor stops needing to call
-    /// [`primary_metal_device`]. At that point `Self::zeros` is
-    /// folded into this entry. See the order-of-operations doc in
-    /// `metal_allocator.rs` lines 56-78.
+    /// [`primary_metal_device`]. The candle-typed `Self::zeros`
+    /// back-compat constructor was deleted (#1082, commit 71a3b677)
+    /// after the last in-file caller migrated to this entry; this
+    /// constructor is now the sole allocation path on `MetalStorage`.
+    /// See the order-of-operations doc in `metal_allocator.rs` lines
+    /// 56-78.
     ///
     /// Mirror of [`crate::CudaStorage::zeros_ctx`] (commit d3caf46b) —
     /// same shape, same rationale (the parallel-constructor step of
