@@ -26445,6 +26445,10 @@ mod tests {
             eprintln!("fused paged decode disabled; skipping batched contiguous decode test");
             return Ok(());
         }
+        // kt parallel to `device` for `PagedKvCache::new_kt` call sites
+        // below — the kt twin lets the constructor call drop the
+        // candle::DType + &candle::Device names. (#1082)
+        let device_kt = kiln_kt_bridge::kt_device_from_candle(&device);
 
         let backend = crate::backend::for_device(&device);
         let batch = 2usize;
@@ -26467,14 +26471,14 @@ mod tests {
         let bt1 = BlockTable { blocks: vec![1] };
         let block_tables = [&bt0, &bt1];
         let start_positions = [start_pos, start_pos];
-        let mut batch_cache = PagedKvCache::new(
+        let mut batch_cache = PagedKvCache::new_kt(
             1,
             2,
             block_size,
             num_kv_heads,
             head_dim,
-            DType::BF16,
-            &device,
+            kiln_tensor::DType::BF16,
+            &device_kt,
         )?;
         for (row, block_table) in block_tables.iter().enumerate() {
             let row_k = prefix_k.narrow(0, row, 1)?.contiguous()?;
@@ -26511,14 +26515,14 @@ mod tests {
         assert_eq!(batched.dims(), &[batch, 1usize, hidden]);
 
         for row in 0..batch {
-            let mut row_cache = PagedKvCache::new(
+            let mut row_cache = PagedKvCache::new_kt(
                 1,
                 1,
                 block_size,
                 num_kv_heads,
                 head_dim,
-                DType::BF16,
-                &device,
+                kiln_tensor::DType::BF16,
+                &device_kt,
             )?;
             let row_table = BlockTable { blocks: vec![0] };
             let row_k = prefix_k.narrow(0, row, 1)?.contiguous()?;
@@ -26576,6 +26580,8 @@ mod tests {
             eprintln!("fused paged decode disabled; skipping batched contiguous transformer test");
             return Ok(());
         }
+        // kt parallel to `device` for `PagedKvCache::new_kt` (#1082).
+        let device_kt = kiln_kt_bridge::kt_device_from_candle(&device);
 
         let backend = crate::backend::for_device(&device);
         let batch = 2usize;
@@ -26630,14 +26636,14 @@ mod tests {
         let bt1 = BlockTable { blocks: vec![1] };
         let block_tables = [&bt0, &bt1];
         let start_positions = [start_pos, start_pos];
-        let mut batch_cache = PagedKvCache::new(
+        let mut batch_cache = PagedKvCache::new_kt(
             1,
             2,
             block_size,
             num_kv_heads,
             head_dim,
-            DType::BF16,
-            &device,
+            kiln_tensor::DType::BF16,
+            &device_kt,
         )?;
         for (row, block_table) in block_tables.iter().enumerate() {
             let row_k = prefix_k.narrow(0, row, 1)?.contiguous()?;
@@ -26670,14 +26676,14 @@ mod tests {
         assert_eq!(batched.dims(), &[batch, 1usize, hidden]);
 
         for row in 0..batch {
-            let mut row_cache = PagedKvCache::new(
+            let mut row_cache = PagedKvCache::new_kt(
                 1,
                 1,
                 block_size,
                 num_kv_heads,
                 head_dim,
-                DType::BF16,
-                &device,
+                kiln_tensor::DType::BF16,
+                &device_kt,
             )?;
             let row_table = BlockTable { blocks: vec![0] };
             let row_k = prefix_k.narrow(0, row, 1)?.contiguous()?;
@@ -26735,6 +26741,8 @@ mod tests {
             eprintln!("fused paged decode disabled; skipping batched contiguous model test");
             return Ok(());
         }
+        // kt parallel to `device` for `PagedKvCache::new_kt` (#1082).
+        let device_kt = kiln_kt_bridge::kt_device_from_candle(&device);
 
         let backend = crate::backend::for_device(&device);
         let batch = 2usize;
@@ -26786,14 +26794,14 @@ mod tests {
         let block_tables = [&bt0, &bt1];
         let start_positions = [start_pos, start_pos];
         let token_ids = [7u32, 11u32];
-        let mut batch_cache = PagedKvCache::new(
+        let mut batch_cache = PagedKvCache::new_kt(
             1,
             2,
             block_size,
             num_kv_heads,
             head_dim,
-            DType::BF16,
-            &device,
+            kiln_tensor::DType::BF16,
+            &device_kt,
         )?;
         for (row, block_table) in block_tables.iter().enumerate() {
             let row_k = prefix_k.narrow(0, row, 1)?.contiguous()?;
@@ -26817,14 +26825,14 @@ mod tests {
 
         let positions = Tensor::from_slice(&[start_pos as f32], 1usize, &device)?;
         for row in 0..batch {
-            let mut row_cache = PagedKvCache::new(
+            let mut row_cache = PagedKvCache::new_kt(
                 1,
                 1,
                 block_size,
                 num_kv_heads,
                 head_dim,
-                DType::BF16,
-                &device,
+                kiln_tensor::DType::BF16,
+                &device_kt,
             )?;
             let row_table = BlockTable { blocks: vec![0] };
             let row_k = prefix_k.narrow(0, row, 1)?.contiguous()?;
@@ -26887,6 +26895,8 @@ mod tests {
             eprintln!("fused paged decode disabled; skipping dyn_seqlen batched test");
             return Ok(());
         }
+        // kt parallel to `device` for `PagedKvCache::new_kt` (#1082).
+        let device_kt = kiln_kt_bridge::kt_device_from_candle(&device);
 
         let backend = crate::backend::for_device(&device);
         let batch = 2usize;
@@ -26961,14 +26971,14 @@ mod tests {
         let block_tables = [&bt0, &bt1];
         let token_ids = [7u32, 11u32];
 
-        let mut batch_cache = PagedKvCache::new(
+        let mut batch_cache = PagedKvCache::new_kt(
             1,
             2,
             block_size,
             num_kv_heads,
             head_dim,
-            DType::BF16,
-            &device,
+            kiln_tensor::DType::BF16,
+            &device_kt,
         )?;
         // Phase 7 #1082: parallel-allocate a kt twin via the constructor
         // stub `try_kt_paged_kv_cache_new` (commit 638bc441). When the
@@ -27036,14 +27046,14 @@ mod tests {
 
         for row in 0..batch {
             let row_start_pos = start_positions[row];
-            let mut row_cache = PagedKvCache::new(
+            let mut row_cache = PagedKvCache::new_kt(
                 1,
                 1,
                 block_size,
                 num_kv_heads,
                 head_dim,
-                DType::BF16,
-                &device,
+                kiln_tensor::DType::BF16,
+                &device_kt,
             )?;
             let row_table = BlockTable { blocks: vec![0] };
             let (row_k, row_v) = if row == 0 {
@@ -27099,6 +27109,8 @@ mod tests {
             eprintln!("fused paged decode disabled; skipping batched hybrid model test");
             return Ok(());
         }
+        // kt parallel to `device` for `PagedKvCache::new_kt` (#1082).
+        let device_kt = kiln_kt_bridge::kt_device_from_candle(&device);
 
         let backend = crate::backend::for_device(&device);
         let batch = 2usize;
@@ -27143,14 +27155,14 @@ mod tests {
         let block_tables = [&bt0, &bt1];
         let start_positions = [start_pos, start_pos];
         let token_ids = [7u32, 11u32];
-        let mut batch_cache = PagedKvCache::new(
+        let mut batch_cache = PagedKvCache::new_kt(
             config.num_full_attention_layers,
             2,
             block_size,
             config.num_kv_heads,
             config.head_dim,
-            DType::BF16,
-            &device,
+            kiln_tensor::DType::BF16,
+            &device_kt,
         )?;
         for (row, block_table) in block_tables.iter().enumerate() {
             let row_k = prefix_k.narrow(0, row, 1)?.contiguous()?;
@@ -27180,14 +27192,14 @@ mod tests {
 
         let positions = Tensor::from_slice(&[start_pos as f32], 1usize, &device)?;
         for row in 0..batch {
-            let mut row_cache = PagedKvCache::new(
+            let mut row_cache = PagedKvCache::new_kt(
                 config.num_full_attention_layers,
                 1,
                 block_size,
                 config.num_kv_heads,
                 config.head_dim,
-                DType::BF16,
-                &device,
+                kiln_tensor::DType::BF16,
+                &device_kt,
             )?;
             let row_table = BlockTable { blocks: vec![0] };
             let row_k = prefix_k.narrow(0, row, 1)?.contiguous()?;
@@ -30846,6 +30858,11 @@ mod tests {
     /// Build a paged cache + sequential block table sized for `seq_len` tokens
     /// with `block_size`-token blocks (block_size = GDN_CHUNK_SIZE so block
     /// boundaries coincide with the smallest legal tile boundary).
+    ///
+    /// Migrated to `PagedKvCache::new_kt` so this helper no longer names
+    /// `candle_core::DType` at the constructor call; the candle `device`
+    /// param is still taken to keep call-site signatures stable (callers
+    /// pass `&device` in scope) — bridge to kt happens at the boundary. (#1082)
     fn make_paged_setup(
         config: &kiln_core::config::ModelConfig,
         seq_len: usize,
@@ -30853,14 +30870,15 @@ mod tests {
         device: &Device,
     ) -> Result<(PagedKvCache, BlockTable)> {
         let num_blocks = (seq_len + block_size - 1) / block_size;
-        let cache = PagedKvCache::new(
+        let device_kt = kiln_kt_bridge::kt_device_from_candle(device);
+        let cache = PagedKvCache::new_kt(
             config.num_full_attention_layers,
             num_blocks,
             block_size,
             config.num_kv_heads,
             config.head_dim,
-            DType::F32,
-            device,
+            kiln_tensor::DType::F32,
+            &device_kt,
         )?;
         let mut block_table = BlockTable::new();
         for i in 0..num_blocks as u32 {
