@@ -46,9 +46,9 @@ use kiln_core::block::BlockTable;
 /// The reduction-axis marker for "the last dimension" — passed to
 /// `Tensor::sum_keepdim` / `max_keepdim` / `mean_keepdim` / `cumsum` /
 /// `narrow` / `Tensor::cat` / `unsqueeze` in this file. Consolidates
-/// `candle_core::D::Minus1` (~58 sites pre-consolidation) under a single
+/// `D::Minus1` (~58 sites pre-consolidation) under a single
 /// short name, mirroring the same pattern in `kiln-train/src/trainer.rs`
-/// (#1082). Drops 58 `candle_core::` references from `forward.rs` without
+/// (#1082). Drops 58 candle prefixes from `forward.rs` without
 /// any behavioral change.
 const LAST_DIM: D = D::Minus1;
 
@@ -1497,7 +1497,7 @@ pub fn cuda_use_kt_paged_kv_cache() -> bool {
 /// [`crate::paged_kv_cache_kt::PagedKvCacheKt::new`] needs an
 /// [`Arc<CudaDevice>`] + `device_index` (see
 /// `crates/kiln-model/src/paged_kv_cache_kt.rs:72`) plus a
-/// [`kiln_tensor::DType`] in place of [`candle_core::DType`]. Wiring
+/// [`kiln_tensor::DType`] in place of candle's `DType`. Wiring
 /// the gate first (commit `eab7f795`) was step 1; this helper is step 2
 /// and gives the next call-site migration a single, well-tested
 /// constructor surface to call instead of repeating the device-arc
@@ -6516,7 +6516,7 @@ impl GpuWeights {
     /// Returns the `kiln_tensor::Device` corresponding to the candle
     /// device that backs the `embed_tokens` tensor. Callers (in
     /// `kiln-server`) that currently do `weights.embed_tokens.device()`
-    /// and feed the resulting `&candle_core::Device` into downstream
+    /// and feed the resulting candle `&Device` into downstream
     /// candle APIs can use this accessor to surface a kt Device at the
     /// public boundary while the internal storage stays candle-typed.
     ///
@@ -6960,12 +6960,12 @@ impl GpuWeights {
 
     /// kt-typed parallel entry to [`Self::from_model_weights`] (#1082 Tier 3).
     ///
-    /// Takes a `kiln_tensor::Device` instead of `candle_core::Device`,
+    /// Takes a `kiln_tensor::Device` instead of candle's `Device`,
     /// bridges at the boundary, and delegates to the existing
     /// candle-typed constructor. The returned `GpuWeights` still holds
     /// candle Tensors internally — the kt typing applies only to the
     /// public surface so kiln-server can call this without importing
-    /// `candle_core` at the call site.
+    /// candle at the call site.
     ///
     /// Errors when the kt Device has no candle equivalent on this build
     /// (e.g. `Vulkan(_)`; kiln-server's Vulkan path uses a CPU candle
@@ -21193,7 +21193,7 @@ pub fn model_forward(
 /// returned logits tensor as a `kiln_tensor::Tensor` via the kt-bridge
 /// zero-copy borrow adapter. This is the surface kiln-server needs in
 /// order to consume forward outputs through `kiln_tensor::ops::*`
-/// instead of `candle_core::Tensor` methods (per the STOP doc on the
+/// instead of candle `Tensor` methods (per the STOP doc on the
 /// kiln-server candle removal).
 ///
 /// `GpuWeights` is still candle-typed internally — see
@@ -28077,7 +28077,7 @@ mod tests {
         // With KV cache: prefill first 4 tokens, then decode the 5th
         //
         // Migrated to `_kt` constructor so this site no longer names
-        // `candle_core::DType` or `candle_core::Device` — the bridge
+        // candle `DType` or `Device` — the bridge
         // happens inside `KvCache::new_kt`. (#1082)
         let mut kv_cache = KvCache::new_kt(
             num_layers,
@@ -30894,7 +30894,7 @@ mod tests {
     /// boundaries coincide with the smallest legal tile boundary).
     ///
     /// Migrated to `PagedKvCache::new_kt` so this helper no longer names
-    /// `candle_core::DType` at the constructor call; the candle `device`
+    /// candle's `DType` at the constructor call; the candle `device`
     /// param is still taken to keep call-site signatures stable (callers
     /// pass `&device` in scope) — bridge to kt happens at the boundary. (#1082)
     fn make_paged_setup(
