@@ -4496,10 +4496,10 @@ pub fn dispatch_mlp_decode_cached_bytes(
     intermediate: usize,
     out_dim: usize,
 ) -> Result<Vec<u8>> {
-    let x = build_cpu_f32_tensor_from_bytes(x_data, &[batch, 1, hidden])?;
-    let out = dispatch_mlp_decode_cached_impl(
+    dispatch_mlp_decode_cached_impl(
         vk_device,
-        &x,
+        x_data,
+        batch,
         gate_weight_t,
         up_weight_t,
         down_weight_t,
@@ -4508,8 +4508,7 @@ pub fn dispatch_mlp_decode_cached_bytes(
         out_dim,
         false,
         false,
-    )?;
-    Ok(extract_tensor_bytes(&out)?.0)
+    )
 }
 
 pub fn dispatch_mlp_decode_cached_bf16_weights_bytes(
@@ -4523,10 +4522,10 @@ pub fn dispatch_mlp_decode_cached_bf16_weights_bytes(
     intermediate: usize,
     out_dim: usize,
 ) -> Result<Vec<u8>> {
-    let x = build_cpu_f32_tensor_from_bytes(x_data, &[batch, 1, hidden])?;
-    let out = dispatch_mlp_decode_cached_impl(
+    dispatch_mlp_decode_cached_impl(
         vk_device,
-        &x,
+        x_data,
+        batch,
         gate_weight_t,
         up_weight_t,
         down_weight_t,
@@ -4535,8 +4534,7 @@ pub fn dispatch_mlp_decode_cached_bf16_weights_bytes(
         out_dim,
         true,
         true,
-    )?;
-    Ok(extract_tensor_bytes(&out)?.0)
+    )
 }
 
 pub fn dispatch_mlp_decode_cached_bf16_gate_up_f32_down_bytes(
@@ -4550,10 +4548,10 @@ pub fn dispatch_mlp_decode_cached_bf16_gate_up_f32_down_bytes(
     intermediate: usize,
     out_dim: usize,
 ) -> Result<Vec<u8>> {
-    let x = build_cpu_f32_tensor_from_bytes(x_data, &[batch, 1, hidden])?;
-    let out = dispatch_mlp_decode_cached_impl(
+    dispatch_mlp_decode_cached_impl(
         vk_device,
-        &x,
+        x_data,
+        batch,
         gate_weight_t,
         up_weight_t,
         down_weight_t,
@@ -4562,14 +4560,14 @@ pub fn dispatch_mlp_decode_cached_bf16_gate_up_f32_down_bytes(
         out_dim,
         true,
         false,
-    )?;
-    Ok(extract_tensor_bytes(&out)?.0)
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
 fn dispatch_mlp_decode_cached_impl(
     vk_device: &VulkanDevice,
-    x: &candle_core::Tensor,
+    x_data: &[u8],
+    batch: usize,
     gate_weight_t: &VulkanBuffer,
     up_weight_t: &VulkanBuffer,
     down_weight_t: &VulkanBuffer,
@@ -4578,19 +4576,11 @@ fn dispatch_mlp_decode_cached_impl(
     out_dim: usize,
     gate_up_bf16_weights: bool,
     down_bf16_weights: bool,
-) -> Result<candle_core::Tensor> {
+) -> Result<Vec<u8>> {
     let device = vk_device.device();
     let queue = vk_device.queue();
     let device_local_mt = vk_device.device_local_mem_type();
     let host_visible_mt = vk_device.host_visible_mem_type();
-
-    let x_dims = x.dims();
-    anyhow::ensure!(
-        x_dims.len() == 3 && x_dims[1] == 1 && x_dims[2] == hidden,
-        "mlp_decode: x shape {:?} does not match [batch, 1, {hidden}]",
-        x_dims
-    );
-    let batch = x_dims[0];
     let profile_stages = profile_vulkan_mlp_kernel_stages_enabled();
     let gate_up_rows2 = !gate_up_bf16_weights && use_prefill_row_pair_matmul(batch);
     // For the all-bf16 MLP, the rows4 / rows8 amortization only beats the
@@ -4627,22 +4617,6 @@ fn dispatch_mlp_decode_cached_impl(
     let chained_dispatch = mlp_chained_dispatch_enabled();
     let chained_transfer_submit = chained_dispatch && mlp_chained_transfer_submit_enabled();
     let total_start = profile_stages.then(Instant::now);
-    let stage_start = profile_stages.then(Instant::now);
-    let x_data = extract_tensor_bytes(x)?.0;
-    finish_vulkan_mlp_kernel_stage_profile(
-        "extract_x",
-        batch,
-        hidden,
-        intermediate,
-        out_dim,
-        gate_up_bf16_weights,
-        down_bf16_weights,
-        gate_up_rows2,
-        gate_up_rows4,
-        down_rows4,
-        down_rows2,
-        stage_start,
-    );
     anyhow::ensure!(
         x_data.len() == batch * hidden * 4,
         "mlp_decode: x buffer has {} bytes, expected {}",
@@ -5038,22 +5012,6 @@ fn dispatch_mlp_decode_cached_impl(
         );
         out_data
     };
-    let stage_start = profile_stages.then(Instant::now);
-    let out = create_tensor_from_data(&out_data, &[batch, 1, out_dim], candle_core::DType::F32);
-    finish_vulkan_mlp_kernel_stage_profile(
-        "create_tensor",
-        batch,
-        hidden,
-        intermediate,
-        out_dim,
-        gate_up_bf16_weights,
-        down_bf16_weights,
-        gate_up_rows2,
-        gate_up_rows4,
-        down_rows4,
-        down_rows2,
-        stage_start,
-    );
     finish_vulkan_mlp_kernel_stage_profile(
         "total",
         batch,
@@ -5068,7 +5026,7 @@ fn dispatch_mlp_decode_cached_impl(
         down_rows2,
         total_start,
     );
-    out
+    Ok(out_data)
 }
 
 /// Dispatch fused single-token GDN gates + recurrent update + gated RMSNorm.
