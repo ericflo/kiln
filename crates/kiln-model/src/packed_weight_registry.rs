@@ -8,7 +8,7 @@
 
 use anyhow::{Context, Result, bail, ensure};
 #[cfg(feature = "cuda")]
-use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+use cudarc::driver::DevicePtr;
 
 use std::collections::BTreeMap;
 
