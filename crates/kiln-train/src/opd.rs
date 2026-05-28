@@ -1978,8 +1978,30 @@ pub fn build_local_teacher_fixture(
         .context("local-teacher forward pass")?;
         // logits shape: [1, T, V]. Detach autograd — no gradients needed.
         let logits = logits.detach();
-        let log_probs =
-            candle_nn::ops::log_softmax(&logits, 2).context("local-teacher log_softmax")?;
+        // (#1082) Inlined log_softmax to drop the candle_nn::ops::log_softmax
+        // dep — `xs - log(sum_exp(xs - max(xs, dim)))` is the same numerically
+        // stable identity candle_nn uses internally (see candle-nn 0.10.2
+        // src/ops.rs:31-38). The matmul / max / sum_keepdim ops live on the
+        // candle_core Tensor itself.
+        let log_probs = {
+            let max = logits
+                .max_keepdim(2)
+                .context("local-teacher log_softmax max_keepdim")?;
+            let diff = logits
+                .broadcast_sub(&max)
+                .context("local-teacher log_softmax broadcast_sub")?;
+            let sum_exp = diff
+                .exp()
+                .context("local-teacher log_softmax exp")?
+                .sum_keepdim(2)
+                .context("local-teacher log_softmax sum_keepdim")?;
+            diff.broadcast_sub(
+                &sum_exp
+                    .log()
+                    .context("local-teacher log_softmax log")?,
+            )
+            .context("local-teacher log_softmax broadcast_sub final")?
+        };
         let log_probs_2d = log_probs
             .squeeze(0)
             .context("local-teacher squeeze batch dim")?
