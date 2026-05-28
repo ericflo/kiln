@@ -22,7 +22,7 @@
 #![cfg(feature = "vulkan")]
 
 use anyhow::{Context, Result, bail};
-use candle_core::{DType, Device, Tensor};
+
 use kiln_tensor_id::TensorId;
 use kiln_core::config::ModelConfig;
 use kiln_vulkan_kernel::vk_autograd::{VkGradStore, vk_backward};
@@ -93,7 +93,7 @@ impl VkLoraPair {
         // parameter leaves via the kt-native `parameter_from_f32_slice`
         // path (which mints a fresh `TensorId` per leaf and is the
         // candle-free replacement for the
-        // `Tensor::from_vec → VkTensor::from_candle → VkTensor::parameter`
+        // `candle_core::Tensor::from_vec → VkTensor::from_candle → VkTensor::parameter`
         // bridge). The leaf shape/dtype/device that the grad store and
         // AdamW dispatch key on are unchanged. (#1082)
         let a = VkTensor::parameter_from_f32_slice(
@@ -365,7 +365,7 @@ pub fn vk_compute_rope_tables_range(
     }
     // Candle-free upload: build VkTensor leaves directly from the
     // computed host-side f32 cos/sin tables. Skips the
-    // `Tensor::from_vec → VkTensor::from_candle` round-trip. (#1082)
+    // `candle_core::Tensor::from_vec → VkTensor::from_candle` round-trip. (#1082)
     let cos_vk = VkTensor::from_f32_slice(&cos, vec![len, half], Arc::clone(device))?;
     let sin_vk = VkTensor::from_f32_slice(&sin, vec![len, half], Arc::clone(device))?;
     Ok((cos_vk, sin_vk))
@@ -1378,17 +1378,17 @@ pub fn vk_step_backward(loss: &VkTensor) -> Result<VkGradStore> {
 ///
 /// Only F32 / BF16 candle dtypes are accepted; anything else bails
 /// since vk-native is F32-or-BF16-only. (#1082)
-fn candle_tensor_to_vk_bytes(t: &Tensor) -> Result<(Vec<u8>, Vec<usize>, VkDType)> {
+fn candle_tensor_to_vk_bytes(t: &candle_core::Tensor) -> Result<(Vec<u8>, Vec<usize>, VkDType)> {
     let dtype = match t.dtype() {
-        DType::F32 => VkDType::F32,
-        DType::BF16 => VkDType::Bf16,
+        candle_core::DType::F32 => VkDType::F32,
+        candle_core::DType::BF16 => VkDType::Bf16,
         other => bail!(
             "vk-native: unsupported tensor dtype {:?} (only F32 and BF16 are supported)",
             other
         ),
     };
     let t = t.contiguous().context("candle_tensor_to_vk_bytes: contiguous")?;
-    let t = t.to_device(&Device::Cpu)
+    let t = t.to_device(&candle_core::Device::Cpu)
         .context("candle_tensor_to_vk_bytes: to CPU")?;
     let shape: Vec<usize> = t.dims().to_vec();
     let nelem: usize = shape.iter().product();
@@ -1415,7 +1415,7 @@ fn candle_tensor_to_vk_bytes(t: &Tensor) -> Result<(Vec<u8>, Vec<usize>, VkDType
             // crate (kiln-model only pulls in `half` under the `cuda`
             // feature). (#1082)
             let data: Vec<f32> = t
-                .to_dtype(DType::F32)
+                .to_dtype(candle_core::DType::F32)
                 .context("candle_tensor_to_vk_bytes: bf16→f32 cast")?
                 .flatten_all()?
                 .to_vec1::<f32>()
@@ -1437,7 +1437,7 @@ fn candle_tensor_to_vk_bytes(t: &Tensor) -> Result<(Vec<u8>, Vec<usize>, VkDType
 /// Lowers to `VkTensor::from_bytes` (candle-free upload boundary). The
 /// candle-typed bytes extraction is local to this file so `vk_tensor.rs`
 /// stays candle-free. (#1082)
-fn vk_from_candle_typed(t: &Tensor, device: &Arc<VulkanDevice>) -> Result<VkTensor> {
+fn vk_from_candle_typed(t: &candle_core::Tensor, device: &Arc<VulkanDevice>) -> Result<VkTensor> {
     let (bytes, shape, dtype) = candle_tensor_to_vk_bytes(t)?;
     VkTensor::from_bytes(&bytes, shape, dtype, Arc::clone(device))
 }
@@ -1446,10 +1446,10 @@ fn vk_from_candle_typed(t: &Tensor, device: &Arc<VulkanDevice>) -> Result<VkTens
 /// weights, biases, q/k_norm — vk_rmsnorm and friends require F32
 /// weights regardless of model dtype. The size is small (~hidden =
 /// 2560 floats per layer × 2 norms = 5 MB total for Qwen3.5-4B).
-fn vk_from_candle_as_f32(t: &Tensor, device: &Arc<VulkanDevice>) -> Result<VkTensor> {
+fn vk_from_candle_as_f32(t: &candle_core::Tensor, device: &Arc<VulkanDevice>) -> Result<VkTensor> {
     let t_f32 = match t.dtype() {
-        DType::F32 => t.clone(),
-        _ => t.to_dtype(DType::F32)?,
+        candle_core::DType::F32 => t.clone(),
+        _ => t.to_dtype(candle_core::DType::F32)?,
     };
     let (bytes, shape, dtype) = candle_tensor_to_vk_bytes(&t_f32)?;
     debug_assert_eq!(dtype, VkDType::F32);
@@ -1465,8 +1465,8 @@ fn vk_from_candle_as_f32(t: &Tensor, device: &Arc<VulkanDevice>) -> Result<VkTen
 /// convention), transposing the _t cache (`[in_dim, out_dim]`) when
 /// the main is stubbed.
 fn pick_projection_weight(
-    main: &Tensor,
-    transposed: &Tensor,
+    main: &candle_core::Tensor,
+    transposed: &candle_core::Tensor,
     device: &Arc<VulkanDevice>,
     name: &str,
 ) -> Result<VkTensor> {
