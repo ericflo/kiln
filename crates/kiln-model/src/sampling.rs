@@ -1514,12 +1514,18 @@ mod tests {
         }
         let elapsed = start.elapsed();
         let per_call = elapsed / 32;
-        // 5ms host budget on a 152k vocab is generous. On a modern CPU
-        // the partial-top-k heap + small history scatter lands well
-        // under 1 ms per token.
+        // Coarse cross-hardware tripwire: the penalty pass must stay well
+        // under a single decode forward step (~20 ms for Qwen3.5-4B), so an
+        // algorithmic regression (e.g. an accidental O(vocab*history) scan
+        // instead of the partial-top-k heap + small history scatter) trips
+        // this, while normal host-CPU variation does not. Measured steady
+        // state is ~7 ms/call on an A6000 pod host CPU (152k vocab, 500-token
+        // history, top_k=20), so the 20 ms budget leaves ~3x headroom.
+        // Release-only (`cfg(not(debug_assertions))`); never runs on the
+        // debug-mode GHA CI.
         assert!(
-            per_call < std::time::Duration::from_millis(5),
-            "penalty path took {:?} per call (release-mode budget 5ms) — regression?",
+            per_call < std::time::Duration::from_millis(20),
+            "penalty path took {:?} per call (release-mode budget 20ms) — algorithmic regression?",
             per_call,
         );
         Ok(())
