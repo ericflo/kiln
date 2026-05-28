@@ -7137,13 +7137,29 @@ pub(crate) fn metal_mlp_gate_up_bf16(x: &candle_core::Tensor, gate_t: &candle_co
             _ => anyhow::bail!("metal mlp gate/up out must be on Metal"),
         };
 
-        let x_buf = buffer_o(x_metal.buffer(), &x_layout, x.dtype());
-        let gate_buf =
-            buffer_o(gate_metal.buffer(), &gate_layout, gate_t.dtype());
-        let up_buf =
-            buffer_o(up_metal.buffer(), &up_layout, up_t.dtype());
-        let out_buf =
-            buffer_o(out_metal.buffer(), &out_layout, out.dtype());
+        // #1082 Step 4 mlp-family: `buffer_o` → `buffer_o_kt`.
+        // The kt-typed helper reads `start_offset()` + `size_in_bytes()`
+        // off the kt Layout/DType; everything else is bit-identical.
+        let x_buf = buffer_o_kt(
+            x_metal.buffer(),
+            &kt_layout_from_candle(x_layout),
+            kt_dtype_from_candle(x.dtype()),
+        );
+        let gate_buf = buffer_o_kt(
+            gate_metal.buffer(),
+            &kt_layout_from_candle(gate_layout),
+            kt_dtype_from_candle(gate_t.dtype()),
+        );
+        let up_buf = buffer_o_kt(
+            up_metal.buffer(),
+            &kt_layout_from_candle(up_layout),
+            kt_dtype_from_candle(up_t.dtype()),
+        );
+        let out_buf = buffer_o_kt(
+            out_metal.buffer(),
+            &kt_layout_from_candle(out_layout),
+            kt_dtype_from_candle(out.dtype()),
+        );
 
         encoder.set_buffer(0, Some(x_buf.buffer), x_buf.offset_in_bytes);
         encoder.set_buffer(1, Some(gate_buf.buffer), gate_buf.offset_in_bytes);
@@ -7262,12 +7278,24 @@ pub(crate) fn metal_mlp_silu_mul_bf16(gate: &candle_core::Tensor, up: &candle_co
             _ => anyhow::bail!("metal mlp silu*mul out must be on Metal"),
         };
 
-        let gate_buf =
-            buffer_o(gate_metal.buffer(), &gate_layout, gate.dtype());
-        let up_buf =
-            buffer_o(up_metal.buffer(), &up_layout, up.dtype());
-        let out_buf =
-            buffer_o(out_metal.buffer(), &out_layout, out.dtype());
+        // #1082 Step 4 mlp-family: `buffer_o` → `buffer_o_kt`.
+        // The kt-typed helper reads `start_offset()` + `size_in_bytes()`
+        // off the kt Layout/DType; everything else is bit-identical.
+        let gate_buf = buffer_o_kt(
+            gate_metal.buffer(),
+            &kt_layout_from_candle(gate_layout),
+            kt_dtype_from_candle(gate.dtype()),
+        );
+        let up_buf = buffer_o_kt(
+            up_metal.buffer(),
+            &kt_layout_from_candle(up_layout),
+            kt_dtype_from_candle(up.dtype()),
+        );
+        let out_buf = buffer_o_kt(
+            out_metal.buffer(),
+            &kt_layout_from_candle(out_layout),
+            kt_dtype_from_candle(out.dtype()),
+        );
 
         encoder.set_buffer(0, Some(gate_buf.buffer), gate_buf.offset_in_bytes);
         encoder.set_buffer(1, Some(up_buf.buffer), up_buf.offset_in_bytes);
