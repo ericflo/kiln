@@ -64,6 +64,16 @@ pub use kt_forward_op::{
 mod kt_tape;
 pub use kt_tape::{fused_linear_cross_entropy_phase_b_via_kt_tape, CudaFlcePhaseBBackward};
 
+/// Wave-13 (#1082): candle-typed kt-tape adapter for the production
+/// caller in [`fused_linear_cross_entropy_dispatch_with_provider`].
+/// Mirrors the rmsnorm sibling
+/// `kiln-model::tape_forward::try_tape_rms_norm_cuda` — same
+/// `KILN_USE_TAPE_FORWARD` env gate + thread-local-tape contract.
+#[cfg(feature = "cuda")]
+mod tape_forward;
+#[cfg(feature = "cuda")]
+pub use tape_forward::try_tape_flce_phase_b_cuda;
+
 /// Optional matmul override hook for the FLCE chunked head pass.
 ///
 /// The default Phase B forward materializes the head as F32 (`head_t.to_dtype(F32)`,
@@ -184,6 +194,28 @@ pub fn fused_linear_cross_entropy_dispatch_with_provider(
         // The autograd chain through `loss.backward()` is preserved
         // in either case — both the shim and the Phase-B path are
         // candle `CustomOp1`s parented on `hidden`.
+        //
+        // Wave-13 (#1082): when `KILN_USE_TAPE_FORWARD=1` AND a thread-
+        // local `kiln_autograd::Tape` scope is active (and no provider
+        // is bound — the tape entry has no provider plumbing), route
+        // through `try_tape_flce_phase_b_cuda` first. The forward
+        // result is bit-exact with the kt-shim (same kt-typed forward
+        // underneath); the backward node is recorded on the tape for
+        // `Tape::backward`. With any gate off (the default)
+        // `try_tape_flce_phase_b_cuda` returns `Ok(None)` and we fall
+        // through to the existing kt-shim — preserving the
+        // candle-autograd chain for callers driving gradients via
+        // `loss.backward()`.
+        #[cfg(feature = "cuda")]
+        {
+            if provider.is_none() {
+                if let Some(out) = try_tape_flce_phase_b_cuda(
+                    hidden, head_t, input_ids, label_mask, chunk_size,
+                )? {
+                    return Ok(out);
+                }
+            }
+        }
         fused_linear_cross_entropy_phase_b_via_kt_forward_op(
             hidden, head_t, input_ids, label_mask, device, chunk_size, provider,
         )
