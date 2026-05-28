@@ -400,7 +400,10 @@ fn is_cuda_device(device: &CdDevice) -> bool {
 // still holds.
 // ---------------------------------------------------------------------------
 use crate::cd_types::*;
-use crate::cd_types::cd_bail;
+// `cd_bail!` macro was used by the old `InjectTensorGradient::bwd`
+// impl; that impl was deleted as part of the CP-4 caller flip
+// (see comment block above the `full_attention_single_layer_tiled_mlp_reverse`
+// function). No other call sites remain in this file. (#1082)
 
 /// Sample a Kaiming-uniform LoRA-A initialization.
 ///
@@ -7792,78 +7795,18 @@ fn full_attention_residual_forward(
     Ok((x + attn_out)?)
 }
 
-#[derive(Clone)]
-struct InjectTensorGradient {
-    upstream: Tensor,
-}
-
-impl std::fmt::Debug for InjectTensorGradient {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("InjectTensorGradient")
-            .field("upstream_dtype", &self.upstream.dtype())
-            .field("upstream_dims", &self.upstream.dims())
-            .finish()
-    }
-}
-
-impl candle_core::CustomOp1 for InjectTensorGradient {
-    fn name(&self) -> &'static str {
-        "kiln-inject-tensor-gradient"
-    }
-
-    fn cpu_fwd(
-        &self,
-        _storage: &CpuStorage,
-        _layout: &Layout,
-    ) -> CdResult<(CpuStorage, Shape)> {
-        Ok((CpuStorage::F32(vec![0.0]), Shape::from(())))
-    }
-
-    #[cfg(feature = "cuda")]
-    fn cuda_fwd(
-        &self,
-        storage: &CudaStorage,
-        _layout: &Layout,
-    ) -> CdResult<(CudaStorage, Shape)> {
-        // (#1082) `CudaStorage` is fully-qualified inline (only this function
-        // touches it) and the `device` field is accessed directly rather than
-        // via the `BackendStorage::device()` trait method, eliminating what
-        // was the last cfg(cuda)-gated module-level `use {
-        // CudaStorage, backend::BackendStorage};`. Combined with the followup
-        // inline-qualification of the remaining `use {...}`
-        // imports (b890535a), trainer.rs candle `use` count is now 0; every
-        // candle reference in this file is inline-qualified. See the module
-        // header comment for the full per-symbol breakdown.
-        let device = &storage.device;
-        let out_slice = device.clone_htod(&[0.0f32])?;
-        Ok((
-            CudaStorage::wrap_cuda_slice(out_slice, device.clone()),
-            Shape::from(()),
-        ))
-    }
-
-    fn bwd(
-        &self,
-        arg: &Tensor,
-        _res: &Tensor,
-        _grad_res: &Tensor,
-    ) -> CdResult<Option<Tensor>> {
-        if self.upstream.dims() != arg.dims() {
-            cd_bail!(
-                "InjectTensorGradient shape mismatch: upstream {:?}, arg {:?}",
-                self.upstream.dims(),
-                arg.dims()
-            );
-        }
-        let upstream = self.upstream.to_device(arg.device())?;
-        let grad = if upstream.dtype() == arg.dtype() {
-            upstream
-        } else {
-            upstream.to_dtype(arg.dtype())?
-        };
-        Ok(Some(grad))
-    }
-}
+// `InjectTensorGradient` (struct + impl candle_core::CustomOp1) was
+// deleted as part of the #1082 CP-4 step 2-3 caller flip. All 6 call
+// sites in `full_attention_single_layer_tiled_mlp_reverse` now use
+// `kiln_kt_bridge::inject_grad_shim::inject_gradient_via_shim` which
+// produces a bit-equivalent candle Tensor (the shim's `bwd` returns
+// the precomputed `upstream`, byte-for-byte matching the previous
+// in-trainer impl). With this deletion, `kiln-train::trainer` has
+// zero production `candle_core::CustomOp1` impls and the crate's
+// `candle-core` dep can move to `[dev-dependencies]`. See commits
+// e2f8723c (substrate revision), 07afd64a (IO mapping removal),
+// a6531830 (shim hoist), and the InjectTensorGradient flip
+// commit itself. (#1082)
 
 #[allow(clippy::too_many_arguments)]
 fn full_attention_single_layer_tiled_mlp_reverse(
@@ -8064,13 +8007,13 @@ fn full_attention_single_layer_tiled_mlp_reverse(
         .with_context(|| {
             format!("full-attention o-proj forward tile [{tile_start}, {tile_end})")
         })?;
-        let injected = out_proj_tile
-            .apply_op1(InjectTensorGradient {
-                upstream: upstream_tile.clone(),
-            })
-            .with_context(|| {
-                format!("full-attention o-proj gradient injection tile [{tile_start}, {tile_end})")
-            })?;
+        let injected = kiln_kt_bridge::inject_grad_shim::inject_gradient_via_shim(
+            &out_proj_tile,
+            &upstream_tile,
+        )
+        .with_context(|| {
+            format!("full-attention o-proj gradient injection tile [{tile_start}, {tile_end})")
+        })?;
         let grads = injected.backward().with_context(|| {
             format!("full-attention o-proj backward tile [{tile_start}, {tile_end})")
         })?;
@@ -8216,11 +8159,11 @@ fn full_attention_single_layer_tiled_mlp_reverse(
                 format!("full-attention core upstream tile [{tile_start}, {tile_end})")
             })?
             .detach();
-        let injected = pre_o
-            .apply_op1(InjectTensorGradient {
-                upstream: pre_o_grad_tile,
-            })
-            .with_context(|| format!("full-attention core gradient injection tile {tile_idx}"))?;
+        let injected = kiln_kt_bridge::inject_grad_shim::inject_gradient_via_shim(
+            &pre_o,
+            &pre_o_grad_tile,
+        )
+        .with_context(|| format!("full-attention core gradient injection tile {tile_idx}"))?;
         let grads = injected
             .backward()
             .with_context(|| format!("full-attention core backward tile {tile_idx}"))?;
@@ -8363,9 +8306,10 @@ fn full_attention_single_layer_tiled_mlp_reverse(
             let mut inject_terms = Vec::with_capacity(2);
             if let Some(q_grad_cpu) = q_grad_tiles_cpu[tile_idx].as_ref() {
                 inject_terms.push(
-                    q.apply_op1(InjectTensorGradient {
-                        upstream: q_grad_cpu.clone(),
-                    })
+                    kiln_kt_bridge::inject_grad_shim::inject_gradient_via_shim(
+                        &q,
+                        q_grad_cpu,
+                    )
                     .context("full-attention q tile gradient injection")?,
                 );
             }
@@ -8373,9 +8317,10 @@ fn full_attention_single_layer_tiled_mlp_reverse(
                 (gate.as_ref(), gate_grad_tiles_cpu[tile_idx].as_ref())
             {
                 inject_terms.push(
-                    gate.apply_op1(InjectTensorGradient {
-                        upstream: gate_grad_cpu.clone(),
-                    })
+                    kiln_kt_bridge::inject_grad_shim::inject_gradient_via_shim(
+                        gate,
+                        gate_grad_cpu,
+                    )
                     .context("full-attention gate tile gradient injection")?,
                 );
             }
@@ -8443,17 +8388,19 @@ fn full_attention_single_layer_tiled_mlp_reverse(
             let mut inject_terms = Vec::with_capacity(2);
             if let Some(k_grad_cpu) = k_grad_tiles_cpu[tile_idx].as_ref() {
                 inject_terms.push(
-                    k.apply_op1(InjectTensorGradient {
-                        upstream: k_grad_cpu.clone(),
-                    })
+                    kiln_kt_bridge::inject_grad_shim::inject_gradient_via_shim(
+                        &k,
+                        k_grad_cpu,
+                    )
                     .context("full-attention k tile gradient injection")?,
                 );
             }
             if let Some(v_grad_cpu) = v_grad_tiles_cpu[tile_idx].as_ref() {
                 inject_terms.push(
-                    v.apply_op1(InjectTensorGradient {
-                        upstream: v_grad_cpu.clone(),
-                    })
+                    kiln_kt_bridge::inject_grad_shim::inject_gradient_via_shim(
+                        &v,
+                        v_grad_cpu,
+                    )
                     .context("full-attention v tile gradient injection")?,
                 );
             }
