@@ -9653,11 +9653,24 @@ pub(crate) fn metal_rms_norm_bf16(x: &candle_core::Tensor, weight: &candle_core:
             _ => anyhow::bail!("metal rmsnorm out must be on Metal"),
         };
 
-        let x_buf = buffer_o(x_metal.buffer(), &x_layout, x.dtype());
-        let w_buf =
-            buffer_o(w_metal.buffer(), &w_layout, weight.dtype());
-        let out_buf =
-            buffer_o(out_metal.buffer(), &o_layout, out.dtype());
+        // #1082 Step 4 rmsnorm-family: `buffer_o` → `buffer_o_kt`.
+        // The kt-typed helper reads `start_offset()` + `size_in_bytes()`
+        // off the kt Layout/DType; everything else is bit-identical.
+        let x_buf = buffer_o_kt(
+            x_metal.buffer(),
+            &kt_layout_from_candle(x_layout),
+            kt_dtype_from_candle(x.dtype()),
+        );
+        let w_buf = buffer_o_kt(
+            w_metal.buffer(),
+            &kt_layout_from_candle(w_layout),
+            kt_dtype_from_candle(weight.dtype()),
+        );
+        let out_buf = buffer_o_kt(
+            out_metal.buffer(),
+            &kt_layout_from_candle(o_layout),
+            kt_dtype_from_candle(out.dtype()),
+        );
 
         encoder.set_buffer(0, Some(x_buf.buffer), x_buf.offset_in_bytes);
         encoder.set_buffer(1, Some(w_buf.buffer), w_buf.offset_in_bytes);
@@ -9747,12 +9760,27 @@ pub(crate) fn metal_gdn_qk_norm_f32_bf16(
             _ => anyhow::bail!("metal gdn qk norm k_out must be on Metal"),
         };
 
-        let q_buf = buffer_o(q_metal.buffer(), &q_layout, q.dtype());
-        let k_buf = buffer_o(k_metal.buffer(), &k_layout, k.dtype());
-        let qo_buf =
-            buffer_o(qo_metal.buffer(), &qo_layout, q_out.dtype());
-        let ko_buf =
-            buffer_o(ko_metal.buffer(), &ko_layout, k_out.dtype());
+        // #1082 Step 4 rmsnorm-family: `buffer_o` → `buffer_o_kt`.
+        let q_buf = buffer_o_kt(
+            q_metal.buffer(),
+            &kt_layout_from_candle(q_layout),
+            kt_dtype_from_candle(q.dtype()),
+        );
+        let k_buf = buffer_o_kt(
+            k_metal.buffer(),
+            &kt_layout_from_candle(k_layout),
+            kt_dtype_from_candle(k.dtype()),
+        );
+        let qo_buf = buffer_o_kt(
+            qo_metal.buffer(),
+            &kt_layout_from_candle(qo_layout),
+            kt_dtype_from_candle(q_out.dtype()),
+        );
+        let ko_buf = buffer_o_kt(
+            ko_metal.buffer(),
+            &kt_layout_from_candle(ko_layout),
+            kt_dtype_from_candle(k_out.dtype()),
+        );
 
         encoder.set_buffer(0, Some(q_buf.buffer), q_buf.offset_in_bytes);
         encoder.set_buffer(1, Some(k_buf.buffer), k_buf.offset_in_bytes);
@@ -9848,12 +9876,27 @@ pub(crate) fn metal_gdn_qk_norm_gqa_f32_bf16(
             _ => anyhow::bail!("metal gdn qk norm gqa k_out must be on Metal"),
         };
 
-        let q_buf = buffer_o(q_metal.buffer(), &q_layout, q.dtype());
-        let k_buf = buffer_o(k_metal.buffer(), &k_layout, k.dtype());
-        let qo_buf =
-            buffer_o(qo_metal.buffer(), &qo_layout, q_out.dtype());
-        let ko_buf =
-            buffer_o(ko_metal.buffer(), &ko_layout, k_out.dtype());
+        // #1082 Step 4 rmsnorm-family: `buffer_o` → `buffer_o_kt`.
+        let q_buf = buffer_o_kt(
+            q_metal.buffer(),
+            &kt_layout_from_candle(q_layout),
+            kt_dtype_from_candle(q.dtype()),
+        );
+        let k_buf = buffer_o_kt(
+            k_metal.buffer(),
+            &kt_layout_from_candle(k_layout),
+            kt_dtype_from_candle(k.dtype()),
+        );
+        let qo_buf = buffer_o_kt(
+            qo_metal.buffer(),
+            &kt_layout_from_candle(qo_layout),
+            kt_dtype_from_candle(q_out.dtype()),
+        );
+        let ko_buf = buffer_o_kt(
+            ko_metal.buffer(),
+            &kt_layout_from_candle(ko_layout),
+            kt_dtype_from_candle(k_out.dtype()),
+        );
 
         encoder.set_buffer(0, Some(q_buf.buffer), q_buf.offset_in_bytes);
         encoder.set_buffer(1, Some(k_buf.buffer), k_buf.offset_in_bytes);
@@ -11042,25 +11085,62 @@ pub(crate) fn metal_gdn_decode_gates_recurrent_rmsnorm_bf16(
             _ => anyhow::bail!("metal gdn decode gates+recurrent+rmsnorm out must be on Metal"),
         };
 
-        let q_buf = buffer_o(q_metal.buffer(), &q_layout, q.dtype());
-        let k_buf = buffer_o(k_metal.buffer(), &k_layout, k.dtype());
-        let v_buf = buffer_o(v_metal.buffer(), &v_layout, v.dtype());
-        let a_buf = buffer_o(a_metal.buffer(), &a_layout, a.dtype());
-        let b_buf = buffer_o(b_metal.buffer(), &b_layout, b.dtype());
-        let al_buf =
-            buffer_o(al_metal.buffer(), &al_layout, a_log.dtype());
-        let dt_buf =
-            buffer_o(dt_metal.buffer(), &dt_layout, dt_bias.dtype());
-        let state_buf = buffer_o(
-            state_metal.buffer(),
-            &state_layout,
-            state.dtype(),
+        // #1082 Step 4 rmsnorm-family: `buffer_o` → `buffer_o_kt`.
+        let q_buf = buffer_o_kt(
+            q_metal.buffer(),
+            &kt_layout_from_candle(q_layout),
+            kt_dtype_from_candle(q.dtype()),
         );
-        let z_buf = buffer_o(z_metal.buffer(), &z_layout, z.dtype());
-        let w_buf =
-            buffer_o(w_metal.buffer(), &w_layout, weight.dtype());
-        let out_buf =
-            buffer_o(out_metal.buffer(), &out_layout, out.dtype());
+        let k_buf = buffer_o_kt(
+            k_metal.buffer(),
+            &kt_layout_from_candle(k_layout),
+            kt_dtype_from_candle(k.dtype()),
+        );
+        let v_buf = buffer_o_kt(
+            v_metal.buffer(),
+            &kt_layout_from_candle(v_layout),
+            kt_dtype_from_candle(v.dtype()),
+        );
+        let a_buf = buffer_o_kt(
+            a_metal.buffer(),
+            &kt_layout_from_candle(a_layout),
+            kt_dtype_from_candle(a.dtype()),
+        );
+        let b_buf = buffer_o_kt(
+            b_metal.buffer(),
+            &kt_layout_from_candle(b_layout),
+            kt_dtype_from_candle(b.dtype()),
+        );
+        let al_buf = buffer_o_kt(
+            al_metal.buffer(),
+            &kt_layout_from_candle(al_layout),
+            kt_dtype_from_candle(a_log.dtype()),
+        );
+        let dt_buf = buffer_o_kt(
+            dt_metal.buffer(),
+            &kt_layout_from_candle(dt_layout),
+            kt_dtype_from_candle(dt_bias.dtype()),
+        );
+        let state_buf = buffer_o_kt(
+            state_metal.buffer(),
+            &kt_layout_from_candle(state_layout),
+            kt_dtype_from_candle(state.dtype()),
+        );
+        let z_buf = buffer_o_kt(
+            z_metal.buffer(),
+            &kt_layout_from_candle(z_layout),
+            kt_dtype_from_candle(z.dtype()),
+        );
+        let w_buf = buffer_o_kt(
+            w_metal.buffer(),
+            &kt_layout_from_candle(w_layout),
+            kt_dtype_from_candle(weight.dtype()),
+        );
+        let out_buf = buffer_o_kt(
+            out_metal.buffer(),
+            &kt_layout_from_candle(out_layout),
+            kt_dtype_from_candle(out.dtype()),
+        );
 
         encoder.set_buffer(0, Some(q_buf.buffer), q_buf.offset_in_bytes);
         encoder.set_buffer(1, Some(k_buf.buffer), k_buf.offset_in_bytes);
@@ -11229,12 +11309,27 @@ fn metal_gated_rms_norm_bf16(x: &candle_core::Tensor, z: &candle_core::Tensor, w
             _ => anyhow::bail!("metal gated rmsnorm out must be on Metal"),
         };
 
-        let x_buf = buffer_o(x_metal.buffer(), &x_layout, x.dtype());
-        let z_buf = buffer_o(z_metal.buffer(), &z_layout, z.dtype());
-        let w_buf =
-            buffer_o(w_metal.buffer(), &w_layout, weight.dtype());
-        let out_buf =
-            buffer_o(out_metal.buffer(), &o_layout, out.dtype());
+        // #1082 Step 4 rmsnorm-family: `buffer_o` → `buffer_o_kt`.
+        let x_buf = buffer_o_kt(
+            x_metal.buffer(),
+            &kt_layout_from_candle(x_layout),
+            kt_dtype_from_candle(x.dtype()),
+        );
+        let z_buf = buffer_o_kt(
+            z_metal.buffer(),
+            &kt_layout_from_candle(z_layout),
+            kt_dtype_from_candle(z.dtype()),
+        );
+        let w_buf = buffer_o_kt(
+            w_metal.buffer(),
+            &kt_layout_from_candle(w_layout),
+            kt_dtype_from_candle(weight.dtype()),
+        );
+        let out_buf = buffer_o_kt(
+            out_metal.buffer(),
+            &kt_layout_from_candle(o_layout),
+            kt_dtype_from_candle(out.dtype()),
+        );
 
         encoder.set_buffer(0, Some(x_buf.buffer), x_buf.offset_in_bytes);
         encoder.set_buffer(1, Some(z_buf.buffer), z_buf.offset_in_bytes);
