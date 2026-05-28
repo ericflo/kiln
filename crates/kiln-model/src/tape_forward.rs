@@ -159,6 +159,15 @@ pub fn try_tape_rms_norm_cuda(x: &Tensor, weight: &Tensor, eps: f32) -> Result<O
     let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
         .context("tape_forward::try_tape_rms_norm_cuda: kt -> candle copy failed")?;
 
+    // CP-4 (#1082) tape_bridge: register the (kt_id ↔ candle_id) IO
+    // mappings so a surrounding `with_tape_scope_emit_to_grad_store`
+    // can transmute the tape-recorded backward into candle-typed
+    // gradients in the candle GradStore. No-ops cleanly when no
+    // bridge scope is active.
+    kiln_kt_bridge::tape_bridge::register_input_mapping(x_kt.id(), x.id());
+    kiln_kt_bridge::tape_bridge::register_input_mapping(w_kt.id(), weight.id());
+    kiln_kt_bridge::tape_bridge::register_output_mapping(out_kt.id(), out.id());
+
     Ok(Some(out))
 }
 
@@ -241,6 +250,15 @@ pub fn try_tape_matmul_cuda(a: &Tensor, b: &Tensor) -> Result<Option<Tensor>> {
     let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
         .context("tape_forward::try_tape_matmul_cuda: kt -> candle copy failed")?;
 
+    // CP-4 (#1082) tape_bridge: register the (kt_id ↔ candle_id) IO
+    // mappings so a surrounding `with_tape_scope_emit_to_grad_store`
+    // can transmute the tape-recorded backward into candle-typed
+    // gradients in the candle GradStore. No-ops cleanly when no
+    // bridge scope is active.
+    kiln_kt_bridge::tape_bridge::register_input_mapping(a_kt.id(), a.id());
+    kiln_kt_bridge::tape_bridge::register_input_mapping(b_kt.id(), b.id());
+    kiln_kt_bridge::tape_bridge::register_output_mapping(out_kt.id(), out.id());
+
     Ok(Some(out))
 }
 
@@ -302,6 +320,14 @@ pub fn try_tape_silu_cuda(x: &Tensor) -> Result<Option<Tensor>> {
 
     let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
         .context("tape_forward::try_tape_silu_cuda: kt -> candle copy failed")?;
+
+    // CP-4 (#1082) tape_bridge: register the (kt_id ↔ candle_id) IO
+    // mappings so a surrounding `with_tape_scope_emit_to_grad_store`
+    // can transmute the tape-recorded backward into candle-typed
+    // gradients in the candle GradStore. No-ops cleanly when no
+    // bridge scope is active.
+    kiln_kt_bridge::tape_bridge::register_input_mapping(x_kt.id(), x.id());
+    kiln_kt_bridge::tape_bridge::register_output_mapping(out_kt.id(), out.id());
 
     Ok(Some(out))
 }
