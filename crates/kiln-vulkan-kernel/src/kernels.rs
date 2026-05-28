@@ -4795,31 +4795,6 @@ fn dispatch_mlp_gate_up_decode_cached_bytes_core(
 ///
 /// Only the final `[batch, 1, out_dim]` tensor is read back to CPU.
 #[allow(clippy::too_many_arguments)]
-pub fn dispatch_mlp_decode_cached(
-    vk_device: &VulkanDevice,
-    x: &Tensor,
-    gate_weight_t: &VulkanBuffer,
-    up_weight_t: &VulkanBuffer,
-    down_weight_t: &VulkanBuffer,
-    hidden: usize,
-    intermediate: usize,
-    out_dim: usize,
-) -> Result<Tensor> {
-    dispatch_mlp_decode_cached_impl(
-        vk_device,
-        x,
-        gate_weight_t,
-        up_weight_t,
-        down_weight_t,
-        hidden,
-        intermediate,
-        out_dim,
-        false,
-        false,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
 pub fn dispatch_mlp_decode_cached_bytes(
     vk_device: &VulkanDevice,
     x_data: &[u8],
