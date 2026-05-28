@@ -3737,17 +3737,38 @@ impl BackendRuntime for VulkanBackend {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
 
-        let result = kiln_vulkan_kernel::kernels::dispatch_gdn_chunk_scan(
-            vk_device,
-            a_strict,
-            b_mask,
-            v_prime,
-            q_s_scaled,
-            beta,
-            decay_last_col,
-        )
-        .context("gdn_chunk_scan kernel failed")?;
-        Ok(Some(result))
+        let a_strict_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(a_strict)?.0;
+        let b_mask_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(b_mask)?.0;
+        let v_prime_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(v_prime)?.0;
+        let q_s_scaled_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(q_s_scaled)?.0;
+        let beta_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(beta)?.0;
+        let decay_last_col_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(decay_last_col)?.0;
+        let v_prime_dims = v_prime.dims();
+        let (batch, heads, chunk, dv) =
+            (v_prime_dims[0], v_prime_dims[1], v_prime_dims[2], v_prime_dims[3]);
+        let (out_data, p_out_data) =
+            kiln_vulkan_kernel::kernels::dispatch_gdn_chunk_scan_bytes(
+                vk_device,
+                &a_strict_data,
+                &b_mask_data,
+                &v_prime_data,
+                &q_s_scaled_data,
+                &beta_data,
+                &decay_last_col_data,
+                batch, heads, chunk, dv,
+            )
+            .context("gdn_chunk_scan kernel failed")?;
+        let out_tensor = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+            &out_data,
+            &[batch, heads, chunk, dv],
+            DType::BF16,
+        )?;
+        let p_out_tensor = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+            &p_out_data,
+            &[batch, heads, chunk, dv],
+            DType::BF16,
+        )?;
+        Ok(Some((out_tensor, p_out_tensor)))
     }
 
     fn gdn_full_chunk_forward(

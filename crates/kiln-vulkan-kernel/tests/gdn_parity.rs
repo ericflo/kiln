@@ -1525,16 +1525,37 @@ fn gdn_chunk_prep_and_scan_match_cpu_reference() -> Result<()> {
     assert_close("prep decay_last_col", &decay_last_col, &exp_decay, 1e-2)?;
     assert_close("prep p_last", &p_last, &exp_plast, 1e-2)?;
 
-    let (got_out, got_w_weighted) = kiln_vulkan_kernel::kernels::dispatch_gdn_chunk_scan(
-        &vk,
-        &a_strict,
-        &b_mask,
-        &v_prime,
-        &q_s_scaled,
-        &beta,
-        &decay_last_col,
-    )
-    .context("dispatch_gdn_chunk_scan")?;
+    let a_strict_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&a_strict)?.0;
+    let b_mask_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&b_mask)?.0;
+    let v_prime_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&v_prime)?.0;
+    let q_s_scaled_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&q_s_scaled)?.0;
+    let beta_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&beta)?.0;
+    let decay_last_col_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&decay_last_col)?.0;
+    let v_prime_dims = v_prime.dims();
+    let (vp_b, vp_h, vp_c, vp_dv) =
+        (v_prime_dims[0], v_prime_dims[1], v_prime_dims[2], v_prime_dims[3]);
+    let (got_out_bytes_a, got_w_weighted_bytes) =
+        kiln_vulkan_kernel::kernels::dispatch_gdn_chunk_scan_bytes(
+            &vk,
+            &a_strict_data,
+            &b_mask_data,
+            &v_prime_data,
+            &q_s_scaled_data,
+            &beta_data_b,
+            &decay_last_col_data,
+            vp_b, vp_h, vp_c, vp_dv,
+        )
+        .context("dispatch_gdn_chunk_scan_bytes")?;
+    let got_out = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+        &got_out_bytes_a,
+        &[vp_b, vp_h, vp_c, vp_dv],
+        candle_core::DType::BF16,
+    )?;
+    let got_w_weighted = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+        &got_w_weighted_bytes,
+        &[vp_b, vp_h, vp_c, vp_dv],
+        candle_core::DType::BF16,
+    )?;
 
     let ad = tensor_data_f32(&a_strict)?;
     let bd = tensor_data_f32(&b_mask)?;
@@ -1642,16 +1663,38 @@ fn gdn_full_chunk_forward_matches_split_vulkan_path() -> Result<()> {
             &vk, &g, &v, &kkt, &qkt, &ks_entry, &q_s,
         )
         .context("dispatch_gdn_chunk_prep")?;
-    let (expected_out, w_weighted) = kiln_vulkan_kernel::kernels::dispatch_gdn_chunk_scan(
-        &vk,
-        &a_strict,
-        &b_mask,
-        &v_prime,
-        &q_s_scaled,
-        &beta,
-        &decay_last_col,
-    )
-    .context("dispatch_gdn_chunk_scan")?;
+    let a_strict_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&a_strict)?.0;
+    let b_mask_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&b_mask)?.0;
+    let v_prime_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&v_prime)?.0;
+    let q_s_scaled_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&q_s_scaled)?.0;
+    let beta_data_bb = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&beta)?.0;
+    let decay_last_col_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&decay_last_col)?.0;
+    let v_prime_dims_b = v_prime.dims();
+    let (vp_b2, vp_h2, vp_c2, vp_dv2) = (
+        v_prime_dims_b[0], v_prime_dims_b[1], v_prime_dims_b[2], v_prime_dims_b[3],
+    );
+    let (expected_out_bytes, w_weighted_bytes) =
+        kiln_vulkan_kernel::kernels::dispatch_gdn_chunk_scan_bytes(
+            &vk,
+            &a_strict_data_b,
+            &b_mask_data_b,
+            &v_prime_data_b,
+            &q_s_scaled_data_b,
+            &beta_data_bb,
+            &decay_last_col_data_b,
+            vp_b2, vp_h2, vp_c2, vp_dv2,
+        )
+        .context("dispatch_gdn_chunk_scan_bytes")?;
+    let expected_out = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+        &expected_out_bytes,
+        &[vp_b2, vp_h2, vp_c2, vp_dv2],
+        candle_core::DType::BF16,
+    )?;
+    let w_weighted = kiln_vulkan_kernel::kernels::create_tensor_from_data(
+        &w_weighted_bytes,
+        &[vp_b2, vp_h2, vp_c2, vp_dv2],
+        candle_core::DType::BF16,
+    )?;
 
     let g_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&g)?.0;
     let v_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&v)?.0;

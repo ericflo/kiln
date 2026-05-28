@@ -10057,28 +10057,25 @@ pub fn dispatch_gdn_full_chunk_forward_bytes(
 /// Input: a_strict[B,H,C,C], b_mask[B,H,C,C], v_prime[B,H,C,dv],
 ///         q_s_scaled[B,H,C,dv], beta[B,H,C], decay_last_col[B,H,C]
 /// Output: out[B,H,C,dv], p_out[B,H,C,dv]
-pub fn dispatch_gdn_chunk_scan(
+#[allow(clippy::too_many_arguments)]
+pub fn dispatch_gdn_chunk_scan_bytes(
     vk_device: &VulkanDevice,
-    a_strict: &Tensor,
-    b_mask: &Tensor,
-    v_prime: &Tensor,
-    q_s_scaled: &Tensor,
-    beta: &Tensor,
-    decay_last_col: &Tensor,
-) -> Result<(Tensor, Tensor)> {
+    a_strict_data: &[u8],
+    b_mask_data: &[u8],
+    v_prime_data: &[u8],
+    q_s_scaled_data: &[u8],
+    beta_data: &[u8],
+    decay_last_col_data: &[u8],
+    batch: usize,
+    heads: usize,
+    chunk: usize,
+    dv: usize,
+) -> Result<(Vec<u8>, Vec<u8>)> {
     let device = vk_device.device();
     let queue = vk_device.queue();
     let qfi = vk_device.queue_family_index();
     let device_local_mt = vk_device.device_local_mem_type();
     let host_visible_mt = vk_device.host_visible_mem_type();
-
-    // Extract input data
-    let a_strict_data = extract_tensor_bytes(a_strict)?.0;
-    let b_mask_data = extract_tensor_bytes(b_mask)?.0;
-    let v_prime_data = extract_tensor_bytes(v_prime)?.0;
-    let q_s_scaled_data = extract_tensor_bytes(q_s_scaled)?.0;
-    let beta_data = extract_tensor_bytes(beta)?.0;
-    let decay_last_col_data = extract_tensor_bytes(decay_last_col)?.0;
 
     // Compile shader
     let glsl_path = concat!(
@@ -10086,10 +10083,6 @@ pub fn dispatch_gdn_chunk_scan(
         "/csrc/shaders/gdn_chunk_scan.comp"
     );
     let spirv = crate::pipeline::ShaderPipeline::compile_shader(glsl_path)?;
-
-    // Parse shapes
-    let dims = v_prime.dims();
-    let (batch, heads, chunk, dv) = (dims[0], dims[1], dims[2], dims[3]);
 
     // Create input buffers + upload
     let a_strict_buf =
@@ -10236,10 +10229,8 @@ pub fn dispatch_gdn_chunk_scan(
     drop(out_buf);
     drop(p_out_buf);
 
-    let out_shape = vec![batch, heads, chunk, dv];
-    let out_tensor = create_tensor_from_data(&out_data, &out_shape, DType::BF16)?;
-    let p_out_tensor = create_tensor_from_data(&p_out_data, &out_shape, DType::BF16)?;
-    Ok((out_tensor, p_out_tensor))
+    let _ = (batch, heads, chunk, dv);
+    Ok((out_data, p_out_data))
 }
 
 /// Scaled dot-product attention forward (prefill), online softmax.
