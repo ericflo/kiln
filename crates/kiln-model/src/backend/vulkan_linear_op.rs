@@ -29,7 +29,6 @@
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use candle_core::op::BackpropOp;
 
 use kiln_vulkan_kernel::{VulkanBuffer, VulkanDevice, kernels};
 
@@ -204,7 +203,7 @@ impl candle_core::CustomOp1 for VulkanLinearOp {
         let x_tensor = candle_core::Tensor::from_storage(
             storage,
             candle_core::Shape::from(l_x.shape().dims()),
-            BackpropOp::none(),
+            candle_core::op::BackpropOp::none(),
             false,
         );
         let x_f32 = if x_tensor.dtype() == candle_core::DType::F32 {
