@@ -211,15 +211,15 @@ fn causal_conv1d_prefill_matches_stateful_cpu_reference() -> Result<()> {
         let x = cpu_f32(x_data.clone(), (batch, channels, seq_len))?;
         let weight = cpu_f32(weight_data.clone(), (channels, 1, kernel_size))?;
         let state = cpu_f32(state_data.clone(), (batch, channels, kernel_size - 1))?;
-        let x_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&x)?.0;
-        let weight_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&weight)?.0;
-        let state_data = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&state)?.0;
+        let x_bytes = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&x)?.0;
+        let weight_bytes = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&weight)?.0;
+        let state_bytes = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&state)?.0;
         let (got_out_bytes, got_state_bytes) =
             kiln_vulkan_kernel::kernels::dispatch_causal_conv1d_prefill_bytes(
                 &vk,
-                &x_data,
-                &weight_data,
-                &state_data,
+                &x_bytes,
+                &weight_bytes,
+                &state_bytes,
                 batch,
                 channels,
                 seq_len,
@@ -1021,9 +1021,8 @@ fn gdn_recurrent_resident_state_matches_two_step_reference() -> Result<()> {
             let v_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&v1)?.0;
             let beta_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&beta1)?.0;
             let g_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&g1)?.0;
-            let state_data_b = if None.is_none() {
-                Some(kiln_vulkan_kernel::kernels::extract_tensor_bytes(&state)?.0)
-            } else { None };
+            let state_data_b =
+                Some(kiln_vulkan_kernel::kernels::extract_tensor_bytes(&state)?.0);
             let q_dims_b = q1.dims();
             let (b_b, h_b, dk_b) = (q_dims_b[0], q_dims_b[1], q_dims_b[2]);
             let dv_b = v1.dims()[2];
@@ -1341,9 +1340,8 @@ fn gdn_recurrent_resident_state_parallel_reduce_matches_two_step_reference() -> 
             let v_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&v1)?.0;
             let beta_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&beta1)?.0;
             let g_data_b = kiln_vulkan_kernel::kernels::extract_tensor_bytes(&g1)?.0;
-            let state_data_b = if None.is_none() {
-                Some(kiln_vulkan_kernel::kernels::extract_tensor_bytes(&state)?.0)
-            } else { None };
+            let state_data_b =
+                Some(kiln_vulkan_kernel::kernels::extract_tensor_bytes(&state)?.0);
             let q_dims_b = q1.dims();
             let (b_b, h_b, dk_b) = (q_dims_b[0], q_dims_b[1], q_dims_b[2]);
             let dv_b = v1.dims()[2];
