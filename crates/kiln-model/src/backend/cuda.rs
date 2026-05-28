@@ -1744,7 +1744,7 @@ impl BackendRuntime for CudaBackend {
             // to matmul_no_broadcast_copy). NVTX range from try_kt_matmul
             // brackets the call as kiln/matmul_kt in nsys.
             if crate::forward::cuda_use_kt_api_matmul()
-                && matches!(x2d.dtype(), candle_core::DType::BF16 | candle_core::DType::F16 | candle_core::DType::F32)
+                && matches!(x2d.dtype(), DType::BF16 | DType::F16 | DType::F32)
                 && x2d.dtype() == weight_t.dtype()
                 && x2d.is_contiguous()
                 && weight_t.is_contiguous()
@@ -1752,7 +1752,7 @@ impl BackendRuntime for CudaBackend {
                 if let Some(kt_out2d) = crate::forward::try_kt_matmul(&x2d, weight_t)? {
                     let mut out_shape = l_dims[..l_dims.len() - 1].to_vec();
                     out_shape.push(out_n);
-                    CUDA_LINEAR_PREFILL_SUCCESSES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    CUDA_LINEAR_PREFILL_SUCCESSES.fetch_add(1, Ordering::Relaxed);
                     return Ok(Some(kt_out2d.reshape(out_shape)?));
                 }
             }
