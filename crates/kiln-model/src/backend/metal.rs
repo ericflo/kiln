@@ -1,7 +1,7 @@
 //! Metal backend: candle's fused SDPA for the attention hot path, portable
 //! fallback for GDN and paged-decode.
 //!
-//! candle-metal ships `candle_nn::ops::sdpa` — an MLX-style fused scaled-dot-
+//! candle-metal ships `kiln_tensor::metal_types::sdpa` — an MLX-style fused scaled-dot-
 //! product attention kernel with native GQA, BF16, and head dims
 //! {32, 64, 72, 80, 96, 128, 256, 512}. For typical transformer head sizes
 //! this replaces the vendored CUDA FlashAttention-2 call on Apple Silicon.
@@ -472,7 +472,7 @@ impl BackendRuntime for MetalBackend {
 
         // sdpa(q, k, v, mask, do_causal, scale, softcapping). softcapping=1.0
         // disables it; kiln's prefill path is always causal.
-        let out = candle_nn::ops::sdpa(&q_t, &k_t, &v_t, None, causal, softmax_scale, 1.0)
+        let out = kiln_tensor::metal_types::sdpa(&q_t, &k_t, &v_t, None, causal, softmax_scale, 1.0)
             .context("candle-metal sdpa failed")?;
 
         let out = out.transpose(1, 2)?.contiguous()?;
@@ -502,7 +502,7 @@ impl BackendRuntime for MetalBackend {
             return Ok(None);
         }
 
-        let out = candle_nn::ops::sdpa(q, k, v, None, causal, softmax_scale, 1.0)
+        let out = kiln_tensor::metal_types::sdpa(q, k, v, None, causal, softmax_scale, 1.0)
             .context("candle-metal head-major sdpa failed")?;
         Ok(Some(out))
     }
@@ -577,7 +577,7 @@ impl BackendRuntime for MetalBackend {
         let k_sdpa = k_live.unsqueeze(0)?.transpose(1, 2)?.contiguous()?; // [1, num_kv_heads, total_seqlen_k, head_dim]
         let v_sdpa = v_live.unsqueeze(0)?.transpose(1, 2)?.contiguous()?;
 
-        let out = candle_nn::ops::sdpa(&q_sdpa, &k_sdpa, &v_sdpa, None, causal, softmax_scale, 1.0)
+        let out = kiln_tensor::metal_types::sdpa(&q_sdpa, &k_sdpa, &v_sdpa, None, causal, softmax_scale, 1.0)
             .context("candle-metal paged sdpa failed")?;
 
         // Back to [1, 1, num_heads, head_dim].
@@ -15004,7 +15004,7 @@ mod tests {
             0.00390625,
         )?;
         let reference = causal_attention_reference_head_major(&q, &k, &v, scale)?;
-        let sdpa = candle_nn::ops::sdpa(&q, &k, &v, None, true, scale, 1.0)?;
+        let sdpa = kiln_tensor::metal_types::sdpa(&q, &k, &v, None, true, scale, 1.0)?;
         device.synchronize()?;
 
         assert!(tensor_all_finite(&sdpa)?);
@@ -15074,7 +15074,7 @@ mod tests {
                 causal_attention_reference_head_major(&q, &k, &v, scale).with_context(|| {
                     format!("Qwen-shaped causal reference failed for seq_len={seq_len}")
                 })?;
-            let sdpa = candle_nn::ops::sdpa(&q, &k, &v, None, true, scale, 1.0)
+            let sdpa = kiln_tensor::metal_types::sdpa(&q, &k, &v, None, true, scale, 1.0)
                 .with_context(|| format!("candle Metal full SDPA failed for seq_len={seq_len}"))?;
             device.synchronize()?;
 
@@ -15093,7 +15093,7 @@ mod tests {
                     .context("bench Qwen-shaped causal attention reference")
             })?;
             let sdpa_us = bench_metal_tensor_op(&device, warmup, iters, || {
-                candle_nn::ops::sdpa(&q, &k, &v, None, true, scale, 1.0)
+                kiln_tensor::metal_types::sdpa(&q, &k, &v, None, true, scale, 1.0)
                     .context("bench candle Metal full SDPA")
             })?;
 
@@ -18083,7 +18083,7 @@ mod tests {
             .transpose(0, 1)?
             .contiguous()?
             .unsqueeze(0)?;
-        let reference = candle_nn::ops::sdpa(&q, &k_ref, &v_ref, None, true, scale, 1.0)?
+        let reference = kiln_tensor::metal_types::sdpa(&q, &k_ref, &v_ref, None, true, scale, 1.0)?
             .transpose(1, 2)?
             .contiguous()?
             .reshape((1usize, 1usize, q_heads * head_dim))?;
@@ -19642,7 +19642,7 @@ mod tests {
         let q_ref = q.transpose(1, 2)?.contiguous()?;
         let k_ref = k_gathered.unsqueeze(0)?.transpose(1, 2)?.contiguous()?;
         let v_ref = v_gathered.unsqueeze(0)?.transpose(1, 2)?.contiguous()?;
-        let ref_out = candle_nn::ops::sdpa(&q_ref, &k_ref, &v_ref, None, true, softmax_scale, 1.0)?;
+        let ref_out = kiln_tensor::metal_types::sdpa(&q_ref, &k_ref, &v_ref, None, true, softmax_scale, 1.0)?;
         let ref_out = ref_out.transpose(1, 2)?.contiguous()?;
 
         assert_eq!(out_paged.dims(), ref_out.dims());

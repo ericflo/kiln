@@ -114,6 +114,18 @@ pub use candle_core::Storage;
 /// `candle_core::D::Minus1` directly.
 pub use candle_core::D;
 
+/// Candle `sdpa` re-export — the MLX-style fused scaled-dot-product
+/// attention kernel shipped in `candle_nn::ops::sdpa`. Used in 9
+/// callsites across `kiln-model::backend::metal` (3 in the metal
+/// SDPA dispatch + 6 in test/parity helpers).
+///
+/// Same Phase-7 chokepoint rationale as the other re-exports: keep
+/// the wire signature identical, move the path through `kiln_tensor`
+/// so callers stop naming `candle_nn::ops::sdpa` directly. The
+/// substrate-lift step replaces this re-export with a kt-native
+/// fused SDPA op that takes `kiln_tensor::Tensor` arguments.
+pub use candle_nn::ops::sdpa;
+
 /// Build a `BufferOffset` from a candle `Buffer` + `Layout` + `DType`.
 ///
 /// This is a mirror of `candle_core::metal_backend::buffer_o` — same

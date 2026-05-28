@@ -49,6 +49,13 @@ memmap2 = { workspace = true }
 # this with a direct cudarc dependency.
 candle-core = { workspace = true, optional = true }
 
+# Optional — pulled in under the `metal` feature only. Used by the
+# `metal_types::sdpa` chokepoint re-export so `kiln-model::backend::metal`
+# can call `kiln_tensor::metal_types::sdpa(...)` instead of naming
+# `candle_nn::ops::sdpa` directly at 9 callsites. Phase 7 follow-up
+# replaces this with a kt-native fused SDPA op.
+candle-nn = { workspace = true, optional = true }
+
 # Direct cudarc — replaces candle re-exports of driver types
 # (`DevicePtr`) in `fp8.rs`. Same workspace pin as candle vendors so
 # the compiled crate unifies. Issue #1082 seam-removal step.
@@ -84,7 +91,7 @@ default = []
 # the SINGLE candle hook in kiln-tensor; Phase 7 replaces it.
 cuda = ["dep:candle-core", "candle-core?/cuda", "dep:cudarc", "dep:kiln-blas"]
 # Reserved for Phase 1.7. Same pattern as `cuda`.
-metal = ["dep:candle-core", "candle-core?/metal", "dep:candle-metal-kernels"]
+metal = ["dep:candle-core", "candle-core?/metal", "dep:candle-metal-kernels", "dep:candle-nn", "candle-nn?/metal"]
 # Phase 1.8 — Vulkan storage. Does NOT go through candle: lifts
 # kiln-vulkan-kernel's already-candle-free VulkanBuffer + VulkanDevice.
 # This is a permanent dependency (Phase 7 does not change it).
