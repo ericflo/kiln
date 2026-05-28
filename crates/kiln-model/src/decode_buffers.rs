@@ -9,7 +9,6 @@
 use anyhow::{Context, Result, bail, ensure};
 #[cfg(feature = "cuda")]
 use candle_core::cuda_backend::cudarc::driver::DevicePtr;
-use candle_core::{DType, Device, Tensor};
 use std::fmt;
 use std::marker::PhantomData;
 
@@ -23,11 +22,11 @@ pub enum DecodeElementType {
 }
 
 impl DecodeElementType {
-    pub fn candle_dtype(self) -> DType {
+    pub fn candle_dtype(self) -> candle_core::DType {
         match self {
-            Self::Bf16 => DType::BF16,
-            Self::Fp8E4M3 => DType::U8,
-            Self::Fp32 => DType::F32,
+            Self::Bf16 => candle_core::DType::BF16,
+            Self::Fp8E4M3 => candle_core::DType::U8,
+            Self::Fp32 => candle_core::DType::F32,
         }
     }
 
@@ -92,7 +91,7 @@ impl BufferShape {
 
 pub struct DecodeBuffer<T: DecodeDType> {
     kind: DecodeBufferKind,
-    tensor: Tensor,
+    tensor: candle_core::Tensor,
     dims: Vec<usize>,
     _dtype: PhantomData<T>,
 }
@@ -111,7 +110,7 @@ impl<T: DecodeDType> DecodeBuffer<T> {
     pub fn allocate(
         kind: DecodeBufferKind,
         dims: impl Into<Vec<usize>>,
-        device: &Device,
+        device: &candle_core::Device,
     ) -> Result<Self> {
         let dims = dims.into();
         ensure!(
@@ -122,7 +121,7 @@ impl<T: DecodeDType> DecodeBuffer<T> {
             dims.iter().all(|&dim| dim > 0),
             "decode buffer {kind:?} dimensions must be non-zero: {dims:?}"
         );
-        let tensor = Tensor::zeros(dims.as_slice(), T::ELEMENT_TYPE.candle_dtype(), device)
+        let tensor = candle_core::Tensor::zeros(dims.as_slice(), T::ELEMENT_TYPE.candle_dtype(), device)
             .with_context(|| format!("allocate decode buffer {kind:?} {dims:?}"))?;
         ensure!(
             tensor.is_contiguous(),
@@ -148,11 +147,11 @@ impl<T: DecodeDType> DecodeBuffer<T> {
         T::ELEMENT_TYPE
     }
 
-    pub fn tensor(&self) -> &Tensor {
+    pub fn tensor(&self) -> &candle_core::Tensor {
         &self.tensor
     }
 
-    pub fn tensor_mut(&mut self) -> &mut Tensor {
+    pub fn tensor_mut(&mut self) -> &mut candle_core::Tensor {
         &mut self.tensor
     }
 
@@ -302,7 +301,7 @@ pub struct DecodeBuffers {
 }
 
 impl DecodeBuffers {
-    pub fn allocate(config: DecodeBufferConfig, device: &Device) -> Result<Self> {
+    pub fn allocate(config: DecodeBufferConfig, device: &candle_core::Device) -> Result<Self> {
         let hidden =
             DecodeBuffer::allocate(DecodeBufferKind::Hidden, config.hidden_dims(), device)?;
         let q = DecodeBuffer::allocate(DecodeBufferKind::Q, config.full_q_dims(), device)?;
@@ -397,7 +396,7 @@ mod tests {
 
     #[test]
     fn decode_buffer_metadata_tracks_bytes() {
-        let device = Device::Cpu;
+        let device = candle_core::Device::Cpu;
         let buffer =
             DecodeBuffer::<Fp32>::allocate(DecodeBufferKind::Logits, [2, 4], &device).unwrap();
         assert_eq!(buffer.dims(), &[2, 4]);
