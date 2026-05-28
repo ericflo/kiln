@@ -32,9 +32,6 @@
 
 use std::sync::Arc;
 
-use candle_core::op::BackpropOp;
-
-
 use kiln_vulkan_kernel::{VulkanBuffer, VulkanDevice, kernels};
 
 /// Op state for [`VulkanLoraOp`]. Captures the device handle plus the
@@ -134,7 +131,7 @@ impl candle_core::CustomOp3 for VulkanLoraOp {
         let x_tensor = candle_core::Tensor::from_storage(
             storage,
             candle_core::Shape::from(x_dims.to_vec()),
-            BackpropOp::none(),
+            candle_core::op::BackpropOp::none(),
             false,
         );
         let x_f32 = if x_tensor.dtype() == candle_core::DType::F32 {
