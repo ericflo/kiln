@@ -3753,15 +3753,10 @@ pub fn dispatch_full_attn_qkv_decode_cached_batched_bytes(
     k_dim: usize,
     v_dim: usize,
 ) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
-    let x = build_cpu_f32_tensor_from_bytes(x_data, &[batch, 1, hidden])?;
-    let (q, k, v) = dispatch_full_attn_qkv_decode_cached_batched_impl(
-        vk_device, &x, q_weight_t, k_weight_t, v_weight_t, batch, hidden, q_dim, k_dim, v_dim, false,
+    let out_data = dispatch_full_attn_qkv_decode_cached_batched_impl(
+        vk_device, x_data, q_weight_t, k_weight_t, v_weight_t, batch, hidden, q_dim, k_dim, v_dim, false,
     )?;
-    Ok((
-        extract_tensor_bytes(&q)?.0,
-        extract_tensor_bytes(&k)?.0,
-        extract_tensor_bytes(&v)?.0,
-    ))
+    split_batched_qkv_output(&out_data, batch, q_dim, k_dim, v_dim)
 }
 
 pub fn dispatch_full_attn_qkv_decode_cached_batched_bf16_weights_bytes(
@@ -3776,10 +3771,9 @@ pub fn dispatch_full_attn_qkv_decode_cached_batched_bf16_weights_bytes(
     k_dim: usize,
     v_dim: usize,
 ) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
-    let x = build_cpu_f32_tensor_from_bytes(x_data, &[batch, 1, hidden])?;
-    let (q, k, v) = dispatch_full_attn_qkv_decode_cached_batched_impl(
+    let out_data = dispatch_full_attn_qkv_decode_cached_batched_impl(
         vk_device,
-        &x,
+        x_data,
         q_weight_t,
         k_weight_t,
         v_weight_t,
@@ -3790,16 +3784,13 @@ pub fn dispatch_full_attn_qkv_decode_cached_batched_bf16_weights_bytes(
         v_dim,
         true,
     )?;
-    let q_bytes = extract_tensor_bytes(&q)?.0;
-    let k_bytes = extract_tensor_bytes(&k)?.0;
-    let v_bytes = extract_tensor_bytes(&v)?.0;
-    Ok((q_bytes, k_bytes, v_bytes))
+    split_batched_qkv_output(&out_data, batch, q_dim, k_dim, v_dim)
 }
 
 #[allow(clippy::too_many_arguments)]
 fn dispatch_full_attn_qkv_decode_cached_batched_impl(
     vk_device: &VulkanDevice,
-    x: &candle_core::Tensor,
+    x_data: &[u8],
     q_weight_t: &VulkanBuffer,
     k_weight_t: &VulkanBuffer,
     v_weight_t: &VulkanBuffer,
@@ -3809,7 +3800,7 @@ fn dispatch_full_attn_qkv_decode_cached_batched_impl(
     k_dim: usize,
     v_dim: usize,
     bf16_weights: bool,
-) -> Result<(candle_core::Tensor, candle_core::Tensor, candle_core::Tensor)> {
+) -> Result<Vec<u8>> {
     let device = vk_device.device();
     let queue = vk_device.queue();
     let device_local_mt = vk_device.device_local_mem_type();
@@ -3817,7 +3808,6 @@ fn dispatch_full_attn_qkv_decode_cached_batched_impl(
 
     anyhow::ensure!(batch > 0, "full_attn_qkv_decode_batched: batch must be > 0");
 
-    let x_data = extract_tensor_bytes(x)?.0;
     let expected_x_bytes = batch
         .checked_mul(hidden)
         .and_then(|n| n.checked_mul(4))
@@ -3896,7 +3886,7 @@ fn dispatch_full_attn_qkv_decode_cached_batched_impl(
         run_compute_pipeline_with_transfer_readback(
             vk_device,
             &x_buf,
-            &x_data,
+            x_data,
             &out_buf,
             out_bytes as u64,
             &spirv,
@@ -3914,7 +3904,7 @@ fn dispatch_full_attn_qkv_decode_cached_batched_impl(
                 queue,
                 *command_pool,
                 &x_buf,
-                &x_data,
+                x_data,
             )
             .context("failed to upload full_attn_qkv_decode_batched x buffer")?;
         }
@@ -3938,20 +3928,24 @@ fn dispatch_full_attn_qkv_decode_cached_batched_impl(
         .context("failed to read back full_attn_qkv_decode_batched output")?
     };
 
-    split_batched_qkv_output(&out_data, batch, q_dim, k_dim, v_dim)
+    let _ = (q_dim, k_dim, v_dim); // shape metadata consumed at the `_bytes` shim boundary
+    Ok(out_data)
 }
 
 /// Split the contiguous batched `[batch, total_out]` readback buffer into
-/// three `[batch, 1, *_dim]` candle tensors. The shader writes rows in
-/// `(q | k | v)` order per batch element, so we copy row-by-row into three
-/// per-dim accumulators.
+/// three per-dim `Vec<u8>` arrays of shape `[batch, *_dim]` f32 bytes.
+/// The shader writes rows in `(q | k | v)` order per batch element, so
+/// we copy row-by-row into three per-dim accumulators.
+///
+/// Candle-free counterpart of the previous tensor-typed split — the
+/// `_bytes` shims consume the three `Vec<u8>` slices directly. (#1082)
 fn split_batched_qkv_output(
     out_data: &[u8],
     batch: usize,
     q_dim: usize,
     k_dim: usize,
     v_dim: usize,
-) -> Result<(candle_core::Tensor, candle_core::Tensor, candle_core::Tensor)> {
+) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>)> {
     let total_out = q_dim + k_dim + v_dim;
     let expected_bytes = batch
         .checked_mul(total_out)
@@ -3965,9 +3959,9 @@ fn split_batched_qkv_output(
     );
     let out_f32: &[f32] = bytemuck::cast_slice(&out_data[..expected_bytes]);
 
-    let mut q_buf = Vec::with_capacity(batch * q_dim);
-    let mut k_buf = Vec::with_capacity(batch * k_dim);
-    let mut v_buf = Vec::with_capacity(batch * v_dim);
+    let mut q_buf: Vec<f32> = Vec::with_capacity(batch * q_dim);
+    let mut k_buf: Vec<f32> = Vec::with_capacity(batch * k_dim);
+    let mut v_buf: Vec<f32> = Vec::with_capacity(batch * v_dim);
     for row in 0..batch {
         let base = row * total_out;
         q_buf.extend_from_slice(&out_f32[base..base + q_dim]);
@@ -3975,10 +3969,11 @@ fn split_batched_qkv_output(
         v_buf.extend_from_slice(&out_f32[base + q_dim + k_dim..base + total_out]);
     }
 
-    let q = candle_core::Tensor::from_vec(q_buf, batch * q_dim, &candle_core::Device::Cpu)?.reshape((batch, 1, q_dim))?;
-    let k = candle_core::Tensor::from_vec(k_buf, batch * k_dim, &candle_core::Device::Cpu)?.reshape((batch, 1, k_dim))?;
-    let v = candle_core::Tensor::from_vec(v_buf, batch * v_dim, &candle_core::Device::Cpu)?.reshape((batch, 1, v_dim))?;
-    Ok((q, k, v))
+    Ok((
+        bytemuck::cast_slice(&q_buf).to_vec(),
+        bytemuck::cast_slice(&k_buf).to_vec(),
+        bytemuck::cast_slice(&v_buf).to_vec(),
+    ))
 }
 
 /// Dispatch batched paged decode attention over compacted K/V windows.
