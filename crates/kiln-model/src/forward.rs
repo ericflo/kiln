@@ -3992,6 +3992,23 @@ fn cuda_softmax_last_dim(x: &Tensor) -> Result<Tensor> {
         && matches!(x.device(), Device::Cuda(_))
         && matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16)
         && x.is_contiguous()
+        // CP-4 (#1082): the kt-API softmax (`try_kt_softmax_last_dim`) returns a
+        // `kt_tensor_to_candle_cuda_copy` — a FRESH candle leaf with NO candle
+        // `BackpropOp`. For an autograd-tracked input that SEVERS candle's
+        // `loss.backward()` graph at the softmax. That was invisible while the
+        // full-attention block was disconnected from the loss, but CP-4 Inc 7
+        // wired the SDPA-fallback attention chain onto the kt `Tape`: the
+        // tape-authoritative backward now propagates the full attention
+        // contribution to `dL/dx`, while the candle baseline (which drives the
+        // parity gate via `loss.backward()`) was still dropping it here — so the
+        // two diverged on every layer BELOW the full-attn layer (the BF16 gate's
+        // lower-layer MLP grads jumped 0.13 → 0.63). Gate the kt-API fast path on
+        // `!x.track_op()` so an autograd-tracked softmax falls through to the
+        // candle-differentiable composite (same forward value, bit-close),
+        // matching the established `!track_op()` guard on the other kt-API
+        // forward-only ops (rms_norm, sigmoid, etc.). Inference / tape paths
+        // (track_op == false) keep the kt-API fast path unchanged.
+        && !x.track_op()
     {
         if let Some(out) = try_kt_softmax_last_dim(x)? {
             return Ok(out);
