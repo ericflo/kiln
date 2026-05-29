@@ -2573,6 +2573,15 @@ pub(crate) struct CausalConv1dPrefillInputBackward {
     batch: usize,
     channels: usize,
     seq_len: usize,
+    /// The conv INPUT's candle dtype. The bwd kernel is F32, so it computes a
+    /// F32 input-grad; we cast it back to this dtype before returning so the
+    /// grad-dtype-follows-tensor invariant holds at the F32↔BF16 conv boundary
+    /// (the conv input `mixed_qkv_ct` is BF16 from in_proj_qkv on a BF16 model,
+    /// but the conv computes/outputs F32). Without this cast the F32 grad flows
+    /// up through the dtype-preserving conv-in transpose to in_proj_qkv's
+    /// `MatmulBackward`, which then runs `cuda_matmul(grad_f32, weight_bf16)` →
+    /// `dtype mismatch a=f32 b=bf16`. (#1082 CP-4)
+    input_dtype: CandleDType,
 }
 
 impl BackwardOp for CausalConv1dPrefillInputBackward {
@@ -2631,6 +2640,18 @@ impl BackwardOp for CausalConv1dPrefillInputBackward {
                     "CausalConv1dPrefillInputBackward: din [rows,C]->[B,C,T]: {e}"
                 ))
             })?;
+        // Cast the F32 kernel grad back to the conv input's dtype so the
+        // grad-dtype-follows-tensor invariant holds across the F32↔BF16 conv
+        // boundary (see `input_dtype` field doc). No-op when already F32.
+        let din = if din.dtype() == self.input_dtype {
+            din
+        } else {
+            din.to_dtype(self.input_dtype).map_err(|e| {
+                kiln_tensor::Error::Msg(format!(
+                    "CausalConv1dPrefillInputBackward: din cast to input dtype: {e}"
+                ))
+            })?
+        };
         let din_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_copy(&din).map_err(|e| {
             kiln_tensor::Error::Msg(format!(
                 "CausalConv1dPrefillInputBackward: din candle->kt: {e}"
@@ -2734,6 +2755,7 @@ pub fn try_tape_causal_conv1d_prefill_cuda(
                 batch,
                 channels,
                 seq_len,
+                input_dtype: input.dtype(),
             }),
         );
     });
