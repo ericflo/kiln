@@ -111,6 +111,10 @@ use kiln_autograd::{
     Tape,
 };
 
+use crate::backend::BackendRuntime;
+use crate::forward::{
+    gdn_recurrent_backward_no_grad, gdn_recurrent_forward_from_parts, GDN_CHUNK_SIZE,
+};
 use crate::lora_loader::LoraProjectionWeights;
 
 // Phase 6a/CP-4 (#1082): the thread-local-tape scope machinery
@@ -1441,6 +1445,195 @@ pub fn try_tape_reshape_cuda(x: &Tensor, new_shape: Vec<usize>) -> Result<Option
         .context("tape_forward::try_tape_reshape_cuda: kt -> candle copy failed")?;
 
     kiln_kt_bridge::tape_bridge::register_input_mapping(x_kt.id(), x.id());
+    kiln_kt_bridge::tape_bridge::register_output_mapping(out_kt.id(), out.id());
+    kiln_kt_bridge::tape_bridge::retain_output_for_chaining(&out_kt, out.id());
+
+    Ok(Some(out))
+}
+
+/// True iff `KILN_USE_TAPE_GDN` is set to an enable value. Narrow opt-in
+/// for the GDN (linear-attention) recurrence tape adapter, separate from
+/// the rest of the fleet. Cached after first read.
+pub fn tape_gdn_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("KILN_USE_TAPE_GDN")
+            .map(|v| {
+                let v = v.trim().to_lowercase();
+                !(v.is_empty() || v == "0" || v == "false" || v == "no")
+            })
+            .unwrap_or(false)
+    })
+}
+
+/// Tape backward for the GDN (Gated DeltaNet linear-attention) recurrence.
+///
+/// # Why a candle-composite wrap (not a kt BackwardOp in kiln-autograd)
+///
+/// The GDN recurrence backward is a stateful chunk-wise reverse-time
+/// algorithm already implemented + CPU-parity-tested as the device-
+/// agnostic candle composite [`gdn_recurrent_backward_no_grad`]
+/// (`test_gdn_recurrent_backward_no_grad_matches_autograd_cpu`). Rather
+/// than re-derive it as kt ops, this `BackwardOp` wraps that proven
+/// function: saves the candle forward inputs and, on backward, bridges
+/// the upstream grad to candle, runs the existing chunk-wise backward, and
+/// bridges the per-input grads back to kt. Lives in kiln-model (not
+/// kiln-autograd) because it calls `crate::forward` + `crate::backend`,
+/// mirroring [`FlashAttnBackward`].
+///
+/// # Saved tensors / inputs
+///
+/// `q`/`k`/`v`/`beta`/`g` + `entry_state` (the recurrent state BEFORE the
+/// forward mutated it) as candle clones; `device` reconstructs the
+/// backend; `chunk_size` is [`GDN_CHUNK_SIZE`]. 5 differentiable inputs
+/// `[q, k, v, beta, g]` in the order the adapter records them;
+/// `entry_state` is the initial (zero) state at the SFT layer boundary, so
+/// the backward's `grad_exit_state` is `None`.
+#[derive(Debug)]
+pub(crate) struct GdnRecurrentBackward {
+    q: Tensor,
+    k: Tensor,
+    v: Tensor,
+    beta: Tensor,
+    g: Tensor,
+    entry_state: Tensor,
+    device: candle_core::Device,
+    chunk_size: usize,
+}
+
+impl BackwardOp for GdnRecurrentBackward {
+    fn name(&self) -> &'static str {
+        "gdn_recurrent_backward"
+    }
+    fn input_count(&self) -> usize {
+        // q, k, v, beta, g.
+        5
+    }
+    fn apply(
+        &self,
+        grad_output: &kiln_tensor::Tensor,
+    ) -> kiln_tensor::Result<Vec<Option<kiln_tensor::Tensor>>> {
+        // Bridge the upstream grad (kt) to candle for the candle composite.
+        let grad_c = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(grad_output).map_err(|e| {
+            kiln_tensor::Error::Msg(format!("GdnRecurrentBackward: grad kt->candle: {e}"))
+        })?;
+        let backend = crate::backend::for_device(&self.device);
+        let grads = gdn_recurrent_backward_no_grad(
+            &*backend,
+            &self.q,
+            &self.k,
+            &self.v,
+            &self.beta,
+            &self.g,
+            &self.entry_state,
+            &grad_c,
+            None,
+            self.chunk_size,
+        )
+        .map_err(|e| kiln_tensor::Error::Msg(format!("GdnRecurrentBackward: gdn bwd: {e}")))?;
+        let to_kt = |t: &Tensor| -> kiln_tensor::Result<kiln_tensor::Tensor> {
+            kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(t).map_err(|e| {
+                kiln_tensor::Error::Msg(format!("GdnRecurrentBackward: grad candle->kt: {e}"))
+            })
+        };
+        Ok(vec![
+            Some(to_kt(&grads.dq)?),
+            Some(to_kt(&grads.dk)?),
+            Some(to_kt(&grads.dv)?),
+            Some(to_kt(&grads.dbeta)?),
+            Some(to_kt(&grads.dg)?),
+        ])
+    }
+}
+
+/// Route the GDN recurrence forward through the kt `Tape` so a
+/// tape-authoritative backward reaches the GDN-block q/k/v/beta/g
+/// projections (and their LoRA `Var`s) — the linear-attention analogue of
+/// [`try_tape_flash_attn_cuda`], covering Qwen3.5-4B's 24 GDN layers.
+///
+/// Runs [`gdn_recurrent_forward_from_parts`] (mutating `recurrent_state`)
+/// and records a [`GdnRecurrentBackward`] whose `entry_state` is the
+/// snapshot of `recurrent_state` BEFORE the forward. Drop-in for the
+/// production recurrence call: `Ok(Some(out))` (with a tape node if a scope
+/// is active), or `Ok(None)` (caller runs the recurrence itself) when the
+/// gate is off, the inputs aren't CUDA, or a kt borrow fails.
+pub fn try_tape_gdn_recurrent_cuda(
+    backend: &dyn BackendRuntime,
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    beta: &Tensor,
+    g: &Tensor,
+    recurrent_state: &mut Tensor,
+) -> Result<Option<Tensor>> {
+    if !tape_forward_enabled() || !tape_gdn_enabled() {
+        return Ok(None);
+    }
+    if !matches!(q.device(), candle_core::Device::Cuda(_)) {
+        return Ok(None);
+    }
+
+    // Snapshot the entry state BEFORE the forward mutates it (the backward
+    // needs it), and the device for backend reconstruction in `apply`.
+    let entry_state = recurrent_state.clone();
+    let device = q.device().clone();
+
+    // Production recurrence forward (mutates recurrent_state in place).
+    let out = gdn_recurrent_forward_from_parts(backend, q, k, v, beta, g, recurrent_state)?;
+
+    // kt input ids (chained from upstream adapters where present).
+    let q_kt = match tape_kt_input(q) {
+        Some(t) => t,
+        None => return Ok(Some(out)),
+    };
+    let k_kt = match tape_kt_input(k) {
+        Some(t) => t,
+        None => return Ok(Some(out)),
+    };
+    let v_kt = match tape_kt_input(v) {
+        Some(t) => t,
+        None => return Ok(Some(out)),
+    };
+    let beta_kt = match tape_kt_input(beta) {
+        Some(t) => t,
+        None => return Ok(Some(out)),
+    };
+    let g_kt = match tape_kt_input(g) {
+        Some(t) => t,
+        None => return Ok(Some(out)),
+    };
+    let out_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&out) {
+        Ok(t) => t,
+        Err(_) => return Ok(Some(out)),
+    };
+
+    let recorded = with_active_tape(|tape: &mut Tape| {
+        tape.record(
+            &out_kt,
+            &[&q_kt, &k_kt, &v_kt, &beta_kt, &g_kt],
+            Box::new(GdnRecurrentBackward {
+                q: q.clone(),
+                k: k.clone(),
+                v: v.clone(),
+                beta: beta.clone(),
+                g: g.clone(),
+                entry_state: entry_state.clone(),
+                device: device.clone(),
+                chunk_size: GDN_CHUNK_SIZE,
+            }),
+        );
+    });
+    if recorded.is_none() {
+        // No active tape scope: the forward output is still valid; just no
+        // node was recorded.
+        return Ok(Some(out));
+    }
+
+    kiln_kt_bridge::tape_bridge::register_input_mapping(q_kt.id(), q.id());
+    kiln_kt_bridge::tape_bridge::register_input_mapping(k_kt.id(), k.id());
+    kiln_kt_bridge::tape_bridge::register_input_mapping(v_kt.id(), v.id());
+    kiln_kt_bridge::tape_bridge::register_input_mapping(beta_kt.id(), beta.id());
+    kiln_kt_bridge::tape_bridge::register_input_mapping(g_kt.id(), g.id());
     kiln_kt_bridge::tape_bridge::register_output_mapping(out_kt.id(), out.id());
     kiln_kt_bridge::tape_bridge::retain_output_for_chaining(&out_kt, out.id());
 
