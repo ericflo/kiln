@@ -137,6 +137,12 @@ pub use kt_forward_op::{
 mod tape_forward;
 #[cfg(feature = "cuda")]
 pub use tape_forward::try_tape_opd_per_position_cuda;
+// CP-4 (#1082) endgame: scalar-mean tape-authoritative entry. Records the
+// scalar OPD loss as a tape ROOT (with IO chaining) so the production OPD
+// trainer can drive backward via `Tape::backward` — mirroring SFT's
+// `try_tape_cross_entropy_from_logits_cuda`. See `tape_forward.rs`.
+#[cfg(feature = "cuda")]
+pub use tape_forward::try_tape_opd_scalar_mean_cuda;
 
 /// Phase 6a/CP-4 (#1082): parallel kt-tape entry that drops the candle
 /// CustomOp1 wrapper in favour of recording onto a `kiln_autograd::Tape`

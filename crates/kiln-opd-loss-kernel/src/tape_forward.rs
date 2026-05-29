@@ -53,7 +53,27 @@ use anyhow::{Context, Result};
 use candle_core::Tensor;
 use kiln_autograd::{tape_forward_enabled, with_active_tape, Tape};
 
-use crate::kt_tape::opd_top_k_reverse_kl_phase_b_per_position_via_kt_tape;
+use crate::kt_tape::{
+    opd_top_k_reverse_kl_phase_b_per_position_via_kt_tape,
+    opd_top_k_reverse_kl_phase_b_via_kt_tape,
+};
+
+/// Borrow a candle input as a kt tensor for the tape path, REUSING an
+/// upstream adapter's kt output when this candle tensor was produced by one
+/// in the active bridge scope (so the recorded kt `Tape` stays connected —
+/// the consumer's input id becomes the producer's output id). Falls back to
+/// a fresh zero-copy borrow otherwise (and outside any bridge scope, which is
+/// the common case + every per-op parity test).
+///
+/// Mirrors `kiln_model::tape_forward::tape_kt_input` exactly — duplicated here
+/// (rather than shared) so this kernel crate does not take a `kiln-model`
+/// dependency. (#1082 CP-4 endgame, Step A.)
+fn tape_kt_input(x: &Tensor) -> Option<kiln_tensor::Tensor> {
+    if let Some(t) = kiln_kt_bridge::tape_bridge::kt_input_for_candle(x.id()) {
+        return Some(t);
+    }
+    kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x).ok()
+}
 
 /// Attempt to run OPD per-position top-K reverse-KL through the
 /// kt-tape pilot ([`opd_top_k_reverse_kl_phase_b_per_position_via_kt_tape`])
@@ -105,11 +125,16 @@ pub fn try_tape_opd_per_position_cuda(
     }
 
     // kt borrow: zero-copy view of the candle CUDA tensors as kt
-    // tensors. Returns `Err` (which we treat as "skip") on layout /
-    // dtype / device mismatch.
-    let hidden_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(hidden) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
+    // tensors. `tape_kt_input` REUSES the upstream adapter's retained kt
+    // output for `hidden` when it was produced by a tape adapter in the
+    // active bridge scope (e.g. the final-RMSNorm `try_tape_rms_norm_cuda`
+    // that produced `student_hidden`) — keeping the recorded tape CONNECTED
+    // from this OPD node back through the model's LoRA chain. Falls back to a
+    // fresh borrow outside a bridge scope (the common case). Returns `Err`
+    // (which we treat as "skip") on layout / dtype / device mismatch.
+    let hidden_kt = match tape_kt_input(hidden) {
+        Some(t) => t,
+        None => return Ok(None),
     };
     let head_t_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(head_t) {
         Ok(t) => t,
@@ -139,6 +164,120 @@ pub fn try_tape_opd_per_position_cuda(
 
     let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
         .context("try_tape_opd_per_position_cuda: kt -> candle copy failed")?;
+
+    // CP-4 (#1082) tape_bridge: register the (kt_id ↔ candle_id) IO mappings
+    // + retain the output so a surrounding tape-authoritative scope can (a)
+    // walk this op's grad back into the candle `hidden` input id, and (b)
+    // thread this per-position output into a downstream adapter's input.
+    // No-ops cleanly outside a bridge scope. `head_t` is non-differentiable
+    // in this op (the kernel emits `d_hidden` only) but we still register its
+    // mapping for completeness.
+    kiln_kt_bridge::tape_bridge::register_input_mapping(hidden_kt.id(), hidden.id());
+    kiln_kt_bridge::tape_bridge::register_input_mapping(head_t_kt.id(), head_t.id());
+    kiln_kt_bridge::tape_bridge::register_output_mapping(out_kt.id(), out.id());
+    kiln_kt_bridge::tape_bridge::retain_output_for_chaining(&out_kt, out.id());
+
+    Ok(Some(out))
+}
+
+/// Attempt to run OPD top-K reverse-KL **reduced to a scalar mean** through
+/// the kt-tape pilot ([`opd_top_k_reverse_kl_phase_b_via_kt_tape`]) and record
+/// the scalar loss as a tape node ready to be the ROOT of a tape-authoritative
+/// backward walk.
+///
+/// This is the OPD analogue of
+/// `kiln_model::tape_forward::try_tape_cross_entropy_from_logits_cuda`: it
+/// produces a scalar loss whose kt tensor is retained in the bridge scope so a
+/// surrounding [`kiln_kt_bridge::tape_bridge::with_tape_authoritative_scope`]
+/// can find it (`candle_output_kt.get(&loss.id())`), seed `dL/dL = 1`, and walk
+/// the connected tape — no candle `loss.backward()`. The recorded backward is
+/// `ScalarMean` mode: it expects a scalar/1-element `grad_loss` (the seed) and
+/// emits `d_hidden` only (`head_t` is non-differentiable in this op).
+///
+/// Returns:
+/// * `Ok(Some(out))` — the scalar tape path ran. The returned candle scalar
+///   `Tensor` is a value-identical copy of the kt-tape loss; the backward node
+///   was recorded on the active thread-local tape and the IO mappings +
+///   retained output were registered for the bridge.
+/// * `Ok(None)` — the env gate (`KILN_USE_TAPE_FORWARD`) was off, no
+///   thread-local tape scope is active, the active set was empty, the kt
+///   envelope rejected the inputs, or the kt borrow failed. The caller must
+///   fall through to the existing scalar dispatch (`opd_step_loss` →
+///   `mean_kl` via the kt-forward-op shim).
+/// * `Err(...)` — a kt-tape forward error (envelope OK but the FFI call
+///   failed). Propagated so callers see the failure cleanly.
+///
+/// # Envelope
+///
+/// Same as [`try_tape_opd_per_position_cuda`]: CUDA + matching F32/BF16
+/// `(hidden, head_t)` dtype + `top_k ∈ {16, 32}`.
+pub fn try_tape_opd_scalar_mean_cuda(
+    hidden: &Tensor,
+    head_t: &Tensor,
+    teacher_topk_indices: &[u32],
+    teacher_topk_logprobs: &[f32],
+    label_mask: &[bool],
+    top_k: usize,
+) -> Result<Option<Tensor>> {
+    if !tape_forward_enabled() {
+        return Ok(None);
+    }
+
+    // Active-count short-circuit — match the per-position adapter. An empty
+    // active set has no loss contribution and recording a tape node for a
+    // no-op forward is a footgun.
+    let active_count = label_mask.iter().filter(|&&m| m).count();
+    if active_count == 0 {
+        return Ok(None);
+    }
+
+    // Thread `hidden` from the upstream model-chain adapter (final RMSNorm)
+    // so the recorded tape is CONNECTED from this loss root back through the
+    // LoRA chain. Fall through on borrow failure.
+    let hidden_kt = match tape_kt_input(hidden) {
+        Some(t) => t,
+        None => return Ok(None),
+    };
+    let head_t_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(head_t) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+
+    // Record the SCALAR-mean OPD loss onto the active tape. If no scope is
+    // open, fall through to the existing dispatch.
+    let loss_kt = match with_active_tape(|tape: &mut Tape| {
+        opd_top_k_reverse_kl_phase_b_via_kt_tape(
+            &hidden_kt,
+            &head_t_kt,
+            teacher_topk_indices,
+            teacher_topk_logprobs,
+            label_mask,
+            top_k,
+            tape,
+        )
+    }) {
+        Some(result) => result,
+        None => return Ok(None),
+    };
+
+    let loss_kt = loss_kt
+        .map_err(|e: kiln_tensor::Error| anyhow::anyhow!("opd_top_k scalar kt-tape: {e}"))
+        .context("try_tape_opd_scalar_mean_cuda: kt-tape forward failed")?;
+
+    // Value-identical candle copy of the scalar loss for the caller (loss_val
+    // + metrics). Like the cross-entropy adapter, the returned candle tensor
+    // carries NO candle autograd lineage — the gradient lives on the tape.
+    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&loss_kt)
+        .context("try_tape_opd_scalar_mean_cuda: kt -> candle copy failed")?;
+
+    // CP-4 (#1082) tape_bridge: register the (kt_id ↔ candle_id) IO mappings
+    // and retain the loss output keyed on the RETURNED copy's id so
+    // `with_tape_authoritative_scope` resolves `loss.id()` → `loss_kt` to seed
+    // the tape root. No-ops cleanly outside a bridge scope.
+    kiln_kt_bridge::tape_bridge::register_input_mapping(hidden_kt.id(), hidden.id());
+    kiln_kt_bridge::tape_bridge::register_input_mapping(head_t_kt.id(), head_t.id());
+    kiln_kt_bridge::tape_bridge::register_output_mapping(loss_kt.id(), out.id());
+    kiln_kt_bridge::tape_bridge::retain_output_for_chaining(&loss_kt, out.id());
 
     Ok(Some(out))
 }

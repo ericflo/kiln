@@ -145,24 +145,45 @@ impl DeviceOp1 for ReduceOp {
             return Ok(None);
         }
         // CUDA backend supports sum/mean over any single axis
-        // (issue #1082 extended this from last-axis-only). `All`
-        // still falls through to CPU.
-        let axis = match self.scope {
-            ReductionScope::Axis(a) => a,
-            ReductionScope::All => return Ok(None),
-        };
-        if axis >= rank {
-            return Ok(None);
+        // (issue #1082 extended this from last-axis-only) AND over
+        // `All` (flatten-to-1-D then reduce axis 0 — reuses the existing
+        // `cuda_*_axis` path). The `All` CUDA path closes the CPU-only
+        // `ReduceOp(All)` gap that blocked OPD/GRPO scalar-loss tape
+        // forwards: `mean_all`/`sum_all` on a CUDA tensor used to fall
+        // through to the CPU path and fail with
+        // `ReduceOp: storage must be CpuStorage`.
+        match self.scope {
+            ReductionScope::Axis(axis) => {
+                if axis >= rank {
+                    return Ok(None);
+                }
+                let axis_dim = x.shape()[axis];
+                if axis_dim == 0 {
+                    return Ok(None);
+                }
+                let out = match self.kind {
+                    ReductionKind::Sum => crate::cuda_sum_axis(x, axis)?,
+                    ReductionKind::Mean => crate::cuda_mean_axis(x, axis)?,
+                };
+                Ok(Some(out))
+            }
+            ReductionScope::All => {
+                let n = x.element_count();
+                if n == 0 {
+                    // mean-of-empty errors on the CPU path; defer there
+                    // for a consistent message rather than dividing by 0.
+                    return Ok(None);
+                }
+                let flat = x.reshape(vec![n])?;
+                let reduced = match self.kind {
+                    ReductionKind::Sum => crate::cuda_sum_axis(&flat, 0)?,
+                    ReductionKind::Mean => crate::cuda_mean_axis(&flat, 0)?,
+                };
+                // Match `cpu_fwd`'s 0-D scalar output shape.
+                let scalar = reduced.reshape(Vec::<usize>::new())?;
+                Ok(Some(scalar))
+            }
         }
-        let axis_dim = x.shape()[axis];
-        if axis_dim == 0 {
-            return Ok(None);
-        }
-        let out = match self.kind {
-            ReductionKind::Sum => crate::cuda_sum_axis(x, axis)?,
-            ReductionKind::Mean => crate::cuda_mean_axis(x, axis)?,
-        };
-        Ok(Some(out))
     }
 
     fn bwd(&self) -> Option<Box<dyn BackwardOp>> {

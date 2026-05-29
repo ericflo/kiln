@@ -10618,8 +10618,11 @@ fn checkpointed_forward_backward(
 /// additionally device-gates this to CUDA devices only (tape-authoritative
 /// adapters require a CUDA device); CPU always uses the candle path regardless
 /// of this flag. (#1082 CP-4.)
+// `pub(crate)` so the OPD trainer (`opd.rs`) can reuse the EXACT same gate
+// for its tape-authoritative dispatch — single source of truth for the
+// `KILN_USE_TAPE_AUTHORITATIVE` env semantics (#1082 CP-4 endgame).
 #[cfg(feature = "cuda")]
-fn tape_authoritative_enabled() -> bool {
+pub(crate) fn tape_authoritative_enabled() -> bool {
     std::env::var("KILN_USE_TAPE_AUTHORITATIVE")
         .map(|v| !matches!(v.trim(), "" | "0" | "false" | "no" | "off"))
         .unwrap_or(true)
@@ -12006,8 +12009,13 @@ fn checkpointed_grpo_forward_backward<'echo>(
     Ok((loss_val, accumulated_grads, echo_env_ce))
 }
 
+// (#1082 CP-4) `pub(crate)` so the OPD tape-authoritative test in `opd.rs`'s
+// own `#[cfg(test)] mod tests` can reuse the BF16 tiny-model fixtures
+// (`tiny_config_bf16` / `tiny_weights_bf16`) instead of duplicating them —
+// single source of truth for the BF16 CUDA fixture. Still `#[cfg(test)]`, so
+// it carries no cost in non-test builds.
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use kiln_model::forward::{
         GpuAttentionWeights, GpuFfnWeights, GpuFullAttentionWeights, GpuLayerWeights,
@@ -14994,7 +15002,9 @@ mod tests {
     /// so on F32 the tape-forward adapters all decline (`Ok(None)`) and no
     /// tape node is recorded — the loss→input chain dead-ends at the first
     /// norm. Only the dtype differs from `tiny_config`.
-    fn tiny_config_bf16() -> ModelConfig {
+    // (#1082 CP-4) `pub(crate)` so `opd.rs`'s tape-authoritative OPD test can
+    // reuse this BF16 fixture (the kt fused adapters are BF16-only).
+    pub(crate) fn tiny_config_bf16() -> ModelConfig {
         ModelConfig {
             dtype: kiln_core::config::DType::BF16,
             ..tiny_config()
@@ -15013,7 +15023,9 @@ mod tests {
     /// would make the rotary adapter decline.
     ///
     /// `mtp` is `None` in the tiny fixtures, so there is no MTP slot to cast.
-    fn tiny_weights_bf16(config: &ModelConfig, device: &CdDevice) -> Result<GpuWeights> {
+    // (#1082 CP-4) `pub(crate)` so `opd.rs`'s tape-authoritative OPD test can
+    // reuse this BF16 fixture (the kt fused adapters are BF16-only).
+    pub(crate) fn tiny_weights_bf16(config: &ModelConfig, device: &CdDevice) -> Result<GpuWeights> {
         let f32_weights = tiny_weights_with_seed(config, device, TINY_WEIGHTS_DEFAULT_SEED)?;
         let layers = f32_weights
             .layers

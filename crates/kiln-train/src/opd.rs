@@ -1119,20 +1119,33 @@ pub struct OpdStepOutputs {
 ///   path uses a scalar advantage — the OPD path generalises that to a
 ///   vector. The refactor is `grpo_loss(... advantage: Tensor ...)`;
 ///   the call site is unchanged for the scalar case).
-pub fn opd_step_loss(inputs: OpdStepInputs<'_>) -> Result<OpdStepOutputs> {
-    let OpdStepInputs {
-        tokens,
-        active_positions,
-        student_hidden,
-        head_t,
-        teacher,
-        loss,
-        top_k,
-        chunk_size,
-        teacher_tokens,
-        teacher_active_positions,
-    } = inputs;
+/// Teacher-side kernel inputs for one OPD step, resolved once from
+/// [`OpdStepInputs`] (the alignment checks, `label_mask`, `top_k` resolution,
+/// and the teacher logprob fetch).
+///
+/// Shared by [`opd_step_loss`] (candle-autograd / per-position path) and the
+/// tape-authoritative scalar-mean path in [`opd_train`] so the (potentially
+/// expensive) teacher fetch + bookkeeping happens exactly once and identically
+/// on both code paths. (#1082 CP-4 endgame.)
+struct PreparedOpdKernelInputs {
+    label_mask: Vec<bool>,
+    teacher_topk_indices: Vec<u32>,
+    teacher_topk_logprobs: Vec<f32>,
+    resolved_top_k: usize,
+    active_count: usize,
+}
 
+/// Run the per-step teacher fetch + mask/`top_k` resolution shared by the
+/// candle and tape-authoritative OPD paths.
+fn prepare_opd_kernel_inputs(
+    tokens: &[u32],
+    active_positions: &[usize],
+    teacher: Arc<dyn LogitSource>,
+    loss: OpdLossGranularity,
+    top_k: usize,
+    teacher_tokens: Option<&[u32]>,
+    teacher_active_positions: Option<&[usize]>,
+) -> Result<PreparedOpdKernelInputs> {
     // Pair-wise alignment check for asymmetric teacher conditioning.
     if let (Some(t_tok), Some(t_act)) = (teacher_tokens, teacher_active_positions) {
         if t_act.len() != active_positions.len() {
@@ -1222,6 +1235,47 @@ pub fn opd_step_loss(inputs: OpdStepInputs<'_>) -> Result<OpdStepOutputs> {
             (indices, logprobs)
         }
     };
+
+    Ok(PreparedOpdKernelInputs {
+        label_mask,
+        teacher_topk_indices,
+        teacher_topk_logprobs,
+        resolved_top_k,
+        active_count,
+    })
+}
+
+pub fn opd_step_loss(inputs: OpdStepInputs<'_>) -> Result<OpdStepOutputs> {
+    let OpdStepInputs {
+        tokens,
+        active_positions,
+        student_hidden,
+        head_t,
+        teacher,
+        loss,
+        top_k,
+        chunk_size,
+        teacher_tokens,
+        teacher_active_positions,
+    } = inputs;
+
+    // Teacher fetch + mask / top_k resolution (shared with the
+    // tape-authoritative scalar path in `opd_train`).
+    let PreparedOpdKernelInputs {
+        label_mask,
+        teacher_topk_indices,
+        teacher_topk_logprobs,
+        resolved_top_k,
+        active_count,
+    } = prepare_opd_kernel_inputs(
+        tokens,
+        active_positions,
+        teacher,
+        loss,
+        top_k,
+        teacher_tokens,
+        teacher_active_positions,
+    )?;
 
     let device = student_hidden.device().clone();
     // chunk_size is plumbed through to the kernel when we switch to
@@ -2194,17 +2248,20 @@ pub fn opd_train(
     let mut token_counts = crate::train_receipt::TokenCountReceipt::default();
 
     use crate::Optimizer;
-    use crate::trainer::{
-        TrainableLoraParams, accumulate_grads, compute_segment_boundaries, lora_weights_detached,
-    };
+    use crate::trainer::TrainableLoraParams;
     // NOTE(#1082): `use Var;` dropped — only two call sites
     // inside this function (`Var::from_tensor` boundary states) and both
     // now use the fully-qualified `Var::from_tensor` path so
     // opd.rs's candle `use` count drops by 1.
+    //
+    // NOTE(#1082 CP-4 endgame): the per-step forward + backward moved into
+    // `opd_step_forward_backward_tape_authoritative` (tape path) and
+    // `opd_step_forward_backward_candle` (legacy candle path). Their forward
+    // helpers + the candle grad-accumulation helpers
+    // (`accumulate_grads`/`compute_segment_boundaries`/`lora_weights_detached`)
+    // are imported locally in those functions, so `opd_train`'s body no longer
+    // references them directly.
     use kiln_model::backend;
-    use kiln_model::forward::{
-        LinearAttentionState, model_forward_embed, model_forward_final_norm, model_forward_segment,
-    };
     use std::collections::HashMap;
 
     if prompts.is_empty() {
@@ -2713,74 +2770,6 @@ pub fn opd_train(
                         .saturating_sub(active_positions.len().saturating_add(env_count))
                         as u64,
                 );
-                // Gradient-checkpointed step. Runs the model forward in
-                // detached segments to bound activation memory, computes the
-                // OPD top-K reverse-KL loss at the final boundary, then
-                // walks segments in reverse with autograd ON to accumulate
-                // LoRA gradients. Mirrors the SFT path's
-                // `checkpointed_forward_backward` so long-context OPD fits
-                // on a single 48GB GPU.
-                let positions: Vec<u32> = (0..input_ids.len()).map(|p| p as u32).collect();
-                let lora_detached = lora_weights_detached(&params);
-                // Per-step auto-tune: pick segment count based on this
-                // step's actual seq_len. Falls back to the legacy
-                // hardcoded 8 if VRAM detection or the auto-tune punts.
-                let num_segments = match kiln_core::vram::recommended_checkpoint_plan(
-                    &opd_vram_cache,
-                    model_config.num_layers,
-                    input_ids.len(),
-                    model_config.hidden_size,
-                    opd_base_model_bytes,
-                ) {
-                    Some(kiln_core::vram::CheckpointPlan::Enabled { num_segments, .. }) => {
-                        num_segments.min(model_config.num_layers).max(1)
-                    }
-                    Some(kiln_core::vram::CheckpointPlan::Disabled { .. }) => {
-                        // Activations fit comfortably — collapse to a
-                        // single segment, which makes the checkpointed
-                        // forward+backward trivially equivalent to the
-                        // non-checkpointed path while preserving this
-                        // branch's existing structure.
-                        1
-                    }
-                    None | Some(kiln_core::vram::CheckpointPlan::UserOverride) => {
-                        8usize.min(model_config.num_layers)
-                    }
-                };
-                let segments = compute_segment_boundaries(model_config.num_layers, num_segments);
-
-                // === Step 1: detached forward; save segment boundaries ===
-                let (embed_hidden, _) = model_forward_embed(input_ids, weights)?;
-                let mut boundary_states: Vec<Tensor> = Vec::with_capacity(segments.len() + 1);
-                boundary_states.push(embed_hidden.detach());
-                {
-                    let mut current = boundary_states[0].clone();
-                    let mut linear_state = LinearAttentionState::new(model_config, &device)?;
-                    for &(start, end) in &segments {
-                        current = model_forward_segment(
-                            &*backend_rt,
-                            current,
-                            weights,
-                            model_config,
-                            &positions,
-                            start,
-                            end,
-                            Some(&mut linear_state),
-                            Some(&lora_detached),
-                        )
-                        .context("OPD checkpointed segmented forward")?;
-                        boundary_states.push(current.detach());
-                        current = boundary_states.last().unwrap().clone();
-                    }
-                }
-                let final_hidden = boundary_states.last().unwrap().clone();
-
-                // === Step 2: OPD loss at the final boundary ===
-                // Build a Var so candle autograd routes the kernel's backward
-                // into `final_var.grad()`.
-                let final_var = Var::from_tensor(&final_hidden)?;
-                let normed =
-                    model_forward_final_norm(final_var.as_tensor(), weights, model_config)?;
                 // §20 asymmetric teacher conditioning: if this prompt
                 // declared `teacher_extra_messages`, build the teacher's
                 // token sequence as `teacher_prompt_tokens ++ sampled`.
@@ -2788,7 +2777,10 @@ pub fn opd_train(
                 // the student's own prompt framing; the teacher's view
                 // swaps the prompt half for the merged-extras version
                 // while keeping the SAME sampled rollout. Active
-                // positions are remapped to the teacher's frame.
+                // positions are remapped to the teacher's frame. This
+                // bookkeeping is path-independent (it only touches host
+                // token arrays) so we compute it once before the
+                // tape-authoritative-vs-candle dispatch below.
                 let teacher_prompt: &[u32] = &teacher_prompt_tokens[prompt_idx];
                 let (teacher_full_tokens_owned, teacher_shifted_positions): (Vec<u32>, Vec<usize>) =
                     if teacher_prompt.is_empty() {
@@ -2819,115 +2811,121 @@ pub fn opd_train(
                             Some(teacher_shifted_positions.as_slice()),
                         )
                     };
-                let out = opd_step_loss(OpdStepInputs {
-                    tokens: input_ids,
-                    active_positions: &active_positions,
-                    student_hidden: &normed,
-                    head_t: &head_t,
-                    teacher: teacher.clone(),
-                    loss: config.loss,
-                    top_k: config.top_k,
-                    chunk_size: 0,
-                    teacher_tokens: teacher_tokens_opt,
-                    teacher_active_positions: teacher_active_opt,
-                })?;
-                let active_count = out.active_count;
-                let mut loss = out.mean_kl;
-                if let Some(echo_cfg) = &config.echo {
-                    if echo_cfg.lambda != 0.0 && env_count > 0 && total_obs_len > 0 {
-                        if let Some(echo_out) =
-                            crate::echo::echo_step_loss(crate::echo::EchoStepInputs {
-                                tokens: input_ids,
-                                env_mask,
-                                student_hidden: &normed,
-                                head_t: &head_t,
-                                total_obs_len,
-                                chunk_size: 0,
-                                provider: None,
-                            })?
+
+                // Whether this step has an ACTIVE ECHO env-CE contribution.
+                // ECHO uses an FLCE + candle `.affine()` + candle `.add()`
+                // composite that has NO kt-tape coverage today, so the
+                // tape-authoritative scalar-loss root (which must be a single
+                // tape-adapter output) cannot represent `mean_kl + λ·echo_ce`.
+                // When ECHO fires we keep this step on the candle
+                // gradient-checkpointing path (see the dispatch below).
+                // ECHO only fires on off-policy agentic data; the on-policy
+                // path sets `env_mask` all-false + `total_obs_len = 0`, so
+                // this is `false` for the common on-policy case. Only read on
+                // the cuda dispatch arm (the non-cuda build always takes the
+                // candle path), hence the cfg-gated `allow(unused)`.
+                #[cfg_attr(not(feature = "cuda"), allow(unused_variables))]
+                let echo_active_this_step = config
+                    .echo
+                    .as_ref()
+                    .map(|c| c.lambda != 0.0 && env_count > 0 && total_obs_len > 0)
+                    .unwrap_or(false);
+
+                // === Forward + backward dispatch (#1082 CP-4 endgame) ===
+                //
+                // Tape-authoritative path (DEFAULT, opt out via
+                // `KILN_USE_TAPE_AUTHORITATIVE=0`): drive gradients through the
+                // kt `Tape` instead of candle `loss.backward()`. Runs a SINGLE
+                // full forward (`model_forward_no_head`) inside
+                // `with_tape_authoritative_scope` so the LoRA adapters record
+                // their nodes, then records the scalar OPD loss as the tape
+                // root (`try_tape_opd_scalar_mean_cuda`) and walks the
+                // connected tape with one `Tape::backward`. This REPLACES the
+                // candle gradient-checkpointing reverse-segment loop — the tape
+                // records every forward node, so a single backward walk yields
+                // the LoRA-param grads directly. Mirrors the SFT dispatch in
+                // `trainer::standard_forward_backward`.
+                //
+                // Device gate: tape adapters require a CUDA device (they record
+                // kt CUDA ops); CPU keeps the candle path. ECHO gate: ECHO has
+                // no tape coverage, so any step with active ECHO falls back to
+                // the candle path too (clearly scoped — non-ECHO OPD first).
+                let (loss_val, active_count, grads_on_device): (
+                    f64,
+                    usize,
+                    HashMap<TensorId, Tensor>,
+                ) = {
+                    #[cfg(feature = "cuda")]
+                    {
+                        if crate::trainer::tape_authoritative_enabled()
+                            && matches!(device, candle_core::Device::Cuda(_))
+                            && !echo_active_this_step
                         {
-                            let echo_env_ce =
-                                echo_out.mean_ce.to_scalar::<f32>().ok().map(f64::from);
-                            let echo_scaled = echo_out.mean_ce.affine(echo_cfg.lambda, 0.0)?;
-                            loss = loss.add(&echo_scaled)?;
-                            tracing::debug!(
-                                prompt = prompt_idx,
-                                sample = sample_idx,
-                                env_tokens = echo_out.env_count,
+                            opd_step_forward_backward_tape_authoritative(
+                                &*backend_rt,
+                                input_ids,
+                                weights,
+                                model_config,
+                                &params,
+                                &device,
+                                &head_t,
+                                teacher.clone(),
+                                &active_positions,
+                                config.loss,
+                                config.top_k,
+                                teacher_tokens_opt,
+                                teacher_active_opt,
+                            )?
+                        } else {
+                            opd_step_forward_backward_candle(
+                                &*backend_rt,
+                                input_ids,
+                                weights,
+                                model_config,
+                                &params,
+                                &device,
+                                &head_t,
+                                teacher.clone(),
+                                &active_positions,
+                                config,
+                                env_mask,
+                                env_count,
                                 total_obs_len,
-                                echo_lambda = echo_cfg.lambda,
-                                echo_env_ce = ?echo_env_ce,
-                                "OPD off-policy path: ECHO env CE active"
-                            );
+                                prompt_idx,
+                                sample_idx,
+                                &opd_vram_cache,
+                                opd_base_model_bytes,
+                                teacher_tokens_opt,
+                                teacher_active_opt,
+                            )?
                         }
                     }
-                }
-                let loss_val = loss.to_scalar::<f32>()? as f64;
-                let head_grads = loss
-                    .backward()
-                    .context("OPD/ECHO loss backward at final boundary")?;
-                let mut upstream_grad = head_grads
-                    .get(final_var.as_tensor())
-                    .ok_or_else(|| anyhow!("no gradient at final_hidden Var"))?
-                    .clone()
-                    .detach();
-                drop(head_grads);
-                drop(normed);
-                drop(final_var);
+                    #[cfg(not(feature = "cuda"))]
+                    {
+                        opd_step_forward_backward_candle(
+                            &*backend_rt,
+                            input_ids,
+                            weights,
+                            model_config,
+                            &params,
+                            &device,
+                            &head_t,
+                            teacher.clone(),
+                            &active_positions,
+                            config,
+                            env_mask,
+                            env_count,
+                            total_obs_len,
+                            prompt_idx,
+                            sample_idx,
+                            &opd_vram_cache,
+                            opd_base_model_bytes,
+                            teacher_tokens_opt,
+                            teacher_active_opt,
+                        )?
+                    }
+                };
 
-                // === Step 3: walk segments in reverse, accumulate LoRA grads ===
-                let mut accumulated_grads: HashMap<TensorId, Tensor> = HashMap::new();
-                let all_vars = params.all_vars();
-                for seg_idx in (0..segments.len()).rev() {
-                    let (seg_start, seg_end) = segments[seg_idx];
-                    let seg_input = boundary_states[seg_idx].clone();
-                    let seg_input_var = Var::from_tensor(&seg_input)?;
-                    let mut state = LinearAttentionState::new(model_config, &device)?;
-                    let lora_for_seg = params.as_lora_weights();
-                    let seg_output = model_forward_segment(
-                        &*backend_rt,
-                        seg_input_var.as_tensor().clone(),
-                        weights,
-                        model_config,
-                        &positions,
-                        seg_start,
-                        seg_end,
-                        Some(&mut state),
-                        Some(&lora_for_seg),
-                    )
-                    .with_context(|| {
-                        format!("OPD checkpointed reverse segment [{seg_start},{seg_end})")
-                    })?;
-
-                    // Inject upstream gradient: scalar = sum(seg_output * upstream)
-                    let scalar = (&seg_output * &upstream_grad)?
-                        .sum_all()
-                        .context("OPD reverse segment gradient injection")?;
-                    let seg_grads = scalar
-                        .backward()
-                        .with_context(|| format!("OPD reverse segment backward {seg_idx}"))?;
-                    accumulate_grads(&mut accumulated_grads, &seg_grads, &all_vars)?;
-                    upstream_grad = seg_grads
-                        .get(seg_input_var.as_tensor())
-                        .ok_or_else(|| anyhow!("no grad at seg_input_var (seg_idx={seg_idx})"))?
-                        .clone()
-                        .detach();
-                    drop(seg_grads);
-                    drop(seg_output);
-                }
-
-                // Move CPU-spilled gradients back to the device for the optimizer step.
-                let grads_on_device: HashMap<TensorId, Tensor> = accumulated_grads
-                    .into_iter()
-                    .map(|(k, v)| {
-                        let v = if v.device().same_device(&device) {
-                            v
-                        } else {
-                            v.to_device(&device).unwrap_or(v)
-                        };
-                        (k, v)
-                    })
-                    .collect();
                 crate::trainer::optimizer_step_from_map(
                     &*backend_rt,
                     &params,
@@ -3067,6 +3065,364 @@ pub fn opd_train(
     );
 
     Ok(output_dir)
+}
+
+/// Tape-authoritative OPD forward + backward for one step (#1082 CP-4 endgame).
+///
+/// Mirrors `trainer::standard_forward_backward_tape_authoritative` (the SFT
+/// precedent): runs the full forward + scalar OPD loss inside
+/// `with_tape_authoritative_scope`, seeds `dL/dL = 1` at the loss, walks the
+/// connected kt `Tape` (NO candle `loss.backward()`), and extracts the
+/// per-LoRA-param grads into the `GradMap` the optimizer step consumes.
+///
+/// The single full forward (`model_forward_no_head`) routes the LoRA adapters
+/// through the tape (when `KILN_USE_TAPE_FORWARD` is on — default), and the
+/// scalar loss adapter (`try_tape_opd_scalar_mean_cuda`) records the loss as
+/// the tape root with its `hidden` input threaded from the final-RMSNorm
+/// adapter's retained kt output so the recorded tape is CONNECTED from the
+/// loss back through the LoRA chain. This REPLACES the candle
+/// gradient-checkpointing reverse-segment loop: the tape records every forward
+/// node, so one backward walk yields the LoRA grads directly.
+///
+/// Returns `(loss_val, active_count, grads_on_device)`, the same shape the
+/// candle path returns, so the caller's optimizer step + logging are oblivious
+/// to which path produced the grads.
+///
+/// CUDA-only: the tape adapters record kt CUDA ops + bridge kt<->candle CUDA
+/// tensors. The caller device-gates this to `Device::Cuda`.
+#[cfg(feature = "cuda")]
+#[allow(clippy::too_many_arguments)]
+fn opd_step_forward_backward_tape_authoritative(
+    backend_rt: &dyn kiln_model::backend::BackendRuntime,
+    input_ids: &[u32],
+    weights: &kiln_model::forward::GpuWeights,
+    model_config: &kiln_core::config::ModelConfig,
+    params: &crate::trainer::TrainableLoraParams,
+    device: &candle_core::Device,
+    head_t: &Tensor,
+    teacher: Arc<dyn LogitSource>,
+    active_positions: &[usize],
+    loss_granularity: OpdLossGranularity,
+    top_k: usize,
+    teacher_tokens: Option<&[u32]>,
+    teacher_active_positions: Option<&[usize]>,
+) -> Result<(f64, usize, std::collections::HashMap<TensorId, Tensor>)> {
+    use kiln_model::forward::model_forward_no_head;
+    use std::collections::HashMap;
+
+    // Teacher fetch + mask / top_k resolution — identical to the candle path
+    // (shared helper). This is the (potentially network/IPC) teacher query;
+    // done ONCE here, before the tape scope, so the closure is pure tensor
+    // work (the scope must not perform side-effecting teacher I/O on a retry).
+    let prepared = prepare_opd_kernel_inputs(
+        input_ids,
+        active_positions,
+        teacher,
+        loss_granularity,
+        top_k,
+        teacher_tokens,
+        teacher_active_positions,
+    )?;
+    let active_count = prepared.active_count;
+
+    let lora_weights = params.as_lora_weights();
+
+    let (loss_val, _loss, grads_by_candle_raw) =
+        kiln_kt_bridge::tape_bridge::with_tape_authoritative_scope(|| {
+            // Single full forward (embed -> layers -> final RMSNorm). The
+            // LoRA adapters inside record onto the active tape; the final
+            // RMSNorm retains its kt output so the OPD loss adapter can
+            // thread it as `hidden` and keep the tape connected.
+            let mut linear_state =
+                kiln_model::forward::LinearAttentionState::new(model_config, device).map_err(
+                    |e| kiln_kt_bridge::BridgeError::new(format!("opd tape: linear_state: {e:#}")),
+                )?;
+            let normed = model_forward_no_head(
+                backend_rt,
+                input_ids,
+                weights,
+                model_config,
+                Some(&mut linear_state),
+                Some(&lora_weights),
+            )
+            .context("opd tape-authoritative forward")
+            .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?;
+
+            // Record the SCALAR OPD loss as the tape root. Returns a detached
+            // candle scalar (value only); the gradient lives on the tape.
+            let loss = match kiln_opd_loss_kernel::try_tape_opd_scalar_mean_cuda(
+                &normed,
+                head_t,
+                &prepared.teacher_topk_indices,
+                &prepared.teacher_topk_logprobs,
+                &prepared.label_mask,
+                prepared.resolved_top_k,
+            )
+            .context("opd tape-authoritative scalar loss")
+            .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?
+            {
+                Some(l) => l,
+                None => {
+                    // The scalar tape adapter declined (gate off, empty active
+                    // set, or out-of-envelope inputs). The tape scope cannot
+                    // be seeded without a tape-routed loss root, so surface a
+                    // clean error — the caller's dispatch should not have
+                    // selected this path if the envelope was unmet.
+                    return Err(kiln_kt_bridge::BridgeError::new(
+                        "opd tape-authoritative: try_tape_opd_scalar_mean_cuda returned None \
+                         (KILN_USE_TAPE_FORWARD off, empty active set, or out-of-envelope \
+                         inputs). The dispatch should keep this step on the candle path.",
+                    ));
+                }
+            };
+            let loss_val = loss
+                .to_scalar::<f32>()
+                .map_err(|e| {
+                    kiln_kt_bridge::BridgeError::new(format!("opd tape: loss.to_scalar: {e}"))
+                })? as f64;
+            Ok((loss_val, loss))
+        })
+        .map_err(|e| anyhow!("opd tape-authoritative backward: {e}"))?;
+
+    // Build the `GradMap` the optimizer step consumes: for each LoRA Var,
+    // look up its grad in the tape walk's `candle_input_id (raw) -> kt grad`
+    // map and copy it back to a candle CUDA tensor. Mirrors SFT's
+    // `var_by_raw` join, but emits a `HashMap<TensorId, Tensor>` directly
+    // (the OPD optimizer step is `optimizer_step_from_map`, not the
+    // `GradStore`-based `optimizer_step`).
+    let var_by_raw: HashMap<usize, &Var> = params
+        .all_vars()
+        .iter()
+        .map(|v| (v.as_tensor().id().as_raw(), *v))
+        .collect();
+
+    // #1082 CP-4 diagnostic (same shape as the SFT path): how deep did the
+    // tape walk reach, and how many of those are LoRA Vars?
+    if std::env::var("KILN_CP4_DEBUG").is_ok() {
+        let reached = grads_by_candle_raw.len();
+        let var_matches = grads_by_candle_raw
+            .keys()
+            .filter(|k| var_by_raw.contains_key(*k))
+            .count();
+        eprintln!(
+            "[CP4-DEBUG] opd tape walk reached {reached} mapped candle inputs; \
+             {var_matches} are LoRA Vars (of {})",
+            var_by_raw.len()
+        );
+    }
+
+    let mut grads_on_device: HashMap<TensorId, Tensor> = HashMap::new();
+    for (candle_raw, kt_grad) in grads_by_candle_raw {
+        if let Some(var) = var_by_raw.get(&candle_raw) {
+            let cg = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&kt_grad)
+                .context("opd tape-authoritative: kt -> candle grad copy")?;
+            grads_on_device.insert(var.as_tensor().id(), cg);
+        }
+    }
+
+    Ok((loss_val, active_count, grads_on_device))
+}
+
+/// Candle gradient-checkpointing OPD forward + backward for one step.
+///
+/// This is the LEGACY path, preserved verbatim from the pre-#1082-CP-4
+/// `opd_train` body so `KILN_USE_TAPE_AUTHORITATIVE=0`, CPU runs, and any step
+/// with an ACTIVE ECHO env-CE contribution still work exactly as before. Runs
+/// the model forward in detached segments to bound activation memory, computes
+/// the OPD top-K reverse-KL loss (plus ECHO when active) at the final
+/// boundary, then walks segments in reverse with candle autograd ON to
+/// accumulate LoRA gradients via `loss.backward()` — the candle CustomOp shim
+/// `opd_top_k_reverse_kl_per_position_via_kt_forward_op` (inside
+/// `opd_step_loss`) carries the per-position KL backward.
+///
+/// Returns `(loss_val, active_count, grads_on_device)`.
+#[allow(clippy::too_many_arguments)]
+fn opd_step_forward_backward_candle(
+    backend_rt: &dyn kiln_model::backend::BackendRuntime,
+    input_ids: &[u32],
+    weights: &kiln_model::forward::GpuWeights,
+    model_config: &kiln_core::config::ModelConfig,
+    params: &crate::trainer::TrainableLoraParams,
+    device: &candle_core::Device,
+    head_t: &Tensor,
+    teacher: Arc<dyn LogitSource>,
+    active_positions: &[usize],
+    config: &OpdConfig,
+    env_mask: &[bool],
+    env_count: usize,
+    total_obs_len: usize,
+    prompt_idx: usize,
+    sample_idx: usize,
+    opd_vram_cache: &kiln_core::vram::GpuVramInfo,
+    opd_base_model_bytes: u64,
+    teacher_tokens: Option<&[u32]>,
+    teacher_active_positions: Option<&[usize]>,
+) -> Result<(f64, usize, std::collections::HashMap<TensorId, Tensor>)> {
+    use crate::trainer::{accumulate_grads, compute_segment_boundaries, lora_weights_detached};
+    use kiln_model::forward::{
+        model_forward_embed, model_forward_final_norm, model_forward_segment, LinearAttentionState,
+    };
+    use std::collections::HashMap;
+
+    let positions: Vec<u32> = (0..input_ids.len()).map(|p| p as u32).collect();
+    let lora_detached = lora_weights_detached(params);
+    // Per-step auto-tune: pick segment count based on this step's actual
+    // seq_len. Falls back to the legacy hardcoded 8 if VRAM detection or the
+    // auto-tune punts.
+    let num_segments = match kiln_core::vram::recommended_checkpoint_plan(
+        opd_vram_cache,
+        model_config.num_layers,
+        input_ids.len(),
+        model_config.hidden_size,
+        opd_base_model_bytes,
+    ) {
+        Some(kiln_core::vram::CheckpointPlan::Enabled { num_segments, .. }) => {
+            num_segments.min(model_config.num_layers).max(1)
+        }
+        Some(kiln_core::vram::CheckpointPlan::Disabled { .. }) => 1,
+        None | Some(kiln_core::vram::CheckpointPlan::UserOverride) => {
+            8usize.min(model_config.num_layers)
+        }
+    };
+    let segments = compute_segment_boundaries(model_config.num_layers, num_segments);
+
+    // === Step 1: detached forward; save segment boundaries ===
+    let (embed_hidden, _) = model_forward_embed(input_ids, weights)?;
+    let mut boundary_states: Vec<Tensor> = Vec::with_capacity(segments.len() + 1);
+    boundary_states.push(embed_hidden.detach());
+    {
+        let mut current = boundary_states[0].clone();
+        let mut linear_state = LinearAttentionState::new(model_config, device)?;
+        for &(start, end) in &segments {
+            current = model_forward_segment(
+                backend_rt,
+                current,
+                weights,
+                model_config,
+                &positions,
+                start,
+                end,
+                Some(&mut linear_state),
+                Some(&lora_detached),
+            )
+            .context("OPD checkpointed segmented forward")?;
+            boundary_states.push(current.detach());
+            current = boundary_states.last().unwrap().clone();
+        }
+    }
+    let final_hidden = boundary_states.last().unwrap().clone();
+
+    // === Step 2: OPD loss at the final boundary ===
+    // Build a Var so candle autograd routes the kernel's backward into
+    // `final_var.grad()`.
+    let final_var = Var::from_tensor(&final_hidden)?;
+    let normed = model_forward_final_norm(final_var.as_tensor(), weights, model_config)?;
+    let out = opd_step_loss(OpdStepInputs {
+        tokens: input_ids,
+        active_positions,
+        student_hidden: &normed,
+        head_t,
+        teacher: teacher.clone(),
+        loss: config.loss,
+        top_k: config.top_k,
+        chunk_size: 0,
+        teacher_tokens,
+        teacher_active_positions,
+    })?;
+    let active_count = out.active_count;
+    let mut loss = out.mean_kl;
+    if let Some(echo_cfg) = &config.echo {
+        if echo_cfg.lambda != 0.0 && env_count > 0 && total_obs_len > 0 {
+            if let Some(echo_out) = crate::echo::echo_step_loss(crate::echo::EchoStepInputs {
+                tokens: input_ids,
+                env_mask,
+                student_hidden: &normed,
+                head_t,
+                total_obs_len,
+                chunk_size: 0,
+                provider: None,
+            })? {
+                let echo_env_ce = echo_out.mean_ce.to_scalar::<f32>().ok().map(f64::from);
+                let echo_scaled = echo_out.mean_ce.affine(echo_cfg.lambda, 0.0)?;
+                loss = loss.add(&echo_scaled)?;
+                tracing::debug!(
+                    prompt = prompt_idx,
+                    sample = sample_idx,
+                    env_tokens = echo_out.env_count,
+                    total_obs_len,
+                    echo_lambda = echo_cfg.lambda,
+                    echo_env_ce = ?echo_env_ce,
+                    "OPD off-policy path: ECHO env CE active"
+                );
+            }
+        }
+    }
+    let loss_val = loss.to_scalar::<f32>()? as f64;
+    let head_grads = loss
+        .backward()
+        .context("OPD/ECHO loss backward at final boundary")?;
+    let mut upstream_grad = head_grads
+        .get(final_var.as_tensor())
+        .ok_or_else(|| anyhow!("no gradient at final_hidden Var"))?
+        .clone()
+        .detach();
+    drop(head_grads);
+    drop(normed);
+    drop(final_var);
+
+    // === Step 3: walk segments in reverse, accumulate LoRA grads ===
+    let mut accumulated_grads: HashMap<TensorId, Tensor> = HashMap::new();
+    let all_vars = params.all_vars();
+    for seg_idx in (0..segments.len()).rev() {
+        let (seg_start, seg_end) = segments[seg_idx];
+        let seg_input = boundary_states[seg_idx].clone();
+        let seg_input_var = Var::from_tensor(&seg_input)?;
+        let mut state = LinearAttentionState::new(model_config, device)?;
+        let lora_for_seg = params.as_lora_weights();
+        let seg_output = model_forward_segment(
+            backend_rt,
+            seg_input_var.as_tensor().clone(),
+            weights,
+            model_config,
+            &positions,
+            seg_start,
+            seg_end,
+            Some(&mut state),
+            Some(&lora_for_seg),
+        )
+        .with_context(|| format!("OPD checkpointed reverse segment [{seg_start},{seg_end})"))?;
+
+        // Inject upstream gradient: scalar = sum(seg_output * upstream)
+        let scalar = (&seg_output * &upstream_grad)?
+            .sum_all()
+            .context("OPD reverse segment gradient injection")?;
+        let seg_grads = scalar
+            .backward()
+            .with_context(|| format!("OPD reverse segment backward {seg_idx}"))?;
+        accumulate_grads(&mut accumulated_grads, &seg_grads, &all_vars)?;
+        upstream_grad = seg_grads
+            .get(seg_input_var.as_tensor())
+            .ok_or_else(|| anyhow!("no grad at seg_input_var (seg_idx={seg_idx})"))?
+            .clone()
+            .detach();
+        drop(seg_grads);
+        drop(seg_output);
+    }
+
+    // Move CPU-spilled gradients back to the device for the optimizer step.
+    let grads_on_device: HashMap<TensorId, Tensor> = accumulated_grads
+        .into_iter()
+        .map(|(k, v)| {
+            let v = if v.device().same_device(device) {
+                v
+            } else {
+                v.to_device(device).unwrap_or(v)
+            };
+            (k, v)
+        })
+        .collect();
+
+    Ok((loss_val, active_count, grads_on_device))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3987,5 +4343,190 @@ mod tests {
         assert!((base_total - 0.11).abs() < 1e-5);
         assert!((doubled_total - 0.12).abs() < 1e-5);
         Ok(())
+    }
+
+    /// #1082 CP-4 endgame: validate that the tape-authoritative OPD step
+    /// ([`opd_step_forward_backward_tape_authoritative`]) produces nonzero
+    /// LoRA gradients — i.e. the OPD-KL scalar tape root
+    /// (`try_tape_opd_scalar_mean_cuda`) is CONNECTED through the BF16 model
+    /// forward back to the LoRA `Var`s, so one `Tape::backward` routes a real
+    /// gradient into each LoRA parameter.
+    ///
+    /// This is the OPD sibling of the SFT
+    /// `tape_authoritative_grads_match_candle_baseline_bf16` coverage check.
+    /// It MUST run on a **BF16 CUDA** model: the kt fused adapters
+    /// (`supports_rmsnorm_kt`, `supports_mlp_silu_mul_kt`,
+    /// `supports_sigmoid_mul_kt`, `supports_rotary_qk_kt`) and the OPD-loss
+    /// kt-tape envelope (`top_k ∈ {16, 32}`, `hidden.dtype() == head_t.dtype()
+    /// ∈ {F32, BF16}`) are all BF16-only / CUDA-only. On F32 (or CPU) every
+    /// `supports_*_kt` predicate returns false, the tape adapters decline
+    /// (`Ok(None)`), no tape node is recorded, and the loss→LoRA chain
+    /// dead-ends — so a CPU/F32 build cannot exercise this path. The kernel
+    /// envelope is documented in `kiln-opd-loss-kernel::kt_tape::envelope_ok`.
+    ///
+    /// Reuses the SFT BF16 fixtures (`crate::trainer::tests::tiny_config_bf16`
+    /// / `tiny_weights_bf16`) — single source of truth for the BF16 tiny model
+    /// — so this test exercises the exact same model the SFT CP-4 coverage gate
+    /// validates, just driven through the OPD scalar-mean loss root instead of
+    /// cross-entropy.
+    ///
+    /// Run via `cargo nextest run` for per-process env isolation: the tape
+    /// gates are `OnceLock`-cached on first read, and the kt GPU substrate is
+    /// not thread-safe across the in-process parallelism `cargo test` uses.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn opd_tape_authoritative_grads_reach_lora_bf16() {
+        use crate::trainer::tests::{tiny_config_bf16, tiny_weights_bf16};
+        use crate::trainer::TrainableLoraParams;
+
+        // `CdDevice` is the per-crate candle facade alias (= candle_core::Device);
+        // opd.rs keeps its `candle_core::` ref count at 0 by going through it.
+        let device = match CdDevice::new_cuda(0) {
+            Ok(d) => d,
+            Err(_) => {
+                eprintln!("opd tape-authoritative grads (bf16): no CUDA device — skipping");
+                return;
+            }
+        };
+
+        // The tape adapters fire only inside a tape scope AND with the tape
+        // gates on. These are `OnceLock`-cached for the process, so set them
+        // FIRST (mirrors the SFT BF16 coverage test). `KILN_USE_TAPE_FORWARD`
+        // gates the OPD scalar-loss kt-tape root + the model-forward kt
+        // adapters; the GDN / attention gates wire the rest of the chain back
+        // to every LoRA Var.
+        unsafe {
+            std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
+            std::env::set_var("KILN_USE_TAPE_LORA_ADD", "1");
+            std::env::set_var("KILN_USE_TAPE_FLASH_ATTN", "1");
+            std::env::set_var("KILN_USE_TAPE_SDPA", "1");
+            std::env::set_var("KILN_USE_TAPE_GDN", "1");
+            std::env::set_var("KILN_USE_TAPE_GDN_GATED_NORM", "1");
+            std::env::set_var("KILN_USE_TAPE_GDN_QK_NORM", "1");
+            std::env::set_var("KILN_USE_TAPE_GDN_CONV", "1");
+        }
+
+        let config = tiny_config_bf16();
+        let weights = tiny_weights_bf16(&config, &device).expect("bf16 tiny weights on cuda");
+        let params =
+            TrainableLoraParams::initialize(&config, &weights, 4, 8.0, &device).expect("params");
+
+        // `head_t` is the (transposed) LM head — the OPD path uses the tied
+        // `embed_tokens_t` (BF16 here, matching the BF16 model output so the
+        // kt-tape dtype gate `hidden.dtype() == head_t.dtype()` passes).
+        let head_t = weights.embed_tokens_t.clone();
+        assert_eq!(
+            head_t.dtype(),
+            DType::BF16,
+            "head_t must be BF16 to satisfy the kt-tape OPD envelope"
+        );
+
+        // Short token sequence; supervise the trailing positions (the typical
+        // assistant-token mask shape). seq_len=7 mirrors the SFT BF16 test.
+        let input_ids: Vec<u32> = vec![1, 5, 10, 3, 7, 2, 8];
+        let active_positions: Vec<usize> = vec![2, 3, 4, 5];
+
+        // Deterministic uniform teacher. `resolved_top_k` =
+        // `top_k.min(caps.max_top_k)`; pick K=16 (in the kt backward envelope
+        // {16, 32}, and ≤ vocab_size=32). `max_top_k = 16` so the resolution
+        // lands exactly on 16.
+        let top_k = 16usize;
+        let teacher: Arc<dyn LogitSource> = Arc::new(
+            crate::logit_source::DeterministicUniformLogitSource::new(
+                "tape-opd-test",
+                config.vocab_size,
+                top_k,
+            ),
+        );
+
+        let backend = kiln_model::backend::for_device(&device);
+
+        let (loss_val, active_count, grads) = opd_step_forward_backward_tape_authoritative(
+            &*backend,
+            &input_ids,
+            &weights,
+            &config,
+            &params,
+            &device,
+            &head_t,
+            teacher,
+            &active_positions,
+            OpdLossGranularity::TeacherTopK,
+            top_k,
+            None,
+            None,
+        )
+        .expect("tape-authoritative OPD step");
+
+        // The active count must match the supervised positions.
+        assert_eq!(
+            active_count,
+            active_positions.len(),
+            "active_count {active_count} != supervised positions {}",
+            active_positions.len()
+        );
+
+        // Per-position KL is non-negative; the mean loss must be finite and
+        // strictly positive (a uniform teacher vs an initialized student gives
+        // a real divergence — a zero/NaN loss would mean the kernel produced a
+        // degenerate forward).
+        assert!(
+            loss_val.is_finite() && loss_val > 0.0,
+            "OPD tape loss {loss_val} is not finite-positive"
+        );
+
+        // HEADLINE assertion: the tape walk routed a grad into the LoRA Vars.
+        // If the loss→LoRA tape chain were severed (the F32 failure mode, or a
+        // broken adapter), `grads` would be empty.
+        assert!(
+            !grads.is_empty(),
+            "tape-authoritative OPD produced NO LoRA grads — the OPD-KL tape \
+             root did not connect through the BF16 model to any LoRA Var"
+        );
+
+        // Every returned grad keys a LoRA Var, and at least one must have a
+        // nonzero, finite norm (a connected-but-all-zero grad would mean the
+        // backward ran but carried no signal — e.g. a detached leaf).
+        let var_ids: std::collections::HashSet<TensorId> =
+            params.all_vars().iter().map(|v| v.as_tensor().id()).collect();
+        let mut nonzero_lora_grads = 0usize;
+        let mut max_norm = 0f32;
+        for (tid, g) in &grads {
+            assert!(
+                var_ids.contains(tid),
+                "grad key {tid:?} is not a LoRA Var id"
+            );
+            let flat = g
+                .to_dtype(DType::F32)
+                .expect("grad -> f32")
+                .flatten_all()
+                .expect("flatten grad")
+                .to_vec1::<f32>()
+                .expect("grad to vec");
+            assert!(
+                flat.iter().all(|x| x.is_finite()),
+                "LoRA grad {tid:?} contains non-finite values"
+            );
+            let norm = flat.iter().map(|x| x * x).sum::<f32>().sqrt();
+            max_norm = max_norm.max(norm);
+            if norm > 0.0 {
+                nonzero_lora_grads += 1;
+            }
+        }
+
+        eprintln!(
+            "[CP4-OPD] tape grads: {} LoRA Vars got a grad ({} nonzero; max_norm={max_norm:.6}); \
+             loss={loss_val:.6}; total_vars={}",
+            grads.len(),
+            nonzero_lora_grads,
+            params.all_vars().len()
+        );
+
+        assert!(
+            nonzero_lora_grads > 0 && max_norm > 0.0,
+            "tape-authoritative OPD routed grads to {} LoRA Vars but ALL were \
+             zero (max_norm={max_norm}) — backward carried no signal",
+            grads.len()
+        );
     }
 }
