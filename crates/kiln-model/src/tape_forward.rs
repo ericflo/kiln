@@ -110,6 +110,7 @@ use kiln_autograd::{
     MatmulBackward, MulSigmoidGateBackward, ReshapeBackward, RopeSplitHalfBackward,
     SiluBackward, Tape, TransposeBackward,
 };
+use candle_core::DType as CandleDType;
 
 use crate::backend::BackendRuntime;
 use crate::forward::{
@@ -2530,6 +2531,223 @@ pub fn try_tape_causal_conv1d_cuda(
     Ok(Some(out))
 }
 
+/// Candle-composite tape backward for the GDN PREFILL causal depthwise conv1d
+/// (`forward::causal_conv1d_prefill`, the `[B, C, T]` candle path the training
+/// forward takes when `gdn_forward_only_fastpaths` is OFF). Wraps the proven
+/// CUDA bwd-input kernel
+/// [`kiln_rmsnorm_kernel::causal_depthwise_conv1d_f32_bwd_input`] (the SAME
+/// kernel the eager `cuda_train.rs` GDN backward uses), handling the
+/// `[B, C, T]` ↔ `[rows, channels]` layout transform.
+///
+/// # Why a candle composite (not the existing `try_tape_causal_conv1d_cuda`)
+///
+/// The existing `try_tape_causal_conv1d_cuda` / [`CausalConv1dInputBackward`]
+/// wraps the `[rows, channels]` DECODE/UPDATE kernel
+/// (`causal_depthwise_conv1d_kt`) — a DIFFERENT kernel with a different layout
+/// contract than the `[B, C, T]` prefill path. Reusing it here would compute
+/// the wrong forward. This composite wraps the prefill bwd-input kernel
+/// instead, on the `[B, C, T]` layout the production prefill forward uses.
+///
+/// # Saved tensors / inputs
+///
+/// `weight` (`[channels, kernel]` F32) is the only saved state; one
+/// differentiable input (`input`, the `[B, C, T]` conv input). The conv
+/// `weight` is a frozen base tensor in LoRA training (not a `Var`), and the
+/// conv state is non-differentiable at the SFT layer boundary, so only the
+/// input gradient is needed to keep the chain connected back through the
+/// in_proj_qkv LoRA `Var`.
+///
+/// # Layout
+///
+/// The bwd kernel expects `[rows, channels]` with `rows` the contiguous causal
+/// (time) axis. The prefill grad arrives `[B, C, T]`; this transposes to
+/// `[B, T, C]`, flattens to `[B*T, C]` (so rows = time within each sequence),
+/// runs the kernel, then reverses the layout. Gated to `batch == 1` (the SFT
+/// training shape) so flattening never mixes batches across a row boundary;
+/// declines (`apply` errors only on a true kernel failure — the adapter's
+/// `Ok(None)` envelope guard below keeps `batch>1` off this path entirely).
+#[derive(Debug)]
+pub(crate) struct CausalConv1dPrefillInputBackward {
+    /// Saved F32 CUDA conv weight `[channels, kernel]`.
+    weight: Tensor,
+    batch: usize,
+    channels: usize,
+    seq_len: usize,
+}
+
+impl BackwardOp for CausalConv1dPrefillInputBackward {
+    fn name(&self) -> &'static str {
+        "gdn_causal_conv1d_prefill_input_backward"
+    }
+    fn input_count(&self) -> usize {
+        1
+    }
+    fn apply(
+        &self,
+        grad_output: &kiln_tensor::Tensor,
+    ) -> kiln_tensor::Result<Vec<Option<kiln_tensor::Tensor>>> {
+        // Upstream grad is [B, C, T] (the conv output layout). Bridge to candle.
+        let grad_c = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(grad_output).map_err(|e| {
+            kiln_tensor::Error::Msg(format!(
+                "CausalConv1dPrefillInputBackward: grad kt->candle: {e}"
+            ))
+        })?;
+        let grad_c = if grad_c.dtype() == CandleDType::F32 {
+            grad_c
+        } else {
+            grad_c.to_dtype(CandleDType::F32).map_err(|e| {
+                kiln_tensor::Error::Msg(format!(
+                    "CausalConv1dPrefillInputBackward: grad to f32: {e}"
+                ))
+            })?
+        };
+        // [B, C, T] -> [B, T, C] -> [B*T, C] (rows = time, channels = C).
+        let rows = self.batch * self.seq_len;
+        let grad_rows = grad_c
+            .transpose(1, 2)
+            .and_then(|t| t.contiguous())
+            .and_then(|t| t.reshape((rows, self.channels)))
+            .map_err(|e| {
+                kiln_tensor::Error::Msg(format!(
+                    "CausalConv1dPrefillInputBackward: grad [B,C,T]->[rows,C]: {e}"
+                ))
+            })?;
+        let din_rows = kiln_rmsnorm_kernel::causal_depthwise_conv1d_f32_bwd_input(
+            &grad_rows,
+            &self.weight,
+        )
+        .map_err(|e| {
+            kiln_tensor::Error::Msg(format!(
+                "CausalConv1dPrefillInputBackward: bwd_input: {e}"
+            ))
+        })?;
+        // [B*T, C] -> [B, T, C] -> [B, C, T] (back to the conv input layout).
+        let din = din_rows
+            .reshape((self.batch, self.seq_len, self.channels))
+            .and_then(|t| t.transpose(1, 2))
+            .and_then(|t| t.contiguous())
+            .map_err(|e| {
+                kiln_tensor::Error::Msg(format!(
+                    "CausalConv1dPrefillInputBackward: din [rows,C]->[B,C,T]: {e}"
+                ))
+            })?;
+        let din_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_copy(&din).map_err(|e| {
+            kiln_tensor::Error::Msg(format!(
+                "CausalConv1dPrefillInputBackward: din candle->kt: {e}"
+            ))
+        })?;
+        Ok(vec![Some(din_kt)])
+    }
+}
+
+/// Route the GDN PREFILL causal depthwise conv1d through the kt `Tape`.
+///
+/// The production forward already computed `out` (`causal_conv1d_prefill`'s
+/// `[B, C, T]` F32 output, BEFORE the SiLU + the transpose-back — those record
+/// via `try_tape_silu_cuda` / `try_tape_transpose_cuda`); this records-only (no
+/// re-run), borrowing `out` as the recorded node's output. The recorded
+/// [`CausalConv1dPrefillInputBackward`] flows the conv output grad back to its
+/// `[B, C, T]` input (and thence, via the conv-in transpose, to the in_proj_qkv
+/// LoRA `Var`). This is the single largest GDN gap — without it the q/k/v reach
+/// `mixed_qkv` but the chain severs before in_proj_qkv.
+///
+/// Reuses the existing `KILN_USE_TAPE_GDN_CONV` gate (mirroring
+/// `try_tape_causal_conv1d_cuda`). `Ok(None)` (caller's production output
+/// unchanged) when the gate is off, no tape scope is active, the inputs aren't
+/// CUDA, `batch != 1`, shapes disagree, or a kt borrow fails — NEVER an error.
+pub fn try_tape_causal_conv1d_prefill_cuda(
+    input: &Tensor,
+    weight: &Tensor,
+    out: &Tensor,
+    kernel: usize,
+) -> Result<Option<Tensor>> {
+    if !tape_forward_enabled() || !tape_gdn_conv_enabled() {
+        return Ok(None);
+    }
+    if !matches!(input.device(), candle_core::Device::Cuda(_))
+        || !matches!(out.device(), candle_core::Device::Cuda(_))
+        || !matches!(weight.device(), candle_core::Device::Cuda(_))
+    {
+        return Ok(None);
+    }
+    if kernel < 2 {
+        return Ok(None);
+    }
+    // Envelope: input/out are [B, C, T]; gate batch==1 so the [B*T,C] flatten
+    // never mixes batches across a row boundary in the bwd kernel.
+    let (batch, channels, seq_len) = match input.dims3() {
+        Ok(d) => d,
+        Err(_) => return Ok(None),
+    };
+    if batch != 1 || out.dims() != [batch, channels, seq_len].as_slice() {
+        return Ok(None);
+    }
+    // The bwd kernel is F32. Build a F32 [channels, kernel] weight view.
+    let weight_f32 = match weight.rank() {
+        2 => match weight.dims2() {
+            Ok((c, k)) if c == channels && k == kernel => weight.clone(),
+            _ => return Ok(None),
+        },
+        3 => match weight.dims3() {
+            Ok((c, one, k)) if c == channels && one == 1 && k == kernel => {
+                match weight.reshape((channels, kernel)) {
+                    Ok(w) => w,
+                    Err(_) => return Ok(None),
+                }
+            }
+            _ => return Ok(None),
+        },
+        _ => return Ok(None),
+    };
+    let weight_f32 = if weight_f32.dtype() == candle_core::DType::F32 {
+        weight_f32
+    } else {
+        match weight_f32.to_dtype(candle_core::DType::F32) {
+            Ok(w) => w,
+            Err(_) => return Ok(None),
+        }
+    };
+    let weight_f32 = match weight_f32.contiguous() {
+        Ok(w) => w,
+        Err(_) => return Ok(None),
+    };
+
+    // kt input — thread the upstream conv-in transpose adapter output so the
+    // tape stays connected back to in_proj_qkv.
+    let input_kt = match tape_kt_input(input) {
+        Some(t) => t,
+        None => return Ok(None),
+    };
+    // The production forward already computed `out`; borrow it as the recorded
+    // node's output so we record-only (no re-run).
+    let out_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(out) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+
+    let recorded = with_active_tape(|tape: &mut Tape| {
+        tape.record(
+            &out_kt,
+            &[&input_kt],
+            Box::new(CausalConv1dPrefillInputBackward {
+                weight: weight_f32.clone(),
+                batch,
+                channels,
+                seq_len,
+            }),
+        );
+    });
+    if recorded.is_none() {
+        return Ok(None);
+    }
+
+    kiln_kt_bridge::tape_bridge::register_input_mapping(input_kt.id(), input.id());
+    kiln_kt_bridge::tape_bridge::register_output_mapping(out_kt.id(), out.id());
+    kiln_kt_bridge::tape_bridge::retain_output_for_chaining(&out_kt, out.id());
+
+    Ok(Some(out.clone()))
+}
+
 /// Candle-composite tape backward for the GDN L2-qk-norm `y =
 /// l2_normalize(x) * scale`. Wraps [`gdn_l2_norm_scale_backward_no_grad`]
 /// (analytic adjoint in candle F32), mirroring how [`GdnRecurrentBackward`]
@@ -2839,6 +3057,404 @@ pub fn try_tape_transpose_cuda(
     kiln_kt_bridge::tape_bridge::retain_output_for_chaining(&out_kt, out.id());
 
     Ok(Some(out))
+}
+
+// ===========================================================================
+// CP-4 Increment 3 (#1082): GDN forward-chain layout/dtype ops — cast,
+// narrow, GQA head-expand.
+//
+// These three adapters wrap the layout/dtype ops on the GDN PREFILL path
+// (`gated_deltanet_forward_decode_if`, training path: `seq_len>1`, BF16,
+// `track_op=true` so the fused fast paths are OFF) that sit BETWEEN the
+// already-wired GDN nodes (in_proj/out_proj keystone, qk_norm,
+// gated_rms_norm, recurrence record, transpose) and otherwise SEVER the
+// chain back to the in_proj_qkv/z LoRA `Var`s. Every one mints a fresh
+// candle id, so an unwrapped op fragments the tape and the GDN LoRA grads
+// never flow.
+//
+// All three use a CANDLE-COMPOSITE backward (grad kt→candle, compute,
+// candle→kt), NOT a kt-native `kiln_autograd` `BackwardOp`, because:
+//   * `CastBackward` / `NarrowBackward` in kiln-autograd downcast the grad
+//     storage to `CpuStorage` (NarrowBackward) or are otherwise CPU-leaning;
+//     a CUDA grad would bail. The candle composite is unambiguously
+//     CUDA-safe and value-faithful (cast is a dtype round-trip; narrow's
+//     adjoint is a zero-pad; the GQA expand's adjoint is a reshape+sum).
+//   * Mirrors the proven `GdnRecurrentBackward` / `GdnL2NormScaleBackward` /
+//     `SdpaBackward` candle-composite pattern already in this module.
+//
+// Gated on `tape_forward_enabled()` + an active tape scope only (pure
+// layout/dtype ops with trivial, always-safe adjoints — same contract as
+// `try_tape_reshape_cuda` / `try_tape_transpose_cuda`). `Ok(None)` on any
+// gate-off / non-CUDA / envelope-miss / kt-borrow failure — NEVER an error.
+// ===========================================================================
+
+/// Candle-composite tape backward for a float dtype cast (`to_dtype`). The
+/// adjoint casts the upstream grad back to the forward input's dtype — a
+/// value-faithful round-trip in the F32↔BF16 space the GDN path uses
+/// (`v.to_dtype(input_dtype)` before recurrence; `attn_out.to_dtype(input_dtype)`
+/// after gated-RMSNorm). One differentiable input (`x`).
+#[derive(Debug)]
+pub(crate) struct CastCompositeBackward {
+    /// The candle dtype of the forward INPUT — backward casts the grad to it.
+    source_dtype: CandleDType,
+}
+
+impl BackwardOp for CastCompositeBackward {
+    fn name(&self) -> &'static str {
+        "cast_composite_backward"
+    }
+    fn input_count(&self) -> usize {
+        1
+    }
+    fn apply(
+        &self,
+        grad_output: &kiln_tensor::Tensor,
+    ) -> kiln_tensor::Result<Vec<Option<kiln_tensor::Tensor>>> {
+        let grad_c = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(grad_output).map_err(|e| {
+            kiln_tensor::Error::Msg(format!("CastCompositeBackward: grad kt->candle: {e}"))
+        })?;
+        let dx = if grad_c.dtype() == self.source_dtype {
+            grad_c
+        } else {
+            grad_c.to_dtype(self.source_dtype).map_err(|e| {
+                kiln_tensor::Error::Msg(format!("CastCompositeBackward: grad cast: {e}"))
+            })?
+        };
+        let dx = dx
+            .contiguous()
+            .map_err(|e| kiln_tensor::Error::Msg(format!("CastCompositeBackward: contig: {e}")))?;
+        let dx_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_copy(&dx).map_err(|e| {
+            kiln_tensor::Error::Msg(format!("CastCompositeBackward: dx candle->kt: {e}"))
+        })?;
+        Ok(vec![Some(dx_kt)])
+    }
+}
+
+/// Route a float dtype cast `out = x.to_dtype(target)` through the kt `Tape`.
+///
+/// The production forward already computed `out` (the caller passes it in);
+/// this records-only (no re-run), borrowing `out` as the recorded node's
+/// output — like `tape_record_gdn_recurrent`. The recorded
+/// [`CastCompositeBackward`] casts the upstream grad back to `x`'s dtype so a
+/// tape-authoritative backward stays connected across the cast.
+///
+/// Used on the GDN path for `v.to_dtype(input_dtype)` (BF16→/F32→BF16 before
+/// recurrence) and `attn_out.to_dtype(input_dtype)` (after gated-RMSNorm,
+/// before out_proj). `Ok(None)` when the gate is off, no tape scope is active,
+/// the inputs aren't CUDA, shapes disagree, or a kt borrow fails.
+pub fn try_tape_cast_cuda(x: &Tensor, out: &Tensor) -> Result<Option<Tensor>> {
+    if !tape_forward_enabled() {
+        return Ok(None);
+    }
+    if !matches!(x.device(), candle_core::Device::Cuda(_))
+        || !matches!(out.device(), candle_core::Device::Cuda(_))
+    {
+        return Ok(None);
+    }
+    // A cast is element-count-preserving and shape-preserving; defer anything
+    // else (the caller's candle path handles it).
+    if x.dims() != out.dims() {
+        return Ok(None);
+    }
+    // No-op cast: candle's `to_dtype` returns `self.clone()` (same id) when the
+    // dtype already matches, so `out` IS `x`. Recording a node here would be a
+    // degenerate self-loop (out_id == in_id); skip cleanly — the chain already
+    // flows through `x`'s id, which the caller continues to use as `out`.
+    if x.dtype() == out.dtype() || x.id() == out.id() {
+        return Ok(None);
+    }
+
+    let x_kt = match tape_kt_input(x) {
+        Some(t) => t,
+        None => return Ok(None),
+    };
+    let out_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(out) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+
+    let recorded = with_active_tape(|tape: &mut Tape| {
+        tape.record(
+            &out_kt,
+            &[&x_kt],
+            Box::new(CastCompositeBackward {
+                source_dtype: x.dtype(),
+            }),
+        );
+    });
+    if recorded.is_none() {
+        return Ok(None);
+    }
+
+    kiln_kt_bridge::tape_bridge::register_input_mapping(x_kt.id(), x.id());
+    kiln_kt_bridge::tape_bridge::register_output_mapping(out_kt.id(), out.id());
+    kiln_kt_bridge::tape_bridge::retain_output_for_chaining(&out_kt, out.id());
+
+    Ok(Some(out.clone()))
+}
+
+/// Candle-composite tape backward for `out = narrow(x, axis, offset, length)`.
+/// The adjoint embeds the upstream grad into a zero-filled tensor of the
+/// original `x.shape` at `[offset .. offset+length]` along `axis` (the
+/// standard "zero-pad" narrow adjoint). One differentiable input (`x`).
+///
+/// CUDA-safe (unlike `kiln_autograd::NarrowBackward`, which downcasts the grad
+/// to `CpuStorage` and bails on a CUDA grad): runs the zero-pad in candle by
+/// `slice_assign`-ing the grad into a zeros tensor.
+#[derive(Debug)]
+pub(crate) struct NarrowCompositeBackward {
+    axis: usize,
+    offset: usize,
+    length: usize,
+    /// `x.shape` from the forward (the target shape for `d_x`).
+    source_shape: Vec<usize>,
+    /// `x.dtype` so the zero-fill matches.
+    source_dtype: CandleDType,
+}
+
+impl BackwardOp for NarrowCompositeBackward {
+    fn name(&self) -> &'static str {
+        "narrow_composite_backward"
+    }
+    fn input_count(&self) -> usize {
+        1
+    }
+    fn apply(
+        &self,
+        grad_output: &kiln_tensor::Tensor,
+    ) -> kiln_tensor::Result<Vec<Option<kiln_tensor::Tensor>>> {
+        let grad_c = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(grad_output).map_err(|e| {
+            kiln_tensor::Error::Msg(format!("NarrowCompositeBackward: grad kt->candle: {e}"))
+        })?;
+        // Cast the grad to the source dtype so d_x matches `x`'s dtype (the
+        // grad arrives in whatever dtype the recurrence / qk_norm backward
+        // produced). `pad_with_zeros` reuses the grad's device.
+        let grad_c = if grad_c.dtype() == self.source_dtype {
+            grad_c
+        } else {
+            grad_c.to_dtype(self.source_dtype).map_err(|e| {
+                kiln_tensor::Error::Msg(format!("NarrowCompositeBackward: grad cast: {e}"))
+            })?
+        };
+        // Narrow adjoint = zero-pad: place the grad at [offset .. offset+length]
+        // along `axis`, zero before/after. `pad_with_zeros(axis, left, right)`
+        // does exactly this in one CUDA-safe op.
+        let source_axis_len = self.source_shape[self.axis];
+        let right = source_axis_len - self.offset - self.length;
+        let dx = grad_c
+            .pad_with_zeros(self.axis, self.offset, right)
+            .map_err(|e| {
+                kiln_tensor::Error::Msg(format!("NarrowCompositeBackward: pad_with_zeros: {e}"))
+            })?;
+        let dx = dx
+            .contiguous()
+            .map_err(|e| kiln_tensor::Error::Msg(format!("NarrowCompositeBackward: contig: {e}")))?;
+        let dx_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_copy(&dx).map_err(|e| {
+            kiln_tensor::Error::Msg(format!("NarrowCompositeBackward: dx candle->kt: {e}"))
+        })?;
+        Ok(vec![Some(dx_kt)])
+    }
+}
+
+/// Route `out = narrow(x, axis, offset, length)` through the kt `Tape`.
+///
+/// The production forward already computed `out` (the caller's
+/// `x.narrow(axis, offset, length)`); this records-only (no re-run), borrowing
+/// `out` as the recorded node's output. The recorded [`NarrowCompositeBackward`]
+/// zero-pads the upstream grad back to `x.shape` so a tape-authoritative
+/// backward stays connected across the slice.
+///
+/// Used on the GDN path for the QKV split (`mixed_qkv.narrow(2, ·, ·)` → q/k/v).
+/// `Ok(None)` on any gate-off / non-CUDA / shape-envelope-miss / kt-borrow
+/// failure.
+pub fn try_tape_narrow_cuda(
+    x: &Tensor,
+    axis: usize,
+    offset: usize,
+    length: usize,
+    out: &Tensor,
+) -> Result<Option<Tensor>> {
+    if !tape_forward_enabled() {
+        return Ok(None);
+    }
+    if !matches!(x.device(), candle_core::Device::Cuda(_))
+        || !matches!(out.device(), candle_core::Device::Cuda(_))
+    {
+        return Ok(None);
+    }
+    let x_dims = x.dims().to_vec();
+    if axis >= x_dims.len() || offset + length > x_dims[axis] {
+        return Ok(None);
+    }
+    // `out` must be the narrowed view: same rank, axis dim == length, others
+    // unchanged.
+    let out_dims = out.dims();
+    if out_dims.len() != x_dims.len() || out_dims[axis] != length {
+        return Ok(None);
+    }
+    for (d, (&od, &xd)) in out_dims.iter().zip(x_dims.iter()).enumerate() {
+        if d != axis && od != xd {
+            return Ok(None);
+        }
+    }
+
+    let x_kt = match tape_kt_input(x) {
+        Some(t) => t,
+        None => return Ok(None),
+    };
+    let out_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(out) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+
+    let recorded = with_active_tape(|tape: &mut Tape| {
+        tape.record(
+            &out_kt,
+            &[&x_kt],
+            Box::new(NarrowCompositeBackward {
+                axis,
+                offset,
+                length,
+                source_shape: x_dims.clone(),
+                source_dtype: x.dtype(),
+            }),
+        );
+    });
+    if recorded.is_none() {
+        return Ok(None);
+    }
+
+    kiln_kt_bridge::tape_bridge::register_input_mapping(x_kt.id(), x.id());
+    kiln_kt_bridge::tape_bridge::register_output_mapping(out_kt.id(), out.id());
+    kiln_kt_bridge::tape_bridge::retain_output_for_chaining(&out_kt, out.id());
+
+    Ok(Some(out.clone()))
+}
+
+/// Candle-composite tape backward for the GDN GQA head-expand
+/// (`x.unsqueeze(3).expand(...).contiguous().reshape(...)`):
+/// `[B, T, nk, dk] → [B, T, nv, dk]` where `nv = nk * gqa_ratio` (each KV head
+/// is broadcast across its `gqa_ratio` query heads). The adjoint sums the
+/// upstream grad over the broadcast (gqa_ratio) sub-dim back to `nk`:
+/// `grad[B,T,nv,dk] → reshape[B,T,nk,gqa_ratio,dk] → sum(dim=3) → [B,T,nk,dk]`.
+/// One differentiable input (`x`).
+#[derive(Debug)]
+pub(crate) struct GqaExpandBackward {
+    batch: usize,
+    seq_len: usize,
+    nk: usize,
+    gqa_ratio: usize,
+    head_dim: usize,
+}
+
+impl BackwardOp for GqaExpandBackward {
+    fn name(&self) -> &'static str {
+        "gdn_gqa_expand_backward"
+    }
+    fn input_count(&self) -> usize {
+        1
+    }
+    fn apply(
+        &self,
+        grad_output: &kiln_tensor::Tensor,
+    ) -> kiln_tensor::Result<Vec<Option<kiln_tensor::Tensor>>> {
+        let grad_c = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(grad_output).map_err(|e| {
+            kiln_tensor::Error::Msg(format!("GqaExpandBackward: grad kt->candle: {e}"))
+        })?;
+        // grad: [B, T, nv, dk] -> [B, T, nk, gqa_ratio, dk] -> sum over gqa_ratio.
+        let g = grad_c
+            .reshape((
+                self.batch,
+                self.seq_len,
+                self.nk,
+                self.gqa_ratio,
+                self.head_dim,
+            ))
+            .map_err(|e| kiln_tensor::Error::Msg(format!("GqaExpandBackward: reshape: {e}")))?;
+        let dx = g
+            .sum(3)
+            .map_err(|e| kiln_tensor::Error::Msg(format!("GqaExpandBackward: sum: {e}")))?;
+        let dx = dx
+            .contiguous()
+            .map_err(|e| kiln_tensor::Error::Msg(format!("GqaExpandBackward: contig: {e}")))?;
+        let dx_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_copy(&dx).map_err(|e| {
+            kiln_tensor::Error::Msg(format!("GqaExpandBackward: dx candle->kt: {e}"))
+        })?;
+        Ok(vec![Some(dx_kt)])
+    }
+}
+
+/// Route the GDN GQA head-expand (`x: [B,T,nk,dk] → out: [B,T,nv,dk]`,
+/// `nv = nk*gqa_ratio`) through the kt `Tape`.
+///
+/// The production forward already computed `out` (the
+/// `unsqueeze(3).expand(...).contiguous().reshape(...)` chain at the GDN
+/// `head_expand` / `head_expand_recur_fallback` sites); this records-only (no
+/// re-run), borrowing `out` as the recorded node's output. The recorded
+/// [`GqaExpandBackward`] sums the grad over the broadcast head sub-dim so a
+/// tape-authoritative backward stays connected from the post-norm q/k back to
+/// the pre-expand (post-split) q/k — and thence the in_proj_qkv LoRA `Var`.
+///
+/// `Ok(None)` on any gate-off / non-CUDA / shape-envelope-miss / kt-borrow
+/// failure.
+pub fn try_tape_gqa_expand_cuda(
+    x: &Tensor,
+    gqa_ratio: usize,
+    out: &Tensor,
+) -> Result<Option<Tensor>> {
+    if !tape_forward_enabled() {
+        return Ok(None);
+    }
+    if !matches!(x.device(), candle_core::Device::Cuda(_))
+        || !matches!(out.device(), candle_core::Device::Cuda(_))
+    {
+        return Ok(None);
+    }
+    if gqa_ratio <= 1 {
+        // No head-expand actually happened (the forward took the
+        // `(q.contiguous(), k.contiguous())` branch); nothing to wrap here.
+        return Ok(None);
+    }
+    let (batch, seq_len, nk, head_dim) = match x.dims4() {
+        Ok(d) => d,
+        Err(_) => return Ok(None),
+    };
+    let nv = nk * gqa_ratio;
+    if out.dims() != [batch, seq_len, nv, head_dim].as_slice() {
+        return Ok(None);
+    }
+
+    let x_kt = match tape_kt_input(x) {
+        Some(t) => t,
+        None => return Ok(None),
+    };
+    let out_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(out) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+
+    let recorded = with_active_tape(|tape: &mut Tape| {
+        tape.record(
+            &out_kt,
+            &[&x_kt],
+            Box::new(GqaExpandBackward {
+                batch,
+                seq_len,
+                nk,
+                gqa_ratio,
+                head_dim,
+            }),
+        );
+    });
+    if recorded.is_none() {
+        return Ok(None);
+    }
+
+    kiln_kt_bridge::tape_bridge::register_input_mapping(x_kt.id(), x.id());
+    kiln_kt_bridge::tape_bridge::register_output_mapping(out_kt.id(), out.id());
+    kiln_kt_bridge::tape_bridge::retain_output_for_chaining(&out_kt, out.id());
+
+    Ok(Some(out.clone()))
 }
 
 // ===========================================================================

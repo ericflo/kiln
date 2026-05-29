@@ -15764,7 +15764,25 @@ fn gated_deltanet_forward_decode_if(
                     let (b, _t, c) = mixed_qkv.dims3()?;
                     mixed_qkv.reshape((b, c, 1))?
                 } else {
-                    mixed_qkv.transpose(1, 2)?.contiguous()?
+                    // CP-4 Increment 3 (#1082): the [B,T,C]->[B,C,T] conv-input
+                    // transpose mints a fresh candle id between the in_proj_qkv
+                    // keystone output (`mixed_qkv`) and the conv. Wrap it so the
+                    // conv backward's input grad flows back to in_proj_qkv. The
+                    // transpose adapter materialises a contiguous copy (matching
+                    // the `.contiguous()` here), so it's value-faithful. No-op +
+                    // candle fallback unless the gate is on + a tape scope is
+                    // active.
+                    #[cfg(feature = "cuda")]
+                    {
+                        match crate::tape_forward::try_tape_transpose_cuda(&mixed_qkv, 1, 2)? {
+                            Some(t) => t,
+                            None => mixed_qkv.transpose(1, 2)?.contiguous()?,
+                        }
+                    }
+                    #[cfg(not(feature = "cuda"))]
+                    {
+                        mixed_qkv.transpose(1, 2)?.contiguous()?
+                    }
                 }
             };
             let post_silu = if seq_len == 1
@@ -15814,7 +15832,27 @@ fn gated_deltanet_forward_decode_if(
                                 conv_state,
                                 kernel_size,
                             )?;
-                            cuda_silu(&y)?
+                            // CP-4 Increment 3 (#1082): wire the prefill conv +
+                            // its SiLU onto the kt Tape. See the comment on the
+                            // sibling fallback branch below.
+                            #[cfg(feature = "cuda")]
+                            let _ = crate::tape_forward::try_tape_causal_conv1d_prefill_cuda(
+                                &mixed_qkv_ct,
+                                &weights.conv1d,
+                                &y,
+                                kernel_size,
+                            )?;
+                            #[cfg(feature = "cuda")]
+                            {
+                                match crate::tape_forward::try_tape_silu_cuda(&y)? {
+                                    Some(t) => t,
+                                    None => cuda_silu(&y)?,
+                                }
+                            }
+                            #[cfg(not(feature = "cuda"))]
+                            {
+                                cuda_silu(&y)?
+                            }
                         }
                     }
                 } else {
@@ -15825,7 +15863,34 @@ fn gated_deltanet_forward_decode_if(
                         conv_state,
                         kernel_size,
                     )?;
-                    cuda_silu(&y)?
+                    // CP-4 Increment 3 (#1082): THE single largest GDN gap. The
+                    // prefill conv is the bottom-most op separating q/k/v from
+                    // in_proj_qkv. Record a CausalConv1dPrefillInputBackward
+                    // (wraps the proven `[rows,channels]` bwd-input kernel with a
+                    // [B,C,T]<->[rows,C] layout transform) so the recurrence's
+                    // dq/dk/dv reach in_proj_qkv. Then wire the SiLU so the chain
+                    // stays connected to the qkv_split. Both no-op + candle
+                    // fallback unless `KILN_USE_TAPE_GDN_CONV` (+ FORWARD) is set
+                    // AND a tape scope is active. This is the training path
+                    // (track_op=true -> gdn_forward_only_fastpaths=false).
+                    #[cfg(feature = "cuda")]
+                    let _ = crate::tape_forward::try_tape_causal_conv1d_prefill_cuda(
+                        &mixed_qkv_ct,
+                        &weights.conv1d,
+                        &y,
+                        kernel_size,
+                    )?;
+                    #[cfg(feature = "cuda")]
+                    {
+                        match crate::tape_forward::try_tape_silu_cuda(&y)? {
+                            Some(t) => t,
+                            None => cuda_silu(&y)?,
+                        }
+                    }
+                    #[cfg(not(feature = "cuda"))]
+                    {
+                        cuda_silu(&y)?
+                    }
                 }
             } else {
                 kiln_nvtx::range!(c"kiln/gdn/conv/fallback_decode");
@@ -15833,8 +15898,24 @@ fn gated_deltanet_forward_decode_if(
                     causal_conv1d_decode(&mixed_qkv_ct, &weights.conv1d, conv_state, kernel_size)?;
                 cuda_silu(&y.to_dtype(DType::F32)?)?
             };
-            // Transpose back to [B, T, qkv_dim]
-            post_silu.transpose(1, 2)?
+            // Transpose back to [B, T, qkv_dim].
+            //
+            // CP-4 Increment 3 (#1082): the [B,C,T]->[B,T,C] conv-output
+            // transpose mints a fresh candle id between the wired SiLU and the
+            // qkv_split. Wrap it so the split's narrow grads flow back through
+            // the conv. No-op + candle fallback unless the gate is on + a tape
+            // scope is active.
+            #[cfg(feature = "cuda")]
+            {
+                match crate::tape_forward::try_tape_transpose_cuda(&post_silu, 1, 2)? {
+                    Some(t) => t,
+                    None => post_silu.transpose(1, 2)?,
+                }
+            }
+            #[cfg(not(feature = "cuda"))]
+            {
+                post_silu.transpose(1, 2)?
+            }
         };
         finish_gdn_stage_profile(
             profile_device,
@@ -15858,17 +15939,51 @@ fn gated_deltanet_forward_decode_if(
         let stage_profile = start_gdn_stage_profile(profile_device, profile_context)?;
         let (q, k, v, z) = {
             kiln_nvtx::range!(c"kiln/gdn/qkv_split");
-            let q = mixed_qkv
-                .narrow(2, 0, qk_dim)?
-                .reshape((batch, seq_len, nk, dk))?;
-            let k = mixed_qkv
-                .narrow(2, qk_dim, qk_dim)?
-                .reshape((batch, seq_len, nk, dk))?;
-            let v = mixed_qkv
-                .narrow(2, 2 * qk_dim, v_dim)?
-                .reshape((batch, seq_len, nv, dv))?;
-            let z = z.reshape((batch, seq_len, nv, dv))?;
-            (q, k, v, z)
+            // CP-4 Increment 3 (#1082): the narrow (QKV split) + reshape ops mint
+            // fresh candle ids between the wired conv output (`mixed_qkv`) and the
+            // head_expand / recur_prep. Wrap each on the kt Tape (narrow adjoint =
+            // zero-pad; reshape adjoint = inverse reshape) so the recurrence's
+            // dq/dk/dv flow back into `mixed_qkv` (and thence conv → in_proj_qkv).
+            // The z reshape connects the in_proj_z keystone output to the
+            // gated-RMSNorm gate input. No-op + candle fallback unless the gate is
+            // on + a tape scope is active.
+            #[cfg(feature = "cuda")]
+            let narrow_then_reshape =
+                |src: &Tensor, offset: usize, length: usize, shape: (usize, usize, usize, usize)| -> Result<Tensor> {
+                    let nar = src.narrow(2, offset, length)?;
+                    let nar = match crate::tape_forward::try_tape_narrow_cuda(
+                        src, 2, offset, length, &nar,
+                    )? {
+                        Some(t) => t,
+                        None => nar,
+                    };
+                    let resh = nar.reshape(shape)?;
+                    match crate::tape_forward::try_tape_reshape_cuda(
+                        &nar,
+                        vec![shape.0, shape.1, shape.2, shape.3],
+                    )? {
+                        Some(t) => Ok(t),
+                        None => Ok(resh),
+                    }
+                };
+            #[cfg(not(feature = "cuda"))]
+            let narrow_then_reshape =
+                |src: &Tensor, offset: usize, length: usize, shape: (usize, usize, usize, usize)| -> Result<Tensor> {
+                    Ok(src.narrow(2, offset, length)?.reshape(shape)?)
+                };
+            let q = narrow_then_reshape(&mixed_qkv, 0, qk_dim, (batch, seq_len, nk, dk))?;
+            let k = narrow_then_reshape(&mixed_qkv, qk_dim, qk_dim, (batch, seq_len, nk, dk))?;
+            let v = narrow_then_reshape(&mixed_qkv, 2 * qk_dim, v_dim, (batch, seq_len, nv, dv))?;
+            let z_reshaped = z.reshape((batch, seq_len, nv, dv))?;
+            #[cfg(feature = "cuda")]
+            let z_reshaped = match crate::tape_forward::try_tape_reshape_cuda(
+                &z,
+                vec![batch, seq_len, nv, dv],
+            )? {
+                Some(t) => t,
+                None => z_reshaped,
+            };
+            (q, k, v, z_reshaped)
         };
         finish_gdn_stage_profile(
             profile_device,
@@ -16035,17 +16150,40 @@ fn gated_deltanet_forward_decode_if(
                     let (q, k) = {
                         kiln_nvtx::range!(c"kiln/gdn/head_expand");
                         if gqa_ratio > 1 {
-                            let q = q
+                            let q_exp = q
                                 .unsqueeze(3)?
                                 .expand(&[batch, seq_len, nk, gqa_ratio, dk])?
                                 .contiguous()?
                                 .reshape((batch, seq_len, nv, dk))?;
-                            let k = k
+                            let k_exp = k
                                 .unsqueeze(3)?
                                 .expand(&[batch, seq_len, nk, gqa_ratio, dk])?
                                 .contiguous()?
                                 .reshape((batch, seq_len, nv, dk))?;
-                            (q, k)
+                            // CP-4 Increment 3 (#1082): the unsqueeze+expand+
+                            // contiguous+reshape chain mints a fresh candle id
+                            // between the wired qk_split (below) and qk_norm. A
+                            // single GqaExpandBackward (adjoint = reshape+sum
+                            // over the broadcast head sub-dim) keeps the chain
+                            // connected so the recurrence's dq/dk reach the
+                            // post-split q/k (and thence in_proj_qkv). No-op +
+                            // candle fallback unless the gate is on + a tape
+                            // scope is active.
+                            #[cfg(feature = "cuda")]
+                            let q_exp = match crate::tape_forward::try_tape_gqa_expand_cuda(
+                                &q, gqa_ratio, &q_exp,
+                            )? {
+                                Some(t) => t,
+                                None => q_exp,
+                            };
+                            #[cfg(feature = "cuda")]
+                            let k_exp = match crate::tape_forward::try_tape_gqa_expand_cuda(
+                                &k, gqa_ratio, &k_exp,
+                            )? {
+                                Some(t) => t,
+                                None => k_exp,
+                            };
+                            (q_exp, k_exp)
                         } else {
                             (q.contiguous()?, k.contiguous()?)
                         }
@@ -16416,17 +16554,34 @@ fn gated_deltanet_forward_decode_if(
             Ok((q, k))
         } else {
             kiln_nvtx::range!(c"kiln/gdn/head_expand_recur_fallback");
-            let q = q
+            let q_exp = q
                 .unsqueeze(3)?
                 .expand(&[batch, seq_len, nk, gqa_ratio, dk])?
                 .contiguous()?
                 .reshape((batch, seq_len, nv, dk))?;
-            let k = k
+            let k_exp = k
                 .unsqueeze(3)?
                 .expand(&[batch, seq_len, nk, gqa_ratio, dk])?
                 .contiguous()?
                 .reshape((batch, seq_len, nv, dk))?;
-            Ok((q, k))
+            // CP-4 Increment 3 (#1082): same head-expand chaining fix as the
+            // main `kiln/gdn/head_expand` site, for the deferred/native
+            // recurrence path (qk_expanded == false). Off the BF16-prefill
+            // training path (which sets qk_expanded == true) but wired for
+            // parity across configs.
+            #[cfg(feature = "cuda")]
+            let q_exp =
+                match crate::tape_forward::try_tape_gqa_expand_cuda(&q, gqa_ratio, &q_exp)? {
+                    Some(t) => t,
+                    None => q_exp,
+                };
+            #[cfg(feature = "cuda")]
+            let k_exp =
+                match crate::tape_forward::try_tape_gqa_expand_cuda(&k, gqa_ratio, &k_exp)? {
+                    Some(t) => t,
+                    None => k_exp,
+                };
+            Ok((q_exp, k_exp))
         }
     };
 
@@ -16556,14 +16711,41 @@ fn gated_deltanet_forward_decode_if(
             // tensor inherits the (now bf16) state dtype.
             let (q, k, v, beta, g) = {
                 kiln_nvtx::range!(c"kiln/gdn/recur_prep");
-                let v = v.to_dtype(input_dtype)?;
+                // CP-4 Increment 3 (#1082): the v cast + the q/k/v/beta/g
+                // transposes mint fresh candle ids feeding the recurrence
+                // record node (`tape_record_gdn_recurrent` below). Wrap them on
+                // the kt Tape so the recurrence backward's dq/dk/dv flow back
+                // through qk_norm → head_expand → split → conv → in_proj_qkv
+                // (and dbeta/dg terminate harmlessly at the non-LoRA in_proj_a/b
+                // gates). No-op + candle fallback unless `KILN_USE_TAPE_FORWARD`
+                // is set AND a tape scope is active. The v cast carries the
+                // in_proj_qkv lineage; beta/g transposes carry the (LoRA-less)
+                // gates lineage — wrapped anyway so the recurrence node sees a
+                // chained id on every input.
+                let v_cast = v.to_dtype(input_dtype)?;
+                #[cfg(feature = "cuda")]
+                let v_cast = match crate::tape_forward::try_tape_cast_cuda(&v, &v_cast)? {
+                    Some(t) => t,
+                    None => v_cast,
+                };
+                let v = v_cast;
 
                 // Transpose to [B, nv, T, dim] for per-head processing.
-                let q = q.transpose(1, 2)?; // [B, nv, T, dk]
-                let k = k.transpose(1, 2)?; // [B, nv, T, dk]
-                let v = v.transpose(1, 2)?; // [B, nv, T, dv]
-                let beta = beta.transpose(1, 2)?; // [B, nv, T]
-                let g = g.transpose(1, 2)?; // [B, nv, T]
+                #[cfg(feature = "cuda")]
+                let transpose12 = |t: &Tensor| -> Result<Tensor> {
+                    match crate::tape_forward::try_tape_transpose_cuda(t, 1, 2)? {
+                        Some(out) => Ok(out),
+                        None => Ok(t.transpose(1, 2)?),
+                    }
+                };
+                #[cfg(not(feature = "cuda"))]
+                let transpose12 = |t: &Tensor| -> Result<Tensor> { Ok(t.transpose(1, 2)?) };
+
+                let q = transpose12(&q)?; // [B, nv, T, dk]
+                let k = transpose12(&k)?; // [B, nv, T, dk]
+                let v = transpose12(&v)?; // [B, nv, T, dv]
+                let beta = transpose12(&beta)?; // [B, nv, T]
+                let g = transpose12(&g)?; // [B, nv, T]
                 (q, k, v, beta, g)
             };
 
@@ -16725,10 +16907,31 @@ fn gated_deltanet_forward_decode_if(
             }
             gated
         };
-        // Reshape to [B, T, v_dim] and cast back to input dtype
-        attn_out
-            .reshape((batch, seq_len, v_dim))?
-            .to_dtype(input_dtype)?
+        // Reshape to [B, T, v_dim] and cast back to input dtype.
+        //
+        // CP-4 Increment 3 (#1082): both ops mint fresh candle ids that sit
+        // between the wired gated-RMSNorm node and the out_proj keystone. Wrap
+        // them on the kt Tape (reshape adjoint = inverse reshape; cast adjoint =
+        // dtype round-trip) so the out_proj LoRA grad's `dL/dx` flows back into
+        // the gated-RMSNorm node (and thence z + the recurrence chain). No-op +
+        // candle fallback unless `KILN_USE_TAPE_FORWARD` is set AND a tape scope
+        // is active.
+        let reshaped = attn_out.reshape((batch, seq_len, v_dim))?;
+        #[cfg(feature = "cuda")]
+        let reshaped = match crate::tape_forward::try_tape_reshape_cuda(
+            &attn_out,
+            vec![batch, seq_len, v_dim],
+        )? {
+            Some(t) => t,
+            None => reshaped,
+        };
+        let casted = reshaped.to_dtype(input_dtype)?;
+        #[cfg(feature = "cuda")]
+        let casted = match crate::tape_forward::try_tape_cast_cuda(&reshaped, &casted)? {
+            Some(t) => t,
+            None => casted,
+        };
+        casted
     };
     finish_gdn_stage_profile(
         profile_device,
