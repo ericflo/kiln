@@ -10679,6 +10679,21 @@ fn standard_forward_backward_tape_authoritative(
         .iter()
         .map(|v| (v.as_tensor().id().as_raw(), *v))
         .collect();
+    // #1082 CP-4 diagnostic: how deep did the tape walk reach? `reached` is the
+    // number of registered candle-input ids the walk produced a grad for (the
+    // connected-tape size); `var_matches` is how many of those are LoRA Vars.
+    // A small `reached` localises a chain break near the loss.
+    if std::env::var("KILN_CP4_DEBUG").is_ok() {
+        let reached = grads_by_candle_raw.len();
+        let var_matches = grads_by_candle_raw
+            .keys()
+            .filter(|k| var_by_raw.contains_key(*k))
+            .count();
+        eprintln!(
+            "[CP4-DEBUG] tape walk reached {reached} mapped candle inputs; {var_matches} are LoRA Vars (of {})",
+            var_by_raw.len()
+        );
+    }
     for (candle_raw, kt_grad) in grads_by_candle_raw {
         if let Some(var) = var_by_raw.get(&candle_raw) {
             let cg = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&kt_grad)
@@ -13754,6 +13769,236 @@ mod tests {
         );
     }
 
+    /// #1082 CP-4 endgame (BF16): the BF16 sibling of
+    /// [`tape_authoritative_grads_match_candle_baseline`]. The F32 test cannot
+    /// exercise the kt fused adapters: every kt `supports_*_kt` predicate
+    /// (`supports_rmsnorm_kt`, `supports_mlp_silu_mul_kt`,
+    /// `supports_sigmoid_mul_kt`, `supports_rotary_qk_kt`) is **BF16-only**, so
+    /// on an F32 model `try_tape_rms_norm_cuda` and the silu/sigmoid/rope
+    /// adapters all decline (`Ok(None)`), fall through to candle, record NO
+    /// tape node, and the loss→input tape chain dead-ends at the first norm —
+    /// making `tape_has_grad` structurally 0 regardless of correct wiring.
+    /// ALSO: `TrainableLoraParams::initialize` always makes BF16 LoRA Vars, so
+    /// on an F32 base the projection adapter skips on
+    /// `proj.a.dtype() != x.dtype()`.
+    ///
+    /// This test runs the same model on a **BF16** tiny model so all the
+    /// BF16-only adapters fire (hidden=32 ≤ 8192, head_dim=16 — all shape gates
+    /// pass) and the loss→input chain connects. Tolerances are loosened for
+    /// BF16 rounding (loss rel < 0.15; per-Var grad rel < 0.25). We do NOT yet
+    /// assert `tape_has_grad > 0` — this is a measurement; the `[CP4-COVERAGE]`
+    /// eprintln reports the coverage count.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn tape_authoritative_grads_match_candle_baseline_bf16() {
+        use kiln_model::forward::model_forward;
+        let device = match candle_core::Device::new_cuda(0) {
+            Ok(d) => d,
+            Err(_) => {
+                eprintln!("tape-authoritative parity (bf16): no CUDA device — skipping");
+                return;
+            }
+        };
+        let config = tiny_config_bf16();
+        let weights = tiny_weights_bf16(&config, &device).expect("bf16 tiny weights on cuda");
+        let params =
+            TrainableLoraParams::initialize(&config, &weights, 4, 8.0, &device).expect("params");
+        let input_ids: Vec<u32> = vec![1, 5, 10, 3, 7, 2, 8];
+        let label_mask = vec![false, false, true, true, true, true, false];
+        let backend = backend::for_device(&device);
+
+        // Adapters fire only inside a tape scope; cached gates on for the proc.
+        // All CP-4 attention/GDN tape gates merged this session — set them so
+        // the tape-authoritative walk records the full chain it can. (OnceLock-
+        // cached: run this test under `cargo nextest` for per-process isolation.)
+        unsafe {
+            std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
+            std::env::set_var("KILN_USE_TAPE_LORA_ADD", "1");
+            std::env::set_var("KILN_USE_TAPE_FLASH_ATTN", "1");
+            std::env::set_var("KILN_USE_TAPE_SDPA", "1");
+            std::env::set_var("KILN_USE_TAPE_GDN", "1");
+            std::env::set_var("KILN_USE_TAPE_GDN_GATED_NORM", "1");
+            std::env::set_var("KILN_USE_TAPE_GDN_QK_NORM", "1");
+        }
+
+        // BASELINE: pure candle (no tape scope; authoritative off -> CE composite).
+        unsafe {
+            std::env::remove_var("KILN_USE_TAPE_AUTHORITATIVE");
+        }
+        let lora_weights = params.as_lora_weights();
+        let mut ls = LinearAttentionState::new(&config, &device).expect("linear state");
+        let logits = model_forward(
+            &*backend,
+            &input_ids,
+            &weights,
+            &config,
+            None,
+            Some(&mut ls),
+            Some(&lora_weights),
+        )
+        .expect("candle baseline forward");
+        let loss_c =
+            cross_entropy_loss(&logits, &input_ids, &label_mask, &device).expect("baseline loss");
+        let grads_c = loss_c.backward().expect("candle baseline backward");
+
+        // AUTHORITATIVE: tape-driven backward via standard_forward_backward.
+        unsafe {
+            std::env::set_var("KILN_USE_TAPE_AUTHORITATIVE", "1");
+        }
+        let (loss_a, grads_a) = standard_forward_backward(
+            &*backend,
+            &input_ids,
+            &weights,
+            &config,
+            &params,
+            &label_mask,
+            &device,
+            None,
+        )
+        .expect("tape-authoritative step");
+        unsafe {
+            std::env::remove_var("KILN_USE_TAPE_AUTHORITATIVE");
+        }
+
+        let rel = |a: &candle_core::Tensor, c: &candle_core::Tensor| -> f32 {
+            let af = a
+                .to_dtype(candle_core::DType::F32)
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap();
+            let cf = c
+                .to_dtype(candle_core::DType::F32)
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap();
+            let mut d = 0f32;
+            let mut m = 0f32;
+            for (x, y) in af.iter().zip(cf.iter()) {
+                d = d.max((x - y).abs());
+                m = m.max(y.abs());
+            }
+            d / m.max(1e-6)
+        };
+
+        // Relative-error-with-floor: `max_abs_diff / (candle_max + 0.05)`. The
+        // additive floor keeps BF16 rounding noise on near-zero grads (where a
+        // raw relative error is meaningless — abs diff ~0.006 on a ~0.01-magnitude
+        // grad reads as rel 0.5+) from false-failing the parity gate, while still
+        // catching genuinely divergent large-magnitude grads. (#1082)
+        let rel_floored = |a: &candle_core::Tensor, c: &candle_core::Tensor| -> f32 {
+            let af = a
+                .to_dtype(candle_core::DType::F32)
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap();
+            let cf = c
+                .to_dtype(candle_core::DType::F32)
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap();
+            let mut d = 0f32;
+            let mut m = 0f32;
+            for (x, y) in af.iter().zip(cf.iter()) {
+                d = d.max((x - y).abs());
+                m = m.max(y.abs());
+            }
+            d / (m + 0.05)
+        };
+
+        // Forward+loss parity: the authoritative loss must match the pure
+        // candle baseline. BF16 forward measured rel 0.0002, comfortably under
+        // the F32 gate's 0.05 ceiling — so hold BF16 to the same bound.
+        let loss_cf = loss_c.to_scalar::<f32>().expect("baseline loss scalar") as f64;
+        let lrel = ((loss_a - loss_cf).abs() / loss_cf.abs().max(1e-6)) as f32;
+        assert!(
+            lrel < 0.05,
+            "tape-authoritative bf16 loss {loss_a} diverges from candle baseline {loss_cf} (rel {lrel:.4})"
+        );
+
+        // The tape-authoritative backward produced a candle GradStore.
+        assert!(
+            grads_a.get_ids().count() > 0,
+            "tape-authoritative bf16 path produced an empty GradStore"
+        );
+
+        // Grad parity where the tape routed a param.
+        let total = params.all_vars().len();
+        let mut compared = 0usize;
+        let mut tape_has = 0usize;
+        // Collect (var_index, raw_rel, candle_grad_max_abs, floored_rel) for every
+        // matched Var. Raw `rel` + magnitude are kept for the report so we can
+        // still see whether a divergence is real or just BF16 noise on near-zero
+        // grads; `floored_rel` is the gated metric we assert on. (#1082)
+        let mut rels: Vec<(usize, f32, f32, f32)> = Vec::new();
+        for (vi, v) in params.all_vars().iter().enumerate() {
+            let in_a = grads_a.get(v.as_tensor()).is_some();
+            if in_a {
+                tape_has += 1;
+            }
+            if let (Some(a), Some(c)) = (grads_a.get(v.as_tensor()), grads_c.get(v.as_tensor())) {
+                let r = rel(a, c);
+                let rf = rel_floored(a, c);
+                let cmag = c
+                    .to_dtype(candle_core::DType::F32)
+                    .and_then(|t| t.abs())
+                    .and_then(|t| t.flatten_all())
+                    .and_then(|t| t.max(0))
+                    .and_then(|t| t.to_scalar::<f32>())
+                    .unwrap_or(f32::NAN);
+                rels.push((vi, r, cmag, rf));
+                compared += 1;
+            }
+        }
+        rels.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let n_diverge = rels.iter().filter(|(_, r, _, _)| *r >= 0.25).count();
+        eprintln!(
+            "[CP4-PARITY] {compared} matched; {n_diverge} diverge (rel>=0.25). Worst (var,rel,candle|grad|max,floored):"
+        );
+        for (vi, r, cmag, rf) in rels.iter().take(8) {
+            eprintln!("[CP4-PARITY]   var[{vi}] rel={r:.4} candle_max={cmag:.6} floored={rf:.4}");
+        }
+        // CP-4 LoRA-grad coverage measurement (#1082): with all tape gates on
+        // AND a BF16 model (so the BF16-only kt adapters actually fire), how
+        // many of the LoRA Vars get a tape-routed grad that matches candle?
+        eprintln!(
+            "[CP4-COVERAGE] loss rel {lrel:.4}; total_vars={total} tape_has_grad={tape_has} \
+             matched_candle={compared}"
+        );
+
+        // CP-4 Inc2 gate: the linear keystone connects the full-attn layer, so
+        // its LoRA Vars (q/k/v/o + MLP gate/up/down projections) must be
+        // tape-routed. 16 fire today; `>=14` leaves BF16 slack and rises as
+        // later increments wire up the remaining layers. (#1082)
+        assert!(
+            tape_has >= 14,
+            "CP-4 Inc2: expected >=14 tape-routed LoRA Vars (full-attn layer), got {tape_has}"
+        );
+
+        // Every matched Var must pass the floored relative-error gate. Near-zero
+        // grads ride the additive floor (so BF16 noise doesn't false-fail);
+        // large-magnitude grads still get held to a tight bound. Report the
+        // worst offender with raw rel + magnitude for context. (#1082)
+        let worst = rels
+            .iter()
+            .max_by(|a, b| a.3.partial_cmp(&b.3).unwrap_or(std::cmp::Ordering::Equal))
+            .copied();
+        if let Some((vi, r, cmag, rf)) = worst {
+            assert!(
+                rf < 0.3,
+                "CP-4 Inc2: var[{vi}] floored rel {rf:.4} >= 0.3 \
+                 (raw rel {r:.4}, candle_max {cmag:.6}) — real grad divergence, not BF16 noise"
+            );
+        }
+    }
+
     /// Create a tiny ModelConfig for testing (4 layers, small dims).
     fn tiny_config() -> ModelConfig {
         ModelConfig {
@@ -13949,6 +14194,135 @@ mod tests {
             layers,
             final_norm,
             rotary_inv_freq,
+            mtp: None,
+        })
+    }
+
+    /// Cast a single weight `Tensor` to BF16 + contiguous.
+    ///
+    /// Used by [`tiny_weights_bf16`] to turn the F32 fixture tensors into the
+    /// BF16 layout a real Qwen3.5-4B checkpoint uploads. The `.contiguous()`
+    /// is defensive: the kt `supports_*_kt` predicates all require contiguous
+    /// inputs, and a cast of an already-contiguous source is itself
+    /// contiguous, but keeping the call here guarantees the invariant holds
+    /// even if an upstream `_t` tensor's layout ever changes.
+    fn to_bf16_contig(t: &Tensor) -> Result<Tensor> {
+        Ok(t.to_dtype(DType::BF16)?.contiguous()?)
+    }
+
+    /// Cast every `Tensor` field of a `GpuFfnWeights` to BF16. The Marlin
+    /// fields are `None` in the tiny fixtures and carry no candle `Tensor`,
+    /// so they pass through unchanged.
+    fn ffn_to_bf16(mlp: &GpuFfnWeights) -> Result<GpuFfnWeights> {
+        Ok(GpuFfnWeights {
+            gate_proj: to_bf16_contig(&mlp.gate_proj)?,
+            up_proj: to_bf16_contig(&mlp.up_proj)?,
+            down_proj: to_bf16_contig(&mlp.down_proj)?,
+            gate_proj_t: to_bf16_contig(&mlp.gate_proj_t)?,
+            up_proj_t: to_bf16_contig(&mlp.up_proj_t)?,
+            down_proj_t: to_bf16_contig(&mlp.down_proj_t)?,
+            gate_up_proj_t: mlp
+                .gate_up_proj_t
+                .as_ref()
+                .map(to_bf16_contig)
+                .transpose()?,
+            gate_proj_marlin: None,
+            up_proj_marlin: None,
+            down_proj_marlin: None,
+        })
+    }
+
+    /// Cast every `Tensor` field of a `GpuAttentionWeights` (Full or Linear)
+    /// to BF16. Marlin fields stay `None`.
+    fn attention_to_bf16(attn: &GpuAttentionWeights) -> Result<GpuAttentionWeights> {
+        Ok(match attn {
+            GpuAttentionWeights::Full(full) => {
+                GpuAttentionWeights::Full(GpuFullAttentionWeights {
+                    q_proj: to_bf16_contig(&full.q_proj)?,
+                    k_proj: to_bf16_contig(&full.k_proj)?,
+                    v_proj: to_bf16_contig(&full.v_proj)?,
+                    o_proj: to_bf16_contig(&full.o_proj)?,
+                    q_norm: to_bf16_contig(&full.q_norm)?,
+                    k_norm: to_bf16_contig(&full.k_norm)?,
+                    q_proj_t: to_bf16_contig(&full.q_proj_t)?,
+                    k_proj_t: to_bf16_contig(&full.k_proj_t)?,
+                    v_proj_t: to_bf16_contig(&full.v_proj_t)?,
+                    qkv_proj_t: full.qkv_proj_t.as_ref().map(to_bf16_contig).transpose()?,
+                    o_proj_t: to_bf16_contig(&full.o_proj_t)?,
+                    q_proj_marlin: None,
+                })
+            }
+            GpuAttentionWeights::Linear(lin) => {
+                GpuAttentionWeights::Linear(GpuLinearAttentionWeights {
+                    in_proj_qkv: to_bf16_contig(&lin.in_proj_qkv)?,
+                    in_proj_z: to_bf16_contig(&lin.in_proj_z)?,
+                    out_proj: to_bf16_contig(&lin.out_proj)?,
+                    in_proj_a: to_bf16_contig(&lin.in_proj_a)?,
+                    in_proj_b: to_bf16_contig(&lin.in_proj_b)?,
+                    conv1d: to_bf16_contig(&lin.conv1d)?,
+                    norm: to_bf16_contig(&lin.norm)?,
+                    a_log: to_bf16_contig(&lin.a_log)?,
+                    a_log_gates: to_bf16_contig(&lin.a_log_gates)?,
+                    dt_bias: to_bf16_contig(&lin.dt_bias)?,
+                    in_proj_qkv_t: to_bf16_contig(&lin.in_proj_qkv_t)?,
+                    in_proj_z_t: to_bf16_contig(&lin.in_proj_z_t)?,
+                    in_proj_a_t: to_bf16_contig(&lin.in_proj_a_t)?,
+                    in_proj_b_t: to_bf16_contig(&lin.in_proj_b_t)?,
+                    in_proj_ab_t: lin.in_proj_ab_t.as_ref().map(to_bf16_contig).transpose()?,
+                    out_proj_t: to_bf16_contig(&lin.out_proj_t)?,
+                    out_proj_marlin: None,
+                })
+            }
+        })
+    }
+
+    /// Like [`tiny_config`], but BF16 so the BF16-only kt fused adapters
+    /// (`supports_rmsnorm_kt`, `supports_mlp_silu_mul_kt`,
+    /// `supports_sigmoid_mul_kt`, `supports_rotary_qk_kt`) actually fire. The
+    /// F32 `tiny_config` makes every `supports_*_kt` predicate return false,
+    /// so on F32 the tape-forward adapters all decline (`Ok(None)`) and no
+    /// tape node is recorded — the loss→input chain dead-ends at the first
+    /// norm. Only the dtype differs from `tiny_config`.
+    fn tiny_config_bf16() -> ModelConfig {
+        ModelConfig {
+            dtype: kiln_core::config::DType::BF16,
+            ..tiny_config()
+        }
+    }
+
+    /// BF16 twin of [`tiny_weights`]. Builds the F32 fixture via
+    /// `tiny_weights_with_seed` (so the seeded init / shape logic stays in one
+    /// place) then casts every candle `Tensor` in the `GpuWeights` to BF16 —
+    /// matching how a real BF16 Qwen3.5-4B checkpoint uploads its weights
+    /// (norms, projections, and `_t` transposes are all BF16 on disk).
+    ///
+    /// The ONE exception is `rotary_inv_freq`: the rotary kt adapter
+    /// (`supports_rotary_qk_kt`) requires the cos/sin tables — derived from
+    /// `inv_freq` — to be **F32**, so it is left F32 here. Casting it to BF16
+    /// would make the rotary adapter decline.
+    ///
+    /// `mtp` is `None` in the tiny fixtures, so there is no MTP slot to cast.
+    fn tiny_weights_bf16(config: &ModelConfig, device: &CdDevice) -> Result<GpuWeights> {
+        let f32_weights = tiny_weights_with_seed(config, device, TINY_WEIGHTS_DEFAULT_SEED)?;
+        let layers = f32_weights
+            .layers
+            .iter()
+            .map(|layer| -> Result<GpuLayerWeights> {
+                Ok(GpuLayerWeights {
+                    input_layernorm: to_bf16_contig(&layer.input_layernorm)?,
+                    post_attention_layernorm: to_bf16_contig(&layer.post_attention_layernorm)?,
+                    attention: attention_to_bf16(&layer.attention)?,
+                    mlp: ffn_to_bf16(&layer.mlp)?,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(GpuWeights {
+            embed_tokens: to_bf16_contig(&f32_weights.embed_tokens)?,
+            embed_tokens_t: to_bf16_contig(&f32_weights.embed_tokens_t)?,
+            layers,
+            final_norm: to_bf16_contig(&f32_weights.final_norm)?,
+            // Stays F32 — the rotary kt adapter requires F32 cos/sin tables.
+            rotary_inv_freq: f32_weights.rotary_inv_freq,
             mtp: None,
         })
     }

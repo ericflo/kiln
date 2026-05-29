@@ -3433,6 +3433,19 @@ fn linear_with_lora_t_backend_decode_if(
     lora: Option<&LoraProjectionWeights>,
     lora_scale: f32,
 ) -> Result<Tensor> {
+    // CP-4 (#1082) Increment 2: route the full base projection (+ fused LoRA
+    // delta) through the kt `Tape` when KILN_USE_TAPE_FORWARD +
+    // KILN_USE_TAPE_LORA_ADD are set and a tape scope is active. Wired at the
+    // TOP because the authoritative path's inputs are DETACHED kt-copies
+    // (`track_op()==false`), so the autograd-safe `linear_prefill_apply` branch
+    // below (gated on `x.track_op()`) is not reliably hit. No-ops (returns
+    // None) otherwise — the production dispatch is untouched in the default
+    // configuration.
+    #[cfg(feature = "cuda")]
+    if let Some(out) = crate::tape_forward::try_tape_lora_linear_cuda(x, weight_t, lora, lora_scale)?
+    {
+        return Ok(out);
+    }
     #[cfg(feature = "cuda")]
     if let Some(out) = cuda_lora_linear_training_bf16(x, weight_t, lora, lora_scale)? {
         return Ok(out);
@@ -11788,6 +11801,18 @@ fn lm_head_forward_backend_decode_if(
     x: &Tensor,
     embed_tokens_t: &Tensor,
 ) -> Result<Tensor> {
+    // CP-4 (#1082) Increment 2: route the lm_head matmul (no LoRA) through the
+    // kt `Tape` so `dL/d(logits)` reaches the lm_head input — the tape root
+    // (cross_entropy-from-logits) connects to this output. Wired at the TOP
+    // because the authoritative path's input is a DETACHED kt-copy
+    // (`track_op()==false`), so the autograd-safe `linear_prefill_apply` branch
+    // below (gated on `x.track_op()`) is not reliably hit. No-ops otherwise.
+    #[cfg(feature = "cuda")]
+    if let Some(out) =
+        crate::tape_forward::try_tape_lora_linear_cuda(x, embed_tokens_t, None, 0.0)?
+    {
+        return Ok(out);
+    }
     if let Some(backend) = backend {
         // For autograd-tracked input (non-FLCE training path), prefer
         // the autograd-safe Vulkan CustomOp; otherwise the leaf
@@ -20843,9 +20868,15 @@ pub fn transformer_block(
     )?;
 
     // Residual connection
+    //
+    // CP-4 (#1082) Increment 2: route through `residual_add` (which threads
+    // `try_tape_add_cuda` onto the kt `Tape`) instead of a raw candle `+`.
+    // The GDN block already used `residual_add`; `transformer_block` used a
+    // raw `+`, which fragmented the tape at the full-attn residual so grads
+    // never reached attention / FFN projections below the loss.
     let x = {
         kiln_nvtx::range!(c"kiln/residual");
-        (x + attn_out)?
+        residual_add(x.clone(), attn_out)?
     };
 
     // Post-attention norm
@@ -20862,9 +20893,15 @@ pub fn transformer_block(
     };
 
     // Residual connection
+    //
+    // CP-4 (#1082) Increment 2: same as the attention residual above — route
+    // through `residual_add` so the FFN residual stays on the kt `Tape`. This
+    // is the link that lets `loss → lm_head → final_norm → FFN residual →
+    // down_proj` connect, making the last full-attn layer's down_proj LoRA
+    // Vars reachable (`tape_has_grad` rises from 0).
     let out = {
         kiln_nvtx::range!(c"kiln/residual");
-        (x + ffn_out)?
+        residual_add(x, ffn_out)?
     };
     Ok(out)
 }

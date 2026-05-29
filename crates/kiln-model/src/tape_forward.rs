@@ -107,8 +107,8 @@ use anyhow::{Context, Result};
 use candle_core::Tensor;
 use kiln_autograd::{
     AddBackward, BackwardOp, CrossEntropyKtBackward, EmbeddingBackward, LoraDeltaAddBackward,
-    MatmulBackward, MulSigmoidGateBackward, ReshapeBackward, RopeSplitHalfBackward, SiluBackward,
-    Tape, TransposeBackward,
+    MatmulBackward, MulSigmoidGateBackward, ReshapeBackward, RopeSplitHalfBackward,
+    SiluBackward, Tape, TransposeBackward,
 };
 
 use crate::backend::BackendRuntime;
@@ -1353,6 +1353,286 @@ pub fn try_tape_lora_add_cuda(
     // the bridge panics on a duplicate kt output id, so we pick the one
     // the consumer actually carries into the loss graph and chain on
     // the same id for upstream re-use via `kt_input_for_candle(out.id())`.
+    kiln_kt_bridge::tape_bridge::register_output_mapping(out_kt.id(), out.id());
+    kiln_kt_bridge::tape_bridge::retain_output_for_chaining(&out_kt, out.id());
+
+    Ok(Some(out))
+}
+
+/// Attempt to run the FULL base projection (and optional fused LoRA delta)
+/// through the kt-typed op surface as ONE chained group of `Tape` nodes:
+/// `reshape → matmul → [lora_delta_add] → reshape`. Records the backward so
+/// `dL/dx` flows through BOTH the frozen base weight AND the LoRA path, and
+/// `proj.a` / `proj.b` receive grads.
+///
+/// The forward computes (matching the existing CUDA dispatch bit-for-bit):
+/// ```text
+/// out = base + scale * (x @ A^T @ B^T)        // when `lora` is Some
+/// out = base = x @ W^T                          // when `lora` is None (lm_head)
+/// ```
+///
+/// # Why a SINGLE fused adapter (base + LoRA together)
+///
+/// CP-4 (#1082) Increment 2 — the keystone. The tape root
+/// ([`try_tape_cross_entropy_from_logits_cuda`], Increment 1) connects to the
+/// lm_head output, but the lm_head matmul and every q/k/v/o/gate/up/down/GDN
+/// projection were unwired, so nothing below the loss got grads
+/// (`tape_has_grad=0/50`). In the authoritative path every intermediate is a
+/// DETACHED kt-copy (`track_op()==false`), so neither
+/// `lm_head_forward_backend_decode_if` nor
+/// `linear_with_lora_t_backend_decode_if` reliably hits `linear_prefill_apply`
+/// (both gate the autograd-safe branch on `x.track_op()`). This adapter is
+/// therefore wired at the TOP of those two functions, before the backend
+/// dispatch.
+///
+/// Folding base + LoRA into one chained group (instead of routing the base
+/// matmul and the LoRA delta-add through two separate adapters across a
+/// reshape boundary) keeps `x2d` and `base2d` as SHARED kt ids: `base2d` is
+/// the matmul node's output (so `dL/dbase2d` flows into the matmul backward),
+/// and `x2d` is shared between the matmul node and the LoRA node (so `dL/dx2d`
+/// accumulates BOTH the base-weight and LoRA contributions — the correct full
+/// `dL/dx`). Splitting them would mint a fresh kt borrow at the reshape and
+/// fragment the chain.
+///
+/// # Node-recording sequence (inside ONE `with_active_tape`)
+///
+/// 1. `ReshapeBackward { input_shape: x_kt.shape() }` — output `x2d [rows, k]`,
+///    input `x_kt`.
+/// 2. `MatmulBackward { a: x2d, b: w_kt }` — output `base2d [rows, n]`, inputs
+///    `[x2d, w_kt]`.
+/// 3. (lora only) `LoraDeltaAddBackward { x: x2d, a, b, scale }` — output
+///    `out2d`, inputs `[base2d, x2d, a_kt, b_kt]` (same order as
+///    [`try_tape_lora_add_cuda`]).
+/// 4. `ReshapeBackward { input_shape: [rows, n] }` — output `out_kt`, input
+///    `out2d` (or `base2d` when `lora` is None).
+///
+/// # Returns
+///
+/// * `Ok(Some(out))` — the tape-forward path ran: a candle copy of the kt
+///   output, reshaped to `x.dims[..-1] ++ [n]`, with the chained group recorded
+///   on the active tape and IO-mapped into the bridge (`x` → `x_kt`, and the
+///   LoRA Vars `proj.a`/`proj.b` → `a_kt`/`b_kt` when present).
+/// * `Ok(None)` — gate off (no tape, `KILN_USE_TAPE_FORWARD` off,
+///   `KILN_USE_TAPE_LORA_ADD` off), or device / dtype / shape / contiguity
+///   preconditions fail. The caller falls through to the existing dispatch.
+/// * `Err(...)` — an unexpected kt forward or kt → candle copy-back failure.
+#[allow(clippy::too_many_lines)]
+pub fn try_tape_lora_linear_cuda(
+    x: &Tensor,
+    weight_t: &Tensor,
+    lora: Option<&LoraProjectionWeights>,
+    lora_scale: f32,
+) -> Result<Option<Tensor>> {
+    if !tape_forward_enabled() || !tape_lora_add_enabled() {
+        return Ok(None);
+    }
+
+    // Device gate: CUDA-only (the bridge's `kt_tensor_from_candle_cuda_*`
+    // helpers are CUDA-only). Match the existing tape adapters.
+    if !matches!(x.device(), candle_core::Device::Cuda(_))
+        || !matches!(weight_t.device(), candle_core::Device::Cuda(_))
+    {
+        return Ok(None);
+    }
+    // Dtype gate: only BF16 / F32 today, and all matching (kt matmul requires
+    // matching dtypes throughout the composed forward).
+    if !matches!(
+        x.dtype(),
+        candle_core::DType::BF16 | candle_core::DType::F32
+    ) {
+        return Ok(None);
+    }
+    if weight_t.dtype() != x.dtype() {
+        return Ok(None);
+    }
+
+    // Shape gate: weight_t must be rank-2 `[K, N]` with x's last dim == K.
+    let Ok((wk, n)) = weight_t.dims2() else {
+        return Ok(None);
+    };
+    let x_dims = x.dims().to_vec();
+    if x_dims.len() < 2 {
+        return Ok(None);
+    }
+    let k = *x_dims.last().unwrap();
+    if k != wk {
+        return Ok(None);
+    }
+    let rows: usize = x_dims[..x_dims.len() - 1].iter().product();
+    if rows == 0 {
+        return Ok(None);
+    }
+
+    // LoRA gate (when present): A/B on CUDA, dtype-matching, shape-consistent,
+    // contiguous. Any mismatch falls through to the existing dispatch.
+    if let Some(proj) = lora {
+        if !matches!(proj.a.device(), candle_core::Device::Cuda(_))
+            || !matches!(proj.b.device(), candle_core::Device::Cuda(_))
+        {
+            return Ok(None);
+        }
+        if proj.a.dtype() != x.dtype() || proj.b.dtype() != x.dtype() {
+            return Ok(None);
+        }
+        let Ok((rank, a_in)) = proj.a.dims2() else {
+            return Ok(None);
+        };
+        let Ok((b_out, b_rank)) = proj.b.dims2() else {
+            return Ok(None);
+        };
+        if a_in != k || b_out != n || b_rank != rank {
+            return Ok(None);
+        }
+        if !proj.a.is_contiguous() || !proj.b.is_contiguous() {
+            return Ok(None);
+        }
+    }
+
+    // kt input — thread the kt id from an upstream tape adapter's output so
+    // the tape stays connected (e.g. lm_head's `x` came from the final norm
+    // adapter). Falls back to a fresh borrow otherwise.
+    let x_kt = match tape_kt_input(x) {
+        Some(t) => t,
+        None => return Ok(None),
+    };
+    // Frozen base weight: a fresh zero-copy borrow is correct (no chaining).
+    let w_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(weight_t) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    // LoRA Var borrows (when present) — fresh zero-copy views, IO-mapped onto
+    // the candle Var ids below so the optimiser sees their grads.
+    let (a_kt, b_kt) = match lora {
+        Some(proj) => {
+            let a = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&proj.a) {
+                Ok(t) => t,
+                Err(_) => return Ok(None),
+            };
+            let b = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&proj.b) {
+                Ok(t) => t,
+                Err(_) => return Ok(None),
+            };
+            (Some(a), Some(b))
+        }
+        None => (None, None),
+    };
+
+    // Record on the active tape (if any). Outside a scope, fall through.
+    let out_kt = match with_active_tape(|tape: &mut Tape| -> Result<_> {
+        // 1) Flatten x's lead dims to 2-D: `x_kt [..., k] -> x2d [rows, k]`.
+        //    kt reshape requires a contiguous source; materialise defensively.
+        let x_kt_c = if x_kt.is_contiguous() {
+            x_kt.clone()
+        } else {
+            x_kt
+                .contiguous()
+                .map_err(|e| anyhow::anyhow!("kt x.contiguous: {e}"))?
+        };
+        let x2d = x_kt_c
+            .reshape(vec![rows, k])
+            .map_err(|e| anyhow::anyhow!("kt x reshape -> 2d: {e}"))?;
+        tape.record(
+            &x2d,
+            &[&x_kt],
+            Box::new(ReshapeBackward {
+                input_shape: x_kt.shape().to_vec(),
+            }),
+        );
+
+        // 2) base2d = x2d @ W^T-less base: `x2d [rows, k] @ w_kt [k, n]`.
+        let base2d = kiln_tensor::ops::matmul(&x2d, &w_kt)
+            .map_err(|e| anyhow::anyhow!("kt matmul x2d@w: {e}"))?;
+        tape.record(
+            &base2d,
+            &[&x2d, &w_kt],
+            Box::new(MatmulBackward {
+                a: x2d.clone(),
+                b: w_kt.clone(),
+            }),
+        );
+
+        // 3) Fuse the LoRA delta + add (mirrors `try_tape_lora_add_cuda`):
+        //    h = x2d @ A^T ; d = h @ B^T ; delta = d * scale ; out2d = base2d + delta.
+        //    ONE `LoraDeltaAddBackward` node with `base2d` as input 0 so its
+        //    grad flows into the matmul backward, and `x2d` shared so dL/dx2d
+        //    accumulates base + LoRA.
+        let out2d = match (lora, a_kt.as_ref(), b_kt.as_ref()) {
+            (Some(_proj), Some(a_kt), Some(b_kt)) => {
+                let a_t_kt = a_kt
+                    .transpose(0, 1)
+                    .map_err(|e| anyhow::anyhow!("kt a.transpose: {e}"))?
+                    .contiguous()
+                    .map_err(|e| anyhow::anyhow!("kt a_t.contiguous: {e}"))?;
+                let h_kt = kiln_tensor::ops::matmul(&x2d, &a_t_kt)
+                    .map_err(|e| anyhow::anyhow!("kt matmul x@a_t: {e}"))?;
+                let b_t_kt = b_kt
+                    .transpose(0, 1)
+                    .map_err(|e| anyhow::anyhow!("kt b.transpose: {e}"))?
+                    .contiguous()
+                    .map_err(|e| anyhow::anyhow!("kt b_t.contiguous: {e}"))?;
+                let d_kt = kiln_tensor::ops::matmul(&h_kt, &b_t_kt)
+                    .map_err(|e| anyhow::anyhow!("kt matmul h@b_t: {e}"))?;
+                let delta_kt = kiln_tensor::ops::mul_scalar(&d_kt, lora_scale)
+                    .map_err(|e| anyhow::anyhow!("kt mul_scalar(scale): {e}"))?;
+                let out2d = kiln_tensor::ops::add(&base2d, &delta_kt)
+                    .map_err(|e| anyhow::anyhow!("kt add(base, delta): {e}"))?;
+                tape.record(
+                    &out2d,
+                    &[&base2d, &x2d, a_kt, b_kt],
+                    Box::new(LoraDeltaAddBackward {
+                        x: x2d.clone(),
+                        a: a_kt.clone(),
+                        b: b_kt.clone(),
+                        scale: lora_scale,
+                    }),
+                );
+                out2d
+            }
+            // No LoRA (e.g. lm_head): the base matmul output IS the projection.
+            _ => base2d,
+        };
+
+        // 4) Reshape back to `x.dims[..-1] ++ [n]`.
+        let mut out_shape = x_dims[..x_dims.len() - 1].to_vec();
+        out_shape.push(n);
+        let out2d_c = if out2d.is_contiguous() {
+            out2d.clone()
+        } else {
+            out2d
+                .contiguous()
+                .map_err(|e| anyhow::anyhow!("kt out2d.contiguous: {e}"))?
+        };
+        let out_kt = out2d_c
+            .reshape(out_shape)
+            .map_err(|e| anyhow::anyhow!("kt out reshape -> nd: {e}"))?;
+        tape.record(
+            &out_kt,
+            &[&out2d],
+            Box::new(ReshapeBackward {
+                input_shape: vec![rows, n],
+            }),
+        );
+
+        Ok(out_kt)
+    }) {
+        Some(result) => result,
+        None => return Ok(None),
+    };
+
+    let out_kt =
+        out_kt.context("tape_forward::try_tape_lora_linear_cuda: kt-tape forward failed")?;
+    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+        .context("tape_forward::try_tape_lora_linear_cuda: kt -> candle copy failed")?;
+
+    // CP-4 (#1082) tape_bridge: register IO mappings. `x` chains upstream;
+    // `proj.a`/`proj.b` are the differentiable LoRA Vars the optimiser cares
+    // about (exactly as `try_tape_lora_add_cuda`). The frozen base weight is
+    // not registered (no grad consumer for it).
+    kiln_kt_bridge::tape_bridge::register_input_mapping(x_kt.id(), x.id());
+    if let (Some(proj), Some(a_kt), Some(b_kt)) = (lora, a_kt.as_ref(), b_kt.as_ref()) {
+        kiln_kt_bridge::tape_bridge::register_input_mapping(a_kt.id(), proj.a.id());
+        kiln_kt_bridge::tape_bridge::register_input_mapping(b_kt.id(), proj.b.id());
+    }
     kiln_kt_bridge::tape_bridge::register_output_mapping(out_kt.id(), out.id());
     kiln_kt_bridge::tape_bridge::retain_output_for_chaining(&out_kt, out.id());
 
