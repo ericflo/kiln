@@ -5,11 +5,11 @@
 //!
 //! # Why this module exists
 //!
-//! The existing [`crate::fused_rmsnorm_via_kt_forward_op`] wraps the
-//! CUDA fused RMSNorm forward + backward inside a candle `CustomOp2`
-//! (`KtForwardOp2`). That's how kiln keeps the candle dependency
-//! alive in the rmsnorm-kernel crate today — even though both halves
-//! of the autograd roundtrip already bottom out in
+//! The candle-autograd shim `kiln-model::rmsnorm_candle_shim::fused_rmsnorm_via_kt_forward_op`
+//! (relocated out of this crate in (#1082)) wraps the CUDA fused RMSNorm
+//! forward + backward inside a candle `CustomOp2` (`KtForwardOp2`). That
+//! shim is how the candle-autograd path reaches these kernels — even
+//! though both halves of the autograd roundtrip already bottom out in
 //! `kiln_tensor::Tensor` + the kt-typed `fused_rmsnorm_kt` /
 //! `fused_rmsnorm_backward_kt` entries.
 //!
@@ -215,7 +215,8 @@ fn cast_partial_hidden_f32_to_bf16(
 }
 
 /// kt-tape fused RMSNorm forward+backward — Phase 6a/CP-4 successor to
-/// [`crate::fused_rmsnorm_via_kt_forward_op`].
+/// the candle `KtForwardOp2` shim
+/// `kiln-model::rmsnorm_candle_shim::fused_rmsnorm_via_kt_forward_op`.
 ///
 /// Runs the CUDA forward via [`fused_rmsnorm_kt`], then records a tape
 /// node whose backward calls [`fused_rmsnorm_backward_kt`] on the same
@@ -239,7 +240,8 @@ fn cast_partial_hidden_f32_to_bf16(
 ///
 /// The production caller in `kiln_model::forward::rms_norm`
 /// (`crates/kiln-model/src/forward.rs:7172`) still routes through
-/// [`crate::fused_rmsnorm_via_kt_forward_op`], not this entry. The
+/// `kiln-model::rmsnorm_candle_shim::fused_rmsnorm_via_kt_forward_op`,
+/// not this entry. The
 /// flip is gated on CP-4 substrate work in `kiln-train` (porting
 /// `loss.backward()` / `candle_core::backprop::GradStore` onto
 /// `kiln_autograd::Var` / `Tape::backward`). See

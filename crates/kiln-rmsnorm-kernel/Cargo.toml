@@ -9,11 +9,28 @@ description = "Fused RMSNorm CUDA kernel (Liger-style) with C-ABI wrapper — co
 build = "build.rs"
 
 [dependencies]
-candle-core = { workspace = true, features = ["cuda"] }
+# (#1082) candle-drop: this crate is now candle-free. The candle-typed
+# glue (the `*_storage` / `matmul_f32_bf16w` / `causal_depthwise_conv1d_f32*`
+# wrappers + the `KtForwardOp2` autograd shim, formerly `kt_forward_op.rs`)
+# was the sole user of `candle-core` here; it moved UP into
+# `kiln-model::rmsnorm_candle_shim`, which keeps candle. The raw
+# `extern "C"` FFI declarations + the pure-`kiln_tensor` kt surface
+# (`kt_api`, `kt_tape`) stay; the moved wrappers re-declare the FFI
+# symbols they need (same single linker symbol in
+# `libkiln_rmsnorm_kernel.a`).
 half = "2"
-# Phase 7 prep — kiln-tensor-typed surface alongside candle-typed.
+# kiln-tensor-typed surface (`kt_api`, `kt_tape`) over the same CUDA FFI.
 kiln-tensor = { workspace = true, features = ["cuda"] }
-kiln-kt-bridge = { workspace = true, features = ["cuda"] }
+# (#1082) candle-drop: `default-features = false` opts OUT of kt-bridge's
+# now-optional `candle` feature. This crate uses ONLY the kt-native bridge
+# surface (BridgeError + alloc_cuda_tensor + cuda_input_device_ptr +
+# cuda_output_device_ptr + cuda_storage_and_byte_offset +
+# cuda_storage_of_output), none of which touch candle. With this opt-out,
+# `cargo tree -p kiln-rmsnorm-kernel --features cuda` is candle-free.
+# NOTE: declared as a DIRECT path dep (not `workspace = true`) because Cargo
+# forbids a member overriding `default-features = false` on a
+# workspace-inherited dependency (same as kiln-opd-loss-kernel).
+kiln-kt-bridge = { path = "../kiln-kt-bridge", default-features = false, features = ["cuda"] }
 # Phase 6a/CP-4 (#1082): kt-tape RMSNorm shim records onto kiln_autograd::Tape.
 kiln-autograd = { workspace = true }
 

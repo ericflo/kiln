@@ -2911,7 +2911,7 @@ impl CustomOp3 for CudaLoraAddF32 {
         let out_storage = s_base.try_clone(l_base)?;
         let out_shape = Shape::from(l_base.dims().to_vec());
         let out_layout = Layout::contiguous(out_shape.clone());
-        kiln_rmsnorm_kernel::lora_add_inplace_f32_storage(
+        crate::rmsnorm_candle_shim::lora_add_inplace_f32_storage(
             &out_storage,
             &out_layout,
             s_hidden,
@@ -3072,7 +3072,7 @@ impl CustomOp3 for CudaLoraLinearBf16 {
         let hidden_shape = Shape::from(vec![rows, rank]);
         let hidden_layout = Layout::contiguous(hidden_shape);
         let hidden_f32 = hidden_bf16.to_dtype(&hidden_layout, DType::F32)?;
-        kiln_rmsnorm_kernel::lora_add_bf16_storage(
+        crate::rmsnorm_candle_shim::lora_add_bf16_storage(
             &out_storage,
             &out_layout,
             &out_storage,
@@ -3287,7 +3287,7 @@ impl CustomOp3 for CudaLoraAddBf16 {
         let out_storage = s_base.try_clone(l_base)?;
         let out_shape = Shape::from(l_base.dims().to_vec());
         let out_layout = Layout::contiguous(out_shape.clone());
-        kiln_rmsnorm_kernel::lora_add_bf16_storage(
+        crate::rmsnorm_candle_shim::lora_add_bf16_storage(
             &out_storage,
             &out_layout,
             s_base,
@@ -3546,7 +3546,7 @@ fn attention_output_gate_decode_if(
 fn cuda_sigmoid_mul_training_bf16(x: &Tensor, gate: &Tensor) -> Result<Option<Tensor>> {
     if cuda_fused_attn_sigmoid_mul_disabled()
         || (!x.track_op() && !gate.track_op())
-        || !kiln_rmsnorm_kernel::supports_sigmoid_mul(x, gate)
+        || !crate::rmsnorm_candle_shim::supports_sigmoid_mul(x, gate)
     {
         return Ok(None);
     }
@@ -3595,7 +3595,7 @@ impl CustomOp2 for CudaSigmoidMulTrainingBf16 {
         let out_storage = s_x.try_clone(l_x)?;
         let out_shape = Shape::from(l_x.dims().to_vec());
         let out_layout = Layout::contiguous(out_shape.clone());
-        kiln_rmsnorm_kernel::fused_sigmoid_mul_storage(
+        crate::rmsnorm_candle_shim::fused_sigmoid_mul_storage(
             &out_storage,
             &out_layout,
             s_x,
@@ -7290,7 +7290,7 @@ pub fn rms_norm(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor> {
                     }
                 }
             }
-            if should_use_fused_rmsnorm() && kiln_rmsnorm_kernel::supports(x, weight) {
+            if should_use_fused_rmsnorm() && crate::rmsnorm_candle_shim::supports(x, weight) {
                 // Phase 7 (#1082): kt-forward-op shim production caller.
                 // Replaces the candle-typed `fused_rmsnorm_with_autograd`
                 // (CustomOp2 over `kiln_fused_rmsnorm` forward + the
@@ -7317,7 +7317,7 @@ pub fn rms_norm(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor> {
                 // `docs/rmsnorm-kt-tape-production-caller-stop-2026-05-28.md`
                 // for the audit explaining why a per-call-site flip is
                 // not progress until CP-4 lands.
-                return kiln_rmsnorm_kernel::fused_rmsnorm_via_kt_forward_op(x, weight, eps as f32)
+                return crate::rmsnorm_candle_shim::fused_rmsnorm_via_kt_forward_op(x, weight, eps as f32)
                     .context("fused_rmsnorm_via_kt_forward_op shim failed");
             }
         }
@@ -10116,7 +10116,7 @@ fn cuda_rotary_one_training_bf16_supported(
 /// Process-wide kill switch for [`fused_rotary_one_backward_via_kt_bridge`].
 ///
 /// Set `KILN_DISABLE_ROTARY_ONE_BWD_KT_BRIDGE=1` to fall back to the
-/// candle-typed `kiln_rmsnorm_kernel::rotary_one_bwd_bf16` path. The
+/// candle-typed `crate::rmsnorm_candle_shim::rotary_one_bwd_bf16` path. The
 /// fallback is also taken automatically on any kt-bridge error
 /// (borrow / FFI / copy-back), matching the precedent established by
 /// `fused_rmsnorm_backward_via_kt_bridge` in commit `341da876`.
@@ -10133,7 +10133,7 @@ fn rotary_one_bwd_kt_bridge_disabled() -> bool {
     })
 }
 
-/// kt-bridge variant of `kiln_rmsnorm_kernel::rotary_one_bwd_bf16` —
+/// kt-bridge variant of `crate::rmsnorm_candle_shim::rotary_one_bwd_bf16` —
 /// borrows `grad_y`/`cos`/`sin` as kt-Tensors, dispatches the same
 /// `kiln_fused_rotary_one_bwd` FFI symbol via
 /// [`kiln_rmsnorm_kernel::fused_rotary_one_bwd_kt`], and copies the
@@ -10253,7 +10253,7 @@ impl CustomOp3 for CudaRotaryOneBf16 {
         let out_storage = s_x.try_clone(l_x)?;
         let out_shape = Shape::from(l_x.dims().to_vec());
         let out_layout = Layout::contiguous(out_shape.clone());
-        kiln_rmsnorm_kernel::rotary_one_bf16_storage(
+        crate::rmsnorm_candle_shim::rotary_one_bf16_storage(
             &out_storage,
             &out_layout,
             s_x,
@@ -10277,7 +10277,7 @@ impl CustomOp3 for CudaRotaryOneBf16 {
         _res: &Tensor,
         grad_y: &Tensor,
     ) -> CandleResult<(Option<Tensor>, Option<Tensor>, Option<Tensor>)> {
-        if kiln_rmsnorm_kernel::supports_rotary_one_bwd_bf16(
+        if crate::rmsnorm_candle_shim::supports_rotary_one_bwd_bf16(
             grad_y,
             cos,
             sin,
@@ -10304,7 +10304,7 @@ impl CustomOp3 for CudaRotaryOneBf16 {
                     }
                 }
             }
-            let grad_x = kiln_rmsnorm_kernel::rotary_one_bwd_bf16(
+            let grad_x = crate::rmsnorm_candle_shim::rotary_one_bwd_bf16(
                 grad_y,
                 cos,
                 sin,
@@ -33526,7 +33526,7 @@ mod tests {
     /// `341da876`; see `docs/CANDLE_REMOVAL_PLAN.md` §"kt-autograd
     /// readiness"). This test exercises the new
     /// `fused_rotary_one_backward_via_kt_bridge` against the candle
-    /// `kiln_rmsnorm_kernel::rotary_one_bwd_bf16` on the SAME inputs.
+    /// `crate::rmsnorm_candle_shim::rotary_one_bwd_bf16` on the SAME inputs.
     /// Both call the same FFI symbol (`kiln_fused_rotary_one_bwd`) →
     /// outputs MUST be bit-exact. Unlike rmsnorm there is no
     /// atomicAdd row reduction here (the kernel writes per-token
@@ -33578,12 +33578,12 @@ mod tests {
             let sin = Tensor::from_vec(raw_sin, (seq_len, half), &device)?;
 
             assert!(
-                kiln_rmsnorm_kernel::supports_rotary_one_bwd_bf16(&g, &cos, &sin, head_dim, rotary_dim),
+                crate::rmsnorm_candle_shim::supports_rotary_one_bwd_bf16(&g, &cos, &sin, head_dim, rotary_dim),
                 "supports check failed on {label}"
             );
 
             // Path A: candle-typed body (existing).
-            let gx_candle = kiln_rmsnorm_kernel::rotary_one_bwd_bf16(
+            let gx_candle = crate::rmsnorm_candle_shim::rotary_one_bwd_bf16(
                 &g, &cos, &sin, head_dim, rotary_dim,
             )
             .expect("candle rotary_one_bwd should succeed");

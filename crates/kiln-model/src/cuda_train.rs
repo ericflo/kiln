@@ -1274,7 +1274,7 @@ pub fn cuda_matmul_f32_bf16w(
         lhs.dtype(),
         rhs.dtype()
     );
-    let out = kiln_rmsnorm_kernel::matmul_f32_bf16w(lhs.as_tensor(), rhs.as_tensor())
+    let out = crate::rmsnorm_candle_shim::matmul_f32_bf16w(lhs.as_tensor(), rhs.as_tensor())
         .context("cuda_matmul_f32_bf16w: CUDA mixed GEMM")?;
     let needs_grad = lhs.requires_grad() || lhs.grad_fn().is_some() || lhs.param_id().is_some();
     let grad_fn = needs_grad.then(|| {
@@ -1348,7 +1348,7 @@ pub fn cuda_lora_linear_fused(
             .matmul(base_weight.as_tensor())
             .context("cuda_lora_linear_fused: base F32 matmul")?,
         (candle_core::DType::F32, candle_core::DType::BF16) => {
-            kiln_rmsnorm_kernel::matmul_f32_bf16w(input.as_tensor(), base_weight.as_tensor())
+            crate::rmsnorm_candle_shim::matmul_f32_bf16w(input.as_tensor(), base_weight.as_tensor())
                 .context("cuda_lora_linear_fused: base BF16-weight matmul")?
         }
         _ => anyhow::bail!(
@@ -2086,7 +2086,7 @@ fn cuda_f32_hidden_head_matmul(
     match (lhs.dtype(), rhs.dtype()) {
         (candle_core::DType::F32, candle_core::DType::F32) => lhs.matmul(rhs).context(context),
         (candle_core::DType::F32, candle_core::DType::BF16) => {
-            kiln_rmsnorm_kernel::matmul_f32_bf16w(lhs, rhs).context(context)
+            crate::rmsnorm_candle_shim::matmul_f32_bf16w(lhs, rhs).context(context)
         }
         _ => anyhow::bail!(
             "{context}: unsupported lhs/rhs dtypes {:?}/{:?}",
@@ -2906,7 +2906,7 @@ pub fn cuda_causal_depthwise_conv1d_prefill_with_state(
         channels
     );
 
-    let output_tensor = kiln_rmsnorm_kernel::causal_depthwise_conv1d_f32(
+    let output_tensor = crate::rmsnorm_candle_shim::causal_depthwise_conv1d_f32(
         input.as_tensor(),
         weight.as_tensor(),
         conv_state.as_tensor(),
@@ -3008,7 +3008,7 @@ pub fn cuda_causal_depthwise_conv1d_prefill_with_state_inplace_input_grad(
         let old_part = cuda_narrow_rows(conv_state, rows, state_rows - rows)?;
         cuda_cat_rows(&[old_part, input.clone()])?.detach()
     };
-    let output_tensor = kiln_rmsnorm_kernel::causal_depthwise_conv1d_f32_inplace(
+    let output_tensor = crate::rmsnorm_candle_shim::causal_depthwise_conv1d_f32_inplace(
         input.as_tensor(),
         weight.as_tensor(),
         conv_state.as_tensor(),
@@ -5541,7 +5541,7 @@ impl CudaBackwardOp for MatmulF32Bf16wBackward {
             "cuda_matmul_f32_bf16w backward expected one input, got {}",
             self.inputs.len()
         );
-        let grad = kiln_rmsnorm_kernel::matmul_f32_bf16w_bwd_lhs(
+        let grad = crate::rmsnorm_candle_shim::matmul_f32_bf16w_bwd_lhs(
             grad_out.as_tensor(),
             self.weight.as_tensor(),
         )
@@ -5593,7 +5593,7 @@ impl CudaBackwardOp for FusedLoraLinearBackward {
                     .context("cuda_lora_linear_fused backward: base input grad")?
             }
             candle_core::DType::BF16 => {
-                kiln_rmsnorm_kernel::matmul_f32_bf16w_bwd_lhs(&grad, self.base_weight.as_tensor())
+                crate::rmsnorm_candle_shim::matmul_f32_bf16w_bwd_lhs(&grad, self.base_weight.as_tensor())
                     .context("cuda_lora_linear_fused backward: BF16 base input grad")?
             }
             dtype => {
@@ -5673,7 +5673,7 @@ impl CudaBackwardOp for CausalDepthwiseConv1dWithStateBackward {
         let input = &self.inputs[0];
         let weight = &self.inputs[1];
         let state = &self.inputs[2];
-        let input_grad = kiln_rmsnorm_kernel::causal_depthwise_conv1d_f32_bwd_input(
+        let input_grad = crate::rmsnorm_candle_shim::causal_depthwise_conv1d_f32_bwd_input(
             grad_out.as_tensor(),
             self.weight.as_tensor(),
         )
@@ -5682,7 +5682,7 @@ impl CudaBackwardOp for CausalDepthwiseConv1dWithStateBackward {
             || weight.grad_fn().is_some()
             || weight.param_id().is_some())
         .then(|| {
-            kiln_rmsnorm_kernel::causal_depthwise_conv1d_f32_bwd_weight(
+            crate::rmsnorm_candle_shim::causal_depthwise_conv1d_f32_bwd_weight(
                 grad_out.as_tensor(),
                 input.as_tensor(),
                 state.as_tensor(),
@@ -5695,7 +5695,7 @@ impl CudaBackwardOp for CausalDepthwiseConv1dWithStateBackward {
         let state_grad =
             (state.requires_grad() || state.grad_fn().is_some() || state.param_id().is_some())
                 .then(|| {
-                    kiln_rmsnorm_kernel::causal_depthwise_conv1d_f32_bwd_state(
+                    crate::rmsnorm_candle_shim::causal_depthwise_conv1d_f32_bwd_state(
                         grad_out.as_tensor(),
                         self.weight.as_tensor(),
                     )
@@ -5732,7 +5732,7 @@ impl CudaBackwardOp for CausalDepthwiseConv1dInputGradBackward {
             "cuda_causal_depthwise_conv1d_prefill_with_state_inplace_input_grad backward expected one input, got {}",
             self.inputs.len()
         );
-        let input_grad = kiln_rmsnorm_kernel::causal_depthwise_conv1d_f32_bwd_input(
+        let input_grad = crate::rmsnorm_candle_shim::causal_depthwise_conv1d_f32_bwd_input(
             grad_out.as_tensor(),
             self.weight.as_tensor(),
         )

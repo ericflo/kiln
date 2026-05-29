@@ -2602,7 +2602,7 @@ pub fn try_tape_causal_conv1d_cuda(
 /// (`forward::causal_conv1d_prefill`, the `[B, C, T]` candle path the training
 /// forward takes when `gdn_forward_only_fastpaths` is OFF). Wraps the proven
 /// CUDA bwd-input kernel
-/// [`kiln_rmsnorm_kernel::causal_depthwise_conv1d_f32_bwd_input`] (the SAME
+/// [`crate::rmsnorm_candle_shim::causal_depthwise_conv1d_f32_bwd_input`] (the SAME
 /// kernel the eager `cuda_train.rs` GDN backward uses), handling the
 /// `[B, C, T]` ↔ `[rows, channels]` layout transform.
 ///
@@ -2688,7 +2688,7 @@ impl BackwardOp for CausalConv1dPrefillInputBackward {
                     "CausalConv1dPrefillInputBackward: grad [B,C,T]->[rows,C]: {e}"
                 ))
             })?;
-        let din_rows = kiln_rmsnorm_kernel::causal_depthwise_conv1d_f32_bwd_input(
+        let din_rows = crate::rmsnorm_candle_shim::causal_depthwise_conv1d_f32_bwd_input(
             &grad_rows,
             &self.weight,
         )
