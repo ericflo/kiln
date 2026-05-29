@@ -29891,6 +29891,134 @@ mod tests {
         Ok(())
     }
 
+    /// Shared max-abs-diff grad comparator for the analytic-backward parity
+    /// tests below (same shape as the one nested in
+    /// `test_gdn_recurrent_backward_no_grad_matches_autograd_cpu`).
+    fn assert_grad_close_tol(name: &str, actual: &Tensor, expected: &Tensor, tol: f32) -> Result<()> {
+        let diff = (actual - expected)?
+            .abs()?
+            .flatten_all()?
+            .max(0)?
+            .to_scalar::<f32>()?;
+        assert!(diff < tol, "{name} gradient diff too large: {diff} >= {tol}");
+        Ok(())
+    }
+
+    /// CP-4 (#1082): numerically validate `gdn_gated_rms_norm_backward_no_grad`
+    /// against candle autograd on CPU/F32.
+    ///
+    /// The forward reference is the PRODUCTION `gated_rms_norm_fallback`
+    /// (`out = rms_norm(x, weight, eps) * silu(z)` — see forward.rs ~12570),
+    /// called directly so the analytic adjoint is checked against the real
+    /// forward rather than a re-derivation. `eps = 1e-6` is passed identically
+    /// to both the forward and the backward (the existing GDN gated-rms-norm
+    /// kernel tests at ~26016/26081 use the same eps). The same deterministic
+    /// upstream tensor seeds `loss = sum(out * upstream)`; candle's
+    /// `loss.backward()` yields the gold dx/dz/dw, and the backward fn is fed
+    /// that upstream as `grad_out`. Tolerance 1e-4 (F32).
+    #[test]
+    fn test_gdn_gated_rms_norm_backward_no_grad_matches_autograd_cpu() -> Result<()> {
+        let device = Device::Cpu;
+        let dtype = DType::F32;
+
+        // Match the production gated_rms_norm shapes: [b, t, hidden] for x/z,
+        // [hidden] for the shared weight.
+        let b = 1usize;
+        let t = 4usize;
+        let hidden = 8usize;
+        let eps = 1e-6f64;
+
+        let x = det_tensor(&[b, t, hidden], 0.40, 0.05, &device)?.to_dtype(dtype)?;
+        let z = det_tensor(&[b, t, hidden], 0.30, -0.07, &device)?.to_dtype(dtype)?;
+        let weight = det_tensor(&[hidden], 0.20, 0.90, &device)?.to_dtype(dtype)?;
+        let upstream = det_tensor(&[b, t, hidden], 0.25, -0.03, &device)?.to_dtype(dtype)?;
+
+        let x_var = Var::from_tensor(&x)?;
+        let z_var = Var::from_tensor(&z)?;
+        let weight_var = Var::from_tensor(&weight)?;
+
+        // Forward via the production fallback so the gold grads exercise the
+        // exact math the analytic backward claims to invert.
+        let out = gated_rms_norm_fallback(
+            x_var.as_tensor(),
+            z_var.as_tensor(),
+            weight_var.as_tensor(),
+            eps,
+        )?;
+        let loss = (&out.to_dtype(DType::F32)? * &upstream)?.sum_all()?;
+        let grads = loss.backward()?;
+
+        let manual = gdn_gated_rms_norm_backward_no_grad(&x, &z, &weight, eps, &upstream)?;
+
+        assert_grad_close_tol(
+            "gated_rms_norm.dx",
+            &manual.dx,
+            grads.get(x_var.as_tensor()).context("missing x grad")?,
+            1e-4,
+        )?;
+        assert_grad_close_tol(
+            "gated_rms_norm.dz",
+            &manual.dz,
+            grads.get(z_var.as_tensor()).context("missing z grad")?,
+            1e-4,
+        )?;
+        assert_grad_close_tol(
+            "gated_rms_norm.dw",
+            &manual.dw,
+            grads
+                .get(weight_var.as_tensor())
+                .context("missing weight grad")?,
+            1e-4,
+        )?;
+
+        Ok(())
+    }
+
+    /// CP-4 (#1082): numerically validate `gdn_l2_norm_scale_backward_no_grad`
+    /// against candle autograd on CPU/F32.
+    ///
+    /// The forward reference reuses the PRODUCTION `l2_normalize` (forward.rs
+    /// ~12171, `x / sqrt(sum(x^2, last) + 1e-6)`) and multiplies by a non-trivial
+    /// `scale` (mirrors the Q path's `scale = 1/sqrt(dk)`). `l2_normalize`
+    /// hard-codes `eps = 1e-6`, so the backward is fed `eps = 1e-6` to match (as
+    /// its docstring states). `loss = sum(out * upstream)`; candle's
+    /// `loss.backward()` yields the gold dx, and the backward fn is fed the same
+    /// upstream as `grad_out`. Tolerance 1e-4 (F32).
+    #[test]
+    fn test_gdn_l2_norm_scale_backward_no_grad_matches_autograd_cpu() -> Result<()> {
+        let device = Device::Cpu;
+        let dtype = DType::F32;
+
+        // [b, heads, t, dk]: the GDN qk-norm operates on the trailing dk axis.
+        let b = 1usize;
+        let heads = 2usize;
+        let t = 4usize;
+        let dk = 6usize;
+        let scale = 1.0f64 / (dk as f64).sqrt(); // Q-path scale = 1/sqrt(dk).
+        let eps = 1e-6f64; // matches l2_normalize's hard-coded epsilon.
+
+        let x = det_tensor(&[b, heads, t, dk], 0.45, 0.06, &device)?.to_dtype(dtype)?;
+        let upstream = det_tensor(&[b, heads, t, dk], 0.22, -0.04, &device)?.to_dtype(dtype)?;
+
+        let x_var = Var::from_tensor(&x)?;
+
+        // Forward via the production l2_normalize + scalar scale.
+        let out = (l2_normalize(x_var.as_tensor())?.affine(scale, 0.0))?;
+        let loss = (&out.to_dtype(DType::F32)? * &upstream)?.sum_all()?;
+        let grads = loss.backward()?;
+
+        let manual = gdn_l2_norm_scale_backward_no_grad(&x, scale, eps, &upstream)?;
+
+        assert_grad_close_tol(
+            "l2_norm_scale.dx",
+            &manual,
+            grads.get(x_var.as_tensor()).context("missing x grad")?,
+            1e-4,
+        )?;
+
+        Ok(())
+    }
+
     #[test]
     fn test_gdn_chunkwise_masks_decay_before_exp() -> Result<()> {
         let device = Device::Cpu;
