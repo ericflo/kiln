@@ -1532,7 +1532,14 @@ impl BackwardOp for GdnRecurrentBackward {
         )
         .map_err(|e| kiln_tensor::Error::Msg(format!("GdnRecurrentBackward: gdn bwd: {e}")))?;
         let to_kt = |t: &Tensor| -> kiln_tensor::Result<kiln_tensor::Tensor> {
-            kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(t).map_err(|e| {
+            // gdn_recurrent_backward_no_grad can return non-contiguous grads
+            // (internal transposes/narrows). Materialise contiguous, then
+            // COPY into an owned kt tensor (no keep-alive lifetime tie to a
+            // local candle temporary).
+            let tc = t.contiguous().map_err(|e| {
+                kiln_tensor::Error::Msg(format!("GdnRecurrentBackward: grad contiguous: {e}"))
+            })?;
+            kiln_kt_bridge::kt_tensor_from_candle_cuda_copy(&tc).map_err(|e| {
                 kiln_tensor::Error::Msg(format!("GdnRecurrentBackward: grad candle->kt: {e}"))
             })
         };
