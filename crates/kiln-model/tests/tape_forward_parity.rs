@@ -3205,3 +3205,353 @@ fn tape_record_gdn_recurrent_head_last_records_node_and_emits_5_grads() {
         std::env::remove_var("KILN_USE_TAPE_GDN");
     }
 }
+
+// ----------------------------------------------------------------------
+// CP-4 GDN surrounding-op tape coverage (#1082) — conv1d / L2-qk-norm /
+// gated-RMSNorm + the head-FIRST→head-LAST transpose chaining fix.
+//
+// For a tape-authoritative backward to reach the GDN-block in_proj / out_proj
+// LoRA Vars, EVERY op between the projection matmuls and the recurrence must
+// record onto the kt Tape. These tests gate the WIRING deterministically
+// (load-robust per the kt-substrate thread-safety note): exactly one node with
+// the right input count; the walk routes grads to the inputs with the correct
+// shapes; all grads nonzero (the "0 LoRA grads" failure mode CP-4 closes) and
+// finite. STRUCTURAL gates only — no cross-call numeric oracle (the kt
+// substrate is not thread-safe under parallel test load).
+// ----------------------------------------------------------------------
+
+/// Small helpers shared by the surrounding-op tests.
+fn cuda_max_abs(tt: &Tensor) -> f32 {
+    tt.to_dtype(DType::F32)
+        .unwrap()
+        .abs()
+        .unwrap()
+        .flatten_all()
+        .unwrap()
+        .max(0)
+        .unwrap()
+        .to_scalar::<f32>()
+        .unwrap()
+}
+
+fn cuda_all_finite(tt: &Tensor) -> bool {
+    tt.to_dtype(DType::F32)
+        .unwrap()
+        .flatten_all()
+        .unwrap()
+        .to_vec1::<f32>()
+        .unwrap()
+        .iter()
+        .all(|x| x.is_finite())
+}
+
+#[test]
+fn tape_causal_conv1d_records_node_and_emits_input_grad() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    let device = match cuda_device() {
+        Some(d) => d,
+        None => {
+            eprintln!("tape conv1d node + input grad: no CUDA device — skipping");
+            return;
+        }
+    };
+
+    // Conv kernel layout: input [rows, channels], weight [channels, kernel],
+    // state [channels, kernel-1]. rows = time steps; small + deterministic.
+    let (rows, channels, kernel) = (6usize, 5usize, 4usize);
+    let input = det_f32(&device, &[rows, channels], 0.10, 0.011);
+    let weight = det_f32(&device, &[channels, kernel], 0.05, 0.007);
+    let state = det_f32(&device, &[channels, kernel - 1], 0.02, 0.003);
+
+    unsafe {
+        std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
+        std::env::set_var("KILN_USE_TAPE_GDN_CONV", "1");
+    }
+
+    let (res, tape) = kiln_model::tape_forward::with_thread_local_tape(|| {
+        kiln_model::tape_forward::try_tape_causal_conv1d_cuda(&input, &weight, &state, kernel)
+    });
+    let out = res
+        .expect("try_tape_causal_conv1d_cuda ok")
+        .expect("returned Some(out) — gate + scope both on");
+    assert_eq!(out.shape().dims(), &[rows, channels], "conv out shape");
+    assert!(out.device().is_cuda(), "conv out stays on CUDA");
+
+    assert_eq!(
+        tape.len(),
+        1,
+        "conv1d records exactly one node (got {})",
+        tape.len()
+    );
+    let node = &tape.nodes()[0];
+    let out_id = node.output_id;
+    let input_ids = node.input_ids.clone();
+    assert_eq!(
+        input_ids.len(),
+        1,
+        "conv1d records exactly one input (the conv input; weight frozen); got {}",
+        input_ids.len()
+    );
+
+    // Seed grad shaped like out; walk.
+    let seed = det_f32(&device, &[rows, channels], 0.3, -0.009);
+    let seed_kt =
+        kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&seed).expect("seed kt borrow");
+    let mut seeds = HashMap::new();
+    seeds.insert(out_id, seed_kt);
+    let grads = tape
+        .backward_with_seeds(seeds, |a, b| kiln_tensor::ops::add(a, b))
+        .expect("conv1d tape backward walk");
+
+    let g_in = {
+        let kt = grads.get(input_ids[0]).expect("conv input grad present");
+        kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(kt).expect("grad -> candle")
+    };
+    assert_eq!(g_in.shape().dims(), &[rows, channels], "d_input shape == input");
+    assert!(cuda_all_finite(&g_in), "d_input has non-finite entries");
+    assert!(
+        cuda_max_abs(&g_in) > 1e-6,
+        "d_input is essentially zero — tape backward not reaching the conv input"
+    );
+
+    unsafe {
+        std::env::remove_var("KILN_USE_TAPE_FORWARD");
+        std::env::remove_var("KILN_USE_TAPE_GDN_CONV");
+    }
+}
+
+#[test]
+fn tape_gdn_l2_norm_scale_records_node_and_emits_input_grad() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    let device = match cuda_device() {
+        Some(d) => d,
+        None => {
+            eprintln!("tape l2-qk-norm node + input grad: no CUDA device — skipping");
+            return;
+        }
+    };
+
+    // L2-qk-norm input [b, t, nv, dk]; forward y = l2_normalize(x) * scale on
+    // the trailing axis. Use the Q scale (1/sqrt(dk)) so the adjoint folds a
+    // non-trivial constant.
+    let (b, t, nv, dk) = (1usize, 4usize, 2usize, 8usize);
+    let scale = 1.0f64 / (dk as f64).sqrt();
+    let x = det_f32(&device, &[b, t, nv, dk], 0.10, 0.011);
+    // The production forward already computed the output; build a same-shape
+    // stand-in (this is a structural wiring gate, not a numeric oracle — the
+    // recorded backward derives the adjoint from the saved `x`, not from `out`).
+    let out = det_f32(&device, &[b, t, nv, dk], 0.05, 0.004);
+
+    unsafe {
+        std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
+        std::env::set_var("KILN_USE_TAPE_GDN_QK_NORM", "1");
+    }
+
+    let (res, tape) = kiln_model::tape_forward::with_thread_local_tape(|| {
+        kiln_model::tape_forward::try_tape_gdn_l2_norm_scale_cuda(&x, scale, &out)
+    });
+    let returned = res
+        .expect("try_tape_gdn_l2_norm_scale_cuda ok")
+        .expect("returned Some(out) — gate + scope both on");
+    assert_eq!(returned.shape().dims(), &[b, t, nv, dk], "l2 norm out shape");
+
+    assert_eq!(
+        tape.len(),
+        1,
+        "l2-qk-norm records exactly one node (got {})",
+        tape.len()
+    );
+    let node = &tape.nodes()[0];
+    let out_id = node.output_id;
+    let input_ids = node.input_ids.clone();
+    assert_eq!(
+        input_ids.len(),
+        1,
+        "l2-qk-norm records exactly one input (x; scale is a constant); got {}",
+        input_ids.len()
+    );
+
+    let seed = det_f32(&device, &[b, t, nv, dk], 0.3, -0.009);
+    let seed_kt =
+        kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&seed).expect("seed kt borrow");
+    let mut seeds = HashMap::new();
+    seeds.insert(out_id, seed_kt);
+    let grads = tape
+        .backward_with_seeds(seeds, |a, b| kiln_tensor::ops::add(a, b))
+        .expect("l2-qk-norm tape backward walk");
+
+    let g_x = {
+        let kt = grads.get(input_ids[0]).expect("l2 input grad present");
+        kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(kt).expect("grad -> candle")
+    };
+    assert_eq!(g_x.shape().dims(), &[b, t, nv, dk], "dx shape == x");
+    assert!(cuda_all_finite(&g_x), "dx has non-finite entries");
+    assert!(
+        cuda_max_abs(&g_x) > 1e-6,
+        "dx is essentially zero — tape backward not reaching the l2-norm input"
+    );
+
+    unsafe {
+        std::env::remove_var("KILN_USE_TAPE_FORWARD");
+        std::env::remove_var("KILN_USE_TAPE_GDN_QK_NORM");
+    }
+}
+
+#[test]
+fn tape_gdn_gated_rms_norm_records_node_and_emits_3_grads() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    let device = match cuda_device() {
+        Some(d) => d,
+        None => {
+            eprintln!("tape gated-rms-norm node + grads: no CUDA device — skipping");
+            return;
+        }
+    };
+
+    // Gated RMSNorm forward: out = rms_norm(x, weight) * silu(z). x/z/out are
+    // head-LAST [b, t, nv, dv]; weight is rank-1 [dv].
+    let (b, t, nv, dv) = (1usize, 4usize, 2usize, 6usize);
+    let x = det_f32(&device, &[b, t, nv, dv], 0.10, 0.011);
+    let z = det_f32(&device, &[b, t, nv, dv], 0.20, 0.007);
+    let weight = det_f32(&device, &[dv], 0.50, 0.013);
+    let out = det_f32(&device, &[b, t, nv, dv], 0.05, 0.004);
+    let eps = 1e-6f64;
+
+    unsafe {
+        std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
+        std::env::set_var("KILN_USE_TAPE_GDN_GATED_NORM", "1");
+    }
+
+    let (res, tape) = kiln_model::tape_forward::with_thread_local_tape(|| {
+        kiln_model::tape_forward::try_tape_gdn_gated_rms_norm_cuda(&x, &z, &weight, eps, &out)
+    });
+    let returned = res
+        .expect("try_tape_gdn_gated_rms_norm_cuda ok")
+        .expect("returned Some(out) — gate + scope both on");
+    assert_eq!(returned.shape().dims(), &[b, t, nv, dv], "gated norm out shape");
+
+    assert_eq!(
+        tape.len(),
+        1,
+        "gated-rms-norm records exactly one node (got {})",
+        tape.len()
+    );
+    let node = &tape.nodes()[0];
+    let out_id = node.output_id;
+    let input_ids = node.input_ids.clone();
+    assert_eq!(
+        input_ids.len(),
+        3,
+        "gated-rms-norm records exactly three inputs (x, z, weight); got {}",
+        input_ids.len()
+    );
+
+    let seed = det_f32(&device, &[b, t, nv, dv], 0.3, -0.009);
+    let seed_kt =
+        kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&seed).expect("seed kt borrow");
+    let mut seeds = HashMap::new();
+    seeds.insert(out_id, seed_kt);
+    let grads = tape
+        .backward_with_seeds(seeds, |a, b| kiln_tensor::ops::add(a, b))
+        .expect("gated-rms-norm tape backward walk");
+
+    // Input order [x, z, weight] -> [dx, dz, dw].
+    let fetch = |i: usize| -> Tensor {
+        let kt = grads
+            .get(input_ids[i])
+            .unwrap_or_else(|| panic!("grad {i} present"));
+        kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(kt).expect("grad -> candle")
+    };
+    let g_dx = fetch(0);
+    let g_dz = fetch(1);
+    let g_dw = fetch(2);
+    assert_eq!(g_dx.shape().dims(), &[b, t, nv, dv], "dx shape == x");
+    assert_eq!(g_dz.shape().dims(), &[b, t, nv, dv], "dz shape == z");
+    assert_eq!(g_dw.shape().dims(), &[dv], "dw shape == weight");
+
+    for (name, t) in [("dx", &g_dx), ("dz", &g_dz), ("dw", &g_dw)] {
+        assert!(cuda_all_finite(t), "{name} has non-finite entries");
+        assert!(
+            cuda_max_abs(t) > 1e-6,
+            "{name} is essentially zero — tape backward not reaching the gated-norm input"
+        );
+    }
+
+    unsafe {
+        std::env::remove_var("KILN_USE_TAPE_FORWARD");
+        std::env::remove_var("KILN_USE_TAPE_GDN_GATED_NORM");
+    }
+}
+
+#[test]
+fn tape_transpose_records_node_and_passes_grad_through_transposed() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    let device = match cuda_device() {
+        Some(d) => d,
+        None => {
+            eprintln!("tape transpose node + grad: no CUDA device — skipping");
+            return;
+        }
+    };
+
+    // The chaining-gap fix transposes the recurrence output head-FIRST
+    // [b, nv, t, dv] -> head-LAST [b, t, nv, dv] (axes 1<->2).
+    let (b, nv, t, dv) = (1usize, 2usize, 4usize, 6usize);
+    let x = det_f32(&device, &[b, nv, t, dv], 0.10, 0.011);
+
+    unsafe {
+        std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
+    }
+
+    let (res, tape) = kiln_model::tape_forward::with_thread_local_tape(|| {
+        kiln_model::tape_forward::try_tape_transpose_cuda(&x, 1, 2)
+    });
+    let out = res
+        .expect("try_tape_transpose_cuda ok")
+        .expect("returned Some(out) — gate + scope both on");
+    // Forward transposes axes 1<->2: [b, nv, t, dv] -> [b, t, nv, dv].
+    assert_eq!(out.shape().dims(), &[b, t, nv, dv], "transposed out shape");
+    assert!(out.device().is_cuda(), "transpose out stays on CUDA");
+
+    assert_eq!(
+        tape.len(),
+        1,
+        "transpose records exactly one node (got {})",
+        tape.len()
+    );
+    let node = &tape.nodes()[0];
+    let out_id = node.output_id;
+    let input_ids = node.input_ids.clone();
+    assert_eq!(input_ids.len(), 1, "transpose records exactly one input");
+
+    // Seed a head-LAST grad; the adjoint transposes back to head-FIRST.
+    let seed = det_f32(&device, &[b, t, nv, dv], 0.3, -0.009);
+    let seed_kt =
+        kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&seed).expect("seed kt borrow");
+    let mut seeds = HashMap::new();
+    seeds.insert(out_id, seed_kt);
+    let grads = tape
+        .backward_with_seeds(seeds, |a, b| kiln_tensor::ops::add(a, b))
+        .expect("transpose tape backward walk");
+
+    let g_x = {
+        let kt = grads.get(input_ids[0]).expect("transpose input grad present");
+        kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(kt).expect("grad -> candle")
+    };
+    // The adjoint re-applies transpose(1,2) so the grad shape matches the
+    // head-FIRST input [b, nv, t, dv].
+    assert_eq!(g_x.shape().dims(), &[b, nv, t, dv], "d_input head-first shape == x");
+    assert!(cuda_all_finite(&g_x), "transpose grad has non-finite entries");
+    assert!(
+        cuda_max_abs(&g_x) > 1e-6,
+        "transpose grad is essentially zero — tape backward not reaching the input"
+    );
+
+    unsafe {
+        std::env::remove_var("KILN_USE_TAPE_FORWARD");
+    }
+}

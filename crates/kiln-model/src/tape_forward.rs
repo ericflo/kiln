@@ -108,11 +108,12 @@ use candle_core::Tensor;
 use kiln_autograd::{
     AddBackward, BackwardOp, CrossEntropyKtBackward, EmbeddingBackward, LoraDeltaAddBackward,
     MatmulBackward, MulSigmoidGateBackward, ReshapeBackward, RopeSplitHalfBackward, SiluBackward,
-    Tape,
+    Tape, TransposeBackward,
 };
 
 use crate::backend::BackendRuntime;
 use crate::forward::{
+    gdn_gated_rms_norm_backward_no_grad, gdn_l2_norm_scale_backward_no_grad,
     gdn_recurrent_backward_no_grad, gdn_recurrent_forward_from_parts, GDN_CHUNK_SIZE,
 };
 use crate::lora_loader::LoraProjectionWeights;
@@ -1756,6 +1757,539 @@ pub fn tape_record_gdn_recurrent(
     kiln_kt_bridge::tape_bridge::retain_output_for_chaining(&out_kt, out.id());
 
     Ok(())
+}
+
+// ===========================================================================
+// CP-4 (#1082): GDN surrounding ops — conv1d / L2-qk-norm / gated-RMSNorm.
+//
+// The GDN recurrence is tape-wired above. For a tape-authoritative backward to
+// reach the GDN-block in_proj / out_proj LoRA Vars, EVERY op between the
+// projection matmuls and the recurrence must ALSO record onto the kt Tape, or
+// the chain fragments. These three adapters cover:
+//
+//   * `try_tape_causal_conv1d_cuda`     — Step 2 depthwise conv on mixed-QKV.
+//   * `try_tape_gdn_l2_norm_scale_cuda` — Step 4/5 L2 qk-norm (q scaled, k not).
+//   * `try_tape_gdn_gated_rms_norm_cuda`— Step 8 gated RMSNorm before out_proj.
+//
+// Plus `try_tape_transpose_cuda` (the head-FIRST→head-LAST chaining-gap fix at
+// `forward.rs:gated_deltanet_forward_decode_if`'s `attn_out.transpose(1,2)`).
+//
+// Each has a narrow `KILN_USE_TAPE_GDN_*` gate (mirroring `tape_gdn_enabled`),
+// is a no-op by default, and falls through cleanly so the production forward is
+// untouched with the gate off.
+// ===========================================================================
+
+/// True iff `KILN_USE_TAPE_GDN_CONV` is set to an enable value. Narrow opt-in
+/// for the GDN causal-depthwise-conv1d tape adapter. Cached after first read.
+pub fn tape_gdn_conv_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("KILN_USE_TAPE_GDN_CONV")
+            .map(|v| {
+                let v = v.trim().to_lowercase();
+                !(v.is_empty() || v == "0" || v == "false" || v == "no")
+            })
+            .unwrap_or(false)
+    })
+}
+
+/// True iff `KILN_USE_TAPE_GDN_QK_NORM` is set to an enable value. Narrow
+/// opt-in for the GDN L2-qk-norm tape adapter. Cached after first read.
+pub fn tape_gdn_qk_norm_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("KILN_USE_TAPE_GDN_QK_NORM")
+            .map(|v| {
+                let v = v.trim().to_lowercase();
+                !(v.is_empty() || v == "0" || v == "false" || v == "no")
+            })
+            .unwrap_or(false)
+    })
+}
+
+/// True iff `KILN_USE_TAPE_GDN_GATED_NORM` is set to an enable value. Narrow
+/// opt-in for the GDN gated-RMSNorm tape adapter. Cached after first read.
+pub fn tape_gdn_gated_norm_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("KILN_USE_TAPE_GDN_GATED_NORM")
+            .map(|v| {
+                let v = v.trim().to_lowercase();
+                !(v.is_empty() || v == "0" || v == "false" || v == "no")
+            })
+            .unwrap_or(false)
+    })
+}
+
+/// CUDA-native tape backward for the GDN causal depthwise conv1d w.r.t. its
+/// INPUT only (the conv `weight` is a frozen base tensor in LoRA training —
+/// `weights.conv1d` is NOT a `Var` — so only the input gradient is needed to
+/// keep the chain connected back through the in_proj LoRA Vars).
+///
+/// # Why a CUDA kt `BackwardOp` (not a candle composite)
+///
+/// `kiln_rmsnorm_kernel::causal_depthwise_conv1d_bwd_input_kt` is a fused CUDA
+/// kernel with no device-agnostic composite. Like [`FlashAttnBackward`], the op
+/// dispatching it lives in `kiln-model` (which depends on the kernel crate) and
+/// implements `kiln_autograd::BackwardOp` over kt tensors directly. The kernel
+/// runs in F32 on `[rows, channels]` operands.
+///
+/// # Saved tensors / inputs
+///
+/// `weight` (`[channels, kernel]`, F32) is the only saved state; one
+/// differentiable input (`input`). The backward needs neither the input nor the
+/// conv state (input-grad depends only on `grad_out` and `weight` —
+/// `kiln_causal_depthwise_conv1d_bwd_input_f32`).
+#[derive(Debug)]
+pub(crate) struct CausalConv1dInputBackward {
+    /// Saved F32 CUDA conv weight `[channels, kernel]`.
+    weight: kiln_tensor::Tensor,
+    kernel: usize,
+}
+
+impl BackwardOp for CausalConv1dInputBackward {
+    fn name(&self) -> &'static str {
+        "gdn_causal_conv1d_input_backward"
+    }
+    fn input_count(&self) -> usize {
+        // input only — weight is frozen, state is non-differentiable.
+        1
+    }
+    fn apply(
+        &self,
+        grad_output: &kiln_tensor::Tensor,
+    ) -> kiln_tensor::Result<Vec<Option<kiln_tensor::Tensor>>> {
+        use kiln_tensor::DType as KtDType;
+
+        // The kernel wants a contiguous F32 `[rows, channels]` grad.
+        let go = if grad_output.dtype() == KtDType::F32 {
+            grad_output.clone()
+        } else {
+            kiln_tensor::ops::cast(grad_output, KtDType::F32)?
+        };
+        let go = if go.is_contiguous() { go } else { go.contiguous()? };
+
+        let gi =
+            kiln_rmsnorm_kernel::causal_depthwise_conv1d_bwd_input_kt(&go, &self.weight, self.kernel)
+                .map_err(|e| {
+                    kiln_tensor::Error::Msg(format!(
+                        "CausalConv1dInputBackward: bwd_input_kt: {e}"
+                    ))
+                })?;
+        Ok(vec![Some(gi)])
+    }
+}
+
+/// Route the GDN causal depthwise conv1d forward through the kt `Tape`.
+///
+/// Operates on the kernel's native `[rows, channels]` F32 layout (`rows =
+/// batch*time`): `input` `[rows, channels]`, `weight` `[channels, kernel]`,
+/// `state` `[channels, kernel-1]`. Returns the conv output `[rows, channels]`
+/// (the caller applies SiLU + the head split downstream — those record via
+/// `try_tape_silu_cuda` / reshape adapters). Records a
+/// [`CausalConv1dInputBackward`] so a tape-authoritative backward flows the conv
+/// output grad back to its input (and thus the in_proj LoRA Vars).
+///
+/// `Ok(None)` (caller runs the production conv itself) when the gate is off,
+/// no tape scope is active, the inputs aren't CUDA/F32/contiguous/rank-2, or a
+/// kt borrow fails.
+pub fn try_tape_causal_conv1d_cuda(
+    input: &Tensor,
+    weight: &Tensor,
+    state: &Tensor,
+    kernel: usize,
+) -> Result<Option<Tensor>> {
+    if !tape_forward_enabled() || !tape_gdn_conv_enabled() {
+        return Ok(None);
+    }
+    // kernel + layout envelope: the kt conv kernel is F32, rank-2
+    // `[rows, channels]`, with `weight == [channels, kernel]` and
+    // `state == [channels, kernel-1]`.
+    if !matches!(input.device(), candle_core::Device::Cuda(_))
+        || input.dtype() != candle_core::DType::F32
+        || weight.dtype() != candle_core::DType::F32
+        || state.dtype() != candle_core::DType::F32
+        || input.rank() != 2
+        || weight.rank() != 2
+        || state.rank() != 2
+        || kernel < 2
+        || !input.is_contiguous()
+        || !weight.is_contiguous()
+        || !state.is_contiguous()
+    {
+        return Ok(None);
+    }
+    let (_rows, channels) = match input.dims2() {
+        Ok(d) => d,
+        Err(_) => return Ok(None),
+    };
+    // Rank already checked == 2 above; compare dims as slices (candle's Error
+    // is not PartialEq, so avoid comparing the Result directly).
+    if weight.dims() != [channels, kernel].as_slice()
+        || state.dims() != [channels, kernel - 1].as_slice()
+    {
+        return Ok(None);
+    }
+
+    // kt inputs — thread the upstream adapter output (the in_proj LoRA / matmul
+    // node) so the tape stays connected.
+    let input_kt = match tape_kt_input(input) {
+        Some(t) => t,
+        None => return Ok(None),
+    };
+    let weight_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(weight) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let state_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(state) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+
+    let out_kt = match with_active_tape(|tape: &mut Tape| -> Result<_> {
+        let y = kiln_rmsnorm_kernel::causal_depthwise_conv1d_kt(
+            &input_kt,
+            &weight_kt,
+            &state_kt,
+            kernel,
+        )
+        .map_err(|e| anyhow::anyhow!("kt causal_depthwise_conv1d: {e}"))?;
+        tape.record(
+            &y,
+            &[&input_kt],
+            Box::new(CausalConv1dInputBackward {
+                weight: weight_kt.clone(),
+                kernel,
+            }),
+        );
+        Ok(y)
+    }) {
+        Some(result) => result,
+        None => return Ok(None),
+    };
+
+    let out_kt =
+        out_kt.context("tape_forward::try_tape_causal_conv1d_cuda: kt-tape forward failed")?;
+    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+        .context("tape_forward::try_tape_causal_conv1d_cuda: kt -> candle copy failed")?;
+
+    // Only `input` is differentiable (weight frozen, state non-differentiable).
+    kiln_kt_bridge::tape_bridge::register_input_mapping(input_kt.id(), input.id());
+    kiln_kt_bridge::tape_bridge::register_output_mapping(out_kt.id(), out.id());
+    kiln_kt_bridge::tape_bridge::retain_output_for_chaining(&out_kt, out.id());
+
+    Ok(Some(out))
+}
+
+/// Candle-composite tape backward for the GDN L2-qk-norm `y =
+/// l2_normalize(x) * scale`. Wraps [`gdn_l2_norm_scale_backward_no_grad`]
+/// (analytic adjoint in candle F32), mirroring how [`GdnRecurrentBackward`]
+/// wraps `gdn_recurrent_backward_no_grad`.
+///
+/// One differentiable input (`x`); `scale` is a non-differentiable constant
+/// folded into the adjoint (Q uses `1/sqrt(dk)`, K uses `1.0`). `eps` matches
+/// `l2_normalize`'s hard-coded `1e-6`.
+#[derive(Debug)]
+pub(crate) struct GdnL2NormScaleBackward {
+    x: Tensor,
+    scale: f64,
+    eps: f64,
+}
+
+impl BackwardOp for GdnL2NormScaleBackward {
+    fn name(&self) -> &'static str {
+        "gdn_l2_norm_scale_backward"
+    }
+    fn input_count(&self) -> usize {
+        1
+    }
+    fn apply(
+        &self,
+        grad_output: &kiln_tensor::Tensor,
+    ) -> kiln_tensor::Result<Vec<Option<kiln_tensor::Tensor>>> {
+        let grad_c = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(grad_output).map_err(|e| {
+            kiln_tensor::Error::Msg(format!("GdnL2NormScaleBackward: grad kt->candle: {e}"))
+        })?;
+        let dx = gdn_l2_norm_scale_backward_no_grad(&self.x, self.scale, self.eps, &grad_c)
+            .map_err(|e| {
+                kiln_tensor::Error::Msg(format!("GdnL2NormScaleBackward: bwd: {e}"))
+            })?;
+        // Adjoint can be non-contiguous (broadcast_mul views) — contiguify then
+        // COPY to an owned kt tensor (cf. the GdnRecurrentBackward non-contig fix).
+        let dx = dx
+            .contiguous()
+            .map_err(|e| kiln_tensor::Error::Msg(format!("GdnL2NormScaleBackward: contig: {e}")))?;
+        let dx_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_copy(&dx).map_err(|e| {
+            kiln_tensor::Error::Msg(format!("GdnL2NormScaleBackward: dx candle->kt: {e}"))
+        })?;
+        Ok(vec![Some(dx_kt)])
+    }
+}
+
+/// Route a GDN L2-qk-norm `y = l2_normalize(x) * scale` through the kt `Tape`.
+///
+/// Used for BOTH halves of `gdn_qk_norm`: Q (`scale = 1/sqrt(dk)`) and K
+/// (`scale = 1.0`). The forward runs candle `l2_normalize`-then-scale via the
+/// existing production helpers; the recorded [`GdnL2NormScaleBackward`] emits
+/// the per-input grad so a tape-authoritative backward reaches the conv / split
+/// (and thence the in_proj LoRA Vars).
+///
+/// `Ok(None)` (caller falls through to the existing `gdn_qk_norm`) when the gate
+/// is off, no tape scope is active, the input isn't CUDA, or a kt borrow fails.
+pub fn try_tape_gdn_l2_norm_scale_cuda(
+    x: &Tensor,
+    scale: f64,
+    out: &Tensor,
+) -> Result<Option<Tensor>> {
+    if !tape_forward_enabled() || !tape_gdn_qk_norm_enabled() {
+        return Ok(None);
+    }
+    if !matches!(x.device(), candle_core::Device::Cuda(_)) {
+        return Ok(None);
+    }
+    if x.dims() != out.dims() {
+        // The L2-norm-scale forward is shape-preserving; defer anything else.
+        return Ok(None);
+    }
+
+    let x_kt = match tape_kt_input(x) {
+        Some(t) => t,
+        None => return Ok(None),
+    };
+    // The production forward already computed `out` (q_out / k_out); borrow it
+    // as the recorded node's output so we record-only (no re-run), like
+    // `tape_record_gdn_recurrent`.
+    let out_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(out) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+
+    let recorded = with_active_tape(|tape: &mut Tape| {
+        tape.record(
+            &out_kt,
+            &[&x_kt],
+            Box::new(GdnL2NormScaleBackward {
+                x: x.clone(),
+                scale,
+                eps: 1e-6,
+            }),
+        );
+    });
+    if recorded.is_none() {
+        return Ok(None);
+    }
+
+    kiln_kt_bridge::tape_bridge::register_input_mapping(x_kt.id(), x.id());
+    kiln_kt_bridge::tape_bridge::register_output_mapping(out_kt.id(), out.id());
+    kiln_kt_bridge::tape_bridge::retain_output_for_chaining(&out_kt, out.id());
+
+    Ok(Some(out.clone()))
+}
+
+/// Candle-composite tape backward for the GDN gated RMSNorm `out =
+/// rms_norm(x, weight) * silu(z)`. Wraps
+/// [`gdn_gated_rms_norm_backward_no_grad`] (analytic adjoint in candle F32),
+/// mirroring how [`GdnRecurrentBackward`] wraps `gdn_recurrent_backward_no_grad`.
+///
+/// Three differentiable inputs `[x, z, weight]` in that order. `x` is the
+/// recurrence output (head-LAST `[B, T, nv, dv]`), `z` is the output gate,
+/// `weight` is the GDN `norm` `Var`.
+#[derive(Debug)]
+pub(crate) struct GdnGatedRmsNormBackward {
+    x: Tensor,
+    z: Tensor,
+    weight: Tensor,
+    eps: f64,
+}
+
+impl BackwardOp for GdnGatedRmsNormBackward {
+    fn name(&self) -> &'static str {
+        "gdn_gated_rms_norm_backward"
+    }
+    fn input_count(&self) -> usize {
+        // x, z, weight.
+        3
+    }
+    fn apply(
+        &self,
+        grad_output: &kiln_tensor::Tensor,
+    ) -> kiln_tensor::Result<Vec<Option<kiln_tensor::Tensor>>> {
+        let grad_c = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(grad_output).map_err(|e| {
+            kiln_tensor::Error::Msg(format!("GdnGatedRmsNormBackward: grad kt->candle: {e}"))
+        })?;
+        let grads = gdn_gated_rms_norm_backward_no_grad(
+            &self.x,
+            &self.z,
+            &self.weight,
+            self.eps,
+            &grad_c,
+        )
+        .map_err(|e| kiln_tensor::Error::Msg(format!("GdnGatedRmsNormBackward: bwd: {e}")))?;
+        // Adjoints can be non-contiguous; contiguify then COPY to owned kt
+        // (cf. the GdnRecurrentBackward non-contig-grad fix).
+        let to_kt = |t: &Tensor| -> kiln_tensor::Result<kiln_tensor::Tensor> {
+            let tc = t.contiguous().map_err(|e| {
+                kiln_tensor::Error::Msg(format!("GdnGatedRmsNormBackward: grad contiguous: {e}"))
+            })?;
+            kiln_kt_bridge::kt_tensor_from_candle_cuda_copy(&tc).map_err(|e| {
+                kiln_tensor::Error::Msg(format!(
+                    "GdnGatedRmsNormBackward: grad candle->kt: {e}"
+                ))
+            })
+        };
+        Ok(vec![
+            Some(to_kt(&grads.dx)?),
+            Some(to_kt(&grads.dz)?),
+            Some(to_kt(&grads.dw)?),
+        ])
+    }
+}
+
+/// Route the GDN gated RMSNorm `out = rms_norm(x, weight) * silu(z)` through
+/// the kt `Tape`.
+///
+/// The production forward (`gated_rms_norm`) already computed `out`; this
+/// records-only (no re-run), borrowing `out` as the node output — like
+/// `tape_record_gdn_recurrent`. The recorded [`GdnGatedRmsNormBackward`] emits
+/// `dx`/`dz`/`dw` so a tape-authoritative backward reaches the recurrence
+/// output (`x`), the gate (`z`), and the `norm` `Var` (`weight`).
+///
+/// `Ok(None)` (caller falls through) when the gate is off, no tape scope is
+/// active, the inputs aren't CUDA, shapes disagree, or a kt borrow fails.
+pub fn try_tape_gdn_gated_rms_norm_cuda(
+    x: &Tensor,
+    z: &Tensor,
+    weight: &Tensor,
+    eps: f64,
+    out: &Tensor,
+) -> Result<Option<Tensor>> {
+    if !tape_forward_enabled() || !tape_gdn_gated_norm_enabled() {
+        return Ok(None);
+    }
+    if !matches!(x.device(), candle_core::Device::Cuda(_)) {
+        return Ok(None);
+    }
+    if x.dims() != z.dims() || x.dims() != out.dims() {
+        return Ok(None);
+    }
+    if weight.rank() != 1 || *x.dims().last().unwrap() != weight.dims()[0] {
+        return Ok(None);
+    }
+
+    let x_kt = match tape_kt_input(x) {
+        Some(t) => t,
+        None => return Ok(None),
+    };
+    let z_kt = match tape_kt_input(z) {
+        Some(t) => t,
+        None => return Ok(None),
+    };
+    let weight_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(weight) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let out_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(out) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+
+    let recorded = with_active_tape(|tape: &mut Tape| {
+        tape.record(
+            &out_kt,
+            &[&x_kt, &z_kt, &weight_kt],
+            Box::new(GdnGatedRmsNormBackward {
+                x: x.clone(),
+                z: z.clone(),
+                weight: weight.clone(),
+                eps,
+            }),
+        );
+    });
+    if recorded.is_none() {
+        return Ok(None);
+    }
+
+    kiln_kt_bridge::tape_bridge::register_input_mapping(x_kt.id(), x.id());
+    kiln_kt_bridge::tape_bridge::register_input_mapping(z_kt.id(), z.id());
+    kiln_kt_bridge::tape_bridge::register_input_mapping(weight_kt.id(), weight.id());
+    kiln_kt_bridge::tape_bridge::register_output_mapping(out_kt.id(), out.id());
+    kiln_kt_bridge::tape_bridge::retain_output_for_chaining(&out_kt, out.id());
+
+    Ok(Some(out.clone()))
+}
+
+/// Route a `transpose(axis_a, axis_b)` through the kt `Tape` so a
+/// tape-authoritative backward stays connected ACROSS the transpose.
+///
+/// CP-4 chaining-gap fix: the production GDN recurrence can return its output
+/// head-FIRST `[B, nv, T, dv]` (the chunkwise fallback), and the forward then
+/// runs `attn_out.transpose(1, 2)` (`forward.rs:gated_deltanet_forward_decode_if`,
+/// ~line 16137) to reach head-LAST `[B, T, nv, dv]` before the gated RMSNorm.
+/// A plain candle transpose mints a fresh tensor id, so the gated-rms-norm
+/// adapter's `tape_kt_input` couldn't chain back to the recurrence node — the
+/// tape would fragment at the transpose and the GDN q/k/v/beta/g (LoRA) grads
+/// would never flow. Recording a [`TransposeBackward`] node (whose adjoint
+/// re-applies the same transpose — it's an involution) keeps the chain intact.
+///
+/// Gated on `KILN_USE_TAPE_FORWARD` + an active tape scope only (transpose is a
+/// pure layout op with a trivial, always-safe adjoint, so it needs no dedicated
+/// kill switch — same contract as [`try_tape_reshape_cuda`]). `Ok(None)` when
+/// the gate is off, no tape is active, the input isn't CUDA, the axes are out of
+/// bounds, or a kt borrow fails.
+pub fn try_tape_transpose_cuda(
+    x: &Tensor,
+    axis_a: usize,
+    axis_b: usize,
+) -> Result<Option<Tensor>> {
+    if !tape_forward_enabled() {
+        return Ok(None);
+    }
+    if !matches!(x.device(), candle_core::Device::Cuda(_)) {
+        return Ok(None);
+    }
+
+    let x_kt = match tape_kt_input(x) {
+        Some(t) => t,
+        None => return Ok(None),
+    };
+    let rank = x_kt.rank();
+    if axis_a >= rank || axis_b >= rank {
+        return Ok(None);
+    }
+
+    let out_kt = match with_active_tape(|tape: &mut Tape| -> Result<_> {
+        // `transpose` yields a non-contiguous view; `kt_tensor_to_candle_cuda_copy`
+        // (below) requires contiguity, so materialise. The recorded output id is
+        // this contiguous tensor — the `TransposeBackward` adjoint transposes the
+        // upstream grad regardless of the forward output's layout, so this is
+        // value-faithful (the production `attn_out.transpose(1,2)` view and this
+        // contiguous copy carry identical elements).
+        let y = x_kt
+            .transpose(axis_a, axis_b)
+            .map_err(|e| anyhow::anyhow!("kt transpose: {e}"))?;
+        let y = if y.is_contiguous() {
+            y
+        } else {
+            y.contiguous()
+                .map_err(|e| anyhow::anyhow!("kt transpose: contiguous: {e}"))?
+        };
+        tape.record(&y, &[&x_kt], Box::new(TransposeBackward { axis_a, axis_b }));
+        Ok(y)
+    }) {
+        Some(result) => result,
+        None => return Ok(None),
+    };
+
+    let out_kt =
+        out_kt.context("tape_forward::try_tape_transpose_cuda: kt-tape forward failed")?;
+    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+        .context("tape_forward::try_tape_transpose_cuda: kt -> candle copy failed")?;
+
+    kiln_kt_bridge::tape_bridge::register_input_mapping(x_kt.id(), x.id());
+    kiln_kt_bridge::tape_bridge::register_output_mapping(out_kt.id(), out.id());
+    kiln_kt_bridge::tape_bridge::retain_output_for_chaining(&out_kt, out.id());
+
+    Ok(Some(out))
 }
 
 /// True iff `KILN_USE_TAPE_LORA_ADD` is set to an enable value.

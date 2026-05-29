@@ -12316,6 +12316,33 @@ fn try_kt_l2_normalize(x_f32: &Tensor, eps: f32) -> Result<Option<Tensor>> {
 }
 
 fn gdn_qk_norm(q: &Tensor, k: &Tensor, input_dtype: DType, scale: f64) -> Result<(Tensor, Tensor)> {
+    let (q_out, k_out) = gdn_qk_norm_forward(q, k, input_dtype, scale)?;
+
+    // Phase 6a/CP-4 (#1082): record GdnL2NormScaleBackward nodes for the
+    // L2-qk-norm outputs the production op just produced (`q_out =
+    // l2_normalize(q) * scale`, `k_out = l2_normalize(k)`). Record-only (no
+    // re-run); no-op unless `KILN_USE_TAPE_FORWARD` + `KILN_USE_TAPE_GDN_QK_NORM`
+    // are set AND a tape scope is active. The production outputs are untouched.
+    // All fast paths feed through here, so the wiring covers every dispatch.
+    #[cfg(feature = "cuda")]
+    {
+        let _ = crate::tape_forward::try_tape_gdn_l2_norm_scale_cuda(q, scale, &q_out)?;
+        let _ = crate::tape_forward::try_tape_gdn_l2_norm_scale_cuda(k, 1.0, &k_out)?;
+    }
+
+    Ok((q_out, k_out))
+}
+
+/// Pure forward of [`gdn_qk_norm`] — `q_out = l2_normalize(q) * scale`,
+/// `k_out = l2_normalize(k)`, cast to `input_dtype`. Split out so the tape
+/// recording in `gdn_qk_norm` runs once at a single exit (all fast paths
+/// feed through here) without re-deriving the per-path dispatch.
+fn gdn_qk_norm_forward(
+    q: &Tensor,
+    k: &Tensor,
+    input_dtype: DType,
+    scale: f64,
+) -> Result<(Tensor, Tensor)> {
     #[cfg(any(feature = "metal", feature = "cuda"))]
     let fused_forward_only_allowed = !any_tensor_tracks_op(&[q, k]);
     #[cfg(feature = "metal")]
@@ -14072,6 +14099,153 @@ pub struct GdnRecurrentBackwardGrads {
     pub dbeta: Tensor,
     pub dg: Tensor,
     pub d_state: Option<Tensor>,
+}
+
+/// Per-input gradients of [`gated_rms_norm`] (the GDN Step-8
+/// `norm(x) * silu(z)` block), returned by
+/// [`gdn_gated_rms_norm_backward_no_grad`].
+///
+/// `dx`/`dz` carry the input dtype; `dw` is the weight gradient summed across
+/// all non-trailing axes (the weight is shared across batch + sequence).
+pub struct GdnGatedRmsNormBackwardGrads {
+    pub dx: Tensor,
+    pub dz: Tensor,
+    pub dw: Tensor,
+}
+
+/// Candle-composite analytic backward for [`gated_rms_norm_fallback`]
+/// (`out = rms_norm(x, weight, eps) * silu(z)`). Device-agnostic (runs in
+/// candle F32; works on CUDA without a host round-trip), so the kt-tape
+/// [`crate::tape_forward::GdnGatedRmsNormBackward`] op can wrap it the same way
+/// [`crate::tape_forward::GdnRecurrentBackward`] wraps
+/// [`gdn_recurrent_backward_no_grad`].
+///
+/// # Math (per trailing-axis row, `D` = trailing-axis size)
+///
+/// ```text
+/// r       = sqrt(mean_j(x_j^2) + eps)
+/// normed  = x * w / r
+/// gate    = silu(z) = z * sigmoid(z)
+/// out     = normed * gate
+///
+/// d_normed = dout * gate
+/// dz       = dout * normed * silu'(z),  silu'(z) = sig(z) * (1 + z * (1 - sig(z)))
+/// S        = Σⱼ d_normed_j * x_j * w_j
+/// dx_k     = (d_normed_k * w_k) / r  -  x_k * S / (D * r^3)
+/// dw_k     = Σ_rows (d_normed_k * x_k) / r
+/// ```
+///
+/// Mirrors [`kiln_autograd::RmsNormBackward`] (rmsnorm.rs lines 112-129) for the
+/// `dx`/`dw` half, with the gate factored into `d_normed` and the separate
+/// `dz` term. Outputs are cast back to `x.dtype()` / `z.dtype()` /
+/// `weight.dtype()` so they match the input `Var` layouts.
+pub fn gdn_gated_rms_norm_backward_no_grad(
+    x: &Tensor,
+    z: &Tensor,
+    weight: &Tensor,
+    eps: f64,
+    grad_out: &Tensor,
+) -> Result<GdnGatedRmsNormBackwardGrads> {
+    let x_dtype = x.dtype();
+    let z_dtype = z.dtype();
+    let w_dtype = weight.dtype();
+
+    let x_f32 = x.to_dtype(DType::F32)?;
+    let z_f32 = z.to_dtype(DType::F32)?;
+    let w_f32 = weight.to_dtype(DType::F32)?;
+    let dout = grad_out.to_dtype(DType::F32)?;
+
+    // r = sqrt(mean(x^2) + eps); inv_r = 1/r (broadcast over the trailing axis).
+    let variance = x_f32.sqr()?.mean_keepdim(LAST_DIM)?;
+    let inv_r = (variance + eps)?.sqrt()?.recip()?; // [..., 1]
+    // normed = x * w / r.
+    let normed = x_f32.broadcast_mul(&inv_r)?.broadcast_mul(&w_f32)?;
+
+    // gate = silu(z); silu'(z) = sig(z) + z * sig(z) * (1 - sig(z)).
+    let sig = cuda_sigmoid(&z_f32)?;
+    let gate = (&z_f32 * &sig)?;
+    let one_minus_sig = (1.0 - &sig)?;
+    let silu_grad = (&sig + (&z_f32 * (&sig * &one_minus_sig)?)?)?;
+
+    // dz = dout * normed * silu'(z).
+    let dz = (&dout * (&normed * &silu_grad)?)?;
+
+    // d_normed = dout * gate — the grad flowing into the rms-norm output.
+    let d_normed = (&dout * &gate)?;
+
+    let hidden = *x_f32.dims().last().unwrap() as f64;
+    // S = Σⱼ d_normed_j * x_j * w_j  (keepdim over the trailing axis).
+    let s = (&d_normed * (&x_f32 * w_f32.broadcast_as(x_f32.shape())?)?)?
+        .sum_keepdim(LAST_DIM)?; // [..., 1]
+    // dx_k = (d_normed_k * w_k) / r - x_k * S / (D * r^3).
+    let inv_r3 = inv_r.powf(3.0)?;
+    let term1 = d_normed.broadcast_mul(&w_f32)?.broadcast_mul(&inv_r)?;
+    let term2 = x_f32
+        .broadcast_mul(&s.broadcast_mul(&inv_r3)?)?
+        .affine(1.0 / hidden, 0.0)?;
+    let dx = (&term1 - &term2)?;
+
+    // dw_k = Σ_rows (d_normed_k * x_k) / r. `weight` is rank-1 [hidden];
+    // collapse every leading axis so dw matches the weight layout.
+    let dw_full = (&d_normed * &x_f32)?.broadcast_mul(&inv_r)?;
+    let dw = {
+        let lead = dw_full.rank() - 1;
+        let mut acc = dw_full;
+        for _ in 0..lead {
+            acc = acc.sum(0)?;
+        }
+        acc
+    };
+
+    Ok(GdnGatedRmsNormBackwardGrads {
+        dx: dx.to_dtype(x_dtype)?,
+        dz: dz.to_dtype(z_dtype)?,
+        dw: dw.to_dtype(w_dtype)?,
+    })
+}
+
+/// Candle-composite analytic backward for the GDN L2-qk-norm forward
+/// `y = l2_normalize(x) * scale` (the Step-4/5 `gdn_qk_norm` op: Q uses
+/// `scale = 1/sqrt(dk)`, K uses `scale = 1.0`). Device-agnostic (candle F32),
+/// so the kt-tape [`crate::tape_forward::GdnL2NormScaleBackward`] op can wrap it
+/// the same way the gated-rms-norm and recurrence ops wrap their composites.
+///
+/// # Math (per trailing-axis row, `norm = sqrt(Σⱼ x_j^2 + eps)`)
+///
+/// Forward (from [`l2_normalize`] + scale): `y_i = scale * x_i / norm`.
+/// Same structure as [`kiln_autograd::L2NormBackward`] (l2norm.rs lines 66-79)
+/// with the constant `scale` folded into the upstream grad:
+///
+/// ```text
+/// S    = Σⱼ dy_j * x_j
+/// dx_k = scale * ( dy_k / norm  -  x_k * S / norm^3 )
+/// ```
+///
+/// `eps = 1e-6` matches [`l2_normalize`]'s hard-coded epsilon. Output is cast
+/// back to `x.dtype()` so it matches the input `Var` layout.
+pub fn gdn_l2_norm_scale_backward_no_grad(
+    x: &Tensor,
+    scale: f64,
+    eps: f64,
+    grad_out: &Tensor,
+) -> Result<Tensor> {
+    let x_dtype = x.dtype();
+    let x_f32 = x.to_dtype(DType::F32)?;
+    let dy = grad_out.to_dtype(DType::F32)?;
+
+    // norm = sqrt(Σⱼ x_j^2 + eps); inv_n = 1/norm (broadcast over trailing axis).
+    let sq_sum = x_f32.sqr()?.sum_keepdim(LAST_DIM)?;
+    let inv_n = (sq_sum + eps)?.sqrt()?.recip()?; // [..., 1]
+    let inv_n3 = inv_n.powf(3.0)?;
+
+    // S = Σⱼ dy_j * x_j.
+    let s = (&dy * &x_f32)?.sum_keepdim(LAST_DIM)?; // [..., 1]
+    // dx_k = scale * ( dy_k / norm - x_k * S / norm^3 ).
+    let term1 = dy.broadcast_mul(&inv_n)?;
+    let term2 = x_f32.broadcast_mul(&s.broadcast_mul(&inv_n3)?)?;
+    let dx = (&term1 - &term2)?.affine(scale, 0.0)?;
+
+    dx.to_dtype(x_dtype)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -16134,7 +16308,25 @@ fn gated_deltanet_forward_decode_if(
         if attn_out_head_last {
             attn_out
         } else {
-            attn_out.transpose(1, 2)?
+            // Phase 6a/CP-4 (#1082) chaining-gap fix: when the recurrence
+            // output is head-FIRST (the chunkwise fallback), this transpose to
+            // head-LAST mints a fresh candle id. Route it through the kt Tape so
+            // the downstream gated-RMSNorm adapter's `tape_kt_input` chains back
+            // to the recurrence node (else the tape fragments here and the GDN
+            // LoRA grads never flow). No-op + falls through to the plain candle
+            // transpose unless `KILN_USE_TAPE_FORWARD` is set AND a tape scope is
+            // active.
+            #[cfg(feature = "cuda")]
+            {
+                match crate::tape_forward::try_tape_transpose_cuda(&attn_out, 1, 2)? {
+                    Some(t) => t,
+                    None => attn_out.transpose(1, 2)?,
+                }
+            }
+            #[cfg(not(feature = "cuda"))]
+            {
+                attn_out.transpose(1, 2)?
+            }
         }
     };
     finish_gdn_stage_profile(
@@ -16165,7 +16357,24 @@ fn gated_deltanet_forward_decode_if(
         let attn_out = if attn_out_already_gated_norm {
             attn_out
         } else {
-            gated_rms_norm(backend, &attn_out, &z, &weights.norm, config.rms_norm_eps)?
+            let gated = gated_rms_norm(backend, &attn_out, &z, &weights.norm, config.rms_norm_eps)?;
+            // Phase 6a/CP-4 (#1082): record a GdnGatedRmsNormBackward node for
+            // the gated-RMSNorm output the production op just produced (BEFORE
+            // the reshape below, so x/z/out shapes still match [B,T,nv,dv]).
+            // No-op (returns `Ok(None)`) unless `KILN_USE_TAPE_FORWARD` +
+            // `KILN_USE_TAPE_GDN_GATED_NORM` are set AND a tape scope is active;
+            // the production output (`gated`) is untouched either way.
+            #[cfg(feature = "cuda")]
+            {
+                let _ = crate::tape_forward::try_tape_gdn_gated_rms_norm_cuda(
+                    &attn_out,
+                    &z,
+                    &weights.norm,
+                    config.rms_norm_eps,
+                    &gated,
+                )?;
+            }
+            gated
         };
         // Reshape to [B, T, v_dim] and cast back to input dtype
         attn_out
