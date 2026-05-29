@@ -681,6 +681,95 @@ impl Tensor {
         self.to_vec::<E>()
     }
 
+    /// Read a rank-2 tensor back to a host `Vec<Vec<E>>` (row-major).
+    /// candle: `pub fn to_vec2<S: WithDType>(&self) -> Result<Vec<Vec<S>>>`.
+    ///
+    /// Rank is asserted via [`Tensor::dims2`] (mirrors candle's
+    /// `self.dims2()?` rank-check), then the flat row-major readback from
+    /// kt's existing [`Tensor::to_vec`] is sliced into `dim0` rows of
+    /// `dim1` elements. `to_vec` already returns contiguous row-major
+    /// data, so the row split is a plain chunking — no stride walk.
+    pub fn to_vec2<E: Element>(&self) -> Result<Vec<Vec<E>>> {
+        let (d0, d1) = self.dims2()?;
+        let flat = self.to_vec::<E>()?;
+        let mut rows = Vec::with_capacity(d0);
+        for r in 0..d0 {
+            rows.push(flat[r * d1..(r + 1) * d1].to_vec());
+        }
+        Ok(rows)
+    }
+
+    /// Read a rank-3 tensor back to a host `Vec<Vec<Vec<E>>>` (row-major).
+    /// candle: `pub fn to_vec3<S: WithDType>(&self) -> Result<Vec<Vec<Vec<S>>>>`.
+    ///
+    /// Rank is asserted via [`Tensor::dims3`] (mirrors candle's
+    /// `self.dims3()?`), then the flat contiguous readback from
+    /// [`Tensor::to_vec`] is nested into `d0 × d1 × d2`. Outer index strides
+    /// by `d1 * d2`, middle by `d2`.
+    pub fn to_vec3<E: Element>(&self) -> Result<Vec<Vec<Vec<E>>>> {
+        let (d0, d1, d2) = self.dims3()?;
+        let flat = self.to_vec::<E>()?;
+        let plane = d1 * d2;
+        let mut out = Vec::with_capacity(d0);
+        for i in 0..d0 {
+            let base = i * plane;
+            let mut rows = Vec::with_capacity(d1);
+            for j in 0..d1 {
+                let row_base = base + j * d2;
+                rows.push(flat[row_base..row_base + d2].to_vec());
+            }
+            out.push(rows);
+        }
+        Ok(out)
+    }
+
+    // ==================================================================
+    // Finite / infinite masks — elementwise predicate masks.
+    //
+    // candle-core has NO `is_finite`/`is_infinite` *method* on `Tensor`
+    // (kt previously only had the reduce-to-bool `all_finite()`), so
+    // there is no candle signature to copy here. These follow the
+    // numpy/torch `isfinite`/`isinf` *elementwise-mask* convention the
+    // #1082 flip needs, and the kt `ops::compare` mask convention: a U8
+    // tensor of the same shape, `1` where the predicate holds, `0`
+    // otherwise. Composed entirely from existing kt primitives
+    // (`abs` + a single `lt`/`eq` against a `full_like(±inf)` constant).
+    // ==================================================================
+
+    /// Elementwise finite mask: U8, same shape, `1` where the element is
+    /// finite (not ±inf, not NaN), `0` otherwise.
+    ///
+    /// Composition: `abs(self) < +inf`. IEEE-754 makes this exact in one
+    /// compare — for a finite `v`, `|v| < inf` is true; for `±inf`,
+    /// `inf < inf` is false; for `NaN`, every ordered compare (including
+    /// `NaN < inf`) is false. So no NaN-specific term and no U8 logical-AND
+    /// is needed (kt's `mul`/`minimum` reject U8 anyway). [`ops::abs`]
+    /// materializes a contiguous tensor, so the [`ops::lt`] contiguity
+    /// requirement holds regardless of `self`'s layout.
+    ///
+    /// dtype must be F32/BF16/F16 (the dtypes [`ops::abs`]/[`ops::lt`]
+    /// accept); other dtypes error from the composed ops.
+    pub fn is_finite(&self) -> Result<Self> {
+        let absx = ops::abs(self)?;
+        let inf = ops::full_like(&absx, f32::INFINITY)?;
+        ops::lt(&absx, &inf)
+    }
+
+    /// Elementwise infinite mask: U8, same shape, `1` where the element is
+    /// `+inf` or `-inf`, `0` everywhere else (including NaN).
+    ///
+    /// Composition: `abs(self) == +inf`. For `±inf`, `inf == inf` is true;
+    /// for any finite value the equality is false; for `NaN`, `NaN == inf`
+    /// is false (matching candle/torch `isinf`, which is `0` at NaN).
+    /// Single `eq` against a `full_like(+inf)` constant.
+    ///
+    /// dtype must be F32/BF16/F16; other dtypes error from the composed ops.
+    pub fn is_infinite(&self) -> Result<Self> {
+        let absx = ops::abs(self)?;
+        let inf = ops::full_like(&absx, f32::INFINITY)?;
+        ops::eq(&absx, &inf)
+    }
+
     // ==================================================================
     // Associated constructors — candle: `Tensor::zeros(shape, dt, &dev)`
     // kt Device is `Copy`, so these take `Device` by value (deviation
@@ -1121,6 +1210,122 @@ mod tests {
         assert_eq!(x.to_vec1::<f32>().unwrap(), vec![1.0, 2.0, 3.0]);
         let r2 = t(&[1.0, 2.0, 3.0, 4.0], &[2, 2]);
         assert!(r2.to_vec1::<f32>().is_err());
+    }
+
+    #[test]
+    fn to_vec2_nests_row_major() {
+        // [2,3] -> two rows of three, row-major.
+        let x = t(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]);
+        let nested = x.to_vec2::<f32>().unwrap();
+        assert_eq!(nested, vec![vec![1.0, 2.0, 3.0], vec![4.0, 5.0, 6.0]]);
+    }
+
+    #[test]
+    fn to_vec2_round_trips_from_known_array() {
+        // Build via from_vec + reshape, read back, assert equal.
+        let known = vec![vec![10.0f32, 20.0], vec![30.0, 40.0], vec![50.0, 60.0]];
+        let flat: Vec<f32> = known.iter().flatten().copied().collect();
+        let x = Tensor::from_vec(flat, vec![3, 2]).unwrap();
+        assert_eq!(x.to_vec2::<f32>().unwrap(), known);
+    }
+
+    #[test]
+    fn to_vec2_rank_mismatch_errors() {
+        let r1 = t(&[1.0, 2.0, 3.0], &[3]);
+        assert!(r1.to_vec2::<f32>().is_err());
+        let r3 = t(&[0.0; 8], &[2, 2, 2]);
+        assert!(r3.to_vec2::<f32>().is_err());
+    }
+
+    #[test]
+    fn to_vec3_nests_row_major() {
+        // [2,2,2] -> 2 planes, each 2 rows of 2, row-major.
+        let x = t(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0], &[2, 2, 2]);
+        let nested = x.to_vec3::<f32>().unwrap();
+        assert_eq!(
+            nested,
+            vec![
+                vec![vec![1.0, 2.0], vec![3.0, 4.0]],
+                vec![vec![5.0, 6.0], vec![7.0, 8.0]],
+            ]
+        );
+    }
+
+    #[test]
+    fn to_vec3_round_trips_non_cubic() {
+        // [1,2,3] exercises distinct d0/d1/d2 strides.
+        let known = vec![vec![
+            vec![1.0f32, 2.0, 3.0],
+            vec![4.0, 5.0, 6.0],
+        ]];
+        let flat: Vec<f32> = known
+            .iter()
+            .flatten()
+            .flatten()
+            .copied()
+            .collect();
+        let x = Tensor::from_vec(flat, vec![1, 2, 3]).unwrap();
+        assert_eq!(x.to_vec3::<f32>().unwrap(), known);
+    }
+
+    #[test]
+    fn to_vec3_rank_mismatch_errors() {
+        let r2 = t(&[1.0, 2.0, 3.0, 4.0], &[2, 2]);
+        assert!(r2.to_vec3::<f32>().is_err());
+        let r1 = t(&[1.0, 2.0], &[2]);
+        assert!(r1.to_vec3::<f32>().is_err());
+    }
+
+    // --- is_finite / is_infinite masks --------------------------------
+
+    fn read_u8(x: &Tensor) -> Vec<u8> {
+        x.to_vec::<u8>().unwrap()
+    }
+
+    #[test]
+    fn is_finite_mask_exact() {
+        // [1.0, 2.0, +inf, -inf, NaN] -> finite mask 1,1,0,0,0.
+        let x = t(
+            &[1.0, 2.0, f32::INFINITY, f32::NEG_INFINITY, f32::NAN],
+            &[5],
+        );
+        let mask = x.is_finite().unwrap();
+        assert_eq!(mask.dtype(), DType::U8);
+        assert_eq!(mask.shape(), &[5]);
+        assert_eq!(read_u8(&mask), vec![1, 1, 0, 0, 0]);
+    }
+
+    #[test]
+    fn is_infinite_mask_exact() {
+        // [1.0, 2.0, +inf, -inf, NaN] -> infinite mask 0,0,1,1,0.
+        let x = t(
+            &[1.0, 2.0, f32::INFINITY, f32::NEG_INFINITY, f32::NAN],
+            &[5],
+        );
+        let mask = x.is_infinite().unwrap();
+        assert_eq!(mask.dtype(), DType::U8);
+        assert_eq!(mask.shape(), &[5]);
+        assert_eq!(read_u8(&mask), vec![0, 0, 1, 1, 0]);
+    }
+
+    #[test]
+    fn is_finite_and_is_infinite_are_complementary_off_nan() {
+        // For non-NaN inputs, finite and infinite masks partition: their
+        // sum is 1 everywhere. (NaN is 0 in both, so it's excluded here.)
+        let x = t(&[0.0, -7.5, f32::INFINITY, f32::NEG_INFINITY], &[4]);
+        let fin = read_u8(&x.is_finite().unwrap());
+        let inf = read_u8(&x.is_infinite().unwrap());
+        for (f, i) in fin.iter().zip(inf.iter()) {
+            assert_eq!(f + i, 1, "finite={f} infinite={i} should partition");
+        }
+    }
+
+    #[test]
+    fn is_finite_preserves_multidim_shape() {
+        let x = t(&[1.0, f32::INFINITY, f32::NAN, -3.0], &[2, 2]);
+        let mask = x.is_finite().unwrap();
+        assert_eq!(mask.shape(), &[2, 2]);
+        assert_eq!(read_u8(&mask), vec![1, 0, 0, 1]);
     }
 
     // --- constructors --------------------------------------------------
