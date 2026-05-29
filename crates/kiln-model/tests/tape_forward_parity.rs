@@ -2896,3 +2896,157 @@ fn tape_reshape_records_node_and_passes_grad_through() {
         std::env::remove_var("KILN_USE_TAPE_FORWARD");
     }
 }
+
+// ----------------------------------------------------------------------
+// CP-4 GDN (linear-attention) recurrence tape coverage (#1082) —
+// `try_tape_gdn_recurrent_cuda` + `GdnRecurrentBackward`.
+//
+// GDN is 24 of Qwen3.5-4B's 32 layers, so tape-authoritative training must
+// reach the GDN-block q/k/v/beta/g projections (and their LoRA Vars). The
+// op wraps the CPU-parity-tested candle composite
+// gdn_recurrent_backward_no_grad (forward.rs:29525), so its NUMERICS
+// already inherit that test's coverage. This test gates the TAPE WIRING
+// deterministically (load-robust per the kt-substrate thread-safety note):
+// exactly one node with 5 inputs; the walk routes dq/dk/dv/dbeta/dg to them
+// with the correct shapes; all grads nonzero (the "0 LoRA grads" failure
+// mode CP-4 closes) and finite.
+// ----------------------------------------------------------------------
+
+/// Deterministic F32 CUDA tensor (GDN backward runs in F32; matches the
+/// forward.rs GDN backward test's dtype).
+fn det_f32(device: &Device, dims: &[usize], base: f32, step: f32) -> Tensor {
+    let n: usize = dims.iter().product();
+    let data: Vec<f32> = (0..n).map(|i| base + (i as f32) * step).collect();
+    Tensor::from_vec(data, dims.to_vec(), &Device::Cpu)
+        .expect("det cpu")
+        .to_device(device)
+        .expect("det -> cuda")
+        .contiguous()
+        .expect("det contig")
+}
+
+#[test]
+fn tape_gdn_recurrent_records_node_and_emits_5_grads() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    let device = match cuda_device() {
+        Some(d) => d,
+        None => {
+            eprintln!("tape_gdn recurrent node + grads: no CUDA device — skipping");
+            return;
+        }
+    };
+
+    // GDN shapes (mirror forward.rs:29525): q/k [b,nv,t,dk], v [b,nv,t,dv],
+    // beta/g [b,nv,t], state [b,nv,dk,dv]. beta in (0,1); g negative (the
+    // log-space decay gate).
+    let (b, nv, t, dk, dv) = (1usize, 2usize, 8usize, 3usize, 4usize);
+    let q = det_f32(&device, &[b, nv, t, dk], 0.10, 0.011);
+    let k = det_f32(&device, &[b, nv, t, dk], 0.05, 0.013);
+    let v = det_f32(&device, &[b, nv, t, dv], 0.20, 0.007);
+    let beta = det_f32(&device, &[b, nv, t], 0.45, 0.004);
+    let g = det_f32(&device, &[b, nv, t], -0.05, -0.006);
+    let mut state = det_f32(&device, &[b, nv, dk, dv], 0.05, 0.003);
+
+    unsafe {
+        std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
+        std::env::set_var("KILN_USE_TAPE_GDN", "1");
+    }
+    let backend = kiln_model::backend::for_device(&device);
+
+    let (res, tape) = kiln_model::tape_forward::with_thread_local_tape(|| {
+        kiln_model::tape_forward::try_tape_gdn_recurrent_cuda(
+            &*backend, &q, &k, &v, &beta, &g, &mut state,
+        )
+    });
+    let out = res
+        .expect("try_tape_gdn_recurrent_cuda ok")
+        .expect("returned Some(out) — gate + scope both on");
+    assert_eq!(out.shape().dims(), &[b, nv, t, dv], "gdn recurrence out shape");
+    assert!(out.device().is_cuda(), "out stays on CUDA");
+
+    assert_eq!(
+        tape.len(),
+        1,
+        "gdn recurrence records exactly one node (got {})",
+        tape.len()
+    );
+    let node = &tape.nodes()[0];
+    let out_id = node.output_id;
+    let input_ids = node.input_ids.clone();
+    assert_eq!(
+        input_ids.len(),
+        5,
+        "gdn records exactly five inputs (q,k,v,beta,g); got {}",
+        input_ids.len()
+    );
+
+    // Seed grad shaped like out; walk.
+    let seed = det_f32(&device, &[b, nv, t, dv], 0.3, -0.009);
+    let seed_kt =
+        kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&seed).expect("seed kt borrow");
+    let mut seeds = HashMap::new();
+    seeds.insert(out_id, seed_kt);
+    let grads = tape
+        .backward_with_seeds(seeds, |a, b| kiln_tensor::ops::add(a, b))
+        .expect("gdn tape backward walk");
+
+    // Input order [q, k, v, beta, g] -> [dq, dk, dv, dbeta, dg].
+    let fetch = |i: usize| -> Tensor {
+        let kt = grads
+            .get(input_ids[i])
+            .unwrap_or_else(|| panic!("grad {i} present"));
+        kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(kt).expect("grad -> candle")
+    };
+    let dq = fetch(0);
+    let dk = fetch(1);
+    let dv = fetch(2);
+    let dbeta = fetch(3);
+    let dg = fetch(4);
+    assert_eq!(dq.shape().dims(), &[b, nv, t, dk], "dq shape == q");
+    assert_eq!(dk.shape().dims(), &[b, nv, t, dk], "dk shape == k");
+    assert_eq!(dv.shape().dims(), &[b, nv, t, dv], "dv shape == v");
+    assert_eq!(dbeta.shape().dims(), &[b, nv, t], "dbeta shape == beta");
+    assert_eq!(dg.shape().dims(), &[b, nv, t], "dg shape == g");
+
+    let max_abs = |tt: &Tensor| {
+        tt.to_dtype(DType::F32)
+            .unwrap()
+            .abs()
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .max(0)
+            .unwrap()
+            .to_scalar::<f32>()
+            .unwrap()
+    };
+    let finite = |tt: &Tensor| {
+        tt.to_dtype(DType::F32)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap()
+            .iter()
+            .all(|x| x.is_finite())
+    };
+    for (name, t) in [
+        ("dq", &dq),
+        ("dk", &dk),
+        ("dv", &dv),
+        ("dbeta", &dbeta),
+        ("dg", &dg),
+    ] {
+        assert!(finite(t), "{name} has non-finite entries");
+        assert!(
+            max_abs(t) > 1e-6,
+            "{name} is essentially zero — tape backward not reaching the GDN input"
+        );
+    }
+
+    unsafe {
+        std::env::remove_var("KILN_USE_TAPE_FORWARD");
+        std::env::remove_var("KILN_USE_TAPE_GDN");
+    }
+}
