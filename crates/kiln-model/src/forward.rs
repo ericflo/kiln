@@ -324,7 +324,7 @@ fn cuda_use_kt_api_embedding() -> bool {
 #[cfg(feature = "cuda")]
 fn cuda_use_kt_api_lm_head() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_LM_HEAD").is_ok());
+    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_LM_HEAD").is_err());
     direct || cuda_use_kt_api_all()
 }
 
@@ -349,7 +349,7 @@ fn cuda_use_kt_api_lm_head() -> bool {
 #[cfg(feature = "cuda")]
 fn cuda_use_kt_api_lora_delta() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_LORA_DELTA").is_ok());
+    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_LORA_DELTA").is_err());
     direct || cuda_use_kt_api_all()
 }
 
