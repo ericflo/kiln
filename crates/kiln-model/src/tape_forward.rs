@@ -106,9 +106,11 @@
 use anyhow::{Context, Result};
 use candle_core::Tensor;
 use kiln_autograd::{
-    AddBackward, CrossEntropyKtBackward, EmbeddingBackward, MatmulBackward,
+    AddBackward, CrossEntropyKtBackward, EmbeddingBackward, LoraDeltaAddBackward, MatmulBackward,
     MulSigmoidGateBackward, RopeSplitHalfBackward, SiluBackward, Tape,
 };
+
+use crate::lora_loader::LoraProjectionWeights;
 
 // Phase 6a/CP-4 (#1082): the thread-local-tape scope machinery
 // (`with_thread_local_tape`, `with_active_tape`, `tape_forward_enabled`)
@@ -854,9 +856,259 @@ pub fn try_tape_cross_entropy_cuda(
     Ok(Some(out))
 }
 
+/// Attempt to run the LoRA delta-and-add through the kt-typed op surface
+/// (`kiln_tensor::ops::{matmul, mul_scalar, add}`) and record a fused
+/// `LoraDeltaAddBackward` node on the active thread-local tape.
+///
+/// The forward computes:
+/// ```text
+/// out = base + scale * (x @ A^T @ B^T)
+/// ```
+///
+/// Returns:
+/// * `Ok(Some(out))` — the tape-forward path ran. The returned candle
+///   `Tensor` is a copy of the kt-typed output (reshaped back to
+///   `base.shape()`); a `LoraDeltaAddBackward { x, a, b, scale }` node was
+///   recorded on the active thread-local tape with inputs
+///   `[base, x, A, B]` in that order.
+/// * `Ok(None)` — gate off (no thread-local tape, `KILN_USE_TAPE_FORWARD`
+///   off, `KILN_USE_TAPE_LORA_ADD` off, or device / dtype / shape /
+///   contiguity preconditions fail). The caller must fall through to the
+///   existing CUDA / Metal / Vulkan / candle dispatch.
+/// * `Err(...)` — an unexpected kt forward, kt → candle copy-back, or
+///   reshape failure. Propagated so callers see the failure cleanly
+///   instead of silently masking it.
+///
+/// # CP-4 (#1082) context — closes LoRA Var grad coverage
+///
+/// Without this adapter, the production LoRA delta-add dispatch in
+/// `add_lora_delta_to_base` lands in either `cuda_lora_add_training_f32`,
+/// `cuda_lora_add_training_bf16`, `backend.lora_decode_add`, or the
+/// Phase-4.1 `CustomOp3` path — none of which the kt `Tape` walker sees.
+/// Under `KILN_USE_TAPE_AUTHORITATIVE`, the resulting candle `GradStore`
+/// has no entries for the LoRA `Var`s (`proj.a`, `proj.b`), so the
+/// optimiser step is a no-op for the adapter parameters. With this
+/// adapter on, the fused backward emits grads for `proj.a` and `proj.b`
+/// in their original `[rank, in_features]` / `[out_features, rank]`
+/// shapes, and the IO mapping pairs each kt input id with the Var's
+/// candle id so the parity gate sees nonzero matched LoRA grads.
+///
+/// # Why fused (not 4 chained tape nodes)
+///
+/// `kiln_tensor::ops::matmul` requires `[..., M, K] @ [..., K, N]`
+/// contiguous. The LoRA delta needs `A^T` and `B^T`, which would change
+/// the kt `TensorId` and the gradient shape on the way out. Mapping
+/// `kt_input_id → candle_id` keyed on a transposed view would deposit
+/// `grad_A^T` (shape `[in_features, rank]`) under the candle id for
+/// `proj.a` (shape `[rank, in_features]`) — a silent shape disagreement
+/// that the bridge surfaces as a `kt -> candle grad copy` failure.
+/// Fusing the four ops into a single `LoraDeltaAddBackward` keeps the
+/// per-input grads in the original Var layouts so the IO mapping is
+/// direct: `(a_kt.id(), proj.a.id())`, `(b_kt.id(), proj.b.id())`.
+/// See `kiln_autograd::backwards::lora_delta_add` for the math
+/// derivation.
+#[allow(clippy::too_many_lines)]
+pub fn try_tape_lora_add_cuda(
+    base: &Tensor,
+    x: &Tensor,
+    proj: &LoraProjectionWeights,
+    lora_scale: f32,
+) -> Result<Option<Tensor>> {
+    if !tape_forward_enabled() || !tape_lora_add_enabled() {
+        return Ok(None);
+    }
+
+    // Device + dtype gate: kt matmul + kt mul_scalar are CUDA-only here
+    // (they have CPU paths too, but the bridge's `kt_tensor_from_candle_cuda_*`
+    // helpers are CUDA-only). Match the existing tape adapters.
+    if !matches!(base.device(), candle_core::Device::Cuda(_))
+        || !matches!(x.device(), candle_core::Device::Cuda(_))
+        || !matches!(proj.a.device(), candle_core::Device::Cuda(_))
+        || !matches!(proj.b.device(), candle_core::Device::Cuda(_))
+    {
+        return Ok(None);
+    }
+    if base.dtype() != x.dtype() {
+        // kt matmul requires matching dtypes throughout the composed
+        // forward; defer mixed-dtype cases to the existing CUDA path
+        // which already handles cross-dtype promotion via CustomOp3.
+        return Ok(None);
+    }
+    // Only BF16 / F32 today (matches the kt matmul envelope).
+    if !matches!(
+        base.dtype(),
+        candle_core::DType::BF16 | candle_core::DType::F32
+    ) {
+        return Ok(None);
+    }
+    if proj.a.dtype() != base.dtype() || proj.b.dtype() != base.dtype() {
+        // For the first cut we require A/B already pre-cast to the
+        // forward dtype. The existing CUDA path handles BF16/F16 → F32
+        // upcasts for the adapter weights via CustomOp3; that's
+        // deliberately out-of-scope here so the tape adapter stays a
+        // single-dtype primitive. The dispatch gate falls through and
+        // the existing path takes over when dtypes mismatch.
+        return Ok(None);
+    }
+
+    // Shape gate.
+    let base_dims = base.dims().to_vec();
+    let x_dims = x.dims().to_vec();
+    if base_dims.len() < 2 || x_dims.len() != base_dims.len() {
+        return Ok(None);
+    }
+    if base_dims[..base_dims.len() - 1] != x_dims[..x_dims.len() - 1] {
+        return Ok(None);
+    }
+    let out_features = *base_dims.last().unwrap();
+    let in_features = *x_dims.last().unwrap();
+    let rows: usize = base_dims[..base_dims.len() - 1].iter().product();
+    if rows == 0 {
+        return Ok(None);
+    }
+
+    let Ok((rank, a_in)) = proj.a.dims2() else {
+        return Ok(None);
+    };
+    let Ok((b_out, b_rank)) = proj.b.dims2() else {
+        return Ok(None);
+    };
+    if a_in != in_features || b_out != out_features || b_rank != rank {
+        return Ok(None);
+    }
+
+    // Reshape base + x to 2-D for the kt matmul envelope. The candle
+    // reshape is a layout view; .contiguous() materialises if needed.
+    let base_2d = base.reshape((rows, out_features))?.contiguous()?;
+    let x_2d = x.reshape((rows, in_features))?.contiguous()?;
+
+    // kt borrows: zero-copy views of the candle CUDA tensors. A/B are
+    // already 2-D and presumed contiguous (Vars allocated by the
+    // optimiser are always so); short-circuit on a non-contig borrow.
+    let base_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&base_2d) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    // For x, prefer to thread the kt id from an upstream tape adapter's
+    // output so the tape stays connected. The `tape_kt_input` helper
+    // looks up `x.id()` (the candle id BEFORE the reshape) — if an
+    // upstream adapter produced `x`, we'd see its kt output here. The
+    // reshape changed the candle id, so we fall through to a fresh
+    // borrow of `x_2d` for the common case (a fully-detached LoRA call).
+    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&x_2d) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let a_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&proj.a) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let b_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&proj.b) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+
+    // kt envelope: matmul requires contiguous 2-D inputs. base + x are
+    // already so by construction above; A and B come straight from the
+    // LoRA loader and are contiguous Vars. If for any reason a Var is
+    // non-contig (in-place layout munging upstream), fall through.
+    if !a_kt.is_contiguous() || !b_kt.is_contiguous() {
+        return Ok(None);
+    }
+
+    // Record on the active tape (if any). Outside a scope, fall through.
+    let out_kt = match with_active_tape(|tape: &mut Tape| -> Result<_> {
+        // h = x @ A^T
+        let a_t_kt = a_kt
+            .transpose(0, 1)
+            .map_err(|e| anyhow::anyhow!("kt a.transpose: {e}"))?
+            .contiguous()
+            .map_err(|e| anyhow::anyhow!("kt a_t.contiguous: {e}"))?;
+        let h_kt = kiln_tensor::ops::matmul(&x_kt, &a_t_kt)
+            .map_err(|e| anyhow::anyhow!("kt matmul x@a_t: {e}"))?;
+        // d = h @ B^T
+        let b_t_kt = b_kt
+            .transpose(0, 1)
+            .map_err(|e| anyhow::anyhow!("kt b.transpose: {e}"))?
+            .contiguous()
+            .map_err(|e| anyhow::anyhow!("kt b_t.contiguous: {e}"))?;
+        let d_kt = kiln_tensor::ops::matmul(&h_kt, &b_t_kt)
+            .map_err(|e| anyhow::anyhow!("kt matmul h@b_t: {e}"))?;
+        // delta = d * scale  (kt elementwise)
+        let delta_kt = kiln_tensor::ops::mul_scalar(&d_kt, lora_scale)
+            .map_err(|e| anyhow::anyhow!("kt mul_scalar(scale): {e}"))?;
+        // out = base + delta  (kt elementwise add)
+        let out_kt = kiln_tensor::ops::add(&base_kt, &delta_kt)
+            .map_err(|e| anyhow::anyhow!("kt add(base, delta): {e}"))?;
+
+        // ONE fused tape node — see module docs on `LoraDeltaAddBackward`
+        // for the rationale (transpose handling, IO-mapping shape match).
+        tape.record(
+            &out_kt,
+            &[&base_kt, &x_kt, &a_kt, &b_kt],
+            Box::new(LoraDeltaAddBackward {
+                x: x_kt.clone(),
+                a: a_kt.clone(),
+                b: b_kt.clone(),
+                scale: lora_scale,
+            }),
+        );
+        Ok(out_kt)
+    }) {
+        Some(result) => result,
+        None => return Ok(None),
+    };
+
+    let out_kt = out_kt.context("tape_forward::try_tape_lora_add_cuda: kt-tape forward failed")?;
+    let out_2d = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+        .context("tape_forward::try_tape_lora_add_cuda: kt -> candle copy failed")?;
+    let out = out_2d.reshape(base_dims.clone())?;
+
+    // CP-4 (#1082) tape_bridge: register IO mappings keyed on the
+    // candle ids the optimiser cares about — proj.a and proj.b are the
+    // LoRA `Var`s; base / x are intermediate but registered for chaining
+    // completeness so a Vars-only consumer of the bridged GradStore can
+    // be added later without re-touching this adapter.
+    kiln_kt_bridge::tape_bridge::register_input_mapping(base_kt.id(), base_2d.id());
+    kiln_kt_bridge::tape_bridge::register_input_mapping(x_kt.id(), x_2d.id());
+    kiln_kt_bridge::tape_bridge::register_input_mapping(a_kt.id(), proj.a.id());
+    kiln_kt_bridge::tape_bridge::register_input_mapping(b_kt.id(), proj.b.id());
+    // The downstream candle consumer holds `out` (the reshape-back of
+    // the kt-side 2-D output). Register the user-facing candle id only;
+    // the bridge panics on a duplicate kt output id, so we pick the one
+    // the consumer actually carries into the loss graph and chain on
+    // the same id for upstream re-use via `kt_input_for_candle(out.id())`.
+    kiln_kt_bridge::tape_bridge::register_output_mapping(out_kt.id(), out.id());
+    kiln_kt_bridge::tape_bridge::retain_output_for_chaining(&out_kt, out.id());
+
+    Ok(Some(out))
+}
+
+/// True iff `KILN_USE_TAPE_LORA_ADD` is set to an enable value.
+///
+/// Separate gate from `KILN_USE_TAPE_FORWARD` so the LoRA add adapter can
+/// be rolled out independently of the rest of the tape-forward fleet. The
+/// production `add_lora_delta_to_base` dispatches through Marlin-fused
+/// CustomOp3 paths today; flipping LoRA to tape recording changes the
+/// gradient path (analytic kt backward vs. CustomOp3 backward) so this
+/// opt-in is intentionally narrow.
+///
+/// Cached after first read, matching `tape_forward_enabled()`.
+pub fn tape_lora_add_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("KILN_USE_TAPE_LORA_ADD")
+            .map(|v| {
+                let v = v.trim().to_lowercase();
+                !(v.is_empty() || v == "0" || v == "false" || v == "no")
+            })
+            .unwrap_or(false)
+    })
+}
+
 // Tape-scope tests live in `kiln-autograd::tape_scope::tests` after
 // wave-13 (#1082) promoted the thread-local-tape machinery there. The
-// kt-tape adapter tests (`try_tape_{rms_norm,matmul,silu,embedding,swiglu}_cuda`
-// round-trips) live in the `kiln-model/tests/tape_forward_parity.rs`
-// integration test because they require the `kiln_kt_bridge` +
-// `kiln_rmsnorm_kernel` cuda surface.
+// kt-tape adapter tests (`try_tape_{rms_norm,matmul,silu,embedding,swiglu,
+// lora_add}_cuda` round-trips) live in the
+// `kiln-model/tests/tape_forward_parity.rs` integration test because they
+// require the `kiln_kt_bridge` + `kiln_rmsnorm_kernel` cuda surface.

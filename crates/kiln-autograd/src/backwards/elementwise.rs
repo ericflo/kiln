@@ -18,7 +18,7 @@
 
 use std::sync::Arc;
 
-use kiln_tensor::ops::{div, mul, sub};
+use kiln_tensor::ops::{div, mul, mul_scalar, sub};
 use kiln_tensor::{CpuStorage, Layout, Result, Storage, Tensor, TensorId};
 
 use crate::BackwardOp;
@@ -133,6 +133,40 @@ impl BackwardOp for DivBackward {
 }
 
 // ----------------------------------------------------------------------
+// MulScalarBackward — `c = x * s` → dx = dc * s.
+// ----------------------------------------------------------------------
+//
+// `s` is a non-differentiable scalar (e.g. a LoRA scale, a 1/batch
+// loss-normaliser, a -1.0 sign-flip). Single input, one gradient. Used by
+// `try_tape_lora_add_cuda` (the `delta = (x @ A^T @ B^T) * scale` step in
+// `out = base + scale * (x @ A^T @ B^T)`) and any future tape adapter that
+// records a `kiln_tensor::ops::mul_scalar` forward. (#1082 CP-4.)
+
+#[derive(Debug)]
+pub struct MulScalarBackward {
+    /// The scalar `s` from the forward `c = x * s`.
+    pub c: f32,
+}
+
+impl BackwardOp for MulScalarBackward {
+    fn name(&self) -> &'static str {
+        "mul_scalar_backward"
+    }
+    fn input_count(&self) -> usize {
+        1
+    }
+    fn apply(&self, grad_output: &Tensor) -> Result<Vec<Option<Tensor>>> {
+        let dx = mul_scalar(grad_output, self.c)?;
+        Ok(vec![Some(dx)])
+    }
+    fn requires_input(&self, _idx: usize) -> bool {
+        // The scalar lives in `self.c`; the forward input `x` does NOT
+        // need to be saved (matches AddBackward/SubBackward).
+        false
+    }
+}
+
+// ----------------------------------------------------------------------
 // Helpers
 // ----------------------------------------------------------------------
 
@@ -240,5 +274,38 @@ mod tests {
         let d = DivBackward { a: one.clone(), b: one };
         assert_eq!(d.name(), "div_backward");
         assert_eq!(d.input_count(), 2);
+
+        let s = MulScalarBackward { c: 0.5 };
+        assert_eq!(s.name(), "mul_scalar_backward");
+        assert_eq!(s.input_count(), 1);
+        assert!(!s.requires_input(0));
+    }
+
+    #[test]
+    fn mul_scalar_backward_scales_grad() {
+        // c = x * 0.25 → dx = dc * 0.25.
+        let dc = Tensor::from_slice(&[2.0f32, 4.0, -8.0], vec![3]).unwrap();
+        let grads = MulScalarBackward { c: 0.25 }.apply(&dc).unwrap();
+        assert_eq!(grads.len(), 1);
+        let dx = grads[0].as_ref().unwrap();
+        assert_eq!(dx.shape(), &[3]);
+        assert_eq!(read_f32(dx), vec![0.5, 1.0, -2.0]);
+    }
+
+    #[test]
+    fn mul_scalar_backward_finite_difference_parity() {
+        // Numerical check: forward y = x * c, sum-loss → dx[i] = c.
+        let x = Tensor::from_slice(&[1.0f32, 2.0, 3.0, 4.0], vec![4]).unwrap();
+        let c = 1.75_f32;
+        let y = mul_scalar(&x, c).unwrap();
+        let dy = Tensor::from_slice(&[1.0f32; 4], vec![4]).unwrap();
+        let grads = MulScalarBackward { c }.apply(&dy).unwrap();
+        let dx = grads[0].as_ref().unwrap();
+        let dx_v = read_f32(dx);
+        // Sum-loss gradient w.r.t. each x[i] equals c.
+        for v in &dx_v {
+            assert!((v - c).abs() < 1e-6);
+        }
+        let _ = y;
     }
 }

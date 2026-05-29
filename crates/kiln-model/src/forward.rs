@@ -2454,6 +2454,18 @@ fn add_lora_delta_to_base(
     let Some(proj) = lora else {
         return Ok(base);
     };
+    // CP-4 (#1082): tape-routed LoRA add. With both `KILN_USE_TAPE_FORWARD`
+    // and `KILN_USE_TAPE_LORA_ADD` on AND a thread-local Tape installed,
+    // the kt-fused forward records a `LoraDeltaAddBackward` node that emits
+    // grads for `proj.a` / `proj.b` keyed on their original Var ids. Closes
+    // the LoRA Var grad-coverage gap that was preventing the tape-
+    // authoritative training step from updating LoRA adapters. Off by
+    // default — falls through to the existing CUDA dispatch when the gate
+    // is off, no tape is active, or the envelope rejects the inputs.
+    #[cfg(feature = "cuda")]
+    if let Some(out) = crate::tape_forward::try_tape_lora_add_cuda(&base, x, proj, lora_scale)? {
+        return Ok(out);
+    }
     #[cfg(feature = "cuda")]
     if let Some(out) = cuda_lora_add_training_f32(&base, x, proj, lora_scale)? {
         return Ok(out);

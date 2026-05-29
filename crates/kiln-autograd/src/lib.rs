@@ -70,13 +70,16 @@ pub use backwards::cross_entropy::CrossEntropyBackward;
 pub use backwards::cross_entropy_kt::CrossEntropyKtBackward;
 pub use backwards::cumsum::CumsumBackward;
 pub use backwards::dropout::DropoutBackward;
-pub use backwards::elementwise::{AddBackward, DivBackward, MulBackward, SubBackward};
+pub use backwards::elementwise::{
+    AddBackward, DivBackward, MulBackward, MulScalarBackward, SubBackward,
+};
 pub use backwards::embedding::EmbeddingBackward;
 pub use backwards::gather::GatherBackward;
 pub use backwards::index_ops::{CastBackward, IndexSelectBackward, ScatterAddBackward};
 pub use backwards::inject_gradient::InjectGradientBackward;
 pub use backwards::l2norm::L2NormBackward;
 pub use backwards::layernorm::LayerNormBackward;
+pub use backwards::lora_delta_add::LoraDeltaAddBackward;
 pub use backwards::mask::MaskedFillBackward;
 pub use backwards::matmul::MatmulBackward;
 pub use backwards::max_axis::MaxAxisBackward;
