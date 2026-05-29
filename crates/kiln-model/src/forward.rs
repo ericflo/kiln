@@ -45,6 +45,17 @@ use crate::weights::{DeferredMtpSource, ModelWeights, MtpWeights, TensorDType, W
 
 use kiln_core::block::BlockTable;
 
+/// kt-tensor type alias (#1082). Bare `Tensor` in this file is
+/// `candle_core::Tensor`; `KtTensor` is the kiln-native
+/// `kiln_tensor::Tensor`. Used by the kt-native embedding + lm_head
+/// helpers and the `GpuWeights` kt accessors so the candle↔kt seam
+/// is explicit at the region boundaries while public signatures stay
+/// candle-typed. Always available (the alias itself pulls in no CUDA
+/// toolchain dependency); the accessors and helpers that construct
+/// `KtTensor` device storage are `#[cfg(feature = "cuda")]`.
+#[allow(unused_imports)]
+use kiln_tensor::Tensor as KtTensor;
+
 /// The reduction-axis marker for "the last dimension" — passed to
 /// `Tensor::sum_keepdim` / `max_keepdim` / `mean_keepdim` / `cumsum` /
 /// `narrow` / `Tensor::cat` / `unsqueeze` in this file. Consolidates
@@ -6621,6 +6632,67 @@ impl GpuWeights {
         kiln_kt_bridge::kt_device_from_candle(self.embed_tokens.device())
     }
 
+    /// kt-native view of the token-embedding table (#1082, embedding
+    /// region migration).
+    ///
+    /// Borrows `embed_tokens` ([vocab, hidden]) as a `KtTensor` via the
+    /// zero-copy CUDA bridge so the embedding region can run its gather
+    /// (`kiln_tensor::cuda_index_select_dim0`) on kt storage without the
+    /// caller re-borrowing the candle field each call. `embed_tokens` is
+    /// uploaded contiguous at load (`from_model_weights`), so the
+    /// `contiguous()` here is a cheap Arc clone in the common case; it is
+    /// kept defensively because the bridge borrow requires contiguity.
+    ///
+    /// CUDA-only: the borrow adapter requires a CUDA device. Returns a
+    /// typed error on non-CUDA (callers fall through to the candle
+    /// `index_select` path). Public signatures of the embedding
+    /// functions stay candle-typed — this accessor is the explicit
+    /// candle→kt boundary at the weight side.
+    #[cfg(feature = "cuda")]
+    pub fn embed_tokens_kt(&self) -> Result<KtTensor> {
+        if !matches!(self.embed_tokens.device(), Device::Cuda(_)) {
+            anyhow::bail!(
+                "embed_tokens_kt: embed_tokens must be on CUDA for the kt borrow \
+                 (got {:?})",
+                self.embed_tokens.device().location()
+            );
+        }
+        let contig = self
+            .embed_tokens
+            .contiguous()
+            .context("embed_tokens_kt: contiguous")?;
+        kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&contig)
+            .map_err(|e| anyhow::anyhow!("embed_tokens_kt borrow: {e}"))
+    }
+
+    /// kt-native view of the pre-transposed token-embedding table
+    /// (#1082, lm_head region migration).
+    ///
+    /// Borrows `embed_tokens_t` ([hidden, vocab], contiguous since load)
+    /// as a `KtTensor` so the lm_head region's final projection
+    /// (`hidden @ embed_tokens_t`) can dispatch through
+    /// `kiln_tensor::cuda_matmul` on kt storage. Same contiguity /
+    /// CUDA-only contract as [`GpuWeights::embed_tokens_kt`].
+    ///
+    /// This is the weight-side candle→kt boundary for the lm_head
+    /// region; the hidden-state side bridges in the lm_head helper.
+    #[cfg(feature = "cuda")]
+    pub fn embed_tokens_t_kt(&self) -> Result<KtTensor> {
+        if !matches!(self.embed_tokens_t.device(), Device::Cuda(_)) {
+            anyhow::bail!(
+                "embed_tokens_t_kt: embed_tokens_t must be on CUDA for the kt borrow \
+                 (got {:?})",
+                self.embed_tokens_t.device().location()
+            );
+        }
+        let contig = self
+            .embed_tokens_t
+            .contiguous()
+            .context("embed_tokens_t_kt: contiguous")?;
+        kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&contig)
+            .map_err(|e| anyhow::anyhow!("embed_tokens_t_kt borrow: {e}"))
+    }
+
     /// Convert `ModelWeights` (CPU bytes) into candle tensors on the given device.
     ///
     /// `config` is used to precompute the rotary `inv_freq` tensor once so the RoPE
@@ -7130,15 +7202,44 @@ fn embedding_lookup_with_index(index: &Tensor, embed_weights: &Tensor) -> Result
     promote_cpu_activation(embed_weights.index_select(index, 0)?)
 }
 
-/// Phase 7 (#1082) — kt-API embedding-lookup migration helper.
-/// Routes the dim-0 `index_select` underlying token-embedding
-/// gather through `kiln_tensor::cuda_index_select_dim0`.
+/// Phase 7 (#1082) — **kt-native** embedding-lookup core.
+///
+/// Operates entirely on `KtTensor` storage: given the token-embedding
+/// table and the U32 index already borrowed as kt tensors, performs the
+/// dim-0 gather via `kiln_tensor::cuda_index_select_dim0` and returns
+/// the gathered rows as a `KtTensor` (no candle in the signature). This
+/// is the consolidated kt-internal computation for the embedding region;
+/// the candle↔kt bridging lives in the thin
+/// [`try_kt_embedding_lookup`] wrapper (hidden-state side) and the
+/// [`GpuWeights::embed_tokens_kt`] accessor (weight side).
+///
+/// Bit-exact memcpy gather — identical byte output to candle's
+/// `index_select` (no arithmetic, no reordering). The `kiln/embedding_kt`
+/// NVTX range is opened by the calling wrappers
+/// ([`try_kt_embedding_lookup`] and [`try_kt_embedding_lookup_from_weights`])
+/// so it brackets the full migrated computation (borrow-in + gather +
+/// copy-out), matching the pre-refactor trace shape; this core does not
+/// open its own range to avoid a nested duplicate.
+#[cfg(feature = "cuda")]
+fn kt_embedding_lookup_native(
+    embed_weights_kt: &KtTensor,
+    index_kt: &KtTensor,
+) -> Result<KtTensor> {
+    kiln_tensor::cuda_index_select_dim0(embed_weights_kt, index_kt)
+        .map_err(|e| anyhow::anyhow!("kt_embedding_lookup_native: index_select failed: {e}"))
+}
+
+/// Phase 7 (#1082) — kt-API embedding-lookup candle-boundary wrapper.
+/// Borrows the candle `embed_weights` + `index` as kt tensors, runs the
+/// kt-native gather ([`kt_embedding_lookup_native`]), and bridges the kt
+/// output back to a candle `Tensor` so the public
+/// [`embedding_lookup`] / [`embedding_lookup_with_index`] signatures stay
+/// candle-typed. The candle↔kt boundaries are: borrow-in (weight +
+/// index) and dtod-copy-out (gathered rows).
 ///
 /// Returns `Ok(None)` on any incompatibility (gate off, non-CUDA,
 /// non-contiguous, unsupported dtype, indices not U32) so the
-/// caller falls through to candle's `index_select`. NVTX range
-/// `kiln/embedding_kt` brackets the migrated call so nsys traces
-/// separate the path from the candle baseline.
+/// caller falls through to candle's `index_select`.
 #[cfg(feature = "cuda")]
 fn try_kt_embedding_lookup(
     embed_weights: &Tensor,
@@ -7164,6 +7265,7 @@ fn try_kt_embedding_lookup(
 
     kiln_nvtx::range!(c"kiln/embedding_kt");
 
+    // candle→kt boundary (weight + index borrow-in).
     let w_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(embed_weights) {
         Ok(t) => t,
         Err(_) => return Ok(None),
@@ -7172,13 +7274,88 @@ fn try_kt_embedding_lookup(
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    let out_kt = match kiln_tensor::cuda_index_select_dim0(&w_kt, &idx_kt) {
+    // kt-internal computation.
+    let out_kt = match kt_embedding_lookup_native(&w_kt, &idx_kt) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
+    // kt→candle boundary (gathered rows copy-out).
     let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
         .map_err(|e| anyhow::anyhow!("try_kt_embedding_lookup: candle copy-back failed: {e}"))?;
     Ok(Some(out))
+}
+
+/// Phase 7 (#1082) — weight-aware kt-native embedding lookup at the
+/// embedding→layer0 seam. Borrows the token-embedding table through
+/// [`GpuWeights::embed_tokens_kt`] (the weight-side candle→kt boundary)
+/// and the U32 index through the kt-bridge, runs the kt-native gather
+/// ([`kt_embedding_lookup_native`]), and bridges the gathered rows back
+/// to candle so the still-candle transformer layers consume an
+/// unchanged candle `Tensor`.
+///
+/// This is the consolidated kt-internal embedding path used by the
+/// production `embedding_lookup_from_weights*` callers (the non-stub
+/// `[vocab, hidden]` layout). Returns `Ok(None)` on any
+/// incompatibility (gate off, tape-forward path active, non-CUDA,
+/// non-contiguous, unsupported dtype, indices not U32) so the caller
+/// falls through to the candle `embedding_lookup*` path. The tape path
+/// is intentionally NOT handled here — when `KILN_USE_TAPE_FORWARD` is
+/// active the caller's `embedding_lookup*` candle entry records the
+/// `EmbeddingBackward` node, which this direct accessor path would
+/// bypass; we defer to it by returning `Ok(None)` so behavior is
+/// preserved on the training tape path.
+#[cfg(feature = "cuda")]
+fn try_kt_embedding_lookup_from_weights(
+    index: &Tensor,
+    weights: &GpuWeights,
+) -> Result<Option<Tensor>> {
+    if !cuda_use_kt_api_embedding() {
+        return Ok(None);
+    }
+    // Defer to the candle `embedding_lookup*` entry (which owns the
+    // tape-forward branch) whenever the tape-forward feature is enabled.
+    // That entry records the `EmbeddingBackward` node when a tape scope
+    // is active and otherwise falls through to its own kt path, so
+    // deferring here keeps the training/tape behavior bit-identical.
+    if crate::tape_forward::tape_forward_enabled() {
+        return Ok(None);
+    }
+    if !matches!(weights.embed_tokens.device(), Device::Cuda(_))
+        || !matches!(index.device(), Device::Cuda(_))
+        || !weights.embed_tokens.is_contiguous()
+        || !index.is_contiguous()
+        || index.dtype() != DType::U32
+        || !matches!(
+            weights.embed_tokens.dtype(),
+            DType::F32 | DType::BF16 | DType::F16
+        )
+    {
+        return Ok(None);
+    }
+
+    kiln_nvtx::range!(c"kiln/embedding_kt");
+
+    // candle→kt boundary: weight side via the accessor, index side via
+    // the kt-bridge borrow.
+    let w_kt = match weights.embed_tokens_kt() {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let idx_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(index) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    // kt-internal computation.
+    let out_kt = match kt_embedding_lookup_native(&w_kt, &idx_kt) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    // kt→candle boundary (gathered rows copy-out feeding the candle
+    // transformer layers).
+    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt).map_err(|e| {
+        anyhow::anyhow!("try_kt_embedding_lookup_from_weights: candle copy-back failed: {e}")
+    })?;
+    promote_cpu_activation(out).map(Some)
 }
 
 fn embedding_lookup_from_weights(token_ids: &[u32], weights: &GpuWeights) -> Result<Tensor> {
@@ -7187,6 +7364,16 @@ fn embedding_lookup_from_weights(token_ids: &[u32], weights: &GpuWeights) -> Res
         let expected_embed_dims = [t_dims[1], t_dims[0]];
         if weights.embed_tokens.dims() != expected_embed_dims.as_slice() {
             return embedding_lookup_from_transposed(token_ids, &weights.embed_tokens_t);
+        }
+    }
+    // Non-stub `[vocab, hidden]` layout: route the gather through the
+    // weight-aware kt-native path (using `embed_tokens_kt()`) when
+    // eligible; fall through to the candle `embedding_lookup` otherwise.
+    #[cfg(feature = "cuda")]
+    {
+        let index = Tensor::new(token_ids, weights.embed_tokens.device())?;
+        if let Some(out) = try_kt_embedding_lookup_from_weights(&index, weights)? {
+            return Ok(out);
         }
     }
     embedding_lookup(token_ids, &weights.embed_tokens)
@@ -7202,6 +7389,14 @@ fn embedding_lookup_from_weights_with_index(
         if weights.embed_tokens.dims() != expected_embed_dims.as_slice() {
             return embedding_lookup_from_transposed_index(index, &weights.embed_tokens_t);
         }
+    }
+
+    // Non-stub `[vocab, hidden]` layout: route the gather through the
+    // weight-aware kt-native path (using `embed_tokens_kt()`) when
+    // eligible; fall through to the candle `embedding_lookup_with_index`.
+    #[cfg(feature = "cuda")]
+    if let Some(out) = try_kt_embedding_lookup_from_weights(index, weights)? {
+        return Ok(out);
     }
 
     embedding_lookup_with_index(index, &weights.embed_tokens)
@@ -11747,6 +11942,29 @@ fn try_kt_lora_delta(
     Ok(Some(delta2d.reshape(out_shape)?))
 }
 
+/// Phase 7 (#1082) — **kt-native** LM head matmul core.
+///
+/// Operates entirely on `KtTensor` storage: given the flattened
+/// `[lead, K]` hidden state and the `[K, vocab]` transposed embedding,
+/// both already borrowed as kt tensors, performs the final projection
+/// via `kiln_tensor::cuda_matmul` (cublasLt) and returns the
+/// `[lead, vocab]` logits as a `KtTensor`. This is the consolidated
+/// kt-internal computation for the lm_head region; the candle↔kt
+/// bridging (and the captured-graph output-buffer fast path) lives in
+/// the [`try_kt_lm_head`] wrapper.
+///
+/// The matmul is bit-exact to the candle baseline for the LM head
+/// (cublasLt BF16-input + FP32-accumulate, the same intrinsic candle's
+/// matmul dispatches to). The `kiln/lm_head_kt` NVTX range is opened by
+/// the [`try_kt_lm_head`] wrapper (covering both this core and the
+/// captured-graph `cuda_matmul_into` branch), so this core does not open
+/// its own range to avoid a nested duplicate.
+#[cfg(feature = "cuda")]
+fn kt_lm_head_native(lhs_kt: &KtTensor, rhs_kt: &KtTensor) -> Result<KtTensor> {
+    kiln_tensor::cuda_matmul(lhs_kt, rhs_kt)
+        .map_err(|e| anyhow::anyhow!("kt_lm_head_native: matmul failed: {e}"))
+}
+
 /// Phase 7 (#1082) — kt-API LM head migration helper. Routes the
 /// `[B*T, hidden] @ [hidden, vocab] -> [B*T, vocab]` final projection
 /// through `kiln_tensor::cuda_matmul` (cublasLt) directly. The LM
@@ -11757,7 +11975,11 @@ fn try_kt_lora_delta(
 ///
 /// Flattens any leading dims to a 2D `[lead, K]` view before
 /// dispatching to keep the kt path on the `M-N-K` cublasLt entry
-/// shape; reshapes the result back to match the input rank.
+/// shape; reshapes the result back to match the input rank. The
+/// candle↔kt boundaries are: borrow-in (hidden + weight) and
+/// dtod-copy-out (logits) — except on the captured-graph fast path,
+/// which writes the matmul result directly into a pre-allocated,
+/// graph-stable candle output buffer via `cuda_matmul_into`.
 ///
 /// Returns `Ok(None)` on any incompatibility (gate off, non-CUDA,
 /// non-{BF16,F16,F32}, dtype mismatch, non-contiguous,
@@ -11798,6 +12020,7 @@ fn try_kt_lm_head(x: &Tensor, embed_tokens_t: &Tensor) -> Result<Option<Tensor>>
         Err(_) => return Ok(None),
     };
 
+    // candle→kt boundary (hidden + weight borrow-in).
     let lhs_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&x2d) {
         Ok(t) => t,
         Err(_) => return Ok(None),
@@ -11841,10 +12064,12 @@ fn try_kt_lm_head(x: &Tensor, embed_tokens_t: &Tensor) -> Result<Option<Tensor>>
         return Ok(Some(dst_candle));
     }
 
-    let out_kt = match kiln_tensor::cuda_matmul(&lhs_kt, &rhs_kt) {
+    // kt-internal computation (no captured-graph buffer installed).
+    let out_kt = match kt_lm_head_native(&lhs_kt, &rhs_kt) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
+    // kt→candle boundary (logits copy-out).
     let out2d = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
         .map_err(|e| anyhow::anyhow!("try_kt_lm_head: candle copy-back failed: {e}"))?;
     Ok(Some(out2d.reshape(out_shape)?))
