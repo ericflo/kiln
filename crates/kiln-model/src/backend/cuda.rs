@@ -500,6 +500,15 @@ impl BackendRuntime for CudaBackend {
         if q.dtype() != candle_core::DType::BF16 {
             return Ok(None);
         }
+        // The vendored FA-2 kernel only supports head_dim 128/256 and
+        // hard-errors otherwise. Decline (mirroring the BF16 decline above)
+        // so non-{128,256} configs — e.g. the head_dim=16 tiny test model on
+        // the detached CP-4 tape-authoritative path, which clears the
+        // track_op + BF16 gates above — fall back to the portable SDPA path
+        // instead of bubbling a hard error. (#1082)
+        if !matches!(q.dims().last(), Some(&128) | Some(&256)) {
+            return Ok(None);
+        }
         // Phase 7 (#1082): kt-typed surface is now the only path.
         // Same closeout pattern as conv1d (2ebcfb08), marlin
         // (0841c266), GDN (86c7f134). Bit-exact: bottoms out in
