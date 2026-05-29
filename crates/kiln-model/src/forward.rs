@@ -15430,7 +15430,21 @@ fn gated_deltanet_forward_decode_if(
     let v_dim = config.linear_v_dim();
     let kernel_size = config.linear_conv_kernel_dim;
     let gqa_ratio = nv / nk;
-    let gdn_forward_only_fastpaths = allow_forward_only_fastpaths && !x.track_op();
+    // CP-4 (#1082): the GDN forward-only fast paths (fused conv+split, backend
+    // causal_conv1d_prefill, fused gates, unexpanded-qk recurrence) fuse ops the
+    // kt Tape can't see and bypass the unfused, tape-wired slow path. They gate on
+    // `!x.track_op()` — but the tape-authoritative path's intermediates are detached
+    // (track_op==false), so they would fire and sever the GDN chain (conv1d never
+    // records → in_proj_qkv disconnects). Disable them when a tape recording scope
+    // is active so the unfused, fully-tape-wired GDN forward runs instead. Default
+    // (no tape scope) behaviour is unchanged.
+    #[cfg(feature = "cuda")]
+    let tape_recording_active = crate::tape_forward::tape_forward_enabled()
+        && kiln_kt_bridge::tape_bridge::bridge_scope_active();
+    #[cfg(not(feature = "cuda"))]
+    let tape_recording_active = false;
+    let gdn_forward_only_fastpaths =
+        allow_forward_only_fastpaths && !x.track_op() && !tape_recording_active;
     let (lora_layer, lora_scale) = match lora {
         Some((layer, scale)) => (Some(layer), scale),
         None => (None, 0.0),
