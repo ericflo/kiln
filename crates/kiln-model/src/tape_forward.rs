@@ -1489,6 +1489,23 @@ pub fn tape_gdn_enabled() -> bool {
 /// `[q, k, v, beta, g]` in the order the adapter records them;
 /// `entry_state` is the initial (zero) state at the SFT layer boundary, so
 /// the backward's `grad_exit_state` is `None`.
+///
+/// # Output layout (`head_last_output`)
+///
+/// The production GDN recurrence dispatch returns the attention output in
+/// **head-LAST `[B, T, nv, dv]`** layout on the CUDA prefill /
+/// full-chunk paths (`gdn_recurrent_prefill_head_last` /
+/// `gdn_chunkwise_recurrence_head_last_full_chunks`) and **head-FIRST
+/// `[B, nv, T, dv]`** only on the chunkwise fallback
+/// (`gdn_chunkwise_recurrence`). [`gdn_recurrent_backward_no_grad`] always
+/// expects a **head-FIRST** grad (its internal `grad_out.narrow(2, …)`
+/// indexes the seq axis at dim 2). `head_last_output` records which layout
+/// the recorded forward output used so `apply` can transpose a head-LAST
+/// upstream grad back to head-FIRST before invoking the backward. The
+/// saved `q`/`k`/`v`/`beta`/`g`/`entry_state` are ALWAYS head-first (they
+/// are the post-`recur_prep`-transpose recurrence inputs), so the returned
+/// `dq`/…/`dg` are head-first and match the head-first input `Var`s
+/// regardless of `head_last_output`.
 #[derive(Debug)]
 pub(crate) struct GdnRecurrentBackward {
     q: Tensor,
@@ -1499,6 +1516,10 @@ pub(crate) struct GdnRecurrentBackward {
     entry_state: Tensor,
     device: candle_core::Device,
     chunk_size: usize,
+    /// `true` when the recorded forward output was head-LAST
+    /// `[B, T, nv, dv]`; `apply` then transposes the upstream grad to the
+    /// head-FIRST `[B, nv, T, dv]` layout the backward requires.
+    head_last_output: bool,
 }
 
 impl BackwardOp for GdnRecurrentBackward {
@@ -1517,6 +1538,30 @@ impl BackwardOp for GdnRecurrentBackward {
         let grad_c = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(grad_output).map_err(|e| {
             kiln_tensor::Error::Msg(format!("GdnRecurrentBackward: grad kt->candle: {e}"))
         })?;
+        // `gdn_recurrent_backward_no_grad` indexes the seq axis at dim 2
+        // (head-FIRST). When the recorded forward output was head-LAST
+        // `[B, T, nv, dv]`, the upstream grad arrives head-last too, so
+        // transpose it back to head-FIRST `[B, nv, T, dv]` before the
+        // backward. The saved q/k/v/beta/g/entry_state are already
+        // head-first, so the returned grads stay head-first (no transpose
+        // on the way out).
+        let grad_c = if self.head_last_output {
+            grad_c
+                .transpose(1, 2)
+                .map_err(|e| {
+                    kiln_tensor::Error::Msg(format!(
+                        "GdnRecurrentBackward: head-last grad transpose: {e}"
+                    ))
+                })?
+                .contiguous()
+                .map_err(|e| {
+                    kiln_tensor::Error::Msg(format!(
+                        "GdnRecurrentBackward: head-last grad contiguous: {e}"
+                    ))
+                })?
+        } else {
+            grad_c
+        };
         let backend = crate::backend::for_device(&self.device);
         let grads = gdn_recurrent_backward_no_grad(
             &*backend,
@@ -1586,32 +1631,97 @@ pub fn try_tape_gdn_recurrent_cuda(
     let device = q.device().clone();
 
     // Production recurrence forward (mutates recurrent_state in place).
+    // `gdn_recurrent_forward_from_parts` returns the recurrence output in
+    // head-FIRST `[B, nv, T, dv]` layout (the short-seq chunkwise path),
+    // hence `head_last = false` below.
     let out = gdn_recurrent_forward_from_parts(backend, q, k, v, beta, g, recurrent_state)?;
 
-    // kt input ids (chained from upstream adapters where present).
+    // Record the node (no-op unless a tape scope is active). The forward
+    // already ran above, so this only records the backward and registers
+    // the IO mappings.
+    tape_record_gdn_recurrent(&out, false, q, k, v, beta, g, &entry_state, &device)?;
+
+    Ok(Some(out))
+}
+
+/// Record a [`GdnRecurrentBackward`] node for a GDN recurrence output that
+/// the PRODUCTION forward has ALREADY computed (via its chunk-scan
+/// kernels), WITHOUT re-running the recurrence.
+///
+/// This is the wiring entry point used by
+/// `forward::gated_deltanet_forward_decode_if`: the prefill/training path
+/// computes the recurrence output itself (through
+/// `gdn_recurrent_prefill_head_last` /
+/// `gdn_chunkwise_recurrence_head_last_full_chunks` /
+/// `gdn_chunkwise_recurrence`) and then calls this to attach the tape node.
+/// Unlike [`try_tape_gdn_recurrent_cuda`] (which re-runs the recurrence via
+/// [`gdn_recurrent_forward_from_parts`] for the per-op parity tests), this
+/// adapter takes the already-computed `out` and only records.
+///
+/// # Arguments
+///
+/// * `out` — the recurrence output the production forward produced. Its
+///   layout is described by `head_last`.
+/// * `head_last` — `true` when `out` is head-LAST `[B, T, nv, dv]` (CUDA
+///   prefill / full-chunk paths), `false` when head-FIRST `[B, nv, T, dv]`
+///   (chunkwise fallback). Stored on the recorded
+///   [`GdnRecurrentBackward`] so its `apply` can transpose a head-last grad
+///   back to head-first before the head-first-only backward.
+/// * `q`/`k`/`v`/`beta`/`g` — the head-FIRST recurrence inputs (post
+///   `recur_prep` transpose). They feed the head-first backward, so the
+///   returned grads are head-first regardless of `head_last`.
+/// * `entry_state` — the recurrent state BEFORE the forward mutated it.
+/// * `device` — for backend reconstruction in `apply`.
+///
+/// Gated on `tape_forward_enabled() && tape_gdn_enabled()` and a CUDA `q`.
+/// A no-op (returns `Ok(())`) when the gate is off, the inputs aren't CUDA,
+/// no tape scope is active, or any kt borrow fails — the production forward
+/// output is unaffected either way.
+#[allow(clippy::too_many_arguments)]
+pub fn tape_record_gdn_recurrent(
+    out: &Tensor,
+    head_last: bool,
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    beta: &Tensor,
+    g: &Tensor,
+    entry_state: &Tensor,
+    device: &candle_core::Device,
+) -> Result<()> {
+    if !tape_forward_enabled() || !tape_gdn_enabled() {
+        return Ok(());
+    }
+    if !matches!(q.device(), candle_core::Device::Cuda(_)) {
+        return Ok(());
+    }
+
+    // kt input ids (chained from upstream adapters where present). A kt
+    // borrow failure means we cannot connect this op to the tape — skip
+    // recording cleanly (the production output is still valid).
     let q_kt = match tape_kt_input(q) {
         Some(t) => t,
-        None => return Ok(Some(out)),
+        None => return Ok(()),
     };
     let k_kt = match tape_kt_input(k) {
         Some(t) => t,
-        None => return Ok(Some(out)),
+        None => return Ok(()),
     };
     let v_kt = match tape_kt_input(v) {
         Some(t) => t,
-        None => return Ok(Some(out)),
+        None => return Ok(()),
     };
     let beta_kt = match tape_kt_input(beta) {
         Some(t) => t,
-        None => return Ok(Some(out)),
+        None => return Ok(()),
     };
     let g_kt = match tape_kt_input(g) {
         Some(t) => t,
-        None => return Ok(Some(out)),
+        None => return Ok(()),
     };
-    let out_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&out) {
+    let out_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(out) {
         Ok(t) => t,
-        Err(_) => return Ok(Some(out)),
+        Err(_) => return Ok(()),
     };
 
     let recorded = with_active_tape(|tape: &mut Tape| {
@@ -1627,13 +1737,14 @@ pub fn try_tape_gdn_recurrent_cuda(
                 entry_state: entry_state.clone(),
                 device: device.clone(),
                 chunk_size: GDN_CHUNK_SIZE,
+                head_last_output: head_last,
             }),
         );
     });
     if recorded.is_none() {
-        // No active tape scope: the forward output is still valid; just no
-        // node was recorded.
-        return Ok(Some(out));
+        // No active tape scope: nothing to record. The production output is
+        // unaffected.
+        return Ok(());
     }
 
     kiln_kt_bridge::tape_bridge::register_input_mapping(q_kt.id(), q.id());
@@ -1644,7 +1755,7 @@ pub fn try_tape_gdn_recurrent_cuda(
     kiln_kt_bridge::tape_bridge::register_output_mapping(out_kt.id(), out.id());
     kiln_kt_bridge::tape_bridge::retain_output_for_chaining(&out_kt, out.id());
 
-    Ok(Some(out))
+    Ok(())
 }
 
 /// True iff `KILN_USE_TAPE_LORA_ADD` is set to an enable value.

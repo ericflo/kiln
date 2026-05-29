@@ -16018,6 +16018,14 @@ fn gated_deltanet_forward_decode_if(
         } else {
             let (q, k) = expanded_qk_for_split(q, k)?;
 
+            // Snapshot the recurrent state BEFORE any dispatch below mutates
+            // it in place — the GDN tape backward (`GdnRecurrentBackward`)
+            // needs the entry state. Cheap clone (a Tensor handle); only the
+            // CUDA tape path reads it, but we take it unconditionally so the
+            // wiring stays a single no-op call below.
+            #[cfg(feature = "cuda")]
+            let gdn_entry_state = recurrent_state.clone();
+
             // Cast v back to input_dtype so the recurrence stays in bf16. The
             // portable F32 causal-conv fallback can still produce F32 mixed_qkv;
             // without this cast the subtract `(v - exp(G) * (K @ S_entry))` below
@@ -16036,7 +16044,7 @@ fn gated_deltanet_forward_decode_if(
                 (q, k, v, beta, g)
             };
 
-            if allow_prefill_recurrent_kernel
+            let recurrent_result = if allow_prefill_recurrent_kernel
                 && let Some(attn_out) = gdn_recurrent_prefill_head_last(
                     backend,
                     &q,
@@ -16075,7 +16083,32 @@ fn gated_deltanet_forward_decode_if(
                         false,
                     ), // [B, nv, T, dv]
                 }
-            }
+            };
+
+            // Phase 6a/CP-4 (#1082) — experimental tape-forward path.
+            // Record a `GdnRecurrentBackward` node for the recurrence output
+            // the dispatch above just produced, using the head-FIRST
+            // q/k/v/beta/g and the head_last flag (tuple element 1) so the
+            // backward can transpose a head-last grad to head-first. No-op
+            // (returns `Ok(())`) unless `KILN_USE_TAPE_FORWARD` +
+            // `KILN_USE_TAPE_GDN` are both set AND a thread-local `Tape` is
+            // active; never re-runs the recurrence. The production output
+            // (`recurrent_result.0`) is untouched. See `crate::tape_forward`
+            // module docs.
+            #[cfg(feature = "cuda")]
+            crate::tape_forward::tape_record_gdn_recurrent(
+                &recurrent_result.0,
+                recurrent_result.1, // head_last
+                &q,
+                &k,
+                &v,
+                &beta,
+                &g,
+                &gdn_entry_state,
+                q.device(),
+            )?;
+
+            recurrent_result
         };
         finish_gdn_stage_profile(
             profile_device,

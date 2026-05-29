@@ -3050,3 +3050,158 @@ fn tape_gdn_recurrent_records_node_and_emits_5_grads() {
         std::env::remove_var("KILN_USE_TAPE_GDN");
     }
 }
+
+// ----------------------------------------------------------------------
+// CP-4 GDN head-LAST production-wiring coverage (#1082) —
+// `tape_record_gdn_recurrent(out, head_last=true, ...)`.
+//
+// The production GDN dispatch (forward.rs:gated_deltanet_forward_decode_if)
+// returns the recurrence output in head-LAST `[b,t,nv,dv]` layout on the
+// CUDA prefill / full-chunk paths, but `gdn_recurrent_backward_no_grad`
+// indexes the SEQ axis at dim 2 (head-FIRST). `tape_record_gdn_recurrent`
+// records `head_last_output` so `GdnRecurrentBackward::apply` transposes a
+// head-last upstream grad back to head-first before the backward. The
+// previous test only exercises the head-FIRST path; this one gates the
+// head-LAST wiring: record a head-last `out` (q/k/v/beta/g stay head-first),
+// walk, and assert exactly one node / five inputs / head-FIRST grad shapes /
+// nonzero + finite. STRUCTURAL gate only — the kt substrate is not
+// thread-safe under parallel test load, so no cross-call numeric oracle.
+// ----------------------------------------------------------------------
+
+#[test]
+fn tape_record_gdn_recurrent_head_last_records_node_and_emits_5_grads() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    let device = match cuda_device() {
+        Some(d) => d,
+        None => {
+            eprintln!("tape_gdn head-last node + grads: no CUDA device — skipping");
+            return;
+        }
+    };
+
+    // Head-FIRST recurrence inputs (post recur_prep transpose), mirroring
+    // the head-first test: q/k [b,nv,t,dk], v [b,nv,t,dv], beta/g [b,nv,t],
+    // entry_state [b,nv,dk,dv].
+    let (b, nv, t, dk, dv) = (1usize, 2usize, 8usize, 3usize, 4usize);
+    let q = det_f32(&device, &[b, nv, t, dk], 0.10, 0.011);
+    let k = det_f32(&device, &[b, nv, t, dk], 0.05, 0.013);
+    let v = det_f32(&device, &[b, nv, t, dv], 0.20, 0.007);
+    let beta = det_f32(&device, &[b, nv, t], 0.45, 0.004);
+    let g = det_f32(&device, &[b, nv, t], -0.05, -0.006);
+    let entry_state = det_f32(&device, &[b, nv, dk, dv], 0.05, 0.003);
+
+    // Head-LAST recurrence output `[b,t,nv,dv]` (the production CUDA
+    // prefill / full-chunk layout). Values are arbitrary — this is a
+    // structural gate on the recorded backward, not a numeric oracle.
+    let out_head_last = det_f32(&device, &[b, t, nv, dv], 0.15, 0.005);
+
+    unsafe {
+        std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
+        std::env::set_var("KILN_USE_TAPE_GDN", "1");
+    }
+
+    let ((), tape) = kiln_model::tape_forward::with_thread_local_tape(|| {
+        kiln_model::tape_forward::tape_record_gdn_recurrent(
+            &out_head_last,
+            true, // head_last
+            &q,
+            &k,
+            &v,
+            &beta,
+            &g,
+            &entry_state,
+            &device,
+        )
+        .expect("tape_record_gdn_recurrent ok");
+    });
+
+    assert_eq!(
+        tape.len(),
+        1,
+        "head-last gdn recurrence records exactly one node (got {})",
+        tape.len()
+    );
+    let node = &tape.nodes()[0];
+    let out_id = node.output_id;
+    let input_ids = node.input_ids.clone();
+    assert_eq!(
+        input_ids.len(),
+        5,
+        "head-last gdn records exactly five inputs (q,k,v,beta,g); got {}",
+        input_ids.len()
+    );
+
+    // Seed grad shaped like the head-LAST out; walk. The backward's
+    // `apply` transposes this seed to head-first before the head-first-only
+    // `gdn_recurrent_backward_no_grad`.
+    let seed = det_f32(&device, &[b, t, nv, dv], 0.3, -0.009);
+    let seed_kt =
+        kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&seed).expect("seed kt borrow");
+    let mut seeds = HashMap::new();
+    seeds.insert(out_id, seed_kt);
+    let grads = tape
+        .backward_with_seeds(seeds, |a, b| kiln_tensor::ops::add(a, b))
+        .expect("head-last gdn tape backward walk");
+
+    // Input order [q, k, v, beta, g] -> [dq, dk, dv, dbeta, dg]. The grads
+    // are head-FIRST (the saved inputs are head-first), so shapes match the
+    // head-first inputs even though the recorded output was head-last.
+    let fetch = |i: usize| -> Tensor {
+        let kt = grads
+            .get(input_ids[i])
+            .unwrap_or_else(|| panic!("grad {i} present"));
+        kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(kt).expect("grad -> candle")
+    };
+    let g_dq = fetch(0);
+    let g_dk = fetch(1);
+    let g_dv = fetch(2);
+    let g_dbeta = fetch(3);
+    let g_dg = fetch(4);
+    assert_eq!(g_dq.shape().dims(), &[b, nv, t, dk], "dq head-first shape == q");
+    assert_eq!(g_dk.shape().dims(), &[b, nv, t, dk], "dk head-first shape == k");
+    assert_eq!(g_dv.shape().dims(), &[b, nv, t, dv], "dv head-first shape == v");
+    assert_eq!(g_dbeta.shape().dims(), &[b, nv, t], "dbeta head-first shape == beta");
+    assert_eq!(g_dg.shape().dims(), &[b, nv, t], "dg head-first shape == g");
+
+    let max_abs = |tt: &Tensor| {
+        tt.to_dtype(DType::F32)
+            .unwrap()
+            .abs()
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .max(0)
+            .unwrap()
+            .to_scalar::<f32>()
+            .unwrap()
+    };
+    let finite = |tt: &Tensor| {
+        tt.to_dtype(DType::F32)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap()
+            .iter()
+            .all(|x| x.is_finite())
+    };
+    for (name, t) in [
+        ("dq", &g_dq),
+        ("dk", &g_dk),
+        ("dv", &g_dv),
+        ("dbeta", &g_dbeta),
+        ("dg", &g_dg),
+    ] {
+        assert!(finite(t), "{name} has non-finite entries");
+        assert!(
+            max_abs(t) > 1e-6,
+            "{name} is essentially zero — head-last tape backward not reaching the GDN input"
+        );
+    }
+
+    unsafe {
+        std::env::remove_var("KILN_USE_TAPE_FORWARD");
+        std::env::remove_var("KILN_USE_TAPE_GDN");
+    }
+}
