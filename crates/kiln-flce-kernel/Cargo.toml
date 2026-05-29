@@ -1,6 +1,6 @@
 [package]
 name = "kiln-flce-kernel"
-description = "Fused Linear Cross-Entropy (FLCE) — chunked cross-entropy over vocab without materializing the full [T, V] logits tensor. Phase A: pure-candle implementation; Phase B: manual-backward CustomOp1; Phase 7 prep: kt-typed parallel surface (see `kt_api`)."
+description = "Fused Linear Cross-Entropy (FLCE) — chunked cross-entropy over vocab without materializing the full [T, V] logits tensor. kt-typed building blocks (kt_api forward+backward, kt_tape Tape recorder); candle-free as of #1082 (the candle Phase A/B reference + CustomOp1 shims moved to kiln-train::flce_candle_shim)."
 version.workspace = true
 publish = false
 edition.workspace = true
@@ -8,39 +8,35 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-candle-core = { workspace = true }
-# kt-typed parallel surface (see `kt_api`). Phase 7 prep — no CUDA
-# feature is needed here because the kt-typed trait lives at the
-# Rust level only; it does not invoke any CUDA FFI yet (kiln-flce
-# has no FFI of its own, unlike the other Phase 7 kernel crates).
+# (#1082) candle-drop: this crate is now 100% candle-free (the THIRD
+# kernel-crate candle drop, after kiln-opd-loss-kernel and
+# kiln-rmsnorm-kernel). The candle-typed glue the SFT/FLCE trainer needs
+# (the pure-candle Phase A reference, the Phase B candle `CustomOp1`, the
+# `KtForwardOp1` kt-forward-op shim, and the kt-tape production-caller
+# adapter) moved UP into `kiln-train::flce_candle_shim`, which keeps candle
+# (and already depends on `kiln-kt-bridge`). `candle-core`, `anyhow`,
+# `tracing`, and `kiln-kt-bridge` were the deps those moved paths needed;
+# with them gone the kept code (`kt_api`, `kt_tape`) is pure `kiln_tensor`
+# + `kiln_autograd`.
+#
+# kt-typed forward + manual backward over `kiln_tensor::Tensor` ops (see
+# `kt_api`). No CUDA FFI of its own — the chunked log-sum-exp reduction is
+# expressed entirely in kt-tensor ops, which carry their own backend
+# dispatch.
 kiln-tensor = { workspace = true }
 # Phase 6a/CP-4 (#1082): kt-tape FLCE shim records onto kiln_autograd::Tape.
 kiln-autograd = { workspace = true }
-# Optional: only used by the CUDA backward bridge path
-# (`fused_linear_cross_entropy_phase_b_backward_via_kt_bridge`) which
-# is itself `#[cfg(feature = "cuda")]`. Pulling it in unconditionally
-# drags `cudarc` into non-CUDA CI matrix jobs (Linux/default,
-# Linux/Vulkan, macOS/Metal), which fail at the `nvcc --version` probe
-# in cudarc's build.rs. Gated under the `cuda` feature along with
-# `candle-core/cuda` + `kiln-tensor/cuda`. Mirrors the precedent set
-# by kiln-opd-loss-kernel (commit `fe4cfd1e`).
-kiln-kt-bridge = { workspace = true, optional = true }
-anyhow = { workspace = true }
-# `tracing` for the warn-on-fallback log emitted when the kt-bridge
-# backward path declines or fails. Cheap dep already pulled in by
-# every consumer of kiln-train.
-tracing = { workspace = true }
 
 [features]
-# Enable the CUDA path in `FlceCustomOp::cuda_fwd`. Without this feature the
-# CUDA forward errors out at runtime ("CUDA not enabled"); the CPU path works
-# either way. kiln-train re-exports this feature via its own `cuda` feature
-# so `cargo build --features cuda --bin kiln-bench` activates it.
-cuda = ["candle-core/cuda", "kiln-tensor/cuda", "dep:kiln-kt-bridge", "kiln-kt-bridge?/cuda"]
+# Activates the CUDA-backed `kiln-tensor` ops behind the kt entries (and
+# the runtime-gated CUDA E2E tests in `kt_tape`). There is no FFI / build.rs
+# in this crate, so the feature only forwards to `kiln-tensor/cuda`.
+# kiln-train re-exports this feature via its own `cuda` feature so
+# `cargo build --features cuda` activates it.
+cuda = ["kiln-tensor/cuda"]
 
 # Note: there is no `[dev-dependencies]` section. The previously-listed
 # `candle-nn = { workspace = true }` dev-dep was unused — no src/, tests/,
 # or benches/ file referenced `candle_nn` — and was dropped as part of
 # the #1082 candle-core dep evaluation
-# (`docs/kiln-flce-kernel-candle-drop-stop-2026-05-28.md`). Re-add it if
-# a future test needs `candle_nn::loss::cross_entropy` as a parity oracle.
+# (`docs/kiln-flce-kernel-candle-drop-stop-2026-05-28.md`).

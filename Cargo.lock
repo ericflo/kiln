@@ -1843,12 +1843,8 @@ dependencies = [
 name = "kiln-flce-kernel"
 version = "0.2.19"
 dependencies = [
- "anyhow",
- "candle-core",
  "kiln-autograd",
- "kiln-kt-bridge",
  "kiln-tensor",
- "tracing",
 ]
 
 [[package]]
@@ -1973,14 +1969,11 @@ version = "0.2.19"
 name = "kiln-opd-loss-kernel"
 version = "0.2.19"
 dependencies = [
- "anyhow",
- "candle-core",
  "cc",
  "half",
  "kiln-autograd",
  "kiln-kt-bridge",
  "kiln-tensor",
- "tracing",
 ]
 
 [[package]]
@@ -2007,7 +2000,6 @@ dependencies = [
 name = "kiln-rmsnorm-kernel"
 version = "0.2.19"
 dependencies = [
- "candle-core",
  "cc",
  "half",
  "kiln-autograd",

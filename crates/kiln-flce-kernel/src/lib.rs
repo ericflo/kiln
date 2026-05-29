@@ -1,4 +1,4 @@
-//! Fused Linear Cross-Entropy (FLCE).
+//! Fused Linear Cross-Entropy (FLCE) — kt-typed building blocks.
 //!
 //! Computes cross-entropy loss over a projected head without materializing
 //! the full `[T, V]` logits tensor. The mathematical trick is the log-sum-exp
@@ -6,30 +6,44 @@
 //! lets us reduce over the vocab dimension in chunks while keeping only
 //! per-row max + running sum-exp + the gathered correct logit.
 //!
-//! # Phase A vs Phase B
+//! # (#1082) candle-free
 //!
-//! Phase A ([`fused_linear_cross_entropy`]) is a pure-candle reference
-//! implementation that chunks the forward over the vocab dim. Forward peak
-//! memory is roughly `T_active * chunk_size * 4 bytes` instead of `T_active *
-//! V * 4 bytes` (~37× smaller for Qwen3.5-4B with chunk=4096 and V=151936).
-//! Backward flows through candle autograd, so intermediate chunk tensors
-//! (`logits_chunk`, `shifted`, `shifted.exp()`) are retained for the entire
-//! forward — at T=8192 with V=248320 this is ~23 GiB held live across 61
-//! vocab chunks, which OOMs SFT on A6000 (see
-//! `docs/audits/PHASE10_MODE_B_TRACE.md`).
+//! This crate is now 100% candle-free (the THIRD kernel-crate candle drop,
+//! after `kiln-opd-loss-kernel` and `kiln-rmsnorm-kernel`). It ships only
+//! the pure-`kiln_tensor` / `kiln_autograd` building blocks:
 //!
-//! Phase B ([`fused_linear_cross_entropy_phase_b`]) replaces the autograd
-//! graph with a [`candle_core::CustomOp1`] whose `bwd()` recomputes each
-//! vocab chunk on the fly. The forward stores only the scalar loss; chunk
-//! intermediates created during the forward pass are local to the op's
-//! `cpu_fwd`/`cuda_fwd` body and dropped on return, breaking the
-//! ~23 GiB-of-FLCE-intermediates retention pattern. Estimated peak-VRAM
-//! saving at T=8192 SFT on A6000: ~22 GiB. Math is identical to Phase A
-//! up to floating-point associativity.
+//! - [`kt_api`] — the kt-typed forward
+//!   ([`kt_api::fused_linear_cross_entropy_phase_b_kt`]) + manual backward
+//!   ([`kt_api::fused_linear_cross_entropy_phase_b_backward_kt`]) over
+//!   `kiln_tensor::Tensor` ops, plus the kt-typed
+//!   [`kt_api::FlceMatmulProviderKt`] provider trait.
+//! - [`kt_tape`] — the kt-tape entry
+//!   ([`fused_linear_cross_entropy_phase_b_via_kt_tape`]) that records the
+//!   FLCE backward onto a `kiln_autograd::Tape`.
 //!
-//! [`fused_linear_cross_entropy_dispatch`] picks A or B based on the
-//! `KILN_FLCE_PHASE_A=1` env var (default Phase B; opt back into Phase A
-//! for parity debugging).
+//! The candle-typed glue that the SFT/FLCE trainer needs — the pure-candle
+//! Phase A reference, the Phase B candle `CustomOp1`, the `KtForwardOp1`
+//! kt-forward-op shim, and the kt-tape production-caller adapter — moved UP
+//! into `kiln-train::flce_candle_shim`, which legitimately keeps
+//! `candle-core` (and already depends on `kiln-kt-bridge`). Those moved
+//! paths call the kt entries this crate re-exports. The relocation kept the
+//! FLCE math byte-identical — only the crate location changed.
+//!
+//! # Phase A vs Phase B (history)
+//!
+//! Phase A was a pure-candle reference that chunks the forward over the
+//! vocab dim; its backward flowed through candle autograd, retaining chunk
+//! intermediates (`logits_chunk`, `shifted`, `shifted.exp()`) for the entire
+//! forward — at T=8192 with V=248320 this was ~23 GiB held live across 61
+//! vocab chunks, which OOMed SFT on A6000 (see
+//! `docs/audits/PHASE10_MODE_B_TRACE.md`). Phase B replaced the autograd
+//! graph with a manual-backward that recomputes each vocab chunk on the fly,
+//! storing only the scalar loss. The kt-typed forward/backward here
+//! implement the same chunked log-sum-exp math, numerically equivalent to
+//! the candle Phase A/B reference up to floating-point associativity in the
+//! chunked reduction. The candle Phase A/B reference now lives in
+//! `kiln-train::flce_candle_shim` as the parity oracle + `KILN_FLCE_PHASE_A`
+//! escape hatch.
 //!
 //! # Target
 //!
@@ -38,80 +52,17 @@
 //! that dominates peak VRAM at `T >= 8192` (OOM before reaching head).
 //! FLCE is the prerequisite, not an optimization.
 
-use anyhow::{Context, Result, anyhow};
-use candle_core::{D, DType, Device, Tensor};
-use std::sync::Arc;
-
-mod phase_b;
-pub use phase_b::{
-    fused_linear_cross_entropy_phase_b, fused_linear_cross_entropy_phase_b_with_provider,
-};
-
 pub mod kt_api;
 pub use kt_api::{
     FlceError, FlceMatmulProviderKt, FlceProviderKt, fused_linear_cross_entropy_phase_b_kt,
 };
 
-mod kt_forward_op;
-pub use kt_forward_op::{
-    fused_linear_cross_entropy_phase_b_via_kt_forward_op, kt_forward_op_disabled,
-};
-
-/// Phase 6a/CP-4 (#1082): parallel kt-tape entry that drops the candle
-/// CustomOp1 wrapper in favour of recording onto a `kiln_autograd::Tape`
-/// directly. Same kt-typed forward and backward, same envelope. See
+/// Phase 6a/CP-4 (#1082): parallel kt-tape entry that records the FLCE
+/// backward onto a `kiln_autograd::Tape` directly (no candle CustomOp1
+/// wrapper). Same kt-typed forward and backward, same envelope. See
 /// `kt_tape.rs` for the pilot port rationale.
-mod kt_tape;
+pub mod kt_tape;
 pub use kt_tape::{fused_linear_cross_entropy_phase_b_via_kt_tape, CudaFlcePhaseBBackward};
-
-/// Wave-13 (#1082): candle-typed kt-tape adapter for the production
-/// caller in [`fused_linear_cross_entropy_dispatch_with_provider`].
-/// Mirrors the rmsnorm sibling
-/// `kiln-model::tape_forward::try_tape_rms_norm_cuda` — same
-/// `KILN_USE_TAPE_FORWARD` env gate + thread-local-tape contract.
-#[cfg(feature = "cuda")]
-mod tape_forward;
-#[cfg(feature = "cuda")]
-pub use tape_forward::try_tape_flce_phase_b_cuda;
-
-/// Optional matmul override hook for the FLCE chunked head pass.
-///
-/// The default Phase B forward materializes the head as F32 (`head_t.to_dtype(F32)`,
-/// ~2.5 GB on Qwen3.5-4B BF16), narrows it per-chunk, and dispatches each
-/// `[active, hidden] @ [hidden, chunk_len]` matmul through candle's CPU
-/// `broadcast_matmul`. On a unified-memory APU this is the dominant
-/// remaining CPU compute in the training tail.
-///
-/// Implementations can route the per-chunk matmul through a Vulkan kernel
-/// (or CUDA/Metal future-equivalents) without FLCE having to take a direct
-/// dependency on the backend crate. Returning `Ok(None)` falls back to the
-/// candle CPU path for that specific chunk; the caller's backward path
-/// remains the analytic Phase B implementation.
-///
-/// The trait exposes chunk metadata (`full_rhs`, `chunk_start`,
-/// `chunk_len`) so an implementation can upload `full_rhs` once and
-/// reuse the same device buffer for every chunk via offset-aware
-/// dispatch — the alternative (give the provider the already-narrowed
-/// rhs Tensor) costs a fresh device-buffer upload per chunk because
-/// candle's narrow yields a fresh `TensorId` and the underlying
-/// per-tensor weight cache misses on every dispatch.
-///
-/// `lhs` is `[active, hidden]` F32. `full_rhs` is the original
-/// `[hidden, vocab_size]` head_t in its original dtype. The chunk to
-/// compute is `full_rhs[:, chunk_start .. chunk_start + chunk_len]`.
-/// Expected output shape is `[active, chunk_len]` F32.
-pub trait FlceMatmulProvider: Send + Sync + std::fmt::Debug {
-    fn chunk_matmul(
-        &self,
-        lhs: &Tensor,
-        full_rhs: &Tensor,
-        chunk_start: usize,
-        chunk_len: usize,
-    ) -> Result<Option<Tensor>>;
-}
-
-/// Convenience boxed type used by the `_with_provider` entry points.
-pub type FlceProvider = Arc<dyn FlceMatmulProvider>;
 
 /// Default chunk size along the vocab dimension.
 ///
@@ -119,334 +70,8 @@ pub type FlceProvider = Arc<dyn FlceMatmulProvider>;
 /// launch overhead and peak intermediate footprint. For Qwen3.5-4B with
 /// V=151936, a chunk of 4096 means ~37 chunks per forward — small enough
 /// that per-chunk launch cost is absorbed.
+///
+/// Re-exported by the candle-typed surface in
+/// `kiln-train::flce_candle_shim` so both `kiln_flce_kernel::DEFAULT_CHUNK_SIZE`
+/// and `flce_candle_shim::DEFAULT_CHUNK_SIZE` resolve to the same value.
 pub const DEFAULT_CHUNK_SIZE: usize = 4096;
-
-/// Read the `KILN_FLCE_PHASE_A` env var. When set (`1`/`true`/`yes`), the
-/// dispatch helper [`fused_linear_cross_entropy_dispatch`] routes to Phase A
-/// (this function); otherwise it routes to Phase B (the CustomOp1 path).
-///
-/// Phase B is the production default — the autograd-graph reduction is the
-/// only audit-supported path to T=8192 SFT on A6000 (see
-/// `docs/audits/PHASE10_MODE_B_TRACE.md`). Phase A is kept as the parity
-/// reference and as an escape hatch for debugging.
-pub fn use_phase_a() -> bool {
-    std::env::var("KILN_FLCE_PHASE_A")
-        .map(|v| {
-            let v = v.to_lowercase();
-            v == "1" || v == "true" || v == "yes"
-        })
-        .unwrap_or(false)
-}
-
-/// Dispatch to either [`fused_linear_cross_entropy`] (Phase A) or
-/// [`fused_linear_cross_entropy_phase_b`] (Phase B) based on the
-/// `KILN_FLCE_PHASE_A` env var. Default is Phase B.
-///
-/// Trainer call sites should use this function instead of the explicit
-/// Phase A/B helpers so a single env-var flip switches every FLCE call.
-pub fn fused_linear_cross_entropy_dispatch(
-    hidden: &Tensor,
-    head_t: &Tensor,
-    input_ids: &[u32],
-    label_mask: &[bool],
-    device: &Device,
-    chunk_size: usize,
-) -> Result<Tensor> {
-    fused_linear_cross_entropy_dispatch_with_provider(
-        hidden, head_t, input_ids, label_mask, device, chunk_size, None,
-    )
-}
-
-/// Same as [`fused_linear_cross_entropy_dispatch`] but accepts an optional
-/// [`FlceProvider`] that the Phase B path consults for the per-chunk
-/// matmul. Phase A ignores the provider (the env var path is the reference
-/// implementation kept for parity debugging).
-///
-/// Trainer call sites that have a `BackendRuntime` handle build a
-/// provider that wraps `backend.linear_prefill_apply` (or equivalent) and
-/// pass it through here.
-pub fn fused_linear_cross_entropy_dispatch_with_provider(
-    hidden: &Tensor,
-    head_t: &Tensor,
-    input_ids: &[u32],
-    label_mask: &[bool],
-    device: &Device,
-    chunk_size: usize,
-    provider: Option<FlceProvider>,
-) -> Result<Tensor> {
-    if use_phase_a() {
-        // Phase A is the reference path for parity debugging only; the
-        // provider is intentionally not threaded through here.
-        let _ = provider;
-        fused_linear_cross_entropy(hidden, head_t, input_ids, label_mask, device, chunk_size)
-    } else {
-        // (#1082) Production path now routes through the
-        // `KtForwardOp1` candle-autograd shim (commit `095f1c74`) over
-        // the kt-typed forward + backward kernels. The shim falls
-        // back to the candle Phase-B `CustomOp1` path when:
-        //   - a `provider` is bound (the trainer's Vulkan FLCE escape;
-        //     the shim has no provider plumbing),
-        //   - `hidden` is not on CUDA,
-        //   - `dtype` ∉ {F32, BF16} or hidden/head dtypes differ,
-        //   - `active_count == 0` or `seq_len < 2`,
-        //   - or the kill switch `KILN_DISABLE_FLCE_KT_FORWARD_OP=1`
-        //     is set.
-        // The autograd chain through `loss.backward()` is preserved
-        // in either case — both the shim and the Phase-B path are
-        // candle `CustomOp1`s parented on `hidden`.
-        //
-        // Wave-13 (#1082): when `KILN_USE_TAPE_FORWARD=1` AND a thread-
-        // local `kiln_autograd::Tape` scope is active (and no provider
-        // is bound — the tape entry has no provider plumbing), route
-        // through `try_tape_flce_phase_b_cuda` first. The forward
-        // result is bit-exact with the kt-shim (same kt-typed forward
-        // underneath); the backward node is recorded on the tape for
-        // `Tape::backward`. With any gate off (the default)
-        // `try_tape_flce_phase_b_cuda` returns `Ok(None)` and we fall
-        // through to the existing kt-shim — preserving the
-        // candle-autograd chain for callers driving gradients via
-        // `loss.backward()`.
-        #[cfg(feature = "cuda")]
-        {
-            if provider.is_none() {
-                if let Some(out) = try_tape_flce_phase_b_cuda(
-                    hidden, head_t, input_ids, label_mask, chunk_size,
-                )? {
-                    return Ok(out);
-                }
-            }
-        }
-        fused_linear_cross_entropy_phase_b_via_kt_forward_op(
-            hidden, head_t, input_ids, label_mask, device, chunk_size, provider,
-        )
-    }
-}
-
-/// Compute cross-entropy loss using a fused linear + cross-entropy pass
-/// (**Phase A** — pure-candle reference, autograd flows through chunk
-/// intermediates).
-///
-/// Phase A is kept as the parity reference and as an opt-in escape hatch
-/// for debugging via `KILN_FLCE_PHASE_A=1`. New training code should call
-/// [`fused_linear_cross_entropy_dispatch`] (default Phase B).
-///
-/// # Arguments
-///
-/// * `hidden` — `[1, seq_len, hidden_size]` post-final-RMSNorm hidden states
-///   (matches the input shape of `kiln_model::forward::model_forward_head`).
-/// * `head_t` — `[hidden_size, vocab_size]` transposed head weight
-///   (matches kiln's `embed_tokens_t` layout; this is `W.T` where `W` is
-///   the standard `[vocab_size, hidden_size]` lm_head).
-/// * `input_ids` — token ids; `input_ids[1..]` are the targets for
-///   `logits[..seq_len-1]` (next-token prediction shift).
-/// * `label_mask` — `[seq_len]` booleans; only positions where
-///   `label_mask[i+1]` is true contribute to the loss.
-/// * `device` — device on which the output scalar is allocated.
-/// * `chunk_size` — chunk size along the vocab dim; use
-///   `DEFAULT_CHUNK_SIZE` unless tuning.
-///
-/// # Returns
-///
-/// A scalar F32 [`Tensor`] — the mean cross-entropy over active positions.
-/// Returns a zero tensor if no positions are active (no assistant tokens).
-///
-/// # Parity
-///
-/// This function is numerically equivalent to the naive
-/// `log_sum_exp(logits) - gather(logits, labels)` path up to floating-point
-/// associativity in the reduction across chunks. The CPU parity test
-/// enforces `atol=1e-4 / rtol=1e-3` at bf16 and tighter at f32.
-pub fn fused_linear_cross_entropy(
-    hidden: &Tensor,
-    head_t: &Tensor,
-    input_ids: &[u32],
-    label_mask: &[bool],
-    device: &Device,
-    chunk_size: usize,
-) -> Result<Tensor> {
-    let seq_len = input_ids.len();
-    if seq_len < 2 {
-        return Tensor::new(0.0f32, device).context("allocate zero loss scalar for seq_len < 2");
-    }
-    if label_mask.len() != seq_len {
-        return Err(anyhow!(
-            "label_mask length {} does not match input_ids length {}",
-            label_mask.len(),
-            seq_len,
-        ));
-    }
-    if chunk_size == 0 {
-        return Err(anyhow!("chunk_size must be > 0"));
-    }
-
-    // Squeeze batch dim: [seq_len, hidden_size]
-    let hidden_2d = hidden.squeeze(0).context("squeeze batch dim from hidden")?;
-
-    // Shift for next-token prediction. Use hidden[..seq_len-1] to predict
-    // input_ids[1..]. Mask is also shifted to line up with the shifted labels.
-    let shift_hidden = hidden_2d
-        .narrow(0, 0, seq_len - 1)
-        .context("narrow shift_hidden")?;
-    let shift_labels: Vec<u32> = input_ids[1..].to_vec();
-    let shift_mask: Vec<bool> = label_mask[1..].to_vec();
-
-    // Gather active positions — these are the rows of `shift_hidden` we
-    // score against their `shift_labels` entries.
-    let active_positions: Vec<u32> = shift_mask
-        .iter()
-        .enumerate()
-        .filter_map(|(i, &m)| if m { Some(i as u32) } else { None })
-        .collect();
-
-    if active_positions.is_empty() {
-        return Tensor::new(0.0f32, device).context("allocate zero loss scalar");
-    }
-
-    let active_labels: Vec<u32> = active_positions
-        .iter()
-        .map(|&i| shift_labels[i as usize])
-        .collect();
-
-    let indices = Tensor::new(active_positions.as_slice(), device)
-        .context("build active position indices")?;
-
-    // `active_hidden`: [num_active, hidden_size]
-    let active_hidden = shift_hidden
-        .index_select(&indices, 0)
-        .context("gather active_hidden rows")?;
-
-    // Vocab size is the last dim of head_t ([hidden_size, vocab_size]).
-    let head_dims = head_t.dims();
-    if head_dims.len() != 2 {
-        return Err(anyhow!(
-            "head_t must be 2-D [hidden_size, vocab_size]; got {:?}",
-            head_dims
-        ));
-    }
-    let vocab_size = head_dims[1];
-
-    // Accumulators in F32 for numerical stability. Phase A keeps these as
-    // `Tensor`s so autograd can backprop into `active_hidden`; Phase B will
-    // detach + recompute in a CustomOp.
-    //
-    // Invariant across chunks:
-    //   running_max[i] = max_{j in [0, V_seen)} logits[i, j]
-    //   running_sumexp[i] = sum_{j in [0, V_seen)} exp(logits[i, j] - running_max[i])
-    //   correct_logit[i] = logits[i, labels[i]] (seen at most once across all chunks)
-    let active_hidden_f32 = active_hidden.to_dtype(DType::F32)?;
-    let head_t_f32 = head_t.to_dtype(DType::F32)?;
-
-    let mut running_max: Option<Tensor> = None; // [num_active, 1]
-    let mut running_sumexp: Option<Tensor> = None; // [num_active, 1] in exp-space relative to running_max
-    let mut correct_logit: Option<Tensor> = None; // [num_active]
-
-    let mut chunk_start = 0usize;
-    while chunk_start < vocab_size {
-        let chunk_len = chunk_size.min(vocab_size - chunk_start);
-
-        // Head slice: [hidden_size, chunk_len].
-        //
-        // `narrow(1, off, chunk)` on a `[H, V]` tensor with stride `[V, 1]`
-        // preserves stride `[V, 1]` for the slice rather than collapsing to
-        // `[chunk, 1]`. CUDA matmul rejects strided right operands, so the
-        // chunked-vocab path crashed on the first SFT step on Qwen3.5-4B
-        // (V=248320). See PR #631 / docs/audits/PHASE10_FLCE_PREFLIGHT.md
-        // Finding 1. CPU candle matmul is permissive about strides, which is
-        // why the parity tests below missed it. Materialize a contiguous
-        // chunk before the matmul.
-        let head_chunk = head_t_f32
-            .narrow(1, chunk_start, chunk_len)
-            .context("slice head_t chunk")?
-            .contiguous()
-            .context("contiguous head_t chunk for matmul (CUDA matmul rejects strided rhs)")?;
-
-        // Chunk logits: [num_active, chunk_len]. This is the ONE materialized
-        // intermediate whose size scales with `chunk_len` instead of `vocab_size`.
-        let logits_chunk = active_hidden_f32
-            .matmul(&head_chunk)
-            .context("matmul active_hidden_f32 @ head_chunk")?;
-
-        // Per-row max within the chunk: [num_active, 1]
-        let chunk_max = logits_chunk
-            .max_keepdim(D::Minus1)
-            .context("max_keepdim on logits_chunk")?;
-
-        // Update running_max and rescale running_sumexp.
-        let (new_max, new_sumexp) = match (running_max.as_ref(), running_sumexp.as_ref()) {
-            (None, None) => {
-                // First chunk: running_max = chunk_max, running_sumexp = sum(exp(chunk - chunk_max))
-                let shifted = (&logits_chunk - chunk_max.broadcast_as(logits_chunk.shape())?)?;
-                let chunk_sumexp = shifted.exp()?.sum_keepdim(D::Minus1)?;
-                (chunk_max.clone(), chunk_sumexp)
-            }
-            (Some(prev_max), Some(prev_sumexp)) => {
-                // new_max = max(prev_max, chunk_max)
-                // prev_sumexp *= exp(prev_max - new_max)
-                // chunk_sumexp = sum(exp(logits_chunk - new_max))
-                // new_sumexp = prev_sumexp + chunk_sumexp
-                let new_max = prev_max.maximum(&chunk_max)?;
-                let prev_scale = (prev_max - &new_max)?.exp()?;
-                let scaled_prev = prev_sumexp.broadcast_mul(&prev_scale)?;
-                let shifted = (&logits_chunk - new_max.broadcast_as(logits_chunk.shape())?)?;
-                let chunk_sumexp = shifted.exp()?.sum_keepdim(D::Minus1)?;
-                let new_sumexp = (scaled_prev + chunk_sumexp)?;
-                (new_max, new_sumexp)
-            }
-            _ => unreachable!("running_max and running_sumexp are set together"),
-        };
-        running_max = Some(new_max);
-        running_sumexp = Some(new_sumexp);
-
-        // For each active row whose label falls inside this chunk, gather the
-        // correct logit from `logits_chunk`.
-        let chunk_end = chunk_start + chunk_len;
-        let mut chunk_hits: Vec<(u32, u32)> = Vec::new(); // (row_idx, label_local_in_chunk)
-        for (row_idx, &label) in active_labels.iter().enumerate() {
-            let label = label as usize;
-            if label >= chunk_start && label < chunk_end {
-                chunk_hits.push((row_idx as u32, (label - chunk_start) as u32));
-            }
-        }
-        if !chunk_hits.is_empty() {
-            let rows: Vec<u32> = chunk_hits.iter().map(|&(r, _)| r).collect();
-            let cols: Vec<u32> = chunk_hits.iter().map(|&(_, c)| c).collect();
-            let row_idx = Tensor::new(rows.as_slice(), device)?;
-            let col_idx_2d = Tensor::new(cols.as_slice(), device)?.unsqueeze(1)?;
-
-            // Gather first rows, then the specific column per row.
-            let selected_rows = logits_chunk.index_select(&row_idx, 0)?; // [hits, chunk_len]
-            let gathered = selected_rows.gather(&col_idx_2d, 1)?.squeeze(1)?; // [hits]
-
-            // Scatter into a [num_active] F32 tensor. We initialize with zeros;
-            // since each active row has exactly one label, each row is touched
-            // exactly once across all chunks.
-            let mut cur = match correct_logit.take() {
-                Some(t) => t,
-                None => Tensor::zeros(active_labels.len(), DType::F32, device)?,
-            };
-            // `index_add` along dim 0 with indices=row_idx accumulates gathered
-            // into `cur`. Since each row appears in at most one chunk for its
-            // one label, this is equivalent to a scatter.
-            cur = cur.index_add(&row_idx, &gathered, 0)?;
-            correct_logit = Some(cur);
-        }
-
-        chunk_start = chunk_end;
-    }
-
-    let running_max = running_max.ok_or_else(|| anyhow!("vocab_size was 0"))?;
-    let running_sumexp = running_sumexp.ok_or_else(|| anyhow!("vocab_size was 0"))?;
-    let correct_logit = correct_logit
-        .ok_or_else(|| anyhow!("no labels fell inside any vocab chunk — label >= vocab_size?"))?;
-
-    // log_sum_exp = running_max + log(running_sumexp). Squeeze the vocab dim.
-    let log_sum_exp =
-        (running_max.squeeze(D::Minus1)? + running_sumexp.squeeze(D::Minus1)?.log()?)?;
-
-    // Per-token loss = log_sum_exp - correct_logit. Mean over active rows.
-    let per_token_loss = (log_sum_exp - correct_logit)?;
-    let loss = per_token_loss.mean_all()?;
-
-    Ok(loss)
-}
-

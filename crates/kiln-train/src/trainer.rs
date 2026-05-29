@@ -54,9 +54,12 @@ use rand::{RngExt, SeedableRng};
 use kiln_core::block::BlockTable;
 use kiln_core::config::ModelConfig;
 use kiln_core::tokenizer::KilnTokenizer;
+// (#1082) FLCE candle-typed surface relocated to `crate::flce_candle_shim`
+// so `kiln-flce-kernel` could drop candle-core (3rd kernel-crate candle
+// drop). The kernel crate keeps only the pure-kt `kt_api` + `kt_tape`.
 #[cfg(test)]
-use kiln_flce_kernel::fused_linear_cross_entropy;
-use kiln_flce_kernel::{
+use crate::flce_candle_shim::fused_linear_cross_entropy;
+use crate::flce_candle_shim::{
     DEFAULT_CHUNK_SIZE, FlceMatmulProvider, FlceProvider, fused_linear_cross_entropy_dispatch,
     fused_linear_cross_entropy_dispatch_with_provider,
 };
@@ -6661,7 +6664,7 @@ fn use_flce() -> bool {
 /// [hidden, chunk_len]` through the active `BackendRuntime`'s
 /// `linear_prefill_apply`. The provider holds an `Arc<dyn ...>` to
 /// the backend so it can satisfy the `'static` bound that
-/// [`kiln_flce_kernel::FlceProvider`] requires.
+/// [`crate::flce_candle_shim::FlceProvider`] requires.
 ///
 /// Receives `full_rhs` plus chunk metadata so the underlying weight
 /// buffer is uploaded once via `linear_prefill_apply` (cached by

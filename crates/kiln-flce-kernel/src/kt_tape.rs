@@ -5,7 +5,7 @@
 //!
 //! # Why this module exists
 //!
-//! The existing [`crate::fused_linear_cross_entropy_phase_b_via_kt_forward_op`]
+//! The candle `kiln_train::flce_candle_shim::fused_linear_cross_entropy_phase_b_via_kt_forward_op`
 //! shim wraps the FLCE Phase B forward+backward inside a candle
 //! `CustomOp1` (`KtForwardOp1`). That keeps the candle dependency
 //! alive in the flce-kernel crate today — even though the kt-typed
@@ -49,7 +49,7 @@
 //! # Envelope
 //!
 //! Matches the shim envelope in
-//! [`crate::kt_forward_op::fused_linear_cross_entropy_phase_b_via_kt_forward_op`]:
+//! `kiln_train::flce_candle_shim::fused_linear_cross_entropy_phase_b_via_kt_forward_op`:
 //!
 //! - `hidden.device()` is CUDA (FLCE's production path is CUDA-only
 //!   in the trainer; CPU FLCE uses the candle Phase B body
@@ -82,7 +82,7 @@ use crate::kt_api::{
 
 /// Returns `true` when `(hidden, head_t)` is inside the kt-tape FLCE
 /// forward+backward envelope. Matches the
-/// `crate::kt_forward_op::shim_envelope_ok` semantics: CUDA + dtype
+/// `kiln_train::flce_candle_shim::shim_envelope_ok` semantics: CUDA + dtype
 /// in {F32, BF16} + matching head_t dtype + 3-D hidden + 2-D head_t
 /// + matching hidden_size.
 fn envelope_ok(hidden: &KtTensor, head_t: &KtTensor) -> bool {
@@ -211,7 +211,7 @@ impl BackwardOp for CudaFlcePhaseBBackward {
 }
 
 /// kt-tape FLCE Phase B forward+backward — Phase 6a/CP-4 successor to
-/// [`crate::fused_linear_cross_entropy_phase_b_via_kt_forward_op`].
+/// the candle `kiln_train::flce_candle_shim::fused_linear_cross_entropy_phase_b_via_kt_forward_op`.
 ///
 /// Runs the kt-typed forward via
 /// [`fused_linear_cross_entropy_phase_b_kt`], then records a tape
@@ -223,7 +223,7 @@ impl BackwardOp for CudaFlcePhaseBBackward {
 /// # Envelope
 ///
 /// Matches the
-/// `crate::kt_forward_op::fused_linear_cross_entropy_phase_b_via_kt_forward_op`
+/// `kiln_train::flce_candle_shim::fused_linear_cross_entropy_phase_b_via_kt_forward_op`
 /// shim envelope (see [`envelope_ok`]). Out-of-envelope inputs
 /// return an `Err` rather than silently falling back; the
 /// production caller is expected to pre-check via the same

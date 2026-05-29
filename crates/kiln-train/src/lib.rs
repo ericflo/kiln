@@ -16,6 +16,15 @@ pub(crate) mod cd_types;
 pub mod cuda_train;
 pub mod diagnostics;
 pub mod echo;
+// (#1082) Candle↔kt boundary for the SFT/FLCE trainer — relocated out of
+// `kiln-flce-kernel` so that kernel crate became 100% candle-free (the
+// THIRD kernel-crate candle drop, after `kiln-opd-loss-kernel` and
+// `kiln-rmsnorm-kernel`). Holds the candle-typed `FlceMatmulProvider` trait,
+// the pure-candle Phase A reference, the Phase B candle `CustomOp1`, the
+// `KtForwardOp1`-based kt-forward-op shim, and the kt-tape production-caller
+// adapter. The kernel crate keeps the pure-kt `kt_api` + `kt_tape` building
+// blocks this module calls. See module docstring. (#1082)
+pub mod flce_candle_shim;
 pub mod logit_cache;
 pub mod logit_source;
 pub mod long_context_fixture;

@@ -31,7 +31,7 @@
 //!
 //! ## Implementation
 //!
-//! `echo_step_loss` calls `kiln_flce_kernel::fused_linear_cross_entropy_dispatch`
+//! `echo_step_loss` calls `crate::flce_candle_shim::fused_linear_cross_entropy_dispatch`
 //! with `env_mask` as the label mask. The FLCE kernel chunks the vocab-dim
 //! matmul (default chunk 4096) and never materializes the full `[T, V]`
 //! logit tensor, so peak memory stays roughly equal to the GRPO baseline.
@@ -72,7 +72,10 @@ use anyhow::{Context, Result};
 // Phase 7 target).
 
 use crate::cd_types::Tensor;
-use kiln_flce_kernel::{
+// (#1082) FLCE candle-typed surface relocated to `crate::flce_candle_shim`
+// so `kiln-flce-kernel` could drop candle-core. The kernel crate keeps
+// only the pure-kt `kt_api` + `kt_tape` building blocks.
+use crate::flce_candle_shim::{
     DEFAULT_CHUNK_SIZE, FlceProvider, fused_linear_cross_entropy_dispatch_with_provider,
 };
 
@@ -108,7 +111,7 @@ pub struct EchoStepInputs<'a> {
     /// keeps the normalization right.
     pub total_obs_len: usize,
     /// Chunk size along the vocab dim. Use
-    /// [`kiln_flce_kernel::DEFAULT_CHUNK_SIZE`] (4096) unless tuning.
+    /// [`crate::flce_candle_shim::DEFAULT_CHUNK_SIZE`] (4096) unless tuning.
     pub chunk_size: usize,
     /// Optional per-chunk matmul provider for backend acceleration.
     /// `None` falls back to candle's portable matmul.

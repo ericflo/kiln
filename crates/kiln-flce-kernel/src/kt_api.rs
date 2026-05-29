@@ -12,19 +12,19 @@
 //! kt-typed surface this module defines is therefore the *migration
 //! target*: when Phase B's `forward_loss` / `backward_dhidden` are
 //! eventually re-implemented over `kiln_tensor::Tensor` (the natural
-//! next step once the [`crate::FlceMatmulProvider`] external
+//! next step once the `kiln_train::flce_candle_shim::FlceMatmulProvider` external
 //! integrations migrate), the kt-typed entry points + provider trait
 //! below are the public surface they will plug into.
 //!
 //! This module ships:
 //!
 //! 1. [`FlceMatmulProviderKt`] — kt-typed parallel of the candle
-//!    [`crate::FlceMatmulProvider`] trait.
+//!    `kiln_train::flce_candle_shim::FlceMatmulProvider` trait.
 //! 2. [`FlceError`] — kt-typed error, independent of candle / anyhow.
 //! 3. [`fused_linear_cross_entropy_phase_b_kt`] — kt-typed forward
 //!    entry point. Implements the chunked log-sum-exp reduction
 //!    over [`kiln_tensor`] ops; mirrors the Phase A candle reference
-//!    (see [`crate::fused_linear_cross_entropy`]) up to floating-
+//!    (see `kiln_train::flce_candle_shim::fused_linear_cross_entropy`) up to floating-
 //!    point associativity in the chunked reduction.
 //! 4. [`fused_linear_cross_entropy_phase_b_backward_kt`] — kt-typed
 //!    manual backward producing `dhidden` from `grad_loss`. Mirrors
@@ -92,7 +92,8 @@ impl From<KtError> for FlceError {
     }
 }
 
-/// `kiln_tensor::Tensor`-typed parallel of [`crate::FlceMatmulProvider`].
+/// `kiln_tensor::Tensor`-typed parallel of the candle-typed
+/// `kiln_train::flce_candle_shim::FlceMatmulProvider`.
 ///
 /// The candle-typed trait lives in `lib.rs` and continues to be used
 /// by the production Phase B path. This kt-typed twin lets backend
@@ -115,7 +116,8 @@ impl From<KtError> for FlceError {
 ///
 /// # Why `full_rhs` rather than a pre-narrowed chunk
 ///
-/// Same reason as the candle-typed trait (see [`crate::FlceMatmulProvider`]):
+/// Same reason as the candle-typed trait (see
+/// `kiln_train::flce_candle_shim::FlceMatmulProvider`):
 /// threading the un-narrowed `full_rhs` + `(chunk_start, chunk_len)`
 /// through to the provider lets implementations upload `full_rhs` to
 /// a device buffer once and reuse the same buffer for every chunk
@@ -134,13 +136,13 @@ pub trait FlceMatmulProviderKt: Send + Sync + std::fmt::Debug {
 }
 
 /// Convenience boxed type used by future `_with_provider_kt` entry
-/// points (analogous to [`crate::FlceProvider`]).
+/// points (analogous to `kiln_train::flce_candle_shim::FlceProvider`).
 pub type FlceProviderKt = Arc<dyn FlceMatmulProviderKt>;
 
 /// kt-typed entry point for FLCE Phase B forward.
 ///
 /// Re-implements the candle Phase A chunked log-sum-exp reduction
-/// (see [`crate::fused_linear_cross_entropy`]) over `kiln_tensor`
+/// (see `kiln_train::flce_candle_shim::fused_linear_cross_entropy`) over `kiln_tensor`
 /// ops. Numerically equivalent up to floating-point associativity in
 /// the chunked sum-exp accumulation; the per-chunk kernel sequence
 /// (matmul → max → shift → exp → sum) is identical.
@@ -404,7 +406,7 @@ pub fn fused_linear_cross_entropy_phase_b_kt(
 /// kt-typed FLCE Phase B backward — compute `dhidden` from `grad_loss`.
 ///
 /// Manual two-pass backward mirroring the candle reference
-/// (`crate::phase_b::backward_dhidden`):
+/// (`kiln_train::flce_candle_shim::backward_dhidden`):
 ///
 /// 1. **Pass 1**: recompute `running_max` and `running_sumexp` chunk-by-chunk
 ///    (identical to forward, minus the `correct_logit` gather).
