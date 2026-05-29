@@ -15964,7 +15964,13 @@ fn gated_deltanet_forward_decode_if(
             #[cfg(feature = "cuda")]
             let narrow_then_reshape =
                 |src: &Tensor, offset: usize, length: usize, shape: (usize, usize, usize, usize)| -> Result<Tensor> {
-                    let nar = src.narrow(2, offset, length)?;
+                    // Materialise contiguous: `narrow` returns a strided view, but
+                    // the narrow adapter borrows `out` as a kt tensor (which
+                    // requires contiguous) and the downstream reshape needs it too.
+                    // Without this the narrow adapter declines (borrow fails) and
+                    // the q/k/v become fresh-borrow islands, severing in_proj_qkv
+                    // from the loss. Value-preserving. (#1082 CP-4 Increment 5)
+                    let nar = src.narrow(2, offset, length)?.contiguous()?;
                     let nar = match crate::tape_forward::try_tape_narrow_cuda(
                         src, 2, offset, length, &nar,
                     )? {
