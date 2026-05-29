@@ -17965,6 +17965,11 @@ mod tests {
         unsafe {
             std::env::set_var("KILN_USE_FLCE", "1");
             std::env::set_var("KILN_CUDA_FLCE", "1");
+            // CP-4 (#1082): tape-authoritative is now the default training path,
+            // but this test validates the CANDLE backend-hook path
+            // (linear_prefill_apply + the FLCE provider + flash decline) which the
+            // tape path bypasses. Opt out so it exercises the candle hooks.
+            std::env::set_var("KILN_USE_TAPE_AUTHORITATIVE", "0");
         }
 
         let result = (|| -> Result<()> {
