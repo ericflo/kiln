@@ -3992,6 +3992,23 @@ fn cuda_softmax_last_dim(x: &Tensor) -> Result<Tensor> {
         && matches!(x.device(), Device::Cuda(_))
         && matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16)
         && x.is_contiguous()
+        // CP-4 (#1082): the kt-API softmax (`try_kt_softmax_last_dim`) returns a
+        // `kt_tensor_to_candle_cuda_copy` — a FRESH candle leaf with NO candle
+        // `BackpropOp`. For an autograd-tracked input that SEVERS candle's
+        // `loss.backward()` graph at the softmax. That was invisible while the
+        // full-attention block was disconnected from the loss, but CP-4 Inc 7
+        // wired the SDPA-fallback attention chain onto the kt `Tape`: the
+        // tape-authoritative backward now propagates the full attention
+        // contribution to `dL/dx`, while the candle baseline (which drives the
+        // parity gate via `loss.backward()`) was still dropping it here — so the
+        // two diverged on every layer BELOW the full-attn layer (the BF16 gate's
+        // lower-layer MLP grads jumped 0.13 → 0.63). Gate the kt-API fast path on
+        // `!x.track_op()` so an autograd-tracked softmax falls through to the
+        // candle-differentiable composite (same forward value, bit-close),
+        // matching the established `!track_op()` guard on the other kt-API
+        // forward-only ops (rms_norm, sigmoid, etc.). Inference / tape paths
+        // (track_op == false) keep the kt-API fast path unchanged.
+        && !x.track_op()
     {
         if let Some(out) = try_kt_softmax_last_dim(x)? {
             return Ok(out);
@@ -17715,6 +17732,122 @@ pub fn gqa_attention_pre_o_chunked_prefill(
     Tensor::cat(&output_refs, 1).context("chunked full-attention pre-o cat")
 }
 
+/// CP-4 (#1082) Increment 7 helper: reshape a candle tensor, routing through
+/// the kt `Tape` (`try_tape_reshape_cuda`) when a tape scope is active so the
+/// reshape stays connected to the upstream producer (chains its input) and
+/// becomes a retained output the downstream consumer can pick up. Falls through
+/// to a plain candle `.reshape()` when the tape adapter declines (gate off, no
+/// scope, non-CUDA, envelope miss).
+///
+/// `dims` is the candle reshape spec (may contain one inferred `()` axis); the
+/// kt reshape needs concrete dims, so the inferred axis is resolved from the
+/// input's element count before recording.
+fn tape_reshape_full_attn(x: &Tensor, dims: &[ReshapeArg]) -> Result<Tensor> {
+    #[cfg(feature = "cuda")]
+    {
+        if crate::tape_forward::tape_forward_enabled() {
+            if let Some(concrete) = resolve_reshape_dims(x.elem_count(), dims) {
+                if let Some(out) = crate::tape_forward::try_tape_reshape_cuda(x, concrete)? {
+                    return Ok(out);
+                }
+            }
+        }
+    }
+    // Candle reshape with the (possibly inferred) spec.
+    candle_reshape_with_spec(x, dims)
+}
+
+/// CP-4 (#1082) Increment 7 helper: `transpose(axis_a, axis_b)` + `contiguous`,
+/// routing through the kt `Tape` (`try_tape_transpose_cuda`, which materialises
+/// a contiguous output) when a tape scope is active so the chain stays
+/// connected across the naive-SDPA layout transpose. Falls through to the plain
+/// candle `transpose().contiguous()` otherwise.
+fn tape_transpose_contig_full_attn(x: &Tensor, axis_a: usize, axis_b: usize) -> Result<Tensor> {
+    #[cfg(feature = "cuda")]
+    {
+        if crate::tape_forward::tape_forward_enabled() {
+            if let Some(out) = crate::tape_forward::try_tape_transpose_cuda(x, axis_a, axis_b)? {
+                return Ok(out);
+            }
+        }
+    }
+    Ok(x.transpose(axis_a, axis_b)?.contiguous()?)
+}
+
+/// A single axis spec for [`tape_reshape_full_attn`]: either a fixed size or the
+/// single inferred axis (`Infer`, the candle `()` placeholder).
+#[derive(Clone, Copy)]
+enum ReshapeArg {
+    Size(usize),
+    Infer,
+}
+
+impl From<usize> for ReshapeArg {
+    fn from(v: usize) -> Self {
+        ReshapeArg::Size(v)
+    }
+}
+
+/// Resolve a reshape spec (with at most one `Infer` axis) to concrete dims given
+/// the total element count. Returns `None` if the spec is inconsistent (e.g. the
+/// fixed axes don't divide the element count, or more than one `Infer`).
+fn resolve_reshape_dims(elem_count: usize, dims: &[ReshapeArg]) -> Option<Vec<usize>> {
+    let mut infer_idx: Option<usize> = None;
+    let mut known: usize = 1;
+    for (i, d) in dims.iter().enumerate() {
+        match d {
+            ReshapeArg::Size(s) => known = known.checked_mul(*s)?,
+            ReshapeArg::Infer => {
+                if infer_idx.is_some() {
+                    return None; // more than one inferred axis
+                }
+                infer_idx = Some(i);
+            }
+        }
+    }
+    let mut out: Vec<usize> = Vec::with_capacity(dims.len());
+    match infer_idx {
+        Some(idx) => {
+            if known == 0 || elem_count % known != 0 {
+                return None;
+            }
+            let inferred = elem_count / known;
+            for (i, d) in dims.iter().enumerate() {
+                out.push(if i == idx {
+                    inferred
+                } else if let ReshapeArg::Size(s) = d {
+                    *s
+                } else {
+                    unreachable!()
+                });
+            }
+        }
+        None => {
+            if known != elem_count {
+                return None;
+            }
+            for d in dims {
+                if let ReshapeArg::Size(s) = d {
+                    out.push(*s);
+                }
+            }
+        }
+    }
+    Some(out)
+}
+
+/// Candle reshape honouring the [`ReshapeArg`] spec (resolves the inferred axis
+/// the same way candle's tuple-with-`()` reshape does).
+fn candle_reshape_with_spec(x: &Tensor, dims: &[ReshapeArg]) -> Result<Tensor> {
+    match resolve_reshape_dims(x.elem_count(), dims) {
+        Some(concrete) => Ok(x.reshape(concrete)?),
+        None => anyhow::bail!(
+            "tape_reshape_full_attn: inconsistent reshape spec for {} elements",
+            x.elem_count()
+        ),
+    }
+}
+
 /// Returns the gated attention value before the final output projection:
 /// [batch, seq_len, num_heads * head_dim].
 pub fn gqa_attention_pre_o(
@@ -17844,7 +17977,22 @@ pub fn gqa_attention_pre_o(
         let q_raw = q_raw
             .as_ref()
             .expect("q_raw is present when attention output gate is disabled");
-        let q = q_raw.reshape(((), seq_len, num_heads, head_dim))?;
+        // CP-4 (#1082) Increment 7: route the q-projection reshape
+        // ([B, S, H*hd] -> [B, S, H, hd]) through the kt `Tape` so the chain
+        // from q_proj (the LoRA keystone) stays connected into q_norm/rope/SDPA
+        // on the naive SDPA-fallback path (tiny-model head_dim<128). Plain
+        // candle `.reshape()` mints a fresh id that severs the tape, leaving
+        // q_norm's input a fresh-borrow island. Falls through to candle when
+        // the gate is off / no tape scope / non-CUDA.
+        let q = tape_reshape_full_attn(
+            q_raw,
+            &[
+                ReshapeArg::Infer,
+                seq_len.into(),
+                num_heads.into(),
+                head_dim.into(),
+            ],
+        )?;
         (q, None)
     };
 
@@ -17856,9 +18004,28 @@ pub fn gqa_attention_pre_o(
             "kv_reshape",
             seq_len,
         )?;
+        // CP-4 (#1082) Increment 7: same as the q reshape above — tape-wire the
+        // K/V reshapes so the chain from k_proj/v_proj reaches k_norm (K) and
+        // the value matmul (V) on the SDPA-fallback path.
         let out = (
-            k.reshape(((), seq_len, num_kv_heads, head_dim))?,
-            v.reshape(((), seq_len, num_kv_heads, head_dim))?,
+            tape_reshape_full_attn(
+                &k,
+                &[
+                    ReshapeArg::Infer,
+                    seq_len.into(),
+                    num_kv_heads.into(),
+                    head_dim.into(),
+                ],
+            )?,
+            tape_reshape_full_attn(
+                &v,
+                &[
+                    ReshapeArg::Infer,
+                    seq_len.into(),
+                    num_kv_heads.into(),
+                    head_dim.into(),
+                ],
+            )?,
         );
         finish_full_attn_stage_profile(
             profile_device,
@@ -17962,7 +18129,13 @@ pub fn gqa_attention_pre_o(
         }
     }
 
-    // Transpose to [batch, heads, seq_len, head_dim] for naive attention
+    // Transpose to [batch, heads, seq_len, head_dim] for naive attention.
+    //
+    // CP-4 (#1082) Increment 7: route the layout transpose through the kt
+    // `Tape` (`tape_transpose_contig_full_attn`) so the chain from rope (Q/K)
+    // and the V reshape stays connected to the SDPA-fallback inputs. A plain
+    // candle `transpose().contiguous()` would mint a fresh id and sever the
+    // tape between rope/reshape and SDPA. Falls through to candle otherwise.
     let (q, k, v) = {
         let stage_profile = start_named_full_attn_stage_profile(
             profile_device,
@@ -17971,9 +18144,9 @@ pub fn gqa_attention_pre_o(
             seq_len,
         )?;
         let out = (
-            q.transpose(1, 2)?.contiguous()?,
-            k.transpose(1, 2)?.contiguous()?,
-            v.transpose(1, 2)?.contiguous()?,
+            tape_transpose_contig_full_attn(&q, 1, 2)?,
+            tape_transpose_contig_full_attn(&k, 1, 2)?,
+            tape_transpose_contig_full_attn(&v, 1, 2)?,
         );
         finish_full_attn_stage_profile(
             profile_device,
@@ -17983,6 +18156,19 @@ pub fn gqa_attention_pre_o(
             stage_profile,
         )?;
         out
+    };
+
+    // CP-4 (#1082) Increment 7: keep references to the head-FIRST, PRE-GQA-
+    // expand q/k/v ([B, nq, T, hd] / [B, nkv, T, hd]) so the naive-SDPA tape
+    // adapter (below) can record `SdpaBackward` from them — mirroring
+    // `gqa_attention_core_prefill`, which records on the pre-expand tensors and
+    // GQA-collapses dk/dv back to nkv. Only meaningful when there's no KV cache
+    // (the tape-authoritative SFT path), so capture before the cache update.
+    #[cfg(feature = "cuda")]
+    let sdpa_pre_expand = if kv_cache.is_none() {
+        Some((q.clone(), k.clone(), v.clone()))
+    } else {
+        None
     };
 
     // If KV cache is provided, update it and use full cached K/V
@@ -18120,6 +18306,47 @@ pub fn gqa_attention_pre_o(
         )?;
         out
     };
+
+    // CP-4 (#1082) Increment 7: route the naive SDPA fallback through the kt
+    // `Tape` when KILN_USE_TAPE_SDPA + an active tape scope are set, so a
+    // tape-authoritative backward reaches the q/k/v (LoRA) projections on the
+    // full-attention SDPA-fallback path (head_dim ∉ {128,256}, e.g. the tiny
+    // test model). Records on the head-FIRST `attn_output` (BEFORE the
+    // transpose-back), with the pre-GQA-expand head-first q/k/v as inputs (the
+    // `SdpaBackward` adjoint GQA-collapses dk/dv back to nkv), then chains the
+    // transpose-back + reshape so the chain reaches o_proj. No-ops (returns
+    // None) in every other configuration; mirrors `gqa_attention_core_prefill`.
+    #[cfg(feature = "cuda")]
+    if let Some((q_pe, k_pe, v_pe)) = sdpa_pre_expand.as_ref() {
+        if let Some(tape_attn) = crate::tape_forward::try_tape_sdpa_fallback_cuda(
+            q_pe,
+            k_pe,
+            v_pe,
+            head_dim,
+            &attn_output,
+        )? {
+            // tape_attn is [B, nq, T, hd] on the tape. Chain transpose(1,2) ->
+            // [B, T, nq, hd] then reshape -> [B, T, nq*hd] so the chain reaches
+            // o_proj. Each chaining adapter falls through to its plain candle op
+            // when its gate is off / no scope is active.
+            let transposed = match crate::tape_forward::try_tape_transpose_cuda(&tape_attn, 1, 2)? {
+                Some(t) => t,
+                None => tape_attn.transpose(1, 2)?.contiguous()?,
+            };
+            let (tb, tt, th, td) = transposed.dims4()?;
+            let flat = th * td;
+            let reshaped = match crate::tape_forward::try_tape_reshape_cuda(
+                &transposed,
+                vec![tb, tt, flat],
+            )? {
+                Some(r) => r,
+                None => transposed.reshape((tb, tt, flat))?,
+            };
+            let attn_output =
+                attention_output_gate_decode_if(use_metal_decode_gemv, reshaped, gate.as_ref())?;
+            return Ok(attn_output);
+        }
+    }
 
     // Transpose back: [batch, seq_len, num_heads, head_dim] -> [batch, seq_len, hidden]
     let attn_output = {
