@@ -84,6 +84,31 @@ pub fn tape_forward_enabled() -> bool {
     })
 }
 
+/// `KILN_TAPE_AUTHORITATIVE` env var — opt-in trainer flip (#1082 CP-4 Step 2).
+///
+/// When this is on, `kiln-train::trainer::standard_forward_backward` routes
+/// SFT backward through `kiln_kt_bridge::tape_bridge::with_tape_authoritative_scope`
+/// instead of candle's `loss.backward()`. The loss op (cross-entropy) must
+/// itself be tape-routed for the seed lookup to find a kt mirror — see the
+/// `try_tape_cross_entropy_cuda` adapter wired into
+/// `kiln-train::cross_entropy_loss`.
+///
+/// Implies `tape_forward_enabled` semantically: the authoritative path
+/// cannot work without tape adapters recording. The trainer's gate check
+/// asserts both before flipping. Off by default. Cached after first read
+/// (same `OnceLock` convention as [`tape_forward_enabled`]).
+pub fn tape_authoritative_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("KILN_TAPE_AUTHORITATIVE")
+            .map(|v| {
+                let v = v.trim().to_lowercase();
+                !(v.is_empty() || v == "0" || v == "false" || v == "no")
+            })
+            .unwrap_or(false)
+    })
+}
+
 thread_local! {
     /// Thread-local active `Tape`. Wrapped in `RefCell` so the
     /// `record(...)` paths can take a mutable borrow; we hand out a

@@ -97,4 +97,6 @@ pub use backwards::unsqueeze::UnsqueezeBackward;
 pub use backwards::where_select::WhereSelectBackward;
 pub use grad_store::GradStore;
 pub use tape::{Tape, TapeNode};
-pub use tape_scope::{tape_forward_enabled, with_active_tape, with_thread_local_tape};
+pub use tape_scope::{
+    tape_authoritative_enabled, tape_forward_enabled, with_active_tape, with_thread_local_tape,
+};

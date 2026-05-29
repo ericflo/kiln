@@ -5966,6 +5966,28 @@ fn cross_entropy_loss(
     // Cross-entropy: -log(softmax(logits)[label])
     // Use log-sum-exp trick for numerical stability
     let active_logits_f32 = active_logits.to_f32_dtype()?;
+
+    // CP-4 (#1082) Step 2: tape-authoritative wiring. When the tape forward
+    // gate is on AND a tape scope is active AND the inputs land in the
+    // adapter's CUDA envelope, route the loss through
+    // `try_tape_cross_entropy_cuda` so a `CrossEntropyKtBackward` node lands
+    // on the active `Tape`. `with_tape_authoritative_scope` then seeds the
+    // tape walk from this loss instead of running candle backward.
+    //
+    // Falls through transparently when CPU / non-CUDA / no tape scope / gate
+    // off / non-canonical layout — same envelope contract as every other
+    // `try_tape_*_cuda` adapter. The composite below runs unchanged in that
+    // case.
+    #[cfg(feature = "cuda")]
+    {
+        if let Some(loss) = kiln_model::tape_forward::try_tape_cross_entropy_cuda(
+            &active_logits_f32,
+            &labels_tensor,
+        )? {
+            return Ok(loss);
+        }
+    }
+
     let log_sum_exp = active_logits_f32.log_sum_exp(LAST_DIM)?; // [num_active]
 
     // Gather the logit for the correct class at each position
@@ -10585,6 +10607,26 @@ pub fn standard_forward_backward(
     device: &CdDevice,
     flce_provider: Option<FlceProvider>,
 ) -> Result<(f64, GradStore)> {
+    // CP-4 (#1082) Step 2: tape-authoritative path. Drives backward through
+    // the kt `Tape` instead of candle's `loss.backward()`. Strictly opt-in
+    // via `KILN_TAPE_AUTHORITATIVE` *and* requires `KILN_USE_TAPE_FORWARD`
+    // (the adapters themselves only record when that gate is on). The loss
+    // op must be tape-routed — see the `try_tape_cross_entropy_cuda` wiring
+    // in `cross_entropy_loss` and the FLCE precondition below.
+    #[cfg(feature = "cuda")]
+    if kiln_autograd::tape_authoritative_enabled() {
+        return standard_forward_backward_tape_authoritative(
+            backend,
+            input_ids,
+            weights,
+            model_config,
+            params,
+            label_mask,
+            device,
+            flce_provider,
+        );
+    }
+
     // CP-4 (#1082): opt-in tape-bridge path. Gated on
     // `KILN_USE_TAPE_FORWARD` *and* the cuda feature. When off (the
     // default), runs the existing forward + `loss.backward()` flow
@@ -10744,6 +10786,180 @@ fn standard_forward_backward_via_tape_bridge(
             Ok((loss_val, loss))
         })
         .map_err(|e| anyhow::anyhow!("tape_bridge backward: {e}"))?;
+
+    Ok((loss_val, grads))
+}
+
+/// CP-4 (#1082) Step 2: `standard_forward_backward` body wrapped in a
+/// `kiln_kt_bridge::tape_bridge::with_tape_authoritative_scope` scope —
+/// the tape-AUTHORITATIVE backward path. Walks the connected kt `Tape`
+/// from the loss seed instead of running candle's `loss.backward()`.
+///
+/// # Precondition
+///
+/// The loss op must be tape-routed. With `KILN_USE_TAPE_FORWARD=1` the
+/// `try_tape_cross_entropy_cuda` adapter is wired into
+/// `cross_entropy_loss` and the composite path falls through whenever
+/// that adapter records, so this precondition is normally satisfied
+/// automatically.
+///
+/// FLCE is NOT yet wired through the bridge's IO-mapping scope (the
+/// `try_tape_flce_phase_b_cuda` adapter doesn't call `register_*` /
+/// `retain_output_for_chaining`). The tape walker would fail to find a
+/// kt mirror for the loss, so we require `KILN_USE_FLCE=0` up front and
+/// produce a clear error otherwise. Wiring FLCE through the bridge is
+/// follow-up work.
+///
+/// # GradStore construction
+///
+/// Builds a candle `GradStore` via the option-(a) path described in the
+/// `kiln-cp4-trainer-flip-gradstore-wrinkle` note: call `loss.backward()`
+/// on the (detached) candle loss to get a `GradStore` containing only
+/// the `loss → ones` seed (candle walks the empty upstream graph), then
+/// `insert_id` each tape-derived grad keyed by the matching candle Var
+/// `TensorId`. `loss.backward()` here is essentially a `GradStore::new()`
+/// hack — it allocates the store, populates one entry for `loss`
+/// itself, and does not run real backward work because the loss has no
+/// upstream candle graph (it's a fresh copy from kt).
+///
+/// Returned `(loss_val, GradStore)` shape matches
+/// `standard_forward_backward` so the optimizer step downstream is
+/// oblivious to which path produced the grads.
+#[cfg(feature = "cuda")]
+fn standard_forward_backward_tape_authoritative(
+    backend: &dyn BackendRuntime,
+    input_ids: &[u32],
+    weights: &GpuWeights,
+    model_config: &ModelConfig,
+    params: &TrainableLoraParams,
+    label_mask: &[bool],
+    device: &CdDevice,
+    flce_provider: Option<FlceProvider>,
+) -> Result<(f64, GradStore)> {
+    // The authoritative path is meaningless without the per-op tape
+    // adapters firing — they're how anything gets onto the tape in the
+    // first place. Both gates are caller-controlled; surface the
+    // misconfiguration loudly rather than silently producing a tape
+    // with no nodes (which would fail later inside the bridge with a
+    // less helpful "loss was not produced by a tape adapter" error).
+    if !kiln_autograd::tape_forward_enabled() {
+        anyhow::bail!(
+            "KILN_TAPE_AUTHORITATIVE=1 requires KILN_USE_TAPE_FORWARD=1 \
+             (the authoritative path drives backward through the kt tape \
+             and depends on the per-op adapters recording onto it)"
+        );
+    }
+
+    // FLCE's `try_tape_flce_phase_b_cuda` adapter doesn't register a
+    // candle⟷kt output mapping today, so the bridge can't seed the
+    // walk from the FLCE-produced loss. Avoid the surprise by failing
+    // up front.
+    if use_flce() && flce_provider.is_some() {
+        anyhow::bail!(
+            "KILN_TAPE_AUTHORITATIVE=1 + KILN_USE_FLCE=1 is not yet \
+             supported: the FLCE adapter does not register a tape⟷candle \
+             output mapping. Set KILN_USE_FLCE=0 to use the composite \
+             cross-entropy path (which is tape-routed via \
+             try_tape_cross_entropy_cuda)."
+        );
+    }
+    // `flce_provider` is the public hook into the FLCE matmul provider;
+    // when `use_flce()` is off the trainer never reaches FLCE code so
+    // the provider is unused on this path. Silence the unused-arg lint.
+    let _ = flce_provider;
+
+    let lora_weights = params.as_lora_weights();
+    let mut linear_state = LinearAttentionState::new(model_config, device)?;
+
+    // The bridge wrapper's `forward` closure must return
+    // `Result<(payload, candle Tensor), BridgeError>`. We pack the
+    // loss-value scalar (`f64`) as the payload so the caller can recover
+    // it after the bridge has consumed the candle Tensor for the tape
+    // walk. The bridge returns the (loss, kt_grads_by_candle_id) tuple
+    // we use to deposit per-Var grads.
+    let (loss_val, loss, kt_grads): (f64, Tensor, HashMap<usize, kiln_tensor::Tensor>) =
+        kiln_kt_bridge::tape_bridge::with_tape_authoritative_scope(|| {
+            let logits = model_forward(
+                backend,
+                input_ids,
+                weights,
+                model_config,
+                None,
+                Some(&mut linear_state),
+                Some(&lora_weights),
+            )
+            .context("training forward pass")
+            .map_err(|e| {
+                kiln_kt_bridge::BridgeError::new(format!(
+                    "tape_authoritative sft step: forward: {e:#}"
+                ))
+            })?;
+            let loss = cross_entropy_loss(&logits, input_ids, label_mask, device).map_err(|e| {
+                kiln_kt_bridge::BridgeError::new(format!(
+                    "tape_authoritative sft step: cross_entropy_loss: {e:#}"
+                ))
+            })?;
+            let loss_val = loss.to_scalar::<f32>().map_err(|e| {
+                kiln_kt_bridge::BridgeError::new(format!(
+                    "tape_authoritative sft step: loss.to_scalar: {e}"
+                ))
+            })? as f64;
+            Ok((loss_val, loss))
+        })
+        .map_err(|e| anyhow::anyhow!("tape_authoritative backward: {e}"))?;
+
+    // Option (a) per the `kiln-cp4-trainer-flip-gradstore-wrinkle` note:
+    // candle's `GradStore::new()` is private, so call `loss.backward()`
+    // on the detached candle loss to allocate one. The walk is a no-op
+    // (loss has no upstream tracked op), the store comes back with just
+    // a `loss → ones_like(loss)` entry, and we then `insert_id` the
+    // tape-derived per-Var grads.
+    let mut grads = loss
+        .backward()
+        .context("tape_authoritative: allocating empty GradStore via detached loss.backward()")?;
+
+    // Deposit one grad per trainable Var that flowed through a tape
+    // adapter. The map's key is the candle input `TensorId::as_raw()`
+    // that the adapter registered via `register_input_mapping`.
+    let mut deposited = 0usize;
+    for var in params.all_vars() {
+        let candle_id = var.as_tensor().id();
+        let raw_id = candle_id.as_raw();
+        let Some(kt_grad) = kt_grads.get(&raw_id) else {
+            continue;
+        };
+        let candle_grad = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(kt_grad).with_context(
+            || {
+                format!(
+                    "tape_authoritative: kt → candle grad copy for Var (candle id {raw_id})"
+                )
+            },
+        )?;
+        let candle_grad = candle_grad.contiguous().with_context(|| {
+            format!(
+                "tape_authoritative: contiguous candle grad for Var (candle id {raw_id})"
+            )
+        })?;
+        grads.insert_id(candle_id, candle_grad);
+        deposited += 1;
+    }
+
+    // Make a wiring bug loud. If we walked the tape successfully but
+    // nothing was deposited under any LoRA Var id, the registered input
+    // ids don't match the Var ids — the optimizer step would silently
+    // see zero gradient. Surface it.
+    anyhow::ensure!(
+        deposited > 0,
+        "tape_authoritative: tape walk produced no LoRA Var grads (zero ids matched). \
+         Likely cause: the LoRA weight tensors are not directly the registered inputs \
+         to a tape adapter (e.g. they flow through a candle-tracked op before reaching \
+         the adapter, breaking the raw-id link). The candle-authoritative \
+         `with_tape_scope_emit_to_grad_store` path handles this via raw-id lookup \
+         into the candle GradStore; the authoritative path needs the Var id to be \
+         registered directly. Re-enable the candle-authoritative path \
+         (`KILN_TAPE_AUTHORITATIVE=0`) and file a follow-up to widen the input \
+         registration set."
+    );
 
     Ok((loss_val, grads))
 }
@@ -16675,6 +16891,232 @@ mod tests {
             std::env::remove_var("KILN_USE_FLCE");
             std::env::remove_var("KILN_CUDA_FLCE");
         }
+        result
+    }
+
+    /// CP-4 (#1082) Step 2: tape-authoritative SFT backward parity.
+    ///
+    /// Drives the tiny-config SFT step through both:
+    /// * `standard_forward_backward` with no tape gates (candle backward)
+    /// * `standard_forward_backward` with `KILN_TAPE_AUTHORITATIVE=1` +
+    ///   `KILN_USE_TAPE_FORWARD=1` + `KILN_USE_FLCE=0`, routing through
+    ///   `standard_forward_backward_tape_authoritative` and walking the kt
+    ///   `Tape` from the cross-entropy seed instead of candle's
+    ///   `loss.backward()`.
+    ///
+    /// Asserts loss equality (scalar f32, both paths run the same kt
+    /// `cross_entropy` op at the seed) and per-LoRA-Var grad parity
+    /// within a loose tolerance — the two paths share kt forward kernels
+    /// but compose grad accumulation differently.
+    ///
+    /// # Env-var caching note
+    ///
+    /// `tape_forward_enabled()` and `tape_authoritative_enabled()` cache
+    /// their first read on a process-wide `OnceLock`. This unit-test
+    /// binary has no other test that reads either gate, so the env
+    /// values set inside the lock are the first to be observed. If a
+    /// future trainer test reads these flags before this one runs,
+    /// promote this test to a dedicated integration binary under
+    /// `crates/kiln-train/tests/`.
+    ///
+    /// Behaves as a no-op skip when no CUDA device is visible — matches
+    /// the existing pattern for `cuda_optimizer_step_from_map_engages_backend_kernels`.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn cuda_tape_authoritative_grads_match_standard_tiny() -> Result<()> {
+        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        let prior_flce = std::env::var("KILN_USE_FLCE").ok();
+        let prior_tape_fwd = std::env::var("KILN_USE_TAPE_FORWARD").ok();
+        let prior_tape_auth = std::env::var("KILN_TAPE_AUTHORITATIVE").ok();
+
+        unsafe {
+            // FLCE off: the tape-authoritative path requires the
+            // composite cross-entropy (which is tape-routed via
+            // `try_tape_cross_entropy_cuda`). FLCE's adapter doesn't
+            // register a candle⟷kt output mapping yet, so leaving FLCE
+            // on would trip the precondition error.
+            std::env::set_var("KILN_USE_FLCE", "0");
+            // Adapters must record onto the active tape.
+            std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
+            // We invoke the authoritative path explicitly below via the
+            // top-level dispatch in `standard_forward_backward`. The
+            // OnceLock cache is empty until then.
+            std::env::set_var("KILN_TAPE_AUTHORITATIVE", "1");
+        }
+
+        let result = (|| -> Result<()> {
+            let device = match CdDevice::new_cuda(0) {
+                Ok(device) => device,
+                Err(err) => {
+                    eprintln!(
+                        "CUDA unavailable, skipping tape-authoritative parity test: {err}"
+                    );
+                    return Ok(());
+                }
+            };
+            let config = tiny_config();
+            let weights = tiny_weights(&config, &device)?;
+            let backend = backend::for_device(&device);
+
+            let input_ids: Vec<u32> = vec![1, 5, 10, 3, 7, 2, 8, 4];
+            let label_mask = vec![false, false, true, true, false, true, true, false];
+            let seed = 0x515f_7eed_u64;
+
+            let params_auth = TrainableLoraParams::initialize_seeded(
+                &config,
+                &weights,
+                4,
+                8.0,
+                &device,
+                Some(seed),
+            )?;
+            let params_std = TrainableLoraParams::initialize_seeded(
+                &config,
+                &weights,
+                4,
+                8.0,
+                &device,
+                Some(seed),
+            )?;
+
+            // Tape-authoritative path: gates are already set; the
+            // dispatcher in `standard_forward_backward` routes through
+            // `standard_forward_backward_tape_authoritative`.
+            let (loss_auth, grads_auth) = standard_forward_backward(
+                &*backend,
+                &input_ids,
+                &weights,
+                &config,
+                &params_auth,
+                &label_mask,
+                &device,
+                None,
+            )?;
+
+            // Standard path: turn the tape gates OFF and re-run. The
+            // OnceLock caches block us from doing this in-process —
+            // both `tape_forward_enabled()` and
+            // `tape_authoritative_enabled()` are already initialized
+            // to `true`. So we exercise the standard path via the
+            // explicit composite walker directly: forward + candle
+            // backward, mirroring `standard_forward_backward`'s
+            // non-tape body.
+            //
+            // (`tape_authoritative_enabled()` -> `true` means
+            // `standard_forward_backward` would re-route here; we
+            // bypass it to get an apples-to-apples candle reference.)
+            let lora_weights = params_std.as_lora_weights();
+            let mut linear_state = LinearAttentionState::new(&config, &device)?;
+            let logits_std = model_forward(
+                &*backend,
+                &input_ids,
+                &weights,
+                &config,
+                None,
+                Some(&mut linear_state),
+                Some(&lora_weights),
+            )
+            .context("standard reference forward")?;
+            // Re-route cross-entropy through the *non-tape* composite
+            // by gating the per-call adapter. We can't disable the
+            // cached gate; instead, call the composite directly. But
+            // `cross_entropy_loss` early-returns through the adapter
+            // when active. So we either need to disable the gate or
+            // build the composite inline. The cleaner option: build
+            // the composite reference path inline so the assertion is
+            // truly apples-to-apples.
+            let seq_len = input_ids.len();
+            let logits_sq = logits_std.squeeze(0)?;
+            let shift_logits = logits_sq.narrow(0, 0, seq_len - 1)?;
+            let shift_labels: Vec<u32> = input_ids[1..].to_vec();
+            let shift_mask: Vec<bool> = label_mask[1..].to_vec();
+            let active_positions: Vec<usize> = shift_mask
+                .iter()
+                .enumerate()
+                .filter_map(|(i, &m)| if m { Some(i) } else { None })
+                .collect();
+            let indices = tensor_new(
+                active_positions
+                    .iter()
+                    .map(|&i| i as u32)
+                    .collect::<Vec<_>>()
+                    .as_slice(),
+                &device,
+            )?;
+            let active_logits = shift_logits.index_select(&indices, 0)?;
+            let active_labels: Vec<u32> =
+                active_positions.iter().map(|&i| shift_labels[i]).collect();
+            let labels_tensor = tensor_new(active_labels.as_slice(), &device)?
+                .to_dtype(DType::U32)?;
+            let active_logits_f32 = active_logits.to_f32_dtype()?;
+            let log_sum_exp = active_logits_f32.log_sum_exp(LAST_DIM)?;
+            let labels_2d = labels_tensor.unsqueeze(1)?;
+            let correct_logits =
+                active_logits_f32.gather(&labels_2d.to_dtype(DType::U32)?, 1)?;
+            let correct_logits = correct_logits.squeeze(1)?;
+            let per_token_loss = (log_sum_exp - correct_logits)?;
+            let loss_std_tensor = per_token_loss.mean_all()?;
+            let loss_std = loss_std_tensor.to_scalar::<f32>()? as f64;
+            let grads_std = loss_std_tensor.backward().context("standard backward")?;
+
+            let loss_diff = (loss_auth - loss_std).abs();
+            assert!(
+                loss_diff < 5e-4,
+                "tape-authoritative loss differs from standard composite: \
+                 auth={loss_auth} std={loss_std} diff={loss_diff:e}"
+            );
+
+            let auth_vars = params_auth.all_vars();
+            let std_vars = params_std.all_vars();
+            assert_eq!(auth_vars.len(), std_vars.len());
+            let mut compared = 0usize;
+            for (auth_var, std_var) in auth_vars.iter().zip(std_vars.iter()) {
+                let g_auth = grads_auth.get(auth_var.as_tensor());
+                let g_std = grads_std.get(std_var.as_tensor());
+                match (g_auth, g_std) {
+                    (Some(a), Some(b)) => {
+                        let diff = (a - b)?
+                            .abs()?
+                            .max_all()?
+                            .to_f32_dtype()?
+                            .to_scalar::<f32>()?;
+                        assert!(
+                            diff < 5e-3,
+                            "tape-authoritative grad differs from standard: \
+                             max_abs_diff={diff:e}"
+                        );
+                        compared += 1;
+                    }
+                    (None, None) => {}
+                    (auth_some, std_some) => panic!(
+                        "tape-authoritative gradient presence mismatch: \
+                         auth={} std={}",
+                        auth_some.is_some(),
+                        std_some.is_some()
+                    ),
+                }
+            }
+            assert!(
+                compared > 0,
+                "tape-authoritative parity compared no LoRA gradients"
+            );
+            Ok(())
+        })();
+
+        unsafe {
+            for (name, value) in [
+                ("KILN_USE_FLCE", prior_flce),
+                ("KILN_USE_TAPE_FORWARD", prior_tape_fwd),
+                ("KILN_TAPE_AUTHORITATIVE", prior_tape_auth),
+            ] {
+                match value {
+                    Some(v) => std::env::set_var(name, v),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
+
         result
     }
 
