@@ -396,6 +396,48 @@ fn cuda_use_kt_api_swiglu_ffn() -> bool {
     !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
 }
 
+/// Phase 7 default-on (#1082): the two cublasLt batched matmuls of the
+/// GQA full-attention **naive-SDPA fallback** (region 3 of the methodical
+/// kiln-model bare-Tensor migration) through the kt-API + adapters.
+///
+/// This is the region-3 sibling of [`cuda_use_kt_api_embedding`] /
+/// [`cuda_use_kt_api_lm_head`] / [`cuda_use_kt_api_swiglu_ffn`] (regions
+/// 0/1/2). It targets ONLY the score matmul (`q @ kᵀ`) and the value
+/// matmul (`softmax @ v`) of [`gqa_attention_core_prefill`]'s non-flash
+/// fallback — the same `cuda_matmul` (cublasLt) entry the lm_head / SwiGLU
+/// matmul migrations already dispatch to, so it is bit-exact with the
+/// candle `broadcast_matmul` it replaces (both bottom out in cublas GEMM on
+/// the GQA-expanded, head-first operands).
+///
+/// EXTREMELY conservative by design — this is the riskiest forward region
+/// (flash / tape / GQA-expand / flash-decline-counter interactions). The
+/// helper [`try_kt_gqa_sdpa_matmuls`] is invoked ONLY on the plain
+/// inference fallback (head_dim ∉ {128,256}, or no flash backend) and
+/// declines (`Ok(None)`, falling through to candle) on EVERY one of:
+/// - the gate is off (`KILN_DISABLE_KT_API_GQA_SDPA=1` /
+///   `KILN_DISABLE_KT_API_ALL=1`);
+/// - non-CUDA device, or a non-{BF16,F16,F32} / mixed dtype;
+/// - autograd-tracked `q` (candle `loss.backward()` parity oracle must keep
+///   the differentiable composite) OR an active tape recording scope (the
+///   `try_tape_sdpa_fallback_cuda` adapter records the analytic backward on
+///   the candle `attn_output`, so the candle ops must run unchanged).
+///
+/// It deliberately does NOT touch the flash-attn offer/decline ordering,
+/// `cuda_flash_attention_training_bf16`, the `try_tape_*` adapters, or the
+/// scale / causal-mask / softmax ops between the two matmuls (those stay on
+/// their existing candle / kt-softmax-gated path — reproducing the scale
+/// (affine div) and the broadcast `-inf` mask in a different kt kernel
+/// risks rounding divergence from the candle parity oracle and is left
+/// candle on purpose). Escape hatch: `KILN_DISABLE_KT_API_GQA_SDPA=1`.
+/// NVTX range `kiln/gqa_sdpa_kt` brackets the two migrated matmuls.
+#[cfg(feature = "cuda")]
+fn cuda_use_kt_api_gqa_sdpa() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    let direct =
+        *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_GQA_SDPA").is_err());
+    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
+}
+
 /// Phase 7 (#1082) opt-in: LoRA delta composite
 /// (`(x @ A^T) @ B^T * scale`) through the kt-API + adapters.
 /// Set `KILN_USE_KT_API_LORA_DELTA=1` (or `KILN_USE_KT_API_ALL=1`)
@@ -5043,6 +5085,132 @@ pub struct GpuFullAttentionWeights {
     /// path routes q_proj through the Marlin kernel instead of the BF16
     /// `broadcast_matmul` via `q_proj_t`. LoRA deltas are still applied on top.
     pub q_proj_marlin: Option<crate::marlin_proj::MarlinPackedProj>,
+}
+
+impl GpuFullAttentionWeights {
+    /// kt-native view of the pre-transposed full-attention q projection
+    /// (#1082, GQA full-attention region migration — region 3).
+    ///
+    /// Borrows `q_proj_t` (`[hidden, num_heads * head_dim (+gate)]`,
+    /// contiguous since load) as a `KtTensor` via the zero-copy CUDA bridge,
+    /// mirroring [`GpuFfnWeights::gate_proj_t_kt`] and
+    /// [`GpuWeights::embed_tokens_t_kt`]. Provided for parity with the other
+    /// migrated regions + future consolidation of the q/k/v projections; the
+    /// region-3 SDPA-matmul helper ([`try_kt_gqa_sdpa_matmuls`]) currently
+    /// borrows the activation q/k/v tensors (post-projection, post-RoPE) and
+    /// does not need the weight accessors, but they are kept here so the
+    /// region's candle→kt weight boundary lives in one place. CUDA-only;
+    /// returns a typed error on non-CUDA (the caller falls through to candle).
+    #[cfg(feature = "cuda")]
+    pub fn q_proj_t_kt(&self) -> Result<KtTensor> {
+        if !matches!(self.q_proj_t.device(), Device::Cuda(_)) {
+            anyhow::bail!(
+                "q_proj_t_kt: q_proj_t must be on CUDA for the kt borrow (got {:?})",
+                self.q_proj_t.device().location()
+            );
+        }
+        let contig = self
+            .q_proj_t
+            .contiguous()
+            .context("q_proj_t_kt: contiguous")?;
+        kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&contig)
+            .map_err(|e| anyhow::anyhow!("q_proj_t_kt borrow: {e}"))
+    }
+
+    /// kt-native view of the pre-transposed full-attention k projection
+    /// (#1082, region 3). Same contiguity / CUDA-only contract as
+    /// [`GpuFullAttentionWeights::q_proj_t_kt`].
+    #[cfg(feature = "cuda")]
+    pub fn k_proj_t_kt(&self) -> Result<KtTensor> {
+        if !matches!(self.k_proj_t.device(), Device::Cuda(_)) {
+            anyhow::bail!(
+                "k_proj_t_kt: k_proj_t must be on CUDA for the kt borrow (got {:?})",
+                self.k_proj_t.device().location()
+            );
+        }
+        let contig = self
+            .k_proj_t
+            .contiguous()
+            .context("k_proj_t_kt: contiguous")?;
+        kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&contig)
+            .map_err(|e| anyhow::anyhow!("k_proj_t_kt borrow: {e}"))
+    }
+
+    /// kt-native view of the pre-transposed full-attention v projection
+    /// (#1082, region 3). Same contiguity / CUDA-only contract as
+    /// [`GpuFullAttentionWeights::q_proj_t_kt`].
+    #[cfg(feature = "cuda")]
+    pub fn v_proj_t_kt(&self) -> Result<KtTensor> {
+        if !matches!(self.v_proj_t.device(), Device::Cuda(_)) {
+            anyhow::bail!(
+                "v_proj_t_kt: v_proj_t must be on CUDA for the kt borrow (got {:?})",
+                self.v_proj_t.device().location()
+            );
+        }
+        let contig = self
+            .v_proj_t
+            .contiguous()
+            .context("v_proj_t_kt: contiguous")?;
+        kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&contig)
+            .map_err(|e| anyhow::anyhow!("v_proj_t_kt borrow: {e}"))
+    }
+
+    /// kt-native view of the pre-transposed full-attention output
+    /// projection (#1082, region 3). Shape `[num_heads * head_dim, hidden]`.
+    /// Same contiguity / CUDA-only contract as
+    /// [`GpuFullAttentionWeights::q_proj_t_kt`]; provided for parity with the
+    /// region-1/2 accessors and future consolidation of the o_proj matmul.
+    #[cfg(feature = "cuda")]
+    pub fn o_proj_t_kt(&self) -> Result<KtTensor> {
+        if !matches!(self.o_proj_t.device(), Device::Cuda(_)) {
+            anyhow::bail!(
+                "o_proj_t_kt: o_proj_t must be on CUDA for the kt borrow (got {:?})",
+                self.o_proj_t.device().location()
+            );
+        }
+        let contig = self
+            .o_proj_t
+            .contiguous()
+            .context("o_proj_t_kt: contiguous")?;
+        kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&contig)
+            .map_err(|e| anyhow::anyhow!("o_proj_t_kt borrow: {e}"))
+    }
+
+    /// kt-native view of the q_norm RMSNorm weight (#1082, region 3).
+    /// Shape `[head_dim]`. Same contiguity / CUDA-only contract as
+    /// [`GpuFullAttentionWeights::q_proj_t_kt`]; provided for parity with the
+    /// region-1/2 accessors (the q/k norm already routes through the
+    /// default-on `rms_norm` kt gate inside the prepare step, so the SDPA
+    /// matmul helper does not need this — it is kept for the future
+    /// consolidation of the prepare region).
+    #[cfg(feature = "cuda")]
+    pub fn q_norm_kt(&self) -> Result<KtTensor> {
+        if !matches!(self.q_norm.device(), Device::Cuda(_)) {
+            anyhow::bail!(
+                "q_norm_kt: q_norm must be on CUDA for the kt borrow (got {:?})",
+                self.q_norm.device().location()
+            );
+        }
+        let contig = self.q_norm.contiguous().context("q_norm_kt: contiguous")?;
+        kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&contig)
+            .map_err(|e| anyhow::anyhow!("q_norm_kt borrow: {e}"))
+    }
+
+    /// kt-native view of the k_norm RMSNorm weight (#1082, region 3).
+    /// Shape `[head_dim]`. Same contract as
+    /// [`GpuFullAttentionWeights::q_norm_kt`].
+    #[cfg(feature = "cuda")]
+    pub fn k_norm_kt(&self) -> Result<KtTensor> {
+        if !matches!(self.k_norm.device(), Device::Cuda(_)) {
+            anyhow::bail!(
+                "k_norm_kt: k_norm must be on CUDA for the kt borrow (got {:?})",
+                self.k_norm.device().location()
+            );
+        }
+        let contig = self.k_norm.contiguous().context("k_norm_kt: contiguous")?;
+        kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&contig)
+            .map_err(|e| anyhow::anyhow!("k_norm_kt borrow: {e}"))
+    }
 }
 
 pub struct GpuLinearAttentionWeights {
@@ -18000,6 +18168,163 @@ pub fn gqa_attention_prepare_prefill(
     Ok(GqaAttentionPrepared { q, k, v, gate })
 }
 
+/// Phase 7 default-on (#1082) — region-3 kt-native consolidation of the
+/// GQA full-attention **naive-SDPA fallback**'s two cublasLt matmuls.
+///
+/// Computes the non-flash fallback `attn_output = softmax((q @ kᵀ)/√hd
+/// + causal_mask) @ v` for the GQA-expanded, head-FIRST operands
+/// (`q`/`k`/`v` all `[B, nq, T, hd]`), routing the **score matmul**
+/// (`q @ kᵀ`) and the **value matmul** (`p @ v`) through the kt substrate
+/// (`kiln_tensor::cuda_matmul`, cublasLt) with a single candle→kt borrow at
+/// each matmul's inputs and a kt→candle copy at each output. The scale,
+/// causal mask, and softmax between the two matmuls are computed by the
+/// EXISTING candle / kt-softmax-gated ops (`affine` div, the additive `-inf`
+/// `broadcast_add` mask via [`apply_causal_mask_with_offset`], and
+/// [`cuda_softmax_last_dim`]) — left candle on purpose so the path stays
+/// bit-exact with the candle parity oracle (reproducing the affine div and
+/// the broadcast `-inf` mask in a different kt kernel risks rounding drift).
+///
+/// Returns the head-FIRST `attn_output` `[B, nq, T, hd]` (BEFORE the caller's
+/// transpose+reshape-back and BEFORE the `try_tape_sdpa_fallback_cuda`
+/// adapter) so the caller's tape/decline/reshape logic is byte-for-byte
+/// unchanged. Returns `Ok(None)` — falling through to the caller's existing
+/// candle `broadcast_matmul` pair — on any of:
+/// - the gate is off (`KILN_DISABLE_KT_API_GQA_SDPA=1` /
+///   `KILN_DISABLE_KT_API_ALL=1`);
+/// - non-CUDA device, non-{BF16,F16,F32} / mixed dtype, or a non-contiguous
+///   operand;
+/// - autograd-tracked `q` (the candle `loss.backward()` parity oracle keeps
+///   the differentiable composite) OR an active tape recording scope (so the
+///   caller's `try_tape_sdpa_fallback_cuda` records the analytic backward on
+///   the candle-computed `attn_output`, exactly as today);
+/// - any kt borrow / matmul / copy-back failure (the candle path then runs).
+///
+/// Bit-exact to the candle fallback by construction: each matmul bottoms out
+/// in the SAME cublasLt GEMM the candle `broadcast_matmul` lowers to on CUDA
+/// (and the SAME `cuda_matmul` entry the validated lm_head / SwiGLU matmul
+/// migrations dispatch to); the intervening scale/mask/softmax ops are
+/// physically unchanged candle tensors. NVTX range `kiln/gqa_sdpa_kt`
+/// brackets the migrated region.
+#[cfg(feature = "cuda")]
+fn try_kt_gqa_sdpa_matmuls(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    seq_len: usize,
+    scale: f64,
+) -> Result<Option<Tensor>> {
+    if !cuda_use_kt_api_gqa_sdpa() {
+        return Ok(None);
+    }
+    // The autograd / tape paths must run the candle composite: an
+    // autograd-tracked `q` drives the candle `loss.backward()` parity gate
+    // (a kt copy-out would sever it), and an active tape scope means the
+    // caller's `try_tape_sdpa_fallback_cuda` will record the analytic
+    // backward on the candle `attn_output` — so the candle ops must run.
+    if q.track_op()
+        || (crate::tape_forward::tape_forward_enabled()
+            && kiln_kt_bridge::tape_bridge::bridge_scope_active())
+    {
+        return Ok(None);
+    }
+    // Envelope: head-FIRST, GQA-EXPANDED operands, all [B, nq, T, hd].
+    let (qb, qh, qt, qd) = match q.dims4() {
+        Ok(d) => d,
+        Err(_) => return Ok(None),
+    };
+    let (kb, kh, kt_, kd) = match k.dims4() {
+        Ok(d) => d,
+        Err(_) => return Ok(None),
+    };
+    let (vb, vh, vt, vd) = match v.dims4() {
+        Ok(d) => d,
+        Err(_) => return Ok(None),
+    };
+    // q/k/v must already be GQA-expanded to identical [B, nq, T, hd] shapes
+    // (the caller expands before this call); bail otherwise.
+    if qb != kb
+        || qb != vb
+        || qh != kh
+        || qh != vh
+        || qt != seq_len
+        || kt_ != seq_len
+        || vt != seq_len
+        || qd != kd
+        || qd != vd
+    {
+        return Ok(None);
+    }
+    let dtype = q.dtype();
+    if !matches!(dtype, DType::BF16 | DType::F16 | DType::F32)
+        || k.dtype() != dtype
+        || v.dtype() != dtype
+        || !matches!(q.device(), Device::Cuda(_))
+        || !matches!(k.device(), Device::Cuda(_))
+        || !matches!(v.device(), Device::Cuda(_))
+        || !q.is_contiguous()
+        || !k.is_contiguous()
+        || !v.is_contiguous()
+    {
+        return Ok(None);
+    }
+
+    kiln_nvtx::range!(c"kiln/gqa_sdpa_kt");
+
+    // --- Score matmul: scores = q @ kᵀ, [B, nq, T, T] ---
+    // cublasLt needs contiguous operands; kᵀ ([B, nq, hd, T]) is a transpose
+    // view, so materialize it contiguous (same as the candle path's `k.t()`,
+    // which `broadcast_matmul` also makes contiguous internally on CUDA).
+    let k_t = match k.transpose(2, 3).and_then(|t| t.contiguous()) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let q_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(q) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let k_t_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&k_t) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let scores_kt = match kiln_tensor::cuda_matmul(&q_kt, &k_t_kt) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let attn_scores = match kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&scores_kt) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+
+    // --- Scale + causal mask + softmax: UNCHANGED candle / kt-softmax ops ---
+    // (Left candle on purpose for bit-exactness with the parity oracle.)
+    let attn_scores = (attn_scores / scale)?;
+    let attn_scores = apply_causal_mask_with_offset(&attn_scores, seq_len, seq_len, 0)?;
+    let attn_weights_softmax = cuda_softmax_last_dim(&attn_scores)?;
+
+    // --- Value matmul: attn_output = p @ v, [B, nq, T, hd] ---
+    let p_contig = match attn_weights_softmax.contiguous() {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let p_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&p_contig) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let v_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let out_kt = match kiln_tensor::cuda_matmul(&p_kt, &v_kt) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let attn_output = match kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    Ok(Some(attn_output))
+}
+
 pub fn gqa_attention_core_prefill(
     backend: &dyn BackendRuntime,
     prepared: &GqaAttentionPrepared,
@@ -18077,11 +18402,39 @@ pub fn gqa_attention_core_prefill(
     };
 
     let scale = (head_dim as f64).sqrt();
-    let attn_scores = q.broadcast_matmul(&k.t()?)?;
-    let attn_scores = (attn_scores / scale)?;
-    let attn_scores = apply_causal_mask_with_offset(&attn_scores, seq_len, seq_len, 0)?;
-    let attn_weights_softmax = cuda_softmax_last_dim(&attn_scores)?;
-    let attn_output = attn_weights_softmax.broadcast_matmul(&v)?; // [B, nq, T, hd]
+    // #1082 region 3: consolidate the fallback's two cublasLt matmuls
+    // (`q @ kᵀ` and `softmax @ v`) into the kt substrate, keeping the
+    // intervening scale / causal-mask / softmax on candle for bit-exactness.
+    // Fires ONLY on the plain inference path (gate on, !track_op, no tape
+    // scope); declines to `None` otherwise so the candle composite below runs
+    // unchanged — including for the tape/decline paths the adapter relies on.
+    // The helper returns the SAME head-FIRST `[B, nq, T, hd]` `attn_output`,
+    // so the `try_tape_sdpa_fallback_cuda` adapter + transpose/reshape-back
+    // logic below is byte-for-byte identical regardless of which path ran.
+    let attn_output = {
+        #[cfg(feature = "cuda")]
+        {
+            match try_kt_gqa_sdpa_matmuls(&q, &k, &v, seq_len, scale)? {
+                Some(out) => out,
+                None => {
+                    let attn_scores = q.broadcast_matmul(&k.t()?)?;
+                    let attn_scores = (attn_scores / scale)?;
+                    let attn_scores =
+                        apply_causal_mask_with_offset(&attn_scores, seq_len, seq_len, 0)?;
+                    let attn_weights_softmax = cuda_softmax_last_dim(&attn_scores)?;
+                    attn_weights_softmax.broadcast_matmul(&v)? // [B, nq, T, hd]
+                }
+            }
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            let attn_scores = q.broadcast_matmul(&k.t()?)?;
+            let attn_scores = (attn_scores / scale)?;
+            let attn_scores = apply_causal_mask_with_offset(&attn_scores, seq_len, seq_len, 0)?;
+            let attn_weights_softmax = cuda_softmax_last_dim(&attn_scores)?;
+            attn_weights_softmax.broadcast_matmul(&v)? // [B, nq, T, hd]
+        }
+    };
 
     // #1082 CP-4: route the GQA SDPA fallback through the kt Tape when
     // KILN_USE_TAPE_SDPA + an active tape scope are set, so a
