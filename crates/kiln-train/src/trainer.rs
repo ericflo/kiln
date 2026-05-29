@@ -17991,6 +17991,15 @@ pub(crate) mod tests {
             // set before any tape-gate read; per-process under nextest.)
             std::env::set_var("KILN_USE_TAPE_AUTHORITATIVE", "0");
             std::env::set_var("KILN_USE_TAPE_FORWARD", "0");
+            // #1082: the per-op kt-API gates are now default-ON, so even with
+            // the tape path off, the "candle" forward routes individual ops
+            // through the kt-API adapters — and a forward-only kt-API op on the
+            // full-attn prep path detaches candle autograd, so q/k/v reach
+            // `flash_attn_prefill` UNtracked and its tracked-decline counter
+            // never fires. This test validates the PURE candle backend-hooks
+            // (linear_prefill / FLCE provider / flash-decline), so force every
+            // kt-API gate off via the master kill-switch.
+            std::env::set_var("KILN_DISABLE_KT_API_ALL", "1");
         }
 
         let result = (|| -> Result<()> {

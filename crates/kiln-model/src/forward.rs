@@ -219,8 +219,24 @@ fn cuda_fused_attn_sigmoid_mul_disabled() -> bool {
 /// short-circuits true when this is set.
 #[cfg(feature = "cuda")]
 fn cuda_use_kt_api_all() -> bool {
+    if cuda_kt_api_master_off() {
+        return false;
+    }
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_ALL").is_ok())
+}
+
+/// Phase 7 master kill-switch (#1082): when `KILN_DISABLE_KT_API_ALL=1`,
+/// EVERY per-family `cuda_use_kt_api_*` gate returns false, forcing the
+/// pure candle-op forward path. Used to A/B the candle reference and by
+/// the `cuda_training_forward_uses_projection_and_flce_backend_hooks`
+/// test to exercise the candle backend-hooks (linear_prefill / FLCE
+/// provider / flash-decline) that the default-on kt-API gates otherwise
+/// route around. Disable value wins over `KILN_USE_KT_API_ALL`.
+#[cfg(feature = "cuda")]
+fn cuda_kt_api_master_off() -> bool {
+    static OFF: OnceLock<bool> = OnceLock::new();
+    *OFF.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_ALL").is_ok())
 }
 
 /// Phase 7 default-on (#1082): softmax-last-dim through the kt-API
@@ -233,7 +249,7 @@ fn cuda_use_kt_api_all() -> bool {
 fn cuda_use_kt_api_softmax() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_SOFTMAX").is_err());
-    direct || cuda_use_kt_api_all()
+    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
 }
 
 /// Phase 7 default-on (#1082): lm_head argmax (1-D flattened
@@ -256,7 +272,7 @@ fn cuda_use_kt_api_argmax() -> bool {
     // #1082: flipped default ON. Bit-exact deterministic argmax.
     // Escape hatch: `KILN_DISABLE_KT_API_ARGMAX=1`.
     let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_ARGMAX").is_err());
-    direct || cuda_use_kt_api_all()
+    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
 }
 
 /// Phase 7 default-on (#1082): l2-normalize (last-axis) through the
@@ -273,7 +289,7 @@ fn cuda_use_kt_api_l2_normalize() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     let direct =
         *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_L2_NORMALIZE").is_err());
-    direct || cuda_use_kt_api_all()
+    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
 }
 
 /// Phase 7 default-on (#1082): token-embedding lookup (dim-0
@@ -302,7 +318,7 @@ fn cuda_use_kt_api_embedding() -> bool {
     // `cuda_index_select_dim0`. Escape hatch: `KILN_DISABLE_KT_API_EMBEDDING=1`.
     let direct =
         *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_EMBEDDING").is_err());
-    direct || cuda_use_kt_api_all()
+    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
 }
 
 /// Phase 7 (#1082) opt-in: LM head matmul (final projection from
@@ -325,7 +341,7 @@ fn cuda_use_kt_api_embedding() -> bool {
 fn cuda_use_kt_api_lm_head() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_LM_HEAD").is_err());
-    direct || cuda_use_kt_api_all()
+    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
 }
 
 /// Phase 7 (#1082) opt-in: LoRA delta composite
@@ -350,7 +366,7 @@ fn cuda_use_kt_api_lm_head() -> bool {
 fn cuda_use_kt_api_lora_delta() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_LORA_DELTA").is_err());
-    direct || cuda_use_kt_api_all()
+    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
 }
 
 /// Phase 7 default-on (#1082): LoRA base + delta accumulator
@@ -378,7 +394,7 @@ fn cuda_use_kt_api_lora_add() -> bool {
     // `cuda_elementwise_binary` kind 0 dispatch; bit-exact to
     // candle Add<Tensor>. Escape hatch: `KILN_DISABLE_KT_API_LORA_ADD=1`.
     let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_LORA_ADD").is_err());
-    direct || cuda_use_kt_api_all()
+    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
 }
 
 /// Phase 7 default-on (#1082): route equal-shape
@@ -405,7 +421,7 @@ fn cuda_use_kt_api_broadcast_mul() -> bool {
     // kind 2 dispatch. Escape hatch: `KILN_DISABLE_KT_API_BROADCAST_MUL=1`.
     let direct =
         *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_BROADCAST_MUL").is_err());
-    direct || cuda_use_kt_api_all()
+    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
 }
 
 /// Phase 7 default-on (#1082): route equal-shape
@@ -425,7 +441,7 @@ fn cuda_use_kt_api_broadcast_add() -> bool {
     // gate. Escape hatch: `KILN_DISABLE_KT_API_BROADCAST_ADD=1`.
     let direct =
         *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_BROADCAST_ADD").is_err());
-    direct || cuda_use_kt_api_all()
+    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
 }
 
 /// Phase 7 (#1082) opt-in: route equal-shape `Tensor::broadcast_sub`
@@ -447,7 +463,7 @@ fn cuda_use_kt_api_broadcast_sub() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     let direct =
         *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_BROADCAST_SUB").is_err());
-    direct || cuda_use_kt_api_all()
+    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
 }
 
 /// Phase 7 default-on (#1082): route equal-shape
@@ -469,7 +485,7 @@ fn cuda_use_kt_api_broadcast_div() -> bool {
     // Escape hatch: `KILN_DISABLE_KT_API_BROADCAST_DIV=1`.
     let direct =
         *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_BROADCAST_DIV").is_err());
-    direct || cuda_use_kt_api_all()
+    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
 }
 
 /// Phase 7 default-on (#1082): last-dim `Tensor::cat` through the
@@ -487,7 +503,7 @@ fn cuda_use_kt_api_concat_last_dim() -> bool {
     // `cuda_concat`. Escape hatch: `KILN_DISABLE_KT_API_CONCAT_LAST_DIM=1`.
     let direct =
         *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_CONCAT_LAST_DIM").is_err());
-    direct || cuda_use_kt_api_all()
+    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
 }
 
 /// Phase 7 opt-in: `sqr().sum_keepdim(-1)` composite through the
@@ -504,7 +520,7 @@ fn cuda_use_kt_api_sum_sq_last_dim() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     let direct =
         *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_SUM_SQ_LAST_DIM").is_err());
-    direct || cuda_use_kt_api_all()
+    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
 }
 
 /// Phase 7 opt-in: `mean_keepdim(-1)` through the kt-API +
@@ -521,7 +537,7 @@ fn cuda_use_kt_api_mean_last_dim() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     let direct =
         *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_MEAN_LAST_DIM").is_err());
-    direct || cuda_use_kt_api_all()
+    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
 }
 
 /// Phase 7 opt-in: `sum_keepdim(-1)` through the kt-API +
@@ -544,7 +560,7 @@ fn cuda_use_kt_api_sum_last_dim() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     let direct =
         *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_SUM_LAST_DIM").is_err());
-    direct || cuda_use_kt_api_all()
+    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
 }
 
 /// Phase 7 opt-in: `Tensor::sum(axis)` (non-keepdim, arbitrary axis)
@@ -571,7 +587,7 @@ fn cuda_use_kt_api_sum_axis() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     let direct =
         *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_SUM_AXIS").is_err());
-    direct || cuda_use_kt_api_all()
+    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
 }
 
 /// Phase 7 opt-in: `max_keepdim(-1)` through the kt-API + adapters.
@@ -594,7 +610,7 @@ fn cuda_use_kt_api_max_last_dim() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     let direct =
         *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_MAX_LAST_DIM").is_err());
-    direct || cuda_use_kt_api_all()
+    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
 }
 
 /// Phase 7 opt-in: `min_keepdim(-1)` through the kt-API + adapters.
@@ -618,7 +634,7 @@ fn cuda_use_kt_api_min_last_dim() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     let direct =
         *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_MIN_LAST_DIM").is_err());
-    direct || cuda_use_kt_api_all()
+    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
 }
 
 /// Phase 7 default-on (#1082): `Tensor::cat` along axis 0
@@ -635,7 +651,7 @@ fn cuda_use_kt_api_cat_dim0() -> bool {
     // #1082: flipped default ON. Bit-exact memcpy concat axis=0.
     let direct =
         *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_CAT_DIM0").is_err());
-    direct || cuda_use_kt_api_all()
+    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
 }
 
 /// Phase 7 default-on (#1082): `Tensor::cat` along axis 2
@@ -651,7 +667,7 @@ fn cuda_use_kt_api_cat_dim2() -> bool {
     // #1082: flipped default ON. Bit-exact memcpy concat axis=2.
     let direct =
         *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_CAT_DIM2").is_err());
-    direct || cuda_use_kt_api_all()
+    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
 }
 
 /// Phase 7 default-on (#1082): `Tensor::cat` along axis 1
@@ -667,7 +683,7 @@ fn cuda_use_kt_api_cat_dim1() -> bool {
     // #1082: flipped default ON. Bit-exact memcpy concat axis=1.
     let direct =
         *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_CAT_DIM1").is_err());
-    direct || cuda_use_kt_api_all()
+    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
 }
 
 /// Phase 7 opt-in: `Tensor::affine(c, 0.0)` (scalar-multiply only)
@@ -696,7 +712,7 @@ fn cuda_use_kt_api_mul_scalar() -> bool {
     // `.affine(c, 0.0)`. Escape hatch:
     // `KILN_DISABLE_KT_API_MUL_SCALAR=1`.
     let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_MUL_SCALAR").is_err());
-    direct || cuda_use_kt_api_all()
+    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
 }
 
 /// Phase 7 default-on (#1082): `tensor + constant` (scalar-add)
@@ -727,7 +743,7 @@ fn cuda_use_kt_api_add_scalar() -> bool {
     // `Tensor + f64`. Escape hatch:
     // `KILN_DISABLE_KT_API_ADD_SCALAR=1`.
     let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_ADD_SCALAR").is_err());
-    direct || cuda_use_kt_api_all()
+    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
 }
 
 /// Phase 7 default-on (#1082): elementwise `Tensor::neg()` through
@@ -747,7 +763,7 @@ fn cuda_use_kt_api_neg() -> bool {
     // (`cuda_activation_unary` kind 12); bit-exact by construction.
     // Escape hatch: `KILN_DISABLE_KT_API_NEG=1`.
     let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_NEG").is_err());
-    direct || cuda_use_kt_api_all()
+    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
 }
 
 /// Phase 7 default-on (#1082): elementwise `Tensor::sqrt()` through
@@ -770,7 +786,7 @@ fn cuda_use_kt_api_sqrt() -> bool {
     // (`cuda_activation_unary` kind 14); bit-exact by construction.
     // Escape hatch: `KILN_DISABLE_KT_API_SQRT=1`.
     let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_SQRT").is_err());
-    direct || cuda_use_kt_api_all()
+    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
 }
 
 /// Phase 7 opt-in: elementwise reciprocal-sqrt
@@ -794,7 +810,7 @@ fn cuda_use_kt_api_sqrt() -> bool {
 fn cuda_use_kt_api_rsqrt() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_RSQRT").is_err());
-    direct || cuda_use_kt_api_all()
+    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
 }
 
 /// Phase 7 default-on (#1082): elementwise binary
@@ -824,7 +840,7 @@ fn cuda_use_kt_api_max_binary() -> bool {
     // Escape hatch: `KILN_DISABLE_KT_API_MAX_BINARY=1`.
     let direct =
         *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_MAX_BINARY").is_err());
-    direct || cuda_use_kt_api_all()
+    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
 }
 
 /// Phase 7 opt-in: elementwise binary `Tensor::minimum(other)`
@@ -849,7 +865,7 @@ fn cuda_use_kt_api_min_binary() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     let direct =
         *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_MIN_BINARY").is_err());
-    direct || cuda_use_kt_api_all()
+    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
 }
 
 /// Phase 7 opt-in: elementwise linear interpolation
@@ -875,7 +891,7 @@ fn cuda_use_kt_api_min_binary() -> bool {
 fn cuda_use_kt_api_lerp() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_LERP").is_err());
-    direct || cuda_use_kt_api_all()
+    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
 }
 
 /// Phase 7 default-on (#1082): elementwise `Tensor::abs()` through
@@ -904,7 +920,7 @@ fn cuda_use_kt_api_abs() -> bool {
     // candle `relu(x)+relu(-x)` composite on all finite inputs.
     // Escape hatch: `KILN_DISABLE_KT_API_ABS=1`.
     let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_ABS").is_err());
-    direct || cuda_use_kt_api_all()
+    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
 }
 
 /// Phase 7 opt-in: elementwise `Tensor::clamp(lo, hi)` through the
@@ -929,7 +945,7 @@ fn cuda_use_kt_api_abs() -> bool {
 fn cuda_use_kt_api_clamp() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_CLAMP").is_err());
-    direct || cuda_use_kt_api_all()
+    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
 }
 
 /// Phase 7 opt-in: elementwise `Tensor::powf(p)` through the
@@ -954,7 +970,7 @@ fn cuda_use_kt_api_clamp() -> bool {
 fn cuda_use_kt_api_pow() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_POW").is_err());
-    direct || cuda_use_kt_api_all()
+    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
 }
 
 /// Phase 7 opt-in: elementwise `Tensor::div_scalar(c)` / `x / c`
@@ -984,7 +1000,7 @@ fn cuda_use_kt_api_div_scalar() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     let direct =
         *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_DIV_SCALAR").is_err());
-    direct || cuda_use_kt_api_all()
+    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
 }
 
 /// Phase 7 default-on (#1082): elementwise `c - x` (scalar minus
@@ -1018,7 +1034,7 @@ fn cuda_use_kt_api_scalar_minus_tensor() -> bool {
     // `KILN_DISABLE_KT_API_SCALAR_MINUS_TENSOR=1`.
     let direct = *ENABLED
         .get_or_init(|| std::env::var("KILN_DISABLE_KT_API_SCALAR_MINUS_TENSOR").is_err());
-    direct || cuda_use_kt_api_all()
+    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
 }
 
 /// Phase 7 opt-in: elementwise `c / x` (scalar divided by tensor)
@@ -1047,7 +1063,7 @@ fn cuda_use_kt_api_scalar_div_tensor() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     let direct = *ENABLED
         .get_or_init(|| std::env::var("KILN_DISABLE_KT_API_SCALAR_DIV_TENSOR").is_err());
-    direct || cuda_use_kt_api_all()
+    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
 }
 
 /// Phase 7 opt-in: elementwise `max(x, c)` (tensor / scalar
@@ -1078,7 +1094,7 @@ fn cuda_use_kt_api_max_with_scalar() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     let direct = *ENABLED
         .get_or_init(|| std::env::var("KILN_DISABLE_KT_API_MAX_WITH_SCALAR").is_err());
-    direct || cuda_use_kt_api_all()
+    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
 }
 
 /// Phase 7 opt-in: elementwise `min(x, c)` (tensor / scalar
@@ -1109,7 +1125,7 @@ fn cuda_use_kt_api_min_with_scalar() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     let direct = *ENABLED
         .get_or_init(|| std::env::var("KILN_DISABLE_KT_API_MIN_WITH_SCALAR").is_err());
-    direct || cuda_use_kt_api_all()
+    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
 }
 
 /// Phase 7 default-on (#1082): elementwise `Tensor::sin()` through
@@ -1133,7 +1149,7 @@ fn cuda_use_kt_api_sin() -> bool {
     // (`cuda_activation_unary` kind 7); bit-exact by construction.
     // Escape hatch: `KILN_DISABLE_KT_API_SIN=1`.
     let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_SIN").is_err());
-    direct || cuda_use_kt_api_all()
+    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
 }
 
 /// Phase 7 default-on (#1082): elementwise `Tensor::cos()` through
@@ -1157,7 +1173,7 @@ fn cuda_use_kt_api_cos() -> bool {
     // (`cuda_activation_unary` kind 8); bit-exact by construction.
     // Escape hatch: `KILN_DISABLE_KT_API_COS=1`.
     let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_COS").is_err());
-    direct || cuda_use_kt_api_all()
+    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
 }
 
 /// Phase 7 default-on (#1082): elementwise `Tensor::exp()` through
@@ -1184,7 +1200,7 @@ fn cuda_use_kt_api_exp() -> bool {
     // Rust shell types differ. Escape hatch:
     // `KILN_DISABLE_KT_API_EXP=1`.
     let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_EXP").is_err());
-    direct || cuda_use_kt_api_all()
+    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
 }
 
 /// Phase 7 opt-in: elementwise `Tensor::tanh()` through the kt-API
@@ -1214,7 +1230,7 @@ fn cuda_use_kt_api_exp() -> bool {
 fn cuda_use_kt_api_tanh() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_TANH").is_err());
-    direct || cuda_use_kt_api_all()
+    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
 }
 
 /// Phase 7 opt-in (#1082): elementwise `Tensor::gelu()` through the
@@ -1242,7 +1258,7 @@ fn cuda_use_kt_api_tanh() -> bool {
 fn cuda_use_kt_api_gelu() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_GELU").is_err());
-    direct || cuda_use_kt_api_all()
+    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
 }
 
 /// Phase 7 opt-in (#1082): elementwise `Tensor::relu()` through the
@@ -1267,7 +1283,7 @@ fn cuda_use_kt_api_gelu() -> bool {
 fn cuda_use_kt_api_relu() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_RELU").is_err());
-    direct || cuda_use_kt_api_all()
+    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
 }
 
 /// Phase 7 default-on (#1082): elementwise `Tensor::recip()` through
@@ -1293,7 +1309,7 @@ fn cuda_use_kt_api_recip() -> bool {
     // (`cuda_activation_unary` kind 22); bit-exact by construction.
     // Escape hatch: `KILN_DISABLE_KT_API_RECIP=1`.
     let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_RECIP").is_err());
-    direct || cuda_use_kt_api_all()
+    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
 }
 
 /// Phase 7 default-on (#1082): elementwise natural-log
@@ -1320,7 +1336,7 @@ fn cuda_use_kt_api_log() -> bool {
     // Rust shell types differ. Escape hatch:
     // `KILN_DISABLE_KT_API_LOG=1`.
     let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_LOG").is_err());
-    direct || cuda_use_kt_api_all()
+    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
 }
 
 /// Phase 7 opt-in (#1082): elementwise base-2 log `Tensor::log2()`
@@ -1346,7 +1362,7 @@ fn cuda_use_kt_api_log() -> bool {
 fn cuda_use_kt_api_log2() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_LOG2").is_ok());
-    direct || cuda_use_kt_api_all()
+    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
 }
 
 /// Phase 7 opt-in (#1082): elementwise base-10 log `Tensor::log10()`
@@ -1371,7 +1387,7 @@ fn cuda_use_kt_api_log2() -> bool {
 fn cuda_use_kt_api_log10() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_LOG10").is_ok());
-    direct || cuda_use_kt_api_all()
+    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
 }
 
 /// Phase 7 opt-in (#1082): elementwise `log1p` (= `ln(1 + x)`,
@@ -1402,7 +1418,7 @@ fn cuda_use_kt_api_log10() -> bool {
 fn cuda_use_kt_api_log1p() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_LOG1P").is_ok());
-    direct || cuda_use_kt_api_all()
+    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
 }
 
 /// Phase 7 opt-in: route the elementwise dtype cast
@@ -1427,7 +1443,7 @@ fn cuda_use_kt_api_log1p() -> bool {
 fn cuda_use_kt_api_to_dtype() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_TO_DTYPE").is_err());
-    direct || cuda_use_kt_api_all()
+    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
 }
 
 /// Phase 7 opt-in: plain `[M, K] @ [K, N]` matmul through the
@@ -1449,7 +1465,7 @@ fn cuda_use_kt_api_to_dtype() -> bool {
 pub(crate) fn cuda_use_kt_api_matmul() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_MATMUL").is_ok());
-    direct || cuda_use_kt_api_all()
+    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
 }
 
 /// Phase 7 opt-in: route the `PagedKvCache` allocation in
@@ -1481,7 +1497,7 @@ pub fn cuda_use_kt_paged_kv_cache() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     let direct =
         *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_PAGED_KV_CACHE").is_ok());
-    direct || cuda_use_kt_api_all()
+    !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
 }
 
 /// Constructor stub for the Phase 7 `PagedKvCacheKt` migration (#1082).
