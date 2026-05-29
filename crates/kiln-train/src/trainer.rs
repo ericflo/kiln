@@ -13788,10 +13788,18 @@ mod tests {
     ///
     /// This test runs the same model on a **BF16** tiny model so all the
     /// BF16-only adapters fire (hidden=32 ≤ 8192, head_dim=16 — all shape gates
-    /// pass) and the loss→input chain connects. Tolerances are loosened for
-    /// BF16 rounding (loss rel < 0.15; per-Var grad rel < 0.25). We do NOT yet
-    /// assert `tape_has_grad > 0` — this is a measurement; the `[CP4-COVERAGE]`
-    /// eprintln reports the coverage count.
+    /// pass) and the loss→input chain connects.
+    ///
+    /// NOTE (#1082): candle is now only a PARTIAL reference. Its
+    /// `loss.backward()` silently severs the full-attention + GDN-conv gradient
+    /// (a kt-API forward-only op returns a detached leaf), so it is NOT a valid
+    /// reference for the ~6-10 attention/conv-dependent Vars — finite-diff
+    /// proves the tape is correct there (see
+    /// `tape_grad_matches_finite_difference_bf16`). This test therefore asserts:
+    /// (1) FULL tape coverage (`tape_has >= 50`), (2) forward bit-parity
+    /// (`loss rel < 0.05`), and (3) the candle-VALID Var subset still agrees
+    /// tightly (`>=34` Vars with floored rel < 0.3). It no longer hard-asserts
+    /// per-Var candle agreement, because candle is the one that's wrong.
     #[cfg(feature = "cuda")]
     #[test]
     fn tape_authoritative_grads_match_candle_baseline_bf16() {
@@ -13981,30 +13989,55 @@ mod tests {
              matched_candle={compared}"
         );
 
-        // CP-4 Inc2 gate: the linear keystone connects the full-attn layer, so
-        // its LoRA Vars (q/k/v/o + MLP gate/up/down projections) must be
-        // tape-routed. 16 fire today; `>=14` leaves BF16 slack and rises as
-        // later increments wire up the remaining layers. (#1082)
+        // CP-4 headline coverage gate: with the full-attn + GDN tape chain
+        // wired, the tape-authoritative walk must route a grad to every LoRA
+        // Var. `>=50` is the full-coverage floor (50 fire today; the +6 over
+        // the old Inc6 `>=44` are the attention/conv-dependent Vars the chain
+        // now reaches). (#1082)
         assert!(
-            tape_has >= 44,
-            "CP-4 Inc6: expected >=44 tape-routed LoRA Vars (+ gate/up across all 4 MLP layers via the wired SwiGLU silu*mul), got {tape_has}"
+            tape_has >= 50,
+            "CP-4: expected >=50 tape-routed LoRA Vars (full coverage of the wired \
+             full-attn + GDN chain), got {tape_has}"
         );
 
-        // Every matched Var must pass the floored relative-error gate. Near-zero
-        // grads ride the additive floor (so BF16 noise doesn't false-fail);
-        // large-magnitude grads still get held to a tight bound. Report the
-        // worst offender with raw rel + magnitude for context. (#1082)
-        let worst = rels
+        // --- Candle is a PARTIAL reference now (#1082) ---
+        //
+        // candle's `loss.backward()` silently severs the full-attention +
+        // GDN-conv gradient: a kt-API forward-only op returns a detached leaf,
+        // so candle's autograd never backprops through those paths. That makes
+        // candle the WRONG reference for the ~6-10 attention/conv-dependent
+        // Vars — `tape_grad_matches_finite_difference_bf16` is the authoritative
+        // grad-correctness gate and proves the tape (not candle) matches the
+        // central finite-difference ground truth on exactly those Vars (e.g.
+        // var[35] where candle gets the SIGN wrong).
+        //
+        // So this test no longer hard-asserts per-Var candle agreement. It
+        // verifies: (1) full tape coverage (above), (2) forward bit-parity
+        // (loss rel < 0.05, asserted earlier), and (3) that the candle-VALID
+        // subset — the non-attention/conv-dependent Vars — still agrees tightly
+        // with the tape. The disagreeing Vars are exactly the ones candle's
+        // autograd drops; we eprintln them via the [CP4-PARITY] report above.
+        let candle_agree = rels.iter().filter(|(_, _, _, rf)| *rf < 0.3).count();
+        let candle_disagree: Vec<usize> = rels
             .iter()
-            .max_by(|a, b| a.3.partial_cmp(&b.3).unwrap_or(std::cmp::Ordering::Equal))
-            .copied();
-        if let Some((vi, r, cmag, rf)) = worst {
-            assert!(
-                rf < 0.3,
-                "CP-4 Inc2: var[{vi}] floored rel {rf:.4} >= 0.3 \
-                 (raw rel {r:.4}, candle_max {cmag:.6}) — real grad divergence, not BF16 noise"
-            );
-        }
+            .filter(|(_, _, _, rf)| *rf >= 0.3)
+            .map(|(vi, _, _, _)| *vi)
+            .collect();
+        eprintln!(
+            "[CP4-PARITY] candle-agree (floored<0.3) = {candle_agree}/{compared}; \
+             candle-disagree Vars (candle's autograd drops these): {candle_disagree:?}"
+        );
+        // The candle-valid Var subset must still agree tightly. 34 of the
+        // matched Vars are non-attention/conv-dependent and agree (floored<0.3);
+        // candle is wrong for the remaining attention/conv-dependent ones, which
+        // the finite-diff test verifies are tape-correct. (#1082)
+        assert!(
+            candle_agree >= 34,
+            "CP-4: expected >=34 Vars to agree with candle (floored<0.3 — the candle-VALID \
+             non-attention/conv subset), got {candle_agree}/{compared}. The disagreeing Vars \
+             {candle_disagree:?} are candle's severed full-attn/conv grads (see \
+             tape_grad_matches_finite_difference_bf16 for the ground-truth check)"
+        );
     }
 
     /// CP-4 (#1082): disambiguate "tape grad vs candle grad" on the
@@ -14030,9 +14063,15 @@ mod tests {
     /// gradient. The perturbed forwards are PLAIN candle forwards
     /// (authoritative OFF) — finite-diff needs only the loss value, not grads.
     ///
-    /// This is a MEASUREMENT test: it asserts only that `fd` is finite and
-    /// prints a `[FD-CHECK]` table. The pod operator reads the table to decide
-    /// ground truth (a tight bound here would false-fail on BF16/ε noise).
+    /// This is the AUTHORITATIVE grad-correctness gate (#1082). It prints the
+    /// `[FD-CHECK]` table for visibility, then asserts on the "informative"
+    /// rows (those where `|fd|` is not finite-diff noise, `|fd| > 0.02` at
+    /// eps=1e-2): (1) the tape is at least as close to ground truth as candle
+    /// (`|fd-tape| <= |fd-candle|` — disambiguation), and (2) the tape matches
+    /// finite-diff within BF16+ε tolerance (`|fd-tape|/|fd| < 0.35`). Pod-
+    /// validated 2026-05-29: tape matches fd on every divergent Var, candle
+    /// does not (var[35] even gets the SIGN wrong), confirming candle's
+    /// autograd severs the full-attn/conv gradient and the tape is correct.
     #[cfg(feature = "cuda")]
     #[test]
     fn tape_grad_matches_finite_difference_bf16() {
@@ -14215,6 +14254,10 @@ mod tests {
         // cross-check.
         let eps_list = [1e-2f32, 3e-2f32];
 
+        // Collect every (Var, eps) row so we can assert AFTER the visibility
+        // rows print. Tuple: (vi, eps, fd, rel_tape, rel_candle). (#1082)
+        let mut fd_rows: Vec<(usize, f32, f64, f64, f64)> = Vec::new();
+
         for &vi in &targets {
             let target_id = all_vars[vi].as_tensor().id();
             let module = modules[vi].module;
@@ -14312,7 +14355,98 @@ mod tests {
                      -> {} matches FD better",
                     if rel_tape <= rel_candle { "TAPE" } else { "CANDLE" }
                 );
+                fd_rows.push((vi, eps, fd, rel_tape, rel_candle));
             }
+        }
+
+        // --- Authoritative grad-correctness gate (#1082) ---
+        //
+        // Finite-diff is ground truth; this proves the tape-authoritative grad
+        // is correct where candle's autograd is unreliable (it severs the
+        // full-attn/conv gradient — a forward-only kt op detaches candle's
+        // autograd, so `loss.backward()` silently drops those Vars' grads).
+        //
+        // Pod-validated ground truth (2026-05-29): for every divergent Var the
+        // tape matches the central finite-difference reference and candle does
+        // NOT — e.g. var[7] (gate_proj) fd=+0.185 tape=+0.163 (rel 0.07)
+        // candle=+0.047 (rel 0.74); var[35] (down_proj) fd=+0.051 tape=+0.046
+        // (rel 0.06) candle=-0.011 (WRONG SIGN, rel 1.21).
+        //
+        // "Informative" rows are those where |fd| is not finite-diff noise. At
+        // eps=1e-2 the near-zero-grad Vars (var[9]/var[31], fd≈0) are pure
+        // BF16/ε noise and tell us nothing about correctness, so we skip them
+        // (but eprintln that we did, so the gate can't go vacuous unnoticed).
+        // Primary eps is 1e-2 (least noisy per pod data); fall back to 3e-2
+        // only if no 1e-2 informative rows survive.
+        const FD_INFORMATIVE_MIN: f64 = 0.02;
+        // BF16 + central-diff tolerance: the tape matches fd within this bound
+        // on every informative Var (var[7]=0.07, var[35]=0.06), so 0.35 leaves
+        // safe headroom while still catching a genuinely wrong grad.
+        const FD_TAPE_REL_TOL: f64 = 0.35;
+
+        let pick_eps = |primary: f32| -> Vec<(usize, f64, f64, f64)> {
+            fd_rows
+                .iter()
+                .filter(|(_, eps, fd, _, _)| {
+                    (*eps - primary).abs() < 1e-6 && fd.abs() > FD_INFORMATIVE_MIN
+                })
+                .map(|(vi, _, fd, rt, rc)| (*vi, *fd, *rt, *rc))
+                .collect()
+        };
+        for (vi, eps, fd, _, _) in &fd_rows {
+            if (*eps - 1e-2f32).abs() < 1e-6 && fd.abs() <= FD_INFORMATIVE_MIN {
+                eprintln!(
+                    "[FD-CHECK] var[{vi}] eps={eps:.0e} |fd|={:.4} <= {FD_INFORMATIVE_MIN} \
+                     -> SKIPPED (finite-diff noise, uninformative)",
+                    fd.abs()
+                );
+            }
+        }
+        // Prefer the eps=1e-2 informative rows; fall back to eps=3e-2 only if
+        // 1e-2 produced none.
+        let informative = {
+            let primary = pick_eps(1e-2);
+            if primary.is_empty() {
+                eprintln!(
+                    "[FD-CHECK] no informative eps=1e-2 rows; falling back to eps=3e-2"
+                );
+                pick_eps(3e-2)
+            } else {
+                primary
+            }
+        };
+
+        eprintln!(
+            "[FD-CHECK] {} informative row(s) (|fd| > {FD_INFORMATIVE_MIN}) feed the grad-correctness gate",
+            informative.len()
+        );
+
+        // Not vacuous: there must be at least ~2 informative Vars, otherwise the
+        // gate proves nothing (pod data shows var[7] + var[35] + var[23]).
+        assert!(
+            informative.len() >= 2,
+            "[FD-CHECK] only {} informative finite-diff row(s) (|fd| > {FD_INFORMATIVE_MIN}); \
+             gate would be vacuous — widen the target Var set or check the FD probe",
+            informative.len()
+        );
+
+        for (vi, fd, rel_tape, rel_candle) in &informative {
+            // (1) Disambiguation: the tape is at least as close to ground truth
+            // as candle. Candle's autograd drops the full-attn/conv gradient, so
+            // on these Vars it is strictly the worse reference.
+            assert!(
+                rel_tape <= rel_candle,
+                "[FD-CHECK] var[{vi}]: tape rel {rel_tape:.4} should be <= candle rel \
+                 {rel_candle:.4} vs finite-diff (fd={fd:+.6}) — candle is the wrong reference \
+                 here, so the tape must be the closer of the two"
+            );
+            // (2) Correctness: the tape matches finite-diff within BF16+eps
+            // tolerance (var[7]=0.07, var[35]=0.06 on pod data).
+            assert!(
+                *rel_tape < FD_TAPE_REL_TOL,
+                "[FD-CHECK] var[{vi}]: tape grad rel {rel_tape:.4} >= {FD_TAPE_REL_TOL} vs \
+                 finite-diff (fd={fd:+.6}) — tape-authoritative grad disagrees with ground truth"
+            );
         }
     }
 
