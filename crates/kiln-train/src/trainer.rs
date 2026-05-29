@@ -10679,6 +10679,21 @@ fn standard_forward_backward_tape_authoritative(
         .iter()
         .map(|v| (v.as_tensor().id().as_raw(), *v))
         .collect();
+    // #1082 CP-4 diagnostic: how deep did the tape walk reach? `reached` is the
+    // number of registered candle-input ids the walk produced a grad for (the
+    // connected-tape size); `var_matches` is how many of those are LoRA Vars.
+    // A small `reached` localises a chain break near the loss.
+    if std::env::var("KILN_CP4_DEBUG").is_ok() {
+        let reached = grads_by_candle_raw.len();
+        let var_matches = grads_by_candle_raw
+            .keys()
+            .filter(|k| var_by_raw.contains_key(*k))
+            .count();
+        eprintln!(
+            "[CP4-DEBUG] tape walk reached {reached} mapped candle inputs; {var_matches} are LoRA Vars (of {})",
+            var_by_raw.len()
+        );
+    }
     for (candle_raw, kt_grad) in grads_by_candle_raw {
         if let Some(var) = var_by_raw.get(&candle_raw) {
             let cg = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&kt_grad)
