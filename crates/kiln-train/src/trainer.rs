@@ -13677,7 +13677,7 @@ mod tests {
 
         // BASELINE: pure candle (no tape scope; authoritative off -> CE composite).
         unsafe {
-            std::env::remove_var("KILN_USE_TAPE_AUTHORITATIVE");
+            std::env::set_var("KILN_USE_TAPE_AUTHORITATIVE", "0");
         }
         let lora_weights = params.as_lora_weights();
         let mut ls = LinearAttentionState::new(&config, &device).expect("linear state");
@@ -13711,7 +13711,7 @@ mod tests {
         )
         .expect("tape-authoritative step");
         unsafe {
-            std::env::remove_var("KILN_USE_TAPE_AUTHORITATIVE");
+            std::env::set_var("KILN_USE_TAPE_AUTHORITATIVE", "0");
         }
 
         let rel = |a: &candle_core::Tensor, c: &candle_core::Tensor| -> f32 {
@@ -13850,7 +13850,7 @@ mod tests {
 
         // BASELINE: pure candle (no tape scope; authoritative off -> CE composite).
         unsafe {
-            std::env::remove_var("KILN_USE_TAPE_AUTHORITATIVE");
+            std::env::set_var("KILN_USE_TAPE_AUTHORITATIVE", "0");
         }
         let lora_weights = params.as_lora_weights();
         let mut ls = LinearAttentionState::new(&config, &device).expect("linear state");
@@ -13884,7 +13884,7 @@ mod tests {
         )
         .expect("tape-authoritative step");
         unsafe {
-            std::env::remove_var("KILN_USE_TAPE_AUTHORITATIVE");
+            std::env::set_var("KILN_USE_TAPE_AUTHORITATIVE", "0");
         }
 
         let rel = |a: &candle_core::Tensor, c: &candle_core::Tensor| -> f32 {
@@ -14135,7 +14135,7 @@ mod tests {
         // tape scope; just the F32 scalar loss for the perturbed adapter.
         let loss_value = |lw: &LoraWeights| -> f64 {
             unsafe {
-                std::env::remove_var("KILN_USE_TAPE_AUTHORITATIVE");
+                std::env::set_var("KILN_USE_TAPE_AUTHORITATIVE", "0");
             }
             let mut ls = LinearAttentionState::new(&config, &device).expect("linear state");
             let logits = model_forward(
@@ -14156,7 +14156,7 @@ mod tests {
         // CANDLE baseline grads: plain forward, authoritative OFF,
         // loss.backward().
         unsafe {
-            std::env::remove_var("KILN_USE_TAPE_AUTHORITATIVE");
+            std::env::set_var("KILN_USE_TAPE_AUTHORITATIVE", "0");
         }
         let lora_weights = params.as_lora_weights();
         let mut ls = LinearAttentionState::new(&config, &device).expect("linear state");
@@ -14190,7 +14190,7 @@ mod tests {
         )
         .expect("tape-authoritative step");
         unsafe {
-            std::env::remove_var("KILN_USE_TAPE_AUTHORITATIVE");
+            std::env::set_var("KILN_USE_TAPE_AUTHORITATIVE", "0");
         }
 
         // Helper: Σ grad[V] · r (F32). `r` is the F32 direction; the grad is
@@ -14706,7 +14706,7 @@ mod tests {
         );
 
         unsafe {
-            std::env::remove_var("KILN_USE_TAPE_AUTHORITATIVE");
+            std::env::set_var("KILN_USE_TAPE_AUTHORITATIVE", "0");
         }
     }
 
