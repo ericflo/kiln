@@ -774,7 +774,7 @@ impl TrainableLoraParams {
     /// Returns the [`OptimizerState`] the trainer threads through
     /// `apply_adamw_update`. CPU and GPU paths both consume it.
     pub fn allocate_adamw_state(&self, device: &CdDevice) -> Result<OptimizerState> {
-        let mut moments: HashMap<TensorId, AdamWMoments> = HashMap::new();
+        let mut moments: HashMap<KtTensorId, AdamWMoments> = HashMap::new();
         for var in self.all_vars() {
             let shape = var.as_tensor().shape().clone();
             let dtype = var.as_tensor().dtype();
@@ -782,7 +782,10 @@ impl TrainableLoraParams {
                 .with_context(|| "allocating AdamW first-moment Var")?;
             let v = var_zeros(shape, dtype, device)
                 .with_context(|| "allocating AdamW second-moment Var")?;
-            moments.insert(var.as_tensor().id(), AdamWMoments { m, v });
+            moments.insert(
+                cd_tensor_id_to_kt(var.as_tensor().id()),
+                AdamWMoments { m, v },
+            );
         }
         Ok(OptimizerState { moments, step: 0 })
     }
@@ -811,7 +814,7 @@ pub struct AdamWMoments {
 /// trainer increments `step` *before* dispatching so the first call
 /// sees `step=1`.
 pub struct OptimizerState {
-    pub moments: HashMap<TensorId, AdamWMoments>,
+    pub moments: HashMap<KtTensorId, AdamWMoments>,
     pub step: u32,
 }
 
@@ -7004,12 +7007,15 @@ pub fn optimizer_step(
             let resident_activation = backend.supports_resident_activation();
             for var in params.all_vars() {
                 if let Some(grad) = grads.get(var.as_tensor()) {
-                    let moments = state.moments.get(&var.as_tensor().id()).ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "optimizer_step: missing AdamW moments for Var id {:?}",
-                            var.as_tensor().id()
-                        )
-                    })?;
+                    let moments = state
+                        .moments
+                        .get(&cd_tensor_id_to_kt(var.as_tensor().id()))
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "optimizer_step: missing AdamW moments for Var id {:?}",
+                                var.as_tensor().id()
+                            )
+                        })?;
                     apply_adamw_update(
                         backend,
                         var,
@@ -7321,12 +7327,13 @@ pub(crate) fn optimizer_step_from_map(
                     } else {
                         grad.to_device(var.as_tensor().device())?
                     };
-                    let moments = state.moments.get(&id).ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "optimizer_step_from_map: missing AdamW moments for Var id {:?}",
-                            id
-                        )
-                    })?;
+                    let moments =
+                        state.moments.get(&cd_tensor_id_to_kt(id)).ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "optimizer_step_from_map: missing AdamW moments for Var id {:?}",
+                                id
+                            )
+                        })?;
                     apply_adamw_update(
                         backend,
                         var,
