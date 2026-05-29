@@ -10608,15 +10608,21 @@ fn checkpointed_forward_backward(
 /// `kiln_autograd::tape_forward_enabled()` (cached after first read).
 /// When unset, the bridge is not opened and `standard_forward_backward`
 /// runs the same forward + `loss.backward()` it has always run.
-/// True iff `KILN_USE_TAPE_AUTHORITATIVE` is set. Read FRESH each call (not
-/// cached) so tests can toggle it; checked once per training step, off the
+/// True unless `KILN_USE_TAPE_AUTHORITATIVE` is set to a disable value —
+/// **DEFAULTS ON** (CP-4 is the production training path). Read FRESH each call
+/// (not cached) so tests can toggle it; checked once per training step, off the
 /// hot path. When on, the SFT step drives backward through the kt `Tape`
-/// (tape-authoritative) instead of candle's `loss.backward()`. (#1082 CP-4.)
+/// (tape-authoritative) instead of candle's `loss.backward()`. Set the env to
+/// `0`/`false`/`no`/off/empty to opt out and fall back to candle's
+/// `loss.backward()` (for debugging / comparison). Note that the dispatch site
+/// additionally device-gates this to CUDA devices only (tape-authoritative
+/// adapters require a CUDA device); CPU always uses the candle path regardless
+/// of this flag. (#1082 CP-4.)
 #[cfg(feature = "cuda")]
 fn tape_authoritative_enabled() -> bool {
     std::env::var("KILN_USE_TAPE_AUTHORITATIVE")
         .map(|v| !matches!(v.trim(), "" | "0" | "false" | "no" | "off"))
-        .unwrap_or(false)
+        .unwrap_or(true)
 }
 
 /// Tape-authoritative SFT forward/backward (#1082 CP-4 endgame).
@@ -10714,12 +10720,17 @@ pub fn standard_forward_backward(
     device: &CdDevice,
     flce_provider: Option<FlceProvider>,
 ) -> Result<(f64, GradStore)> {
-    // CP-4 (#1082): opt-in tape-bridge path. Gated on
-    // `KILN_USE_TAPE_FORWARD` *and* the cuda feature. When off (the
-    // default), runs the existing forward + `loss.backward()` flow
-    // unchanged.
+    // CP-4 (#1082): tape-authoritative path is now the DEFAULT (opt out via
+    // `KILN_USE_TAPE_AUTHORITATIVE=0/false/no/off`).
+    //
+    // CRITICAL device gate: the tape-authoritative adapters require a CUDA
+    // device (they record kt CUDA ops and bridge kt<->candle CUDA tensors). On
+    // a CPU candle device they would record an empty tape -> zero LoRA grads ->
+    // broken training. So we additionally require `device` to be CUDA here;
+    // CPU runs (e.g. the `perf_regression_sft_train_cpu_smoke` test) keep the
+    // candle `loss.backward()` path below regardless of the flag.
     #[cfg(feature = "cuda")]
-    if tape_authoritative_enabled() {
+    if tape_authoritative_enabled() && matches!(device, candle_core::Device::Cuda(_)) {
         return standard_forward_backward_tape_authoritative(
             backend,
             input_ids,
@@ -13666,7 +13677,7 @@ mod tests {
 
         // BASELINE: pure candle (no tape scope; authoritative off -> CE composite).
         unsafe {
-            std::env::remove_var("KILN_USE_TAPE_AUTHORITATIVE");
+            std::env::set_var("KILN_USE_TAPE_AUTHORITATIVE", "0");
         }
         let lora_weights = params.as_lora_weights();
         let mut ls = LinearAttentionState::new(&config, &device).expect("linear state");
@@ -13700,7 +13711,7 @@ mod tests {
         )
         .expect("tape-authoritative step");
         unsafe {
-            std::env::remove_var("KILN_USE_TAPE_AUTHORITATIVE");
+            std::env::set_var("KILN_USE_TAPE_AUTHORITATIVE", "0");
         }
 
         let rel = |a: &candle_core::Tensor, c: &candle_core::Tensor| -> f32 {
@@ -13839,7 +13850,7 @@ mod tests {
 
         // BASELINE: pure candle (no tape scope; authoritative off -> CE composite).
         unsafe {
-            std::env::remove_var("KILN_USE_TAPE_AUTHORITATIVE");
+            std::env::set_var("KILN_USE_TAPE_AUTHORITATIVE", "0");
         }
         let lora_weights = params.as_lora_weights();
         let mut ls = LinearAttentionState::new(&config, &device).expect("linear state");
@@ -13873,7 +13884,7 @@ mod tests {
         )
         .expect("tape-authoritative step");
         unsafe {
-            std::env::remove_var("KILN_USE_TAPE_AUTHORITATIVE");
+            std::env::set_var("KILN_USE_TAPE_AUTHORITATIVE", "0");
         }
 
         let rel = |a: &candle_core::Tensor, c: &candle_core::Tensor| -> f32 {
@@ -14124,7 +14135,7 @@ mod tests {
         // tape scope; just the F32 scalar loss for the perturbed adapter.
         let loss_value = |lw: &LoraWeights| -> f64 {
             unsafe {
-                std::env::remove_var("KILN_USE_TAPE_AUTHORITATIVE");
+                std::env::set_var("KILN_USE_TAPE_AUTHORITATIVE", "0");
             }
             let mut ls = LinearAttentionState::new(&config, &device).expect("linear state");
             let logits = model_forward(
@@ -14145,7 +14156,7 @@ mod tests {
         // CANDLE baseline grads: plain forward, authoritative OFF,
         // loss.backward().
         unsafe {
-            std::env::remove_var("KILN_USE_TAPE_AUTHORITATIVE");
+            std::env::set_var("KILN_USE_TAPE_AUTHORITATIVE", "0");
         }
         let lora_weights = params.as_lora_weights();
         let mut ls = LinearAttentionState::new(&config, &device).expect("linear state");
@@ -14179,7 +14190,7 @@ mod tests {
         )
         .expect("tape-authoritative step");
         unsafe {
-            std::env::remove_var("KILN_USE_TAPE_AUTHORITATIVE");
+            std::env::set_var("KILN_USE_TAPE_AUTHORITATIVE", "0");
         }
 
         // Helper: Σ grad[V] · r (F32). `r` is the F32 direction; the grad is
@@ -14695,7 +14706,7 @@ mod tests {
         );
 
         unsafe {
-            std::env::remove_var("KILN_USE_TAPE_AUTHORITATIVE");
+            std::env::set_var("KILN_USE_TAPE_AUTHORITATIVE", "0");
         }
     }
 
@@ -17954,6 +17965,17 @@ mod tests {
         unsafe {
             std::env::set_var("KILN_USE_FLCE", "1");
             std::env::set_var("KILN_CUDA_FLCE", "1");
+            // CP-4 (#1082): tape-authoritative + the tape adapters are now the
+            // default, but this test validates the PURE CANDLE backend-hook path
+            // (linear_prefill_apply + the FLCE provider + flash decline) which the
+            // tape path bypasses. Disable BOTH the authoritative dispatch AND the
+            // master tape-forward gate (which otherwise routes the FLCE training
+            // path through the candle-seeded tape bridge `with_tape_scope_emit_to_grad_store`,
+            // and that bridge errors on candle's severed full-attn grad). With both
+            // off this is a clean candle `loss.backward()`. (OnceLock-cached gates —
+            // set before any tape-gate read; per-process under nextest.)
+            std::env::set_var("KILN_USE_TAPE_AUTHORITATIVE", "0");
+            std::env::set_var("KILN_USE_TAPE_FORWARD", "0");
         }
 
         let result = (|| -> Result<()> {

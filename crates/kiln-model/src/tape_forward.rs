@@ -1698,14 +1698,15 @@ pub fn try_tape_lora_linear_cuda(
     Ok(Some(out))
 }
 
-/// True iff `KILN_USE_TAPE_FLASH_ATTN` is set to an enable value.
+/// True unless `KILN_USE_TAPE_FLASH_ATTN` is set to a disable value —
+/// **DEFAULTS ON** (CP-4 production path).
 ///
 /// Separate gate from `KILN_USE_TAPE_FORWARD` so the flash-attention tape
-/// adapter rolls out independently of the rest of the tape-forward fleet:
-/// flipping it changes the attention-block gradient path from candle's
-/// `CudaFlashAttentionTrainingBf16` CustomOp3 to a kt `Tape` node, so the
-/// opt-in is intentionally narrow. Cached after first read, matching
-/// [`tape_lora_add_enabled`].
+/// adapter can be opted out independently of the rest of the tape-forward
+/// fleet: the attention-block gradient now flows through a kt `Tape` node by
+/// default. Set the env to `0`/`false`/`no`/empty to opt out and route through
+/// candle's `CudaFlashAttentionTrainingBf16` CustomOp3 (for debugging /
+/// comparison). Cached after first read, matching [`tape_lora_add_enabled`].
 pub fn tape_flash_attn_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| {
@@ -1714,7 +1715,7 @@ pub fn tape_flash_attn_enabled() -> bool {
                 let v = v.trim().to_lowercase();
                 !(v.is_empty() || v == "0" || v == "false" || v == "no")
             })
-            .unwrap_or(false)
+            .unwrap_or(true)
     })
 }
 
@@ -2060,9 +2061,11 @@ pub fn try_tape_reshape_cuda(x: &Tensor, new_shape: Vec<usize>) -> Result<Option
     Ok(Some(out))
 }
 
-/// True iff `KILN_USE_TAPE_GDN` is set to an enable value. Narrow opt-in
-/// for the GDN (linear-attention) recurrence tape adapter, separate from
-/// the rest of the fleet. Cached after first read.
+/// True unless `KILN_USE_TAPE_GDN` is set to a disable value — **DEFAULTS ON**
+/// (CP-4 production path). Gate for the GDN (linear-attention) recurrence tape
+/// adapter, separate from the rest of the fleet. Set the env to
+/// `0`/`false`/`no`/empty to opt out (for debugging / comparison). Cached after
+/// first read.
 pub fn tape_gdn_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| {
@@ -2071,7 +2074,7 @@ pub fn tape_gdn_enabled() -> bool {
                 let v = v.trim().to_lowercase();
                 !(v.is_empty() || v == "0" || v == "false" || v == "no")
             })
-            .unwrap_or(false)
+            .unwrap_or(true)
     })
 }
 
@@ -2387,8 +2390,10 @@ pub fn tape_record_gdn_recurrent(
 // untouched with the gate off.
 // ===========================================================================
 
-/// True iff `KILN_USE_TAPE_GDN_CONV` is set to an enable value. Narrow opt-in
-/// for the GDN causal-depthwise-conv1d tape adapter. Cached after first read.
+/// True unless `KILN_USE_TAPE_GDN_CONV` is set to a disable value —
+/// **DEFAULTS ON** (CP-4 production path). Gate for the GDN
+/// causal-depthwise-conv1d tape adapter. Set the env to `0`/`false`/`no`/empty
+/// to opt out (for debugging / comparison). Cached after first read.
 pub fn tape_gdn_conv_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| {
@@ -2397,12 +2402,14 @@ pub fn tape_gdn_conv_enabled() -> bool {
                 let v = v.trim().to_lowercase();
                 !(v.is_empty() || v == "0" || v == "false" || v == "no")
             })
-            .unwrap_or(false)
+            .unwrap_or(true)
     })
 }
 
-/// True iff `KILN_USE_TAPE_GDN_QK_NORM` is set to an enable value. Narrow
-/// opt-in for the GDN L2-qk-norm tape adapter. Cached after first read.
+/// True unless `KILN_USE_TAPE_GDN_QK_NORM` is set to a disable value —
+/// **DEFAULTS ON** (CP-4 production path). Gate for the GDN L2-qk-norm tape
+/// adapter. Set the env to `0`/`false`/`no`/empty to opt out (for debugging /
+/// comparison). Cached after first read.
 pub fn tape_gdn_qk_norm_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| {
@@ -2411,12 +2418,14 @@ pub fn tape_gdn_qk_norm_enabled() -> bool {
                 let v = v.trim().to_lowercase();
                 !(v.is_empty() || v == "0" || v == "false" || v == "no")
             })
-            .unwrap_or(false)
+            .unwrap_or(true)
     })
 }
 
-/// True iff `KILN_USE_TAPE_GDN_GATED_NORM` is set to an enable value. Narrow
-/// opt-in for the GDN gated-RMSNorm tape adapter. Cached after first read.
+/// True unless `KILN_USE_TAPE_GDN_GATED_NORM` is set to a disable value —
+/// **DEFAULTS ON** (CP-4 production path). Gate for the GDN gated-RMSNorm tape
+/// adapter. Set the env to `0`/`false`/`no`/empty to opt out (for debugging /
+/// comparison). Cached after first read.
 pub fn tape_gdn_gated_norm_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| {
@@ -2425,7 +2434,7 @@ pub fn tape_gdn_gated_norm_enabled() -> bool {
                 let v = v.trim().to_lowercase();
                 !(v.is_empty() || v == "0" || v == "false" || v == "no")
             })
-            .unwrap_or(false)
+            .unwrap_or(true)
     })
 }
 
@@ -3555,10 +3564,12 @@ pub fn try_tape_gqa_expand_cuda(
 // no entry-state to snapshot.
 // ===========================================================================
 
-/// True iff `KILN_USE_TAPE_SDPA` is set to an enable value. Narrow opt-in for
-/// the naive SDPA-fallback attention tape adapter, separate from
-/// `KILN_USE_TAPE_FLASH_ATTN` (which covers the flash path) and the rest of
-/// the fleet. Cached after first read, mirroring [`tape_gdn_enabled`].
+/// True unless `KILN_USE_TAPE_SDPA` is set to a disable value — **DEFAULTS ON**
+/// (CP-4 production path). Gate for the naive SDPA-fallback attention tape
+/// adapter, separate from `KILN_USE_TAPE_FLASH_ATTN` (which covers the flash
+/// path) and the rest of the fleet. Set the env to `0`/`false`/`no`/empty to
+/// opt out (for debugging / comparison). Cached after first read, mirroring
+/// [`tape_gdn_enabled`].
 pub fn tape_sdpa_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| {
@@ -3567,7 +3578,7 @@ pub fn tape_sdpa_enabled() -> bool {
                 let v = v.trim().to_lowercase();
                 !(v.is_empty() || v == "0" || v == "false" || v == "no")
             })
-            .unwrap_or(false)
+            .unwrap_or(true)
     })
 }
 
@@ -3770,14 +3781,14 @@ pub fn try_tape_sdpa_fallback_cuda(
     Ok(Some(out.clone()))
 }
 
-/// True iff `KILN_USE_TAPE_LORA_ADD` is set to an enable value.
+/// True unless `KILN_USE_TAPE_LORA_ADD` is set to a disable value —
+/// **DEFAULTS ON** (CP-4 production path).
 ///
 /// Separate gate from `KILN_USE_TAPE_FORWARD` so the LoRA add adapter can
-/// be rolled out independently of the rest of the tape-forward fleet. The
-/// production `add_lora_delta_to_base` dispatches through Marlin-fused
-/// CustomOp3 paths today; flipping LoRA to tape recording changes the
-/// gradient path (analytic kt backward vs. CustomOp3 backward) so this
-/// opt-in is intentionally narrow.
+/// be opted out independently of the rest of the tape-forward fleet. The
+/// LoRA add now records on the tape (analytic kt backward) by default;
+/// set the env to `0`/`false`/`no`/empty to opt out and route through the
+/// legacy Marlin-fused CustomOp3 backward (for debugging / comparison).
 ///
 /// Cached after first read, matching `tape_forward_enabled()`.
 pub fn tape_lora_add_enabled() -> bool {
@@ -3788,7 +3799,7 @@ pub fn tape_lora_add_enabled() -> bool {
                 let v = v.trim().to_lowercase();
                 !(v.is_empty() || v == "0" || v == "false" || v == "no")
             })
-            .unwrap_or(false)
+            .unwrap_or(true)
     })
 }
 
