@@ -63,11 +63,14 @@ use std::sync::OnceLock;
 
 use crate::Tape;
 
-/// `KILN_USE_TAPE_FORWARD` env var — opt-in only. Cached after first read.
+/// `KILN_USE_TAPE_FORWARD` env var — **DEFAULTS ON** (CP-4 production path).
+/// Cached after first read.
 ///
-/// Returns `true` only if the env var is set and not one of the
-/// disable values (`0`, `false`, `no`, empty). Matches the convention
-/// used by `KILN_VULKAN_RMSNORM` and friends in `kiln-model::forward`.
+/// Tape-forward routing is now the default. To **opt out** (for debugging /
+/// comparison against the legacy candle CustomOp path), set the env var to one
+/// of the disable values (`0`, `false`, `no`, empty); any other value (or the
+/// var being unset) keeps it on. Matches the convention used by
+/// `KILN_VULKAN_RMSNORM` and friends in `kiln-model::forward`.
 ///
 /// Lifted verbatim from `kiln-model::tape_forward` so kernel crates
 /// can gate their own tape-routing adapters on the same env without
@@ -80,7 +83,7 @@ pub fn tape_forward_enabled() -> bool {
                 let v = v.trim().to_lowercase();
                 !(v.is_empty() || v == "0" || v == "false" || v == "no")
             })
-            .unwrap_or(false)
+            .unwrap_or(true)
     })
 }
 
