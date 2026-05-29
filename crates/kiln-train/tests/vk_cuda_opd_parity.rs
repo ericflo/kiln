@@ -35,7 +35,7 @@ use anyhow::Result;
 // the shim) is numerically equivalent to the fused `kiln_opd_topk_kl_fwd_*`
 // kernel up to f32 associativity; the cross-engine tolerance below
 // (`1e-4` abs / `1e-3` rel) accommodates that difference.
-use kiln_opd_loss_kernel::opd_top_k_reverse_kl_per_position_via_kt_forward_op;
+use kiln_train::opd_candle_shim::opd_top_k_reverse_kl_per_position_via_kt_forward_op;
 use kiln_vulkan_kernel::vk_ops::opd::vk_opd_top_k_reverse_kl_per_position;
 use kiln_vulkan_kernel::vk_tensor::VkTensor;
 use kiln_vulkan_kernel::VulkanDevice;

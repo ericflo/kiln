@@ -6,10 +6,12 @@
 //!
 //! # Why this module exists
 //!
-//! The existing [`crate::opd_top_k_reverse_kl_per_position_via_kt_forward_op`]
+//! The existing `kiln_train::opd_candle_shim::opd_top_k_reverse_kl_per_position_via_kt_forward_op`
 //! wraps the kt-tensor forward + the CUDA analytic backward inside a candle
-//! `CustomOp1` (`OpdLossCustomOp` / `KtForwardOp1`). That keeps the candle
-//! dependency alive in the opd-loss-kernel crate today — even though both
+//! `CustomOp1` (`KtForwardOp1`). It used to keep the candle dependency alive
+//! in the opd-loss-kernel crate, but (#1082) relocated it (and the rest of
+//! the candle glue) UP into `kiln-train::opd_candle_shim` so this crate is
+//! now candle-free — even though both
 //! halves of the autograd roundtrip already bottom out in
 //! `kiln_tensor::Tensor` + the kt-typed forward
 //! ([`crate::opd_top_k_reverse_kl_per_position_kt`] /
@@ -54,7 +56,7 @@
 //!
 //! Out of scope for this commit ((#1082)). The production caller in
 //! `kiln-train` still uses the candle CustomOp path
-//! ([`crate::opd_top_k_reverse_kl_per_position_via_kt_forward_op`]).
+//! (`kiln_train::opd_candle_shim::opd_top_k_reverse_kl_per_position_via_kt_forward_op`).
 //! Migration lands once the wider kiln-train autograd substrate adopts
 //! kt-tape — keeping the two paths in parallel for now matches the
 //! "parallel shim, flip when ready" rollout cadence the issue
@@ -218,7 +220,7 @@ impl BackwardOp for CudaOpdTopKReverseKlPhaseBBackward {
 
 /// kt-tape Phase-B per-position forward+backward — Phase 6a/CP-4
 /// successor to
-/// [`crate::opd_top_k_reverse_kl_per_position_via_kt_forward_op`].
+/// `kiln_train::opd_candle_shim::opd_top_k_reverse_kl_per_position_via_kt_forward_op`.
 ///
 /// Runs the kt-typed Phase-A forward via
 /// [`opd_top_k_reverse_kl_per_position_kt`], then records a tape node

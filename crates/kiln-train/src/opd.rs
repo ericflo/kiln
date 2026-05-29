@@ -99,9 +99,12 @@ use crate::{ChatMessage, Optimizer, default_alpha, default_rank};
 // (c) `top_k` is not 16 or 32, (d) `hidden.dtype()` is not F32 or BF16,
 // or (e) `hidden.dtype() != head_t.dtype()` — so the autograd chain
 // through `mean_kl.backward()` is preserved on every code path.
-use kiln_opd_loss_kernel::{
-    DEFAULT_CHUNK_SIZE, opd_top_k_reverse_kl_per_position_via_kt_forward_op,
-};
+use kiln_opd_loss_kernel::DEFAULT_CHUNK_SIZE;
+// (#1082) The candle-typed OPD glue (Phase A reference, kt-forward-op
+// shim, kt-tape adapters) was relocated from `kiln-opd-loss-kernel` into
+// `crate::opd_candle_shim` so the kernel crate could drop candle. The
+// call sites below are unchanged except for the new module path.
+use crate::opd_candle_shim::opd_top_k_reverse_kl_per_position_via_kt_forward_op;
 
 /// §6 default top-K for the `TeacherTopK` loss path. Picked by Fu et al.
 /// (2026) ablation table 3: K = 32 is the optimum across math and
@@ -1321,7 +1324,7 @@ pub fn opd_step_loss(inputs: OpdStepInputs<'_>) -> Result<OpdStepOutputs> {
     let per_position_kl = {
         #[cfg(feature = "cuda")]
         {
-            if let Some(out) = kiln_opd_loss_kernel::try_tape_opd_per_position_cuda(
+            if let Some(out) = crate::opd_candle_shim::try_tape_opd_per_position_cuda(
                 student_hidden,
                 head_t,
                 &teacher_topk_indices,
@@ -3150,7 +3153,7 @@ fn opd_step_forward_backward_tape_authoritative(
 
             // Record the SCALAR OPD loss as the tape root. Returns a detached
             // candle scalar (value only); the gradient lives on the tape.
-            let loss = match kiln_opd_loss_kernel::try_tape_opd_scalar_mean_cuda(
+            let loss = match crate::opd_candle_shim::try_tape_opd_scalar_mean_cuda(
                 &normed,
                 head_t,
                 &prepared.teacher_topk_indices,

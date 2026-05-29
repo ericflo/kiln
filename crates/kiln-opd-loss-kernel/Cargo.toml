@@ -12,20 +12,26 @@ build = "build.rs"
 cc = "1"
 
 [dependencies]
-candle-core = { workspace = true }
+# (#1082) candle-drop: this crate is now 100% candle-free (the first
+# kernel-crate candle drop). The candle-typed glue (Phase A reference,
+# the `CustomOp1` kt-forward-op shim, the kt-tape production-caller
+# adapters) moved UP into `kiln-train::opd_candle_shim`, which keeps
+# candle. `candle-core`, `anyhow`, and `tracing` were the deps those
+# moved paths needed; with them gone the kept code (`kt_api`, `kt_tape`,
+# `phase_b`, `lib.rs`) is pure `kiln_tensor` + `kiln_autograd`.
+#
 # kt-typed parallel surface (see `kt_api`). The forward path is pure
 # kt-tensor ops; the backward kt entry point
-# (`opd_top_k_reverse_kl_phase_b_bwd_kt`) wraps the same CUDA FFI
-# symbols as the candle path (`kiln_opd_topk_kl_bwd_*`), routing
-# through `kiln-kt-bridge` for storage downcast + device-pointer
-# extraction. CUDA-only on the backward; gated by the `cuda` feature.
+# (`opd_top_k_reverse_kl_phase_b_bwd_kt`) wraps the CUDA FFI symbols
+# `kiln_opd_topk_kl_bwd_*`, routing through `kiln-kt-bridge` for storage
+# downcast + device-pointer extraction. CUDA-only on the backward; gated
+# by the `cuda` feature.
 kiln-tensor = { workspace = true }
 # Phase 6a/CP-4 (#1082): kt-tape parallel surface (see `kt_tape`). The
 # kt-tape entry records the OPD Phase-B fused backward directly onto a
-# `kiln_autograd::Tape`, dropping the candle `CustomOp1` wrapper used by
-# `kt_forward_op`. Same FFI symbols as the candle path on the backward.
-# Always-on dep — the kt-tape module compiles on every build; the
-# `apply()` body is gated under the `cuda` feature.
+# `kiln_autograd::Tape`. Same FFI symbols on the backward. Always-on dep
+# — the kt-tape module compiles on every build; the `apply()` body is
+# gated under the `cuda` feature.
 kiln-autograd = { workspace = true }
 # Optional: only used by the CUDA backward bridge path
 # (`opd_top_k_reverse_kl_phase_b_bwd_kt`) which itself is
@@ -33,22 +39,14 @@ kiln-autograd = { workspace = true }
 # `cudarc` into non-CUDA CI matrix jobs (Linux/default,
 # Linux/Vulkan, macOS/Metal), which fail at the `nvcc --version`
 # probe in cudarc's build.rs. Gated under the `cuda` feature
-# along with `candle-core/cuda` + `kiln-tensor/cuda`.
+# along with `kiln-tensor/cuda`.
 kiln-kt-bridge = { workspace = true, optional = true }
-anyhow = { workspace = true }
 half = "2"
-# `tracing` for the warn-on-fallback path in cuda_fwd. Cheap dep and
-# already pulled in by every consumer of kiln-train.
-tracing = { workspace = true }
 
 [features]
-# Activates the raw-CUDA forward/backward path in `cuda_fwd`/`bwd`. Without
-# this feature the CUDA path routes through the candle reference path on
-# CUDA storage (correct but slower). kiln-train re-exports this feature via
+# Activates the raw-CUDA fused backward path in the kt entry
+# (`opd_top_k_reverse_kl_phase_b_bwd_kt`) + the kt-tape `apply()` body.
+# Without this feature the kt-typed surface compiles but the CUDA-only
+# backward dispatch is gated out. kiln-train re-exports this feature via
 # its own `cuda` feature so `cargo build --features cuda` activates it.
-#
-# Milestone 1 (this commit): the `cuda` feature only enables the candle-on-CUDA
-# reference path; a raw-CUDA C-ABI kernel + `build.rs` lands in the next
-# milestone (see `docs/plans/grand-plan-for-extraordinarily-great-on-policy-distillation-for-everyone.md`
-# §9.2). The CPU reference path is the parity oracle.
-cuda = ["candle-core/cuda", "kiln-tensor/cuda", "dep:kiln-kt-bridge", "kiln-kt-bridge?/cuda"]
+cuda = ["kiln-tensor/cuda", "dep:kiln-kt-bridge", "kiln-kt-bridge?/cuda"]

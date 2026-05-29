@@ -1,15 +1,15 @@
 //! OPD top-K reverse-KL — fused CUDA backward FFI declarations + envelope.
 //!
-//! Originally this module hosted the candle [`CustomOp1`] wrapper
+//! Originally this module hosted the candle `CustomOp1` wrapper
 //! `OpdLossCustomOp` along with the analytic chunked backward, the
 //! fused-CUDA fast paths, and the `compute_per_position_metrics`
 //! diagnostics. After Wave-9 (`0c1be227`) wired the candle `CustomOp::bwd`
 //! through the kt bridge, then Wave-12 (`#1082`) flipped the production
 //! caller in `kiln-train::opd::opd_step_loss` onto the kt-shim
-//! [`crate::opd_top_k_reverse_kl_per_position_via_kt_forward_op`] (and
-//! Wave-13 added the tape-gated short-circuit
-//! [`crate::try_tape_opd_per_position_cuda`]), the candle CustomOp1
-//! became dead in production — used only by the smoke
+//! `kiln_train::opd_candle_shim::opd_top_k_reverse_kl_per_position_via_kt_forward_op`
+//! (and Wave-13 added the tape-gated short-circuit
+//! `kiln_train::opd_candle_shim::try_tape_opd_per_position_cuda`), the
+//! candle CustomOp1 became dead in production — used only by the smoke
 //! `kiln-train::opd::opd_train_synthetic_validation` and the
 //! `kiln-train/tests/vk_cuda_opd_parity.rs` parity gate. Both were
 //! migrated to the production shim on 2026-05-28 (commit `e495554c`),
@@ -26,7 +26,7 @@
 //!   powers both the kt-tape pilot
 //!   ([`crate::opd_top_k_reverse_kl_phase_b_per_position_via_kt_tape`])
 //!   and the candle kt-forward-op shim
-//!   ([`crate::opd_top_k_reverse_kl_per_position_via_kt_forward_op`]).
+//!   (`kiln_train::opd_candle_shim::opd_top_k_reverse_kl_per_position_via_kt_forward_op`).
 //! * [`cuda_kernel_supports`] — the `(K ∈ {16, 32}, dtype ∈ {F32, BF16})`
 //!   envelope used by both call sites above.
 //!
@@ -53,7 +53,7 @@
 //! `csrc/opd_topk_kl.cu` are removed in the same commit so the static
 //! library doesn't carry dead code.
 
-use candle_core::DType;
+use kiln_tensor::DType;
 
 // FFI declarations for the fused CUDA backward kernel (§9.2 of the
 // grand plan). Linked in only when the `cuda` feature is active — the

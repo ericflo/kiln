@@ -97,22 +97,25 @@
 //!
 //! [§9.2 of `docs/plans/grand-plan-for-extraordinarily-great-on-policy-distillation-for-everyone.md`]: ../../docs/plans/grand-plan-for-extraordinarily-great-on-policy-distillation-for-everyone.md
 
-use anyhow::{Context, Result, anyhow};
-use candle_core::{D, DType, Device, Tensor};
-
 // `phase_b` retains only the fused-CUDA backward FFI declarations
 // (`kiln_opd_topk_kl_bwd_{bf16,f32}`) and the `cuda_kernel_supports`
-// envelope check. The candle `CustomOp1` wrapper `OpdLossCustomOp`, the
-// candle entry points `opd_top_k_reverse_kl_phase_b` and
-// `_per_position`, the fused-FWD FFI symbols, and the `PerPositionMetrics`
-// path were all removed in (#1082, 2026-05-28) — production now goes
-// through `opd_top_k_reverse_kl_per_position_via_kt_forward_op`
-// (`kt_forward_op.rs`) for candle-autograd integration or
-// `try_tape_opd_per_position_cuda` (`tape_forward.rs`) when the
-// `KILN_USE_TAPE_FORWARD` gate + a thread-local `Tape` scope are
-// active. Both call sites pre-check the K + dtype envelope via
-// [`phase_b::cuda_kernel_supports`] before dispatching the fused
-// backward.
+// envelope check (both pure kt — the candle `DType` reference was ported
+// to `kiln_tensor::DType` in the candle-drop). The candle `CustomOp1`
+// wrapper `OpdLossCustomOp`, the candle entry points
+// `opd_top_k_reverse_kl_phase_b` and `_per_position`, the fused-FWD FFI
+// symbols, and the `PerPositionMetrics` path were all removed in
+// (#1082, 2026-05-28).
+//
+// (#1082) candle-drop: this crate is now 100% candle-free. The
+// candle-typed glue that used to live here — the pure-candle Phase A
+// reference path (`opd_top_k_reverse_kl_phase_a_per_position` & helpers),
+// the candle `CustomOp1` kt-forward-op shim
+// (`opd_top_k_reverse_kl_per_position_via_kt_forward_op`,
+// `kt_forward_op.rs`), and the kt-tape production-caller adapters
+// (`try_tape_opd_per_position_cuda` / `try_tape_opd_scalar_mean_cuda`,
+// `tape_forward.rs`) — moved UP into `kiln-train::opd_candle_shim`
+// (which legitimately keeps candle). They call the kt-typed building
+// blocks below (`kt_api`, `kt_tape`) across the crate boundary.
 mod phase_b;
 
 pub mod kt_api;
@@ -123,26 +126,6 @@ pub use kt_api::{
 
 #[cfg(feature = "cuda")]
 pub use kt_api::opd_top_k_reverse_kl_phase_b_bwd_kt;
-
-mod kt_forward_op;
-pub use kt_forward_op::{
-    kt_forward_op_disabled, opd_top_k_reverse_kl_per_position_via_kt_forward_op,
-};
-
-/// Wave-13 (#1082): candle-typed kt-tape adapter for the production
-/// caller in `kiln-train::opd::opd_step_loss`. Mirrors the rmsnorm
-/// sibling `kiln-model::tape_forward::try_tape_rms_norm_cuda` — same
-/// `KILN_USE_TAPE_FORWARD` env gate + thread-local-tape contract.
-#[cfg(feature = "cuda")]
-mod tape_forward;
-#[cfg(feature = "cuda")]
-pub use tape_forward::try_tape_opd_per_position_cuda;
-// CP-4 (#1082) endgame: scalar-mean tape-authoritative entry. Records the
-// scalar OPD loss as a tape ROOT (with IO chaining) so the production OPD
-// trainer can drive backward via `Tape::backward` — mirroring SFT's
-// `try_tape_cross_entropy_from_logits_cuda`. See `tape_forward.rs`.
-#[cfg(feature = "cuda")]
-pub use tape_forward::try_tape_opd_scalar_mean_cuda;
 
 /// Phase 6a/CP-4 (#1082): parallel kt-tape entry that drops the candle
 /// CustomOp1 wrapper in favour of recording onto a `kiln_autograd::Tape`
@@ -176,248 +159,13 @@ pub fn kernel_disabled() -> bool {
         .unwrap_or(false)
 }
 
-/// Validate the shape / dtype contract on the public entry points and
-/// return the `(T, H, V, T_active, K)` quintuple for downstream code.
-fn validate_inputs(
-    hidden: &Tensor,
-    head_t: &Tensor,
-    teacher_topk_indices: &[u32],
-    teacher_topk_logprobs: &[f32],
-    label_mask: &[bool],
-    top_k: usize,
-) -> Result<(usize, usize, usize, usize, usize)> {
-    let hidden_dims = hidden.dims();
-    if hidden_dims.len() != 3 {
-        return Err(anyhow!(
-            "hidden must be 3-D [1, T, H]; got {:?}",
-            hidden_dims
-        ));
-    }
-    if hidden_dims[0] != 1 {
-        return Err(anyhow!(
-            "hidden batch dim must be 1 (kiln trainer convention); got {:?}",
-            hidden_dims
-        ));
-    }
-    let seq_len = hidden_dims[1];
-    let hidden_size = hidden_dims[2];
-
-    let head_dims = head_t.dims();
-    if head_dims.len() != 2 {
-        return Err(anyhow!(
-            "head_t must be 2-D [H, V]; got {:?}",
-            head_dims
-        ));
-    }
-    if head_dims[0] != hidden_size {
-        return Err(anyhow!(
-            "hidden_size mismatch: hidden has H={} but head_t has H={}",
-            hidden_size,
-            head_dims[0]
-        ));
-    }
-    let vocab_size = head_dims[1];
-
-    if label_mask.len() != seq_len {
-        return Err(anyhow!(
-            "label_mask length {} does not match T {}",
-            label_mask.len(),
-            seq_len
-        ));
-    }
-    if top_k == 0 {
-        return Err(anyhow!("top_k must be > 0"));
-    }
-
-    let active_count = label_mask.iter().filter(|&&m| m).count();
-    let expected_logits = active_count * top_k;
-    if teacher_topk_indices.len() != expected_logits {
-        return Err(anyhow!(
-            "teacher_topk_indices length {} != T_active * K = {} * {} = {}",
-            teacher_topk_indices.len(),
-            active_count,
-            top_k,
-            expected_logits
-        ));
-    }
-    if teacher_topk_logprobs.len() != expected_logits {
-        return Err(anyhow!(
-            "teacher_topk_logprobs length {} != T_active * K = {} * {} = {}",
-            teacher_topk_logprobs.len(),
-            active_count,
-            top_k,
-            expected_logits
-        ));
-    }
-    for (i, &idx) in teacher_topk_indices.iter().enumerate() {
-        if (idx as usize) >= vocab_size {
-            return Err(anyhow!(
-                "teacher_topk_indices[{}] = {} >= vocab_size {}",
-                i,
-                idx,
-                vocab_size
-            ));
-        }
-    }
-
-    Ok((seq_len, hidden_size, vocab_size, active_count, top_k))
-}
-
-/// Phase A per-position reverse-KL. Returns a `[T_active]` f32 tensor.
-/// Used by the trainer when constructing the per-token advantage
-/// `A_t = -KL_t` for the GRPO importance-sampling loss (§3.1, step 4 of
-/// the grand plan pseudocode).
-pub fn opd_top_k_reverse_kl_phase_a_per_position(
-    hidden: &Tensor,
-    head_t: &Tensor,
-    teacher_topk_indices: &[u32],
-    teacher_topk_logprobs: &[f32],
-    label_mask: &[bool],
-    top_k: usize,
-    device: &Device,
-) -> Result<Tensor> {
-    let (_, _, _, active_count, _) = validate_inputs(
-        hidden,
-        head_t,
-        teacher_topk_indices,
-        teacher_topk_logprobs,
-        label_mask,
-        top_k,
-    )?;
-    if active_count == 0 {
-        return Tensor::zeros((0,), DType::F32, device)
-            .context("empty per-position KL (no active rows)");
-    }
-    per_position_phase_a(hidden, head_t, teacher_topk_indices, teacher_topk_logprobs, label_mask, top_k, device)
-}
-
-/// Per-position helper used by [`opd_top_k_reverse_kl_phase_a_per_position`].
-///
-/// Math:
-///
-/// 1. `head_chunk[t, h, k] = head_t[h, teacher_topk_indices[t, k]]` — a
-///    per-token gather of K columns from the projection matrix. Built by
-///    flattening the `[T_active * K]` index buffer once and calling
-///    `head_t.index_select(...)` on dim 1, which yields
-///    `[H, T_active * K]`. Reshape to `[T_active, K, H]` and transpose to
-///    `[T_active, H, K]`.
-/// 2. `s_logits[t, k] = sum_h hidden_active[t, h] * head_chunk[t, h, k]`
-///    — batched matmul `[T_active, 1, H] @ [T_active, H, K]` → `[T_active, K]`.
-/// 3. Renormalise both distributions over the K support:
-///    ```text
-///    log_p_hat = s_logits - logsumexp(s_logits, dim=-1)
-///    log_q_hat = teacher_topk_logprobs - logsumexp(teacher_topk_logprobs, dim=-1)
-///    p_hat = exp(log_p_hat)
-///    ```
-/// 4. Per-position KL: `KL_t = sum_k p_hat[t, k] * (log_p_hat[t, k] - log_q_hat[t, k])`.
-fn per_position_phase_a(
-    hidden: &Tensor,
-    head_t: &Tensor,
-    teacher_topk_indices: &[u32],
-    teacher_topk_logprobs: &[f32],
-    label_mask: &[bool],
-    top_k: usize,
-    device: &Device,
-) -> Result<Tensor> {
-    let active_positions: Vec<u32> = label_mask
-        .iter()
-        .enumerate()
-        .filter_map(|(i, &m)| if m { Some(i as u32) } else { None })
-        .collect();
-    let active_count = active_positions.len();
-    debug_assert!(active_count > 0, "caller short-circuits empty");
-
-    let active_indices = Tensor::new(active_positions.as_slice(), device)
-        .context("build active position indices")?;
-    let hidden_2d = hidden.squeeze(0).context("squeeze hidden batch dim")?;
-    let active_hidden = hidden_2d
-        .index_select(&active_indices, 0)
-        .context("gather active rows from hidden")?;
-    let active_hidden_f32 = active_hidden
-        .to_dtype(DType::F32)
-        .context("cast hidden to f32")?;
-    let head_t_f32 = head_t.to_dtype(DType::F32).context("cast head_t to f32")?;
-
-    // Gather K columns per token, return `[T_active, H, K]`.
-    let head_gather = gather_head_columns(&head_t_f32, teacher_topk_indices, active_count, top_k, device)?;
-
-    // Batched matmul: [T_active, 1, H] @ [T_active, H, K] -> [T_active, 1, K]
-    let lhs = active_hidden_f32
-        .unsqueeze(1)
-        .context("unsqueeze active_hidden")?;
-    let s_logits = lhs
-        .matmul(&head_gather)
-        .context("batched matmul for student logits at K")?
-        .squeeze(1)
-        .context("squeeze student logits dim")?;
-
-    // Teacher logprobs at the K support (already log-softmax over the full
-    // teacher vocab from the LogitSource).
-    let q_logprobs = Tensor::from_vec(
-        teacher_topk_logprobs.to_vec(),
-        (active_count, top_k),
-        device,
-    )
-    .context("build teacher topk logprobs tensor")?;
-
-    // Renormalise both distributions over the K-element support.
-    let log_p_hat = log_softmax_last(&s_logits)?;
-    let log_q_hat = log_softmax_last(&q_logprobs)?;
-
-    // KL(p_hat || q_hat) = sum_k p_hat * (log_p_hat - log_q_hat)
-    let p_hat = log_p_hat.exp().context("exp(log_p_hat)")?;
-    let diff = (&log_p_hat - &log_q_hat).context("log_p_hat - log_q_hat")?;
-    let per_token = (p_hat * diff)
-        .context("p_hat * (log_p_hat - log_q_hat)")?
-        .sum(D::Minus1)
-        .context("sum over K support")?;
-    Ok(per_token)
-}
-
-/// Gather K columns of `head_t` per active token. Returns a tensor of
-/// shape `[T_active, H, K]` where slice `t` holds the K columns of `head_t`
-/// pointed to by `teacher_topk_indices[t * K .. (t+1) * K]`.
-///
-/// We build this by `head_t.index_select(dim=1, indices=flat)` which yields
-/// `[H, T_active * K]`, then reshape to `[H, T_active, K]` and transpose
-/// to `[T_active, H, K]`. The expensive operation is the
-/// `index_select` — `T_active * K` columns × `H` rows. For typical OPD
-/// configs (T_active ≤ 4096, K = 32, H = 2560) this is 4096 × 32 × 2560 =
-/// 335M f32 elements = ~1.3 GB, comparable to a single forward-chunk in
-/// FLCE and far below the full-vocab projection.
-fn gather_head_columns(
-    head_t: &Tensor,
-    teacher_topk_indices: &[u32],
-    active_count: usize,
-    top_k: usize,
-    device: &Device,
-) -> Result<Tensor> {
-    let flat_indices = Tensor::new(teacher_topk_indices, device)
-        .context("build flat indices")?;
-    let gathered = head_t
-        .index_select(&flat_indices, 1)
-        .context("index_select head_t columns")?;
-    // [H, T_active * K] -> [H, T_active, K] -> [T_active, H, K]
-    let hidden_size = head_t.dim(0)?;
-    let reshaped = gathered
-        .reshape((hidden_size, active_count, top_k))
-        .context("reshape gathered head columns")?;
-    let transposed = reshaped
-        .permute((1, 0, 2))
-        .context("permute to [T_active, H, K]")?
-        .contiguous()
-        .context("contiguous after permute")?;
-    Ok(transposed)
-}
-
-/// log_softmax along the last dimension. We re-implement it here (rather
-/// than pulling in a `candle_nn`-style helper) to keep the autograd graph
-/// minimal: this version produces a single subtraction node off the input.
-pub(crate) fn log_softmax_last(x: &Tensor) -> Result<Tensor> {
-    let lse = x.log_sum_exp(D::Minus1)?.unsqueeze(D::Minus1)?;
-    let broadcast = lse.broadcast_as(x.shape())?;
-    Ok((x - broadcast)?)
-}
+// (#1082) candle-drop: the pure-candle Phase A reference path
+// (`validate_inputs`, `opd_top_k_reverse_kl_phase_a_per_position`,
+// `per_position_phase_a`, `gather_head_columns`, `log_softmax_last`)
+// moved UP into `kiln-train::opd_candle_shim` so this crate could drop
+// its `candle-core` dependency. The kt-typed forward + backward
+// (`kt_api`, `kt_tape`) — which the relocated shim now calls across the
+// crate boundary — stay here.
 
 // (#1082, 2026-05-28) The candle `OpdLossCustomOp` re-export and the
 // `compute_per_position_metrics` / `PerPositionMetrics` re-exports were
