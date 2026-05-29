@@ -24,6 +24,15 @@ pub trait Element: Copy + 'static {
     const SIZE: usize;
     /// Convert a slice of `Self` to the byte buffer the storage carries.
     fn to_bytes(values: &[Self]) -> Vec<u8>;
+    /// Decode a byte buffer (little-endian, `Self::SIZE` bytes per
+    /// element) back into a `Vec<Self>`. The inverse of [`to_bytes`].
+    ///
+    /// Used by [`Tensor::to_vec`](crate::Tensor::to_vec) to read a
+    /// contiguous CPU storage back to host scalars — the candle-free
+    /// replacement for candle's `Tensor::to_vec1::<T>()` /
+    /// `to_scalar::<T>()`. `bytes.len()` must be a multiple of
+    /// `Self::SIZE`.
+    fn from_bytes(bytes: &[u8]) -> Vec<Self>;
 }
 
 impl Element for f32 {
@@ -31,6 +40,9 @@ impl Element for f32 {
     const SIZE: usize = 4;
     fn to_bytes(values: &[Self]) -> Vec<u8> {
         bytemuck::cast_slice::<f32, u8>(values).to_vec()
+    }
+    fn from_bytes(bytes: &[u8]) -> Vec<Self> {
+        bytemuck::cast_slice::<u8, f32>(bytes).to_vec()
     }
 }
 
@@ -44,6 +56,12 @@ impl Element for half::bf16 {
         }
         out
     }
+    fn from_bytes(bytes: &[u8]) -> Vec<Self> {
+        bytes
+            .chunks_exact(2)
+            .map(|c| half::bf16::from_le_bytes([c[0], c[1]]))
+            .collect()
+    }
 }
 
 impl Element for half::f16 {
@@ -56,6 +74,12 @@ impl Element for half::f16 {
         }
         out
     }
+    fn from_bytes(bytes: &[u8]) -> Vec<Self> {
+        bytes
+            .chunks_exact(2)
+            .map(|c| half::f16::from_le_bytes([c[0], c[1]]))
+            .collect()
+    }
 }
 
 impl Element for u32 {
@@ -63,6 +87,9 @@ impl Element for u32 {
     const SIZE: usize = 4;
     fn to_bytes(values: &[Self]) -> Vec<u8> {
         bytemuck::cast_slice::<u32, u8>(values).to_vec()
+    }
+    fn from_bytes(bytes: &[u8]) -> Vec<Self> {
+        bytemuck::cast_slice::<u8, u32>(bytes).to_vec()
     }
 }
 
@@ -72,6 +99,9 @@ impl Element for u8 {
     fn to_bytes(values: &[Self]) -> Vec<u8> {
         values.to_vec()
     }
+    fn from_bytes(bytes: &[u8]) -> Vec<Self> {
+        bytes.to_vec()
+    }
 }
 
 impl Element for i64 {
@@ -79,6 +109,9 @@ impl Element for i64 {
     const SIZE: usize = 8;
     fn to_bytes(values: &[Self]) -> Vec<u8> {
         bytemuck::cast_slice::<i64, u8>(values).to_vec()
+    }
+    fn from_bytes(bytes: &[u8]) -> Vec<Self> {
+        bytemuck::cast_slice::<u8, i64>(bytes).to_vec()
     }
 }
 
@@ -126,5 +159,32 @@ mod tests {
         assert_eq!(bytes.len(), 4);
         // BF16(1.0) = 0x3F80 little-endian = [0x80, 0x3F]
         assert_eq!(&bytes[..2], &[0x80, 0x3F]);
+    }
+
+    #[test]
+    fn from_bytes_inverts_to_bytes() {
+        // f32
+        let f = vec![1.0_f32, -2.5, 3.14, 0.0];
+        assert_eq!(<f32 as Element>::from_bytes(&<f32 as Element>::to_bytes(&f)), f);
+        // u32
+        let u = vec![0_u32, 7, 4_000_000_000];
+        assert_eq!(<u32 as Element>::from_bytes(&<u32 as Element>::to_bytes(&u)), u);
+        // u8
+        let b = vec![0_u8, 255, 17];
+        assert_eq!(<u8 as Element>::from_bytes(&<u8 as Element>::to_bytes(&b)), b);
+        // i64
+        let i = vec![-1_i64, 0, 9_000_000_000];
+        assert_eq!(<i64 as Element>::from_bytes(&<i64 as Element>::to_bytes(&i)), i);
+        // bf16 / f16 (exactly-representable values round-trip)
+        let bf = vec![half::bf16::from_f32(1.0), half::bf16::from_f32(-0.5)];
+        assert_eq!(
+            <half::bf16 as Element>::from_bytes(&<half::bf16 as Element>::to_bytes(&bf)),
+            bf
+        );
+        let hf = vec![half::f16::from_f32(2.0), half::f16::from_f32(0.25)];
+        assert_eq!(
+            <half::f16 as Element>::from_bytes(&<half::f16 as Element>::to_bytes(&hf)),
+            hf
+        );
     }
 }

@@ -780,6 +780,54 @@ impl Tensor {
             "Tensor::to_device: transition {src}→{target} requires a GPU feature (cuda/metal/vulkan); none is enabled in this build"
         )))
     }
+
+    /// Read the tensor back to a host `Vec<E>` in row-major logical
+    /// order — the candle-free replacement for candle's
+    /// `Tensor::to_vec1::<E>()` / `to_scalar::<E>()` / flatten-then-read
+    /// idioms (#1082 Tier-3). Migrating off candle, ~200 sites across
+    /// `kiln-model` read a tensor back to host scalars; this is their
+    /// single shared primitive.
+    ///
+    /// Pipeline: move to CPU (`to_device(Cpu)`), materialize contiguity
+    /// (`contiguous()`), then byte-decode via [`Element::from_bytes`].
+    /// The requested element type `E` must match the tensor's dtype
+    /// exactly — there is no implicit cast (use [`crate::ops::cast`]
+    /// first if you need one).
+    ///
+    /// A contiguous tensor may still carry a non-zero
+    /// [`Layout::start_offset`](crate::Layout::start_offset) (e.g. a
+    /// `narrow`ed-but-contiguous view shares the parent's storage), so
+    /// the read is sliced to `[start .. start + element_count]` — never
+    /// the whole backing buffer.
+    pub fn to_vec<E: Element>(&self) -> Result<Vec<E>> {
+        if self.dtype() != E::DTYPE {
+            return Err(Error::Msg(format!(
+                "Tensor::to_vec: tensor dtype {:?} does not match requested element type {:?} \
+                 (no implicit cast — use ops::cast first)",
+                self.dtype(),
+                E::DTYPE
+            )));
+        }
+        let cpu = self.to_device(Device::Cpu)?.contiguous()?;
+        let n = cpu.element_count();
+        let per = E::SIZE;
+        let start_bytes = cpu.layout().start_offset() * per;
+        let end_bytes = start_bytes + n * per;
+        let storage = cpu
+            .storage()
+            .as_any()
+            .downcast_ref::<CpuStorage>()
+            .ok_or_else(|| Error::from_str("Tensor::to_vec: CPU device must hold CpuStorage"))?;
+        let bytes = storage.as_bytes();
+        if end_bytes > bytes.len() {
+            return Err(Error::Msg(format!(
+                "Tensor::to_vec: element byte range {start_bytes}..{end_bytes} exceeds \
+                 contiguous CPU storage length {}",
+                bytes.len()
+            )));
+        }
+        Ok(E::from_bytes(&bytes[start_bytes..end_bytes]))
+    }
 }
 
 /// Helper for [`Tensor::all_finite`] — read one element at the given
@@ -830,6 +878,37 @@ mod tests {
         assert!(t.is_contiguous());
         // Storage bytes should be 12 * 4 = 48.
         assert_eq!(t.storage().byte_len(), 48);
+    }
+
+    #[test]
+    fn to_vec_round_trips_from_slice() {
+        let v = vec![1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let t = Tensor::from_slice(&v, vec![2, 3]).unwrap();
+        assert_eq!(t.to_vec::<f32>().unwrap(), v);
+    }
+
+    #[test]
+    fn to_vec_reads_narrowed_and_strided_views() {
+        // A narrowed view must read back exactly its own elements.
+        // kiln flags an offset view as non-contiguous, so to_vec's
+        // contiguous() pass materializes it — this verifies that path
+        // produces the right logical-order elements, not a slice of the
+        // parent's backing buffer.
+        let v: Vec<f32> = (0..12).map(|x| x as f32).collect();
+        let t = Tensor::from_slice(&v, vec![3, 4]).unwrap();
+        // row narrow: shape [1,4] = logical elements 4..8
+        let row1 = t.narrow(0, 1, 1).unwrap();
+        assert_eq!(row1.to_vec::<f32>().unwrap(), vec![4.0, 5.0, 6.0, 7.0]);
+        // column narrow: shape [3,1], strided (definitely non-contiguous)
+        // = elements 0, 4, 8
+        let col0 = t.narrow(1, 0, 1).unwrap();
+        assert_eq!(col0.to_vec::<f32>().unwrap(), vec![0.0, 4.0, 8.0]);
+    }
+
+    #[test]
+    fn to_vec_dtype_mismatch_errors() {
+        let t = Tensor::zeros_cpu(vec![2], DType::F32);
+        assert!(t.to_vec::<u32>().is_err());
     }
 
     #[test]
