@@ -214,3 +214,18 @@ This proves the toolchain (kt twin-constructor pattern, two-step device placemen
 - **Coupling rule:** the `cd_types` alias flip and the `GpuWeights` field flip (Phase 1) **must land together or in adjacent PRs** — a mismatch (kt `GpuWeights` fed into a candle `cd_types::Tensor` signature) won't compile. Plan Phase 1 to include the `cd_types.rs` alias swap and the `training_queue.rs:962` one-liner in the same change set.
 
 **Net:** kiln-server is effectively free; kiln-train's real cost is the `cd_types` alias flip (which cascades cleanly) plus ~30 mechanical `Device`/`DType` test-site renames. Neither crate gates the cuda-first candle drop beyond the Phase-1 `GpuWeights` lift they already depend on.
+---
+
+## 6. Reality-check addendum (post-Phase-0, verified against source `2ea7f1cd`)
+
+Two corrections from validating the plan against the actual source — material to execution order:
+
+### 6.1 `forward.rs` uses a bare `Tensor` import alias, not `candle_core::Tensor` qualified
+`forward.rs:25` is `use candle_core::{backend::BackendDevice, D, DType, Device, Tensor, Var};`. So the ~1,240 bare `Tensor` occurrences and ~847 `candle`-qualified occurrences (the latter includes comments) ARE the candle surface — **not ~3,862**. The map's 3,862 conflated the bare-`Tensor` token count with candle refs. Consequence for migration: forward.rs is a **contained per-file flip** — change the import to `kiln_tensor::{Tensor, ...}` (or `use kiln_tensor::Tensor;`), then fix the now-broken op-call *syntax* (candle methods → kt free-fns: `.to_dtype`→`ops::cast`, `.index_select(idx,d)`→`ops::index_select(t,d,idx)`, `softmax(D::Minus1)`→`softmax_last_dim`, etc.). The op SEMANTICS map 1:1 (substrate complete); the churn is syntactic + the broadcast/keepdim gotchas already cataloged in §3 Phase 6.
+
+### 6.2 Phase 1 (GpuWeights) and Phase 6 (forward.rs) are COUPLED via bare `Tensor`
+`GpuWeights`/`GpuLayerWeights`/… fields are bare `Tensor` (= candle), and forward.rs does candle ops directly on them. Flipping the struct fields to `kiln_tensor::Tensor` therefore **breaks every forward.rs op on them at compile time** — Phase 1 cannot land standalone-compilable without either (a) doing forward.rs in the same change (the big core flip — GpuWeights + forward.rs together, the XXL atomic-ish lift), or (b) flipping the fields to kt + wrapping each forward.rs field-read in a candle-bridge (`kt_tensor_to_candle_cuda_borrow`) so forward.rs stays candle-typed until its own flip — hundreds of temporary bridge sites, messy but incrementally compilable.
+
+**Revised recommendation:** treat **GpuWeights + forward.rs as one migration unit** (the core), decomposed into compilable sub-steps by *kt-twin accessor* rather than per-field bridges: keep candle fields, add `*_kt()` accessor methods (precedent: `device_kt`/`from_model_weights_kt`/`model_forward_kt` already exist) that return kt views, migrate forward.rs region-by-region (embedding/lm-head → MLP → GQA attn → GDN) to consume the `_kt()` accessors, and only flip the underlying fields to kt once the last candle consumer is gone. The backends (metal 1298 / vulkan 480 / cuda 289 — these DO use `candle_core::` qualified heavily, unlike forward.rs) flip after the trait (Phase 2), independently.
+
+**Next concrete increment:** begin the forward.rs region migration at the **embedding + lm_head** region (smallest, most upstream, already has `model_forward_kt`/`from_model_weights_kt` kt scaffolding to build on), behind `_kt()` accessors, validated on a CUDA pod against the candle path. Then MLP/SwiGLU, then GQA attention, then GDN (heaviest).
