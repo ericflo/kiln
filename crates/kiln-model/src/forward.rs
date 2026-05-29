@@ -16724,7 +16724,7 @@ fn gated_deltanet_forward_decode_if(
                 // chained id on every input.
                 let v_cast = v.to_dtype(input_dtype)?;
                 #[cfg(feature = "cuda")]
-                let v_cast = match crate::tape_forward::try_tape_cast_cuda(v, &v_cast)? {
+                let v_cast = match crate::tape_forward::try_tape_cast_cuda(&v, &v_cast)? {
                     Some(t) => t,
                     None => v_cast,
                 };
