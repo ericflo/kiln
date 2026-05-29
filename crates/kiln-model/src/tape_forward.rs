@@ -1426,12 +1426,27 @@ pub fn try_tape_lora_linear_cuda(
     if !tape_forward_enabled() || !tape_lora_add_enabled() {
         return Ok(None);
     }
+    let cp4_dbg = std::env::var("KILN_CP4_DEBUG").is_ok();
+    if cp4_dbg {
+        eprintln!(
+            "[CP4-DEBUG] lora_linear CALLED lora={} x={:?}/{:?} w={:?}/{:?} scope_active={}",
+            lora.is_some(),
+            x.dims(),
+            x.dtype(),
+            weight_t.dims(),
+            weight_t.dtype(),
+            kiln_kt_bridge::tape_bridge::bridge_scope_active(),
+        );
+    }
 
     // Device gate: CUDA-only (the bridge's `kt_tensor_from_candle_cuda_*`
     // helpers are CUDA-only). Match the existing tape adapters.
     if !matches!(x.device(), candle_core::Device::Cuda(_))
         || !matches!(weight_t.device(), candle_core::Device::Cuda(_))
     {
+        if cp4_dbg {
+            eprintln!("[CP4-DEBUG] lora_linear SKIP device");
+        }
         return Ok(None);
     }
     // Dtype gate: only BF16 / F32 today, and all matching (kt matmul requires
@@ -1636,6 +1651,13 @@ pub fn try_tape_lora_linear_cuda(
     kiln_kt_bridge::tape_bridge::register_output_mapping(out_kt.id(), out.id());
     kiln_kt_bridge::tape_bridge::retain_output_for_chaining(&out_kt, out.id());
 
+    if cp4_dbg {
+        eprintln!(
+            "[CP4-DEBUG] lora_linear FIRED lora={} out_id={} (retained for chaining)",
+            lora.is_some(),
+            out.id().as_raw(),
+        );
+    }
     Ok(Some(out))
 }
 
