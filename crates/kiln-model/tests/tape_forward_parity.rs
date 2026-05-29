@@ -2998,16 +2998,16 @@ fn tape_gdn_recurrent_records_node_and_emits_5_grads() {
             .unwrap_or_else(|| panic!("grad {i} present"));
         kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(kt).expect("grad -> candle")
     };
-    let dq = fetch(0);
-    let dk = fetch(1);
-    let dv = fetch(2);
-    let dbeta = fetch(3);
-    let dg = fetch(4);
-    assert_eq!(dq.shape().dims(), &[b, nv, t, dk], "dq shape == q");
-    assert_eq!(dk.shape().dims(), &[b, nv, t, dk], "dk shape == k");
-    assert_eq!(dv.shape().dims(), &[b, nv, t, dv], "dv shape == v");
-    assert_eq!(dbeta.shape().dims(), &[b, nv, t], "dbeta shape == beta");
-    assert_eq!(dg.shape().dims(), &[b, nv, t], "dg shape == g");
+    let g_dq = fetch(0);
+    let g_dk = fetch(1);
+    let g_dv = fetch(2);
+    let g_dbeta = fetch(3);
+    let g_dg = fetch(4);
+    assert_eq!(g_dq.shape().dims(), &[b, nv, t, dk], "dq shape == q");
+    assert_eq!(g_dk.shape().dims(), &[b, nv, t, dk], "dk shape == k");
+    assert_eq!(g_dv.shape().dims(), &[b, nv, t, dv], "dv shape == v");
+    assert_eq!(g_dbeta.shape().dims(), &[b, nv, t], "dbeta shape == beta");
+    assert_eq!(g_dg.shape().dims(), &[b, nv, t], "dg shape == g");
 
     let max_abs = |tt: &Tensor| {
         tt.to_dtype(DType::F32)
@@ -3032,11 +3032,11 @@ fn tape_gdn_recurrent_records_node_and_emits_5_grads() {
             .all(|x| x.is_finite())
     };
     for (name, t) in [
-        ("dq", &dq),
-        ("dk", &dk),
-        ("dv", &dv),
-        ("dbeta", &dbeta),
-        ("dg", &dg),
+        ("dq", &g_dq),
+        ("dk", &g_dk),
+        ("dv", &g_dv),
+        ("dbeta", &g_dbeta),
+        ("dg", &g_dg),
     ] {
         assert!(finite(t), "{name} has non-finite entries");
         assert!(
