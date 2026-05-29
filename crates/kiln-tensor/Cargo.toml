@@ -96,12 +96,16 @@ kiln-vulkan-kernel = { path = "../kiln-vulkan-kernel", optional = true }
 
 [features]
 default = []
-# Phase 1.6 — CUDA storage. The `cuda` feature pulls candle-core (cuda)
-# as the cudarc vendor; we reach the driver types as
-# `candle_core::cuda_backend::cudarc::driver::*` matching the pattern in
-# kiln-conv1d-kernel / kiln-flash-attn / kiln-model::cuda_graph. This is
-# the SINGLE candle hook in kiln-tensor; Phase 7 replaces it.
-cuda = ["dep:candle-core", "candle-core?/cuda", "dep:cudarc", "dep:kiln-blas"]
+# CUDA storage. #1082 CP-1 CLOSED: the `cuda` feature is candle-free.
+# The driver types come from `cudarc::driver::*` directly (`dep:cudarc`),
+# and the cublasLt matmul layer from candle-free `kiln-blas`. The former
+# `candle_core::cuda_backend::cudarc::driver::*` re-export hook was the
+# last candle dependency in kiln-tensor's CUDA path; with `CudaStorage`/
+# `CudaAllocator` holding `Arc<CudaContext>` (not `Arc<CudaDevice>`) and
+# the test helper moved to `primary_cuda_context`, nothing under
+# `--features cuda` touches candle. (candle-core stays an optional dep
+# below for the `metal` feature only, until CP-2 closes that path.)
+cuda = ["dep:cudarc", "dep:kiln-blas"]
 # Reserved for Phase 1.7. Same pattern as `cuda`.
 #
 # `objc2` + `objc2-metal` add the direct Metal protocol-object substrate

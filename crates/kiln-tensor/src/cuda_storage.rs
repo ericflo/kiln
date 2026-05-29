@@ -1977,39 +1977,34 @@ pub fn cuda_scatter_add_dim0(
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[cfg(feature = "cuda")]
-    use candle_core::cuda_backend::CudaDevice;
-
     fn cuda_test_enabled() -> bool {
         std::env::var("KILN_TENSOR_CUDA_TEST").ok().as_deref() == Some("1")
     }
 
-    /// Acquire a primary candle `CudaDevice` for tests that still
-    /// need to drive `dev.cuda_stream().context()` directly (the
-    /// `cuda_is_finite_integer_dtype_is_vacuously_true` test
-    /// allocates a `CudaStorage::zeros_ctx` against the candle
-    /// stream's context). New tests should call
-    /// `primary_cuda_context(0)` directly instead.
+    /// Acquire a primary cudarc [`CudaContext`] for tests that need to
+    /// allocate device storage directly.
+    ///
+    /// #1082 CP-1: candle-free. The context comes from
+    /// [`primary_cuda_context`], not a candle `Device::new_cuda`
+    /// round-trip, so this test module compiles with `candle-core`
+    /// dropped from the crate's `cuda` feature.
     ///
     /// Returns `None` if `KILN_TENSOR_CUDA_TEST` is unset OR the host
     /// has no visible CUDA device.
-    fn maybe_cuda_device() -> Option<Arc<CudaDevice>> {
+    fn maybe_cuda_ctx() -> Option<Arc<CudaContext>> {
         if !cuda_test_enabled() {
             return None;
         }
-        match candle_core::Device::new_cuda(0).ok()? {
-            candle_core::Device::Cuda(d) => Some(Arc::new(d)),
-            _ => None,
-        }
+        primary_cuda_context(0).ok()
     }
 
     #[test]
     fn zeros_round_sizes() {
-        let Some(dev) = maybe_cuda_device() else {
+        let Some(dev) = maybe_cuda_ctx() else {
             eprintln!("skip: KILN_TENSOR_CUDA_TEST unset or no GPU");
             return;
         };
-        let ctx = dev.cuda_stream().context().clone();
+        let ctx = dev.clone();
         let storage = CudaStorage::zeros_ctx(&ctx, 0, DType::BF16, 64).unwrap();
         assert_eq!(storage.device(), Device::Cuda(0));
         assert_eq!(storage.dtype(), DType::BF16);
@@ -2021,19 +2016,19 @@ mod tests {
 
     #[test]
     fn from_slice_validates_alignment() {
-        let Some(dev) = maybe_cuda_device() else {
+        let Some(dev) = maybe_cuda_ctx() else {
             eprintln!("skip: KILN_TENSOR_CUDA_TEST unset or no GPU");
             return;
         };
-        let ctx = dev.cuda_stream().context().clone();
-        let slice = dev.alloc_zeros::<u8>(17).unwrap();
+        let ctx = dev.clone();
+        let slice = dev.default_stream().alloc_zeros::<u8>(17).unwrap();
         let err = CudaStorage::from_slice_ctx(&ctx, 0, DType::F32, slice).unwrap_err();
         assert!(err.to_string().contains("not a multiple"));
     }
 
     #[test]
     fn cuda_zeros_returns_arc_storage() {
-        let Some(_dev) = maybe_cuda_device() else {
+        let Some(_dev) = maybe_cuda_ctx() else {
             eprintln!("skip: KILN_TENSOR_CUDA_TEST unset or no GPU");
             return;
         };
@@ -2052,14 +2047,14 @@ mod tests {
     // --- cuda_is_finite (#1082 Phase 9 substrate) -------------------
 
     /// Build a CUDA F32 tensor from a host slice via host_to_cuda_copy.
-    fn cuda_f32_from_slice(_dev: Arc<CudaDevice>, values: &[f32]) -> crate::Tensor {
+    fn cuda_f32_from_slice(_ctx: Arc<CudaContext>, values: &[f32]) -> crate::Tensor {
         let cpu = crate::Tensor::from_slice(values, vec![values.len()]).unwrap();
         crate::host_to_cuda_copy(&cpu, 0).unwrap()
     }
 
     #[test]
     fn cuda_is_finite_all_finite_f32_returns_true() {
-        let Some(dev) = maybe_cuda_device() else {
+        let Some(dev) = maybe_cuda_ctx() else {
             eprintln!("skip: KILN_TENSOR_CUDA_TEST unset or no GPU");
             return;
         };
@@ -2071,7 +2066,7 @@ mod tests {
 
     #[test]
     fn cuda_is_finite_nan_f32_returns_false() {
-        let Some(dev) = maybe_cuda_device() else {
+        let Some(dev) = maybe_cuda_ctx() else {
             eprintln!("skip: KILN_TENSOR_CUDA_TEST unset or no GPU");
             return;
         };
@@ -2082,7 +2077,7 @@ mod tests {
 
     #[test]
     fn cuda_is_finite_pos_inf_f32_returns_false() {
-        let Some(dev) = maybe_cuda_device() else {
+        let Some(dev) = maybe_cuda_ctx() else {
             eprintln!("skip: KILN_TENSOR_CUDA_TEST unset or no GPU");
             return;
         };
@@ -2092,7 +2087,7 @@ mod tests {
 
     #[test]
     fn cuda_is_finite_neg_inf_f32_returns_false() {
-        let Some(dev) = maybe_cuda_device() else {
+        let Some(dev) = maybe_cuda_ctx() else {
             eprintln!("skip: KILN_TENSOR_CUDA_TEST unset or no GPU");
             return;
         };
@@ -2102,7 +2097,7 @@ mod tests {
 
     #[test]
     fn cuda_is_finite_bf16_nan_returns_false() {
-        let Some(dev) = maybe_cuda_device() else {
+        let Some(dev) = maybe_cuda_ctx() else {
             eprintln!("skip: KILN_TENSOR_CUDA_TEST unset or no GPU");
             return;
         };
@@ -2124,7 +2119,7 @@ mod tests {
 
     #[test]
     fn cuda_is_finite_f16_inf_returns_false() {
-        let Some(dev) = maybe_cuda_device() else {
+        let Some(dev) = maybe_cuda_ctx() else {
             eprintln!("skip: KILN_TENSOR_CUDA_TEST unset or no GPU");
             return;
         };
@@ -2139,13 +2134,13 @@ mod tests {
 
     #[test]
     fn cuda_is_finite_integer_dtype_is_vacuously_true() {
-        let Some(dev) = maybe_cuda_device() else {
+        let Some(dev) = maybe_cuda_ctx() else {
             eprintln!("skip: KILN_TENSOR_CUDA_TEST unset or no GPU");
             return;
         };
         // Build a CUDA U32 storage with a couple values; cuda_is_finite
         // short-circuits before touching the kernel.
-        let ctx = dev.cuda_stream().context().clone();
+        let ctx = dev.clone();
         let storage = CudaStorage::zeros_ctx(&ctx, 0, DType::U32, 4).unwrap();
         let storage_arc: crate::Storage = Arc::new(storage);
         let t = crate::Tensor::from_parts(
@@ -2160,7 +2155,7 @@ mod tests {
 
     #[test]
     fn cuda_is_finite_non_contiguous_uses_contig_path() {
-        let Some(dev) = maybe_cuda_device() else {
+        let Some(dev) = maybe_cuda_ctx() else {
             eprintln!("skip: KILN_TENSOR_CUDA_TEST unset or no GPU");
             return;
         };
