@@ -3555,3 +3555,177 @@ fn tape_transpose_records_node_and_passes_grad_through_transposed() {
         std::env::remove_var("KILN_USE_TAPE_FORWARD");
     }
 }
+
+// ----------------------------------------------------------------------
+// CP-4 SDPA-fallback attention tape coverage (#1082) —
+// `try_tape_sdpa_fallback_cuda` + `SdpaBackward`.
+//
+// `try_tape_flash_attn_cuda` only fires on the flash path
+// (head_dim ∈ {128, 256}). At every other head_dim — notably the tiny
+// synthetic test model's head_dim = 16 — the GQA full-attention block runs
+// the naive SDPA fallback (`forward::gqa_attention_core_prefill`'s non-flash
+// path). For tape-authoritative training to reach the GQA-block q/k/v
+// projection LoRA Vars on THAT path, the fallback must record onto the kt
+// Tape too. `SdpaBackward` wraps the CPU-parity-tested candle composite
+// `sdpa_fallback_backward_no_grad` (forward.rs), so its NUMERICS already
+// inherit that test's coverage. This test gates the TAPE WIRING
+// deterministically (load-robust per the kt-substrate thread-safety note — no
+// cross-call numeric oracle): exactly one node with 3 inputs (q, k, v); the
+// walk routes dq/dk/dv to them with the correct shapes (dk/dv GQA-collapsed to
+// num_kv_heads); all grads nonzero (the "0 LoRA grads" disconnected-island
+// failure mode CP-4 closes) and finite.
+// ----------------------------------------------------------------------
+
+#[test]
+fn tape_sdpa_fallback_records_node_and_emits_qkv_grads() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    let device = match cuda_device() {
+        Some(d) => d,
+        None => {
+            eprintln!("tape_sdpa_fallback node + qkv grads: no CUDA device — skipping");
+            return;
+        }
+    };
+
+    // GQA: 4 query heads, 2 KV heads (groups=2), head_dim=16 (the non-flash
+    // path — flash only fires at head_dim ∈ {128,256}). b=1, t=6. Head-FIRST,
+    // PRE-GQA-expand layout: q = [b, nq, t, hd], k/v = [b, nkv, t, hd]. The
+    // recorded output is the head-FIRST attention output [b, nq, t, hd].
+    let (b, nq, nkv, t, hd) = (1usize, 4usize, 2usize, 6usize, 16usize);
+    let q = det_f32(&device, &[b, nq, t, hd], 0.10, 0.011);
+    let k = det_f32(&device, &[b, nkv, t, hd], 0.07, 0.009);
+    let v = det_f32(&device, &[b, nkv, t, hd], 0.05, 0.013);
+    // The production forward already computed the attention output; build a
+    // same-shape stand-in (this is a structural wiring gate, not a numeric
+    // oracle — the recorded backward derives the adjoint from the saved
+    // q/k/v, not from `out`).
+    let out = det_f32(&device, &[b, nq, t, hd], 0.03, 0.004);
+
+    unsafe {
+        std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
+        std::env::set_var("KILN_USE_TAPE_SDPA", "1");
+    }
+
+    // Record inside a tape scope. One SdpaBackward node with inputs [q, k, v].
+    let (res, tape) = kiln_model::tape_forward::with_thread_local_tape(|| {
+        kiln_model::tape_forward::try_tape_sdpa_fallback_cuda(&q, &k, &v, hd, &out)
+    });
+    let returned = res
+        .expect("try_tape_sdpa_fallback_cuda ok")
+        .expect("returned Some(out) — gate + scope both on");
+    assert_eq!(returned.shape().dims(), &[b, nq, t, hd], "sdpa out shape");
+    assert!(returned.device().is_cuda(), "out stays on CUDA");
+
+    assert_eq!(
+        tape.len(),
+        1,
+        "sdpa fallback must record exactly one tape node (got {}). Empty means \
+         the adapter fell through (gate off / envelope rejected); >1 means an \
+         over-record bug.",
+        tape.len()
+    );
+    let node = &tape.nodes()[0];
+    let out_id = node.output_id;
+    let input_ids = node.input_ids.clone();
+    assert_eq!(
+        input_ids.len(),
+        3,
+        "sdpa fallback records exactly three inputs (q, k, v); got {}",
+        input_ids.len()
+    );
+
+    // Backward walk: seed grad shaped like out.
+    let seed = det_f32(&device, &[b, nq, t, hd], 0.3, -0.009);
+    let seed_kt =
+        kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&seed).expect("seed kt borrow");
+    let mut seeds = HashMap::new();
+    seeds.insert(out_id, seed_kt);
+    let grads = tape
+        .backward_with_seeds(seeds, |a, b| kiln_tensor::ops::add(a, b))
+        .expect("sdpa fallback tape backward walk");
+
+    // Input order is [q, k, v]; SdpaBackward returns [dq, dk, dv].
+    let fetch = |i: usize| -> Tensor {
+        let kt = grads
+            .get(input_ids[i])
+            .unwrap_or_else(|| panic!("grad {i} present"));
+        kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(kt).expect("grad -> candle")
+    };
+    let dq = fetch(0);
+    let dk = fetch(1);
+    let dv = fetch(2);
+
+    // dq keeps the query-head count; dk/dv are GQA-collapsed to num_kv_heads.
+    assert_eq!(dq.shape().dims(), &[b, nq, t, hd], "dq shape == q");
+    assert_eq!(
+        dk.shape().dims(),
+        &[b, nkv, t, hd],
+        "dk shape == k (GQA-collapsed to num_kv_heads)"
+    );
+    assert_eq!(
+        dv.shape().dims(),
+        &[b, nkv, t, hd],
+        "dv shape == v (GQA-collapsed to num_kv_heads)"
+    );
+
+    // The exact CP-4 failure mode was "0 grads". Assert nonzero + finite. No
+    // cross-call numeric oracle here: the kt substrate is not thread-safe under
+    // parallel test load, so a re-derived oracle is unreliable under the full
+    // suite. The VALUES of sdpa_fallback_backward_no_grad are covered by its
+    // own isolated CPU candle-autograd-parity test in forward.rs. This test
+    // gates the TAPE INTEGRATION: node recorded with q/k/v inputs, the walk
+    // routes dq/dk/dv to them, dk/dv GQA-collapsed to num_kv_heads, every grad
+    // nonzero (the "0 LoRA grads" disconnected-island failure CP-4 closes).
+    for (name, tt) in [("dq", &dq), ("dk", &dk), ("dv", &dv)] {
+        assert!(cuda_all_finite(tt), "{name} has non-finite entries");
+        assert!(
+            cuda_max_abs(tt) > 1e-4,
+            "{name} is essentially zero — tape backward not reaching the input"
+        );
+    }
+
+    unsafe {
+        std::env::remove_var("KILN_USE_TAPE_FORWARD");
+        std::env::remove_var("KILN_USE_TAPE_SDPA");
+    }
+}
+
+#[test]
+fn tape_sdpa_fallback_short_circuits_without_active_scope() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    let device = match cuda_device() {
+        Some(d) => d,
+        None => {
+            eprintln!("tape_sdpa_fallback short-circuit: no CUDA device — skipping");
+            return;
+        }
+    };
+    let (b, nq, nkv, t, hd) = (1usize, 4usize, 2usize, 6usize, 16usize);
+    let q = det_f32(&device, &[b, nq, t, hd], 0.10, 0.011);
+    let k = det_f32(&device, &[b, nkv, t, hd], 0.07, 0.009);
+    let v = det_f32(&device, &[b, nkv, t, hd], 0.05, 0.013);
+    let out = det_f32(&device, &[b, nq, t, hd], 0.03, 0.004);
+
+    unsafe {
+        std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
+        std::env::set_var("KILN_USE_TAPE_SDPA", "1");
+    }
+
+    // Called OUTSIDE a `with_thread_local_tape` scope: the gate is on but there
+    // is no active tape, so the adapter must return None cleanly (caller falls
+    // through to the plain candle transpose+reshape).
+    let res = kiln_model::tape_forward::try_tape_sdpa_fallback_cuda(&q, &k, &v, hd, &out)
+        .expect("adapter returns Ok with no active tape");
+    assert!(
+        res.is_none(),
+        "sdpa fallback adapter must return None with no active tape scope, \
+         not record a dangling node"
+    );
+
+    unsafe {
+        std::env::remove_var("KILN_USE_TAPE_FORWARD");
+        std::env::remove_var("KILN_USE_TAPE_SDPA");
+    }
+}

@@ -14248,6 +14248,189 @@ pub fn gdn_l2_norm_scale_backward_no_grad(
     Ok(dx.to_dtype(x_dtype)?)
 }
 
+/// Per-input gradients of the naive scaled-dot-product-attention fallback
+/// ([`gqa_attention_core_prefill`]'s non-flash path), returned by
+/// [`sdpa_fallback_backward_no_grad`].
+///
+/// All three grads carry the inputs' dtype. `dq` keeps the query-head count
+/// (`[B, nq, T, hd]`); `dk`/`dv` are GQA-collapsed back to the KV-head count
+/// (`[B, nkv, T, hd]`) so they match the pre-expand `k`/`v` `Var` layouts.
+pub struct SdpaFallbackBackwardGrads {
+    pub dq: Tensor,
+    pub dk: Tensor,
+    pub dv: Tensor,
+}
+
+/// Candle-composite analytic backward for the naive SDPA fallback that
+/// [`gqa_attention_core_prefill`] runs when flash-attention is unavailable
+/// (e.g. `head_dim` ∉ {128, 256}, as on the tiny synthetic test model with
+/// `head_dim = 16`). Device-agnostic (runs in candle F32; works on CUDA
+/// without a host round-trip), so the kt-tape
+/// [`crate::tape_forward::SdpaBackward`] op can wrap it the same way
+/// [`crate::tape_forward::GdnRecurrentBackward`] wraps
+/// [`gdn_recurrent_backward_no_grad`].
+///
+/// # Inputs
+///
+/// `q`/`k`/`v` are the **pre-attention, head-FIRST** tensors the fallback
+/// consumes: `q = [B, nq, T, hd]`, `k`/`v = [B, nkv, T, hd]` (the
+/// `prepared.{q,k,v}.transpose(1,2)` layout — BEFORE the GQA expand). `scale`
+/// is the dot-product scale `1/sqrt(head_dim)` (the forward divides scores by
+/// `sqrt(head_dim)`; here we pass the reciprocal as a multiplier). `causal`
+/// selects the strict-upper-triangular mask the forward applies via
+/// [`apply_causal_mask_with_offset`] (offset 0, full prefill).
+///
+/// # Math (head-FIRST, GQA-expanded; per `[B, nq, T, *]` block)
+///
+/// Forward:
+/// ```text
+/// scores = (q @ kᵀ) * scale            [B, nq, T, T]
+/// scores[..,i,j] = -inf   if causal && j > i
+/// p      = softmax(scores, last)        [B, nq, T, T]
+/// out    = p @ v                        [B, nq, T, hd]
+/// ```
+/// Backward (`g = grad_out`, `[B, nq, T, hd]`):
+/// ```text
+/// dv_exp  = pᵀ @ g                       [B, nq, T, hd]
+/// dp      = g @ vᵀ                       [B, nq, T, T]
+/// dscores = p * (dp - Σ_last(p * dp))    (softmax adjoint, masked rows ⇒ 0)
+/// dscores[..,i,j] = 0     if causal && j > i
+/// dq      = (dscores  @ k) * scale       [B, nq, T, hd]
+/// dk_exp  = (dscoresᵀ @ q) * scale       [B, nq, T, hd]
+/// ```
+/// `dk_exp`/`dv_exp` are then GQA-collapsed from `nq` back to `nkv` by summing
+/// each group of `nq/nkv` query heads (mirroring the forward's
+/// `unsqueeze(2).expand(...).reshape(...)` broadcast of `k`/`v`).
+///
+/// The explicit `dscores` re-mask is belt-and-suspenders: `softmax(-inf) ≈ 0`
+/// already zeroes the masked column in `p` (and hence its `dscores`
+/// contribution), but re-masking guarantees exactness regardless of any
+/// finite-`-inf` softmax stabilisation. Outputs are cast back to the inputs'
+/// dtypes so they match the `Var` layouts.
+pub fn sdpa_fallback_backward_no_grad(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    scale: f64,
+    causal: bool,
+    grad_out: &Tensor,
+) -> Result<SdpaFallbackBackwardGrads> {
+    let q_dtype = q.dtype();
+    let k_dtype = k.dtype();
+    let v_dtype = v.dtype();
+
+    let (batch, num_heads, seq_len, head_dim) = q.dims4()?;
+    let num_kv_heads = k.dim(1)?;
+    if num_kv_heads == 0 || num_heads % num_kv_heads != 0 {
+        anyhow::bail!(
+            "sdpa_fallback_backward_no_grad: invalid GQA num_heads={num_heads} \
+             num_kv_heads={num_kv_heads}"
+        );
+    }
+    let gqa_ratio = num_heads / num_kv_heads;
+
+    let q_f32 = q.to_dtype(DType::F32)?;
+    let k_f32 = k.to_dtype(DType::F32)?;
+    let v_f32 = v.to_dtype(DType::F32)?;
+    let g_f32 = grad_out.to_dtype(DType::F32)?;
+
+    // GQA-expand k/v from num_kv_heads -> num_heads, exactly mirroring the
+    // forward's `unsqueeze(2).expand(...).contiguous().reshape(...)`.
+    let expand_heads = |t: &Tensor, last: usize| -> Result<Tensor> {
+        if gqa_ratio > 1 {
+            Ok(t.unsqueeze(2)?
+                .expand(&[batch, num_kv_heads, gqa_ratio, seq_len, last])?
+                .contiguous()?
+                .reshape((batch, num_heads, seq_len, last))?)
+        } else {
+            Ok(t.contiguous()?)
+        }
+    };
+    let k_exp = expand_heads(&k_f32, head_dim)?; // [B, nq, T, hd]
+    let v_exp = expand_heads(&v_f32, head_dim)?; // [B, nq, T, hd]
+
+    // Recompute the forward scores -> probabilities (the backward needs `p`).
+    // scores = (q @ kᵀ) * scale; causal-masked; p = softmax(last).
+    let scores = q_f32.contiguous()?.broadcast_matmul(&k_exp.t()?)?; // [B, nq, T, T]
+    let scores = scores.affine(scale, 0.0)?;
+    let scores = if causal {
+        apply_causal_mask_with_offset(&scores, seq_len, seq_len, 0)?
+    } else {
+        scores
+    };
+    // Numerically-stable softmax over the last axis (max-shift), matching the
+    // forward's `cuda_softmax_last_dim` composite. Kept inline (rather than
+    // `candle_nn::ops::softmax_last_dim`) so this stays a self-contained
+    // device-agnostic candle-F32 composite.
+    let max_val = scores.max_keepdim(LAST_DIM)?; // [B, nq, T, 1]
+    let exp_shifted = scores.broadcast_sub(&max_val)?.exp()?;
+    let sum_exp = exp_shifted.sum_keepdim(LAST_DIM)?; // [B, nq, T, 1]
+    let p = exp_shifted.broadcast_div(&sum_exp)?; // [B, nq, T, T]
+
+    // dv_exp = pᵀ @ g. p is [B, nq, T, T] (T_q x T_k), g is [B, nq, T, hd];
+    // pᵀ over the (T_q, T_k) axes gives [B, nq, T_k, T_q] @ [B, nq, T_q, hd].
+    let p_c = p.contiguous()?;
+    let g_c = g_f32.contiguous()?;
+    let dv_exp = p_c.transpose(2, 3)?.contiguous()?.broadcast_matmul(&g_c)?; // [B, nq, T, hd]
+
+    // dp = g @ vᵀ. [B, nq, T, hd] @ [B, nq, hd, T] -> [B, nq, T_q, T_k].
+    let dp = g_c.broadcast_matmul(&v_exp.t()?)?; // [B, nq, T, T]
+
+    // Softmax adjoint: dscores = p * (dp - Σ_last(p * dp)).
+    let sum_pdp = (&p_c * &dp)?.sum_keepdim(LAST_DIM)?; // [B, nq, T, 1]
+    let dscores = (&p_c * &dp.broadcast_sub(&sum_pdp)?)?; // [B, nq, T, T]
+
+    // Re-zero the strictly-future (masked) score positions so no gradient
+    // leaks across the causal boundary (exactness; softmax already ≈0 there).
+    let dscores = if causal {
+        let device = dscores.device();
+        // 1.0 where allowed (j <= i), 0.0 where masked (j > i).
+        let keep: Vec<f32> = (0..seq_len)
+            .flat_map(|i| (0..seq_len).map(move |j| if j <= i { 1.0f32 } else { 0.0f32 }))
+            .collect();
+        let keep = Tensor::new(keep, device)?.reshape((1, 1, seq_len, seq_len))?;
+        dscores.broadcast_mul(&keep)?
+    } else {
+        dscores
+    };
+    let dscores = dscores.contiguous()?;
+
+    // dq = (dscores @ k) * scale. [B, nq, T, T] @ [B, nq, T, hd].
+    let dq = dscores
+        .broadcast_matmul(&k_exp)?
+        .affine(scale, 0.0)?; // [B, nq, T, hd]
+
+    // dk_exp = (dscoresᵀ @ q) * scale. dscoresᵀ over (T_q, T_k):
+    // [B, nq, T_k, T_q] @ [B, nq, T_q, hd] -> [B, nq, T_k, hd].
+    let dk_exp = dscores
+        .transpose(2, 3)?
+        .contiguous()?
+        .broadcast_matmul(&q_f32.contiguous()?)?
+        .affine(scale, 0.0)?; // [B, nq, T, hd]
+
+    // GQA-collapse dk_exp / dv_exp from num_heads back to num_kv_heads by
+    // summing each group of `gqa_ratio` query heads (the adjoint of the
+    // forward's head broadcast). Reshape [B, nkv, groups, T, hd] then sum the
+    // group axis.
+    let collapse = |dexp: &Tensor| -> Result<Tensor> {
+        if gqa_ratio > 1 {
+            let grouped =
+                dexp.reshape((batch, num_kv_heads, gqa_ratio, seq_len, head_dim))?;
+            Ok(grouped.sum(2)?) // [B, nkv, T, hd]
+        } else {
+            Ok(dexp.clone())
+        }
+    };
+    let dk = collapse(&dk_exp)?;
+    let dv = collapse(&dv_exp)?;
+
+    Ok(SdpaFallbackBackwardGrads {
+        dq: dq.to_dtype(q_dtype)?,
+        dk: dk.to_dtype(k_dtype)?,
+        dv: dv.to_dtype(v_dtype)?,
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 fn gdn_chunk_prep_f32(
     g: &Tensor,
@@ -16879,25 +17062,29 @@ pub fn gqa_attention_core_prefill(
         }
     }
 
+    // Head-FIRST, PRE-GQA-expand q/k/v ([B, nq, T, hd] / [B, nkv, T, hd]):
+    // the naive SDPA fallback consumes these. Keep references to them for the
+    // #1082 CP-4 kt-Tape SDPA adapter below (it derives the analytic backward
+    // from these pre-expand tensors and GQA-collapses dk/dv back to nkv).
     let q = prepared.q.transpose(1, 2)?.contiguous()?;
-    let k = prepared.k.transpose(1, 2)?.contiguous()?;
-    let v = prepared.v.transpose(1, 2)?.contiguous()?;
+    let k_he = prepared.k.transpose(1, 2)?.contiguous()?;
+    let v_he = prepared.v.transpose(1, 2)?.contiguous()?;
     let gqa_ratio = num_heads / num_kv_heads;
-    let batch = k.dim(0)?;
+    let batch = k_he.dim(0)?;
     let (k, v) = if gqa_ratio > 1 {
-        let k = k
+        let k = k_he
             .unsqueeze(2)?
             .expand(&[batch, num_kv_heads, gqa_ratio, seq_len, head_dim])?
             .contiguous()?
             .reshape((batch, num_heads, seq_len, head_dim))?;
-        let v = v
+        let v = v_he
             .unsqueeze(2)?
             .expand(&[batch, num_kv_heads, gqa_ratio, seq_len, head_dim])?
             .contiguous()?
             .reshape((batch, num_heads, seq_len, head_dim))?;
         (k, v)
     } else {
-        (k.contiguous()?, v.contiguous()?)
+        (k_he.contiguous()?, v_he.contiguous()?)
     };
 
     let scale = (head_dim as f64).sqrt();
@@ -16905,7 +17092,39 @@ pub fn gqa_attention_core_prefill(
     let attn_scores = (attn_scores / scale)?;
     let attn_scores = apply_causal_mask_with_offset(&attn_scores, seq_len, seq_len, 0)?;
     let attn_weights_softmax = cuda_softmax_last_dim(&attn_scores)?;
-    let attn_output = attn_weights_softmax.broadcast_matmul(&v)?;
+    let attn_output = attn_weights_softmax.broadcast_matmul(&v)?; // [B, nq, T, hd]
+
+    // #1082 CP-4: route the GQA SDPA fallback through the kt Tape when
+    // KILN_USE_TAPE_SDPA + an active tape scope are set, so a
+    // tape-authoritative backward reaches the q/k/v (LoRA) projections on the
+    // NON-flash path (head_dim ∉ {128,256}). No-ops (returns None) in every
+    // other configuration — default training/inference is unchanged and falls
+    // through to the plain candle transpose+reshape below. Records on the
+    // head-FIRST `attn_output` (BEFORE the reshape-back), with the pre-expand
+    // head-first q/k_he/v_he as inputs; then chains the transpose+reshape so
+    // the tape stays connected to o_proj (else it fragments at the reshape).
+    #[cfg(feature = "cuda")]
+    if let Some(tape_attn) = crate::tape_forward::try_tape_sdpa_fallback_cuda(
+        &q, &k_he, &v_he, head_dim, &attn_output,
+    )? {
+        // tape_attn is [B, nq, T, hd] on the tape. Chain transpose(1,2) ->
+        // [B, T, nq, hd] then reshape -> [B, T, nq*hd] so the chain reaches
+        // o_proj. Each chaining adapter falls through to its plain candle op
+        // when its gate is off / no scope is active.
+        let transposed = match crate::tape_forward::try_tape_transpose_cuda(&tape_attn, 1, 2)? {
+            Some(t) => t,
+            None => tape_attn.transpose(1, 2)?.contiguous()?,
+        };
+        let (tb, tt, th, td) = transposed.dims4()?;
+        let flat = th * td;
+        if let Some(reshaped) =
+            crate::tape_forward::try_tape_reshape_cuda(&transposed, vec![tb, tt, flat])?
+        {
+            return Ok(reshaped);
+        }
+        return Ok(transposed.reshape((tb, tt, flat))?);
+    }
+
     Ok(attn_output
         .transpose(1, 2)?
         .contiguous()?
@@ -30013,6 +30232,108 @@ mod tests {
             "l2_norm_scale.dx",
             &manual,
             grads.get(x_var.as_tensor()).context("missing x grad")?,
+            1e-4,
+        )?;
+
+        Ok(())
+    }
+
+    /// CP-4 (#1082): numerically validate `sdpa_fallback_backward_no_grad`
+    /// against candle autograd on CPU/F32.
+    ///
+    /// The forward reference reconstructs `gqa_attention_core_prefill`'s
+    /// non-flash SDPA fallback EXACTLY: GQA-expand k/v from `nkv` to `nq`,
+    /// `scores = (q @ kᵀ) / sqrt(hd)`, an additive causal mask (`-inf` where
+    /// `j > i`, matching `apply_causal_mask_with_offset` at offset 0), a
+    /// numerically-stable softmax over the last axis, then `out = p @ v`. The
+    /// inputs are head-FIRST, PRE-expand candle `Var`s (`q = [b, nq, t, hd]`,
+    /// `k`/`v = [b, nkv, t, hd]`) so the gold dq/dk/dv land on the same layout
+    /// the analytic backward returns (dq keeps `nq`; dk/dv collapse to `nkv`).
+    /// `loss = sum(out * upstream)`; candle's `loss.backward()` yields the gold
+    /// grads, and the backward fn is fed the same upstream as `grad_out` with
+    /// `scale = 1/sqrt(hd)`, `causal = true`. Tolerance 1e-4 (F32).
+    #[test]
+    fn test_sdpa_fallback_backward_no_grad_matches_autograd_cpu() -> Result<()> {
+        let device = Device::Cpu;
+        let dtype = DType::F32;
+
+        // Small GQA shapes: 4 query heads, 2 KV heads (groups=2), head_dim=8.
+        let b = 1usize;
+        let nq = 4usize;
+        let nkv = 2usize;
+        let t = 6usize;
+        let hd = 8usize;
+        let gqa_ratio = nq / nkv;
+        let scale = 1.0f64 / (hd as f64).sqrt();
+
+        // Head-FIRST, PRE-expand inputs (what the fallback consumes).
+        let q = det_tensor(&[b, nq, t, hd], 0.30, 0.02, &device)?.to_dtype(dtype)?;
+        let k = det_tensor(&[b, nkv, t, hd], 0.25, -0.01, &device)?.to_dtype(dtype)?;
+        let v = det_tensor(&[b, nkv, t, hd], 0.20, 0.03, &device)?.to_dtype(dtype)?;
+        let upstream = det_tensor(&[b, nq, t, hd], 0.18, -0.02, &device)?.to_dtype(dtype)?;
+
+        let q_var = Var::from_tensor(&q)?;
+        let k_var = Var::from_tensor(&k)?;
+        let v_var = Var::from_tensor(&v)?;
+
+        // GQA-expand k/v from nkv -> nq, EXACTLY mirroring the fallback's
+        // `unsqueeze(2).expand(...).contiguous().reshape(...)`.
+        let expand = |t_in: &Tensor| -> Result<Tensor> {
+            Ok(t_in
+                .unsqueeze(2)?
+                .expand(&[b, nkv, gqa_ratio, t, hd])?
+                .contiguous()?
+                .reshape((b, nq, t, hd))?)
+        };
+        let k_exp = expand(k_var.as_tensor())?; // [b, nq, t, hd]
+        let v_exp = expand(v_var.as_tensor())?; // [b, nq, t, hd]
+
+        // scores = (q @ kᵀ) * scale.
+        let scores = q_var
+            .as_tensor()
+            .contiguous()?
+            .broadcast_matmul(&k_exp.t()?)?
+            .affine(scale, 0.0)?; // [b, nq, t, t]
+
+        // Additive causal mask (-inf where j > i), matching
+        // `apply_causal_mask_with_offset` at offset 0.
+        let mask: Vec<f32> = (0..t)
+            .flat_map(|i| {
+                (0..t).map(move |j| if j <= i { 0.0f32 } else { f32::NEG_INFINITY })
+            })
+            .collect();
+        let mask = Tensor::new(mask, &device)?.reshape((1, 1, t, t))?;
+        let scores = scores.broadcast_add(&mask)?;
+
+        // Numerically-stable softmax over the last axis.
+        let max_val = scores.max_keepdim(LAST_DIM)?;
+        let exp_shifted = scores.broadcast_sub(&max_val)?.exp()?;
+        let sum_exp = exp_shifted.sum_keepdim(LAST_DIM)?;
+        let p = exp_shifted.broadcast_div(&sum_exp)?; // [b, nq, t, t]
+
+        // out = p @ v.
+        let out = p.contiguous()?.broadcast_matmul(&v_exp)?; // [b, nq, t, hd]
+        let loss = (&out.to_dtype(DType::F32)? * &upstream)?.sum_all()?;
+        let grads = loss.backward()?;
+
+        let manual = sdpa_fallback_backward_no_grad(&q, &k, &v, scale, true, &upstream)?;
+
+        assert_grad_close_tol(
+            "sdpa.dq",
+            &manual.dq,
+            grads.get(q_var.as_tensor()).context("missing q grad")?,
+            1e-4,
+        )?;
+        assert_grad_close_tol(
+            "sdpa.dk",
+            &manual.dk,
+            grads.get(k_var.as_tensor()).context("missing k grad")?,
+            1e-4,
+        )?;
+        assert_grad_close_tol(
+            "sdpa.dv",
+            &manual.dv,
+            grads.get(v_var.as_tensor()).context("missing v grad")?,
             1e-4,
         )?;
 

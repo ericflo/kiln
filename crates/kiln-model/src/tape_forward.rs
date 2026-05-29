@@ -114,7 +114,8 @@ use kiln_autograd::{
 use crate::backend::BackendRuntime;
 use crate::forward::{
     gdn_gated_rms_norm_backward_no_grad, gdn_l2_norm_scale_backward_no_grad,
-    gdn_recurrent_backward_no_grad, gdn_recurrent_forward_from_parts, GDN_CHUNK_SIZE,
+    gdn_recurrent_backward_no_grad, gdn_recurrent_forward_from_parts,
+    sdpa_fallback_backward_no_grad, GDN_CHUNK_SIZE,
 };
 use crate::lora_loader::LoraProjectionWeights;
 
@@ -2290,6 +2291,239 @@ pub fn try_tape_transpose_cuda(
     kiln_kt_bridge::tape_bridge::retain_output_for_chaining(&out_kt, out.id());
 
     Ok(Some(out))
+}
+
+// ===========================================================================
+// CP-4 (#1082): naive SDPA-fallback attention tape coverage.
+//
+// `try_tape_flash_attn_cuda` only fires when flash-attention is available
+// (`head_dim ∈ {128, 256}`). The GQA full-attention block's NON-flash
+// fallback (`forward::gqa_attention_core_prefill`'s naive scaled-dot-product
+// path) is the path that runs at every other head_dim — notably the tiny
+// synthetic test model's `head_dim = 16`. For a tape-authoritative backward
+// to reach the GQA-block q/k/v projection LoRA `Var`s on that path, the
+// fallback must ALSO record onto the kt Tape, exactly as the flash path does.
+//
+// Mirrors `try_tape_gdn_recurrent_cuda` / `GdnRecurrentBackward`: a
+// candle-composite `BackwardOp` (`SdpaBackward`) wrapping the analytic
+// `forward::sdpa_fallback_backward_no_grad`, recorded on the fallback's
+// attention output with `[q, k, v]` as inputs. SDPA is stateless, so there is
+// no entry-state to snapshot.
+// ===========================================================================
+
+/// True iff `KILN_USE_TAPE_SDPA` is set to an enable value. Narrow opt-in for
+/// the naive SDPA-fallback attention tape adapter, separate from
+/// `KILN_USE_TAPE_FLASH_ATTN` (which covers the flash path) and the rest of
+/// the fleet. Cached after first read, mirroring [`tape_gdn_enabled`].
+pub fn tape_sdpa_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("KILN_USE_TAPE_SDPA")
+            .map(|v| {
+                let v = v.trim().to_lowercase();
+                !(v.is_empty() || v == "0" || v == "false" || v == "no")
+            })
+            .unwrap_or(false)
+    })
+}
+
+/// Candle-composite tape backward for the naive SDPA fallback
+/// (`forward::gqa_attention_core_prefill`'s non-flash path). Wraps
+/// [`sdpa_fallback_backward_no_grad`] (analytic adjoint in candle F32),
+/// mirroring how [`GdnRecurrentBackward`] wraps `gdn_recurrent_backward_no_grad`.
+///
+/// # Why a candle-composite wrap (not a kt `BackwardOp` in kiln-autograd)
+///
+/// The SDPA backward is a composite of broadcast / 4D-batched matmuls, a
+/// softmax adjoint, a causal mask, and a GQA head collapse. Those aren't
+/// cleanly expressible over `kiln_tensor::ops` (no batched `broadcast_matmul`
+/// / softmax-adjoint primitive there), and `kiln-autograd` carries no candle
+/// dep — so the analytic backward lives as a candle composite in `kiln-model`
+/// and this `BackwardOp` bridges grads through it, exactly like the GDN ops.
+///
+/// # Saved tensors / inputs
+///
+/// `q`/`k`/`v` are the **pre-attention, head-FIRST** tensors the fallback
+/// consumes (`q = [B, nq, T, hd]`, `k`/`v = [B, nkv, T, hd]`, BEFORE the GQA
+/// expand) as candle clones; `scale = 1/sqrt(head_dim)`; `causal` selects the
+/// strict-upper-triangular mask. 3 differentiable inputs `[q, k, v]` in the
+/// order the adapter records them. The returned `dq` keeps `nq` heads;
+/// `dk`/`dv` are GQA-collapsed to `nkv` (matching the `k`/`v` `Var` layouts).
+#[derive(Debug)]
+pub(crate) struct SdpaBackward {
+    q: Tensor,
+    k: Tensor,
+    v: Tensor,
+    scale: f64,
+    causal: bool,
+}
+
+impl BackwardOp for SdpaBackward {
+    fn name(&self) -> &'static str {
+        "sdpa_fallback_backward"
+    }
+    fn input_count(&self) -> usize {
+        // q, k, v.
+        3
+    }
+    fn apply(
+        &self,
+        grad_output: &kiln_tensor::Tensor,
+    ) -> kiln_tensor::Result<Vec<Option<kiln_tensor::Tensor>>> {
+        // Bridge the upstream grad (kt) to candle for the candle composite.
+        let grad_c = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(grad_output).map_err(|e| {
+            kiln_tensor::Error::Msg(format!("SdpaBackward: grad kt->candle: {e}"))
+        })?;
+        let grads = sdpa_fallback_backward_no_grad(
+            &self.q,
+            &self.k,
+            &self.v,
+            self.scale,
+            self.causal,
+            &grad_c,
+        )
+        .map_err(|e| kiln_tensor::Error::Msg(format!("SdpaBackward: sdpa bwd: {e}")))?;
+        // Adjoints can be non-contiguous (broadcast/transpose views); contiguify
+        // then COPY to owned kt (cf. the GdnRecurrentBackward non-contig fix).
+        let to_kt = |t: &Tensor| -> kiln_tensor::Result<kiln_tensor::Tensor> {
+            let tc = t.contiguous().map_err(|e| {
+                kiln_tensor::Error::Msg(format!("SdpaBackward: grad contiguous: {e}"))
+            })?;
+            kiln_kt_bridge::kt_tensor_from_candle_cuda_copy(&tc).map_err(|e| {
+                kiln_tensor::Error::Msg(format!("SdpaBackward: grad candle->kt: {e}"))
+            })
+        };
+        Ok(vec![
+            Some(to_kt(&grads.dq)?),
+            Some(to_kt(&grads.dk)?),
+            Some(to_kt(&grads.dv)?),
+        ])
+    }
+}
+
+/// Record an [`SdpaBackward`] node for the naive SDPA-fallback attention
+/// output that the PRODUCTION forward has ALREADY computed.
+///
+/// The forward (`gqa_attention_core_prefill`'s non-flash path) computes the
+/// attention output itself (q@kᵀ scaled, causal-masked softmax, @v) and then
+/// reshapes it back to `[B, T, hidden]`; this adapter takes that already-
+/// computed `out` (head-FIRST `[B, nq, T, hd]`, BEFORE the reshape-back) and
+/// records-only (no re-run), borrowing `out` as the recorded node's output —
+/// like `tape_record_gdn_recurrent`. The recorded [`SdpaBackward`] emits
+/// GQA-collapsed `dq`/`dk`/`dv` so a tape-authoritative backward reaches the
+/// q/k/v projections (and their LoRA `Var`s) on the non-flash path — the
+/// attention-block link the flash path covers via [`try_tape_flash_attn_cuda`].
+///
+/// # Arguments
+///
+/// * `q`/`k`/`v` — the **pre-attention head-FIRST** tensors the fallback
+///   consumes: `q = [B, nq, T, hd]`, `k`/`v = [B, nkv, T, hd]` (the
+///   `prepared.{q,k,v}.transpose(1,2)` layout, BEFORE the GQA expand). They
+///   must carry their LoRA lineage from the upstream q/k/v_proj adapters via
+///   `tape_kt_input` chaining.
+/// * `head_dim` — `scale = 1/sqrt(head_dim)`, matching the forward's score
+///   divisor.
+/// * `out` — the attention output the forward produced, head-FIRST
+///   `[B, nq, T, hd]` (the `attn_weights_softmax.broadcast_matmul(&v)` result
+///   BEFORE its `transpose(1,2).reshape(...)`).
+///
+/// `Ok(None)` (caller's production output unchanged) when the gate is off, no
+/// tape scope is active, the inputs aren't CUDA, shapes disagree, or a kt
+/// borrow fails.
+pub fn try_tape_sdpa_fallback_cuda(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    head_dim: usize,
+    out: &Tensor,
+) -> Result<Option<Tensor>> {
+    if !tape_forward_enabled() || !tape_sdpa_enabled() {
+        return Ok(None);
+    }
+    if !matches!(q.device(), candle_core::Device::Cuda(_))
+        || !matches!(k.device(), candle_core::Device::Cuda(_))
+        || !matches!(v.device(), candle_core::Device::Cuda(_))
+        || !matches!(out.device(), candle_core::Device::Cuda(_))
+    {
+        return Ok(None);
+    }
+
+    // Shape envelope: q = [B, nq, T, hd]; k/v = [B, nkv, T, hd]; out matches q.
+    let (bq, nq, tq, dq_) = match q.dims4() {
+        Ok(d) => d,
+        Err(_) => return Ok(None),
+    };
+    let (bk, nkv, tk, dk_) = match k.dims4() {
+        Ok(d) => d,
+        Err(_) => return Ok(None),
+    };
+    let (bv, nvh, tv, dv_) = match v.dims4() {
+        Ok(d) => d,
+        Err(_) => return Ok(None),
+    };
+    if bq != bk
+        || bq != bv
+        || nkv == 0
+        || nq % nkv != 0
+        || nvh != nkv
+        || tq != tk
+        || tq != tv
+        || dq_ != head_dim
+        || dk_ != head_dim
+        || dv_ != head_dim
+        || out.dims() != [bq, nq, tq, head_dim].as_slice()
+    {
+        return Ok(None);
+    }
+
+    let scale = 1.0f64 / (head_dim as f64).sqrt();
+    let causal = true;
+
+    // kt inputs — thread the upstream q/k/v_proj (+ RoPE / norm) adapter outputs
+    // so the tape stays connected back to the LoRA Vars.
+    let q_kt = match tape_kt_input(q) {
+        Some(t) => t,
+        None => return Ok(None),
+    };
+    let k_kt = match tape_kt_input(k) {
+        Some(t) => t,
+        None => return Ok(None),
+    };
+    let v_kt = match tape_kt_input(v) {
+        Some(t) => t,
+        None => return Ok(None),
+    };
+    // The production forward already computed `out`; borrow it as the recorded
+    // node's output so we record-only (no re-run), like `tape_record_gdn_recurrent`.
+    let out_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(out) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+
+    let recorded = with_active_tape(|tape: &mut Tape| {
+        tape.record(
+            &out_kt,
+            &[&q_kt, &k_kt, &v_kt],
+            Box::new(SdpaBackward {
+                q: q.clone(),
+                k: k.clone(),
+                v: v.clone(),
+                scale,
+                causal,
+            }),
+        );
+    });
+    if recorded.is_none() {
+        return Ok(None);
+    }
+
+    kiln_kt_bridge::tape_bridge::register_input_mapping(q_kt.id(), q.id());
+    kiln_kt_bridge::tape_bridge::register_input_mapping(k_kt.id(), k.id());
+    kiln_kt_bridge::tape_bridge::register_input_mapping(v_kt.id(), v.id());
+    kiln_kt_bridge::tape_bridge::register_output_mapping(out_kt.id(), out.id());
+    kiln_kt_bridge::tape_bridge::retain_output_for_chaining(&out_kt, out.id());
+
+    Ok(Some(out.clone()))
 }
 
 /// True iff `KILN_USE_TAPE_LORA_ADD` is set to an enable value.
