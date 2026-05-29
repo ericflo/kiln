@@ -14007,6 +14007,315 @@ mod tests {
         }
     }
 
+    /// CP-4 (#1082): disambiguate "tape grad vs candle grad" on the
+    /// attention-dependent LoRA Vars using an INDEPENDENT reference —
+    /// **central finite differences** on the loss value.
+    ///
+    /// `tape_authoritative_grads_match_candle_baseline_bf16` shows that ~9 of
+    /// the 40 candle-matched Vars diverge once the full-attn SDPA q/k/v chain
+    /// is wired to the tape. A candle-vs-candle comparison cannot tell us which
+    /// side is right: the candle baseline may sever the attention pathway
+    /// somewhere (a forward-only kt op returns a detached leaf, so
+    /// `loss.backward()` never backprops through attention), OR the tape's
+    /// SDPA-fallback grad may be wrong.
+    ///
+    /// Finite differences answer this directly. For a chosen Var `V` and a
+    /// fixed random direction `r`, the true directional derivative is
+    /// `⟨dL/dV, r⟩ ≈ (L(V + εr) − L(V − εr)) / (2ε)`. That value (`fd`) is the
+    /// ground truth computed from loss VALUES only — no autograd. We then dot
+    /// each candidate gradient with the same `r`:
+    ///   `tape_dot   = Σ grads_tape[V]   · r`
+    ///   `candle_dot = Σ grads_candle[V] · r`
+    /// Whichever of `tape_dot` / `candle_dot` is closer to `fd` is the correct
+    /// gradient. The perturbed forwards are PLAIN candle forwards
+    /// (authoritative OFF) — finite-diff needs only the loss value, not grads.
+    ///
+    /// This is a MEASUREMENT test: it asserts only that `fd` is finite and
+    /// prints a `[FD-CHECK]` table. The pod operator reads the table to decide
+    /// ground truth (a tight bound here would false-fail on BF16/ε noise).
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn tape_grad_matches_finite_difference_bf16() {
+        use kiln_model::forward::model_forward;
+        let device = match candle_core::Device::new_cuda(0) {
+            Ok(d) => d,
+            Err(_) => {
+                eprintln!("[FD-CHECK] no CUDA device — skipping");
+                return;
+            }
+        };
+        // Same BF16 tiny model + LoRA + inputs as the parity test, so the
+        // Vars line up index-for-index with that test's `[CP4-PARITY]` table.
+        let config = tiny_config_bf16();
+        let weights = tiny_weights_bf16(&config, &device).expect("bf16 tiny weights on cuda");
+        let params =
+            TrainableLoraParams::initialize(&config, &weights, 4, 8.0, &device).expect("params");
+        let input_ids: Vec<u32> = vec![1, 5, 10, 3, 7, 2, 8];
+        let label_mask = vec![false, false, true, true, true, true, false];
+        let backend = backend::for_device(&device);
+
+        // All CP-4 tape gates on so the authoritative walk records the full
+        // chain (matches the parity test). OnceLock-cached — run under
+        // `cargo nextest` for per-process env isolation.
+        unsafe {
+            std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
+            std::env::set_var("KILN_USE_TAPE_LORA_ADD", "1");
+            std::env::set_var("KILN_USE_TAPE_FLASH_ATTN", "1");
+            std::env::set_var("KILN_USE_TAPE_SDPA", "1");
+            std::env::set_var("KILN_USE_TAPE_GDN", "1");
+            std::env::set_var("KILN_USE_TAPE_GDN_GATED_NORM", "1");
+            std::env::set_var("KILN_USE_TAPE_GDN_QK_NORM", "1");
+            std::env::set_var("KILN_USE_TAPE_GDN_CONV", "1");
+        }
+
+        // Helper: pure-candle (authoritative OFF) forward + loss VALUE for a
+        // given LoraWeights. This is the finite-diff probe — no autograd, no
+        // tape scope; just the F32 scalar loss for the perturbed adapter.
+        let loss_value = |lw: &LoraWeights| -> f64 {
+            unsafe {
+                std::env::remove_var("KILN_USE_TAPE_AUTHORITATIVE");
+            }
+            let mut ls = LinearAttentionState::new(&config, &device).expect("linear state");
+            let logits = model_forward(
+                &*backend,
+                &input_ids,
+                &weights,
+                &config,
+                None,
+                Some(&mut ls),
+                Some(lw),
+            )
+            .expect("fd plain forward");
+            let loss = cross_entropy_loss(&logits, &input_ids, &label_mask, &device)
+                .expect("fd loss");
+            loss.to_scalar::<f32>().expect("fd loss scalar") as f64
+        };
+
+        // CANDLE baseline grads: plain forward, authoritative OFF,
+        // loss.backward().
+        unsafe {
+            std::env::remove_var("KILN_USE_TAPE_AUTHORITATIVE");
+        }
+        let lora_weights = params.as_lora_weights();
+        let mut ls = LinearAttentionState::new(&config, &device).expect("linear state");
+        let logits = model_forward(
+            &*backend,
+            &input_ids,
+            &weights,
+            &config,
+            None,
+            Some(&mut ls),
+            Some(&lora_weights),
+        )
+        .expect("candle baseline forward");
+        let loss_c =
+            cross_entropy_loss(&logits, &input_ids, &label_mask, &device).expect("baseline loss");
+        let grads_candle = loss_c.backward().expect("candle baseline backward");
+
+        // TAPE-authoritative grads via standard_forward_backward.
+        unsafe {
+            std::env::set_var("KILN_USE_TAPE_AUTHORITATIVE", "1");
+        }
+        let (_loss_a, grads_tape) = standard_forward_backward(
+            &*backend,
+            &input_ids,
+            &weights,
+            &config,
+            &params,
+            &label_mask,
+            &device,
+            None,
+        )
+        .expect("tape-authoritative step");
+        unsafe {
+            std::env::remove_var("KILN_USE_TAPE_AUTHORITATIVE");
+        }
+
+        // Helper: Σ grad[V] · r (F32). `r` is the F32 direction; the grad is
+        // cast to F32 first so BF16 grads dot cleanly against the F32 dir.
+        let dot_grad = |g: &candle_core::Tensor, r: &[f32]| -> f64 {
+            let gf = g
+                .to_dtype(candle_core::DType::F32)
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap();
+            gf.iter()
+                .zip(r.iter())
+                .map(|(x, y)| (*x as f64) * (*y as f64))
+                .sum()
+        };
+
+        // Pick which Vars to FD-check. Self-select the divergent ones: compute
+        // each matched Var's raw relative error (tape vs candle) and take the
+        // worst few — these are exactly the Vars the parity gate flags. Always
+        // include at least a couple even if none cross the threshold so the
+        // table is never empty.
+        let all_vars = params.all_vars();
+        let modules = params.all_vars_with_modules();
+        let rel = |a: &candle_core::Tensor, c: &candle_core::Tensor| -> f32 {
+            let af = a
+                .to_dtype(candle_core::DType::F32)
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap();
+            let cf = c
+                .to_dtype(candle_core::DType::F32)
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap();
+            let mut d = 0f32;
+            let mut m = 0f32;
+            for (x, y) in af.iter().zip(cf.iter()) {
+                d = d.max((x - y).abs());
+                m = m.max(y.abs());
+            }
+            d / m.max(1e-6)
+        };
+        let mut ranked: Vec<(usize, f32)> = Vec::new();
+        for (vi, v) in all_vars.iter().enumerate() {
+            if let (Some(t), Some(c)) =
+                (grads_tape.get(v.as_tensor()), grads_candle.get(v.as_tensor()))
+            {
+                ranked.push((vi, rel(t, c)));
+            }
+        }
+        ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        // Up to 5 worst divergent Vars; fall back to the first matched Vars if
+        // ranking is empty.
+        let mut targets: Vec<usize> = ranked.iter().take(5).map(|(vi, _)| *vi).collect();
+        if targets.is_empty() {
+            for (vi, v) in all_vars.iter().enumerate() {
+                if grads_tape.get(v.as_tensor()).is_some()
+                    && grads_candle.get(v.as_tensor()).is_some()
+                {
+                    targets.push(vi);
+                }
+                if targets.len() >= 3 {
+                    break;
+                }
+            }
+        }
+
+        eprintln!(
+            "[FD-CHECK] central finite-difference reference for {} Var(s); \
+             fd=(L+ - L-)/(2*eps) is ground truth, compare tape_dot/candle_dot to it",
+            targets.len()
+        );
+
+        // Try a couple of eps values — BF16 perturbation granularity + an F32
+        // loss means the right eps is a balance: too small and L± round to the
+        // same BF16-influenced value (fd → 0/noise), too large and the central
+        // diff picks up curvature. 1e-2 is the primary; 3e-2 is a coarser
+        // cross-check.
+        let eps_list = [1e-2f32, 3e-2f32];
+
+        for &vi in &targets {
+            let target_id = all_vars[vi].as_tensor().id();
+            let module = modules[vi].module;
+            let shape: Vec<usize> = all_vars[vi].as_tensor().dims().to_vec();
+            let n: usize = shape.iter().product();
+
+            // Deterministic F32 direction r in [-1,1], seeded per Var index so
+            // each run probes the same direction.
+            let mut rng = StdRng::seed_from_u64(0xF1_17E_D1FF_u64 ^ vi as u64);
+            let r: Vec<f32> = (0..n).map(|_| rng.random_range(-1.0f32..1.0f32)).collect();
+            let r_tensor = Tensor::from_slice(&r, shape.as_slice(), &device)
+                .expect("fd direction tensor");
+
+            // grad · r for both candidates (computed once; eps-independent).
+            let tape_dot = grads_tape
+                .get(all_vars[vi].as_tensor())
+                .map(|g| dot_grad(g, &r));
+            let candle_dot = grads_candle
+                .get(all_vars[vi].as_tensor())
+                .map(|g| dot_grad(g, &r));
+
+            // Build a perturbed LoraWeights where exactly the target Var's
+            // tensor is replaced by `V_f32 ± eps*r → BF16`; every other Var is
+            // cloned unchanged. Var clones share a TensorId, so matching by
+            // `tensor.id() == target_id` perturbs precisely one slot.
+            let perturbed_lora = |sign: f32, eps: f32| -> LoraWeights {
+                let make_proj = |pair: &Option<(Var, Var)>| -> Option<LoraProjectionWeights> {
+                    pair.as_ref().map(|(a, b)| {
+                        let pick = |t: &candle_core::Tensor| -> candle_core::Tensor {
+                            if t.id() == target_id {
+                                let vf = t
+                                    .to_dtype(candle_core::DType::F32)
+                                    .expect("V to f32");
+                                let delta = (&r_tensor * ((sign * eps) as f64))
+                                    .expect("eps*r");
+                                (vf + delta)
+                                    .expect("V + eps*r")
+                                    .to_dtype(candle_core::DType::BF16)
+                                    .expect("perturbed to bf16")
+                            } else {
+                                t.clone()
+                            }
+                        };
+                        LoraProjectionWeights {
+                            a: pick(a.as_tensor()),
+                            b: pick(b.as_tensor()),
+                        }
+                    })
+                };
+                let layers: Vec<LoraLayerWeights> = params
+                    .layers
+                    .iter()
+                    .map(|lp| LoraLayerWeights {
+                        q_proj: make_proj(&lp.q_proj),
+                        k_proj: make_proj(&lp.k_proj),
+                        v_proj: make_proj(&lp.v_proj),
+                        o_proj: make_proj(&lp.o_proj),
+                        in_proj_qkv: make_proj(&lp.in_proj_qkv),
+                        in_proj_z: make_proj(&lp.in_proj_z),
+                        gdn_out_proj: make_proj(&lp.gdn_out_proj),
+                        gate_proj: make_proj(&lp.gate_proj),
+                        up_proj: make_proj(&lp.up_proj),
+                        down_proj: make_proj(&lp.down_proj),
+                        ..Default::default()
+                    })
+                    .collect();
+                LoraWeights {
+                    layers,
+                    rank: params.rank,
+                    alpha: params.alpha,
+                    scale: params.scale,
+                }
+            };
+
+            for &eps in &eps_list {
+                let l_plus = loss_value(&perturbed_lora(1.0, eps));
+                let l_minus = loss_value(&perturbed_lora(-1.0, eps));
+                let fd = (l_plus - l_minus) / (2.0 * eps as f64);
+
+                assert!(
+                    fd.is_finite(),
+                    "[FD-CHECK] var[{vi}] ({module}) fd not finite \
+                     (L+ {l_plus}, L- {l_minus}, eps {eps})"
+                );
+
+                let td = tape_dot.unwrap_or(f64::NAN);
+                let cd = candle_dot.unwrap_or(f64::NAN);
+                let denom = fd.abs().max(1e-9);
+                let rel_tape = (fd - td).abs() / denom;
+                let rel_candle = (fd - cd).abs() / denom;
+                eprintln!(
+                    "[FD-CHECK] var[{vi}] ({module}) eps={eps:.0e} \
+                     fd={fd:+.6} tape_dot={td:+.6} candle_dot={cd:+.6} \
+                     |fd-tape|/|fd|={rel_tape:.4} |fd-candle|/|fd|={rel_candle:.4} \
+                     -> {} matches FD better",
+                    if rel_tape <= rel_candle { "TAPE" } else { "CANDLE" }
+                );
+            }
+        }
+    }
+
     /// Create a tiny ModelConfig for testing (4 layers, small dims).
     fn tiny_config() -> ModelConfig {
         ModelConfig {
