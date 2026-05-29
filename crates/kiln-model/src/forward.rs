@@ -16598,6 +16598,32 @@ pub fn gqa_attention_core_prefill(
         let q = prepared.q.contiguous()?;
         let k = prepared.k.contiguous()?;
         let v = prepared.v.contiguous()?;
+        // #1082 CP-4: route the GQA flash path through the kt Tape when
+        // KILN_USE_TAPE_FLASH_ATTN + an active tape scope are set, so a
+        // tape-authoritative backward reaches the q/k/v (LoRA) projections.
+        // No-ops (returns None) in every other configuration — default
+        // training/inference is unchanged and falls through below.
+        #[cfg(feature = "cuda")]
+        if let Some(attn_output) = crate::tape_forward::try_tape_flash_attn_cuda(
+            &q,
+            &k,
+            &v,
+            num_heads,
+            num_kv_heads,
+            head_dim,
+        )? {
+            // attn_output is [b, seq, num_heads, head_dim] on the tape; also
+            // tape-record the reshape to [b, seq, hidden] so the chain stays
+            // connected to o_proj (else the tape fragments at the reshape).
+            let (rb, rs, rh, rd) = attn_output.dims4()?;
+            let flat = rh * rd;
+            if let Some(reshaped) =
+                crate::tape_forward::try_tape_reshape_cuda(&attn_output, vec![rb, rs, flat])?
+            {
+                return Ok(reshaped);
+            }
+            return Ok(attn_output.reshape((rb, rs, flat))?);
+        }
         #[cfg(feature = "cuda")]
         if let Some(attn_output) =
             cuda_flash_attention_training_bf16(&q, &k, &v, num_heads, num_kv_heads, head_dim)?
@@ -17022,6 +17048,33 @@ pub fn gqa_attention_pre_o(
         let q = q.contiguous()?;
         let k = k.contiguous()?;
         let v = v.contiguous()?;
+        // #1082 CP-4: kt-Tape flash path (see gqa_attention_core_prefill).
+        // No-op unless KILN_USE_TAPE_FLASH_ATTN + active tape scope. NOTE:
+        // when an attention output gate is present, the gate multiply is not
+        // yet tape-recorded, so the tape chain ends at the reshape for
+        // gate-on models (a follow-up gate adapter closes that); gate-off
+        // (e.g. Qwen3.5-4B default) chains straight through to o_proj.
+        #[cfg(feature = "cuda")]
+        if let Some(attn_output) = crate::tape_forward::try_tape_flash_attn_cuda(
+            &q,
+            &k,
+            &v,
+            num_heads,
+            num_kv_heads,
+            head_dim,
+        )? {
+            let (rb, rs, rh, rd) = attn_output.dims4()?;
+            let flat = rh * rd;
+            let attn_output = match crate::tape_forward::try_tape_reshape_cuda(
+                &attn_output,
+                vec![rb, rs, flat],
+            )? {
+                Some(reshaped) => reshaped,
+                None => attn_output.reshape((rb, rs, flat))?,
+            };
+            let attn_output = attention_output_gate_decode_if(false, attn_output, gate.as_ref())?;
+            return Ok(attn_output);
+        }
         #[cfg(feature = "cuda")]
         if let Some(attn_output) =
             cuda_flash_attention_training_bf16(&q, &k, &v, num_heads, num_kv_heads, head_dim)?
