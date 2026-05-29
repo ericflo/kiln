@@ -279,7 +279,7 @@ dependencies = [
  "candle-kernels",
  "candle-metal-kernels",
  "candle-ug",
- "cudarc 0.19.4",
+ "cudarc 0.19.7",
  "float8",
  "gemm 0.19.0",
  "half",
@@ -635,9 +635,9 @@ dependencies = [
 
 [[package]]
 name = "cudarc"
-version = "0.19.4"
+version = "0.19.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f071cd6a7b5d51607df76aa2d426aaabc7a74bc6bdb885b8afa63a880572ad9b"
+checksum = "1cea5f10a99e025c1b44ae2354c2d8326b25ddbd0baf76bde8e55cfd4018a2cc"
 dependencies = [
  "float8",
  "half",
@@ -1777,7 +1777,7 @@ name = "kiln-blas"
 version = "0.2.19"
 dependencies = [
  "cc",
- "cudarc 0.19.4",
+ "cudarc 0.19.7",
  "half",
  "serde",
  "serde_json",
@@ -1925,7 +1925,7 @@ dependencies = [
  "candle-core",
  "candle-nn",
  "console 0.16.3",
- "cudarc 0.19.4",
+ "cudarc 0.19.7",
  "half",
  "indicatif 0.18.4",
  "kiln-autograd",
@@ -2076,7 +2076,7 @@ dependencies = [
  "candle-metal-kernels",
  "candle-nn",
  "cc",
- "cudarc 0.19.4",
+ "cudarc 0.19.7",
  "half",
  "kiln-autograd",
  "kiln-blas",
@@ -2328,9 +2328,9 @@ checksum = "6877bb514081ee2a7ff5ef9de3281f14a4dd4bceac4c09388074a6b5df8a139a"
 
 [[package]]
 name = "minijinja"
-version = "2.19.0"
+version = "2.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "805bfd7352166bae857ee569628b52bcd85a1cecf7810861ebceb1686b72b75d"
+checksum = "2929e494b2280e1e18959bb2e121da03347ae896896fdfaceaab43c88a02803f"
 dependencies = [
  "memo-map",
  "serde",
@@ -2339,9 +2339,9 @@ dependencies = [
 
 [[package]]
 name = "minijinja-contrib"
-version = "2.19.0"
+version = "2.20.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "45092d80391870622fcf3bd82f5d2af18f99533ea60debb4bc9db0c76f0e809a"
+checksum = "99df5123c54391e2a228014c1dbbd85a3dab08a25e776c810526f2f47542b3de"
 dependencies = [
  "minijinja",
  "serde",
@@ -3180,9 +3180,9 @@ dependencies = [
 
 [[package]]
 name = "serde_json"
-version = "1.0.149"
+version = "1.0.150"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "83fc039473c5595ace860d8c4fafa220ff474b3fc6bfdb4293327f1a37e94d86"
+checksum = "e8014e44b4736ed0538adeecded0fce2a272f22dc9578a7eb6b2d9993c74cfb9"
 dependencies = [
  "itoa",
  "memchr",

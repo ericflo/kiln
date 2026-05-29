@@ -136,7 +136,7 @@ candle-nn = "0.10"
 # owned CudaDevice). Issue #1082 Phase 7 swap-out of candle proceeds
 # crate-by-crate; this dep is the seam for crates that only need
 # cudarc and not the full candle Tensor surface.
-cudarc = { version = "0.19.4", default-features = false, features = [
+cudarc = { version = "0.19.7", default-features = false, features = [
     "std",
     "cublas",
     "cublaslt",
