@@ -17965,11 +17965,17 @@ mod tests {
         unsafe {
             std::env::set_var("KILN_USE_FLCE", "1");
             std::env::set_var("KILN_CUDA_FLCE", "1");
-            // CP-4 (#1082): tape-authoritative is now the default training path,
-            // but this test validates the CANDLE backend-hook path
+            // CP-4 (#1082): tape-authoritative + the tape adapters are now the
+            // default, but this test validates the PURE CANDLE backend-hook path
             // (linear_prefill_apply + the FLCE provider + flash decline) which the
-            // tape path bypasses. Opt out so it exercises the candle hooks.
+            // tape path bypasses. Disable BOTH the authoritative dispatch AND the
+            // master tape-forward gate (which otherwise routes the FLCE training
+            // path through the candle-seeded tape bridge `with_tape_scope_emit_to_grad_store`,
+            // and that bridge errors on candle's severed full-attn grad). With both
+            // off this is a clean candle `loss.backward()`. (OnceLock-cached gates —
+            // set before any tape-gate read; per-process under nextest.)
             std::env::set_var("KILN_USE_TAPE_AUTHORITATIVE", "0");
+            std::env::set_var("KILN_USE_TAPE_FORWARD", "0");
         }
 
         let result = (|| -> Result<()> {
