@@ -1031,15 +1031,6 @@ pub fn try_tape_cross_entropy_from_logits_cuda(
 
     // kt input — thread the lm_head adapter's output so the tape stays connected
     // (today, before lm_head is wired, this falls to a fresh borrow — fine).
-    if std::env::var("KILN_CP4_DEBUG").is_ok() {
-        let chained =
-            kiln_kt_bridge::tape_bridge::kt_input_for_candle(logits.id()).is_some();
-        eprintln!(
-            "[CP4-DEBUG] CE-from-logits: logits.id()={} chained_to_lm_head={}",
-            logits.id().as_raw(),
-            chained,
-        );
-    }
     let logits_kt = match tape_kt_input(logits) {
         Some(t) => t,
         None => return Ok(None),
@@ -1435,27 +1426,12 @@ pub fn try_tape_lora_linear_cuda(
     if !tape_forward_enabled() || !tape_lora_add_enabled() {
         return Ok(None);
     }
-    let cp4_dbg = std::env::var("KILN_CP4_DEBUG").is_ok();
-    if cp4_dbg {
-        eprintln!(
-            "[CP4-DEBUG] lora_linear CALLED lora={} x={:?}/{:?} w={:?}/{:?} scope_active={}",
-            lora.is_some(),
-            x.dims(),
-            x.dtype(),
-            weight_t.dims(),
-            weight_t.dtype(),
-            kiln_kt_bridge::tape_bridge::bridge_scope_active(),
-        );
-    }
 
     // Device gate: CUDA-only (the bridge's `kt_tensor_from_candle_cuda_*`
     // helpers are CUDA-only). Match the existing tape adapters.
     if !matches!(x.device(), candle_core::Device::Cuda(_))
         || !matches!(weight_t.device(), candle_core::Device::Cuda(_))
     {
-        if cp4_dbg {
-            eprintln!("[CP4-DEBUG] lora_linear SKIP device");
-        }
         return Ok(None);
     }
     // Dtype gate: only BF16 / F32 today, and all matching (kt matmul requires
@@ -1493,37 +1469,21 @@ pub fn try_tape_lora_linear_cuda(
         if !matches!(proj.a.device(), candle_core::Device::Cuda(_))
             || !matches!(proj.b.device(), candle_core::Device::Cuda(_))
         {
-            if cp4_dbg { eprintln!("[CP4-DEBUG] lora_linear SKIP lora-device"); }
             return Ok(None);
         }
         if proj.a.dtype() != x.dtype() || proj.b.dtype() != x.dtype() {
-            if cp4_dbg {
-                eprintln!(
-                    "[CP4-DEBUG] lora_linear SKIP lora-dtype a={:?} b={:?} x={:?}",
-                    proj.a.dtype(), proj.b.dtype(), x.dtype()
-                );
-            }
             return Ok(None);
         }
         let Ok((rank, a_in)) = proj.a.dims2() else {
-            if cp4_dbg { eprintln!("[CP4-DEBUG] lora_linear SKIP a.dims2 a={:?}", proj.a.dims()); }
             return Ok(None);
         };
         let Ok((b_out, b_rank)) = proj.b.dims2() else {
-            if cp4_dbg { eprintln!("[CP4-DEBUG] lora_linear SKIP b.dims2 b={:?}", proj.b.dims()); }
             return Ok(None);
         };
         if a_in != k || b_out != n || b_rank != rank {
-            if cp4_dbg {
-                eprintln!(
-                    "[CP4-DEBUG] lora_linear SKIP lora-shape a={:?} b={:?} k={k} n={n}",
-                    proj.a.dims(), proj.b.dims()
-                );
-            }
             return Ok(None);
         }
         if !proj.a.is_contiguous() || !proj.b.is_contiguous() {
-            if cp4_dbg { eprintln!("[CP4-DEBUG] lora_linear SKIP lora-contig"); }
             return Ok(None);
         }
     }
@@ -1656,10 +1616,7 @@ pub fn try_tape_lora_linear_cuda(
         Ok(out_kt)
     }) {
         Some(result) => result,
-        None => {
-            if cp4_dbg { eprintln!("[CP4-DEBUG] lora_linear SKIP no-active-tape-scope"); }
-            return Ok(None);
-        }
+        None => return Ok(None),
     };
 
     let out_kt =
@@ -1679,13 +1636,6 @@ pub fn try_tape_lora_linear_cuda(
     kiln_kt_bridge::tape_bridge::register_output_mapping(out_kt.id(), out.id());
     kiln_kt_bridge::tape_bridge::retain_output_for_chaining(&out_kt, out.id());
 
-    if cp4_dbg {
-        eprintln!(
-            "[CP4-DEBUG] lora_linear FIRED lora={} out_id={} (retained for chaining)",
-            lora.is_some(),
-            out.id().as_raw(),
-        );
-    }
     Ok(Some(out))
 }
 

@@ -13884,12 +13884,42 @@ mod tests {
             d / m.max(1e-6)
         };
 
+        // Relative-error-with-floor: `max_abs_diff / (candle_max + 0.05)`. The
+        // additive floor keeps BF16 rounding noise on near-zero grads (where a
+        // raw relative error is meaningless — abs diff ~0.006 on a ~0.01-magnitude
+        // grad reads as rel 0.5+) from false-failing the parity gate, while still
+        // catching genuinely divergent large-magnitude grads. (#1082)
+        let rel_floored = |a: &candle_core::Tensor, c: &candle_core::Tensor| -> f32 {
+            let af = a
+                .to_dtype(candle_core::DType::F32)
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap();
+            let cf = c
+                .to_dtype(candle_core::DType::F32)
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap();
+            let mut d = 0f32;
+            let mut m = 0f32;
+            for (x, y) in af.iter().zip(cf.iter()) {
+                d = d.max((x - y).abs());
+                m = m.max(y.abs());
+            }
+            d / (m + 0.05)
+        };
+
         // Forward+loss parity: the authoritative loss must match the pure
-        // candle baseline. Loosened for BF16 rounding (vs F32's 0.05).
+        // candle baseline. BF16 forward measured rel 0.0002, comfortably under
+        // the F32 gate's 0.05 ceiling — so hold BF16 to the same bound.
         let loss_cf = loss_c.to_scalar::<f32>().expect("baseline loss scalar") as f64;
         let lrel = ((loss_a - loss_cf).abs() / loss_cf.abs().max(1e-6)) as f32;
         assert!(
-            lrel < 0.15,
+            lrel < 0.05,
             "tape-authoritative bf16 loss {loss_a} diverges from candle baseline {loss_cf} (rel {lrel:.4})"
         );
 
@@ -13899,16 +13929,15 @@ mod tests {
             "tape-authoritative bf16 path produced an empty GradStore"
         );
 
-        // Grad parity where the tape routed a param. Loosened for BF16 (vs
-        // F32's 0.1). We do NOT assert tape_has > 0 yet — this is a
-        // measurement; the eprintln reports the coverage.
+        // Grad parity where the tape routed a param.
         let total = params.all_vars().len();
         let mut compared = 0usize;
         let mut tape_has = 0usize;
-        // Collect (var_index, rel, candle_grad_max_abs) for every matched Var so
-        // we can see whether divergences are real or just BF16 noise on
-        // near-zero grads (where relative error is meaningless). (#1082)
-        let mut rels: Vec<(usize, f32, f32)> = Vec::new();
+        // Collect (var_index, raw_rel, candle_grad_max_abs, floored_rel) for every
+        // matched Var. Raw `rel` + magnitude are kept for the report so we can
+        // still see whether a divergence is real or just BF16 noise on near-zero
+        // grads; `floored_rel` is the gated metric we assert on. (#1082)
+        let mut rels: Vec<(usize, f32, f32, f32)> = Vec::new();
         for (vi, v) in params.all_vars().iter().enumerate() {
             let in_a = grads_a.get(v.as_tensor()).is_some();
             if in_a {
@@ -13916,6 +13945,7 @@ mod tests {
             }
             if let (Some(a), Some(c)) = (grads_a.get(v.as_tensor()), grads_c.get(v.as_tensor())) {
                 let r = rel(a, c);
+                let rf = rel_floored(a, c);
                 let cmag = c
                     .to_dtype(candle_core::DType::F32)
                     .and_then(|t| t.abs())
@@ -13923,17 +13953,17 @@ mod tests {
                     .and_then(|t| t.max(0))
                     .and_then(|t| t.to_scalar::<f32>())
                     .unwrap_or(f32::NAN);
-                rels.push((vi, r, cmag));
+                rels.push((vi, r, cmag, rf));
                 compared += 1;
             }
         }
         rels.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        let n_diverge = rels.iter().filter(|(_, r, _)| *r >= 0.25).count();
+        let n_diverge = rels.iter().filter(|(_, r, _, _)| *r >= 0.25).count();
         eprintln!(
-            "[CP4-PARITY] {compared} matched; {n_diverge} diverge (rel>=0.25). Worst (var,rel,candle|grad|max):"
+            "[CP4-PARITY] {compared} matched; {n_diverge} diverge (rel>=0.25). Worst (var,rel,candle|grad|max,floored):"
         );
-        for (vi, r, cmag) in rels.iter().take(8) {
-            eprintln!("[CP4-PARITY]   var[{vi}] rel={r:.4} candle_max={cmag:.6}");
+        for (vi, r, cmag, rf) in rels.iter().take(8) {
+            eprintln!("[CP4-PARITY]   var[{vi}] rel={r:.4} candle_max={cmag:.6} floored={rf:.4}");
         }
         // CP-4 LoRA-grad coverage measurement (#1082): with all tape gates on
         // AND a BF16 model (so the BF16-only kt adapters actually fire), how
@@ -13942,6 +13972,31 @@ mod tests {
             "[CP4-COVERAGE] loss rel {lrel:.4}; total_vars={total} tape_has_grad={tape_has} \
              matched_candle={compared}"
         );
+
+        // CP-4 Inc2 gate: the linear keystone connects the full-attn layer, so
+        // its LoRA Vars (q/k/v/o + MLP gate/up/down projections) must be
+        // tape-routed. 16 fire today; `>=14` leaves BF16 slack and rises as
+        // later increments wire up the remaining layers. (#1082)
+        assert!(
+            tape_has >= 14,
+            "CP-4 Inc2: expected >=14 tape-routed LoRA Vars (full-attn layer), got {tape_has}"
+        );
+
+        // Every matched Var must pass the floored relative-error gate. Near-zero
+        // grads ride the additive floor (so BF16 noise doesn't false-fail);
+        // large-magnitude grads still get held to a tight bound. Report the
+        // worst offender with raw rel + magnitude for context. (#1082)
+        let worst = rels
+            .iter()
+            .max_by(|a, b| a.3.partial_cmp(&b.3).unwrap_or(std::cmp::Ordering::Equal))
+            .copied();
+        if let Some((vi, r, cmag, rf)) = worst {
+            assert!(
+                rf < 0.3,
+                "CP-4 Inc2: var[{vi}] floored rel {rf:.4} >= 0.3 \
+                 (raw rel {r:.4}, candle_max {cmag:.6}) — real grad divergence, not BF16 noise"
+            );
+        }
     }
 
     /// Create a tiny ModelConfig for testing (4 layers, small dims).
