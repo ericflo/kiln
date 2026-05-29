@@ -2817,3 +2817,87 @@ fn tape_flash_attn_short_circuits_without_active_scope() {
         std::env::remove_var("KILN_USE_TAPE_FLASH_ATTN");
     }
 }
+
+// ----------------------------------------------------------------------
+// CP-4 reshape tape adapter (#1082) — `try_tape_reshape_cuda`.
+//
+// The GQA fast path reshapes the flash-attn output [b,seq,heads,head_dim]
+// to [b,seq,heads*head_dim] before o_proj. A plain candle reshape would
+// fragment the tape (fresh id) and break the q/k/v-LoRA -> loss chain.
+// This adapter records a ReshapeBackward node so the chain stays
+// connected; its adjoint reshapes the upstream grad back to the input
+// shape (a pure view, values pass through unchanged).
+// ----------------------------------------------------------------------
+
+#[test]
+fn tape_reshape_records_node_and_passes_grad_through() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    let device = match cuda_device() {
+        Some(d) => d,
+        None => {
+            eprintln!("tape_reshape node + grad: no CUDA device — skipping");
+            return;
+        }
+    };
+
+    // [2,3,4,5] -> [2,3,20] (the heads*head_dim collapse shape).
+    let x = build_attn_bf16(&device, &[2, 3, 4, 5], 0xBEEF_0001);
+
+    unsafe {
+        std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
+    }
+
+    let (res, tape) = kiln_model::tape_forward::with_thread_local_tape(|| {
+        kiln_model::tape_forward::try_tape_reshape_cuda(&x, vec![2, 3, 20])
+    });
+    let out = res
+        .expect("try_tape_reshape_cuda ok")
+        .expect("returned Some(out) — gate + scope both on");
+    assert_eq!(out.shape().dims(), &[2, 3, 20], "reshaped out shape");
+    assert!(out.device().is_cuda(), "out stays on CUDA");
+
+    assert_eq!(
+        tape.len(),
+        1,
+        "reshape records exactly one tape node (got {})",
+        tape.len()
+    );
+    let node = &tape.nodes()[0];
+    let out_id = node.output_id;
+    let input_ids = node.input_ids.clone();
+    assert_eq!(input_ids.len(), 1, "reshape records exactly one input");
+
+    // Seed a non-trivial grad shaped like out; the adjoint must reshape it
+    // back to the input shape, values unchanged.
+    let seed_host: Vec<half::bf16> = (0..2 * 3 * 20)
+        .map(|i| half::bf16::from_f32((i as f32) * 0.01 - 0.3))
+        .collect();
+    let seed = Tensor::from_vec(seed_host, (2, 3, 20), &Device::Cpu)
+        .expect("seed cpu")
+        .to_device(&device)
+        .expect("seed -> cuda")
+        .contiguous()
+        .expect("seed contig");
+    let seed_kt =
+        kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&seed).expect("seed kt borrow");
+    let mut seeds = HashMap::new();
+    seeds.insert(out_id, seed_kt);
+
+    let grads = tape
+        .backward_with_seeds(seeds, |a, b| kiln_tensor::ops::add(a, b))
+        .expect("reshape tape backward walk");
+    let dx_kt = grads.get(input_ids[0]).expect("dx present");
+    let dx = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(dx_kt).expect("dx -> candle");
+    assert_eq!(dx.shape().dims(), &[2, 3, 4, 5], "dx shape == input shape");
+
+    let seed_reshaped = seed.reshape((2, 3, 4, 5)).expect("seed reshape");
+    assert!(
+        max_abs_diff(&dx, &seed_reshaped) < 1e-3,
+        "reshape adjoint must pass the grad through as a view (no value change)"
+    );
+
+    unsafe {
+        std::env::remove_var("KILN_USE_TAPE_FORWARD");
+    }
+}

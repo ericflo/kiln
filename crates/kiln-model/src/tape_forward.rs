@@ -107,7 +107,8 @@ use anyhow::{Context, Result};
 use candle_core::Tensor;
 use kiln_autograd::{
     AddBackward, BackwardOp, CrossEntropyKtBackward, EmbeddingBackward, LoraDeltaAddBackward,
-    MatmulBackward, MulSigmoidGateBackward, RopeSplitHalfBackward, SiluBackward, Tape,
+    MatmulBackward, MulSigmoidGateBackward, ReshapeBackward, RopeSplitHalfBackward, SiluBackward,
+    Tape,
 };
 
 use crate::lora_loader::LoraProjectionWeights;
@@ -1358,6 +1359,88 @@ pub fn try_tape_flash_attn_cuda(
     kiln_kt_bridge::tape_bridge::register_input_mapping(q_kt.id(), q.id());
     kiln_kt_bridge::tape_bridge::register_input_mapping(k_kt.id(), k.id());
     kiln_kt_bridge::tape_bridge::register_input_mapping(v_kt.id(), v.id());
+    kiln_kt_bridge::tape_bridge::register_output_mapping(out_kt.id(), out.id());
+    kiln_kt_bridge::tape_bridge::retain_output_for_chaining(&out_kt, out.id());
+
+    Ok(Some(out))
+}
+
+/// Route a `reshape` through the kt `Tape` so a tape-authoritative
+/// backward stays connected ACROSS the reshape.
+///
+/// Why this matters for CP-4: the GQA attention fast path produces a
+/// `[b, seq, heads, head_dim]` output from [`try_tape_flash_attn_cuda`]
+/// and then reshapes it to `[b, seq, heads*head_dim]` before the o_proj
+/// matmul. A plain candle reshape mints a fresh tensor id, so the
+/// downstream o_proj adapter (`tape_kt_input`) could not chain back to the
+/// flash node — the tape would fragment at the reshape and the q/k/v
+/// (LoRA) grads would never flow. Recording a `ReshapeBackward` node
+/// (whose adjoint just reshapes the grad back to the input shape) keeps
+/// the chain intact: flash → reshape → o_proj → … → loss.
+///
+/// Gated on `KILN_USE_TAPE_FORWARD` + an active tape scope only (reshape
+/// is a pure layout op with a trivial, always-safe adjoint, so it needs
+/// no dedicated kill switch); it is only ever called from the sites that
+/// opt in. Returns `Ok(None)` when the gate is off, no tape is active,
+/// the input isn't CUDA, the element counts don't match, or a kt borrow
+/// fails — the caller then falls through to a plain candle reshape.
+pub fn try_tape_reshape_cuda(x: &Tensor, new_shape: Vec<usize>) -> Result<Option<Tensor>> {
+    if !tape_forward_enabled() {
+        return Ok(None);
+    }
+    if !matches!(x.device(), candle_core::Device::Cuda(_)) {
+        return Ok(None);
+    }
+
+    // Reuse an upstream adapter's kt output (e.g. the flash-attn node) so
+    // the tape stays connected; else a fresh zero-copy borrow.
+    let x_kt = match tape_kt_input(x) {
+        Some(t) => t,
+        None => return Ok(None),
+    };
+
+    let input_shape = x_kt.shape().to_vec();
+    let in_elems: usize = input_shape.iter().product();
+    let out_elems: usize = new_shape.iter().product();
+    if in_elems != out_elems {
+        // Not a pure reshape (would need a copy/broadcast); defer to the
+        // caller's candle path.
+        return Ok(None);
+    }
+
+    let out_kt = match with_active_tape(|tape: &mut Tape| -> Result<_> {
+        // kt reshape requires a contiguous source; flash output already is,
+        // but materialise defensively for the general case.
+        let x_c = if x_kt.is_contiguous() {
+            x_kt.clone()
+        } else {
+            x_kt
+                .contiguous()
+                .map_err(|e| anyhow::anyhow!("kt reshape: x.contiguous: {e}"))?
+        };
+        let out_kt = x_c
+            .reshape(new_shape.clone())
+            .map_err(|e| anyhow::anyhow!("kt reshape: {e}"))?;
+        // Single-input node; the adjoint reshapes the upstream grad back to
+        // `input_shape` (the original kt input's shape).
+        tape.record(
+            &out_kt,
+            &[&x_kt],
+            Box::new(ReshapeBackward {
+                input_shape: input_shape.clone(),
+            }),
+        );
+        Ok(out_kt)
+    }) {
+        Some(result) => result,
+        None => return Ok(None),
+    };
+
+    let out_kt = out_kt.context("tape_forward::try_tape_reshape_cuda: kt-tape forward failed")?;
+    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+        .context("tape_forward::try_tape_reshape_cuda: kt -> candle copy failed")?;
+
+    kiln_kt_bridge::tape_bridge::register_input_mapping(x_kt.id(), x.id());
     kiln_kt_bridge::tape_bridge::register_output_mapping(out_kt.id(), out.id());
     kiln_kt_bridge::tape_bridge::retain_output_for_chaining(&out_kt, out.id());
 
