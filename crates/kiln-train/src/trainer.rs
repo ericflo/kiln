@@ -14068,14 +14068,22 @@ mod tests {
     /// (authoritative OFF) — finite-diff needs only the loss value, not grads.
     ///
     /// This is the AUTHORITATIVE grad-correctness gate (#1082). It prints the
-    /// `[FD-CHECK]` table for visibility, then asserts on the "informative"
-    /// rows (those where `|fd|` is not finite-diff noise, `|fd| > 0.02` at
-    /// eps=1e-2): (1) the tape is at least as close to ground truth as candle
-    /// (`|fd-tape| <= |fd-candle|` — disambiguation), and (2) the tape matches
-    /// finite-diff within BF16+ε tolerance (`|fd-tape|/|fd| < 0.35`). Pod-
-    /// validated 2026-05-29: tape matches fd on every divergent Var, candle
-    /// does not (var[35] even gets the SIGN wrong), confirming candle's
-    /// autograd severs the full-attn/conv gradient and the tape is correct.
+    /// `[FD-CHECK]` table for visibility, then asserts only on "stable" rows —
+    /// Vars whose central finite-difference is a valid ground-truth reference.
+    /// A Var qualifies ONLY if BOTH `|fd_1e-2| > 0.02` (above the BF16-noise
+    /// floor) AND the two eps agree within 40% (`|fd_1e-2 - fd_3e-2| /
+    /// max(...) < 0.4`, proving a stable linear regime). Small-magnitude grads
+    /// have BF16-noise-dominated finite differences that swing wildly with eps
+    /// (var[9] 0.043 vs 0.012, a 3.5× swing) and are NOT ground truth — both
+    /// tape and candle are far from such noise — so they are excluded. On each
+    /// stable Var (eps=1e-2 row) we assert: (1) the tape is at least as close
+    /// to ground truth as candle (`|fd-tape| <= |fd-candle|` — disambiguation),
+    /// and (2) the tape matches finite-diff within BF16+ε tolerance
+    /// (`|fd-tape|/|fd| < 0.35`). Pod-validated 2026-05-29: the two stable Vars
+    /// are var[7] (gate_proj, tape rel 0.07 vs candle 0.74) and var[35]
+    /// (down_proj, tape rel 0.06 vs candle wrong-sign) — tape matches fd, candle
+    /// does not, confirming candle's autograd severs the full-attn/conv
+    /// gradient and the tape is correct.
     #[cfg(feature = "cuda")]
     #[test]
     fn tape_grad_matches_finite_difference_bf16() {
@@ -14365,76 +14373,99 @@ mod tests {
 
         // --- Authoritative grad-correctness gate (#1082) ---
         //
-        // Finite-diff is ground truth; this proves the tape-authoritative grad
-        // is correct where candle's autograd is unreliable (it severs the
-        // full-attn/conv gradient — a forward-only kt op detaches candle's
-        // autograd, so `loss.backward()` silently drops those Vars' grads).
+        // Finite-diff is ground truth ONLY where it is a stable linear
+        // estimate; this proves the tape-authoritative grad is correct where
+        // candle's autograd is unreliable (it severs the full-attn/conv
+        // gradient — a forward-only kt op detaches candle's autograd, so
+        // `loss.backward()` silently drops those Vars' grads).
         //
-        // Pod-validated ground truth (2026-05-29): for every divergent Var the
-        // tape matches the central finite-difference reference and candle does
-        // NOT — e.g. var[7] (gate_proj) fd=+0.185 tape=+0.163 (rel 0.07)
-        // candle=+0.047 (rel 0.74); var[35] (down_proj) fd=+0.051 tape=+0.046
-        // (rel 0.06) candle=-0.011 (WRONG SIGN, rel 1.21).
+        // Pod-validated ground truth (2026-05-29): only Vars whose central
+        // finite-difference is CONSISTENT across the two eps values are valid
+        // references. A large grad has a stable fd that agrees across eps; a
+        // small grad's fd is BF16-noise-dominated and swings wildly with eps,
+        // so it is NOT ground truth (both tape AND candle are far from it — it
+        // is noise) and must be excluded:
+        //   - var[7]  (gate_proj): fd 0.185 (1e-2) vs 0.175 (3e-2) — STABLE;
+        //                          tape rel 0.07 vs candle 0.74
+        //   - var[35] (down_proj): fd 0.051 (1e-2) vs 0.049 (3e-2) — STABLE;
+        //                          tape rel 0.06 vs candle wrong-sign
+        //   - var[9]  fd 0.043 vs 0.012 (3.5× swing) — UNSTABLE/noisy, excluded
+        //   - var[23] fd 0.036 vs 0.014 — UNSTABLE/noisy, excluded
+        //   - var[31] fd ≈ 0          — UNSTABLE/noisy, excluded
         //
-        // "Informative" rows are those where |fd| is not finite-diff noise. At
-        // eps=1e-2 the near-zero-grad Vars (var[9]/var[31], fd≈0) are pure
-        // BF16/ε noise and tell us nothing about correctness, so we skip them
-        // (but eprintln that we did, so the gate can't go vacuous unnoticed).
-        // Primary eps is 1e-2 (least noisy per pod data); fall back to 3e-2
-        // only if no 1e-2 informative rows survive.
+        // A Var feeds the gate ONLY if BOTH:
+        //   (a) |fd_1e-2| > FD_INFORMATIVE_MIN (not pure noise), AND
+        //   (b) the two eps agree within FD_EPS_STABLE_TOL (relative): proving
+        //       fd is in a stable linear regime rather than BF16-noise-driven.
+        // The eps=1e-2 row of each stable Var is what feeds the asserts.
         const FD_INFORMATIVE_MIN: f64 = 0.02;
+        // Eps-stability tolerance: the eps=1e-2 and eps=3e-2 finite differences
+        // must agree to within this relative bound. var[7] (0.185 vs 0.175,
+        // ~5%) and var[35] (0.051 vs 0.049, ~4%) pass easily; the noisy small
+        // grads (var[9] 3.5× swing, var[23] 2.6× swing) are excluded.
+        const FD_EPS_STABLE_TOL: f64 = 0.4;
         // BF16 + central-diff tolerance: the tape matches fd within this bound
-        // on every informative Var (var[7]=0.07, var[35]=0.06), so 0.35 leaves
+        // on every stable Var (var[7]=0.07, var[35]=0.06), so 0.35 leaves
         // safe headroom while still catching a genuinely wrong grad.
         const FD_TAPE_REL_TOL: f64 = 0.35;
 
-        let pick_eps = |primary: f32| -> Vec<(usize, f64, f64, f64)> {
-            fd_rows
+        // Pair each target Var's two eps rows (eps=1e-2 + eps=3e-2) and decide
+        // stability. Only Vars whose fd is eps-consistent feed the gate; the
+        // eps=1e-2 row's rel_tape/rel_candle are used for the asserts.
+        let mut stable_gated: Vec<(usize, f64, f64, f64)> = Vec::new();
+        for &vi in &targets {
+            let fd_1e2 = fd_rows
                 .iter()
-                .filter(|(_, eps, fd, _, _)| {
-                    (*eps - primary).abs() < 1e-6 && fd.abs() > FD_INFORMATIVE_MIN
-                })
-                .map(|(vi, _, fd, rt, rc)| (*vi, *fd, *rt, *rc))
-                .collect()
-        };
-        for (vi, eps, fd, _, _) in &fd_rows {
-            if (*eps - 1e-2f32).abs() < 1e-6 && fd.abs() <= FD_INFORMATIVE_MIN {
+                .find(|(v, eps, ..)| *v == vi && (*eps - 1e-2f32).abs() < 1e-6)
+                .map(|(_, _, fd, rt, rc)| (*fd, *rt, *rc));
+            let fd_3e2 = fd_rows
+                .iter()
+                .find(|(v, eps, ..)| *v == vi && (*eps - 3e-2f32).abs() < 1e-6)
+                .map(|(_, _, fd, _, _)| *fd);
+            let (Some((fd1, rt1, rc1)), Some(fd3)) = (fd_1e2, fd_3e2) else {
+                continue;
+            };
+            // (a) informative: eps=1e-2 fd is above the BF16-noise floor.
+            if fd1.abs() <= FD_INFORMATIVE_MIN {
                 eprintln!(
-                    "[FD-CHECK] var[{vi}] eps={eps:.0e} |fd|={:.4} <= {FD_INFORMATIVE_MIN} \
-                     -> SKIPPED (finite-diff noise, uninformative)",
-                    fd.abs()
+                    "[FD-CHECK] var[{vi}] UNSTABLE/noisy (excluded): \
+                     fd_1e-2={fd1:+.6} fd_3e-2={fd3:+.6} (|fd_1e-2|<={FD_INFORMATIVE_MIN}, below noise floor)"
+                );
+                continue;
+            }
+            // (b) eps-stable: the two eps agree within FD_EPS_STABLE_TOL,
+            // proving a stable linear regime (not BF16-noise-driven).
+            let eps_rel_swing = (fd1 - fd3).abs() / fd1.abs().max(fd3.abs()).max(1e-9);
+            if eps_rel_swing < FD_EPS_STABLE_TOL {
+                eprintln!(
+                    "[FD-CHECK] var[{vi}] STABLE (gated): \
+                     fd_1e-2={fd1:+.6} fd_3e-2={fd3:+.6} eps_rel_swing={eps_rel_swing:.4} < {FD_EPS_STABLE_TOL}"
+                );
+                stable_gated.push((vi, fd1, rt1, rc1));
+            } else {
+                eprintln!(
+                    "[FD-CHECK] var[{vi}] UNSTABLE/noisy (excluded): \
+                     fd_1e-2={fd1:+.6} fd_3e-2={fd3:+.6} eps_rel_swing={eps_rel_swing:.4} >= {FD_EPS_STABLE_TOL}"
                 );
             }
         }
-        // Prefer the eps=1e-2 informative rows; fall back to eps=3e-2 only if
-        // 1e-2 produced none.
-        let informative = {
-            let primary = pick_eps(1e-2);
-            if primary.is_empty() {
-                eprintln!(
-                    "[FD-CHECK] no informative eps=1e-2 rows; falling back to eps=3e-2"
-                );
-                pick_eps(3e-2)
-            } else {
-                primary
-            }
-        };
 
         eprintln!(
-            "[FD-CHECK] {} informative row(s) (|fd| > {FD_INFORMATIVE_MIN}) feed the grad-correctness gate",
-            informative.len()
+            "[FD-CHECK] {} stable row(s) (|fd|>{FD_INFORMATIVE_MIN} AND eps-consistent) feed the grad-correctness gate",
+            stable_gated.len()
         );
 
-        // Not vacuous: there must be at least ~2 informative Vars, otherwise the
-        // gate proves nothing (pod data shows var[7] + var[35] + var[23]).
+        // Not vacuous: there must be at least 2 stable Vars (pod data: var[7] +
+        // var[35]). If somehow fewer, fail loudly so we investigate rather than
+        // silently passing on an empty gate.
         assert!(
-            informative.len() >= 2,
-            "[FD-CHECK] only {} informative finite-diff row(s) (|fd| > {FD_INFORMATIVE_MIN}); \
-             gate would be vacuous — widen the target Var set or check the FD probe",
-            informative.len()
+            stable_gated.len() >= 2,
+            "[FD-CHECK] only {} stable finite-diff row(s) (|fd|>{FD_INFORMATIVE_MIN} AND eps-consistent); \
+             gate would be vacuous — pod data expects var[7] + var[35]; widen the target set or check the FD probe",
+            stable_gated.len()
         );
 
-        for (vi, fd, rel_tape, rel_candle) in &informative {
+        for (vi, fd, rel_tape, rel_candle) in &stable_gated {
             // (1) Disambiguation: the tape is at least as close to ground truth
             // as candle. Candle's autograd drops the full-attn/conv gradient, so
             // on these Vars it is strictly the worse reference.
