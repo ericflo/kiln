@@ -2596,3 +2596,224 @@ fn add_lora_delta_to_base_routes_through_tape_when_gated() {
     assert_eq!(out.dtype(), candle_core::DType::F32);
     assert!(out.device().is_cuda());
 }
+
+// ----------------------------------------------------------------------
+// CP-4 attention-block tape coverage (#1082) — `try_tape_flash_attn_cuda`.
+//
+// The CP-4 tape-authoritative SFT backward seeds the tape at the loss and
+// walks it; for LoRA `Var` grads to flow, EVERY op between a q/k/v
+// projection (where LoRA applies) and the loss must record onto the kt
+// Tape. FlashAttention sits squarely on that path but previously recorded
+// only onto candle's `BackpropOp` graph (`CudaFlashAttentionTrainingBf16`
+// CustomOp3) — invisible to the tape walk, so the q/k/v projection grads
+// (and their LoRA Vars) were a disconnected island and harvested 0 grads.
+//
+// `try_tape_flash_attn_cuda` records a `FlashAttnBackward` node that, on a
+// backward walk, dispatches `flash_attn_bwd_kt` and GQA-collapses dk/dv
+// back to `heads_kv`. This test proves: (1) exactly one node with 3 inputs
+// (q,k,v) is recorded; (2) the walk emits dq/dk/dv with the right shapes
+// (dk/dv collapsed to heads_kv); (3) the grads are nonzero (the exact
+// failure mode the CP-4 frontier hit); (4) they match a direct
+// `flash_attn_bwd_kt` + collapse oracle.
+// ----------------------------------------------------------------------
+
+/// Build a contiguous CUDA BF16 tensor of the given dims for attention
+/// inputs (small, deterministic, modest magnitude).
+fn build_attn_bf16(device: &Device, dims: &[usize], seed: u64) -> Tensor {
+    let len: usize = dims.iter().product();
+    let host = random_bf16_vec(len, seed, 0.25);
+    Tensor::from_vec(host, dims.to_vec(), &Device::Cpu)
+        .expect("attn cpu")
+        .to_device(device)
+        .expect("attn -> cuda")
+        .contiguous()
+        .expect("attn contig")
+}
+
+#[test]
+fn tape_flash_attn_records_node_and_emits_qkv_grads() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    let device = match cuda_device() {
+        Some(d) => d,
+        None => {
+            eprintln!("tape_flash_attn node + qkv grads: no CUDA device — skipping");
+            return;
+        }
+    };
+
+    // GQA: 4 query heads, 2 KV heads (groups=2), head_dim=128 (a supported
+    // FA2 head_dim), b=1, sq=sk=16. Small enough to be fast, GQA enough to
+    // exercise the dk/dv group-collapse path.
+    let (b, sq, sk, hq, hkv, hd) = (1usize, 16usize, 16usize, 4usize, 2usize, 128usize);
+    let q = build_attn_bf16(&device, &[b, sq, hq, hd], 0x1111_2222_3333_4444);
+    let k = build_attn_bf16(&device, &[b, sk, hkv, hd], 0x5555_6666_7777_8888);
+    let v = build_attn_bf16(&device, &[b, sk, hkv, hd], 0x9999_AAAA_BBBB_CCCC);
+
+    unsafe {
+        std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
+        std::env::set_var("KILN_USE_TAPE_FLASH_ATTN", "1");
+    }
+
+    // Forward inside a tape scope. Records one FlashAttnBackward node with
+    // inputs [q, k, v].
+    let (res, tape) = kiln_model::tape_forward::with_thread_local_tape(|| {
+        kiln_model::tape_forward::try_tape_flash_attn_cuda(&q, &k, &v, hq, hkv, hd)
+    });
+    let out = res
+        .expect("try_tape_flash_attn_cuda ok")
+        .expect("returned Some(out) — gate + scope both on");
+    assert_eq!(out.shape().dims(), &[b, sq, hq, hd], "attn out shape");
+    assert!(out.device().is_cuda(), "out stays on CUDA");
+    assert_eq!(out.dtype(), DType::BF16, "flash attn output is BF16");
+
+    assert_eq!(
+        tape.len(),
+        1,
+        "flash-attn must record exactly one tape node (got {}). Empty means \
+         the adapter fell through (gate off / envelope rejected); >1 means \
+         an over-record bug.",
+        tape.len()
+    );
+    let node = &tape.nodes()[0];
+    let out_id = node.output_id;
+    let input_ids = node.input_ids.clone();
+    assert_eq!(
+        input_ids.len(),
+        3,
+        "flash-attn records exactly three inputs (q, k, v); got {}",
+        input_ids.len()
+    );
+
+    // Backward walk: seed grad shaped like out (sum-loss seed of ones).
+    let seed_host = vec![half::bf16::from_f32(1.0); b * sq * hq * hd];
+    let seed = Tensor::from_vec(seed_host, (b, sq, hq, hd), &Device::Cpu)
+        .expect("seed cpu")
+        .to_device(&device)
+        .expect("seed -> cuda")
+        .contiguous()
+        .expect("seed contig");
+    let seed_kt =
+        kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&seed).expect("seed kt borrow");
+    let mut seeds = HashMap::new();
+    seeds.insert(out_id, seed_kt);
+
+    let grads = tape
+        .backward_with_seeds(seeds, |a, b| kiln_tensor::ops::add(a, b))
+        .expect("flash-attn tape backward walk");
+
+    // Input order is [q, k, v]; FlashAttnBackward returns [dq, dk, dv].
+    let dq_kt = grads.get(input_ids[0]).expect("dq present");
+    let dk_kt = grads.get(input_ids[1]).expect("dk present");
+    let dv_kt = grads.get(input_ids[2]).expect("dv present");
+    let dq = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(dq_kt).expect("dq -> candle");
+    let dk = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(dk_kt).expect("dk -> candle");
+    let dv = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(dv_kt).expect("dv -> candle");
+
+    // dq keeps the query-head count; dk/dv are GQA-collapsed to heads_kv.
+    assert_eq!(dq.shape().dims(), &[b, sq, hq, hd], "dq shape == q");
+    assert_eq!(
+        dk.shape().dims(),
+        &[b, sk, hkv, hd],
+        "dk shape == k (GQA-collapsed to heads_kv)"
+    );
+    assert_eq!(
+        dv.shape().dims(),
+        &[b, sk, hkv, hd],
+        "dv shape == v (GQA-collapsed to heads_kv)"
+    );
+
+    let max_abs = |t: &Tensor| {
+        t.to_dtype(DType::F32)
+            .expect("f32")
+            .abs()
+            .expect("abs")
+            .flatten_all()
+            .expect("flat")
+            .max(0)
+            .expect("max")
+            .to_scalar::<f32>()
+            .expect("scalar")
+    };
+    // The exact CP-4 failure mode was "0 grads". Assert nonzero.
+    assert!(max_abs(&dq) > 1e-4, "dq is essentially zero — tape backward not reaching q");
+    assert!(max_abs(&dk) > 1e-4, "dk is essentially zero — tape backward not reaching k");
+    assert!(max_abs(&dv) > 1e-4, "dv is essentially zero — tape backward not reaching v");
+
+    // Oracle: call flash fwd/bwd directly with the same inputs + the same
+    // F32 GQA collapse the op uses, and compare. Same kernel + same
+    // collapse ⇒ effectively bit-exact (small tolerance covers any
+    // backward-accumulation nondeterminism on these tiny shapes).
+    let q_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&q).expect("q kt");
+    let k_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&k).expect("k kt");
+    let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&v).expect("v kt");
+    let scale = 1.0_f32 / (hd as f32).sqrt();
+    let (out_ref_kt, lse_ref_kt) =
+        kiln_flash_attn::flash_attn_fwd_kt(&q_kt, &k_kt, &v_kt, scale, true).expect("ref fwd");
+    let seed_kt2 = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&seed).expect("seed kt2");
+    let (dq_ref_kt, dk_exp_kt, dv_exp_kt) = kiln_flash_attn::flash_attn_bwd_kt(
+        &seed_kt2, &q_kt, &k_kt, &v_kt, &out_ref_kt, &lse_ref_kt, scale, true,
+    )
+    .expect("ref bwd");
+    let groups = hq / hkv;
+    let collapse = |dexp: &kiln_tensor::Tensor| -> Tensor {
+        let f = kiln_tensor::ops::cast(dexp, kiln_tensor::DType::F32).expect("cast f32");
+        let g = f.reshape(vec![b, sk, hkv, groups, hd]).expect("reshape groups");
+        let g = if g.is_contiguous() { g } else { g.contiguous().expect("contig") };
+        let s = kiln_tensor::ops::sum_axis(&g, 3).expect("sum groups");
+        let bf = kiln_tensor::ops::cast(&s, kiln_tensor::DType::BF16).expect("cast bf16");
+        kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&bf).expect("ref -> candle")
+    };
+    let dq_ref = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&dq_ref_kt).expect("dq_ref candle");
+    let dk_ref = collapse(&dk_exp_kt);
+    let dv_ref = collapse(&dv_exp_kt);
+    let out_ref = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_ref_kt).expect("out_ref");
+
+    assert!(max_abs_diff(&out, &out_ref) < 2e-2, "out vs direct flash fwd");
+    assert!(max_abs_diff(&dq, &dq_ref) < 2e-2, "dq vs direct flash bwd");
+    assert!(max_abs_diff(&dk, &dk_ref) < 2e-2, "dk vs direct flash bwd + collapse");
+    assert!(max_abs_diff(&dv, &dv_ref) < 2e-2, "dv vs direct flash bwd + collapse");
+
+    unsafe {
+        std::env::remove_var("KILN_USE_TAPE_FORWARD");
+        std::env::remove_var("KILN_USE_TAPE_FLASH_ATTN");
+    }
+}
+
+#[test]
+fn tape_flash_attn_short_circuits_without_active_scope() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    let device = match cuda_device() {
+        Some(d) => d,
+        None => {
+            eprintln!("tape_flash_attn short-circuit: no CUDA device — skipping");
+            return;
+        }
+    };
+    let (b, sq, sk, hq, hkv, hd) = (1usize, 16usize, 16usize, 4usize, 2usize, 128usize);
+    let q = build_attn_bf16(&device, &[b, sq, hq, hd], 0x10);
+    let k = build_attn_bf16(&device, &[b, sk, hkv, hd], 0x20);
+    let v = build_attn_bf16(&device, &[b, sk, hkv, hd], 0x30);
+
+    unsafe {
+        std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
+        std::env::set_var("KILN_USE_TAPE_FLASH_ATTN", "1");
+    }
+
+    // Called OUTSIDE a `with_thread_local_tape` scope: the gate is on but
+    // there is no active tape, so the adapter must return None cleanly
+    // (caller falls through to the existing CustomOp3 / fast path).
+    let res = kiln_model::tape_forward::try_tape_flash_attn_cuda(&q, &k, &v, hq, hkv, hd)
+        .expect("adapter returns Ok with no active tape");
+    assert!(
+        res.is_none(),
+        "flash-attn adapter must return None with no active tape scope, \
+         not record a dangling node"
+    );
+
+    unsafe {
+        std::env::remove_var("KILN_USE_TAPE_FORWARD");
+        std::env::remove_var("KILN_USE_TAPE_FLASH_ATTN");
+    }
+}

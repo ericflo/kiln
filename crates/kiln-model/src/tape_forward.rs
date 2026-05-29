@@ -106,8 +106,8 @@
 use anyhow::{Context, Result};
 use candle_core::Tensor;
 use kiln_autograd::{
-    AddBackward, CrossEntropyKtBackward, EmbeddingBackward, LoraDeltaAddBackward, MatmulBackward,
-    MulSigmoidGateBackward, RopeSplitHalfBackward, SiluBackward, Tape,
+    AddBackward, BackwardOp, CrossEntropyKtBackward, EmbeddingBackward, LoraDeltaAddBackward,
+    MatmulBackward, MulSigmoidGateBackward, RopeSplitHalfBackward, SiluBackward, Tape,
 };
 
 use crate::lora_loader::LoraProjectionWeights;
@@ -1078,6 +1078,286 @@ pub fn try_tape_lora_add_cuda(
     // the bridge panics on a duplicate kt output id, so we pick the one
     // the consumer actually carries into the loss graph and chain on
     // the same id for upstream re-use via `kt_input_for_candle(out.id())`.
+    kiln_kt_bridge::tape_bridge::register_output_mapping(out_kt.id(), out.id());
+    kiln_kt_bridge::tape_bridge::retain_output_for_chaining(&out_kt, out.id());
+
+    Ok(Some(out))
+}
+
+/// True iff `KILN_USE_TAPE_FLASH_ATTN` is set to an enable value.
+///
+/// Separate gate from `KILN_USE_TAPE_FORWARD` so the flash-attention tape
+/// adapter rolls out independently of the rest of the tape-forward fleet:
+/// flipping it changes the attention-block gradient path from candle's
+/// `CudaFlashAttentionTrainingBf16` CustomOp3 to a kt `Tape` node, so the
+/// opt-in is intentionally narrow. Cached after first read, matching
+/// [`tape_lora_add_enabled`].
+pub fn tape_flash_attn_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("KILN_USE_TAPE_FLASH_ATTN")
+            .map(|v| {
+                let v = v.trim().to_lowercase();
+                !(v.is_empty() || v == "0" || v == "false" || v == "no")
+            })
+            .unwrap_or(false)
+    })
+}
+
+/// Fused tape backward for the vendored FlashAttention-2 forward
+/// (`kiln_flash_attn::flash_attn_fwd_kt`).
+///
+/// # Why this `BackwardOp` lives in `kiln-model`, not `kiln-autograd`
+///
+/// Every other `BackwardOp` is a device-agnostic composite of
+/// `kiln_tensor::ops` and lives in `kiln-autograd`. FlashAttention is the
+/// exception: its forward and backward are a single fused CUDA kernel
+/// (`kiln_flash_attn::flash_attn_{fwd,bwd}_kt`) with no device-agnostic
+/// composite matching the kernel's numerics or memory profile. Since
+/// `kiln-autograd` deliberately carries no `kiln-flash-attn` dependency
+/// (layering — it stays buildable on every backend), the op that
+/// dispatches the kernel lives here in `kiln-model` (which already depends
+/// on `kiln-flash-attn`) and implements the `kiln_autograd::BackwardOp`
+/// trait. The CPU/composite reference for parity lives in the test.
+///
+/// # Saved tensors
+///
+/// `q`, `k`, `v` (the GROUPED GQA inputs as handed to `flash_attn_fwd_kt`),
+/// the forward output `out`, and `softmax_lse` — all kt clones (Arc bumps;
+/// no allocation). `scale`/`causal` are the forward params;
+/// `heads_q`/`heads_kv` drive the GQA gradient collapse.
+///
+/// # Backward
+///
+/// `flash_attn_bwd_kt(dout, q, k, v, out, lse, scale, causal)` returns
+/// `(dq, dk, dv)` where `dk`/`dv` come back EXPANDED to `heads_q` (the
+/// kernel internally broadcasts grouped K/V). When `heads_kv != heads_q`
+/// we collapse them to `heads_kv` by reshaping to `[b, sk, heads_kv,
+/// groups, hd]` and summing the group axis — mirroring the
+/// `CudaFlashAttentionTrainingBf16::bwd` candle path exactly. The collapse
+/// runs in F32 (cast → sum → cast back to BF16) so the group reduction
+/// doesn't lose precision in BF16.
+#[derive(Debug)]
+pub(crate) struct FlashAttnBackward {
+    q: kiln_tensor::Tensor,
+    k: kiln_tensor::Tensor,
+    v: kiln_tensor::Tensor,
+    out: kiln_tensor::Tensor,
+    softmax_lse: kiln_tensor::Tensor,
+    scale: f32,
+    causal: bool,
+    heads_q: usize,
+    heads_kv: usize,
+}
+
+impl BackwardOp for FlashAttnBackward {
+    fn name(&self) -> &'static str {
+        "flash_attn_backward"
+    }
+    fn input_count(&self) -> usize {
+        // q, k, v.
+        3
+    }
+    fn apply(
+        &self,
+        grad_output: &kiln_tensor::Tensor,
+    ) -> kiln_tensor::Result<Vec<Option<kiln_tensor::Tensor>>> {
+        use kiln_tensor::{bail, DType};
+
+        // FA bwd needs a BF16, compact-contiguous dout shaped like `out`.
+        let dout = if grad_output.dtype() == DType::BF16 {
+            grad_output.clone()
+        } else {
+            kiln_tensor::ops::cast(grad_output, DType::BF16)?
+        };
+        let dout = if dout.is_contiguous() {
+            dout
+        } else {
+            dout.contiguous()?
+        };
+
+        let (dq, dk_exp, dv_exp) = kiln_flash_attn::flash_attn_bwd_kt(
+            &dout,
+            &self.q,
+            &self.k,
+            &self.v,
+            &self.out,
+            &self.softmax_lse,
+            self.scale,
+            self.causal,
+        )
+        .map_err(|e| {
+            kiln_tensor::Error::Msg(format!("FlashAttnBackward: flash_attn_bwd_kt: {e:?}"))
+        })?;
+
+        // GQA collapse: dk/dv come back expanded to heads_q.
+        let (dk, dv) = if self.heads_kv != self.heads_q {
+            if self.heads_kv == 0 || self.heads_q % self.heads_kv != 0 {
+                bail!(
+                    "FlashAttnBackward: invalid GQA heads_q={} heads_kv={}",
+                    self.heads_q,
+                    self.heads_kv
+                );
+            }
+            let groups = self.heads_q / self.heads_kv;
+            let collapse =
+                |dexp: &kiln_tensor::Tensor| -> kiln_tensor::Result<kiln_tensor::Tensor> {
+                    let s = dexp.shape();
+                    if s.len() != 4 {
+                        bail!(
+                            "FlashAttnBackward: expanded grad must be rank-4 \
+                             [b,sk,heads_q,hd], got {s:?}"
+                        );
+                    }
+                    let (b, sk, hq, hd) = (s[0], s[1], s[2], s[3]);
+                    if hq != self.heads_q {
+                        bail!(
+                            "FlashAttnBackward: expanded grad heads {hq} != heads_q {}",
+                            self.heads_q
+                        );
+                    }
+                    // Reduce groups in F32 (BF16 group-sum loses precision).
+                    let f32g = kiln_tensor::ops::cast(dexp, DType::F32)?;
+                    let grouped = f32g.reshape(vec![b, sk, self.heads_kv, groups, hd])?;
+                    let grouped = if grouped.is_contiguous() {
+                        grouped
+                    } else {
+                        grouped.contiguous()?
+                    };
+                    let summed = kiln_tensor::ops::sum_axis(&grouped, 3)?; // [b,sk,heads_kv,hd]
+                    kiln_tensor::ops::cast(&summed, DType::BF16)
+                };
+            (collapse(&dk_exp)?, collapse(&dv_exp)?)
+        } else {
+            (dk_exp, dv_exp)
+        };
+
+        Ok(vec![Some(dq), Some(dk), Some(dv)])
+    }
+}
+
+/// Attempt to route the FlashAttention-2 forward through the kt `Tape`
+/// instead of candle's `CudaFlashAttentionTrainingBf16` CustomOp3.
+///
+/// `q` is `[b, sq, heads_q, hd]`; `k`/`v` are the GROUPED `[b, sk,
+/// heads_kv, hd]` GQA tensors (the CUDA FA2 wrapper consumes grouped K/V
+/// directly). Returns the attention output `[b, sq, heads_q, hd]` (the
+/// caller reshapes to `[b, sq, heads_q*hd]` for o_proj). The recorded
+/// [`FlashAttnBackward`] node emits GQA-collapsed `dq/dk/dv` so a
+/// tape-authoritative backward seeded at the loss reaches the q/k/v
+/// projections (and therefore their LoRA `Var`s) — this is the
+/// attention-block link the CP-4 tape-authoritative SFT path was missing
+/// (flash-attn previously recorded only onto candle's `BackpropOp` graph,
+/// leaving the LoRA tape nodes a disconnected island).
+///
+/// `Ok(None)` (caller falls through to the existing CustomOp3 / fast path)
+/// when: the gate is off, no tape scope is active, the inputs leave the
+/// BF16/CUDA/contiguous/`head_dim∈{128,256}`/valid-GQA envelope, or a kt
+/// borrow fails.
+pub fn try_tape_flash_attn_cuda(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    num_heads: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+) -> Result<Option<Tensor>> {
+    if !tape_forward_enabled() || !tape_flash_attn_enabled() {
+        return Ok(None);
+    }
+
+    // Device + dtype + layout envelope — mirror
+    // `cuda_flash_attention_training_bf16`'s gate so we never record a
+    // node the kernel would reject.
+    if q.dtype() != candle_core::DType::BF16
+        || k.dtype() != candle_core::DType::BF16
+        || v.dtype() != candle_core::DType::BF16
+        || !matches!(q.device(), candle_core::Device::Cuda(_))
+        || !matches!(k.device(), candle_core::Device::Cuda(_))
+        || !matches!(v.device(), candle_core::Device::Cuda(_))
+        || !q.is_contiguous()
+        || !k.is_contiguous()
+        || !v.is_contiguous()
+        || !matches!(head_dim, 128 | 256)
+        || num_kv_heads == 0
+        || num_heads % num_kv_heads != 0
+    {
+        return Ok(None);
+    }
+    let Ok((bq, _sq, hq, dq_)) = q.dims4() else {
+        return Ok(None);
+    };
+    let Ok((bk, sk, hk, dk_)) = k.dims4() else {
+        return Ok(None);
+    };
+    let Ok((bv, sv, hv, dv_)) = v.dims4() else {
+        return Ok(None);
+    };
+    if bq != bk
+        || bq != bv
+        || sk != sv
+        || hq != num_heads
+        || hk != num_kv_heads
+        || hv != num_kv_heads
+        || dq_ != head_dim
+        || dk_ != head_dim
+        || dv_ != head_dim
+    {
+        return Ok(None);
+    }
+
+    let softmax_scale = 1.0 / (head_dim as f32).sqrt();
+    let causal = true;
+
+    // kt inputs — thread upstream adapter outputs (RoPE / q_norm produced
+    // q; v straight from v_proj+lora) so the tape stays connected.
+    let q_kt = match tape_kt_input(q) {
+        Some(t) => t,
+        None => return Ok(None),
+    };
+    let k_kt = match tape_kt_input(k) {
+        Some(t) => t,
+        None => return Ok(None),
+    };
+    let v_kt = match tape_kt_input(v) {
+        Some(t) => t,
+        None => return Ok(None),
+    };
+
+    let out_kt = match with_active_tape(|tape: &mut Tape| -> Result<_> {
+        let (out_kt, lse_kt) =
+            kiln_flash_attn::flash_attn_fwd_kt(&q_kt, &k_kt, &v_kt, softmax_scale, causal)
+                .map_err(|e| anyhow::anyhow!("kt flash_attn_fwd_kt: {e:?}"))?;
+
+        tape.record(
+            &out_kt,
+            &[&q_kt, &k_kt, &v_kt],
+            Box::new(FlashAttnBackward {
+                q: q_kt.clone(),
+                k: k_kt.clone(),
+                v: v_kt.clone(),
+                out: out_kt.clone(),
+                softmax_lse: lse_kt,
+                scale: softmax_scale,
+                causal,
+                heads_q: num_heads,
+                heads_kv: num_kv_heads,
+            }),
+        );
+        Ok(out_kt)
+    }) {
+        Some(result) => result,
+        None => return Ok(None),
+    };
+
+    let out_kt =
+        out_kt.context("tape_forward::try_tape_flash_attn_cuda: kt-tape forward failed")?;
+    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+        .context("tape_forward::try_tape_flash_attn_cuda: kt -> candle copy failed")?;
+
+    kiln_kt_bridge::tape_bridge::register_input_mapping(q_kt.id(), q.id());
+    kiln_kt_bridge::tape_bridge::register_input_mapping(k_kt.id(), k.id());
+    kiln_kt_bridge::tape_bridge::register_input_mapping(v_kt.id(), v.id());
     kiln_kt_bridge::tape_bridge::register_output_mapping(out_kt.id(), out.id());
     kiln_kt_bridge::tape_bridge::retain_output_for_chaining(&out_kt, out.id());
 
