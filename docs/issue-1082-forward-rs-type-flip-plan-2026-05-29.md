@@ -36,13 +36,23 @@ grad-delivery plumbing** the optimizer still reads.
 
 ## ⚠️ The flip is gated on a kt-native training substrate (the true long pole)
 
-Even the **default-on tape-authoritative** path still calls candle `loss.backward()`
-on the *detached* loss to obtain a `GradStore`, then inserts the kt-tape grads keyed by
-each LoRA `Var`'s candle `TensorId` (`trainer.rs:10756–10783`). The kt-native
-`Tape::backward → kt-GradStore` substrate exists (`tape_step.rs`) but is **not wired to
-production `Parameter`s**. The `KILN_USE_TAPE_AUTHORITATIVE=0` opt-out **and the CPU
-device path** (forced regardless of the flag, device-gate at 10809) are pure candle
-`loss.backward()`.
+**Precise mechanism (verified by reading `trainer.rs:10715–10787`):** the default-on
+`standard_forward_backward_tape_authoritative` computes the **gradients via the kt tape**
+(`with_tape_authoritative_scope` walks the connected tape from the loss and returns
+`grads_by_candle_raw` — kt grads; NO candle gradient computation). The `loss.backward()`
+at 10756 is **only a plumbing hack to obtain a `GradStore` container** (candle's
+`GradStore::new()` is private) — it runs on the *detached* loss (returns `{loss: ones}`,
+no real graph) and is immediately overwritten by `grads.insert_id(var.id(),
+kt_tensor_to_candle_cuda_copy(&kt_grad))`. So the candle dependency in the training
+backward is the **`GradStore` TYPE + `Var`/`TensorId` keying + the kt→candle grad copy**,
+NOT the gradient math (which is already kt-tape and finite-diff-validated as more correct
+than candle). The `KILN_USE_TAPE_AUTHORITATIVE=0` opt-out **and the CPU device path**
+(device-gate at 10809) remain pure candle `loss.backward()`.
+
+This **de-risks Increment 0**: it is a *GradStore-plumbing swap* (expose/replace the
+candle `GradStore` with a kt-keyed grad map; make `optimizer_step` read kt grads; drop the
+detached-loss container hack), NOT a backward rebuild. The hard part is the
+`Var`/`Parameter`/optimizer keying, not the gradient computation.
 
 **Consequence:** flipping `forward.rs` to kt severs the candle autograd graph that
 `model_forward`'s candle-typed return feeds into — which breaks *both* the
