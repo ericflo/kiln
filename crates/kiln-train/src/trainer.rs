@@ -13613,9 +13613,18 @@ mod tests {
         let label_mask = vec![false, false, true, true, true, true, false];
         let backend = backend::for_device(&device);
 
-        // Adapters fire only inside a tape scope; cached gate on for the proc.
+        // Adapters fire only inside a tape scope; cached gates on for the proc.
+        // All CP-4 attention/GDN tape gates merged this session — set them so
+        // the tape-authoritative walk records the full chain it can. (OnceLock-
+        // cached: run this test under `cargo nextest` for per-process isolation.)
         unsafe {
             std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
+            std::env::set_var("KILN_USE_TAPE_LORA_ADD", "1");
+            std::env::set_var("KILN_USE_TAPE_FLASH_ATTN", "1");
+            std::env::set_var("KILN_USE_TAPE_SDPA", "1");
+            std::env::set_var("KILN_USE_TAPE_GDN", "1");
+            std::env::set_var("KILN_USE_TAPE_GDN_GATED_NORM", "1");
+            std::env::set_var("KILN_USE_TAPE_GDN_QK_NORM", "1");
         }
 
         // BASELINE: pure candle (no tape scope; authoritative off -> CE composite).
@@ -13702,8 +13711,14 @@ mod tests {
         // tracked coverage gap (wire the LoRA matmuls through
         // try_tape_matmul_cuda next), not a flaky test. Where grads exist on
         // BOTH paths they must match.
+        let total = params.all_vars().len();
         let mut compared = 0usize;
+        let mut tape_has = 0usize;
         for v in params.all_vars() {
+            let in_a = grads_a.get(v.as_tensor()).is_some();
+            if in_a {
+                tape_has += 1;
+            }
             if let (Some(a), Some(c)) = (grads_a.get(v.as_tensor()), grads_c.get(v.as_tensor())) {
                 let r = rel(a, c);
                 assert!(
@@ -13713,9 +13728,11 @@ mod tests {
                 compared += 1;
             }
         }
+        // CP-4 LoRA-grad coverage measurement (#1082): with all tape gates on,
+        // how many of the LoRA Vars get a tape-routed grad that matches candle?
         eprintln!(
-            "tape-authoritative parity: loss rel {lrel:.4}; {compared} param-Var grads matched \
-             (LoRA matmul tape-routing pending)"
+            "[CP4-COVERAGE] loss rel {lrel:.4}; total_vars={total} tape_has_grad={tape_has} \
+             matched_candle={compared}"
         );
     }
 
