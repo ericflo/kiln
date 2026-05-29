@@ -31,6 +31,7 @@ mod element;
 mod error;
 mod layout;
 mod method_api;
+mod operators;
 pub mod ops;
 pub mod probe;
 pub mod profile;
@@ -68,7 +69,7 @@ pub use activation_registry::{
 pub use allocator::{allocator_frozen_error, Allocator, AllocatorMode};
 pub use cpu_allocator::CpuAllocator;
 pub use determinism::{deterministic_enabled, Determinism, DeterministicCache, DETERMINISTIC_CACHED};
-pub use device::{Backend, Device};
+pub use device::{Backend, Device, DeviceLocation};
 pub use device_op::{dispatch1, dispatch2, dispatch3, BackwardOp, DeviceOp1, DeviceOp2, DeviceOp3};
 pub use dtype::DType;
 pub use element::Element;

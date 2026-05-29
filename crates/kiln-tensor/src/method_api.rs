@@ -597,6 +597,203 @@ impl Tensor {
     }
 
     // ==================================================================
+    // argmax — candle: `pub fn argmax<D: Dim>(&self, dim: D) -> Result<Self>`
+    // candle squeezes the reduced axis (its `argmax`, *not*
+    // `argmax_keepdim`). kt's [`ops::argmax_last_dim`] already squeezes
+    // the *trailing* axis, so for a general `dim` we move that axis to
+    // the end first (zero-copy permute), reduce, and let the squeeze
+    // drop it — leaving the remaining axes in their original relative
+    // order (exactly candle's output layout). Output dtype is `I64`
+    // (kt's `argmax_last_dim` convention), tie-broken by lowest index
+    // (matches `candle_core::Tensor::argmax`).
+    // ==================================================================
+
+    /// Index of the maximum along `dim`, with `dim` removed from the
+    /// output shape. candle's `argmax` (squeezes the reduced axis).
+    ///
+    /// Delegates to [`ops::argmax_last_dim`] directly when `dim` is the
+    /// last axis; otherwise [`Tensor::move_axis`]es the target axis to
+    /// the end (zero-copy), reduces, and the trailing-axis squeeze
+    /// leaves the other axes in their original order.
+    pub fn argmax<Dm: Dim>(&self, dim: Dm) -> Result<Self> {
+        let rank = self.rank();
+        let axis = dim.to_index(rank, "argmax")?;
+        if axis == rank - 1 {
+            ops::argmax_last_dim(self)
+        } else {
+            // Move `axis` to the trailing position; the squeeze in
+            // argmax_last_dim then drops it, leaving the remaining axes
+            // in their original relative order. `move_axis` is a permute
+            // (non-contiguous view); `ops::argmax_last_dim` requires a
+            // contiguous input, so materialize first.
+            let moved = self.move_axis(axis, rank - 1)?.contiguous()?;
+            ops::argmax_last_dim(&moved)
+        }
+    }
+
+    // ==================================================================
+    // index_add — candle:
+    //   `pub fn index_add<D: Dim>(&self, indexes, source, dim) -> Result<Self>`
+    // candle returns `self` with `source` *added into* `self` at the
+    // positions named by `indexes` along `dim`. kt's
+    // [`ops::scatter_add`] is the "into-zeros" sibling (the
+    // index_select backward): it builds a zero output of the target
+    // shape and scatters `source` in. So candle's index_add is
+    // `self + scatter_add(source, dim, indexes, self.dims()[dim])`.
+    // ==================================================================
+
+    /// Add `source` into a copy of `self` at the rows named by
+    /// `indexes` along `dim`. candle's `index_add` (arg order:
+    /// `indexes`, `source`, `dim`).
+    ///
+    /// Composed as `self + ops::scatter_add(source, dim, indexes,
+    /// self.dims()[dim])`: `scatter_add` produces a zero tensor of
+    /// `self`'s shape with `source` scattered into the indexed
+    /// positions, and the elementwise add folds that onto `self`.
+    pub fn index_add<Dm: Dim>(&self, indexes: &Self, source: &Self, dim: Dm) -> Result<Self> {
+        let axis = dim.to_index(self.rank(), "index_add")?;
+        let target_dim = self.shape()[axis];
+        let scattered = ops::scatter_add(source, axis, indexes, target_dim)?;
+        ops::add(self, &scattered)
+    }
+
+    // ==================================================================
+    // Autograd-free shims — candle methods that interrogate or detach
+    // the computation graph. kt's [`Tensor`] is a pure view/storage
+    // handle with **no autograd graph** (the tape lives in a separate
+    // crate), so these collapse to constants / identity / deep-copy.
+    // ==================================================================
+
+    /// Whether the autograd graph should track ops on this tensor.
+    /// candle: `self.is_variable || self.op.is_some()`.
+    ///
+    /// **Always `false` for kt.** kt's [`Tensor`] carries no autograd
+    /// metadata — it is a storage+layout handle, and gradient tracking
+    /// lives entirely in the separate `kiln-autograd` tape, which is
+    /// keyed off explicit `Var`s rather than a per-tensor `op` field.
+    /// `forward.rs` reads `track_op()` (28 sites) purely to route
+    /// between the autograd-safe slow path and the inference fast path;
+    /// with no in-tensor graph, every kt tensor takes the fast path,
+    /// which is correct because the tape-authoritative training path
+    /// detaches its intermediates (see the `kiln-candle-autograd-drops`
+    /// notes on #1082).
+    pub fn track_op(&self) -> bool {
+        false
+    }
+
+    /// Deep copy — a fresh storage allocation holding the same values.
+    /// candle: `pub fn copy(&self) -> Result<Tensor>` ("copies the
+    /// actual storage but may fail because of running out of memory").
+    ///
+    /// Unlike [`Clone`] (which shares the storage `Arc`) and
+    /// [`Tensor::contiguous`] (which returns a *shared* clone when the
+    /// input is already contiguous), `copy` always materializes a new
+    /// backing buffer, so later in-place mutation of the source does
+    /// not alias the copy. `forward.rs` relies on this to snapshot the
+    /// GDN recurrent / conv states before they are mutated in place.
+    ///
+    /// - CUDA: routes through `cuda_contiguous`, which always allocates
+    ///   a fresh device buffer (even for contiguous inputs).
+    /// - CPU: rebuilds a fresh [`crate::CpuStorage`] from the
+    ///   materialized row-major bytes.
+    /// - Metal / Vulkan: not yet implemented (errors) — no `copy` call
+    ///   site reaches those backends today (#1082).
+    pub fn copy(&self) -> Result<Self> {
+        match self.device() {
+            #[cfg(feature = "cuda")]
+            Device::Cuda(_) => crate::cuda_storage::cuda_contiguous(self),
+            Device::Cpu => {
+                // Materialize a contiguous CPU view, then rebuild fresh
+                // storage from its addressable bytes so the result never
+                // aliases `self`'s buffer.
+                let contig = self.contiguous()?;
+                let per = contig.dtype().size_in_bytes();
+                let n = contig.element_count();
+                let start_bytes = contig.layout().start_offset() * per;
+                let end_bytes = start_bytes + n * per;
+                let storage = contig
+                    .storage()
+                    .as_any()
+                    .downcast_ref::<crate::CpuStorage>()
+                    .ok_or_else(|| {
+                        crate::Error::from_str("Tensor::copy: CPU device must hold CpuStorage")
+                    })?;
+                let bytes = storage.as_bytes();
+                if end_bytes > bytes.len() {
+                    return Err(crate::Error::Msg(format!(
+                        "Tensor::copy: byte range {start_bytes}..{end_bytes} exceeds CPU \
+                         storage length {}",
+                        bytes.len()
+                    )));
+                }
+                let fresh = crate::CpuStorage::from_bytes(
+                    contig.dtype(),
+                    bytes[start_bytes..end_bytes].to_vec(),
+                )?;
+                // Explicit `Storage` (= `Arc<dyn StorageBackend>`) so the
+                // `Arc<CpuStorage>` unsized-coerces at the binding, matching
+                // the `from_slice` constructor pattern.
+                let storage_arc: crate::Storage = std::sync::Arc::new(fresh);
+                Self::from_parts(
+                    storage_arc,
+                    crate::Layout::contiguous(contig.shape().to_vec()),
+                    crate::TensorId::next(),
+                )
+            }
+            other => Err(crate::Error::Msg(format!(
+                "Tensor::copy: deep copy on {other} is not yet implemented (#1082)"
+            ))),
+        }
+    }
+
+    /// Detach from the autograd graph. candle:
+    /// `pub fn detach(&self) -> Tensor` (returns a graph-free view that
+    /// **shares** the storage; identity if already detached).
+    ///
+    /// kt has no in-tensor autograd graph, so detach is a plain
+    /// identity: it returns a `Clone` (shared-storage handle). Matches
+    /// candle's "already detached → same tensor" fast path, and
+    /// candle's by-value `Tensor` return (not `Result`).
+    pub fn detach(&self) -> Self {
+        self.clone()
+    }
+
+    // ==================================================================
+    // Tensor::empty — candle:
+    //   `pub unsafe fn empty<S: Into<Shape>>(shape, dtype, &device)`
+    // candle hands back *uninitialized* memory; kt has no uninitialized
+    // allocator, so this zero-fills (a strictly safer superset — every
+    // candle `empty` call site immediately overwrites the buffer). The
+    // method is still `unsafe` to keep candle's call shape
+    // (`unsafe { Tensor::empty(...) }`) compiling unchanged at the flip
+    // sites.
+    // ==================================================================
+
+    /// Allocate a tensor of `shape`/`dtype` on `device`. candle's
+    /// `Tensor::empty` returns uninitialized memory; kt zero-fills
+    /// instead (no uninit allocator), which is a safe superset since
+    /// callers overwrite the buffer immediately.
+    ///
+    /// # Safety
+    ///
+    /// Kept `unsafe` to mirror candle's signature so flip sites that
+    /// write `unsafe { Tensor::empty(...) }` type-check unchanged. The
+    /// kt impl is in fact memory-safe (it zero-initializes), but the
+    /// `unsafe` marker is part of the API-compat contract.
+    ///
+    /// kt deviation: `device` is taken **by value** (`Device` is
+    /// `Copy`), matching kt's other ctors (`zeros`/`ones`/`arange`);
+    /// candle takes `&Device`. The flip handles the `&`→value at the
+    /// far fewer ctor sites.
+    pub unsafe fn empty(
+        shape: impl Into<Vec<usize>>,
+        dtype: DType,
+        device: Device,
+    ) -> Result<Self> {
+        Self::zeros_on(device, shape.into(), dtype)
+    }
+
+    // ==================================================================
     // Shape accessors — candle name aliases
     // ==================================================================
 
@@ -1378,5 +1575,144 @@ mod tests {
         assert_eq!(a.shape(), &[2, 3]);
         // Fixed seed => reproducible draws.
         assert_eq!(v(&a), v(&b));
+    }
+
+    // --- argmax (#1082 flip gaps) --------------------------------------
+
+    #[test]
+    fn argmax_last_dim_matches_ops_and_squeezes() {
+        // [2,3]; per-row argmax over the last axis -> [2].
+        let x = t(&[1.0, 9.0, 3.0, 4.0, 2.0, 6.0], &[2, 3]);
+        let got = x.argmax(D::Minus1).unwrap();
+        let want = ops::argmax_last_dim(&x).unwrap();
+        assert_eq!(got.dtype(), DType::I64);
+        assert_eq!(got.shape(), &[2]); // last axis dropped
+        assert_eq!(got.to_vec::<i64>().unwrap(), want.to_vec::<i64>().unwrap());
+        // row0 max is 9.0 @ idx 1; row1 max is 6.0 @ idx 2.
+        assert_eq!(got.to_vec::<i64>().unwrap(), vec![1, 2]);
+        // usize axis form for the last axis takes the same fast path.
+        let got_usize = x.argmax(1usize).unwrap();
+        assert_eq!(got_usize.to_vec::<i64>().unwrap(), vec![1, 2]);
+    }
+
+    #[test]
+    fn argmax_rank1_dim0_is_last_axis() {
+        // The dominant forward.rs call shape: argmax(0) on a 1-D tensor.
+        let logits = t(&[0.1, 0.3, 9.9, 0.2], &[4]);
+        let got = logits.argmax(0usize).unwrap();
+        assert_eq!(got.shape(), &[] as &[usize]); // scalar (rank-0)
+        assert_eq!(got.to_vec::<i64>().unwrap(), vec![2]);
+    }
+
+    #[test]
+    fn argmax_non_last_axis_drops_that_axis_in_order() {
+        // [2,3]; argmax over axis 0 -> [3], one winner per column.
+        // col0: max(1,4)=4 @ row1; col1: max(9,2)=9 @ row0; col2: max(3,6)=6 @ row1.
+        let x = t(&[1.0, 9.0, 3.0, 4.0, 2.0, 6.0], &[2, 3]);
+        let got = x.argmax(0usize).unwrap();
+        assert_eq!(got.shape(), &[3]); // axis 0 removed, axis 1 preserved
+        assert_eq!(got.to_vec::<i64>().unwrap(), vec![1, 0, 1]);
+    }
+
+    // --- index_add (#1082 flip gaps) -----------------------------------
+
+    #[test]
+    fn index_add_adds_source_rows_into_self() {
+        // self: [3,2] zeros; add source rows into rows 0 and 2.
+        // candle arg order: index_add(indexes, source, dim).
+        let base = Tensor::zeros(vec![3, 2], DType::F32, Device::Cpu).unwrap();
+        let indexes = Tensor::from_slice(&[0i64, 2i64], vec![2]).unwrap();
+        let source = t(&[10.0, 20.0, 30.0, 40.0], &[2, 2]); // 2 rows of 2
+        let got = base.index_add(&indexes, &source, 0usize).unwrap();
+        assert_eq!(got.shape(), &[3, 2]);
+        // row0 gets [10,20], row1 untouched [0,0], row2 gets [30,40].
+        assert_eq!(v(&got), vec![10.0, 20.0, 0.0, 0.0, 30.0, 40.0]);
+    }
+
+    #[test]
+    fn index_add_folds_onto_existing_self_values() {
+        // Non-zero base verifies the `self + scatter_add(...)` composition.
+        let base = t(&[1.0, 1.0, 1.0, 1.0, 1.0, 1.0], &[3, 2]);
+        let indexes = Tensor::from_slice(&[1i64], vec![1]).unwrap();
+        let source = t(&[100.0, 200.0], &[1, 2]);
+        let got = base.index_add(&indexes, &source, 0usize).unwrap();
+        // only row1 changes: [1,1] + [100,200] = [101,201].
+        assert_eq!(v(&got), vec![1.0, 1.0, 101.0, 201.0, 1.0, 1.0]);
+        // Cross-check against the underlying scatter_add composition.
+        let scattered = ops::scatter_add(&source, 0, &indexes, 3).unwrap();
+        let want = ops::add(&base, &scattered).unwrap();
+        assert_eq!(v(&got), v(&want));
+    }
+
+    // --- track_op (#1082 flip gaps) ------------------------------------
+
+    #[test]
+    fn track_op_is_always_false() {
+        let x = t(&[1.0, 2.0, 3.0, 4.0], &[2, 2]);
+        assert!(!x.track_op());
+        // Derived tensors are equally untracked (no in-tensor graph).
+        let y = x.add(&x).unwrap();
+        assert!(!y.track_op());
+    }
+
+    // --- copy (#1082 flip gaps) ----------------------------------------
+
+    #[test]
+    fn copy_produces_independent_storage() {
+        let x = t(&[1.0, 2.0, 3.0, 4.0], &[2, 2]);
+        let c = x.copy().unwrap();
+        // Same values + shape + dtype.
+        assert_eq!(c.shape(), x.shape());
+        assert_eq!(c.dtype(), x.dtype());
+        assert_eq!(v(&c), v(&x));
+        // Fresh storage allocation (not aliasing the source Arc), unlike
+        // a plain Clone / contiguous() fast path.
+        assert!(
+            !std::sync::Arc::ptr_eq(c.storage(), x.storage()),
+            "copy must allocate fresh storage, not share the source Arc"
+        );
+    }
+
+    #[test]
+    fn copy_of_noncontiguous_materializes_logical_order() {
+        // Transpose makes a non-contiguous view; copy must read it in
+        // logical (row-major) order, like candle's copy.
+        let x = t(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0], &[2, 3]);
+        let xt = x.transpose(0, 1).unwrap(); // [3,2], non-contiguous
+        let c = xt.copy().unwrap();
+        assert_eq!(c.shape(), &[3, 2]);
+        // logical order of the transpose: columns of x.
+        assert_eq!(v(&c), vec![1.0, 4.0, 2.0, 5.0, 3.0, 6.0]);
+        assert!(!std::sync::Arc::ptr_eq(c.storage(), xt.storage()));
+    }
+
+    // --- detach (#1082 flip gaps) --------------------------------------
+
+    #[test]
+    fn detach_is_identity_returns_tensor() {
+        let x = t(&[1.0, 2.0, 3.0, 4.0], &[2, 2]);
+        // candle returns `Tensor` by value (not Result); kt mirrors that.
+        let d: Tensor = x.detach();
+        assert_eq!(v(&d), v(&x));
+        assert_eq!(d.shape(), x.shape());
+        // kt detach is a shared-storage identity (no autograd to sever).
+        assert!(std::sync::Arc::ptr_eq(d.storage(), x.storage()));
+    }
+
+    // --- empty (#1082 flip gaps) ---------------------------------------
+
+    #[test]
+    fn empty_has_requested_shape_and_dtype() {
+        // SAFETY: kt's `empty` zero-fills (safe superset of candle's
+        // uninitialized memory); the `unsafe` is API-compat only.
+        let e = unsafe { Tensor::empty(vec![2, 3], DType::F32, Device::Cpu) }.unwrap();
+        assert_eq!(e.shape(), &[2, 3]);
+        assert_eq!(e.dtype(), DType::F32);
+        // kt zero-fills rather than leaving garbage.
+        assert_eq!(v(&e), vec![0.0; 6]);
+        // BF16 dtype also honored.
+        let eb = unsafe { Tensor::empty(vec![4], DType::BF16, Device::Cpu) }.unwrap();
+        assert_eq!(eb.shape(), &[4]);
+        assert_eq!(eb.dtype(), DType::BF16);
     }
 }
