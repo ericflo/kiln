@@ -22,7 +22,12 @@ use anyhow::{Context, Result};
 //   only consumed by the other feature's code path. The `Result as CandleResult`
 //   rename avoids clashing with `anyhow::Result`.
 #[allow(unused_imports)]
-use candle_core::{backend::BackendDevice, D, DType, Device, Tensor, Var};
+use candle_core::{backend::BackendDevice, Var};
+// #1082 Increment 4: bare `Tensor`/`Device`/`DType`/`D` now resolve to the
+// kiln-native substrate. The candle-autograd island (Var/CustomOp/BackpropOp)
+// keeps explicit `candle_core::` paths.
+#[allow(unused_imports)]
+use kiln_tensor::{Tensor, Device, DType, D};
 #[cfg(any(feature = "cuda", feature = "vulkan"))]
 #[allow(unused_imports)]
 use candle_core::{
