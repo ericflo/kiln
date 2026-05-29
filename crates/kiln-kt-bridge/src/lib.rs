@@ -698,7 +698,13 @@ pub fn kt_tensor_to_candle_cuda_copy(
             ));
         }
     };
-    let src_slice = src_cuda.slice().slice(src_byte_off..);
+    // #1082: `device_ptr_raw()` works for both Owned and Borrowed storage
+    // (unlike `slice()`, which panics on Borrowed). Returns the buffer-start
+    // pointer; add the kt layout's start-offset bytes to reach the active
+    // region. The dtod memcpy below is a pure byte copy, so a borrowed
+    // source is always safe to read.
+    let (src_base_ptr, _src_byte_len) = src_cuda.device_ptr_raw();
+    let src_ptr = src_base_ptr + src_byte_off as u64;
 
     macro_rules! dispatch_dst_copy {
         ($T:ty, $name:literal) => {{
@@ -711,7 +717,6 @@ pub fn kt_tensor_to_candle_cuda_copy(
             let dst_view = slice.slice(0..);
             unsafe {
                 let (dst_ptr, _dst_g) = dst_view.device_ptr(&stream);
-                let (src_ptr, _src_g) = src_slice.device_ptr(&stream);
                 cudarc_result::memcpy_dtod_async(dst_ptr, src_ptr, total_bytes, raw_stream)
                     .map_err(|e| {
                         BridgeError::new(format!(
