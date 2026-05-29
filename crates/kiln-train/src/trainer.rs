@@ -14485,6 +14485,220 @@ mod tests {
         }
     }
 
+    /// CP-4 (#1082) PRE-DEFAULT-ON CONVERGENCE GATE for tape-authoritative
+    /// SFT.
+    ///
+    /// `tape_authoritative_grads_match_candle_baseline_bf16` proves the tape
+    /// routes a grad to all 50 LoRA Vars and `tape_grad_matches_finite_difference_bf16`
+    /// proves those grads match the central-finite-difference ground truth on
+    /// the attention/conv-dependent Vars candle's autograd silently drops. What
+    /// neither proves is that *stringing 100 such steps together actually
+    /// trains the model*. This test closes that gap: it runs a real 100-step
+    /// AdamW SFT loop with `KILN_USE_TAPE_AUTHORITATIVE=1` and asserts the loss
+    /// is finite every step and trends meaningfully downward.
+    ///
+    /// CANDLE-PARITY IS INVALID HERE. candle's `loss.backward()` severs the
+    /// full-attention + GDN-conv gradient (a kt forward-only op returns a
+    /// detached leaf), so a candle-trained reference would converge to the
+    /// WRONG place — it can only ever optimize the partial chain it can see. We
+    /// therefore validate that tape-authoritative training CONVERGES, not that
+    /// it matches candle.
+    ///
+    /// Optimizer reuse: the per-step update mirrors the production
+    /// non-checkpointed SFT loop exactly (`sft_train`, trainer.rs:2286-2305):
+    /// `standard_forward_backward(...)` → `(loss, GradStore)` (tape-authoritative
+    /// since the env is set) → `optimizer_step(&*backend, &params, &grads, lr,
+    /// Optimizer::AdamW{..}, opt_state.as_mut())`. AdamW (decoupled WD) is the
+    /// production default optimizer. `allocate_adamw_state` is called once
+    /// before the loop and threaded through; `optimizer_step` increments
+    /// `OptimizerState::step` itself (1-indexed) so bias-correction is correct.
+    /// Like the sibling tape tests, params/moments are NOT registered with the
+    /// backend, so AdamW takes its candle-`Var::set` CPU-fallback path — the
+    /// path whose updated candle storage the tape-authoritative forward then
+    /// reads back via `params.as_lora_weights()` on the next step.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn tape_authoritative_sft_converges_bf16() {
+        let device = match candle_core::Device::new_cuda(0) {
+            Ok(d) => d,
+            Err(_) => {
+                eprintln!("tape-authoritative convergence (bf16): no CUDA device — skipping");
+                return;
+            }
+        };
+        // SAME fixture as tape_authoritative_grads_match_candle_baseline_bf16.
+        let config = tiny_config_bf16();
+        let weights = tiny_weights_bf16(&config, &device).expect("bf16 tiny weights on cuda");
+        let params =
+            TrainableLoraParams::initialize(&config, &weights, 4, 8.0, &device).expect("params");
+        let input_ids: Vec<u32> = vec![1, 5, 10, 3, 7, 2, 8];
+        let label_mask = vec![false, false, true, true, true, true, false];
+        let backend = backend::for_device(&device);
+
+        // All 7 CP-4 tape gates + tape-authoritative backward. Mirror the
+        // sibling bf16 tests verbatim (OnceLock-cached gates — run under
+        // `cargo nextest` for per-process isolation).
+        unsafe {
+            std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
+            std::env::set_var("KILN_USE_TAPE_LORA_ADD", "1");
+            std::env::set_var("KILN_USE_TAPE_FLASH_ATTN", "1");
+            std::env::set_var("KILN_USE_TAPE_SDPA", "1");
+            std::env::set_var("KILN_USE_TAPE_GDN", "1");
+            std::env::set_var("KILN_USE_TAPE_GDN_GATED_NORM", "1");
+            std::env::set_var("KILN_USE_TAPE_GDN_QK_NORM", "1");
+            std::env::set_var("KILN_USE_TAPE_GDN_CONV", "1");
+            std::env::set_var("KILN_USE_TAPE_AUTHORITATIVE", "1");
+        }
+
+        // Production AdamW default (decoupled WD). LR 1e-3 — an order of
+        // magnitude above the SFT default (1e-4) because the tiny fixture has
+        // only 4 supervised tokens to overfit and just 100 steps to do it in;
+        // 1e-3 is well within the stable regime for this fixture and gives a
+        // clearly readable downward curve without diverging.
+        let lr = 1e-3_f64;
+        let optimizer = Optimizer::AdamW {
+            beta1: 0.9,
+            beta2: 0.999,
+            eps: 1e-8,
+            weight_decay: 0.0,
+        };
+        // Allocate moment state ONCE before the loop, exactly as the production
+        // loop does (trainer.rs:2161). NOT registered with the backend — that
+        // keeps AdamW on the candle-`Var::set` CPU-fallback path so the next
+        // tape forward's `as_lora_weights()` reads the updated candle storage.
+        let mut opt_state = params
+            .allocate_adamw_state(&device)
+            .expect("allocate AdamW state");
+
+        const STEPS: usize = 100;
+        let mut losses: Vec<f64> = Vec::with_capacity(STEPS);
+        let mut step1_grad_nonzero = false;
+
+        for step in 0..STEPS {
+            let (loss, grads) = standard_forward_backward(
+                &*backend,
+                &input_ids,
+                &weights,
+                &config,
+                &params,
+                &label_mask,
+                &device,
+                None,
+            )
+            .expect("tape-authoritative forward/backward");
+
+            // Training-is-actually-happening check on step 0: at least one LoRA
+            // Var must receive a finite, nonzero grad.
+            if step == 0 {
+                assert!(
+                    grads.get_ids().count() > 0,
+                    "CP-4 convergence: step 1 produced an empty GradStore — no training signal"
+                );
+                for v in params.all_vars() {
+                    if let Some(g) = grads.get(v.as_tensor()) {
+                        let norm = g
+                            .to_dtype(candle_core::DType::F32)
+                            .and_then(|t| t.sqr())
+                            .and_then(|t| t.sum_all())
+                            .and_then(|t| t.to_scalar::<f32>())
+                            .unwrap_or(0.0);
+                        if norm.is_finite() && norm > 0.0 {
+                            step1_grad_nonzero = true;
+                            break;
+                        }
+                    }
+                }
+                assert!(
+                    step1_grad_nonzero,
+                    "CP-4 convergence: step 1 — no LoRA Var received a nonzero grad"
+                );
+            }
+
+            // Every step's loss must be finite (no NaN/Inf training blowup).
+            assert!(
+                loss.is_finite(),
+                "CP-4 convergence: loss at step {step} is non-finite ({loss}) — training diverged"
+            );
+
+            // Mirror the production optimizer step EXACTLY (trainer.rs:2298).
+            // `optimizer_step` bumps `opt_state.step` (1-indexed) internally, so
+            // bias-correction uses the right step index without us tracking it.
+            optimizer_step(&*backend, &params, &grads, lr, optimizer, Some(&mut opt_state))
+                .expect("AdamW optimizer step");
+
+            losses.push(loss);
+        }
+
+        let initial_loss = losses[0];
+        let final_loss = *losses.last().expect("100 losses recorded");
+        let min_loss = losses
+            .iter()
+            .cloned()
+            .fold(f64::INFINITY, f64::min);
+
+        // [CP4-CONVERGE] trajectory line so the curve is readable from the pod
+        // log: initial, the quartile checkpoints, final, and the min.
+        eprintln!(
+            "[CP4-CONVERGE] lr={lr} steps={STEPS} | initial={:.6} step25={:.6} step50={:.6} \
+             step75={:.6} final={:.6} min={:.6}",
+            initial_loss,
+            losses[24],
+            losses[49],
+            losses[74],
+            final_loss,
+            min_loss
+        );
+
+        // Optimizer step counter is 1-indexed and bumped once per step.
+        assert_eq!(
+            opt_state.step as usize, STEPS,
+            "CP-4 convergence: AdamW step counter should be {STEPS}, got {}",
+            opt_state.step
+        );
+
+        // Adam moment Vars must be finite at step 100 (no NaN/Inf leaked into
+        // the optimizer state — a silent way training can rot).
+        for moments in opt_state.moments.values() {
+            let finite_sum = |v: &Var| -> bool {
+                v.as_tensor()
+                    .to_dtype(candle_core::DType::F32)
+                    .and_then(|t| t.abs())
+                    .and_then(|t| t.sum_all())
+                    .and_then(|t| t.to_scalar::<f32>())
+                    .map(|s| s.is_finite())
+                    .unwrap_or(false)
+            };
+            assert!(
+                finite_sum(&moments.m) && finite_sum(&moments.v),
+                "CP-4 convergence: AdamW moment Var became non-finite by step {STEPS}"
+            );
+        }
+
+        // The HEADLINE gate: tape-authoritative SFT must STABLY IMPROVE. The
+        // tiny model overfits the 4 fixed supervised tokens easily within 100
+        // steps, so we require both a net decrease AND a meaningful one. The
+        // 0.9× min-loss bound (>=10% improvement off the initial loss) is a
+        // deliberately conservative floor — a working tape-authoritative loop
+        // overfits this fixture far past that; a no-op (severed-gradient) loop
+        // can't clear it. If the observed pod curve sits between these bounds,
+        // tighten the multiplier — but it MUST prove a real downward trend.
+        assert!(
+            final_loss < initial_loss,
+            "CP-4 convergence: final loss {final_loss:.6} did not improve on initial \
+             {initial_loss:.6} — tape-authoritative SFT is not training"
+        );
+        assert!(
+            min_loss <= initial_loss * 0.9,
+            "CP-4 convergence: min loss {min_loss:.6} is not <= 90% of initial \
+             {initial_loss:.6} (= {:.6}) — no meaningful downward trend over {STEPS} steps",
+            initial_loss * 0.9
+        );
+
+        unsafe {
+            std::env::remove_var("KILN_USE_TAPE_AUTHORITATIVE");
+        }
+    }
+
     /// Create a tiny ModelConfig for testing (4 layers, small dims).
     fn tiny_config() -> ModelConfig {
         ModelConfig {
