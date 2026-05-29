@@ -209,4 +209,29 @@ mod tests {
             Error::Msg(m) => assert!(m.starts_with("io: ")),
         }
     }
+
+    // #1082 flip prerequisite: `forward.rs` uses `?` into `anyhow::Result`
+    // and `anyhow::Context::context(...)`. Both require
+    // `kiln_tensor::Error: std::error::Error + Send + Sync + 'static`.
+    // thiserror's `#[derive(thiserror::Error)]` on `Error` already
+    // provides the `std::error::Error` impl, and `Error::Msg(String)` is
+    // trivially `Send + Sync + 'static`. These tests lock that in so a
+    // future variant addition that breaks the bound fails CI here rather
+    // than at the (far more numerous) flip call sites.
+    #[test]
+    fn error_is_std_error_send_sync_static() {
+        fn assert_bounds<T: std::error::Error + Send + Sync + 'static>() {}
+        assert_bounds::<Error>();
+    }
+
+    #[test]
+    fn error_boxes_as_dyn_std_error() {
+        let e = Error::from_str("boom");
+        // The exact conversion anyhow relies on: any `std::error::Error`
+        // value can be boxed as `Box<dyn std::error::Error + Send + Sync>`.
+        let boxed: Box<dyn std::error::Error + Send + Sync + 'static> = Box::new(e);
+        assert_eq!(boxed.to_string(), "boom");
+        // `source()` is `None` for the leaf `Msg` variant (no nested cause).
+        assert!(std::error::Error::source(boxed.as_ref()).is_none());
+    }
 }

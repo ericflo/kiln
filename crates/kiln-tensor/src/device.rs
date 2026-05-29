@@ -86,6 +86,60 @@ impl Device {
             Device::Vulkan(_) => Backend::Vulkan,
         }
     }
+
+    /// Physical-device locator, mirroring `candle_core::Device::location`.
+    ///
+    /// candle distinguishes a logical [`Device`] (of which several can
+    /// share one physical device, e.g. CUDA streams) from a
+    /// [`DeviceLocation`] (the physical device). `forward.rs` uses
+    /// `device().location()` two ways after the #1082 flip:
+    ///
+    /// 1. In `{:?}` error messages — any `Debug` locator suffices.
+    /// 2. Destructured as `DeviceLocation::Cuda { gpu_id }` to read the
+    ///    GPU index when building the paged KV cache.
+    ///
+    /// To keep both call shapes type-checking, this returns a
+    /// [`DeviceLocation`] whose variants match candle's field-for-field
+    /// (`Cpu`, `Cuda { gpu_id }`, `Metal { gpu_id }`), plus a kt-only
+    /// `Vulkan { gpu_id }` for the fourth backend kt dispatches over.
+    pub const fn location(self) -> DeviceLocation {
+        match self {
+            Device::Cpu => DeviceLocation::Cpu,
+            Device::Cuda(gpu_id) => DeviceLocation::Cuda { gpu_id },
+            Device::Metal(gpu_id) => DeviceLocation::Metal { gpu_id },
+            Device::Vulkan(gpu_id) => DeviceLocation::Vulkan { gpu_id },
+        }
+    }
+}
+
+/// A physical-device locator, mirroring `candle_core::DeviceLocation`.
+///
+/// candle's enum has `Cpu`, `Cuda { gpu_id }`, `Metal { gpu_id }`; kt
+/// adds `Vulkan { gpu_id }` for the fourth backend it dispatches over.
+/// The struct-variant field is named `gpu_id` to match candle exactly
+/// so flip-site destructuring (`DeviceLocation::Cuda { gpu_id }`)
+/// type-checks unchanged. Returned by [`Device::location`].
+#[derive(Debug, Copy, Clone, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum DeviceLocation {
+    /// The CPU.
+    Cpu,
+    /// A CUDA device, identified by its GPU index.
+    Cuda {
+        /// The CUDA device index.
+        gpu_id: usize,
+    },
+    /// An Apple Metal device, identified by its GPU index.
+    Metal {
+        /// The Metal device index.
+        gpu_id: usize,
+    },
+    /// A Vulkan device, identified by its GPU index (kt-only — candle
+    /// has no Vulkan backend).
+    Vulkan {
+        /// The Vulkan device index.
+        gpu_id: usize,
+    },
 }
 
 impl fmt::Display for Device {
@@ -182,5 +236,44 @@ mod tests {
     fn display_uses_short_name() {
         assert_eq!(format!("{}", Device::Cuda(0)), "cuda:0");
         assert_eq!(format!("{}", Backend::Vulkan), "vulkan");
+    }
+
+    // --- DeviceLocation (#1082 flip gaps) ------------------------------
+
+    #[test]
+    fn location_maps_each_variant() {
+        assert_eq!(Device::Cpu.location(), DeviceLocation::Cpu);
+        assert_eq!(Device::Cuda(0).location(), DeviceLocation::Cuda { gpu_id: 0 });
+        assert_eq!(Device::Cuda(3).location(), DeviceLocation::Cuda { gpu_id: 3 });
+        assert_eq!(Device::Metal(1).location(), DeviceLocation::Metal { gpu_id: 1 });
+        assert_eq!(
+            Device::Vulkan(2).location(),
+            DeviceLocation::Vulkan { gpu_id: 2 }
+        );
+    }
+
+    #[test]
+    fn location_destructures_gpu_id() {
+        // The exact flip-site pattern: `match dev.location() {
+        //   DeviceLocation::Cuda { gpu_id } => ... }`.
+        let gpu_id = match Device::Cuda(5).location() {
+            DeviceLocation::Cuda { gpu_id } => gpu_id,
+            other => panic!("expected Cuda location, got {other:?}"),
+        };
+        assert_eq!(gpu_id, 5);
+    }
+
+    #[test]
+    fn location_is_debug_for_error_messages() {
+        // forward.rs `{:?}`-prints `device().location()` in bail! messages.
+        assert_eq!(format!("{:?}", Device::Cpu.location()), "Cpu");
+        assert_eq!(
+            format!("{:?}", Device::Cuda(0).location()),
+            "Cuda { gpu_id: 0 }"
+        );
+        assert_eq!(
+            format!("{:?}", Device::Metal(2).location()),
+            "Metal { gpu_id: 2 }"
+        );
     }
 }
