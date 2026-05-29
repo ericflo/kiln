@@ -2896,3 +2896,94 @@ fn tape_reshape_records_node_and_passes_grad_through() {
         std::env::remove_var("KILN_USE_TAPE_FORWARD");
     }
 }
+
+// ----------------------------------------------------------------------
+// DIAGNOSTIC (not a gate): isolate the source of the ~0.8 dq divergence
+// seen when the flash oracle re-ran under full parallel test load. Runs
+// WITH the rest of the suite (no env lock) so it sees the same concurrent
+// GPU load. Prints, does not assert (informational). Three questions:
+//   1. fwd determinism: out/lse identical across two back-to-back fwds?
+//   2. bwd determinism: dq identical across two bwds with the SAME inputs
+//      (deterministic=1 is passed)?
+//   3. lse-sensitivity: how much does dq move when fed two (possibly
+//      different) fwd outputs?
+// ----------------------------------------------------------------------
+#[test]
+fn flash_attn_determinism_diagnostic() {
+    let device = match cuda_device() {
+        Some(d) => d,
+        None => {
+            eprintln!("[FLASH-DIAG] no CUDA device — skipping");
+            return;
+        }
+    };
+    let (b, sq, sk, hq, hkv, hd) = (1usize, 16usize, 16usize, 4usize, 2usize, 128usize);
+    let q = build_attn_bf16(&device, &[b, sq, hq, hd], 0xD1A6_0001);
+    let k = build_attn_bf16(&device, &[b, sk, hkv, hd], 0xD1A6_0002);
+    let v = build_attn_bf16(&device, &[b, sk, hkv, hd], 0xD1A6_0003);
+    let q_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&q).expect("q kt");
+    let k_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&k).expect("k kt");
+    let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&v).expect("v kt");
+    let scale = 1.0_f32 / (hd as f32).sqrt();
+
+    let peak = |t: &Tensor| -> f32 {
+        t.to_dtype(DType::F32)
+            .unwrap()
+            .abs()
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .max(0)
+            .unwrap()
+            .to_scalar::<f32>()
+            .unwrap()
+    };
+    let to_c = |t: &kiln_tensor::Tensor| kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(t).unwrap();
+    let rp = |a: &Tensor, b: &Tensor| max_abs_diff(a, b) / peak(a).max(1e-6);
+
+    // (1) fwd x2 back-to-back.
+    let (out1, lse1) =
+        kiln_flash_attn::flash_attn_fwd_kt(&q_kt, &k_kt, &v_kt, scale, true).expect("fwd1");
+    let (out2, lse2) =
+        kiln_flash_attn::flash_attn_fwd_kt(&q_kt, &k_kt, &v_kt, scale, true).expect("fwd2");
+    let (out1c, out2c, lse1c, lse2c) = (to_c(&out1), to_c(&out2), to_c(&lse1), to_c(&lse2));
+    eprintln!(
+        "[FLASH-DIAG] fwd determinism: out rel-peak {:.6}, lse rel-peak {:.6}",
+        rp(&out1c, &out2c),
+        rp(&lse1c, &lse2c)
+    );
+
+    // (2) bwd x2 with the SAME (out1, lse1).
+    let seed = Tensor::from_vec(
+        vec![half::bf16::from_f32(1.0); b * sq * hq * hd],
+        (b, sq, hq, hd),
+        &Device::Cpu,
+    )
+    .unwrap()
+    .to_device(&device)
+    .unwrap()
+    .contiguous()
+    .unwrap();
+    let seed_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&seed).expect("seed kt");
+    let (dq_a, _, _) =
+        kiln_flash_attn::flash_attn_bwd_kt(&seed_kt, &q_kt, &k_kt, &v_kt, &out1, &lse1, scale, true)
+            .expect("bwdA");
+    let (dq_b, _, _) =
+        kiln_flash_attn::flash_attn_bwd_kt(&seed_kt, &q_kt, &k_kt, &v_kt, &out1, &lse1, scale, true)
+            .expect("bwdB");
+    let (dq_ac, dq_bc) = (to_c(&dq_a), to_c(&dq_b));
+    eprintln!(
+        "[FLASH-DIAG] bwd determinism (SAME inputs, deterministic=1): dq rel-peak {:.6}",
+        rp(&dq_ac, &dq_bc)
+    );
+
+    // (3) bwd with the second fwd's (out2, lse2).
+    let (dq_c, _, _) =
+        kiln_flash_attn::flash_attn_bwd_kt(&seed_kt, &q_kt, &k_kt, &v_kt, &out2, &lse2, scale, true)
+            .expect("bwdC");
+    let dq_cc = to_c(&dq_c);
+    eprintln!(
+        "[FLASH-DIAG] bwd lse-sensitivity: dq(fwd1) vs dq(fwd2) rel-peak {:.6}",
+        rp(&dq_ac, &dq_cc)
+    );
+}
