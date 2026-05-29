@@ -25,6 +25,14 @@ pub mod echo;
 // adapter. The kernel crate keeps the pure-kt `kt_api` + `kt_tape` building
 // blocks this module calls. See module docstring. (#1082)
 pub mod flce_candle_shim;
+// (#1082) CP-4: GRPO policy-gradient scalar-loss tape root. The
+// candle↔kt boundary for the GRPO trainer's tape-authoritative path —
+// a single fused tape node taking the full `[1, T, V]` policy logits and
+// producing the scalar PG (+ optional KL) loss, whose backward recomputes
+// the candle GRPO forward with autograd ON to yield `dL/dlogits`. Mirrors
+// `kiln_model::tape_forward::try_tape_cross_entropy_from_logits_cuda` (the
+// SFT loss root) and `opd_candle_shim::try_tape_opd_scalar_mean_cuda` (OPD).
+pub mod grpo_candle_shim;
 pub mod logit_cache;
 pub mod logit_source;
 pub mod long_context_fixture;

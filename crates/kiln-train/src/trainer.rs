@@ -4650,6 +4650,29 @@ fn train_tokenized_grpo_group_with_grad_norms(
             .map_or(0, |m| m.iter().filter(|&&v| v).count());
         let mut comp_echo_env_ce: Option<f64> = None;
 
+        // CP-4 (#1082): tape-authoritative eligibility for THIS completion. When
+        // eligible, the kt `Tape` records the FULL forward, so gradient
+        // checkpointing (the candle reverse-segment loop) is unnecessary — we
+        // route to the non-checkpointed tape branch below even when `segments`
+        // is `Some`. Gated to CUDA (tape adapters are CUDA-only), no ACTIVE ECHO
+        // env-CE (no tape root — carved out), and not the `no_policy_loss`
+        // constant-zero-without-ECHO config. Mirrors how OPD's tape path REPLACES
+        // its candle gradient-checkpointing loop. This is the SINGLE source of
+        // truth for the tape-authoritative gate — both the checkpointing-bypass
+        // (`active_segments` below) and the non-checkpointed-branch dispatch read
+        // it. Kept local + cfg-split so the non-cuda build doesn't reference the
+        // cuda-only gate fn.
+        #[cfg(feature = "cuda")]
+        let tape_auth_eligible = tape_authoritative_enabled()
+            && matches!(device, candle_core::Device::Cuda(_))
+            && !(config.loss.echo.is_some()
+                && config.loss.echo_enabled()
+                && comp_env_count > 0
+                && comp.total_obs_len > 0)
+            && !config.loss.no_policy_loss;
+        #[cfg(not(feature = "cuda"))]
+        let tape_auth_eligible = false;
+
         let ref_log_probs = if skip_reference {
             // ReferencePolicy::None: no reference forward; ratio is forced
             // to 1.0 inside grpo_loss / analytic tail via
@@ -4740,7 +4763,13 @@ fn train_tokenized_grpo_group_with_grad_norms(
         };
 
         let loss_val;
-        if let Some(segs) = segments {
+        // CP-4 (#1082): when this completion is tape-authoritative-eligible, the
+        // tape records the full forward and the non-checkpointed branch's
+        // `grpo_step_forward_backward_tape_authoritative` drives backward — so
+        // skip the candle gradient-checkpointing branch entirely (the tape IS the
+        // activation store; no reverse-segment loop needed).
+        let active_segments = if tape_auth_eligible { None } else { segments };
+        if let Some(segs) = active_segments {
             // Build ECHO inputs for the checkpointed analytic tail. The
             // tail folds env-CE into the same vocab-chunk forward+backward
             // loop as GRPO; legacy single-turn rollouts (no env tokens)
@@ -4815,19 +4844,57 @@ fn train_tokenized_grpo_group_with_grad_norms(
                 );
             }
         } else {
-            // CP-4 (#1082): non-checkpointed GRPO+ECHO step. When
-            // `KILN_USE_TAPE_FORWARD` is set (and the build has the
-            // `cuda` feature), delegate the forward + loss-construction
-            // + `loss.backward()` to
-            // `grpo_non_checkpointed_forward_backward_via_tape_bridge`,
-            // which runs the same flow inside
-            // `kiln_kt_bridge::tape_bridge::with_tape_scope_emit_to_grad_store`.
-            // Default behaviour (env unset / build without cuda) leaves
-            // the inline forward + `loss.backward()` flow below
-            // unchanged.
+            // CP-4 (#1082): non-checkpointed GRPO+ECHO step — forward +
+            // backward dispatch, in priority order:
+            //
+            //   1. TAPE-AUTHORITATIVE (DEFAULT, opt out via
+            //      `KILN_USE_TAPE_AUTHORITATIVE=0`): drive gradients through the
+            //      kt `Tape` instead of candle `loss.backward()`. Runs ONE policy
+            //      forward inside `with_tape_authoritative_scope` so the LoRA
+            //      adapters record their nodes, then roots the tape at the GRPO
+            //      scalar PG (+ KL) loss
+            //      (`grpo_candle_shim::try_tape_grpo_pg_loss_from_logits_cuda`)
+            //      and walks the connected tape with one `Tape::backward`. NO
+            //      candle backward. Mirrors the SFT dispatch in
+            //      `standard_forward_backward` and the OPD dispatch in `opd.rs`.
+            //
+            //      Gated to: CUDA device (tape adapters record kt CUDA ops; CPU
+            //      keeps candle) AND no ACTIVE ECHO env-CE term (ECHO has no tape
+            //      root — carved out exactly like OPD) AND not the
+            //      `no_policy_loss` constant-zero-without-ECHO config.
+            //
+            //   2. CANDLE-AUTHORITATIVE TAPE-BRIDGE (`KILN_USE_TAPE_FORWARD`):
+            //      runs the same flow inside
+            //      `with_tape_scope_emit_to_grad_store`, but candle
+            //      `loss.backward()` stays authoritative and the tape merges into
+            //      its `GradStore`.
+            //
+            //   3. INLINE candle forward + `loss.backward()` (default when both
+            //      env gates are off / non-cuda build) — the verbatim legacy
+            //      path below.
             #[cfg(feature = "cuda")]
             let bridge_overrides: Option<(GradStore, f64, Option<f64>)> =
-                if kiln_autograd::tape_forward_enabled() {
+                if tape_auth_eligible {
+                    let (lv, g) = grpo_step_forward_backward_tape_authoritative(
+                        backend,
+                        &comp.input_ids,
+                        weights,
+                        model_config,
+                        params,
+                        &comp.action_mask,
+                        &ref_log_probs,
+                        loss_params,
+                        device,
+                        comp_idx,
+                        num_active,
+                        comp_env_count,
+                        streaming_tile_tokens,
+                        checkpoint_segments,
+                        timings.as_deref_mut(),
+                    )?;
+                    // No ECHO env-CE on this path (gated off above).
+                    Some((g, lv, None))
+                } else if kiln_autograd::tape_forward_enabled() {
                     let (lv, g, ce) = grpo_non_checkpointed_forward_backward_via_tape_bridge(
                         backend,
                         &comp.input_ids,
@@ -5548,7 +5615,10 @@ fn compute_advantages(rewards: &[f64], mode: AdvantageMode) -> Vec<f64> {
 ///
 /// Returns a 1-D tensor of log-probs for only the masked (completion) positions.
 /// Uses the next-token prediction convention: logits[i] predicts token[i+1].
-fn token_log_probs(
+// `pub(crate)` so the GRPO tape-authoritative loss-root shim
+// (`crate::grpo_candle_shim`) can recompute the EXACT same policy log-probs
+// inside its candle-autograd backward composite (#1082 CP-4).
+pub(crate) fn token_log_probs(
     logits: &Tensor,
     input_ids: &[u32],
     mask: &[bool],
@@ -11095,6 +11165,161 @@ fn grpo_non_checkpointed_forward_backward_via_tape_bridge(
     Ok((loss_val, grads, comp_echo_env_ce))
 }
 
+/// Tape-authoritative GRPO policy-gradient forward/backward for ONE completion
+/// (#1082 CP-4 endgame).
+///
+/// Runs the policy `model_forward` inside
+/// `kiln_kt_bridge::tape_bridge::with_tape_authoritative_scope`: the LoRA / GDN /
+/// attention adapters record their nodes, and the GRPO scalar PG (+ KL) loss
+/// root (`crate::grpo_candle_shim::try_tape_grpo_pg_loss_from_logits_cuda`)
+/// records the loss as the tape root threaded onto the lm_head output. The scope
+/// seeds `dL/dL = 1` at the loss and walks the connected tape — NO candle
+/// `loss.backward()`. The per-input kt grads are copied into a candle
+/// `GradStore` keyed by each LoRA `Var`'s candle `TensorId`, so the GRPO
+/// optimizer step (`optimizer_step` / `accumulate_grads`) consumes them exactly
+/// as candle's own grads — identical return shape to the candle path's
+/// `loss.backward()` `GradStore`.
+///
+/// This is the GRPO sibling of `standard_forward_backward_tape_authoritative`
+/// (SFT) and `opd::opd_step_forward_backward_tape_authoritative` (OPD). The
+/// reference log-probs (`ref_log_probs`) are the detached IS-ratio denominator
+/// — a constant baked into the loss root, never differentiated. ECHO is NOT
+/// handled here: the dispatch keeps any ECHO-active step on the candle path
+/// (the GRPO loss root has no ECHO term), so this path is non-ECHO GRPO only.
+#[cfg(feature = "cuda")]
+#[allow(clippy::too_many_arguments)]
+fn grpo_step_forward_backward_tape_authoritative(
+    backend: &dyn BackendRuntime,
+    input_ids: &[u32],
+    weights: &GpuWeights,
+    model_config: &ModelConfig,
+    params: &TrainableLoraParams,
+    action_mask: &[bool],
+    ref_log_probs: &Tensor,
+    loss_params: GrpoLossParams,
+    device: &CdDevice,
+    comp_idx: usize,
+    num_active: usize,
+    comp_env_count: usize,
+    streaming_tile_tokens: usize,
+    checkpoint_segments: usize,
+    mut timings: Option<&mut GrpoBenchmarkTimings>,
+) -> Result<(f64, GradStore)> {
+    let lora_weights = params.as_lora_weights();
+    let mut linear_state = LinearAttentionState::new(model_config, device)?;
+    let step_started = Instant::now();
+
+    let (loss_val, loss, grads_by_candle_raw) =
+        kiln_kt_bridge::tape_bridge::with_tape_authoritative_scope(|| {
+            // Single policy forward (embed -> layers -> final RMSNorm -> lm_head).
+            // The LoRA adapters inside record onto the active tape; the lm_head
+            // output (logits) is retained so the GRPO loss root can thread it.
+            let policy_logits = model_forward(
+                backend,
+                input_ids,
+                weights,
+                model_config,
+                None,
+                Some(&mut linear_state),
+                Some(&lora_weights),
+            )
+            .context("GRPO tape-authoritative policy forward")
+            .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?;
+
+            // Record the SCALAR GRPO PG (+ KL) loss as the tape root.
+            let loss = match crate::grpo_candle_shim::try_tape_grpo_pg_loss_from_logits_cuda(
+                &policy_logits,
+                input_ids,
+                action_mask,
+                ref_log_probs,
+                loss_params,
+                device,
+            )
+            .context("GRPO tape-authoritative scalar loss")
+            .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?
+            {
+                Some(l) => l,
+                None => {
+                    // The scalar tape adapter declined (gate off, empty active
+                    // set, or non-CUDA logits). The scope cannot be seeded
+                    // without a tape-routed loss root — surface a clean error.
+                    // The dispatch should not have selected this path if the
+                    // envelope was unmet.
+                    return Err(kiln_kt_bridge::BridgeError::new(
+                        "GRPO tape-authoritative: try_tape_grpo_pg_loss_from_logits_cuda \
+                         returned None (KILN_USE_TAPE_FORWARD off, empty active set, or \
+                         non-CUDA logits). The dispatch should keep this step on the candle \
+                         path.",
+                    ));
+                }
+            };
+            let loss_val = loss
+                .to_scalar::<f32>()
+                .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("GRPO loss.to_scalar: {e}")))?
+                as f64;
+            Ok((loss_val, loss))
+        })
+        .map_err(|e| anyhow::anyhow!("GRPO tape-authoritative backward: {e}"))?;
+
+    // `GradStore::new()` is private; obtain a store via `backward()` on the
+    // (detached) loss — it returns `{loss: ones}` — then insert the tape grads
+    // keyed by each LoRA Var's real candle TensorId (mirrors the SFT path).
+    let mut grads = loss
+        .backward()
+        .context("GRPO tape-authoritative: loss.backward() on detached loss")?;
+    let var_by_raw: std::collections::HashMap<usize, &Var> = params
+        .all_vars()
+        .iter()
+        .map(|v| (v.as_tensor().id().as_raw(), *v))
+        .collect();
+
+    // #1082 CP-4 diagnostic (same shape as SFT / OPD): how deep did the tape walk
+    // reach, and how many of those are LoRA Vars? A small `reached` localises a
+    // chain break near the loss.
+    if std::env::var("KILN_CP4_DEBUG").is_ok() {
+        let reached = grads_by_candle_raw.len();
+        let var_matches = grads_by_candle_raw
+            .keys()
+            .filter(|k| var_by_raw.contains_key(*k))
+            .count();
+        eprintln!(
+            "[CP4-DEBUG] grpo tape walk reached {reached} mapped candle inputs; \
+             {var_matches} are LoRA Vars (of {})",
+            var_by_raw.len()
+        );
+    }
+
+    for (candle_raw, kt_grad) in grads_by_candle_raw {
+        if let Some(var) = var_by_raw.get(&candle_raw) {
+            let cg = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&kt_grad)
+                .context("GRPO tape-authoritative: kt -> candle grad copy")?;
+            grads.insert_id(var.as_tensor().id(), cg);
+        }
+    }
+
+    let step_elapsed = step_started.elapsed();
+    if let Some(t) = timings.as_deref_mut() {
+        // The tape walk owns the backward internally so we can't break the step
+        // into policy_forward / backward here; bucket the full wall-clock against
+        // the backward timer so the GRPO benchmark accounting still totals
+        // correctly when this path is exercised.
+        t.add_backward(step_elapsed);
+    }
+    tracing::info!(
+        comp_idx,
+        seq_len = input_ids.len(),
+        action_tokens = num_active,
+        env_tokens = comp_env_count,
+        checkpoint_segments,
+        streaming_prefill = streaming_prefill_enabled_for(device, input_ids.len()),
+        streaming_tile_tokens,
+        elapsed_ms = step_elapsed.as_millis() as u64,
+        "GRPO step end (tape-authoritative)"
+    );
+
+    Ok((loss_val, grads))
+}
+
 /// Bundled parameters for the GRPO surrogate / KL loss.
 ///
 /// `loss_normalizer` is the scalar applied to the *sum* of per-token loss
@@ -11177,7 +11402,10 @@ impl GrpoLossParams {
 ///   * `IsLevel::Cispo` — CISPO weight clipping: the per-token gradient
 ///     factor `stop_grad(clip(r))·A` multiplies `log π_θ`, so every token
 ///     contributes a gradient even when the IS ratio is out of clip range.
-fn grpo_loss(
+// `pub(crate)` so the GRPO tape-authoritative loss-root shim
+// (`crate::grpo_candle_shim`) can recompute the EXACT same scalar PG (+ KL)
+// loss inside its candle-autograd backward composite (#1082 CP-4).
+pub(crate) fn grpo_loss(
     policy_log_probs: &Tensor,
     ref_log_probs: &Tensor,
     params: GrpoLossParams,
@@ -14063,6 +14291,186 @@ pub(crate) mod tests {
              non-attention/conv subset), got {candle_agree}/{compared}. The disagreeing Vars \
              {candle_disagree:?} are candle's severed full-attn/conv grads (see \
              tape_grad_matches_finite_difference_bf16 for the ground-truth check)"
+        );
+    }
+
+    /// #1082 CP-4 endgame: validate that the tape-authoritative GRPO step
+    /// ([`grpo_step_forward_backward_tape_authoritative`]) produces nonzero
+    /// finite LoRA gradients — i.e. the GRPO policy-gradient scalar tape root
+    /// (`crate::grpo_candle_shim::try_tape_grpo_pg_loss_from_logits_cuda`) is
+    /// CONNECTED through the BF16 model forward back to the LoRA `Var`s, so one
+    /// `Tape::backward` routes a real gradient into each LoRA parameter.
+    ///
+    /// This is the GRPO sibling of the SFT
+    /// `tape_authoritative_grads_match_candle_baseline_bf16` and the OPD
+    /// `opd_tape_authoritative_grads_reach_lora_bf16` coverage checks. It MUST
+    /// run on a **BF16 CUDA** model: the kt fused adapters
+    /// (`supports_rmsnorm_kt`, `supports_mlp_silu_mul_kt`,
+    /// `supports_sigmoid_mul_kt`, `supports_rotary_qk_kt`) are all BF16-only /
+    /// CUDA-only. On F32 (or CPU) every `supports_*_kt` predicate returns false,
+    /// the model-forward tape adapters decline (`Ok(None)`), no node is recorded,
+    /// and the loss→LoRA chain dead-ends — so a CPU/F32 build cannot exercise
+    /// this path. (The GRPO loss ROOT itself is candle-recompute and is
+    /// device-agnostic, but without the BF16 model adapters the chain from the
+    /// root back to the Vars is severed.)
+    ///
+    /// Reuses the SFT BF16 fixtures (`tiny_config_bf16` / `tiny_weights_bf16`) —
+    /// single source of truth for the BF16 tiny model — so this exercises the
+    /// exact same model the SFT/OPD CP-4 coverage gates validate, driven through
+    /// the GRPO policy-gradient loss root.
+    ///
+    /// Uses `ReferencePolicy::None` semantics (`reinforce = true`): a synthetic
+    /// nonzero advantage drives a real REINFORCE gradient (`-A · ∇log π_θ`)
+    /// without needing a reference forward — the simplest GRPO step that still
+    /// exercises the full forward→loss→LoRA tape chain. `ref_log_probs` is the
+    /// detached placeholder the reinforce branch ignores.
+    ///
+    /// Run via `cargo nextest run` for per-process env isolation: the tape gates
+    /// are `OnceLock`-cached on first read, and the kt GPU substrate is not
+    /// thread-safe across the in-process parallelism `cargo test` uses.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn grpo_tape_authoritative_grads_reach_lora_bf16() {
+        let device = match candle_core::Device::new_cuda(0) {
+            Ok(d) => d,
+            Err(_) => {
+                eprintln!("grpo tape-authoritative grads (bf16): no CUDA device — skipping");
+                return;
+            }
+        };
+
+        // The tape adapters fire only inside a tape scope AND with the tape
+        // gates on. These are `OnceLock`-cached for the process, so set them
+        // FIRST (mirrors the SFT/OPD BF16 coverage tests). `KILN_USE_TAPE_FORWARD`
+        // gates the GRPO scalar-loss root + the model-forward kt adapters; the
+        // GDN / attention gates wire the rest of the chain back to every LoRA Var.
+        // `KILN_USE_TAPE_AUTHORITATIVE` defaults ON, but set it explicitly so the
+        // test is robust to a `=0` left over from a sibling test in the same proc.
+        unsafe {
+            std::env::set_var("KILN_USE_TAPE_AUTHORITATIVE", "1");
+            std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
+            std::env::set_var("KILN_USE_TAPE_LORA_ADD", "1");
+            std::env::set_var("KILN_USE_TAPE_FLASH_ATTN", "1");
+            std::env::set_var("KILN_USE_TAPE_SDPA", "1");
+            std::env::set_var("KILN_USE_TAPE_GDN", "1");
+            std::env::set_var("KILN_USE_TAPE_GDN_GATED_NORM", "1");
+            std::env::set_var("KILN_USE_TAPE_GDN_QK_NORM", "1");
+            std::env::set_var("KILN_USE_TAPE_GDN_CONV", "1");
+        }
+
+        let config = tiny_config_bf16();
+        let weights = tiny_weights_bf16(&config, &device).expect("bf16 tiny weights on cuda");
+        let params =
+            TrainableLoraParams::initialize(&config, &weights, 4, 8.0, &device).expect("params");
+        let backend = backend::for_device(&device);
+
+        // Short token sequence; supervise the trailing completion positions (the
+        // typical action-mask shape). seq_len=7 mirrors the SFT/OPD BF16 tests.
+        let input_ids: Vec<u32> = vec![1, 5, 10, 3, 7, 2, 8];
+        // action_mask true at the completion tokens; the next-token shift makes
+        // the active set { i in 1..T : action_mask[i] }.
+        let action_mask = vec![false, false, true, true, true, true, false];
+        let num_active = action_mask[1..].iter().filter(|&&m| m).count();
+        assert!(num_active > 0, "test needs supervised action tokens");
+
+        // REINFORCE GRPO step: reference forced to ratio=1, KL off, a synthetic
+        // nonzero group-relative advantage drives `-A · ∇log π_θ`. The placeholder
+        // ref_log_probs is never inspected by the reinforce branch.
+        let ref_log_probs = zeros_f32_on(num_active, &device)
+            .expect("ref placeholder")
+            .detach();
+        let loss_params = GrpoLossParams {
+            advantage: 0.75,
+            clip_low: 0.2,
+            clip_high: 0.2,
+            kl_coeff: 0.0,
+            kl_estimator: KlEstimator::None,
+            loss_normalizer: 1.0 / num_active as f64,
+            is_level: IsLevel::Token,
+            reinforce: true,
+            entropy_aware_kl_quantile: None,
+        };
+
+        let (loss_val, grads) = grpo_step_forward_backward_tape_authoritative(
+            &*backend,
+            &input_ids,
+            &weights,
+            &config,
+            &params,
+            &action_mask,
+            &ref_log_probs,
+            loss_params,
+            &device,
+            0,         // comp_idx
+            num_active,
+            0,         // comp_env_count (no ECHO on this path)
+            0,         // streaming_tile_tokens
+            0,         // checkpoint_segments
+            None,
+        )
+        .expect("tape-authoritative GRPO step");
+
+        // The loss must be finite (REINFORCE surrogate of an initialized student
+        // vs a synthetic advantage — a NaN/inf would mean a degenerate forward).
+        assert!(
+            loss_val.is_finite(),
+            "GRPO tape loss {loss_val} is not finite"
+        );
+
+        // HEADLINE assertion: the tape walk routed a grad into the LoRA Vars. If
+        // the loss→LoRA tape chain were severed (the F32 failure mode, or a
+        // broken adapter), `grads` would carry no LoRA-Var entries.
+        let var_ids: std::collections::HashSet<TensorId> =
+            params.all_vars().iter().map(|v| v.as_tensor().id()).collect();
+        let mut nonzero_lora_grads = 0usize;
+        let mut tape_has = 0usize;
+        let mut max_norm = 0f32;
+        for v in params.all_vars() {
+            let Some(g) = grads.get(v.as_tensor()) else {
+                continue;
+            };
+            tape_has += 1;
+            assert!(
+                var_ids.contains(&v.as_tensor().id()),
+                "grad key is not a LoRA Var id"
+            );
+            let flat = g
+                .to_dtype(candle_core::DType::F32)
+                .expect("grad -> f32")
+                .flatten_all()
+                .expect("flatten grad")
+                .to_vec1::<f32>()
+                .expect("grad to vec");
+            assert!(
+                flat.iter().all(|x| x.is_finite()),
+                "LoRA grad contains non-finite values"
+            );
+            let norm = flat.iter().map(|x| x * x).sum::<f32>().sqrt();
+            max_norm = max_norm.max(norm);
+            if norm > 0.0 {
+                nonzero_lora_grads += 1;
+            }
+        }
+
+        eprintln!(
+            "[CP4-GRPO] tape grads: {tape_has} LoRA Vars got a grad ({nonzero_lora_grads} nonzero; \
+             max_norm={max_norm:.6}); loss={loss_val:.6}; total_vars={}",
+            params.all_vars().len()
+        );
+
+        // Full coverage of the wired full-attn + GDN chain, same floor as the SFT
+        // BF16 coverage gate (50 fire today). A grad reaching every LoRA Var means
+        // the GRPO loss root connected through the BF16 model to the whole chain.
+        assert!(
+            tape_has >= 50,
+            "CP-4 GRPO: expected >=50 tape-routed LoRA Vars (full coverage of the wired \
+             full-attn + GDN chain), got {tape_has} — the GRPO PG loss root did not connect \
+             through the BF16 model to the LoRA chain"
+        );
+        assert!(
+            nonzero_lora_grads > 0 && max_norm > 0.0,
+            "tape-authoritative GRPO routed grads to {tape_has} LoRA Vars but ALL were zero \
+             (max_norm={max_norm}) — the backward carried no signal"
         );
     }
 
