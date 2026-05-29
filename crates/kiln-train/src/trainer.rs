@@ -13986,8 +13986,8 @@ mod tests {
         // tape-routed. 16 fire today; `>=14` leaves BF16 slack and rises as
         // later increments wire up the remaining layers. (#1082)
         assert!(
-            tape_has >= 28,
-            "CP-4 Inc5: expected >=28 tape-routed LoRA Vars (full-attn + all GDN proj incl in_proj_qkv via conv chain), got {tape_has}"
+            tape_has >= 44,
+            "CP-4 Inc6: expected >=44 tape-routed LoRA Vars (+ gate/up across all 4 MLP layers via the wired SwiGLU silu*mul), got {tape_has}"
         );
 
         // Every matched Var must pass the floored relative-error gate. Near-zero

@@ -10973,9 +10973,17 @@ fn swiglu_ffn_impl_no_chunk(
         {
             #[cfg(feature = "cuda")]
             {
+                // CP-4 (#1082): the fused MLP silu*mul kernel fuses two ops the kt
+                // Tape can't see and gates on !track_op — but the tape-authoritative
+                // path's intermediates are detached (track_op==false), so it would
+                // fire and leave the gate/up projections' grads islands. Disable it
+                // under a tape recording scope so the unfused, tape-wired silu + mul
+                // path runs. Default (no tape scope) unchanged.
                 let fused_hidden = if !cuda_fused_mlp_silu_mul_disabled()
                     && !gate.track_op()
                     && !up.track_op()
+                    && !(crate::tape_forward::tape_forward_enabled()
+                        && kiln_kt_bridge::tape_bridge::bridge_scope_active())
                 {
                     if let (Some(gate_kt), Some(up_kt)) =
                         (try_borrow_kt_cuda(&gate), try_borrow_kt_cuda(&up))
@@ -11018,7 +11026,13 @@ fn swiglu_ffn_impl_no_chunk(
                     // SiLU activation: x * sigmoid(x)
                     let stage_profile =
                         start_mlp_stage_profile(profile_device, profile_context)?;
-                    let gate = cuda_silu(&gate)?;
+                    // CP-4 Increment 6 (#1082): wire SiLU(gate) onto the kt Tape so
+                    // the gate-proj LoRA Vars chain through it. No-op + candle
+                    // fallback unless KILN_USE_TAPE_FORWARD + a tape scope is active.
+                    let gate = match crate::tape_forward::try_tape_silu_cuda(&gate)? {
+                        Some(t) => t,
+                        None => cuda_silu(&gate)?,
+                    };
                     finish_mlp_stage_profile(
                         profile_device,
                         profile_context,
@@ -11029,7 +11043,14 @@ fn swiglu_ffn_impl_no_chunk(
                     // Element-wise multiply
                     let stage_profile =
                         start_mlp_stage_profile(profile_device, profile_context)?;
-                    let hidden = (gate * up)?;
+                    // CP-4 Increment 6 (#1082): the production SwiGLU mul. Wire it
+                    // so SiLU(gate) and up chain back to the gate/up projections
+                    // (down_proj reaches the loss via the FFN residual, but without
+                    // this its dL/dx never flows to gate/up — they stayed islands).
+                    let hidden = match crate::tape_forward::try_tape_mul_cuda(&gate, &up)? {
+                        Some(t) => t,
+                        None => (gate * up)?,
+                    };
                     finish_mlp_stage_profile(
                         profile_device,
                         profile_context,

@@ -107,7 +107,7 @@ use anyhow::{Context, Result};
 use candle_core::Tensor;
 use kiln_autograd::{
     AddBackward, BackwardOp, CrossEntropyKtBackward, EmbeddingBackward, LoraDeltaAddBackward,
-    MatmulBackward, MulSigmoidGateBackward, ReshapeBackward, RopeSplitHalfBackward,
+    MatmulBackward, MulBackward, MulSigmoidGateBackward, ReshapeBackward, RopeSplitHalfBackward,
     SiluBackward, Tape, TransposeBackward,
 };
 use candle_core::DType as CandleDType;
@@ -763,6 +763,64 @@ pub fn try_tape_add_cuda(a: &Tensor, b: &Tensor) -> Result<Option<Tensor>> {
         .context("tape_forward::try_tape_add_cuda: kt -> candle copy failed")?;
 
     // CP-4 (#1082) tape_bridge: both inputs are differentiable.
+    kiln_kt_bridge::tape_bridge::register_input_mapping(a_kt.id(), a.id());
+    kiln_kt_bridge::tape_bridge::register_input_mapping(b_kt.id(), b.id());
+    kiln_kt_bridge::tape_bridge::register_output_mapping(out_kt.id(), out.id());
+    kiln_kt_bridge::tape_bridge::retain_output_for_chaining(&out_kt, out.id());
+
+    Ok(Some(out))
+}
+
+/// Route an element-wise multiply (`a * b`) through the kt `Tape`, recording a
+/// `MulBackward { a, b }` node (`dL/da = grad * b`, `dL/db = grad * a`). This is
+/// the production SwiGLU `silu(gate) * up` mul (`forward.rs` MLP `hidden_mul`) —
+/// the op that, when unwired, leaves the gate/up projections' grads a
+/// disconnected island (down_proj reaches the loss via the FFN residual, but its
+/// `dL/dx` never flows back to gate/up). `try_tape_swiglu_cuda` is dead on this
+/// path (it gates on `!track_op`). Both inputs chain via `tape_kt_input` so the
+/// SiLU(gate) and up-proj outputs stay connected. (#1082 CP-4 Increment 6)
+pub fn try_tape_mul_cuda(a: &Tensor, b: &Tensor) -> Result<Option<Tensor>> {
+    if !tape_forward_enabled() {
+        return Ok(None);
+    }
+    // `kiln_tensor::ops::mul` requires identical shapes; defer broadcasting to
+    // the caller's candle path.
+    if a.dims() != b.dims() {
+        return Ok(None);
+    }
+
+    let a_kt = match tape_kt_input(a) {
+        Some(t) => t,
+        None => return Ok(None),
+    };
+    let b_kt = match tape_kt_input(b) {
+        Some(t) => t,
+        None => return Ok(None),
+    };
+
+    let out_kt = match with_active_tape(|tape: &mut Tape| -> Result<_> {
+        let y = kiln_tensor::ops::mul(&a_kt, &b_kt)
+            .map_err(|e| anyhow::anyhow!("kt mul: {e}"))?;
+        tape.record(
+            &y,
+            &[&a_kt, &b_kt],
+            Box::new(MulBackward {
+                a: a_kt.clone(),
+                b: b_kt.clone(),
+            }),
+        );
+        Ok(y)
+    }) {
+        Some(result) => result,
+        None => return Ok(None),
+    };
+
+    let out_kt = out_kt.context("tape_forward::try_tape_mul_cuda: kt-tape forward failed")?;
+
+    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+        .context("tape_forward::try_tape_mul_cuda: kt -> candle copy failed")?;
+
+    // CP-4 (#1082) tape_bridge: both inputs are differentiable (SiLU(gate), up).
     kiln_kt_bridge::tape_bridge::register_input_mapping(a_kt.id(), a.id());
     kiln_kt_bridge::tape_bridge::register_input_mapping(b_kt.id(), b.id());
     kiln_kt_bridge::tape_bridge::register_output_mapping(out_kt.id(), out.id());
