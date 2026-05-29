@@ -40,20 +40,24 @@
 // transformations instead of bespoke per-kernel CustomOp wrappers.
 //
 // CustomOp1/2/3 + CudaStorage live behind candle-core's CUDA feature, so
-// the shim is only compiled when the `cuda` feature is on. The pure
-// `candle <-> kt` Device/DType enum-mapping helpers below stay
-// unconditional so multi-backend builds (Metal/Vulkan/CPU) can use them
-// without a CUDA toolchain.
-#[cfg(feature = "cuda")]
+// the shim is only compiled when BOTH the `cuda` AND `candle` features
+// are on (it's a candle CustomOp). The kt-native helpers below stay
+// unconditional so candle-free CUDA consumers can use them, and the
+// pure `candle <-> kt` Device/DType enum-mapping helpers compile on any
+// `candle` build (CUDA toolchain not required for the enum mappers).
+// (#1082)
+#[cfg(all(feature = "cuda", feature = "candle"))]
 pub mod forward_op;
 
-/// Non-cuda-gated `CustomOp1` shim for gradient injection
+/// `CustomOp1` shim for gradient injection
 /// (`InjectGradientCandleShim` + `inject_gradient_via_shim`).
 /// Hosted here rather than in `tape_bridge` so the
 /// `kiln-train::trainer` `InjectTensorGradient::apply_op1` flip can
-/// land on every feature (the shim is pure candle — no cuda crate
-/// refs). The CUDA-only `tape_bridge::inject_gradient_kt` is a thin
-/// wrapper that adds a kt-tape side channel. (#1082 CP-4 step 2-3)
+/// land on every `candle` build (the shim is pure candle — no cuda
+/// crate refs). The CUDA-only `tape_bridge::inject_gradient_kt` is a
+/// thin wrapper that adds a kt-tape side channel. Candle-gated because
+/// it `impl candle_core::CustomOp1`. (#1082 CP-4 step 2-3)
+#[cfg(feature = "candle")]
 pub mod inject_grad_shim;
 
 /// Phase 6a/CP-4 (#1082) — kt-tape → candle GradStore bridge.
@@ -63,11 +67,21 @@ pub mod inject_grad_shim;
 /// "disjoint-walker" problem this bridges. Wired into the production
 /// `try_tape_{rms_norm,matmul,silu}_cuda` adapters in
 /// `kiln-model::tape_forward` via the registration helpers
-/// `register_input_mapping` / `register_output_mapping`.
-#[cfg(feature = "cuda")]
+/// `register_input_mapping` / `register_output_mapping`. Gated on both
+/// `cuda` (CudaStorage) and `candle` (GradStore). (#1082)
+#[cfg(all(feature = "cuda", feature = "candle"))]
 pub mod tape_bridge;
 
-use kiln_tensor::{Device as KtDevice, DType as KtDType};
+// `KtDType` is used by the candle-free CUDA helpers
+// (`cuda_storage_and_byte_offset`, `alloc_cuda_tensor`,
+// `cuda_input_device_ptr`) AND by the candle dtype mappers, so it's
+// needed whenever either `cuda` or `candle` is on. `KtDevice` is only
+// referenced by the candle-gated Device mappers
+// (`kt_device_from_candle` / `candle_device_from_kt`). (#1082)
+#[cfg(any(feature = "cuda", feature = "candle"))]
+use kiln_tensor::DType as KtDType;
+#[cfg(feature = "candle")]
+use kiln_tensor::Device as KtDevice;
 #[cfg(feature = "cuda")]
 use kiln_tensor::{CudaStorage, StorageBackend, Tensor as KtTensor};
 
@@ -223,6 +237,7 @@ pub fn cuda_output_device_ptr(t: &KtTensor) -> u64 {
 /// variant lands. In the meantime [`kt_tensor_from_candle_cuda_copy`]
 /// provides a correct-but-copying adapter that unblocks call-site
 /// migration.
+#[cfg(feature = "candle")]
 pub fn candle_dtype_to_kt(d: candle_core::DType) -> Result<KtDType, BridgeError> {
     use candle_core::DType as C;
     Ok(match d {
@@ -261,6 +276,7 @@ pub fn candle_dtype_to_kt(d: candle_core::DType) -> Result<KtDType, BridgeError>
 /// Phase 7 of #1082 uses this to translate kt-typed inputs at
 /// `kiln-model`'s public surface (the `_kt` parallel entries) into the
 /// candle dtype the underlying call path still expects.
+#[cfg(feature = "candle")]
 pub fn kt_dtype_to_candle(d: KtDType) -> Result<candle_core::DType, BridgeError> {
     use candle_core::DType as C;
     Ok(match d {
@@ -306,6 +322,7 @@ pub fn kt_dtype_to_candle(d: KtDType) -> Result<candle_core::DType, BridgeError>
 /// Vulkan and any future candle backends degrade to `kt::Device::Cpu`.
 /// The kiln-server Vulkan-active path carries a candle CPU device by
 /// convention (see `kiln-model::backend::mod::for_device`).
+#[cfg(feature = "candle")]
 pub fn kt_device_from_candle(d: &candle_core::Device) -> KtDevice {
     use candle_core::backend::BackendDevice;
     use candle_core::DeviceLocation;
@@ -366,6 +383,7 @@ pub fn kt_device_from_candle(d: &candle_core::Device) -> KtDevice {
 /// Phase 7 of #1082 uses this to translate kt-typed inputs at
 /// `kiln-model`'s public surface (the `_kt` parallel entries) into the
 /// candle `Device` the underlying call path still expects.
+#[cfg(feature = "candle")]
 pub fn candle_device_from_kt(d: &KtDevice) -> Result<candle_core::Device, BridgeError> {
     match d {
         KtDevice::Cpu => Ok(candle_core::Device::Cpu),
@@ -415,7 +433,7 @@ pub fn candle_device_from_kt(d: &KtDevice) -> Result<candle_core::Device, Bridge
 /// it). Callers that need the candle CUDA device on a non-cuda build
 /// should use [`candle_device_from_kt`] with `KtDevice::Cuda(_)`
 /// instead (no graph capture). (#1082)
-#[cfg(feature = "cuda")]
+#[cfg(all(feature = "cuda", feature = "candle"))]
 pub fn candle_cuda_device_with_stream_no_event_tracking(
     ordinal: usize,
 ) -> Result<candle_core::Device, BridgeError> {
@@ -459,7 +477,7 @@ pub fn candle_cuda_device_with_stream_no_event_tracking(
 /// row-major strides). If the candle tensor's `layout.start_offset()` is
 /// non-zero, only the live elements are copied — the kt-Tensor doesn't
 /// inherit any unused prefix from the candle storage.
-#[cfg(feature = "cuda")]
+#[cfg(all(feature = "cuda", feature = "candle"))]
 #[allow(clippy::needless_pass_by_value)]
 pub fn kt_tensor_from_candle_cuda_copy(
     t: &candle_core::Tensor,
@@ -594,7 +612,7 @@ pub fn kt_tensor_from_candle_cuda_copy(
 /// The candle Tensor's layout is contiguous (start_offset = 0,
 /// row-major strides). Non-contiguous kt sources must be made
 /// contiguous before this call.
-#[cfg(feature = "cuda")]
+#[cfg(all(feature = "cuda", feature = "candle"))]
 pub fn kt_tensor_to_candle_cuda_copy(
     t: &KtTensor,
 ) -> Result<candle_core::Tensor, BridgeError> {
@@ -788,7 +806,7 @@ pub fn kt_tensor_to_candle_cuda_copy(
 /// call sites in `kiln-model::backend::cuda` skipping this step
 /// while the sibling `gdn_gates` kt path applied it — see that
 /// commit message for the failure mode.
-#[cfg(feature = "cuda")]
+#[cfg(all(feature = "cuda", feature = "candle"))]
 pub fn kt_tensor_from_candle_cuda_borrow(
     t: &candle_core::Tensor,
 ) -> Result<KtTensor, BridgeError> {
@@ -940,6 +958,7 @@ mod tests {
         assert!(e.to_string().contains("must be"));
     }
 
+    #[cfg(feature = "candle")]
     #[test]
     fn dtype_mapping_round_trip() {
         assert_eq!(candle_dtype_to_kt(candle_core::DType::F32).unwrap(), KtDType::F32);
@@ -953,6 +972,7 @@ mod tests {
         assert_eq!(candle_dtype_to_kt(candle_core::DType::I64).unwrap(), KtDType::I64);
     }
 
+    #[cfg(feature = "candle")]
     #[test]
     fn kt_dtype_to_candle_basic() {
         assert_eq!(kt_dtype_to_candle(KtDType::F32).unwrap(), candle_core::DType::F32);
@@ -966,6 +986,7 @@ mod tests {
         assert!(kt_dtype_to_candle(KtDType::Int4Packed).is_err());
     }
 
+    #[cfg(feature = "candle")]
     #[test]
     fn kt_device_from_candle_cpu_roundtrip() {
         // The CPU arm has no GPU dependency — exercise it unconditionally.
@@ -973,12 +994,14 @@ mod tests {
         assert_eq!(kt_device_from_candle(&d), KtDevice::Cpu);
     }
 
+    #[cfg(feature = "candle")]
     #[test]
     fn candle_device_from_kt_cpu_roundtrip() {
         let d = candle_device_from_kt(&KtDevice::Cpu).unwrap();
         assert!(matches!(d, candle_core::Device::Cpu));
     }
 
+    #[cfg(feature = "candle")]
     #[test]
     fn candle_device_from_kt_vulkan_errors() {
         // Vulkan is unsupported through candle; this should surface a
@@ -990,8 +1013,9 @@ mod tests {
     /// Without `feature = "metal"`, the inverse helper must surface a
     /// typed BridgeError instead of attempting `Device::new_metal`
     /// (which would route to the `dummy_metal_backend` `fail!()`
-    /// stub). (#1082)
-    #[cfg(not(feature = "metal"))]
+    /// stub). Requires `candle` since `candle_device_from_kt` is
+    /// candle-gated. (#1082)
+    #[cfg(all(feature = "candle", not(feature = "metal")))]
     #[test]
     fn candle_device_from_kt_metal_errors_without_feature() {
         let e = candle_device_from_kt(&KtDevice::Metal(0)).unwrap_err();

@@ -52,10 +52,13 @@ default-members = [
     "crates/kiln-graph-cuda",
     "crates/kiln-graph-metal",
     "crates/kiln-graph-vulkan",
-    # kiln-kt-bridge's default build (no `--features cuda`) is the pure
+    # kiln-kt-bridge's default build (candle on via the default-on
+    # `candle` feature, no `--features cuda`) is the pure
     # `candle <-> kt` Device/DType enum-mapping helpers — no CUDA
-    # toolchain needed. Tests + the CudaStorage downcast / device-ptr /
-    # forward_op shim are behind the `cuda` feature. (#1082)
+    # toolchain needed. The CudaStorage downcast / device-ptr /
+    # forward_op shim are behind the `cuda` feature; candle itself is
+    # now an optional (default-on) feature so candle-free consumers can
+    # opt out with `default-features = false`. (#1082)
     "crates/kiln-kt-bridge",
     "crates/kiln-model",
     "crates/kiln-mps",

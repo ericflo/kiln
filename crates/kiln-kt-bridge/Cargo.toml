@@ -8,40 +8,55 @@ repository.workspace = true
 description = "Shared helpers for Phase 7 kt-API ports (CudaStorage downcast, alloc, device-pointer extraction, plus pure candle<->kt Device/DType mapping)."
 
 [features]
-default = []
-# Enables the CUDA-touching helpers (CudaStorage downcast, alloc,
-# device-pointer extraction, candle CUDA Tensor borrow/copy adapters,
-# and the `forward_op` CustomOp shim). Pulls candle-core (cuda) and
-# kiln-tensor (cuda) so the cudarc-typed code paths compile.
-#
-# Without this feature, kiln-kt-bridge still exposes the four pure
-# `candle <-> kt` Device/DType enum-mapping helpers
-# (`candle_dtype_to_kt`, `kt_dtype_to_candle`, `kt_device_from_candle`,
-# `candle_device_from_kt`) so multi-backend builds (Metal, Vulkan, CPU)
-# of `kiln-model` / `kiln-server` can use them without dragging in a
-# CUDA toolchain. The mapping helpers only touch candle's `Device` /
-# `DType` enums, which are part of the candle-core base API and have
-# no CUDA dep themselves. (#1082)
-cuda = ["candle-core/cuda", "kiln-tensor/cuda"]
+# candle is DEFAULT-ON so every existing kt-bridge consumer is
+# unchanged. Only a consumer that explicitly opts out
+# (`default-features = false`) becomes candle-free — today that's just
+# `kiln-opd-loss-kernel`, the first kernel crate whose own candle dep
+# was dropped and which uses only the kt-native bridge surface
+# (BridgeError + alloc_cuda_tensor + cuda_*_device_ptr +
+# cuda_storage_and_byte_offset). (#1082)
+default = ["candle"]
+
+# Gates the entire candle⟷kt bridge surface: the Device/DType enum
+# mappers, the candle CUDA Tensor borrow/copy adapters, the
+# `forward_op`/`inject_grad_shim`/`tape_bridge` CustomOp + GradStore
+# modules, and the graph-ready candle CUDA device constructor. With
+# this feature OFF the crate still exposes the kt-native helpers
+# (BridgeError, CudaStorage downcast, alloc, device-pointer
+# extraction) so a candle-free consumer can use them on a CUDA build
+# without dragging in candle. (#1082)
+candle = ["dep:candle-core"]
+
+# Enables the CUDA-touching kt-native helpers (CudaStorage downcast,
+# alloc, device-pointer extraction). Pulls `kiln-tensor/cuda` so the
+# cudarc-typed code paths compile. This feature is candle-INDEPENDENT:
+# `--features cuda` alone (no `candle`) builds the candle-free CUDA
+# surface; `--features cuda,candle` additionally forwards
+# `candle-core/cuda` (via the weak `candle-core?/cuda` below) so the
+# candle CUDA adapters compile. The weak `candle-core?/cuda` is a
+# no-op when `candle` is off, so the `cuda` feature never resurrects
+# candle. (#1082)
+cuda = ["kiln-tensor/cuda", "candle-core?/cuda"]
 
 # Enables Metal-aware Device enum mapping in `kt_device_from_candle`
-# and `candle_device_from_kt`. Without this feature, the helpers still
-# compile but `candle_core::Device::Metal(_)` inputs are skipped (the
-# arm is `#[cfg(feature = "metal")]`-gated) and the inverse Metal arm
-# errors out with `BridgeError`. The feature forwards
-# `candle-core/metal` so that `MetalDevice::location()` returns a real
-# `DeviceLocation::Metal { gpu_id }` instead of the
-# `dummy_metal_backend` `fail!()` stub. `kiln-tensor/metal` is
-# forwarded for parity with the `cuda` pattern; the `KtDevice::Metal(_)`
-# variant itself is unconditional on the kt side. (#1082)
-metal = ["candle-core/metal", "kiln-tensor/metal"]
+# and `candle_device_from_kt`. Those helpers are themselves
+# candle-gated, so the metal feature implies `candle`. Without the
+# candle feature there's nothing Metal-mapping to enable; with it on,
+# the feature forwards `candle-core/metal` so that
+# `MetalDevice::location()` returns a real `DeviceLocation::Metal {
+# gpu_id }` instead of the `dummy_metal_backend` `fail!()` stub.
+# `kiln-tensor/metal` is forwarded for parity with the `cuda` pattern;
+# the `KtDevice::Metal(_)` variant itself is unconditional on the kt
+# side. (#1082)
+metal = ["candle", "candle-core/metal", "kiln-tensor/metal"]
 
 [dependencies]
-# Candle is always present; the `cuda` feature forwards `candle-core/cuda`
-# (and `kiln-tensor/cuda`) to pull in the cudarc-typed code paths. The
-# pure `candle <-> kt` Device/DType enum-mapping helpers only need the
-# candle base API and compile on every host without a CUDA toolchain.
-candle-core = { workspace = true }
+# Candle is OPTIONAL (default-on via the `candle` feature). Consumers
+# that use only the kt-native bridge surface can opt out with
+# `default-features = false` to become candle-free. The `cuda` feature
+# forwards `candle-core?/cuda` (weak — no-op without `candle`) and
+# `kiln-tensor/cuda` to pull in the cudarc-typed code paths.
+candle-core = { workspace = true, optional = true }
 kiln-tensor = { workspace = true }
 # Phase 6a/CP-4 (#1082): the `tape_bridge` module owns the
 # candle⟷kt TensorId mapping that lets `kiln_autograd::Tape::backward`

@@ -40,7 +40,20 @@ kiln-autograd = { workspace = true }
 # Linux/Vulkan, macOS/Metal), which fail at the `nvcc --version`
 # probe in cudarc's build.rs. Gated under the `cuda` feature
 # along with `kiln-tensor/cuda`.
-kiln-kt-bridge = { workspace = true, optional = true }
+#
+# (#1082) candle-drop: `default-features = false` opts OUT of
+# kt-bridge's now-optional `candle` feature. This crate uses ONLY the
+# kt-native bridge surface (BridgeError + alloc_cuda_tensor +
+# cuda_input_device_ptr + cuda_output_device_ptr +
+# cuda_storage_and_byte_offset — see `kt_api.rs`), none of which touch
+# candle. With this opt-out, `cargo tree -p kiln-opd-loss-kernel
+# --features cuda` is candle-free, completing this crate's candle drop
+# at the dependency-graph level too. Every OTHER kt-bridge consumer
+# keeps the default (candle-on), so the blast radius is contained.
+# NOTE: declared as a DIRECT path dep (not `workspace = true`) because Cargo
+# forbids a member overriding `default-features = false` on a workspace-inherited
+# dependency. This is the only crate that opts out of kt-bridge's candle feature.
+kiln-kt-bridge = { path = "../kiln-kt-bridge", optional = true, default-features = false }
 half = "2"
 
 [features]
@@ -49,4 +62,8 @@ half = "2"
 # Without this feature the kt-typed surface compiles but the CUDA-only
 # backward dispatch is gated out. kiln-train re-exports this feature via
 # its own `cuda` feature so `cargo build --features cuda` activates it.
+#
+# (#1082) Enables `kiln-kt-bridge?/cuda` (the candle-free CUDA helpers)
+# but deliberately NOT `kiln-kt-bridge?/candle`, so the kt-bridge
+# pulled in here stays candle-free.
 cuda = ["kiln-tensor/cuda", "dep:kiln-kt-bridge", "kiln-kt-bridge?/cuda"]
