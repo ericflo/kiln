@@ -446,7 +446,7 @@ fn cuda_use_kt_api_broadcast_add() -> bool {
 fn cuda_use_kt_api_broadcast_sub() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     let direct =
-        *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_BROADCAST_SUB").is_ok());
+        *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_BROADCAST_SUB").is_err());
     direct || cuda_use_kt_api_all()
 }
 
@@ -503,7 +503,7 @@ fn cuda_use_kt_api_concat_last_dim() -> bool {
 fn cuda_use_kt_api_sum_sq_last_dim() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     let direct =
-        *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_SUM_SQ_LAST_DIM").is_ok());
+        *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_SUM_SQ_LAST_DIM").is_err());
     direct || cuda_use_kt_api_all()
 }
 
@@ -520,7 +520,7 @@ fn cuda_use_kt_api_sum_sq_last_dim() -> bool {
 fn cuda_use_kt_api_mean_last_dim() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     let direct =
-        *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_MEAN_LAST_DIM").is_ok());
+        *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_MEAN_LAST_DIM").is_err());
     direct || cuda_use_kt_api_all()
 }
 
@@ -543,7 +543,7 @@ fn cuda_use_kt_api_mean_last_dim() -> bool {
 fn cuda_use_kt_api_sum_last_dim() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     let direct =
-        *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_SUM_LAST_DIM").is_ok());
+        *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_SUM_LAST_DIM").is_err());
     direct || cuda_use_kt_api_all()
 }
 
@@ -570,7 +570,7 @@ fn cuda_use_kt_api_sum_last_dim() -> bool {
 fn cuda_use_kt_api_sum_axis() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     let direct =
-        *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_SUM_AXIS").is_ok());
+        *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_SUM_AXIS").is_err());
     direct || cuda_use_kt_api_all()
 }
 
@@ -593,7 +593,7 @@ fn cuda_use_kt_api_sum_axis() -> bool {
 fn cuda_use_kt_api_max_last_dim() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     let direct =
-        *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_MAX_LAST_DIM").is_ok());
+        *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_MAX_LAST_DIM").is_err());
     direct || cuda_use_kt_api_all()
 }
 
@@ -617,7 +617,7 @@ fn cuda_use_kt_api_max_last_dim() -> bool {
 fn cuda_use_kt_api_min_last_dim() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     let direct =
-        *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_MIN_LAST_DIM").is_ok());
+        *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_MIN_LAST_DIM").is_err());
     direct || cuda_use_kt_api_all()
 }
 
@@ -793,7 +793,7 @@ fn cuda_use_kt_api_sqrt() -> bool {
 #[cfg(feature = "cuda")]
 fn cuda_use_kt_api_rsqrt() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_RSQRT").is_ok());
+    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_RSQRT").is_err());
     direct || cuda_use_kt_api_all()
 }
 
@@ -848,7 +848,7 @@ fn cuda_use_kt_api_max_binary() -> bool {
 fn cuda_use_kt_api_min_binary() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     let direct =
-        *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_MIN_BINARY").is_ok());
+        *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_MIN_BINARY").is_err());
     direct || cuda_use_kt_api_all()
 }
 
@@ -874,7 +874,7 @@ fn cuda_use_kt_api_min_binary() -> bool {
 #[allow(dead_code)]
 fn cuda_use_kt_api_lerp() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_LERP").is_ok());
+    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_LERP").is_err());
     direct || cuda_use_kt_api_all()
 }
 
@@ -928,7 +928,7 @@ fn cuda_use_kt_api_abs() -> bool {
 #[allow(dead_code)]
 fn cuda_use_kt_api_clamp() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_CLAMP").is_ok());
+    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_CLAMP").is_err());
     direct || cuda_use_kt_api_all()
 }
 
@@ -953,7 +953,7 @@ fn cuda_use_kt_api_clamp() -> bool {
 #[allow(dead_code)]
 fn cuda_use_kt_api_pow() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_POW").is_ok());
+    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_POW").is_err());
     direct || cuda_use_kt_api_all()
 }
 
@@ -983,7 +983,7 @@ fn cuda_use_kt_api_pow() -> bool {
 fn cuda_use_kt_api_div_scalar() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     let direct =
-        *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_DIV_SCALAR").is_ok());
+        *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_DIV_SCALAR").is_err());
     direct || cuda_use_kt_api_all()
 }
 
@@ -1046,7 +1046,7 @@ fn cuda_use_kt_api_scalar_minus_tensor() -> bool {
 fn cuda_use_kt_api_scalar_div_tensor() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     let direct = *ENABLED
-        .get_or_init(|| std::env::var("KILN_USE_KT_API_SCALAR_DIV_TENSOR").is_ok());
+        .get_or_init(|| std::env::var("KILN_DISABLE_KT_API_SCALAR_DIV_TENSOR").is_err());
     direct || cuda_use_kt_api_all()
 }
 
@@ -1077,7 +1077,7 @@ fn cuda_use_kt_api_scalar_div_tensor() -> bool {
 fn cuda_use_kt_api_max_with_scalar() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     let direct = *ENABLED
-        .get_or_init(|| std::env::var("KILN_USE_KT_API_MAX_WITH_SCALAR").is_ok());
+        .get_or_init(|| std::env::var("KILN_DISABLE_KT_API_MAX_WITH_SCALAR").is_err());
     direct || cuda_use_kt_api_all()
 }
 
@@ -1108,7 +1108,7 @@ fn cuda_use_kt_api_max_with_scalar() -> bool {
 fn cuda_use_kt_api_min_with_scalar() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     let direct = *ENABLED
-        .get_or_init(|| std::env::var("KILN_USE_KT_API_MIN_WITH_SCALAR").is_ok());
+        .get_or_init(|| std::env::var("KILN_DISABLE_KT_API_MIN_WITH_SCALAR").is_err());
     direct || cuda_use_kt_api_all()
 }
 
@@ -1213,7 +1213,7 @@ fn cuda_use_kt_api_exp() -> bool {
 #[allow(dead_code)]
 fn cuda_use_kt_api_tanh() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_TANH").is_ok());
+    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_TANH").is_err());
     direct || cuda_use_kt_api_all()
 }
 
@@ -1241,7 +1241,7 @@ fn cuda_use_kt_api_tanh() -> bool {
 #[allow(dead_code)]
 fn cuda_use_kt_api_gelu() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_GELU").is_ok());
+    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_GELU").is_err());
     direct || cuda_use_kt_api_all()
 }
 
@@ -1266,7 +1266,7 @@ fn cuda_use_kt_api_gelu() -> bool {
 #[allow(dead_code)]
 fn cuda_use_kt_api_relu() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_RELU").is_ok());
+    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_RELU").is_err());
     direct || cuda_use_kt_api_all()
 }
 
@@ -1426,7 +1426,7 @@ fn cuda_use_kt_api_log1p() -> bool {
 #[cfg(feature = "cuda")]
 fn cuda_use_kt_api_to_dtype() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_TO_DTYPE").is_ok());
+    let direct = *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_TO_DTYPE").is_err());
     direct || cuda_use_kt_api_all()
 }
 
