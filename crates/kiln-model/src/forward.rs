@@ -14245,7 +14245,7 @@ pub fn gdn_l2_norm_scale_backward_no_grad(
     let term2 = x_f32.broadcast_mul(&s.broadcast_mul(&inv_n3)?)?;
     let dx = (&term1 - &term2)?.affine(scale, 0.0)?;
 
-    dx.to_dtype(x_dtype)
+    Ok(dx.to_dtype(x_dtype)?)
 }
 
 #[allow(clippy::too_many_arguments)]
