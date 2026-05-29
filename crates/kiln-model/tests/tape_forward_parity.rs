@@ -2988,11 +2988,12 @@ fn flash_attn_determinism_diagnostic() {
     );
 
     // (4) THE TAPE PATH: record via try_tape_flash_attn_cuda, walk, and
-    // compare the tape-walked dq to a DIRECT flash bwd with the same q/k/v.
-    // Since flash is byte-deterministic (above), a correct tape path must
-    // reproduce the direct dq exactly. This is the real CP-4 contract: the
-    // tape produces correct gradients. Env mutation guarded by ENV_LOCK.
-    let dq_tape_vs_direct = {
+    // compare the tape-walked dq to a MANUAL direct flash bwd that uses the
+    // SAME q/k/v + test-1's deterministic (out1, lse1) — which equals the
+    // adapter's saved out/lse since flash fwd is byte-deterministic. A
+    // correct tape path must reproduce dq_manual exactly. Localizes whether
+    // the tape's `apply` is fed the wrong inputs.
+    {
         let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         unsafe {
             std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
@@ -3001,10 +3002,11 @@ fn flash_attn_determinism_diagnostic() {
         let (res, tape) = kiln_model::tape_forward::with_thread_local_tape(|| {
             kiln_model::tape_forward::try_tape_flash_attn_cuda(&q, &k, &v, hq, hkv, hd)
         });
-        let _out = res.expect("adapter ok").expect("adapter Some");
+        let out_adapter = res.expect("adapter ok").expect("adapter Some");
         let node = &tape.nodes()[0];
         let out_id = node.output_id;
         let input_ids = node.input_ids.clone();
+        let n_inputs = input_ids.len();
         let mut seeds = HashMap::new();
         seeds.insert(out_id, kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&seed).unwrap());
         let grads = tape
@@ -3015,17 +3017,27 @@ fn flash_attn_determinism_diagnostic() {
             std::env::remove_var("KILN_USE_TAPE_FORWARD");
             std::env::remove_var("KILN_USE_TAPE_FLASH_ATTN");
         }
-        // Direct dq with a fresh deterministic fwd (== the adapter's fwd).
-        let (out_d, lse_d) =
-            kiln_flash_attn::flash_attn_fwd_kt(&q_kt, &k_kt, &v_kt, scale, true).expect("fwdD");
-        let (dq_d, _, _) = kiln_flash_attn::flash_attn_bwd_kt(
-            &seed_kt, &q_kt, &k_kt, &v_kt, &out_d, &lse_d, scale, true,
+        // Manual direct using test-1's (out1, lse1) — == adapter's saved fwd.
+        let (dq_m, _, _) = kiln_flash_attn::flash_attn_bwd_kt(
+            &seed_kt, &q_kt, &k_kt, &v_kt, &out1, &lse1, scale, true,
         )
-        .expect("bwdD");
-        rp(&dq_tape, &to_c(&dq_d))
-    };
-    eprintln!(
-        "[FLASH-DIAG] TAPE-PATH dq vs DIRECT dq rel-peak {:.6}",
-        dq_tape_vs_direct
-    );
+        .expect("bwdM");
+        let dq_m_c = to_c(&dq_m);
+        eprintln!(
+            "[FLASH-DIAG] node inputs={} ; adapter-out vs indep-fwd rel-peak {:.6}",
+            n_inputs,
+            rp(&out_adapter, &out1c)
+        );
+        eprintln!(
+            "[FLASH-DIAG] dq_tape shape {:?} peak {:.5} ; dq_manual shape {:?} peak {:.5}",
+            dq_tape.shape().dims(),
+            peak(&dq_tape),
+            dq_m_c.shape().dims(),
+            peak(&dq_m_c)
+        );
+        eprintln!(
+            "[FLASH-DIAG] TAPE-PATH dq vs MANUAL direct rel-peak {:.6}",
+            rp(&dq_tape, &dq_m_c)
+        );
+    }
 }
