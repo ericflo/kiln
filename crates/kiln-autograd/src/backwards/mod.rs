@@ -42,6 +42,7 @@ pub mod rmsnorm;
 pub mod rope;
 pub mod rope_split_half;
 pub mod stack;
+pub mod stride;
 pub mod swiglu;
 pub mod trig;
 pub mod unary_arith;

@@ -91,6 +91,9 @@ pub use backwards::rmsnorm::RmsNormBackward;
 pub use backwards::rope::RopeBackward;
 pub use backwards::rope_split_half::RopeSplitHalfBackward;
 pub use backwards::stack::StackBackward;
+pub use backwards::stride::{
+    ContiguousBackward, PermuteBackward, ReshapeBackward, TransposeBackward,
+};
 pub use backwards::swiglu::MulSigmoidGateBackward;
 pub use backwards::trig::{
     AcosBackward, AsinBackward, AtanBackward, CosBackward, SinBackward, TanBackward,
