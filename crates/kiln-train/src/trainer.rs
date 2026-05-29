@@ -13658,6 +13658,10 @@ mod tests {
             std::env::set_var("KILN_USE_TAPE_GDN", "1");
             std::env::set_var("KILN_USE_TAPE_GDN_GATED_NORM", "1");
             std::env::set_var("KILN_USE_TAPE_GDN_QK_NORM", "1");
+            // CP-4 Increment 3 (#1082): the GDN conv1d-prefill + the conv
+            // in/out transposes are gated on KILN_USE_TAPE_GDN_CONV; set it so
+            // the GDN forward chain wires all the way back to in_proj_qkv.
+            std::env::set_var("KILN_USE_TAPE_GDN_CONV", "1");
         }
 
         // BASELINE: pure candle (no tape scope; authoritative off -> CE composite).
@@ -13819,6 +13823,10 @@ mod tests {
             std::env::set_var("KILN_USE_TAPE_GDN", "1");
             std::env::set_var("KILN_USE_TAPE_GDN_GATED_NORM", "1");
             std::env::set_var("KILN_USE_TAPE_GDN_QK_NORM", "1");
+            // CP-4 Increment 3 (#1082): the GDN conv1d-prefill + the conv
+            // in/out transposes are gated on KILN_USE_TAPE_GDN_CONV; set it so
+            // the GDN forward chain wires all the way back to in_proj_qkv.
+            std::env::set_var("KILN_USE_TAPE_GDN_CONV", "1");
         }
 
         // BASELINE: pure candle (no tape scope; authoritative off -> CE composite).
