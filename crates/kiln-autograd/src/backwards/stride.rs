@@ -78,7 +78,15 @@ impl BackwardOp for TransposeBackward {
                 self.axis_b
             );
         }
-        Ok(vec![Some(grad_output.transpose(self.axis_a, self.axis_b)?)])
+        // Materialise contiguous: the transpose adjoint is a strided view,
+        // but the kt↔candle bridge and kernel-dispatching consumers (e.g.
+        // GdnRecurrentBackward, the trainer GradStore copy) require
+        // contiguous storage. Value-preserving; mirrors ReshapeBackward.
+        Ok(vec![Some(
+            grad_output
+                .transpose(self.axis_a, self.axis_b)?
+                .contiguous()?,
+        )])
     }
     fn requires_input(&self, _idx: usize) -> bool {
         false
