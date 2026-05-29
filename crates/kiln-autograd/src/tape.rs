@@ -179,10 +179,35 @@ impl Tape {
         // cost when on); CI training-parity tests opt in.
         let anomaly = crate::anomaly::anomaly_detection_enabled();
 
+        // #1082 CP-4 diagnostic: tape size + per-node processing trace.
+        let cp4_dbg = std::env::var("KILN_CP4_DEBUG").is_ok();
+        if cp4_dbg {
+            eprintln!(
+                "[CP4-DEBUG] backward_with_seeds: {} nodes on tape, {} seeds",
+                self.nodes.len(),
+                grads.len()
+            );
+            for (i, node) in self.nodes.iter().enumerate() {
+                eprintln!(
+                    "[CP4-DEBUG]   node[{i}] op={} out={} ins={:?}",
+                    node.op.name(),
+                    node.output_id.as_raw(),
+                    node.input_ids.iter().map(|id| id.as_raw()).collect::<Vec<_>>(),
+                );
+            }
+        }
+
         // Walk nodes in reverse insertion order. (Insertion order is
         // already topo-sorted producer-before-consumer because each
         // forward op records before its consumers.)
         for (node_index, node) in self.nodes.iter().enumerate().rev() {
+            if cp4_dbg && !grads.contains_key(&node.output_id) {
+                eprintln!(
+                    "[CP4-DEBUG]   SKIP node[{node_index}] op={} out={} (no upstream grad)",
+                    node.op.name(),
+                    node.output_id.as_raw(),
+                );
+            }
             // 1. Anti-pattern 16: input version check via the live
             //    Arc<AtomicU64> handles captured at record() time.
             for (i, recorded_version) in node.input_versions.iter().enumerate() {
