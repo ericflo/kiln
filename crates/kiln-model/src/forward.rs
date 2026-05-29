@@ -14204,6 +14204,147 @@ pub fn gdn_gated_rms_norm_backward_no_grad(
     })
 }
 
+/// Candle-composite analytic backward for the fused "cross-entropy from full
+/// logits" tape node ([`crate::tape_forward::CrossEntropyFromLogitsBackward`]).
+///
+/// Computes `dL/d(full logits)` for the next-token-prediction masked
+/// cross-entropy loss that [`crate::tape_forward::try_tape_cross_entropy_from_logits_cuda`]
+/// (and the candle-authoritative fallback `kiln_train::trainer::cross_entropy_loss`)
+/// produces. Device-agnostic (candle F32, no kt round-trip) so the kt-tape
+/// `CrossEntropyFromLogitsBackward` op can wrap it exactly the way
+/// [`gdn_recurrent_backward_no_grad`] / [`sdpa_fallback_backward_no_grad`] are
+/// wrapped. Because it is pure candle, it runs (and is parity-tested) on CPU
+/// where candle's own autograd is the oracle — no CUDA needed.
+///
+/// # Why one fused node
+///
+/// The forward `cross_entropy_loss` chains FOUR un-taped candle ops
+/// (`squeeze(0)` → `narrow(0, 0, T-1)` → `index_select(active)` → `to_dtype(F32)`)
+/// before the loss op, so a kt-tape rooted at the loss had a fresh-borrow input
+/// island and the chain died one op below the loss (`tape_has_grad=0/50`). This
+/// node instead takes the FULL `[1, T, V]` model logits directly and produces
+/// the scalar loss, so `dL/d(logits)` reaches the lm_head output once that op is
+/// wired (#1082 CP-4 Increment 1).
+///
+/// # Math (mean reduction over active shifted positions)
+///
+/// Forward (mirrors `cross_entropy_loss`, lines 5929-5995):
+/// ```text
+/// lg        = logits.squeeze(0)            [T, V]
+/// shift     = lg.narrow(0, 0, T-1)         [T-1, V]   (predict token[i+1] from logit[i])
+/// active    = shift.index_select(active_positions, 0)   [A, V]
+/// active32  = active.to_dtype(F32)
+/// loss      = mean_a( log_sum_exp(active32[a]) - active32[a, label_a] )
+/// ```
+/// where `active_positions = { i in 0..T-1 : label_mask[i+1] }`, `A = num_active`,
+/// and `label_a = input_ids[active_positions[a] + 1]`.
+///
+/// Backward (`g = dL/dloss`, the seed — typically `1.0`):
+/// ```text
+/// p_a             = softmax(active32[a])              [A, V]
+/// g_active[a]     = (p_a - one_hot(label_a)) * (g / A)   [A, V]   (mean ⇒ the 1/A)
+/// grad_shift      = scatter g_active into zeros[T-1, V] at rows active_positions
+/// grad_lg         = cat(grad_shift, zeros[1, V], dim=0)  [T, V]   (narrow(0,0,T-1) adjoint)
+/// dL/d(logits)    = grad_lg.unsqueeze(0)              [1, T, V]   cast to logits.dtype()
+/// ```
+/// The trailing zero row is the adjoint of dropping `lg[T-1]` (it never feeds the
+/// loss). Rows of `shift` not in `active_positions` get zero gradient (the
+/// `index_select` adjoint), which the zeros base already provides.
+///
+/// `g_active` is built with an explicit host-side one-hot `Vec<f32>` (mirroring
+/// `kiln_train::trainer::analytic_sft_tail_grad_pre_final_norm`, lines 6148-6158)
+/// so no uncertain candle scatter/one-hot API is needed. The active rows are
+/// scattered back via `index_add` of `g_active` into a `[T-1, V]` zeros tensor
+/// along dim 0 (the `index_select` adjoint).
+pub fn cross_entropy_from_logits_grad_candle(
+    logits: &Tensor,
+    input_ids: &[u32],
+    label_mask: &[bool],
+    grad_scalar: f64,
+) -> Result<Tensor> {
+    let logits_dtype = logits.dtype();
+    let device = logits.device();
+    let seq_len = input_ids.len();
+
+    let dims = logits.dims();
+    if dims.len() != 3 || dims[0] != 1 || dims[1] != seq_len {
+        anyhow::bail!(
+            "cross_entropy_from_logits_grad_candle: logits must be [1, seq_len, vocab], \
+             got {dims:?} for seq_len {seq_len}"
+        );
+    }
+    if label_mask.len() != seq_len {
+        anyhow::bail!(
+            "cross_entropy_from_logits_grad_candle: label_mask length {} != input_ids length {}",
+            label_mask.len(),
+            seq_len
+        );
+    }
+    anyhow::ensure!(
+        seq_len >= 2,
+        "cross_entropy_from_logits_grad_candle: requires at least 2 tokens"
+    );
+    let vocab_size = dims[2];
+
+    // active_positions = { i in 0..T-1 : label_mask[i+1] } (shifted-label mask).
+    let active_positions: Vec<u32> = label_mask[1..]
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &m)| if m { Some(i as u32) } else { None })
+        .collect();
+    anyhow::ensure!(
+        !active_positions.is_empty(),
+        "cross_entropy_from_logits_grad_candle: no supervised shifted-label positions"
+    );
+    let num_active = active_positions.len();
+    let active_labels: Vec<u32> = active_positions
+        .iter()
+        .map(|&i| input_ids[i as usize + 1])
+        .collect();
+
+    // Replicate the forward gather: squeeze(0) -> narrow(0,0,T-1) ->
+    // index_select(active) -> to_f32, EXACTLY as `cross_entropy_loss` does.
+    let lg = logits.squeeze(0)?; // [T, V]
+    let shift = lg.narrow(0, 0, seq_len - 1)?; // [T-1, V]
+    let active_indices = Tensor::new(active_positions.as_slice(), device)?;
+    let active = shift.index_select(&active_indices, 0)?; // [A, V]
+    let active_f32 = active.to_dtype(DType::F32)?;
+
+    // p = softmax(active_f32, last). Numerically-stable max-shift (matches the
+    // forward's log_sum_exp; kept inline so this stays a self-contained
+    // device-agnostic candle-F32 composite, like the SDPA fallback backward).
+    let max_val = active_f32.max_keepdim(LAST_DIM)?; // [A, 1]
+    let exp_shifted = active_f32.broadcast_sub(&max_val)?.exp()?;
+    let sum_exp = exp_shifted.sum_keepdim(LAST_DIM)?; // [A, 1]
+    let p = exp_shifted.broadcast_div(&sum_exp)?; // [A, V]
+
+    // g_active = (p - one_hot(label)) * (g / A). The 1/A is the mean reduction;
+    // `g` is the incoming scalar dL/dloss seed. One-hot built host-side.
+    let inv_n = grad_scalar / num_active as f64;
+    let mut one_hot_data = vec![0.0f32; num_active * vocab_size];
+    for (row_idx, &label) in active_labels.iter().enumerate() {
+        let label = label as usize;
+        anyhow::ensure!(
+            label < vocab_size,
+            "cross_entropy_from_logits_grad_candle: label {label} >= vocab {vocab_size}"
+        );
+        one_hot_data[row_idx * vocab_size + label] = 1.0;
+    }
+    let one_hot = Tensor::from_vec(one_hot_data, (num_active, vocab_size), device)?;
+    let g_active = (p - one_hot)?.affine(inv_n, 0.0)?; // [A, V]
+
+    // Scatter g_active back into a [T-1, V] zeros tensor at rows
+    // active_positions (the index_select adjoint), then pad a zero row at the
+    // end for the dropped lg[T-1] (the narrow(0,0,T-1) adjoint), -> [T, V].
+    let grad_shift_base = Tensor::zeros((seq_len - 1, vocab_size), DType::F32, device)?;
+    let grad_shift = grad_shift_base.index_add(&active_indices, &g_active, 0)?; // [T-1, V]
+    let zero_row = Tensor::zeros((1, vocab_size), DType::F32, device)?;
+    let grad_lg = Tensor::cat(&[&grad_shift, &zero_row], 0)?; // [T, V]
+    let grad_logits = grad_lg.unsqueeze(0)?; // [1, T, V]
+
+    Ok(grad_logits.to_dtype(logits_dtype)?)
+}
+
 /// Candle-composite analytic backward for the GDN L2-qk-norm forward
 /// `y = l2_normalize(x) * scale` (the Step-4/5 `gdn_qk_norm` op: Q uses
 /// `scale = 1/sqrt(dk)`, K uses `scale = 1.0`). Device-agnostic (candle F32),

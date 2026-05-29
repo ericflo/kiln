@@ -5928,6 +5928,24 @@ fn cross_entropy_loss(
 ) -> Result<Tensor> {
     let seq_len = input_ids.len();
 
+    // #1082 CP-4 Increment 1: when tape-authoritative, route the WHOLE loss
+    // through the fused "cross-entropy from full logits" node. It takes the
+    // full `[1, T, V]` model logits directly (not the four un-taped
+    // squeeze/narrow/index_select/to_f32 ops below), so the tape root's input
+    // is the lm_head output rather than a fresh-borrow island — the chain that
+    // previously died one op below the loss (`tape_has_grad=0/50`) now reaches
+    // the lm_head once that op is wired. Gated on the authoritative flag; the
+    // candle-authoritative path (which still calls `loss.backward()`) falls
+    // through to the lineage-carrying candle composite below.
+    #[cfg(feature = "cuda")]
+    if tape_authoritative_enabled() {
+        if let Some(loss) = kiln_model::tape_forward::try_tape_cross_entropy_from_logits_cuda(
+            logits, input_ids, label_mask, device,
+        )? {
+            return Ok(loss);
+        }
+    }
+
     // Squeeze batch dimension: [seq_len, vocab_size]
     let logits = logits.squeeze(0)?;
 
