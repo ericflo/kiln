@@ -29,6 +29,7 @@ pub mod layernorm;
 pub mod leaky_activations;
 pub mod lerp;
 pub mod log_variants;
+pub mod lora_delta_add;
 pub mod mask;
 pub mod matmul;
 pub mod max_axis;
