@@ -11018,7 +11018,13 @@ fn swiglu_ffn_impl_no_chunk(
                     // SiLU activation: x * sigmoid(x)
                     let stage_profile =
                         start_mlp_stage_profile(profile_device, profile_context)?;
-                    let gate = cuda_silu(&gate)?;
+                    // CP-4 Increment 6 (#1082): wire SiLU(gate) onto the kt Tape so
+                    // the gate-proj LoRA Vars chain through it. No-op + candle
+                    // fallback unless KILN_USE_TAPE_FORWARD + a tape scope is active.
+                    let gate = match crate::tape_forward::try_tape_silu_cuda(&gate)? {
+                        Some(t) => t,
+                        None => cuda_silu(&gate)?,
+                    };
                     finish_mlp_stage_profile(
                         profile_device,
                         profile_context,
@@ -11029,7 +11035,14 @@ fn swiglu_ffn_impl_no_chunk(
                     // Element-wise multiply
                     let stage_profile =
                         start_mlp_stage_profile(profile_device, profile_context)?;
-                    let hidden = (gate * up)?;
+                    // CP-4 Increment 6 (#1082): the production SwiGLU mul. Wire it
+                    // so SiLU(gate) and up chain back to the gate/up projections
+                    // (down_proj reaches the loss via the FFN residual, but without
+                    // this its dL/dx never flows to gate/up — they stayed islands).
+                    let hidden = match crate::tape_forward::try_tape_mul_cuda(&gate, &up)? {
+                        Some(t) => t,
+                        None => (gate * up)?,
+                    };
                     finish_mlp_stage_profile(
                         profile_device,
                         profile_context,
