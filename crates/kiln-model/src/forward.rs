@@ -17058,7 +17058,10 @@ fn gated_deltanet_forward_decode_if(
                                     &q_kt, &k_kt, nv,
                                 ) {
                                     kiln_nvtx::range!(c"kiln/gdn/qk_norm_gqa");
-                                    let (q_kt, k_kt) =
+                                    // #1082: keep the fused L2-QK-norm output as kt —
+                                    // the downstream qk_norm tuple arms are kt, so the
+                                    // candle copy-out is gone.
+                                    let (q, k) =
                                         kiln_rmsnorm_kernel::fused_l2_qk_norm_gqa_kt(
                                             &q_kt,
                                             &k_kt,
@@ -17069,16 +17072,6 @@ fn gated_deltanet_forward_decode_if(
                                         .map_err(|e| {
                                             anyhow::anyhow!("kt fused_l2_qk_norm_gqa: {e}")
                                         })?;
-                                    let q =
-                                        kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&q_kt)
-                                            .with_context(|| {
-                                                "kt-adapter: l2_qk_norm_gqa q → candle failed"
-                                            })?;
-                                    let k =
-                                        kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&k_kt)
-                                            .with_context(|| {
-                                                "kt-adapter: l2_qk_norm_gqa k → candle failed"
-                                            })?;
                                     Some((q, k))
                                 } else {
                                     None
@@ -20937,11 +20930,19 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
                 // host-immediate slots into kernel args.
                 if let Some(slot_tensor) = kv_slot {
                     if kv_fused_batched_enabled() {
+                        // #1082: candle-island batch write — bridge kt k/v/slots
+                        // to candle (kt twin cache written separately).
+                        let k_c = kt_logits_to_candle(&k)
+                            .context("batch kv write graph-slot kt->candle k")?;
+                        let v_c = kt_logits_to_candle(&v)
+                            .context("batch kv write graph-slot kt->candle v")?;
+                        let slot_c = kt_logits_to_candle(slot_tensor)
+                            .context("batch kv write graph-slot kt->candle slots")?;
                         paged_cache.write_token_major_native_batch_graph_slot(
                             full_attn_layer_idx,
-                            &k,
-                            &v,
-                            slot_tensor,
+                            &k_c,
+                            &v_c,
+                            &slot_c,
                         )?
                     } else {
                         false
@@ -20955,16 +20956,21 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
                 false
             }
         };
-        if !kv_write_done
-            && !paged_cache.write_token_major_native_batch(
+        if !kv_write_done {
+            // #1082: candle-island batch write — bridge kt k/v to candle.
+            let k_c = kt_logits_to_candle(&k)
+                .context("batch kv write kt->candle k")?;
+            let v_c = kt_logits_to_candle(&v)
+                .context("batch kv write kt->candle v")?;
+            if !paged_cache.write_token_major_native_batch(
                 full_attn_layer_idx,
                 block_tables,
                 start_positions,
-                &k,
-                &v,
-            )?
-        {
-            anyhow::bail!("batched contiguous paged attention KV write declined");
+                &k_c,
+                &v_c,
+            )? {
+                anyhow::bail!("batched contiguous paged attention KV write declined");
+            }
         }
         finish_full_attn_stage_profile(
             profile_device,
@@ -20975,9 +20981,24 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
         )?;
     }
 
-    let (k_pool, v_pool) = paged_cache
+    let (k_pool_candle, v_pool_candle) = paged_cache
         .pool_tensors(full_attn_layer_idx)
         .context("batched contiguous paged attention layer index out of range")?;
+    // #1082: candle pool tensors -> kt for the kt batch decode backend methods.
+    // CUDA: zero-copy borrow; non-CUDA: bailing copy stub (production is CUDA).
+    #[cfg(feature = "cuda")]
+    let (k_pool, v_pool) = (
+        kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(k_pool_candle)
+            .context("batched paged decode borrow k_pool")?,
+        kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v_pool_candle)
+            .context("batched paged decode borrow v_pool")?,
+    );
+    #[cfg(not(feature = "cuda"))]
+    let (k_pool, v_pool) = (
+        candle_to_kt_activation(k_pool_candle).context("batched paged decode kt pool k")?,
+        candle_to_kt_activation(v_pool_candle).context("batched paged decode kt pool v")?,
+    );
+    let (k_pool, v_pool) = (&k_pool, &v_pool);
     // Prefer the once-per-step cached tensors when the caller built them;
     // otherwise use the per-layer ones we built above.
     let block_table_tensor: &Tensor = match (cached_meta, own_block_table_tensor.as_ref()) {
