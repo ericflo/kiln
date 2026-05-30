@@ -858,10 +858,59 @@ impl Tensor {
         match self.device() {
             #[cfg(feature = "cuda")]
             Device::Cuda(_) => crate::cuda_storage::cuda_slice_set_dim0(self, src, offset)?,
+            Device::Cpu => {
+                // #1082: CPU in-place slice-set (dim 0). kt `CpuStorage` has no
+                // interior lock, so we mirror the CUDA path — which writes
+                // through the device pointer obtained from `&self` — with a raw
+                // host-pointer copy. SAFETY: the `slice_set` contract is a
+                // caller-owned, layout-stable buffer written with no concurrent
+                // access (the single-threaded GDN decode conv_state update is the
+                // production caller). This is the same in-place effect candle's
+                // `slice_set` has (candle wraps storage in `RwLock`; kt's
+                // lock-free design needs the explicit unchecked write here). The
+                // outer-dim bounds were validated above.
+                if self.dtype().is_packed() {
+                    return Err(crate::Error::Msg(
+                        "Tensor::slice_set: packed dtype not supported on CPU".to_string(),
+                    ));
+                }
+                let bpe = self.dtype().size_in_bytes();
+                let inner: usize = self.dims().iter().skip(1).product();
+                let n_bytes = src.element_count() * bpe;
+                let dst_storage = self.storage();
+                let src_storage = src.storage();
+                let dst_cpu = dst_storage
+                    .as_any()
+                    .downcast_ref::<crate::CpuStorage>()
+                    .ok_or_else(|| {
+                        crate::Error::Msg("Tensor::slice_set: dst must be CPU storage".to_string())
+                    })?;
+                let src_cpu = src_storage
+                    .as_any()
+                    .downcast_ref::<crate::CpuStorage>()
+                    .ok_or_else(|| {
+                        crate::Error::Msg("Tensor::slice_set: src must be CPU storage".to_string())
+                    })?;
+                let dst_byte_off = offset * inner * bpe;
+                let src_byte_off = src.layout().start_offset() * bpe;
+                let dst_bytes = dst_cpu.as_bytes();
+                let src_bytes = src_cpu.as_bytes();
+                if dst_byte_off + n_bytes > dst_bytes.len()
+                    || src_byte_off + n_bytes > src_bytes.len()
+                {
+                    return Err(crate::Error::Msg(
+                        "Tensor::slice_set: byte range overflow".to_string(),
+                    ));
+                }
+                unsafe {
+                    let dst_ptr = (dst_bytes.as_ptr() as *mut u8).add(dst_byte_off);
+                    let src_ptr = src_bytes.as_ptr().add(src_byte_off);
+                    std::ptr::copy_nonoverlapping(src_ptr, dst_ptr, n_bytes);
+                }
+            }
             other => {
                 return Err(crate::Error::Msg(format!(
-                    "Tensor::slice_set: backend {other} not supported (#1082: CUDA-only; \
-                     kt storage is Arc-shared so a safe CPU in-place write isn't expressible)"
+                    "Tensor::slice_set: backend {other} not supported (#1082)"
                 )));
             }
         }
