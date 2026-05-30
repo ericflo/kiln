@@ -11796,9 +11796,16 @@ fn swiglu_ffn_impl_no_chunk(
                     // CP-4 Increment 6 (#1082): wire SiLU(gate) onto the kt Tape so
                     // the gate-proj LoRA Vars chain through it. No-op + candle
                     // fallback unless KILN_USE_TAPE_FORWARD + a tape scope is active.
-                    let gate = match crate::tape_forward::try_tape_silu_cuda(&gate)? {
-                        Some(t) => t,
-                        None => cuda_silu(&gate)?,
+                    let gate = if crate::tape_forward::tape_forward_enabled() {
+                        let g_candle = kt_logits_to_candle(&gate)
+                            .context("mlp silu kt->candle gate (tape)")?;
+                        match crate::tape_forward::try_tape_silu_cuda(&g_candle)? {
+                            Some(t) => candle_to_kt_activation(&t)
+                                .context("mlp silu candle->kt tape out")?,
+                            None => cuda_silu(&gate)?,
+                        }
+                    } else {
+                        cuda_silu(&gate)?
                     };
                     finish_mlp_stage_profile(
                         profile_device,
@@ -11814,9 +11821,18 @@ fn swiglu_ffn_impl_no_chunk(
                     // so SiLU(gate) and up chain back to the gate/up projections
                     // (down_proj reaches the loss via the FFN residual, but without
                     // this its dL/dx never flows to gate/up — they stayed islands).
-                    let hidden = match crate::tape_forward::try_tape_mul_cuda(&gate, &up)? {
-                        Some(t) => t,
-                        None => (gate * up)?,
+                    let hidden = if crate::tape_forward::tape_forward_enabled() {
+                        let g_candle = kt_logits_to_candle(&gate)
+                            .context("mlp mul kt->candle gate (tape)")?;
+                        let u_candle =
+                            kt_logits_to_candle(&up).context("mlp mul kt->candle up (tape)")?;
+                        match crate::tape_forward::try_tape_mul_cuda(&g_candle, &u_candle)? {
+                            Some(t) => candle_to_kt_activation(&t)
+                                .context("mlp mul candle->kt tape out")?,
+                            None => (gate * up)?,
+                        }
+                    } else {
+                        (gate * up)?
                     };
                     finish_mlp_stage_profile(
                         profile_device,
@@ -13094,9 +13110,17 @@ fn gdn_qk_norm(q: &Tensor, k: &Tensor, input_dtype: DType, scale: f64) -> Result
     // are set AND a tape scope is active. The production outputs are untouched.
     // All fast paths feed through here, so the wiring covers every dispatch.
     #[cfg(feature = "cuda")]
-    {
-        let _ = crate::tape_forward::try_tape_gdn_l2_norm_scale_cuda(q, scale, &q_out)?;
-        let _ = crate::tape_forward::try_tape_gdn_l2_norm_scale_cuda(k, 1.0, &k_out)?;
+    if crate::tape_forward::tape_forward_enabled() {
+        let q_candle = kt_logits_to_candle(q).context("gdn_qk_norm kt->candle q (tape)")?;
+        let k_candle = kt_logits_to_candle(k).context("gdn_qk_norm kt->candle k (tape)")?;
+        let q_out_candle =
+            kt_logits_to_candle(&q_out).context("gdn_qk_norm kt->candle q_out (tape)")?;
+        let k_out_candle =
+            kt_logits_to_candle(&k_out).context("gdn_qk_norm kt->candle k_out (tape)")?;
+        let _ =
+            crate::tape_forward::try_tape_gdn_l2_norm_scale_cuda(&q_candle, scale, &q_out_candle)?;
+        let _ =
+            crate::tape_forward::try_tape_gdn_l2_norm_scale_cuda(&k_candle, 1.0, &k_out_candle)?;
     }
 
     Ok((q_out, k_out))
