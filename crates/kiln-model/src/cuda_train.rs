@@ -26,6 +26,124 @@ pub fn next_cuda_train_op_id() -> u64 {
     NEXT_CUDA_TRAIN_OP_ID.fetch_add(1, Ordering::Relaxed)
 }
 
+// #1082 forward-flip iter4: the `crate::forward::try_kt_*` elementwise/reduce
+// helpers are kt-typed (kt in -> Option<kt> out), but this training module's
+// canonical storage is candle (`CudaTrainTensor` wraps `candle_core::Tensor`).
+// These thin wrappers borrow the contiguous candle operand(s) to kt zero-copy,
+// run the kt helper, and copy any kt result back to candle — preserving the
+// existing `match { Some(out) => out, None => <candle fallback> }` call shape
+// at the ~50 call sites. A borrow failure (non-CUDA / unsupported dtype /
+// non-contiguous) surfaces as an error, matching the helpers' own
+// preconditions; callers that want a silent fall-through already gate on
+// `is_contiguous()` upstream.
+mod kt_bridge_ct {
+    use super::*;
+
+    #[inline]
+    fn to_kt(t: &candle_core::Tensor, what: &str) -> Result<kiln_tensor::Tensor> {
+        kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(t)
+            .with_context(|| format!("{what}: candle->kt borrow"))
+    }
+
+    #[inline]
+    fn to_candle(t: &kiln_tensor::Tensor, what: &str) -> Result<candle_core::Tensor> {
+        kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(t)
+            .with_context(|| format!("{what}: kt->candle copy"))
+    }
+
+    macro_rules! unary {
+        ($name:ident, $kt:path, $what:literal) => {
+            pub(crate) fn $name(x: &candle_core::Tensor) -> Result<Option<candle_core::Tensor>> {
+                let x_kt = to_kt(x, $what)?;
+                match $kt(&x_kt)? {
+                    Some(out_kt) => Ok(Some(to_candle(&out_kt, $what)?)),
+                    None => Ok(None),
+                }
+            }
+        };
+    }
+
+    unary!(try_kt_exp, crate::forward::try_kt_exp, "cuda_train kt exp");
+    unary!(try_kt_neg, crate::forward::try_kt_neg, "cuda_train kt neg");
+    unary!(try_kt_log, crate::forward::try_kt_log, "cuda_train kt log");
+    unary!(try_kt_recip, crate::forward::try_kt_recip, "cuda_train kt recip");
+    unary!(try_kt_rsqrt, crate::forward::try_kt_rsqrt, "cuda_train kt rsqrt");
+    unary!(
+        try_kt_mean_last_dim_keepdim,
+        crate::forward::try_kt_mean_last_dim_keepdim,
+        "cuda_train kt mean_last_dim_keepdim"
+    );
+    unary!(
+        try_kt_sum_last_dim_keepdim,
+        crate::forward::try_kt_sum_last_dim_keepdim,
+        "cuda_train kt sum_last_dim_keepdim"
+    );
+    unary!(
+        try_kt_max_last_dim_keepdim,
+        crate::forward::try_kt_max_last_dim_keepdim,
+        "cuda_train kt max_last_dim_keepdim"
+    );
+
+    pub(crate) fn try_kt_add_scalar(
+        x: &candle_core::Tensor,
+        c: f64,
+    ) -> Result<Option<candle_core::Tensor>> {
+        let x_kt = to_kt(x, "cuda_train kt add_scalar")?;
+        match crate::forward::try_kt_add_scalar(&x_kt, c)? {
+            Some(out_kt) => Ok(Some(to_candle(&out_kt, "cuda_train kt add_scalar")?)),
+            None => Ok(None),
+        }
+    }
+
+    macro_rules! binary {
+        ($name:ident, $kt:path, $what:literal) => {
+            pub(crate) fn $name(
+                a: &candle_core::Tensor,
+                b: &candle_core::Tensor,
+            ) -> Result<Option<candle_core::Tensor>> {
+                let a_kt = to_kt(a, $what)?;
+                let b_kt = to_kt(b, $what)?;
+                match $kt(&a_kt, &b_kt)? {
+                    Some(out_kt) => Ok(Some(to_candle(&out_kt, $what)?)),
+                    None => Ok(None),
+                }
+            }
+        };
+    }
+
+    binary!(
+        try_kt_broadcast_mul,
+        crate::forward::try_kt_broadcast_mul,
+        "cuda_train kt broadcast_mul"
+    );
+    binary!(
+        try_kt_broadcast_add,
+        crate::forward::try_kt_broadcast_add,
+        "cuda_train kt broadcast_add"
+    );
+    binary!(
+        try_kt_broadcast_div,
+        crate::forward::try_kt_broadcast_div,
+        "cuda_train kt broadcast_div"
+    );
+
+    pub(crate) fn try_kt_concat_last_dim(
+        pieces: &[&candle_core::Tensor],
+    ) -> Result<Option<candle_core::Tensor>> {
+        // Borrow each candle piece to kt (keeping the kt tensors alive for the
+        // duration of the concat), then bridge the result back to candle.
+        let kt_owned: Vec<kiln_tensor::Tensor> = pieces
+            .iter()
+            .map(|p| to_kt(p, "cuda_train kt concat_last_dim"))
+            .collect::<Result<_>>()?;
+        let kt_refs: Vec<&kiln_tensor::Tensor> = kt_owned.iter().collect();
+        match crate::forward::try_kt_concat_last_dim(&kt_refs)? {
+            Some(out_kt) => Ok(Some(to_candle(&out_kt, "cuda_train kt concat_last_dim")?)),
+            None => Ok(None),
+        }
+    }
+}
+
 /// Backward op interface for the future CUDA-native training graph.
 pub trait CudaBackwardOp: Send + Sync + std::fmt::Debug {
     fn op_name(&self) -> &'static str;
@@ -791,7 +909,9 @@ pub fn cuda_div(lhs: &CudaTrainTensor, rhs: &CudaTrainTensor) -> Result<CudaTrai
     // Falls through to the candle composite when
     // KILN_USE_KT_API_BROADCAST_DIV is off (default) so behavior is
     // identical with the gate off.
-    let out = match crate::forward::try_kt_broadcast_div(lhs.as_tensor(), rhs.as_tensor())
+    // #1082: kt-bridged via `kt_bridge_ct` (candle->kt->candle). Falls
+    // through to the candle composite on miss.
+    let out = match kt_bridge_ct::try_kt_broadcast_div(lhs.as_tensor(), rhs.as_tensor())
         .context("cuda_div: try_kt_broadcast_div")?
     {
         Some(out) => out,
@@ -906,7 +1026,8 @@ pub fn cuda_rmsnorm(
     // off or any precondition fails so behavior is identical with
     // the gate off. Mirrors the existing `try_kt_rsqrt` wiring
     // below.
-    let variance = match crate::forward::try_kt_mean_last_dim_keepdim(&sq)
+    // #1082: kt-bridged via `kt_bridge_ct`.
+    let variance = match kt_bridge_ct::try_kt_mean_last_dim_keepdim(&sq)
         .context("cuda_rmsnorm: try_kt_mean_last_dim_keepdim")?
     {
         Some(out) => out,
@@ -925,14 +1046,14 @@ pub fn cuda_rmsnorm(
     // to the candle `+ f64` composite when `KILN_USE_KT_API_ADD_SCALAR`
     // (or `KILN_USE_KT_API_ALL`) is off or any precondition fails so
     // behavior is identical with the gate off.
-    let variance_plus_eps = match crate::forward::try_kt_add_scalar(&variance, eps as f64)
+    let variance_plus_eps = match kt_bridge_ct::try_kt_add_scalar(&variance, eps as f64)
         .context("cuda_rmsnorm: try_kt_add_scalar")?
     {
         Some(out) => out,
         None => (variance + eps as f64)
             .context("cuda_rmsnorm: add eps")?,
     };
-    let rms_inv = match crate::forward::try_kt_rsqrt(&variance_plus_eps)
+    let rms_inv = match kt_bridge_ct::try_kt_rsqrt(&variance_plus_eps)
         .context("cuda_rmsnorm: try_kt_rsqrt")?
     {
         Some(out) => out,
@@ -1061,7 +1182,7 @@ fn cuda_rope_apply(
     match x_pass {
         Some(pass) => {
             let pieces: [&candle_core::Tensor; 3] = [&r1, &r2, &pass];
-            if let Some(out) = crate::forward::try_kt_concat_last_dim(&pieces)
+            if let Some(out) = kt_bridge_ct::try_kt_concat_last_dim(&pieces)
                 .context("cuda_rope: try_kt_concat_last_dim")?
             {
                 Ok(out)
@@ -1071,7 +1192,7 @@ fn cuda_rope_apply(
         }
         None => {
             let pieces: [&candle_core::Tensor; 2] = [&r1, &r2];
-            if let Some(out) = crate::forward::try_kt_concat_last_dim(&pieces)
+            if let Some(out) = kt_bridge_ct::try_kt_concat_last_dim(&pieces)
                 .context("cuda_rope: try_kt_concat_last_dim")?
             {
                 Ok(out)
@@ -1565,12 +1686,25 @@ pub fn cuda_count_gdn_layers(weights: &CudaModelWeights) -> usize {
         .count()
 }
 
-fn cuda_frozen_f32_tensor(tensor: &candle_core::Tensor, name: &str) -> Result<CudaTrainTensor> {
+/// Bridge a kt GpuWeights tensor to a contiguous candle CUDA tensor for the
+/// candle-storage `CudaTrainTensor` import path (#1082). The kt weight is
+/// already CUDA-resident + contiguous at load; the copy bridge re-materialises
+/// it as candle storage.
+fn kt_weight_to_candle(tensor: &kiln_tensor::Tensor, name: &str) -> Result<candle_core::Tensor> {
     ensure!(
-        matches!(tensor.device(), candle_core::Device::Cuda(_)),
+        matches!(tensor.device(), kiln_tensor::Device::Cuda(_)),
         "CUDA native model import requires CUDA tensor for {name}, got {:?}",
         tensor.device()
     );
+    let contig = tensor
+        .contiguous()
+        .with_context(|| format!("make CUDA native model weight {name} contiguous (kt)"))?;
+    kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&contig)
+        .with_context(|| format!("bridge CUDA native model weight {name} kt->candle"))
+}
+
+fn cuda_frozen_f32_tensor(tensor: &kiln_tensor::Tensor, name: &str) -> Result<CudaTrainTensor> {
+    let tensor = kt_weight_to_candle(tensor, name)?;
     let tensor = tensor
         .to_dtype(candle_core::DType::F32)
         .with_context(|| format!("convert CUDA native model weight {name} to f32"))?
@@ -1579,12 +1713,8 @@ fn cuda_frozen_f32_tensor(tensor: &candle_core::Tensor, name: &str) -> Result<Cu
     CudaTrainTensor::new(tensor).with_context(|| format!("wrap CUDA native model weight {name}"))
 }
 
-fn cuda_frozen_typed_tensor(tensor: &candle_core::Tensor, name: &str) -> Result<CudaTrainTensor> {
-    ensure!(
-        matches!(tensor.device(), candle_core::Device::Cuda(_)),
-        "CUDA native model import requires CUDA tensor for {name}, got {:?}",
-        tensor.device()
-    );
+fn cuda_frozen_typed_tensor(tensor: &kiln_tensor::Tensor, name: &str) -> Result<CudaTrainTensor> {
+    let tensor = kt_weight_to_candle(tensor, name)?;
     ensure!(
         matches!(tensor.dtype(), candle_core::DType::F32 | candle_core::DType::BF16),
         "CUDA native typed import supports only F32/BF16 for {name}, got {:?}",
@@ -1679,11 +1809,12 @@ impl CudaModelWeights {
             };
             layers.push(imported);
         }
+        // #1082: `rotary_inv_freq` is kt; keep the dtype/device/read in kt.
         let rotary_inv_freq = weights
             .rotary_inv_freq
-            .to_dtype(candle_core::DType::F32)
+            .to_dtype(kiln_tensor::DType::F32)
             .context("convert CUDA native model rotary_inv_freq to f32")?
-            .to_device(&candle_core::Device::Cpu)
+            .to_device(kiln_tensor::Device::Cpu)
             .context("read CUDA native model rotary_inv_freq to CPU")?
             .flatten_all()
             .context("flatten CUDA native model rotary_inv_freq")?
@@ -1934,7 +2065,7 @@ pub fn cuda_softmax_last_dim(input: &CudaTrainTensor) -> Result<CudaTrainTensor>
     // (single-kernel kt-side reduction). Falls through to candle when
     // KILN_USE_KT_API_MAX_KEEPDIM is off or preconditions fail.
     let x_ref = input.as_tensor();
-    let max_val = match crate::forward::try_kt_max_last_dim_keepdim(x_ref)
+    let max_val = match kt_bridge_ct::try_kt_max_last_dim_keepdim(x_ref)
         .context("cuda_softmax_last_dim: try_kt_max_last_dim_keepdim")?
     {
         Some(out) => out,
@@ -1953,13 +2084,13 @@ pub fn cuda_softmax_last_dim(input: &CudaTrainTensor) -> Result<CudaTrainTensor>
     // result on CUDA, matching the kt route's gate); otherwise
     // falls through to the candle `exp()` path. Behavior is
     // bit-identical when the gate is off.
-    let exp_shifted = match crate::forward::try_kt_exp(&shifted)
+    let exp_shifted = match kt_bridge_ct::try_kt_exp(&shifted)
         .context("cuda_softmax_last_dim: try_kt_exp")?
     {
         Some(out) => out,
         None => shifted.exp().context("cuda_softmax_last_dim: exp")?,
     };
-    let sum_exp = match crate::forward::try_kt_sum_last_dim_keepdim(&exp_shifted)
+    let sum_exp = match kt_bridge_ct::try_kt_sum_last_dim_keepdim(&exp_shifted)
         .context("cuda_softmax_last_dim: try_kt_sum_last_dim_keepdim")?
     {
         Some(out) => out,
@@ -2211,7 +2342,7 @@ pub fn cuda_shifted_linear_cross_entropy_loss(
                 // on CUDA, matching the kt route's gate. Falls through
                 // to the candle `exp()` path when the gate is off or
                 // the precondition fails.
-                let chunk_exp = match crate::forward::try_kt_exp(&shifted)
+                let chunk_exp = match kt_bridge_ct::try_kt_exp(&shifted)
                     .context("cuda_shifted_linear_cross_entropy_loss: try_kt_exp initial")?
                 {
                     Some(out) => out,
@@ -2220,7 +2351,7 @@ pub fn cuda_shifted_linear_cross_entropy_loss(
                         .context("cuda_shifted_linear_cross_entropy_loss: initial exp")?,
                 };
                 // Phase 7 (#1082): route sum_keepdim(-1) through kt-API
-                let chunk_sumexp = match crate::forward::try_kt_sum_last_dim_keepdim(&chunk_exp)
+                let chunk_sumexp = match kt_bridge_ct::try_kt_sum_last_dim_keepdim(&chunk_exp)
                     .context("cuda_shifted_linear_cross_entropy_loss: try_kt_sum init")?
                 {
                     Some(out) => out,
@@ -2239,7 +2370,7 @@ pub fn cuda_shifted_linear_cross_entropy_loss(
                 // contiguous tensors → contiguous F32 result on CUDA.
                 let prev_diff = (prev_max - &new_max)
                     .context("cuda_shifted_linear_cross_entropy_loss: previous scale logits")?;
-                let prev_scale = match crate::forward::try_kt_exp(&prev_diff)
+                let prev_scale = match kt_bridge_ct::try_kt_exp(&prev_diff)
                     .context("cuda_shifted_linear_cross_entropy_loss: try_kt_exp prev_scale")?
                 {
                     Some(out) => out,
@@ -2258,8 +2389,8 @@ pub fn cuda_shifted_linear_cross_entropy_loss(
                 // cuda_elementwise_binary(KIND_MUL) launch. Falls
                 // through to the candle composite when
                 // KILN_USE_KT_API_BROADCAST_MUL is off.
-                let scaled_prev = match crate::forward::try_kt_broadcast_mul(
-                    &prev_sumexp,
+                let scaled_prev = match kt_bridge_ct::try_kt_broadcast_mul(
+                    prev_sumexp,
                     &prev_scale,
                 )
                 .context("cuda_shifted_linear_cross_entropy_loss: try_kt_broadcast_mul scale prev")?
@@ -2275,7 +2406,7 @@ pub fn cuda_shifted_linear_cross_entropy_loss(
                 // Phase 7 (#1082): route the chunk `exp` through the
                 // kt-API helper. Same shape contract as the initial
                 // chunk branch above.
-                let chunk_exp = match crate::forward::try_kt_exp(&shifted)
+                let chunk_exp = match kt_bridge_ct::try_kt_exp(&shifted)
                     .context("cuda_shifted_linear_cross_entropy_loss: try_kt_exp chunk")?
                 {
                     Some(out) => out,
@@ -2284,7 +2415,7 @@ pub fn cuda_shifted_linear_cross_entropy_loss(
                         .context("cuda_shifted_linear_cross_entropy_loss: chunk exp")?,
                 };
                 // Phase 7 (#1082): route sum_keepdim(-1) through kt-API
-                let chunk_sumexp = match crate::forward::try_kt_sum_last_dim_keepdim(&chunk_exp)
+                let chunk_sumexp = match kt_bridge_ct::try_kt_sum_last_dim_keepdim(&chunk_exp)
                     .context("cuda_shifted_linear_cross_entropy_loss: try_kt_sum chunk")?
                 {
                     Some(out) => out,
@@ -2334,7 +2465,7 @@ pub fn cuda_shifted_linear_cross_entropy_loss(
     // (single-kernel `cuda_activation_unary` with kind tag 6). Falls
     // through to candle `.log()` when the kt-API gate is off or any
     // precondition fails so behavior is identical with the gate off.
-    let log_sumexp_only = match crate::forward::try_kt_log(&running_sumexp)
+    let log_sumexp_only = match kt_bridge_ct::try_kt_log(&running_sumexp)
         .context("cuda_shifted_linear_cross_entropy_loss: try_kt_log")?
     {
         Some(out) => out,
@@ -2351,7 +2482,7 @@ pub fn cuda_shifted_linear_cross_entropy_loss(
     // cuda_elementwise_binary(KIND_ADD) launch. Falls through to the
     // candle composite when KILN_USE_KT_API_BROADCAST_ADD is off
     // (default) so behavior is identical with the gate off.
-    let log_sum_exp_keepdim = match crate::forward::try_kt_broadcast_add(
+    let log_sum_exp_keepdim = match kt_bridge_ct::try_kt_broadcast_add(
         &log_sumexp_only,
         &running_max,
     )
@@ -2397,21 +2528,21 @@ pub fn cuda_sigmoid(input: &CudaTrainTensor) -> Result<CudaTrainTensor> {
     // fails (non-CUDA, unsupported dtype, non-contiguous, rank-0),
     // so behavior is identical with the gates off.
     let x = input.as_tensor();
-    let neg = match crate::forward::try_kt_neg(x).context("cuda_sigmoid: try_kt_neg")? {
+    let neg = match kt_bridge_ct::try_kt_neg(x).context("cuda_sigmoid: try_kt_neg")? {
         Some(out) => out,
         None => x.neg().context("cuda_sigmoid: neg")?,
     };
-    let exp_neg = match crate::forward::try_kt_exp(&neg).context("cuda_sigmoid: try_kt_exp")? {
+    let exp_neg = match kt_bridge_ct::try_kt_exp(&neg).context("cuda_sigmoid: try_kt_exp")? {
         Some(out) => out,
         None => neg.exp().context("cuda_sigmoid: exp")?,
     };
-    let one_plus = match crate::forward::try_kt_add_scalar(&exp_neg, 1.0)
+    let one_plus = match kt_bridge_ct::try_kt_add_scalar(&exp_neg, 1.0)
         .context("cuda_sigmoid: try_kt_add_scalar")?
     {
         Some(out) => out,
         None => (exp_neg + 1.0).context("cuda_sigmoid: add one")?,
     };
-    let out = match crate::forward::try_kt_recip(&one_plus)
+    let out = match kt_bridge_ct::try_kt_recip(&one_plus)
         .context("cuda_sigmoid: try_kt_recip")?
     {
         Some(out) => out,
@@ -2441,7 +2572,7 @@ pub fn cuda_exp(input: &CudaTrainTensor) -> Result<CudaTrainTensor> {
     // the candle composite when any precondition fails so behavior
     // is identical with the gate off.
     let x = input.as_tensor();
-    let out = match crate::forward::try_kt_exp(x).context("cuda_exp: try_kt_exp")? {
+    let out = match kt_bridge_ct::try_kt_exp(x).context("cuda_exp: try_kt_exp")? {
         Some(out) => out,
         None => x.exp().context("cuda_exp: candle CUDA exp")?,
     };
@@ -2480,31 +2611,31 @@ pub fn cuda_softplus(input: &CudaTrainTensor) -> Result<CudaTrainTensor> {
     // precondition fails, so behavior is identical with the gates
     // off.
     let x = input.as_tensor();
-    let neg_x = match crate::forward::try_kt_neg(x).context("cuda_softplus: try_kt_neg")? {
+    let neg_x = match kt_bridge_ct::try_kt_neg(x).context("cuda_softplus: try_kt_neg")? {
         Some(out) => out,
         None => x.neg().context("cuda_softplus: neg")?,
     };
     let relu_neg_x = neg_x.maximum(&zeros).context("cuda_softplus: max(-x, 0)")?;
     let abs_x = (&relu_x + &relu_neg_x).context("cuda_softplus: abs")?;
-    let neg_abs = match crate::forward::try_kt_neg(&abs_x).context("cuda_softplus: try_kt_neg abs")?
+    let neg_abs = match kt_bridge_ct::try_kt_neg(&abs_x).context("cuda_softplus: try_kt_neg abs")?
     {
         Some(out) => out,
         None => abs_x.neg().context("cuda_softplus: -abs")?,
     };
-    let exp_neg_abs = match crate::forward::try_kt_exp(&neg_abs)
+    let exp_neg_abs = match kt_bridge_ct::try_kt_exp(&neg_abs)
         .context("cuda_softplus: try_kt_exp")?
     {
         Some(out) => out,
         None => neg_abs.exp().context("cuda_softplus: exp(-abs)")?,
     };
-    let one_plus = match crate::forward::try_kt_add_scalar(&exp_neg_abs, 1.0)
+    let one_plus = match kt_bridge_ct::try_kt_add_scalar(&exp_neg_abs, 1.0)
         .context("cuda_softplus: try_kt_add_scalar")?
     {
         Some(out) => out,
         None => (exp_neg_abs + 1.0).context("cuda_softplus: add one")?,
     };
     // Phase 7 (#1082): route the final `log()` through try_kt_log.
-    let log_term = match crate::forward::try_kt_log(&one_plus)
+    let log_term = match kt_bridge_ct::try_kt_log(&one_plus)
         .context("cuda_softplus: try_kt_log")?
     {
         Some(out) => out,
@@ -2536,21 +2667,21 @@ pub fn cuda_silu(input: &CudaTrainTensor) -> Result<CudaTrainTensor> {
     // its gate is off OR its precondition fails, so behavior is
     // identical with the gates off.
     let x = input.as_tensor();
-    let neg = match crate::forward::try_kt_neg(x).context("cuda_silu: try_kt_neg")? {
+    let neg = match kt_bridge_ct::try_kt_neg(x).context("cuda_silu: try_kt_neg")? {
         Some(out) => out,
         None => x.neg().context("cuda_silu: neg")?,
     };
-    let exp_neg = match crate::forward::try_kt_exp(&neg).context("cuda_silu: try_kt_exp")? {
+    let exp_neg = match kt_bridge_ct::try_kt_exp(&neg).context("cuda_silu: try_kt_exp")? {
         Some(out) => out,
         None => neg.exp().context("cuda_silu: exp")?,
     };
-    let one_plus = match crate::forward::try_kt_add_scalar(&exp_neg, 1.0)
+    let one_plus = match kt_bridge_ct::try_kt_add_scalar(&exp_neg, 1.0)
         .context("cuda_silu: try_kt_add_scalar")?
     {
         Some(out) => out,
         None => (exp_neg + 1.0).context("cuda_silu: add one")?,
     };
-    let sigmoid = match crate::forward::try_kt_recip(&one_plus)
+    let sigmoid = match kt_bridge_ct::try_kt_recip(&one_plus)
         .context("cuda_silu: try_kt_recip")?
     {
         Some(out) => out,
@@ -4131,7 +4262,7 @@ impl CudaBackwardOp for RmsNormBackward {
         // mean_keepdim wiring — route `mean_keepdim(-1)` through
         // `try_kt_mean_last_dim_keepdim` with a candle fallback so
         // behavior is identical when the gate is off.
-        let variance = match crate::forward::try_kt_mean_last_dim_keepdim(&sq)
+        let variance = match kt_bridge_ct::try_kt_mean_last_dim_keepdim(&sq)
             .context("cuda_rmsnorm backward: try_kt_mean_last_dim_keepdim")?
         {
             Some(out) => out,
@@ -4147,14 +4278,14 @@ impl CudaBackwardOp for RmsNormBackward {
         // wiring — route `variance + eps` through `try_kt_add_scalar`
         // with a candle fallback so behavior is identical when the
         // gate is off.
-        let variance_plus_eps = match crate::forward::try_kt_add_scalar(&variance, self.eps as f64)
+        let variance_plus_eps = match kt_bridge_ct::try_kt_add_scalar(&variance, self.eps as f64)
             .context("cuda_rmsnorm backward: try_kt_add_scalar")?
         {
             Some(out) => out,
             None => (variance + self.eps as f64)
                 .context("cuda_rmsnorm backward: add eps")?,
         };
-        let rms_inv = match crate::forward::try_kt_rsqrt(&variance_plus_eps)
+        let rms_inv = match kt_bridge_ct::try_kt_rsqrt(&variance_plus_eps)
             .context("cuda_rmsnorm backward: try_kt_rsqrt")?
         {
             Some(out) => out,
@@ -4176,7 +4307,7 @@ impl CudaBackwardOp for RmsNormBackward {
         // to the candle composite when KILN_USE_KT_API_BROADCAST_MUL
         // is off or any precondition fails so behavior is identical
         // with the gate off.
-        let rms_inv_cubed = match crate::forward::try_kt_broadcast_mul(&rms_inv_sq, &rms_inv)
+        let rms_inv_cubed = match kt_bridge_ct::try_kt_broadcast_mul(&rms_inv_sq, &rms_inv)
             .context("cuda_rmsnorm backward: try_kt_broadcast_mul rms_inv_cubed")?
         {
             Some(out) => out,
@@ -4194,7 +4325,7 @@ impl CudaBackwardOp for RmsNormBackward {
         // which preserves `[..., 1]`. The outer `input *
         // dot_correction` is a true broadcast (`[..., H] * [..., 1]`)
         // and stays on the candle path.
-        let dot_correction = match crate::forward::try_kt_broadcast_mul(&dot, &correction_scale)
+        let dot_correction = match kt_bridge_ct::try_kt_broadcast_mul(&dot, &correction_scale)
             .context("cuda_rmsnorm backward: try_kt_broadcast_mul dot_correction")?
         {
             Some(out) => out,
@@ -4733,7 +4864,7 @@ impl CudaBackwardOp for ExpBackward {
         // helper with a candle fallback. The helper accepts
         // contiguous F32/BF16/F16 on CUDA and falls through otherwise.
         let x = self.inputs[0].as_tensor();
-        let exp = match crate::forward::try_kt_exp(x).context("cuda_exp backward: try_kt_exp")? {
+        let exp = match kt_bridge_ct::try_kt_exp(x).context("cuda_exp backward: try_kt_exp")? {
             Some(out) => out,
             None => x.exp().context("cuda_exp backward: exp input")?,
         };
@@ -4769,25 +4900,25 @@ impl CudaBackwardOp for SoftplusBackward {
         // fallback. The dtype check happens implicitly in the helpers:
         // they accept contiguous F32/BF16/F16, fall through otherwise.
         let x = self.inputs[0].as_tensor();
-        let neg_x = match crate::forward::try_kt_neg(x)
+        let neg_x = match kt_bridge_ct::try_kt_neg(x)
             .context("cuda_softplus backward: try_kt_neg")?
         {
             Some(out) => out,
             None => x.neg().context("cuda_softplus backward: negate input")?,
         };
-        let exp_neg = match crate::forward::try_kt_exp(&neg_x)
+        let exp_neg = match kt_bridge_ct::try_kt_exp(&neg_x)
             .context("cuda_softplus backward: try_kt_exp")?
         {
             Some(out) => out,
             None => neg_x.exp().context("cuda_softplus backward: exp -input")?,
         };
-        let one_plus = match crate::forward::try_kt_add_scalar(&exp_neg, 1.0)
+        let one_plus = match kt_bridge_ct::try_kt_add_scalar(&exp_neg, 1.0)
             .context("cuda_softplus backward: try_kt_add_scalar")?
         {
             Some(out) => out,
             None => (exp_neg + 1.0).context("cuda_softplus backward: add one")?,
         };
-        let sigmoid = match crate::forward::try_kt_recip(&one_plus)
+        let sigmoid = match kt_bridge_ct::try_kt_recip(&one_plus)
             .context("cuda_softplus backward: try_kt_recip")?
         {
             Some(out) => out,
@@ -4986,13 +5117,13 @@ impl CudaBackwardOp for ShiftedCrossEntropyBackward {
             .broadcast_sub(&max_val)
             .context("cuda_shifted_cross_entropy_loss backward: shift")?;
         // Phase 7 (#1082): wire exp + sum_keepdim through kt-API
-        let exp_shifted = match crate::forward::try_kt_exp(&shifted)
+        let exp_shifted = match kt_bridge_ct::try_kt_exp(&shifted)
             .context("cuda_shifted_cross_entropy_loss backward: try_kt_exp")?
         {
             Some(out) => out,
             None => shifted.exp().context("cuda_shifted_cross_entropy_loss backward: exp")?,
         };
-        let sum_exp = match crate::forward::try_kt_sum_last_dim_keepdim(&exp_shifted)
+        let sum_exp = match kt_bridge_ct::try_kt_sum_last_dim_keepdim(&exp_shifted)
             .context("cuda_shifted_cross_entropy_loss backward: try_kt_sum")?
         {
             Some(out) => out,
@@ -5156,7 +5287,7 @@ impl CudaBackwardOp for ShiftedLinearCrossEntropyBackward {
                         "cuda_shifted_linear_cross_entropy_loss backward: initial shift",
                     )?;
                     // Phase 7 (#1082): wire exp + sum_keepdim through kt-API
-                    let chunk_exp = match crate::forward::try_kt_exp(&shifted)
+                    let chunk_exp = match kt_bridge_ct::try_kt_exp(&shifted)
                         .context("cuda_shifted_linear_cross_entropy_loss backward: try_kt_exp init")?
                     {
                         Some(out) => out,
@@ -5164,7 +5295,7 @@ impl CudaBackwardOp for ShiftedLinearCrossEntropyBackward {
                             .exp()
                             .context("cuda_shifted_linear_cross_entropy_loss backward: initial exp")?,
                     };
-                    let chunk_sumexp = match crate::forward::try_kt_sum_last_dim_keepdim(&chunk_exp)
+                    let chunk_sumexp = match kt_bridge_ct::try_kt_sum_last_dim_keepdim(&chunk_exp)
                         .context("cuda_shifted_linear_cross_entropy_loss backward: try_kt_sum init")?
                     {
                         Some(out) => out,
@@ -5180,7 +5311,7 @@ impl CudaBackwardOp for ShiftedLinearCrossEntropyBackward {
                         .context("cuda_shifted_linear_cross_entropy_loss backward: running max")?;
                     let prev_diff = (prev_max - &new_max)
                         .context("cuda_shifted_linear_cross_entropy_loss backward: previous scale logits")?;
-                    let prev_scale = match crate::forward::try_kt_exp(&prev_diff)
+                    let prev_scale = match kt_bridge_ct::try_kt_exp(&prev_diff)
                         .context("cuda_shifted_linear_cross_entropy_loss backward: try_kt_exp prev_scale")?
                     {
                         Some(out) => out,
@@ -5196,8 +5327,8 @@ impl CudaBackwardOp for ShiftedLinearCrossEntropyBackward {
                     // fast path engages. Falls through to the candle
                     // composite when KILN_USE_KT_API_BROADCAST_MUL is
                     // off.
-                    let scaled_prev = match crate::forward::try_kt_broadcast_mul(
-                        &prev_sumexp,
+                    let scaled_prev = match kt_bridge_ct::try_kt_broadcast_mul(
+                        prev_sumexp,
                         &prev_scale,
                     )
                     .context(
@@ -5211,7 +5342,7 @@ impl CudaBackwardOp for ShiftedLinearCrossEntropyBackward {
                     let shifted = logits_chunk
                         .broadcast_sub(&new_max)
                         .context("cuda_shifted_linear_cross_entropy_loss backward: chunk shift")?;
-                    let chunk_exp_b = match crate::forward::try_kt_exp(&shifted)
+                    let chunk_exp_b = match kt_bridge_ct::try_kt_exp(&shifted)
                         .context("cuda_shifted_linear_cross_entropy_loss backward: try_kt_exp chunk")?
                     {
                         Some(out) => out,
@@ -5219,7 +5350,7 @@ impl CudaBackwardOp for ShiftedLinearCrossEntropyBackward {
                             .exp()
                             .context("cuda_shifted_linear_cross_entropy_loss backward: chunk exp")?,
                     };
-                    let chunk_sumexp = match crate::forward::try_kt_sum_last_dim_keepdim(&chunk_exp_b)
+                    let chunk_sumexp = match kt_bridge_ct::try_kt_sum_last_dim_keepdim(&chunk_exp_b)
                         .context("cuda_shifted_linear_cross_entropy_loss backward: try_kt_sum chunk")?
                     {
                         Some(out) => out,
@@ -5264,7 +5395,7 @@ impl CudaBackwardOp for ShiftedLinearCrossEntropyBackward {
             let shifted = logits_chunk
                 .broadcast_sub(&running_max)
                 .context("cuda_shifted_linear_cross_entropy_loss backward: grad shift")?;
-            let exp_chunk = match crate::forward::try_kt_exp(&shifted)
+            let exp_chunk = match kt_bridge_ct::try_kt_exp(&shifted)
                 .context("cuda_shifted_linear_cross_entropy_loss backward: try_kt_exp grad")?
             {
                 Some(out) => out,
