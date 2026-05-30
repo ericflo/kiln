@@ -34073,7 +34073,8 @@ mod tests {
         device: &Device,
     ) -> Result<(PagedKvCache, BlockTable)> {
         let num_blocks = (seq_len + block_size - 1) / block_size;
-        let device_kt = kiln_kt_bridge::kt_device_from_candle(device);
+        // #1082: `device` is already a kt `Device`.
+        let device_kt = *device;
         let cache = PagedKvCache::new_kt(
             config.num_full_attention_layers,
             num_blocks,
