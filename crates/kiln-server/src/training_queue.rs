@@ -960,11 +960,18 @@ fn build_multi_tenant_merge_teacher(
         // this source's prompts and surface a tracing warning.
         let src_dir = adapter_dir.join(&source.adapter);
         let device = weights.embed_tokens.device().clone();
-        let teacher_lora = match kiln_model::lora_loader::LoraWeights::load(
-            &src_dir,
-            model_config.num_layers,
-            &device,
-        ) {
+        // #1082: `device` is kt (kt `GpuWeights`); LoraWeights::load wants
+        // candle — bridge kt->candle. A bridge failure falls through to the
+        // same graceful Err fallback below.
+        let teacher_lora = match kiln_kt_bridge::candle_device_from_kt(&device)
+            .map_err(|e| anyhow::anyhow!("teacher lora device bridge: {e}"))
+            .and_then(|device_cd| {
+                kiln_model::lora_loader::LoraWeights::load(
+                    &src_dir,
+                    model_config.num_layers,
+                    &device_cd,
+                )
+            }) {
             Ok(weights) => Some(weights),
             Err(e) => {
                 tracing::warn!(
@@ -2513,7 +2520,10 @@ fn auto_load_adapter(
         guard.weights.embed_tokens.device().clone()
     };
 
-    let lora = LoraWeights::load(adapter_path, num_layers, &device)
+    // #1082: bridge kt `device` -> candle for LoraWeights::load.
+    let device_cd = kiln_kt_bridge::candle_device_from_kt(&device)
+        .map_err(|e| format!("adapter device bridge: {e}"))?;
+    let lora = LoraWeights::load(adapter_path, num_layers, &device_cd)
         .map_err(|e| format!("failed to load adapter: {e}"))?;
 
     {
