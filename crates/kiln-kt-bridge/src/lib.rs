@@ -488,6 +488,20 @@ pub fn candle_cuda_device_with_stream_no_event_tracking(
 /// row-major strides). If the candle tensor's `layout.start_offset()` is
 /// non-zero, only the live elements are copied — the kt-Tensor doesn't
 /// inherit any unused prefix from the candle storage.
+/// No-CUDA (default-build) host bridge: candle CPU tensor → kt CPU tensor
+/// (typed host copy). #1082: companion to the no-CUDA `kt_tensor_to_candle_cuda_copy`;
+/// the kiln-train call sites invoke this unconditionally, so the default
+/// (no-CUDA / linux-default CI) build needs an implementation under the same
+/// name. Value-faithful host copy over F32/BF16/F16/U32/U8/I64.
+#[cfg(all(not(feature = "cuda"), feature = "candle"))]
+pub fn kt_tensor_from_candle_cuda_copy(
+    t: &candle_core::Tensor,
+) -> Result<kiln_tensor::Tensor, BridgeError> {
+    // CPU build: copy and borrow are identical (both are a host copy). Reuse the
+    // borrow variant's logic.
+    kt_tensor_from_candle_cuda_borrow(t)
+}
+
 #[cfg(all(feature = "cuda", feature = "candle"))]
 #[allow(clippy::needless_pass_by_value)]
 pub fn kt_tensor_from_candle_cuda_copy(
