@@ -2985,19 +2985,19 @@ impl CustomOp3 for CudaLoraAddF32 {
         {
             bail!("CudaLoraAddF32 CPU fallback requires compact contiguous inputs");
         }
-        let base = Tensor::from_storage(
+        let base = candle_core::Tensor::from_storage(
             Storage::Cpu(s_base.clone()),
             Shape::from(l_base.dims().to_vec()),
             BackpropOp::none(),
             false,
         );
-        let hidden = Tensor::from_storage(
+        let hidden = candle_core::Tensor::from_storage(
             Storage::Cpu(s_hidden.clone()),
             Shape::from(l_hidden.dims().to_vec()),
             BackpropOp::none(),
             false,
         );
-        let b = Tensor::from_storage(
+        let b = candle_core::Tensor::from_storage(
             Storage::Cpu(s_b.clone()),
             Shape::from(l_b.dims().to_vec()),
             BackpropOp::none(),
@@ -3109,19 +3109,19 @@ impl CustomOp3 for CudaLoraLinearBf16 {
                 "CudaLoraLinearBf16 CPU fallback requires compact contiguous inputs"
             );
         }
-        let x = Tensor::from_storage(
+        let x = candle_core::Tensor::from_storage(
             Storage::Cpu(s_x.clone()),
             Shape::from(l_x.dims().to_vec()),
             BackpropOp::none(),
             false,
         );
-        let a = Tensor::from_storage(
+        let a = candle_core::Tensor::from_storage(
             Storage::Cpu(s_a.clone()),
             Shape::from(l_a.dims().to_vec()),
             BackpropOp::none(),
             false,
         );
-        let b = Tensor::from_storage(
+        let b = candle_core::Tensor::from_storage(
             Storage::Cpu(s_b.clone()),
             Shape::from(l_b.dims().to_vec()),
             BackpropOp::none(),
@@ -3316,7 +3316,7 @@ impl CustomOp3 for CudaLoraLinearBf16 {
             });
         }
 
-        let grad_x = Tensor::from_storage(
+        let grad_x = candle_core::Tensor::from_storage(
             Storage::Cuda(grad_x_storage),
             grad_x_shape,
             BackpropOp::none(),
@@ -3358,19 +3358,19 @@ impl CustomOp3 for CudaLoraAddBf16 {
         {
             bail!("CudaLoraAddBf16 CPU fallback requires compact contiguous inputs");
         }
-        let base = Tensor::from_storage(
+        let base = candle_core::Tensor::from_storage(
             Storage::Cpu(s_base.clone()),
             Shape::from(l_base.dims().to_vec()),
             BackpropOp::none(),
             false,
         );
-        let hidden = Tensor::from_storage(
+        let hidden = candle_core::Tensor::from_storage(
             Storage::Cpu(s_hidden.clone()),
             Shape::from(l_hidden.dims().to_vec()),
             BackpropOp::none(),
             false,
         );
-        let b = Tensor::from_storage(
+        let b = candle_core::Tensor::from_storage(
             Storage::Cpu(s_b.clone()),
             Shape::from(l_b.dims().to_vec()),
             BackpropOp::none(),
@@ -3968,14 +3968,14 @@ impl CustomOp2 for CudaSigmoidMulTrainingBf16 {
             )?;
         }
 
-        let grad_x = Tensor::from_storage(
+        let grad_x = candle_core::Tensor::from_storage(
             Storage::Cuda(grad_x_storage),
             out_shape.clone(),
             BackpropOp::none(),
             false,
         )
         .reshape(dims)?;
-        let grad_gate = Tensor::from_storage(
+        let grad_gate = candle_core::Tensor::from_storage(
             Storage::Cuda(grad_gate_storage),
             out_shape,
             BackpropOp::none(),
@@ -4561,19 +4561,19 @@ impl CustomOp3 for CudaFlashAttentionTrainingBf16 {
                 "CudaFlashAttentionTrainingBf16 CUDA path requires compact contiguous inputs"
             );
         }
-        let q = Tensor::from_storage(
+        let q = candle_core::Tensor::from_storage(
             Storage::Cuda(s_q.try_clone(l_q)?),
             Shape::from(l_q.dims().to_vec()),
             BackpropOp::none(),
             false,
         );
-        let k = Tensor::from_storage(
+        let k = candle_core::Tensor::from_storage(
             Storage::Cuda(s_k.try_clone(l_k)?),
             Shape::from(l_k.dims().to_vec()),
             BackpropOp::none(),
             false,
         );
-        let v = Tensor::from_storage(
+        let v = candle_core::Tensor::from_storage(
             Storage::Cuda(s_v.try_clone(l_v)?),
             Shape::from(l_v.dims().to_vec()),
             BackpropOp::none(),
@@ -5794,11 +5794,17 @@ impl LinearAttentionState {
         let mut conv_states = Vec::with_capacity(num_linear_layers);
 
         for _ in 0..num_linear_layers {
-            recurrent_states.push(Tensor::zeros((batch, nv, dk, dv), recurrent_dtype, device)?);
+            // kt `zeros` takes shape as `Into<Vec<usize>>` and `Device` by
+            // value (kt Device is Copy) (#1082 forward-flip).
+            recurrent_states.push(Tensor::zeros(
+                vec![batch, nv, dk, dv],
+                recurrent_dtype,
+                *device,
+            )?);
             conv_states.push(Tensor::zeros(
-                (batch, conv_dim, k_minus_1),
+                vec![batch, conv_dim, k_minus_1],
                 DType::F32,
-                device,
+                *device,
             )?);
         }
 
@@ -8410,7 +8416,7 @@ fn try_vulkan_rmsnorm_autograd(x: &Tensor, weight: &Tensor, eps: f32) -> Result<
             l_x: &Layout,
         ) -> CandleResult<(CpuStorage, Shape)> {
             let storage = Storage::Cpu(s_x.clone());
-            let x_tensor = Tensor::from_storage(
+            let x_tensor = candle_core::Tensor::from_storage(
                 storage,
                 Shape::from(l_x.shape().dims()),
                 BackpropOp::none(),
@@ -11075,19 +11081,19 @@ impl CustomOp3 for CudaRotaryOneBf16 {
         {
             bail!("CudaRotaryOneBf16 CPU fallback requires compact contiguous inputs");
         }
-        let x = Tensor::from_storage(
+        let x = candle_core::Tensor::from_storage(
             Storage::Cpu(s_x.clone()),
             Shape::from(l_x.dims().to_vec()),
             BackpropOp::none(),
             false,
         );
-        let cos = Tensor::from_storage(
+        let cos = candle_core::Tensor::from_storage(
             Storage::Cpu(s_cos.clone()),
             Shape::from(l_cos.dims().to_vec()),
             BackpropOp::none(),
             false,
         );
-        let sin = Tensor::from_storage(
+        let sin = candle_core::Tensor::from_storage(
             Storage::Cpu(s_sin.clone()),
             Shape::from(l_sin.dims().to_vec()),
             BackpropOp::none(),
