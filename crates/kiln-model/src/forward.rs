@@ -2661,7 +2661,10 @@ fn cuda_lora_training_linear_disabled() -> bool {
 }
 
 #[cfg(feature = "cuda")]
-fn to_dtype_if_needed(t: &Tensor, dtype: DType) -> CandleResult<Tensor> {
+fn to_dtype_if_needed(
+    t: &candle_core::Tensor,
+    dtype: candle_core::DType,
+) -> CandleResult<candle_core::Tensor> {
     if t.dtype() == dtype {
         return Ok(t.clone());
     }
@@ -2677,11 +2680,23 @@ fn to_dtype_if_needed(t: &Tensor, dtype: DType) -> CandleResult<Tensor> {
     // dtype pair, etc.).
     #[cfg(feature = "cuda")]
     {
-        match try_kt_to_dtype(t, dtype)
-            .map_err(|e| Error::Msg(format!("try_kt_to_dtype: {e}")))?
-        {
-            Some(out) => return Ok(out),
-            None => {}
+        // #1082 forward-flip: `try_kt_to_dtype` is kt-typed. Bridge the
+        // candle input into kt, route through the kt fast-path, and copy
+        // the kt result back to candle so this candle-island utility keeps
+        // its candle return contract.
+        if let Ok(t_kt) = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(t) {
+            if let Ok(kt_dtype) = kiln_kt_bridge::candle_dtype_to_kt(dtype) {
+                match try_kt_to_dtype(&t_kt, kt_dtype)
+                    .map_err(|e| Error::Msg(format!("try_kt_to_dtype: {e}")))?
+                {
+                    Some(out_kt) => {
+                        let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+                            .map_err(|e| Error::Msg(format!("to_dtype_if_needed copy-back: {e}")))?;
+                        return Ok(out);
+                    }
+                    None => {}
+                }
+            }
         }
     }
     t.to_dtype(dtype)
@@ -2701,20 +2716,20 @@ fn cuda_lora_bwd_tile_rows() -> usize {
 
 #[cfg(feature = "cuda")]
 fn cuda_lora_linear_training_bf16(
-    x: &Tensor,
-    weight_t: &Tensor,
+    x: &candle_core::Tensor,
+    weight_t: &candle_core::Tensor,
     lora: Option<&LoraProjectionWeights>,
     scale: f32,
-) -> Result<Option<Tensor>> {
+) -> Result<Option<candle_core::Tensor>> {
     let Some(proj) = lora else {
         return Ok(None);
     };
     if cuda_lora_training_linear_disabled()
-        || x.dtype() != DType::BF16
-        || weight_t.dtype() != DType::BF16
+        || x.dtype() != candle_core::DType::BF16
+        || weight_t.dtype() != candle_core::DType::BF16
         || !x.track_op()
-        || !matches!(x.device(), Device::Cuda(_))
-        || !matches!(weight_t.device(), Device::Cuda(_))
+        || !matches!(x.device(), candle_core::Device::Cuda(_))
+        || !matches!(weight_t.device(), candle_core::Device::Cuda(_))
     {
         return Ok(None);
     }
@@ -2733,7 +2748,7 @@ fn cuda_lora_linear_training_bf16(
     if rows == 0 {
         let mut out_dims = x_dims.to_vec();
         *out_dims.last_mut().unwrap() = out_dim;
-        return Ok(Some(Tensor::zeros(out_dims, DType::BF16, x.device())?));
+        return Ok(Some(candle_core::Tensor::zeros(out_dims, candle_core::DType::BF16, x.device())?));
     }
 
     let Ok((rank, a_in)) = proj.a.dims2() else {
@@ -2750,8 +2765,8 @@ fn cuda_lora_linear_training_bf16(
     if !x_2d.is_contiguous() {
         return Ok(None);
     }
-    let a_bf16 = to_dtype_if_needed(&proj.a, DType::BF16)?.contiguous()?;
-    let b_bf16 = to_dtype_if_needed(&proj.b, DType::BF16)?.contiguous()?;
+    let a_bf16 = to_dtype_if_needed(&proj.a, candle_core::DType::BF16)?.contiguous()?;
+    let b_bf16 = to_dtype_if_needed(&proj.b, candle_core::DType::BF16)?.contiguous()?;
     let out_2d = x_2d
         .apply_op3(
             &a_bf16,
@@ -2769,16 +2784,16 @@ fn cuda_lora_linear_training_bf16(
 
 #[cfg(feature = "cuda")]
 fn cuda_lora_add_training_f32(
-    base: &Tensor,
-    x: &Tensor,
+    base: &candle_core::Tensor,
+    x: &candle_core::Tensor,
     proj: &LoraProjectionWeights,
     scale: f32,
-) -> Result<Option<Tensor>> {
+) -> Result<Option<candle_core::Tensor>> {
     if cuda_lora_training_add_disabled()
-        || base.dtype() != DType::F32
-        || x.dtype() != DType::F32
-        || !matches!(base.device(), Device::Cuda(_))
-        || !matches!(x.device(), Device::Cuda(_))
+        || base.dtype() != candle_core::DType::F32
+        || x.dtype() != candle_core::DType::F32
+        || !matches!(base.device(), candle_core::Device::Cuda(_))
+        || !matches!(x.device(), candle_core::Device::Cuda(_))
     {
         return Ok(None);
     }
@@ -2822,32 +2837,8 @@ fn cuda_lora_add_training_f32(
     // — but we keep it on the candle fall-through (candle's
     // `to_dtype` doesn't *always* produce contiguous storage,
     // notably for already-F32 inputs which alias).
-    let a_f32 = {
-        #[cfg(feature = "cuda")]
-        {
-            match try_kt_to_dtype(&proj.a, DType::F32)? {
-                Some(out) => out,
-                None => proj.a.to_dtype(DType::F32)?.contiguous()?,
-            }
-        }
-        #[cfg(not(feature = "cuda"))]
-        {
-            proj.a.to_dtype(DType::F32)?.contiguous()?
-        }
-    };
-    let b_f32 = {
-        #[cfg(feature = "cuda")]
-        {
-            match try_kt_to_dtype(&proj.b, DType::F32)? {
-                Some(out) => out,
-                None => proj.b.to_dtype(DType::F32)?.contiguous()?,
-            }
-        }
-        #[cfg(not(feature = "cuda"))]
-        {
-            proj.b.to_dtype(DType::F32)?.contiguous()?
-        }
-    };
+    let a_f32 = to_dtype_if_needed(&proj.a, candle_core::DType::F32)?.contiguous()?;
+    let b_f32 = to_dtype_if_needed(&proj.b, candle_core::DType::F32)?.contiguous()?;
     let a_t = a_f32.t()?.contiguous()?;
     let hidden = x_2d
         .matmul(&a_t)
@@ -2862,16 +2853,16 @@ fn cuda_lora_add_training_f32(
 
 #[cfg(feature = "cuda")]
 fn cuda_lora_add_training_bf16(
-    base: &Tensor,
-    x: &Tensor,
+    base: &candle_core::Tensor,
+    x: &candle_core::Tensor,
     proj: &LoraProjectionWeights,
     scale: f32,
-) -> Result<Option<Tensor>> {
+) -> Result<Option<candle_core::Tensor>> {
     if cuda_lora_training_add_disabled()
-        || base.dtype() != DType::BF16
-        || x.dtype() != DType::BF16
-        || !matches!(base.device(), Device::Cuda(_))
-        || !matches!(x.device(), Device::Cuda(_))
+        || base.dtype() != candle_core::DType::BF16
+        || x.dtype() != candle_core::DType::BF16
+        || !matches!(base.device(), candle_core::Device::Cuda(_))
+        || !matches!(x.device(), candle_core::Device::Cuda(_))
     {
         return Ok(None);
     }
@@ -2915,37 +2906,13 @@ fn cuda_lora_add_training_bf16(
     // short-circuit) so we fall through to candle's `.to_dtype()`
     // (a zero-copy view); the explicit `.contiguous()?` then
     // pays for compactness if the view is non-contiguous.
-    let a_bf16 = {
-        #[cfg(feature = "cuda")]
-        {
-            match try_kt_to_dtype(&proj.a, DType::BF16)? {
-                Some(out) => out,
-                None => proj.a.to_dtype(DType::BF16)?.contiguous()?,
-            }
-        }
-        #[cfg(not(feature = "cuda"))]
-        {
-            proj.a.to_dtype(DType::BF16)?.contiguous()?
-        }
-    };
-    let b_bf16 = {
-        #[cfg(feature = "cuda")]
-        {
-            match try_kt_to_dtype(&proj.b, DType::BF16)? {
-                Some(out) => out,
-                None => proj.b.to_dtype(DType::BF16)?.contiguous()?,
-            }
-        }
-        #[cfg(not(feature = "cuda"))]
-        {
-            proj.b.to_dtype(DType::BF16)?.contiguous()?
-        }
-    };
+    let a_bf16 = to_dtype_if_needed(&proj.a, candle_core::DType::BF16)?.contiguous()?;
+    let b_bf16 = to_dtype_if_needed(&proj.b, candle_core::DType::BF16)?.contiguous()?;
     let a_t = a_bf16.t()?.contiguous()?;
     let hidden = x_2d
         .matmul(&a_t)
         .context("cuda BF16 LoRA training add hidden matmul")?
-        .to_dtype(DType::F32)?
+        .to_dtype(candle_core::DType::F32)?
         .contiguous()
         .context("cuda BF16 LoRA training add hidden contiguous")?;
     let out_2d = base_2d
@@ -3042,17 +3009,17 @@ impl CustomOp3 for CudaLoraAddF32 {
 
     fn bwd(
         &self,
-        _base: &Tensor,
-        hidden: &Tensor,
-        b: &Tensor,
-        _res: &Tensor,
-        grad_y: &Tensor,
-    ) -> CandleResult<(Option<Tensor>, Option<Tensor>, Option<Tensor>)> {
+        _base: &candle_core::Tensor,
+        hidden: &candle_core::Tensor,
+        b: &candle_core::Tensor,
+        _res: &candle_core::Tensor,
+        grad_y: &candle_core::Tensor,
+    ) -> CandleResult<(Option<candle_core::Tensor>, Option<candle_core::Tensor>, Option<candle_core::Tensor>)> {
         let grad_base = grad_y.clone();
-        let grad_y_f32 = to_dtype_if_needed(grad_y, DType::F32)?;
+        let grad_y_f32 = to_dtype_if_needed(grad_y, candle_core::DType::F32)?;
         let grad_delta = (grad_y_f32 * self.scale as f64)?;
-        let b_f32 = to_dtype_if_needed(b, DType::F32)?;
-        let hidden_f32 = to_dtype_if_needed(hidden, DType::F32)?;
+        let b_f32 = to_dtype_if_needed(b, candle_core::DType::F32)?;
+        let hidden_f32 = to_dtype_if_needed(hidden, candle_core::DType::F32)?;
         let grad_hidden = grad_delta.matmul(&b_f32)?;
         let grad_b = grad_delta.t()?.contiguous()?.matmul(&hidden_f32)?;
         Ok((Some(grad_base), Some(grad_hidden), Some(grad_b)))
@@ -3068,16 +3035,16 @@ struct CudaLoraAddBf16 {
 #[cfg(feature = "cuda")]
 #[derive(Debug, Clone)]
 struct CudaLoraLinearBf16 {
-    weight_t: Tensor,
+    weight_t: candle_core::Tensor,
     scale: f32,
 }
 
 #[cfg(feature = "cuda")]
 impl CudaLoraLinearBf16 {
-    fn forward_tensor(&self, x: &Tensor, a: &Tensor, b: &Tensor) -> CandleResult<Tensor> {
+    fn forward_tensor(&self, x: &candle_core::Tensor, a: &candle_core::Tensor, b: &candle_core::Tensor) -> CandleResult<candle_core::Tensor> {
         let base = x.matmul(&self.weight_t)?;
         let a_t = a.t()?.contiguous()?;
-        let hidden = x.matmul(&a_t)?.to_dtype(DType::F32)?.contiguous()?;
+        let hidden = x.matmul(&a_t)?.to_dtype(candle_core::DType::F32)?.contiguous()?;
         base.apply_op3_no_bwd(&hidden, b, &CudaLoraAddBf16 { scale: self.scale })
     }
 }
@@ -3187,7 +3154,7 @@ impl CustomOp3 for CudaLoraLinearBf16 {
         let hidden_bf16 = s_x.matmul(s_a, (1, rows, rank, in_features), l_x, &a_t_layout)?;
         let hidden_shape = Shape::from(vec![rows, rank]);
         let hidden_layout = Layout::contiguous(hidden_shape);
-        let hidden_f32 = hidden_bf16.to_dtype(&hidden_layout, DType::F32)?;
+        let hidden_f32 = hidden_bf16.to_dtype(&hidden_layout, candle_core::DType::F32)?;
         crate::rmsnorm_candle_shim::lora_add_bf16_storage(
             &out_storage,
             &out_layout,
@@ -3205,35 +3172,35 @@ impl CustomOp3 for CudaLoraLinearBf16 {
 
     fn bwd(
         &self,
-        x: &Tensor,
-        a: &Tensor,
-        b: &Tensor,
-        _res: &Tensor,
-        grad_y: &Tensor,
-    ) -> CandleResult<(Option<Tensor>, Option<Tensor>, Option<Tensor>)> {
+        x: &candle_core::Tensor,
+        a: &candle_core::Tensor,
+        b: &candle_core::Tensor,
+        _res: &candle_core::Tensor,
+        grad_y: &candle_core::Tensor,
+    ) -> CandleResult<(Option<candle_core::Tensor>, Option<candle_core::Tensor>, Option<candle_core::Tensor>)> {
         let rows = grad_y.dim(0)?;
         let tile_rows = cuda_lora_bwd_tile_rows().min(rows.max(1));
         let weight_t_t = self.weight_t.t()?;
-        let a_bf16 = to_dtype_if_needed(a, DType::BF16)?;
+        let a_bf16 = to_dtype_if_needed(a, candle_core::DType::BF16)?;
         let a_t_bf16 = a_bf16.t()?.contiguous()?;
-        let a_f32 = to_dtype_if_needed(a, DType::F32)?;
-        let b_f32 = to_dtype_if_needed(b, DType::F32)?;
+        let a_f32 = to_dtype_if_needed(a, candle_core::DType::F32)?;
+        let b_f32 = to_dtype_if_needed(b, candle_core::DType::F32)?;
         let x_in = x.dim(1)?;
         let grad_x_shape = Shape::from(vec![rows, x_in]);
-        let Device::Cuda(cuda_device) = x.device() else {
+        let candle_core::Device::Cuda(cuda_device) = x.device() else {
             bail!("CudaLoraLinearBf16 backward requires CUDA input");
         };
-        let mut grad_x_storage = unsafe { cuda_device.alloc_uninit(&grad_x_shape, DType::BF16)? };
-        let mut grad_a_acc: Option<Tensor> = None;
-        let mut grad_b_acc: Option<Tensor> = None;
+        let mut grad_x_storage = unsafe { cuda_device.alloc_uninit(&grad_x_shape, candle_core::DType::BF16)? };
+        let mut grad_a_acc: Option<candle_core::Tensor> = None;
+        let mut grad_b_acc: Option<candle_core::Tensor> = None;
 
         for start in (0..rows).step_by(tile_rows) {
             let len = (rows - start).min(tile_rows);
             let x_tile = x.narrow(0, start, len)?;
-            let x_tile_f32 = to_dtype_if_needed(&x_tile, DType::F32)?;
+            let x_tile_f32 = to_dtype_if_needed(&x_tile, candle_core::DType::F32)?;
             let grad_y_tile = grad_y.narrow(0, start, len)?;
-            let grad_y_tile_bf16 = to_dtype_if_needed(&grad_y_tile, DType::BF16)?;
-            let grad_y_tile_f32 = to_dtype_if_needed(&grad_y_tile, DType::F32)?;
+            let grad_y_tile_bf16 = to_dtype_if_needed(&grad_y_tile, candle_core::DType::BF16)?;
+            let grad_y_tile_f32 = to_dtype_if_needed(&grad_y_tile, candle_core::DType::F32)?;
 
             let grad_x_base = grad_y_tile_bf16.matmul(&weight_t_t)?;
             // Phase 7 (#1082): when `KILN_USE_KT_API_MUL_SCALAR=1`
@@ -3244,25 +3211,8 @@ impl CustomOp3 for CudaLoraLinearBf16 {
             // (MulScalar). Falls through to the candle composite
             // when any precondition fails.
             let grad_hidden_pre = grad_y_tile_f32.matmul(&b_f32)?;
-            let grad_hidden = {
-                #[cfg(feature = "cuda")]
-                {
-                    if let Some(out) = try_kt_mul_scalar(&grad_hidden_pre, self.scale as f64)
-                        .map_err(|e| Error::Msg(format!(
-                            "CudaLoraLinearBf16 backward: try_kt_mul_scalar: {e}"
-                        )))?
-                    {
-                        out
-                    } else {
-                        grad_hidden_pre.affine(self.scale as f64, 0.0)?
-                    }
-                }
-                #[cfg(not(feature = "cuda"))]
-                {
-                    grad_hidden_pre.affine(self.scale as f64, 0.0)?
-                }
-            };
-            let grad_x_lora = grad_hidden.matmul(&a_f32)?.to_dtype(DType::BF16)?;
+            let grad_hidden = grad_hidden_pre.affine(self.scale as f64, 0.0)?;
+            let grad_x_lora = grad_hidden.matmul(&a_f32)?.to_dtype(candle_core::DType::BF16)?;
             let grad_x_tile = (grad_x_base + grad_x_lora)?;
             let (grad_x_tile_storage, grad_x_tile_layout) = grad_x_tile.storage_and_layout();
             let Storage::Cuda(grad_x_tile_storage) = &*grad_x_tile_storage else {
@@ -3280,29 +3230,12 @@ impl CustomOp3 for CudaLoraLinearBf16 {
 
             let hidden = x_tile
                 .matmul(&a_t_bf16)?
-                .to_dtype(DType::F32)?
+                .to_dtype(candle_core::DType::F32)?
                 .contiguous()?;
             // Phase 7 (#1082): same kt-API mul-scalar migration for
             // the grad_b_tile scaling.
             let grad_b_tile_pre = grad_y_tile_f32.t()?.matmul(&hidden)?;
-            let grad_b_tile = {
-                #[cfg(feature = "cuda")]
-                {
-                    if let Some(out) = try_kt_mul_scalar(&grad_b_tile_pre, self.scale as f64)
-                        .map_err(|e| Error::Msg(format!(
-                            "CudaLoraLinearBf16 backward: try_kt_mul_scalar: {e}"
-                        )))?
-                    {
-                        out
-                    } else {
-                        grad_b_tile_pre.affine(self.scale as f64, 0.0)?
-                    }
-                }
-                #[cfg(not(feature = "cuda"))]
-                {
-                    grad_b_tile_pre.affine(self.scale as f64, 0.0)?
-                }
-            };
+            let grad_b_tile = grad_b_tile_pre.affine(self.scale as f64, 0.0)?;
             grad_b_acc = Some(match grad_b_acc {
                 Some(acc) => (acc + grad_b_tile)?,
                 None => grad_b_tile,
@@ -3376,10 +3309,10 @@ impl CustomOp3 for CudaLoraAddBf16 {
             false,
         );
         let delta = (hidden
-            .to_dtype(DType::F32)?
-            .matmul(&b.to_dtype(DType::F32)?.t()?)?
+            .to_dtype(candle_core::DType::F32)?
+            .matmul(&b.to_dtype(candle_core::DType::F32)?.t()?)?
             * self.scale as f64)?;
-        let out = (base.to_dtype(DType::F32)? + delta)?.to_dtype(DType::BF16)?;
+        let out = (base.to_dtype(candle_core::DType::F32)? + delta)?.to_dtype(candle_core::DType::BF16)?;
         let (storage, layout) = out.storage_and_layout();
         let storage = storage.try_clone(layout)?;
         match storage {
@@ -3420,25 +3353,25 @@ impl CustomOp3 for CudaLoraAddBf16 {
 
     fn bwd(
         &self,
-        _base: &Tensor,
-        hidden: &Tensor,
-        b: &Tensor,
-        _res: &Tensor,
-        grad_y: &Tensor,
-    ) -> CandleResult<(Option<Tensor>, Option<Tensor>, Option<Tensor>)> {
-        let grad_base = to_dtype_if_needed(grad_y, DType::BF16)?;
+        _base: &candle_core::Tensor,
+        hidden: &candle_core::Tensor,
+        b: &candle_core::Tensor,
+        _res: &candle_core::Tensor,
+        grad_y: &candle_core::Tensor,
+    ) -> CandleResult<(Option<candle_core::Tensor>, Option<candle_core::Tensor>, Option<candle_core::Tensor>)> {
+        let grad_base = to_dtype_if_needed(grad_y, candle_core::DType::BF16)?;
         let rows = grad_y.dim(0)?;
         let tile_rows = cuda_lora_bwd_tile_rows().min(rows.max(1));
-        let b_f32 = to_dtype_if_needed(b, DType::F32)?;
+        let b_f32 = to_dtype_if_needed(b, candle_core::DType::F32)?;
         let mut grad_hidden_tiles = Vec::with_capacity(rows.div_ceil(tile_rows));
-        let mut grad_b_acc: Option<Tensor> = None;
+        let mut grad_b_acc: Option<candle_core::Tensor> = None;
 
         for start in (0..rows).step_by(tile_rows) {
             let len = (rows - start).min(tile_rows);
             let grad_y_tile = grad_y.narrow(0, start, len)?;
-            let grad_y_tile_f32 = to_dtype_if_needed(&grad_y_tile, DType::F32)?;
+            let grad_y_tile_f32 = to_dtype_if_needed(&grad_y_tile, candle_core::DType::F32)?;
             let hidden_tile = hidden.narrow(0, start, len)?;
-            let hidden_tile_f32 = to_dtype_if_needed(&hidden_tile, DType::F32)?;
+            let hidden_tile_f32 = to_dtype_if_needed(&hidden_tile, candle_core::DType::F32)?;
             // Phase 7 (#1082): when `KILN_USE_KT_API_MUL_SCALAR=1`
             // (or `KILN_USE_KT_API_ALL=1`) is set AND the input is
             // a contiguous CUDA tensor of a supported dtype, route
@@ -3447,43 +3380,9 @@ impl CustomOp3 for CudaLoraAddBf16 {
             // (MulScalar). Falls through to the candle composite
             // when any precondition fails.
             let grad_hidden_tile_pre = grad_y_tile_f32.matmul(&b_f32)?;
-            let grad_hidden_tile = {
-                #[cfg(feature = "cuda")]
-                {
-                    if let Some(out) = try_kt_mul_scalar(&grad_hidden_tile_pre, self.scale as f64)
-                        .map_err(|e| Error::Msg(format!(
-                            "CudaLoraAddBf16 backward: try_kt_mul_scalar: {e}"
-                        )))?
-                    {
-                        out
-                    } else {
-                        grad_hidden_tile_pre.affine(self.scale as f64, 0.0)?
-                    }
-                }
-                #[cfg(not(feature = "cuda"))]
-                {
-                    grad_hidden_tile_pre.affine(self.scale as f64, 0.0)?
-                }
-            };
+            let grad_hidden_tile = grad_hidden_tile_pre.affine(self.scale as f64, 0.0)?;
             let grad_b_tile_pre = grad_y_tile_f32.t()?.matmul(&hidden_tile_f32)?;
-            let grad_b_tile = {
-                #[cfg(feature = "cuda")]
-                {
-                    if let Some(out) = try_kt_mul_scalar(&grad_b_tile_pre, self.scale as f64)
-                        .map_err(|e| Error::Msg(format!(
-                            "CudaLoraAddBf16 backward: try_kt_mul_scalar: {e}"
-                        )))?
-                    {
-                        out
-                    } else {
-                        grad_b_tile_pre.affine(self.scale as f64, 0.0)?
-                    }
-                }
-                #[cfg(not(feature = "cuda"))]
-                {
-                    grad_b_tile_pre.affine(self.scale as f64, 0.0)?
-                }
-            };
+            let grad_b_tile = grad_b_tile_pre.affine(self.scale as f64, 0.0)?;
             grad_hidden_tiles.push(grad_hidden_tile);
             grad_b_acc = Some(match grad_b_acc {
                 Some(acc) => (acc + grad_b_tile)?,
@@ -3499,26 +3398,7 @@ impl CustomOp3 for CudaLoraAddBf16 {
         // Falls through to the candle composite when any
         // precondition fails so behavior is identical with the
         // gate off.
-        let grad_hidden = {
-            #[cfg(feature = "cuda")]
-            {
-                let pieces: Vec<&Tensor> =
-                    grad_hidden_refs.iter().map(|t| &**t).collect();
-                if let Some(out) = try_kt_cat_dim0(&pieces)
-                    .map_err(|e| Error::Msg(format!(
-                        "CudaLoraAddBf16 backward: try_kt_cat_dim0: {e}"
-                    )))?
-                {
-                    out
-                } else {
-                    Tensor::cat(&grad_hidden_refs, 0)?
-                }
-            }
-            #[cfg(not(feature = "cuda"))]
-            {
-                Tensor::cat(&grad_hidden_refs, 0)?
-            }
-        };
+        let grad_hidden = candle_core::Tensor::cat(&grad_hidden_refs, 0)?;
         let Some(grad_b_acc) = grad_b_acc else {
             bail!("CudaLoraAddBf16 backward produced no B gradient tiles");
         };
@@ -3659,7 +3539,7 @@ fn attention_output_gate_decode_if(
 }
 
 #[cfg(feature = "cuda")]
-fn cuda_sigmoid_mul_training_bf16(x: &Tensor, gate: &Tensor) -> Result<Option<Tensor>> {
+fn cuda_sigmoid_mul_training_bf16(x: &candle_core::Tensor, gate: &candle_core::Tensor) -> Result<Option<candle_core::Tensor>> {
     if cuda_fused_attn_sigmoid_mul_disabled()
         || (!x.track_op() && !gate.track_op())
         || !crate::rmsnorm_candle_shim::supports_sigmoid_mul(x, gate)
@@ -3727,11 +3607,11 @@ impl CustomOp2 for CudaSigmoidMulTrainingBf16 {
 
     fn bwd(
         &self,
-        x: &Tensor,
-        gate: &Tensor,
-        _res: &Tensor,
-        grad_y: &Tensor,
-    ) -> CandleResult<(Option<Tensor>, Option<Tensor>)> {
+        x: &candle_core::Tensor,
+        gate: &candle_core::Tensor,
+        _res: &candle_core::Tensor,
+        grad_y: &candle_core::Tensor,
+    ) -> CandleResult<(Option<candle_core::Tensor>, Option<candle_core::Tensor>)> {
         let dims = x.dims();
         if dims != gate.dims() || dims != grad_y.dims() {
             bail!(
@@ -3747,11 +3627,11 @@ impl CustomOp2 for CudaSigmoidMulTrainingBf16 {
         let rows = x.elem_count() / width.max(1);
         if rows == 0 {
             return Ok((
-                Some(Tensor::zeros(dims, x.dtype(), x.device())?),
-                Some(Tensor::zeros(dims, gate.dtype(), gate.device())?),
+                Some(candle_core::Tensor::zeros(dims, x.dtype(), x.device())?),
+                Some(candle_core::Tensor::zeros(dims, gate.dtype(), gate.device())?),
             ));
         }
-        let Device::Cuda(cuda_device) = x.device() else {
+        let candle_core::Device::Cuda(cuda_device) = x.device() else {
             bail!("CudaSigmoidMulTrainingBf16 backward requires CUDA input");
         };
         x.device().synchronize()?;
@@ -3788,92 +3668,13 @@ impl CustomOp2 for CudaSigmoidMulTrainingBf16 {
             // `kiln_tensor::cuda_activation_unary` with kind 12
             // (Neg). Falls through to the candle composite when
             // any precondition fails.
-            let neg_gate = {
-                #[cfg(feature = "cuda")]
-                {
-                    if let Some(out) = try_kt_neg(&gate_tile).map_err(|e| {
-                        Error::Msg(format!(
-                            "CudaSigmoidMulTrainingBf16 backward: try_kt_neg: {e}"
-                        ))
-                    })? {
-                        out
-                    } else {
-                        gate_tile.neg()?
-                    }
-                }
-                #[cfg(not(feature = "cuda"))]
-                {
-                    gate_tile.neg()?
-                }
-            };
-            // Phase 7 (#1082): same kt-API migration for the
-            // `neg_gate.exp()` step — when `KILN_USE_KT_API_EXP=1`
-            // (or `KILN_USE_KT_API_ALL=1`) is set, route through
-            // `kiln_tensor::cuda_activation_unary` with kind 6
-            // (Exp). Falls through to the candle composite when
-            // any precondition fails.
-            let neg_exp = {
-                #[cfg(feature = "cuda")]
-                {
-                    if let Some(out) = try_kt_exp(&neg_gate)
-                        .map_err(|e| Error::Msg(format!(
-                            "CudaSigmoidMulTrainingBf16 backward: try_kt_exp: {e}"
-                        )))?
-                    {
-                        out
-                    } else {
-                        neg_gate.exp()?
-                    }
-                }
-                #[cfg(not(feature = "cuda"))]
-                {
-                    neg_gate.exp()?
-                }
-            };
-            let one_plus_neg_exp = {
-                #[cfg(feature = "cuda")]
-                {
-                    if let Some(out) = try_kt_add_scalar(&neg_exp, 1.0)
-                        .map_err(|e| Error::Msg(format!(
-                            "CudaSigmoidMulTrainingBf16 backward: try_kt_add_scalar: {e}"
-                        )))?
-                    {
-                        out
-                    } else {
-                        (neg_exp + 1.0)?
-                    }
-                }
-                #[cfg(not(feature = "cuda"))]
-                {
-                    (neg_exp + 1.0)?
-                }
-            };
-            // Phase 7 (#1082): same kt-API migration for the
-            // `one_plus_neg_exp.recip()` step — when `KILN_USE_KT_API_RECIP=1`
-            // (or `KILN_USE_KT_API_ALL=1`) is set, route through
-            // `kiln_tensor::cuda_activation_unary` with kind 22
-            // (Recip). Falls through to the candle composite when
-            // any precondition fails. Mirrors the `cuda_sigmoid`
-            // wiring (line ~114) which already routes this step
-            // through `try_kt_recip`.
-            let sigmoid_gate = {
-                #[cfg(feature = "cuda")]
-                {
-                    if let Some(out) = try_kt_recip(&one_plus_neg_exp)
-                        .map_err(|e| Error::Msg(format!(
-                            "CudaSigmoidMulTrainingBf16 backward: try_kt_recip: {e}"
-                        )))?
-                    {
-                        out
-                    } else {
-                        one_plus_neg_exp.recip()?
-                    }
-                }
-                #[cfg(not(feature = "cuda"))]
-                {
-                    one_plus_neg_exp.recip()?
-                }
-            };
+            // #1082 forward-flip: candle-autograd backward island — take the
+            // candle sigmoid composite directly. The per-step kt fast-path
+            // adapters are kt-typed and do not apply on this candle path.
+            let neg_gate = gate_tile.neg()?;
+            let neg_exp = neg_gate.exp()?;
+            let one_plus_neg_exp = (neg_exp + 1.0)?;
+            let sigmoid_gate = one_plus_neg_exp.recip()?;
             let grad_x_tile = (grad_y_tile.clone() * sigmoid_gate.clone())?;
             let (grad_x_tile_storage, grad_x_tile_layout) = grad_x_tile.storage_and_layout();
             let Storage::Cuda(grad_x_tile_storage) = &*grad_x_tile_storage else {
@@ -3891,7 +3692,7 @@ impl CustomOp2 for CudaSigmoidMulTrainingBf16 {
                 start * width,
             )?;
 
-            let sigmoid_f32 = sigmoid_gate.to_dtype(DType::F32)?;
+            let sigmoid_f32 = sigmoid_gate.to_dtype(candle_core::DType::F32)?;
             // Phase 7 (#1082): fast path through
             // `try_kt_scalar_minus_tensor(sigmoid_f32, 1.0)` — when
             // `KILN_USE_KT_API_SCALAR_MINUS_TENSOR=1` (or
@@ -3909,45 +3710,15 @@ impl CustomOp2 for CudaSigmoidMulTrainingBf16 {
             // derivative composite.
             // Phase 7 (#1082): same kt-API neg migration for the
             // `sigmoid_f32.neg()` step.
+            // #1082 forward-flip: candle composite for `1 - sigmoid` on this
+            // candle-autograd backward island.
             let one_minus_sigmoid = {
-                #[cfg(feature = "cuda")]
-                {
-                    if let Some(out) = try_kt_scalar_minus_tensor(&sigmoid_f32, 1.0).map_err(
-                        |e| Error::Msg(format!(
-                            "CudaSigmoidMulTrainingBf16 backward: try_kt_scalar_minus_tensor: {e}"
-                        )),
-                    )? {
-                        out
-                    } else {
-                        let neg_sigmoid = if let Some(out) = try_kt_neg(&sigmoid_f32).map_err(|e| {
-                            Error::Msg(format!(
-                                "CudaSigmoidMulTrainingBf16 backward: try_kt_neg: {e}"
-                            ))
-                        })? {
-                            out
-                        } else {
-                            sigmoid_f32.neg()?
-                        };
-                        if let Some(out) = try_kt_add_scalar(&neg_sigmoid, 1.0)
-                            .map_err(|e| Error::Msg(format!(
-                                "CudaSigmoidMulTrainingBf16 backward: try_kt_add_scalar: {e}"
-                            )))?
-                        {
-                            out
-                        } else {
-                            (neg_sigmoid + 1.0)?
-                        }
-                    }
-                }
-                #[cfg(not(feature = "cuda"))]
-                {
-                    let neg_sigmoid = sigmoid_f32.neg()?;
-                    (neg_sigmoid + 1.0)?
-                }
+                let neg_sigmoid = sigmoid_f32.neg()?;
+                (neg_sigmoid + 1.0)?
             };
             let gate_deriv = (sigmoid_f32 * one_minus_sigmoid)?;
             let grad_gate_tile =
-                (grad_y_tile.to_dtype(DType::F32)? * x_tile.to_dtype(DType::F32)?)?;
+                (grad_y_tile.to_dtype(candle_core::DType::F32)? * x_tile.to_dtype(candle_core::DType::F32)?)?;
             let grad_gate_tile = (grad_gate_tile * gate_deriv)?.to_dtype(gate.dtype())?;
             let (grad_gate_tile_storage, grad_gate_tile_layout) =
                 grad_gate_tile.storage_and_layout();
