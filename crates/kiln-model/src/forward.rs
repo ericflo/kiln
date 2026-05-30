@@ -13541,12 +13541,17 @@ fn gated_rms_norm_fallback(x: &Tensor, z: &Tensor, weight: &Tensor, eps: f64) ->
             variance_plus_eps.sqrt()?.recip()?
         }
     };
-    let normed = x_f32.broadcast_mul(&rms_inv)?;
-    let normed = normed.broadcast_mul(&w_f32)?;
+    // #1082: `rms_inv` descends from `variance` (mean + `unsqueeze(-1)` view),
+    // so it can be non-contiguous; kt elementwise still requires contiguous
+    // operands ("stride-aware path not in Phase 1.15"). candle broadcast over
+    // strided views implicitly; `.contiguous()` (O(1) no-op when contiguous)
+    // restores that. Guard each mul operand defensively.
+    let normed = x_f32.broadcast_mul(&rms_inv.contiguous()?)?;
+    let normed = normed.contiguous()?.broadcast_mul(&w_f32)?;
 
     // Output gate: silu(z) = z * sigmoid(z)
     let gate = cuda_silu(&z_f32)?;
-    let out = (normed * gate)?;
+    let out = (normed.contiguous()? * gate.contiguous()?)?;
     Ok(out)
 }
 
