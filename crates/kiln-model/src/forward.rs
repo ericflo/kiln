@@ -79,7 +79,15 @@ const LAST_DIM: D = D::Minus1;
 
 #[cfg(feature = "cuda")]
 fn try_borrow_kt_cuda(t: &Tensor) -> Option<kiln_tensor::Tensor> {
-    kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(t).ok()
+    // #1082 forward-flip: `t` is already a kt tensor (the forward compute
+    // path is kt-native). The historical candle→kt borrow is a no-op now,
+    // so just clone the handle after re-checking the same CUDA+contiguous
+    // gate the bridge borrow used to enforce.
+    if matches!(t.device(), Device::Cuda(_)) && t.is_contiguous() {
+        Some(t.clone())
+    } else {
+        None
+    }
 }
 
 /// CUDA-compatible sigmoid: `1 / (1 + exp(-x))`.
@@ -174,17 +182,13 @@ fn cuda_sigmoid(x: &Tensor) -> Result<Tensor> {
 fn try_kt_sigmoid_composite(x: &Tensor) -> Result<Option<Tensor>> {
     kiln_nvtx::range!(c"kiln/sigmoid_composite_kt");
 
-    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
+    // #1082 forward-flip: `x` is already kt; run the kt kernel directly and
+    // return kt (no candle↔kt round-trip).
     // kind tag 1 = Sigmoid (matches csrc/activation.cu KIND_SIGMOID).
-    let out_kt = match kiln_tensor::cuda_activation_unary(&x_kt, 1) {
+    let out = match kiln_tensor::cuda_activation_unary(x, 1) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-        .map_err(|e| anyhow::anyhow!("try_kt_sigmoid_composite: candle copy-back failed: {e}"))?;
     Ok(Some(out))
 }
 
