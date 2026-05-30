@@ -60,7 +60,20 @@ __device__ __forceinline__ float param_to_float(float x) {
     return x;
 }
 
+}  // namespace (device helpers only)
 
+// #1082 (H100/SM90 dlink-prune fix): the GDN gate `__global__` kernels below
+// have EXTERNAL linkage — they are intentionally NOT inside the anonymous
+// namespace above. Under separable compilation (RDC, `cc::Build::cuda(true)`
+// compiles every .cu with `-dc` then device-links them), `nvcc -dlink`
+// (nvlink) dead-code-eliminates *internal-linkage* `__global__` entry points
+// that have no device-side caller. On SM90 (H100) this silently dropped the
+// entire `gdn_gates.o` device section from `kiln_gdn_kernel_dlink.o`, so the
+// host-side launch resolved no registered device symbol and failed with
+// `cudaErrorSymbolNotFound` (500) — while SM80/SM86 (A100/A6000) happened not
+// to prune them. External linkage marks these as exported entry points that
+// nvlink must keep on every arch. The `__device__` helpers above stay internal
+// (they are inlined into the kernels, so their linkage is irrelevant).
 __global__ void gdn_gate_beta_bf16_kernel(
     const __nv_bfloat16* __restrict__ b,
     __nv_bfloat16* __restrict__ beta_out,
@@ -128,7 +141,20 @@ __global__ void gdn_gates_bf16_kernel(
     g_out[out_idx]    = __float2bfloat16(g_f);
 }
 
-}  // namespace
+// #1082: Explicit template instantiations (external linkage) for the three
+// used type combos (matching kiln_gdn_gates_bf16 / _f32_bf16_params /
+// _f32_params). Forces strong, kept device entry-point symbols so nvlink
+// cannot dead-code-eliminate them at device-link on any arch (SM90 pruned the
+// implicit weak instantiations — see the external-linkage note above).
+template __global__ void gdn_gates_bf16_kernel<__nv_bfloat16, __nv_bfloat16>(
+    const __nv_bfloat16*, const __nv_bfloat16*, const __nv_bfloat16*, const __nv_bfloat16*,
+    __nv_bfloat16*, __nv_bfloat16*, int32_t, int32_t, int32_t);
+template __global__ void gdn_gates_bf16_kernel<float, __nv_bfloat16>(
+    const __nv_bfloat16*, const __nv_bfloat16*, const float*, const __nv_bfloat16*,
+    __nv_bfloat16*, __nv_bfloat16*, int32_t, int32_t, int32_t);
+template __global__ void gdn_gates_bf16_kernel<float, float>(
+    const __nv_bfloat16*, const __nv_bfloat16*, const float*, const float*,
+    __nv_bfloat16*, __nv_bfloat16*, int32_t, int32_t, int32_t);
 
 template <typename ALogT, typename DtBiasT>
 int32_t launch_gdn_gates_bf16(
