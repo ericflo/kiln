@@ -371,7 +371,7 @@ impl GpuPackedWeightRegistry {
         &mut self,
         layer: RegistryLayer,
         projection: ProjectionKind,
-        tensor: &candle_core::Tensor,
+        tensor: &kiln_tensor::Tensor,
         transposed: bool,
     ) -> Result<()> {
         let key = PackedWeightKey::new(layer, projection)?;
@@ -389,7 +389,7 @@ impl GpuPackedWeightRegistry {
         &mut self,
         layer: RegistryLayer,
         projection: ProjectionKind,
-        bf16_t: &candle_core::Tensor,
+        bf16_t: &kiln_tensor::Tensor,
         marlin: Option<crate::marlin_proj::MarlinPackedProj>,
     ) -> Result<()> {
         let key = PackedWeightKey::new(layer, projection)?;
