@@ -15614,8 +15614,17 @@ fn gdn_chunk_prep_f32(
         }
     };
     let p_col = p.unsqueeze(3)?;
-    let strict_mask = strict_bool.to_dtype(DType::F32)?;
-    let causal_mask = causal_bool.to_dtype(DType::F32)?;
+    // #1082: U8→F32 cast is unsupported on the kt CUDA path (cast covers
+    // float↔float + U32↔I64; the unsupported-CUDA-cast fallback hits the CPU
+    // branch on a CUDA tensor). Build the F32 multiplicative masks via
+    // `where_cond` (1.0 where set, else 0.0) — the same selection the decay
+    // sites above use. This prep runs on CUDA inside the GDN recurrence backward
+    // (tape-authoritative); inference uses the fused kernel, so it never hit
+    // this cast before.
+    let mask_ones = Tensor::ones((batch, heads, chunk, chunk), DType::F32, &device)?;
+    let mask_zeros = Tensor::zeros((batch, heads, chunk, chunk), DType::F32, &device)?;
+    let strict_mask = strict_bool.where_cond(&mask_ones, &mask_zeros)?;
+    let causal_mask = causal_bool.where_cond(&mask_ones, &mask_zeros)?;
 
     let v_f32 = v.to_dtype(DType::F32)?;
     let kkt_f32 = kkt.to_dtype(DType::F32)?;
@@ -16043,6 +16052,14 @@ pub fn gdn_recurrent_backward_no_grad(
         let causal_bool = causal_lower_tri_bool(chunk, &q.device())?
             .reshape((1, 1, chunk, chunk))?
             .broadcast_as((batch, heads, chunk, chunk))?;
+        // #1082: F32 multiplicative masks via `where_cond`, NOT `.to_dtype(F32)`
+        // on the U8 bool masks (the kt U8→F32 cast is unsupported and its
+        // fallback hits the CPU branch on a CUDA tensor). Built once, reused in
+        // the broadcast_muls below.
+        let mask_ones = Tensor::ones((batch, heads, chunk, chunk), DType::F32, q.device())?;
+        let mask_zeros = Tensor::zeros((batch, heads, chunk, chunk), DType::F32, q.device())?;
+        let strict_mask_f32 = strict_bool.where_cond(&mask_ones, &mask_zeros)?;
+        let causal_mask_f32 = causal_bool.where_cond(&mask_ones, &mask_zeros)?;
         // Phase 7 (#1082): route both `where_cond(...).exp()` steps
         // through `try_kt_exp` under the same KILN_USE_KT_API_EXP
         // gate. The where_cond stays candle-side; only the
@@ -16065,7 +16082,7 @@ pub fn gdn_recurrent_backward_no_grad(
                     masked.exp()?
                 }
             };
-            exped.broadcast_mul(&strict_bool.to_dtype(DType::F32)?)?
+            exped.broadcast_mul(&strict_mask_f32)?
         };
         let causal_decay = {
             let masked = causal_bool.where_cond(&decay_delta, &zero_delta)?;
@@ -16082,7 +16099,7 @@ pub fn gdn_recurrent_backward_no_grad(
                     masked.exp()?
                 }
             };
-            exped.broadcast_mul(&causal_bool.to_dtype(DType::F32)?)?
+            exped.broadcast_mul(&causal_mask_f32)?
         };
         let d_kkt = d_a_strict.broadcast_mul(&strict_decay)?.contiguous()?;
         let d_qkt = d_b_mask.broadcast_mul(&causal_decay)?.contiguous()?;
