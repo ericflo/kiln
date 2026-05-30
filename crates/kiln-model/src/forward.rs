@@ -3544,23 +3544,15 @@ fn linear_with_lora_t_decode_if(
         // #1082: `linear_with_lora_t` is the candle-typed base-projection
         // composite (lora_loader). Bridge the kt inputs in and the candle
         // result back to kt so this `_decode_if` stays kt-typed.
-        #[cfg(feature = "cuda")]
-        {
-            let x_candle = kt_logits_to_candle(x)
-                .context("linear_with_lora_t_decode_if kt->candle x")?;
-            let weight_candle = kt_logits_to_candle(weight_t)
-                .context("linear_with_lora_t_decode_if kt->candle weight_t")?;
-            let out = linear_with_lora_t(&x_candle, &weight_candle, lora, lora_scale)?;
-            candle_to_kt_activation(&out)
-                .context("linear_with_lora_t_decode_if candle->kt out")
-        }
-        #[cfg(not(feature = "cuda"))]
-        {
-            let _ = (x, weight_t, lora, lora_scale);
-            anyhow::bail!(
-                "linear_with_lora_t_decode_if non-metal path requires the `cuda` feature (#1082)"
-            )
-        }
+        // #1082: un-stubbed for no-CUDA — the kt↔candle bridges and
+        // `linear_with_lora_t` (a candle CPU-capable composite) all work on any
+        // candle build. Bridge kt in, run the candle base projection, bridge back.
+        let x_candle = kt_logits_to_candle(x)
+            .context("linear_with_lora_t_decode_if kt->candle x")?;
+        let weight_candle = kt_logits_to_candle(weight_t)
+            .context("linear_with_lora_t_decode_if kt->candle weight_t")?;
+        let out = linear_with_lora_t(&x_candle, &weight_candle, lora, lora_scale)?;
+        candle_to_kt_activation(&out).context("linear_with_lora_t_decode_if candle->kt out")
     }
 }
 
@@ -6275,22 +6267,16 @@ impl LinearAttentionState {
 /// The non-CUDA loader device branches (Metal stub / Vulkan / CPU) are
 /// type-checked on a CUDA build but error at runtime — production is
 /// CUDA (A6000); non-CUDA loader paths are an iteration-2 concern.
-#[cfg(feature = "cuda")]
+// #1082: un-stubbed for no-CUDA. `kt_tensor_from_candle_cuda_copy` now has a
+// no-CUDA CPU host variant, so this loader bridge works on any build (candle is
+// a hard dep of kiln-model). The CPU/Metal loader paths previously bailed
+// "requires the cuda feature" and broke the no-CUDA `cargo test` runtime.
 fn candle_weight_to_kt(t: &candle_core::Tensor) -> Result<Tensor> {
     let contig = t
         .contiguous()
         .context("candle_weight_to_kt: contiguous")?;
     kiln_kt_bridge::kt_tensor_from_candle_cuda_copy(&contig)
         .map_err(|e| anyhow::anyhow!("candle_weight_to_kt copy bridge: {e}"))
-}
-
-/// Non-CUDA stub: the candle→kt copy bridge is CUDA-only, so the Metal
-/// parallel loader path (its only caller) errors at runtime on a non-CUDA
-/// build — production is CUDA, and the pure-kt Metal loader is an
-/// iteration-2 concern (mirrors [`weight_to_tensor`]'s non-cuda variant). (#1082)
-#[cfg(not(feature = "cuda"))]
-fn candle_weight_to_kt(_t: &candle_core::Tensor) -> Result<Tensor> {
-    anyhow::bail!("candle_weight_to_kt: candle→kt copy bridge requires the `cuda` feature (#1082)")
 }
 
 /// Resolve the candle device the loader builds its intermediate candle
@@ -6304,18 +6290,13 @@ fn loader_candle_device(device: &Device) -> Result<candle_core::Device> {
 
 /// Convert a `WeightTensor` (raw bytes + shape + dtype) to a kt `Tensor` on `device`.
 /// Builds a candle tensor leaf then copy-bridges to kt (#1082 forward-flip).
-#[cfg(feature = "cuda")]
+// #1082: un-stubbed for no-CUDA (see `candle_weight_to_kt`).
 fn weight_to_tensor(w: &WeightTensor, device: &Device) -> Result<Tensor> {
     let dtype = weight_dtype_candle(w);
     let cdev = loader_candle_device(device)?;
     let t = candle_core::Tensor::from_raw_buffer(w.as_bytes(), dtype, &w.shape, &cdev)
         .context("failed to create tensor from raw buffer")?;
     candle_weight_to_kt(&t)
-}
-
-#[cfg(not(feature = "cuda"))]
-fn weight_to_tensor(_w: &WeightTensor, _device: &Device) -> Result<Tensor> {
-    anyhow::bail!("weight_to_tensor: kt loader bridge requires the `cuda` feature (#1082)")
 }
 
 fn weight_dtype(w: &WeightTensor) -> DType {
@@ -6503,7 +6484,7 @@ pub(crate) fn transposed_weight_bytes_2d(w: &WeightTensor) -> Result<(Vec<u8>, [
     Ok((out, [cols, rows]))
 }
 
-#[cfg(feature = "cuda")]
+// #1082: un-stubbed for no-CUDA (see `candle_weight_to_kt`).
 fn weight_to_transposed_tensor_2d(w: &WeightTensor, device: &Device) -> Result<Tensor> {
     let data = transposed_weight_bytes_2d_cached_bytes(w)?;
     let cdev = loader_candle_device(device)?;
@@ -6515,13 +6496,6 @@ fn weight_to_transposed_tensor_2d(w: &WeightTensor, device: &Device) -> Result<T
     )
     .context("failed to create transposed tensor from raw buffer")?;
     candle_weight_to_kt(&t)
-}
-
-#[cfg(not(feature = "cuda"))]
-fn weight_to_transposed_tensor_2d(_w: &WeightTensor, _device: &Device) -> Result<Tensor> {
-    anyhow::bail!(
-        "weight_to_transposed_tensor_2d: kt loader bridge requires the `cuda` feature (#1082)"
-    )
 }
 
 fn cached_transpose_for_weight(
@@ -13024,18 +12998,11 @@ fn lm_head_argmax_rows(x: &Tensor, embed_tokens_t: &Tensor) -> Result<Vec<u32>> 
     let logits = lm_head_forward(x, embed_tokens_t)?;
     // #1082: `greedy_sample_rows` is a candle-typed host-sampler island; bridge
     // the kt logits to candle for it.
-    #[cfg(feature = "cuda")]
-    {
-        let logits_c = kt_logits_to_candle(&logits)
-            .context("lm_head_argmax_rows kt->candle logits")?;
-        crate::sampling::greedy_sample_rows(&logits_c)
-            .context("batched greedy row sampling failed")
-    }
-    #[cfg(not(feature = "cuda"))]
-    {
-        let _ = logits;
-        anyhow::bail!("lm_head_argmax_rows requires the `cuda` feature (#1082)")
-    }
+    // #1082: un-stubbed for no-CUDA — `kt_logits_to_candle` + `greedy_sample_rows`
+    // (candle host sampler) work on any candle build.
+    let logits_c =
+        kt_logits_to_candle(&logits).context("lm_head_argmax_rows kt->candle logits")?;
+    crate::sampling::greedy_sample_rows(&logits_c).context("batched greedy row sampling failed")
 }
 
 fn lm_head_argmax_rows_backend_decode_if(
@@ -23972,7 +23939,6 @@ pub fn model_forward(
 /// Copy-bridge the kt-typed forward logits to a candle `Tensor` for the
 /// `model_forward` candle-returning shim (#1082 forward-flip). CUDA-only;
 /// the non-CUDA branch errors at runtime (production decode is CUDA).
-#[cfg(feature = "cuda")]
 fn model_forward_logits_kt_to_candle(logits: Tensor) -> Result<candle_core::Tensor> {
     // #1082 CP-4: keep the original kt logits handle (the recorded lm_head tape
     // output) so we can register it as the producer of the bridged candle
@@ -23997,10 +23963,6 @@ fn model_forward_logits_kt_to_candle(logits: Tensor) -> Result<candle_core::Tens
     Ok(candle)
 }
 
-#[cfg(not(feature = "cuda"))]
-fn model_forward_logits_kt_to_candle(_logits: Tensor) -> Result<candle_core::Tensor> {
-    anyhow::bail!("model_forward: kt->candle logits bridge requires the `cuda` feature (#1082)")
-}
 
 /// Crate-visible kt→candle copy-bridge for the inference paths whose
 /// public surface still hands logits/hidden to the candle-typed host
@@ -24009,7 +23971,6 @@ fn model_forward_logits_kt_to_candle(_logits: Tensor) -> Result<candle_core::Ten
 /// non-CUDA arm errors at runtime since production decode is CUDA.
 /// Used by `generate.rs` / `speculative.rs` at the kt-producer →
 /// candle-sampler boundary (#1082 forward-flip iter4).
-#[cfg(feature = "cuda")]
 pub(crate) fn kt_logits_to_candle(logits: &Tensor) -> Result<candle_core::Tensor> {
     let contig;
     let lc = if logits.is_contiguous() {
@@ -24029,16 +23990,11 @@ pub(crate) fn kt_logits_to_candle(logits: &Tensor) -> Result<candle_core::Tensor
     Ok(candle)
 }
 
-#[cfg(not(feature = "cuda"))]
-pub(crate) fn kt_logits_to_candle(_logits: &Tensor) -> Result<candle_core::Tensor> {
-    anyhow::bail!("kt_logits_to_candle requires the `cuda` feature (#1082)")
-}
 
 /// Crate-visible candle→kt copy-bridge for the inverse direction: a
 /// candle-typed activation (e.g. a decode `hidden` produced by an older
 /// candle path) handed into a kt-typed forward entry. CUDA-only copy;
 /// non-CUDA errors at runtime. (#1082 forward-flip iter4)
-#[cfg(feature = "cuda")]
 pub(crate) fn candle_to_kt_activation(t: &candle_core::Tensor) -> Result<Tensor> {
     // #1082 CP-4: if `t` was produced by a tape adapter / kt→candle bridge in
     // the active tape scope (registered via `retain_output_for_chaining`),
@@ -24061,10 +24017,6 @@ pub(crate) fn candle_to_kt_activation(t: &candle_core::Tensor) -> Result<Tensor>
         .map_err(|e| anyhow::anyhow!("candle_to_kt_activation bridge: {e}"))
 }
 
-#[cfg(not(feature = "cuda"))]
-pub(crate) fn candle_to_kt_activation(_t: &candle_core::Tensor) -> Result<Tensor> {
-    anyhow::bail!("candle_to_kt_activation requires the `cuda` feature (#1082)")
-}
 
 /// kt has no infer-from-hole reshape (candle's `((), d1, d2)`). These
 /// helpers reproduce a rank-3 / rank-4 reshape where the leading
