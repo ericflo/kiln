@@ -627,15 +627,19 @@ pub fn cuda_matmul_with_bias(
         }
     };
     // ---- allocate output ----
-    // CudaStorage::zeros_ctx (#1082) + .context() default stream — no
-    // .candle_device() read on this matmul path.
+    // .context() default stream — no .candle_device() read on this
+    // matmul path.
     let ctx = a_storage.context();
     let batch: usize = a_shape[..a_rank - 2].iter().product::<usize>().max(1);
     let mut out_shape = a_shape[..a_rank - 2].to_vec();
     out_shape.push(m);
     out_shape.push(n);
     let out_n_elements = batch * m * n;
-    let out_storage = CudaStorage::zeros_ctx(&ctx, device_index, dtype, out_n_elements)?;
+    // #1082 (perf, Pattern A): the cublasLt GEMM runs with beta=0
+    // (handle.matmul hardcodes alpha=1.0/beta=0.0, so C is never read)
+    // and Epilogue::Bias only adds a bias vector — every output element
+    // is written; uninit skips the memset.
+    let out_storage = CudaStorage::alloc_uninit_ctx(&ctx, device_index, dtype, out_n_elements)?;
 
     // ---- acquire handle ----
     // Cold start passes the cudarc CudaContext through to
