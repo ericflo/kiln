@@ -2269,32 +2269,80 @@ pub fn sft_train(
 
                 let flce_provider = build_flce_provider(&backend, &label_mask, model_config);
                 if let Some(ref segs) = segments {
-                    // Gradient-checkpointed forward/backward
-                    let (lv, accumulated_grads) = checkpointed_forward_backward(
-                        &*backend,
-                        &input_ids,
-                        weights,
-                        model_config,
-                        &params,
-                        &label_mask,
-                        segs,
-                        &device,
-                        flce_provider,
-                    )?;
-                    loss_val = lv;
-                    observe_lora_grad_norms_from_map(
-                        &mut lora_grad_norms,
-                        &lora_grad_index,
-                        &accumulated_grads,
-                    )?;
-                    optimizer_step_from_map(
-                        &*backend,
-                        &params,
-                        &accumulated_grads,
-                        config.learning_rate,
-                        config.optimizer,
-                        opt_state.as_mut(),
-                    )?;
+                    // (#1082) Gradient checkpointing: route the reverse through
+                    // the kt tape when tape-eligible (CUDA + BF16 base), because
+                    // the legacy candle checkpointed reverse is grad-severed by
+                    // the forward.rs flip (candle `.backward()` can't trace the
+                    // now-kt-internal `model_forward_segment`). CPU/F32/ECHO keep
+                    // the candle `GradMap` path (also severed, but that's the
+                    // deferred F32/CPU/ECHO endgame; see task #4 / the #[ignore]'d
+                    // checkpointed tests).
+                    #[cfg(feature = "cuda")]
+                    let tape_ckpt = tape_authoritative_enabled()
+                        && matches!(device, candle_core::Device::Cuda(_))
+                        && base_dtype_supports_tape(weights);
+                    #[cfg(not(feature = "cuda"))]
+                    let tape_ckpt = false;
+
+                    if tape_ckpt {
+                        #[cfg(feature = "cuda")]
+                        {
+                            let (lv, kt_grads) =
+                                checkpointed_forward_backward_tape_authoritative_kt(
+                                    &*backend,
+                                    &input_ids,
+                                    weights,
+                                    model_config,
+                                    &params,
+                                    &label_mask,
+                                    segs,
+                                    &device,
+                                    flce_provider,
+                                )?;
+                            loss_val = lv;
+                            let grads = GradSource::Kt(kt_grads);
+                            observe_lora_grad_norms_dispatch(
+                                &mut lora_grad_norms,
+                                &params,
+                                &grads,
+                            )?;
+                            optimizer_step_dispatch(
+                                &*backend,
+                                &params,
+                                &grads,
+                                config.learning_rate,
+                                config.optimizer,
+                                opt_state.as_mut(),
+                            )?;
+                        }
+                    } else {
+                        // Gradient-checkpointed forward/backward (candle GradMap)
+                        let (lv, accumulated_grads) = checkpointed_forward_backward(
+                            &*backend,
+                            &input_ids,
+                            weights,
+                            model_config,
+                            &params,
+                            &label_mask,
+                            segs,
+                            &device,
+                            flce_provider,
+                        )?;
+                        loss_val = lv;
+                        observe_lora_grad_norms_from_map(
+                            &mut lora_grad_norms,
+                            &lora_grad_index,
+                            &accumulated_grads,
+                        )?;
+                        optimizer_step_from_map(
+                            &*backend,
+                            &params,
+                            &accumulated_grads,
+                            config.learning_rate,
+                            config.optimizer,
+                            opt_state.as_mut(),
+                        )?;
+                    }
                 } else {
                     // Standard (non-checkpointed) forward/backward
                     let (lv, grads) = standard_forward_backward(
@@ -11682,6 +11730,237 @@ fn standard_forward_backward_tape_authoritative_kt(
             grads.insert(KtTensorId::from_raw(candle_raw as u64), kt_grad);
         }
     }
+    Ok((loss_val, grads))
+}
+
+/// Gradient-checkpointed SFT forward/backward via the kt autograd tape (#1082).
+///
+/// The kt-native replacement for the legacy candle gradient-checkpointing
+/// reverse (`checkpointed_forward_backward`), which the forward.rs candle→kt
+/// flip grad-severed: candle `.backward()` can no longer trace through the now
+/// kt-internal `model_forward_segment` (the kt↔candle copy bridge breaks the
+/// autograd lineage). This routes each checkpoint segment's backward through
+/// the kt tape instead — the same validated grad producer as the monolithic
+/// `standard_forward_backward_tape_authoritative_kt`, just applied per segment
+/// so only one segment's activations are resident at a time (the whole point of
+/// gradient checkpointing).
+///
+/// Flow (mirrors `checkpointed_forward_backward` Steps 1-2, replaces Step 3):
+///  1. One detached forward → kt boundary activations (one per segment start +
+///     the final pre-final-norm hidden). No tape recording (memory-bounded).
+///  2. Loss at the final boundary + the analytic tail seed `d(loss)/d(hidden)`
+///     through final-RMSNorm + tied LM-head + masked next-token cross-entropy
+///     (a candle island; bridged to kt to seed the tape).
+///  3. Walk segments in reverse: re-run each segment's forward UNDER A FRESH
+///     thread-local tape (recording only that segment), seed the tape backward
+///     at the segment output with the upstream grad, read out (a) the LoRA `Var`
+///     grads for that segment and (b) the segment-INPUT grad to chain into the
+///     previous segment. The fresh-tape-per-segment design bounds memory.
+///
+/// Returns the LoRA grads as a kt-native `kiln_autograd::GradStore` (keyed by
+/// `KtTensorId`), consumed directly by `optimizer_step_from_kt_grad_store` — no
+/// candle `loss.backward()` and no kt→candle grad copy.
+///
+/// CUDA-only: the kt tape adapters (`crate::tape_forward`, `#![cfg(cuda)]`)
+/// record only on CUDA, so a CPU checkpointing-tape path would need them
+/// un-gated first (the deeper #1082 endgame). The dispatch below keeps the
+/// candle path for F32/CPU/ECHO.
+#[cfg(feature = "cuda")]
+#[allow(clippy::too_many_arguments)]
+fn checkpointed_forward_backward_tape_authoritative_kt(
+    backend: &dyn BackendRuntime,
+    input_ids: &[u32],
+    weights: &GpuWeights,
+    model_config: &ModelConfig,
+    params: &TrainableLoraParams,
+    label_mask: &[bool],
+    segments: &[(usize, usize)],
+    device: &CdDevice,
+    flce_provider: Option<FlceProvider>,
+) -> Result<(f64, kiln_autograd::GradStore)> {
+    let num_segments = segments.len();
+    anyhow::ensure!(
+        num_segments > 0,
+        "checkpointed (kt-tape) SFT requires at least one segment"
+    );
+    anyhow::ensure!(
+        input_ids.len() == label_mask.len(),
+        "input_ids/label_mask length mismatch: {} vs {}",
+        input_ids.len(),
+        label_mask.len()
+    );
+    anyhow::ensure!(
+        has_supervised_shifted_labels(label_mask),
+        "checkpointed (kt-tape) SFT called with no supervised shifted-label positions"
+    );
+
+    let positions: Vec<u32> = (0..input_ids.len()).map(|p| p as u32).collect();
+    let lora_detached = lora_weights_detached(params);
+    let lora_weights = params.as_lora_weights();
+
+    let cd_out = |k: &kiln_tensor::Tensor| -> Result<Tensor> {
+        kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(
+            &k.contiguous()
+                .map_err(|e| anyhow::anyhow!("ckpt-kt: kt contiguous: {e}"))?,
+        )
+        .map_err(|e| anyhow::anyhow!("ckpt-kt: kt->candle copy: {e}"))
+    };
+    let kt_in = |c: &Tensor| -> Result<kiln_tensor::Tensor> {
+        kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(c)
+            .map_err(|e| anyhow::anyhow!("ckpt-kt: candle->kt borrow: {e}"))
+    };
+
+    // Step 1: detached forward → kt boundary activations (one per segment start
+    // + the final pre-final-norm hidden). NOT under a tape scope, so nothing is
+    // recorded — only the boundary tensors are kept (the checkpointing memory
+    // profile). A single threaded `LinearAttentionState` is fine: each GDN
+    // layer's recurrence is internal to its own full-sequence pass.
+    let (embed_hidden, _) = model_forward_embed(input_ids, weights)?;
+    let mut boundaries: Vec<kiln_tensor::Tensor> = Vec::with_capacity(num_segments + 1);
+    let mut current = embed_hidden.detach();
+    boundaries.push(current.clone());
+    {
+        let mut linear_state = LinearAttentionState::new(
+            model_config,
+            &kiln_kt_bridge::kt_device_from_candle(device),
+        )?;
+        for &(start, end) in segments.iter() {
+            current = model_forward_segment(
+                backend,
+                current,
+                weights,
+                model_config,
+                &positions,
+                start,
+                end,
+                Some(&mut linear_state),
+                Some(&lora_detached),
+            )?
+            .detach();
+            boundaries.push(current.clone());
+        }
+    }
+    let final_hidden_kt = boundaries
+        .last()
+        .context("ckpt-kt: missing final checkpoint boundary")?
+        .clone();
+
+    // Step 2: real loss at the final boundary + the exact analytic tail seed
+    // (candle island). `analytic_sft_tail_grad_pre_final_norm` returns
+    // d(loss)/d(pre-final-norm hidden) as candle F32 [1, T, H] — exactly the
+    // upstream grad to seed the LAST segment's backward (its output IS that
+    // hidden).
+    let final_hidden_candle = cd_out(&final_hidden_kt)?;
+    let head_t_candle = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&weights.embed_tokens_t)
+        .map_err(|e| anyhow::anyhow!("ckpt-kt: kt->candle head_t: {e}"))?;
+    let final_norm_candle = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&weights.final_norm)
+        .map_err(|e| anyhow::anyhow!("ckpt-kt: kt->candle final_norm: {e}"))?;
+    let loss = if use_flce() {
+        let normed = cd_out(&model_forward_final_norm(&final_hidden_kt, weights, model_config)?)?;
+        fused_linear_cross_entropy_dispatch_with_provider(
+            &normed,
+            &head_t_candle,
+            input_ids,
+            label_mask,
+            device,
+            DEFAULT_CHUNK_SIZE,
+            flce_provider.clone(),
+        )
+        .context("ckpt-kt fused linear cross-entropy (final boundary)")?
+    } else {
+        let logits = cd_out(&model_forward_head(&final_hidden_kt, weights, model_config)?)?;
+        cross_entropy_loss(&logits, input_ids, label_mask, device)?
+    };
+    let loss_val = loss.to_scalar::<f32>()? as f64;
+    let tail_candle = analytic_sft_tail_grad_pre_final_norm(
+        &final_hidden_candle,
+        &final_norm_candle,
+        &head_t_candle,
+        input_ids,
+        label_mask,
+        model_config.rms_norm_eps,
+        DEFAULT_CHUNK_SIZE,
+    )
+    .context("ckpt-kt analytic SFT tail gradient")?
+    .detach();
+    let mut upstream_grad = kt_in(&tail_candle)?;
+    drop(loss);
+    drop(final_hidden_candle);
+
+    // Step 3: reverse pass over segments via the kt tape. Each segment is
+    // re-run under its OWN fresh tape (memory bounded to one segment), seeded at
+    // its output with the upstream grad; we read the LoRA Var grads and the
+    // segment-input grad (to chain) out of the walk.
+    let var_raw_ids: std::collections::HashSet<usize> = params
+        .all_vars()
+        .iter()
+        .map(|v| v.as_tensor().id().as_raw())
+        .collect();
+    let mut grads = kiln_autograd::GradStore::new();
+    for seg_idx in (0..num_segments).rev() {
+        let (start, end) = segments[seg_idx];
+        let seg_input = boundaries[seg_idx].clone();
+        let seg_input_id = seg_input.id();
+        // Match the seed dtype to the segment output (the model hidden dtype);
+        // the analytic tail is F32 and chained grads may differ.
+        let seg_output_dtype = boundaries[seg_idx + 1].dtype();
+        let seed = upstream_grad
+            .to_dtype(seg_output_dtype)
+            .map_err(|e| anyhow::anyhow!("ckpt-kt: seed dtype cast (segment {seg_idx}): {e}"))?;
+        let positions_ref = &positions;
+        let lora_ref = &lora_weights;
+        let (kt_grads, candle_grads) = kiln_kt_bridge::tape_bridge::with_tape_segment_backward_scope(
+            seed,
+            || {
+                // Fresh recurrence state per segment (GDN recurrence is internal
+                // to each layer's full-sequence pass — see Step 1 note).
+                let mut seg_ls = LinearAttentionState::new(
+                    model_config,
+                    &kiln_kt_bridge::kt_device_from_candle(device),
+                )
+                .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?;
+                model_forward_segment(
+                    backend,
+                    seg_input,
+                    weights,
+                    model_config,
+                    positions_ref,
+                    start,
+                    end,
+                    Some(&mut seg_ls),
+                    Some(lora_ref),
+                )
+                .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))
+            },
+        )
+        .map_err(|e| anyhow::anyhow!("ckpt-kt: segment {seg_idx} tape backward: {e}"))?;
+
+        // Accumulate this segment's LoRA Var grads (disjoint across segments —
+        // each layer is in exactly one segment — but sum defensively).
+        for (candle_raw, g) in candle_grads {
+            if var_raw_ids.contains(&candle_raw) {
+                let key = KtTensorId::from_raw(candle_raw as u64);
+                match grads.remove(key) {
+                    Some(prev) => grads.insert(
+                        key,
+                        kiln_tensor::ops::add(&prev, &g)
+                            .map_err(|e| anyhow::anyhow!("ckpt-kt: grad accumulate: {e}"))?,
+                    ),
+                    None => grads.insert(key, g),
+                }
+            }
+        }
+
+        // Chain the upstream grad into the previous (earlier) segment.
+        if seg_idx > 0 {
+            upstream_grad = kt_grads.get(seg_input_id).cloned().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "ckpt-kt: tape backward produced no input gradient for segment {seg_idx}"
+                )
+            })?;
+        }
+    }
+
     Ok((loss_val, grads))
 }
 

@@ -382,6 +382,80 @@ where
     })
 }
 
+/// Per-segment tape-authoritative backward for gradient checkpointing (#1082).
+///
+/// Like [`with_tape_authoritative_scope`], but seeds the backward at an
+/// arbitrary segment OUTPUT with an externally-supplied upstream gradient
+/// (instead of looking up a loss adapter output and seeding `dL/dL = 1`). This
+/// is the kt-tape replacement for the legacy candle gradient-checkpointing
+/// reverse, which was grad-severed by the flip (candle `.backward()` cannot
+/// trace through the now-kt-internal `model_forward_segment`).
+///
+/// # Contract
+///
+/// `forward` runs ONE checkpoint segment under a fresh thread-local tape (so
+/// only that segment's activations are recorded — memory stays bounded to a
+/// single segment) and must return the segment's kt OUTPUT tensor. The tape is
+/// then seeded with `{ seg_output.id() : upstream_grad }` and walked.
+///
+/// Returns `(kt_grads, candle_input_grads)`:
+/// * `kt_grads` — the full [`kiln_autograd::GradStore`] (keyed by `KtTensorId`).
+///   The caller reads the segment-INPUT grad (`kt_grads.get(seg_input.id())`)
+///   to chain into the previous segment.
+/// * `candle_input_grads` — `candle_input_id_raw -> kt grad`, the same
+///   candle-id-keyed map [`with_tape_authoritative_scope`] returns, so the
+///   caller can pick out the LoRA `Var` grads for this segment by candle id.
+///
+/// # Errors
+/// * `forward()` errors (propagated).
+/// * Tape walk errors.
+pub fn with_tape_segment_backward_scope<F>(
+    upstream_grad: kiln_tensor::Tensor,
+    forward: F,
+) -> Result<(kiln_autograd::GradStore, HashMap<usize, kiln_tensor::Tensor>), BridgeError>
+where
+    F: FnOnce() -> Result<kiln_tensor::Tensor, BridgeError>,
+{
+    with_io_mapping_scope(|| {
+        let (forward_res, tape): (Result<kiln_tensor::Tensor, BridgeError>, Tape) =
+            with_thread_local_tape(forward);
+        let seg_output = forward_res?;
+
+        // Seed the upstream grad at the segment output id and walk the tape.
+        // The seed dtype is matched to the segment output dtype by the caller.
+        let mut seeds: HashMap<KtTensorId, kiln_tensor::Tensor> = HashMap::new();
+        seeds.insert(seg_output.id(), upstream_grad);
+        let kt_grads = tape
+            .backward_with_seeds(seeds, |a, b| kiln_tensor::ops::add(a, b))
+            .map_err(|e| {
+                BridgeError::new(format!(
+                    "tape_bridge: with_tape_segment_backward_scope backward walk: {e}"
+                ))
+            })?;
+
+        // Map each recorded kt input grad to its candle input id(s) (a kt input
+        // may fan out to several candle ids across islands — deposit each).
+        let input_map: Vec<(u64, usize)> = BRIDGE_SCOPE.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .map(|s| {
+                    s.kt_to_candle_input
+                        .iter()
+                        .flat_map(|(k, vs)| vs.iter().map(move |v| (*k, *v)))
+                        .collect()
+                })
+                .unwrap_or_default()
+        });
+        let mut candle_input_grads: HashMap<usize, kiln_tensor::Tensor> = HashMap::new();
+        for (kt_in_raw, candle_in_raw) in input_map {
+            if let Some(g) = kt_grads.get(KtTensorId::from_raw(kt_in_raw)) {
+                candle_input_grads.insert(candle_in_raw, g.clone());
+            }
+        }
+        Ok((kt_grads, candle_input_grads))
+    })
+}
+
 /// True iff a bridge scope is active on the current thread.
 ///
 /// Adapters can use this to know whether registering is worth the
