@@ -1952,35 +1952,37 @@ mod tests {
     }
 
     #[test]
-    fn cuda_flash_attention_declines_tracked_training_tensors() -> Result<()> {
+    fn cuda_flash_attention_declines_unsupported_dtype() -> Result<()> {
+        // #1082 DoD-101/102: the FlashAttention BackendRuntime methods
+        // are now kt-typed. The kt forward path is detached
+        // (track_op() is always false), so the historical
+        // candle-`Var`-tracked decline gate no longer applies. The
+        // production decline contract these methods still enforce is
+        // the dtype gate: non-BF16 inputs return Ok(None) so the
+        // caller falls back to the portable SDPA path. We exercise
+        // that with F32 kt tensors here (the CPU test backend can't
+        // dispatch the real CUDA kernel anyway).
+        use kiln_tensor::{DType as KtDType, Tensor as KtTensor};
         let backend = test_backend();
 
-        let q_base = candle_core::Tensor::zeros((1, 2, 1, 128), candle_core::DType::BF16, &candle_core::Device::Cpu)?;
-        let q_var = candle_core::Var::from_tensor(&q_base)?;
-        let q = q_var.as_tensor();
-        let k = candle_core::Tensor::zeros((1, 2, 1, 128), candle_core::DType::BF16, &candle_core::Device::Cpu)?;
-        let v = candle_core::Tensor::zeros((1, 2, 1, 128), candle_core::DType::BF16, &candle_core::Device::Cpu)?;
+        let q = KtTensor::zeros_cpu(vec![1, 2, 1, 128], KtDType::F32);
+        let k = KtTensor::zeros_cpu(vec![1, 2, 1, 128], KtDType::F32);
+        let v = KtTensor::zeros_cpu(vec![1, 2, 1, 128], KtDType::F32);
         assert!(
-            q.track_op(),
-            "test precondition: q must be autograd-tracked"
-        );
-        assert!(
-            backend.flash_attn_prefill(q, &k, &v, 1.0, true)?.is_none(),
-            "CUDA FlashAttention prefill must decline tracked tensors until it has a bwd hook"
+            backend.flash_attn_prefill(&q, &k, &v, 1.0, true)?.is_none(),
+            "CUDA FlashAttention prefill must decline non-BF16 inputs"
         );
 
-        let q_decode_base = candle_core::Tensor::zeros((1, 1, 1, 128), candle_core::DType::BF16, &candle_core::Device::Cpu)?;
-        let q_decode_var = candle_core::Var::from_tensor(&q_decode_base)?;
-        let q_decode = q_decode_var.as_tensor();
-        let k_pool = candle_core::Tensor::zeros((128, 1, 128), candle_core::DType::BF16, &candle_core::Device::Cpu)?;
-        let v_pool = candle_core::Tensor::zeros((128, 1, 128), candle_core::DType::BF16, &candle_core::Device::Cpu)?;
-        let block_table = candle_core::Tensor::zeros((1, 1), candle_core::DType::U32, &candle_core::Device::Cpu)?;
-        let seqused_k = candle_core::Tensor::zeros((1,), candle_core::DType::I32, &candle_core::Device::Cpu)?;
+        let q_decode = KtTensor::zeros_cpu(vec![1, 1, 1, 128], KtDType::F32);
+        let k_pool = KtTensor::zeros_cpu(vec![128, 1, 128], KtDType::F32);
+        let v_pool = KtTensor::zeros_cpu(vec![128, 1, 128], KtDType::F32);
+        let block_table = KtTensor::zeros_cpu(vec![1, 1], KtDType::U32);
+        let seqused_k = KtTensor::zeros_cpu(vec![1], KtDType::I64);
 
         assert!(
             backend
                 .flash_attn_paged_decode(
-                    q_decode,
+                    &q_decode,
                     &k_pool,
                     &v_pool,
                     &block_table,
@@ -1990,12 +1992,12 @@ mod tests {
                     true
                 )?
                 .is_none(),
-            "CUDA paged decode attention must decline tracked tensors"
+            "CUDA paged decode attention must decline non-BF16 inputs"
         );
         assert!(
             backend
                 .flash_attn_paged_decode_contiguous_batch_dyn_seqlen(
-                    q_decode,
+                    &q_decode,
                     &k_pool,
                     &v_pool,
                     &block_table,
@@ -2006,7 +2008,7 @@ mod tests {
                     true,
                 )?
                 .is_none(),
-            "CUDA dynamic paged decode attention must decline tracked tensors"
+            "CUDA dynamic paged decode attention must decline non-BF16 inputs"
         );
 
         Ok(())
