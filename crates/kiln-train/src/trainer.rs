@@ -10033,6 +10033,507 @@ pub(crate) mod tests {
         })
     }
 
+    /// CP-4 (#1082) GROUND-TRUTH grad-correctness gate — reconstructed for the
+    /// candle-drop. The pre-flip test (`tape_grad_matches_finite_difference_bf16`,
+    /// deleted in feaf2e99) compared the kt tape grad against BOTH central
+    /// finite differences AND a candle `loss.backward()` baseline. After the
+    /// forward.rs candle→kt flip there is no candle loss to call `.backward()`
+    /// on (the forward returns kt), and LoRA params are now
+    /// `kiln_param::Parameter` rather than candle `Var`. So this version drops
+    /// the candle baseline entirely and validates the tape grad against the ONE
+    /// candle-free ground truth that survives the flip: central finite
+    /// differences on the loss VALUE.
+    ///
+    /// Method (unchanged in spirit): for a LoRA `Parameter` `P` and a fixed
+    /// random direction `r`, the true directional derivative is
+    /// `⟨dL/dP, r⟩ ≈ (L(P + εr) − L(P − εr)) / (2ε)`. The `fd` value is computed
+    /// from loss VALUES only — no autograd. We then dot the tape grad with the
+    /// same `r` (`tape_dot = Σ grad_tape[P] · r`) and assert the tape matches
+    /// `fd` within a BF16+ε tolerance.
+    ///
+    /// Perturbation under the new API: the forward reads each LoRA tensor via
+    /// `TrainableLoraParams::as_lora_weights` → `forward_storage().primary_tensor()`,
+    /// so we perturb a param by swapping its `forward_storage` to a
+    /// `P_f32 ± εr → BF16` Plain tensor (`replace_forward_storage`), take the
+    /// loss value, then restore the original storage. The loss value is the same
+    /// whether the tape records or not, so we reuse
+    /// `standard_forward_backward_tape_authoritative_kt` for both the tape grad
+    /// (unperturbed) and the FD loss probes (perturbed; grads discarded).
+    ///
+    /// Only "stable" rows feed the assert — a Var qualifies iff BOTH
+    /// `|fd_1e-2| > 0.02` (above the BF16-noise floor) AND the two eps agree
+    /// within 40% (a stable linear regime). Small-magnitude grads have
+    /// BF16-noise-dominated finite differences that swing wildly with eps and
+    /// are NOT ground truth, so they are excluded. On each stable row the tape
+    /// must match finite-diff within `|fd-tape|/|fd| < 0.35`.
+    ///
+    /// CUDA-only (kt tape adapters are BF16/CUDA-only). Run under
+    /// `cargo nextest run` for per-process env isolation (tape gates are
+    /// OnceLock-cached).
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn tape_grad_matches_finite_difference_bf16() {
+        if !kiln_tensor::probe::cuda_is_available() {
+            eprintln!("[FD-CHECK] no CUDA device — skipping");
+            return;
+        }
+        let device = CdDevice::Cuda(0);
+        let config = tiny_config_bf16();
+        let weights = tiny_weights_bf16(&config, &device).expect("bf16 tiny weights on cuda");
+        let mut params =
+            TrainableLoraParams::initialize(&config, &weights, 4, 8.0, &device).expect("params");
+        let input_ids: Vec<u32> = vec![1, 5, 10, 3, 7, 2, 8];
+        let label_mask = vec![false, false, true, true, true, true, false];
+        let backend = backend::for_device_kt(&device);
+
+        // All CP-4 tape gates on so the authoritative walk records the full
+        // wired chain. OnceLock-cached — run under `cargo nextest`.
+        unsafe {
+            std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
+            std::env::set_var("KILN_USE_TAPE_LORA_ADD", "1");
+            std::env::set_var("KILN_USE_TAPE_FLASH_ATTN", "1");
+            std::env::set_var("KILN_USE_TAPE_SDPA", "1");
+            std::env::set_var("KILN_USE_TAPE_GDN", "1");
+            std::env::set_var("KILN_USE_TAPE_GDN_GATED_NORM", "1");
+            std::env::set_var("KILN_USE_TAPE_GDN_QK_NORM", "1");
+            std::env::set_var("KILN_USE_TAPE_GDN_CONV", "1");
+            std::env::set_var("KILN_USE_TAPE_AUTHORITATIVE", "1");
+        }
+
+        // --- TAPE grads (ground-truth candidate), unperturbed params. ---
+        let (_loss_a, grads_tape) = standard_forward_backward_tape_authoritative_kt(
+            &*backend,
+            &input_ids,
+            &weights,
+            &config,
+            &params,
+            &label_mask,
+            &device,
+            None,
+        )
+        .expect("tape-authoritative(kt) step");
+
+        // Snapshot per-param identity so we can index the tape grad store and
+        // perturb a precise slot. `all_params()` / `all_params_mut()` share the
+        // SAME traversal order, so index `vi` is consistent between them.
+        let param_ids: Vec<KtTensorId> =
+            params.all_params().iter().map(|p| p.tensor_id()).collect();
+        let param_shapes: Vec<Vec<usize>> = params
+            .all_params()
+            .iter()
+            .map(|p| p.forward_storage().primary_tensor().dims().to_vec())
+            .collect();
+        let num_params = param_ids.len();
+
+        // Σ grad[P] · r in F32 (grad cast to F32 first; `r` is F32).
+        let dot_grad = |g: &KtTensor, r: &[f32]| -> f64 {
+            let gf = g
+                .to_dtype(KtDType::F32)
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap();
+            gf.iter()
+                .zip(r.iter())
+                .map(|(x, y)| (*x as f64) * (*y as f64))
+                .sum()
+        };
+        // L2 norm of a kt grad (F32) — used to rank FD targets.
+        let grad_l2 = |g: &KtTensor| -> f32 {
+            let gf = g
+                .to_dtype(KtDType::F32)
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap();
+            gf.iter().map(|x| x * x).sum::<f32>().sqrt()
+        };
+
+        // Plain forward + loss VALUE for the CURRENT params (reuses the tape
+        // producer; the loss value is identical with/without tape recording —
+        // we discard the grads). The caller perturbs `params` in place before
+        // each probe and restores afterwards.
+        let loss_value = |p: &TrainableLoraParams| -> f64 {
+            let (lv, _g) = standard_forward_backward_tape_authoritative_kt(
+                &*backend,
+                &input_ids,
+                &weights,
+                &config,
+                p,
+                &label_mask,
+                &device,
+                None,
+            )
+            .expect("fd loss-value forward");
+            lv
+        };
+
+        // Rank FD targets by tape-grad L2 magnitude: large-grad Vars (typically
+        // the MLP gate/up/down) have stable, above-noise finite differences;
+        // small-grad Vars are BF16-noise-dominated and get excluded by the
+        // stability gate below. Probe the largest-magnitude Vars so >=2 clear it.
+        let mut ranked: Vec<(usize, f32)> = Vec::new();
+        for (vi, id) in param_ids.iter().enumerate() {
+            if let Some(g) = grads_tape.get(*id) {
+                ranked.push((vi, grad_l2(g)));
+            }
+        }
+        ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        let targets: Vec<usize> = ranked.iter().take(10).map(|(vi, _)| *vi).collect();
+
+        eprintln!(
+            "[FD-CHECK] central finite-difference reference for {} Var(s) (of {num_params}); \
+             fd=(L+ - L-)/(2*eps) is ground truth, compare tape_dot to it",
+            targets.len()
+        );
+
+        // Two eps: 1e-2 primary, 3e-2 coarse cross-check (BF16 perturbation
+        // granularity + F32 loss → too small rounds to noise, too large picks
+        // up curvature).
+        let eps_list = [1e-2f32, 3e-2f32];
+        // Per-(Var,eps) rows: (vi, eps, fd, rel_tape).
+        let mut fd_rows: Vec<(usize, f32, f64, f64)> = Vec::new();
+
+        for &vi in &targets {
+            let target_id = param_ids[vi];
+            let shape = param_shapes[vi].clone();
+            let n: usize = shape.iter().product();
+
+            // Deterministic F32 direction r in [-1,1], seeded per-Var so each
+            // run probes the same direction. Built ON the CUDA device.
+            let mut rng = StdRng::seed_from_u64(0xF1_17E_D1FF_u64 ^ vi as u64);
+            let r: Vec<f32> = (0..n).map(|_| rng.random_range(-1.0f32..1.0f32)).collect();
+            let r_tensor = KtTensor::from_vec_on(device.clone(), r.clone(), shape.clone())
+                .expect("fd direction tensor on cuda");
+
+            // grad · r (eps-independent; computed once).
+            let tape_dot = grads_tape.get(target_id).map(|g| dot_grad(g, &r));
+
+            // Perturb param `vi`'s forward storage to `P_f32 ± εr → BF16`, run
+            // the loss, then restore. The forward reads `forward_storage()
+            // .primary_tensor()` via `as_lora_weights`, so this is the slot to
+            // swap. `replace_forward_storage` preserves `tensor_id`.
+            let probe = |sign: f32, eps: f32| -> f64 {
+                // Capture the original forward tensor for this param.
+                let original = {
+                    let ps = params.all_params();
+                    ps[vi].forward_storage().primary_tensor().clone()
+                };
+                let pf32 = original
+                    .to_dtype(KtDType::F32)
+                    .expect("P to f32");
+                let delta = r_tensor
+                    .affine((sign * eps) as f64, 0.0)
+                    .expect("eps*r");
+                let perturbed = pf32
+                    .add(&delta)
+                    .expect("P + eps*r")
+                    .to_dtype(KtDType::BF16)
+                    .expect("perturbed to bf16");
+                {
+                    let mut pm = params.all_params_mut();
+                    pm[vi].replace_forward_storage(KtForwardStorage::Plain(perturbed));
+                }
+                let lv = loss_value(&params);
+                {
+                    let mut pm = params.all_params_mut();
+                    pm[vi].replace_forward_storage(KtForwardStorage::Plain(original));
+                }
+                lv
+            };
+
+            let td = tape_dot.unwrap_or(f64::NAN);
+            for &eps in &eps_list {
+                let l_plus = probe(1.0, eps);
+                let l_minus = probe(-1.0, eps);
+                let fd = (l_plus - l_minus) / (2.0 * eps as f64);
+                assert!(
+                    fd.is_finite(),
+                    "[FD-CHECK] var[{vi}] fd not finite (L+ {l_plus}, L- {l_minus}, eps {eps})"
+                );
+                let denom = fd.abs().max(1e-9);
+                let rel_tape = (fd - td).abs() / denom;
+                eprintln!(
+                    "[FD-CHECK] var[{vi}] eps={eps:.0e} fd={fd:+.6} tape_dot={td:+.6} \
+                     |fd-tape|/|fd|={rel_tape:.4}"
+                );
+                fd_rows.push((vi, eps, fd, rel_tape));
+            }
+        }
+
+        unsafe {
+            std::env::set_var("KILN_USE_TAPE_AUTHORITATIVE", "0");
+        }
+
+        // --- Stability gate: only eps-consistent, above-noise rows are ground
+        // truth. (Same gating the deleted test used.) ---
+        const FD_INFORMATIVE_MIN: f64 = 0.02;
+        const FD_EPS_STABLE_TOL: f64 = 0.4;
+        const FD_TAPE_REL_TOL: f64 = 0.35;
+
+        let mut stable_gated: Vec<(usize, f64, f64)> = Vec::new();
+        for &vi in &targets {
+            let fd_1e2 = fd_rows
+                .iter()
+                .find(|(v, eps, ..)| *v == vi && (*eps - 1e-2f32).abs() < 1e-6)
+                .map(|(_, _, fd, rt)| (*fd, *rt));
+            let fd_3e2 = fd_rows
+                .iter()
+                .find(|(v, eps, ..)| *v == vi && (*eps - 3e-2f32).abs() < 1e-6)
+                .map(|(_, _, fd, _)| *fd);
+            let (Some((fd1, rt1)), Some(fd3)) = (fd_1e2, fd_3e2) else {
+                continue;
+            };
+            if fd1.abs() <= FD_INFORMATIVE_MIN {
+                eprintln!(
+                    "[FD-CHECK] var[{vi}] UNSTABLE/noisy (excluded): fd_1e-2={fd1:+.6} \
+                     fd_3e-2={fd3:+.6} (|fd_1e-2|<={FD_INFORMATIVE_MIN}, below noise floor)"
+                );
+                continue;
+            }
+            let eps_rel_swing = (fd1 - fd3).abs() / fd1.abs().max(fd3.abs()).max(1e-9);
+            if eps_rel_swing < FD_EPS_STABLE_TOL {
+                eprintln!(
+                    "[FD-CHECK] var[{vi}] STABLE (gated): fd_1e-2={fd1:+.6} fd_3e-2={fd3:+.6} \
+                     eps_rel_swing={eps_rel_swing:.4} < {FD_EPS_STABLE_TOL}"
+                );
+                stable_gated.push((vi, fd1, rt1));
+            } else {
+                eprintln!(
+                    "[FD-CHECK] var[{vi}] UNSTABLE/noisy (excluded): fd_1e-2={fd1:+.6} \
+                     fd_3e-2={fd3:+.6} eps_rel_swing={eps_rel_swing:.4} >= {FD_EPS_STABLE_TOL}"
+                );
+            }
+        }
+
+        eprintln!(
+            "[FD-CHECK] {} stable row(s) (|fd|>{FD_INFORMATIVE_MIN} AND eps-consistent) feed the \
+             grad-correctness gate",
+            stable_gated.len()
+        );
+
+        // Not vacuous: at least one stable Var must feed the gate, else the FD
+        // probe found nothing it can use as ground truth and we should
+        // investigate rather than silently pass.
+        assert!(
+            !stable_gated.is_empty(),
+            "[FD-CHECK] no stable finite-diff row (|fd|>{FD_INFORMATIVE_MIN} AND eps-consistent); \
+             gate would be vacuous — widen the target set or check the FD probe"
+        );
+
+        for (vi, fd, rel_tape) in &stable_gated {
+            // THE authoritative grad-correctness gate (#1082): the tape grad
+            // matches the central-finite-difference ground truth within the
+            // BF16+eps tolerance.
+            assert!(
+                *rel_tape < FD_TAPE_REL_TOL,
+                "[FD-CHECK] var[{vi}]: tape grad rel {rel_tape:.4} >= {FD_TAPE_REL_TOL} vs \
+                 finite-diff (fd={fd:+.6}) — tape-authoritative grad disagrees with ground truth"
+            );
+        }
+    }
+
+    /// CP-4 (#1082) CONVERGENCE GATE for tape-authoritative SFT — reconstructed
+    /// for the candle-drop. `tape_grad_matches_finite_difference_bf16` proves a
+    /// single step's grads are correct against finite-diff ground truth; this
+    /// test proves that *stringing many such steps together actually trains the
+    /// model*: it runs a real AdamW SFT loop with `KILN_USE_TAPE_AUTHORITATIVE=1`
+    /// and asserts the loss is finite every step and trends meaningfully
+    /// downward.
+    ///
+    /// New API vs the deleted version:
+    /// - LoRA params are `kiln_param::Parameter` (was candle `Var`); the
+    ///   optimizer is `kiln_optim::AdamW` wrapped in `OptimizerState`.
+    /// - The per-step update is `standard_forward_backward_tape_authoritative_kt`
+    ///   → `(loss, kiln_autograd::GradStore)` (keyed by `Parameter::tensor_id()`)
+    ///   → `optimizer_step_from_kt_grad_store(.., AdamW, Some(&mut opt_state))`,
+    ///   which steps each `Parameter`'s kt master in place (preserving
+    ///   `tensor_id`) via `kiln_optim::AdamW`. No candle `Var`, no
+    ///   `loss.backward()`, no kt→candle grad copy.
+    /// - `allocate_adamw_state` now takes the AdamW hyperparameters (the kt
+    ///   `KtAdamW` owns its moments keyed by `tensor_id`); the step counter is
+    ///   per-parameter (`opt_state.adamw.moments(id).step`).
+    ///
+    /// CANDLE-PARITY IS INVALID HERE: candle's `loss.backward()` severed the
+    /// full-attention + GDN-conv gradient, so a candle-trained reference would
+    /// converge to the WRONG place. We validate that tape-authoritative training
+    /// CONVERGES, not that it matches candle.
+    ///
+    /// CUDA-only. Run under `cargo nextest run` for per-process env isolation.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn tape_authoritative_sft_converges_bf16() {
+        if !kiln_tensor::probe::cuda_is_available() {
+            eprintln!("tape-authoritative convergence (bf16): no CUDA device — skipping");
+            return;
+        }
+        let device = CdDevice::Cuda(0);
+        let config = tiny_config_bf16();
+        let weights = tiny_weights_bf16(&config, &device).expect("bf16 tiny weights on cuda");
+        let mut params =
+            TrainableLoraParams::initialize(&config, &weights, 4, 8.0, &device).expect("params");
+        let input_ids: Vec<u32> = vec![1, 5, 10, 3, 7, 2, 8];
+        let label_mask = vec![false, false, true, true, true, true, false];
+        let backend = backend::for_device_kt(&device);
+
+        // All CP-4 tape gates + tape-authoritative backward. OnceLock-cached —
+        // run under `cargo nextest`.
+        unsafe {
+            std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
+            std::env::set_var("KILN_USE_TAPE_LORA_ADD", "1");
+            std::env::set_var("KILN_USE_TAPE_FLASH_ATTN", "1");
+            std::env::set_var("KILN_USE_TAPE_SDPA", "1");
+            std::env::set_var("KILN_USE_TAPE_GDN", "1");
+            std::env::set_var("KILN_USE_TAPE_GDN_GATED_NORM", "1");
+            std::env::set_var("KILN_USE_TAPE_GDN_QK_NORM", "1");
+            std::env::set_var("KILN_USE_TAPE_GDN_CONV", "1");
+            std::env::set_var("KILN_USE_TAPE_AUTHORITATIVE", "1");
+        }
+
+        // Production AdamW default (decoupled WD). LR 1e-3 — an order of
+        // magnitude above the SFT default (1e-4) because the tiny fixture has
+        // only 4 supervised tokens to overfit in 100 steps; 1e-3 is well within
+        // the stable regime for this fixture and gives a clearly readable
+        // downward curve without diverging.
+        let lr = 1e-3_f64;
+        let (beta1, beta2, eps, weight_decay) = (0.9_f32, 0.999_f32, 1e-8_f32, 0.0_f32);
+        let optimizer = Optimizer::AdamW {
+            beta1,
+            beta2,
+            eps,
+            weight_decay,
+        };
+        // Allocate moment state ONCE before the loop. `kiln_optim::AdamW` owns
+        // the per-parameter moments (keyed by `Parameter::tensor_id()`); the
+        // step counter is per-parameter inside those moments.
+        let mut opt_state = params
+            .allocate_adamw_state(lr, beta1, beta2, eps, weight_decay, &device)
+            .expect("allocate AdamW state");
+
+        const STEPS: usize = 100;
+        let mut losses: Vec<f64> = Vec::with_capacity(STEPS);
+        let mut step1_grad_nonzero = false;
+
+        for step in 0..STEPS {
+            let (loss, grads) = standard_forward_backward_tape_authoritative_kt(
+                &*backend,
+                &input_ids,
+                &weights,
+                &config,
+                &params,
+                &label_mask,
+                &device,
+                None,
+            )
+            .expect("tape-authoritative forward/backward");
+
+            // Training-is-actually-happening check on step 0: the kt GradStore
+            // must be non-empty and at least one LoRA param must receive a
+            // finite nonzero grad.
+            if step == 0 {
+                assert!(
+                    !grads.is_empty(),
+                    "CP-4 convergence: step 1 produced an empty GradStore — no training signal"
+                );
+                for p in params.all_params() {
+                    if let Some(g) = grads.get(p.tensor_id()) {
+                        let norm = g
+                            .to_dtype(KtDType::F32)
+                            .and_then(|t| t.flatten_all())
+                            .and_then(|t| t.to_vec1::<f32>())
+                            .map(|v| v.iter().map(|x| x * x).sum::<f32>().sqrt())
+                            .unwrap_or(0.0);
+                        if norm.is_finite() && norm > 0.0 {
+                            step1_grad_nonzero = true;
+                            break;
+                        }
+                    }
+                }
+                assert!(
+                    step1_grad_nonzero,
+                    "CP-4 convergence: step 1 — no LoRA param received a nonzero grad"
+                );
+            }
+
+            assert!(
+                loss.is_finite(),
+                "CP-4 convergence: loss at step {step} is non-finite ({loss}) — training diverged"
+            );
+
+            // kt-native optimizer step: route the GradStore through
+            // `kiln_optim::AdamW` per param (keyed by `tensor_id()`), updating
+            // each kt master in place.
+            optimizer_step_from_kt_grad_store(
+                &*backend,
+                &mut params,
+                &grads,
+                lr,
+                optimizer,
+                Some(&mut opt_state),
+            )
+            .expect("AdamW optimizer step");
+
+            losses.push(loss);
+        }
+
+        let initial_loss = losses[0];
+        let final_loss = *losses.last().expect("100 losses recorded");
+        let min_loss = losses.iter().cloned().fold(f64::INFINITY, f64::min);
+
+        eprintln!(
+            "[CP4-CONVERGE] lr={lr} steps={STEPS} | initial={:.6} step25={:.6} step50={:.6} \
+             step75={:.6} final={:.6} min={:.6}",
+            initial_loss, losses[24], losses[49], losses[74], final_loss, min_loss
+        );
+
+        // Per-parameter AdamW step counter (1-indexed, bumped once per step):
+        // every stepped param should have run exactly STEPS times, and its
+        // moment buffers must stay finite (no NaN/Inf leaked into optimizer
+        // state — a silent way training can rot).
+        let mut stepped = 0usize;
+        for id in params.all_params().iter().map(|p| p.tensor_id()) {
+            if let Some(m) = opt_state.adamw.moments(id) {
+                stepped += 1;
+                assert_eq!(
+                    m.step as usize, STEPS,
+                    "CP-4 convergence: AdamW step counter for param {id:?} should be {STEPS}, got {}",
+                    m.step
+                );
+                assert!(
+                    m.m.iter().all(|x| x.is_finite()) && m.v.iter().all(|x| x.is_finite()),
+                    "CP-4 convergence: AdamW moments for param {id:?} became non-finite by step {STEPS}"
+                );
+            }
+        }
+        assert!(
+            stepped > 0,
+            "CP-4 convergence: AdamW stepped 0 params — optimizer never ran"
+        );
+
+        // The HEADLINE gate: tape-authoritative SFT must STABLY IMPROVE. The
+        // tiny model overfits the 4 fixed supervised tokens easily within 100
+        // steps, so we require both a net decrease AND a meaningful one (>=10%
+        // off the initial loss). A working tape-authoritative loop overfits this
+        // fixture far past that; a no-op (severed-gradient) loop can't clear it.
+        assert!(
+            final_loss < initial_loss,
+            "CP-4 convergence: final loss {final_loss:.6} did not improve on initial \
+             {initial_loss:.6} — tape-authoritative SFT is not training"
+        );
+        assert!(
+            min_loss <= initial_loss * 0.9,
+            "CP-4 convergence: min loss {min_loss:.6} is not <= 90% of initial \
+             {initial_loss:.6} (= {:.6}) — no meaningful downward trend over {STEPS} steps",
+            initial_loss * 0.9
+        );
+
+        unsafe {
+            std::env::set_var("KILN_USE_TAPE_AUTHORITATIVE", "0");
+        }
+    }
+
     #[test]
     fn test_lora_initialize_uses_transposed_projection_shapes() -> Result<()> {
         let device = cpu_device();
