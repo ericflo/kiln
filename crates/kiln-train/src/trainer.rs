@@ -15064,7 +15064,7 @@ pub(crate) mod tests {
             std::env::set_var("KILN_USE_TAPE_AUTHORITATIVE", "0");
         }
         let lora_weights = params.as_lora_weights();
-        let mut ls = LinearAttentionState::new(&config, &device).expect("linear state");
+        let mut ls = LinearAttentionState::new(&config, &kiln_kt_bridge::kt_device_from_candle(&device)).expect("linear state");
         let logits = model_forward(
             &*backend,
             &input_ids,
@@ -15249,7 +15249,7 @@ pub(crate) mod tests {
             std::env::set_var("KILN_USE_TAPE_AUTHORITATIVE", "0");
         }
         let lora_weights = params.as_lora_weights();
-        let mut ls = LinearAttentionState::new(&config, &device).expect("linear state");
+        let mut ls = LinearAttentionState::new(&config, &kiln_kt_bridge::kt_device_from_candle(&device)).expect("linear state");
         let logits = model_forward(
             &*backend,
             &input_ids,
@@ -15816,7 +15816,7 @@ pub(crate) mod tests {
             unsafe {
                 std::env::set_var("KILN_USE_TAPE_AUTHORITATIVE", "0");
             }
-            let mut ls = LinearAttentionState::new(&config, &device).expect("linear state");
+            let mut ls = LinearAttentionState::new(&config, &kiln_kt_bridge::kt_device_from_candle(&device)).expect("linear state");
             let logits = model_forward(
                 &*backend,
                 &input_ids,
@@ -15838,7 +15838,7 @@ pub(crate) mod tests {
             std::env::set_var("KILN_USE_TAPE_AUTHORITATIVE", "0");
         }
         let lora_weights = params.as_lora_weights();
-        let mut ls = LinearAttentionState::new(&config, &device).expect("linear state");
+        let mut ls = LinearAttentionState::new(&config, &kiln_kt_bridge::kt_device_from_candle(&device)).expect("linear state");
         let logits = model_forward(
             &*backend,
             &input_ids,
@@ -16444,17 +16444,64 @@ pub(crate) mod tests {
     /// `Tensor::randn(0, std, ...)` calls used previously in `tiny_weights`,
     /// while staying inside a strictly bounded range (no fat tail) and
     /// remaining deterministic for a given `rng` state.
+    // #1082: `GpuWeights`/`GpuFfnWeights`/`GpuAttentionWeights` fields are all
+    // kt tensors, so the tiny-fixture builders below must produce kt. These
+    // test-only kt helpers replace the production candle helpers
+    // (`zeros_f32_on`/`ones_dtype_on`/`zeros_dtype_on`, which return
+    // `cd_types::Tensor` = candle) at the kt-field assignment sites. They build
+    // on CPU via the kt `from_slice`/`zeros`/`ones` façade and move to a kt
+    // device bridged from the candle `CdDevice` param.
+    fn kt_zeros_f32_on(shape: &[usize], device: &CdDevice) -> Result<kiln_tensor::Tensor> {
+        let kdev = kiln_kt_bridge::kt_device_from_candle(device);
+        kiln_tensor::Tensor::zeros(shape.to_vec(), kiln_tensor::DType::F32, &kdev)
+            .map_err(Into::into)
+    }
+
+    fn kt_ones_f32_on(shape: &[usize], device: &CdDevice) -> Result<kiln_tensor::Tensor> {
+        let kdev = kiln_kt_bridge::kt_device_from_candle(device);
+        kiln_tensor::Tensor::ones(shape.to_vec(), kiln_tensor::DType::F32, &kdev)
+            .map_err(Into::into)
+    }
+
+    /// #1082 CPU host round-trip: candle F32 CPU tensor → kt F32 CPU tensor.
+    /// The production kt<->candle tensor bridges are CUDA-only; this reads the
+    /// F32 host values + shape and rebuilds the kt form. Used only by
+    /// `#[ignore]`d CPU parity tests whose candle-autograd oracle is severed by
+    /// the kt forward flip (compile-only). Not used on any live path.
+    #[allow(dead_code)]
+    fn cpu_candle_to_kt_f32(t: &Tensor) -> Result<kiln_tensor::Tensor> {
+        let dims = t.dims().to_vec();
+        let data = t.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+        kiln_tensor::Tensor::from_vec(data, dims).map_err(Into::into)
+    }
+
+    /// #1082 CPU host round-trip: kt F32 CPU tensor → candle F32 CPU tensor.
+    /// Companion to [`cpu_candle_to_kt_f32`]; same `#[ignore]`-only scope.
+    #[allow(dead_code)]
+    fn cpu_kt_to_candle_f32(t: &kiln_tensor::Tensor) -> Result<Tensor> {
+        let dims = t.dims().to_vec();
+        let data = t
+            .to_dtype(kiln_tensor::DType::F32)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        tensor_from_vec(data, dims, &cpu_device()).map_err(Into::into)
+    }
+
     fn randn_like_seeded(
         rng: &mut StdRng,
         std: f32,
         shape: &[usize],
         device: &CdDevice,
-    ) -> Result<Tensor> {
+    ) -> Result<kiln_tensor::Tensor> {
         // 3.0_f32.sqrt() — stable equivalent of unstable `f32::consts::SQRT_3`.
         let a = std * 1.732_050_8_f32;
         let n: usize = shape.iter().product();
         let data: Vec<f32> = (0..n).map(|_| rng.random_range(-a..a)).collect();
-        Tensor::from_slice(&data, shape, device).map_err(Into::into)
+        // #1082: build a kt CPU tensor then move to the (bridged) kt device.
+        let kdev = kiln_kt_bridge::kt_device_from_candle(device);
+        kiln_tensor::Tensor::from_slice(&data, shape.to_vec())?
+            .to_device(kdev)
+            .map_err(Into::into)
     }
 
     /// Create tiny random GpuWeights on CPU for the given config, using a
@@ -16484,12 +16531,12 @@ pub(crate) mod tests {
 
         let embed_tokens = randn_like_seeded(&mut rng, 0.02, &[vocab, h], device)?;
         let embed_tokens_t = embed_tokens.t()?.contiguous()?;
-        let final_norm = zeros_f32_on(h, device)?; // (1+w)*x, so zeros = identity
+        let final_norm = kt_zeros_f32_on(&[h], device)?; // (1+w)*x, so zeros = identity
 
         let mut layers = Vec::new();
         for layer_idx in 0..config.num_layers {
-            let input_layernorm = zeros_f32_on(h, device)?;
-            let post_attention_layernorm = zeros_f32_on(h, device)?;
+            let input_layernorm = kt_zeros_f32_on(&[h], device)?;
+            let post_attention_layernorm = kt_zeros_f32_on(&[h], device)?;
 
             let gate_proj = randn_like_seeded(&mut rng, 0.02, &[inter, h], device)?;
             let up_proj = randn_like_seeded(&mut rng, 0.02, &[inter, h], device)?;
@@ -16527,8 +16574,8 @@ pub(crate) mod tests {
                     k_proj,
                     v_proj,
                     o_proj,
-                    q_norm: ones_dtype_on((hd,), DType::F32, device)?,
-                    k_norm: ones_dtype_on((hd,), DType::F32, device)?,
+                    q_norm: kt_ones_f32_on(&[hd], device)?,
+                    k_norm: kt_ones_f32_on(&[hd], device)?,
                     q_proj_t,
                     k_proj_t,
                     v_proj_t,
@@ -16566,10 +16613,11 @@ pub(crate) mod tests {
                     in_proj_a,
                     in_proj_b,
                     conv1d,
-                    norm: zeros_f32_on(config.linear_key_head_dim, device)?,
+                    norm: kt_zeros_f32_on(&[config.linear_key_head_dim], device)?,
                     a_log: a_log.clone(),
-                    a_log_gates: a_log.to_dtype(DType::BF16)?,
-                    dt_bias: zeros_f32_on(config.linear_num_value_heads, device)?,
+                    // #1082: `a_log` is now kt → use kt DType.
+                    a_log_gates: a_log.to_dtype(kiln_tensor::DType::BF16)?,
+                    dt_bias: kt_zeros_f32_on(&[config.linear_num_value_heads], device)?,
                     in_proj_qkv_t,
                     in_proj_z_t,
                     in_proj_a_t,
@@ -16591,7 +16639,9 @@ pub(crate) mod tests {
         let rotary_inv_freq = kiln_model::forward::compute_rotary_inv_freq(
             config.rotary_dim(),
             config.rope_theta,
-            device,
+            // #1082: `compute_rotary_inv_freq` takes a kt `&Device` and returns
+            // a kt tensor (feeds the kt `rotary_inv_freq` field).
+            &kiln_kt_bridge::kt_device_from_candle(device),
         )?;
 
         Ok(GpuWeights {
@@ -16612,8 +16662,10 @@ pub(crate) mod tests {
     /// inputs, and a cast of an already-contiguous source is itself
     /// contiguous, but keeping the call here guarantees the invariant holds
     /// even if an upstream `_t` tensor's layout ever changes.
-    fn to_bf16_contig(t: &Tensor) -> Result<Tensor> {
-        Ok(t.to_dtype(DType::BF16)?.contiguous()?)
+    // #1082: the tiny-fixture `GpuWeights` tensors are kt; this caster takes
+    // and returns kt (`DType` here is the kt dtype).
+    fn to_bf16_contig(t: &kiln_tensor::Tensor) -> Result<kiln_tensor::Tensor> {
+        Ok(t.to_dtype(kiln_tensor::DType::BF16)?.contiguous()?)
     }
 
     /// Cast every `Tensor` field of a `GpuFfnWeights` to BF16. The Marlin
@@ -16753,7 +16805,8 @@ pub(crate) mod tests {
         let kiln_model::forward::GpuAttentionWeights::Full(full) = &mut layer.attention else {
             unreachable!("test config should create a full-attention layer");
         };
-        let stub = zeros_f32_on((1usize,), &device)?;
+        // #1082: `full.{q,k,v,o}_proj` are kt fields → build a kt stub.
+        let stub = kt_zeros_f32_on(&[1usize], &device)?;
         full.q_proj = stub.clone();
         full.k_proj = stub.clone();
         full.v_proj = stub.clone();
@@ -16832,8 +16885,11 @@ pub(crate) mod tests {
             anyhow::bail!("test setup expected layer {gdn_layer_idx} to be GDN");
         };
 
+        // #1082: the `*_t` GDN weights (`in_proj_qkv_t`/`in_proj_z_t`/
+        // `out_proj_t`) are kt tensors; the closure only reads `.dims()`, so
+        // take a kt ref.
         let assert_pair_matches_weight =
-            |name: &str, pair: &Option<(Var, Var)>, w_t: &Tensor| -> Result<()> {
+            |name: &str, pair: &Option<(Var, Var)>, w_t: &kiln_tensor::Tensor| -> Result<()> {
                 let dims = w_t.dims();
                 anyhow::ensure!(dims.len() == 2, "{name} test weight must be rank-2");
                 let (a, b) = pair
@@ -16943,7 +16999,18 @@ pub(crate) mod tests {
         Ok(())
     }
 
+    // #1082: `kiln_model::forward::rms_norm_fallback` is now a kt op, so the
+    // candle `Var`/`loss.backward()` autograd oracle this test relies on is
+    // SEVERED — candle's tape cannot trace through the kt RMSNorm, so
+    // `grads.get(hidden_var)` would not reflect the analytic formula. Per the
+    // documented policy (`kiln-candle-autograd-drops-attn-conv-grads`), the
+    // oracle must be ported to a kt-tape / finite-diff comparison (CP-4); this
+    // test is `#[ignore]`d rather than bridged into a falsely-passing/failing
+    // state. The body is bridged kt<->candle on the host purely so it still
+    // type-checks.
     #[test]
+    #[ignore = "#1082: candle-autograd oracle severed by kt rms_norm_fallback; \
+                port to kt-tape/finite-diff oracle (CP-4)"]
     fn test_analytic_sft_tail_grad_pre_final_norm_parity() -> Result<()> {
         let device = cpu_device();
         let seq_len = 5usize;
@@ -16978,11 +17045,15 @@ pub(crate) mod tests {
         )?;
 
         let hidden_var = var_from_tensor(&hidden)?;
-        let normed = kiln_model::forward::rms_norm_fallback(
-            hidden_var.as_tensor(),
-            &final_norm_weight,
+        // #1082: `rms_norm_fallback` is kt; bridge the candle Var tensor → kt
+        // and the kt result → candle (CPU host round-trip). NOTE: this round
+        // trip is what severs the candle autograd graph — hence `#[ignore]`.
+        let normed_kt = kiln_model::forward::rms_norm_fallback(
+            &cpu_candle_to_kt_f32(hidden_var.as_tensor())?,
+            &cpu_candle_to_kt_f32(&final_norm_weight)?,
             eps,
         )?;
+        let normed = cpu_kt_to_candle_f32(&normed_kt)?;
         let logits = normed.broadcast_matmul(&head_t)?;
         let loss = cross_entropy_loss(&logits, &input_ids, &label_mask, &device)?;
         let grads = loss.backward()?;
@@ -17047,7 +17118,7 @@ pub(crate) mod tests {
         let backend = backend::for_device(&device);
 
         // Full forward pass (no KV cache, no LoRA)
-        let mut linear_state_full = LinearAttentionState::new(&config, &device)?;
+        let mut linear_state_full = LinearAttentionState::new(&config, &kiln_kt_bridge::kt_device_from_candle(&device))?;
         let logits_full = model_forward(
             &*backend,
             &input_ids,
@@ -17060,7 +17131,7 @@ pub(crate) mod tests {
 
         // Segmented forward: embed → segment(0..2) → segment(2..4) → head
         let (hidden, positions) = model_forward_embed(&input_ids, &weights)?;
-        let mut linear_state_seg = LinearAttentionState::new(&config, &device)?;
+        let mut linear_state_seg = LinearAttentionState::new(&config, &kiln_kt_bridge::kt_device_from_candle(&device))?;
         let hidden = model_forward_segment(
             &*backend,
             hidden,
@@ -17072,7 +17143,7 @@ pub(crate) mod tests {
             Some(&mut linear_state_seg),
             None,
         )?;
-        let mut linear_state_seg2 = LinearAttentionState::new(&config, &device)?;
+        let mut linear_state_seg2 = LinearAttentionState::new(&config, &kiln_kt_bridge::kt_device_from_candle(&device))?;
         // The second segment needs fresh linear state starting from the correct layer offset.
         // However, LinearAttentionState::new creates state for ALL linear layers.
         // model_forward_segment handles the indexing internally.
@@ -17089,7 +17160,11 @@ pub(crate) mod tests {
         )?;
         let logits_seg = model_forward_head(&hidden, &weights, &config)?;
 
-        // Compare logits
+        // Compare logits. #1082: `model_forward` returns candle but
+        // `model_forward_head` (and the segment/embed chain feeding it) returns
+        // kt. Bridge `logits_seg` kt→candle (CPU F32, lossless) so the diff math
+        // stays candle and the 1e-4 parity bound is unchanged.
+        let logits_seg = cpu_kt_to_candle_f32(&logits_seg)?;
         let diff = (logits_full - logits_seg)?
             .abs()?
             .max_all()?
@@ -17289,7 +17364,7 @@ pub(crate) mod tests {
         let kl_coeff = 0.05;
 
         let ref_log_probs = {
-            let mut ref_linear_state = LinearAttentionState::new(&config, &device)?;
+            let mut ref_linear_state = LinearAttentionState::new(&config, &kiln_kt_bridge::kt_device_from_candle(&device))?;
             let ref_logits = model_forward(
                 &*backend,
                 &input_ids,
@@ -17308,7 +17383,7 @@ pub(crate) mod tests {
             TrainableLoraParams::initialize_seeded(&config, &weights, 4, 8.0, &device, Some(seed))?;
 
         let lora_weights = params_std.as_lora_weights();
-        let mut linear_state = LinearAttentionState::new(&config, &device)?;
+        let mut linear_state = LinearAttentionState::new(&config, &kiln_kt_bridge::kt_device_from_candle(&device))?;
         let policy_logits = model_forward(
             &*backend,
             &input_ids,
@@ -17992,7 +18067,7 @@ pub(crate) mod tests {
         let backend = backend::for_device(&device);
 
         // Naive path: full forward → logits → cross_entropy_loss.
-        let mut linear_state_naive = LinearAttentionState::new(&config, &device)?;
+        let mut linear_state_naive = LinearAttentionState::new(&config, &kiln_kt_bridge::kt_device_from_candle(&device))?;
         let logits = model_forward(
             &*backend,
             &input_ids,
@@ -18007,7 +18082,7 @@ pub(crate) mod tests {
 
         // FLCE path: no-head forward → fused LCE (small chunk to exercise the
         // chunked reduction on a modest vocab size).
-        let mut linear_state_flce = LinearAttentionState::new(&config, &device)?;
+        let mut linear_state_flce = LinearAttentionState::new(&config, &kiln_kt_bridge::kt_device_from_candle(&device))?;
         let hidden = model_forward_no_head(
             &*backend,
             &input_ids,
@@ -18016,9 +18091,15 @@ pub(crate) mod tests {
             Some(&mut linear_state_flce),
             None,
         )?;
+        // #1082: `model_forward_no_head` returns kt `hidden` and
+        // `embed_tokens_t` is kt, but `fused_linear_cross_entropy` is candle
+        // (the FLCE candle shim). Bridge both kt→candle (CPU F32, lossless) so
+        // the naive-CE vs FLCE parity bound is unchanged.
+        let hidden_c = cpu_kt_to_candle_f32(&hidden)?;
+        let head_t_c = cpu_kt_to_candle_f32(&weights.embed_tokens_t)?;
         let loss_flce = fused_linear_cross_entropy(
-            &hidden,
-            &weights.embed_tokens_t,
+            &hidden_c,
+            &head_t_c,
             &input_ids,
             &label_mask,
             &device,
@@ -18906,8 +18987,13 @@ pub(crate) mod tests {
         let device = cpu_device();
         let config = tiny_config();
         let weights = tiny_weights(&config, &device)?;
-        let final_norm_weight = weights.final_norm.clone();
-        let head_t = weights.embed_tokens_t.clone();
+        // #1082: `final_norm`/`embed_tokens_t` are kt; the
+        // `analytic_grpo_tail_loss_grad_pre_final_norm` analytic helper is
+        // candle-typed. Bridge kt→candle (CPU F32, lossless) — the analytic
+        // gradient is computed directly (no candle-autograd oracle), so the
+        // bridge preserves the test exactly.
+        let final_norm_weight = cpu_kt_to_candle_f32(&weights.final_norm)?;
+        let head_t = cpu_kt_to_candle_f32(&weights.embed_tokens_t)?;
 
         // Synthetic 8-token sequence. Action positions {2, 3, 5}.
         // Env positions {4, 6}. Disjoint per trajectory_mask invariant.

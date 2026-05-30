@@ -4488,7 +4488,12 @@ mod tests {
         // `head_t` is the (transposed) LM head — the OPD path uses the tied
         // `embed_tokens_t` (BF16 here, matching the BF16 model output so the
         // kt-tape dtype gate `hidden.dtype() == head_t.dtype()` passes).
-        let head_t = weights.embed_tokens_t.clone();
+        // #1082: `embed_tokens_t` is a kt tensor; the
+        // `opd_step_forward_backward_tape_authoritative` fn takes a candle
+        // `head_t` (it re-borrows kt internally). Bridge kt→candle on CUDA,
+        // mirroring the candle-path helper at opd.rs:2468.
+        let head_t = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&weights.embed_tokens_t)
+            .expect("bridge embed_tokens_t kt→candle for OPD head_t");
         assert_eq!(
             head_t.dtype(),
             DType::BF16,

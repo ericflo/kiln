@@ -307,8 +307,13 @@ fn main() -> Result<()> {
         kiln_model::LoadModelOptions { load_mtp: false },
     )
     .context("load model weights")?;
-    let gpu_weights = GpuWeights::from_model_weights(&model_weights, &model_config, &device)
-        .context("transfer weights to CUDA")?;
+    // #1082: kt `&Device` expected; bridge the candle CUDA device.
+    let gpu_weights = GpuWeights::from_model_weights(
+        &model_weights,
+        &model_config,
+        &kiln_kt_bridge::kt_device_from_candle(&device),
+    )
+    .context("transfer weights to CUDA")?;
     drop(model_weights);
 
     // ModelRunner takes ownership of weights + tokenizer + config.
