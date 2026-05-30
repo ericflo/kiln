@@ -24,10 +24,8 @@
 //! D2H copy of the resulting probabilities. The kt host-side path below is
 //! preserved as a fallback for CPU tensors and any precondition failure.
 //!
-//! `speculative_decode_step` still calls `model_forward` (flat-`KvCache`
-//! path), which has not yet been flipped off candle by its owning agent; that
-//! one cross-file seam is bridged in-file via `crate::forward::candle_to_kt_activation`
-//! and marked `// (#1082) bridge — remove when forward.rs model_forward() flips`.
+//! `speculative_decode_step` calls `model_forward_kt` (flat-`KvCache` path),
+//! which is fully kt-typed and returns kt logits directly — no candle bridge.
 
 use anyhow::{Context, Result};
 
@@ -44,12 +42,12 @@ use kiln_core::token::TokenId;
 use crate::backend::BackendRuntime;
 use crate::c1_attr;
 use crate::forward::{
-    GpuWeights, LinearAttentionState, model_forward, model_forward_embed, model_forward_head,
-    model_forward_paged, model_forward_paged_with_last_hidden, model_forward_segment,
-    mtp_forward_step,
+    GpuWeights, LinearAttentionState, model_forward_embed, model_forward_head,
+    model_forward_kt, model_forward_paged, model_forward_paged_with_last_hidden,
+    model_forward_segment, mtp_forward_step,
 };
 use crate::kv_cache::KvCache;
-use crate::paged_kv_cache::PagedKvCache;
+use crate::PagedKvCacheKt;
 use crate::sampling::{greedy_sample, greedy_sample_rows, sample_with_params};
 
 /// Phase C35 H13 A/B — read `KILN_MTP_ARGMAX_FP32=1` once per process, cached
@@ -468,7 +466,9 @@ pub fn speculative_decode_step(
     verify_input.push(last_token);
     verify_input.extend_from_slice(&draft_tokens);
 
-    let verify_logits_cd = model_forward(
+    // #1082: `model_forward_kt` returns kt logits directly; feed straight into
+    // the downstream slicing + kt host samplers with no candle bridge.
+    let verify_logits = model_forward_kt(
         backend,
         &verify_input,
         weights,
@@ -478,11 +478,6 @@ pub fn speculative_decode_step(
         lora,
     )
     .context("verification forward pass failed")?;
-    // (#1082) bridge — remove when forward.rs model_forward() flips to kt.
-    // The flat-`KvCache` `model_forward` still returns a candle tensor; bridge
-    // it to kt so the downstream slicing + kt host samplers operate uniformly.
-    let verify_logits = crate::forward::candle_to_kt_activation(&verify_logits_cd)
-        .context("verify logits candle->kt bridge")?;
 
     // The verify_logits has shape [1, K+1, vocab_size].
     // Position i gives logits for predicting token at position i+1.
@@ -626,7 +621,7 @@ pub fn speculative_decode_step_paged_greedy(
     last_token: TokenId,
     weights: &GpuWeights,
     config: &ModelConfig,
-    paged_cache: &PagedKvCache,
+    paged_cache: &PagedKvCacheKt,
     block_table: &BlockTable,
     base_pos: usize,
     linear_state: &mut LinearAttentionState,
@@ -841,11 +836,11 @@ pub fn speculative_mtp_decode_step(
     h_prev: &Tensor,
     weights: &GpuWeights,
     config: &ModelConfig,
-    base_cache: &PagedKvCache,
+    base_cache: &PagedKvCacheKt,
     base_block_table: &BlockTable,
     base_pos: usize,
     linear_state: &mut LinearAttentionState,
-    mtp_cache: &PagedKvCache,
+    mtp_cache: &PagedKvCacheKt,
     mtp_block_table: &BlockTable,
     mtp_pos: usize,
     _params: &SamplingParams,

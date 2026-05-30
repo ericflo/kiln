@@ -37,7 +37,7 @@ use kiln_vulkan_kernel::{CommandBatch, VkPagedKvCache, VulkanBuffer, VulkanDevic
 
 use crate::backend::vulkan::VulkanBackend;
 use crate::forward::GpuLayerWeights;
-use crate::paged_kv_cache::PagedKvCache;
+use crate::PagedKvCacheKt;
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -184,7 +184,7 @@ pub fn drain_resident_decode_timing() {
 /// legacy block helper.
 ///
 /// The KV cache write lands in the supplied `VkPagedKvCache` at the
-/// block-table-resolved slot for `start_pos`. The legacy `PagedKvCache`
+/// block-table-resolved slot for `start_pos`. The legacy `PagedKvCacheKt`
 /// is **not** updated — once the resident path is engaged for a layer,
 /// it owns that layer's KV state for the remainder of the decode
 /// session.
@@ -197,7 +197,7 @@ pub fn transformer_block_paged_decode_full_attn_resident_b1(
     start_pos: usize,
     block_table: &BlockTable,
     full_attn_layer_idx: usize,
-    paged_cache: &PagedKvCache,
+    paged_cache: &PagedKvCacheKt,
     vk_kv_cache: &VkPagedKvCache,
     rope_cos: &kiln_tensor::Tensor,
     rope_sin: &kiln_tensor::Tensor,
@@ -1348,7 +1348,7 @@ fn seed_conv_state(vk_device: &VulkanDevice, buf: &VulkanBuffer, state_t: &candl
 pub fn seed_vk_kv_cache_layer_blocks_from_legacy(
     vk_device: &VulkanDevice,
     vk_cache: &VkPagedKvCache,
-    paged_cache: &PagedKvCache,
+    paged_cache: &PagedKvCacheKt,
     layer_idx: usize,
     block_ids: &[u32],
 ) -> Result<()> {
@@ -1395,7 +1395,7 @@ pub fn seed_vk_kv_cache_layer_blocks_from_legacy(
 pub fn seed_vk_kv_cache_layer_from_legacy(
     vk_device: &VulkanDevice,
     vk_cache: &VkPagedKvCache,
-    paged_cache: &PagedKvCache,
+    paged_cache: &PagedKvCacheKt,
     layer_idx: usize,
 ) -> Result<()> {
     let (k_tensor, v_tensor) = paged_cache
@@ -1463,7 +1463,7 @@ pub fn record_full_attn_block_into(
     start_pos: usize,
     block_table: &BlockTable,
     full_attn_layer_idx: usize,
-    paged_cache: &PagedKvCache,
+    paged_cache: &PagedKvCacheKt,
     vk_kv_cache: &VkPagedKvCache,
     rope_cos_buf: &VulkanBuffer,
     rope_sin_buf: &VulkanBuffer,

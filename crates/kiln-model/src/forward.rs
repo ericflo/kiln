@@ -24,13 +24,20 @@ use crate::kv_cache::KvCache;
 use crate::lora_loader::{
     LoraLayerWeights, LoraProjectionWeights, LoraWeights, compute_lora_delta, linear_with_lora_t,
 };
-use crate::paged_kv_cache::{PagedKvCache, contiguous_slot_run_start};
+// (#1082) The candle `crate::paged_kv_cache` module was deleted; its kt twin
+// `PagedKvCacheKt` is the production cache. Alias it to `PagedKvCache` so the
+// `model_forward_paged*` params and the ~80 `&PagedKvCache` type refs below
+// resolve to the kt type — matching `generate.rs`'s identical alias so the
+// paged forward fns line up with their callers. `contiguous_slot_run_start`
+// is a free fn in `kiln_core::block` (the deleted module merely re-exported
+// it) and now comes from the `kiln_core::block` import below.
+use crate::PagedKvCacheKt as PagedKvCache;
 use crate::transposed_weight_cache::{
     CachedTransposedWeightBytes, transposed_weight_bytes_2d_cached_bytes,
 };
 use crate::weights::{DeferredMtpSource, ModelWeights, MtpWeights, TensorDType, WeightTensor};
 
-use kiln_core::block::BlockTable;
+use kiln_core::block::{contiguous_slot_run_start, BlockTable};
 
 /// kt-tensor type alias (#1082). Bare `Tensor` in this file is
 /// `candle_core::Tensor`; `KtTensor` is the kiln-native
@@ -27529,14 +27536,14 @@ mod tests {
         let bt1 = BlockTable { blocks: vec![1] };
         let block_tables = [&bt0, &bt1];
         let start_positions = [start_pos, start_pos];
-        let mut batch_cache = PagedKvCache::new_kt(
+        let mut batch_cache = PagedKvCacheKt::new(
             1,
             2,
             block_size,
             num_kv_heads,
             head_dim,
             kiln_tensor::DType::BF16,
-            &device_kt,
+            device_kt.index().unwrap_or(0),
         )?;
         for (row, block_table) in block_tables.iter().enumerate() {
             let row_k = prefix_k.narrow(0, row, 1)?.contiguous()?;
@@ -27573,14 +27580,14 @@ mod tests {
         assert_eq!(batched.dims(), &[batch, 1usize, hidden]);
 
         for row in 0..batch {
-            let mut row_cache = PagedKvCache::new_kt(
+            let mut row_cache = PagedKvCacheKt::new(
                 1,
                 1,
                 block_size,
                 num_kv_heads,
                 head_dim,
                 kiln_tensor::DType::BF16,
-                &device_kt,
+                device_kt.index().unwrap_or(0),
             )?;
             let row_table = BlockTable { blocks: vec![0] };
             let row_k = prefix_k.narrow(0, row, 1)?.contiguous()?;
@@ -27694,14 +27701,14 @@ mod tests {
         let bt1 = BlockTable { blocks: vec![1] };
         let block_tables = [&bt0, &bt1];
         let start_positions = [start_pos, start_pos];
-        let mut batch_cache = PagedKvCache::new_kt(
+        let mut batch_cache = PagedKvCacheKt::new(
             1,
             2,
             block_size,
             num_kv_heads,
             head_dim,
             kiln_tensor::DType::BF16,
-            &device_kt,
+            device_kt.index().unwrap_or(0),
         )?;
         for (row, block_table) in block_tables.iter().enumerate() {
             let row_k = prefix_k.narrow(0, row, 1)?.contiguous()?;
@@ -27734,14 +27741,14 @@ mod tests {
         assert_eq!(batched.dims(), &[batch, 1usize, hidden]);
 
         for row in 0..batch {
-            let mut row_cache = PagedKvCache::new_kt(
+            let mut row_cache = PagedKvCacheKt::new(
                 1,
                 1,
                 block_size,
                 num_kv_heads,
                 head_dim,
                 kiln_tensor::DType::BF16,
-                &device_kt,
+                device_kt.index().unwrap_or(0),
             )?;
             let row_table = BlockTable { blocks: vec![0] };
             let row_k = prefix_k.narrow(0, row, 1)?.contiguous()?;
@@ -27852,14 +27859,14 @@ mod tests {
         let block_tables = [&bt0, &bt1];
         let start_positions = [start_pos, start_pos];
         let token_ids = [7u32, 11u32];
-        let mut batch_cache = PagedKvCache::new_kt(
+        let mut batch_cache = PagedKvCacheKt::new(
             1,
             2,
             block_size,
             num_kv_heads,
             head_dim,
             kiln_tensor::DType::BF16,
-            &device_kt,
+            device_kt.index().unwrap_or(0),
         )?;
         for (row, block_table) in block_tables.iter().enumerate() {
             let row_k = prefix_k.narrow(0, row, 1)?.contiguous()?;
@@ -27883,14 +27890,14 @@ mod tests {
 
         let positions = Tensor::from_slice(&[start_pos as f32], 1usize)?.to_device(device)?;
         for row in 0..batch {
-            let mut row_cache = PagedKvCache::new_kt(
+            let mut row_cache = PagedKvCacheKt::new(
                 1,
                 1,
                 block_size,
                 num_kv_heads,
                 head_dim,
                 kiln_tensor::DType::BF16,
-                &device_kt,
+                device_kt.index().unwrap_or(0),
             )?;
             let row_table = BlockTable { blocks: vec![0] };
             let row_k = prefix_k.narrow(0, row, 1)?.contiguous()?;
@@ -28038,14 +28045,14 @@ mod tests {
         let block_tables = [&bt0, &bt1];
         let token_ids = [7u32, 11u32];
 
-        let mut batch_cache = PagedKvCache::new_kt(
+        let mut batch_cache = PagedKvCacheKt::new(
             1,
             2,
             block_size,
             num_kv_heads,
             head_dim,
             kiln_tensor::DType::BF16,
-            &device_kt,
+            device_kt.index().unwrap_or(0),
         )?;
         // Phase 7 #1082: parallel-allocate a kt twin via the constructor
         // stub `try_kt_paged_kv_cache_new` (commit 638bc441). When the
@@ -28113,14 +28120,14 @@ mod tests {
 
         for row in 0..batch {
             let row_start_pos = start_positions[row];
-            let mut row_cache = PagedKvCache::new_kt(
+            let mut row_cache = PagedKvCacheKt::new(
                 1,
                 1,
                 block_size,
                 num_kv_heads,
                 head_dim,
                 kiln_tensor::DType::BF16,
-                &device_kt,
+                device_kt.index().unwrap_or(0),
             )?;
             let row_table = BlockTable { blocks: vec![0] };
             let (row_k, row_v) = if row == 0 {
@@ -28223,14 +28230,14 @@ mod tests {
         let block_tables = [&bt0, &bt1];
         let start_positions = [start_pos, start_pos];
         let token_ids = [7u32, 11u32];
-        let mut batch_cache = PagedKvCache::new_kt(
+        let mut batch_cache = PagedKvCacheKt::new(
             config.num_full_attention_layers,
             2,
             block_size,
             config.num_kv_heads,
             config.head_dim,
             kiln_tensor::DType::BF16,
-            &device_kt,
+            device_kt.index().unwrap_or(0),
         )?;
         for (row, block_table) in block_tables.iter().enumerate() {
             let row_k = prefix_k.narrow(0, row, 1)?.contiguous()?;
@@ -28260,14 +28267,14 @@ mod tests {
 
         let positions = Tensor::from_slice(&[start_pos as f32], 1usize)?.to_device(device)?;
         for row in 0..batch {
-            let mut row_cache = PagedKvCache::new_kt(
+            let mut row_cache = PagedKvCacheKt::new(
                 config.num_full_attention_layers,
                 1,
                 block_size,
                 config.num_kv_heads,
                 config.head_dim,
                 kiln_tensor::DType::BF16,
-                &device_kt,
+                device_kt.index().unwrap_or(0),
             )?;
             let row_table = BlockTable { blocks: vec![0] };
             let row_k = prefix_k.narrow(0, row, 1)?.contiguous()?;
@@ -32181,14 +32188,14 @@ mod tests {
         let num_blocks = (seq_len + block_size - 1) / block_size;
         // #1082: `device` is already a kt `Device`.
         let device_kt = *device;
-        let cache = PagedKvCache::new_kt(
+        let cache = PagedKvCacheKt::new(
             config.num_full_attention_layers,
             num_blocks,
             block_size,
             config.num_kv_heads,
             config.head_dim,
             kiln_tensor::DType::F32,
-            &device_kt,
+            device_kt.index().unwrap_or(0),
         )?;
         let mut block_table = BlockTable::new();
         for i in 0..num_blocks as u32 {

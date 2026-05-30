@@ -109,7 +109,7 @@ use crate::forward::PagedDecodeGraphInputs;
 use crate::forward::model_forward_paged_with_graph_inputs;
 use crate::forward::{GpuWeights, LinearAttentionState, model_forward_paged};
 use crate::lora_loader::LoraWeights;
-use crate::paged_kv_cache::PagedKvCache;
+use crate::PagedKvCacheKt;
 
 use kiln_core::block::BlockTable;
 
@@ -126,7 +126,7 @@ struct CudaGraphKey {
 
 #[cfg(feature = "cuda")]
 impl CudaGraphKey {
-    fn new(block_table: &BlockTable, paged_cache: &PagedKvCache, seq_len: usize) -> Self {
+    fn new(block_table: &BlockTable, paged_cache: &PagedKvCacheKt, seq_len: usize) -> Self {
         let stable_metadata = Self::stable_paged_metadata_enabled();
         let attention_len = seq_len + 1;
         let max_seqlen_k = attention_len.div_ceil(128) * 128;
@@ -231,7 +231,7 @@ impl CudaBatchedGraphKey {
     fn new(
         batch_size: usize,
         max_seq_len: usize,
-        paged_cache: &PagedKvCache,
+        paged_cache: &PagedKvCacheKt,
     ) -> Self {
         let stable_metadata = CudaGraphKey::stable_paged_metadata_enabled();
         let attention_len = max_seq_len + 1;
@@ -537,7 +537,7 @@ impl CudaGraphRunner {
         _token_ids: &[u32],
         _weights: &GpuWeights,
         _config: &ModelConfig,
-        _paged_cache: &PagedKvCache,
+        _paged_cache: &PagedKvCacheKt,
         _block_tables: &[&BlockTable],
         _sequence_lengths: &[usize],
         _linear_states: &mut [&mut LinearAttentionState],
@@ -554,7 +554,7 @@ impl CudaGraphRunner {
         token_ids: &[u32],
         weights: &GpuWeights,
         config: &ModelConfig,
-        paged_cache: &PagedKvCache,
+        paged_cache: &PagedKvCacheKt,
         block_tables: &[&BlockTable],
         sequence_lengths: &[usize],
         linear_states: &mut [&mut LinearAttentionState],
@@ -819,7 +819,7 @@ impl CudaGraphRunner {
         token_id: u32,
         weights: &GpuWeights,
         config: &ModelConfig,
-        paged_cache: &PagedKvCache,
+        paged_cache: &PagedKvCacheKt,
         block_table: &BlockTable,
         seq_len: usize,
         linear_state: &mut LinearAttentionState,
@@ -1143,7 +1143,7 @@ impl CudaGraphRunner {
         seqused_k_buffer: &candle_core::Tensor,
         kv_slot_buffer: &candle_core::Tensor,
         block_table: &BlockTable,
-        paged_cache: &PagedKvCache,
+        paged_cache: &PagedKvCacheKt,
         seq_len: usize,
         max_seqlen_k: usize,
     ) -> Result<()> {
@@ -1205,7 +1205,7 @@ impl CudaGraphRunner {
         seqused_k_buffer: &candle_core::Tensor,
         kv_slot_buffer: &candle_core::Tensor,
         block_tables: &[&BlockTable],
-        paged_cache: &PagedKvCache,
+        paged_cache: &PagedKvCacheKt,
         start_positions: &[usize],
         max_seqlen_k: usize,
     ) -> Result<()> {
@@ -1340,7 +1340,7 @@ impl CudaGraphRunner {
         token_id: u32,
         weights: &GpuWeights,
         config: &ModelConfig,
-        paged_cache: &PagedKvCache,
+        paged_cache: &PagedKvCacheKt,
         block_table: &BlockTable,
         seq_len: usize,
         linear_state: &mut LinearAttentionState,
@@ -1601,7 +1601,7 @@ impl CudaGraphRunner {
         token_ids: &[u32],
         weights: &GpuWeights,
         config: &ModelConfig,
-        paged_cache: &PagedKvCache,
+        paged_cache: &PagedKvCacheKt,
         block_tables: &[&BlockTable],
         sequence_lengths: &[usize],
         lora: Option<&LoraWeights>,
@@ -1874,7 +1874,7 @@ impl CudaGraphRunner {
         token_id: u32,
         weights: &GpuWeights,
         config: &ModelConfig,
-        paged_cache: &PagedKvCache,
+        paged_cache: &PagedKvCacheKt,
         block_table: &BlockTable,
         seq_len: usize,
         linear_state: &mut LinearAttentionState,
@@ -1953,7 +1953,7 @@ impl CudaGraphRunner {
     #[cfg(feature = "cuda")]
     fn padded_block_table(
         block_table: &BlockTable,
-        paged_cache: &PagedKvCache,
+        paged_cache: &PagedKvCacheKt,
         max_seqlen_k: usize,
     ) -> Result<Vec<u32>> {
         let block_size = paged_cache.block_size();
@@ -1975,7 +1975,7 @@ impl CudaGraphRunner {
     #[cfg(feature = "cuda")]
     fn new_block_table_buffer(
         block_table: &BlockTable,
-        paged_cache: &PagedKvCache,
+        paged_cache: &PagedKvCacheKt,
         max_seqlen_k: usize,
         device: &candle_core::Device,
     ) -> Result<candle_core::Tensor> {
@@ -1993,7 +1993,7 @@ impl CudaGraphRunner {
     #[cfg(feature = "cuda")]
     fn new_kv_slot_buffer(
         block_table: &BlockTable,
-        paged_cache: &PagedKvCache,
+        paged_cache: &PagedKvCacheKt,
         seq_len: usize,
         device: &candle_core::Device,
     ) -> Result<candle_core::Tensor> {
@@ -2012,7 +2012,7 @@ impl CudaGraphRunner {
     #[allow(dead_code)]
     fn new_batched_block_table_buffer(
         block_tables: &[&BlockTable],
-        paged_cache: &PagedKvCache,
+        paged_cache: &PagedKvCacheKt,
         max_seqlen_k: usize,
         device: &candle_core::Device,
     ) -> Result<candle_core::Tensor> {
@@ -2067,7 +2067,7 @@ impl CudaGraphRunner {
     #[allow(dead_code)]
     fn new_batched_kv_slot_buffer(
         block_tables: &[&BlockTable],
-        paged_cache: &PagedKvCache,
+        paged_cache: &PagedKvCacheKt,
         start_positions: &[usize],
         device: &candle_core::Device,
     ) -> Result<candle_core::Tensor> {
@@ -2340,7 +2340,7 @@ impl CudaGraphRunner {
         token_id: u32,
         weights: &GpuWeights,
         config: &ModelConfig,
-        paged_cache: &PagedKvCache,
+        paged_cache: &PagedKvCacheKt,
         block_table: &BlockTable,
         seq_len: usize,
         linear_state: &mut LinearAttentionState,

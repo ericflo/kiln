@@ -81,7 +81,7 @@ impl KvCache {
     /// be represented in candle (e.g. `F8E4M3` — use
     /// [`Self::new_with_fp8_kt`] with the dequant dtype + `fp8=true`).
     ///
-    /// Matches the shape of `PagedKvCache::new_kt`: same kt -> candle
+    /// Matches the shape of `PagedKvCacheKt::new`: same kt -> candle
     /// boundary, same delegation pattern. See that constructor for
     /// the rationale on why this minimum-effort wrapper unblocks
     /// candle-import removal at upstream call sites today even
@@ -117,7 +117,7 @@ impl KvCache {
     ///
     /// See [`Self::new_kt`] for the error / Vulkan-CPU-placeholder
     /// semantics; they apply here verbatim. Mirrors
-    /// `PagedKvCache::new_uninit_with_fp8_kt` for the contiguous
+    /// `PagedKvCacheKt::new_with_fp8` for the contiguous
     /// cache shape. (#1082)
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_fp8_kt(
@@ -195,7 +195,7 @@ impl KvCache {
 
     /// kt-typed accessor for the cache's stored compute dtype (#1082).
     ///
-    /// Mirror of `PagedKvCache::compute_dtype_kt`. Returns the
+    /// Mirror of `PagedKvCacheKt::compute_dtype`. Returns the
     /// dequant target dtype as `kiln_tensor::DType` so callers can
     /// match against kt types without importing
     /// `candle_core::DType`. For FP8 caches this is the dtype the
@@ -204,7 +204,7 @@ impl KvCache {
     ///
     /// Errors only if the internal candle dtype cannot be mapped to
     /// a kt dtype, which would indicate a constructor invariant
-    /// violation. See `PagedKvCache::compute_dtype_kt` for the full
+    /// violation. See `PagedKvCacheKt::compute_dtype` for the full
     /// rationale on the error path. (#1082)
     pub fn compute_dtype_kt(&self) -> Result<kiln_tensor::DType> {
         kiln_kt_bridge::candle_dtype_to_kt(self.compute_dtype)

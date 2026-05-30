@@ -3595,19 +3595,19 @@ async fn real_prompt_logprobs(
     let handle = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<Vec<f32>>> {
         let _gpu_guard = gpu_lock.read().unwrap();
         let runner_guard = runner.read().unwrap();
-        // Route through `device_kt()` so this site doesn't name
-        // `candle_core::Device`; bridge back at the call site below
-        // because the public `model_forward` + `LinearAttentionState::new`
-        // entries still take a candle `&Device` (issue #1082).
+        // #1082 candle-drop: candle `model_forward` was removed; route through
+        // the kt-native `model_forward_kt`, which returns a kt
+        // `kiln_tensor::Tensor` and serves every backend (CPU/Metal/Vulkan/CUDA)
+        // — it is the sole forward entry now. The old candle device bridge
+        // (`candle_device_from_kt`) and candle log-softmax math are gone; the
+        // whole path is kt.
         let device_kt = runner_guard.weights.device_kt();
         let backend = kiln_model::backend::for_device_kt(&device_kt);
-        let device_candle = kiln_kt_bridge::candle_device_from_kt(&device_kt)
-            .map_err(|e| anyhow::anyhow!("real_prompt_logprobs: kt -> candle device: {e}"))?;
         let mut linear_state = kiln_model::forward::LinearAttentionState::new(
             &runner_guard.config,
             &device_kt,
         )?;
-        let logits = kiln_model::forward::model_forward(
+        let logits = kiln_model::forward::model_forward_kt(
             &*backend,
             &prompt_tokens_owned,
             &runner_guard.weights,
@@ -3617,36 +3617,17 @@ async fn real_prompt_logprobs(
             runner_guard.active_lora(),
         )
         .context("prompt-logprobs forward pass")?;
-        // Inline `log_softmax_last_dim` so this file stops naming
-        // `candle_core::Tensor` / `candle_core::Result` in a typed fn
-        // signature — the candle Tensor type is now only ever inferred
-        // from `model_forward`'s return value. Uses `usize` last-dim
-        // index (candle's `Tensor::log_sum_exp`/`unsqueeze` accept
-        // `impl Dim`/`impl Dims` and `usize: Dim`) so the call site
-        // also stops naming `candle_core::D::Minus1` (issue #1082,
-        // candle removal). The kt-typed `model_forward_kt` exists but
-        // is CUDA-only; `real_prompt_logprobs` must also serve
-        // CPU/Metal/Vulkan, so we keep the candle math path until the
-        // kt forward covers non-CUDA backends.
-        let last_dim = logits.dims().len().saturating_sub(1);
-        let lse = logits
-            .log_sum_exp(last_dim)
-            .context("prompt-logprobs log_sum_exp")?
-            .unsqueeze(last_dim)
-            .context("prompt-logprobs unsqueeze")?;
-        let broadcast = lse
-            .broadcast_as(logits.shape())
-            .context("prompt-logprobs broadcast_as")?;
-        let log_probs = (&logits - broadcast).context("prompt-logprobs log_softmax sub")?;
-        // Bridge `kt::DType::F32` -> candle's `DType::F32` so this site
-        // doesn't name `candle_core::DType` directly. Bridge is pure
-        // enum mapping (always-on, no CUDA toolchain dep). (#1082)
-        let candle_f32 = kiln_kt_bridge::kt_dtype_to_candle(kiln_tensor::DType::F32)
-            .map_err(|e| anyhow::anyhow!("real_prompt_logprobs: kt -> candle f32: {e}"))?;
+        // log-softmax over the trailing vocab axis via the kt op (numerically
+        // stable, with both CUDA and CPU/Metal fallbacks — replaces the inlined
+        // candle `log_sum_exp`/`unsqueeze`/`broadcast_as`/`sub` math). Logits
+        // are `[1, seq_len, vocab]`; squeeze the batch dim, force F32, copy to
+        // host. (#1082 candle-drop)
+        let log_probs = kiln_tensor::ops::log_softmax_last_dim(&logits)
+            .context("prompt-logprobs log_softmax_last_dim")?;
         let log_probs_2d = log_probs
             .squeeze(0)
             .context("prompt-logprobs squeeze batch dim")?
-            .to_dtype(candle_f32)
+            .to_dtype(kiln_tensor::DType::F32)
             .context("prompt-logprobs to_dtype f32")?;
         log_probs_2d
             .to_vec2::<f32>()
@@ -5165,7 +5146,7 @@ async fn generate_real(
     state: &AppState,
     runner: &std::sync::Arc<std::sync::RwLock<kiln_model::ModelRunner>>,
     block_manager: &std::sync::Arc<std::sync::Mutex<kiln_core::block::BlockManager>>,
-    paged_cache: &std::sync::Arc<kiln_model::PagedKvCache>,
+    paged_cache: &std::sync::Arc<kiln_model::PagedKvCacheKt>,
     prefix_cache: &std::sync::Arc<std::sync::Mutex<RealPrefixCache>>,
     prompt_text: &str,
     prompt_tokens: &[TokenId],
@@ -5530,7 +5511,7 @@ async fn generate_real_streaming(
     state: &AppState,
     runner: &std::sync::Arc<std::sync::RwLock<kiln_model::ModelRunner>>,
     block_manager: &std::sync::Arc<std::sync::Mutex<kiln_core::block::BlockManager>>,
-    paged_cache: &std::sync::Arc<kiln_model::PagedKvCache>,
+    paged_cache: &std::sync::Arc<kiln_model::PagedKvCacheKt>,
     prefix_cache: &std::sync::Arc<std::sync::Mutex<RealPrefixCache>>,
     decode_batcher: &Option<std::sync::Arc<kiln_model::DecodeBatcher>>,
     prompt_text: &str,

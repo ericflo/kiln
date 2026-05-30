@@ -23,7 +23,7 @@ use kiln_core::vram::{detect_used_vram_bytes, detect_vram};
 use kiln_model::ModelRunner;
 use kiln_model::backend as runtime_backend;
 use kiln_model::forward::{
-    GpuWeights, LinearAttentionState, model_forward,
+    GpuWeights, LinearAttentionState, model_forward_kt,
     model_forward_paged_last_token, model_forward_paged_last_token_greedy,
     model_forward_paged_last_token_with_last_hidden, model_forward_paged_next_token_greedy,
     model_forward_paged_streaming, model_forward_paged_streaming_last_token_with_last_hidden,
@@ -34,7 +34,7 @@ use kiln_model::forward::{
     streaming_prefill_enabled_for,
 };
 use kiln_model::kv_cache::KvCache;
-use kiln_model::paged_kv_cache::PagedKvCache;
+use kiln_model::PagedKvCacheKt;
 use kiln_model::sampling::greedy_sample;
 use kiln_model::speculative::{
     SpeculativeConfig, speculative_decode_step, speculative_decode_step_paged_greedy,
@@ -765,7 +765,7 @@ fn bench_inference(
 
 /// Benchmark latency by directly timing prefill and each decode step.
 ///
-/// Uses `model_forward` directly for precise per-step timing.
+/// Uses `model_forward_kt` directly for precise per-step timing.
 fn bench_latency(
     weights: &GpuWeights,
     config: &ModelConfig,
@@ -807,7 +807,7 @@ fn bench_latency(
 
     // Prefill: forward pass on all prompt tokens
     let prefill_start = Instant::now();
-    let logits = model_forward(
+    let logits = model_forward_kt(
         &*backend,
         &prompt_token_ids,
         weights,
@@ -839,7 +839,7 @@ fn bench_latency(
         }
 
         let step_start = Instant::now();
-        let logits = model_forward(
+        let logits = model_forward_kt(
             &*backend,
             &[next_token],
             weights,
@@ -909,7 +909,7 @@ fn bench_latency(
 
 /// Benchmark latency along the PAGED production path.
 ///
-/// Mirrors `bench_latency` but uses `PagedKvCache` + `BlockTable` +
+/// Mirrors `bench_latency` but uses `PagedKvCacheKt` + `BlockTable` +
 /// `model_forward_paged` (the same code path the HTTP server / scheduler
 /// drives). This is what production inference actually runs; the non-paged
 /// `bench_latency` measures a code path that no real request takes.
@@ -938,14 +938,18 @@ fn bench_latency_paged(
     let max_total = actual_prompt_tokens + max_output_tokens;
     let num_blocks = (max_total + PAGED_BLOCK_SIZE - 1) / PAGED_BLOCK_SIZE;
 
-    let paged_cache = PagedKvCache::new_kt(
+    // #1082 candle-drop: candle `PagedKvCache::new_kt(&device_kt, ...)` ->
+    // kt `PagedKvCacheKt::new(..., device_index)`. The trailing `&Device`
+    // arg becomes a plain `device_index: usize` (single-GPU -> 0; multi-GPU
+    // index comes from the kt `Device`).
+    let paged_cache = PagedKvCacheKt::new(
         config.num_full_attention_layers,
         num_blocks,
         PAGED_BLOCK_SIZE,
         config.num_kv_heads,
         config.head_dim,
         dtype,
-        &device_kt,
+        device_kt.index().unwrap_or(0),
     )?;
 
     // Phase 7 #1082: first end-to-end PagedKvCacheKt production wiring.
@@ -1596,7 +1600,7 @@ fn bench_latency_skiplayer(
 
     // Prefill: full forward pass, no speculative draft yet.
     let prefill_start = Instant::now();
-    let logits = model_forward(
+    let logits = model_forward_kt(
         &*backend,
         &prompt_token_ids,
         weights,
@@ -1742,7 +1746,7 @@ fn bench_latency_skiplayer(
 /// self-speculative implementation. It keeps the paged prefill/cache/block-table
 /// setup in this harness and delegates each decode iteration to
 /// `speculative_decode_step_paged_greedy`, which is expected to verify against
-/// `PagedKvCache` at the caller-provided `base_pos`.
+/// `PagedKvCacheKt` at the caller-provided `base_pos`.
 ///
 /// Enable with `KILN_SPEC_METHOD=skip_layer --paged`. Without `--paged`, the
 /// legacy flat-KV skip-layer benchmark remains available for comparisons.
@@ -1781,14 +1785,16 @@ fn bench_latency_paged_skiplayer(
     let max_total = actual_prompt_tokens + max_output_tokens + max_spec_window + 1;
     let num_blocks = (max_total + PAGED_BLOCK_SIZE - 1) / PAGED_BLOCK_SIZE;
 
-    let paged_cache = PagedKvCache::new_kt(
+    // #1082 candle-drop: `PagedKvCache::new_kt(&device_kt, ...)` ->
+    // `PagedKvCacheKt::new(..., device_index)`.
+    let paged_cache = PagedKvCacheKt::new(
         config.num_full_attention_layers,
         num_blocks,
         PAGED_BLOCK_SIZE,
         config.num_kv_heads,
         config.head_dim,
         dtype,
-        &device_kt,
+        device_kt.index().unwrap_or(0),
     )?;
     let backend = runtime_backend_for_bench(&device_kt, weights)?;
     // #1082 forward-flip: `LinearAttentionState::new_with_batch_for_inference_backend`
@@ -1996,7 +2002,7 @@ fn mtp_argmax_fp32_enabled() -> bool {
 
 /// Benchmark latency along the NATIVE-MTP speculative path.
 ///
-/// Uses two `PagedKvCache` instances (base + 1-layer MTP), threads `h_prev`
+/// Uses two `PagedKvCacheKt` instances (base + 1-layer MTP), threads `h_prev`
 /// across iterations, and drives `speculative_mtp_decode_step` per step.
 /// Reports α = `draft_accepted / total_draft_attempts`.
 ///
@@ -2053,23 +2059,25 @@ fn bench_latency_paged_mtp(
     let max_total_base = actual_prompt_tokens + 2 * max_output_tokens;
     let num_blocks = (max_total_base + PAGED_BLOCK_SIZE - 1) / PAGED_BLOCK_SIZE;
 
-    let base_cache = PagedKvCache::new_kt(
+    // #1082 candle-drop: `PagedKvCache::new_kt(&device_kt, ...)` ->
+    // `PagedKvCacheKt::new(..., device_index)` for both base + MTP caches.
+    let base_cache = PagedKvCacheKt::new(
         config.num_full_attention_layers,
         num_blocks,
         PAGED_BLOCK_SIZE,
         config.num_kv_heads,
         config.head_dim,
         dtype,
-        &device_kt,
+        device_kt.index().unwrap_or(0),
     )?;
-    let mtp_cache = PagedKvCache::new_kt(
+    let mtp_cache = PagedKvCacheKt::new(
         1,
         num_blocks,
         PAGED_BLOCK_SIZE,
         config.num_kv_heads,
         config.head_dim,
         dtype,
-        &device_kt,
+        device_kt.index().unwrap_or(0),
     )?;
     let backend = runtime_backend_for_bench(&device_kt, weights)?;
     // #1082 forward-flip: `LinearAttentionState::new_with_batch_for_inference_backend`
