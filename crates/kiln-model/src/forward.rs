@@ -13715,13 +13715,18 @@ fn compute_w_chunk(
 ) -> Result<Tensor> {
     // The kernel envelope is C <= 128; callers enforce this precondition so
     // we never pay for a backend call we know will decline.
+    #[cfg(feature = "cuda")]
     if c <= 128
         && !any_kt_tensor_tracks_op(&[a_strict, v_prime, beta_c])
         && backend.supports_gdn_forward_substitution()
     {
         kiln_nvtx::range!(c"kiln/attn/gdn/chunk");
-        if let Some(out) = backend.gdn_forward_substitution(a_strict, v_prime, beta_c)? {
-            return Ok(out);
+        // #1082: `gdn_forward_substitution` is candle-typed; bridge kt in/out.
+        let a_c = kt_logits_to_candle(a_strict).context("gdn fwd_sub kt->candle a_strict")?;
+        let vp_c = kt_logits_to_candle(v_prime).context("gdn fwd_sub kt->candle v_prime")?;
+        let beta_c2 = kt_logits_to_candle(beta_c).context("gdn fwd_sub kt->candle beta")?;
+        if let Some(out) = backend.gdn_forward_substitution(&a_c, &vp_c, &beta_c2)? {
+            return candle_to_kt_activation(&out).context("gdn fwd_sub candle->kt out");
         }
     }
     compute_w_chunk_fallback(a_strict, v_prime, beta_c, c)
@@ -14348,15 +14353,31 @@ fn gdn_chunkwise_recurrence(
             ]) && backend.supports_gdn_chunk_scan()
                 && dtype == DType::BF16
             {
-                match backend.gdn_chunk_scan(
-                    &a_strict,
-                    &b_mask,
-                    &v_prime,
-                    &q_s_scaled,
-                    &beta_c,
-                    &decay_last_col,
-                )? {
-                    Some((out_chunk, w_weighted)) => (out_chunk, w_weighted),
+                // #1082: `gdn_chunk_scan` is candle-typed; bridge kt inputs in
+                // and the candle (out_chunk, w_weighted) pair back to kt so both
+                // match arms agree on kt.
+                let scan_out = {
+                    let a_c =
+                        kt_logits_to_candle(&a_strict).context("gdn chunk_scan kt->candle a")?;
+                    let b_c =
+                        kt_logits_to_candle(&b_mask).context("gdn chunk_scan kt->candle b")?;
+                    let vp_c =
+                        kt_logits_to_candle(&v_prime).context("gdn chunk_scan kt->candle v_prime")?;
+                    let qss_c = kt_logits_to_candle(&q_s_scaled)
+                        .context("gdn chunk_scan kt->candle q_s_scaled")?;
+                    let beta_cc =
+                        kt_logits_to_candle(&beta_c).context("gdn chunk_scan kt->candle beta")?;
+                    let dlc_c = kt_logits_to_candle(&decay_last_col)
+                        .context("gdn chunk_scan kt->candle decay_last_col")?;
+                    backend.gdn_chunk_scan(&a_c, &b_c, &vp_c, &qss_c, &beta_cc, &dlc_c)?
+                };
+                match scan_out {
+                    Some((out_chunk, w_weighted)) => (
+                        candle_to_kt_activation(&out_chunk)
+                            .context("gdn chunk_scan candle->kt out_chunk")?,
+                        candle_to_kt_activation(&w_weighted)
+                            .context("gdn chunk_scan candle->kt w_weighted")?,
+                    ),
                     None => {
                         let w = compute_w_chunk(backend, &a_strict, &v_prime, &beta_c, c)?;
                         let intra = b_mask.matmul(&w)?;
