@@ -4597,7 +4597,7 @@ impl ModelRunner {
 
         // Prefill: feed the prompt through the base model and capture the
         // post-final-norm last hidden row as the seed `h_prev`.
-        let (prefill_logits, mut h_prev) =
+        let (prefill_logits_kt, h_prev_kt) =
             if streaming_prefill_enabled_for(&self.weights.embed_tokens.device(), prompt_tokens.len()) {
                 model_forward_paged_streaming_last_token_with_last_hidden(
                     &*self.backend,
@@ -4626,6 +4626,11 @@ impl ModelRunner {
                 )
                 .context("mtp prefill forward pass failed")?
             };
+        // #1082: the MTP speculative step + its debug helpers are a candle
+        // island (`h_prev`/logits are candle there). Bridge the kt prefill
+        // logits + last-hidden to candle at this boundary.
+        let prefill_logits = crate::forward::kt_logits_to_candle(&prefill_logits_kt)?;
+        let mut h_prev = crate::forward::kt_logits_to_candle(&h_prev_kt)?;
 
         // The last-row logits drive the first emitted token (same as the
         // skip-layer path).
@@ -5044,7 +5049,7 @@ impl ModelRunner {
         let (tx, rx) = mpsc::channel();
         let mut linear_state = self.new_linear_state()?;
 
-        let (prefill_logits, mut h_prev) =
+        let (prefill_logits_kt, h_prev_kt) =
             if streaming_prefill_enabled_for(&self.weights.embed_tokens.device(), prompt_tokens.len()) {
                 model_forward_paged_streaming_last_token_with_last_hidden(
                     &*self.backend,
@@ -5073,6 +5078,9 @@ impl ModelRunner {
                 )
                 .context("mtp prefill forward pass failed")?
             };
+        // #1082: kt -> candle for the candle MTP speculative island.
+        let prefill_logits = crate::forward::kt_logits_to_candle(&prefill_logits_kt)?;
+        let mut h_prev = crate::forward::kt_logits_to_candle(&h_prev_kt)?;
 
         let prefill_last = prefill_logits.squeeze(1)?;
         let mut last_token = greedy_sample(&prefill_last)?;
@@ -5319,7 +5327,7 @@ impl ModelRunner {
             let mut linear_state = runner_guard.new_linear_state()?;
             let logits = {
                 let pc_guard = lock_paged_cache(paged_cache.as_ref())?;
-                if streaming_prefill_enabled_for(runner_guard.weights.embed_tokens.device(), prompt_tokens.len())
+                if streaming_prefill_enabled_for(&runner_guard.weights.embed_tokens.device(), prompt_tokens.len())
                 {
                     model_forward_paged_streaming(
                         &*runner_guard.backend,
@@ -5349,6 +5357,8 @@ impl ModelRunner {
                     .context("prefill forward pass (paged) failed")?
                 }
             };
+            // #1082: kt logits -> candle for the host sampler island.
+            let logits = crate::forward::kt_logits_to_candle(&logits)?;
             (logits, linear_state)
         };
 
@@ -5544,7 +5554,7 @@ impl ModelRunner {
                     let logits = {
                         let pc_guard = lock_paged_cache(paged_cache.as_ref())?;
                         if streaming_prefill_enabled_for(
-                            runner_guard.weights.embed_tokens.device(),
+                            &runner_guard.weights.embed_tokens.device(),
                             prompt_tokens.len(),
                         ) {
                             if let Some(split_pos) = split_pos {
@@ -5617,6 +5627,8 @@ impl ModelRunner {
                             .context("prefill forward pass (paged prefix cache) failed")?
                         }
                     };
+                    // #1082: kt logits -> candle for the candle next-token store.
+                    let logits = crate::forward::kt_logits_to_candle(&logits)?;
                     let registration = runner_guard.completed_prompt_registration(
                         &prompt_tokens,
                         &block_table,
@@ -5999,6 +6011,8 @@ impl ModelRunner {
                 .context("prefill forward pass (paged prefix cache) failed")?
             }
         };
+        // #1082: kt logits -> candle for the candle next-token store + sampler.
+        let logits = crate::forward::kt_logits_to_candle(&logits)?;
 
         let registration = self.completed_prompt_registration(
             prompt_tokens,
@@ -6235,6 +6249,8 @@ impl ModelRunner {
                 .context("prefill forward pass (streaming paged skip-layer) failed")?
             }
         };
+        // #1082: kt logits -> candle for the host sampler island.
+        let logits = crate::forward::kt_logits_to_candle(&logits)?;
 
         let mut draft_linear_state =
             self.snapshot_draft_linear_state(&linear_state, spec_config)?;
@@ -6437,6 +6453,8 @@ impl ModelRunner {
                 return Err(e.context("prefill forward pass (paged) failed"));
             }
         };
+        // #1082: kt logits -> candle for the host sampler island.
+        let logits = crate::forward::kt_logits_to_candle(&logits)?;
 
         let mut seq_len = prompt_tokens.len();
         let mut generated_tokens: Vec<TokenId> = Vec::new();
