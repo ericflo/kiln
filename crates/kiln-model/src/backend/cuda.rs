@@ -727,182 +727,98 @@ impl BackendRuntime for CudaBackend {
 
     fn gdn_chunk_prep(
         &self,
-        g: &candle_core::Tensor,
-        v: &candle_core::Tensor,
-        kkt: &candle_core::Tensor,
-        qkt: &candle_core::Tensor,
-        ks_entry: &candle_core::Tensor,
-        q_s: &candle_core::Tensor,
-    ) -> Result<Option<(candle_core::Tensor, candle_core::Tensor, candle_core::Tensor, candle_core::Tensor, candle_core::Tensor, candle_core::Tensor)>> {
-        // Phase 7 (#1082): kt-typed surface is now the only path,
-        // same closeout pattern as conv1d (2ebcfb08) and marlin
-        // (0841c266). The kt-typed predicate (`_supports_kt`,
-        // 7da2615a) and the `gdn_chunk_prep_kt` 6-tuple-returning
-        // kernel are the only call path — the candle-typed
-        // `kiln_gdn_kernel::gdn_chunk_prep[_supports]` fallback has
-        // been deleted.
+        g: &kiln_tensor::Tensor,
+        v: &kiln_tensor::Tensor,
+        kkt: &kiln_tensor::Tensor,
+        qkt: &kiln_tensor::Tensor,
+        ks_entry: &kiln_tensor::Tensor,
+        q_s: &kiln_tensor::Tensor,
+    ) -> Result<Option<(kiln_tensor::Tensor, kiln_tensor::Tensor, kiln_tensor::Tensor, kiln_tensor::Tensor, kiln_tensor::Tensor, kiln_tensor::Tensor)>> {
+        // Phase 7 (#1082): kt-typed surface is now the only path. Args
+        // are already kt (#1082 DoD-101/102), so no candle↔kt bridge —
+        // the predicate + `gdn_chunk_prep_kt` 6-tuple kernel run
+        // directly on the caller's kt tensors and the kt outputs are
+        // returned without a copy.
         kiln_nvtx::range!(c"kiln/gdn_chunk_prep_kt");
-        let g_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(g)
-            .with_context(|| "kt-adapter: gdn_chunk_prep g → kt failed")?;
-        let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v)
-            .with_context(|| "kt-adapter: gdn_chunk_prep v → kt failed")?;
-        let kkt_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(kkt)
-            .with_context(|| "kt-adapter: gdn_chunk_prep kkt → kt failed")?;
-        let qkt_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(qkt)
-            .with_context(|| "kt-adapter: gdn_chunk_prep qkt → kt failed")?;
-        let ks_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(ks_entry)
-            .with_context(|| "kt-adapter: gdn_chunk_prep ks_entry → kt failed")?;
-        let qs_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(q_s)
-            .with_context(|| "kt-adapter: gdn_chunk_prep q_s → kt failed")?;
-        if !kiln_gdn_kernel::gdn_chunk_prep_supports_kt(
-            &g_kt, &v_kt, &kkt_kt, &qkt_kt, &ks_kt, &qs_kt,
-        ) {
+        if !kiln_gdn_kernel::gdn_chunk_prep_supports_kt(g, v, kkt, qkt, ks_entry, q_s) {
             return Ok(None);
         }
         let (o0, o1, o2, o3, o4, o5) =
-            kiln_gdn_kernel::gdn_chunk_prep_kt(&g_kt, &v_kt, &kkt_kt, &qkt_kt, &ks_kt, &qs_kt)
+            kiln_gdn_kernel::gdn_chunk_prep_kt(g, v, kkt, qkt, ks_entry, q_s)
                 .map_err(|e| anyhow::anyhow!("kt gdn_chunk_prep: {e}"))?;
-        let c0 = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&o0)
-            .with_context(|| "kt-adapter: gdn_chunk_prep o0 → candle failed")?;
-        let c1 = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&o1)
-            .with_context(|| "kt-adapter: gdn_chunk_prep o1 → candle failed")?;
-        let c2 = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&o2)
-            .with_context(|| "kt-adapter: gdn_chunk_prep o2 → candle failed")?;
-        let c3 = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&o3)
-            .with_context(|| "kt-adapter: gdn_chunk_prep o3 → candle failed")?;
-        let c4 = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&o4)
-            .with_context(|| "kt-adapter: gdn_chunk_prep o4 → candle failed")?;
-        let c5 = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&o5)
-            .with_context(|| "kt-adapter: gdn_chunk_prep o5 → candle failed")?;
-        Ok(Some((c0, c1, c2, c3, c4, c5)))
+        Ok(Some((o0, o1, o2, o3, o4, o5)))
     }
 
     fn gdn_chunk_scan(
         &self,
-        a_strict: &candle_core::Tensor,
-        b_mask: &candle_core::Tensor,
-        v_prime: &candle_core::Tensor,
-        q_s_scaled: &candle_core::Tensor,
-        beta: &candle_core::Tensor,
-        decay_last_col: &candle_core::Tensor,
-    ) -> Result<Option<(candle_core::Tensor, candle_core::Tensor)>> {
-        // Phase 7 (#1082): kt-typed surface is now the only path,
-        // same closeout pattern as conv1d (2ebcfb08) and marlin
-        // (0841c266). The kt-typed predicate (`_supports_kt`,
-        // 7da2615a) and the `gdn_chunk_scan_kt` 2-tuple-returning
-        // kernel are the only call path — the candle-typed
-        // `kiln_gdn_kernel::gdn_chunk_scan[_supports]` fallback has
-        // been deleted.
+        a_strict: &kiln_tensor::Tensor,
+        b_mask: &kiln_tensor::Tensor,
+        v_prime: &kiln_tensor::Tensor,
+        q_s_scaled: &kiln_tensor::Tensor,
+        beta: &kiln_tensor::Tensor,
+        decay_last_col: &kiln_tensor::Tensor,
+    ) -> Result<Option<(kiln_tensor::Tensor, kiln_tensor::Tensor)>> {
+        // Phase 7 (#1082): kt-typed surface is now the only path. Args
+        // are already kt (#1082 DoD-101/102), so no candle↔kt bridge.
         kiln_nvtx::range!(c"kiln/gdn_chunk_scan_kt");
-        let a_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(a_strict)
-            .with_context(|| "kt-adapter: gdn_chunk_scan a_strict → kt failed")?;
-        let m_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(b_mask)
-            .with_context(|| "kt-adapter: gdn_chunk_scan b_mask → kt failed")?;
-        let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v_prime)
-            .with_context(|| "kt-adapter: gdn_chunk_scan v_prime → kt failed")?;
-        let qs_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(q_s_scaled)
-            .with_context(|| "kt-adapter: gdn_chunk_scan q_s_scaled → kt failed")?;
-        let beta_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(beta)
-            .with_context(|| "kt-adapter: gdn_chunk_scan beta → kt failed")?;
-        let dlc_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(decay_last_col)
-            .with_context(|| "kt-adapter: gdn_chunk_scan decay_last_col → kt failed")?;
         if !kiln_gdn_kernel::gdn_chunk_scan_supports_kt(
-            &a_kt, &m_kt, &v_kt, &qs_kt, &beta_kt, &dlc_kt,
+            a_strict, b_mask, v_prime, q_s_scaled, beta, decay_last_col,
         ) {
             return Ok(None);
         }
         let (o0, o1) = kiln_gdn_kernel::gdn_chunk_scan_kt(
-            &a_kt, &m_kt, &v_kt, &qs_kt, &beta_kt, &dlc_kt,
+            a_strict, b_mask, v_prime, q_s_scaled, beta, decay_last_col,
         )
         .map_err(|e| anyhow::anyhow!("kt gdn_chunk_scan: {e}"))?;
-        let c0 = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&o0)
-            .with_context(|| "kt-adapter: gdn_chunk_scan o0 → candle failed")?;
-        let c1 = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&o1)
-            .with_context(|| "kt-adapter: gdn_chunk_scan o1 → candle failed")?;
-        Ok(Some((c0, c1)))
+        Ok(Some((o0, o1)))
     }
 
     fn gdn_full_chunk_forward(
         &self,
-        g: &candle_core::Tensor,
-        v: &candle_core::Tensor,
-        kkt: &candle_core::Tensor,
-        qkt: &candle_core::Tensor,
-        ks_entry: &candle_core::Tensor,
-        q_s: &candle_core::Tensor,
-        beta: &candle_core::Tensor,
-        k_t: &candle_core::Tensor,
-        state: &mut candle_core::Tensor,
-    ) -> Result<Option<candle_core::Tensor>> {
+        g: &kiln_tensor::Tensor,
+        v: &kiln_tensor::Tensor,
+        kkt: &kiln_tensor::Tensor,
+        qkt: &kiln_tensor::Tensor,
+        ks_entry: &kiln_tensor::Tensor,
+        q_s: &kiln_tensor::Tensor,
+        beta: &kiln_tensor::Tensor,
+        k_t: &kiln_tensor::Tensor,
+        state: &mut kiln_tensor::Tensor,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
         let dv_tile = kiln_gdn_kernel::GDN_FULL_CHUNK_FORWARD_MULTIBLOCK_DV_TILE;
         // Phase 7 (#1082): kt-typed surface is now the only path
-        // (single-block + multiblock), same closeout pattern as
-        // conv1d (2ebcfb08), marlin (0841c266), and the flash-attn
-        // paged-decode `_with_graph_outputs` site (aab07fa7). Both
-        // kt-typed predicates (`_supports_kt`, `_multiblock_supports_kt`,
-        // 7da2615a) and both kt kernels (`gdn_full_chunk_forward_kt`
-        // single-block, `gdn_full_chunk_forward_multiblock_kt`) are
-        // the only wires. State mutation surfaces through the
-        // caller's `&mut Tensor` via the shared buffer (conv1d
-        // pattern).
-        let g_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(g)
-            .with_context(|| "kt-adapter: gdn_full_chunk_forward g → kt")?;
-        let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v)
-            .with_context(|| "kt-adapter: gdn_full_chunk_forward v → kt")?;
-        let kkt_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(kkt)
-            .with_context(|| "kt-adapter: gdn_full_chunk_forward kkt → kt")?;
-        let qkt_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(qkt)
-            .with_context(|| "kt-adapter: gdn_full_chunk_forward qkt → kt")?;
-        let ks_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(ks_entry)
-            .with_context(|| "kt-adapter: gdn_full_chunk_forward ks_entry → kt")?;
-        let qs_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(q_s)
-            .with_context(|| "kt-adapter: gdn_full_chunk_forward q_s → kt")?;
-        let beta_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(beta)
-            .with_context(|| "kt-adapter: gdn_full_chunk_forward beta → kt")?;
-        let kt_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(k_t)
-            .with_context(|| "kt-adapter: gdn_full_chunk_forward k_t → kt")?;
-        let state_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(state)
-            .with_context(|| "kt-adapter: gdn_full_chunk_forward state → kt")?;
+        // (single-block + multiblock). Args are already kt (#1082
+        // DoD-101/102), so no candle↔kt bridge — both predicates and
+        // kernels run directly on the caller's kt tensors. State
+        // mutation surfaces through the caller's `&mut kt::Tensor`.
         if !kiln_gdn_kernel::gdn_full_chunk_forward_supports_kt(
-            &g_kt, &v_kt, &kkt_kt, &qkt_kt, &ks_kt, &qs_kt, &beta_kt, &kt_kt, &state_kt,
+            g, v, kkt, qkt, ks_entry, q_s, beta, k_t, state,
         ) {
             return Ok(None);
         }
         if self.gdn_full_chunk_forward_multiblock_enabled
             && kiln_gdn_kernel::gdn_full_chunk_forward_multiblock_supports_kt(
-                &g_kt, &v_kt, &kkt_kt, &qkt_kt, &ks_kt, &qs_kt, &beta_kt, &kt_kt, &state_kt,
-                dv_tile,
+                g, v, kkt, qkt, ks_entry, q_s, beta, k_t, state, dv_tile,
             )
         {
             kiln_nvtx::range!(c"kiln/gdn_full_chunk_forward_multiblock_kt");
             let out_kt = kiln_gdn_kernel::gdn_full_chunk_forward_multiblock_kt(
-                &g_kt, &v_kt, &kkt_kt, &qkt_kt, &ks_kt, &qs_kt, &beta_kt, &kt_kt, &state_kt,
-                dv_tile,
+                g, v, kkt, qkt, ks_entry, q_s, beta, k_t, state, dv_tile,
             )
             .map_err(|e| anyhow::anyhow!("kt gdn_full_chunk_forward_multiblock: {e}"))?;
-            let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-                .with_context(|| "kt-adapter: gdn_full_chunk_forward_multiblock out → candle")?;
             CUDA_GDN_FULL_CHUNK_FORWARD_MULTIBLOCK_SUCCESSES.fetch_add(1, Ordering::Relaxed);
-            return Ok(Some(out));
+            return Ok(Some(out_kt));
         }
-        // Single-block fall-through. Phase 7 (#1082): now kt-only,
-        // closing the last candle-typed gdn caller in this backend.
-        // The `gdn_full_chunk_forward_kt` wire bottoms out in the
-        // same `kiln_gdn_full_chunk_forward` FFI symbol as the old
-        // candle dispatch, so this migration is bit-exact. We reuse
-        // the kt borrows already established above — they are zero-
-        // copy adapters over the same CUDA storage as the caller's
-        // `&Tensor` / `&mut Tensor` refs, and `state` mutation
-        // surfaces through the shared buffer (multiblock pattern).
+        // Single-block fall-through. The `gdn_full_chunk_forward_kt`
+        // wire bottoms out in the same FFI symbol; `state` mutation
+        // surfaces through the caller's `&mut kt::Tensor`.
         kiln_nvtx::range!(c"kiln/gdn_full_chunk_forward_kt");
         let out_kt = kiln_gdn_kernel::gdn_full_chunk_forward_kt(
-            &g_kt, &v_kt, &kkt_kt, &qkt_kt, &ks_kt, &qs_kt, &beta_kt, &kt_kt, &state_kt,
+            g, v, kkt, qkt, ks_entry, q_s, beta, k_t, state,
         )
         .map_err(|e| anyhow::anyhow!("kt gdn_full_chunk_forward: {e}"))?;
-        let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-            .with_context(|| "kt-adapter: gdn_full_chunk_forward out → candle")?;
         CUDA_GDN_FULL_CHUNK_FORWARD_SINGLE_SUCCESSES.fetch_add(1, Ordering::Relaxed);
-        Ok(Some(out))
+        Ok(Some(out_kt))
     }
 
     #[allow(clippy::too_many_arguments)]
