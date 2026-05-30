@@ -4171,13 +4171,18 @@ mod tests {
 
         let backend = kiln_model::backend::for_device_kt(&device);
 
+        // opd_step_forward_backward_tape_authoritative still takes a candle device
+        // (it bridges to the opd_candle_shim internally — a remaining #1082
+        // candle island); bridge the kt test device to candle for the call.
+        let device_cd = kiln_kt_bridge::candle_device_from_kt(&device)
+            .expect("opd test: kt->candle device bridge");
         let (loss_val, active_count, grads) = opd_step_forward_backward_tape_authoritative(
             &*backend,
             &input_ids,
             &weights,
             &config,
             &params,
-            &device,
+            &device_cd,
             &head_t,
             teacher,
             &active_positions,
