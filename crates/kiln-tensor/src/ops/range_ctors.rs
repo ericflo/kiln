@@ -15,9 +15,9 @@ use std::sync::Arc;
 use crate::{bail, CpuStorage, DType, Layout, Result, Storage, Tensor, TensorId};
 
 fn build(dtype: DType, values: &[f32]) -> Result<Tensor> {
-    if !matches!(dtype, DType::F32 | DType::BF16 | DType::F16) {
+    if !matches!(dtype, DType::F32 | DType::BF16 | DType::F16 | DType::U32) {
         bail!(
-            "range constructor: dtype must be F32/BF16/F16, got {dtype}"
+            "range constructor: dtype must be F32/BF16/F16/U32, got {dtype}"
         );
     }
     let per = dtype.size_in_bytes();
@@ -36,6 +36,14 @@ fn build(dtype: DType, values: &[f32]) -> Result<Tensor> {
         DType::F16 => {
             for (i, &v) in values.iter().enumerate() {
                 bytes[i * 2..i * 2 + 2].copy_from_slice(&half::f16::from_f32(v).to_le_bytes());
+            }
+        }
+        // #1082 flip: U32 ramps (candle `arange(0u32, n, dev)` mask builders).
+        // The ramp values are exact small non-negative integers, so `v as u32`
+        // is exact (no rounding).
+        DType::U32 => {
+            for (i, &v) in values.iter().enumerate() {
+                bytes[i * 4..i * 4 + 4].copy_from_slice(&(v as u32).to_le_bytes());
             }
         }
         _ => unreachable!(),

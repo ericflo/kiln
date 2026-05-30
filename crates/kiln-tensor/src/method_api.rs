@@ -42,8 +42,10 @@
 //! these methods take `D: Dim` (one axis) rather than candle's
 //! multi-axis `Dims`. See the deviation note in the PR report.
 
+use std::borrow::Borrow;
+
 use crate::ops;
-use crate::{DType, Device, Element, Result, Tensor};
+use crate::{DType, Device, Element, Result, Shape, Tensor};
 
 /// Negative-axis selector, mirroring `candle_core::D`.
 ///
@@ -319,14 +321,16 @@ impl Tensor {
     // ==================================================================
 
     /// Broadcast `self` to `shape` (size-1 axes replicated, leading
-    /// axes left-padded). candle's `broadcast_as`.
-    pub fn broadcast_as(&self, shape: impl Into<Vec<usize>>) -> Result<Self> {
-        broadcast_to_shape(self, &shape.into())
+    /// axes left-padded). candle's `broadcast_as`. `shape` is any
+    /// [`Into<Shape>`](Shape) (tuples/array/`Vec`/slice).
+    pub fn broadcast_as(&self, shape: impl Into<Shape>) -> Result<Self> {
+        broadcast_to_shape(self, &shape.into().into_dims())
     }
 
-    /// Alias for [`Tensor::broadcast_as`] (candle's `expand`).
-    pub fn expand(&self, shape: impl Into<Vec<usize>>) -> Result<Self> {
-        broadcast_to_shape(self, &shape.into())
+    /// Alias for [`Tensor::broadcast_as`] (candle's `expand`). `shape` is
+    /// any [`Into<Shape>`](Shape).
+    pub fn expand(&self, shape: impl Into<Shape>) -> Result<Self> {
+        broadcast_to_shape(self, &shape.into().into_dims())
     }
 
     // ==================================================================
@@ -781,16 +785,16 @@ impl Tensor {
     /// kt impl is in fact memory-safe (it zero-initializes), but the
     /// `unsafe` marker is part of the API-compat contract.
     ///
-    /// kt deviation: `device` is taken **by value** (`Device` is
-    /// `Copy`), matching kt's other ctors (`zeros`/`ones`/`arange`);
-    /// candle takes `&Device`. The flip handles the `&`→value at the
-    /// far fewer ctor sites.
+    /// `shape` is any [`Into<Shape>`](Shape) (candle's tuple/array/`Vec`
+    /// forms) and `device` is any [`Borrow<Device>`](Borrow) — both
+    /// `&Device` (candle's spelling) and owned `Device` (`x.device()`,
+    /// `*device`) type-check, matching the rest of the kt ctor façade.
     pub unsafe fn empty(
-        shape: impl Into<Vec<usize>>,
+        shape: impl Into<Shape>,
         dtype: DType,
-        device: Device,
+        device: impl Borrow<Device>,
     ) -> Result<Self> {
-        Self::zeros_on(device, shape.into(), dtype)
+        Self::zeros_on(*device.borrow(), shape.into().into_dims(), dtype)
     }
 
     // ==================================================================
@@ -977,15 +981,30 @@ impl Tensor {
     /// Zero-initialized tensor of `shape`/`dtype` on `device`. candle:
     /// `Tensor::zeros<S: Into<Shape>>(shape, dtype, &device)`. Delegates
     /// to [`Tensor::zeros_on`].
-    pub fn zeros(shape: impl Into<Vec<usize>>, dtype: DType, device: Device) -> Result<Self> {
-        Self::zeros_on(device, shape.into(), dtype)
+    ///
+    /// Accepts candle's exact call shapes: `shape` is any
+    /// [`Into<Shape>`](Shape) (tuples, `()`, bare `usize`, `Vec`, array,
+    /// slice) and `device` is any [`Borrow<Device>`](Borrow) — both
+    /// `&Device` (the candle spelling, and `device:&Device` locals) and
+    /// owned `Device` (`x.device()`, `*device`).
+    pub fn zeros(
+        shape: impl Into<Shape>,
+        dtype: DType,
+        device: impl Borrow<Device>,
+    ) -> Result<Self> {
+        Self::zeros_on(*device.borrow(), shape.into().into_dims(), dtype)
     }
 
     /// Ones tensor of `shape`/`dtype` on `device`. candle:
     /// `Tensor::ones<S: Into<Shape>>(shape, dtype, &device)`. Builds via
-    /// `zeros_on` then [`ops::full_like`] with value 1.
-    pub fn ones(shape: impl Into<Vec<usize>>, dtype: DType, device: Device) -> Result<Self> {
-        let z = Self::zeros_on(device, shape.into(), dtype)?;
+    /// `zeros_on` then [`ops::full_like`] with value 1. Same
+    /// `Into<Shape>` / `Borrow<Device>` façade as [`Tensor::zeros`].
+    pub fn ones(
+        shape: impl Into<Shape>,
+        dtype: DType,
+        device: impl Borrow<Device>,
+    ) -> Result<Self> {
+        let z = Self::zeros_on(*device.borrow(), shape.into().into_dims(), dtype)?;
         ops::full_like(&z, 1.0)
     }
 
@@ -1003,20 +1022,48 @@ impl Tensor {
 
     /// Concatenate `tensors` along `dim`. candle:
     /// `Tensor::cat<A: AsRef<Tensor>, D: Dim>(args: &[A], dim: D)`.
-    /// kt's free fn takes `&[&Tensor]`; this accepts `&[&Tensor]` to
-    /// match the common flip call shape and resolves a single absolute
-    /// axis. Delegates to [`ops::concat`].
-    pub fn cat(tensors: &[&Self], dim: usize) -> Result<Self> {
-        ops::concat(tensors, dim)
+    ///
+    /// Mirrors candle's signature: the slice element type is generic over
+    /// [`AsRef<Tensor>`](AsRef), so both `&[&Tensor]` (the `Tensor: AsRef`
+    /// blanket via `&[&q, &k]`) and `&[Tensor]` (a `Vec<Tensor>` borrowed
+    /// as a slice) type-check at the same call shape — `forward.rs` uses
+    /// both. The axis is generic over [`Dim`], so `Tensor::cat(&pieces, 2)`
+    /// (absolute `usize`) and `Tensor::cat(&pieces, D::Minus1)` /
+    /// `Tensor::cat(&pieces, LAST_DIM)` (negative selector) both resolve.
+    ///
+    /// The negative axis is resolved against the **first** input's rank
+    /// (all `cat` inputs share rank), then delegated to [`ops::concat`]
+    /// with the absolute index.
+    pub fn cat<A: AsRef<Self>, Dm: Dim>(tensors: &[A], dim: Dm) -> Result<Self> {
+        if tensors.is_empty() {
+            return Err(crate::Error::Msg(
+                "Tensor::cat: at least one input required".to_string(),
+            ));
+        }
+        let refs: Vec<&Self> = tensors.iter().map(|t| t.as_ref()).collect();
+        let rank = refs[0].rank();
+        let axis = dim.to_index(rank, "cat")?;
+        ops::concat(&refs, axis)
     }
 
     /// 1-D tensor `[start, start+1, …, end)` on `device`. candle:
     /// `Tensor::arange<D: WithDType>(start, end, &device)` (step 1).
-    /// Built on CPU via [`ops::arange`] (step 1.0, F32) then moved to
+    /// Built on CPU via [`ops::arange`] (step 1.0) then moved to
     /// `device`.
-    pub fn arange(start: f32, end: f32, device: Device) -> Result<Self> {
-        let cpu = ops::arange(start, end, 1.0, DType::F32)?;
-        cpu.to_device(device)
+    ///
+    /// `start`/`end` are generic over [`ArangeScalar`] so the candle call
+    /// shapes `Tensor::arange(0u32, n as u32, dev)` (U32 ramp, the
+    /// `forward.rs` mask builders) and `Tensor::arange(0f32, n, dev)`
+    /// both type-check; the produced tensor's dtype follows the scalar
+    /// type, mirroring candle's `WithDType`. `device` is any
+    /// [`Borrow<Device>`](Borrow) (`&Device` or owned).
+    pub fn arange<S: ArangeScalar>(
+        start: S,
+        end: S,
+        device: impl Borrow<Device>,
+    ) -> Result<Self> {
+        let cpu = ops::arange(start.to_f32(), end.to_f32(), 1.0, S::DTYPE)?;
+        cpu.to_device(*device.borrow())
     }
 
     /// Normal-distributed tensor `N(mean, std²)`. candle:
@@ -1026,15 +1073,24 @@ impl Tensor {
     /// (`KT_RANDN_DEFAULT_SEED`). Results are reproducible but will NOT
     /// match candle's global-RNG draws. Built on CPU then moved to
     /// `device`.
+    ///
+    /// `shape` is any [`Into<Shape>`](Shape) (candle's tuple/array/`Vec`
+    /// forms) and `device` is any [`Borrow<Device>`](Borrow).
     pub fn randn(
         mean: f32,
         std: f32,
-        shape: impl Into<Vec<usize>>,
-        device: Device,
+        shape: impl Into<Shape>,
+        device: impl Borrow<Device>,
     ) -> Result<Self> {
         const KT_RANDN_DEFAULT_SEED: u64 = 0x6b696c6e_72616e64; // "kiln rand"
-        let cpu = ops::rand_normal(shape.into(), mean, std, KT_RANDN_DEFAULT_SEED, DType::F32)?;
-        cpu.to_device(device)
+        let cpu = ops::rand_normal(
+            shape.into().into_dims(),
+            mean,
+            std,
+            KT_RANDN_DEFAULT_SEED,
+            DType::F32,
+        )?;
+        cpu.to_device(*device.borrow())
     }
 
     /// `Tensor::new(data, &device)` candle ctor for 1-D host data.
@@ -1044,10 +1100,38 @@ impl Tensor {
     /// **rank-1 slice** case (`Tensor::new(&[1f32, 2., 3.], &dev)`),
     /// which is the dominant flip pattern. Higher-rank `new` call sites
     /// flip to `from_slice` + `reshape`. Built via
-    /// [`Tensor::from_slice`] then moved to `device`.
-    pub fn new<E: Element>(data: &[E], device: Device) -> Result<Self> {
+    /// [`Tensor::from_slice`] then moved to `device`. `device` is any
+    /// [`Borrow<Device>`](Borrow) (`&Device` or owned).
+    pub fn new<E: Element>(data: &[E], device: impl Borrow<Device>) -> Result<Self> {
         let cpu = Self::from_slice(data, vec![data.len()])?;
-        cpu.to_device(device)
+        cpu.to_device(*device.borrow())
+    }
+}
+
+/// Scalar types accepted by [`Tensor::arange`], mirroring candle's
+/// `WithDType` bound on `arange`. Carries the candle/kt [`DType`] the
+/// produced ramp should have and a lossless-for-ramps `f32` projection
+/// (the underlying [`ops::arange`] computes the ramp in `f32`, then
+/// `build(dtype, …)` re-encodes — the integer ramps `forward.rs` builds
+/// are exactly representable).
+pub trait ArangeScalar: Copy {
+    /// The dtype of the produced tensor (matches candle's `WithDType`).
+    const DTYPE: DType;
+    /// Project the bound to the `f32` the ramp loop runs in.
+    fn to_f32(self) -> f32;
+}
+
+impl ArangeScalar for f32 {
+    const DTYPE: DType = DType::F32;
+    fn to_f32(self) -> f32 {
+        self
+    }
+}
+
+impl ArangeScalar for u32 {
+    const DTYPE: DType = DType::U32;
+    fn to_f32(self) -> f32 {
+        self as f32
     }
 }
 
@@ -1555,10 +1639,64 @@ mod tests {
     }
 
     #[test]
+    fn cat_generic_dim_negative_axis_matches_usize() {
+        // candle-flip parity: `cat(.., D::Minus1)` must equal
+        // `cat(.., 1usize)` for rank-2 inputs.
+        let a = t(&[1.0, 2.0], &[1, 2]);
+        let b = t(&[3.0, 4.0], &[1, 2]);
+        let by_neg = Tensor::cat(&[&a, &b], D::Minus1).unwrap();
+        let by_abs = Tensor::cat(&[&a, &b], 1usize).unwrap();
+        assert_eq!(by_neg.shape(), &[1, 4]);
+        assert_eq!(v(&by_neg), v(&by_abs));
+        assert_eq!(v(&by_neg), vec![1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn cat_generic_accepts_owned_tensor_slice() {
+        // candle-flip parity: a `Vec<Tensor>` borrowed as `&[Tensor]`
+        // must type-check (A = Tensor, via `Tensor: AsRef<Tensor>`),
+        // matching `&[&Tensor]` (A = &Tensor).
+        let owned: Vec<Tensor> = vec![t(&[1.0, 2.0], &[1, 2]), t(&[3.0, 4.0], &[1, 2])];
+        let got = Tensor::cat(&owned, 0).unwrap();
+        assert_eq!(got.shape(), &[2, 2]);
+        assert_eq!(v(&got), vec![1.0, 2.0, 3.0, 4.0]);
+    }
+
+    #[test]
     fn arange_ctor_step_one() {
-        let a = Tensor::arange(0.0, 4.0, Device::Cpu).unwrap();
+        let a = Tensor::arange(0.0f32, 4.0, Device::Cpu).unwrap();
         assert_eq!(a.shape(), &[4]);
         assert_eq!(v(&a), vec![0.0, 1.0, 2.0, 3.0]);
+    }
+
+    #[test]
+    fn arange_ctor_u32_yields_u32_dtype() {
+        // candle-flip parity: `arange(0u32, n, dev)` (the forward.rs
+        // mask builders) produces a U32 ramp.
+        let a = Tensor::arange(0u32, 3u32, Device::Cpu).unwrap();
+        assert_eq!(a.shape(), &[3]);
+        assert_eq!(a.dtype(), DType::U32);
+        assert_eq!(a.to_vec::<u32>().unwrap(), vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn ctors_accept_tuple_shape_and_device_ref() {
+        // candle-flip parity: tuple shapes + `&Device` ctor args.
+        let dev = Device::Cpu;
+        let z = Tensor::zeros((2, 3), DType::F32, &dev).unwrap();
+        assert_eq!(z.shape(), &[2, 3]);
+        let scalar = Tensor::zeros((), DType::F32, &dev).unwrap();
+        assert_eq!(scalar.shape(), &[] as &[usize]);
+        // tuple + scalar shapes through the `Into<Shape>` façade
+        // (`from_slice`/`from_vec` stay 2-arg, CPU-only — the 3-arg
+        // device-targeting flip calls are a per-site follow-up).
+        let from_tuple = Tensor::from_slice(&[1.0f32, 2.0], (2,)).unwrap();
+        assert_eq!(from_tuple.shape(), &[2]);
+        let from_vec3 = Tensor::from_vec(vec![1.0f32, 2.0, 3.0], (1, 3)).unwrap();
+        assert_eq!(from_vec3.shape(), &[1, 3]);
+        // `usize` scalar shape + owned device.
+        let by_scalar = Tensor::zeros(4usize, DType::F32, dev).unwrap();
+        assert_eq!(by_scalar.shape(), &[4]);
     }
 
     #[test]

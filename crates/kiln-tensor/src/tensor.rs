@@ -35,7 +35,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use crate::{
-    cpu_zeros, profile, CpuStorage, DType, Device, Element, Error, Layout, Result, Storage,
+    cpu_zeros, profile, CpuStorage, DType, Device, Element, Error, Layout, Result, Shape, Storage,
     StorageBackend, TensorId,
 };
 
@@ -74,14 +74,29 @@ pub struct Tensor {
     version: Arc<AtomicU64>,
 }
 
+/// `Tensor: AsRef<Tensor>` mirrors candle, which keys `Tensor::cat`
+/// (and friends) on `A: AsRef<Tensor>`. This single impl is what makes
+/// **both** `&[&Tensor]` and `&[Tensor]` slice arguments type-check at
+/// the same `cat` call shape: the std blanket
+/// `impl<T> AsRef<U> for &T where T: AsRef<U>` derives `&Tensor: AsRef<Tensor>`
+/// from this, and `Vec<Tensor>` borrows directly as `&[Tensor]`. See
+/// [`Tensor::cat`](crate::Tensor::cat) for the #1082 flip rationale.
+impl AsRef<Tensor> for Tensor {
+    fn as_ref(&self) -> &Tensor {
+        self
+    }
+}
+
 impl Tensor {
     // ------------------------------------------------------------------
     // Constructors
     // ------------------------------------------------------------------
 
     /// Construct a zero-initialized CPU tensor with the given shape and dtype.
-    pub fn zeros_cpu(shape: impl Into<Vec<usize>>, dtype: DType) -> Self {
-        let shape: Vec<usize> = shape.into();
+    /// `shape` is any [`Into<Shape>`](Shape) (candle's tuple/array/`Vec`
+    /// forms) — see the `Shape` module doc for the #1082 façade rationale.
+    pub fn zeros_cpu(shape: impl Into<Shape>, dtype: DType) -> Self {
+        let shape: Vec<usize> = shape.into().into_dims();
         let n_elements: usize = shape.iter().product();
         let storage = cpu_zeros(dtype, n_elements);
         let layout = Layout::contiguous(shape);
@@ -94,9 +109,10 @@ impl Tensor {
     }
 
     /// Build a CPU tensor from a typed slice + shape. The slice length
-    /// must equal the product of `shape`.
-    pub fn from_slice<E: Element>(values: &[E], shape: impl Into<Vec<usize>>) -> Result<Self> {
-        let shape: Vec<usize> = shape.into();
+    /// must equal the product of `shape`. `shape` is any
+    /// [`Into<Shape>`](Shape) (candle's tuple/scalar/array/`Vec` forms).
+    pub fn from_slice<E: Element>(values: &[E], shape: impl Into<Shape>) -> Result<Self> {
+        let shape: Vec<usize> = shape.into().into_dims();
         let want: usize = shape.iter().product();
         if values.len() != want {
             return Err(Error::Msg(format!(
@@ -117,7 +133,9 @@ impl Tensor {
     }
 
     /// Build a CPU tensor from a typed `Vec` + shape (consumes the vec).
-    pub fn from_vec<E: Element>(values: Vec<E>, shape: impl Into<Vec<usize>>) -> Result<Self> {
+    /// `shape` is any [`Into<Shape>`](Shape) (candle's tuple/scalar/array/
+    /// `Vec` forms).
+    pub fn from_vec<E: Element>(values: Vec<E>, shape: impl Into<Shape>) -> Result<Self> {
         Self::from_slice(&values, shape)
     }
 
@@ -139,7 +157,7 @@ impl Tensor {
     #[cfg(feature = "cuda")]
     pub fn cuda_from_slice<E: Element>(
         values: &[E],
-        shape: impl Into<Vec<usize>>,
+        shape: impl Into<Shape>,
         device_index: usize,
     ) -> Result<Self> {
         let cpu = Self::from_slice(values, shape)?;
@@ -155,11 +173,11 @@ impl Tensor {
     /// `cuda_zeros_ctx` (candle-free).
     #[cfg(feature = "cuda")]
     pub fn cuda_zeros_on(
-        shape: impl Into<Vec<usize>>,
+        shape: impl Into<Shape>,
         dtype: DType,
         device_index: usize,
     ) -> Result<Self> {
-        let shape_vec: Vec<usize> = shape.into();
+        let shape_vec: Vec<usize> = shape.into().into_dims();
         let n_elements = shape_vec.iter().product::<usize>();
         let storage = crate::cuda_zeros_ctx(device_index, dtype, n_elements)?;
         let layout = Layout::contiguous(shape_vec);
@@ -366,10 +384,14 @@ impl Tensor {
     /// For non-contiguous reshape, the caller must invoke
     /// [`contiguous()`](Tensor::contiguous) first (which logs a
     /// `kiln_profile_contiguous_copy` event in Phase 1.x).
-    pub fn reshape(&self, new_shape: impl Into<Vec<usize>>) -> Result<Self> {
+    pub fn reshape(&self, new_shape: impl Into<Shape>) -> Result<Self> {
+        // `new_shape` accepts any candle `Into<Shape>` (tuples are the
+        // dominant `forward.rs` flip form); convert to the `Vec<usize>`
+        // the layout reshape consumes.
+        let dims: Vec<usize> = new_shape.into().into_dims();
         Ok(Tensor {
             storage: Arc::clone(&self.storage),
-            layout: self.layout.reshape(new_shape)?,
+            layout: self.layout.reshape(dims)?,
             id: TensorId::next(),
             version: Arc::clone(&self.version),
         })
