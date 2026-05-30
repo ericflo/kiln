@@ -123,12 +123,14 @@ struct IoMappingScope {
     /// `TensorId` to insert each kt-side input gradient under in the
     /// candle `GradStore`.
     ///
-    /// Multiple adapters may register the same `kt_input_id` (e.g.
-    /// the same `kt_x_id` borrowed twice from the same candle source
-    /// `x`); the mapping value must always match for the same key.
-    /// We assert this on insert so a wiring bug surfaces at record
-    /// time, not silently at emit time.
-    kt_to_candle_input: HashMap<u64, usize>,
+    /// #1082 CP-4: a `kt_input_id` may fan out to MULTIPLE candle ids now
+    /// that the bridge helpers CHAIN (a recorded kt tensor is reused across
+    /// candle-island boundaries, so the same kt feeds several adapters whose
+    /// candle inputs differ). Mapping kt → set of candle ids keeps every
+    /// correspondence; the backward deposit visits all of them so a LoRA
+    /// Var's grad still lands under its candle id even when the same kt also
+    /// feeds an intermediate island input.
+    kt_to_candle_input: HashMap<u64, Vec<usize>>,
 
     /// `kt_output_id → candle_output_id` for outputs returned by the
     /// adapters. The bridge backward pulls each candle output's grad
@@ -171,20 +173,12 @@ pub fn register_input_mapping(kt_id: KtTensorId, candle_id: CandleTensorId) {
         };
         let kt_raw = kt_id.as_raw();
         let candle_raw = candle_id.as_raw();
-        if let Some(prev) = scope.kt_to_candle_input.insert(kt_raw, candle_raw) {
-            // Same kt input recorded twice. Allowed iff the candle
-            // ID matches — that's the "single candle tensor borrowed
-            // by two adapters" case. Different candle IDs would mean
-            // the kt-bridge's TensorId allocator handed out the same
-            // u64 for two distinct kt borrows of two distinct candle
-            // sources, which would be a wiring bug.
-            assert_eq!(
-                prev, candle_raw,
-                "tape_bridge: kt input id {kt_raw} already mapped to candle id \
-                 {prev}; new candle id {candle_raw} disagrees — this is an \
-                 adapter-side wiring bug. The same kt TensorId must not pair \
-                 with two distinct candle TensorIds in one bridge scope."
-            );
+        // #1082 CP-4: append (dedup) — a chained kt tensor may correspond to
+        // several candle ids across island boundaries (fan-out). Each is kept
+        // so the backward deposit covers all of them.
+        let ids = scope.kt_to_candle_input.entry(kt_raw).or_default();
+        if !ids.contains(&candle_raw) {
+            ids.push(candle_raw);
         }
     });
 }
@@ -364,11 +358,18 @@ where
                 BridgeError::new(format!("tape_bridge: tape-authoritative backward walk: {e}"))
             })?;
 
-        // Map each recorded kt input grad to its candle input id.
+        // Map each recorded kt input grad to its candle input id(s). #1082
+        // CP-4: a kt input may fan out to several candle ids (chained reuse
+        // across islands) — deposit the grad under every one.
         let input_map: Vec<(u64, usize)> = BRIDGE_SCOPE.with(|cell| {
             cell.borrow()
                 .as_ref()
-                .map(|s| s.kt_to_candle_input.iter().map(|(k, v)| (*k, *v)).collect())
+                .map(|s| {
+                    s.kt_to_candle_input
+                        .iter()
+                        .flat_map(|(k, vs)| vs.iter().map(move |v| (*k, *v)))
+                        .collect()
+                })
                 .unwrap_or_default()
         });
         let mut out: HashMap<usize, kiln_tensor::Tensor> = HashMap::new();
