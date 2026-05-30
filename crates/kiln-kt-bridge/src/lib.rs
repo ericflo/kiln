@@ -663,7 +663,7 @@ fn cached_candle_cuda_device(index: usize) -> Result<candle_core::Device, Bridge
 /// CUDA variant (F32/BF16/F16/U32/U8/I64).
 #[cfg(all(not(feature = "cuda"), feature = "candle"))]
 pub fn kt_tensor_to_candle_cuda_copy(
-    t: &KtTensor,
+    t: &kiln_tensor::Tensor,
 ) -> Result<candle_core::Tensor, BridgeError> {
     let ct;
     let t = if t.is_contiguous() {
@@ -898,7 +898,7 @@ pub fn kt_tensor_to_candle_cuda_copy(
 #[cfg(all(not(feature = "cuda"), feature = "candle"))]
 pub fn kt_tensor_from_candle_cuda_borrow(
     t: &candle_core::Tensor,
-) -> Result<KtTensor, BridgeError> {
+) -> Result<kiln_tensor::Tensor, BridgeError> {
     let t = t
         .contiguous()
         .map_err(|e| BridgeError::new(format!("candle->kt cpu: contiguous: {e}")))?;
