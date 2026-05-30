@@ -5930,27 +5930,31 @@ mod tests {
             }
         };
         let config = tiny_cuda_model_config();
-        let embed_tokens = candle_core::Tensor::from_vec(
+        // #1082: GpuWeights fields are kt. Build the tensors as kt on a kt
+        // device bridged from the candle CUDA `device`.
+        let kdev = kiln_kt_bridge::kt_device_from_candle(&device);
+        use kiln_tensor::{DType as KtDType, Tensor as KtTensor};
+        let embed_tokens = KtTensor::from_vec(
             vec![0.1f32, -0.2, 0.3, 0.4, 0.5, -0.6, 0.7, 0.8],
             (4usize, 2usize),
-            &device,
-        )?;
+        )?
+        .to_device(kdev)?;
         let embed_tokens_t = embed_tokens.t()?.contiguous()?;
-        let q_proj = candle_core::Tensor::from_vec(vec![0.2f32, -0.3, 0.4, 0.1], (2usize, 2usize), &device)?;
-        let k_proj = candle_core::Tensor::from_vec(vec![0.1f32, 0.6, 0.8, -0.2], (2usize, 2usize), &device)?;
-        let v_proj = candle_core::Tensor::from_vec(vec![0.7f32, -0.2, -0.5, 0.6], (2usize, 2usize), &device)?;
-        let o_proj = candle_core::Tensor::from_vec(vec![0.3f32, -0.4, 0.8, 0.2], (2usize, 2usize), &device)?;
+        let q_proj = KtTensor::from_vec(vec![0.2f32, -0.3, 0.4, 0.1], (2usize, 2usize))?.to_device(kdev)?;
+        let k_proj = KtTensor::from_vec(vec![0.1f32, 0.6, 0.8, -0.2], (2usize, 2usize))?.to_device(kdev)?;
+        let v_proj = KtTensor::from_vec(vec![0.7f32, -0.2, -0.5, 0.6], (2usize, 2usize))?.to_device(kdev)?;
+        let o_proj = KtTensor::from_vec(vec![0.3f32, -0.4, 0.8, 0.2], (2usize, 2usize))?.to_device(kdev)?;
         let gate_proj =
-            candle_core::Tensor::from_vec(vec![0.25f32, -0.15, 0.35, 0.05], (2usize, 2usize), &device)?;
-        let up_proj = candle_core::Tensor::from_vec(vec![0.45f32, 0.2, -0.1, 0.55], (2usize, 2usize), &device)?;
+            KtTensor::from_vec(vec![0.25f32, -0.15, 0.35, 0.05], (2usize, 2usize))?.to_device(kdev)?;
+        let up_proj = KtTensor::from_vec(vec![0.45f32, 0.2, -0.1, 0.55], (2usize, 2usize))?.to_device(kdev)?;
         let down_proj =
-            candle_core::Tensor::from_vec(vec![0.6f32, -0.25, 0.15, 0.5], (2usize, 2usize), &device)?;
+            KtTensor::from_vec(vec![0.6f32, -0.25, 0.15, 0.5], (2usize, 2usize))?.to_device(kdev)?;
         let weights = GpuWeights {
             embed_tokens,
             embed_tokens_t,
             layers: vec![GpuLayerWeights {
-                input_layernorm: candle_core::Tensor::zeros((2usize,), candle_core::DType::F32, &device)?,
-                post_attention_layernorm: candle_core::Tensor::zeros((2usize,), candle_core::DType::F32, &device)?,
+                input_layernorm: KtTensor::zeros((2usize,), KtDType::F32, &kdev)?,
+                post_attention_layernorm: KtTensor::zeros((2usize,), KtDType::F32, &kdev)?,
                 attention: GpuAttentionWeights::Full(GpuFullAttentionWeights {
                     q_proj_t: q_proj.t()?.contiguous()?,
                     k_proj_t: k_proj.t()?.contiguous()?,
@@ -5960,8 +5964,8 @@ mod tests {
                     k_proj,
                     v_proj,
                     o_proj,
-                    q_norm: candle_core::Tensor::zeros((2usize,), candle_core::DType::F32, &device)?,
-                    k_norm: candle_core::Tensor::zeros((2usize,), candle_core::DType::F32, &device)?,
+                    q_norm: KtTensor::zeros((2usize,), KtDType::F32, &kdev)?,
+                    k_norm: KtTensor::zeros((2usize,), KtDType::F32, &kdev)?,
                     qkv_proj_t: None,
                     q_proj_marlin: None,
                 }),
@@ -5978,8 +5982,8 @@ mod tests {
                     down_proj_marlin: None,
                 },
             }],
-            final_norm: candle_core::Tensor::zeros((2usize,), candle_core::DType::F32, &device)?,
-            rotary_inv_freq: candle_core::Tensor::from_vec(vec![1.0f32], (1usize,), &device)?,
+            final_norm: KtTensor::zeros((2usize,), KtDType::F32, &kdev)?,
+            rotary_inv_freq: KtTensor::from_vec(vec![1.0f32], (1usize,))?.to_device(kdev)?,
             mtp: None,
         };
 
