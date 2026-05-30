@@ -11774,9 +11774,19 @@ pub fn standard_forward_backward(
             Some(&lora_weights),
         )
         .context("training forward pass (FLCE)")?;
+        // #1082: `model_forward_no_head` + `embed_tokens_t` are kt now; the
+        // candle FLCE shim wants candle. Bridge kt->candle (CUDA). PERF
+        // follow-up: route this path to the kt-FLCE kernel to drop both
+        // bridges (esp. the per-step embed_tokens_t copy). NO-CUDA follow-up:
+        // the CPU-smoke FLCE path needs a host kt<->candle bridge in
+        // kiln-kt-bridge (the cuda bridge is `#[cfg(all(cuda,candle))]`).
+        let hidden_cd = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&hidden)
+            .map_err(|e| anyhow::anyhow!("FLCE hidden kt->candle bridge: {e}"))?;
+        let embed_t_cd = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&weights.embed_tokens_t)
+            .map_err(|e| anyhow::anyhow!("FLCE embed_tokens_t kt->candle bridge: {e}"))?;
         fused_linear_cross_entropy_dispatch_with_provider(
-            &hidden,
-            &weights.embed_tokens_t,
+            &hidden_cd,
+            &embed_t_cd,
             input_ids,
             label_mask,
             device,
@@ -11857,9 +11867,20 @@ fn standard_forward_backward_via_tape_bridge(
                         "tape_bridge sft step: FLCE forward: {e:#}"
                     ))
                 })?;
+                // #1082: bridge kt->candle for the candle FLCE shim (CUDA).
+                // Same perf (kt-FLCE) + no-cuda (host bridge) follow-ups as the
+                // non-tape FLCE site above.
+                let hidden_cd = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&hidden)
+                    .map_err(|e| kiln_kt_bridge::BridgeError::new(format!(
+                        "tape_bridge sft step: FLCE hidden kt->candle: {e}"
+                    )))?;
+                let embed_t_cd = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&weights.embed_tokens_t)
+                    .map_err(|e| kiln_kt_bridge::BridgeError::new(format!(
+                        "tape_bridge sft step: FLCE embed_tokens_t kt->candle: {e}"
+                    )))?;
                 fused_linear_cross_entropy_dispatch_with_provider(
-                    &hidden,
-                    &weights.embed_tokens_t,
+                    &hidden_cd,
+                    &embed_t_cd,
                     input_ids,
                     label_mask,
                     device,
