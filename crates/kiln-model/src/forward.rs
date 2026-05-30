@@ -18809,13 +18809,16 @@ fn tape_reshape_full_attn(x: &Tensor, dims: &[ReshapeArg]) -> Result<Tensor> {
     {
         if crate::tape_forward::tape_forward_enabled() {
             if let Some(concrete) = resolve_reshape_dims(x.elem_count(), dims) {
-                if let Some(out) = crate::tape_forward::try_tape_reshape_cuda(x, concrete)? {
-                    return Ok(out);
+                let x_c = kt_logits_to_candle(x)
+                    .context("tape_reshape_full_attn kt->candle (tape)")?;
+                if let Some(out) = crate::tape_forward::try_tape_reshape_cuda(&x_c, concrete)? {
+                    return candle_to_kt_activation(&out)
+                        .context("tape_reshape_full_attn candle->kt (tape)");
                 }
             }
         }
     }
-    // Candle reshape with the (possibly inferred) spec.
+    // kt reshape with the (possibly inferred) spec.
     candle_reshape_with_spec(x, dims)
 }
 
@@ -18828,8 +18831,11 @@ fn tape_transpose_contig_full_attn(x: &Tensor, axis_a: usize, axis_b: usize) -> 
     #[cfg(feature = "cuda")]
     {
         if crate::tape_forward::tape_forward_enabled() {
-            if let Some(out) = crate::tape_forward::try_tape_transpose_cuda(x, axis_a, axis_b)? {
-                return Ok(out);
+            let x_c = kt_logits_to_candle(x)
+                .context("tape_transpose_contig_full_attn kt->candle (tape)")?;
+            if let Some(out) = crate::tape_forward::try_tape_transpose_cuda(&x_c, axis_a, axis_b)? {
+                return candle_to_kt_activation(&out)
+                    .context("tape_transpose_contig_full_attn candle->kt (tape)");
             }
         }
     }
