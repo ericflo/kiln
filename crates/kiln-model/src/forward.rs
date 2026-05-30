@@ -19162,33 +19162,47 @@ pub fn gqa_attention_pre_o(
         // gate-on models (a follow-up gate adapter closes that); gate-off
         // (e.g. Qwen3.5-4B default) chains straight through to o_proj.
         #[cfg(feature = "cuda")]
-        if let Some(attn_output) = crate::tape_forward::try_tape_flash_attn_cuda(
-            &q,
-            &k,
-            &v,
-            num_heads,
-            num_kv_heads,
-            head_dim,
-        )? {
-            let (rb, rs, rh, rd) = attn_output.dims4()?;
-            let flat = rh * rd;
-            let attn_output = match crate::tape_forward::try_tape_reshape_cuda(
-                &attn_output,
-                vec![rb, rs, flat],
+        if crate::tape_forward::tape_forward_enabled() {
+            let q_c = kt_logits_to_candle(&q).context("full-attn flash kt->candle q (tape)")?;
+            let k_c = kt_logits_to_candle(&k).context("full-attn flash kt->candle k (tape)")?;
+            let v_c = kt_logits_to_candle(&v).context("full-attn flash kt->candle v (tape)")?;
+            if let Some(attn_output) = crate::tape_forward::try_tape_flash_attn_cuda(
+                &q_c,
+                &k_c,
+                &v_c,
+                num_heads,
+                num_kv_heads,
+                head_dim,
             )? {
-                Some(reshaped) => reshaped,
-                None => attn_output.reshape((rb, rs, flat))?,
-            };
-            let attn_output = attention_output_gate_decode_if(false, attn_output, gate.as_ref())?;
-            return Ok(attn_output);
+                let (rb, rs, rh, rd) = attn_output.dims4()?;
+                let flat = rh * rd;
+                let attn_output = match crate::tape_forward::try_tape_reshape_cuda(
+                    &attn_output,
+                    vec![rb, rs, flat],
+                )? {
+                    Some(reshaped) => reshaped,
+                    None => attn_output.reshape((rb, rs, flat))?,
+                };
+                let attn_kt = candle_to_kt_activation(&attn_output)
+                    .context("full-attn flash candle->kt tape out")?;
+                let attn_kt = attention_output_gate_decode_if(false, attn_kt, gate.as_ref())?;
+                return Ok(attn_kt);
+            }
         }
         #[cfg(feature = "cuda")]
-        if let Some(attn_output) =
-            cuda_flash_attention_training_bf16(&q, &k, &v, num_heads, num_kv_heads, head_dim)?
-        {
-            let attn_output = attn_output.reshape(((), seq_len, num_heads * head_dim))?;
-            let attn_output = attention_output_gate_decode_if(false, attn_output, gate.as_ref())?;
-            return Ok(attn_output);
+        if q.track_op() || k.track_op() || v.track_op() {
+            let q_c = kt_logits_to_candle(&q).context("full-attn flash kt->candle q (train)")?;
+            let k_c = kt_logits_to_candle(&k).context("full-attn flash kt->candle k (train)")?;
+            let v_c = kt_logits_to_candle(&v).context("full-attn flash kt->candle v (train)")?;
+            if let Some(attn_output) =
+                cuda_flash_attention_training_bf16(&q_c, &k_c, &v_c, num_heads, num_kv_heads, head_dim)?
+            {
+                let attn_output = attn_output.reshape(((), seq_len, num_heads * head_dim))?;
+                let attn_kt = candle_to_kt_activation(&attn_output)
+                    .context("full-attn flash candle->kt training out")?;
+                let attn_kt = attention_output_gate_decode_if(false, attn_kt, gate.as_ref())?;
+                return Ok(attn_kt);
+            }
         }
         if let Some(attn_output) =
             flash_attention_forward(backend, &q, &k, &v, num_heads, num_kv_heads, head_dim)?
@@ -19310,7 +19324,8 @@ pub fn gqa_attention_pre_o(
             seq_len,
         )?;
         let out = q.broadcast_matmul(&k.t()?)?;
-        let out = (out / scale)?;
+        // kt has no `Tensor / f64`; `x / scale == x * (1/scale)` via affine.
+        let out = out.affine(1.0 / scale, 0.0)?;
         finish_full_attn_stage_profile(
             profile_device,
             profile_context,
@@ -19386,34 +19401,42 @@ pub fn gqa_attention_pre_o(
     // transpose-back + reshape so the chain reaches o_proj. No-ops (returns
     // None) in every other configuration; mirrors `gqa_attention_core_prefill`.
     #[cfg(feature = "cuda")]
-    if let Some((q_pe, k_pe, v_pe)) = sdpa_pre_expand.as_ref() {
-        if let Some(tape_attn) = crate::tape_forward::try_tape_sdpa_fallback_cuda(
-            q_pe,
-            k_pe,
-            v_pe,
-            head_dim,
-            &attn_output,
-        )? {
-            // tape_attn is [B, nq, T, hd] on the tape. Chain transpose(1,2) ->
-            // [B, T, nq, hd] then reshape -> [B, T, nq*hd] so the chain reaches
-            // o_proj. Each chaining adapter falls through to its plain candle op
-            // when its gate is off / no scope is active.
-            let transposed = match crate::tape_forward::try_tape_transpose_cuda(&tape_attn, 1, 2)? {
-                Some(t) => t,
-                None => tape_attn.transpose(1, 2)?.contiguous()?,
-            };
-            let (tb, tt, th, td) = transposed.dims4()?;
-            let flat = th * td;
-            let reshaped = match crate::tape_forward::try_tape_reshape_cuda(
-                &transposed,
-                vec![tb, tt, flat],
+    if crate::tape_forward::tape_forward_enabled() {
+        if let Some((q_pe, k_pe, v_pe)) = sdpa_pre_expand.as_ref() {
+            let q_c =
+                kt_logits_to_candle(q_pe).context("full-attn sdpa kt->candle q_pe (tape)")?;
+            let k_c =
+                kt_logits_to_candle(k_pe).context("full-attn sdpa kt->candle k_pe (tape)")?;
+            let v_c =
+                kt_logits_to_candle(v_pe).context("full-attn sdpa kt->candle v_pe (tape)")?;
+            let ao_c = kt_logits_to_candle(&attn_output)
+                .context("full-attn sdpa kt->candle attn_out (tape)")?;
+            if let Some(tape_attn) = crate::tape_forward::try_tape_sdpa_fallback_cuda(
+                &q_c, &k_c, &v_c, head_dim, &ao_c,
             )? {
-                Some(r) => r,
-                None => transposed.reshape((tb, tt, flat))?,
-            };
-            let attn_output =
-                attention_output_gate_decode_if(use_metal_decode_gemv, reshaped, gate.as_ref())?;
-            return Ok(attn_output);
+                let transposed =
+                    match crate::tape_forward::try_tape_transpose_cuda(&tape_attn, 1, 2)? {
+                        Some(t) => t,
+                        None => tape_attn.transpose(1, 2)?.contiguous()?,
+                    };
+                let (tb, tt, th, td) = transposed.dims4()?;
+                let flat = th * td;
+                let reshaped = match crate::tape_forward::try_tape_reshape_cuda(
+                    &transposed,
+                    vec![tb, tt, flat],
+                )? {
+                    Some(r) => r,
+                    None => transposed.reshape((tb, tt, flat))?,
+                };
+                let reshaped_kt = candle_to_kt_activation(&reshaped)
+                    .context("full-attn sdpa candle->kt tape out")?;
+                let attn_output = attention_output_gate_decode_if(
+                    use_metal_decode_gemv,
+                    reshaped_kt,
+                    gate.as_ref(),
+                )?;
+                return Ok(attn_output);
+            }
         }
     }
 
