@@ -6901,8 +6901,19 @@ fn gdn_in_proj_matmul(
     x: &Tensor,
     weight_t: &Tensor,
 ) -> Result<Tensor> {
-    if let Some(out) = backend.linear_prefill_apply(x, weight_t)? {
-        return Ok(out);
+    // #1082: `linear_prefill_apply` is a candle-typed training/autograd backend
+    // method; bridge kt in and the candle result back to kt. (`kt_logits_to_candle`
+    // / `candle_to_kt_activation` error at runtime on non-CUDA, which is fine —
+    // the Vulkan/Metal prefill_apply paths don't take this branch in production.)
+    #[cfg(feature = "cuda")]
+    {
+        let x_c = kt_logits_to_candle(x).context("gdn_in_proj_matmul kt->candle x")?;
+        let weight_c =
+            kt_logits_to_candle(weight_t).context("gdn_in_proj_matmul kt->candle weight_t")?;
+        if let Some(out) = backend.linear_prefill_apply(&x_c, &weight_c)? {
+            return candle_to_kt_activation(&out)
+                .context("gdn_in_proj_matmul candle->kt prefill out");
+        }
     }
     broadcast_matmul_cpu_compatible(x, weight_t)
 }
@@ -11688,20 +11699,16 @@ fn swiglu_ffn_impl_no_chunk(
                                     start_mlp_stage_profile(profile_device, profile_context)?;
                                 let hidden = {
                                     kiln_nvtx::range!(c"kiln/mlp/gate_silu_hidden_mul_packed");
-                                    let hidden_kt =
-                                        kiln_rmsnorm_kernel::fused_mlp_silu_mul_packed_kt(
-                                            &gate_up_kt,
-                                            g_dim,
-                                        )
-                                        .map_err(|e| {
-                                            anyhow::anyhow!(
-                                                "kt fused_mlp_silu_mul_packed: {e}"
-                                            )
-                                        })?;
-                                    kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&hidden_kt)
-                                        .with_context(|| {
-                                            "kt-adapter: mlp_silu_mul_packed out → candle failed"
-                                        })?
+                                    // #1082: keep the silu*mul output as kt — the
+                                    // down-proj path is kt now, so the candle copy-out
+                                    // is gone.
+                                    kiln_rmsnorm_kernel::fused_mlp_silu_mul_packed_kt(
+                                        &gate_up_kt,
+                                        g_dim,
+                                    )
+                                    .map_err(|e| {
+                                        anyhow::anyhow!("kt fused_mlp_silu_mul_packed: {e}")
+                                    })?
                                 };
                                 finish_mlp_stage_profile(
                                     profile_device,
@@ -11827,18 +11834,13 @@ fn swiglu_ffn_impl_no_chunk(
                         if kiln_rmsnorm_kernel::supports_mlp_silu_mul_kt(&gate_kt, &up_kt) {
                             let stage_profile =
                                 start_mlp_stage_profile(profile_device, profile_context)?;
-                            // Phase 7 (#1082): kt-only. Same FFI symbol.
-                            let hidden = {
-                                let out_kt =
-                                    kiln_rmsnorm_kernel::fused_mlp_silu_mul_kt(&gate_kt, &up_kt)
-                                        .map_err(|e| {
-                                            anyhow::anyhow!("kt fused_mlp_silu_mul2: {e}")
-                                        })?;
-                                kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-                                    .with_context(|| {
-                                        "kt-adapter: mlp_silu_mul2 out → candle failed"
-                                    })?
-                            };
+                            // Phase 7 (#1082): kt-only. Same FFI symbol. Keep the
+                            // output as kt — no candle copy-out (down-proj is kt).
+                            let hidden =
+                                kiln_rmsnorm_kernel::fused_mlp_silu_mul_kt(&gate_kt, &up_kt)
+                                    .map_err(|e| {
+                                        anyhow::anyhow!("kt fused_mlp_silu_mul2: {e}")
+                                    })?;
                             finish_mlp_stage_profile(
                                 profile_device,
                                 profile_context,
