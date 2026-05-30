@@ -1144,13 +1144,20 @@ fn run_legacy_lm_head_sample_batch(
     params: &[SamplingParams],
     states: &[&mut PagedBatchedDecodeState],
 ) -> Result<Vec<TokenId>> {
-    let logits = crate::forward::model_forward_head_backend_decode_if(
+    // #1082: `model_forward_head_backend_decode_if` is kt-typed; the
+    // `hidden` activation arriving here is still candle. Bridge in, then
+    // bridge the kt logits back out to candle for the host sampler island.
+    let hidden_kt = crate::forward::candle_to_kt_activation(hidden)
+        .context("batched decode lm head: hidden candle->kt")?;
+    let logits_kt = crate::forward::model_forward_head_backend_decode_if(
         Some(backend),
-        hidden,
+        &hidden_kt,
         weights,
         config,
     )
     .context("batched decode lm head")?;
+    let logits = crate::forward::kt_logits_to_candle(&logits_kt)
+        .context("batched decode lm head: logits kt->candle")?;
     let mut sampled = Vec::with_capacity(states.len());
     for (idx, params) in params.iter().enumerate() {
         let row = logits
@@ -1272,7 +1279,12 @@ impl ModelRunner {
         cuda_graphs: bool,
     ) -> Self {
         let eos_token_ids = tokenizer.eos_token_ids();
-        let device = weights.embed_tokens.device().clone();
+        // #1082: `embed_tokens.device()` is a kt `Device`; the cuda-graph
+        // runner + backend dispatcher are candle-typed. Bridge to a candle
+        // device (same physical GPU index) for those candle-typed consumers.
+        let kt_device = weights.embed_tokens.device();
+        let device = kiln_kt_bridge::candle_device_from_kt(&kt_device)
+            .expect("ModelRunner::new_with_options: kt->candle device bridge");
         let cuda_graph = CudaGraphRunner::new(&device, cuda_graphs);
         let backend = backend::for_device(&device);
         let training_caps = backend.training_capabilities();
@@ -1320,7 +1332,10 @@ impl ModelRunner {
     /// `docs/audits/candle_cpu_residency_2026-05-11.md`.
     pub fn prewarm_backend_decode_weights(&mut self) -> Result<()> {
         self.backend.prewarm_decode_weights(&self.weights)?;
-        let device = self.weights.embed_tokens.device().clone();
+        // #1082: kt device -> candle for the candle-typed backend hook.
+        let kt_device = self.weights.embed_tokens.device();
+        let device = kiln_kt_bridge::candle_device_from_kt(&kt_device)
+            .map_err(|e| anyhow::anyhow!("prewarm_backend_decode_weights device bridge: {e}"))?;
         self.backend
             .drop_uploaded_bf16_weights(&mut self.weights, &device)?;
         Ok(())
@@ -1331,7 +1346,10 @@ impl ModelRunner {
     /// The directory must contain `adapter_config.json` and `adapter_model.safetensors`.
     /// Replaces any previously loaded adapter.
     pub fn load_adapter(&mut self, path: &Path) -> Result<()> {
-        let device = self.weights.embed_tokens.device().clone();
+        // #1082: kt device -> candle for the candle-typed LoRA loader.
+        let kt_device = self.weights.embed_tokens.device();
+        let device = kiln_kt_bridge::candle_device_from_kt(&kt_device)
+            .map_err(|e| anyhow::anyhow!("load_adapter device bridge: {e}"))?;
         let num_layers = self.config.num_layers;
         let lora =
             LoraWeights::load(path, num_layers, &device).context("failed to load LoRA adapter")?;
@@ -1416,8 +1434,11 @@ impl ModelRunner {
                 .expect("Qwen3.5 decode buffer config must be valid")
             })
             .clone();
-        let device = self.weights.embed_tokens.device();
-        let buffers = DecodeBuffers::allocate(cfg, device)?;
+        // #1082: kt device -> candle for the candle-typed decode buffers.
+        let kt_device = self.weights.embed_tokens.device();
+        let device = kiln_kt_bridge::candle_device_from_kt(&kt_device)
+            .map_err(|e| anyhow::anyhow!("ensure_decode_buffers device bridge: {e}"))?;
+        let buffers = DecodeBuffers::allocate(cfg, &device)?;
         // If another thread won the race, drop our newly allocated copy
         // harmlessly and fall through to the winner's buffer.
         let _ = self.decode_buffers.set(buffers);
@@ -1486,29 +1507,33 @@ impl ModelRunner {
 
     /// Create a new KV cache sized for this model.
     fn new_kv_cache(&self, max_seq_len: usize) -> Result<KvCache> {
+        // #1082: `embed_tokens.device()` is now a kt `Device` (by value);
+        // route through the kt-typed `KvCache::new_kt` so no candle Device
+        // import is needed at the call site.
         let dtype = match self.config.dtype {
-            kiln_core::config::DType::BF16 => candle_core::DType::BF16,
-            kiln_core::config::DType::FP16 => candle_core::DType::F16,
-            kiln_core::config::DType::FP32 => candle_core::DType::F32,
+            kiln_core::config::DType::BF16 => kiln_tensor::DType::BF16,
+            kiln_core::config::DType::FP16 => kiln_tensor::DType::F16,
+            kiln_core::config::DType::FP32 => kiln_tensor::DType::F32,
         };
         let device = self.weights.embed_tokens.device();
-        KvCache::new(
+        KvCache::new_kt(
             self.config.num_full_attention_layers,
             self.config.num_kv_heads,
             self.config.head_dim,
             max_seq_len,
             dtype,
-            device,
+            &device,
         )
     }
 
     /// Create a new linear attention state for GDN layers.
     fn new_linear_state(&self) -> Result<LinearAttentionState> {
+        // #1082: kt `Device` by value -> pass by reference.
         let device = self.weights.embed_tokens.device();
         LinearAttentionState::new_with_batch_for_inference_backend(
             &self.config,
             1,
-            device,
+            &device,
             Some(self.backend.name()),
         )
     }
@@ -2282,14 +2307,14 @@ impl ModelRunner {
 
         let use_greedy_prefill_token = params.is_effectively_greedy()
             && matches!(self.backend.device(), kiln_tensor::Device::Metal(_))
-            && !streaming_prefill_enabled_for(self.weights.embed_tokens.device(), prefill_tokens.len());
+            && !streaming_prefill_enabled_for(&self.weights.embed_tokens.device(), prefill_tokens.len());
         let split_pos =
             strict_prompt_prefix_split_pos(prompt_tokens.len(), cached_tokens, block_size);
         let mut prefill_split_snapshot: Option<RollingPrefixSnapshot> = None;
         let prefill_start = std::time::Instant::now();
         let prefill_source = {
             let pc_guard = lock_paged_cache(paged_cache)?;
-            if streaming_prefill_enabled_for(self.weights.embed_tokens.device(), prefill_tokens.len()) {
+            if streaming_prefill_enabled_for(&self.weights.embed_tokens.device(), prefill_tokens.len()) {
                 if let Some(split_pos) = split_pos {
                     let head_tokens = &prompt_tokens[cached_tokens..split_pos];
                     let _ = model_forward_paged_streaming_with_progress(
@@ -2514,7 +2539,7 @@ impl ModelRunner {
         let prefill_start = std::time::Instant::now();
         let logits = {
             let pc_guard = lock_paged_cache(paged_cache)?;
-            if streaming_prefill_enabled_for(self.weights.embed_tokens.device(), prefill_tokens.len()) {
+            if streaming_prefill_enabled_for(&self.weights.embed_tokens.device(), prefill_tokens.len()) {
                 if let Some(split_pos) = split_pos {
                     let head_tokens = &prompt_tokens[cached_tokens..split_pos];
                     let _ = model_forward_paged_streaming_with_progress(
@@ -3578,7 +3603,7 @@ impl ModelRunner {
 
         let logits = {
             let pc_guard = lock_paged_cache(paged_cache)?;
-            if streaming_prefill_enabled_for(self.weights.embed_tokens.device(), prompt_tokens.len()) {
+            if streaming_prefill_enabled_for(&self.weights.embed_tokens.device(), prompt_tokens.len()) {
                 model_forward_paged_streaming_with_progress(
                     &*self.backend,
                     prompt_tokens,
@@ -3710,7 +3735,7 @@ impl ModelRunner {
         // before the decode loop starts. The decode loop then re-acquires the
         // cache per step.
         let streaming_prefill =
-            streaming_prefill_enabled_for(self.weights.embed_tokens.device(), prompt_tokens.len());
+            streaming_prefill_enabled_for(&self.weights.embed_tokens.device(), prompt_tokens.len());
         let prefill_source = {
             let pc_guard = lock_paged_cache(paged_cache)?;
             if streaming_prefill {
@@ -3889,7 +3914,7 @@ impl ModelRunner {
 
         let logits = {
             let pc_guard = lock_paged_cache(paged_cache)?;
-            if streaming_prefill_enabled_for(self.weights.embed_tokens.device(), prompt_tokens.len()) {
+            if streaming_prefill_enabled_for(&self.weights.embed_tokens.device(), prompt_tokens.len()) {
                 model_forward_paged_streaming(
                     &*self.backend,
                     prompt_tokens,
@@ -4072,7 +4097,7 @@ impl ModelRunner {
         // Long Metal prompts use tiled streaming prefill by default; env
         // overrides can force either path.
         let streaming_prefill =
-            streaming_prefill_enabled_for(self.weights.embed_tokens.device(), prompt_tokens.len());
+            streaming_prefill_enabled_for(&self.weights.embed_tokens.device(), prompt_tokens.len());
         let prefill_source = if streaming_prefill {
             PrefillSampleSource::Logits(
                 model_forward_paged_streaming(
@@ -4565,7 +4590,7 @@ impl ModelRunner {
         // Prefill: feed the prompt through the base model and capture the
         // post-final-norm last hidden row as the seed `h_prev`.
         let (prefill_logits, mut h_prev) =
-            if streaming_prefill_enabled_for(self.weights.embed_tokens.device(), prompt_tokens.len()) {
+            if streaming_prefill_enabled_for(&self.weights.embed_tokens.device(), prompt_tokens.len()) {
                 model_forward_paged_streaming_last_token_with_last_hidden(
                     &*self.backend,
                     prompt_tokens,
@@ -5012,7 +5037,7 @@ impl ModelRunner {
         let mut linear_state = self.new_linear_state()?;
 
         let (prefill_logits, mut h_prev) =
-            if streaming_prefill_enabled_for(self.weights.embed_tokens.device(), prompt_tokens.len()) {
+            if streaming_prefill_enabled_for(&self.weights.embed_tokens.device(), prompt_tokens.len()) {
                 model_forward_paged_streaming_last_token_with_last_hidden(
                     &*self.backend,
                     &prompt_tokens,
@@ -5901,7 +5926,7 @@ impl ModelRunner {
         let mut prefill_split_snapshot: Option<RollingPrefixSnapshot> = None;
         let logits = {
             let pc_guard = lock_paged_cache(paged_cache)?;
-            if streaming_prefill_enabled_for(self.weights.embed_tokens.device(), prompt_tokens.len()) {
+            if streaming_prefill_enabled_for(&self.weights.embed_tokens.device(), prompt_tokens.len()) {
                 if let Some(split_pos) = split_pos {
                     let head_tokens = &prompt_tokens[cached_tokens..split_pos];
                     let _ = model_forward_paged_streaming(
@@ -6017,7 +6042,7 @@ impl ModelRunner {
 
         let logits = {
             let pc_guard = lock_paged_cache(paged_cache)?;
-            if streaming_prefill_enabled_for(self.weights.embed_tokens.device(), prompt_tokens.len()) {
+            if streaming_prefill_enabled_for(&self.weights.embed_tokens.device(), prompt_tokens.len()) {
                 model_forward_paged_streaming(
                     &*self.backend,
                     prompt_tokens,
@@ -6173,7 +6198,7 @@ impl ModelRunner {
 
         let logits = {
             let pc_guard = lock_paged_cache(paged_cache)?;
-            if streaming_prefill_enabled_for(self.weights.embed_tokens.device(), prompt_tokens.len()) {
+            if streaming_prefill_enabled_for(&self.weights.embed_tokens.device(), prompt_tokens.len()) {
                 model_forward_paged_streaming(
                     &*self.backend,
                     prompt_tokens,
@@ -6371,7 +6396,7 @@ impl ModelRunner {
         // Prefill. Long Metal prompts use tiled streaming prefill by default;
         // env overrides can force either path.
         let prefill_result =
-            if streaming_prefill_enabled_for(self.weights.embed_tokens.device(), prompt_tokens.len()) {
+            if streaming_prefill_enabled_for(&self.weights.embed_tokens.device(), prompt_tokens.len()) {
                 model_forward_paged_streaming(
                     &*self.backend,
                     &prompt_tokens,

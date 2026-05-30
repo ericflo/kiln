@@ -54,8 +54,15 @@ pub fn greedy_sample(logits: &candle_core::Tensor) -> Result<u32> {
     // flattening. Falls through to candle's argmax when any
     // compatibility precondition fails.
     #[cfg(feature = "cuda")]
-    if let Some(idx) = crate::forward::try_kt_argmax_1d(&flat)? {
-        return Ok(idx);
+    if flat.is_contiguous() {
+        // #1082: `try_kt_argmax_1d` now takes a kt tensor. Borrow the
+        // contiguous CUDA candle logits zero-copy; on a borrow failure
+        // (non-CUDA, unsupported dtype) fall through to candle's argmax.
+        if let Ok(flat_kt) = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&flat) {
+            if let Some(idx) = crate::forward::try_kt_argmax_1d(&flat_kt)? {
+                return Ok(idx);
+            }
+        }
     }
     // Argmax stays on device; only the scalar u32 token ID is transferred to host.
     let idx = flat.argmax(0)?.to_scalar::<u32>()?;
@@ -78,8 +85,15 @@ pub fn greedy_sample_rows(logits: &candle_core::Tensor) -> Result<Vec<u32>> {
     // I64->u32 host copy. Falls through to the candle composite when
     // any compatibility precondition fails.
     #[cfg(feature = "cuda")]
-    if let Some(ids) = crate::forward::try_kt_sampling_argmax_rows(logits)? {
-        return Ok(ids);
+    if logits.is_contiguous() {
+        // #1082: `try_kt_sampling_argmax_rows` now takes a kt tensor.
+        // Borrow the contiguous CUDA candle logits zero-copy; a borrow
+        // failure falls through to the candle argmax composite below.
+        if let Ok(logits_kt) = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(logits) {
+            if let Some(ids) = crate::forward::try_kt_sampling_argmax_rows(&logits_kt)? {
+                return Ok(ids);
+            }
+        }
     }
     let vocab_dim = dims.len() - 1;
     let ids = logits.argmax(vocab_dim)?.flatten_all()?;

@@ -23279,6 +23279,53 @@ fn model_forward_logits_kt_to_candle(_logits: Tensor) -> Result<candle_core::Ten
     anyhow::bail!("model_forward: kt->candle logits bridge requires the `cuda` feature (#1082)")
 }
 
+/// Crate-visible kt→candle copy-bridge for the inference paths whose
+/// public surface still hands logits/hidden to the candle-typed host
+/// sampler island (`crate::sampling::*`) and candle MTP-debug helpers.
+/// Mirrors [`model_forward_logits_kt_to_candle`]: CUDA-only copy; the
+/// non-CUDA arm errors at runtime since production decode is CUDA.
+/// Used by `generate.rs` / `speculative.rs` at the kt-producer →
+/// candle-sampler boundary (#1082 forward-flip iter4).
+#[cfg(feature = "cuda")]
+pub(crate) fn kt_logits_to_candle(logits: &Tensor) -> Result<candle_core::Tensor> {
+    let contig;
+    let logits = if logits.is_contiguous() {
+        logits
+    } else {
+        contig = logits.contiguous()?;
+        &contig
+    };
+    kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(logits)
+        .map_err(|e| anyhow::anyhow!("kt_logits_to_candle bridge: {e}"))
+}
+
+#[cfg(not(feature = "cuda"))]
+pub(crate) fn kt_logits_to_candle(_logits: &Tensor) -> Result<candle_core::Tensor> {
+    anyhow::bail!("kt_logits_to_candle requires the `cuda` feature (#1082)")
+}
+
+/// Crate-visible candle→kt copy-bridge for the inverse direction: a
+/// candle-typed activation (e.g. a decode `hidden` produced by an older
+/// candle path) handed into a kt-typed forward entry. CUDA-only copy;
+/// non-CUDA errors at runtime. (#1082 forward-flip iter4)
+#[cfg(feature = "cuda")]
+pub(crate) fn candle_to_kt_activation(t: &candle_core::Tensor) -> Result<Tensor> {
+    let contig;
+    let t = if t.is_contiguous() {
+        t
+    } else {
+        contig = t.contiguous()?;
+        &contig
+    };
+    kiln_kt_bridge::kt_tensor_from_candle_cuda_copy(t)
+        .map_err(|e| anyhow::anyhow!("candle_to_kt_activation bridge: {e}"))
+}
+
+#[cfg(not(feature = "cuda"))]
+pub(crate) fn candle_to_kt_activation(_t: &candle_core::Tensor) -> Result<Tensor> {
+    anyhow::bail!("candle_to_kt_activation requires the `cuda` feature (#1082)")
+}
+
 /// kt-typed parallel entry to [`model_forward`] (#1082 Tier 3).
 ///
 /// Delegates to the existing candle-typed `model_forward` and wraps the

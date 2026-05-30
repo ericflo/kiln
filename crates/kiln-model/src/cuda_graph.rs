@@ -474,11 +474,14 @@ impl CudaGraphRunner {
             "persistent batched state requires batch_size > 0"
         );
         if !self.batched_state_pool.contains_key(&batch_size) {
+            // #1082: the LinearAttentionState constructor is kt-typed;
+            // bridge the candle device held by the graph runner to kt.
+            let kt_device = kiln_kt_bridge::kt_device_from_candle(device);
             let state =
                 crate::forward::LinearAttentionState::new_with_batch_for_inference_backend(
                     config,
                     batch_size,
-                    device,
+                    &kt_device,
                     Some("cuda"),
                 )
                 .with_context(|| {
