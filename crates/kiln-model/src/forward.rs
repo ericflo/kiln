@@ -27234,17 +27234,34 @@ mod tests {
     /// build — from another crate's tests it appears unresolved.
     static RESIDENCY_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    /// #1082 type-flip test shim. The tests below were written against
+    /// candle's `new_cuda_device(0) -> Result<Device>`, which both
+    /// *constructs* and *validates* (probes) a CUDA device. kt's `Device`
+    /// is a plain enum (`Device::Cuda(0)`) with no fallible constructor, so
+    /// the availability probe must be explicit: build a 1-element tensor and
+    /// move it to CUDA(0). On a host without a visible GPU the `to_device`
+    /// move returns `Err`, so the tests skip exactly as before; on the GPU
+    /// pod it returns the kt `Device::Cuda(0)`. This preserves the original
+    /// skip-if-no-CUDA semantics while flipping the device type to kt.
+    #[cfg(feature = "cuda")]
+    fn new_cuda_device(index: usize) -> Result<Device> {
+        let dev = Device::Cuda(index);
+        // Probe: a host→CUDA move fails if no CUDA device is visible.
+        let _probe = Tensor::from_slice(&[0.0f32], (1usize,))?.to_device(dev)?;
+        Ok(dev)
+    }
+
     #[cfg(feature = "cuda")]
     #[test]
     fn test_cuda_sigmoid_kt_default_matches_host_formula() -> Result<()> {
-        let Ok(device) = Device::new_cuda(0) else {
+        let Ok(device) = new_cuda_device(0) else {
             eprintln!("CUDA unavailable, skipping test_cuda_sigmoid_kt_default_matches_host_formula");
             return Ok(());
         };
         let data = [-8.0_f32, -2.0, -0.5, 0.0, 0.5, 2.0, 8.0, 16.0];
-        let x = Tensor::from_slice(&data, (2usize, 4usize), &device)?.contiguous()?;
+        let x = Tensor::from_slice(&data, (2usize, 4usize))?.to_device(device)?.contiguous()?;
         let out = cuda_sigmoid(&x)?;
-        device.synchronize()?;
+        synchronize_for_profile(&device)?;
         let got = out.flatten_all()?.to_vec1::<f32>()?;
         for (idx, (&input, &actual)) in data.iter().zip(got.iter()).enumerate() {
             let expected = 1.0 / (1.0 + (-input).exp());
@@ -27259,14 +27276,14 @@ mod tests {
     #[cfg(feature = "cuda")]
     #[test]
     fn test_cuda_silu_kt_default_matches_host_formula() -> Result<()> {
-        let Ok(device) = Device::new_cuda(0) else {
+        let Ok(device) = new_cuda_device(0) else {
             eprintln!("CUDA unavailable, skipping test_cuda_silu_kt_default_matches_host_formula");
             return Ok(());
         };
         let data = [-8.0_f32, -2.0, -0.5, 0.0, 0.5, 2.0, 8.0, 16.0];
-        let x = Tensor::from_slice(&data, (2usize, 4usize), &device)?.contiguous()?;
+        let x = Tensor::from_slice(&data, (2usize, 4usize))?.to_device(device)?.contiguous()?;
         let out = cuda_silu(&x)?;
-        device.synchronize()?;
+        synchronize_for_profile(&device)?;
         let got = out.flatten_all()?.to_vec1::<f32>()?;
         for (idx, (&input, &actual)) in data.iter().zip(got.iter()).enumerate() {
             let sigmoid = 1.0 / (1.0 + (-input).exp());
@@ -27282,7 +27299,7 @@ mod tests {
     #[cfg(feature = "cuda")]
     #[test]
     fn test_cuda_softmax_last_dim_kt_default_matches_host_formula() -> Result<()> {
-        let Ok(device) = Device::new_cuda(0) else {
+        let Ok(device) = new_cuda_device(0) else {
             eprintln!(
                 "CUDA unavailable, skipping test_cuda_softmax_last_dim_kt_default_matches_host_formula"
             );
@@ -27292,11 +27309,11 @@ mod tests {
             1.0_f32, 2.0, 3.0, -1.0, //
             -4.0, -2.0, -2.0, 0.0,
         ];
-        let x = Tensor::from_slice(&data, (2usize, 4usize), &device)?.contiguous()?;
+        let x = Tensor::from_slice(&data, (2usize, 4usize))?.to_device(device)?.contiguous()?;
         let direct = try_kt_softmax_last_dim(&x)?
             .context("expected CUDA kt softmax helper to accept contiguous F32 input")?;
         let out = cuda_softmax_last_dim(&x)?;
-        device.synchronize()?;
+        synchronize_for_profile(&device)?;
 
         let direct_vals = direct.flatten_all()?.to_vec1::<f32>()?;
         let got = out.flatten_all()?.to_vec1::<f32>()?;
@@ -27329,19 +27346,19 @@ mod tests {
     #[cfg(feature = "cuda")]
     #[test]
     fn test_cuda_l2_normalize_kt_default_matches_host_formula() -> Result<()> {
-        let Ok(device) = Device::new_cuda(0) else {
+        let Ok(device) = new_cuda_device(0) else {
             eprintln!(
                 "CUDA unavailable, skipping test_cuda_l2_normalize_kt_default_matches_host_formula"
             );
             return Ok(());
         };
         let data = [3.0_f32, 4.0, 0.0, -2.0, 1.0, 2.0];
-        let x = Tensor::from_slice(&data, (2usize, 3usize), &device)?.contiguous()?;
+        let x = Tensor::from_slice(&data, (2usize, 3usize))?.to_device(device)?.contiguous()?;
         let x_f32 = x.to_dtype(DType::F32)?;
         let direct = try_kt_l2_normalize(&x_f32, 1e-6)?
             .context("expected CUDA kt l2_normalize helper to accept contiguous F32 input")?;
         let out = l2_normalize(&x)?;
-        device.synchronize()?;
+        synchronize_for_profile(&device)?;
 
         let direct_vals = direct.flatten_all()?.to_vec1::<f32>()?;
         let got = out.flatten_all()?.to_vec1::<f32>()?;
@@ -27373,7 +27390,7 @@ mod tests {
     #[cfg(feature = "cuda")]
     #[test]
     fn test_cuda_lora_add_kt_default_matches_host_formula() -> Result<()> {
-        let Ok(device) = Device::new_cuda(0) else {
+        let Ok(device) = new_cuda_device(0) else {
             eprintln!(
                 "CUDA unavailable, skipping test_cuda_lora_add_kt_default_matches_host_formula"
             );
@@ -27381,11 +27398,11 @@ mod tests {
         };
         let base_data = [1.0_f32, -2.0, 3.5, 0.0, 0.25, -0.5];
         let delta_data = [0.1_f32, 0.2, -0.3, 4.0, -0.05, 0.5];
-        let base = Tensor::from_slice(&base_data, (2usize, 3usize), &device)?.contiguous()?;
-        let delta = Tensor::from_slice(&delta_data, (2usize, 3usize), &device)?.contiguous()?;
+        let base = Tensor::from_slice(&base_data, (2usize, 3usize))?.to_device(device)?.contiguous()?;
+        let delta = Tensor::from_slice(&delta_data, (2usize, 3usize))?.to_device(device)?.contiguous()?;
         let out = try_kt_lora_add(&base, &delta)?
             .context("expected CUDA kt lora_add helper to accept contiguous F32 input")?;
-        device.synchronize()?;
+        synchronize_for_profile(&device)?;
 
         let got = out.flatten_all()?.to_vec1::<f32>()?;
         for (idx, (&b, &d)) in base_data.iter().zip(delta_data.iter()).enumerate() {
@@ -27402,7 +27419,7 @@ mod tests {
     #[cfg(feature = "cuda")]
     #[test]
     fn test_cuda_scalar_minus_tensor_kt_default_matches_host_formula() -> Result<()> {
-        let Ok(device) = Device::new_cuda(0) else {
+        let Ok(device) = new_cuda_device(0) else {
             eprintln!(
                 "CUDA unavailable, skipping test_cuda_scalar_minus_tensor_kt_default_matches_host_formula"
             );
@@ -27415,12 +27432,12 @@ mod tests {
             0.0_f32, 0.25, 0.5, 0.75, //
             1.0, -0.5, 2.0, -2.0,
         ];
-        let x = Tensor::from_slice(&data, (2usize, 4usize), &device)?.contiguous()?;
+        let x = Tensor::from_slice(&data, (2usize, 4usize))?.to_device(device)?.contiguous()?;
         let c = 1.0_f64;
         let direct = try_kt_scalar_minus_tensor(&x, c)?.context(
             "expected CUDA kt scalar_minus_tensor helper to accept contiguous F32 input",
         )?;
-        device.synchronize()?;
+        synchronize_for_profile(&device)?;
 
         let direct_vals = direct.flatten_all()?.to_vec1::<f32>()?;
         for (idx, (&input, &actual)) in data.iter().zip(direct_vals.iter()).enumerate() {
@@ -27573,11 +27590,11 @@ mod tests {
     #[test]
     fn test_backend_linear_decode_adds_lora_delta() -> Result<()> {
         let device = Device::Cpu;
-        let x = Tensor::from_vec(vec![1.0f32, 2.0], (1, 1, 2), &device)?;
+        let x = Tensor::from_vec(vec![1.0f32, 2.0], (1, 1, 2))?.to_device(device)?;
         let weight_t = Tensor::zeros((2, 3), DType::F32, &device)?;
         let lora = LoraProjectionWeights {
-            a: Tensor::from_vec(vec![3.0f32, 4.0], (1, 2), &device)?,
-            b: Tensor::from_vec(vec![5.0f32, 6.0, 7.0], (3, 1), &device)?,
+            a: Tensor::from_vec(vec![3.0f32, 4.0], (1, 2))?.to_device(device)?,
+            b: Tensor::from_vec(vec![5.0f32, 6.0, 7.0], (3, 1))?.to_device(device)?,
         };
         let backend = FixedLinearBackend {
             device: device.clone(),
@@ -27608,7 +27625,7 @@ mod tests {
     #[test]
     fn test_swiglu_down_only_lora_keeps_backend_gate_up_decode() -> Result<()> {
         let device = Device::Cpu;
-        let x = Tensor::from_vec(vec![1.0f32, 2.0], (1, 1, 2), &device)?;
+        let x = Tensor::from_vec(vec![1.0f32, 2.0], (1, 1, 2))?.to_device(device)?;
         let zero_proj = Tensor::zeros((2, 2), DType::F32, &device)?;
         let zero_proj_t = zero_proj.t()?.contiguous()?;
         let mlp = GpuFfnWeights {
@@ -27634,8 +27651,8 @@ mod tests {
         };
         let lora_layer = LoraLayerWeights {
             down_proj: Some(LoraProjectionWeights {
-                a: Tensor::from_vec(vec![1.0f32, 0.0], (1, 2), &device)?,
-                b: Tensor::from_vec(vec![2.0f32, 4.0], (2, 1), &device)?,
+                a: Tensor::from_vec(vec![1.0f32, 0.0], (1, 2))?.to_device(device)?,
+                b: Tensor::from_vec(vec![2.0f32, 4.0], (2, 1))?.to_device(device)?,
             }),
             ..Default::default()
         };
@@ -27675,7 +27692,7 @@ mod tests {
     #[test]
     fn test_swiglu_attention_only_lora_keeps_backend_mlp_decode() -> Result<()> {
         let device = Device::Cpu;
-        let x = Tensor::from_vec(vec![1.0f32, 2.0], (1, 1, 2), &device)?;
+        let x = Tensor::from_vec(vec![1.0f32, 2.0], (1, 1, 2))?.to_device(device)?;
         let zero_proj = Tensor::zeros((2, 2), DType::F32, &device)?;
         let zero_proj_t = zero_proj.t()?.contiguous()?;
         let mlp = GpuFfnWeights {
@@ -27701,8 +27718,8 @@ mod tests {
         };
         let lora_layer = LoraLayerWeights {
             q_proj: Some(LoraProjectionWeights {
-                a: Tensor::from_vec(vec![1.0f32, 0.0], (1, 2), &device)?,
-                b: Tensor::from_vec(vec![2.0f32, 4.0], (2, 1), &device)?,
+                a: Tensor::from_vec(vec![1.0f32, 0.0], (1, 2))?.to_device(device)?,
+                b: Tensor::from_vec(vec![2.0f32, 4.0], (2, 1))?.to_device(device)?,
             }),
             ..Default::default()
         };
@@ -28247,8 +28264,8 @@ mod tests {
                 -4.0, 1.0, -1.5, 2.0, -2.5, 0.25, -0.5, 0.75, -1.0,
             ],
             (batch, seq_len, hidden),
-            &device,
-        )?;
+        )?
+        .to_device(device)?;
 
         let (
             rms_inv_row,
@@ -28317,7 +28334,7 @@ mod tests {
         use rand::rngs::StdRng;
         use rand::{RngExt, SeedableRng};
 
-        let device = match Device::new_cuda(0) {
+        let device = match new_cuda_device(0) {
             Ok(device) => device,
             Err(err) => {
                 eprintln!(
@@ -28349,11 +28366,11 @@ mod tests {
             .map(|_| rng.random_range(0.5f32..1.5f32))
             .collect();
 
-        let x = Tensor::from_slice(&x_data, (batch, seq_len, heads, hidden), &device)?
+        let x = Tensor::from_slice(&x_data, (batch, seq_len, heads, hidden))?.to_device(device)?
             .to_dtype(DType::BF16)?;
-        let z = Tensor::from_slice(&z_data, (batch, seq_len, heads, hidden), &device)?
+        let z = Tensor::from_slice(&z_data, (batch, seq_len, heads, hidden))?.to_device(device)?
             .to_dtype(DType::BF16)?;
-        let weight = Tensor::from_slice(&w_data, (hidden,), &device)?.to_dtype(DType::BF16)?;
+        let weight = Tensor::from_slice(&w_data, (hidden,))?.to_device(device)?.to_dtype(DType::BF16)?;
 
         let fallback = gated_rms_norm_fallback(&x, &z, &weight, 1e-6)?;
         let fused = backend
@@ -28366,8 +28383,8 @@ mod tests {
         let diff = (fused.to_dtype(DType::F32)?
             - fallback.to_dtype(DType::BF16)?.to_dtype(DType::F32)?)?;
         let abs = diff.abs()?;
-        let max = abs.flatten_all()?.max(0)?.to_scalar::<f32>()?;
-        let mean = abs.flatten_all()?.mean(0)?.to_scalar::<f32>()?;
+        let max = abs.flatten_all()?.max(0)?.flatten_all()?.to_vec1::<f32>()?[0];
+        let mean = abs.flatten_all()?.mean(0)?.flatten_all()?.to_vec1::<f32>()?[0];
         eprintln!("gated_rms_norm cuda vs fallback: max_abs_diff={max:e} mean_abs_diff={mean:e}");
         assert!(
             max < 5e-3,
@@ -28414,11 +28431,11 @@ mod tests {
             .map(|_| rng.random_range(0.5f32..1.5f32))
             .collect();
 
-        let x = Tensor::from_slice(&x_data, (batch, seq_len, heads, hidden), &device)?
+        let x = Tensor::from_slice(&x_data, (batch, seq_len, heads, hidden))?.to_device(device)?
             .to_dtype(DType::BF16)?;
-        let z = Tensor::from_slice(&z_data, (batch, seq_len, heads, hidden), &device)?
+        let z = Tensor::from_slice(&z_data, (batch, seq_len, heads, hidden))?.to_device(device)?
             .to_dtype(DType::BF16)?;
-        let weight = Tensor::from_slice(&w_data, (hidden,), &device)?.to_dtype(DType::BF16)?;
+        let weight = Tensor::from_slice(&w_data, (hidden,))?.to_device(device)?.to_dtype(DType::BF16)?;
 
         let fallback = gated_rms_norm_fallback(&x, &z, &weight, 1e-6)?;
         let fused = backend
@@ -28431,8 +28448,8 @@ mod tests {
         let diff = (fused.to_dtype(DType::F32)?
             - fallback.to_dtype(DType::BF16)?.to_dtype(DType::F32)?)?;
         let abs = diff.abs()?;
-        let max = abs.flatten_all()?.max(0)?.to_scalar::<f32>()?;
-        let mean = abs.flatten_all()?.mean(0)?.to_scalar::<f32>()?;
+        let max = abs.flatten_all()?.max(0)?.flatten_all()?.to_vec1::<f32>()?[0];
+        let mean = abs.flatten_all()?.mean(0)?.flatten_all()?.to_vec1::<f32>()?[0];
         eprintln!("gated_rms_norm metal vs fallback: max_abs_diff={max:e} mean_abs_diff={mean:e}");
         assert!(
             max < 5e-3,
@@ -28470,9 +28487,9 @@ mod tests {
             .map(|_| rng.random_range(-0.2f32..0.2f32))
             .collect();
 
-        let x = Tensor::from_slice(&x_data, (batch, seq_len, hidden), &device)?
+        let x = Tensor::from_slice(&x_data, (batch, seq_len, hidden))?.to_device(device)?
             .to_dtype(DType::BF16)?;
-        let weight = Tensor::from_slice(&w_data, (hidden,), &device)?.to_dtype(DType::BF16)?;
+        let weight = Tensor::from_slice(&w_data, (hidden,))?.to_device(device)?.to_dtype(DType::BF16)?;
 
         assert!(crate::backend::metal::metal_rms_norm_supports(&x, &weight));
         let fallback = rms_norm_fallback(&x, &weight, 1e-6)?;
@@ -28484,8 +28501,8 @@ mod tests {
         let diff = (fused.to_dtype(DType::F32)?
             - fallback.to_dtype(DType::BF16)?.to_dtype(DType::F32)?)?;
         let abs = diff.abs()?;
-        let max = abs.flatten_all()?.max(0)?.to_scalar::<f32>()?;
-        let mean = abs.flatten_all()?.mean(0)?.to_scalar::<f32>()?;
+        let max = abs.flatten_all()?.max(0)?.flatten_all()?.to_vec1::<f32>()?[0];
+        let mean = abs.flatten_all()?.mean(0)?.flatten_all()?.to_vec1::<f32>()?[0];
         eprintln!("rms_norm metal vs fallback: max_abs_diff={max:e} mean_abs_diff={mean:e}");
         assert!(
             max < 5e-3,
@@ -28519,10 +28536,10 @@ mod tests {
             .map(|i| ((i % 31) as f32 - 15.0) * 0.01953125)
             .collect();
 
-        let x = Tensor::from_slice(&x_data, (batch, 1usize, hidden), &device)?
+        let x = Tensor::from_slice(&x_data, (batch, 1usize, hidden))?.to_device(device)?
             .to_dtype(DType::BF16)?
             .contiguous()?;
-        let weight_t = Tensor::from_slice(&weight_data, (hidden, vocab), &device)?
+        let weight_t = Tensor::from_slice(&weight_data, (hidden, vocab))?.to_device(device)?
             .to_dtype(DType::BF16)?
             .contiguous()?;
 
@@ -28536,8 +28553,8 @@ mod tests {
         let diff = (fast.to_dtype(DType::F32)?
             - reference.to_dtype(DType::BF16)?.to_dtype(DType::F32)?)?;
         let abs = diff.abs()?;
-        let max = abs.flatten_all()?.max(0)?.to_scalar::<f32>()?;
-        let mean = abs.flatten_all()?.mean(0)?.to_scalar::<f32>()?;
+        let max = abs.flatten_all()?.max(0)?.flatten_all()?.to_vec1::<f32>()?[0];
+        let mean = abs.flatten_all()?.mean(0)?.flatten_all()?.to_vec1::<f32>()?[0];
         assert!(
             max < 2e-2,
             "Metal batch LM-head max_abs_diff={max:e} exceeds 2e-2"
@@ -28574,12 +28591,12 @@ mod tests {
         let k_data: Vec<f32> = (0..batch * seq_len * k_heads * head_dim)
             .map(|_| rng.random_range(-1.0f32..1.0f32))
             .collect();
-        let q = Tensor::from_slice(&q_data, (batch, seq_len, q_heads, head_dim), &device)?
+        let q = Tensor::from_slice(&q_data, (batch, seq_len, q_heads, head_dim))?.to_device(device)?
             .to_dtype(DType::BF16)?;
-        let k = Tensor::from_slice(&k_data, (batch, seq_len, k_heads, head_dim), &device)?
+        let k = Tensor::from_slice(&k_data, (batch, seq_len, k_heads, head_dim))?.to_device(device)?
             .to_dtype(DType::BF16)?;
         let positions: Vec<f32> = (11..11 + seq_len).map(|p| p as f32).collect();
-        let positions = Tensor::from_slice(&positions, (seq_len,), &device)?;
+        let positions = Tensor::from_slice(&positions, (seq_len,))?.to_device(device)?;
         let inv_freq = compute_rotary_inv_freq(rotary_dim, 10_000.0, &device)?;
         let (cos, sin) = rotary_tables_from_tensor(&positions, &inv_freq)?;
 
@@ -28598,8 +28615,8 @@ mod tests {
         let k_diff = (k_fused.to_dtype(DType::F32)?
             - k_ref.to_dtype(DType::BF16)?.to_dtype(DType::F32)?)?
         .abs()?;
-        let q_max = q_diff.flatten_all()?.max(0)?.to_scalar::<f32>()?;
-        let k_max = k_diff.flatten_all()?.max(0)?.to_scalar::<f32>()?;
+        let q_max = q_diff.flatten_all()?.max(0)?.flatten_all()?.to_vec1::<f32>()?[0];
+        let k_max = k_diff.flatten_all()?.max(0)?.flatten_all()?.to_vec1::<f32>()?[0];
         assert!(q_max < 1e-6, "Metal rotary Q max_abs_diff={q_max:e}");
         assert!(k_max < 1e-6, "Metal rotary K max_abs_diff={k_max:e}");
 
@@ -29266,8 +29283,8 @@ mod tests {
     fn tensor_abs_diff_stats(left: &Tensor, right: &Tensor) -> Result<(f32, f32)> {
         let diff = (left.to_dtype(DType::F32)? - right.to_dtype(DType::F32)?)?;
         let abs = diff.abs()?;
-        let max = abs.flatten_all()?.max(0)?.to_scalar::<f32>()?;
-        let mean = abs.flatten_all()?.mean(0)?.to_scalar::<f32>()?;
+        let max = abs.flatten_all()?.max(0)?.flatten_all()?.to_vec1::<f32>()?[0];
+        let mean = abs.flatten_all()?.mean(0)?.flatten_all()?.to_vec1::<f32>()?[0];
         Ok((max, mean))
     }
 
@@ -29298,7 +29315,7 @@ mod tests {
         let attn = make_bf16_full_attn_weights(hidden, num_heads, num_kv_heads, head_dim, &device)?;
 
         let x = patterned_bf16(&[batch, 1usize, hidden], 0.01, &device)?;
-        let positions = Tensor::from_slice(&[start_pos as f32], 1usize, &device)?;
+        let positions = Tensor::from_slice(&[start_pos as f32], 1usize)?.to_device(device)?;
         let inv_freq = compute_rotary_inv_freq(head_dim, 10_000.0, &device)?;
 
         let prefix_k = patterned_bf16(&[batch, start_pos, num_kv_heads, head_dim], 0.002, &device)?;
@@ -29347,7 +29364,7 @@ mod tests {
         #[cfg(feature = "cuda")]
             None,
         )?;
-        device.synchronize()?;
+        synchronize_for_profile(&device)?;
         assert_eq!(batched.dims(), &[batch, 1usize, hidden]);
 
         for row in 0..batch {
@@ -29383,13 +29400,13 @@ mod tests {
                 false,
                 None,
             )?;
-            device.synchronize()?;
+            synchronize_for_profile(&device)?;
 
             let batch_row = batched.narrow(0, row, 1)?;
             let diff = (batch_row.to_dtype(DType::F32)? - rowwise.to_dtype(DType::F32)?)?;
             let abs = diff.abs()?;
-            let max = abs.flatten_all()?.max(0)?.to_scalar::<f32>()?;
-            let mean = abs.flatten_all()?.mean(0)?.to_scalar::<f32>()?;
+            let max = abs.flatten_all()?.max(0)?.flatten_all()?.to_vec1::<f32>()?[0];
+            let mean = abs.flatten_all()?.mean(0)?.flatten_all()?.to_vec1::<f32>()?[0];
             eprintln!(
                 "batched contiguous paged decode row {row}: max_abs_diff={max:e} mean_abs_diff={mean:e}"
             );
@@ -29464,7 +29481,7 @@ mod tests {
             mlp: make_bf16_mlp_weights(hidden, intermediate, &device)?,
         };
         let x = patterned_bf16(&[batch, 1usize, hidden], 0.01, &device)?;
-        let positions = Tensor::from_slice(&[start_pos as f32], 1usize, &device)?;
+        let positions = Tensor::from_slice(&[start_pos as f32], 1usize)?.to_device(device)?;
         let inv_freq = compute_rotary_inv_freq(head_dim, 10_000.0, &device)?;
         let prefix_k = patterned_bf16(&[batch, start_pos, num_kv_heads, head_dim], 0.002, &device)?;
         let prefix_v = patterned_bf16(&[batch, start_pos, num_kv_heads, head_dim], 0.003, &device)?;
@@ -29508,7 +29525,7 @@ mod tests {
             #[cfg(feature = "cuda")]
             None,
         )?;
-        device.synchronize()?;
+        synchronize_for_profile(&device)?;
         assert_eq!(batched.dims(), &[batch, 1usize, hidden]);
 
         for row in 0..batch {
@@ -29544,13 +29561,13 @@ mod tests {
                 0,
                 None,
             )?;
-            device.synchronize()?;
+            synchronize_for_profile(&device)?;
 
             let batch_row = batched.narrow(0, row, 1)?;
             let diff = (batch_row.to_dtype(DType::F32)? - rowwise.to_dtype(DType::F32)?)?;
             let abs = diff.abs()?;
-            let max = abs.flatten_all()?.max(0)?.to_scalar::<f32>()?;
-            let mean = abs.flatten_all()?.mean(0)?.to_scalar::<f32>()?;
+            let max = abs.flatten_all()?.max(0)?.flatten_all()?.to_vec1::<f32>()?[0];
+            let mean = abs.flatten_all()?.mean(0)?.flatten_all()?.to_vec1::<f32>()?[0];
             eprintln!(
                 "batched contiguous transformer block row {row}: max_abs_diff={max:e} mean_abs_diff={mean:e}"
             );
@@ -29656,10 +29673,10 @@ mod tests {
             None,
             None,
         )?;
-        device.synchronize()?;
+        synchronize_for_profile(&device)?;
         assert_eq!(batched.dims(), &[batch, 1usize, vocab]);
 
-        let positions = Tensor::from_slice(&[start_pos as f32], 1usize, &device)?;
+        let positions = Tensor::from_slice(&[start_pos as f32], 1usize)?.to_device(device)?;
         for row in 0..batch {
             let mut row_cache = PagedKvCache::new_kt(
                 1,
@@ -29686,13 +29703,13 @@ mod tests {
                 None,
                 Some(&positions),
             )?;
-            device.synchronize()?;
+            synchronize_for_profile(&device)?;
 
             let batch_row = batched.narrow(0, row, 1)?;
             let diff = (batch_row.to_dtype(DType::F32)? - rowwise.to_dtype(DType::F32)?)?;
             let abs = diff.abs()?;
-            let max = abs.flatten_all()?.max(0)?.to_scalar::<f32>()?;
-            let mean = abs.flatten_all()?.mean(0)?.to_scalar::<f32>()?;
+            let max = abs.flatten_all()?.max(0)?.flatten_all()?.to_vec1::<f32>()?[0];
+            let mean = abs.flatten_all()?.mean(0)?.flatten_all()?.to_vec1::<f32>()?[0];
             eprintln!(
                 "batched contiguous model decode row {row}: max_abs_diff={max:e} mean_abs_diff={mean:e}"
             );
@@ -29718,7 +29735,7 @@ mod tests {
     #[cfg(feature = "cuda")]
     #[test]
     fn test_model_forward_paged_decode_contiguous_batch_dyn_seqlen_cuda() -> Result<()> {
-        let device = match Device::new_cuda(0) {
+        let device = match new_cuda_device(0) {
             Ok(device) => device,
             Err(err) => {
                 eprintln!(
@@ -29877,7 +29894,7 @@ mod tests {
             None,
             None,
         )?;
-        device.synchronize()?;
+        synchronize_for_profile(&device)?;
         assert_eq!(batched.dims(), &[batch, 1usize, vocab]);
 
         for row in 0..batch {
@@ -29898,7 +29915,7 @@ mod tests {
                 (prefix_k_row1.clone(), prefix_v_row1.clone())
             };
             assert!(row_cache.write_token_major_native(0, &row_table, 0, &row_k, &row_v)?);
-            let positions = Tensor::from_slice(&[row_start_pos as f32], 1usize, &device)?;
+            let positions = Tensor::from_slice(&[row_start_pos as f32], 1usize)?.to_device(device)?;
             let rowwise = model_forward_paged(
                 &*backend,
                 &token_ids[row..row + 1],
@@ -29911,13 +29928,13 @@ mod tests {
                 None,
                 Some(&positions),
             )?;
-            device.synchronize()?;
+            synchronize_for_profile(&device)?;
 
             let batch_row = batched.narrow(0, row, 1)?;
             let diff = (batch_row.to_dtype(DType::F32)? - rowwise.to_dtype(DType::F32)?)?;
             let abs = diff.abs()?;
-            let max = abs.flatten_all()?.max(0)?.to_scalar::<f32>()?;
-            let mean = abs.flatten_all()?.mean(0)?.to_scalar::<f32>()?;
+            let max = abs.flatten_all()?.max(0)?.flatten_all()?.to_vec1::<f32>()?[0];
+            let mean = abs.flatten_all()?.mean(0)?.flatten_all()?.to_vec1::<f32>()?[0];
             eprintln!(
                 "dyn_seqlen batched contiguous model decode row {row} (start_pos={row_start_pos}): max_abs_diff={max:e} mean_abs_diff={mean:e}"
             );
@@ -30023,10 +30040,10 @@ mod tests {
             Some(&mut batch_state),
             None,
         )?;
-        device.synchronize()?;
+        synchronize_for_profile(&device)?;
         assert_eq!(batched.dims(), &[batch, 1usize, config.vocab_size]);
 
-        let positions = Tensor::from_slice(&[start_pos as f32], 1usize, &device)?;
+        let positions = Tensor::from_slice(&[start_pos as f32], 1usize)?.to_device(device)?;
         for row in 0..batch {
             let mut row_cache = PagedKvCache::new_kt(
                 config.num_full_attention_layers,
@@ -30053,7 +30070,7 @@ mod tests {
                 None,
                 Some(&positions),
             )?;
-            device.synchronize()?;
+            synchronize_for_profile(&device)?;
 
             let batch_row = batched.narrow(0, row, 1)?;
             let (max, mean) = tensor_abs_diff_stats(&batch_row, &rowwise)?;
@@ -31642,17 +31659,17 @@ mod tests {
         row0.recurrent_states[0] = Tensor::from_slice(
             &recurrent_values0,
             (1usize, 4usize, 4usize, 4usize),
-            &device,
-        )?;
+        )?
+        .to_device(device)?;
         row1.recurrent_states[0] = Tensor::from_slice(
             &recurrent_values1,
             (1usize, 4usize, 4usize, 4usize),
-            &device,
-        )?;
+        )?
+        .to_device(device)?;
         row0.conv_states[0] =
-            Tensor::from_slice(&conv_values0, (1usize, 32usize, 3usize), &device)?;
+            Tensor::from_slice(&conv_values0, (1usize, 32usize, 3usize))?.to_device(device)?;
         row1.conv_states[0] =
-            Tensor::from_slice(&conv_values1, (1usize, 32usize, 3usize), &device)?;
+            Tensor::from_slice(&conv_values1, (1usize, 32usize, 3usize))?.to_device(device)?;
 
         let batched = LinearAttentionState::from_batch_rows(&[&row0, &row1])?;
         assert_eq!(batched.batch_size()?, 2);
@@ -31947,7 +31964,7 @@ mod tests {
     #[cfg(feature = "cuda")]
     #[test]
     fn test_cuda_flash_attention_training_bwd_kt_collapses_gqa_grads() -> Result<()> {
-        let device = match Device::new_cuda(0) {
+        let device = match new_cuda_device(0) {
             Ok(device) => device,
             Err(err) => {
                 eprintln!(
@@ -32063,12 +32080,12 @@ mod tests {
             .abs()?
             .flatten_all()?
             .max(0)?
-            .to_scalar::<f32>()?;
+            .flatten_all()?.to_vec1::<f32>()?[0];
         let state_diff = (&state_chunk - &state_seq)?
             .abs()?
             .flatten_all()?
             .max(0)?
-            .to_scalar::<f32>()?;
+            .flatten_all()?.to_vec1::<f32>()?[0];
 
         // Task acceptance: max abs diff < 1e-3 in bf16. We run the test in
         // F32 so the actual tolerance is much tighter; guard against both
@@ -32094,12 +32111,12 @@ mod tests {
                 .abs()?
                 .flatten_all()?
                 .max(0)?
-                .to_scalar::<f32>()?;
+                .flatten_all()?.to_vec1::<f32>()?[0];
             let sd = (&state_a - &state_b)?
                 .abs()?
                 .flatten_all()?
                 .max(0)?
-                .to_scalar::<f32>()?;
+                .flatten_all()?.to_vec1::<f32>()?[0];
             assert!(d < 1e-3, "chunkwise(cs={cs}) output diff {d}");
             assert!(sd < 1e-3, "chunkwise(cs={cs}) state diff {sd}");
         }
@@ -32183,7 +32200,7 @@ mod tests {
                 .abs()?
                 .flatten_all()?
                 .max(0)?
-                .to_scalar::<f32>()?;
+                .flatten_all()?.to_vec1::<f32>()?[0];
             assert!(
                 diff < tol,
                 "{name} gradient diff too large: {diff} >= {tol}"
@@ -32243,7 +32260,7 @@ mod tests {
             .abs()?
             .flatten_all()?
             .max(0)?
-            .to_scalar::<f32>()?;
+            .flatten_all()?.to_vec1::<f32>()?[0];
         assert!(diff < tol, "{name} gradient diff too large: {diff} >= {tol}");
         Ok(())
     }
@@ -32480,7 +32497,7 @@ mod tests {
         let k = det_tensor(&[b, nv, t, dk], 0.2, 0.0, &device)?.to_dtype(dtype)?;
         let v = det_tensor(&[b, nv, t, dv], 0.4, 0.0, &device)?.to_dtype(dtype)?;
         let beta = Tensor::ones((b, nv, t), dtype, &device)?;
-        let g = Tensor::from_vec(vec![-100.0f32; b * nv * t], (b, nv, t), &device)?;
+        let g = Tensor::from_vec(vec![-100.0f32; b * nv * t], (b, nv, t))?.to_device(device)?;
         let state_init = Tensor::zeros((b, nv, dk, dv), dtype, &device)?;
         let backend = test_backend(&device);
 
@@ -32542,12 +32559,12 @@ mod tests {
             .abs()?
             .flatten_all()?
             .max(0)?
-            .to_scalar::<f32>()?;
+            .flatten_all()?.to_vec1::<f32>()?[0];
         let state_diff = (&state_fast - &state_seq)?
             .abs()?
             .flatten_all()?
             .max(0)?
-            .to_scalar::<f32>()?;
+            .flatten_all()?.to_vec1::<f32>()?[0];
 
         assert!(
             out_diff < 1e-5,
@@ -32575,7 +32592,7 @@ mod tests {
         use rand::rngs::StdRng;
         use rand::{RngExt, SeedableRng};
 
-        let device = match Device::new_cuda(0) {
+        let device = match new_cuda_device(0) {
             Ok(d) => d,
             Err(_) => {
                 eprintln!("CUDA not available, skipping test_gdn_kernel_matches_fallback");
@@ -32602,9 +32619,9 @@ mod tests {
             .collect();
         let beta_data: Vec<f32> = (0..n_b).map(|_| rng.random_range(0.5f32..1.5f32)).collect();
 
-        let a_f32 = Tensor::from_slice(&a_data, (b, nv, c, c), &device)?;
-        let v_f32 = Tensor::from_slice(&v_data, (b, nv, c, dv), &device)?;
-        let beta_f32 = Tensor::from_slice(&beta_data, (b, nv, c), &device)?;
+        let a_f32 = Tensor::from_slice(&a_data, (b, nv, c, c))?.to_device(device)?;
+        let v_f32 = Tensor::from_slice(&v_data, (b, nv, c, dv))?.to_device(device)?;
+        let beta_f32 = Tensor::from_slice(&beta_data, (b, nv, c))?.to_device(device)?;
 
         // Make A_strict actually strictly lower triangular (matches what
         // the recurrence produces upstream of compute_w_chunk).
@@ -32621,8 +32638,8 @@ mod tests {
 
         let diff = (w_kernel.to_dtype(DType::F32)? - w_fb.to_dtype(DType::F32)?)?;
         let abs = diff.abs()?;
-        let max = abs.flatten_all()?.max(0)?.to_scalar::<f32>()?;
-        let mean = abs.flatten_all()?.mean(0)?.to_scalar::<f32>()?;
+        let max = abs.flatten_all()?.max(0)?.flatten_all()?.to_vec1::<f32>()?[0];
+        let mean = abs.flatten_all()?.mean(0)?.flatten_all()?.to_vec1::<f32>()?[0];
 
         eprintln!("gdn-kernel vs fallback: max_abs_diff={max:e}, mean_abs_diff={mean:e}");
 
@@ -32671,9 +32688,9 @@ mod tests {
             .collect();
         let beta_data: Vec<f32> = (0..n_b).map(|_| rng.random_range(0.5f32..1.5f32)).collect();
 
-        let a_f32 = Tensor::from_slice(&a_data, (b, nv, c, c), &device)?;
-        let v_f32 = Tensor::from_slice(&v_data, (b, nv, c, dv), &device)?;
-        let beta_f32 = Tensor::from_slice(&beta_data, (b, nv, c), &device)?;
+        let a_f32 = Tensor::from_slice(&a_data, (b, nv, c, c))?.to_device(device)?;
+        let v_f32 = Tensor::from_slice(&v_data, (b, nv, c, dv))?.to_device(device)?;
+        let beta_f32 = Tensor::from_slice(&beta_data, (b, nv, c))?.to_device(device)?;
 
         let mask = strict_lower_tri_mask(c, DType::F32, &device)?;
         let a_f32 = a_f32.broadcast_mul(&mask)?;
@@ -32688,8 +32705,8 @@ mod tests {
 
         let diff = (w_kernel.to_dtype(DType::F32)? - w_fb.to_dtype(DType::F32)?)?;
         let abs = diff.abs()?;
-        let max = abs.flatten_all()?.max(0)?.to_scalar::<f32>()?;
-        let mean = abs.flatten_all()?.mean(0)?.to_scalar::<f32>()?;
+        let max = abs.flatten_all()?.max(0)?.flatten_all()?.to_vec1::<f32>()?[0];
+        let mean = abs.flatten_all()?.mean(0)?.flatten_all()?.to_vec1::<f32>()?[0];
 
         eprintln!(
             "metal gdn-forward-sub vs fallback: max_abs_diff={max:e}, mean_abs_diff={mean:e}"
@@ -32719,7 +32736,7 @@ mod tests {
         use rand::rngs::StdRng;
         use rand::{RngExt, SeedableRng};
 
-        let device = match Device::new_cuda(0) {
+        let device = match new_cuda_device(0) {
             Ok(d) => d,
             Err(_) => {
                 eprintln!(
@@ -32760,12 +32777,12 @@ mod tests {
             .map(|_| rng.random_range(-0.1f32..0.1f32))
             .collect();
 
-        let q_f32 = Tensor::from_slice(&q_data, (b, nv, t, dk), &device)?;
-        let k_f32 = Tensor::from_slice(&k_data, (b, nv, t, dk), &device)?;
-        let v_f32 = Tensor::from_slice(&v_data, (b, nv, t, dv), &device)?;
-        let beta_f32 = Tensor::from_slice(&beta_data, (b, nv, t), &device)?;
-        let g_f32 = Tensor::from_slice(&g_data, (b, nv, t), &device)?;
-        let state_f32 = Tensor::from_slice(&s_data, (b, nv, dk, dv), &device)?;
+        let q_f32 = Tensor::from_slice(&q_data, (b, nv, t, dk))?.to_device(device)?;
+        let k_f32 = Tensor::from_slice(&k_data, (b, nv, t, dk))?.to_device(device)?;
+        let v_f32 = Tensor::from_slice(&v_data, (b, nv, t, dv))?.to_device(device)?;
+        let beta_f32 = Tensor::from_slice(&beta_data, (b, nv, t))?.to_device(device)?;
+        let g_f32 = Tensor::from_slice(&g_data, (b, nv, t))?.to_device(device)?;
+        let state_f32 = Tensor::from_slice(&s_data, (b, nv, dk, dv))?.to_device(device)?;
 
         let q = q_f32.to_dtype(DType::BF16)?;
         let k = k_f32.to_dtype(DType::BF16)?;
@@ -32803,12 +32820,12 @@ mod tests {
 
         let out_diff = (out_kernel.to_dtype(DType::F32)? - &out_ref)?;
         let abs = out_diff.abs()?;
-        let max = abs.flatten_all()?.max(0)?.to_scalar::<f32>()?;
-        let mean = abs.flatten_all()?.mean(0)?.to_scalar::<f32>()?;
+        let max = abs.flatten_all()?.max(0)?.flatten_all()?.to_vec1::<f32>()?[0];
+        let mean = abs.flatten_all()?.mean(0)?.flatten_all()?.to_vec1::<f32>()?[0];
         let s_diff = (state_kernel.to_dtype(DType::F32)? - &state_ref)?;
         let s_abs = s_diff.abs()?;
-        let s_max = s_abs.flatten_all()?.max(0)?.to_scalar::<f32>()?;
-        let s_mean = s_abs.flatten_all()?.mean(0)?.to_scalar::<f32>()?;
+        let s_max = s_abs.flatten_all()?.max(0)?.flatten_all()?.to_vec1::<f32>()?[0];
+        let s_mean = s_abs.flatten_all()?.mean(0)?.flatten_all()?.to_vec1::<f32>()?[0];
 
         eprintln!(
             "gdn-recurrent vs reference: out max={max:e} mean={mean:e}, state max={s_max:e} mean={s_mean:e}"
@@ -32878,13 +32895,13 @@ mod tests {
             .map(|_| rng.random_range(-0.1f32..0.1f32))
             .collect();
 
-        let q = Tensor::from_slice(&q_data, (b, nv, t, dk), &device)?.to_dtype(DType::BF16)?;
-        let k = Tensor::from_slice(&k_data, (b, nv, t, dk), &device)?.to_dtype(DType::BF16)?;
-        let v = Tensor::from_slice(&v_data, (b, nv, t, dv), &device)?.to_dtype(DType::BF16)?;
-        let beta = Tensor::from_slice(&beta_data, (b, nv, t), &device)?.to_dtype(DType::BF16)?;
-        let g = Tensor::from_slice(&g_data, (b, nv, t), &device)?.to_dtype(DType::BF16)?;
+        let q = Tensor::from_slice(&q_data, (b, nv, t, dk))?.to_device(device)?.to_dtype(DType::BF16)?;
+        let k = Tensor::from_slice(&k_data, (b, nv, t, dk))?.to_device(device)?.to_dtype(DType::BF16)?;
+        let v = Tensor::from_slice(&v_data, (b, nv, t, dv))?.to_device(device)?.to_dtype(DType::BF16)?;
+        let beta = Tensor::from_slice(&beta_data, (b, nv, t))?.to_device(device)?.to_dtype(DType::BF16)?;
+        let g = Tensor::from_slice(&g_data, (b, nv, t))?.to_device(device)?.to_dtype(DType::BF16)?;
         let state_bf16 =
-            Tensor::from_slice(&s_data, (b, nv, dk, dv), &device)?.to_dtype(DType::BF16)?;
+            Tensor::from_slice(&s_data, (b, nv, dk, dv))?.to_device(device)?.to_dtype(DType::BF16)?;
 
         let q_ref = q.to_dtype(DType::F32)?;
         let k_ref = k.to_dtype(DType::F32)?;
@@ -32906,12 +32923,12 @@ mod tests {
 
         let out_diff = (out_kernel.to_dtype(DType::F32)? - &out_ref)?;
         let abs = out_diff.abs()?;
-        let max = abs.flatten_all()?.max(0)?.to_scalar::<f32>()?;
-        let mean = abs.flatten_all()?.mean(0)?.to_scalar::<f32>()?;
+        let max = abs.flatten_all()?.max(0)?.flatten_all()?.to_vec1::<f32>()?[0];
+        let mean = abs.flatten_all()?.mean(0)?.flatten_all()?.to_vec1::<f32>()?[0];
         let s_diff = (state_kernel.to_dtype(DType::F32)? - &state_ref)?;
         let s_abs = s_diff.abs()?;
-        let s_max = s_abs.flatten_all()?.max(0)?.to_scalar::<f32>()?;
-        let s_mean = s_abs.flatten_all()?.mean(0)?.to_scalar::<f32>()?;
+        let s_max = s_abs.flatten_all()?.max(0)?.flatten_all()?.to_vec1::<f32>()?[0];
+        let s_mean = s_abs.flatten_all()?.mean(0)?.flatten_all()?.to_vec1::<f32>()?[0];
 
         eprintln!(
             "metal gdn-recurrent vs reference: out max={max:e} mean={mean:e}, state max={s_max:e} mean={s_mean:e}"
@@ -32957,7 +32974,7 @@ mod tests {
         use rand::rngs::StdRng;
         use rand::{RngExt, SeedableRng};
 
-        let device = match Device::new_cuda(0) {
+        let device = match new_cuda_device(0) {
             Ok(d) => d,
             Err(_) => {
                 eprintln!("CUDA not available, skipping test_gdn_chunk_prep_matches_fallback");
@@ -32998,13 +33015,13 @@ mod tests {
             .map(|_| rng.random_range(-0.5f32..0.5f32))
             .collect();
 
-        let g = Tensor::from_slice(&g_data, (b, nv, c), &device)?.to_dtype(DType::BF16)?;
-        let v = Tensor::from_slice(&v_data, (b, nv, c, dv), &device)?.to_dtype(DType::BF16)?;
-        let kkt = Tensor::from_slice(&kkt_data, (b, nv, c, c), &device)?.to_dtype(DType::BF16)?;
-        let qkt = Tensor::from_slice(&qkt_data, (b, nv, c, c), &device)?.to_dtype(DType::BF16)?;
+        let g = Tensor::from_slice(&g_data, (b, nv, c))?.to_device(device)?.to_dtype(DType::BF16)?;
+        let v = Tensor::from_slice(&v_data, (b, nv, c, dv))?.to_device(device)?.to_dtype(DType::BF16)?;
+        let kkt = Tensor::from_slice(&kkt_data, (b, nv, c, c))?.to_device(device)?.to_dtype(DType::BF16)?;
+        let qkt = Tensor::from_slice(&qkt_data, (b, nv, c, c))?.to_device(device)?.to_dtype(DType::BF16)?;
         let ks_entry =
-            Tensor::from_slice(&ks_data, (b, nv, c, dv), &device)?.to_dtype(DType::BF16)?;
-        let q_s = Tensor::from_slice(&qs_data, (b, nv, c, dv), &device)?.to_dtype(DType::BF16)?;
+            Tensor::from_slice(&ks_data, (b, nv, c, dv))?.to_device(device)?.to_dtype(DType::BF16)?;
+        let q_s = Tensor::from_slice(&qs_data, (b, nv, c, dv))?.to_device(device)?.to_dtype(DType::BF16)?;
 
         // Kernel path.
         let (a_strict_k, b_mask_k, v_prime_k, q_s_scaled_k, decay_last_col_k, p_last_k) =
@@ -33042,8 +33059,8 @@ mod tests {
         let check = |name: &str, k: &Tensor, r: &Tensor| -> Result<()> {
             let diff = (k.to_dtype(DType::F32)? - r.to_dtype(DType::F32)?)?;
             let abs = diff.abs()?;
-            let max = abs.flatten_all()?.max(0)?.to_scalar::<f32>()?;
-            let mean = abs.flatten_all()?.mean(0)?.to_scalar::<f32>()?;
+            let max = abs.flatten_all()?.max(0)?.flatten_all()?.to_vec1::<f32>()?[0];
+            let mean = abs.flatten_all()?.mean(0)?.flatten_all()?.to_vec1::<f32>()?[0];
             eprintln!("gdn-chunk-prep {name}: max={max:e} mean={mean:e}");
             assert!(
                 max < 1e-2,
@@ -33077,7 +33094,7 @@ mod tests {
         use rand::rngs::StdRng;
         use rand::{RngExt, SeedableRng};
 
-        let device = match Device::new_cuda(0) {
+        let device = match new_cuda_device(0) {
             Ok(d) => d,
             Err(_) => {
                 eprintln!("CUDA not available, skipping test_gdn_chunk_body_matches_fallback");
@@ -33119,15 +33136,15 @@ mod tests {
         let decay_data: Vec<f32> = (0..n_c).map(|_| rng.random_range(0.6f32..1.0f32)).collect();
 
         let a_strict =
-            Tensor::from_slice(&a_data, (b, nv, c, c), &device)?.to_dtype(DType::BF16)?;
-        let b_mask = Tensor::from_slice(&b_data, (b, nv, c, c), &device)?.to_dtype(DType::BF16)?;
+            Tensor::from_slice(&a_data, (b, nv, c, c))?.to_device(device)?.to_dtype(DType::BF16)?;
+        let b_mask = Tensor::from_slice(&b_data, (b, nv, c, c))?.to_device(device)?.to_dtype(DType::BF16)?;
         let v_prime =
-            Tensor::from_slice(&v_data, (b, nv, c, dv), &device)?.to_dtype(DType::BF16)?;
+            Tensor::from_slice(&v_data, (b, nv, c, dv))?.to_device(device)?.to_dtype(DType::BF16)?;
         let q_s_scaled =
-            Tensor::from_slice(&qss_data, (b, nv, c, dv), &device)?.to_dtype(DType::BF16)?;
-        let beta = Tensor::from_slice(&beta_data, (b, nv, c), &device)?.to_dtype(DType::BF16)?;
+            Tensor::from_slice(&qss_data, (b, nv, c, dv))?.to_device(device)?.to_dtype(DType::BF16)?;
+        let beta = Tensor::from_slice(&beta_data, (b, nv, c))?.to_device(device)?.to_dtype(DType::BF16)?;
         let decay_last_col =
-            Tensor::from_slice(&decay_data, (b, nv, c), &device)?.to_dtype(DType::BF16)?;
+            Tensor::from_slice(&decay_data, (b, nv, c))?.to_device(device)?.to_dtype(DType::BF16)?;
 
         let (out_kernel, ww_kernel) = kiln_gdn_kernel::gdn_chunk_scan(
             &a_strict,
@@ -33150,8 +33167,8 @@ mod tests {
         let check = |name: &str, got: &Tensor, want: &Tensor| -> Result<()> {
             let diff = (got.to_dtype(DType::F32)? - want.to_dtype(DType::F32)?)?;
             let abs = diff.abs()?;
-            let max = abs.flatten_all()?.max(0)?.to_scalar::<f32>()?;
-            let mean = abs.flatten_all()?.mean(0)?.to_scalar::<f32>()?;
+            let max = abs.flatten_all()?.max(0)?.flatten_all()?.to_vec1::<f32>()?[0];
+            let mean = abs.flatten_all()?.mean(0)?.flatten_all()?.to_vec1::<f32>()?[0];
             eprintln!("gdn-chunk-body {name}: max={max:e} mean={mean:e}");
             assert!(
                 max < 2e-2,
@@ -33180,7 +33197,7 @@ mod tests {
         use rand::rngs::StdRng;
         use rand::{RngExt, SeedableRng};
 
-        let device = match Device::new_cuda(0) {
+        let device = match new_cuda_device(0) {
             Ok(d) => d,
             Err(_) => {
                 eprintln!(
@@ -33229,17 +33246,17 @@ mod tests {
             .map(|_| rng.random_range(-0.25f32..0.25f32))
             .collect();
 
-        let g = Tensor::from_slice(&g_data, (b, nv, c), &device)?.to_dtype(DType::BF16)?;
-        let v = Tensor::from_slice(&v_data, (b, nv, c, dv), &device)?.to_dtype(DType::BF16)?;
-        let kkt = Tensor::from_slice(&kkt_data, (b, nv, c, c), &device)?.to_dtype(DType::BF16)?;
-        let qkt = Tensor::from_slice(&qkt_data, (b, nv, c, c), &device)?.to_dtype(DType::BF16)?;
+        let g = Tensor::from_slice(&g_data, (b, nv, c))?.to_device(device)?.to_dtype(DType::BF16)?;
+        let v = Tensor::from_slice(&v_data, (b, nv, c, dv))?.to_device(device)?.to_dtype(DType::BF16)?;
+        let kkt = Tensor::from_slice(&kkt_data, (b, nv, c, c))?.to_device(device)?.to_dtype(DType::BF16)?;
+        let qkt = Tensor::from_slice(&qkt_data, (b, nv, c, c))?.to_device(device)?.to_dtype(DType::BF16)?;
         let ks_entry =
-            Tensor::from_slice(&ks_data, (b, nv, c, dv), &device)?.to_dtype(DType::BF16)?;
-        let q_s = Tensor::from_slice(&qs_data, (b, nv, c, dv), &device)?.to_dtype(DType::BF16)?;
-        let beta = Tensor::from_slice(&beta_data, (b, nv, c), &device)?.to_dtype(DType::BF16)?;
-        let k_t = Tensor::from_slice(&kt_data, (b, nv, dk, c), &device)?.to_dtype(DType::BF16)?;
+            Tensor::from_slice(&ks_data, (b, nv, c, dv))?.to_device(device)?.to_dtype(DType::BF16)?;
+        let q_s = Tensor::from_slice(&qs_data, (b, nv, c, dv))?.to_device(device)?.to_dtype(DType::BF16)?;
+        let beta = Tensor::from_slice(&beta_data, (b, nv, c))?.to_device(device)?.to_dtype(DType::BF16)?;
+        let k_t = Tensor::from_slice(&kt_data, (b, nv, dk, c))?.to_device(device)?.to_dtype(DType::BF16)?;
         let mut state_kernel =
-            Tensor::from_slice(&state_data, (b, nv, dk, dv), &device)?.to_dtype(DType::BF16)?;
+            Tensor::from_slice(&state_data, (b, nv, dk, dv))?.to_device(device)?.to_dtype(DType::BF16)?;
         let state_ref = state_kernel.clone();
 
         let out_kernel = kiln_gdn_kernel::gdn_full_chunk_forward(
@@ -33272,8 +33289,8 @@ mod tests {
             |name: &str, got: &Tensor, want: &Tensor, max_tol: f32, mean_tol: f32| -> Result<()> {
                 let diff = (got.to_dtype(DType::F32)? - want.to_dtype(DType::F32)?)?;
                 let abs = diff.abs()?;
-                let max = abs.flatten_all()?.max(0)?.to_scalar::<f32>()?;
-                let mean = abs.flatten_all()?.mean(0)?.to_scalar::<f32>()?;
+                let max = abs.flatten_all()?.max(0)?.flatten_all()?.to_vec1::<f32>()?[0];
+                let mean = abs.flatten_all()?.mean(0)?.flatten_all()?.to_vec1::<f32>()?[0];
                 eprintln!("gdn-full-chunk {name}: max={max:e} mean={mean:e}");
                 assert!(
                     max < max_tol,
@@ -33309,7 +33326,7 @@ mod tests {
         use rand::rngs::StdRng;
         use rand::{RngExt, SeedableRng};
 
-        let device = match Device::new_cuda(0) {
+        let device = match new_cuda_device(0) {
             Ok(d) => d,
             Err(_) => {
                 eprintln!(
@@ -33358,17 +33375,17 @@ mod tests {
             .map(|_| rng.random_range(-0.25f32..0.25f32))
             .collect();
 
-        let g = Tensor::from_slice(&g_data, (b, nv, c), &device)?.to_dtype(DType::BF16)?;
-        let v = Tensor::from_slice(&v_data, (b, nv, c, dv), &device)?.to_dtype(DType::BF16)?;
-        let kkt = Tensor::from_slice(&kkt_data, (b, nv, c, c), &device)?.to_dtype(DType::BF16)?;
-        let qkt = Tensor::from_slice(&qkt_data, (b, nv, c, c), &device)?.to_dtype(DType::BF16)?;
+        let g = Tensor::from_slice(&g_data, (b, nv, c))?.to_device(device)?.to_dtype(DType::BF16)?;
+        let v = Tensor::from_slice(&v_data, (b, nv, c, dv))?.to_device(device)?.to_dtype(DType::BF16)?;
+        let kkt = Tensor::from_slice(&kkt_data, (b, nv, c, c))?.to_device(device)?.to_dtype(DType::BF16)?;
+        let qkt = Tensor::from_slice(&qkt_data, (b, nv, c, c))?.to_device(device)?.to_dtype(DType::BF16)?;
         let ks_entry =
-            Tensor::from_slice(&ks_data, (b, nv, c, dv), &device)?.to_dtype(DType::BF16)?;
-        let q_s = Tensor::from_slice(&qs_data, (b, nv, c, dv), &device)?.to_dtype(DType::BF16)?;
-        let beta = Tensor::from_slice(&beta_data, (b, nv, c), &device)?.to_dtype(DType::BF16)?;
-        let k_t = Tensor::from_slice(&kt_data, (b, nv, dk, c), &device)?.to_dtype(DType::BF16)?;
+            Tensor::from_slice(&ks_data, (b, nv, c, dv))?.to_device(device)?.to_dtype(DType::BF16)?;
+        let q_s = Tensor::from_slice(&qs_data, (b, nv, c, dv))?.to_device(device)?.to_dtype(DType::BF16)?;
+        let beta = Tensor::from_slice(&beta_data, (b, nv, c))?.to_device(device)?.to_dtype(DType::BF16)?;
+        let k_t = Tensor::from_slice(&kt_data, (b, nv, dk, c))?.to_device(device)?.to_dtype(DType::BF16)?;
         let state0 =
-            Tensor::from_slice(&state_data, (b, nv, dk, dv), &device)?.to_dtype(DType::BF16)?;
+            Tensor::from_slice(&state_data, (b, nv, dk, dv))?.to_device(device)?.to_dtype(DType::BF16)?;
 
         let mut state_single = state0.clone();
         let out_single = kiln_gdn_kernel::gdn_full_chunk_forward(
@@ -33453,7 +33470,7 @@ mod tests {
         use rand::rngs::StdRng;
         use rand::{RngExt, SeedableRng};
 
-        let device = match Device::new_cuda(0) {
+        let device = match new_cuda_device(0) {
             Ok(d) => d,
             Err(_) => {
                 eprintln!(
@@ -33482,9 +33499,9 @@ mod tests {
             .map(|_| rng.random_range(-0.3f32..0.3f32))
             .collect();
 
-        let x_f32 = Tensor::from_slice(&x_data, (batch, channels, 1), &device)?;
-        let w_f32 = Tensor::from_slice(&w_data, (channels, 1, kernel_size), &device)?;
-        let s_init = Tensor::from_slice(&s_data, (batch, channels, kernel_size - 1), &device)?;
+        let x_f32 = Tensor::from_slice(&x_data, (batch, channels, 1))?.to_device(device)?;
+        let w_f32 = Tensor::from_slice(&w_data, (channels, 1, kernel_size))?.to_device(device)?;
+        let s_init = Tensor::from_slice(&s_data, (batch, channels, kernel_size - 1))?.to_device(device)?;
 
         let x = x_f32.to_dtype(DType::BF16)?;
         let w = w_f32.to_dtype(DType::BF16)?;
@@ -33514,8 +33531,8 @@ mod tests {
         // Output parity (silu fused on the kernel side).
         let diff = (out_k.to_dtype(DType::F32)? - out_fb.to_dtype(DType::F32)?)?;
         let abs = diff.abs()?;
-        let max = abs.flatten_all()?.max(0)?.to_scalar::<f32>()?;
-        let mean = abs.flatten_all()?.mean(0)?.to_scalar::<f32>()?;
+        let max = abs.flatten_all()?.max(0)?.flatten_all()?.to_vec1::<f32>()?[0];
+        let mean = abs.flatten_all()?.mean(0)?.flatten_all()?.to_vec1::<f32>()?[0];
         eprintln!("conv1d_update vs fallback: max_abs_diff={max:e} mean_abs_diff={mean:e}");
         assert!(
             max < 2e-3,
@@ -33528,7 +33545,7 @@ mod tests {
 
         // State parity — both paths write the same K-1 previous inputs.
         let sdiff = (s_k.to_dtype(DType::F32)? - s_fb.to_dtype(DType::F32)?)?;
-        let smax = sdiff.abs()?.flatten_all()?.max(0)?.to_scalar::<f32>()?;
+        let smax = sdiff.abs()?.flatten_all()?.max(0)?.flatten_all()?.to_vec1::<f32>()?[0];
         eprintln!("conv1d_update state parity: max_abs_diff={smax:e}");
         assert!(
             smax < 1e-5,
@@ -33547,7 +33564,7 @@ mod tests {
         use rand::rngs::StdRng;
         use rand::{RngExt, SeedableRng};
 
-        let device = match Device::new_cuda(0) {
+        let device = match new_cuda_device(0) {
             Ok(d) => d,
             Err(_) => {
                 eprintln!(
@@ -33577,11 +33594,11 @@ mod tests {
             .map(|_| rng.random_range(-0.3f32..0.3f32))
             .collect();
 
-        let x = Tensor::from_slice(&x_data, (batch, channels, seq_len), &device)?
+        let x = Tensor::from_slice(&x_data, (batch, channels, seq_len))?.to_device(device)?
             .to_dtype(DType::BF16)?;
-        let w = Tensor::from_slice(&w_data, (channels, 1, kernel_size), &device)?
+        let w = Tensor::from_slice(&w_data, (channels, 1, kernel_size))?.to_device(device)?
             .to_dtype(DType::BF16)?;
-        let s_init = Tensor::from_slice(&s_data, (batch, channels, kernel_size - 1), &device)?;
+        let s_init = Tensor::from_slice(&s_data, (batch, channels, kernel_size - 1))?.to_device(device)?;
 
         let mut s_fb = s_init.clone();
         let out_fb = causal_conv1d_prefill_with_dtype(&x, &w, &mut s_fb, kernel_size, DType::F32)?;
@@ -33605,8 +33622,8 @@ mod tests {
 
         let diff = (out_k.to_dtype(DType::F32)? - out_fb.to_dtype(DType::F32)?)?;
         let abs = diff.abs()?;
-        let max = abs.flatten_all()?.max(0)?.to_scalar::<f32>()?;
-        let mean = abs.flatten_all()?.mean(0)?.to_scalar::<f32>()?;
+        let max = abs.flatten_all()?.max(0)?.flatten_all()?.to_vec1::<f32>()?[0];
+        let mean = abs.flatten_all()?.mean(0)?.flatten_all()?.to_vec1::<f32>()?[0];
         eprintln!("conv1d_prefill vs fallback: max_abs_diff={max:e} mean_abs_diff={mean:e}");
         assert!(
             max < 2e-3,
@@ -33618,7 +33635,7 @@ mod tests {
         );
 
         let sdiff = (s_k.to_dtype(DType::F32)? - s_fb.to_dtype(DType::F32)?)?;
-        let smax = sdiff.abs()?.flatten_all()?.max(0)?.to_scalar::<f32>()?;
+        let smax = sdiff.abs()?.flatten_all()?.max(0)?.flatten_all()?.to_vec1::<f32>()?[0];
         eprintln!("conv1d_prefill state parity: max_abs_diff={smax:e}");
         assert!(
             smax < 1e-5,
@@ -33663,9 +33680,9 @@ mod tests {
             .map(|_| rng.random_range(-0.3f32..0.3f32))
             .collect();
 
-        let x_f32 = Tensor::from_slice(&x_data, (batch, channels, 1), &device)?;
-        let w_f32 = Tensor::from_slice(&w_data, (channels, 1, kernel_size), &device)?;
-        let s_init = Tensor::from_slice(&s_data, (batch, channels, kernel_size - 1), &device)?;
+        let x_f32 = Tensor::from_slice(&x_data, (batch, channels, 1))?.to_device(device)?;
+        let w_f32 = Tensor::from_slice(&w_data, (channels, 1, kernel_size))?.to_device(device)?;
+        let s_init = Tensor::from_slice(&s_data, (batch, channels, kernel_size - 1))?.to_device(device)?;
 
         let x = x_f32.to_dtype(DType::BF16)?;
         let w = w_f32.to_dtype(DType::BF16)?;
@@ -33692,8 +33709,8 @@ mod tests {
 
         let diff = (out_k.to_dtype(DType::F32)? - out_fb.to_dtype(DType::F32)?)?;
         let abs = diff.abs()?;
-        let max = abs.flatten_all()?.max(0)?.to_scalar::<f32>()?;
-        let mean = abs.flatten_all()?.mean(0)?.to_scalar::<f32>()?;
+        let max = abs.flatten_all()?.max(0)?.flatten_all()?.to_vec1::<f32>()?[0];
+        let mean = abs.flatten_all()?.mean(0)?.flatten_all()?.to_vec1::<f32>()?[0];
         eprintln!("metal conv1d_update vs fallback: max_abs_diff={max:e} mean_abs_diff={mean:e}");
         assert!(
             max < 2e-3,
@@ -33705,7 +33722,7 @@ mod tests {
         );
 
         let sdiff = (s_k.to_dtype(DType::F32)? - s_fb.to_dtype(DType::F32)?)?;
-        let smax = sdiff.abs()?.flatten_all()?.max(0)?.to_scalar::<f32>()?;
+        let smax = sdiff.abs()?.flatten_all()?.max(0)?.flatten_all()?.to_vec1::<f32>()?[0];
         eprintln!("metal conv1d_update state parity: max_abs_diff={smax:e}");
         assert!(
             smax < 1e-5,
@@ -33748,11 +33765,11 @@ mod tests {
             .map(|_| rng.random_range(-0.3f32..0.3f32))
             .collect();
 
-        let x = Tensor::from_slice(&x_data, (batch, channels, seq_len), &device)?
+        let x = Tensor::from_slice(&x_data, (batch, channels, seq_len))?.to_device(device)?
             .to_dtype(DType::BF16)?;
-        let w = Tensor::from_slice(&w_data, (channels, 1, kernel_size), &device)?
+        let w = Tensor::from_slice(&w_data, (channels, 1, kernel_size))?.to_device(device)?
             .to_dtype(DType::BF16)?;
-        let s_init = Tensor::from_slice(&s_data, (batch, channels, kernel_size - 1), &device)?;
+        let s_init = Tensor::from_slice(&s_data, (batch, channels, kernel_size - 1))?.to_device(device)?;
 
         let mut s_ref = s_init.clone();
         let out_ref =
@@ -33771,8 +33788,8 @@ mod tests {
 
         let diff = (out_bf16.to_dtype(DType::F32)? - out_ref.to_dtype(DType::F32)?)?;
         let abs = diff.abs()?;
-        let max = abs.flatten_all()?.max(0)?.to_scalar::<f32>()?;
-        let mean = abs.flatten_all()?.mean(0)?.to_scalar::<f32>()?;
+        let max = abs.flatten_all()?.max(0)?.flatten_all()?.to_vec1::<f32>()?[0];
+        let mean = abs.flatten_all()?.mean(0)?.flatten_all()?.to_vec1::<f32>()?[0];
         eprintln!("conv1d_prefill bf16 vs f32: max_abs_diff={max:e} mean_abs_diff={mean:e}");
         assert!(
             max < 2e-2,
@@ -33784,7 +33801,7 @@ mod tests {
         );
 
         let sdiff = (s_bf16.to_dtype(DType::F32)? - s_ref.to_dtype(DType::F32)?)?;
-        let smax = sdiff.abs()?.flatten_all()?.max(0)?.to_scalar::<f32>()?;
+        let smax = sdiff.abs()?.flatten_all()?.max(0)?.flatten_all()?.to_vec1::<f32>()?[0];
         eprintln!("conv1d_prefill bf16 state parity: max_abs_diff={smax:e}");
         assert!(
             smax < 1e-6,
@@ -33827,11 +33844,11 @@ mod tests {
             .map(|_| rng.random_range(-0.3f32..0.3f32))
             .collect();
 
-        let x = Tensor::from_slice(&x_data, (batch, channels, seq_len), &device)?
+        let x = Tensor::from_slice(&x_data, (batch, channels, seq_len))?.to_device(device)?
             .to_dtype(DType::BF16)?;
-        let w = Tensor::from_slice(&w_data, (channels, 1, kernel_size), &device)?
+        let w = Tensor::from_slice(&w_data, (channels, 1, kernel_size))?.to_device(device)?
             .to_dtype(DType::BF16)?;
-        let s_init = Tensor::from_slice(&s_data, (batch, channels, kernel_size - 1), &device)?;
+        let s_init = Tensor::from_slice(&s_data, (batch, channels, kernel_size - 1))?.to_device(device)?;
 
         let mut s_ref = s_init.clone();
         let out_ref =
@@ -33853,8 +33870,8 @@ mod tests {
 
         let diff = (out_kernel.to_dtype(DType::F32)? - out_ref.to_dtype(DType::F32)?)?;
         let abs = diff.abs()?;
-        let max = abs.flatten_all()?.max(0)?.to_scalar::<f32>()?;
-        let mean = abs.flatten_all()?.mean(0)?.to_scalar::<f32>()?;
+        let max = abs.flatten_all()?.max(0)?.flatten_all()?.to_vec1::<f32>()?[0];
+        let mean = abs.flatten_all()?.mean(0)?.flatten_all()?.to_vec1::<f32>()?[0];
         eprintln!(
             "metal conv1d_prefill kernel vs fallback: max_abs_diff={max:e} mean_abs_diff={mean:e}"
         );
@@ -33868,7 +33885,7 @@ mod tests {
         );
 
         let sdiff = (s_kernel.to_dtype(DType::F32)? - s_ref.to_dtype(DType::F32)?)?;
-        let smax = sdiff.abs()?.flatten_all()?.max(0)?.to_scalar::<f32>()?;
+        let smax = sdiff.abs()?.flatten_all()?.max(0)?.flatten_all()?.to_vec1::<f32>()?[0];
         eprintln!("metal conv1d_prefill kernel state parity: max_abs_diff={smax:e}");
         assert!(
             smax < 1e-6,
@@ -34130,12 +34147,12 @@ mod tests {
             .abs()?
             .flatten_all()?
             .max(0)?
-            .to_scalar::<f32>()?;
+            .flatten_all()?.to_vec1::<f32>()?[0];
         let hidden_diff = (&mono_hidden - &stream_hidden)?
             .abs()?
             .flatten_all()?
             .max(0)?
-            .to_scalar::<f32>()?;
+            .flatten_all()?.to_vec1::<f32>()?[0];
         assert!(
             logits_diff <= 1e-5,
             "streaming MTP prefill logits drifted: max_abs_diff={logits_diff:e}"
@@ -34349,12 +34366,12 @@ mod tests {
             weight_data[i * vocab + best] = x_data[i] * norm_weight_data[i];
         }
 
-        let x = Tensor::from_slice(&x_data, (1usize, 1usize, hidden), &device)?
+        let x = Tensor::from_slice(&x_data, (1usize, 1usize, hidden))?.to_device(device)?
             .to_dtype(DType::BF16)?;
         let norm_weight =
-            Tensor::from_slice(&norm_weight_data, (hidden,), &device)?.to_dtype(DType::BF16)?;
+            Tensor::from_slice(&norm_weight_data, (hidden,))?.to_device(device)?.to_dtype(DType::BF16)?;
         let weight_t =
-            Tensor::from_slice(&weight_data, (hidden, vocab), &device)?.to_dtype(DType::BF16)?;
+            Tensor::from_slice(&weight_data, (hidden, vocab))?.to_device(device)?.to_dtype(DType::BF16)?;
 
         let normed = rms_norm(&x, &norm_weight, 1e-6)?;
         let reference = lm_head_argmax(&normed, &weight_t)?;
@@ -34738,7 +34755,7 @@ mod tests {
     #[test]
     #[cfg(feature = "cuda")]
     fn test_streaming_matches_monolithic_cuda() -> Result<()> {
-        let device = match Device::new_cuda(0) {
+        let device = match new_cuda_device(0) {
             Ok(d) => d,
             Err(_) => {
                 eprintln!("CUDA not available, skipping test_streaming_matches_monolithic_cuda");
@@ -35011,7 +35028,7 @@ mod tests {
     #[cfg(feature = "cuda")]
     #[test]
     fn test_cuda_rotary_one_bwd_kt_bridge_default_matches_candle_path() -> Result<()> {
-        let Ok(device) = Device::new_cuda(0) else {
+        let Ok(device) = new_cuda_device(0) else {
             eprintln!(
                 "CUDA unavailable, skipping test_cuda_rotary_one_bwd_kt_bridge_default_matches_candle_path"
             );
@@ -35040,7 +35057,7 @@ mod tests {
             for _ in 0..grad_n {
                 raw_g.push(next(0.3));
             }
-            let g = Tensor::from_vec(raw_g, (batch, seq_len, heads, head_dim), &device)?
+            let g = Tensor::from_vec(raw_g, (batch, seq_len, heads, head_dim))?.to_device(device)?
                 .to_dtype(DType::BF16)?;
 
             // cos/sin tables: [S, R/2] F32, values in [-1, 1].
@@ -35050,8 +35067,8 @@ mod tests {
                 raw_cos.push(next(1.0));
                 raw_sin.push(next(1.0));
             }
-            let cos = Tensor::from_vec(raw_cos, (seq_len, half), &device)?;
-            let sin = Tensor::from_vec(raw_sin, (seq_len, half), &device)?;
+            let cos = Tensor::from_vec(raw_cos, (seq_len, half))?.to_device(device)?;
+            let sin = Tensor::from_vec(raw_sin, (seq_len, half))?.to_device(device)?;
 
             assert!(
                 crate::rmsnorm_candle_shim::supports_rotary_one_bwd_bf16(&g, &cos, &sin, head_dim, rotary_dim),
@@ -35068,7 +35085,7 @@ mod tests {
             let gx_bridge = fused_rotary_one_backward_via_kt_bridge(&g, &cos, &sin, rotary_dim)
                 .expect("kt-bridge rotary_one_bwd should succeed");
 
-            device.synchronize()?;
+            synchronize_for_profile(&device)?;
 
             // Compare in f32 to keep the diff math precise.
             let a = gx_candle.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
