@@ -370,92 +370,103 @@ impl Tensor {
     // candle: `pub fn exp(&self) -> Result<Self>` etc.
     // ==================================================================
 
+    // #1082: kt's unary elementwise ops require a **contiguous** input (they
+    // `bail!("{op}: input must be contiguous")`), whereas candle's unary ops
+    // accepted strided/transposed/broadcast views. Each façade method below
+    // contiguifies first — an O(1) shared-clone when already contiguous, a
+    // device-correct `cuda_contiguous` (no host roundtrip) on CUDA — restoring
+    // candle-compat (same rationale as the elementwise/cast/cat/broadcast_as
+    // façade contiguify). Without this, a non-contiguous intermediate (e.g. a
+    // strided tensor in the GDN recurrence backward, now on the kt CUDA path)
+    // bails. `self.contiguous()?` is value-faithful.
+
     /// `exp(self)`. Delegates to [`ops::exp`].
     pub fn exp(&self) -> Result<Self> {
-        ops::exp(self)
+        ops::exp(&self.contiguous()?)
     }
 
     /// `sqrt(self)`. Delegates to [`ops::sqrt`].
     pub fn sqrt(&self) -> Result<Self> {
-        ops::sqrt(self)
+        ops::sqrt(&self.contiguous()?)
     }
 
     /// `-self`. Delegates to [`ops::neg`].
     pub fn neg(&self) -> Result<Self> {
-        ops::neg(self)
+        ops::neg(&self.contiguous()?)
     }
 
     /// `|self|`. Delegates to [`ops::abs`].
     pub fn abs(&self) -> Result<Self> {
-        ops::abs(self)
+        ops::abs(&self.contiguous()?)
     }
 
     /// Natural log `ln(self)`. candle names this `log`; delegates to
     /// [`ops::ln`].
     pub fn log(&self) -> Result<Self> {
-        ops::ln(self)
+        ops::ln(&self.contiguous()?)
     }
 
     /// `1/self`. candle names this `recip`; delegates to
     /// [`ops::reciprocal`].
     pub fn recip(&self) -> Result<Self> {
-        ops::reciprocal(self)
+        ops::reciprocal(&self.contiguous()?)
     }
 
     /// `self * self`. candle's `sqr`; composed as [`ops::mul`]`(self, self)`.
     pub fn sqr(&self) -> Result<Self> {
-        ops::mul(self, self)
+        let c = self.contiguous()?;
+        ops::mul(&c, &c)
     }
 
     /// `1/sqrt(self)`. Composed as `sqrt` then [`ops::reciprocal`].
     /// (candle has no `rsqrt` method, but `forward.rs` uses the idiom.)
     pub fn rsqrt(&self) -> Result<Self> {
-        ops::reciprocal(&ops::sqrt(self)?)
+        ops::reciprocal(&ops::sqrt(&self.contiguous()?)?)
     }
 
     /// `sin(self)`. Delegates to [`ops::sin`].
     pub fn sin(&self) -> Result<Self> {
-        ops::sin(self)
+        ops::sin(&self.contiguous()?)
     }
 
     /// `cos(self)`. Delegates to [`ops::cos`].
     pub fn cos(&self) -> Result<Self> {
-        ops::cos(self)
+        ops::cos(&self.contiguous()?)
     }
 
     /// `tanh(self)`. Delegates to [`ops::tanh`].
     pub fn tanh(&self) -> Result<Self> {
-        ops::tanh(self)
+        ops::tanh(&self.contiguous()?)
     }
 
     /// `gelu(self)`. Delegates to [`ops::gelu`].
     pub fn gelu(&self) -> Result<Self> {
-        ops::gelu(self)
+        ops::gelu(&self.contiguous()?)
     }
 
     /// `relu(self)`. Delegates to [`ops::relu`].
     pub fn relu(&self) -> Result<Self> {
-        ops::relu(self)
+        ops::relu(&self.contiguous()?)
     }
 
     /// `silu(self)` (a.k.a. swish). Delegates to [`ops::silu`].
     pub fn silu(&self) -> Result<Self> {
-        ops::silu(self)
+        ops::silu(&self.contiguous()?)
     }
 
     /// `sigmoid(self)`. Delegates to [`ops::sigmoid`].
     pub fn sigmoid(&self) -> Result<Self> {
-        ops::sigmoid(self)
+        ops::sigmoid(&self.contiguous()?)
     }
 
     /// `log2(self)`. Delegates to [`ops::log2`].
     pub fn log2(&self) -> Result<Self> {
-        ops::log2(self)
+        ops::log2(&self.contiguous()?)
     }
 
     /// `log10(self)`. Delegates to [`ops::log10`].
     pub fn log10(&self) -> Result<Self> {
-        ops::log10(self)
+        ops::log10(&self.contiguous()?)
     }
 
     // ==================================================================
