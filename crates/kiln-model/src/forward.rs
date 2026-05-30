@@ -16154,11 +16154,21 @@ pub fn gdn_recurrent_backward_no_grad(
         let decay_term = decay_last_col.broadcast_mul(&d_decay_last_col_acc)?;
         let decay_sum = decay_term.sum(LAST_DIM)?.unsqueeze(2)?;
         let last_mask = {
-            let idx_f32 = Tensor::arange(0u32, chunk as u32, q.device())?.to_dtype(DType::F32)?;
+            // #1082: build the index ramp directly in F32 (exact for chunk ≤ 64),
+            // not u32-then-cast — the kt U32→F32 cast is unsupported on CUDA and
+            // its fallback hits the CPU branch on a CUDA tensor. The U8 `eq` mask
+            // is then turned into an F32 multiplicative mask via `where_cond`
+            // (1.0 at the last position, else 0.0) so the `broadcast_mul`s below
+            // get matching F32 dtypes (kt binary ops require equal dtypes; candle
+            // auto-promoted the U8 mask).
+            let idx_f32 = Tensor::arange(0f32, chunk as f32, q.device())?;
             let target = kiln_tensor::ops::full_like(&idx_f32, (chunk - 1) as f32)?;
-            kiln_tensor::ops::eq(&idx_f32, &target)?
+            let eq_bool = kiln_tensor::ops::eq(&idx_f32, &target)?
                 .reshape((1, 1, chunk))?
-                .broadcast_as((batch, heads, chunk))?
+                .broadcast_as((batch, heads, chunk))?;
+            let ones = Tensor::ones((batch, heads, chunk), DType::F32, q.device())?;
+            let zeros = Tensor::zeros((batch, heads, chunk), DType::F32, q.device())?;
+            eq_bool.where_cond(&ones, &zeros)?
         };
         d_g_acc = (&d_g_acc - &decay_term)?;
         d_g_acc = (&d_g_acc + &decay_sum.broadcast_mul(&last_mask)?)?;
