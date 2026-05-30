@@ -7545,7 +7545,19 @@ impl GpuWeights {
         // force the legacy serial pack for A/B measurements or rollback.
         if w4a16_enabled && !marlin_pack_inputs.is_empty() {
             let pack_start = std::time::Instant::now();
-            let packed = crate::marlin_proj::pack_from_bf16_batch(&marlin_pack_inputs)
+            // #1082: `marlin_pack_inputs` holds kt tensors, but the marlin
+            // packer (`pack_from_bf16_batch`) is a candle-typed quantization
+            // island. Bridge each weight kt->candle once here.
+            let marlin_pack_inputs_candle: Vec<(candle_core::Tensor, i32)> = marlin_pack_inputs
+                .iter()
+                .map(|(t, group)| {
+                    Ok::<_, anyhow::Error>((
+                        kt_logits_to_candle(t).context("marlin batch pack: kt->candle weight")?,
+                        *group,
+                    ))
+                })
+                .collect::<Result<_>>()?;
+            let packed = crate::marlin_proj::pack_from_bf16_batch(&marlin_pack_inputs_candle)
                 .context("marlin batch pack")?;
             let pack_elapsed_ms = pack_start.elapsed().as_millis();
             let parallel = !crate::marlin_proj::parallel_pack_disabled();
@@ -15427,7 +15439,7 @@ pub fn sdpa_fallback_backward_no_grad(
         let keep: Vec<f32> = (0..seq_len)
             .flat_map(|i| (0..seq_len).map(move |j| if j <= i { 1.0f32 } else { 0.0f32 }))
             .collect();
-        let keep = Tensor::new(keep, device)?.reshape((1, 1, seq_len, seq_len))?;
+        let keep = Tensor::new(&keep, device)?.reshape((1, 1, seq_len, seq_len))?;
         dscores.broadcast_mul(&keep)?
     } else {
         dscores
@@ -21027,7 +21039,7 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
                 "batched contiguous paged attention requires uniform start_pos for the strict path",
             )?;
             let start_slots =
-                Tensor::from_vec_on(x.device(), strict_slots, vec![batch])?.contiguous()?;
+                Tensor::from_vec_on(x.device(), strict_slots.to_vec(), vec![batch])?.contiguous()?;
             let q_strict = {
                 let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
                 let q_strict = q.transpose(1, 2)?.contiguous()?;
@@ -22466,7 +22478,7 @@ fn apply_causal_mask_with_offset(
             (0..kv_len).map(move |j| if j < max_kv { 0.0 } else { f32::NEG_INFINITY })
         })
         .collect();
-    let mask = Tensor::new(mask, device)?.reshape((1, 1, q_len, kv_len))?;
+    let mask = Tensor::new(&mask, device)?.reshape((1, 1, q_len, kv_len))?;
     let mask = mask.to_dtype(scores.dtype())?;
     let out = scores.broadcast_add(&mask)?;
     Ok(out)
