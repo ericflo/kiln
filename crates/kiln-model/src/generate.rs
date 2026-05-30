@@ -4556,7 +4556,12 @@ impl ModelRunner {
         const BLOCK_SIZE: usize = 16;
 
         let max_total = prompt_tokens.len() + params.max_tokens;
-        let device = self.weights.embed_tokens.device();
+        // #1082: embed_tokens is now kt, so `.device()` is a kt Device.
+        // The candle-typed `PagedKvCache::new` wants `&candle_core::Device`;
+        // bridge once at this candle island.
+        let device_kt = self.weights.embed_tokens.device();
+        let device = kiln_kt_bridge::candle_device_from_kt(&device_kt)
+            .context("paged cache: kt device -> candle device")?;
         let dtype = match self.config.dtype {
             kiln_core::config::DType::BF16 => candle_core::DType::BF16,
             kiln_core::config::DType::FP16 => candle_core::DType::F16,
@@ -4575,7 +4580,7 @@ impl ModelRunner {
             self.config.num_kv_heads,
             self.config.head_dim,
             dtype,
-            device,
+            &device,
         )?;
         let mtp_cache = PagedKvCache::new(
             1,
@@ -4584,7 +4589,7 @@ impl ModelRunner {
             self.config.num_kv_heads,
             self.config.head_dim,
             dtype,
-            device,
+            &device,
         )?;
         let mut base_block_table = BlockTable::new();
         let mut mtp_block_table = BlockTable::new();
@@ -5013,7 +5018,12 @@ impl ModelRunner {
         const BLOCK_SIZE: usize = 16;
 
         let max_total = prompt_tokens.len() + params.max_tokens;
-        let device = self.weights.embed_tokens.device();
+        // #1082: embed_tokens is now kt, so `.device()` is a kt Device.
+        // Bridge once to the candle Device the candle-typed
+        // `PagedKvCache::new` requires.
+        let device_kt = self.weights.embed_tokens.device();
+        let device = kiln_kt_bridge::candle_device_from_kt(&device_kt)
+            .context("paged cache: kt device -> candle device")?;
         let dtype = match self.config.dtype {
             kiln_core::config::DType::BF16 => candle_core::DType::BF16,
             kiln_core::config::DType::FP16 => candle_core::DType::F16,
@@ -5028,7 +5038,7 @@ impl ModelRunner {
             self.config.num_kv_heads,
             self.config.head_dim,
             dtype,
-            device,
+            &device,
         )?;
         let mtp_cache = PagedKvCache::new(
             1,
@@ -5037,7 +5047,7 @@ impl ModelRunner {
             self.config.num_kv_heads,
             self.config.head_dim,
             dtype,
-            device,
+            &device,
         )?;
         let mut base_block_table = BlockTable::new();
         let mut mtp_block_table = BlockTable::new();

@@ -2245,14 +2245,18 @@ pub fn try_tape_gdn_recurrent_cuda(
     if !tape_forward_enabled() || !tape_gdn_enabled() {
         return Ok(None);
     }
-    if !matches!(q.device(), candle_core::Device::Cuda(_)) {
+    // #1082: q is kt now, so `.device()` is a kt Device.
+    if !matches!(q.device(), kiln_tensor::Device::Cuda(_)) {
         return Ok(None);
     }
 
     // Snapshot the entry state BEFORE the forward mutates it (the backward
     // needs it), and the device for backend reconstruction in `apply`.
+    // `tape_record_gdn_recurrent` is a candle-typed BackwardOp adapter
+    // island, so bridge the kt device to candle once here (#1082).
     let entry_state = recurrent_state.clone();
-    let device = q.device().clone();
+    let device = kiln_kt_bridge::candle_device_from_kt(&q.device())
+        .context("tape gdn recurrent: kt device -> candle device")?;
 
     // Production recurrence forward (mutates recurrent_state in place).
     // `gdn_recurrent_forward_from_parts` returns the recurrence output in

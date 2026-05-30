@@ -80,10 +80,6 @@ pub fn reset_gdn_full_chunk_forward_dispatch_counts() {
     CUDA_GDN_FULL_CHUNK_FORWARD_SINGLE_SUCCESSES.store(0, Ordering::Relaxed);
 }
 
-fn any_tracks_op(tensors: &[&candle_core::Tensor]) -> bool {
-    tensors.iter().any(|tensor| tensor.track_op())
-}
-
 fn with_cuda_resident_ids<R>(f: impl FnOnce(&mut HashSet<TensorId>) -> R) -> R {
     let registry = CUDA_RESIDENT_TENSOR_IDS.get_or_init(|| Mutex::new(HashSet::new()));
     let mut guard = registry
