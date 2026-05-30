@@ -2236,7 +2236,16 @@ fn try_kt_silu_composite(x: &Tensor) -> Result<Option<Tensor>> {
     Ok(Some(out))
 }
 
-fn any_tensor_tracks_op(tensors: &[&Tensor]) -> bool {
+fn any_tensor_tracks_op(tensors: &[&candle_core::Tensor]) -> bool {
+    tensors.iter().any(|tensor| tensor.track_op())
+}
+
+/// kt twin of [`any_tensor_tracks_op`] (#1082 forward-flip). kt tensors are
+/// forward-only — `track_op()` is structurally always `false` — so this is a
+/// no-op gate that always reports `false`. Provided so kt-path autograd gates
+/// keep the same call shape as the candle islands without a type clash.
+#[allow(dead_code)]
+fn any_kt_tensor_tracks_op(tensors: &[&kiln_tensor::Tensor]) -> bool {
     tensors.iter().any(|tensor| tensor.track_op())
 }
 
@@ -4211,22 +4220,22 @@ fn cuda_flash_attention_training_disabled() -> bool {
 
 #[cfg(feature = "cuda")]
 fn cuda_flash_attention_training_bf16(
-    q: &Tensor,
-    k: &Tensor,
-    v: &Tensor,
+    q: &candle_core::Tensor,
+    k: &candle_core::Tensor,
+    v: &candle_core::Tensor,
     num_heads: usize,
     num_kv_heads: usize,
     head_dim: usize,
-) -> Result<Option<Tensor>> {
+) -> Result<Option<candle_core::Tensor>> {
     if cuda_flash_attention_training_disabled() || !any_tensor_tracks_op(&[q, k, v]) {
         return Ok(None);
     }
-    if q.dtype() != DType::BF16
-        || k.dtype() != DType::BF16
-        || v.dtype() != DType::BF16
-        || !matches!(q.device(), Device::Cuda(_))
-        || !matches!(k.device(), Device::Cuda(_))
-        || !matches!(v.device(), Device::Cuda(_))
+    if q.dtype() != candle_core::DType::BF16
+        || k.dtype() != candle_core::DType::BF16
+        || v.dtype() != candle_core::DType::BF16
+        || !matches!(q.device(), candle_core::Device::Cuda(_))
+        || !matches!(k.device(), candle_core::Device::Cuda(_))
+        || !matches!(v.device(), candle_core::Device::Cuda(_))
         || !q.is_contiguous()
         || !k.is_contiguous()
         || !v.is_contiguous()
@@ -4362,12 +4371,12 @@ impl CustomOp3 for CudaFlashAttentionTrainingBf16 {
 
     fn bwd(
         &self,
-        q: &Tensor,
-        k: &Tensor,
-        v: &Tensor,
-        res: &Tensor,
-        grad_y: &Tensor,
-    ) -> CandleResult<(Option<Tensor>, Option<Tensor>, Option<Tensor>)> {
+        q: &candle_core::Tensor,
+        k: &candle_core::Tensor,
+        v: &candle_core::Tensor,
+        res: &candle_core::Tensor,
+        grad_y: &candle_core::Tensor,
+    ) -> CandleResult<(Option<candle_core::Tensor>, Option<candle_core::Tensor>, Option<candle_core::Tensor>)> {
         // Phase 7 (#1082): kt-only recompute shell. We only need
         // softmax_lse for backward; the recomputed output can drop after
         // the kt call returns.
@@ -4394,7 +4403,7 @@ impl CustomOp3 for CudaFlashAttentionTrainingBf16 {
             .map_err(|e| {
                 Error::Msg(format!("kt-adapter: fa_fwd_recompute lse: {e}"))
             })?;
-        let dout = if grad_y.dtype() == DType::BF16 {
+        let dout = if grad_y.dtype() == candle_core::DType::BF16 {
             grad_y.clone()
         } else {
             // Phase 7 (#1082): route the grad_y → BF16 cast in the
@@ -4406,12 +4415,10 @@ impl CustomOp3 for CudaFlashAttentionTrainingBf16 {
             // narrows to BF16 for FA-bwd's preferred dtype. Falls
             // through to candle's `.to_dtype()` when the gate is off
             // or the preconditions fail (e.g. non-contiguous grad_y).
-            match try_kt_to_dtype(grad_y, DType::BF16)
-                .map_err(|e| Error::Msg(format!("try_kt_to_dtype: {e}")))?
-            {
-                Some(out) => out,
-                None => grad_y.to_dtype(DType::BF16)?,
-            }
+            // #1082 forward-flip: candle-island recompute — route the cast
+            // through the candle `to_dtype_if_needed` (which internally
+            // bridges to the kt fast-path).
+            to_dtype_if_needed(grad_y, candle_core::DType::BF16)?
         };
         // Phase 7 (#1082): kt-only. The kt shell calls the same FA-bwd
         // FFI symbol as the previous candle shell. It returns expanded
