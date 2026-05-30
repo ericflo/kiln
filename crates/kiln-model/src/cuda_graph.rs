@@ -724,7 +724,24 @@ impl CudaGraphRunner {
             // `output_logits` is already the post-LM-head tensor
             // (`[batch, 1, vocab]`) — the wrapper does final_norm +
             // lm_head + slice_set inside the captured region.
-            let tokens = match crate::sampling::greedy_sample_rows(&captured.output_logits) {
+            // #1082: `output_logits` is a graph-stable candle buffer (its
+            // device pointer is baked into the captured graph); bridge it
+            // zero-copy to kt for the now-kt-typed `greedy_sample_rows`.
+            let output_logits_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(
+                &captured.output_logits,
+            ) {
+                Ok(t) => t,
+                Err(e) => {
+                    tracing::warn!(
+                        batch_size,
+                        max_seqlen_k = key.max_seqlen_k,
+                        error = %e,
+                        "batched graph replay: bridge output_logits candle->kt failed, falling back to eager"
+                    );
+                    return Ok(None);
+                }
+            };
+            let tokens = match crate::sampling::greedy_sample_rows(&output_logits_kt) {
                 Ok(t) => t,
                 Err(e) => {
                     tracing::warn!(
@@ -1861,7 +1878,12 @@ impl CudaGraphRunner {
         };
         // Argmax + DtoH happens OUTSIDE the capture window — `output_logits`
         // holds the captured forward's final-norm + LM-head result.
-        let tokens = crate::sampling::greedy_sample_rows(&captured.output_logits)
+        // #1082: bridge the graph-stable candle buffer zero-copy to kt for
+        // the now-kt-typed `greedy_sample_rows`.
+        let output_logits_kt =
+            kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&captured.output_logits)
+                .context("bridge captured output_logits candle->kt failed")?;
+        let tokens = crate::sampling::greedy_sample_rows(&output_logits_kt)
             .context("argmax over captured output_logits failed")?;
         self.captured_batched.insert(key, captured);
         Ok(tokens)

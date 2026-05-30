@@ -1257,10 +1257,13 @@ pub fn try_tape_lora_add_cuda(
     // Device + dtype gate: kt matmul + kt mul_scalar are CUDA-only here
     // (they have CPU paths too, but the bridge's `kt_tensor_from_candle_cuda_*`
     // helpers are CUDA-only). Match the existing tape adapters.
+    // base / x are candle (the caller bridges them to candle for this
+    // cross-file seam); proj.a / proj.b are kt (#1082 — `LoraProjectionWeights`
+    // holds `kiln_tensor::Tensor`), so gate them against the kt `Device`.
     if !matches!(base.device(), candle_core::Device::Cuda(_))
         || !matches!(x.device(), candle_core::Device::Cuda(_))
-        || !matches!(proj.a.device(), candle_core::Device::Cuda(_))
-        || !matches!(proj.b.device(), candle_core::Device::Cuda(_))
+        || !matches!(proj.a.device(), kiln_tensor::Device::Cuda(_))
+        || !matches!(proj.b.device(), kiln_tensor::Device::Cuda(_))
     {
         return Ok(None);
     }
@@ -1277,7 +1280,13 @@ pub fn try_tape_lora_add_cuda(
     ) {
         return Ok(None);
     }
-    if proj.a.dtype() != base.dtype() || proj.b.dtype() != base.dtype() {
+    // proj.a / proj.b are kt; `base` is candle. Compare in kt-space by
+    // mapping base's (BF16/F32, per the gate above) candle dtype to kt.
+    let base_kt_dtype = match kiln_kt_bridge::candle_dtype_to_kt(base.dtype()) {
+        Ok(d) => d,
+        Err(_) => return Ok(None),
+    };
+    if proj.a.dtype() != base_kt_dtype || proj.b.dtype() != base_kt_dtype {
         // For the first cut we require A/B already pre-cast to the
         // forward dtype. The existing CUDA path handles BF16/F16 → F32
         // upcasts for the adapter weights via CustomOp3; that's
@@ -1335,14 +1344,10 @@ pub fn try_tape_lora_add_cuda(
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    let a_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&proj.a) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
-    let b_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&proj.b) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
+    // proj.a / proj.b are already kt (#1082) — no candle→kt borrow bridge
+    // needed; use them directly. The kt clone is cheap (Arc storage).
+    let a_kt = proj.a.clone();
+    let b_kt = proj.b.clone();
 
     // kt envelope: matmul requires contiguous 2-D inputs. base + x are
     // already so by construction above; A and B come straight from the
@@ -1407,8 +1412,10 @@ pub fn try_tape_lora_add_cuda(
     // be added later without re-touching this adapter.
     kiln_kt_bridge::tape_bridge::register_input_mapping(base_kt.id(), base_2d.id());
     kiln_kt_bridge::tape_bridge::register_input_mapping(x_kt.id(), x_2d.id());
-    kiln_kt_bridge::tape_bridge::register_input_mapping(a_kt.id(), proj.a.id());
-    kiln_kt_bridge::tape_bridge::register_input_mapping(b_kt.id(), proj.b.id());
+    // proj.a / proj.b are kt Vars now (#1082) — deposit their grads under their
+    // own kt ids via the kt-keyed registration (no candle id exists for them).
+    kiln_kt_bridge::tape_bridge::register_input_mapping_kt(a_kt.id(), proj.a.id());
+    kiln_kt_bridge::tape_bridge::register_input_mapping_kt(b_kt.id(), proj.b.id());
     // The downstream candle consumer holds `out` (the reshape-back of
     // the kt-side 2-D output). Register the user-facing candle id only;
     // the bridge panics on a duplicate kt output id, so we pick the one
@@ -1527,12 +1534,18 @@ pub fn try_tape_lora_linear_cuda(
     // LoRA gate (when present): A/B on CUDA, dtype-matching, shape-consistent,
     // contiguous. Any mismatch falls through to the existing dispatch.
     if let Some(proj) = lora {
-        if !matches!(proj.a.device(), candle_core::Device::Cuda(_))
-            || !matches!(proj.b.device(), candle_core::Device::Cuda(_))
+        // proj.a / proj.b are kt Vars (#1082); gate against the kt `Device`.
+        if !matches!(proj.a.device(), kiln_tensor::Device::Cuda(_))
+            || !matches!(proj.b.device(), kiln_tensor::Device::Cuda(_))
         {
             return Ok(None);
         }
-        if proj.a.dtype() != x.dtype() || proj.b.dtype() != x.dtype() {
+        // x is candle; compare A/B (kt) dtypes against x's dtype mapped to kt.
+        let x_kt_dtype = match kiln_kt_bridge::candle_dtype_to_kt(x.dtype()) {
+            Ok(d) => d,
+            Err(_) => return Ok(None),
+        };
+        if proj.a.dtype() != x_kt_dtype || proj.b.dtype() != x_kt_dtype {
             return Ok(None);
         }
         let Ok((rank, a_in)) = proj.a.dims2() else {
@@ -1565,15 +1578,9 @@ pub fn try_tape_lora_linear_cuda(
     // the candle Var ids below so the optimiser sees their grads.
     let (a_kt, b_kt) = match lora {
         Some(proj) => {
-            let a = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&proj.a) {
-                Ok(t) => t,
-                Err(_) => return Ok(None),
-            };
-            let b = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&proj.b) {
-                Ok(t) => t,
-                Err(_) => return Ok(None),
-            };
-            (Some(a), Some(b))
+            // proj.a / proj.b are already kt (#1082) — no candle→kt borrow
+            // bridge; use them directly (cheap Arc-storage clone).
+            (Some(proj.a.clone()), Some(proj.b.clone()))
         }
         None => (None, None),
     };
@@ -1691,8 +1698,10 @@ pub fn try_tape_lora_linear_cuda(
     // not registered (no grad consumer for it).
     kiln_kt_bridge::tape_bridge::register_input_mapping(x_kt.id(), x.id());
     if let (Some(proj), Some(a_kt), Some(b_kt)) = (lora, a_kt.as_ref(), b_kt.as_ref()) {
-        kiln_kt_bridge::tape_bridge::register_input_mapping(a_kt.id(), proj.a.id());
-        kiln_kt_bridge::tape_bridge::register_input_mapping(b_kt.id(), proj.b.id());
+        // proj.a / proj.b are kt Vars (#1082) — deposit grads under their own kt
+        // ids via the kt-keyed registration (no candle id exists for them).
+        kiln_kt_bridge::tape_bridge::register_input_mapping_kt(a_kt.id(), proj.a.id());
+        kiln_kt_bridge::tape_bridge::register_input_mapping_kt(b_kt.id(), proj.b.id());
     }
     kiln_kt_bridge::tape_bridge::register_output_mapping(out_kt.id(), out.id());
     kiln_kt_bridge::tape_bridge::retain_output_for_chaining(&out_kt, out.id());

@@ -127,14 +127,12 @@ impl LoraWeights {
                 if maybe_err.is_some() {
                     return;
                 }
-                // #1082: `proj.a` / `proj.b` are kt tensors but the
-                // `register_resident_activation` backend hook still takes
-                // `&candle_core::Tensor`. Bridge kt -> candle until the
-                // backend trait flips to kt (then this copy drops).
+                // #1082: `proj.a` / `proj.b` are kt tensors and the
+                // `register_resident_activation` backend hook now takes
+                // `&kiln_tensor::Tensor`, so pass the kt tensor directly
+                // (no kt -> candle bridge copy).
                 let register = |t: &KtTensor| -> anyhow::Result<()> {
-                    let candle = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(t)
-                        .context("register_with_backend kt->candle")?;
-                    backend.register_resident_activation(&candle)
+                    backend.register_resident_activation(t)
                 };
                 if let Err(e) = register(&proj.a) {
                     maybe_err = Some(e);
@@ -158,18 +156,13 @@ impl LoraWeights {
         }
         for layer in &self.layers {
             layer.for_each_projection(|proj| {
-                // #1082: bridge kt -> candle for the still-candle
-                // `evict_resident_activation` hook. Best-effort cleanup:
-                // a bridge failure just skips the evict (the resident
+                // #1082: `evict_resident_activation` now takes a kt
+                // `&kiln_tensor::Tensor`, so pass `proj.a` / `proj.b`
+                // directly (no kt -> candle bridge copy). The resident
                 // registry is GPU-only behind
-                // `supports_resident_activation()`).
-                let evict = |t: &KtTensor| {
-                    if let Ok(candle) = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(t) {
-                        backend.evict_resident_activation(&candle);
-                    }
-                };
-                evict(&proj.a);
-                evict(&proj.b);
+                // `supports_resident_activation()`.
+                backend.evict_resident_activation(&proj.a);
+                backend.evict_resident_activation(&proj.b);
             });
         }
     }

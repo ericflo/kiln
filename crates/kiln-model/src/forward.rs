@@ -77,21 +77,6 @@ fn try_borrow_kt_cuda(t: &Tensor) -> Option<kiln_tensor::Tensor> {
     }
 }
 
-/// #1082: bring a candle `PagedKvCache` pool tensor into kt. On CUDA this is a
-/// zero-copy borrow over the same device storage; on non-CUDA there is no
-/// candle→kt borrow bridge, so the (bailing) `candle_to_kt_activation` stub
-/// keeps the build type-checking — production paged decode is CUDA-only.
-#[cfg(feature = "cuda")]
-fn candle_pool_to_kt(t: &candle_core::Tensor) -> Result<Tensor> {
-    kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(t)
-        .map_err(|e| anyhow::anyhow!("candle_pool_to_kt borrow: {e}"))
-}
-
-#[cfg(not(feature = "cuda"))]
-fn candle_pool_to_kt(t: &candle_core::Tensor) -> Result<Tensor> {
-    candle_to_kt_activation(t)
-}
-
 /// CUDA-compatible sigmoid: `1 / (1 + exp(-x))`.
 ///
 /// `candle_nn::ops::sigmoid` lacks a CUDA kernel, so we implement it using
@@ -2041,18 +2026,16 @@ fn try_kt_paged_kv_read(
         kiln_nvtx::range!(c"kiln/paged_kv_kt/read");
         return kt.read(layer_idx, block_table, seq_len);
     }
-    let (k_c, v_c) = candle_cache.read(layer_idx, block_table, seq_len)?;
-    let k = candle_to_kt_activation(&k_c)
-        .context("try_kt_paged_kv_read candle->kt k")?;
-    let v = candle_to_kt_activation(&v_c)
-        .context("try_kt_paged_kv_read candle->kt v")?;
+    // (#1082) `candle_cache` is now the kt `PagedKvCacheKt` (the candle module
+    // was deleted); `read` returns kt tensors directly, so the legacy
+    // `candle_to_kt_activation` bridge is gone — pass the kt pools through.
+    let (k, v) = candle_cache.read(layer_idx, block_table, seq_len)?;
     Ok((k, v))
 }
 
-/// Non-CUDA twin of [`try_kt_paged_kv_read`]: there is no kt paged cache
-/// on non-CUDA builds, so bridge the candle read straight to kt
-/// (`candle_to_kt_activation` errors at runtime on non-CUDA, matching the
-/// rest of the CUDA-only paged decode path).
+/// Non-CUDA twin of [`try_kt_paged_kv_read`]: the paged cache is the kt
+/// `PagedKvCacheKt` on every build (the candle module was deleted), so
+/// `read` already hands back kt tensors — no bridge needed.
 #[cfg(not(feature = "cuda"))]
 fn try_kt_paged_kv_read(
     candle_cache: &PagedKvCache,
@@ -2060,11 +2043,7 @@ fn try_kt_paged_kv_read(
     block_table: &BlockTable,
     seq_len: usize,
 ) -> Result<(Tensor, Tensor)> {
-    let (k_c, v_c) = candle_cache.read(layer_idx, block_table, seq_len)?;
-    let k = candle_to_kt_activation(&k_c)
-        .context("try_kt_paged_kv_read candle->kt k")?;
-    let v = candle_to_kt_activation(&v_c)
-        .context("try_kt_paged_kv_read candle->kt v")?;
+    let (k, v) = candle_cache.read(layer_idx, block_table, seq_len)?;
     Ok((k, v))
 }
 
@@ -18004,39 +17983,22 @@ fn try_flash_attn_paged_decode(
         return Ok(None);
     }
 
-    let candle_pools = paged_cache.pool_tensors(full_attn_layer_idx);
+    let kt_pools = paged_cache.pool_tensors(full_attn_layer_idx);
     #[cfg(feature = "cuda")]
     try_kt_paged_kv_pool_tensors_present(
-        candle_pools.is_some(),
+        kt_pools.is_some(),
         full_attn_layer_idx,
         kt_paged_cache,
     );
-    let (k_pool_candle, v_pool_candle) = match candle_pools {
+    let (k_pool, v_pool) = match kt_pools {
         Some(p) => p,
         None => return Ok(None),
     };
-    // #1082: the candle `PagedKvCache::pool_tensors` returns candle pool
-    // tensors, but every downstream consumer (kt `.narrow`, the kt backend
-    // decode methods, the kt flash-attn FFI) is kt now. Bring the pools into
-    // kt once. On CUDA this is a zero-copy borrow over the same device
-    // storage; on non-CUDA there is no candle→kt borrow bridge yet, so the
-    // (bailing) `candle_to_kt_activation` stub keeps the build type-checking —
-    // production paged decode is CUDA-only.
-    #[cfg(feature = "cuda")]
-    let (k_pool, v_pool) = (
-        kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(k_pool_candle)
-            .context("try_flash_attn_paged_decode borrow k_pool")?,
-        kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v_pool_candle)
-            .context("try_flash_attn_paged_decode borrow v_pool")?,
-    );
-    #[cfg(not(feature = "cuda"))]
-    let (k_pool, v_pool) = (
-        candle_to_kt_activation(k_pool_candle)
-            .context("try_flash_attn_paged_decode kt pool k")?,
-        candle_to_kt_activation(v_pool_candle)
-            .context("try_flash_attn_paged_decode kt pool v")?,
-    );
-    let (k_pool, v_pool) = (&k_pool, &v_pool);
+    // #1082: `PagedKvCacheKt::pool_tensors` already returns kt pool references
+    // (`&KtTensor`), and every downstream consumer (kt `.narrow`, the kt backend
+    // decode methods, the kt flash-attn FFI) is kt now. The legacy candle→kt
+    // borrow/`candle_to_kt_activation` bridges are gone — use the kt pools
+    // directly.
 
     // Common macOS/desktop case: a single sequence receives freshly-allocated
     // blocks, so its whole live KV window is already one contiguous run in the
@@ -19148,19 +19110,14 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
                 // host-immediate slots into kernel args.
                 if let Some(slot_tensor) = kv_slot {
                     if kv_fused_batched_enabled() {
-                        // #1082: candle-island batch write — bridge kt k/v/slots
-                        // to candle (kt twin cache written separately).
-                        let k_c = kt_logits_to_candle(&k)
-                            .context("batch kv write graph-slot kt->candle k")?;
-                        let v_c = kt_logits_to_candle(&v)
-                            .context("batch kv write graph-slot kt->candle v")?;
-                        let slot_c = kt_logits_to_candle(slot_tensor)
-                            .context("batch kv write graph-slot kt->candle slots")?;
+                        // #1082: `PagedKvCacheKt::write_token_major_native_batch_graph_slot`
+                        // takes kt tensors; `k`/`v`/`slot_tensor` are already kt, so
+                        // pass them through with no candle bridge.
                         paged_cache.write_token_major_native_batch_graph_slot(
                             full_attn_layer_idx,
-                            &k_c,
-                            &v_c,
-                            &slot_c,
+                            &k,
+                            &v,
+                            slot_tensor,
                         )?
                     } else {
                         false
@@ -19175,17 +19132,14 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
             }
         };
         if !kv_write_done {
-            // #1082: candle-island batch write — bridge kt k/v to candle.
-            let k_c = kt_logits_to_candle(&k)
-                .context("batch kv write kt->candle k")?;
-            let v_c = kt_logits_to_candle(&v)
-                .context("batch kv write kt->candle v")?;
+            // #1082: `PagedKvCacheKt::write_token_major_native_batch` takes kt
+            // tensors; `k`/`v` are already kt, so pass them with no candle bridge.
             if !paged_cache.write_token_major_native_batch(
                 full_attn_layer_idx,
                 block_tables,
                 start_positions,
-                &k_c,
-                &v_c,
+                &k,
+                &v,
             )? {
                 anyhow::bail!("batched contiguous paged attention KV write declined");
             }
@@ -19199,24 +19153,11 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
         )?;
     }
 
-    let (k_pool_candle, v_pool_candle) = paged_cache
+    // #1082: `PagedKvCacheKt::pool_tensors` returns kt pool references already;
+    // the candle borrow/bridge dance is gone — bind the kt pools directly.
+    let (k_pool, v_pool) = paged_cache
         .pool_tensors(full_attn_layer_idx)
         .context("batched contiguous paged attention layer index out of range")?;
-    // #1082: candle pool tensors -> kt for the kt batch decode backend methods.
-    // CUDA: zero-copy borrow; non-CUDA: bailing copy stub (production is CUDA).
-    #[cfg(feature = "cuda")]
-    let (k_pool, v_pool) = (
-        kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(k_pool_candle)
-            .context("batched paged decode borrow k_pool")?,
-        kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v_pool_candle)
-            .context("batched paged decode borrow v_pool")?,
-    );
-    #[cfg(not(feature = "cuda"))]
-    let (k_pool, v_pool) = (
-        candle_to_kt_activation(k_pool_candle).context("batched paged decode kt pool k")?,
-        candle_to_kt_activation(v_pool_candle).context("batched paged decode kt pool v")?,
-    );
-    let (k_pool, v_pool) = (&k_pool, &v_pool);
     // Prefer the once-per-step cached tensors when the caller built them;
     // otherwise use the per-layer ones we built above.
     let block_table_tensor: &Tensor = match (cached_meta, own_block_table_tensor.as_ref()) {
@@ -19891,34 +19832,23 @@ fn gqa_attention_paged_with_rope_tables(
             let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
             {
                 kiln_nvtx::range!(c"kiln/kv/copy");
-                // #1082: the candle `PagedKvCache` write methods are a candle
-                // island (the cache stores candle tensors). Bridge the kt
-                // token-major / head-major K/V to candle for the write only;
-                // the kt twin cache is written separately by the kt path.
-                // (`kt_logits_to_candle` errors at runtime on non-CUDA, which
-                // is fine: production paged decode is CUDA-only.)
-                let k_tm_c = kt_logits_to_candle(&k_cache_token_major)
-                    .context("paged write kt->candle k_cache_token_major")?;
-                let v_tm_c = kt_logits_to_candle(&v_cache_token_major)
-                    .context("paged write kt->candle v_cache_token_major")?;
+                // #1082: `PagedKvCacheKt` write methods take kt tensors; the
+                // token-major / head-major K/V are already kt, so pass them
+                // through with no candle bridge.
                 if !paged_cache.write_token_major_native(
                     full_attn_layer_idx,
                     block_table,
                     start_pos,
-                    &k_tm_c,
-                    &v_tm_c,
+                    &k_cache_token_major,
+                    &v_cache_token_major,
                 )? {
-                    let k_head_c = kt_logits_to_candle(&k_head)
-                        .context("paged write kt->candle k_head")?;
-                    let v_head_c = kt_logits_to_candle(&v_head)
-                        .context("paged write kt->candle v_head")?;
                     paged_cache
                         .write(
                             full_attn_layer_idx,
                             block_table,
                             start_pos,
-                            &k_head_c,
-                            &v_head_c,
+                            &k_head,
+                            &v_head,
                         )
                         .context("paged KV cache write failed")?;
                 }
@@ -19991,23 +19921,15 @@ fn gqa_attention_paged_with_rope_tables(
             #[cfg(feature = "cuda")]
             {
                 if let Some(inputs) = graph_inputs {
-                    // #1082: the candle `PagedKvCache` graph-slot writer is a
-                    // candle island (k/v/slot are candle). Bridge the kt
-                    // token-major K/V and the kt `kv_slot` to candle for the
-                    // write only — mirrors the non-graph token-major write path
-                    // above (`kt_logits_to_candle`). The kt twin cache, when
-                    // plumbed, is written separately by the kt graph-slot path.
-                    let k_tm_c = kt_logits_to_candle(&k_cache_token_major)
-                        .context("graph-slot write kt->candle k_cache_token_major")?;
-                    let v_tm_c = kt_logits_to_candle(&v_cache_token_major)
-                        .context("graph-slot write kt->candle v_cache_token_major")?;
-                    let kv_slot_c = kt_logits_to_candle(inputs.kv_slot)
-                        .context("graph-slot write kt->candle kv_slot")?;
+                    // #1082: `PagedKvCacheKt::write_token_major_native_graph_slot`
+                    // takes kt tensors; `k_cache_token_major`/`v_cache_token_major`
+                    // and `inputs.kv_slot` are already kt, so pass them with no
+                    // candle bridge.
                     let done = paged_cache.write_token_major_native_graph_slot(
                         full_attn_layer_idx,
-                        &k_tm_c,
-                        &v_tm_c,
-                        &kv_slot_c,
+                        &k_cache_token_major,
+                        &v_cache_token_major,
+                        inputs.kv_slot,
                     )?;
                     // Phase 7 #1082: when the legacy PagedKvCache writer
                     // succeeded and a kt twin cache is plumbed through (i.e. the
@@ -20048,30 +19970,25 @@ fn gqa_attention_paged_with_rope_tables(
         // Bridge lazily so the graph-slot fast path (`graph_write_done`) skips
         // the candle copy entirely.
         if !graph_write_done {
-            let k_tm_c = kt_logits_to_candle(&k_cache_token_major)
-                .context("paged write kt->candle k_cache_token_major")?;
-            let v_tm_c = kt_logits_to_candle(&v_cache_token_major)
-                .context("paged write kt->candle v_cache_token_major")?;
+            // #1082: `PagedKvCacheKt` write methods take kt tensors;
+            // `k_cache_token_major`/`v_cache_token_major` are already kt, so
+            // pass them through with no candle bridge.
             if !paged_cache.write_token_major_native(
                 full_attn_layer_idx,
                 block_table,
                 start_pos,
-                &k_tm_c,
-                &v_tm_c,
+                &k_cache_token_major,
+                &v_cache_token_major,
             )? {
                 let k_head = k_cache_token_major.transpose(1, 2)?.contiguous()?;
                 let v_head = v_cache_token_major.transpose(1, 2)?.contiguous()?;
-                let k_head_c = kt_logits_to_candle(&k_head)
-                    .context("paged write kt->candle k_head")?;
-                let v_head_c = kt_logits_to_candle(&v_head)
-                    .context("paged write kt->candle v_head")?;
                 paged_cache
                     .write(
                         full_attn_layer_idx,
                         block_table,
                         start_pos,
-                        &k_head_c,
-                        &v_head_c,
+                        &k_head,
+                        &v_head,
                     )
                     .context("paged KV cache write failed")?;
             }
@@ -20199,15 +20116,11 @@ fn gqa_attention_paged_with_rope_tables(
                         .map(|(k_pool, v_pool)| (start_slot, k_pool, v_pool))
                 })
                 .map(|(start_slot, k_pool, v_pool)| {
-                    // #1082: candle pool tensors -> kt for the kt backend read;
-                    // k/v_cache_token_major are already kt.
-                    let k_pool_kt = candle_pool_to_kt(k_pool)
-                        .context("paged head-major append: k_pool -> kt")?;
-                    let v_pool_kt = candle_pool_to_kt(v_pool)
-                        .context("paged head-major append: v_pool -> kt")?;
+                    // #1082: `PagedKvCacheKt::pool_tensors` already yields kt pool
+                    // references; pass them straight to the kt backend read.
                     backend.paged_kv_head_major_read_append_token_major(
-                        &k_pool_kt,
-                        &v_pool_kt,
+                        k_pool,
+                        v_pool,
                         start_slot,
                         start_pos,
                         &k_cache_token_major,
@@ -20252,14 +20165,11 @@ fn gqa_attention_paged_with_rope_tables(
                         .map(|(k_pool, v_pool)| (start_slot, k_pool, v_pool))
                 })
                 .map(|(start_slot, k_pool, v_pool)| {
-                    // #1082: candle pool tensors -> kt for the kt backend read.
-                    let k_pool_kt = candle_pool_to_kt(k_pool)
-                        .context("paged head-major read: k_pool -> kt")?;
-                    let v_pool_kt = candle_pool_to_kt(v_pool)
-                        .context("paged head-major read: v_pool -> kt")?;
+                    // #1082: `PagedKvCacheKt::pool_tensors` already yields kt pool
+                    // references; pass them straight to the kt backend read.
                     backend.paged_kv_head_major_read(
-                        &k_pool_kt,
-                        &v_pool_kt,
+                        k_pool,
+                        v_pool,
                         start_slot,
                         fast_read_len,
                     )

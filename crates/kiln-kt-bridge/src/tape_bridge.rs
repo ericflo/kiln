@@ -183,6 +183,34 @@ pub fn register_input_mapping(kt_id: KtTensorId, candle_id: CandleTensorId) {
     });
 }
 
+/// Register one input mapping pair where the differentiable leaf is itself a
+/// kt tensor (e.g. a LoRA `Var` after the #1082 forward flip made
+/// `LoraProjectionWeights` hold `kiln_tensor::Tensor`).
+///
+/// Same map (`kt_to_candle_input`) and same backward-deposit semantics as
+/// [`register_input_mapping`]: the stored "deposit" id is read back by the
+/// trainer via `KtTensorId::from_raw(key_raw as u64)` and matched against
+/// `param.tensor_id().as_raw()`. The candle variant happens to store a candle
+/// `TensorId`'s raw; this variant stores the kt leaf's own id raw directly so
+/// the deposit key == the param's kt id — no synthetic candle id needed (candle
+/// `TensorId` has no `from_raw`, so a kt leaf could not be expressed via the
+/// candle-typed entry point). On a 64-bit target `usize == u64`, so the
+/// `as_raw() -> u64` round-trips through the `usize`-keyed map losslessly.
+pub fn register_input_mapping_kt(kt_id: KtTensorId, deposit_kt_id: KtTensorId) {
+    BRIDGE_SCOPE.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let Some(scope) = borrow.as_mut() else {
+            return;
+        };
+        let kt_raw = kt_id.as_raw();
+        let deposit_raw = deposit_kt_id.as_raw() as usize;
+        let ids = scope.kt_to_candle_input.entry(kt_raw).or_default();
+        if !ids.contains(&deposit_raw) {
+            ids.push(deposit_raw);
+        }
+    });
+}
+
 /// Register one output mapping pair.
 ///
 /// Called from `try_tape_*_cuda` adapters as they finish recording
