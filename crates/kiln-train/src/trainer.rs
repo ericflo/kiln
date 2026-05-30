@@ -10987,16 +10987,16 @@ fn base_dtype_supports_tape(weights: &GpuWeights) -> bool {
 /// copied into a candle `GradStore` keyed by each `Var`'s candle `TensorId`,
 /// so the optimizer step consumes them exactly as candle's own grads.
 ///
-/// (#1082 Inc-0 PR4) SUPERSEDED by
-/// [`standard_forward_backward_tape_authoritative_kt`] as the SFT
-/// tape-authoritative path: `standard_forward_backward` now calls the kt
-/// producer + returns `GradSource::Kt` (no `loss.backward()` container hack, no
-/// per-grad kt -> candle copy). This candle-hack variant is retained
-/// `#[allow(dead_code)]` for reversibility — it is the last codepath that still
-/// instantiates a candle `loss` to seed a `GradStore`, which the forward.rs
-/// type-flip will not be able to do. Delete it once the flip lands.
+/// (#1082 Inc-0 PR4) This candle-hack variant is now the **non-BF16-base**
+/// tape-authoritative path (e.g. the F32 `tiny_config` test model): the
+/// BF16-only kt fused adapters decline on F32, so the kt producer
+/// ([`standard_forward_backward_tape_authoritative_kt`]) would yield an empty
+/// grad store. `standard_forward_backward` routes BF16 bases to the kt producer
+/// (`GradSource::Kt`, no `loss.backward()` hack / no kt->candle copy) and
+/// non-BF16 bases here (`GradSource::Candle`). This is the last codepath that
+/// instantiates a candle `loss` to seed a `GradStore`; it goes away when kt
+/// covers F32 (or F32 training is dropped) ahead of the forward.rs type-flip.
 #[cfg(feature = "cuda")]
-#[allow(dead_code)]
 fn standard_forward_backward_tape_authoritative(
     backend: &dyn BackendRuntime,
     input_ids: &[u32],
@@ -11171,30 +11171,46 @@ pub fn standard_forward_backward(
     // CPU runs (e.g. the `perf_regression_sft_train_cpu_smoke` test) keep the
     // candle `loss.backward()` path below regardless of the flag.
     //
-    // (#1082 Inc-0 PR4) The tape-authoritative branch now delivers grads
-    // KT-NATIVELY: it calls `standard_forward_backward_tape_authoritative_kt`
-    // (PR2 producer) and returns `GradSource::Kt`, so the downstream optimizer
-    // step consumes kt grads directly via `optimizer_step_from_kt_grad_store`
-    // (PR3) — NO candle `loss.backward()` GradStore-container hack and NO
-    // per-grad kt -> candle copy. The old candle-hack
-    // `standard_forward_backward_tape_authoritative` is retained `#[allow(
-    // dead_code)]` for reversibility (see its doc-comment).
+    // (#1082 Inc-0 PR4) Tape-authoritative CUDA dispatch, split by base dtype:
+    //   - BF16 base: the kt tape adapters fire — deliver grads KT-NATIVELY via
+    //     `standard_forward_backward_tape_authoritative_kt` (PR2 producer) →
+    //     `GradSource::Kt`, consumed directly by `optimizer_step_from_kt_grad_store`
+    //     (PR3). NO candle `loss.backward()` GradStore-container hack, NO per-grad
+    //     kt->candle copy. This is the production path (Qwen3.5-4B is BF16).
+    //   - Non-BF16 base (e.g. the F32 `tiny_config` test model): the BF16-only
+    //     kt fused adapters all decline, so the kt producer would yield an EMPTY
+    //     grad store = broken training. Use the candle tape-auth producer
+    //     (`standard_forward_backward_tape_authoritative`: cross_entropy +
+    //     `loss.backward()` overlay) → `GradSource::Candle`, which trains F32
+    //     correctly. (Falling through to the tape-bridge instead would hit the
+    //     kt-FLCE cross-device `index_select` gap on F32.)
     #[cfg(feature = "cuda")]
-    if tape_authoritative_enabled()
-        && matches!(device, candle_core::Device::Cuda(_))
-        && base_dtype_supports_tape(weights)
-    {
-        let (loss_val, kt_grads) = standard_forward_backward_tape_authoritative_kt(
-            backend,
-            input_ids,
-            weights,
-            model_config,
-            params,
-            label_mask,
-            device,
-            flce_provider,
-        )?;
-        return Ok((loss_val, GradSource::Kt(kt_grads)));
+    if tape_authoritative_enabled() && matches!(device, candle_core::Device::Cuda(_)) {
+        if base_dtype_supports_tape(weights) {
+            let (loss_val, kt_grads) = standard_forward_backward_tape_authoritative_kt(
+                backend,
+                input_ids,
+                weights,
+                model_config,
+                params,
+                label_mask,
+                device,
+                flce_provider,
+            )?;
+            return Ok((loss_val, GradSource::Kt(kt_grads)));
+        } else {
+            let (loss_val, grads) = standard_forward_backward_tape_authoritative(
+                backend,
+                input_ids,
+                weights,
+                model_config,
+                params,
+                label_mask,
+                device,
+                flce_provider,
+            )?;
+            return Ok((loss_val, GradSource::Candle(grads)));
+        }
     }
     #[cfg(feature = "cuda")]
     if kiln_autograd::tape_forward_enabled() {
