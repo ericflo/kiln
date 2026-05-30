@@ -14118,9 +14118,32 @@ fn gdn_chunkwise_recurrence(
             && dtype == DType::BF16
         {
             let stage_profile = start_gdn_recurrent_inner_profile(device, profile_inner)?;
-            let out_chunk = backend.gdn_full_chunk_forward(
-                &g_c, &v_c, &kkt, &qkt, &ks_entry, &q_s, &beta_c, &k_t_mat, state,
-            )?;
+            // #1082: `gdn_full_chunk_forward` is candle-typed; bridge kt->candle
+            // in and candle->kt out.
+            let out_chunk = {
+                let g_cc = kt_logits_to_candle(&g_c).context("gdn full_chunk kt->candle g")?;
+                let v_cc = kt_logits_to_candle(&v_c).context("gdn full_chunk kt->candle v")?;
+                let kkt_c = kt_logits_to_candle(&kkt).context("gdn full_chunk kt->candle kkt")?;
+                let qkt_c = kt_logits_to_candle(&qkt).context("gdn full_chunk kt->candle qkt")?;
+                let kse_c = kt_logits_to_candle(&ks_entry)
+                    .context("gdn full_chunk kt->candle ks_entry")?;
+                let qs_c = kt_logits_to_candle(&q_s).context("gdn full_chunk kt->candle q_s")?;
+                let beta_cc =
+                    kt_logits_to_candle(&beta_c).context("gdn full_chunk kt->candle beta")?;
+                let ktm_c =
+                    kt_logits_to_candle(&k_t_mat).context("gdn full_chunk kt->candle k_t_mat")?;
+                // `gdn_full_chunk_forward` mutates `state` IN PLACE; bridge to a
+                // mutable candle copy, run, then write the updated state back to
+                // the kt `state` so the recurrence carries forward correctly.
+                let mut state_c =
+                    kt_logits_to_candle(state).context("gdn full_chunk kt->candle state")?;
+                let out = backend.gdn_full_chunk_forward(
+                    &g_cc, &v_cc, &kkt_c, &qkt_c, &kse_c, &qs_c, &beta_cc, &ktm_c, &mut state_c,
+                )?;
+                *state = candle_to_kt_activation(&state_c)
+                    .context("gdn full_chunk candle->kt state write-back")?;
+                out
+            };
             finish_gdn_recurrent_inner_profile(
                 device,
                 "full_chunk_forward",
@@ -14132,7 +14155,10 @@ fn gdn_chunkwise_recurrence(
                 stage_profile,
             )?;
             if let Some(out_chunk) = out_chunk {
-                out_chunks.push(out_chunk);
+                out_chunks.push(
+                    candle_to_kt_activation(&out_chunk)
+                        .context("gdn full_chunk candle->kt out_chunk")?,
+                );
                 continue;
             }
         }
@@ -14152,25 +14178,50 @@ fn gdn_chunkwise_recurrence(
         let stage_profile = start_gdn_recurrent_inner_profile(device, profile_inner)?;
         let (a_strict, b_mask, v_prime, q_s_scaled, decay_last_col_u, p_last_u) = {
             kiln_nvtx::range!(c"kiln/attn/gdn/chunk_prep");
+            // #1082: `gdn_chunk_prep` is candle-typed; bridge kt inputs in and
+            // the 6 candle results back to kt so both match arms produce kt.
+            #[cfg(feature = "cuda")]
             let prep_out = if !any_kt_tensor_tracks_op(&[&g_c, &v_c, &kkt, &qkt, &ks_entry, &q_s])
                 && backend.supports_gdn_chunk_prep()
                 && dtype == DType::BF16
             {
-                backend.gdn_chunk_prep(&g_c, &v_c, &kkt, &qkt, &ks_entry, &q_s)?
+                let g_cc = kt_logits_to_candle(&g_c).context("gdn chunk_prep kt->candle g")?;
+                let v_cc = kt_logits_to_candle(&v_c).context("gdn chunk_prep kt->candle v")?;
+                let kkt_c = kt_logits_to_candle(&kkt).context("gdn chunk_prep kt->candle kkt")?;
+                let qkt_c = kt_logits_to_candle(&qkt).context("gdn chunk_prep kt->candle qkt")?;
+                let kse_c =
+                    kt_logits_to_candle(&ks_entry).context("gdn chunk_prep kt->candle ks_entry")?;
+                let qs_c = kt_logits_to_candle(&q_s).context("gdn chunk_prep kt->candle q_s")?;
+                backend.gdn_chunk_prep(&g_cc, &v_cc, &kkt_c, &qkt_c, &kse_c, &qs_c)?
             } else {
                 None
             };
+            #[cfg(not(feature = "cuda"))]
+            let prep_out: Option<(
+                candle_core::Tensor,
+                candle_core::Tensor,
+                candle_core::Tensor,
+                candle_core::Tensor,
+                candle_core::Tensor,
+                candle_core::Tensor,
+            )> = None;
             match prep_out {
                 Some((a_strict, b_mask, v_prime, q_s_scaled, decay_last_col, p_last)) => {
                     let decay_last_col_u = decay_last_col.unsqueeze(3)?; // [B,nv,C,1]
                     let p_last_u = p_last.unsqueeze(2)?.unsqueeze(3)?; // [B,nv,1,1]
                     (
-                        a_strict.contiguous()?,
-                        b_mask.contiguous()?,
-                        v_prime,
-                        q_s_scaled,
-                        decay_last_col_u,
-                        p_last_u,
+                        candle_to_kt_activation(&a_strict.contiguous()?)
+                            .context("gdn chunk_prep candle->kt a_strict")?,
+                        candle_to_kt_activation(&b_mask.contiguous()?)
+                            .context("gdn chunk_prep candle->kt b_mask")?,
+                        candle_to_kt_activation(&v_prime)
+                            .context("gdn chunk_prep candle->kt v_prime")?,
+                        candle_to_kt_activation(&q_s_scaled)
+                            .context("gdn chunk_prep candle->kt q_s_scaled")?,
+                        candle_to_kt_activation(&decay_last_col_u)
+                            .context("gdn chunk_prep candle->kt decay_last_col")?,
+                        candle_to_kt_activation(&p_last_u)
+                            .context("gdn chunk_prep candle->kt p_last")?,
                     )
                 }
                 None => {
