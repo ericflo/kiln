@@ -824,40 +824,39 @@ impl BackendRuntime for CudaBackend {
     #[allow(clippy::too_many_arguments)]
     fn gdn_decode_gates_recurrent(
         &self,
-        q: &candle_core::Tensor,
-        k: &candle_core::Tensor,
-        v: &candle_core::Tensor,
-        a: &candle_core::Tensor,
-        b: &candle_core::Tensor,
-        a_log: &candle_core::Tensor,
-        dt_bias: &candle_core::Tensor,
-        state: &mut candle_core::Tensor,
-        z: &candle_core::Tensor,
-        weight: &candle_core::Tensor,
+        q: &kiln_tensor::Tensor,
+        k: &kiln_tensor::Tensor,
+        v: &kiln_tensor::Tensor,
+        a: &kiln_tensor::Tensor,
+        b: &kiln_tensor::Tensor,
+        a_log: &kiln_tensor::Tensor,
+        dt_bias: &kiln_tensor::Tensor,
+        state: &mut kiln_tensor::Tensor,
+        z: &kiln_tensor::Tensor,
+        weight: &kiln_tensor::Tensor,
         eps: f64,
-    ) -> Result<Option<candle_core::Tensor>> {
+    ) -> Result<Option<kiln_tensor::Tensor>> {
         if !self.gdn_decode_fused_enabled {
             return Ok(None);
         }
-        // Phase 7 (#1082): kt-typed bf16 surface is now the only path,
-        // same closeout pattern as conv1d (2ebcfb08) and marlin
-        // (0841c266). The candle-typed
-        // `kiln_gdn_kernel::gdn_decode_gates_recurrent[_supports]`
-        // fallback has been deleted; non-bf16 envelopes return
-        // Ok(None) so the caller's split-decode fallback engages.
-        // Production decode for Qwen3.5-4B uses bf16 for q/k/v/a/b/
-        // a_log/dt_bias/state/z and f32 for the rmsnorm weight; the
-        // bf16_kt variant is the matching production hot path.
-        if !(q.dtype() == candle_core::DType::BF16
-            && k.dtype() == candle_core::DType::BF16
-            && v.dtype() == candle_core::DType::BF16
-            && a.dtype() == candle_core::DType::BF16
-            && b.dtype() == candle_core::DType::BF16
-            && a_log.dtype() == candle_core::DType::BF16
-            && dt_bias.dtype() == candle_core::DType::BF16
-            && state.dtype() == candle_core::DType::BF16
-            && z.dtype() == candle_core::DType::BF16
-            && weight.dtype() == candle_core::DType::F32)
+        // Phase 7 (#1082): kt-typed bf16 surface is now the only path.
+        // Args are already kt (#1082 DoD-101/102), so no candle↔kt
+        // bridge — the kernel runs directly on the caller's kt
+        // tensors. Non-bf16 envelopes return Ok(None) so the caller's
+        // split-decode fallback engages. Production decode for
+        // Qwen3.5-4B uses bf16 for q/k/v/a/b/a_log/dt_bias/state/z and
+        // f32 for the rmsnorm weight; the bf16_kt variant is the
+        // matching production hot path.
+        if !(q.dtype() == kiln_tensor::DType::BF16
+            && k.dtype() == kiln_tensor::DType::BF16
+            && v.dtype() == kiln_tensor::DType::BF16
+            && a.dtype() == kiln_tensor::DType::BF16
+            && b.dtype() == kiln_tensor::DType::BF16
+            && a_log.dtype() == kiln_tensor::DType::BF16
+            && dt_bias.dtype() == kiln_tensor::DType::BF16
+            && state.dtype() == kiln_tensor::DType::BF16
+            && z.dtype() == kiln_tensor::DType::BF16
+            && weight.dtype() == kiln_tensor::DType::F32)
         {
             tracing::debug!(
                 q_shape = ?q.shape(), q_dtype = ?q.dtype(),
@@ -877,55 +876,52 @@ impl BackendRuntime for CudaBackend {
             // 1-D weight tensors (a_log, dt_bias) to BF16 if they
             // arrived as F32 from the safetensors loader; the
             // group-norm weight stays F32 (kernel contract).
-            let a_log_bf16 = if a_log.dtype() == candle_core::DType::BF16 {
+            let a_log_bf16 = if a_log.dtype() == kiln_tensor::DType::BF16 {
                 None
             } else {
-                Some(a_log.to_dtype(candle_core::DType::BF16)
+                Some(a_log.to_dtype(kiln_tensor::DType::BF16)
                     .with_context(|| "gdn_decode_gates: cast a_log -> bf16")?)
             };
-            let dt_bias_bf16 = if dt_bias.dtype() == candle_core::DType::BF16 {
+            let dt_bias_bf16 = if dt_bias.dtype() == kiln_tensor::DType::BF16 {
                 None
             } else {
-                Some(dt_bias.to_dtype(candle_core::DType::BF16)
+                Some(dt_bias.to_dtype(kiln_tensor::DType::BF16)
                     .with_context(|| "gdn_decode_gates: cast dt_bias -> bf16")?)
             };
-            let weight_f32 = if weight.dtype() == candle_core::DType::F32 {
+            let weight_f32 = if weight.dtype() == kiln_tensor::DType::F32 {
                 None
             } else {
-                Some(weight.to_dtype(candle_core::DType::F32)
+                Some(weight.to_dtype(kiln_tensor::DType::F32)
                     .with_context(|| "gdn_decode_gates: cast weight -> f32")?)
             };
             // Cast heavy tensors too. q/k/v often arrive F32 from
             // the conv1d kernel epilogue (kernel returns F32 by
-            // design — see forward.rs:14897). The candle-typed
-            // gdn_decode_*_supports already accepts F32 q/k/v
-            // (kiln-gdn-kernel/src/lib.rs:1047-1049) but the kt
-            // path is BF16-only — cast at the boundary so the kt
-            // surface still works for the production hot path. Cast
-            // cost is per-layer hidden-dim elements (small at B=1).
-            // `state` is NOT cast — the kernel mutates it in place
-            // and the caller's tensor would not see the writes
-            // through a fresh allocation.
-            if state.dtype() != candle_core::DType::BF16 {
+            // design — see forward.rs:14897). The kt path is BF16-only
+            // — cast at the boundary so the kt surface still works for
+            // the production hot path. Cast cost is per-layer
+            // hidden-dim elements (small at B=1). `state` is NOT cast
+            // — the kernel mutates it in place and the caller's tensor
+            // would not see the writes through a fresh allocation.
+            if state.dtype() != kiln_tensor::DType::BF16 {
                 return Ok(None);
             }
-            let q_bf16 = if q.dtype() == candle_core::DType::BF16 { None } else {
-                Some(q.to_dtype(candle_core::DType::BF16).with_context(|| "gdn_decode_gates: cast q -> bf16")?)
+            let q_bf16 = if q.dtype() == kiln_tensor::DType::BF16 { None } else {
+                Some(q.to_dtype(kiln_tensor::DType::BF16).with_context(|| "gdn_decode_gates: cast q -> bf16")?)
             };
-            let k_bf16 = if k.dtype() == candle_core::DType::BF16 { None } else {
-                Some(k.to_dtype(candle_core::DType::BF16).with_context(|| "gdn_decode_gates: cast k -> bf16")?)
+            let k_bf16 = if k.dtype() == kiln_tensor::DType::BF16 { None } else {
+                Some(k.to_dtype(kiln_tensor::DType::BF16).with_context(|| "gdn_decode_gates: cast k -> bf16")?)
             };
-            let v_bf16 = if v.dtype() == candle_core::DType::BF16 { None } else {
-                Some(v.to_dtype(candle_core::DType::BF16).with_context(|| "gdn_decode_gates: cast v -> bf16")?)
+            let v_bf16 = if v.dtype() == kiln_tensor::DType::BF16 { None } else {
+                Some(v.to_dtype(kiln_tensor::DType::BF16).with_context(|| "gdn_decode_gates: cast v -> bf16")?)
             };
-            let a_bf16 = if a.dtype() == candle_core::DType::BF16 { None } else {
-                Some(a.to_dtype(candle_core::DType::BF16).with_context(|| "gdn_decode_gates: cast a -> bf16")?)
+            let a_bf16 = if a.dtype() == kiln_tensor::DType::BF16 { None } else {
+                Some(a.to_dtype(kiln_tensor::DType::BF16).with_context(|| "gdn_decode_gates: cast a -> bf16")?)
             };
-            let b_bf16 = if b.dtype() == candle_core::DType::BF16 { None } else {
-                Some(b.to_dtype(candle_core::DType::BF16).with_context(|| "gdn_decode_gates: cast b -> bf16")?)
+            let b_bf16 = if b.dtype() == kiln_tensor::DType::BF16 { None } else {
+                Some(b.to_dtype(kiln_tensor::DType::BF16).with_context(|| "gdn_decode_gates: cast b -> bf16")?)
             };
-            let z_bf16 = if z.dtype() == candle_core::DType::BF16 { None } else {
-                Some(z.to_dtype(candle_core::DType::BF16).with_context(|| "gdn_decode_gates: cast z -> bf16")?)
+            let z_bf16 = if z.dtype() == kiln_tensor::DType::BF16 { None } else {
+                Some(z.to_dtype(kiln_tensor::DType::BF16).with_context(|| "gdn_decode_gates: cast z -> bf16")?)
             };
             return self.gdn_decode_gates_recurrent(
                 q_bf16.as_ref().unwrap_or(q),
@@ -979,28 +975,8 @@ impl BackendRuntime for CudaBackend {
         let weight_c = weight
             .contiguous()
             .with_context(|| "kt-adapter: gdn_decode_gates weight contiguous failed")?;
-        let q_kt_4d = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(q)
-            .with_context(|| "kt-adapter: gdn_decode_gates q → kt (4D for supports) failed")?;
-        let k_kt_4d = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(k)
-            .with_context(|| "kt-adapter: gdn_decode_gates k → kt (4D for supports) failed")?;
-        let v_kt_4d = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v)
-            .with_context(|| "kt-adapter: gdn_decode_gates v → kt (4D for supports) failed")?;
-        let a_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&a_c)
-            .with_context(|| "kt-adapter: gdn_decode_gates a → kt failed")?;
-        let b_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&b_c)
-            .with_context(|| "kt-adapter: gdn_decode_gates b → kt failed")?;
-        let alog_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&alog_c)
-            .with_context(|| "kt-adapter: gdn_decode_gates a_log → kt failed")?;
-        let dtb_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&dtb_c)
-            .with_context(|| "kt-adapter: gdn_decode_gates dt_bias → kt failed")?;
-        let state_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&state_c)
-            .with_context(|| "kt-adapter: gdn_decode_gates state → kt failed")?;
-        let z_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&z_c)
-            .with_context(|| "kt-adapter: gdn_decode_gates z → kt failed")?;
-        let w_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&weight_c)
-            .with_context(|| "kt-adapter: gdn_decode_gates weight → kt failed")?;
         if !kiln_gdn_kernel::gdn_decode_gates_recurrent_supports_kt(
-            &q_kt_4d, &k_kt_4d, &v_kt_4d, &a_kt, &b_kt, &alog_kt, &dtb_kt, &state_kt, &z_kt, &w_kt,
+            q, k, v, &a_c, &b_c, &alog_c, &dtb_c, &state_c, &z_c, &weight_c,
         ) {
             return Ok(None);
         }
@@ -1012,26 +988,18 @@ impl BackendRuntime for CudaBackend {
             .with_context(|| "kt-adapter: gdn_decode_gates k squeeze(1) failed")?;
         let v_3d = v.squeeze(1)
             .with_context(|| "kt-adapter: gdn_decode_gates v squeeze(1) failed")?;
-        let q_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&q_3d)
-            .with_context(|| "kt-adapter: gdn_decode_gates q 3D → kt failed")?;
-        let k_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&k_3d)
-            .with_context(|| "kt-adapter: gdn_decode_gates k 3D → kt failed")?;
-        let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&v_3d)
-            .with_context(|| "kt-adapter: gdn_decode_gates v 3D → kt failed")?;
         let out_kt = kiln_gdn_kernel::gdn_decode_gates_recurrent_bf16_kt(
-            &q_kt, &k_kt, &v_kt, &a_kt, &b_kt, &alog_kt, &dtb_kt, &state_kt, &z_kt, &w_kt,
+            &q_3d, &k_3d, &v_3d, &a_c, &b_c, &alog_c, &dtb_c, &state_c, &z_c, &weight_c,
             eps as f32,
         )
         .map_err(|e| anyhow::anyhow!("kt gdn_decode_gates_recurrent: {e}"))?;
-        let out_3d = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-            .with_context(|| "kt-adapter: gdn_decode_gates out → candle failed")?;
         // kt_api allocates a 3D `[B, value_heads, dv]` output (see
         // crates/kiln-gdn-kernel/src/kt_api.rs:568) but the
         // BackendRuntime trait + production caller expect 4D
         // `[B, 1, value_heads, dv]` (see attn_out shape contract at
         // forward.rs:15595). Unsqueeze the seq_len axis back at
         // position 1; metadata-only reshape, no copy. (#1082)
-        let out = out_3d
+        let out = out_kt
             .unsqueeze(1)
             .with_context(|| "kt-adapter: gdn_decode_gates out 3D->4D unsqueeze failed")?;
         Ok(Some(out))
@@ -1040,37 +1008,34 @@ impl BackendRuntime for CudaBackend {
     #[allow(clippy::too_many_arguments)]
     fn gdn_decode_qk_norm_gates_recurrent(
         &self,
-        q: &candle_core::Tensor,
-        k: &candle_core::Tensor,
-        v: &candle_core::Tensor,
-        a: &candle_core::Tensor,
-        b: &candle_core::Tensor,
-        a_log: &candle_core::Tensor,
-        dt_bias: &candle_core::Tensor,
-        state: &mut candle_core::Tensor,
+        q: &kiln_tensor::Tensor,
+        k: &kiln_tensor::Tensor,
+        v: &kiln_tensor::Tensor,
+        a: &kiln_tensor::Tensor,
+        b: &kiln_tensor::Tensor,
+        a_log: &kiln_tensor::Tensor,
+        dt_bias: &kiln_tensor::Tensor,
+        state: &mut kiln_tensor::Tensor,
         q_scale: f64,
         qk_eps: f64,
-    ) -> Result<Option<candle_core::Tensor>> {
+    ) -> Result<Option<kiln_tensor::Tensor>> {
         if !self.gdn_decode_qk_norm_recurrent_enabled {
             return Ok(None);
         }
-        // Phase 7 (#1082): kt-typed bf16 surface is now the only path,
-        // same closeout pattern as conv1d (2ebcfb08) and marlin
-        // (0841c266). The candle-typed
-        // `kiln_gdn_kernel::gdn_decode_qk_norm_gates_recurrent
-        // [_supports]` fallback has been deleted; non-bf16 envelopes
-        // return Ok(None) so the caller's split qk_norm fallback
-        // engages. Production decode for Qwen3.5-4B uses bf16 for all
-        // 8 input tensors; the bf16_kt variant is the matching
-        // production hot path.
-        if !(q.dtype() == candle_core::DType::BF16
-            && k.dtype() == candle_core::DType::BF16
-            && v.dtype() == candle_core::DType::BF16
-            && a.dtype() == candle_core::DType::BF16
-            && b.dtype() == candle_core::DType::BF16
-            && a_log.dtype() == candle_core::DType::BF16
-            && dt_bias.dtype() == candle_core::DType::BF16
-            && state.dtype() == candle_core::DType::BF16)
+        // Phase 7 (#1082): kt-typed bf16 surface is now the only path.
+        // Args are already kt (#1082 DoD-101/102), so no candle↔kt
+        // bridge. Non-bf16 envelopes return Ok(None) so the caller's
+        // split qk_norm fallback engages. Production decode for
+        // Qwen3.5-4B uses bf16 for all 8 input tensors; the bf16_kt
+        // variant is the matching production hot path.
+        if !(q.dtype() == kiln_tensor::DType::BF16
+            && k.dtype() == kiln_tensor::DType::BF16
+            && v.dtype() == kiln_tensor::DType::BF16
+            && a.dtype() == kiln_tensor::DType::BF16
+            && b.dtype() == kiln_tensor::DType::BF16
+            && a_log.dtype() == kiln_tensor::DType::BF16
+            && dt_bias.dtype() == kiln_tensor::DType::BF16
+            && state.dtype() == kiln_tensor::DType::BF16)
         {
             tracing::debug!(
                 q_shape = ?q.shape(), q_dtype = ?q.dtype(),
@@ -1090,38 +1055,38 @@ impl BackendRuntime for CudaBackend {
             // 1-D weight tensors here and recurse. The cast is cheap
             // (num_heads elements) and one-shot per call — the cost
             // is dominated by the kernel launch.
-            let a_log_bf16 = if a_log.dtype() == candle_core::DType::BF16 {
+            let a_log_bf16 = if a_log.dtype() == kiln_tensor::DType::BF16 {
                 None
             } else {
-                Some(a_log.to_dtype(candle_core::DType::BF16)
+                Some(a_log.to_dtype(kiln_tensor::DType::BF16)
                     .with_context(|| "gdn_decode_qk_norm: cast a_log -> bf16")?)
             };
-            let dt_bias_bf16 = if dt_bias.dtype() == candle_core::DType::BF16 {
+            let dt_bias_bf16 = if dt_bias.dtype() == kiln_tensor::DType::BF16 {
                 None
             } else {
-                Some(dt_bias.to_dtype(candle_core::DType::BF16)
+                Some(dt_bias.to_dtype(kiln_tensor::DType::BF16)
                     .with_context(|| "gdn_decode_qk_norm: cast dt_bias -> bf16")?)
             };
             // Same heavy-tensor cast as gdn_decode_gates_recurrent
             // above — required because conv1d kernel emits F32
             // q/k/v.
-            if state.dtype() != candle_core::DType::BF16 {
+            if state.dtype() != kiln_tensor::DType::BF16 {
                 return Ok(None);
             }
-            let q_bf16 = if q.dtype() == candle_core::DType::BF16 { None } else {
-                Some(q.to_dtype(candle_core::DType::BF16).with_context(|| "gdn_decode_qk_norm: cast q -> bf16")?)
+            let q_bf16 = if q.dtype() == kiln_tensor::DType::BF16 { None } else {
+                Some(q.to_dtype(kiln_tensor::DType::BF16).with_context(|| "gdn_decode_qk_norm: cast q -> bf16")?)
             };
-            let k_bf16 = if k.dtype() == candle_core::DType::BF16 { None } else {
-                Some(k.to_dtype(candle_core::DType::BF16).with_context(|| "gdn_decode_qk_norm: cast k -> bf16")?)
+            let k_bf16 = if k.dtype() == kiln_tensor::DType::BF16 { None } else {
+                Some(k.to_dtype(kiln_tensor::DType::BF16).with_context(|| "gdn_decode_qk_norm: cast k -> bf16")?)
             };
-            let v_bf16 = if v.dtype() == candle_core::DType::BF16 { None } else {
-                Some(v.to_dtype(candle_core::DType::BF16).with_context(|| "gdn_decode_qk_norm: cast v -> bf16")?)
+            let v_bf16 = if v.dtype() == kiln_tensor::DType::BF16 { None } else {
+                Some(v.to_dtype(kiln_tensor::DType::BF16).with_context(|| "gdn_decode_qk_norm: cast v -> bf16")?)
             };
-            let a_bf16 = if a.dtype() == candle_core::DType::BF16 { None } else {
-                Some(a.to_dtype(candle_core::DType::BF16).with_context(|| "gdn_decode_qk_norm: cast a -> bf16")?)
+            let a_bf16 = if a.dtype() == kiln_tensor::DType::BF16 { None } else {
+                Some(a.to_dtype(kiln_tensor::DType::BF16).with_context(|| "gdn_decode_qk_norm: cast a -> bf16")?)
             };
-            let b_bf16 = if b.dtype() == candle_core::DType::BF16 { None } else {
-                Some(b.to_dtype(candle_core::DType::BF16).with_context(|| "gdn_decode_qk_norm: cast b -> bf16")?)
+            let b_bf16 = if b.dtype() == kiln_tensor::DType::BF16 { None } else {
+                Some(b.to_dtype(kiln_tensor::DType::BF16).with_context(|| "gdn_decode_qk_norm: cast b -> bf16")?)
             };
             return self.gdn_decode_qk_norm_gates_recurrent(
                 q_bf16.as_ref().unwrap_or(q),
@@ -1160,24 +1125,8 @@ impl BackendRuntime for CudaBackend {
         let state_c = state
             .contiguous()
             .with_context(|| "kt-adapter: gdn_decode_qk_norm state contiguous failed")?;
-        let q_kt_4d = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(q)
-            .with_context(|| "kt-adapter: gdn_decode_qk_norm q → kt (4D) failed")?;
-        let k_kt_4d = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(k)
-            .with_context(|| "kt-adapter: gdn_decode_qk_norm k → kt (4D) failed")?;
-        let v_kt_4d = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v)
-            .with_context(|| "kt-adapter: gdn_decode_qk_norm v → kt (4D) failed")?;
-        let a_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&a_c)
-            .with_context(|| "kt-adapter: gdn_decode_qk_norm a → kt failed")?;
-        let b_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&b_c)
-            .with_context(|| "kt-adapter: gdn_decode_qk_norm b → kt failed")?;
-        let alog_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&alog_c)
-            .with_context(|| "kt-adapter: gdn_decode_qk_norm a_log → kt failed")?;
-        let dtb_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&dtb_c)
-            .with_context(|| "kt-adapter: gdn_decode_qk_norm dt_bias → kt failed")?;
-        let state_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&state_c)
-            .with_context(|| "kt-adapter: gdn_decode_qk_norm state → kt failed")?;
         if !kiln_gdn_kernel::gdn_decode_qk_norm_gates_recurrent_supports_kt(
-            &q_kt_4d, &k_kt_4d, &v_kt_4d, &a_kt, &b_kt, &alog_kt, &dtb_kt, &state_kt,
+            q, k, v, &a_c, &b_c, &alog_c, &dtb_c, &state_c,
         ) {
             return Ok(None);
         }
@@ -1188,24 +1137,16 @@ impl BackendRuntime for CudaBackend {
             .with_context(|| "kt-adapter: gdn_decode_qk_norm k squeeze(1) failed")?;
         let v_3d = v.squeeze(1)
             .with_context(|| "kt-adapter: gdn_decode_qk_norm v squeeze(1) failed")?;
-        let q_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&q_3d)
-            .with_context(|| "kt-adapter: gdn_decode_qk_norm q 3D → kt failed")?;
-        let k_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&k_3d)
-            .with_context(|| "kt-adapter: gdn_decode_qk_norm k 3D → kt failed")?;
-        let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&v_3d)
-            .with_context(|| "kt-adapter: gdn_decode_qk_norm v 3D → kt failed")?;
         let out_kt = kiln_gdn_kernel::gdn_decode_qk_norm_gates_recurrent_bf16_kt(
-            &q_kt, &k_kt, &v_kt, &a_kt, &b_kt, &alog_kt, &dtb_kt, &state_kt,
+            &q_3d, &k_3d, &v_3d, &a_c, &b_c, &alog_c, &dtb_c, &state_c,
             q_scale as f32, qk_eps as f32,
         )
         .map_err(|e| anyhow::anyhow!("kt gdn_decode_qk_norm_gates_recurrent: {e}"))?;
-        let out_3d = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-            .with_context(|| "kt-adapter: gdn_decode_qk_norm out → candle failed")?;
         // Same 3D->4D unsqueeze fix as gdn_decode_gates_recurrent
         // above. The kt_api allocates 3D `[B, value_heads, dv]`
         // (see crates/kiln-gdn-kernel/src/kt_api.rs) but the trait
         // contract is 4D `[B, 1, value_heads, dv]`. (#1082)
-        let out = out_3d
+        let out = out_kt
             .unsqueeze(1)
             .with_context(|| "kt-adapter: gdn_decode_qk_norm out 3D->4D unsqueeze failed")?;
         Ok(Some(out))
@@ -1214,42 +1155,40 @@ impl BackendRuntime for CudaBackend {
     #[allow(clippy::too_many_arguments)]
     fn gdn_decode_qk_norm_gates_recurrent_rmsnorm(
         &self,
-        q: &candle_core::Tensor,
-        k: &candle_core::Tensor,
-        v: &candle_core::Tensor,
-        a: &candle_core::Tensor,
-        b: &candle_core::Tensor,
-        a_log: &candle_core::Tensor,
-        dt_bias: &candle_core::Tensor,
-        state: &mut candle_core::Tensor,
-        z: &candle_core::Tensor,
-        weight: &candle_core::Tensor,
+        q: &kiln_tensor::Tensor,
+        k: &kiln_tensor::Tensor,
+        v: &kiln_tensor::Tensor,
+        a: &kiln_tensor::Tensor,
+        b: &kiln_tensor::Tensor,
+        a_log: &kiln_tensor::Tensor,
+        dt_bias: &kiln_tensor::Tensor,
+        state: &mut kiln_tensor::Tensor,
+        z: &kiln_tensor::Tensor,
+        weight: &kiln_tensor::Tensor,
         q_scale: f64,
         qk_eps: f64,
         rms_eps: f64,
-    ) -> Result<Option<candle_core::Tensor>> {
+    ) -> Result<Option<kiln_tensor::Tensor>> {
         if !self.gdn_decode_qk_norm_recurrent_rmsnorm_enabled {
             return Ok(None);
         }
-        // Phase 7 (#1082): kt-typed bf16 surface is now the only path,
-        // same closeout pattern as conv1d (2ebcfb08) and marlin
-        // (0841c266). The candle-typed
-        // `kiln_gdn_kernel::gdn_decode_qk_norm_gates_recurrent_rmsnorm
-        // [_supports]` fallback has been deleted; non-bf16 envelopes
-        // return Ok(None) so the caller's split gated_norm fallback
-        // engages. Production decode for Qwen3.5-4B uses bf16 for all
-        // 10 input tensors (with F32 weight); the bf16_kt variant is
-        // the matching production hot path.
-        if !(q.dtype() == candle_core::DType::BF16
-            && k.dtype() == candle_core::DType::BF16
-            && v.dtype() == candle_core::DType::BF16
-            && a.dtype() == candle_core::DType::BF16
-            && b.dtype() == candle_core::DType::BF16
-            && a_log.dtype() == candle_core::DType::BF16
-            && dt_bias.dtype() == candle_core::DType::BF16
-            && state.dtype() == candle_core::DType::BF16
-            && z.dtype() == candle_core::DType::BF16
-            && weight.dtype() == candle_core::DType::F32)
+        // Phase 7 (#1082): kt-typed bf16 surface is now the only path.
+        // Args are already kt (#1082 DoD-101/102), so no candle↔kt
+        // bridge. Non-bf16 envelopes return Ok(None) so the caller's
+        // split gated_norm fallback engages. Production decode for
+        // Qwen3.5-4B uses bf16 for all 10 input tensors (with F32
+        // weight); the bf16_kt variant is the matching production hot
+        // path.
+        if !(q.dtype() == kiln_tensor::DType::BF16
+            && k.dtype() == kiln_tensor::DType::BF16
+            && v.dtype() == kiln_tensor::DType::BF16
+            && a.dtype() == kiln_tensor::DType::BF16
+            && b.dtype() == kiln_tensor::DType::BF16
+            && a_log.dtype() == kiln_tensor::DType::BF16
+            && dt_bias.dtype() == kiln_tensor::DType::BF16
+            && state.dtype() == kiln_tensor::DType::BF16
+            && z.dtype() == kiln_tensor::DType::BF16
+            && weight.dtype() == kiln_tensor::DType::F32)
         {
             tracing::debug!(
                 q_shape = ?q.shape(), q_dtype = ?q.dtype(),
@@ -1270,46 +1209,46 @@ impl BackendRuntime for CudaBackend {
             // above. Heavier tensors (q/k/v/a/b/state/z) shouldn't
             // be non-bf16 on the production hot path; if they are,
             // decline.
-            let a_log_bf16 = if a_log.dtype() == candle_core::DType::BF16 {
+            let a_log_bf16 = if a_log.dtype() == kiln_tensor::DType::BF16 {
                 None
             } else {
-                Some(a_log.to_dtype(candle_core::DType::BF16)
+                Some(a_log.to_dtype(kiln_tensor::DType::BF16)
                     .with_context(|| "gdn_decode_rmsnorm: cast a_log -> bf16")?)
             };
-            let dt_bias_bf16 = if dt_bias.dtype() == candle_core::DType::BF16 {
+            let dt_bias_bf16 = if dt_bias.dtype() == kiln_tensor::DType::BF16 {
                 None
             } else {
-                Some(dt_bias.to_dtype(candle_core::DType::BF16)
+                Some(dt_bias.to_dtype(kiln_tensor::DType::BF16)
                     .with_context(|| "gdn_decode_rmsnorm: cast dt_bias -> bf16")?)
             };
-            let weight_f32 = if weight.dtype() == candle_core::DType::F32 {
+            let weight_f32 = if weight.dtype() == kiln_tensor::DType::F32 {
                 None
             } else {
-                Some(weight.to_dtype(candle_core::DType::F32)
+                Some(weight.to_dtype(kiln_tensor::DType::F32)
                     .with_context(|| "gdn_decode_rmsnorm: cast weight -> f32")?)
             };
             // Same heavy-tensor cast as the sibling functions
             // above — required because conv1d emits F32 q/k/v.
-            if state.dtype() != candle_core::DType::BF16 {
+            if state.dtype() != kiln_tensor::DType::BF16 {
                 return Ok(None);
             }
-            let q_bf16 = if q.dtype() == candle_core::DType::BF16 { None } else {
-                Some(q.to_dtype(candle_core::DType::BF16).with_context(|| "gdn_decode_rmsnorm: cast q -> bf16")?)
+            let q_bf16 = if q.dtype() == kiln_tensor::DType::BF16 { None } else {
+                Some(q.to_dtype(kiln_tensor::DType::BF16).with_context(|| "gdn_decode_rmsnorm: cast q -> bf16")?)
             };
-            let k_bf16 = if k.dtype() == candle_core::DType::BF16 { None } else {
-                Some(k.to_dtype(candle_core::DType::BF16).with_context(|| "gdn_decode_rmsnorm: cast k -> bf16")?)
+            let k_bf16 = if k.dtype() == kiln_tensor::DType::BF16 { None } else {
+                Some(k.to_dtype(kiln_tensor::DType::BF16).with_context(|| "gdn_decode_rmsnorm: cast k -> bf16")?)
             };
-            let v_bf16 = if v.dtype() == candle_core::DType::BF16 { None } else {
-                Some(v.to_dtype(candle_core::DType::BF16).with_context(|| "gdn_decode_rmsnorm: cast v -> bf16")?)
+            let v_bf16 = if v.dtype() == kiln_tensor::DType::BF16 { None } else {
+                Some(v.to_dtype(kiln_tensor::DType::BF16).with_context(|| "gdn_decode_rmsnorm: cast v -> bf16")?)
             };
-            let a_bf16 = if a.dtype() == candle_core::DType::BF16 { None } else {
-                Some(a.to_dtype(candle_core::DType::BF16).with_context(|| "gdn_decode_rmsnorm: cast a -> bf16")?)
+            let a_bf16 = if a.dtype() == kiln_tensor::DType::BF16 { None } else {
+                Some(a.to_dtype(kiln_tensor::DType::BF16).with_context(|| "gdn_decode_rmsnorm: cast a -> bf16")?)
             };
-            let b_bf16 = if b.dtype() == candle_core::DType::BF16 { None } else {
-                Some(b.to_dtype(candle_core::DType::BF16).with_context(|| "gdn_decode_rmsnorm: cast b -> bf16")?)
+            let b_bf16 = if b.dtype() == kiln_tensor::DType::BF16 { None } else {
+                Some(b.to_dtype(kiln_tensor::DType::BF16).with_context(|| "gdn_decode_rmsnorm: cast b -> bf16")?)
             };
-            let z_bf16 = if z.dtype() == candle_core::DType::BF16 { None } else {
-                Some(z.to_dtype(candle_core::DType::BF16).with_context(|| "gdn_decode_rmsnorm: cast z -> bf16")?)
+            let z_bf16 = if z.dtype() == kiln_tensor::DType::BF16 { None } else {
+                Some(z.to_dtype(kiln_tensor::DType::BF16).with_context(|| "gdn_decode_rmsnorm: cast z -> bf16")?)
             };
             return self.gdn_decode_qk_norm_gates_recurrent_rmsnorm(
                 q_bf16.as_ref().unwrap_or(q),
@@ -1363,28 +1302,8 @@ impl BackendRuntime for CudaBackend {
         let weight_c = weight
             .contiguous()
             .with_context(|| "kt-adapter: gdn_decode_rmsnorm weight contiguous failed")?;
-        let q_kt_4d = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(q)
-            .with_context(|| "kt-adapter: gdn_decode_rmsnorm q → kt (4D) failed")?;
-        let k_kt_4d = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(k)
-            .with_context(|| "kt-adapter: gdn_decode_rmsnorm k → kt (4D) failed")?;
-        let v_kt_4d = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v)
-            .with_context(|| "kt-adapter: gdn_decode_rmsnorm v → kt (4D) failed")?;
-        let a_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&a_c)
-            .with_context(|| "kt-adapter: gdn_decode_rmsnorm a → kt failed")?;
-        let b_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&b_c)
-            .with_context(|| "kt-adapter: gdn_decode_rmsnorm b → kt failed")?;
-        let alog_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&alog_c)
-            .with_context(|| "kt-adapter: gdn_decode_rmsnorm a_log → kt failed")?;
-        let dtb_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&dtb_c)
-            .with_context(|| "kt-adapter: gdn_decode_rmsnorm dt_bias → kt failed")?;
-        let state_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&state_c)
-            .with_context(|| "kt-adapter: gdn_decode_rmsnorm state → kt failed")?;
-        let z_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&z_c)
-            .with_context(|| "kt-adapter: gdn_decode_rmsnorm z → kt failed")?;
-        let w_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&weight_c)
-            .with_context(|| "kt-adapter: gdn_decode_rmsnorm weight → kt failed")?;
         if !kiln_gdn_kernel::gdn_decode_qk_norm_gates_recurrent_rmsnorm_supports_kt(
-            &q_kt_4d, &k_kt_4d, &v_kt_4d, &a_kt, &b_kt, &alog_kt, &dtb_kt, &state_kt, &z_kt, &w_kt,
+            q, k, v, &a_c, &b_c, &alog_c, &dtb_c, &state_c, &z_c, &weight_c,
         ) {
             return Ok(None);
         }
@@ -1395,24 +1314,16 @@ impl BackendRuntime for CudaBackend {
             .with_context(|| "kt-adapter: gdn_decode_rmsnorm k squeeze(1) failed")?;
         let v_3d = v.squeeze(1)
             .with_context(|| "kt-adapter: gdn_decode_rmsnorm v squeeze(1) failed")?;
-        let q_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&q_3d)
-            .with_context(|| "kt-adapter: gdn_decode_rmsnorm q 3D → kt failed")?;
-        let k_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&k_3d)
-            .with_context(|| "kt-adapter: gdn_decode_rmsnorm k 3D → kt failed")?;
-        let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&v_3d)
-            .with_context(|| "kt-adapter: gdn_decode_rmsnorm v 3D → kt failed")?;
         let out_kt = kiln_gdn_kernel::gdn_decode_qk_norm_gates_recurrent_rmsnorm_bf16_kt(
-            &q_kt, &k_kt, &v_kt, &a_kt, &b_kt, &alog_kt, &dtb_kt, &state_kt, &z_kt, &w_kt,
+            &q_3d, &k_3d, &v_3d, &a_c, &b_c, &alog_c, &dtb_c, &state_c, &z_c, &weight_c,
             q_scale as f32, qk_eps as f32, rms_eps as f32,
         )
         .map_err(|e| anyhow::anyhow!("kt gdn_decode_qk_norm_gates_recurrent_rmsnorm: {e}"))?;
-        let out_3d = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-            .with_context(|| "kt-adapter: gdn_decode_rmsnorm out → candle failed")?;
         // Same 3D->4D unsqueeze fix as the gdn_decode_gates_recurrent
         // and gdn_decode_qk_norm_gates_recurrent wires above. The
         // kt_api allocates 3D `[B, value_heads, dv]` but the trait
         // contract is 4D `[B, 1, value_heads, dv]`. (#1082)
-        let out = out_3d
+        let out = out_kt
             .unsqueeze(1)
             .with_context(|| "kt-adapter: gdn_decode_rmsnorm out 3D->4D unsqueeze failed")?;
         Ok(Some(out))
