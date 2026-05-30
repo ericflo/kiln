@@ -4896,7 +4896,7 @@ fn train_tokenized_grpo_group_with_grad_norms(
         // candle ECHO term was a candle-authoritative feature dropped in the
         // candle drop). `grpo_step_forward_backward_tape_authoritative_kt`
         // returns `GradSource::Kt`, consumed kt-native by the dispatchers.
-        let loss_val;
+        let loss_val: f64;
         anyhow::ensure!(
             tape_auth_eligible,
             "GRPO requires the kt tape-authoritative path (CUDA + BF16 base, no \
@@ -5897,6 +5897,9 @@ fn cross_entropy_loss(
             .context("cross_entropy_loss: logits contiguous")?;
         let candle = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&lc)
             .map_err(|e| anyhow::anyhow!("cross_entropy_loss: logits kt->candle: {e}"))?;
+        // tape_bridge is the CUDA kt-tape chaining hint; no-cuda/vulkan training
+        // is not the live path (kt tape is CUDA-only), so it's skippable there.
+        #[cfg(feature = "cuda")]
         kiln_kt_bridge::tape_bridge::retain_output_for_chaining(logits, candle.id());
         candle
     };
