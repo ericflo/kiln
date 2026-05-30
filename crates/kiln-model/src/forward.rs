@@ -23942,7 +23942,10 @@ pub fn model_forward(
 fn model_forward_logits_kt_to_candle(logits: Tensor) -> Result<candle_core::Tensor> {
     // #1082 CP-4: keep the original kt logits handle (the recorded lm_head tape
     // output) so we can register it as the producer of the bridged candle
-    // logits id below.
+    // logits id below. The `tape_bridge` registry is CUDA-only (CP-4 GPU
+    // tape-authoritative training), so the chaining is cuda-gated; on no-CUDA
+    // this is a plain kt->candle copy.
+    #[cfg(feature = "cuda")]
     let logits_chain = logits.clone();
     let contig = if logits.is_contiguous() {
         logits
@@ -23959,6 +23962,7 @@ fn model_forward_logits_kt_to_candle(logits: Tensor) -> Result<candle_core::Tens
     // dead-ends at the loss and the kt GradStore comes back empty. The call
     // self-gates on an active tape-bridge scope, so it is a no-op on the
     // inference/decode path.
+    #[cfg(feature = "cuda")]
     kiln_kt_bridge::tape_bridge::retain_output_for_chaining(&logits_chain, candle.id());
     Ok(candle)
 }
@@ -23986,6 +23990,8 @@ pub(crate) fn kt_logits_to_candle(logits: &Tensor) -> Result<candle_core::Tensor
     // `candle_to_kt_activation` re-entering the kt tape chains back to it
     // instead of fresh-borrowing — keeping the tape connected across the candle
     // island. Self-gates on the bridge scope (no-op on the inference path).
+    // CUDA-only: the `tape_bridge` registry is part of the CP-4 GPU tape path.
+    #[cfg(feature = "cuda")]
     kiln_kt_bridge::tape_bridge::retain_output_for_chaining(logits, candle.id());
     Ok(candle)
 }
@@ -24002,7 +24008,9 @@ pub(crate) fn candle_to_kt_activation(t: &candle_core::Tensor) -> Result<Tensor>
     // candle island instead of re-entering as a fresh, un-chained kt id (which
     // islands the upstream forward from the loss → empty grads). Self-gates on
     // the bridge scope (returns `None` outside it), so the inference / decode
-    // path takes the plain fresh copy below unchanged.
+    // path takes the plain fresh copy below unchanged. CUDA-only: the
+    // `tape_bridge` registry is part of the CP-4 GPU tape path.
+    #[cfg(feature = "cuda")]
     if let Some(kt) = kiln_kt_bridge::tape_bridge::kt_input_for_candle(t.id()) {
         return Ok(kt);
     }
