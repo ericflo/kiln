@@ -1335,11 +1335,11 @@ impl BackendRuntime for CudaBackend {
 
     fn gdn_gates(
         &self,
-        a: &candle_core::Tensor,
-        b: &candle_core::Tensor,
-        a_log: &candle_core::Tensor,
-        dt_bias: &candle_core::Tensor,
-    ) -> Result<Option<(candle_core::Tensor, candle_core::Tensor)>> {
+        a: &kiln_tensor::Tensor,
+        b: &kiln_tensor::Tensor,
+        a_log: &kiln_tensor::Tensor,
+        dt_bias: &kiln_tensor::Tensor,
+    ) -> Result<Option<(kiln_tensor::Tensor, kiln_tensor::Tensor)>> {
         let dims = a.dims();
         let is_t1_decode = dims.len() >= 2 && dims[dims.len() - 2] == 1;
         if !is_t1_decode && std::env::var("KILN_DISABLE_CUDA_GDN_PREFILL_GATES").is_ok() {
@@ -1351,34 +1351,27 @@ impl BackendRuntime for CudaBackend {
             );
             return Ok(None);
         }
-        // Phase 7 (#1082): kt-typed bf16 surface is now the only path,
-        // same closeout pattern as conv1d (2ebcfb08) and marlin
-        // (0841c266). The candle-typed
-        // `kiln_gdn_kernel::gdn_gates[_decline_reason]` fallback has
-        // been deleted; non-bf16 envelopes (f32/f32, f32/bf16) return
+        // Phase 7 (#1082): kt-typed bf16 surface is now the only path.
+        // Args are already kt (#1082 DoD-101/102), so no candle↔kt
+        // bridge. Non-bf16 envelopes (f32/f32, f32/bf16) return
         // Ok(None) so the caller's candle fallback engages. bf16 was
         // the only envelope on the production decode/prefill path for
-        // Qwen3.5-4B GDN; the mixed-precision variants are reachable
-        // only through paths not exercised in production.
-        if !(a.dtype() == candle_core::DType::BF16
-            && b.dtype() == candle_core::DType::BF16
-            && a_log.dtype() == candle_core::DType::BF16
-            && dt_bias.dtype() == candle_core::DType::BF16)
+        // Qwen3.5-4B GDN.
+        if !(a.dtype() == kiln_tensor::DType::BF16
+            && b.dtype() == kiln_tensor::DType::BF16
+            && a_log.dtype() == kiln_tensor::DType::BF16
+            && dt_bias.dtype() == kiln_tensor::DType::BF16)
         {
             return Ok(None);
         }
         kiln_nvtx::range!(c"kiln/gdn_gates_bf16_kt");
-        // kt_tensor_from_candle_cuda_borrow requires contiguous inputs (see
-        // kiln-kt-bridge::lib.rs: "tensor must be contiguous"). At the
-        // bs>1 / prefill GDN call site, `a` and `b` arrive as
+        // At the bs>1 / prefill GDN call site, `a` and `b` arrive as
         // `ab.narrow(2, .., nv)` views on a fused A/B in-proj output,
-        // which are non-contiguous on the last dim. The candle path
-        // used to handle this by computing a collapsed row-stride and
-        // falling through to `.contiguous()` on declined stride; with
-        // the candle path now gone, we make each operand contiguous
-        // here unconditionally. This is a no-op when the upstream
-        // tensor is already contiguous (the seq_len==1 decode case).
-        // a_log and dt_bias are weight tensors and are already
+        // which are non-contiguous on the last dim. The kt kernel
+        // requires contiguous inputs, so we make each operand
+        // contiguous here unconditionally. This is a no-op when the
+        // upstream tensor is already contiguous (the seq_len==1 decode
+        // case). a_log and dt_bias are weight tensors and are already
         // contiguous; the calls are kept for symmetry / future-proofing.
         let a_c = a
             .contiguous()
@@ -1392,25 +1385,13 @@ impl BackendRuntime for CudaBackend {
         let dtb_c = dt_bias
             .contiguous()
             .with_context(|| "kt-adapter: gdn_gates dt_bias contiguous failed")?;
-        let a_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&a_c)
-            .with_context(|| "kt-adapter: gdn_gates a → kt failed")?;
-        let b_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&b_c)
-            .with_context(|| "kt-adapter: gdn_gates b → kt failed")?;
-        let alog_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&alog_c)
-            .with_context(|| "kt-adapter: gdn_gates a_log → kt failed")?;
-        let dtb_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&dtb_c)
-            .with_context(|| "kt-adapter: gdn_gates dt_bias → kt failed")?;
-        if !kiln_gdn_kernel::gdn_gates_supports_kt(&a_kt, &b_kt, &alog_kt, &dtb_kt) {
+        if !kiln_gdn_kernel::gdn_gates_supports_kt(&a_c, &b_c, &alog_c, &dtb_c) {
             return Ok(None);
         }
         let (beta_kt, g_kt) =
-            kiln_gdn_kernel::gdn_gates_bf16_kt(&a_kt, &b_kt, &alog_kt, &dtb_kt)
+            kiln_gdn_kernel::gdn_gates_bf16_kt(&a_c, &b_c, &alog_c, &dtb_c)
                 .map_err(|e| anyhow::anyhow!("kt gdn_gates_bf16: {e}"))?;
-        let beta = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&beta_kt)
-            .with_context(|| "kt-adapter: gdn_gates beta → candle failed")?;
-        let g = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&g_kt)
-            .with_context(|| "kt-adapter: gdn_gates g → candle failed")?;
-        Ok(Some((beta, g)))
+        Ok(Some((beta_kt, g_kt)))
     }
 
     fn supports_gdn_gated_rms_norm(&self) -> bool {
@@ -1646,31 +1627,29 @@ impl BackendRuntime for CudaBackend {
 
     fn gdn_gated_rms_norm(
         &self,
-        x: &candle_core::Tensor,
-        z: &candle_core::Tensor,
-        weight: &candle_core::Tensor,
+        x: &kiln_tensor::Tensor,
+        z: &kiln_tensor::Tensor,
+        weight: &kiln_tensor::Tensor,
         eps: f64,
-    ) -> Result<Option<candle_core::Tensor>> {
+    ) -> Result<Option<kiln_tensor::Tensor>> {
         if !self.gdn_gated_rms_norm_enabled {
             return Ok(None);
         }
-        // Phase 7 (#1082): kt-typed bf16 surface is now the only path,
-        // same closeout pattern as conv1d (2ebcfb08) and marlin
-        // (0841c266). The candle-typed `kiln_gdn_kernel::gdn_gated_rms_
-        // norm[_supports]` fallback has been deleted; non-bf16 inputs
-        // (which the kt path declines) return Ok(None) so the caller's
-        // candle fallback engages. bf16 was the only envelope the
-        // candle path could reach in production for Qwen3.5-4B GDN.
-        if !(x.dtype() == candle_core::DType::BF16
-            && z.dtype() == candle_core::DType::BF16
-            && weight.dtype() == candle_core::DType::BF16)
+        // Phase 7 (#1082): kt-typed bf16 surface is now the only path.
+        // Args are already kt (#1082 DoD-101/102), so no candle↔kt
+        // bridge. Non-bf16 inputs (which the kt path declines) return
+        // Ok(None) so the caller's candle fallback engages. bf16 was
+        // the only production envelope for Qwen3.5-4B GDN.
+        if !(x.dtype() == kiln_tensor::DType::BF16
+            && z.dtype() == kiln_tensor::DType::BF16
+            && weight.dtype() == kiln_tensor::DType::BF16)
         {
             return Ok(None);
         }
         kiln_nvtx::range!(c"kiln/gdn_gated_rms_norm_bf16_kt");
         // The kt variant expects rank-2 [rows, hidden]; flatten higher-rank
         // x/z by folding all leading dims into rows. weight stays [hidden].
-        let x_dims = x.dims();
+        let x_dims = x.dims().to_vec();
         let hidden = *x_dims.last().expect("x has at least one dim (checked by supports_kt)");
         let rows: usize = x_dims.iter().take(x_dims.len() - 1).product();
         let x_flat = x
@@ -1679,21 +1658,13 @@ impl BackendRuntime for CudaBackend {
         let z_flat = z
             .reshape((rows, hidden))
             .context("kt-adapter: gdn_gated_rms_norm reshape z → [rows, hidden] failed")?;
-        let x_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&x_flat)
-            .with_context(|| "kt-adapter: gdn_gated_rms_norm x → kt failed")?;
-        let z_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&z_flat)
-            .with_context(|| "kt-adapter: gdn_gated_rms_norm z → kt failed")?;
-        let w_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(weight)
-            .with_context(|| "kt-adapter: gdn_gated_rms_norm weight → kt failed")?;
-        if !kiln_gdn_kernel::gdn_gated_rms_norm_supports_kt(&x_kt, &z_kt, &w_kt) {
+        if !kiln_gdn_kernel::gdn_gated_rms_norm_supports_kt(&x_flat, &z_flat, weight) {
             return Ok(None);
         }
         let out_kt =
-            kiln_gdn_kernel::gdn_gated_rms_norm_bf16_kt(&x_kt, &z_kt, &w_kt, eps as f32)
+            kiln_gdn_kernel::gdn_gated_rms_norm_bf16_kt(&x_flat, &z_flat, weight, eps as f32)
                 .map_err(|e| anyhow::anyhow!("kt gdn_gated_rms_norm_bf16: {e}"))?;
-        let out_flat = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-            .with_context(|| "kt-adapter: gdn_gated_rms_norm out → candle failed")?;
-        let out = out_flat
+        let out = out_kt
             .reshape(x_dims)
             .context("kt-adapter: gdn_gated_rms_norm reshape out → original failed")?;
         Ok(Some(out))
