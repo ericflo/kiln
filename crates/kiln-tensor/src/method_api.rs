@@ -288,8 +288,13 @@ impl Tensor {
     // ==================================================================
 
     /// Matrix multiply `self @ rhs`. Delegates to [`ops::matmul`].
+    /// #1082: kt MatmulOp requires contiguous operands (candle's cublas path
+    /// took a transpose flag); contiguify the transposed-weight (`W^T`) case.
+    /// No-op when already contiguous (the decode hot path), so no regression
+    /// there; the copy only lands on the strided/transposed training matmuls
+    /// candle materialized too.
     pub fn matmul(&self, rhs: &Self) -> Result<Self> {
-        ops::matmul(self, rhs)
+        ops::matmul(&contig_for_op(self)?, &contig_for_op(rhs)?)
     }
 
     /// Batched matmul with broadcast batch dims.
@@ -324,8 +329,8 @@ impl Tensor {
         let mut rhs_shape = batch;
         rhs_shape.extend_from_slice(&[rk, n]);
         ops::matmul(
-            &broadcast_to_shape(self, &lhs_shape)?,
-            &broadcast_to_shape(rhs, &rhs_shape)?,
+            &contig_for_op(&broadcast_to_shape(self, &lhs_shape)?)?,
+            &contig_for_op(&broadcast_to_shape(rhs, &rhs_shape)?)?,
         )
     }
 
