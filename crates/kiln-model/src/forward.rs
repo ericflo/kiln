@@ -8192,8 +8192,15 @@ pub fn rms_norm(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor> {
                 return Ok(out);
             }
         } else if vulkan_rmsnorm_training_enabled_for(x) {
-            if let Some(out) = try_vulkan_rmsnorm_autograd(x, weight, eps as f32)? {
-                return Ok(out);
+            // try_vulkan_rmsnorm_autograd is candle-typed (it wraps the kernel in
+            // a candle CustomOp1 for autograd). Bridge the kt x/weight to candle
+            // for the call, then bridge the candle result back to kt. (#1082)
+            let x_c = kt_logits_to_candle(x).context("rms_norm kt->candle x (vk autograd)")?;
+            let w_c =
+                kt_logits_to_candle(weight).context("rms_norm kt->candle weight (vk autograd)")?;
+            if let Some(out) = try_vulkan_rmsnorm_autograd(&x_c, &w_c, eps as f32)? {
+                return candle_to_kt_activation(&out)
+                    .context("rms_norm candle->kt (vk autograd) out");
             }
         }
     }
@@ -8223,7 +8230,7 @@ fn vulkan_rmsnorm_training_enabled_for(x: &Tensor) -> bool {
         return forced;
     }
     const RMSNORM_AUTO_ROW_THRESHOLD: usize = 1024;
-    let dims = x.shape().dims();
+    let dims = x.shape();
     if dims.is_empty() {
         return false;
     }
@@ -8255,11 +8262,11 @@ fn vulkan_rmsnorm_forward_inference_enabled() -> bool {
 /// without routing through the kiln-vulkan-kernel candle bridge surface. (#1082)
 #[cfg(feature = "vulkan")]
 #[inline]
-fn vk_tensor_to_f32_bytes_with_shape(tensor: &Tensor) -> Result<(Vec<u8>, Vec<usize>)> {
+fn vk_tensor_to_f32_bytes_with_shape(tensor: &candle_core::Tensor) -> Result<(Vec<u8>, Vec<usize>)> {
     let shape: Vec<usize> = tensor.shape().dims().to_vec();
     let flat = tensor.flatten_all().context("failed to flatten tensor")?;
     let f32_data = flat
-        .to_dtype(DType::F32)?
+        .to_dtype(candle_core::DType::F32)?
         .to_vec1::<f32>()
         .context("failed to extract f32 data")?;
     Ok((bytemuck::cast_slice(&f32_data).to_vec(), shape))
@@ -8270,13 +8277,13 @@ fn vk_tensor_to_f32_bytes_with_shape(tensor: &Tensor) -> Result<(Vec<u8>, Vec<us
 fn vk_tensor_from_f32_bytes(
     data: &[u8],
     shape: &[usize],
-    dtype: DType,
-) -> Result<Tensor> {
+    dtype: candle_core::DType,
+) -> Result<candle_core::Tensor> {
     let f32_data: &[f32] = bytemuck::cast_slice(data);
-    let tensor = Tensor::from_vec(f32_data.to_vec(), f32_data.len(), &Device::Cpu)?
+    let tensor = candle_core::Tensor::from_vec(f32_data.to_vec(), f32_data.len(), &candle_core::Device::Cpu)?
         .reshape(shape)?;
-    if dtype == DType::BF16 {
-        Ok(tensor.to_dtype(DType::BF16)?)
+    if dtype == candle_core::DType::BF16 {
+        Ok(tensor.to_dtype(candle_core::DType::BF16)?)
     } else {
         Ok(tensor)
     }
@@ -8301,13 +8308,17 @@ fn try_vulkan_rmsnorm_forward(x: &Tensor, weight: &Tensor, eps: f32) -> Result<O
     } else {
         weight.to_dtype(DType::F32)?
     };
-    let x_dims = x_f32.shape().dims().to_vec();
+    let x_dims = x_f32.shape().to_vec();
     let hidden = *x_dims
         .last()
         .ok_or_else(|| anyhow::anyhow!("rmsnorm: x has no dims"))?;
     let rows: usize = x_dims[..x_dims.len() - 1].iter().product();
-    let x_bytes = vk_tensor_to_f32_bytes_with_shape(&x_f32)?.0;
-    let w_bytes = vk_tensor_to_f32_bytes_with_shape(&w_f32)?.0;
+    // The byte helpers are candle-typed (they build CPU candle tensors for the
+    // autograd CustomOp1). Bridge the kt locals to candle for extraction. (#1082)
+    let x_f32_c = crate::forward::kt_logits_to_candle(&x_f32)?;
+    let w_f32_c = crate::forward::kt_logits_to_candle(&w_f32)?;
+    let x_bytes = vk_tensor_to_f32_bytes_with_shape(&x_f32_c)?.0;
+    let w_bytes = vk_tensor_to_f32_bytes_with_shape(&w_f32_c)?.0;
     let out_bytes = kiln_vulkan_kernel::kernels::dispatch_qwen_rmsnorm_forward_bytes(
         vk_device.as_ref(),
         &x_bytes,
@@ -8316,11 +8327,13 @@ fn try_vulkan_rmsnorm_forward(x: &Tensor, weight: &Tensor, eps: f32) -> Result<O
         hidden,
         eps,
     )?;
-    let out_f32 = vk_tensor_from_f32_bytes(
+    let out_f32_c = vk_tensor_from_f32_bytes(
         &out_bytes,
         &x_dims,
-        DType::F32,
+        candle_core::DType::F32,
     )?;
+    // Bridge the candle result back to kt before the kt-typed dtype cast. (#1082)
+    let out_f32 = crate::forward::candle_to_kt_activation(&out_f32_c)?;
     let out = if out_f32.dtype() == in_dtype {
         out_f32
     } else {
@@ -16441,17 +16454,23 @@ fn gated_deltanet_forward_decode_if(
                 .as_any()
                 .downcast_ref::<crate::backend::vulkan::VulkanBackend>()
             {
+                // The resident-decode entry is candle-typed (vk_decode_resident.rs
+                // operates on CPU-resident candle tensors). Bridge the kt locals to
+                // candle for the call, then bridge the candle result back to kt. (#1082)
+                let x_c = crate::forward::kt_logits_to_candle(x)?;
+                let recurrent_state_c = crate::forward::kt_logits_to_candle(recurrent_state)?;
+                let conv_state_c = crate::forward::kt_logits_to_candle(conv_state)?;
                 if let Some(out) =
                     crate::vk_decode_resident::gated_deltanet_forward_decode_resident_b1(
                         vk_backend,
-                        x,
+                        &x_c,
                         weights,
                         config,
-                        recurrent_state,
-                        conv_state,
+                        &recurrent_state_c,
+                        &conv_state_c,
                     )?
                 {
-                    return Ok(out);
+                    return crate::forward::candle_to_kt_activation(&out);
                 }
             }
         }
@@ -24943,6 +24962,10 @@ fn model_forward_paged_last_token_resident_native_vk(
             GpuAttentionWeights::Linear(_) => {
                 let recurrent_t = &state.recurrent_states[linear_attn_idx];
                 let conv_t = &state.conv_states[linear_attn_idx];
+                // record_gdn_block_into is candle-typed; bridge the kt state
+                // tensors to candle CPU for the call (vulkan reads host bytes). (#1082)
+                let recurrent_c = crate::forward::kt_logits_to_candle(recurrent_t)?;
+                let conv_c = crate::forward::kt_logits_to_candle(conv_t)?;
                 let ok = crate::vk_decode_resident::record_gdn_block_into(
                     vk_backend,
                     &mut batch,
@@ -24950,8 +24973,8 @@ fn model_forward_paged_last_token_resident_native_vk(
                     to_buf,
                     layer,
                     config,
-                    recurrent_t,
-                    conv_t,
+                    &recurrent_c,
+                    &conv_c,
                 )?;
                 if !ok {
                     return Ok(None);
@@ -24968,9 +24991,12 @@ fn model_forward_paged_last_token_resident_native_vk(
     // costing ~12 ms / token; baking these two dispatches into the
     // batch turns that into ~5 ms of pure GPU compute on the same
     // queue submission.
-    let final_norm_buf = vk_backend.cached_f32_weight_buffer(&weights.final_norm)?;
-    let lm_head_w_buf =
-        vk_backend.cached_bf16_packed_weight_buffer(&weights.embed_tokens_t)?;
+    let final_norm_buf = vk_backend.cached_f32_weight_buffer(
+        &crate::vk_decode_resident::kt_weight_to_candle_cached(&weights.final_norm)?,
+    )?;
+    let lm_head_w_buf = vk_backend.cached_bf16_packed_weight_buffer(
+        &crate::vk_decode_resident::kt_weight_to_candle_cached(&weights.embed_tokens_t)?,
+    )?;
     let vocab_size = weights.embed_tokens_t.dims().last().copied().unwrap_or(0);
     if vocab_size == 0 {
         return Ok(None);
@@ -25048,7 +25074,7 @@ fn model_forward_paged_last_token_resident_native_vk(
     // to avoid a wasteful to_dtype() conversion (the caller's argmax
     // / greedy_sample works in f32 either way).
     let logits =
-        Tensor::from_vec(out_f32, (1usize, 1usize, vocab_size), device)?;
+        Tensor::from_vec_on(device, out_f32, vec![1usize, 1usize, vocab_size])?;
     if timing_enabled {
         READBACK_NS.fetch_add(t_readback.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }
@@ -26749,17 +26775,23 @@ fn model_forward_paged_inner(
                         {
                             let recurrent_t = &state.recurrent_states[linear_attn_idx];
                             let conv_t = &state.conv_states[linear_attn_idx];
+                            // transformer_block_paged_decode_gdn_resident_b1 is
+                            // candle-typed; bridge the kt locals to candle for the
+                            // call, then bridge the candle result back to kt. (#1082)
+                            let hidden_c = crate::forward::kt_logits_to_candle(&hidden)?;
+                            let recurrent_c = crate::forward::kt_logits_to_candle(recurrent_t)?;
+                            let conv_c = crate::forward::kt_logits_to_candle(conv_t)?;
                             if let Some(out) =
                                 crate::vk_decode_resident::transformer_block_paged_decode_gdn_resident_b1(
                                     vk_backend,
-                                    &hidden,
+                                    &hidden_c,
                                     layer,
                                     config,
-                                    recurrent_t,
-                                    conv_t,
+                                    &recurrent_c,
+                                    &conv_c,
                                 )?
                             {
-                                hidden = out;
+                                hidden = crate::forward::candle_to_kt_activation(&out)?;
                                 linear_attn_idx += 1;
                                 if let Some(start) = layer_profile_start {
                                     synchronize_for_profile(&device)?;

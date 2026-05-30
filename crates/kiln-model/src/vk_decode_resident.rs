@@ -39,6 +39,59 @@ use crate::backend::vulkan::VulkanBackend;
 use crate::forward::GpuLayerWeights;
 use crate::paged_kv_cache::PagedKvCache;
 
+use std::collections::HashMap;
+use std::sync::Mutex;
+
+/// Process-global kt-weight → candle-tensor bridge cache (#1082 forward-flip).
+///
+/// `GpuWeights` projection / norm tensors are now `kiln_tensor::Tensor` (kt),
+/// but the Vulkan backend's `cached_*_weight_buffer` upload helpers in
+/// `backend/vulkan.rs` are candle-typed and key their device-buffer cache on
+/// `candle_core::TensorId`. A naive per-call `kt -> candle` bridge would mint a
+/// fresh candle `TensorId` every decode step, so the backend's weight-buffer
+/// cache would miss and re-upload every weight on every step — defeating the
+/// resident-decode upload-once contract this module exists for.
+///
+/// This memoizes the bridge on the kt tensor's STABLE [`kiln_tensor::TensorId`]
+/// (one logical weight ⇒ one id for the model's lifetime), so the candle tensor
+/// handed to the upload helper is identical across calls. The first call uploads;
+/// every subsequent call hits the backend's candle-keyed buffer cache. On the
+/// Vulkan (non-CUDA) build the underlying bridge is a value-faithful host copy,
+/// which is also what the upload helpers consume — so this is runtime-correct,
+/// not just a compile shim.
+static KT_WEIGHT_CANDLE_CACHE: Mutex<Option<HashMap<kiln_tensor::TensorId, candle_core::Tensor>>> =
+    Mutex::new(None);
+
+/// Bridge a kt weight tensor to a cached candle tensor (see
+/// [`KT_WEIGHT_CANDLE_CACHE`]). The returned candle tensor has a stable
+/// `candle_core::TensorId` across calls for the same kt weight, so the
+/// backend's weight-buffer cache uploads it exactly once.
+///
+/// `pub(crate)` so the native-decode lm_head/final_norm upload site in
+/// `forward.rs` shares the same canonical upload-once bridge cache.
+pub(crate) fn kt_weight_to_candle_cached(
+    weight: &kiln_tensor::Tensor,
+) -> Result<candle_core::Tensor> {
+    let key = weight.id();
+    {
+        let guard = KT_WEIGHT_CANDLE_CACHE
+            .lock()
+            .map_err(|_| anyhow::anyhow!("kt-weight candle bridge cache mutex poisoned"))?;
+        if let Some(map) = guard.as_ref() {
+            if let Some(t) = map.get(&key) {
+                return Ok(t.clone());
+            }
+        }
+    }
+    let candle = crate::forward::kt_logits_to_candle(weight)
+        .context("bridge kt weight to candle for Vulkan upload")?;
+    let mut guard = KT_WEIGHT_CANDLE_CACHE
+        .lock()
+        .map_err(|_| anyhow::anyhow!("kt-weight candle bridge cache mutex poisoned"))?;
+    let map = guard.get_or_insert_with(HashMap::new);
+    Ok(map.entry(key).or_insert(candle).clone())
+}
+
 // Env-gated per-block timing accumulators. Enable with
 // `KILN_VK_RESIDENT_DECODE_TIMING=1`. Each accumulator records nanos
 // across (block_total, upload, submit_wait, readback). Call sites
@@ -138,7 +191,7 @@ pub fn drain_resident_decode_timing() {
 #[allow(clippy::too_many_arguments)]
 pub fn transformer_block_paged_decode_full_attn_resident_b1(
     backend: &VulkanBackend,
-    x: &candle_core::Tensor,
+    x: &kiln_tensor::Tensor,
     layer: &GpuLayerWeights,
     config: &ModelConfig,
     start_pos: usize,
@@ -146,9 +199,20 @@ pub fn transformer_block_paged_decode_full_attn_resident_b1(
     full_attn_layer_idx: usize,
     paged_cache: &PagedKvCache,
     vk_kv_cache: &VkPagedKvCache,
-    rope_cos: &candle_core::Tensor,
-    rope_sin: &candle_core::Tensor,
-) -> Result<Option<candle_core::Tensor>> {
+    rope_cos: &kiln_tensor::Tensor,
+    rope_sin: &kiln_tensor::Tensor,
+) -> Result<Option<kiln_tensor::Tensor>> {
+    // #1082 forward-flip: the kt-typed caller hands kt activations; the Vulkan
+    // resident body operates on CPU-resident candle tensors (reads host bytes,
+    // uploads to vk buffers). Bridge the kt inputs to candle host copies once at
+    // the boundary so the existing candle body is unchanged; the candle result
+    // is bridged back to kt before returning. Runtime-correct on the CPU-resident
+    // Vulkan path (value-faithful host copy).
+    let x = &crate::forward::kt_logits_to_candle(x).context("bridge kt x for resident full-attn")?;
+    let rope_cos =
+        &crate::forward::kt_logits_to_candle(rope_cos).context("bridge kt rope_cos")?;
+    let rope_sin =
+        &crate::forward::kt_logits_to_candle(rope_sin).context("bridge kt rope_sin")?;
     // --- supported-config gate ---------------------------------------
     let dims = x.dims();
     if dims.len() != 3 || dims[0] != 1 || dims[1] != 1 {
@@ -190,20 +254,20 @@ pub fn transformer_block_paged_decode_full_attn_resident_b1(
 
     // --- weight buffer lookups (cached on backend) -------------------
     // Q/K/V/O projections + MLP gate/up/down: bf16-packed
-    let q_w_buf = backend.cached_bf16_packed_weight_buffer(&attn.q_proj_t)?;
-    let k_w_buf = backend.cached_bf16_packed_weight_buffer(&attn.k_proj_t)?;
-    let v_w_buf = backend.cached_bf16_packed_weight_buffer(&attn.v_proj_t)?;
-    let o_w_buf = backend.cached_bf16_packed_weight_buffer(&attn.o_proj_t)?;
-    let gate_w_buf = backend.cached_bf16_packed_weight_buffer(&layer.mlp.gate_proj_t)?;
-    let up_w_buf = backend.cached_bf16_packed_weight_buffer(&layer.mlp.up_proj_t)?;
-    let down_w_buf = backend.cached_bf16_packed_weight_buffer(&layer.mlp.down_proj_t)?;
+    let q_w_buf = backend.cached_bf16_packed_weight_buffer(&kt_weight_to_candle_cached(&attn.q_proj_t)?)?;
+    let k_w_buf = backend.cached_bf16_packed_weight_buffer(&kt_weight_to_candle_cached(&attn.k_proj_t)?)?;
+    let v_w_buf = backend.cached_bf16_packed_weight_buffer(&kt_weight_to_candle_cached(&attn.v_proj_t)?)?;
+    let o_w_buf = backend.cached_bf16_packed_weight_buffer(&kt_weight_to_candle_cached(&attn.o_proj_t)?)?;
+    let gate_w_buf = backend.cached_bf16_packed_weight_buffer(&kt_weight_to_candle_cached(&layer.mlp.gate_proj_t)?)?;
+    let up_w_buf = backend.cached_bf16_packed_weight_buffer(&kt_weight_to_candle_cached(&layer.mlp.up_proj_t)?)?;
+    let down_w_buf = backend.cached_bf16_packed_weight_buffer(&kt_weight_to_candle_cached(&layer.mlp.down_proj_t)?)?;
 
     // RMSnorm weights: f32 (the candle storage may be bf16; the cache
     // helper converts on first lookup).
-    let in_norm_buf = backend.cached_f32_weight_buffer(&layer.input_layernorm)?;
-    let post_norm_buf = backend.cached_f32_weight_buffer(&layer.post_attention_layernorm)?;
-    let q_norm_buf = backend.cached_f32_weight_buffer(&attn.q_norm)?;
-    let k_norm_buf = backend.cached_f32_weight_buffer(&attn.k_norm)?;
+    let in_norm_buf = backend.cached_f32_weight_buffer(&kt_weight_to_candle_cached(&layer.input_layernorm)?)?;
+    let post_norm_buf = backend.cached_f32_weight_buffer(&kt_weight_to_candle_cached(&layer.post_attention_layernorm)?)?;
+    let q_norm_buf = backend.cached_f32_weight_buffer(&kt_weight_to_candle_cached(&attn.q_norm)?)?;
+    let k_norm_buf = backend.cached_f32_weight_buffer(&kt_weight_to_candle_cached(&attn.k_norm)?)?;
 
     // --- rope cos/sin upload (per-step, single position) -------------
     // Inlined replacement for `kernels::upload_tensor_f32_buffer`:
@@ -513,7 +577,9 @@ pub fn transformer_block_paged_decode_full_attn_resident_b1(
         FA_TOTAL_NS.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
         FA_CALLS.fetch_add(1, Ordering::Relaxed);
     }
-    Ok(Some(out_tensor))
+    // #1082 forward-flip: bridge the candle decode output back to a kt tensor
+    // for the kt-typed caller (host copy on the CPU-resident Vulkan path).
+    Ok(Some(crate::forward::candle_to_kt_activation(&out_tensor)?))
 }
 
 fn f32_slice_to_bytes(data: &[f32]) -> Vec<u8> {
@@ -632,20 +698,20 @@ pub fn transformer_block_paged_decode_gdn_resident_b1(
     let fb_t0 = if timing_enabled() { Some(Instant::now()) } else { None };
 
     // --- weight buffer lookups (cached on backend) -------------------
-    let qkv_w = backend.cached_bf16_packed_weight_buffer(&lin_weights.in_proj_qkv_t)?;
-    let z_w = backend.cached_bf16_packed_weight_buffer(&lin_weights.in_proj_z_t)?;
-    let a_w = backend.cached_bf16_packed_weight_buffer(&lin_weights.in_proj_a_t)?;
-    let b_w = backend.cached_bf16_packed_weight_buffer(&lin_weights.in_proj_b_t)?;
-    let out_w = backend.cached_bf16_packed_weight_buffer(&lin_weights.out_proj_t)?;
-    let conv_w = backend.cached_f32_weight_buffer(&lin_weights.conv1d)?;
-    let qk_norm = backend.cached_f32_weight_buffer(&lin_weights.norm)?;
-    let a_log = backend.cached_f32_weight_buffer(&lin_weights.a_log)?;
-    let dt_bias = backend.cached_f32_weight_buffer(&lin_weights.dt_bias)?;
-    let gate_w = backend.cached_bf16_packed_weight_buffer(&layer.mlp.gate_proj_t)?;
-    let up_w = backend.cached_bf16_packed_weight_buffer(&layer.mlp.up_proj_t)?;
-    let down_w = backend.cached_bf16_packed_weight_buffer(&layer.mlp.down_proj_t)?;
-    let in_norm = backend.cached_f32_weight_buffer(&layer.input_layernorm)?;
-    let post_norm = backend.cached_f32_weight_buffer(&layer.post_attention_layernorm)?;
+    let qkv_w = backend.cached_bf16_packed_weight_buffer(&kt_weight_to_candle_cached(&lin_weights.in_proj_qkv_t)?)?;
+    let z_w = backend.cached_bf16_packed_weight_buffer(&kt_weight_to_candle_cached(&lin_weights.in_proj_z_t)?)?;
+    let a_w = backend.cached_bf16_packed_weight_buffer(&kt_weight_to_candle_cached(&lin_weights.in_proj_a_t)?)?;
+    let b_w = backend.cached_bf16_packed_weight_buffer(&kt_weight_to_candle_cached(&lin_weights.in_proj_b_t)?)?;
+    let out_w = backend.cached_bf16_packed_weight_buffer(&kt_weight_to_candle_cached(&lin_weights.out_proj_t)?)?;
+    let conv_w = backend.cached_f32_weight_buffer(&kt_weight_to_candle_cached(&lin_weights.conv1d)?)?;
+    let qk_norm = backend.cached_f32_weight_buffer(&kt_weight_to_candle_cached(&lin_weights.norm)?)?;
+    let a_log = backend.cached_f32_weight_buffer(&kt_weight_to_candle_cached(&lin_weights.a_log)?)?;
+    let dt_bias = backend.cached_f32_weight_buffer(&kt_weight_to_candle_cached(&lin_weights.dt_bias)?)?;
+    let gate_w = backend.cached_bf16_packed_weight_buffer(&kt_weight_to_candle_cached(&layer.mlp.gate_proj_t)?)?;
+    let up_w = backend.cached_bf16_packed_weight_buffer(&kt_weight_to_candle_cached(&layer.mlp.up_proj_t)?)?;
+    let down_w = backend.cached_bf16_packed_weight_buffer(&kt_weight_to_candle_cached(&layer.mlp.down_proj_t)?)?;
+    let in_norm = backend.cached_f32_weight_buffer(&kt_weight_to_candle_cached(&layer.input_layernorm)?)?;
+    let post_norm = backend.cached_f32_weight_buffer(&kt_weight_to_candle_cached(&layer.post_attention_layernorm)?)?;
 
     // --- persistent state buffers --------------------------------
     let recurrent_bytes = (1 * nv * dk * dv * 4) as u64;
@@ -984,16 +1050,16 @@ pub fn gated_deltanet_forward_decode_resident_b1(
     let eps = config.rms_norm_eps as f32;
 
     // --- weight buffer lookups ----------------------------------
-    let qkv_w = backend.cached_bf16_packed_weight_buffer(&weights.in_proj_qkv_t)?;
-    let z_w = backend.cached_bf16_packed_weight_buffer(&weights.in_proj_z_t)?;
-    let a_w = backend.cached_bf16_packed_weight_buffer(&weights.in_proj_a_t)?;
-    let b_w = backend.cached_bf16_packed_weight_buffer(&weights.in_proj_b_t)?;
-    let out_w = backend.cached_bf16_packed_weight_buffer(&weights.out_proj_t)?;
-    let conv_w = backend.cached_f32_weight_buffer(&weights.conv1d)?;
-    let q_norm = backend.cached_f32_weight_buffer(&weights.norm)?; // used for gated_rms_norm
+    let qkv_w = backend.cached_bf16_packed_weight_buffer(&kt_weight_to_candle_cached(&weights.in_proj_qkv_t)?)?;
+    let z_w = backend.cached_bf16_packed_weight_buffer(&kt_weight_to_candle_cached(&weights.in_proj_z_t)?)?;
+    let a_w = backend.cached_bf16_packed_weight_buffer(&kt_weight_to_candle_cached(&weights.in_proj_a_t)?)?;
+    let b_w = backend.cached_bf16_packed_weight_buffer(&kt_weight_to_candle_cached(&weights.in_proj_b_t)?)?;
+    let out_w = backend.cached_bf16_packed_weight_buffer(&kt_weight_to_candle_cached(&weights.out_proj_t)?)?;
+    let conv_w = backend.cached_f32_weight_buffer(&kt_weight_to_candle_cached(&weights.conv1d)?)?;
+    let q_norm = backend.cached_f32_weight_buffer(&kt_weight_to_candle_cached(&weights.norm)?)?; // used for gated_rms_norm
     // a_log and dt_bias: these enter the fused recurrent+rmsnorm kernel.
-    let a_log = backend.cached_f32_weight_buffer(&weights.a_log)?;
-    let dt_bias = backend.cached_f32_weight_buffer(&weights.dt_bias)?;
+    let a_log = backend.cached_f32_weight_buffer(&kt_weight_to_candle_cached(&weights.a_log)?)?;
+    let dt_bias = backend.cached_f32_weight_buffer(&kt_weight_to_candle_cached(&weights.dt_bias)?)?;
 
     // --- persistent state buffers --------------------------------
     let recurrent_bytes = (1 * nv * dk * dv * 4) as u64;
@@ -1430,17 +1496,17 @@ pub fn record_full_attn_block_into(
     let max_blocks_per_seq = block_table.blocks.len();
 
     // --- weight buffer lookups (cached on backend) -------------------
-    let q_w = backend.cached_bf16_packed_weight_buffer(&attn.q_proj_t)?;
-    let k_w = backend.cached_bf16_packed_weight_buffer(&attn.k_proj_t)?;
-    let v_w = backend.cached_bf16_packed_weight_buffer(&attn.v_proj_t)?;
-    let o_w = backend.cached_bf16_packed_weight_buffer(&attn.o_proj_t)?;
-    let gate_w = backend.cached_bf16_packed_weight_buffer(&layer.mlp.gate_proj_t)?;
-    let up_w = backend.cached_bf16_packed_weight_buffer(&layer.mlp.up_proj_t)?;
-    let down_w = backend.cached_bf16_packed_weight_buffer(&layer.mlp.down_proj_t)?;
-    let in_norm = backend.cached_f32_weight_buffer(&layer.input_layernorm)?;
-    let post_norm = backend.cached_f32_weight_buffer(&layer.post_attention_layernorm)?;
-    let q_norm = backend.cached_f32_weight_buffer(&attn.q_norm)?;
-    let k_norm = backend.cached_f32_weight_buffer(&attn.k_norm)?;
+    let q_w = backend.cached_bf16_packed_weight_buffer(&kt_weight_to_candle_cached(&attn.q_proj_t)?)?;
+    let k_w = backend.cached_bf16_packed_weight_buffer(&kt_weight_to_candle_cached(&attn.k_proj_t)?)?;
+    let v_w = backend.cached_bf16_packed_weight_buffer(&kt_weight_to_candle_cached(&attn.v_proj_t)?)?;
+    let o_w = backend.cached_bf16_packed_weight_buffer(&kt_weight_to_candle_cached(&attn.o_proj_t)?)?;
+    let gate_w = backend.cached_bf16_packed_weight_buffer(&kt_weight_to_candle_cached(&layer.mlp.gate_proj_t)?)?;
+    let up_w = backend.cached_bf16_packed_weight_buffer(&kt_weight_to_candle_cached(&layer.mlp.up_proj_t)?)?;
+    let down_w = backend.cached_bf16_packed_weight_buffer(&kt_weight_to_candle_cached(&layer.mlp.down_proj_t)?)?;
+    let in_norm = backend.cached_f32_weight_buffer(&kt_weight_to_candle_cached(&layer.input_layernorm)?)?;
+    let post_norm = backend.cached_f32_weight_buffer(&kt_weight_to_candle_cached(&layer.post_attention_layernorm)?)?;
+    let q_norm = backend.cached_f32_weight_buffer(&kt_weight_to_candle_cached(&attn.q_norm)?)?;
+    let k_norm = backend.cached_f32_weight_buffer(&kt_weight_to_candle_cached(&attn.k_norm)?)?;
 
     // --- per-layer scratch buffers (pooled, persistent) --------------
     // These can be SHARED across all full-attn layers within one batch
@@ -1723,20 +1789,20 @@ pub fn record_gdn_block_into(
     let state_key = recurrent_state_t.id();
 
     // Weight lookups
-    let qkv_w = backend.cached_bf16_packed_weight_buffer(&lin_weights.in_proj_qkv_t)?;
-    let z_w = backend.cached_bf16_packed_weight_buffer(&lin_weights.in_proj_z_t)?;
-    let a_w = backend.cached_bf16_packed_weight_buffer(&lin_weights.in_proj_a_t)?;
-    let b_w = backend.cached_bf16_packed_weight_buffer(&lin_weights.in_proj_b_t)?;
-    let out_w = backend.cached_bf16_packed_weight_buffer(&lin_weights.out_proj_t)?;
-    let conv_w = backend.cached_f32_weight_buffer(&lin_weights.conv1d)?;
-    let qk_norm = backend.cached_f32_weight_buffer(&lin_weights.norm)?;
-    let a_log = backend.cached_f32_weight_buffer(&lin_weights.a_log)?;
-    let dt_bias = backend.cached_f32_weight_buffer(&lin_weights.dt_bias)?;
-    let gate_w = backend.cached_bf16_packed_weight_buffer(&layer.mlp.gate_proj_t)?;
-    let up_w = backend.cached_bf16_packed_weight_buffer(&layer.mlp.up_proj_t)?;
-    let down_w = backend.cached_bf16_packed_weight_buffer(&layer.mlp.down_proj_t)?;
-    let in_norm = backend.cached_f32_weight_buffer(&layer.input_layernorm)?;
-    let post_norm = backend.cached_f32_weight_buffer(&layer.post_attention_layernorm)?;
+    let qkv_w = backend.cached_bf16_packed_weight_buffer(&kt_weight_to_candle_cached(&lin_weights.in_proj_qkv_t)?)?;
+    let z_w = backend.cached_bf16_packed_weight_buffer(&kt_weight_to_candle_cached(&lin_weights.in_proj_z_t)?)?;
+    let a_w = backend.cached_bf16_packed_weight_buffer(&kt_weight_to_candle_cached(&lin_weights.in_proj_a_t)?)?;
+    let b_w = backend.cached_bf16_packed_weight_buffer(&kt_weight_to_candle_cached(&lin_weights.in_proj_b_t)?)?;
+    let out_w = backend.cached_bf16_packed_weight_buffer(&kt_weight_to_candle_cached(&lin_weights.out_proj_t)?)?;
+    let conv_w = backend.cached_f32_weight_buffer(&kt_weight_to_candle_cached(&lin_weights.conv1d)?)?;
+    let qk_norm = backend.cached_f32_weight_buffer(&kt_weight_to_candle_cached(&lin_weights.norm)?)?;
+    let a_log = backend.cached_f32_weight_buffer(&kt_weight_to_candle_cached(&lin_weights.a_log)?)?;
+    let dt_bias = backend.cached_f32_weight_buffer(&kt_weight_to_candle_cached(&lin_weights.dt_bias)?)?;
+    let gate_w = backend.cached_bf16_packed_weight_buffer(&kt_weight_to_candle_cached(&layer.mlp.gate_proj_t)?)?;
+    let up_w = backend.cached_bf16_packed_weight_buffer(&kt_weight_to_candle_cached(&layer.mlp.up_proj_t)?)?;
+    let down_w = backend.cached_bf16_packed_weight_buffer(&kt_weight_to_candle_cached(&layer.mlp.down_proj_t)?)?;
+    let in_norm = backend.cached_f32_weight_buffer(&kt_weight_to_candle_cached(&layer.input_layernorm)?)?;
+    let post_norm = backend.cached_f32_weight_buffer(&kt_weight_to_candle_cached(&layer.post_attention_layernorm)?)?;
 
     // Persistent state (per-state-key on backend)
     let recurrent_bytes = (1 * nv * dk * dv * 4) as u64;
