@@ -2300,8 +2300,12 @@ pub fn sft_train(
                         flce_provider,
                     )?;
                     loss_val = lv;
-                    observe_lora_grad_norms_from_grad_store(&mut lora_grad_norms, &params, &grads)?;
-                    optimizer_step(
+                    // (#1082 Inc-0 PR4) `grads` is a `GradSource` now: the
+                    // tape-authoritative CUDA path delivers `GradSource::Kt`
+                    // (consumed kt-native by the dispatchers, no candle copy);
+                    // the candle/CPU/opt-out paths deliver `GradSource::Candle`.
+                    observe_lora_grad_norms_dispatch(&mut lora_grad_norms, &params, &grads)?;
+                    optimizer_step_dispatch(
                         &*backend,
                         &params,
                         &grads,
@@ -5235,6 +5239,41 @@ fn observe_lora_grad_norms_from_grad_store(
     Ok(())
 }
 
+/// (#1082 Inc-0 PR4) kt-native sibling of
+/// [`observe_lora_grad_norms_from_grad_store`]: reads each LoRA `Var`'s
+/// gradient from a kt-native [`kiln_autograd::GradStore`] (keyed by
+/// [`KtTensorId`] via `cd_tensor_id_to_kt`) and accumulates its squared
+/// L2 norm per module.
+///
+/// PERF (#1082): the per-Var norm is computed KT-NATIVELY via
+/// `train_receipt::tensor_l2_norm_kt` (kt `l2_norm_scalar`, which casts
+/// to F32 on-device then reduces with a single D2H scalar readback) — NO
+/// full-tensor `kt -> candle` grad copy. This keeps the observe call off
+/// the candle bridge entirely on the tape-authoritative path.
+#[cfg(feature = "cuda")]
+fn observe_lora_grad_norms_from_kt_grad_store(
+    accumulator: &mut crate::train_receipt::LoraGradNormAccumulator,
+    params: &TrainableLoraParams,
+    grads: &kiln_autograd::GradStore,
+) -> Result<()> {
+    let mut sum_sq_by_module: BTreeMap<&'static str, f64> = BTreeMap::new();
+    for entry in params.all_vars_with_modules() {
+        let kt_id = cd_tensor_id_to_kt(entry.var.as_tensor().id());
+        if let Some(kt_grad) = grads.get(kt_id) {
+            let norm = crate::train_receipt::tensor_l2_norm_kt(kt_grad).with_context(|| {
+                format!("compute LoRA grad l2 norm (kt) for module {}", entry.module)
+            })?;
+            if norm.is_finite() {
+                *sum_sq_by_module.entry(entry.module).or_insert(0.0) += norm * norm;
+            } else {
+                tracing::warn!(module = entry.module, "skipping non-finite LoRA grad norm sample (kt)");
+            }
+        }
+    }
+    observe_lora_grad_module_norms(accumulator, sum_sq_by_module);
+    Ok(())
+}
+
 fn accumulate_lora_grad_sum_sq(
     sum_sq_by_module: &mut BTreeMap<&'static str, f64>,
     module: &'static str,
@@ -6980,6 +7019,135 @@ fn sgd_step(
     Ok(())
 }
 
+/// (#1082 Inc-0 PR4) Where a SFT forward/backward step delivered its
+/// gradients — the unified return type of [`standard_forward_backward`].
+///
+/// `Candle` carries a candle [`GradStore`] (keyed by candle `TensorId`,
+/// values are candle `Tensor`) — the legacy/default path, plus the
+/// candle-auth opt-out, the tape-bridge path, and the CPU path.
+///
+/// `Kt` carries a kt-native [`kiln_autograd::GradStore`] (keyed by
+/// [`KtTensorId`], values are `kiln_tensor::Tensor`) produced by
+/// [`standard_forward_backward_tape_authoritative_kt`] — the
+/// perf-correct, candle-free SFT tape-authoritative CUDA path. This is
+/// the variant that lets the forward.rs type-flip drop the candle
+/// `loss` dependency.
+///
+/// The variant is opaque to most call sites: they pattern through
+/// [`optimizer_step_dispatch`] / [`observe_lora_grad_norms_dispatch`],
+/// which dispatch per-variant. Test/diagnostic sites that need a candle
+/// `Tensor` per `Var` use [`GradSource::candle_grad`] (bridges kt ->
+/// candle on demand for the `Kt` variant); sites that need the raw
+/// candle store use [`GradSource::candle`].
+///
+/// CUDA-gating: the `Kt` variant exists ONLY under `feature = "cuda"`
+/// (its producer + the per-Var kt -> candle bridge are CUDA-only). On a
+/// non-cuda build `GradSource` is a single-variant `Candle` wrapper and
+/// `standard_forward_backward` always returns `Candle`, so the CPU smoke
+/// test (`perf_regression_sft_train_cpu_smoke`) is unaffected.
+pub enum GradSource {
+    /// Candle-native gradients (default / opt-out / tape-bridge / CPU).
+    Candle(GradStore),
+    /// kt-native gradients (SFT tape-authoritative CUDA path, #1082).
+    #[cfg(feature = "cuda")]
+    Kt(kiln_autograd::GradStore),
+}
+
+impl GradSource {
+    /// Number of parameters that received a gradient. Mirrors candle's
+    /// `GradStore::get_ids().count()` and kt's `GradStore::len()`.
+    pub fn num_grad_ids(&self) -> usize {
+        match self {
+            GradSource::Candle(gs) => gs.get_ids().count(),
+            #[cfg(feature = "cuda")]
+            GradSource::Kt(kt) => kt.len(),
+        }
+    }
+
+    /// Borrow the underlying candle `GradStore`, or `None` for the `Kt`
+    /// variant. Used by call sites that drain candle grads into a
+    /// `GradMap` and only ever run on the candle/CPU path.
+    pub fn candle(&self) -> Option<&GradStore> {
+        match self {
+            GradSource::Candle(gs) => Some(gs),
+            #[cfg(feature = "cuda")]
+            GradSource::Kt(_) => None,
+        }
+    }
+
+    /// Owned candle `Tensor` gradient for `var`, or `None` if the store
+    /// has no grad for it. For the `Kt` variant the kt grad is bridged
+    /// to candle on demand (`kt_tensor_to_candle_cuda_copy`) at this
+    /// per-Var boundary — used only by diagnostic/test grad-comparison
+    /// sites, not the optimizer hot path (which consumes kt grads via
+    /// [`optimizer_step_from_kt_grad_store`] without a copy). (#1082)
+    pub fn candle_grad(&self, var: &Var) -> Result<Option<Tensor>> {
+        match self {
+            GradSource::Candle(gs) => Ok(gs.get(var.as_tensor()).map(|g| g.clone())),
+            #[cfg(feature = "cuda")]
+            GradSource::Kt(kt) => {
+                let kt_id = cd_tensor_id_to_kt(var.as_tensor().id());
+                match kt.get(kt_id) {
+                    Some(kt_grad) => {
+                        let cg = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(kt_grad)
+                            .map_err(|e| {
+                                anyhow::anyhow!(
+                                    "GradSource::candle_grad: kt -> candle grad copy: {e}"
+                                )
+                            })?;
+                        Ok(Some(cg))
+                    }
+                    None => Ok(None),
+                }
+            }
+        }
+    }
+}
+
+/// (#1082 Inc-0 PR4) Optimizer-step dispatcher over [`GradSource`]: the
+/// `Candle` variant feeds [`optimizer_step`] (unchanged candle path);
+/// the `Kt` variant feeds [`optimizer_step_from_kt_grad_store`]
+/// (kt-native consumer, PR3). The candle path is untouched so the
+/// opt-out / GRPO / CPU flows behave exactly as before.
+pub fn optimizer_step_dispatch(
+    backend: &dyn BackendRuntime,
+    params: &TrainableLoraParams,
+    grads: &GradSource,
+    lr: f64,
+    optimizer: Optimizer,
+    opt_state: Option<&mut OptimizerState>,
+) -> Result<()> {
+    match grads {
+        GradSource::Candle(gs) => {
+            optimizer_step(backend, params, gs, lr, optimizer, opt_state)
+        }
+        #[cfg(feature = "cuda")]
+        GradSource::Kt(kt) => {
+            optimizer_step_from_kt_grad_store(backend, params, kt, lr, optimizer, opt_state)
+        }
+    }
+}
+
+/// (#1082 Inc-0 PR4) LoRA grad-norm observer dispatcher over
+/// [`GradSource`]: the `Candle` variant routes through the existing
+/// candle observer ([`observe_lora_grad_norms_from_grad_store`]); the
+/// `Kt` variant computes each module's grad L2 norm KT-NATIVELY (no
+/// kt -> candle copy) via `train_receipt::tensor_l2_norm_kt`, looking up
+/// each LoRA `Var`'s grad by `cd_tensor_id_to_kt(var.id())`.
+pub fn observe_lora_grad_norms_dispatch(
+    accumulator: &mut crate::train_receipt::LoraGradNormAccumulator,
+    params: &TrainableLoraParams,
+    grads: &GradSource,
+) -> Result<()> {
+    match grads {
+        GradSource::Candle(gs) => {
+            observe_lora_grad_norms_from_grad_store(accumulator, params, gs)
+        }
+        #[cfg(feature = "cuda")]
+        GradSource::Kt(kt) => observe_lora_grad_norms_from_kt_grad_store(accumulator, params, kt),
+    }
+}
+
 /// Dispatch the configured optimizer against grads from candle's
 /// `GradStore`. `opt_state` must be `Some` iff `optimizer` is
 /// `Optimizer::AdamW`. Caller mutates `opt_state.step` (increments by
@@ -7366,9 +7534,9 @@ pub(crate) fn optimizer_step_from_map(
 /// Moments are looked up by `KtTensorId` (PR1 keying), matching the producer.
 /// The per-Var `kt -> candle` bridge is the LAST candle dependency in this
 /// grad path; it disappears when the optimizer master/moments go kt-native via
-/// `kiln-optim`. Wired into the SFT loop in Inc-0 PR4; currently UNUSED.
+/// `kiln-optim`. (#1082 Inc-0 PR4) NOW WIRED IN via [`optimizer_step_dispatch`]
+/// (the `GradSource::Kt` arm), which the SFT loop + CP-4 convergence gate call.
 #[cfg(feature = "cuda")]
-#[allow(dead_code)]
 pub(crate) fn optimizer_step_from_kt_grad_store(
     backend: &dyn BackendRuntime,
     params: &TrainableLoraParams,
@@ -10800,7 +10968,17 @@ pub(crate) fn tape_authoritative_enabled() -> bool {
 /// connected graph — NO candle `loss.backward()`. The per-input kt grads are
 /// copied into a candle `GradStore` keyed by each `Var`'s candle `TensorId`,
 /// so the optimizer step consumes them exactly as candle's own grads.
+///
+/// (#1082 Inc-0 PR4) SUPERSEDED by
+/// [`standard_forward_backward_tape_authoritative_kt`] as the SFT
+/// tape-authoritative path: `standard_forward_backward` now calls the kt
+/// producer + returns `GradSource::Kt` (no `loss.backward()` container hack, no
+/// per-grad kt -> candle copy). This candle-hack variant is retained
+/// `#[allow(dead_code)]` for reversibility — it is the last codepath that still
+/// instantiates a candle `loss` to seed a `GradStore`, which the forward.rs
+/// type-flip will not be able to do. Delete it once the flip lands.
 #[cfg(feature = "cuda")]
+#[allow(dead_code)]
 fn standard_forward_backward_tape_authoritative(
     backend: &dyn BackendRuntime,
     input_ids: &[u32],
@@ -10895,11 +11073,10 @@ fn standard_forward_backward_tape_authoritative(
 /// match the PR1 `KtTensorId`-keyed `OptimizerState.moments`
 /// (`KtTensorId::from_raw(var.id().as_raw() as u64)` ==
 /// `cd_tensor_id_to_kt(var.id())`), so PR3's consumer looks moments up by the
-/// same key. Currently UNUSED — wired into the SFT loop in Inc-0 PR4; landed
-/// ahead of its caller so the substrate compiles independently per the
-/// Increment-0 plan (`docs/issue-1082-inc0-grad-substrate-plan-2026-05-29.md`).
+/// same key. (#1082 Inc-0 PR4) NOW WIRED IN: `standard_forward_backward`'s
+/// tape-authoritative CUDA branch calls this and returns `GradSource::Kt`, so
+/// the SFT loop + the CP-4 gates exercise this kt-native path.
 #[cfg(feature = "cuda")]
-#[allow(dead_code)]
 fn standard_forward_backward_tape_authoritative_kt(
     backend: &dyn BackendRuntime,
     input_ids: &[u32],
@@ -10965,7 +11142,7 @@ pub fn standard_forward_backward(
     label_mask: &[bool],
     device: &CdDevice,
     flce_provider: Option<FlceProvider>,
-) -> Result<(f64, GradStore)> {
+) -> Result<(f64, GradSource)> {
     // CP-4 (#1082): tape-authoritative path is now the DEFAULT (opt out via
     // `KILN_USE_TAPE_AUTHORITATIVE=0/false/no/off`).
     //
@@ -10975,9 +11152,18 @@ pub fn standard_forward_backward(
     // broken training. So we additionally require `device` to be CUDA here;
     // CPU runs (e.g. the `perf_regression_sft_train_cpu_smoke` test) keep the
     // candle `loss.backward()` path below regardless of the flag.
+    //
+    // (#1082 Inc-0 PR4) The tape-authoritative branch now delivers grads
+    // KT-NATIVELY: it calls `standard_forward_backward_tape_authoritative_kt`
+    // (PR2 producer) and returns `GradSource::Kt`, so the downstream optimizer
+    // step consumes kt grads directly via `optimizer_step_from_kt_grad_store`
+    // (PR3) — NO candle `loss.backward()` GradStore-container hack and NO
+    // per-grad kt -> candle copy. The old candle-hack
+    // `standard_forward_backward_tape_authoritative` is retained `#[allow(
+    // dead_code)]` for reversibility (see its doc-comment).
     #[cfg(feature = "cuda")]
     if tape_authoritative_enabled() && matches!(device, candle_core::Device::Cuda(_)) {
-        return standard_forward_backward_tape_authoritative(
+        let (loss_val, kt_grads) = standard_forward_backward_tape_authoritative_kt(
             backend,
             input_ids,
             weights,
@@ -10986,11 +11172,12 @@ pub fn standard_forward_backward(
             label_mask,
             device,
             flce_provider,
-        );
+        )?;
+        return Ok((loss_val, GradSource::Kt(kt_grads)));
     }
     #[cfg(feature = "cuda")]
     if kiln_autograd::tape_forward_enabled() {
-        return standard_forward_backward_via_tape_bridge(
+        let (loss_val, grads) = standard_forward_backward_via_tape_bridge(
             backend,
             input_ids,
             weights,
@@ -10999,7 +11186,8 @@ pub fn standard_forward_backward(
             label_mask,
             device,
             flce_provider,
-        );
+        )?;
+        return Ok((loss_val, GradSource::Candle(grads)));
     }
 
     let lora_weights = params.as_lora_weights();
@@ -11041,7 +11229,7 @@ pub fn standard_forward_backward(
     let loss_val = loss.to_scalar::<f32>()? as f64;
     let grads = loss.backward().context("backward pass")?;
 
-    Ok((loss_val, grads))
+    Ok((loss_val, GradSource::Candle(grads)))
 }
 
 /// CP-4 (#1082): `standard_forward_backward` body wrapped in a
@@ -14157,11 +14345,18 @@ pub(crate) mod tests {
             "tape-authoritative loss {loss_a} diverges from candle baseline {loss_cf} (rel {lrel:.4})"
         );
 
-        // The tape-authoritative backward produced a candle GradStore.
-        assert!(
-            grads_a.get_ids().count() > 0,
-            "tape-authoritative path produced an empty GradStore"
-        );
+        // (#1082 Inc-0 PR4) `grads_a` is a `GradSource::Kt` now — it carries
+        // ONLY the tape-walk grads (no candle `loss.backward()` overlay). On
+        // this F32 model the BF16-only kt fused adapters all decline, so the
+        // loss->input tape chain dead-ends at the first norm and `num_grad_ids`
+        // is structurally 0 (see `tape_authoritative_grads_match_candle_baseline_bf16`'s
+        // doc — the BF16 test is the authoritative coverage gate). Pre-PR4 this
+        // assert was satisfied by the candle-hack producer's `loss.backward()`
+        // overlay (candle autograd DOES populate F32 grads), NOT by tape
+        // coverage — so it never actually tested the tape path here. We now
+        // REPORT coverage instead of hard-asserting `>0`, matching the test's
+        // own "compared may be 0 — tracked coverage gap, not flaky" stance.
+        let num_grad_ids = grads_a.num_grad_ids();
 
         // Grad parity where the tape routed a param. NOTE: the LoRA projection
         // matmuls are not yet adapter-wired, so `compared` may be 0 — that's a
@@ -14172,12 +14367,12 @@ pub(crate) mod tests {
         let mut compared = 0usize;
         let mut tape_has = 0usize;
         for v in params.all_vars() {
-            let in_a = grads_a.get(v.as_tensor()).is_some();
-            if in_a {
+            let a_grad = grads_a.candle_grad(v).expect("kt->candle grad bridge");
+            if a_grad.is_some() {
                 tape_has += 1;
             }
-            if let (Some(a), Some(c)) = (grads_a.get(v.as_tensor()), grads_c.get(v.as_tensor())) {
-                let r = rel(a, c);
+            if let (Some(a), Some(c)) = (a_grad, grads_c.get(v.as_tensor())) {
+                let r = rel(&a, c);
                 assert!(
                     r < 0.1,
                     "tape-authoritative grad diverges from candle baseline (rel {r:.4})"
@@ -14188,8 +14383,8 @@ pub(crate) mod tests {
         // CP-4 LoRA-grad coverage measurement (#1082): with all tape gates on,
         // how many of the LoRA Vars get a tape-routed grad that matches candle?
         eprintln!(
-            "[CP4-COVERAGE] loss rel {lrel:.4}; total_vars={total} tape_has_grad={tape_has} \
-             matched_candle={compared}"
+            "[CP4-COVERAGE] loss rel {lrel:.4}; total_vars={total} kt_grad_ids={num_grad_ids} \
+             tape_has_grad={tape_has} matched_candle={compared}"
         );
     }
 
@@ -14359,9 +14554,11 @@ pub(crate) mod tests {
             "tape-authoritative bf16 loss {loss_a} diverges from candle baseline {loss_cf} (rel {lrel:.4})"
         );
 
-        // The tape-authoritative backward produced a candle GradStore.
+        // The tape-authoritative backward produced gradients. (#1082 Inc-0 PR4:
+        // `grads_a` is `GradSource::Kt` — `num_grad_ids` counts the kt store;
+        // `candle_grad(v)` bridges each Var's grad to candle for comparison.)
         assert!(
-            grads_a.get_ids().count() > 0,
+            grads_a.num_grad_ids() > 0,
             "tape-authoritative bf16 path produced an empty GradStore"
         );
 
@@ -14375,13 +14572,13 @@ pub(crate) mod tests {
         // grads; `floored_rel` is the gated metric we assert on. (#1082)
         let mut rels: Vec<(usize, f32, f32, f32)> = Vec::new();
         for (vi, v) in params.all_vars().iter().enumerate() {
-            let in_a = grads_a.get(v.as_tensor()).is_some();
-            if in_a {
+            let a_grad = grads_a.candle_grad(v).expect("kt->candle grad bridge");
+            if a_grad.is_some() {
                 tape_has += 1;
             }
-            if let (Some(a), Some(c)) = (grads_a.get(v.as_tensor()), grads_c.get(v.as_tensor())) {
-                let r = rel(a, c);
-                let rf = rel_floored(a, c);
+            if let (Some(a), Some(c)) = (a_grad, grads_c.get(v.as_tensor())) {
+                let r = rel(&a, c);
+                let rf = rel_floored(&a, c);
                 let cmag = c
                     .to_dtype(candle_core::DType::F32)
                     .and_then(|t| t.abs())
@@ -14782,6 +14979,22 @@ pub(crate) mod tests {
             std::env::set_var("KILN_USE_TAPE_AUTHORITATIVE", "0");
         }
 
+        // (#1082 Inc-0 PR4) `grads_tape` is a `GradSource::Kt` now. Materialize
+        // the per-Var grads to candle ONCE (keyed by candle `TensorId`) so the
+        // three lookup sites below keep their candle-`Tensor` comparison shape
+        // (`rel` / `dot_grad`) without re-bridging on every probe.
+        let tape_grad_map: std::collections::HashMap<TensorId, Tensor> = params
+            .all_vars()
+            .iter()
+            .filter_map(|v| {
+                grads_tape
+                    .candle_grad(v)
+                    .expect("kt->candle grad bridge")
+                    .map(|g| (v.as_tensor().id(), g))
+            })
+            .collect();
+        let tape_grad = |v: &Var| -> Option<&Tensor> { tape_grad_map.get(&v.as_tensor().id()) };
+
         // Helper: Σ grad[V] · r (F32). `r` is the F32 direction; the grad is
         // cast to F32 first so BF16 grads dot cleanly against the F32 dir.
         let dot_grad = |g: &candle_core::Tensor, r: &[f32]| -> f64 {
@@ -14830,9 +15043,7 @@ pub(crate) mod tests {
         };
         let mut ranked: Vec<(usize, f32)> = Vec::new();
         for (vi, v) in all_vars.iter().enumerate() {
-            if let (Some(t), Some(c)) =
-                (grads_tape.get(v.as_tensor()), grads_candle.get(v.as_tensor()))
-            {
+            if let (Some(t), Some(c)) = (tape_grad(v), grads_candle.get(v.as_tensor())) {
                 ranked.push((vi, rel(t, c)));
             }
         }
@@ -14842,9 +15053,7 @@ pub(crate) mod tests {
         let mut targets: Vec<usize> = ranked.iter().take(5).map(|(vi, _)| *vi).collect();
         if targets.is_empty() {
             for (vi, v) in all_vars.iter().enumerate() {
-                if grads_tape.get(v.as_tensor()).is_some()
-                    && grads_candle.get(v.as_tensor()).is_some()
-                {
+                if tape_grad(v).is_some() && grads_candle.get(v.as_tensor()).is_some() {
                     targets.push(vi);
                 }
                 if targets.len() >= 3 {
@@ -14884,9 +15093,7 @@ pub(crate) mod tests {
                 .expect("fd direction tensor");
 
             // grad · r for both candidates (computed once; eps-independent).
-            let tape_dot = grads_tape
-                .get(all_vars[vi].as_tensor())
-                .map(|g| dot_grad(g, &r));
+            let tape_dot = tape_grad(&all_vars[vi]).map(|g| dot_grad(g, &r));
             let candle_dot = grads_candle
                 .get(all_vars[vi].as_tensor())
                 .map(|g| dot_grad(g, &r));
@@ -15105,10 +15312,12 @@ pub(crate) mod tests {
     /// it matches candle.
     ///
     /// Optimizer reuse: the per-step update mirrors the production
-    /// non-checkpointed SFT loop exactly (`sft_train`, trainer.rs:2286-2305):
-    /// `standard_forward_backward(...)` → `(loss, GradStore)` (tape-authoritative
-    /// since the env is set) → `optimizer_step(&*backend, &params, &grads, lr,
-    /// Optimizer::AdamW{..}, opt_state.as_mut())`. AdamW (decoupled WD) is the
+    /// non-checkpointed SFT loop exactly (`sft_train`):
+    /// `standard_forward_backward(...)` → `(loss, GradSource::Kt)`
+    /// (tape-authoritative since the env is set) → `optimizer_step_dispatch(
+    /// &*backend, &params, &grads, lr, Optimizer::AdamW{..}, opt_state.as_mut())`
+    /// (which routes the kt grads through `optimizer_step_from_kt_grad_store`).
+    /// AdamW (decoupled WD) is the
     /// production default optimizer. `allocate_adamw_state` is called once
     /// before the loop and threaded through; `optimizer_step` increments
     /// `OptimizerState::step` itself (1-indexed) so bias-correction is correct.
@@ -15188,14 +15397,16 @@ pub(crate) mod tests {
             .expect("tape-authoritative forward/backward");
 
             // Training-is-actually-happening check on step 0: at least one LoRA
-            // Var must receive a finite, nonzero grad.
+            // Var must receive a finite, nonzero grad. (#1082 Inc-0 PR4: `grads`
+            // is a `GradSource::Kt` — `num_grad_ids` counts the kt store and
+            // `candle_grad(v)` bridges each grad for the norm probe.)
             if step == 0 {
                 assert!(
-                    grads.get_ids().count() > 0,
+                    grads.num_grad_ids() > 0,
                     "CP-4 convergence: step 1 produced an empty GradStore — no training signal"
                 );
                 for v in params.all_vars() {
-                    if let Some(g) = grads.get(v.as_tensor()) {
+                    if let Some(g) = grads.candle_grad(v).expect("kt->candle grad bridge") {
                         let norm = g
                             .to_dtype(candle_core::DType::F32)
                             .and_then(|t| t.sqr())
@@ -15220,10 +15431,12 @@ pub(crate) mod tests {
                 "CP-4 convergence: loss at step {step} is non-finite ({loss}) — training diverged"
             );
 
-            // Mirror the production optimizer step EXACTLY (trainer.rs:2298).
-            // `optimizer_step` bumps `opt_state.step` (1-indexed) internally, so
-            // bias-correction uses the right step index without us tracking it.
-            optimizer_step(&*backend, &params, &grads, lr, optimizer, Some(&mut opt_state))
+            // Mirror the production optimizer step EXACTLY (the non-checkpointed
+            // SFT branch). `optimizer_step_dispatch` bumps `opt_state.step`
+            // (1-indexed) internally, so bias-correction uses the right step
+            // index without us tracking it. (#1082 Inc-0 PR4: routes the
+            // `GradSource::Kt` grads through `optimizer_step_from_kt_grad_store`.)
+            optimizer_step_dispatch(&*backend, &params, &grads, lr, optimizer, Some(&mut opt_state))
                 .expect("AdamW optimizer step");
 
             losses.push(loss);
@@ -16126,7 +16339,9 @@ pub(crate) mod tests {
             assert_eq!(std_vars.len(), ckpt_vars.len());
             let mut compared = 0usize;
             for (std_var, ckpt_var) in std_vars.iter().zip(ckpt_vars.iter()) {
-                let g_std = grads_std.get(std_var.as_tensor());
+                // (#1082 Inc-0 PR4) CPU run -> `grads_std` is `GradSource::Candle`;
+                // `candle_grad` returns the owned candle grad.
+                let g_std = grads_std.candle_grad(std_var)?;
                 let g_ckpt = grads_ckpt.get(&ckpt_var.as_tensor().id());
                 match (g_std, g_ckpt) {
                     (Some(a), Some(b)) => {
@@ -16363,7 +16578,9 @@ pub(crate) mod tests {
             assert_eq!(std_vars.len(), ckpt_vars.len());
             let mut compared = 0usize;
             for (std_var, ckpt_var) in std_vars.iter().zip(ckpt_vars.iter()) {
-                let g_std = grads_std.get(std_var.as_tensor());
+                // (#1082 Inc-0 PR4) CPU run -> `grads_std` is `GradSource::Candle`;
+                // `candle_grad` returns the owned candle grad.
+                let g_std = grads_std.candle_grad(std_var)?;
                 let g_ckpt = grads_ckpt.get(&ckpt_var.as_tensor().id());
                 match (g_std, g_ckpt) {
                     (Some(a), Some(b)) => {
@@ -16692,13 +16909,14 @@ pub(crate) mod tests {
             &device,
             None,
         )?;
-        // Lift `grad_store_std` (a `GradStore`) into the same map type as
-        // checkpointed_forward_backward returns so the test can compare
-        // both paths via a uniform interface.
+        // Lift `grad_store_std` (a `GradSource`; CPU run -> `Candle`) into the
+        // same map type as checkpointed_forward_backward returns so the test can
+        // compare both paths via a uniform interface. (#1082 Inc-0 PR4:
+        // `candle_grad` returns the owned candle grad.)
         let mut grads_std: GradMap = HashMap::new();
         for var in params.all_vars() {
-            if let Some(g) = grad_store_std.get(var.as_tensor()) {
-                grads_std.insert(var.as_tensor().id(), g.clone());
+            if let Some(g) = grad_store_std.candle_grad(var)? {
+                grads_std.insert(var.as_tensor().id(), g);
             }
         }
 
@@ -18634,11 +18852,14 @@ pub(crate) mod tests {
                 flash_tracked_declines > 0,
                 "CUDA full-attention training should offer FlashAttention and decline tracked tensors"
             );
+            // (#1082 Inc-0 PR4) This test forces `KILN_USE_TAPE_AUTHORITATIVE=0`,
+            // so `grads` is `GradSource::Candle`; `candle_grad` returns the
+            // owned candle grad (never errors on the candle variant).
             assert!(
                 params
                     .all_vars()
                     .iter()
-                    .any(|var| grads.get(var.as_tensor()).is_some()),
+                    .any(|var| grads.candle_grad(var).expect("candle grad").is_some()),
                 "CUDA training forward/backward should produce at least one LoRA gradient"
             );
             Ok(())
