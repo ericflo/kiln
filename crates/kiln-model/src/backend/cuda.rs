@@ -1648,10 +1648,18 @@ impl BackendRuntime for CudaBackend {
         let x_dims = x.dims().to_vec();
         let hidden = *x_dims.last().expect("x has at least one dim (checked by supports_kt)");
         let rows: usize = x_dims.iter().take(x_dims.len() - 1).product();
+        // #1082: x/z arrive as transposed views (e.g. [1,7,2,16] strides
+        // [224,16,112,1] after the head transpose). candle's reshape silently
+        // copied; kt's reshape requires contiguous (and logs the copy), so
+        // contiguify explicitly first — same materialization candle did.
         let x_flat = x
+            .contiguous()
+            .context("kt-adapter: gdn_gated_rms_norm contiguous x failed")?
             .reshape((rows, hidden))
             .context("kt-adapter: gdn_gated_rms_norm reshape x → [rows, hidden] failed")?;
         let z_flat = z
+            .contiguous()
+            .context("kt-adapter: gdn_gated_rms_norm contiguous z failed")?
             .reshape((rows, hidden))
             .context("kt-adapter: gdn_gated_rms_norm reshape z → [rows, hidden] failed")?;
         if !kiln_gdn_kernel::gdn_gated_rms_norm_supports_kt(&x_flat, &z_flat, weight) {
