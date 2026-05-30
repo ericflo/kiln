@@ -1050,6 +1050,24 @@ impl Tensor {
         self.to_vec::<E>()
     }
 
+    /// Read a single-element tensor back to a host scalar `E`. candle's
+    /// `to_scalar::<S>()` equivalent (#1082).
+    ///
+    /// Errors if the tensor does not hold exactly one element (the shape
+    /// is included in the message); otherwise delegates to kt's existing
+    /// [`Tensor::to_vec`], which validates that `E` matches the tensor's
+    /// dtype and performs the host readback, and returns element `[0]`.
+    pub fn to_scalar<E: Element>(&self) -> Result<E> {
+        if self.element_count() != 1 {
+            return Err(crate::Error::Msg(format!(
+                "to_scalar: expected exactly one element, got {} (shape {:?})",
+                self.element_count(),
+                self.shape()
+            )));
+        }
+        Ok(self.to_vec::<E>()?[0])
+    }
+
     /// Read a rank-2 tensor back to a host `Vec<Vec<E>>` (row-major).
     /// candle: `pub fn to_vec2<S: WithDType>(&self) -> Result<Vec<Vec<S>>>`.
     ///

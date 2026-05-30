@@ -350,10 +350,10 @@ pub fn reset_counter() {
 /// Extract the top-K `(token_id, logit)` pairs from a flattenable logits
 /// tensor. Accepts shapes `[V]`, `[1, V]`, or `[1, 1, V]` — anything that
 /// flattens to a 1-D vocab-sized vector.
-pub fn top_k_logits(logits: &candle_core::Tensor, k: usize) -> Result<Vec<(u32, f32)>> {
+pub fn top_k_logits(logits: &kiln_tensor::Tensor, k: usize) -> Result<Vec<(u32, f32)>> {
     let vals = logits
         .flatten_all()?
-        .to_dtype(candle_core::DType::F32)?
+        .to_dtype(kiln_tensor::DType::F32)?
         .to_vec1::<f32>()?;
     let mut idx: Vec<(u32, f32)> = vals
         .iter()
@@ -368,8 +368,8 @@ pub fn top_k_logits(logits: &candle_core::Tensor, k: usize) -> Result<Vec<(u32, 
 /// Compute the L2 norm of a tensor as a single f32. Diagnostic check on
 /// tensor magnitudes — useful for catching the "all zeros" or "explosion"
 /// failure modes that would silently kill draft accuracy.
-pub fn tensor_l2_norm(t: &candle_core::Tensor) -> Result<f32> {
-    let v = t.flatten_all()?.to_dtype(candle_core::DType::F32)?.to_vec1::<f32>()?;
+pub fn tensor_l2_norm(t: &kiln_tensor::Tensor) -> Result<f32> {
+    let v = t.flatten_all()?.to_dtype(kiln_tensor::DType::F32)?.to_vec1::<f32>()?;
     Ok(v.iter().map(|x| x * x).sum::<f32>().sqrt())
 }
 
@@ -1445,7 +1445,7 @@ pub fn capture_b12_gqa_tap(name: &str, t: &kiln_tensor::Tensor) -> Result<()> {
 /// 1. `token_emb` — `embed_tokens(draft_token)` output, unsqueezed to [1,1,H]
 /// 2. `norm_emb` — `rms_norm(token_emb, pre_fc_norm_embedding)` (pre-fc norm on embed half)
 /// 3. `norm_h` — `rms_norm(h_prev, pre_fc_norm_hidden)` (pre-fc norm on hidden half)
-/// 4. `concat` — `candle_core::Tensor::cat([norm_emb, norm_h], dim=2)` post-contiguous
+/// 4. `concat` — `kiln_tensor::Tensor::cat([norm_emb, norm_h], dim=2)` post-contiguous
 /// 5. `fused` — `concat @ mtp.fc_t` (output of the fused-input linear)
 pub const C6_TAP_NAMES: &[&str] = &["token_emb", "norm_emb", "norm_h", "concat", "fused"];
 
@@ -2434,7 +2434,7 @@ mod tests {
 
     #[test]
     fn top_k_picks_largest_in_descending_order() {
-        let t = candle_core::Tensor::new(&[1.0_f32, 5.0, 3.0, 4.0, 2.0][..], &candle_core::Device::Cpu).unwrap();
+        let t = kiln_tensor::Tensor::new(&[1.0_f32, 5.0, 3.0, 4.0, 2.0][..], &kiln_tensor::Device::Cpu).unwrap();
         let top = top_k_logits(&t, 3).unwrap();
         assert_eq!(top.len(), 3);
         assert_eq!(top[0].0, 1); // logit 5.0
@@ -2444,7 +2444,7 @@ mod tests {
 
     #[test]
     fn l2_norm_matches_hand_calculation() {
-        let t = candle_core::Tensor::new(&[3.0_f32, 4.0][..], &candle_core::Device::Cpu).unwrap();
+        let t = kiln_tensor::Tensor::new(&[3.0_f32, 4.0][..], &kiln_tensor::Device::Cpu).unwrap();
         let n = tensor_l2_norm(&t).unwrap();
         assert!((n - 5.0).abs() < 1e-5);
     }
