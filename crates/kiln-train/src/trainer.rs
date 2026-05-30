@@ -4309,12 +4309,19 @@ fn compute_ref_log_probs_shared_prefix(
     // The position that predicts the first completion token (input_ids[prompt_len])
     // is prompt_len - 1. Capture its normed hidden state as a detached, stable
     // owning tensor so the rest of the prompt_hidden allocation can be freed.
-    let last_prompt_hidden = prompt_hidden
-        .narrow(1, prompt_len - 1, 1)
-        .context("GRPO shared-prefix: narrow last prompt hidden")?
-        .contiguous()
-        .context("GRPO shared-prefix: contiguous last prompt hidden")?
-        .detach();
+    // (#1082) `prompt_hidden` is kt (kt-flipped `model_forward_paged_normed_hidden`).
+    // The downstream GRPO ref log-prob math (`cat_tensors`,
+    // `chunked_log_probs_for_completion`) is a candle island, so bridge the
+    // detached kt hidden to candle here.
+    let last_prompt_hidden = {
+        let kt = prompt_hidden
+            .narrow(1, prompt_len - 1, 1)
+            .context("GRPO shared-prefix: narrow last prompt hidden")?
+            .contiguous()
+            .context("GRPO shared-prefix: contiguous last prompt hidden")?;
+        kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&kt)
+            .map_err(|e| anyhow::anyhow!("GRPO shared-prefix: kt->candle last prompt hidden: {e}"))?
+    };
     drop(prompt_hidden);
 
     // Snapshot the GDN linear state at end-of-prompt so each completion can
@@ -4346,18 +4353,23 @@ fn compute_ref_log_probs_shared_prefix(
 
         let completion_ids = &comp.input_ids[prompt_len..];
 
-        let comp_hidden = model_forward_paged_normed_hidden(
-            backend,
-            completion_ids,
-            weights,
-            model_config,
-            &paged_cache,
-            &block_table,
-            prompt_len,
-            Some(&mut linear_state),
-            ema_ref_lora,
-        )
-        .with_context(|| format!("GRPO shared-prefix: completion {comp_idx} forward"))?;
+        let comp_hidden = {
+            let kt = model_forward_paged_normed_hidden(
+                backend,
+                completion_ids,
+                weights,
+                model_config,
+                &paged_cache,
+                &block_table,
+                prompt_len,
+                Some(&mut linear_state),
+                ema_ref_lora,
+            )
+            .with_context(|| format!("GRPO shared-prefix: completion {comp_idx} forward"))?;
+            // (#1082) bridge kt forward output -> candle for the log-prob island.
+            kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&kt)
+                .map_err(|e| anyhow::anyhow!("GRPO shared-prefix: kt->candle comp hidden: {e}"))?
+        };
 
         // Build the "active hidden" tensor: aligned with the completion tokens
         // we want to compute log-probs for. Following the legacy convention in
@@ -4382,9 +4394,13 @@ fn compute_ref_log_probs_shared_prefix(
         };
         drop(comp_hidden);
 
+        // (#1082) `embed_tokens_t` is kt; the chunked log-prob helper is a
+        // candle island. Bridge the head weight to candle for this call.
+        let head_t_candle = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&weights.embed_tokens_t)
+            .map_err(|e| anyhow::anyhow!("GRPO shared-prefix: kt->candle head_t: {e}"))?;
         let log_probs = chunked_log_probs_for_completion(
             &active_hidden,
-            &weights.embed_tokens_t,
+            &head_t_candle,
             completion_ids,
             DEFAULT_CHUNK_SIZE,
             device,
@@ -8167,17 +8183,20 @@ fn full_attention_mlp_reverse_tile_size(
     if tile >= seq_len { None } else { Some(tile) }
 }
 
+// (#1082) kt-native: this forward helper threads its input through kiln-model
+// kt ops (`rms_norm`, `gqa_*`) only — no candle Var / backward. Take + return
+// kt; the candle-autograd reverse callers bridge at the call boundary.
 #[allow(clippy::too_many_arguments)]
 fn full_attention_attention_pre_o_forward(
     backend: &dyn BackendRuntime,
-    x: &Tensor,
+    x: &kiln_tensor::Tensor,
     weights: &GpuWeights,
     model_config: &ModelConfig,
     positions: &[u32],
     layer_idx: usize,
     full_attn_layer_idx: usize,
     lora: Option<(&LoraLayerWeights, f32)>,
-) -> Result<Tensor> {
+) -> Result<kiln_tensor::Tensor> {
     let layer = &weights.layers[layer_idx];
     let attn_weights = match &layer.attention {
         GpuAttentionWeights::Full(attn_weights) => attn_weights,
@@ -8187,9 +8206,9 @@ fn full_attention_attention_pre_o_forward(
     };
     let normed = rms_norm(x, &layer.input_layernorm, model_config.rms_norm_eps)?;
     let (_batch, seq_len, _hidden) = normed.dims3()?;
-    let tile_size = streaming_tile_tokens_for(normed.device());
+    let tile_size = streaming_tile_tokens_for(&normed.device());
     let attn_out = if backend.name() == "cuda"
-        && streaming_prefill_enabled_for(normed.device(), seq_len)
+        && streaming_prefill_enabled_for(&normed.device(), seq_len)
         && tile_size > 0
         && tile_size < seq_len
     {
@@ -8233,7 +8252,7 @@ fn full_attention_attention_pre_o_forward(
 #[allow(clippy::too_many_arguments, dead_code)]
 fn full_attention_attention_prepare_forward(
     backend: &dyn BackendRuntime,
-    x: &Tensor,
+    x: &kiln_tensor::Tensor,
     weights: &GpuWeights,
     model_config: &ModelConfig,
     positions: &[u32],
@@ -8270,14 +8289,14 @@ fn full_attention_attention_prepare_forward(
 #[allow(clippy::too_many_arguments)]
 fn full_attention_attention_forward(
     backend: &dyn BackendRuntime,
-    x: &Tensor,
+    x: &kiln_tensor::Tensor,
     weights: &GpuWeights,
     model_config: &ModelConfig,
     positions: &[u32],
     layer_idx: usize,
     full_attn_layer_idx: usize,
     lora: Option<(&LoraLayerWeights, f32)>,
-) -> Result<Tensor> {
+) -> Result<kiln_tensor::Tensor> {
     let layer = &weights.layers[layer_idx];
     let attn_weights = match &layer.attention {
         GpuAttentionWeights::Full(attn_weights) => attn_weights,
@@ -8302,14 +8321,14 @@ fn full_attention_attention_forward(
 #[allow(clippy::too_many_arguments)]
 fn full_attention_residual_forward(
     backend: &dyn BackendRuntime,
-    x: &Tensor,
+    x: &kiln_tensor::Tensor,
     weights: &GpuWeights,
     model_config: &ModelConfig,
     positions: &[u32],
     layer_idx: usize,
     full_attn_layer_idx: usize,
     lora: Option<(&LoraLayerWeights, f32)>,
-) -> Result<Tensor> {
+) -> Result<kiln_tensor::Tensor> {
     let attn_out = full_attention_attention_forward(
         backend,
         x,
