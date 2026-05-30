@@ -7027,7 +7027,8 @@ fn promote_cpu_activation(t: Tensor) -> Result<Tensor> {
 /// residency. The struct layout is preserved so every existing construction
 /// site (tests, loaders) continues to compile unchanged.
 fn dropped_bf16_stub(device: &Device) -> Result<Tensor> {
-    Ok(Tensor::zeros((1usize,), DType::BF16, device)?)
+    // kt `zeros`: shape as `Into<Vec<usize>>`, `Device` by value (#1082).
+    Ok(Tensor::zeros(vec![1usize], DType::BF16, *device)?)
 }
 
 /// Kill switch for the Marlin BF16 residency cleanup. Setting
