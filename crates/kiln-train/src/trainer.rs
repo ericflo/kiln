@@ -12888,6 +12888,22 @@ fn checkpointed_grpo_forward_backward<'echo>(
         "GRPO policy forward start"
     );
 
+    // (#1082) Same kt/candle island split as `checkpointed_forward_backward`:
+    // kt-native forward ops, candle boundary store / spool / loss / analytic
+    // tail. Bridge candle->kt (`kt_in`) into kt ops and kt->candle (`cd_out`)
+    // out of them.
+    let cd_out = |k: &kiln_tensor::Tensor| -> Result<Tensor> {
+        kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(
+            &k.contiguous()
+                .map_err(|e| anyhow::anyhow!("checkpointed GRPO: kt contiguous: {e}"))?,
+        )
+        .map_err(|e| anyhow::anyhow!("checkpointed GRPO: kt->candle copy: {e}"))
+    };
+    let kt_in = |c: &Tensor| -> Result<kiln_tensor::Tensor> {
+        kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(c)
+            .map_err(|e| anyhow::anyhow!("checkpointed GRPO: candle->kt borrow: {e}"))
+    };
+
     let detached_boundary = |boundary_idx: usize| -> Result<Tensor> {
         anyhow::ensure!(
             boundary_idx <= num_segments,
@@ -12913,7 +12929,7 @@ fn checkpointed_grpo_forward_backward<'echo>(
                 format!("synchronize GRPO detached checkpoint boundary segment [{start}, {end})")
             })?;
         }
-        Ok(current)
+        cd_out(&current)
     };
 
     let mut spooled_final_hidden: Option<Tensor> = None;
@@ -12929,7 +12945,7 @@ fn checkpointed_grpo_forward_backward<'echo>(
         synchronize_checkpoint_boundary(device, || {
             "synchronize spooled GRPO embedding checkpoint boundary".to_string()
         })?;
-        spool.save(0, &current)?;
+        spool.save(0, &cd_out(&current)?)?;
         synchronize_checkpoint_boundary(device, || {
             "synchronize spooled GRPO embedding checkpoint boundary save".to_string()
         })?;
@@ -12953,7 +12969,7 @@ fn checkpointed_grpo_forward_backward<'echo>(
                     seg_idx + 1
                 )
             })?;
-            spool.save(seg_idx + 1, &current)?;
+            spool.save(seg_idx + 1, &cd_out(&current)?)?;
             synchronize_checkpoint_boundary(device, || {
                 format!(
                     "synchronize spooled GRPO checkpoint boundary {} after save",
@@ -12961,7 +12977,7 @@ fn checkpointed_grpo_forward_backward<'echo>(
                 )
             })?;
         }
-        spooled_final_hidden = Some(current);
+        spooled_final_hidden = Some(cd_out(&current)?);
         Some(spool)
     } else {
         None
@@ -12981,7 +12997,8 @@ fn checkpointed_grpo_forward_backward<'echo>(
         }
 
         {
-            let mut current = boundary_states[0].clone();
+            // Thread `current` as kt; push candle copies into the candle store.
+            let mut current = kt_in(&boundary_states[0])?;
             let mut linear_state = LinearAttentionState::new(model_config, &kiln_kt_bridge::kt_device_from_candle(device))?;
             for &(start, end) in segments.iter() {
                 current = model_forward_segment(
@@ -12994,15 +13011,15 @@ fn checkpointed_grpo_forward_backward<'echo>(
                     end,
                     Some(&mut linear_state),
                     Some(&lora_detached),
-                )?;
-                boundary_states.push(current.detach());
+                )?
+                .detach();
+                boundary_states.push(cd_out(&current)?);
                 if resident_activation {
                     backend.register_resident_activation(boundary_states.last().unwrap())?;
                 }
                 synchronize_checkpoint_boundary(device, || {
                     format!("synchronize cached GRPO checkpoint boundary segment [{start}, {end})")
                 })?;
-                current = boundary_states.last().unwrap().clone();
             }
         }
         segment_input_via_registry_or_clone(
@@ -13040,10 +13057,16 @@ fn checkpointed_grpo_forward_backward<'echo>(
         should_spool_boundaries,
         "GRPO backward start"
     );
+    // (#1082) `final_hidden` is candle; the analytic GRPO tail is a candle
+    // island but `final_norm`/`embed_tokens_t` weights are kt — bridge them.
+    let final_norm_candle = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&weights.final_norm)
+        .map_err(|e| anyhow::anyhow!("checkpointed GRPO: kt->candle final_norm: {e}"))?;
+    let head_t_candle = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&weights.embed_tokens_t)
+        .map_err(|e| anyhow::anyhow!("checkpointed GRPO: kt->candle head_t: {e}"))?;
     let (loss_val, mut upstream_grad, echo_env_ce) = analytic_grpo_tail_loss_grad_pre_final_norm(
         &final_hidden,
-        &weights.final_norm,
-        &weights.embed_tokens_t,
+        &final_norm_candle,
+        &head_t_candle,
         input_ids,
         completion_mask,
         ref_log_probs,
@@ -13256,9 +13279,11 @@ fn checkpointed_grpo_forward_backward<'echo>(
         let seg_input_var = var_from_tensor(&seg_input)?;
         let lora_weights_for_seg = params.as_lora_weights();
         let mut linear_state = LinearAttentionState::new(model_config, &kiln_kt_bridge::kt_device_from_candle(device))?;
-        let seg_output = model_forward_segment(
+        // (#1082) bridge candle Var -> kt for the kt segment forward, and the kt
+        // output -> candle for the candle injection scalar / `.backward()`.
+        let seg_output = cd_out(&model_forward_segment(
             backend,
-            seg_input_var.as_tensor().clone(),
+            kt_in(seg_input_var.as_tensor())?,
             weights,
             model_config,
             &positions,
@@ -13266,7 +13291,7 @@ fn checkpointed_grpo_forward_backward<'echo>(
             seg_end,
             Some(&mut linear_state),
             Some(&lora_weights_for_seg),
-        )?;
+        )?)?;
 
         let seg_output_f32 = seg_output.to_f32_dtype()?;
         let upstream_f32 = upstream_grad_for_seg.to_f32_dtype()?;
