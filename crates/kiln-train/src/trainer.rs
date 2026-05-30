@@ -15134,6 +15134,107 @@ pub(crate) mod tests {
         );
     }
 
+    /// (#1082 Inc-0 PR5) kt-producer sibling of
+    /// [`grpo_tape_authoritative_grads_reach_lora_bf16`]: exercises
+    /// `grpo_step_forward_backward_tape_authoritative_kt` — the NEW kt grad
+    /// producer that delivers into a `kiln_autograd::GradStore` DIRECTLY (no
+    /// candle `loss.backward()` GradStore-container hack, no per-grad
+    /// `kt->candle` copy). The candle sibling tests the legacy candle-hack
+    /// producer; this gate validates the kt delivery path the GRPO training loop
+    /// now uses on a BF16 base. Asserts the kt GradStore connects the GRPO PG
+    /// loss root through the BF16 model to >=50 LoRA Vars (keyed by `KtTensorId`
+    /// via `cd_tensor_id_to_kt`). Same BF16 fixtures / env / loss params.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn grpo_tape_authoritative_grads_reach_lora_bf16_kt() {
+        let device = match candle_core::Device::new_cuda(0) {
+            Ok(d) => d,
+            Err(_) => {
+                eprintln!("grpo kt-producer grads (bf16): no CUDA device — skipping");
+                return;
+            }
+        };
+        unsafe {
+            std::env::set_var("KILN_USE_TAPE_AUTHORITATIVE", "1");
+            std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
+            std::env::set_var("KILN_USE_TAPE_LORA_ADD", "1");
+            std::env::set_var("KILN_USE_TAPE_FLASH_ATTN", "1");
+            std::env::set_var("KILN_USE_TAPE_SDPA", "1");
+            std::env::set_var("KILN_USE_TAPE_GDN", "1");
+            std::env::set_var("KILN_USE_TAPE_GDN_GATED_NORM", "1");
+            std::env::set_var("KILN_USE_TAPE_GDN_QK_NORM", "1");
+            std::env::set_var("KILN_USE_TAPE_GDN_CONV", "1");
+        }
+
+        let config = tiny_config_bf16();
+        let weights = tiny_weights_bf16(&config, &device).expect("bf16 tiny weights on cuda");
+        let params =
+            TrainableLoraParams::initialize(&config, &weights, 4, 8.0, &device).expect("params");
+        let backend = backend::for_device(&device);
+
+        let input_ids: Vec<u32> = vec![1, 5, 10, 3, 7, 2, 8];
+        let action_mask = vec![false, false, true, true, true, true, false];
+        let num_active = action_mask[1..].iter().filter(|&&m| m).count();
+        assert!(num_active > 0, "test needs supervised action tokens");
+
+        let ref_log_probs = zeros_f32_on(num_active, &device)
+            .expect("ref placeholder")
+            .detach();
+        let loss_params = GrpoLossParams {
+            advantage: 0.75,
+            clip_low: 0.2,
+            clip_high: 0.2,
+            kl_coeff: 0.0,
+            kl_estimator: KlEstimator::None,
+            loss_normalizer: 1.0 / num_active as f64,
+            is_level: IsLevel::Token,
+            reinforce: true,
+            entropy_aware_kl_quantile: None,
+        };
+
+        let (loss_val, grads) = grpo_step_forward_backward_tape_authoritative_kt(
+            &*backend,
+            &input_ids,
+            &weights,
+            &config,
+            &params,
+            &action_mask,
+            &ref_log_probs,
+            loss_params,
+            &device,
+            0,
+            num_active,
+            0,
+            0,
+            0,
+            None,
+        )
+        .expect("tape-authoritative GRPO kt step");
+
+        assert!(loss_val.is_finite(), "GRPO kt loss {loss_val} is not finite");
+
+        // The kt GradStore (keyed by KtTensorId) must reach the LoRA Vars — i.e.
+        // the GRPO PG loss root connected through the BF16 model back to the
+        // whole wired chain, delivered kt-native (no loss.backward() hack).
+        let mut tape_has = 0usize;
+        for v in params.all_vars() {
+            if grads.get(cd_tensor_id_to_kt(v.as_tensor().id())).is_some() {
+                tape_has += 1;
+            }
+        }
+        eprintln!(
+            "[CP4-GRPO-KT] kt GradStore reached {tape_has} LoRA Vars (of {}); kt_grad_ids={}; \
+             loss={loss_val:.6}",
+            params.all_vars().len(),
+            grads.len()
+        );
+        assert!(
+            tape_has >= 50,
+            "CP-4 GRPO kt: expected >=50 LoRA Vars in the kt GradStore (full coverage of the \
+             wired full-attn + GDN chain), got {tape_has}"
+        );
+    }
+
     /// CP-4 (#1082): disambiguate "tape grad vs candle grad" on the
     /// attention-dependent LoRA Vars using an INDEPENDENT reference —
     /// **central finite differences** on the loss value.
