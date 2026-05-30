@@ -13794,10 +13794,12 @@ const GDN_RECURRENT_PREFILL_MAX_TOKENS: usize = 2048;
 /// Build a [n, n] mask on `device` with `dtype`, 1.0 where row > col else 0.0.
 /// Used for the strictly lower-triangular `A_strict` mask (i < t, exclusive).
 fn strict_lower_tri_bool(n: usize, device: &Device) -> Result<Tensor> {
-    // #1082: the kt `gt` op requires F32/BF16/F16 (candle allowed u32). Cast the
-    // arange indices to F32 — exact for the small (chunk_size ≤ 64) integer
-    // ranges here — so the comparison runs on the CUDA tape-authoritative path.
-    let t = Tensor::arange(0u32, n as u32, device)?.to_dtype(DType::F32)?;
+    // #1082: the kt `gt` op requires F32/BF16/F16 (candle allowed u32). Build
+    // the index ramp directly in F32 (exact for chunk_size ≤ 64) — NOT u32 then
+    // `.to_dtype(F32)`, because the kt U32→F32 cast is unsupported and the
+    // fallback hits the CPU branch on a CUDA tensor. F32 `arange` → CUDA via
+    // `to_device` is the well-trodden path; the comparison then runs on CUDA.
+    let t = Tensor::arange(0f32, n as f32, device)?;
     let cols = t.reshape((1, n))?.broadcast_as((n, n))?;
     let rows = t.reshape((n, 1))?.broadcast_as((n, n))?;
     Ok(kiln_tensor::ops::gt(&rows, &cols)?)
@@ -13812,9 +13814,11 @@ fn strict_lower_tri_mask(n: usize, dtype: DType, device: &Device) -> Result<Tens
 /// Build a [n, n] mask on `device` with `dtype`, 1.0 where row >= col else 0.0.
 /// Used for the causal (inclusive) lower-triangular `B_mask` mask (i <= t).
 fn causal_lower_tri_bool(n: usize, device: &Device) -> Result<Tensor> {
-    // #1082: kt `ge` requires F32/BF16/F16 (candle allowed u32). Cast the arange
-    // indices to F32 (exact for chunk_size ≤ 64) so the CUDA tape path runs.
-    let t = Tensor::arange(0u32, n as u32, device)?.to_dtype(DType::F32)?;
+    // #1082: kt `ge` requires F32/BF16/F16 (candle allowed u32). Build the index
+    // ramp directly in F32 (exact for chunk_size ≤ 64) — NOT u32 then a cast
+    // (the kt U32→F32 cast is unsupported and falls back to the CPU branch on a
+    // CUDA tensor). F32 `arange` → CUDA `to_device` runs the comparison on CUDA.
+    let t = Tensor::arange(0f32, n as f32, device)?;
     let cols = t.reshape((1, n))?.broadcast_as((n, n))?;
     let rows = t.reshape((n, 1))?.broadcast_as((n, n))?;
     Ok(kiln_tensor::ops::ge(&rows, &cols)?)
@@ -15910,10 +15914,21 @@ pub fn gdn_recurrent_backward_no_grad(
         #[cfg(not(feature = "cuda"))]
         let d_beta = prod_pb.sum(LAST_DIM)?;
         let dr_w_t = dr.matmul(&w.transpose(2, 3)?.contiguous()?)?;
-        let strict_mask = strict_lower_tri_bool(chunk, &q.device())?
-            .reshape((1, 1, chunk, chunk))?
-            .broadcast_as((batch, heads, chunk, chunk))?
-            .to_dtype(DType::F32)?;
+        // #1082: build the F32 multiplicative mask via `where_cond` (1.0 where
+        // strict-lower, else 0.0), NOT `.to_dtype(F32)` on the U8 bool mask — the
+        // kt U8→F32 cast is unsupported (cast covers float↔float + U32↔I64), and
+        // the unsupported-CUDA-cast fallback hits the CPU branch on a CUDA tensor
+        // ("CastOp: storage must be CpuStorage on CPU"). This backward only
+        // executes now that the tape chain reaches the recurrence.
+        let strict_mask = {
+            let strict_bool = strict_lower_tri_bool(chunk, &q.device())?;
+            let ones = Tensor::ones((chunk, chunk), DType::F32, q.device())?;
+            let zeros = Tensor::zeros((chunk, chunk), DType::F32, q.device())?;
+            strict_bool
+                .where_cond(&ones, &zeros)?
+                .reshape((1, 1, chunk, chunk))?
+                .broadcast_as((batch, heads, chunk, chunk))?
+        };
         // Phase 7 (#1082): route the `beta_c.neg()` step through
         // `try_kt_neg` when `KILN_USE_KT_API_NEG=1` (or
         // `KILN_USE_KT_API_ALL=1`) is set. Mirrors the wirings
