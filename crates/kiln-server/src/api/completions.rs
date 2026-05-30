@@ -4261,10 +4261,8 @@ async fn ensure_runtime_adapter(
             let loaded_name = state.loaded_adapter_name.clone();
 
             tokio::task::spawn_blocking(move || {
-                // #1082: bridge kt `device` -> candle for LoraWeights::load.
-                let device_cd = kiln_kt_bridge::candle_device_from_kt(&device)
-                    .map_err(|e| format!("{e}"))?;
-                let lora = LoraWeights::load(&adapter_path, num_layers, device_cd)
+                // #1082: LoraWeights::load is kt-native — pass the kt device directly.
+                let lora = LoraWeights::load(&adapter_path, num_layers, device)
                     .map_err(|e| format!("{e}"))?;
                 let mut guard = runner.write().unwrap();
                 guard.swap_lora(Some(lora));
@@ -4602,10 +4600,9 @@ async fn ensure_composed_adapter_swap(
     let composed_active = target.active_name.clone();
 
     tokio::task::spawn_blocking(move || {
-        // #1082: bridge kt `device` -> candle for LoraWeights::load.
-        let device_cd = kiln_kt_bridge::candle_device_from_kt(&device).map_err(|e| format!("{e}"))?;
+        // #1082: LoraWeights::load is kt-native — pass the kt device directly.
         let lora =
-            LoraWeights::load(&cache_dir, num_layers, device_cd).map_err(|e| format!("{e}"))?;
+            LoraWeights::load(&cache_dir, num_layers, device).map_err(|e| format!("{e}"))?;
         let mut guard = runner.write().unwrap();
         guard.swap_lora(Some(lora));
         *active_name.write().unwrap() = Some(composed_active);

@@ -178,11 +178,9 @@ impl EvalGenerator for LiveEvalGenerator {
                                 path.display()
                             ));
                         }
-                        // #1082: bridge kt `device` -> candle for LoraWeights::load.
-                        let device_cd = kiln_kt_bridge::candle_device_from_kt(&device)
-                            .map_err(|e| format!("loading adapter `{name}`: {e}"))?;
+                        // #1082: LoraWeights::load is kt-native — pass the kt device directly.
                         let lora =
-                            kiln_model::lora_loader::LoraWeights::load(&path, num_layers, device_cd)
+                            kiln_model::lora_loader::LoraWeights::load(&path, num_layers, device)
                                 .map_err(|e| format!("loading adapter `{name}`: {e}"))?;
                         runner.write().unwrap().swap_lora(Some(lora));
                     }
