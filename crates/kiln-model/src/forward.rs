@@ -22,7 +22,14 @@ use anyhow::{Context, Result};
 //   only consumed by the other feature's code path. The `Result as CandleResult`
 //   rename avoids clashing with `anyhow::Result`.
 #[allow(unused_imports)]
-use candle_core::{backend::BackendDevice, D, DType, Device, Tensor, Var};
+use candle_core::{backend::BackendDevice, Var};
+// #1082 forward.rs type-flip: bare `Tensor`/`Device`/`DType`/`D` now resolve to
+// the kiln-native substrate. The candle-autograd island (Var / CustomOp1-3 /
+// BackpropOp + the training CustomOp impls) keeps explicit `candle_core::`
+// paths; the BackendRuntime seam stays candle-typed and is bridged at call
+// sites. This is the ref-reducing atomic core (#1082 forward-flip-plan Inc4).
+#[allow(unused_imports)]
+use kiln_tensor::{Tensor, Device, DType, D};
 #[cfg(any(feature = "cuda", feature = "vulkan"))]
 #[allow(unused_imports)]
 use candle_core::{
