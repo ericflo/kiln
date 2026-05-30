@@ -16564,9 +16564,16 @@ fn gated_deltanet_forward_decode_if(
                     // active.
                     #[cfg(feature = "cuda")]
                     {
-                        match crate::tape_forward::try_tape_transpose_cuda(&mixed_qkv, 1, 2)? {
-                            Some(t) => t,
-                            None => mixed_qkv.transpose(1, 2)?.contiguous()?,
+                        if crate::tape_forward::tape_forward_enabled() {
+                            let in_candle = kt_logits_to_candle(&mixed_qkv)
+                                .context("gdn conv transpose kt->candle (tape)")?;
+                            match crate::tape_forward::try_tape_transpose_cuda(&in_candle, 1, 2)? {
+                                Some(t) => candle_to_kt_activation(&t)
+                                    .context("gdn conv transpose candle->kt (tape)")?,
+                                None => mixed_qkv.transpose(1, 2)?.contiguous()?,
+                            }
+                        } else {
+                            mixed_qkv.transpose(1, 2)?.contiguous()?
                         }
                     }
                     #[cfg(not(feature = "cuda"))]
@@ -16626,17 +16633,29 @@ fn gated_deltanet_forward_decode_if(
                             // its SiLU onto the kt Tape. See the comment on the
                             // sibling fallback branch below.
                             #[cfg(feature = "cuda")]
-                            let _ = crate::tape_forward::try_tape_causal_conv1d_prefill_cuda(
-                                &mixed_qkv_ct,
-                                &weights.conv1d,
-                                &y,
-                                kernel_size,
-                            )?;
+                            if crate::tape_forward::tape_forward_enabled() {
+                                let mqkv_c = kt_logits_to_candle(&mixed_qkv_ct)
+                                    .context("gdn conv1d prefill kt->candle input (tape)")?;
+                                let conv_c = kt_logits_to_candle(&weights.conv1d)
+                                    .context("gdn conv1d prefill kt->candle conv1d (tape)")?;
+                                let y_c = kt_logits_to_candle(&y)
+                                    .context("gdn conv1d prefill kt->candle y (tape)")?;
+                                let _ = crate::tape_forward::try_tape_causal_conv1d_prefill_cuda(
+                                    &mqkv_c, &conv_c, &y_c, kernel_size,
+                                )?;
+                            }
                             #[cfg(feature = "cuda")]
                             {
-                                match crate::tape_forward::try_tape_silu_cuda(&y)? {
-                                    Some(t) => t,
-                                    None => cuda_silu(&y)?,
+                                if crate::tape_forward::tape_forward_enabled() {
+                                    let y_c = kt_logits_to_candle(&y)
+                                        .context("gdn conv1d silu kt->candle y (tape)")?;
+                                    match crate::tape_forward::try_tape_silu_cuda(&y_c)? {
+                                        Some(t) => candle_to_kt_activation(&t)
+                                            .context("gdn conv1d silu candle->kt (tape)")?,
+                                        None => cuda_silu(&y)?,
+                                    }
+                                } else {
+                                    cuda_silu(&y)?
                                 }
                             }
                             #[cfg(not(feature = "cuda"))]
@@ -16697,9 +16716,16 @@ fn gated_deltanet_forward_decode_if(
             // scope is active.
             #[cfg(feature = "cuda")]
             {
-                match crate::tape_forward::try_tape_transpose_cuda(&post_silu, 1, 2)? {
-                    Some(t) => t,
-                    None => post_silu.transpose(1, 2)?,
+                if crate::tape_forward::tape_forward_enabled() {
+                    let ps_c = kt_logits_to_candle(&post_silu)
+                        .context("gdn conv-out transpose kt->candle (tape)")?;
+                    match crate::tape_forward::try_tape_transpose_cuda(&ps_c, 1, 2)? {
+                        Some(t) => candle_to_kt_activation(&t)
+                            .context("gdn conv-out transpose candle->kt (tape)")?,
+                        None => post_silu.transpose(1, 2)?,
+                    }
+                } else {
+                    post_silu.transpose(1, 2)?
                 }
             }
             #[cfg(not(feature = "cuda"))]
