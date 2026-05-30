@@ -8646,7 +8646,7 @@ fn c45_layer1_row_replay_tensors(
 
     let extracted_scalar_values = extracted_scalars;
     let extracted_scalars =
-        Tensor::from_slice(&extracted_scalar_values, (batch,), &Device::Cpu)?.contiguous()?;
+        Tensor::from_vec_on(Device::Cpu, extracted_scalar_values, vec![batch])?.contiguous()?;
     let last_row_values = last_row.reshape((batch, hidden))?.contiguous()?;
     let broadcast_output = last_row.broadcast_mul(&rms_inv_row)?.contiguous()?;
 
@@ -14967,7 +14967,7 @@ pub fn cross_entropy_from_logits_grad_candle(
         );
         one_hot_data[row_idx * vocab_size + label] = 1.0;
     }
-    let one_hot = Tensor::from_vec(one_hot_data, (num_active, vocab_size), device)?;
+    let one_hot = Tensor::from_vec_on(device, one_hot_data, vec![num_active, vocab_size])?;
     let g_active = (p - one_hot)?.affine(inv_n, 0.0)?; // [A, V]
 
     // Scatter g_active back into a [T-1, V] zeros tensor at rows
@@ -19814,12 +19814,17 @@ impl CachedPagedDecodeMeta {
         let max_blocks_per_seq =
             ((max_seqlen_k + page_block_size - 1) / page_block_size).max(1);
         let mut block_table_vec = Vec::<u32>::with_capacity(batch * max_blocks_per_seq);
-        let mut seqused_k_vec = Vec::<i32>::with_capacity(batch);
+        // #1082: kt flash-attn requires `seqused_k` U32 (see
+        // kiln-flash-attn/src/kt_api.rs); the count is a non-negative
+        // sequence length, so u32 is the faithful kt dtype. candle's old
+        // i32 storage and the FFI `*const i32` share the bit pattern for
+        // these small non-negative values.
+        let mut seqused_k_vec = Vec::<u32>::with_capacity(batch);
         for (row_idx, bt) in block_tables.iter().enumerate() {
             let row_seqlen = start_positions[row_idx] + 1;
             seqused_k_vec.push(
-                i32::try_from(row_seqlen)
-                    .context("CachedPagedDecodeMeta: seqused_k exceeds i32 range")?,
+                u32::try_from(row_seqlen)
+                    .context("CachedPagedDecodeMeta: seqused_k exceeds u32 range")?,
             );
             let row_blocks = bt.blocks.as_slice();
             anyhow::ensure!(
@@ -19863,14 +19868,11 @@ impl CachedPagedDecodeMeta {
             None
         };
 
-        let block_table_tensor = Tensor::from_slice(
-            block_table_vec.as_slice(),
-            (batch, max_blocks_per_seq),
-            device,
-        )?
-        .contiguous()?;
+        let block_table_tensor =
+            Tensor::from_vec_on(device.clone(), block_table_vec, vec![batch, max_blocks_per_seq])?
+                .contiguous()?;
         let seqused_k_tensor =
-            Tensor::from_slice(seqused_k_vec.as_slice(), batch, device)?.contiguous()?;
+            Tensor::from_vec_on(device.clone(), seqused_k_vec, vec![batch])?.contiguous()?;
 
         Ok(Self {
             block_table_tensor,
@@ -20246,12 +20248,14 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
             let max_blocks_per_seq =
                 ((max_seqlen_k + page_block_size - 1) / page_block_size).max(1);
             let mut block_table_vec = Vec::<u32>::with_capacity(batch * max_blocks_per_seq);
-            let mut seqused_k_vec = Vec::<i32>::with_capacity(batch);
+            // #1082: kt flash-attn requires `seqused_k` U32 (kt_api.rs); the
+            // count is a non-negative sequence length, faithful as u32.
+            let mut seqused_k_vec = Vec::<u32>::with_capacity(batch);
             for (row_idx, bt) in block_tables.iter().enumerate() {
                 let row_seqlen = start_positions[row_idx] + 1;
                 seqused_k_vec.push(
-                    i32::try_from(row_seqlen)
-                        .context("batched contiguous paged attention seqused_k exceeds i32 range")?,
+                    u32::try_from(row_seqlen)
+                        .context("batched contiguous paged attention seqused_k exceeds u32 range")?,
                 );
                 let row_blocks = bt.blocks.as_slice();
                 anyhow::ensure!(
@@ -20298,14 +20302,14 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
                 None
             };
 
-            let block_table_tensor = Tensor::from_slice(
-                block_table_vec.as_slice(),
-                (batch, max_blocks_per_seq),
+            let block_table_tensor = Tensor::from_vec_on(
                 x.device(),
+                block_table_vec,
+                vec![batch, max_blocks_per_seq],
             )?
             .contiguous()?;
             let seqused_k_tensor =
-                Tensor::from_slice(seqused_k_vec.as_slice(), batch, x.device())?.contiguous()?;
+                Tensor::from_vec_on(x.device(), seqused_k_vec, vec![batch])?.contiguous()?;
 
             (
                 max_seqlen_k,
@@ -20569,7 +20573,7 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
                 "batched contiguous paged attention requires uniform start_pos for the strict path",
             )?;
             let start_slots =
-                Tensor::from_slice(strict_slots, batch, x.device())?.contiguous()?;
+                Tensor::from_vec_on(x.device(), strict_slots, vec![batch])?.contiguous()?;
             let q_strict = {
                 let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
                 let q_strict = q.transpose(1, 2)?.contiguous()?;
@@ -22857,10 +22861,10 @@ fn model_forward_paged_decode_contiguous_batch_hidden_inner(
     let positions_uniform = start_positions.iter().all(|&p| p == first_pos);
     let positions_owned: Option<Tensor> = if stable_positions_gpu.is_none() {
         Some(if positions_uniform {
-            Tensor::from_slice(&[first_pos as f32], 1usize, device)?
+            Tensor::from_vec_on(device, vec![first_pos as f32], vec![1])?
         } else {
             let positions_f32: Vec<f32> = start_positions.iter().map(|&p| p as f32).collect();
-            Tensor::from_slice(positions_f32.as_slice(), batch, device)?
+            Tensor::from_vec_on(device, positions_f32, vec![batch])?
         })
     } else {
         None
@@ -25031,7 +25035,7 @@ pub fn model_forward_paged_batched_decode_hidden(
             }
             GpuAttentionWeights::Full(_) => {
                 let positions_f32: Vec<f32> = sequence_lengths.iter().map(|&p| p as f32).collect();
-                let positions = Tensor::from_slice(positions_f32.as_slice(), batch_size, device)?;
+                let positions = Tensor::from_vec_on(device, positions_f32, vec![batch_size])?;
                 let block_table_refs: Vec<&BlockTable> = block_tables.iter().collect();
                 match transformer_block_paged_decode_contiguous_batch(
                     backend,
@@ -25064,10 +25068,10 @@ pub fn model_forward_paged_batched_decode_hidden(
                         let mut rows = Vec::with_capacity(batch_size);
                         for row_idx in 0..batch_size {
                             let row_hidden = hidden.narrow(0, row_idx, 1)?.contiguous()?;
-                            let row_position = Tensor::from_slice(
-                                &[sequence_lengths[row_idx] as f32],
-                                1usize,
+                            let row_position = Tensor::from_vec_on(
                                 device,
+                                vec![sequence_lengths[row_idx] as f32],
+                                vec![1],
                             )?;
                             let row = transformer_block_paged(
                                 backend,
