@@ -18463,32 +18463,51 @@ pub fn gqa_attention_core_prefill(
         // tape-authoritative backward reaches the q/k/v (LoRA) projections.
         // No-ops (returns None) in every other configuration — default
         // training/inference is unchanged and falls through below.
+        // #1082: tape flash-attn + the training CustomOp are candle islands.
+        // Bridge q/k/v kt->candle only when the tape is active / training.
         #[cfg(feature = "cuda")]
-        if let Some(attn_output) = crate::tape_forward::try_tape_flash_attn_cuda(
-            &q,
-            &k,
-            &v,
-            num_heads,
-            num_kv_heads,
-            head_dim,
-        )? {
-            // attn_output is [b, seq, num_heads, head_dim] on the tape; also
-            // tape-record the reshape to [b, seq, hidden] so the chain stays
-            // connected to o_proj (else the tape fragments at the reshape).
-            let (rb, rs, rh, rd) = attn_output.dims4()?;
-            let flat = rh * rd;
-            if let Some(reshaped) =
-                crate::tape_forward::try_tape_reshape_cuda(&attn_output, vec![rb, rs, flat])?
-            {
-                return Ok(reshaped);
+        if crate::tape_forward::tape_forward_enabled() {
+            let q_c = kt_logits_to_candle(&q).context("flash kt->candle q (tape)")?;
+            let k_c = kt_logits_to_candle(&k).context("flash kt->candle k (tape)")?;
+            let v_c = kt_logits_to_candle(&v).context("flash kt->candle v (tape)")?;
+            if let Some(attn_output) = crate::tape_forward::try_tape_flash_attn_cuda(
+                &q_c,
+                &k_c,
+                &v_c,
+                num_heads,
+                num_kv_heads,
+                head_dim,
+            )? {
+                // attn_output is [b, seq, num_heads, head_dim] on the tape; also
+                // tape-record the reshape to [b, seq, hidden] so the chain stays
+                // connected to o_proj (else the tape fragments at the reshape).
+                let (rb, rs, rh, rd) = attn_output.dims4()?;
+                let flat = rh * rd;
+                if let Some(reshaped) =
+                    crate::tape_forward::try_tape_reshape_cuda(&attn_output, vec![rb, rs, flat])?
+                {
+                    return candle_to_kt_activation(&reshaped)
+                        .context("flash candle->kt tape reshaped");
+                }
+                let out = attn_output.reshape((rb, rs, flat))?;
+                return candle_to_kt_activation(&out).context("flash candle->kt tape out");
             }
-            return Ok(attn_output.reshape((rb, rs, flat))?);
         }
         #[cfg(feature = "cuda")]
-        if let Some(attn_output) =
-            cuda_flash_attention_training_bf16(&q, &k, &v, num_heads, num_kv_heads, head_dim)?
         {
-            return Ok(attn_output.reshape(((), seq_len, num_heads * head_dim))?);
+            // The training CustomOp only fires for autograd-tracked inputs.
+            if q.track_op() || k.track_op() || v.track_op() {
+                let q_c = kt_logits_to_candle(&q).context("flash kt->candle q (train)")?;
+                let k_c = kt_logits_to_candle(&k).context("flash kt->candle k (train)")?;
+                let v_c = kt_logits_to_candle(&v).context("flash kt->candle v (train)")?;
+                if let Some(attn_output) = cuda_flash_attention_training_bf16(
+                    &q_c, &k_c, &v_c, num_heads, num_kv_heads, head_dim,
+                )? {
+                    let out = attn_output.reshape(((), seq_len, num_heads * head_dim))?;
+                    return candle_to_kt_activation(&out)
+                        .context("flash candle->kt training out");
+                }
+            }
         }
         if let Some(attn_output) =
             flash_attention_forward(backend, &q, &k, &v, num_heads, num_kv_heads, head_dim)?
