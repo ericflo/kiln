@@ -11424,11 +11424,8 @@ fn try_kt_swiglu_ffn(x: &Tensor, mlp: &GpuFfnWeights) -> Result<Option<Tensor>> 
         Err(_) => return Ok(None),
     };
 
-    // candle→kt boundary (input borrow-in + weight accessors).
-    let x2d_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&x2d) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
+    // #1082 forward-flip: `x2d` is already kt; use it directly (no candle
+    // borrow). Weight accessors are kt-native.
     let gate_t_kt = match mlp.gate_proj_t_kt() {
         Ok(t) => t,
         Err(_) => return Ok(None),
@@ -11443,17 +11440,15 @@ fn try_kt_swiglu_ffn(x: &Tensor, mlp: &GpuFfnWeights) -> Result<Option<Tensor>> 
     };
 
     // kt-internal computation: gate/up matmuls → silu*mul → down matmul.
-    let out_kt = match kt_swiglu_ffn_native(&x2d_kt, &gate_t_kt, &up_t_kt, &down_t_kt) {
+    let out_kt = match kt_swiglu_ffn_native(&x2d, &gate_t_kt, &up_t_kt, &down_t_kt) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
 
-    // kt→candle boundary (output copy-out), then restore input rank.
-    let out2d = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-        .map_err(|e| anyhow::anyhow!("try_kt_swiglu_ffn: candle copy-back failed: {e}"))?;
+    // Result is kt — restore input rank and return directly (no copy-out).
     let mut out_shape: Vec<usize> = x_dims[..x_dims.len() - 1].to_vec();
     out_shape.push(hidden);
-    let out = out2d
+    let out = out_kt
         .reshape(out_shape)
         .context("try_kt_swiglu_ffn: output reshape")?;
     Ok(Some(out))
