@@ -6649,6 +6649,9 @@ mod tests {
     /// math, so 1×1 placeholder GDN tensors are sufficient — the registry only
     /// needs them to exist with the correct layer-kind tag if it's ever forced.
     fn tiny_weights(config: &ModelConfig, device: &candle_core::Device) -> GpuWeights {
+        // #1082: GpuWeights fields are kt — build all tensors on a kt
+        // device bridged from the candle `device` param.
+        let kdev = kiln_kt_bridge::kt_device_from_candle(device);
         let h = config.hidden_size;
         let inter = config.intermediate_size;
         let vocab = config.vocab_size;
@@ -6656,22 +6659,22 @@ mod tests {
         let num_kv_heads = config.num_kv_heads;
         let head_dim = config.head_dim;
 
-        let embed = candle_core::Tensor::randn(0.0_f32, 0.02, (vocab, h), device).unwrap();
+        let embed = Tensor::randn(0.0_f32, 0.02, (vocab, h), &kdev).unwrap();
         let embed_t = embed.t().unwrap().contiguous().unwrap();
-        let final_norm = candle_core::Tensor::zeros((h,), candle_core::DType::F32, device).unwrap();
+        let final_norm = Tensor::zeros((h,), DType::F32, &kdev).unwrap();
 
         let mut layers = Vec::with_capacity(config.num_layers);
         for layer_idx in 0..config.num_layers {
             let is_full = (layer_idx + 1) % config.full_attention_interval == 0;
             let attention = if is_full {
                 let q_proj =
-                    candle_core::Tensor::randn(0.0_f32, 0.02, (num_heads * head_dim, h), device).unwrap();
+                    Tensor::randn(0.0_f32, 0.02, (num_heads * head_dim, h), &kdev).unwrap();
                 let k_proj =
-                    candle_core::Tensor::randn(0.0_f32, 0.02, (num_kv_heads * head_dim, h), device).unwrap();
+                    Tensor::randn(0.0_f32, 0.02, (num_kv_heads * head_dim, h), &kdev).unwrap();
                 let v_proj =
-                    candle_core::Tensor::randn(0.0_f32, 0.02, (num_kv_heads * head_dim, h), device).unwrap();
+                    Tensor::randn(0.0_f32, 0.02, (num_kv_heads * head_dim, h), &kdev).unwrap();
                 let o_proj =
-                    candle_core::Tensor::randn(0.0_f32, 0.02, (h, num_heads * head_dim), device).unwrap();
+                    Tensor::randn(0.0_f32, 0.02, (h, num_heads * head_dim), &kdev).unwrap();
                 let q_proj_t = q_proj.t().unwrap().contiguous().unwrap();
                 let k_proj_t = k_proj.t().unwrap().contiguous().unwrap();
                 let v_proj_t = v_proj.t().unwrap().contiguous().unwrap();
@@ -6681,8 +6684,8 @@ mod tests {
                     k_proj,
                     v_proj,
                     o_proj,
-                    q_norm: candle_core::Tensor::zeros((head_dim,), candle_core::DType::F32, device).unwrap(),
-                    k_norm: candle_core::Tensor::zeros((head_dim,), candle_core::DType::F32, device).unwrap(),
+                    q_norm: Tensor::zeros((head_dim,), DType::F32, &kdev).unwrap(),
+                    k_norm: Tensor::zeros((head_dim,), DType::F32, &kdev).unwrap(),
                     q_proj_t,
                     k_proj_t,
                     v_proj_t,
@@ -6703,16 +6706,16 @@ mod tests {
                 let qk_dim = nk * dk;
                 let v_dim = nv * dv;
                 let qkv_dim = qk_dim * 2 + v_dim;
-                let in_proj_qkv = candle_core::Tensor::randn(0.0_f32, 0.02, (qkv_dim, h), device).unwrap();
-                let in_proj_z = candle_core::Tensor::randn(0.0_f32, 0.02, (v_dim, h), device).unwrap();
-                let in_proj_a = candle_core::Tensor::randn(0.0_f32, 0.02, (nv, h), device).unwrap();
-                let in_proj_b = candle_core::Tensor::randn(0.0_f32, 0.02, (nv, h), device).unwrap();
-                let out_proj = candle_core::Tensor::randn(0.0_f32, 0.02, (h, v_dim), device).unwrap();
-                let conv1d = candle_core::Tensor::randn(0.0_f32, 0.02, (qkv_dim, kernel), device).unwrap();
-                let norm = candle_core::Tensor::ones((v_dim,), candle_core::DType::F32, device).unwrap();
-                let a_log = candle_core::Tensor::zeros((nv,), candle_core::DType::F32, device).unwrap();
-                let a_log_gates = candle_core::Tensor::zeros((nv,), candle_core::DType::F32, device).unwrap();
-                let dt_bias = candle_core::Tensor::zeros((nv,), candle_core::DType::F32, device).unwrap();
+                let in_proj_qkv = Tensor::randn(0.0_f32, 0.02, (qkv_dim, h), &kdev).unwrap();
+                let in_proj_z = Tensor::randn(0.0_f32, 0.02, (v_dim, h), &kdev).unwrap();
+                let in_proj_a = Tensor::randn(0.0_f32, 0.02, (nv, h), &kdev).unwrap();
+                let in_proj_b = Tensor::randn(0.0_f32, 0.02, (nv, h), &kdev).unwrap();
+                let out_proj = Tensor::randn(0.0_f32, 0.02, (h, v_dim), &kdev).unwrap();
+                let conv1d = Tensor::randn(0.0_f32, 0.02, (qkv_dim, kernel), &kdev).unwrap();
+                let norm = Tensor::ones((v_dim,), DType::F32, &kdev).unwrap();
+                let a_log = Tensor::zeros((nv,), DType::F32, &kdev).unwrap();
+                let a_log_gates = Tensor::zeros((nv,), DType::F32, &kdev).unwrap();
+                let dt_bias = Tensor::zeros((nv,), DType::F32, &kdev).unwrap();
                 let in_proj_qkv_t = in_proj_qkv.t().unwrap().contiguous().unwrap();
                 let in_proj_z_t = in_proj_z.t().unwrap().contiguous().unwrap();
                 let in_proj_a_t = in_proj_a.t().unwrap().contiguous().unwrap();
@@ -6741,16 +6744,16 @@ mod tests {
                 )
             };
 
-            let gate_proj = candle_core::Tensor::randn(0.0_f32, 0.02, (inter, h), device).unwrap();
-            let up_proj = candle_core::Tensor::randn(0.0_f32, 0.02, (inter, h), device).unwrap();
-            let down_proj = candle_core::Tensor::randn(0.0_f32, 0.02, (h, inter), device).unwrap();
+            let gate_proj = Tensor::randn(0.0_f32, 0.02, (inter, h), &kdev).unwrap();
+            let up_proj = Tensor::randn(0.0_f32, 0.02, (inter, h), &kdev).unwrap();
+            let down_proj = Tensor::randn(0.0_f32, 0.02, (h, inter), &kdev).unwrap();
             let gate_proj_t = gate_proj.t().unwrap().contiguous().unwrap();
             let up_proj_t = up_proj.t().unwrap().contiguous().unwrap();
             let down_proj_t = down_proj.t().unwrap().contiguous().unwrap();
 
             layers.push(crate::forward::GpuLayerWeights {
-                input_layernorm: candle_core::Tensor::zeros((h,), candle_core::DType::F32, device).unwrap(),
-                post_attention_layernorm: candle_core::Tensor::zeros((h,), candle_core::DType::F32, device)
+                input_layernorm: Tensor::zeros((h,), DType::F32, &kdev).unwrap(),
+                post_attention_layernorm: Tensor::zeros((h,), DType::F32, &kdev)
                     .unwrap(),
                 attention,
                 mlp: crate::forward::GpuFfnWeights {
@@ -6769,7 +6772,7 @@ mod tests {
         }
 
         let rotary_inv_freq =
-            crate::forward::compute_rotary_inv_freq(config.rotary_dim(), config.rope_theta, device)
+            crate::forward::compute_rotary_inv_freq(config.rotary_dim(), config.rope_theta, &kdev)
                 .unwrap();
 
         GpuWeights {
