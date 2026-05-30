@@ -6284,9 +6284,20 @@ fn candle_weight_to_kt(t: &candle_core::Tensor) -> Result<Tensor> {
         .map_err(|e| anyhow::anyhow!("candle_weight_to_kt copy bridge: {e}"))
 }
 
+/// Non-CUDA stub: the candle→kt copy bridge is CUDA-only, so the Metal
+/// parallel loader path (its only caller) errors at runtime on a non-CUDA
+/// build — production is CUDA, and the pure-kt Metal loader is an
+/// iteration-2 concern (mirrors [`weight_to_tensor`]'s non-cuda variant). (#1082)
+#[cfg(not(feature = "cuda"))]
+fn candle_weight_to_kt(_t: &candle_core::Tensor) -> Result<Tensor> {
+    anyhow::bail!("candle_weight_to_kt: candle→kt copy bridge requires the `cuda` feature (#1082)")
+}
+
 /// Resolve the candle device the loader builds its intermediate candle
 /// tensors on, from the kt `Device` passed through the loader. (#1082)
-#[cfg(feature = "cuda")]
+/// Unconditional: `candle_device_from_kt` is a pure enum mapping with no
+/// CUDA toolchain dependency, so the loader's Metal path needs it on the
+/// non-cuda build too.
 fn loader_candle_device(device: &Device) -> Result<candle_core::Device> {
     kiln_kt_bridge::candle_device_from_kt(device).map_err(|e| anyhow::anyhow!("{e}"))
 }
@@ -6318,7 +6329,8 @@ fn weight_dtype(w: &WeightTensor) -> DType {
 /// candle-typed sibling of [`weight_dtype`] for the loader's candle
 /// intermediates (the `Gpu*Weights` fields are kt, but the loader still
 /// constructs candle tensors before copy-bridging). (#1082)
-#[cfg(feature = "cuda")]
+/// Unconditional: pure `TensorDType`→`candle_core::DType` map, no cuda dep;
+/// the loader's Metal path needs it on the non-cuda build too.
 fn weight_dtype_candle(w: &WeightTensor) -> candle_core::DType {
     match w.dtype {
         TensorDType::F16 => candle_core::DType::F16,
