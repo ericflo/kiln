@@ -953,6 +953,93 @@ pub fn cuda_contiguous(src: &crate::Tensor) -> Result<crate::Tensor> {
     .map_err(|e| crate::Error::Msg(format!("cuda_contiguous: wrap: {e}")))
 }
 
+/// In-place `slice_set` along dim 0: copy `src` (contiguous) into `dst`'s
+/// existing device buffer starting at outer-axis `offset`.
+///
+/// #1082: the kt counterpart of `candle_core::Tensor::slice_set` for the
+/// CUDA-graph output buffer + GDN resident-state row writes. Every kiln
+/// call site uses dim 0, so this is a single contiguous device→device
+/// memcpy: dim 0 is the outermost stride, so an offset along it is a flat
+/// byte offset (`offset * inner * bpe`) and the `src` block is contiguous.
+/// Writes through `dst`'s raw device pointer — the caller owns the
+/// destination (graph buffer / resident state), so aliasing is intentional;
+/// the [`crate::Tensor::slice_set`] wrapper validates shapes/dtype/device
+/// and bumps the version counter afterward. `src`/`dst` must be contiguous
+/// and same-dtype/device (checked by the wrapper).
+#[cfg(feature = "cuda")]
+pub fn cuda_slice_set_dim0(dst: &crate::Tensor, src: &crate::Tensor, offset: usize) -> Result<()> {
+    use cudarc::driver::DevicePtr;
+
+    if dst.dtype().is_packed() {
+        return Err(crate::Error::Msg(
+            "cuda_slice_set: packed dtype not supported".to_string(),
+        ));
+    }
+    let bpe = dst.dtype().size_in_bytes();
+    // inner = product of dims after the outer axis (the per-row block size).
+    let inner: usize = dst.dims().iter().skip(1).product();
+    let src_n = src.element_count();
+
+    let dst_storage = dst
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .ok_or_else(|| crate::Error::Msg("cuda_slice_set: dst must be CUDA storage".to_string()))?;
+    let src_storage = src
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .ok_or_else(|| crate::Error::Msg("cuda_slice_set: src must be CUDA storage".to_string()))?;
+
+    let ctx = dst_storage.context();
+    let stream = ctx.default_stream();
+    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+
+    let src_base = match &src_storage.slice {
+        SliceOwner::Owned(s) => {
+            let (p, _g) = s.device_ptr(&stream);
+            p
+        }
+        SliceOwner::Borrowed { ptr, .. } => *ptr,
+    };
+    let dst_base = match &dst_storage.slice {
+        SliceOwner::Owned(s) => {
+            let (p, _g) = s.device_ptr(&stream);
+            p
+        }
+        SliceOwner::Borrowed { ptr, .. } => *ptr,
+    };
+
+    let src_byte_off = (src.layout().start_offset() * bpe) as u64;
+    let dst_byte_off = ((offset * inner) * bpe) as u64;
+    let src_ptr = (src_base + src_byte_off) as *const core::ffi::c_void;
+    let dst_ptr = (dst_base + dst_byte_off) as *mut core::ffi::c_void;
+
+    // Flat contiguous copy of `src_n` elements (shape [src_n], stride [1])
+    // into dst at the computed byte offset. Reuses the contiguous-copy
+    // kernel that backs `cuda_contiguous`.
+    let shape_i64 = [src_n as i64];
+    let strides_i64 = [1i64];
+    let status = unsafe {
+        kiln_contiguous_copy_async(
+            src_ptr,
+            dst_ptr,
+            shape_i64.as_ptr(),
+            strides_i64.as_ptr(),
+            1,
+            bpe as i32,
+            src_n as i64,
+            raw_stream,
+        )
+    };
+    if status != 0 {
+        return Err(crate::Error::Msg(format!(
+            "cuda_slice_set: kiln_contiguous_copy_async returned status {status}"
+        )));
+    }
+    Ok(())
+}
+
 /// CUDA-side `index_select(src, axis=0, indices)` — gather along the
 /// outer axis of a CUDA tensor.
 ///
@@ -2042,6 +2129,48 @@ mod tests {
             return None;
         }
         primary_cuda_context(0).ok()
+    }
+
+    /// #1082: `Tensor::slice_set` dim-0 in-place write — the CUDA-graph
+    /// output-buffer + GDN resident-state row-write primitive. Verifies
+    /// the targeted row is overwritten and the others are untouched.
+    #[test]
+    fn slice_set_dim0_writes_targeted_row() {
+        let Some(_dev) = maybe_cuda_ctx() else {
+            eprintln!("skip: KILN_TENSOR_CUDA_TEST unset or no GPU");
+            return;
+        };
+        let dev = Device::Cuda(0);
+        // dst = 3x2 zeros; src = 1x2 [7, 8]; write into row 1.
+        let dst = crate::Tensor::from_vec_on(dev, vec![0f32; 6], vec![3, 2]).unwrap();
+        let src = crate::Tensor::from_vec_on(dev, vec![7f32, 8f32], vec![1, 2]).unwrap();
+        dst.slice_set(&src, 0usize, 1).unwrap();
+        let got = dst.to_vec2::<f32>().unwrap();
+        assert_eq!(
+            got,
+            vec![vec![0.0, 0.0], vec![7.0, 8.0], vec![0.0, 0.0]],
+            "slice_set must overwrite only row 1"
+        );
+
+        // offset 0 (the graph-output-buffer pattern): full overwrite.
+        let dst2 = crate::Tensor::from_vec_on(dev, vec![9f32; 4], vec![2, 2]).unwrap();
+        let src2 = crate::Tensor::from_vec_on(dev, vec![1f32, 2.0, 3.0, 4.0], vec![2, 2]).unwrap();
+        dst2.slice_set(&src2, 0usize, 0).unwrap();
+        assert_eq!(dst2.to_vec2::<f32>().unwrap(), vec![vec![1.0, 2.0], vec![3.0, 4.0]]);
+    }
+
+    /// #1082: dim>0 and shape-overflow are rejected (only dim 0 is wired).
+    #[test]
+    fn slice_set_rejects_unsupported_dim_and_overflow() {
+        let Some(_dev) = maybe_cuda_ctx() else {
+            eprintln!("skip: KILN_TENSOR_CUDA_TEST unset or no GPU");
+            return;
+        };
+        let dev = Device::Cuda(0);
+        let dst = crate::Tensor::from_vec_on(dev, vec![0f32; 6], vec![3, 2]).unwrap();
+        let src = crate::Tensor::from_vec_on(dev, vec![1f32, 2.0], vec![1, 2]).unwrap();
+        assert!(dst.slice_set(&src, 1usize, 0).is_err(), "dim 1 must error");
+        assert!(dst.slice_set(&src, 0usize, 3).is_err(), "offset overflow must error");
     }
 
     #[test]

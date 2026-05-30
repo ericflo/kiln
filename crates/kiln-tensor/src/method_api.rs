@@ -750,6 +750,81 @@ impl Tensor {
         }
     }
 
+    /// In-place `slice_set` (candle parity:
+    /// `pub fn slice_set<D: Dim>(&self, src, dim, offset) -> Result<()>`).
+    /// Copies `src` into `self`'s existing storage along `dim` at `offset`,
+    /// mutating in place, then bumps the version counter.
+    ///
+    /// #1082: every kiln call site uses **dim 0** (the CUDA-graph output
+    /// buffer `slice_set(&logits, 0, 0)` and the GDN resident-state row
+    /// writes `slice_set(&state, 0, row)`), so only dim 0 is implemented —
+    /// dim 0 is the outermost stride, making the write a single contiguous
+    /// device→device memcpy. Requires contiguous `self`/`src`, matching
+    /// dtype + device + rank, matching inner dims, and `src.dims()[0] +
+    /// offset <= self.dims()[0]` (mirrors candle's checks). CUDA only:
+    /// kt storage is `Arc`-shared with no `RwLock`, so a safe CPU in-place
+    /// write isn't expressible here; no kiln call site needs it.
+    pub fn slice_set<Dm: Dim>(&self, src: &Self, dim: Dm, offset: usize) -> Result<()> {
+        let d = dim.to_index(self.rank(), "slice_set")?;
+        if d != 0 {
+            return Err(crate::Error::Msg(format!(
+                "Tensor::slice_set: only dim 0 supported (got {d}); all kiln call sites use dim 0"
+            )));
+        }
+        if !self.is_contiguous() || !src.is_contiguous() {
+            return Err(crate::Error::Msg(
+                "Tensor::slice_set: requires contiguous self and src".to_string(),
+            ));
+        }
+        if self.dtype() != src.dtype() {
+            return Err(crate::Error::Msg(format!(
+                "Tensor::slice_set: dtype mismatch self={:?} src={:?}",
+                self.dtype(),
+                src.dtype()
+            )));
+        }
+        if self.device() != src.device() {
+            return Err(crate::Error::Msg(
+                "Tensor::slice_set: device mismatch".to_string(),
+            ));
+        }
+        if self.rank() != src.rank() {
+            return Err(crate::Error::Msg(format!(
+                "Tensor::slice_set: rank mismatch self={} src={}",
+                self.rank(),
+                src.rank()
+            )));
+        }
+        let sd = self.dims();
+        let cd = src.dims();
+        for i in 1..sd.len() {
+            if sd[i] != cd[i] {
+                return Err(crate::Error::Msg(format!(
+                    "Tensor::slice_set: inner dim {i} mismatch self={} src={}",
+                    sd[i], cd[i]
+                )));
+            }
+        }
+        if !sd.is_empty() && cd[0] + offset > sd[0] {
+            return Err(crate::Error::Msg(format!(
+                "Tensor::slice_set: outer-dim overflow src[0]={} + offset={} > self[0]={}",
+                cd[0], offset, sd[0]
+            )));
+        }
+        match self.device() {
+            #[cfg(feature = "cuda")]
+            Device::Cuda(_) => crate::cuda_storage::cuda_slice_set_dim0(self, src, offset)?,
+            other => {
+                return Err(crate::Error::Msg(format!(
+                    "Tensor::slice_set: backend {other} not supported (#1082: CUDA-only; \
+                     kt storage is Arc-shared so a safe CPU in-place write isn't expressible)"
+                )));
+            }
+        }
+        self.bump_version();
+        Ok(())
+    }
+
     /// Detach from the autograd graph. candle:
     /// `pub fn detach(&self) -> Tensor` (returns a graph-free view that
     /// **shares** the storage; identity if already detached).
