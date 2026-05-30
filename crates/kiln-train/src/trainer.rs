@@ -9242,9 +9242,32 @@ fn exact_gdn_single_layer_tiled_reverse(
         "exact tiled GDN reverse begin"
     );
 
+    // (#1082) The GDN forward/backward ops (`gdn_attention_residual_block`,
+    // `gdn_recurrent_*`, `gdn_*_from_*`) and `LinearAttentionState` are all
+    // kt-native, so the recurrence/conv boundary states are kt. The candle
+    // autograd `Var` / `loss.backward()` recompute machinery below is a candle
+    // island; we bridge candle->kt (`kt_in`) before feeding a kt op and
+    // kt->candle (`cd_out`) after a kt op so the candle scalars / `.backward()`
+    // type-check. NOTE: candle autograd cannot trace LoRA grads through a kt op
+    // (the bridge boundary is a detached candle leaf), so this legacy candle
+    // gradient-checkpointing path is grad-severed post-flip; the
+    // tape-authoritative CUDA path is the correct grad producer. See note
+    // `kiln-candle-autograd-drops-attn-conv-grads`.
+    let kt_in = |c: &Tensor| -> Result<kiln_tensor::Tensor> {
+        kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(c)
+            .map_err(|e| anyhow::anyhow!("exact GDN reverse: candle->kt borrow: {e}"))
+    };
+    let cd_out = |k: &kiln_tensor::Tensor| -> Result<Tensor> {
+        kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(
+            &k.contiguous()
+                .map_err(|e| anyhow::anyhow!("exact GDN reverse: kt contiguous: {e}"))?,
+        )
+        .map_err(|e| anyhow::anyhow!("exact GDN reverse: kt->candle copy: {e}"))
+    };
+
     let boundary_state = LinearAttentionState::new(model_config, &kiln_kt_bridge::kt_device_from_candle(device))?;
-    let mut recurrent_boundaries: Vec<Tensor> = Vec::with_capacity(num_tiles + 1);
-    let mut conv_boundaries: Vec<Tensor> = Vec::with_capacity(num_tiles + 1);
+    let mut recurrent_boundaries: Vec<kiln_tensor::Tensor> = Vec::with_capacity(num_tiles + 1);
+    let mut conv_boundaries: Vec<kiln_tensor::Tensor> = Vec::with_capacity(num_tiles + 1);
     recurrent_boundaries.push(boundary_state.recurrent_states[linear_attn_idx].detach());
     conv_boundaries.push(boundary_state.conv_states[linear_attn_idx].detach());
 
@@ -9266,9 +9289,11 @@ fn exact_gdn_single_layer_tiled_reverse(
             .layers
             .get(layer_idx)
             .map(|layer| (layer, lora_detached.scale));
+        // (#1082) bridge candle `tile_input` -> kt for the kt-native block.
+        let tile_input_kt = kt_in(&tile_input)?;
         let after_attn = gdn_attention_residual_block(
             backend,
-            &tile_input,
+            &tile_input_kt,
             layer,
             model_config,
             &mut tile_state.recurrent_states[linear_attn_idx],
@@ -9306,7 +9331,12 @@ fn exact_gdn_single_layer_tiled_reverse(
     let lora_weights_for_seg = params.as_lora_weights();
     let all_vars = params.all_vars();
     let mut input_grad_chunks: Vec<Option<Tensor>> = (0..num_tiles).map(|_| None).collect();
-    let mut next_recurrent_grad: Option<Tensor> = None;
+    // (#1082) `next_recurrent_grad` flows into the kt-native
+    // `gdn_recurrent_backward_no_grad` (split path) and is sourced from the kt
+    // `GdnRecurrentBackwardGrads::d_state`, so it is kt. `next_conv_grad` is
+    // only ever sourced from / consumed by the candle autograd island, so it
+    // stays candle.
+    let mut next_recurrent_grad: Option<kiln_tensor::Tensor> = None;
     let mut next_conv_grad: Option<Tensor> = None;
 
     for tile_idx in (0..num_tiles).rev() {
@@ -9355,13 +9385,16 @@ fn exact_gdn_single_layer_tiled_reverse(
             .get(layer_idx)
             .map(|layer| (layer, lora_detached.scale));
 
+        // (#1082) kt-native GDN block: bridge candle `tile_input` -> kt; the kt
+        // `after_attn_value` feeds further kt MLP ops, so keep it kt.
         let after_attn_value = {
             let mut value_state = LinearAttentionState::new(model_config, &kiln_kt_bridge::kt_device_from_candle(device))?;
             value_state.recurrent_states[linear_attn_idx] = recurrent_boundaries[tile_idx].clone();
             value_state.conv_states[linear_attn_idx] = conv_boundaries[tile_idx].clone();
+            let tile_input_kt = kt_in(&tile_input.detach())?;
             gdn_attention_residual_block(
                 backend,
-                &tile_input.detach(),
+                &tile_input_kt,
                 layer,
                 model_config,
                 &mut value_state.recurrent_states[linear_attn_idx],
@@ -9406,13 +9439,20 @@ fn exact_gdn_single_layer_tiled_reverse(
             "mlp_gated_value",
             stage_started,
         )?;
-        let gated_var = var_from_tensor(&gated_value)?;
-        let down_out = transformer_mlp_down_from_gated(gated_var.as_tensor(), layer, layer_lora)
-            .with_context(|| {
-                format!(
-                    "exact tiled GDN reverse MLP down layer {layer_idx} tile [{tile_start}, {tile_end})"
-                )
-            })?;
+        // (#1082) `gated_value` is kt; bridge to candle for the Var, bridge the
+        // candle Var back to kt for the kt-native down proj, then bridge the kt
+        // `down_out` to candle for the candle injection scalar / `.backward()`.
+        let gated_var = var_from_tensor(&cd_out(&gated_value)?)?;
+        let down_out = cd_out(&transformer_mlp_down_from_gated(
+            &kt_in(gated_var.as_tensor())?,
+            layer,
+            layer_lora,
+        )
+        .with_context(|| {
+            format!(
+                "exact tiled GDN reverse MLP down layer {layer_idx} tile [{tile_start}, {tile_end})"
+            )
+        })?)?;
         let down_out_f32 = down_out.to_f32_dtype()?;
         let down_scalar = (&down_out_f32 * &tile_grad_out_f32)?
             .sum_all()
@@ -9445,14 +9485,20 @@ fn exact_gdn_single_layer_tiled_reverse(
         drop(gated_var);
         drop(gated_value);
 
-        let after_attn_var = var_from_tensor(&after_attn_value)?;
-        let gated_tracked =
-            transformer_mlp_gated_hidden(after_attn_var.as_tensor(), layer, model_config, layer_lora)
-                .with_context(|| {
-                    format!(
-                        "exact tiled GDN reverse MLP gate/up layer {layer_idx} tile [{tile_start}, {tile_end})"
-                    )
-                })?;
+        // (#1082) bridge kt `after_attn_value` -> candle Var; bridge candle Var
+        // -> kt for the kt MLP gate/up; bridge kt `gated_tracked` -> candle.
+        let after_attn_var = var_from_tensor(&cd_out(&after_attn_value)?)?;
+        let gated_tracked = cd_out(&transformer_mlp_gated_hidden(
+            &kt_in(after_attn_var.as_tensor())?,
+            layer,
+            model_config,
+            layer_lora,
+        )
+        .with_context(|| {
+            format!(
+                "exact tiled GDN reverse MLP gate/up layer {layer_idx} tile [{tile_start}, {tile_end})"
+            )
+        })?)?;
         let gated_tracked_f32 = gated_tracked.to_f32_dtype()?;
         let grad_gated_f32 = grad_gated.to_f32_dtype()?;
         let gate_scalar = (&gated_tracked_f32 * &grad_gated_f32)?
@@ -9496,8 +9542,16 @@ fn exact_gdn_single_layer_tiled_reverse(
                 anyhow::bail!("exact split GDN backward called on non-GDN layer {layer_idx}");
             };
 
+            // (#1082) The split-path "value" recompute is an all-kt chain
+            // (in_norm/in_proj/qkv/gates/recurrent/gated_norm are kt-native).
+            // Bridge candle `tile_input` -> kt once and keep the chain kt; the
+            // candle Var seams below bridge back to candle where autograd needs
+            // them. `tile_input.dtype()` (candle) -> kt DType for the kt gate op.
+            let tile_input_kt_value = kt_in(&tile_input.detach())?;
+            let tile_input_kt_dtype = kiln_kt_bridge::candle_dtype_to_kt(tile_input.dtype())
+                .map_err(|e| anyhow::anyhow!("exact split GDN: candle->kt dtype: {e}"))?;
             let normed_value =
-                gdn_attention_input_norm(&tile_input.detach(), layer, model_config)?.detach();
+                gdn_attention_input_norm(&tile_input_kt_value, layer, model_config)?.detach();
             let parts_value = gdn_attention_in_projections(
                 backend,
                 &normed_value,
@@ -9520,7 +9574,7 @@ fn exact_gdn_single_layer_tiled_reverse(
             let k_value = qkv_value.k.detach();
             let v_value = qkv_value.v.detach();
             let (beta_value, g_value) =
-                gdn_gates_from_ab_training(&a_value, &b_value, linear_weights, tile_input.dtype())?;
+                gdn_gates_from_ab_training(&a_value, &b_value, linear_weights, tile_input_kt_dtype)?;
             let beta_value = beta_value.detach();
             let g_value = g_value.detach();
             let mut value_recurrent_state = recurrent_boundaries[tile_idx].clone();
@@ -9544,10 +9598,14 @@ fn exact_gdn_single_layer_tiled_reverse(
             .detach();
 
             let upstream_after_attn_f32 = upstream_after_attn.to_f32_dtype()?;
-            let gated_norm_var = var_from_tensor(&gated_norm_value)?;
-            let attn_out = gdn_out_proj_from_gated_norm(
+            // (#1082) kt `gated_norm_value` -> candle Var; candle Var -> kt for
+            // the kt out-proj; kt `attn_out` -> candle for the candle scalar.
+            // `grad_or_zeros_like` is candle, so its `like` arg is the candle Var
+            // tensor (same shape/dtype as the kt value).
+            let gated_norm_var = var_from_tensor(&cd_out(&gated_norm_value)?)?;
+            let attn_out = cd_out(&gdn_out_proj_from_gated_norm(
                 backend,
-                gated_norm_var.as_tensor(),
+                &kt_in(gated_norm_var.as_tensor())?,
                 linear_weights,
                 layer_lora,
             )
@@ -9555,7 +9613,7 @@ fn exact_gdn_single_layer_tiled_reverse(
                 format!(
                     "exact split GDN out-proj layer {layer_idx} tile [{tile_start}, {tile_end})"
                 )
-            })?;
+            })?)?;
             let out_scalar = (&attn_out.to_f32_dtype()? * &upstream_after_attn_f32)?
                 .sum_all()
                 .with_context(|| format!("exact split GDN out-proj injection tile {tile_idx}"))?;
@@ -9563,9 +9621,12 @@ fn exact_gdn_single_layer_tiled_reverse(
                 .backward()
                 .with_context(|| format!("exact split GDN out-proj backward tile {tile_idx}"))?;
             accumulate_grads(accumulated_grads, &out_grads, &all_vars)?;
-            let grad_gated_norm =
-                grad_or_zeros_like(&out_grads, gated_norm_var.as_tensor(), &gated_norm_value)?
-                    .to_f32_dtype()?;
+            let grad_gated_norm = grad_or_zeros_like(
+                &out_grads,
+                gated_norm_var.as_tensor(),
+                gated_norm_var.as_tensor(),
+            )?
+            .to_f32_dtype()?;
             drop(out_grads);
             drop(out_scalar);
             drop(attn_out);
@@ -9582,12 +9643,14 @@ fn exact_gdn_single_layer_tiled_reverse(
                 stage_started,
             )?;
 
-            let recurrent_var = var_from_tensor(&recurrent_value)?;
-            let z_var = var_from_tensor(&z_value)?;
-            let gated_norm = gdn_gated_norm_from_recurrent(
+            // (#1082) kt `recurrent_value`/`z_value` -> candle Vars; candle Vars
+            // -> kt for the kt gated-norm; kt `gated_norm` -> candle.
+            let recurrent_var = var_from_tensor(&cd_out(&recurrent_value)?)?;
+            let z_var = var_from_tensor(&cd_out(&z_value)?)?;
+            let gated_norm = cd_out(&gdn_gated_norm_from_recurrent(
                 backend,
-                recurrent_var.as_tensor(),
-                z_var.as_tensor(),
+                &kt_in(recurrent_var.as_tensor())?,
+                &kt_in(z_var.as_tensor())?,
                 linear_weights,
                 model_config,
             )
@@ -9595,7 +9658,7 @@ fn exact_gdn_single_layer_tiled_reverse(
                 format!(
                     "exact split GDN gated-norm layer {layer_idx} tile [{tile_start}, {tile_end})"
                 )
-            })?;
+            })?)?;
             let gated_norm_scalar = (&gated_norm.to_f32_dtype()? * &grad_gated_norm)?
                 .sum_all()
                 .with_context(|| format!("exact split GDN gated-norm injection tile {tile_idx}"))?;
@@ -9605,11 +9668,12 @@ fn exact_gdn_single_layer_tiled_reverse(
             let grad_recurrent = grad_or_zeros_like(
                 &gated_norm_grads,
                 recurrent_var.as_tensor(),
-                &recurrent_value,
+                recurrent_var.as_tensor(),
             )?
             .to_f32_dtype()?;
-            let grad_z = grad_or_zeros_like(&gated_norm_grads, z_var.as_tensor(), &z_value)?
-                .to_f32_dtype()?;
+            let grad_z =
+                grad_or_zeros_like(&gated_norm_grads, z_var.as_tensor(), z_var.as_tensor())?
+                    .to_f32_dtype()?;
             drop(gated_norm_grads);
             drop(gated_norm_scalar);
             drop(gated_norm);
@@ -9627,6 +9691,12 @@ fn exact_gdn_single_layer_tiled_reverse(
                 stage_started,
             )?;
 
+            // (#1082) `gdn_recurrent_backward_no_grad` is kt-native: bridge the
+            // candle `grad_recurrent` upstream to kt; `entry_state` and the
+            // kt `next_recurrent_grad` carry-in are already kt. The returned
+            // `GdnRecurrentBackwardGrads` fields (dq/dk/dv/dbeta/dg/d_state)
+            // are kt.
+            let grad_recurrent_kt = kt_in(&grad_recurrent)?;
             let recurrent_grads = gdn_recurrent_backward_no_grad(
                 backend,
                 &q_value,
@@ -9635,7 +9705,7 @@ fn exact_gdn_single_layer_tiled_reverse(
                 &beta_value,
                 &g_value,
                 &recurrent_boundaries[tile_idx],
-                &grad_recurrent,
+                &grad_recurrent_kt,
                 next_recurrent_grad.as_ref(),
                 GDN_CHUNK_SIZE,
             )
@@ -9644,7 +9714,8 @@ fn exact_gdn_single_layer_tiled_reverse(
                     "exact split GDN recurrent backward layer {layer_idx} tile [{tile_start}, {tile_end})"
                 )
             })?;
-            next_recurrent_grad = recurrent_grads.d_state.as_ref().map(Tensor::detach);
+            // `d_state` is kt; use kt `.detach()` (not candle `Tensor::detach`).
+            next_recurrent_grad = recurrent_grads.d_state.as_ref().map(|t| t.detach());
             stage_started = finish_exact_gdn_reverse_tile_stage(
                 device,
                 profile_tiles,
@@ -9657,12 +9728,17 @@ fn exact_gdn_single_layer_tiled_reverse(
                 stage_started,
             )?;
 
-            let mixed_qkv_var = var_from_tensor(&mixed_qkv_value)?;
-            let conv_var = var_from_tensor(&conv_boundaries[tile_idx])?;
-            let mut tracked_conv_state = conv_var.as_tensor().clone();
+            // (#1082) kt `mixed_qkv_value`/conv boundary -> candle Vars; the kt
+            // qkv op needs a kt `&mut` conv state and kt `mixed_qkv` input, so
+            // bridge the candle Vars in. Its kt outputs (qkv_tracked.q/k/v) and
+            // the kt recurrent grads (dq/dk/dv) are bridged to candle for the
+            // candle injection scalar / `.backward()`.
+            let mixed_qkv_var = var_from_tensor(&cd_out(&mixed_qkv_value)?)?;
+            let conv_var = var_from_tensor(&cd_out(&conv_boundaries[tile_idx])?)?;
+            let mut tracked_conv_state = kt_in(conv_var.as_tensor())?;
             let qkv_tracked = gdn_qkv_from_mixed_training(
                 backend,
-                mixed_qkv_var.as_tensor(),
+                &kt_in(mixed_qkv_var.as_tensor())?,
                 linear_weights,
                 model_config,
                 &mut tracked_conv_state,
@@ -9672,24 +9748,33 @@ fn exact_gdn_single_layer_tiled_reverse(
                     "exact split GDN qkv/conv layer {layer_idx} tile [{tile_start}, {tile_end})"
                 )
             })?;
-            let mut qkv_scalar = (&qkv_tracked.q.to_f32_dtype()? * &recurrent_grads.dq)?
+            let qkv_q_cd = cd_out(&qkv_tracked.q)?;
+            let qkv_k_cd = cd_out(&qkv_tracked.k)?;
+            let qkv_v_cd = cd_out(&qkv_tracked.v)?;
+            let dq_cd = cd_out(&recurrent_grads.dq)?;
+            let dk_cd = cd_out(&recurrent_grads.dk)?;
+            let dv_cd = cd_out(&recurrent_grads.dv)?;
+            let mut qkv_scalar = (&qkv_q_cd.to_f32_dtype()? * &dq_cd)?
                 .sum_all()
                 .with_context(|| format!("exact split GDN q grad injection tile {tile_idx}"))?;
             qkv_scalar = (qkv_scalar
-                + (&qkv_tracked.k.to_f32_dtype()? * &recurrent_grads.dk)?
+                + (&qkv_k_cd.to_f32_dtype()? * &dk_cd)?
                     .sum_all()
                     .with_context(|| {
                         format!("exact split GDN k grad injection tile {tile_idx}")
                     })?)?;
             qkv_scalar = (qkv_scalar
-                + (&qkv_tracked.v.to_f32_dtype()? * &recurrent_grads.dv)?
+                + (&qkv_v_cd.to_f32_dtype()? * &dv_cd)?
                     .sum_all()
                     .with_context(|| {
                         format!("exact split GDN v grad injection tile {tile_idx}")
                     })?)?;
             if let Some(grad) = next_conv_grad.as_ref() {
+                // `tracked_conv_state` is kt; bridge to candle for the candle
+                // injection. `grad` (next_conv_grad) is already candle.
+                let tracked_conv_state_cd = cd_out(&tracked_conv_state)?;
                 qkv_scalar = (qkv_scalar
-                    + (&tracked_conv_state.to_f32_dtype()?
+                    + (&tracked_conv_state_cd.to_f32_dtype()?
                         * &grad.to_f32_dtype()?)?
                         .sum_all()
                         .with_context(|| {
@@ -9699,9 +9784,12 @@ fn exact_gdn_single_layer_tiled_reverse(
             let qkv_grads = qkv_scalar
                 .backward()
                 .with_context(|| format!("exact split GDN qkv/conv backward tile {tile_idx}"))?;
-            let grad_mixed_qkv =
-                grad_or_zeros_like(&qkv_grads, mixed_qkv_var.as_tensor(), &mixed_qkv_value)?
-                    .to_f32_dtype()?;
+            let grad_mixed_qkv = grad_or_zeros_like(
+                &qkv_grads,
+                mixed_qkv_var.as_tensor(),
+                mixed_qkv_var.as_tensor(),
+            )?
+            .to_f32_dtype()?;
             next_conv_grad = qkv_grads.get(conv_var.as_tensor()).map(Tensor::detach);
             drop(qkv_grads);
             drop(qkv_scalar);
@@ -9721,19 +9809,26 @@ fn exact_gdn_single_layer_tiled_reverse(
                 stage_started,
             )?;
 
-            let a_var = var_from_tensor(&a_value)?;
-            let b_var = var_from_tensor(&b_value)?;
-            let (beta_tracked, g_tracked) = gdn_gates_from_ab_training(
-                a_var.as_tensor(),
-                b_var.as_tensor(),
+            // (#1082) kt `a_value`/`b_value` -> candle Vars; candle Vars -> kt
+            // for the kt gates op; kt `beta_tracked`/`g_tracked` + kt grads
+            // (dbeta/dg) -> candle for the candle injection scalar.
+            let a_var = var_from_tensor(&cd_out(&a_value)?)?;
+            let b_var = var_from_tensor(&cd_out(&b_value)?)?;
+            let (beta_tracked_kt, g_tracked_kt) = gdn_gates_from_ab_training(
+                &kt_in(a_var.as_tensor())?,
+                &kt_in(b_var.as_tensor())?,
                 linear_weights,
-                tile_input.dtype(),
+                tile_input_kt_dtype,
             )?;
-            let mut gates_scalar = (&beta_tracked.to_f32_dtype()? * &recurrent_grads.dbeta)?
+            let beta_tracked = cd_out(&beta_tracked_kt)?;
+            let g_tracked = cd_out(&g_tracked_kt)?;
+            let dbeta_cd = cd_out(&recurrent_grads.dbeta)?;
+            let dg_cd = cd_out(&recurrent_grads.dg)?;
+            let mut gates_scalar = (&beta_tracked.to_f32_dtype()? * &dbeta_cd)?
                 .sum_all()
                 .with_context(|| format!("exact split GDN beta grad injection tile {tile_idx}"))?;
             gates_scalar = (gates_scalar
-                + (&g_tracked.to_f32_dtype()? * &recurrent_grads.dg)?
+                + (&g_tracked.to_f32_dtype()? * &dg_cd)?
                     .sum_all()
                     .with_context(|| {
                         format!("exact split GDN decay grad injection tile {tile_idx}")
@@ -9741,9 +9836,9 @@ fn exact_gdn_single_layer_tiled_reverse(
             let gates_grads = gates_scalar
                 .backward()
                 .with_context(|| format!("exact split GDN gates backward tile {tile_idx}"))?;
-            let grad_a = grad_or_zeros_like(&gates_grads, a_var.as_tensor(), &a_value)?
+            let grad_a = grad_or_zeros_like(&gates_grads, a_var.as_tensor(), a_var.as_tensor())?
                 .to_f32_dtype()?;
-            let grad_b = grad_or_zeros_like(&gates_grads, b_var.as_tensor(), &b_value)?
+            let grad_b = grad_or_zeros_like(&gates_grads, b_var.as_tensor(), b_var.as_tensor())?
                 .to_f32_dtype()?;
             drop(gates_grads);
             drop(gates_scalar);
@@ -9763,36 +9858,43 @@ fn exact_gdn_single_layer_tiled_reverse(
                 stage_started,
             )?;
 
-            let normed_var = var_from_tensor(&normed_value)?;
+            // (#1082) kt `normed_value` -> candle Var; candle Var -> kt for the
+            // kt in-proj; the kt `GdnInputProjectionParts` fields are bridged
+            // to candle for the candle injection scalar.
+            let normed_var = var_from_tensor(&cd_out(&normed_value)?)?;
             let parts_tracked = gdn_attention_in_projections(
                 backend,
-                normed_var.as_tensor(),
+                &kt_in(normed_var.as_tensor())?,
                 linear_weights,
                 layer_lora,
             )
             .with_context(|| {
                 format!("exact split GDN in-proj layer {layer_idx} tile [{tile_start}, {tile_end})")
             })?;
-            let mut proj_scalar = (&parts_tracked.mixed_qkv.to_f32_dtype()?
+            let parts_mixed_qkv_cd = cd_out(&parts_tracked.mixed_qkv)?;
+            let parts_z_cd = cd_out(&parts_tracked.z)?;
+            let parts_a_cd = cd_out(&parts_tracked.a)?;
+            let parts_b_cd = cd_out(&parts_tracked.b)?;
+            let mut proj_scalar = (&parts_mixed_qkv_cd.to_f32_dtype()?
                 * &grad_mixed_qkv)?
                 .sum_all()
                 .with_context(|| {
                     format!("exact split GDN mixed-qkv grad injection tile {tile_idx}")
                 })?;
             proj_scalar = (proj_scalar
-                + (&parts_tracked.z.to_f32_dtype()? * &grad_z)?
+                + (&parts_z_cd.to_f32_dtype()? * &grad_z)?
                     .sum_all()
                     .with_context(|| {
                         format!("exact split GDN z grad injection tile {tile_idx}")
                     })?)?;
             proj_scalar = (proj_scalar
-                + (&parts_tracked.a.to_f32_dtype()? * &grad_a)?
+                + (&parts_a_cd.to_f32_dtype()? * &grad_a)?
                     .sum_all()
                     .with_context(|| {
                         format!("exact split GDN a grad injection tile {tile_idx}")
                     })?)?;
             proj_scalar = (proj_scalar
-                + (&parts_tracked.b.to_f32_dtype()? * &grad_b)?
+                + (&parts_b_cd.to_f32_dtype()? * &grad_b)?
                     .sum_all()
                     .with_context(|| {
                         format!("exact split GDN b grad injection tile {tile_idx}")
@@ -9802,7 +9904,7 @@ fn exact_gdn_single_layer_tiled_reverse(
                 .with_context(|| format!("exact split GDN in-proj backward tile {tile_idx}"))?;
             accumulate_grads(accumulated_grads, &proj_grads, &all_vars)?;
             let grad_normed =
-                grad_or_zeros_like(&proj_grads, normed_var.as_tensor(), &normed_value)?
+                grad_or_zeros_like(&proj_grads, normed_var.as_tensor(), normed_var.as_tensor())?
                     .to_f32_dtype()?;
             drop(proj_grads);
             drop(proj_scalar);
@@ -9820,9 +9922,11 @@ fn exact_gdn_single_layer_tiled_reverse(
                 stage_started,
             )?;
 
+            // (#1082) `tile_input` is candle; bridge the candle Var -> kt for the
+            // kt input-norm op, and bridge the kt `normed_tracked` -> candle.
             let tile_input_var = var_from_tensor(&tile_input)?;
-            let normed_tracked = gdn_attention_input_norm(
-                tile_input_var.as_tensor(),
+            let normed_tracked = cd_out(&gdn_attention_input_norm(
+                &kt_in(tile_input_var.as_tensor())?,
                 layer,
                 model_config,
             )
@@ -9830,7 +9934,7 @@ fn exact_gdn_single_layer_tiled_reverse(
                 format!(
                     "exact split GDN input norm layer {layer_idx} tile [{tile_start}, {tile_end})"
                 )
-            })?;
+            })?)?;
             let norm_scalar = (&normed_tracked.to_f32_dtype()? * &grad_normed)?
                 .sum_all()
                 .with_context(|| format!("exact split GDN input norm injection tile {tile_idx}"))?;
@@ -9885,17 +9989,22 @@ fn exact_gdn_single_layer_tiled_reverse(
             continue;
         }
 
+        // (#1082) Non-split path. `tile_input` is candle; the boundary states
+        // are kt. Bridge kt boundaries -> candle Vars, bridge the candle Var
+        // tensors -> kt to seed the kt `LinearAttentionState`, run the kt GDN
+        // block, and bridge its kt output / kt exit-states back to candle for
+        // the candle injection scalar / `.backward()`.
         let tile_input_var = var_from_tensor(&tile_input)?;
-        let recurrent_var = var_from_tensor(&recurrent_boundaries[tile_idx])?;
-        let conv_var = var_from_tensor(&conv_boundaries[tile_idx])?;
+        let recurrent_var = var_from_tensor(&cd_out(&recurrent_boundaries[tile_idx])?)?;
+        let conv_var = var_from_tensor(&cd_out(&conv_boundaries[tile_idx])?)?;
 
         let mut tile_state = LinearAttentionState::new(model_config, &kiln_kt_bridge::kt_device_from_candle(device))?;
-        tile_state.recurrent_states[linear_attn_idx] = recurrent_var.as_tensor().clone();
-        tile_state.conv_states[linear_attn_idx] = conv_var.as_tensor().clone();
+        tile_state.recurrent_states[linear_attn_idx] = kt_in(recurrent_var.as_tensor())?;
+        tile_state.conv_states[linear_attn_idx] = kt_in(conv_var.as_tensor())?;
 
-        let after_attn = gdn_attention_residual_block(
+        let after_attn = cd_out(&gdn_attention_residual_block(
             backend,
-            tile_input_var.as_tensor(),
+            &kt_in(tile_input_var.as_tensor())?,
             layer,
             model_config,
             &mut tile_state.recurrent_states[linear_attn_idx],
@@ -9906,7 +10015,7 @@ fn exact_gdn_single_layer_tiled_reverse(
             format!(
                 "exact tiled GDN reverse forward layer {layer_idx} tile [{tile_start}, {tile_end})"
             )
-        })?;
+        })?)?;
         stage_started = finish_exact_gdn_reverse_tile_stage(
             device,
             profile_tiles,
@@ -9926,16 +10035,20 @@ fn exact_gdn_single_layer_tiled_reverse(
             .with_context(|| format!("exact tiled GDN output injection tile {tile_idx}"))?;
 
         if let Some(grad) = next_recurrent_grad.as_ref() {
+            // Exit recurrent state and the kt carry-in grad are kt; bridge both
+            // to candle for the candle injection scalar.
             let exit_state_f32 =
-                tile_state.recurrent_states[linear_attn_idx].to_f32_dtype()?;
-            let grad_f32 = grad.to_f32_dtype()?;
+                cd_out(&tile_state.recurrent_states[linear_attn_idx])?.to_f32_dtype()?;
+            let grad_f32 = cd_out(grad)?.to_f32_dtype()?;
             let state_scalar = (&exit_state_f32 * &grad_f32)?.sum_all().with_context(|| {
                 format!("exact tiled GDN recurrent-state injection tile {tile_idx}")
             })?;
             scalar = (scalar + state_scalar)?;
         }
         if let Some(grad) = next_conv_grad.as_ref() {
-            let exit_state_f32 = tile_state.conv_states[linear_attn_idx].to_f32_dtype()?;
+            // Exit conv state is kt -> candle; `next_conv_grad` is candle.
+            let exit_state_f32 =
+                cd_out(&tile_state.conv_states[linear_attn_idx])?.to_f32_dtype()?;
             let grad_f32 = grad.to_f32_dtype()?;
             let state_scalar = (&exit_state_f32 * &grad_f32)?
                 .sum_all()
@@ -9965,9 +10078,22 @@ fn exact_gdn_single_layer_tiled_reverse(
                 .with_context(|| format!("alloc zero GDN tiled input grad tile {tile_idx}"))?,
         };
         input_grad_chunks[tile_idx] = Some(input_grad);
+        // `next_recurrent_grad` is kt (it feeds the kt recurrent backward on the
+        // split path) and is carried across loop iterations, so it must OWN its
+        // buffer — use the candle->kt copy (not the aliasing borrow) since
+        // `tile_grads` is dropped at the end of this iteration.
+        // `next_conv_grad` stays candle.
         next_recurrent_grad = tile_grads
             .get(recurrent_var.as_tensor())
-            .map(Tensor::detach);
+            .map(|g| {
+                kiln_kt_bridge::kt_tensor_from_candle_cuda_copy(
+                    &g.detach()
+                        .contiguous()
+                        .context("GDN tiled recurrent grad contiguous")?,
+                )
+                .map_err(|e| anyhow::anyhow!("exact GDN reverse: candle->kt recurrent grad: {e}"))
+            })
+            .transpose()?;
         next_conv_grad = tile_grads.get(conv_var.as_tensor()).map(Tensor::detach);
 
         drop(tile_grads);
