@@ -2422,21 +2422,15 @@ fn format_oom_remediation_message(
 mod tests {
     use super::*;
 
-    /// Shared CPU candle device for tests. Routes through the always-on
-    /// kt -> candle bridge so this helper no longer names
-    /// `candle_core::Device` syntactically — the macro emits the
-    /// candle value via type inference at the call site, and callers
-    /// pass `&cpu_device!()` (or `let device = cpu_device!()` followed
-    /// by `&device`) to the upstream `LinearAttentionState::new` entry
-    /// which still wants `&candle_core::Device` while that API
-    /// migrates to kt. Macro form (vs `fn`) is required because Rust
-    /// has no way to spell the candle return type without naming the
-    /// `candle_core::Device` path directly (issue #1082, candle
-    /// removal).
+    /// Shared CPU device for tests. #1082: now emits a kt `Device::Cpu`
+    /// directly — `AppState::new_real` and `LinearAttentionState::new` both take
+    /// `kt::Device` after the forward flip, so the previous kt→candle bridge
+    /// (needed while those APIs still wanted `candle_core::Device`) is gone.
+    /// Kept as a macro for call-site compatibility (`cpu_device!()` /
+    /// `&cpu_device!()`); kt `Device` is `Copy`.
     macro_rules! cpu_device {
         () => {
-            ::kiln_kt_bridge::candle_device_from_kt(&::kiln_tensor::Device::Cpu)
-                .expect("kt::Device::Cpu -> candle::Device::Cpu bridge is infallible")
+            ::kiln_tensor::Device::Cpu
         };
     }
 
