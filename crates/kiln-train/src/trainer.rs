@@ -10959,21 +10959,21 @@ pub(crate) fn tape_authoritative_enabled() -> bool {
 }
 
 /// (#1082 Inc-0 PR4) The kt tape adapters are **BF16-only** — the fused kernels
-/// they record (`gdn_gates_bf16`, rms_norm, silu, rotary, ...) require BF16
-/// inputs and decline on F32, so on an F32 model the tape produces ZERO LoRA
-/// grads. Pre-PR4 the candle `loss.backward()` overlay silently covered F32;
-/// the kt producer (PR2) has no overlay, so routing F32 through it would yield
-/// an empty grad store = broken F32 training. Gate the kt grad-delivery on BF16
-/// LoRA params; F32 (e.g. the `tiny_config` F32 test model) falls through to
-/// the candle `loss.backward()` path below, which trains F32 correctly.
-/// Production (Qwen3.5-4B) is BF16, so this takes the kt path.
+/// they record (`gdn_gates_bf16`, rms_norm, silu, rotary, ...) require BF16 and
+/// the LoRA projection adapter skips when `proj.a.dtype() != x.dtype()`. The
+/// decisive dtype is the **activation** dtype, which follows the BASE model
+/// weights — NOT the LoRA Vars, which `TrainableLoraParams::initialize` always
+/// makes BF16 even on an F32 base. So on an F32 base model every adapter
+/// declines and the tape produces ZERO LoRA grads. Pre-PR4 the candle
+/// `loss.backward()` overlay silently covered F32; the kt producer (PR2) has no
+/// overlay, so routing F32 through it would yield an empty grad store = broken
+/// F32 training. Gate the kt grad-delivery on a **BF16 base model**
+/// (`embed_tokens` dtype = the activation dtype); an F32 base (e.g. the
+/// `tiny_config` F32 test model) falls through to the candle path below, which
+/// trains F32 correctly. Production (Qwen3.5-4B) is BF16 → kt path.
 #[cfg(feature = "cuda")]
-fn lora_params_are_tape_dtype(params: &TrainableLoraParams) -> bool {
-    params
-        .all_vars()
-        .iter()
-        .next()
-        .is_some_and(|v| matches!(v.as_tensor().dtype(), DType::BF16))
+fn base_dtype_supports_tape(weights: &GpuWeights) -> bool {
+    matches!(weights.embed_tokens.dtype(), DType::BF16)
 }
 
 /// Tape-authoritative SFT forward/backward (#1082 CP-4 endgame).
@@ -11182,7 +11182,7 @@ pub fn standard_forward_backward(
     #[cfg(feature = "cuda")]
     if tape_authoritative_enabled()
         && matches!(device, candle_core::Device::Cuda(_))
-        && lora_params_are_tape_dtype(params)
+        && base_dtype_supports_tape(weights)
     {
         let (loss_val, kt_grads) = standard_forward_backward_tape_authoritative_kt(
             backend,
