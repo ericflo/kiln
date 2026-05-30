@@ -33163,7 +33163,7 @@ mod tests {
 
         // Kernel path.
         let (a_strict_k, b_mask_k, v_prime_k, q_s_scaled_k, decay_last_col_k, p_last_k) =
-            kiln_gdn_kernel::gdn_chunk_prep(&g, &v, &kkt, &qkt, &ks_entry, &q_s)?;
+            kiln_gdn_kernel::gdn_chunk_prep_kt(&g, &v, &kkt, &qkt, &ks_entry, &q_s)?;
 
         // Candle reference chain — mirrors the else branch in
         // gdn_chunkwise_recurrence.
@@ -33284,7 +33284,7 @@ mod tests {
         let decay_last_col =
             Tensor::from_slice(&decay_data, (b, nv, c))?.to_device(device)?.to_dtype(DType::BF16)?;
 
-        let (out_kernel, ww_kernel) = kiln_gdn_kernel::gdn_chunk_scan(
+        let (out_kernel, ww_kernel) = kiln_gdn_kernel::gdn_chunk_scan_kt(
             &a_strict,
             &b_mask,
             &v_prime,
@@ -33397,7 +33397,7 @@ mod tests {
             Tensor::from_slice(&state_data, (b, nv, dk, dv))?.to_device(device)?.to_dtype(DType::BF16)?;
         let state_ref = state_kernel.clone();
 
-        let out_kernel = kiln_gdn_kernel::gdn_full_chunk_forward(
+        let out_kernel = kiln_gdn_kernel::gdn_full_chunk_forward_kt(
             &g,
             &v,
             &kkt,
@@ -33406,11 +33406,11 @@ mod tests {
             &q_s,
             &beta,
             &k_t,
-            &mut state_kernel,
+            &state_kernel,
         )?;
 
         let (a_strict, b_mask, v_prime, q_s_scaled, decay_last_col, p_last) =
-            kiln_gdn_kernel::gdn_chunk_prep(&g, &v, &kkt, &qkt, &ks_entry, &q_s)?;
+            kiln_gdn_kernel::gdn_chunk_prep_kt(&g, &v, &kkt, &qkt, &ks_entry, &q_s)?;
         let (out_ref, ww_ref) = compute_chunk_body_reference(
             &a_strict,
             &b_mask,
@@ -33526,7 +33526,7 @@ mod tests {
             Tensor::from_slice(&state_data, (b, nv, dk, dv))?.to_device(device)?.to_dtype(DType::BF16)?;
 
         let mut state_single = state0.clone();
-        let out_single = kiln_gdn_kernel::gdn_full_chunk_forward(
+        let out_single = kiln_gdn_kernel::gdn_full_chunk_forward_kt(
             &g,
             &v,
             &kkt,
@@ -33535,12 +33535,12 @@ mod tests {
             &q_s,
             &beta,
             &k_t,
-            &mut state_single,
+            &state_single,
         )?;
 
         let dv_tile = kiln_gdn_kernel::GDN_FULL_CHUNK_FORWARD_MULTIBLOCK_DV_TILE;
         let mut state_mb = state0.clone();
-        let out_mb = kiln_gdn_kernel::gdn_full_chunk_forward_multiblock(
+        let out_mb = kiln_gdn_kernel::gdn_full_chunk_forward_multiblock_kt(
             &g,
             &v,
             &kkt,
@@ -33549,7 +33549,7 @@ mod tests {
             &q_s,
             &beta,
             &k_t,
-            &mut state_mb,
+            &state_mb,
             dv_tile,
         )?;
 
