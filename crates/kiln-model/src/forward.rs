@@ -8987,20 +8987,13 @@ fn apply_rope(
         {
             return Ok(out);
         }
-        if !cuda_fused_rotary_qk_disabled()
-            && cuda_rotary_one_training_bf16_supported(x, cos, sin, head_dim, rotary_dim)
-        {
-            return x
-                .apply_op3(
-                    cos,
-                    sin,
-                    CudaRotaryOneBf16 {
-                        head_dim,
-                        rotary_dim,
-                    },
-                )
-                .context("cuda rotary one CustomOp3");
-        }
+        // #1082 forward-flip: `apply_rope` is kt-native now. The candle
+        // `CudaRotaryOneBf16` CustomOp3 autograd fast-path only applies to
+        // tracked candle tensors; kt tensors are forward-only, so the
+        // autograd routing is handled by the CP-4 tape path above. The
+        // fused inference RoPE for kt inputs goes through the kt rotary
+        // kernel exercised elsewhere; here we fall through to the
+        // elementwise composite below.
     }
 
     let half_rotary = rotary_dim / 2;
@@ -9009,17 +9002,21 @@ fn apply_rope(
     // Work in f32 for precision
     let x = x.to_dtype(DType::F32)?;
 
-    // Split into rotary portion and passthrough portion
-    let x_rot = x.narrow(LAST_DIM, 0, rotary_dim)?; // [..., :rotary_dim]
+    // Split into rotary portion and passthrough portion.
+    // #1082 forward-flip: kt `narrow` takes a `usize` axis (not `D`), so the
+    // last axis is resolved explicitly from the tensor rank.
+    let x_last = x.rank() - 1;
+    let x_rot = x.narrow(x_last, 0, rotary_dim)?; // [..., :rotary_dim]
     let x_pass = if rotary_dim < head_dim {
-        Some(x.narrow(LAST_DIM, rotary_dim, head_dim - rotary_dim)?) // [..., rotary_dim:]
+        Some(x.narrow(x_last, rotary_dim, head_dim - rotary_dim)?) // [..., rotary_dim:]
     } else {
         None
     };
 
     // Split rotary portion into two halves
-    let x1 = x_rot.narrow(LAST_DIM, 0, half_rotary)?; // [..., :half_rotary]
-    let x2 = x_rot.narrow(LAST_DIM, half_rotary, half_rotary)?; // [..., half_rotary:rotary_dim]
+    let x_rot_last = x_rot.rank() - 1;
+    let x1 = x_rot.narrow(x_rot_last, 0, half_rotary)?; // [..., :half_rotary]
+    let x2 = x_rot.narrow(x_rot_last, half_rotary, half_rotary)?; // [..., half_rotary:rotary_dim]
 
     // cos/sin are [seq_len, half_rotary], need to broadcast to [batch, seq_len, num_heads, half_rotary]
     // Reshape to [1, seq_len, 1, half_rotary]
@@ -10572,11 +10569,11 @@ fn rotary_one_bwd_kt_bridge_disabled() -> bool {
 /// silently breaks training.
 #[cfg(feature = "cuda")]
 fn fused_rotary_one_backward_via_kt_bridge(
-    grad_y: &Tensor,
-    cos: &Tensor,
-    sin: &Tensor,
+    grad_y: &candle_core::Tensor,
+    cos: &candle_core::Tensor,
+    sin: &candle_core::Tensor,
     rotary_dim: usize,
-) -> CandleResult<Tensor> {
+) -> CandleResult<candle_core::Tensor> {
     let grad_y_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(grad_y).map_err(|e| {
         Error::Msg(format!("kt-bridge rotary_one bwd: borrow grad_y failed: {e}"))
     })?;
@@ -10689,12 +10686,12 @@ impl CustomOp3 for CudaRotaryOneBf16 {
 
     fn bwd(
         &self,
-        _x: &Tensor,
-        cos: &Tensor,
-        sin: &Tensor,
-        _res: &Tensor,
-        grad_y: &Tensor,
-    ) -> CandleResult<(Option<Tensor>, Option<Tensor>, Option<Tensor>)> {
+        _x: &candle_core::Tensor,
+        cos: &candle_core::Tensor,
+        sin: &candle_core::Tensor,
+        _res: &candle_core::Tensor,
+        grad_y: &candle_core::Tensor,
+    ) -> CandleResult<(Option<candle_core::Tensor>, Option<candle_core::Tensor>, Option<candle_core::Tensor>)> {
         if crate::rmsnorm_candle_shim::supports_rotary_one_bwd_bf16(
             grad_y,
             cos,
@@ -10740,26 +10737,26 @@ impl CustomOp3 for CudaRotaryOneBf16 {
 
 #[cfg(feature = "cuda")]
 fn rotary_one_backward(
-    grad_y: &Tensor,
-    cos: &Tensor,
-    sin: &Tensor,
+    grad_y: &candle_core::Tensor,
+    cos: &candle_core::Tensor,
+    sin: &candle_core::Tensor,
     head_dim: usize,
     rotary_dim: usize,
-) -> Result<Tensor> {
+) -> Result<candle_core::Tensor> {
     let half_rotary = rotary_dim / 2;
     let grad_dtype = grad_y.dtype();
-    let grad = grad_y.to_dtype(DType::F32)?;
-    let grad_rot = grad.narrow(LAST_DIM, 0, rotary_dim)?;
+    let grad = grad_y.to_dtype(candle_core::DType::F32)?;
+    let grad_rot = grad.narrow(candle_core::D::Minus1, 0, rotary_dim)?;
     let grad_pass = if rotary_dim < head_dim {
-        Some(grad.narrow(LAST_DIM, rotary_dim, head_dim - rotary_dim)?)
+        Some(grad.narrow(candle_core::D::Minus1, rotary_dim, head_dim - rotary_dim)?)
     } else {
         None
     };
 
-    let g1 = grad_rot.narrow(LAST_DIM, 0, half_rotary)?;
-    let g2 = grad_rot.narrow(LAST_DIM, half_rotary, half_rotary)?;
-    let cos = cos.to_dtype(DType::F32)?.unsqueeze(0)?.unsqueeze(2)?;
-    let sin = sin.to_dtype(DType::F32)?.unsqueeze(0)?.unsqueeze(2)?;
+    let g1 = grad_rot.narrow(candle_core::D::Minus1, 0, half_rotary)?;
+    let g2 = grad_rot.narrow(candle_core::D::Minus1, half_rotary, half_rotary)?;
+    let cos = cos.to_dtype(candle_core::DType::F32)?.unsqueeze(0)?.unsqueeze(2)?;
+    let sin = sin.to_dtype(candle_core::DType::F32)?.unsqueeze(0)?.unsqueeze(2)?;
 
     let dx1 = (g1.broadcast_mul(&cos)? + g2.broadcast_mul(&sin)?)?;
     let dx2 = (g2.broadcast_mul(&cos)? - g1.broadcast_mul(&sin)?)?;
@@ -10770,35 +10767,10 @@ fn rotary_one_backward(
     // preconditions (CUDA-resident, supported dtype, contiguous,
     // matching rank) are not satisfied, so behavior is bit-identical
     // when the gate is off.
+    // #1082 forward-flip: candle-autograd backward island — candle concat.
     let out = match grad_pass {
-        Some(pass) => {
-            #[cfg(feature = "cuda")]
-            {
-                let pieces: [&Tensor; 3] = [&dx1, &dx2, &pass];
-                match try_kt_concat_last_dim(&pieces)? {
-                    Some(out) => out,
-                    None => Tensor::cat(&[&dx1, &dx2, &pass], LAST_DIM)?,
-                }
-            }
-            #[cfg(not(feature = "cuda"))]
-            {
-                Tensor::cat(&[&dx1, &dx2, &pass], LAST_DIM)?
-            }
-        }
-        None => {
-            #[cfg(feature = "cuda")]
-            {
-                let pieces: [&Tensor; 2] = [&dx1, &dx2];
-                match try_kt_concat_last_dim(&pieces)? {
-                    Some(out) => out,
-                    None => Tensor::cat(&[&dx1, &dx2], LAST_DIM)?,
-                }
-            }
-            #[cfg(not(feature = "cuda"))]
-            {
-                Tensor::cat(&[&dx1, &dx2], LAST_DIM)?
-            }
-        }
+        Some(pass) => candle_core::Tensor::cat(&[&dx1, &dx2, &pass], candle_core::D::Minus1)?,
+        None => candle_core::Tensor::cat(&[&dx1, &dx2], candle_core::D::Minus1)?,
     };
     Ok(out.to_dtype(grad_dtype)?)
 }
