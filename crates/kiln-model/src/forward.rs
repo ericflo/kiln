@@ -12699,6 +12699,16 @@ fn lm_head_forward_backend_decode_if(
             if let Some(out) =
                 crate::tape_forward::try_tape_lora_linear_cuda(&x_c, &et_c, None, 0.0)?
             {
+                // #1082 CP-4: `try_tape_lora_linear_cuda` recorded the matmul on
+                // the kt tape and retained `out`.id() -> that kt output. Return
+                // the RECORDED kt tensor (via the chaining lookup) so the lm_head
+                // output IS the tape node — a fresh `candle_to_kt_activation`
+                // borrow would mint a new kt id, islanding the lm_head from the
+                // cross_entropy root and emptying the GradStore. Falls back to a
+                // fresh bridge if (somehow) not retained.
+                if let Some(kt) = kiln_kt_bridge::tape_bridge::kt_input_for_candle(out.id()) {
+                    return Ok(kt);
+                }
                 return candle_to_kt_activation(&out).context("lm_head candle->kt tape out");
             }
         }
