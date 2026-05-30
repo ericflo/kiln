@@ -68,8 +68,8 @@ pub(crate) type CdResult<T> = candle_core::Result<T>;
 /// `Into<Shape>` bounds on candle `zeros_*`, `D::Minus1` axis args on
 /// candle ops). Bare kt code uses `kiln_tensor::{Shape, D}` directly;
 /// these aliases stay candle-pinned until Wave E1 flips those helpers.
-pub(crate) type Shape = candle_core::Shape;
-pub(crate) type D = candle_core::D;
+pub(crate) type Shape = kiln_tensor::Shape;
+pub(crate) type D = kiln_tensor::D;
 
 /// candle backprop gradient store — candle island (#1082). The
 /// candle-authoritative `.backward()` paths in `trainer.rs` still hand

@@ -595,6 +595,25 @@ impl Tensor {
         ops::max_axis(self, axis)?.unsqueeze(axis)
     }
 
+    /// Gather along `dim` using integer `indices` (candle's `gather`).
+    /// Delegates to the [`ops::gather`] free fn (#1082 candle-compat).
+    pub fn gather<Dm: Dim>(&self, indices: &Self, dim: Dm) -> Result<Self> {
+        let axis = dim.to_index(self.rank(), "gather")?;
+        ops::gather(self, axis, indices)
+    }
+
+    /// Log-sum-exp over `dim`, removing the axis. candle's `log_sum_exp`
+    /// (single-axis). Numerically stable: `m + log(sum(exp(x - m)))` where
+    /// `m = max(x, dim)`. (#1082 candle-compat.)
+    pub fn log_sum_exp<Dm: Dim>(&self, dim: Dm) -> Result<Self> {
+        let axis = dim.to_index(self.rank(), "log_sum_exp")?;
+        let m_keep = ops::max_axis(self, axis)?.unsqueeze(axis)?;
+        let shifted = self.broadcast_sub(&m_keep)?;
+        let summed = ops::sum_axis(&shifted.exp()?, axis)?;
+        let m = ops::max_axis(self, axis)?;
+        summed.log()?.add(&m)
+    }
+
     /// Min over `dim`, removing the axis. candle's `min`. Delegates to
     /// [`ops::min_axis`].
     pub fn min<Dm: Dim>(&self, dim: Dm) -> Result<Self> {
