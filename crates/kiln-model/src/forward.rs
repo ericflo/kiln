@@ -11315,7 +11315,10 @@ fn swiglu_ffn_impl_no_chunk(
     use_metal_decode_gemv: bool,
     profile_context: Option<(usize, usize)>,
 ) -> Result<Tensor> {
-    let profile_device = x.device();
+    // #1082: kt `.device()` returns a `Device` by value; bind the owned value
+    // and a reference so the `&Device`-typed profile helpers below are unchanged.
+    let profile_device_val = x.device();
+    let profile_device = &profile_device_val;
     let (_, seq_len, _) = x.dims3()?;
     let (lora_layer, lora_scale) = match lora {
         Some((l, s)) => (Some(l), s),
@@ -16009,7 +16012,10 @@ fn gated_deltanet_forward_decode_if(
     lora: Option<(&LoraLayerWeights, f32)>,
 ) -> Result<Tensor> {
     let (batch, seq_len, _hidden) = x.dims3()?;
-    let profile_device = x.device();
+    // #1082: kt `.device()` returns a `Device` by value; bind the owned value
+    // and a reference so the `&Device`-typed profile helpers below are unchanged.
+    let profile_device_val = x.device();
+    let profile_device = &profile_device_val;
     let input_dtype = x.dtype();
     let nk = config.linear_num_key_heads;
     let dk = config.linear_key_head_dim;
@@ -18603,7 +18609,10 @@ pub fn gqa_attention_pre_o(
     lora: Option<(&LoraLayerWeights, f32)>,
 ) -> Result<Tensor> {
     let (_batch, seq_len, _hidden) = x.dims3()?;
-    let profile_device = x.device();
+    // #1082: kt `.device()` returns a `Device` by value; bind the owned value
+    // and a reference so the `&Device`-typed profile helpers below are unchanged.
+    let profile_device_val = x.device();
+    let profile_device = &profile_device_val;
     let profile_context = profile_full_attn_stages_enabled().then_some((
         full_attn_layer_idx,
         positions.first().copied().unwrap_or(0) as usize,
@@ -20134,7 +20143,10 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
     >,
 ) -> Result<Tensor> {
     let (batch, seq_len, _hidden) = x.dims3()?;
-    let profile_device = x.device();
+    // #1082: kt `.device()` returns a `Device` by value; bind the owned value
+    // and a reference so the `&Device`-typed profile helpers below are unchanged.
+    let profile_device_val = x.device();
+    let profile_device = &profile_device_val;
     anyhow::ensure!(batch > 0, "batched paged decode requires a non-empty batch");
     anyhow::ensure!(
         seq_len == 1,
@@ -20766,7 +20778,10 @@ fn gqa_attention_paged_with_rope_tables(
     >,
 ) -> Result<Tensor> {
     let (_batch, seq_len, _hidden) = x.dims3()?;
-    let profile_device = x.device();
+    // #1082: kt `.device()` returns a `Device` by value; bind the owned value
+    // and a reference so the `&Device`-typed profile helpers below are unchanged.
+    let profile_device_val = x.device();
+    let profile_device = &profile_device_val;
     let profile_context =
         profile_full_attn_stages_enabled().then_some((full_attn_layer_idx, start_pos));
     let subop_armed = crate::mtp_debug::is_subop_capture_armed();
