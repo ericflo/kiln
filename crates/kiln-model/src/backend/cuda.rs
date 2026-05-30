@@ -1757,11 +1757,20 @@ impl BackendRuntime for CudaBackend {
                 && x2d.is_contiguous()
                 && weight_t.is_contiguous()
             {
-                if let Some(kt_out2d) = crate::forward::try_kt_matmul(&x2d, weight_t)? {
+                // #1082: `try_kt_matmul` is kt-typed. Borrow the contiguous
+                // candle operands zero-copy, run the kt matmul, then bridge
+                // the kt result back to candle for this candle backend impl.
+                let x2d_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&x2d)
+                    .map_err(|e| anyhow::anyhow!("linear_prefill kt matmul lhs borrow: {e}"))?;
+                let weight_t_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(weight_t)
+                    .map_err(|e| anyhow::anyhow!("linear_prefill kt matmul rhs borrow: {e}"))?;
+                if let Some(kt_out2d) = crate::forward::try_kt_matmul(&x2d_kt, &weight_t_kt)? {
+                    let out2d = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&kt_out2d)
+                        .map_err(|e| anyhow::anyhow!("linear_prefill kt matmul out bridge: {e}"))?;
                     let mut out_shape = l_dims[..l_dims.len() - 1].to_vec();
                     out_shape.push(out_n);
                     CUDA_LINEAR_PREFILL_SUCCESSES.fetch_add(1, Ordering::Relaxed);
-                    return Ok(Some(kt_out2d.reshape(out_shape)?));
+                    return Ok(Some(out2d.reshape(out_shape)?));
                 }
             }
 
@@ -1791,11 +1800,18 @@ impl BackendRuntime for CudaBackend {
                     .context("linear_prefill_apply non-contig x: contiguous failed")?;
                 let x2d = x_c.reshape((lead, k))?;
                 if x2d.is_contiguous() {
-                    if let Some(kt_out2d) = crate::forward::try_kt_matmul(&x2d, weight_t)? {
+                    // #1082: bridge candle->kt for the kt matmul, then back.
+                    let x2d_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&x2d)
+                        .map_err(|e| anyhow::anyhow!("linear_prefill kt matmul lhs borrow: {e}"))?;
+                    let weight_t_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(weight_t)
+                        .map_err(|e| anyhow::anyhow!("linear_prefill kt matmul rhs borrow: {e}"))?;
+                    if let Some(kt_out2d) = crate::forward::try_kt_matmul(&x2d_kt, &weight_t_kt)? {
+                        let out2d = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&kt_out2d)
+                            .map_err(|e| anyhow::anyhow!("linear_prefill kt matmul out bridge: {e}"))?;
                         let mut out_shape = l_dims[..l_dims.len() - 1].to_vec();
                         out_shape.push(out_n);
                         CUDA_LINEAR_PREFILL_SUCCESSES.fetch_add(1, Ordering::Relaxed);
-                        return Ok(Some(kt_out2d.reshape(out_shape)?));
+                        return Ok(Some(out2d.reshape(out_shape)?));
                     }
                 }
             }
