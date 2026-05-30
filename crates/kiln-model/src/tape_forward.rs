@@ -2365,9 +2365,16 @@ pub fn tape_record_gdn_recurrent(
         Some(t) => t,
         None => return Ok(()),
     };
-    let out_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(out) {
-        Ok(t) => t,
-        Err(_) => return Ok(()),
+    // #1082 CP-4: record the node output as the PRODUCTION kt (resolved via the
+    // `kt_logits_to_candle` retain on `out`), NOT a fresh borrow. A fresh borrow
+    // mints a new kt id divorced from the production recurrence output that
+    // flows downstream, so the next adapter's `tape_kt_input` (which resolves to
+    // that production kt) couldn't chain to this node — the recurrence→transpose
+    // fragmentation that orphaned every GDN in_proj/z LoRA `Var`. `tape_kt_input`
+    // falls back to a fresh borrow outside a chain scope, so this is safe.
+    let out_kt = match tape_kt_input(out) {
+        Some(t) => t,
+        None => return Ok(()),
     };
 
     let recorded = with_active_tape(|tape: &mut Tape| {
@@ -2840,11 +2847,15 @@ pub fn try_tape_causal_conv1d_prefill_cuda(
         Some(t) => t,
         None => return Ok(None),
     };
-    // The production forward already computed `out`; borrow it as the recorded
-    // node's output so we record-only (no re-run).
-    let out_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(out) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
+    // The production forward already computed `out`. #1082 CP-4: record the
+    // node output as the PRODUCTION kt (resolved via the `kt_logits_to_candle`
+    // retain on `out`), NOT a fresh borrow — else the recorded output id is
+    // divorced from the conv-output kt that flows downstream and the next
+    // adapter can't chain to it. Falls back to a fresh borrow outside a chain
+    // scope.
+    let out_kt = match tape_kt_input(out) {
+        Some(t) => t,
+        None => return Ok(None),
     };
 
     let recorded = with_active_tape(|tape: &mut Tape| {
@@ -2945,12 +2956,15 @@ pub fn try_tape_gdn_l2_norm_scale_cuda(
         Some(t) => t,
         None => return Ok(None),
     };
-    // The production forward already computed `out` (q_out / k_out); borrow it
-    // as the recorded node's output so we record-only (no re-run), like
-    // `tape_record_gdn_recurrent`.
-    let out_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(out) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
+    // The production forward already computed `out` (q_out / k_out). #1082
+    // CP-4: record the node output as the PRODUCTION kt (resolved via the
+    // `kt_logits_to_candle` retain on `out`), NOT a fresh borrow — else the
+    // recorded output id is divorced from the qk-norm-output kt that flows
+    // downstream and the next adapter (gqa-expand / recurrence) can't chain to
+    // it. Falls back to a fresh borrow outside a chain scope.
+    let out_kt = match tape_kt_input(out) {
+        Some(t) => t,
+        None => return Ok(None),
     };
 
     let recorded = with_active_tape(|tape: &mut Tape| {
@@ -3078,9 +3092,15 @@ pub fn try_tape_gdn_gated_rms_norm_cuda(
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    let out_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(out) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
+    // #1082 CP-4: record the node output as the PRODUCTION kt (resolved via the
+    // `kt_logits_to_candle` retain on `out`), NOT a fresh borrow — else the
+    // recorded output id is divorced from the gated-norm-output kt that flows
+    // downstream (reshape→cast→out_proj) and the next adapter can't chain to it,
+    // orphaning the whole GDN chain back to in_proj. Falls back to a fresh
+    // borrow outside a chain scope.
+    let out_kt = match tape_kt_input(out) {
+        Some(t) => t,
+        None => return Ok(None),
     };
 
     let recorded = with_active_tape(|tape: &mut Tape| {
