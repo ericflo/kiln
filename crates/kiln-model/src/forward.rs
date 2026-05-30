@@ -7668,9 +7668,18 @@ pub fn embedding_lookup(token_ids: &[u32], embed_weights: &Tensor) -> Result<Ten
     // that the backward node lives on `Tape` instead of leaving the
     // result as a no-autograd candle Tensor. With the gate off (the
     // default) this returns `Ok(None)` and we fall through.
+    // tape_forward is candle-typed; bridge only when the tape is active.
     #[cfg(feature = "cuda")]
-    if let Some(out) = crate::tape_forward::try_tape_embedding_cuda(embed_weights, &index)? {
-        return promote_cpu_activation(out);
+    if crate::tape_forward::tape_forward_enabled() {
+        let w_candle =
+            kt_logits_to_candle(embed_weights).context("embedding_lookup kt->candle weights")?;
+        let idx_candle =
+            kt_logits_to_candle(&index).context("embedding_lookup kt->candle index")?;
+        if let Some(out) = crate::tape_forward::try_tape_embedding_cuda(&w_candle, &idx_candle)? {
+            return promote_cpu_activation(
+                candle_to_kt_activation(&out).context("embedding_lookup candle->kt tape out")?,
+            );
+        }
     }
     #[cfg(feature = "cuda")]
     if let Some(out) = try_kt_embedding_lookup(embed_weights, &index)? {
@@ -7686,8 +7695,17 @@ fn embedding_lookup_with_index(index: &Tensor, embed_weights: &Tensor) -> Result
     // rationale; this site mirrors it for the index-already-built
     // call path used by the batched-decode and prefill loops.
     #[cfg(feature = "cuda")]
-    if let Some(out) = crate::tape_forward::try_tape_embedding_cuda(embed_weights, index)? {
-        return promote_cpu_activation(out);
+    if crate::tape_forward::tape_forward_enabled() {
+        let w_candle = kt_logits_to_candle(embed_weights)
+            .context("embedding_lookup_with_index kt->candle weights")?;
+        let idx_candle =
+            kt_logits_to_candle(index).context("embedding_lookup_with_index kt->candle index")?;
+        if let Some(out) = crate::tape_forward::try_tape_embedding_cuda(&w_candle, &idx_candle)? {
+            return promote_cpu_activation(
+                candle_to_kt_activation(&out)
+                    .context("embedding_lookup_with_index candle->kt tape out")?,
+            );
+        }
     }
     #[cfg(feature = "cuda")]
     if let Some(out) = try_kt_embedding_lookup(embed_weights, index)? {
@@ -7805,16 +7823,16 @@ fn try_kt_embedding_lookup_from_weights(
     if crate::tape_forward::tape_forward_enabled() {
         return Ok(None);
     }
-    // #1082 forward-flip: `weights.embed_tokens` is a candle field (checked
-    // with candle types); `index` is kt (the forward-path arg).
-    if !matches!(weights.embed_tokens.device(), candle_core::Device::Cuda(_))
+    // #1082 forward-flip: `weights.embed_tokens` is now a kt field; `index`
+    // is kt too. Gate with kt Device/DType.
+    if !matches!(weights.embed_tokens.device(), Device::Cuda(_))
         || !matches!(index.device(), Device::Cuda(_))
         || !weights.embed_tokens.is_contiguous()
         || !index.is_contiguous()
         || index.dtype() != DType::U32
         || !matches!(
             weights.embed_tokens.dtype(),
-            candle_core::DType::F32 | candle_core::DType::BF16 | candle_core::DType::F16
+            DType::F32 | DType::BF16 | DType::F16
         )
     {
         return Ok(None);
