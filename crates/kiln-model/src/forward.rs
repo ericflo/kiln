@@ -7586,7 +7586,12 @@ impl GpuWeights {
 /// through `kiln_tensor::cuda_index_select_dim0`. Falls through to
 /// candle's `index_select` when any precondition fails.
 pub fn embedding_lookup(token_ids: &[u32], embed_weights: &Tensor) -> Result<Tensor> {
-    let index = Tensor::new(token_ids, embed_weights.device())?;
+    // #1082: kt 1-D index tensor on the weights' device (no candle `Tensor::new`).
+    let index = Tensor::from_vec_on(
+        embed_weights.device(),
+        token_ids.to_vec(),
+        vec![token_ids.len()],
+    )?;
     // Phase 6a/CP-4 (#1082) — experimental tape-forward path.
     // When `KILN_USE_TAPE_FORWARD` is set AND a thread-local `Tape`
     // is active (via `crate::tape_forward::with_thread_local_tape`),
@@ -7776,7 +7781,11 @@ fn embedding_lookup_from_weights(token_ids: &[u32], weights: &GpuWeights) -> Res
     // eligible; fall through to the candle `embedding_lookup` otherwise.
     #[cfg(feature = "cuda")]
     {
-        let index = Tensor::new(token_ids, weights.embed_tokens.device())?;
+        let index = Tensor::from_vec_on(
+            weights.embed_tokens.device(),
+            token_ids.to_vec(),
+            vec![token_ids.len()],
+        )?;
         if let Some(out) = try_kt_embedding_lookup_from_weights(&index, weights)? {
             return Ok(out);
         }
@@ -7808,7 +7817,11 @@ fn embedding_lookup_from_weights_with_index(
 }
 
 fn embedding_lookup_from_transposed(token_ids: &[u32], embed_tokens_t: &Tensor) -> Result<Tensor> {
-    let index = Tensor::new(token_ids, embed_tokens_t.device())?;
+    let index = Tensor::from_vec_on(
+        embed_tokens_t.device(),
+        token_ids.to_vec(),
+        vec![token_ids.len()],
+    )?;
     embedding_lookup_from_transposed_index(&index, embed_tokens_t)
 }
 
@@ -8781,8 +8794,11 @@ pub fn rotary_embedding(
     let device = q.device();
 
     // Position tensor
+    // #1082: kt has no `Tensor::new(slice, &Device)`; build a 1-D kt tensor on
+    // the source device via `from_vec_on`, then unsqueeze to [seq_len, 1].
     let pos_f32: Vec<f32> = positions.iter().map(|&p| p as f32).collect();
-    let pos = Tensor::new(pos_f32.as_slice(), device)?.unsqueeze(1)?; // [seq_len, 1]
+    let pos_len = pos_f32.len();
+    let pos = Tensor::from_vec_on(device, pos_f32, vec![pos_len])?.unsqueeze(1)?; // [seq_len, 1]
 
     // Outer product: [seq_len, half_rotary]
     let freqs = pos.broadcast_mul(&inv_freq.unsqueeze(0)?)?;
@@ -13705,7 +13721,10 @@ fn gdn_chunkwise_recurrence(
 ) -> Result<Tensor> {
     let (batch, heads, seq_len, _) = q.dims4()?;
     let dtype = q.dtype();
-    let device = q.device();
+    // #1082: kt `.device()` returns a value; keep a reference for the
+    // `&Device`-typed profile helpers below.
+    let device_val = q.device();
+    let device = &device_val;
     let profile_inner = profile_gdn_recurrent_inner_stages_enabled();
 
     // Single-token decode fast path. The chunkwise machinery (preshape,
