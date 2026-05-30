@@ -10215,7 +10215,7 @@ pub(crate) mod tests {
             // the loss, then restore. The forward reads `forward_storage()
             // .primary_tensor()` via `as_lora_weights`, so this is the slot to
             // swap. `replace_forward_storage` preserves `tensor_id`.
-            let probe = |sign: f32, eps: f32| -> f64 {
+            let mut probe = |sign: f32, eps: f32| -> f64 {
                 // Capture the original forward tensor for this param.
                 let original = {
                     let ps = params.all_params();
