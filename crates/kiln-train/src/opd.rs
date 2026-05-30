@@ -1999,8 +1999,11 @@ pub fn build_local_teacher_fixture(
     use kiln_model::backend;
     use kiln_model::forward::{LinearAttentionState, model_forward};
 
-    let device = weights.embed_tokens.device().clone();
-    let backend_rt = backend::for_device(&device);
+    // (#1082) `embed_tokens.device()` is kt; `LinearAttentionState::new` below
+    // takes a kt device, and `for_device_kt` selects the backend from a kt
+    // device, so keep `device` kt here.
+    let device = weights.embed_tokens.device();
+    let backend_rt = backend::for_device_kt(&device);
 
     let vocab_size = model_config.vocab_size;
     if top_k > vocab_size {
@@ -2301,7 +2304,11 @@ pub fn opd_train(
         );
     }
 
-    let device = weights.embed_tokens.device().clone();
+    // (#1082) `embed_tokens.device()` is now a kt Device; the OPD training body
+    // is a candle island (LoRA Vars, AdamW state, candle dispatch fns that take
+    // `&candle_core::Device`). Bridge once and keep `device` candle.
+    let device = kiln_kt_bridge::candle_device_from_kt(&weights.embed_tokens.device())
+        .map_err(|e| anyhow!("opd_train: kt -> candle device: {e}"))?;
     let backend_rt = backend::for_device(&device);
 
     // Cache VRAM + base-model footprint estimate for the per-step
@@ -3152,10 +3159,11 @@ fn opd_step_forward_backward_tape_authoritative(
             // LoRA adapters inside record onto the active tape; the final
             // RMSNorm retains its kt output so the OPD loss adapter can
             // thread it as `hidden` and keep the tape connected.
-            let mut linear_state =
-                kiln_model::forward::LinearAttentionState::new(model_config, device).map_err(
-                    |e| kiln_kt_bridge::BridgeError::new(format!("opd tape: linear_state: {e:#}")),
-                )?;
+            let mut linear_state = kiln_model::forward::LinearAttentionState::new(
+                model_config,
+                &kiln_kt_bridge::kt_device_from_candle(device),
+            )
+            .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("opd tape: linear_state: {e:#}")))?;
             let normed = model_forward_no_head(
                 backend_rt,
                 input_ids,
@@ -3167,10 +3175,26 @@ fn opd_step_forward_backward_tape_authoritative(
             .context("opd tape-authoritative forward")
             .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?;
 
+            // (#1082) `model_forward_no_head` now returns a kt tensor, but the
+            // OPD scalar-loss tape shim consumes a candle `hidden` whose id it
+            // resolves back to the upstream kt tensor through the tape bridge
+            // (`tape_kt_input`). Bridge the kt `normed` to a candle copy and
+            // register the (kt_id -> candle_id) mapping so the shim threads the
+            // ORIGINAL kt `normed` (connected to the LoRA tape recordings) as
+            // `hidden`, keeping the Increment-0 kt grad path connected. Mirrors
+            // the SFT path, where `model_forward` returns candle and
+            // `try_tape_cross_entropy_from_logits_cuda` registers the mapping
+            // internally.
+            let normed_candle = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&normed)
+                .map_err(|e| {
+                    kiln_kt_bridge::BridgeError::new(format!("opd tape: kt->candle normed: {e}"))
+                })?;
+            kiln_kt_bridge::tape_bridge::register_input_mapping(normed.id(), normed_candle.id());
+
             // Record the SCALAR OPD loss as the tape root. Returns a detached
             // candle scalar (value only); the gradient lives on the tape.
             let loss = match crate::opd_candle_shim::try_tape_opd_scalar_mean_cuda(
-                &normed,
+                &normed_candle,
                 head_t,
                 &prepared.teacher_topk_indices,
                 &prepared.teacher_topk_logprobs,
@@ -3285,6 +3309,25 @@ fn opd_step_forward_backward_candle(
 
     let positions: Vec<u32> = (0..input_ids.len()).map(|p| p as u32).collect();
     let lora_detached = lora_weights_detached(params);
+
+    // (#1082) This legacy candle gradient-checkpointing path threads candle
+    // `Var`s through the now-kt kiln-model forward ops (`model_forward_segment`,
+    // `model_forward_final_norm`). The kt ops are bridged candle->kt on the way
+    // in and kt->candle on the way out so the candle Var / `loss.backward()`
+    // machinery still type-checks. NOTE: candle autograd cannot trace LoRA
+    // gradients through a kt op (the bridge boundary is a detached candle
+    // leaf), so this fallback path is grad-severed post-flip — the
+    // tape-authoritative path (the CUDA default) is the correct producer. See
+    // note `kiln-candle-autograd-drops-attn-conv-grads`.
+    let kt_in = |c: &Tensor| -> Result<kiln_tensor::Tensor> {
+        kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(c)
+            .map_err(|e| anyhow!("opd candle path: candle->kt borrow: {e}"))
+    };
+    let cd_out = |k: &kiln_tensor::Tensor| -> Result<Tensor> {
+        kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(k)
+            .map_err(|e| anyhow!("opd candle path: kt->candle copy: {e}"))
+    };
+
     // Per-step auto-tune: pick segment count based on this step's actual
     // seq_len. Falls back to the legacy hardcoded 8 if VRAM detection or the
     // auto-tune punts.
@@ -3306,12 +3349,15 @@ fn opd_step_forward_backward_candle(
     let segments = compute_segment_boundaries(model_config.num_layers, num_segments);
 
     // === Step 1: detached forward; save segment boundaries ===
+    // (#1082) `model_forward_embed`/`model_forward_segment` are kt-native, so
+    // the boundary states are kt; bridge to candle only at the `Var` seams.
     let (embed_hidden, _) = model_forward_embed(input_ids, weights)?;
-    let mut boundary_states: Vec<Tensor> = Vec::with_capacity(segments.len() + 1);
+    let mut boundary_states: Vec<kiln_tensor::Tensor> = Vec::with_capacity(segments.len() + 1);
     boundary_states.push(embed_hidden.detach());
     {
         let mut current = boundary_states[0].clone();
-        let mut linear_state = LinearAttentionState::new(model_config, device)?;
+        let mut linear_state =
+            LinearAttentionState::new(model_config, &kiln_kt_bridge::kt_device_from_candle(device))?;
         for &(start, end) in &segments {
             current = model_forward_segment(
                 backend_rt,
@@ -3333,9 +3379,14 @@ fn opd_step_forward_backward_candle(
 
     // === Step 2: OPD loss at the final boundary ===
     // Build a Var so candle autograd routes the kernel's backward into
-    // `final_var.grad()`.
-    let final_var = Var::from_tensor(&final_hidden)?;
-    let normed = model_forward_final_norm(final_var.as_tensor(), weights, model_config)?;
+    // `final_var.grad()`. The Var is candle, so bridge the kt `final_hidden`
+    // to candle; the final-norm kt op is bridged candle->kt->candle.
+    let final_var = Var::from_tensor(&cd_out(&final_hidden)?)?;
+    let normed = cd_out(&model_forward_final_norm(
+        &kt_in(final_var.as_tensor())?,
+        weights,
+        model_config,
+    )?)?;
     let out = opd_step_loss(OpdStepInputs {
         tokens: input_ids,
         active_positions,
@@ -3395,12 +3446,16 @@ fn opd_step_forward_backward_candle(
     for seg_idx in (0..segments.len()).rev() {
         let (seg_start, seg_end) = segments[seg_idx];
         let seg_input = boundary_states[seg_idx].clone();
-        let seg_input_var = Var::from_tensor(&seg_input)?;
-        let mut state = LinearAttentionState::new(model_config, device)?;
+        // `seg_input` is kt; the candle Var seeds candle autograd, so bridge.
+        let seg_input_var = Var::from_tensor(&cd_out(&seg_input)?)?;
+        let mut state =
+            LinearAttentionState::new(model_config, &kiln_kt_bridge::kt_device_from_candle(device))?;
         let lora_for_seg = params.as_lora_weights();
-        let seg_output = model_forward_segment(
+        // The segment forward is kt-native; bridge the candle Var tensor in,
+        // and the kt output back to candle for the candle gradient injection.
+        let seg_output = cd_out(&model_forward_segment(
             backend_rt,
-            seg_input_var.as_tensor().clone(),
+            kt_in(seg_input_var.as_tensor())?,
             weights,
             model_config,
             &positions,
@@ -3409,7 +3464,7 @@ fn opd_step_forward_backward_candle(
             Some(&mut state),
             Some(&lora_for_seg),
         )
-        .with_context(|| format!("OPD checkpointed reverse segment [{seg_start},{seg_end})"))?;
+        .with_context(|| format!("OPD checkpointed reverse segment [{seg_start},{seg_end})"))?)?;
 
         // Inject upstream gradient: scalar = sum(seg_output * upstream)
         let scalar = (&seg_output * &upstream_grad)?
