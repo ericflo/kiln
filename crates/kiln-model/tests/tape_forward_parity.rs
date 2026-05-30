@@ -2998,10 +2998,11 @@ fn tape_gdn_recurrent_records_node_and_emits_5_grads() {
     let out = res
         .expect("try_tape_gdn_recurrent_cuda ok")
         .expect("returned Some(out) — gate + scope both on");
-    assert_eq!(out.shape(), &[b, nv, t, dv], "gdn recurrence out shape");
-    // kt Device has `is_gpu()` (no `is_cuda()`); on this CUDA-only test the GPU
-    // is CUDA, so this is the equivalent device-residency assertion.
-    assert!(out.device().is_gpu(), "out stays on GPU (CUDA)");
+    // #1082: `out` is a candle Tensor (the tape adapter records candle); use
+    // candle shape/device idioms (kt's `.shape()==&[..]` / `.is_gpu()` don't
+    // apply to candle).
+    assert_eq!(out.dims4().unwrap(), (b, nv, t, dv), "gdn recurrence out shape");
+    assert!(!out.device().is_cpu(), "out stays on GPU (CUDA)");
 
     assert_eq!(
         tape.len(),
