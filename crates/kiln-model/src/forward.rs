@@ -16773,19 +16773,35 @@ fn gated_deltanet_forward_decode_if(
                     // the q/k/v become fresh-borrow islands, severing in_proj_qkv
                     // from the loss. Value-preserving. (#1082 CP-4 Increment 5)
                     let nar = src.narrow(2, offset, length)?.contiguous()?;
-                    let nar = match crate::tape_forward::try_tape_narrow_cuda(
-                        src, 2, offset, length, &nar,
-                    )? {
-                        Some(t) => t,
-                        None => nar,
+                    let nar = if crate::tape_forward::tape_forward_enabled() {
+                        let src_c = kt_logits_to_candle(src)
+                            .context("gdn qkv narrow kt->candle src (tape)")?;
+                        let nar_c = kt_logits_to_candle(&nar)
+                            .context("gdn qkv narrow kt->candle nar (tape)")?;
+                        match crate::tape_forward::try_tape_narrow_cuda(
+                            &src_c, 2, offset, length, &nar_c,
+                        )? {
+                            Some(t) => candle_to_kt_activation(&t)
+                                .context("gdn qkv narrow candle->kt (tape)")?,
+                            None => nar,
+                        }
+                    } else {
+                        nar
                     };
                     let resh = nar.reshape(shape)?;
-                    match crate::tape_forward::try_tape_reshape_cuda(
-                        &nar,
-                        vec![shape.0, shape.1, shape.2, shape.3],
-                    )? {
-                        Some(t) => Ok(t),
-                        None => Ok(resh),
+                    if crate::tape_forward::tape_forward_enabled() {
+                        let nar_c = kt_logits_to_candle(&nar)
+                            .context("gdn qkv reshape kt->candle nar (tape)")?;
+                        match crate::tape_forward::try_tape_reshape_cuda(
+                            &nar_c,
+                            vec![shape.0, shape.1, shape.2, shape.3],
+                        )? {
+                            Some(t) => Ok(candle_to_kt_activation(&t)
+                                .context("gdn qkv reshape candle->kt (tape)")?),
+                            None => Ok(resh),
+                        }
+                    } else {
+                        Ok(resh)
                     }
                 };
             #[cfg(not(feature = "cuda"))]
@@ -16798,12 +16814,18 @@ fn gated_deltanet_forward_decode_if(
             let v = narrow_then_reshape(&mixed_qkv, 2 * qk_dim, v_dim, (batch, seq_len, nv, dv))?;
             let z_reshaped = z.reshape((batch, seq_len, nv, dv))?;
             #[cfg(feature = "cuda")]
-            let z_reshaped = match crate::tape_forward::try_tape_reshape_cuda(
-                &z,
-                vec![batch, seq_len, nv, dv],
-            )? {
-                Some(t) => t,
-                None => z_reshaped,
+            let z_reshaped = if crate::tape_forward::tape_forward_enabled() {
+                let z_c = kt_logits_to_candle(&z).context("gdn z reshape kt->candle (tape)")?;
+                match crate::tape_forward::try_tape_reshape_cuda(
+                    &z_c,
+                    vec![batch, seq_len, nv, dv],
+                )? {
+                    Some(t) => candle_to_kt_activation(&t)
+                        .context("gdn z reshape candle->kt (tape)")?,
+                    None => z_reshaped,
+                }
+            } else {
+                z_reshaped
             };
             (q, k, v, z_reshaped)
         };
