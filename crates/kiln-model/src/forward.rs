@@ -8121,7 +8121,7 @@ fn vulkan_device_handle() -> Option<std::sync::Arc<kiln_vulkan_kernel::VulkanDev
 /// weights are frozen during LoRA training — only `x` participates in
 /// autograd.
 #[cfg(feature = "vulkan")]
-fn try_vulkan_rmsnorm_autograd(x: &Tensor, weight: &Tensor, eps: f32) -> Result<Option<Tensor>> {
+fn try_vulkan_rmsnorm_autograd(x: &candle_core::Tensor, weight: &candle_core::Tensor, eps: f32) -> Result<Option<candle_core::Tensor>> {
     // `CpuStorage`, `CustomOp1`, `Layout`, `Shape`, `Storage` are all imported at
     // top level under the matching feature gates — no inner `use` needed. (#1082)
 
@@ -8132,9 +8132,9 @@ fn try_vulkan_rmsnorm_autograd(x: &Tensor, weight: &Tensor, eps: f32) -> Result<
 
     struct VulkanRmsNormOp {
         vk_device: std::sync::Arc<kiln_vulkan_kernel::VulkanDevice>,
-        weight: Tensor, // captured frozen weight
+        weight: candle_core::Tensor, // captured frozen weight
         eps: f32,
-        out_dtype: DType,
+        out_dtype: candle_core::DType,
     }
     impl std::fmt::Debug for VulkanRmsNormOp {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -8161,15 +8161,15 @@ fn try_vulkan_rmsnorm_autograd(x: &Tensor, weight: &Tensor, eps: f32) -> Result<
                 BackpropOp::none(),
                 false,
             );
-            let x_f32 = if x_tensor.dtype() == DType::F32 {
+            let x_f32 = if x_tensor.dtype() == candle_core::DType::F32 {
                 x_tensor.contiguous()?
             } else {
-                x_tensor.to_dtype(DType::F32)?.contiguous()?
+                x_tensor.to_dtype(candle_core::DType::F32)?.contiguous()?
             };
-            let w_f32 = if self.weight.dtype() == DType::F32 {
+            let w_f32 = if self.weight.dtype() == candle_core::DType::F32 {
                 self.weight.clone()
             } else {
-                self.weight.to_dtype(DType::F32).map_err(|e| {
+                self.weight.to_dtype(candle_core::DType::F32).map_err(|e| {
                     Error::Msg(format!("rmsnorm fwd weight→f32: {e:?}"))
                 })?
             };
@@ -8198,7 +8198,7 @@ fn try_vulkan_rmsnorm_autograd(x: &Tensor, weight: &Tensor, eps: f32) -> Result<
             let out_f32 = vk_tensor_from_f32_bytes(
                 &out_bytes,
                 &x_dims,
-                DType::F32,
+                candle_core::DType::F32,
             )
             .map_err(|e| Error::Msg(format!("rmsnorm fwd rebuild: {e:?}")))?;
             let out = if out_f32.dtype() == self.out_dtype {
@@ -8227,31 +8227,31 @@ fn try_vulkan_rmsnorm_autograd(x: &Tensor, weight: &Tensor, eps: f32) -> Result<
         }
         fn bwd(
             &self,
-            x: &Tensor,
-            _y: &Tensor,
-            grad_y: &Tensor,
-        ) -> CandleResult<Option<Tensor>> {
+            x: &candle_core::Tensor,
+            _y: &candle_core::Tensor,
+            grad_y: &candle_core::Tensor,
+        ) -> CandleResult<Option<candle_core::Tensor>> {
             // Route the backward through the candle-free
             // `dispatch_qwen_rmsnorm_backward_bytes` entry point. We
             // still pull bytes out of candle tensors at the boundary
             // (these are autograd inputs from the surrounding op so
-            // they have to come in as `&Tensor`), but the dispatch
-            // call itself no longer hands a `Tensor` to the kernel
+            // they have to come in as `&candle_core::Tensor`), but the dispatch
+            // call itself no longer hands a `candle_core::Tensor` to the kernel
             // crate. (#1082)
-            let x_f32 = if x.dtype() == DType::F32 {
+            let x_f32 = if x.dtype() == candle_core::DType::F32 {
                 x.clone()
             } else {
-                x.to_dtype(DType::F32)?
+                x.to_dtype(candle_core::DType::F32)?
             };
-            let w_f32 = if self.weight.dtype() == DType::F32 {
+            let w_f32 = if self.weight.dtype() == candle_core::DType::F32 {
                 self.weight.clone()
             } else {
-                self.weight.to_dtype(DType::F32)?
+                self.weight.to_dtype(candle_core::DType::F32)?
             };
-            let grad_y_f32 = if grad_y.dtype() == DType::F32 {
+            let grad_y_f32 = if grad_y.dtype() == candle_core::DType::F32 {
                 grad_y.clone()
             } else {
-                grad_y.to_dtype(DType::F32)?
+                grad_y.to_dtype(candle_core::DType::F32)?
             };
             // Validate shape preconditions that the candle entry
             // previously enforced via dim asserts. We compute
@@ -8309,12 +8309,12 @@ fn try_vulkan_rmsnorm_autograd(x: &Tensor, weight: &Tensor, eps: f32) -> Result<
             let dx_f32 = vk_tensor_from_f32_bytes(
                 &dx_bytes,
                 dims.as_slice(),
-                DType::F32,
+                candle_core::DType::F32,
             )
             .map_err(|e| {
                 Error::Msg(format!("rmsnorm bwd build dx tensor: {e:?}"))
             })?;
-            let dx = if self.out_dtype == DType::F32 {
+            let dx = if self.out_dtype == candle_core::DType::F32 {
                 dx_f32
             } else {
                 dx_f32
