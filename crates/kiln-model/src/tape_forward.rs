@@ -1001,8 +1001,17 @@ impl BackwardOp for CrossEntropyFromLogitsBackward {
                 )
             })? as f64;
 
+        // #1082: `cross_entropy_from_logits_grad_candle` is now kt-typed
+        // (kt input + kt output). Bridge this struct's stored candle logits
+        // to kt for the call; the returned grad is already kt.
+        let logits_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&self.logits)
+            .map_err(|e| {
+                kiln_tensor::Error::Msg(format!(
+                    "CrossEntropyFromLogitsBackward: logits candle->kt: {e}"
+                ))
+            })?;
         let grad_logits = crate::forward::cross_entropy_from_logits_grad_candle(
-            &self.logits,
+            &logits_kt,
             &self.input_ids,
             &self.label_mask,
             grad_scalar,
@@ -1014,19 +1023,12 @@ impl BackwardOp for CrossEntropyFromLogitsBackward {
         })?;
 
         // The composite output is freshly built (cat/unsqueeze → possibly
-        // non-contiguous) and owns no kt lifetime — materialise contiguous and
-        // COPY into an owned kt tensor (not borrow).
-        let grad_logits = grad_logits.contiguous().map_err(|e| {
+        // non-contiguous) — materialise contiguous as an owned kt tensor.
+        let grad_logits_kt = grad_logits.contiguous().map_err(|e| {
             kiln_tensor::Error::Msg(format!(
                 "CrossEntropyFromLogitsBackward: grad contiguous: {e}"
             ))
         })?;
-        let grad_logits_kt =
-            kiln_kt_bridge::kt_tensor_from_candle_cuda_copy(&grad_logits).map_err(|e| {
-                kiln_tensor::Error::Msg(format!(
-                    "CrossEntropyFromLogitsBackward: grad candle->kt: {e}"
-                ))
-            })?;
 
         Ok(vec![Some(grad_logits_kt)])
     }
@@ -2175,29 +2177,39 @@ impl BackwardOp for GdnRecurrentBackward {
             grad_c
         };
         let backend = crate::backend::for_device(&self.device);
+        // #1082: `gdn_recurrent_backward_no_grad` is now kt-typed (kt inputs,
+        // kt-grad outputs). Bridge the candle-stored saved tensors + the
+        // candle upstream grad to kt at the boundary.
+        let to_kt_in = |t: &Tensor, name: &str| -> kiln_tensor::Result<kiln_tensor::Tensor> {
+            kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(t).map_err(|e| {
+                kiln_tensor::Error::Msg(format!("GdnRecurrentBackward: {name} candle->kt: {e}"))
+            })
+        };
+        let q_kt = to_kt_in(&self.q, "q")?;
+        let k_kt = to_kt_in(&self.k, "k")?;
+        let v_kt = to_kt_in(&self.v, "v")?;
+        let beta_kt = to_kt_in(&self.beta, "beta")?;
+        let g_kt = to_kt_in(&self.g, "g")?;
+        let entry_state_kt = to_kt_in(&self.entry_state, "entry_state")?;
+        let grad_c_kt = to_kt_in(&grad_c, "grad_out")?;
         let grads = gdn_recurrent_backward_no_grad(
             &*backend,
-            &self.q,
-            &self.k,
-            &self.v,
-            &self.beta,
-            &self.g,
-            &self.entry_state,
-            &grad_c,
+            &q_kt,
+            &k_kt,
+            &v_kt,
+            &beta_kt,
+            &g_kt,
+            &entry_state_kt,
+            &grad_c_kt,
             None,
             self.chunk_size,
         )
         .map_err(|e| kiln_tensor::Error::Msg(format!("GdnRecurrentBackward: gdn bwd: {e}")))?;
-        let to_kt = |t: &Tensor| -> kiln_tensor::Result<kiln_tensor::Tensor> {
-            // gdn_recurrent_backward_no_grad can return non-contiguous grads
-            // (internal transposes/narrows). Materialise contiguous, then
-            // COPY into an owned kt tensor (no keep-alive lifetime tie to a
-            // local candle temporary).
-            let tc = t.contiguous().map_err(|e| {
+        // grads.* are kt; the backward can return non-contiguous grads
+        // (internal transposes/narrows) — materialise contiguous.
+        let to_kt = |t: &kiln_tensor::Tensor| -> kiln_tensor::Result<kiln_tensor::Tensor> {
+            t.contiguous().map_err(|e| {
                 kiln_tensor::Error::Msg(format!("GdnRecurrentBackward: grad contiguous: {e}"))
-            })?;
-            kiln_kt_bridge::kt_tensor_from_candle_cuda_copy(&tc).map_err(|e| {
-                kiln_tensor::Error::Msg(format!("GdnRecurrentBackward: grad candle->kt: {e}"))
             })
         };
         Ok(vec![
@@ -2863,21 +2875,20 @@ impl BackwardOp for GdnL2NormScaleBackward {
         &self,
         grad_output: &kiln_tensor::Tensor,
     ) -> kiln_tensor::Result<Vec<Option<kiln_tensor::Tensor>>> {
-        let grad_c = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(grad_output).map_err(|e| {
-            kiln_tensor::Error::Msg(format!("GdnL2NormScaleBackward: grad kt->candle: {e}"))
+        // #1082: `gdn_l2_norm_scale_backward_no_grad` is now kt-typed. Bridge
+        // the candle-stored `x` + the kt upstream grad to kt; the returned dx
+        // is already kt.
+        let x_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&self.x).map_err(|e| {
+            kiln_tensor::Error::Msg(format!("GdnL2NormScaleBackward: x candle->kt: {e}"))
         })?;
-        let dx = gdn_l2_norm_scale_backward_no_grad(&self.x, self.scale, self.eps, &grad_c)
+        let dx = gdn_l2_norm_scale_backward_no_grad(&x_kt, self.scale, self.eps, grad_output)
             .map_err(|e| {
                 kiln_tensor::Error::Msg(format!("GdnL2NormScaleBackward: bwd: {e}"))
             })?;
-        // Adjoint can be non-contiguous (broadcast_mul views) — contiguify then
-        // COPY to an owned kt tensor (cf. the GdnRecurrentBackward non-contig fix).
-        let dx = dx
+        // Adjoint can be non-contiguous (broadcast_mul views) — contiguify.
+        let dx_kt = dx
             .contiguous()
             .map_err(|e| kiln_tensor::Error::Msg(format!("GdnL2NormScaleBackward: contig: {e}")))?;
-        let dx_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_copy(&dx).map_err(|e| {
-            kiln_tensor::Error::Msg(format!("GdnL2NormScaleBackward: dx candle->kt: {e}"))
-        })?;
         Ok(vec![Some(dx_kt)])
     }
 }
@@ -2970,27 +2981,28 @@ impl BackwardOp for GdnGatedRmsNormBackward {
         &self,
         grad_output: &kiln_tensor::Tensor,
     ) -> kiln_tensor::Result<Vec<Option<kiln_tensor::Tensor>>> {
-        let grad_c = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(grad_output).map_err(|e| {
-            kiln_tensor::Error::Msg(format!("GdnGatedRmsNormBackward: grad kt->candle: {e}"))
-        })?;
+        // #1082: `gdn_gated_rms_norm_backward_no_grad` is now kt-typed. Bridge
+        // the candle-stored x/z/weight to kt; the upstream grad is already kt.
+        let to_kt_in = |t: &Tensor, name: &str| -> kiln_tensor::Result<kiln_tensor::Tensor> {
+            kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(t).map_err(|e| {
+                kiln_tensor::Error::Msg(format!("GdnGatedRmsNormBackward: {name} candle->kt: {e}"))
+            })
+        };
+        let x_kt = to_kt_in(&self.x, "x")?;
+        let z_kt = to_kt_in(&self.z, "z")?;
+        let weight_kt = to_kt_in(&self.weight, "weight")?;
         let grads = gdn_gated_rms_norm_backward_no_grad(
-            &self.x,
-            &self.z,
-            &self.weight,
+            &x_kt,
+            &z_kt,
+            &weight_kt,
             self.eps,
-            &grad_c,
+            grad_output,
         )
         .map_err(|e| kiln_tensor::Error::Msg(format!("GdnGatedRmsNormBackward: bwd: {e}")))?;
-        // Adjoints can be non-contiguous; contiguify then COPY to owned kt
-        // (cf. the GdnRecurrentBackward non-contig-grad fix).
-        let to_kt = |t: &Tensor| -> kiln_tensor::Result<kiln_tensor::Tensor> {
-            let tc = t.contiguous().map_err(|e| {
+        // Adjoints (kt) can be non-contiguous; contiguify.
+        let to_kt = |t: &kiln_tensor::Tensor| -> kiln_tensor::Result<kiln_tensor::Tensor> {
+            t.contiguous().map_err(|e| {
                 kiln_tensor::Error::Msg(format!("GdnGatedRmsNormBackward: grad contiguous: {e}"))
-            })?;
-            kiln_kt_bridge::kt_tensor_from_candle_cuda_copy(&tc).map_err(|e| {
-                kiln_tensor::Error::Msg(format!(
-                    "GdnGatedRmsNormBackward: grad candle->kt: {e}"
-                ))
             })
         };
         Ok(vec![
@@ -3625,27 +3637,30 @@ impl BackwardOp for SdpaBackward {
         &self,
         grad_output: &kiln_tensor::Tensor,
     ) -> kiln_tensor::Result<Vec<Option<kiln_tensor::Tensor>>> {
-        // Bridge the upstream grad (kt) to candle for the candle composite.
-        let grad_c = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(grad_output).map_err(|e| {
-            kiln_tensor::Error::Msg(format!("SdpaBackward: grad kt->candle: {e}"))
-        })?;
+        // #1082: `sdpa_fallback_backward_no_grad` is now kt-typed. Bridge the
+        // candle-stored q/k/v to kt; the upstream grad is already kt.
+        let to_kt_in = |t: &Tensor, name: &str| -> kiln_tensor::Result<kiln_tensor::Tensor> {
+            kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(t).map_err(|e| {
+                kiln_tensor::Error::Msg(format!("SdpaBackward: {name} candle->kt: {e}"))
+            })
+        };
+        let q_kt = to_kt_in(&self.q, "q")?;
+        let k_kt = to_kt_in(&self.k, "k")?;
+        let v_kt = to_kt_in(&self.v, "v")?;
         let grads = sdpa_fallback_backward_no_grad(
-            &self.q,
-            &self.k,
-            &self.v,
+            &q_kt,
+            &k_kt,
+            &v_kt,
             self.scale,
             self.causal,
-            &grad_c,
+            grad_output,
         )
         .map_err(|e| kiln_tensor::Error::Msg(format!("SdpaBackward: sdpa bwd: {e}")))?;
-        // Adjoints can be non-contiguous (broadcast/transpose views); contiguify
-        // then COPY to owned kt (cf. the GdnRecurrentBackward non-contig fix).
-        let to_kt = |t: &Tensor| -> kiln_tensor::Result<kiln_tensor::Tensor> {
-            let tc = t.contiguous().map_err(|e| {
+        // Adjoints (kt) can be non-contiguous (broadcast/transpose views);
+        // contiguify.
+        let to_kt = |t: &kiln_tensor::Tensor| -> kiln_tensor::Result<kiln_tensor::Tensor> {
+            t.contiguous().map_err(|e| {
                 kiln_tensor::Error::Msg(format!("SdpaBackward: grad contiguous: {e}"))
-            })?;
-            kiln_kt_bridge::kt_tensor_from_candle_cuda_copy(&tc).map_err(|e| {
-                kiln_tensor::Error::Msg(format!("SdpaBackward: grad candle->kt: {e}"))
             })
         };
         Ok(vec![
