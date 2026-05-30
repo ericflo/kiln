@@ -8719,18 +8719,19 @@ fn c46_layer1_row_provenance_tensors(
     let selected_row_f32 = selected_row.to_dtype(DType::F32)?;
     let selected_row_contiguous = selected_row_f32.contiguous()?;
     let selected_row_flat = selected_row_contiguous
-        .reshape(((), hidden))?
+        .reshape((selected_row_contiguous.element_count() / hidden, hidden))?
         .contiguous()?;
 
     let x_f32 = x.to_dtype(DType::F32)?;
     let (_batch, seq_len, hidden) = x_f32
         .dims3()
         .context("C46 row provenance expects f32 layer-1 hidden to be [batch, seq, hidden]")?;
-    let c45_last_row = x_f32
-        .narrow(1, seq_len - 1, 1)?
-        .contiguous()?
-        .reshape(((), hidden))?
-        .contiguous()?;
+    let c45_last_row = {
+        let c45_tmp = x_f32.narrow(1, seq_len - 1, 1)?.contiguous()?;
+        c45_tmp
+            .reshape((c45_tmp.element_count() / hidden, hidden))?
+            .contiguous()?
+    };
 
     Ok((
         selected_row,
@@ -17778,8 +17779,8 @@ fn cuda_split_q_gate_training_bf16(
         gate_lora.as_ref(),
         lora_scale,
     )?;
-    let q = q_flat.reshape(((), seq_len, num_heads, head_dim))?;
-    let gate = gate.reshape(((), seq_len, q_dim))?;
+    let q = reshape_hole0_4(&q_flat, seq_len, num_heads, head_dim)?;
+    let gate = reshape_hole0_3(&gate, seq_len, q_dim)?;
     Ok(Some((q, gate)))
 }
 
@@ -17847,15 +17848,13 @@ pub fn gqa_attention_q_gate_prefill(
             lora_scale,
         )?;
         if attn_output_gate {
-            let q_raw = q_raw.reshape(((), seq_len, num_heads, head_dim * 2))?;
+            let q_raw = reshape_hole0_4(&q_raw, seq_len, num_heads, head_dim * 2)?;
             let q = q_raw.narrow(3, 0, head_dim)?;
             let gate = q_raw.narrow(3, head_dim, head_dim)?;
-            let gate = gate
-                .contiguous()?
-                .reshape(((), seq_len, num_heads * head_dim))?;
+            let gate = reshape_hole0_3(&gate.contiguous()?, seq_len, num_heads * head_dim)?;
             (q.contiguous()?, Some(gate))
         } else {
-            (q_raw.reshape(((), seq_len, num_heads, head_dim))?, None)
+            (reshape_hole0_4(&q_raw, seq_len, num_heads, head_dim)?, None)
         }
     };
 
@@ -17882,24 +17881,24 @@ pub fn gqa_attention_kv_prefill(
         Some((l, s)) => (Some(l), s),
         None => (None, 0.0),
     };
-    let k = linear_with_lora_t_backend_decode_if(
+    let k_flat = linear_with_lora_t_backend_decode_if(
         Some(backend),
         false,
         x,
         &attn_weights.k_proj_t,
         lora_layer.and_then(|l| l.k_proj.as_ref()),
         lora_scale,
-    )?
-    .reshape(((), seq_len, num_kv_heads, head_dim))?;
-    let v = linear_with_lora_t_backend_decode_if(
+    )?;
+    let k = reshape_hole0_4(&k_flat, seq_len, num_kv_heads, head_dim)?;
+    let v_flat = linear_with_lora_t_backend_decode_if(
         Some(backend),
         false,
         x,
         &attn_weights.v_proj_t,
         lora_layer.and_then(|l| l.v_proj.as_ref()),
         lora_scale,
-    )?
-    .reshape(((), seq_len, num_kv_heads, head_dim))?;
+    )?;
+    let v = reshape_hole0_4(&v_flat, seq_len, num_kv_heads, head_dim)?;
     let k = rms_norm(&k, &attn_weights.k_norm, rms_norm_eps)?;
     let (k, _) = rotary_embedding(&k, &k, positions, head_dim, rotary_dim, inv_freq)?;
     Ok((k, v))
@@ -17990,23 +17989,21 @@ pub fn gqa_attention_prepare_prefill(
         let q_raw = q_raw
             .as_ref()
             .expect("q_raw is present when split_q_gate is inactive");
-        let q_raw = q_raw.reshape(((), seq_len, num_heads, head_dim * 2))?;
+        let q_raw = reshape_hole0_4(q_raw, seq_len, num_heads, head_dim * 2)?;
         let q = q_raw.narrow(3, 0, head_dim)?;
         let gate = q_raw.narrow(3, head_dim, head_dim)?;
-        let gate = gate
-            .contiguous()?
-            .reshape(((), seq_len, num_heads * head_dim))?;
+        let gate = reshape_hole0_3(&gate.contiguous()?, seq_len, num_heads * head_dim)?;
         (q.contiguous()?, Some(gate))
     } else {
         let q_raw = q_raw
             .as_ref()
             .expect("q_raw is present when attention output gate is disabled");
-        let q = q_raw.reshape(((), seq_len, num_heads, head_dim))?;
+        let q = reshape_hole0_4(q_raw, seq_len, num_heads, head_dim)?;
         (q, None)
     };
 
-    let k = k.reshape(((), seq_len, num_kv_heads, head_dim))?;
-    let v = v.reshape(((), seq_len, num_kv_heads, head_dim))?;
+    let k = reshape_hole0_4(&k, seq_len, num_kv_heads, head_dim)?;
+    let v = reshape_hole0_4(&v, seq_len, num_kv_heads, head_dim)?;
     let q = rms_norm(&q, &attn_weights.q_norm, rms_norm_eps)?;
     let k = rms_norm(&k, &attn_weights.k_norm, rms_norm_eps)?;
     let (q, k) = rotary_embedding(&q, &k, positions, head_dim, rotary_dim, inv_freq)?;
@@ -18313,10 +18310,11 @@ pub fn gqa_attention_core_prefill(
         return Ok(transposed.reshape((tb, tt, flat))?);
     }
 
-    Ok(attn_output
-        .transpose(1, 2)?
-        .contiguous()?
-        .reshape(((), seq_len, num_heads * head_dim))?)
+    Ok(reshape_hole0_3(
+        &attn_output.transpose(1, 2)?.contiguous()?,
+        seq_len,
+        num_heads * head_dim,
+    )?)
 }
 
 pub fn gqa_attention_apply_output_gate(
@@ -18367,7 +18365,7 @@ pub fn gqa_attention_pre_o_chunked_prefill(
         None => (None, 0.0),
     };
 
-    let k = linear_with_lora_t_backend_decode_if(
+    let k_flat = linear_with_lora_t_backend_decode_if(
         Some(backend),
         false,
         x,
@@ -18375,10 +18373,10 @@ pub fn gqa_attention_pre_o_chunked_prefill(
         lora_layer.and_then(|l| l.k_proj.as_ref()),
         lora_scale,
     )
-    .context("chunked full-attention pre-o k projection")?
-    .reshape(((), seq_len, num_kv_heads, head_dim))
-    .context("chunked full-attention pre-o k reshape")?;
-    let v = linear_with_lora_t_backend_decode_if(
+    .context("chunked full-attention pre-o k projection")?;
+    let k = reshape_hole0_4(&k_flat, seq_len, num_kv_heads, head_dim)
+        .context("chunked full-attention pre-o k reshape")?;
+    let v_flat = linear_with_lora_t_backend_decode_if(
         Some(backend),
         false,
         x,
@@ -18386,9 +18384,9 @@ pub fn gqa_attention_pre_o_chunked_prefill(
         lora_layer.and_then(|l| l.v_proj.as_ref()),
         lora_scale,
     )
-    .context("chunked full-attention pre-o v projection")?
-    .reshape(((), seq_len, num_kv_heads, head_dim))
-    .context("chunked full-attention pre-o v reshape")?;
+    .context("chunked full-attention pre-o v projection")?;
+    let v = reshape_hole0_4(&v_flat, seq_len, num_kv_heads, head_dim)
+        .context("chunked full-attention pre-o v reshape")?;
     let k = rms_norm(&k, &attn_weights.k_norm, rms_norm_eps)
         .context("chunked full-attention pre-o k norm")?;
     let (k, _) = rotary_embedding(&k, &k, positions, head_dim, rotary_dim, inv_freq)
@@ -18415,8 +18413,7 @@ pub fn gqa_attention_pre_o_chunked_prefill(
             format!("chunked full-attention pre-o q projection [{tile_start}, {tile_end})")
         })?;
         let (q_tile, gate_tile) = if attn_output_gate {
-            let q_raw = q_raw
-                .reshape(((), tile_len, num_heads, head_dim * 2))
+            let q_raw = reshape_hole0_4(&q_raw, tile_len, num_heads, head_dim * 2)
                 .with_context(|| {
                     format!(
                         "chunked full-attention pre-o q/gate reshape [{tile_start}, {tile_end})"
@@ -18429,23 +18426,21 @@ pub fn gqa_attention_pre_o_chunked_prefill(
                 })?
                 .contiguous()
                 .context("chunked full-attention pre-o q contiguous")?;
-            let gate = q_raw
+            let gate_split = q_raw
                 .narrow(3, head_dim, head_dim)
                 .with_context(|| {
                     format!("chunked full-attention pre-o gate split [{tile_start}, {tile_end})")
                 })?
                 .contiguous()
-                .context("chunked full-attention pre-o gate contiguous")?
-                .reshape(((), tile_len, num_heads * head_dim))
+                .context("chunked full-attention pre-o gate contiguous")?;
+            let gate = reshape_hole0_3(&gate_split, tile_len, num_heads * head_dim)
                 .context("chunked full-attention pre-o gate reshape")?;
             (q, Some(gate))
         } else {
             (
-                q_raw
-                    .reshape(((), tile_len, num_heads, head_dim))
-                    .with_context(|| {
-                        format!("chunked full-attention pre-o q reshape [{tile_start}, {tile_end})")
-                    })?,
+                reshape_hole0_4(&q_raw, tile_len, num_heads, head_dim).with_context(|| {
+                    format!("chunked full-attention pre-o q reshape [{tile_start}, {tile_end})")
+                })?,
                 None,
             )
         };
@@ -18729,13 +18724,11 @@ pub fn gqa_attention_pre_o(
             .expect("q_raw is present when split_q_gate is inactive");
         // q_raw: [batch, seq_len, num_heads * head_dim * 2]
         // Reshape to [batch, seq_len, num_heads, head_dim * 2] then split
-        let q_raw = q_raw.reshape(((), seq_len, num_heads, head_dim * 2))?;
+        let q_raw = reshape_hole0_4(q_raw, seq_len, num_heads, head_dim * 2)?;
         let q = q_raw.narrow(3, 0, head_dim)?;
         let gate = q_raw.narrow(3, head_dim, head_dim)?;
         // gate needs to be [batch, seq_len, num_heads * head_dim] for later
-        let gate = gate
-            .contiguous()?
-            .reshape(((), seq_len, num_heads * head_dim))?;
+        let gate = reshape_hole0_3(&gate.contiguous()?, seq_len, num_heads * head_dim)?;
         (q.contiguous()?, Some(gate))
     } else {
         let q_raw = q_raw
@@ -19120,11 +19113,11 @@ pub fn gqa_attention_pre_o(
             "attn_output_layout",
             seq_len,
         )?;
-        let out = attn_output.transpose(1, 2)?.contiguous()?.reshape((
-            (),
+        let out = reshape_hole0_3(
+            &attn_output.transpose(1, 2)?.contiguous()?,
             seq_len,
             num_heads * head_dim,
-        ))?;
+        )?;
         finish_full_attn_stage_profile(
             profile_device,
             profile_context,
@@ -20357,15 +20350,13 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
     let (q, gate) = {
         let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
         let out = if attn_output_gate {
-            let q_raw = q_raw.reshape(((), seq_len, num_heads, head_dim * 2))?;
+            let q_raw = reshape_hole0_4(&q_raw, seq_len, num_heads, head_dim * 2)?;
             let q = q_raw.narrow(3, 0, head_dim)?;
             let gate = q_raw.narrow(3, head_dim, head_dim)?;
-            let gate = gate
-                .contiguous()?
-                .reshape(((), seq_len, num_heads * head_dim))?;
+            let gate = reshape_hole0_3(&gate.contiguous()?, seq_len, num_heads * head_dim)?;
             (q.contiguous()?, Some(gate))
         } else {
-            (q_raw.reshape(((), seq_len, num_heads, head_dim))?, None)
+            (reshape_hole0_4(&q_raw, seq_len, num_heads, head_dim)?, None)
         };
         finish_full_attn_stage_profile(
             profile_device,
@@ -20376,8 +20367,8 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
         )?;
         out
     };
-    let k = k.reshape(((), seq_len, num_kv_heads, head_dim))?;
-    let v = v.reshape(((), seq_len, num_kv_heads, head_dim))?;
+    let k = reshape_hole0_4(&k, seq_len, num_kv_heads, head_dim)?;
+    let v = reshape_hole0_4(&v, seq_len, num_kv_heads, head_dim)?;
 
     let (q, k) = {
         let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
@@ -20970,15 +20961,13 @@ fn gqa_attention_paged_with_rope_tables(
             let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
             kiln_nvtx::range!(c"kiln/proj/qkv_split");
             let out = if attn_output_gate {
-                let q_raw = q_raw.reshape(((), seq_len, num_heads, head_dim * 2))?;
+                let q_raw = reshape_hole0_4(&q_raw, seq_len, num_heads, head_dim * 2)?;
                 let q = q_raw.narrow(3, 0, head_dim)?;
                 let gate = q_raw.narrow(3, head_dim, head_dim)?;
-                let gate = gate
-                    .contiguous()?
-                    .reshape(((), seq_len, num_heads * head_dim))?;
+                let gate = reshape_hole0_3(&gate.contiguous()?, seq_len, num_heads * head_dim)?;
                 (q.contiguous()?, Some(gate))
             } else {
-                let q = q_raw.reshape(((), seq_len, num_heads, head_dim))?;
+                let q = reshape_hole0_4(&q_raw, seq_len, num_heads, head_dim)?;
                 (q, None)
             };
             finish_full_attn_stage_profile(
@@ -21004,7 +20993,7 @@ fn gqa_attention_paged_with_rope_tables(
             }
         }
 
-        let k = k_raw.reshape(((), seq_len, num_kv_heads, head_dim))?;
+        let k = reshape_hole0_4(&k_raw, seq_len, num_kv_heads, head_dim)?;
 
         // Phase B9 H2 taps: pre_qk_norm_{q,k} are the per-head reshaped tensors
         // immediately before per-head RMSNorm. pre_qk_norm_q is alias of
@@ -21084,7 +21073,7 @@ fn gqa_attention_paged_with_rope_tables(
         (q, k, gate)
     };
 
-    let v = v.reshape(((), seq_len, num_kv_heads, head_dim))?;
+    let v = reshape_hole0_4(&v, seq_len, num_kv_heads, head_dim)?;
 
     // Keep the cache-native token-major K/V views for paged writes. Attention
     // still wants head-major tensors, but the cache pool stores
@@ -21908,11 +21897,11 @@ fn gqa_attention_paged_with_rope_tables(
     // Transpose back and output projection
     let attn_output = {
         let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
-        let out = attn_output.transpose(1, 2)?.contiguous()?.reshape((
-            (),
+        let out = reshape_hole0_3(
+            &attn_output.transpose(1, 2)?.contiguous()?,
             seq_len,
             num_heads * head_dim,
-        ))?;
+        )?;
         finish_full_attn_stage_profile(
             profile_device,
             profile_context,
@@ -22195,7 +22184,7 @@ fn transformer_block_detached_cuda_prefill_chunked(
         Some((l, s)) => (Some(l), s),
         None => (None, 0.0),
     };
-    let k = linear_with_lora_t_backend_decode_if(
+    let k_flat = linear_with_lora_t_backend_decode_if(
         Some(backend),
         false,
         &normed,
@@ -22203,10 +22192,10 @@ fn transformer_block_detached_cuda_prefill_chunked(
         lora_layer.and_then(|l| l.k_proj.as_ref()),
         lora_scale,
     )
-    .context("chunked full-attention k projection")?
-    .reshape(((), seq_len, num_kv_heads, head_dim))
-    .context("chunked full-attention k reshape")?;
-    let v = linear_with_lora_t_backend_decode_if(
+    .context("chunked full-attention k projection")?;
+    let k = reshape_hole0_4(&k_flat, seq_len, num_kv_heads, head_dim)
+        .context("chunked full-attention k reshape")?;
+    let v_flat = linear_with_lora_t_backend_decode_if(
         Some(backend),
         false,
         &normed,
@@ -22214,9 +22203,9 @@ fn transformer_block_detached_cuda_prefill_chunked(
         lora_layer.and_then(|l| l.v_proj.as_ref()),
         lora_scale,
     )
-    .context("chunked full-attention v projection")?
-    .reshape(((), seq_len, num_kv_heads, head_dim))
-    .context("chunked full-attention v reshape")?;
+    .context("chunked full-attention v projection")?;
+    let v = reshape_hole0_4(&v_flat, seq_len, num_kv_heads, head_dim)
+        .context("chunked full-attention v reshape")?;
     let k = rms_norm(&k, &attn_weights.k_norm, rms_norm_eps)
         .context("chunked full-attention k norm")?;
     let (k, _) = rotary_embedding(&k, &k, positions, head_dim, rotary_dim, inv_freq)
@@ -22243,11 +22232,9 @@ fn transformer_block_detached_cuda_prefill_chunked(
             format!("chunked full-attention q projection [{tile_start}, {tile_end})")
         })?;
         let (q_tile, gate_tile) = if config.attn_output_gate {
-            let q_raw = q_raw
-                .reshape(((), tile_len, num_heads, head_dim * 2))
-                .with_context(|| {
-                    format!("chunked full-attention q/gate reshape [{tile_start}, {tile_end})")
-                })?;
+            let q_raw = reshape_hole0_4(&q_raw, tile_len, num_heads, head_dim * 2).with_context(
+                || format!("chunked full-attention q/gate reshape [{tile_start}, {tile_end})"),
+            )?;
             let q = q_raw
                 .narrow(3, 0, head_dim)
                 .with_context(|| {
@@ -22255,23 +22242,21 @@ fn transformer_block_detached_cuda_prefill_chunked(
                 })?
                 .contiguous()
                 .context("chunked full-attention q contiguous")?;
-            let gate = q_raw
+            let gate_split = q_raw
                 .narrow(3, head_dim, head_dim)
                 .with_context(|| {
                     format!("chunked full-attention gate split [{tile_start}, {tile_end})")
                 })?
                 .contiguous()
-                .context("chunked full-attention gate contiguous")?
-                .reshape(((), tile_len, num_heads * head_dim))
+                .context("chunked full-attention gate contiguous")?;
+            let gate = reshape_hole0_3(&gate_split, tile_len, num_heads * head_dim)
                 .context("chunked full-attention gate reshape")?;
             (q, Some(gate))
         } else {
             (
-                q_raw
-                    .reshape(((), tile_len, num_heads, head_dim))
-                    .with_context(|| {
-                        format!("chunked full-attention q reshape [{tile_start}, {tile_end})")
-                    })?,
+                reshape_hole0_4(&q_raw, tile_len, num_heads, head_dim).with_context(|| {
+                    format!("chunked full-attention q reshape [{tile_start}, {tile_end})")
+                })?,
                 None,
             )
         };
@@ -23358,6 +23343,24 @@ pub(crate) fn candle_to_kt_activation(t: &candle_core::Tensor) -> Result<Tensor>
 #[cfg(not(feature = "cuda"))]
 pub(crate) fn candle_to_kt_activation(_t: &candle_core::Tensor) -> Result<Tensor> {
     anyhow::bail!("candle_to_kt_activation requires the `cuda` feature (#1082)")
+}
+
+/// kt has no infer-from-hole reshape (candle's `((), d1, d2)`). These
+/// helpers reproduce a rank-3 / rank-4 reshape where the leading
+/// dimension is inferred from the element count, divided by the product
+/// of the explicit trailing dims (#1082 forward-flip). The inferred dim
+/// is placed in slot 0, matching every candle `reshape(((), ..))` site
+/// flipped here (all of which infer batch in position 0).
+#[inline]
+fn reshape_hole0_3(t: &Tensor, d1: usize, d2: usize) -> Result<Tensor> {
+    let n = t.element_count();
+    Ok(t.reshape((n / (d1 * d2), d1, d2))?)
+}
+
+#[inline]
+fn reshape_hole0_4(t: &Tensor, d1: usize, d2: usize, d3: usize) -> Result<Tensor> {
+    let n = t.element_count();
+    Ok(t.reshape((n / (d1 * d2 * d3), d1, d2, d3))?)
 }
 
 /// kt-typed parallel entry to [`model_forward`] (#1082 Tier 3).
