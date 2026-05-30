@@ -27251,6 +27251,34 @@ mod tests {
         Ok(dev)
     }
 
+    /// #1082 test-island host bridge (CPU). The candle-autograd parity tests
+    /// below build the value as a kt tensor (via `det_tensor`/`Tensor::*`) but
+    /// the candle `Var`/`loss.backward()` oracle needs a *candle* tensor, and
+    /// the production CUDA kt<->candle bridge is unavailable on CPU. This reads
+    /// the kt tensor's F32 values + shape on the host and rebuilds a candle CPU
+    /// tensor. Lossless for the F32 CPU parity comparisons here.
+    ///
+    /// NOTE (semantics): the forward composites these tests exercise
+    /// (`gated_rms_norm_fallback`, `gdn_chunkwise_recurrence`, …) are now kt
+    /// (#1082), so feeding the candle `Var` tensors through them no longer
+    /// records on candle's autograd graph — the candle oracle is severed by the
+    /// flip itself (see `kiln-candle-autograd-drops-attn-conv-grads`). These
+    /// tests COMPILE via this bridge but are expected to be ported to a
+    /// kt-tape / finite-diff oracle (the CP-4 long pole); they are NOT made to
+    /// falsely pass here.
+    fn kt_cpu_to_candle(t: &Tensor) -> candle_core::Tensor {
+        let dims = t.dims().to_vec();
+        let data = t
+            .to_dtype(DType::F32)
+            .expect("kt -> f32")
+            .flatten_all()
+            .expect("kt flatten")
+            .to_vec1::<f32>()
+            .expect("kt to_vec1");
+        candle_core::Tensor::from_vec(data, dims, &candle_core::Device::Cpu)
+            .expect("candle from_vec cpu")
+    }
+
     #[cfg(feature = "cuda")]
     #[test]
     fn test_cuda_sigmoid_kt_default_matches_host_formula() -> Result<()> {
@@ -31976,7 +32004,7 @@ mod tests {
                 (x * 0.5) * scale + bias
             })
             .collect();
-        Ok(Tensor::from_vec(data, shape, device)?)
+        Ok(Tensor::from_vec(data, shape)?.to_device(*device)?)
     }
 
     #[cfg(feature = "cuda")]
@@ -31998,10 +32026,15 @@ mod tests {
         let heads_kv = 2usize;
         let head_dim = 128usize;
 
-        let q = det_tensor(&[batch, seq_len, heads_q, head_dim], 0.10, 0.01, &device)?
+        // #1082: `det_tensor` builds kt tensors, but
+        // `cuda_flash_attention_training_bf16` is still candle-typed (it runs
+        // candle autograd through the FlashAttention custom-op). Build the kt
+        // inputs, then bridge them to candle (CUDA copy) so candle's `Var` +
+        // `loss.backward()` oracle is unchanged.
+        let q_kt = det_tensor(&[batch, seq_len, heads_q, head_dim], 0.10, 0.01, &device)?
             .to_dtype(DType::BF16)?
             .contiguous()?;
-        let k = det_tensor(
+        let k_kt = det_tensor(
             &[batch, seq_len, heads_kv, head_dim],
             0.12,
             -0.02,
@@ -32009,9 +32042,15 @@ mod tests {
         )?
         .to_dtype(DType::BF16)?
         .contiguous()?;
-        let v = det_tensor(&[batch, seq_len, heads_kv, head_dim], 0.09, 0.03, &device)?
+        let v_kt = det_tensor(&[batch, seq_len, heads_kv, head_dim], 0.09, 0.03, &device)?
             .to_dtype(DType::BF16)?
             .contiguous()?;
+        let q = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&q_kt)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let k = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&k_kt)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        let v = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&v_kt)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
 
         let q_var = Var::from_tensor(&q)?;
         let k_var = Var::from_tensor(&k)?;
@@ -32038,7 +32077,12 @@ mod tests {
                 .get(var.as_tensor())
                 .with_context(|| format!("missing {name} grad"))?;
             assert_eq!(grad.dims(), expected.as_slice(), "{name} grad shape");
-            let values = grad.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+            // #1082: `grad` is a candle tensor (candle autograd oracle), so use
+            // candle's DType.
+            let values = grad
+                .to_dtype(candle_core::DType::F32)?
+                .flatten_all()?
+                .to_vec1::<f32>()?;
             assert!(
                 values.iter().all(|v| v.is_finite()) && values.iter().any(|v| v.abs() > 1e-6),
                 "{name} grad should be finite and non-zero"
@@ -32172,26 +32216,40 @@ mod tests {
         let grad_exit_state = det_tensor(&[b, nv, dk, dv], 0.15, 0.04, &device)?.to_dtype(dtype)?;
         let backend = test_backend(&device);
 
-        let q_var = Var::from_tensor(&q)?;
-        let k_var = Var::from_tensor(&k)?;
-        let v_var = Var::from_tensor(&v)?;
-        let beta_var = Var::from_tensor(&beta)?;
-        let g_var = Var::from_tensor(&g)?;
-        let state_var = Var::from_tensor(&state)?;
-        let mut state_for_autograd = state_var.as_tensor().clone();
-        let out = gdn_chunkwise_recurrence(
-            &backend,
-            q_var.as_tensor(),
-            k_var.as_tensor(),
-            v_var.as_tensor(),
-            beta_var.as_tensor(),
-            g_var.as_tensor(),
-            &mut state_for_autograd,
-            chunk_size,
+        // #1082 SEMANTIC NOTE: the candle `Var` autograd oracle below is severed
+        // by the forward flip — `gdn_chunkwise_recurrence` is now kt-typed, so
+        // its forward no longer records on candle's graph. The candle leaves
+        // (`*_var`) are built from candle copies of the kt inputs and the kt
+        // forward output is bridged back to candle as a detached leaf; candle's
+        // `loss.backward()` therefore yields no q/k/v/beta/g/state grads and the
+        // `grads.get(...)?` lookups below fail at RUNTIME. This is intentional:
+        // the test COMPILES and surfaces the candle-oracle severance rather than
+        // being made to falsely pass. Porting the oracle to the kt tape /
+        // finite-diff is the CP-4 long pole (see plan + the
+        // `kiln-candle-autograd-drops-attn-conv-grads` note).
+        let q_c = kt_cpu_to_candle(&q);
+        let k_c = kt_cpu_to_candle(&k);
+        let v_c = kt_cpu_to_candle(&v);
+        let beta_c = kt_cpu_to_candle(&beta);
+        let g_c = kt_cpu_to_candle(&g);
+        let state_c = kt_cpu_to_candle(&state);
+        let upstream_c = kt_cpu_to_candle(&upstream);
+        let grad_exit_state_c = kt_cpu_to_candle(&grad_exit_state);
+        let q_var = Var::from_tensor(&q_c)?;
+        let k_var = Var::from_tensor(&k_c)?;
+        let v_var = Var::from_tensor(&v_c)?;
+        let beta_var = Var::from_tensor(&beta_c)?;
+        let g_var = Var::from_tensor(&g_c)?;
+        let state_var = Var::from_tensor(&state_c)?;
+        let mut state_for_autograd = state.clone();
+        let out_kt = gdn_chunkwise_recurrence(
+            &backend, &q, &k, &v, &beta, &g, &mut state_for_autograd, chunk_size,
         )?;
-        let out_term = (&out.to_dtype(DType::F32)? * &upstream)?.sum_all()?;
+        let out = kt_cpu_to_candle(&out_kt);
+        let state_after = kt_cpu_to_candle(&state_for_autograd);
+        let out_term = (&out.to_dtype(candle_core::DType::F32)? * &upstream_c)?.sum_all()?;
         let state_term =
-            (&state_for_autograd.to_dtype(DType::F32)? * &grad_exit_state)?.sum_all()?;
+            (&state_after.to_dtype(candle_core::DType::F32)? * &grad_exit_state_c)?.sum_all()?;
         let loss = (&out_term + &state_term)?;
         let grads = loss.backward()?;
 
@@ -32208,17 +32266,29 @@ mod tests {
             chunk_size,
         )?;
 
+        // #1082: `actual` is a kt grad (from the analytic backward), `expected`
+        // is a candle grad (from the candle autograd oracle). Compare as host
+        // f32 vectors (max-abs-diff) — no cross-type tensor subtraction.
         fn assert_grad_close(
             name: &str,
             actual: &Tensor,
-            expected: &Tensor,
+            expected: &candle_core::Tensor,
             tol: f32,
         ) -> Result<()> {
-            let diff = (actual - expected)?
-                .abs()?
+            let a = actual
+                .to_dtype(DType::F32)?
                 .flatten_all()?
-                .max(0)?
-                .flatten_all()?.to_vec1::<f32>()?[0];
+                .to_vec1::<f32>()?;
+            let e = expected
+                .to_dtype(candle_core::DType::F32)?
+                .flatten_all()?
+                .to_vec1::<f32>()?;
+            anyhow::ensure!(a.len() == e.len(), "{name} grad len mismatch {} vs {}", a.len(), e.len());
+            let diff = a
+                .iter()
+                .zip(e.iter())
+                .map(|(x, y)| (x - y).abs())
+                .fold(0.0_f32, f32::max);
             assert!(
                 diff < tol,
                 "{name} gradient diff too large: {diff} >= {tol}"
@@ -32273,12 +32343,28 @@ mod tests {
     /// Shared max-abs-diff grad comparator for the analytic-backward parity
     /// tests below (same shape as the one nested in
     /// `test_gdn_recurrent_backward_no_grad_matches_autograd_cpu`).
-    fn assert_grad_close_tol(name: &str, actual: &Tensor, expected: &Tensor, tol: f32) -> Result<()> {
-        let diff = (actual - expected)?
-            .abs()?
+    // #1082: kt analytic grad vs candle autograd-oracle grad — compare as host
+    // f32 vectors (see `assert_grad_close` note above).
+    fn assert_grad_close_tol(
+        name: &str,
+        actual: &Tensor,
+        expected: &candle_core::Tensor,
+        tol: f32,
+    ) -> Result<()> {
+        let a = actual
+            .to_dtype(DType::F32)?
             .flatten_all()?
-            .max(0)?
-            .flatten_all()?.to_vec1::<f32>()?[0];
+            .to_vec1::<f32>()?;
+        let e = expected
+            .to_dtype(candle_core::DType::F32)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+        anyhow::ensure!(a.len() == e.len(), "{name} grad len mismatch {} vs {}", a.len(), e.len());
+        let diff = a
+            .iter()
+            .zip(e.iter())
+            .map(|(x, y)| (x - y).abs())
+            .fold(0.0_f32, f32::max);
         assert!(diff < tol, "{name} gradient diff too large: {diff} >= {tol}");
         Ok(())
     }
@@ -32312,19 +32398,20 @@ mod tests {
         let weight = det_tensor(&[hidden], 0.20, 0.90, &device)?.to_dtype(dtype)?;
         let upstream = det_tensor(&[b, t, hidden], 0.25, -0.03, &device)?.to_dtype(dtype)?;
 
-        let x_var = Var::from_tensor(&x)?;
-        let z_var = Var::from_tensor(&z)?;
-        let weight_var = Var::from_tensor(&weight)?;
+        // #1082: candle oracle severed by the kt forward flip — see the SEMANTIC
+        // NOTE in test_gdn_recurrent_backward_no_grad_matches_autograd_cpu and
+        // the `kt_cpu_to_candle` helper. Compiles; runtime-fails on the absent
+        // candle grads rather than being made to falsely pass.
+        let x_var = Var::from_tensor(&kt_cpu_to_candle(&x))?;
+        let z_var = Var::from_tensor(&kt_cpu_to_candle(&z))?;
+        let weight_var = Var::from_tensor(&kt_cpu_to_candle(&weight))?;
+        let upstream_c = kt_cpu_to_candle(&upstream);
 
         // Forward via the production fallback so the gold grads exercise the
         // exact math the analytic backward claims to invert.
-        let out = gated_rms_norm_fallback(
-            x_var.as_tensor(),
-            z_var.as_tensor(),
-            weight_var.as_tensor(),
-            eps,
-        )?;
-        let loss = (&out.to_dtype(DType::F32)? * &upstream)?.sum_all()?;
+        let out_kt = gated_rms_norm_fallback(&x, &z, &weight, eps)?;
+        let out = kt_cpu_to_candle(&out_kt);
+        let loss = (&out.to_dtype(candle_core::DType::F32)? * &upstream_c)?.sum_all()?;
         let grads = loss.backward()?;
 
         let manual = gdn_gated_rms_norm_backward_no_grad(&x, &z, &weight, eps, &upstream)?;
@@ -32379,11 +32466,18 @@ mod tests {
         let x = det_tensor(&[b, heads, t, dk], 0.45, 0.06, &device)?.to_dtype(dtype)?;
         let upstream = det_tensor(&[b, heads, t, dk], 0.22, -0.04, &device)?.to_dtype(dtype)?;
 
-        let x_var = Var::from_tensor(&x)?;
+        // #1082: candle oracle severed by the kt forward flip (`l2_normalize`
+        // is kt) — see the SEMANTIC NOTE in
+        // test_gdn_recurrent_backward_no_grad_matches_autograd_cpu. Compiles;
+        // runtime-fails on the absent candle grad rather than falsely passing.
+        let x_var = Var::from_tensor(&kt_cpu_to_candle(&x))?;
+        let upstream_c = kt_cpu_to_candle(&upstream);
 
-        // Forward via the production l2_normalize + scalar scale.
-        let out = (l2_normalize(x_var.as_tensor())?.affine(scale, 0.0))?;
-        let loss = (&out.to_dtype(DType::F32)? * &upstream)?.sum_all()?;
+        // Forward via the production l2_normalize + scalar scale (kt), output
+        // bridged to candle (detached) for the oracle loss.
+        let out_kt = l2_normalize(&x)?.affine(scale, 0.0)?;
+        let out = kt_cpu_to_candle(&out_kt);
+        let loss = (&out.to_dtype(candle_core::DType::F32)? * &upstream_c)?.sum_all()?;
         let grads = loss.backward()?;
 
         let manual = gdn_l2_norm_scale_backward_no_grad(&x, scale, eps, &upstream)?;
@@ -32426,19 +32520,26 @@ mod tests {
         let gqa_ratio = nq / nkv;
         let scale = 1.0f64 / (hd as f64).sqrt();
 
-        // Head-FIRST, PRE-expand inputs (what the fallback consumes).
+        // Head-FIRST, PRE-expand inputs (what the fallback consumes). #1082:
+        // the analytic backward `sdpa_fallback_backward_no_grad` is kt-typed, so
+        // build kt inputs for it. The candle autograd ORACLE here is
+        // self-contained (inline candle ops below — NOT a kt production fn), so
+        // it stays a valid oracle; build parallel candle leaves from the same
+        // deterministic data via the host bridge.
         let q = det_tensor(&[b, nq, t, hd], 0.30, 0.02, &device)?.to_dtype(dtype)?;
         let k = det_tensor(&[b, nkv, t, hd], 0.25, -0.01, &device)?.to_dtype(dtype)?;
         let v = det_tensor(&[b, nkv, t, hd], 0.20, 0.03, &device)?.to_dtype(dtype)?;
         let upstream = det_tensor(&[b, nq, t, hd], 0.18, -0.02, &device)?.to_dtype(dtype)?;
+        let upstream_c = kt_cpu_to_candle(&upstream);
 
-        let q_var = Var::from_tensor(&q)?;
-        let k_var = Var::from_tensor(&k)?;
-        let v_var = Var::from_tensor(&v)?;
+        let q_var = Var::from_tensor(&kt_cpu_to_candle(&q))?;
+        let k_var = Var::from_tensor(&kt_cpu_to_candle(&k))?;
+        let v_var = Var::from_tensor(&kt_cpu_to_candle(&v))?;
 
         // GQA-expand k/v from nkv -> nq, EXACTLY mirroring the fallback's
-        // `unsqueeze(2).expand(...).contiguous().reshape(...)`.
-        let expand = |t_in: &Tensor| -> Result<Tensor> {
+        // `unsqueeze(2).expand(...).contiguous().reshape(...)`. (candle ops on
+        // the candle oracle leaves.)
+        let expand = |t_in: &candle_core::Tensor| -> Result<candle_core::Tensor> {
             Ok(t_in
                 .unsqueeze(2)?
                 .expand(&[b, nkv, gqa_ratio, t, hd])?
@@ -32462,18 +32563,19 @@ mod tests {
                 (0..t).map(move |j| if j <= i { 0.0f32 } else { f32::NEG_INFINITY })
             })
             .collect();
-        let mask = Tensor::new(&mask, &device)?.reshape((1, 1, t, t))?;
+        let mask = candle_core::Tensor::new(mask.as_slice(), &candle_core::Device::Cpu)?
+            .reshape((1, 1, t, t))?;
         let scores = scores.broadcast_add(&mask)?;
 
         // Numerically-stable softmax over the last axis.
-        let max_val = scores.max_keepdim(LAST_DIM)?;
+        let max_val = scores.max_keepdim(candle_core::D::Minus1)?;
         let exp_shifted = scores.broadcast_sub(&max_val)?.exp()?;
-        let sum_exp = exp_shifted.sum_keepdim(LAST_DIM)?;
+        let sum_exp = exp_shifted.sum_keepdim(candle_core::D::Minus1)?;
         let p = exp_shifted.broadcast_div(&sum_exp)?; // [b, nq, t, t]
 
         // out = p @ v.
         let out = p.contiguous()?.broadcast_matmul(&v_exp)?; // [b, nq, t, hd]
-        let loss = (&out.to_dtype(DType::F32)? * &upstream)?.sum_all()?;
+        let loss = (&out.to_dtype(candle_core::DType::F32)? * &upstream_c)?.sum_all()?;
         let grads = loss.backward()?;
 
         let manual = sdpa_fallback_backward_no_grad(&q, &k, &v, scale, true, &upstream)?;
