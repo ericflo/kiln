@@ -9086,8 +9086,12 @@ fn rotary_embedding_from_tables(
 fn residual_add(a: Tensor, b: Tensor) -> Result<Tensor> {
     #[cfg(feature = "cuda")]
     {
-        if let Some(out) = crate::tape_forward::try_tape_add_cuda(&a, &b)? {
-            return Ok(out);
+        if crate::tape_forward::tape_forward_enabled() {
+            let a_candle = kt_logits_to_candle(&a).context("residual_add kt->candle a")?;
+            let b_candle = kt_logits_to_candle(&b).context("residual_add kt->candle b")?;
+            if let Some(out) = crate::tape_forward::try_tape_add_cuda(&a_candle, &b_candle)? {
+                return candle_to_kt_activation(&out).context("residual_add candle->kt tape out");
+            }
         }
     }
     Ok((a + b)?)
@@ -9112,10 +9116,21 @@ fn apply_rope(
         // KILN_USE_TAPE_FORWARD is set and a tape scope is active. No-ops
         // (returns None) otherwise — the production fast-path below is
         // untouched in the default configuration.
-        if let Some(out) =
-            crate::tape_forward::try_tape_rope_cuda(x, cos, sin, head_dim, rotary_dim)?
-        {
-            return Ok(out);
+        if crate::tape_forward::tape_forward_enabled() {
+            let x_candle = kt_logits_to_candle(x).context("apply_rope kt->candle x (tape)")?;
+            let cos_candle =
+                kt_logits_to_candle(cos).context("apply_rope kt->candle cos (tape)")?;
+            let sin_candle =
+                kt_logits_to_candle(sin).context("apply_rope kt->candle sin (tape)")?;
+            if let Some(out) = crate::tape_forward::try_tape_rope_cuda(
+                &x_candle,
+                &cos_candle,
+                &sin_candle,
+                head_dim,
+                rotary_dim,
+            )? {
+                return candle_to_kt_activation(&out).context("apply_rope candle->kt tape out");
+            }
         }
         // #1082 forward-flip: `apply_rope` is kt-native now. The candle
         // `CudaRotaryOneBf16` CustomOp3 autograd fast-path only applies to
@@ -10985,21 +11000,27 @@ pub fn swiglu_ffn_gated_hidden(
             // gate off (the default) this returns `Ok(None)` and we
             // fall through to the existing `fused_mlp_silu_mul_kt`
             // dispatch.
-            if let Some(out) = crate::tape_forward::try_tape_swiglu_cuda(&gate, &up)
-                .context("swiglu_ffn_gated_hidden try_tape_swiglu_cuda")?
-            {
-                return Ok(out);
+            if crate::tape_forward::tape_forward_enabled() {
+                let gate_candle =
+                    kt_logits_to_candle(&gate).context("swiglu kt->candle gate (tape)")?;
+                let up_candle = kt_logits_to_candle(&up).context("swiglu kt->candle up (tape)")?;
+                if let Some(out) =
+                    crate::tape_forward::try_tape_swiglu_cuda(&gate_candle, &up_candle)
+                        .context("swiglu_ffn_gated_hidden try_tape_swiglu_cuda")?
+                {
+                    return candle_to_kt_activation(&out)
+                        .context("swiglu candle->kt tape out");
+                }
             }
             if let (Some(gate_kt), Some(up_kt)) =
                 (try_borrow_kt_cuda(&gate), try_borrow_kt_cuda(&up))
             {
                 if kiln_rmsnorm_kernel::supports_mlp_silu_mul_kt(&gate_kt, &up_kt) {
                     // Phase 7 (#1082): kt-only. Same FFI symbol as the
-                    // candle path.
+                    // candle path. Result is kt — return it directly.
                     let out_kt = kiln_rmsnorm_kernel::fused_mlp_silu_mul_kt(&gate_kt, &up_kt)
                         .map_err(|e| anyhow::anyhow!("kt fused_mlp_silu_mul: {e}"))?;
-                    return kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-                        .with_context(|| "kt-adapter: mlp_silu_mul out → candle failed");
+                    return Ok(out_kt);
                 }
             }
         }
