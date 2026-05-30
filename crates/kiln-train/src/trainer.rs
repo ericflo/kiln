@@ -15363,10 +15363,15 @@ pub(crate) mod tests {
         // still see whether a divergence is real or just BF16 noise on near-zero
         // grads; `floored_rel` is the gated metric we assert on. (#1082)
         let mut rels: Vec<(usize, f32, f32, f32)> = Vec::new();
+        // #1082 CP-4 diagnostic: which Vars lack a tape grad (with shape, to
+        // pinpoint the unchained forward branch — q/k/v/o vs gate/up/down vs GDN).
+        let mut missing: Vec<(usize, Vec<usize>)> = Vec::new();
         for (vi, v) in params.all_vars().iter().enumerate() {
             let a_grad = grads_a.candle_grad(v).expect("kt->candle grad bridge");
             if a_grad.is_some() {
                 tape_has += 1;
+            } else {
+                missing.push((vi, v.as_tensor().dims().to_vec()));
             }
             if let (Some(a), Some(c)) = (a_grad, grads_c.get(v.as_tensor())) {
                 let r = rel(&a, c);
@@ -15397,6 +15402,7 @@ pub(crate) mod tests {
             "[CP4-COVERAGE] loss rel {lrel:.4}; total_vars={total} tape_has_grad={tape_has} \
              matched_candle={compared}"
         );
+        eprintln!("[CP4-MISSING] {} vars without a tape grad (idx, shape): {missing:?}", missing.len());
 
         // CP-4 headline coverage gate: with the full-attn + GDN tape chain
         // wired, the tape-authoritative walk must route a grad to every LoRA
