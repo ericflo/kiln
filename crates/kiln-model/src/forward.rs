@@ -7729,14 +7729,16 @@ fn try_kt_embedding_lookup_from_weights(
     if crate::tape_forward::tape_forward_enabled() {
         return Ok(None);
     }
-    if !matches!(weights.embed_tokens.device(), Device::Cuda(_))
+    // #1082 forward-flip: `weights.embed_tokens` is a candle field (checked
+    // with candle types); `index` is kt (the forward-path arg).
+    if !matches!(weights.embed_tokens.device(), candle_core::Device::Cuda(_))
         || !matches!(index.device(), Device::Cuda(_))
         || !weights.embed_tokens.is_contiguous()
         || !index.is_contiguous()
         || index.dtype() != DType::U32
         || !matches!(
             weights.embed_tokens.dtype(),
-            DType::F32 | DType::BF16 | DType::F16
+            candle_core::DType::F32 | candle_core::DType::BF16 | candle_core::DType::F16
         )
     {
         return Ok(None);
@@ -7744,27 +7746,17 @@ fn try_kt_embedding_lookup_from_weights(
 
     kiln_nvtx::range!(c"kiln/embedding_kt");
 
-    // candle→kt boundary: weight side via the accessor, index side via
-    // the kt-bridge borrow.
+    // Weight side via the kt accessor; index is already kt (no borrow).
     let w_kt = match weights.embed_tokens_kt() {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    let idx_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(index) {
+    // kt-internal computation; return the kt result directly (no copy-back).
+    let out_kt = match kt_embedding_lookup_native(&w_kt, index) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    // kt-internal computation.
-    let out_kt = match kt_embedding_lookup_native(&w_kt, &idx_kt) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
-    // kt→candle boundary (gathered rows copy-out feeding the candle
-    // transformer layers).
-    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt).map_err(|e| {
-        anyhow::anyhow!("try_kt_embedding_lookup_from_weights: candle copy-back failed: {e}")
-    })?;
-    promote_cpu_activation(out).map(Some)
+    promote_cpu_activation(out_kt).map(Some)
 }
 
 fn embedding_lookup_from_weights(token_ids: &[u32], weights: &GpuWeights) -> Result<Tensor> {
