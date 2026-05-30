@@ -5047,7 +5047,8 @@ pub fn compute_rotary_inv_freq(
     let inv_freq: Vec<f32> = (0..half_rotary)
         .map(|i| 1.0 / rope_theta.powf(2.0 * i as f64 / rotary_dim as f64) as f32)
         .collect();
-    let t = Tensor::new(inv_freq.as_slice(), device)
+    // kt `new` takes `Device` by value (kt Device is Copy) (#1082).
+    let t = Tensor::new(inv_freq.as_slice(), *device)
         .context("failed to build rotary inv_freq tensor")?;
     Ok(t)
 }
@@ -6347,12 +6348,44 @@ impl LinearAttentionState {
     }
 }
 
-/// Convert a `WeightTensor` (raw bytes + shape + dtype) to a candle `Tensor` on `device`.
+/// #1082 forward-flip loader bridge: the `Gpu*Weights` fields are now
+/// `kiln_tensor::Tensor` (the bare `Tensor` alias). The loader still
+/// reads candle safetensors and builds candle tensors leaf-by-leaf, so
+/// each leaf builds a `candle_core::Tensor` and copy-bridges it into a
+/// kt tensor here. CUDA-only: the copy bridge requires a CUDA device.
+/// The non-CUDA loader device branches (Metal stub / Vulkan / CPU) are
+/// type-checked on a CUDA build but error at runtime — production is
+/// CUDA (A6000); non-CUDA loader paths are an iteration-2 concern.
+#[cfg(feature = "cuda")]
+fn candle_weight_to_kt(t: &candle_core::Tensor) -> Result<Tensor> {
+    let contig = t
+        .contiguous()
+        .context("candle_weight_to_kt: contiguous")?;
+    kiln_kt_bridge::kt_tensor_from_candle_cuda_copy(&contig)
+        .map_err(|e| anyhow::anyhow!("candle_weight_to_kt copy bridge: {e}"))
+}
+
+/// Resolve the candle device the loader builds its intermediate candle
+/// tensors on, from the kt `Device` passed through the loader. (#1082)
+#[cfg(feature = "cuda")]
+fn loader_candle_device(device: &Device) -> Result<candle_core::Device> {
+    kiln_kt_bridge::candle_device_from_kt(device).map_err(|e| anyhow::anyhow!("{e}"))
+}
+
+/// Convert a `WeightTensor` (raw bytes + shape + dtype) to a kt `Tensor` on `device`.
+/// Builds a candle tensor leaf then copy-bridges to kt (#1082 forward-flip).
+#[cfg(feature = "cuda")]
 fn weight_to_tensor(w: &WeightTensor, device: &Device) -> Result<Tensor> {
-    let dtype = weight_dtype(w);
-    let t = Tensor::from_raw_buffer(w.as_bytes(), dtype, &w.shape, device)
+    let dtype = weight_dtype_candle(w);
+    let cdev = loader_candle_device(device)?;
+    let t = candle_core::Tensor::from_raw_buffer(w.as_bytes(), dtype, &w.shape, &cdev)
         .context("failed to create tensor from raw buffer")?;
-    Ok(t)
+    candle_weight_to_kt(&t)
+}
+
+#[cfg(not(feature = "cuda"))]
+fn weight_to_tensor(_w: &WeightTensor, _device: &Device) -> Result<Tensor> {
+    anyhow::bail!("weight_to_tensor: kt loader bridge requires the `cuda` feature (#1082)")
 }
 
 fn weight_dtype(w: &WeightTensor) -> DType {
@@ -6360,6 +6393,18 @@ fn weight_dtype(w: &WeightTensor) -> DType {
         TensorDType::F16 => DType::F16,
         TensorDType::BF16 => DType::BF16,
         TensorDType::F32 => DType::F32,
+    }
+}
+
+/// candle-typed sibling of [`weight_dtype`] for the loader's candle
+/// intermediates (the `Gpu*Weights` fields are kt, but the loader still
+/// constructs candle tensors before copy-bridging). (#1082)
+#[cfg(feature = "cuda")]
+fn weight_dtype_candle(w: &WeightTensor) -> candle_core::DType {
+    match w.dtype {
+        TensorDType::F16 => candle_core::DType::F16,
+        TensorDType::BF16 => candle_core::DType::BF16,
+        TensorDType::F32 => candle_core::DType::F32,
     }
 }
 
@@ -6527,10 +6572,25 @@ pub(crate) fn transposed_weight_bytes_2d(w: &WeightTensor) -> Result<(Vec<u8>, [
     Ok((out, [cols, rows]))
 }
 
+#[cfg(feature = "cuda")]
 fn weight_to_transposed_tensor_2d(w: &WeightTensor, device: &Device) -> Result<Tensor> {
     let data = transposed_weight_bytes_2d_cached_bytes(w)?;
-    Tensor::from_raw_buffer(data.as_bytes(), weight_dtype(w), &data.shape(), device)
-        .context("failed to create transposed tensor from raw buffer")
+    let cdev = loader_candle_device(device)?;
+    let t = candle_core::Tensor::from_raw_buffer(
+        data.as_bytes(),
+        weight_dtype_candle(w),
+        &data.shape(),
+        &cdev,
+    )
+    .context("failed to create transposed tensor from raw buffer")?;
+    candle_weight_to_kt(&t)
+}
+
+#[cfg(not(feature = "cuda"))]
+fn weight_to_transposed_tensor_2d(_w: &WeightTensor, _device: &Device) -> Result<Tensor> {
+    anyhow::bail!(
+        "weight_to_transposed_tensor_2d: kt loader bridge requires the `cuda` feature (#1082)"
+    )
 }
 
 fn cached_transpose_for_weight(
@@ -6546,7 +6606,9 @@ fn cached_transpose_for_weight(
 }
 
 fn dropped_weight_stub(w: &WeightTensor, device: &Device) -> Result<Tensor> {
-    Ok(Tensor::zeros((1usize,), weight_dtype(w), device)?)
+    // kt `zeros` takes `Device` by value (kt Device is Copy) and shape as
+    // `Into<Vec<usize>>` (#1082 forward-flip).
+    Ok(Tensor::zeros(vec![1usize], weight_dtype(w), *device)?)
 }
 
 /// True when `from_model_weights` should stub the candle CPU storage
@@ -6579,9 +6641,9 @@ impl ProjectionLoadCache {
             Ok(Self {
                 drop_projection_originals,
                 drop_projection_transposes,
-                bf16_stub: Some(Tensor::zeros((1usize,), DType::BF16, device)?),
-                f16_stub: Some(Tensor::zeros((1usize,), DType::F16, device)?),
-                f32_stub: Some(Tensor::zeros((1usize,), DType::F32, device)?),
+                bf16_stub: Some(Tensor::zeros(vec![1usize], DType::BF16, *device)?),
+                f16_stub: Some(Tensor::zeros(vec![1usize], DType::F16, *device)?),
+                f32_stub: Some(Tensor::zeros(vec![1usize], DType::F32, *device)?),
             })
         } else {
             Ok(Self {
@@ -6749,9 +6811,21 @@ fn projection_tensors_for_load_batch(
         .into_par_iter()
         .zip(weights.par_iter())
         .map(|(data, (name, w))| {
-            let transposed =
-                Tensor::from_raw_buffer(data.as_bytes(), weight_dtype(w), &data.shape(), &device)
-                    .with_context(|| format!("{name} transposed projection upload"))?;
+            // Metal-only parallel path. The `Gpu*Weights` fields are kt
+            // (#1082 forward-flip), so build a candle leaf then copy-bridge.
+            // `candle_weight_to_kt` is CUDA-gated; this path is unreachable on
+            // the CUDA production build (device is never Metal) but still
+            // type-checks there. (Pure-Metal kt loader = iteration-2 concern.)
+            let cdev = loader_candle_device(&device)?;
+            let transposed_candle = candle_core::Tensor::from_raw_buffer(
+                data.as_bytes(),
+                weight_dtype_candle(w),
+                &data.shape(),
+                &cdev,
+            )
+            .with_context(|| format!("{name} transposed projection upload"))?;
+            let transposed = candle_weight_to_kt(&transposed_candle)
+                .with_context(|| format!("{name} transposed projection kt bridge"))?;
             let original_stub = match cache.stub_for(weight_dtype(w)) {
                 Some(stub) => stub,
                 None => dropped_weight_stub(w, &device)
