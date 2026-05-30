@@ -1685,10 +1685,13 @@ fn adapter_smoke_linear_state(
     weights: &GpuWeights,
     model_config: &ModelConfig,
 ) -> Result<LinearAttentionState> {
+    // (#1082) `Tensor::device()` returns an owned kt `Device` (Copy); the
+    // constructor wants `&Device`, so bind to a local and borrow.
+    let kt_device = weights.embed_tokens.device();
     LinearAttentionState::new_with_batch_for_inference_backend(
         model_config,
         1,
-        weights.embed_tokens.device(),
+        &kt_device,
         Some(backend.name()),
     )
 }
@@ -4762,7 +4765,10 @@ fn train_tokenized_grpo_group_with_grad_norms(
             // BasePerStep (None ema_ref_lora) → base model (no LoRA).
             // Ema (Some(snapshot)) → frozen snapshot of the LoRA from a
             // prior training point.
-            let ref_hidden = model_forward_no_head(
+            // (#1082) `model_forward_no_head` is kt-native; bridge its kt
+            // output (and the kt `embed_tokens_t` head weight) to candle for
+            // the candle-island `selected_log_probs_from_normed_hidden_chunked`.
+            let ref_hidden_kt = model_forward_no_head(
                 backend,
                 &comp.input_ids,
                 weights,
@@ -4771,9 +4777,16 @@ fn train_tokenized_grpo_group_with_grad_norms(
                 ema_ref_lora,
             )
             .context("GRPO reference forward pass")?;
+            let ref_hidden = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(
+                &ref_hidden_kt.contiguous().context("GRPO ref hidden contiguous")?,
+            )
+            .map_err(|e| anyhow::anyhow!("GRPO ref forward: kt->candle ref hidden: {e}"))?;
+            drop(ref_hidden_kt);
+            let ref_head_t_candle = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&weights.embed_tokens_t)
+                .map_err(|e| anyhow::anyhow!("GRPO ref forward: kt->candle head_t: {e}"))?;
             let ref_log_probs = selected_log_probs_from_normed_hidden_chunked(
                 &ref_hidden,
-                &weights.embed_tokens_t,
+                &ref_head_t_candle,
                 &comp.input_ids,
                 &comp.action_mask,
                 DEFAULT_CHUNK_SIZE,
@@ -8408,9 +8421,15 @@ fn full_attention_single_layer_tiled_mlp_reverse(
         "exact full-attention tiled MLP reverse begin"
     );
 
-    let attn_residual_value = full_attention_residual_forward(
+    // (#1082) The local `full_attention_*_forward` helpers are kt-native (take
+    // kt `x`, return kt). Bridge `seg_input` candle->kt for the call, and the
+    // kt residual value back to candle so the candle tile loop / Vars below stay
+    // a candle autograd island.
+    let seg_input_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(seg_input)
+        .map_err(|e| anyhow::anyhow!("full-attention residual: candle->kt seg_input: {e}"))?;
+    let attn_residual_value_kt = full_attention_residual_forward(
         backend,
-        seg_input,
+        &seg_input_kt,
         weights,
         model_config,
         positions,
@@ -8420,6 +8439,13 @@ fn full_attention_single_layer_tiled_mlp_reverse(
     )
     .with_context(|| format!("full-attention tiled MLP value residual layer {layer_idx}"))?
     .detach();
+    let attn_residual_value = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(
+        &attn_residual_value_kt
+            .contiguous()
+            .context("full-attention residual value contiguous")?,
+    )
+    .map_err(|e| anyhow::anyhow!("full-attention residual: kt->candle residual value: {e}"))?;
+    drop(attn_residual_value_kt);
     synchronize_checkpoint_boundary(device, || {
         format!("synchronize full-attention tiled MLP value residual layer {layer_idx}")
     })?;
@@ -8444,14 +8470,29 @@ fn full_attention_single_layer_tiled_mlp_reverse(
         let residual_tile_var = var_from_tensor(&residual_tile).with_context(|| {
             format!("full-attention MLP residual tile Var [{tile_start}, {tile_end})")
         })?;
-        let normed_tile = rms_norm(
+        // (#1082) `rms_norm`/`swiglu_ffn` are kt-native. Bridge the candle Var
+        // tensor in (candle->kt borrow), keep the kt chain through the MLP, and
+        // bridge the kt `ffn_out` back to candle for the candle residual add /
+        // `loss.backward()`. NOTE: candle autograd cannot trace LoRA grads
+        // through the kt ops (the bridge boundary is a detached candle leaf), so
+        // this legacy candle-checkpointing path is grad-severed post-flip — the
+        // tape-authoritative CUDA path is the correct grad producer.
+        let residual_tile_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(
             residual_tile_var.as_tensor(),
+        )
+        .map_err(|e| anyhow::anyhow!("full-attention MLP tile: candle->kt residual: {e}"))?;
+        let normed_tile = rms_norm(
+            &residual_tile_kt,
             &layer.post_attention_layernorm,
             model_config.rms_norm_eps,
         )
         .with_context(|| format!("full-attention MLP post norm tile [{tile_start}, {tile_end})"))?;
-        let ffn_out = swiglu_ffn(&normed_tile, &layer.mlp, layer_lora)
+        let ffn_out_kt = swiglu_ffn(&normed_tile, &layer.mlp, layer_lora)
             .with_context(|| format!("full-attention MLP tile [{tile_start}, {tile_end})"))?;
+        let ffn_out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(
+            &ffn_out_kt.contiguous().context("full-attention MLP ffn_out contiguous")?,
+        )
+        .map_err(|e| anyhow::anyhow!("full-attention MLP tile: kt->candle ffn_out: {e}"))?;
         let tile_output = (residual_tile_var.as_tensor() + ffn_out).with_context(|| {
             format!("full-attention MLP residual add tile [{tile_start}, {tile_end})")
         })?;
@@ -8510,9 +8551,10 @@ fn full_attention_single_layer_tiled_mlp_reverse(
         format!("synchronize full-attention tiled MLP value cleanup layer {layer_idx}")
     })?;
 
-    let pre_o_value = full_attention_attention_pre_o_forward(
+    // (#1082) kt-native helper: bridge `seg_input` in, kt pre-o value out->candle.
+    let pre_o_value_kt = full_attention_attention_pre_o_forward(
         backend,
-        seg_input,
+        &seg_input_kt,
         weights,
         model_config,
         positions,
@@ -8522,6 +8564,13 @@ fn full_attention_single_layer_tiled_mlp_reverse(
     )
     .with_context(|| format!("full-attention pre-o value layer {layer_idx}"))?
     .detach();
+    let pre_o_value = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(
+        &pre_o_value_kt
+            .contiguous()
+            .context("full-attention pre-o value contiguous")?,
+    )
+    .map_err(|e| anyhow::anyhow!("full-attention pre-o: kt->candle pre-o value: {e}"))?;
+    drop(pre_o_value_kt);
     synchronize_checkpoint_boundary(device, || {
         format!("synchronize full-attention pre-o value layer {layer_idx}")
     })?;
@@ -8544,9 +8593,16 @@ fn full_attention_single_layer_tiled_mlp_reverse(
         let pre_o_tile_var = var_from_tensor(&pre_o_tile).with_context(|| {
             format!("full-attention o-proj pre-o tile Var [{tile_start}, {tile_end})")
         })?;
-        let out_proj_tile = gqa_attention_output_projection(
-            backend,
+        // (#1082) `gqa_attention_output_projection` is kt-native. Bridge the
+        // candle Var in and its kt output back to candle for the candle shim /
+        // `loss.backward()`.
+        let pre_o_tile_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(
             pre_o_tile_var.as_tensor(),
+        )
+        .map_err(|e| anyhow::anyhow!("full-attention o-proj: candle->kt pre-o tile: {e}"))?;
+        let out_proj_tile_kt = gqa_attention_output_projection(
+            backend,
+            &pre_o_tile_kt,
             attn_weights,
             false,
             layer_lora,
@@ -8554,6 +8610,13 @@ fn full_attention_single_layer_tiled_mlp_reverse(
         .with_context(|| {
             format!("full-attention o-proj forward tile [{tile_start}, {tile_end})")
         })?;
+        let out_proj_tile = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(
+            &out_proj_tile_kt
+                .contiguous()
+                .context("full-attention o-proj tile contiguous")?,
+        )
+        .map_err(|e| anyhow::anyhow!("full-attention o-proj: kt->candle out_proj tile: {e}"))?;
+        drop(out_proj_tile_kt);
         let injected = kiln_kt_bridge::inject_grad_shim::inject_gradient_via_shim(
             &out_proj_tile,
             &upstream_tile,
@@ -8607,7 +8670,10 @@ fn full_attention_single_layer_tiled_mlp_reverse(
     })?;
 
     let total_tiles = total_tokens.div_ceil(tile_size);
-    let normed_value = rms_norm(seg_input, &layer.input_layernorm, model_config.rms_norm_eps)
+    // (#1082) `rms_norm` / `gqa_attention_kv_prefill` are kt-native; keep
+    // `normed_value` / `k_value` / `v_value` kt (bridge to candle only at the
+    // candle `var_from_tensor` seams below).
+    let normed_value = rms_norm(&seg_input_kt, &layer.input_layernorm, model_config.rms_norm_eps)
         .with_context(|| format!("full-attention core value norm layer {layer_idx}"))?
         .detach();
     let (k_value, v_value) = gqa_attention_kv_prefill(
@@ -8657,34 +8723,60 @@ fn full_attention_single_layer_tiled_mlp_reverse(
             detached_layer_lora,
         )
         .with_context(|| format!("full-attention Q/Gate value tile [{tile_start}, {tile_end})"))?;
-        let k_prefix = k_value
+        // (#1082) `q_value`/`gate_value`/`k_value`/`v_value` are kt. The
+        // candle-autograd recompute below builds candle `Var`s, so bridge each
+        // kt forward value to candle for `var_from_tensor`.
+        let k_prefix_kt = k_value
             .narrow(1, 0, tile_end)
             .with_context(|| format!("full-attention K prefix tile {tile_idx}"))?
             .detach();
-        let v_prefix = v_value
+        let v_prefix_kt = v_value
             .narrow(1, 0, tile_end)
             .with_context(|| format!("full-attention V prefix tile {tile_idx}"))?
             .detach();
-        let q_var = var_from_tensor(&q_value.detach())
+        let q_cd = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(
+            &q_value.detach().contiguous().context("full-attention q contiguous")?,
+        )
+        .map_err(|e| anyhow::anyhow!("full-attention core: kt->candle q: {e}"))?;
+        let k_cd = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(
+            &k_prefix_kt.contiguous().context("full-attention k prefix contiguous")?,
+        )
+        .map_err(|e| anyhow::anyhow!("full-attention core: kt->candle k prefix: {e}"))?;
+        let v_cd = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(
+            &v_prefix_kt.contiguous().context("full-attention v prefix contiguous")?,
+        )
+        .map_err(|e| anyhow::anyhow!("full-attention core: kt->candle v prefix: {e}"))?;
+        let q_var = var_from_tensor(&q_cd)
             .with_context(|| format!("full-attention q Var tile [{tile_start}, {tile_end})"))?;
-        let k_var = var_from_tensor(&k_prefix).with_context(|| {
+        let k_var = var_from_tensor(&k_cd).with_context(|| {
             format!("full-attention k Var prefix [0, {tile_end}) tile {tile_idx}")
         })?;
-        let v_var = var_from_tensor(&v_prefix).with_context(|| {
+        let v_var = var_from_tensor(&v_cd).with_context(|| {
             format!("full-attention v Var prefix [0, {tile_end}) tile {tile_idx}")
         })?;
         let gate_var = gate_value
             .as_ref()
-            .map(|gate| {
-                var_from_tensor(&gate.detach()).with_context(|| {
+            .map(|gate| -> Result<Var> {
+                let gate_cd = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(
+                    &gate
+                        .detach()
+                        .contiguous()
+                        .context("full-attention gate contiguous")?,
+                )
+                .map_err(|e| anyhow::anyhow!("full-attention core: kt->candle gate: {e}"))?;
+                var_from_tensor(&gate_cd).with_context(|| {
                     format!("full-attention gate Var tile [{tile_start}, {tile_end})")
                 })
             })
             .transpose()?;
+        // Bridge the candle Var tensors back to kt for the kt-native core op.
         let prepared_vars = GqaAttentionPrepared {
-            q: q_var.as_tensor().clone(),
-            k: k_var.as_tensor().clone(),
-            v: v_var.as_tensor().clone(),
+            q: kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(q_var.as_tensor())
+                .map_err(|e| anyhow::anyhow!("full-attention core: candle->kt q var: {e}"))?,
+            k: kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(k_var.as_tensor())
+                .map_err(|e| anyhow::anyhow!("full-attention core: candle->kt k var: {e}"))?,
+            v: kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v_var.as_tensor())
+                .map_err(|e| anyhow::anyhow!("full-attention core: candle->kt v var: {e}"))?,
             gate: None,
         };
         let attn_core = gqa_attention_core_prefill(
@@ -8695,11 +8787,22 @@ fn full_attention_single_layer_tiled_mlp_reverse(
             model_config.head_dim,
         )
         .with_context(|| format!("full-attention core recompute tile {tile_idx}"))?;
-        let pre_o = gqa_attention_apply_output_gate(
-            attn_core,
-            gate_var.as_ref().map(|gate| gate.as_tensor()),
+        // Bridge the candle gate Var to kt for the kt-native output gate op.
+        let gate_kt = gate_var
+            .as_ref()
+            .map(|gate| {
+                kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(gate.as_tensor())
+                    .map_err(|e| anyhow::anyhow!("full-attention core: candle->kt gate var: {e}"))
+            })
+            .transpose()?;
+        let pre_o_kt = gqa_attention_apply_output_gate(attn_core, gate_kt.as_ref())
+            .with_context(|| format!("full-attention output gate recompute tile {tile_idx}"))?;
+        // Bridge kt `pre_o` -> candle for the candle shim / `loss.backward()`.
+        let pre_o = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(
+            &pre_o_kt.contiguous().context("full-attention pre_o contiguous")?,
         )
-        .with_context(|| format!("full-attention output gate recompute tile {tile_idx}"))?;
+        .map_err(|e| anyhow::anyhow!("full-attention core: kt->candle pre_o: {e}"))?;
+        drop(pre_o_kt);
         let pre_o_grad_tile = pre_o_grad_cpu
             .narrow(1, tile_start, tile_len)
             .with_context(|| {
@@ -8789,13 +8892,15 @@ fn full_attention_single_layer_tiled_mlp_reverse(
         drop(injected);
         drop(pre_o);
         drop(prepared_vars);
+        // `gate_kt` borrows `gate_var`; drop the borrow before the Var.
+        drop(gate_kt);
         drop(gate_var);
         drop(v_var);
         drop(k_var);
         drop(q_var);
         drop(gate_value);
-        drop(v_prefix);
-        drop(k_prefix);
+        drop(v_prefix_kt);
+        drop(k_prefix_kt);
         drop(normed_tile);
         synchronize_checkpoint_boundary(device, || {
             format!("synchronize full-attention core backward tile {tile_idx}")
@@ -8826,15 +8931,23 @@ fn full_attention_single_layer_tiled_mlp_reverse(
             let seg_input_var = var_from_tensor(&seg_input_tile).with_context(|| {
                 format!("full-attention q/gate input Var tile [{tile_start}, {tile_end})")
             })?;
+            // (#1082) `rms_norm` / `gqa_attention_q_gate_prefill` are kt-native:
+            // bridge the candle Var in, keep the kt chain, bridge the kt q/gate
+            // outputs back to candle for the candle injection shim.
+            let seg_input_tile_kt =
+                kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(seg_input_var.as_tensor())
+                    .map_err(|e| {
+                        anyhow::anyhow!("full-attention q/gate: candle->kt seg input: {e}")
+                    })?;
             let normed_tile = rms_norm(
-                seg_input_var.as_tensor(),
+                &seg_input_tile_kt,
                 &layer.input_layernorm,
                 model_config.rms_norm_eps,
             )
             .with_context(|| {
                 format!("full-attention q/gate norm tile [{tile_start}, {tile_end})")
             })?;
-            let (q, gate) = gqa_attention_q_gate_prefill(
+            let (q_kt, gate_kt) = gqa_attention_q_gate_prefill(
                 backend,
                 &normed_tile,
                 attn_weights,
@@ -8850,6 +8963,19 @@ fn full_attention_single_layer_tiled_mlp_reverse(
             .with_context(|| {
                 format!("full-attention q/gate prepare tile [{tile_start}, {tile_end})")
             })?;
+            let q = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(
+                &q_kt.contiguous().context("full-attention q contiguous")?,
+            )
+            .map_err(|e| anyhow::anyhow!("full-attention q/gate: kt->candle q: {e}"))?;
+            let gate = gate_kt
+                .as_ref()
+                .map(|g| {
+                    kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(
+                        &g.contiguous().context("full-attention gate contiguous")?,
+                    )
+                    .map_err(|e| anyhow::anyhow!("full-attention q/gate: kt->candle gate: {e}"))
+                })
+                .transpose()?;
             let mut inject_terms = Vec::with_capacity(2);
             if let Some(q_grad_cpu) = q_grad_tiles_cpu[tile_idx].as_ref() {
                 inject_terms.push(
@@ -8911,13 +9037,18 @@ fn full_attention_single_layer_tiled_mlp_reverse(
             let seg_input_var = var_from_tensor(&seg_input_tile).with_context(|| {
                 format!("full-attention k/v input Var tile [{tile_start}, {tile_end})")
             })?;
+            // (#1082) kt-native `rms_norm` / `gqa_attention_kv_prefill`: bridge
+            // candle Var in, bridge kt k/v outputs back to candle for the shim.
+            let seg_input_tile_kt =
+                kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(seg_input_var.as_tensor())
+                    .map_err(|e| anyhow::anyhow!("full-attention k/v: candle->kt seg input: {e}"))?;
             let normed_tile = rms_norm(
-                seg_input_var.as_tensor(),
+                &seg_input_tile_kt,
                 &layer.input_layernorm,
                 model_config.rms_norm_eps,
             )
             .with_context(|| format!("full-attention k/v norm tile [{tile_start}, {tile_end})"))?;
-            let (k, v) = gqa_attention_kv_prefill(
+            let (k_kt, v_kt) = gqa_attention_kv_prefill(
                 backend,
                 &normed_tile,
                 attn_weights,
@@ -8932,6 +9063,14 @@ fn full_attention_single_layer_tiled_mlp_reverse(
             .with_context(|| {
                 format!("full-attention k/v prepare tile [{tile_start}, {tile_end})")
             })?;
+            let k = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(
+                &k_kt.contiguous().context("full-attention k contiguous")?,
+            )
+            .map_err(|e| anyhow::anyhow!("full-attention k/v: kt->candle k: {e}"))?;
+            let v = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(
+                &v_kt.contiguous().context("full-attention v contiguous")?,
+            )
+            .map_err(|e| anyhow::anyhow!("full-attention k/v: kt->candle v: {e}"))?;
             let mut inject_terms = Vec::with_capacity(2);
             if let Some(k_grad_cpu) = k_grad_tiles_cpu[tile_idx].as_ref() {
                 inject_terms.push(
