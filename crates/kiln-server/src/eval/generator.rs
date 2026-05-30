@@ -182,7 +182,7 @@ impl EvalGenerator for LiveEvalGenerator {
                         let device_cd = kiln_kt_bridge::candle_device_from_kt(&device)
                             .map_err(|e| format!("loading adapter `{name}`: {e}"))?;
                         let lora =
-                            kiln_model::lora_loader::LoraWeights::load(&path, num_layers, &device_cd)
+                            kiln_model::lora_loader::LoraWeights::load(&path, num_layers, device_cd)
                                 .map_err(|e| format!("loading adapter `{name}`: {e}"))?;
                         runner.write().unwrap().swap_lora(Some(lora));
                     }

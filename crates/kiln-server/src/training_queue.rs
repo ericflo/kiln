@@ -969,7 +969,7 @@ fn build_multi_tenant_merge_teacher(
                 kiln_model::lora_loader::LoraWeights::load(
                     &src_dir,
                     model_config.num_layers,
-                    &device_cd,
+                    device_cd,
                 )
             }) {
             Ok(weights) => Some(weights),
@@ -2523,7 +2523,7 @@ fn auto_load_adapter(
     // #1082: bridge kt `device` -> candle for LoraWeights::load.
     let device_cd = kiln_kt_bridge::candle_device_from_kt(&device)
         .map_err(|e| format!("adapter device bridge: {e}"))?;
-    let lora = LoraWeights::load(adapter_path, num_layers, &device_cd)
+    let lora = LoraWeights::load(adapter_path, num_layers, device_cd)
         .map_err(|e| format!("failed to load adapter: {e}"))?;
 
     {

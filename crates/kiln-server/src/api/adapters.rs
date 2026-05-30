@@ -247,7 +247,7 @@ async fn load_adapter(
         // #1082: `device` is kt now (from kt `GpuWeights`); LoraWeights::load
         // wants candle — bridge kt->candle.
         let device_cd = kiln_kt_bridge::candle_device_from_kt(&device).map_err(|e| format!("{e}"))?;
-        let lora = LoraWeights::load(&path, num_layers, &device_cd).map_err(|e| format!("{e}"))?;
+        let lora = LoraWeights::load(&path, num_layers, device_cd).map_err(|e| format!("{e}"))?;
         // Brief write lock to swap the adapter in.
         let mut guard = runner.write().unwrap();
         guard.swap_lora(Some(lora));
