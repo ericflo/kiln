@@ -13946,7 +13946,25 @@ fn gdn_chunkwise_recurrence(
             let stage_profile = start_gdn_recurrent_inner_profile(device, profile_inner)?;
             let out_opt = {
                 kiln_nvtx::range!(c"kiln/attn/gdn/recurrent");
-                backend.gdn_recurrent_step(&q1, &k1, &v1, &beta1, &g1, state)?
+                // #1082: `gdn_recurrent_step` is candle-typed and mutates state
+                // in place; bridge kt in/out and write the candle state back.
+                let q_c = kt_logits_to_candle(&q1).context("gdn step kt->candle q1")?;
+                let k_c = kt_logits_to_candle(&k1).context("gdn step kt->candle k1")?;
+                let v_c = kt_logits_to_candle(&v1).context("gdn step kt->candle v1")?;
+                let beta_c = kt_logits_to_candle(&beta1).context("gdn step kt->candle beta1")?;
+                let g_cc = kt_logits_to_candle(&g1).context("gdn step kt->candle g1")?;
+                let mut state_c =
+                    kt_logits_to_candle(state).context("gdn step kt->candle state")?;
+                let out = backend
+                    .gdn_recurrent_step(&q_c, &k_c, &v_c, &beta_c, &g_cc, &mut state_c)?;
+                *state = candle_to_kt_activation(&state_c)
+                    .context("gdn step candle->kt state write-back")?;
+                match out {
+                    Some(o) => Some(
+                        candle_to_kt_activation(&o).context("gdn step candle->kt out")?,
+                    ),
+                    None => None,
+                }
             };
             finish_gdn_recurrent_inner_profile(
                 device,
