@@ -11118,7 +11118,8 @@ pub(crate) fn tape_authoritative_enabled() -> bool {
 /// trains F32 correctly. Production (Qwen3.5-4B) is BF16 → kt path.
 #[cfg(feature = "cuda")]
 fn base_dtype_supports_tape(weights: &GpuWeights) -> bool {
-    matches!(weights.embed_tokens.dtype(), DType::BF16)
+    // (#1082) `embed_tokens.dtype()` is now kt `DType`.
+    matches!(weights.embed_tokens.dtype(), kiln_tensor::DType::BF16)
 }
 
 /// Tape-authoritative SFT forward/backward (#1082 CP-4 endgame).
