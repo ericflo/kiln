@@ -18,7 +18,13 @@ pub mod lora_loader;
 pub mod marlin_proj;
 pub mod mtp_debug;
 pub mod packed_weight_registry;
-#[cfg(feature = "cuda")]
+// (#1082 all-hardware) `paged_kv_cache_kt` compiles on every backend now: the
+// struct, metadata accessors, and `new`/`new_with_fp8` constructors are
+// available everywhere (CPU-resident pools on the Vulkan/CPU build), while the
+// CUDA-kernel write/read methods stay `#[cfg(feature = "cuda")]` inside the
+// module. This is required because `forward.rs`/`generate.rs`/`cuda_graph.rs`/
+// `speculative.rs`/`vk_decode_resident.rs` thread `&PagedKvCacheKt` through
+// signatures that are NOT cuda-gated.
 pub mod paged_kv_cache_kt;
 pub mod quantized;
 pub mod qwen35_shapes;
@@ -51,7 +57,6 @@ pub use generate::{
 pub use kv_cache::KvCache;
 pub use loader::{LoadModelOptions, load_model, load_model_with_options};
 pub use lora_loader::LoraWeights;
-#[cfg(feature = "cuda")]
 pub use paged_kv_cache_kt::PagedKvCacheKt;
 pub use speculative::SpeculativeConfig;
 pub use weights::ModelWeights;

@@ -1370,15 +1370,17 @@ pub fn seed_vk_kv_cache_layer_blocks_from_legacy(
         let slot_start = bid * block_size;
         let k_block = k_tensor.narrow(0, slot_start, block_size)?.contiguous()?;
         let v_block = v_tensor.narrow(0, slot_start, block_size)?.contiguous()?;
-        let k_block_f32 = if k_block.dtype() == candle_core::DType::F32 {
+        // #1082: `pool_tensors` now hands back `kiln_tensor::Tensor` (kt), so
+        // compare/convert against kt's `DType`, not candle's.
+        let k_block_f32 = if k_block.dtype() == kiln_tensor::DType::F32 {
             k_block.flatten_all()?
         } else {
-            k_block.to_dtype(candle_core::DType::F32)?.flatten_all()?
+            k_block.to_dtype(kiln_tensor::DType::F32)?.flatten_all()?
         };
-        let v_block_f32 = if v_block.dtype() == candle_core::DType::F32 {
+        let v_block_f32 = if v_block.dtype() == kiln_tensor::DType::F32 {
             v_block.flatten_all()?
         } else {
-            v_block.to_dtype(candle_core::DType::F32)?.flatten_all()?
+            v_block.to_dtype(kiln_tensor::DType::F32)?.flatten_all()?
         };
         let k_data: Vec<f32> = k_block_f32.to_vec1()?;
         let v_data: Vec<f32> = v_block_f32.to_vec1()?;
@@ -1401,15 +1403,16 @@ pub fn seed_vk_kv_cache_layer_from_legacy(
     let (k_tensor, v_tensor) = paged_cache
         .pool_tensors(layer_idx)
         .ok_or_else(|| anyhow::anyhow!("legacy paged_cache layer {layer_idx} out of range"))?;
-    let k_flat = if k_tensor.dtype() == candle_core::DType::F32 {
+    // #1082: kt pool tensors — compare/convert against kt's `DType`.
+    let k_flat = if k_tensor.dtype() == kiln_tensor::DType::F32 {
         k_tensor.flatten_all()?
     } else {
-        k_tensor.to_dtype(candle_core::DType::F32)?.flatten_all()?
+        k_tensor.to_dtype(kiln_tensor::DType::F32)?.flatten_all()?
     };
-    let v_flat = if v_tensor.dtype() == candle_core::DType::F32 {
+    let v_flat = if v_tensor.dtype() == kiln_tensor::DType::F32 {
         v_tensor.flatten_all()?
     } else {
-        v_tensor.to_dtype(candle_core::DType::F32)?.flatten_all()?
+        v_tensor.to_dtype(kiln_tensor::DType::F32)?.flatten_all()?
     };
     let k_data: Vec<f32> = k_flat.to_vec1()?;
     let v_data: Vec<f32> = v_flat.to_vec1()?;

@@ -2033,18 +2033,30 @@ fn try_kt_paged_kv_read(
     Ok((k, v))
 }
 
-/// Non-CUDA twin of [`try_kt_paged_kv_read`]: the paged cache is the kt
-/// `PagedKvCacheKt` on every build (the candle module was deleted), so
-/// `read` already hands back kt tensors — no bridge needed.
+/// Non-CUDA twin of [`try_kt_paged_kv_read`].
+///
+/// (#1082 all-hardware) `PagedKvCacheKt::read` is a CUDA-kernel method
+/// (`cuda_index_select_dim0` gather + `cuda_fp8_dequantize_direct`) and is
+/// therefore `#[cfg(feature = "cuda")]`. The only caller of this twin is the
+/// generic CPU-paged attention fallback in
+/// [`gqa_attention_paged_with_rope_tables`], which is *never reached at
+/// runtime* on the Vulkan backend — Vulkan decode goes through the
+/// single-submit resident path (`model_forward_paged_last_token_resident_native_vk`)
+/// that keeps its KV in `kiln_vulkan_kernel::VkPagedKvCache` and only seeds
+/// from `PagedKvCacheKt::pool_tensors`. So this twin compiles (keeping
+/// `--features vulkan` green) but bails with a clear error if some future
+/// path ever does dispatch the generic fallback on a non-CUDA build.
 #[cfg(not(feature = "cuda"))]
 fn try_kt_paged_kv_read(
-    candle_cache: &PagedKvCache,
-    layer_idx: usize,
-    block_table: &BlockTable,
-    seq_len: usize,
+    _candle_cache: &PagedKvCache,
+    _layer_idx: usize,
+    _block_table: &BlockTable,
+    _seq_len: usize,
 ) -> Result<(Tensor, Tensor)> {
-    let (k, v) = candle_cache.read(layer_idx, block_table, seq_len)?;
-    Ok((k, v))
+    anyhow::bail!(
+        "generic paged-KV cache read is CUDA-only; the Vulkan backend uses the \
+         resident-decode path (VkPagedKvCache), not PagedKvCacheKt::read"
+    )
 }
 
 /// Phase 7 opt-in: route the Vulkan `linear_prefill_apply` 2D matmul
@@ -19133,14 +19145,31 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
         if !kv_write_done {
             // #1082: `PagedKvCacheKt::write_token_major_native_batch` takes kt
             // tensors; `k`/`v` are already kt, so pass them with no candle bridge.
-            if !paged_cache.write_token_major_native_batch(
-                full_attn_layer_idx,
-                block_tables,
-                start_positions,
-                &k,
-                &v,
-            )? {
-                anyhow::bail!("batched contiguous paged attention KV write declined");
+            // (#1082 all-hardware) The native batch writer is a CUDA-kernel
+            // method (`paged_kv_write_token_major_bf16_batch_slot_kt` / `slice_set`)
+            // and is `#[cfg(feature = "cuda")]`. The Vulkan backend never reaches
+            // this generic batched-contiguous path at runtime (it uses the
+            // resident-decode `VkPagedKvCache` path), so the non-CUDA arm bails
+            // explicitly rather than mis-writing.
+            #[cfg(feature = "cuda")]
+            {
+                if !paged_cache.write_token_major_native_batch(
+                    full_attn_layer_idx,
+                    block_tables,
+                    start_positions,
+                    &k,
+                    &v,
+                )? {
+                    anyhow::bail!("batched contiguous paged attention KV write declined");
+                }
+            }
+            #[cfg(not(feature = "cuda"))]
+            {
+                let _ = (&paged_cache, full_attn_layer_idx, block_tables, start_positions, &k, &v);
+                anyhow::bail!(
+                    "batched contiguous paged-KV write is CUDA-only; the Vulkan backend \
+                     uses the resident-decode path (VkPagedKvCache), not PagedKvCacheKt"
+                );
             }
         }
         finish_full_attn_stage_profile(
@@ -19834,22 +19863,48 @@ fn gqa_attention_paged_with_rope_tables(
                 // #1082: `PagedKvCacheKt` write methods take kt tensors; the
                 // token-major / head-major K/V are already kt, so pass them
                 // through with no candle bridge.
-                if !paged_cache.write_token_major_native(
-                    full_attn_layer_idx,
-                    block_table,
-                    start_pos,
-                    &k_cache_token_major,
-                    &v_cache_token_major,
-                )? {
-                    paged_cache
-                        .write(
-                            full_attn_layer_idx,
-                            block_table,
-                            start_pos,
-                            &k_head,
-                            &v_head,
-                        )
-                        .context("paged KV cache write failed")?;
+                // (#1082 all-hardware) `write_token_major_native` / `write` are
+                // CUDA-kernel methods (`#[cfg(feature = "cuda")]`). The Vulkan
+                // backend never reaches this generic prefill/decode fallback at
+                // runtime — it dispatches the single-submit resident path
+                // (`model_forward_paged_last_token_resident_native_vk`) which
+                // owns KV in `VkPagedKvCache`. The non-CUDA arm bails.
+                #[cfg(feature = "cuda")]
+                {
+                    if !paged_cache.write_token_major_native(
+                        full_attn_layer_idx,
+                        block_table,
+                        start_pos,
+                        &k_cache_token_major,
+                        &v_cache_token_major,
+                    )? {
+                        paged_cache
+                            .write(
+                                full_attn_layer_idx,
+                                block_table,
+                                start_pos,
+                                &k_head,
+                                &v_head,
+                            )
+                            .context("paged KV cache write failed")?;
+                    }
+                }
+                #[cfg(not(feature = "cuda"))]
+                {
+                    let _ = (
+                        &paged_cache,
+                        full_attn_layer_idx,
+                        block_table,
+                        start_pos,
+                        &k_cache_token_major,
+                        &v_cache_token_major,
+                        &k_head,
+                        &v_head,
+                    );
+                    anyhow::bail!(
+                        "generic paged-KV write is CUDA-only; the Vulkan backend uses the \
+                         resident-decode path (VkPagedKvCache), not PagedKvCacheKt::write*"
+                    );
                 }
             }
             finish_full_attn_stage_profile(
@@ -19972,24 +20027,45 @@ fn gqa_attention_paged_with_rope_tables(
             // #1082: `PagedKvCacheKt` write methods take kt tensors;
             // `k_cache_token_major`/`v_cache_token_major` are already kt, so
             // pass them through with no candle bridge.
-            if !paged_cache.write_token_major_native(
-                full_attn_layer_idx,
-                block_table,
-                start_pos,
-                &k_cache_token_major,
-                &v_cache_token_major,
-            )? {
-                let k_head = k_cache_token_major.transpose(1, 2)?.contiguous()?;
-                let v_head = v_cache_token_major.transpose(1, 2)?.contiguous()?;
-                paged_cache
-                    .write(
-                        full_attn_layer_idx,
-                        block_table,
-                        start_pos,
-                        &k_head,
-                        &v_head,
-                    )
-                    .context("paged KV cache write failed")?;
+            // (#1082 all-hardware) CUDA-kernel writers; the Vulkan backend uses
+            // the resident-decode path (`VkPagedKvCache`) and never reaches this
+            // generic fallback, so the non-CUDA arm bails.
+            #[cfg(feature = "cuda")]
+            {
+                if !paged_cache.write_token_major_native(
+                    full_attn_layer_idx,
+                    block_table,
+                    start_pos,
+                    &k_cache_token_major,
+                    &v_cache_token_major,
+                )? {
+                    let k_head = k_cache_token_major.transpose(1, 2)?.contiguous()?;
+                    let v_head = v_cache_token_major.transpose(1, 2)?.contiguous()?;
+                    paged_cache
+                        .write(
+                            full_attn_layer_idx,
+                            block_table,
+                            start_pos,
+                            &k_head,
+                            &v_head,
+                        )
+                        .context("paged KV cache write failed")?;
+                }
+            }
+            #[cfg(not(feature = "cuda"))]
+            {
+                let _ = (
+                    &paged_cache,
+                    full_attn_layer_idx,
+                    block_table,
+                    start_pos,
+                    &k_cache_token_major,
+                    &v_cache_token_major,
+                );
+                anyhow::bail!(
+                    "generic paged-KV write is CUDA-only; the Vulkan backend uses the \
+                     resident-decode path (VkPagedKvCache), not PagedKvCacheKt::write*"
+                );
             }
         }
         finish_full_attn_stage_profile(

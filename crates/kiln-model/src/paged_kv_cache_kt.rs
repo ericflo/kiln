@@ -30,7 +30,34 @@
 //! - FP8 storage uses `DType::U8` (caller dequantizes)
 //! - `block_size` / `num_blocks` / `is_fp8` / `compute_dtype` accessors
 
-#![cfg(feature = "cuda")]
+// #1082 candle-drop / all-hardware: this module is available on every
+// build, NOT just `--features cuda`. The struct, the metadata accessors
+// (`block_size`/`num_blocks`/`num_layers`/`is_fp8`/`compute_dtype`/
+// `pool_tensors`/`contiguous_slot_run_starts`), and the `new`/`new_with_fp8`
+// constructors compile on all backends so the `&PagedKvCacheKt` type that
+// `forward.rs`/`generate.rs`/`cuda_graph.rs`/`speculative.rs`/
+// `vk_decode_resident.rs` thread through their (un-gated) signatures resolves
+// everywhere. The Vulkan resident-decode path reads `block_size()`/
+// `num_blocks()`/`pool_tensors()` off this type (the actual KV bytes live in
+// `kiln_vulkan_kernel::VkPagedKvCache`), mirroring how the deleted candle
+// `PagedKvCache` held CPU-resident tensors for the Vulkan backend.
+//
+// The KV **write/read kernel methods** (`write*`, `read`,
+// `write_token_major_native*`, `write_contiguous_slot_run`) are
+// fundamentally CUDA constructs: they scatter via the
+// `kiln_flash_attn::paged_kv_write_token_major_bf16*_kt` device kernels,
+// gather via `cuda_index_select_dim0`, quantize via `cuda_fp8_*_direct`, and
+// mutate the Arc-shared pool storage in place via `slice_set` (which kt only
+// implements for CUDA — see `kiln_tensor::Tensor::slice_set`, "CUDA only: kt
+// storage is Arc-shared with no RwLock, so a safe CPU in-place write isn't
+// expressible here"). They are therefore `#[cfg(feature = "cuda")]`. On the
+// Vulkan/CPU build the generic CPU-paged attention fallback that would have
+// called them is never reached at runtime (the resident-decode path runs
+// instead); the un-cuda call sites in `forward.rs` are gated to bail with a
+// clear error rather than silently mis-write.
+use anyhow::Result;
+#[cfg(feature = "cuda")]
+use anyhow::Context;
 
 // #1082: cudarc imported directly instead of through
 // candle_core::cuda_backend::cudarc::*. The candle re-export is a pure
@@ -41,14 +68,18 @@
 // surface takes a `device_index: usize` instead of an
 // `Arc<candle_core::cuda_backend::CudaDevice>` — allocation routes through
 // `cuda_zeros_ctx(device_index, ..)` — so this file carries no candle import.
-use anyhow::{Context, Result};
+#[cfg(feature = "cuda")]
 use cudarc::driver::result as cudarc_result;
 
-use kiln_core::block::{contiguous_slot_run_start, contiguous_slot_run_starts, BlockTable};
+use kiln_core::block::BlockTable;
+#[cfg(feature = "cuda")]
+use kiln_core::block::contiguous_slot_run_start;
+use kiln_core::block::contiguous_slot_run_starts;
+#[cfg(feature = "cuda")]
 use kiln_tensor::{
     cuda_fp8_dequantize_direct, cuda_fp8_quantize_direct, cuda_zeros_ctx, CudaStorage,
-    DType as KtDType, Layout, Tensor as KtTensor, TensorId,
 };
+use kiln_tensor::{DType as KtDType, Layout, Tensor as KtTensor, TensorId};
 
 /// Paged KV cache backed by `kiln_tensor::Tensor`. Twin of
 /// the deleted candle `PagedKvCache` (#1082 candle-drop).
@@ -124,23 +155,39 @@ impl PagedKvCacheKt {
         let shape = vec![total_slots, num_kv_heads, head_dim];
 
         let mut layers = Vec::with_capacity(num_full_attn_layers);
-        for i in 0..num_full_attn_layers {
-            let k_storage = cuda_zeros_ctx(device_index, storage_dtype, n_elements)
-                .with_context(|| format!("kt paged-kv: alloc k_pool layer {i}"))?;
-            let v_storage = cuda_zeros_ctx(device_index, storage_dtype, n_elements)
-                .with_context(|| format!("kt paged-kv: alloc v_pool layer {i}"))?;
-            let k = KtTensor::from_parts(
-                k_storage,
-                Layout::contiguous(shape.clone()),
-                TensorId::next(),
-            )
-            .with_context(|| format!("kt paged-kv: wrap k_pool layer {i}"))?;
-            let v = KtTensor::from_parts(
-                v_storage,
-                Layout::contiguous(shape.clone()),
-                TensorId::next(),
-            )
-            .with_context(|| format!("kt paged-kv: wrap v_pool layer {i}"))?;
+        for _i in 0..num_full_attn_layers {
+            // #1082 all-hardware: CUDA allocates the pools on the selected
+            // device via `cuda_zeros_ctx`; the Vulkan/CPU build allocates
+            // host-resident kt pools via `Tensor::zeros_cpu` — exactly what
+            // the deleted candle cache did for the Vulkan backend (it held
+            // CPU candle tensors). `device_index` is unused on the CPU path.
+            #[cfg(feature = "cuda")]
+            let (k, v) = {
+                let k_storage = cuda_zeros_ctx(device_index, storage_dtype, n_elements)
+                    .with_context(|| format!("kt paged-kv: alloc k_pool layer {_i}"))?;
+                let v_storage = cuda_zeros_ctx(device_index, storage_dtype, n_elements)
+                    .with_context(|| format!("kt paged-kv: alloc v_pool layer {_i}"))?;
+                let k = KtTensor::from_parts(
+                    k_storage,
+                    Layout::contiguous(shape.clone()),
+                    TensorId::next(),
+                )
+                .with_context(|| format!("kt paged-kv: wrap k_pool layer {_i}"))?;
+                let v = KtTensor::from_parts(
+                    v_storage,
+                    Layout::contiguous(shape.clone()),
+                    TensorId::next(),
+                )
+                .with_context(|| format!("kt paged-kv: wrap v_pool layer {_i}"))?;
+                (k, v)
+            };
+            #[cfg(not(feature = "cuda"))]
+            let (k, v) = {
+                let _ = (device_index, n_elements);
+                let k = KtTensor::zeros_cpu(shape.clone(), storage_dtype);
+                let v = KtTensor::zeros_cpu(shape.clone(), storage_dtype);
+                (k, v)
+            };
             layers.push((k, v));
         }
         let fp8_scales = vec![(1.0_f32, 1.0_f32); num_full_attn_layers];
@@ -224,6 +271,7 @@ impl PagedKvCacheKt {
     /// This is NOT capturable under a CUDA graph (the D2H read forces a
     /// sync), so FP8 caches must run with graph capture disabled — the
     /// same constraint the candle path imposed by declining FP8 here.
+    #[cfg(feature = "cuda")]
     pub fn write_token_major_native_graph_slot(
         &self,
         layer_idx: usize,
@@ -300,6 +348,7 @@ impl PagedKvCacheKt {
     /// kernel needed. The destination pool's storage is mutated
     /// in place via the raw device pointer (same idiom as the
     /// kt-API kernel crates).
+    #[cfg(feature = "cuda")]
     pub fn write_contiguous_slot_run(
         &self,
         layer_idx: usize,
@@ -480,6 +529,7 @@ impl PagedKvCacheKt {
     ///   candle, plus one `cuda_index_select_dim0` per pool, plus
     ///   the same transpose+contiguous+unsqueeze tail as the fast
     ///   path.
+    #[cfg(feature = "cuda")]
     pub fn read(
         &self,
         layer_idx: usize,
@@ -595,6 +645,7 @@ impl PagedKvCacheKt {
     /// Host-slot variant: writes a single decode token at a host-known
     /// slot index. Mirrors the host-slot (`new_len == 1`) path of
     /// [`Self::write_token_major_native`].
+    #[cfg(feature = "cuda")]
     pub fn write_token_major_native_single(
         &self,
         layer_idx: usize,
@@ -624,6 +675,7 @@ impl PagedKvCacheKt {
     /// `[new_len, num_kv_heads, head_dim]` block is `slice_set` into the
     /// pool — as one contiguous run when the block table resolves to a
     /// contiguous slot range, else row-by-row.
+    #[cfg(feature = "cuda")]
     pub fn write_token_major_native(
         &self,
         layer_idx: usize,
@@ -728,6 +780,7 @@ impl PagedKvCacheKt {
     /// is squeezed to `[1, 1, num_kv_heads, head_dim]` and handed to
     /// [`Self::write_token_major_native`], which uses the BF16 host-slot
     /// CUDA kernel.
+    #[cfg(feature = "cuda")]
     pub fn write_token_major_native_batch(
         &self,
         layer_idx: usize,
@@ -806,6 +859,7 @@ impl PagedKvCacheKt {
     /// which writes a contiguous `[batch, num_kv_heads, head_dim]` block —
     /// so the seq_len=1 dim is squeezed before dispatch (the kernel's
     /// `element_count == batch * kv_heads * head_dim` check is then exact).
+    #[cfg(feature = "cuda")]
     pub fn write_token_major_native_batch_graph_slot(
         &self,
         layer_idx: usize,
@@ -859,6 +913,7 @@ impl PagedKvCacheKt {
     /// on `self.fp8`. The head-major input is transposed to token-major
     /// `[new_len, num_kv_heads, head_dim]` before the per-slot writes,
     /// matching the candle reshape exactly.
+    #[cfg(feature = "cuda")]
     pub fn write(
         &self,
         layer_idx: usize,
@@ -874,6 +929,7 @@ impl PagedKvCacheKt {
         }
     }
 
+    #[cfg(feature = "cuda")]
     fn write_native(
         &self,
         layer_idx: usize,
@@ -950,6 +1006,7 @@ impl PagedKvCacheKt {
         Ok(())
     }
 
+    #[cfg(feature = "cuda")]
     fn write_fp8(
         &self,
         layer_idx: usize,
@@ -1042,6 +1099,7 @@ impl PagedKvCacheKt {
     /// `[1, num_kv_heads, new_len, head_dim]` -> contiguous
     /// `[new_len, num_kv_heads, head_dim]` for both k and v. Shared by the
     /// multi-token `write_native` / `write_fp8` paths.
+    #[cfg(feature = "cuda")]
     fn head_major_to_token_major(
         &self,
         k: &KtTensor,
