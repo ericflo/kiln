@@ -1679,21 +1679,24 @@ pub fn try_kt_paged_kv_cache_new(
         return Ok(None);
     }
 
-    let cuda_dev_ref = match device {
-        Device::Cuda(d) => d,
+    // #1082 forward-flip: `device`/`dtype` are kt types now. Bridge the kt
+    // CUDA device to a candle `Arc<CudaDevice>` (PagedKvCacheKt::new still
+    // takes a candle device handle), and read the index straight off the kt
+    // device enum.
+    let device_index = match device {
+        Device::Cuda(idx) => *idx,
         _ => return Ok(None),
     };
-    // Type inferred as `Arc<CudaDevice>` — no need to spell out the
-    // full candle `cuda_backend::CudaDevice` path. (#1082)
-    let cuda_device_arc = Arc::new(cuda_dev_ref.clone());
-    let device_index = match cuda_device_arc.location() {
-        DeviceLocation::Cuda { gpu_id } => gpu_id,
+    let candle_device =
+        kiln_kt_bridge::candle_device_from_kt(device).map_err(|e| anyhow::anyhow!("{e}"))?;
+    let cuda_device_arc = match candle_device {
+        candle_core::Device::Cuda(cuda_dev) => Arc::new(cuda_dev),
         other => anyhow::bail!(
-            "try_kt_paged_kv_cache_new: expected Cuda location, got {other:?}"
+            "try_kt_paged_kv_cache_new: expected Cuda candle device, got {other:?}"
         ),
     };
-    let kt_dtype = kiln_kt_bridge::candle_dtype_to_kt(dtype)
-        .map_err(|e| anyhow::anyhow!("try_kt_paged_kv_cache_new: dtype map: {e}"))?;
+    // `dtype` is already a kt DType — no candle→kt conversion needed.
+    let kt_dtype = dtype;
 
     let cache = crate::paged_kv_cache_kt::PagedKvCacheKt::new(
         num_full_attn_layers,
@@ -2339,9 +2342,15 @@ fn synchronize_for_profile(device: &Device) -> Result<()> {
     // enqueue cost rather than execution cost. Call the device-level
     // synchronize for any async backend (CUDA, Metal); CPU is already
     // synchronous so the match-and-skip there avoids the extra call.
+    // #1082 forward-flip: `device` is a kt `Device`, which has no
+    // `synchronize`. Bridge to a candle device for the (profiling-only) sync.
     match device {
         Device::Cpu => Ok(()),
-        Device::Cuda(_) | Device::Metal(_) => device.synchronize().map_err(Into::into),
+        Device::Cuda(_) | Device::Metal(_) => {
+            let candle_device = kiln_kt_bridge::candle_device_from_kt(device)
+                .map_err(|e| anyhow::anyhow!("synchronize_for_profile: {e}"))?;
+            candle_device.synchronize().map_err(Into::into)
+        }
     }
 }
 
