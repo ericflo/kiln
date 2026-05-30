@@ -13243,13 +13243,12 @@ fn gdn_qk_norm_forward(
                     // conv1d (2ebcfb08), marlin (0841c266), GDN (86c7f134),
                     // flash-attn (9ac211e9). Bit-exact: bottoms out in the
                     // same `kiln_fused_l2_qk_norm` FFI symbol.
-                    let (q_out_kt, k_out_kt) =
+                    // #1082: keep the fused L2-QK-norm output as kt — this fn
+                    // returns kt and the fallback below is kt, so the candle
+                    // copy-out is gone.
+                    let (q_out, k_out) =
                         kiln_rmsnorm_kernel::fused_l2_qk_norm_kt(&q_kt, &k_kt, scale as f32, 1e-6)
                             .map_err(|e| anyhow::anyhow!("kt fused_l2_qk_norm: {e}"))?;
-                    let q_out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&q_out_kt)
-                        .with_context(|| "kt-adapter: l2_qk_norm q_out → candle failed")?;
-                    let k_out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&k_out_kt)
-                        .with_context(|| "kt-adapter: l2_qk_norm k_out → candle failed")?;
                     return Ok((q_out, k_out));
                 }
             }
@@ -21414,23 +21413,12 @@ fn gqa_attention_paged_with_rope_tables(
                                 .map_err(|e| {
                                     anyhow::anyhow!("kt attn_decode_qkv_prep: {e}")
                                 })?;
-                            let q = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&q_kt)
-                                .with_context(|| {
-                                    "kt-adapter: attn qkv_prep q → candle failed"
-                                })?;
-                            let k = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&k_kt)
-                                .with_context(|| {
-                                    "kt-adapter: attn qkv_prep k → candle failed"
-                                })?;
-                            let gate = match gate_kt {
-                                Some(gate_kt) => Some(
-                                    kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&gate_kt)
-                                        .with_context(|| {
-                                            "kt-adapter: attn qkv_prep gate → candle failed"
-                                        })?,
-                                ),
-                                None => None,
-                            };
+                            // #1082: keep the fused qkv-prep outputs as kt — the
+                            // `fused_qkv_prep` consumer and the else-branch below are
+                            // kt, so the candle copy-out is gone.
+                            let q = q_kt;
+                            let k = k_kt;
+                            let gate = gate_kt;
                             finish_full_attn_stage_profile(
                                 profile_device,
                                 profile_context,

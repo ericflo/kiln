@@ -2577,9 +2577,10 @@ impl ModelRunner {
                     if let Some(cancel) = cancel {
                         cancel.report_prefill_tokens_completed(prefill_tokens.len() as u64);
                     }
-                    logits
+                    // #1082: kt logits -> candle for the candle sampler below.
+                    crate::forward::kt_logits_to_candle(&logits)?
                 } else {
-                    model_forward_paged_streaming_with_progress(
+                    let logits = model_forward_paged_streaming_with_progress(
                         &*self.backend,
                         prefill_tokens,
                         &self.weights,
@@ -2591,7 +2592,9 @@ impl ModelRunner {
                         self.active_lora.as_ref(),
                         cancel,
                     )
-                    .context("batched-engine prefill forward pass (streaming) failed")?
+                    .context("batched-engine prefill forward pass (streaming) failed")?;
+                    // #1082: kt logits -> candle for the candle sampler below.
+                    crate::forward::kt_logits_to_candle(&logits)?
                 }
             } else if let Some(split_pos) = split_pos {
                 // Split the prefill at the last block boundary so we can
@@ -6103,6 +6106,9 @@ impl ModelRunner {
                 .context("prefill forward pass (paged) failed")?
             }
         };
+        // #1082: forward returns kt logits; bridge to candle for the
+        // candle-typed `stream_decode_from_prefill_logits` sampler entry.
+        let logits = crate::forward::kt_logits_to_candle(&logits)?;
 
         self.stream_decode_from_prefill_logits(
             logits,

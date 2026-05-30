@@ -2235,25 +2235,26 @@ impl BackwardOp for GdnRecurrentBackward {
 /// gate is off, the inputs aren't CUDA, or a kt borrow fails.
 pub fn try_tape_gdn_recurrent_cuda(
     backend: &dyn BackendRuntime,
-    q: &Tensor,
-    k: &Tensor,
-    v: &Tensor,
-    beta: &Tensor,
-    g: &Tensor,
-    recurrent_state: &mut Tensor,
+    q: &kiln_tensor::Tensor,
+    k: &kiln_tensor::Tensor,
+    v: &kiln_tensor::Tensor,
+    beta: &kiln_tensor::Tensor,
+    g: &kiln_tensor::Tensor,
+    recurrent_state: &mut kiln_tensor::Tensor,
 ) -> Result<Option<Tensor>> {
     if !tape_forward_enabled() || !tape_gdn_enabled() {
         return Ok(None);
     }
-    // #1082: q is kt now, so `.device()` is a kt Device.
+    // #1082: q/k/v/beta/g/recurrent_state are kt (this calls the kt
+    // production recurrence `gdn_recurrent_forward_from_parts`). The
+    // `tape_record_gdn_recurrent` BackwardOp adapter is candle-typed, so the
+    // bridge to candle happens just before the record call.
     if !matches!(q.device(), kiln_tensor::Device::Cuda(_)) {
         return Ok(None);
     }
 
     // Snapshot the entry state BEFORE the forward mutates it (the backward
     // needs it), and the device for backend reconstruction in `apply`.
-    // `tape_record_gdn_recurrent` is a candle-typed BackwardOp adapter
-    // island, so bridge the kt device to candle once here (#1082).
     let entry_state = recurrent_state.clone();
     let device = kiln_kt_bridge::candle_device_from_kt(&q.device())
         .context("tape gdn recurrent: kt device -> candle device")?;
@@ -2262,12 +2263,29 @@ pub fn try_tape_gdn_recurrent_cuda(
     // `gdn_recurrent_forward_from_parts` returns the recurrence output in
     // head-FIRST `[B, nv, T, dv]` layout (the short-seq chunkwise path),
     // hence `head_last = false` below.
-    let out = gdn_recurrent_forward_from_parts(backend, q, k, v, beta, g, recurrent_state)?;
+    let out_kt =
+        gdn_recurrent_forward_from_parts(backend, q, k, v, beta, g, recurrent_state)?;
 
-    // Record the node (no-op unless a tape scope is active). The forward
-    // already ran above, so this only records the backward and registers
-    // the IO mappings.
-    tape_record_gdn_recurrent(&out, false, q, k, v, beta, g, &entry_state, &device)?;
+    // Record the node (no-op unless a tape scope is active). The candle-typed
+    // adapter takes candle tensors, so bridge the kt forward output + saved
+    // inputs to candle for the record call (#1082).
+    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+        .context("tape gdn recurrent: out kt -> candle")?;
+    let q_c = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(q)
+        .context("tape gdn recurrent: q kt -> candle")?;
+    let k_c = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(k)
+        .context("tape gdn recurrent: k kt -> candle")?;
+    let v_c = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(v)
+        .context("tape gdn recurrent: v kt -> candle")?;
+    let beta_c = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(beta)
+        .context("tape gdn recurrent: beta kt -> candle")?;
+    let g_c = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(g)
+        .context("tape gdn recurrent: g kt -> candle")?;
+    let entry_state_c = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&entry_state)
+        .context("tape gdn recurrent: entry_state kt -> candle")?;
+    tape_record_gdn_recurrent(
+        &out, false, &q_c, &k_c, &v_c, &beta_c, &g_c, &entry_state_c, &device,
+    )?;
 
     Ok(Some(out))
 }
