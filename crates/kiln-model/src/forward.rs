@@ -7698,7 +7698,10 @@ impl GpuWeights {
 
         if projection_load_cache.drops_projection_originals() && matches!(device, Device::Metal(_))
         {
-            device
+            // #1082: `device` is now `kiln_tensor::Device` (no `synchronize`);
+            // bridge to candle for the Metal queue sync (candle Device has it).
+            kiln_kt_bridge::candle_device_from_kt(device)
+                .map_err(|e| anyhow::anyhow!("{e}"))?
                 .synchronize()
                 .context("synchronize after dropping Metal projection originals")?;
             tracing::info!("Metal projection original buffer cache swept after load");
@@ -7736,9 +7739,10 @@ impl GpuWeights {
         config: &kiln_core::config::ModelConfig,
         device: &kiln_tensor::Device,
     ) -> Result<Self> {
-        let candle_device =
-            kiln_kt_bridge::candle_device_from_kt(device).map_err(|e| anyhow::anyhow!("{e}"))?;
-        Self::from_model_weights(weights, config, &candle_device)
+        // #1082: post-flip `from_model_weights` already takes a kt `Device`
+        // and bridges to candle internally where needed, so this kt entry is
+        // now a straight passthrough (kept for the kiln-server call site).
+        Self::from_model_weights(weights, config, device)
     }
 }
 
@@ -10887,15 +10891,12 @@ impl CustomOp3 for CudaRotaryOneBf16 {
             BackpropOp::none(),
             false,
         );
-        let out = apply_rope(&x, &cos, &sin, self.head_dim, self.rotary_dim).map_err(|e| {
-            Error::Msg(format!("CudaRotaryOneBf16 CPU fallback: {e:?}"))
-        })?;
-        let (storage, layout) = out.storage_and_layout();
-        let storage = storage.try_clone(layout)?;
-        match storage {
-            Storage::Cpu(storage) => Ok((storage, Shape::from(l_x.dims().to_vec()))),
-            _ => bail!("CudaRotaryOneBf16 CPU fallback produced non-CPU storage"),
-        }
+        // #1082: `apply_rope` is now kt-native (CUDA/BF16) and there is no
+        // candle↔kt CPU storage bridge, so this candle CPU fallback for the
+        // CUDA-only `CudaRotaryOneBf16` op cannot reuse it. The op only runs
+        // on CUDA (`cuda_fwd`); the CPU fallback is unreachable in production.
+        let _ = (&x, &cos, &sin, &l_x);
+        bail!("CudaRotaryOneBf16: CPU fallback unsupported (#1082: CUDA-only rotary op)")
     }
 
     fn cuda_fwd(
@@ -20224,7 +20225,7 @@ fn try_flash_attn_paged_decode(
             lora_scale,
         )?
     };
-    finish_full_attn_stage_profile(q.device(), profile_context, "o_proj", q_len, stage_profile)?;
+    finish_full_attn_stage_profile(&q.device(), profile_context, "o_proj", q_len, stage_profile)?;
     let _ = crate::mtp_debug::capture_subop("post_o_proj", &out);
     Ok(Some(out))
 }
