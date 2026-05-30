@@ -2315,6 +2315,15 @@ pub fn sft_train(
                                 opt_state.as_mut(),
                             )?;
                         }
+                        // Without the cuda feature `tape_ckpt` is a `false`
+                        // const so this arm is unreachable; the diverging body
+                        // tells the borrow checker `loss_val` is still assigned
+                        // on every reachable path (the cuda block above is
+                        // cfg'd out, leaving this arm otherwise empty).
+                        #[cfg(not(feature = "cuda"))]
+                        {
+                            unreachable!("tape_ckpt is always false without the cuda feature");
+                        }
                     } else {
                         // Gradient-checkpointed forward/backward (candle GradMap)
                         let (lv, accumulated_grads) = checkpointed_forward_backward(
@@ -16034,6 +16043,159 @@ pub(crate) mod tests {
             tape_has >= 50,
             "CP-4 GRPO kt: expected >=50 LoRA Vars in the kt GradStore (full coverage of the \
              wired full-attn + GDN chain), got {tape_has}"
+        );
+    }
+
+    /// CP-4 (#1082) task #4: the kt-tape gradient-checkpointing producer
+    /// (`checkpointed_forward_backward_tape_authoritative_kt`) must deliver the
+    /// SAME LoRA grads as the validated monolithic tape producer
+    /// (`standard_forward_backward_tape_authoritative_kt`). Gradient
+    /// checkpointing is purely a memory optimisation — it re-runs each layer
+    /// segment under its own tape and chains the segment-input grad — so the
+    /// LoRA Var grads must match the whole-forward tape walk (modulo BF16
+    /// recompute noise). This is the correctness gate for the checkpointing
+    /// port that replaced the flip-severed candle checkpointed reverse.
+    ///
+    /// Run under `cargo nextest` for per-process env isolation (the tape gates
+    /// are OnceLock-cached).
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn checkpointed_tape_grads_match_monolithic_tape_bf16() {
+        let device = match candle_core::Device::new_cuda(0) {
+            Ok(d) => d,
+            Err(_) => {
+                eprintln!("ckpt-kt vs monolithic parity (bf16): no CUDA device — skipping");
+                return;
+            }
+        };
+        let config = tiny_config_bf16();
+        let weights = tiny_weights_bf16(&config, &device).expect("bf16 tiny weights on cuda");
+        let params =
+            TrainableLoraParams::initialize(&config, &weights, 4, 8.0, &device).expect("params");
+        let input_ids: Vec<u32> = vec![1, 5, 10, 3, 7, 2, 8];
+        let label_mask = vec![false, false, true, true, true, true, false];
+        let backend = backend::for_device(&device);
+
+        // Same tape gates as the monolithic CP-4 parity test so both producers
+        // record the full wired chain. (OnceLock-cached → run under nextest.)
+        unsafe {
+            std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
+            std::env::set_var("KILN_USE_TAPE_LORA_ADD", "1");
+            std::env::set_var("KILN_USE_TAPE_FLASH_ATTN", "1");
+            std::env::set_var("KILN_USE_TAPE_SDPA", "1");
+            std::env::set_var("KILN_USE_TAPE_GDN", "1");
+            std::env::set_var("KILN_USE_TAPE_GDN_GATED_NORM", "1");
+            std::env::set_var("KILN_USE_TAPE_GDN_QK_NORM", "1");
+            std::env::set_var("KILN_USE_TAPE_GDN_CONV", "1");
+            std::env::set_var("KILN_USE_TAPE_AUTHORITATIVE", "1");
+        }
+
+        // Reference: monolithic (whole-forward) kt tape.
+        let (loss_mono, grads_mono) = standard_forward_backward_tape_authoritative_kt(
+            &*backend,
+            &input_ids,
+            &weights,
+            &config,
+            &params,
+            &label_mask,
+            &device,
+            None,
+        )
+        .expect("monolithic kt-tape step");
+
+        // Under test: gradient-checkpointed kt tape (2 segments over all layers).
+        let segments = compute_segment_boundaries(config.num_layers, 2);
+        let (loss_ckpt, grads_ckpt) = checkpointed_forward_backward_tape_authoritative_kt(
+            &*backend,
+            &input_ids,
+            &weights,
+            &config,
+            &params,
+            &label_mask,
+            &segments,
+            &device,
+            None,
+        )
+        .expect("checkpointed kt-tape step");
+
+        unsafe {
+            std::env::set_var("KILN_USE_TAPE_AUTHORITATIVE", "0");
+        }
+
+        // Relative error with an additive floor (BF16 near-zero-grad noise).
+        let rel_kt = |a: &kiln_tensor::Tensor, c: &kiln_tensor::Tensor| -> f32 {
+            let af = a
+                .to_dtype(kiln_tensor::DType::F32)
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap();
+            let cf = c
+                .to_dtype(kiln_tensor::DType::F32)
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap();
+            let mut d = 0f32;
+            let mut m = 0f32;
+            for (x, y) in af.iter().zip(cf.iter()) {
+                d = d.max((x - y).abs());
+                m = m.max(y.abs());
+            }
+            d / m.max(0.05)
+        };
+
+        let var_keys: Vec<KtTensorId> = params
+            .all_vars()
+            .iter()
+            .map(|v| cd_tensor_id_to_kt(v.as_tensor().id()))
+            .collect();
+        let mut compared = 0usize;
+        let mut max_rel = 0f32;
+        let mut max_idx = 0usize;
+        for (i, key) in var_keys.iter().enumerate() {
+            match (grads_mono.get(*key), grads_ckpt.get(*key)) {
+                (Some(gm), Some(gc)) => {
+                    let r = rel_kt(gm, gc);
+                    if r > max_rel {
+                        max_rel = r;
+                        max_idx = i;
+                    }
+                    compared += 1;
+                }
+                (Some(_), None) => panic!(
+                    "checkpointed kt-tape is MISSING a grad for LoRA Var[{i}] that the monolithic \
+                     tape produced — the segment chain dropped it"
+                ),
+                (None, Some(_)) => panic!(
+                    "checkpointed kt-tape produced a grad for LoRA Var[{i}] that the monolithic \
+                     tape did not"
+                ),
+                (None, None) => {}
+            }
+        }
+        eprintln!(
+            "[CKPT-KT] compared {compared} LoRA Vars; mono cov {} ckpt cov {}; loss mono {loss_mono:.6} \
+             ckpt {loss_ckpt:.6}; max grad rel {max_rel:.4} @ var[{max_idx}]",
+            grads_mono.len(),
+            grads_ckpt.len(),
+        );
+        assert!(compared > 0, "no LoRA Vars compared (both grad stores empty)");
+        assert_eq!(
+            grads_ckpt.len(),
+            grads_mono.len(),
+            "checkpointed kt-tape coverage {} != monolithic {} — the segmented walk reached a \
+             different set of Vars",
+            grads_ckpt.len(),
+            grads_mono.len(),
+        );
+        assert!(
+            max_rel < 0.05,
+            "checkpointed-vs-monolithic kt-tape grad rel {max_rel:.4} @ var[{max_idx}] exceeds the \
+             0.05 floored tolerance — the checkpointing port does not reproduce the whole-forward \
+             tape grads"
         );
     }
 
