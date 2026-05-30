@@ -27524,7 +27524,12 @@ mod tests {
     /// Tests all run on `Device::Cpu`, so the `CpuBackend` (all kernel methods
     /// return `Ok(None)`) is the right dispatch target.
     fn test_backend(device: &Device) -> CpuBackend {
-        CpuBackend::new(device.clone())
+        // #1082: `device` is now a kt `Device`; `CpuBackend::new` still takes a
+        // candle `Device` (it caches both forms). Bridge kt→candle. On CPU this
+        // is a trivial mapping.
+        let candle_device = kiln_kt_bridge::candle_device_from_kt(device)
+            .expect("kt→candle device bridge for test_backend");
+        CpuBackend::new(candle_device)
     }
 
     #[derive(Debug)]
@@ -27631,8 +27636,12 @@ mod tests {
         let x = Tensor::from_vec(vec![1.0f32, 2.0], (1, 1, 2))?.to_device(device)?;
         let weight_t = Tensor::zeros((2, 3), DType::F32, &device)?;
         let lora = LoraProjectionWeights {
-            a: Tensor::from_vec(vec![3.0f32, 4.0], (1, 2))?.to_device(device)?,
-            b: Tensor::from_vec(vec![5.0f32, 6.0, 7.0], (3, 1))?.to_device(device)?,
+            // #1082: `LoraProjectionWeights.{a,b}` stay candle-typed (production
+            // struct); build kt then bridge kt→candle (CPU F32, lossless).
+            a: kt_cpu_to_candle(&Tensor::from_vec(vec![3.0f32, 4.0], (1, 2))?.to_device(device)?),
+            b: kt_cpu_to_candle(
+                &Tensor::from_vec(vec![5.0f32, 6.0, 7.0], (3, 1))?.to_device(device)?,
+            ),
         };
         let backend = FixedLinearBackend {
             device: device.clone(),
@@ -27689,8 +27698,13 @@ mod tests {
         };
         let lora_layer = LoraLayerWeights {
             down_proj: Some(LoraProjectionWeights {
-                a: Tensor::from_vec(vec![1.0f32, 0.0], (1, 2))?.to_device(device)?,
-                b: Tensor::from_vec(vec![2.0f32, 4.0], (2, 1))?.to_device(device)?,
+                // #1082: candle-typed LoRA fields; bridge kt→candle (CPU F32).
+                a: kt_cpu_to_candle(
+                    &Tensor::from_vec(vec![1.0f32, 0.0], (1, 2))?.to_device(device)?,
+                ),
+                b: kt_cpu_to_candle(
+                    &Tensor::from_vec(vec![2.0f32, 4.0], (2, 1))?.to_device(device)?,
+                ),
             }),
             ..Default::default()
         };
@@ -27756,8 +27770,13 @@ mod tests {
         };
         let lora_layer = LoraLayerWeights {
             q_proj: Some(LoraProjectionWeights {
-                a: Tensor::from_vec(vec![1.0f32, 0.0], (1, 2))?.to_device(device)?,
-                b: Tensor::from_vec(vec![2.0f32, 4.0], (2, 1))?.to_device(device)?,
+                // #1082: candle-typed LoRA fields; bridge kt→candle (CPU F32).
+                a: kt_cpu_to_candle(
+                    &Tensor::from_vec(vec![1.0f32, 0.0], (1, 2))?.to_device(device)?,
+                ),
+                b: kt_cpu_to_candle(
+                    &Tensor::from_vec(vec![2.0f32, 4.0], (2, 1))?.to_device(device)?,
+                ),
             }),
             ..Default::default()
         };
@@ -32074,7 +32093,9 @@ mod tests {
         .context("CUDA FlashAttention training path declined supported GQA shape")?;
         assert_eq!(out.dims(), &[batch, seq_len, heads_q, head_dim]);
 
-        let loss = out.to_dtype(DType::F32)?.sum_all()?;
+        // #1082: `out` is candle (FlashAttention training path returns candle for
+        // the candle-autograd oracle); use candle's DType.
+        let loss = out.to_dtype(candle_core::DType::F32)?.sum_all()?;
         let grads = loss.backward()?;
         for (name, var, expected) in [
             ("q", &q_var, [batch, seq_len, heads_q, head_dim]),
@@ -34455,7 +34476,10 @@ mod tests {
             "last-token prefill max_abs_diff={max_abs:e} exceeds 1e-5"
         );
 
-        let expected_token = crate::sampling::greedy_sample(&last_logits)?;
+        // #1082: `last_logits` is kt (model output); `greedy_sample` is
+        // candle-typed. Bridge kt→candle (CPU F32, lossless — argmax is
+        // identical) so the greedy comparison still pins the same token.
+        let expected_token = crate::sampling::greedy_sample(&kt_cpu_to_candle(&last_logits))?;
         let (mut greedy_cache, greedy_bt) = make_paged_setup(&config, total, 64, &device)?;
         let mut greedy_state = LinearAttentionState::new(&config, &device)?;
         let greedy_token = model_forward_paged_last_token_greedy(
@@ -35209,26 +35233,40 @@ mod tests {
             let cos = Tensor::from_vec(raw_cos, (seq_len, half))?.to_device(device)?;
             let sin = Tensor::from_vec(raw_sin, (seq_len, half))?.to_device(device)?;
 
+            // #1082: `g`/`cos`/`sin` are kt; the candle shim entry points
+            // (`supports_rotary_one_bwd_bf16`, `rotary_one_bwd_bf16`) and the
+            // kt-bridge entry (`fused_rotary_one_backward_via_kt_bridge`) all
+            // take candle tensors. Bridge kt→candle once (CUDA copy) — the
+            // SAME candle inputs feed both parity paths, so the bit-exactness
+            // contract is preserved.
+            let g_c = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&g)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let cos_c = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&cos)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            let sin_c = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&sin)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+
             assert!(
-                crate::rmsnorm_candle_shim::supports_rotary_one_bwd_bf16(&g, &cos, &sin, head_dim, rotary_dim),
+                crate::rmsnorm_candle_shim::supports_rotary_one_bwd_bf16(&g_c, &cos_c, &sin_c, head_dim, rotary_dim),
                 "supports check failed on {label}"
             );
 
             // Path A: candle-typed body (existing).
             let gx_candle = crate::rmsnorm_candle_shim::rotary_one_bwd_bf16(
-                &g, &cos, &sin, head_dim, rotary_dim,
+                &g_c, &cos_c, &sin_c, head_dim, rotary_dim,
             )
             .expect("candle rotary_one_bwd should succeed");
 
             // Path B: kt-bridge body (new).
-            let gx_bridge = fused_rotary_one_backward_via_kt_bridge(&g, &cos, &sin, rotary_dim)
+            let gx_bridge = fused_rotary_one_backward_via_kt_bridge(&g_c, &cos_c, &sin_c, rotary_dim)
                 .expect("kt-bridge rotary_one_bwd should succeed");
 
             synchronize_for_profile(&device)?;
 
-            // Compare in f32 to keep the diff math precise.
-            let a = gx_candle.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
-            let b = gx_bridge.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+            // Compare in f32 to keep the diff math precise. `gx_candle`/`gx_bridge`
+            // are candle tensors → candle DType.
+            let a = gx_candle.to_dtype(candle_core::DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+            let b = gx_bridge.to_dtype(candle_core::DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
             assert_eq!(a.len(), b.len(), "shape mismatch on {label}");
             let mut max_diff: f32 = 0.0;
             for (x, y) in a.iter().zip(b.iter()) {

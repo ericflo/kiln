@@ -6601,6 +6601,12 @@ impl ModelRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // #1082: `generate.rs` itself names no `Tensor`/`DType` (it operates on
+    // `GpuWeights`/op return values), so `use super::*` brings neither into the
+    // test module. `tiny_weights` builds the kt-typed `GpuWeights` fields with
+    // the candle-shaped kt constructor façade (`Tensor::randn`/`zeros`/`ones`
+    // accepting a kt `&Device`), so import the kt forms explicitly.
+    use kiln_tensor::{DType, Tensor};
 
     /// Create a tiny model config for testing.
     ///
