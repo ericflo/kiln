@@ -166,6 +166,18 @@ fn broadcast_to_shape(x: &Tensor, target: &[usize]) -> Result<Tensor> {
         padded_shape.extend_from_slice(cur);
         x.reshape(padded_shape)?
     };
+    // #1082: kt's `broadcast_to` op requires a contiguous input (candle's
+    // `broadcast_as` was lenient and accepted strided/transposed views). Restore
+    // candle-compat by contiguifying here — an O(1) shared-clone when already
+    // contiguous, a device-correct `cuda_contiguous` (no host roundtrip) on
+    // CUDA — mirroring the elementwise / cast / cat façade contiguify documented
+    // below. Without this, broadcasting a non-contiguous intermediate (e.g. a
+    // transposed tensor in the GDN recurrence backward) bails.
+    let padded = if padded.is_contiguous() {
+        padded
+    } else {
+        padded.contiguous()?
+    };
     ops::broadcast_to(&padded, target)
 }
 
