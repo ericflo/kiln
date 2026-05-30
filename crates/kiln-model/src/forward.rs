@@ -25875,19 +25875,33 @@ pub fn mtp_forward_step(
     // is `norm_emb_l2 / norm_h_l2`; values far from 1.0 are evidence the
     // two halves have mismatched magnitudes feeding `fc`.
     if crate::mtp_debug::should_log() {
-        let h_norm = crate::mtp_debug::tensor_l2_norm(h_prev).unwrap_or(f32::NAN);
-        let norm_emb_l2 = crate::mtp_debug::tensor_l2_norm(&norm_emb).unwrap_or(f32::NAN);
-        let norm_h_l2 = crate::mtp_debug::tensor_l2_norm(&norm_h).unwrap_or(f32::NAN);
-        let fused_l2 = crate::mtp_debug::tensor_l2_norm(&fused).unwrap_or(f32::NAN);
+        // #1082: `mtp_debug::tensor_l2_norm`/`top_k_logits` stay candle-typed
+        // (also called from the candle-aliased sampler in speculative.rs).
+        // Bridge the kt activations to candle here — cold debug path only
+        // (`should_log()` gate), so the copies don't touch production decode.
+        let l2_kt = |t: &Tensor| -> f32 {
+            kt_logits_to_candle(t)
+                .ok()
+                .and_then(|c| crate::mtp_debug::tensor_l2_norm(&c).ok())
+                .unwrap_or(f32::NAN)
+        };
+        let h_norm = l2_kt(h_prev);
+        let norm_emb_l2 = l2_kt(&norm_emb);
+        let norm_h_l2 = l2_kt(&norm_h);
+        let fused_l2 = l2_kt(&fused);
         let halves_ratio = if norm_h_l2 > 0.0 {
             norm_emb_l2 / norm_h_l2
         } else {
             f32::NAN
         };
-        let logits_norm = crate::mtp_debug::tensor_l2_norm(&logits).unwrap_or(f32::NAN);
-        let top = crate::mtp_debug::top_k_logits(&logits, 5)
-            .map(|t| crate::mtp_debug::format_top_k(&t))
-            .unwrap_or_else(|e| format!("<top_k err: {e}>"));
+        let logits_norm = l2_kt(&logits);
+        let logits_candle = kt_logits_to_candle(&logits);
+        let top = match logits_candle {
+            Ok(lc) => crate::mtp_debug::top_k_logits(&lc, 5)
+                .map(|t| crate::mtp_debug::format_top_k(&t))
+                .unwrap_or_else(|e| format!("<top_k err: {e}>")),
+            Err(e) => format!("<top_k bridge err: {e}>"),
+        };
         tracing::info!(
             target: "kiln::mtp_debug",
             mtp_pos = mtp_pos,
