@@ -561,7 +561,7 @@ where
 
     // For each kt input we registered, look up its grad and copy it
     // back into the candle GradStore under the matched candle id.
-    for (kt_in_raw, candle_in_raw) in &scope.kt_to_candle_input {
+    for (kt_in_raw, candle_in_raws) in &scope.kt_to_candle_input {
         let kt_input_id = KtTensorId::from_raw(*kt_in_raw);
         let Some(kt_grad) = kt_grad_store.get(kt_input_id) else {
             // No grad for this kt input. Common case: the same kt
@@ -573,19 +573,23 @@ where
             continue;
         };
 
-        let candle_grad = crate::kt_tensor_to_candle_cuda_copy(kt_grad).map_err(|e| {
-            BridgeError::new(format!(
-                "tape_bridge: kt → candle grad copy failed for kt input \
-                 (kt id {kt_in_raw}, candle id {candle_in_raw}): {e}"
-            ))
-        })?;
+        // #1082 CP-4: a kt input may fan out to several candle ids (chained
+        // reuse across islands) — deposit the grad under each.
+        for candle_in_raw in candle_in_raws {
+            let candle_grad = crate::kt_tensor_to_candle_cuda_copy(kt_grad).map_err(|e| {
+                BridgeError::new(format!(
+                    "tape_bridge: kt → candle grad copy failed for kt input \
+                     (kt id {kt_in_raw}, candle id {candle_in_raw}): {e}"
+                ))
+            })?;
 
-        // Merge into the candle GradStore. If the candle side
-        // already has a grad for this id (the same Tensor flowed
-        // through both tape and candle paths), accumulate; else,
-        // skip with a soft warning (no `TensorId::from_raw` on
-        // candle's side — see `insert_or_add_by_raw` doc).
-        insert_or_add_by_raw(&mut candle_grad_store, *candle_in_raw, candle_grad)?;
+            // Merge into the candle GradStore. If the candle side
+            // already has a grad for this id (the same Tensor flowed
+            // through both tape and candle paths), accumulate; else,
+            // skip with a soft warning (no `TensorId::from_raw` on
+            // candle's side — see `insert_or_add_by_raw` doc).
+            insert_or_add_by_raw(&mut candle_grad_store, *candle_in_raw, candle_grad)?;
+        }
     }
 
     Ok((payload, candle_grad_store))
