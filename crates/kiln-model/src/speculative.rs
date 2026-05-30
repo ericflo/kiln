@@ -130,8 +130,9 @@ fn draft_forward_hidden(
     config: &ModelConfig,
     draft_layers: usize,
     linear_state: &mut LinearAttentionState,
-) -> Result<candle_core::Tensor> {
-    // Embed tokens
+) -> Result<kiln_tensor::Tensor> {
+    // #1082: `model_forward_embed`/`_segment` are kt-typed; the draft hidden
+    // stays kt and is consumed by the kt `model_forward_head` in `draft_forward`.
     let (hidden, positions) = model_forward_embed(token_ids, weights)?;
 
     // Run only the first `draft_layers` layers
@@ -166,7 +167,10 @@ fn draft_forward(
         draft_layers,
         linear_state,
     )?;
-    model_forward_head(&hidden, weights, config)
+    // #1082: `model_forward_head` returns kt logits; bridge to candle for the
+    // candle-typed host sampler island (`greedy_sample`).
+    let logits_kt = model_forward_head(&hidden, weights, config)?;
+    crate::forward::kt_logits_to_candle(&logits_kt)
 }
 
 /// Compute softmax probabilities from logits for the last position.
@@ -656,7 +660,7 @@ pub fn speculative_decode_step_paged_greedy(
     let mut verify_input: Vec<TokenId> = Vec::with_capacity(k + 1);
     verify_input.push(last_token);
     verify_input.extend_from_slice(&draft_tokens);
-    let verify_logits = model_forward_paged(
+    let verify_logits_kt = model_forward_paged(
         backend,
         &verify_input,
         weights,
@@ -669,6 +673,8 @@ pub fn speculative_decode_step_paged_greedy(
         None,
     )
     .context("paged skip-layer verification forward pass failed")?;
+    // #1082: kt logits -> candle for the host sampler island.
+    let verify_logits = crate::forward::kt_logits_to_candle(&verify_logits_kt)?;
     let target_tokens = greedy_sample_rows(&verify_logits)
         .context("paged skip-layer batched verification greedy sampling failed")?;
     anyhow::ensure!(
@@ -848,10 +854,15 @@ pub fn speculative_mtp_decode_step(
     // write slot in the isolated MTP paged cache. See Phase B7a evidence
     // in PR #276: without this, `post_layer` drifts monotonically with
     // `mtp_pos` (cos_sim 0.999977 → 0.999531 → 0.997527 at pos 0/1/2).
-    let (mtp_logits, _mtp_hidden) = mtp_forward_step(
+    // #1082: `mtp_forward_step` is kt-typed; bridge the candle `h_prev` to kt
+    // for the call, then bridge the kt logits back to candle for the candle
+    // host sampler + MTP-debug island.
+    let h_prev_kt = crate::forward::candle_to_kt_activation(h_prev)
+        .context("mtp draft step: h_prev candle->kt")?;
+    let (mtp_logits_kt, _mtp_hidden) = mtp_forward_step(
         backend,
         last_token,
-        h_prev,
+        &h_prev_kt,
         weights,
         config,
         mtp_cache,
@@ -860,6 +871,8 @@ pub fn speculative_mtp_decode_step(
         mtp_pos,
     )
     .context("mtp draft step failed")?;
+    let mtp_logits = crate::forward::kt_logits_to_candle(&mtp_logits_kt)
+        .context("mtp draft step: logits kt->candle")?;
     // Phase C35 H13 A/B — optional FP32 promotion before argmax. See
     // `mtp_argmax_fp32_enabled` for motivation (vLLM parity). The original
     // `mtp_logits` tensor is still borrowed downstream by C1 attribution and
@@ -877,7 +890,7 @@ pub fn speculative_mtp_decode_step(
         .snapshot_for_decode_rollback()
         .context("snapshot linear attention state before MTP verify")?;
     let verify_input = [last_token, draft_token];
-    let (verify_logits, hidden_after_draft) = model_forward_paged_with_last_hidden(
+    let (verify_logits_kt, hidden_after_draft_kt) = model_forward_paged_with_last_hidden(
         backend,
         &verify_input,
         weights,
@@ -890,6 +903,12 @@ pub fn speculative_mtp_decode_step(
         None, // positions_gpu: let the forward pass build positions internally.
     )
     .context("mtp two-token verify forward failed")?;
+    // #1082: kt logits + last-hidden -> candle for the candle sampler/debug
+    // island and the candle-typed `MtpSpeculativeStepResult::new_h_prev`.
+    let verify_logits = crate::forward::kt_logits_to_candle(&verify_logits_kt)
+        .context("mtp verify: logits kt->candle")?;
+    let hidden_after_draft = crate::forward::kt_logits_to_candle(&hidden_after_draft_kt)
+        .context("mtp verify: hidden kt->candle")?;
 
     // Position 0 predicts what follows `last_token`; position 1 predicts what
     // follows the accepted draft token (the speculative bonus). Sample both
@@ -1012,7 +1031,7 @@ pub fn speculative_mtp_decode_step(
             .restore_from_decode_rollback(&linear_state_snapshot)
             .context("restore linear attention state after MTP rejection")?;
         let verify_input0 = [last_token];
-        let (_verify_logits0, hidden_after_last) = model_forward_paged_with_last_hidden(
+        let (_verify_logits0, hidden_after_last_kt) = model_forward_paged_with_last_hidden(
             backend,
             &verify_input0,
             weights,
@@ -1025,7 +1044,9 @@ pub fn speculative_mtp_decode_step(
             None,
         )
         .context("mtp rejection replay forward failed")?;
-        new_h_prev = hidden_after_last;
+        // #1082: kt last-hidden -> candle for the candle `new_h_prev`.
+        new_h_prev = crate::forward::kt_logits_to_candle(&hidden_after_last_kt)
+            .context("mtp rejection replay: hidden kt->candle")?;
 
         // REJECT: emit the target's token at position 0.
         if eos_token_ids.contains(&target_at_0) {
