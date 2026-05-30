@@ -16695,17 +16695,29 @@ fn gated_deltanet_forward_decode_if(
                     // AND a tape scope is active. This is the training path
                     // (track_op=true -> gdn_forward_only_fastpaths=false).
                     #[cfg(feature = "cuda")]
-                    let _ = crate::tape_forward::try_tape_causal_conv1d_prefill_cuda(
-                        &mixed_qkv_ct,
-                        &weights.conv1d,
-                        &y,
-                        kernel_size,
-                    )?;
+                    if crate::tape_forward::tape_forward_enabled() {
+                        let mqkv_c = kt_logits_to_candle(&mixed_qkv_ct)
+                            .context("gdn conv1d prefill kt->candle input (tape)")?;
+                        let conv_c = kt_logits_to_candle(&weights.conv1d)
+                            .context("gdn conv1d prefill kt->candle conv1d (tape)")?;
+                        let y_c = kt_logits_to_candle(&y)
+                            .context("gdn conv1d prefill kt->candle y (tape)")?;
+                        let _ = crate::tape_forward::try_tape_causal_conv1d_prefill_cuda(
+                            &mqkv_c, &conv_c, &y_c, kernel_size,
+                        )?;
+                    }
                     #[cfg(feature = "cuda")]
                     {
-                        match crate::tape_forward::try_tape_silu_cuda(&y)? {
-                            Some(t) => t,
-                            None => cuda_silu(&y)?,
+                        if crate::tape_forward::tape_forward_enabled() {
+                            let y_c = kt_logits_to_candle(&y)
+                                .context("gdn conv1d silu kt->candle y (tape)")?;
+                            match crate::tape_forward::try_tape_silu_cuda(&y_c)? {
+                                Some(t) => candle_to_kt_activation(&t)
+                                    .context("gdn conv1d silu candle->kt (tape)")?,
+                                None => cuda_silu(&y)?,
+                            }
+                        } else {
+                            cuda_silu(&y)?
                         }
                     }
                     #[cfg(not(feature = "cuda"))]
