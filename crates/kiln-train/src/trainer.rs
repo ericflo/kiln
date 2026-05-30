@@ -15450,13 +15450,31 @@ pub(crate) mod tests {
         // the observed 33; the finite-diff gate is the authoritative grad check —
         // this just confirms coverage + forward parity + candle-valid majority
         // agreement). (#1082)
-        assert!(
-            candle_agree >= 30,
-            "CP-4: expected >=30 Vars to agree with candle (floored<0.3 — the candle-VALID \
-             non-attention/conv subset), got {candle_agree}/{compared}. The disagreeing Vars \
-             {candle_disagree:?} are candle's severed full-attn/conv grads (see \
-             tape_grad_matches_finite_difference_bf16 for the ground-truth check)"
-        );
+        // #1082: after the FULL forward flip, the forward is entirely kt, so
+        // candle's `loss.backward()` severs ALL LoRA-Var grads (not just the
+        // attn/conv subset) — the candle baseline is now an EMPTY reference
+        // (`compared == 0`). When candle still provides a non-empty reference
+        // (`compared > 0`, e.g. a partially-flipped build), the candle-VALID Var
+        // subset must still agree tightly (≥30 of ~33). When candle is fully
+        // severed, full tape coverage (asserted above), forward loss-parity
+        // (asserted earlier), and the finite-difference grad-correctness gate
+        // (`tape_grad_matches_finite_difference_bf16`) carry the validation —
+        // candle-parity is the WRONG validator post-flip (see that test).
+        if compared > 0 {
+            assert!(
+                candle_agree >= 30,
+                "CP-4: expected >=30 Vars to agree with candle (floored<0.3 — the candle-VALID \
+                 non-attention/conv subset), got {candle_agree}/{compared}. The disagreeing Vars \
+                 {candle_disagree:?} are candle's severed full-attn/conv grads (see \
+                 tape_grad_matches_finite_difference_bf16 for the ground-truth check)"
+            );
+        } else {
+            eprintln!(
+                "[CP4-PARITY] candle baseline empty (compared=0): the full forward flip severed \
+                 candle's autograd entirely — relying on tape coverage (50/50) + forward loss \
+                 parity + the finite-difference grad check (#1082)"
+            );
+        }
     }
 
     /// #1082 CP-4 endgame: validate that the tape-authoritative GRPO step
@@ -15917,49 +15935,34 @@ pub(crate) mod tests {
         // table is never empty.
         let all_vars = params.all_vars();
         let modules = params.all_vars_with_modules();
-        let rel = |a: &candle_core::Tensor, c: &candle_core::Tensor| -> f32 {
-            let af = a
+        // Rank FD targets by tape-grad L2 magnitude. #1082: after the full
+        // forward flip the forward is entirely kt, so candle's `loss.backward()`
+        // baseline is EMPTY (it can't backprop through kt ops) — we can no longer
+        // rank by tape-vs-candle divergence as the pre-flip test did. Large-grad
+        // Vars (the MLP gate/up/down) have stable, above-noise finite differences;
+        // small-grad Vars are BF16-noise-dominated and get excluded by the
+        // stability gate below. Probe the largest-magnitude Vars so ≥2 clear it.
+        let grad_l2 = |t: &candle_core::Tensor| -> f32 {
+            let gf = t
                 .to_dtype(candle_core::DType::F32)
                 .unwrap()
                 .flatten_all()
                 .unwrap()
                 .to_vec1::<f32>()
                 .unwrap();
-            let cf = c
-                .to_dtype(candle_core::DType::F32)
-                .unwrap()
-                .flatten_all()
-                .unwrap()
-                .to_vec1::<f32>()
-                .unwrap();
-            let mut d = 0f32;
-            let mut m = 0f32;
-            for (x, y) in af.iter().zip(cf.iter()) {
-                d = d.max((x - y).abs());
-                m = m.max(y.abs());
-            }
-            d / m.max(1e-6)
+            gf.iter().map(|x| x * x).sum::<f32>().sqrt()
         };
         let mut ranked: Vec<(usize, f32)> = Vec::new();
         for (vi, v) in all_vars.iter().enumerate() {
-            if let (Some(t), Some(c)) = (tape_grad(v), grads_candle.get(v.as_tensor())) {
-                ranked.push((vi, rel(t, c)));
+            if let Some(t) = tape_grad(v) {
+                ranked.push((vi, grad_l2(t)));
             }
         }
         ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        // Up to 5 worst divergent Vars; fall back to the first matched Vars if
-        // ranking is empty.
-        let mut targets: Vec<usize> = ranked.iter().take(5).map(|(vi, _)| *vi).collect();
-        if targets.is_empty() {
-            for (vi, v) in all_vars.iter().enumerate() {
-                if tape_grad(v).is_some() && grads_candle.get(v.as_tensor()).is_some() {
-                    targets.push(vi);
-                }
-                if targets.len() >= 3 {
-                    break;
-                }
-            }
-        }
+        // Probe the 10 largest-grad Vars (covers several MLP Vars, which have
+        // the stable finite differences the gate needs). The stability filter
+        // (|fd|>noise AND eps-consistent) then selects the valid references.
+        let targets: Vec<usize> = ranked.iter().take(10).map(|(vi, _)| *vi).collect();
 
         eprintln!(
             "[FD-CHECK] central finite-difference reference for {} Var(s); \
@@ -16172,17 +16175,25 @@ pub(crate) mod tests {
         );
 
         for (vi, fd, rel_tape, rel_candle) in &stable_gated {
-            // (1) Disambiguation: the tape is at least as close to ground truth
-            // as candle. Candle's autograd drops the full-attn/conv gradient, so
-            // on these Vars it is strictly the worse reference.
-            assert!(
-                rel_tape <= rel_candle,
-                "[FD-CHECK] var[{vi}]: tape rel {rel_tape:.4} should be <= candle rel \
-                 {rel_candle:.4} vs finite-diff (fd={fd:+.6}) — candle is the wrong reference \
-                 here, so the tape must be the closer of the two"
-            );
+            // (1) Disambiguation (only when candle provides a grad): the tape is
+            // at least as close to ground truth as candle. #1082: after the full
+            // forward flip, candle's `loss.backward()` baseline is EMPTY (it
+            // can't backprop through the all-kt forward), so `candle_dot` is None
+            // and `rel_candle` is NaN — this comparison is vacuous and skipped.
+            // The finite-difference correctness gate (2) is the authoritative
+            // check. (Pre-flip / partially-flipped builds where candle still has
+            // a grad keep the tape-beats-candle disambiguation.)
+            if rel_candle.is_finite() {
+                assert!(
+                    rel_tape <= rel_candle,
+                    "[FD-CHECK] var[{vi}]: tape rel {rel_tape:.4} should be <= candle rel \
+                     {rel_candle:.4} vs finite-diff (fd={fd:+.6}) — candle is the wrong reference \
+                     here, so the tape must be the closer of the two"
+                );
+            }
             // (2) Correctness: the tape matches finite-diff within BF16+eps
-            // tolerance (var[7]=0.07, var[35]=0.06 on pod data).
+            // tolerance (var[7]=0.07, var[35]=0.06 on pod data). THE authoritative
+            // grad-correctness gate (#1082).
             assert!(
                 *rel_tape < FD_TAPE_REL_TOL,
                 "[FD-CHECK] var[{vi}]: tape grad rel {rel_tape:.4} >= {FD_TAPE_REL_TOL} vs \
