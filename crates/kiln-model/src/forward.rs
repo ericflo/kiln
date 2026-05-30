@@ -2227,17 +2227,12 @@ fn cuda_silu(x: &Tensor) -> Result<Tensor> {
 fn try_kt_silu_composite(x: &Tensor) -> Result<Option<Tensor>> {
     kiln_nvtx::range!(c"kiln/silu_composite_kt");
 
-    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
     // kind tag 0 = SiLU (matches csrc/activation.cu KIND_SILU).
-    let out_kt = match kiln_tensor::cuda_activation_unary(&x_kt, 0) {
+    let out_kt = match kiln_tensor::cuda_activation_unary(x, 0) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-        .map_err(|e| anyhow::anyhow!("try_kt_silu_composite: candle copy-back failed: {e}"))?;
+    let out = out_kt;
     Ok(Some(out))
 }
 
@@ -4228,19 +4223,13 @@ pub(crate) fn try_kt_sum_last_dim_keepdim(x: &Tensor) -> Result<Option<Tensor>> 
 
     kiln_nvtx::range!(c"kiln/sum_last_dim_kt");
 
-    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x) {
+    let out_kt = match kiln_tensor::cuda_sum_last_axis(x) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    let out_kt = match kiln_tensor::cuda_sum_last_axis(&x_kt) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
-    let reduced = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt).map_err(|e| {
-        anyhow::anyhow!("try_kt_sum_last_dim_keepdim: candle copy-back failed: {e}")
-    })?;
+    let reduced = out_kt;
     let out = reduced
-        .unsqueeze(LAST_DIM)
+        .unsqueeze(reduced.rank())
         .map_err(|e| anyhow::anyhow!("try_kt_sum_last_dim_keepdim: unsqueeze failed: {e}"))?;
     Ok(Some(out))
 }
@@ -4279,16 +4268,11 @@ fn try_kt_sum_axis(x: &Tensor, axis: usize) -> Result<Option<Tensor>> {
 
     kiln_nvtx::range!(c"kiln/sum_axis_kt");
 
-    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x) {
+    let out_kt = match kiln_tensor::cuda_sum_axis(x, axis) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    let out_kt = match kiln_tensor::cuda_sum_axis(&x_kt, axis) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
-    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-        .map_err(|e| anyhow::anyhow!("try_kt_sum_axis: candle copy-back failed: {e}"))?;
+    let out = out_kt;
     Ok(Some(out))
 }
 
@@ -4326,11 +4310,9 @@ pub(crate) fn try_kt_max_last_dim_keepdim(x: &Tensor) -> Result<Option<Tensor>> 
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    let reduced = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt).map_err(|e| {
-        anyhow::anyhow!("try_kt_max_last_dim_keepdim: candle copy-back failed: {e}")
-    })?;
+    let reduced = out_kt;
     let out = reduced
-        .unsqueeze(LAST_DIM)
+        .unsqueeze(reduced.rank())
         .map_err(|e| anyhow::anyhow!("try_kt_max_last_dim_keepdim: unsqueeze failed: {e}"))?;
     Ok(Some(out))
 }
@@ -4370,11 +4352,9 @@ fn try_kt_min_last_dim_keepdim(x: &Tensor) -> Result<Option<Tensor>> {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    let reduced = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt).map_err(|e| {
-        anyhow::anyhow!("try_kt_min_last_dim_keepdim: candle copy-back failed: {e}")
-    })?;
+    let reduced = out_kt;
     let out = reduced
-        .unsqueeze(LAST_DIM)
+        .unsqueeze(reduced.rank())
         .map_err(|e| anyhow::anyhow!("try_kt_min_last_dim_keepdim: unsqueeze failed: {e}"))?;
     Ok(Some(out))
 }
@@ -4391,16 +4371,11 @@ fn try_kt_min_last_dim_keepdim(x: &Tensor) -> Result<Option<Tensor>> {
 fn try_kt_softmax_last_dim(x: &Tensor) -> Result<Option<Tensor>> {
     kiln_nvtx::range!(c"kiln/softmax_kt");
 
-    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x) {
+    let out_kt = match kiln_tensor::cuda_softmax_last_axis(x) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    let out_kt = match kiln_tensor::cuda_softmax_last_axis(&x_kt) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
-    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-        .map_err(|e| anyhow::anyhow!("try_kt_softmax_last_dim: candle copy-back failed: {e}"))?;
+    let out = out_kt;
     Ok(Some(out))
 }
 
@@ -6976,20 +6951,11 @@ pub(crate) fn try_kt_matmul(lhs: &Tensor, rhs: &Tensor) -> Result<Option<Tensor>
         return Ok(Some(out));
     }
 
-    let lhs_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(lhs) {
+    let out_kt = match kiln_tensor::cuda_matmul(lhs, rhs) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    let rhs_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(rhs) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
-    let out_kt = match kiln_tensor::cuda_matmul(&lhs_kt, &rhs_kt) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
-    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-        .map_err(|e| anyhow::anyhow!("try_kt_matmul: candle copy-back failed: {e}"))?;
+    let out = out_kt;
     Ok(Some(out))
 }
 
@@ -7932,22 +7898,13 @@ fn try_kt_embedding_lookup(
     kiln_nvtx::range!(c"kiln/embedding_kt");
 
     // candle→kt boundary (weight + index borrow-in).
-    let w_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(embed_weights) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
-    let idx_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(index) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
     // kt-internal computation.
-    let out_kt = match kt_embedding_lookup_native(&w_kt, &idx_kt) {
+    let out_kt = match kt_embedding_lookup_native(embed_weights, index) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
     // kt→candle boundary (gathered rows copy-out).
-    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-        .map_err(|e| anyhow::anyhow!("try_kt_embedding_lookup: candle copy-back failed: {e}"))?;
+    let out = out_kt;
     Ok(Some(out))
 }
 
@@ -8728,19 +8685,13 @@ pub(crate) fn try_kt_mean_last_dim_keepdim(x: &Tensor) -> Result<Option<Tensor>>
 
     kiln_nvtx::range!(c"kiln/mean_last_dim_kt");
 
-    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x) {
+    let out_kt = match kiln_tensor::cuda_mean_last_axis(x) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    let out_kt = match kiln_tensor::cuda_mean_last_axis(&x_kt) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
-    let reduced = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt).map_err(|e| {
-        anyhow::anyhow!("try_kt_mean_last_dim_keepdim: candle copy-back failed: {e}")
-    })?;
+    let reduced = out_kt;
     let out = reduced
-        .unsqueeze(LAST_DIM)
+        .unsqueeze(reduced.rank())
         .map_err(|e| anyhow::anyhow!("try_kt_mean_last_dim_keepdim: unsqueeze failed: {e}"))?;
     Ok(Some(out))
 }
@@ -9385,20 +9336,11 @@ pub(crate) fn try_kt_concat_last_dim(pieces: &[&Tensor]) -> Result<Option<Tensor
 
     kiln_nvtx::range!(c"kiln/concat_last_dim_kt");
 
-    let mut kt_owned = Vec::with_capacity(pieces.len());
-    for t in pieces.iter() {
-        match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(t) {
-            Ok(k) => kt_owned.push(k),
-            Err(_) => return Ok(None),
-        }
-    }
-    let kt_refs: Vec<&kiln_tensor::Tensor> = kt_owned.iter().collect();
-    let out_kt = match kiln_tensor::cuda_concat(&kt_refs, axis) {
+    let out_kt = match kiln_tensor::cuda_concat(pieces, axis) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-        .map_err(|e| anyhow::anyhow!("try_kt_concat_last_dim: candle copy-back failed: {e}"))?;
+    let out = out_kt;
     Ok(Some(out))
 }
 
@@ -9444,20 +9386,11 @@ fn try_kt_cat_dim0(pieces: &[&Tensor]) -> Result<Option<Tensor>> {
 
     kiln_nvtx::range!(c"kiln/cat_dim0_kt");
 
-    let mut kt_owned = Vec::with_capacity(pieces.len());
-    for t in pieces.iter() {
-        match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(t) {
-            Ok(k) => kt_owned.push(k),
-            Err(_) => return Ok(None),
-        }
-    }
-    let kt_refs: Vec<&kiln_tensor::Tensor> = kt_owned.iter().collect();
-    let out_kt = match kiln_tensor::cuda_concat(&kt_refs, 0) {
+    let out_kt = match kiln_tensor::cuda_concat(pieces, 0) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-        .map_err(|e| anyhow::anyhow!("try_kt_cat_dim0: candle copy-back failed: {e}"))?;
+    let out = out_kt;
     Ok(Some(out))
 }
 
@@ -9502,20 +9435,11 @@ fn try_kt_cat_dim1(pieces: &[&Tensor]) -> Result<Option<Tensor>> {
 
     kiln_nvtx::range!(c"kiln/cat_dim1_kt");
 
-    let mut kt_owned = Vec::with_capacity(pieces.len());
-    for t in pieces.iter() {
-        match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(t) {
-            Ok(k) => kt_owned.push(k),
-            Err(_) => return Ok(None),
-        }
-    }
-    let kt_refs: Vec<&kiln_tensor::Tensor> = kt_owned.iter().collect();
-    let out_kt = match kiln_tensor::cuda_concat(&kt_refs, 1) {
+    let out_kt = match kiln_tensor::cuda_concat(pieces, 1) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-        .map_err(|e| anyhow::anyhow!("try_kt_cat_dim1: candle copy-back failed: {e}"))?;
+    let out = out_kt;
     Ok(Some(out))
 }
 
@@ -9560,20 +9484,11 @@ fn try_kt_cat_dim2(pieces: &[&Tensor]) -> Result<Option<Tensor>> {
 
     kiln_nvtx::range!(c"kiln/cat_dim2_kt");
 
-    let mut kt_owned = Vec::with_capacity(pieces.len());
-    for t in pieces.iter() {
-        match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(t) {
-            Ok(k) => kt_owned.push(k),
-            Err(_) => return Ok(None),
-        }
-    }
-    let kt_refs: Vec<&kiln_tensor::Tensor> = kt_owned.iter().collect();
-    let out_kt = match kiln_tensor::cuda_concat(&kt_refs, 2) {
+    let out_kt = match kiln_tensor::cuda_concat(pieces, 2) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-        .map_err(|e| anyhow::anyhow!("try_kt_cat_dim2: candle copy-back failed: {e}"))?;
+    let out = out_kt;
     Ok(Some(out))
 }
 
@@ -9607,18 +9522,13 @@ fn try_kt_mul_scalar(x: &Tensor, c: f64) -> Result<Option<Tensor>> {
 
     kiln_nvtx::range!(c"kiln/mul_scalar_kt");
 
-    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
     // kind tag 2 = ScalarKind::MulScalar (matches
     // crates/kiln-tensor/src/ops/scalar.rs).
-    let out_kt = match kiln_tensor::cuda_scalar_op(&x_kt, 2, c_f32) {
+    let out_kt = match kiln_tensor::cuda_scalar_op(x, 2, c_f32) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-        .map_err(|e| anyhow::anyhow!("try_kt_mul_scalar: candle copy-back failed: {e}"))?;
+    let out = out_kt;
     Ok(Some(out))
 }
 
@@ -9651,18 +9561,13 @@ pub(crate) fn try_kt_add_scalar(x: &Tensor, c: f64) -> Result<Option<Tensor>> {
 
     kiln_nvtx::range!(c"kiln/add_scalar_kt");
 
-    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
     // kind tag 0 = ScalarKind::AddScalar (matches
     // crates/kiln-tensor/src/ops/scalar.rs).
-    let out_kt = match kiln_tensor::cuda_scalar_op(&x_kt, 0, c_f32) {
+    let out_kt = match kiln_tensor::cuda_scalar_op(x, 0, c_f32) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-        .map_err(|e| anyhow::anyhow!("try_kt_add_scalar: candle copy-back failed: {e}"))?;
+    let out = out_kt;
     Ok(Some(out))
 }
 
@@ -9690,18 +9595,13 @@ pub(crate) fn try_kt_neg(x: &Tensor) -> Result<Option<Tensor>> {
 
     kiln_nvtx::range!(c"kiln/neg_kt");
 
-    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
     // kind tag 12 = Neg (matches csrc/activation.cu constants and
     // crates/kiln-tensor/src/ops/unary_arith.rs::cuda_kind_tag).
-    let out_kt = match kiln_tensor::cuda_activation_unary(&x_kt, 12) {
+    let out_kt = match kiln_tensor::cuda_activation_unary(x, 12) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-        .map_err(|e| anyhow::anyhow!("try_kt_neg: candle copy-back failed: {e}"))?;
+    let out = out_kt;
     Ok(Some(out))
 }
 
@@ -9729,18 +9629,13 @@ fn try_kt_sqrt(x: &Tensor) -> Result<Option<Tensor>> {
 
     kiln_nvtx::range!(c"kiln/sqrt_kt");
 
-    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
     // kind tag 14 = Sqrt (matches csrc/activation.cu constants and
     // crates/kiln-tensor/src/ops/unary_arith.rs::cuda_kind_tag).
-    let out_kt = match kiln_tensor::cuda_activation_unary(&x_kt, 14) {
+    let out_kt = match kiln_tensor::cuda_activation_unary(x, 14) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-        .map_err(|e| anyhow::anyhow!("try_kt_sqrt: candle copy-back failed: {e}"))?;
+    let out = out_kt;
     Ok(Some(out))
 }
 
@@ -9778,18 +9673,13 @@ pub(crate) fn try_kt_rsqrt(x: &Tensor) -> Result<Option<Tensor>> {
 
     kiln_nvtx::range!(c"kiln/rsqrt_kt");
 
-    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
     // kind tag 28 = Rsqrt (matches KIND_RSQRT in
     // csrc/activation.cu — added alongside this helper).
-    let out_kt = match kiln_tensor::cuda_activation_unary(&x_kt, 28) {
+    let out_kt = match kiln_tensor::cuda_activation_unary(x, 28) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-        .map_err(|e| anyhow::anyhow!("try_kt_rsqrt: candle copy-back failed: {e}"))?;
+    let out = out_kt;
     Ok(Some(out))
 }
 
@@ -9825,22 +9715,13 @@ fn try_kt_max_binary(a: &Tensor, b: &Tensor) -> Result<Option<Tensor>> {
 
     kiln_nvtx::range!(c"kiln/max_binary_kt");
 
-    let a_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(a) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
-    let b_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(b) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
     // kind tag 1 = Max (matches KIND_MAXIMUM in
     // csrc/binary_minmax.cu).
-    let out_kt = match kiln_tensor::cuda_binary_minmax(&a_kt, &b_kt, 1) {
+    let out_kt = match kiln_tensor::cuda_binary_minmax(a, b, 1) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-        .map_err(|e| anyhow::anyhow!("try_kt_max_binary: candle copy-back failed: {e}"))?;
+    let out = out_kt;
     Ok(Some(out))
 }
 
@@ -9873,22 +9754,13 @@ fn try_kt_min_binary(a: &Tensor, b: &Tensor) -> Result<Option<Tensor>> {
 
     kiln_nvtx::range!(c"kiln/min_binary_kt");
 
-    let a_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(a) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
-    let b_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(b) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
     // kind tag 0 = Min (matches KIND_MINIMUM in
     // csrc/binary_minmax.cu).
-    let out_kt = match kiln_tensor::cuda_binary_minmax(&a_kt, &b_kt, 0) {
+    let out_kt = match kiln_tensor::cuda_binary_minmax(a, b, 0) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-        .map_err(|e| anyhow::anyhow!("try_kt_min_binary: candle copy-back failed: {e}"))?;
+    let out = out_kt;
     Ok(Some(out))
 }
 
@@ -9928,20 +9800,11 @@ fn try_kt_lerp(a: &Tensor, b: &Tensor, weight: f32) -> Result<Option<Tensor>> {
 
     kiln_nvtx::range!(c"kiln/lerp_kt");
 
-    let a_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(a) {
+    let out_kt = match kiln_tensor::cuda_lerp(a, b, weight) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    let b_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(b) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
-    let out_kt = match kiln_tensor::cuda_lerp(&a_kt, &b_kt, weight) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
-    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-        .map_err(|e| anyhow::anyhow!("try_kt_lerp: candle copy-back failed: {e}"))?;
+    let out = out_kt;
     Ok(Some(out))
 }
 
@@ -9984,18 +9847,13 @@ fn try_kt_abs(x: &Tensor) -> Result<Option<Tensor>> {
 
     kiln_nvtx::range!(c"kiln/abs_kt");
 
-    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
     // kind tag 13 = Abs (matches csrc/activation.cu constants and
     // crates/kiln-tensor/src/ops/unary_arith.rs::cuda_kind_tag).
-    let out_kt = match kiln_tensor::cuda_activation_unary(&x_kt, 13) {
+    let out_kt = match kiln_tensor::cuda_activation_unary(x, 13) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-        .map_err(|e| anyhow::anyhow!("try_kt_abs: candle copy-back failed: {e}"))?;
+    let out = out_kt;
     Ok(Some(out))
 }
 
@@ -10036,17 +9894,12 @@ fn try_kt_clamp(x: &Tensor, lo: f32, hi: f32) -> Result<Option<Tensor>> {
 
     kiln_nvtx::range!(c"kiln/clamp_kt");
 
-    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
     // kind tag 0 = Clamp (matches csrc/clamp_pow.cu KIND_CLAMP).
-    let out_kt = match kiln_tensor::cuda_clamp_pow(&x_kt, 0, lo, hi) {
+    let out_kt = match kiln_tensor::cuda_clamp_pow(x, 0, lo, hi) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-        .map_err(|e| anyhow::anyhow!("try_kt_clamp: candle copy-back failed: {e}"))?;
+    let out = out_kt;
     Ok(Some(out))
 }
 
@@ -10092,18 +9945,13 @@ fn try_kt_pow(x: &Tensor, p: f32) -> Result<Option<Tensor>> {
 
     kiln_nvtx::range!(c"kiln/pow_kt");
 
-    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
     // kind tag 1 = Pow (matches csrc/clamp_pow.cu KIND_POW). The
     // `b` argument is ignored by the Pow path, so pass 0.0.
-    let out_kt = match kiln_tensor::cuda_clamp_pow(&x_kt, 1, p, 0.0) {
+    let out_kt = match kiln_tensor::cuda_clamp_pow(x, 1, p, 0.0) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-        .map_err(|e| anyhow::anyhow!("try_kt_pow: candle copy-back failed: {e}"))?;
+    let out = out_kt;
     Ok(Some(out))
 }
 
@@ -10155,18 +10003,13 @@ fn try_kt_div_scalar(x: &Tensor, c: f64) -> Result<Option<Tensor>> {
 
     kiln_nvtx::range!(c"kiln/div_scalar_kt");
 
-    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
     // kind tag 3 = ScalarKind::DivScalar (matches
     // crates/kiln-tensor/src/ops/scalar.rs).
-    let out_kt = match kiln_tensor::cuda_scalar_op(&x_kt, 3, c_f32) {
+    let out_kt = match kiln_tensor::cuda_scalar_op(x, 3, c_f32) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-        .map_err(|e| anyhow::anyhow!("try_kt_div_scalar: candle copy-back failed: {e}"))?;
+    let out = out_kt;
     Ok(Some(out))
 }
 
@@ -10208,18 +10051,13 @@ fn try_kt_scalar_minus_tensor(x: &Tensor, c: f64) -> Result<Option<Tensor>> {
 
     kiln_nvtx::range!(c"kiln/scalar_minus_tensor_kt");
 
-    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
     // kind tag 4 = ScalarKind::ScalarMinusTensor (matches
     // crates/kiln-tensor/src/ops/scalar.rs).
-    let out_kt = match kiln_tensor::cuda_scalar_op(&x_kt, 4, c_f32) {
+    let out_kt = match kiln_tensor::cuda_scalar_op(x, 4, c_f32) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-        .map_err(|e| anyhow::anyhow!("try_kt_scalar_minus_tensor: candle copy-back failed: {e}"))?;
+    let out = out_kt;
     Ok(Some(out))
 }
 
@@ -10263,18 +10101,13 @@ fn try_kt_scalar_div_tensor(x: &Tensor, c: f64) -> Result<Option<Tensor>> {
 
     kiln_nvtx::range!(c"kiln/scalar_div_tensor_kt");
 
-    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
     // kind tag 5 = ScalarKind::ScalarDivTensor (matches
     // crates/kiln-tensor/src/ops/scalar.rs).
-    let out_kt = match kiln_tensor::cuda_scalar_op(&x_kt, 5, c_f32) {
+    let out_kt = match kiln_tensor::cuda_scalar_op(x, 5, c_f32) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-        .map_err(|e| anyhow::anyhow!("try_kt_scalar_div_tensor: candle copy-back failed: {e}"))?;
+    let out = out_kt;
     Ok(Some(out))
 }
 
@@ -10320,18 +10153,13 @@ fn try_kt_max_with_scalar(x: &Tensor, c: f64) -> Result<Option<Tensor>> {
 
     kiln_nvtx::range!(c"kiln/max_with_scalar_kt");
 
-    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
     // kind tag 6 = ScalarKind::MaxWithScalar (matches
     // crates/kiln-tensor/src/ops/scalar.rs).
-    let out_kt = match kiln_tensor::cuda_scalar_op(&x_kt, 6, c_f32) {
+    let out_kt = match kiln_tensor::cuda_scalar_op(x, 6, c_f32) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-        .map_err(|e| anyhow::anyhow!("try_kt_max_with_scalar: candle copy-back failed: {e}"))?;
+    let out = out_kt;
     Ok(Some(out))
 }
 
@@ -10377,18 +10205,13 @@ fn try_kt_min_with_scalar(x: &Tensor, c: f64) -> Result<Option<Tensor>> {
 
     kiln_nvtx::range!(c"kiln/min_with_scalar_kt");
 
-    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
     // kind tag 7 = ScalarKind::MinWithScalar (matches
     // crates/kiln-tensor/src/ops/scalar.rs).
-    let out_kt = match kiln_tensor::cuda_scalar_op(&x_kt, 7, c_f32) {
+    let out_kt = match kiln_tensor::cuda_scalar_op(x, 7, c_f32) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-        .map_err(|e| anyhow::anyhow!("try_kt_min_with_scalar: candle copy-back failed: {e}"))?;
+    let out = out_kt;
     Ok(Some(out))
 }
 
@@ -10416,17 +10239,12 @@ fn try_kt_sin(x: &Tensor) -> Result<Option<Tensor>> {
 
     kiln_nvtx::range!(c"kiln/sin_kt");
 
-    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
     // kind tag 7 = Sin (matches csrc/activation.cu KIND_SIN).
-    let out_kt = match kiln_tensor::cuda_activation_unary(&x_kt, 7) {
+    let out_kt = match kiln_tensor::cuda_activation_unary(x, 7) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-        .map_err(|e| anyhow::anyhow!("try_kt_sin: candle copy-back failed: {e}"))?;
+    let out = out_kt;
     Ok(Some(out))
 }
 
@@ -10454,17 +10272,12 @@ fn try_kt_cos(x: &Tensor) -> Result<Option<Tensor>> {
 
     kiln_nvtx::range!(c"kiln/cos_kt");
 
-    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
     // kind tag 8 = Cos (matches csrc/activation.cu KIND_COS).
-    let out_kt = match kiln_tensor::cuda_activation_unary(&x_kt, 8) {
+    let out_kt = match kiln_tensor::cuda_activation_unary(x, 8) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-        .map_err(|e| anyhow::anyhow!("try_kt_cos: candle copy-back failed: {e}"))?;
+    let out = out_kt;
     Ok(Some(out))
 }
 
@@ -10493,18 +10306,13 @@ pub(crate) fn try_kt_exp(x: &Tensor) -> Result<Option<Tensor>> {
 
     kiln_nvtx::range!(c"kiln/exp_kt");
 
-    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
     // kind tag 6 = Exp (matches csrc/activation.cu KIND_EXP and
     // crates/kiln-tensor/src/ops/unary_arith.rs::cuda_kind_tag).
-    let out_kt = match kiln_tensor::cuda_activation_unary(&x_kt, 6) {
+    let out_kt = match kiln_tensor::cuda_activation_unary(x, 6) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-        .map_err(|e| anyhow::anyhow!("try_kt_exp: candle copy-back failed: {e}"))?;
+    let out = out_kt;
     Ok(Some(out))
 }
 
@@ -10543,17 +10351,12 @@ fn try_kt_tanh(x: &Tensor) -> Result<Option<Tensor>> {
 
     kiln_nvtx::range!(c"kiln/tanh_kt");
 
-    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
     // kind tag 3 = Tanh (matches csrc/activation.cu KIND_TANH).
-    let out_kt = match kiln_tensor::cuda_activation_unary(&x_kt, 3) {
+    let out_kt = match kiln_tensor::cuda_activation_unary(x, 3) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-        .map_err(|e| anyhow::anyhow!("try_kt_tanh: candle copy-back failed: {e}"))?;
+    let out = out_kt;
     Ok(Some(out))
 }
 
@@ -10589,17 +10392,12 @@ fn try_kt_gelu(x: &Tensor) -> Result<Option<Tensor>> {
 
     kiln_nvtx::range!(c"kiln/gelu_kt");
 
-    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
     // kind tag 2 = GELU (matches csrc/activation.cu KIND_GELU).
-    let out_kt = match kiln_tensor::cuda_activation_unary(&x_kt, 2) {
+    let out_kt = match kiln_tensor::cuda_activation_unary(x, 2) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-        .map_err(|e| anyhow::anyhow!("try_kt_gelu: candle copy-back failed: {e}"))?;
+    let out = out_kt;
     Ok(Some(out))
 }
 
@@ -10635,17 +10433,12 @@ fn try_kt_relu(x: &Tensor) -> Result<Option<Tensor>> {
 
     kiln_nvtx::range!(c"kiln/relu_kt");
 
-    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
     // kind tag 4 = ReLU (matches csrc/activation.cu KIND_RELU).
-    let out_kt = match kiln_tensor::cuda_activation_unary(&x_kt, 4) {
+    let out_kt = match kiln_tensor::cuda_activation_unary(x, 4) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-        .map_err(|e| anyhow::anyhow!("try_kt_relu: candle copy-back failed: {e}"))?;
+    let out = out_kt;
     Ok(Some(out))
 }
 
@@ -10683,17 +10476,12 @@ pub(crate) fn try_kt_recip(x: &Tensor) -> Result<Option<Tensor>> {
 
     kiln_nvtx::range!(c"kiln/recip_kt");
 
-    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
     // kind tag 22 = Recip (matches csrc/activation.cu KIND_RECIP).
-    let out_kt = match kiln_tensor::cuda_activation_unary(&x_kt, 22) {
+    let out_kt = match kiln_tensor::cuda_activation_unary(x, 22) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-        .map_err(|e| anyhow::anyhow!("try_kt_recip: candle copy-back failed: {e}"))?;
+    let out = out_kt;
     Ok(Some(out))
 }
 
@@ -10730,17 +10518,12 @@ pub(crate) fn try_kt_log(x: &Tensor) -> Result<Option<Tensor>> {
 
     kiln_nvtx::range!(c"kiln/log_kt");
 
-    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
     // kind tag 5 = Log (matches csrc/activation.cu KIND_LOG = ln(x)).
-    let out_kt = match kiln_tensor::cuda_activation_unary(&x_kt, 5) {
+    let out_kt = match kiln_tensor::cuda_activation_unary(x, 5) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-        .map_err(|e| anyhow::anyhow!("try_kt_log: candle copy-back failed: {e}"))?;
+    let out = out_kt;
     Ok(Some(out))
 }
 
@@ -10782,17 +10565,12 @@ fn try_kt_log2(x: &Tensor) -> Result<Option<Tensor>> {
 
     kiln_nvtx::range!(c"kiln/log2_kt");
 
-    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
     // kind tag 15 = Log2 (matches csrc/activation.cu KIND_LOG2).
-    let out_kt = match kiln_tensor::cuda_activation_unary(&x_kt, 15) {
+    let out_kt = match kiln_tensor::cuda_activation_unary(x, 15) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-        .map_err(|e| anyhow::anyhow!("try_kt_log2: candle copy-back failed: {e}"))?;
+    let out = out_kt;
     Ok(Some(out))
 }
 
@@ -10833,17 +10611,12 @@ fn try_kt_log10(x: &Tensor) -> Result<Option<Tensor>> {
 
     kiln_nvtx::range!(c"kiln/log10_kt");
 
-    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
     // kind tag 16 = Log10 (matches csrc/activation.cu KIND_LOG10).
-    let out_kt = match kiln_tensor::cuda_activation_unary(&x_kt, 16) {
+    let out_kt = match kiln_tensor::cuda_activation_unary(x, 16) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-        .map_err(|e| anyhow::anyhow!("try_kt_log10: candle copy-back failed: {e}"))?;
+    let out = out_kt;
     Ok(Some(out))
 }
 
@@ -10886,17 +10659,12 @@ fn try_kt_log1p(x: &Tensor) -> Result<Option<Tensor>> {
 
     kiln_nvtx::range!(c"kiln/log1p_kt");
 
-    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
     // kind tag 17 = Log1p (matches csrc/activation.cu KIND_LOG1P).
-    let out_kt = match kiln_tensor::cuda_activation_unary(&x_kt, 17) {
+    let out_kt = match kiln_tensor::cuda_activation_unary(x, 17) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-        .map_err(|e| anyhow::anyhow!("try_kt_log1p: candle copy-back failed: {e}"))?;
+    let out = out_kt;
     Ok(Some(out))
 }
 
@@ -10940,22 +10708,17 @@ fn try_kt_to_dtype(x: &Tensor, target: DType) -> Result<Option<Tensor>> {
 
     kiln_nvtx::range!(c"kiln/to_dtype_kt");
 
-    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
     let kt_target = match target {
         DType::F32 => kiln_tensor::DType::F32,
         DType::BF16 => kiln_tensor::DType::BF16,
         DType::F16 => kiln_tensor::DType::F16,
         _ => return Ok(None),
     };
-    let out_kt = match kiln_tensor::cuda_cast(&x_kt, kt_target) {
+    let out_kt = match kiln_tensor::cuda_cast(x, kt_target) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-        .map_err(|e| anyhow::anyhow!("try_kt_to_dtype: candle copy-back failed: {e}"))?;
+    let out = out_kt;
     Ok(Some(out))
 }
 
@@ -12459,22 +12222,13 @@ fn try_kt_lora_add(base: &Tensor, delta: &Tensor) -> Result<Option<Tensor>> {
 
     kiln_nvtx::range!(c"kiln/lora_add_kt");
 
-    let base_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(base) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
-    let delta_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(delta) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
     // kind tag 0 = Add (matches BinaryKind::Add in
     // crates/kiln-tensor/src/ops/elementwise.rs).
-    let out_kt = match kiln_tensor::cuda_elementwise_binary(&base_kt, &delta_kt, 0) {
+    let out_kt = match kiln_tensor::cuda_elementwise_binary(base, delta, 0) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-        .map_err(|e| anyhow::anyhow!("try_kt_lora_add: candle copy-back failed: {e}"))?;
+    let out = out_kt;
     Ok(Some(out))
 }
 
@@ -12515,22 +12269,13 @@ pub(crate) fn try_kt_broadcast_mul(a: &Tensor, b: &Tensor) -> Result<Option<Tens
 
     kiln_nvtx::range!(c"kiln/broadcast_mul_kt");
 
-    let a_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(a) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
-    let b_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(b) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
     // kind tag 2 = Mul (matches KIND_MUL in
     // crates/kiln-tensor/csrc/elementwise.cu).
-    let out_kt = match kiln_tensor::cuda_elementwise_binary(&a_kt, &b_kt, 2) {
+    let out_kt = match kiln_tensor::cuda_elementwise_binary(a, b, 2) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-        .map_err(|e| anyhow::anyhow!("try_kt_broadcast_mul: candle copy-back failed: {e}"))?;
+    let out = out_kt;
     Ok(Some(out))
 }
 
@@ -12562,22 +12307,13 @@ pub(crate) fn try_kt_broadcast_add(a: &Tensor, b: &Tensor) -> Result<Option<Tens
 
     kiln_nvtx::range!(c"kiln/broadcast_add_kt");
 
-    let a_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(a) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
-    let b_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(b) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
     // kind tag 0 = Add (matches KIND_ADD in
     // crates/kiln-tensor/csrc/elementwise.cu).
-    let out_kt = match kiln_tensor::cuda_elementwise_binary(&a_kt, &b_kt, 0) {
+    let out_kt = match kiln_tensor::cuda_elementwise_binary(a, b, 0) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-        .map_err(|e| anyhow::anyhow!("try_kt_broadcast_add: candle copy-back failed: {e}"))?;
+    let out = out_kt;
     Ok(Some(out))
 }
 
@@ -12611,22 +12347,13 @@ pub(crate) fn try_kt_broadcast_sub(a: &Tensor, b: &Tensor) -> Result<Option<Tens
 
     kiln_nvtx::range!(c"kiln/broadcast_sub_kt");
 
-    let a_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(a) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
-    let b_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(b) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
     // kind tag 1 = Sub (matches KIND_SUB in
     // crates/kiln-tensor/csrc/elementwise.cu).
-    let out_kt = match kiln_tensor::cuda_elementwise_binary(&a_kt, &b_kt, 1) {
+    let out_kt = match kiln_tensor::cuda_elementwise_binary(a, b, 1) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-        .map_err(|e| anyhow::anyhow!("try_kt_broadcast_sub: candle copy-back failed: {e}"))?;
+    let out = out_kt;
     Ok(Some(out))
 }
 
@@ -12656,22 +12383,13 @@ pub(crate) fn try_kt_broadcast_div(a: &Tensor, b: &Tensor) -> Result<Option<Tens
 
     kiln_nvtx::range!(c"kiln/broadcast_div_kt");
 
-    let a_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(a) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
-    let b_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(b) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
     // kind tag 3 = Div (matches KIND_DIV in
     // crates/kiln-tensor/csrc/elementwise.cu).
-    let out_kt = match kiln_tensor::cuda_elementwise_binary(&a_kt, &b_kt, 3) {
+    let out_kt = match kiln_tensor::cuda_elementwise_binary(a, b, 3) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-        .map_err(|e| anyhow::anyhow!("try_kt_broadcast_div: candle copy-back failed: {e}"))?;
+    let out = out_kt;
     Ok(Some(out))
 }
 
@@ -13069,29 +12787,20 @@ fn try_kt_lm_head_argmax(x: &Tensor, embed_tokens_t: &Tensor) -> Result<Option<u
         Err(_) => return Ok(None),
     };
 
-    let lhs_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&x2d) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
-    let rhs_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(embed_tokens_t) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
-    let logits_kt = match kiln_tensor::cuda_matmul(&lhs_kt, &rhs_kt) {
+    // #1082 forward-flip: `x2d` / `embed_tokens_t` are already kt; run the
+    // kt matmul + argmax directly and read the scalar back (no candle
+    // round-trip).
+    let logits_kt = match kiln_tensor::cuda_matmul(&x2d, embed_tokens_t) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
     // `cuda_argmax_last_axis` reduces the last axis. On the
-    // `[1, vocab]` matmul output it yields a rank-1 `[1]` I64
-    // tensor; copy back to a candle scalar via the kt-bridge and
-    // unwrap to u32 to match the existing return type.
+    // `[1, vocab]` matmul output it yields a rank-1 `[1]` I64 tensor.
     let argmax_kt = match kiln_tensor::cuda_argmax_last_axis(&logits_kt) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    let argmax = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&argmax_kt)
-        .map_err(|e| anyhow::anyhow!("try_kt_lm_head_argmax: candle copy-back failed: {e}"))?;
-    let token_i64 = argmax.flatten_all()?.to_scalar::<i64>()?;
+    let token_i64 = argmax_kt.flatten_all()?.to_vec1::<i64>()?[0];
     Ok(Some(token_i64 as u32))
 }
 
@@ -13118,19 +12827,15 @@ pub(crate) fn try_kt_argmax_1d(x: &Tensor) -> Result<Option<u32>> {
 
     kiln_nvtx::range!(c"kiln/argmax_kt");
 
-    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x) {
+    // #1082 forward-flip: `x` is already kt; run the kt argmax directly
+    // and read the scalar back without the candle round-trip.
+    let out_kt = match kiln_tensor::cuda_argmax_last_axis(x) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    let out_kt = match kiln_tensor::cuda_argmax_last_axis(&x_kt) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
-    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-        .map_err(|e| anyhow::anyhow!("try_kt_argmax_1d: candle copy-back failed: {e}"))?;
     // kt_argmax returns I64; cuda_argmax_last_axis on a rank-1 input
-    // yields a rank-0 scalar tensor.
-    let token_i64 = out.to_scalar::<i64>()?;
+    // yields a rank-0 scalar tensor — flatten to rank-1 [1] and read.
+    let token_i64 = out_kt.flatten_all()?.to_vec1::<i64>()?[0];
     Ok(Some(token_i64 as u32))
 }
 
@@ -13190,16 +12895,11 @@ pub(crate) fn try_kt_sampling_argmax_rows(logits: &Tensor) -> Result<Option<Vec<
 
     kiln_nvtx::range!(c"kiln/sampling_argmax_rows_kt");
 
-    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(logits) {
+    let out_kt = match kiln_tensor::cuda_argmax_last_axis(logits) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    let out_kt = match kiln_tensor::cuda_argmax_last_axis(&x_kt) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
-    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-        .map_err(|e| anyhow::anyhow!("try_kt_sampling_argmax_rows: candle copy-back failed: {e}"))?;
+    let out = out_kt;
     // cuda_argmax_last_axis on a rank-N input yields a rank-(N-1) I64
     // tensor; flatten and cast each element to u32 to match the
     // existing greedy_sample_rows return type.
@@ -13449,18 +13149,12 @@ fn try_kt_sum_squared_last_dim_keepdim(x: &Tensor) -> Result<Option<Tensor>> {
 
     kiln_nvtx::range!(c"kiln/sum_sq_last_dim_kt");
 
-    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x) {
+    let out_kt = match kiln_tensor::cuda_sum_squared_last_axis(x) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    let out_kt = match kiln_tensor::cuda_sum_squared_last_axis(&x_kt) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
-    let reduced = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt).map_err(|e| {
-        anyhow::anyhow!("try_kt_sum_squared_last_dim_keepdim: candle copy-back failed: {e}")
-    })?;
-    let out = reduced.unsqueeze(LAST_DIM).map_err(|e| {
+    let reduced = out_kt;
+    let out = reduced.unsqueeze(reduced.rank()).map_err(|e| {
         anyhow::anyhow!("try_kt_sum_squared_last_dim_keepdim: unsqueeze failed: {e}")
     })?;
     Ok(Some(out))
@@ -13478,16 +13172,11 @@ fn try_kt_sum_squared_last_dim_keepdim(x: &Tensor) -> Result<Option<Tensor>> {
 fn try_kt_l2_normalize(x_f32: &Tensor, eps: f32) -> Result<Option<Tensor>> {
     kiln_nvtx::range!(c"kiln/l2_normalize_kt");
 
-    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x_f32) {
+    let out_kt = match kiln_tensor::cuda_l2norm_last_axis(x_f32, eps) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    let out_kt = match kiln_tensor::cuda_l2norm_last_axis(&x_kt, eps) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
-    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-        .map_err(|e| anyhow::anyhow!("try_kt_l2_normalize: candle copy-back failed: {e}"))?;
+    let out = out_kt;
     Ok(Some(out))
 }
 
