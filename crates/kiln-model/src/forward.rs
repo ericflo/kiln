@@ -11142,9 +11142,8 @@ fn lm_head_argmax_rows(x: &Tensor, embed_tokens_t: &Tensor) -> Result<Vec<u32>> 
     // the kt logits to candle for it.
     // #1082: un-stubbed for no-CUDA — `kt_logits_to_candle` + `greedy_sample_rows`
     // (candle host sampler) work on any candle build.
-    let logits_c =
-        kt_logits_to_candle(&logits).context("lm_head_argmax_rows kt->candle logits")?;
-    crate::sampling::greedy_sample_rows(&logits_c).context("batched greedy row sampling failed")
+    // #1082: greedy_sample_rows is kt-native now — pass kt logits directly.
+    crate::sampling::greedy_sample_rows(&logits).context("batched greedy row sampling failed")
 }
 
 fn lm_head_argmax_rows_backend_decode_if(
@@ -24434,12 +24433,9 @@ pub fn mtp_forward_step(
         // (also called from the candle-aliased sampler in speculative.rs).
         // Bridge the kt activations to candle here — cold debug path only
         // (`should_log()` gate), so the copies don't touch production decode.
-        let l2_kt = |t: &Tensor| -> f32 {
-            kt_logits_to_candle(t)
-                .ok()
-                .and_then(|c| crate::mtp_debug::tensor_l2_norm(&c).ok())
-                .unwrap_or(f32::NAN)
-        };
+        // #1082: mtp_debug::tensor_l2_norm is kt-native now — no candle bridge.
+        let l2_kt =
+            |t: &Tensor| -> f32 { crate::mtp_debug::tensor_l2_norm(t).unwrap_or(f32::NAN) };
         let h_norm = l2_kt(h_prev);
         let norm_emb_l2 = l2_kt(&norm_emb);
         let norm_h_l2 = l2_kt(&norm_h);
@@ -24450,13 +24446,10 @@ pub fn mtp_forward_step(
             f32::NAN
         };
         let logits_norm = l2_kt(&logits);
-        let logits_candle = kt_logits_to_candle(&logits);
-        let top = match logits_candle {
-            Ok(lc) => crate::mtp_debug::top_k_logits(&lc, 5)
-                .map(|t| crate::mtp_debug::format_top_k(&t))
-                .unwrap_or_else(|e| format!("<top_k err: {e}>")),
-            Err(e) => format!("<top_k bridge err: {e}>"),
-        };
+        // #1082: mtp_debug::top_k_logits is kt-native now — pass kt directly.
+        let top = crate::mtp_debug::top_k_logits(&logits, 5)
+            .map(|t| crate::mtp_debug::format_top_k(&t))
+            .unwrap_or_else(|e| format!("<top_k err: {e}>"));
         tracing::info!(
             target: "kiln::mtp_debug",
             mtp_pos = mtp_pos,
