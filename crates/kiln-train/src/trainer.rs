@@ -9945,11 +9945,24 @@ fn tile_loss_explicit(
     mask_padded.push(false);
     mask_padded.extend_from_slice(mask);
 
+    // (#1082) `model_forward_final_norm`/`model_forward_head` are kt-native and
+    // `embed_tokens_t` is kt; the FLCE / cross-entropy loss helpers are candle
+    // islands, so bridge candle->kt for the forward input and kt->candle for
+    // the head output + the lm_head weight.
+    let head_t_candle = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&weights.embed_tokens_t)
+        .map_err(|e| anyhow::anyhow!("tile_loss_explicit: kt->candle head_t: {e}"))?;
     let loss = if use_flce() {
-        let normed = model_forward_final_norm(&hidden_padded, weights, model_config)?;
+        let normed_kt = model_forward_final_norm(
+            &kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&hidden_padded)
+                .map_err(|e| anyhow::anyhow!("tile_loss_explicit: candle->kt hidden: {e}"))?,
+            weights,
+            model_config,
+        )?;
+        let normed = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&normed_kt)
+            .map_err(|e| anyhow::anyhow!("tile_loss_explicit: kt->candle normed: {e}"))?;
         fused_linear_cross_entropy_dispatch(
             &normed,
-            &weights.embed_tokens_t,
+            &head_t_candle,
             &input_ids_padded,
             &mask_padded,
             device,
@@ -9957,7 +9970,14 @@ fn tile_loss_explicit(
         )
         .context("tile fused linear cross-entropy")?
     } else {
-        let logits = model_forward_head(&hidden_padded, weights, model_config)?;
+        let logits_kt = model_forward_head(
+            &kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&hidden_padded)
+                .map_err(|e| anyhow::anyhow!("tile_loss_explicit: candle->kt hidden: {e}"))?,
+            weights,
+            model_config,
+        )?;
+        let logits = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&logits_kt)
+            .map_err(|e| anyhow::anyhow!("tile_loss_explicit: kt->candle logits: {e}"))?;
         cross_entropy_loss(&logits, &input_ids_padded, &mask_padded, device)?
     };
 
