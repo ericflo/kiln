@@ -7966,10 +7966,19 @@ pub fn rms_norm(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor> {
             // Production-safe: opt-in via two conditions
             // (env var + active tape scope). The default forward path
             // is unchanged. See `crate::tape_forward` module docs.
-            if let Some(out) =
-                crate::tape_forward::try_tape_rms_norm_cuda(x, weight, eps as f32)?
-            {
-                return Ok(out);
+            // tape_forward is candle-typed; only bridge when the tape is
+            // active (training). Production decode skips this copy.
+            if crate::tape_forward::tape_forward_enabled() {
+                let x_candle =
+                    kt_logits_to_candle(x).context("rms_norm kt->candle x (tape)")?;
+                let w_candle =
+                    kt_logits_to_candle(weight).context("rms_norm kt->candle weight (tape)")?;
+                if let Some(out) =
+                    crate::tape_forward::try_tape_rms_norm_cuda(&x_candle, &w_candle, eps as f32)?
+                {
+                    return candle_to_kt_activation(&out)
+                        .context("rms_norm candle->kt tape out");
+                }
             }
             if !x.track_op() && !weight.track_op() {
                 if let (Some(x_kt), Some(w_kt)) =
@@ -7977,16 +7986,25 @@ pub fn rms_norm(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor> {
                 {
                     if kiln_rmsnorm_kernel::supports_rmsnorm_kt(&x_kt, &w_kt) {
                         // Phase 7 (#1082): kt-only. Bit-exact: bottoms out in
-                        // the same `kiln_fused_rmsnorm` FFI symbol.
+                        // the same `kiln_fused_rmsnorm` FFI symbol. Result is kt
+                        // — return it directly (no candle round-trip).
                         let out_kt =
                             kiln_rmsnorm_kernel::fused_rmsnorm_kt(&x_kt, &w_kt, eps as f32)
                                 .map_err(|e| anyhow::anyhow!("kt fused_rmsnorm: {e}"))?;
-                        return kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-                            .with_context(|| "kt-adapter: rmsnorm out → candle failed");
+                        return Ok(out_kt);
                     }
                 }
             }
-            if should_use_fused_rmsnorm() && crate::rmsnorm_candle_shim::supports(x, weight) {
+            // Autograd/training path: `rmsnorm_candle_shim` is candle-typed.
+            // Bridge the kt x/weight to candle and the candle result back to
+            // kt. (Reached only for tracked tensors; the non-tracked decode
+            // path returned from the kt-native branch above.)
+            let x_candle = kt_logits_to_candle(x).context("rms_norm kt->candle x (shim)")?;
+            let w_candle =
+                kt_logits_to_candle(weight).context("rms_norm kt->candle weight (shim)")?;
+            if should_use_fused_rmsnorm()
+                && crate::rmsnorm_candle_shim::supports(&x_candle, &w_candle)
+            {
                 // Phase 7 (#1082): kt-forward-op shim production caller.
                 // Replaces the candle-typed `fused_rmsnorm_with_autograd`
                 // (CustomOp2 over `kiln_fused_rmsnorm` forward + the
@@ -8013,8 +8031,13 @@ pub fn rms_norm(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor> {
                 // `docs/rmsnorm-kt-tape-production-caller-stop-2026-05-28.md`
                 // for the audit explaining why a per-call-site flip is
                 // not progress until CP-4 lands.
-                return crate::rmsnorm_candle_shim::fused_rmsnorm_via_kt_forward_op(x, weight, eps as f32)
-                    .context("fused_rmsnorm_via_kt_forward_op shim failed");
+                let out = crate::rmsnorm_candle_shim::fused_rmsnorm_via_kt_forward_op(
+                    &x_candle,
+                    &w_candle,
+                    eps as f32,
+                )
+                .context("fused_rmsnorm_via_kt_forward_op shim failed")?;
+                return candle_to_kt_activation(&out).context("rms_norm candle->kt shim out");
             }
         }
     }
