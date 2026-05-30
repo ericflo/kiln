@@ -1788,11 +1788,10 @@ pub fn cuda_cast(src: &crate::Tensor, target: crate::DType) -> Result<crate::Ten
         crate::Device::Cuda(i) => i,
         _ => unreachable!(),
     };
-    let dst_storage = CudaStorage::zeros_ctx(&ctx,
-        device_index,
-        target,
-        n,
-    )?;
+    // #1082 (perf, Pattern A): the cast kernel writes every one of `n` output
+    // elements (`out[i] = cast(src[i])`), so the output is fully overwritten
+    // before any read — allocate uninitialized to skip the cudaMemsetAsync.
+    let dst_storage = CudaStorage::alloc_uninit_ctx(&ctx, device_index, target, n)?;
 
     let stream = ctx.default_stream();
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
