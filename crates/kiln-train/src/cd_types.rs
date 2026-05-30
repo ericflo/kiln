@@ -185,18 +185,13 @@ pub(crate) fn safetensors_save_file(
 }
 
 // ---------------------------------------------------------------------------
-// Macro shim for `candle_core::bail!`. Confines the candle bail path to
-// this file. Re-exported via `pub(crate) use cd_bail` so call sites can
-// `use crate::cd_types::cd_bail;` and keep writing `cd_bail!(...)`.
-// ---------------------------------------------------------------------------
-
-/// Helper macro shim wrapping candle's `bail!`. Lets call sites write
-/// `cd_bail!(...)` instead of the full candle path.
-macro_rules! cd_bail {
-    ($($t:tt)*) => { ::candle_core::bail!($($t)*) };
-}
-pub(crate) use cd_bail;
-
+// (#1082) The `cd_bail!` macro shim (wrapping `candle_core::bail!`) was
+// removed: its sole call site was the `InjectTensorGradient::bwd` candle
+// `CustomOp1` impl in `trainer.rs`, which the forward.rs type-flip deleted in
+// favour of `kiln_kt_bridge::inject_grad_shim::inject_gradient_via_shim`. With
+// no remaining call sites the macro + its `pub(crate) use` were dead (unused-
+// macro / unused-import warnings), so they are gone. Re-add a kt-native bail
+// shim here if a future kt-tape adapter needs one.
 // ---------------------------------------------------------------------------
 // (#1082) Tests for the `cd_tensor_id_to_kt` migration substrate.
 // ---------------------------------------------------------------------------
