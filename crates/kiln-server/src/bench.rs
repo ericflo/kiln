@@ -158,9 +158,8 @@ fn greedy_sample_kt(logits: &kiln_tensor::Tensor) -> Result<u32> {
         contig = logits.contiguous()?;
         &contig
     };
-    let candle_logits = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(logits)
-        .map_err(|e| anyhow::anyhow!("bench greedy_sample_kt: kt -> candle bridge: {e}"))?;
-    greedy_sample(&candle_logits)
+    // #1082: greedy_sample is kt-native — no candle bridge.
+    greedy_sample(logits)
 }
 
 #[cfg(not(feature = "cuda"))]
@@ -2142,20 +2141,18 @@ fn bench_latency_paged_mtp(
     // host sampler both still consume candle tensors, so bridge the
     // last-position hidden state to candle once here and thread the candle
     // `h_prev` through the decode loop.
-    let mut h_prev = bench_kt_tensor_to_candle(&prefill_h_prev_kt)
-        .context("bench_latency_paged_mtp: prefill h_prev kt -> candle bridge")?;
+    // #1082: speculative_mtp_decode_step + greedy_sample are kt-native now —
+    // keep h_prev / prefill_last as kt (no candle bridge).
+    let mut h_prev = prefill_h_prev_kt;
 
-    // prefill_logits is already [1, 1, V] (kt). Squeeze the time dim then
-    // bridge to candle for the candle host sampler.
-    let prefill_last_kt = prefill_logits.squeeze(1)?;
-    let prefill_last = bench_kt_tensor_to_candle(&prefill_last_kt)
-        .context("bench_latency_paged_mtp: prefill logits kt -> candle bridge")?;
+    // prefill_logits is already [1, 1, V] (kt). Squeeze the time dim.
+    let prefill_last = prefill_logits.squeeze(1)?;
     // Phase C35 H13 A/B — optionally cast logits to FP32 before argmax so the
     // bench prefill matches vLLM's sampler contract (rejection_sampler.py
     // casts `raw_target_logits` to float32 before greedy). BF16 argmax can
     // flip top-1 under ties when two candidates share the same BF16 bucket.
     let mut last_token = if mtp_argmax_fp32_enabled() {
-        let prefill_last_fp32 = prefill_last.to_dtype(kiln_kt_bridge::candle_core::DType::F32)?;
+        let prefill_last_fp32 = prefill_last.to_dtype(kiln_tensor::DType::F32)?;
         greedy_sample(&prefill_last_fp32)?
     } else {
         greedy_sample(&prefill_last)?
