@@ -6804,16 +6804,22 @@ pub(crate) fn try_kt_matmul(lhs: &Tensor, rhs: &Tensor) -> Result<Option<Tensor>
     // on `Tape` instead of leaving the result as a no-autograd
     // candle Tensor. With the gate off (the default) this returns
     // `Ok(None)` and we fall through to the existing dispatch.
-    if let Some(out) = crate::tape_forward::try_tape_matmul_cuda(lhs, rhs)? {
-        return Ok(Some(out));
+    // tape_forward is candle-typed; bridge only when the tape is active.
+    if crate::tape_forward::tape_forward_enabled() {
+        let lhs_candle = kt_logits_to_candle(lhs).context("try_kt_matmul kt->candle lhs")?;
+        let rhs_candle = kt_logits_to_candle(rhs).context("try_kt_matmul kt->candle rhs")?;
+        if let Some(out) = crate::tape_forward::try_tape_matmul_cuda(&lhs_candle, &rhs_candle)? {
+            return Ok(Some(
+                candle_to_kt_activation(&out).context("try_kt_matmul candle->kt tape out")?,
+            ));
+        }
     }
 
     let out_kt = match kiln_tensor::cuda_matmul(lhs, rhs) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    let out = out_kt;
-    Ok(Some(out))
+    Ok(Some(out_kt))
 }
 
 /// Vulkan-routed `[B, T, H] @ [H, D] -> [B, T, D]` matmul with autograd
