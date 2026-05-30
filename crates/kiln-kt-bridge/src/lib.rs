@@ -654,6 +654,50 @@ fn cached_candle_cuda_device(index: usize) -> Result<candle_core::Device, Bridge
 /// The candle Tensor's layout is contiguous (start_offset = 0,
 /// row-major strides). Non-contiguous kt sources must be made
 /// contiguous before this call.
+/// No-CUDA (default-build) host bridge: kt CPU tensor → candle CPU tensor via a
+/// typed host round-trip. #1082: the CUDA variant below is `#[cfg(cuda)]`-only,
+/// but the shared kiln-train GRPO/FLCE call sites invoke this unconditionally,
+/// so the default (no-CUDA / `linux-default` CI) build needs an implementation
+/// under the same name. On the CPU both tensors are host-resident; this is a
+/// value-faithful copy across the type systems. Supported dtypes mirror the
+/// CUDA variant (F32/BF16/F16/U32/U8/I64).
+#[cfg(all(not(feature = "cuda"), feature = "candle"))]
+pub fn kt_tensor_to_candle_cuda_copy(
+    t: &KtTensor,
+) -> Result<candle_core::Tensor, BridgeError> {
+    let ct;
+    let t = if t.is_contiguous() {
+        t
+    } else {
+        ct = t
+            .contiguous()
+            .map_err(|e| BridgeError::new(format!("kt->candle cpu: contiguous: {e}")))?;
+        &ct
+    };
+    let shape: Vec<usize> = t.shape().to_vec();
+    let dev = candle_core::Device::Cpu;
+    macro_rules! bridge {
+        ($E:ty) => {{
+            let v: Vec<$E> = t
+                .to_vec::<$E>()
+                .map_err(|e| BridgeError::new(format!("kt->candle cpu to_vec: {e}")))?;
+            candle_core::Tensor::from_vec(v, shape, &dev)
+                .map_err(|e| BridgeError::new(format!("kt->candle cpu from_vec: {e}")))
+        }};
+    }
+    match t.dtype() {
+        KtDType::F32 => bridge!(f32),
+        KtDType::BF16 => bridge!(half::bf16),
+        KtDType::F16 => bridge!(half::f16),
+        KtDType::U32 => bridge!(u32),
+        KtDType::U8 => bridge!(u8),
+        KtDType::I64 => bridge!(i64),
+        other => Err(BridgeError::new(format!(
+            "kt->candle cpu: unsupported dtype {other:?}"
+        ))),
+    }
+}
+
 #[cfg(all(feature = "cuda", feature = "candle"))]
 pub fn kt_tensor_to_candle_cuda_copy(
     t: &KtTensor,
@@ -846,6 +890,42 @@ pub fn kt_tensor_to_candle_cuda_copy(
 /// call sites in `kiln-model::backend::cuda` skipping this step
 /// while the sibling `gdn_gates` kt path applied it — see that
 /// commit message for the failure mode.
+/// No-CUDA (default-build) host bridge: candle CPU tensor → kt CPU tensor via a
+/// typed host copy. #1082: companion to the no-CUDA `kt_tensor_to_candle_cuda_copy`
+/// above. The "borrow" name is retained for call-site compatibility with the
+/// CUDA zero-copy variant; on the CPU build this is a value-faithful copy, not
+/// a view. Supported dtypes mirror the CUDA variant.
+#[cfg(all(not(feature = "cuda"), feature = "candle"))]
+pub fn kt_tensor_from_candle_cuda_borrow(
+    t: &candle_core::Tensor,
+) -> Result<KtTensor, BridgeError> {
+    let t = t
+        .contiguous()
+        .map_err(|e| BridgeError::new(format!("candle->kt cpu: contiguous: {e}")))?;
+    let shape: Vec<usize> = t.dims().to_vec();
+    macro_rules! bridge {
+        ($E:ty) => {{
+            let v: Vec<$E> = t
+                .flatten_all()
+                .and_then(|f| f.to_vec1::<$E>())
+                .map_err(|e| BridgeError::new(format!("candle->kt cpu to_vec1: {e}")))?;
+            kiln_tensor::Tensor::from_slice(&v, shape)
+                .map_err(|e| BridgeError::new(format!("candle->kt cpu from_slice: {e}")))
+        }};
+    }
+    match t.dtype() {
+        candle_core::DType::F32 => bridge!(f32),
+        candle_core::DType::BF16 => bridge!(half::bf16),
+        candle_core::DType::F16 => bridge!(half::f16),
+        candle_core::DType::U32 => bridge!(u32),
+        candle_core::DType::U8 => bridge!(u8),
+        candle_core::DType::I64 => bridge!(i64),
+        other => Err(BridgeError::new(format!(
+            "candle->kt cpu: unsupported dtype {other:?}"
+        ))),
+    }
+}
+
 #[cfg(all(feature = "cuda", feature = "candle"))]
 pub fn kt_tensor_from_candle_cuda_borrow(
     t: &candle_core::Tensor,
