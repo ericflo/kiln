@@ -225,15 +225,21 @@ pub fn cuda_matmul(a: &Tensor, b: &Tensor) -> Result<Tensor> {
         }
     };
     // ---- allocate output ----
-    // CudaStorage::zeros_ctx (#1082) — the cudarc CudaContext is pulled
-    // directly off a_storage.context(), no .candle_device() read.
+    // CudaStorage::alloc_uninit_ctx (#1082 perf, Pattern A) — the cudarc
+    // CudaContext is pulled directly off a_storage.context(), no
+    // .candle_device() read.
     let ctx = a_storage.context();
     let batch: usize = a_shape[..a_rank - 2].iter().product::<usize>().max(1);
     let mut out_shape = a_shape[..a_rank - 2].to_vec();
     out_shape.push(m);
     out_shape.push(n);
     let out_n_elements = batch * m * n;
-    let out_storage = CudaStorage::zeros_ctx(&ctx, device_index, dtype, out_n_elements)?;
+    // #1082 (perf, Pattern A): this GEMM uses Epilogue::Identity (beta = 0,
+    // pure C = A@B) and the per-batch loop below covers every batch, so all
+    // `batch * m * n` output elements are written before any read. Allocate
+    // uninitialized to skip the cudaMemsetAsync zero-fill (a full-buffer DRAM
+    // write the GEMM immediately overwrites).
+    let out_storage = CudaStorage::alloc_uninit_ctx(&ctx, device_index, dtype, out_n_elements)?;
 
     // ---- acquire handle ----
     // Cold start passes the cudarc CudaContext through to

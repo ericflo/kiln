@@ -158,6 +158,45 @@ impl CudaStorage {
         })
     }
 
+    /// (#1082 perf — Pattern A) Allocate `n_elements` of `dtype`
+    /// **UNINITIALIZED** on the cudarc `CudaContext` `ctx`.
+    ///
+    /// Identical to [`Self::zeros_ctx`] except it skips the
+    /// `cudaMemsetAsync` zero-fill (`alloc_zeros` → `alloc`). That zero-fill
+    /// is pure waste whenever the producer overwrites 100% of the buffer —
+    /// e.g. a GEMM with `beta = 0` (`Epilogue::Identity`), or a full-tensor
+    /// elementwise / cast / copy that writes every element. The audit flagged
+    /// "alloc-zeros then fully overwrite" as the highest-frequency baked-in
+    /// waste on the decode + train paths.
+    ///
+    /// # Caller contract
+    /// The returned storage's device bytes are uninitialized; the caller MUST
+    /// fully overwrite the buffer before any read. For accumulation /
+    /// partial-write outputs (read-before-write), use [`Self::zeros_ctx`].
+    pub fn alloc_uninit_ctx(
+        ctx: &Arc<CudaContext>,
+        device_index: usize,
+        dtype: DType,
+        n_elements: usize,
+    ) -> Result<Self> {
+        let byte_len = dtype.packed_buffer_bytes(n_elements);
+        // SAFETY: cudarc's `alloc` returns uninitialized device memory. The
+        // caller contract (documented above) requires a full overwrite before
+        // any read, so the uninitialized contents are never observed.
+        let slice = unsafe { ctx.default_stream().alloc::<u8>(byte_len) }.map_err(|e| {
+            Error::Msg(format!(
+                "CudaStorage::alloc_uninit_ctx: ctx.default_stream().alloc::<u8>({byte_len}) \
+                 failed: {e:?}"
+            ))
+        })?;
+        Ok(CudaStorage {
+            device: Device::Cuda(device_index),
+            dtype,
+            slice: SliceOwner::Owned(slice),
+            ctx: ctx.clone(),
+        })
+    }
+
     /// Wrap an existing `CudaSlice<u8>` allocated by the caller —
     /// **candle-free** entry point.
     ///
