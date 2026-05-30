@@ -27512,19 +27512,27 @@ mod tests {
         }
 
         fn device(&self) -> kiln_tensor::Device {
-            // Test mock — synthesizes kt identity from the candle device
-            // held in the struct. Production backends cache this; the
-            // test path bridges per call because the struct existed
-            // before the kt accessor and a field add would churn many
-            // setups. (#1082)
-            kiln_kt_bridge::kt_device_from_candle(&self.device)
+            // #1082: the struct's `device` field is now a kt `Device`
+            // (`Copy`), so the trait's kt-typed accessor returns it directly
+            // — no candle bridge needed.
+            self.device
         }
 
-        fn linear_decode(&self, _x: &Tensor, _weight_t: &Tensor) -> Result<Option<Tensor>> {
-            Ok(Some(Tensor::from_vec(
+        fn linear_decode(
+            &self,
+            _x: &candle_core::Tensor,
+            _weight_t: &candle_core::Tensor,
+        ) -> Result<Option<candle_core::Tensor>> {
+            // The `BackendRuntime::linear_decode` trait method is still
+            // candle-typed (the production decode path bridges kt→candle
+            // before calling it and back after). Build the fixed candle
+            // output on a candle device bridged from the kt `device` field.
+            let candle_device = kiln_kt_bridge::candle_device_from_kt(&self.device)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+            Ok(Some(candle_core::Tensor::from_vec(
                 self.values.clone(),
                 self.dims,
-                &self.device,
+                &candle_device,
             )?))
         }
     }
@@ -27546,7 +27554,8 @@ mod tests {
         }
 
         fn device(&self) -> kiln_tensor::Device {
-            kiln_kt_bridge::kt_device_from_candle(&self.device)
+            // #1082: kt `Device` field returned directly.
+            self.device
         }
 
         fn mlp_decode(
@@ -27556,14 +27565,15 @@ mod tests {
             _up_weight_t: &Tensor,
             _down_weight_t: &Tensor,
         ) -> Result<Option<Tensor>> {
+            // #1082: the `mlp_decode` trait method is kt-typed — build the
+            // fixed kt output (`from_vec` is CPU; move to the kt device).
             self.fused_calls
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Ok(match self.fused_values.as_ref() {
-                Some(values) => Some(Tensor::from_vec(
-                    values.clone(),
-                    self.fused_dims,
-                    &self.device,
-                )?),
+                Some(values) => Some(
+                    Tensor::from_vec(values.clone(), self.fused_dims)?
+                        .to_device(self.device)?,
+                ),
                 None => None,
             })
         }
@@ -27574,14 +27584,14 @@ mod tests {
             _gate_weight_t: &Tensor,
             _up_weight_t: &Tensor,
         ) -> Result<Option<Tensor>> {
+            // #1082: kt-typed trait method.
             self.gate_up_calls
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Ok(match self.gate_up_values.as_ref() {
-                Some(values) => Some(Tensor::from_vec(
-                    values.clone(),
-                    self.gate_up_dims,
-                    &self.device,
-                )?),
+                Some(values) => Some(
+                    Tensor::from_vec(values.clone(), self.gate_up_dims)?
+                        .to_device(self.device)?,
+                ),
                 None => None,
             })
         }
@@ -28172,7 +28182,7 @@ mod tests {
             1.0, 1.1, 1.2, // token 3
             1.3, 1.4, 1.5, // token 4
         ];
-        let embed = Tensor::new(embed_data, &device)?.reshape((5, 3))?;
+        let embed = Tensor::new(&embed_data, &device)?.reshape((5, 3))?;
 
         let result = embedding_lookup(&[2, 0, 4], &embed)?;
         assert_eq!(result.dims(), &[3, 3]); // [seq_len=3, hidden_size=3]
@@ -28200,7 +28210,7 @@ mod tests {
             1.0, 1.1, 1.2, //
             1.3, 1.4, 1.5,
         ];
-        let embed = Tensor::new(embed_data, &device)?.reshape((5, 3))?;
+        let embed = Tensor::new(&embed_data, &device)?.reshape((5, 3))?;
         let embed_t = embed.t()?.contiguous()?;
 
         let direct = embedding_lookup(&[2, 0, 4], &embed)?;
@@ -28343,7 +28353,7 @@ mod tests {
                 return Ok(());
             }
         };
-        let backend = crate::backend::for_device(&device);
+        let backend = crate::backend::for_device_kt(&device);
         if !backend.supports_gdn_gated_rms_norm() {
             eprintln!("CUDA gated RMSNorm disabled, skipping parity test");
             return Ok(());
@@ -28408,7 +28418,7 @@ mod tests {
             eprintln!("Metal unavailable, skipping test_metal_gated_rms_norm_matches_fallback");
             return Ok(());
         };
-        let backend = crate::backend::for_device(&device);
+        let backend = crate::backend::for_device_kt(&device);
         if !backend.supports_gdn_gated_rms_norm() {
             eprintln!("Metal gated RMSNorm disabled, skipping parity test");
             return Ok(());
@@ -29052,7 +29062,7 @@ mod tests {
         let data: Vec<f32> = (0..n)
             .map(|i| (((i * 17 + 13) % 257) as f32 - 128.0) * scale)
             .collect();
-        Ok(Tensor::new(data, device)?
+        Ok(Tensor::new(&data, device)?
             .reshape(shape)?
             .to_dtype(DType::BF16)?
             .contiguous()?)
@@ -29064,7 +29074,7 @@ mod tests {
         let data: Vec<f32> = (0..n)
             .map(|i| (((i * 23 + 19) % 251) as f32 - 125.0) * scale)
             .collect();
-        Ok(Tensor::new(data, device)?.reshape(shape)?.contiguous()?)
+        Ok(Tensor::new(&data, device)?.reshape(shape)?.contiguous()?)
     }
 
     #[cfg(any(feature = "metal", feature = "cuda"))]
@@ -29301,9 +29311,9 @@ mod tests {
         // kt parallel to `device` for `PagedKvCache::new_kt` call sites
         // below — the kt twin lets the constructor call drop the
         // candle::DType + &candle::Device names. (#1082)
-        let device_kt = kiln_kt_bridge::kt_device_from_candle(&device);
+        let device_kt = device; // #1082: `device` is already kt
 
-        let backend = crate::backend::for_device(&device);
+        let backend = crate::backend::for_device_kt(&device);
         let batch = 2usize;
         let hidden = 512usize;
         let num_heads = 16usize;
@@ -29434,9 +29444,9 @@ mod tests {
             return Ok(());
         }
         // kt parallel to `device` for `PagedKvCache::new_kt` (#1082).
-        let device_kt = kiln_kt_bridge::kt_device_from_candle(&device);
+        let device_kt = device; // #1082: `device` is already kt
 
-        let backend = crate::backend::for_device(&device);
+        let backend = crate::backend::for_device_kt(&device);
         let batch = 2usize;
         let hidden = 512usize;
         let intermediate = 768usize;
@@ -29595,9 +29605,9 @@ mod tests {
             return Ok(());
         }
         // kt parallel to `device` for `PagedKvCache::new_kt` (#1082).
-        let device_kt = kiln_kt_bridge::kt_device_from_candle(&device);
+        let device_kt = device; // #1082: `device` is already kt
 
-        let backend = crate::backend::for_device(&device);
+        let backend = crate::backend::for_device_kt(&device);
         let batch = 2usize;
         let vocab = 64usize;
         let hidden = 512usize;
@@ -29748,10 +29758,12 @@ mod tests {
             eprintln!("fused paged decode disabled; skipping dyn_seqlen batched test");
             return Ok(());
         }
-        // kt parallel to `device` for `PagedKvCache::new_kt` (#1082).
-        let device_kt = kiln_kt_bridge::kt_device_from_candle(&device);
+        // #1082: `device` is now a kt `Device` (from `new_cuda_device`), so the
+        // kt cache constructor takes it directly and the backend dispatch goes
+        // through the kt entry point.
+        let device_kt = device;
 
-        let backend = crate::backend::for_device(&device);
+        let backend = crate::backend::for_device_kt(&device);
         let batch = 2usize;
         let vocab = 64usize;
         let hidden = 512usize;
@@ -29963,9 +29975,9 @@ mod tests {
             return Ok(());
         }
         // kt parallel to `device` for `PagedKvCache::new_kt` (#1082).
-        let device_kt = kiln_kt_bridge::kt_device_from_candle(&device);
+        let device_kt = device; // #1082: `device` is already kt
 
-        let backend = crate::backend::for_device(&device);
+        let backend = crate::backend::for_device_kt(&device);
         let batch = 2usize;
         let block_size = 16usize;
         let start_pos = 3usize;
@@ -30605,7 +30617,10 @@ mod tests {
     #[test]
     fn test_cached_transpose_materializes_on_cpu() -> Result<()> {
         let device = Device::Cpu;
-        let t = Tensor::new(&[[1.0_f32, 2.0, 3.0], [4.0, 5.0, 6.0]], &device)?;
+        // #1082: kt `Tensor::new` only accepts rank-1 slices; build the [2,3]
+        // tensor from a flat slice + shape (same values).
+        let t = Tensor::from_slice(&[1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0], (2usize, 3usize))?
+            .to_device(device)?;
 
         let tt = cached_transpose(&t)?;
 
@@ -30624,7 +30639,10 @@ mod tests {
         let Some(device) = crate::backend::metal::try_new_metal() else {
             return Ok(());
         };
-        let t = Tensor::new(&[[1.0_f32, 2.0, 3.0], [4.0, 5.0, 6.0]], &device)?;
+        // #1082: kt `Tensor::new` only accepts rank-1 slices; build the [2,3]
+        // tensor from a flat slice + shape (same values).
+        let t = Tensor::from_slice(&[1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0], (2usize, 3usize))?
+            .to_device(device)?;
 
         let tt = cached_transpose(&t)?;
 
@@ -30652,7 +30670,7 @@ mod tests {
         let randn = |shape: &[usize]| -> Result<Tensor> {
             let n: usize = shape.iter().product();
             let data: Vec<f32> = (0..n).map(|i| ((i as f32 * 0.01).sin()) * 0.1).collect();
-            Ok(Tensor::new(data, device)?.reshape(shape)?)
+            Ok(Tensor::new(&data, device)?.reshape(shape)?)
         };
 
         let embed_tokens = randn(&[vocab_size, hidden_size])?;
@@ -31085,7 +31103,7 @@ mod tests {
         let randn = |shape: &[usize]| -> Result<Tensor> {
             let n: usize = shape.iter().product();
             let data: Vec<f32> = (0..n).map(|i| ((i as f32 * 0.01).sin()) * 0.1).collect();
-            Ok(Tensor::new(data, device)?.reshape(shape)?)
+            Ok(Tensor::new(&data, device)?.reshape(shape)?)
         };
 
         let embed_tokens = randn(&[vocab_size, hidden_size])?;
@@ -32444,7 +32462,7 @@ mod tests {
                 (0..t).map(move |j| if j <= i { 0.0f32 } else { f32::NEG_INFINITY })
             })
             .collect();
-        let mask = Tensor::new(mask, &device)?.reshape((1, 1, t, t))?;
+        let mask = Tensor::new(&mask, &device)?.reshape((1, 1, t, t))?;
         let scores = scores.broadcast_add(&mask)?;
 
         // Numerically-stable softmax over the last axis.
@@ -32632,7 +32650,7 @@ mod tests {
         let v = v_f32.to_dtype(DType::BF16)?;
         let beta = beta_f32.to_dtype(DType::BF16)?;
 
-        let backend = crate::backend::for_device(&device);
+        let backend = crate::backend::for_device_kt(&device);
         let w_kernel = compute_w_chunk(&*backend, &a, &v, &beta, c)?; // CUDA kernel
         let w_fb = compute_w_chunk_fallback(&a, &v, &beta, c)?; // candle per-token
 
@@ -32699,7 +32717,7 @@ mod tests {
         let v = v_f32.to_dtype(DType::BF16)?;
         let beta = beta_f32.to_dtype(DType::BF16)?;
 
-        let backend = crate::backend::for_device(&device);
+        let backend = crate::backend::for_device_kt(&device);
         let w_kernel = compute_w_chunk(&*backend, &a, &v, &beta, c)?;
         let w_fb = compute_w_chunk_fallback(&a, &v, &beta, c)?;
 
@@ -32813,7 +32831,7 @@ mod tests {
         unsafe {
             std::env::remove_var("KILN_DISABLE_GDN_KERNEL");
         }
-        let backend = crate::backend::for_device(&device);
+        let backend = crate::backend::for_device_kt(&device);
         let mut state_kernel = state_bf16.clone();
         let out_kernel =
             gdn_chunkwise_recurrence(&*backend, &q, &k, &v, &beta, &g, &mut state_kernel, 1)?;
@@ -32912,7 +32930,7 @@ mod tests {
         let out_ref =
             gdn_sequential_reference(&q_ref, &k_ref, &v_ref, &beta_ref, &g_ref, &mut state_ref)?;
 
-        let backend = crate::backend::for_device(&device);
+        let backend = crate::backend::for_device_kt(&device);
         if !backend.supports_gdn_recurrent_step() {
             eprintln!("Metal recurrent kernel disabled, skipping parity test");
             return Ok(());
@@ -33512,7 +33530,7 @@ mod tests {
         let out_fb = cuda_silu(&out_fb.to_dtype(DType::F32)?)?;
 
         // Fused kernel path via the backend dispatch.
-        let backend = crate::backend::for_device(&device);
+        let backend = crate::backend::for_device_kt(&device);
         if !backend.supports_causal_conv1d_update() {
             eprintln!(
                 "backend declines causal_conv1d_update (KILN_DISABLE_FUSED_CONV1D?); skipping"
@@ -33604,7 +33622,7 @@ mod tests {
         let out_fb = causal_conv1d_prefill_with_dtype(&x, &w, &mut s_fb, kernel_size, DType::F32)?;
         let out_fb = cuda_silu(&out_fb)?;
 
-        let backend = crate::backend::for_device(&device);
+        let backend = crate::backend::for_device_kt(&device);
         if !backend.supports_causal_conv1d_prefill() {
             eprintln!(
                 "backend declines causal_conv1d_prefill (KILN_DISABLE_FUSED_CONV1D?); skipping"
@@ -33691,7 +33709,7 @@ mod tests {
         let out_fb = causal_conv1d_decode(&x, &w, &mut s_fb, kernel_size)?;
         let out_fb = cuda_silu(&out_fb.to_dtype(DType::F32)?)?;
 
-        let backend = crate::backend::for_device(&device);
+        let backend = crate::backend::for_device_kt(&device);
         if !backend.supports_causal_conv1d_update() {
             eprintln!(
                 "backend declines causal_conv1d_update (KILN_DISABLE_FUSED_CONV1D?); skipping"
@@ -33855,7 +33873,7 @@ mod tests {
             causal_conv1d_prefill_with_dtype(&x, &w, &mut s_ref, kernel_size, DType::F32)?;
         let out_ref = cuda_silu(&out_ref)?;
 
-        let backend = crate::backend::for_device(&device);
+        let backend = crate::backend::for_device_kt(&device);
         assert!(backend.supports_causal_conv1d_prefill());
         let mut s_kernel = s_init.clone();
         let out_kernel = match backend.causal_conv1d_prefill(&x, &w, &mut s_kernel, kernel_size)? {
@@ -34524,7 +34542,7 @@ mod tests {
         let tile = GDN_CHUNK_SIZE; // 64-token tiles -> 3 tiles
         let n: usize = total * config.hidden_size;
         let data: Vec<f32> = (0..n).map(|i| ((i as f32 * 0.013).sin()) * 0.1).collect();
-        let x = Tensor::new(data, &device)?.reshape((1, total, config.hidden_size))?;
+        let x = Tensor::new(&data, &device)?.reshape((1, total, config.hidden_size))?;
 
         // Monolithic.
         let mut mono_state = LinearAttentionState::new(&config, &device)?;
@@ -34637,7 +34655,7 @@ mod tests {
         let tile = GDN_CHUNK_SIZE; // 64-token tiles -> 3 tiles
         let n: usize = total * config.hidden_size;
         let data: Vec<f32> = (0..n).map(|i| ((i as f32 * 0.017).cos()) * 0.1).collect();
-        let hidden = Tensor::new(data, &device)?.reshape((1, total, config.hidden_size))?;
+        let hidden = Tensor::new(&data, &device)?.reshape((1, total, config.hidden_size))?;
         let positions: Vec<u32> = (0..total as u32).collect();
 
         // Monolithic — env vars unset for this thread/process.
@@ -34780,7 +34798,7 @@ mod tests {
             config.num_layers,
             config.full_attention_interval,
         )?;
-        let backend = crate::backend::for_device(&device);
+        let backend = crate::backend::for_device_kt(&device);
 
         // Monolithic: single forward pass, full LM head.
         let (mut mono_cache, mono_bt) = make_paged_setup(&config, total, block_size, &device)?;
