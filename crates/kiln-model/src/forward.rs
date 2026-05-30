@@ -9260,8 +9260,10 @@ fn apply_rope(
     let half_rotary = rotary_dim / 2;
     let x_dtype = x.dtype();
 
-    // Work in f32 for precision
-    let x = x.to_dtype(DType::F32)?;
+    // Work in f32 for precision.
+    // #1082: x may be a transposed GQA-head view (non-contiguous); kt CastOp
+    // requires contiguous (candle copied implicitly). No-op when contiguous.
+    let x = x.contiguous()?.to_dtype(DType::F32)?;
 
     // Split into rotary portion and passthrough portion.
     // #1082 forward-flip: kt `narrow` takes a `usize` axis (not `D`), so the
@@ -9276,13 +9278,17 @@ fn apply_rope(
 
     // Split rotary portion into two halves
     let x_rot_last = x_rot.rank() - 1;
-    let x1 = x_rot.narrow(x_rot_last, 0, half_rotary)?; // [..., :half_rotary]
-    let x2 = x_rot.narrow(x_rot_last, half_rotary, half_rotary)?; // [..., half_rotary:rotary_dim]
+    // #1082: narrowed halves are non-contiguous views; kt elementwise requires
+    // contiguous operands (candle handled strided). `.contiguous()` is an O(1)
+    // no-op when already contiguous.
+    let x1 = x_rot.narrow(x_rot_last, 0, half_rotary)?.contiguous()?; // [..., :half_rotary]
+    let x2 = x_rot.narrow(x_rot_last, half_rotary, half_rotary)?.contiguous()?; // [..., half_rotary:rotary_dim]
 
     // cos/sin are [seq_len, half_rotary], need to broadcast to [batch, seq_len, num_heads, half_rotary]
-    // Reshape to [1, seq_len, 1, half_rotary]
-    let cos = cos.to_dtype(DType::F32)?.unsqueeze(0)?.unsqueeze(2)?;
-    let sin = sin.to_dtype(DType::F32)?.unsqueeze(0)?.unsqueeze(2)?;
+    // Reshape to [1, seq_len, 1, half_rotary]. #1082: unsqueeze yields a view →
+    // contiguify before the broadcast-mul (kt elementwise needs contiguous).
+    let cos = cos.to_dtype(DType::F32)?.unsqueeze(0)?.unsqueeze(2)?.contiguous()?;
+    let sin = sin.to_dtype(DType::F32)?.unsqueeze(0)?.unsqueeze(2)?.contiguous()?;
 
     // Standard RoPE rotation: [x1*cos - x2*sin, x1*sin + x2*cos]
     let r1 = (x1.broadcast_mul(&cos)? - x2.broadcast_mul(&sin)?)?;
