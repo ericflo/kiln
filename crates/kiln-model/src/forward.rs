@@ -2759,16 +2759,24 @@ fn add_lora_delta_to_base(
         }
         return Ok((base + delta_kt)?);
     }
-    // Non-CUDA LoRA-add fallback needs a candle bridge for `compute_lora_delta`
-    // / Metal helpers; the kt<->candle bridges are CUDA-only (#1082). Production
-    // decode is CUDA, so surface a typed error here rather than silently
-    // dropping the LoRA delta on a CPU/Metal-only build.
+    // #1082: no-CUDA CPU LoRA-add. The kt<->candle bridges now have CPU host
+    // variants and `compute_lora_delta` is a candle CPU-capable composite, so
+    // bridge x to candle, compute the candle LoRA delta, bridge it back to kt,
+    // and add. (No GPU kernels / tape here — this is the inference CPU path.)
     #[cfg(not(feature = "cuda"))]
     {
-        let _ = (backend, proj, x);
-        anyhow::bail!(
-            "add_lora_delta_to_base: non-CUDA LoRA-add path needs a kt<->candle CPU bridge (#1082)"
-        )
+        let _ = backend;
+        let x_candle =
+            kt_logits_to_candle(x).context("add_lora_delta_to_base kt->candle x (cpu)")?;
+        let delta = compute_lora_delta(&x_candle, proj, lora_scale)?;
+        let delta_kt = candle_to_kt_activation(&delta)
+            .context("add_lora_delta_to_base candle->kt compute_lora_delta (cpu)")?;
+        let delta_kt = if delta_kt.dtype() == base.dtype() {
+            delta_kt
+        } else {
+            delta_kt.to_dtype(base.dtype())?
+        };
+        Ok((base + delta_kt)?)
     }
 }
 
