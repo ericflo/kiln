@@ -2635,21 +2635,13 @@ fn linear_with_lora_t_decode(
 
     // #1082: `linear_with_lora_t` is the candle-typed base-projection composite
     // (lora_loader). Bridge the kt inputs in and the candle result back to kt.
-    #[cfg(feature = "cuda")]
-    {
-        let x_candle =
-            kt_logits_to_candle(x).context("linear_with_lora_t_decode kt->candle x")?;
-        let weight_candle = kt_logits_to_candle(weight_t)
-            .context("linear_with_lora_t_decode kt->candle weight_t")?;
-        let out = linear_with_lora_t(&x_candle, &weight_candle, lora, lora_scale)?;
-        candle_to_kt_activation(&out).context("linear_with_lora_t_decode candle->kt out")
-    }
-    #[cfg(not(feature = "cuda"))]
-    {
-        anyhow::bail!(
-            "linear_with_lora_t_decode: non-CUDA candle base projection needs a kt<->candle CPU bridge (#1082)"
-        )
-    }
+    // Un-stubbed for no-CUDA — the kt<->candle bridges + linear_with_lora_t are
+    // candle CPU-capable and work on any build.
+    let x_candle = kt_logits_to_candle(x).context("linear_with_lora_t_decode kt->candle x")?;
+    let weight_candle =
+        kt_logits_to_candle(weight_t).context("linear_with_lora_t_decode kt->candle weight_t")?;
+    let out = linear_with_lora_t(&x_candle, &weight_candle, lora, lora_scale)?;
+    candle_to_kt_activation(&out).context("linear_with_lora_t_decode candle->kt out")
 }
 
 fn add_lora_delta_to_base(
@@ -12751,7 +12743,10 @@ fn lm_head_argmax(x: &Tensor, embed_tokens_t: &Tensor) -> Result<u32> {
             return Ok(token);
         }
     }
-    Ok(logits_1d.argmax(0)?.flatten_all()?.to_vec1::<u32>()?[0])
+    // #1082: kt `argmax` returns I64 indices (candle returned U32). Read i64 and
+    // narrow to the u32 token id. (The CUDA fast paths above return early; this
+    // fallback runs on the no-CUDA / kt-API-off path.)
+    Ok(logits_1d.argmax(0)?.flatten_all()?.to_vec1::<i64>()?[0] as u32)
 }
 
 /// Phase 7 (#1082) — fused kt-API LM head + argmax migration helper.
