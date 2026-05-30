@@ -7354,6 +7354,88 @@ pub(crate) fn optimizer_step_from_map(
     }
 }
 
+/// (#1082 Increment-0 PR3) kt-native-grad consumer — the
+/// [`optimizer_step_from_map`] analogue that reads gradients from a kt-native
+/// [`kiln_autograd::GradStore`] (keyed by [`KtTensorId`]; values are
+/// `kiln_tensor::Tensor`), produced by
+/// [`standard_forward_backward_tape_authoritative_kt`] (PR2).
+///
+/// For each LoRA `Var` it bridges the kt grad to candle at this single per-Var
+/// boundary (`kt_tensor_to_candle_cuda_copy`) and feeds the existing candle
+/// AdamW/SGD update (which still owns the candle `Var` master + moments).
+/// Moments are looked up by `KtTensorId` (PR1 keying), matching the producer.
+/// The per-Var `kt -> candle` bridge is the LAST candle dependency in this
+/// grad path; it disappears when the optimizer master/moments go kt-native via
+/// `kiln-optim`. Wired into the SFT loop in Inc-0 PR4; currently UNUSED.
+#[cfg(feature = "cuda")]
+#[allow(dead_code)]
+pub(crate) fn optimizer_step_from_kt_grad_store(
+    backend: &dyn BackendRuntime,
+    params: &TrainableLoraParams,
+    grads: &kiln_autograd::GradStore,
+    lr: f64,
+    optimizer: Optimizer,
+    opt_state: Option<&mut OptimizerState>,
+) -> Result<()> {
+    let bridge = |kt_grad: &kiln_tensor::Tensor| -> Result<Tensor> {
+        kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(kt_grad).map_err(|e| {
+            anyhow::anyhow!("optimizer_step_from_kt_grad_store: kt -> candle grad copy: {e}")
+        })
+    };
+    match optimizer {
+        Optimizer::Sgd => {
+            let resident_activation = backend.supports_resident_activation();
+            for var in params.all_vars() {
+                let kt_id = cd_tensor_id_to_kt(var.as_tensor().id());
+                if let Some(kt_grad) = grads.get(kt_id) {
+                    let grad = bridge(kt_grad)?;
+                    apply_sgd_update(backend, var, &grad, lr, resident_activation)?;
+                }
+            }
+            Ok(())
+        }
+        Optimizer::AdamW {
+            beta1,
+            beta2,
+            eps,
+            weight_decay,
+        } => {
+            let state = opt_state.ok_or_else(|| {
+                anyhow::anyhow!("optimizer_step_from_kt_grad_store: AdamW requires OptimizerState")
+            })?;
+            state.step = state.step.saturating_add(1);
+            let step = state.step;
+            let resident_activation = backend.supports_resident_activation();
+            for var in params.all_vars() {
+                let kt_id = cd_tensor_id_to_kt(var.as_tensor().id());
+                if let Some(kt_grad) = grads.get(kt_id) {
+                    let grad = bridge(kt_grad)?;
+                    let moments = state.moments.get(&kt_id).ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "optimizer_step_from_kt_grad_store: missing AdamW moments for kt id {:?}",
+                            kt_id
+                        )
+                    })?;
+                    apply_adamw_update(
+                        backend,
+                        var,
+                        &grad,
+                        moments,
+                        lr,
+                        beta1,
+                        beta2,
+                        eps,
+                        weight_decay,
+                        step,
+                        resident_activation,
+                    )?;
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
 /// Gradient checkpointing configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CheckpointConfig {
@@ -10788,6 +10870,87 @@ fn standard_forward_backward_tape_authoritative(
             let cg = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&kt_grad)
                 .context("tape-authoritative: kt -> candle grad copy")?;
             grads.insert_id(var.as_tensor().id(), cg);
+        }
+    }
+    Ok((loss_val, grads))
+}
+
+/// (#1082 Increment-0 PR2) kt-native sibling of
+/// [`standard_forward_backward_tape_authoritative`]: delivers the
+/// tape-authoritative LoRA gradients into a kt-native
+/// [`kiln_autograd::GradStore`] keyed by [`KtTensorId`], WITHOUT the candle
+/// `loss.backward()` GradStore-container hack and WITHOUT the per-grad
+/// `kt -> candle` copy.
+///
+/// The kt grads produced by `with_tape_authoritative_scope` are the
+/// authoritative output; they are inserted as-is (the candle `loss` is used
+/// only for the `loss_val` scalar readback). The optimizer bridges each grad
+/// to candle at its per-Var boundary (`optimizer_step_from_kt_grad_store`,
+/// Inc-0 PR3) until the optimizer itself goes kt-native via `kiln-optim`.
+///
+/// This is the perf-correct grad-delivery path AND the structural gate for the
+/// forward.rs type-flip: it removes the dependency on a candle `loss` existing
+/// to call `.backward()` on (post-flip `model_forward` returns kt, so there is
+/// no candle loss to instantiate a candle `GradStore` from). The grad keys
+/// match the PR1 `KtTensorId`-keyed `OptimizerState.moments`
+/// (`KtTensorId::from_raw(var.id().as_raw() as u64)` ==
+/// `cd_tensor_id_to_kt(var.id())`), so PR3's consumer looks moments up by the
+/// same key. Currently UNUSED — wired into the SFT loop in Inc-0 PR4; landed
+/// ahead of its caller so the substrate compiles independently per the
+/// Increment-0 plan (`docs/issue-1082-inc0-grad-substrate-plan-2026-05-29.md`).
+#[cfg(feature = "cuda")]
+#[allow(dead_code)]
+fn standard_forward_backward_tape_authoritative_kt(
+    backend: &dyn BackendRuntime,
+    input_ids: &[u32],
+    weights: &GpuWeights,
+    model_config: &ModelConfig,
+    params: &TrainableLoraParams,
+    label_mask: &[bool],
+    device: &CdDevice,
+    _flce_provider: Option<FlceProvider>,
+) -> Result<(f64, kiln_autograd::GradStore)> {
+    let lora_weights = params.as_lora_weights();
+    let mut linear_state = LinearAttentionState::new(model_config, device)?;
+
+    let (loss_val, _loss, grads_by_candle_raw) =
+        kiln_kt_bridge::tape_bridge::with_tape_authoritative_scope(|| {
+            let logits = model_forward(
+                backend,
+                input_ids,
+                weights,
+                model_config,
+                None,
+                Some(&mut linear_state),
+                Some(&lora_weights),
+            )
+            .context("tape-authoritative(kt) forward")
+            .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?;
+            let loss = cross_entropy_loss(&logits, input_ids, label_mask, device)
+                .context("tape-authoritative(kt) cross_entropy_loss")
+                .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?;
+            let loss_val = loss
+                .to_scalar::<f32>()
+                .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("loss.to_scalar: {e}")))?
+                as f64;
+            Ok((loss_val, loss))
+        })
+        .map_err(|e| anyhow::anyhow!("tape-authoritative(kt) backward: {e}"))?;
+
+    // Build a kt-native GradStore DIRECTLY from the tape grads. No
+    // `loss.backward()` container hack (`GradStore::new()` on kiln_autograd is
+    // public, unlike candle's) and no `kt -> candle` grad copy: the kt grads
+    // are inserted as-is, keyed by each LoRA Var's id bridged into the kt id
+    // space (matching the PR1 `KtTensorId`-keyed moments).
+    let var_raw_ids: std::collections::HashSet<usize> = params
+        .all_vars()
+        .iter()
+        .map(|v| v.as_tensor().id().as_raw())
+        .collect();
+    let mut grads = kiln_autograd::GradStore::new();
+    for (candle_raw, kt_grad) in grads_by_candle_raw {
+        if var_raw_ids.contains(&candle_raw) {
+            grads.insert(KtTensorId::from_raw(candle_raw as u64), kt_grad);
         }
     }
     Ok((loss_val, grads))
