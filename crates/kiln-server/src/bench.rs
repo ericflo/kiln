@@ -175,7 +175,7 @@ fn greedy_sample_kt(_logits: &kiln_tensor::Tensor) -> Result<u32> {
 /// sampler. CUDA-only copy; the non-CUDA arm errors at runtime since the
 /// bench decode path is CUDA-only in practice (issue #1082, candle removal).
 #[cfg(feature = "cuda")]
-fn bench_kt_tensor_to_candle(t: &kiln_tensor::Tensor) -> Result<candle_core::Tensor> {
+fn bench_kt_tensor_to_candle(t: &kiln_tensor::Tensor) -> Result<kiln_kt_bridge::candle_core::Tensor> {
     let contig;
     let t = if t.is_contiguous() {
         t
@@ -188,7 +188,7 @@ fn bench_kt_tensor_to_candle(t: &kiln_tensor::Tensor) -> Result<candle_core::Ten
 }
 
 #[cfg(not(feature = "cuda"))]
-fn bench_kt_tensor_to_candle(_t: &kiln_tensor::Tensor) -> Result<candle_core::Tensor> {
+fn bench_kt_tensor_to_candle(_t: &kiln_tensor::Tensor) -> Result<kiln_kt_bridge::candle_core::Tensor> {
     anyhow::bail!("bench_kt_tensor_to_candle requires the `cuda` feature (#1082)")
 }
 
@@ -2147,7 +2147,7 @@ fn bench_latency_paged_mtp(
     // casts `raw_target_logits` to float32 before greedy). BF16 argmax can
     // flip top-1 under ties when two candidates share the same BF16 bucket.
     let mut last_token = if mtp_argmax_fp32_enabled() {
-        let prefill_last_fp32 = prefill_last.to_dtype(candle_core::DType::F32)?;
+        let prefill_last_fp32 = prefill_last.to_dtype(kiln_kt_bridge::candle_core::DType::F32)?;
         greedy_sample(&prefill_last_fp32)?
     } else {
         greedy_sample(&prefill_last)?

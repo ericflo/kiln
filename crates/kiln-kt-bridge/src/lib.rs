@@ -60,6 +60,17 @@ pub mod forward_op;
 #[cfg(feature = "candle")]
 pub mod inject_grad_shim;
 
+/// Re-export of `candle_core` (#1082). During the migration, consumer
+/// crates that bridge to candle islands but don't carry candle as a
+/// direct dependency (e.g. the `kiln-server` `kiln-bench` binary, whose
+/// candle-core is dev-only) need to *name* candle types for explicit
+/// signatures (`fn … -> Result<candle_core::Tensor>`) while the bridge
+/// fns only let them be *inferred*. Naming via `kiln_kt_bridge::candle_core::…`
+/// avoids adding a fresh direct candle dependency that the candle-drop
+/// endgame would then have to remove again.
+#[cfg(feature = "candle")]
+pub use candle_core;
+
 /// Phase 6a/CP-4 (#1082) — kt-tape → candle GradStore bridge.
 ///
 /// Lets `kiln_autograd::Tape::backward` emit gradients into a
