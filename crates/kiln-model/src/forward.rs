@@ -2033,6 +2033,55 @@ pub(crate) fn try_kt_paged_kv_num_blocks(
     kt_num_blocks
 }
 
+/// Phase 7 (#1082): kt-typed paged-cache K/V read for the now-kt
+/// full-attention prefill path. When the kt twin cache is present, read
+/// directly from it (`PagedKvCacheKt::read` returns kt tensors — the
+/// contiguous fast path is a zero-copy `narrow`, so this avoids the
+/// candle→kt device copy entirely). Otherwise read from the candle cache
+/// and bridge the result to kt (CUDA copy).
+///
+/// Unlike the accessor helpers above, the surrounding consumers are now
+/// kt-typed (`Tensor::cat`, head-major transposes), so this returns kt
+/// tensors rather than asserting parity against a candle value.
+#[cfg(feature = "cuda")]
+fn try_kt_paged_kv_read(
+    candle_cache: &PagedKvCache,
+    kt_cache: Option<&crate::paged_kv_cache_kt::PagedKvCacheKt>,
+    layer_idx: usize,
+    block_table: &BlockTable,
+    seq_len: usize,
+) -> Result<(Tensor, Tensor)> {
+    if let Some(kt) = kt_cache {
+        kiln_nvtx::range!(c"kiln/paged_kv_kt/read");
+        return kt.read(layer_idx, block_table, seq_len);
+    }
+    let (k_c, v_c) = candle_cache.read(layer_idx, block_table, seq_len)?;
+    let k = candle_to_kt_activation(&k_c)
+        .context("try_kt_paged_kv_read candle->kt k")?;
+    let v = candle_to_kt_activation(&v_c)
+        .context("try_kt_paged_kv_read candle->kt v")?;
+    Ok((k, v))
+}
+
+/// Non-CUDA twin of [`try_kt_paged_kv_read`]: there is no kt paged cache
+/// on non-CUDA builds, so bridge the candle read straight to kt
+/// (`candle_to_kt_activation` errors at runtime on non-CUDA, matching the
+/// rest of the CUDA-only paged decode path).
+#[cfg(not(feature = "cuda"))]
+fn try_kt_paged_kv_read(
+    candle_cache: &PagedKvCache,
+    layer_idx: usize,
+    block_table: &BlockTable,
+    seq_len: usize,
+) -> Result<(Tensor, Tensor)> {
+    let (k_c, v_c) = candle_cache.read(layer_idx, block_table, seq_len)?;
+    let k = candle_to_kt_activation(&k_c)
+        .context("try_kt_paged_kv_read candle->kt k")?;
+    let v = candle_to_kt_activation(&v_c)
+        .context("try_kt_paged_kv_read candle->kt v")?;
+    Ok((k, v))
+}
+
 /// Phase 7 opt-in: route the Vulkan `linear_prefill_apply` 2D matmul
 /// path through a kt-API equivalent of `kiln_tensor::cuda_matmul`.
 /// Default off; set `KILN_USE_KT_API_MATMUL=1` (or
@@ -3477,7 +3526,26 @@ fn linear_with_lora_t_decode_if(
     if use_metal_decode_gemv {
         linear_with_lora_t_decode(x, weight_t, lora, lora_scale)
     } else {
-        linear_with_lora_t(x, weight_t, lora, lora_scale)
+        // #1082: `linear_with_lora_t` is the candle-typed base-projection
+        // composite (lora_loader). Bridge the kt inputs in and the candle
+        // result back to kt so this `_decode_if` stays kt-typed.
+        #[cfg(feature = "cuda")]
+        {
+            let x_candle = kt_logits_to_candle(x)
+                .context("linear_with_lora_t_decode_if kt->candle x")?;
+            let weight_candle = kt_logits_to_candle(weight_t)
+                .context("linear_with_lora_t_decode_if kt->candle weight_t")?;
+            let out = linear_with_lora_t(&x_candle, &weight_candle, lora, lora_scale)?;
+            candle_to_kt_activation(&out)
+                .context("linear_with_lora_t_decode_if candle->kt out")
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            let _ = (x, weight_t, lora, lora_scale);
+            anyhow::bail!(
+                "linear_with_lora_t_decode_if non-metal path requires the `cuda` feature (#1082)"
+            )
+        }
     }
 }
 
@@ -4160,12 +4228,9 @@ pub(crate) fn try_kt_max_last_dim_keepdim(x: &Tensor) -> Result<Option<Tensor>> 
 
     kiln_nvtx::range!(c"kiln/max_last_dim_kt");
 
-    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
+    // #1082: `x` is already kt — call the kt kernel directly (no bridge).
     let last_axis = x.rank() - 1;
-    let out_kt = match kiln_tensor::cuda_max_axis(&x_kt, last_axis) {
+    let out_kt = match kiln_tensor::cuda_max_axis(x, last_axis) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
@@ -4202,12 +4267,9 @@ fn try_kt_min_last_dim_keepdim(x: &Tensor) -> Result<Option<Tensor>> {
 
     kiln_nvtx::range!(c"kiln/min_last_dim_kt");
 
-    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
+    // #1082: `x` is already kt — call the kt kernel directly (no bridge).
     let last_axis = x.rank() - 1;
-    let out_kt = match kiln_tensor::cuda_min_axis(&x_kt, last_axis) {
+    let out_kt = match kiln_tensor::cuda_min_axis(x, last_axis) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
@@ -21585,20 +21647,34 @@ fn gqa_attention_paged_with_rope_tables(
             let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
             {
                 kiln_nvtx::range!(c"kiln/kv/copy");
+                // #1082: the candle `PagedKvCache` write methods are a candle
+                // island (the cache stores candle tensors). Bridge the kt
+                // token-major / head-major K/V to candle for the write only;
+                // the kt twin cache is written separately by the kt path.
+                // (`kt_logits_to_candle` errors at runtime on non-CUDA, which
+                // is fine: production paged decode is CUDA-only.)
+                let k_tm_c = kt_logits_to_candle(&k_cache_token_major)
+                    .context("paged write kt->candle k_cache_token_major")?;
+                let v_tm_c = kt_logits_to_candle(&v_cache_token_major)
+                    .context("paged write kt->candle v_cache_token_major")?;
                 if !paged_cache.write_token_major_native(
                     full_attn_layer_idx,
                     block_table,
                     start_pos,
-                    &k_cache_token_major,
-                    &v_cache_token_major,
+                    &k_tm_c,
+                    &v_tm_c,
                 )? {
+                    let k_head_c = kt_logits_to_candle(&k_head)
+                        .context("paged write kt->candle k_head")?;
+                    let v_head_c = kt_logits_to_candle(&v_head)
+                        .context("paged write kt->candle v_head")?;
                     paged_cache
                         .write(
                             full_attn_layer_idx,
                             block_table,
                             start_pos,
-                            &k_head,
-                            &v_head,
+                            &k_head_c,
+                            &v_head_c,
                         )
                         .context("paged KV cache write failed")?;
                 }
@@ -21711,26 +21787,38 @@ fn gqa_attention_paged_with_rope_tables(
                 false
             }
         };
-        if !graph_write_done
-            && !paged_cache.write_token_major_native(
+        // #1082: bridge kt K/V to candle for the candle-island write (see the
+        // initial-prefill write above). kt twin cache write happens separately.
+        // Bridge lazily so the graph-slot fast path (`graph_write_done`) skips
+        // the candle copy entirely.
+        if !graph_write_done {
+            let k_tm_c = kt_logits_to_candle(&k_cache_token_major)
+                .context("paged write kt->candle k_cache_token_major")?;
+            let v_tm_c = kt_logits_to_candle(&v_cache_token_major)
+                .context("paged write kt->candle v_cache_token_major")?;
+            if !paged_cache.write_token_major_native(
                 full_attn_layer_idx,
                 block_table,
                 start_pos,
-                &k_cache_token_major,
-                &v_cache_token_major,
-            )?
-        {
-            let k_head = k_cache_token_major.transpose(1, 2)?.contiguous()?;
-            let v_head = v_cache_token_major.transpose(1, 2)?.contiguous()?;
-            paged_cache
-                .write(
-                    full_attn_layer_idx,
-                    block_table,
-                    start_pos,
-                    &k_head,
-                    &v_head,
-                )
-                .context("paged KV cache write failed")?;
+                &k_tm_c,
+                &v_tm_c,
+            )? {
+                let k_head = k_cache_token_major.transpose(1, 2)?.contiguous()?;
+                let v_head = v_cache_token_major.transpose(1, 2)?.contiguous()?;
+                let k_head_c = kt_logits_to_candle(&k_head)
+                    .context("paged write kt->candle k_head")?;
+                let v_head_c = kt_logits_to_candle(&v_head)
+                    .context("paged write kt->candle v_head")?;
+                paged_cache
+                    .write(
+                        full_attn_layer_idx,
+                        block_table,
+                        start_pos,
+                        &k_head_c,
+                        &v_head_c,
+                    )
+                    .context("paged KV cache write failed")?;
+            }
         }
         finish_full_attn_stage_profile(
             profile_device,
@@ -21915,9 +22003,29 @@ fn gqa_attention_paged_with_rope_tables(
                 None => {
                     let (prefix_k, prefix_v) = match fast_read {
                         Some((k, v)) => (k, v),
-                        None => paged_cache
-                            .read(full_attn_layer_idx, block_table, start_pos)
-                            .context("paged KV cache prefix read failed")?,
+                        None => {
+                            #[cfg(feature = "cuda")]
+                            {
+                                try_kt_paged_kv_read(
+                                    paged_cache,
+                                    kt_paged_cache,
+                                    full_attn_layer_idx,
+                                    block_table,
+                                    start_pos,
+                                )
+                                .context("paged KV cache prefix read failed")?
+                            }
+                            #[cfg(not(feature = "cuda"))]
+                            {
+                                try_kt_paged_kv_read(
+                                    paged_cache,
+                                    full_attn_layer_idx,
+                                    block_table,
+                                    start_pos,
+                                )
+                                .context("paged KV cache prefix read failed")?
+                            }
+                        }
                     };
                     let current_k = k_cache_token_major.transpose(1, 2)?.contiguous()?;
                     let current_v = v_cache_token_major.transpose(1, 2)?.contiguous()?;
@@ -21933,9 +22041,23 @@ fn gqa_attention_paged_with_rope_tables(
                 None => {
                     let stage_profile =
                         start_full_attn_stage_profile(profile_device, profile_context)?;
-                    let out = paged_cache
-                        .read(full_attn_layer_idx, block_table, total_seq_len)
-                        .context("paged KV cache read failed")?;
+                    #[cfg(feature = "cuda")]
+                    let out = try_kt_paged_kv_read(
+                        paged_cache,
+                        kt_paged_cache,
+                        full_attn_layer_idx,
+                        block_table,
+                        total_seq_len,
+                    )
+                    .context("paged KV cache read failed")?;
+                    #[cfg(not(feature = "cuda"))]
+                    let out = try_kt_paged_kv_read(
+                        paged_cache,
+                        full_attn_layer_idx,
+                        block_table,
+                        total_seq_len,
+                    )
+                    .context("paged KV cache read failed")?;
                     finish_full_attn_stage_profile(
                         profile_device,
                         profile_context,
@@ -22564,7 +22686,7 @@ fn transformer_block_detached_cuda_prefill_chunked(
         return Ok(None);
     }
     let (_batch, seq_len, _hidden) = x.dims3()?;
-    if !streaming_prefill_enabled_for(x.device(), seq_len) {
+    if !streaming_prefill_enabled_for(&x.device(), seq_len) {
         return Ok(None);
     }
     let tile_size = streaming_tile_tokens_for(&x.device());
