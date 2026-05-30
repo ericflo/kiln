@@ -2066,9 +2066,10 @@ impl CudaGraphRunner {
         linear_state: &mut LinearAttentionState,
     ) -> Result<()> {
         for state in &mut linear_state.recurrent_states {
-            if state.dtype() != candle_core::DType::BF16 {
+            // #1082: recurrent_states are kt tensors; use kt DType.
+            if state.dtype() != kiln_tensor::DType::BF16 {
                 *state = state
-                    .to_dtype(candle_core::DType::BF16)
+                    .to_dtype(kiln_tensor::DType::BF16)
                     .context("prepare CUDA graph GDN recurrent state")?;
             }
         }
