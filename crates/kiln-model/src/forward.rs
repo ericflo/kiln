@@ -15226,10 +15226,10 @@ fn gdn_chunk_prep_f32(
     let big_g_row = big_g.unsqueeze(2)?;
     let decay_delta = big_g_col.broadcast_sub(&big_g_row)?;
     let zero_delta = Tensor::zeros_like(&decay_delta)?;
-    let strict_bool = strict_lower_tri_bool(chunk, device)?
+    let strict_bool = strict_lower_tri_bool(chunk, &device)?
         .reshape((1, 1, chunk, chunk))?
         .broadcast_as((batch, heads, chunk, chunk))?;
-    let causal_bool = causal_lower_tri_bool(chunk, device)?
+    let causal_bool = causal_lower_tri_bool(chunk, &device)?
         .reshape((1, 1, chunk, chunk))?
         .broadcast_as((batch, heads, chunk, chunk))?;
     // Phase 7 (#1082): route the two `where_cond(...).exp()` steps
@@ -15589,7 +15589,7 @@ pub fn gdn_recurrent_backward_no_grad(
         #[cfg(not(feature = "cuda"))]
         let d_beta = prod_pb.sum(LAST_DIM)?;
         let dr_w_t = dr.matmul(&w.transpose(2, 3)?.contiguous()?)?;
-        let strict_mask = strict_lower_tri_bool(chunk, q.device())?
+        let strict_mask = strict_lower_tri_bool(chunk, &q.device())?
             .reshape((1, 1, chunk, chunk))?
             .broadcast_as((batch, heads, chunk, chunk))?
             .to_dtype(DType::F32)?;
@@ -15701,10 +15701,10 @@ pub fn gdn_recurrent_backward_no_grad(
         let big_g_row = big_g.unsqueeze(2)?;
         let decay_delta = big_g_col.broadcast_sub(&big_g_row)?;
         let zero_delta = Tensor::zeros_like(&decay_delta)?;
-        let strict_bool = strict_lower_tri_bool(chunk, q.device())?
+        let strict_bool = strict_lower_tri_bool(chunk, &q.device())?
             .reshape((1, 1, chunk, chunk))?
             .broadcast_as((batch, heads, chunk, chunk))?;
-        let causal_bool = causal_lower_tri_bool(chunk, q.device())?
+        let causal_bool = causal_lower_tri_bool(chunk, &q.device())?
             .reshape((1, 1, chunk, chunk))?
             .broadcast_as((batch, heads, chunk, chunk))?;
         // Phase 7 (#1082): route both `where_cond(...).exp()` steps
@@ -15951,7 +15951,7 @@ pub fn gated_deltanet_forward_streaming(
         let end = (cursor + tile_size).min(total);
         let len = end - cursor;
         let allow_forward_only_fastpaths =
-            streaming_gdn_forward_only_fastpaths_allowed(tile_device);
+            streaming_gdn_forward_only_fastpaths_allowed(&tile_device);
         let allow_prefill_recurrent_kernel = allow_forward_only_fastpaths;
         let mut run_tile = || -> Result<Tensor> {
             let tile_in = x.narrow(1, cursor, len)?;
@@ -19359,7 +19359,7 @@ fn try_flash_attn_paged_decode(
             contiguous_slot_run_start(block_table, block_size, 0, total_seq_len)
         {
             let softmax_scale = 1.0 / (head_dim as f32).sqrt();
-            let stage_profile = start_full_attn_stage_profile(q.device(), profile_context)?;
+            let stage_profile = start_full_attn_stage_profile(&q.device(), profile_context)?;
             let attn_output = {
                 kiln_nvtx::range!(c"kiln/attn/paged_decode_contiguous");
                 backend.flash_attn_paged_decode_contiguous(
@@ -19372,7 +19372,7 @@ fn try_flash_attn_paged_decode(
                 )?
             };
             finish_full_attn_stage_profile(
-                q.device(),
+                &q.device(),
                 profile_context,
                 "decode_attn_contiguous",
                 q_len,
@@ -19385,7 +19385,7 @@ fn try_flash_attn_paged_decode(
                     && backend.supports_paged_kv_head_major_read()
                 {
                     kiln_nvtx::range!(c"kiln/kv/head_major_read_decode");
-                    let stage_profile = start_full_attn_stage_profile(q.device(), profile_context)?;
+                    let stage_profile = start_full_attn_stage_profile(&q.device(), profile_context)?;
                     let out = backend.paged_kv_head_major_read(
                         k_pool,
                         v_pool,
@@ -19393,7 +19393,7 @@ fn try_flash_attn_paged_decode(
                         total_seq_len,
                     )?;
                     finish_full_attn_stage_profile(
-                        q.device(),
+                        &q.device(),
                         profile_context,
                         "kv_head_read",
                         q_len,
@@ -19421,12 +19421,12 @@ fn try_flash_attn_paged_decode(
                             )
                         }
                     };
-                    let stage_profile = start_full_attn_stage_profile(q.device(), profile_context)?;
+                    let stage_profile = start_full_attn_stage_profile(&q.device(), profile_context)?;
                     let out = flash_attention_forward_head_major(
                         backend, q, &k_head, &v_head, num_heads, head_dim,
                     )?;
                     finish_full_attn_stage_profile(
-                        q.device(),
+                        &q.device(),
                         profile_context,
                         "decode_attn_head_major",
                         q_len,
@@ -19445,19 +19445,19 @@ fn try_flash_attn_paged_decode(
                 // returns above and should not pay this transpose/copy.
                 let k_live = k_pool.narrow(0, start_slot, total_seq_len)?.unsqueeze(0)?;
                 let v_live = v_pool.narrow(0, start_slot, total_seq_len)?.unsqueeze(0)?;
-                let stage_profile = start_full_attn_stage_profile(q.device(), profile_context)?;
+                let stage_profile = start_full_attn_stage_profile(&q.device(), profile_context)?;
                 let q_fa = {
                     kiln_nvtx::range!(c"kiln/attn/q_fa_transpose");
                     q.transpose(1, 2)?.contiguous()?
                 };
                 finish_full_attn_stage_profile(
-                    q.device(),
+                    &q.device(),
                     profile_context,
                     "q_fa_transpose",
                     q_len,
                     stage_profile,
                 )?;
-                let stage_profile = start_full_attn_stage_profile(q.device(), profile_context)?;
+                let stage_profile = start_full_attn_stage_profile(&q.device(), profile_context)?;
                 let out = flash_attention_forward(
                     backend,
                     &q_fa,
@@ -19468,7 +19468,7 @@ fn try_flash_attn_paged_decode(
                     head_dim,
                 )?;
                 finish_full_attn_stage_profile(
-                    q.device(),
+                    &q.device(),
                     profile_context,
                     "decode_attn_fallback",
                     q_len,
@@ -19481,11 +19481,11 @@ fn try_flash_attn_paged_decode(
                 // [batch, seq_len, num_heads * head_dim].
                 let _ = crate::mtp_debug::capture_subop("post_attn_raw", &attn_output);
 
-                let stage_profile = start_full_attn_stage_profile(q.device(), profile_context)?;
+                let stage_profile = start_full_attn_stage_profile(&q.device(), profile_context)?;
                 let attn_output =
                     attention_output_gate_decode_if(use_metal_decode_gemv, attn_output, gate)?;
                 finish_full_attn_stage_profile(
-                    q.device(),
+                    &q.device(),
                     profile_context,
                     "attn_gate",
                     q_len,
@@ -19493,7 +19493,7 @@ fn try_flash_attn_paged_decode(
                 )?;
                 let _ = crate::mtp_debug::capture_subop("post_attn_gated", &attn_output);
 
-                let stage_profile = start_full_attn_stage_profile(q.device(), profile_context)?;
+                let stage_profile = start_full_attn_stage_profile(&q.device(), profile_context)?;
                 let out = {
                     kiln_nvtx::range!(c"kiln/proj/o");
                     linear_with_lora_t_backend_decode_if(
@@ -19506,7 +19506,7 @@ fn try_flash_attn_paged_decode(
                     )?
                 };
                 finish_full_attn_stage_profile(
-                    q.device(),
+                    &q.device(),
                     profile_context,
                     "o_proj",
                     q_len,
@@ -19599,11 +19599,11 @@ fn try_flash_attn_paged_decode(
     // -> [batch, 1, num_heads, head_dim]. Build it lazily so the contiguous-KV
     // Metal path above can avoid a dead transpose/copy per full-attention layer.
     let q_fa = {
-        let stage_profile = start_full_attn_stage_profile(q.device(), profile_context)?;
+        let stage_profile = start_full_attn_stage_profile(&q.device(), profile_context)?;
         kiln_nvtx::range!(c"kiln/attn/q_fa_transpose");
         let q_fa = q.transpose(1, 2)?.contiguous()?;
         finish_full_attn_stage_profile(
-            q.device(),
+            &q.device(),
             profile_context,
             "q_fa_transpose",
             q_len,
@@ -19612,7 +19612,7 @@ fn try_flash_attn_paged_decode(
         q_fa
     };
 
-    let stage_profile = start_full_attn_stage_profile(q.device(), profile_context)?;
+    let stage_profile = start_full_attn_stage_profile(&q.device(), profile_context)?;
     let attn_out = {
         #[cfg(feature = "cuda")]
         {
@@ -19704,7 +19704,7 @@ fn try_flash_attn_paged_decode(
         }
     };
     finish_full_attn_stage_profile(
-        q.device(),
+        &q.device(),
         profile_context,
         "decode_attn_paged",
         q_len,
@@ -19717,10 +19717,10 @@ fn try_flash_attn_paged_decode(
     let attn_output = attn_out.reshape((batch, 1usize, num_heads * head_dim))?;
     let _ = crate::mtp_debug::capture_subop("post_attn_raw", &attn_output);
 
-    let stage_profile = start_full_attn_stage_profile(q.device(), profile_context)?;
+    let stage_profile = start_full_attn_stage_profile(&q.device(), profile_context)?;
     let attn_output = attention_output_gate_decode_if(use_metal_decode_gemv, attn_output, gate)?;
     finish_full_attn_stage_profile(
-        q.device(),
+        &q.device(),
         profile_context,
         "attn_gate",
         q_len,
@@ -19728,7 +19728,7 @@ fn try_flash_attn_paged_decode(
     )?;
     let _ = crate::mtp_debug::capture_subop("post_attn_gated", &attn_output);
 
-    let stage_profile = start_full_attn_stage_profile(q.device(), profile_context)?;
+    let stage_profile = start_full_attn_stage_profile(&q.device(), profile_context)?;
     let out = {
         kiln_nvtx::range!(c"kiln/proj/o");
         linear_with_lora_t_backend_decode_if(
@@ -22166,7 +22166,7 @@ fn transformer_block_detached_cuda_prefill_chunked(
     if !streaming_prefill_enabled_for(x.device(), seq_len) {
         return Ok(None);
     }
-    let tile_size = streaming_tile_tokens_for(x.device());
+    let tile_size = streaming_tile_tokens_for(&x.device());
     if tile_size == 0 || tile_size >= seq_len {
         return Ok(None);
     }
@@ -22920,7 +22920,7 @@ fn model_forward_paged_decode_contiguous_batch_hidden_inner(
             ),
             _ => Some(
                 CachedPagedDecodeMeta::build(
-                    device,
+                    &device,
                     paged_cache,
                     block_tables,
                     start_positions,
@@ -25872,7 +25872,7 @@ fn model_forward_paged_inner(
     let device = weights.embed_tokens.device();
     let _profile_sections =
         std::env::var("KILN_PROFILE_PAGED_SECTIONS").is_ok().then(|| {
-            let _ = synchronize_for_profile(device);
+            let _ = synchronize_for_profile(&device);
             (std::time::Instant::now(), seq_len, start_pos)
         });
 
@@ -25928,7 +25928,7 @@ fn model_forward_paged_inner(
     });
 
     if _profile_sections.is_some() {
-        let _ = synchronize_for_profile(device);
+        let _ = synchronize_for_profile(&device);
         if let Some((t0, sl, sp)) = _profile_sections.as_ref() {
             eprintln!(
                 "kiln_profile_section section=embed_and_positions seq_len={sl} start_pos={sp} elapsed_ms={:.3}",
@@ -25937,7 +25937,7 @@ fn model_forward_paged_inner(
         }
     }
     let _profile_layers_t0 = _profile_sections.is_some().then(|| {
-        let _ = synchronize_for_profile(device);
+        let _ = synchronize_for_profile(&device);
         std::time::Instant::now()
     });
 
@@ -25955,7 +25955,7 @@ fn model_forward_paged_inner(
         match &layer.attention {
             GpuAttentionWeights::Full(_) => {
                 let layer_profile_start = if profile_paged_layers {
-                    synchronize_for_profile(device)?;
+                    synchronize_for_profile(&device)?;
                     Some(std::time::Instant::now())
                 } else {
                     None
@@ -26001,13 +26001,13 @@ fn model_forward_paged_inner(
                     .with_context(|| format!("transformer block {i} (full attention, paged)"))?;
                 full_attn_idx += 1;
                 if let Some(start) = layer_profile_start {
-                    synchronize_for_profile(device)?;
+                    synchronize_for_profile(&device)?;
                     log_paged_layer_profile(i, "full", seq_len, start_pos, start.elapsed());
                 }
             }
             GpuAttentionWeights::Linear(lin_weights) => {
                 let layer_profile_start = if profile_paged_layers {
-                    synchronize_for_profile(device)?;
+                    synchronize_for_profile(&device)?;
                     Some(std::time::Instant::now())
                 } else {
                     None
@@ -26060,7 +26060,7 @@ fn model_forward_paged_inner(
                                 hidden = out;
                                 linear_attn_idx += 1;
                                 if let Some(start) = layer_profile_start {
-                                    synchronize_for_profile(device)?;
+                                    synchronize_for_profile(&device)?;
                                     log_paged_layer_profile(
                                         i, "linear", seq_len, start_pos, start.elapsed(),
                                     );
@@ -26180,7 +26180,7 @@ fn model_forward_paged_inner(
                 }
                 linear_attn_idx += 1;
                 if let Some(start) = layer_profile_start {
-                    synchronize_for_profile(device)?;
+                    synchronize_for_profile(&device)?;
                     log_paged_layer_profile(i, "linear", seq_len, start_pos, start.elapsed());
                 }
             }
@@ -26200,7 +26200,7 @@ fn model_forward_paged_inner(
     }
 
     if let Some(t) = _profile_layers_t0.as_ref() {
-        let _ = synchronize_for_profile(device);
+        let _ = synchronize_for_profile(&device);
         if let Some((_, sl, sp)) = _profile_sections.as_ref() {
             eprintln!(
                 "kiln_profile_section section=layer_loop seq_len={sl} start_pos={sp} elapsed_ms={:.3}",
@@ -26209,7 +26209,7 @@ fn model_forward_paged_inner(
         }
     }
     let _profile_lm_head_t0 = _profile_sections.is_some().then(|| {
-        let _ = synchronize_for_profile(device);
+        let _ = synchronize_for_profile(&device);
         std::time::Instant::now()
     });
 
@@ -26309,7 +26309,7 @@ fn model_forward_paged_inner(
         if let (Some(t), Some((t_outer, sl, sp))) =
             (_profile_lm_head_t0.as_ref(), _profile_sections.as_ref())
         {
-            let _ = synchronize_for_profile(device);
+            let _ = synchronize_for_profile(&device);
             eprintln!(
                 "kiln_profile_section section=lm_head_tail seq_len={sl} start_pos={sp} elapsed_ms={:.3}",
                 t.elapsed().as_secs_f64() * 1000.0
@@ -26389,7 +26389,7 @@ pub fn model_forward_paged_streaming_with_progress(
         start_pos,
         linear_state,
         lora,
-        streaming_tile_tokens_for(weights.embed_tokens.device()),
+        streaming_tile_tokens_for(&weights.embed_tokens.device()),
         streaming_last_token_lm_head(),
         progress,
     )
@@ -26421,7 +26421,7 @@ pub fn model_forward_paged_streaming_last_token_with_last_hidden(
         start_pos,
         linear_state,
         lora,
-        streaming_tile_tokens_for(weights.embed_tokens.device()),
+        streaming_tile_tokens_for(&weights.embed_tokens.device()),
     )
 }
 
