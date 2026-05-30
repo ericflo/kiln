@@ -1328,7 +1328,9 @@ pub fn cuda_elementwise_binary(
         crate::Device::Cuda(i) => i,
         _ => unreachable!(),
     };
-    let out_storage = CudaStorage::zeros_ctx(&ctx,
+    // #1082 (perf, Pattern A): elementwise binary writes the full output
+    // (out[i] = op(a[i], b[i]) for all n); uninit skips the memset.
+    let out_storage = CudaStorage::alloc_uninit_ctx(&ctx,
         device_index,
         dtype,
         n,
@@ -1356,7 +1358,7 @@ pub fn cuda_elementwise_binary(
             let (p, _g) = s.device_ptr(&stream);
             p
         }
-        SliceOwner::Borrowed { .. } => unreachable!("cuda_zeros produces Owned"),
+        SliceOwner::Borrowed { .. } => unreachable!("alloc_uninit produces Owned"),
     };
 
     let a_off = (a.layout().start_offset() * bpe) as u64;
@@ -1460,7 +1462,9 @@ pub fn cuda_binary_minmax(
         _ => unreachable!(),
     };
     let n = a.element_count();
-    let out_storage = CudaStorage::zeros_ctx(&ctx, device_index, dtype, n)?;
+    // #1082 (perf, Pattern A): binary min/max writes the full output
+    // (out[i] = min/max(a[i], b[i]) for all n); uninit skips the memset.
+    let out_storage = CudaStorage::alloc_uninit_ctx(&ctx, device_index, dtype, n)?;
 
     let stream = ctx.default_stream();
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
@@ -1484,7 +1488,7 @@ pub fn cuda_binary_minmax(
             let (p, _g) = s.device_ptr(&stream);
             p
         }
-        SliceOwner::Borrowed { .. } => unreachable!("cuda zeros produces Owned"),
+        SliceOwner::Borrowed { .. } => unreachable!("alloc_uninit produces Owned"),
     };
 
     let per = dtype.size_in_bytes();
@@ -1578,7 +1582,9 @@ pub fn cuda_lerp(a: &crate::Tensor, b: &crate::Tensor, weight: f32) -> Result<cr
         _ => unreachable!(),
     };
     let n = a.element_count();
-    let out_storage = CudaStorage::zeros_ctx(&ctx, device_index, dtype, n)?;
+    // #1082 (perf, Pattern A): lerp writes the full output
+    // (out[i] = a[i] + w*(b[i]-a[i]) for all n); uninit skips the memset.
+    let out_storage = CudaStorage::alloc_uninit_ctx(&ctx, device_index, dtype, n)?;
 
     let stream = ctx.default_stream();
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
@@ -1602,7 +1608,7 @@ pub fn cuda_lerp(a: &crate::Tensor, b: &crate::Tensor, weight: f32) -> Result<cr
             let (p, _g) = s.device_ptr(&stream);
             p
         }
-        SliceOwner::Borrowed { .. } => unreachable!("cuda zeros produces Owned"),
+        SliceOwner::Borrowed { .. } => unreachable!("alloc_uninit produces Owned"),
     };
 
     let per = dtype.size_in_bytes();
@@ -1682,7 +1688,9 @@ pub fn cuda_activation_unary(x: &crate::Tensor, kind: i32) -> Result<crate::Tens
         crate::Device::Cuda(i) => i,
         _ => unreachable!(),
     };
-    let out_storage = CudaStorage::zeros_ctx(&ctx,
+    // #1082 (perf, Pattern A): unary activation writes the full output
+    // (out[i] = f(x[i]) for all n); uninit skips the memset.
+    let out_storage = CudaStorage::alloc_uninit_ctx(&ctx,
         device_index,
         dtype,
         n,
@@ -1703,7 +1711,7 @@ pub fn cuda_activation_unary(x: &crate::Tensor, kind: i32) -> Result<crate::Tens
             let (p, _g) = s.device_ptr(&stream);
             p
         }
-        SliceOwner::Borrowed { .. } => unreachable!("cuda_zeros produces Owned"),
+        SliceOwner::Borrowed { .. } => unreachable!("alloc_uninit produces Owned"),
     };
 
     let x_off = (x.layout().start_offset() * bpe) as u64;
@@ -2256,8 +2264,11 @@ pub fn cuda_softmax_last_axis(x: &crate::Tensor) -> Result<crate::Tensor> {
         crate::Device::Cuda(i) => i,
         _ => unreachable!(),
     };
+    // #1082 (perf, Pattern A): softmax writes every element of the
+    // last-axis output (Pass 3 stores out[row, c] for all rows × cols);
+    // uninit skips the memset.
     let out_storage =
-        CudaStorage::zeros_ctx(&ctx, device_index, dtype, x.element_count())?;
+        CudaStorage::alloc_uninit_ctx(&ctx, device_index, dtype, x.element_count())?;
 
     let stream = ctx.default_stream();
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
@@ -2274,7 +2285,7 @@ pub fn cuda_softmax_last_axis(x: &crate::Tensor) -> Result<crate::Tensor> {
             let (p, _g) = s.device_ptr(&stream);
             p
         }
-        SliceOwner::Borrowed { .. } => unreachable!("cuda zeros produces Owned"),
+        SliceOwner::Borrowed { .. } => unreachable!("alloc_uninit produces Owned"),
     };
 
     let x_off = (x.layout().start_offset() * dtype.size_in_bytes()) as u64;
@@ -2667,7 +2678,11 @@ pub fn cuda_sum_squared_last_axis(x: &crate::Tensor) -> Result<crate::Tensor> {
         _ => unreachable!(),
     };
     // Output is always F32.
-    let out_storage = CudaStorage::zeros_ctx(&ctx,
+    // #1082 (perf, Pattern A): the sum-of-squares kernel writes every
+    // output row (out[row] = Σ_c x[row,c]^2 for all n_rows rows; lane 0
+    // of each per-row block stores unconditionally) and the output is
+    // exactly n_rows elements; uninit skips the memset.
+    let out_storage = CudaStorage::alloc_uninit_ctx(&ctx,
         device_index,
         crate::DType::F32,
         n_rows as usize,
@@ -2777,8 +2792,12 @@ pub fn cuda_l2norm_last_axis(x: &crate::Tensor, eps: f32) -> Result<crate::Tenso
         crate::Device::Cuda(i) => i,
         _ => unreachable!(),
     };
+    // #1082 (perf, Pattern A): the l2norm-apply kernel writes every
+    // element of the output (out[row, c] = x[row,c] * inv_norm for all
+    // rows × cols) and the output is exactly x.element_count(); uninit
+    // skips the memset.
     let out_storage =
-        CudaStorage::zeros_ctx(&ctx, device_index, dtype, x.element_count())?;
+        CudaStorage::alloc_uninit_ctx(&ctx, device_index, dtype, x.element_count())?;
 
     let stream = ctx.default_stream();
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
@@ -2795,14 +2814,14 @@ pub fn cuda_l2norm_last_axis(x: &crate::Tensor, eps: f32) -> Result<crate::Tenso
             let (p, _g) = s.device_ptr(&stream);
             p
         }
-        SliceOwner::Borrowed { .. } => unreachable!("cuda zeros produces Owned"),
+        SliceOwner::Borrowed { .. } => unreachable!("alloc_uninit produces Owned"),
     };
     let out_base = match &out_storage.slice {
         SliceOwner::Owned(s) => {
             let (p, _g) = s.device_ptr(&stream);
             p
         }
-        SliceOwner::Borrowed { .. } => unreachable!("cuda zeros produces Owned"),
+        SliceOwner::Borrowed { .. } => unreachable!("alloc_uninit produces Owned"),
     };
 
     let x_off = (x.layout().start_offset() * dtype.size_in_bytes()) as u64;
@@ -2930,8 +2949,11 @@ pub fn cuda_rmsnorm_last_axis(
         crate::Device::Cuda(i) => i,
         _ => unreachable!(),
     };
+    // #1082 (perf, Pattern A): rmsnorm writes every element of the
+    // last-axis output (Pass 2 stores out[row, c] for all rows × cols);
+    // uninit skips the memset.
     let out_storage =
-        CudaStorage::zeros_ctx(&ctx, device_index, dtype, x.element_count())?;
+        CudaStorage::alloc_uninit_ctx(&ctx, device_index, dtype, x.element_count())?;
 
     let stream = ctx.default_stream();
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
@@ -3091,8 +3113,11 @@ pub fn cuda_layernorm_last_axis(
         crate::Device::Cuda(i) => i,
         _ => unreachable!(),
     };
+    // #1082 (perf, Pattern A): layernorm writes every element of the
+    // last-axis output (Pass 2 stores out[row, c] for all rows × cols);
+    // uninit skips the memset.
     let out_storage =
-        CudaStorage::zeros_ctx(&ctx, device_index, dtype, x.element_count())?;
+        CudaStorage::alloc_uninit_ctx(&ctx, device_index, dtype, x.element_count())?;
 
     let stream = ctx.default_stream();
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
@@ -4746,7 +4771,9 @@ pub fn cuda_scalar_op(x: &crate::Tensor, kind: i32, c: f32) -> Result<crate::Ten
         crate::Device::Cuda(i) => i,
         _ => unreachable!(),
     };
-    let out_storage = CudaStorage::zeros_ctx(&ctx,
+    // #1082 (perf, Pattern A): scalar op writes the full output
+    // (out[i] = f(x[i], c) for all n); uninit skips the memset.
+    let out_storage = CudaStorage::alloc_uninit_ctx(&ctx,
         device_index,
         dtype,
         n,
@@ -4767,7 +4794,7 @@ pub fn cuda_scalar_op(x: &crate::Tensor, kind: i32, c: f32) -> Result<crate::Ten
             let (p, _g) = s.device_ptr(&stream);
             p
         }
-        SliceOwner::Borrowed { .. } => unreachable!("cuda_zeros produces Owned"),
+        SliceOwner::Borrowed { .. } => unreachable!("alloc_uninit produces Owned"),
     };
 
     let x_off = (x.layout().start_offset() * bpe) as u64;
@@ -4850,7 +4877,9 @@ pub fn cuda_clamp_pow(
         crate::Device::Cuda(i) => i,
         _ => unreachable!(),
     };
-    let out_storage = CudaStorage::zeros_ctx(&ctx, device_index, dtype, n)?;
+    // #1082 (perf, Pattern A): clamp/pow writes the full output
+    // (out[i] = clamp/pow(x[i]) for all n); uninit skips the memset.
+    let out_storage = CudaStorage::alloc_uninit_ctx(&ctx, device_index, dtype, n)?;
 
     let stream = ctx.default_stream();
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
@@ -4867,7 +4896,7 @@ pub fn cuda_clamp_pow(
             let (p, _g) = s.device_ptr(&stream);
             p
         }
-        SliceOwner::Borrowed { .. } => unreachable!("cuda_zeros produces Owned"),
+        SliceOwner::Borrowed { .. } => unreachable!("alloc_uninit produces Owned"),
     };
 
     let x_off = (x.layout().start_offset() * bpe) as u64;
@@ -4969,7 +4998,9 @@ pub fn cuda_compare(
         _ => unreachable!(),
     };
     // Output is U8 (one byte per element).
-    let out_storage = CudaStorage::zeros_ctx(&ctx,
+    // #1082 (perf, Pattern A): compare writes the full output
+    // (out[i] = cmp(a[i], b[i]) ? 1 : 0 for all n); uninit skips the memset.
+    let out_storage = CudaStorage::alloc_uninit_ctx(&ctx,
         device_index,
         crate::DType::U8,
         n,
