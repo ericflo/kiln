@@ -189,7 +189,7 @@ pub(crate) fn grpo_pg_loss_from_logits_grad_candle(
     ref_log_probs: &Tensor,
     loss_params: GrpoLossParams,
     grad_scalar: f64,
-    device: &CdDevice,
+    device: &candle_core::Device,
 ) -> Result<Tensor> {
     let logits_dtype = logits.dtype();
     let dims = logits.dims();
@@ -214,19 +214,54 @@ pub(crate) fn grpo_pg_loss_from_logits_grad_candle(
         .context("grpo_pg_loss_from_logits_grad_candle: leaf Var from logits")?;
     let leaf_t = leaf.as_tensor();
 
-    // EXACT candle GRPO forward — the same `token_log_probs` + `grpo_loss` the
-    // candle-authoritative GRPO step runs (single source of truth for the math).
-    let policy_log_probs = token_log_probs(leaf_t, input_ids, action_mask, device)
+    // (#1082) candle GRPO island — convert to kt hand-derived logit-grad in final pass.
+    //
+    // The GRPO math (`token_log_probs` / `grpo_loss` in `trainer.rs`) has been
+    // flipped to kt (`kiln_tensor` ops, kt `CdDevice`); there is no candle copy
+    // and kt's autograd is `kiln_autograd::Tape`-driven (no per-op tape adapter
+    // for the GRPO `index_select` / `gather` / `cast` backward gaps, which is the
+    // whole reason this fused-node-via-recompute exists). To keep the
+    // candle-autograd backward ROOT working at this boundary we run the kt forward
+    // on a kt leaf clone, then record the GRPO composite and walk the kt tape — so
+    // for now we bridge the candle leaf into kt, run the kt `token_log_probs` +
+    // `grpo_loss` (numerically the single source of truth), and bridge the kt loss
+    // back into the candle graph. `loss.backward()` below stays candle-typed; the
+    // analytic `dL/d(logits)` derivation that replaces this recompute lands in the
+    // final pass.
+    let leaf_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_copy(leaf_t).map_err(|e| {
+        anyhow::anyhow!("grpo_pg_loss_from_logits_grad_candle: leaf candle->kt: {e}")
+    })?;
+    let ref_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_copy(ref_log_probs).map_err(|e| {
+        anyhow::anyhow!("grpo_pg_loss_from_logits_grad_candle: ref_log_probs candle->kt: {e}")
+    })?;
+    let device_kt = kiln_kt_bridge::kt_device_from_candle(device);
+
+    // EXACT GRPO forward — the same kt `token_log_probs` + `grpo_loss` the
+    // tape-authoritative GRPO step runs (single source of truth for the math).
+    let policy_log_probs = token_log_probs(&leaf_kt, input_ids, action_mask, &device_kt)
         .context("grpo_pg_loss_from_logits_grad_candle: token_log_probs")?;
-    let loss = grpo_loss(&policy_log_probs, ref_log_probs, loss_params, device)
+    let loss_kt = grpo_loss(&policy_log_probs, &ref_kt, loss_params, &device_kt)
         .context("grpo_pg_loss_from_logits_grad_candle: grpo_loss")?;
+
+    // Bridge the kt scalar loss back into a candle tensor so the candle-autograd
+    // backward root below stays candle-typed (#1082 candle island).
+    let loss = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&loss_kt)
+        .context("grpo_pg_loss_from_logits_grad_candle: loss kt->candle")?;
 
     let grads = loss
         .backward()
         .context("grpo_pg_loss_from_logits_grad_candle: candle loss.backward()")?;
     let grad_leaf = grads.get(leaf_t).cloned().with_context(|| {
+        // (#1082) candle GRPO island — convert to kt hand-derived logit-grad in
+        // final pass. With the GRPO math flipped to kt (no candle copy), the kt
+        // forward above carries no candle autograd lineage from `leaf_t` to
+        // `loss`, so candle's `.backward()` yields no grad for the leaf. The
+        // final-pass replacement derives `dL/d(logits)` directly from the kt loss
+        // (analytic GRPO logit-grad) instead of this candle recompute.
         "grpo_pg_loss_from_logits_grad_candle: candle backward produced no grad for the logits \
-         leaf (the loss did not depend on logits — likely an all-false action_mask)"
+         leaf — the kt GRPO forward carries no candle lineage to the leaf (#1082 candle island; \
+         pending final-pass kt hand-derived logit-grad), or the loss did not depend on logits \
+         (all-false action_mask)"
             .to_string()
     })?;
 
@@ -306,21 +341,30 @@ pub(crate) fn try_tape_grpo_pg_loss_from_logits_cuda(
         },
     };
 
-    // FORWARD value via candle — the same `token_log_probs` + `grpo_loss` math as
-    // the candle-authoritative path, so the returned scalar is numerically
-    // identical. `ref_log_probs` is the detached constant denominator.
-    let policy_log_probs = token_log_probs(logits, input_ids, action_mask, device)
+    // FORWARD value — the same kt `token_log_probs` + `grpo_loss` math as the
+    // tape-authoritative path, so the returned scalar is numerically identical.
+    // `ref_log_probs` is the detached constant denominator. The math functions
+    // are kt (#1082); bridge the candle `logits` / `ref_log_probs` into kt and
+    // convert the kt `device` to candle once for the saved backward state.
+    let ref_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_copy(ref_log_probs)
+        .map_err(|e| anyhow::anyhow!("try_tape_grpo_pg_loss_from_logits_cuda: ref candle->kt: {e}"))?;
+    let device_candle = kiln_kt_bridge::candle_device_from_kt(device)
+        .map_err(|e| anyhow::anyhow!("try_tape_grpo_pg_loss_from_logits_cuda: device kt->candle: {e}"))?;
+    let policy_log_probs = token_log_probs(&logits_kt, input_ids, action_mask, device)
         .context("try_tape_grpo_pg_loss_from_logits_cuda: token_log_probs")?;
-    let loss_candle = grpo_loss(&policy_log_probs, ref_log_probs, loss_params, device)
+    // kt scalar GRPO loss (already the OWNED kt copy the tape root needs — no
+    // candle round-trip; the kt loss does not dangle once the local candle
+    // `logits` drops because it carries no candle lineage).
+    let loss_kt_forward = grpo_loss(&policy_log_probs, &ref_kt, loss_params, device)
         .context("try_tape_grpo_pg_loss_from_logits_cuda: grpo_loss")?;
 
-    // Record the fused node: the OUTPUT must be an OWNED kt copy of the loss
-    // (a borrow would dangle once the local `loss_candle` drops — the tape is
-    // walked much later). The copy is a scalar (negligible). Saved state: the
-    // FULL logits + host-side gather metadata + detached ref_log_probs + params.
+    // Record the fused node: the OUTPUT is the OWNED kt loss. Saved state: the
+    // FULL candle logits + host-side gather metadata + detached candle
+    // ref_log_probs + params (the candle-island backward recomputes from these).
     let loss_kt = match with_active_tape(|tape: &mut Tape| -> Result<_> {
-        let loss_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_copy(&loss_candle)
-            .map_err(|e| anyhow::anyhow!("loss kt copy: {e}"))?;
+        let loss_kt = loss_kt_forward;
+        // `loss_kt` is the kt scalar GRPO loss (no candle lineage). Record the
+        // fused candle-island backward node against the CONNECTED kt logits input.
         tape.record(
             &loss_kt,
             &[&logits_kt],
@@ -330,7 +374,7 @@ pub(crate) fn try_tape_grpo_pg_loss_from_logits_cuda(
                 action_mask: action_mask.to_vec(),
                 ref_log_probs: ref_log_probs.detach(),
                 loss_params,
-                device: device.clone(),
+                device: device_candle,
             }) as Box<dyn BackwardOp>,
         );
         Ok(loss_kt)
@@ -341,13 +385,13 @@ pub(crate) fn try_tape_grpo_pg_loss_from_logits_cuda(
     let loss_kt = loss_kt
         .context("try_tape_grpo_pg_loss_from_logits_cuda: kt-tape forward failed")?;
 
-    // Return a DETACHED, lineage-free loss by construction (a fresh kt -> candle
-    // CUDA copy, numerically identical to the candle baseline). The candle
-    // `loss_candle` still carries candle autograd lineage; if returned, the
-    // tape-authoritative caller's `loss.backward()` could let candle's autograd
-    // silently fill in LoRA-Var grads (a false positive defeating the
-    // tape-coverage measurement). The fresh copy makes `loss.backward()`
-    // unconditionally `{loss: ones}` and the recorded node the sole tape root.
+    // Return a DETACHED, lineage-free candle loss by construction (a fresh kt ->
+    // candle CUDA copy of the kt scalar loss, numerically identical to the
+    // baseline). The returned candle copy carries NO candle autograd lineage, so
+    // the tape-authoritative caller's `loss.backward()` is unconditionally
+    // `{loss: ones}` and the recorded kt node is the sole tape root (a candle
+    // lineage here could silently fill in LoRA grads, a false positive defeating
+    // the tape-coverage measurement).
     let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&loss_kt)
         .context("try_tape_grpo_pg_loss_from_logits_cuda: kt -> candle copy failed")?;
 

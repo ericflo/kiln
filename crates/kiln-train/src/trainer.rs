@@ -491,7 +491,7 @@ fn kaiming_uniform_a(
             // RNG) is the non-reproducible fallback; draw from a
             // thread RNG so we stay candle-free (candle `Var::rand_f64`
             // is gone with the autograd `Var`).
-            let mut trng = StdRng::from_entropy();
+            let mut trng = StdRng::seed_from_u64(rand::random());
             (0..n)
                 .map(|_| trng.random_range(-bound_f32..bound_f32))
                 .collect()
@@ -504,24 +504,21 @@ fn kaiming_uniform_a(
 }
 
 /// (#1082) Upload f32 host values to a kt tensor on `device`, cast to
-/// `dtype` (BF16 in production). Bridges through candle once to land on
-/// the requested CUDA device, then borrows the candle tensor as kt
-/// zero-copy. This is the LoRA-init analogue of the per-step kt forward
-/// bridges — a cross-device seam that disappears when a host->kt CUDA
-/// upload helper lands in kiln-tensor/kiln-kt-bridge.
-/// // (#1082) bridge — remove when kiln-tensor grows a host->CUDA upload.
+/// `dtype` (BF16 in production). Lands directly on the requested device
+/// via the candle-free `Tensor::from_vec_on` host->device upload — the
+/// host->kt CUDA upload helper the old candle bridge was waiting for now
+/// exists in kiln-tensor, so this is fully kt-native (no candle hop).
 fn build_lora_master_kt(
     data: &[f32],
     shape: &[usize],
     dtype: DType,
     device: &CdDevice,
 ) -> Result<KtTensor> {
-    let cd = Tensor::from_slice(data, shape, device)?.to_dtype(dtype)?;
-    // `kt_tensor_from_candle_cuda_borrow` is defined for BOTH the cuda
-    // build (zero-copy CUDA borrow) and the no-cuda build (host candle->kt
-    // copy), so this one call covers CUDA + CPU init.
-    kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&cd)
-        .map_err(|e| anyhow::anyhow!("build_lora_master_kt: candle->kt: {e}"))
+    // Land the f32 host data on `device` (CPU direct, CUDA via H2D copy),
+    // then cast to the requested dtype (BF16 in production).
+    Tensor::from_vec_on(*device, data.to_vec(), shape.to_vec())?
+        .to_dtype(dtype)
+        .map_err(|e| anyhow::anyhow!("build_lora_master_kt: to_dtype: {e}"))
 }
 
 /// Convert our ChatMessage to the core tokenizer's ChatMessage.
@@ -636,14 +633,10 @@ impl TrainableLoraParams {
         device: &CdDevice,
         seed: Option<u64>,
     ) -> Result<Self> {
-        // Best-effort seed of the device RNG — `Var::zeros` for B does not
-        // need it, and on backends where `set_seed` works (CUDA/Metal) it
-        // pins anything else that uses the device RNG during init. Errors
-        // (e.g. CPU's `set_seed` bail) are swallowed because the seeded
-        // StdRng path below is what actually delivers determinism for A.
-        if let Some(seed) = seed {
-            let _ = device.set_seed(seed);
-        }
+        // (#1082) kt `Device` has no `set_seed` (candle's was a no-op on CPU
+        // anyway); the seeded `StdRng` below is what actually delivers
+        // byte-for-byte determinism for LoRA-A. LoRA-B is plain zeros and
+        // never touches a device RNG, so nothing else here needs seeding.
         let mut rng = seed.map(StdRng::seed_from_u64);
 
         let scale = alpha / rank as f32;
@@ -1073,10 +1066,14 @@ impl TrainableLoraParams {
         device: &CdDevice,
     ) -> Result<usize> {
         let st_path = adapter_dir.join("adapter_model.safetensors");
-        let tensors = safetensors_load_file(&st_path, device)
+        // (#1082) candle island — safetensors I/O is candle. Bridge the kt
+        // device to candle for the candle `safetensors::load` shim.
+        let cd_device = kiln_kt_bridge::candle_device_from_kt(device)
+            .map_err(|e| anyhow::anyhow!("load adapter: kt->candle device: {e}"))?;
+        let tensors = safetensors_load_file(&st_path, &cd_device)
             .with_context(|| format!("loading adapter safetensors from {}", st_path.display()))?;
 
-        let install = |param: &mut Parameter, t: &Tensor, key: &str| -> Result<()> {
+        let install = |param: &mut Parameter, t: &candle_core::Tensor, key: &str| -> Result<()> {
             let kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(t)
                 .map_err(|e| anyhow::anyhow!("load adapter {key}: candle->kt: {e}"))?;
             param.replace_forward_storage(KtForwardStorage::Plain(kt.clone()));
@@ -1146,15 +1143,17 @@ impl TrainableLoraParams {
         let config_path = output_dir.join("adapter_config.json");
         std::fs::write(&config_path, serde_json::to_string_pretty(&config)?)?;
 
-        // Collect all tensors for safetensors serialization
-        let mut tensor_data: HashMap<String, Tensor> = HashMap::new();
+        // Collect all tensors for safetensors serialization.
+        // (#1082) candle island — the safetensors writer is candle, so the
+        // collected tensors are candle (bridged from kt below).
+        let mut tensor_data: HashMap<String, candle_core::Tensor> = HashMap::new();
 
         // (#1082) Save reads each `Parameter`'s primary kt tensor and
         // bridges it to candle for the safetensors writer (the
         // `safetensors_save_file` shim is candle). Cross-file candle
         // island until kiln-tensor's own safetensors save is wired in.
         // // (#1082) bridge — safetensors I/O is still a candle island.
-        let kt_to_cd = |kt: &KtTensor, key: &str| -> Result<Tensor> {
+        let kt_to_cd = |kt: &KtTensor, key: &str| -> Result<candle_core::Tensor> {
             kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(kt)
                 .map_err(|e| anyhow::anyhow!("save adapter {key}: kt->candle: {e}"))
         };
@@ -2167,13 +2166,13 @@ pub fn sft_train(
         .as_deref()
         .map(|name| crate::adapter_shape::resolve_base_adapter_dir(name, adapter_dir));
 
-    // (#1082) `embed_tokens.device()` is now a kt Device. The SFT training
-    // body is a candle island (LoRA Vars, AdamW state, candle safetensors I/O,
-    // `standard_forward_backward(device: &CdDevice)`), so bridge the kt device
-    // to a candle device once here and keep `device` candle downstream.
-    let device = kiln_kt_bridge::candle_device_from_kt(&weights.embed_tokens.device())
-        .map_err(|e| anyhow::anyhow!("sft_train: kt -> candle device: {e}"))?;
-    let backend = backend::for_device(&device);
+    // (#1082) `embed_tokens.device()` is a kt Device; the SFT path is now
+    // kt-native end-to-end (kt `Parameter`s, kt AdamW state, kt tape
+    // forward/backward), so keep `device` kt downstream. The only candle
+    // touch left is the safetensors adapter I/O, which bridges the kt device
+    // to candle locally inside `load_from_safetensors`/`save_peft`.
+    let device = weights.embed_tokens.device();
+    let backend = backend::for_device_kt(&device);
 
     tracing::info!(
         num_examples = examples.len(),
@@ -2617,11 +2616,12 @@ pub fn grpo_train(
         .base_adapter
         .as_deref()
         .map(|name| crate::adapter_shape::resolve_base_adapter_dir(name, adapter_dir));
-    // (#1082) `embed_tokens.device()` is now a kt Device; the GRPO training
-    // body is a candle island. Bridge once and keep `device` candle.
-    let device = kiln_kt_bridge::candle_device_from_kt(&weights.embed_tokens.device())
-        .map_err(|e| anyhow::anyhow!("grpo_train: kt -> candle device: {e}"))?;
-    let backend = backend::for_device(&device);
+    // (#1082) `embed_tokens.device()` is a kt Device; the GRPO body is now
+    // kt-native (kt `Parameter`s, kt AdamW state, kt tape forward/backward),
+    // so keep `device` kt downstream. The only candle touch is safetensors
+    // adapter I/O, which bridges kt->candle locally inside save/load.
+    let device = weights.embed_tokens.device();
+    let backend = backend::for_device_kt(&device);
 
     let total_completions: usize = groups.iter().map(|g| g.completions.len()).sum();
     let mut data_stats = crate::train_receipt::DataStatsReceipt {
@@ -3452,11 +3452,12 @@ pub fn grpo_train_jsonl(
     let mut phase_timings = GrpoBenchmarkTimings::default();
     let mut dynamic_groups_filtered = 0usize;
 
-    // (#1082) `embed_tokens.device()` is now a kt Device; the OPD training
-    // body is a candle island. Bridge once and keep `device` candle.
-    let device = kiln_kt_bridge::candle_device_from_kt(&weights.embed_tokens.device())
-        .map_err(|e| anyhow::anyhow!("opd_train: kt -> candle device: {e}"))?;
-    let backend = backend::for_device(&device);
+    // (#1082) `embed_tokens.device()` is a kt Device; the OPD/GRPO body is now
+    // kt-native (kt `Parameter`s, kt AdamW state, kt tape forward/backward), so
+    // keep `device` kt downstream. The only candle touch is safetensors adapter
+    // I/O, which bridges kt->candle locally inside save/load.
+    let device = weights.embed_tokens.device();
+    let backend = backend::for_device_kt(&device);
 
     tracing::info!(
         dataset = %dataset_path.display(),
@@ -3843,7 +3844,7 @@ pub fn grpo_train_jsonl(
                 &tgroup,
                 weights,
                 model_config,
-                &params,
+                &mut params,
                 config,
                 segments.as_deref(),
                 &device,
@@ -4413,7 +4414,7 @@ fn compute_ref_log_probs_shared_prefix(
         block_table.push(i);
     }
 
-    let mut linear_state = LinearAttentionState::new(model_config, &kiln_kt_bridge::kt_device_from_candle(device))
+    let mut linear_state = LinearAttentionState::new(model_config, device)
         .context("GRPO shared-prefix: build LinearAttentionState")?;
 
     // Phase 1: prompt forward — populates the paged cache for positions
@@ -4434,19 +4435,14 @@ fn compute_ref_log_probs_shared_prefix(
     // The position that predicts the first completion token (input_ids[prompt_len])
     // is prompt_len - 1. Capture its normed hidden state as a detached, stable
     // owning tensor so the rest of the prompt_hidden allocation can be freed.
-    // (#1082) `prompt_hidden` is kt (kt-flipped `model_forward_paged_normed_hidden`).
-    // The downstream GRPO ref log-prob math (`cat_tensors`,
-    // `chunked_log_probs_for_completion`) is a candle island, so bridge the
-    // detached kt hidden to candle here.
-    let last_prompt_hidden = {
-        let kt = prompt_hidden
-            .narrow(1, prompt_len - 1, 1)
-            .context("GRPO shared-prefix: narrow last prompt hidden")?
-            .contiguous()
-            .context("GRPO shared-prefix: contiguous last prompt hidden")?;
-        kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&kt)
-            .map_err(|e| anyhow::anyhow!("GRPO shared-prefix: kt->candle last prompt hidden: {e}"))?
-    };
+    // (#1082) `prompt_hidden` is kt (kt-flipped `model_forward_paged_normed_hidden`);
+    // the downstream GRPO ref log-prob math (`cat_tensors`,
+    // `chunked_log_probs_for_completion`) is now kt-native too, so keep it kt.
+    let last_prompt_hidden = prompt_hidden
+        .narrow(1, prompt_len - 1, 1)
+        .context("GRPO shared-prefix: narrow last prompt hidden")?
+        .contiguous()
+        .context("GRPO shared-prefix: contiguous last prompt hidden")?;
     drop(prompt_hidden);
 
     // Snapshot the GDN linear state at end-of-prompt so each completion can
@@ -4491,9 +4487,8 @@ fn compute_ref_log_probs_shared_prefix(
                 ema_ref_lora,
             )
             .with_context(|| format!("GRPO shared-prefix: completion {comp_idx} forward"))?;
-            // (#1082) bridge kt forward output -> candle for the log-prob island.
-            kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&kt)
-                .map_err(|e| anyhow::anyhow!("GRPO shared-prefix: kt->candle comp hidden: {e}"))?
+            // (#1082) kt forward output flows straight into the kt log-prob path.
+            kt
         };
 
         // Build the "active hidden" tensor: aligned with the completion tokens
@@ -4519,13 +4514,11 @@ fn compute_ref_log_probs_shared_prefix(
         };
         drop(comp_hidden);
 
-        // (#1082) `embed_tokens_t` is kt; the chunked log-prob helper is a
-        // candle island. Bridge the head weight to candle for this call.
-        let head_t_candle = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&weights.embed_tokens_t)
-            .map_err(|e| anyhow::anyhow!("GRPO shared-prefix: kt->candle head_t: {e}"))?;
+        // (#1082) `embed_tokens_t` and the chunked log-prob helper are both
+        // kt now; pass the kt head weight straight through.
         let log_probs = chunked_log_probs_for_completion(
             &active_hidden,
-            &head_t_candle,
+            &weights.embed_tokens_t,
             completion_ids,
             DEFAULT_CHUNK_SIZE,
             device,
@@ -4625,7 +4618,7 @@ fn chunked_log_probs_for_completion(
                     anyhow::bail!("label {label} is outside vocab size {vocab_size}");
                 }
             }
-            let one_hot = tensor_from_vec(one_hot_data, (n_targets, chunk_len), device)?;
+            let one_hot = Tensor::from_vec_on(*device, one_hot_data, vec![n_targets, chunk_len])?;
             let chunk_correct = (&logits_chunk * &one_hot)?.sum_keepdim(LAST_DIM)?;
             correct_logits = Some(match correct_logits.as_ref() {
                 Some(prev) => (prev + chunk_correct)?.detach(),
@@ -4698,8 +4691,8 @@ fn train_tokenized_grpo_group_with_grad_norms(
         .max()
         .unwrap_or(0);
     let checkpoint_segments = segments.map_or(0, |segs| segs.len());
-    let streaming_tile_tokens = streaming_tile_tokens_for(&kiln_kt_bridge::kt_device_from_candle(device));
-    let streaming_prefill = streaming_prefill_enabled_for(&kiln_kt_bridge::kt_device_from_candle(device),group_max_seq_len);
+    let streaming_tile_tokens = streaming_tile_tokens_for(device);
+    let streaming_prefill = streaming_prefill_enabled_for(device, group_max_seq_len);
 
     let token_level = matches!(config.loss_aggregation, LossAggregation::TokenLevel);
     let mut group_accum: GradMap = HashMap::new();
@@ -4789,7 +4782,7 @@ fn train_tokenized_grpo_group_with_grad_norms(
         // cuda-only gate fn.
         #[cfg(feature = "cuda")]
         let tape_auth_eligible = tape_authoritative_enabled()
-            && matches!(device, candle_core::Device::Cuda(_))
+            && matches!(device, kiln_tensor::Device::Cuda(_))
             && !(config.loss.echo.is_some()
                 && config.loss.echo_enabled()
                 && comp_env_count > 0
@@ -4834,7 +4827,8 @@ fn train_tokenized_grpo_group_with_grad_norms(
                 // above), but handle it cleanly.
                 zeros_f32_on(num_active, device)?.detach()
             } else {
-                let indices = tensor_new(active_indices.as_slice(), device)?;
+                let n_idx = active_indices.len();
+                let indices = Tensor::from_vec_on(*device, active_indices, vec![n_idx])?;
                 span.index_select(&indices, 0)?.detach()
             }
         } else {
@@ -4845,18 +4839,19 @@ fn train_tokenized_grpo_group_with_grad_norms(
                 action_tokens = num_active,
                 env_tokens = comp_env_count,
                 checkpoint_segments,
-                streaming_prefill = streaming_prefill_enabled_for(&kiln_kt_bridge::kt_device_from_candle(device),comp.input_ids.len()),
+                streaming_prefill = streaming_prefill_enabled_for(device, comp.input_ids.len()),
                 streaming_tile_tokens,
                 "GRPO ref forward start"
             );
-            let mut ref_linear_state = LinearAttentionState::new(model_config, &kiln_kt_bridge::kt_device_from_candle(device))?;
+            let mut ref_linear_state = LinearAttentionState::new(model_config, device)?;
             // BasePerStep (None ema_ref_lora) → base model (no LoRA).
             // Ema (Some(snapshot)) → frozen snapshot of the LoRA from a
             // prior training point.
-            // (#1082) `model_forward_no_head` is kt-native; bridge its kt
-            // output (and the kt `embed_tokens_t` head weight) to candle for
-            // the candle-island `selected_log_probs_from_normed_hidden_chunked`.
-            let ref_hidden_kt = model_forward_no_head(
+            // (#1082) `model_forward_no_head` and
+            // `selected_log_probs_from_normed_hidden_chunked` are both kt-native;
+            // the kt hidden + kt `embed_tokens_t` head weight flow through
+            // directly (no candle bridge).
+            let ref_hidden = model_forward_no_head(
                 backend,
                 &comp.input_ids,
                 weights,
@@ -4864,17 +4859,12 @@ fn train_tokenized_grpo_group_with_grad_norms(
                 Some(&mut ref_linear_state),
                 ema_ref_lora,
             )
-            .context("GRPO reference forward pass")?;
-            let ref_hidden = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(
-                &ref_hidden_kt.contiguous().context("GRPO ref hidden contiguous")?,
-            )
-            .map_err(|e| anyhow::anyhow!("GRPO ref forward: kt->candle ref hidden: {e}"))?;
-            drop(ref_hidden_kt);
-            let ref_head_t_candle = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&weights.embed_tokens_t)
-                .map_err(|e| anyhow::anyhow!("GRPO ref forward: kt->candle head_t: {e}"))?;
+            .context("GRPO reference forward pass")?
+            .contiguous()
+            .context("GRPO ref hidden contiguous")?;
             let ref_log_probs = selected_log_probs_from_normed_hidden_chunked(
                 &ref_hidden,
-                &ref_head_t_candle,
+                &weights.embed_tokens_t,
                 &comp.input_ids,
                 &comp.action_mask,
                 DEFAULT_CHUNK_SIZE,
@@ -4889,7 +4879,7 @@ fn train_tokenized_grpo_group_with_grad_norms(
                 action_tokens = num_active,
                 env_tokens = comp_env_count,
                 checkpoint_segments,
-                streaming_prefill = streaming_prefill_enabled_for(&kiln_kt_bridge::kt_device_from_candle(device),comp.input_ids.len()),
+                streaming_prefill = streaming_prefill_enabled_for(device, comp.input_ids.len()),
                 streaming_tile_tokens,
                 elapsed_ms = ref_started.elapsed().as_millis() as u64,
                 "GRPO ref forward end"
@@ -5339,14 +5329,15 @@ fn tokenize_grpo_group_timed(
 fn deepcopy_tensor_for_snapshot(t: &Tensor) -> Result<Tensor> {
     let device = t.device();
     let dtype = t.dtype();
-    let shape = t.shape().clone();
+    let shape = t.dims().to_vec();
     let host: Vec<f32> = t
         .to_f32_dtype()?
         .flatten_all()?
-        .to_device(&cpu_device())?
+        .to_device(cpu_device())?
         .to_vec1::<f32>()
         .context("snapshot: read tensor to host f32 vec")?;
-    let rebuilt = tensor_from_vec(host, shape, device)?;
+    // (#1082) kt-native rebuild on the source device (no candle constructor).
+    let rebuilt = Tensor::from_vec_on(device, host, shape)?;
     if dtype == DType::F32 {
         Ok(rebuilt.detach())
     } else {
@@ -5386,42 +5377,21 @@ fn snapshot_projection(
         return Ok(None);
     };
     // (#1082) The EMA blend / deepcopy helpers (`ema_blend_tensor` /
-    // `deepcopy_tensor_for_snapshot`) still operate on candle tensors;
-    // `LoraProjectionWeights.a/.b` are kt. Bridge the param's primary kt
-    // tensor -> candle for the blend, then bridge the candle result back to
-    // kt for the snapshot `LoraWeights`. Candle island until the EMA blend is
-    // ported to kt ops.
-    // // (#1082) bridge — EMA snapshot blend is still a candle island.
-    let cur_a_cd = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(
-        cur_a.forward_storage().primary_tensor(),
-    )
-    .map_err(|e| anyhow::anyhow!("snapshot_projection: cur_a kt->candle: {e}"))?;
-    let cur_b_cd = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(
-        cur_b.forward_storage().primary_tensor(),
-    )
-    .map_err(|e| anyhow::anyhow!("snapshot_projection: cur_b kt->candle: {e}"))?;
-    let (a_cd, b_cd) = match prior {
-        Some(prior) => {
-            // `prior.a/.b` are kt (from a prior snapshot's LoraWeights); bridge
-            // them to candle for the blend.
-            let prior_a_cd = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&prior.a)
-                .map_err(|e| anyhow::anyhow!("snapshot_projection: prior_a kt->candle: {e}"))?;
-            let prior_b_cd = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&prior.b)
-                .map_err(|e| anyhow::anyhow!("snapshot_projection: prior_b kt->candle: {e}"))?;
-            (
-                ema_blend_tensor(&prior_a_cd, &cur_a_cd, decay)?,
-                ema_blend_tensor(&prior_b_cd, &cur_b_cd, decay)?,
-            )
-        }
+    // `deepcopy_tensor_for_snapshot`) are now kt-native, and the param's
+    // primary tensor + `LoraProjectionWeights.a/.b` are kt, so the whole
+    // snapshot blend runs in kt with no candle bridge.
+    let cur_a_kt = cur_a.forward_storage().primary_tensor();
+    let cur_b_kt = cur_b.forward_storage().primary_tensor();
+    let (a, b) = match prior {
+        Some(prior) => (
+            ema_blend_tensor(&prior.a, cur_a_kt, decay)?,
+            ema_blend_tensor(&prior.b, cur_b_kt, decay)?,
+        ),
         None => (
-            deepcopy_tensor_for_snapshot(&cur_a_cd)?,
-            deepcopy_tensor_for_snapshot(&cur_b_cd)?,
+            deepcopy_tensor_for_snapshot(cur_a_kt)?,
+            deepcopy_tensor_for_snapshot(cur_b_kt)?,
         ),
     };
-    let a = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&a_cd)
-        .map_err(|e| anyhow::anyhow!("snapshot_projection: a candle->kt: {e}"))?;
-    let b = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&b_cd)
-        .map_err(|e| anyhow::anyhow!("snapshot_projection: b candle->kt: {e}"))?;
     Ok(Some(LoraProjectionWeights { a, b }))
 }
 
@@ -5555,14 +5525,9 @@ pub(crate) fn token_log_probs(
     }
 
     // Gather active logits
-    let indices = tensor_new(
-        active_positions
-            .iter()
-            .map(|&i| i as u32)
-            .collect::<Vec<_>>()
-            .as_slice(),
-        device,
-    )?;
+    let active_idx_u32: Vec<u32> = active_positions.iter().map(|&i| i as u32).collect();
+    let n_active_idx = active_idx_u32.len();
+    let indices = Tensor::from_vec_on(*device, active_idx_u32, vec![n_active_idx])?;
     let active_logits = shift_logits.index_select(&indices, 0)?; // [num_active, vocab_size]
 
     let active_labels: Vec<u32> = active_positions.iter().map(|&i| shift_labels[i]).collect();
@@ -5570,7 +5535,8 @@ pub(crate) fn token_log_probs(
     // log_softmax then gather
     let active_logits_f32 = active_logits.to_f32_dtype()?;
     let log_sum_exp = active_logits_f32.log_sum_exp(LAST_DIM)?; // [num_active]
-    let labels_2d = tensor_new(active_labels.as_slice(), device)?
+    let n_labels = active_labels.len();
+    let labels_2d = Tensor::from_vec_on(*device, active_labels, vec![n_labels])?
         .to_dtype(DType::U32)?
         .unsqueeze(1)?;
     let correct_logits = active_logits_f32.gather(&labels_2d, 1)?.squeeze(1)?; // [num_active]
@@ -5627,7 +5593,7 @@ fn selected_log_probs_from_normed_hidden_chunked(
         .filter_map(|(i, &m)| if m { Some(i as u32) } else { None })
         .collect();
     if active_positions.is_empty() {
-        return zeros_f32_on(1, device).map_err(Into::into);
+        return zeros_f32_on(1, &device).map_err(Into::into);
     }
     let active_labels: Vec<u32> = active_positions
         .iter()
@@ -5637,7 +5603,8 @@ fn selected_log_probs_from_normed_hidden_chunked(
 
     let hidden_2d = normed_hidden.squeeze(0)?;
     let shift_hidden = hidden_2d.narrow(0, 0, seq_len - 1)?;
-    let active_indices = tensor_new(active_positions.as_slice(), device)?;
+    let n_pos = active_positions.len();
+    let active_indices = Tensor::from_vec_on(device, active_positions.clone(), vec![n_pos])?;
     let active_hidden = shift_hidden
         .index_select(&active_indices, 0)?
         .to_f32_dtype()?;
@@ -5689,14 +5656,14 @@ fn selected_log_probs_from_normed_hidden_chunked(
                     anyhow::bail!("label {} is outside vocab size {}", label, vocab_size);
                 }
             }
-            let one_hot = tensor_from_vec(one_hot_data, (num_active, chunk_len), device)?;
+            let one_hot = Tensor::from_vec_on(device, one_hot_data, vec![num_active, chunk_len])?;
             let chunk_correct = (&logits_chunk * &one_hot)?.sum_keepdim(LAST_DIM)?;
             correct_logits = Some(match correct_logits.as_ref() {
                 Some(prev) => (prev + chunk_correct)?.detach(),
                 None => chunk_correct.detach(),
             });
         }
-        synchronize_metal_tail_chunk(device, "synchronize selected log-prob chunk")?;
+        synchronize_metal_tail_chunk(&device, "synchronize selected log-prob chunk")?;
         chunk_start = chunk_end;
     }
 
@@ -5902,13 +5869,37 @@ fn has_supervised_shifted_labels(label_mask: &[bool]) -> bool {
 /// `label_mask`: which positions to include in the loss
 ///
 /// Returns: scalar loss tensor (tracked by autograd).
+// (#1082) `cross_entropy_loss` is a CANDLE-autograd loss island. It returns a
+// candle `Tensor`: the SFT tape-authoritative scope
+// (`with_tape_authoritative_scope`) structurally requires the loss to be the
+// candle tensor produced (and id-registered) by the candle `try_tape_*`
+// adapters so the tape backward can seed from it; the candle composite below
+// is the historical `loss.backward()` path. Callers thread kt logits/device in
+// and this fn bridges to candle once at the boundary (with id chaining).
+// // (#1082) candle island — SFT cross-entropy loss is candle-autograd.
 fn cross_entropy_loss(
-    logits: &Tensor,
+    logits: &KtTensor,
     input_ids: &[u32],
     label_mask: &[bool],
     device: &CdDevice,
-) -> Result<Tensor> {
+) -> Result<candle_core::Tensor> {
     let seq_len = input_ids.len();
+
+    // Bridge the kt logits + device to candle once at the island boundary, and
+    // register kt->candle id chaining so the candle `try_tape_*` adapters'
+    // `tape_kt_input` recovers the lm_head kt output and keep the tape
+    // connected back to the LoRA forward (a bare copy would island it).
+    let cd_device = kiln_kt_bridge::candle_device_from_kt(device)
+        .map_err(|e| anyhow::anyhow!("cross_entropy_loss: kt->candle device: {e}"))?;
+    let logits_candle = {
+        let lc = logits
+            .contiguous()
+            .context("cross_entropy_loss: logits contiguous")?;
+        let candle = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&lc)
+            .map_err(|e| anyhow::anyhow!("cross_entropy_loss: logits kt->candle: {e}"))?;
+        kiln_kt_bridge::tape_bridge::retain_output_for_chaining(logits, candle.id());
+        candle
+    };
 
     // #1082 CP-4 Increment 1: when tape-authoritative, route the WHOLE loss
     // through the fused "cross-entropy from full logits" node. It takes the
@@ -5922,14 +5913,17 @@ fn cross_entropy_loss(
     #[cfg(feature = "cuda")]
     if tape_authoritative_enabled() {
         if let Some(loss) = kiln_model::tape_forward::try_tape_cross_entropy_from_logits_cuda(
-            logits, input_ids, label_mask, device,
+            &logits_candle,
+            input_ids,
+            label_mask,
+            &cd_device,
         )? {
             return Ok(loss);
         }
     }
 
     // Squeeze batch dimension: [seq_len, vocab_size]
-    let logits = logits.squeeze(0)?;
+    let logits = logits_candle.squeeze(0)?;
 
     // For next-token prediction: predict token[i+1] from logits[i]
     // So we use logits[0..seq_len-1] to predict input_ids[1..seq_len]
@@ -5949,29 +5943,27 @@ fn cross_entropy_loss(
         "cross_entropy_loss called with no supervised shifted-label positions"
     );
 
-    // Gather active logits and labels
+    // Gather active logits and labels (candle island).
     let indices = tensor_new(
         active_positions
             .iter()
             .map(|&i| i as u32)
             .collect::<Vec<_>>()
             .as_slice(),
-        device,
+        &cd_device,
     )?;
     let active_logits = shift_logits.index_select(&indices, 0)?; // [num_active, vocab_size]
 
     let active_labels: Vec<u32> = active_positions.iter().map(|&i| shift_labels[i]).collect();
-    let labels_tensor = tensor_new(active_labels.as_slice(), device)?.to_dtype(DType::U32)?;
+    let labels_tensor =
+        tensor_new(active_labels.as_slice(), &cd_device)?.to_dtype(candle_core::DType::U32)?;
 
     // Cross-entropy: -log(softmax(logits)[label])
     // Use log-sum-exp trick for numerical stability
-    let active_logits_f32 = active_logits.to_f32_dtype()?;
+    let active_logits_f32 = active_logits.to_dtype(candle_core::DType::F32)?;
 
     // #1082 CP-4: when tape-authoritative, route the loss through the
-    // cross_entropy adapter so it records the scalar loss as the tape
-    // root. Gated on the authoritative flag so the candle-authoritative
-    // path (which still calls loss.backward()) keeps a lineage-carrying
-    // candle loss.
+    // cross_entropy adapter so it records the scalar loss as the tape root.
     #[cfg(feature = "cuda")]
     if tape_authoritative_enabled() {
         if let Some(loss) = kiln_model::tape_forward::try_tape_cross_entropy_cuda(
@@ -5981,11 +5973,12 @@ fn cross_entropy_loss(
             return Ok(loss);
         }
     }
-    let log_sum_exp = active_logits_f32.log_sum_exp(LAST_DIM)?; // [num_active]
+    let log_sum_exp = active_logits_f32.log_sum_exp(candle_core::D::Minus1)?; // [num_active]
 
     // Gather the logit for the correct class at each position
     let labels_2d = labels_tensor.unsqueeze(1)?; // [num_active, 1]
-    let correct_logits = active_logits_f32.gather(&labels_2d.to_dtype(DType::U32)?, 1)?; // [num_active, 1]
+    let correct_logits =
+        active_logits_f32.gather(&labels_2d.to_dtype(candle_core::DType::U32)?, 1)?; // [num_active, 1]
     let correct_logits = correct_logits.squeeze(1)?; // [num_active]
 
     // loss = mean(log_sum_exp - correct_logit)
@@ -6002,10 +5995,12 @@ fn cross_entropy_loss(
 /// chunking over vocab so the full `[T, V]` logits tensor is never
 /// materialized. The returned tensor is F32 with shape `[1, T, H]`; inactive
 /// shifted-label rows and the final sequence row are zero.
-fn synchronize_metal_tail_chunk(device: &CdDevice, context: &'static str) -> Result<()> {
-    if is_metal_device(device) {
-        device.synchronize().context(context)?;
-    }
+fn synchronize_metal_tail_chunk(device: &CdDevice, _context: &'static str) -> Result<()> {
+    // (#1082) kt `Device` has no per-device `synchronize()` (candle-only API);
+    // the candle-drop training path is CUDA-only (the kt tape adapters are
+    // BF16/CUDA), so the Metal chunk-tail sync that candle needed is a no-op
+    // here. If kt Metal training is ever wired up it gets its own sync hook.
+    let _ = is_metal_device(device);
     Ok(())
 }
 
@@ -6063,7 +6058,7 @@ fn analytic_sft_tail_grad_pre_final_norm(
         .filter_map(|(i, &m)| if m { Some(i as u32) } else { None })
         .collect();
     if active_positions.is_empty() {
-        return Ok(zeros_f32_on(hidden.shape(), device)?);
+        return Ok(zeros_f32_on(hidden.dims(), &device)?);
     }
 
     let active_labels: Vec<u32> = active_positions
@@ -6074,7 +6069,8 @@ fn analytic_sft_tail_grad_pre_final_norm(
 
     let hidden_2d = hidden.squeeze(0)?;
     let shift_hidden = hidden_2d.narrow(0, 0, seq_len - 1)?;
-    let active_indices = tensor_new(active_positions.as_slice(), device)?;
+    let active_indices =
+        Tensor::from_vec_on(device, active_positions.clone(), vec![num_active])?;
     let active_hidden = shift_hidden
         .index_select(&active_indices, 0)?
         .to_f32_dtype()?;
@@ -6124,7 +6120,7 @@ fn analytic_sft_tail_grad_pre_final_norm(
             running_max = Some(new_max);
             running_sumexp = Some(new_sumexp);
         }
-        synchronize_metal_tail_chunk(device, "synchronize analytic SFT tail normalizer chunk")?;
+        synchronize_metal_tail_chunk(&device, "synchronize analytic SFT tail normalizer chunk")?;
         chunk_start += chunk_len;
     }
     let running_max = running_max.context("vocab_size was zero")?;
@@ -6132,7 +6128,7 @@ fn analytic_sft_tail_grad_pre_final_norm(
 
     // Pass 2: accumulate d(loss)/d(post-final-norm hidden) by vocab chunk.
     let inv_n = 1.0f64 / num_active as f64;
-    let mut grad_normed = zeros_f32_on((num_active, hidden_size), device)?;
+    let mut grad_normed = zeros_f32_on((num_active, hidden_size), &device)?;
     let mut chunk_start = 0usize;
     while chunk_start < vocab_size {
         let chunk_len = chunk_size.min(vocab_size - chunk_start);
@@ -6154,13 +6150,13 @@ fn analytic_sft_tail_grad_pre_final_norm(
                     anyhow::bail!("label {} is outside vocab size {}", label, vocab_size);
                 }
             }
-            let one_hot = tensor_from_vec(one_hot_data, (num_active, chunk_len), device)?;
+            let one_hot = Tensor::from_vec_on(device, one_hot_data, vec![num_active, chunk_len])?;
             let grad_logits = (softmax_chunk - one_hot)?.affine(inv_n, 0.0)?;
             let head_chunk_t = head_chunk.t()?.contiguous()?;
             let chunk_contrib = grad_logits.matmul(&head_chunk_t)?;
             grad_normed = (&grad_normed + chunk_contrib)?.detach();
         }
-        synchronize_metal_tail_chunk(device, "synchronize analytic SFT tail gradient chunk")?;
+        synchronize_metal_tail_chunk(&device, "synchronize analytic SFT tail gradient chunk")?;
 
         chunk_start = chunk_end;
     }
@@ -6174,7 +6170,7 @@ fn analytic_sft_tail_grad_pre_final_norm(
     let correction = active_hidden.broadcast_mul(&dot.broadcast_mul(&correction_scale)?)?;
     let grad_active_hidden = (u.broadcast_mul(&rms_inv)? - correction)?.detach();
 
-    let mut grad_hidden_2d = zeros_f32_on((seq_len, hidden_size), device)?;
+    let mut grad_hidden_2d = zeros_f32_on((seq_len, hidden_size), &device)?;
     grad_hidden_2d = grad_hidden_2d.index_add(&active_indices, &grad_active_hidden, 0)?;
     Ok(grad_hidden_2d.unsqueeze(0)?)
 }
@@ -6215,21 +6211,36 @@ struct BackendFlceProvider {
 }
 
 impl FlceMatmulProvider for BackendFlceProvider {
+    // (#1082) The FLCE path is a candle island for now: the
+    // `FlceMatmulProvider` trait (in `flce_candle_shim`) is candle-typed, so
+    // this impl signature stays candle (`&candle_core::Tensor` in/out). The
+    // backend chunk matmul (`linear_prefill_apply_offset`) is kt-native, so we
+    // bridge candle->kt on the way in and kt->candle on the way out. Drop the
+    // bridge once FLCE itself flips to kt.
     fn chunk_matmul(
         &self,
-        lhs: &Tensor,
-        full_rhs: &Tensor,
+        lhs: &candle_core::Tensor,
+        full_rhs: &candle_core::Tensor,
         chunk_start: usize,
         chunk_len: usize,
-    ) -> anyhow::Result<Option<Tensor>> {
-        let lhs_3d = lhs.unsqueeze(0)?;
-        let Some(out_3d) =
-            self.backend
-                .linear_prefill_apply_offset(&lhs_3d, full_rhs, chunk_start, chunk_len)?
+    ) -> anyhow::Result<Option<candle_core::Tensor>> {
+        let lhs_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(lhs)
+            .map_err(|e| anyhow::anyhow!("FLCE chunk_matmul: candle->kt lhs: {e}"))?;
+        let full_rhs_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(full_rhs)
+            .map_err(|e| anyhow::anyhow!("FLCE chunk_matmul: candle->kt full_rhs: {e}"))?;
+        let lhs_3d = lhs_kt.unsqueeze(0)?;
+        let Some(out_3d) = self.backend.linear_prefill_apply_offset(
+            &lhs_3d,
+            &full_rhs_kt,
+            chunk_start,
+            chunk_len,
+        )?
         else {
             return Ok(None);
         };
-        let out = out_3d.squeeze(0)?;
+        let out_kt = out_3d.squeeze(0)?;
+        let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
+            .map_err(|e| anyhow::anyhow!("FLCE chunk_matmul: kt->candle out: {e}"))?;
         Ok(Some(out))
     }
 }
@@ -6356,11 +6367,17 @@ impl SpooledCheckpointBoundaries {
         Ok(Self { _dir: dir, paths })
     }
 
+    // (#1082) Spool checkpoint I/O is a candle island: candle's per-tensor
+    // `save_safetensors` / `safetensors::load` have no kt counterpart yet.
+    // The activation tensors are kt, so bridge kt->candle on save and
+    // candle->kt on load. Drop the bridge once kiln-tensor grows safetensors.
     fn save(&self, boundary_idx: usize, tensor: &Tensor) -> Result<()> {
         let path = self.paths.get(boundary_idx).ok_or_else(|| {
             anyhow::anyhow!("checkpoint boundary index {boundary_idx} out of spool range")
         })?;
-        tensor.save_safetensors("hidden", path).with_context(|| {
+        let tensor_cd = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(tensor)
+            .map_err(|e| anyhow::anyhow!("spool save: kt->candle: {e}"))?;
+        tensor_cd.save_safetensors("hidden", path).with_context(|| {
             format!(
                 "save checkpoint boundary {boundary_idx} to {}",
                 path.display()
@@ -6372,15 +6389,19 @@ impl SpooledCheckpointBoundaries {
         let path = self.paths.get(boundary_idx).ok_or_else(|| {
             anyhow::anyhow!("checkpoint boundary index {boundary_idx} out of spool range")
         })?;
-        let mut tensors = safetensors_load_file(path, device).with_context(|| {
+        let cd_device = kiln_kt_bridge::candle_device_from_kt(device)
+            .map_err(|e| anyhow::anyhow!("spool load: kt->candle device: {e}"))?;
+        let mut tensors = safetensors_load_file(path, &cd_device).with_context(|| {
             format!(
                 "load checkpoint boundary {boundary_idx} from {}",
                 path.display()
             )
         })?;
-        tensors.remove("hidden").ok_or_else(|| {
+        let tensor_cd = tensors.remove("hidden").ok_or_else(|| {
             anyhow::anyhow!("checkpoint boundary {boundary_idx} missing `hidden` tensor")
-        })
+        })?;
+        kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&tensor_cd)
+            .map_err(|e| anyhow::anyhow!("spool load: candle->kt: {e}"))
     }
 }
 
@@ -7175,10 +7196,10 @@ fn tiled_training_tile_size(
     seq_len: usize,
 ) -> Option<usize> {
     let _ = weights; // signature retained for callers; gating moved to the dispatcher.
-    if !streaming_prefill_enabled_for(&kiln_kt_bridge::kt_device_from_candle(device),seq_len) {
+    if !streaming_prefill_enabled_for(device, seq_len) {
         return None;
     }
-    let tile = streaming_tile_tokens_for(&kiln_kt_bridge::kt_device_from_candle(device));
+    let tile = streaming_tile_tokens_for(device);
     if tile == 0 || tile % GDN_CHUNK_SIZE != 0 || tile >= seq_len {
         return None;
     }
@@ -7204,7 +7225,7 @@ fn exact_gdn_reverse_tile_size(
     ) {
         return None;
     }
-    if !streaming_prefill_enabled_for(&kiln_kt_bridge::kt_device_from_candle(device),seq_len) {
+    if !streaming_prefill_enabled_for(device, seq_len) {
         return None;
     }
     let tile = exact_gdn_backward_tile_tokens_for(device);
@@ -7219,7 +7240,7 @@ fn exact_gdn_backward_tile_tokens_for(device: &CdDevice) -> usize {
         if is_cuda_device(device) {
             1024
         } else {
-            streaming_tile_tokens_for(&kiln_kt_bridge::kt_device_from_candle(device))
+            streaming_tile_tokens_for(device)
         }
     }
 
@@ -7555,7 +7576,7 @@ fn standard_forward_backward_tape_authoritative_kt(
     _flce_provider: Option<FlceProvider>,
 ) -> Result<(f64, kiln_autograd::GradStore)> {
     let lora_weights = params.as_lora_weights();
-    let mut linear_state = LinearAttentionState::new(model_config, &kiln_kt_bridge::kt_device_from_candle(device))?;
+    let mut linear_state = LinearAttentionState::new(model_config, device)?;
 
     let (loss_val, _loss, grads_by_candle_raw) =
         kiln_kt_bridge::tape_bridge::with_tape_authoritative_scope(|| {
@@ -7666,16 +7687,15 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
     let lora_detached = lora_weights_detached(params);
     let lora_weights = params.as_lora_weights();
 
-    let cd_out = |k: &kiln_tensor::Tensor| -> Result<Tensor> {
+    // (#1082) FLCE is the only candle island left in this checkpointed path
+    // (the analytic tail seed + cross-entropy are kt now). Bridge a kt tensor
+    // to candle just for the FLCE dispatch call.
+    let cd_out = |k: &kiln_tensor::Tensor| -> Result<candle_core::Tensor> {
         kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(
             &k.contiguous()
                 .map_err(|e| anyhow::anyhow!("ckpt-kt: kt contiguous: {e}"))?,
         )
         .map_err(|e| anyhow::anyhow!("ckpt-kt: kt->candle copy: {e}"))
-    };
-    let kt_in = |c: &Tensor| -> Result<kiln_tensor::Tensor> {
-        kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(c)
-            .map_err(|e| anyhow::anyhow!("ckpt-kt: candle->kt borrow: {e}"))
     };
 
     // Step 1: detached forward → kt boundary activations (one per segment start
@@ -7688,10 +7708,7 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
     let mut current = embed_hidden.detach();
     boundaries.push(current.clone());
     {
-        let mut linear_state = LinearAttentionState::new(
-            model_config,
-            &kiln_kt_bridge::kt_device_from_candle(device),
-        )?;
+        let mut linear_state = LinearAttentionState::new(model_config, device)?;
         for &(start, end) in segments.iter() {
             current = model_forward_segment(
                 backend,
@@ -7713,37 +7730,39 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
         .context("ckpt-kt: missing final checkpoint boundary")?
         .clone();
 
-    // Step 2: real loss at the final boundary + the exact analytic tail seed
-    // (candle island). `analytic_sft_tail_grad_pre_final_norm` returns
-    // d(loss)/d(pre-final-norm hidden) as candle F32 [1, T, H] — exactly the
+    // Step 2: real loss at the final boundary + the exact analytic tail seed.
+    // `analytic_sft_tail_grad_pre_final_norm` is kt-native and returns
+    // d(loss)/d(pre-final-norm hidden) as kt F32 [1, T, H] — exactly the
     // upstream grad to seed the LAST segment's backward (its output IS that
-    // hidden).
-    let final_hidden_candle = cd_out(&final_hidden_kt)?;
-    let head_t_candle = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&weights.embed_tokens_t)
-        .map_err(|e| anyhow::anyhow!("ckpt-kt: kt->candle head_t: {e}"))?;
-    let final_norm_candle = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&weights.final_norm)
-        .map_err(|e| anyhow::anyhow!("ckpt-kt: kt->candle final_norm: {e}"))?;
-    let loss = if use_flce() {
+    // hidden). The loss value is only needed as a scalar; FLCE remains a candle
+    // island (bridge kt->candle for that dispatch only).
+    let loss_val = if use_flce() {
+        // (#1082) candle island — FLCE dispatch is candle-typed.
         let normed = cd_out(&model_forward_final_norm(&final_hidden_kt, weights, model_config)?)?;
-        fused_linear_cross_entropy_dispatch_with_provider(
+        let head_t_candle = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&weights.embed_tokens_t)
+            .map_err(|e| anyhow::anyhow!("ckpt-kt: kt->candle head_t: {e}"))?;
+        let cd_device = kiln_kt_bridge::candle_device_from_kt(device)
+            .map_err(|e| anyhow::anyhow!("ckpt-kt: kt->candle device: {e}"))?;
+        let loss = fused_linear_cross_entropy_dispatch_with_provider(
             &normed,
             &head_t_candle,
             input_ids,
             label_mask,
-            device,
+            &cd_device,
             DEFAULT_CHUNK_SIZE,
             flce_provider.clone(),
         )
-        .context("ckpt-kt fused linear cross-entropy (final boundary)")?
+        .context("ckpt-kt fused linear cross-entropy (final boundary)")?;
+        loss.to_scalar::<f32>()? as f64
     } else {
-        let logits = cd_out(&model_forward_head(&final_hidden_kt, weights, model_config)?)?;
-        cross_entropy_loss(&logits, input_ids, label_mask, device)?
+        let logits = model_forward_head(&final_hidden_kt, weights, model_config)?;
+        let loss = cross_entropy_loss(&logits, input_ids, label_mask, device)?;
+        loss.to_scalar::<f32>()? as f64
     };
-    let loss_val = loss.to_scalar::<f32>()? as f64;
-    let tail_candle = analytic_sft_tail_grad_pre_final_norm(
-        &final_hidden_candle,
-        &final_norm_candle,
-        &head_t_candle,
+    let mut upstream_grad = analytic_sft_tail_grad_pre_final_norm(
+        &final_hidden_kt,
+        &weights.final_norm,
+        &weights.embed_tokens_t,
         input_ids,
         label_mask,
         model_config.rms_norm_eps,
@@ -7751,9 +7770,6 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
     )
     .context("ckpt-kt analytic SFT tail gradient")?
     .detach();
-    let mut upstream_grad = kt_in(&tail_candle)?;
-    drop(loss);
-    drop(final_hidden_candle);
 
     // Step 3: reverse pass over segments via the kt tape. Each segment is
     // re-run under its OWN fresh tape (memory bounded to one segment), seeded at
@@ -7783,10 +7799,7 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
             || {
                 // Fresh recurrence state per segment (GDN recurrence is internal
                 // to each layer's full-sequence pass — see Step 1 note).
-                let mut seg_ls = LinearAttentionState::new(
-                    model_config,
-                    &kiln_kt_bridge::kt_device_from_candle(device),
-                )
+                let mut seg_ls = LinearAttentionState::new(model_config, device)
                 .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?;
                 model_forward_segment(
                     backend,
@@ -7854,7 +7867,7 @@ pub fn standard_forward_backward(
     #[cfg(feature = "cuda")]
     {
         anyhow::ensure!(
-            matches!(device, candle_core::Device::Cuda(_)),
+            matches!(device, kiln_tensor::Device::Cuda(_)),
             "standard_forward_backward: kt tape-authoritative SFT requires a CUDA \
              device post candle-drop (the candle CPU `loss.backward()` path was \
              removed in #1082)."
@@ -7946,7 +7959,7 @@ fn grpo_step_forward_backward_tape_authoritative_kt(
     mut timings: Option<&mut GrpoBenchmarkTimings>,
 ) -> Result<(f64, kiln_autograd::GradStore)> {
     let lora_weights = params.as_lora_weights();
-    let mut linear_state = LinearAttentionState::new(model_config, &kiln_kt_bridge::kt_device_from_candle(device))?;
+    let mut linear_state = LinearAttentionState::new(model_config, device)?;
     let step_started = Instant::now();
 
     let (loss_val, _loss, grads_by_candle_raw) =
@@ -8085,7 +8098,7 @@ fn grpo_step_forward_backward_tape_authoritative_kt(
         action_tokens = num_active,
         env_tokens = comp_env_count,
         checkpoint_segments,
-        streaming_prefill = streaming_prefill_enabled_for(&kiln_kt_bridge::kt_device_from_candle(device),input_ids.len()),
+        streaming_prefill = streaming_prefill_enabled_for(device, input_ids.len()),
         streaming_tile_tokens,
         elapsed_ms = step_elapsed.as_millis() as u64,
         "GRPO step end (tape-authoritative kt)"
@@ -8187,7 +8200,8 @@ pub(crate) fn grpo_loss(
 ) -> Result<Tensor> {
     let num_active = policy_log_probs.elem_count();
     if num_active == 0 {
-        return tensor_new(0.0_f32, device).map_err(Into::into);
+        // Scalar zero loss (empty active set). kt-native.
+        return zeros_f32_on((), device).map_err(Into::into);
     }
 
     // REINFORCE short-circuit: when `reinforce` is set, the IS ratio is
@@ -8203,8 +8217,10 @@ pub(crate) fn grpo_loss(
     if params.reinforce {
         let log_ratio = (policy_log_probs - policy_log_probs.detach())?;
         let ratio = log_ratio.exp()?;
-        let adv = tensor_new(params.advantage as f32, device)?.broadcast_as(ratio.shape())?;
-        let per_token_loss = (&ratio * &adv)?.neg()?;
+        // (#1082) advantage is a constant scalar; fold the broadcast-mul into a
+        // single `affine` (gradient flows through `ratio`, identical math, no
+        // constant tensor allocation).
+        let per_token_loss = ratio.affine(-(params.advantage), 0.0)?;
         let total = per_token_loss.sum_all()?;
         return total
             .affine(params.loss_normalizer, 0.0)
@@ -8213,7 +8229,7 @@ pub(crate) fn grpo_loss(
 
     let log_ratio = (policy_log_probs - ref_log_probs)?;
     let ratio = log_ratio.exp()?;
-    let ratio_shape = ratio.shape().clone();
+    let ratio_shape = ratio.dims().to_vec();
 
     // Asymmetric PPO clip range: [1 - clip_low, 1 + clip_high].
     let lo_val = 1.0 - params.clip_low;
@@ -8245,7 +8261,8 @@ pub(crate) fn grpo_loss(
                 .iter()
                 .map(|p| if -(*p as f64) >= thr { 1.0 } else { 0.0 })
                 .collect();
-            let mask = tensor_from_vec(mask_host, ratio.shape(), device)?.to_f32_dtype()?;
+            let mask = Tensor::from_vec_on(*device, mask_host, ratio.dims().to_vec())?
+                .to_f32_dtype()?;
             (&kl_penalty_raw * &mask)?
         } else {
             kl_penalty_raw
@@ -8257,17 +8274,11 @@ pub(crate) fn grpo_loss(
     let neg_surrogate = match params.is_level {
         IsLevel::Token => {
             // Per-token surrogate: -min(r·A, clip(r)·A).
-            let lo = tensor_new(lo_val, device)?
-                .to_f32_dtype()?
-                .broadcast_as(&ratio_shape)?;
-            let hi = tensor_new(hi_val, device)?
-                .to_f32_dtype()?
-                .broadcast_as(&ratio_shape)?;
-            let clipped_ratio = ratio.clamp(&lo, &hi)?;
-            let adv_tensor =
-                tensor_new(params.advantage as f32, device)?.broadcast_as(&ratio_shape)?;
-            let surr1 = (&ratio * &adv_tensor)?;
-            let surr2 = (&clipped_ratio * &adv_tensor)?;
+            // (#1082) kt `clamp` takes scalar bounds directly; advantage folds
+            // into `affine` (constant scalar, gradient flows through the ratio).
+            let clipped_ratio = ratio.clamp(lo_val, hi_val)?;
+            let surr1 = ratio.affine(params.advantage, 0.0)?;
+            let surr2 = clipped_ratio.affine(params.advantage, 0.0)?;
             let surrogate = surr1.minimum(&surr2)?;
             surrogate.neg()?
         }
@@ -8282,18 +8293,11 @@ pub(crate) fn grpo_loss(
             // `surrogate / num_active`, replicated per token.
             let u = log_ratio.mean_keepdim(0)?;
             let s = u.exp()?;
-            let lo_t = tensor_new(lo_val as f32, device)?
-                .reshape(&[1])?
-                .broadcast_as(s.shape())?;
-            let hi_t = tensor_new(hi_val as f32, device)?
-                .reshape(&[1])?
-                .broadcast_as(s.shape())?;
-            let clipped = s.clamp(&lo_t, &hi_t)?;
-            let adv = tensor_new(params.advantage as f32, device)?
-                .reshape(&[1])?
-                .broadcast_as(s.shape())?;
-            let surr1 = (&s * &adv)?;
-            let surr2 = (&clipped * &adv)?;
+            // (#1082) kt scalar clamp + scalar `affine` for the constant
+            // advantage (gradient flows through `s`).
+            let clipped = s.clamp(lo_val, hi_val)?;
+            let surr1 = s.affine(params.advantage, 0.0)?;
+            let surr2 = clipped.affine(params.advantage, 0.0)?;
             let surrogate = surr1.minimum(&surr2)?;
             let per_token_scale = 1.0 / num_active as f64;
             // Repeat scalar across active token positions, scaled so that
@@ -8305,19 +8309,12 @@ pub(crate) fn grpo_loss(
             // CISPO: gradient through `log π_θ` only; the IS weight is the
             // *clipped* ratio with stop-gradient. The total loss contribution
             // is `-stop_grad(clip(r)) · A · log π_θ` per token.
-            let lo = tensor_new(lo_val, device)?
-                .to_f32_dtype()?
-                .broadcast_as(&ratio_shape)?;
-            let hi = tensor_new(hi_val, device)?
-                .to_f32_dtype()?
-                .broadcast_as(&ratio_shape)?;
-            let clipped_ratio = ratio.clamp(&lo, &hi)?.detach();
-            let adv_tensor =
-                tensor_new(params.advantage as f32, device)?.broadcast_as(&ratio_shape)?;
+            // (#1082) kt scalar clamp; advantage folds into `affine`. `weight`
+            // is detached either way, so the constant scalar mul is exact.
+            let clipped_ratio = ratio.clamp(lo_val, hi_val)?.detach();
             // log π_θ = policy_log_probs (already in tensor form).
-            let weight = (&clipped_ratio * &adv_tensor)?.detach();
-            let neg = (&weight * policy_log_probs)?.neg()?;
-            neg
+            let weight = clipped_ratio.affine(params.advantage, 0.0)?.detach();
+            (&weight * policy_log_probs)?.neg()?
         }
     };
 
@@ -8375,6 +8372,19 @@ pub(crate) mod tests {
                 std::env::remove_var(key);
             }
         }
+    }
+
+    // (#1082) kt CPU test-tensor constructors. The candle `tensor_new` /
+    // `tensor_from_vec` cd_types shims build candle tensors, but the
+    // production loss/log-prob helpers under test (`grpo_loss`,
+    // `ema_blend_tensor`, `token_log_probs`, `cross_entropy_loss`, …) are now
+    // kt-typed. These build the same fixtures kt-native on CPU.
+    fn t1d(values: &[f32]) -> Result<Tensor> {
+        Tensor::from_slice(values, values.len()).map_err(Into::into)
+    }
+
+    fn tnd(values: Vec<f32>, shape: impl Into<kiln_tensor::Shape>) -> Result<Tensor> {
+        Tensor::from_vec(values, shape).map_err(Into::into)
     }
 
     // ---------------------------------------------------------------------
@@ -8949,8 +8959,8 @@ pub(crate) mod tests {
     #[test]
     fn grpo_loss_k1_matches_legacy_mean_form_at_per_sample_normalizer() -> Result<()> {
         let device = cpu_device();
-        let policy = tensor_new(&[-1.1_f32, -0.9, -1.4], &device)?;
-        let reference = tensor_new(&[-1.0_f32, -1.0, -1.2], &device)?;
+        let policy = t1d(&[-1.1_f32, -0.9, -1.4])?;
+        let reference = t1d(&[-1.0_f32, -1.0, -1.2])?;
         let advantage = 0.5_f64;
         let kl_coeff = 0.1_f64;
         let clip = 0.2_f64;
@@ -8991,8 +9001,8 @@ pub(crate) mod tests {
     #[test]
     fn grpo_loss_none_kl_drops_penalty_term() -> Result<()> {
         let device = cpu_device();
-        let policy = tensor_new(&[-1.1_f32, -0.9, -1.4], &device)?;
-        let reference = tensor_new(&[-1.0_f32, -1.0, -1.2], &device)?;
+        let policy = t1d(&[-1.1_f32, -0.9, -1.4])?;
+        let reference = t1d(&[-1.0_f32, -1.0, -1.2])?;
         let advantage = 0.5_f64;
         let num_active = 3usize;
         let params = GrpoLossParams {
@@ -9033,8 +9043,8 @@ pub(crate) mod tests {
         // very small advantage and a moderate kl_coeff, the total per-token
         // loss should be ≥ 0 for any non-trivial log_ratio.
         let device = cpu_device();
-        let policy = tensor_new(&[-0.6_f32, -1.3, -0.4], &device)?;
-        let reference = tensor_new(&[-1.0_f32, -1.0, -1.0], &device)?;
+        let policy = t1d(&[-0.6_f32, -1.3, -0.4])?;
+        let reference = t1d(&[-1.0_f32, -1.0, -1.0])?;
         let params = GrpoLossParams {
             advantage: 0.0,
             clip_low: 0.2,
@@ -9064,8 +9074,8 @@ pub(crate) mod tests {
         // ceiling kicks in, so a wider clip_high yields a less-pessimistic
         // min and therefore *smaller* loss.
         let device = cpu_device();
-        let policy = tensor_new(&[-0.7_f32, -0.6, -0.5], &device)?;
-        let reference = tensor_new(&[-1.0_f32, -1.0, -1.0], &device)?;
+        let policy = t1d(&[-0.7_f32, -0.6, -0.5])?;
+        let reference = t1d(&[-1.0_f32, -1.0, -1.0])?;
         let make = |hi: f64| GrpoLossParams {
             advantage: 0.5,
             clip_low: 0.2,
@@ -9093,8 +9103,8 @@ pub(crate) mod tests {
         // 1/(2N) (e.g. a TokenLevel group of two equal-size completions)
         // should yield a factor-of-two difference in the scalar.
         let device = cpu_device();
-        let policy = tensor_new(&[-1.1_f32, -0.9, -1.4], &device)?;
-        let reference = tensor_new(&[-1.0_f32, -1.0, -1.2], &device)?;
+        let policy = t1d(&[-1.1_f32, -0.9, -1.4])?;
+        let reference = t1d(&[-1.0_f32, -1.0, -1.2])?;
         let base = GrpoLossParams {
             advantage: 0.5,
             clip_low: 0.2,
@@ -9131,8 +9141,8 @@ pub(crate) mod tests {
         // up to a constant offset. Choosing all same-sign log_ratios makes
         // the math easy to verify.
         let device = cpu_device();
-        let policy = tensor_new(&[-0.05_f32, -3.0, -2.5, -0.10], &device)?;
-        let reference = tensor_new(&[0.0_f32, 0.0, 0.0, 0.0], &device)?; // log_ratio = policy
+        let policy = t1d(&[-0.05_f32, -3.0, -2.5, -0.10])?;
+        let reference = t1d(&[0.0_f32, 0.0, 0.0, 0.0])?; // log_ratio = policy
         let base = GrpoLossParams {
             advantage: 0.0, // isolate KL
             clip_low: 0.2,
@@ -9180,8 +9190,8 @@ pub(crate) mod tests {
     #[test]
     fn entropy_aware_kl_zero_quantile_matches_full_kl() -> Result<()> {
         let device = cpu_device();
-        let policy = tensor_new(&[-0.5_f32, -2.0, -1.4], &device)?;
-        let reference = tensor_new(&[-1.0_f32, -1.0, -1.0], &device)?;
+        let policy = t1d(&[-0.5_f32, -2.0, -1.4])?;
+        let reference = t1d(&[-1.0_f32, -1.0, -1.0])?;
         let base = GrpoLossParams {
             advantage: 0.3,
             clip_low: 0.2,
@@ -9220,9 +9230,8 @@ pub(crate) mod tests {
 
     #[test]
     fn ema_blend_tensor_matches_manual_formula() -> Result<()> {
-        let device = cpu_device();
-        let old = tensor_new(&[1.0_f32, 2.0, 4.0], &device)?;
-        let current = tensor_new(&[2.0_f32, 4.0, 8.0], &device)?;
+        let old = t1d(&[1.0_f32, 2.0, 4.0])?;
+        let current = t1d(&[2.0_f32, 4.0, 8.0])?;
         let decay = 0.25_f32;
         let blended = ema_blend_tensor(&old, &current, decay)?;
         let got = blended.to_vec1::<f32>()?;
@@ -9236,9 +9245,8 @@ pub(crate) mod tests {
 
     #[test]
     fn ema_blend_with_decay_one_returns_old() -> Result<()> {
-        let device = cpu_device();
-        let old = tensor_new(&[3.0_f32, 5.0], &device)?;
-        let current = tensor_new(&[7.0_f32, 11.0], &device)?;
+        let old = t1d(&[3.0_f32, 5.0])?;
+        let current = t1d(&[7.0_f32, 11.0])?;
         let blended = ema_blend_tensor(&old, &current, 1.0)?;
         let got = blended.to_vec1::<f32>()?;
         assert!((got[0] - 3.0).abs() < 1e-5);
@@ -9248,9 +9256,8 @@ pub(crate) mod tests {
 
     #[test]
     fn ema_blend_with_decay_zero_returns_current() -> Result<()> {
-        let device = cpu_device();
-        let old = tensor_new(&[3.0_f32, 5.0], &device)?;
-        let current = tensor_new(&[7.0_f32, 11.0], &device)?;
+        let old = t1d(&[3.0_f32, 5.0])?;
+        let current = t1d(&[7.0_f32, 11.0])?;
         let blended = ema_blend_tensor(&old, &current, 0.0)?;
         let got = blended.to_vec1::<f32>()?;
         assert!((got[0] - 7.0).abs() < 1e-5);
@@ -9267,8 +9274,8 @@ pub(crate) mod tests {
     #[test]
     fn grpo_loss_sequence_level_matches_manual_gspo_value() -> Result<()> {
         let device = cpu_device();
-        let policy = tensor_new(&[-0.7_f32, -0.9, -1.1, -1.3], &device)?;
-        let reference = tensor_new(&[-1.0_f32, -1.0, -1.0, -1.0], &device)?;
+        let policy = t1d(&[-0.7_f32, -0.9, -1.1, -1.3])?;
+        let reference = t1d(&[-1.0_f32, -1.0, -1.0, -1.0])?;
         let advantage = 0.4_f64;
         let clip = 0.2_f64;
         let num_active = 4usize;
@@ -9321,8 +9328,8 @@ pub(crate) mod tests {
         //   sum_t -clip(r_t) * A * log_pi_t  /  num_active
         // Manual check against grpo_loss.
         let device = cpu_device();
-        let policy = tensor_new(&[-0.6_f32, -1.4, -0.5, -1.0], &device)?;
-        let reference = tensor_new(&[-1.0_f32, -1.0, -1.0, -1.0], &device)?;
+        let policy = t1d(&[-0.6_f32, -1.4, -0.5, -1.0])?;
+        let reference = t1d(&[-1.0_f32, -1.0, -1.0, -1.0])?;
         let advantage = 0.5_f64;
         let clip = 0.2_f64;
         let n = 4usize;
@@ -9362,8 +9369,8 @@ pub(crate) mod tests {
         // ReferencePolicy::None forces reinforce=true. The loss reduces to
         // `-advantage` per token, summed and scaled by loss_normalizer.
         let device = cpu_device();
-        let policy = tensor_new(&[-0.5_f32, -1.1, -0.8], &device)?;
-        let reference = tensor_new(&[0.0_f32, 0.0, 0.0], &device)?;
+        let policy = t1d(&[-0.5_f32, -1.1, -0.8])?;
+        let reference = t1d(&[0.0_f32, 0.0, 0.0])?;
         let advantage = 0.3_f64;
         let n = 3usize;
 
@@ -9484,21 +9491,19 @@ pub(crate) mod tests {
     #[test]
     fn chunked_selected_log_probs_match_full_logits() -> Result<()> {
         let device = cpu_device();
-        let normed_hidden = tensor_from_vec(
+        let normed_hidden = tnd(
             vec![
                 0.10f32, -0.20, 0.30, 0.40, 0.50, -0.60, -0.70, 0.80, 0.90, 1.00, -1.10, 1.20,
                 1.30, 1.40, -1.50,
             ],
             (1, 5, 3),
-            &device,
         )?;
-        let head_t = tensor_from_vec(
+        let head_t = tnd(
             vec![
                 0.20f32, -0.10, 0.30, -0.40, 0.50, -0.60, 0.70, 0.80, -0.90, 1.00, -1.10, 1.20,
                 -1.30, 1.40, 1.50, -1.60, 1.70, -1.80,
             ],
             (3, 6),
-            &device,
         )?;
         let input_ids = vec![0, 2, 5, 1, 4];
         let mask = vec![false, true, false, true, true];
@@ -9685,14 +9690,12 @@ pub(crate) mod tests {
     // on CPU via the kt `from_slice`/`zeros`/`ones` façade and move to a kt
     // device bridged from the candle `CdDevice` param.
     fn kt_zeros_f32_on(shape: &[usize], device: &CdDevice) -> Result<kiln_tensor::Tensor> {
-        let kdev = kiln_kt_bridge::kt_device_from_candle(device);
-        kiln_tensor::Tensor::zeros(shape.to_vec(), kiln_tensor::DType::F32, &kdev)
+        kiln_tensor::Tensor::zeros(shape.to_vec(), kiln_tensor::DType::F32, device)
             .map_err(Into::into)
     }
 
     fn kt_ones_f32_on(shape: &[usize], device: &CdDevice) -> Result<kiln_tensor::Tensor> {
-        let kdev = kiln_kt_bridge::kt_device_from_candle(device);
-        kiln_tensor::Tensor::ones(shape.to_vec(), kiln_tensor::DType::F32, &kdev)
+        kiln_tensor::Tensor::ones(shape.to_vec(), kiln_tensor::DType::F32, device)
             .map_err(Into::into)
     }
 
@@ -9702,22 +9705,26 @@ pub(crate) mod tests {
     /// `#[ignore]`d CPU parity tests whose candle-autograd oracle is severed by
     /// the kt forward flip (compile-only). Not used on any live path.
     #[allow(dead_code)]
-    fn cpu_candle_to_kt_f32(t: &Tensor) -> Result<kiln_tensor::Tensor> {
+    fn cpu_candle_to_kt_f32(t: &candle_core::Tensor) -> Result<kiln_tensor::Tensor> {
         let dims = t.dims().to_vec();
-        let data = t.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+        let data = t
+            .to_dtype(candle_core::DType::F32)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
         kiln_tensor::Tensor::from_vec(data, dims).map_err(Into::into)
     }
 
     /// #1082 CPU host round-trip: kt F32 CPU tensor → candle F32 CPU tensor.
     /// Companion to [`cpu_candle_to_kt_f32`]; same `#[ignore]`-only scope.
     #[allow(dead_code)]
-    fn cpu_kt_to_candle_f32(t: &kiln_tensor::Tensor) -> Result<Tensor> {
+    fn cpu_kt_to_candle_f32(t: &kiln_tensor::Tensor) -> Result<candle_core::Tensor> {
         let dims = t.dims().to_vec();
         let data = t
             .to_dtype(kiln_tensor::DType::F32)?
             .flatten_all()?
             .to_vec1::<f32>()?;
-        tensor_from_vec(data, dims, &cpu_device()).map_err(Into::into)
+        // candle island (CPU host rebuild) — explicit candle CPU device.
+        tensor_from_vec(data, dims, &candle_core::Device::Cpu).map_err(Into::into)
     }
 
     fn randn_like_seeded(
@@ -9730,10 +9737,9 @@ pub(crate) mod tests {
         let a = std * 1.732_050_8_f32;
         let n: usize = shape.iter().product();
         let data: Vec<f32> = (0..n).map(|_| rng.random_range(-a..a)).collect();
-        // #1082: build a kt CPU tensor then move to the (bridged) kt device.
-        let kdev = kiln_kt_bridge::kt_device_from_candle(device);
+        // #1082: build a kt CPU tensor then move to the kt device.
         kiln_tensor::Tensor::from_slice(&data, shape.to_vec())?
-            .to_device(kdev)
+            .to_device(*device)
             .map_err(Into::into)
     }
 
@@ -9873,8 +9879,9 @@ pub(crate) mod tests {
             config.rotary_dim(),
             config.rope_theta,
             // #1082: `compute_rotary_inv_freq` takes a kt `&Device` and returns
-            // a kt tensor (feeds the kt `rotary_inv_freq` field).
-            &kiln_kt_bridge::kt_device_from_candle(device),
+            // a kt tensor (feeds the kt `rotary_inv_freq` field). `device` is
+            // already kt, so pass it straight through.
+            device,
         )?;
 
         Ok(GpuWeights {
@@ -10214,13 +10221,13 @@ pub(crate) mod tests {
 
         // 3 tokens, vocab size 4
         // logits: [1, 3, 4]
-        let logits = tensor_new(
-            &[[
-                [2.0f32, 1.0, 0.1, 0.0],
-                [0.0, 3.0, 0.1, 0.0],
-                [0.0, 0.0, 0.0, 5.0],
-            ]],
-            &device,
+        let logits = tnd(
+            vec![
+                2.0f32, 1.0, 0.1, 0.0, //
+                0.0, 3.0, 0.1, 0.0, //
+                0.0, 0.0, 0.0, 5.0,
+            ],
+            (1, 3, 4),
         )?;
 
         // input_ids: [A, B, C] — predict B from logits[0], C from logits[1]
@@ -10281,10 +10288,10 @@ pub(crate) mod tests {
         let weights = tiny_weights(&config, &device)?;
 
         let input_ids: Vec<u32> = vec![1, 5, 10, 3, 7];
-        let backend = backend::for_device(&device);
+        let backend = backend::for_device_kt(&device);
 
         // Full forward pass (no KV cache, no LoRA)
-        let mut linear_state_full = LinearAttentionState::new(&config, &kiln_kt_bridge::kt_device_from_candle(&device))?;
+        let mut linear_state_full = LinearAttentionState::new(&config, &device)?;
         let logits_full = model_forward_kt(
             &*backend,
             &input_ids,
@@ -10297,7 +10304,7 @@ pub(crate) mod tests {
 
         // Segmented forward: embed → segment(0..2) → segment(2..4) → head
         let (hidden, positions) = model_forward_embed(&input_ids, &weights)?;
-        let mut linear_state_seg = LinearAttentionState::new(&config, &kiln_kt_bridge::kt_device_from_candle(&device))?;
+        let mut linear_state_seg = LinearAttentionState::new(&config, &device)?;
         let hidden = model_forward_segment(
             &*backend,
             hidden,
@@ -10309,7 +10316,7 @@ pub(crate) mod tests {
             Some(&mut linear_state_seg),
             None,
         )?;
-        let mut linear_state_seg2 = LinearAttentionState::new(&config, &kiln_kt_bridge::kt_device_from_candle(&device))?;
+        let mut linear_state_seg2 = LinearAttentionState::new(&config, &device)?;
         // The second segment needs fresh linear state starting from the correct layer offset.
         // However, LinearAttentionState::new creates state for ALL linear layers.
         // model_forward_segment handles the indexing internally.
@@ -10409,10 +10416,10 @@ pub(crate) mod tests {
         let input_ids: Vec<u32> = vec![1, 5, 10, 3, 7, 2, 8];
         let label_mask = vec![false, false, true, true, true, true, false];
 
-        let backend = backend::for_device(&device);
+        let backend = backend::for_device_kt(&device);
 
         // Naive path: full forward → logits → cross_entropy_loss.
-        let mut linear_state_naive = LinearAttentionState::new(&config, &kiln_kt_bridge::kt_device_from_candle(&device))?;
+        let mut linear_state_naive = LinearAttentionState::new(&config, &device)?;
         let logits = model_forward_kt(
             &*backend,
             &input_ids,
@@ -10427,7 +10434,7 @@ pub(crate) mod tests {
 
         // FLCE path: no-head forward → fused LCE (small chunk to exercise the
         // chunked reduction on a modest vocab size).
-        let mut linear_state_flce = LinearAttentionState::new(&config, &kiln_kt_bridge::kt_device_from_candle(&device))?;
+        let mut linear_state_flce = LinearAttentionState::new(&config, &device)?;
         let hidden = model_forward_no_head(
             &*backend,
             &input_ids,
@@ -10442,12 +10449,14 @@ pub(crate) mod tests {
         // the naive-CE vs FLCE parity bound is unchanged.
         let hidden_c = cpu_kt_to_candle_f32(&hidden)?;
         let head_t_c = cpu_kt_to_candle_f32(&weights.embed_tokens_t)?;
+        // candle island — `fused_linear_cross_entropy` is candle-typed; use a
+        // candle CPU device (parity test runs on CPU).
         let loss_flce = fused_linear_cross_entropy(
             &hidden_c,
             &head_t_c,
             &input_ids,
             &label_mask,
-            &device,
+            &candle_core::Device::Cpu,
             8, // small chunk to exercise uneven-chunk path
         )?
         .to_scalar::<f32>()?;
