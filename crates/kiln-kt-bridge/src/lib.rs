@@ -591,6 +591,37 @@ pub fn kt_tensor_from_candle_cuda_copy(
     .map_err(|e| BridgeError::new(format!("kt-bridge copy: wrap: {e}")))
 }
 
+/// (#1082 perf — Pattern A) Per-ordinal cache of the candle `CudaDevice`.
+///
+/// `candle_core::Device::new_cuda(i)` constructs a FRESH `CudaBlas`
+/// (`cublasCreate`) + `CudaRng` handle on every call. The kt→candle
+/// copy-back ([`kt_tensor_to_candle_cuda_copy`]) runs per gated op — dozens
+/// of times per decoded token, hundreds per training step — so rebuilding the
+/// cuBLAS/cuRAND handle each time is pure waste (audited as the #1 Pattern-A
+/// tax). A `candle_core::Device` is `Arc`-cloneable, so we build one per
+/// ordinal and hand out cheap `Arc`-bump clones thereafter (same cuBLAS handle
+/// + stream — exactly what the inverse `..._from_candle_cuda_borrow` already
+/// does via `cuda_st.device().clone()`). Same-ordinal candle CUDA devices
+/// compare equal by `gpu_id`, so downstream candle ops are unaffected.
+#[cfg(all(feature = "cuda", feature = "candle"))]
+fn cached_candle_cuda_device(index: usize) -> Result<candle_core::Device, BridgeError> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<usize, candle_core::Device>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = cache.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(dev) = guard.get(&index) {
+        return Ok(dev.clone());
+    }
+    let dev = candle_core::Device::new_cuda(index).map_err(|e| {
+        BridgeError::new(format!(
+            "kt-bridge: cached_candle_cuda_device: new_cuda({index}): {e}"
+        ))
+    })?;
+    guard.insert(index, dev.clone());
+    Ok(dev)
+}
+
 /// Phase 7 candle→kt adapter — **inverse copying variant**.
 ///
 /// Allocates a fresh candle `Tensor` of the same shape and dtype as
@@ -673,11 +704,9 @@ pub fn kt_tensor_to_candle_cuda_copy(
             )));
         }
     };
-    let candle_device = candle_core::Device::new_cuda(device_index).map_err(|e| {
-        BridgeError::new(format!(
-            "kt-bridge to_candle: candle_core::Device::new_cuda({device_index}): {e}"
-        ))
-    })?;
+    // #1082 (perf, Pattern A): reuse a cached candle CudaDevice per ordinal
+    // instead of building a fresh cuBLAS+cuRAND handle on every copy-back.
+    let candle_device = cached_candle_cuda_device(device_index)?;
     let candle_device_arc = match &candle_device {
         CDevice::Cuda(d) => std::sync::Arc::new(d.clone()),
         other => {
