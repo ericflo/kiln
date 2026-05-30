@@ -90,6 +90,21 @@ fn try_borrow_kt_cuda(t: &Tensor) -> Option<kiln_tensor::Tensor> {
     }
 }
 
+/// #1082: bring a candle `PagedKvCache` pool tensor into kt. On CUDA this is a
+/// zero-copy borrow over the same device storage; on non-CUDA there is no
+/// candle→kt borrow bridge, so the (bailing) `candle_to_kt_activation` stub
+/// keeps the build type-checking — production paged decode is CUDA-only.
+#[cfg(feature = "cuda")]
+fn candle_pool_to_kt(t: &candle_core::Tensor) -> Result<Tensor> {
+    kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(t)
+        .map_err(|e| anyhow::anyhow!("candle_pool_to_kt borrow: {e}"))
+}
+
+#[cfg(not(feature = "cuda"))]
+fn candle_pool_to_kt(t: &candle_core::Tensor) -> Result<Tensor> {
+    candle_to_kt_activation(t)
+}
+
 /// CUDA-compatible sigmoid: `1 / (1 + exp(-x))`.
 ///
 /// `candle_nn::ops::sigmoid` lacks a CUDA kernel, so we implement it using
@@ -21968,9 +21983,15 @@ fn gqa_attention_paged_with_rope_tables(
                         .map(|(k_pool, v_pool)| (start_slot, k_pool, v_pool))
                 })
                 .map(|(start_slot, k_pool, v_pool)| {
+                    // #1082: candle pool tensors -> kt for the kt backend read;
+                    // k/v_cache_token_major are already kt.
+                    let k_pool_kt = candle_pool_to_kt(k_pool)
+                        .context("paged head-major append: k_pool -> kt")?;
+                    let v_pool_kt = candle_pool_to_kt(v_pool)
+                        .context("paged head-major append: v_pool -> kt")?;
                     backend.paged_kv_head_major_read_append_token_major(
-                        k_pool,
-                        v_pool,
+                        &k_pool_kt,
+                        &v_pool_kt,
                         start_slot,
                         start_pos,
                         &k_cache_token_major,
@@ -22015,7 +22036,17 @@ fn gqa_attention_paged_with_rope_tables(
                         .map(|(k_pool, v_pool)| (start_slot, k_pool, v_pool))
                 })
                 .map(|(start_slot, k_pool, v_pool)| {
-                    backend.paged_kv_head_major_read(k_pool, v_pool, start_slot, fast_read_len)
+                    // #1082: candle pool tensors -> kt for the kt backend read.
+                    let k_pool_kt = candle_pool_to_kt(k_pool)
+                        .context("paged head-major read: k_pool -> kt")?;
+                    let v_pool_kt = candle_pool_to_kt(v_pool)
+                        .context("paged head-major read: v_pool -> kt")?;
+                    backend.paged_kv_head_major_read(
+                        &k_pool_kt,
+                        &v_pool_kt,
+                        start_slot,
+                        fast_read_len,
+                    )
                 })
                 .transpose()?
                 .flatten()
