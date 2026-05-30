@@ -14383,8 +14383,17 @@ fn gdn_chunkwise_recurrence(
                     let p = exp_to_dtype(&big_g)?; // [B, nv, C]
                     let p_col = p.unsqueeze(3)?; // [B, nv, C, 1]
 
-                    let strict_mask = strict_bool.to_dtype(dtype)?;
-                    let causal_mask = causal_bool.to_dtype(dtype)?;
+                    // #1082: U8→float cast is unsupported on the kt CUDA path
+                    // (the unsupported-cast fallback hits the CPU branch on a
+                    // CUDA tensor). Build the dtype-typed multiplicative masks via
+                    // where_cond (1.0 where set, else 0.0). This forward chunkwise
+                    // prep runs when the fused GDN kernels decline (e.g. the F32
+                    // tiny model); the BF16 production path uses the fused kernel
+                    // and never reaches here.
+                    let m_ones = Tensor::ones((batch, heads, c, c), dtype, device)?;
+                    let m_zeros = Tensor::zeros((batch, heads, c, c), dtype, device)?;
+                    let strict_mask = strict_bool.where_cond(&m_ones, &m_zeros)?;
+                    let causal_mask = causal_bool.where_cond(&m_ones, &m_zeros)?;
 
                     let v_prime = (&v_c - ks_entry.broadcast_mul(&p_col)?)?;
                     let a_strict = kkt

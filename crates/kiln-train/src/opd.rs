@@ -3189,7 +3189,16 @@ fn opd_step_forward_backward_tape_authoritative(
                 .map_err(|e| {
                     kiln_kt_bridge::BridgeError::new(format!("opd tape: kt->candle normed: {e}"))
                 })?;
-            kiln_kt_bridge::tape_bridge::register_input_mapping(normed.id(), normed_candle.id());
+            // #1082 CP-4: RETAIN the kt `normed` keyed by the candle copy's id so
+            // the OPD scalar-loss shim's `tape_kt_input(normed_candle)` resolves
+            // back to the ORIGINAL recorded kt `normed` (connected to the LoRA
+            // tape recordings) instead of a fresh, un-chained borrow. The shim
+            // reads `candle_output_kt` (via `kt_input_for_candle`), which is
+            // populated by `retain_output_for_chaining` — NOT `register_input_mapping`
+            // (that populates the deposit-side `kt_to_candle_input`). Using the
+            // wrong registry severed the loss→normed→LoRA tape chain → empty grads.
+            // Mirrors the SFT path's `model_forward_logits_kt_to_candle` retain.
+            kiln_kt_bridge::tape_bridge::retain_output_for_chaining(&normed, normed_candle.id());
 
             // Record the SCALAR OPD loss as the tape root. Returns a detached
             // candle scalar (value only); the gradient lives on the tape.
