@@ -379,16 +379,23 @@ impl Tensor {
         })
     }
 
-    /// Reshape — only valid on contiguous tensors. See [`Layout::reshape`].
-    ///
-    /// For non-contiguous reshape, the caller must invoke
-    /// [`contiguous()`](Tensor::contiguous) first (which logs a
-    /// `kiln_profile_contiguous_copy` event in Phase 1.x).
+    /// Reshape. Zero-copy view when `self` is contiguous; when `self` is
+    /// non-contiguous a pure view is impossible, so the data is materialized
+    /// first via [`contiguous()`](Tensor::contiguous) (which logs a
+    /// `kiln_profile_contiguous_copy` event) — matching candle's `reshape`
+    /// and honoring the "view when possible, copy only when necessary +
+    /// logged" intent. (#1082: the forward-flip reshapes many strided GDN /
+    /// attention head views that candle copied implicitly.)
     pub fn reshape(&self, new_shape: impl Into<Shape>) -> Result<Self> {
         // `new_shape` accepts any candle `Into<Shape>` (tuples are the
         // dominant `forward.rs` flip form); convert to the `Vec<usize>`
         // the layout reshape consumes.
         let dims: Vec<usize> = new_shape.into().into_dims();
+        if !self.is_contiguous() {
+            // A strided layout can't be reshaped as a view — materialize, then
+            // reshape the contiguous copy (recurses once into the view path).
+            return self.contiguous()?.reshape(dims);
+        }
         Ok(Tensor {
             storage: Arc::clone(&self.storage),
             layout: self.layout.reshape(dims)?,
@@ -989,13 +996,21 @@ mod tests {
     }
 
     #[test]
-    fn reshape_only_on_contiguous() {
+    fn reshape_view_when_contiguous_materializes_when_not() {
         let t = Tensor::zeros_cpu(vec![3, 4], DType::F32);
+        // Contiguous reshape is a zero-copy view (shares the storage Arc).
         let r = t.reshape(vec![12]).unwrap();
         assert_eq!(r.shape(), &[12]);
+        assert!(Arc::ptr_eq(t.storage(), r.storage()));
 
+        // #1082: a non-contiguous (transposed) reshape can't be a pure view,
+        // so it now materializes (candle-parity, logged copy) rather than
+        // erroring — succeeds with the right shape and fresh storage.
         let tt = t.transpose(0, 1).unwrap();
-        assert!(tt.reshape(vec![12]).is_err());
+        assert!(!tt.is_contiguous());
+        let rr = tt.reshape(vec![12]).unwrap();
+        assert_eq!(rr.shape(), &[12]);
+        assert!(!Arc::ptr_eq(tt.storage(), rr.storage()));
     }
 
     #[test]
