@@ -17981,30 +17981,35 @@ fn q_proj_forward_decode_if(
 ) -> Result<Tensor> {
     #[cfg(feature = "cuda")]
     if let Some(ref packed) = attn_weights.q_proj_marlin {
-        let base =
-            crate::marlin_proj::matmul_bf16(x, packed).context("q_proj_forward: marlin matmul")?;
+        // #1082: Marlin matmul is candle-typed. Bridge x kt->candle, then the
+        // candle base back to kt so the kt-native LoRA delta/add chain runs.
+        let x_candle = kt_logits_to_candle(x).context("q_proj_forward: kt->candle x (marlin)")?;
+        let base_candle = crate::marlin_proj::matmul_bf16(&x_candle, packed)
+            .context("q_proj_forward: marlin matmul")?;
+        let base = candle_to_kt_activation(&base_candle)
+            .context("q_proj_forward: candle->kt marlin base")?;
         if let Some(proj) = lora {
-            #[cfg(feature = "cuda")]
+            if let Some(delta) = try_kt_lora_delta(x, proj, lora_scale)
+                .context("q_proj_forward: kt lora delta")?
             {
-                if let Some(delta) = try_kt_lora_delta(x, proj, lora_scale)
-                    .context("q_proj_forward: kt lora delta")?
+                let delta = if delta.dtype() == base.dtype() {
+                    delta
+                } else {
+                    delta
+                        .to_dtype(base.dtype())
+                        .context("q_proj_forward: kt lora delta cast")?
+                };
+                if let Some(out) =
+                    try_kt_lora_add(&base, &delta).context("q_proj_forward: kt lora add")?
                 {
-                    let delta = if delta.dtype() == base.dtype() {
-                        delta
-                    } else {
-                        delta.to_dtype(base.dtype())
-                            .context("q_proj_forward: kt lora delta cast")?
-                    };
-                    if let Some(out) = try_kt_lora_add(&base, &delta)
-                        .context("q_proj_forward: kt lora add")?
-                    {
-                        return Ok(out);
-                    }
-                    return Ok((base + delta).context("q_proj_forward: add lora delta")?);
+                    return Ok(out);
                 }
+                return Ok((base + delta).context("q_proj_forward: add lora delta")?);
             }
-            let delta =
-                compute_lora_delta(x, proj, lora_scale).context("q_proj_forward: lora delta")?;
+            let delta_candle = compute_lora_delta(&x_candle, proj, lora_scale)
+                .context("q_proj_forward: lora delta")?;
+            let delta = candle_to_kt_activation(&delta_candle)
+                .context("q_proj_forward: candle->kt compute_lora_delta")?;
             return Ok((base + delta).context("q_proj_forward: add lora delta")?);
         }
         return Ok(base);
