@@ -12421,9 +12421,11 @@ fn try_kt_lora_delta(
     if x_dims.len() < 2 {
         return Ok(None);
     }
+    // #1082: `x` is kt; `proj.a`/`proj.b` are candle (LoraProjectionWeights).
+    // Check each against its own Device/DType type.
     if !matches!(x.device(), Device::Cuda(_))
-        || !matches!(proj.a.device(), Device::Cuda(_))
-        || !matches!(proj.b.device(), Device::Cuda(_))
+        || !matches!(proj.a.device(), candle_core::Device::Cuda(_))
+        || !matches!(proj.b.device(), candle_core::Device::Cuda(_))
     {
         return Ok(None);
     }
@@ -12442,11 +12444,16 @@ fn try_kt_lora_delta(
     if b_rank != rank || x_dims[x_dims.len() - 1] != in_features {
         return Ok(None);
     }
-    let a = match proj.a.to_dtype(x.dtype()) {
+    // #1082: bridge kt x-dtype to candle for the candle `to_dtype` calls.
+    let x_candle_dtype = match kiln_kt_bridge::kt_dtype_to_candle(x.dtype()) {
+        Ok(d) => d,
+        Err(_) => return Ok(None),
+    };
+    let a = match proj.a.to_dtype(x_candle_dtype) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    let b = match proj.b.to_dtype(x.dtype()) {
+    let b = match proj.b.to_dtype(x_candle_dtype) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
@@ -12473,59 +12480,45 @@ fn try_kt_lora_delta(
 
     kiln_nvtx::range!(c"kiln/lora_delta_kt");
 
+    // #1082: `x` (hence `x2d`) is already kt; only `a_t`/`b_t` are candle
+    // (LoraProjectionWeights). Borrow just the candle weights into kt and keep
+    // the whole matmul→matmul→scale chain in kt — no candle round-trips
+    // between steps (per the #1082 perf mandate).
     // Step 1: hidden = x @ A^T -> shape [lead, rank]
-    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&x2d) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
     let a_t_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&a_t) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    let hidden_kt = match kiln_tensor::cuda_matmul(&x_kt, &a_t_kt) {
+    let hidden_kt = match kiln_tensor::cuda_matmul(&x2d, &a_t_kt) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    let hidden = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&hidden_kt)
-        .map_err(|e| anyhow::anyhow!("try_kt_lora_delta: candle copy-back hidden: {e}"))?;
-    if !hidden.is_contiguous() {
+    if !hidden_kt.is_contiguous() {
         return Ok(None);
     }
 
     // Step 2: delta_pre = hidden @ B^T -> shape [lead, out_features]
-    let hidden_kt2 = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&hidden) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
     let b_t_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&b_t) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    let delta_pre_kt = match kiln_tensor::cuda_matmul(&hidden_kt2, &b_t_kt) {
+    let delta_pre_kt = match kiln_tensor::cuda_matmul(&hidden_kt, &b_t_kt) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    let delta_pre = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&delta_pre_kt)
-        .map_err(|e| anyhow::anyhow!("try_kt_lora_delta: candle copy-back delta_pre: {e}"))?;
-    if !delta_pre.is_contiguous() {
+    if !delta_pre_kt.is_contiguous() {
         return Ok(None);
     }
 
     // Step 3: delta = delta_pre * scale (kind tag 2 = MulScalar)
-    let delta_pre_kt2 = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&delta_pre) {
+    let delta_kt = match kiln_tensor::cuda_scalar_op(&delta_pre_kt, 2, scale) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    let delta_kt = match kiln_tensor::cuda_scalar_op(&delta_pre_kt2, 2, scale) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
-    let delta2d = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&delta_kt)
-        .map_err(|e| anyhow::anyhow!("try_kt_lora_delta: candle copy-back delta: {e}"))?;
 
     let mut out_shape: Vec<usize> = x_dims[..x_dims.len() - 1].to_vec();
     out_shape.push(out_features);
-    Ok(Some(delta2d.reshape(out_shape)?))
+    Ok(Some(delta_kt.reshape(out_shape)?))
 }
 
 /// Phase 7 (#1082) — **kt-native** LM head matmul core.
@@ -12601,20 +12594,14 @@ fn try_kt_lm_head(x: &Tensor, embed_tokens_t: &Tensor) -> Result<Option<Tensor>>
 
     let out_n = r_dims[1];
     let lead: usize = l_dims[..l_dims.len() - 1].iter().product();
+    // #1082: `x` and `embed_tokens_t` are already kt — reshape/borrow directly,
+    // no candle boundary on the inputs.
     let x2d = match x.reshape((lead, k)) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-
-    // candle→kt boundary (hidden + weight borrow-in).
-    let lhs_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&x2d) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
-    let rhs_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(embed_tokens_t) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
+    let lhs_kt = &x2d;
+    let rhs_kt = embed_tokens_t;
 
     let mut out_shape: Vec<usize> = l_dims[..l_dims.len() - 1].to_vec();
     out_shape.push(out_n);
@@ -12630,35 +12617,28 @@ fn try_kt_lm_head(x: &Tensor, embed_tokens_t: &Tensor) -> Result<Option<Tensor>>
     // `CUDA_ERROR_ILLEGAL_ADDRESS` fault at
     // `greedy_sample_rows(captured.output_logits)` documented in
     // `bench-results/cuda-graph-status.md` (2026-05-26 entries).
-    if let Some(dst_candle) = try_take_lm_head_output_buffer(&out_shape, x.dtype()) {
-        // The thread-local hands us a candle Tensor shaped like
-        // `[batch, 1, vocab]`. Reshape it to the 2-D `[lead, out_n]`
-        // matmul output shape, borrow it as kt, write into it.
-        let dst2d = match dst_candle.reshape((lead, out_n)) {
+    if let Some(dst) = try_take_lm_head_output_buffer(&out_shape, x.dtype()) {
+        // The thread-local hands us a kt Tensor shaped like `[batch, 1, vocab]`.
+        // Reshape it to the 2-D `[lead, out_n]` matmul output shape and write
+        // the matmul result directly into its graph-stable storage.
+        let dst2d = match dst.reshape((lead, out_n)) {
             Ok(t) => t,
             Err(_) => return Ok(None),
         };
-        let dst_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&dst2d) {
-            Ok(t) => t,
-            Err(_) => return Ok(None),
-        };
-        if kiln_tensor::cuda_matmul_into(&lhs_kt, &rhs_kt, &dst_kt).is_err() {
+        if kiln_tensor::cuda_matmul_into(lhs_kt, rhs_kt, &dst2d).is_err() {
             return Ok(None);
         }
-        // Return the original `[batch, 1, vocab]`-shaped candle wrapper
-        // so the caller's slice_set reads from the graph-stable buffer.
-        return Ok(Some(dst_candle));
+        // Return the original `[batch, 1, vocab]`-shaped kt wrapper so the
+        // caller's slice_set reads from the graph-stable buffer.
+        return Ok(Some(dst));
     }
 
     // kt-internal computation (no captured-graph buffer installed).
-    let out_kt = match kt_lm_head_native(&lhs_kt, &rhs_kt) {
+    let out_kt = match kt_lm_head_native(lhs_kt, rhs_kt) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    // kt→candle boundary (logits copy-out).
-    let out2d = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-        .map_err(|e| anyhow::anyhow!("try_kt_lm_head: candle copy-back failed: {e}"))?;
-    Ok(Some(out2d.reshape(out_shape)?))
+    Ok(Some(out_kt.reshape(out_shape)?))
 }
 
 fn lm_head_forward_backend_decode_if(
@@ -12996,7 +12976,20 @@ fn lm_head_argmax_rows(x: &Tensor, embed_tokens_t: &Tensor) -> Result<Vec<u32>> 
         }
     }
     let logits = lm_head_forward(x, embed_tokens_t)?;
-    crate::sampling::greedy_sample_rows(&logits).context("batched greedy row sampling failed")
+    // #1082: `greedy_sample_rows` is a candle-typed host-sampler island; bridge
+    // the kt logits to candle for it.
+    #[cfg(feature = "cuda")]
+    {
+        let logits_c = kt_logits_to_candle(&logits)
+            .context("lm_head_argmax_rows kt->candle logits")?;
+        crate::sampling::greedy_sample_rows(&logits_c)
+            .context("batched greedy row sampling failed")
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        let _ = logits;
+        anyhow::bail!("lm_head_argmax_rows requires the `cuda` feature (#1082)")
+    }
 }
 
 fn lm_head_argmax_rows_backend_decode_if(
@@ -19390,9 +19383,18 @@ pub fn gqa_attention_pre_o(
             "kv_cache_update",
             seq_len,
         )?;
-        let (full_k, full_v) = cache
-            .update(full_attn_layer_idx, &k, &v)
+        // #1082: the legacy contiguous `KvCache` stores candle tensors and its
+        // `update` is candle-typed. Bridge the kt K/V in, then bring the full
+        // cached K/V back to kt for the kt SDPA path below.
+        let k_c = kt_logits_to_candle(&k).context("KV cache update kt->candle k")?;
+        let v_c = kt_logits_to_candle(&v).context("KV cache update kt->candle v")?;
+        let (full_k_c, full_v_c) = cache
+            .update(full_attn_layer_idx, &k_c, &v_c)
             .context("KV cache update failed")?;
+        let full_k =
+            candle_to_kt_activation(&full_k_c).context("KV cache update candle->kt full_k")?;
+        let full_v =
+            candle_to_kt_activation(&full_v_c).context("KV cache update candle->kt full_v")?;
         finish_full_attn_stage_profile(
             profile_device,
             profile_context,
