@@ -12714,12 +12714,17 @@ fn multi_layer_per_layer_tile_reverse(
     // segment. layer_inputs[i] is the input to layer (seg_start + i), with
     // layer_inputs[0] = seg_input. Detached LoRA weights mean no autograd
     // graph is built during this pass — boundaries are pure values.
+    // (#1082) `layer_inputs` is a candle store (each entry feeds the candle-in
+    // `exact_gdn_single_layer_tiled_reverse` / `full_attention_*_reverse`).
+    // `model_forward_segment` is kt-native, so thread the build-loop `current`
+    // as kt (bridge the candle seed in) and push candle copies into the store.
     let num_layers = seg_end - seg_start;
     let mut layer_inputs: Vec<Tensor> = Vec::with_capacity(num_layers);
     layer_inputs.push(seg_input.detach());
     {
         let mut linear_state = LinearAttentionState::new(model_config, &kiln_kt_bridge::kt_device_from_candle(device))?;
-        let mut current = layer_inputs[0].clone();
+        let mut current = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&layer_inputs[0])
+            .map_err(|e| anyhow::anyhow!("multi-layer tile reverse: candle->kt seg input: {e}"))?;
         for layer_offset in 0..(num_layers - 1) {
             let layer_idx = seg_start + layer_offset;
             current = model_forward_segment(
@@ -12737,7 +12742,16 @@ fn multi_layer_per_layer_tile_reverse(
                 format!("multi-layer tile reverse: per-layer-input forward at layer {layer_idx}")
             })?
             .detach();
-            layer_inputs.push(current.clone());
+            layer_inputs.push(
+                kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(
+                    &current
+                        .contiguous()
+                        .context("multi-layer tile reverse: layer input contiguous")?,
+                )
+                .map_err(|e| {
+                    anyhow::anyhow!("multi-layer tile reverse: kt->candle layer input: {e}")
+                })?,
+            );
         }
     }
 
