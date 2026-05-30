@@ -12596,23 +12596,33 @@ fn lm_head_forward_backend_decode_if(
     // because the authoritative path's input is a DETACHED kt-copy
     // (`track_op()==false`), so the autograd-safe `linear_prefill_apply` branch
     // below (gated on `x.track_op()`) is not reliably hit. No-ops otherwise.
+    // #1082: tape + backend trait are candle islands. Bridge kt->candle once
+    // for those; the production CUDA decode falls through to the kt-native
+    // `lm_head_forward` (backend.linear_decode returns None on CUDA).
     #[cfg(feature = "cuda")]
-    if let Some(out) =
-        crate::tape_forward::try_tape_lora_linear_cuda(x, embed_tokens_t, None, 0.0)?
     {
-        return Ok(out);
-    }
-    if let Some(backend) = backend {
-        // For autograd-tracked input (non-FLCE training path), prefer
-        // the autograd-safe Vulkan CustomOp; otherwise the leaf
-        // returned by linear_decode silently drops the gradient.
-        if x.track_op() {
-            if let Some(logits) = backend.linear_prefill_apply(x, embed_tokens_t)? {
-                return Ok(logits);
+        let x_c = kt_logits_to_candle(x).context("lm_head kt->candle x")?;
+        let et_c = kt_logits_to_candle(embed_tokens_t).context("lm_head kt->candle embed_t")?;
+        if crate::tape_forward::tape_forward_enabled() {
+            if let Some(out) =
+                crate::tape_forward::try_tape_lora_linear_cuda(&x_c, &et_c, None, 0.0)?
+            {
+                return candle_to_kt_activation(&out).context("lm_head candle->kt tape out");
             }
         }
-        if let Some(logits) = backend.linear_decode(x, embed_tokens_t)? {
-            return Ok(logits);
+        if let Some(backend) = backend {
+            // For autograd-tracked input, prefer the autograd-safe Vulkan
+            // CustomOp; otherwise the leaf from linear_decode drops the grad.
+            if x.track_op() {
+                if let Some(logits) = backend.linear_prefill_apply(&x_c, &et_c)? {
+                    return candle_to_kt_activation(&logits)
+                        .context("lm_head candle->kt prefill logits");
+                }
+            }
+            if let Some(logits) = backend.linear_decode(&x_c, &et_c)? {
+                return candle_to_kt_activation(&logits)
+                    .context("lm_head candle->kt decode logits");
+            }
         }
     }
     lm_head_forward(x, embed_tokens_t)
