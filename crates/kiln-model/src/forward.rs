@@ -23956,14 +23956,21 @@ fn model_forward_logits_kt_to_candle(_logits: Tensor) -> Result<candle_core::Ten
 #[cfg(feature = "cuda")]
 pub(crate) fn kt_logits_to_candle(logits: &Tensor) -> Result<candle_core::Tensor> {
     let contig;
-    let logits = if logits.is_contiguous() {
+    let lc = if logits.is_contiguous() {
         logits
     } else {
         contig = logits.contiguous()?;
         &contig
     };
-    kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(logits)
-        .map_err(|e| anyhow::anyhow!("kt_logits_to_candle bridge: {e}"))
+    let candle = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(lc)
+        .map_err(|e| anyhow::anyhow!("kt_logits_to_candle bridge: {e}"))?;
+    // #1082 CP-4: register the ORIGINAL kt tensor (a recorded tape node output)
+    // as the producer of this candle id, so a downstream tape adapter /
+    // `candle_to_kt_activation` re-entering the kt tape chains back to it
+    // instead of fresh-borrowing — keeping the tape connected across the candle
+    // island. Self-gates on the bridge scope (no-op on the inference path).
+    kiln_kt_bridge::tape_bridge::retain_output_for_chaining(logits, candle.id());
+    Ok(candle)
 }
 
 #[cfg(not(feature = "cuda"))]
@@ -23977,6 +23984,16 @@ pub(crate) fn kt_logits_to_candle(_logits: &Tensor) -> Result<candle_core::Tenso
 /// non-CUDA errors at runtime. (#1082 forward-flip iter4)
 #[cfg(feature = "cuda")]
 pub(crate) fn candle_to_kt_activation(t: &candle_core::Tensor) -> Result<Tensor> {
+    // #1082 CP-4: if `t` was produced by a tape adapter / kt→candle bridge in
+    // the active tape scope (registered via `retain_output_for_chaining`),
+    // reuse that recorded kt tensor so the kt tape stays connected ACROSS the
+    // candle island instead of re-entering as a fresh, un-chained kt id (which
+    // islands the upstream forward from the loss → empty grads). Self-gates on
+    // the bridge scope (returns `None` outside it), so the inference / decode
+    // path takes the plain fresh copy below unchanged.
+    if let Some(kt) = kiln_kt_bridge::tape_bridge::kt_input_for_candle(t.id()) {
+        return Ok(kt);
+    }
     let contig;
     let t = if t.is_contiguous() {
         t
