@@ -4109,13 +4109,11 @@ mod tests {
 
         // `CdDevice` is the per-crate candle facade alias (= candle_core::Device);
         // opd.rs keeps its `candle_core::` ref count at 0 by going through it.
-        let device = match CdDevice::new_cuda(0) {
-            Ok(d) => d,
-            Err(_) => {
-                eprintln!("opd tape-authoritative grads (bf16): no CUDA device — skipping");
-                return;
-            }
-        };
+        if !kiln_tensor::probe::cuda_is_available() {
+            eprintln!("opd tape-authoritative grads (bf16): no CUDA device — skipping");
+            return;
+        }
+        let device = CdDevice::Cuda(0);
 
         // The tape adapters fire only inside a tape scope AND with the tape
         // gates on. These are `OnceLock`-cached for the process, so set them
@@ -4171,7 +4169,7 @@ mod tests {
             ),
         );
 
-        let backend = kiln_model::backend::for_device(&device);
+        let backend = kiln_model::backend::for_device_kt(&device);
 
         let (loss_val, active_count, grads) = opd_step_forward_backward_tape_authoritative(
             &*backend,

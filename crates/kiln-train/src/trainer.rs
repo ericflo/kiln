@@ -9522,7 +9522,8 @@ pub(crate) mod tests {
         )?;
         let max_diff = (&full - &chunked)?
             .abs()?
-            .max_all()?
+            .flatten_all()?
+            .max(0)?
             .to_f32_dtype()?
             .to_scalar::<f32>()?;
         assert!(
@@ -10206,7 +10207,9 @@ pub(crate) mod tests {
 
         let saved = safetensors_load_file(
             &adapter_dir.path().join("adapter_model.safetensors"),
-            &cpu_device(),
+            // safetensors_load_file is a candle island (adapter I/O); it wants a
+            // candle device. (#1082)
+            &candle_core::Device::Cpu,
         )?;
         for module in ["in_proj_qkv", "in_proj_z", "out_proj"] {
             let key = format!(
