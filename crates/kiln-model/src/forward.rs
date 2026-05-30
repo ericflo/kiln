@@ -1799,27 +1799,10 @@ pub(crate) fn try_kt_paged_kv_write_token_major_native_graph_slot(
         None => return Ok(false),
     };
 
-    let k_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(k).map_err(|e| {
-        anyhow::anyhow!(
-            "try_kt_paged_kv_write_token_major_native_graph_slot: \
-             borrow k as KtTensor failed: {e}"
-        )
-    })?;
-    let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v).map_err(|e| {
-        anyhow::anyhow!(
-            "try_kt_paged_kv_write_token_major_native_graph_slot: \
-             borrow v as KtTensor failed: {e}"
-        )
-    })?;
-    let slot_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(slot).map_err(|e| {
-        anyhow::anyhow!(
-            "try_kt_paged_kv_write_token_major_native_graph_slot: \
-             borrow slot as KtTensor failed: {e}"
-        )
-    })?;
-
+    // #1082: k/v/slot are already kt `Tensor` (forward-flip); pass them
+    // straight to the kt cache writer — no candle->kt borrow needed.
     cache
-        .write_token_major_native_graph_slot(layer_idx, &k_kt, &v_kt, &slot_kt)
+        .write_token_major_native_graph_slot(layer_idx, k, v, slot)
         .context(
             "try_kt_paged_kv_write_token_major_native_graph_slot: \
              kt write_token_major_native_graph_slot failed",
@@ -2203,10 +2186,18 @@ fn cuda_silu(x: &Tensor) -> Result<Tensor> {
         // tape-recorded backward node. With the gate off (the
         // default) this returns `Ok(None)` and we fall through to
         // the existing `try_kt_silu_composite` dispatch.
-        if let Some(out) =
-            crate::tape_forward::try_tape_silu_cuda(x).context("cuda_silu try_tape_silu_cuda")?
-        {
-            return Ok(out);
+        // #1082: tape_forward uses the candle `Tensor` alias. Only bridge
+        // (kt->candle in, candle->kt out) when the tape is actually active —
+        // the hot inference path skips the copy entirely and falls straight
+        // to the kt-native `try_kt_silu_composite` below.
+        if crate::tape_forward::tape_forward_enabled() {
+            let x_candle = kt_logits_to_candle(x).context("cuda_silu kt->candle for tape silu")?;
+            if let Some(out) = crate::tape_forward::try_tape_silu_cuda(&x_candle)
+                .context("cuda_silu try_tape_silu_cuda")?
+            {
+                return Ok(candle_to_kt_activation(&out)
+                    .context("cuda_silu candle->kt for tape silu out")?);
+            }
         }
         if let Some(out) = try_kt_silu_composite(x).context("cuda_silu try_kt_silu_composite")? {
             return Ok(out);
@@ -2591,55 +2582,12 @@ fn add_lora_delta_to_base(
     let Some(proj) = lora else {
         return Ok(base);
     };
-    // CP-4 (#1082): tape-routed LoRA add. With both `KILN_USE_TAPE_FORWARD`
-    // and `KILN_USE_TAPE_LORA_ADD` on AND a thread-local Tape installed,
-    // the kt-fused forward records a `LoraDeltaAddBackward` node that emits
-    // grads for `proj.a` / `proj.b` keyed on their original Var ids. Closes
-    // the LoRA Var grad-coverage gap that was preventing the tape-
-    // authoritative training step from updating LoRA adapters. Off by
-    // default — falls through to the existing CUDA dispatch when the gate
-    // is off, no tape is active, or the envelope rejects the inputs.
-    #[cfg(feature = "cuda")]
-    if let Some(out) = crate::tape_forward::try_tape_lora_add_cuda(&base, x, proj, lora_scale)? {
-        return Ok(out);
-    }
-    #[cfg(feature = "cuda")]
-    if let Some(out) = cuda_lora_add_training_f32(&base, x, proj, lora_scale)? {
-        return Ok(out);
-    }
-    #[cfg(feature = "cuda")]
-    if let Some(out) = cuda_lora_add_training_bf16(&base, x, proj, lora_scale)? {
-        return Ok(out);
-    }
-    if let Some(backend) = backend {
-        if let Some(out) = backend.lora_decode_add(&base, x, &proj.a, &proj.b, lora_scale)? {
-            return Ok(out);
-        }
-        // Phase 4.1 step 2 + 5 (autograd-safe via CustomOp3): when
-        // both A and B are registry-resident, dispatch the LoRA
-        // delta on-device. The Vulkan impl wraps the dispatch in
-        // `VulkanLoraOp` which provides analytic gradients for x,
-        // A, and B — so this path is now safe to use during training
-        // too. `loss.backward()` produces correct grad_A and grad_B
-        // that flow into the SGD update.
-        if let Some(delta) = backend.lora_delta_resident(x, &proj.a, &proj.b, lora_scale)? {
-            let delta = if delta.dtype() == base.dtype() {
-                delta
-            } else {
-                delta.to_dtype(base.dtype())?
-            };
-            return Ok((base + delta)?);
-        }
-    }
-    #[cfg(feature = "metal")]
-    {
-        if crate::backend::metal::metal_lora_add_decode_supports(&base, x, &proj.a, &proj.b) {
-            return crate::backend::metal::metal_lora_add_decode_bf16(
-                &base, x, &proj.a, &proj.b, lora_scale,
-            )
-            .context("metal LoRA decode delta/add failed");
-        }
-    }
+    // #1082 forward-flip: `base`/`x` are kt here; the LoRA A/B factors
+    // (`proj.a`/`proj.b`), the tape path, the CustomOp training adds, the
+    // backend trait, and `compute_lora_delta` are all candle-typed islands.
+    // Take the kt-native production CUDA path FIRST (it is on by default and
+    // serves the hot BF16 decode), so the candle bridge below only runs on
+    // the training / Metal / Vulkan / CPU fallback paths — no hot-path copy.
     #[cfg(feature = "cuda")]
     {
         if let Some(delta) = try_kt_lora_delta(x, proj, lora_scale)? {
@@ -2654,19 +2602,94 @@ fn add_lora_delta_to_base(
             return Ok((base + delta)?);
         }
     }
-    let delta = compute_lora_delta(x, proj, lora_scale)?;
-    let delta = if delta.dtype() == base.dtype() {
-        delta
-    } else {
-        delta.to_dtype(base.dtype())?
-    };
+
+    // Candle-island fallback chain. Bridge the kt `base`/`x` to candle once
+    // (CUDA copy; only reached when the kt-native path above declined), then
+    // bridge any candle result back to kt at the seam.
     #[cfg(feature = "cuda")]
+    let base_candle = kt_logits_to_candle(&base).context("add_lora_delta_to_base kt->candle base")?;
+    #[cfg(feature = "cuda")]
+    let x_candle = kt_logits_to_candle(x).context("add_lora_delta_to_base kt->candle x")?;
+
+    // CP-4 (#1082): tape-routed LoRA add. With both `KILN_USE_TAPE_FORWARD`
+    // and `KILN_USE_TAPE_LORA_ADD` on AND a thread-local Tape installed,
+    // the kt-fused forward records a `LoraDeltaAddBackward` node that emits
+    // grads for `proj.a` / `proj.b` keyed on their original Var ids.
+    #[cfg(feature = "cuda")]
+    if let Some(out) =
+        crate::tape_forward::try_tape_lora_add_cuda(&base_candle, &x_candle, proj, lora_scale)?
     {
-        if let Some(out) = try_kt_lora_add(&base, &delta)? {
-            return Ok(out);
+        return candle_to_kt_activation(&out).context("add_lora_delta_to_base candle->kt tape out");
+    }
+    #[cfg(feature = "cuda")]
+    if let Some(out) = cuda_lora_add_training_f32(&base_candle, &x_candle, proj, lora_scale)? {
+        return candle_to_kt_activation(&out)
+            .context("add_lora_delta_to_base candle->kt training-f32 out");
+    }
+    #[cfg(feature = "cuda")]
+    if let Some(out) = cuda_lora_add_training_bf16(&base_candle, &x_candle, proj, lora_scale)? {
+        return candle_to_kt_activation(&out)
+            .context("add_lora_delta_to_base candle->kt training-bf16 out");
+    }
+    if let Some(backend) = backend {
+        #[cfg(feature = "cuda")]
+        if let Some(out) =
+            backend.lora_decode_add(&base_candle, &x_candle, &proj.a, &proj.b, lora_scale)?
+        {
+            return candle_to_kt_activation(&out)
+                .context("add_lora_delta_to_base candle->kt backend decode-add out");
+        }
+        // Phase 4.1 step 2 + 5 (autograd-safe via CustomOp3): when
+        // both A and B are registry-resident, dispatch the LoRA
+        // delta on-device.
+        #[cfg(feature = "cuda")]
+        if let Some(delta) = backend.lora_delta_resident(&x_candle, &proj.a, &proj.b, lora_scale)? {
+            let delta_kt = candle_to_kt_activation(&delta)
+                .context("add_lora_delta_to_base candle->kt backend delta-resident")?;
+            let delta_kt = if delta_kt.dtype() == base.dtype() {
+                delta_kt
+            } else {
+                delta_kt.to_dtype(base.dtype())?
+            };
+            return Ok((base + delta_kt)?);
         }
     }
-    Ok((base + delta)?)
+    #[cfg(feature = "metal")]
+    {
+        if crate::backend::metal::metal_lora_add_decode_supports(&base, x, &proj.a, &proj.b) {
+            return crate::backend::metal::metal_lora_add_decode_bf16(
+                &base, x, &proj.a, &proj.b, lora_scale,
+            )
+            .context("metal LoRA decode delta/add failed");
+        }
+    }
+    // Final candle composite fallback (`compute_lora_delta` is candle-typed).
+    #[cfg(feature = "cuda")]
+    {
+        let delta = compute_lora_delta(&x_candle, proj, lora_scale)?;
+        let delta_kt = candle_to_kt_activation(&delta)
+            .context("add_lora_delta_to_base candle->kt compute_lora_delta")?;
+        let delta_kt = if delta_kt.dtype() == base.dtype() {
+            delta_kt
+        } else {
+            delta_kt.to_dtype(base.dtype())?
+        };
+        if let Some(out) = try_kt_lora_add(&base, &delta_kt)? {
+            return Ok(out);
+        }
+        return Ok((base + delta_kt)?);
+    }
+    // Non-CUDA LoRA-add fallback needs a candle bridge for `compute_lora_delta`
+    // / Metal helpers; the kt<->candle bridges are CUDA-only (#1082). Production
+    // decode is CUDA, so surface a typed error here rather than silently
+    // dropping the LoRA delta on a CPU/Metal-only build.
+    #[cfg(not(feature = "cuda"))]
+    {
+        let _ = (backend, proj, x);
+        anyhow::bail!(
+            "add_lora_delta_to_base: non-CUDA LoRA-add path needs a kt<->candle CPU bridge (#1082)"
+        )
+    }
 }
 
 #[cfg(feature = "cuda")]
