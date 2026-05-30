@@ -19796,10 +19796,32 @@ fn try_flash_attn_paged_decode(
         full_attn_layer_idx,
         kt_paged_cache,
     );
-    let (k_pool, v_pool) = match candle_pools {
+    let (k_pool_candle, v_pool_candle) = match candle_pools {
         Some(p) => p,
         None => return Ok(None),
     };
+    // #1082: the candle `PagedKvCache::pool_tensors` returns candle pool
+    // tensors, but every downstream consumer (kt `.narrow`, the kt backend
+    // decode methods, the kt flash-attn FFI) is kt now. Bring the pools into
+    // kt once. On CUDA this is a zero-copy borrow over the same device
+    // storage; on non-CUDA there is no candle→kt borrow bridge yet, so the
+    // (bailing) `candle_to_kt_activation` stub keeps the build type-checking —
+    // production paged decode is CUDA-only.
+    #[cfg(feature = "cuda")]
+    let (k_pool, v_pool) = (
+        kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(k_pool_candle)
+            .context("try_flash_attn_paged_decode borrow k_pool")?,
+        kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v_pool_candle)
+            .context("try_flash_attn_paged_decode borrow v_pool")?,
+    );
+    #[cfg(not(feature = "cuda"))]
+    let (k_pool, v_pool) = (
+        candle_to_kt_activation(k_pool_candle)
+            .context("try_flash_attn_paged_decode kt pool k")?,
+        candle_to_kt_activation(v_pool_candle)
+            .context("try_flash_attn_paged_decode kt pool v")?,
+    );
+    let (k_pool, v_pool) = (&k_pool, &v_pool);
 
     // Common macOS/desktop case: a single sequence receives freshly-allocated
     // blocks, so its whole live KV window is already one contiguous run in the
@@ -20098,28 +20120,18 @@ fn try_flash_attn_paged_decode(
                 // `bench-results/cuda-graph-bs2-secondary-audit.md`
                 // suspects 3+4.
                 kiln_nvtx::range!(c"kiln/flash_attn_paged_decode_dyn_seqlen_kt_with_graph_outputs");
-                let q_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&q_fa)
-                    .context("forward kt: borrow q_fa")?;
-                let k_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(k_pool)
-                    .context("forward kt: borrow k_pool")?;
-                let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v_pool)
-                    .context("forward kt: borrow v_pool")?;
-                let bt_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(bt_tensor)
-                    .context("forward kt: borrow bt_tensor")?;
-                let sk_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(inputs.seqused_k)
-                    .context("forward kt: borrow seqused_k")?;
-                let out_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(attn_out)
-                    .context("forward kt: borrow attn_out (caller-owned graph output)")?;
-                let lse_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(softmax_lse)
-                    .context("forward kt: borrow softmax_lse (caller-owned graph output)")?;
+                // #1082: every arg is already kt here — `q_fa` (kt param `q`
+                // transposed), `k_pool`/`v_pool` (bridged to kt at the top of
+                // this fn), and `inputs.*` / `attn_out` / `softmax_lse`
+                // (PagedDecodeGraphInputs is kt-typed). Pass directly.
                 kiln_flash_attn::flash_attn_paged_decode_dyn_seqlen_kt_with_graph_outputs(
-                    &q_kt,
-                    &k_kt,
-                    &v_kt,
-                    &bt_kt,
-                    &sk_kt,
-                    &out_kt,
-                    &lse_kt,
+                    &q_fa,
+                    k_pool,
+                    v_pool,
+                    inputs.block_table,
+                    inputs.seqused_k,
+                    attn_out,
+                    softmax_lse,
                     inputs.max_seqlen_k,
                     block_size,
                     softmax_scale,
