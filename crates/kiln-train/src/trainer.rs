@@ -10323,9 +10323,19 @@ fn tiled_segment_recompute_and_backward(
         let is_last_tile = tile_end == total;
 
         // Slice tile-local inputs.
-        let tile_seg_input = seg_input
-            .narrow(1, tile_start, tile_len)
-            .context("narrow seg_input to tile")?;
+        // (#1082) `seg_input` is candle (it comes from the candle-typed
+        // `segment_input_via_registry_or_clone` / backend residency helper).
+        // `model_forward_segment` is kt-native, so bridge the candle tile input
+        // -> kt; the kt `tile_hidden` then threads through later kt segment
+        // forwards and is bridged -> candle only for the candle loss helper.
+        let tile_seg_input = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(
+            &seg_input
+                .narrow(1, tile_start, tile_len)
+                .context("narrow seg_input to tile")?
+                .contiguous()
+                .context("tiled segment tile input contiguous")?,
+        )
+        .map_err(|e| anyhow::anyhow!("tiled segment: candle->kt tile input: {e}"))?;
         let tile_positions: Vec<u32> = positions[tile_start..tile_end].to_vec();
 
         // Grad-tracked forward through segment `seg_idx` on the tile.
@@ -10377,10 +10387,20 @@ fn tiled_segment_recompute_and_backward(
         let tile_labels: Vec<u32> = input_ids[labels_start..labels_end].to_vec();
         let tile_mask: Vec<bool> = label_mask[labels_start..labels_end].to_vec();
 
+        // (#1082) bridge the kt segment output -> candle for the candle FLCE
+        // loss helper. The candle `loss.backward()` below cannot trace through
+        // the kt segment forward (grad-severed legacy path); the
+        // tape-authoritative CUDA path is the correct grad producer.
+        let tile_hidden_cd = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(
+            &tile_hidden
+                .contiguous()
+                .context("tiled segment tile_hidden contiguous")?,
+        )
+        .map_err(|e| anyhow::anyhow!("tiled segment: kt->candle tile_hidden: {e}"))?;
         let scaled_loss = tile_loss_explicit(
             weights,
             model_config,
-            &tile_hidden,
+            &tile_hidden_cd,
             &tile_labels,
             &tile_mask,
             total_active,
@@ -10535,7 +10555,16 @@ fn layer_pair_tiled_segment_recompute_and_backward(
     // later-seg LoRA Var would receive (1 contribution per earlier-or-equal
     // seg-iteration) instead of exactly one.
     let lora_detached = lora_weights_detached(params);
-    let mut tail_hidden = seg_output_var.as_tensor().clone();
+    // (#1082) `model_forward_segment` / `model_forward_final_norm` /
+    // `model_forward_head` are kt-native. Thread `tail_hidden` as kt: bridge
+    // the candle `seg_output_var` -> kt to seed it, and bridge the kt
+    // norm/head outputs -> candle for the candle FLCE / cross-entropy loss
+    // (the candle `loss.backward()` cannot trace through the kt forward —
+    // grad-severed legacy path; the tape path is the correct producer).
+    let mut tail_hidden = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(
+        seg_output_var.as_tensor(),
+    )
+    .map_err(|e| anyhow::anyhow!("layer-pair tail: candle->kt seg output: {e}"))?;
     for (i, &(later_start, later_end)) in segments[seg_idx + 1..].iter().enumerate() {
         // Detach BETWEEN later segments. Skip the detach for the first
         // later segment so the gradient flows from later-segs[0]'s input
@@ -10562,11 +10591,18 @@ fn layer_pair_tiled_segment_recompute_and_backward(
         })?;
     }
 
+    let head_t_candle = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&weights.embed_tokens_t)
+        .map_err(|e| anyhow::anyhow!("layer-pair tail: kt->candle head_t: {e}"))?;
     let tail_loss = if use_flce() {
-        let normed = model_forward_final_norm(&tail_hidden, weights, model_config)?;
+        let normed = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(
+            &model_forward_final_norm(&tail_hidden, weights, model_config)?
+                .contiguous()
+                .context("layer-pair tail normed contiguous")?,
+        )
+        .map_err(|e| anyhow::anyhow!("layer-pair tail: kt->candle normed: {e}"))?;
         fused_linear_cross_entropy_dispatch(
             &normed,
-            &weights.embed_tokens_t,
+            &head_t_candle,
             input_ids,
             label_mask,
             device,
@@ -10574,7 +10610,12 @@ fn layer_pair_tiled_segment_recompute_and_backward(
         )
         .context("layer-pair tail FLCE")?
     } else {
-        let logits = model_forward_head(&tail_hidden, weights, model_config)?;
+        let logits = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(
+            &model_forward_head(&tail_hidden, weights, model_config)?
+                .contiguous()
+                .context("layer-pair tail logits contiguous")?,
+        )
+        .map_err(|e| anyhow::anyhow!("layer-pair tail: kt->candle logits: {e}"))?;
         cross_entropy_loss(&logits, input_ids, label_mask, device)?
     };
 
@@ -10609,15 +10650,25 @@ fn layer_pair_tiled_segment_recompute_and_backward(
     // would just be torn down again for no benefit. Use detached LoRA so
     // the inner ops don't bother building the LoRA-side autograd graph.
     let blocks = partition_segment_layers_by_attn_type(weights, seg_start, seg_end);
-    let mut block_boundaries: Vec<Tensor> = Vec::with_capacity(blocks.len() + 1);
+    // (#1082) `model_forward_segment` is kt-native, so the block boundaries are
+    // kt. The candle `segment_input_via_registry_or_clone` seed is bridged
+    // candle->kt; per-block Var construction in step 4 bridges back to candle.
+    let mut block_boundaries: Vec<kiln_tensor::Tensor> = Vec::with_capacity(blocks.len() + 1);
     // Phase 3.2: registry-resolve fast path for the segment's input
     // boundary when supported by the backend.
     let resident_activation = backend.supports_resident_activation();
-    block_boundaries.push(segment_input_via_registry_or_clone(
-        backend,
-        &boundary_states[seg_idx],
-        resident_activation,
-    )?);
+    block_boundaries.push(
+        kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(
+            &segment_input_via_registry_or_clone(
+                backend,
+                &boundary_states[seg_idx],
+                resident_activation,
+            )?
+            .contiguous()
+            .context("layer-pair block boundary seed contiguous")?,
+        )
+        .map_err(|e| anyhow::anyhow!("layer-pair: candle->kt block boundary seed: {e}"))?,
+    );
     {
         let mut linear_state = LinearAttentionState::new(model_config, &kiln_kt_bridge::kt_device_from_candle(device))?;
         let mut current = block_boundaries[0].clone();
@@ -10648,8 +10699,17 @@ fn layer_pair_tiled_segment_recompute_and_backward(
     let mut grad_at_current_output = grad_at_seg_output;
 
     for (block_idx, (kind, range)) in blocks.iter().enumerate().rev() {
-        let block_input = block_boundaries[block_idx].clone();
-        let block_input_var = var_from_tensor(&block_input)?;
+        // (#1082) kt block boundary -> candle Var; the kt-native segment
+        // forward gets the candle Var bridged back to kt, and its kt output is
+        // bridged -> candle for the candle gradient-injection scalar.
+        let block_input_var = var_from_tensor(
+            &kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(
+                &block_boundaries[block_idx]
+                    .contiguous()
+                    .context("layer-pair block input contiguous")?,
+            )
+            .map_err(|e| anyhow::anyhow!("layer-pair: kt->candle block input: {e}"))?,
+        )?;
 
         let new_grad_at_block_input = match kind {
             AttnKind::FullAttn => {
@@ -10658,9 +10718,14 @@ fn layer_pair_tiled_segment_recompute_and_backward(
                 // scalar = (block_output * grad_at_current_output).sum_all().
                 let mut state = LinearAttentionState::new(model_config, &kiln_kt_bridge::kt_device_from_candle(device))?;
                 let lora_for_block = params.as_lora_weights();
-                let block_output = model_forward_segment(
+                let block_output_kt = model_forward_segment(
                     backend,
-                    block_input_var.as_tensor().clone(),
+                    kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(
+                        block_input_var.as_tensor(),
+                    )
+                    .map_err(|e| {
+                        anyhow::anyhow!("layer-pair FA: candle->kt block input: {e}")
+                    })?,
                     weights,
                     model_config,
                     positions,
@@ -10675,6 +10740,12 @@ fn layer_pair_tiled_segment_recompute_and_backward(
                         range.start, range.end,
                     )
                 })?;
+                let block_output = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(
+                    &block_output_kt
+                        .contiguous()
+                        .context("layer-pair FA block output contiguous")?,
+                )
+                .map_err(|e| anyhow::anyhow!("layer-pair FA: kt->candle block output: {e}"))?;
 
                 let scalar = (&block_output * &grad_at_current_output)?
                     .sum_all()
@@ -10705,7 +10776,7 @@ fn layer_pair_tiled_segment_recompute_and_backward(
                 // tile-local gradient at block_input_var (zeros outside the
                 // tile range, real gradient inside). Sum across tiles to
                 // recover the full-seq_len gradient at block_input_var.
-                let (_, total_tokens, _) = block_input.dims3()?;
+                let (_, total_tokens, _) = block_input_var.as_tensor().dims3()?;
                 let mut state = LinearAttentionState::new(model_config, &kiln_kt_bridge::kt_device_from_candle(device))?;
                 let mut summed: Option<Tensor> = None;
 
@@ -10714,14 +10785,22 @@ fn layer_pair_tiled_segment_recompute_and_backward(
                     let tile_end = (tile_start + tile_size).min(total_tokens);
                     let tile_len = tile_end - tile_start;
 
-                    let tile_input = block_input_var
-                        .as_tensor()
-                        .narrow(1, tile_start, tile_len)
-                        .context("narrow GDN block input to tile")?;
+                    // (#1082) bridge the candle Var tile slice -> kt for the
+                    // kt segment forward; bridge the kt tile output -> candle
+                    // for the candle injection scalar.
+                    let tile_input = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(
+                        &block_input_var
+                            .as_tensor()
+                            .narrow(1, tile_start, tile_len)
+                            .context("narrow GDN block input to tile")?
+                            .contiguous()
+                            .context("layer-pair GDN tile input contiguous")?,
+                    )
+                    .map_err(|e| anyhow::anyhow!("layer-pair GDN: candle->kt tile input: {e}"))?;
                     let tile_positions: Vec<u32> = positions[tile_start..tile_end].to_vec();
                     let lora_for_block = params.as_lora_weights();
 
-                    let tile_output = model_forward_segment(
+                    let tile_output_kt = model_forward_segment(
                         backend,
                         tile_input,
                         weights,
@@ -10739,6 +10818,12 @@ fn layer_pair_tiled_segment_recompute_and_backward(
                             range.start, range.end,
                         )
                     })?;
+                    let tile_output = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(
+                        &tile_output_kt
+                            .contiguous()
+                            .context("layer-pair GDN tile output contiguous")?,
+                    )
+                    .map_err(|e| anyhow::anyhow!("layer-pair GDN: kt->candle tile output: {e}"))?;
 
                     let tile_grad_out = grad_at_current_output
                         .narrow(1, tile_start, tile_len)
