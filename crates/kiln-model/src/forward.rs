@@ -2244,7 +2244,6 @@ fn any_tensor_tracks_op(tensors: &[&candle_core::Tensor]) -> bool {
 /// forward-only — `track_op()` is structurally always `false` — so this is a
 /// no-op gate that always reports `false`. Provided so kt-path autograd gates
 /// keep the same call shape as the candle islands without a type clash.
-#[allow(dead_code)]
 fn any_kt_tensor_tracks_op(tensors: &[&kiln_tensor::Tensor]) -> bool {
     tensors.iter().any(|tensor| tensor.track_op())
 }
@@ -12954,7 +12953,7 @@ fn gdn_qk_norm_forward(
     scale: f64,
 ) -> Result<(Tensor, Tensor)> {
     #[cfg(any(feature = "metal", feature = "cuda"))]
-    let fused_forward_only_allowed = !any_tensor_tracks_op(&[q, k]);
+    let fused_forward_only_allowed = !any_kt_tensor_tracks_op(&[q, k]);
     #[cfg(feature = "metal")]
     {
         if fused_forward_only_allowed
@@ -13162,7 +13161,7 @@ fn gated_rms_norm(
     weight: &Tensor,
     eps: f64,
 ) -> Result<Tensor> {
-    if !any_tensor_tracks_op(&[x, z, weight]) && backend.supports_gdn_gated_rms_norm() {
+    if !any_kt_tensor_tracks_op(&[x, z, weight]) && backend.supports_gdn_gated_rms_norm() {
         if let Some(out) = backend.gdn_gated_rms_norm(x, z, weight, eps)? {
             return Ok(out);
         }
@@ -13521,7 +13520,7 @@ fn compute_w_chunk(
     // The kernel envelope is C <= 128; callers enforce this precondition so
     // we never pay for a backend call we know will decline.
     if c <= 128
-        && !any_tensor_tracks_op(&[a_strict, v_prime, beta_c])
+        && !any_kt_tensor_tracks_op(&[a_strict, v_prime, beta_c])
         && backend.supports_gdn_forward_substitution()
     {
         kiln_nvtx::range!(c"kiln/attn/gdn/chunk");
@@ -13709,7 +13708,7 @@ fn gdn_chunkwise_recurrence(
     // per (B,H).
     if seq_len == 1 {
         let use_backend_recurrent_step = state.dtype() == dtype
-            && !any_tensor_tracks_op(&[q, k, v, beta, g, state])
+            && !any_kt_tensor_tracks_op(&[q, k, v, beta, g, state])
             && backend.supports_gdn_recurrent_step()
             && (dtype == DType::BF16
                 || (dtype == DType::F32
@@ -13795,7 +13794,7 @@ fn gdn_chunkwise_recurrence(
         && matches!(device, Device::Cuda(_))
         && dtype == DType::BF16
         && full_chunks > 0
-        && !any_tensor_tracks_op(&[q, k, v, beta, g])
+        && !any_kt_tensor_tracks_op(&[q, k, v, beta, g])
         && std::env::var("KILN_DISABLE_GDN_CHUNK_PRE_PERMUTE").is_err();
 
     let pre_permuted: Option<(Tensor, Tensor, Tensor, Tensor, Tensor, Tensor)> =
@@ -13913,7 +13912,7 @@ fn gdn_chunkwise_recurrence(
 
         if !is_tail
             && c == 64
-            && !any_tensor_tracks_op(&[
+            && !any_kt_tensor_tracks_op(&[
                 &g_c, &v_c, &kkt, &qkt, &ks_entry, &q_s, &beta_c, &k_t_mat, state,
             ])
             && backend.supports_gdn_full_chunk_forward()
@@ -13954,7 +13953,7 @@ fn gdn_chunkwise_recurrence(
         let stage_profile = start_gdn_recurrent_inner_profile(device, profile_inner)?;
         let (a_strict, b_mask, v_prime, q_s_scaled, decay_last_col_u, p_last_u) = {
             kiln_nvtx::range!(c"kiln/attn/gdn/chunk_prep");
-            let prep_out = if !any_tensor_tracks_op(&[&g_c, &v_c, &kkt, &qkt, &ks_entry, &q_s])
+            let prep_out = if !any_kt_tensor_tracks_op(&[&g_c, &v_c, &kkt, &qkt, &ks_entry, &q_s])
                 && backend.supports_gdn_chunk_prep()
                 && dtype == DType::BF16
             {
@@ -14089,7 +14088,7 @@ fn gdn_chunkwise_recurrence(
         let stage_profile = start_gdn_recurrent_inner_profile(device, profile_inner)?;
         let (out_chunk, w_weighted) = {
             kiln_nvtx::range!(c"kiln/attn/gdn/chunk");
-            if !any_tensor_tracks_op(&[
+            if !any_kt_tensor_tracks_op(&[
                 &a_strict,
                 &b_mask,
                 &v_prime,
@@ -14209,7 +14208,7 @@ fn gdn_recurrent_prefill_head_last(
     if seq_len <= 1
         || q.dtype() != DType::BF16
         || state.dtype() != DType::BF16
-        || any_tensor_tracks_op(&[q, k, v, beta, g, state])
+        || any_kt_tensor_tracks_op(&[q, k, v, beta, g, state])
         || !backend.supports_gdn_recurrent_prefill_head_last()
     {
         return Ok(None);
@@ -14230,7 +14229,7 @@ fn gdn_recurrent_prefill_native_head_last(
     if seq_len == 0
         || q.dtype() != DType::BF16
         || state.dtype() != DType::BF16
-        || any_tensor_tracks_op(&[q, k, v, beta, g, state])
+        || any_kt_tensor_tracks_op(&[q, k, v, beta, g, state])
         || !backend.supports_gdn_recurrent_prefill_native_head_last()
     {
         return Ok(None);
@@ -14260,7 +14259,7 @@ fn gdn_chunkwise_recurrence_head_last_full_chunks(
         || seq_len % chunk_size != 0
         || dtype != DType::BF16
         || state.dtype() != DType::BF16
-        || any_tensor_tracks_op(&[q, k, v, beta, g, state])
+        || any_kt_tensor_tracks_op(&[q, k, v, beta, g, state])
         || !backend.supports_gdn_full_chunk_forward_head_last()
     {
         return Ok(None);
@@ -20824,7 +20823,7 @@ fn gqa_attention_paged_with_rope_tables(
                 && !cuda_fused_attn_decode_qkv_prep_disabled()
                 && !subop_armed
                 && !b12_layer_31
-                && !any_tensor_tracks_op(&[
+                && !any_kt_tensor_tracks_op(&[
                     &q_raw,
                     &k_raw,
                     &attn_weights.q_norm,
