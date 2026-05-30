@@ -2815,7 +2815,7 @@ pub fn opd_train(
                         // kt-native).
                         crate::trainer::optimizer_step_from_kt_grad_store(
                             &*backend_rt,
-                            &params,
+                            &mut params,
                             &kt_grads,
                             config.learning_rate,
                             config.optimizer,

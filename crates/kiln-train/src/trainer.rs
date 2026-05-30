@@ -8251,7 +8251,7 @@ pub(crate) fn grpo_loss(
             // CPU-side quantile from policy_log_probs.
             let plp_host: Vec<f32> = policy_log_probs
                 .flatten_all()?
-                .to_device(&cpu_device())?
+                .to_device(cpu_device())?
                 .to_vec1::<f32>()?;
             let mut neg = plp_host.iter().map(|p| -(*p as f64)).collect::<Vec<_>>();
             neg.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
