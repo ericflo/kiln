@@ -17602,18 +17602,34 @@ fn gated_deltanet_forward_decode_if(
                 // chained id on every input.
                 let v_cast = v.to_dtype(input_dtype)?;
                 #[cfg(feature = "cuda")]
-                let v_cast = match crate::tape_forward::try_tape_cast_cuda(&v, &v_cast)? {
-                    Some(t) => t,
-                    None => v_cast,
+                let v_cast = if crate::tape_forward::tape_forward_enabled() {
+                    let v_c = kt_logits_to_candle(&v)
+                        .context("gdn recur v-cast kt->candle v (tape)")?;
+                    let vc_c = kt_logits_to_candle(&v_cast)
+                        .context("gdn recur v-cast kt->candle v_cast (tape)")?;
+                    match crate::tape_forward::try_tape_cast_cuda(&v_c, &vc_c)? {
+                        Some(t) => candle_to_kt_activation(&t)
+                            .context("gdn recur v-cast candle->kt (tape)")?,
+                        None => v_cast,
+                    }
+                } else {
+                    v_cast
                 };
                 let v = v_cast;
 
                 // Transpose to [B, nv, T, dim] for per-head processing.
                 #[cfg(feature = "cuda")]
                 let transpose12 = |t: &Tensor| -> Result<Tensor> {
-                    match crate::tape_forward::try_tape_transpose_cuda(t, 1, 2)? {
-                        Some(out) => Ok(out),
-                        None => Ok(t.transpose(1, 2)?),
+                    if crate::tape_forward::tape_forward_enabled() {
+                        let t_c = kt_logits_to_candle(t)
+                            .context("gdn recur transpose kt->candle (tape)")?;
+                        match crate::tape_forward::try_tape_transpose_cuda(&t_c, 1, 2)? {
+                            Some(out) => candle_to_kt_activation(&out)
+                                .context("gdn recur transpose candle->kt (tape)"),
+                            None => Ok(t.transpose(1, 2)?),
+                        }
+                    } else {
+                        Ok(t.transpose(1, 2)?)
                     }
                 };
                 #[cfg(not(feature = "cuda"))]
@@ -17679,17 +17695,31 @@ fn gated_deltanet_forward_decode_if(
             // (`recurrent_result.0`) is untouched. See `crate::tape_forward`
             // module docs.
             #[cfg(feature = "cuda")]
-            crate::tape_forward::tape_record_gdn_recurrent(
-                &recurrent_result.0,
-                recurrent_result.1, // head_last
-                &q,
-                &k,
-                &v,
-                &beta,
-                &g,
-                &gdn_entry_state,
-                q.device(),
-            )?;
+            if crate::tape_forward::tape_forward_enabled() {
+                let out_c = kt_logits_to_candle(&recurrent_result.0)
+                    .context("gdn recurrent record kt->candle out (tape)")?;
+                let q_c = kt_logits_to_candle(&q).context("gdn recurrent record kt->candle q")?;
+                let k_c = kt_logits_to_candle(&k).context("gdn recurrent record kt->candle k")?;
+                let v_c = kt_logits_to_candle(&v).context("gdn recurrent record kt->candle v")?;
+                let beta_c =
+                    kt_logits_to_candle(&beta).context("gdn recurrent record kt->candle beta")?;
+                let g_c = kt_logits_to_candle(&g).context("gdn recurrent record kt->candle g")?;
+                let state_c = kt_logits_to_candle(&gdn_entry_state)
+                    .context("gdn recurrent record kt->candle entry_state")?;
+                let dev_c = kiln_kt_bridge::candle_device_from_kt(&q.device())
+                    .map_err(|e| anyhow::anyhow!("gdn recurrent record kt->candle device: {e}"))?;
+                crate::tape_forward::tape_record_gdn_recurrent(
+                    &out_c,
+                    recurrent_result.1, // head_last
+                    &q_c,
+                    &k_c,
+                    &v_c,
+                    &beta_c,
+                    &g_c,
+                    &state_c,
+                    &dev_c,
+                )?;
+            }
 
             recurrent_result
         };
