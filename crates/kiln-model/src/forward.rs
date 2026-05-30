@@ -18417,30 +18417,20 @@ fn try_kt_gqa_sdpa_matmuls(
     // cublasLt needs contiguous operands; kᵀ ([B, nq, hd, T]) is a transpose
     // view, so materialize it contiguous (same as the candle path's `k.t()`,
     // which `broadcast_matmul` also makes contiguous internally on CUDA).
+    // #1082 forward-flip: q/k/v are already kt; run the GEMMs, scale/mask/
+    // softmax all kt-native — no candle borrow / copy-out round-trips.
     let k_t = match k.transpose(2, 3).and_then(|t| t.contiguous()) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    let q_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(q) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
-    let k_t_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&k_t) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
-    let scores_kt = match kiln_tensor::cuda_matmul(&q_kt, &k_t_kt) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
-    let attn_scores = match kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&scores_kt) {
+    let attn_scores = match kiln_tensor::cuda_matmul(q, &k_t) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
 
-    // --- Scale + causal mask + softmax: UNCHANGED candle / kt-softmax ops ---
-    // (Left candle on purpose for bit-exactness with the parity oracle.)
-    let attn_scores = (attn_scores / scale)?;
+    // --- Scale + causal mask + softmax (kt-native) ---
+    // kt has no `Tensor / f64`; `x / scale == x * (1/scale)` via affine.
+    let attn_scores = attn_scores.affine(1.0 / scale, 0.0)?;
     let attn_scores = apply_causal_mask_with_offset(&attn_scores, seq_len, seq_len, 0)?;
     let attn_weights_softmax = cuda_softmax_last_dim(&attn_scores)?;
 
@@ -18449,19 +18439,7 @@ fn try_kt_gqa_sdpa_matmuls(
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    let p_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&p_contig) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
-    let v_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
-    let out_kt = match kiln_tensor::cuda_matmul(&p_kt, &v_kt) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
-    let attn_output = match kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt) {
+    let attn_output = match kiln_tensor::cuda_matmul(&p_contig, v) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
