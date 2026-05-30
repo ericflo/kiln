@@ -22031,7 +22031,8 @@ fn gqa_attention_paged_with_rope_tables(
         let attn_scores = {
             let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
             let attn_scores = q_grouped.broadcast_matmul(&k_flat.transpose(2, 3)?.contiguous()?)?;
-            let attn_scores = (attn_scores / scale)?;
+            // kt has no `Tensor / f64`; `x / scale == x * (1/scale)` via affine.
+            let attn_scores = attn_scores.affine(1.0 / scale, 0.0)?;
             finish_full_attn_stage_profile(
                 profile_device,
                 profile_context,
@@ -22193,7 +22194,8 @@ fn gqa_attention_paged_with_rope_tables(
     let attn_scores = {
         let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
         let attn_scores = q.broadcast_matmul(&k.t()?)?;
-        let attn_scores = (attn_scores / scale)?;
+        // kt has no `Tensor / f64`; `x / scale == x * (1/scale)` via affine.
+        let attn_scores = attn_scores.affine(1.0 / scale, 0.0)?;
         finish_full_attn_stage_profile(
             profile_device,
             profile_context,
