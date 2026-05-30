@@ -3587,29 +3587,40 @@ fn linear_with_lora_t_backend_decode_if(
     // falls through to the kt-returning `linear_with_lora_t_decode_if` below).
     // Any candle base they produce is bridged back to kt before the kt-typed
     // `add_lora_delta_to_base`.
-    #[cfg(feature = "cuda")]
+    // Bridge x/weight_t to candle ONCE for the candle-typed islands below (the
+    // tape/training CustomOps and the backend's candle-typed decode/prefill
+    // trait methods). #1082: the kt<->candle bridges work on any build.
     {
         let x_candle = kt_logits_to_candle(x)
             .context("linear_with_lora_t_backend_decode_if kt->candle x")?;
         let weight_candle = kt_logits_to_candle(weight_t)
             .context("linear_with_lora_t_backend_decode_if kt->candle weight_t")?;
-        if let Some(out) =
-            crate::tape_forward::try_tape_lora_linear_cuda(&x_candle, &weight_candle, lora, lora_scale)?
+        // CUDA-only: tape-routed + training-CustomOp linear (early returns).
+        #[cfg(feature = "cuda")]
         {
-            return candle_to_kt_activation(&out)
-                .context("linear_with_lora_t_backend_decode_if candle->kt tape out");
+            if let Some(out) = crate::tape_forward::try_tape_lora_linear_cuda(
+                &x_candle,
+                &weight_candle,
+                lora,
+                lora_scale,
+            )? {
+                return candle_to_kt_activation(&out)
+                    .context("linear_with_lora_t_backend_decode_if candle->kt tape out");
+            }
+            if let Some(out) =
+                cuda_lora_linear_training_bf16(&x_candle, &weight_candle, lora, lora_scale)?
+            {
+                return candle_to_kt_activation(&out)
+                    .context("linear_with_lora_t_backend_decode_if candle->kt training out");
+            }
         }
-        if let Some(out) =
-            cuda_lora_linear_training_bf16(&x_candle, &weight_candle, lora, lora_scale)?
-        {
-            return candle_to_kt_activation(&out)
-                .context("linear_with_lora_t_backend_decode_if candle->kt training out");
-        }
+        // Base projection via the backend's candle-typed decode/prefill trait
+        // methods — UNCONDITIONAL (#1082: previously cuda-gated, so the no-CUDA
+        // path skipped the backend base and emitted delta-only output). The
+        // BackendRuntime trait + the kt<->candle bridges work on any build.
         if let Some(backend) = backend {
             // Autograd-tracked input → prefer the autograd-safe Vulkan
-            // CustomOp1 (linear_prefill_apply). Routing by track_op()
-            // preserves the leaf-fast path for inference while routing
-            // training through the parity-tested CustomOp.
+            // CustomOp1 (linear_prefill_apply).
             if x.track_op() {
                 if let Some(base) = backend.linear_prefill_apply(&x_candle, &weight_candle)? {
                     let base_kt = candle_to_kt_activation(&base).context(
@@ -3623,8 +3634,7 @@ fn linear_with_lora_t_backend_decode_if(
                     .context("linear_with_lora_t_backend_decode_if candle->kt decode base")?;
                 return add_lora_delta_to_base(Some(backend), base_kt, x, lora, lora_scale);
             }
-            // Last-ditch: try the autograd-safe path even for non-tracked
-            // inputs in case the backend supports a combo linear_decode declines.
+            // Last-ditch: try the autograd-safe path even for non-tracked inputs.
             if let Some(base) = backend.linear_prefill_apply(&x_candle, &weight_candle)? {
                 let base_kt = candle_to_kt_activation(&base).context(
                     "linear_with_lora_t_backend_decode_if candle->kt prefill-fallback base",
