@@ -23908,13 +23908,27 @@ pub fn model_forward(
 /// the non-CUDA branch errors at runtime (production decode is CUDA).
 #[cfg(feature = "cuda")]
 fn model_forward_logits_kt_to_candle(logits: Tensor) -> Result<candle_core::Tensor> {
-    let logits = if logits.is_contiguous() {
+    // #1082 CP-4: keep the original kt logits handle (the recorded lm_head tape
+    // output) so we can register it as the producer of the bridged candle
+    // logits id below.
+    let logits_chain = logits.clone();
+    let contig = if logits.is_contiguous() {
         logits
     } else {
         logits.contiguous()?
     };
-    kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&logits)
-        .map_err(|e| anyhow::anyhow!("model_forward logits kt->candle bridge: {e}"))
+    let candle = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&contig)
+        .map_err(|e| anyhow::anyhow!("model_forward logits kt->candle bridge: {e}"))?;
+    // #1082 CP-4 (the lm_head→cross_entropy tape seam): map the bridged candle
+    // logits id back to the kt lm_head output, so a downstream cross_entropy
+    // tape adapter (`try_tape_cross_entropy_from_logits_cuda`, which re-borrows
+    // the candle logits as a *fresh* kt id) chains to the recorded lm_head node
+    // via `kt_input_for_candle` instead of islanding. Without this the tape walk
+    // dead-ends at the loss and the kt GradStore comes back empty. The call
+    // self-gates on an active tape-bridge scope, so it is a no-op on the
+    // inference/decode path.
+    kiln_kt_bridge::tape_bridge::retain_output_for_chaining(&logits_chain, candle.id());
+    Ok(candle)
 }
 
 #[cfg(not(feature = "cuda"))]
