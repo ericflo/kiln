@@ -352,83 +352,98 @@ impl BackendRuntime for MetalBackend {
 
     fn flash_attn_paged_decode_contiguous(
         &self,
-        q: &candle_core::Tensor,
-        k_pool: &candle_core::Tensor,
-        v_pool: &candle_core::Tensor,
+        q: &kiln_tensor::Tensor,
+        k_pool: &kiln_tensor::Tensor,
+        v_pool: &kiln_tensor::Tensor,
         start_slot: usize,
         total_seqlen_k: usize,
         softmax_scale: f32,
-    ) -> Result<Option<candle_core::Tensor>> {
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        // #1082 forward-flip: trait surface is kt; bridge each kt arg to a
+        // candle CPU local (host round-trip, matching this backend's
+        // CPU-resident model), then delegate to the unchanged candle helper.
+        let q = crate::forward::kt_logits_to_candle(q)?;
+        let k_pool = crate::forward::kt_logits_to_candle(k_pool)?;
+        let v_pool = crate::forward::kt_logits_to_candle(v_pool)?;
         if !metal_paged_attn_decode_contiguous_supports(
-            q,
-            k_pool,
-            v_pool,
+            &q,
+            &k_pool,
+            &v_pool,
             start_slot,
             total_seqlen_k,
         ) {
             return Ok(None);
         }
         let out = metal_paged_attn_decode_contiguous_bf16_d256(
-            q,
-            k_pool,
-            v_pool,
+            &q,
+            &k_pool,
+            &v_pool,
             start_slot,
             total_seqlen_k,
             softmax_scale,
         )
         .context("metal contiguous paged decode attention failed")?;
-        Ok(Some(out))
+        Ok(Some(crate::forward::candle_to_kt_activation(&out)?))
     }
 
     fn flash_attn_paged_decode_contiguous_batch(
         &self,
-        q: &candle_core::Tensor,
-        k_pool: &candle_core::Tensor,
-        v_pool: &candle_core::Tensor,
-        start_slots: &candle_core::Tensor,
+        q: &kiln_tensor::Tensor,
+        k_pool: &kiln_tensor::Tensor,
+        v_pool: &kiln_tensor::Tensor,
+        start_slots: &kiln_tensor::Tensor,
         total_seqlen_k: usize,
         softmax_scale: f32,
-    ) -> Result<Option<candle_core::Tensor>> {
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        let q = crate::forward::kt_logits_to_candle(q)?;
+        let k_pool = crate::forward::kt_logits_to_candle(k_pool)?;
+        let v_pool = crate::forward::kt_logits_to_candle(v_pool)?;
+        let start_slots = crate::forward::kt_logits_to_candle(start_slots)?;
         if !metal_paged_attn_decode_contiguous_batch_supports(
-            q,
-            k_pool,
-            v_pool,
-            start_slots,
+            &q,
+            &k_pool,
+            &v_pool,
+            &start_slots,
             total_seqlen_k,
         ) {
             return Ok(None);
         }
         let out = metal_paged_attn_decode_contiguous_batch_bf16_d256(
-            q,
-            k_pool,
-            v_pool,
-            start_slots,
+            &q,
+            &k_pool,
+            &v_pool,
+            &start_slots,
             total_seqlen_k,
             softmax_scale,
         )
         .context("metal contiguous paged batch decode attention failed")?;
-        Ok(Some(out))
+        Ok(Some(crate::forward::candle_to_kt_activation(&out)?))
     }
 
     fn flash_attn_paged_decode_contiguous_batch_dyn_seqlen(
         &self,
-        q: &candle_core::Tensor,
-        k_pool: &candle_core::Tensor,
-        v_pool: &candle_core::Tensor,
-        block_table: &candle_core::Tensor,
-        seqused_k: &candle_core::Tensor,
+        q: &kiln_tensor::Tensor,
+        k_pool: &kiln_tensor::Tensor,
+        v_pool: &kiln_tensor::Tensor,
+        block_table: &kiln_tensor::Tensor,
+        seqused_k: &kiln_tensor::Tensor,
         max_seqlen_k: usize,
         page_block_size: usize,
         softmax_scale: f32,
         causal: bool,
-    ) -> Result<Option<candle_core::Tensor>> {
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        let q = crate::forward::kt_logits_to_candle(q)?;
+        let k_pool = crate::forward::kt_logits_to_candle(k_pool)?;
+        let v_pool = crate::forward::kt_logits_to_candle(v_pool)?;
+        let block_table = crate::forward::kt_logits_to_candle(block_table)?;
+        let seqused_k = crate::forward::kt_logits_to_candle(seqused_k)?;
         if !causal
             || !metal_paged_attn_decode_contiguous_batch_dyn_seqlen_supports(
-                q,
-                k_pool,
-                v_pool,
-                block_table,
-                seqused_k,
+                &q,
+                &k_pool,
+                &v_pool,
+                &block_table,
+                &seqused_k,
                 max_seqlen_k,
                 page_block_size,
             )
@@ -436,17 +451,17 @@ impl BackendRuntime for MetalBackend {
             return Ok(None);
         }
         let out = metal_paged_attn_decode_contiguous_batch_dyn_seqlen_bf16_d256(
-            q,
-            k_pool,
-            v_pool,
-            block_table,
-            seqused_k,
+            &q,
+            &k_pool,
+            &v_pool,
+            &block_table,
+            &seqused_k,
             max_seqlen_k,
             page_block_size,
             softmax_scale,
         )
         .context("metal dyn-seqlen paged batch decode attention failed")?;
-        Ok(Some(out))
+        Ok(Some(crate::forward::candle_to_kt_activation(&out)?))
     }
 
     fn supports_paged_kv_head_major_read(&self) -> bool {
@@ -503,19 +518,20 @@ impl BackendRuntime for MetalBackend {
 
     fn flash_attn_prefill(
         &self,
-        q: &candle_core::Tensor,
-        k: &candle_core::Tensor,
-        v: &candle_core::Tensor,
+        q: &kiln_tensor::Tensor,
+        k: &kiln_tensor::Tensor,
+        v: &kiln_tensor::Tensor,
         softmax_scale: f32,
         causal: bool,
-    ) -> Result<Option<candle_core::Tensor>> {
+    ) -> Result<Option<kiln_tensor::Tensor>> {
         if std::env::var(DISABLE_METAL_SDPA).is_ok() {
             return Ok(None);
         }
         // Decline (caller falls back to the portable path) when candle's SDPA
         // can't handle the shape/dtype. Cheaper than surfacing a kernel error
-        // from inside the fused path.
-        if !matches!(q.dtype(), candle_core::DType::BF16 | candle_core::DType::F16 | candle_core::DType::F32) {
+        // from inside the fused path. Guards read the kt arg directly and run
+        // BEFORE the candle bridges (#1082 forward-flip).
+        if !matches!(q.dtype(), kiln_tensor::DType::BF16 | kiln_tensor::DType::F16 | kiln_tensor::DType::F32) {
             return Ok(None);
         }
         // Last-axis index via kt-native `rank()` arithmetic so this site no
@@ -532,6 +548,11 @@ impl BackendRuntime for MetalBackend {
             return Ok(None);
         }
 
+        // Bridge kt args to candle CPU locals for the unchanged candle helper.
+        let q = crate::forward::kt_logits_to_candle(q)?;
+        let k = crate::forward::kt_logits_to_candle(k)?;
+        let v = crate::forward::kt_logits_to_candle(v)?;
+
         let q_t = q.transpose(1, 2)?.contiguous()?;
         let k_t = k.transpose(1, 2)?.contiguous()?;
         let v_t = v.transpose(1, 2)?.contiguous()?;
@@ -542,21 +563,22 @@ impl BackendRuntime for MetalBackend {
             .context("candle-metal sdpa failed")?;
 
         let out = out.transpose(1, 2)?.contiguous()?;
-        Ok(Some(out))
+        Ok(Some(crate::forward::candle_to_kt_activation(&out)?))
     }
 
     fn flash_attn_prefill_head_major(
         &self,
-        q: &candle_core::Tensor,
-        k: &candle_core::Tensor,
-        v: &candle_core::Tensor,
+        q: &kiln_tensor::Tensor,
+        k: &kiln_tensor::Tensor,
+        v: &kiln_tensor::Tensor,
         softmax_scale: f32,
         causal: bool,
-    ) -> Result<Option<candle_core::Tensor>> {
+    ) -> Result<Option<kiln_tensor::Tensor>> {
         if std::env::var(DISABLE_METAL_SDPA).is_ok() {
             return Ok(None);
         }
-        if !matches!(q.dtype(), candle_core::DType::BF16 | candle_core::DType::F16 | candle_core::DType::F32) {
+        // Guards read the kt arg directly, BEFORE the candle bridges (#1082).
+        if !matches!(q.dtype(), kiln_tensor::DType::BF16 | kiln_tensor::DType::F16 | kiln_tensor::DType::F32) {
             return Ok(None);
         }
         // Last-axis index via kt-native `rank()` arithmetic; see notes above (#1082 chokepoint).
@@ -569,9 +591,13 @@ impl BackendRuntime for MetalBackend {
             return Ok(None);
         }
 
-        let out = sdpa(q, k, v, None, causal, softmax_scale, 1.0)
+        let q = crate::forward::kt_logits_to_candle(q)?;
+        let k = crate::forward::kt_logits_to_candle(k)?;
+        let v = crate::forward::kt_logits_to_candle(v)?;
+
+        let out = sdpa(&q, &k, &v, None, causal, softmax_scale, 1.0)
             .context("candle-metal head-major sdpa failed")?;
-        Ok(Some(out))
+        Ok(Some(crate::forward::candle_to_kt_activation(&out)?))
     }
 
     /// Gather K/V from the paged pool via `index_select` on the block table,
@@ -580,19 +606,20 @@ impl BackendRuntime for MetalBackend {
     /// naive-softmax+matmul fallback — same result, one fused kernel.
     fn flash_attn_paged_decode(
         &self,
-        q: &candle_core::Tensor,
-        k_pool: &candle_core::Tensor,
-        v_pool: &candle_core::Tensor,
-        block_table: &candle_core::Tensor,
+        q: &kiln_tensor::Tensor,
+        k_pool: &kiln_tensor::Tensor,
+        v_pool: &kiln_tensor::Tensor,
+        block_table: &kiln_tensor::Tensor,
         total_seqlen_k: usize,
         page_block_size: usize,
         softmax_scale: f32,
         causal: bool,
-    ) -> Result<Option<candle_core::Tensor>> {
+    ) -> Result<Option<kiln_tensor::Tensor>> {
         // Gate on everything SDPA can handle. Pool dtype matches q dtype by
         // construction (both come from the same forward config), so only q
-        // needs checking.
-        if !matches!(q.dtype(), candle_core::DType::BF16 | candle_core::DType::F16 | candle_core::DType::F32) {
+        // needs checking. Guards read the kt arg directly, BEFORE the candle
+        // bridges (#1082 forward-flip).
+        if !matches!(q.dtype(), kiln_tensor::DType::BF16 | kiln_tensor::DType::F16 | kiln_tensor::DType::F32) {
             return Ok(None);
         }
         // Last-axis index via kt-native `rank()` arithmetic; see notes above (#1082 chokepoint).
@@ -600,6 +627,13 @@ impl BackendRuntime for MetalBackend {
         if !metal_sdpa_supports_head_dim(head_dim) {
             return Ok(None);
         }
+
+        // Bridge kt args to candle CPU locals; the remainder of the body runs
+        // on the candle locals via name-shadowing.
+        let q = crate::forward::kt_logits_to_candle(q)?;
+        let k_pool = crate::forward::kt_logits_to_candle(k_pool)?;
+        let v_pool = crate::forward::kt_logits_to_candle(v_pool)?;
+        let block_table = crate::forward::kt_logits_to_candle(block_table)?;
 
         let (batch, q_len, num_heads, _) = q.dims4()?;
         if batch != 1 || q_len != 1 {
@@ -651,281 +685,394 @@ impl BackendRuntime for MetalBackend {
         // Back to [1, 1, num_heads, head_dim].
         let out = out.transpose(1, 2)?.contiguous()?;
         debug_assert_eq!(out.dims(), &[1, 1, num_heads, head_dim]);
-        Ok(Some(out))
+        Ok(Some(crate::forward::candle_to_kt_activation(&out)?))
     }
 
     fn paged_kv_head_major_read(
         &self,
-        k_pool: &candle_core::Tensor,
-        v_pool: &candle_core::Tensor,
+        k_pool: &kiln_tensor::Tensor,
+        v_pool: &kiln_tensor::Tensor,
         start_slot: usize,
         seq_len: usize,
-    ) -> Result<Option<(candle_core::Tensor, candle_core::Tensor)>> {
-        if !metal_paged_kv_head_major_read_supports(k_pool, v_pool, start_slot, seq_len) {
+    ) -> Result<Option<(kiln_tensor::Tensor, kiln_tensor::Tensor)>> {
+        let k_pool = crate::forward::kt_logits_to_candle(k_pool)?;
+        let v_pool = crate::forward::kt_logits_to_candle(v_pool)?;
+        if !metal_paged_kv_head_major_read_supports(&k_pool, &v_pool, start_slot, seq_len) {
             return Ok(None);
         }
-        metal_paged_kv_head_major_read_bf16(k_pool, v_pool, start_slot, seq_len)
-            .map(Some)
-            .context("metal paged_kv_head_major_read failed")
+        let (k_out, v_out) =
+            metal_paged_kv_head_major_read_bf16(&k_pool, &v_pool, start_slot, seq_len)
+                .context("metal paged_kv_head_major_read failed")?;
+        Ok(Some((
+            crate::forward::candle_to_kt_activation(&k_out)?,
+            crate::forward::candle_to_kt_activation(&v_out)?,
+        )))
     }
 
     fn paged_kv_head_major_read_append_token_major(
         &self,
-        k_pool: &candle_core::Tensor,
-        v_pool: &candle_core::Tensor,
+        k_pool: &kiln_tensor::Tensor,
+        v_pool: &kiln_tensor::Tensor,
         start_slot: usize,
         prefix_len: usize,
-        k_tail: &candle_core::Tensor,
-        v_tail: &candle_core::Tensor,
-    ) -> Result<Option<(candle_core::Tensor, candle_core::Tensor)>> {
+        k_tail: &kiln_tensor::Tensor,
+        v_tail: &kiln_tensor::Tensor,
+    ) -> Result<Option<(kiln_tensor::Tensor, kiln_tensor::Tensor)>> {
+        let k_pool = crate::forward::kt_logits_to_candle(k_pool)?;
+        let v_pool = crate::forward::kt_logits_to_candle(v_pool)?;
+        let k_tail = crate::forward::kt_logits_to_candle(k_tail)?;
+        let v_tail = crate::forward::kt_logits_to_candle(v_tail)?;
         if !metal_paged_kv_head_major_read_append_token_major_supports(
-            k_pool, v_pool, start_slot, prefix_len, k_tail, v_tail,
+            &k_pool, &v_pool, start_slot, prefix_len, &k_tail, &v_tail,
         ) {
             return Ok(None);
         }
-        metal_paged_kv_head_major_read_append_token_major_bf16(
-            k_pool, v_pool, start_slot, prefix_len, k_tail, v_tail,
+        let (k_out, v_out) = metal_paged_kv_head_major_read_append_token_major_bf16(
+            &k_pool, &v_pool, start_slot, prefix_len, &k_tail, &v_tail,
         )
-        .map(Some)
-        .context("metal paged_kv_head_major_read_append_token_major failed")
+        .context("metal paged_kv_head_major_read_append_token_major failed")?;
+        Ok(Some((
+            crate::forward::candle_to_kt_activation(&k_out)?,
+            crate::forward::candle_to_kt_activation(&v_out)?,
+        )))
     }
 
     fn causal_conv1d_prefill(
         &self,
-        x: &candle_core::Tensor,
-        weight: &candle_core::Tensor,
-        conv_state: &mut candle_core::Tensor,
+        x: &kiln_tensor::Tensor,
+        weight: &kiln_tensor::Tensor,
+        conv_state: &mut kiln_tensor::Tensor,
         kernel_size: usize,
-    ) -> Result<Option<candle_core::Tensor>> {
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        let x = crate::forward::kt_logits_to_candle(x)?;
+        let weight = crate::forward::kt_logits_to_candle(weight)?;
+        // `&mut` arg: bridge to a mutable candle local, let the helper mutate it
+        // in place, then copy it back into the kt `conv_state` so the in-place
+        // contract survives the host round-trip (#1082 forward-flip).
+        let mut conv_state_c = crate::forward::kt_logits_to_candle(conv_state)?;
         if self.disable.conv1d_prefill
-            || !metal_conv1d_prefill_supports(x, weight, conv_state, kernel_size)
+            || !metal_conv1d_prefill_supports(&x, &weight, &conv_state_c, kernel_size)
         {
             return Ok(None);
         }
-        let out = metal_causal_conv1d_prefill_bf16_f32_k4(x, weight, conv_state, kernel_size)
+        let out = metal_causal_conv1d_prefill_bf16_f32_k4(&x, &weight, &mut conv_state_c, kernel_size)
             .context("metal causal_conv1d_prefill kernel failed")?;
-        Ok(Some(out))
+        *conv_state = crate::forward::candle_to_kt_activation(&conv_state_c)?;
+        Ok(Some(crate::forward::candle_to_kt_activation(&out)?))
     }
 
     fn causal_conv1d_update(
         &self,
-        x: &candle_core::Tensor,
-        weight: &candle_core::Tensor,
-        conv_state: &mut candle_core::Tensor,
+        x: &kiln_tensor::Tensor,
+        weight: &kiln_tensor::Tensor,
+        conv_state: &mut kiln_tensor::Tensor,
         kernel_size: usize,
-    ) -> Result<Option<candle_core::Tensor>> {
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        let x = crate::forward::kt_logits_to_candle(x)?;
+        let weight = crate::forward::kt_logits_to_candle(weight)?;
+        let mut conv_state_c = crate::forward::kt_logits_to_candle(conv_state)?;
         if self.disable.conv1d_update
-            || !metal_conv1d_update_supports(x, weight, conv_state, kernel_size)
+            || !metal_conv1d_update_supports(&x, &weight, &conv_state_c, kernel_size)
         {
             return Ok(None);
         }
-        let out = metal_causal_conv1d_update_bf16_f32_k4(x, weight, conv_state, kernel_size)
+        let out = metal_causal_conv1d_update_bf16_f32_k4(&x, &weight, &mut conv_state_c, kernel_size)
             .context("metal causal_conv1d_update kernel failed")?;
-        Ok(Some(out))
+        *conv_state = crate::forward::candle_to_kt_activation(&conv_state_c)?;
+        Ok(Some(crate::forward::candle_to_kt_activation(&out)?))
     }
 
     fn gdn_forward_substitution(
         &self,
-        a_strict: &candle_core::Tensor,
-        v_prime: &candle_core::Tensor,
-        beta: &candle_core::Tensor,
-    ) -> Result<Option<candle_core::Tensor>> {
+        a_strict: &kiln_tensor::Tensor,
+        v_prime: &kiln_tensor::Tensor,
+        beta: &kiln_tensor::Tensor,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        let a_strict = crate::forward::kt_logits_to_candle(a_strict)?;
+        let v_prime = crate::forward::kt_logits_to_candle(v_prime)?;
+        let beta = crate::forward::kt_logits_to_candle(beta)?;
         if self.disable.gdn_forward_substitution
-            || !metal_gdn_forward_substitution_supports(a_strict, v_prime, beta)
+            || !metal_gdn_forward_substitution_supports(&a_strict, &v_prime, &beta)
         {
             return Ok(None);
         }
         let out = match a_strict.dtype() {
-            candle_core::DType::BF16 => metal_gdn_forward_substitution_bf16(a_strict, v_prime, beta),
-            candle_core::DType::F32 => metal_gdn_forward_substitution_f32(a_strict, v_prime, beta),
+            candle_core::DType::BF16 => metal_gdn_forward_substitution_bf16(&a_strict, &v_prime, &beta),
+            candle_core::DType::F32 => metal_gdn_forward_substitution_f32(&a_strict, &v_prime, &beta),
             other => anyhow::bail!("unsupported metal gdn_forward_substitution dtype {other:?}"),
         }
         .context("metal gdn_forward_substitution kernel failed")?;
-        Ok(Some(out))
+        Ok(Some(crate::forward::candle_to_kt_activation(&out)?))
     }
 
     fn gdn_recurrent_step(
         &self,
-        q: &candle_core::Tensor,
-        k: &candle_core::Tensor,
-        v: &candle_core::Tensor,
-        beta: &candle_core::Tensor,
-        g: &candle_core::Tensor,
-        state: &mut candle_core::Tensor,
-    ) -> Result<Option<candle_core::Tensor>> {
-        if self.disable.gdn_recurrent || !metal_gdn_recurrent_supports(q, k, v, beta, g, state) {
+        q: &kiln_tensor::Tensor,
+        k: &kiln_tensor::Tensor,
+        v: &kiln_tensor::Tensor,
+        beta: &kiln_tensor::Tensor,
+        g: &kiln_tensor::Tensor,
+        state: &mut kiln_tensor::Tensor,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        let q = crate::forward::kt_logits_to_candle(q)?;
+        let k = crate::forward::kt_logits_to_candle(k)?;
+        let v = crate::forward::kt_logits_to_candle(v)?;
+        let beta = crate::forward::kt_logits_to_candle(beta)?;
+        let g = crate::forward::kt_logits_to_candle(g)?;
+        let mut state_c = crate::forward::kt_logits_to_candle(state)?;
+        if self.disable.gdn_recurrent
+            || !metal_gdn_recurrent_supports(&q, &k, &v, &beta, &g, &state_c)
+        {
             return Ok(None);
         }
-        let out = metal_gdn_recurrent_bf16(q, k, v, beta, g, state)
+        let out = metal_gdn_recurrent_bf16(&q, &k, &v, &beta, &g, &mut state_c)
             .context("metal gdn_recurrent_step kernel failed")?;
-        Ok(Some(out))
+        *state = crate::forward::candle_to_kt_activation(&state_c)?;
+        Ok(Some(crate::forward::candle_to_kt_activation(&out)?))
     }
 
     fn gdn_chunk_prep(
         &self,
-        g: &candle_core::Tensor,
-        v: &candle_core::Tensor,
-        kkt: &candle_core::Tensor,
-        qkt: &candle_core::Tensor,
-        ks_entry: &candle_core::Tensor,
-        q_s: &candle_core::Tensor,
-    ) -> Result<Option<(candle_core::Tensor, candle_core::Tensor, candle_core::Tensor, candle_core::Tensor, candle_core::Tensor, candle_core::Tensor)>> {
+        g: &kiln_tensor::Tensor,
+        v: &kiln_tensor::Tensor,
+        kkt: &kiln_tensor::Tensor,
+        qkt: &kiln_tensor::Tensor,
+        ks_entry: &kiln_tensor::Tensor,
+        q_s: &kiln_tensor::Tensor,
+    ) -> Result<Option<(kiln_tensor::Tensor, kiln_tensor::Tensor, kiln_tensor::Tensor, kiln_tensor::Tensor, kiln_tensor::Tensor, kiln_tensor::Tensor)>> {
+        let g = crate::forward::kt_logits_to_candle(g)?;
+        let v = crate::forward::kt_logits_to_candle(v)?;
+        let kkt = crate::forward::kt_logits_to_candle(kkt)?;
+        let qkt = crate::forward::kt_logits_to_candle(qkt)?;
+        let ks_entry = crate::forward::kt_logits_to_candle(ks_entry)?;
+        let q_s = crate::forward::kt_logits_to_candle(q_s)?;
         if self.disable.gdn_forward_substitution
-            || !metal_gdn_chunk_prep_supports(g, v, kkt, qkt, ks_entry, q_s)
+            || !metal_gdn_chunk_prep_supports(&g, &v, &kkt, &qkt, &ks_entry, &q_s)
         {
             return Ok(None);
         }
-        let out = metal_gdn_chunk_prep_bf16(g, v, kkt, qkt, ks_entry, q_s)
-            .context("metal gdn_chunk_prep kernel failed")?;
-        Ok(Some(out))
+        let (o0, o1, o2, o3, o4, o5) =
+            metal_gdn_chunk_prep_bf16(&g, &v, &kkt, &qkt, &ks_entry, &q_s)
+                .context("metal gdn_chunk_prep kernel failed")?;
+        Ok(Some((
+            crate::forward::candle_to_kt_activation(&o0)?,
+            crate::forward::candle_to_kt_activation(&o1)?,
+            crate::forward::candle_to_kt_activation(&o2)?,
+            crate::forward::candle_to_kt_activation(&o3)?,
+            crate::forward::candle_to_kt_activation(&o4)?,
+            crate::forward::candle_to_kt_activation(&o5)?,
+        )))
     }
 
     fn gdn_full_chunk_forward(
         &self,
-        g: &candle_core::Tensor,
-        v: &candle_core::Tensor,
-        kkt: &candle_core::Tensor,
-        qkt: &candle_core::Tensor,
-        ks_entry: &candle_core::Tensor,
-        q_s: &candle_core::Tensor,
-        beta: &candle_core::Tensor,
-        k_t: &candle_core::Tensor,
-        state: &mut candle_core::Tensor,
-    ) -> Result<Option<candle_core::Tensor>> {
+        g: &kiln_tensor::Tensor,
+        v: &kiln_tensor::Tensor,
+        kkt: &kiln_tensor::Tensor,
+        qkt: &kiln_tensor::Tensor,
+        ks_entry: &kiln_tensor::Tensor,
+        q_s: &kiln_tensor::Tensor,
+        beta: &kiln_tensor::Tensor,
+        k_t: &kiln_tensor::Tensor,
+        state: &mut kiln_tensor::Tensor,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        let g = crate::forward::kt_logits_to_candle(g)?;
+        let v = crate::forward::kt_logits_to_candle(v)?;
+        let kkt = crate::forward::kt_logits_to_candle(kkt)?;
+        let qkt = crate::forward::kt_logits_to_candle(qkt)?;
+        let ks_entry = crate::forward::kt_logits_to_candle(ks_entry)?;
+        let q_s = crate::forward::kt_logits_to_candle(q_s)?;
+        let beta = crate::forward::kt_logits_to_candle(beta)?;
+        let k_t = crate::forward::kt_logits_to_candle(k_t)?;
+        let mut state_c = crate::forward::kt_logits_to_candle(state)?;
         if self.disable.gdn_forward_substitution
             || !metal_gdn_full_chunk_forward_supports(
-                g, v, kkt, qkt, ks_entry, q_s, beta, k_t, state,
+                &g, &v, &kkt, &qkt, &ks_entry, &q_s, &beta, &k_t, &state_c,
             )
         {
             return Ok(None);
         }
-        let out =
-            metal_gdn_full_chunk_forward_bf16(g, v, kkt, qkt, ks_entry, q_s, beta, k_t, state)
-                .context("metal gdn_full_chunk_forward kernel failed")?;
-        Ok(Some(out))
+        let out = metal_gdn_full_chunk_forward_bf16(
+            &g, &v, &kkt, &qkt, &ks_entry, &q_s, &beta, &k_t, &mut state_c,
+        )
+        .context("metal gdn_full_chunk_forward kernel failed")?;
+        *state = crate::forward::candle_to_kt_activation(&state_c)?;
+        Ok(Some(crate::forward::candle_to_kt_activation(&out)?))
     }
 
     #[allow(clippy::too_many_arguments)]
     fn gdn_full_chunk_forward_head_last_into(
         &self,
-        g: &candle_core::Tensor,
-        v: &candle_core::Tensor,
-        kkt: &candle_core::Tensor,
-        qkt: &candle_core::Tensor,
-        ks_entry: &candle_core::Tensor,
-        q_s: &candle_core::Tensor,
-        beta: &candle_core::Tensor,
-        k_t: &candle_core::Tensor,
-        state: &mut candle_core::Tensor,
-        out: &candle_core::Tensor,
+        g: &kiln_tensor::Tensor,
+        v: &kiln_tensor::Tensor,
+        kkt: &kiln_tensor::Tensor,
+        qkt: &kiln_tensor::Tensor,
+        ks_entry: &kiln_tensor::Tensor,
+        q_s: &kiln_tensor::Tensor,
+        beta: &kiln_tensor::Tensor,
+        k_t: &kiln_tensor::Tensor,
+        state: &mut kiln_tensor::Tensor,
+        out: &kiln_tensor::Tensor,
         t_start: usize,
         seq_len: usize,
     ) -> Result<bool> {
+        let g = crate::forward::kt_logits_to_candle(g)?;
+        let v = crate::forward::kt_logits_to_candle(v)?;
+        let kkt = crate::forward::kt_logits_to_candle(kkt)?;
+        let qkt = crate::forward::kt_logits_to_candle(qkt)?;
+        let ks_entry = crate::forward::kt_logits_to_candle(ks_entry)?;
+        let q_s = crate::forward::kt_logits_to_candle(q_s)?;
+        let beta = crate::forward::kt_logits_to_candle(beta)?;
+        let k_t = crate::forward::kt_logits_to_candle(k_t)?;
+        let mut state_c = crate::forward::kt_logits_to_candle(state)?;
+        // `out` is a caller-owned output buffer written in place by the kernel.
+        // Bridged here as a candle local to satisfy the kt trait surface; see
+        // the report's note on the in-place write-back of this shared-ref arg.
+        let out_c = crate::forward::kt_logits_to_candle(out)?;
         if self.disable.gdn_forward_substitution
             || !metal_gdn_full_chunk_forward_head_last_supports(
-                g, v, kkt, qkt, ks_entry, q_s, beta, k_t, state, out, t_start, seq_len,
+                &g, &v, &kkt, &qkt, &ks_entry, &q_s, &beta, &k_t, &state_c, &out_c, t_start, seq_len,
             )
         {
             return Ok(false);
         }
         metal_gdn_full_chunk_forward_head_last_into_bf16(
-            g, v, kkt, qkt, ks_entry, q_s, beta, k_t, state, out, t_start, seq_len,
+            &g, &v, &kkt, &qkt, &ks_entry, &q_s, &beta, &k_t, &mut state_c, &out_c, t_start, seq_len,
         )
         .context("metal gdn_full_chunk_forward_head_last_into kernel failed")?;
+        *state = crate::forward::candle_to_kt_activation(&state_c)?;
         Ok(true)
     }
 
     fn gdn_recurrent_prefill_head_last(
         &self,
-        q: &candle_core::Tensor,
-        k: &candle_core::Tensor,
-        v: &candle_core::Tensor,
-        beta: &candle_core::Tensor,
-        g: &candle_core::Tensor,
-        state: &mut candle_core::Tensor,
-    ) -> Result<Option<candle_core::Tensor>> {
+        q: &kiln_tensor::Tensor,
+        k: &kiln_tensor::Tensor,
+        v: &kiln_tensor::Tensor,
+        beta: &kiln_tensor::Tensor,
+        g: &kiln_tensor::Tensor,
+        state: &mut kiln_tensor::Tensor,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        let q = crate::forward::kt_logits_to_candle(q)?;
+        let k = crate::forward::kt_logits_to_candle(k)?;
+        let v = crate::forward::kt_logits_to_candle(v)?;
+        let beta = crate::forward::kt_logits_to_candle(beta)?;
+        let g = crate::forward::kt_logits_to_candle(g)?;
+        let mut state_c = crate::forward::kt_logits_to_candle(state)?;
         if self.disable.gdn_recurrent
-            || !metal_gdn_recurrent_prefill_head_last_supports(q, k, v, beta, g, state)
+            || !metal_gdn_recurrent_prefill_head_last_supports(&q, &k, &v, &beta, &g, &state_c)
         {
             return Ok(None);
         }
-        let out = metal_gdn_recurrent_prefill_head_last_bf16(q, k, v, beta, g, state)
+        let out = metal_gdn_recurrent_prefill_head_last_bf16(&q, &k, &v, &beta, &g, &mut state_c)
             .context("metal gdn_recurrent_prefill_head_last kernel failed")?;
-        Ok(Some(out))
+        *state = crate::forward::candle_to_kt_activation(&state_c)?;
+        Ok(Some(crate::forward::candle_to_kt_activation(&out)?))
     }
 
     fn gdn_recurrent_prefill_native_head_last(
         &self,
-        q: &candle_core::Tensor,
-        k: &candle_core::Tensor,
-        v: &candle_core::Tensor,
-        beta: &candle_core::Tensor,
-        g: &candle_core::Tensor,
-        state: &mut candle_core::Tensor,
-    ) -> Result<Option<candle_core::Tensor>> {
+        q: &kiln_tensor::Tensor,
+        k: &kiln_tensor::Tensor,
+        v: &kiln_tensor::Tensor,
+        beta: &kiln_tensor::Tensor,
+        g: &kiln_tensor::Tensor,
+        state: &mut kiln_tensor::Tensor,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        let q = crate::forward::kt_logits_to_candle(q)?;
+        let k = crate::forward::kt_logits_to_candle(k)?;
+        let v = crate::forward::kt_logits_to_candle(v)?;
+        let beta = crate::forward::kt_logits_to_candle(beta)?;
+        let g = crate::forward::kt_logits_to_candle(g)?;
+        let mut state_c = crate::forward::kt_logits_to_candle(state)?;
         if self.disable.gdn_recurrent
-            || !metal_gdn_recurrent_prefill_native_head_last_supports(q, k, v, beta, g, state)
-        {
-            return Ok(None);
-        }
-        let out = metal_gdn_recurrent_prefill_native_head_last_bf16(q, k, v, beta, g, state)
-            .context("metal gdn_recurrent_prefill_native_head_last kernel failed")?;
-        Ok(Some(out))
-    }
-
-    fn gdn_in_proj_decode(
-        &self,
-        x: &candle_core::Tensor,
-        in_proj_qkv_t: &candle_core::Tensor,
-        in_proj_z_t: &candle_core::Tensor,
-        in_proj_a_t: &candle_core::Tensor,
-        in_proj_b_t: &candle_core::Tensor,
-    ) -> Result<Option<(candle_core::Tensor, candle_core::Tensor, candle_core::Tensor, candle_core::Tensor)>> {
-        if self.disable.gdn_in_proj
-            || !metal_gdn_in_proj_decode_supports(
-                x,
-                in_proj_qkv_t,
-                in_proj_z_t,
-                in_proj_a_t,
-                in_proj_b_t,
+            || !metal_gdn_recurrent_prefill_native_head_last_supports(
+                &q, &k, &v, &beta, &g, &state_c,
             )
         {
             return Ok(None);
         }
         let out =
-            metal_gdn_in_proj_decode_bf16(x, in_proj_qkv_t, in_proj_z_t, in_proj_a_t, in_proj_b_t)
-                .context("metal gdn_in_proj_decode kernel failed")?;
-        Ok(Some(out))
+            metal_gdn_recurrent_prefill_native_head_last_bf16(&q, &k, &v, &beta, &g, &mut state_c)
+                .context("metal gdn_recurrent_prefill_native_head_last kernel failed")?;
+        *state = crate::forward::candle_to_kt_activation(&state_c)?;
+        Ok(Some(crate::forward::candle_to_kt_activation(&out)?))
+    }
+
+    fn gdn_in_proj_decode(
+        &self,
+        x: &kiln_tensor::Tensor,
+        in_proj_qkv_t: &kiln_tensor::Tensor,
+        in_proj_z_t: &kiln_tensor::Tensor,
+        in_proj_a_t: &kiln_tensor::Tensor,
+        in_proj_b_t: &kiln_tensor::Tensor,
+    ) -> Result<Option<(kiln_tensor::Tensor, kiln_tensor::Tensor, kiln_tensor::Tensor, kiln_tensor::Tensor)>> {
+        let x = crate::forward::kt_logits_to_candle(x)?;
+        let in_proj_qkv_t = crate::forward::kt_logits_to_candle(in_proj_qkv_t)?;
+        let in_proj_z_t = crate::forward::kt_logits_to_candle(in_proj_z_t)?;
+        let in_proj_a_t = crate::forward::kt_logits_to_candle(in_proj_a_t)?;
+        let in_proj_b_t = crate::forward::kt_logits_to_candle(in_proj_b_t)?;
+        if self.disable.gdn_in_proj
+            || !metal_gdn_in_proj_decode_supports(
+                &x,
+                &in_proj_qkv_t,
+                &in_proj_z_t,
+                &in_proj_a_t,
+                &in_proj_b_t,
+            )
+        {
+            return Ok(None);
+        }
+        let (o0, o1, o2, o3) = metal_gdn_in_proj_decode_bf16(
+            &x, &in_proj_qkv_t, &in_proj_z_t, &in_proj_a_t, &in_proj_b_t,
+        )
+        .context("metal gdn_in_proj_decode kernel failed")?;
+        Ok(Some((
+            crate::forward::candle_to_kt_activation(&o0)?,
+            crate::forward::candle_to_kt_activation(&o1)?,
+            crate::forward::candle_to_kt_activation(&o2)?,
+            crate::forward::candle_to_kt_activation(&o3)?,
+        )))
     }
 
     fn gdn_gates(
         &self,
-        a: &candle_core::Tensor,
-        b: &candle_core::Tensor,
-        a_log: &candle_core::Tensor,
-        dt_bias: &candle_core::Tensor,
-    ) -> Result<Option<(candle_core::Tensor, candle_core::Tensor)>> {
-        if self.disable.gdn_gates || !metal_gdn_gates_supports(a, b, a_log, dt_bias) {
+        a: &kiln_tensor::Tensor,
+        b: &kiln_tensor::Tensor,
+        a_log: &kiln_tensor::Tensor,
+        dt_bias: &kiln_tensor::Tensor,
+    ) -> Result<Option<(kiln_tensor::Tensor, kiln_tensor::Tensor)>> {
+        let a = crate::forward::kt_logits_to_candle(a)?;
+        let b = crate::forward::kt_logits_to_candle(b)?;
+        let a_log = crate::forward::kt_logits_to_candle(a_log)?;
+        let dt_bias = crate::forward::kt_logits_to_candle(dt_bias)?;
+        if self.disable.gdn_gates || !metal_gdn_gates_supports(&a, &b, &a_log, &dt_bias) {
             return Ok(None);
         }
-        let out =
-            metal_gdn_gates_bf16(a, b, a_log, dt_bias).context("metal gdn_gates kernel failed")?;
-        Ok(Some(out))
+        let (beta, g) = metal_gdn_gates_bf16(&a, &b, &a_log, &dt_bias)
+            .context("metal gdn_gates kernel failed")?;
+        Ok(Some((
+            crate::forward::candle_to_kt_activation(&beta)?,
+            crate::forward::candle_to_kt_activation(&g)?,
+        )))
     }
 
     fn gdn_gated_rms_norm(
         &self,
-        x: &candle_core::Tensor,
-        z: &candle_core::Tensor,
-        weight: &candle_core::Tensor,
+        x: &kiln_tensor::Tensor,
+        z: &kiln_tensor::Tensor,
+        weight: &kiln_tensor::Tensor,
         eps: f64,
-    ) -> Result<Option<candle_core::Tensor>> {
-        if self.disable.gated_rms_norm || !metal_gated_rms_norm_supports(x, z, weight) {
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        let x = crate::forward::kt_logits_to_candle(x)?;
+        let z = crate::forward::kt_logits_to_candle(z)?;
+        let weight = crate::forward::kt_logits_to_candle(weight)?;
+        if self.disable.gated_rms_norm || !metal_gated_rms_norm_supports(&x, &z, &weight) {
             return Ok(None);
         }
-        let out = metal_gated_rms_norm_bf16(x, z, weight, eps as f32)
+        let out = metal_gated_rms_norm_bf16(&x, &z, &weight, eps as f32)
             .context("metal gated_rms_norm kernel failed")?;
-        Ok(Some(out))
+        Ok(Some(crate::forward::candle_to_kt_activation(&out)?))
     }
 }
 

@@ -1894,29 +1894,38 @@ impl BackendRuntime for VulkanBackend {
 
     fn flash_attn_prefill(
         &self,
-        q: &candle_core::Tensor,
-        k: &candle_core::Tensor,
-        v: &candle_core::Tensor,
+        q: &kiln_tensor::Tensor,
+        k: &kiln_tensor::Tensor,
+        v: &kiln_tensor::Tensor,
         softmax_scale: f32,
         causal: bool,
-    ) -> Result<Option<candle_core::Tensor>> {
-        if q.dtype() != candle_core::DType::BF16 || !self.has_vulkan() {
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        // kt guard read directly off the kt args (before the bridge).
+        if q.dtype() != kiln_tensor::DType::BF16 || !self.has_vulkan() {
             return Ok(None);
         }
-        self.flash_attn_prefill_vulkan(q, k, v, softmax_scale, causal)
+        // Bridge kt args -> candle locals (CPU host round-trip; the Vulkan
+        // backend's model is CPU-resident on the candle surface).
+        let q_c = crate::forward::kt_logits_to_candle(q)?;
+        let k_c = crate::forward::kt_logits_to_candle(k)?;
+        let v_c = crate::forward::kt_logits_to_candle(v)?;
+        match self.flash_attn_prefill_vulkan(&q_c, &k_c, &v_c, softmax_scale, causal)? {
+            Some(out) => Ok(Some(crate::forward::candle_to_kt_activation(&out)?)),
+            None => Ok(None),
+        }
     }
 
     fn flash_attn_paged_decode(
         &self,
-        _q: &candle_core::Tensor,
-        _k_pool: &candle_core::Tensor,
-        _v_pool: &candle_core::Tensor,
-        _block_table: &candle_core::Tensor,
+        _q: &kiln_tensor::Tensor,
+        _k_pool: &kiln_tensor::Tensor,
+        _v_pool: &kiln_tensor::Tensor,
+        _block_table: &kiln_tensor::Tensor,
         _total_seqlen_k: usize,
         _page_block_size: usize,
         _softmax_scale: f32,
         _causal: bool,
-    ) -> Result<Option<candle_core::Tensor>> {
+    ) -> Result<Option<kiln_tensor::Tensor>> {
         if !self.has_vulkan() {
             return Ok(None);
         }
@@ -1926,35 +1935,49 @@ impl BackendRuntime for VulkanBackend {
 
     fn flash_attn_paged_decode_contiguous_batch_dyn_seqlen(
         &self,
-        q: &candle_core::Tensor,
-        k_pool: &candle_core::Tensor,
-        v_pool: &candle_core::Tensor,
-        block_table: &candle_core::Tensor,
-        seqused_k: &candle_core::Tensor,
+        q: &kiln_tensor::Tensor,
+        k_pool: &kiln_tensor::Tensor,
+        v_pool: &kiln_tensor::Tensor,
+        block_table: &kiln_tensor::Tensor,
+        seqused_k: &kiln_tensor::Tensor,
         max_seqlen_k: usize,
         page_block_size: usize,
         softmax_scale: f32,
         causal: bool,
-    ) -> Result<Option<candle_core::Tensor>> {
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        // kt dtype/device guards read directly off the kt args before the
+        // bridge. (Mirrors the candle guards below, lifted to kt types.)
         if !self.has_vulkan()
             || !self.paged_attn_decode_batch_enabled
-            || q.dtype() != candle_core::DType::F32
-            || k_pool.dtype() != candle_core::DType::F32
-            || v_pool.dtype() != candle_core::DType::F32
+            || q.dtype() != kiln_tensor::DType::F32
+            || k_pool.dtype() != kiln_tensor::DType::F32
+            || v_pool.dtype() != kiln_tensor::DType::F32
         {
             return Ok(None);
         }
         if !causal {
             return Ok(None);
         }
-        if !matches!(q.device(), candle_core::Device::Cpu)
-            || !matches!(k_pool.device(), candle_core::Device::Cpu)
-            || !matches!(v_pool.device(), candle_core::Device::Cpu)
-            || !matches!(block_table.device(), candle_core::Device::Cpu)
-            || !matches!(seqused_k.device(), candle_core::Device::Cpu)
+        if !matches!(q.device(), kiln_tensor::Device::Cpu)
+            || !matches!(k_pool.device(), kiln_tensor::Device::Cpu)
+            || !matches!(v_pool.device(), kiln_tensor::Device::Cpu)
+            || !matches!(block_table.device(), kiln_tensor::Device::Cpu)
+            || !matches!(seqused_k.device(), kiln_tensor::Device::Cpu)
         {
             return Ok(None);
         }
+        // Bridge kt args -> candle locals, then re-borrow under the same
+        // names so the original candle body below is unchanged.
+        let q_owned = crate::forward::kt_logits_to_candle(q)?;
+        let k_pool_owned = crate::forward::kt_logits_to_candle(k_pool)?;
+        let v_pool_owned = crate::forward::kt_logits_to_candle(v_pool)?;
+        let block_table_owned = crate::forward::kt_logits_to_candle(block_table)?;
+        let seqused_k_owned = crate::forward::kt_logits_to_candle(seqused_k)?;
+        let q = &q_owned;
+        let k_pool = &k_pool_owned;
+        let v_pool = &v_pool_owned;
+        let block_table = &block_table_owned;
+        let seqused_k = &seqused_k_owned;
 
         let Ok((batch, q_len, num_heads, head_dim)) = q.dims4() else {
             return Ok(None);
@@ -2064,7 +2087,7 @@ impl BackendRuntime for VulkanBackend {
                 &[batch, 1, num_heads, head_dim],
                 candle_core::DType::F32,
             )?;
-            return Ok(Some(out));
+            return Ok(Some(crate::forward::candle_to_kt_activation(&out)?));
         }
 
         // Single-row fallback (batch == 1) keeps the original compacted path
@@ -2120,28 +2143,41 @@ impl BackendRuntime for VulkanBackend {
             &[batch, 1, num_heads, head_dim],
             candle_core::DType::F32,
         )?;
-        Ok(Some(out))
+        Ok(Some(crate::forward::candle_to_kt_activation(&out)?))
     }
 
     fn gdn_in_proj_decode(
         &self,
-        x: &candle_core::Tensor,
-        in_proj_qkv_t: &candle_core::Tensor,
-        in_proj_z_t: &candle_core::Tensor,
-        in_proj_a_t: &candle_core::Tensor,
-        in_proj_b_t: &candle_core::Tensor,
-    ) -> Result<Option<(candle_core::Tensor, candle_core::Tensor, candle_core::Tensor, candle_core::Tensor)>> {
-        if !self.has_vulkan() || !self.gdn_enabled || x.dtype() != candle_core::DType::F32 {
+        x: &kiln_tensor::Tensor,
+        in_proj_qkv_t: &kiln_tensor::Tensor,
+        in_proj_z_t: &kiln_tensor::Tensor,
+        in_proj_a_t: &kiln_tensor::Tensor,
+        in_proj_b_t: &kiln_tensor::Tensor,
+    ) -> Result<Option<(kiln_tensor::Tensor, kiln_tensor::Tensor, kiln_tensor::Tensor, kiln_tensor::Tensor)>> {
+        // kt guards read directly off the kt args before the bridge.
+        if !self.has_vulkan() || !self.gdn_enabled || x.dtype() != kiln_tensor::DType::F32 {
             return Ok(None);
         }
-        if !matches!(x.device(), candle_core::Device::Cpu)
-            || !matches!(in_proj_qkv_t.device(), candle_core::Device::Cpu)
-            || !matches!(in_proj_z_t.device(), candle_core::Device::Cpu)
-            || !matches!(in_proj_a_t.device(), candle_core::Device::Cpu)
-            || !matches!(in_proj_b_t.device(), candle_core::Device::Cpu)
+        if !matches!(x.device(), kiln_tensor::Device::Cpu)
+            || !matches!(in_proj_qkv_t.device(), kiln_tensor::Device::Cpu)
+            || !matches!(in_proj_z_t.device(), kiln_tensor::Device::Cpu)
+            || !matches!(in_proj_a_t.device(), kiln_tensor::Device::Cpu)
+            || !matches!(in_proj_b_t.device(), kiln_tensor::Device::Cpu)
         {
             return Ok(None);
         }
+        // Bridge kt args -> candle locals, re-borrow under the same names so
+        // the original candle body below is unchanged.
+        let x_owned = crate::forward::kt_logits_to_candle(x)?;
+        let in_proj_qkv_t_owned = crate::forward::kt_logits_to_candle(in_proj_qkv_t)?;
+        let in_proj_z_t_owned = crate::forward::kt_logits_to_candle(in_proj_z_t)?;
+        let in_proj_a_t_owned = crate::forward::kt_logits_to_candle(in_proj_a_t)?;
+        let in_proj_b_t_owned = crate::forward::kt_logits_to_candle(in_proj_b_t)?;
+        let x = &x_owned;
+        let in_proj_qkv_t = &in_proj_qkv_t_owned;
+        let in_proj_z_t = &in_proj_z_t_owned;
+        let in_proj_a_t = &in_proj_a_t_owned;
+        let in_proj_b_t = &in_proj_b_t_owned;
 
         let Ok((batch, seq_len, hidden)) = x.dims3() else {
             return Ok(None);
@@ -2281,39 +2317,68 @@ impl BackendRuntime for VulkanBackend {
                 b.reshape((batch, seq_len, b_dim))?,
             )
         };
-        Ok(Some(result))
+        Ok(Some((
+            crate::forward::candle_to_kt_activation(&result.0)?,
+            crate::forward::candle_to_kt_activation(&result.1)?,
+            crate::forward::candle_to_kt_activation(&result.2)?,
+            crate::forward::candle_to_kt_activation(&result.3)?,
+        )))
     }
 
     fn gdn_decode_gates_recurrent_rmsnorm(
         &self,
-        q: &candle_core::Tensor,
-        k: &candle_core::Tensor,
-        v: &candle_core::Tensor,
-        a: &candle_core::Tensor,
-        b: &candle_core::Tensor,
-        a_log: &candle_core::Tensor,
-        dt_bias: &candle_core::Tensor,
-        state: &mut candle_core::Tensor,
-        z: &candle_core::Tensor,
-        weight: &candle_core::Tensor,
+        q: &kiln_tensor::Tensor,
+        k: &kiln_tensor::Tensor,
+        v: &kiln_tensor::Tensor,
+        a: &kiln_tensor::Tensor,
+        b: &kiln_tensor::Tensor,
+        a_log: &kiln_tensor::Tensor,
+        dt_bias: &kiln_tensor::Tensor,
+        state_kt: &mut kiln_tensor::Tensor,
+        z: &kiln_tensor::Tensor,
+        weight: &kiln_tensor::Tensor,
         eps: f64,
-    ) -> Result<Option<candle_core::Tensor>> {
-        if !self.has_vulkan() || !self.gdn_enabled || q.dtype() != candle_core::DType::F32 {
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        // kt guards read directly off the kt args before the bridge.
+        if !self.has_vulkan() || !self.gdn_enabled || q.dtype() != kiln_tensor::DType::F32 {
             return Ok(None);
         }
-        if !matches!(q.device(), candle_core::Device::Cpu)
-            || !matches!(k.device(), candle_core::Device::Cpu)
-            || !matches!(v.device(), candle_core::Device::Cpu)
-            || !matches!(a.device(), candle_core::Device::Cpu)
-            || !matches!(b.device(), candle_core::Device::Cpu)
-            || !matches!(a_log.device(), candle_core::Device::Cpu)
-            || !matches!(dt_bias.device(), candle_core::Device::Cpu)
-            || !matches!(state.device(), candle_core::Device::Cpu)
-            || !matches!(z.device(), candle_core::Device::Cpu)
-            || !matches!(weight.device(), candle_core::Device::Cpu)
+        if !matches!(q.device(), kiln_tensor::Device::Cpu)
+            || !matches!(k.device(), kiln_tensor::Device::Cpu)
+            || !matches!(v.device(), kiln_tensor::Device::Cpu)
+            || !matches!(a.device(), kiln_tensor::Device::Cpu)
+            || !matches!(b.device(), kiln_tensor::Device::Cpu)
+            || !matches!(a_log.device(), kiln_tensor::Device::Cpu)
+            || !matches!(dt_bias.device(), kiln_tensor::Device::Cpu)
+            || !matches!(state_kt.device(), kiln_tensor::Device::Cpu)
+            || !matches!(z.device(), kiln_tensor::Device::Cpu)
+            || !matches!(weight.device(), kiln_tensor::Device::Cpu)
         {
             return Ok(None);
         }
+        // Bridge kt args -> candle locals. `state` is the candle mirror of the
+        // kt `state_kt`; mutations to it are pushed back to the kt arg at each
+        // return that may have updated it.
+        let q_owned = crate::forward::kt_logits_to_candle(q)?;
+        let k_owned = crate::forward::kt_logits_to_candle(k)?;
+        let v_owned = crate::forward::kt_logits_to_candle(v)?;
+        let a_owned = crate::forward::kt_logits_to_candle(a)?;
+        let b_owned = crate::forward::kt_logits_to_candle(b)?;
+        let a_log_owned = crate::forward::kt_logits_to_candle(a_log)?;
+        let dt_bias_owned = crate::forward::kt_logits_to_candle(dt_bias)?;
+        let z_owned = crate::forward::kt_logits_to_candle(z)?;
+        let weight_owned = crate::forward::kt_logits_to_candle(weight)?;
+        let mut state_c = crate::forward::kt_logits_to_candle(state_kt)?;
+        let q = &q_owned;
+        let k = &k_owned;
+        let v = &v_owned;
+        let a = &a_owned;
+        let b = &b_owned;
+        let a_log = &a_log_owned;
+        let dt_bias = &dt_bias_owned;
+        let z = &z_owned;
+        let weight = &weight_owned;
+        let state: &mut candle_core::Tensor = &mut state_c;
         let Ok((batch, seq_len, nv, dk)) = q.dims4() else {
             return Ok(None);
         };
@@ -2409,7 +2474,9 @@ impl BackendRuntime for VulkanBackend {
             RECURRENT_STATE_RESIDENT_CACHE.with(|cache| {
                 cache.borrow_mut().insert(state_id, resident_state);
             });
-            return Ok(Some(out));
+            // Push the (possibly mutated) candle state mirror back to the kt arg.
+            *state_kt = crate::forward::candle_to_kt_activation(state)?;
+            return Ok(Some(crate::forward::candle_to_kt_activation(&out)?));
         }
         let (batch, _, nv, dk) = q.dims4()?;
         let dv = v.dims4()?.3;
@@ -2447,7 +2514,9 @@ impl BackendRuntime for VulkanBackend {
                 )?;
             }
         }
-        Ok(Some(out))
+        // Push the (possibly mutated) candle state mirror back to the kt arg.
+        *state_kt = crate::forward::candle_to_kt_activation(state)?;
+        Ok(Some(crate::forward::candle_to_kt_activation(&out)?))
     }
 
     fn linear_decode(&self, x: &candle_core::Tensor, weight_t: &candle_core::Tensor) -> Result<Option<candle_core::Tensor>> {
@@ -2773,13 +2842,20 @@ impl BackendRuntime for VulkanBackend {
         self.has_vulkan() && self.linear_decode_enabled
     }
 
-    fn linear_decode_argmax(&self, x: &candle_core::Tensor, weight_t: &candle_core::Tensor) -> Result<Option<u32>> {
-        if !self.has_vulkan() || !self.linear_decode_enabled || x.dtype() != candle_core::DType::F32 {
+    fn linear_decode_argmax(&self, x: &kiln_tensor::Tensor, weight_t: &kiln_tensor::Tensor) -> Result<Option<u32>> {
+        // kt guards read directly off the kt args before the bridge.
+        if !self.has_vulkan() || !self.linear_decode_enabled || x.dtype() != kiln_tensor::DType::F32 {
             return Ok(None);
         }
-        if !matches!(x.device(), candle_core::Device::Cpu) || !matches!(weight_t.device(), candle_core::Device::Cpu) {
+        if !matches!(x.device(), kiln_tensor::Device::Cpu) || !matches!(weight_t.device(), kiln_tensor::Device::Cpu) {
             return Ok(None);
         }
+        // Bridge kt args -> candle locals; re-borrow under the same names so
+        // the candle body below is unchanged. Non-tensor (u32) return: no bridge.
+        let x_owned = crate::forward::kt_logits_to_candle(x)?;
+        let weight_t_owned = crate::forward::kt_logits_to_candle(weight_t)?;
+        let x = &x_owned;
+        let weight_t = &weight_t_owned;
 
         let Ok((batch, seq_len, hidden)) = x.dims3() else {
             return Ok(None);
@@ -2837,8 +2913,8 @@ impl BackendRuntime for VulkanBackend {
 
     fn linear_decode_sample(
         &self,
-        x: &candle_core::Tensor,
-        weight_t: &candle_core::Tensor,
+        x: &kiln_tensor::Tensor,
+        weight_t: &kiln_tensor::Tensor,
         history_indices: &[u32],
         history_counts: &[u32],
         repetition_penalty: f32,
@@ -2850,12 +2926,19 @@ impl BackendRuntime for VulkanBackend {
         min_p: f32,
         seed: u64,
     ) -> Result<Option<u32>> {
-        if !self.supports_linear_decode_sample(top_k) || x.dtype() != candle_core::DType::F32 {
+        // kt guards read directly off the kt args before the bridge.
+        if !self.supports_linear_decode_sample(top_k) || x.dtype() != kiln_tensor::DType::F32 {
             return Ok(None);
         }
-        if !matches!(x.device(), candle_core::Device::Cpu) || !matches!(weight_t.device(), candle_core::Device::Cpu) {
+        if !matches!(x.device(), kiln_tensor::Device::Cpu) || !matches!(weight_t.device(), kiln_tensor::Device::Cpu) {
             return Ok(None);
         }
+        // Bridge kt args -> candle locals; re-borrow under the same names.
+        // Non-tensor (u32) return: no bridge.
+        let x_owned = crate::forward::kt_logits_to_candle(x)?;
+        let weight_t_owned = crate::forward::kt_logits_to_candle(weight_t)?;
+        let x = &x_owned;
+        let weight_t = &weight_t_owned;
         let Ok((batch, seq_len, hidden)) = x.dims3() else {
             return Ok(None);
         };
@@ -2904,19 +2987,26 @@ impl BackendRuntime for VulkanBackend {
 
     fn linear_decode_argmax_batch(
         &self,
-        x: &candle_core::Tensor,
-        weight_t: &candle_core::Tensor,
+        x: &kiln_tensor::Tensor,
+        weight_t: &kiln_tensor::Tensor,
     ) -> Result<Option<Vec<u32>>> {
+        // kt guards read directly off the kt args before the bridge.
         if !self.has_vulkan()
             || !self.linear_decode_enabled
             || !self.linear_argmax_batch_enabled
-            || x.dtype() != candle_core::DType::F32
+            || x.dtype() != kiln_tensor::DType::F32
         {
             return Ok(None);
         }
-        if !matches!(x.device(), candle_core::Device::Cpu) || !matches!(weight_t.device(), candle_core::Device::Cpu) {
+        if !matches!(x.device(), kiln_tensor::Device::Cpu) || !matches!(weight_t.device(), kiln_tensor::Device::Cpu) {
             return Ok(None);
         }
+        // Bridge kt args -> candle locals; re-borrow under the same names.
+        // Non-tensor (Vec<u32>) return: no bridge.
+        let x_owned = crate::forward::kt_logits_to_candle(x)?;
+        let weight_t_owned = crate::forward::kt_logits_to_candle(weight_t)?;
+        let x = &x_owned;
+        let weight_t = &weight_t_owned;
 
         let Ok((batch, seq_len, hidden)) = x.dims3() else {
             return Ok(None);
@@ -3222,21 +3312,32 @@ impl BackendRuntime for VulkanBackend {
 
     fn full_attn_qkv_decode(
         &self,
-        x: &candle_core::Tensor,
-        q_weight_t: &candle_core::Tensor,
-        k_weight_t: &candle_core::Tensor,
-        v_weight_t: &candle_core::Tensor,
-    ) -> Result<Option<(candle_core::Tensor, candle_core::Tensor, candle_core::Tensor)>> {
-        if !self.has_vulkan() || !self.full_attn_qkv_enabled || x.dtype() != candle_core::DType::F32 {
+        x: &kiln_tensor::Tensor,
+        q_weight_t: &kiln_tensor::Tensor,
+        k_weight_t: &kiln_tensor::Tensor,
+        v_weight_t: &kiln_tensor::Tensor,
+    ) -> Result<Option<(kiln_tensor::Tensor, kiln_tensor::Tensor, kiln_tensor::Tensor)>> {
+        // kt guards read directly off the kt args before the bridge.
+        if !self.has_vulkan() || !self.full_attn_qkv_enabled || x.dtype() != kiln_tensor::DType::F32 {
             return Ok(None);
         }
-        if !matches!(x.device(), candle_core::Device::Cpu)
-            || !matches!(q_weight_t.device(), candle_core::Device::Cpu)
-            || !matches!(k_weight_t.device(), candle_core::Device::Cpu)
-            || !matches!(v_weight_t.device(), candle_core::Device::Cpu)
+        if !matches!(x.device(), kiln_tensor::Device::Cpu)
+            || !matches!(q_weight_t.device(), kiln_tensor::Device::Cpu)
+            || !matches!(k_weight_t.device(), kiln_tensor::Device::Cpu)
+            || !matches!(v_weight_t.device(), kiln_tensor::Device::Cpu)
         {
             return Ok(None);
         }
+        // Bridge kt args -> candle locals; re-borrow under the same names so
+        // the candle body below is unchanged.
+        let x_owned = crate::forward::kt_logits_to_candle(x)?;
+        let q_weight_t_owned = crate::forward::kt_logits_to_candle(q_weight_t)?;
+        let k_weight_t_owned = crate::forward::kt_logits_to_candle(k_weight_t)?;
+        let v_weight_t_owned = crate::forward::kt_logits_to_candle(v_weight_t)?;
+        let x = &x_owned;
+        let q_weight_t = &q_weight_t_owned;
+        let k_weight_t = &k_weight_t_owned;
+        let v_weight_t = &v_weight_t_owned;
 
         let Ok((batch, seq_len, hidden)) = x.dims3() else {
             return Ok(None);
@@ -3355,24 +3456,37 @@ impl BackendRuntime for VulkanBackend {
             )?;
             (q, k, v)
         };
-        Ok(Some(out))
+        Ok(Some((
+            crate::forward::candle_to_kt_activation(&out.0)?,
+            crate::forward::candle_to_kt_activation(&out.1)?,
+            crate::forward::candle_to_kt_activation(&out.2)?,
+        )))
     }
 
     fn mlp_gate_up_decode(
         &self,
-        x: &candle_core::Tensor,
-        gate_weight_t: &candle_core::Tensor,
-        up_weight_t: &candle_core::Tensor,
-    ) -> Result<Option<candle_core::Tensor>> {
-        if !self.has_vulkan() || !self.mlp_gate_up_enabled || x.dtype() != candle_core::DType::F32 {
+        x: &kiln_tensor::Tensor,
+        gate_weight_t: &kiln_tensor::Tensor,
+        up_weight_t: &kiln_tensor::Tensor,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        // kt guards read directly off the kt args before the bridge.
+        if !self.has_vulkan() || !self.mlp_gate_up_enabled || x.dtype() != kiln_tensor::DType::F32 {
             return Ok(None);
         }
-        if !matches!(x.device(), candle_core::Device::Cpu)
-            || !matches!(gate_weight_t.device(), candle_core::Device::Cpu)
-            || !matches!(up_weight_t.device(), candle_core::Device::Cpu)
+        if !matches!(x.device(), kiln_tensor::Device::Cpu)
+            || !matches!(gate_weight_t.device(), kiln_tensor::Device::Cpu)
+            || !matches!(up_weight_t.device(), kiln_tensor::Device::Cpu)
         {
             return Ok(None);
         }
+        // Bridge kt args -> candle locals; re-borrow under the same names so
+        // the candle body below is unchanged.
+        let x_owned = crate::forward::kt_logits_to_candle(x)?;
+        let gate_weight_t_owned = crate::forward::kt_logits_to_candle(gate_weight_t)?;
+        let up_weight_t_owned = crate::forward::kt_logits_to_candle(up_weight_t)?;
+        let x = &x_owned;
+        let gate_weight_t = &gate_weight_t_owned;
+        let up_weight_t = &up_weight_t_owned;
 
         let Ok((batch, seq_len, hidden)) = x.dims3() else {
             return Ok(None);
@@ -3420,26 +3534,37 @@ impl BackendRuntime for VulkanBackend {
         } else {
             out.reshape((batch, seq_len, intermediate))?
         };
-        Ok(Some(out))
+        Ok(Some(crate::forward::candle_to_kt_activation(&out)?))
     }
 
     fn mlp_decode(
         &self,
-        x: &candle_core::Tensor,
-        gate_weight_t: &candle_core::Tensor,
-        up_weight_t: &candle_core::Tensor,
-        down_weight_t: &candle_core::Tensor,
-    ) -> Result<Option<candle_core::Tensor>> {
-        if !self.has_vulkan() || !self.mlp_decode_enabled || x.dtype() != candle_core::DType::F32 {
+        x: &kiln_tensor::Tensor,
+        gate_weight_t: &kiln_tensor::Tensor,
+        up_weight_t: &kiln_tensor::Tensor,
+        down_weight_t: &kiln_tensor::Tensor,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        // kt guards read directly off the kt args before the bridge.
+        if !self.has_vulkan() || !self.mlp_decode_enabled || x.dtype() != kiln_tensor::DType::F32 {
             return Ok(None);
         }
-        if !matches!(x.device(), candle_core::Device::Cpu)
-            || !matches!(gate_weight_t.device(), candle_core::Device::Cpu)
-            || !matches!(up_weight_t.device(), candle_core::Device::Cpu)
-            || !matches!(down_weight_t.device(), candle_core::Device::Cpu)
+        if !matches!(x.device(), kiln_tensor::Device::Cpu)
+            || !matches!(gate_weight_t.device(), kiln_tensor::Device::Cpu)
+            || !matches!(up_weight_t.device(), kiln_tensor::Device::Cpu)
+            || !matches!(down_weight_t.device(), kiln_tensor::Device::Cpu)
         {
             return Ok(None);
         }
+        // Bridge kt args -> candle locals; re-borrow under the same names so
+        // the candle body below is unchanged.
+        let x_owned = crate::forward::kt_logits_to_candle(x)?;
+        let gate_weight_t_owned = crate::forward::kt_logits_to_candle(gate_weight_t)?;
+        let up_weight_t_owned = crate::forward::kt_logits_to_candle(up_weight_t)?;
+        let down_weight_t_owned = crate::forward::kt_logits_to_candle(down_weight_t)?;
+        let x = &x_owned;
+        let gate_weight_t = &gate_weight_t_owned;
+        let up_weight_t = &up_weight_t_owned;
+        let down_weight_t = &down_weight_t_owned;
 
         let Ok((batch, seq_len, hidden)) = x.dims3() else {
             return Ok(None);
@@ -3546,21 +3671,30 @@ impl BackendRuntime for VulkanBackend {
         } else {
             out.reshape((batch, seq_len, out_dim))?
         };
-        Ok(Some(out))
+        Ok(Some(crate::forward::candle_to_kt_activation(&out)?))
     }
 
     fn gdn_forward_substitution(
         &self,
-        a_strict: &candle_core::Tensor,
-        v_prime: &candle_core::Tensor,
-        beta: &candle_core::Tensor,
-    ) -> Result<Option<candle_core::Tensor>> {
+        a_strict: &kiln_tensor::Tensor,
+        v_prime: &kiln_tensor::Tensor,
+        beta: &kiln_tensor::Tensor,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        // kt guards read directly off the kt args before the bridge.
         if !self.has_vulkan() || !self.gdn_enabled {
             return Ok(None);
         }
-        if a_strict.dtype() != candle_core::DType::BF16 {
+        if a_strict.dtype() != kiln_tensor::DType::BF16 {
             return Ok(None);
         }
+        // Bridge kt args -> candle locals; re-borrow under the same names so
+        // the candle body below is unchanged.
+        let a_strict_owned = crate::forward::kt_logits_to_candle(a_strict)?;
+        let v_prime_owned = crate::forward::kt_logits_to_candle(v_prime)?;
+        let beta_owned = crate::forward::kt_logits_to_candle(beta)?;
+        let a_strict = &a_strict_owned;
+        let v_prime = &v_prime_owned;
+        let beta = &beta_owned;
         let vk_device = self
             .vulkan_device
             .as_ref()
@@ -3587,33 +3721,48 @@ impl BackendRuntime for VulkanBackend {
             &[batch, heads, chunk, dv],
             candle_core::DType::F32,
         )?;
-        Ok(Some(out))
+        Ok(Some(crate::forward::candle_to_kt_activation(&out)?))
     }
 
     fn gdn_recurrent_prefill_native_head_last(
         &self,
-        q: &candle_core::Tensor,
-        k: &candle_core::Tensor,
-        v: &candle_core::Tensor,
-        beta: &candle_core::Tensor,
-        g: &candle_core::Tensor,
-        state: &mut candle_core::Tensor,
-    ) -> Result<Option<candle_core::Tensor>> {
+        q: &kiln_tensor::Tensor,
+        k: &kiln_tensor::Tensor,
+        v: &kiln_tensor::Tensor,
+        beta: &kiln_tensor::Tensor,
+        g: &kiln_tensor::Tensor,
+        state_kt: &mut kiln_tensor::Tensor,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        // kt guards read directly off the kt args before the bridge.
         if !self.has_vulkan()
             || !self.gdn_recurrent_unexpanded_qk_enabled
-            || !matches!(q.dtype(), candle_core::DType::BF16 | candle_core::DType::F32)
+            || !matches!(q.dtype(), kiln_tensor::DType::BF16 | kiln_tensor::DType::F32)
         {
             return Ok(None);
         }
-        if !matches!(q.device(), candle_core::Device::Cpu)
-            || !matches!(k.device(), candle_core::Device::Cpu)
-            || !matches!(v.device(), candle_core::Device::Cpu)
-            || !matches!(beta.device(), candle_core::Device::Cpu)
-            || !matches!(g.device(), candle_core::Device::Cpu)
-            || !matches!(state.device(), candle_core::Device::Cpu)
+        if !matches!(q.device(), kiln_tensor::Device::Cpu)
+            || !matches!(k.device(), kiln_tensor::Device::Cpu)
+            || !matches!(v.device(), kiln_tensor::Device::Cpu)
+            || !matches!(beta.device(), kiln_tensor::Device::Cpu)
+            || !matches!(g.device(), kiln_tensor::Device::Cpu)
+            || !matches!(state_kt.device(), kiln_tensor::Device::Cpu)
         {
             return Ok(None);
         }
+        // Bridge kt args -> candle locals. `state` mirrors `state_kt`; the
+        // mutated mirror is pushed back to the kt arg at each return below.
+        let q_owned = crate::forward::kt_logits_to_candle(q)?;
+        let k_owned = crate::forward::kt_logits_to_candle(k)?;
+        let v_owned = crate::forward::kt_logits_to_candle(v)?;
+        let beta_owned = crate::forward::kt_logits_to_candle(beta)?;
+        let g_owned = crate::forward::kt_logits_to_candle(g)?;
+        let mut state_c = crate::forward::kt_logits_to_candle(state_kt)?;
+        let q = &q_owned;
+        let k = &k_owned;
+        let v = &v_owned;
+        let beta = &beta_owned;
+        let g = &g_owned;
+        let state: &mut candle_core::Tensor = &mut state_c;
         let Ok((batch, seq_len, q_heads, dk)) = q.dims4() else {
             return Ok(None);
         };
@@ -3699,7 +3848,9 @@ impl BackendRuntime for VulkanBackend {
             RECURRENT_STATE_RESIDENT_CACHE.with(|cache| {
                 cache.borrow_mut().insert(state_id, resident_state);
             });
-            return Ok(Some(out));
+            // Push the (possibly mutated) candle state mirror back to the kt arg.
+            *state_kt = crate::forward::candle_to_kt_activation(state)?;
+            return Ok(Some(crate::forward::candle_to_kt_activation(&out)?));
         }
         let skip_state_readback = crate::forward::vulkan_skip_gdn_state_readback_active();
         let (batch, _seq, q_heads, dk) = q.dims4()?;
@@ -3743,35 +3894,52 @@ impl BackendRuntime for VulkanBackend {
                 state_dtype,
             )?;
         }
-        Ok(Some(out))
+        // Push the (possibly mutated) candle state mirror back to the kt arg.
+        *state_kt = crate::forward::candle_to_kt_activation(state)?;
+        Ok(Some(crate::forward::candle_to_kt_activation(&out)?))
     }
 
     fn gdn_recurrent_qk_norm_prefill_native_head_last(
         &self,
-        q: &candle_core::Tensor,
-        k: &candle_core::Tensor,
-        v: &candle_core::Tensor,
-        beta: &candle_core::Tensor,
-        g: &candle_core::Tensor,
-        state: &mut candle_core::Tensor,
+        q: &kiln_tensor::Tensor,
+        k: &kiln_tensor::Tensor,
+        v: &kiln_tensor::Tensor,
+        beta: &kiln_tensor::Tensor,
+        g: &kiln_tensor::Tensor,
+        state_kt: &mut kiln_tensor::Tensor,
         q_scale: f64,
         qk_eps: f64,
-    ) -> Result<Option<candle_core::Tensor>> {
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        // kt guards read directly off the kt args before the bridge.
         if !self.has_vulkan()
             || !self.gdn_recurrent_qk_norm_unexpanded_enabled
-            || !matches!(q.dtype(), candle_core::DType::F32 | candle_core::DType::BF16)
+            || !matches!(q.dtype(), kiln_tensor::DType::F32 | kiln_tensor::DType::BF16)
         {
             return Ok(None);
         }
-        if !matches!(q.device(), candle_core::Device::Cpu)
-            || !matches!(k.device(), candle_core::Device::Cpu)
-            || !matches!(v.device(), candle_core::Device::Cpu)
-            || !matches!(beta.device(), candle_core::Device::Cpu)
-            || !matches!(g.device(), candle_core::Device::Cpu)
-            || !matches!(state.device(), candle_core::Device::Cpu)
+        if !matches!(q.device(), kiln_tensor::Device::Cpu)
+            || !matches!(k.device(), kiln_tensor::Device::Cpu)
+            || !matches!(v.device(), kiln_tensor::Device::Cpu)
+            || !matches!(beta.device(), kiln_tensor::Device::Cpu)
+            || !matches!(g.device(), kiln_tensor::Device::Cpu)
+            || !matches!(state_kt.device(), kiln_tensor::Device::Cpu)
         {
             return Ok(None);
         }
+        // Bridge kt args -> candle locals. `state` mirrors `state_kt`; the
+        // mutated mirror is pushed back to the kt arg at the return below.
+        let q_owned = crate::forward::kt_logits_to_candle(q)?;
+        let k_owned = crate::forward::kt_logits_to_candle(k)?;
+        let v_owned = crate::forward::kt_logits_to_candle(v)?;
+        let beta_owned = crate::forward::kt_logits_to_candle(beta)?;
+        let g_owned = crate::forward::kt_logits_to_candle(g)?;
+        let mut state_c = crate::forward::kt_logits_to_candle(state_kt)?;
+        let q = &q_owned;
+        let k = &k_owned;
+        let v = &v_owned;
+        let beta = &beta_owned;
+        let g = &g_owned;
+        let state: &mut candle_core::Tensor = &mut state_c;
         let Ok((_, _, _, dk)) = q.dims4() else {
             return Ok(None);
         };
@@ -3824,24 +3992,41 @@ impl BackendRuntime for VulkanBackend {
                 state_dtype,
             )?;
         }
-        Ok(Some(out))
+        // Push the (possibly mutated) candle state mirror back to the kt arg.
+        *state_kt = crate::forward::candle_to_kt_activation(state)?;
+        Ok(Some(crate::forward::candle_to_kt_activation(&out)?))
     }
 
     fn gdn_recurrent_step(
         &self,
-        q: &candle_core::Tensor,
-        k: &candle_core::Tensor,
-        v: &candle_core::Tensor,
-        beta: &candle_core::Tensor,
-        g: &candle_core::Tensor,
-        state: &mut candle_core::Tensor,
-    ) -> Result<Option<candle_core::Tensor>> {
+        q: &kiln_tensor::Tensor,
+        k: &kiln_tensor::Tensor,
+        v: &kiln_tensor::Tensor,
+        beta: &kiln_tensor::Tensor,
+        g: &kiln_tensor::Tensor,
+        state_kt: &mut kiln_tensor::Tensor,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        // kt guards read directly off the kt args before the bridge.
         if !self.has_vulkan() || !self.gdn_enabled {
             return Ok(None);
         }
-        if !matches!(q.dtype(), candle_core::DType::BF16 | candle_core::DType::F32) {
+        if !matches!(q.dtype(), kiln_tensor::DType::BF16 | kiln_tensor::DType::F32) {
             return Ok(None);
         }
+        // Bridge kt args -> candle locals. `state` mirrors `state_kt`; the
+        // mutated mirror is pushed back to the kt arg at each return below.
+        let q_owned = crate::forward::kt_logits_to_candle(q)?;
+        let k_owned = crate::forward::kt_logits_to_candle(k)?;
+        let v_owned = crate::forward::kt_logits_to_candle(v)?;
+        let beta_owned = crate::forward::kt_logits_to_candle(beta)?;
+        let g_owned = crate::forward::kt_logits_to_candle(g)?;
+        let mut state_c = crate::forward::kt_logits_to_candle(state_kt)?;
+        let q = &q_owned;
+        let k = &k_owned;
+        let v = &v_owned;
+        let beta = &beta_owned;
+        let g = &g_owned;
+        let state: &mut candle_core::Tensor = &mut state_c;
         let vk_device = self
             .vulkan_device
             .as_ref()
@@ -3884,7 +4069,9 @@ impl BackendRuntime for VulkanBackend {
             RECURRENT_STATE_RESIDENT_CACHE.with(|cache| {
                 cache.borrow_mut().insert(state_id, resident_state);
             });
-            return Ok(Some(out));
+            // Push the (possibly mutated) candle state mirror back to the kt arg.
+            *state_kt = crate::forward::candle_to_kt_activation(state)?;
+            return Ok(Some(crate::forward::candle_to_kt_activation(&out)?));
         }
 
         let skip_state_readback = crate::forward::vulkan_skip_gdn_state_readback_active();
@@ -3928,24 +4115,41 @@ impl BackendRuntime for VulkanBackend {
                 state_dtype,
             )?;
         }
-        Ok(Some(out))
+        // Push the (possibly mutated) candle state mirror back to the kt arg.
+        *state_kt = crate::forward::candle_to_kt_activation(state)?;
+        Ok(Some(crate::forward::candle_to_kt_activation(&out)?))
     }
 
     fn gdn_chunk_prep(
         &self,
-        g: &candle_core::Tensor,
-        v: &candle_core::Tensor,
-        kkt: &candle_core::Tensor,
-        qkt: &candle_core::Tensor,
-        ks_entry: &candle_core::Tensor,
-        q_s: &candle_core::Tensor,
-    ) -> Result<Option<(candle_core::Tensor, candle_core::Tensor, candle_core::Tensor, candle_core::Tensor, candle_core::Tensor, candle_core::Tensor)>> {
+        g: &kiln_tensor::Tensor,
+        v: &kiln_tensor::Tensor,
+        kkt: &kiln_tensor::Tensor,
+        qkt: &kiln_tensor::Tensor,
+        ks_entry: &kiln_tensor::Tensor,
+        q_s: &kiln_tensor::Tensor,
+    ) -> Result<Option<(kiln_tensor::Tensor, kiln_tensor::Tensor, kiln_tensor::Tensor, kiln_tensor::Tensor, kiln_tensor::Tensor, kiln_tensor::Tensor)>> {
+        // kt guards read directly off the kt args before the bridge.
         if !self.has_vulkan() || !self.gdn_enabled {
             return Ok(None);
         }
-        if g.dtype() != candle_core::DType::BF16 {
+        if g.dtype() != kiln_tensor::DType::BF16 {
             return Ok(None);
         }
+        // Bridge kt args -> candle locals; re-borrow under the same names so
+        // the candle body below is unchanged.
+        let g_owned = crate::forward::kt_logits_to_candle(g)?;
+        let v_owned = crate::forward::kt_logits_to_candle(v)?;
+        let kkt_owned = crate::forward::kt_logits_to_candle(kkt)?;
+        let qkt_owned = crate::forward::kt_logits_to_candle(qkt)?;
+        let ks_entry_owned = crate::forward::kt_logits_to_candle(ks_entry)?;
+        let q_s_owned = crate::forward::kt_logits_to_candle(q_s)?;
+        let g = &g_owned;
+        let v = &v_owned;
+        let kkt = &kkt_owned;
+        let qkt = &qkt_owned;
+        let ks_entry = &ks_entry_owned;
+        let q_s = &q_s_owned;
         let vk_device = self
             .vulkan_device
             .as_ref()
@@ -3989,24 +4193,46 @@ impl BackendRuntime for VulkanBackend {
         let p_last_t = tensor_from_f32_bytes(
             &p_last_b, &p_last_shape, candle_core::DType::BF16,
         )?;
-        Ok(Some((a_strict_t, b_mask_t, v_prime_t, q_s_scaled_t, decay_last_col_t, p_last_t)))
+        Ok(Some((
+            crate::forward::candle_to_kt_activation(&a_strict_t)?,
+            crate::forward::candle_to_kt_activation(&b_mask_t)?,
+            crate::forward::candle_to_kt_activation(&v_prime_t)?,
+            crate::forward::candle_to_kt_activation(&q_s_scaled_t)?,
+            crate::forward::candle_to_kt_activation(&decay_last_col_t)?,
+            crate::forward::candle_to_kt_activation(&p_last_t)?,
+        )))
     }
 
     fn gdn_chunk_scan(
         &self,
-        a_strict: &candle_core::Tensor,
-        b_mask: &candle_core::Tensor,
-        v_prime: &candle_core::Tensor,
-        q_s_scaled: &candle_core::Tensor,
-        beta: &candle_core::Tensor,
-        decay_last_col: &candle_core::Tensor,
-    ) -> Result<Option<(candle_core::Tensor, candle_core::Tensor)>> {
+        a_strict: &kiln_tensor::Tensor,
+        b_mask: &kiln_tensor::Tensor,
+        v_prime: &kiln_tensor::Tensor,
+        q_s_scaled: &kiln_tensor::Tensor,
+        beta: &kiln_tensor::Tensor,
+        decay_last_col: &kiln_tensor::Tensor,
+    ) -> Result<Option<(kiln_tensor::Tensor, kiln_tensor::Tensor)>> {
+        // kt guards read directly off the kt args before the bridge.
         if !self.has_vulkan() || !self.gdn_enabled {
             return Ok(None);
         }
-        if a_strict.dtype() != candle_core::DType::BF16 {
+        if a_strict.dtype() != kiln_tensor::DType::BF16 {
             return Ok(None);
         }
+        // Bridge kt args -> candle locals; re-borrow under the same names so
+        // the candle body below is unchanged.
+        let a_strict_owned = crate::forward::kt_logits_to_candle(a_strict)?;
+        let b_mask_owned = crate::forward::kt_logits_to_candle(b_mask)?;
+        let v_prime_owned = crate::forward::kt_logits_to_candle(v_prime)?;
+        let q_s_scaled_owned = crate::forward::kt_logits_to_candle(q_s_scaled)?;
+        let beta_owned = crate::forward::kt_logits_to_candle(beta)?;
+        let decay_last_col_owned = crate::forward::kt_logits_to_candle(decay_last_col)?;
+        let a_strict = &a_strict_owned;
+        let b_mask = &b_mask_owned;
+        let v_prime = &v_prime_owned;
+        let q_s_scaled = &q_s_scaled_owned;
+        let beta = &beta_owned;
+        let decay_last_col = &decay_last_col_owned;
         let vk_device = self
             .vulkan_device
             .as_ref()
@@ -4043,27 +4269,51 @@ impl BackendRuntime for VulkanBackend {
             &[batch, heads, chunk, dv],
             candle_core::DType::BF16,
         )?;
-        Ok(Some((out_tensor, p_out_tensor)))
+        Ok(Some((
+            crate::forward::candle_to_kt_activation(&out_tensor)?,
+            crate::forward::candle_to_kt_activation(&p_out_tensor)?,
+        )))
     }
 
     fn gdn_full_chunk_forward(
         &self,
-        g: &candle_core::Tensor,
-        v: &candle_core::Tensor,
-        kkt: &candle_core::Tensor,
-        qkt: &candle_core::Tensor,
-        ks_entry: &candle_core::Tensor,
-        q_s: &candle_core::Tensor,
-        beta: &candle_core::Tensor,
-        k_t: &candle_core::Tensor,
-        state: &mut candle_core::Tensor,
-    ) -> Result<Option<candle_core::Tensor>> {
+        g: &kiln_tensor::Tensor,
+        v: &kiln_tensor::Tensor,
+        kkt: &kiln_tensor::Tensor,
+        qkt: &kiln_tensor::Tensor,
+        ks_entry: &kiln_tensor::Tensor,
+        q_s: &kiln_tensor::Tensor,
+        beta: &kiln_tensor::Tensor,
+        k_t: &kiln_tensor::Tensor,
+        state_kt: &mut kiln_tensor::Tensor,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        // kt guards read directly off the kt args before the bridge.
         if !self.has_vulkan() || !self.gdn_enabled {
             return Ok(None);
         }
-        if g.dtype() != candle_core::DType::BF16 {
+        if g.dtype() != kiln_tensor::DType::BF16 {
             return Ok(None);
         }
+        // Bridge kt args -> candle locals. `state` mirrors `state_kt`; the
+        // mutated mirror is pushed back to the kt arg at the return below.
+        let g_owned = crate::forward::kt_logits_to_candle(g)?;
+        let v_owned = crate::forward::kt_logits_to_candle(v)?;
+        let kkt_owned = crate::forward::kt_logits_to_candle(kkt)?;
+        let qkt_owned = crate::forward::kt_logits_to_candle(qkt)?;
+        let ks_entry_owned = crate::forward::kt_logits_to_candle(ks_entry)?;
+        let q_s_owned = crate::forward::kt_logits_to_candle(q_s)?;
+        let beta_owned = crate::forward::kt_logits_to_candle(beta)?;
+        let k_t_owned = crate::forward::kt_logits_to_candle(k_t)?;
+        let mut state_c = crate::forward::kt_logits_to_candle(state_kt)?;
+        let g = &g_owned;
+        let v = &v_owned;
+        let kkt = &kkt_owned;
+        let qkt = &qkt_owned;
+        let ks_entry = &ks_entry_owned;
+        let q_s = &q_s_owned;
+        let beta = &beta_owned;
+        let k_t = &k_t_owned;
+        let state: &mut candle_core::Tensor = &mut state_c;
         let vk_device = self
             .vulkan_device
             .as_ref()
@@ -4101,22 +4351,35 @@ impl BackendRuntime for VulkanBackend {
             candle_core::DType::BF16,
         )?;
         *state = new_state;
-        Ok(Some(out))
+        // Push the (mutated) candle state mirror back to the kt arg.
+        *state_kt = crate::forward::candle_to_kt_activation(state)?;
+        Ok(Some(crate::forward::candle_to_kt_activation(&out)?))
     }
 
     fn gdn_gates(
         &self,
-        a: &candle_core::Tensor,
-        b: &candle_core::Tensor,
-        a_log: &candle_core::Tensor,
-        dt_bias: &candle_core::Tensor,
-    ) -> Result<Option<(candle_core::Tensor, candle_core::Tensor)>> {
+        a: &kiln_tensor::Tensor,
+        b: &kiln_tensor::Tensor,
+        a_log: &kiln_tensor::Tensor,
+        dt_bias: &kiln_tensor::Tensor,
+    ) -> Result<Option<(kiln_tensor::Tensor, kiln_tensor::Tensor)>> {
+        // kt guards read directly off the kt args before the bridge.
         if !self.has_vulkan() || !self.gdn_gates_enabled {
             return Ok(None);
         }
-        if !matches!(a.dtype(), candle_core::DType::BF16 | candle_core::DType::F32) {
+        if !matches!(a.dtype(), kiln_tensor::DType::BF16 | kiln_tensor::DType::F32) {
             return Ok(None);
         }
+        // Bridge kt args -> candle locals; re-borrow under the same names so
+        // the candle body below is unchanged.
+        let a_owned = crate::forward::kt_logits_to_candle(a)?;
+        let b_owned = crate::forward::kt_logits_to_candle(b)?;
+        let a_log_owned = crate::forward::kt_logits_to_candle(a_log)?;
+        let dt_bias_owned = crate::forward::kt_logits_to_candle(dt_bias)?;
+        let a = &a_owned;
+        let b = &b_owned;
+        let a_log = &a_log_owned;
+        let dt_bias = &dt_bias_owned;
         let vk_device = self
             .vulkan_device
             .as_ref()
@@ -4147,16 +4410,20 @@ impl BackendRuntime for VulkanBackend {
             tensor_from_f32_bytes(&beta_b, &out_shape, output_dtype)?;
         let g =
             tensor_from_f32_bytes(&g_b, &out_shape, output_dtype)?;
-        Ok(Some((beta, g)))
+        Ok(Some((
+            crate::forward::candle_to_kt_activation(&beta)?,
+            crate::forward::candle_to_kt_activation(&g)?,
+        )))
     }
 
     fn gdn_gated_rms_norm(
         &self,
-        x: &candle_core::Tensor,
-        z: &candle_core::Tensor,
-        weight: &candle_core::Tensor,
+        x: &kiln_tensor::Tensor,
+        z: &kiln_tensor::Tensor,
+        weight: &kiln_tensor::Tensor,
         eps: f64,
-    ) -> Result<Option<candle_core::Tensor>> {
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        // kt guards read directly off the kt args before the bridge.
         if !self.has_vulkan() || !self.gdn_gated_rms_norm_enabled {
             return Ok(None);
         }
