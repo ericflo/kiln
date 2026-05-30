@@ -13469,9 +13469,12 @@ fn gated_rms_norm(
 /// `z`: [..., dim] — output gate (from in_proj_z)
 /// `weight`: [dim] — learnable scale
 fn gated_rms_norm_fallback(x: &Tensor, z: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor> {
-    let x_f32 = x.to_dtype(DType::F32)?;
-    let z_f32 = z.to_dtype(DType::F32)?;
-    let w_f32 = weight.to_dtype(DType::F32)?;
+    // #1082: x/z arrive as transposed GDN head views (non-contiguous); kt's
+    // CastOp requires contiguous (candle's `to_dtype` copied implicitly).
+    // `.contiguous()` is an O(1) no-op when already contiguous.
+    let x_f32 = x.contiguous()?.to_dtype(DType::F32)?;
+    let z_f32 = z.contiguous()?.to_dtype(DType::F32)?;
+    let w_f32 = weight.contiguous()?.to_dtype(DType::F32)?;
 
     // RMS norm on last dimension
     //
