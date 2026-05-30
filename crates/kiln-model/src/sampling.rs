@@ -860,12 +860,20 @@ mod tests {
         let logits = candle_core::Tensor::new(&values, &device)?.reshape((2, 4))?;
         let flat = last_position_logits(&logits)?;
 
-        assert_eq!(crate::forward::try_kt_argmax_1d(&flat)?, Some(2));
+        // #1082: `try_kt_argmax_1d` is kt-typed — bridge the candle `flat`
+        // (CUDA) to kt for the direct kt-helper check; `greedy_sample` stays
+        // candle.
+        let flat_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&flat.contiguous()?)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        assert_eq!(crate::forward::try_kt_argmax_1d(&flat_kt)?, Some(2));
         assert_eq!(greedy_sample(&logits)?, 2);
 
         let bf16_logits = logits.to_dtype(candle_core::DType::BF16)?;
         let bf16_flat = last_position_logits(&bf16_logits)?;
-        assert_eq!(crate::forward::try_kt_argmax_1d(&bf16_flat)?, Some(2));
+        let bf16_flat_kt =
+            kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&bf16_flat.contiguous()?)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
+        assert_eq!(crate::forward::try_kt_argmax_1d(&bf16_flat_kt)?, Some(2));
         assert_eq!(greedy_sample(&bf16_logits)?, 2);
         Ok(())
     }
@@ -922,15 +930,22 @@ mod tests {
         let expected = vec![2, 0, 3, 1];
         let logits = candle_core::Tensor::new(&values, &device)?.reshape((2, 2, 4))?;
 
+        // #1082: `try_kt_sampling_argmax_rows` is kt-typed — bridge the candle
+        // CUDA logits to kt; `greedy_sample_rows` stays candle.
+        let logits_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&logits.contiguous()?)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
         assert_eq!(
-            crate::forward::try_kt_sampling_argmax_rows(&logits)?,
+            crate::forward::try_kt_sampling_argmax_rows(&logits_kt)?,
             Some(expected.clone())
         );
         assert_eq!(greedy_sample_rows(&logits)?, expected);
 
         let bf16_logits = logits.to_dtype(candle_core::DType::BF16)?;
+        let bf16_logits_kt =
+            kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&bf16_logits.contiguous()?)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
         assert_eq!(
-            crate::forward::try_kt_sampling_argmax_rows(&bf16_logits)?,
+            crate::forward::try_kt_sampling_argmax_rows(&bf16_logits_kt)?,
             Some(vec![2, 0, 3, 1])
         );
         assert_eq!(greedy_sample_rows(&bf16_logits)?, vec![2, 0, 3, 1]);
