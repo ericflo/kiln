@@ -1,0 +1,927 @@
+crates/kiln-tensor/src/cpu_allocator.rs:38:82: warning: unused import: `Error`
+crates/kiln-tensor/src/ops/concat.rs:35:31: warning: unused import: `DType`
+crates/kiln-tensor/src/ops/layernorm.rs:22:5: warning: unused import: `crate::DeviceOp3`
+crates/kiln-tensor/src/ops/stack.rs:35:31: warning: unused import: `DType`
+crates/kiln-tensor/src/cuda_storage.rs:860:9: warning: unused import: `std::any::Any as _`
+crates/kiln-tensor/src/cuda_storage.rs:978:9: warning: unused import: `std::any::Any as _`
+crates/kiln-tensor/src/cuda_storage.rs:1127:9: warning: unused import: `std::any::Any as _`
+crates/kiln-tensor/src/cuda_storage.rs:1279:9: warning: unused import: `std::any::Any as _`
+crates/kiln-tensor/src/cuda_storage.rs:1658:9: warning: unused import: `std::any::Any as _`
+crates/kiln-tensor/src/cuda_storage.rs:1757:9: warning: unused import: `std::any::Any as _`
+crates/kiln-tensor/src/cuda_storage.rs:1892:9: warning: unused import: `std::any::Any as _`
+crates/kiln-tensor/src/cuda_storage.rs:4207:9: warning: unused import: `std::any::Any as _`
+crates/kiln-tensor/src/cuda_storage.rs:4384:9: warning: unused import: `std::any::Any as _`
+crates/kiln-tensor/src/cuda_storage.rs:4736:9: warning: unused import: `std::any::Any as _`
+crates/kiln-tensor/src/cuda_storage.rs:4847:9: warning: unused import: `std::any::Any as _`
+crates/kiln-tensor/src/cuda_storage.rs:4948:9: warning: unused import: `std::any::Any as _`
+crates/kiln-tensor/src/cuda_storage.rs:5071:9: warning: unused import: `std::any::Any as _`
+crates/kiln-tensor/src/cuda_storage.rs:5205:9: warning: unused import: `std::any::Any as _`
+crates/kiln-tensor/src/cuda_storage.rs:5298:9: warning: unused import: `std::any::Any as _`
+crates/kiln-tensor/src/tensor.rs:39:5: warning: unused import: `StorageBackend`
+crates/kiln-tensor/src/ops/gumbel_sample.rs:126:13: warning: unused variable: `per`: help: if this is intentional, prefix it with an underscore: `_per`
+crates/kiln-tensor/src/ops/reduce.rs:285:9: warning: unused variable: `rank`: help: if this is intentional, prefix it with an underscore: `_rank`
+crates/kiln-tensor/src/ops/sdpa.rs:67:9: warning: variable does not need to be mutable
+crates/kiln-tensor/src/ops/triangular.rs:92:53: warning: unused variable: `name`: help: if this is intentional, prefix it with an underscore: `_name`
+warning: `kiln-tensor` (lib) generated 24 warnings (run `cargo fix --lib -p kiln-tensor` to apply 23 suggestions)
+crates/kiln-kt-bridge/src/lib.rs:902:29: warning: unnecessary `unsafe` block: unnecessary `unsafe` block
+warning: `kiln-kt-bridge` (lib) generated 7 warnings (6 duplicates)
+crates/kiln-marlin-gemm/src/lib.rs:49:12: warning: unused import: `bf16`
+warning: `kiln-marlin-gemm` (lib) generated 1 warning (run `cargo fix --lib -p kiln-marlin-gemm` to apply 1 suggestion)
+    Checking kiln-model v0.2.19 (/workspace/kiln/crates/kiln-model)
+crates/kiln-model/src/forward.rs:11847:1: warning: unused doc comment
+crates/kiln-model/src/backend/cuda.rs:1760:41: error[E0308]: arguments to this function are incorrect
+crates/kiln-model/src/backend/cuda.rs:1764:36: error[E0308]: `?` operator has incompatible types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/backend/cuda.rs:1794:45: error[E0308]: arguments to this function are incorrect
+crates/kiln-model/src/backend/cuda.rs:1798:40: error[E0308]: `?` operator has incompatible types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/cuda_graph.rs:481:21: error[E0308]: mismatched types: expected `kiln_tensor::Device`, found `candle_core::Device`
+crates/kiln-model/src/cuda_graph.rs:1350:13: error[E0308]: mismatched types: expected `kiln_tensor::Device`, found `candle_core::Device`
+crates/kiln-model/src/cuda_graph.rs:1357:51: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/cuda_graph.rs:1358:57: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/cuda_graph.rs:1359:29: error[E0308]: arguments to this function are incorrect
+crates/kiln-model/src/cuda_graph.rs:1361:69: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/cuda_graph.rs:1362:69: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/cuda_graph.rs:1370:21: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/cuda_graph.rs:1372:49: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/cuda_graph.rs:1377:21: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/cuda_graph.rs:1384:13: error[E0308]: arguments to this function are incorrect
+crates/kiln-model/src/cuda_graph.rs:1394:17: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/cuda_graph.rs:1395:17: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/cuda_graph.rs:1396:17: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/cuda_graph.rs:1398:29: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/cuda_graph.rs:1399:29: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/cuda_graph.rs:1400:27: error[E0308]: mismatched types: expected `&[Tensor]`, found `&Vec<Tensor>`
+crates/kiln-model/src/cuda_graph.rs:1401:30: error[E0308]: mismatched types: expected `&[Tensor]`, found `&Vec<Tensor>`
+crates/kiln-model/src/cuda_graph.rs:1405:71: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/cuda_graph.rs:1415:13: error[E0308]: arguments to this function are incorrect
+crates/kiln-model/src/cuda_graph.rs:1450:30: error[E0308]: arguments to this function are incorrect
+crates/kiln-model/src/cuda_graph.rs:1465:32: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/cuda_graph.rs:1448:13: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/cuda_graph.rs:1559:13: error[E0308]: mismatched types: expected `kiln_tensor::Device`, found `candle_core::Device`
+crates/kiln-model/src/cuda_graph.rs:1570:59: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/cuda_graph.rs:1571:65: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/cuda_graph.rs:1572:77: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/cuda_graph.rs:1573:77: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/cuda_graph.rs:1584:13: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/cuda_graph.rs:1586:67: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/cuda_graph.rs:1588:91: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/cuda_graph.rs:1589:29: error[E0308]: arguments to this function are incorrect
+crates/kiln-model/src/cuda_graph.rs:1591:13: error[E0308]: arguments to this function are incorrect
+crates/kiln-model/src/cuda_graph.rs:1592:79: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/cuda_graph.rs:1611:13: error[E0308]: arguments to this function are incorrect
+crates/kiln-model/src/cuda_graph.rs:1618:63: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/cuda_graph.rs:1622:28: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/cuda_graph.rs:1623:28: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/cuda_graph.rs:1624:30: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/cuda_graph.rs:1625:28: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/cuda_graph.rs:1626:26: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/cuda_graph.rs:1628:29: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/cuda_graph.rs:1629:29: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/cuda_graph.rs:1630:27: error[E0308]: mismatched types: expected `&[Tensor]`, found `&Vec<Tensor>`
+crates/kiln-model/src/cuda_graph.rs:1631:30: error[E0308]: mismatched types: expected `&[Tensor]`, found `&Vec<Tensor>`
+crates/kiln-model/src/cuda_graph.rs:1632:32: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/cuda_graph.rs:1662:17: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/cuda_graph.rs:1770:9: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/cuda_graph.rs:2066:33: error[E0308]: mismatched types: expected `kiln_tensor::DType`, found `candle_core::DType`
+crates/kiln-model/src/cuda_graph.rs:2068:31: error[E0308]: mismatched types: expected `kiln_tensor::DType`, found `candle_core::DType`
+crates/kiln-model/src/cuda_graph.rs:2230:57: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/cuda_graph.rs:2241:18: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/cuda_graph.rs:2231:9: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/cuda_train.rs:794:21: error[E0308]: arguments to this function are incorrect
+crates/kiln-model/src/cuda_train.rs:798:17: error[E0308]: `match` arms have incompatible types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/cuda_train.rs:909:71: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/cuda_train.rs:913:17: error[E0308]: `match` arms have incompatible types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/cuda_train.rs:1064:71: error[E0308]: mismatched types: expected `&[&Tensor]`, found `&[&Tensor; 3]`
+crates/kiln-model/src/cuda_train.rs:1067:20: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/cuda_train.rs:1074:71: error[E0308]: mismatched types: expected `&[&Tensor]`, found `&[&Tensor; 2]`
+crates/kiln-model/src/cuda_train.rs:1077:20: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/cuda_train.rs:1607:51: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/cuda_train.rs:1608:44: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/cuda_train.rs:1609:44: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/cuda_train.rs:1610:44: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/cuda_train.rs:1611:47: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/cuda_train.rs:1612:47: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/cuda_train.rs:1613:44: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/cuda_train.rs:1615:13: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/cuda_train.rs:1618:47: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/cuda_train.rs:1619:45: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/cuda_train.rs:1620:47: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/cuda_train.rs:1642:51: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/cuda_train.rs:1644:13: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/cuda_train.rs:1647:52: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/cuda_train.rs:1648:52: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/cuda_train.rs:1649:52: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/cuda_train.rs:1650:47: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/cuda_train.rs:1651:39: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/cuda_train.rs:1652:45: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/cuda_train.rs:1653:41: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/cuda_train.rs:1654:51: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/cuda_train.rs:1655:51: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/cuda_train.rs:1667:56: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/cuda_train.rs:1668:55: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/cuda_train.rs:1669:56: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/cuda_train.rs:1684:23: error[E0308]: mismatched types: expected `kiln_tensor::DType`, found `candle_core::DType`
+crates/kiln-model/src/cuda_train.rs:1686:24: error[E0308]: mismatched types: expected `Device`, found `&Device`
+crates/kiln-model/src/cuda_train.rs:1937:69: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/cuda_train.rs:1941:17: error[E0308]: `match` arms have incompatible types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/cuda_train.rs:1956:56: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/cuda_train.rs:1960:17: error[E0308]: `match` arms have incompatible types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/cuda_train.rs:2214:66: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/cuda_train.rs:2218:29: error[E0308]: `match` arms have incompatible types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/cuda_train.rs:2242:67: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/cuda_train.rs:2246:29: error[E0308]: `match` arms have incompatible types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/cuda_train.rs:2262:21: error[E0308]: mismatched types: expected `&Tensor`, found `&&Tensor`
+crates/kiln-model/src/cuda_train.rs:2268:29: error[E0308]: `match` arms have incompatible types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/cuda_train.rs:2278:66: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/cuda_train.rs:2282:29: error[E0308]: `match` arms have incompatible types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/cuda_train.rs:2337:60: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/cuda_train.rs:2341:17: error[E0308]: `match` arms have incompatible types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/cuda_train.rs:2356:9: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/cuda_train.rs:2400:48: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/cuda_train.rs:2402:17: error[E0308]: `match` arms have incompatible types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/cuda_train.rs:2444:48: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/cuda_train.rs:2446:17: error[E0308]: `match` arms have incompatible types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/cuda_train.rs:2483:50: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/cuda_train.rs:2485:17: error[E0308]: `match` arms have incompatible types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/cuda_train.rs:2488:41: error[E0599]: no method named `context` found for struct `candle_core::Tensor` in the current scope: method not found in `candle_core::Tensor`
+crates/kiln-model/src/cuda_train.rs:2513:35: error[E0599]: no method named `context` found for struct `candle_core::Tensor` in the current scope: method not found in `candle_core::Tensor`
+crates/kiln-model/src/cuda_train.rs:2539:48: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/cuda_train.rs:2541:17: error[E0308]: `match` arms have incompatible types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/cuda_train.rs:2559:30: error[E0599]: no method named `context` found for struct `candle_core::Tensor` in the current scope: method not found in `candle_core::Tensor`
+crates/kiln-model/src/cuda_train.rs:4134:75: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/cuda_train.rs:4138:21: error[E0308]: `match` arms have incompatible types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/cuda_train.rs:4197:73: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/cuda_train.rs:4201:21: error[E0308]: `match` arms have incompatible types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/cuda_train.rs:4736:52: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/cuda_train.rs:4738:21: error[E0308]: `match` arms have incompatible types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/cuda_train.rs:4740:50: error[E0599]: no method named `context` found for struct `candle_core::Tensor` in the current scope: method not found in `candle_core::Tensor`
+crates/kiln-model/src/cuda_train.rs:4772:54: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/cuda_train.rs:4776:21: error[E0308]: `match` arms have incompatible types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/cuda_train.rs:4797:47: error[E0599]: no method named `context` found for struct `candle_core::Tensor` in the current scope: method not found in `candle_core::Tensor`
+crates/kiln-model/src/cuda_train.rs:4989:60: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/cuda_train.rs:4993:21: error[E0308]: `match` arms have incompatible types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/cuda_train.rs:5159:70: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/cuda_train.rs:5163:33: error[E0308]: `match` arms have incompatible types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/cuda_train.rs:5183:71: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/cuda_train.rs:5187:33: error[E0308]: `match` arms have incompatible types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/cuda_train.rs:5200:25: error[E0308]: mismatched types: expected `&Tensor`, found `&&Tensor`
+crates/kiln-model/src/cuda_train.rs:5207:33: error[E0308]: `match` arms have incompatible types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/cuda_train.rs:5214:72: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/cuda_train.rs:5218:33: error[E0308]: `match` arms have incompatible types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/cuda_train.rs:5267:62: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/cuda_train.rs:5271:25: error[E0308]: `match` arms have incompatible types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:1802:66: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:1808:66: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:1814:69: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:2207:53: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:2209:23: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:2577:5: error[E0308]: arguments to this function are incorrect
+crates/kiln-model/src/forward.rs:2577:5: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:2599:24: error[E0308]: arguments to this function are incorrect
+crates/kiln-model/src/forward.rs:2600:19: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:2603:24: error[E0308]: arguments to this function are incorrect
+crates/kiln-model/src/forward.rs:2604:19: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:2607:24: error[E0308]: arguments to this function are incorrect
+crates/kiln-model/src/forward.rs:2608:19: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:2611:36: error[E0308]: arguments to this method are incorrect
+crates/kiln-model/src/forward.rs:2612:23: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:2621:58: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:2622:45: error[E0308]: mismatched types: expected `candle_core::DType`, found `kiln_tensor::DType`
+crates/kiln-model/src/forward.rs:2625:32: error[E0308]: mismatched types: expected `candle_core::DType`, found `kiln_tensor::DType`
+crates/kiln-model/src/forward.rs:2627:29: error[E0277]: the trait bound `candle_core::Tensor: Borrow<kiln_tensor::Tensor>` is not satisfied: the trait `Borrow<kiln_tensor::Tensor>` is not implemented for `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:2653:36: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:2654:37: error[E0308]: mismatched types: expected `candle_core::DType`, found `kiln_tensor::DType`
+crates/kiln-model/src/forward.rs:2657:24: error[E0308]: mismatched types: expected `candle_core::DType`, found `kiln_tensor::DType`
+crates/kiln-model/src/forward.rs:2661:51: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:3437:9: error[E0308]: arguments to this function are incorrect
+crates/kiln-model/src/forward.rs:3437:9: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:3458:24: error[E0308]: arguments to this function are incorrect
+crates/kiln-model/src/forward.rs:3460:19: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:3463:24: error[E0308]: arguments to this function are incorrect
+crates/kiln-model/src/forward.rs:3464:19: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:3477:41: error[E0308]: arguments to this method are incorrect
+crates/kiln-model/src/forward.rs:3478:62: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:3481:37: error[E0308]: arguments to this method are incorrect
+crates/kiln-model/src/forward.rs:3482:58: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:3487:37: error[E0308]: arguments to this method are incorrect
+crates/kiln-model/src/forward.rs:3488:58: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:3530:28: error[E0308]: arguments to this function are incorrect
+crates/kiln-model/src/forward.rs:3531:23: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:3548:31: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:3845:36: error[E0308]: arguments to this method are incorrect
+crates/kiln-model/src/forward.rs:3852:23: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:4092:72: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:4134:72: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:4214:37: error[E0308]: arguments to this method are incorrect
+crates/kiln-model/src/forward.rs:4221:13: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:4515:17: error[E0308]: arguments to this method are incorrect
+crates/kiln-model/src/forward.rs:4526:13: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:5841:38: error[E0308]: arguments to this method are incorrect
+crates/kiln-model/src/forward.rs:5884:22: error[E0599]: no method named `slice_set` found for struct `kiln_tensor::Tensor` in the current scope: method not found in `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:5895:22: error[E0599]: no method named `slice_set` found for struct `kiln_tensor::Tensor` in the current scope: method not found in `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:5941:25: error[E0308]: arguments to this method are incorrect
+crates/kiln-model/src/forward.rs:5969:62: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:5976:56: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:5983:67: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:5991:71: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:6736:24: error[E0308]: arguments to this function are incorrect
+crates/kiln-model/src/forward.rs:6737:24: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:6765:32: error[E0308]: arguments to this method are incorrect
+crates/kiln-model/src/forward.rs:6766:19: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:7471:67: error[E0308]: mismatched types: expected `&[(Tensor, i32)]`, found `&Vec<(Tensor, i32)>`
+crates/kiln-model/src/forward.rs:7525:18: error[E0599]: no method named `synchronize` found for reference `&kiln_tensor::Device` in the current scope: method not found in `&kiln_tensor::Device`
+crates/kiln-model/src/forward.rs:7564:51: error[E0308]: mismatched types: expected `kiln_tensor::Device`, found `candle_core::Device`
+crates/kiln-model/src/forward.rs:7596:24: error[E0308]: arguments to this function are incorrect
+crates/kiln-model/src/forward.rs:7597:39: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:7613:24: error[E0308]: arguments to this function are incorrect
+crates/kiln-model/src/forward.rs:7614:39: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:7734:49: error[E0308]: mismatched types: expected `kiln_tensor::Device`, found `candle_core::Device`
+crates/kiln-model/src/forward.rs:7741:13: error[E0308]: mismatched types: expected `kiln_tensor::DType`, found `candle_core::DType`
+crates/kiln-model/src/forward.rs:7741:39: error[E0308]: mismatched types: expected `kiln_tensor::DType`, found `candle_core::DType`
+crates/kiln-model/src/forward.rs:7741:66: error[E0308]: mismatched types: expected `kiln_tensor::DType`, found `candle_core::DType`
+crates/kiln-model/src/forward.rs:7886:17: error[E0308]: arguments to this function are incorrect
+crates/kiln-model/src/forward.rs:7888:27: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:7900:32: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:7905:46: error[E0308]: arguments to this function are incorrect
+crates/kiln-model/src/forward.rs:7932:24: error[E0308]: arguments to this function are incorrect
+crates/kiln-model/src/forward.rs:8482:77: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:8486:81: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:8488:84: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:8492:78: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:8502:82: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:8506:86: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:8511:9: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:8547:9: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:8555:83: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:8572:88: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:8579:9: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:8598:9: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:8632:9: error[E0061]: this function takes 2 arguments but 3 arguments were supplied
+crates/kiln-model/src/forward.rs:8665:9: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:8669:9: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:8673:9: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:8677:9: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:8681:9: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:8685:9: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:8705:18: error[E0277]: the trait bound `kiln_tensor::Shape: From<((), usize)>` is not satisfied: the trait `From<((), usize)>` is not implemented for `kiln_tensor::Shape`
+crates/kiln-model/src/forward.rs:8715:18: error[E0277]: the trait bound `kiln_tensor::Shape: From<((), usize)>` is not satisfied: the trait `From<((), usize)>` is not implemented for `kiln_tensor::Shape`
+crates/kiln-model/src/forward.rs:8736:9: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:8740:9: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:8744:9: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:8748:9: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:8752:9: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:8954:28: error[E0308]: arguments to this function are incorrect
+crates/kiln-model/src/forward.rs:8955:23: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:8981:13: error[E0308]: arguments to this function are incorrect
+crates/kiln-model/src/forward.rs:8983:23: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:10640:19: error[E0308]: arguments to this function are incorrect
+crates/kiln-model/src/forward.rs:10643:37: error[E0599]: no method named `storage_and_layout` found for struct `kiln_tensor::Tensor` in the current scope: method not found in `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:10853:32: error[E0308]: arguments to this function are incorrect
+crates/kiln-model/src/forward.rs:10856:27: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:10866:28: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:11272:74: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:11303:13: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:11327:57: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:11329:25: error[E0308]: arguments to this method are incorrect
+crates/kiln-model/src/forward.rs:11332:21: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:11338:27: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:11344:57: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:11345:43: error[E0308]: arguments to this method are incorrect
+crates/kiln-model/src/forward.rs:11347:21: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:11353:61: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:11359:25: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:11367:21: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:11442:57: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:11450:33: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:11460:61: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:11479:37: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:11486:61: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:11492:41: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:11500:37: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:11539:9: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:11601:57: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:11615:33: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:11636:49: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:11640:78: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:11642:33: error[E0308]: `match` arms have incompatible types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:11645:25: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:11653:49: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:11658:86: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:11663:25: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:11699:49: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:11713:9: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:11752:55: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:11765:53: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:11778:55: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:11806:52: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:11814:53: error[E0308]: mismatched types: expected `kiln_tensor::DType`, found `candle_core::DType`
+crates/kiln-model/src/forward.rs:11817:40: error[E0308]: mismatched types: expected `kiln_tensor::DType`, found `candle_core::DType`
+crates/kiln-model/src/forward.rs:11820:56: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:11825:37: error[E0277]: the trait bound `kiln_tensor::Tensor: Borrow<candle_core::Tensor>` is not satisfied: the trait `Borrow<candle_core::Tensor>` is not implemented for `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:11825:31: error[E0308]: `?` operator has incompatible types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:11829:36: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:11830:23: error[E0308]: `?` operator has incompatible types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:11832:19: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:12174:39: error[E0308]: mismatched types: expected `candle_core::Device`, found `kiln_tensor::Device`
+crates/kiln-model/src/forward.rs:12175:39: error[E0308]: mismatched types: expected `candle_core::Device`, found `kiln_tensor::Device`
+crates/kiln-model/src/forward.rs:12194:35: error[E0308]: mismatched types: expected `candle_core::DType`, found `kiln_tensor::DType`
+crates/kiln-model/src/forward.rs:12198:35: error[E0308]: mismatched types: expected `candle_core::DType`, found `kiln_tensor::DType`
+crates/kiln-model/src/forward.rs:12226:72: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:12277:13: error[E0308]: `?` operator has incompatible types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:12359:74: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:12363:74: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:12390:78: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:12410:13: error[E0308]: `?` operator has incompatible types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:12426:9: error[E0308]: arguments to this function are incorrect
+crates/kiln-model/src/forward.rs:12428:19: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:12435:43: error[E0308]: arguments to this method are incorrect
+crates/kiln-model/src/forward.rs:12436:27: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:12439:39: error[E0308]: arguments to this method are incorrect
+crates/kiln-model/src/forward.rs:12440:23: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:12475:29: error[E0599]: no method named `to_scalar` found for struct `kiln_tensor::Tensor` in the current scope: method not found in `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:12593:38: error[E0308]: arguments to this method are incorrect
+crates/kiln-model/src/forward.rs:12713:13: error[E0308]: arguments to this method are incorrect
+crates/kiln-model/src/forward.rs:12738:41: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:12748:43: error[E0308]: arguments to this method are incorrect
+crates/kiln-model/src/forward.rs:12939:17: error[E0308]: arguments to this function are incorrect
+crates/kiln-model/src/forward.rs:12940:17: error[E0308]: arguments to this function are incorrect
+crates/kiln-model/src/forward.rs:12989:32: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:12989:39: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:13166:36: error[E0308]: arguments to this method are incorrect
+crates/kiln-model/src/forward.rs:13167:23: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:13457:10: error[E0599]: no method named `slice_set` found for mutable reference `&mut kiln_tensor::Tensor` in the current scope: method not found in `&mut kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:13485:13: error[E0599]: `kiln_tensor::Tensor` is not an iterator: `kiln_tensor::Tensor` is not an iterator
+crates/kiln-model/src/forward.rs:13500:13: error[E0599]: `kiln_tensor::Tensor` is not an iterator: `kiln_tensor::Tensor` is not an iterator
+crates/kiln-model/src/forward.rs:13528:36: error[E0308]: arguments to this method are incorrect
+crates/kiln-model/src/forward.rs:13529:23: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:13722:67: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:13734:17: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:13743:67: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:13746:25: error[E0308]: arguments to this method are incorrect
+crates/kiln-model/src/forward.rs:13749:17: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:13759:27: error[E0308]: `?` operator has incompatible types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:13763:63: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:13766:13: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:13845:63: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:13879:13: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:13894:63: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:13904:13: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:13922:67: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:13923:37: error[E0308]: arguments to this method are incorrect
+crates/kiln-model/src/forward.rs:13927:17: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:13937:33: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:13954:63: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:13961:25: error[E0308]: arguments to this method are incorrect
+crates/kiln-model/src/forward.rs:13993:64: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:13996:64: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:14066:21: error[E0308]: `match` arms have incompatible types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:14078:13: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:14089:63: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:14102:31: error[E0308]: arguments to this method are incorrect
+crates/kiln-model/src/forward.rs:14116:25: error[E0308]: `match` arms have incompatible types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:14128:13: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:14143:63: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:14148:13: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:14159:59: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:14187:9: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:14217:13: error[E0308]: arguments to this method are incorrect
+crates/kiln-model/src/forward.rs:14217:5: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:14238:13: error[E0308]: arguments to this method are incorrect
+crates/kiln-model/src/forward.rs:14238:5: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:14288:21: error[E0308]: arguments to this method are incorrect
+crates/kiln-model/src/forward.rs:14943:19: error[E0061]: this function takes 2 arguments but 3 arguments were supplied
+crates/kiln-model/src/forward.rs:15142:32: error[E0308]: mismatched types: expected `&[_]`, found `Vec<f32>`
+crates/kiln-model/src/forward.rs:15202:52: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:15205:52: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:15565:56: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:15677:56: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:15680:56: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:15777:14: error[E0599]: `kiln_tensor::Tensor` is not an iterator: `kiln_tensor::Tensor` is not an iterator
+crates/kiln-model/src/forward.rs:15925:58: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:16078:49: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:16083:57: error[E0308]: arguments to this method are incorrect
+crates/kiln-model/src/forward.rs:16166:13: error[E0308]: `if` and `else` have incompatible types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:16176:9: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:16191:65: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:16195:65: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:16349:53: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:16393:29: error[E0308]: arguments to this method are incorrect
+crates/kiln-model/src/forward.rs:16410:25: error[E0308]: `match` arms have incompatible types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:16417:33: error[E0308]: arguments to this method are incorrect
+crates/kiln-model/src/forward.rs:16438:37: error[E0308]: arguments to this function are incorrect
+crates/kiln-model/src/forward.rs:16446:79: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:16448:45: error[E0308]: `match` arms have incompatible types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:16476:29: error[E0308]: arguments to this function are incorrect
+crates/kiln-model/src/forward.rs:16484:71: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:16486:37: error[E0308]: `match` arms have incompatible types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:16520:13: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:16538:53: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:16559:37: error[E0308]: arguments to this function are incorrect
+crates/kiln-model/src/forward.rs:16563:33: error[E0308]: `match` arms have incompatible types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:16570:39: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:16594:13: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:16613:53: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:16798:21: error[E0308]: `if` and `else` have incompatible types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:16803:13: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:16914:57: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:16915:29: error[E0308]: arguments to this method are incorrect
+crates/kiln-model/src/forward.rs:16931:17: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:16950:61: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:16951:54: error[E0308]: arguments to this method are incorrect
+crates/kiln-model/src/forward.rs:16965:34: error[E0308]: arguments to this function are incorrect
+crates/kiln-model/src/forward.rs:16967:26: error[E0308]: arguments to this method are incorrect
+crates/kiln-model/src/forward.rs:16983:21: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:16990:47: error[E0308]: arguments to this method are incorrect
+crates/kiln-model/src/forward.rs:17179:23: error[E0308]: arguments to this function are incorrect
+crates/kiln-model/src/forward.rs:17181:29: error[E0308]: `match` arms have incompatible types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:17185:23: error[E0308]: arguments to this function are incorrect
+crates/kiln-model/src/forward.rs:17187:29: error[E0308]: `match` arms have incompatible types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:17212:53: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:17217:22: error[E0308]: arguments to this method are incorrect
+crates/kiln-model/src/forward.rs:17222:21: error[E0308]: `if` and `else` have incompatible types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:17231:13: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:17251:53: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:17253:38: error[E0308]: mismatched types: expected `candle_core::DType`, found `kiln_tensor::DType`
+crates/kiln-model/src/forward.rs:17260:17: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:17266:44: error[E0308]: arguments to this function are incorrect
+crates/kiln-model/src/forward.rs:17267:42: error[E0308]: arguments to this function are incorrect
+crates/kiln-model/src/forward.rs:17281:21: error[E0308]: `match` arms have incompatible types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:17285:38: error[E0308]: mismatched types: expected `candle_core::DType`, found `kiln_tensor::DType`
+crates/kiln-model/src/forward.rs:17286:13: error[E0308]: arguments to this function are incorrect
+crates/kiln-model/src/forward.rs:17302:26: error[E0308]: arguments to this function are incorrect
+crates/kiln-model/src/forward.rs:17330:41: error[E0308]: mismatched types: expected `candle_core::DType`, found `kiln_tensor::DType`
+crates/kiln-model/src/forward.rs:17341:72: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:17342:41: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:17351:37: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:17352:40: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:17353:37: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:17409:13: error[E0308]: arguments to this function are incorrect
+crates/kiln-model/src/forward.rs:17424:13: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:17199:12: error[E0308]: `if` and `else` have incompatible types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:17441:49: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:17469:9: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:17490:49: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:17496:25: error[E0308]: arguments to this function are incorrect
+crates/kiln-model/src/forward.rs:17505:25: error[E0308]: arguments to this function are incorrect
+crates/kiln-model/src/forward.rs:17513:13: error[E0308]: `if` and `else` have incompatible types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:17542:9: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:17564:49: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:17578:9: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:17589:66: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:17592:66: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:17638:45: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:17645:53: error[E0308]: mismatched types: expected `kiln_tensor::DType`, found `candle_core::DType`
+crates/kiln-model/src/forward.rs:17648:40: error[E0308]: mismatched types: expected `kiln_tensor::DType`, found `candle_core::DType`
+crates/kiln-model/src/forward.rs:17651:56: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:17656:37: error[E0277]: the trait bound `kiln_tensor::Tensor: Borrow<candle_core::Tensor>` is not satisfied: the trait `Borrow<candle_core::Tensor>` is not implemented for `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:17656:31: error[E0308]: `?` operator has incompatible types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:17660:36: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:17661:23: error[E0308]: `?` operator has incompatible types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:17663:19: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:17752:28: error[E0277]: the trait bound `kiln_tensor::Shape: From<((), usize, usize, usize)>` is not satisfied: the trait `From<((), usize, usize, usize)>` is not implemented for `kiln_tensor::Shape`
+crates/kiln-model/src/forward.rs:17753:29: error[E0277]: the trait bound `kiln_tensor::Shape: From<((), usize, usize)>` is not satisfied: the trait `From<((), usize, usize)>` is not implemented for `kiln_tensor::Shape`
+crates/kiln-model/src/forward.rs:17821:39: error[E0277]: the trait bound `kiln_tensor::Shape: From<((), usize, usize, usize)>` is not satisfied: the trait `From<((), usize, usize, usize)>` is not implemented for `kiln_tensor::Shape`
+crates/kiln-model/src/forward.rs:17826:26: error[E0277]: the trait bound `kiln_tensor::Shape: From<((), usize, usize)>` is not satisfied: the trait `From<((), usize, usize)>` is not implemented for `kiln_tensor::Shape`
+crates/kiln-model/src/forward.rs:17829:28: error[E0277]: the trait bound `kiln_tensor::Shape: From<((), usize, usize, usize)>` is not satisfied: the trait `From<((), usize, usize, usize)>` is not implemented for `kiln_tensor::Shape`
+crates/kiln-model/src/forward.rs:17864:14: error[E0277]: the trait bound `kiln_tensor::Shape: From<((), usize, usize, usize)>` is not satisfied: the trait `From<((), usize, usize, usize)>` is not implemented for `kiln_tensor::Shape`
+crates/kiln-model/src/forward.rs:17873:14: error[E0277]: the trait bound `kiln_tensor::Shape: From<((), usize, usize, usize)>` is not satisfied: the trait `From<((), usize, usize, usize)>` is not implemented for `kiln_tensor::Shape`
+crates/kiln-model/src/forward.rs:17964:35: error[E0277]: the trait bound `kiln_tensor::Shape: From<((), usize, usize, usize)>` is not satisfied: the trait `From<((), usize, usize, usize)>` is not implemented for `kiln_tensor::Shape`
+crates/kiln-model/src/forward.rs:17969:22: error[E0277]: the trait bound `kiln_tensor::Shape: From<((), usize, usize)>` is not satisfied: the trait `From<((), usize, usize)>` is not implemented for `kiln_tensor::Shape`
+crates/kiln-model/src/forward.rs:17975:31: error[E0277]: the trait bound `kiln_tensor::Shape: From<((), usize, usize, usize)>` is not satisfied: the trait `From<((), usize, usize, usize)>` is not implemented for `kiln_tensor::Shape`
+crates/kiln-model/src/forward.rs:17979:23: error[E0277]: the trait bound `kiln_tensor::Shape: From<((), usize, usize, usize)>` is not satisfied: the trait `From<((), usize, usize, usize)>` is not implemented for `kiln_tensor::Shape`
+crates/kiln-model/src/forward.rs:17980:23: error[E0277]: the trait bound `kiln_tensor::Shape: From<((), usize, usize, usize)>` is not satisfied: the trait `From<((), usize, usize, usize)>` is not implemented for `kiln_tensor::Shape`
+crates/kiln-model/src/forward.rs:18098:72: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:18102:74: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:18118:53: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:18126:72: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:18130:72: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:18142:13: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:18163:36: error[E0308]: arguments to this function are incorrect
+crates/kiln-model/src/forward.rs:18179:27: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:18181:23: error[E0308]: `?` operator has incompatible types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:18185:13: error[E0308]: arguments to this function are incorrect
+crates/kiln-model/src/forward.rs:18187:23: error[E0308]: `?` operator has incompatible types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:18266:30: error[E0308]: arguments to this function are incorrect
+crates/kiln-model/src/forward.rs:18282:23: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:18284:19: error[E0308]: `?` operator has incompatible types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:18290:18: error[E0277]: the trait bound `kiln_tensor::Shape: From<((), usize, usize)>` is not satisfied: the trait `From<((), usize, usize)>` is not implemented for `kiln_tensor::Shape`
+crates/kiln-model/src/forward.rs:18350:14: error[E0277]: the trait bound `kiln_tensor::Shape: From<((), usize, usize, usize)>` is not satisfied: the trait `From<((), usize, usize, usize)>` is not implemented for `kiln_tensor::Shape`
+crates/kiln-model/src/forward.rs:18361:14: error[E0277]: the trait bound `kiln_tensor::Shape: From<((), usize, usize, usize)>` is not satisfied: the trait `From<((), usize, usize, usize)>` is not implemented for `kiln_tensor::Shape`
+crates/kiln-model/src/forward.rs:18390:26: error[E0277]: the trait bound `kiln_tensor::Shape: From<((), usize, usize, usize)>` is not satisfied: the trait `From<((), usize, usize, usize)>` is not implemented for `kiln_tensor::Shape`
+crates/kiln-model/src/forward.rs:18410:26: error[E0277]: the trait bound `kiln_tensor::Shape: From<((), usize, usize)>` is not satisfied: the trait `From<((), usize, usize)>` is not implemented for `kiln_tensor::Shape`
+crates/kiln-model/src/forward.rs:18416:30: error[E0277]: the trait bound `kiln_tensor::Shape: From<((), usize, usize, usize)>` is not satisfied: the trait `From<((), usize, usize, usize)>` is not implemented for `kiln_tensor::Shape`
+crates/kiln-model/src/forward.rs:18482:79: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:18483:31: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:18501:77: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:18502:27: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:18646:13: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:18682:13: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:18700:35: error[E0277]: the trait bound `kiln_tensor::Shape: From<((), usize, usize, usize)>` is not satisfied: the trait `From<((), usize, usize, usize)>` is not implemented for `kiln_tensor::Shape`
+crates/kiln-model/src/forward.rs:18706:22: error[E0277]: the trait bound `kiln_tensor::Shape: From<((), usize, usize)>` is not satisfied: the trait `From<((), usize, usize)>` is not implemented for `kiln_tensor::Shape`
+crates/kiln-model/src/forward.rs:18734:13: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:18763:13: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:18776:13: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:18786:13: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:18799:49: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:18802:13: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:18828:36: error[E0308]: arguments to this function are incorrect
+crates/kiln-model/src/forward.rs:18845:70: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:18850:13: error[E0308]: arguments to this function are incorrect
+crates/kiln-model/src/forward.rs:18853:70: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:18873:13: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:18884:13: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:18909:13: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:18915:14: error[E0308]: arguments to this method are incorrect
+crates/kiln-model/src/forward.rs:18918:13: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:18927:9: error[E0308]: `if` and `else` have incompatible types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:18935:13: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:18952:13: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:18970:13: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:18978:13: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:18991:13: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:18998:13: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:19009:13: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:19016:13: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:19026:13: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:19033:13: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:19053:34: error[E0308]: arguments to this function are incorrect
+crates/kiln-model/src/forward.rs:19078:72: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:19086:13: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:19091:70: error[E0277]: the trait bound `kiln_tensor::Shape: From<((), usize, usize)>` is not satisfied: the trait `From<((), usize, usize)>` is not implemented for `kiln_tensor::Shape`
+crates/kiln-model/src/forward.rs:19097:13: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:19335:63: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:19339:21: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:19348:17: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:19361:71: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:19369:25: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:19397:71: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:19398:31: error[E0308]: arguments to this function are incorrect
+crates/kiln-model/src/forward.rs:19402:25: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:19379:17: error[E0308]: `if` and `else` have incompatible types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:19421:67: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:19427:21: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:19433:67: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:19434:27: error[E0308]: arguments to this function are incorrect
+crates/kiln-model/src/forward.rs:19444:21: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:19457:67: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:19459:76: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:19461:21: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:19467:76: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:19469:67: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:19482:21: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:19488:72: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:19575:59: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:19579:13: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:19588:55: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:19613:78: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:19619:79: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:19621:79: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:19623:80: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:19625:80: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:19647:31: error[E0308]: arguments to this method are incorrect
+crates/kiln-model/src/forward.rs:19647:17: error[E0308]: `if` and `else` have incompatible types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:19680:9: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:19693:55: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:19696:9: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:19702:64: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:19704:55: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:19716:36: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:19717:60: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:19841:34: error[E0061]: this function takes 2 arguments but 3 arguments were supplied
+crates/kiln-model/src/forward.rs:19848:32: error[E0277]: the trait bound `i32: kiln_tensor::Element` is not satisfied: the trait `kiln_tensor::Element` is not implemented for `i32`
+crates/kiln-model/src/forward.rs:19848:13: error[E0061]: this function takes 2 arguments but 3 arguments were supplied
+crates/kiln-model/src/forward.rs:20273:38: error[E0061]: this function takes 2 arguments but 3 arguments were supplied
+crates/kiln-model/src/forward.rs:20280:36: error[E0277]: the trait bound `i32: kiln_tensor::Element` is not satisfied: the trait `kiln_tensor::Element` is not implemented for `i32`
+crates/kiln-model/src/forward.rs:20280:17: error[E0061]: this function takes 2 arguments but 3 arguments were supplied
+crates/kiln-model/src/forward.rs:20302:59: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:20313:13: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:20323:59: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:20325:39: error[E0277]: the trait bound `kiln_tensor::Shape: From<((), usize, usize, usize)>` is not satisfied: the trait `From<((), usize, usize, usize)>` is not implemented for `kiln_tensor::Shape`
+crates/kiln-model/src/forward.rs:20330:26: error[E0277]: the trait bound `kiln_tensor::Shape: From<((), usize, usize)>` is not satisfied: the trait `From<((), usize, usize)>` is not implemented for `kiln_tensor::Shape`
+crates/kiln-model/src/forward.rs:20333:28: error[E0277]: the trait bound `kiln_tensor::Shape: From<((), usize, usize, usize)>` is not satisfied: the trait `From<((), usize, usize, usize)>` is not implemented for `kiln_tensor::Shape`
+crates/kiln-model/src/forward.rs:20336:13: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:20344:23: error[E0277]: the trait bound `kiln_tensor::Shape: From<((), usize, usize, usize)>` is not satisfied: the trait `From<((), usize, usize, usize)>` is not implemented for `kiln_tensor::Shape`
+crates/kiln-model/src/forward.rs:20345:23: error[E0277]: the trait bound `kiln_tensor::Shape: From<((), usize, usize, usize)>` is not satisfied: the trait `From<((), usize, usize, usize)>` is not implemented for `kiln_tensor::Shape`
+crates/kiln-model/src/forward.rs:20348:59: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:20352:13: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:20361:59: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:20404:13: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:20417:59: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:20431:37: error[E0308]: arguments to this method are incorrect
+crates/kiln-model/src/forward.rs:20450:29: error[E0308]: arguments to this method are incorrect
+crates/kiln-model/src/forward.rs:20461:13: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:20496:59: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:20546:17: error[E0061]: this function takes 2 arguments but 3 arguments were supplied
+crates/kiln-model/src/forward.rs:20548:67: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:20551:21: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:20559:32: error[E0308]: arguments to this method are incorrect
+crates/kiln-model/src/forward.rs:20559:24: error[E0308]: `?` operator has incompatible types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:20579:18: error[E0308]: arguments to this method are incorrect
+crates/kiln-model/src/forward.rs:20578:24: error[E0308]: `?` operator has incompatible types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:20624:13: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:20644:59: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:20648:13: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:20657:59: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:20668:13: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:20779:59: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:20790:13: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:20801:68: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:20802:64: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:20803:64: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:20809:73: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:20815:57: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:20816:57: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:20817:57: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:20864:63: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:20902:33: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:20908:35: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:20908:38: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:20908:41: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/forward.rs:20932:63: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:20935:43: error[E0277]: the trait bound `kiln_tensor::Shape: From<((), usize, usize, usize)>` is not satisfied: the trait `From<((), usize, usize, usize)>` is not implemented for `kiln_tensor::Shape`
+crates/kiln-model/src/forward.rs:20940:30: error[E0277]: the trait bound `kiln_tensor::Shape: From<((), usize, usize)>` is not satisfied: the trait `From<((), usize, usize)>` is not implemented for `kiln_tensor::Shape`
+crates/kiln-model/src/forward.rs:20943:39: error[E0277]: the trait bound `kiln_tensor::Shape: From<((), usize, usize, usize)>` is not satisfied: the trait `From<((), usize, usize, usize)>` is not implemented for `kiln_tensor::Shape`
+crates/kiln-model/src/forward.rs:20947:17: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:20957:69: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:20961:84: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:20963:76: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:20965:87: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:20969:31: error[E0277]: the trait bound `kiln_tensor::Shape: From<((), usize, usize, usize)>` is not satisfied: the trait `From<((), usize, usize, usize)>` is not implemented for `kiln_tensor::Shape`
+crates/kiln-model/src/forward.rs:20975:70: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:20976:70: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:20981:63: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:20987:17: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:20996:68: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:20997:68: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:21001:71: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:21002:71: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:21008:64: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:21009:64: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:21016:63: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:21024:17: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:21033:68: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:21034:68: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:21042:61: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:21043:61: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:21049:23: error[E0277]: the trait bound `kiln_tensor::Shape: From<((), usize, usize, usize)>` is not satisfied: the trait `From<((), usize, usize, usize)>` is not implemented for `kiln_tensor::Shape`
+crates/kiln-model/src/forward.rs:21063:59: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:21067:13: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:21090:59: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:21094:13: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:21100:59: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:21105:17: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:21114:17: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:21120:63: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:21134:17: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:21143:17: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:21153:63: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:21156:33: error[E0308]: arguments to this method are incorrect
+crates/kiln-model/src/forward.rs:21164:26: error[E0308]: arguments to this method are incorrect
+crates/kiln-model/src/forward.rs:21175:17: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:21186:63: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:21189:17: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:21196:67: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:21198:63: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:21211:17: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:21219:65: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:21236:59: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:21242:44: error[E0308]: arguments to this method are incorrect
+crates/kiln-model/src/forward.rs:21283:29: error[E0308]: arguments to this method are incorrect
+crates/kiln-model/src/forward.rs:21294:18: error[E0308]: arguments to this method are incorrect
+crates/kiln-model/src/forward.rs:21304:13: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:21426:29: error[E0308]: arguments to this method are incorrect
+crates/kiln-model/src/forward.rs:21493:50: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:21494:50: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:21492:21: error[E0308]: `match` arms have incompatible types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:21503:55: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:21508:25: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:21534:67: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:21548:65: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:21570:67: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:21584:65: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:21612:65: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:21613:65: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:21614:65: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:21616:66: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:21626:63: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:21645:17: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:21656:63: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:21660:17: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:21675:78: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:21680:63: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:21683:17: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:21698:65: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:21703:63: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:21714:17: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:21723:70: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:21729:63: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:21733:63: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:21737:17: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:21746:72: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:21750:63: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:21753:63: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:21764:17: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:21773:68: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:21776:61: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:21783:59: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:21795:13: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:21803:59: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:21806:13: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:21818:59: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:21822:13: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:21833:59: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:21836:13: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:21846:59: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:21849:13: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:21858:59: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:21861:13: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:21872:59: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:21873:70: error[E0277]: the trait bound `kiln_tensor::Shape: From<((), usize, usize)>` is not satisfied: the trait `From<((), usize, usize)>` is not implemented for `kiln_tensor::Shape`
+crates/kiln-model/src/forward.rs:21879:13: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:21888:66: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:21892:59: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:21896:13: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:21905:68: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:21909:59: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:21913:59: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:21924:13: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:21933:64: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:21936:57: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:21982:28: error[E0308]: mismatched types: expected `&[_]`, found `Vec<f32>`
+crates/kiln-model/src/forward.rs:22133:39: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:22136:47: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:22169:14: error[E0277]: the trait bound `kiln_tensor::Shape: From<((), usize, usize, usize)>` is not satisfied: the trait `From<((), usize, usize, usize)>` is not implemented for `kiln_tensor::Shape`
+crates/kiln-model/src/forward.rs:22180:14: error[E0277]: the trait bound `kiln_tensor::Shape: From<((), usize, usize, usize)>` is not satisfied: the trait `From<((), usize, usize, usize)>` is not implemented for `kiln_tensor::Shape`
+crates/kiln-model/src/forward.rs:22209:26: error[E0277]: the trait bound `kiln_tensor::Shape: From<((), usize, usize, usize)>` is not satisfied: the trait `From<((), usize, usize, usize)>` is not implemented for `kiln_tensor::Shape`
+crates/kiln-model/src/forward.rs:22227:26: error[E0277]: the trait bound `kiln_tensor::Shape: From<((), usize, usize)>` is not satisfied: the trait `From<((), usize, usize)>` is not implemented for `kiln_tensor::Shape`
+crates/kiln-model/src/forward.rs:22233:30: error[E0277]: the trait bound `kiln_tensor::Shape: From<((), usize, usize, usize)>` is not satisfied: the trait `From<((), usize, usize, usize)>` is not implemented for `kiln_tensor::Shape`
+crates/kiln-model/src/forward.rs:22451:71: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:22457:66: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:22489:68: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:22498:71: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:22507:70: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:22512:65: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:22540:61: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:22837:13: error[E0061]: this function takes 2 arguments but 3 arguments were supplied
+crates/kiln-model/src/forward.rs:22840:13: error[E0061]: this function takes 2 arguments but 3 arguments were supplied
+crates/kiln-model/src/forward.rs:22894:21: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:24703:10: error[E0599]: no method named `slice_set` found for reference `&kiln_tensor::Tensor` in the current scope: method not found in `&kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:24946:33: error[E0061]: this function takes 2 arguments but 3 arguments were supplied
+crates/kiln-model/src/forward.rs:24979:48: error[E0061]: this function takes 2 arguments but 3 arguments were supplied
+crates/kiln-model/src/forward.rs:25277:69: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:25299:68: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:25306:66: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:25337:66: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:25362:65: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:25465:76: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:25480:75: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:25488:72: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:25602:17: error[E0308]: mismatched types: expected `&[(&str, &Tensor)]`, found `&[(&str, &Tensor); 8]`
+crates/kiln-model/src/forward.rs:25670:55: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:25671:60: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:25672:58: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:25673:57: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:25679:60: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:25680:50: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:25781:45: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:25798:59: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:25837:41: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:25846:41: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:25864:45: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:25910:45: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:25916:45: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:26032:89: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:26035:89: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:26061:25: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:26085:80: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:26089:45: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:26104:83: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:26109:41: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:26118:41: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:26180:83: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:26199:83: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:26218:45: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:26298:35: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/forward.rs:26330:35: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/generate.rs:1149:9: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/generate.rs:1160:27: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/generate.rs:1164:37: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/generate.rs:1276:47: error[E0308]: mismatched types: expected `candle_core::Device`, found `kiln_tensor::Device`
+crates/kiln-model/src/generate.rs:1277:43: error[E0308]: mismatched types: expected `candle_core::Device`, found `kiln_tensor::Device`
+crates/kiln-model/src/generate.rs:1325:60: error[E0308]: mismatched types: expected `candle_core::Device`, found `kiln_tensor::Device`
+crates/kiln-model/src/generate.rs:1337:49: error[E0308]: mismatched types: expected `candle_core::Device`, found `kiln_tensor::Device`
+crates/kiln-model/src/generate.rs:1420:52: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/generate.rs:1501:13: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/generate.rs:1511:13: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/generate.rs:2285:47: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/generate.rs:2292:46: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/generate.rs:2332:49: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/generate.rs:2335:25: error[E0308]: `?` operator has incompatible types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/generate.rs:2383:45: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/generate.rs:2517:46: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/generate.rs:2640:52: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/generate.rs:2647:47: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/generate.rs:2893:29: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/generate.rs:2903:25: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/generate.rs:3454:27: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/generate.rs:3456:25: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/generate.rs:3581:46: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/generate.rs:3621:27: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/generate.rs:3623:25: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/generate.rs:3713:43: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/generate.rs:3718:21: error[E0308]: `?` operator has incompatible types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/generate.rs:3766:45: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/generate.rs:3892:46: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/generate.rs:3927:44: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/generate.rs:4075:43: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/generate.rs:4078:17: error[E0308]: `?` operator has incompatible types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/generate.rs:4111:17: error[E0308]: `?` operator has incompatible types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/generate.rs:4545:13: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/generate.rs:4554:13: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/generate.rs:4568:46: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/generate.rs:4600:44: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/generate.rs:4676:17: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/generate.rs:4698:22: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/generate.rs:4993:13: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/generate.rs:5002:13: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/generate.rs:5015:46: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/generate.rs:5045:44: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/generate.rs:5097:17: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/generate.rs:5116:22: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/generate.rs:5289:50: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/generate.rs:5322:52: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/generate.rs:5514:29: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/generate.rs:5592:59: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/generate.rs:5604:25: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/generate.rs:5904:46: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/generate.rs:5975:47: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/generate.rs:5989:13: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/generate.rs:6020:46: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/generate.rs:6051:13: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/generate.rs:6176:46: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/generate.rs:6212:44: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/generate.rs:6374:46: error[E0308]: mismatched types: expected `&Device`, found `Device`
+crates/kiln-model/src/generate.rs:6420:27: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/generate.rs:6422:25: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/packed_weight_registry.rs:227:13: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/packed_weight_registry.rs:233:13: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/packed_weight_registry.rs:239:13: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/packed_weight_registry.rs:247:17: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/packed_weight_registry.rs:253:17: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/packed_weight_registry.rs:262:25: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/packed_weight_registry.rs:265:76: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/packed_weight_registry.rs:266:76: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/packed_weight_registry.rs:267:76: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/packed_weight_registry.rs:271:25: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/packed_weight_registry.rs:277:25: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/packed_weight_registry.rs:286:25: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/packed_weight_registry.rs:292:25: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/packed_weight_registry.rs:298:25: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/packed_weight_registry.rs:304:25: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/packed_weight_registry.rs:310:25: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/packed_weight_registry.rs:316:25: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/packed_weight_registry.rs:322:25: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/packed_weight_registry.rs:328:25: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/packed_weight_registry.rs:334:25: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/packed_weight_registry.rs:340:25: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/packed_weight_registry.rs:350:17: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/packed_weight_registry.rs:356:17: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/packed_weight_registry.rs:362:17: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/sampling.rs:57:57: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/sampling.rs:81:68: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/speculative.rs:150:8: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/speculative.rs:169:24: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/speculative.rs:169:5: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/speculative.rs:672:44: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/speculative.rs:854:9: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/speculative.rs:868:46: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/speculative.rs:898:22: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/speculative.rs:931:57: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/speculative.rs:933:13: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/speculative.rs:969:52: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/speculative.rs:972:55: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/speculative.rs:1045:9: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/tape_forward.rs:1005:13: error[E0308]: mismatched types: expected `kiln_tensor::Tensor`, found `candle_core::Tensor`
+crates/kiln-model/src/tape_forward.rs:1025:61: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/tape_forward.rs:2178:21: error[E0308]: arguments to this function are incorrect
+crates/kiln-model/src/tape_forward.rs:2204:24: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/tape_forward.rs:2205:24: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/tape_forward.rs:2206:24: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/tape_forward.rs:2207:24: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/tape_forward.rs:2208:24: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/tape_forward.rs:2249:15: error[E0308]: arguments to this function are incorrect
+crates/kiln-model/src/tape_forward.rs:2254:31: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/tape_forward.rs:2256:13: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/tape_forward.rs:2869:18: error[E0308]: arguments to this function are incorrect
+crates/kiln-model/src/tape_forward.rs:2878:69: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/tape_forward.rs:2976:21: error[E0308]: arguments to this function are incorrect
+crates/kiln-model/src/tape_forward.rs:2997:24: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/tape_forward.rs:2998:24: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/tape_forward.rs:2999:24: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/tape_forward.rs:3632:21: error[E0308]: arguments to this function are incorrect
+crates/kiln-model/src/tape_forward.rs:3652:24: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/tape_forward.rs:3653:24: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/tape_forward.rs:3654:24: error[E0308]: mismatched types: expected `candle_core::Tensor`, found `kiln_tensor::Tensor`
+crates/kiln-model/src/forward.rs:2347:11: error[E0004]: non-exhaustive patterns: `&_` not covered: pattern `&_` not covered
+warning: `kiln-model` (lib) generated 1 warning
+error: could not compile `kiln-model` (lib) due to 893 previous errors; 1 warning emitted
+

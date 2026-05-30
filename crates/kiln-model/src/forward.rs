@@ -2346,7 +2346,11 @@ fn synchronize_for_profile(device: &Device) -> Result<()> {
     // `synchronize`. Bridge to a candle device for the (profiling-only) sync.
     match device {
         Device::Cpu => Ok(()),
-        Device::Cuda(_) | Device::Metal(_) => {
+        // Any async GPU backend (CUDA / Metal / Vulkan) needs a device
+        // sync before timing. kt `Device` is `#[non_exhaustive]`, so the
+        // wildcard arm both folds in future backends and satisfies the
+        // exhaustiveness check for this out-of-crate match.
+        _ => {
             let candle_device = kiln_kt_bridge::candle_device_from_kt(device)
                 .map_err(|e| anyhow::anyhow!("synchronize_for_profile: {e}"))?;
             candle_device.synchronize().map_err(Into::into)
