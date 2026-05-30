@@ -1138,20 +1138,18 @@ pub fn append_prefix_block_table(cached_blocks: &[u32], allocated_blocks: &[u32]
 /// doesn't apply.
 fn run_legacy_lm_head_sample_batch(
     backend: &dyn crate::backend::BackendRuntime,
-    hidden: &candle_core::Tensor,
+    hidden: &kiln_tensor::Tensor,
     weights: &GpuWeights,
     config: &kiln_core::config::ModelConfig,
     params: &[SamplingParams],
     states: &[&mut PagedBatchedDecodeState],
 ) -> Result<Vec<TokenId>> {
-    // #1082: `model_forward_head_backend_decode_if` is kt-typed; the
-    // `hidden` activation arriving here is still candle. Bridge in, then
-    // bridge the kt logits back out to candle for the host sampler island.
-    let hidden_kt = crate::forward::candle_to_kt_activation(hidden)
-        .context("batched decode lm head: hidden candle->kt")?;
+    // #1082: `model_forward_head_backend_decode_if` is kt-typed and `hidden`
+    // arrives kt from the batched decode forward; run the kt lm head, then
+    // bridge the kt logits to candle for the host sampler island below.
     let logits_kt = crate::forward::model_forward_head_backend_decode_if(
         Some(backend),
-        &hidden_kt,
+        hidden,
         weights,
         config,
     )
@@ -2354,23 +2352,23 @@ impl ModelRunner {
                     if let Some(cancel) = cancel {
                         cancel.report_prefill_tokens_completed(prefill_tokens.len() as u64);
                     }
-                    PrefillSampleSource::Logits(logits)
+                    // #1082: kt logits -> candle for the candle-typed sample source.
+                    PrefillSampleSource::Logits(crate::forward::kt_logits_to_candle(&logits)?)
                 } else {
-                    PrefillSampleSource::Logits(
-                        model_forward_paged_streaming_with_progress(
-                            &*self.backend,
-                            prefill_tokens,
-                            &self.weights,
-                            &self.config,
-                            pc_guard,
-                            block_table,
-                            cached_tokens,
-                            Some(&mut linear_state),
-                            self.active_lora.as_ref(),
-                            cancel,
-                        )
-                        .context("prefill forward pass (paged prefix cache, streaming) failed")?,
+                    let logits = model_forward_paged_streaming_with_progress(
+                        &*self.backend,
+                        prefill_tokens,
+                        &self.weights,
+                        &self.config,
+                        pc_guard,
+                        block_table,
+                        cached_tokens,
+                        Some(&mut linear_state),
+                        self.active_lora.as_ref(),
+                        cancel,
                     )
+                    .context("prefill forward pass (paged prefix cache, streaming) failed")?;
+                    PrefillSampleSource::Logits(crate::forward::kt_logits_to_candle(&logits)?)
                 }
             } else if use_greedy_prefill_token {
                 PrefillSampleSource::GreedyToken(
@@ -2405,7 +2403,8 @@ impl ModelRunner {
                 if let Some(cancel) = cancel {
                     cancel.report_prefill_tokens_completed(prefill_tokens.len() as u64);
                 }
-                PrefillSampleSource::Logits(logits)
+                // #1082: kt logits -> candle for the candle-typed sample source.
+                PrefillSampleSource::Logits(crate::forward::kt_logits_to_candle(&logits)?)
             }
         };
 
@@ -2639,7 +2638,8 @@ impl ModelRunner {
                 if let Some(cancel) = cancel {
                     cancel.report_prefill_tokens_completed(prefill_tokens.len() as u64);
                 }
-                logits
+                // #1082: kt logits -> candle for the candle sampler below.
+                crate::forward::kt_logits_to_candle(&logits)?
             } else {
                 let logits = model_forward_paged_last_token(
                     &*self.backend,
@@ -2657,7 +2657,8 @@ impl ModelRunner {
                 if let Some(cancel) = cancel {
                     cancel.report_prefill_tokens_completed(prefill_tokens.len() as u64);
                 }
-                logits
+                // #1082: kt logits -> candle for the candle sampler below.
+                crate::forward::kt_logits_to_candle(&logits)?
             }
         };
         let prefill_duration = prefill_start.elapsed();
@@ -3474,6 +3475,8 @@ impl ModelRunner {
             )
             .context("decode forward pass (paged) failed")?
         };
+        // #1082: kt logits -> candle for the host sampler island.
+        let logits = crate::forward::kt_logits_to_candle(&logits)?;
 
         let token = if params.is_effectively_greedy() {
             greedy_sample(&logits)
@@ -3637,6 +3640,8 @@ impl ModelRunner {
                 logits
             }
         };
+        // #1082: kt logits -> candle for the host sampler island.
+        let logits = crate::forward::kt_logits_to_candle(&logits)?;
 
         let mut seq_len = prompt_tokens.len();
         let mut generated_tokens: Vec<TokenId> = Vec::new();
@@ -3739,20 +3744,20 @@ impl ModelRunner {
         let prefill_source = {
             let pc_guard = lock_paged_cache(paged_cache)?;
             if streaming_prefill {
-                PrefillSampleSource::Logits(
-                    model_forward_paged_streaming(
-                        &*self.backend,
-                        prompt_tokens,
-                        &self.weights,
-                        &self.config,
-                        pc_guard,
-                        block_table,
-                        0,
-                        Some(&mut linear_state),
-                        self.active_lora.as_ref(),
-                    )
-                    .context("prefill forward pass (paged, streaming) failed")?,
+                let logits = model_forward_paged_streaming(
+                    &*self.backend,
+                    prompt_tokens,
+                    &self.weights,
+                    &self.config,
+                    pc_guard,
+                    block_table,
+                    0,
+                    Some(&mut linear_state),
+                    self.active_lora.as_ref(),
                 )
+                .context("prefill forward pass (paged, streaming) failed")?;
+                // #1082: kt logits -> candle for the candle sample source.
+                PrefillSampleSource::Logits(crate::forward::kt_logits_to_candle(&logits)?)
             } else if params.is_effectively_greedy()
                 && matches!(self.backend.device(), kiln_tensor::Device::Metal(_))
             {
@@ -3788,7 +3793,8 @@ impl ModelRunner {
                 if let Some(cancel) = cancel {
                     cancel.report_prefill_tokens_completed(prompt_tokens.len() as u64);
                 }
-                PrefillSampleSource::Logits(logits)
+                // #1082: kt logits -> candle for the candle sample source.
+                PrefillSampleSource::Logits(crate::forward::kt_logits_to_candle(&logits)?)
             }
         };
 
@@ -3943,6 +3949,8 @@ impl ModelRunner {
                 .context("prefill forward pass (paged skip-layer) failed")?
             }
         };
+        // #1082: kt logits -> candle for the host sampler island.
+        let logits = crate::forward::kt_logits_to_candle(&logits)?;
 
         let mut draft_linear_state =
             self.snapshot_draft_linear_state(&linear_state, spec_config)?;
@@ -4099,20 +4107,20 @@ impl ModelRunner {
         let streaming_prefill =
             streaming_prefill_enabled_for(&self.weights.embed_tokens.device(), prompt_tokens.len());
         let prefill_source = if streaming_prefill {
-            PrefillSampleSource::Logits(
-                model_forward_paged_streaming(
-                    &*self.backend,
-                    prompt_tokens,
-                    &self.weights,
-                    &self.config,
-                    paged_cache,
-                    block_table,
-                    0,
-                    Some(&mut linear_state),
-                    self.active_lora.as_ref(),
-                )
-                .context("prefill forward pass (paged, streaming) failed")?,
+            let logits = model_forward_paged_streaming(
+                &*self.backend,
+                prompt_tokens,
+                &self.weights,
+                &self.config,
+                paged_cache,
+                block_table,
+                0,
+                Some(&mut linear_state),
+                self.active_lora.as_ref(),
             )
+            .context("prefill forward pass (paged, streaming) failed")?;
+            // #1082: kt logits -> candle for the candle sample source.
+            PrefillSampleSource::Logits(crate::forward::kt_logits_to_candle(&logits)?)
         } else if params.is_effectively_greedy()
             && matches!(self.backend.device(), kiln_tensor::Device::Metal(_))
         {
@@ -4132,21 +4140,21 @@ impl ModelRunner {
                 .context("greedy prefill forward pass (paged) failed")?,
             )
         } else {
-            PrefillSampleSource::Logits(
-                model_forward_paged_last_token(
-                    &*self.backend,
-                    prompt_tokens,
-                    &self.weights,
-                    &self.config,
-                    paged_cache,
-                    block_table,
-                    0,
-                    Some(&mut linear_state),
-                    self.active_lora.as_ref(),
-                    None,
-                )
-                .context("prefill forward pass (paged) failed")?,
+            let logits = model_forward_paged_last_token(
+                &*self.backend,
+                prompt_tokens,
+                &self.weights,
+                &self.config,
+                paged_cache,
+                block_table,
+                0,
+                Some(&mut linear_state),
+                self.active_lora.as_ref(),
+                None,
             )
+            .context("prefill forward pass (paged) failed")?;
+            // #1082: kt logits -> candle for the candle sample source.
+            PrefillSampleSource::Logits(crate::forward::kt_logits_to_candle(&logits)?)
         };
 
         let mut seq_len = prompt_tokens.len();
