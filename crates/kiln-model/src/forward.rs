@@ -18558,7 +18558,8 @@ pub fn gqa_attention_core_prefill(
                 Some(out) => out,
                 None => {
                     let attn_scores = q.broadcast_matmul(&k.t()?)?;
-                    let attn_scores = (attn_scores / scale)?;
+                    // kt has no `Tensor / f64`; `x / scale == x * (1/scale)`.
+                    let attn_scores = attn_scores.affine(1.0 / scale, 0.0)?;
                     let attn_scores =
                         apply_causal_mask_with_offset(&attn_scores, seq_len, seq_len, 0)?;
                     let attn_weights_softmax = cuda_softmax_last_dim(&attn_scores)?;
@@ -18569,7 +18570,7 @@ pub fn gqa_attention_core_prefill(
         #[cfg(not(feature = "cuda"))]
         {
             let attn_scores = q.broadcast_matmul(&k.t()?)?;
-            let attn_scores = (attn_scores / scale)?;
+            let attn_scores = attn_scores.affine(1.0 / scale, 0.0)?;
             let attn_scores = apply_causal_mask_with_offset(&attn_scores, seq_len, seq_len, 0)?;
             let attn_weights_softmax = cuda_softmax_last_dim(&attn_scores)?;
             attn_weights_softmax.broadcast_matmul(&v)? // [B, nq, T, hd]
@@ -18586,25 +18587,33 @@ pub fn gqa_attention_core_prefill(
     // head-first q/k_he/v_he as inputs; then chains the transpose+reshape so
     // the tape stays connected to o_proj (else it fragments at the reshape).
     #[cfg(feature = "cuda")]
-    if let Some(tape_attn) = crate::tape_forward::try_tape_sdpa_fallback_cuda(
-        &q, &k_he, &v_he, head_dim, &attn_output,
-    )? {
-        // tape_attn is [B, nq, T, hd] on the tape. Chain transpose(1,2) ->
-        // [B, T, nq, hd] then reshape -> [B, T, nq*hd] so the chain reaches
-        // o_proj. Each chaining adapter falls through to its plain candle op
-        // when its gate is off / no scope is active.
-        let transposed = match crate::tape_forward::try_tape_transpose_cuda(&tape_attn, 1, 2)? {
-            Some(t) => t,
-            None => tape_attn.transpose(1, 2)?.contiguous()?,
-        };
-        let (tb, tt, th, td) = transposed.dims4()?;
-        let flat = th * td;
-        if let Some(reshaped) =
-            crate::tape_forward::try_tape_reshape_cuda(&transposed, vec![tb, tt, flat])?
-        {
-            return Ok(reshaped);
+    if crate::tape_forward::tape_forward_enabled() {
+        let q_c = kt_logits_to_candle(&q).context("sdpa-fallback kt->candle q (tape)")?;
+        let k_c = kt_logits_to_candle(&k_he).context("sdpa-fallback kt->candle k_he (tape)")?;
+        let v_c = kt_logits_to_candle(&v_he).context("sdpa-fallback kt->candle v_he (tape)")?;
+        let ao_c =
+            kt_logits_to_candle(&attn_output).context("sdpa-fallback kt->candle attn_out (tape)")?;
+        if let Some(tape_attn) = crate::tape_forward::try_tape_sdpa_fallback_cuda(
+            &q_c, &k_c, &v_c, head_dim, &ao_c,
+        )? {
+            // tape_attn is [B, nq, T, hd] on the candle tape. Chain
+            // transpose(1,2) -> reshape -> [B, T, nq*hd] so the chain reaches
+            // o_proj, then bridge the candle result back to kt.
+            let transposed = match crate::tape_forward::try_tape_transpose_cuda(&tape_attn, 1, 2)? {
+                Some(t) => t,
+                None => tape_attn.transpose(1, 2)?.contiguous()?,
+            };
+            let (tb, tt, th, td) = transposed.dims4()?;
+            let flat = th * td;
+            if let Some(reshaped) =
+                crate::tape_forward::try_tape_reshape_cuda(&transposed, vec![tb, tt, flat])?
+            {
+                return candle_to_kt_activation(&reshaped)
+                    .context("sdpa-fallback candle->kt tape reshaped");
+            }
+            let out = transposed.reshape((tb, tt, flat))?;
+            return candle_to_kt_activation(&out).context("sdpa-fallback candle->kt tape out");
         }
-        return Ok(transposed.reshape((tb, tt, flat))?);
     }
 
     Ok(reshape_hole0_3(
