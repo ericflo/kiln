@@ -10958,6 +10958,24 @@ pub(crate) fn tape_authoritative_enabled() -> bool {
         .unwrap_or(true)
 }
 
+/// (#1082 Inc-0 PR4) The kt tape adapters are **BF16-only** — the fused kernels
+/// they record (`gdn_gates_bf16`, rms_norm, silu, rotary, ...) require BF16
+/// inputs and decline on F32, so on an F32 model the tape produces ZERO LoRA
+/// grads. Pre-PR4 the candle `loss.backward()` overlay silently covered F32;
+/// the kt producer (PR2) has no overlay, so routing F32 through it would yield
+/// an empty grad store = broken F32 training. Gate the kt grad-delivery on BF16
+/// LoRA params; F32 (e.g. the `tiny_config` F32 test model) falls through to
+/// the candle `loss.backward()` path below, which trains F32 correctly.
+/// Production (Qwen3.5-4B) is BF16, so this takes the kt path.
+#[cfg(feature = "cuda")]
+fn lora_params_are_tape_dtype(params: &TrainableLoraParams) -> bool {
+    params
+        .all_vars()
+        .iter()
+        .next()
+        .is_some_and(|v| matches!(v.as_tensor().dtype(), DType::BF16))
+}
+
 /// Tape-authoritative SFT forward/backward (#1082 CP-4 endgame).
 ///
 /// Runs the model forward + cross-entropy loss inside
@@ -11162,7 +11180,10 @@ pub fn standard_forward_backward(
     // `standard_forward_backward_tape_authoritative` is retained `#[allow(
     // dead_code)]` for reversibility (see its doc-comment).
     #[cfg(feature = "cuda")]
-    if tape_authoritative_enabled() && matches!(device, candle_core::Device::Cuda(_)) {
+    if tape_authoritative_enabled()
+        && matches!(device, candle_core::Device::Cuda(_))
+        && lora_params_are_tape_dtype(params)
+    {
         let (loss_val, kt_grads) = standard_forward_backward_tape_authoritative_kt(
             backend,
             input_ids,
@@ -14345,18 +14366,23 @@ pub(crate) mod tests {
             "tape-authoritative loss {loss_a} diverges from candle baseline {loss_cf} (rel {lrel:.4})"
         );
 
-        // (#1082 Inc-0 PR4) `grads_a` is a `GradSource::Kt` now — it carries
-        // ONLY the tape-walk grads (no candle `loss.backward()` overlay). On
-        // this F32 model the BF16-only kt fused adapters all decline, so the
-        // loss->input tape chain dead-ends at the first norm and `num_grad_ids`
-        // is structurally 0 (see `tape_authoritative_grads_match_candle_baseline_bf16`'s
-        // doc — the BF16 test is the authoritative coverage gate). Pre-PR4 this
-        // assert was satisfied by the candle-hack producer's `loss.backward()`
-        // overlay (candle autograd DOES populate F32 grads), NOT by tape
-        // coverage — so it never actually tested the tape path here. We now
-        // REPORT coverage instead of hard-asserting `>0`, matching the test's
-        // own "compared may be 0 — tracked coverage gap, not flaky" stance.
+        // (#1082 Inc-0 PR4) On this F32 model the kt tape adapters are BF16-only
+        // and all decline, so `lora_params_are_tape_dtype(params)` is false and
+        // `standard_forward_backward` routes F32 to the candle path (here the
+        // tape-bridge, since `KILN_USE_TAPE_FORWARD=1`) → `grads_a` is a
+        // `GradSource::Candle` carrying full candle `loss.backward()` grads. So
+        // F32 CUDA training is preserved (routing F32 through the BF16-only kt
+        // producer would have yielded an EMPTY grad store = broken training —
+        // the regression this gate guards against). This test therefore guards
+        // "F32 CUDA training produces grads that match the pure-candle baseline";
+        // the BF16 sibling (`..._bf16`) is the authoritative TAPE-coverage gate.
         let num_grad_ids = grads_a.num_grad_ids();
+        assert!(
+            num_grad_ids > 0,
+            "F32 CUDA training produced an empty grad store — no training signal \
+             (Inc-0 PR4 regression: F32 must route to the candle path, not the \
+             BF16-only kt producer)"
+        );
 
         // Grad parity where the tape routed a param. NOTE: the LoRA projection
         // matmuls are not yet adapter-wired, so `compared` may be 0 — that's a
