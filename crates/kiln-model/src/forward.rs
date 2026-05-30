@@ -8853,15 +8853,12 @@ pub fn rotary_embedding_from_tensor(
                 ) {
                     // Phase 7 (#1082): kt-only. Bit-exact: bottoms out in the
                     // same `kiln_fused_rotary_qk` FFI symbol.
+                    // #1082 forward-flip: kt-native — return kt directly.
                     let (rq_kt, rk_kt) = kiln_rmsnorm_kernel::fused_rotary_qk_kt(
                         &q_kt, &k_kt, &cos_kt, &sin_kt, rotary_dim,
                     )
                     .map_err(|e| anyhow::anyhow!("kt fused_rotary_qk: {e}"))?;
-                    let rq = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&rq_kt)
-                        .with_context(|| "kt-adapter: rotary_qk rq → candle failed")?;
-                    let rk = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&rk_kt)
-                        .with_context(|| "kt-adapter: rotary_qk rk → candle failed")?;
-                    return Ok((rq, rk));
+                    return Ok((rq_kt, rk_kt));
                 }
             }
         }
@@ -8918,15 +8915,13 @@ fn rotary_embedding_from_tables(
                 ) {
                     // Phase 7 (#1082): kt-only. Same FFI symbol as the
                     // candle path.
+                    // #1082 forward-flip: kt-native — return the kt outputs
+                    // directly (no candle round-trip).
                     let (rq_kt, rk_kt) = kiln_rmsnorm_kernel::fused_rotary_qk_kt(
                         &q_kt, &k_kt, &cos_kt, &sin_kt, rotary_dim,
                     )
                     .map_err(|e| anyhow::anyhow!("kt fused_rotary_qk2: {e}"))?;
-                    let rq = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&rq_kt)
-                        .with_context(|| "kt-adapter: rotary_qk2 rq → candle failed")?;
-                    let rk = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&rk_kt)
-                        .with_context(|| "kt-adapter: rotary_qk2 rk → candle failed")?;
-                    return Ok((rq, rk));
+                    return Ok((rq_kt, rk_kt));
                 }
             }
         }
