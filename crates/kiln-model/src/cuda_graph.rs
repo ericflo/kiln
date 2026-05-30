@@ -1348,21 +1348,31 @@ impl CudaGraphRunner {
     ) -> Result<candle_core::Tensor> {
         use candle_core::cuda_backend::cudarc::driver::sys::CUstreamCaptureMode_enum::CU_STREAM_CAPTURE_MODE_RELAXED;
 
-        let device = weights.embed_tokens.device();
-        let cuda_dev = match device {
+        // #1082: `weights.embed_tokens.device()` is now a kt `Device`.
+        // The CUDA-graph buffer helpers below (and the candle `cuda_stream`
+        // accessor) are candle-typed, so bridge the kt device to candle once
+        // and use it everywhere a `&candle_core::Device` is needed. The
+        // kt-typed forward/struct edges are bridged per-buffer below.
+        let kt_device = weights.embed_tokens.device();
+        let device = kiln_kt_bridge::candle_device_from_kt(&kt_device)
+            .context("CUDA graph capture: bridge kt device to candle")?;
+        let cuda_dev = match &device {
             candle_core::Device::Cuda(d) => d,
             _ => anyhow::bail!("CUDA graphs require a CUDA device"),
         };
         let stream = cuda_dev.cuda_stream();
+        // kt dtype for the buffer helpers that take a candle dtype.
+        let candle_dtype = kiln_kt_bridge::kt_dtype_to_candle(weights.embed_tokens.dtype())
+            .context("CUDA graph capture: bridge kt dtype to candle")?;
 
         // Pre-allocate graph-stable decode tensors BEFORE capture. Their
         // device pointers get baked into the captured graph.
-        let token_buffer = Self::new_token_buffer(device, token_id)?;
-        let position_buffer = Self::new_position_buffer(device, seq_len)?;
-        let output_logits = Self::new_output_logits(config, device, weights.embed_tokens.dtype())?;
+        let token_buffer = Self::new_token_buffer(&device, token_id)?;
+        let position_buffer = Self::new_position_buffer(&device, seq_len)?;
+        let output_logits = Self::new_output_logits(config, &device, candle_dtype)?;
         let output_logits_for_capture = output_logits.clone();
-        let rotary_cos_buffer = Self::new_rotary_cos_buffer(config, device, seq_len)?;
-        let rotary_sin_buffer = Self::new_rotary_sin_buffer(config, device, seq_len)?;
+        let rotary_cos_buffer = Self::new_rotary_cos_buffer(config, &device, seq_len)?;
+        let rotary_sin_buffer = Self::new_rotary_sin_buffer(config, &device, seq_len)?;
         let key = CudaGraphKey::new(block_table, paged_cache, seq_len);
         let (block_table_buffer, seqused_k_buffer, kv_slot_buffer) = if key.stable_metadata {
             (
@@ -1370,42 +1380,76 @@ impl CudaGraphRunner {
                     block_table,
                     paged_cache,
                     key.max_seqlen_k,
-                    device,
+                    &device,
                 )?),
-                Some(Self::new_seqused_k_buffer(device, seq_len + 1)?),
+                Some(Self::new_seqused_k_buffer(&device, seq_len + 1)?),
                 Some(Self::new_kv_slot_buffer(
                     block_table,
                     paged_cache,
                     seq_len,
-                    device,
+                    &device,
                 )?),
             )
         } else {
             (None, None, None)
         };
         let (paged_decode_outputs, paged_decode_lse) = if key.stable_metadata {
-            Self::new_paged_decode_outputs(config, device, weights.embed_tokens.dtype())?
+            Self::new_paged_decode_outputs(config, &device, candle_dtype)?
         } else {
             (Vec::new(), Vec::new())
         };
+        // #1082: the candle graph-stable buffers above feed the kt-typed
+        // `PagedDecodeGraphInputs` (and the kt-typed forward). Bridge each
+        // candle buffer to kt zero-copy (`kt_tensor_from_candle_cuda_borrow`
+        // preserves the device pointer the captured graph bakes in) and
+        // bind to locals so the struct's `&'a kt::Tensor` refs are valid.
+        let rotary_cos_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&rotary_cos_buffer)
+            .context("CUDA graph: bridge rotary_cos buffer candle->kt")?;
+        let rotary_sin_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&rotary_sin_buffer)
+            .context("CUDA graph: bridge rotary_sin buffer candle->kt")?;
+        let paged_decode_outputs_kt = paged_decode_outputs
+            .iter()
+            .map(kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow)
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .context("CUDA graph: bridge paged_decode_outputs candle->kt")?;
+        let paged_decode_lse_kt = paged_decode_lse
+            .iter()
+            .map(kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow)
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .context("CUDA graph: bridge paged_decode_lse candle->kt")?;
+        let block_table_kt = block_table_buffer
+            .as_ref()
+            .map(kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow)
+            .transpose()
+            .context("CUDA graph: bridge block_table buffer candle->kt")?;
+        let seqused_k_kt = seqused_k_buffer
+            .as_ref()
+            .map(kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow)
+            .transpose()
+            .context("CUDA graph: bridge seqused_k buffer candle->kt")?;
+        let kv_slot_kt = kv_slot_buffer
+            .as_ref()
+            .map(kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow)
+            .transpose()
+            .context("CUDA graph: bridge kv_slot buffer candle->kt")?;
         let graph_inputs = match (
-            block_table_buffer.as_ref(),
-            seqused_k_buffer.as_ref(),
-            kv_slot_buffer.as_ref(),
+            block_table_kt.as_ref(),
+            seqused_k_kt.as_ref(),
+            kv_slot_kt.as_ref(),
         ) {
             (Some(block_table), Some(seqused_k), Some(kv_slot)) => Some(PagedDecodeGraphInputs {
                 block_table,
                 seqused_k,
                 kv_slot,
                 max_seqlen_k: key.max_seqlen_k,
-                rotary_cos: &rotary_cos_buffer,
-                rotary_sin: &rotary_sin_buffer,
-                attn_out: &paged_decode_outputs,
-                softmax_lse: &paged_decode_lse,
+                rotary_cos: &rotary_cos_kt,
+                rotary_sin: &rotary_sin_kt,
+                attn_out: &paged_decode_outputs_kt[..],
+                softmax_lse: &paged_decode_lse_kt[..],
             }),
             _ => None,
         };
-        let gdn_decode_outputs = Self::new_gdn_decode_outputs(config, device)?;
+        let gdn_decode_outputs = Self::new_gdn_decode_outputs(config, &device)?;
         // Phase 5 #1082 — pre-allocate the lm-head matmul output
         // buffer OUTSIDE the capture window. Installed via
         // `crate::forward::with_lm_head_output_buffer` below; the
@@ -1415,7 +1459,20 @@ impl CudaGraphRunner {
         // (which has historically worked by allocator-determinism
         // luck at small `[1, 1, vocab]` shapes).
         let lm_head_output_buffer =
-            Self::new_lm_head_output_buffer(config, device, weights.embed_tokens.dtype(), 1)?;
+            Self::new_lm_head_output_buffer(config, &device, candle_dtype, 1)?;
+        // `with_lm_head_output_buffer` takes a kt `Tensor`; bridge the
+        // candle graph-stable buffer zero-copy. The candle original is
+        // still owned by `CapturedDecodeGraph._lm_head_output_buffer`.
+        let lm_head_output_buffer_kt =
+            kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&lm_head_output_buffer)
+                .context("CUDA graph: bridge lm_head output buffer candle->kt")?;
+        // `model_forward_paged_with_graph_inputs` takes kt token/position
+        // buffers; bridge the candle graph-stable buffers zero-copy.
+        let token_buffer_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&token_buffer)
+            .context("CUDA graph: bridge token buffer candle->kt")?;
+        let position_buffer_kt =
+            kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&position_buffer)
+                .context("CUDA graph: bridge position buffer candle->kt")?;
         Self::prepare_gdn_recurrent_state_for_capture(linear_state)?;
 
         // Synchronize all pending work before capture
@@ -1448,7 +1505,7 @@ impl CudaGraphRunner {
         // closure is invoked directly.
         let _ = &gdn_decode_outputs;
         let logits_result = crate::forward::with_lm_head_output_buffer(
-            lm_head_output_buffer.clone(),
+            lm_head_output_buffer_kt.clone(),
             || {
                 let logits = model_forward_paged_with_graph_inputs(
                     backend,
@@ -1460,12 +1517,18 @@ impl CudaGraphRunner {
                     seq_len,
                     Some(linear_state),
                     lora,
-                    &token_buffer,
-                    &position_buffer,
+                    &token_buffer_kt,
+                    &position_buffer_kt,
                     graph_inputs.as_ref(),
                 )?;
+                // `logits` is kt; the graph-stable `output_logits_for_capture`
+                // is candle. Bridge kt->candle (the helper materializes a
+                // contiguous copy if needed), then candle `slice_set` copies
+                // into the stable device pointer the captured graph reads.
+                let logits_candle = crate::forward::kt_logits_to_candle(&logits)
+                    .context("CUDA graph: bridge logits kt->candle for stable output")?;
                 output_logits_for_capture
-                    .slice_set(&logits, 0, 0)
+                    .slice_set(&logits_candle, 0, 0)
                     .context("copy CUDA graph logits into stable output")?;
                 Ok::<candle_core::Tensor, anyhow::Error>(output_logits_for_capture)
             },
@@ -1557,23 +1620,31 @@ impl CudaGraphRunner {
         let max_seq_len = *sequence_lengths.iter().max().expect("non-empty batch");
         let key = CudaBatchedGraphKey::new(batch_size, max_seq_len, paged_cache);
 
-        let device = weights.embed_tokens.device();
-        let cuda_dev = match device {
+        // #1082: `weights.embed_tokens.{device,dtype}()` are now kt-typed.
+        // The batched buffer helpers + candle `cuda_stream` accessor are
+        // candle-typed, so bridge once and use `&device` / `candle_dtype`
+        // for them; the kt-typed forward/struct edges are bridged per-buffer
+        // below.
+        let kt_device = weights.embed_tokens.device();
+        let device = kiln_kt_bridge::candle_device_from_kt(&kt_device)
+            .context("batched CUDA graph capture: bridge kt device to candle")?;
+        let cuda_dev = match &device {
             candle_core::Device::Cuda(d) => d,
             _ => anyhow::bail!("CUDA graphs require a CUDA device"),
         };
         let stream = cuda_dev.cuda_stream();
         let adapter_gen = self.adapter_generation;
-        let dtype = weights.embed_tokens.dtype();
+        let candle_dtype = kiln_kt_bridge::kt_dtype_to_candle(weights.embed_tokens.dtype())
+            .context("batched CUDA graph capture: bridge kt dtype to candle")?;
 
         // Pre-allocate every device buffer the captured graph will read
         // from or write to. Each pointer is baked into the recorded
         // kernel launches; the runner refreshes their contents in
         // place before each replay.
-        let token_buffer = Self::new_batched_token_buffer(device, token_ids)?;
-        let position_buffer = Self::new_batched_position_buffer(device, sequence_lengths)?;
-        let rotary_cos_buffer = Self::new_batched_rotary_cos_buffer(config, device, batch_size)?;
-        let rotary_sin_buffer = Self::new_batched_rotary_sin_buffer(config, device, batch_size)?;
+        let token_buffer = Self::new_batched_token_buffer(&device, token_ids)?;
+        let position_buffer = Self::new_batched_position_buffer(&device, sequence_lengths)?;
+        let rotary_cos_buffer = Self::new_batched_rotary_cos_buffer(config, &device, batch_size)?;
+        let rotary_sin_buffer = Self::new_batched_rotary_sin_buffer(config, &device, batch_size)?;
         Self::update_batched_rotary_buffers(
             &rotary_cos_buffer,
             &rotary_sin_buffer,
@@ -1584,15 +1655,15 @@ impl CudaGraphRunner {
             block_tables,
             paged_cache,
             key.max_seqlen_k,
-            device,
+            &device,
         )?;
-        let seqused_k_buffer = Self::new_batched_seqused_k_buffer(device, sequence_lengths)?;
+        let seqused_k_buffer = Self::new_batched_seqused_k_buffer(&device, sequence_lengths)?;
         let kv_slot_buffer =
-            Self::new_batched_kv_slot_buffer(block_tables, paged_cache, sequence_lengths, device)?;
-        let output_logits = Self::new_batched_output_logits(config, device, dtype, batch_size)?;
+            Self::new_batched_kv_slot_buffer(block_tables, paged_cache, sequence_lengths, &device)?;
+        let output_logits = Self::new_batched_output_logits(config, &device, candle_dtype, batch_size)?;
         let (paged_decode_outputs, paged_decode_lse) =
-            Self::new_batched_paged_decode_outputs(config, device, dtype, batch_size)?;
-        let gdn_decode_outputs = Self::new_batched_gdn_decode_outputs(config, device, batch_size)?;
+            Self::new_batched_paged_decode_outputs(config, &device, candle_dtype, batch_size)?;
+        let gdn_decode_outputs = Self::new_batched_gdn_decode_outputs(config, &device, batch_size)?;
         // Phase 5 #1082 — pre-allocate the lm-head matmul output buffer
         // OUTSIDE the capture window. Installed via
         // `crate::forward::with_lm_head_output_buffer` below so the
@@ -1611,28 +1682,67 @@ impl CudaGraphRunner {
         // (2026-05-26 entry recommending the
         // `with_lm_head_output_buffer` thread-local approach).
         let lm_head_output_buffer =
-            Self::new_lm_head_output_buffer(config, device, dtype, batch_size)?;
+            Self::new_lm_head_output_buffer(config, &device, candle_dtype, batch_size)?;
+        // The kt-typed forward + `BatchedPagedDecodeGraphInputs` consume kt
+        // references; bridge each candle graph-stable buffer zero-copy
+        // (`kt_tensor_from_candle_cuda_borrow` preserves the device pointer
+        // baked into the captured graph) and bind to locals so the struct's
+        // `&'a kt::Tensor` refs are valid. The candle originals stay owned by
+        // `CapturedBatchedDecodeGraph` for in-place updates on replay.
+        let token_buffer_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&token_buffer)
+            .context("batched CUDA graph: bridge token buffer candle->kt")?;
+        let position_buffer_kt =
+            kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&position_buffer)
+                .context("batched CUDA graph: bridge position buffer candle->kt")?;
+        let block_table_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&block_table_buffer)
+            .context("batched CUDA graph: bridge block_table buffer candle->kt")?;
+        let seqused_k_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&seqused_k_buffer)
+            .context("batched CUDA graph: bridge seqused_k buffer candle->kt")?;
+        let kv_slot_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&kv_slot_buffer)
+            .context("batched CUDA graph: bridge kv_slot buffer candle->kt")?;
+        let rotary_cos_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&rotary_cos_buffer)
+            .context("batched CUDA graph: bridge rotary_cos buffer candle->kt")?;
+        let rotary_sin_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&rotary_sin_buffer)
+            .context("batched CUDA graph: bridge rotary_sin buffer candle->kt")?;
+        let output_logits_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&output_logits)
+            .context("batched CUDA graph: bridge output_logits buffer candle->kt")?;
+        let paged_decode_outputs_kt = paged_decode_outputs
+            .iter()
+            .map(kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow)
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .context("batched CUDA graph: bridge paged_decode_outputs candle->kt")?;
+        let paged_decode_lse_kt = paged_decode_lse
+            .iter()
+            .map(kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow)
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .context("batched CUDA graph: bridge paged_decode_lse candle->kt")?;
+        // `with_lm_head_output_buffer` takes a kt `Tensor`; bridge the candle
+        // graph-stable buffer zero-copy (candle original stays owned by the
+        // captured graph as `_lm_head_output_buffer`).
+        let lm_head_output_buffer_kt =
+            kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&lm_head_output_buffer)
+                .context("batched CUDA graph: bridge lm_head output buffer candle->kt")?;
 
         // Capture + forward inside a scope so the `&mut` borrow on
         // `self.batched_state_pool` (taken by `persistent_batched_state`)
         // ends before we mutate `self.captured_batched` below.
         let captured: CapturedBatchedDecodeGraph = {
             let persistent_state = self
-                .persistent_batched_state(batch_size, config, device)?
+                .persistent_batched_state(batch_size, config, &device)?
                 .context("persistent batched state required for capture")?;
             Self::prepare_gdn_recurrent_state_for_capture(persistent_state)?;
             let mut graph_inputs = crate::forward::BatchedPagedDecodeGraphInputs {
-                token_ids: &token_buffer,
-                positions: &position_buffer,
-                block_table: &block_table_buffer,
-                seqused_k: &seqused_k_buffer,
-                kv_slot: &kv_slot_buffer,
+                token_ids: &token_buffer_kt,
+                positions: &position_buffer_kt,
+                block_table: &block_table_kt,
+                seqused_k: &seqused_k_kt,
+                kv_slot: &kv_slot_kt,
                 max_seqlen_k: key.max_seqlen_k,
-                rotary_cos: &rotary_cos_buffer,
-                rotary_sin: &rotary_sin_buffer,
-                attn_out: &paged_decode_outputs,
-                softmax_lse: &paged_decode_lse,
-                output_logits: &output_logits,
+                rotary_cos: &rotary_cos_kt,
+                rotary_sin: &rotary_sin_kt,
+                attn_out: &paged_decode_outputs_kt[..],
+                softmax_lse: &paged_decode_lse_kt[..],
+                output_logits: &output_logits_kt,
                 linear_state: persistent_state,
             };
 
@@ -1662,7 +1772,7 @@ impl CudaGraphRunner {
             // sidesteps that by owning its allocations end-to-end.)
             let _ = &gdn_decode_outputs;
             let forward_result = crate::forward::with_lm_head_output_buffer(
-                lm_head_output_buffer.clone(),
+                lm_head_output_buffer_kt.clone(),
                 || {
                     crate::forward::model_forward_paged_batched_with_graph_inputs(
                         backend,
@@ -1770,7 +1880,10 @@ impl CudaGraphRunner {
         linear_state: &mut LinearAttentionState,
         lora: Option<&LoraWeights>,
     ) -> Result<candle_core::Tensor> {
-        model_forward_paged(
+        // #1082: `model_forward_paged` is kt-typed (returns kt logits).
+        // This warmup helper hands candle logits back to the candle eager
+        // caller path, so bridge the kt result to candle on the way out.
+        let logits = model_forward_paged(
             backend,
             &[token_id],
             weights,
@@ -1782,7 +1895,9 @@ impl CudaGraphRunner {
             lora,
             None, // no pre-allocated position buffer — creates one internally
         )
-        .context("eager decode forward pass failed")
+        .context("eager decode forward pass failed")?;
+        crate::forward::kt_logits_to_candle(&logits)
+            .context("eager decode forward: bridge kt logits to candle")
     }
 
     #[cfg(feature = "cuda")]
@@ -2231,8 +2346,18 @@ impl CudaGraphRunner {
         linear_state: &mut LinearAttentionState,
         lora: Option<&LoraWeights>,
     ) -> Result<candle_core::Tensor> {
-        let position_buffer = Self::new_position_buffer(weights.embed_tokens.device(), seq_len)?;
-        model_forward_paged(
+        // #1082: bridge the kt device to candle for the candle-typed
+        // `new_position_buffer` helper, then bridge that candle buffer back to
+        // kt for the kt-typed `model_forward_paged`, and bridge its kt logits
+        // to candle for this helper's candle return type.
+        let kt_device = weights.embed_tokens.device();
+        let device = kiln_kt_bridge::candle_device_from_kt(&kt_device)
+            .context("graph-shaped eager decode: bridge kt device to candle")?;
+        let position_buffer = Self::new_position_buffer(&device, seq_len)?;
+        let position_buffer_kt =
+            kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&position_buffer)
+                .context("graph-shaped eager decode: bridge position buffer candle->kt")?;
+        let logits = model_forward_paged(
             backend,
             &[token_id],
             weights,
@@ -2242,9 +2367,11 @@ impl CudaGraphRunner {
             seq_len,
             Some(linear_state),
             lora,
-            Some(&position_buffer),
+            Some(&position_buffer_kt),
         )
-        .context("graph-shaped eager decode forward pass failed")
+        .context("graph-shaped eager decode forward pass failed")?;
+        crate::forward::kt_logits_to_candle(&logits)
+            .context("graph-shaped eager decode: bridge kt logits to candle")
     }
 }
 

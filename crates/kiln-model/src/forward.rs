@@ -21788,11 +21788,23 @@ fn gqa_attention_paged_with_rope_tables(
             #[cfg(feature = "cuda")]
             {
                 if let Some(inputs) = graph_inputs {
+                    // #1082: the candle `PagedKvCache` graph-slot writer is a
+                    // candle island (k/v/slot are candle). Bridge the kt
+                    // token-major K/V and the kt `kv_slot` to candle for the
+                    // write only — mirrors the non-graph token-major write path
+                    // above (`kt_logits_to_candle`). The kt twin cache, when
+                    // plumbed, is written separately by the kt graph-slot path.
+                    let k_tm_c = kt_logits_to_candle(&k_cache_token_major)
+                        .context("graph-slot write kt->candle k_cache_token_major")?;
+                    let v_tm_c = kt_logits_to_candle(&v_cache_token_major)
+                        .context("graph-slot write kt->candle v_cache_token_major")?;
+                    let kv_slot_c = kt_logits_to_candle(inputs.kv_slot)
+                        .context("graph-slot write kt->candle kv_slot")?;
                     let done = paged_cache.write_token_major_native_graph_slot(
                         full_attn_layer_idx,
-                        &k_cache_token_major,
-                        &v_cache_token_major,
-                        inputs.kv_slot,
+                        &k_tm_c,
+                        &v_tm_c,
+                        &kv_slot_c,
                     )?;
                     // Phase 7 #1082: when the legacy PagedKvCache writer
                     // succeeded and a kt twin cache is plumbed through (i.e. the
