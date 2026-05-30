@@ -5120,8 +5120,7 @@ impl GpuFullAttentionWeights {
             .q_proj_t
             .contiguous()
             .context("q_proj_t_kt: contiguous")?;
-        kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&contig)
-            .map_err(|e| anyhow::anyhow!("q_proj_t_kt borrow: {e}"))
+        Ok(contig)
     }
 
     /// kt-native view of the pre-transposed full-attention k projection
@@ -5139,8 +5138,7 @@ impl GpuFullAttentionWeights {
             .k_proj_t
             .contiguous()
             .context("k_proj_t_kt: contiguous")?;
-        kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&contig)
-            .map_err(|e| anyhow::anyhow!("k_proj_t_kt borrow: {e}"))
+        Ok(contig)
     }
 
     /// kt-native view of the pre-transposed full-attention v projection
@@ -5158,8 +5156,7 @@ impl GpuFullAttentionWeights {
             .v_proj_t
             .contiguous()
             .context("v_proj_t_kt: contiguous")?;
-        kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&contig)
-            .map_err(|e| anyhow::anyhow!("v_proj_t_kt borrow: {e}"))
+        Ok(contig)
     }
 
     /// kt-native view of the pre-transposed full-attention output
@@ -5179,8 +5176,7 @@ impl GpuFullAttentionWeights {
             .o_proj_t
             .contiguous()
             .context("o_proj_t_kt: contiguous")?;
-        kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&contig)
-            .map_err(|e| anyhow::anyhow!("o_proj_t_kt borrow: {e}"))
+        Ok(contig)
     }
 
     /// kt-native view of the q_norm RMSNorm weight (#1082, region 3).
@@ -5199,8 +5195,7 @@ impl GpuFullAttentionWeights {
             );
         }
         let contig = self.q_norm.contiguous().context("q_norm_kt: contiguous")?;
-        kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&contig)
-            .map_err(|e| anyhow::anyhow!("q_norm_kt borrow: {e}"))
+        Ok(contig)
     }
 
     /// kt-native view of the k_norm RMSNorm weight (#1082, region 3).
@@ -5215,8 +5210,7 @@ impl GpuFullAttentionWeights {
             );
         }
         let contig = self.k_norm.contiguous().context("k_norm_kt: contiguous")?;
-        kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&contig)
-            .map_err(|e| anyhow::anyhow!("k_norm_kt borrow: {e}"))
+        Ok(contig)
     }
 }
 
@@ -5283,8 +5277,7 @@ impl GpuLinearAttentionWeights {
             .in_proj_qkv
             .contiguous()
             .context("in_proj_qkv_kt: contiguous")?;
-        kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&contig)
-            .map_err(|e| anyhow::anyhow!("in_proj_qkv_kt borrow: {e}"))
+        Ok(contig)
     }
 
     /// kt-native view of the GDN `in_proj_z` (gate) projection weight
@@ -5302,8 +5295,7 @@ impl GpuLinearAttentionWeights {
             .in_proj_z
             .contiguous()
             .context("in_proj_z_kt: contiguous")?;
-        kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&contig)
-            .map_err(|e| anyhow::anyhow!("in_proj_z_kt borrow: {e}"))
+        Ok(contig)
     }
 
     /// kt-native view of the GDN output projection weight (`out_proj`,
@@ -5322,8 +5314,7 @@ impl GpuLinearAttentionWeights {
             .out_proj
             .contiguous()
             .context("out_proj_kt: contiguous")?;
-        kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&contig)
-            .map_err(|e| anyhow::anyhow!("out_proj_kt borrow: {e}"))
+        Ok(contig)
     }
 
     /// kt-native view of the GDN `in_proj_a` projection weight (#1082,
@@ -5341,8 +5332,7 @@ impl GpuLinearAttentionWeights {
             .in_proj_a
             .contiguous()
             .context("in_proj_a_kt: contiguous")?;
-        kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&contig)
-            .map_err(|e| anyhow::anyhow!("in_proj_a_kt borrow: {e}"))
+        Ok(contig)
     }
 
     /// kt-native view of the GDN `in_proj_b` projection weight (#1082,
@@ -5360,8 +5350,7 @@ impl GpuLinearAttentionWeights {
             .in_proj_b
             .contiguous()
             .context("in_proj_b_kt: contiguous")?;
-        kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&contig)
-            .map_err(|e| anyhow::anyhow!("in_proj_b_kt borrow: {e}"))
+        Ok(contig)
     }
 
     /// kt-native view of the GDN depthwise `conv1d` weight (#1082, GDN
@@ -5376,8 +5365,7 @@ impl GpuLinearAttentionWeights {
             );
         }
         let contig = self.conv1d.contiguous().context("conv1d_kt: contiguous")?;
-        kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&contig)
-            .map_err(|e| anyhow::anyhow!("conv1d_kt borrow: {e}"))
+        Ok(contig)
     }
 
     /// kt-native view of the GDN gated-RMSNorm `norm` weight (#1082, GDN
@@ -5392,8 +5380,7 @@ impl GpuLinearAttentionWeights {
             );
         }
         let contig = self.norm.contiguous().context("norm_kt: contiguous")?;
-        kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&contig)
-            .map_err(|e| anyhow::anyhow!("norm_kt borrow: {e}"))
+        Ok(contig)
     }
 
     /// kt-native view of the GDN `a_log` decay parameter (#1082, GDN
@@ -5408,8 +5395,7 @@ impl GpuLinearAttentionWeights {
             );
         }
         let contig = self.a_log.contiguous().context("a_log_kt: contiguous")?;
-        kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&contig)
-            .map_err(|e| anyhow::anyhow!("a_log_kt borrow: {e}"))
+        Ok(contig)
     }
 
     /// kt-native view of the GDN `a_log_gates` decay parameter (#1082,
@@ -5427,8 +5413,7 @@ impl GpuLinearAttentionWeights {
             .a_log_gates
             .contiguous()
             .context("a_log_gates_kt: contiguous")?;
-        kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&contig)
-            .map_err(|e| anyhow::anyhow!("a_log_gates_kt borrow: {e}"))
+        Ok(contig)
     }
 
     /// kt-native view of the GDN `dt_bias` parameter (#1082, GDN region).
@@ -5446,8 +5431,7 @@ impl GpuLinearAttentionWeights {
             .dt_bias
             .contiguous()
             .context("dt_bias_kt: contiguous")?;
-        kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&contig)
-            .map_err(|e| anyhow::anyhow!("dt_bias_kt borrow: {e}"))
+        Ok(contig)
     }
 
     /// kt-native view of the pre-transposed GDN fused input projection
@@ -5467,8 +5451,7 @@ impl GpuLinearAttentionWeights {
             .in_proj_qkv_t
             .contiguous()
             .context("in_proj_qkv_t_kt: contiguous")?;
-        kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&contig)
-            .map_err(|e| anyhow::anyhow!("in_proj_qkv_t_kt borrow: {e}"))
+        Ok(contig)
     }
 
     /// kt-native view of the pre-transposed GDN gate projection
@@ -5487,8 +5470,7 @@ impl GpuLinearAttentionWeights {
             .in_proj_z_t
             .contiguous()
             .context("in_proj_z_t_kt: contiguous")?;
-        kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&contig)
-            .map_err(|e| anyhow::anyhow!("in_proj_z_t_kt borrow: {e}"))
+        Ok(contig)
     }
 
     /// kt-native view of the pre-transposed GDN `in_proj_a` projection
@@ -5506,8 +5488,7 @@ impl GpuLinearAttentionWeights {
             .in_proj_a_t
             .contiguous()
             .context("in_proj_a_t_kt: contiguous")?;
-        kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&contig)
-            .map_err(|e| anyhow::anyhow!("in_proj_a_t_kt borrow: {e}"))
+        Ok(contig)
     }
 
     /// kt-native view of the pre-transposed GDN `in_proj_b` projection
@@ -5525,8 +5506,7 @@ impl GpuLinearAttentionWeights {
             .in_proj_b_t
             .contiguous()
             .context("in_proj_b_t_kt: contiguous")?;
-        kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&contig)
-            .map_err(|e| anyhow::anyhow!("in_proj_b_t_kt borrow: {e}"))
+        Ok(contig)
     }
 
     /// kt-native view of the optional pre-transposed combined A/B
@@ -5547,8 +5527,7 @@ impl GpuLinearAttentionWeights {
             );
         }
         let contig = ab_t.contiguous().context("in_proj_ab_t_kt: contiguous")?;
-        let kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&contig)
-            .map_err(|e| anyhow::anyhow!("in_proj_ab_t_kt borrow: {e}"))?;
+        let kt = contig;
         Ok(Some(kt))
     }
 
@@ -5569,8 +5548,7 @@ impl GpuLinearAttentionWeights {
             .out_proj_t
             .contiguous()
             .context("out_proj_t_kt: contiguous")?;
-        kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&contig)
-            .map_err(|e| anyhow::anyhow!("out_proj_t_kt borrow: {e}"))
+        Ok(contig)
     }
 }
 
@@ -5636,8 +5614,7 @@ impl GpuFfnWeights {
             .gate_proj_t
             .contiguous()
             .context("gate_proj_t_kt: contiguous")?;
-        kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&contig)
-            .map_err(|e| anyhow::anyhow!("gate_proj_t_kt borrow: {e}"))
+        Ok(contig)
     }
 
     /// kt-native view of the pre-transposed SwiGLU up projection
@@ -5656,8 +5633,7 @@ impl GpuFfnWeights {
             .up_proj_t
             .contiguous()
             .context("up_proj_t_kt: contiguous")?;
-        kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&contig)
-            .map_err(|e| anyhow::anyhow!("up_proj_t_kt borrow: {e}"))
+        Ok(contig)
     }
 
     /// kt-native view of the pre-transposed SwiGLU down projection
@@ -5677,8 +5653,7 @@ impl GpuFfnWeights {
             .down_proj_t
             .contiguous()
             .context("down_proj_t_kt: contiguous")?;
-        kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&contig)
-            .map_err(|e| anyhow::anyhow!("down_proj_t_kt borrow: {e}"))
+        Ok(contig)
     }
 }
 
@@ -7235,7 +7210,9 @@ impl GpuWeights {
     /// `candle <-> kt` Device enum mapping with no CUDA toolchain
     /// dependency. (#1082)
     pub fn device_kt(&self) -> kiln_tensor::Device {
-        kiln_kt_bridge::kt_device_from_candle(self.embed_tokens.device())
+        // #1082 forward-flip: `embed_tokens` is now a kt tensor, so its
+        // `device()` already returns a `kiln_tensor::Device` — identity.
+        self.embed_tokens.device()
     }
 
     /// kt-native view of the token-embedding table (#1082, embedding
@@ -7267,8 +7244,7 @@ impl GpuWeights {
             .embed_tokens
             .contiguous()
             .context("embed_tokens_kt: contiguous")?;
-        kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&contig)
-            .map_err(|e| anyhow::anyhow!("embed_tokens_kt borrow: {e}"))
+        Ok(contig)
     }
 
     /// kt-native view of the pre-transposed token-embedding table
@@ -7295,8 +7271,7 @@ impl GpuWeights {
             .embed_tokens_t
             .contiguous()
             .context("embed_tokens_t_kt: contiguous")?;
-        kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&contig)
-            .map_err(|e| anyhow::anyhow!("embed_tokens_t_kt borrow: {e}"))
+        Ok(contig)
     }
 
     /// Convert `ModelWeights` (CPU bytes) into candle tensors on the given device.
