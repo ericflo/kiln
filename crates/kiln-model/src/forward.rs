@@ -23683,6 +23683,17 @@ pub fn model_forward_paged_decode_contiguous_batch_greedy(
 ///   be skipped with an identity pass-through.
 /// - After this function returns, the caller must call `kv_cache.advance(token_ids.len())`
 ///   to update the cached sequence length.
+/// #1082 forward-flip: the forward internals now produce kt tensors (the
+/// bare `Tensor` alias resolves to `kiln_tensor::Tensor`). `model_forward`
+/// remains the **candle-returning shim** for the deferred candle consumers
+/// (`generate.rs`, `server::bench`, `speculative.rs`, and the candle-auth /
+/// tape `GradStore` training harvest) so their call sites stay untouched in
+/// this pass. The kt logits are copy-bridged to candle at the return. The
+/// kt-native entry point is [`model_forward_kt`].
+///
+/// NOTE: bridging via copy severs any candle autograd graph — this is
+/// expected and documented (forward-flip plan Inc4); training correctness
+/// is restored by the kt-native training substrate (Inc0), not by this shim.
 pub fn model_forward(
     backend: &dyn BackendRuntime,
     token_ids: &[u32],
@@ -23691,7 +23702,7 @@ pub fn model_forward(
     mut kv_cache: Option<&mut KvCache>,
     mut linear_state: Option<&mut LinearAttentionState>,
     lora: Option<&LoraWeights>,
-) -> Result<Tensor> {
+) -> Result<candle_core::Tensor> {
     let seq_len = token_ids.len();
 
     // 1. Embedding lookup: [seq_len, hidden_size]
@@ -23801,7 +23812,28 @@ pub fn model_forward(
         lm_head_forward_backend_decode_if(Some(backend), &hidden, &weights.embed_tokens_t)?
     };
 
-    Ok(logits)
+    // #1082 forward-flip: `logits` is a kt tensor; copy-bridge it to a
+    // candle tensor for the deferred candle consumers (CUDA-only).
+    model_forward_logits_kt_to_candle(logits)
+}
+
+/// Copy-bridge the kt-typed forward logits to a candle `Tensor` for the
+/// `model_forward` candle-returning shim (#1082 forward-flip). CUDA-only;
+/// the non-CUDA branch errors at runtime (production decode is CUDA).
+#[cfg(feature = "cuda")]
+fn model_forward_logits_kt_to_candle(logits: Tensor) -> Result<candle_core::Tensor> {
+    let logits = if logits.is_contiguous() {
+        logits
+    } else {
+        logits.contiguous()?
+    };
+    kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&logits)
+        .map_err(|e| anyhow::anyhow!("model_forward logits kt->candle bridge: {e}"))
+}
+
+#[cfg(not(feature = "cuda"))]
+fn model_forward_logits_kt_to_candle(_logits: Tensor) -> Result<candle_core::Tensor> {
+    anyhow::bail!("model_forward: kt->candle logits bridge requires the `cuda` feature (#1082)")
 }
 
 /// kt-typed parallel entry to [`model_forward`] (#1082 Tier 3).
