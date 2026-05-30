@@ -2174,7 +2174,11 @@ fn sample_student_rollout(
     let num_segments = default_segments.min(model_config.num_layers);
     let segments =
         crate::trainer::compute_segment_boundaries(model_config.num_layers, num_segments);
-    let run_forward = |seq: &[u32]| -> Result<Tensor> {
+    // (#1082) kt-native: the segmented forward chain produces kt tensors
+    // end-to-end (no autograd needed in sampling). `sample_step` is a
+    // candle-island consumer, so we bridge kt -> candle at the two call
+    // sites below rather than threading candle through the closure.
+    let run_forward = |seq: &[u32]| -> Result<kiln_tensor::Tensor> {
         let positions: Vec<u32> = (0..seq.len() as u32).collect();
         let (embed_hidden, _) = model_forward_embed(seq, weights)?;
         let mut linear_state = LinearAttentionState::new_for_inference(model_config, &device)?;
@@ -2205,9 +2209,16 @@ fn sample_student_rollout(
         Ok(logits)
     };
 
+    // (#1082) Bridge the kt logits produced by `run_forward` into the
+    // candle Tensor `sample_step` consumes (candle island).
+    let to_candle = |kt: kiln_tensor::Tensor| -> Result<Tensor> {
+        kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&kt)
+            .map_err(|e| anyhow!("opd sampler kt->candle: {e}"))
+    };
+
     let mut generated: Vec<u32> = Vec::with_capacity(max_new_tokens);
     let mut working: Vec<u32> = prompt_tokens.to_vec();
-    let mut next = sample_step(&run_forward(&working)?, &params, step_seed, &[])
+    let mut next = sample_step(&to_candle(run_forward(&working)?)?, &params, step_seed, &[])
         .context("on-policy rollout first-token sample")?;
 
     for _ in 0..max_new_tokens {
@@ -2219,7 +2230,7 @@ fn sample_student_rollout(
         if let Some(s) = step_seed.as_mut() {
             *s = s.wrapping_add(1);
         }
-        next = sample_step(&run_forward(&working)?, &params, step_seed, &generated)
+        next = sample_step(&to_candle(run_forward(&working)?)?, &params, step_seed, &generated)
             .context("on-policy rollout next-token sample")?;
     }
     Ok(generated)
@@ -2443,7 +2454,12 @@ pub fn opd_train(
     let mut global_step = 0usize;
     let mut last_loss = 0.0_f64;
 
-    let head_t = weights.embed_tokens_t.clone();
+    // (#1082) `embed_tokens_t` is now kt. Both dispatch paths
+    // (`opd_step_forward_backward_{tape_authoritative,candle}`) consume a
+    // candle `head_t` (the candle-island OPD loss + ECHO shims), so bridge
+    // the kt weight to candle once here.
+    let head_t = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&weights.embed_tokens_t)
+        .map_err(|e| anyhow!("opd_train: kt -> candle head_t: {e}"))?;
 
     // §3.9 guardrail observer + per-step rollout summary buffer.
     // The guardrail watches loss / repetition / overlap signals every

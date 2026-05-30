@@ -2032,7 +2032,12 @@ pub fn sft_train(
         .as_deref()
         .map(|name| crate::adapter_shape::resolve_base_adapter_dir(name, adapter_dir));
 
-    let device = weights.embed_tokens.device().clone();
+    // (#1082) `embed_tokens.device()` is now a kt Device. The SFT training
+    // body is a candle island (LoRA Vars, AdamW state, candle safetensors I/O,
+    // `standard_forward_backward(device: &CdDevice)`), so bridge the kt device
+    // to a candle device once here and keep `device` candle downstream.
+    let device = kiln_kt_bridge::candle_device_from_kt(&weights.embed_tokens.device())
+        .map_err(|e| anyhow::anyhow!("sft_train: kt -> candle device: {e}"))?;
     let backend = backend::for_device(&device);
 
     tracing::info!(
@@ -2478,7 +2483,10 @@ pub fn grpo_train(
         .base_adapter
         .as_deref()
         .map(|name| crate::adapter_shape::resolve_base_adapter_dir(name, adapter_dir));
-    let device = weights.embed_tokens.device().clone();
+    // (#1082) `embed_tokens.device()` is now a kt Device; the GRPO training
+    // body is a candle island. Bridge once and keep `device` candle.
+    let device = kiln_kt_bridge::candle_device_from_kt(&weights.embed_tokens.device())
+        .map_err(|e| anyhow::anyhow!("grpo_train: kt -> candle device: {e}"))?;
     let backend = backend::for_device(&device);
 
     let total_completions: usize = groups.iter().map(|g| g.completions.len()).sum();
@@ -3317,7 +3325,10 @@ pub fn grpo_train_jsonl(
     let mut phase_timings = GrpoBenchmarkTimings::default();
     let mut dynamic_groups_filtered = 0usize;
 
-    let device = weights.embed_tokens.device().clone();
+    // (#1082) `embed_tokens.device()` is now a kt Device; the OPD training
+    // body is a candle island. Bridge once and keep `device` candle.
+    let device = kiln_kt_bridge::candle_device_from_kt(&weights.embed_tokens.device())
+        .map_err(|e| anyhow::anyhow!("opd_train: kt -> candle device: {e}"))?;
     let backend = backend::for_device(&device);
 
     tracing::info!(
@@ -4277,7 +4288,7 @@ fn compute_ref_log_probs_shared_prefix(
         block_table.push(i);
     }
 
-    let mut linear_state = LinearAttentionState::new(model_config, device)
+    let mut linear_state = LinearAttentionState::new(model_config, &kiln_kt_bridge::kt_device_from_candle(device))
         .context("GRPO shared-prefix: build LinearAttentionState")?;
 
     // Phase 1: prompt forward — populates the paged cache for positions
@@ -4580,8 +4591,8 @@ fn train_tokenized_grpo_group_with_grad_norms(
         .max()
         .unwrap_or(0);
     let checkpoint_segments = segments.map_or(0, |segs| segs.len());
-    let streaming_tile_tokens = streaming_tile_tokens_for(device);
-    let streaming_prefill = streaming_prefill_enabled_for(device, group_max_seq_len);
+    let streaming_tile_tokens = streaming_tile_tokens_for(&kiln_kt_bridge::kt_device_from_candle(device));
+    let streaming_prefill = streaming_prefill_enabled_for(&kiln_kt_bridge::kt_device_from_candle(device),group_max_seq_len);
 
     let token_level = matches!(config.loss_aggregation, LossAggregation::TokenLevel);
     let mut group_accum: GradMap = HashMap::new();
@@ -4727,11 +4738,11 @@ fn train_tokenized_grpo_group_with_grad_norms(
                 action_tokens = num_active,
                 env_tokens = comp_env_count,
                 checkpoint_segments,
-                streaming_prefill = streaming_prefill_enabled_for(device, comp.input_ids.len()),
+                streaming_prefill = streaming_prefill_enabled_for(&kiln_kt_bridge::kt_device_from_candle(device),comp.input_ids.len()),
                 streaming_tile_tokens,
                 "GRPO ref forward start"
             );
-            let mut ref_linear_state = LinearAttentionState::new(model_config, device)?;
+            let mut ref_linear_state = LinearAttentionState::new(model_config, &kiln_kt_bridge::kt_device_from_candle(device))?;
             // BasePerStep (None ema_ref_lora) → base model (no LoRA).
             // Ema (Some(snapshot)) → frozen snapshot of the LoRA from a
             // prior training point.
@@ -4761,7 +4772,7 @@ fn train_tokenized_grpo_group_with_grad_norms(
                 action_tokens = num_active,
                 env_tokens = comp_env_count,
                 checkpoint_segments,
-                streaming_prefill = streaming_prefill_enabled_for(device, comp.input_ids.len()),
+                streaming_prefill = streaming_prefill_enabled_for(&kiln_kt_bridge::kt_device_from_candle(device),comp.input_ids.len()),
                 streaming_tile_tokens,
                 elapsed_ms = ref_started.elapsed().as_millis() as u64,
                 "GRPO ref forward end"
@@ -4974,7 +4985,7 @@ fn train_tokenized_grpo_group_with_grad_norms(
                 g
             } else {
                 let lora_weights = params.as_lora_weights();
-                let mut linear_state = LinearAttentionState::new(model_config, device)?;
+                let mut linear_state = LinearAttentionState::new(model_config, &kiln_kt_bridge::kt_device_from_candle(device))?;
                 let policy_forward_started = Instant::now();
                 tracing::info!(
                     comp_idx,
@@ -4982,7 +4993,7 @@ fn train_tokenized_grpo_group_with_grad_norms(
                     action_tokens = num_active,
                     env_tokens = comp_env_count,
                     checkpoint_segments,
-                    streaming_prefill = streaming_prefill_enabled_for(device, comp.input_ids.len()),
+                    streaming_prefill = streaming_prefill_enabled_for(&kiln_kt_bridge::kt_device_from_candle(device),comp.input_ids.len()),
                     streaming_tile_tokens,
                     "GRPO policy forward start"
                 );
@@ -5005,7 +5016,7 @@ fn train_tokenized_grpo_group_with_grad_norms(
                     action_tokens = num_active,
                     env_tokens = comp_env_count,
                     checkpoint_segments,
-                    streaming_prefill = streaming_prefill_enabled_for(device, comp.input_ids.len()),
+                    streaming_prefill = streaming_prefill_enabled_for(&kiln_kt_bridge::kt_device_from_candle(device),comp.input_ids.len()),
                     streaming_tile_tokens,
                     elapsed_ms = policy_forward_started.elapsed().as_millis() as u64,
                     "GRPO policy forward end"
@@ -5093,7 +5104,7 @@ fn train_tokenized_grpo_group_with_grad_norms(
                     action_tokens = num_active,
                     env_tokens = comp_env_count,
                     checkpoint_segments = 0usize,
-                    streaming_prefill = streaming_prefill_enabled_for(device, comp.input_ids.len()),
+                    streaming_prefill = streaming_prefill_enabled_for(&kiln_kt_bridge::kt_device_from_candle(device),comp.input_ids.len()),
                     streaming_tile_tokens,
                     "GRPO backward start"
                 );
@@ -5107,7 +5118,7 @@ fn train_tokenized_grpo_group_with_grad_norms(
                     action_tokens = num_active,
                     env_tokens = comp_env_count,
                     checkpoint_segments = 0usize,
-                    streaming_prefill = streaming_prefill_enabled_for(device, comp.input_ids.len()),
+                    streaming_prefill = streaming_prefill_enabled_for(&kiln_kt_bridge::kt_device_from_candle(device),comp.input_ids.len()),
                     streaming_tile_tokens,
                     elapsed_ms = backward_started.elapsed().as_millis() as u64,
                     "GRPO backward end"
@@ -8023,10 +8034,10 @@ fn tiled_training_tile_size(
     seq_len: usize,
 ) -> Option<usize> {
     let _ = weights; // signature retained for callers; gating moved to the dispatcher.
-    if !streaming_prefill_enabled_for(device, seq_len) {
+    if !streaming_prefill_enabled_for(&kiln_kt_bridge::kt_device_from_candle(device),seq_len) {
         return None;
     }
-    let tile = streaming_tile_tokens_for(device);
+    let tile = streaming_tile_tokens_for(&kiln_kt_bridge::kt_device_from_candle(device));
     if tile == 0 || tile % GDN_CHUNK_SIZE != 0 || tile >= seq_len {
         return None;
     }
@@ -8052,7 +8063,7 @@ fn exact_gdn_reverse_tile_size(
     ) {
         return None;
     }
-    if !streaming_prefill_enabled_for(device, seq_len) {
+    if !streaming_prefill_enabled_for(&kiln_kt_bridge::kt_device_from_candle(device),seq_len) {
         return None;
     }
     let tile = exact_gdn_backward_tile_tokens_for(device);
@@ -8067,7 +8078,7 @@ fn exact_gdn_backward_tile_tokens_for(device: &CdDevice) -> usize {
         if is_cuda_device(device) {
             1024
         } else {
-            streaming_tile_tokens_for(device)
+            streaming_tile_tokens_for(&kiln_kt_bridge::kt_device_from_candle(device))
         }
     }
 
@@ -9073,7 +9084,7 @@ fn exact_gdn_single_layer_tiled_reverse(
         "exact tiled GDN reverse begin"
     );
 
-    let boundary_state = LinearAttentionState::new(model_config, device)?;
+    let boundary_state = LinearAttentionState::new(model_config, &kiln_kt_bridge::kt_device_from_candle(device))?;
     let mut recurrent_boundaries: Vec<Tensor> = Vec::with_capacity(num_tiles + 1);
     let mut conv_boundaries: Vec<Tensor> = Vec::with_capacity(num_tiles + 1);
     recurrent_boundaries.push(boundary_state.recurrent_states[linear_attn_idx].detach());
@@ -9089,7 +9100,7 @@ fn exact_gdn_single_layer_tiled_reverse(
             .with_context(|| format!("GDN tiled reverse boundary input tile {tile_idx}"))?
             .detach();
 
-        let mut tile_state = LinearAttentionState::new(model_config, device)?;
+        let mut tile_state = LinearAttentionState::new(model_config, &kiln_kt_bridge::kt_device_from_candle(device))?;
         tile_state.recurrent_states[linear_attn_idx] = recurrent_boundaries[tile_idx].clone();
         tile_state.conv_states[linear_attn_idx] = conv_boundaries[tile_idx].clone();
 
@@ -9187,7 +9198,7 @@ fn exact_gdn_single_layer_tiled_reverse(
             .map(|layer| (layer, lora_detached.scale));
 
         let after_attn_value = {
-            let mut value_state = LinearAttentionState::new(model_config, device)?;
+            let mut value_state = LinearAttentionState::new(model_config, &kiln_kt_bridge::kt_device_from_candle(device))?;
             value_state.recurrent_states[linear_attn_idx] = recurrent_boundaries[tile_idx].clone();
             value_state.conv_states[linear_attn_idx] = conv_boundaries[tile_idx].clone();
             gdn_attention_residual_block(
@@ -9720,7 +9731,7 @@ fn exact_gdn_single_layer_tiled_reverse(
         let recurrent_var = var_from_tensor(&recurrent_boundaries[tile_idx])?;
         let conv_var = var_from_tensor(&conv_boundaries[tile_idx])?;
 
-        let mut tile_state = LinearAttentionState::new(model_config, device)?;
+        let mut tile_state = LinearAttentionState::new(model_config, &kiln_kt_bridge::kt_device_from_candle(device))?;
         tile_state.recurrent_states[linear_attn_idx] = recurrent_var.as_tensor().clone();
         tile_state.conv_states[linear_attn_idx] = conv_var.as_tensor().clone();
 
@@ -9991,11 +10002,11 @@ fn tiled_segment_recompute_and_backward(
     // States threaded across tiles. Grad-tracked segment uses one shared
     // state; each later (detached) segment also gets its own shared state so
     // the detached forward sees the same monolithic context evolution.
-    let mut grad_state = LinearAttentionState::new(model_config, device)?;
+    let mut grad_state = LinearAttentionState::new(model_config, &kiln_kt_bridge::kt_device_from_candle(device))?;
     let later_count = segments.len().saturating_sub(seg_idx + 1);
     let mut later_states: Vec<LinearAttentionState> = Vec::with_capacity(later_count);
     for _ in 0..later_count {
-        later_states.push(LinearAttentionState::new(model_config, device)?);
+        later_states.push(LinearAttentionState::new(model_config, &kiln_kt_bridge::kt_device_from_candle(device))?);
     }
 
     let all_vars = params.all_vars();
@@ -10228,7 +10239,7 @@ fn layer_pair_tiled_segment_recompute_and_backward(
         if i > 0 {
             tail_hidden = tail_hidden.detach();
         }
-        let mut later_state = LinearAttentionState::new(model_config, device)?;
+        let mut later_state = LinearAttentionState::new(model_config, &kiln_kt_bridge::kt_device_from_candle(device))?;
         tail_hidden = model_forward_segment(
             backend,
             tail_hidden,
@@ -10304,7 +10315,7 @@ fn layer_pair_tiled_segment_recompute_and_backward(
         resident_activation,
     )?);
     {
-        let mut linear_state = LinearAttentionState::new(model_config, device)?;
+        let mut linear_state = LinearAttentionState::new(model_config, &kiln_kt_bridge::kt_device_from_candle(device))?;
         let mut current = block_boundaries[0].clone();
         for (_kind, range) in &blocks {
             current = model_forward_segment(
@@ -10341,7 +10352,7 @@ fn layer_pair_tiled_segment_recompute_and_backward(
                 // Full-attention block: forward monolithically (FA can't be
                 // tiled at training time — no KV cache). Gradient injection:
                 // scalar = (block_output * grad_at_current_output).sum_all().
-                let mut state = LinearAttentionState::new(model_config, device)?;
+                let mut state = LinearAttentionState::new(model_config, &kiln_kt_bridge::kt_device_from_candle(device))?;
                 let lora_for_block = params.as_lora_weights();
                 let block_output = model_forward_segment(
                     backend,
@@ -10391,7 +10402,7 @@ fn layer_pair_tiled_segment_recompute_and_backward(
                 // tile range, real gradient inside). Sum across tiles to
                 // recover the full-seq_len gradient at block_input_var.
                 let (_, total_tokens, _) = block_input.dims3()?;
-                let mut state = LinearAttentionState::new(model_config, device)?;
+                let mut state = LinearAttentionState::new(model_config, &kiln_kt_bridge::kt_device_from_candle(device))?;
                 let mut summed: Option<Tensor> = None;
 
                 let mut tile_start = 0usize;
@@ -10557,7 +10568,7 @@ fn checkpointed_forward_backward(
         );
         let (embed_hidden, _) = model_forward_embed(input_ids, weights)?;
         let mut current = embed_hidden.detach();
-        let mut linear_state = LinearAttentionState::new(model_config, device)?;
+        let mut linear_state = LinearAttentionState::new(model_config, &kiln_kt_bridge::kt_device_from_candle(device))?;
         for (seg_idx, &(start, end)) in segments.iter().take(boundary_idx).enumerate() {
             let segment_timer = profile_checkpoint_segments.then(std::time::Instant::now);
             if profile_checkpoint_segments {
@@ -10617,7 +10628,7 @@ fn checkpointed_forward_backward(
         synchronize_checkpoint_boundary(device, || {
             "synchronize spooled embedding checkpoint boundary save".to_string()
         })?;
-        let mut linear_state = LinearAttentionState::new(model_config, device)?;
+        let mut linear_state = LinearAttentionState::new(model_config, &kiln_kt_bridge::kt_device_from_candle(device))?;
         for (seg_idx, &(start, end)) in segments.iter().enumerate() {
             tracing::info!(
                 segment = seg_idx + 1,
@@ -10696,7 +10707,7 @@ fn checkpointed_forward_backward(
 
         {
             let mut current = boundary_states[0].clone();
-            let mut linear_state = LinearAttentionState::new(model_config, device)?;
+            let mut linear_state = LinearAttentionState::new(model_config, &kiln_kt_bridge::kt_device_from_candle(device))?;
             for (seg_idx, &(start, end)) in segments.iter().enumerate() {
                 let segment_timer = profile_checkpoint_segments.then(std::time::Instant::now);
                 if profile_checkpoint_segments {
@@ -10934,7 +10945,7 @@ fn checkpointed_forward_backward(
         let seg_input_var = var_from_tensor(&seg_input)?;
 
         let lora_weights_for_seg = params.as_lora_weights();
-        let mut linear_state = LinearAttentionState::new(model_config, device)?;
+        let mut linear_state = LinearAttentionState::new(model_config, &kiln_kt_bridge::kt_device_from_candle(device))?;
         let seg_output = model_forward_segment(
             backend,
             seg_input_var.as_tensor().clone(),
@@ -11103,7 +11114,7 @@ fn standard_forward_backward_tape_authoritative(
     _flce_provider: Option<FlceProvider>,
 ) -> Result<(f64, GradStore)> {
     let lora_weights = params.as_lora_weights();
-    let mut linear_state = LinearAttentionState::new(model_config, device)?;
+    let mut linear_state = LinearAttentionState::new(model_config, &kiln_kt_bridge::kt_device_from_candle(device))?;
 
     let (loss_val, loss, grads_by_candle_raw) =
         kiln_kt_bridge::tape_bridge::with_tape_authoritative_scope(|| {
@@ -11201,7 +11212,7 @@ fn standard_forward_backward_tape_authoritative_kt(
     _flce_provider: Option<FlceProvider>,
 ) -> Result<(f64, kiln_autograd::GradStore)> {
     let lora_weights = params.as_lora_weights();
-    let mut linear_state = LinearAttentionState::new(model_config, device)?;
+    let mut linear_state = LinearAttentionState::new(model_config, &kiln_kt_bridge::kt_device_from_candle(device))?;
 
     let (loss_val, _loss, grads_by_candle_raw) =
         kiln_kt_bridge::tape_bridge::with_tape_authoritative_scope(|| {
@@ -11323,7 +11334,7 @@ pub fn standard_forward_backward(
     }
 
     let lora_weights = params.as_lora_weights();
-    let mut linear_state = LinearAttentionState::new(model_config, device)?;
+    let mut linear_state = LinearAttentionState::new(model_config, &kiln_kt_bridge::kt_device_from_candle(device))?;
 
     let loss = if use_flce() {
         let hidden = model_forward_no_head(
@@ -11393,7 +11404,7 @@ fn standard_forward_backward_via_tape_bridge(
     flce_provider: Option<FlceProvider>,
 ) -> Result<(f64, GradStore)> {
     let lora_weights = params.as_lora_weights();
-    let mut linear_state = LinearAttentionState::new(model_config, device)?;
+    let mut linear_state = LinearAttentionState::new(model_config, &kiln_kt_bridge::kt_device_from_candle(device))?;
 
     // The bridge wrapper's `forward` closure must return
     // `Result<(payload, candle Tensor), BridgeError>`. We pack the
@@ -11512,7 +11523,7 @@ fn grpo_non_checkpointed_forward_backward_via_tape_bridge(
     mut timings: Option<&mut GrpoBenchmarkTimings>,
 ) -> Result<(f64, GradStore, Option<f64>)> {
     let lora_weights = params.as_lora_weights();
-    let mut linear_state = LinearAttentionState::new(model_config, device)?;
+    let mut linear_state = LinearAttentionState::new(model_config, &kiln_kt_bridge::kt_device_from_candle(device))?;
     let step_started = Instant::now();
 
     // The bridge wrapper's `forward` closure must return
@@ -11646,7 +11657,7 @@ fn grpo_non_checkpointed_forward_backward_via_tape_bridge(
         action_tokens = num_active,
         env_tokens = comp_env_count,
         checkpoint_segments,
-        streaming_prefill = streaming_prefill_enabled_for(device, input_ids.len()),
+        streaming_prefill = streaming_prefill_enabled_for(&kiln_kt_bridge::kt_device_from_candle(device),input_ids.len()),
         streaming_tile_tokens,
         elapsed_ms = step_elapsed.as_millis() as u64,
         "GRPO step end (tape_bridge)"
@@ -11696,7 +11707,7 @@ fn grpo_step_forward_backward_tape_authoritative(
     mut timings: Option<&mut GrpoBenchmarkTimings>,
 ) -> Result<(f64, GradStore)> {
     let lora_weights = params.as_lora_weights();
-    let mut linear_state = LinearAttentionState::new(model_config, device)?;
+    let mut linear_state = LinearAttentionState::new(model_config, &kiln_kt_bridge::kt_device_from_candle(device))?;
     let step_started = Instant::now();
 
     let (loss_val, loss, grads_by_candle_raw) =
@@ -11801,7 +11812,7 @@ fn grpo_step_forward_backward_tape_authoritative(
         action_tokens = num_active,
         env_tokens = comp_env_count,
         checkpoint_segments,
-        streaming_prefill = streaming_prefill_enabled_for(device, input_ids.len()),
+        streaming_prefill = streaming_prefill_enabled_for(&kiln_kt_bridge::kt_device_from_candle(device),input_ids.len()),
         streaming_tile_tokens,
         elapsed_ms = step_elapsed.as_millis() as u64,
         "GRPO step end (tape-authoritative)"
@@ -11857,7 +11868,7 @@ fn grpo_step_forward_backward_tape_authoritative_kt(
     mut timings: Option<&mut GrpoBenchmarkTimings>,
 ) -> Result<(f64, kiln_autograd::GradStore)> {
     let lora_weights = params.as_lora_weights();
-    let mut linear_state = LinearAttentionState::new(model_config, device)?;
+    let mut linear_state = LinearAttentionState::new(model_config, &kiln_kt_bridge::kt_device_from_candle(device))?;
     let step_started = Instant::now();
 
     let (loss_val, _loss, grads_by_candle_raw) =
@@ -11957,7 +11968,7 @@ fn grpo_step_forward_backward_tape_authoritative_kt(
         action_tokens = num_active,
         env_tokens = comp_env_count,
         checkpoint_segments,
-        streaming_prefill = streaming_prefill_enabled_for(device, input_ids.len()),
+        streaming_prefill = streaming_prefill_enabled_for(&kiln_kt_bridge::kt_device_from_candle(device),input_ids.len()),
         streaming_tile_tokens,
         elapsed_ms = step_elapsed.as_millis() as u64,
         "GRPO step end (tape-authoritative kt)"
@@ -12279,7 +12290,7 @@ fn multi_layer_per_layer_tile_reverse(
     let mut layer_inputs: Vec<Tensor> = Vec::with_capacity(num_layers);
     layer_inputs.push(seg_input.detach());
     {
-        let mut linear_state = LinearAttentionState::new(model_config, device)?;
+        let mut linear_state = LinearAttentionState::new(model_config, &kiln_kt_bridge::kt_device_from_candle(device))?;
         let mut current = layer_inputs[0].clone();
         for layer_offset in 0..(num_layers - 1) {
             let layer_idx = seg_start + layer_offset;
@@ -12422,12 +12433,12 @@ fn checkpointed_grpo_forward_backward<'echo>(
     let active_tokens = completion_mask
         .get(1..)
         .map_or(0usize, |mask| mask.iter().filter(|&&active| active).count());
-    let streaming_tile_tokens = streaming_tile_tokens_for(device);
+    let streaming_tile_tokens = streaming_tile_tokens_for(&kiln_kt_bridge::kt_device_from_candle(device));
     tracing::info!(
         seq_len = input_ids.len(),
         action_tokens = active_tokens,
         num_segments,
-        streaming_prefill = streaming_prefill_enabled_for(device, input_ids.len()),
+        streaming_prefill = streaming_prefill_enabled_for(&kiln_kt_bridge::kt_device_from_candle(device),input_ids.len()),
         streaming_tile_tokens,
         recompute_boundaries,
         should_spool_boundaries,
@@ -12442,7 +12453,7 @@ fn checkpointed_grpo_forward_backward<'echo>(
         );
         let (embed_hidden, _) = model_forward_embed(input_ids, weights)?;
         let mut current = embed_hidden.detach();
-        let mut linear_state = LinearAttentionState::new(model_config, device)?;
+        let mut linear_state = LinearAttentionState::new(model_config, &kiln_kt_bridge::kt_device_from_candle(device))?;
         for &(start, end) in segments.iter().take(boundary_idx) {
             current = model_forward_segment(
                 backend,
@@ -12480,7 +12491,7 @@ fn checkpointed_grpo_forward_backward<'echo>(
         synchronize_checkpoint_boundary(device, || {
             "synchronize spooled GRPO embedding checkpoint boundary save".to_string()
         })?;
-        let mut linear_state = LinearAttentionState::new(model_config, device)?;
+        let mut linear_state = LinearAttentionState::new(model_config, &kiln_kt_bridge::kt_device_from_candle(device))?;
         for (seg_idx, &(start, end)) in segments.iter().enumerate() {
             current = model_forward_segment(
                 backend,
@@ -12529,7 +12540,7 @@ fn checkpointed_grpo_forward_backward<'echo>(
 
         {
             let mut current = boundary_states[0].clone();
-            let mut linear_state = LinearAttentionState::new(model_config, device)?;
+            let mut linear_state = LinearAttentionState::new(model_config, &kiln_kt_bridge::kt_device_from_candle(device))?;
             for &(start, end) in segments.iter() {
                 current = model_forward_segment(
                     backend,
@@ -12567,7 +12578,7 @@ fn checkpointed_grpo_forward_backward<'echo>(
         seq_len = input_ids.len(),
         action_tokens = active_tokens,
         num_segments,
-        streaming_prefill = streaming_prefill_enabled_for(device, input_ids.len()),
+        streaming_prefill = streaming_prefill_enabled_for(&kiln_kt_bridge::kt_device_from_candle(device),input_ids.len()),
         streaming_tile_tokens,
         recompute_boundaries,
         should_spool_boundaries,
@@ -12581,7 +12592,7 @@ fn checkpointed_grpo_forward_backward<'echo>(
         seq_len = input_ids.len(),
         action_tokens = active_tokens,
         num_segments,
-        streaming_prefill = streaming_prefill_enabled_for(device, input_ids.len()),
+        streaming_prefill = streaming_prefill_enabled_for(&kiln_kt_bridge::kt_device_from_candle(device),input_ids.len()),
         streaming_tile_tokens,
         recompute_boundaries,
         should_spool_boundaries,
@@ -12618,7 +12629,7 @@ fn checkpointed_grpo_forward_backward<'echo>(
             full_attention_mlp_reverse_tile_size(weights, input_ids.len(), seg_start, seg_end);
         let use_multi_layer_tile_reverse = seg_end > seg_start + 1
             && multi_layer_tile_reverse_enabled()
-            && streaming_prefill_enabled_for(device, input_ids.len());
+            && streaming_prefill_enabled_for(&kiln_kt_bridge::kt_device_from_candle(device),input_ids.len());
         tracing::info!(
             segment = seg_idx + 1,
             num_segments,
@@ -12802,7 +12813,7 @@ fn checkpointed_grpo_forward_backward<'echo>(
 
         let seg_input_var = var_from_tensor(&seg_input)?;
         let lora_weights_for_seg = params.as_lora_weights();
-        let mut linear_state = LinearAttentionState::new(model_config, device)?;
+        let mut linear_state = LinearAttentionState::new(model_config, &kiln_kt_bridge::kt_device_from_candle(device))?;
         let seg_output = model_forward_segment(
             backend,
             seg_input_var.as_tensor().clone(),
@@ -12875,7 +12886,7 @@ fn checkpointed_grpo_forward_backward<'echo>(
         seq_len = input_ids.len(),
         action_tokens = active_tokens,
         num_segments,
-        streaming_prefill = streaming_prefill_enabled_for(device, input_ids.len()),
+        streaming_prefill = streaming_prefill_enabled_for(&kiln_kt_bridge::kt_device_from_candle(device),input_ids.len()),
         streaming_tile_tokens,
         recompute_boundaries,
         should_spool_boundaries,
