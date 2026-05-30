@@ -13794,7 +13794,10 @@ const GDN_RECURRENT_PREFILL_MAX_TOKENS: usize = 2048;
 /// Build a [n, n] mask on `device` with `dtype`, 1.0 where row > col else 0.0.
 /// Used for the strictly lower-triangular `A_strict` mask (i < t, exclusive).
 fn strict_lower_tri_bool(n: usize, device: &Device) -> Result<Tensor> {
-    let t = Tensor::arange(0u32, n as u32, device)?;
+    // #1082: the kt `gt` op requires F32/BF16/F16 (candle allowed u32). Cast the
+    // arange indices to F32 — exact for the small (chunk_size ≤ 64) integer
+    // ranges here — so the comparison runs on the CUDA tape-authoritative path.
+    let t = Tensor::arange(0u32, n as u32, device)?.to_dtype(DType::F32)?;
     let cols = t.reshape((1, n))?.broadcast_as((n, n))?;
     let rows = t.reshape((n, 1))?.broadcast_as((n, n))?;
     Ok(kiln_tensor::ops::gt(&rows, &cols)?)
@@ -13809,7 +13812,9 @@ fn strict_lower_tri_mask(n: usize, dtype: DType, device: &Device) -> Result<Tens
 /// Build a [n, n] mask on `device` with `dtype`, 1.0 where row >= col else 0.0.
 /// Used for the causal (inclusive) lower-triangular `B_mask` mask (i <= t).
 fn causal_lower_tri_bool(n: usize, device: &Device) -> Result<Tensor> {
-    let t = Tensor::arange(0u32, n as u32, device)?;
+    // #1082: kt `ge` requires F32/BF16/F16 (candle allowed u32). Cast the arange
+    // indices to F32 (exact for chunk_size ≤ 64) so the CUDA tape path runs.
+    let t = Tensor::arange(0u32, n as u32, device)?.to_dtype(DType::F32)?;
     let cols = t.reshape((1, n))?.broadcast_as((n, n))?;
     let rows = t.reshape((n, 1))?.broadcast_as((n, n))?;
     Ok(kiln_tensor::ops::ge(&rows, &cols)?)
