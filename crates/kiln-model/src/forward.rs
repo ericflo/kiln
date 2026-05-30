@@ -32195,6 +32195,10 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "#1082: candle-autograd oracle severed by the kt forward flip \
+                 (gdn_chunkwise_recurrence is now kt, no candle graph). Compiles; \
+                 needs a kt-tape / finite-diff oracle (CP-4 long pole) before it \
+                 can validate again. See kiln-candle-autograd-drops-attn-conv-grads."]
     fn test_gdn_recurrent_backward_no_grad_matches_autograd_cpu() -> Result<()> {
         let device = Device::Cpu;
         let dtype = DType::F32;
@@ -32390,6 +32394,9 @@ mod tests {
     /// `loss.backward()` yields the gold dx/dz/dw, and the backward fn is fed
     /// that upstream as `grad_out`. Tolerance 1e-4 (F32).
     #[test]
+    #[ignore = "#1082: candle-autograd oracle severed by the kt forward flip \
+                 (gated_rms_norm_fallback is now kt). Compiles; needs a kt-tape / \
+                 finite-diff oracle before it can validate again."]
     fn test_gdn_gated_rms_norm_backward_no_grad_matches_autograd_cpu() -> Result<()> {
         let device = Device::Cpu;
         let dtype = DType::F32;
@@ -32459,6 +32466,9 @@ mod tests {
     /// `loss.backward()` yields the gold dx, and the backward fn is fed the same
     /// upstream as `grad_out`. Tolerance 1e-4 (F32).
     #[test]
+    #[ignore = "#1082: candle-autograd oracle severed by the kt forward flip \
+                 (l2_normalize is now kt). Compiles; needs a kt-tape / finite-diff \
+                 oracle before it can validate again."]
     fn test_gdn_l2_norm_scale_backward_no_grad_matches_autograd_cpu() -> Result<()> {
         let device = Device::Cpu;
         let dtype = DType::F32;
