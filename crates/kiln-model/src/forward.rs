@@ -3589,8 +3589,18 @@ fn attention_output_gate_decode_if(
 
     #[cfg(feature = "cuda")]
     {
-        if let Some(out) = cuda_sigmoid_mul_training_bf16(&attn_output, gate)? {
-            return Ok(out);
+        // Training CustomOp2 island is candle-typed; only enter (and pay the
+        // kt<->candle bridge) when an input is autograd-tracked. Production
+        // decode is detached and skips straight to the kt-native fused path.
+        if attn_output.track_op() || gate.track_op() {
+            let x_candle = kt_logits_to_candle(&attn_output)
+                .context("attention_output_gate kt->candle attn_output")?;
+            let g_candle =
+                kt_logits_to_candle(gate).context("attention_output_gate kt->candle gate")?;
+            if let Some(out) = cuda_sigmoid_mul_training_bf16(&x_candle, &g_candle)? {
+                return candle_to_kt_activation(&out)
+                    .context("attention_output_gate candle->kt training out");
+            }
         }
         if !cuda_fused_attn_sigmoid_mul_disabled()
             && !attn_output.track_op()
@@ -3601,13 +3611,12 @@ fn attention_output_gate_decode_if(
             {
                 if kiln_rmsnorm_kernel::supports_sigmoid_mul_kt(&x_kt, &g_kt) {
                     // Phase 7 (#1082): kt-only. Bit-exact: bottoms out in
-                    // the same `kiln_fused_sigmoid_mul` FFI symbol.
+                    // the same `kiln_fused_sigmoid_mul` FFI symbol. Result is
+                    // kt — return it directly (no candle round-trip).
                     kiln_nvtx::range!(c"kiln/attn/output_gate_cuda_fused_kt");
                     let out_kt = kiln_rmsnorm_kernel::fused_sigmoid_mul_kt(&x_kt, &g_kt)
                         .map_err(|e| anyhow::anyhow!("kt sigmoid/mul: {e}"))?;
-                    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-                        .with_context(|| "kt-adapter: out → candle failed")?;
-                    return Ok(out);
+                    return Ok(out_kt);
                 }
             }
         }
