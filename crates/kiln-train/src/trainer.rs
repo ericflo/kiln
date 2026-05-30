@@ -10950,11 +10950,30 @@ fn checkpointed_forward_backward(
     let should_spool_boundaries = recompute_boundaries && spool_checkpoint_boundaries(device);
     let profile_checkpoint_segments = profile_checkpoint_segments();
 
+    // (#1082) `model_forward_embed` / `model_forward_segment` /
+    // `model_forward_final_norm` / `model_forward_head` are kt-native; the
+    // boundary store, spool I/O, resident-activation registry, FLCE/CE loss,
+    // and analytic tail grad are all candle islands. Bridge candle->kt
+    // (`kt_in`) before a kt forward op and kt->candle (`cd_out`) after one.
+    let cd_out = |k: &kiln_tensor::Tensor| -> Result<Tensor> {
+        kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(
+            &k.contiguous()
+                .map_err(|e| anyhow::anyhow!("checkpointed: kt contiguous: {e}"))?,
+        )
+        .map_err(|e| anyhow::anyhow!("checkpointed: kt->candle copy: {e}"))
+    };
+    let kt_in = |c: &Tensor| -> Result<kiln_tensor::Tensor> {
+        kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(c)
+            .map_err(|e| anyhow::anyhow!("checkpointed: candle->kt borrow: {e}"))
+    };
+
     let detached_boundary = |boundary_idx: usize| -> Result<Tensor> {
         anyhow::ensure!(
             boundary_idx <= num_segments,
             "checkpoint boundary index {boundary_idx} out of range for {num_segments} segments"
         );
+        // `current` threads as kt through the kt-native forward ops; the closure
+        // returns a candle boundary for the candle store / Var seams.
         let (embed_hidden, _) = model_forward_embed(input_ids, weights)?;
         let mut current = embed_hidden.detach();
         let mut linear_state = LinearAttentionState::new(model_config, &kiln_kt_bridge::kt_device_from_candle(device))?;
@@ -10997,7 +11016,8 @@ fn checkpointed_forward_backward(
                 );
             }
         }
-        Ok(current)
+        // Bridge the kt boundary -> candle for the candle store / Var seams.
+        cd_out(&current)
     };
 
     let mut spooled_final_hidden: Option<Tensor> = None;
@@ -11008,12 +11028,14 @@ fn checkpointed_forward_backward(
             seq_len = input_ids.len(),
             "spooling checkpoint boundaries to temporary safetensors"
         );
+        // `current` threads as kt; `spool.save` is a candle island, so bridge
+        // each boundary kt->candle for the save and for `spooled_final_hidden`.
         let (embed_hidden, _) = model_forward_embed(input_ids, weights)?;
         let mut current = embed_hidden.detach();
         synchronize_checkpoint_boundary(device, || {
             "synchronize spooled embedding checkpoint boundary".to_string()
         })?;
-        spool.save(0, &current)?;
+        spool.save(0, &cd_out(&current)?)?;
         synchronize_checkpoint_boundary(device, || {
             "synchronize spooled embedding checkpoint boundary save".to_string()
         })?;
@@ -11044,7 +11066,7 @@ fn checkpointed_forward_backward(
                     seg_idx + 1
                 )
             })?;
-            spool.save(seg_idx + 1, &current)?;
+            spool.save(seg_idx + 1, &cd_out(&current)?)?;
             synchronize_checkpoint_boundary(device, || {
                 format!(
                     "synchronize spooled checkpoint boundary {} after save",
@@ -11059,7 +11081,7 @@ fn checkpointed_forward_backward(
                 "spooled checkpoint boundary segment"
             );
         }
-        spooled_final_hidden = Some(current);
+        spooled_final_hidden = Some(cd_out(&current)?);
         tracing::info!(
             num_segments,
             "finished spooling checkpoint boundaries to temporary safetensors"
@@ -11095,7 +11117,11 @@ fn checkpointed_forward_backward(
         }
 
         {
-            let mut current = boundary_states[0].clone();
+            // `boundary_states` is candle; `model_forward_segment` is kt-native.
+            // Thread `current` as kt: bridge the candle seed in, push candle
+            // copies into the store, and re-derive the kt `current` from the
+            // kt forward output each iteration (not from the candle store).
+            let mut current = kt_in(&boundary_states[0])?;
             let mut linear_state = LinearAttentionState::new(model_config, &kiln_kt_bridge::kt_device_from_candle(device))?;
             for (seg_idx, &(start, end)) in segments.iter().enumerate() {
                 let segment_timer = profile_checkpoint_segments.then(std::time::Instant::now);
@@ -11118,8 +11144,9 @@ fn checkpointed_forward_backward(
                     end,
                     Some(&mut linear_state),
                     Some(&lora_detached),
-                )?;
-                boundary_states.push(current.detach());
+                )?
+                .detach();
+                boundary_states.push(cd_out(&current)?);
                 if resident_activation {
                     backend.register_resident_activation(boundary_states.last().unwrap())?;
                 }
@@ -11136,7 +11163,6 @@ fn checkpointed_forward_backward(
                         "cached checkpoint boundary segment complete"
                     );
                 }
-                current = boundary_states.last().unwrap().clone();
             }
         }
         segment_input_via_registry_or_clone(
@@ -11153,11 +11179,21 @@ fn checkpointed_forward_backward(
     // tied LM head + masked next-token cross-entropy. This avoids the old
     // per-segment tail forward, which retained later-layer graphs and was not
     // viable for long examples.
+    // (#1082) `final_hidden` is candle; the kt-native final-norm/head ops take
+    // kt and `embed_tokens_t`/`final_norm` weights are kt. Bridge candle->kt for
+    // the forward input, kt->candle for the head output + the candle FLCE/CE
+    // loss + the candle-island analytic tail grad (which takes candle hidden +
+    // candle weights).
+    let final_hidden_kt = kt_in(&final_hidden)?;
+    let head_t_candle = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&weights.embed_tokens_t)
+        .map_err(|e| anyhow::anyhow!("checkpointed: kt->candle head_t: {e}"))?;
+    let final_norm_candle = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&weights.final_norm)
+        .map_err(|e| anyhow::anyhow!("checkpointed: kt->candle final_norm: {e}"))?;
     let loss = if use_flce() {
-        let normed = model_forward_final_norm(&final_hidden, weights, model_config)?;
+        let normed = cd_out(&model_forward_final_norm(&final_hidden_kt, weights, model_config)?)?;
         fused_linear_cross_entropy_dispatch_with_provider(
             &normed,
-            &weights.embed_tokens_t,
+            &head_t_candle,
             input_ids,
             label_mask,
             device,
@@ -11166,15 +11202,15 @@ fn checkpointed_forward_backward(
         )
         .context("fused linear cross-entropy (checkpointed final boundary)")?
     } else {
-        let logits = model_forward_head(&final_hidden, weights, model_config)?;
+        let logits = cd_out(&model_forward_head(&final_hidden_kt, weights, model_config)?)?;
         cross_entropy_loss(&logits, input_ids, label_mask, device)?
     };
     let loss_val = loss.to_scalar::<f32>()? as f64;
 
     let mut upstream_grad = analytic_sft_tail_grad_pre_final_norm(
         &final_hidden,
-        &weights.final_norm,
-        &weights.embed_tokens_t,
+        &final_norm_candle,
+        &head_t_candle,
         input_ids,
         label_mask,
         model_config.rms_norm_eps,
@@ -11335,9 +11371,11 @@ fn checkpointed_forward_backward(
 
         let lora_weights_for_seg = params.as_lora_weights();
         let mut linear_state = LinearAttentionState::new(model_config, &kiln_kt_bridge::kt_device_from_candle(device))?;
-        let seg_output = model_forward_segment(
+        // (#1082) bridge candle Var -> kt for the kt segment forward, and the kt
+        // output -> candle for the candle injection scalar / `.backward()`.
+        let seg_output = cd_out(&model_forward_segment(
             backend,
-            seg_input_var.as_tensor().clone(),
+            kt_in(seg_input_var.as_tensor())?,
             weights,
             model_config,
             &positions,
@@ -11345,7 +11383,7 @@ fn checkpointed_forward_backward(
             seg_end,
             Some(&mut linear_state),
             Some(&lora_weights_for_seg),
-        )?;
+        )?)?;
 
         let seg_output_f32 = seg_output.to_f32_dtype()?;
         let upstream_f32 = upstream_grad_for_seg.to_f32_dtype()?;
