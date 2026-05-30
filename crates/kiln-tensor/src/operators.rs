@@ -91,11 +91,16 @@ macro_rules! kt_bin_trait {
     // $mul    : f64 -> f64 closure giving the affine multiplier for the scalar form
     // $add    : f64 -> f64 closure giving the affine addend for the scalar form
     ($trait:ident, $fn:ident, $mul:expr, $add:expr) => {
+        // #1082: kt `ops::{add,sub,mul,div}` require contiguous operands
+        // ("stride-aware path not in Phase 1.15"); candle's operators handled
+        // strided/narrowed views implicitly. Contiguify each operand
+        // (device-correct; O(1) no-op when already contiguous) so
+        // `(a * b)?`-style call sites in forward.rs work verbatim.
         impl<B: Borrow<Tensor>> std::ops::$trait<B> for Tensor {
             type Output = Result<Tensor>;
 
             fn $fn(self, rhs: B) -> Self::Output {
-                ops::$fn(&self, rhs.borrow())
+                ops::$fn(&self.contiguous()?, &rhs.borrow().contiguous()?)
             }
         }
 
@@ -103,7 +108,7 @@ macro_rules! kt_bin_trait {
             type Output = Result<Tensor>;
 
             fn $fn(self, rhs: B) -> Self::Output {
-                ops::$fn(self, rhs.borrow())
+                ops::$fn(&self.contiguous()?, &rhs.borrow().contiguous()?)
             }
         }
 
@@ -111,7 +116,7 @@ macro_rules! kt_bin_trait {
             type Output = Result<Tensor>;
 
             fn $fn(self, rhs: Tensor) -> Self::Output {
-                ops::$fn(self?.borrow(), &rhs)
+                ops::$fn(&self?.borrow().contiguous()?, &rhs.contiguous()?)
             }
         }
 
@@ -119,7 +124,7 @@ macro_rules! kt_bin_trait {
             type Output = Result<Tensor>;
 
             fn $fn(self, rhs: &Tensor) -> Self::Output {
-                ops::$fn(self?.borrow(), rhs)
+                ops::$fn(&self?.borrow().contiguous()?, &rhs.contiguous()?)
             }
         }
 
@@ -127,7 +132,7 @@ macro_rules! kt_bin_trait {
             type Output = Result<Tensor>;
 
             fn $fn(self, rhs: Result<B>) -> Self::Output {
-                ops::$fn(&self, rhs?.borrow())
+                ops::$fn(&self.contiguous()?, &rhs?.borrow().contiguous()?)
             }
         }
 
@@ -135,7 +140,7 @@ macro_rules! kt_bin_trait {
             type Output = Result<Tensor>;
 
             fn $fn(self, rhs: Result<B>) -> Self::Output {
-                ops::$fn(self, rhs?.borrow())
+                ops::$fn(&self.contiguous()?, &rhs?.borrow().contiguous()?)
             }
         }
 
@@ -143,7 +148,9 @@ macro_rules! kt_bin_trait {
             type Output = Result<Tensor>;
 
             fn $fn(self, rhs: f64) -> Self::Output {
-                self.affine($mul(rhs), $add(rhs))
+                // #1082: contiguify for the strict scalar/affine op (no-op when
+                // already contiguous).
+                self.contiguous()?.affine($mul(rhs), $add(rhs))
             }
         }
 
@@ -151,7 +158,7 @@ macro_rules! kt_bin_trait {
             type Output = Result<Tensor>;
 
             fn $fn(self, rhs: f64) -> Self::Output {
-                self.affine($mul(rhs), $add(rhs))
+                self.contiguous()?.affine($mul(rhs), $add(rhs))
             }
         }
     };

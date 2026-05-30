@@ -169,6 +169,20 @@ fn broadcast_to_shape(x: &Tensor, target: &[usize]) -> Result<Tensor> {
     ops::broadcast_to(&padded, target)
 }
 
+/// #1082 forward-flip: kt's core elementwise/cast/concat ops require
+/// **contiguous** operands ("stride-aware path not in Phase 1.15"), whereas
+/// candle materialized strided/broadcast views implicitly. The candle-compat
+/// façade methods below restore that behavior by contiguifying non-contiguous
+/// operands here — device-correct (`.contiguous()` runs `cuda_contiguous` on
+/// CUDA, no host roundtrip), an O(1) shared-clone when already contiguous, and
+/// logged via `kiln_profile_contiguous_copy` when an actual copy happens (so
+/// the copy-counter goal is preserved). The core `ops::` entry points keep
+/// their strict contract for direct callers.
+#[inline]
+fn contig_for_op(t: &Tensor) -> Result<Tensor> {
+    t.contiguous()
+}
+
 impl Tensor {
     // ==================================================================
     // Binary elementwise (same-shape) — candle `binary_op!`
@@ -177,22 +191,22 @@ impl Tensor {
 
     /// Elementwise `self + rhs` (same shape). Delegates to [`ops::add`].
     pub fn add(&self, rhs: &Self) -> Result<Self> {
-        ops::add(self, rhs)
+        ops::add(&contig_for_op(self)?, &contig_for_op(rhs)?)
     }
 
     /// Elementwise `self - rhs` (same shape). Delegates to [`ops::sub`].
     pub fn sub(&self, rhs: &Self) -> Result<Self> {
-        ops::sub(self, rhs)
+        ops::sub(&contig_for_op(self)?, &contig_for_op(rhs)?)
     }
 
     /// Elementwise `self * rhs` (same shape). Delegates to [`ops::mul`].
     pub fn mul(&self, rhs: &Self) -> Result<Self> {
-        ops::mul(self, rhs)
+        ops::mul(&contig_for_op(self)?, &contig_for_op(rhs)?)
     }
 
     /// Elementwise `self / rhs` (same shape). Delegates to [`ops::div`].
     pub fn div(&self, rhs: &Self) -> Result<Self> {
-        ops::div(self, rhs)
+        ops::div(&contig_for_op(self)?, &contig_for_op(rhs)?)
     }
 
     /// Elementwise `max(self, rhs)`. Delegates to [`ops::maximum`].
@@ -200,12 +214,12 @@ impl Tensor {
     /// candle types this `<T: TensorOrScalar>`; kt only needs the
     /// tensor-tensor form for the flip, so the arg is `&Self`.
     pub fn maximum(&self, rhs: &Self) -> Result<Self> {
-        ops::maximum(self, rhs)
+        ops::maximum(&contig_for_op(self)?, &contig_for_op(rhs)?)
     }
 
     /// Elementwise `min(self, rhs)`. Delegates to [`ops::minimum`].
     pub fn minimum(&self, rhs: &Self) -> Result<Self> {
-        ops::minimum(self, rhs)
+        ops::minimum(&contig_for_op(self)?, &contig_for_op(rhs)?)
     }
 
     // ==================================================================
@@ -214,12 +228,13 @@ impl Tensor {
     // ==================================================================
 
     /// Broadcasting `self + rhs` (numpy rules). Composes
-    /// [`ops::broadcast_to`] + [`ops::add`].
+    /// [`ops::broadcast_to`] + [`ops::add`]. (#1082: broadcast yields strided
+    /// views; `contig_for_op` materializes them for the strict kt op.)
     pub fn broadcast_add(&self, rhs: &Self) -> Result<Self> {
         let shape = broadcast_shape(self.shape(), rhs.shape(), "broadcast_add")?;
         ops::add(
-            &broadcast_to_shape(self, &shape)?,
-            &broadcast_to_shape(rhs, &shape)?,
+            &contig_for_op(&broadcast_to_shape(self, &shape)?)?,
+            &contig_for_op(&broadcast_to_shape(rhs, &shape)?)?,
         )
     }
 
@@ -227,8 +242,8 @@ impl Tensor {
     pub fn broadcast_sub(&self, rhs: &Self) -> Result<Self> {
         let shape = broadcast_shape(self.shape(), rhs.shape(), "broadcast_sub")?;
         ops::sub(
-            &broadcast_to_shape(self, &shape)?,
-            &broadcast_to_shape(rhs, &shape)?,
+            &contig_for_op(&broadcast_to_shape(self, &shape)?)?,
+            &contig_for_op(&broadcast_to_shape(rhs, &shape)?)?,
         )
     }
 
@@ -236,8 +251,8 @@ impl Tensor {
     pub fn broadcast_mul(&self, rhs: &Self) -> Result<Self> {
         let shape = broadcast_shape(self.shape(), rhs.shape(), "broadcast_mul")?;
         ops::mul(
-            &broadcast_to_shape(self, &shape)?,
-            &broadcast_to_shape(rhs, &shape)?,
+            &contig_for_op(&broadcast_to_shape(self, &shape)?)?,
+            &contig_for_op(&broadcast_to_shape(rhs, &shape)?)?,
         )
     }
 
@@ -245,8 +260,8 @@ impl Tensor {
     pub fn broadcast_div(&self, rhs: &Self) -> Result<Self> {
         let shape = broadcast_shape(self.shape(), rhs.shape(), "broadcast_div")?;
         ops::div(
-            &broadcast_to_shape(self, &shape)?,
-            &broadcast_to_shape(rhs, &shape)?,
+            &contig_for_op(&broadcast_to_shape(self, &shape)?)?,
+            &contig_for_op(&broadcast_to_shape(rhs, &shape)?)?,
         )
     }
 
@@ -254,8 +269,8 @@ impl Tensor {
     pub fn broadcast_maximum(&self, rhs: &Self) -> Result<Self> {
         let shape = broadcast_shape(self.shape(), rhs.shape(), "broadcast_maximum")?;
         ops::maximum(
-            &broadcast_to_shape(self, &shape)?,
-            &broadcast_to_shape(rhs, &shape)?,
+            &contig_for_op(&broadcast_to_shape(self, &shape)?)?,
+            &contig_for_op(&broadcast_to_shape(rhs, &shape)?)?,
         )
     }
 
@@ -263,8 +278,8 @@ impl Tensor {
     pub fn broadcast_minimum(&self, rhs: &Self) -> Result<Self> {
         let shape = broadcast_shape(self.shape(), rhs.shape(), "broadcast_minimum")?;
         ops::minimum(
-            &broadcast_to_shape(self, &shape)?,
-            &broadcast_to_shape(rhs, &shape)?,
+            &contig_for_op(&broadcast_to_shape(self, &shape)?)?,
+            &contig_for_op(&broadcast_to_shape(rhs, &shape)?)?,
         )
     }
 
@@ -468,7 +483,8 @@ impl Tensor {
     /// `pub fn to_dtype(&self, dtype: DType) -> Result<Self>`. Delegates
     /// to [`ops::cast`].
     pub fn to_dtype(&self, dtype: DType) -> Result<Self> {
-        ops::cast(self, dtype)
+        // #1082: kt CastOp requires contiguous input (candle copied implicitly).
+        ops::cast(&contig_for_op(self)?, dtype)
     }
 
     // NOTE: `to_device` already exists as an inherent method on Tensor
@@ -1118,7 +1134,15 @@ impl Tensor {
         let refs: Vec<&Self> = tensors.iter().map(|t| t.as_ref()).collect();
         let rank = refs[0].rank();
         let axis = dim.to_index(rank, "cat")?;
-        ops::concat(&refs, axis)
+        // #1082: kt concat requires contiguous inputs (candle copied
+        // implicitly); pieces are often narrowed/transposed views. Materialize
+        // each (O(1) no-op when already contiguous).
+        let contig: Vec<Self> = refs
+            .iter()
+            .map(|t| contig_for_op(t))
+            .collect::<Result<Vec<_>>>()?;
+        let contig_refs: Vec<&Self> = contig.iter().collect();
+        ops::concat(&contig_refs, axis)
     }
 
     /// 1-D tensor `[start, start+1, …, end)` on `device`. candle:
