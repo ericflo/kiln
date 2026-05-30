@@ -1139,6 +1139,7 @@ impl Drop for VulkanBackend {
     }
 }
 
+// #1082 DoD-101/102: BackendRuntime decode methods flipped to kt; metal/vulkan impls need matching flip when their builds are restored.
 impl BackendRuntime for VulkanBackend {
     fn name(&self) -> &'static str {
         if self.has_vulkan() { "vulkan" } else { "cpu" }

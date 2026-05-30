@@ -323,6 +323,7 @@ pub fn precompile_custom_kernels(device: &candle_core::Device) -> Result<()> {
     Ok(())
 }
 
+// #1082 DoD-101/102: BackendRuntime decode methods flipped to kt; metal/vulkan impls need matching flip when their builds are restored.
 impl BackendRuntime for MetalBackend {
     fn name(&self) -> &'static str {
         "metal"
