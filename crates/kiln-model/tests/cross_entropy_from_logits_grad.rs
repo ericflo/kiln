@@ -24,6 +24,15 @@
 
 use candle_core::{DType, Device, Tensor, Var, D};
 
+// #1082 type-flip: `kiln_model::forward::cross_entropy_from_logits_grad_candle`
+// now takes/returns kt (`kiln_tensor`) tensors even though it is a
+// pure-candle-numerics composite under the hood. This CPU parity test keeps the
+// candle autograd oracle exactly as-is and builds a parallel kt input from the
+// same deterministic data so it can call the now-kt-typed function. The kt
+// output is read back to a `Vec<f32>` and compared against the candle oracle,
+// preserving the same numeric assertions.
+use kiln_tensor::Tensor as KtTensor;
+
 /// Deterministic F32 tensor on `device`, shaped `dims`, filled `base + i*step`.
 fn det_f32(device: &Device, dims: &[usize], base: f32, step: f32) -> Tensor {
     let n: usize = dims.iter().product();
@@ -31,9 +40,35 @@ fn det_f32(device: &Device, dims: &[usize], base: f32, step: f32) -> Tensor {
     Tensor::from_vec(data, dims.to_vec(), device).expect("det tensor")
 }
 
-fn max_abs_rel_err(got: &Tensor, want: &Tensor) -> f32 {
+/// Build a kt CPU tensor with the same deterministic data + shape as `det_f32`.
+fn det_f32_kt(dims: &[usize], base: f32, step: f32) -> KtTensor {
+    let n: usize = dims.iter().product();
+    let data: Vec<f32> = (0..n).map(|i| base + (i as f32) * step).collect();
+    KtTensor::from_vec(data, dims.to_vec()).expect("det kt tensor")
+}
+
+/// Build a kt CPU tensor mirroring a candle tensor's data + shape (CPU only).
+fn kt_from_candle_cpu(t: &Tensor) -> KtTensor {
+    let dims = t.dims().to_vec();
+    let data = t.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+    KtTensor::from_vec(data, dims).expect("kt from candle cpu")
+}
+
+/// kt vs candle comparison: the under-test fn now returns a kt tensor while the
+/// oracle stays candle. Extract both to `Vec<f32>` and compare (same metric).
+fn max_abs_rel_err_kt_vs_candle(got: &KtTensor, want: &Tensor) -> f32 {
     let g = got.flatten_all().unwrap().to_vec1::<f32>().unwrap();
     let w = want.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+    max_abs_rel_err_slices(&g, &w)
+}
+
+fn max_abs_rel_err_kt(got: &KtTensor, want: &KtTensor) -> f32 {
+    let g = got.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+    let w = want.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+    max_abs_rel_err_slices(&g, &w)
+}
+
+fn max_abs_rel_err_slices(g: &[f32], w: &[f32]) -> f32 {
     assert_eq!(g.len(), w.len(), "shape mismatch got {} want {}", g.len(), w.len());
     let mut max = 0.0f32;
     for (a, b) in g.iter().zip(w.iter()) {
@@ -116,9 +151,11 @@ fn cross_entropy_from_logits_grad_matches_candle_autograd() {
 
     // Under test: the candle composite the kt-tape op wraps. grad_scalar = 1.0
     // is the dL/dloss seed (the tape-authoritative backward seeds the loss with
-    // ones).
+    // ones). #1082: the fn is now kt-typed — feed the same logits as a kt CPU
+    // tensor (logits leaf is the same deterministic data as `logits_data`).
+    let logits_kt = kt_from_candle_cpu(logits);
     let got_grad = kiln_model::forward::cross_entropy_from_logits_grad_candle(
-        logits,
+        &logits_kt,
         &input_ids,
         &label_mask,
         1.0,
@@ -131,7 +168,7 @@ fn cross_entropy_from_logits_grad_matches_candle_autograd() {
         "composite grad shape must be [1, T, V]"
     );
 
-    let err = max_abs_rel_err(&got_grad, &oracle_grad);
+    let err = max_abs_rel_err_kt_vs_candle(&got_grad, &oracle_grad);
     assert!(
         err < 1e-4,
         "cross_entropy_from_logits_grad_candle vs candle autograd: max rel err {err} >= 1e-4"
@@ -157,9 +194,10 @@ fn cross_entropy_from_logits_grad_matches_candle_autograd() {
 /// into the per-row mean gradient). grad(2.0) == 2 * grad(1.0).
 #[test]
 fn cross_entropy_from_logits_grad_scales_with_seed() {
-    let device = Device::Cpu;
     let (t, v) = (5usize, 4usize);
-    let logits = det_f32(&device, &[1, t, v], 0.1, 0.03);
+    // #1082: fn is kt-typed — build the logits leaf directly as a kt CPU tensor
+    // with the same deterministic data as `det_f32`.
+    let logits = det_f32_kt(&[1, t, v], 0.1, 0.03);
     let input_ids: Vec<u32> = vec![0, 2, 1, 3, 2];
     let label_mask: Vec<bool> = vec![false, true, true, false, true];
 
@@ -179,6 +217,6 @@ fn cross_entropy_from_logits_grad_scales_with_seed() {
     .unwrap();
 
     let two_g1 = g1.affine(2.0, 0.0).unwrap();
-    let err = max_abs_rel_err(&g2, &two_g1);
+    let err = max_abs_rel_err_kt(&g2, &two_g1);
     assert!(err < 1e-5, "grad(2.0) != 2*grad(1.0): max rel err {err}");
 }

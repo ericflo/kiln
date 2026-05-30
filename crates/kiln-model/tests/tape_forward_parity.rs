@@ -60,6 +60,20 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 use candle_core::{DType, Device, Tensor};
+use kiln_tensor::Tensor as KtTensor;
+
+// #1082 type-flip: the forward fns under test (`rms_norm`, `matmul`, etc.) are
+// now kt (`kiln_tensor`) typed. This is a CUDA-only test file, so the CUDA
+// kt<->candle bridge is available: build candle on-device inputs, borrow them to
+// kt for the call, and copy kt outputs back to candle for the (unchanged)
+// bit-exact parity assertions.
+fn kt_in(t: &Tensor) -> KtTensor {
+    kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(t).expect("candle -> kt borrow (cuda)")
+}
+
+fn candle_out(t: &KtTensor) -> Tensor {
+    kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(t).expect("kt -> candle copy (cuda)")
+}
 
 /// Lock to serialize env var mutation across tests in this binary —
 /// the `KILN_USE_TAPE_FORWARD` cache is a process-wide `OnceLock`,
@@ -157,14 +171,20 @@ fn tape_forward_rms_norm_bit_exact_parity_with_baseline() {
     // `try_tape_rms_norm_cuda` short-circuits to `Ok(None)` and the
     // call falls through to the existing kt-forward-op dispatch.
     // This is the production path today.
-    let baseline = kiln_model::forward::rms_norm(&x, &w, eps).expect("baseline rms_norm");
+    // #1082: rms_norm is kt-typed — bridge candle inputs to kt for the call,
+    // copy the kt output back to candle for the bit-exact parity assertions.
+    let x_kt = kt_in(&x);
+    let w_kt = kt_in(&w);
+    let baseline =
+        candle_out(&kiln_model::forward::rms_norm(&x_kt, &w_kt, eps).expect("baseline rms_norm"));
 
     // Path B — tape-forward. Env is on AND a Tape scope is open, so
     // `try_tape_rms_norm_cuda` records a node and returns the kt
-    // output as a candle Tensor.
-    let (tape_result, tape) =
-        kiln_model::tape_forward::with_thread_local_tape(|| kiln_model::forward::rms_norm(&x, &w, eps));
-    let tape_out = tape_result.expect("tape-forward rms_norm");
+    // output (which we copy to candle here for comparison).
+    let (tape_result, tape) = kiln_model::tape_forward::with_thread_local_tape(|| {
+        kiln_model::forward::rms_norm(&x_kt, &w_kt, eps)
+    });
+    let tape_out = candle_out(&tape_result.expect("tape-forward rms_norm"));
 
     // --- Forward parity (the load-bearing assertion).
     let diff = max_abs_diff(&baseline, &tape_out);
@@ -230,8 +250,12 @@ fn tape_forward_short_circuits_without_active_scope() {
     unsafe {
         std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
     }
-    let out = kiln_model::forward::rms_norm(&x, &w, eps).expect("rms_norm without scope");
-    assert_eq!(out.shape().dims(), &[rows, hidden]);
+    // #1082: rms_norm is kt-typed — bridge inputs, then read the kt output's
+    // shape directly (kt `.shape()` returns `&[usize]`).
+    let x_kt = kt_in(&x);
+    let w_kt = kt_in(&w);
+    let out = kiln_model::forward::rms_norm(&x_kt, &w_kt, eps).expect("rms_norm without scope");
+    assert_eq!(out.shape(), &[rows, hidden]);
 }
 
 // ----------------------------------------------------------------------
@@ -1175,8 +1199,11 @@ fn tape_backward_rms_norm_produces_input_grads() {
         std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
     }
 
+    // #1082: rms_norm is kt-typed — bridge candle inputs to kt for the call.
+    let x_kt = kt_in(&x);
+    let w_kt = kt_in(&w);
     let (res, tape) = kiln_model::tape_forward::with_thread_local_tape(|| {
-        kiln_model::forward::rms_norm(&x, &w, eps)
+        kiln_model::forward::rms_norm(&x_kt, &w_kt, eps)
     });
     let _out = res.expect("tape-forward rms_norm ok");
     assert_eq!(tape.len(), 1, "rms_norm must record exactly one node");
@@ -2954,16 +2981,27 @@ fn tape_gdn_recurrent_records_node_and_emits_5_grads() {
     }
     let backend = kiln_model::backend::for_device(&device);
 
+    // #1082: try_tape_gdn_recurrent_cuda takes kt q/k/v/beta/g + &mut kt state.
+    // Bridge the candle inputs to kt (CUDA borrow; same device storage).
+    let q_kt = kt_in(&q);
+    let k_kt = kt_in(&k);
+    let v_kt = kt_in(&v);
+    let beta_kt = kt_in(&beta);
+    let g_kt = kt_in(&g);
+    let mut state_kt = kt_in(&state);
+
     let (res, tape) = kiln_model::tape_forward::with_thread_local_tape(|| {
         kiln_model::tape_forward::try_tape_gdn_recurrent_cuda(
-            &*backend, &q, &k, &v, &beta, &g, &mut state,
+            &*backend, &q_kt, &k_kt, &v_kt, &beta_kt, &g_kt, &mut state_kt,
         )
     });
     let out = res
         .expect("try_tape_gdn_recurrent_cuda ok")
         .expect("returned Some(out) — gate + scope both on");
-    assert_eq!(out.shape().dims(), &[b, nv, t, dv], "gdn recurrence out shape");
-    assert!(out.device().is_cuda(), "out stays on CUDA");
+    assert_eq!(out.shape(), &[b, nv, t, dv], "gdn recurrence out shape");
+    // kt Device has `is_gpu()` (no `is_cuda()`); on this CUDA-only test the GPU
+    // is CUDA, so this is the equivalent device-residency assertion.
+    assert!(out.device().is_gpu(), "out stays on GPU (CUDA)");
 
     assert_eq!(
         tape.len(),
