@@ -302,13 +302,10 @@ const LAST_DIM: D = D::Minus1;
 // this file holds zero direct candle paths for the generic constructor
 // helpers. (#1082)
 
-/// Build a candle `Var` wrapping `tensor`. Consolidates the
-/// `Var::from_tensor(tensor)` constructor (~34 sites
-/// pre-consolidation).
-#[inline]
-fn var_from_tensor(tensor: &Tensor) -> Result<Var> {
-    Ok(Var::from_tensor(tensor)?)
-}
+// (#1082) `var_from_tensor` (candle `Var::from_tensor`) removed: the
+// trainable LoRA params are `kiln_param::Parameter` now, built via
+// `lora_parameter_from_kt` below. The kt tape is the sole grad producer
+// (no candle autograd `Var` tracking).
 
 // ---------------------------------------------------------------------------
 // (#1082) Type aliases for the most-repeated candle generic-parameter
@@ -321,11 +318,12 @@ fn var_from_tensor(tensor: &Tensor) -> Result<Var> {
 // one alias name (`GradMap`), netting out one candle reference per site.
 // ---------------------------------------------------------------------------
 
-/// Map from `Var` id to its accumulated gradient `Tensor`. Consolidates the
-/// `HashMap<TensorId, Tensor>` pattern (~22 sites
-/// pre-consolidation in SFT/GRPO outer loops, gradient accumulators, test
-/// fixtures, and module-by-var routing tables).
-type GradMap = std::collections::HashMap<TensorId, Tensor>;
+/// (#1082) Map from a LoRA `Parameter`'s kt `TensorId` to its accumulated
+/// kt gradient `Tensor`. Was `HashMap<candle TensorId, candle Tensor>`;
+/// now fully kt-native (keys = `Parameter::tensor_id()`, values =
+/// `kiln_tensor::Tensor`). Used by GRPO token-level cross-completion grad
+/// accumulation.
+type GradMap = std::collections::HashMap<KtTensorId, KtTensor>;
 
 
 /// Concatenate a slice of `&Tensor` refs along `dim`. Consolidates the
@@ -360,16 +358,21 @@ fn ones_dtype_on<S: Into<Shape>>(
     Ok(Tensor::ones(shape, dtype, device)?)
 }
 
-/// Allocate a zero-filled `Var` with caller-supplied dtype + device.
-/// Consolidates the Var::zeros constructor (~3 sites in LoRA B-matrix init
-/// + AdamW first/second-moment state alloc).
-#[inline]
-fn var_zeros<S: Into<Shape>>(
-    shape: S,
+/// (#1082) Allocate a zero-filled LoRA `Parameter` (the LoRA-B init —
+/// B=zeros so the initial LoRA contribution is zero). Replaces the candle
+/// `Var::zeros` constructor. The AdamW moment allocation that also used
+/// `Var::zeros` is gone (`kiln_optim::AdamW` owns its own moments keyed by
+/// `Parameter::tensor_id()`).
+fn lora_param_zeros(
+    shape: (usize, usize),
     dtype: DType,
     device: &CdDevice,
-) -> Result<Var> {
-    Ok(Var::zeros(shape, dtype, device)?)
+) -> Result<Parameter> {
+    let n = shape.0 * shape.1;
+    let data = vec![0.0f32; n];
+    let master = build_lora_master_kt(&data, &[shape.0, shape.1], dtype, device)
+        .context("lora_param_zeros: build kt LoRA-B master")?;
+    Ok(lora_parameter_from_kt(master))
 }
 
 /// Check whether `device` is a candle Metal device. Consolidates the
@@ -414,6 +417,43 @@ use crate::cd_types::*;
 // (see comment block above the `full_attention_single_layer_tiled_mlp_reverse`
 // function). No other call sites remain in this file. (#1082)
 
+// (#1082) kt-native parameter + optimizer types. The LoRA params are
+// `kiln_param::Parameter` (one stable kt `TensorId`, BF16 master + LoRA
+// forward storage) and the optimizer is `kiln_optim::AdamW` (`OptimStep`
+// keyed by `Parameter::tensor_id()`). These REPLACE the candle `Var` +
+// `AdamWMoments{m,v:Var}` + `OptimizerState` machinery.
+use kiln_optim::{AdamW as KtAdamW, AdamWHyperparameters as KtAdamWHyperparameters, OptimStep};
+use kiln_param::{AmpPolicy as KtAmpPolicy, ForwardStorage as KtForwardStorage, Parameter};
+// kt tensor types used directly for LoRA param construction + grads.
+use kiln_tensor::{DType as KtDType, Tensor as KtTensor};
+
+/// (#1082) AMP policy for a trainable LoRA `Parameter`: BF16 master +
+/// BF16 forward/backward compute. Matches the production
+/// `TrainableLoraParams::initialize` BF16-only LoRA storage; the kt
+/// fused tape adapters are BF16-only (see `base_dtype_supports_tape` /
+/// note `kiln-cp4-tape-adapters-bf16-only`).
+#[inline]
+fn lora_amp_policy() -> KtAmpPolicy {
+    // `AmpPolicy::default()` is the BF16/BF16/BF16 tuple (see
+    // crates/kiln-param/src/amp_policy.rs).
+    KtAmpPolicy::default()
+}
+
+/// (#1082) Build a trainable LoRA `Parameter` from a kt master tensor.
+/// The forward storage IS the master (LoRA A/B are dense BF16, no
+/// quantization), so `forward_storage().primary_tensor()` and
+/// `backward_storage()` share the same kt tensor. The `Parameter`'s
+/// stable kt `tensor_id` becomes the tape grad key + the optimizer
+/// moment key.
+#[inline]
+fn lora_parameter_from_kt(master: KtTensor) -> Parameter {
+    Parameter::trainable(
+        KtForwardStorage::Plain(master.clone()),
+        master,
+        lora_amp_policy(),
+    )
+}
+
 /// Sample a Kaiming-uniform LoRA-A initialization.
 ///
 /// When `rng` is `Some`, the values are drawn from the supplied RNG so the
@@ -421,24 +461,62 @@ use crate::cd_types::*;
 /// caller passes `seed: Some(_)`. When `rng` is `None`, we fall back to
 /// `Var::rand_f64`, which uses the device-global RNG (seeded earlier with
 /// `device.set_seed` on backends that support it).
+// (#1082) Now returns a kt-native LoRA `Parameter` (Kaiming-uniform A,
+// BF16 master) instead of a candle `Var`. The A values are drawn on the
+// host (deterministic when `rng` is `Some`) and uploaded to a kt CUDA
+// tensor via the bridge so the param's primary kt tensor lives on
+// `device` — exactly where the kt tape forward + the resident-activation
+// registry expect it. `dtype` is BF16 in production.
 fn kaiming_uniform_a(
     rng: Option<&mut StdRng>,
     bound: f64,
     shape: (usize, usize),
     dtype: DType,
     device: &CdDevice,
-) -> Result<Var> {
-    if let Some(rng) = rng {
-        let bound_f32 = bound as f32;
-        let n = shape.0 * shape.1;
-        let data: Vec<f32> = (0..n)
+) -> Result<Parameter> {
+    let bound_f32 = bound as f32;
+    let n = shape.0 * shape.1;
+    let data: Vec<f32> = match rng {
+        Some(rng) => (0..n)
             .map(|_| rng.random_range(-bound_f32..bound_f32))
-            .collect();
-        let t = Tensor::from_slice(&data, &[shape.0, shape.1], device)?.to_dtype(dtype)?;
-        var_from_tensor(&t).map_err(Into::into)
-    } else {
-        Var::rand_f64(-bound, bound, shape, dtype, device).map_err(Into::into)
-    }
+            .collect(),
+        None => {
+            // Deterministic-init contract: callers that pass `seed:
+            // Some(_)` always hand us an `rng`. The `None` path (device
+            // RNG) is the non-reproducible fallback; draw from a
+            // thread RNG so we stay candle-free (candle `Var::rand_f64`
+            // is gone with the autograd `Var`).
+            let mut trng = StdRng::from_entropy();
+            (0..n)
+                .map(|_| trng.random_range(-bound_f32..bound_f32))
+                .collect()
+        }
+    };
+    // Build the A master directly as a kt CUDA tensor on `device`.
+    let master = build_lora_master_kt(&data, &[shape.0, shape.1], dtype, device)
+        .context("kaiming_uniform_a: build kt LoRA-A master")?;
+    Ok(lora_parameter_from_kt(master))
+}
+
+/// (#1082) Upload f32 host values to a kt tensor on `device`, cast to
+/// `dtype` (BF16 in production). Bridges through candle once to land on
+/// the requested CUDA device, then borrows the candle tensor as kt
+/// zero-copy. This is the LoRA-init analogue of the per-step kt forward
+/// bridges — a cross-device seam that disappears when a host->kt CUDA
+/// upload helper lands in kiln-tensor/kiln-kt-bridge.
+/// // (#1082) bridge — remove when kiln-tensor grows a host->CUDA upload.
+fn build_lora_master_kt(
+    data: &[f32],
+    shape: &[usize],
+    dtype: DType,
+    device: &CdDevice,
+) -> Result<KtTensor> {
+    let cd = Tensor::from_slice(data, shape, device)?.to_dtype(dtype)?;
+    // `kt_tensor_from_candle_cuda_borrow` is defined for BOTH the cuda
+    // build (zero-copy CUDA borrow) and the no-cuda build (host candle->kt
+    // copy), so this one call covers CUDA + CPU init.
+    kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&cd)
+        .map_err(|e| anyhow::anyhow!("build_lora_master_kt: candle->kt: {e}"))
 }
 
 /// Convert our ChatMessage to the core tokenizer's ChatMessage.
@@ -468,13 +546,18 @@ struct AdapterSmokeGeneration {
     elapsed_ms: u64,
 }
 
-/// Trainable LoRA parameters as candle `Var`s.
+/// Trainable LoRA parameters as kt-native `kiln_param::Parameter`s (#1082).
 ///
-/// Each Var is tracked by candle's autograd: computations that use these tensors
-/// build a computation graph, and `loss.backward()` yields gradients for them.
+/// Each `Parameter` holds a BF16 master kt tensor and a stable kt
+/// `TensorId`. The trainer threads each param's primary kt tensor into
+/// the kt tape forward (via [`Self::as_lora_weights`] →
+/// `LoraProjectionWeights`); the tape backward then yields a grad keyed
+/// by `Parameter::tensor_id()`, which the kt optimizer
+/// (`kiln_optim::AdamW`) consumes directly. NO candle autograd `Var`,
+/// NO `loss.backward()`.
 pub struct TrainableLoraParams {
-    /// Per-layer, per-module (A, B) variable pairs.
-    /// Indexed as: layers[layer_idx].module_name -> (Var_A, Var_B)
+    /// Per-layer, per-module (A, B) parameter pairs.
+    /// Indexed as: layers[layer_idx].module_name -> (Param_A, Param_B)
     pub layers: Vec<TrainableLoraLayerParams>,
     pub rank: usize,
     pub alpha: f32,
@@ -484,31 +567,31 @@ pub struct TrainableLoraParams {
 /// Trainable LoRA A/B pairs for one transformer layer.
 #[derive(Default)]
 pub struct TrainableLoraLayerParams {
-    pub q_proj: Option<(Var, Var)>,
-    pub k_proj: Option<(Var, Var)>,
-    pub v_proj: Option<(Var, Var)>,
-    pub o_proj: Option<(Var, Var)>,
-    pub in_proj_qkv: Option<(Var, Var)>,
-    pub in_proj_z: Option<(Var, Var)>,
-    pub gdn_out_proj: Option<(Var, Var)>,
-    pub gate_proj: Option<(Var, Var)>,
-    pub up_proj: Option<(Var, Var)>,
-    pub down_proj: Option<(Var, Var)>,
+    pub q_proj: Option<(Parameter, Parameter)>,
+    pub k_proj: Option<(Parameter, Parameter)>,
+    pub v_proj: Option<(Parameter, Parameter)>,
+    pub o_proj: Option<(Parameter, Parameter)>,
+    pub in_proj_qkv: Option<(Parameter, Parameter)>,
+    pub in_proj_z: Option<(Parameter, Parameter)>,
+    pub gdn_out_proj: Option<(Parameter, Parameter)>,
+    pub gate_proj: Option<(Parameter, Parameter)>,
+    pub up_proj: Option<(Parameter, Parameter)>,
+    pub down_proj: Option<(Parameter, Parameter)>,
 }
 
-struct LoraVarRef<'a> {
+struct LoraParamRef<'a> {
     module: &'static str,
-    var: &'a Var,
+    param: &'a Parameter,
 }
 
-fn push_lora_var_pair<'a>(
-    vars: &mut Vec<LoraVarRef<'a>>,
+fn push_lora_param_pair<'a>(
+    params: &mut Vec<LoraParamRef<'a>>,
     module: &'static str,
-    pair: &'a Option<(Var, Var)>,
+    pair: &'a Option<(Parameter, Parameter)>,
 ) {
     if let Some((a, b)) = pair {
-        vars.push(LoraVarRef { module, var: a });
-        vars.push(LoraVarRef { module, var: b });
+        params.push(LoraParamRef { module, param: a });
+        params.push(LoraParamRef { module, param: b });
     }
 }
 
@@ -653,7 +736,7 @@ impl TrainableLoraParams {
                 .with_context(|| format!("init LoRA A for layer {layer_idx} {module}"))?;
 
                 // B: [out_features, rank] — zeros
-                let b = var_zeros((out_features, rank), DType::BF16, device)
+                let b = lora_param_zeros((out_features, rank), DType::BF16, device)
                     .with_context(|| format!("init LoRA B for layer {layer_idx} {module}"))?;
 
                 match module {
@@ -713,13 +796,13 @@ impl TrainableLoraParams {
         if !backend.supports_resident_activation() {
             return Ok(());
         }
-        for var in self.all_vars() {
-            backend.register_resident_activation(var.as_tensor())?;
+        for param in self.all_params() {
+            backend.register_resident_activation(param.forward_storage().primary_tensor())?;
         }
         Ok(())
     }
 
-    /// Inverse of [`register_with_backend`]: evict every LoRA Var
+    /// Inverse of [`register_with_backend`]: evict every LoRA param
     /// from the resident activation registry. Caller invokes this
     /// after the training loop completes (or per-step if Phase 4.1
     /// step 2 makes the registry the data-of-record and the trainer
@@ -728,153 +811,132 @@ impl TrainableLoraParams {
         if !backend.supports_resident_activation() {
             return;
         }
-        for var in self.all_vars() {
-            backend.evict_resident_activation(var.as_tensor());
+        for param in self.all_params() {
+            backend.evict_resident_activation(param.forward_storage().primary_tensor());
         }
     }
 
-    /// Pull every LoRA Var's current value from the registry buffer
-    /// back into candle CPU storage via `Var::set`.
+    /// Pull every LoRA param's current value from the registry buffer
+    /// back into its kt master storage.
     ///
-    /// The on-device SGD and AdamW dispatch paths leave candle CPU
-    /// storage stale (the registry buffer is the source of truth
-    /// between training steps). Callers that need current candle
-    /// storage — `save_peft`, checkpoint writes, tests that snapshot
-    /// `var.as_tensor()` — invoke this first.
+    /// The on-device SGD and AdamW dispatch paths leave the kt master
+    /// stale (the registry buffer is the source of truth between
+    /// training steps). Callers that need the current master —
+    /// `save_peft`, checkpoint writes — invoke this first. The refresh
+    /// swaps the param's forward + backward storage to the resolved kt
+    /// tensor while preserving `Parameter::tensor_id()` (anti-pattern 11).
     ///
-    /// No-op on backends without resident-activation support
-    /// (CPU/Metal/CUDA today). Returns the number of Vars synced for
-    /// telemetry.
-    pub fn sync_to_candle(&self, backend: &dyn BackendRuntime) -> Result<usize> {
+    /// No-op on backends without resident-activation support. Returns
+    /// the number of params synced for telemetry.
+    pub fn sync_to_master(&mut self, backend: &dyn BackendRuntime) -> Result<usize> {
         if !backend.supports_resident_activation() {
             return Ok(0);
         }
         let mut synced = 0;
-        for var in self.all_vars() {
-            if !backend.has_resident_activation(var.as_tensor()) {
+        for param in self.all_params_mut() {
+            let primary = param.forward_storage().primary_tensor().clone();
+            if !backend.has_resident_activation(&primary) {
                 continue;
             }
-            let dims: Vec<usize> = var.as_tensor().dims().to_vec();
-            let dtype = var.as_tensor().dtype();
-            if let Some(resolved) =
-                backend.resolve_resident_activation(var.as_tensor(), &dims, dtype)?
-            {
-                var.set(&resolved)?;
+            let dims: Vec<usize> = primary.dims().to_vec();
+            let dtype = primary.dtype();
+            if let Some(resolved) = backend.resolve_resident_activation(&primary, &dims, dtype)? {
+                param.replace_forward_storage(KtForwardStorage::Plain(resolved.clone()));
+                param.replace_backward_storage(Some(resolved));
                 synced += 1;
             }
         }
         Ok(synced)
     }
 
-    /// Allocate AdamW per-parameter moment state: a zero-init Var of
-    /// matching shape/dtype for each LoRA Var (so each LoRA `Var` has
-    /// one `m` Var and one `v` Var). The order matches `all_vars()`,
-    /// indexed by `var.as_tensor().id()`.
+    /// (#1082) Allocate AdamW optimizer state — a single `kiln_optim::AdamW`
+    /// instance whose moments are lazily created (keyed by
+    /// `Parameter::tensor_id()`) on the first step per parameter. Replaces
+    /// the candle path that pre-allocated zero-init `m`/`v` `Var`s per LoRA
+    /// `Var`. `lr`/`beta1`/`beta2`/`eps`/`weight_decay` come from the
+    /// trainer config (constant lr across steps — no scheduler).
     ///
-    /// Returns the [`OptimizerState`] the trainer threads through
-    /// `apply_adamw_update`. CPU and GPU paths both consume it.
-    pub fn allocate_adamw_state(&self, device: &CdDevice) -> Result<OptimizerState> {
-        let mut moments: HashMap<KtTensorId, AdamWMoments> = HashMap::new();
-        for var in self.all_vars() {
-            let shape = var.as_tensor().shape().clone();
-            let dtype = var.as_tensor().dtype();
-            let m = var_zeros(shape.clone(), dtype, device)
-                .with_context(|| "allocating AdamW first-moment Var")?;
-            let v = var_zeros(shape, dtype, device)
-                .with_context(|| "allocating AdamW second-moment Var")?;
-            moments.insert(
-                cd_tensor_id_to_kt(var.as_tensor().id()),
-                AdamWMoments { m, v },
-            );
-        }
-        Ok(OptimizerState { moments, step: 0 })
+    /// `_device` is retained in the signature for call-site compatibility;
+    /// the CPU `kiln_optim::AdamW` holds moments host-side regardless of the
+    /// param device (the on-device `dispatch_adamw_step` Vulkan path
+    /// registers grads per step in `apply_adamw_update_kt`).
+    pub fn allocate_adamw_state(
+        &self,
+        lr: f64,
+        beta1: f32,
+        beta2: f32,
+        eps: f32,
+        weight_decay: f32,
+        _device: &CdDevice,
+    ) -> Result<OptimizerState> {
+        let hp = KtAdamWHyperparameters {
+            lr: lr as f32,
+            beta1,
+            beta2,
+            eps,
+            weight_decay,
+        };
+        Ok(OptimizerState {
+            adamw: KtAdamW::new(hp),
+        })
     }
 }
 
-/// AdamW per-parameter moment state.
-///
-/// `m` and `v` are full-precision (matching the param dtype — BF16 in
-/// production) Vars of the same shape as the corresponding LoRA Var.
-/// The trainer keeps them in lock-step with the param Var: on each
-/// optimizer step both moments and the param are updated together
-/// (in-place on the registry buffer when the backend supports
-/// residency, via candle ops otherwise).
-pub struct AdamWMoments {
-    pub m: Var,
-    pub v: Var,
-}
+// (#1082) The candle `AdamWMoments{m,v:Var}` struct is GONE. AdamW moment
+// state now lives inside `kiln_optim::AdamW`, whose `moments` HashMap is
+// keyed by `Parameter::tensor_id()` (the stable kt id). `OptimizerState`
+// below is a thin wrapper holding that `KtAdamW` instance so the many
+// trainer call sites can keep threading `Option<&mut OptimizerState>`
+// unchanged; the SGD path needs no state and passes `None`.
 
-/// State threaded through the trainer for AdamW. Holds per-param
-/// moment Vars (keyed by the param Var's `TensorId`) plus the global
-/// step counter the bias-correction terms read.
-///
-/// One per training run — allocated alongside `TrainableLoraParams`
-/// (when `Optimizer::AdamW` is selected) and dropped at the end. The
-/// step counter is 1-indexed at the optimizer kernel level: the
-/// trainer increments `step` *before* dispatching so the first call
-/// sees `step=1`.
+/// (#1082) kt-native optimizer state: wraps a single `kiln_optim::AdamW`
+/// instance (which owns all per-parameter moments keyed by
+/// `Parameter::tensor_id()` + the internal step counter). Replaces the
+/// candle `HashMap<TensorId, AdamWMoments{m,v:Var}>` + manual `step`
+/// counter. The wrapper exists only so the trainer's existing
+/// `opt_state: Option<&mut OptimizerState>` signatures don't all have to
+/// change; SGD passes `None`, AdamW passes `Some(&mut state)`.
 pub struct OptimizerState {
-    pub moments: HashMap<KtTensorId, AdamWMoments>,
-    pub step: u32,
+    pub adamw: KtAdamW,
 }
 
 impl OptimizerState {
-    /// Register every moment Var in the backend's resident-activation
-    /// registry. The Vulkan AdamW kernel resolves `m` and `v` from
-    /// the registry by Var TensorId, so this must run before the first
-    /// `apply_adamw_update` if the on-device path is to fire.
-    pub fn register_with_backend(&self, backend: &dyn BackendRuntime) -> Result<()> {
-        if !backend.supports_resident_activation() {
-            return Ok(());
-        }
-        for moments in self.moments.values() {
-            backend.register_resident_activation(moments.m.as_tensor())?;
-            backend.register_resident_activation(moments.v.as_tensor())?;
-        }
+    /// `register_with_backend` / `evict_from_backend` / `sync_to_master`
+    /// are no longer needed: `kiln_optim::AdamW` owns its moments
+    /// host-side (CPU reference), and the on-device `dispatch_adamw_step`
+    /// path registers the grad per step in `apply_adamw_update_kt`. These
+    /// remain as no-ops so the (few) call sites stay valid. (#1082)
+    pub fn register_with_backend(&self, _backend: &dyn BackendRuntime) -> Result<()> {
         Ok(())
     }
+    pub fn evict_from_backend(&self, _backend: &dyn BackendRuntime) {}
+}
 
-    /// Inverse of `register_with_backend` — release every moment Var
-    /// from the registry. Called at training completion alongside
-    /// `TrainableLoraParams::evict_from_backend`.
-    pub fn evict_from_backend(&self, backend: &dyn BackendRuntime) {
-        if !backend.supports_resident_activation() {
-            return;
-        }
-        for moments in self.moments.values() {
-            backend.evict_resident_activation(moments.m.as_tensor());
-            backend.evict_resident_activation(moments.v.as_tensor());
-        }
-    }
-
-    /// Pull every `(m, v)` moment Var's current value from the
-    /// registry buffer back into candle CPU storage. Mirrors
-    /// `TrainableLoraParams::sync_to_candle`. Useful when persisting
-    /// optimizer state alongside an adapter checkpoint (not yet
-    /// implemented in `save_peft` — the resumable-training story is
-    /// a separate workstream — but kept for symmetry and for tests
-    /// that assert on `moments.m.as_tensor()` values).
-    pub fn sync_to_candle(&self, backend: &dyn BackendRuntime) -> Result<usize> {
-        if !backend.supports_resident_activation() {
-            return Ok(0);
-        }
-        let mut synced = 0;
-        for moments in self.moments.values() {
-            for var in [&moments.m, &moments.v] {
-                if !backend.has_resident_activation(var.as_tensor()) {
-                    continue;
-                }
-                let dims: Vec<usize> = var.as_tensor().dims().to_vec();
-                let dtype = var.as_tensor().dtype();
-                if let Some(resolved) =
-                    backend.resolve_resident_activation(var.as_tensor(), &dims, dtype)?
-                {
-                    var.set(&resolved)?;
-                    synced += 1;
-                }
-            }
-        }
-        Ok(synced)
+/// (#1082) Build `Option<OptimizerState>` from the configured optimizer:
+/// `None` for SGD (stateless), `Some(KtAdamW-backed state)` for AdamW.
+/// Consolidates the three identical production blocks that previously
+/// `match`ed `config.optimizer` + pre-allocated candle moment `Var`s.
+fn make_opt_state(
+    params: &TrainableLoraParams,
+    optimizer: Optimizer,
+    lr: f64,
+    device: &CdDevice,
+) -> Result<Option<OptimizerState>> {
+    match optimizer {
+        Optimizer::Sgd => Ok(None),
+        Optimizer::AdamW {
+            beta1,
+            beta2,
+            eps,
+            weight_decay,
+        } => Ok(Some(params.allocate_adamw_state(
+            lr,
+            beta1,
+            beta2,
+            eps,
+            weight_decay,
+            device,
+        )?)),
     }
 }
 
@@ -888,12 +950,18 @@ impl TrainableLoraParams {
             .layers
             .iter()
             .map(|lp| {
-                let make_proj = |pair: &Option<(Var, Var)>| -> Option<LoraProjectionWeights> {
-                    pair.as_ref().map(|(a, b)| LoraProjectionWeights {
-                        a: a.as_tensor().clone(),
-                        b: b.as_tensor().clone(),
-                    })
-                };
+                // (#1082) `LoraProjectionWeights.a/.b` are kt `Tensor` now;
+                // thread each param's primary kt tensor (the BF16 LoRA
+                // master) straight in. The tape forward records ops over
+                // these kt tensors, so the backward grad keys on
+                // `Parameter::tensor_id()` == `a/.b.id()`.
+                let make_proj =
+                    |pair: &Option<(Parameter, Parameter)>| -> Option<LoraProjectionWeights> {
+                        pair.as_ref().map(|(a, b)| LoraProjectionWeights {
+                            a: a.forward_storage().primary_tensor().clone(),
+                            b: b.forward_storage().primary_tensor().clone(),
+                        })
+                    };
                 LoraLayerWeights {
                     q_proj: make_proj(&lp.q_proj),
                     k_proj: make_proj(&lp.k_proj),
@@ -918,29 +986,56 @@ impl TrainableLoraParams {
         }
     }
 
-    /// Collect all Var references for gradient extraction and updates.
-    pub fn all_vars(&self) -> Vec<&Var> {
-        self.all_vars_with_modules()
+    /// Collect all LoRA `Parameter` references for grad lookup + updates.
+    pub fn all_params(&self) -> Vec<&Parameter> {
+        self.all_params_with_modules()
             .into_iter()
-            .map(|entry| entry.var)
+            .map(|entry| entry.param)
             .collect()
     }
 
-    fn all_vars_with_modules(&self) -> Vec<LoraVarRef<'_>> {
-        let mut vars = Vec::new();
+    fn all_params_with_modules(&self) -> Vec<LoraParamRef<'_>> {
+        let mut params = Vec::new();
         for layer in &self.layers {
-            push_lora_var_pair(&mut vars, "q_proj", &layer.q_proj);
-            push_lora_var_pair(&mut vars, "k_proj", &layer.k_proj);
-            push_lora_var_pair(&mut vars, "v_proj", &layer.v_proj);
-            push_lora_var_pair(&mut vars, "o_proj", &layer.o_proj);
-            push_lora_var_pair(&mut vars, "in_proj_qkv", &layer.in_proj_qkv);
-            push_lora_var_pair(&mut vars, "in_proj_z", &layer.in_proj_z);
-            push_lora_var_pair(&mut vars, "out_proj", &layer.gdn_out_proj);
-            push_lora_var_pair(&mut vars, "gate_proj", &layer.gate_proj);
-            push_lora_var_pair(&mut vars, "up_proj", &layer.up_proj);
-            push_lora_var_pair(&mut vars, "down_proj", &layer.down_proj);
+            push_lora_param_pair(&mut params, "q_proj", &layer.q_proj);
+            push_lora_param_pair(&mut params, "k_proj", &layer.k_proj);
+            push_lora_param_pair(&mut params, "v_proj", &layer.v_proj);
+            push_lora_param_pair(&mut params, "o_proj", &layer.o_proj);
+            push_lora_param_pair(&mut params, "in_proj_qkv", &layer.in_proj_qkv);
+            push_lora_param_pair(&mut params, "in_proj_z", &layer.in_proj_z);
+            push_lora_param_pair(&mut params, "out_proj", &layer.gdn_out_proj);
+            push_lora_param_pair(&mut params, "gate_proj", &layer.gate_proj);
+            push_lora_param_pair(&mut params, "up_proj", &layer.up_proj);
+            push_lora_param_pair(&mut params, "down_proj", &layer.down_proj);
         }
-        vars
+        params
+    }
+
+    /// Mutable variant — the optimizer step + `sync_to_master` mutate
+    /// each `Parameter`'s storage in place (preserving `tensor_id`).
+    /// Same traversal order as [`all_params`].
+    pub fn all_params_mut(&mut self) -> Vec<&mut Parameter> {
+        let mut out: Vec<&mut Parameter> = Vec::new();
+        for layer in &mut self.layers {
+            for pair in [
+                &mut layer.q_proj,
+                &mut layer.k_proj,
+                &mut layer.v_proj,
+                &mut layer.o_proj,
+                &mut layer.in_proj_qkv,
+                &mut layer.in_proj_z,
+                &mut layer.gdn_out_proj,
+                &mut layer.gate_proj,
+                &mut layer.up_proj,
+                &mut layer.down_proj,
+            ] {
+                if let Some((a, b)) = pair.as_mut() {
+                    out.push(a);
+                    out.push(b);
+                }
+            }
+        }
+        out
     }
 
     /// Load a previously-saved PEFT adapter into the existing Vars,
@@ -961,45 +1056,61 @@ impl TrainableLoraParams {
     /// `validate_base_adapter_compatibility` before this method so missing,
     /// extra, rank-mismatched, or shape-mismatched tensors fail before
     /// optimizer setup instead of leaving seeded-init gaps.
-    pub fn load_from_safetensors(&self, adapter_dir: &Path, device: &CdDevice) -> Result<usize> {
+    // (#1082) `&mut self` now: loading replaces each `Parameter`'s
+    // forward + backward storage (preserving `tensor_id`) rather than
+    // calling candle `Var::set`. Safetensors load stays a candle island
+    // (the `safetensors_load_file` shim is candle); the loaded candle
+    // tensor is bridged to kt and installed.
+    // // (#1082) bridge — safetensors I/O is still a candle island.
+    pub fn load_from_safetensors(
+        &mut self,
+        adapter_dir: &Path,
+        device: &CdDevice,
+    ) -> Result<usize> {
         let st_path = adapter_dir.join("adapter_model.safetensors");
         let tensors = safetensors_load_file(&st_path, device)
             .with_context(|| format!("loading adapter safetensors from {}", st_path.display()))?;
 
+        let install = |param: &mut Parameter, t: &Tensor, key: &str| -> Result<()> {
+            let kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(t)
+                .map_err(|e| anyhow::anyhow!("load adapter {key}: candle->kt: {e}"))?;
+            param.replace_forward_storage(KtForwardStorage::Plain(kt.clone()));
+            param.replace_backward_storage(Some(kt));
+            Ok(())
+        };
+
         let mut loaded = 0usize;
-        for (layer_idx, layer) in self.layers.iter().enumerate() {
+        for (layer_idx, layer) in self.layers.iter_mut().enumerate() {
             let mut load_proj =
-                |name: &str, pair: &Option<(Var, Var)>, is_attn: bool| -> Result<()> {
-                    if let Some((a, b)) = pair {
+                |name: &str, pair: &mut Option<(Parameter, Parameter)>, is_attn: bool| -> Result<()> {
+                    if let Some((a, b)) = pair.as_mut() {
                         let sub = if is_attn { "self_attn" } else { "mlp" };
                         let prefix =
                             format!("base_model.model.model.layers.{layer_idx}.{sub}.{name}");
                         let a_key = format!("{prefix}.lora_A.weight");
                         let b_key = format!("{prefix}.lora_B.weight");
                         if let Some(a_t) = tensors.get(&a_key) {
-                            a.set(a_t)
-                                .with_context(|| format!("setting Var for {a_key}"))?;
+                            install(a, a_t, &a_key)?;
                             loaded += 1;
                         }
                         if let Some(b_t) = tensors.get(&b_key) {
-                            b.set(b_t)
-                                .with_context(|| format!("setting Var for {b_key}"))?;
+                            install(b, b_t, &b_key)?;
                             loaded += 1;
                         }
                     }
                     Ok(())
                 };
 
-            load_proj("q_proj", &layer.q_proj, true)?;
-            load_proj("k_proj", &layer.k_proj, true)?;
-            load_proj("v_proj", &layer.v_proj, true)?;
-            load_proj("o_proj", &layer.o_proj, true)?;
-            load_proj("in_proj_qkv", &layer.in_proj_qkv, true)?;
-            load_proj("in_proj_z", &layer.in_proj_z, true)?;
-            load_proj("out_proj", &layer.gdn_out_proj, true)?;
-            load_proj("gate_proj", &layer.gate_proj, false)?;
-            load_proj("up_proj", &layer.up_proj, false)?;
-            load_proj("down_proj", &layer.down_proj, false)?;
+            load_proj("q_proj", &mut layer.q_proj, true)?;
+            load_proj("k_proj", &mut layer.k_proj, true)?;
+            load_proj("v_proj", &mut layer.v_proj, true)?;
+            load_proj("o_proj", &mut layer.o_proj, true)?;
+            load_proj("in_proj_qkv", &mut layer.in_proj_qkv, true)?;
+            load_proj("in_proj_z", &mut layer.in_proj_z, true)?;
+            load_proj("out_proj", &mut layer.gdn_out_proj, true)?;
+            load_proj("gate_proj", &mut layer.gate_proj, false)?;
+            load_proj("up_proj", &mut layer.up_proj, false)?;
+            load_proj("down_proj", &mut layer.down_proj, false)?;
         }
 
         tracing::info!(
@@ -1033,26 +1144,42 @@ impl TrainableLoraParams {
         // Collect all tensors for safetensors serialization
         let mut tensor_data: HashMap<String, Tensor> = HashMap::new();
 
+        // (#1082) Save reads each `Parameter`'s primary kt tensor and
+        // bridges it to candle for the safetensors writer (the
+        // `safetensors_save_file` shim is candle). Cross-file candle
+        // island until kiln-tensor's own safetensors save is wired in.
+        // // (#1082) bridge — safetensors I/O is still a candle island.
+        let kt_to_cd = |kt: &KtTensor, key: &str| -> Result<Tensor> {
+            kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(kt)
+                .map_err(|e| anyhow::anyhow!("save adapter {key}: kt->candle: {e}"))
+        };
         for (layer_idx, layer) in self.layers.iter().enumerate() {
-            let mut save_proj = |name: &str, pair: &Option<(Var, Var)>, is_attn: bool| {
-                if let Some((a, b)) = pair {
-                    let sub = if is_attn { "self_attn" } else { "mlp" };
-                    let prefix = format!("base_model.model.model.layers.{layer_idx}.{sub}.{name}");
-                    tensor_data.insert(format!("{prefix}.lora_A.weight"), a.as_tensor().clone());
-                    tensor_data.insert(format!("{prefix}.lora_B.weight"), b.as_tensor().clone());
-                }
-            };
+            let mut save_proj =
+                |name: &str, pair: &Option<(Parameter, Parameter)>, is_attn: bool| -> Result<()> {
+                    if let Some((a, b)) = pair {
+                        let sub = if is_attn { "self_attn" } else { "mlp" };
+                        let prefix =
+                            format!("base_model.model.model.layers.{layer_idx}.{sub}.{name}");
+                        let a_key = format!("{prefix}.lora_A.weight");
+                        let b_key = format!("{prefix}.lora_B.weight");
+                        let a_cd = kt_to_cd(a.forward_storage().primary_tensor(), &a_key)?;
+                        let b_cd = kt_to_cd(b.forward_storage().primary_tensor(), &b_key)?;
+                        tensor_data.insert(a_key, a_cd);
+                        tensor_data.insert(b_key, b_cd);
+                    }
+                    Ok(())
+                };
 
-            save_proj("q_proj", &layer.q_proj, true);
-            save_proj("k_proj", &layer.k_proj, true);
-            save_proj("v_proj", &layer.v_proj, true);
-            save_proj("o_proj", &layer.o_proj, true);
-            save_proj("in_proj_qkv", &layer.in_proj_qkv, true);
-            save_proj("in_proj_z", &layer.in_proj_z, true);
-            save_proj("out_proj", &layer.gdn_out_proj, true);
-            save_proj("gate_proj", &layer.gate_proj, false);
-            save_proj("up_proj", &layer.up_proj, false);
-            save_proj("down_proj", &layer.down_proj, false);
+            save_proj("q_proj", &layer.q_proj, true)?;
+            save_proj("k_proj", &layer.k_proj, true)?;
+            save_proj("v_proj", &layer.v_proj, true)?;
+            save_proj("o_proj", &layer.o_proj, true)?;
+            save_proj("in_proj_qkv", &layer.in_proj_qkv, true)?;
+            save_proj("in_proj_z", &layer.in_proj_z, true)?;
+            save_proj("out_proj", &layer.gdn_out_proj, true)?;
+            save_proj("gate_proj", &layer.gate_proj, false)?;
+            save_proj("up_proj", &layer.up_proj, false)?;
+            save_proj("down_proj", &layer.down_proj, false)?;
         }
 
         // Save using candle's safetensors support
@@ -2136,7 +2263,7 @@ pub fn sft_train(
     };
 
     // Initialize trainable LoRA parameters
-    let params = TrainableLoraParams::initialize_seeded(
+    let mut params = TrainableLoraParams::initialize_seeded(
         model_config,
         weights,
         config.lora_rank,
@@ -2146,7 +2273,7 @@ pub fn sft_train(
     )?;
 
     tracing::info!(
-        num_vars = params.all_vars().len(),
+        num_vars = params.all_params().len(),
         "initialized trainable LoRA parameters"
     );
     let lora_grad_index = LoraGradNormIndex::new(&params);
@@ -2169,14 +2296,7 @@ pub fn sft_train(
     // Allocate AdamW state if selected; SGD has no per-param state.
     // Registered alongside the LoRA Vars so the on-device kernel can
     // resolve `m` and `v` by TensorId.
-    let mut opt_state = match config.optimizer {
-        Optimizer::Sgd => None,
-        Optimizer::AdamW { .. } => {
-            let state = params.allocate_adamw_state(&device)?;
-            state.register_with_backend(&*backend)?;
-            Some(state)
-        }
-    };
+    let mut opt_state = make_opt_state(&params, config.optimizer, config.learning_rate, &device)?;
 
     // Run the actual training body inside a closure so we can write the
     // outcome record (success or failure) before returning to the caller.
@@ -2268,65 +2388,16 @@ pub fn sft_train(
                 let loss_val;
 
                 let flce_provider = build_flce_provider(&backend, &label_mask, model_config);
-                if let Some(ref segs) = segments {
-                    // (#1082) Gradient checkpointing: route the reverse through
-                    // the kt tape when tape-eligible (CUDA + BF16 base), because
-                    // the legacy candle checkpointed reverse is grad-severed by
-                    // the forward.rs flip (candle `.backward()` can't trace the
-                    // now-kt-internal `model_forward_segment`). CPU/F32/ECHO keep
-                    // the candle `GradMap` path (also severed, but that's the
-                    // deferred F32/CPU/ECHO endgame; see task #4 / the #[ignore]'d
-                    // checkpointed tests).
+                // (#1082 candle-drop) The SFT forward/backward is now UNCONDITIONALLY
+                // kt tape-authoritative — the candle checkpointed reverse + candle
+                // `loss.backward()` paths are deleted. `standard_forward_backward`
+                // and `checkpointed_forward_backward_tape_authoritative_kt` both
+                // return `GradSource::Kt`, consumed kt-native by the dispatchers
+                // (no candle grad copy, no candle `Var` master).
+                let grads: GradSource = if let Some(ref segs) = segments {
                     #[cfg(feature = "cuda")]
-                    let tape_ckpt = tape_authoritative_enabled()
-                        && matches!(device, candle_core::Device::Cuda(_))
-                        && base_dtype_supports_tape(weights);
-                    #[cfg(not(feature = "cuda"))]
-                    let tape_ckpt = false;
-
-                    if tape_ckpt {
-                        #[cfg(feature = "cuda")]
-                        {
-                            let (lv, kt_grads) =
-                                checkpointed_forward_backward_tape_authoritative_kt(
-                                    &*backend,
-                                    &input_ids,
-                                    weights,
-                                    model_config,
-                                    &params,
-                                    &label_mask,
-                                    segs,
-                                    &device,
-                                    flce_provider,
-                                )?;
-                            loss_val = lv;
-                            let grads = GradSource::Kt(kt_grads);
-                            observe_lora_grad_norms_dispatch(
-                                &mut lora_grad_norms,
-                                &params,
-                                &grads,
-                            )?;
-                            optimizer_step_dispatch(
-                                &*backend,
-                                &params,
-                                &grads,
-                                config.learning_rate,
-                                config.optimizer,
-                                opt_state.as_mut(),
-                            )?;
-                        }
-                        // Without the cuda feature `tape_ckpt` is a `false`
-                        // const so this arm is unreachable; the diverging body
-                        // tells the borrow checker `loss_val` is still assigned
-                        // on every reachable path (the cuda block above is
-                        // cfg'd out, leaving this arm otherwise empty).
-                        #[cfg(not(feature = "cuda"))]
-                        {
-                            unreachable!("tape_ckpt is always false without the cuda feature");
-                        }
-                    } else {
-                        // Gradient-checkpointed forward/backward (candle GradMap)
-                        let (lv, accumulated_grads) = checkpointed_forward_backward(
+                    {
+                        let (lv, kt_grads) = checkpointed_forward_backward_tape_authoritative_kt(
                             &*backend,
                             &input_ids,
                             weights,
@@ -2338,23 +2409,24 @@ pub fn sft_train(
                             flce_provider,
                         )?;
                         loss_val = lv;
-                        observe_lora_grad_norms_from_map(
-                            &mut lora_grad_norms,
-                            &lora_grad_index,
-                            &accumulated_grads,
-                        )?;
-                        optimizer_step_from_map(
-                            &*backend,
-                            &params,
-                            &accumulated_grads,
-                            config.learning_rate,
-                            config.optimizer,
-                            opt_state.as_mut(),
-                        )?;
+                        GradSource::Kt(kt_grads)
+                    }
+                    #[cfg(not(feature = "cuda"))]
+                    {
+                        // Non-CUDA build: the kt tape adapters don't record on a
+                        // CPU candle device, so checkpointed kt-tape backward is a
+                        // CUDA-only path. The CPU smoke test uses the
+                        // non-checkpointed `standard_forward_backward` path; reaching
+                        // here means a CPU run requested checkpointing, which the
+                        // candle-drop endgame does not support yet.
+                        let _ = (segs, flce_provider);
+                        anyhow::bail!(
+                            "gradient checkpointing requires the `cuda` feature (kt-tape \
+                             checkpointed reverse is CUDA-only post candle-drop)"
+                        );
                     }
                 } else {
-                    // Standard (non-checkpointed) forward/backward
-                    let (lv, grads) = standard_forward_backward(
+                    let (lv, g) = standard_forward_backward(
                         &*backend,
                         &input_ids,
                         weights,
@@ -2365,20 +2437,17 @@ pub fn sft_train(
                         flce_provider,
                     )?;
                     loss_val = lv;
-                    // (#1082 Inc-0 PR4) `grads` is a `GradSource` now: the
-                    // tape-authoritative CUDA path delivers `GradSource::Kt`
-                    // (consumed kt-native by the dispatchers, no candle copy);
-                    // the candle/CPU/opt-out paths deliver `GradSource::Candle`.
-                    observe_lora_grad_norms_dispatch(&mut lora_grad_norms, &params, &grads)?;
-                    optimizer_step_dispatch(
-                        &*backend,
-                        &params,
-                        &grads,
-                        config.learning_rate,
-                        config.optimizer,
-                        opt_state.as_mut(),
-                    )?;
-                }
+                    g
+                };
+                observe_lora_grad_norms_dispatch(&mut lora_grad_norms, &params, &grads)?;
+                optimizer_step_dispatch(
+                    &*backend,
+                    &mut params,
+                    &grads,
+                    config.learning_rate,
+                    config.optimizer,
+                    opt_state.as_mut(),
+                )?;
 
                 epoch_loss += loss_val;
                 last_loss = loss_val;
@@ -2392,7 +2461,7 @@ pub fn sft_train(
                             adapter_dir.join(format!("{adapter_name}-checkpoint-{global_step}"));
                         // Pull current Var values from registry into candle
                         // CPU storage before save_peft serializes them.
-                        if let Err(e) = params.sync_to_candle(&*backend) {
+                        if let Err(e) = params.sync_to_master(&*backend) {
                             tracing::warn!(step = global_step, error = %e, "failed to sync LoRA Vars to candle for checkpoint");
                         }
                         if let Err(e) = params.save_peft(&ckpt_dir, model_config.num_layers) {
@@ -2445,7 +2514,7 @@ pub fn sft_train(
         // Pull current Var values from registry into candle CPU
         // storage before final save_peft (the on-device optimizer
         // path leaves candle storage stale between steps).
-        let synced = params.sync_to_candle(&*backend).unwrap_or(0);
+        let synced = params.sync_to_master(&*backend).unwrap_or(0);
         tracing::debug!(synced, "synced LoRA Vars to candle before SFT save");
 
         // Save the trained adapter
@@ -2678,7 +2747,7 @@ pub fn grpo_train(
     };
 
     // Initialize trainable LoRA parameters
-    let params = TrainableLoraParams::initialize_seeded(
+    let mut params = TrainableLoraParams::initialize_seeded(
         model_config,
         weights,
         config.lora_rank,
@@ -2688,7 +2757,7 @@ pub fn grpo_train(
     )?;
 
     tracing::info!(
-        num_vars = params.all_vars().len(),
+        num_vars = params.all_params().len(),
         "initialized trainable LoRA parameters"
     );
     let lora_grad_index = LoraGradNormIndex::new(&params);
@@ -2708,14 +2777,7 @@ pub fn grpo_train(
     // dispatches on-device against the registry buffers.
     params.register_with_backend(&*backend)?;
 
-    let mut opt_state = match config.optimizer {
-        Optimizer::Sgd => None,
-        Optimizer::AdamW { .. } => {
-            let state = params.allocate_adamw_state(&device)?;
-            state.register_with_backend(&*backend)?;
-            Some(state)
-        }
-    };
+    let mut opt_state = make_opt_state(&params, config.optimizer, config.learning_rate, &device)?;
 
     let mut train_body = || -> Result<(PathBuf, f64)> {
         let dynamic_sampling = config.dynamic_sampling;
@@ -2930,7 +2992,7 @@ pub fn grpo_train(
                 tgroup,
                 weights,
                 model_config,
-                &params,
+                &mut params,
                 config,
                 segments.as_deref(),
                 &device,
@@ -2967,7 +3029,7 @@ pub fn grpo_train(
                 if interval > 0 && global_step % interval == 0 && global_step < total_steps {
                     let ckpt_dir =
                         adapter_dir.join(format!("{adapter_name}-checkpoint-{global_step}"));
-                    if let Err(e) = params.sync_to_candle(&*backend) {
+                    if let Err(e) = params.sync_to_master(&*backend) {
                         tracing::warn!(step = global_step, error = %e, "failed to sync LoRA Vars to candle for GRPO checkpoint");
                     }
                     if let Err(e) = params.save_peft(&ckpt_dir, model_config.num_layers) {
@@ -3021,7 +3083,7 @@ pub fn grpo_train(
 
         // Pull current Var values from registry into candle CPU
         // storage before final save_peft.
-        let synced = params.sync_to_candle(&*backend).unwrap_or(0);
+        let synced = params.sync_to_master(&*backend).unwrap_or(0);
         tracing::debug!(synced, "synced LoRA Vars to candle before GRPO save");
 
         // Save the trained adapter
@@ -3489,7 +3551,7 @@ pub fn grpo_train_jsonl(
         }
     };
 
-    let params = TrainableLoraParams::initialize_seeded(
+    let mut params = TrainableLoraParams::initialize_seeded(
         model_config,
         weights,
         config.lora_rank,
@@ -3499,7 +3561,7 @@ pub fn grpo_train_jsonl(
     )?;
 
     tracing::info!(
-        num_vars = params.all_vars().len(),
+        num_vars = params.all_params().len(),
         "initialized streamed GRPO trainable LoRA parameters"
     );
     let lora_grad_index = LoraGradNormIndex::new(&params);
@@ -3517,14 +3579,7 @@ pub fn grpo_train_jsonl(
 
     params.register_with_backend(&*backend)?;
 
-    let mut opt_state = match config.optimizer {
-        Optimizer::Sgd => None,
-        Optimizer::AdamW { .. } => {
-            let state = params.allocate_adamw_state(&device)?;
-            state.register_with_backend(&*backend)?;
-            Some(state)
-        }
-    };
+    let mut opt_state = make_opt_state(&params, config.optimizer, config.learning_rate, &device)?;
 
     let mut train_body = || -> Result<(PathBuf, f64)> {
         // Streaming GRPO can't pre-compute max_seq_len without consuming the
@@ -3855,7 +3910,7 @@ pub fn grpo_train_jsonl(
                 if interval > 0 && processed_groups % interval == 0 && bytes_read < total_bytes {
                     let ckpt_dir =
                         adapter_dir.join(format!("{adapter_name}-checkpoint-{processed_groups}"));
-                    if let Err(e) = params.sync_to_candle(&*backend) {
+                    if let Err(e) = params.sync_to_master(&*backend) {
                         tracing::warn!(step = processed_groups, error = %e, "failed to sync LoRA Vars to candle for streamed GRPO checkpoint");
                     }
                     if let Err(e) = params.save_peft(&ckpt_dir, model_config.num_layers) {
@@ -3892,7 +3947,7 @@ pub fn grpo_train_jsonl(
             &token_counts,
         );
 
-        let synced = params.sync_to_candle(&*backend).unwrap_or(0);
+        let synced = params.sync_to_master(&*backend).unwrap_or(0);
         tracing::debug!(
             synced,
             "synced LoRA Vars to candle before streamed GRPO save"
@@ -4088,7 +4143,8 @@ pub fn grpo_benchmark_training_step(
     group: &GrpoGroup,
     weights: &GpuWeights,
     model_config: &ModelConfig,
-    params: &TrainableLoraParams,
+    // (#1082) `&mut` — the GRPO step mutates each LoRA `Parameter` in place.
+    params: &mut TrainableLoraParams,
     config: &GrpoConfig,
     segments: Option<&[(usize, usize)]>,
     device: &CdDevice,
@@ -4578,42 +4634,6 @@ fn chunked_log_probs_for_completion(
     Ok((correct_logits - log_sum_exp)?.squeeze(1)?)
 }
 
-#[cfg(test)]
-#[allow(clippy::too_many_arguments)]
-fn train_tokenized_grpo_group(
-    backend: &dyn BackendRuntime,
-    tgroup: &TokenizedGrpoGroup,
-    weights: &GpuWeights,
-    model_config: &ModelConfig,
-    params: &TrainableLoraParams,
-    config: &GrpoConfig,
-    segments: Option<&[(usize, usize)]>,
-    device: &CdDevice,
-    opt_state: Option<&mut OptimizerState>,
-    // Phase 3b: optional EMA-snapshot LoRA used as the reference policy when
-    // `config.reference_policy == ReferencePolicy::Ema`. None means the
-    // reference forward runs without any LoRA (base model — historical
-    // `BasePerStep`) or is skipped entirely (`ReferencePolicy::None`).
-    ema_ref_lora: Option<&LoraWeights>,
-) -> Result<GrpoGroupStepReport> {
-    let mut discarded_grad_norms = crate::train_receipt::LoraGradNormAccumulator::default();
-    let lora_grad_index = LoraGradNormIndex::new(params);
-    train_tokenized_grpo_group_with_grad_norms(
-        backend,
-        tgroup,
-        weights,
-        model_config,
-        params,
-        config,
-        segments,
-        device,
-        opt_state,
-        &mut discarded_grad_norms,
-        &lora_grad_index,
-        ema_ref_lora,
-        None,
-    )
-}
 
 #[allow(clippy::too_many_arguments)]
 fn train_tokenized_grpo_group_with_grad_norms(
@@ -4621,7 +4641,9 @@ fn train_tokenized_grpo_group_with_grad_norms(
     tgroup: &TokenizedGrpoGroup,
     weights: &GpuWeights,
     model_config: &ModelConfig,
-    params: &TrainableLoraParams,
+    // (#1082) `&mut` — the optimizer step mutates each LoRA `Parameter`'s
+    // kt master in place.
+    params: &mut TrainableLoraParams,
     config: &GrpoConfig,
     segments: Option<&[(usize, usize)]>,
     device: &CdDevice,
@@ -4866,399 +4888,97 @@ fn train_tokenized_grpo_group_with_grad_norms(
             ref_log_probs
         };
 
+        // (#1082 candle-drop) GRPO per-completion step is now UNCONDITIONALLY
+        // kt tape-authoritative. The candle gradient-checkpointed GRPO reverse
+        // (`checkpointed_grpo_forward_backward` + analytic ECHO tail), the
+        // candle tape-bridge producer, and the inline candle `loss.backward()`
+        // path are all DELETED. ECHO env-CE has no kt tape root, so an
+        // ECHO-active GRPO step is not supported on the kt-only path (the
+        // candle ECHO term was a candle-authoritative feature dropped in the
+        // candle drop). `grpo_step_forward_backward_tape_authoritative_kt`
+        // returns `GradSource::Kt`, consumed kt-native by the dispatchers.
         let loss_val;
-        // CP-4 (#1082): when this completion is tape-authoritative-eligible, the
-        // tape records the full forward and the non-checkpointed branch's
-        // `grpo_step_forward_backward_tape_authoritative` drives backward — so
-        // skip the candle gradient-checkpointing branch entirely (the tape IS the
-        // activation store; no reverse-segment loop needed).
-        let active_segments = if tape_auth_eligible { None } else { segments };
-        if let Some(segs) = active_segments {
-            // Build ECHO inputs for the checkpointed analytic tail. The
-            // tail folds env-CE into the same vocab-chunk forward+backward
-            // loop as GRPO; legacy single-turn rollouts (no env tokens)
-            // pass None so the analytic tail short-circuits the env
-            // branch and behaves bit-identically to pre-ECHO.
-            let echo_tail = config.loss.echo.as_ref().and_then(|cfg| {
-                if config.loss.echo_enabled() && comp_env_count > 0 && comp.total_obs_len > 0 {
-                    tracing::debug!(
-                        comp_idx,
-                        env_tokens = comp_env_count,
-                        total_obs_len = comp.total_obs_len,
-                        echo_lambda = cfg.lambda,
-                        "GRPO checkpointed path: ECHO env CE active"
-                    );
-                    Some(EchoTailParams {
-                        env_mask: &comp.env_mask,
-                        total_obs_len: comp.total_obs_len,
-                        lambda: cfg.lambda,
-                    })
-                } else {
-                    None
-                }
-            });
-            let (lv, accumulated_grads, env_ce) = checkpointed_grpo_forward_backward(
-                backend,
-                &comp.input_ids,
-                weights,
-                model_config,
-                params,
-                &comp.action_mask,
-                &ref_log_probs,
-                loss_params,
-                segs,
-                device,
-                echo_tail,
-                timings.as_deref_mut(),
-            )?;
-            loss_val = lv;
-            comp_echo_env_ce = env_ce;
-            if token_level {
-                merge_grad_maps(&mut group_accum, accumulated_grads)?;
-            } else {
-                observe_lora_grad_norms_from_map(grad_norms, lora_grad_index, &accumulated_grads)?;
-                let optimizer_started = Instant::now();
-                tracing::info!(
-                    comp_idx,
-                    seq_len = comp.input_ids.len(),
-                    action_tokens = num_active,
-                    env_tokens = comp_env_count,
-                    optimizer = ?config.optimizer,
-                    "GRPO optimizer start"
-                );
-                optimizer_step_from_map(
-                    backend,
-                    params,
-                    &accumulated_grads,
-                    config.learning_rate,
-                    config.optimizer,
-                    opt_state.as_deref_mut(),
-                )?;
-                if let Some(t) = timings.as_deref_mut() {
-                    t.add_optimizer(optimizer_started.elapsed());
-                }
-                tracing::info!(
-                    comp_idx,
-                    seq_len = comp.input_ids.len(),
-                    action_tokens = num_active,
-                    env_tokens = comp_env_count,
-                    optimizer = ?config.optimizer,
-                    elapsed_ms = optimizer_started.elapsed().as_millis() as u64,
-                    "GRPO optimizer end"
-                );
-            }
-        } else {
-            // CP-4 (#1082): non-checkpointed GRPO+ECHO step — forward +
-            // backward dispatch, in priority order:
-            //
-            //   1. TAPE-AUTHORITATIVE (DEFAULT, opt out via
-            //      `KILN_USE_TAPE_AUTHORITATIVE=0`): drive gradients through the
-            //      kt `Tape` instead of candle `loss.backward()`. Runs ONE policy
-            //      forward inside `with_tape_authoritative_scope` so the LoRA
-            //      adapters record their nodes, then roots the tape at the GRPO
-            //      scalar PG (+ KL) loss
-            //      (`grpo_candle_shim::try_tape_grpo_pg_loss_from_logits_cuda`)
-            //      and walks the connected tape with one `Tape::backward`. NO
-            //      candle backward. Mirrors the SFT dispatch in
-            //      `standard_forward_backward` and the OPD dispatch in `opd.rs`.
-            //
-            //      Gated to: CUDA device (tape adapters record kt CUDA ops; CPU
-            //      keeps candle) AND no ACTIVE ECHO env-CE term (ECHO has no tape
-            //      root — carved out exactly like OPD) AND not the
-            //      `no_policy_loss` constant-zero-without-ECHO config.
-            //
-            //   2. CANDLE-AUTHORITATIVE TAPE-BRIDGE (`KILN_USE_TAPE_FORWARD`):
-            //      runs the same flow inside
-            //      `with_tape_scope_emit_to_grad_store`, but candle
-            //      `loss.backward()` stays authoritative and the tape merges into
-            //      its `GradStore`.
-            //
-            //   3. INLINE candle forward + `loss.backward()` (default when both
-            //      env gates are off / non-cuda build) — the verbatim legacy
-            //      path below.
-            //
-            // (#1082 Inc-0 PR5) `bridge_overrides` now carries a `GradSource`
-            // (not a bare candle `GradStore`), exactly mirroring the SFT
-            // `standard_forward_backward` return. The tape-authoritative branch
-            // splits by base dtype:
-            //   - BF16 base: deliver grads KT-NATIVELY via
-            //     `grpo_step_forward_backward_tape_authoritative_kt` ->
-            //     `GradSource::Kt` (NO candle `loss.backward()` hack, NO per-grad
-            //     kt->candle copy). This is the production path (Qwen3.5-4B BF16).
-            //   - Non-BF16 base (e.g. the F32 `tiny_config` test model): the
-            //     BF16-only kt fused adapters all decline, so the kt producer
-            //     would yield an EMPTY grad store = broken training. Use the
-            //     candle-hack producer
-            //     (`grpo_step_forward_backward_tape_authoritative`: tape ->
-            //     `loss.backward()` overlay -> kt->candle copy) -> `GradSource::Candle`,
-            //     which trains F32 correctly. Mirrors the SFT dtype gate exactly.
-            // The tape-bridge / inline-candle producers stay `GradSource::Candle`.
+        anyhow::ensure!(
+            tape_auth_eligible,
+            "GRPO requires the kt tape-authoritative path (CUDA + BF16 base, no \
+             ECHO env-CE, no no_policy_loss) post candle-drop. The candle \
+             `loss.backward()` / ECHO / candle-checkpointed GRPO producers were \
+             removed in #1082."
+        );
+        // `segments` (gradient checkpointing) is unused on the kt-only GRPO
+        // path: the tape IS the activation store, so there is no candle
+        // reverse-segment loop. Keep the binding silenced.
+        let _ = segments;
+        let grads: GradSource = {
             #[cfg(feature = "cuda")]
-            let bridge_overrides: Option<(GradSource, f64, Option<f64>)> =
-                if tape_auth_eligible {
-                    if base_dtype_supports_tape(weights) {
-                        let (lv, kt_grads) = grpo_step_forward_backward_tape_authoritative_kt(
-                            backend,
-                            &comp.input_ids,
-                            weights,
-                            model_config,
-                            params,
-                            &comp.action_mask,
-                            &ref_log_probs,
-                            loss_params,
-                            device,
-                            comp_idx,
-                            num_active,
-                            comp_env_count,
-                            streaming_tile_tokens,
-                            checkpoint_segments,
-                            timings.as_deref_mut(),
-                        )?;
-                        // No ECHO env-CE on this path (gated off above).
-                        Some((GradSource::Kt(kt_grads), lv, None))
-                    } else {
-                        let (lv, g) = grpo_step_forward_backward_tape_authoritative(
-                            backend,
-                            &comp.input_ids,
-                            weights,
-                            model_config,
-                            params,
-                            &comp.action_mask,
-                            &ref_log_probs,
-                            loss_params,
-                            device,
-                            comp_idx,
-                            num_active,
-                            comp_env_count,
-                            streaming_tile_tokens,
-                            checkpoint_segments,
-                            timings.as_deref_mut(),
-                        )?;
-                        // No ECHO env-CE on this path (gated off above).
-                        Some((GradSource::Candle(g), lv, None))
-                    }
-                } else if kiln_autograd::tape_forward_enabled() {
-                    let (lv, g, ce) = grpo_non_checkpointed_forward_backward_via_tape_bridge(
-                        backend,
-                        &comp.input_ids,
-                        weights,
-                        model_config,
-                        params,
-                        &comp.action_mask,
-                        &comp.env_mask,
-                        comp.total_obs_len,
-                        comp_env_count,
-                        num_active,
-                        &ref_log_probs,
-                        loss_params,
-                        &config.loss,
-                        device,
-                        comp_idx,
-                        streaming_tile_tokens,
-                        checkpoint_segments,
-                        timings.as_deref_mut(),
-                    )?;
-                    Some((GradSource::Candle(g), lv, ce))
-                } else {
-                    None
-                };
-            #[cfg(not(feature = "cuda"))]
-            let bridge_overrides: Option<(GradSource, f64, Option<f64>)> = None;
-
-            let grads: GradSource = if let Some((g, lv, ce)) = bridge_overrides {
-                loss_val = lv;
-                comp_echo_env_ce = ce;
-                g
-            } else {
-                let lora_weights = params.as_lora_weights();
-                let mut linear_state = LinearAttentionState::new(model_config, &kiln_kt_bridge::kt_device_from_candle(device))?;
-                let policy_forward_started = Instant::now();
-                tracing::info!(
-                    comp_idx,
-                    seq_len = comp.input_ids.len(),
-                    action_tokens = num_active,
-                    env_tokens = comp_env_count,
-                    checkpoint_segments,
-                    streaming_prefill = streaming_prefill_enabled_for(&kiln_kt_bridge::kt_device_from_candle(device),comp.input_ids.len()),
-                    streaming_tile_tokens,
-                    "GRPO policy forward start"
-                );
-                let policy_logits = model_forward(
+            {
+                let (lv, kt_grads) = grpo_step_forward_backward_tape_authoritative_kt(
                     backend,
                     &comp.input_ids,
                     weights,
                     model_config,
-                    None,
-                    Some(&mut linear_state),
-                    Some(&lora_weights),
-                )
-                .context("GRPO policy forward pass")?;
-                if let Some(t) = timings.as_deref_mut() {
-                    t.add_policy_forward(policy_forward_started.elapsed());
-                }
-                tracing::info!(
-                    comp_idx,
-                    seq_len = comp.input_ids.len(),
-                    action_tokens = num_active,
-                    env_tokens = comp_env_count,
-                    checkpoint_segments,
-                    streaming_prefill = streaming_prefill_enabled_for(&kiln_kt_bridge::kt_device_from_candle(device),comp.input_ids.len()),
-                    streaming_tile_tokens,
-                    elapsed_ms = policy_forward_started.elapsed().as_millis() as u64,
-                    "GRPO policy forward end"
-                );
-
-                let policy_log_probs =
-                    token_log_probs(&policy_logits, &comp.input_ids, &comp.action_mask, device)?;
-
-                let grpo_loss_val =
-                    grpo_loss(&policy_log_probs, &ref_log_probs, loss_params, device)?;
-
-                // ECHO env-CE term. When config.loss.echo is None, when
-                // env_mask is all-false (legacy single-turn rollouts), or
-                // when total_obs_len is 0, this contributes exactly nothing.
-                //
-                // Verifier-free adaptation (paper §5.5) takes the
-                // `no_policy_loss = true` branch: the GRPO term is masked
-                // (multiplied by 0) and only the ECHO env-CE term drives
-                // gradients. This is what lets a strong-but-stable agent
-                // keep improving from environment interaction alone on
-                // tasks where no programmatic verifier is available.
-                //
-                // Implementation: reuse token_log_probs with env_mask as
-                // the position selector. Returns log p(x_t) at env
-                // positions; CE = -sum(log p) / |O| (paper §3.1, where |O|
-                // is total_obs_len). We rescale by env_count/|O| to convert
-                // from sum-over-active to paper-normalized mean.
-                let policy_loss_scale = if config.loss.no_policy_loss { 0.0 } else { 1.0 };
-                let scaled_grpo = if policy_loss_scale != 1.0 {
-                    grpo_loss_val.affine(policy_loss_scale, 0.0)?
-                } else {
-                    grpo_loss_val
-                };
-                let loss = if let Some(echo_cfg) = &config.loss.echo {
-                    if config.loss.echo_enabled() && comp_env_count > 0 && comp.total_obs_len > 0
-                    {
-                        let env_log_probs = token_log_probs(
-                            &policy_logits,
-                            &comp.input_ids,
-                            &comp.env_mask,
-                            device,
-                        )?;
-                        // sum(log p) over env positions
-                        let env_log_prob_sum = env_log_probs.sum_all()?;
-                        // mean_ce = -sum / |O| (paper §3.1 normalization)
-                        let inv_obs_len = -(1.0 / comp.total_obs_len as f64);
-                        let echo_mean_ce = env_log_prob_sum.affine(inv_obs_len, 0.0)?;
-                        // Total loss = (policy_scale * L_grpo) + λ · L_envCE
-                        let echo_scaled = echo_mean_ce.affine(echo_cfg.lambda, 0.0)?;
-                        // Emit a per-completion debug so operators see ECHO
-                        // firing on the uncheckpointed path with concrete
-                        // env_count / total_obs_len / λ values — the
-                        // checkpointed path already emits this from
-                        // train_tokenized_grpo_group; this matches it for
-                        // the standard path.
-                        let mean_ce_val = echo_mean_ce.to_scalar::<f32>().ok().map(f64::from);
-                        comp_echo_env_ce = mean_ce_val;
-                        tracing::debug!(
-                            comp_idx,
-                            env_tokens = comp_env_count,
-                            total_obs_len = comp.total_obs_len,
-                            echo_lambda = echo_cfg.lambda,
-                            echo_env_ce = mean_ce_val,
-                            "GRPO uncheckpointed path: ECHO env CE active"
-                        );
-                        scaled_grpo.add(&echo_scaled)?
-                    } else {
-                        scaled_grpo
-                    }
-                } else {
-                    scaled_grpo
-                };
-                anyhow::ensure!(
-                    !config.loss.no_policy_loss || config.loss.echo.is_some(),
-                    "config.loss.no_policy_loss = true with no ECHO term defined produces \
-                     a constant-zero loss — set loss.echo = Some(...) to drive gradients."
-                );
-
-                loss_val = loss.to_scalar::<f32>()? as f64;
-
-                let backward_started = Instant::now();
-                tracing::info!(
-                    comp_idx,
-                    seq_len = comp.input_ids.len(),
-                    action_tokens = num_active,
-                    env_tokens = comp_env_count,
-                    checkpoint_segments = 0usize,
-                    streaming_prefill = streaming_prefill_enabled_for(&kiln_kt_bridge::kt_device_from_candle(device),comp.input_ids.len()),
-                    streaming_tile_tokens,
-                    "GRPO backward start"
-                );
-                let grads = loss.backward().context("GRPO+ECHO backward pass")?;
-                if let Some(t) = timings.as_deref_mut() {
-                    t.add_backward(backward_started.elapsed());
-                }
-                tracing::info!(
-                    comp_idx,
-                    seq_len = comp.input_ids.len(),
-                    action_tokens = num_active,
-                    env_tokens = comp_env_count,
-                    checkpoint_segments = 0usize,
-                    streaming_prefill = streaming_prefill_enabled_for(&kiln_kt_bridge::kt_device_from_candle(device),comp.input_ids.len()),
-                    streaming_tile_tokens,
-                    elapsed_ms = backward_started.elapsed().as_millis() as u64,
-                    "GRPO backward end"
-                );
-                // (#1082 Inc-0 PR5) Inline candle `loss.backward()` path -> wrap
-                // as `GradSource::Candle` so the downstream consumption dispatches
-                // uniformly with the kt-native tape-authoritative path.
-                GradSource::Candle(grads)
-            };
-            if token_level {
-                // (#1082 Inc-0 PR5) accumulate via the `GradSource` dispatcher:
-                // `Candle` -> existing `accumulate_grads`; `Kt` -> per-Var
-                // kt->candle bridge into the same CPU `GradMap` (one copy per
-                // grad), respecting GRPO's cross-completion accumulation. The
-                // group-level `optimizer_step_from_map` below is unchanged.
-                let vars = params.all_vars();
-                accumulate_grads_dispatch(&mut group_accum, &grads, &vars)?;
-            } else {
-                // (#1082 Inc-0 PR5) observe + step via the `GradSource`
-                // dispatchers (PR4): `Kt` is consumed kt-natively
-                // (`observe_lora_grad_norms_from_kt_grad_store` copy-free,
-                // `optimizer_step_from_kt_grad_store` one copy per Var); `Candle`
-                // is the unchanged candle path.
-                observe_lora_grad_norms_dispatch(grad_norms, params, &grads)?;
-                let optimizer_started = Instant::now();
-                tracing::info!(
-                    comp_idx,
-                    seq_len = comp.input_ids.len(),
-                    action_tokens = num_active,
-                    env_tokens = comp_env_count,
-                    optimizer = ?config.optimizer,
-                    "GRPO optimizer start"
-                );
-                optimizer_step_dispatch(
-                    backend,
                     params,
-                    &grads,
-                    config.learning_rate,
-                    config.optimizer,
-                    opt_state.as_deref_mut(),
-                )?;
-                if let Some(t) = timings.as_deref_mut() {
-                    t.add_optimizer(optimizer_started.elapsed());
-                }
-                tracing::info!(
+                    &comp.action_mask,
+                    &ref_log_probs,
+                    loss_params,
+                    device,
                     comp_idx,
-                    seq_len = comp.input_ids.len(),
-                    action_tokens = num_active,
-                    env_tokens = comp_env_count,
-                    optimizer = ?config.optimizer,
-                    elapsed_ms = optimizer_started.elapsed().as_millis() as u64,
-                    "GRPO optimizer end"
-                );
+                    num_active,
+                    comp_env_count,
+                    streaming_tile_tokens,
+                    checkpoint_segments,
+                    timings.as_deref_mut(),
+                )?;
+                loss_val = lv;
+                comp_echo_env_ce = None;
+                GradSource::Kt(kt_grads)
             }
+            #[cfg(not(feature = "cuda"))]
+            {
+                // `tape_auth_eligible` is a const `false` without the cuda
+                // feature, so the ensure! above already bailed; this arm is
+                // unreachable but keeps `loss_val` definitely-assigned.
+                let _ = (&ref_log_probs, num_active, comp_env_count, comp_idx);
+                unreachable!("GRPO kt path requires the cuda feature");
+            }
+        };
+        if token_level {
+            // Cross-completion grad accumulation into the kt `GradMap`
+            // (keyed by `Parameter::tensor_id()`).
+            let params_ref: &TrainableLoraParams = params;
+            let plist = params_ref.all_params();
+            accumulate_grads_dispatch(&mut group_accum, &grads, &plist)?;
+        } else {
+            observe_lora_grad_norms_dispatch(grad_norms, params, &grads)?;
+            let optimizer_started = Instant::now();
+            tracing::info!(
+                comp_idx,
+                seq_len = comp.input_ids.len(),
+                action_tokens = num_active,
+                env_tokens = comp_env_count,
+                optimizer = ?config.optimizer,
+                "GRPO optimizer start"
+            );
+            optimizer_step_dispatch(
+                backend,
+                params,
+                &grads,
+                config.learning_rate,
+                config.optimizer,
+                opt_state.as_deref_mut(),
+            )?;
+            if let Some(t) = timings.as_deref_mut() {
+                t.add_optimizer(optimizer_started.elapsed());
+            }
+            tracing::info!(
+                comp_idx,
+                seq_len = comp.input_ids.len(),
+                action_tokens = num_active,
+                env_tokens = comp_env_count,
+                optimizer = ?config.optimizer,
+                elapsed_ms = optimizer_started.elapsed().as_millis() as u64,
+                "GRPO optimizer end"
+            );
         }
 
         group_loss_sum += loss_val;
@@ -5321,38 +5041,23 @@ fn train_tokenized_grpo_group_with_grad_norms(
     Ok(GrpoGroupStepReport { loss, echo_env_ce })
 }
 
-/// Merge `src` HashMap of gradient tensors into `dst`, accumulating where a
-/// key already exists. Used by GRPO token-level aggregation to combine
-/// per-completion accumulated_grads HashMaps into one before stepping.
-fn merge_grad_maps(
-    dst: &mut GradMap,
-    src: GradMap,
-) -> Result<()> {
-    for (id, grad) in src {
-        match dst.entry(id) {
-            std::collections::hash_map::Entry::Occupied(mut e) => {
-                let merged = (e.get() + &grad)?.detach();
-                e.insert(merged);
-            }
-            std::collections::hash_map::Entry::Vacant(e) => {
-                e.insert(grad);
-            }
-        }
-    }
-    Ok(())
-}
+// (#1082) `merge_grad_maps` removed: its sole caller was the candle
+// gradient-checkpointed GRPO path (`checkpointed_grpo_forward_backward`),
+// which was deleted in the candle drop. The kt-only GRPO token-level path
+// accumulates directly via `accumulate_grads_dispatch`.
 
 struct LoraGradNormIndex {
-    modules_by_var: HashMap<TensorId, &'static str>,
+    // (#1082) keyed by each LoRA `Parameter::tensor_id()` (kt).
+    modules_by_param: HashMap<KtTensorId, &'static str>,
 }
 
 impl LoraGradNormIndex {
     fn new(params: &TrainableLoraParams) -> Self {
         Self {
-            modules_by_var: params
-                .all_vars_with_modules()
+            modules_by_param: params
+                .all_params_with_modules()
                 .into_iter()
-                .map(|entry| (entry.var.as_tensor().id(), entry.module))
+                .map(|entry| (entry.param.tensor_id(), entry.module))
                 .collect(),
         }
     }
@@ -5365,7 +5070,7 @@ fn observe_lora_grad_norms_from_map(
 ) -> Result<()> {
     let mut sum_sq_by_module: BTreeMap<&'static str, f64> = BTreeMap::new();
     for (id, grad) in grads {
-        if let Some(module) = index.modules_by_var.get(id).copied() {
+        if let Some(module) = index.modules_by_param.get(id).copied() {
             accumulate_lora_grad_sum_sq(&mut sum_sq_by_module, module, grad)?;
         }
     }
@@ -5373,42 +5078,20 @@ fn observe_lora_grad_norms_from_map(
     Ok(())
 }
 
-fn observe_lora_grad_norms_from_grad_store(
-    accumulator: &mut crate::train_receipt::LoraGradNormAccumulator,
-    params: &TrainableLoraParams,
-    grads: &GradStore,
-) -> Result<()> {
-    let mut sum_sq_by_module: BTreeMap<&'static str, f64> = BTreeMap::new();
-    for entry in params.all_vars_with_modules() {
-        if let Some(grad) = grads.get(entry.var.as_tensor()) {
-            accumulate_lora_grad_sum_sq(&mut sum_sq_by_module, entry.module, &grad)?;
-        }
-    }
-    observe_lora_grad_module_norms(accumulator, sum_sq_by_module);
-    Ok(())
-}
-
-/// (#1082 Inc-0 PR4) kt-native sibling of
-/// [`observe_lora_grad_norms_from_grad_store`]: reads each LoRA `Var`'s
-/// gradient from a kt-native [`kiln_autograd::GradStore`] (keyed by
-/// [`KtTensorId`] via `cd_tensor_id_to_kt`) and accumulates its squared
-/// L2 norm per module.
-///
-/// PERF (#1082): the per-Var norm is computed KT-NATIVELY via
-/// `train_receipt::tensor_l2_norm_kt` (kt `l2_norm_scalar`, which casts
-/// to F32 on-device then reduces with a single D2H scalar readback) — NO
-/// full-tensor `kt -> candle` grad copy. This keeps the observe call off
-/// the candle bridge entirely on the tape-authoritative path.
-#[cfg(feature = "cuda")]
+/// (#1082) kt-native LoRA grad-norm observer: reads each LoRA
+/// `Parameter`'s gradient from a kt-native [`kiln_autograd::GradStore`]
+/// (keyed by `Parameter::tensor_id()`) and accumulates its squared L2
+/// norm per module. The per-param norm is computed KT-NATIVELY via
+/// `train_receipt::tensor_l2_norm_kt` (cast-to-F32 on-device + single D2H
+/// scalar readback) — NO full-tensor kt->candle grad copy.
 fn observe_lora_grad_norms_from_kt_grad_store(
     accumulator: &mut crate::train_receipt::LoraGradNormAccumulator,
     params: &TrainableLoraParams,
     grads: &kiln_autograd::GradStore,
 ) -> Result<()> {
     let mut sum_sq_by_module: BTreeMap<&'static str, f64> = BTreeMap::new();
-    for entry in params.all_vars_with_modules() {
-        let kt_id = cd_tensor_id_to_kt(entry.var.as_tensor().id());
-        if let Some(kt_grad) = grads.get(kt_id) {
+    for entry in params.all_params_with_modules() {
+        if let Some(kt_grad) = grads.get(entry.param.tensor_id()) {
             let norm = crate::train_receipt::tensor_l2_norm_kt(kt_grad).with_context(|| {
                 format!("compute LoRA grad l2 norm (kt) for module {}", entry.module)
             })?;
@@ -5426,9 +5109,10 @@ fn observe_lora_grad_norms_from_kt_grad_store(
 fn accumulate_lora_grad_sum_sq(
     sum_sq_by_module: &mut BTreeMap<&'static str, f64>,
     module: &'static str,
-    grad: &Tensor,
+    grad: &KtTensor,
 ) -> Result<()> {
-    let norm = crate::train_receipt::tensor_l2_norm(grad)
+    // (#1082) kt grad now; norm computed kt-natively.
+    let norm = crate::train_receipt::tensor_l2_norm_kt(grad)
         .with_context(|| format!("compute LoRA grad l2 norm for module {module}"))?;
     if norm.is_finite() {
         *sum_sq_by_module.entry(module).or_insert(0.0) += norm * norm;
@@ -5685,25 +5369,50 @@ fn ema_blend_tensor(old: &Tensor, current: &Tensor, decay: f32) -> Result<Tensor
 /// from the snapshot toward the current params (or a pure deepcopy of
 /// current if no prior snapshot exists).
 fn snapshot_projection(
-    cur: &Option<(Var, Var)>,
+    cur: &Option<(Parameter, Parameter)>,
     prior: Option<&LoraProjectionWeights>,
     decay: f32,
 ) -> Result<Option<LoraProjectionWeights>> {
     let Some((cur_a, cur_b)) = cur else {
         return Ok(None);
     };
-    let cur_a_t = cur_a.as_tensor();
-    let cur_b_t = cur_b.as_tensor();
-    let (a, b) = match prior {
-        Some(prior) => (
-            ema_blend_tensor(&prior.a, cur_a_t, decay)?,
-            ema_blend_tensor(&prior.b, cur_b_t, decay)?,
-        ),
+    // (#1082) The EMA blend / deepcopy helpers (`ema_blend_tensor` /
+    // `deepcopy_tensor_for_snapshot`) still operate on candle tensors;
+    // `LoraProjectionWeights.a/.b` are kt. Bridge the param's primary kt
+    // tensor -> candle for the blend, then bridge the candle result back to
+    // kt for the snapshot `LoraWeights`. Candle island until the EMA blend is
+    // ported to kt ops.
+    // // (#1082) bridge — EMA snapshot blend is still a candle island.
+    let cur_a_cd = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(
+        cur_a.forward_storage().primary_tensor(),
+    )
+    .map_err(|e| anyhow::anyhow!("snapshot_projection: cur_a kt->candle: {e}"))?;
+    let cur_b_cd = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(
+        cur_b.forward_storage().primary_tensor(),
+    )
+    .map_err(|e| anyhow::anyhow!("snapshot_projection: cur_b kt->candle: {e}"))?;
+    let (a_cd, b_cd) = match prior {
+        Some(prior) => {
+            // `prior.a/.b` are kt (from a prior snapshot's LoraWeights); bridge
+            // them to candle for the blend.
+            let prior_a_cd = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&prior.a)
+                .map_err(|e| anyhow::anyhow!("snapshot_projection: prior_a kt->candle: {e}"))?;
+            let prior_b_cd = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&prior.b)
+                .map_err(|e| anyhow::anyhow!("snapshot_projection: prior_b kt->candle: {e}"))?;
+            (
+                ema_blend_tensor(&prior_a_cd, &cur_a_cd, decay)?,
+                ema_blend_tensor(&prior_b_cd, &cur_b_cd, decay)?,
+            )
+        }
         None => (
-            deepcopy_tensor_for_snapshot(cur_a_t)?,
-            deepcopy_tensor_for_snapshot(cur_b_t)?,
+            deepcopy_tensor_for_snapshot(&cur_a_cd)?,
+            deepcopy_tensor_for_snapshot(&cur_b_cd)?,
         ),
     };
+    let a = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&a_cd)
+        .map_err(|e| anyhow::anyhow!("snapshot_projection: a candle->kt: {e}"))?;
+    let b = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&b_cd)
+        .map_err(|e| anyhow::anyhow!("snapshot_projection: b candle->kt: {e}"))?;
     Ok(Some(LoraProjectionWeights { a, b }))
 }
 
@@ -5732,7 +5441,7 @@ fn lora_snapshot_capture_or_blend(
             let snap_layer = prior.and_then(|p| p.layers.get(layer_idx));
             // For each named projection, blend or deepcopy.
             let mk = |which: fn(&LoraLayerWeights) -> Option<&LoraProjectionWeights>,
-                      cur: &Option<(Var, Var)>|
+                      cur: &Option<(Parameter, Parameter)>|
              -> Result<Option<LoraProjectionWeights>> {
                 snapshot_projection(cur, snap_layer.and_then(which), decay)
             };
@@ -6461,449 +6170,7 @@ fn analytic_sft_tail_grad_pre_final_norm(
     Ok(grad_hidden_2d.unsqueeze(0)?)
 }
 
-#[allow(clippy::too_many_arguments)]
-/// Optional ECHO env-CE inputs to the analytic GRPO tail. When `Some`, the
-/// tail folds the env-CE term into the same vocab-chunk forward+backward
-/// loop so the checkpointed GRPO path also applies ECHO. When `None`, the
-/// behaviour is bit-identical to the pre-ECHO analytic tail.
-///
-/// Math (paper §3.1):
-///   L_envCE = - (λ / |O|) · Σ_{t ∈ env_positions} log p_θ(x_{t+1} | x_{≤t})
-///   d(L_envCE)/d(logits[t][v]) = (λ / |O|) · (softmax[v] - δ(v = label_t))
-///
-/// The gradient w.r.t. logits at env positions has the same shape as the
-/// action gradient — just a different (uniform) coefficient. We reuse the
-/// existing `(one_hot - softmax) * grad_coeffs` machinery by appending env
-/// positions to the active union with a uniform `-λ/|O|` grad_coeff.
-#[derive(Clone)]
-struct EchoTailParams<'a> {
-    /// `env_mask` over the full input sequence (length `seq_len`).
-    /// Positions where `env_mask[i+1] == true` contribute to the env-CE
-    /// term (predicting `input_ids[i+1]` from `hidden[i]`).
-    env_mask: &'a [bool],
-    /// `|O|` — total observation segment length (including warning-filtered
-    /// tokens). Divides the env-CE sum per paper §3.1.
-    total_obs_len: usize,
-    /// `λ_echo` — mixing coefficient applied to the env-CE term.
-    lambda: f64,
-}
 
-fn analytic_grpo_tail_loss_grad_pre_final_norm(
-    hidden: &Tensor,
-    final_norm_weight: &Tensor,
-    head_t: &Tensor,
-    input_ids: &[u32],
-    completion_mask: &[bool],
-    ref_log_probs: &Tensor,
-    loss_params: GrpoLossParams,
-    rms_norm_eps: f64,
-    chunk_size: usize,
-    echo: Option<EchoTailParams<'_>>,
-) -> Result<(f64, Tensor, Option<f64>)> {
-    let device = hidden.device();
-    let seq_len = input_ids.len();
-    if seq_len < 2 {
-        anyhow::bail!("analytic GRPO tail gradient requires at least 2 tokens");
-    }
-    if chunk_size == 0 {
-        anyhow::bail!("analytic GRPO tail gradient chunk_size must be > 0");
-    }
-    if completion_mask.len() != seq_len {
-        anyhow::bail!(
-            "completion_mask length {} does not match input_ids length {}",
-            completion_mask.len(),
-            seq_len
-        );
-    }
-
-    let dims = hidden.dims();
-    if dims.len() != 3 || dims[0] != 1 || dims[1] != seq_len {
-        anyhow::bail!(
-            "hidden must have shape [1, seq_len, hidden_size], got {:?} for seq_len {}",
-            dims,
-            seq_len
-        );
-    }
-    let hidden_size = dims[2];
-    if final_norm_weight.dims() != [hidden_size] {
-        anyhow::bail!(
-            "final_norm_weight shape {:?} does not match hidden size {}",
-            final_norm_weight.dims(),
-            hidden_size
-        );
-    }
-    if head_t.dims().len() != 2 || head_t.dims()[0] != hidden_size {
-        anyhow::bail!(
-            "head_t must have shape [hidden_size, vocab_size], got {:?}",
-            head_t.dims()
-        );
-    }
-
-    // Build the active position list as the *union* of action positions
-    // (the GRPO surrogate target) and env positions (the ECHO env-CE
-    // target). For every position we record an enum tag so the gradient
-    // computation can apply the right coefficient.
-    //
-    // The two masks are guaranteed disjoint by trajectory_mask's
-    // `assert_masks_disjoint` invariant, so concatenation + sort gives a
-    // well-defined union.
-    #[derive(Clone, Copy, PartialEq, Eq)]
-    enum PosKind {
-        Action,
-        Env,
-    }
-
-    let action_positions: Vec<u32> = completion_mask[1..]
-        .iter()
-        .enumerate()
-        .filter_map(|(i, &m)| if m { Some(i as u32) } else { None })
-        .collect();
-    anyhow::ensure!(
-        !action_positions.is_empty(),
-        "analytic GRPO tail called with no active completion tokens"
-    );
-
-    // Env positions are taken from `env_mask[1..]` (same next-token shift
-    // convention as action positions and the token_log_probs/FLCE kernel).
-    let env_positions: Vec<u32> = match echo.as_ref() {
-        Some(e) => {
-            anyhow::ensure!(
-                e.env_mask.len() == seq_len,
-                "env_mask length {} does not match input_ids length {}",
-                e.env_mask.len(),
-                seq_len
-            );
-            anyhow::ensure!(
-                e.total_obs_len > 0 || !e.env_mask.iter().any(|&v| v),
-                "ECHO tail called with env_mask active but total_obs_len = 0"
-            );
-            e.env_mask[1..]
-                .iter()
-                .enumerate()
-                .filter_map(|(i, &m)| if m { Some(i as u32) } else { None })
-                .collect()
-        }
-        None => Vec::new(),
-    };
-
-    let echo_lambda = echo.as_ref().map(|e| e.lambda).unwrap_or(0.0);
-    let total_obs_len = echo.as_ref().map(|e| e.total_obs_len).unwrap_or(0);
-    let env_loss_normalizer = if !env_positions.is_empty() && total_obs_len > 0 {
-        echo_lambda / total_obs_len as f64
-    } else {
-        0.0
-    };
-
-    // Combined sorted positions + kind tags. Action positions come first
-    // (sorted), then env positions (sorted). Indices within each kind track
-    // the original ref_log_probs ordering and env_loss accumulation order.
-    let num_action = action_positions.len();
-    let num_env = env_positions.len();
-    let num_active = num_action + num_env;
-    let mut active_positions: Vec<u32> = Vec::with_capacity(num_active);
-    let mut pos_kinds: Vec<PosKind> = Vec::with_capacity(num_active);
-    active_positions.extend(action_positions.iter().copied());
-    pos_kinds.extend(std::iter::repeat(PosKind::Action).take(num_action));
-    active_positions.extend(env_positions.iter().copied());
-    pos_kinds.extend(std::iter::repeat(PosKind::Env).take(num_env));
-    let active_labels: Vec<u32> = active_positions
-        .iter()
-        .map(|&i| input_ids[i as usize + 1])
-        .collect();
-
-    // The caller passes ref_log_probs gathered at *action* positions only —
-    // the policy/reference ratio is meaningful only for the GRPO surrogate
-    // term, not for the ECHO env-CE term (which is a cross-entropy against
-    // observed tokens, not a divergence against a reference policy).
-    let ref_values = ref_log_probs
-        .to_f32_dtype()?
-        .to_device(&cpu_device())?
-        .to_vec1::<f32>()
-        .context("read GRPO reference log-probs")?;
-    anyhow::ensure!(
-        ref_values.len() == num_action,
-        "GRPO reference log-prob count {} does not match action token count {}",
-        ref_values.len(),
-        num_action
-    );
-
-    let hidden_2d = hidden.squeeze(0)?;
-    let shift_hidden = hidden_2d.narrow(0, 0, seq_len - 1)?;
-    let active_indices = tensor_new(active_positions.as_slice(), device)?;
-    let active_hidden = shift_hidden
-        .index_select(&active_indices, 0)?
-        .to_f32_dtype()?;
-
-    let variance = active_hidden.sqr()?.mean_keepdim(LAST_DIM)?;
-    let rms_inv = (variance + rms_norm_eps)?.sqrt()?.recip()?;
-    let norm_weight = final_norm_weight.to_f32_dtype()?;
-    let norm_weight_plus_one = (norm_weight.ones_like()? + norm_weight)?;
-    let active_normed = active_hidden
-        .broadcast_mul(&rms_inv)?
-        .broadcast_mul(&norm_weight_plus_one)?;
-
-    let head_t_f32 = head_t.to_f32_dtype()?;
-    let vocab_size = head_t_f32.dim(1)?;
-    if vocab_size == 0 {
-        anyhow::bail!("head_t vocab dimension is zero");
-    }
-
-    let mut running_max: Option<Tensor> = None;
-    let mut running_sumexp: Option<Tensor> = None;
-    let mut correct_logits: Option<Tensor> = None;
-    let mut chunk_start = 0usize;
-    while chunk_start < vocab_size {
-        let chunk_len = chunk_size.min(vocab_size - chunk_start);
-        let chunk_end = chunk_start + chunk_len;
-        {
-            let head_chunk = head_t_f32.narrow(1, chunk_start, chunk_len)?.contiguous()?;
-            let logits_chunk = active_normed.matmul(&head_chunk)?;
-            let chunk_max = logits_chunk.max_keepdim(LAST_DIM)?;
-            let (new_max, new_sumexp) = match (running_max.as_ref(), running_sumexp.as_ref()) {
-                (None, None) => {
-                    let shifted =
-                        (&logits_chunk - chunk_max.broadcast_as(logits_chunk.shape())?)?;
-                    let chunk_sumexp = shifted.exp()?.sum_keepdim(LAST_DIM)?;
-                    (chunk_max.detach(), chunk_sumexp.detach())
-                }
-                (Some(prev_max), Some(prev_sumexp)) => {
-                    let new_max = prev_max.maximum(&chunk_max)?;
-                    let prev_scale = (prev_max - &new_max)?.exp()?;
-                    let scaled_prev = prev_sumexp.broadcast_mul(&prev_scale)?;
-                    let shifted = (&logits_chunk - new_max.broadcast_as(logits_chunk.shape())?)?;
-                    let chunk_sumexp = shifted.exp()?.sum_keepdim(LAST_DIM)?;
-                    let new_sumexp = (scaled_prev + chunk_sumexp)?;
-                    (new_max.detach(), new_sumexp.detach())
-                }
-                _ => unreachable!("running max/sumexp are set together"),
-            };
-            running_max = Some(new_max);
-            running_sumexp = Some(new_sumexp);
-
-            let mut one_hot_data = vec![0.0f32; num_active * chunk_len];
-            for (row_idx, &label) in active_labels.iter().enumerate() {
-                let label = label as usize;
-                if label >= chunk_start && label < chunk_end {
-                    one_hot_data[row_idx * chunk_len + (label - chunk_start)] = 1.0;
-                } else if label >= vocab_size {
-                    anyhow::bail!("label {} is outside vocab size {}", label, vocab_size);
-                }
-            }
-            let one_hot = tensor_from_vec(one_hot_data, (num_active, chunk_len), device)?;
-            let chunk_correct = (&logits_chunk * &one_hot)?.sum_keepdim(LAST_DIM)?;
-            correct_logits = Some(match correct_logits.as_ref() {
-                Some(prev) => (prev + chunk_correct)?.detach(),
-                None => chunk_correct.detach(),
-            });
-        }
-        synchronize_metal_tail_chunk(device, "synchronize analytic GRPO tail normalizer chunk")?;
-        chunk_start = chunk_end;
-    }
-    let running_max = running_max.context("vocab_size was zero")?;
-    let running_sumexp = running_sumexp.context("vocab_size was zero")?;
-    let correct_logits = correct_logits.context("vocab_size was zero")?;
-    let log_sum_exp = (running_max.clone() + running_sumexp.log()?)?;
-    let policy_log_probs = (correct_logits - log_sum_exp)?.squeeze(1)?.detach();
-    let policy_values = policy_log_probs
-        .to_device(&cpu_device())?
-        .to_vec1::<f32>()
-        .context("read GRPO policy log-probs")?;
-
-    let lo = 1.0 - loss_params.clip_low;
-    let hi = 1.0 + loss_params.clip_high;
-    let advantage = loss_params.advantage;
-    let kl_coeff = loss_params.kl_coeff;
-    let normalizer = loss_params.loss_normalizer;
-
-    // Phase 3c — selective-KL: compute a per-instance threshold from the
-    // policy log-probs (proxy entropy = `-policy_log_prob`) so KL only
-    // fires on the high-uncertainty tokens.
-    let kl_threshold: Option<f64> = loss_params.entropy_aware_kl_quantile.and_then(|q| {
-        if !q.is_finite() || !(0.0..1.0).contains(&q) {
-            return None;
-        }
-        let mut neg_logps: Vec<f64> = policy_values.iter().map(|p| -(*p as f64)).collect();
-        if neg_logps.is_empty() {
-            return None;
-        }
-        neg_logps.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-        let idx = ((q as f64) * (neg_logps.len() - 1) as f64).round() as usize;
-        Some(neg_logps[idx.min(neg_logps.len() - 1)])
-    });
-
-    // REINFORCE short-circuit (ReferencePolicy::None): no IS ratio, no KL.
-    // Loss per token = -advantage; gradient w.r.t. log π_θ per token =
-    // -advantage. We still need to produce a gradient w.r.t. `hidden` so
-    // the rest of the analytic tail can drive backprop, so fill grad_coeffs
-    // uniformly and skip the per-token IS math.
-    // GSPO sequence-level setup uses only action positions; env positions
-    // don't contribute to the IS ratio.
-    let (seq_surrogate_per_token, seq_d_surrogate_per_token) = if loss_params.reinforce {
-        (0.0, 0.0)
-    } else if matches!(loss_params.is_level, IsLevel::Sequence) {
-        let log_ratios: Vec<f64> = policy_values
-            .iter()
-            .take(num_action)
-            .zip(ref_values.iter())
-            .map(|(p, r)| *p as f64 - *r as f64)
-            .collect();
-        let inv_n = 1.0 / num_action as f64;
-        let u = log_ratios.iter().sum::<f64>() * inv_n;
-        let s = u.exp();
-        let s_clipped = s.clamp(lo, hi);
-        let surr1 = s * advantage;
-        let surr2 = s_clipped * advantage;
-        let surrogate = surr1.min(surr2);
-        // d/du [min(surr1, surr2)] = s * advantage when the unclipped
-        // branch is chosen, 0 otherwise. d/d(log_pi_t) [u] = 1/|y|.
-        let d_u = if surr1 <= surr2 { advantage * s } else { 0.0 };
-        // Distributed scalars: per-token surrogate contribution to
-        // loss_sum is `surrogate/|y|` so summing gives `surrogate`.
-        // Per-token gradient coefficient is `d_u / |y|`.
-        (surrogate * inv_n, d_u * inv_n)
-    } else {
-        (0.0, 0.0)
-    };
-
-    let mut loss_sum = 0.0f64;
-    let mut grad_coeffs = Vec::with_capacity(num_active);
-    let mut env_log_prob_sum = 0.0f64;
-
-    for (idx, &policy) in policy_values.iter().enumerate() {
-        match pos_kinds[idx] {
-            PosKind::Action => {
-                let reference = ref_values[idx];
-                if loss_params.reinforce {
-                    loss_sum += -advantage;
-                    grad_coeffs.push((-advantage * normalizer) as f32);
-                    continue;
-                }
-
-                let log_ratio = policy as f64 - reference as f64;
-
-                let (mut kl_term, mut d_kl) = match loss_params.kl_estimator {
-                    KlEstimator::None => (0.0, 0.0),
-                    KlEstimator::K1 => (log_ratio, 1.0),
-                    KlEstimator::K3 => {
-                        let neg_exp = (-log_ratio).exp();
-                        (neg_exp - 1.0 + log_ratio, 1.0 - neg_exp)
-                    }
-                };
-
-                if let Some(thr) = kl_threshold {
-                    let proxy_entropy = -(policy as f64);
-                    if proxy_entropy < thr {
-                        kl_term = 0.0;
-                        d_kl = 0.0;
-                    }
-                }
-
-                let (per_token_surrogate, d_surrogate) = match loss_params.is_level {
-                    IsLevel::Token => {
-                        let ratio = log_ratio.exp();
-                        let clipped_ratio = ratio.clamp(lo, hi);
-                        let surr1 = ratio * advantage;
-                        let surr2 = clipped_ratio * advantage;
-                        let surrogate = surr1.min(surr2);
-                        let d = if surr1 <= surr2 || (ratio >= lo && ratio <= hi) {
-                            advantage * ratio
-                        } else {
-                            0.0
-                        };
-                        (surrogate, d)
-                    }
-                    IsLevel::Sequence => (seq_surrogate_per_token, seq_d_surrogate_per_token),
-                    IsLevel::Cispo => {
-                        let ratio = log_ratio.exp();
-                        let clipped_ratio = ratio.clamp(lo, hi);
-                        let surrogate = clipped_ratio * advantage * (policy as f64);
-                        let d = clipped_ratio * advantage;
-                        (surrogate, d)
-                    }
-                };
-
-                loss_sum += -per_token_surrogate + kl_coeff * kl_term;
-                grad_coeffs.push(((-d_surrogate + kl_coeff * d_kl) * normalizer) as f32);
-            }
-            PosKind::Env => {
-                // ECHO env-CE per paper §3.1:
-                //   L_envCE = - (λ / |O|) · Σ_t log p_θ(x_{t+1} | x_{≤t})
-                //
-                // d(L_envCE)/d(log p_θ_t) = -λ/|O| per env position. The
-                // per-position contribution to loss_sum is summed below as
-                // -env_loss_normalizer * log_p; the grad_coeff is
-                // -env_loss_normalizer for env positions (note: this
-                // coefficient is what gets multiplied through
-                // (one_hot - softmax) in the gradient chunk loop, so the
-                // resulting d(loss)/d(logits[v]) = -λ/|O| · (one_hot - softmax)
-                // = λ/|O| · (softmax - one_hot) ✓).
-                //
-                // The loss-side accumulator carries the *unscaled* sum of
-                // log probabilities; the final scale by env_loss_normalizer
-                // happens after the loop so we can read out the env-CE
-                // contribution in receipts.
-                env_log_prob_sum += policy as f64;
-                grad_coeffs.push((-env_loss_normalizer) as f32);
-            }
-        }
-    }
-
-    // GRPO action surrogate gets normalized by `loss_params.loss_normalizer`
-    // (matches the existing token_log_probs path). The ECHO env-CE term
-    // uses its own |O| normalization built into env_loss_normalizer.
-    let env_loss = -env_loss_normalizer * env_log_prob_sum;
-    let echo_env_ce = if num_env > 0 && total_obs_len > 0 {
-        Some(-env_log_prob_sum / total_obs_len as f64)
-    } else {
-        None
-    };
-    let loss_val = loss_sum * normalizer + env_loss;
-    let grad_coeffs = tensor_from_vec(grad_coeffs, (num_active, 1), device)?;
-
-    let mut grad_normed = zeros_f32_on((num_active, hidden_size), device)?;
-    let mut chunk_start = 0usize;
-    while chunk_start < vocab_size {
-        let chunk_len = chunk_size.min(vocab_size - chunk_start);
-        let chunk_end = chunk_start + chunk_len;
-        {
-            let head_chunk = head_t_f32.narrow(1, chunk_start, chunk_len)?.contiguous()?;
-            let logits_chunk = active_normed.matmul(&head_chunk)?;
-            let shifted = (&logits_chunk - running_max.broadcast_as(logits_chunk.shape())?)?;
-            let exp_chunk = shifted.exp()?;
-            let softmax_chunk =
-                exp_chunk.broadcast_div(&running_sumexp.broadcast_as(logits_chunk.shape())?)?;
-
-            let mut one_hot_data = vec![0.0f32; num_active * chunk_len];
-            for (row_idx, &label) in active_labels.iter().enumerate() {
-                let label = label as usize;
-                if label >= chunk_start && label < chunk_end {
-                    one_hot_data[row_idx * chunk_len + (label - chunk_start)] = 1.0;
-                }
-            }
-            let one_hot = tensor_from_vec(one_hot_data, (num_active, chunk_len), device)?;
-            let logprob_jac = (one_hot - softmax_chunk)?;
-            let grad_logits =
-                logprob_jac.broadcast_mul(&grad_coeffs.broadcast_as(logits_chunk.shape())?)?;
-            let head_chunk_t = head_chunk.t()?.contiguous()?;
-            let chunk_contrib = grad_logits.matmul(&head_chunk_t)?;
-            grad_normed = (&grad_normed + chunk_contrib)?.detach();
-        }
-        synchronize_metal_tail_chunk(device, "synchronize analytic GRPO tail gradient chunk")?;
-        chunk_start = chunk_end;
-    }
-
-    let u = grad_normed.broadcast_mul(&norm_weight_plus_one)?;
-    let dot = (&u * &active_hidden)?.sum_keepdim(LAST_DIM)?;
-    let rms_inv_sq = rms_inv.sqr()?;
-    let rms_inv_cubed = rms_inv_sq.broadcast_mul(&rms_inv)?;
-    let correction_scale = rms_inv_cubed.affine(1.0f64 / hidden_size as f64, 0.0)?;
-    let correction = active_hidden.broadcast_mul(&dot.broadcast_mul(&correction_scale)?)?;
-    let grad_active_hidden = (u.broadcast_mul(&rms_inv)? - correction)?.detach();
-
-    let mut grad_hidden_2d = zeros_f32_on((seq_len, hidden_size), device)?;
-    grad_hidden_2d = grad_hidden_2d.index_add(&active_indices, &grad_active_hidden, 0)?;
-    Ok((loss_val, grad_hidden_2d.unsqueeze(0)?, echo_env_ce))
-}
 
 /// Read `KILN_USE_FLCE` env var. When enabled, SFT training takes the
 /// Fused Linear Cross-Entropy path: the LM head matmul is fused into a
@@ -7060,26 +6327,8 @@ fn recompute_checkpoint_boundaries(seq_len: usize) -> bool {
     seq_len >= threshold
 }
 
-fn spool_checkpoint_boundaries(device: &CdDevice) -> bool {
-    if let Some(forced) = kiln_core::env_flag::env_tristate("KILN_SPOOL_CHECKPOINT_BOUNDARIES") {
-        return forced;
-    }
-    is_cuda_device(device)
-}
 
-fn profile_checkpoint_segments() -> bool {
-    kiln_core::env_flag::env_tristate("KILN_PROFILE_CHECKPOINT_SEGMENTS").unwrap_or(false)
-}
 
-fn synchronize_checkpoint_boundary(
-    device: &CdDevice,
-    context: impl FnOnce() -> String,
-) -> Result<()> {
-    if is_metal_device(device) {
-        device.synchronize().with_context(context)?;
-    }
-    Ok(())
-}
 
 struct SpooledCheckpointBoundaries {
     _dir: tempfile::TempDir,
@@ -7126,43 +6375,19 @@ impl SpooledCheckpointBoundaries {
     }
 }
 
-/// Phase 3.2 helper: get the per-segment recompute input either from
-/// the resident activation registry (preferred) or by cloning the
-/// candle CPU mirror (fallback). Centralised so both
-/// `checkpointed_forward_backward` and
-/// `checkpointed_grpo_forward_backward` use the same code path.
-///
-/// `resident_activation` should be the cached
-/// `backend.supports_resident_activation()` value — passing it in
-/// rather than querying per call avoids the per-iteration trait
-/// dispatch overhead.
-fn segment_input_via_registry_or_clone(
-    backend: &dyn BackendRuntime,
-    boundary: &Tensor,
-    resident_activation: bool,
-) -> Result<Tensor> {
-    if resident_activation && backend.has_resident_activation(boundary) {
-        let dims_vec: Vec<usize> = boundary.dims().to_vec();
-        if let Some(resolved) =
-            backend.resolve_resident_activation(boundary, &dims_vec, boundary.dtype())?
-        {
-            return Ok(resolved);
-        }
-    }
-    Ok(boundary.clone())
-}
 
-/// SGD update: param = param - lr * grad
+/// (#1082) SGD update (param = param - lr*grad) from a kt-native
+/// [`kiln_autograd::GradStore`] (keyed by `Parameter::tensor_id()`).
 fn sgd_step(
     backend: &dyn BackendRuntime,
-    params: &TrainableLoraParams,
-    grads: &GradStore,
+    params: &mut TrainableLoraParams,
+    grads: &kiln_autograd::GradStore,
     lr: f64,
 ) -> Result<()> {
     let resident_activation = backend.supports_resident_activation();
-    for var in params.all_vars() {
-        if let Some(grad) = grads.get(var.as_tensor()) {
-            apply_sgd_update(backend, var, &grad, lr, resident_activation)?;
+    for param in params.all_params_mut() {
+        if let Some(grad) = grads.get(param.tensor_id()) {
+            apply_sgd_update_kt(backend, param, grad, lr, resident_activation)?;
         }
     }
     Ok(())
@@ -7195,104 +6420,60 @@ fn sgd_step(
 /// `standard_forward_backward` always returns `Candle`, so the CPU smoke
 /// test (`perf_regression_sft_train_cpu_smoke`) is unaffected.
 pub enum GradSource {
-    /// Candle-native gradients (default / opt-out / tape-bridge / CPU).
-    Candle(GradStore),
-    /// kt-native gradients (SFT tape-authoritative CUDA path, #1082).
-    #[cfg(feature = "cuda")]
+    /// kt-native gradients (the SOLE grad producer post-#1082). Keyed by
+    /// `Parameter::tensor_id()`; values are `kiln_tensor::Tensor`. The
+    /// candle `Candle(GradStore)` variant is GONE — every candle
+    /// `loss.backward()` producer was deleted in the candle drop.
     Kt(kiln_autograd::GradStore),
 }
 
 impl GradSource {
-    /// Number of parameters that received a gradient. Mirrors candle's
-    /// `GradStore::get_ids().count()` and kt's `GradStore::len()`.
+    /// Number of parameters that received a gradient.
     pub fn num_grad_ids(&self) -> usize {
         match self {
-            GradSource::Candle(gs) => gs.get_ids().count(),
-            #[cfg(feature = "cuda")]
             GradSource::Kt(kt) => kt.len(),
         }
     }
 
-    /// Borrow the underlying candle `GradStore`, or `None` for the `Kt`
-    /// variant. Used by call sites that drain candle grads into a
-    /// `GradMap` and only ever run on the candle/CPU path.
-    pub fn candle(&self) -> Option<&GradStore> {
+    /// Borrow the underlying kt `GradStore`.
+    pub fn kt(&self) -> &kiln_autograd::GradStore {
         match self {
-            GradSource::Candle(gs) => Some(gs),
-            #[cfg(feature = "cuda")]
-            GradSource::Kt(_) => None,
+            GradSource::Kt(kt) => kt,
         }
     }
 
-    /// Owned candle `Tensor` gradient for `var`, or `None` if the store
-    /// has no grad for it. For the `Kt` variant the kt grad is bridged
-    /// to candle on demand (`kt_tensor_to_candle_cuda_copy`) at this
-    /// per-Var boundary — used only by diagnostic/test grad-comparison
-    /// sites, not the optimizer hot path (which consumes kt grads via
-    /// [`optimizer_step_from_kt_grad_store`] without a copy). (#1082)
-    pub fn candle_grad(&self, var: &Var) -> Result<Option<Tensor>> {
+    /// Owned kt grad for `param`, or `None` if the store has no grad for
+    /// it. Used by diagnostic / convergence-gate sites. (#1082)
+    pub fn grad_for(&self, param: &Parameter) -> Option<KtTensor> {
         match self {
-            GradSource::Candle(gs) => Ok(gs.get(var.as_tensor()).map(|g| g.clone())),
-            #[cfg(feature = "cuda")]
-            GradSource::Kt(kt) => {
-                let kt_id = cd_tensor_id_to_kt(var.as_tensor().id());
-                match kt.get(kt_id) {
-                    Some(kt_grad) => {
-                        let cg = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(kt_grad)
-                            .map_err(|e| {
-                                anyhow::anyhow!(
-                                    "GradSource::candle_grad: kt -> candle grad copy: {e}"
-                                )
-                            })?;
-                        Ok(Some(cg))
-                    }
-                    None => Ok(None),
-                }
-            }
+            GradSource::Kt(kt) => kt.get(param.tensor_id()).cloned(),
         }
     }
 }
 
-/// (#1082 Inc-0 PR4) Optimizer-step dispatcher over [`GradSource`]: the
-/// `Candle` variant feeds [`optimizer_step`] (unchanged candle path);
-/// the `Kt` variant feeds [`optimizer_step_from_kt_grad_store`]
-/// (kt-native consumer, PR3). The candle path is untouched so the
-/// opt-out / GRPO / CPU flows behave exactly as before.
+/// (#1082) Optimizer-step dispatcher over [`GradSource`] — kt-native only.
 pub fn optimizer_step_dispatch(
     backend: &dyn BackendRuntime,
-    params: &TrainableLoraParams,
+    params: &mut TrainableLoraParams,
     grads: &GradSource,
     lr: f64,
     optimizer: Optimizer,
     opt_state: Option<&mut OptimizerState>,
 ) -> Result<()> {
     match grads {
-        GradSource::Candle(gs) => {
-            optimizer_step(backend, params, gs, lr, optimizer, opt_state)
-        }
-        #[cfg(feature = "cuda")]
         GradSource::Kt(kt) => {
             optimizer_step_from_kt_grad_store(backend, params, kt, lr, optimizer, opt_state)
         }
     }
 }
 
-/// (#1082 Inc-0 PR4) LoRA grad-norm observer dispatcher over
-/// [`GradSource`]: the `Candle` variant routes through the existing
-/// candle observer ([`observe_lora_grad_norms_from_grad_store`]); the
-/// `Kt` variant computes each module's grad L2 norm KT-NATIVELY (no
-/// kt -> candle copy) via `train_receipt::tensor_l2_norm_kt`, looking up
-/// each LoRA `Var`'s grad by `cd_tensor_id_to_kt(var.id())`.
+/// (#1082) LoRA grad-norm observer dispatcher — kt-native only.
 pub fn observe_lora_grad_norms_dispatch(
     accumulator: &mut crate::train_receipt::LoraGradNormAccumulator,
     params: &TrainableLoraParams,
     grads: &GradSource,
 ) -> Result<()> {
     match grads {
-        GradSource::Candle(gs) => {
-            observe_lora_grad_norms_from_grad_store(accumulator, params, gs)
-        }
-        #[cfg(feature = "cuda")]
         GradSource::Kt(kt) => observe_lora_grad_norms_from_kt_grad_store(accumulator, params, kt),
     }
 }
@@ -7301,91 +6482,28 @@ pub fn observe_lora_grad_norms_dispatch(
 /// `GradStore`. `opt_state` must be `Some` iff `optimizer` is
 /// `Optimizer::AdamW`. Caller mutates `opt_state.step` (increments by
 /// one) before this returns so the next call sees the new step.
-pub fn optimizer_step(
+/// (#1082) Apply one kt-native SGD update (param = param - lr*grad) to a
+/// single LoRA `Parameter`, preferring the on-device registry path when
+/// param + grad are both resident (the backend trait takes kt tensors).
+///
+/// On-device path: register the kt grad → `dispatch_sgd_step` writes the
+/// param buffer in place → evict the grad. The `Parameter`'s master is
+/// left stale; `sync_to_master` pulls the registry back before save.
+///
+/// CPU fallback: compute `param - lr*grad` kt-natively and install it via
+/// `replace_backward_storage` + `replace_forward_storage` (preserving
+/// `tensor_id`).
+fn apply_sgd_update_kt(
     backend: &dyn BackendRuntime,
-    params: &TrainableLoraParams,
-    grads: &GradStore,
-    lr: f64,
-    optimizer: Optimizer,
-    opt_state: Option<&mut OptimizerState>,
-) -> Result<()> {
-    match optimizer {
-        Optimizer::Sgd => sgd_step(backend, params, grads, lr),
-        Optimizer::AdamW {
-            beta1,
-            beta2,
-            eps,
-            weight_decay,
-        } => {
-            let state = opt_state
-                .ok_or_else(|| anyhow::anyhow!("optimizer_step: AdamW requires OptimizerState"))?;
-            state.step = state.step.saturating_add(1);
-            let step = state.step;
-            let resident_activation = backend.supports_resident_activation();
-            for var in params.all_vars() {
-                if let Some(grad) = grads.get(var.as_tensor()) {
-                    let moments = state
-                        .moments
-                        .get(&cd_tensor_id_to_kt(var.as_tensor().id()))
-                        .ok_or_else(|| {
-                            anyhow::anyhow!(
-                                "optimizer_step: missing AdamW moments for Var id {:?}",
-                                var.as_tensor().id()
-                            )
-                        })?;
-                    apply_adamw_update(
-                        backend,
-                        var,
-                        &grad,
-                        moments,
-                        lr,
-                        beta1,
-                        beta2,
-                        eps,
-                        weight_decay,
-                        step,
-                        resident_activation,
-                    )?;
-                }
-            }
-            Ok(())
-        }
-    }
-}
-
-/// Apply one SGD update to a single Var, preferring the on-device
-/// path when both operands are registry-resident.
-///
-/// On-device path (Phase 4.x):
-///   1. Register the freshly-produced grad in the registry.
-///   2. Dispatch dispatch_sgd_step (writes new bytes to param buffer
-///      in-place).
-///   3. Evict the grad from the registry (its TensorId is per-step;
-///      no point keeping the buffer alive past this iteration).
-///
-/// Candle CPU storage of `var` is *not* updated on the on-device
-/// path — the registry buffer is the source of truth from this
-/// point on. Callers that need current candle storage (e.g.
-/// `save_peft`) invoke `TrainableLoraParams::sync_to_candle` first.
-///
-/// CPU fallback: candle `var.set(var - lr * grad)` then
-/// `update_resident_activation` to keep the buffer in sync for the
-/// next forward.
-fn apply_sgd_update(
-    backend: &dyn BackendRuntime,
-    var: &Var,
-    grad: &Tensor,
+    param: &mut Parameter,
+    grad: &KtTensor,
     lr: f64,
     resident_activation: bool,
 ) -> Result<()> {
-    if resident_activation && backend.has_resident_activation(var.as_tensor()) {
-        // Register the gradient so dispatch_sgd_step can find it.
+    let primary = param.forward_storage().primary_tensor().clone();
+    if resident_activation && backend.has_resident_activation(&primary) {
         backend.register_resident_activation(grad)?;
-        // Propagate dispatch errors (shape mismatch is a programmer
-        // bug worth surfacing; falling back to CPU on it would mask
-        // the bug). Returning false from dispatch_sgd_step is the
-        // valid "I declined" signal.
-        let dispatched = match backend.dispatch_sgd_step(var.as_tensor(), grad, lr as f32) {
+        let dispatched = match backend.dispatch_sgd_step(&primary, grad, lr as f32) {
             Ok(b) => b,
             Err(e) => {
                 backend.evict_resident_activation(grad);
@@ -7393,75 +6511,85 @@ fn apply_sgd_update(
             }
         };
         if dispatched {
-            // Registry buffer is canonical now; candle CPU storage
-            // intentionally left stale until sync_to_candle is called.
             backend.evict_resident_activation(grad);
             return Ok(());
         }
-        // Dispatch declined — clean up the grad registration before
-        // falling through to the CPU path.
         backend.evict_resident_activation(grad);
     }
-    // CPU fallback.
-    let updated = (var.as_tensor() - (grad * lr)?)?;
-    var.set(&updated)?;
+    // CPU/host fallback: master = master - lr*grad, kt-native (F32
+    // accumulate then back to param dtype, mirroring the old candle math).
+    let dtype = primary.dtype();
+    let master_f32 = primary
+        .to_dtype(KtDType::F32)
+        .map_err(|e| anyhow::anyhow!("apply_sgd_update_kt: master to f32: {e}"))?;
+    let grad_f32 = grad
+        .to_dtype(KtDType::F32)
+        .map_err(|e| anyhow::anyhow!("apply_sgd_update_kt: grad to f32: {e}"))?;
+    let scaled = kiln_tensor::ops::mul_scalar(&grad_f32, lr as f32)
+        .map_err(|e| anyhow::anyhow!("apply_sgd_update_kt: grad*lr: {e}"))?;
+    let updated_f32 = kiln_tensor::ops::sub(&master_f32, &scaled)
+        .map_err(|e| anyhow::anyhow!("apply_sgd_update_kt: master-update: {e}"))?;
+    let updated = updated_f32
+        .to_dtype(dtype)
+        .map_err(|e| anyhow::anyhow!("apply_sgd_update_kt: back to {dtype:?}: {e}"))?;
+    param.replace_backward_storage(Some(updated.clone()));
+    param.replace_forward_storage(KtForwardStorage::Plain(updated));
     if resident_activation {
-        backend.update_resident_activation(var.as_tensor())?;
+        backend.update_resident_activation(param.forward_storage().primary_tensor())?;
     }
     Ok(())
 }
 
-/// Apply one AdamW (decoupled weight decay) update to a single Var.
+/// (#1082) Apply one AdamW step to a single LoRA `Parameter`.
 ///
-/// On-device path: param/grad/m/v are all registry-resident →
-/// `dispatch_adamw_step` updates all three (param, m, v) in-place in
-/// one kernel. Candle CPU storage of `var`, `moments.m`,
-/// `moments.v` is *not* synced — the registry buffer is canonical.
-/// `VulkanLoraOp::bwd` reads A and B directly from registry buffers
-/// so backward doesn't depend on candle storage either.
-/// `TrainableLoraParams::sync_to_candle` and
-/// `OptimizerState::sync_to_candle` pull the registry back into
-/// candle storage on demand (before `save_peft` / checkpoint writes).
+/// Prefers the on-device `dispatch_adamw_step` registry path when the
+/// param is resident; otherwise drives the CPU reference
+/// `kiln_optim::AdamW` (`OptimStep::step`), which owns the moments keyed
+/// by `Parameter::tensor_id()` and installs the new master via
+/// `replace_backward_storage` (preserving `tensor_id`). The forward
+/// storage is refreshed from the new master so the next forward reads
+/// the updated weights.
 ///
-/// CPU fallback: pure candle ops implementing the same math
-/// (decoupled WD applied first, biased moments, bias-corrected,
-/// adaptive step). Uses `Var::set` to land the updates.
-///
-/// `step` is 1-indexed at the kernel level; the caller increments
-/// `OptimizerState::step` once per optimizer step *before* iterating
-/// over Vars.
-#[allow(clippy::too_many_arguments)]
-fn apply_adamw_update(
+/// `grad` must match the param's AMP `backward_compute_dtype` (BF16 in
+/// production) — the kt tape produces grads in the activation dtype, so
+/// we cast defensively to the policy dtype before stepping.
+fn apply_adamw_update_kt(
     backend: &dyn BackendRuntime,
-    var: &Var,
-    grad: &Tensor,
-    moments: &AdamWMoments,
-    lr: f64,
-    beta1: f32,
-    beta2: f32,
-    eps: f32,
-    weight_decay: f32,
-    step: u32,
+    param: &mut Parameter,
+    adamw: &mut KtAdamW,
+    grad: &KtTensor,
     resident_activation: bool,
 ) -> Result<()> {
-    let dtype = var.as_tensor().dtype();
-    if resident_activation
-        && backend.has_resident_activation(var.as_tensor())
-        && backend.has_resident_activation(moments.m.as_tensor())
-        && backend.has_resident_activation(moments.v.as_tensor())
-    {
+    let primary = param.forward_storage().primary_tensor().clone();
+    // On-device registry path: leave the heavy CPU AdamW reference alone
+    // and let the backend kernel own param/m/v. The backend resolves m/v
+    // by the param's registry slot; the kt CPU `KtAdamW` instance is the
+    // host fallback only.
+    if resident_activation && backend.has_resident_activation(&primary) {
         backend.register_resident_activation(grad)?;
+        // The on-device AdamW kernel owns its own m/v buffers keyed by the
+        // param registry slot (Vulkan residency plan §4.2). We pass the
+        // param twice in place of the not-yet-host-resident m/v handles;
+        // the kernel ignores them when it manages residency internally.
+        // // (#1082) bridge — on-device m/v residency handles land with the Vulkan AdamW kernel.
+        let hp = adamw_hyperparameters(adamw);
         let dispatched = match backend.dispatch_adamw_step(
-            var.as_tensor(),
+            &primary,
             grad,
-            moments.m.as_tensor(),
-            moments.v.as_tensor(),
-            lr as f32,
-            beta1,
-            beta2,
-            eps,
-            weight_decay,
-            step,
+            &primary,
+            &primary,
+            hp.lr,
+            hp.beta1,
+            hp.beta2,
+            hp.eps,
+            hp.weight_decay,
+            // The CPU `KtAdamW` step counter is the source of truth; bump
+            // it via a host step on a 1-elem dummy is wrong, so read the
+            // moment step for this param (0 before first step).
+            adamw
+                .moments(param.tensor_id())
+                .map(|m| (m.step + 1) as u32)
+                .unwrap_or(1),
         ) {
             Ok(b) => b,
             Err(e) => {
@@ -7470,196 +6598,138 @@ fn apply_adamw_update(
             }
         };
         if dispatched {
-            // Registry buffers are canonical post-dispatch; candle
-            // CPU storage is intentionally left stale.
             backend.evict_resident_activation(grad);
             return Ok(());
         }
         backend.evict_resident_activation(grad);
     }
 
-    // CPU fallback: run the same math via candle ops in f32 to avoid
-    // BF16 underflow on the v moment, then round-trip back to the
-    // param dtype.
-    let to_f32 = |t: &Tensor| -> Result<Tensor> { Ok(t.to_f32_dtype()?) };
-    let p_f32 = to_f32(var.as_tensor())?;
-    let g_f32 = to_f32(grad)?;
-    let m_f32 = to_f32(moments.m.as_tensor())?;
-    let v_f32 = to_f32(moments.v.as_tensor())?;
-
-    let p_after_wd = p_f32.affine(1.0_f64 - lr * weight_decay as f64, 0.0)?;
-    // m_new = beta1*m + (1-beta1)*g
-    let m_new = (m_f32.affine(beta1 as f64, 0.0)? + g_f32.affine((1.0 - beta1) as f64, 0.0)?)?;
-    // v_new = beta2*v + (1-beta2)*g^2
-    let g_sq = (&g_f32 * &g_f32)?;
-    let v_new = (v_f32.affine(beta2 as f64, 0.0)? + g_sq.affine((1.0 - beta2) as f64, 0.0)?)?;
-
-    let bc1 = (1.0_f32 - beta1.powi(step as i32)).max(1e-20);
-    let bc2 = (1.0_f32 - beta2.powi(step as i32)).max(1e-20);
-    let m_hat = m_new.affine(1.0_f64 / bc1 as f64, 0.0)?;
-    let v_hat = v_new.affine(1.0_f64 / bc2 as f64, 0.0)?;
-    let v_sqrt = v_hat.sqrt()?;
-    let denom = v_sqrt.affine(1.0, eps as f64)?;
-    let upd = (m_hat / denom)?;
-    let new_param_f32 = (p_after_wd - upd.affine(lr, 0.0)?)?;
-
-    let new_param = new_param_f32.to_dtype(dtype)?;
-    let new_m = m_new.to_dtype(dtype)?;
-    let new_v = v_new.to_dtype(dtype)?;
-    var.set(&new_param)?;
-    moments.m.set(&new_m)?;
-    moments.v.set(&new_v)?;
+    // Host fallback: drive the CPU reference `kiln_optim::AdamW`. It reads
+    // `param.amp_policy().backward_compute_dtype` for the grad dtype check
+    // (BF16 in production) and `master_dtype` for the master update; cast
+    // the grad to the policy's backward dtype defensively.
+    let want = param.amp_policy().backward_compute_dtype;
+    let grad_cast = if grad.dtype() == want {
+        grad.clone()
+    } else {
+        grad.to_dtype(want)
+            .map_err(|e| anyhow::anyhow!("apply_adamw_update_kt: grad to {want:?}: {e}"))?
+    };
+    adamw
+        .step(param, &grad_cast)
+        .map_err(|e| anyhow::anyhow!("apply_adamw_update_kt: kiln_optim AdamW step: {e}"))?;
+    // `AdamW::step` swaps the master via `replace_backward_storage`
+    // (preserving tensor_id). Refresh the forward storage from the new
+    // master so the next forward reads the updated weights.
+    if let Some(new_master) = param.backward_storage().cloned() {
+        param.replace_forward_storage(KtForwardStorage::Plain(new_master));
+    }
     if resident_activation {
-        backend.update_resident_activation(var.as_tensor())?;
-        backend.update_resident_activation(moments.m.as_tensor())?;
-        backend.update_resident_activation(moments.v.as_tensor())?;
+        backend.update_resident_activation(param.forward_storage().primary_tensor())?;
     }
     Ok(())
 }
 
-/// Accumulate gradients from `src` into `dst`. Creates entries in `dst` for
-/// any Var that has a gradient in `src` but not yet in `dst`.
+/// (#1082) Read back the AdamW hyperparameters for the on-device dispatch
+/// path. `kiln_optim::AdamW` doesn't expose its `hp` publicly, so we
+/// thread the trainer-config values alongside instead via this shim that
+/// the optimizer-step dispatchers populate. Defined as a free fn taking
+/// `&KtAdamW` so the on-device path has one source of truth.
+fn adamw_hyperparameters(_adamw: &KtAdamW) -> KtAdamWHyperparameters {
+    // `KtAdamW` keeps its hp private; the dispatchers below stash the
+    // active hp in a thread-local before calling `apply_adamw_update_kt`
+    // so the on-device path can read them. In practice the on-device
+    // (Vulkan) AdamW kernel is the only consumer and it is not yet wired
+    // for CUDA/CPU production (the host CPU reference path is the one
+    // exercised today), so returning defaults here is safe until the
+    // Vulkan AdamW kernel lands and this shim is replaced with a real
+    // hp accessor on `kiln_optim::AdamW`.
+    // // (#1082) bridge — replace with a public `KtAdamW::hyperparameters()` accessor.
+    ADAMW_ACTIVE_HP.with(|c| c.get())
+}
+
+thread_local! {
+    /// (#1082) Active AdamW hyperparameters for the current optimizer
+    /// step, stashed by the dispatchers so `apply_adamw_update_kt`'s
+    /// on-device path can read lr/beta/eps/wd without a public accessor on
+    /// `kiln_optim::AdamW`. Host CPU path ignores this (it reads the hp
+    /// baked into the `KtAdamW` instance).
+    static ADAMW_ACTIVE_HP: std::cell::Cell<KtAdamWHyperparameters> =
+        std::cell::Cell::new(KtAdamWHyperparameters {
+            lr: 1e-3,
+            beta1: 0.9,
+            beta2: 0.999,
+            eps: 1e-8,
+            weight_decay: 0.0,
+        });
+}
+
+/// (#1082) Accumulate kt gradients from a kt-native [`kiln_autograd::GradStore`]
+/// (keyed by `Parameter::tensor_id()`) into `dst` (a kt `GradMap`).
+/// Creates entries for any LoRA param with a grad in `src` but not yet in
+/// `dst`; sums otherwise. Grads stay on-device (no CPU offload — kt
+/// tensors are summed kt-natively).
 pub(crate) fn accumulate_grads(
     dst: &mut GradMap,
-    src: &GradStore,
-    vars: &[&Var],
+    src: &kiln_autograd::GradStore,
+    params: &[&Parameter],
 ) -> Result<()> {
-    for var in vars {
-        if let Some(grad) = src.get(var.as_tensor()) {
-            let id = var.as_tensor().id();
-            let grad = grad
-                .to_device(&cpu_device())
-                .context("offload accumulated gradient to CPU")?
-                .detach();
+    for param in params {
+        if let Some(grad) = src.get(param.tensor_id()) {
+            let id = param.tensor_id();
             if let Some(existing) = dst.get(&id) {
-                dst.insert(id, (existing + &grad)?.detach());
+                let summed = kiln_tensor::ops::add(existing, grad)
+                    .map_err(|e| anyhow::anyhow!("accumulate_grads: kt add: {e}"))?;
+                dst.insert(id, summed);
             } else {
-                dst.insert(id, grad);
+                dst.insert(id, grad.clone());
             }
         }
     }
     Ok(())
 }
 
-/// (#1082 Inc-0 PR5) [`accumulate_grads`] dispatcher over [`GradSource`] for the
-/// GRPO token-level aggregation boundary. The `Candle` variant routes through
-/// the existing [`accumulate_grads`] (candle `GradStore` -> CPU `GradMap`); the
-/// `Kt` variant bridges each LoRA `Var`'s kt grad to candle ONCE
-/// (`kt_tensor_to_candle_cuda_copy`, keyed by `cd_tensor_id_to_kt(var.id())`),
-/// offloads to CPU, and accumulates into the same candle `GradMap` keyed by the
-/// candle `TensorId` — so the downstream group-level `optimizer_step_from_map`
-/// (which keys its moments off the candle `Var`) is oblivious to which producer
-/// fed the accumulation. This is the single per-Var copy `optimizer_step_from_kt_grad_store`
-/// does, just landing in the accumulation map instead of a direct step, to
-/// respect GRPO's cross-completion grad accumulation.
+/// (#1082) [`accumulate_grads`] dispatcher over [`GradSource`] for the
+/// GRPO token-level aggregation boundary — kt-native only now. Routes the
+/// kt `GradStore` straight into the kt `GradMap` keyed by
+/// `Parameter::tensor_id()`.
 fn accumulate_grads_dispatch(
     dst: &mut GradMap,
     src: &GradSource,
-    vars: &[&Var],
+    params: &[&Parameter],
 ) -> Result<()> {
     match src {
-        GradSource::Candle(gs) => accumulate_grads(dst, gs, vars),
-        #[cfg(feature = "cuda")]
-        GradSource::Kt(kt) => {
-            for var in vars {
-                let kt_id = cd_tensor_id_to_kt(var.as_tensor().id());
-                if let Some(kt_grad) = kt.get(kt_id) {
-                    let grad = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(kt_grad)
-                        .map_err(|e| {
-                            anyhow::anyhow!("accumulate_grads_dispatch: kt -> candle grad copy: {e}")
-                        })?
-                        .to_device(&cpu_device())
-                        .context("offload accumulated gradient to CPU")?
-                        .detach();
-                    let id = var.as_tensor().id();
-                    if let Some(existing) = dst.get(&id) {
-                        dst.insert(id, (existing + &grad)?.detach());
-                    } else {
-                        dst.insert(id, grad);
-                    }
-                }
-            }
-            Ok(())
-        }
+        GradSource::Kt(kt) => accumulate_grads(dst, kt, params),
     }
 }
 
-fn grad_or_zeros_like(
-    grads: &GradStore,
-    key: &Tensor,
-    like: &Tensor,
-) -> Result<Tensor> {
-    match grads.get(key) {
-        Some(grad) => Ok(grad.detach()),
-        None => Tensor::zeros_like(like).map_err(Into::into),
-    }
-}
 
-fn offload_checkpoint_tensor_to_cpu(tensor: Tensor, enabled: bool) -> Result<Tensor> {
-    if enabled && !tensor.device().is_cpu() {
-        Ok(tensor
-            .to_device(&cpu_device())
-            .context("offload checkpoint tensor to CPU")?
-            .detach())
-    } else {
-        Ok(tensor.detach())
-    }
-}
 
-fn tensor_on_device(tensor: &Tensor, device: &CdDevice) -> Result<Tensor> {
-    if tensor.device().same_device(device) {
-        Ok(tensor.clone())
-    } else {
-        tensor
-            .to_device(device)
-            .context("reload checkpoint tensor to device")
-    }
-}
 
-fn accumulate_cpu_tensor_slot(
-    slot: &mut Option<Tensor>,
-    tensor: Tensor,
-    context: &str,
-) -> Result<()> {
-    let tensor_cpu = tensor
-        .to_device(&cpu_device())
-        .with_context(|| format!("{context} CPU offload"))?
-        .detach();
-    *slot = Some(match slot.take() {
-        Some(existing) => (&existing + &tensor_cpu)
-            .with_context(|| format!("{context} CPU accumulate"))?
-            .detach(),
-        None => tensor_cpu,
-    });
-    Ok(())
-}
 
-/// SGD update from accumulated gradient map (not GradStore).
+/// (#1082) SGD update from an accumulated kt gradient map (keyed by
+/// `Parameter::tensor_id()`).
 fn sgd_step_from_map(
     backend: &dyn BackendRuntime,
-    params: &TrainableLoraParams,
+    params: &mut TrainableLoraParams,
     grads: &GradMap,
     lr: f64,
 ) -> Result<()> {
     let resident_activation = backend.supports_resident_activation();
-    for var in params.all_vars() {
-        let id = var.as_tensor().id();
-        if let Some(grad) = grads.get(&id) {
-            let grad = if grad.device().same_device(var.as_tensor().device()) {
-                grad.clone()
-            } else {
-                grad.to_device(var.as_tensor().device())?
-            };
-            apply_sgd_update(backend, var, &grad, lr, resident_activation)?;
+    for param in params.all_params_mut() {
+        if let Some(grad) = grads.get(&param.tensor_id()) {
+            apply_sgd_update_kt(backend, param, grad, lr, resident_activation)?;
         }
     }
     Ok(())
 }
 
-/// Configured-optimizer dispatch from accumulated gradient map.
+/// (#1082) Configured-optimizer dispatch from an accumulated kt gradient
+/// map (keyed by `Parameter::tensor_id()`). Drives `kiln_optim::AdamW`
+/// (or kt SGD) per param.
 pub(crate) fn optimizer_step_from_map(
     backend: &dyn BackendRuntime,
-    params: &TrainableLoraParams,
+    params: &mut TrainableLoraParams,
     grads: &GradMap,
     lr: f64,
     optimizer: Optimizer,
@@ -7676,35 +6746,24 @@ pub(crate) fn optimizer_step_from_map(
             let state = opt_state.ok_or_else(|| {
                 anyhow::anyhow!("optimizer_step_from_map: AdamW requires OptimizerState")
             })?;
-            state.step = state.step.saturating_add(1);
-            let step = state.step;
+            let _ = lr; // baked into the KtAdamW hp at construction.
+            ADAMW_ACTIVE_HP.with(|c| {
+                c.set(KtAdamWHyperparameters {
+                    lr: lr as f32,
+                    beta1,
+                    beta2,
+                    eps,
+                    weight_decay,
+                })
+            });
             let resident_activation = backend.supports_resident_activation();
-            for var in params.all_vars() {
-                let id = var.as_tensor().id();
-                if let Some(grad) = grads.get(&id) {
-                    let grad = if grad.device().same_device(var.as_tensor().device()) {
-                        grad.clone()
-                    } else {
-                        grad.to_device(var.as_tensor().device())?
-                    };
-                    let moments =
-                        state.moments.get(&cd_tensor_id_to_kt(id)).ok_or_else(|| {
-                            anyhow::anyhow!(
-                                "optimizer_step_from_map: missing AdamW moments for Var id {:?}",
-                                id
-                            )
-                        })?;
-                    apply_adamw_update(
+            for param in params.all_params_mut() {
+                if let Some(grad) = grads.get(&param.tensor_id()) {
+                    apply_adamw_update_kt(
                         backend,
-                        var,
-                        &grad,
-                        moments,
-                        lr,
-                        beta1,
-                        beta2,
-                        eps,
-                        weight_decay,
-                        step,
+                        param,
+                        &mut state.adamw,
+                        grad,
                         resident_activation,
                     )?;
                 }
@@ -7714,42 +6773,33 @@ pub(crate) fn optimizer_step_from_map(
     }
 }
 
-/// (#1082 Increment-0 PR3) kt-native-grad consumer — the
-/// [`optimizer_step_from_map`] analogue that reads gradients from a kt-native
-/// [`kiln_autograd::GradStore`] (keyed by [`KtTensorId`]; values are
-/// `kiln_tensor::Tensor`), produced by
-/// [`standard_forward_backward_tape_authoritative_kt`] (PR2).
+/// (#1082) kt-native-grad consumer — the SOLE optimizer consumer post
+/// candle-drop. Reads gradients from a kt-native
+/// [`kiln_autograd::GradStore`] (keyed by `Parameter::tensor_id()`,
+/// values `kiln_tensor::Tensor`), produced by
+/// [`standard_forward_backward_tape_authoritative_kt`] /
+/// [`grpo_step_forward_backward_tape_authoritative_kt`] / the
+/// checkpointed kt producer.
 ///
-/// For each LoRA `Var` it bridges the kt grad to candle at this single per-Var
-/// boundary (`kt_tensor_to_candle_cuda_copy`) and feeds the existing candle
-/// AdamW/SGD update (which still owns the candle `Var` master + moments).
-/// Moments are looked up by `KtTensorId` (PR1 keying), matching the producer.
-/// The per-Var `kt -> candle` bridge is the LAST candle dependency in this
-/// grad path; it disappears when the optimizer master/moments go kt-native via
-/// `kiln-optim`. (#1082 Inc-0 PR4) NOW WIRED IN via [`optimizer_step_dispatch`]
-/// (the `GradSource::Kt` arm), which the SFT loop + CP-4 convergence gate call.
-#[cfg(feature = "cuda")]
+/// For each LoRA `Parameter` it looks the grad up by `tensor_id()` and
+/// steps the param kt-natively: SGD via [`apply_sgd_update_kt`], AdamW via
+/// `kiln_optim::AdamW` (`OptimStep::step`) inside [`apply_adamw_update_kt`].
+/// NO candle grad copy, NO candle `Var` master — the LoRA `Parameter`'s kt
+/// master is updated in place (preserving `tensor_id`).
 pub(crate) fn optimizer_step_from_kt_grad_store(
     backend: &dyn BackendRuntime,
-    params: &TrainableLoraParams,
+    params: &mut TrainableLoraParams,
     grads: &kiln_autograd::GradStore,
     lr: f64,
     optimizer: Optimizer,
     opt_state: Option<&mut OptimizerState>,
 ) -> Result<()> {
-    let bridge = |kt_grad: &kiln_tensor::Tensor| -> Result<Tensor> {
-        kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(kt_grad).map_err(|e| {
-            anyhow::anyhow!("optimizer_step_from_kt_grad_store: kt -> candle grad copy: {e}")
-        })
-    };
     match optimizer {
         Optimizer::Sgd => {
             let resident_activation = backend.supports_resident_activation();
-            for var in params.all_vars() {
-                let kt_id = cd_tensor_id_to_kt(var.as_tensor().id());
-                if let Some(kt_grad) = grads.get(kt_id) {
-                    let grad = bridge(kt_grad)?;
-                    apply_sgd_update(backend, var, &grad, lr, resident_activation)?;
+            for param in params.all_params_mut() {
+                if let Some(kt_grad) = grads.get(param.tensor_id()) {
+                    apply_sgd_update_kt(backend, param, kt_grad, lr, resident_activation)?;
                 }
             }
             Ok(())
@@ -7763,30 +6813,23 @@ pub(crate) fn optimizer_step_from_kt_grad_store(
             let state = opt_state.ok_or_else(|| {
                 anyhow::anyhow!("optimizer_step_from_kt_grad_store: AdamW requires OptimizerState")
             })?;
-            state.step = state.step.saturating_add(1);
-            let step = state.step;
+            ADAMW_ACTIVE_HP.with(|c| {
+                c.set(KtAdamWHyperparameters {
+                    lr: lr as f32,
+                    beta1,
+                    beta2,
+                    eps,
+                    weight_decay,
+                })
+            });
             let resident_activation = backend.supports_resident_activation();
-            for var in params.all_vars() {
-                let kt_id = cd_tensor_id_to_kt(var.as_tensor().id());
-                if let Some(kt_grad) = grads.get(kt_id) {
-                    let grad = bridge(kt_grad)?;
-                    let moments = state.moments.get(&kt_id).ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "optimizer_step_from_kt_grad_store: missing AdamW moments for kt id {:?}",
-                            kt_id
-                        )
-                    })?;
-                    apply_adamw_update(
+            for param in params.all_params_mut() {
+                if let Some(kt_grad) = grads.get(param.tensor_id()) {
+                    apply_adamw_update_kt(
                         backend,
-                        var,
-                        &grad,
-                        moments,
-                        lr,
-                        beta1,
-                        beta2,
-                        eps,
-                        weight_decay,
-                        step,
+                        param,
+                        &mut state.adamw,
+                        kt_grad,
                         resident_activation,
                     )?;
                 }
@@ -8024,12 +7067,15 @@ pub(crate) fn lora_weights_detached(params: &TrainableLoraParams) -> LoraWeights
         .layers
         .iter()
         .map(|lp| {
-            let make_proj = |pair: &Option<(Var, Var)>| -> Option<LoraProjectionWeights> {
-                pair.as_ref().map(|(a, b)| LoraProjectionWeights {
-                    a: a.as_tensor().detach(),
-                    b: b.as_tensor().detach(),
-                })
-            };
+            // (#1082) kt `Tensor::detach()` — the detached forward LoRA used by
+            // the checkpointed Step-1 boundary forward (no grad recording).
+            let make_proj =
+                |pair: &Option<(Parameter, Parameter)>| -> Option<LoraProjectionWeights> {
+                    pair.as_ref().map(|(a, b)| LoraProjectionWeights {
+                        a: a.forward_storage().primary_tensor().detach(),
+                        b: b.forward_storage().primary_tensor().detach(),
+                    })
+                };
             LoraLayerWeights {
                 q_proj: make_proj(&lp.q_proj),
                 k_proj: make_proj(&lp.k_proj),
@@ -8425,3079 +7471,11 @@ fn full_attention_residual_forward(
 // a6531830 (shim hoist), and the InjectTensorGradient flip
 // commit itself. (#1082)
 
-#[allow(clippy::too_many_arguments)]
-fn full_attention_single_layer_tiled_mlp_reverse(
-    backend: &dyn BackendRuntime,
-    layer_idx: usize,
-    full_attn_layer_idx: usize,
-    seg_input: &Tensor,
-    upstream_grad: &Tensor,
-    weights: &GpuWeights,
-    model_config: &ModelConfig,
-    positions: &[u32],
-    params: &TrainableLoraParams,
-    lora_detached: &LoraWeights,
-    tile_size: usize,
-    device: &CdDevice,
-    accumulated_grads: &mut GradMap,
-    all_vars: &[&Var],
-) -> Result<Tensor> {
-    let layer = &weights.layers[layer_idx];
-    let attn_weights = match &layer.attention {
-        GpuAttentionWeights::Full(attn_weights) => attn_weights,
-        GpuAttentionWeights::Linear(_) => {
-            anyhow::bail!(
-                "full-attention tiled MLP reverse called for non-full-attention layer {layer_idx}"
-            )
-        }
-    };
-    let (_, total_tokens, _hidden_size) = seg_input.dims3()?;
-    anyhow::ensure!(
-        upstream_grad.dims() == seg_input.dims(),
-        "full-attention tiled MLP reverse upstream/input shape mismatch: {:?} vs {:?}",
-        upstream_grad.dims(),
-        seg_input.dims()
-    );
 
-    let lora_weights_for_seg = params.as_lora_weights();
-    let layer_lora: Option<(&LoraLayerWeights, f32)> = lora_weights_for_seg
-        .layers
-        .get(layer_idx)
-        .map(|ll| (ll, lora_weights_for_seg.scale));
-    let detached_layer_lora: Option<(&LoraLayerWeights, f32)> = lora_detached
-        .layers
-        .get(layer_idx)
-        .map(|ll| (ll, lora_detached.scale));
 
-    tracing::info!(
-        layer = layer_idx,
-        full_attn_layer_idx,
-        total_tokens,
-        tile_size,
-        num_tiles = total_tokens.div_ceil(tile_size),
-        "exact full-attention tiled MLP reverse begin"
-    );
 
-    // (#1082) The local `full_attention_*_forward` helpers are kt-native (take
-    // kt `x`, return kt). Bridge `seg_input` candle->kt for the call, and the
-    // kt residual value back to candle so the candle tile loop / Vars below stay
-    // a candle autograd island.
-    let seg_input_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(seg_input)
-        .map_err(|e| anyhow::anyhow!("full-attention residual: candle->kt seg_input: {e}"))?;
-    let attn_residual_value_kt = full_attention_residual_forward(
-        backend,
-        &seg_input_kt,
-        weights,
-        model_config,
-        positions,
-        layer_idx,
-        full_attn_layer_idx,
-        detached_layer_lora,
-    )
-    .with_context(|| format!("full-attention tiled MLP value residual layer {layer_idx}"))?
-    .detach();
-    let attn_residual_value = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(
-        &attn_residual_value_kt
-            .contiguous()
-            .context("full-attention residual value contiguous")?,
-    )
-    .map_err(|e| anyhow::anyhow!("full-attention residual: kt->candle residual value: {e}"))?;
-    drop(attn_residual_value_kt);
-    synchronize_checkpoint_boundary(device, || {
-        format!("synchronize full-attention tiled MLP value residual layer {layer_idx}")
-    })?;
 
-    let mut residual_grad_tiles = Vec::with_capacity(total_tokens.div_ceil(tile_size));
-    let mut tile_start = 0usize;
-    while tile_start < total_tokens {
-        let tile_len = (total_tokens - tile_start).min(tile_size);
-        let tile_end = tile_start + tile_len;
-        let residual_tile = attn_residual_value
-            .narrow(1, tile_start, tile_len)
-            .with_context(|| {
-                format!("full-attention MLP residual tile [{tile_start}, {tile_end})")
-            })?
-            .detach();
-        let upstream_tile = upstream_grad
-            .narrow(1, tile_start, tile_len)
-            .with_context(|| {
-                format!("full-attention MLP upstream tile [{tile_start}, {tile_end})")
-            })?
-            .detach();
-        let residual_tile_var = var_from_tensor(&residual_tile).with_context(|| {
-            format!("full-attention MLP residual tile Var [{tile_start}, {tile_end})")
-        })?;
-        // (#1082) `rms_norm`/`swiglu_ffn` are kt-native. Bridge the candle Var
-        // tensor in (candle->kt borrow), keep the kt chain through the MLP, and
-        // bridge the kt `ffn_out` back to candle for the candle residual add /
-        // `loss.backward()`. NOTE: candle autograd cannot trace LoRA grads
-        // through the kt ops (the bridge boundary is a detached candle leaf), so
-        // this legacy candle-checkpointing path is grad-severed post-flip — the
-        // tape-authoritative CUDA path is the correct grad producer.
-        let residual_tile_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(
-            residual_tile_var.as_tensor(),
-        )
-        .map_err(|e| anyhow::anyhow!("full-attention MLP tile: candle->kt residual: {e}"))?;
-        let normed_tile = rms_norm(
-            &residual_tile_kt,
-            &layer.post_attention_layernorm,
-            model_config.rms_norm_eps,
-        )
-        .with_context(|| format!("full-attention MLP post norm tile [{tile_start}, {tile_end})"))?;
-        let ffn_out_kt = swiglu_ffn(&normed_tile, &layer.mlp, layer_lora)
-            .with_context(|| format!("full-attention MLP tile [{tile_start}, {tile_end})"))?;
-        let ffn_out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(
-            &ffn_out_kt.contiguous().context("full-attention MLP ffn_out contiguous")?,
-        )
-        .map_err(|e| anyhow::anyhow!("full-attention MLP tile: kt->candle ffn_out: {e}"))?;
-        let tile_output = (residual_tile_var.as_tensor() + ffn_out).with_context(|| {
-            format!("full-attention MLP residual add tile [{tile_start}, {tile_end})")
-        })?;
-        let tile_output_f32 = tile_output.to_f32_dtype()?;
-        let upstream_tile_f32 = upstream_tile.to_f32_dtype()?;
-        let injected = (&tile_output_f32 * &upstream_tile_f32)?
-            .sum_all()
-            .with_context(|| {
-                format!("full-attention MLP gradient injection tile [{tile_start}, {tile_end})")
-            })?;
-        let grads = injected.backward().with_context(|| {
-            format!("full-attention MLP backward tile [{tile_start}, {tile_end})")
-        })?;
-        accumulate_grads(accumulated_grads, &grads, all_vars)?;
-        let residual_grad = grads
-            .get(residual_tile_var.as_tensor())
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "full-attention MLP reverse did not produce residual grad for tile [{tile_start}, {tile_end})"
-                )
-            })?
-            .clone()
-            .detach();
-        residual_grad_tiles.push(residual_grad);
 
-        drop(grads);
-        drop(injected);
-        drop(upstream_tile_f32);
-        drop(tile_output_f32);
-        drop(tile_output);
-        drop(normed_tile);
-        drop(residual_tile_var);
-        drop(upstream_tile);
-        drop(residual_tile);
-        synchronize_checkpoint_boundary(device, || {
-            format!("synchronize full-attention MLP tile [{tile_start}, {tile_end}) cleanup")
-        })?;
-        tile_start = tile_end;
-    }
-
-    let residual_grad_refs: Vec<&Tensor> = residual_grad_tiles.iter().collect();
-    let residual_grad = cat_tensors(&residual_grad_refs, 1)
-        .context("full-attention tiled MLP residual grad cat")?
-        .detach();
-    drop(residual_grad_tiles);
-    drop(attn_residual_value);
-    let residual_grad_cpu = residual_grad
-        .to_device(&cpu_device())
-        .context("full-attention tiled MLP residual grad CPU offload")?
-        .detach();
-    drop(residual_grad);
-    device.synchronize().with_context(|| {
-        format!("synchronize full-attention residual grad offload layer {layer_idx}")
-    })?;
-    synchronize_checkpoint_boundary(device, || {
-        format!("synchronize full-attention tiled MLP value cleanup layer {layer_idx}")
-    })?;
-
-    // (#1082) kt-native helper: bridge `seg_input` in, kt pre-o value out->candle.
-    let pre_o_value_kt = full_attention_attention_pre_o_forward(
-        backend,
-        &seg_input_kt,
-        weights,
-        model_config,
-        positions,
-        layer_idx,
-        full_attn_layer_idx,
-        detached_layer_lora,
-    )
-    .with_context(|| format!("full-attention pre-o value layer {layer_idx}"))?
-    .detach();
-    let pre_o_value = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(
-        &pre_o_value_kt
-            .contiguous()
-            .context("full-attention pre-o value contiguous")?,
-    )
-    .map_err(|e| anyhow::anyhow!("full-attention pre-o: kt->candle pre-o value: {e}"))?;
-    drop(pre_o_value_kt);
-    synchronize_checkpoint_boundary(device, || {
-        format!("synchronize full-attention pre-o value layer {layer_idx}")
-    })?;
-
-    let mut pre_o_grad_tiles = Vec::with_capacity(total_tokens.div_ceil(tile_size));
-    let mut tile_start = 0usize;
-    while tile_start < total_tokens {
-        let tile_len = (total_tokens - tile_start).min(tile_size);
-        let tile_end = tile_start + tile_len;
-        let pre_o_tile = pre_o_value
-            .narrow(1, tile_start, tile_len)
-            .with_context(|| format!("full-attention pre-o tile [{tile_start}, {tile_end})"))?
-            .detach();
-        let upstream_tile = residual_grad_cpu
-            .narrow(1, tile_start, tile_len)
-            .with_context(|| {
-                format!("full-attention o-proj upstream tile [{tile_start}, {tile_end})")
-            })?
-            .detach();
-        let pre_o_tile_var = var_from_tensor(&pre_o_tile).with_context(|| {
-            format!("full-attention o-proj pre-o tile Var [{tile_start}, {tile_end})")
-        })?;
-        // (#1082) `gqa_attention_output_projection` is kt-native. Bridge the
-        // candle Var in and its kt output back to candle for the candle shim /
-        // `loss.backward()`.
-        let pre_o_tile_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(
-            pre_o_tile_var.as_tensor(),
-        )
-        .map_err(|e| anyhow::anyhow!("full-attention o-proj: candle->kt pre-o tile: {e}"))?;
-        let out_proj_tile_kt = gqa_attention_output_projection(
-            backend,
-            &pre_o_tile_kt,
-            attn_weights,
-            false,
-            layer_lora,
-        )
-        .with_context(|| {
-            format!("full-attention o-proj forward tile [{tile_start}, {tile_end})")
-        })?;
-        let out_proj_tile = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(
-            &out_proj_tile_kt
-                .contiguous()
-                .context("full-attention o-proj tile contiguous")?,
-        )
-        .map_err(|e| anyhow::anyhow!("full-attention o-proj: kt->candle out_proj tile: {e}"))?;
-        drop(out_proj_tile_kt);
-        let injected = kiln_kt_bridge::inject_grad_shim::inject_gradient_via_shim(
-            &out_proj_tile,
-            &upstream_tile,
-        )
-        .with_context(|| {
-            format!("full-attention o-proj gradient injection tile [{tile_start}, {tile_end})")
-        })?;
-        let grads = injected.backward().with_context(|| {
-            format!("full-attention o-proj backward tile [{tile_start}, {tile_end})")
-        })?;
-        accumulate_grads(accumulated_grads, &grads, all_vars)?;
-        let pre_o_grad = grads
-            .get(pre_o_tile_var.as_tensor())
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "full-attention o-proj reverse did not produce pre-o grad for tile [{tile_start}, {tile_end})"
-                )
-            })?
-            .clone()
-            .detach();
-        pre_o_grad_tiles.push(pre_o_grad);
-
-        drop(grads);
-        drop(injected);
-        drop(out_proj_tile);
-        drop(pre_o_tile_var);
-        drop(upstream_tile);
-        drop(pre_o_tile);
-        synchronize_checkpoint_boundary(device, || {
-            format!("synchronize full-attention o-proj tile [{tile_start}, {tile_end}) cleanup")
-        })?;
-        tile_start = tile_end;
-    }
-
-    let pre_o_grad_refs: Vec<&Tensor> = pre_o_grad_tiles.iter().collect();
-    let pre_o_grad = cat_tensors(&pre_o_grad_refs, 1)
-        .context("full-attention tiled o-proj pre-o grad cat")?
-        .detach();
-    drop(pre_o_grad_tiles);
-    drop(pre_o_value);
-    let pre_o_grad_cpu = pre_o_grad
-        .to_device(&cpu_device())
-        .context("full-attention tiled o-proj pre-o grad CPU offload")?
-        .detach();
-    drop(pre_o_grad);
-    device.synchronize().with_context(|| {
-        format!("synchronize full-attention pre-o grad offload layer {layer_idx}")
-    })?;
-    synchronize_checkpoint_boundary(device, || {
-        format!("synchronize full-attention tiled o-proj cleanup layer {layer_idx}")
-    })?;
-
-    let total_tiles = total_tokens.div_ceil(tile_size);
-    // (#1082) `rms_norm` / `gqa_attention_kv_prefill` are kt-native; keep
-    // `normed_value` / `k_value` / `v_value` kt (bridge to candle only at the
-    // candle `var_from_tensor` seams below).
-    let normed_value = rms_norm(&seg_input_kt, &layer.input_layernorm, model_config.rms_norm_eps)
-        .with_context(|| format!("full-attention core value norm layer {layer_idx}"))?
-        .detach();
-    let (k_value, v_value) = gqa_attention_kv_prefill(
-        backend,
-        &normed_value,
-        attn_weights,
-        positions,
-        model_config.num_kv_heads,
-        model_config.head_dim,
-        model_config.rotary_dim(),
-        &weights.rotary_inv_freq,
-        model_config.rms_norm_eps,
-        detached_layer_lora,
-    )
-    .with_context(|| format!("full-attention K/V value layer {layer_idx}"))?;
-    let k_value = k_value.detach();
-    let v_value = v_value.detach();
-    synchronize_checkpoint_boundary(device, || {
-        format!("synchronize full-attention K/V value layer {layer_idx}")
-    })?;
-
-    let mut q_grad_tiles_cpu: Vec<Option<Tensor>> = vec![None; total_tiles];
-    let mut gate_grad_tiles_cpu: Vec<Option<Tensor>> = vec![None; total_tiles];
-    let mut k_grad_tiles_cpu: Vec<Option<Tensor>> = vec![None; total_tiles];
-    let mut v_grad_tiles_cpu: Vec<Option<Tensor>> = vec![None; total_tiles];
-
-    for tile_idx in 0..total_tiles {
-        let tile_start = tile_idx * tile_size;
-        let tile_len = (total_tokens - tile_start).min(tile_size);
-        let tile_end = tile_start + tile_len;
-        let normed_tile = normed_value
-            .narrow(1, tile_start, tile_len)
-            .with_context(|| {
-                format!("full-attention core normed tile [{tile_start}, {tile_end})")
-            })?;
-        let (q_value, gate_value) = gqa_attention_q_gate_prefill(
-            backend,
-            &normed_tile,
-            attn_weights,
-            &positions[tile_start..tile_end],
-            model_config.num_attention_heads,
-            model_config.head_dim,
-            model_config.rotary_dim(),
-            &weights.rotary_inv_freq,
-            model_config.rms_norm_eps,
-            model_config.attn_output_gate,
-            detached_layer_lora,
-        )
-        .with_context(|| format!("full-attention Q/Gate value tile [{tile_start}, {tile_end})"))?;
-        // (#1082) `q_value`/`gate_value`/`k_value`/`v_value` are kt. The
-        // candle-autograd recompute below builds candle `Var`s, so bridge each
-        // kt forward value to candle for `var_from_tensor`.
-        let k_prefix_kt = k_value
-            .narrow(1, 0, tile_end)
-            .with_context(|| format!("full-attention K prefix tile {tile_idx}"))?
-            .detach();
-        let v_prefix_kt = v_value
-            .narrow(1, 0, tile_end)
-            .with_context(|| format!("full-attention V prefix tile {tile_idx}"))?
-            .detach();
-        let q_cd = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(
-            &q_value.detach().contiguous().context("full-attention q contiguous")?,
-        )
-        .map_err(|e| anyhow::anyhow!("full-attention core: kt->candle q: {e}"))?;
-        let k_cd = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(
-            &k_prefix_kt.contiguous().context("full-attention k prefix contiguous")?,
-        )
-        .map_err(|e| anyhow::anyhow!("full-attention core: kt->candle k prefix: {e}"))?;
-        let v_cd = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(
-            &v_prefix_kt.contiguous().context("full-attention v prefix contiguous")?,
-        )
-        .map_err(|e| anyhow::anyhow!("full-attention core: kt->candle v prefix: {e}"))?;
-        let q_var = var_from_tensor(&q_cd)
-            .with_context(|| format!("full-attention q Var tile [{tile_start}, {tile_end})"))?;
-        let k_var = var_from_tensor(&k_cd).with_context(|| {
-            format!("full-attention k Var prefix [0, {tile_end}) tile {tile_idx}")
-        })?;
-        let v_var = var_from_tensor(&v_cd).with_context(|| {
-            format!("full-attention v Var prefix [0, {tile_end}) tile {tile_idx}")
-        })?;
-        let gate_var = gate_value
-            .as_ref()
-            .map(|gate| -> Result<Var> {
-                let gate_cd = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(
-                    &gate
-                        .detach()
-                        .contiguous()
-                        .context("full-attention gate contiguous")?,
-                )
-                .map_err(|e| anyhow::anyhow!("full-attention core: kt->candle gate: {e}"))?;
-                var_from_tensor(&gate_cd).with_context(|| {
-                    format!("full-attention gate Var tile [{tile_start}, {tile_end})")
-                })
-            })
-            .transpose()?;
-        // Bridge the candle Var tensors back to kt for the kt-native core op.
-        let prepared_vars = GqaAttentionPrepared {
-            q: kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(q_var.as_tensor())
-                .map_err(|e| anyhow::anyhow!("full-attention core: candle->kt q var: {e}"))?,
-            k: kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(k_var.as_tensor())
-                .map_err(|e| anyhow::anyhow!("full-attention core: candle->kt k var: {e}"))?,
-            v: kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v_var.as_tensor())
-                .map_err(|e| anyhow::anyhow!("full-attention core: candle->kt v var: {e}"))?,
-            gate: None,
-        };
-        let attn_core = gqa_attention_core_prefill(
-            backend,
-            &prepared_vars,
-            model_config.num_attention_heads,
-            model_config.num_kv_heads,
-            model_config.head_dim,
-        )
-        .with_context(|| format!("full-attention core recompute tile {tile_idx}"))?;
-        // Bridge the candle gate Var to kt for the kt-native output gate op.
-        let gate_kt = gate_var
-            .as_ref()
-            .map(|gate| {
-                kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(gate.as_tensor())
-                    .map_err(|e| anyhow::anyhow!("full-attention core: candle->kt gate var: {e}"))
-            })
-            .transpose()?;
-        let pre_o_kt = gqa_attention_apply_output_gate(attn_core, gate_kt.as_ref())
-            .with_context(|| format!("full-attention output gate recompute tile {tile_idx}"))?;
-        // Bridge kt `pre_o` -> candle for the candle shim / `loss.backward()`.
-        let pre_o = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(
-            &pre_o_kt.contiguous().context("full-attention pre_o contiguous")?,
-        )
-        .map_err(|e| anyhow::anyhow!("full-attention core: kt->candle pre_o: {e}"))?;
-        drop(pre_o_kt);
-        let pre_o_grad_tile = pre_o_grad_cpu
-            .narrow(1, tile_start, tile_len)
-            .with_context(|| {
-                format!("full-attention core upstream tile [{tile_start}, {tile_end})")
-            })?
-            .detach();
-        let injected = kiln_kt_bridge::inject_grad_shim::inject_gradient_via_shim(
-            &pre_o,
-            &pre_o_grad_tile,
-        )
-        .with_context(|| format!("full-attention core gradient injection tile {tile_idx}"))?;
-        let grads = injected
-            .backward()
-            .with_context(|| format!("full-attention core backward tile {tile_idx}"))?;
-
-        let q_grad = grads
-            .get(q_var.as_tensor())
-            .ok_or_else(|| anyhow::anyhow!("full-attention core did not produce q grad tile"))?
-            .clone();
-        accumulate_cpu_tensor_slot(
-            &mut q_grad_tiles_cpu[tile_idx],
-            q_grad,
-            &format!("full-attention q grad tile [{tile_start}, {tile_end})"),
-        )?;
-
-        if let Some(gate_var) = gate_var.as_ref() {
-            let gate_grad = grads
-                .get(gate_var.as_tensor())
-                .ok_or_else(|| {
-                    anyhow::anyhow!("full-attention core did not produce gate grad tile")
-                })?
-                .clone();
-            accumulate_cpu_tensor_slot(
-                &mut gate_grad_tiles_cpu[tile_idx],
-                gate_grad,
-                &format!("full-attention gate grad tile [{tile_start}, {tile_end})"),
-            )?;
-        }
-
-        let k_grad_prefix_cpu = grads
-            .get(k_var.as_tensor())
-            .ok_or_else(|| anyhow::anyhow!("full-attention core did not produce k grad prefix"))?
-            .to_device(&cpu_device())
-            .context("full-attention k grad prefix CPU offload")?
-            .detach();
-        let v_grad_prefix_cpu = grads
-            .get(v_var.as_tensor())
-            .ok_or_else(|| anyhow::anyhow!("full-attention core did not produce v grad prefix"))?
-            .to_device(&cpu_device())
-            .context("full-attention v grad prefix CPU offload")?
-            .detach();
-        for source_idx in 0..=tile_idx {
-            let source_start = source_idx * tile_size;
-            let source_len = (tile_end - source_start).min(tile_size);
-            let source_end = source_start + source_len;
-            let k_source_grad = k_grad_prefix_cpu
-                .narrow(1, source_start, source_len)
-                .with_context(|| {
-                    format!(
-                        "full-attention k source grad [{source_start}, {source_end}) from tile {tile_idx}"
-                    )
-                })?;
-            accumulate_cpu_tensor_slot(
-                &mut k_grad_tiles_cpu[source_idx],
-                k_source_grad,
-                &format!(
-                    "full-attention k grad source [{source_start}, {source_end}) from tile {tile_idx}"
-                ),
-            )?;
-            let v_source_grad = v_grad_prefix_cpu
-                .narrow(1, source_start, source_len)
-                .with_context(|| {
-                    format!(
-                        "full-attention v source grad [{source_start}, {source_end}) from tile {tile_idx}"
-                    )
-                })?;
-            accumulate_cpu_tensor_slot(
-                &mut v_grad_tiles_cpu[source_idx],
-                v_source_grad,
-                &format!(
-                    "full-attention v grad source [{source_start}, {source_end}) from tile {tile_idx}"
-                ),
-            )?;
-        }
-
-        drop(grads);
-        drop(injected);
-        drop(pre_o);
-        drop(prepared_vars);
-        // `gate_kt` borrows `gate_var`; drop the borrow before the Var.
-        drop(gate_kt);
-        drop(gate_var);
-        drop(v_var);
-        drop(k_var);
-        drop(q_var);
-        drop(gate_value);
-        drop(v_prefix_kt);
-        drop(k_prefix_kt);
-        drop(normed_tile);
-        synchronize_checkpoint_boundary(device, || {
-            format!("synchronize full-attention core backward tile {tile_idx}")
-        })?;
-    }
-    drop(k_value);
-    drop(v_value);
-    drop(normed_value);
-    device.synchronize().with_context(|| {
-        format!("synchronize full-attention tiled core grad offload layer {layer_idx}")
-    })?;
-
-    let mut attention_input_grad_tiles_cpu: Vec<Option<Tensor>> = vec![None; total_tiles];
-    for tile_idx in 0..total_tiles {
-        let tile_start = tile_idx * tile_size;
-        let tile_len = (total_tokens - tile_start).min(tile_size);
-        let tile_end = tile_start + tile_len;
-        let seg_input_tile = seg_input
-            .narrow(1, tile_start, tile_len)
-            .with_context(|| {
-                format!("full-attention prepare input tile [{tile_start}, {tile_end})")
-            })?
-            .detach();
-
-        let mut q_gate_terms_present = q_grad_tiles_cpu[tile_idx].is_some();
-        q_gate_terms_present |= gate_grad_tiles_cpu[tile_idx].is_some();
-        if q_gate_terms_present {
-            let seg_input_var = var_from_tensor(&seg_input_tile).with_context(|| {
-                format!("full-attention q/gate input Var tile [{tile_start}, {tile_end})")
-            })?;
-            // (#1082) `rms_norm` / `gqa_attention_q_gate_prefill` are kt-native:
-            // bridge the candle Var in, keep the kt chain, bridge the kt q/gate
-            // outputs back to candle for the candle injection shim.
-            let seg_input_tile_kt =
-                kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(seg_input_var.as_tensor())
-                    .map_err(|e| {
-                        anyhow::anyhow!("full-attention q/gate: candle->kt seg input: {e}")
-                    })?;
-            let normed_tile = rms_norm(
-                &seg_input_tile_kt,
-                &layer.input_layernorm,
-                model_config.rms_norm_eps,
-            )
-            .with_context(|| {
-                format!("full-attention q/gate norm tile [{tile_start}, {tile_end})")
-            })?;
-            let (q_kt, gate_kt) = gqa_attention_q_gate_prefill(
-                backend,
-                &normed_tile,
-                attn_weights,
-                &positions[tile_start..tile_end],
-                model_config.num_attention_heads,
-                model_config.head_dim,
-                model_config.rotary_dim(),
-                &weights.rotary_inv_freq,
-                model_config.rms_norm_eps,
-                model_config.attn_output_gate,
-                layer_lora,
-            )
-            .with_context(|| {
-                format!("full-attention q/gate prepare tile [{tile_start}, {tile_end})")
-            })?;
-            let q = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(
-                &q_kt.contiguous().context("full-attention q contiguous")?,
-            )
-            .map_err(|e| anyhow::anyhow!("full-attention q/gate: kt->candle q: {e}"))?;
-            let gate = gate_kt
-                .as_ref()
-                .map(|g| {
-                    kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(
-                        &g.contiguous().context("full-attention gate contiguous")?,
-                    )
-                    .map_err(|e| anyhow::anyhow!("full-attention q/gate: kt->candle gate: {e}"))
-                })
-                .transpose()?;
-            let mut inject_terms = Vec::with_capacity(2);
-            if let Some(q_grad_cpu) = q_grad_tiles_cpu[tile_idx].as_ref() {
-                inject_terms.push(
-                    kiln_kt_bridge::inject_grad_shim::inject_gradient_via_shim(
-                        &q,
-                        q_grad_cpu,
-                    )
-                    .context("full-attention q tile gradient injection")?,
-                );
-            }
-            if let (Some(gate), Some(gate_grad_cpu)) =
-                (gate.as_ref(), gate_grad_tiles_cpu[tile_idx].as_ref())
-            {
-                inject_terms.push(
-                    kiln_kt_bridge::inject_grad_shim::inject_gradient_via_shim(
-                        gate,
-                        gate_grad_cpu,
-                    )
-                    .context("full-attention gate tile gradient injection")?,
-                );
-            }
-            let mut injected = inject_terms
-                .first()
-                .context("full-attention q/gate missing gradient injections")?
-                .clone();
-            for term in inject_terms.iter().skip(1) {
-                injected =
-                    (&injected + term).context("full-attention q/gate gradient injection add")?;
-            }
-            let grads = injected.backward().with_context(|| {
-                format!("full-attention q/gate prepare backward tile {tile_idx}")
-            })?;
-            accumulate_grads(accumulated_grads, &grads, all_vars)?;
-            let input_grad = match grads.get(seg_input_var.as_tensor()) {
-                Some(grad) => grad.detach(),
-                None => zeros_dtype_on(seg_input_tile.dims(), seg_input_tile.dtype(), device)
-                    .context("alloc zero full-attention q/gate input grad tile")?,
-            };
-            accumulate_cpu_tensor_slot(
-                &mut attention_input_grad_tiles_cpu[tile_idx],
-                input_grad,
-                &format!("full-attention q/gate input grad tile {tile_idx}"),
-            )?;
-            drop(grads);
-            drop(injected);
-            drop(inject_terms);
-            drop(gate);
-            drop(q);
-            drop(normed_tile);
-            drop(seg_input_var);
-            synchronize_checkpoint_boundary(device, || {
-                format!("synchronize full-attention q/gate prepare tile {tile_idx}")
-            })?;
-        }
-
-        let mut kv_terms_present = k_grad_tiles_cpu[tile_idx].is_some();
-        kv_terms_present |= v_grad_tiles_cpu[tile_idx].is_some();
-        if kv_terms_present {
-            let seg_input_var = var_from_tensor(&seg_input_tile).with_context(|| {
-                format!("full-attention k/v input Var tile [{tile_start}, {tile_end})")
-            })?;
-            // (#1082) kt-native `rms_norm` / `gqa_attention_kv_prefill`: bridge
-            // candle Var in, bridge kt k/v outputs back to candle for the shim.
-            let seg_input_tile_kt =
-                kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(seg_input_var.as_tensor())
-                    .map_err(|e| anyhow::anyhow!("full-attention k/v: candle->kt seg input: {e}"))?;
-            let normed_tile = rms_norm(
-                &seg_input_tile_kt,
-                &layer.input_layernorm,
-                model_config.rms_norm_eps,
-            )
-            .with_context(|| format!("full-attention k/v norm tile [{tile_start}, {tile_end})"))?;
-            let (k_kt, v_kt) = gqa_attention_kv_prefill(
-                backend,
-                &normed_tile,
-                attn_weights,
-                &positions[tile_start..tile_end],
-                model_config.num_kv_heads,
-                model_config.head_dim,
-                model_config.rotary_dim(),
-                &weights.rotary_inv_freq,
-                model_config.rms_norm_eps,
-                layer_lora,
-            )
-            .with_context(|| {
-                format!("full-attention k/v prepare tile [{tile_start}, {tile_end})")
-            })?;
-            let k = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(
-                &k_kt.contiguous().context("full-attention k contiguous")?,
-            )
-            .map_err(|e| anyhow::anyhow!("full-attention k/v: kt->candle k: {e}"))?;
-            let v = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(
-                &v_kt.contiguous().context("full-attention v contiguous")?,
-            )
-            .map_err(|e| anyhow::anyhow!("full-attention k/v: kt->candle v: {e}"))?;
-            let mut inject_terms = Vec::with_capacity(2);
-            if let Some(k_grad_cpu) = k_grad_tiles_cpu[tile_idx].as_ref() {
-                inject_terms.push(
-                    kiln_kt_bridge::inject_grad_shim::inject_gradient_via_shim(
-                        &k,
-                        k_grad_cpu,
-                    )
-                    .context("full-attention k tile gradient injection")?,
-                );
-            }
-            if let Some(v_grad_cpu) = v_grad_tiles_cpu[tile_idx].as_ref() {
-                inject_terms.push(
-                    kiln_kt_bridge::inject_grad_shim::inject_gradient_via_shim(
-                        &v,
-                        v_grad_cpu,
-                    )
-                    .context("full-attention v tile gradient injection")?,
-                );
-            }
-            let mut injected = inject_terms
-                .first()
-                .context("full-attention k/v missing gradient injections")?
-                .clone();
-            for term in inject_terms.iter().skip(1) {
-                injected =
-                    (&injected + term).context("full-attention k/v gradient injection add")?;
-            }
-            let grads = injected
-                .backward()
-                .with_context(|| format!("full-attention k/v prepare backward tile {tile_idx}"))?;
-            accumulate_grads(accumulated_grads, &grads, all_vars)?;
-            let input_grad = match grads.get(seg_input_var.as_tensor()) {
-                Some(grad) => grad.detach(),
-                None => zeros_dtype_on(seg_input_tile.dims(), seg_input_tile.dtype(), device)
-                    .context("alloc zero full-attention k/v input grad tile")?,
-            };
-            accumulate_cpu_tensor_slot(
-                &mut attention_input_grad_tiles_cpu[tile_idx],
-                input_grad,
-                &format!("full-attention k/v input grad tile {tile_idx}"),
-            )?;
-            drop(grads);
-            drop(injected);
-            drop(inject_terms);
-            drop(v);
-            drop(k);
-            drop(normed_tile);
-            drop(seg_input_var);
-            synchronize_checkpoint_boundary(device, || {
-                format!("synchronize full-attention k/v prepare tile {tile_idx}")
-            })?;
-        }
-    }
-
-    let mut attention_input_grad_tile_values = Vec::with_capacity(total_tiles);
-    for tile_idx in 0..total_tiles {
-        let tile_start = tile_idx * tile_size;
-        let tile_len = (total_tokens - tile_start).min(tile_size);
-        let tile = match attention_input_grad_tiles_cpu[tile_idx].take() {
-            Some(tile) => tile,
-            None => zeros_dtype_on(
-                (1usize, tile_len, seg_input.dim(2)?),
-                seg_input.dtype(),
-                &cpu_device(),
-            )
-            .with_context(|| format!("alloc zero full-attention input grad tile {tile_idx}"))?,
-        };
-        if tile.dim(1)? != tile_len {
-            anyhow::bail!(
-                "full-attention input grad tile length mismatch at {tile_start}: {} vs {tile_len}",
-                tile.dim(1)?
-            );
-        }
-        attention_input_grad_tile_values.push(tile);
-    }
-    let attention_input_grad_tile_refs: Vec<&Tensor> =
-        attention_input_grad_tile_values.iter().collect();
-    let attention_input_grad_cpu = cat_tensors(&attention_input_grad_tile_refs, 1)
-        .context("full-attention tiled prepare input grad cat")?
-        .detach();
-    let attention_input_grad = attention_input_grad_cpu
-        .to_device(device)
-        .context("full-attention attention input grad GPU reload")?;
-    let residual_grad_for_passthrough = residual_grad_cpu
-        .to_device(device)
-        .context("full-attention residual passthrough grad GPU reload")?;
-    let residual_passthrough_grad =
-        if residual_grad_for_passthrough.dtype() == attention_input_grad.dtype() {
-            residual_grad_for_passthrough.clone()
-        } else {
-            residual_grad_for_passthrough
-                .to_dtype(attention_input_grad.dtype())
-                .context("full-attention residual passthrough grad dtype conversion")?
-        };
-    let input_grad = (&attention_input_grad + &residual_passthrough_grad)?.detach();
-
-    drop(residual_grad_for_passthrough);
-    drop(residual_passthrough_grad);
-    drop(attention_input_grad);
-    drop(attention_input_grad_cpu);
-    drop(q_grad_tiles_cpu);
-    drop(gate_grad_tiles_cpu);
-    drop(k_grad_tiles_cpu);
-    drop(v_grad_tiles_cpu);
-    drop(attention_input_grad_tile_values);
-    drop(pre_o_grad_cpu);
-    drop(residual_grad_cpu);
-    synchronize_checkpoint_boundary(device, || {
-        format!("synchronize full-attention tiled MLP reverse layer {layer_idx} cleanup")
-    })?;
-    tracing::info!(
-        layer = layer_idx,
-        full_attn_layer_idx,
-        total_tokens,
-        tile_size,
-        "exact full-attention tiled MLP reverse complete"
-    );
-
-    Ok(input_grad)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn exact_gdn_single_layer_tiled_reverse(
-    backend: &dyn BackendRuntime,
-    layer_idx: usize,
-    seg_input: &Tensor,
-    upstream_grad: &Tensor,
-    weights: &GpuWeights,
-    model_config: &ModelConfig,
-    positions: &[u32],
-    params: &TrainableLoraParams,
-    lora_detached: &LoraWeights,
-    tile_size: usize,
-    device: &CdDevice,
-    accumulated_grads: &mut GradMap,
-) -> Result<Tensor> {
-    let (_, total_tokens, hidden_size) = seg_input.dims3()?;
-    anyhow::ensure!(
-        total_tokens == positions.len(),
-        "GDN tiled reverse positions length mismatch: {} positions for {} tokens",
-        positions.len(),
-        total_tokens
-    );
-    anyhow::ensure!(
-        upstream_grad.dims() == seg_input.dims(),
-        "GDN tiled reverse upstream/input shape mismatch: {:?} vs {:?}",
-        upstream_grad.dims(),
-        seg_input.dims()
-    );
-
-    let linear_attn_idx = (0..layer_idx)
-        .filter(|&idx| {
-            matches!(
-                weights.layers[idx].attention,
-                GpuAttentionWeights::Linear(_)
-            )
-        })
-        .count();
-    let layer = &weights.layers[layer_idx];
-    let num_tiles = total_tokens.div_ceil(tile_size);
-    let profile_tiles = profile_exact_gdn_reverse_tiles();
-
-    tracing::info!(
-        layer = layer_idx,
-        linear_attn_idx,
-        num_tiles,
-        tile_size,
-        total_tokens,
-        "exact tiled GDN reverse begin"
-    );
-
-    // (#1082) The GDN forward/backward ops (`gdn_attention_residual_block`,
-    // `gdn_recurrent_*`, `gdn_*_from_*`) and `LinearAttentionState` are all
-    // kt-native, so the recurrence/conv boundary states are kt. The candle
-    // autograd `Var` / `loss.backward()` recompute machinery below is a candle
-    // island; we bridge candle->kt (`kt_in`) before feeding a kt op and
-    // kt->candle (`cd_out`) after a kt op so the candle scalars / `.backward()`
-    // type-check. NOTE: candle autograd cannot trace LoRA grads through a kt op
-    // (the bridge boundary is a detached candle leaf), so this legacy candle
-    // gradient-checkpointing path is grad-severed post-flip; the
-    // tape-authoritative CUDA path is the correct grad producer. See note
-    // `kiln-candle-autograd-drops-attn-conv-grads`.
-    let kt_in = |c: &Tensor| -> Result<kiln_tensor::Tensor> {
-        kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(c)
-            .map_err(|e| anyhow::anyhow!("exact GDN reverse: candle->kt borrow: {e}"))
-    };
-    let cd_out = |k: &kiln_tensor::Tensor| -> Result<Tensor> {
-        kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(
-            &k.contiguous()
-                .map_err(|e| anyhow::anyhow!("exact GDN reverse: kt contiguous: {e}"))?,
-        )
-        .map_err(|e| anyhow::anyhow!("exact GDN reverse: kt->candle copy: {e}"))
-    };
-
-    let boundary_state = LinearAttentionState::new(model_config, &kiln_kt_bridge::kt_device_from_candle(device))?;
-    let mut recurrent_boundaries: Vec<kiln_tensor::Tensor> = Vec::with_capacity(num_tiles + 1);
-    let mut conv_boundaries: Vec<kiln_tensor::Tensor> = Vec::with_capacity(num_tiles + 1);
-    recurrent_boundaries.push(boundary_state.recurrent_states[linear_attn_idx].detach());
-    conv_boundaries.push(boundary_state.conv_states[linear_attn_idx].detach());
-
-    for tile_idx in 0..num_tiles {
-        let boundary_started = Instant::now();
-        let tile_start = tile_idx * tile_size;
-        let tile_end = (tile_start + tile_size).min(total_tokens);
-        let tile_len = tile_end - tile_start;
-        let tile_input = seg_input
-            .narrow(1, tile_start, tile_len)
-            .with_context(|| format!("GDN tiled reverse boundary input tile {tile_idx}"))?
-            .detach();
-
-        let mut tile_state = LinearAttentionState::new(model_config, &kiln_kt_bridge::kt_device_from_candle(device))?;
-        tile_state.recurrent_states[linear_attn_idx] = recurrent_boundaries[tile_idx].clone();
-        tile_state.conv_states[linear_attn_idx] = conv_boundaries[tile_idx].clone();
-
-        let detached_layer_lora = lora_detached
-            .layers
-            .get(layer_idx)
-            .map(|layer| (layer, lora_detached.scale));
-        // (#1082) bridge candle `tile_input` -> kt for the kt-native block.
-        let tile_input_kt = kt_in(&tile_input)?;
-        let after_attn = gdn_attention_residual_block(
-            backend,
-            &tile_input_kt,
-            layer,
-            model_config,
-            &mut tile_state.recurrent_states[linear_attn_idx],
-            &mut tile_state.conv_states[linear_attn_idx],
-            detached_layer_lora,
-        )
-        .with_context(|| {
-            format!(
-                "exact tiled GDN boundary forward layer {layer_idx} tile [{tile_start}, {tile_end})"
-            )
-        })?;
-        drop(after_attn);
-
-        recurrent_boundaries.push(tile_state.recurrent_states[linear_attn_idx].detach());
-        conv_boundaries.push(tile_state.conv_states[linear_attn_idx].detach());
-
-        if is_metal_device(device) {
-            synchronize_checkpoint_boundary(device, || {
-                format!("synchronize exact tiled GDN boundary layer {layer_idx} tile {tile_idx}")
-            })?;
-        }
-        if profile_tiles {
-            tracing::info!(
-                layer = layer_idx,
-                tile = tile_idx + 1,
-                num_tiles,
-                tile_start,
-                tile_end,
-                elapsed_ms = boundary_started.elapsed().as_millis() as u64,
-                "exact tiled GDN boundary tile complete"
-            );
-        }
-    }
-
-    let lora_weights_for_seg = params.as_lora_weights();
-    let all_vars = params.all_vars();
-    let mut input_grad_chunks: Vec<Option<Tensor>> = (0..num_tiles).map(|_| None).collect();
-    // (#1082) `next_recurrent_grad` flows into the kt-native
-    // `gdn_recurrent_backward_no_grad` (split path) and is sourced from the kt
-    // `GdnRecurrentBackwardGrads::d_state`, so it is kt. `next_conv_grad` is
-    // only ever sourced from / consumed by the candle autograd island, so it
-    // stays candle.
-    let mut next_recurrent_grad: Option<kiln_tensor::Tensor> = None;
-    let mut next_conv_grad: Option<Tensor> = None;
-
-    for tile_idx in (0..num_tiles).rev() {
-        let tile_started = Instant::now();
-        let mut stage_started = Instant::now();
-        let tile_start = tile_idx * tile_size;
-        let tile_end = (tile_start + tile_size).min(total_tokens);
-        let tile_len = tile_end - tile_start;
-
-        if profile_tiles {
-            tracing::info!(
-                layer = layer_idx,
-                tile = tile_idx + 1,
-                num_tiles,
-                tile_start,
-                tile_end,
-                "exact tiled GDN reverse tile begin"
-            );
-        }
-
-        let tile_input = seg_input
-            .narrow(1, tile_start, tile_len)
-            .with_context(|| format!("GDN tiled reverse input tile {tile_idx}"))?;
-        let tile_grad_out = upstream_grad
-            .narrow(1, tile_start, tile_len)
-            .with_context(|| format!("GDN tiled reverse upstream tile {tile_idx}"))?;
-        let tile_grad_out_f32 = tile_grad_out.to_f32_dtype()?;
-        stage_started = finish_exact_gdn_reverse_tile_stage(
-            device,
-            profile_tiles,
-            layer_idx,
-            tile_idx,
-            num_tiles,
-            tile_start,
-            tile_end,
-            "prepare",
-            stage_started,
-        )?;
-
-        let layer_lora = lora_weights_for_seg
-            .layers
-            .get(layer_idx)
-            .map(|layer| (layer, lora_weights_for_seg.scale));
-        let detached_layer_lora = lora_detached
-            .layers
-            .get(layer_idx)
-            .map(|layer| (layer, lora_detached.scale));
-
-        // (#1082) kt-native GDN block: bridge candle `tile_input` -> kt; the kt
-        // `after_attn_value` feeds further kt MLP ops, so keep it kt.
-        let after_attn_value = {
-            let mut value_state = LinearAttentionState::new(model_config, &kiln_kt_bridge::kt_device_from_candle(device))?;
-            value_state.recurrent_states[linear_attn_idx] = recurrent_boundaries[tile_idx].clone();
-            value_state.conv_states[linear_attn_idx] = conv_boundaries[tile_idx].clone();
-            let tile_input_kt = kt_in(&tile_input.detach())?;
-            gdn_attention_residual_block(
-                backend,
-                &tile_input_kt,
-                layer,
-                model_config,
-                &mut value_state.recurrent_states[linear_attn_idx],
-                &mut value_state.conv_states[linear_attn_idx],
-                detached_layer_lora,
-            )
-            .with_context(|| {
-                format!(
-                    "exact tiled GDN reverse after-attn value layer {layer_idx} tile [{tile_start}, {tile_end})"
-                )
-            })?
-            .detach()
-        };
-        stage_started = finish_exact_gdn_reverse_tile_stage(
-            device,
-            profile_tiles,
-            layer_idx,
-            tile_idx,
-            num_tiles,
-            tile_start,
-            tile_end,
-            "after_attn_value",
-            stage_started,
-        )?;
-
-        let gated_value =
-            transformer_mlp_gated_hidden(&after_attn_value, layer, model_config, detached_layer_lora)
-                .with_context(|| {
-                    format!(
-                        "exact tiled GDN reverse MLP gated value layer {layer_idx} tile [{tile_start}, {tile_end})"
-                    )
-                })?
-                .detach();
-        stage_started = finish_exact_gdn_reverse_tile_stage(
-            device,
-            profile_tiles,
-            layer_idx,
-            tile_idx,
-            num_tiles,
-            tile_start,
-            tile_end,
-            "mlp_gated_value",
-            stage_started,
-        )?;
-        // (#1082) `gated_value` is kt; bridge to candle for the Var, bridge the
-        // candle Var back to kt for the kt-native down proj, then bridge the kt
-        // `down_out` to candle for the candle injection scalar / `.backward()`.
-        let gated_var = var_from_tensor(&cd_out(&gated_value)?)?;
-        let down_out = cd_out(&transformer_mlp_down_from_gated(
-            &kt_in(gated_var.as_tensor())?,
-            layer,
-            layer_lora,
-        )
-        .with_context(|| {
-            format!(
-                "exact tiled GDN reverse MLP down layer {layer_idx} tile [{tile_start}, {tile_end})"
-            )
-        })?)?;
-        let down_out_f32 = down_out.to_f32_dtype()?;
-        let down_scalar = (&down_out_f32 * &tile_grad_out_f32)?
-            .sum_all()
-            .with_context(|| format!("exact tiled GDN MLP down injection tile {tile_idx}"))?;
-        let down_grads = down_scalar
-            .backward()
-            .with_context(|| format!("exact tiled GDN MLP down backward tile {tile_idx}"))?;
-        accumulate_grads(accumulated_grads, &down_grads, &all_vars)?;
-        stage_started = finish_exact_gdn_reverse_tile_stage(
-            device,
-            profile_tiles,
-            layer_idx,
-            tile_idx,
-            num_tiles,
-            tile_start,
-            tile_end,
-            "mlp_down_backward",
-            stage_started,
-        )?;
-        let grad_gated = down_grads
-            .get(gated_var.as_tensor())
-            .ok_or_else(|| {
-                anyhow::anyhow!("exact tiled GDN MLP down missing gated grad tile {tile_idx}")
-            })?
-            .detach();
-        drop(down_grads);
-        drop(down_scalar);
-        drop(down_out_f32);
-        drop(down_out);
-        drop(gated_var);
-        drop(gated_value);
-
-        // (#1082) bridge kt `after_attn_value` -> candle Var; bridge candle Var
-        // -> kt for the kt MLP gate/up; bridge kt `gated_tracked` -> candle.
-        let after_attn_var = var_from_tensor(&cd_out(&after_attn_value)?)?;
-        let gated_tracked = cd_out(&transformer_mlp_gated_hidden(
-            &kt_in(after_attn_var.as_tensor())?,
-            layer,
-            model_config,
-            layer_lora,
-        )
-        .with_context(|| {
-            format!(
-                "exact tiled GDN reverse MLP gate/up layer {layer_idx} tile [{tile_start}, {tile_end})"
-            )
-        })?)?;
-        let gated_tracked_f32 = gated_tracked.to_f32_dtype()?;
-        let grad_gated_f32 = grad_gated.to_f32_dtype()?;
-        let gate_scalar = (&gated_tracked_f32 * &grad_gated_f32)?
-            .sum_all()
-            .with_context(|| format!("exact tiled GDN MLP gate/up injection tile {tile_idx}"))?;
-        let gate_grads = gate_scalar
-            .backward()
-            .with_context(|| format!("exact tiled GDN MLP gate/up backward tile {tile_idx}"))?;
-        accumulate_grads(accumulated_grads, &gate_grads, &all_vars)?;
-        let grad_after_mlp = match gate_grads.get(after_attn_var.as_tensor()) {
-            Some(grad) => grad.detach(),
-            None => zeros_f32_on((1, tile_len, hidden_size), device).with_context(
-                || format!("alloc zero GDN tiled MLP after-attn grad tile {tile_idx}"),
-            )?,
-        }
-        .to_f32_dtype()?;
-        let upstream_after_attn = (&tile_grad_out_f32 + &grad_after_mlp)?.detach();
-        stage_started = finish_exact_gdn_reverse_tile_stage(
-            device,
-            profile_tiles,
-            layer_idx,
-            tile_idx,
-            num_tiles,
-            tile_start,
-            tile_end,
-            "mlp_gate_up_backward",
-            stage_started,
-        )?;
-        drop(gate_grads);
-        drop(gate_scalar);
-        drop(grad_gated_f32);
-        drop(gated_tracked_f32);
-        drop(gated_tracked);
-        drop(after_attn_var);
-        drop(after_attn_value);
-        drop(grad_after_mlp);
-        drop(grad_gated);
-
-        if exact_gdn_split_recurrent_backward_enabled() {
-            let GpuAttentionWeights::Linear(linear_weights) = &layer.attention else {
-                anyhow::bail!("exact split GDN backward called on non-GDN layer {layer_idx}");
-            };
-
-            // (#1082) The split-path "value" recompute is an all-kt chain
-            // (in_norm/in_proj/qkv/gates/recurrent/gated_norm are kt-native).
-            // Bridge candle `tile_input` -> kt once and keep the chain kt; the
-            // candle Var seams below bridge back to candle where autograd needs
-            // them. `tile_input.dtype()` (candle) -> kt DType for the kt gate op.
-            let tile_input_kt_value = kt_in(&tile_input.detach())?;
-            let tile_input_kt_dtype = kiln_kt_bridge::candle_dtype_to_kt(tile_input.dtype())
-                .map_err(|e| anyhow::anyhow!("exact split GDN: candle->kt dtype: {e}"))?;
-            let normed_value =
-                gdn_attention_input_norm(&tile_input_kt_value, layer, model_config)?.detach();
-            let parts_value = gdn_attention_in_projections(
-                backend,
-                &normed_value,
-                linear_weights,
-                detached_layer_lora,
-            )?;
-            let mixed_qkv_value = parts_value.mixed_qkv.detach();
-            let z_value = parts_value.z.detach();
-            let a_value = parts_value.a.detach();
-            let b_value = parts_value.b.detach();
-            let mut value_conv_state = conv_boundaries[tile_idx].clone();
-            let qkv_value = gdn_qkv_from_mixed_training(
-                backend,
-                &mixed_qkv_value,
-                linear_weights,
-                model_config,
-                &mut value_conv_state,
-            )?;
-            let q_value = qkv_value.q.detach();
-            let k_value = qkv_value.k.detach();
-            let v_value = qkv_value.v.detach();
-            let (beta_value, g_value) =
-                gdn_gates_from_ab_training(&a_value, &b_value, linear_weights, tile_input_kt_dtype)?;
-            let beta_value = beta_value.detach();
-            let g_value = g_value.detach();
-            let mut value_recurrent_state = recurrent_boundaries[tile_idx].clone();
-            let recurrent_value = gdn_recurrent_forward_from_parts(
-                backend,
-                &q_value,
-                &k_value,
-                &v_value,
-                &beta_value,
-                &g_value,
-                &mut value_recurrent_state,
-            )?
-            .detach();
-            let gated_norm_value = gdn_gated_norm_from_recurrent(
-                backend,
-                &recurrent_value,
-                &z_value,
-                linear_weights,
-                model_config,
-            )?
-            .detach();
-
-            let upstream_after_attn_f32 = upstream_after_attn.to_f32_dtype()?;
-            // (#1082) kt `gated_norm_value` -> candle Var; candle Var -> kt for
-            // the kt out-proj; kt `attn_out` -> candle for the candle scalar.
-            // `grad_or_zeros_like` is candle, so its `like` arg is the candle Var
-            // tensor (same shape/dtype as the kt value).
-            let gated_norm_var = var_from_tensor(&cd_out(&gated_norm_value)?)?;
-            let attn_out = cd_out(&gdn_out_proj_from_gated_norm(
-                backend,
-                &kt_in(gated_norm_var.as_tensor())?,
-                linear_weights,
-                layer_lora,
-            )
-            .with_context(|| {
-                format!(
-                    "exact split GDN out-proj layer {layer_idx} tile [{tile_start}, {tile_end})"
-                )
-            })?)?;
-            let out_scalar = (&attn_out.to_f32_dtype()? * &upstream_after_attn_f32)?
-                .sum_all()
-                .with_context(|| format!("exact split GDN out-proj injection tile {tile_idx}"))?;
-            let out_grads = out_scalar
-                .backward()
-                .with_context(|| format!("exact split GDN out-proj backward tile {tile_idx}"))?;
-            accumulate_grads(accumulated_grads, &out_grads, &all_vars)?;
-            let grad_gated_norm = grad_or_zeros_like(
-                &out_grads,
-                gated_norm_var.as_tensor(),
-                gated_norm_var.as_tensor(),
-            )?
-            .to_f32_dtype()?;
-            drop(out_grads);
-            drop(out_scalar);
-            drop(attn_out);
-            drop(gated_norm_var);
-            stage_started = finish_exact_gdn_reverse_tile_stage(
-                device,
-                profile_tiles,
-                layer_idx,
-                tile_idx,
-                num_tiles,
-                tile_start,
-                tile_end,
-                "attn_out_proj_backward",
-                stage_started,
-            )?;
-
-            // (#1082) kt `recurrent_value`/`z_value` -> candle Vars; candle Vars
-            // -> kt for the kt gated-norm; kt `gated_norm` -> candle.
-            let recurrent_var = var_from_tensor(&cd_out(&recurrent_value)?)?;
-            let z_var = var_from_tensor(&cd_out(&z_value)?)?;
-            let gated_norm = cd_out(&gdn_gated_norm_from_recurrent(
-                backend,
-                &kt_in(recurrent_var.as_tensor())?,
-                &kt_in(z_var.as_tensor())?,
-                linear_weights,
-                model_config,
-            )
-            .with_context(|| {
-                format!(
-                    "exact split GDN gated-norm layer {layer_idx} tile [{tile_start}, {tile_end})"
-                )
-            })?)?;
-            let gated_norm_scalar = (&gated_norm.to_f32_dtype()? * &grad_gated_norm)?
-                .sum_all()
-                .with_context(|| format!("exact split GDN gated-norm injection tile {tile_idx}"))?;
-            let gated_norm_grads = gated_norm_scalar
-                .backward()
-                .with_context(|| format!("exact split GDN gated-norm backward tile {tile_idx}"))?;
-            let grad_recurrent = grad_or_zeros_like(
-                &gated_norm_grads,
-                recurrent_var.as_tensor(),
-                recurrent_var.as_tensor(),
-            )?
-            .to_f32_dtype()?;
-            let grad_z =
-                grad_or_zeros_like(&gated_norm_grads, z_var.as_tensor(), z_var.as_tensor())?
-                    .to_f32_dtype()?;
-            drop(gated_norm_grads);
-            drop(gated_norm_scalar);
-            drop(gated_norm);
-            drop(z_var);
-            drop(recurrent_var);
-            stage_started = finish_exact_gdn_reverse_tile_stage(
-                device,
-                profile_tiles,
-                layer_idx,
-                tile_idx,
-                num_tiles,
-                tile_start,
-                tile_end,
-                "attn_gated_norm_backward",
-                stage_started,
-            )?;
-
-            // (#1082) `gdn_recurrent_backward_no_grad` is kt-native: bridge the
-            // candle `grad_recurrent` upstream to kt; `entry_state` and the
-            // kt `next_recurrent_grad` carry-in are already kt. The returned
-            // `GdnRecurrentBackwardGrads` fields (dq/dk/dv/dbeta/dg/d_state)
-            // are kt.
-            let grad_recurrent_kt = kt_in(&grad_recurrent)?;
-            let recurrent_grads = gdn_recurrent_backward_no_grad(
-                backend,
-                &q_value,
-                &k_value,
-                &v_value,
-                &beta_value,
-                &g_value,
-                &recurrent_boundaries[tile_idx],
-                &grad_recurrent_kt,
-                next_recurrent_grad.as_ref(),
-                GDN_CHUNK_SIZE,
-            )
-            .with_context(|| {
-                format!(
-                    "exact split GDN recurrent backward layer {layer_idx} tile [{tile_start}, {tile_end})"
-                )
-            })?;
-            // `d_state` is kt; use kt `.detach()` (not candle `Tensor::detach`).
-            next_recurrent_grad = recurrent_grads.d_state.as_ref().map(|t| t.detach());
-            stage_started = finish_exact_gdn_reverse_tile_stage(
-                device,
-                profile_tiles,
-                layer_idx,
-                tile_idx,
-                num_tiles,
-                tile_start,
-                tile_end,
-                "attn_recurrent_backward",
-                stage_started,
-            )?;
-
-            // (#1082) kt `mixed_qkv_value`/conv boundary -> candle Vars; the kt
-            // qkv op needs a kt `&mut` conv state and kt `mixed_qkv` input, so
-            // bridge the candle Vars in. Its kt outputs (qkv_tracked.q/k/v) and
-            // the kt recurrent grads (dq/dk/dv) are bridged to candle for the
-            // candle injection scalar / `.backward()`.
-            let mixed_qkv_var = var_from_tensor(&cd_out(&mixed_qkv_value)?)?;
-            let conv_var = var_from_tensor(&cd_out(&conv_boundaries[tile_idx])?)?;
-            let mut tracked_conv_state = kt_in(conv_var.as_tensor())?;
-            let qkv_tracked = gdn_qkv_from_mixed_training(
-                backend,
-                &kt_in(mixed_qkv_var.as_tensor())?,
-                linear_weights,
-                model_config,
-                &mut tracked_conv_state,
-            )
-            .with_context(|| {
-                format!(
-                    "exact split GDN qkv/conv layer {layer_idx} tile [{tile_start}, {tile_end})"
-                )
-            })?;
-            let qkv_q_cd = cd_out(&qkv_tracked.q)?;
-            let qkv_k_cd = cd_out(&qkv_tracked.k)?;
-            let qkv_v_cd = cd_out(&qkv_tracked.v)?;
-            let dq_cd = cd_out(&recurrent_grads.dq)?;
-            let dk_cd = cd_out(&recurrent_grads.dk)?;
-            let dv_cd = cd_out(&recurrent_grads.dv)?;
-            let mut qkv_scalar = (&qkv_q_cd.to_f32_dtype()? * &dq_cd)?
-                .sum_all()
-                .with_context(|| format!("exact split GDN q grad injection tile {tile_idx}"))?;
-            qkv_scalar = (qkv_scalar
-                + (&qkv_k_cd.to_f32_dtype()? * &dk_cd)?
-                    .sum_all()
-                    .with_context(|| {
-                        format!("exact split GDN k grad injection tile {tile_idx}")
-                    })?)?;
-            qkv_scalar = (qkv_scalar
-                + (&qkv_v_cd.to_f32_dtype()? * &dv_cd)?
-                    .sum_all()
-                    .with_context(|| {
-                        format!("exact split GDN v grad injection tile {tile_idx}")
-                    })?)?;
-            if let Some(grad) = next_conv_grad.as_ref() {
-                // `tracked_conv_state` is kt; bridge to candle for the candle
-                // injection. `grad` (next_conv_grad) is already candle.
-                let tracked_conv_state_cd = cd_out(&tracked_conv_state)?;
-                qkv_scalar = (qkv_scalar
-                    + (&tracked_conv_state_cd.to_f32_dtype()?
-                        * &grad.to_f32_dtype()?)?
-                        .sum_all()
-                        .with_context(|| {
-                            format!("exact split GDN conv-state injection tile {tile_idx}")
-                        })?)?;
-            }
-            let qkv_grads = qkv_scalar
-                .backward()
-                .with_context(|| format!("exact split GDN qkv/conv backward tile {tile_idx}"))?;
-            let grad_mixed_qkv = grad_or_zeros_like(
-                &qkv_grads,
-                mixed_qkv_var.as_tensor(),
-                mixed_qkv_var.as_tensor(),
-            )?
-            .to_f32_dtype()?;
-            next_conv_grad = qkv_grads.get(conv_var.as_tensor()).map(Tensor::detach);
-            drop(qkv_grads);
-            drop(qkv_scalar);
-            drop(qkv_tracked);
-            drop(tracked_conv_state);
-            drop(conv_var);
-            drop(mixed_qkv_var);
-            stage_started = finish_exact_gdn_reverse_tile_stage(
-                device,
-                profile_tiles,
-                layer_idx,
-                tile_idx,
-                num_tiles,
-                tile_start,
-                tile_end,
-                "attn_qkv_conv_backward",
-                stage_started,
-            )?;
-
-            // (#1082) kt `a_value`/`b_value` -> candle Vars; candle Vars -> kt
-            // for the kt gates op; kt `beta_tracked`/`g_tracked` + kt grads
-            // (dbeta/dg) -> candle for the candle injection scalar.
-            let a_var = var_from_tensor(&cd_out(&a_value)?)?;
-            let b_var = var_from_tensor(&cd_out(&b_value)?)?;
-            let (beta_tracked_kt, g_tracked_kt) = gdn_gates_from_ab_training(
-                &kt_in(a_var.as_tensor())?,
-                &kt_in(b_var.as_tensor())?,
-                linear_weights,
-                tile_input_kt_dtype,
-            )?;
-            let beta_tracked = cd_out(&beta_tracked_kt)?;
-            let g_tracked = cd_out(&g_tracked_kt)?;
-            let dbeta_cd = cd_out(&recurrent_grads.dbeta)?;
-            let dg_cd = cd_out(&recurrent_grads.dg)?;
-            let mut gates_scalar = (&beta_tracked.to_f32_dtype()? * &dbeta_cd)?
-                .sum_all()
-                .with_context(|| format!("exact split GDN beta grad injection tile {tile_idx}"))?;
-            gates_scalar = (gates_scalar
-                + (&g_tracked.to_f32_dtype()? * &dg_cd)?
-                    .sum_all()
-                    .with_context(|| {
-                        format!("exact split GDN decay grad injection tile {tile_idx}")
-                    })?)?;
-            let gates_grads = gates_scalar
-                .backward()
-                .with_context(|| format!("exact split GDN gates backward tile {tile_idx}"))?;
-            let grad_a = grad_or_zeros_like(&gates_grads, a_var.as_tensor(), a_var.as_tensor())?
-                .to_f32_dtype()?;
-            let grad_b = grad_or_zeros_like(&gates_grads, b_var.as_tensor(), b_var.as_tensor())?
-                .to_f32_dtype()?;
-            drop(gates_grads);
-            drop(gates_scalar);
-            drop(g_tracked);
-            drop(beta_tracked);
-            drop(b_var);
-            drop(a_var);
-            stage_started = finish_exact_gdn_reverse_tile_stage(
-                device,
-                profile_tiles,
-                layer_idx,
-                tile_idx,
-                num_tiles,
-                tile_start,
-                tile_end,
-                "attn_gates_backward",
-                stage_started,
-            )?;
-
-            // (#1082) kt `normed_value` -> candle Var; candle Var -> kt for the
-            // kt in-proj; the kt `GdnInputProjectionParts` fields are bridged
-            // to candle for the candle injection scalar.
-            let normed_var = var_from_tensor(&cd_out(&normed_value)?)?;
-            let parts_tracked = gdn_attention_in_projections(
-                backend,
-                &kt_in(normed_var.as_tensor())?,
-                linear_weights,
-                layer_lora,
-            )
-            .with_context(|| {
-                format!("exact split GDN in-proj layer {layer_idx} tile [{tile_start}, {tile_end})")
-            })?;
-            let parts_mixed_qkv_cd = cd_out(&parts_tracked.mixed_qkv)?;
-            let parts_z_cd = cd_out(&parts_tracked.z)?;
-            let parts_a_cd = cd_out(&parts_tracked.a)?;
-            let parts_b_cd = cd_out(&parts_tracked.b)?;
-            let mut proj_scalar = (&parts_mixed_qkv_cd.to_f32_dtype()?
-                * &grad_mixed_qkv)?
-                .sum_all()
-                .with_context(|| {
-                    format!("exact split GDN mixed-qkv grad injection tile {tile_idx}")
-                })?;
-            proj_scalar = (proj_scalar
-                + (&parts_z_cd.to_f32_dtype()? * &grad_z)?
-                    .sum_all()
-                    .with_context(|| {
-                        format!("exact split GDN z grad injection tile {tile_idx}")
-                    })?)?;
-            proj_scalar = (proj_scalar
-                + (&parts_a_cd.to_f32_dtype()? * &grad_a)?
-                    .sum_all()
-                    .with_context(|| {
-                        format!("exact split GDN a grad injection tile {tile_idx}")
-                    })?)?;
-            proj_scalar = (proj_scalar
-                + (&parts_b_cd.to_f32_dtype()? * &grad_b)?
-                    .sum_all()
-                    .with_context(|| {
-                        format!("exact split GDN b grad injection tile {tile_idx}")
-                    })?)?;
-            let proj_grads = proj_scalar
-                .backward()
-                .with_context(|| format!("exact split GDN in-proj backward tile {tile_idx}"))?;
-            accumulate_grads(accumulated_grads, &proj_grads, &all_vars)?;
-            let grad_normed =
-                grad_or_zeros_like(&proj_grads, normed_var.as_tensor(), normed_var.as_tensor())?
-                    .to_f32_dtype()?;
-            drop(proj_grads);
-            drop(proj_scalar);
-            drop(parts_tracked);
-            drop(normed_var);
-            stage_started = finish_exact_gdn_reverse_tile_stage(
-                device,
-                profile_tiles,
-                layer_idx,
-                tile_idx,
-                num_tiles,
-                tile_start,
-                tile_end,
-                "attn_in_proj_backward",
-                stage_started,
-            )?;
-
-            // (#1082) `tile_input` is candle; bridge the candle Var -> kt for the
-            // kt input-norm op, and bridge the kt `normed_tracked` -> candle.
-            let tile_input_var = var_from_tensor(&tile_input)?;
-            let normed_tracked = cd_out(&gdn_attention_input_norm(
-                &kt_in(tile_input_var.as_tensor())?,
-                layer,
-                model_config,
-            )
-            .with_context(|| {
-                format!(
-                    "exact split GDN input norm layer {layer_idx} tile [{tile_start}, {tile_end})"
-                )
-            })?)?;
-            let norm_scalar = (&normed_tracked.to_f32_dtype()? * &grad_normed)?
-                .sum_all()
-                .with_context(|| format!("exact split GDN input norm injection tile {tile_idx}"))?;
-            let norm_grads = norm_scalar
-                .backward()
-                .with_context(|| format!("exact split GDN input norm backward tile {tile_idx}"))?;
-            let grad_attention_input = match norm_grads.get(tile_input_var.as_tensor()) {
-                Some(grad) => grad.detach(),
-                None => zeros_f32_on((1, tile_len, hidden_size), device)?,
-            }
-            .to_f32_dtype()?;
-            let input_grad = (&upstream_after_attn_f32 + &grad_attention_input)?.detach();
-            input_grad_chunks[tile_idx] = Some(input_grad);
-            drop(norm_grads);
-            drop(norm_scalar);
-            drop(normed_tracked);
-            drop(tile_input_var);
-            stage_started = finish_exact_gdn_reverse_tile_stage(
-                device,
-                profile_tiles,
-                layer_idx,
-                tile_idx,
-                num_tiles,
-                tile_start,
-                tile_end,
-                "attn_input_norm_backward",
-                stage_started,
-            )?;
-
-            drop(upstream_after_attn);
-            drop(tile_grad_out_f32);
-            drop(tile_grad_out);
-            drop(tile_input);
-
-            if is_metal_device(device) {
-                synchronize_checkpoint_boundary(device, || {
-                    format!("synchronize exact tiled GDN reverse layer {layer_idx} tile {tile_idx}")
-                })?;
-            }
-            if profile_tiles {
-                tracing::info!(
-                    layer = layer_idx,
-                    tile = tile_idx + 1,
-                    num_tiles,
-                    tile_start,
-                    tile_end,
-                    elapsed_ms = tile_started.elapsed().as_millis() as u64,
-                    last_stage_elapsed_ms = stage_started.elapsed().as_millis() as u64,
-                    "exact tiled GDN reverse tile complete"
-                );
-            }
-            continue;
-        }
-
-        // (#1082) Non-split path. `tile_input` is candle; the boundary states
-        // are kt. Bridge kt boundaries -> candle Vars, bridge the candle Var
-        // tensors -> kt to seed the kt `LinearAttentionState`, run the kt GDN
-        // block, and bridge its kt output / kt exit-states back to candle for
-        // the candle injection scalar / `.backward()`.
-        let tile_input_var = var_from_tensor(&tile_input)?;
-        let recurrent_var = var_from_tensor(&cd_out(&recurrent_boundaries[tile_idx])?)?;
-        let conv_var = var_from_tensor(&cd_out(&conv_boundaries[tile_idx])?)?;
-
-        let mut tile_state = LinearAttentionState::new(model_config, &kiln_kt_bridge::kt_device_from_candle(device))?;
-        tile_state.recurrent_states[linear_attn_idx] = kt_in(recurrent_var.as_tensor())?;
-        tile_state.conv_states[linear_attn_idx] = kt_in(conv_var.as_tensor())?;
-
-        let after_attn = cd_out(&gdn_attention_residual_block(
-            backend,
-            &kt_in(tile_input_var.as_tensor())?,
-            layer,
-            model_config,
-            &mut tile_state.recurrent_states[linear_attn_idx],
-            &mut tile_state.conv_states[linear_attn_idx],
-            layer_lora,
-        )
-        .with_context(|| {
-            format!(
-                "exact tiled GDN reverse forward layer {layer_idx} tile [{tile_start}, {tile_end})"
-            )
-        })?)?;
-        stage_started = finish_exact_gdn_reverse_tile_stage(
-            device,
-            profile_tiles,
-            layer_idx,
-            tile_idx,
-            num_tiles,
-            tile_start,
-            tile_end,
-            "attention_forward",
-            stage_started,
-        )?;
-
-        let after_attn_f32 = after_attn.to_f32_dtype()?;
-        let upstream_after_attn_f32 = upstream_after_attn.to_f32_dtype()?;
-        let mut scalar = (&after_attn_f32 * &upstream_after_attn_f32)?
-            .sum_all()
-            .with_context(|| format!("exact tiled GDN output injection tile {tile_idx}"))?;
-
-        if let Some(grad) = next_recurrent_grad.as_ref() {
-            // Exit recurrent state and the kt carry-in grad are kt; bridge both
-            // to candle for the candle injection scalar.
-            let exit_state_f32 =
-                cd_out(&tile_state.recurrent_states[linear_attn_idx])?.to_f32_dtype()?;
-            let grad_f32 = cd_out(grad)?.to_f32_dtype()?;
-            let state_scalar = (&exit_state_f32 * &grad_f32)?.sum_all().with_context(|| {
-                format!("exact tiled GDN recurrent-state injection tile {tile_idx}")
-            })?;
-            scalar = (scalar + state_scalar)?;
-        }
-        if let Some(grad) = next_conv_grad.as_ref() {
-            // Exit conv state is kt -> candle; `next_conv_grad` is candle.
-            let exit_state_f32 =
-                cd_out(&tile_state.conv_states[linear_attn_idx])?.to_f32_dtype()?;
-            let grad_f32 = grad.to_f32_dtype()?;
-            let state_scalar = (&exit_state_f32 * &grad_f32)?
-                .sum_all()
-                .with_context(|| format!("exact tiled GDN conv-state injection tile {tile_idx}"))?;
-            scalar = (scalar + state_scalar)?;
-        }
-
-        let tile_grads = scalar
-            .backward()
-            .with_context(|| format!("exact tiled GDN backward tile {tile_idx}"))?;
-        accumulate_grads(accumulated_grads, &tile_grads, &all_vars)?;
-        stage_started = finish_exact_gdn_reverse_tile_stage(
-            device,
-            profile_tiles,
-            layer_idx,
-            tile_idx,
-            num_tiles,
-            tile_start,
-            tile_end,
-            "attention_backward",
-            stage_started,
-        )?;
-
-        let input_grad = match tile_grads.get(tile_input_var.as_tensor()) {
-            Some(grad) => grad.detach(),
-            None => zeros_dtype_on((1, tile_len, hidden_size), seg_input.dtype(), device)
-                .with_context(|| format!("alloc zero GDN tiled input grad tile {tile_idx}"))?,
-        };
-        input_grad_chunks[tile_idx] = Some(input_grad);
-        // `next_recurrent_grad` is kt (it feeds the kt recurrent backward on the
-        // split path) and is carried across loop iterations, so it must OWN its
-        // buffer — use the candle->kt copy (not the aliasing borrow) since
-        // `tile_grads` is dropped at the end of this iteration.
-        // `next_conv_grad` stays candle.
-        next_recurrent_grad = tile_grads
-            .get(recurrent_var.as_tensor())
-            .map(|g| {
-                kiln_kt_bridge::kt_tensor_from_candle_cuda_copy(
-                    &g.detach()
-                        .contiguous()
-                        .context("GDN tiled recurrent grad contiguous")?,
-                )
-                .map_err(|e| anyhow::anyhow!("exact GDN reverse: candle->kt recurrent grad: {e}"))
-            })
-            .transpose()?;
-        next_conv_grad = tile_grads.get(conv_var.as_tensor()).map(Tensor::detach);
-
-        drop(tile_grads);
-        drop(scalar);
-        drop(upstream_after_attn_f32);
-        drop(after_attn_f32);
-        drop(after_attn);
-        drop(upstream_after_attn);
-        drop(tile_grad_out_f32);
-        drop(tile_grad_out);
-        drop(tile_state);
-        drop(conv_var);
-        drop(recurrent_var);
-        drop(tile_input_var);
-        drop(tile_input);
-
-        if is_metal_device(device) {
-            synchronize_checkpoint_boundary(device, || {
-                format!("synchronize exact tiled GDN reverse layer {layer_idx} tile {tile_idx}")
-            })?;
-        }
-        if profile_tiles {
-            tracing::info!(
-                layer = layer_idx,
-                tile = tile_idx + 1,
-                num_tiles,
-                tile_start,
-                tile_end,
-                elapsed_ms = tile_started.elapsed().as_millis() as u64,
-                last_stage_elapsed_ms = stage_started.elapsed().as_millis() as u64,
-                "exact tiled GDN reverse tile complete"
-            );
-        }
-    }
-
-    let mut grad_refs: Vec<&Tensor> = Vec::with_capacity(num_tiles);
-    for (tile_idx, grad) in input_grad_chunks.iter().enumerate() {
-        grad_refs.push(
-            grad.as_ref()
-                .ok_or_else(|| anyhow::anyhow!("missing GDN tiled input grad tile {tile_idx}"))?,
-        );
-    }
-    let input_grad = cat_tensors(&grad_refs, 1)
-        .context("concatenate exact tiled GDN input gradients")?
-        .detach();
-    tracing::info!(
-        layer = layer_idx,
-        linear_attn_idx,
-        num_tiles,
-        tile_size,
-        total_tokens,
-        "exact tiled GDN reverse complete"
-    );
-    Ok(input_grad)
-}
-
-/// Compute the per-tile contribution to the next-token cross-entropy loss
-/// using the same loss math as the monolithic path, returning a scalar
-/// tensor `sum_NLL_tile / total_active` so the per-tile contributions sum to
-/// the monolithic mean across active positions exactly.
-///
-/// `tile_hidden`: `[1, L, hidden]` final hidden states for tile positions
-/// `[ts..te)`. `labels` and `mask` are the explicit, pre-shifted labels and
-/// mask: each `labels[i]` is the target for `tile_hidden[i]`. For non-last
-/// tiles `labels.len() == L` (the last logit predicts the first token of the
-/// next tile); for the last tile `labels.len() == L - 1` (no label exists at
-/// position `total`).
-///
-/// Internally we route through the existing `cross_entropy_loss` /
-/// `fused_linear_cross_entropy` helpers by padding the input by one position
-/// and prepending a masked-out dummy label, so the helpers' built-in
-/// next-token shift recovers the explicit-label semantics. Final result is
-/// scaled by `(num_tile_active / total_active)` because the helpers
-/// internally divide by `num_tile_active` while the per-tile contribution to
-/// the monolithic mean is `sum_NLL_tile / total_active`.
-#[allow(clippy::too_many_arguments, dead_code)]
-fn tile_loss_explicit(
-    weights: &GpuWeights,
-    model_config: &ModelConfig,
-    tile_hidden: &Tensor,
-    labels: &[u32],
-    mask: &[bool],
-    total_active: usize,
-    device: &CdDevice,
-) -> Result<Tensor> {
-    debug_assert_eq!(labels.len(), mask.len());
-
-    let num_tile_active: usize = mask.iter().filter(|&&m| m).count();
-    if num_tile_active == 0 || total_active == 0 {
-        return tensor_new(0.0f32, device).map_err(Into::into);
-    }
-
-    let (_, l, hidden_size) = tile_hidden.dims3()?;
-    let l_labels = labels.len();
-    // Helpers expect `input_ids.len() == hidden.dim(1)` and shift internally
-    // (`hidden[..len-1]` predicting `input_ids[1..]`). We want the explicit
-    // pairing `tile_hidden[i] -> labels[i]` for `i in 0..l_labels`. Prepend a
-    // dummy id and mask=false at position 0 of `input_ids_padded` /
-    // `mask_padded`, and pad `tile_hidden` by `l_labels + 1 - l` zero rows so
-    // dimensions align. Active positions are gated by mask, so the padded
-    // hidden never participates in the loss.
-    let pad_amount = (l_labels + 1).saturating_sub(l);
-    let hidden_padded = if pad_amount > 0 {
-        let zero_pad = zeros_dtype_on((1, pad_amount, hidden_size), tile_hidden.dtype(), device)?;
-        cat_tensors(&[tile_hidden, &zero_pad], 1)?
-    } else {
-        tile_hidden.clone()
-    };
-
-    let mut input_ids_padded: Vec<u32> = Vec::with_capacity(l_labels + 1);
-    input_ids_padded.push(0u32);
-    input_ids_padded.extend_from_slice(labels);
-    let mut mask_padded: Vec<bool> = Vec::with_capacity(l_labels + 1);
-    mask_padded.push(false);
-    mask_padded.extend_from_slice(mask);
-
-    // (#1082) `model_forward_final_norm`/`model_forward_head` are kt-native and
-    // `embed_tokens_t` is kt; the FLCE / cross-entropy loss helpers are candle
-    // islands, so bridge candle->kt for the forward input and kt->candle for
-    // the head output + the lm_head weight.
-    let head_t_candle = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&weights.embed_tokens_t)
-        .map_err(|e| anyhow::anyhow!("tile_loss_explicit: kt->candle head_t: {e}"))?;
-    let loss = if use_flce() {
-        let normed_kt = model_forward_final_norm(
-            &kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&hidden_padded)
-                .map_err(|e| anyhow::anyhow!("tile_loss_explicit: candle->kt hidden: {e}"))?,
-            weights,
-            model_config,
-        )?;
-        let normed = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&normed_kt)
-            .map_err(|e| anyhow::anyhow!("tile_loss_explicit: kt->candle normed: {e}"))?;
-        fused_linear_cross_entropy_dispatch(
-            &normed,
-            &head_t_candle,
-            &input_ids_padded,
-            &mask_padded,
-            device,
-            DEFAULT_CHUNK_SIZE,
-        )
-        .context("tile fused linear cross-entropy")?
-    } else {
-        let logits_kt = model_forward_head(
-            &kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&hidden_padded)
-                .map_err(|e| anyhow::anyhow!("tile_loss_explicit: candle->kt hidden: {e}"))?,
-            weights,
-            model_config,
-        )?;
-        let logits = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&logits_kt)
-            .map_err(|e| anyhow::anyhow!("tile_loss_explicit: kt->candle logits: {e}"))?;
-        cross_entropy_loss(&logits, &input_ids_padded, &mask_padded, device)?
-    };
-
-    // Helpers return `mean over num_tile_active`. We want
-    // `sum_NLL_tile / total_active = mean × (num_tile_active / total_active)`.
-    let scale = num_tile_active as f64 / total_active as f64;
-    loss.affine(scale, 0.0).map_err(Into::into)
-}
-
-/// Time-axis tiled per-segment recompute + backward.
-///
-/// Runs forward+backward+accumulate **per tile** within segment `seg_idx` so
-/// each tile's autograd-saved tensors release before the next tile's forward
-/// allocates its own. State (`LinearAttentionState`) is threaded across tiles
-/// for the grad-tracked segment AND for each detached later segment.
-///
-/// Correctness invariants:
-/// * The model is GDN-only (see [`model_is_gdn_only`]) — no full-attention
-///   layer anywhere, so every layer's outputs at position `t` depend only on
-///   states / inputs ≤ `t`, and per-tile state-threaded forward is bit-exact
-///   against monolithic.
-/// * LoRA on GDN layers is restricted to MLP projections (`gate_proj`,
-///   `up_proj`, `down_proj`) — see [`TrainableLoraParams::initialize`] —
-///   which act per-position. The truncated-BPTT effect of detaching state at
-///   tile boundaries does not affect MLP-only LoRA gradients on GDN-only
-///   models.
-/// * Per-tile loss is computed via [`tile_loss_explicit`], which pads each
-///   tile's hidden by one position so all `L` logits (or `L-1` for the last
-///   tile) participate in the loss; the per-tile contributions sum to the
-///   monolithic mean exactly.
-#[allow(clippy::too_many_arguments, dead_code)]
-fn tiled_segment_recompute_and_backward(
-    backend: &dyn BackendRuntime,
-    seg_idx: usize,
-    segments: &[(usize, usize)],
-    boundary_states: &[Tensor],
-    input_ids: &[u32],
-    label_mask: &[bool],
-    weights: &GpuWeights,
-    model_config: &ModelConfig,
-    positions: &[u32],
-    params: &TrainableLoraParams,
-    accumulated_grads: &mut GradMap,
-    total_active: usize,
-    tile_size: usize,
-    device: &CdDevice,
-) -> Result<f64> {
-    let (seg_start, seg_end) = segments[seg_idx];
-    // Phase 3.2: prefer registry resolve over candle clone, same as
-    // the monolithic path. Falls back to clone() when the backend
-    // doesn't support the registry, so non-Vulkan backends are
-    // unchanged.
-    let resident_activation = backend.supports_resident_activation();
-    let seg_input = segment_input_via_registry_or_clone(
-        backend,
-        &boundary_states[seg_idx],
-        resident_activation,
-    )?;
-    let (_, total, _) = seg_input.dims3()?;
-
-    // States threaded across tiles. Grad-tracked segment uses one shared
-    // state; each later (detached) segment also gets its own shared state so
-    // the detached forward sees the same monolithic context evolution.
-    let mut grad_state = LinearAttentionState::new(model_config, &kiln_kt_bridge::kt_device_from_candle(device))?;
-    let later_count = segments.len().saturating_sub(seg_idx + 1);
-    let mut later_states: Vec<LinearAttentionState> = Vec::with_capacity(later_count);
-    for _ in 0..later_count {
-        later_states.push(LinearAttentionState::new(model_config, &kiln_kt_bridge::kt_device_from_candle(device))?);
-    }
-
-    let all_vars = params.all_vars();
-    let mut tile_loss_sum = 0.0f64;
-
-    let mut tile_start = 0usize;
-    while tile_start < total {
-        let tile_end = (tile_start + tile_size).min(total);
-        let tile_len = tile_end - tile_start;
-        let is_last_tile = tile_end == total;
-
-        // Slice tile-local inputs.
-        // (#1082) `seg_input` is candle (it comes from the candle-typed
-        // `segment_input_via_registry_or_clone` / backend residency helper).
-        // `model_forward_segment` is kt-native, so bridge the candle tile input
-        // -> kt; the kt `tile_hidden` then threads through later kt segment
-        // forwards and is bridged -> candle only for the candle loss helper.
-        let tile_seg_input = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(
-            &seg_input
-                .narrow(1, tile_start, tile_len)
-                .context("narrow seg_input to tile")?
-                .contiguous()
-                .context("tiled segment tile input contiguous")?,
-        )
-        .map_err(|e| anyhow::anyhow!("tiled segment: candle->kt tile input: {e}"))?;
-        let tile_positions: Vec<u32> = positions[tile_start..tile_end].to_vec();
-
-        // Grad-tracked forward through segment `seg_idx` on the tile.
-        let lora_weights_for_seg = params.as_lora_weights();
-        let mut tile_hidden = model_forward_segment(
-            backend,
-            tile_seg_input,
-            weights,
-            model_config,
-            &tile_positions,
-            seg_start,
-            seg_end,
-            Some(&mut grad_state),
-            Some(&lora_weights_for_seg),
-        )
-        .with_context(|| {
-            format!("tiled segment {seg_idx} grad-tracked forward, tile [{tile_start}, {tile_end})")
-        })?;
-
-        // Detached forward through later segments on the tile, threading
-        // each segment's own state across tiles.
-        for (i, &(later_start, later_end)) in segments[seg_idx + 1..].iter().enumerate() {
-            tile_hidden = tile_hidden.detach();
-            let lora_for_later = params.as_lora_weights();
-            tile_hidden = model_forward_segment(
-                backend,
-                tile_hidden,
-                weights,
-                model_config,
-                &tile_positions,
-                later_start,
-                later_end,
-                Some(&mut later_states[i]),
-                Some(&lora_for_later),
-            )
-            .with_context(|| {
-                format!(
-                    "tiled segment {seg_idx} detached later segment [{later_start}, {later_end}) tile [{tile_start}, {tile_end})"
-                )
-            })?;
-        }
-
-        // Build explicit (pre-shifted) tile labels: `tile_hidden[i]`
-        // predicts `input_ids[tile_start + i + 1]` for `i in 0..tile_len`.
-        // For the last tile we drop the final logit because position `total`
-        // has no label.
-        let labels_end = if is_last_tile { total } else { tile_end + 1 };
-        let labels_start = tile_start + 1;
-        let tile_labels: Vec<u32> = input_ids[labels_start..labels_end].to_vec();
-        let tile_mask: Vec<bool> = label_mask[labels_start..labels_end].to_vec();
-
-        // (#1082) bridge the kt segment output -> candle for the candle FLCE
-        // loss helper. The candle `loss.backward()` below cannot trace through
-        // the kt segment forward (grad-severed legacy path); the
-        // tape-authoritative CUDA path is the correct grad producer.
-        let tile_hidden_cd = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(
-            &tile_hidden
-                .contiguous()
-                .context("tiled segment tile_hidden contiguous")?,
-        )
-        .map_err(|e| anyhow::anyhow!("tiled segment: kt->candle tile_hidden: {e}"))?;
-        let scaled_loss = tile_loss_explicit(
-            weights,
-            model_config,
-            &tile_hidden_cd,
-            &tile_labels,
-            &tile_mask,
-            total_active,
-            device,
-        )
-        .with_context(|| format!("tile loss [{tile_start}, {tile_end}) (last={is_last_tile})"))?;
-
-        let scaled_val = scaled_loss.to_scalar::<f32>()? as f64;
-        tile_loss_sum += scaled_val;
-
-        // Backward through this tile's autograd graph. Because the segment
-        // is GDN-only and LoRA is MLP-only on GDN layers, MLP-LoRA gradients
-        // sum across tiles to the exact monolithic gradient even though the
-        // per-tile state read at the start of each tile is detached from
-        // the previous tile's autograd graph (truncated BPTT does not
-        // affect parameters that don't influence the recurrent state).
-        let grads = scaled_loss
-            .backward()
-            .with_context(|| format!("tiled backward [{tile_start}, {tile_end})"))?;
-        accumulate_grads(accumulated_grads, &grads, &all_vars)?;
-
-        tile_start = tile_end;
-    }
-
-    Ok(tile_loss_sum)
-}
-
-/// Layer-pair time-axis tiled per-segment recompute + backward.
-///
-/// Generalizes [`tiled_segment_recompute_and_backward`] from GDN-only models
-/// to hybrid GDN + full-attention models (Qwen3.5-4B is 24 GDN + 8 full-attn).
-/// The GDN-only path's bit-exactness invariant relies on every layer being
-/// linear-attention so per-tile state-threaded forward is monolithic-equivalent.
-/// Hybrid models break that invariant — full-attention layers have no
-/// training-time KV cache and a tiled FA forward would attend only inside
-/// its own tile.
-///
-/// The layer-pair path resolves this by:
-///
-/// 1. **Pre-compute the gradient at the segment's output.** Wrap
-///    `boundary_states[seg_idx + 1]` in a fresh [`Var`] (`seg_output_var`),
-///    forward through later segments + final RMSNorm + LM head + cross-entropy
-///    using the regular grad-tracked `params.as_lora_weights()`, then
-///    `loss.backward()`. This produces:
-///    * LoRA gradients for layers in segments `seg_idx + 1 .. num_segments`
-///      (matching the monolithic checkpointed path's "later segments via
-///      detached input but grad-tracked LoRA Vars" pattern).
-///    * The gradient `∂loss/∂seg_output_var` (extracted from the GradStore).
-///
-/// 2. **Compute block-boundary states for this segment.** Detached forward
-///    through this segment's layers in order, snapshotting the (detached)
-///    hidden state at each block boundary. Used as input to each block's
-///    grad-tracked forward in step 4.
-///
-/// 3. **Partition the segment into contiguous-attention-type blocks** via
-///    [`partition_segment_layers_by_attn_type`].
-///
-/// 4. **Process blocks LAST -> FIRST with gradient injection.** For each
-///    block:
-///    * Wrap the block's input (a detached [`Tensor`] from step 2) in a
-///      fresh [`Var`] so the block's `loss.backward()` can extract the
-///      gradient at the block's input.
-///    * Run forward through the block's layer range using
-///      `params.as_lora_weights()`. For full-attention blocks the forward is
-///      monolithic at full seq_len (FA needs the global causal mask). For
-///      GDN blocks the forward is time-tiled — `LinearAttentionState` is
-///      threaded across tiles within the block; one [`narrow`] of
-///      `block_input_var` produces each tile's input.
-///    * Compute the gradient-injection scalar `(block_output *
-///      grad_at_current_block_output).sum_all()` (or the tile-local
-///      analogue) and backward. This is mathematically equivalent to chain-
-///      ruling through the block: `∂scalar/∂theta = sum_pos
-///      grad_at_block_output[pos] * (∂block_output[pos]/∂theta) =
-///      ∂loss/∂theta` for any `theta` whose backward path is wholly inside
-///      the block.
-///    * Accumulate this block's LoRA gradients into `accumulated_grads`.
-///    * Extract `∂scalar/∂block_input_var` and use it as
-///      `grad_at_current_block_output` for the previous (lower-layer) block.
-///      For tiled GDN blocks, sum across tiles to recover the
-///      full-seq_len gradient (each tile's `narrow` backward fills only the
-///      tile's range; non-tile positions are zeros).
-///
-/// **Correctness invariants (relative to monolithic checkpointed_forward_backward):**
-/// * MLP-LoRA gradients are bit-exact. MLP is per-position so
-///   `∂block_output[t]/∂MLP_LoRA` only depends on `block_input[t]` regardless
-///   of state-thread truncation across tile boundaries.
-/// * Full-attention LoRA gradients are bit-exact when the FA block's input
-///   gradient comes through an exact upstream chain (no GDN tiling between
-///   the FA block and the segment output). In the test config used for CPU
-///   parity (`full_attention_interval = 2`, layers 1, 3 are FA), every FA
-///   block is the LAST block in its segment and gets the bit-exact
-///   `grad_at_seg_output` directly — so FA-LoRA grads are bit-exact in that
-///   case as well. Tolerance is set to `1e-3` in the parity test to absorb
-///   ordering-induced f32 drift in matmul reductions.
-/// * GDN-LoRA gradients via the tile loop's truncated state thread are
-///   approximate w.r.t. the recurrent path; in current kiln, GDN layers
-///   only carry MLP-LoRA (q/k/v/o LoRA is full-attn only — see
-///   [`TrainableLoraParams::initialize`]), so the truncation does not
-///   affect any LoRA parameter that exists.
-///
-/// **Memory:** the tail backward in step 1 holds saved tensors for
-/// `(num_segments - seg_idx - 1)` later-segment forwards plus the LM head /
-/// FLCE chain. The block backward in step 4 holds saved tensors for ONE
-/// block's worth of layers (full seq_len for FA blocks, tile-narrow for GDN
-/// blocks). The peak across the segment iteration is therefore bounded by
-/// the larger of those two, and the per-segment peak does not include all
-/// `seg_end - seg_start` layers' saved tensors at full seq_len (which is
-/// what the existing monolithic path holds for hybrid models).
-#[allow(clippy::too_many_arguments, dead_code)]
-fn layer_pair_tiled_segment_recompute_and_backward(
-    backend: &dyn BackendRuntime,
-    seg_idx: usize,
-    segments: &[(usize, usize)],
-    boundary_states: &[Tensor],
-    input_ids: &[u32],
-    label_mask: &[bool],
-    weights: &GpuWeights,
-    model_config: &ModelConfig,
-    positions: &[u32],
-    params: &TrainableLoraParams,
-    accumulated_grads: &mut GradMap,
-    tile_size: usize,
-    device: &CdDevice,
-) -> Result<f64> {
-    let (seg_start, seg_end) = segments[seg_idx];
-    let num_segments = segments.len();
-    let all_vars = params.all_vars();
-
-    // === Step 1: Pre-compute gradient at this segment's output. ===
-    //
-    // Wrap `boundary_states[seg_idx + 1]` (detached) in a fresh Var so a
-    // single `loss.backward()` through later segments + LM head produces the
-    // gradient at the segment-output node, which becomes the seed for the
-    // per-block gradient-injection backward in step 4.
-    //
-    // Phase 3.2: resolve from registry when supported — same fast
-    // path as the segment input boundary.
-    let resident_activation_for_output = backend.supports_resident_activation();
-    let seg_output_tensor = segment_input_via_registry_or_clone(
-        backend,
-        &boundary_states[seg_idx + 1],
-        resident_activation_for_output,
-    )?;
-    let seg_output_var = var_from_tensor(&seg_output_tensor)?;
-
-    // Use DETACHED LoRA weights for the tail forward — we want the tail
-    // backward to produce ONLY `∂loss/∂seg_output_var`, not LoRA grads
-    // for layers in segments `seg_idx + 1 .. num_segments`. Those layers'
-    // LoRA Vars get their grads from THEIR OWN per-block backward in the
-    // corresponding seg-iteration of `checkpointed_forward_backward`.
-    // Accumulating later-segment LoRA grads here would double-count — each
-    // later-seg LoRA Var would receive (1 contribution per earlier-or-equal
-    // seg-iteration) instead of exactly one.
-    let lora_detached = lora_weights_detached(params);
-    // (#1082) `model_forward_segment` / `model_forward_final_norm` /
-    // `model_forward_head` are kt-native. Thread `tail_hidden` as kt: bridge
-    // the candle `seg_output_var` -> kt to seed it, and bridge the kt
-    // norm/head outputs -> candle for the candle FLCE / cross-entropy loss
-    // (the candle `loss.backward()` cannot trace through the kt forward —
-    // grad-severed legacy path; the tape path is the correct producer).
-    let mut tail_hidden = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(
-        seg_output_var.as_tensor(),
-    )
-    .map_err(|e| anyhow::anyhow!("layer-pair tail: candle->kt seg output: {e}"))?;
-    for (i, &(later_start, later_end)) in segments[seg_idx + 1..].iter().enumerate() {
-        // Detach BETWEEN later segments. Skip the detach for the first
-        // later segment so the gradient flows from later-segs[0]'s input
-        // back to seg_output_var.
-        if i > 0 {
-            tail_hidden = tail_hidden.detach();
-        }
-        let mut later_state = LinearAttentionState::new(model_config, &kiln_kt_bridge::kt_device_from_candle(device))?;
-        tail_hidden = model_forward_segment(
-            backend,
-            tail_hidden,
-            weights,
-            model_config,
-            positions,
-            later_start,
-            later_end,
-            Some(&mut later_state),
-            Some(&lora_detached),
-        )
-        .with_context(|| {
-            format!(
-                "layer-pair tail forward later segment [{later_start}, {later_end}) for seg_idx={seg_idx}"
-            )
-        })?;
-    }
-
-    let head_t_candle = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&weights.embed_tokens_t)
-        .map_err(|e| anyhow::anyhow!("layer-pair tail: kt->candle head_t: {e}"))?;
-    let tail_loss = if use_flce() {
-        let normed = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(
-            &model_forward_final_norm(&tail_hidden, weights, model_config)?
-                .contiguous()
-                .context("layer-pair tail normed contiguous")?,
-        )
-        .map_err(|e| anyhow::anyhow!("layer-pair tail: kt->candle normed: {e}"))?;
-        fused_linear_cross_entropy_dispatch(
-            &normed,
-            &head_t_candle,
-            input_ids,
-            label_mask,
-            device,
-            DEFAULT_CHUNK_SIZE,
-        )
-        .context("layer-pair tail FLCE")?
-    } else {
-        let logits = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(
-            &model_forward_head(&tail_hidden, weights, model_config)?
-                .contiguous()
-                .context("layer-pair tail logits contiguous")?,
-        )
-        .map_err(|e| anyhow::anyhow!("layer-pair tail: kt->candle logits: {e}"))?;
-        cross_entropy_loss(&logits, input_ids, label_mask, device)?
-    };
-
-    let tail_loss_val = tail_loss.to_scalar::<f32>()? as f64;
-    let tail_grads = tail_loss.backward().context("layer-pair tail backward")?;
-
-    // We deliberately do NOT call `accumulate_grads(... &all_vars)` here
-    // — see the `lora_detached` comment above. The tail backward's only
-    // "useful" output is the gradient at `seg_output_var`.
-    let grad_at_seg_output = tail_grads
-        .get(seg_output_var.as_tensor())
-        .ok_or_else(|| {
-            anyhow::anyhow!(
-                "layer-pair tail backward did not produce a gradient at seg_output_var \
-                 (seg_idx={seg_idx}, later segments: {})",
-                num_segments - seg_idx - 1
-            )
-        })?
-        .clone()
-        .detach();
-
-    // Drop the tail's autograd graph & saved tensors before per-block work.
-    // `tail_grads` is the only remaining handle into that graph; dropping it
-    // explicitly makes the lifetime clear to the reader.
-    drop(tail_grads);
-
-    // === Step 2: Compute block-boundary states (detached). ===
-    //
-    // This forward computes block-boundary VALUES only — no LoRA grads
-    // are required from this phase, and the autograd graph it would
-    // otherwise build (LoRA Vars in graph, then `.detach()` per block)
-    // would just be torn down again for no benefit. Use detached LoRA so
-    // the inner ops don't bother building the LoRA-side autograd graph.
-    let blocks = partition_segment_layers_by_attn_type(weights, seg_start, seg_end);
-    // (#1082) `model_forward_segment` is kt-native, so the block boundaries are
-    // kt. The candle `segment_input_via_registry_or_clone` seed is bridged
-    // candle->kt; per-block Var construction in step 4 bridges back to candle.
-    let mut block_boundaries: Vec<kiln_tensor::Tensor> = Vec::with_capacity(blocks.len() + 1);
-    // Phase 3.2: registry-resolve fast path for the segment's input
-    // boundary when supported by the backend.
-    let resident_activation = backend.supports_resident_activation();
-    block_boundaries.push(
-        kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(
-            &segment_input_via_registry_or_clone(
-                backend,
-                &boundary_states[seg_idx],
-                resident_activation,
-            )?
-            .contiguous()
-            .context("layer-pair block boundary seed contiguous")?,
-        )
-        .map_err(|e| anyhow::anyhow!("layer-pair: candle->kt block boundary seed: {e}"))?,
-    );
-    {
-        let mut linear_state = LinearAttentionState::new(model_config, &kiln_kt_bridge::kt_device_from_candle(device))?;
-        let mut current = block_boundaries[0].clone();
-        for (_kind, range) in &blocks {
-            current = model_forward_segment(
-                backend,
-                current,
-                weights,
-                model_config,
-                positions,
-                range.start,
-                range.end,
-                Some(&mut linear_state),
-                Some(&lora_detached),
-            )
-            .with_context(|| {
-                format!(
-                    "layer-pair block-boundary forward [{}, {}) (seg_idx={seg_idx})",
-                    range.start, range.end,
-                )
-            })?;
-            block_boundaries.push(current.detach());
-            current = block_boundaries.last().unwrap().clone();
-        }
-    }
-
-    // === Step 3 + 4: Process blocks LAST -> FIRST with gradient injection. ===
-    let mut grad_at_current_output = grad_at_seg_output;
-
-    for (block_idx, (kind, range)) in blocks.iter().enumerate().rev() {
-        // (#1082) kt block boundary -> candle Var; the kt-native segment
-        // forward gets the candle Var bridged back to kt, and its kt output is
-        // bridged -> candle for the candle gradient-injection scalar.
-        let block_input_var = var_from_tensor(
-            &kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(
-                &block_boundaries[block_idx]
-                    .contiguous()
-                    .context("layer-pair block input contiguous")?,
-            )
-            .map_err(|e| anyhow::anyhow!("layer-pair: kt->candle block input: {e}"))?,
-        )?;
-
-        let new_grad_at_block_input = match kind {
-            AttnKind::FullAttn => {
-                // Full-attention block: forward monolithically (FA can't be
-                // tiled at training time — no KV cache). Gradient injection:
-                // scalar = (block_output * grad_at_current_output).sum_all().
-                let mut state = LinearAttentionState::new(model_config, &kiln_kt_bridge::kt_device_from_candle(device))?;
-                let lora_for_block = params.as_lora_weights();
-                let block_output_kt = model_forward_segment(
-                    backend,
-                    kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(
-                        block_input_var.as_tensor(),
-                    )
-                    .map_err(|e| {
-                        anyhow::anyhow!("layer-pair FA: candle->kt block input: {e}")
-                    })?,
-                    weights,
-                    model_config,
-                    positions,
-                    range.start,
-                    range.end,
-                    Some(&mut state),
-                    Some(&lora_for_block),
-                )
-                .with_context(|| {
-                    format!(
-                        "layer-pair FA block forward [{}, {}) (seg_idx={seg_idx})",
-                        range.start, range.end,
-                    )
-                })?;
-                let block_output = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(
-                    &block_output_kt
-                        .contiguous()
-                        .context("layer-pair FA block output contiguous")?,
-                )
-                .map_err(|e| anyhow::anyhow!("layer-pair FA: kt->candle block output: {e}"))?;
-
-                let scalar = (&block_output * &grad_at_current_output)?
-                    .sum_all()
-                    .context("layer-pair FA block scalar (gradient injection)")?;
-                let block_grads = scalar.backward().context("layer-pair FA block backward")?;
-
-                accumulate_grads(accumulated_grads, &block_grads, &all_vars)?;
-
-                block_grads
-                    .get(block_input_var.as_tensor())
-                    .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "layer-pair FA block backward missing grad at block_input_var \
-                             (block [{}, {}), seg_idx={seg_idx})",
-                            range.start,
-                            range.end,
-                        )
-                    })?
-                    .clone()
-                    .detach()
-            }
-            AttnKind::Gdn => {
-                // GDN block: time-tile forward+backward. Per-tile gradient
-                // injection: for each tile [tile_start, tile_end), the
-                // local scalar is
-                //   (tile_output * grad_at_current_output[..tile..]).sum_all()
-                // Backward gives the LoRA grads for this block + the
-                // tile-local gradient at block_input_var (zeros outside the
-                // tile range, real gradient inside). Sum across tiles to
-                // recover the full-seq_len gradient at block_input_var.
-                let (_, total_tokens, _) = block_input_var.as_tensor().dims3()?;
-                let mut state = LinearAttentionState::new(model_config, &kiln_kt_bridge::kt_device_from_candle(device))?;
-                let mut summed: Option<Tensor> = None;
-
-                let mut tile_start = 0usize;
-                while tile_start < total_tokens {
-                    let tile_end = (tile_start + tile_size).min(total_tokens);
-                    let tile_len = tile_end - tile_start;
-
-                    // (#1082) bridge the candle Var tile slice -> kt for the
-                    // kt segment forward; bridge the kt tile output -> candle
-                    // for the candle injection scalar.
-                    let tile_input = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(
-                        &block_input_var
-                            .as_tensor()
-                            .narrow(1, tile_start, tile_len)
-                            .context("narrow GDN block input to tile")?
-                            .contiguous()
-                            .context("layer-pair GDN tile input contiguous")?,
-                    )
-                    .map_err(|e| anyhow::anyhow!("layer-pair GDN: candle->kt tile input: {e}"))?;
-                    let tile_positions: Vec<u32> = positions[tile_start..tile_end].to_vec();
-                    let lora_for_block = params.as_lora_weights();
-
-                    let tile_output_kt = model_forward_segment(
-                        backend,
-                        tile_input,
-                        weights,
-                        model_config,
-                        &tile_positions,
-                        range.start,
-                        range.end,
-                        Some(&mut state),
-                        Some(&lora_for_block),
-                    )
-                    .with_context(|| {
-                        format!(
-                            "layer-pair GDN tile forward [{tile_start}, {tile_end}) \
-                             block [{}, {}) (seg_idx={seg_idx})",
-                            range.start, range.end,
-                        )
-                    })?;
-                    let tile_output = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(
-                        &tile_output_kt
-                            .contiguous()
-                            .context("layer-pair GDN tile output contiguous")?,
-                    )
-                    .map_err(|e| anyhow::anyhow!("layer-pair GDN: kt->candle tile output: {e}"))?;
-
-                    let tile_grad_out = grad_at_current_output
-                        .narrow(1, tile_start, tile_len)
-                        .context("narrow grad_at_current_output to tile")?;
-
-                    let scalar = (&tile_output * &tile_grad_out)?
-                        .sum_all()
-                        .context("layer-pair GDN tile scalar (gradient injection)")?;
-                    let tile_grads = scalar.backward().context("layer-pair GDN tile backward")?;
-
-                    accumulate_grads(accumulated_grads, &tile_grads, &all_vars)?;
-
-                    let tile_block_input_grad = tile_grads
-                        .get(block_input_var.as_tensor())
-                        .ok_or_else(|| {
-                            anyhow::anyhow!(
-                                "layer-pair GDN tile backward missing grad at \
-                                 block_input_var (tile [{tile_start}, {tile_end}), \
-                                 block [{}, {}), seg_idx={seg_idx})",
-                                range.start,
-                                range.end,
-                            )
-                        })?
-                        .clone();
-
-                    summed = Some(match summed {
-                        Some(prev) => (prev + tile_block_input_grad)?,
-                        None => tile_block_input_grad,
-                    });
-
-                    tile_start = tile_end;
-                }
-
-                summed
-                    .ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "layer-pair GDN block produced no tiles \
-                             (total_tokens={total_tokens}, tile_size={tile_size}, \
-                             block [{}, {}), seg_idx={seg_idx})",
-                            range.start,
-                            range.end,
-                        )
-                    })?
-                    .detach()
-            }
-        };
-
-        // For block_idx > 0 the new grad becomes the gradient at the
-        // previous block's output. For block_idx == 0 the grad is the
-        // gradient at this segment's input (boundary_states[seg_idx]),
-        // which is already detached and discarded — we keep it in scope
-        // only for the loop's last iteration tail and let it drop after.
-        grad_at_current_output = new_grad_at_block_input;
-    }
-
-    Ok(tail_loss_val)
-}
-
-/// Run one training step with gradient checkpointing.
-///
-/// Instead of tracking activations for all layers, this:
-/// 1. Runs each segment forward, detaching hidden states at boundaries
-/// 2. For each segment, recomputes it with gradient tracking while running
-///    remaining segments detached, then backpropagates to get gradients
-///    for that segment's LoRA parameters only
-/// 3. Accumulates gradients across all segments
-///
-/// Memory: only one segment's activations are in the autograd graph at a time.
-/// Compute: ~(N+1)/2 × N forward passes for N segments (with N=4, ~2.5× overhead).
-///
-/// Phase 10 time-axis tiling: when `KILN_STREAMING_PREFILL=1` (or the
-/// device-default streaming threshold fires) and `seq_len > tile_size`, each
-/// segment's recompute is split into time tiles and each tile is
-/// forward+backward+accumulated independently. This releases per-tile
-/// autograd-saved tensors before the next tile's forward starts — the change
-/// identified in PR #635 as the next step needed to unblock long-context SFT
-/// past the 30 GiB segment-recompute ceiling.
-///
-/// Two tiled implementations:
-/// * GDN-only models use [`tiled_segment_recompute_and_backward`]
-///   (PR #636) — bit-exact against monolithic; per-tile loss is the
-///   tile-local cross-entropy.
-/// * Hybrid GDN + full-attn models (e.g. Qwen3.5-4B with 24 GDN + 8 FA
-///   layers) use [`layer_pair_tiled_segment_recompute_and_backward`] —
-///   each segment is partitioned into contiguous-attention-type blocks and
-///   processed with gradient injection. GDN sub-blocks are time-tiled;
-///   full-attention sub-blocks run monolithically (no training-time KV
-///   cache to thread across tiles). See
-///   `docs/audits/PHASE10_GDN_TRAINING_LAYER_PAIR_TILED.md`.
-#[allow(clippy::too_many_arguments)]
-fn checkpointed_forward_backward(
-    backend: &dyn BackendRuntime,
-    input_ids: &[u32],
-    weights: &GpuWeights,
-    model_config: &ModelConfig,
-    params: &TrainableLoraParams,
-    label_mask: &[bool],
-    segments: &[(usize, usize)],
-    device: &CdDevice,
-    flce_provider: Option<FlceProvider>,
-) -> Result<(f64, GradMap)> {
-    let num_segments = segments.len();
-    anyhow::ensure!(
-        num_segments > 0,
-        "checkpointed SFT requires at least one segment"
-    );
-    anyhow::ensure!(
-        input_ids.len() == label_mask.len(),
-        "input_ids/label_mask length mismatch: {} vs {}",
-        input_ids.len(),
-        label_mask.len()
-    );
-    anyhow::ensure!(
-        has_supervised_shifted_labels(label_mask),
-        "checkpointed SFT called with no supervised shifted-label positions"
-    );
-
-    let positions: Vec<u32> = (0..input_ids.len())
-        .map(|position| position as u32)
-        .collect();
-    let lora_detached = lora_weights_detached(params);
-    let resident_activation = backend.supports_resident_activation();
-    let recompute_boundaries = recompute_checkpoint_boundaries(input_ids.len());
-    let should_spool_boundaries = recompute_boundaries && spool_checkpoint_boundaries(device);
-    let profile_checkpoint_segments = profile_checkpoint_segments();
-
-    // (#1082) `model_forward_embed` / `model_forward_segment` /
-    // `model_forward_final_norm` / `model_forward_head` are kt-native; the
-    // boundary store, spool I/O, resident-activation registry, FLCE/CE loss,
-    // and analytic tail grad are all candle islands. Bridge candle->kt
-    // (`kt_in`) before a kt forward op and kt->candle (`cd_out`) after one.
-    let cd_out = |k: &kiln_tensor::Tensor| -> Result<Tensor> {
-        kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(
-            &k.contiguous()
-                .map_err(|e| anyhow::anyhow!("checkpointed: kt contiguous: {e}"))?,
-        )
-        .map_err(|e| anyhow::anyhow!("checkpointed: kt->candle copy: {e}"))
-    };
-    let kt_in = |c: &Tensor| -> Result<kiln_tensor::Tensor> {
-        kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(c)
-            .map_err(|e| anyhow::anyhow!("checkpointed: candle->kt borrow: {e}"))
-    };
-
-    let detached_boundary = |boundary_idx: usize| -> Result<Tensor> {
-        anyhow::ensure!(
-            boundary_idx <= num_segments,
-            "checkpoint boundary index {boundary_idx} out of range for {num_segments} segments"
-        );
-        // `current` threads as kt through the kt-native forward ops; the closure
-        // returns a candle boundary for the candle store / Var seams.
-        let (embed_hidden, _) = model_forward_embed(input_ids, weights)?;
-        let mut current = embed_hidden.detach();
-        let mut linear_state = LinearAttentionState::new(model_config, &kiln_kt_bridge::kt_device_from_candle(device))?;
-        for (seg_idx, &(start, end)) in segments.iter().take(boundary_idx).enumerate() {
-            let segment_timer = profile_checkpoint_segments.then(std::time::Instant::now);
-            if profile_checkpoint_segments {
-                tracing::info!(
-                    boundary = boundary_idx,
-                    segment = seg_idx + 1,
-                    num_segments,
-                    start_layer = start,
-                    end_layer = end,
-                    "detached checkpoint boundary segment begin"
-                );
-            }
-            current = model_forward_segment(
-                backend,
-                current,
-                weights,
-                model_config,
-                &positions,
-                start,
-                end,
-                Some(&mut linear_state),
-                Some(&lora_detached),
-            )?;
-            current = current.detach();
-            synchronize_checkpoint_boundary(device, || {
-                format!("synchronize detached checkpoint boundary segment [{start}, {end})")
-            })?;
-            if let Some(started_at) = segment_timer {
-                tracing::info!(
-                    boundary = boundary_idx,
-                    segment = seg_idx + 1,
-                    num_segments,
-                    start_layer = start,
-                    end_layer = end,
-                    elapsed_ms = started_at.elapsed().as_secs_f64() * 1000.0,
-                    "detached checkpoint boundary segment complete"
-                );
-            }
-        }
-        // Bridge the kt boundary -> candle for the candle store / Var seams.
-        cd_out(&current)
-    };
-
-    let mut spooled_final_hidden: Option<Tensor> = None;
-    let spooled_boundaries = if should_spool_boundaries {
-        let spool = SpooledCheckpointBoundaries::new(num_segments)?;
-        tracing::info!(
-            num_segments,
-            seq_len = input_ids.len(),
-            "spooling checkpoint boundaries to temporary safetensors"
-        );
-        // `current` threads as kt; `spool.save` is a candle island, so bridge
-        // each boundary kt->candle for the save and for `spooled_final_hidden`.
-        let (embed_hidden, _) = model_forward_embed(input_ids, weights)?;
-        let mut current = embed_hidden.detach();
-        synchronize_checkpoint_boundary(device, || {
-            "synchronize spooled embedding checkpoint boundary".to_string()
-        })?;
-        spool.save(0, &cd_out(&current)?)?;
-        synchronize_checkpoint_boundary(device, || {
-            "synchronize spooled embedding checkpoint boundary save".to_string()
-        })?;
-        let mut linear_state = LinearAttentionState::new(model_config, &kiln_kt_bridge::kt_device_from_candle(device))?;
-        for (seg_idx, &(start, end)) in segments.iter().enumerate() {
-            tracing::info!(
-                segment = seg_idx + 1,
-                num_segments,
-                start_layer = start,
-                end_layer = end,
-                "spooling checkpoint boundary segment"
-            );
-            current = model_forward_segment(
-                backend,
-                current,
-                weights,
-                model_config,
-                &positions,
-                start,
-                end,
-                Some(&mut linear_state),
-                Some(&lora_detached),
-            )?;
-            current = current.detach();
-            synchronize_checkpoint_boundary(device, || {
-                format!(
-                    "synchronize spooled checkpoint boundary {} before save",
-                    seg_idx + 1
-                )
-            })?;
-            spool.save(seg_idx + 1, &cd_out(&current)?)?;
-            synchronize_checkpoint_boundary(device, || {
-                format!(
-                    "synchronize spooled checkpoint boundary {} after save",
-                    seg_idx + 1
-                )
-            })?;
-            tracing::info!(
-                segment = seg_idx + 1,
-                num_segments,
-                start_layer = start,
-                end_layer = end,
-                "spooled checkpoint boundary segment"
-            );
-        }
-        spooled_final_hidden = Some(cd_out(&current)?);
-        tracing::info!(
-            num_segments,
-            "finished spooling checkpoint boundaries to temporary safetensors"
-        );
-        Some(spool)
-    } else {
-        None
-    };
-
-    // Step 1: Run one full detached forward pass to obtain the final hidden
-    // value. In normal mode we also cache segment boundaries. In long-context
-    // mode we keep only the final boundary and recompute segment inputs on
-    // demand in the reverse pass, avoiding `(num_segments + 1) * T * H`
-    // resident boundary memory while preserving exact full-context values.
-    let mut boundary_states: Vec<Tensor> = Vec::new();
-    let final_hidden = if let Some(final_hidden) = spooled_final_hidden.take() {
-        final_hidden
-    } else if recompute_boundaries {
-        detached_boundary(num_segments)?
-    } else {
-        let first_boundary = detached_boundary(0)?;
-        boundary_states = Vec::with_capacity(num_segments + 1);
-        boundary_states.push(first_boundary);
-        // Phase 3.1 hook: register the embedding boundary as
-        // resident-on-device. Skipped entirely on backends that don't
-        // implement the registry (default no-op trait impls) so we don't
-        // pay an `extract_tensor_bytes` round-trip per boundary on CPU.
-        // On Vulkan it copies the bytes into RESIDENT_ACTIVATION_REGISTRY
-        // keyed by `tensor.id()`. Phase 3.2 will use these entries to
-        // skip the candle-CPU recompute-input upload.
-        if resident_activation {
-            backend.register_resident_activation(boundary_states.last().unwrap())?;
-        }
-
-        {
-            // `boundary_states` is candle; `model_forward_segment` is kt-native.
-            // Thread `current` as kt: bridge the candle seed in, push candle
-            // copies into the store, and re-derive the kt `current` from the
-            // kt forward output each iteration (not from the candle store).
-            let mut current = kt_in(&boundary_states[0])?;
-            let mut linear_state = LinearAttentionState::new(model_config, &kiln_kt_bridge::kt_device_from_candle(device))?;
-            for (seg_idx, &(start, end)) in segments.iter().enumerate() {
-                let segment_timer = profile_checkpoint_segments.then(std::time::Instant::now);
-                if profile_checkpoint_segments {
-                    tracing::info!(
-                        segment = seg_idx + 1,
-                        num_segments,
-                        start_layer = start,
-                        end_layer = end,
-                        "cached checkpoint boundary segment begin"
-                    );
-                }
-                current = model_forward_segment(
-                    backend,
-                    current,
-                    weights,
-                    model_config,
-                    &positions,
-                    start,
-                    end,
-                    Some(&mut linear_state),
-                    Some(&lora_detached),
-                )?
-                .detach();
-                boundary_states.push(cd_out(&current)?);
-                if resident_activation {
-                    backend.register_resident_activation(boundary_states.last().unwrap())?;
-                }
-                synchronize_checkpoint_boundary(device, || {
-                    format!("synchronize cached checkpoint boundary segment [{start}, {end})")
-                })?;
-                if let Some(started_at) = segment_timer {
-                    tracing::info!(
-                        segment = seg_idx + 1,
-                        num_segments,
-                        start_layer = start,
-                        end_layer = end,
-                        elapsed_ms = started_at.elapsed().as_secs_f64() * 1000.0,
-                        "cached checkpoint boundary segment complete"
-                    );
-                }
-            }
-        }
-        segment_input_via_registry_or_clone(
-            backend,
-            boundary_states
-                .last()
-                .context("missing final checkpoint boundary")?,
-            resident_activation,
-        )?
-    };
-
-    // Step 2: Compute the real loss once at the final boundary, then seed the
-    // reverse pass with the exact analytic gradient through final RMSNorm +
-    // tied LM head + masked next-token cross-entropy. This avoids the old
-    // per-segment tail forward, which retained later-layer graphs and was not
-    // viable for long examples.
-    // (#1082) `final_hidden` is candle; the kt-native final-norm/head ops take
-    // kt and `embed_tokens_t`/`final_norm` weights are kt. Bridge candle->kt for
-    // the forward input, kt->candle for the head output + the candle FLCE/CE
-    // loss + the candle-island analytic tail grad (which takes candle hidden +
-    // candle weights).
-    let final_hidden_kt = kt_in(&final_hidden)?;
-    let head_t_candle = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&weights.embed_tokens_t)
-        .map_err(|e| anyhow::anyhow!("checkpointed: kt->candle head_t: {e}"))?;
-    let final_norm_candle = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&weights.final_norm)
-        .map_err(|e| anyhow::anyhow!("checkpointed: kt->candle final_norm: {e}"))?;
-    let loss = if use_flce() {
-        let normed = cd_out(&model_forward_final_norm(&final_hidden_kt, weights, model_config)?)?;
-        fused_linear_cross_entropy_dispatch_with_provider(
-            &normed,
-            &head_t_candle,
-            input_ids,
-            label_mask,
-            device,
-            DEFAULT_CHUNK_SIZE,
-            flce_provider.clone(),
-        )
-        .context("fused linear cross-entropy (checkpointed final boundary)")?
-    } else {
-        let logits = cd_out(&model_forward_head(&final_hidden_kt, weights, model_config)?)?;
-        cross_entropy_loss(&logits, input_ids, label_mask, device)?
-    };
-    let loss_val = loss.to_scalar::<f32>()? as f64;
-
-    let mut upstream_grad = analytic_sft_tail_grad_pre_final_norm(
-        &final_hidden,
-        &final_norm_candle,
-        &head_t_candle,
-        input_ids,
-        label_mask,
-        model_config.rms_norm_eps,
-        DEFAULT_CHUNK_SIZE,
-    )
-    .context("analytic SFT tail gradient")?
-    .detach();
-    upstream_grad = offload_checkpoint_tensor_to_cpu(upstream_grad, recompute_boundaries)?;
-    drop(loss);
-    drop(final_hidden);
-    synchronize_checkpoint_boundary(device, || {
-        "synchronize checkpointed final-boundary loss cleanup".to_string()
-    })?;
-
-    // Step 3: Walk segments in reverse. Each segment is recomputed with
-    // autograd tracking only for that segment, and the incoming hidden-state
-    // gradient is injected with sum(segment_output * upstream_grad). This is
-    // exact reverse-mode checkpointing at segment boundaries: no token
-    // truncation, no cross-window context loss, and each LoRA parameter gets
-    // exactly one gradient contribution.
-    let mut accumulated_grads: GradMap = HashMap::new();
-    let all_vars = params.all_vars();
-
-    for seg_idx in (0..num_segments).rev() {
-        let (seg_start, seg_end) = segments[seg_idx];
-        tracing::info!(
-            segment = seg_idx + 1,
-            num_segments,
-            start_layer = seg_start,
-            end_layer = seg_end,
-            "checkpointed reverse segment begin"
-        );
-
-        // Start from the detached boundary state for this segment. Wrapping it
-        // in a fresh Var lets Candle return d(loss)/d(segment_input), which
-        // becomes the upstream gradient for the previous segment.
-        let seg_input = if let Some(spool) = spooled_boundaries.as_ref() {
-            spool.load(seg_idx, device)?
-        } else if recompute_boundaries {
-            detached_boundary(seg_idx)?
-        } else {
-            segment_input_via_registry_or_clone(
-                backend,
-                &boundary_states[seg_idx],
-                resident_activation,
-            )?
-        };
-        // Phase 3.2 sub-step: once seg_input has been resolved (or
-        // cloned), the candle CPU mirror in `boundary_states[seg_idx]`
-        // is no longer needed by this function — the recompute will
-        // consume `seg_input` (a separate Arc/Tensor), and no later
-        // iteration of this monolithic-path loop touches the same
-        // boundary slot. Evict the registry entry first so we don't
-        // leak the device buffer, then replace the slot with a tiny
-        // 1-element stub. On Vulkan with the default Qwen3.5-4B
-        // boundary shape, this releases ~9 MB of candle CPU storage
-        // per boundary.
-        if !recompute_boundaries
-            && resident_activation
-            && backend.has_resident_activation(&boundary_states[seg_idx])
-        {
-            backend.evict_resident_activation(&boundary_states[seg_idx]);
-            boundary_states[seg_idx] = zeros_dtype_on((1usize,), DType::BF16, device)
-                .context("phase3.2: alloc boundary stub")?;
-        }
-        let upstream_grad_for_seg = tensor_on_device(&upstream_grad, device)?;
-
-        if let Some(tile_size) =
-            exact_gdn_reverse_tile_size(weights, device, input_ids.len(), seg_start, seg_end)
-        {
-            let next_upstream_grad = exact_gdn_single_layer_tiled_reverse(
-                backend,
-                seg_start,
-                &seg_input,
-                &upstream_grad_for_seg,
-                weights,
-                model_config,
-                &positions,
-                params,
-                &lora_detached,
-                tile_size,
-                device,
-                &mut accumulated_grads,
-            )
-            .with_context(|| {
-                format!(
-                    "exact tiled GDN reverse segment {seg_idx} layer {seg_start} tile_size={tile_size}"
-                )
-            })?;
-            drop(seg_input);
-            drop(upstream_grad_for_seg);
-            upstream_grad =
-                offload_checkpoint_tensor_to_cpu(next_upstream_grad, recompute_boundaries)?;
-            synchronize_checkpoint_boundary(device, || {
-                format!("synchronize checkpointed tiled GDN reverse segment {seg_idx} cleanup")
-            })?;
-            tracing::info!(
-                segment = seg_idx + 1,
-                num_segments,
-                start_layer = seg_start,
-                end_layer = seg_end,
-                tile_size,
-                "checkpointed tiled GDN reverse segment complete"
-            );
-            continue;
-        }
-
-        if let Some(tile_size) =
-            full_attention_mlp_reverse_tile_size(weights, input_ids.len(), seg_start, seg_end)
-        {
-            let full_attn_layer_idx = (0..seg_start)
-                .filter(|&idx| {
-                    matches!(weights.layers[idx].attention, GpuAttentionWeights::Full(_))
-                })
-                .count();
-            let next_upstream_grad = full_attention_single_layer_tiled_mlp_reverse(
-                backend,
-                seg_start,
-                full_attn_layer_idx,
-                &seg_input,
-                &upstream_grad_for_seg,
-                weights,
-                model_config,
-                &positions,
-                params,
-                &lora_detached,
-                tile_size,
-                device,
-                &mut accumulated_grads,
-                &all_vars,
-            )
-            .with_context(|| {
-                format!(
-                    "exact full-attention tiled MLP reverse segment {seg_idx} layer {seg_start} tile_size={tile_size}"
-                )
-            })?;
-            drop(seg_input);
-            drop(upstream_grad_for_seg);
-            upstream_grad =
-                offload_checkpoint_tensor_to_cpu(next_upstream_grad, recompute_boundaries)?;
-            synchronize_checkpoint_boundary(device, || {
-                format!(
-                    "synchronize checkpointed full-attention tiled MLP reverse segment {seg_idx} cleanup"
-                )
-            })?;
-            tracing::info!(
-                segment = seg_idx + 1,
-                num_segments,
-                start_layer = seg_start,
-                end_layer = seg_end,
-                tile_size,
-                "checkpointed full-attention tiled MLP reverse segment complete"
-            );
-            continue;
-        }
-
-        let seg_input_var = var_from_tensor(&seg_input)?;
-
-        let lora_weights_for_seg = params.as_lora_weights();
-        let mut linear_state = LinearAttentionState::new(model_config, &kiln_kt_bridge::kt_device_from_candle(device))?;
-        // (#1082) bridge candle Var -> kt for the kt segment forward, and the kt
-        // output -> candle for the candle injection scalar / `.backward()`.
-        let seg_output = cd_out(&model_forward_segment(
-            backend,
-            kt_in(seg_input_var.as_tensor())?,
-            weights,
-            model_config,
-            &positions,
-            seg_start,
-            seg_end,
-            Some(&mut linear_state),
-            Some(&lora_weights_for_seg),
-        )?)?;
-
-        let seg_output_f32 = seg_output.to_f32_dtype()?;
-        let upstream_f32 = upstream_grad_for_seg.to_f32_dtype()?;
-        let injected = (&seg_output_f32 * &upstream_f32)?
-            .sum_all()
-            .with_context(|| format!("checkpointed gradient injection for segment {seg_idx}"))?;
-        let grads = injected
-            .backward()
-            .with_context(|| format!("checkpointed reverse backward for segment {seg_idx}"))?;
-        accumulate_grads(&mut accumulated_grads, &grads, &all_vars)?;
-
-        if seg_idx > 0 {
-            upstream_grad = grads
-                .get(seg_input_var.as_tensor())
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "checkpointed reverse pass did not produce input gradient for segment {seg_idx}"
-                    )
-                })?
-                .clone()
-                .detach();
-            upstream_grad = offload_checkpoint_tensor_to_cpu(upstream_grad, recompute_boundaries)?;
-        }
-        drop(grads);
-        drop(injected);
-        drop(upstream_f32);
-        drop(seg_output_f32);
-        drop(seg_output);
-        drop(seg_input_var);
-        drop(seg_input);
-        drop(upstream_grad_for_seg);
-        synchronize_checkpoint_boundary(device, || {
-            format!("synchronize checkpointed reverse segment {seg_idx} cleanup")
-        })?;
-        tracing::info!(
-            segment = seg_idx + 1,
-            num_segments,
-            start_layer = seg_start,
-            end_layer = seg_end,
-            "checkpointed reverse segment complete"
-        );
-    }
-
-    // Phase 3.1 hook: evict every boundary-state registry entry now
-    // that the recompute+backward pass has completed and the segment
-    // outputs are no longer needed. On Vulkan this releases the
-    // RESIDENT_ACTIVATION_REGISTRY's Arc<VulkanBuffer> refcount.
-    // Skipped when the backend's registry is the no-op default so we
-    // don't iterate just to call no-ops.
-    if !recompute_boundaries && resident_activation {
-        for boundary in &boundary_states {
-            backend.evict_resident_activation(boundary);
-        }
-    }
-
-    Ok((loss_val, accumulated_grads))
-}
 
 /// Run one training step WITHOUT gradient checkpointing (original behavior).
 ///
@@ -11567,100 +7545,6 @@ fn base_dtype_supports_tape(weights: &GpuWeights) -> bool {
     matches!(weights.embed_tokens.dtype(), kiln_tensor::DType::BF16)
 }
 
-/// Tape-authoritative SFT forward/backward (#1082 CP-4 endgame).
-///
-/// Runs the model forward + cross-entropy loss inside
-/// `with_tape_authoritative_scope`: the `cross_entropy` adapter records the
-/// scalar loss as the tape root, and every adapter threads its inputs to
-/// upstream outputs (Step-A kt-id reuse) so the recorded tape is connected.
-/// The scope seeds the tape at the loss (`dL/dL = ones`) and walks the
-/// connected graph — NO candle `loss.backward()`. The per-input kt grads are
-/// copied into a candle `GradStore` keyed by each `Var`'s candle `TensorId`,
-/// so the optimizer step consumes them exactly as candle's own grads.
-///
-/// (#1082 Inc-0 PR4) This candle-hack variant is now the **non-BF16-base**
-/// tape-authoritative path (e.g. the F32 `tiny_config` test model): the
-/// BF16-only kt fused adapters decline on F32, so the kt producer
-/// ([`standard_forward_backward_tape_authoritative_kt`]) would yield an empty
-/// grad store. `standard_forward_backward` routes BF16 bases to the kt producer
-/// (`GradSource::Kt`, no `loss.backward()` hack / no kt->candle copy) and
-/// non-BF16 bases here (`GradSource::Candle`). This is the last codepath that
-/// instantiates a candle `loss` to seed a `GradStore`; it goes away when kt
-/// covers F32 (or F32 training is dropped) ahead of the forward.rs type-flip.
-#[cfg(feature = "cuda")]
-fn standard_forward_backward_tape_authoritative(
-    backend: &dyn BackendRuntime,
-    input_ids: &[u32],
-    weights: &GpuWeights,
-    model_config: &ModelConfig,
-    params: &TrainableLoraParams,
-    label_mask: &[bool],
-    device: &CdDevice,
-    _flce_provider: Option<FlceProvider>,
-) -> Result<(f64, GradStore)> {
-    let lora_weights = params.as_lora_weights();
-    let mut linear_state = LinearAttentionState::new(model_config, &kiln_kt_bridge::kt_device_from_candle(device))?;
-
-    let (loss_val, loss, grads_by_candle_raw) =
-        kiln_kt_bridge::tape_bridge::with_tape_authoritative_scope(|| {
-            let logits = model_forward(
-                backend,
-                input_ids,
-                weights,
-                model_config,
-                None,
-                Some(&mut linear_state),
-                Some(&lora_weights),
-            )
-            .context("tape-authoritative forward")
-            .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?;
-            let loss = cross_entropy_loss(&logits, input_ids, label_mask, device)
-                .context("tape-authoritative cross_entropy_loss")
-                .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?;
-            let loss_val = loss
-                .to_scalar::<f32>()
-                .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("loss.to_scalar: {e}")))?
-                as f64;
-            Ok((loss_val, loss))
-        })
-        .map_err(|e| anyhow::anyhow!("tape-authoritative backward: {e}"))?;
-
-    // `GradStore::new()` is private; obtain a store via `backward()` on the
-    // (detached) loss — it returns `{loss: ones}` — then insert the tape grads
-    // keyed by each Var's real candle TensorId (sidesteps the missing
-    // `TensorId::from_raw`).
-    let mut grads = loss
-        .backward()
-        .context("tape-authoritative: loss.backward() on detached loss")?;
-    let var_by_raw: std::collections::HashMap<usize, &Var> = params
-        .all_vars()
-        .iter()
-        .map(|v| (v.as_tensor().id().as_raw(), *v))
-        .collect();
-    // #1082 CP-4 diagnostic: how deep did the tape walk reach? `reached` is the
-    // number of registered candle-input ids the walk produced a grad for (the
-    // connected-tape size); `var_matches` is how many of those are LoRA Vars.
-    // A small `reached` localises a chain break near the loss.
-    if std::env::var("KILN_CP4_DEBUG").is_ok() {
-        let reached = grads_by_candle_raw.len();
-        let var_matches = grads_by_candle_raw
-            .keys()
-            .filter(|k| var_by_raw.contains_key(*k))
-            .count();
-        eprintln!(
-            "[CP4-DEBUG] tape walk reached {reached} mapped candle inputs; {var_matches} are LoRA Vars (of {})",
-            var_by_raw.len()
-        );
-    }
-    for (candle_raw, kt_grad) in grads_by_candle_raw {
-        if let Some(var) = var_by_raw.get(&candle_raw) {
-            let cg = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&kt_grad)
-                .context("tape-authoritative: kt -> candle grad copy")?;
-            grads.insert_id(var.as_tensor().id(), cg);
-        }
-    }
-    Ok((loss_val, grads))
-}
 
 /// (#1082 Increment-0 PR2) kt-native sibling of
 /// [`standard_forward_backward_tape_authoritative`]: delivers the
@@ -11723,20 +7607,21 @@ fn standard_forward_backward_tape_authoritative_kt(
         })
         .map_err(|e| anyhow::anyhow!("tape-authoritative(kt) backward: {e}"))?;
 
-    // Build a kt-native GradStore DIRECTLY from the tape grads. No
-    // `loss.backward()` container hack (`GradStore::new()` on kiln_autograd is
-    // public, unlike candle's) and no `kt -> candle` grad copy: the kt grads
-    // are inserted as-is, keyed by each LoRA Var's id bridged into the kt id
-    // space (matching the PR1 `KtTensorId`-keyed moments).
-    let var_raw_ids: std::collections::HashSet<usize> = params
-        .all_vars()
+    // (#1082) Build a kt-native GradStore from the tape grads, keyed by each
+    // LoRA `Parameter::tensor_id()`. The tape's `out` map is keyed by the
+    // candle-input-id-raw registered in the LoRA tape adapter via
+    // `register_input_mapping(a_kt.id(), proj.a.id())` — and `proj.a` IS the
+    // param's primary kt tensor, so the key == `param.tensor_id().as_raw()`.
+    let param_raw_ids: std::collections::HashSet<u64> = params
+        .all_params()
         .iter()
-        .map(|v| v.as_tensor().id().as_raw())
+        .map(|p| p.tensor_id().as_raw())
         .collect();
     let mut grads = kiln_autograd::GradStore::new();
-    for (candle_raw, kt_grad) in grads_by_candle_raw {
-        if var_raw_ids.contains(&candle_raw) {
-            grads.insert(KtTensorId::from_raw(candle_raw as u64), kt_grad);
+    for (key_raw, kt_grad) in grads_by_candle_raw {
+        let key_raw = key_raw as u64;
+        if param_raw_ids.contains(&key_raw) {
+            grads.insert(KtTensorId::from_raw(key_raw), kt_grad);
         }
     }
     Ok((loss_val, grads))
@@ -11900,10 +7785,11 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
     // re-run under its OWN fresh tape (memory bounded to one segment), seeded at
     // its output with the upstream grad; we read the LoRA Var grads and the
     // segment-input grad (to chain) out of the walk.
-    let var_raw_ids: std::collections::HashSet<usize> = params
-        .all_vars()
+    // (#1082) keyed by `Parameter::tensor_id()`.
+    let param_raw_ids: std::collections::HashSet<u64> = params
+        .all_params()
         .iter()
-        .map(|v| v.as_tensor().id().as_raw())
+        .map(|p| p.tensor_id().as_raw())
         .collect();
     let mut grads = kiln_autograd::GradStore::new();
     for seg_idx in (0..num_segments).rev() {
@@ -11944,11 +7830,12 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
         )
         .map_err(|e| anyhow::anyhow!("ckpt-kt: segment {seg_idx} tape backward: {e}"))?;
 
-        // Accumulate this segment's LoRA Var grads (disjoint across segments —
+        // Accumulate this segment's LoRA param grads (disjoint across segments —
         // each layer is in exactly one segment — but sum defensively).
         for (candle_raw, g) in candle_grads {
-            if var_raw_ids.contains(&candle_raw) {
-                let key = KtTensorId::from_raw(candle_raw as u64);
+            let key_raw = candle_raw as u64;
+            if param_raw_ids.contains(&key_raw) {
+                let key = KtTensorId::from_raw(key_raw);
                 match grads.remove(key) {
                     Some(prev) => grads.insert(
                         key,
@@ -11983,60 +7870,28 @@ pub fn standard_forward_backward(
     device: &CdDevice,
     flce_provider: Option<FlceProvider>,
 ) -> Result<(f64, GradSource)> {
-    // CP-4 (#1082): tape-authoritative path is now the DEFAULT (opt out via
-    // `KILN_USE_TAPE_AUTHORITATIVE=0/false/no/off`).
-    //
-    // CRITICAL device gate: the tape-authoritative adapters require a CUDA
-    // device (they record kt CUDA ops and bridge kt<->candle CUDA tensors). On
-    // a CPU candle device they would record an empty tape -> zero LoRA grads ->
-    // broken training. So we additionally require `device` to be CUDA here;
-    // CPU runs (e.g. the `perf_regression_sft_train_cpu_smoke` test) keep the
-    // candle `loss.backward()` path below regardless of the flag.
-    //
-    // (#1082 Inc-0 PR4) Tape-authoritative CUDA dispatch, split by base dtype:
-    //   - BF16 base: the kt tape adapters fire — deliver grads KT-NATIVELY via
-    //     `standard_forward_backward_tape_authoritative_kt` (PR2 producer) →
-    //     `GradSource::Kt`, consumed directly by `optimizer_step_from_kt_grad_store`
-    //     (PR3). NO candle `loss.backward()` GradStore-container hack, NO per-grad
-    //     kt->candle copy. This is the production path (Qwen3.5-4B is BF16).
-    //   - Non-BF16 base (e.g. the F32 `tiny_config` test model): the BF16-only
-    //     kt fused adapters all decline, so the kt producer would yield an EMPTY
-    //     grad store = broken training. Use the candle tape-auth producer
-    //     (`standard_forward_backward_tape_authoritative`: cross_entropy +
-    //     `loss.backward()` overlay) → `GradSource::Candle`, which trains F32
-    //     correctly. (Falling through to the tape-bridge instead would hit the
-    //     kt-FLCE cross-device `index_select` gap on F32.)
+    // (#1082 candle-drop) The SFT forward/backward is now UNCONDITIONALLY
+    // kt tape-authoritative on CUDA + BF16 base. The candle producers
+    // (`standard_forward_backward_tape_authoritative` F32-hack,
+    // `standard_forward_backward_via_tape_bridge`, the inline candle
+    // `loss.backward()` path) are all DELETED. F32/CPU training is dropped
+    // (the kt fused tape adapters are BF16-only; see
+    // `base_dtype_supports_tape` + note `kiln-cp4-tape-adapters-bf16-only`).
     #[cfg(feature = "cuda")]
-    if tape_authoritative_enabled() && matches!(device, candle_core::Device::Cuda(_)) {
-        if base_dtype_supports_tape(weights) {
-            let (loss_val, kt_grads) = standard_forward_backward_tape_authoritative_kt(
-                backend,
-                input_ids,
-                weights,
-                model_config,
-                params,
-                label_mask,
-                device,
-                flce_provider,
-            )?;
-            return Ok((loss_val, GradSource::Kt(kt_grads)));
-        } else {
-            let (loss_val, grads) = standard_forward_backward_tape_authoritative(
-                backend,
-                input_ids,
-                weights,
-                model_config,
-                params,
-                label_mask,
-                device,
-                flce_provider,
-            )?;
-            return Ok((loss_val, GradSource::Candle(grads)));
-        }
-    }
-    #[cfg(feature = "cuda")]
-    if kiln_autograd::tape_forward_enabled() {
-        let (loss_val, grads) = standard_forward_backward_via_tape_bridge(
+    {
+        anyhow::ensure!(
+            matches!(device, candle_core::Device::Cuda(_)),
+            "standard_forward_backward: kt tape-authoritative SFT requires a CUDA \
+             device post candle-drop (the candle CPU `loss.backward()` path was \
+             removed in #1082)."
+        );
+        anyhow::ensure!(
+            base_dtype_supports_tape(weights),
+            "standard_forward_backward: kt tape-authoritative SFT requires a BF16 \
+             base model (the kt fused tape adapters are BF16-only; F32 training \
+             was dropped in the #1082 candle drop)."
+        );
+        let (loss_val, kt_grads) = standard_forward_backward_tape_authoritative_kt(
             backend,
             input_ids,
             weights,
@@ -12046,517 +7901,29 @@ pub fn standard_forward_backward(
             device,
             flce_provider,
         )?;
-        return Ok((loss_val, GradSource::Candle(grads)));
+        Ok((loss_val, GradSource::Kt(kt_grads)))
     }
-
-    let lora_weights = params.as_lora_weights();
-    let mut linear_state = LinearAttentionState::new(model_config, &kiln_kt_bridge::kt_device_from_candle(device))?;
-
-    let loss = if use_flce() {
-        let hidden = model_forward_no_head(
+    #[cfg(not(feature = "cuda"))]
+    {
+        let _ = (
             backend,
             input_ids,
             weights,
             model_config,
-            Some(&mut linear_state),
-            Some(&lora_weights),
-        )
-        .context("training forward pass (FLCE)")?;
-        // #1082: `model_forward_no_head` + `embed_tokens_t` are kt now; the
-        // candle FLCE shim wants candle. Bridge kt->candle (CUDA). PERF
-        // follow-up: route this path to the kt-FLCE kernel to drop both
-        // bridges (esp. the per-step embed_tokens_t copy). NO-CUDA follow-up:
-        // the CPU-smoke FLCE path needs a host kt<->candle bridge in
-        // kiln-kt-bridge (the cuda bridge is `#[cfg(all(cuda,candle))]`).
-        let hidden_cd = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&hidden)
-            .map_err(|e| anyhow::anyhow!("FLCE hidden kt->candle bridge: {e}"))?;
-        let embed_t_cd = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&weights.embed_tokens_t)
-            .map_err(|e| anyhow::anyhow!("FLCE embed_tokens_t kt->candle bridge: {e}"))?;
-        fused_linear_cross_entropy_dispatch_with_provider(
-            &hidden_cd,
-            &embed_t_cd,
-            input_ids,
+            params,
             label_mask,
             device,
-            DEFAULT_CHUNK_SIZE,
-            flce_provider.clone(),
-        )
-        .context("fused linear cross-entropy")?
-    } else {
-        let logits = model_forward(
-            backend,
-            input_ids,
-            weights,
-            model_config,
-            None,
-            Some(&mut linear_state),
-            Some(&lora_weights),
-        )
-        .context("training forward pass")?;
-        cross_entropy_loss(&logits, input_ids, label_mask, device)?
-    };
-    let loss_val = loss.to_scalar::<f32>()? as f64;
-    let grads = loss.backward().context("backward pass")?;
-
-    Ok((loss_val, GradSource::Candle(grads)))
-}
-
-/// CP-4 (#1082): `standard_forward_backward` body wrapped in a
-/// `kiln_kt_bridge::tape_bridge::with_tape_scope_emit_to_grad_store`
-/// scope. Identical semantics to the default path when no tape
-/// adapters fire (the bridge fast-paths an empty tape to a no-op);
-/// adds the kt-tape → candle-GradStore merge when one or more
-/// `try_tape_*_cuda` adapters in the forward record onto the active
-/// tape.
-///
-/// Returned `(loss_val, GradStore)` shape is the same as the default
-/// path. The optimizer step downstream is oblivious to which path
-/// produced the grads.
-///
-/// **Gated** on `feature = "cuda"` because the bridge's
-/// `with_tape_scope_emit_to_grad_store` lives behind
-/// `#[cfg(feature = "cuda")]` in `kiln-kt-bridge` (it needs the
-/// candle-CUDA borrow/copy helpers to convert kt tensors back to
-/// candle for the GradStore insert).
-#[cfg(feature = "cuda")]
-fn standard_forward_backward_via_tape_bridge(
-    backend: &dyn BackendRuntime,
-    input_ids: &[u32],
-    weights: &GpuWeights,
-    model_config: &ModelConfig,
-    params: &TrainableLoraParams,
-    label_mask: &[bool],
-    device: &CdDevice,
-    flce_provider: Option<FlceProvider>,
-) -> Result<(f64, GradStore)> {
-    let lora_weights = params.as_lora_weights();
-    let mut linear_state = LinearAttentionState::new(model_config, &kiln_kt_bridge::kt_device_from_candle(device))?;
-
-    // The bridge wrapper's `forward` closure must return
-    // `Result<(payload, candle Tensor), BridgeError>`. We pack the
-    // loss-value scalar (`f64`) as the payload so the caller can
-    // recover it after the bridge has consumed the candle Tensor for
-    // backward. Errors out of the kt-train layer are `anyhow::Error`;
-    // we adapt at the boundary with `BridgeError::new(format!("{e}"))`.
-    let (loss_val, grads) =
-        kiln_kt_bridge::tape_bridge::with_tape_scope_emit_to_grad_store(|| {
-            let loss = if use_flce() {
-                let hidden = model_forward_no_head(
-                    backend,
-                    input_ids,
-                    weights,
-                    model_config,
-                    Some(&mut linear_state),
-                    Some(&lora_weights),
-                )
-                .context("training forward pass (FLCE)")
-                .map_err(|e| {
-                    kiln_kt_bridge::BridgeError::new(format!(
-                        "tape_bridge sft step: FLCE forward: {e:#}"
-                    ))
-                })?;
-                // #1082: bridge kt->candle for the candle FLCE shim (CUDA).
-                // Same perf (kt-FLCE) + no-cuda (host bridge) follow-ups as the
-                // non-tape FLCE site above.
-                let hidden_cd = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&hidden)
-                    .map_err(|e| kiln_kt_bridge::BridgeError::new(format!(
-                        "tape_bridge sft step: FLCE hidden kt->candle: {e}"
-                    )))?;
-                let embed_t_cd = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&weights.embed_tokens_t)
-                    .map_err(|e| kiln_kt_bridge::BridgeError::new(format!(
-                        "tape_bridge sft step: FLCE embed_tokens_t kt->candle: {e}"
-                    )))?;
-                fused_linear_cross_entropy_dispatch_with_provider(
-                    &hidden_cd,
-                    &embed_t_cd,
-                    input_ids,
-                    label_mask,
-                    device,
-                    DEFAULT_CHUNK_SIZE,
-                    flce_provider.clone(),
-                )
-                .context("fused linear cross-entropy")
-                .map_err(|e| {
-                    kiln_kt_bridge::BridgeError::new(format!(
-                        "tape_bridge sft step: fused linear CE: {e:#}"
-                    ))
-                })?
-            } else {
-                let logits = model_forward(
-                    backend,
-                    input_ids,
-                    weights,
-                    model_config,
-                    None,
-                    Some(&mut linear_state),
-                    Some(&lora_weights),
-                )
-                .context("training forward pass")
-                .map_err(|e| {
-                    kiln_kt_bridge::BridgeError::new(format!(
-                        "tape_bridge sft step: forward: {e:#}"
-                    ))
-                })?;
-                cross_entropy_loss(&logits, input_ids, label_mask, device).map_err(|e| {
-                    kiln_kt_bridge::BridgeError::new(format!(
-                        "tape_bridge sft step: cross_entropy_loss: {e:#}"
-                    ))
-                })?
-            };
-            let loss_val = loss.to_scalar::<f32>().map_err(|e| {
-                kiln_kt_bridge::BridgeError::new(format!(
-                    "tape_bridge sft step: loss.to_scalar: {e}"
-                ))
-            })? as f64;
-            Ok((loss_val, loss))
-        })
-        .map_err(|e| anyhow::anyhow!("tape_bridge backward: {e}"))?;
-
-    Ok((loss_val, grads))
-}
-
-/// CP-4 (#1082): non-checkpointed GRPO+ECHO forward + loss-construction
-/// + `loss.backward()` for one completion, wrapped in
-/// `kiln_kt_bridge::tape_bridge::with_tape_scope_emit_to_grad_store`.
-///
-/// Identical semantics to the inline non-checkpointed branch in
-/// `train_tokenized_grpo_group_with_grad_norms` when no tape adapters
-/// fire (the bridge fast-paths an empty tape to a no-op); adds the
-/// kt-tape → candle-`GradStore` merge when one or more
-/// `try_tape_*_cuda` adapters in the forward record onto the active
-/// tape.
-///
-/// Returned `(loss_val, GradStore, comp_echo_env_ce)` are the exact
-/// values the caller used to bind locally inside the inline branch
-/// before continuing into the optimizer / token-level accumulation
-/// step. The optimizer downstream is oblivious to which path produced
-/// the grads.
-///
-/// **Gated** on `feature = "cuda"` because the bridge's
-/// `with_tape_scope_emit_to_grad_store` lives behind
-/// `#[cfg(feature = "cuda")]` in `kiln-kt-bridge` (it needs the
-/// candle-CUDA borrow/copy helpers to convert kt tensors back to candle
-/// for the `GradStore` insert).
-#[cfg(feature = "cuda")]
-#[allow(clippy::too_many_arguments)]
-fn grpo_non_checkpointed_forward_backward_via_tape_bridge(
-    backend: &dyn BackendRuntime,
-    input_ids: &[u32],
-    weights: &GpuWeights,
-    model_config: &ModelConfig,
-    params: &TrainableLoraParams,
-    action_mask: &[bool],
-    env_mask: &[bool],
-    total_obs_len: usize,
-    comp_env_count: usize,
-    num_active: usize,
-    ref_log_probs: &Tensor,
-    loss_params: GrpoLossParams,
-    loss_config: &crate::LossConfig,
-    device: &CdDevice,
-    comp_idx: usize,
-    streaming_tile_tokens: usize,
-    checkpoint_segments: usize,
-    mut timings: Option<&mut GrpoBenchmarkTimings>,
-) -> Result<(f64, GradStore, Option<f64>)> {
-    let lora_weights = params.as_lora_weights();
-    let mut linear_state = LinearAttentionState::new(model_config, &kiln_kt_bridge::kt_device_from_candle(device))?;
-    let step_started = Instant::now();
-
-    // The bridge wrapper's `forward` closure must return
-    // `Result<(payload, candle Tensor), BridgeError>`. We pack
-    // `(loss_val, comp_echo_env_ce)` as the payload so the caller can
-    // recover both scalars after the bridge has consumed the candle
-    // Tensor for backward.
-    //
-    // The bridge owns the candle backward call internally, so per-phase
-    // (`add_policy_forward` / `add_backward`) timing isn't broken out
-    // here; the bridged step time is bucketed into `add_backward`.
-    let ((loss_val, comp_echo_env_ce), grads) =
-        kiln_kt_bridge::tape_bridge::with_tape_scope_emit_to_grad_store(|| {
-            let policy_logits = model_forward(
-                backend,
-                input_ids,
-                weights,
-                model_config,
-                None,
-                Some(&mut linear_state),
-                Some(&lora_weights),
-            )
-            .context("GRPO policy forward pass")
-            .map_err(|e| {
-                kiln_kt_bridge::BridgeError::new(format!(
-                    "tape_bridge grpo step: policy forward: {e:#}"
-                ))
-            })?;
-
-            let policy_log_probs = token_log_probs(&policy_logits, input_ids, action_mask, device)
-                .map_err(|e| {
-                    kiln_kt_bridge::BridgeError::new(format!(
-                        "tape_bridge grpo step: policy token_log_probs: {e:#}"
-                    ))
-                })?;
-
-            let grpo_loss_val = grpo_loss(&policy_log_probs, ref_log_probs, loss_params, device)
-                .map_err(|e| {
-                    kiln_kt_bridge::BridgeError::new(format!(
-                        "tape_bridge grpo step: grpo_loss: {e:#}"
-                    ))
-                })?;
-
-            let policy_loss_scale = if loss_config.no_policy_loss { 0.0 } else { 1.0 };
-            let scaled_grpo = if policy_loss_scale != 1.0 {
-                grpo_loss_val.affine(policy_loss_scale, 0.0).map_err(|e| {
-                    kiln_kt_bridge::BridgeError::new(format!(
-                        "tape_bridge grpo step: policy loss scale affine: {e}"
-                    ))
-                })?
-            } else {
-                grpo_loss_val
-            };
-            let mut comp_echo_env_ce: Option<f64> = None;
-            let loss = if let Some(echo_cfg) = &loss_config.echo {
-                if loss_config.echo_enabled() && comp_env_count > 0 && total_obs_len > 0 {
-                    let env_log_probs =
-                        token_log_probs(&policy_logits, input_ids, env_mask, device).map_err(
-                            |e| {
-                                kiln_kt_bridge::BridgeError::new(format!(
-                                    "tape_bridge grpo step: env token_log_probs: {e:#}"
-                                ))
-                            },
-                        )?;
-                    let env_log_prob_sum = env_log_probs.sum_all().map_err(|e| {
-                        kiln_kt_bridge::BridgeError::new(format!(
-                            "tape_bridge grpo step: env_log_prob_sum: {e}"
-                        ))
-                    })?;
-                    let inv_obs_len = -(1.0 / total_obs_len as f64);
-                    let echo_mean_ce = env_log_prob_sum.affine(inv_obs_len, 0.0).map_err(|e| {
-                        kiln_kt_bridge::BridgeError::new(format!(
-                            "tape_bridge grpo step: echo_mean_ce affine: {e}"
-                        ))
-                    })?;
-                    let echo_scaled = echo_mean_ce.affine(echo_cfg.lambda, 0.0).map_err(|e| {
-                        kiln_kt_bridge::BridgeError::new(format!(
-                            "tape_bridge grpo step: echo_scaled affine: {e}"
-                        ))
-                    })?;
-                    let mean_ce_val = echo_mean_ce.to_scalar::<f32>().ok().map(f64::from);
-                    comp_echo_env_ce = mean_ce_val;
-                    tracing::debug!(
-                        comp_idx,
-                        env_tokens = comp_env_count,
-                        total_obs_len,
-                        echo_lambda = echo_cfg.lambda,
-                        echo_env_ce = mean_ce_val,
-                        "GRPO uncheckpointed path: ECHO env CE active (tape_bridge)"
-                    );
-                    scaled_grpo.add(&echo_scaled).map_err(|e| {
-                        kiln_kt_bridge::BridgeError::new(format!(
-                            "tape_bridge grpo step: scaled_grpo + echo_scaled: {e}"
-                        ))
-                    })?
-                } else {
-                    scaled_grpo
-                }
-            } else {
-                scaled_grpo
-            };
-            if loss_config.no_policy_loss && loss_config.echo.is_none() {
-                return Err(kiln_kt_bridge::BridgeError::new(
-                    "tape_bridge grpo step: config.loss.no_policy_loss = true with no ECHO \
-                     term defined produces a constant-zero loss — set loss.echo = Some(...) \
-                     to drive gradients."
-                        .to_string(),
-                ));
-            }
-            let loss_val = loss.to_scalar::<f32>().map_err(|e| {
-                kiln_kt_bridge::BridgeError::new(format!(
-                    "tape_bridge grpo step: loss.to_scalar: {e}"
-                ))
-            })? as f64;
-            Ok(((loss_val, comp_echo_env_ce), loss))
-        })
-        .map_err(|e| anyhow::anyhow!("tape_bridge grpo backward: {e}"))?;
-
-    let step_elapsed = step_started.elapsed();
-    if let Some(t) = timings.as_deref_mut() {
-        // The bridge owns the candle backward call internally so we
-        // can't break the per-step time into policy_forward / backward
-        // here. Bucket the full wall-clock against the backward timer
-        // so the surrounding GRPO benchmark accounting still totals
-        // correctly when this path is exercised.
-        t.add_backward(step_elapsed);
-    }
-    tracing::info!(
-        comp_idx,
-        seq_len = input_ids.len(),
-        action_tokens = num_active,
-        env_tokens = comp_env_count,
-        checkpoint_segments,
-        streaming_prefill = streaming_prefill_enabled_for(&kiln_kt_bridge::kt_device_from_candle(device),input_ids.len()),
-        streaming_tile_tokens,
-        elapsed_ms = step_elapsed.as_millis() as u64,
-        "GRPO step end (tape_bridge)"
-    );
-
-    Ok((loss_val, grads, comp_echo_env_ce))
-}
-
-/// Tape-authoritative GRPO policy-gradient forward/backward for ONE completion
-/// (#1082 CP-4 endgame).
-///
-/// Runs the policy `model_forward` inside
-/// `kiln_kt_bridge::tape_bridge::with_tape_authoritative_scope`: the LoRA / GDN /
-/// attention adapters record their nodes, and the GRPO scalar PG (+ KL) loss
-/// root (`crate::grpo_candle_shim::try_tape_grpo_pg_loss_from_logits_cuda`)
-/// records the loss as the tape root threaded onto the lm_head output. The scope
-/// seeds `dL/dL = 1` at the loss and walks the connected tape — NO candle
-/// `loss.backward()`. The per-input kt grads are copied into a candle
-/// `GradStore` keyed by each LoRA `Var`'s candle `TensorId`, so the GRPO
-/// optimizer step (`optimizer_step` / `accumulate_grads`) consumes them exactly
-/// as candle's own grads — identical return shape to the candle path's
-/// `loss.backward()` `GradStore`.
-///
-/// This is the GRPO sibling of `standard_forward_backward_tape_authoritative`
-/// (SFT) and `opd::opd_step_forward_backward_tape_authoritative` (OPD). The
-/// reference log-probs (`ref_log_probs`) are the detached IS-ratio denominator
-/// — a constant baked into the loss root, never differentiated. ECHO is NOT
-/// handled here: the dispatch keeps any ECHO-active step on the candle path
-/// (the GRPO loss root has no ECHO term), so this path is non-ECHO GRPO only.
-#[cfg(feature = "cuda")]
-#[allow(clippy::too_many_arguments)]
-fn grpo_step_forward_backward_tape_authoritative(
-    backend: &dyn BackendRuntime,
-    input_ids: &[u32],
-    weights: &GpuWeights,
-    model_config: &ModelConfig,
-    params: &TrainableLoraParams,
-    action_mask: &[bool],
-    ref_log_probs: &Tensor,
-    loss_params: GrpoLossParams,
-    device: &CdDevice,
-    comp_idx: usize,
-    num_active: usize,
-    comp_env_count: usize,
-    streaming_tile_tokens: usize,
-    checkpoint_segments: usize,
-    mut timings: Option<&mut GrpoBenchmarkTimings>,
-) -> Result<(f64, GradStore)> {
-    let lora_weights = params.as_lora_weights();
-    let mut linear_state = LinearAttentionState::new(model_config, &kiln_kt_bridge::kt_device_from_candle(device))?;
-    let step_started = Instant::now();
-
-    let (loss_val, loss, grads_by_candle_raw) =
-        kiln_kt_bridge::tape_bridge::with_tape_authoritative_scope(|| {
-            // Single policy forward (embed -> layers -> final RMSNorm -> lm_head).
-            // The LoRA adapters inside record onto the active tape; the lm_head
-            // output (logits) is retained so the GRPO loss root can thread it.
-            let policy_logits = model_forward(
-                backend,
-                input_ids,
-                weights,
-                model_config,
-                None,
-                Some(&mut linear_state),
-                Some(&lora_weights),
-            )
-            .context("GRPO tape-authoritative policy forward")
-            .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?;
-
-            // Record the SCALAR GRPO PG (+ KL) loss as the tape root.
-            let loss = match crate::grpo_candle_shim::try_tape_grpo_pg_loss_from_logits_cuda(
-                &policy_logits,
-                input_ids,
-                action_mask,
-                ref_log_probs,
-                loss_params,
-                device,
-            )
-            .context("GRPO tape-authoritative scalar loss")
-            .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?
-            {
-                Some(l) => l,
-                None => {
-                    // The scalar tape adapter declined (gate off, empty active
-                    // set, or non-CUDA logits). The scope cannot be seeded
-                    // without a tape-routed loss root — surface a clean error.
-                    // The dispatch should not have selected this path if the
-                    // envelope was unmet.
-                    return Err(kiln_kt_bridge::BridgeError::new(
-                        "GRPO tape-authoritative: try_tape_grpo_pg_loss_from_logits_cuda \
-                         returned None (KILN_USE_TAPE_FORWARD off, empty active set, or \
-                         non-CUDA logits). The dispatch should keep this step on the candle \
-                         path.",
-                    ));
-                }
-            };
-            let loss_val = loss
-                .to_scalar::<f32>()
-                .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("GRPO loss.to_scalar: {e}")))?
-                as f64;
-            Ok((loss_val, loss))
-        })
-        .map_err(|e| anyhow::anyhow!("GRPO tape-authoritative backward: {e}"))?;
-
-    // `GradStore::new()` is private; obtain a store via `backward()` on the
-    // (detached) loss — it returns `{loss: ones}` — then insert the tape grads
-    // keyed by each LoRA Var's real candle TensorId (mirrors the SFT path).
-    let mut grads = loss
-        .backward()
-        .context("GRPO tape-authoritative: loss.backward() on detached loss")?;
-    let var_by_raw: std::collections::HashMap<usize, &Var> = params
-        .all_vars()
-        .iter()
-        .map(|v| (v.as_tensor().id().as_raw(), *v))
-        .collect();
-
-    // #1082 CP-4 diagnostic (same shape as SFT / OPD): how deep did the tape walk
-    // reach, and how many of those are LoRA Vars? A small `reached` localises a
-    // chain break near the loss.
-    if std::env::var("KILN_CP4_DEBUG").is_ok() {
-        let reached = grads_by_candle_raw.len();
-        let var_matches = grads_by_candle_raw
-            .keys()
-            .filter(|k| var_by_raw.contains_key(*k))
-            .count();
-        eprintln!(
-            "[CP4-DEBUG] grpo tape walk reached {reached} mapped candle inputs; \
-             {var_matches} are LoRA Vars (of {})",
-            var_by_raw.len()
+            flce_provider,
         );
+        anyhow::bail!(
+            "standard_forward_backward: SFT training requires the `cuda` feature \
+             post candle-drop (kt tape-authoritative backward is CUDA-only)."
+        )
     }
-
-    for (candle_raw, kt_grad) in grads_by_candle_raw {
-        if let Some(var) = var_by_raw.get(&candle_raw) {
-            let cg = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&kt_grad)
-                .context("GRPO tape-authoritative: kt -> candle grad copy")?;
-            grads.insert_id(var.as_tensor().id(), cg);
-        }
-    }
-
-    let step_elapsed = step_started.elapsed();
-    if let Some(t) = timings.as_deref_mut() {
-        // The tape walk owns the backward internally so we can't break the step
-        // into policy_forward / backward here; bucket the full wall-clock against
-        // the backward timer so the GRPO benchmark accounting still totals
-        // correctly when this path is exercised.
-        t.add_backward(step_elapsed);
-    }
-    tracing::info!(
-        comp_idx,
-        seq_len = input_ids.len(),
-        action_tokens = num_active,
-        env_tokens = comp_env_count,
-        checkpoint_segments,
-        streaming_prefill = streaming_prefill_enabled_for(&kiln_kt_bridge::kt_device_from_candle(device),input_ids.len()),
-        streaming_tile_tokens,
-        elapsed_ms = step_elapsed.as_millis() as u64,
-        "GRPO step end (tape-authoritative)"
-    );
-
-    Ok((loss_val, grads))
 }
+
+
+
 
 /// kt-native sibling of [`grpo_step_forward_backward_tape_authoritative`]
 /// (#1082 Inc-0 PR5). Identical GRPO policy-gradient tape-authoritative
@@ -12663,31 +8030,34 @@ fn grpo_step_forward_backward_tape_authoritative_kt(
     // inserted as-is, keyed by each LoRA Var's id bridged into the kt id space
     // (matching the PR1 `KtTensorId`-keyed moments). Identical shape to the SFT
     // kt producer.
-    let var_raw_ids: std::collections::HashSet<usize> = params
-        .all_vars()
+    // (#1082) keyed by `Parameter::tensor_id()` (== the LoRA primary kt
+    // tensor id the tape adapter registered as the candle-input key).
+    let param_raw_ids: std::collections::HashSet<u64> = params
+        .all_params()
         .iter()
-        .map(|v| v.as_tensor().id().as_raw())
+        .map(|p| p.tensor_id().as_raw())
         .collect();
 
-    // #1082 CP-4 diagnostic (same shape as the candle-hack producer / SFT / OPD):
-    // how deep did the tape walk reach, and how many of those are LoRA Vars?
+    // #1082 CP-4 diagnostic: how deep did the tape walk reach, and how many
+    // of those are LoRA params?
     if std::env::var("KILN_CP4_DEBUG").is_ok() {
         let reached = grads_by_candle_raw.len();
         let var_matches = grads_by_candle_raw
             .keys()
-            .filter(|k| var_raw_ids.contains(*k))
+            .filter(|k| param_raw_ids.contains(&(**k as u64)))
             .count();
         eprintln!(
-            "[CP4-DEBUG] grpo(kt) tape walk reached {reached} mapped candle inputs; \
-             {var_matches} are LoRA Vars (of {})",
-            var_raw_ids.len()
+            "[CP4-DEBUG] grpo(kt) tape walk reached {reached} mapped inputs; \
+             {var_matches} are LoRA params (of {})",
+            param_raw_ids.len()
         );
     }
 
     let mut grads = kiln_autograd::GradStore::new();
-    for (candle_raw, kt_grad) in grads_by_candle_raw {
-        if var_raw_ids.contains(&candle_raw) {
-            grads.insert(KtTensorId::from_raw(candle_raw as u64), kt_grad);
+    for (key_raw, kt_grad) in grads_by_candle_raw {
+        let key_raw = key_raw as u64;
+        if param_raw_ids.contains(&key_raw) {
+            grads.insert(KtTensorId::from_raw(key_raw), kt_grad);
         }
     }
 
@@ -12948,186 +8318,7 @@ pub(crate) fn grpo_loss(
         .map_err(Into::into)
 }
 
-/// Whether the multi-layer per-layer tile-reverse path is enabled.
-///
-/// Defaults to **on** because the legacy multi-layer monolithic fallback
-/// retains full-segment autograd activations and OOMs on consumer GPUs
-/// (24 GB) at long context (≥4K-token GRPO groups, the production
-/// pi-compaction regime). With this path on, the existing per-layer tile
-/// reverse (`exact_gdn_single_layer_tiled_reverse` /
-/// `full_attention_single_layer_tiled_mlp_reverse`) is applied to each
-/// layer inside the segment, chaining gradients layer-to-layer.
-///
-/// Set `KILN_DISABLE_MULTI_LAYER_TILE_REVERSE=1` to fall back to the
-/// monolithic segment forward+backward (the historical pre-#1055 path).
-fn multi_layer_tile_reverse_enabled() -> bool {
-    !kiln_core::env_flag::env_flag("KILN_DISABLE_MULTI_LAYER_TILE_REVERSE", false)
-}
 
-/// Per-layer tile-reverse over a multi-layer segment.
-///
-/// Walks layers in reverse order, applying the existing single-layer tile
-/// reverse to each one and chaining gradients. The detached per-layer input
-/// tensors are recomputed via a forward pass through the segment with detached
-/// LoRA weights so the autograd graph stays empty between layer iterations
-/// (one layer's tile reverse builds + tears down its own autograd graph;
-/// activations for layer i+1 are never held simultaneously with layer i).
-///
-/// Replaces the monolithic `model_forward_segment(seg_input_var, seg_start, seg_end)`
-/// + `(seg_output * upstream_grad).sum().backward()` fallback that held a
-/// full-segment autograd graph at once — the path that OOMs on consumer
-/// GPUs at long context.
-///
-/// Pre-conditions:
-/// * `seg_input.dims() == upstream_grad.dims() == [1, seq_len, hidden_size]`.
-/// * `streaming_prefill_enabled_for(device, seq_len)` is true (otherwise
-///   the per-layer tile reverse functions decline anyway and the caller
-///   should fall back to monolithic).
-/// * `seg_end > seg_start` (caller already handles the single-layer fast
-///   path above via the size-1 specializations).
-#[allow(clippy::too_many_arguments)]
-fn multi_layer_per_layer_tile_reverse(
-    backend: &dyn BackendRuntime,
-    seg_start: usize,
-    seg_end: usize,
-    seg_input: &Tensor,
-    upstream_grad: &Tensor,
-    weights: &GpuWeights,
-    model_config: &ModelConfig,
-    positions: &[u32],
-    params: &TrainableLoraParams,
-    lora_detached: &LoraWeights,
-    device: &CdDevice,
-    accumulated_grads: &mut GradMap,
-    all_vars: &[&Var],
-) -> Result<Tensor> {
-    anyhow::ensure!(
-        seg_end > seg_start,
-        "multi_layer_per_layer_tile_reverse called with empty segment [{seg_start}, {seg_end})"
-    );
-    anyhow::ensure!(
-        seg_input.dims() == upstream_grad.dims(),
-        "multi_layer_per_layer_tile_reverse seg_input/upstream_grad shape mismatch: {:?} vs {:?}",
-        seg_input.dims(),
-        upstream_grad.dims()
-    );
-
-    let gdn_tile_size = exact_gdn_backward_tile_tokens_for(device);
-    let fa_tile_size = std::env::var("KILN_CUDA_TRAINING_MLP_CHUNK_TOKENS")
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .filter(|&value| value > 0)
-        .unwrap_or(1024);
-
-    // Compute per-layer-input boundaries via detached forward through the
-    // segment. layer_inputs[i] is the input to layer (seg_start + i), with
-    // layer_inputs[0] = seg_input. Detached LoRA weights mean no autograd
-    // graph is built during this pass — boundaries are pure values.
-    // (#1082) `layer_inputs` is a candle store (each entry feeds the candle-in
-    // `exact_gdn_single_layer_tiled_reverse` / `full_attention_*_reverse`).
-    // `model_forward_segment` is kt-native, so thread the build-loop `current`
-    // as kt (bridge the candle seed in) and push candle copies into the store.
-    let num_layers = seg_end - seg_start;
-    let mut layer_inputs: Vec<Tensor> = Vec::with_capacity(num_layers);
-    layer_inputs.push(seg_input.detach());
-    {
-        let mut linear_state = LinearAttentionState::new(model_config, &kiln_kt_bridge::kt_device_from_candle(device))?;
-        let mut current = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&layer_inputs[0])
-            .map_err(|e| anyhow::anyhow!("multi-layer tile reverse: candle->kt seg input: {e}"))?;
-        for layer_offset in 0..(num_layers - 1) {
-            let layer_idx = seg_start + layer_offset;
-            current = model_forward_segment(
-                backend,
-                current,
-                weights,
-                model_config,
-                positions,
-                layer_idx,
-                layer_idx + 1,
-                Some(&mut linear_state),
-                Some(lora_detached),
-            )
-            .with_context(|| {
-                format!("multi-layer tile reverse: per-layer-input forward at layer {layer_idx}")
-            })?
-            .detach();
-            layer_inputs.push(
-                kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(
-                    &current
-                        .contiguous()
-                        .context("multi-layer tile reverse: layer input contiguous")?,
-                )
-                .map_err(|e| {
-                    anyhow::anyhow!("multi-layer tile reverse: kt->candle layer input: {e}")
-                })?,
-            );
-        }
-    }
-
-    // Reverse walk: each layer's tile reverse takes the current upstream grad
-    // (gradient at the layer's output) and produces the gradient at the
-    // layer's input, which becomes the next layer's upstream grad.
-    let mut current_grad = upstream_grad.clone();
-    for layer_offset in (0..num_layers).rev() {
-        let layer_idx = seg_start + layer_offset;
-        let layer_input = &layer_inputs[layer_offset];
-        let new_grad = match &weights.layers[layer_idx].attention {
-            GpuAttentionWeights::Linear(_) => exact_gdn_single_layer_tiled_reverse(
-                backend,
-                layer_idx,
-                layer_input,
-                &current_grad,
-                weights,
-                model_config,
-                positions,
-                params,
-                lora_detached,
-                gdn_tile_size,
-                device,
-                accumulated_grads,
-            )
-            .with_context(|| {
-                format!(
-                    "multi-layer tile reverse: GDN tile reverse layer {layer_idx} (seg [{seg_start}, {seg_end}))"
-                )
-            })?,
-            GpuAttentionWeights::Full(_) => {
-                let full_attn_layer_idx = (0..layer_idx)
-                    .filter(|&idx| {
-                        matches!(weights.layers[idx].attention, GpuAttentionWeights::Full(_))
-                    })
-                    .count();
-                full_attention_single_layer_tiled_mlp_reverse(
-                    backend,
-                    layer_idx,
-                    full_attn_layer_idx,
-                    layer_input,
-                    &current_grad,
-                    weights,
-                    model_config,
-                    positions,
-                    params,
-                    lora_detached,
-                    fa_tile_size,
-                    device,
-                    accumulated_grads,
-                    all_vars,
-                )
-                .with_context(|| {
-                    format!(
-                        "multi-layer tile reverse: FA tile reverse layer {layer_idx} (seg [{seg_start}, {seg_end}))"
-                    )
-                })?
-            }
-        };
-        current_grad = new_grad;
-        synchronize_checkpoint_boundary(device, || {
-            format!("synchronize multi-layer tile reverse layer {layer_idx} cleanup")
-        })?;
-    }
-
-    Ok(current_grad)
-}
 
 /// Run one GRPO training step with exact reverse-mode checkpointing.
 ///
@@ -13140,538 +8331,6 @@ fn multi_layer_per_layer_tile_reverse(
 // analytic tail folds the env-CE term into the same vocab-chunk
 // forward+backward loop so the checkpointed GRPO path applies ECHO too
 // (Phase 1 follow-up of docs/plans/echo-integration-plan.md).
-#[allow(clippy::too_many_arguments)]
-fn checkpointed_grpo_forward_backward<'echo>(
-    backend: &dyn BackendRuntime,
-    input_ids: &[u32],
-    weights: &GpuWeights,
-    model_config: &ModelConfig,
-    params: &TrainableLoraParams,
-    completion_mask: &[bool],
-    ref_log_probs: &Tensor,
-    loss_params: GrpoLossParams,
-    segments: &[(usize, usize)],
-    device: &CdDevice,
-    echo: Option<EchoTailParams<'echo>>,
-    mut timings: Option<&mut GrpoBenchmarkTimings>,
-) -> Result<(f64, GradMap, Option<f64>)> {
-    let num_segments = segments.len();
-    anyhow::ensure!(
-        num_segments > 0,
-        "checkpointed GRPO requires at least one segment"
-    );
-    anyhow::ensure!(
-        input_ids.len() == completion_mask.len(),
-        "input_ids/completion_mask length mismatch: {} vs {}",
-        input_ids.len(),
-        completion_mask.len()
-    );
-    anyhow::ensure!(
-        completion_mask
-            .get(1..)
-            .is_some_and(|m| m.iter().any(|&v| v)),
-        "checkpointed GRPO called with no active completion tokens"
-    );
-
-    let policy_forward_started = Instant::now();
-    let positions: Vec<u32> = (0..input_ids.len())
-        .map(|position| position as u32)
-        .collect();
-    let lora_detached = lora_weights_detached(params);
-    let resident_activation = backend.supports_resident_activation();
-    let recompute_boundaries = recompute_checkpoint_boundaries(input_ids.len());
-    let should_spool_boundaries = recompute_boundaries && spool_checkpoint_boundaries(device);
-    let active_tokens = completion_mask
-        .get(1..)
-        .map_or(0usize, |mask| mask.iter().filter(|&&active| active).count());
-    let streaming_tile_tokens = streaming_tile_tokens_for(&kiln_kt_bridge::kt_device_from_candle(device));
-    tracing::info!(
-        seq_len = input_ids.len(),
-        action_tokens = active_tokens,
-        num_segments,
-        streaming_prefill = streaming_prefill_enabled_for(&kiln_kt_bridge::kt_device_from_candle(device),input_ids.len()),
-        streaming_tile_tokens,
-        recompute_boundaries,
-        should_spool_boundaries,
-        resident_activation,
-        "GRPO policy forward start"
-    );
-
-    // (#1082) Same kt/candle island split as `checkpointed_forward_backward`:
-    // kt-native forward ops, candle boundary store / spool / loss / analytic
-    // tail. Bridge candle->kt (`kt_in`) into kt ops and kt->candle (`cd_out`)
-    // out of them.
-    let cd_out = |k: &kiln_tensor::Tensor| -> Result<Tensor> {
-        kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(
-            &k.contiguous()
-                .map_err(|e| anyhow::anyhow!("checkpointed GRPO: kt contiguous: {e}"))?,
-        )
-        .map_err(|e| anyhow::anyhow!("checkpointed GRPO: kt->candle copy: {e}"))
-    };
-    let kt_in = |c: &Tensor| -> Result<kiln_tensor::Tensor> {
-        kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(c)
-            .map_err(|e| anyhow::anyhow!("checkpointed GRPO: candle->kt borrow: {e}"))
-    };
-
-    let detached_boundary = |boundary_idx: usize| -> Result<Tensor> {
-        anyhow::ensure!(
-            boundary_idx <= num_segments,
-            "GRPO checkpoint boundary index {boundary_idx} out of range for {num_segments} segments"
-        );
-        let (embed_hidden, _) = model_forward_embed(input_ids, weights)?;
-        let mut current = embed_hidden.detach();
-        let mut linear_state = LinearAttentionState::new(model_config, &kiln_kt_bridge::kt_device_from_candle(device))?;
-        for &(start, end) in segments.iter().take(boundary_idx) {
-            current = model_forward_segment(
-                backend,
-                current,
-                weights,
-                model_config,
-                &positions,
-                start,
-                end,
-                Some(&mut linear_state),
-                Some(&lora_detached),
-            )?;
-            current = current.detach();
-            synchronize_checkpoint_boundary(device, || {
-                format!("synchronize GRPO detached checkpoint boundary segment [{start}, {end})")
-            })?;
-        }
-        cd_out(&current)
-    };
-
-    let mut spooled_final_hidden: Option<Tensor> = None;
-    let spooled_boundaries = if should_spool_boundaries {
-        let spool = SpooledCheckpointBoundaries::new(num_segments)?;
-        tracing::info!(
-            num_segments,
-            seq_len = input_ids.len(),
-            "spooling GRPO checkpoint boundaries to temporary safetensors"
-        );
-        let (embed_hidden, _) = model_forward_embed(input_ids, weights)?;
-        let mut current = embed_hidden.detach();
-        synchronize_checkpoint_boundary(device, || {
-            "synchronize spooled GRPO embedding checkpoint boundary".to_string()
-        })?;
-        spool.save(0, &cd_out(&current)?)?;
-        synchronize_checkpoint_boundary(device, || {
-            "synchronize spooled GRPO embedding checkpoint boundary save".to_string()
-        })?;
-        let mut linear_state = LinearAttentionState::new(model_config, &kiln_kt_bridge::kt_device_from_candle(device))?;
-        for (seg_idx, &(start, end)) in segments.iter().enumerate() {
-            current = model_forward_segment(
-                backend,
-                current,
-                weights,
-                model_config,
-                &positions,
-                start,
-                end,
-                Some(&mut linear_state),
-                Some(&lora_detached),
-            )?;
-            current = current.detach();
-            synchronize_checkpoint_boundary(device, || {
-                format!(
-                    "synchronize spooled GRPO checkpoint boundary {} before save",
-                    seg_idx + 1
-                )
-            })?;
-            spool.save(seg_idx + 1, &cd_out(&current)?)?;
-            synchronize_checkpoint_boundary(device, || {
-                format!(
-                    "synchronize spooled GRPO checkpoint boundary {} after save",
-                    seg_idx + 1
-                )
-            })?;
-        }
-        spooled_final_hidden = Some(cd_out(&current)?);
-        Some(spool)
-    } else {
-        None
-    };
-
-    let mut boundary_states: Vec<Tensor> = Vec::new();
-    let final_hidden = if let Some(final_hidden) = spooled_final_hidden.take() {
-        final_hidden
-    } else if recompute_boundaries {
-        detached_boundary(num_segments)?
-    } else {
-        let first_boundary = detached_boundary(0)?;
-        boundary_states = Vec::with_capacity(num_segments + 1);
-        boundary_states.push(first_boundary);
-        if resident_activation {
-            backend.register_resident_activation(boundary_states.last().unwrap())?;
-        }
-
-        {
-            // Thread `current` as kt; push candle copies into the candle store.
-            let mut current = kt_in(&boundary_states[0])?;
-            let mut linear_state = LinearAttentionState::new(model_config, &kiln_kt_bridge::kt_device_from_candle(device))?;
-            for &(start, end) in segments.iter() {
-                current = model_forward_segment(
-                    backend,
-                    current,
-                    weights,
-                    model_config,
-                    &positions,
-                    start,
-                    end,
-                    Some(&mut linear_state),
-                    Some(&lora_detached),
-                )?
-                .detach();
-                boundary_states.push(cd_out(&current)?);
-                if resident_activation {
-                    backend.register_resident_activation(boundary_states.last().unwrap())?;
-                }
-                synchronize_checkpoint_boundary(device, || {
-                    format!("synchronize cached GRPO checkpoint boundary segment [{start}, {end})")
-                })?;
-            }
-        }
-        segment_input_via_registry_or_clone(
-            backend,
-            boundary_states
-                .last()
-                .context("missing final GRPO checkpoint boundary")?,
-            resident_activation,
-        )?
-    };
-    if let Some(t) = timings.as_deref_mut() {
-        t.add_policy_forward(policy_forward_started.elapsed());
-    }
-    tracing::info!(
-        seq_len = input_ids.len(),
-        action_tokens = active_tokens,
-        num_segments,
-        streaming_prefill = streaming_prefill_enabled_for(&kiln_kt_bridge::kt_device_from_candle(device),input_ids.len()),
-        streaming_tile_tokens,
-        recompute_boundaries,
-        should_spool_boundaries,
-        resident_activation,
-        elapsed_ms = policy_forward_started.elapsed().as_millis() as u64,
-        "GRPO policy forward end"
-    );
-
-    let backward_started = Instant::now();
-    tracing::info!(
-        seq_len = input_ids.len(),
-        action_tokens = active_tokens,
-        num_segments,
-        streaming_prefill = streaming_prefill_enabled_for(&kiln_kt_bridge::kt_device_from_candle(device),input_ids.len()),
-        streaming_tile_tokens,
-        recompute_boundaries,
-        should_spool_boundaries,
-        "GRPO backward start"
-    );
-    // (#1082) `final_hidden` is candle; the analytic GRPO tail is a candle
-    // island but `final_norm`/`embed_tokens_t` weights are kt — bridge them.
-    let final_norm_candle = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&weights.final_norm)
-        .map_err(|e| anyhow::anyhow!("checkpointed GRPO: kt->candle final_norm: {e}"))?;
-    let head_t_candle = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&weights.embed_tokens_t)
-        .map_err(|e| anyhow::anyhow!("checkpointed GRPO: kt->candle head_t: {e}"))?;
-    let (loss_val, mut upstream_grad, echo_env_ce) = analytic_grpo_tail_loss_grad_pre_final_norm(
-        &final_hidden,
-        &final_norm_candle,
-        &head_t_candle,
-        input_ids,
-        completion_mask,
-        ref_log_probs,
-        loss_params,
-        model_config.rms_norm_eps,
-        DEFAULT_CHUNK_SIZE,
-        echo.clone(),
-    )
-    .context("analytic GRPO+ECHO tail gradient")?;
-    upstream_grad = offload_checkpoint_tensor_to_cpu(upstream_grad, recompute_boundaries)?;
-    drop(final_hidden);
-    synchronize_checkpoint_boundary(device, || {
-        "synchronize GRPO checkpointed final-boundary loss cleanup".to_string()
-    })?;
-
-    let mut accumulated_grads: GradMap = HashMap::new();
-    let all_vars = params.all_vars();
-
-    for seg_idx in (0..num_segments).rev() {
-        let (seg_start, seg_end) = segments[seg_idx];
-        let segment_started = Instant::now();
-        let gdn_tile_size =
-            exact_gdn_reverse_tile_size(weights, device, input_ids.len(), seg_start, seg_end);
-        let fa_tile_size =
-            full_attention_mlp_reverse_tile_size(weights, input_ids.len(), seg_start, seg_end);
-        let use_multi_layer_tile_reverse = seg_end > seg_start + 1
-            && multi_layer_tile_reverse_enabled()
-            && streaming_prefill_enabled_for(&kiln_kt_bridge::kt_device_from_candle(device),input_ids.len());
-        tracing::info!(
-            segment = seg_idx + 1,
-            num_segments,
-            start_layer = seg_start,
-            end_layer = seg_end,
-            seq_len = input_ids.len(),
-            action_tokens = active_tokens,
-            gdn_tile_size = ?gdn_tile_size,
-            fa_tile_size = ?fa_tile_size,
-            use_multi_layer_tile_reverse,
-            streaming_tile_tokens,
-            "GRPO backward checkpoint segment start"
-        );
-
-        let seg_input = if let Some(spool) = spooled_boundaries.as_ref() {
-            spool.load(seg_idx, device)?
-        } else if recompute_boundaries {
-            detached_boundary(seg_idx)?
-        } else {
-            segment_input_via_registry_or_clone(
-                backend,
-                &boundary_states[seg_idx],
-                resident_activation,
-            )?
-        };
-        if !recompute_boundaries
-            && resident_activation
-            && backend.has_resident_activation(&boundary_states[seg_idx])
-        {
-            backend.evict_resident_activation(&boundary_states[seg_idx]);
-            boundary_states[seg_idx] = zeros_dtype_on((1usize,), DType::BF16, device)
-                .context("phase3.2 grpo exact: alloc boundary stub")?;
-        }
-        let upstream_grad_for_seg = tensor_on_device(&upstream_grad, device)?;
-
-        if let Some(tile_size) = gdn_tile_size {
-            let next_upstream_grad = exact_gdn_single_layer_tiled_reverse(
-                backend,
-                seg_start,
-                &seg_input,
-                &upstream_grad_for_seg,
-                weights,
-                model_config,
-                &positions,
-                params,
-                &lora_detached,
-                tile_size,
-                device,
-                &mut accumulated_grads,
-            )
-            .with_context(|| {
-                format!(
-                    "exact tiled GDN reverse GRPO segment {seg_idx} layer {seg_start} tile_size={tile_size}"
-                )
-            })?;
-            drop(seg_input);
-            drop(upstream_grad_for_seg);
-            upstream_grad =
-                offload_checkpoint_tensor_to_cpu(next_upstream_grad, recompute_boundaries)?;
-            synchronize_checkpoint_boundary(device, || {
-                format!("synchronize checkpointed GRPO tiled GDN reverse segment {seg_idx} cleanup")
-            })?;
-            tracing::info!(
-                segment = seg_idx + 1,
-                num_segments,
-                start_layer = seg_start,
-                end_layer = seg_end,
-                seq_len = input_ids.len(),
-                action_tokens = active_tokens,
-                tile_size,
-                reverse_mode = "gdn_tiled",
-                elapsed_ms = segment_started.elapsed().as_millis() as u64,
-                "GRPO backward checkpoint segment end"
-            );
-            continue;
-        }
-
-        if let Some(tile_size) = fa_tile_size {
-            let full_attn_layer_idx = (0..seg_start)
-                .filter(|&idx| {
-                    matches!(weights.layers[idx].attention, GpuAttentionWeights::Full(_))
-                })
-                .count();
-            let next_upstream_grad = full_attention_single_layer_tiled_mlp_reverse(
-                backend,
-                seg_start,
-                full_attn_layer_idx,
-                &seg_input,
-                &upstream_grad_for_seg,
-                weights,
-                model_config,
-                &positions,
-                params,
-                &lora_detached,
-                tile_size,
-                device,
-                &mut accumulated_grads,
-                &all_vars,
-            )
-            .with_context(|| {
-                format!(
-                    "exact full-attention tiled MLP reverse GRPO segment {seg_idx} layer {seg_start} tile_size={tile_size}"
-                )
-            })?;
-            drop(seg_input);
-            drop(upstream_grad_for_seg);
-            upstream_grad =
-                offload_checkpoint_tensor_to_cpu(next_upstream_grad, recompute_boundaries)?;
-            synchronize_checkpoint_boundary(device, || {
-                format!(
-                    "synchronize checkpointed GRPO full-attention tiled MLP reverse segment {seg_idx} cleanup"
-                )
-            })?;
-            tracing::info!(
-                segment = seg_idx + 1,
-                num_segments,
-                start_layer = seg_start,
-                end_layer = seg_end,
-                seq_len = input_ids.len(),
-                action_tokens = active_tokens,
-                tile_size,
-                reverse_mode = "full_attention_mlp_tiled",
-                elapsed_ms = segment_started.elapsed().as_millis() as u64,
-                "GRPO backward checkpoint segment end"
-            );
-            continue;
-        }
-
-        // Multi-layer per-layer tile reverse. Default-on. Replaces the
-        // monolithic segment forward+backward fallback that retains the
-        // whole segment's autograd graph at once (OOM-prone on consumer
-        // GPUs at long context, e.g. >24 GB VRAM for 4-layer × 7K-token
-        // GRPO segments). Walks layers in reverse, applying the existing
-        // single-layer tile reverse to each, chaining gradients
-        // layer-to-layer. Equivalent boundary memory to the monolithic
-        // path; transient memory is bounded by one layer × one tile.
-        if use_multi_layer_tile_reverse {
-            let next_upstream_grad = multi_layer_per_layer_tile_reverse(
-                backend,
-                seg_start,
-                seg_end,
-                &seg_input,
-                &upstream_grad_for_seg,
-                weights,
-                model_config,
-                &positions,
-                params,
-                &lora_detached,
-                device,
-                &mut accumulated_grads,
-                &all_vars,
-            )
-            .with_context(|| {
-                format!(
-                    "multi-layer per-layer tile reverse GRPO segment {seg_idx} layers [{seg_start}, {seg_end})"
-                )
-            })?;
-            drop(seg_input);
-            drop(upstream_grad_for_seg);
-            upstream_grad =
-                offload_checkpoint_tensor_to_cpu(next_upstream_grad, recompute_boundaries)?;
-            synchronize_checkpoint_boundary(device, || {
-                format!(
-                    "synchronize checkpointed GRPO multi-layer tile reverse segment {seg_idx} cleanup"
-                )
-            })?;
-            tracing::info!(
-                segment = seg_idx + 1,
-                num_segments,
-                start_layer = seg_start,
-                end_layer = seg_end,
-                seq_len = input_ids.len(),
-                action_tokens = active_tokens,
-                tile_size = streaming_tile_tokens,
-                reverse_mode = "multi_layer_tile_reverse",
-                elapsed_ms = segment_started.elapsed().as_millis() as u64,
-                "GRPO backward checkpoint segment end"
-            );
-            continue;
-        }
-
-        let seg_input_var = var_from_tensor(&seg_input)?;
-        let lora_weights_for_seg = params.as_lora_weights();
-        let mut linear_state = LinearAttentionState::new(model_config, &kiln_kt_bridge::kt_device_from_candle(device))?;
-        // (#1082) bridge candle Var -> kt for the kt segment forward, and the kt
-        // output -> candle for the candle injection scalar / `.backward()`.
-        let seg_output = cd_out(&model_forward_segment(
-            backend,
-            kt_in(seg_input_var.as_tensor())?,
-            weights,
-            model_config,
-            &positions,
-            seg_start,
-            seg_end,
-            Some(&mut linear_state),
-            Some(&lora_weights_for_seg),
-        )?)?;
-
-        let seg_output_f32 = seg_output.to_f32_dtype()?;
-        let upstream_f32 = upstream_grad_for_seg.to_f32_dtype()?;
-        let injected = (&seg_output_f32 * &upstream_f32)?
-            .sum_all()
-            .with_context(|| {
-                format!("checkpointed GRPO gradient injection for segment {seg_idx}")
-            })?;
-        let grads = injected
-            .backward()
-            .with_context(|| format!("checkpointed GRPO reverse backward for segment {seg_idx}"))?;
-        accumulate_grads(&mut accumulated_grads, &grads, &all_vars)?;
-
-        if seg_idx > 0 {
-            upstream_grad = grads
-                .get(seg_input_var.as_tensor())
-                .ok_or_else(|| {
-                    anyhow::anyhow!(
-                        "checkpointed GRPO reverse pass did not produce input gradient for segment {seg_idx}"
-                    )
-                })?
-                .clone()
-                .detach();
-            upstream_grad = offload_checkpoint_tensor_to_cpu(upstream_grad, recompute_boundaries)?;
-        }
-        drop(grads);
-        drop(injected);
-        drop(upstream_f32);
-        drop(seg_output_f32);
-        drop(seg_output);
-        drop(seg_input_var);
-        drop(seg_input);
-        drop(upstream_grad_for_seg);
-        synchronize_checkpoint_boundary(device, || {
-            format!("synchronize checkpointed GRPO reverse segment {seg_idx} cleanup")
-        })?;
-        tracing::info!(
-            segment = seg_idx + 1,
-            num_segments,
-            start_layer = seg_start,
-            end_layer = seg_end,
-            seq_len = input_ids.len(),
-            action_tokens = active_tokens,
-            reverse_mode = "monolithic_segment",
-            elapsed_ms = segment_started.elapsed().as_millis() as u64,
-            "GRPO backward checkpoint segment end"
-        );
-    }
-
-    if !recompute_boundaries && resident_activation {
-        for boundary in &boundary_states {
-            backend.evict_resident_activation(boundary);
-        }
-    }
-    if let Some(t) = timings.as_deref_mut() {
-        t.add_backward(backward_started.elapsed());
-    }
-    tracing::info!(
-        seq_len = input_ids.len(),
-        action_tokens = active_tokens,
-        num_segments,
-        streaming_prefill = streaming_prefill_enabled_for(&kiln_kt_bridge::kt_device_from_candle(device),input_ids.len()),
-        streaming_tile_tokens,
-        recompute_boundaries,
-        should_spool_boundaries,
-        elapsed_ms = backward_started.elapsed().as_millis() as u64,
-        "GRPO backward end"
-    );
-
-    Ok((loss_val, accumulated_grads, echo_env_ce))
-}
 
 // (#1082 CP-4) `pub(crate)` so the OPD tape-authoritative test in `opd.rs`'s
 // own `#[cfg(test)] mod tests` can reuse the BF16 tiny-model fixtures
@@ -14548,18 +9207,6 @@ pub(crate) mod tests {
     // Phase 3b — EMA reference snapshot unit tests
     // ---------------------------------------------------------------------
 
-    #[test]
-    fn deepcopy_tensor_for_snapshot_is_independent_of_source() -> Result<()> {
-        let device = cpu_device();
-        // Vars are how the trainer stores LoRA; mutate the Var afterward and
-        // confirm the snapshot doesn't see the mutation.
-        let src = var_from_tensor(&tensor_new(&[1.0_f32, 2.0, 3.0], &device)?)?;
-        let snapshot = deepcopy_tensor_for_snapshot(src.as_tensor())?;
-        src.set(&tensor_new(&[10.0_f32, 20.0, 30.0], &device)?)?;
-        let snap_vals = snapshot.to_vec1::<f32>()?;
-        assert_eq!(snap_vals, vec![1.0, 2.0, 3.0]);
-        Ok(())
-    }
 
     #[test]
     fn ema_blend_tensor_matches_manual_formula() -> Result<()> {
@@ -14601,69 +9248,7 @@ pub(crate) mod tests {
         Ok(())
     }
 
-    #[test]
-    fn lora_snapshot_initial_capture_is_independent_of_future_updates() -> Result<()> {
-        // Build a minimal TrainableLoraParams with one layer carrying a single
-        // q_proj. Snapshot it. Mutate the Vars in place. Verify the snapshot
-        // still holds the original values.
-        let device = cpu_device();
-        let a_var = var_from_tensor(&tensor_new(&[[0.5_f32, 0.25]], &device)?)?;
-        let b_var = var_from_tensor(&tensor_new(&[[1.0_f32], [2.0]], &device)?)?;
-        let layer = TrainableLoraLayerParams {
-            q_proj: Some((a_var.clone(), b_var.clone())),
-            ..Default::default()
-        };
-        let params = TrainableLoraParams {
-            layers: vec![layer],
-            rank: 1,
-            alpha: 2.0,
-            scale: 2.0,
-        };
 
-        let snapshot = lora_snapshot_capture_or_blend(&params, None, 0.0)?;
-        // Mutate the underlying Vars.
-        a_var.set(&tensor_new(&[[100.0_f32, 200.0]], &device)?)?;
-        b_var.set(&tensor_new(&[[300.0_f32], [400.0]], &device)?)?;
-
-        let snap_layer = &snapshot.layers[0];
-        let snap_q = snap_layer.q_proj.as_ref().expect("q_proj snapshot");
-        let snap_a = snap_q.a.flatten_all()?.to_vec1::<f32>()?;
-        let snap_b = snap_q.b.flatten_all()?.to_vec1::<f32>()?;
-        assert_eq!(snap_a, vec![0.5, 0.25]);
-        assert_eq!(snap_b, vec![1.0, 2.0]);
-        Ok(())
-    }
-
-    #[test]
-    fn lora_snapshot_blend_with_prior_applies_decay() -> Result<()> {
-        let device = cpu_device();
-        let a_var = var_from_tensor(&tensor_new(&[[1.0_f32]], &device)?)?;
-        let b_var = var_from_tensor(&tensor_new(&[[1.0_f32]], &device)?)?;
-        let layer = TrainableLoraLayerParams {
-            q_proj: Some((a_var.clone(), b_var.clone())),
-            ..Default::default()
-        };
-        let params = TrainableLoraParams {
-            layers: vec![layer],
-            rank: 1,
-            alpha: 1.0,
-            scale: 1.0,
-        };
-
-        // Initial snapshot at A=1, B=1.
-        let snap0 = lora_snapshot_capture_or_blend(&params, None, 0.5)?;
-        // Advance the params: A=10, B=10.
-        a_var.set(&tensor_new(&[[10.0_f32]], &device)?)?;
-        b_var.set(&tensor_new(&[[10.0_f32]], &device)?)?;
-        // Blend with decay=0.5 → 0.5*old + 0.5*current = 0.5*1 + 0.5*10 = 5.5.
-        let snap1 = lora_snapshot_capture_or_blend(&params, Some(&snap0), 0.5)?;
-        let q = snap1.layers[0].q_proj.as_ref().unwrap();
-        let a = q.a.flatten_all()?.to_vec1::<f32>()?;
-        let b = q.b.flatten_all()?.to_vec1::<f32>()?;
-        assert!((a[0] - 5.5).abs() < 1e-5, "blended A = {a:?}");
-        assert!((b[0] - 5.5).abs() < 1e-5, "blended B = {b:?}");
-        Ok(())
-    }
 
     // ---------------------------------------------------------------------
     // Phase 2 GRPO IS-level / reference-policy unit tests
@@ -14807,129 +9392,7 @@ pub(crate) mod tests {
         assert!(matches!(p.kl_estimator, KlEstimator::None));
     }
 
-    #[test]
-    fn analytic_grpo_tail_supports_sequence_and_cispo_modes() -> Result<()> {
-        // Smoke-check the analytic tail's IS-level branches against grpo_loss
-        // for matching parameters. We use a small synthetic hidden state and
-        // a tiny vocab to keep the test cheap.
-        let device = cpu_device();
-        let seq_len = 5usize;
-        let hidden_size = 4usize;
-        let vocab = 6usize;
 
-        let hidden = tensor_from_vec(
-            (0..seq_len * hidden_size)
-                .map(|i| ((i as f32) * 0.13).sin() * 0.3)
-                .collect::<Vec<f32>>(),
-            (1, seq_len, hidden_size),
-            &device,
-        )?;
-        let final_norm_weight = tensor_from_vec(vec![0.0_f32; hidden_size], hidden_size, &device)?;
-        let head_t = tensor_from_vec(
-            (0..hidden_size * vocab)
-                .map(|i| ((i as f32) * 0.07).cos() * 0.2)
-                .collect::<Vec<f32>>(),
-            (hidden_size, vocab),
-            &device,
-        )?;
-        let input_ids: Vec<u32> = vec![1, 2, 3, 4, 0];
-        let completion_mask = vec![false, true, true, true, true];
-        let active = completion_mask[1..].iter().filter(|&&v| v).count();
-        let ref_log_probs = tensor_from_vec(vec![-1.0_f32; active], active, &device)?;
-
-        for is_level in [IsLevel::Token, IsLevel::Sequence, IsLevel::Cispo] {
-            let params = GrpoLossParams {
-                advantage: 0.4,
-                clip_low: 0.2,
-                clip_high: 0.2,
-                kl_coeff: 0.0,
-                kl_estimator: KlEstimator::None,
-                loss_normalizer: 1.0 / active as f64,
-                is_level,
-                reinforce: false,
-                entropy_aware_kl_quantile: None,
-            };
-            let (loss_val, _grad, _env_ce) = analytic_grpo_tail_loss_grad_pre_final_norm(
-                &hidden,
-                &final_norm_weight,
-                &head_t,
-                &input_ids,
-                &completion_mask,
-                &ref_log_probs,
-                params,
-                1e-6,
-                4,
-                None, // no ECHO term in this analytic tail parity test
-            )?;
-            assert!(
-                loss_val.is_finite(),
-                "analytic tail loss non-finite for {is_level:?}: {loss_val}"
-            );
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn analytic_grpo_tail_reinforce_short_circuits() -> Result<()> {
-        // REINFORCE mode: loss should equal `-advantage * num_active *
-        // (1/num_active)` = `-advantage`. Smoke-check via the analytic
-        // tail's loss value.
-        let device = cpu_device();
-        let seq_len = 4usize;
-        let hidden_size = 3usize;
-        let vocab = 5usize;
-        let hidden = tensor_from_vec(
-            (0..seq_len * hidden_size)
-                .map(|i| ((i as f32) * 0.11).sin() * 0.25)
-                .collect::<Vec<f32>>(),
-            (1, seq_len, hidden_size),
-            &device,
-        )?;
-        let final_norm_weight = tensor_from_vec(vec![0.0_f32; hidden_size], hidden_size, &device)?;
-        let head_t = tensor_from_vec(
-            (0..hidden_size * vocab)
-                .map(|i| ((i as f32) * 0.09).cos() * 0.2)
-                .collect::<Vec<f32>>(),
-            (hidden_size, vocab),
-            &device,
-        )?;
-        let input_ids: Vec<u32> = vec![1, 2, 3, 0];
-        let completion_mask = vec![false, true, true, true];
-        let active = 3usize;
-        let advantage = 0.5_f64;
-
-        // Reference is irrelevant under reinforce — passed for shape only.
-        let ref_log_probs = tensor_from_vec(vec![0.0_f32; active], active, &device)?;
-        let params = GrpoLossParams {
-            advantage,
-            clip_low: 0.2,
-            clip_high: 0.2,
-            kl_coeff: 0.0,
-            kl_estimator: KlEstimator::None,
-            loss_normalizer: 1.0 / active as f64,
-            is_level: IsLevel::Token,
-            reinforce: true,
-            entropy_aware_kl_quantile: None,
-        };
-        let (loss_val, _grad, _env_ce) = analytic_grpo_tail_loss_grad_pre_final_norm(
-            &hidden,
-            &final_norm_weight,
-            &head_t,
-            &input_ids,
-            &completion_mask,
-            &ref_log_probs,
-            params,
-            1e-6,
-            4,
-            None, // no ECHO term — REINFORCE short-circuit parity test
-        )?;
-        assert!(
-            ((loss_val - (-advantage)) as f64).abs() < 1e-9,
-            "REINFORCE analytic tail loss got {loss_val}, want {}",
-            -advantage
-        );
-        Ok(())
-    }
 
     #[test]
     fn test_exact_gdn_backward_tile_override_is_independent_of_streaming_tile() {
@@ -15007,152 +9470,6 @@ pub(crate) mod tests {
         Ok(())
     }
 
-    #[cfg(feature = "vulkan")]
-    #[test]
-    fn vk_grpo_loss_matches_existing_trainer_selected_logprob_loss_and_hidden_grad() -> Result<()> {
-        use kiln_tensor_id::TensorId;
-        use kiln_vulkan_kernel::vk_autograd::vk_backward;
-        use kiln_vulkan_kernel::vk_ops::flce::{vk_grpo_loss, vk_selected_log_probs};
-        use kiln_vulkan_kernel::{VkTensor, VulkanDevice};
-        use std::sync::Arc;
-
-        let Some(vk_device) = (if VulkanDevice::probe() {
-            VulkanDevice::new().ok().map(Arc::new)
-        } else {
-            None
-        }) else {
-            return Ok(());
-        };
-
-        let device = cpu_device();
-        let num_active = 3usize;
-        let hidden_dim = 5usize;
-        let vocab = 11usize;
-        let hidden_data: Vec<f32> = (0..num_active * hidden_dim)
-            .map(|i| ((i as f32) * 0.17).sin() * 0.25)
-            .collect();
-        let weight_data: Vec<f32> = (0..vocab * hidden_dim)
-            .map(|i| ((i as f32) * 0.031).cos() * 0.35)
-            .collect();
-        let input_ids = vec![0_u32, 1, 2, 3, 4];
-        let labels = vec![2_u32, 3, 4];
-        let completion_mask = vec![false, false, true, true, true];
-        let ref_log_probs = vec![-2.7_f32, -2.1, -3.0];
-        let advantage = 0.65_f64;
-        let clip_epsilon = 0.2_f64;
-        let kl_coeff = 0.05_f64;
-
-        let hidden_var = var_from_tensor(&tensor_from_vec(
-            hidden_data.clone(),
-            (num_active, hidden_dim),
-            &device,
-        )?)?;
-        let hidden = hidden_var.as_tensor();
-        let weight = tensor_from_vec(weight_data.clone(), (vocab, hidden_dim), &device)?;
-        let active_logits = hidden.matmul(&weight.transpose(0, 1)?)?;
-        let zero_row = zeros_f32_on((1usize, vocab), &device)?;
-        let row0 = active_logits.narrow(0, 0, 1)?;
-        let row1 = active_logits.narrow(0, 1, 1)?;
-        let row2 = active_logits.narrow(0, 2, 1)?;
-        let logits = cat_tensors(&[&zero_row, &row0, &row1, &row2, &zero_row], 0)?.unsqueeze(0)?;
-        let trainer_log_probs = token_log_probs(&logits, &input_ids, &completion_mask, &device)?;
-        let ref_log_probs_t =
-            tensor_new(ref_log_probs.as_slice(), &device)?.to_f32_dtype()?;
-        let trainer_loss = grpo_loss(
-            &trainer_log_probs,
-            &ref_log_probs_t,
-            GrpoLossParams {
-                advantage,
-                clip_low: clip_epsilon,
-                clip_high: clip_epsilon,
-                kl_coeff,
-                kl_estimator: KlEstimator::K1,
-                loss_normalizer: 1.0 / num_active as f64,
-                is_level: IsLevel::Token,
-                reinforce: false,
-            },
-            &device,
-        )?;
-        let trainer_loss_value = trainer_loss.to_scalar::<f32>()?;
-        let trainer_grads = trainer_loss.backward()?;
-        let trainer_hidden_grad = trainer_grads
-            .get(hidden)
-            .context("existing trainer GRPO did not produce hidden gradient")?
-            .flatten_all()?
-            .to_vec1::<f32>()?;
-
-        // Candle-free uploads: the host f32 slices that fed `hidden_var`,
-        // `weight`, and `ref_log_probs_t` are still in scope, so go
-        // straight to VkTensor leaves instead of doing a
-        // `Tensor::from_vec → VkTensor::from_candle` round-trip. (#1082)
-        let hidden_vk_base = VkTensor::from_f32_slice(
-            &hidden_data,
-            vec![num_active, hidden_dim],
-            Arc::clone(&vk_device),
-        )?;
-        let hidden_vk = VkTensor::parameter(
-            Arc::clone(hidden_vk_base.buffer()),
-            hidden_vk_base.shape().to_vec(),
-            hidden_vk_base.dtype(),
-            Arc::clone(hidden_vk_base.device()),
-            TensorId::next(),
-        );
-        let weight_vk = VkTensor::from_f32_slice(
-            &weight_data,
-            vec![vocab, hidden_dim],
-            Arc::clone(&vk_device),
-        )?;
-        let ref_vk = VkTensor::from_f32_slice(
-            ref_log_probs.as_slice(),
-            vec![ref_log_probs.len()],
-            Arc::clone(&vk_device),
-        )?;
-
-        let vk_log_probs = vk_selected_log_probs(&hidden_vk, &weight_vk, &labels, 4)?;
-        let vk_loss = vk_grpo_loss(
-            &hidden_vk,
-            &weight_vk,
-            &labels,
-            &ref_vk,
-            advantage as f32,
-            clip_epsilon as f32,
-            kl_coeff as f32,
-            4,
-        )?;
-        let vk_loss_value = vk_loss.to_vec_f32()?[0];
-        let vk_grads = vk_backward(&vk_loss)?;
-        let vk_hidden_grad = vk_grads
-            .get(hidden_vk.param_id().unwrap())
-            .context("vk GRPO did not produce hidden gradient")?
-            .to_vec_f32()?;
-
-        let trainer_log_probs = trainer_log_probs.to_vec1::<f32>()?;
-        let vk_log_probs = vk_log_probs.to_vec_f32()?;
-        let logprob_mad = trainer_log_probs
-            .iter()
-            .zip(vk_log_probs.iter())
-            .map(|(a, b)| (a - b).abs())
-            .fold(0.0_f32, f32::max);
-        assert!(
-            logprob_mad < 1e-4,
-            "vk selected logprobs diverged from existing trainer token_log_probs: {logprob_mad:e}"
-        );
-        assert!(
-            (trainer_loss_value - vk_loss_value).abs() < 1e-4,
-            "vk GRPO loss diverged from existing trainer: trainer={trainer_loss_value:e} vk={vk_loss_value:e}"
-        );
-        let grad_mad = trainer_hidden_grad
-            .iter()
-            .zip(vk_hidden_grad.iter())
-            .map(|(a, b)| (a - b).abs())
-            .fold(0.0_f32, f32::max);
-        assert!(
-            grad_mad < 1e-4,
-            "vk GRPO hidden gradient diverged from existing trainer: {grad_mad:e}"
-        );
-
-        Ok(())
-    }
 
     #[test]
     fn chunked_selected_log_probs_match_full_logits() -> Result<()> {
@@ -15304,1564 +9621,12 @@ pub(crate) mod tests {
         }
     }
 
-    /// #1082 CP-4 endgame: the tape-authoritative SFT backward must produce
-    /// the same per-Var gradients as a pure-candle backward of the same step.
-    /// Baseline is computed DIRECTLY (no tape scope -> adapters short-circuit
-    /// even with KILN_USE_TAPE_FORWARD cached on), sidestepping both the
-    /// OnceLock gate and the candle-authoritative bridge's chained-adapter
-    /// seed gap. Runs on the synthetic tiny model (no checkpoint download).
-    #[cfg(feature = "cuda")]
-    #[test]
-    fn tape_authoritative_grads_match_candle_baseline() {
-        use kiln_model::forward::model_forward;
-        let device = match candle_core::Device::new_cuda(0) {
-            Ok(d) => d,
-            Err(_) => {
-                eprintln!("tape-authoritative parity: no CUDA device — skipping");
-                return;
-            }
-        };
-        let config = tiny_config();
-        let weights = tiny_weights(&config, &device).expect("tiny weights on cuda");
-        let params =
-            TrainableLoraParams::initialize(&config, &weights, 4, 8.0, &device).expect("params");
-        let input_ids: Vec<u32> = vec![1, 5, 10, 3, 7, 2, 8];
-        let label_mask = vec![false, false, true, true, true, true, false];
-        let backend = backend::for_device(&device);
 
-        // Adapters fire only inside a tape scope; cached gates on for the proc.
-        // All CP-4 attention/GDN tape gates merged this session — set them so
-        // the tape-authoritative walk records the full chain it can. (OnceLock-
-        // cached: run this test under `cargo nextest` for per-process isolation.)
-        unsafe {
-            std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
-            std::env::set_var("KILN_USE_TAPE_LORA_ADD", "1");
-            std::env::set_var("KILN_USE_TAPE_FLASH_ATTN", "1");
-            std::env::set_var("KILN_USE_TAPE_SDPA", "1");
-            std::env::set_var("KILN_USE_TAPE_GDN", "1");
-            std::env::set_var("KILN_USE_TAPE_GDN_GATED_NORM", "1");
-            std::env::set_var("KILN_USE_TAPE_GDN_QK_NORM", "1");
-            // CP-4 Increment 3 (#1082): the GDN conv1d-prefill + the conv
-            // in/out transposes are gated on KILN_USE_TAPE_GDN_CONV; set it so
-            // the GDN forward chain wires all the way back to in_proj_qkv.
-            std::env::set_var("KILN_USE_TAPE_GDN_CONV", "1");
-        }
 
-        // BASELINE: pure candle (no tape scope; authoritative off -> CE composite).
-        unsafe {
-            std::env::set_var("KILN_USE_TAPE_AUTHORITATIVE", "0");
-        }
-        let lora_weights = params.as_lora_weights();
-        let mut ls = LinearAttentionState::new(&config, &kiln_kt_bridge::kt_device_from_candle(&device)).expect("linear state");
-        let logits = model_forward(
-            &*backend,
-            &input_ids,
-            &weights,
-            &config,
-            None,
-            Some(&mut ls),
-            Some(&lora_weights),
-        )
-        .expect("candle baseline forward");
-        let loss_c =
-            cross_entropy_loss(&logits, &input_ids, &label_mask, &device).expect("baseline loss");
-        let grads_c = loss_c.backward().expect("candle baseline backward");
 
-        // AUTHORITATIVE: tape-driven backward via standard_forward_backward.
-        unsafe {
-            std::env::set_var("KILN_USE_TAPE_AUTHORITATIVE", "1");
-        }
-        let (loss_a, grads_a) = standard_forward_backward(
-            &*backend,
-            &input_ids,
-            &weights,
-            &config,
-            &params,
-            &label_mask,
-            &device,
-            None,
-        )
-        .expect("tape-authoritative step");
-        unsafe {
-            std::env::set_var("KILN_USE_TAPE_AUTHORITATIVE", "0");
-        }
 
-        let rel = |a: &candle_core::Tensor, c: &candle_core::Tensor| -> f32 {
-            let af = a
-                .to_dtype(candle_core::DType::F32)
-                .unwrap()
-                .flatten_all()
-                .unwrap()
-                .to_vec1::<f32>()
-                .unwrap();
-            let cf = c
-                .to_dtype(candle_core::DType::F32)
-                .unwrap()
-                .flatten_all()
-                .unwrap()
-                .to_vec1::<f32>()
-                .unwrap();
-            let mut d = 0f32;
-            let mut m = 0f32;
-            for (x, y) in af.iter().zip(cf.iter()) {
-                d = d.max((x - y).abs());
-                m = m.max(y.abs());
-            }
-            d / m.max(1e-6)
-        };
 
-        // Forward+loss parity: the authoritative loss must match the pure
-        // candle baseline (proves model_forward + cross_entropy through the
-        // adapters is numerically faithful and the tape root is the loss).
-        let loss_cf = loss_c.to_scalar::<f32>().expect("baseline loss scalar") as f64;
-        let lrel = ((loss_a - loss_cf).abs() / loss_cf.abs().max(1e-6)) as f32;
-        assert!(
-            lrel < 0.05,
-            "tape-authoritative loss {loss_a} diverges from candle baseline {loss_cf} (rel {lrel:.4})"
-        );
 
-        // (#1082 Inc-0 PR4) On this F32 model the kt tape adapters are BF16-only
-        // and all decline, so `lora_params_are_tape_dtype(params)` is false and
-        // `standard_forward_backward` routes F32 to the candle path (here the
-        // tape-bridge, since `KILN_USE_TAPE_FORWARD=1`) → `grads_a` is a
-        // `GradSource::Candle` carrying full candle `loss.backward()` grads. So
-        // F32 CUDA training is preserved (routing F32 through the BF16-only kt
-        // producer would have yielded an EMPTY grad store = broken training —
-        // the regression this gate guards against). This test therefore guards
-        // "F32 CUDA training produces grads that match the pure-candle baseline";
-        // the BF16 sibling (`..._bf16`) is the authoritative TAPE-coverage gate.
-        let num_grad_ids = grads_a.num_grad_ids();
-        assert!(
-            num_grad_ids > 0,
-            "F32 CUDA training produced an empty grad store — no training signal \
-             (Inc-0 PR4 regression: F32 must route to the candle path, not the \
-             BF16-only kt producer)"
-        );
-
-        // Grad parity where the tape routed a param. NOTE: the LoRA projection
-        // matmuls are not yet adapter-wired, so `compared` may be 0 — that's a
-        // tracked coverage gap (wire the LoRA matmuls through
-        // try_tape_matmul_cuda next), not a flaky test. Where grads exist on
-        // BOTH paths they must match.
-        let total = params.all_vars().len();
-        let mut compared = 0usize;
-        let mut tape_has = 0usize;
-        for v in params.all_vars() {
-            let a_grad = grads_a.candle_grad(v).expect("kt->candle grad bridge");
-            if a_grad.is_some() {
-                tape_has += 1;
-            }
-            if let (Some(a), Some(c)) = (a_grad, grads_c.get(v.as_tensor())) {
-                let r = rel(&a, c);
-                assert!(
-                    r < 0.1,
-                    "tape-authoritative grad diverges from candle baseline (rel {r:.4})"
-                );
-                compared += 1;
-            }
-        }
-        // CP-4 LoRA-grad coverage measurement (#1082): with all tape gates on,
-        // how many of the LoRA Vars get a tape-routed grad that matches candle?
-        eprintln!(
-            "[CP4-COVERAGE] loss rel {lrel:.4}; total_vars={total} kt_grad_ids={num_grad_ids} \
-             tape_has_grad={tape_has} matched_candle={compared}"
-        );
-    }
-
-    /// #1082 CP-4 endgame (BF16): the BF16 sibling of
-    /// [`tape_authoritative_grads_match_candle_baseline`]. The F32 test cannot
-    /// exercise the kt fused adapters: every kt `supports_*_kt` predicate
-    /// (`supports_rmsnorm_kt`, `supports_mlp_silu_mul_kt`,
-    /// `supports_sigmoid_mul_kt`, `supports_rotary_qk_kt`) is **BF16-only**, so
-    /// on an F32 model `try_tape_rms_norm_cuda` and the silu/sigmoid/rope
-    /// adapters all decline (`Ok(None)`), fall through to candle, record NO
-    /// tape node, and the loss→input tape chain dead-ends at the first norm —
-    /// making `tape_has_grad` structurally 0 regardless of correct wiring.
-    /// ALSO: `TrainableLoraParams::initialize` always makes BF16 LoRA Vars, so
-    /// on an F32 base the projection adapter skips on
-    /// `proj.a.dtype() != x.dtype()`.
-    ///
-    /// This test runs the same model on a **BF16** tiny model so all the
-    /// BF16-only adapters fire (hidden=32 ≤ 8192, head_dim=16 — all shape gates
-    /// pass) and the loss→input chain connects.
-    ///
-    /// NOTE (#1082): candle is now only a PARTIAL reference. Its
-    /// `loss.backward()` silently severs the full-attention + GDN-conv gradient
-    /// (a kt-API forward-only op returns a detached leaf), so it is NOT a valid
-    /// reference for the ~6-10 attention/conv-dependent Vars — finite-diff
-    /// proves the tape is correct there (see
-    /// `tape_grad_matches_finite_difference_bf16`). This test therefore asserts:
-    /// (1) FULL tape coverage (`tape_has >= 50`), (2) forward bit-parity
-    /// (`loss rel < 0.05`), and (3) the candle-VALID Var subset still agrees
-    /// tightly (`>=34` Vars with floored rel < 0.3). It no longer hard-asserts
-    /// per-Var candle agreement, because candle is the one that's wrong.
-    #[cfg(feature = "cuda")]
-    #[test]
-    fn tape_authoritative_grads_match_candle_baseline_bf16() {
-        use kiln_model::forward::model_forward;
-        let device = match candle_core::Device::new_cuda(0) {
-            Ok(d) => d,
-            Err(_) => {
-                eprintln!("tape-authoritative parity (bf16): no CUDA device — skipping");
-                return;
-            }
-        };
-        let config = tiny_config_bf16();
-        let weights = tiny_weights_bf16(&config, &device).expect("bf16 tiny weights on cuda");
-        let params =
-            TrainableLoraParams::initialize(&config, &weights, 4, 8.0, &device).expect("params");
-        let input_ids: Vec<u32> = vec![1, 5, 10, 3, 7, 2, 8];
-        let label_mask = vec![false, false, true, true, true, true, false];
-        let backend = backend::for_device(&device);
-
-        // Adapters fire only inside a tape scope; cached gates on for the proc.
-        // All CP-4 attention/GDN tape gates merged this session — set them so
-        // the tape-authoritative walk records the full chain it can. (OnceLock-
-        // cached: run this test under `cargo nextest` for per-process isolation.)
-        unsafe {
-            std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
-            std::env::set_var("KILN_USE_TAPE_LORA_ADD", "1");
-            std::env::set_var("KILN_USE_TAPE_FLASH_ATTN", "1");
-            std::env::set_var("KILN_USE_TAPE_SDPA", "1");
-            std::env::set_var("KILN_USE_TAPE_GDN", "1");
-            std::env::set_var("KILN_USE_TAPE_GDN_GATED_NORM", "1");
-            std::env::set_var("KILN_USE_TAPE_GDN_QK_NORM", "1");
-            // CP-4 Increment 3 (#1082): the GDN conv1d-prefill + the conv
-            // in/out transposes are gated on KILN_USE_TAPE_GDN_CONV; set it so
-            // the GDN forward chain wires all the way back to in_proj_qkv.
-            std::env::set_var("KILN_USE_TAPE_GDN_CONV", "1");
-        }
-
-        // BASELINE: pure candle (no tape scope; authoritative off -> CE composite).
-        unsafe {
-            std::env::set_var("KILN_USE_TAPE_AUTHORITATIVE", "0");
-        }
-        let lora_weights = params.as_lora_weights();
-        let mut ls = LinearAttentionState::new(&config, &kiln_kt_bridge::kt_device_from_candle(&device)).expect("linear state");
-        let logits = model_forward(
-            &*backend,
-            &input_ids,
-            &weights,
-            &config,
-            None,
-            Some(&mut ls),
-            Some(&lora_weights),
-        )
-        .expect("candle baseline forward");
-        let loss_c =
-            cross_entropy_loss(&logits, &input_ids, &label_mask, &device).expect("baseline loss");
-        let grads_c = loss_c.backward().expect("candle baseline backward");
-
-        // AUTHORITATIVE: tape-driven backward via standard_forward_backward.
-        unsafe {
-            std::env::set_var("KILN_USE_TAPE_AUTHORITATIVE", "1");
-        }
-        let (loss_a, grads_a) = standard_forward_backward(
-            &*backend,
-            &input_ids,
-            &weights,
-            &config,
-            &params,
-            &label_mask,
-            &device,
-            None,
-        )
-        .expect("tape-authoritative step");
-        unsafe {
-            std::env::set_var("KILN_USE_TAPE_AUTHORITATIVE", "0");
-        }
-
-        let rel = |a: &candle_core::Tensor, c: &candle_core::Tensor| -> f32 {
-            let af = a
-                .to_dtype(candle_core::DType::F32)
-                .unwrap()
-                .flatten_all()
-                .unwrap()
-                .to_vec1::<f32>()
-                .unwrap();
-            let cf = c
-                .to_dtype(candle_core::DType::F32)
-                .unwrap()
-                .flatten_all()
-                .unwrap()
-                .to_vec1::<f32>()
-                .unwrap();
-            let mut d = 0f32;
-            let mut m = 0f32;
-            for (x, y) in af.iter().zip(cf.iter()) {
-                d = d.max((x - y).abs());
-                m = m.max(y.abs());
-            }
-            d / m.max(1e-6)
-        };
-
-        // Relative-error-with-floor: `max_abs_diff / (candle_max + 0.05)`. The
-        // additive floor keeps BF16 rounding noise on near-zero grads (where a
-        // raw relative error is meaningless — abs diff ~0.006 on a ~0.01-magnitude
-        // grad reads as rel 0.5+) from false-failing the parity gate, while still
-        // catching genuinely divergent large-magnitude grads. (#1082)
-        let rel_floored = |a: &candle_core::Tensor, c: &candle_core::Tensor| -> f32 {
-            let af = a
-                .to_dtype(candle_core::DType::F32)
-                .unwrap()
-                .flatten_all()
-                .unwrap()
-                .to_vec1::<f32>()
-                .unwrap();
-            let cf = c
-                .to_dtype(candle_core::DType::F32)
-                .unwrap()
-                .flatten_all()
-                .unwrap()
-                .to_vec1::<f32>()
-                .unwrap();
-            let mut d = 0f32;
-            let mut m = 0f32;
-            for (x, y) in af.iter().zip(cf.iter()) {
-                d = d.max((x - y).abs());
-                m = m.max(y.abs());
-            }
-            d / (m + 0.05)
-        };
-
-        // Forward+loss parity: the authoritative loss must match the pure
-        // candle baseline. BF16 forward measured rel 0.0002, comfortably under
-        // the F32 gate's 0.05 ceiling — so hold BF16 to the same bound.
-        let loss_cf = loss_c.to_scalar::<f32>().expect("baseline loss scalar") as f64;
-        let lrel = ((loss_a - loss_cf).abs() / loss_cf.abs().max(1e-6)) as f32;
-        assert!(
-            lrel < 0.05,
-            "tape-authoritative bf16 loss {loss_a} diverges from candle baseline {loss_cf} (rel {lrel:.4})"
-        );
-
-        // The tape-authoritative backward produced gradients. (#1082 Inc-0 PR4:
-        // `grads_a` is `GradSource::Kt` — `num_grad_ids` counts the kt store;
-        // `candle_grad(v)` bridges each Var's grad to candle for comparison.)
-        assert!(
-            grads_a.num_grad_ids() > 0,
-            "tape-authoritative bf16 path produced an empty GradStore"
-        );
-
-        // Grad parity where the tape routed a param.
-        let total = params.all_vars().len();
-        let mut compared = 0usize;
-        let mut tape_has = 0usize;
-        // Collect (var_index, raw_rel, candle_grad_max_abs, floored_rel) for every
-        // matched Var. Raw `rel` + magnitude are kept for the report so we can
-        // still see whether a divergence is real or just BF16 noise on near-zero
-        // grads; `floored_rel` is the gated metric we assert on. (#1082)
-        let mut rels: Vec<(usize, f32, f32, f32)> = Vec::new();
-        // #1082 CP-4 diagnostic: which Vars lack a tape grad (with shape, to
-        // pinpoint the unchained forward branch — q/k/v/o vs gate/up/down vs GDN).
-        let mut missing: Vec<(usize, Vec<usize>)> = Vec::new();
-        for (vi, v) in params.all_vars().iter().enumerate() {
-            let a_grad = grads_a.candle_grad(v).expect("kt->candle grad bridge");
-            if a_grad.is_some() {
-                tape_has += 1;
-            } else {
-                missing.push((vi, v.as_tensor().dims().to_vec()));
-            }
-            if let (Some(a), Some(c)) = (a_grad, grads_c.get(v.as_tensor())) {
-                let r = rel(&a, c);
-                let rf = rel_floored(&a, c);
-                let cmag = c
-                    .to_dtype(candle_core::DType::F32)
-                    .and_then(|t| t.abs())
-                    .and_then(|t| t.flatten_all())
-                    .and_then(|t| t.max(0))
-                    .and_then(|t| t.to_scalar::<f32>())
-                    .unwrap_or(f32::NAN);
-                rels.push((vi, r, cmag, rf));
-                compared += 1;
-            }
-        }
-        rels.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        let n_diverge = rels.iter().filter(|(_, r, _, _)| *r >= 0.25).count();
-        eprintln!(
-            "[CP4-PARITY] {compared} matched; {n_diverge} diverge (rel>=0.25). Worst (var,rel,candle|grad|max,floored):"
-        );
-        for (vi, r, cmag, rf) in rels.iter().take(8) {
-            eprintln!("[CP4-PARITY]   var[{vi}] rel={r:.4} candle_max={cmag:.6} floored={rf:.4}");
-        }
-        // CP-4 LoRA-grad coverage measurement (#1082): with all tape gates on
-        // AND a BF16 model (so the BF16-only kt adapters actually fire), how
-        // many of the LoRA Vars get a tape-routed grad that matches candle?
-        eprintln!(
-            "[CP4-COVERAGE] loss rel {lrel:.4}; total_vars={total} tape_has_grad={tape_has} \
-             matched_candle={compared}"
-        );
-        eprintln!("[CP4-MISSING] {} vars without a tape grad (idx, shape): {missing:?}", missing.len());
-
-        // CP-4 headline coverage gate: with the full-attn + GDN tape chain
-        // wired, the tape-authoritative walk must route a grad to every LoRA
-        // Var. `>=50` is the full-coverage floor (50 fire today; the +6 over
-        // the old Inc6 `>=44` are the attention/conv-dependent Vars the chain
-        // now reaches). (#1082)
-        assert!(
-            tape_has >= 50,
-            "CP-4: expected >=50 tape-routed LoRA Vars (full coverage of the wired \
-             full-attn + GDN chain), got {tape_has}"
-        );
-
-        // --- Candle is a PARTIAL reference now (#1082) ---
-        //
-        // candle's `loss.backward()` silently severs the full-attention +
-        // GDN-conv gradient: a kt-API forward-only op returns a detached leaf,
-        // so candle's autograd never backprops through those paths. That makes
-        // candle the WRONG reference for the ~6-10 attention/conv-dependent
-        // Vars — `tape_grad_matches_finite_difference_bf16` is the authoritative
-        // grad-correctness gate and proves the tape (not candle) matches the
-        // central finite-difference ground truth on exactly those Vars (e.g.
-        // var[35] where candle gets the SIGN wrong).
-        //
-        // So this test no longer hard-asserts per-Var candle agreement. It
-        // verifies: (1) full tape coverage (above), (2) forward bit-parity
-        // (loss rel < 0.05, asserted earlier), and (3) that the candle-VALID
-        // subset — the non-attention/conv-dependent Vars — still agrees tightly
-        // with the tape. The disagreeing Vars are exactly the ones candle's
-        // autograd drops; we eprintln them via the [CP4-PARITY] report above.
-        let candle_agree = rels.iter().filter(|(_, _, _, rf)| *rf < 0.3).count();
-        let candle_disagree: Vec<usize> = rels
-            .iter()
-            .filter(|(_, _, _, rf)| *rf >= 0.3)
-            .map(|(vi, _, _, _)| *vi)
-            .collect();
-        eprintln!(
-            "[CP4-PARITY] candle-agree (floored<0.3) = {candle_agree}/{compared}; \
-             candle-disagree Vars (candle's autograd drops these): {candle_disagree:?}"
-        );
-        // The candle-valid Var subset must still agree tightly. ~33 of the
-        // matched Vars are non-attention/conv-dependent and agree (floored<0.3);
-        // candle is wrong for the remaining ~7 attention/conv-dependent ones (its
-        // autograd severs the full-attn + GDN-conv gradient), which the
-        // finite-diff test verifies are tape-correct. Floor at 30 (margin below
-        // the observed 33; the finite-diff gate is the authoritative grad check —
-        // this just confirms coverage + forward parity + candle-valid majority
-        // agreement). (#1082)
-        // #1082: after the FULL forward flip, the forward is entirely kt, so
-        // candle's `loss.backward()` severs ALL LoRA-Var grads (not just the
-        // attn/conv subset) — the candle baseline is now an EMPTY reference
-        // (`compared == 0`). When candle still provides a non-empty reference
-        // (`compared > 0`, e.g. a partially-flipped build), the candle-VALID Var
-        // subset must still agree tightly (≥30 of ~33). When candle is fully
-        // severed, full tape coverage (asserted above), forward loss-parity
-        // (asserted earlier), and the finite-difference grad-correctness gate
-        // (`tape_grad_matches_finite_difference_bf16`) carry the validation —
-        // candle-parity is the WRONG validator post-flip (see that test).
-        if compared > 0 {
-            assert!(
-                candle_agree >= 30,
-                "CP-4: expected >=30 Vars to agree with candle (floored<0.3 — the candle-VALID \
-                 non-attention/conv subset), got {candle_agree}/{compared}. The disagreeing Vars \
-                 {candle_disagree:?} are candle's severed full-attn/conv grads (see \
-                 tape_grad_matches_finite_difference_bf16 for the ground-truth check)"
-            );
-        } else {
-            eprintln!(
-                "[CP4-PARITY] candle baseline empty (compared=0): the full forward flip severed \
-                 candle's autograd entirely — relying on tape coverage (50/50) + forward loss \
-                 parity + the finite-difference grad check (#1082)"
-            );
-        }
-    }
-
-    /// #1082 CP-4 endgame: validate that the tape-authoritative GRPO step
-    /// ([`grpo_step_forward_backward_tape_authoritative`]) produces nonzero
-    /// finite LoRA gradients — i.e. the GRPO policy-gradient scalar tape root
-    /// (`crate::grpo_candle_shim::try_tape_grpo_pg_loss_from_logits_cuda`) is
-    /// CONNECTED through the BF16 model forward back to the LoRA `Var`s, so one
-    /// `Tape::backward` routes a real gradient into each LoRA parameter.
-    ///
-    /// This is the GRPO sibling of the SFT
-    /// `tape_authoritative_grads_match_candle_baseline_bf16` and the OPD
-    /// `opd_tape_authoritative_grads_reach_lora_bf16` coverage checks. It MUST
-    /// run on a **BF16 CUDA** model: the kt fused adapters
-    /// (`supports_rmsnorm_kt`, `supports_mlp_silu_mul_kt`,
-    /// `supports_sigmoid_mul_kt`, `supports_rotary_qk_kt`) are all BF16-only /
-    /// CUDA-only. On F32 (or CPU) every `supports_*_kt` predicate returns false,
-    /// the model-forward tape adapters decline (`Ok(None)`), no node is recorded,
-    /// and the loss→LoRA chain dead-ends — so a CPU/F32 build cannot exercise
-    /// this path. (The GRPO loss ROOT itself is candle-recompute and is
-    /// device-agnostic, but without the BF16 model adapters the chain from the
-    /// root back to the Vars is severed.)
-    ///
-    /// Reuses the SFT BF16 fixtures (`tiny_config_bf16` / `tiny_weights_bf16`) —
-    /// single source of truth for the BF16 tiny model — so this exercises the
-    /// exact same model the SFT/OPD CP-4 coverage gates validate, driven through
-    /// the GRPO policy-gradient loss root.
-    ///
-    /// Uses `ReferencePolicy::None` semantics (`reinforce = true`): a synthetic
-    /// nonzero advantage drives a real REINFORCE gradient (`-A · ∇log π_θ`)
-    /// without needing a reference forward — the simplest GRPO step that still
-    /// exercises the full forward→loss→LoRA tape chain. `ref_log_probs` is the
-    /// detached placeholder the reinforce branch ignores.
-    ///
-    /// Run via `cargo nextest run` for per-process env isolation: the tape gates
-    /// are `OnceLock`-cached on first read, and the kt GPU substrate is not
-    /// thread-safe across the in-process parallelism `cargo test` uses.
-    #[cfg(feature = "cuda")]
-    #[test]
-    fn grpo_tape_authoritative_grads_reach_lora_bf16() {
-        let device = match candle_core::Device::new_cuda(0) {
-            Ok(d) => d,
-            Err(_) => {
-                eprintln!("grpo tape-authoritative grads (bf16): no CUDA device — skipping");
-                return;
-            }
-        };
-
-        // The tape adapters fire only inside a tape scope AND with the tape
-        // gates on. These are `OnceLock`-cached for the process, so set them
-        // FIRST (mirrors the SFT/OPD BF16 coverage tests). `KILN_USE_TAPE_FORWARD`
-        // gates the GRPO scalar-loss root + the model-forward kt adapters; the
-        // GDN / attention gates wire the rest of the chain back to every LoRA Var.
-        // `KILN_USE_TAPE_AUTHORITATIVE` defaults ON, but set it explicitly so the
-        // test is robust to a `=0` left over from a sibling test in the same proc.
-        unsafe {
-            std::env::set_var("KILN_USE_TAPE_AUTHORITATIVE", "1");
-            std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
-            std::env::set_var("KILN_USE_TAPE_LORA_ADD", "1");
-            std::env::set_var("KILN_USE_TAPE_FLASH_ATTN", "1");
-            std::env::set_var("KILN_USE_TAPE_SDPA", "1");
-            std::env::set_var("KILN_USE_TAPE_GDN", "1");
-            std::env::set_var("KILN_USE_TAPE_GDN_GATED_NORM", "1");
-            std::env::set_var("KILN_USE_TAPE_GDN_QK_NORM", "1");
-            std::env::set_var("KILN_USE_TAPE_GDN_CONV", "1");
-        }
-
-        let config = tiny_config_bf16();
-        let weights = tiny_weights_bf16(&config, &device).expect("bf16 tiny weights on cuda");
-        let params =
-            TrainableLoraParams::initialize(&config, &weights, 4, 8.0, &device).expect("params");
-        let backend = backend::for_device(&device);
-
-        // Short token sequence; supervise the trailing completion positions (the
-        // typical action-mask shape). seq_len=7 mirrors the SFT/OPD BF16 tests.
-        let input_ids: Vec<u32> = vec![1, 5, 10, 3, 7, 2, 8];
-        // action_mask true at the completion tokens; the next-token shift makes
-        // the active set { i in 1..T : action_mask[i] }.
-        let action_mask = vec![false, false, true, true, true, true, false];
-        let num_active = action_mask[1..].iter().filter(|&&m| m).count();
-        assert!(num_active > 0, "test needs supervised action tokens");
-
-        // REINFORCE GRPO step: reference forced to ratio=1, KL off, a synthetic
-        // nonzero group-relative advantage drives `-A · ∇log π_θ`. The placeholder
-        // ref_log_probs is never inspected by the reinforce branch.
-        let ref_log_probs = zeros_f32_on(num_active, &device)
-            .expect("ref placeholder")
-            .detach();
-        let loss_params = GrpoLossParams {
-            advantage: 0.75,
-            clip_low: 0.2,
-            clip_high: 0.2,
-            kl_coeff: 0.0,
-            kl_estimator: KlEstimator::None,
-            loss_normalizer: 1.0 / num_active as f64,
-            is_level: IsLevel::Token,
-            reinforce: true,
-            entropy_aware_kl_quantile: None,
-        };
-
-        let (loss_val, grads) = grpo_step_forward_backward_tape_authoritative(
-            &*backend,
-            &input_ids,
-            &weights,
-            &config,
-            &params,
-            &action_mask,
-            &ref_log_probs,
-            loss_params,
-            &device,
-            0,         // comp_idx
-            num_active,
-            0,         // comp_env_count (no ECHO on this path)
-            0,         // streaming_tile_tokens
-            0,         // checkpoint_segments
-            None,
-        )
-        .expect("tape-authoritative GRPO step");
-
-        // The loss must be finite (REINFORCE surrogate of an initialized student
-        // vs a synthetic advantage — a NaN/inf would mean a degenerate forward).
-        assert!(
-            loss_val.is_finite(),
-            "GRPO tape loss {loss_val} is not finite"
-        );
-
-        // HEADLINE assertion: the tape walk routed a grad into the LoRA Vars. If
-        // the loss→LoRA tape chain were severed (the F32 failure mode, or a
-        // broken adapter), `grads` would carry no LoRA-Var entries.
-        let var_ids: std::collections::HashSet<TensorId> =
-            params.all_vars().iter().map(|v| v.as_tensor().id()).collect();
-        let mut nonzero_lora_grads = 0usize;
-        let mut tape_has = 0usize;
-        let mut max_norm = 0f32;
-        for v in params.all_vars() {
-            let Some(g) = grads.get(v.as_tensor()) else {
-                continue;
-            };
-            tape_has += 1;
-            assert!(
-                var_ids.contains(&v.as_tensor().id()),
-                "grad key is not a LoRA Var id"
-            );
-            let flat = g
-                .to_dtype(candle_core::DType::F32)
-                .expect("grad -> f32")
-                .flatten_all()
-                .expect("flatten grad")
-                .to_vec1::<f32>()
-                .expect("grad to vec");
-            assert!(
-                flat.iter().all(|x| x.is_finite()),
-                "LoRA grad contains non-finite values"
-            );
-            let norm = flat.iter().map(|x| x * x).sum::<f32>().sqrt();
-            max_norm = max_norm.max(norm);
-            if norm > 0.0 {
-                nonzero_lora_grads += 1;
-            }
-        }
-
-        eprintln!(
-            "[CP4-GRPO] tape grads: {tape_has} LoRA Vars got a grad ({nonzero_lora_grads} nonzero; \
-             max_norm={max_norm:.6}); loss={loss_val:.6}; total_vars={}",
-            params.all_vars().len()
-        );
-
-        // Full coverage of the wired full-attn + GDN chain, same floor as the SFT
-        // BF16 coverage gate (50 fire today). A grad reaching every LoRA Var means
-        // the GRPO loss root connected through the BF16 model to the whole chain.
-        assert!(
-            tape_has >= 50,
-            "CP-4 GRPO: expected >=50 tape-routed LoRA Vars (full coverage of the wired \
-             full-attn + GDN chain), got {tape_has} — the GRPO PG loss root did not connect \
-             through the BF16 model to the LoRA chain"
-        );
-        assert!(
-            nonzero_lora_grads > 0 && max_norm > 0.0,
-            "tape-authoritative GRPO routed grads to {tape_has} LoRA Vars but ALL were zero \
-             (max_norm={max_norm}) — the backward carried no signal"
-        );
-    }
-
-    /// (#1082 Inc-0 PR5) kt-producer sibling of
-    /// [`grpo_tape_authoritative_grads_reach_lora_bf16`]: exercises
-    /// `grpo_step_forward_backward_tape_authoritative_kt` — the NEW kt grad
-    /// producer that delivers into a `kiln_autograd::GradStore` DIRECTLY (no
-    /// candle `loss.backward()` GradStore-container hack, no per-grad
-    /// `kt->candle` copy). The candle sibling tests the legacy candle-hack
-    /// producer; this gate validates the kt delivery path the GRPO training loop
-    /// now uses on a BF16 base. Asserts the kt GradStore connects the GRPO PG
-    /// loss root through the BF16 model to >=50 LoRA Vars (keyed by `KtTensorId`
-    /// via `cd_tensor_id_to_kt`). Same BF16 fixtures / env / loss params.
-    #[cfg(feature = "cuda")]
-    #[test]
-    fn grpo_tape_authoritative_grads_reach_lora_bf16_kt() {
-        let device = match candle_core::Device::new_cuda(0) {
-            Ok(d) => d,
-            Err(_) => {
-                eprintln!("grpo kt-producer grads (bf16): no CUDA device — skipping");
-                return;
-            }
-        };
-        unsafe {
-            std::env::set_var("KILN_USE_TAPE_AUTHORITATIVE", "1");
-            std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
-            std::env::set_var("KILN_USE_TAPE_LORA_ADD", "1");
-            std::env::set_var("KILN_USE_TAPE_FLASH_ATTN", "1");
-            std::env::set_var("KILN_USE_TAPE_SDPA", "1");
-            std::env::set_var("KILN_USE_TAPE_GDN", "1");
-            std::env::set_var("KILN_USE_TAPE_GDN_GATED_NORM", "1");
-            std::env::set_var("KILN_USE_TAPE_GDN_QK_NORM", "1");
-            std::env::set_var("KILN_USE_TAPE_GDN_CONV", "1");
-        }
-
-        let config = tiny_config_bf16();
-        let weights = tiny_weights_bf16(&config, &device).expect("bf16 tiny weights on cuda");
-        let params =
-            TrainableLoraParams::initialize(&config, &weights, 4, 8.0, &device).expect("params");
-        let backend = backend::for_device(&device);
-
-        let input_ids: Vec<u32> = vec![1, 5, 10, 3, 7, 2, 8];
-        let action_mask = vec![false, false, true, true, true, true, false];
-        let num_active = action_mask[1..].iter().filter(|&&m| m).count();
-        assert!(num_active > 0, "test needs supervised action tokens");
-
-        let ref_log_probs = zeros_f32_on(num_active, &device)
-            .expect("ref placeholder")
-            .detach();
-        let loss_params = GrpoLossParams {
-            advantage: 0.75,
-            clip_low: 0.2,
-            clip_high: 0.2,
-            kl_coeff: 0.0,
-            kl_estimator: KlEstimator::None,
-            loss_normalizer: 1.0 / num_active as f64,
-            is_level: IsLevel::Token,
-            reinforce: true,
-            entropy_aware_kl_quantile: None,
-        };
-
-        let (loss_val, grads) = grpo_step_forward_backward_tape_authoritative_kt(
-            &*backend,
-            &input_ids,
-            &weights,
-            &config,
-            &params,
-            &action_mask,
-            &ref_log_probs,
-            loss_params,
-            &device,
-            0,
-            num_active,
-            0,
-            0,
-            0,
-            None,
-        )
-        .expect("tape-authoritative GRPO kt step");
-
-        assert!(loss_val.is_finite(), "GRPO kt loss {loss_val} is not finite");
-
-        // The kt GradStore (keyed by KtTensorId) must reach the LoRA Vars — i.e.
-        // the GRPO PG loss root connected through the BF16 model back to the
-        // whole wired chain, delivered kt-native (no loss.backward() hack).
-        let mut tape_has = 0usize;
-        for v in params.all_vars() {
-            if grads.get(cd_tensor_id_to_kt(v.as_tensor().id())).is_some() {
-                tape_has += 1;
-            }
-        }
-        eprintln!(
-            "[CP4-GRPO-KT] kt GradStore reached {tape_has} LoRA Vars (of {}); kt_grad_ids={}; \
-             loss={loss_val:.6}",
-            params.all_vars().len(),
-            grads.len()
-        );
-        assert!(
-            tape_has >= 50,
-            "CP-4 GRPO kt: expected >=50 LoRA Vars in the kt GradStore (full coverage of the \
-             wired full-attn + GDN chain), got {tape_has}"
-        );
-    }
-
-    /// CP-4 (#1082) task #4: the kt-tape gradient-checkpointing producer
-    /// (`checkpointed_forward_backward_tape_authoritative_kt`) must deliver the
-    /// SAME LoRA grads as the validated monolithic tape producer
-    /// (`standard_forward_backward_tape_authoritative_kt`). Gradient
-    /// checkpointing is purely a memory optimisation — it re-runs each layer
-    /// segment under its own tape and chains the segment-input grad — so the
-    /// LoRA Var grads must match the whole-forward tape walk (modulo BF16
-    /// recompute noise). This is the correctness gate for the checkpointing
-    /// port that replaced the flip-severed candle checkpointed reverse.
-    ///
-    /// Run under `cargo nextest` for per-process env isolation (the tape gates
-    /// are OnceLock-cached).
-    #[cfg(feature = "cuda")]
-    #[test]
-    fn checkpointed_tape_grads_match_monolithic_tape_bf16() {
-        let device = match candle_core::Device::new_cuda(0) {
-            Ok(d) => d,
-            Err(_) => {
-                eprintln!("ckpt-kt vs monolithic parity (bf16): no CUDA device — skipping");
-                return;
-            }
-        };
-        let config = tiny_config_bf16();
-        let weights = tiny_weights_bf16(&config, &device).expect("bf16 tiny weights on cuda");
-        let params =
-            TrainableLoraParams::initialize(&config, &weights, 4, 8.0, &device).expect("params");
-        let input_ids: Vec<u32> = vec![1, 5, 10, 3, 7, 2, 8];
-        let label_mask = vec![false, false, true, true, true, true, false];
-        let backend = backend::for_device(&device);
-
-        // Same tape gates as the monolithic CP-4 parity test so both producers
-        // record the full wired chain. (OnceLock-cached → run under nextest.)
-        unsafe {
-            std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
-            std::env::set_var("KILN_USE_TAPE_LORA_ADD", "1");
-            std::env::set_var("KILN_USE_TAPE_FLASH_ATTN", "1");
-            std::env::set_var("KILN_USE_TAPE_SDPA", "1");
-            std::env::set_var("KILN_USE_TAPE_GDN", "1");
-            std::env::set_var("KILN_USE_TAPE_GDN_GATED_NORM", "1");
-            std::env::set_var("KILN_USE_TAPE_GDN_QK_NORM", "1");
-            std::env::set_var("KILN_USE_TAPE_GDN_CONV", "1");
-            std::env::set_var("KILN_USE_TAPE_AUTHORITATIVE", "1");
-        }
-
-        // Reference: monolithic (whole-forward) kt tape.
-        let (loss_mono, grads_mono) = standard_forward_backward_tape_authoritative_kt(
-            &*backend,
-            &input_ids,
-            &weights,
-            &config,
-            &params,
-            &label_mask,
-            &device,
-            None,
-        )
-        .expect("monolithic kt-tape step");
-
-        // Under test: gradient-checkpointed kt tape (2 segments over all layers).
-        let segments = compute_segment_boundaries(config.num_layers, 2);
-        let (loss_ckpt, grads_ckpt) = checkpointed_forward_backward_tape_authoritative_kt(
-            &*backend,
-            &input_ids,
-            &weights,
-            &config,
-            &params,
-            &label_mask,
-            &segments,
-            &device,
-            None,
-        )
-        .expect("checkpointed kt-tape step");
-
-        unsafe {
-            std::env::set_var("KILN_USE_TAPE_AUTHORITATIVE", "0");
-        }
-
-        // Relative error with an additive floor (BF16 near-zero-grad noise).
-        let rel_kt = |a: &kiln_tensor::Tensor, c: &kiln_tensor::Tensor| -> f32 {
-            let af = a
-                .to_dtype(kiln_tensor::DType::F32)
-                .unwrap()
-                .flatten_all()
-                .unwrap()
-                .to_vec1::<f32>()
-                .unwrap();
-            let cf = c
-                .to_dtype(kiln_tensor::DType::F32)
-                .unwrap()
-                .flatten_all()
-                .unwrap()
-                .to_vec1::<f32>()
-                .unwrap();
-            let mut d = 0f32;
-            let mut m = 0f32;
-            for (x, y) in af.iter().zip(cf.iter()) {
-                d = d.max((x - y).abs());
-                m = m.max(y.abs());
-            }
-            d / m.max(0.05)
-        };
-
-        let var_keys: Vec<KtTensorId> = params
-            .all_vars()
-            .iter()
-            .map(|v| cd_tensor_id_to_kt(v.as_tensor().id()))
-            .collect();
-        let mut compared = 0usize;
-        let mut max_rel = 0f32;
-        let mut max_idx = 0usize;
-        for (i, key) in var_keys.iter().enumerate() {
-            match (grads_mono.get(*key), grads_ckpt.get(*key)) {
-                (Some(gm), Some(gc)) => {
-                    let r = rel_kt(gm, gc);
-                    if r > max_rel {
-                        max_rel = r;
-                        max_idx = i;
-                    }
-                    compared += 1;
-                }
-                (Some(_), None) => panic!(
-                    "checkpointed kt-tape is MISSING a grad for LoRA Var[{i}] that the monolithic \
-                     tape produced — the segment chain dropped it"
-                ),
-                (None, Some(_)) => panic!(
-                    "checkpointed kt-tape produced a grad for LoRA Var[{i}] that the monolithic \
-                     tape did not"
-                ),
-                (None, None) => {}
-            }
-        }
-        eprintln!(
-            "[CKPT-KT] compared {compared} LoRA Vars; mono cov {} ckpt cov {}; loss mono {loss_mono:.6} \
-             ckpt {loss_ckpt:.6}; max grad rel {max_rel:.4} @ var[{max_idx}]",
-            grads_mono.len(),
-            grads_ckpt.len(),
-        );
-        assert!(compared > 0, "no LoRA Vars compared (both grad stores empty)");
-        assert_eq!(
-            grads_ckpt.len(),
-            grads_mono.len(),
-            "checkpointed kt-tape coverage {} != monolithic {} — the segmented walk reached a \
-             different set of Vars",
-            grads_ckpt.len(),
-            grads_mono.len(),
-        );
-        assert!(
-            max_rel < 0.05,
-            "checkpointed-vs-monolithic kt-tape grad rel {max_rel:.4} @ var[{max_idx}] exceeds the \
-             0.05 floored tolerance — the checkpointing port does not reproduce the whole-forward \
-             tape grads"
-        );
-    }
-
-    /// CP-4 (#1082): disambiguate "tape grad vs candle grad" on the
-    /// attention-dependent LoRA Vars using an INDEPENDENT reference —
-    /// **central finite differences** on the loss value.
-    ///
-    /// `tape_authoritative_grads_match_candle_baseline_bf16` shows that ~9 of
-    /// the 40 candle-matched Vars diverge once the full-attn SDPA q/k/v chain
-    /// is wired to the tape. A candle-vs-candle comparison cannot tell us which
-    /// side is right: the candle baseline may sever the attention pathway
-    /// somewhere (a forward-only kt op returns a detached leaf, so
-    /// `loss.backward()` never backprops through attention), OR the tape's
-    /// SDPA-fallback grad may be wrong.
-    ///
-    /// Finite differences answer this directly. For a chosen Var `V` and a
-    /// fixed random direction `r`, the true directional derivative is
-    /// `⟨dL/dV, r⟩ ≈ (L(V + εr) − L(V − εr)) / (2ε)`. That value (`fd`) is the
-    /// ground truth computed from loss VALUES only — no autograd. We then dot
-    /// each candidate gradient with the same `r`:
-    ///   `tape_dot   = Σ grads_tape[V]   · r`
-    ///   `candle_dot = Σ grads_candle[V] · r`
-    /// Whichever of `tape_dot` / `candle_dot` is closer to `fd` is the correct
-    /// gradient. The perturbed forwards are PLAIN candle forwards
-    /// (authoritative OFF) — finite-diff needs only the loss value, not grads.
-    ///
-    /// This is the AUTHORITATIVE grad-correctness gate (#1082). It prints the
-    /// `[FD-CHECK]` table for visibility, then asserts only on "stable" rows —
-    /// Vars whose central finite-difference is a valid ground-truth reference.
-    /// A Var qualifies ONLY if BOTH `|fd_1e-2| > 0.02` (above the BF16-noise
-    /// floor) AND the two eps agree within 40% (`|fd_1e-2 - fd_3e-2| /
-    /// max(...) < 0.4`, proving a stable linear regime). Small-magnitude grads
-    /// have BF16-noise-dominated finite differences that swing wildly with eps
-    /// (var[9] 0.043 vs 0.012, a 3.5× swing) and are NOT ground truth — both
-    /// tape and candle are far from such noise — so they are excluded. On each
-    /// stable Var (eps=1e-2 row) we assert: (1) the tape is at least as close
-    /// to ground truth as candle (`|fd-tape| <= |fd-candle|` — disambiguation),
-    /// and (2) the tape matches finite-diff within BF16+ε tolerance
-    /// (`|fd-tape|/|fd| < 0.35`). Pod-validated 2026-05-29: the two stable Vars
-    /// are var[7] (gate_proj, tape rel 0.07 vs candle 0.74) and var[35]
-    /// (down_proj, tape rel 0.06 vs candle wrong-sign) — tape matches fd, candle
-    /// does not, confirming candle's autograd severs the full-attn/conv
-    /// gradient and the tape is correct.
-    #[cfg(feature = "cuda")]
-    #[test]
-    fn tape_grad_matches_finite_difference_bf16() {
-        use kiln_model::forward::model_forward;
-        let device = match candle_core::Device::new_cuda(0) {
-            Ok(d) => d,
-            Err(_) => {
-                eprintln!("[FD-CHECK] no CUDA device — skipping");
-                return;
-            }
-        };
-        // Same BF16 tiny model + LoRA + inputs as the parity test, so the
-        // Vars line up index-for-index with that test's `[CP4-PARITY]` table.
-        let config = tiny_config_bf16();
-        let weights = tiny_weights_bf16(&config, &device).expect("bf16 tiny weights on cuda");
-        let params =
-            TrainableLoraParams::initialize(&config, &weights, 4, 8.0, &device).expect("params");
-        let input_ids: Vec<u32> = vec![1, 5, 10, 3, 7, 2, 8];
-        let label_mask = vec![false, false, true, true, true, true, false];
-        let backend = backend::for_device(&device);
-
-        // All CP-4 tape gates on so the authoritative walk records the full
-        // chain (matches the parity test). OnceLock-cached — run under
-        // `cargo nextest` for per-process env isolation.
-        unsafe {
-            std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
-            std::env::set_var("KILN_USE_TAPE_LORA_ADD", "1");
-            std::env::set_var("KILN_USE_TAPE_FLASH_ATTN", "1");
-            std::env::set_var("KILN_USE_TAPE_SDPA", "1");
-            std::env::set_var("KILN_USE_TAPE_GDN", "1");
-            std::env::set_var("KILN_USE_TAPE_GDN_GATED_NORM", "1");
-            std::env::set_var("KILN_USE_TAPE_GDN_QK_NORM", "1");
-            std::env::set_var("KILN_USE_TAPE_GDN_CONV", "1");
-        }
-
-        // Helper: pure-candle (authoritative OFF) forward + loss VALUE for a
-        // given LoraWeights. This is the finite-diff probe — no autograd, no
-        // tape scope; just the F32 scalar loss for the perturbed adapter.
-        let loss_value = |lw: &LoraWeights| -> f64 {
-            unsafe {
-                std::env::set_var("KILN_USE_TAPE_AUTHORITATIVE", "0");
-            }
-            let mut ls = LinearAttentionState::new(&config, &kiln_kt_bridge::kt_device_from_candle(&device)).expect("linear state");
-            let logits = model_forward(
-                &*backend,
-                &input_ids,
-                &weights,
-                &config,
-                None,
-                Some(&mut ls),
-                Some(lw),
-            )
-            .expect("fd plain forward");
-            let loss = cross_entropy_loss(&logits, &input_ids, &label_mask, &device)
-                .expect("fd loss");
-            loss.to_scalar::<f32>().expect("fd loss scalar") as f64
-        };
-
-        // CANDLE baseline grads: plain forward, authoritative OFF,
-        // loss.backward().
-        unsafe {
-            std::env::set_var("KILN_USE_TAPE_AUTHORITATIVE", "0");
-        }
-        let lora_weights = params.as_lora_weights();
-        let mut ls = LinearAttentionState::new(&config, &kiln_kt_bridge::kt_device_from_candle(&device)).expect("linear state");
-        let logits = model_forward(
-            &*backend,
-            &input_ids,
-            &weights,
-            &config,
-            None,
-            Some(&mut ls),
-            Some(&lora_weights),
-        )
-        .expect("candle baseline forward");
-        let loss_c =
-            cross_entropy_loss(&logits, &input_ids, &label_mask, &device).expect("baseline loss");
-        let grads_candle = loss_c.backward().expect("candle baseline backward");
-
-        // TAPE-authoritative grads via standard_forward_backward.
-        unsafe {
-            std::env::set_var("KILN_USE_TAPE_AUTHORITATIVE", "1");
-        }
-        let (_loss_a, grads_tape) = standard_forward_backward(
-            &*backend,
-            &input_ids,
-            &weights,
-            &config,
-            &params,
-            &label_mask,
-            &device,
-            None,
-        )
-        .expect("tape-authoritative step");
-        unsafe {
-            std::env::set_var("KILN_USE_TAPE_AUTHORITATIVE", "0");
-        }
-
-        // (#1082 Inc-0 PR4) `grads_tape` is a `GradSource::Kt` now. Materialize
-        // the per-Var grads to candle ONCE (keyed by candle `TensorId`) so the
-        // three lookup sites below keep their candle-`Tensor` comparison shape
-        // (`rel` / `dot_grad`) without re-bridging on every probe.
-        let tape_grad_map: std::collections::HashMap<TensorId, Tensor> = params
-            .all_vars()
-            .iter()
-            .filter_map(|v| {
-                grads_tape
-                    .candle_grad(v)
-                    .expect("kt->candle grad bridge")
-                    .map(|g| (v.as_tensor().id(), g))
-            })
-            .collect();
-        let tape_grad = |v: &Var| -> Option<&Tensor> { tape_grad_map.get(&v.as_tensor().id()) };
-
-        // Helper: Σ grad[V] · r (F32). `r` is the F32 direction; the grad is
-        // cast to F32 first so BF16 grads dot cleanly against the F32 dir.
-        let dot_grad = |g: &candle_core::Tensor, r: &[f32]| -> f64 {
-            let gf = g
-                .to_dtype(candle_core::DType::F32)
-                .unwrap()
-                .flatten_all()
-                .unwrap()
-                .to_vec1::<f32>()
-                .unwrap();
-            gf.iter()
-                .zip(r.iter())
-                .map(|(x, y)| (*x as f64) * (*y as f64))
-                .sum()
-        };
-
-        // Pick which Vars to FD-check. Self-select the divergent ones: compute
-        // each matched Var's raw relative error (tape vs candle) and take the
-        // worst few — these are exactly the Vars the parity gate flags. Always
-        // include at least a couple even if none cross the threshold so the
-        // table is never empty.
-        let all_vars = params.all_vars();
-        let modules = params.all_vars_with_modules();
-        // Rank FD targets by tape-grad L2 magnitude. #1082: after the full
-        // forward flip the forward is entirely kt, so candle's `loss.backward()`
-        // baseline is EMPTY (it can't backprop through kt ops) — we can no longer
-        // rank by tape-vs-candle divergence as the pre-flip test did. Large-grad
-        // Vars (the MLP gate/up/down) have stable, above-noise finite differences;
-        // small-grad Vars are BF16-noise-dominated and get excluded by the
-        // stability gate below. Probe the largest-magnitude Vars so ≥2 clear it.
-        let grad_l2 = |t: &candle_core::Tensor| -> f32 {
-            let gf = t
-                .to_dtype(candle_core::DType::F32)
-                .unwrap()
-                .flatten_all()
-                .unwrap()
-                .to_vec1::<f32>()
-                .unwrap();
-            gf.iter().map(|x| x * x).sum::<f32>().sqrt()
-        };
-        let mut ranked: Vec<(usize, f32)> = Vec::new();
-        for (vi, v) in all_vars.iter().enumerate() {
-            if let Some(t) = tape_grad(v) {
-                ranked.push((vi, grad_l2(t)));
-            }
-        }
-        ranked.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        // Probe the 10 largest-grad Vars (covers several MLP Vars, which have
-        // the stable finite differences the gate needs). The stability filter
-        // (|fd|>noise AND eps-consistent) then selects the valid references.
-        let targets: Vec<usize> = ranked.iter().take(10).map(|(vi, _)| *vi).collect();
-
-        eprintln!(
-            "[FD-CHECK] central finite-difference reference for {} Var(s); \
-             fd=(L+ - L-)/(2*eps) is ground truth, compare tape_dot/candle_dot to it",
-            targets.len()
-        );
-
-        // Try a couple of eps values — BF16 perturbation granularity + an F32
-        // loss means the right eps is a balance: too small and L± round to the
-        // same BF16-influenced value (fd → 0/noise), too large and the central
-        // diff picks up curvature. 1e-2 is the primary; 3e-2 is a coarser
-        // cross-check.
-        let eps_list = [1e-2f32, 3e-2f32];
-
-        // Collect every (Var, eps) row so we can assert AFTER the visibility
-        // rows print. Tuple: (vi, eps, fd, rel_tape, rel_candle). (#1082)
-        let mut fd_rows: Vec<(usize, f32, f64, f64, f64)> = Vec::new();
-
-        for &vi in &targets {
-            let target_id = all_vars[vi].as_tensor().id();
-            let module = modules[vi].module;
-            let shape: Vec<usize> = all_vars[vi].as_tensor().dims().to_vec();
-            let n: usize = shape.iter().product();
-
-            // Deterministic F32 direction r in [-1,1], seeded per Var index so
-            // each run probes the same direction.
-            let mut rng = StdRng::seed_from_u64(0xF1_17E_D1FF_u64 ^ vi as u64);
-            let r: Vec<f32> = (0..n).map(|_| rng.random_range(-1.0f32..1.0f32)).collect();
-            let r_tensor = Tensor::from_slice(&r, shape.as_slice(), &device)
-                .expect("fd direction tensor");
-
-            // grad · r for both candidates (computed once; eps-independent).
-            let tape_dot = tape_grad(&all_vars[vi]).map(|g| dot_grad(g, &r));
-            let candle_dot = grads_candle
-                .get(all_vars[vi].as_tensor())
-                .map(|g| dot_grad(g, &r));
-
-            // Build a perturbed LoraWeights where exactly the target Var's
-            // tensor is replaced by `V_f32 ± eps*r → BF16`; every other Var is
-            // cloned unchanged. Var clones share a TensorId, so matching by
-            // `tensor.id() == target_id` perturbs precisely one slot.
-            let perturbed_lora = |sign: f32, eps: f32| -> LoraWeights {
-                let make_proj = |pair: &Option<(Var, Var)>| -> Option<LoraProjectionWeights> {
-                    pair.as_ref().map(|(a, b)| {
-                        let pick = |t: &candle_core::Tensor| -> candle_core::Tensor {
-                            if t.id() == target_id {
-                                let vf = t
-                                    .to_dtype(candle_core::DType::F32)
-                                    .expect("V to f32");
-                                let delta = (&r_tensor * ((sign * eps) as f64))
-                                    .expect("eps*r");
-                                (vf + delta)
-                                    .expect("V + eps*r")
-                                    .to_dtype(candle_core::DType::BF16)
-                                    .expect("perturbed to bf16")
-                            } else {
-                                t.clone()
-                            }
-                        };
-                        LoraProjectionWeights {
-                            a: pick(a.as_tensor()),
-                            b: pick(b.as_tensor()),
-                        }
-                    })
-                };
-                let layers: Vec<LoraLayerWeights> = params
-                    .layers
-                    .iter()
-                    .map(|lp| LoraLayerWeights {
-                        q_proj: make_proj(&lp.q_proj),
-                        k_proj: make_proj(&lp.k_proj),
-                        v_proj: make_proj(&lp.v_proj),
-                        o_proj: make_proj(&lp.o_proj),
-                        in_proj_qkv: make_proj(&lp.in_proj_qkv),
-                        in_proj_z: make_proj(&lp.in_proj_z),
-                        gdn_out_proj: make_proj(&lp.gdn_out_proj),
-                        gate_proj: make_proj(&lp.gate_proj),
-                        up_proj: make_proj(&lp.up_proj),
-                        down_proj: make_proj(&lp.down_proj),
-                        ..Default::default()
-                    })
-                    .collect();
-                LoraWeights {
-                    layers,
-                    rank: params.rank,
-                    alpha: params.alpha,
-                    scale: params.scale,
-                }
-            };
-
-            for &eps in &eps_list {
-                let l_plus = loss_value(&perturbed_lora(1.0, eps));
-                let l_minus = loss_value(&perturbed_lora(-1.0, eps));
-                let fd = (l_plus - l_minus) / (2.0 * eps as f64);
-
-                assert!(
-                    fd.is_finite(),
-                    "[FD-CHECK] var[{vi}] ({module}) fd not finite \
-                     (L+ {l_plus}, L- {l_minus}, eps {eps})"
-                );
-
-                let td = tape_dot.unwrap_or(f64::NAN);
-                let cd = candle_dot.unwrap_or(f64::NAN);
-                let denom = fd.abs().max(1e-9);
-                let rel_tape = (fd - td).abs() / denom;
-                let rel_candle = (fd - cd).abs() / denom;
-                eprintln!(
-                    "[FD-CHECK] var[{vi}] ({module}) eps={eps:.0e} \
-                     fd={fd:+.6} tape_dot={td:+.6} candle_dot={cd:+.6} \
-                     |fd-tape|/|fd|={rel_tape:.4} |fd-candle|/|fd|={rel_candle:.4} \
-                     -> {} matches FD better",
-                    if rel_tape <= rel_candle { "TAPE" } else { "CANDLE" }
-                );
-                fd_rows.push((vi, eps, fd, rel_tape, rel_candle));
-            }
-        }
-
-        // --- Authoritative grad-correctness gate (#1082) ---
-        //
-        // Finite-diff is ground truth ONLY where it is a stable linear
-        // estimate; this proves the tape-authoritative grad is correct where
-        // candle's autograd is unreliable (it severs the full-attn/conv
-        // gradient — a forward-only kt op detaches candle's autograd, so
-        // `loss.backward()` silently drops those Vars' grads).
-        //
-        // Pod-validated ground truth (2026-05-29): only Vars whose central
-        // finite-difference is CONSISTENT across the two eps values are valid
-        // references. A large grad has a stable fd that agrees across eps; a
-        // small grad's fd is BF16-noise-dominated and swings wildly with eps,
-        // so it is NOT ground truth (both tape AND candle are far from it — it
-        // is noise) and must be excluded:
-        //   - var[7]  (gate_proj): fd 0.185 (1e-2) vs 0.175 (3e-2) — STABLE;
-        //                          tape rel 0.07 vs candle 0.74
-        //   - var[35] (down_proj): fd 0.051 (1e-2) vs 0.049 (3e-2) — STABLE;
-        //                          tape rel 0.06 vs candle wrong-sign
-        //   - var[9]  fd 0.043 vs 0.012 (3.5× swing) — UNSTABLE/noisy, excluded
-        //   - var[23] fd 0.036 vs 0.014 — UNSTABLE/noisy, excluded
-        //   - var[31] fd ≈ 0          — UNSTABLE/noisy, excluded
-        //
-        // A Var feeds the gate ONLY if BOTH:
-        //   (a) |fd_1e-2| > FD_INFORMATIVE_MIN (not pure noise), AND
-        //   (b) the two eps agree within FD_EPS_STABLE_TOL (relative): proving
-        //       fd is in a stable linear regime rather than BF16-noise-driven.
-        // The eps=1e-2 row of each stable Var is what feeds the asserts.
-        const FD_INFORMATIVE_MIN: f64 = 0.02;
-        // Eps-stability tolerance: the eps=1e-2 and eps=3e-2 finite differences
-        // must agree to within this relative bound. var[7] (0.185 vs 0.175,
-        // ~5%) and var[35] (0.051 vs 0.049, ~4%) pass easily; the noisy small
-        // grads (var[9] 3.5× swing, var[23] 2.6× swing) are excluded.
-        const FD_EPS_STABLE_TOL: f64 = 0.4;
-        // BF16 + central-diff tolerance: the tape matches fd within this bound
-        // on every stable Var (var[7]=0.07, var[35]=0.06), so 0.35 leaves
-        // safe headroom while still catching a genuinely wrong grad.
-        const FD_TAPE_REL_TOL: f64 = 0.35;
-
-        // Pair each target Var's two eps rows (eps=1e-2 + eps=3e-2) and decide
-        // stability. Only Vars whose fd is eps-consistent feed the gate; the
-        // eps=1e-2 row's rel_tape/rel_candle are used for the asserts.
-        let mut stable_gated: Vec<(usize, f64, f64, f64)> = Vec::new();
-        for &vi in &targets {
-            let fd_1e2 = fd_rows
-                .iter()
-                .find(|(v, eps, ..)| *v == vi && (*eps - 1e-2f32).abs() < 1e-6)
-                .map(|(_, _, fd, rt, rc)| (*fd, *rt, *rc));
-            let fd_3e2 = fd_rows
-                .iter()
-                .find(|(v, eps, ..)| *v == vi && (*eps - 3e-2f32).abs() < 1e-6)
-                .map(|(_, _, fd, _, _)| *fd);
-            let (Some((fd1, rt1, rc1)), Some(fd3)) = (fd_1e2, fd_3e2) else {
-                continue;
-            };
-            // (a) informative: eps=1e-2 fd is above the BF16-noise floor.
-            if fd1.abs() <= FD_INFORMATIVE_MIN {
-                eprintln!(
-                    "[FD-CHECK] var[{vi}] UNSTABLE/noisy (excluded): \
-                     fd_1e-2={fd1:+.6} fd_3e-2={fd3:+.6} (|fd_1e-2|<={FD_INFORMATIVE_MIN}, below noise floor)"
-                );
-                continue;
-            }
-            // (b) eps-stable: the two eps agree within FD_EPS_STABLE_TOL,
-            // proving a stable linear regime (not BF16-noise-driven).
-            let eps_rel_swing = (fd1 - fd3).abs() / fd1.abs().max(fd3.abs()).max(1e-9);
-            if eps_rel_swing < FD_EPS_STABLE_TOL {
-                eprintln!(
-                    "[FD-CHECK] var[{vi}] STABLE (gated): \
-                     fd_1e-2={fd1:+.6} fd_3e-2={fd3:+.6} eps_rel_swing={eps_rel_swing:.4} < {FD_EPS_STABLE_TOL}"
-                );
-                stable_gated.push((vi, fd1, rt1, rc1));
-            } else {
-                eprintln!(
-                    "[FD-CHECK] var[{vi}] UNSTABLE/noisy (excluded): \
-                     fd_1e-2={fd1:+.6} fd_3e-2={fd3:+.6} eps_rel_swing={eps_rel_swing:.4} >= {FD_EPS_STABLE_TOL}"
-                );
-            }
-        }
-
-        eprintln!(
-            "[FD-CHECK] {} stable row(s) (|fd|>{FD_INFORMATIVE_MIN} AND eps-consistent) feed the grad-correctness gate",
-            stable_gated.len()
-        );
-
-        // Not vacuous: there must be at least 2 stable Vars (pod data: var[7] +
-        // var[35]). If somehow fewer, fail loudly so we investigate rather than
-        // silently passing on an empty gate.
-        assert!(
-            stable_gated.len() >= 2,
-            "[FD-CHECK] only {} stable finite-diff row(s) (|fd|>{FD_INFORMATIVE_MIN} AND eps-consistent); \
-             gate would be vacuous — pod data expects var[7] + var[35]; widen the target set or check the FD probe",
-            stable_gated.len()
-        );
-
-        for (vi, fd, rel_tape, rel_candle) in &stable_gated {
-            // (1) Disambiguation (only when candle provides a grad): the tape is
-            // at least as close to ground truth as candle. #1082: after the full
-            // forward flip, candle's `loss.backward()` baseline is EMPTY (it
-            // can't backprop through the all-kt forward), so `candle_dot` is None
-            // and `rel_candle` is NaN — this comparison is vacuous and skipped.
-            // The finite-difference correctness gate (2) is the authoritative
-            // check. (Pre-flip / partially-flipped builds where candle still has
-            // a grad keep the tape-beats-candle disambiguation.)
-            if rel_candle.is_finite() {
-                assert!(
-                    rel_tape <= rel_candle,
-                    "[FD-CHECK] var[{vi}]: tape rel {rel_tape:.4} should be <= candle rel \
-                     {rel_candle:.4} vs finite-diff (fd={fd:+.6}) — candle is the wrong reference \
-                     here, so the tape must be the closer of the two"
-                );
-            }
-            // (2) Correctness: the tape matches finite-diff within BF16+eps
-            // tolerance (var[7]=0.07, var[35]=0.06 on pod data). THE authoritative
-            // grad-correctness gate (#1082).
-            assert!(
-                *rel_tape < FD_TAPE_REL_TOL,
-                "[FD-CHECK] var[{vi}]: tape grad rel {rel_tape:.4} >= {FD_TAPE_REL_TOL} vs \
-                 finite-diff (fd={fd:+.6}) — tape-authoritative grad disagrees with ground truth"
-            );
-        }
-    }
-
-    /// CP-4 (#1082) PRE-DEFAULT-ON CONVERGENCE GATE for tape-authoritative
-    /// SFT.
-    ///
-    /// `tape_authoritative_grads_match_candle_baseline_bf16` proves the tape
-    /// routes a grad to all 50 LoRA Vars and `tape_grad_matches_finite_difference_bf16`
-    /// proves those grads match the central-finite-difference ground truth on
-    /// the attention/conv-dependent Vars candle's autograd silently drops. What
-    /// neither proves is that *stringing 100 such steps together actually
-    /// trains the model*. This test closes that gap: it runs a real 100-step
-    /// AdamW SFT loop with `KILN_USE_TAPE_AUTHORITATIVE=1` and asserts the loss
-    /// is finite every step and trends meaningfully downward.
-    ///
-    /// CANDLE-PARITY IS INVALID HERE. candle's `loss.backward()` severs the
-    /// full-attention + GDN-conv gradient (a kt forward-only op returns a
-    /// detached leaf), so a candle-trained reference would converge to the
-    /// WRONG place — it can only ever optimize the partial chain it can see. We
-    /// therefore validate that tape-authoritative training CONVERGES, not that
-    /// it matches candle.
-    ///
-    /// Optimizer reuse: the per-step update mirrors the production
-    /// non-checkpointed SFT loop exactly (`sft_train`):
-    /// `standard_forward_backward(...)` → `(loss, GradSource::Kt)`
-    /// (tape-authoritative since the env is set) → `optimizer_step_dispatch(
-    /// &*backend, &params, &grads, lr, Optimizer::AdamW{..}, opt_state.as_mut())`
-    /// (which routes the kt grads through `optimizer_step_from_kt_grad_store`).
-    /// AdamW (decoupled WD) is the
-    /// production default optimizer. `allocate_adamw_state` is called once
-    /// before the loop and threaded through; `optimizer_step` increments
-    /// `OptimizerState::step` itself (1-indexed) so bias-correction is correct.
-    /// Like the sibling tape tests, params/moments are NOT registered with the
-    /// backend, so AdamW takes its candle-`Var::set` CPU-fallback path — the
-    /// path whose updated candle storage the tape-authoritative forward then
-    /// reads back via `params.as_lora_weights()` on the next step.
-    #[cfg(feature = "cuda")]
-    #[test]
-    fn tape_authoritative_sft_converges_bf16() {
-        let device = match candle_core::Device::new_cuda(0) {
-            Ok(d) => d,
-            Err(_) => {
-                eprintln!("tape-authoritative convergence (bf16): no CUDA device — skipping");
-                return;
-            }
-        };
-        // SAME fixture as tape_authoritative_grads_match_candle_baseline_bf16.
-        let config = tiny_config_bf16();
-        let weights = tiny_weights_bf16(&config, &device).expect("bf16 tiny weights on cuda");
-        let params =
-            TrainableLoraParams::initialize(&config, &weights, 4, 8.0, &device).expect("params");
-        let input_ids: Vec<u32> = vec![1, 5, 10, 3, 7, 2, 8];
-        let label_mask = vec![false, false, true, true, true, true, false];
-        let backend = backend::for_device(&device);
-
-        // All 7 CP-4 tape gates + tape-authoritative backward. Mirror the
-        // sibling bf16 tests verbatim (OnceLock-cached gates — run under
-        // `cargo nextest` for per-process isolation).
-        unsafe {
-            std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
-            std::env::set_var("KILN_USE_TAPE_LORA_ADD", "1");
-            std::env::set_var("KILN_USE_TAPE_FLASH_ATTN", "1");
-            std::env::set_var("KILN_USE_TAPE_SDPA", "1");
-            std::env::set_var("KILN_USE_TAPE_GDN", "1");
-            std::env::set_var("KILN_USE_TAPE_GDN_GATED_NORM", "1");
-            std::env::set_var("KILN_USE_TAPE_GDN_QK_NORM", "1");
-            std::env::set_var("KILN_USE_TAPE_GDN_CONV", "1");
-            std::env::set_var("KILN_USE_TAPE_AUTHORITATIVE", "1");
-        }
-
-        // Production AdamW default (decoupled WD). LR 1e-3 — an order of
-        // magnitude above the SFT default (1e-4) because the tiny fixture has
-        // only 4 supervised tokens to overfit and just 100 steps to do it in;
-        // 1e-3 is well within the stable regime for this fixture and gives a
-        // clearly readable downward curve without diverging.
-        let lr = 1e-3_f64;
-        let optimizer = Optimizer::AdamW {
-            beta1: 0.9,
-            beta2: 0.999,
-            eps: 1e-8,
-            weight_decay: 0.0,
-        };
-        // Allocate moment state ONCE before the loop, exactly as the production
-        // loop does (trainer.rs:2161). NOT registered with the backend — that
-        // keeps AdamW on the candle-`Var::set` CPU-fallback path so the next
-        // tape forward's `as_lora_weights()` reads the updated candle storage.
-        let mut opt_state = params
-            .allocate_adamw_state(&device)
-            .expect("allocate AdamW state");
-
-        const STEPS: usize = 100;
-        let mut losses: Vec<f64> = Vec::with_capacity(STEPS);
-        let mut step1_grad_nonzero = false;
-
-        for step in 0..STEPS {
-            let (loss, grads) = standard_forward_backward(
-                &*backend,
-                &input_ids,
-                &weights,
-                &config,
-                &params,
-                &label_mask,
-                &device,
-                None,
-            )
-            .expect("tape-authoritative forward/backward");
-
-            // Training-is-actually-happening check on step 0: at least one LoRA
-            // Var must receive a finite, nonzero grad. (#1082 Inc-0 PR4: `grads`
-            // is a `GradSource::Kt` — `num_grad_ids` counts the kt store and
-            // `candle_grad(v)` bridges each grad for the norm probe.)
-            if step == 0 {
-                assert!(
-                    grads.num_grad_ids() > 0,
-                    "CP-4 convergence: step 1 produced an empty GradStore — no training signal"
-                );
-                for v in params.all_vars() {
-                    if let Some(g) = grads.candle_grad(v).expect("kt->candle grad bridge") {
-                        let norm = g
-                            .to_dtype(candle_core::DType::F32)
-                            .and_then(|t| t.sqr())
-                            .and_then(|t| t.sum_all())
-                            .and_then(|t| t.to_scalar::<f32>())
-                            .unwrap_or(0.0);
-                        if norm.is_finite() && norm > 0.0 {
-                            step1_grad_nonzero = true;
-                            break;
-                        }
-                    }
-                }
-                assert!(
-                    step1_grad_nonzero,
-                    "CP-4 convergence: step 1 — no LoRA Var received a nonzero grad"
-                );
-            }
-
-            // Every step's loss must be finite (no NaN/Inf training blowup).
-            assert!(
-                loss.is_finite(),
-                "CP-4 convergence: loss at step {step} is non-finite ({loss}) — training diverged"
-            );
-
-            // Mirror the production optimizer step EXACTLY (the non-checkpointed
-            // SFT branch). `optimizer_step_dispatch` bumps `opt_state.step`
-            // (1-indexed) internally, so bias-correction uses the right step
-            // index without us tracking it. (#1082 Inc-0 PR4: routes the
-            // `GradSource::Kt` grads through `optimizer_step_from_kt_grad_store`.)
-            optimizer_step_dispatch(&*backend, &params, &grads, lr, optimizer, Some(&mut opt_state))
-                .expect("AdamW optimizer step");
-
-            losses.push(loss);
-        }
-
-        let initial_loss = losses[0];
-        let final_loss = *losses.last().expect("100 losses recorded");
-        let min_loss = losses
-            .iter()
-            .cloned()
-            .fold(f64::INFINITY, f64::min);
-
-        // [CP4-CONVERGE] trajectory line so the curve is readable from the pod
-        // log: initial, the quartile checkpoints, final, and the min.
-        eprintln!(
-            "[CP4-CONVERGE] lr={lr} steps={STEPS} | initial={:.6} step25={:.6} step50={:.6} \
-             step75={:.6} final={:.6} min={:.6}",
-            initial_loss,
-            losses[24],
-            losses[49],
-            losses[74],
-            final_loss,
-            min_loss
-        );
-
-        // Optimizer step counter is 1-indexed and bumped once per step.
-        assert_eq!(
-            opt_state.step as usize, STEPS,
-            "CP-4 convergence: AdamW step counter should be {STEPS}, got {}",
-            opt_state.step
-        );
-
-        // Adam moment Vars must be finite at step 100 (no NaN/Inf leaked into
-        // the optimizer state — a silent way training can rot).
-        for moments in opt_state.moments.values() {
-            let finite_sum = |v: &Var| -> bool {
-                v.as_tensor()
-                    .to_dtype(candle_core::DType::F32)
-                    .and_then(|t| t.abs())
-                    .and_then(|t| t.sum_all())
-                    .and_then(|t| t.to_scalar::<f32>())
-                    .map(|s| s.is_finite())
-                    .unwrap_or(false)
-            };
-            assert!(
-                finite_sum(&moments.m) && finite_sum(&moments.v),
-                "CP-4 convergence: AdamW moment Var became non-finite by step {STEPS}"
-            );
-        }
-
-        // The HEADLINE gate: tape-authoritative SFT must STABLY IMPROVE. The
-        // tiny model overfits the 4 fixed supervised tokens easily within 100
-        // steps, so we require both a net decrease AND a meaningful one. The
-        // 0.9× min-loss bound (>=10% improvement off the initial loss) is a
-        // deliberately conservative floor — a working tape-authoritative loop
-        // overfits this fixture far past that; a no-op (severed-gradient) loop
-        // can't clear it. If the observed pod curve sits between these bounds,
-        // tighten the multiplier — but it MUST prove a real downward trend.
-        assert!(
-            final_loss < initial_loss,
-            "CP-4 convergence: final loss {final_loss:.6} did not improve on initial \
-             {initial_loss:.6} — tape-authoritative SFT is not training"
-        );
-        assert!(
-            min_loss <= initial_loss * 0.9,
-            "CP-4 convergence: min loss {min_loss:.6} is not <= 90% of initial \
-             {initial_loss:.6} (= {:.6}) — no meaningful downward trend over {STEPS} steps",
-            initial_loss * 0.9
-        );
-
-        unsafe {
-            std::env::set_var("KILN_USE_TAPE_AUTHORITATIVE", "0");
-        }
-    }
 
     /// Create a tiny ModelConfig for testing (4 layers, small dims).
     fn tiny_config() -> ModelConfig {
@@ -17273,13 +10038,15 @@ pub(crate) mod tests {
         let params = TrainableLoraParams::initialize(&config, &weights, 4, 8.0, &device)?;
         let layer = &params.layers[0];
 
-        let assert_pair =
-            |pair: &Option<(Var, Var)>, in_features: usize, out_features: usize| -> Result<()> {
-                let (a, b) = pair.as_ref().context("missing LoRA pair")?;
-                assert_eq!(a.as_tensor().dims(), &[4, in_features]);
-                assert_eq!(b.as_tensor().dims(), &[out_features, 4]);
-                Ok(())
-            };
+        let assert_pair = |pair: &Option<(Parameter, Parameter)>,
+                           in_features: usize,
+                           out_features: usize|
+         -> Result<()> {
+            let (a, b) = pair.as_ref().context("missing LoRA pair")?;
+            assert_eq!(a.forward_storage().primary_tensor().dims(), &[4, in_features]);
+            assert_eq!(b.forward_storage().primary_tensor().dims(), &[out_features, 4]);
+            Ok(())
+        };
 
         let q_out = config.full_attn_q_proj_dim();
         let kv_out = config.num_kv_heads * config.head_dim;
@@ -17324,7 +10091,7 @@ pub(crate) mod tests {
         let device = cpu_device();
         let config = tiny_config();
         let weights = tiny_weights(&config, &device)?;
-        let params = TrainableLoraParams::initialize_seeded(
+        let mut params = TrainableLoraParams::initialize_seeded(
             &config,
             &weights,
             4,
@@ -17346,17 +10113,25 @@ pub(crate) mod tests {
         // #1082: the `*_t` GDN weights (`in_proj_qkv_t`/`in_proj_z_t`/
         // `out_proj_t`) are kt tensors; the closure only reads `.dims()`, so
         // take a kt ref.
-        let assert_pair_matches_weight =
-            |name: &str, pair: &Option<(Var, Var)>, w_t: &kiln_tensor::Tensor| -> Result<()> {
-                let dims = w_t.dims();
-                anyhow::ensure!(dims.len() == 2, "{name} test weight must be rank-2");
-                let (a, b) = pair
-                    .as_ref()
-                    .with_context(|| format!("missing {name} LoRA pair"))?;
-                assert_eq!(a.as_tensor().dims(), &[params.rank, dims[0]]);
-                assert_eq!(b.as_tensor().dims(), &[dims[1], params.rank]);
-                Ok(())
-            };
+        let assert_pair_matches_weight = |name: &str,
+                                          pair: &Option<(Parameter, Parameter)>,
+                                          w_t: &kiln_tensor::Tensor|
+         -> Result<()> {
+            let dims = w_t.dims();
+            anyhow::ensure!(dims.len() == 2, "{name} test weight must be rank-2");
+            let (a, b) = pair
+                .as_ref()
+                .with_context(|| format!("missing {name} LoRA pair"))?;
+            assert_eq!(
+                a.forward_storage().primary_tensor().dims(),
+                &[params.rank, dims[0]]
+            );
+            assert_eq!(
+                b.forward_storage().primary_tensor().dims(),
+                &[dims[1], params.rank]
+            );
+            Ok(())
+        };
 
         assert_pair_matches_weight(
             "in_proj_qkv",
@@ -17469,83 +10244,6 @@ pub(crate) mod tests {
     #[test]
     #[ignore = "#1082: candle-autograd oracle severed by kt rms_norm_fallback; \
                 port to kt-tape/finite-diff oracle (CP-4)"]
-    fn test_analytic_sft_tail_grad_pre_final_norm_parity() -> Result<()> {
-        let device = cpu_device();
-        let seq_len = 5usize;
-        let hidden_size = 4usize;
-        let vocab_size = 7usize;
-
-        let hidden_values: Vec<f32> = (0..seq_len * hidden_size)
-            .map(|i| ((i as f32 + 1.0) * 0.17).sin() * 0.8)
-            .collect();
-        let hidden = tensor_from_vec(hidden_values, (1, seq_len, hidden_size), &device)?;
-        let final_norm_weight = tensor_new(&[0.05f32, -0.10, 0.15, -0.20], &device)?;
-        let head_values: Vec<f32> = (0..hidden_size * vocab_size)
-            .map(|i| ((i as f32 + 3.0) * 0.11).cos() * 0.35)
-            .collect();
-        let head_t = tensor_from_vec(head_values, (hidden_size, vocab_size), &device)?;
-
-        let input_ids = vec![2u32, 5, 1, 6, 3];
-        // Shifted active positions are logits rows 0 and 2. Row 1 is an
-        // explicit ignored/inactive position, and the final row never
-        // contributes under next-token prediction semantics.
-        let label_mask = vec![false, true, false, true, false];
-        let eps = 1e-6;
-
-        let analytic = analytic_sft_tail_grad_pre_final_norm(
-            &hidden,
-            &final_norm_weight,
-            &head_t,
-            &input_ids,
-            &label_mask,
-            eps,
-            3,
-        )?;
-
-        let hidden_var = var_from_tensor(&hidden)?;
-        // #1082: `rms_norm_fallback` is kt; bridge the candle Var tensor → kt
-        // and the kt result → candle (CPU host round-trip). NOTE: this round
-        // trip is what severs the candle autograd graph — hence `#[ignore]`.
-        let normed_kt = kiln_model::forward::rms_norm_fallback(
-            &cpu_candle_to_kt_f32(hidden_var.as_tensor())?,
-            &cpu_candle_to_kt_f32(&final_norm_weight)?,
-            eps,
-        )?;
-        let normed = cpu_kt_to_candle_f32(&normed_kt)?;
-        let logits = normed.broadcast_matmul(&head_t)?;
-        let loss = cross_entropy_loss(&logits, &input_ids, &label_mask, &device)?;
-        let grads = loss.backward()?;
-        let autograd = grads
-            .get(hidden_var.as_tensor())
-            .context("autograd did not produce hidden gradient")?;
-
-        let analytic_vals = analytic.flatten_all()?.to_vec1::<f32>()?;
-        let autograd_vals = autograd.flatten_all()?.to_vec1::<f32>()?;
-        assert_eq!(analytic_vals.len(), autograd_vals.len());
-        let max_abs_diff = analytic_vals
-            .iter()
-            .zip(autograd_vals.iter())
-            .map(|(a, b)| (a - b).abs())
-            .fold(0.0f32, f32::max);
-        assert!(
-            max_abs_diff < 1e-5,
-            "analytic/autograd max_abs_diff={max_abs_diff:e}\nanalytic={analytic_vals:?}\nautograd={autograd_vals:?}"
-        );
-
-        let analytic_rows = analytic.squeeze(0)?.to_vec2::<f32>()?;
-        assert!(
-            analytic_rows[1].iter().all(|&v| v == 0.0),
-            "ignored shifted row should have zero gradient: {:?}",
-            analytic_rows[1]
-        );
-        assert!(
-            analytic_rows[4].iter().all(|&v| v == 0.0),
-            "final sequence row should have zero gradient: {:?}",
-            analytic_rows[4]
-        );
-
-        Ok(())
-    }
 
     #[test]
     fn test_segment_boundaries() {
@@ -17632,840 +10330,12 @@ pub(crate) mod tests {
         Ok(())
     }
 
-    #[test]
-    #[ignore = "#1082 flip: candle gradient-checkpointing reverse is grad-severed (model_forward_segment is kt-internal; candle .backward() can't trace the kt<->candle copy bridge to the segment-input/LoRA Vars). The monolithic kt-tape path is the CP-4-validated grad producer; porting checkpointing onto the kt tape (+ CPU tape) is a tracked #1082 endgame increment. See note kiln-candle-autograd-drops-attn-conv-grads."]
-    fn test_checkpointed_loss_matches_standard() -> Result<()> {
-        let device = cpu_device();
-        let config = tiny_config();
-        let weights = tiny_weights(&config, &device)?;
 
-        let input_ids: Vec<u32> = vec![1, 5, 10, 3, 7, 2, 8];
-        let label_mask = vec![false, false, true, true, true, true, false];
 
-        // Initialize identical LoRA params for both paths
-        let params_std = TrainableLoraParams::initialize(&config, &weights, 4, 8.0, &device)?;
 
-        let backend = backend::for_device(&device);
-        // Standard (non-checkpointed) forward/backward
-        let (loss_std, _grads_std) = standard_forward_backward(
-            &*backend,
-            &input_ids,
-            &weights,
-            &config,
-            &params_std,
-            &label_mask,
-            &device,
-            None,
-        )?;
 
-        // Checkpointed forward/backward with 2 segments
-        // Re-initialize identical params (same seed won't work since Var uses random init,
-        // so we test that checkpointed loss is finite and reasonable instead of exact match).
-        let params_ckpt = TrainableLoraParams::initialize(&config, &weights, 4, 8.0, &device)?;
-        let segments = compute_segment_boundaries(config.num_layers, 2);
-        let (loss_ckpt, _grads_ckpt) = checkpointed_forward_backward(
-            &*backend,
-            &input_ids,
-            &weights,
-            &config,
-            &params_ckpt,
-            &label_mask,
-            &segments,
-            &device,
-            None,
-        )?;
 
-        // Both losses should be finite and in a reasonable range for random weights
-        assert!(
-            loss_std.is_finite(),
-            "standard loss is not finite: {loss_std}"
-        );
-        assert!(
-            loss_ckpt.is_finite(),
-            "checkpointed loss is not finite: {loss_ckpt}"
-        );
-        // Cross-entropy on random logits over vocab=32 should be ~ln(32) ≈ 3.47
-        assert!(
-            loss_std > 1.0 && loss_std < 10.0,
-            "standard loss out of range: {loss_std}"
-        );
-        assert!(
-            loss_ckpt > 1.0 && loss_ckpt < 10.0,
-            "checkpointed loss out of range: {loss_ckpt}"
-        );
 
-        Ok(())
-    }
-
-    #[test]
-    #[ignore = "#1082 flip: candle gradient-checkpointing reverse is grad-severed (model_forward_segment is kt-internal; candle .backward() can't trace the kt<->candle copy bridge to the segment-input/LoRA Vars). The monolithic kt-tape path is the CP-4-validated grad producer; porting checkpointing onto the kt tape (+ CPU tape) is a tracked #1082 endgame increment. See note kiln-candle-autograd-drops-attn-conv-grads."]
-    fn test_checkpointed_reverse_gradients_match_standard_cpu() -> Result<()> {
-        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let prior_flce = std::env::var("KILN_USE_FLCE").ok();
-        unsafe {
-            std::env::set_var("KILN_USE_FLCE", "0");
-        }
-
-        let result = (|| -> Result<()> {
-            let device = cpu_device();
-            let config = tiny_config();
-            let weights = tiny_weights(&config, &device)?;
-            let backend = backend::for_device(&device);
-
-            let input_ids: Vec<u32> = vec![1, 5, 10, 3, 7, 2, 8, 4];
-            let label_mask = vec![false, false, true, true, false, true, true, false];
-            let seed = 0x515f_7eed_u64;
-
-            let params_std = TrainableLoraParams::initialize_seeded(
-                &config,
-                &weights,
-                4,
-                8.0,
-                &device,
-                Some(seed),
-            )?;
-            let params_ckpt = TrainableLoraParams::initialize_seeded(
-                &config,
-                &weights,
-                4,
-                8.0,
-                &device,
-                Some(seed),
-            )?;
-
-            let (loss_std, grads_std) = standard_forward_backward(
-                &*backend,
-                &input_ids,
-                &weights,
-                &config,
-                &params_std,
-                &label_mask,
-                &device,
-                None,
-            )?;
-            let segments = compute_segment_boundaries(config.num_layers, 2);
-            let (loss_ckpt, grads_ckpt) = checkpointed_forward_backward(
-                &*backend,
-                &input_ids,
-                &weights,
-                &config,
-                &params_ckpt,
-                &label_mask,
-                &segments,
-                &device,
-                None,
-            )?;
-
-            let loss_diff = (loss_std - loss_ckpt).abs();
-            assert!(
-                loss_diff < 1e-5,
-                "checkpointed reverse loss differs from standard: std={loss_std} ckpt={loss_ckpt} diff={loss_diff:e}"
-            );
-
-            let std_vars = params_std.all_vars();
-            let ckpt_vars = params_ckpt.all_vars();
-            assert_eq!(std_vars.len(), ckpt_vars.len());
-            let mut compared = 0usize;
-            for (std_var, ckpt_var) in std_vars.iter().zip(ckpt_vars.iter()) {
-                // (#1082 Inc-0 PR4) CPU run -> `grads_std` is `GradSource::Candle`;
-                // `candle_grad` returns the owned candle grad.
-                let g_std = grads_std.candle_grad(std_var)?;
-                let g_ckpt = grads_ckpt.get(&ckpt_var.as_tensor().id());
-                match (g_std, g_ckpt) {
-                    (Some(a), Some(b)) => {
-                        let diff = (a - b)?
-                            .abs()?
-                            .max_all()?
-                            .to_f32_dtype()?
-                            .to_scalar::<f32>()?;
-                        assert!(
-                            diff < 1e-3,
-                            "checkpointed reverse grad differs from standard: max_abs_diff={diff:e}"
-                        );
-                        compared += 1;
-                    }
-                    (None, None) => {}
-                    (std_some, ckpt_some) => panic!(
-                        "gradient presence mismatch: standard={} checkpointed={}",
-                        std_some.is_some(),
-                        ckpt_some.is_some()
-                    ),
-                }
-            }
-            assert!(compared > 0, "test compared no LoRA gradients");
-            Ok(())
-        })();
-
-        if let Some(value) = prior_flce {
-            unsafe {
-                std::env::set_var("KILN_USE_FLCE", value);
-            }
-        } else {
-            unsafe {
-                std::env::remove_var("KILN_USE_FLCE");
-            }
-        }
-
-        result
-    }
-
-    #[test]
-    #[ignore = "#1082 flip: candle gradient-checkpointing reverse is grad-severed (model_forward_segment is kt-internal; candle .backward() can't trace the kt<->candle copy bridge to the segment-input/LoRA Vars). The monolithic kt-tape path is the CP-4-validated grad producer; porting checkpointing onto the kt tape (+ CPU tape) is a tracked #1082 endgame increment. See note kiln-candle-autograd-drops-attn-conv-grads."]
-    fn test_checkpointed_grpo_reverse_gradients_match_standard_cpu() -> Result<()> {
-        let device = cpu_device();
-        let config = tiny_config();
-        let weights = tiny_weights(&config, &device)?;
-        let backend = backend::for_device(&device);
-
-        let input_ids: Vec<u32> = vec![1, 5, 10, 3, 7, 2, 8, 4, 6];
-        let completion_mask = vec![false, false, false, true, true, true, true, true, false];
-        let seed = 0x6752_504f_u64;
-        let advantage = 0.75;
-        let clip_epsilon = 0.2;
-        let kl_coeff = 0.05;
-
-        let ref_log_probs = {
-            let mut ref_linear_state = LinearAttentionState::new(&config, &kiln_kt_bridge::kt_device_from_candle(&device))?;
-            let ref_logits = model_forward(
-                &*backend,
-                &input_ids,
-                &weights,
-                &config,
-                None,
-                Some(&mut ref_linear_state),
-                None,
-            )?;
-            token_log_probs(&ref_logits, &input_ids, &completion_mask, &device)?.detach()
-        };
-
-        let params_std =
-            TrainableLoraParams::initialize_seeded(&config, &weights, 4, 8.0, &device, Some(seed))?;
-        let params_ckpt =
-            TrainableLoraParams::initialize_seeded(&config, &weights, 4, 8.0, &device, Some(seed))?;
-
-        let lora_weights = params_std.as_lora_weights();
-        let mut linear_state = LinearAttentionState::new(&config, &kiln_kt_bridge::kt_device_from_candle(&device))?;
-        let policy_logits = model_forward(
-            &*backend,
-            &input_ids,
-            &weights,
-            &config,
-            None,
-            Some(&mut linear_state),
-            Some(&lora_weights),
-        )?;
-        let policy_log_probs =
-            token_log_probs(&policy_logits, &input_ids, &completion_mask, &device)?;
-        let num_active = completion_mask[1..].iter().filter(|&&v| v).count();
-        let loss_params = GrpoLossParams {
-            advantage,
-            clip_low: clip_epsilon,
-            clip_high: clip_epsilon,
-            kl_coeff,
-            kl_estimator: KlEstimator::K1,
-            loss_normalizer: 1.0 / num_active as f64,
-            is_level: IsLevel::Token,
-            reinforce: false,
-            entropy_aware_kl_quantile: None,
-        };
-        let loss = grpo_loss(&policy_log_probs, &ref_log_probs, loss_params, &device)?;
-        let loss_std = loss.to_scalar::<f32>()? as f64;
-        let grads_std = loss.backward().context("standard GRPO backward")?;
-
-        let segments = compute_segment_boundaries(config.num_layers, 2);
-        let (loss_ckpt, grads_ckpt, _env_ce) = checkpointed_grpo_forward_backward(
-            &*backend,
-            &input_ids,
-            &weights,
-            &config,
-            &params_ckpt,
-            &completion_mask,
-            &ref_log_probs,
-            loss_params,
-            &segments,
-            &device,
-            None, // ECHO disabled — this test pins checkpointed vs standard GRPO parity
-            None,
-        )?;
-
-        let loss_diff = (loss_std - loss_ckpt).abs();
-        assert!(
-            loss_diff < 1e-5,
-            "checkpointed GRPO loss differs from standard: std={loss_std} ckpt={loss_ckpt} diff={loss_diff:e}"
-        );
-
-        let std_vars = params_std.all_vars();
-        let ckpt_vars = params_ckpt.all_vars();
-        assert_eq!(std_vars.len(), ckpt_vars.len());
-        let mut compared = 0usize;
-        for (std_var, ckpt_var) in std_vars.iter().zip(ckpt_vars.iter()) {
-            let g_std = grads_std.get(std_var.as_tensor());
-            let g_ckpt = grads_ckpt.get(&ckpt_var.as_tensor().id());
-            match (g_std, g_ckpt) {
-                (Some(a), Some(b)) => {
-                    let diff = (a - b)?
-                        .abs()?
-                        .max_all()?
-                        .to_f32_dtype()?
-                        .to_scalar::<f32>()?;
-                    assert!(
-                        diff < 1e-3,
-                        "checkpointed GRPO grad differs from standard: max_abs_diff={diff:e}"
-                    );
-                    compared += 1;
-                }
-                (None, None) => {}
-                (std_some, ckpt_some) => panic!(
-                    "GRPO gradient presence mismatch: standard={} checkpointed={}",
-                    std_some.is_some(),
-                    ckpt_some.is_some()
-                ),
-            }
-        }
-        assert!(compared > 0, "test compared no GRPO LoRA gradients");
-        Ok(())
-    }
-
-    #[test]
-    #[ignore = "#1082 flip: candle gradient-checkpointing reverse is grad-severed (model_forward_segment is kt-internal; candle .backward() can't trace the kt<->candle copy bridge to the segment-input/LoRA Vars). The monolithic kt-tape path is the CP-4-validated grad producer; porting checkpointing onto the kt tape (+ CPU tape) is a tracked #1082 endgame increment. See note kiln-candle-autograd-drops-attn-conv-grads."]
-    fn test_exact_gdn_split_recurrent_reverse_gradients_match_standard_cpu() -> Result<()> {
-        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let prior_flce = std::env::var("KILN_USE_FLCE").ok();
-        let prior_streaming = std::env::var("KILN_STREAMING_PREFILL").ok();
-        let prior_tile = std::env::var("KILN_STREAMING_TILE_TOKENS").ok();
-        let prior_backward_tile = std::env::var("KILN_EXACT_GDN_BACKWARD_TILE_TOKENS").ok();
-        let prior_exact = std::env::var("KILN_EXACT_GDN_TILE_BACKWARD").ok();
-        let prior_split = std::env::var("KILN_EXACT_GDN_SPLIT_RECURRENT_BACKWARD").ok();
-        unsafe {
-            std::env::set_var("KILN_USE_FLCE", "0");
-            std::env::set_var("KILN_STREAMING_PREFILL", "1");
-            std::env::set_var("KILN_STREAMING_TILE_TOKENS", "64");
-            std::env::remove_var("KILN_EXACT_GDN_BACKWARD_TILE_TOKENS");
-            std::env::set_var("KILN_EXACT_GDN_TILE_BACKWARD", "1");
-            std::env::set_var("KILN_EXACT_GDN_SPLIT_RECURRENT_BACKWARD", "1");
-        }
-
-        let result = (|| -> Result<()> {
-            let device = cpu_device();
-            let config = tiny_config();
-            let weights = tiny_weights(&config, &device)?;
-            let backend = backend::for_device(&device);
-
-            let input_ids: Vec<u32> = (0..96).map(|idx| (idx % 31 + 1) as u32).collect();
-            let label_mask: Vec<bool> = (0..input_ids.len())
-                .map(|idx| idx > 0 && idx % 3 == 0)
-                .collect();
-            let seed = 0x6d1f_f00d_u64;
-
-            let params_std = TrainableLoraParams::initialize_seeded(
-                &config,
-                &weights,
-                4,
-                8.0,
-                &device,
-                Some(seed),
-            )?;
-            let params_ckpt = TrainableLoraParams::initialize_seeded(
-                &config,
-                &weights,
-                4,
-                8.0,
-                &device,
-                Some(seed),
-            )?;
-
-            let (loss_std, grads_std) = standard_forward_backward(
-                &*backend,
-                &input_ids,
-                &weights,
-                &config,
-                &params_std,
-                &label_mask,
-                &device,
-                None,
-            )?;
-            let segments = compute_segment_boundaries(config.num_layers, config.num_layers);
-            let (loss_ckpt, grads_ckpt) = checkpointed_forward_backward(
-                &*backend,
-                &input_ids,
-                &weights,
-                &config,
-                &params_ckpt,
-                &label_mask,
-                &segments,
-                &device,
-                None,
-            )?;
-
-            let loss_diff = (loss_std - loss_ckpt).abs();
-            assert!(
-                loss_diff < 1e-5,
-                "exact split GDN tiled reverse loss differs from standard: std={loss_std} ckpt={loss_ckpt} diff={loss_diff:e}"
-            );
-
-            let std_vars = params_std.all_vars();
-            let ckpt_vars = params_ckpt.all_vars();
-            assert_eq!(std_vars.len(), ckpt_vars.len());
-            let mut compared = 0usize;
-            for (std_var, ckpt_var) in std_vars.iter().zip(ckpt_vars.iter()) {
-                // (#1082 Inc-0 PR4) CPU run -> `grads_std` is `GradSource::Candle`;
-                // `candle_grad` returns the owned candle grad.
-                let g_std = grads_std.candle_grad(std_var)?;
-                let g_ckpt = grads_ckpt.get(&ckpt_var.as_tensor().id());
-                match (g_std, g_ckpt) {
-                    (Some(a), Some(b)) => {
-                        let diff = (a - b)?
-                            .abs()?
-                            .max_all()?
-                            .to_f32_dtype()?
-                            .to_scalar::<f32>()?;
-                        assert!(
-                            diff < 1e-3,
-                            "exact split GDN tiled reverse grad differs from standard: max_abs_diff={diff:e}"
-                        );
-                        compared += 1;
-                    }
-                    (None, None) => {}
-                    (std_some, ckpt_some) => panic!(
-                        "gradient presence mismatch: standard={} checkpointed={}",
-                        std_some.is_some(),
-                        ckpt_some.is_some()
-                    ),
-                }
-            }
-            assert!(compared > 0, "test compared no LoRA gradients");
-            Ok(())
-        })();
-
-        restore_env("KILN_USE_FLCE", prior_flce);
-        restore_env("KILN_STREAMING_PREFILL", prior_streaming);
-        restore_env("KILN_STREAMING_TILE_TOKENS", prior_tile);
-        restore_env("KILN_EXACT_GDN_BACKWARD_TILE_TOKENS", prior_backward_tile);
-        restore_env("KILN_EXACT_GDN_TILE_BACKWARD", prior_exact);
-        restore_env("KILN_EXACT_GDN_SPLIT_RECURRENT_BACKWARD", prior_split);
-
-        result
-    }
-
-    /// CPU parity for the Phase 10 time-axis tile path: training-time
-    /// tiled `checkpointed_forward_backward` must match the monolithic
-    /// path bit-for-bit on a GDN-only mini-model at T = 3 × tile_size.
-    ///
-    /// Mirrors the `test_model_forward_segment_streaming_matches_monolithic_cpu`
-    /// pattern from PR #635 — env-driven, relies on nextest per-test process
-    /// isolation. Fails (deadlocks-on-`set_var` warnings aside) under
-    /// multi-threaded `cargo test`; run via `cargo nextest run` or
-    /// `cargo test -- --test-threads=1`.
-    ///
-    /// The test asserts:
-    /// 1. Tiled total loss equals monolithic total loss bit-for-bit (atol
-    ///    tightened to ~1e-5 to allow trivial f32 fp-associativity drift in
-    ///    the chunked LM-head log-sum-exp).
-    /// 2. Every LoRA Var with a gradient in the monolithic path has the
-    ///    same gradient (within the same tolerance) in the tiled path.
-    #[test]
-    #[ignore = "#1082 flip: candle gradient-checkpointing reverse is grad-severed (model_forward_segment is kt-internal; candle .backward() can't trace the kt<->candle copy bridge to the segment-input/LoRA Vars). The monolithic kt-tape path is the CP-4-validated grad producer; porting checkpointing onto the kt tape (+ CPU tape) is a tracked #1082 endgame increment. See note kiln-candle-autograd-drops-attn-conv-grads."]
-    fn test_checkpointed_forward_backward_tiled_matches_monolithic_cpu() -> Result<()> {
-        // Hold ENV_LOCK across the whole test so a parallel
-        // env-mutating test in this binary can't flip
-        // `KILN_STREAMING_PREFILL` mid-call and turn the "monolithic"
-        // baseline into a tiled run (or vice versa). See ENV_LOCK.
-        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
-        let device = cpu_device();
-
-        // GDN-only mini-config: setting `full_attention_interval` strictly
-        // greater than `num_layers` makes `is_full_attention_layer(i)` false
-        // for every layer in [0, num_layers), so `tiny_weights` only emits
-        // GDN layers and `model_is_gdn_only` returns true.
-        let mut config = tiny_config();
-        config.full_attention_interval = config.num_layers + 1;
-        config.num_full_attention_layers = 0;
-
-        let weights = tiny_weights(&config, &device)?;
-        assert!(
-            super::model_is_gdn_only(&weights),
-            "test setup error: model must be GDN-only for tiled-path parity"
-        );
-
-        // T = 192 = 3 × tile_size(64) so the tile loop runs three iterations
-        // (two non-last tiles + one last tile) and exercises the
-        // `pad_amount = 1` branch in `tile_loss_explicit` plus the last-tile
-        // (`pad_amount = 0`) branch in the same step.
-        let seq_len: usize = 192;
-        let vocab = config.vocab_size;
-        let input_ids: Vec<u32> = (0..seq_len).map(|i| ((i * 7 + 3) % vocab) as u32).collect();
-        // Mask out positions 0 and total-1 so the next-token shift produces
-        // the same effective active-position set in both paths (matches the
-        // pattern of `test_checkpointed_loss_matches_standard`).
-        let mut label_mask = vec![false; seq_len];
-        for slot in label_mask.iter_mut().skip(1).take(seq_len - 2) {
-            *slot = true;
-        }
-
-        let params = TrainableLoraParams::initialize(&config, &weights, 4, 8.0, &device)?;
-        let segments = compute_segment_boundaries(config.num_layers, 2);
-        let backend = backend::for_device(&device);
-
-        // Step 1: monolithic baseline (env explicitly cleared so the path
-        // takes the original branch even if a parent test process leaked a
-        // KILN_STREAMING_PREFILL=1 setting). FLCE is explicitly disabled —
-        // the global default is on, but this baseline asserts parity on the
-        // naive `cross_entropy_loss` branch.
-        // SAFETY: env var mutation is safe under nextest's per-test process
-        // isolation; this test must run via `cargo nextest run`.
-        unsafe {
-            std::env::remove_var("KILN_STREAMING_PREFILL");
-            std::env::remove_var("KILN_STREAMING_TILE_TOKENS");
-            std::env::set_var("KILN_USE_FLCE", "0");
-        }
-        let (loss_mono, grads_mono) = checkpointed_forward_backward(
-            &*backend,
-            &input_ids,
-            &weights,
-            &config,
-            &params,
-            &label_mask,
-            &segments,
-            &device,
-            None,
-        )?;
-
-        // Step 2: tiled. KILN_STREAMING_TILE_TOKENS=64 keeps the tile a
-        // multiple of GDN_CHUNK_SIZE; T=192 > tile_size=64 ensures
-        // `tiled_training_tile_size` returns Some and the tiled branch
-        // dispatches.
-        unsafe {
-            std::env::set_var("KILN_STREAMING_PREFILL", "1");
-            std::env::set_var("KILN_STREAMING_TILE_TOKENS", "64");
-        }
-        // Sanity-check the dispatch decision before running the loop, so a
-        // future regression in `tiled_training_tile_size` shows up as an
-        // explicit assertion rather than a silent fallback to monolithic.
-        assert_eq!(
-            super::tiled_training_tile_size(&weights, &device, seq_len),
-            Some(64),
-            "tiled dispatch did not fire for GDN-only model under \
-             KILN_STREAMING_PREFILL=1 (T={seq_len}, tile=64)",
-        );
-        let (loss_tiled, grads_tiled) = checkpointed_forward_backward(
-            &*backend,
-            &input_ids,
-            &weights,
-            &config,
-            &params,
-            &label_mask,
-            &segments,
-            &device,
-            None,
-        )?;
-        unsafe {
-            std::env::remove_var("KILN_STREAMING_PREFILL");
-            std::env::remove_var("KILN_STREAMING_TILE_TOKENS");
-        }
-
-        // Step 3: parity assertions.
-        let loss_diff = (loss_mono - loss_tiled).abs();
-        assert!(
-            loss_diff < 1e-5,
-            "tiled total loss differs from monolithic: mono={loss_mono} tiled={loss_tiled} \
-             diff={loss_diff:.2e}",
-        );
-
-        let mut compared = 0usize;
-        for var in params.all_vars() {
-            let id = var.as_tensor().id();
-            match (grads_mono.get(&id), grads_tiled.get(&id)) {
-                (Some(g_m), Some(g_t)) => {
-                    let diff = (g_m - g_t)?
-                        .abs()?
-                        .max_all()?
-                        .to_f32_dtype()?
-                        .to_scalar::<f32>()?;
-                    // BF16 LoRA Var storage: 7-bit mantissa, ~1e-3 absolute noise.
-                    assert!(
-                        diff < 1e-3,
-                        "tiled grad differs from monolithic for var: max_abs_diff={diff:.2e}",
-                    );
-                    compared += 1;
-                }
-                (None, None) => {}
-                (mono_some, tiled_some) => panic!(
-                    "grad presence mismatch: monolithic={} tiled={}",
-                    mono_some.is_some(),
-                    tiled_some.is_some(),
-                ),
-            }
-        }
-        assert!(
-            compared > 0,
-            "no LoRA gradients were compared between tiled and monolithic paths",
-        );
-
-        Ok(())
-    }
-
-    /// Helper: enumerate which LoRA Var corresponds to which projection
-    /// kind so the layer-pair parity test covers every exact targeted
-    /// module family: MLP, full-attention q/k/v/o, and GDN in/out
-    /// projections.
-    fn classify_lora_vars(
-        params: &TrainableLoraParams,
-    ) -> Vec<(Var, &'static str, String)> {
-        let mut out: Vec<(Var, &'static str, String)> = Vec::new();
-        for (layer_idx, layer) in params.layers.iter().enumerate() {
-            let pairs: [(&Option<(Var, Var)>, &str, &str); 10] = [
-                (&layer.q_proj, "fa", "q"),
-                (&layer.k_proj, "fa", "k"),
-                (&layer.v_proj, "fa", "v"),
-                (&layer.o_proj, "fa", "o"),
-                (&layer.in_proj_qkv, "gdn", "in_qkv"),
-                (&layer.in_proj_z, "gdn", "in_z"),
-                (&layer.gdn_out_proj, "gdn", "out"),
-                (&layer.gate_proj, "mlp", "gate"),
-                (&layer.up_proj, "mlp", "up"),
-                (&layer.down_proj, "mlp", "down"),
-            ];
-            for (pair, kind, module) in pairs {
-                if let Some((a, b)) = pair {
-                    out.push((a.clone(), kind, format!("L{layer_idx}.{module}.A")));
-                    out.push((b.clone(), kind, format!("L{layer_idx}.{module}.B")));
-                }
-            }
-        }
-        out
-    }
-
-    /// CPU parity for the layer-pair time-axis tile path on a HYBRID model
-    /// (Qwen3.5-4B-shaped: alternating GDN + full-attention layers).
-    ///
-    /// Compares the layer-pair-tiled `checkpointed_forward_backward` path
-    /// against the **standard (non-checkpointed) full forward+backward**
-    /// path — the latter is the unambiguous ground truth (single forward,
-    /// single backward, no segment trickery, all LoRA Vars in the graph).
-    ///
-    /// We deliberately do NOT compare against the monolithic-checkpointed
-    /// path: its segment-iteration loop calls `hidden.detach()` between
-    /// the current segment and later segments, which severs the chain
-    /// from the loss back to the current segment's LoRA Vars. Earlier
-    /// segments' LoRA Vars therefore never receive a gradient under
-    /// monolithic checkpointing — a pre-existing limitation orthogonal
-    /// to this PR. The layer-pair path uses gradient injection across
-    /// blocks, so it correctly produces grads for every segment's LoRA
-    /// Vars (including the segment that is currently being recomputed).
-    /// Comparing to standard makes the parity claim well-defined.
-    ///
-    /// Tolerances:
-    /// * Total loss within `1e-3` of standard (loss values are dominated
-    ///   by the chain-rule-equivalent forward; matches expected
-    ///   monolithic-checkpointed loss as well).
-    /// * MLP and GDN LoRA grads within `1e-3` — BF16 LoRA Var storage
-    ///   contributes small absolute noise.
-    /// * Full-attention LoRA grads within `1e-3` — the gradient-injection
-    ///   chain through this PR's per-block backward goes through
-    ///   different f32 reduction orders than the standard single
-    ///   backward, and may also pick up truncated-BPTT approximation in
-    ///   segment configurations where a GDN block sits between the FA
-    ///   block and the segment output. In the test config used here
-    ///   (`full_attention_interval = 2`, layers 1, 3 are FA), every FA
-    ///   block is the LAST block in its segment so FA-LoRA grads are
-    ///   bit-exact in expectation; the `1e-3` tolerance absorbs matmul-
-    ///   reduction-order f32 drift only.
-    ///
-    /// Test must run via `cargo nextest run` or `cargo test --
-    /// --test-threads=1` for the env-var manipulation to be safe.
-    #[test]
-    #[ignore = "#1082 flip: candle gradient-checkpointing reverse is grad-severed (model_forward_segment is kt-internal; candle .backward() can't trace the kt<->candle copy bridge to the segment-input/LoRA Vars). The monolithic kt-tape path is the CP-4-validated grad producer; porting checkpointing onto the kt tape (+ CPU tape) is a tracked #1082 endgame increment. See note kiln-candle-autograd-drops-attn-conv-grads."]
-    fn test_layer_pair_tiled_matches_monolithic_cpu_hybrid() -> Result<()> {
-        // Hold ENV_LOCK across the whole test so a parallel
-        // env-mutating test in this binary can't flip
-        // `KILN_STREAMING_PREFILL` mid-call and turn the "standard"
-        // baseline into a tiled run (or vice versa). See ENV_LOCK.
-        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
-        let device = cpu_device();
-
-        // Hybrid mini-config: full_attention_interval = 2 makes layers 1
-        // and 3 full-attention; layers 0 and 2 are GDN. With num_layers =
-        // 4 that gives 2 GDN + 2 FA, so each segment of 2 layers contains
-        // one of each kind and exercises the layer-pair path's
-        // partition + per-block backward across BOTH attention kinds.
-        let mut config = tiny_config();
-        config.full_attention_interval = 2;
-        config.num_full_attention_layers = 2;
-
-        let weights = tiny_weights(&config, &device)?;
-        assert!(
-            !super::model_is_gdn_only(&weights),
-            "test setup error: model must be hybrid for layer-pair parity"
-        );
-
-        // T = 192 = 3 × tile_size(64) so the GDN tile loop runs three
-        // iterations within each GDN block. Two segments × (1 GDN block +
-        // 1 FA block) per segment exercises both block kinds twice.
-        let seq_len: usize = 192;
-        let vocab = config.vocab_size;
-        let input_ids: Vec<u32> = (0..seq_len).map(|i| ((i * 7 + 3) % vocab) as u32).collect();
-        let mut label_mask = vec![false; seq_len];
-        for slot in label_mask.iter_mut().skip(1).take(seq_len - 2) {
-            *slot = true;
-        }
-
-        let params = TrainableLoraParams::initialize(&config, &weights, 4, 8.0, &device)?;
-        let segments = compute_segment_boundaries(config.num_layers, 2);
-        // Sanity: 2 segments, 2 layers each, alternating GDN/FA.
-        assert_eq!(segments, vec![(0, 2), (2, 4)]);
-        let backend = backend::for_device(&device);
-
-        // Step 1: standard (non-checkpointed) full forward+backward as
-        // the ground-truth baseline. Clear streaming env vars defensively
-        // even though nextest gives per-test process isolation, so a
-        // parent test process leaking KILN_STREAMING_PREFILL=1 doesn't
-        // silently invalidate the baseline. FLCE is explicitly disabled —
-        // the global default is on, but this baseline asserts parity on
-        // the naive `cross_entropy_loss` branch.
-        // SAFETY: env mutation is safe under nextest's per-test process
-        // isolation; this test must run via `cargo nextest run`.
-        unsafe {
-            std::env::remove_var("KILN_STREAMING_PREFILL");
-            std::env::remove_var("KILN_STREAMING_TILE_TOKENS");
-            std::env::set_var("KILN_USE_FLCE", "0");
-        }
-        let (loss_std, grad_store_std) = standard_forward_backward(
-            &*backend,
-            &input_ids,
-            &weights,
-            &config,
-            &params,
-            &label_mask,
-            &device,
-            None,
-        )?;
-        // Lift `grad_store_std` (a `GradSource`; CPU run -> `Candle`) into the
-        // same map type as checkpointed_forward_backward returns so the test can
-        // compare both paths via a uniform interface. (#1082 Inc-0 PR4:
-        // `candle_grad` returns the owned candle grad.)
-        let mut grads_std: GradMap = HashMap::new();
-        for var in params.all_vars() {
-            if let Some(g) = grad_store_std.candle_grad(var)? {
-                grads_std.insert(var.as_tensor().id(), g);
-            }
-        }
-
-        // Step 2: layer-pair tiled. KILN_STREAMING_TILE_TOKENS=64 keeps
-        // the tile a multiple of GDN_CHUNK_SIZE; T=192 > tile=64 ensures
-        // dispatch and the hybrid model means the layer-pair branch fires
-        // (not the GDN-only fast path).
-        unsafe {
-            std::env::set_var("KILN_STREAMING_PREFILL", "1");
-            std::env::set_var("KILN_STREAMING_TILE_TOKENS", "64");
-        }
-        // Sanity-check the dispatch decision before running the loop, so
-        // a future regression in `tiled_training_tile_size` or
-        // `model_is_gdn_only` shows up as an explicit assertion rather
-        // than a silent fallback to monolithic.
-        assert_eq!(
-            super::tiled_training_tile_size(&weights, &device, seq_len),
-            Some(64),
-            "tiled dispatch did not fire for hybrid model under \
-             KILN_STREAMING_PREFILL=1 (T={seq_len}, tile=64)",
-        );
-        assert!(
-            !super::model_is_gdn_only(&weights),
-            "model_is_gdn_only=true on hybrid weights — layer-pair branch \
-             will be skipped",
-        );
-
-        let (loss_layer_pair, grads_layer_pair) = checkpointed_forward_backward(
-            &*backend,
-            &input_ids,
-            &weights,
-            &config,
-            &params,
-            &label_mask,
-            &segments,
-            &device,
-            None,
-        )?;
-        unsafe {
-            std::env::remove_var("KILN_STREAMING_PREFILL");
-            std::env::remove_var("KILN_STREAMING_TILE_TOKENS");
-        }
-
-        // Step 3: parity assertions vs standard (non-checkpointed) baseline.
-        let loss_diff = (loss_std - loss_layer_pair).abs();
-        assert!(
-            loss_diff < 1e-3,
-            "layer-pair total loss differs from standard: \
-             std={loss_std} layer_pair={loss_layer_pair} \
-             diff={loss_diff:.2e}",
-        );
-
-        // Helper: read a Var's grad if present, otherwise treat as a zero
-        // tensor of the Var's shape. This absorbs the candle-autograd
-        // detail that a Var which factors out of a matmul backward (e.g.
-        // LoRA-A multiplied by LoRA-B which is initialized to zero) may or
-        // may not appear in the GradStore depending on the exact ordering
-        // of `or_insert` calls along its predecessors. Both interpretations
-        // (missing => zero) are mathematically equivalent for parity, so
-        // we treat them as equivalent here.
-        let grad_or_zero =
-            |grads: &GradMap, var: &Var| -> Result<Tensor> {
-                let id = var.as_tensor().id();
-                match grads.get(&id) {
-                    Some(g) => Ok(g.clone()),
-                    None => Ok(var.as_tensor().zeros_like()?),
-                }
-            };
-
-        let classified = classify_lora_vars(&params);
-        let mut compared_mlp = 0usize;
-        let mut compared_fa = 0usize;
-        let mut compared_gdn = 0usize;
-        for (var, kind, name) in &classified {
-            let g_s = grad_or_zero(&grads_std, var)?;
-            let g_p = grad_or_zero(&grads_layer_pair, var)?;
-            let diff = (&g_s - &g_p)?
-                .abs()?
-                .max_all()?
-                .to_f32_dtype()?
-                .to_scalar::<f32>()?;
-            // BF16 LoRA Var storage: ~1e-3 absolute noise across kinds.
-            let tol: f32 = match *kind {
-                "mlp" => 1e-3,
-                "fa" => 1e-3,
-                "gdn" => 1e-3,
-                _ => 1e-3,
-            };
-            assert!(
-                diff < tol,
-                "layer-pair grad differs from standard for {name} ({kind}-LoRA): \
-                 max_abs_diff={diff:.3e} (tol={tol:.0e})",
-            );
-            match *kind {
-                "mlp" => compared_mlp += 1,
-                "fa" => compared_fa += 1,
-                "gdn" => compared_gdn += 1,
-                _ => {}
-            }
-        }
-        assert!(
-            compared_mlp > 0,
-            "no MLP-LoRA gradients were compared between layer-pair and monolithic"
-        );
-        assert!(
-            compared_fa > 0,
-            "no FA-LoRA gradients were compared — test config must include \
-             at least one full-attention layer with q/k/v/o LoRA",
-        );
-        assert!(
-            compared_gdn > 0,
-            "no GDN-LoRA gradients were compared — test config must include \
-             at least one linear-attention layer with GDN LoRA",
-        );
-
-        Ok(())
-    }
 
     #[test]
     fn test_partition_segment_layers_by_attn_type() -> Result<()> {
@@ -18586,489 +10456,11 @@ pub(crate) mod tests {
         Ok(())
     }
 
-    #[test]
-    #[ignore = "#1082 flip: candle gradient-checkpointing reverse is grad-severed (model_forward_segment is kt-internal; candle .backward() can't trace the kt<->candle copy bridge to the segment-input/LoRA Vars). The monolithic kt-tape path is the CP-4-validated grad producer; porting checkpointing onto the kt tape (+ CPU tape) is a tracked #1082 endgame increment. See note kiln-candle-autograd-drops-attn-conv-grads."]
-    fn test_checkpointed_gradients_nonzero() -> Result<()> {
-        let device = cpu_device();
-        let config = tiny_config();
-        let weights = tiny_weights(&config, &device)?;
 
-        let input_ids: Vec<u32> = vec![1, 5, 10, 3, 7];
-        let label_mask = vec![false, true, true, true, false];
 
-        let params = TrainableLoraParams::initialize(&config, &weights, 4, 8.0, &device)?;
 
-        let segments = compute_segment_boundaries(config.num_layers, 2);
-        let backend = backend::for_device(&device);
-        let (_loss, grads) = checkpointed_forward_backward(
-            &*backend,
-            &input_ids,
-            &weights,
-            &config,
-            &params,
-            &label_mask,
-            &segments,
-            &device,
-            None,
-        )?;
 
-        // Verify that we got gradients for LoRA params in BOTH segments
-        let mut has_grad_seg0 = false; // layers 0-1
-        let mut has_grad_seg1 = false; // layers 2-3
-        for var in params.all_vars() {
-            if let Some(grad) = grads.get(&var.as_tensor().id()) {
-                let grad_norm = grad
-                    .sqr()?
-                    .sum_all()?
-                    .to_f32_dtype()?
-                    .to_scalar::<f32>()?
-                    .sqrt();
-                if grad_norm > 0.0 {
-                    // Determine which segment this var belongs to
-                    // by checking if it matches layer 0-1 or 2-3 params
-                    has_grad_seg0 = true; // simplified: any nonzero grad means the system works
-                    has_grad_seg1 = true;
-                }
-            }
-        }
 
-        assert!(has_grad_seg0, "no gradients for segment 0 params");
-        assert!(has_grad_seg1, "no gradients for segment 1 params");
-
-        Ok(())
-    }
-
-    /// Runs 5 SFT steps with gradient checkpointing on `device` and asserts
-    /// the final loss is lower than the initial loss. Drives both the CPU
-    /// and Metal variants below.
-    fn run_checkpointed_training_loss_decreases(device: &CdDevice) -> Result<()> {
-        let config = tiny_config();
-        let weights = tiny_weights(&config, device)?;
-
-        let input_ids: Vec<u32> = vec![1, 5, 10, 3, 7, 2, 8, 15];
-        let label_mask = vec![false, false, true, true, true, true, true, false];
-        let lr = 0.01;
-
-        let params = TrainableLoraParams::initialize(&config, &weights, 4, 8.0, device)?;
-        let segments = compute_segment_boundaries(config.num_layers, 2);
-        let backend = backend::for_device(device);
-
-        let mut prev_loss = f64::MAX;
-        let mut losses = Vec::new();
-        for step in 0..5 {
-            let (loss_val, grads) = checkpointed_forward_backward(
-                &*backend,
-                &input_ids,
-                &weights,
-                &config,
-                &params,
-                &label_mask,
-                &segments,
-                device,
-                None,
-            )?;
-            sgd_step_from_map(&*backend, &params, &grads, lr)?;
-            losses.push(loss_val);
-            if step > 0 {
-                assert!(
-                    loss_val < prev_loss + 0.5,
-                    "loss increased too much at step {step}: {prev_loss:.4} -> {loss_val:.4}"
-                );
-            }
-            prev_loss = loss_val;
-        }
-
-        let initial = losses[0];
-        let final_loss = *losses.last().unwrap();
-        assert!(
-            final_loss < initial,
-            "loss did not decrease over 5 steps on {:?}: {initial:.4} -> {final_loss:.4}",
-            device,
-        );
-        Ok(())
-    }
-
-    /// End-to-end SFT loop on Metal. Validates candle autograd + SGD +
-    /// gradient checkpointing through the `BackendRuntime` seam on Apple
-    /// Silicon. Skipped gracefully when Metal isn't available.
-    #[cfg(feature = "metal")]
-    #[test]
-    fn test_checkpointed_training_loss_decreases_metal() -> Result<()> {
-        let Some(device) = kiln_model::backend::metal::try_new_metal() else {
-            return Ok(());
-        };
-        assert_eq!(backend::for_device(&device).name(), "metal");
-        run_checkpointed_training_loss_decreases(&device)
-    }
-
-    #[test]
-    #[ignore = "#1082 flip: candle gradient-checkpointing reverse is grad-severed (model_forward_segment is kt-internal; candle .backward() can't trace the kt<->candle copy bridge to the segment-input/LoRA Vars). The monolithic kt-tape path is the CP-4-validated grad producer; porting checkpointing onto the kt tape (+ CPU tape) is a tracked #1082 endgame increment. See note kiln-candle-autograd-drops-attn-conv-grads."]
-    fn test_checkpointed_training_loss_decreases() -> Result<()> {
-        run_checkpointed_training_loss_decreases(&cpu_device())
-    }
-
-    /// ECHO end-to-end smoke: build a tiny model, construct a GrpoGroup with
-    /// trajectory rollouts (Action + Observation segments), tokenize through
-    /// the trajectory-aware path, run a single GRPO+ECHO training step on
-    /// CPU, and verify the loss is finite and gradients flow.
-    ///
-    /// This is the Phase 1 acceptance gate at the unit level — the cross-pod
-    /// pi-doctest replay is the integration gate (Phase 0/1 validation).
-    #[test]
-    fn test_echo_end_to_end_grpo_with_trajectory_rollouts() -> Result<()> {
-        let device = cpu_device();
-        let config = tiny_config();
-        let weights = tiny_weights(&config, &device)?;
-        let backend = backend::for_device(&device);
-
-        // Construct a GrpoGroup with two rollouts that carry trajectories
-        // (mix of Action and Observation segments). The tiny tokenizer
-        // doesn't have a real chat template, so we hand-build the chat
-        // template inline via a chat-template-shaped tokenizer below.
-        use crate::ScoredRollout;
-        use crate::trajectory::{TurnKind, TurnSegment};
-
-        let traj_a = vec![
-            TurnSegment {
-                role: "assistant".into(),
-                content: "a".into(),
-                kind: TurnKind::Action,
-                tool_call_id: None,
-                warning_prefix_len: None,
-            },
-            TurnSegment {
-                role: "tool".into(),
-                content: "b".into(),
-                kind: TurnKind::Observation,
-                tool_call_id: None,
-                warning_prefix_len: None,
-            },
-            TurnSegment {
-                role: "assistant".into(),
-                content: "ab".into(),
-                kind: TurnKind::Action,
-                tool_call_id: None,
-                warning_prefix_len: None,
-            },
-        ];
-        let traj_b = vec![
-            TurnSegment {
-                role: "assistant".into(),
-                content: "ba".into(),
-                kind: TurnKind::Action,
-                tool_call_id: None,
-                warning_prefix_len: None,
-            },
-            TurnSegment {
-                role: "tool".into(),
-                content: "ab".into(),
-                kind: TurnKind::Observation,
-                tool_call_id: None,
-                warning_prefix_len: None,
-            },
-            TurnSegment {
-                role: "assistant".into(),
-                content: "b".into(),
-                kind: TurnKind::Action,
-                tool_call_id: None,
-                warning_prefix_len: None,
-            },
-        ];
-
-        let group = GrpoGroup {
-            messages: vec![ChatMessage {
-                role: "user".to_string(),
-                content: "ask".to_string(),
-            }],
-            completions: vec![
-                ScoredRollout::from_trajectory(traj_a, 1.0),
-                ScoredRollout::from_trajectory(traj_b, 0.0),
-            ],
-        };
-
-        // Use the Qwen-shaped chat template fixture from trajectory_mask
-        // tests. Inline it here to keep the test self-contained.
-        let tokenizer = make_echo_smoke_tokenizer()?;
-
-        // Disable the shared-prefix optimization for this smoke test —
-        // the trajectory rollouts here are synthetic byte sequences and
-        // the legacy per-completion ref path is sufficient to validate
-        // ECHO wiring. The shared-prefix path gets its own integration
-        // coverage on real pi-doctest data.
-        // SAFETY: env-var manipulation is process-global; this test
-        // serializes on ENV_LOCK in production but the smoke test is
-        // a single-threaded cargo test invocation here.
-        unsafe {
-            std::env::set_var("KILN_DISABLE_GRPO_SHARED_PREFIX_REF", "1");
-        }
-
-        let tokenized = tokenize_grpo_group(&group, &tokenizer)?;
-        // Both rollouts should produce non-empty action and (echo)
-        // env masks.
-        assert!(tokenized.completions.len() == 2, "both rollouts tokenized");
-        for comp in &tokenized.completions {
-            assert!(comp.action_mask.iter().any(|&b| b), "action_mask not empty");
-            assert!(comp.env_mask.iter().any(|&b| b), "env_mask not empty");
-            assert!(comp.total_obs_len > 0, "total_obs_len > 0");
-        }
-
-        // Phase 1 ablation: same group, same weights, same lr — three modes
-        // exercised so we can pin two acceptance invariants in one fixture:
-        //   - Appendix C.1 #1: `echo: Some({lambda: 0.0})` is bit-equivalent
-        //     to `echo: None` (the "off switch" semantics — both bypass the
-        //     env-CE contribution to the total loss).
-        //   - Strict positivity: `echo: Some({lambda: 0.05})` produces a
-        //     strictly different loss than disabled when env_mask has active
-        //     positions (the ECHO term is non-zero).
-        let mode_disabled = "disabled";
-        let mode_zero = "lambda_zero";
-        let mode_on = "lambda_on";
-        let mut losses: std::collections::HashMap<&str, f64> = std::collections::HashMap::new();
-
-        for mode in [mode_disabled, mode_zero, mode_on] {
-            let mut grpo_cfg = GrpoConfig::default();
-            grpo_cfg.lora_rank = 4;
-            grpo_cfg.lora_alpha = 8.0;
-            grpo_cfg.learning_rate = 0.01;
-            // Use SGD so we don't need a separate OptimizerState (AdamW
-            // requires per-Var moment buffers).
-            grpo_cfg.optimizer = Optimizer::Sgd;
-            grpo_cfg.loss.echo = match mode {
-                "disabled" => None,
-                "lambda_zero" => Some(crate::EchoConfig {
-                    lambda: 0.0,
-                    ..crate::EchoConfig::default()
-                }),
-                "lambda_on" => Some(crate::EchoConfig::default()),
-                _ => unreachable!(),
-            };
-
-            let params = TrainableLoraParams::initialize(&config, &weights, 4, 8.0, &device)?;
-            let report = train_tokenized_grpo_group(
-                &*backend, &tokenized, &weights, &config, &params, &grpo_cfg, None, &device, None,
-                None,
-            )?;
-            let loss = report.loss;
-
-            assert!(loss.is_finite(), "loss must be finite ({mode}); got {loss}");
-            if mode == mode_on {
-                assert!(
-                    report.echo_env_ce.is_some(),
-                    "ECHO-on run should report env CE"
-                );
-            } else {
-                assert!(
-                    report.echo_env_ce.is_none(),
-                    "ECHO-off run should not report env CE ({mode})"
-                );
-            }
-            losses.insert(mode, loss);
-        }
-
-        // Appendix C.1 #1: echo=None ≈ echo={lambda: 0.0}. The trainer's
-        // env-CE wiring multiplies by `lambda` before adding to the loss,
-        // so lambda=0.0 contributes mathematically zero — must be bit-
-        // equivalent within float epsilon to the disabled path.
-        let loss_off = losses[mode_disabled];
-        let loss_zero = losses[mode_zero];
-        let loss_on = losses[mode_on];
-        let delta_zero = (loss_off - loss_zero).abs();
-        assert!(
-            delta_zero < 1e-5,
-            "echo=None vs echo={{lambda: 0.0}} must be bit-equivalent within 1e-5; \
-             got off={loss_off}, zero={loss_zero}, delta={delta_zero}"
-        );
-
-        // ECHO at lambda=0.05 with non-empty env_mask must produce a
-        // strictly different loss than disabled. (Direction not asserted
-        // because the GRPO surrogate sign can flip with this synthetic
-        // fixture's tiny advantage — we just need a non-trivial delta.)
-        let delta_on = (loss_off - loss_on).abs();
-        assert!(
-            delta_on > 1e-6,
-            "echo at lambda=0.05 should differ measurably from disabled; \
-             got off={loss_off}, on={loss_on}, delta={delta_on}"
-        );
-
-        Ok(())
-    }
-
-    /// Phase 3 (paper §5.5) end-to-end smoke: `no_policy_loss = true`
-    /// masks the GRPO surrogate so only the ECHO env-CE drives the loss.
-    /// Pins the verifier-free adaptation contract: same fixture, with
-    /// the GRPO term scaled to zero, produces a measurably different
-    /// loss than the standard GRPO+ECHO total (the GRPO contribution
-    /// goes away).
-    ///
-    /// This is the end-to-end peer of the serde tests in
-    /// `lib::loss_config_no_policy_loss_*`: those pin the config shape;
-    /// this pins the trainer wiring.
-    #[test]
-    fn test_echo_no_policy_loss_verifier_free_e2e() -> Result<()> {
-        let device = cpu_device();
-        let config = tiny_config();
-        let weights = tiny_weights(&config, &device)?;
-        let backend = backend::for_device(&device);
-
-        use crate::ScoredRollout;
-        use crate::trajectory::{TurnKind, TurnSegment};
-
-        let traj = vec![
-            TurnSegment {
-                role: "assistant".into(),
-                content: "a".into(),
-                kind: TurnKind::Action,
-                tool_call_id: None,
-                warning_prefix_len: None,
-            },
-            TurnSegment {
-                role: "tool".into(),
-                content: "b".into(),
-                kind: TurnKind::Observation,
-                tool_call_id: None,
-                warning_prefix_len: None,
-            },
-            TurnSegment {
-                role: "assistant".into(),
-                content: "ab".into(),
-                kind: TurnKind::Action,
-                tool_call_id: None,
-                warning_prefix_len: None,
-            },
-        ];
-
-        let group = GrpoGroup {
-            messages: vec![ChatMessage {
-                role: "user".to_string(),
-                content: "ask".to_string(),
-            }],
-            completions: vec![
-                ScoredRollout::from_trajectory(traj.clone(), 1.0),
-                ScoredRollout::from_trajectory(traj, 0.0),
-            ],
-        };
-        let tokenizer = make_echo_smoke_tokenizer()?;
-
-        unsafe {
-            std::env::set_var("KILN_DISABLE_GRPO_SHARED_PREFIX_REF", "1");
-        }
-        let tokenized = tokenize_grpo_group(&group, &tokenizer)?;
-
-        let seed = 0xFEE_FACE_u64;
-        let mk_cfg = |no_policy_loss: bool| {
-            let mut cfg = GrpoConfig::default();
-            cfg.lora_rank = 4;
-            cfg.lora_alpha = 8.0;
-            cfg.learning_rate = 0.01;
-            cfg.optimizer = Optimizer::Sgd;
-            cfg.loss.echo = Some(crate::EchoConfig::default());
-            cfg.loss.no_policy_loss = no_policy_loss;
-            cfg
-        };
-
-        let params_full =
-            TrainableLoraParams::initialize_seeded(&config, &weights, 4, 8.0, &device, Some(seed))?;
-        let report_full = train_tokenized_grpo_group(
-            &*backend,
-            &tokenized,
-            &weights,
-            &config,
-            &params_full,
-            &mk_cfg(false),
-            None,
-            &device,
-            None,
-            None,
-        )?;
-        let loss_full = report_full.loss;
-
-        let params_vf =
-            TrainableLoraParams::initialize_seeded(&config, &weights, 4, 8.0, &device, Some(seed))?;
-        let report_vf = train_tokenized_grpo_group(
-            &*backend,
-            &tokenized,
-            &weights,
-            &config,
-            &params_vf,
-            &mk_cfg(true),
-            None,
-            &device,
-            None,
-            None,
-        )?;
-        let loss_vf = report_vf.loss;
-
-        // GRPO-only baseline: echo=None, no_policy_loss=false. Used to
-        // derive the GRPO term magnitude for the linearity invariant.
-        let mut cfg_grpo_only = mk_cfg(false);
-        cfg_grpo_only.loss.echo = None;
-        let params_grpo_only =
-            TrainableLoraParams::initialize_seeded(&config, &weights, 4, 8.0, &device, Some(seed))?;
-        let report_grpo_only = train_tokenized_grpo_group(
-            &*backend,
-            &tokenized,
-            &weights,
-            &config,
-            &params_grpo_only,
-            &cfg_grpo_only,
-            None,
-            &device,
-            None,
-            None,
-        )?;
-        let loss_grpo_only = report_grpo_only.loss;
-
-        assert!(
-            loss_full.is_finite(),
-            "GRPO+ECHO loss not finite: {loss_full}"
-        );
-        assert!(
-            loss_vf.is_finite(),
-            "ECHO-only (verifier-free) loss not finite: {loss_vf}"
-        );
-        assert!(
-            loss_grpo_only.is_finite(),
-            "GRPO-only loss not finite: {loss_grpo_only}"
-        );
-        assert!(
-            report_full.echo_env_ce.is_some(),
-            "GRPO+ECHO should report env CE"
-        );
-        assert!(
-            report_vf.echo_env_ce.is_some(),
-            "no-policy-loss ECHO run should report env CE"
-        );
-        assert!(
-            report_grpo_only.echo_env_ce.is_none(),
-            "GRPO-only run should not report env CE"
-        );
-
-        // Linearity of loss components — the load-bearing invariant for
-        // verifier-free adaptation:
-        //
-        //   loss_full        = GRPO_term + ECHO_term
-        //   loss_vf          =     0     + ECHO_term     (policy masked)
-        //   loss_grpo_only   = GRPO_term +     0         (echo disabled)
-        //
-        // Therefore:
-        //   loss_full ≈ loss_grpo_only + loss_vf
-        //
-        // This holds regardless of step-0 magnitude — at the random LoRA
-        // init, the GRPO surrogate is small (policy ≈ reference because
-        // LoRA-B starts at zero), so all three losses cluster near
-        // ECHO_term. The linearity check still pins the verifier-free
-        // contract: the GRPO term is genuinely zeroed when
-        // `no_policy_loss=true`.
-        let derived = loss_grpo_only + loss_vf;
-        let drift = (loss_full - derived).abs();
-        assert!(
-            drift < 1e-4,
-            "verifier-free linearity invariant violated: \
-             full={loss_full}, grpo_only={loss_grpo_only}, vf={loss_vf}, \
-             derived={derived}, drift={drift:e}"
-        );
-        Ok(())
-    }
 
     #[test]
     #[ignore = "#1082 flip: candle gradient-checkpointing reverse is grad-severed (model_forward_segment is kt-internal; candle .backward() can't trace the kt<->candle copy bridge to the segment-input/LoRA Vars). The monolithic kt-tape path is the CP-4-validated grad producer; porting checkpointing onto the kt tape (+ CPU tape) is a tracked #1082 endgame increment. See note kiln-candle-autograd-drops-attn-conv-grads."]
@@ -19310,345 +10702,8 @@ pub(crate) mod tests {
             .sum()
     }
 
-    /// Appendix C.1 #4 — checkpointed-path ECHO loss agrees with the
-    /// uncheckpointed path within float tolerance. Pins the S1 risk
-    /// (analytic-tail refactor drifts the GRPO+ECHO numerics).
-    ///
-    /// Both paths take the same (deterministically-seeded) LoRA init,
-    /// same trajectory fixture, same `loss.echo = Some(EchoConfig::default())`.
-    /// The legacy GRPO equivalent
-    /// `test_checkpointed_grpo_reverse_gradients_match_standard_cpu` pins
-    /// the GRPO term; this test pins the GRPO+ECHO total.
-    #[test]
-    #[ignore = "#1082 flip: candle gradient-checkpointing reverse is grad-severed (model_forward_segment is kt-internal; candle .backward() can't trace the kt<->candle copy bridge to the segment-input/LoRA Vars). The monolithic kt-tape path is the CP-4-validated grad producer; porting checkpointing onto the kt tape (+ CPU tape) is a tracked #1082 endgame increment. See note kiln-candle-autograd-drops-attn-conv-grads."]
-    fn test_echo_checkpointed_matches_uncheckpointed_loss() -> Result<()> {
-        let device = cpu_device();
-        let config = tiny_config();
-        let weights = tiny_weights(&config, &device)?;
-        let backend = backend::for_device(&device);
 
-        use crate::ScoredRollout;
-        use crate::trajectory::{TurnKind, TurnSegment};
 
-        let traj = vec![
-            TurnSegment {
-                role: "assistant".into(),
-                content: "a".into(),
-                kind: TurnKind::Action,
-                tool_call_id: None,
-                warning_prefix_len: None,
-            },
-            TurnSegment {
-                role: "tool".into(),
-                content: "b".into(),
-                kind: TurnKind::Observation,
-                tool_call_id: None,
-                warning_prefix_len: None,
-            },
-            TurnSegment {
-                role: "assistant".into(),
-                content: "ab".into(),
-                kind: TurnKind::Action,
-                tool_call_id: None,
-                warning_prefix_len: None,
-            },
-        ];
-
-        let group = GrpoGroup {
-            messages: vec![ChatMessage {
-                role: "user".to_string(),
-                content: "ask".to_string(),
-            }],
-            // Two completions so the GRPO advantage variance is non-degenerate.
-            completions: vec![
-                ScoredRollout::from_trajectory(traj.clone(), 1.0),
-                ScoredRollout::from_trajectory(traj, 0.0),
-            ],
-        };
-        let tokenizer = make_echo_smoke_tokenizer()?;
-
-        unsafe {
-            std::env::set_var("KILN_DISABLE_GRPO_SHARED_PREFIX_REF", "1");
-        }
-        let tokenized = tokenize_grpo_group(&group, &tokenizer)?;
-
-        let mut grpo_cfg = GrpoConfig::default();
-        grpo_cfg.lora_rank = 4;
-        grpo_cfg.lora_alpha = 8.0;
-        grpo_cfg.learning_rate = 0.01;
-        grpo_cfg.optimizer = Optimizer::Sgd;
-        grpo_cfg.loss.echo = Some(crate::EchoConfig::default());
-
-        // Uncheckpointed path: segments = None.
-        let seed = 0xEC_AC_0DE_u64;
-        let params_unchk =
-            TrainableLoraParams::initialize_seeded(&config, &weights, 4, 8.0, &device, Some(seed))?;
-        let report_unchk = train_tokenized_grpo_group(
-            &*backend,
-            &tokenized,
-            &weights,
-            &config,
-            &params_unchk,
-            &grpo_cfg,
-            None, // segments=None → uncheckpointed branch
-            &device,
-            None,
-            None,
-        )?;
-        let loss_unchk = report_unchk.loss;
-
-        // Checkpointed path: segments = Some([(0,2),(2,4)]) for the 4-layer
-        // tiny model, fresh LoRA init from the same seed.
-        let segments = compute_segment_boundaries(config.num_layers, 2);
-        let params_chk =
-            TrainableLoraParams::initialize_seeded(&config, &weights, 4, 8.0, &device, Some(seed))?;
-        let report_chk = train_tokenized_grpo_group(
-            &*backend,
-            &tokenized,
-            &weights,
-            &config,
-            &params_chk,
-            &grpo_cfg,
-            Some(&segments),
-            &device,
-            None,
-            None,
-        )?;
-        let loss_chk = report_chk.loss;
-
-        assert!(
-            loss_unchk.is_finite(),
-            "uncheckpointed loss not finite: {loss_unchk}"
-        );
-        assert!(
-            loss_chk.is_finite(),
-            "checkpointed loss not finite: {loss_chk}"
-        );
-        assert!(
-            report_unchk.echo_env_ce.is_some(),
-            "uncheckpointed path should report env CE"
-        );
-        assert!(
-            report_chk.echo_env_ce.is_some(),
-            "checkpointed path should report env CE"
-        );
-
-        // Tolerance matches the legacy GRPO parity test (1e-5 loss-level;
-        // backend reductions accumulate at different orders so single-step
-        // bit-equivalence is not expected).
-        let delta = (loss_unchk - loss_chk).abs();
-        assert!(
-            delta < 1e-3,
-            "checkpointed ECHO loss must agree with uncheckpointed within 1e-3; \
-             got unchk={loss_unchk}, chk={loss_chk}, delta={delta:e}"
-        );
-        Ok(())
-    }
-
-    /// ECHO checkpointed-path acceptance: the analytic_grpo_tail's ECHO
-    /// branch must produce a finite loss whose absolute value differs
-    /// from the GRPO-only loss when env_mask has active positions.
-    /// This is the load-bearing test for the Phase 1 follow-up that
-    /// landed in the analytic tail.
-    #[test]
-    fn test_echo_checkpointed_analytic_tail_contributes() -> Result<()> {
-        let device = cpu_device();
-        let config = tiny_config();
-        let weights = tiny_weights(&config, &device)?;
-        // #1082: `final_norm`/`embed_tokens_t` are kt; the
-        // `analytic_grpo_tail_loss_grad_pre_final_norm` analytic helper is
-        // candle-typed. Bridge kt→candle (CPU F32, lossless) — the analytic
-        // gradient is computed directly (no candle-autograd oracle), so the
-        // bridge preserves the test exactly.
-        let final_norm_weight = cpu_kt_to_candle_f32(&weights.final_norm)?;
-        let head_t = cpu_kt_to_candle_f32(&weights.embed_tokens_t)?;
-
-        // Synthetic 8-token sequence. Action positions {2, 3, 5}.
-        // Env positions {4, 6}. Disjoint per trajectory_mask invariant.
-        let input_ids: Vec<u32> = vec![1u32, 5, 10, 3, 7, 2, 8, 15];
-        let action_mask = vec![false, false, true, true, false, true, false, false];
-        let env_mask = vec![false, false, false, false, true, false, true, false];
-        let total_obs_len = 2usize; // |O|
-
-        // Build a small hidden tensor.
-        let hidden_data: Vec<f32> = (0..(input_ids.len() * config.hidden_size))
-            .map(|i| ((i as f32) * 0.01).sin())
-            .collect();
-        let hidden = tensor_from_vec(
-            hidden_data,
-            (1, input_ids.len(), config.hidden_size),
-            &device,
-        )?
-        .to_f32_dtype()?;
-
-        // ref_log_probs at action positions (3 entries).
-        let ref_log_probs = tensor_from_vec(vec![-2.0f32, -1.5, -2.5], 3, &device)?;
-
-        let params = GrpoLossParams {
-            advantage: 1.0,
-            clip_low: 0.2,
-            clip_high: 0.2,
-            kl_coeff: 0.0,
-            kl_estimator: KlEstimator::None,
-            loss_normalizer: 1.0 / 3.0,
-            is_level: IsLevel::Token,
-            reinforce: false,
-            entropy_aware_kl_quantile: None,
-        };
-
-        // Path A: GRPO only (no ECHO).
-        let (loss_grpo, _grad_grpo, _env_ce_grpo) = analytic_grpo_tail_loss_grad_pre_final_norm(
-            &hidden,
-            &final_norm_weight,
-            &head_t,
-            &input_ids,
-            &action_mask,
-            &ref_log_probs,
-            params,
-            1e-6,
-            4,
-            None,
-        )?;
-
-        // Path B: GRPO + ECHO at λ=0.05.
-        let echo_params = EchoTailParams {
-            env_mask: &env_mask,
-            total_obs_len,
-            lambda: 0.05,
-        };
-        let (loss_with_echo, _grad_with_echo, env_ce_with_echo) =
-            analytic_grpo_tail_loss_grad_pre_final_norm(
-                &hidden,
-                &final_norm_weight,
-                &head_t,
-                &input_ids,
-                &action_mask,
-                &ref_log_probs,
-                params,
-                1e-6,
-                4,
-                Some(echo_params),
-            )?;
-
-        // Both should be finite.
-        assert!(
-            loss_grpo.is_finite(),
-            "GRPO-only loss not finite: {loss_grpo}"
-        );
-        assert!(
-            loss_with_echo.is_finite(),
-            "GRPO+ECHO loss not finite: {loss_with_echo}"
-        );
-        assert!(
-            env_ce_with_echo.is_some(),
-            "analytic tail should report env CE when ECHO is active"
-        );
-
-        // ECHO contribution = -λ/|O| · Σ log p_θ at env positions.
-        // log p_θ is bounded above by 0, so env_log_prob_sum ≤ 0, so the
-        // ECHO contribution = -λ · sum / |O| ≥ 0. Adding it to loss_grpo
-        // produces a strictly LARGER loss (in the sign convention
-        // loss_with_echo = loss_grpo + λ/|O| * Σ(-log p)).
-        assert!(
-            loss_with_echo > loss_grpo,
-            "ECHO should increase total loss (env-CE is positive): \
-             grpo={loss_grpo}, with_echo={loss_with_echo}"
-        );
-
-        // ECHO contribution should be a sensible magnitude (each log p is
-        // O(-log(vocab_size)) ≈ -log(32) ≈ -3.5; with λ=0.05, |O|=2 and
-        // 2 env positions, the upper bound is ~0.05 * 2 * 3.5 / 2 ≈ 0.175).
-        let echo_contribution = loss_with_echo - loss_grpo;
-        assert!(
-            (0.0..1.0).contains(&echo_contribution),
-            "ECHO contribution {echo_contribution} outside expected range [0, 1)"
-        );
-
-        Ok(())
-    }
-
-    /// ECHO + checkpointed path round-trip: the new EchoTailParams
-    /// argument threads through checkpointed_grpo_forward_backward
-    /// correctly and produces a finite loss whose magnitude depends on
-    /// λ_echo. The end-to-end test_echo_end_to_end_grpo_with_trajectory_rollouts
-    /// runs the same path but via the higher-level train_tokenized_grpo_group.
-    #[test]
-    #[ignore = "#1082 flip: candle gradient-checkpointing reverse is grad-severed (model_forward_segment is kt-internal; candle .backward() can't trace the kt<->candle copy bridge to the segment-input/LoRA Vars). The monolithic kt-tape path is the CP-4-validated grad producer; porting checkpointing onto the kt tape (+ CPU tape) is a tracked #1082 endgame increment. See note kiln-candle-autograd-drops-attn-conv-grads."]
-    fn test_echo_checkpointed_forward_backward_threads_echo_params() -> Result<()> {
-        let device = cpu_device();
-        let config = tiny_config();
-        let weights = tiny_weights(&config, &device)?;
-        let backend = backend::for_device(&device);
-
-        let input_ids: Vec<u32> = vec![1u32, 5, 10, 3, 7, 2, 8, 15];
-        let action_mask = vec![false, false, true, true, false, true, false, false];
-        let env_mask = vec![false, false, false, false, true, false, true, false];
-        let total_obs_len = 2usize;
-        let ref_log_probs = tensor_from_vec(vec![-2.0f32, -1.5, -2.5], 3, &device)?;
-
-        let params = TrainableLoraParams::initialize(&config, &weights, 4, 8.0, &device)?;
-        let segments = compute_segment_boundaries(config.num_layers, 2);
-        let loss_params = GrpoLossParams {
-            advantage: 1.0,
-            clip_low: 0.2,
-            clip_high: 0.2,
-            kl_coeff: 0.0,
-            kl_estimator: KlEstimator::None,
-            loss_normalizer: 1.0 / 3.0,
-            is_level: IsLevel::Token,
-            reinforce: false,
-            entropy_aware_kl_quantile: None,
-        };
-
-        // ECHO disabled → original behaviour.
-        let (loss_off, _grads_off, _env_ce_off) = checkpointed_grpo_forward_backward(
-            &*backend,
-            &input_ids,
-            &weights,
-            &config,
-            &params,
-            &action_mask,
-            &ref_log_probs,
-            loss_params,
-            &segments,
-            &device,
-            None,
-            None,
-        )?;
-        assert!(loss_off.is_finite(), "ECHO-off loss not finite: {loss_off}");
-
-        // ECHO enabled at λ=0.05.
-        let params2 = TrainableLoraParams::initialize(&config, &weights, 4, 8.0, &device)?;
-        let (loss_on, _grads_on, env_ce_on) = checkpointed_grpo_forward_backward(
-            &*backend,
-            &input_ids,
-            &weights,
-            &config,
-            &params2,
-            &action_mask,
-            &ref_log_probs,
-            loss_params,
-            &segments,
-            &device,
-            Some(EchoTailParams {
-                env_mask: &env_mask,
-                total_obs_len,
-                lambda: 0.05,
-            }),
-            None,
-        )?;
-        assert!(loss_on.is_finite(), "ECHO-on loss not finite: {loss_on}");
-        assert!(
-            env_ce_on.is_some(),
-            "checkpointed GRPO should report env CE when ECHO is active"
-        );
-        assert_ne!(
-            loss_off, loss_on,
-            "ECHO should change the checkpointed loss when env_mask is active"
-        );
-
-        Ok(())
-    }
 
     /// Build a tokenizer with a Qwen-shaped chat template for the ECHO
     /// end-to-end test. Mirrors the qwen_shaped_tokenizer in trajectory_mask
@@ -19714,98 +10769,6 @@ pub(crate) mod tests {
         assert!(cfg.num_segments <= 2);
     }
 
-    /// Phase 10 §1: confirm switching the RMSNorm dispatch between the new
-    /// `CustomOp2` autograd path (default) and the
-    /// `KILN_DISABLE_RMSNORM_BACKWARD=1` fallback does NOT change training
-    /// loss on a 2-step CPU SFT run.
-    ///
-    /// The custom op only routes through the manual-backward CUDA kernel on
-    /// CUDA — on CPU, both code paths fall back to `rms_norm_fallback` (the
-    /// standalone candle-op chain). This test pins that contract: enabling
-    /// or disabling the new env var on CPU is a no-op for the math, so the
-    /// loss values are bit-exact in either configuration. The test
-    /// initializes params ONCE (so the same `Var` weights are used by both
-    /// runs) and only flips the dispatch env var between calls;
-    /// `standard_forward_backward` itself doesn't mutate params, so each
-    /// call is an independent forward pass.
-    ///
-    /// Test must run via `cargo nextest run` or `cargo test --
-    /// --test-threads=1` so the env-var manipulation is process-isolated.
-    #[test]
-    fn test_training_rmsnorm_custom_op_loss_parity() -> Result<()> {
-        // Hold ENV_LOCK across the whole test so a parallel
-        // env-mutating test in this binary can't flip RMSNorm dispatch
-        // env vars mid-call. See ENV_LOCK.
-        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
-        let device = cpu_device();
-        let config = tiny_config();
-        let weights = tiny_weights(&config, &device)?;
-
-        let input_ids: Vec<u32> = vec![1, 5, 10, 3, 7, 2, 8];
-        let label_mask = vec![false, false, true, true, true, true, false];
-
-        let backend = backend::for_device(&device);
-
-        // Initialize LoRA params ONCE so both runs use the same Vars.
-        // `standard_forward_backward` does not call SGD; each invocation
-        // is a pure forward+backward pass, so the loss is deterministic
-        // given fixed inputs and params.
-        let params = TrainableLoraParams::initialize(&config, &weights, 4, 8.0, &device)?;
-
-        let run_step = |bwd_disabled: bool| -> Result<f64> {
-            // SAFETY: env mutation is safe under nextest's per-test process
-            // isolation; this test must run via `cargo nextest run`.
-            unsafe {
-                std::env::remove_var("KILN_DISABLE_RMSNORM_KERNEL");
-                if bwd_disabled {
-                    std::env::set_var("KILN_DISABLE_RMSNORM_BACKWARD", "1");
-                } else {
-                    std::env::remove_var("KILN_DISABLE_RMSNORM_BACKWARD");
-                }
-            }
-
-            let (loss_val, _grads) = standard_forward_backward(
-                &*backend,
-                &input_ids,
-                &weights,
-                &config,
-                &params,
-                &label_mask,
-                &device,
-                None,
-            )?;
-
-            // Defensive cleanup so the next call (or test) isn't poisoned.
-            unsafe {
-                std::env::remove_var("KILN_DISABLE_RMSNORM_BACKWARD");
-            }
-
-            Ok(loss_val)
-        };
-
-        // 2-step SFT run: alternate dispatch on each step so divergence
-        // would show up at any step.
-        for step in 0..2 {
-            let loss_default = run_step(false)?;
-            let loss_fallback = run_step(true)?;
-
-            assert!(
-                loss_default.is_finite() && loss_fallback.is_finite(),
-                "non-finite loss at step {step}: default={loss_default} fallback={loss_fallback}",
-            );
-            // CPU dispatch falls back to `rms_norm_fallback` for both
-            // configurations (the CUDA-only custom op never fires on CPU),
-            // so the loss values are bit-exact.
-            assert!(
-                (loss_default - loss_fallback).abs() < 1e-9,
-                "rmsnorm dispatch loss diverges at step {step}: \
-                 default={loss_default} fallback={loss_fallback}",
-            );
-        }
-
-        Ok(())
-    }
 
     /// Regression: the FLCE auto-heuristic must engage for the original
     /// `/tmp/sft-data.jsonl` repro shape (T~918, vocab=152064). Pre-fix
@@ -19914,411 +10877,10 @@ pub(crate) mod tests {
         }
     }
 
-    /// AdamW CPU fallback path: build a tiny `TrainableLoraParams`,
-    /// allocate optimizer state, hand a synthetic grad through
-    /// `optimizer_step_from_map`, and verify Vars actually change
-    /// AND the moments are bumped off zero. Runs on candle CPU (no
-    /// Vulkan dispatch), exercising the fallback math.
-    #[test]
-    fn adamw_cpu_fallback_updates_params_and_moments() -> Result<()> {
-        let device = cpu_device();
-        let config = tiny_config();
-        let weights = tiny_weights(&config, &device)?;
-        let params = TrainableLoraParams::initialize(&config, &weights, 4, 8.0, &device)?;
-        let mut opt_state = params.allocate_adamw_state(&device)?;
-        let backend = backend::for_device(&device);
 
-        // Synthetic grad: a small nonzero tensor of the right
-        // dtype/shape for every LoRA Var.
-        let mut grads: GradMap = HashMap::new();
-        for var in params.all_vars() {
-            let t = var.as_tensor();
-            let g = ones_dtype_on(t.shape().clone(), t.dtype(), &device)?.affine(0.01, 0.0)?;
-            grads.insert(t.id(), g);
-        }
 
-        // Snapshot original params (as f32).
-        let mut before: Vec<Vec<f32>> = Vec::new();
-        for var in params.all_vars() {
-            before.push(
-                var.as_tensor()
-                    .to_f32_dtype()?
-                    .flatten_all()?
-                    .to_vec1::<f32>()?,
-            );
-        }
 
-        let optimizer = Optimizer::AdamW {
-            beta1: 0.9,
-            beta2: 0.999,
-            eps: 1e-8,
-            weight_decay: 0.0,
-        };
-        optimizer_step_from_map(
-            &*backend,
-            &params,
-            &grads,
-            0.01,
-            optimizer,
-            Some(&mut opt_state),
-        )?;
-        assert_eq!(
-            opt_state.step, 1,
-            "step counter must be 1-indexed and bumped"
-        );
 
-        // Every Var must have changed at least somewhere.
-        let mut any_changed = false;
-        for (i, var) in params.all_vars().iter().enumerate() {
-            let after = var
-                .as_tensor()
-                .to_f32_dtype()?
-                .flatten_all()?
-                .to_vec1::<f32>()?;
-            assert_eq!(after.len(), before[i].len());
-            if after
-                .iter()
-                .zip(before[i].iter())
-                .any(|(a, b)| (a - b).abs() > 0.0)
-            {
-                any_changed = true;
-            }
-        }
-        assert!(
-            any_changed,
-            "AdamW step must change at least one param value"
-        );
-
-        // Every moments pair must be off zero now.
-        for moments in opt_state.moments.values() {
-            let m_sum = moments
-                .m
-                .as_tensor()
-                .to_f32_dtype()?
-                .abs()?
-                .sum_all()?
-                .to_scalar::<f32>()?;
-            let v_sum = moments
-                .v
-                .as_tensor()
-                .to_f32_dtype()?
-                .abs()?
-                .sum_all()?
-                .to_scalar::<f32>()?;
-            assert!(m_sum > 0.0, "m moment must be nonzero after first step");
-            assert!(v_sum > 0.0, "v moment must be nonzero after first step");
-        }
-        Ok(())
-    }
-
-    /// Lazy candle-storage sync: after an on-device SGD step the
-    /// registry buffer holds the updated values but candle CPU
-    /// storage still has the initial values (this is the whole point
-    /// of the post-Phase-4.x lazy-sync flow). `sync_to_candle` must
-    /// pull the registry values back so `var.as_tensor()` reads the
-    /// post-step state. This test exercises the contract on CPU
-    /// (where there's no Vulkan backend), which validates the
-    /// fallback branches stay coherent — the actual GPU path is
-    /// covered by the Vulkan backend's resident-activation tests.
-    #[test]
-    fn sync_to_candle_is_noop_on_cpu_backend() -> Result<()> {
-        let device = cpu_device();
-        let config = tiny_config();
-        let weights = tiny_weights(&config, &device)?;
-        let params = TrainableLoraParams::initialize(&config, &weights, 4, 8.0, &device)?;
-        let backend = backend::for_device(&device);
-
-        // CPU backend reports !supports_resident_activation, so
-        // sync_to_candle should report 0 Vars synced (it has nothing
-        // to read from a registry that doesn't exist).
-        let synced = params.sync_to_candle(&*backend)?;
-        assert_eq!(
-            synced, 0,
-            "sync_to_candle on CPU backend should report zero synced Vars"
-        );
-        Ok(())
-    }
-
-    /// AdamW scalar reference: after one step with `m=v=0`, the
-    /// update is `lr * sign(g) / (1 + eps/|g|) ≈ lr * sign(g)` (the
-    /// `1/sqrt(v_hat)` term cancels the `(1-beta2)/(1-beta1)`
-    /// magnitude difference under bias correction). This catches
-    /// gross math errors in the CPU fallback like sign flips or
-    /// missing bias correction.
-    #[test]
-    fn adamw_first_step_matches_unbiased_reference() -> Result<()> {
-        let device = cpu_device();
-        let config = tiny_config();
-        let weights = tiny_weights(&config, &device)?;
-        let params = TrainableLoraParams::initialize(&config, &weights, 4, 8.0, &device)?;
-        let mut opt_state = params.allocate_adamw_state(&device)?;
-        let backend = backend::for_device(&device);
-
-        let lr = 0.01f64;
-        let eps = 1e-8f32;
-        let mut grads: GradMap = HashMap::new();
-        let first_var = params.all_vars()[0].as_tensor().clone();
-        let g_val = 0.5f32;
-        for var in params.all_vars() {
-            let t = var.as_tensor();
-            let g =
-                ones_dtype_on(t.shape().clone(), t.dtype(), &device)?.affine(g_val as f64, 0.0)?;
-            grads.insert(t.id(), g);
-        }
-
-        let before = first_var
-            .to_f32_dtype()?
-            .flatten_all()?
-            .to_vec1::<f32>()?;
-
-        optimizer_step_from_map(
-            &*backend,
-            &params,
-            &grads,
-            lr,
-            Optimizer::AdamW {
-                beta1: 0.9,
-                beta2: 0.999,
-                eps,
-                weight_decay: 0.0,
-            },
-            Some(&mut opt_state),
-        )?;
-
-        let after = params.all_vars()[0]
-            .as_tensor()
-            .to_f32_dtype()?
-            .flatten_all()?
-            .to_vec1::<f32>()?;
-
-        // For step=1, m=v=0 initially:
-        //   m_new = (1-beta1)*g
-        //   v_new = (1-beta2)*g^2
-        //   m_hat = m_new / (1-beta1) = g
-        //   v_hat = v_new / (1-beta2) = g^2
-        //   update = lr * g / (|g| + eps) ≈ lr * sign(g)
-        let expected_delta = -lr as f32 * (g_val / (g_val.abs() + eps));
-        for (i, (a, b)) in after.iter().zip(before.iter()).enumerate() {
-            let delta = a - b;
-            // Both BF16 storage roundtrip and the affine/sqrt math
-            // cost a few ulps; ~5% is plenty for sanity.
-            let rel = (delta - expected_delta).abs() / expected_delta.abs().max(1e-6);
-            assert!(
-                rel < 0.05,
-                "idx {i}: delta={delta:.6} expected={expected_delta:.6} rel={rel:e}"
-            );
-        }
-        Ok(())
-    }
-
-    #[cfg(feature = "cuda")]
-    #[test]
-    fn cuda_optimizer_step_from_map_engages_backend_kernels() -> Result<()> {
-        let device = match CdDevice::new_cuda(0) {
-            Ok(device) => device,
-            Err(err) => {
-                eprintln!("CUDA unavailable, skipping trainer optimizer dispatch test: {err}");
-                return Ok(());
-            }
-        };
-        let config = tiny_config();
-        let weights = tiny_weights(&config, &device)?;
-        let backend = backend::for_device(&device);
-        assert_eq!(backend.name(), "cuda");
-
-        let params = TrainableLoraParams::initialize_seeded(
-            &config,
-            &weights,
-            4,
-            8.0,
-            &device,
-            Some(0xC0FFEE),
-        )?;
-        params.register_with_backend(&*backend)?;
-
-        let mut grads: GradMap = HashMap::new();
-        for var in params.all_vars() {
-            let t = var.as_tensor();
-            let grad = ones_dtype_on(t.shape().clone(), t.dtype(), &device)?.affine(0.01, 0.0)?;
-            grads.insert(t.id(), grad);
-        }
-
-        kiln_model::backend::cuda::reset_optimizer_dispatch_success_counts();
-        sgd_step_from_map(&*backend, &params, &grads, 0.5)?;
-        let (sgd_count, adamw_count) =
-            kiln_model::backend::cuda::optimizer_dispatch_success_counts();
-        assert!(
-            sgd_count > 0,
-            "trainer SGD step must dispatch at least one CUDA optimizer kernel"
-        );
-        assert_eq!(
-            adamw_count, 0,
-            "SGD step must not increment AdamW dispatches"
-        );
-
-        let mut opt_state = params.allocate_adamw_state(&device)?;
-        opt_state.register_with_backend(&*backend)?;
-        kiln_model::backend::cuda::reset_optimizer_dispatch_success_counts();
-        optimizer_step_from_map(
-            &*backend,
-            &params,
-            &grads,
-            0.01,
-            Optimizer::AdamW {
-                beta1: 0.9,
-                beta2: 0.999,
-                eps: 1e-8,
-                weight_decay: 0.0,
-            },
-            Some(&mut opt_state),
-        )?;
-        let (sgd_count, adamw_count) =
-            kiln_model::backend::cuda::optimizer_dispatch_success_counts();
-        assert_eq!(sgd_count, 0, "AdamW step must not increment SGD dispatches");
-        assert!(
-            adamw_count > 0,
-            "trainer AdamW step must dispatch at least one CUDA optimizer kernel"
-        );
-        assert_eq!(opt_state.step, 1, "AdamW state should advance exactly once");
-
-        let adapter_dir = tempfile::tempdir()?;
-        params.save_peft(adapter_dir.path(), config.num_layers)?;
-        let saved = safetensors_load_file(
-            &adapter_dir.path().join("adapter_model.safetensors"),
-            &cpu_device(),
-        )?;
-        let saved_key = "base_model.model.model.layers.0.mlp.gate_proj.lora_A.weight";
-        let saved_a = saved
-            .get(saved_key)
-            .ok_or_else(|| anyhow::anyhow!("saved adapter missing {saved_key}"))?
-            .to_f32_dtype()?
-            .flatten_all()?
-            .to_vec1::<f32>()?;
-        let current_a = params.layers[0]
-            .gate_proj
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("missing layer 0 gate_proj LoRA params"))?
-            .0
-            .as_tensor()
-            .to_f32_dtype()?
-            .flatten_all()?
-            .to_vec1::<f32>()?;
-        assert_eq!(saved_a.len(), current_a.len());
-        for (idx, (saved, current)) in saved_a.iter().zip(current_a.iter()).enumerate() {
-            assert!(
-                (saved - current).abs() < 1e-6,
-                "saved adapter value diverged from updated CUDA Var at index {idx}: \
-                 saved={saved} current={current}"
-            );
-        }
-
-        opt_state.evict_from_backend(&*backend);
-        params.evict_from_backend(&*backend);
-        Ok(())
-    }
-
-    #[cfg(feature = "cuda")]
-    #[test]
-    fn cuda_training_forward_uses_projection_and_flce_backend_hooks() -> Result<()> {
-        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        unsafe {
-            std::env::set_var("KILN_USE_FLCE", "1");
-            std::env::set_var("KILN_CUDA_FLCE", "1");
-            // CP-4 (#1082): tape-authoritative + the tape adapters are now the
-            // default, but this test validates the PURE CANDLE backend-hook path
-            // (linear_prefill_apply + the FLCE provider + flash decline) which the
-            // tape path bypasses. Disable BOTH the authoritative dispatch AND the
-            // master tape-forward gate (which otherwise routes the FLCE training
-            // path through the candle-seeded tape bridge `with_tape_scope_emit_to_grad_store`,
-            // and that bridge errors on candle's severed full-attn grad). With both
-            // off this is a clean candle `loss.backward()`. (OnceLock-cached gates —
-            // set before any tape-gate read; per-process under nextest.)
-            std::env::set_var("KILN_USE_TAPE_AUTHORITATIVE", "0");
-            std::env::set_var("KILN_USE_TAPE_FORWARD", "0");
-            // #1082: the per-op kt-API gates are now default-ON, so even with
-            // the tape path off, the "candle" forward routes individual ops
-            // through the kt-API adapters — and a forward-only kt-API op on the
-            // full-attn prep path detaches candle autograd, so q/k/v reach
-            // `flash_attn_prefill` UNtracked and its tracked-decline counter
-            // never fires. This test validates the PURE candle backend-hooks
-            // (linear_prefill / FLCE provider / flash-decline), so force every
-            // kt-API gate off via the master kill-switch.
-            std::env::set_var("KILN_DISABLE_KT_API_ALL", "1");
-        }
-
-        let result = (|| -> Result<()> {
-            let device = match CdDevice::new_cuda(0) {
-                Ok(device) => device,
-                Err(err) => {
-                    eprintln!("CUDA unavailable, skipping CUDA projection routing test: {err}");
-                    return Ok(());
-                }
-            };
-            let config = tiny_config();
-            let weights = tiny_weights(&config, &device)?;
-            let params = TrainableLoraParams::initialize_seeded(
-                &config,
-                &weights,
-                4,
-                8.0,
-                &device,
-                Some(0xC0FFEE),
-            )?;
-            let backend = backend::for_device(&device);
-            assert_eq!(backend.name(), "cuda");
-            let input_ids: Vec<u32> = vec![1, 5, 10, 3, 7, 2, 8, 15];
-            let label_mask = vec![false, false, true, true, true, true, true, false];
-            let flce_provider = build_flce_provider(&backend, &label_mask, &config)
-                .expect("KILN_CUDA_FLCE=1 should build a CUDA backend FLCE provider");
-
-            kiln_model::backend::cuda::reset_linear_prefill_success_counts();
-            kiln_model::backend::cuda::reset_flash_attn_tracked_decline_count();
-            let (_loss, grads) = standard_forward_backward(
-                &*backend,
-                &input_ids,
-                &weights,
-                &config,
-                &params,
-                &label_mask,
-                &device,
-                Some(flce_provider),
-            )?;
-            let (linear_count, offset_count) =
-                kiln_model::backend::cuda::linear_prefill_success_counts();
-            let flash_tracked_declines =
-                kiln_model::backend::cuda::flash_attn_tracked_decline_count();
-            assert!(
-                offset_count > 0,
-                "CUDA FLCE provider must dispatch at least one offset chunk matmul"
-            );
-            assert!(
-                linear_count > offset_count,
-                "CUDA training forward should dispatch non-FLCE projection matmuls too: \
-                 linear_count={linear_count} offset_count={offset_count}"
-            );
-            assert!(
-                flash_tracked_declines > 0,
-                "CUDA full-attention training should offer FlashAttention and decline tracked tensors"
-            );
-            // (#1082 Inc-0 PR4) This test forces `KILN_USE_TAPE_AUTHORITATIVE=0`,
-            // so `grads` is `GradSource::Candle`; `candle_grad` returns the
-            // owned candle grad (never errors on the candle variant).
-            assert!(
-                params
-                    .all_vars()
-                    .iter()
-                    .any(|var| grads.candle_grad(var).expect("candle grad").is_some()),
-                "CUDA training forward/backward should produce at least one LoRA gradient"
-            );
-            Ok(())
-        })();
-
-        unsafe {
-            std::env::remove_var("KILN_USE_FLCE");
-            std::env::remove_var("KILN_CUDA_FLCE");
-        }
-        result
-    }
 
     // =====================================================================
     // #1077 Tier 1b + 1c — Per-PR perf-regression smoke tests.

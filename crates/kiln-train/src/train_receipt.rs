@@ -11,19 +11,18 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result};
-// NOTE(#1082): Dropped every direct `candle_core::` reference in this
-// file. The 3 remaining candle uses (the `&Tensor` parameter on
-// `tensor_l2_norm`, the `DType::F32` cast inside that helper, and the
-// `Tensor::from_vec`/`Device::Cpu` pair in the candle-parity test) now
-// go through the per-crate candle facade `crate::cd_types`. The
-// aliases are transparent at the ABI boundary so the public surface is
-// unchanged. This drops train_receipt.rs `candle_core::` ref count from
-// 8 → 0 as part of the per-file path-collapse pass in full candle
-// removal (#1082).
-// The `tensor_l2_norm(&Tensor)` helper itself still exists because
-// `trainer.rs` calls it on candle-autograd gradients; that caller is
-// what blocks the candle dep from leaving this crate.
-use crate::cd_types::{DType, Tensor};
+// NOTE(#1082 Wave E4): the `cd_types` facade now resolves bare
+// `Tensor` / `DType` to **kt** (matching the workspace post-flip
+// convention). The only candle uses left in this file are the
+// `tensor_l2_norm(&candle_core::Tensor)` helper and its candle-parity
+// test; both are now written as explicit `candle_core::*` paths (a
+// candle island), since the helper's sole live caller — `trainer.rs`'s
+// candle-autograd gradient-norm fallback at the `.backward()` boundary —
+// is being migrated to `tensor_l2_norm_kt` in Wave E1. The production
+// adapter-norm path already uses the kt helper
+// (`tensor_l2_norm_kt` via `kt::safetensors::load_cpu`). When the last
+// candle-grad caller flips, this island and the candle dep leave the
+// crate.
 use kiln_core::config::ModelConfig;
 use kiln_core::config_hashes::ConfigHashes;
 use kiln_core::tokenizer::KilnTokenizer;
@@ -1554,9 +1553,13 @@ fn population_variance(values: &[f64]) -> f64 {
         / values.len() as f64
 }
 
-pub(crate) fn tensor_l2_norm(tensor: &Tensor) -> Result<f64> {
+// (#1082) Candle island — `trainer.rs`'s candle-autograd gradient-norm
+// fallback (`.backward()` boundary, trainer.rs:~5431) still hands a
+// candle gradient here. Pinned to explicit `candle_core::*` until Wave
+// E1 flips that caller to `tensor_l2_norm_kt`.
+pub(crate) fn tensor_l2_norm(tensor: &candle_core::Tensor) -> Result<f64> {
     let sum_sq = tensor
-        .to_dtype(DType::F32)?
+        .to_dtype(candle_core::DType::F32)?
         .sqr()?
         .sum_all()?
         .to_scalar::<f32>()?;
@@ -2056,7 +2059,7 @@ mod tests {
         .sqrt();
 
         let cand =
-            Tensor::from_vec(xs.clone(), (xs.len(),), &crate::cd_types::CdDevice::Cpu)?;
+            candle_core::Tensor::from_vec(xs.clone(), (xs.len(),), &candle_core::Device::Cpu)?;
         let cand_norm = tensor_l2_norm(&cand)?;
         assert!(
             (cand_norm - expected).abs() < 1e-5,

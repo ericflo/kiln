@@ -79,10 +79,13 @@ pub mod metal;
 #[cfg(feature = "vulkan")]
 pub mod vulkan;
 
-#[cfg(feature = "vulkan")]
-pub mod vulkan_linear_op;
-#[cfg(feature = "vulkan")]
-pub mod vulkan_lora_op;
+// (#1082) backend::vulkan_linear_op + vulkan_lora_op removed: those
+// `candle_core::CustomOp1` / `CustomOp3` wrappers existed only to wire the
+// Vulkan matmul / LoRA-delta dispatch into candle's `.backward()`. With the
+// kt autograd tape (`kiln_autograd`) as the sole grad producer, the candle
+// autograd islands are dead — `VulkanBackend::{linear_prefill_apply,
+// lora_delta_resident}` now decline so the kt-recorded forward path owns the
+// projection / LoRA matmuls and the tape produces their gradients.
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct TrainingCapabilities {
@@ -382,7 +385,7 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     /// Phase 3.2 lands, `checkpointed_forward_backward` calls this for
     /// each segment-output tensor so the recompute pass can read the
     /// boundary back from device memory instead of the candle CPU mirror.
-    fn register_resident_activation(&self, _tensor: &candle_core::Tensor) -> Result<()> {
+    fn register_resident_activation(&self, _tensor: &kiln_tensor::Tensor) -> Result<()> {
         Ok(())
     }
 
@@ -390,18 +393,18 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     /// registry. Caller invokes this when the autograd pass no longer
     /// needs the tensor (e.g. after a segment's backward completes).
     /// No-op default.
-    fn evict_resident_activation(&self, _tensor: &candle_core::Tensor) {}
+    fn evict_resident_activation(&self, _tensor: &kiln_tensor::Tensor) {}
 
     /// Re-upload the tensor's current bytes into its registry buffer
-    /// (if registered). Caller invokes this when the candle CPU
+    /// (if registered). Caller invokes this when the kt master
     /// storage has been mutated outside of the registry — e.g. after
-    /// the candle-CPU SGD step writes a new value to a registered
-    /// LoRA Var. Without this, `lora_delta_resident` and friends
+    /// the optimizer step writes a new value to a registered
+    /// LoRA parameter. Without this, `lora_delta_resident` and friends
     /// would keep reading the original init bytes from the buffer.
     ///
     /// No-op default; backends without a registry have nothing to
     /// keep in sync.
-    fn update_resident_activation(&self, _tensor: &candle_core::Tensor) -> Result<()> {
+    fn update_resident_activation(&self, _tensor: &kiln_tensor::Tensor) -> Result<()> {
         Ok(())
     }
 
@@ -410,27 +413,27 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     /// resident fast path and the legacy CPU-roundtrip path. False by
     /// default so callers without registry support continue to use the
     /// legacy path.
-    fn has_resident_activation(&self, _tensor: &candle_core::Tensor) -> bool {
+    fn has_resident_activation(&self, _tensor: &kiln_tensor::Tensor) -> bool {
         false
     }
 
     /// Read a previously-registered activation back from device into
-    /// a fresh CPU `candle_core::Tensor` with the given shape and dtype. Returns
+    /// a fresh CPU `kiln_tensor::Tensor` with the given shape and dtype. Returns
     /// `Ok(None)` when the activation isn't resident — caller should
     /// then use whatever CPU-side storage they retained originally.
     ///
     /// Phase 3.2 of the residency plan: pairs with
     /// `register_resident_activation` to let `checkpointed_forward_backward`
-    /// drop the candle CPU mirror after registering, then re-materialise
+    /// drop the CPU mirror after registering, then re-materialise
     /// only when the recompute pass actually needs the boundary.
     /// Today's no-op default returns `Ok(None)` so callers without
     /// registry support fall through to the legacy code path.
     fn resolve_resident_activation(
         &self,
-        _tensor: &candle_core::Tensor,
+        _tensor: &kiln_tensor::Tensor,
         _shape: &[usize],
-        _dtype: candle_core::DType,
-    ) -> Result<Option<candle_core::Tensor>> {
+        _dtype: kiln_tensor::DType,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
         Ok(None)
     }
 
@@ -444,7 +447,7 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     /// activations first (Phase 3.1 hooks). The default implementation
     /// is a no-op returning false; the Vulkan backend's impl will land
     /// alongside Phase 4.1's resident `TrainableLoraParams`.
-    fn dispatch_sgd_step(&self, _param: &candle_core::Tensor, _grad: &candle_core::Tensor, _lr: f32) -> Result<bool> {
+    fn dispatch_sgd_step(&self, _param: &kiln_tensor::Tensor, _grad: &kiln_tensor::Tensor, _lr: f32) -> Result<bool> {
         Ok(false)
     }
 
@@ -463,10 +466,10 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     #[allow(clippy::too_many_arguments)]
     fn dispatch_adamw_step(
         &self,
-        _param: &candle_core::Tensor,
-        _grad: &candle_core::Tensor,
-        _first_moment: &candle_core::Tensor,
-        _second_moment: &candle_core::Tensor,
+        _param: &kiln_tensor::Tensor,
+        _grad: &kiln_tensor::Tensor,
+        _first_moment: &kiln_tensor::Tensor,
+        _second_moment: &kiln_tensor::Tensor,
         _lr: f32,
         _beta1: f32,
         _beta2: f32,
@@ -487,17 +490,17 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     /// `compute_lora_delta` path.
     ///
     /// Reading A and B from the registry means the LoRA forward
-    /// path no longer reads `var.as_tensor()`'s candle CPU storage
+    /// path no longer reads the kt master's CPU storage
     /// for data — only for shape metadata. Phase 4.2's
     /// `dispatch_sgd_step` can then write to the same registry
-    /// buffers in place without a sync-back to candle storage.
+    /// buffers in place without a sync-back to host storage.
     fn lora_delta_resident(
         &self,
-        _x: &candle_core::Tensor,
-        _a: &candle_core::Tensor,
-        _b: &candle_core::Tensor,
+        _x: &kiln_tensor::Tensor,
+        _a: &kiln_tensor::Tensor,
+        _b: &kiln_tensor::Tensor,
         _scale: f32,
-    ) -> Result<Option<candle_core::Tensor>> {
+    ) -> Result<Option<kiln_tensor::Tensor>> {
         Ok(None)
     }
 
@@ -919,18 +922,18 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     /// and the output shape is `[batch, seq_len, out_dim]`. Backends should
     /// return `Ok(None)` for unsupported shapes, dtypes, LoRA paths, or debug
     /// modes.
-    fn linear_decode(&self, _x: &candle_core::Tensor, _weight_t: &candle_core::Tensor) -> Result<Option<candle_core::Tensor>> {
+    fn linear_decode(&self, _x: &kiln_tensor::Tensor, _weight_t: &kiln_tensor::Tensor) -> Result<Option<kiln_tensor::Tensor>> {
         Ok(None)
     }
 
-    /// Autograd-safe transposed linear projection for prefill / training.
+    /// Tape-recorded transposed linear projection for prefill / training.
     ///
     /// Same shapes as `linear_decode` but the result must be wired into the
-    /// candle autograd graph so `.backward()` produces a real gradient.
-    /// Implementations typically wrap the dispatch in a `CustomOp1` with a
-    /// proper `bwd` impl. Backends without an autograd-safe path return
-    /// `Ok(None)` so the caller falls back to the candle CPU matmul.
-    fn linear_prefill_apply(&self, _x: &candle_core::Tensor, _weight_t: &candle_core::Tensor) -> Result<Option<candle_core::Tensor>> {
+    /// kt autograd tape (`kiln_autograd`) so `Tape::backward()` produces a
+    /// real gradient. Backends route through the kt-tape-recording matmul.
+    /// Backends without a tape-recording path return `Ok(None)` so the
+    /// caller falls back to the portable kt matmul (which the tape records).
+    fn linear_prefill_apply(&self, _x: &kiln_tensor::Tensor, _weight_t: &kiln_tensor::Tensor) -> Result<Option<kiln_tensor::Tensor>> {
         Ok(None)
     }
 
@@ -944,14 +947,14 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     ///
     /// Used by the FLCE chunked head loop. The result need not be
     /// autograd-tracked — FLCE owns its own analytic backward; the result
-    /// is consumed inside the FLCE CustomOp1's `cpu_fwd`.
+    /// is consumed inside the FLCE analytic-backward path.
     fn linear_prefill_apply_offset(
         &self,
-        _x: &candle_core::Tensor,
-        _full_weight_t: &candle_core::Tensor,
+        _x: &kiln_tensor::Tensor,
+        _full_weight_t: &kiln_tensor::Tensor,
         _chunk_start: usize,
         _chunk_len: usize,
-    ) -> Result<Option<candle_core::Tensor>> {
+    ) -> Result<Option<kiln_tensor::Tensor>> {
         Ok(None)
     }
 
@@ -1026,16 +1029,16 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     ///
     /// `base` is the already-computed base projection output, `x` is the
     /// projection input, and `a`/`b` are PEFT LoRA matrices. Backends must
-    /// return `Ok(None)` for tracked tensors; training needs the differentiable
-    /// Candle path.
+    /// return `Ok(None)` for tape-tracked tensors; training needs the
+    /// kt-tape-recorded differentiable path.
     fn lora_decode_add(
         &self,
-        _base: &candle_core::Tensor,
-        _x: &candle_core::Tensor,
-        _a: &candle_core::Tensor,
-        _b: &candle_core::Tensor,
+        _base: &kiln_tensor::Tensor,
+        _x: &kiln_tensor::Tensor,
+        _a: &kiln_tensor::Tensor,
+        _b: &kiln_tensor::Tensor,
         _scale: f32,
-    ) -> Result<Option<candle_core::Tensor>> {
+    ) -> Result<Option<kiln_tensor::Tensor>> {
         Ok(None)
     }
 
@@ -1068,7 +1071,7 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     fn drop_uploaded_bf16_weights(
         &self,
         _weights: &mut crate::forward::GpuWeights,
-        _device: &candle_core::Device,
+        _device: &kiln_tensor::Device,
     ) -> Result<usize> {
         Ok(0)
     }
@@ -1402,11 +1405,11 @@ mod tests {
         assert!(caps.projection_training.contains("offset chunk hook"));
         assert!(
             caps.lora_delta_training
-                .contains("declines tracked tensors")
+                .contains("declines tape-tracked tensors")
         );
         assert_eq!(
             caps.resident_activation,
-            "TensorId lifecycle registry; candle CUDA tensors are canonical"
+            "kt TensorId lifecycle registry; kt CUDA tensors are canonical"
         );
         assert!(caps.sgd_step.contains("CUDA in-place optimizer kernel"));
         assert!(caps.adamw_step.contains("CUDA in-place optimizer kernel"));

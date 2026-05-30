@@ -3,8 +3,9 @@ pub mod backend;
 pub mod c1_attr;
 pub mod cancel;
 pub mod cuda_graph;
-#[cfg(feature = "cuda")]
-pub mod cuda_train;
+// (#1082 Wave F2) `cuda_train` deleted — the hand-rolled candle-autograd
+// CUDA training engine (`CudaTrainTensor`/`CudaBackwardOp`/`cuda_backward`)
+// is gone; the kt tape is the sole gradient producer.
 pub mod decode_buffers;
 pub mod engine;
 pub mod forward;
@@ -17,7 +18,6 @@ pub mod lora_loader;
 pub mod marlin_proj;
 pub mod mtp_debug;
 pub mod packed_weight_registry;
-pub mod paged_kv_cache;
 #[cfg(feature = "cuda")]
 pub mod paged_kv_cache_kt;
 pub mod quantized;
@@ -51,6 +51,7 @@ pub use generate::{
 pub use kv_cache::KvCache;
 pub use loader::{LoadModelOptions, load_model, load_model_with_options};
 pub use lora_loader::LoraWeights;
-pub use paged_kv_cache::PagedKvCache;
+#[cfg(feature = "cuda")]
+pub use paged_kv_cache_kt::PagedKvCacheKt;
 pub use speculative::SpeculativeConfig;
 pub use weights::ModelWeights;

@@ -15,7 +15,11 @@ pub(crate) mod cd_types;
 #[cfg(feature = "cuda")]
 pub mod cuda_train;
 pub mod diagnostics;
-pub mod echo;
+// (#1082) `pub mod echo;` deleted: ECHO's only caller was the OPD candle
+// gradient-checkpointing path (`opd_step_forward_backward_candle`), which
+// the candle-drop removed. ECHO's FLCE composite has no kt-tape coverage,
+// so it dropped out with the candle path. Re-add a kt-native ECHO module
+// when the FLCE env-CE term gets a tape adapter.
 // (#1082) Candle↔kt boundary for the SFT/FLCE trainer — relocated out of
 // `kiln-flce-kernel` so that kernel crate became 100% candle-free (the
 // THIRD kernel-crate candle drop, after `kiln-opd-loss-kernel` and
