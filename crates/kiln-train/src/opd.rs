@@ -1865,7 +1865,7 @@ pub fn build_local_teacher_fixture(
     tokenizer_hash: Option<String>,
 ) -> Result<crate::logit_source::FixtureLogitSource> {
     use kiln_model::backend;
-    use kiln_model::forward::{LinearAttentionState, model_forward};
+    use kiln_model::forward::{LinearAttentionState, model_forward_kt};
 
     // (#1082) `embed_tokens.device()` is kt; `LinearAttentionState::new` below
     // takes a kt device, and `for_device_kt` selects the backend from a kt
@@ -1894,7 +1894,7 @@ pub fn build_local_teacher_fixture(
             continue;
         }
         let mut linear_state = LinearAttentionState::new(model_config, &device)?;
-        let logits = model_forward(
+        let logits = model_forward_kt(
             &*backend_rt,
             tokens,
             weights,

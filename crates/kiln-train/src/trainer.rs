@@ -71,14 +71,14 @@ use kiln_model::forward::{
     gdn_qkv_from_mixed_training, gdn_recurrent_backward_no_grad, gdn_recurrent_forward_from_parts,
     gqa_attention_apply_output_gate, gqa_attention_core_prefill, gqa_attention_kv_prefill,
     gqa_attention_output_projection, gqa_attention_pre_o, gqa_attention_pre_o_chunked_prefill,
-    gqa_attention_prepare_prefill, gqa_attention_q_gate_prefill, model_forward,
+    gqa_attention_prepare_prefill, gqa_attention_q_gate_prefill, model_forward_kt,
     model_forward_embed, model_forward_final_norm, model_forward_head, model_forward_no_head,
     model_forward_paged_normed_hidden, model_forward_segment, rms_norm,
     streaming_prefill_enabled_for, streaming_tile_tokens_for, swiglu_ffn,
     transformer_mlp_down_from_gated, transformer_mlp_gated_hidden,
 };
 use kiln_model::lora_loader::{LoraLayerWeights, LoraProjectionWeights, LoraWeights};
-use kiln_model::paged_kv_cache::PagedKvCache;
+use kiln_model::PagedKvCacheKt;
 use kiln_model::sampling::greedy_sample;
 
 use crate::replay::{
@@ -426,6 +426,11 @@ use kiln_optim::{AdamW as KtAdamW, AdamWHyperparameters as KtAdamWHyperparameter
 use kiln_param::{AmpPolicy as KtAmpPolicy, ForwardStorage as KtForwardStorage, Parameter};
 // kt tensor types used directly for LoRA param construction + grads.
 use kiln_tensor::{DType as KtDType, Tensor as KtTensor};
+// (#1082) `KtTensorId` was the `cd_types` alias for the kt tensor id, removed
+// when `cd_types::TensorId` itself became `kiln_tensor::TensorId`. The kt
+// `GradStore` is keyed on `kiln_tensor::TensorId`, so the grad-insert and
+// grad-map sites here name it via this explicit alias.
+use kiln_tensor::TensorId as KtTensorId;
 
 /// (#1082) AMP policy for a trainable LoRA `Parameter`: BF16 master +
 /// BF16 forward/backward compute. Matches the production
@@ -1831,7 +1836,7 @@ fn adapter_smoke_forward_logits(
     lora: Option<&LoraWeights>,
 ) -> Result<Tensor> {
     let mut linear_state = adapter_smoke_linear_state(backend, weights, model_config)?;
-    model_forward(
+    model_forward_kt(
         backend,
         token_ids,
         weights,
@@ -4389,16 +4394,20 @@ fn compute_ref_log_probs_shared_prefix(
     };
 
     let num_blocks = (max_total + GRPO_REF_PAGED_BLOCK_SIZE - 1) / GRPO_REF_PAGED_BLOCK_SIZE;
-    let paged_cache = PagedKvCache::new(
+    // (#1082) The candle `PagedKvCache::new` took a candle device; its kt twin
+    // `PagedKvCacheKt::new` takes a `device_index: usize`. `device` is a kt
+    // `Device` (Copy); single-GPU prod → `Cuda(idx)`, so use its index (CPU /
+    // unindexed → 0).
+    let paged_cache = PagedKvCacheKt::new(
         model_config.num_full_attention_layers,
         num_blocks,
         GRPO_REF_PAGED_BLOCK_SIZE,
         model_config.num_kv_heads,
         model_config.head_dim,
         dtype,
-        device,
+        device.index().unwrap_or(0),
     )
-    .context("GRPO shared-prefix: build PagedKvCache")?;
+    .context("GRPO shared-prefix: build PagedKvCacheKt")?;
     let mut block_table = BlockTable::new();
     for i in 0..num_blocks as u32 {
         block_table.push(i);
@@ -7230,47 +7239,12 @@ fn exact_gdn_backward_tile_tokens_for(device: &CdDevice) -> usize {
     }
 }
 
-fn profile_exact_gdn_reverse_tiles() -> bool {
-    kiln_core::env_flag::env_tristate("KILN_PROFILE_EXACT_GDN_REVERSE_TILES").unwrap_or(false)
-}
-
-fn exact_gdn_split_recurrent_backward_enabled() -> bool {
-    kiln_core::env_flag::env_tristate("KILN_EXACT_GDN_SPLIT_RECURRENT_BACKWARD").unwrap_or(true)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn finish_exact_gdn_reverse_tile_stage(
-    device: &CdDevice,
-    enabled: bool,
-    layer_idx: usize,
-    tile_idx: usize,
-    num_tiles: usize,
-    tile_start: usize,
-    tile_end: usize,
-    stage: &'static str,
-    started: Instant,
-) -> Result<Instant> {
-    if enabled && is_metal_device(device) {
-        synchronize_checkpoint_boundary(device, || {
-            format!(
-                "synchronize exact tiled GDN reverse layer {layer_idx} tile {tile_idx} stage {stage}"
-            )
-        })?;
-    }
-    if enabled {
-        tracing::info!(
-            layer = layer_idx,
-            tile = tile_idx + 1,
-            num_tiles,
-            tile_start,
-            tile_end,
-            stage,
-            elapsed_ms = started.elapsed().as_millis() as u64,
-            "exact tiled GDN reverse tile stage"
-        );
-    }
-    Ok(Instant::now())
-}
+// (#1082) Deleted three orphaned residues of the removed exact_gdn tiled-reverse
+// machinery — all had zero callers after the candle-drop:
+//   * `profile_exact_gdn_reverse_tiles`
+//   * `exact_gdn_split_recurrent_backward_enabled`
+//   * `finish_exact_gdn_reverse_tile_stage` (its only call was to the already
+//     deleted `synchronize_checkpoint_boundary`)
 
 fn full_attention_mlp_reverse_tile_size(
     weights: &GpuWeights,
@@ -7585,7 +7559,7 @@ fn standard_forward_backward_tape_authoritative_kt(
 
     let (loss_val, _loss, grads_by_candle_raw) =
         kiln_kt_bridge::tape_bridge::with_tape_authoritative_scope(|| {
-            let logits = model_forward(
+            let logits = model_forward_kt(
                 backend,
                 input_ids,
                 weights,
@@ -7980,7 +7954,7 @@ fn grpo_step_forward_backward_tape_authoritative_kt(
             // Single policy forward (embed -> layers -> final RMSNorm -> lm_head).
             // The LoRA adapters inside record onto the active tape; the lm_head
             // output (logits) is retained so the GRPO loss root can thread it.
-            let policy_logits = model_forward(
+            let policy_logits = model_forward_kt(
                 backend,
                 input_ids,
                 weights,
@@ -7992,12 +7966,48 @@ fn grpo_step_forward_backward_tape_authoritative_kt(
             .context("GRPO tape-authoritative(kt) policy forward")
             .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?;
 
+            // (#1082 forward-flip) `model_forward_kt` now returns kt logits, but
+            // the GRPO scalar-loss adapter `try_tape_grpo_pg_loss_from_logits_cuda`
+            // is still candle-typed (it owns a candle island: candle
+            // `token_log_probs` + `grpo_loss` for the forward value, and a candle
+            // `loss.backward()` recompute in its fused `GrpoPgLossFromLogitsBackward`).
+            // Bridge `policy_logits` kt -> candle AND register the original kt
+            // tensor as the producer of the candle id via
+            // `retain_output_for_chaining`, so the adapter's
+            // `kt_input_for_candle(logits.id())` lookup recovers the lm_head kt
+            // output and keeps the tape CONNECTED back to the LoRA forward (a bare
+            // copy would fall through to a fresh, un-chained borrow -> islanded
+            // forward -> empty LoRA grads). This is exactly what the in-`forward.rs`
+            // `kt_logits_to_candle` helper does; it is `pub(crate)` there so it is
+            // inlined here. `ref_log_probs` is a detached constant denominator, so a
+            // plain kt -> candle copy is sufficient (no chaining).
+            let policy_logits_candle = {
+                let lc = policy_logits.contiguous().map_err(|e| {
+                    kiln_kt_bridge::BridgeError::new(format!("GRPO(kt) logits contiguous: {e}"))
+                })?;
+                let candle = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&lc).map_err(|e| {
+                    kiln_kt_bridge::BridgeError::new(format!("GRPO(kt) logits kt->candle: {e}"))
+                })?;
+                kiln_kt_bridge::tape_bridge::retain_output_for_chaining(&policy_logits, candle.id());
+                candle
+            };
+            let ref_log_probs_candle = {
+                let rc = ref_log_probs.contiguous().map_err(|e| {
+                    kiln_kt_bridge::BridgeError::new(format!("GRPO(kt) ref_log_probs contiguous: {e}"))
+                })?;
+                kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&rc).map_err(|e| {
+                    kiln_kt_bridge::BridgeError::new(format!(
+                        "GRPO(kt) ref_log_probs kt->candle: {e}"
+                    ))
+                })?
+            };
+
             // Record the SCALAR GRPO PG (+ KL) loss as the tape root.
             let loss = match crate::grpo_candle_shim::try_tape_grpo_pg_loss_from_logits_cuda(
-                &policy_logits,
+                &policy_logits_candle,
                 input_ids,
                 action_mask,
-                ref_log_probs,
+                &ref_log_probs_candle,
                 loss_params,
                 device,
             )
@@ -10275,7 +10285,7 @@ pub(crate) mod tests {
 
         // Full forward pass (no KV cache, no LoRA)
         let mut linear_state_full = LinearAttentionState::new(&config, &kiln_kt_bridge::kt_device_from_candle(&device))?;
-        let logits_full = model_forward(
+        let logits_full = model_forward_kt(
             &*backend,
             &input_ids,
             &weights,
@@ -10316,14 +10326,15 @@ pub(crate) mod tests {
         )?;
         let logits_seg = model_forward_head(&hidden, &weights, &config)?;
 
-        // Compare logits. #1082: `model_forward` returns candle but
-        // `model_forward_head` (and the segment/embed chain feeding it) returns
-        // kt. Bridge `logits_seg` kt→candle (CPU F32, lossless) so the diff math
-        // stays candle and the 1e-4 parity bound is unchanged.
-        let logits_seg = cpu_kt_to_candle_f32(&logits_seg)?;
-        let diff = (logits_full - logits_seg)?
+        // Compare logits. #1082: post forward-flip BOTH `model_forward_kt` and
+        // `model_forward_head` (with the segment/embed chain feeding it) return
+        // kt, so the diff math stays entirely in kt — no kt→candle bridge. kt
+        // has no `max_all`; `flatten_all()?.max(0)?` reduces to a rank-0 scalar.
+        let diff = logits_full
+            .sub(&logits_seg)?
             .abs()?
-            .max_all()?
+            .flatten_all()?
+            .max(0)?
             .to_scalar::<f32>()?;
         assert!(diff < 1e-4, "segmented forward differs from full by {diff}");
 
@@ -10402,7 +10413,7 @@ pub(crate) mod tests {
 
         // Naive path: full forward → logits → cross_entropy_loss.
         let mut linear_state_naive = LinearAttentionState::new(&config, &kiln_kt_bridge::kt_device_from_candle(&device))?;
-        let logits = model_forward(
+        let logits = model_forward_kt(
             &*backend,
             &input_ids,
             &weights,
