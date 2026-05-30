@@ -13,7 +13,11 @@ use axum::http::{Request, StatusCode};
 // call site below — `new_real` itself was migrated to take `kt::Device` in #1082;
 // the bridge is necessary because `tiny_weights` still wants the candle device
 // to construct candle `Tensor` fields on the production weight structs.
-use candle_core::{DType, Device, Tensor};
+// #1082: GpuWeights / GpuLayerWeights / GpuFullAttentionWeights / GpuFfnWeights
+// fields are now kt-typed, so `tiny_weights` builds kt `Tensor`s directly. The
+// device is a kt `Device::Cpu` (passed straight to `AppState::new_real`, which
+// takes `kt::Device` since #1082 — no candle bridge needed).
+use kiln_tensor::{DType, Device, Tensor};
 use serde_json::{Value, json};
 use tower::ServiceExt; // for `oneshot`
 
@@ -221,7 +225,7 @@ async fn submit_grpo_dataset_path_route_defaults_to_vulkan_streaming_queue() {
         config,
         runner,
         state_tokenizer,
-        kiln_kt_bridge::kt_device_from_candle(&device),
+        device,
         adapter_dir.path().to_path_buf(),
         &kiln_server::config::MemoryConfig::default(),
         300,
@@ -330,7 +334,7 @@ async fn test_real_model_chat_completion() {
         config,
         runner,
         state_tokenizer,
-        kiln_kt_bridge::kt_device_from_candle(&device),
+        device,
         std::path::PathBuf::from("/tmp/kiln-test-adapters"),
         &kiln_server::config::MemoryConfig::default(),
         300,
@@ -405,7 +409,7 @@ async fn test_real_model_streaming_chat_completion() {
         config,
         runner,
         state_tokenizer,
-        kiln_kt_bridge::kt_device_from_candle(&device),
+        device,
         std::path::PathBuf::from("/tmp/kiln-test-adapters"),
         &kiln_server::config::MemoryConfig::default(),
         300,
@@ -524,7 +528,7 @@ async fn test_request_timeout_configurable() {
         config,
         runner,
         state_tokenizer,
-        kiln_kt_bridge::kt_device_from_candle(&device),
+        device,
         std::path::PathBuf::from("/tmp/kiln-test-adapters"),
         &kiln_server::config::MemoryConfig::default(),
         42,
@@ -550,7 +554,7 @@ async fn test_default_request_timeout() {
         config,
         runner,
         state_tokenizer,
-        kiln_kt_bridge::kt_device_from_candle(&device),
+        device,
         std::path::PathBuf::from("/tmp/kiln-test-adapters"),
         &kiln_server::config::MemoryConfig::default(),
         600,
@@ -575,7 +579,7 @@ async fn test_health_with_real_backend() {
         config,
         runner,
         state_tokenizer,
-        kiln_kt_bridge::kt_device_from_candle(&device),
+        device,
         std::path::PathBuf::from("/tmp/kiln-test-adapters"),
         &kiln_server::config::MemoryConfig::default(),
         300,
@@ -639,7 +643,7 @@ async fn test_real_model_chat_completion_metal() {
         config,
         runner,
         state_tokenizer,
-        kiln_kt_bridge::kt_device_from_candle(&device),
+        device,
         std::path::PathBuf::from("/tmp/kiln-test-adapters"),
         &kiln_server::config::MemoryConfig::default(),
         300,
