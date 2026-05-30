@@ -17757,9 +17757,16 @@ fn gated_deltanet_forward_decode_if(
             // active.
             #[cfg(feature = "cuda")]
             {
-                match crate::tape_forward::try_tape_transpose_cuda(&attn_out, 1, 2)? {
-                    Some(t) => t,
-                    None => attn_out.transpose(1, 2)?,
+                if crate::tape_forward::tape_forward_enabled() {
+                    let ao_c = kt_logits_to_candle(&attn_out)
+                        .context("gdn attn_out transpose kt->candle (tape)")?;
+                    match crate::tape_forward::try_tape_transpose_cuda(&ao_c, 1, 2)? {
+                        Some(t) => candle_to_kt_activation(&t)
+                            .context("gdn attn_out transpose candle->kt (tape)")?,
+                        None => attn_out.transpose(1, 2)?,
+                    }
+                } else {
+                    attn_out.transpose(1, 2)?
                 }
             }
             #[cfg(not(feature = "cuda"))]
@@ -17804,13 +17811,20 @@ fn gated_deltanet_forward_decode_if(
             // `KILN_USE_TAPE_GDN_GATED_NORM` are set AND a tape scope is active;
             // the production output (`gated`) is untouched either way.
             #[cfg(feature = "cuda")]
-            {
+            if crate::tape_forward::tape_forward_enabled() {
+                let ao_c = kt_logits_to_candle(&attn_out)
+                    .context("gdn gated-norm kt->candle attn_out (tape)")?;
+                let z_c = kt_logits_to_candle(&z).context("gdn gated-norm kt->candle z (tape)")?;
+                let norm_c = kt_logits_to_candle(&weights.norm)
+                    .context("gdn gated-norm kt->candle norm (tape)")?;
+                let gated_c =
+                    kt_logits_to_candle(&gated).context("gdn gated-norm kt->candle gated (tape)")?;
                 let _ = crate::tape_forward::try_tape_gdn_gated_rms_norm_cuda(
-                    &attn_out,
-                    &z,
-                    &weights.norm,
+                    &ao_c,
+                    &z_c,
+                    &norm_c,
                     config.rms_norm_eps,
-                    &gated,
+                    &gated_c,
                 )?;
             }
             gated
@@ -17826,18 +17840,31 @@ fn gated_deltanet_forward_decode_if(
         // is active.
         let reshaped = attn_out.reshape((batch, seq_len, v_dim))?;
         #[cfg(feature = "cuda")]
-        let reshaped = match crate::tape_forward::try_tape_reshape_cuda(
-            &attn_out,
-            vec![batch, seq_len, v_dim],
-        )? {
-            Some(t) => t,
-            None => reshaped,
+        let reshaped = if crate::tape_forward::tape_forward_enabled() {
+            let ao_c = kt_logits_to_candle(&attn_out)
+                .context("gdn gated-norm reshape kt->candle (tape)")?;
+            match crate::tape_forward::try_tape_reshape_cuda(&ao_c, vec![batch, seq_len, v_dim])? {
+                Some(t) => candle_to_kt_activation(&t)
+                    .context("gdn gated-norm reshape candle->kt (tape)")?,
+                None => reshaped,
+            }
+        } else {
+            reshaped
         };
         let casted = reshaped.to_dtype(input_dtype)?;
         #[cfg(feature = "cuda")]
-        let casted = match crate::tape_forward::try_tape_cast_cuda(&reshaped, &casted)? {
-            Some(t) => t,
-            None => casted,
+        let casted = if crate::tape_forward::tape_forward_enabled() {
+            let r_c = kt_logits_to_candle(&reshaped)
+                .context("gdn gated-norm cast kt->candle reshaped (tape)")?;
+            let c_c = kt_logits_to_candle(&casted)
+                .context("gdn gated-norm cast kt->candle casted (tape)")?;
+            match crate::tape_forward::try_tape_cast_cuda(&r_c, &c_c)? {
+                Some(t) => candle_to_kt_activation(&t)
+                    .context("gdn gated-norm cast candle->kt (tape)")?,
+                None => casted,
+            }
+        } else {
+            casted
         };
         casted
     };
