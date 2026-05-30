@@ -12496,7 +12496,7 @@ fn lm_head_argmax(x: &Tensor, embed_tokens_t: &Tensor) -> Result<u32> {
             return Ok(token);
         }
     }
-    Ok(logits_1d.argmax(0)?.to_scalar::<u32>()?)
+    Ok(logits_1d.argmax(0)?.flatten_all()?.to_vec1::<u32>()?[0])
 }
 
 /// Phase 7 (#1082) — fused kt-API LM head + argmax migration helper.
@@ -13506,7 +13506,7 @@ fn strict_lower_tri_bool(n: usize, device: &Device) -> Result<Tensor> {
     let t = Tensor::arange(0u32, n as u32, device)?;
     let cols = t.reshape((1, n))?.broadcast_as((n, n))?;
     let rows = t.reshape((n, 1))?.broadcast_as((n, n))?;
-    Ok(rows.gt(&cols)?)
+    Ok(kiln_tensor::ops::gt(&rows, &cols)?)
 }
 
 #[cfg(test)]
@@ -13521,7 +13521,7 @@ fn causal_lower_tri_bool(n: usize, device: &Device) -> Result<Tensor> {
     let t = Tensor::arange(0u32, n as u32, device)?;
     let cols = t.reshape((1, n))?.broadcast_as((n, n))?;
     let rows = t.reshape((n, 1))?.broadcast_as((n, n))?;
-    Ok(rows.ge(&cols)?)
+    Ok(kiln_tensor::ops::ge(&rows, &cols)?)
 }
 
 #[cfg(test)]
@@ -15800,11 +15800,13 @@ pub fn gdn_recurrent_backward_no_grad(
 
         let decay_term = decay_last_col.broadcast_mul(&d_decay_last_col_acc)?;
         let decay_sum = decay_term.sum(LAST_DIM)?.unsqueeze(2)?;
-        let last_mask = Tensor::arange(0u32, chunk as u32, q.device())?
-            .eq((chunk - 1) as u32)?
-            .to_dtype(DType::F32)?
-            .reshape((1, 1, chunk))?
-            .broadcast_as((batch, heads, chunk))?;
+        let last_mask = {
+            let idx_f32 = Tensor::arange(0u32, chunk as u32, q.device())?.to_dtype(DType::F32)?;
+            let target = kiln_tensor::ops::full_like(&idx_f32, (chunk - 1) as f32)?;
+            kiln_tensor::ops::eq(&idx_f32, &target)?
+                .reshape((1, 1, chunk))?
+                .broadcast_as((batch, heads, chunk))?
+        };
         d_g_acc = (&d_g_acc - &decay_term)?;
         d_g_acc = (&d_g_acc + &decay_sum.broadcast_mul(&last_mask)?)?;
         let p_last_term = p
