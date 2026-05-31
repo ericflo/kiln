@@ -11,7 +11,9 @@
 #![cfg(test)]
 
 use anyhow::Result;
-use kiln_vulkan_kernel::vk_ops::gdn_chunkwise::vk_gdn_chunkwise_forward_no_grad;
+use kiln_vulkan_kernel::vk_ops::gdn_chunkwise::{
+    vk_gdn_chunkwise_forward_no_grad, vk_gdn_chunkwise_forward_no_grad_single_submit,
+};
 use kiln_vulkan_kernel::{VkTensor, VulkanDevice};
 use std::sync::Arc;
 
@@ -24,6 +26,20 @@ fn vk_dev() -> Option<Arc<VulkanDevice>> {
 
 fn upload(device: &Arc<VulkanDevice>, data: &[f32], shape: &[usize]) -> Result<VkTensor> {
     VkTensor::from_f32_slice(data, shape.to_vec(), Arc::clone(device))
+}
+
+fn assert_close(label: &str, got: &[f32], want: &[f32], tol: f32) {
+    assert_eq!(got.len(), want.len(), "{label}: length mismatch");
+    let max_err = got
+        .iter()
+        .zip(want.iter())
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0_f32, f32::max);
+    println!("{label} max abs err = {max_err:.6e}");
+    assert!(
+        max_err < tol,
+        "{label} max err {max_err} exceeds tolerance {tol}"
+    );
 }
 
 /// Per-token reference, mirroring `gdn_single_token_recurrence` in
@@ -304,6 +320,73 @@ fn vk_gdn_chunkwise_minimal_sanity() -> Result<()> {
     for v in &data {
         assert!(v.is_finite(), "non-finite output: {v}");
     }
+    Ok(())
+}
+
+#[test]
+fn vk_gdn_chunkwise_single_submit_matches_cpu_multichunk() -> Result<()> {
+    let Some(dev) = vk_dev() else { return Ok(()) };
+
+    let batch = 1;
+    let nv = 2;
+    let seq_len = 16;
+    let dk = 4;
+    let dv = 4;
+    let chunk_size = 8;
+
+    let q_data: Vec<f32> = (0..(batch * nv * seq_len * dk))
+        .map(|i| ((i as f32) * 0.031).sin() * 0.2)
+        .collect();
+    let k_data: Vec<f32> = (0..(batch * nv * seq_len * dk))
+        .map(|i| ((i as f32) * 0.027 + 0.4).cos() * 0.2)
+        .collect();
+    let v_data: Vec<f32> = (0..(batch * nv * seq_len * dv))
+        .map(|i| ((i as f32) * 0.019 - 0.3).sin() * 0.2)
+        .collect();
+    let beta_data = vec![0.45_f32; batch * nv * seq_len];
+    let g_data = vec![-0.015_f32; batch * nv * seq_len];
+    let state_init = vec![0.0_f32; batch * nv * dk * dv];
+
+    let mut cpu_state = state_init.clone();
+    let cpu_out = cpu_per_token_recurrence(
+        &q_data,
+        &k_data,
+        &v_data,
+        &beta_data,
+        &g_data,
+        &mut cpu_state,
+        batch,
+        nv,
+        seq_len,
+        dk,
+        dv,
+    );
+
+    let q = upload(&dev, &q_data, &[batch, nv, seq_len, dk])?;
+    let k = upload(&dev, &k_data, &[batch, nv, seq_len, dk])?;
+    let v = upload(&dev, &v_data, &[batch, nv, seq_len, dv])?;
+    let beta = upload(&dev, &beta_data, &[batch, nv, seq_len])?;
+    let g = upload(&dev, &g_data, &[batch, nv, seq_len])?;
+    let mut state = upload(&dev, &state_init, &[batch, nv, dk, dv])?;
+
+    let gpu_out = vk_gdn_chunkwise_forward_no_grad_single_submit(
+        &q, &k, &v, &beta, &g, &mut state, chunk_size,
+    )?;
+    let gpu_out_data = gpu_out.to_vec_f32()?;
+    let gpu_state_data = state.to_vec_f32()?;
+
+    assert_close(
+        "vk_gdn_chunkwise_single_submit out",
+        &gpu_out_data,
+        &cpu_out,
+        1e-4,
+    );
+    assert_close(
+        "vk_gdn_chunkwise_single_submit state",
+        &gpu_state_data,
+        &cpu_state,
+        1e-4,
+    );
     Ok(())
 }
 

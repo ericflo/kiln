@@ -74,7 +74,7 @@ gdn_chunkwise_forward`. GDN prefill layer **400 → 246 ms**, total prefill
 **12.8 → 9.1 s (~29%)**. Validated correct (GPU and CPU chunkwise produce
 identical greedy output). CUDA/Metal untouched (trait default Ok(None)).
 
-**Still open — single-submit fusion (the proper "max out the hardware" step):**
+**Single-submit fusion target (the proper "max out the hardware" step):**
 246 ms/layer is **dispatch-bound** — `vk_gdn_chunkwise_forward_no_grad` issues
 ~20-30 submit+wait per layer (`chunk_forward_no_grad` does 6-8
 `vk_matmul_batched_no_grad`, each self-submits+reads-back, + `state_update`),
@@ -82,7 +82,7 @@ instead of chaining the whole layer's scan into ONE `CommandBatch`.
 
 Implementation plan (confirmed feasible — `CommandBatch::record_shader` +
 `record_copy_buffer` + one `submit_and_wait` already host this pattern in
-`vk_decode_resident::record_gdn_block_into`): write a
+`vk_decode_resident::record_gdn_block_into`): write/finish a
 `record_gdn_chunkwise_prefill_block_into` that pre-allocates the chunk
 intermediates (q_s, ks, kkt, qkt, b_mask, w_weighted, p_last, k_t, per-chunk
 out, state) as device-local buffers and `record_shader`s the matmul / forward-
@@ -92,6 +92,21 @@ state buffer — no readback). One submit per layer instead of ~20-30. Then rout
 `gdn_chunkwise_recurrence` to it. This is correctness-critical (a wrong binding
 corrupts all output) → implement deliberately with incremental parity vs the
 current GPU chunkwise (already validated identical to CPU), not rushed.
+
+**Update — single-submit recorder landed (first implementation slice):**
+`record_gdn_chunkwise_prefill_block_into` now records the same per-chunk
+narrow/matmul/prep/solve/update/scatter sequence into one `CommandBatch`, owns
+all transient buffers until submit completion, and exposes
+`vk_gdn_chunkwise_forward_no_grad_single_submit`. The Vulkan backend tries this
+path first for GDN prefill and can fall back to the existing Vulkan chunkwise
+path if the recorder rejects a shape/config. Direct parity test coverage is
+candle-free and passes against a CPU recurrence oracle on a multi-chunk shape:
+output max abs err `1.117587e-8`, state max abs err `5.960464e-8`
+(`vk_gdn_chunkwise_single_submit_matches_cpu_multichunk`). Full
+`vk_gdn_chunkwise_parity` suite: **7/7 pass** on Vulkan hardware. Real
+end-to-end prefill timing still needs a kt/Vulkan-only bench path; do not count
+the existing release bench binary as proof for this item because it still links
+the old candle-facing app stack.
 
 Other proper work-packages for full saturation (per "max out the hardware in
 every config"):

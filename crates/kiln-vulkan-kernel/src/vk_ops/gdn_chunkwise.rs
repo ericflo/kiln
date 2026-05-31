@@ -34,7 +34,7 @@ use crate::vk_ops::narrow::vk_narrow_lastdim_no_grad;
 use crate::vk_ops::shape::vk_reshape;
 use crate::vk_ops::solve_tri::vk_solve_tri_no_grad;
 use crate::vk_tensor::{VkBackwardOp, VkDType, VkTensor};
-use crate::{VulkanBuffer, VulkanDevice};
+use crate::{CommandBatch, VulkanBuffer, VulkanDevice, Workgroups};
 use anyhow::{Context, Result};
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -55,6 +55,488 @@ thread_local! {
 
 fn alloc_f32(device: &Arc<VulkanDevice>, n: usize) -> Result<Arc<VulkanBuffer>> {
     crate::buffer_pool::pool_alloc_f32(device, n)
+}
+
+macro_rules! shader_path {
+    ($name:literal) => {
+        concat!(env!("CARGO_MANIFEST_DIR"), "/csrc/shaders/", $name, ".comp")
+    };
+}
+
+const SHADER_NARROW_LASTDIM_F32: &str = shader_path!("vk_narrow_lastdim_f32");
+const SHADER_NARROW_LASTDIM_F32_OFFSET: &str = shader_path!("vk_narrow_lastdim_f32_offset");
+const SHADER_NARROW_LASTDIM_BWD_F32: &str = shader_path!("vk_narrow_lastdim_bwd_f32");
+const SHADER_NARROW_LASTDIM_BWD_F32_OFFSET: &str = shader_path!("vk_narrow_lastdim_bwd_f32_offset");
+const SHADER_MATMUL_BATCHED_F32: &str = shader_path!("vk_matmul_batched_f32");
+const SHADER_TRANSPOSE_3D_F32: &str = shader_path!("vk_transpose_3d_f32");
+const SHADER_GDN_CHUNK_PREP: &str = shader_path!("gdn_chunk_prep");
+const SHADER_SOLVE_TRI_V2: &str = shader_path!("vk_solve_tri_v2");
+const SHADER_BROADCAST_MUL_LASTDIM: &str = shader_path!("vk_broadcast_mul_lastdim");
+const SHADER_ELEMENTWISE_BINARY_F32: &str = shader_path!("vk_elementwise_binary_f32");
+const SHADER_ELEMENTWISE_BINARY_F32_OFFSET: &str = shader_path!("vk_elementwise_binary_f32_offset");
+const OP_ADD: u32 = 0;
+
+/// Result of recording a chunkwise-prefill block into a [`CommandBatch`].
+///
+/// `_keepalive` intentionally owns every transient buffer referenced by the
+/// recorded command buffer. Keep this value alive until after
+/// `CommandBatch::submit_and_wait` returns.
+pub struct GdnChunkwisePrefillRecord {
+    pub out: VkTensor,
+    pub state: VkTensor,
+    _keepalive: Vec<VkTensor>,
+}
+
+fn record_narrow_lastdim_no_grad(
+    batch: &mut CommandBatch<'_>,
+    t: &VkTensor,
+    start: usize,
+    len: usize,
+) -> Result<VkTensor> {
+    anyhow::ensure!(t.dtype() == VkDType::F32, "vk_narrow(record): F32-only");
+    let dims = t.shape();
+    let inner_in = *dims.last().unwrap_or(&1);
+    let outer: usize = dims[..dims.len().saturating_sub(1)]
+        .iter()
+        .product::<usize>()
+        .max(1);
+    anyhow::ensure!(
+        start + len <= inner_in,
+        "vk_narrow(record): slice [{start}, {}) out of bounds inner={inner_in}",
+        start + len
+    );
+
+    let out_buf = alloc_f32(t.device(), outer * len)?;
+    let total = outer * len;
+    let tile_elements = crate::vk_ops::vk_1d_tile_elements();
+    if total <= tile_elements {
+        let workgroups = ((total + 255) / 256) as u32;
+        let push = [outer as u32, inner_in as u32, start as u32, len as u32];
+        batch.record_shader(
+            SHADER_NARROW_LASTDIM_F32,
+            &[t.buffer().handle(), out_buf.handle()],
+            &push,
+            Workgroups::OneD(workgroups),
+        )?;
+    } else {
+        crate::vk_ops::for_each_1d_tile(total, tile_elements, |offset, chunk_len| {
+            let workgroups = ((chunk_len + 255) / 256) as u32;
+            let push = [
+                outer as u32,
+                inner_in as u32,
+                start as u32,
+                len as u32,
+                chunk_len as u32,
+                offset as u32,
+            ];
+            batch.record_shader(
+                SHADER_NARROW_LASTDIM_F32_OFFSET,
+                &[t.buffer().handle(), out_buf.handle()],
+                &push,
+                Workgroups::OneD(workgroups),
+            )
+        })?;
+    }
+
+    let mut new_shape = dims.to_vec();
+    *new_shape.last_mut().unwrap() = len;
+    Ok(VkTensor::from_buffer(
+        out_buf,
+        new_shape,
+        VkDType::F32,
+        Arc::clone(t.device()),
+    ))
+}
+
+fn record_scatter_to_lastdim_slice_inplace(
+    batch: &mut CommandBatch<'_>,
+    dst: &VkTensor,
+    src: &VkTensor,
+    start: usize,
+    len: usize,
+) -> Result<()> {
+    anyhow::ensure!(
+        dst.dtype() == VkDType::F32 && src.dtype() == VkDType::F32,
+        "vk_scatter_to_lastdim_slice(record): F32-only"
+    );
+    let dst_dims = dst.shape();
+    let src_dims = src.shape();
+    let inner_in = *dst_dims.last().unwrap_or(&1);
+    let inner_src = *src_dims.last().unwrap_or(&1);
+    let outer_dst: usize = dst_dims[..dst_dims.len().saturating_sub(1)]
+        .iter()
+        .product::<usize>()
+        .max(1);
+    let outer_src: usize = src_dims[..src_dims.len().saturating_sub(1)]
+        .iter()
+        .product::<usize>()
+        .max(1);
+    anyhow::ensure!(
+        outer_src == outer_dst,
+        "vk_scatter_to_lastdim_slice(record): outer mismatch dst={outer_dst} src={outer_src}"
+    );
+    anyhow::ensure!(
+        inner_src == len,
+        "vk_scatter_to_lastdim_slice(record): src last dim {inner_src} != len {len}"
+    );
+    anyhow::ensure!(
+        start + len <= inner_in,
+        "vk_scatter_to_lastdim_slice(record): slice [{start}, {}) out of bounds inner={inner_in}",
+        start + len
+    );
+
+    let total = outer_dst * len;
+    let tile_elements = crate::vk_ops::vk_1d_tile_elements();
+    if total <= tile_elements {
+        let workgroups = ((total + 255) / 256) as u32;
+        let push = [outer_dst as u32, inner_in as u32, start as u32, len as u32];
+        batch.record_shader(
+            SHADER_NARROW_LASTDIM_BWD_F32,
+            &[src.buffer().handle(), dst.buffer().handle()],
+            &push,
+            Workgroups::OneD(workgroups),
+        )?;
+    } else {
+        crate::vk_ops::for_each_1d_tile(total, tile_elements, |offset, chunk_len| {
+            let workgroups = ((chunk_len + 255) / 256) as u32;
+            let push = [
+                outer_dst as u32,
+                inner_in as u32,
+                start as u32,
+                len as u32,
+                chunk_len as u32,
+                offset as u32,
+            ];
+            batch.record_shader(
+                SHADER_NARROW_LASTDIM_BWD_F32_OFFSET,
+                &[src.buffer().handle(), dst.buffer().handle()],
+                &push,
+                Workgroups::OneD(workgroups),
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn record_matmul_batched_no_grad(
+    batch: &mut CommandBatch<'_>,
+    a: &VkTensor,
+    b: &VkTensor,
+) -> Result<VkTensor> {
+    let (batch_dim, m, n, k_dim) = check_batched_matmul_record(a, b)?;
+    let out = alloc_f32(a.device(), batch_dim * m * n)?;
+    let workgroups = Workgroups::ThreeD(
+        ((n + 15) / 16) as u32,
+        ((m + 15) / 16) as u32,
+        batch_dim as u32,
+    );
+    let push = [batch_dim as u32, m as u32, n as u32, k_dim as u32];
+    batch.record_shader(
+        SHADER_MATMUL_BATCHED_F32,
+        &[a.buffer().handle(), b.buffer().handle(), out.handle()],
+        &push,
+        workgroups,
+    )?;
+    Ok(VkTensor::from_buffer(
+        out,
+        vec![batch_dim, m, n],
+        VkDType::F32,
+        Arc::clone(a.device()),
+    ))
+}
+
+fn check_batched_matmul_record(a: &VkTensor, b: &VkTensor) -> Result<(usize, usize, usize, usize)> {
+    anyhow::ensure!(
+        a.shape().len() == 3 && b.shape().len() == 3,
+        "vk_matmul_batched(record): rank-3 required, got {:?}/{:?}",
+        a.shape(),
+        b.shape()
+    );
+    anyhow::ensure!(
+        a.dtype() == VkDType::F32 && b.dtype() == VkDType::F32,
+        "vk_matmul_batched(record): F32-only"
+    );
+    let ba = a.shape()[0];
+    let m = a.shape()[1];
+    let k = a.shape()[2];
+    let bb = b.shape()[0];
+    let kk = b.shape()[1];
+    let n = b.shape()[2];
+    anyhow::ensure!(ba == bb, "batch mismatch: {ba} vs {bb}");
+    anyhow::ensure!(k == kk, "inner-dim mismatch: {k} vs {kk}");
+    Ok((ba, m, n, k))
+}
+
+fn record_transpose_batched_2d_no_grad(
+    batch: &mut CommandBatch<'_>,
+    t: &VkTensor,
+) -> Result<VkTensor> {
+    anyhow::ensure!(
+        t.shape().len() == 3,
+        "vk_transpose_batched_2d(record): rank-3 required, got {:?}",
+        t.shape()
+    );
+    anyhow::ensure!(
+        t.dtype() == VkDType::F32,
+        "vk_transpose_batched_2d(record): F32 only"
+    );
+    let batch_dim = t.shape()[0];
+    let rows = t.shape()[1];
+    let cols = t.shape()[2];
+    let out = alloc_f32(t.device(), batch_dim * rows * cols)?;
+    let push = [batch_dim as u32, rows as u32, cols as u32];
+    batch.record_shader(
+        SHADER_TRANSPOSE_3D_F32,
+        &[t.buffer().handle(), out.handle()],
+        &push,
+        Workgroups::ThreeD(
+            ((cols + 15) / 16) as u32,
+            ((rows + 15) / 16) as u32,
+            batch_dim as u32,
+        ),
+    )?;
+    Ok(VkTensor::from_buffer(
+        out,
+        vec![batch_dim, cols, rows],
+        VkDType::F32,
+        Arc::clone(t.device()),
+    ))
+}
+
+fn record_gdn_chunk_prep_no_grad(
+    batch_rec: &mut CommandBatch<'_>,
+    g: &VkTensor,
+    v: &VkTensor,
+    kkt: &VkTensor,
+    qkt: &VkTensor,
+    ks_entry: &VkTensor,
+    q_s: &VkTensor,
+    batch: usize,
+    heads: usize,
+    chunk: usize,
+    dv: usize,
+) -> Result<GdnChunkPrepOutput> {
+    let device = g.device();
+    for t in [g, v, kkt, qkt, ks_entry, q_s] {
+        anyhow::ensure!(
+            t.dtype() == VkDType::F32,
+            "vk_gdn_chunk_prep(record): F32 only"
+        );
+    }
+    anyhow::ensure!(g.num_elements() == batch * heads * chunk, "g size");
+    anyhow::ensure!(v.num_elements() == batch * heads * chunk * dv, "v size");
+    anyhow::ensure!(
+        kkt.num_elements() == batch * heads * chunk * chunk,
+        "kkt size"
+    );
+    anyhow::ensure!(
+        qkt.num_elements() == batch * heads * chunk * chunk,
+        "qkt size"
+    );
+    anyhow::ensure!(
+        ks_entry.num_elements() == batch * heads * chunk * dv,
+        "ks_entry size"
+    );
+    anyhow::ensure!(q_s.num_elements() == batch * heads * chunk * dv, "q_s size");
+
+    let bh = batch * heads;
+    let a_strict = alloc_f32(device, bh * chunk * chunk)?;
+    let b_mask = alloc_f32(device, bh * chunk * chunk)?;
+    let v_prime = alloc_f32(device, bh * chunk * dv)?;
+    let q_s_scaled = alloc_f32(device, bh * chunk * dv)?;
+    let decay_last_col = alloc_f32(device, bh * chunk)?;
+    let p_last = alloc_f32(device, bh)?;
+
+    let per_bh = chunk * chunk + chunk * dv + chunk + 1;
+    let total = bh * per_bh;
+    let workgroups = ((total + 255) / 256) as u32;
+    let push = [batch as u32, heads as u32, chunk as u32, dv as u32];
+    batch_rec.record_shader(
+        SHADER_GDN_CHUNK_PREP,
+        &[
+            g.buffer().handle(),
+            v.buffer().handle(),
+            kkt.buffer().handle(),
+            qkt.buffer().handle(),
+            ks_entry.buffer().handle(),
+            q_s.buffer().handle(),
+            a_strict.handle(),
+            b_mask.handle(),
+            v_prime.handle(),
+            q_s_scaled.handle(),
+            decay_last_col.handle(),
+            p_last.handle(),
+        ],
+        &push,
+        Workgroups::OneD(workgroups),
+    )?;
+
+    Ok(GdnChunkPrepOutput {
+        a_strict: VkTensor::from_buffer(
+            a_strict,
+            vec![batch, heads, chunk, chunk],
+            VkDType::F32,
+            Arc::clone(device),
+        ),
+        b_mask: VkTensor::from_buffer(
+            b_mask,
+            vec![batch, heads, chunk, chunk],
+            VkDType::F32,
+            Arc::clone(device),
+        ),
+        v_prime: VkTensor::from_buffer(
+            v_prime,
+            vec![batch, heads, chunk, dv],
+            VkDType::F32,
+            Arc::clone(device),
+        ),
+        q_s_scaled: VkTensor::from_buffer(
+            q_s_scaled,
+            vec![batch, heads, chunk, dv],
+            VkDType::F32,
+            Arc::clone(device),
+        ),
+        decay_last_col: VkTensor::from_buffer(
+            decay_last_col,
+            vec![batch, heads, chunk],
+            VkDType::F32,
+            Arc::clone(device),
+        ),
+        p_last: VkTensor::from_buffer(p_last, vec![batch, heads], VkDType::F32, Arc::clone(device)),
+    })
+}
+
+fn record_solve_tri_no_grad(
+    batch_rec: &mut CommandBatch<'_>,
+    a_strict: &VkTensor,
+    v_prime: &VkTensor,
+    beta: &VkTensor,
+    batch: usize,
+    heads: usize,
+    chunk: usize,
+    dv: usize,
+) -> Result<VkTensor> {
+    anyhow::ensure!(
+        a_strict.dtype() == VkDType::F32,
+        "vk_solve_tri(record): F32"
+    );
+    anyhow::ensure!(v_prime.dtype() == VkDType::F32, "vk_solve_tri(record): F32");
+    anyhow::ensure!(beta.dtype() == VkDType::F32, "vk_solve_tri(record): F32");
+    anyhow::ensure!(
+        a_strict.num_elements() == batch * heads * chunk * chunk,
+        "vk_solve_tri(record): a_strict shape"
+    );
+    anyhow::ensure!(
+        v_prime.num_elements() == batch * heads * chunk * dv,
+        "vk_solve_tri(record): v_prime shape"
+    );
+    anyhow::ensure!(
+        beta.num_elements() == batch * heads * chunk,
+        "vk_solve_tri(record): beta shape"
+    );
+    anyhow::ensure!(
+        chunk <= 64 && dv <= 256,
+        "vk_solve_tri(record): shader caps require chunk<=64, dv<=256"
+    );
+
+    let device = a_strict.device();
+    let out = alloc_f32(device, batch * heads * chunk * dv)?;
+    let dv_per_wg = 64u32;
+    let dv_tiles = (dv as u32 + dv_per_wg - 1) / dv_per_wg;
+    let push = [batch as u32, heads as u32, chunk as u32, dv as u32];
+    batch_rec.record_shader(
+        SHADER_SOLVE_TRI_V2,
+        &[
+            a_strict.buffer().handle(),
+            v_prime.buffer().handle(),
+            beta.buffer().handle(),
+            out.handle(),
+        ],
+        &push,
+        Workgroups::ThreeD((batch * heads) as u32, dv_tiles, 1),
+    )?;
+    Ok(VkTensor::from_buffer(
+        out,
+        vec![batch, heads, chunk, dv],
+        VkDType::F32,
+        Arc::clone(device),
+    ))
+}
+
+fn record_broadcast_mul_lastdim_no_grad(
+    batch: &mut CommandBatch<'_>,
+    a: &VkTensor,
+    b: &VkTensor,
+    n: usize,
+) -> Result<VkTensor> {
+    let dims_a = a.shape();
+    let dims_b = b.shape();
+    anyhow::ensure!(a.dtype() == VkDType::F32 && b.dtype() == VkDType::F32);
+    anyhow::ensure!(dims_a[dims_a.len() - 1] == n);
+    anyhow::ensure!(dims_b[dims_b.len() - 1] == 1);
+    let total = a.num_elements();
+    let device = a.device();
+    let out_buf = alloc_f32(device, total)?;
+    let push = [total as u32, n as u32];
+    batch.record_shader(
+        SHADER_BROADCAST_MUL_LASTDIM,
+        &[a.buffer().handle(), b.buffer().handle(), out_buf.handle()],
+        &push,
+        Workgroups::OneD(((total + 255) / 256) as u32),
+    )?;
+    Ok(VkTensor::from_buffer(
+        out_buf,
+        dims_a.to_vec(),
+        VkDType::F32,
+        Arc::clone(device),
+    ))
+}
+
+fn record_add_no_grad(
+    batch: &mut CommandBatch<'_>,
+    a: &VkTensor,
+    b: &VkTensor,
+) -> Result<VkTensor> {
+    anyhow::ensure!(
+        a.shape() == b.shape(),
+        "vk_add(record): shape mismatch {:?} vs {:?}",
+        a.shape(),
+        b.shape()
+    );
+    anyhow::ensure!(
+        a.dtype() == VkDType::F32 && b.dtype() == VkDType::F32,
+        "vk_add(record): F32-only"
+    );
+    let out_buf = alloc_f32(a.device(), a.num_elements())?;
+    let n_elements = a.num_elements();
+    let tile_elements = crate::vk_ops::vk_1d_tile_elements();
+    if n_elements <= tile_elements {
+        let workgroups = ((n_elements + 255) / 256) as u32;
+        let push = [n_elements as u32, OP_ADD];
+        batch.record_shader(
+            SHADER_ELEMENTWISE_BINARY_F32,
+            &[a.buffer().handle(), b.buffer().handle(), out_buf.handle()],
+            &push,
+            Workgroups::OneD(workgroups),
+        )?;
+    } else {
+        crate::vk_ops::for_each_1d_tile(n_elements, tile_elements, |offset, len| {
+            let workgroups = ((len + 255) / 256) as u32;
+            let push = [len as u32, OP_ADD, offset as u32];
+            batch.record_shader(
+                SHADER_ELEMENTWISE_BINARY_F32_OFFSET,
+                &[a.buffer().handle(), b.buffer().handle(), out_buf.handle()],
+                &push,
+                Workgroups::OneD(workgroups),
+            )
+        })?;
+    }
+    Ok(VkTensor::from_buffer(
+        out_buf,
+        a.shape().to_vec(),
+        VkDType::F32,
+        Arc::clone(a.device()),
+    ))
 }
 
 /// Slice along time dim (dim=2 of a [B, nv, T, ...] tensor) for a
@@ -259,6 +741,358 @@ fn state_update(
     let delta_3 = vk_matmul_batched_no_grad(k_t, &w_3)?;
     let delta_4 = vk_reshape(&delta_3, &[batch, nv, dk, dv])?;
     vk_add_no_grad(&s_scaled_4d, &delta_4)
+}
+
+fn record_time_narrow_no_grad(
+    batch: &mut CommandBatch<'_>,
+    t: &VkTensor,
+    t_start: usize,
+    t_len: usize,
+    last_axis: usize,
+) -> Result<VkTensor> {
+    let dims = t.shape();
+    debug_assert!(dims.len() >= 3, "time_narrow(record): rank >= 3");
+    let bh: usize = dims[..dims.len() - 2].iter().product();
+    let t_total = dims[dims.len() - 2];
+    debug_assert_eq!(dims[dims.len() - 1], last_axis);
+    debug_assert!(t_start + t_len <= t_total);
+
+    let input_2d = vk_reshape(t, &[bh, t_total * last_axis])?;
+    let narrowed =
+        record_narrow_lastdim_no_grad(batch, &input_2d, t_start * last_axis, t_len * last_axis)?;
+    let mut out_shape = dims[..dims.len() - 2].to_vec();
+    out_shape.push(t_len);
+    out_shape.push(last_axis);
+    vk_reshape(&narrowed, &out_shape)
+}
+
+fn record_time_narrow_3d_no_grad(
+    batch: &mut CommandBatch<'_>,
+    t: &VkTensor,
+    t_start: usize,
+    t_len: usize,
+) -> Result<VkTensor> {
+    let dims = t.shape();
+    debug_assert_eq!(dims.len(), 3);
+    let bh = dims[0] * dims[1];
+    let t_total = dims[2];
+    let input_2d = vk_reshape(t, &[bh, t_total])?;
+    let narrowed = record_narrow_lastdim_no_grad(batch, &input_2d, t_start, t_len)?;
+    vk_reshape(&narrowed, &[dims[0], dims[1], t_len])
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_chunk_forward_no_grad(
+    batch_rec: &mut CommandBatch<'_>,
+    q_c: &VkTensor,
+    k_c: &VkTensor,
+    v_c: &VkTensor,
+    beta_c: &VkTensor,
+    g_c: &VkTensor,
+    state: &VkTensor,
+    batch: usize,
+    nv: usize,
+    chunk: usize,
+    dk: usize,
+    dv: usize,
+    keepalive: &mut Vec<VkTensor>,
+) -> Result<(VkTensor, VkTensor, VkTensor, VkTensor)> {
+    let bh = batch * nv;
+    let q_3 = vk_reshape(q_c, &[bh, chunk, dk])?;
+    let k_3 = vk_reshape(k_c, &[bh, chunk, dk])?;
+    let v_3 = vk_reshape(v_c, &[bh, chunk, dv])?;
+    let s_3 = vk_reshape(state, &[bh, dk, dv])?;
+    keepalive.extend([q_3.clone(), k_3.clone(), v_3.clone(), s_3.clone()]);
+
+    let k_t = record_transpose_batched_2d_no_grad(batch_rec, &k_3)?;
+    let ks_entry = record_matmul_batched_no_grad(batch_rec, &k_3, &s_3)?;
+    let q_s = record_matmul_batched_no_grad(batch_rec, &q_3, &s_3)?;
+    let kkt = record_matmul_batched_no_grad(batch_rec, &k_3, &k_t)?;
+    let qkt = record_matmul_batched_no_grad(batch_rec, &q_3, &k_t)?;
+    keepalive.extend([
+        k_t.clone(),
+        ks_entry.clone(),
+        q_s.clone(),
+        kkt.clone(),
+        qkt.clone(),
+    ]);
+
+    let v_4 = vk_reshape(&v_3, &[batch, nv, chunk, dv])?;
+    let kkt_4 = vk_reshape(&kkt, &[batch, nv, chunk, chunk])?;
+    let qkt_4 = vk_reshape(&qkt, &[batch, nv, chunk, chunk])?;
+    let ks_entry_4 = vk_reshape(&ks_entry, &[batch, nv, chunk, dv])?;
+    let q_s_4 = vk_reshape(&q_s, &[batch, nv, chunk, dv])?;
+    keepalive.extend([
+        v_4.clone(),
+        kkt_4.clone(),
+        qkt_4.clone(),
+        ks_entry_4.clone(),
+        q_s_4.clone(),
+    ]);
+
+    let prep = record_gdn_chunk_prep_no_grad(
+        batch_rec,
+        g_c,
+        &v_4,
+        &kkt_4,
+        &qkt_4,
+        &ks_entry_4,
+        &q_s_4,
+        batch,
+        nv,
+        chunk,
+        dv,
+    )?;
+    keepalive.extend([
+        prep.a_strict.clone(),
+        prep.b_mask.clone(),
+        prep.v_prime.clone(),
+        prep.q_s_scaled.clone(),
+        prep.decay_last_col.clone(),
+        prep.p_last.clone(),
+    ]);
+
+    let w_4 = record_solve_tri_no_grad(
+        batch_rec,
+        &prep.a_strict,
+        &prep.v_prime,
+        beta_c,
+        batch,
+        nv,
+        chunk,
+        dv,
+    )?;
+    let bmask_3 = vk_reshape(&prep.b_mask, &[bh, chunk, chunk])?;
+    let w_3 = vk_reshape(&w_4, &[bh, chunk, dv])?;
+    let intra_3 = record_matmul_batched_no_grad(batch_rec, &bmask_3, &w_3)?;
+    let intra_4 = vk_reshape(&intra_3, &[batch, nv, chunk, dv])?;
+    let out_chunk = record_add_no_grad(batch_rec, &prep.q_s_scaled, &intra_4)?;
+    keepalive.extend([
+        w_4.clone(),
+        bmask_3.clone(),
+        w_3.clone(),
+        intra_3.clone(),
+        intra_4.clone(),
+        out_chunk.clone(),
+    ]);
+
+    let decay_dlc_4 = vk_reshape(&prep.decay_last_col, &[batch, nv, chunk, 1])?;
+    let w_weighted_4 = record_broadcast_mul_lastdim_no_grad(batch_rec, &w_4, &decay_dlc_4, dv)?;
+    keepalive.extend([decay_dlc_4, w_weighted_4.clone()]);
+
+    Ok((out_chunk, w_weighted_4, prep.p_last, k_t))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_state_update(
+    batch_rec: &mut CommandBatch<'_>,
+    state: &VkTensor,
+    p_last: &VkTensor,
+    k_t: &VkTensor,
+    w_weighted: &VkTensor,
+    batch: usize,
+    nv: usize,
+    dk: usize,
+    dv: usize,
+    chunk: usize,
+    keepalive: &mut Vec<VkTensor>,
+) -> Result<VkTensor> {
+    let bh = batch * nv;
+    let s_2d = vk_reshape(state, &[bh, dk * dv])?;
+    let p_2d = vk_reshape(p_last, &[bh, 1])?;
+    let s_scaled_2d = record_broadcast_mul_lastdim_no_grad(batch_rec, &s_2d, &p_2d, dk * dv)?;
+    let s_scaled_4d = vk_reshape(&s_scaled_2d, &[batch, nv, dk, dv])?;
+    let w_3 = vk_reshape(w_weighted, &[bh, chunk, dv])?;
+    let delta_3 = record_matmul_batched_no_grad(batch_rec, k_t, &w_3)?;
+    let delta_4 = vk_reshape(&delta_3, &[batch, nv, dk, dv])?;
+    let out = record_add_no_grad(batch_rec, &s_scaled_4d, &delta_4)?;
+    keepalive.extend([
+        s_2d,
+        p_2d,
+        s_scaled_2d,
+        s_scaled_4d,
+        w_3,
+        delta_3,
+        delta_4,
+        out.clone(),
+    ]);
+    Ok(out)
+}
+
+/// Record a full chunkwise GDN prefill scan into an existing command batch.
+///
+/// This is the single-submit counterpart to
+/// [`vk_gdn_chunkwise_forward_no_grad`]. It records the same per-chunk
+/// matmul/prep/solve/update/scatter sequence without submitting or reading
+/// back between kernels. The returned [`GdnChunkwisePrefillRecord`] must stay
+/// alive until the batch has been submitted, because it owns all transient
+/// buffers referenced by the recorded command buffer.
+pub fn record_gdn_chunkwise_prefill_block_into(
+    batch_rec: &mut CommandBatch<'_>,
+    q: &VkTensor,
+    k: &VkTensor,
+    v: &VkTensor,
+    beta: &VkTensor,
+    g: &VkTensor,
+    state: &VkTensor,
+    chunk_size: usize,
+) -> Result<GdnChunkwisePrefillRecord> {
+    let dims = q.shape();
+    anyhow::ensure!(
+        dims.len() == 4,
+        "record_gdn_chunkwise_prefill_block_into: q rank-4"
+    );
+    anyhow::ensure!(
+        q.dtype() == VkDType::F32
+            && k.dtype() == VkDType::F32
+            && v.dtype() == VkDType::F32
+            && beta.dtype() == VkDType::F32
+            && g.dtype() == VkDType::F32
+            && state.dtype() == VkDType::F32,
+        "record_gdn_chunkwise_prefill_block_into: F32-only"
+    );
+    anyhow::ensure!(
+        std::env::var("KILN_VK_SOLVE_TRI_CPU").is_err(),
+        "record_gdn_chunkwise_prefill_block_into: KILN_VK_SOLVE_TRI_CPU requires fallback path"
+    );
+
+    let batch = dims[0];
+    let nv = dims[1];
+    let seq_len = dims[2];
+    let dk = dims[3];
+    let dv = v.shape()[3];
+    anyhow::ensure!(
+        k.shape() == q.shape(),
+        "record_gdn_chunkwise_prefill_block_into: k/q shape mismatch"
+    );
+    anyhow::ensure!(
+        v.shape() == [batch, nv, seq_len, dv],
+        "record_gdn_chunkwise_prefill_block_into: v shape mismatch"
+    );
+    anyhow::ensure!(
+        beta.shape() == [batch, nv, seq_len],
+        "record_gdn_chunkwise_prefill_block_into: beta shape mismatch"
+    );
+    anyhow::ensure!(
+        g.shape() == [batch, nv, seq_len],
+        "record_gdn_chunkwise_prefill_block_into: g shape mismatch"
+    );
+    anyhow::ensure!(
+        state.shape() == [batch, nv, dk, dv],
+        "record_gdn_chunkwise_prefill_block_into: state shape mismatch"
+    );
+    anyhow::ensure!(
+        chunk_size > 0 && chunk_size <= 64 && dv <= 256,
+        "record_gdn_chunkwise_prefill_block_into: shader caps require 0<chunk<=64 and dv<=256"
+    );
+
+    let device = q.device();
+    let bh = batch * nv;
+    let out_buf = alloc_f32(device, bh * seq_len * dv)?;
+    let out_full = VkTensor::from_buffer(
+        out_buf,
+        vec![batch, nv, seq_len, dv],
+        VkDType::F32,
+        Arc::clone(device),
+    );
+    let dst_view = vk_reshape(&out_full, &[bh, seq_len * dv])?;
+
+    let full_chunks = seq_len / chunk_size;
+    let tail = seq_len - full_chunks * chunk_size;
+    let total_chunks = full_chunks + if tail > 0 { 1 } else { 0 };
+    let mut state_cur = state.clone();
+    let mut keepalive = Vec::with_capacity(total_chunks * 40 + 4);
+    keepalive.extend([out_full.clone(), dst_view.clone(), state_cur.clone()]);
+
+    for ci in 0..total_chunks {
+        let is_tail = ci >= full_chunks;
+        let c = if is_tail { tail } else { chunk_size };
+        let t_start = ci * chunk_size;
+
+        let q_c = record_time_narrow_no_grad(batch_rec, q, t_start, c, dk)?;
+        let k_c = record_time_narrow_no_grad(batch_rec, k, t_start, c, dk)?;
+        let v_c = record_time_narrow_no_grad(batch_rec, v, t_start, c, dv)?;
+        let beta_c = record_time_narrow_3d_no_grad(batch_rec, beta, t_start, c)?;
+        let g_c = record_time_narrow_3d_no_grad(batch_rec, g, t_start, c)?;
+        keepalive.extend([
+            q_c.clone(),
+            k_c.clone(),
+            v_c.clone(),
+            beta_c.clone(),
+            g_c.clone(),
+        ]);
+
+        let (out_chunk, w_weighted, p_last, k_t) = record_chunk_forward_no_grad(
+            batch_rec,
+            &q_c,
+            &k_c,
+            &v_c,
+            &beta_c,
+            &g_c,
+            &state_cur,
+            batch,
+            nv,
+            c,
+            dk,
+            dv,
+            &mut keepalive,
+        )?;
+
+        let chunk_view = vk_reshape(&out_chunk, &[bh, c * dv])?;
+        record_scatter_to_lastdim_slice_inplace(
+            batch_rec,
+            &dst_view,
+            &chunk_view,
+            t_start * dv,
+            c * dv,
+        )?;
+        keepalive.extend([out_chunk, chunk_view]);
+
+        state_cur = record_state_update(
+            batch_rec,
+            &state_cur,
+            &p_last,
+            &k_t,
+            &w_weighted,
+            batch,
+            nv,
+            dk,
+            dv,
+            c,
+            &mut keepalive,
+        )?;
+    }
+
+    Ok(GdnChunkwisePrefillRecord {
+        out: out_full,
+        state: state_cur,
+        _keepalive: keepalive,
+    })
+}
+
+/// Single-submit chunkwise GDN prefill forward.
+///
+/// Creates one [`CommandBatch`], records the full prefill scan via
+/// [`record_gdn_chunkwise_prefill_block_into`], submits once, then replaces the
+/// caller's state with the final device-local state buffer.
+pub fn vk_gdn_chunkwise_forward_no_grad_single_submit(
+    q: &VkTensor,
+    k: &VkTensor,
+    v: &VkTensor,
+    beta: &VkTensor,
+    g: &VkTensor,
+    state: &mut VkTensor,
+    chunk_size: usize,
+) -> Result<VkTensor> {
+    let mut batch = CommandBatch::new(q.device())?;
+    let record =
+        record_gdn_chunkwise_prefill_block_into(&mut batch, q, k, v, beta, g, state, chunk_size)?;
+    let out = record.out.clone();
+    let new_state = record.state.clone();
+    batch.submit_and_wait("gdn chunkwise prefill single-submit")?;
+    *state = new_state;
+    drop(record);
+    Ok(out)
 }
 
 /// Forward chunkwise GDN recurrence.

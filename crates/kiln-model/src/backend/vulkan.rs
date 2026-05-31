@@ -4141,10 +4141,47 @@ impl BackendRuntime for VulkanBackend {
         let state_shape = state_kt.shape().to_vec();
         let mut state_vk = load(state_kt)?;
 
-        let out_vk = kiln_vulkan_kernel::vk_ops::gdn_chunkwise::vk_gdn_chunkwise_forward_no_grad(
-            &q_vk, &k_vk, &v_vk, &beta_vk, &g_vk, &mut state_vk, chunk_size,
-        )
-        .context("vk_gdn_chunkwise_forward_no_grad")?;
+        let out_vk =
+            if std::env::var("KILN_DISABLE_VULKAN_GDN_CHUNKWISE_SINGLE_SUBMIT").is_err() {
+                match kiln_vulkan_kernel::vk_ops::gdn_chunkwise::vk_gdn_chunkwise_forward_no_grad_single_submit(
+                    &q_vk,
+                    &k_vk,
+                    &v_vk,
+                    &beta_vk,
+                    &g_vk,
+                    &mut state_vk,
+                    chunk_size,
+                ) {
+                    Ok(out) => out,
+                    Err(err) => {
+                        tracing::warn!(
+                            error = %err,
+                            "single-submit Vulkan GDN chunkwise prefill failed; falling back"
+                        );
+                        kiln_vulkan_kernel::vk_ops::gdn_chunkwise::vk_gdn_chunkwise_forward_no_grad(
+                            &q_vk,
+                            &k_vk,
+                            &v_vk,
+                            &beta_vk,
+                            &g_vk,
+                            &mut state_vk,
+                            chunk_size,
+                        )
+                        .context("vk_gdn_chunkwise_forward_no_grad fallback")?
+                    }
+                }
+            } else {
+                kiln_vulkan_kernel::vk_ops::gdn_chunkwise::vk_gdn_chunkwise_forward_no_grad(
+                    &q_vk,
+                    &k_vk,
+                    &v_vk,
+                    &beta_vk,
+                    &g_vk,
+                    &mut state_vk,
+                    chunk_size,
+                )
+                .context("vk_gdn_chunkwise_forward_no_grad")?
+            };
 
         // Read back output + the updated state into kt (CPU-host) tensors.
         let out_shape = out_vk.shape().to_vec();
