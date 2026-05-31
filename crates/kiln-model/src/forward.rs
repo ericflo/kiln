@@ -28204,6 +28204,317 @@ mod tests {
         Ok(())
     }
 
+    /// bs=1 CUDA-graph-capture+replay vs. eager decode parity.
+    ///
+    /// `cuda_graph.rs` captures the bs=1 decode forward under CUDA stream
+    /// capture (`KILN_CUDA_GRAPHS=true`, the production default) and replays
+    /// it on subsequent steps, baking device pointers into the recorded
+    /// kernel launches. There was NO correctness gate verifying that a
+    /// graph-captured-and-replayed decode produces the SAME logits as the
+    /// equivalent eager (non-graph) decode — a stale / dangling-pointer or
+    /// wrong-buffer bug in capture would silently corrupt decode. This test
+    /// is that gate (and the validation gate before `cuda_graph.rs`'s
+    /// candle buffers flip to kt under #1082).
+    ///
+    /// Strategy: build the same synthetic 1-layer full-attention model the
+    /// C3 dyn-seqlen test uses, then
+    ///   1. compute reference logits with a plain eager `model_forward_paged`
+    ///      on a fresh prefix-only cache, and
+    ///   2. drive `CudaGraphRunner::decode_step_paged` THREE times against a
+    ///      second fresh prefix-only cache at the SAME (token, position,
+    ///      block-table) shape: call 1 = eager warmup, call 2 = stream
+    ///      capture, call 3 = graph replay.
+    /// We assert (a) a graph was actually captured (guards against a silent
+    /// eager fallback making the comparison vacuous), and (b) the replay
+    /// logits match the eager reference with token/argmax parity + a
+    /// bf16-realistic relative bound — mirroring the C3 assertion exactly.
+    ///
+    /// Each `decode_step_paged` call writes the decode token's K/V to the
+    /// same KV slot (`start_pos`, fixed across all three calls) with the
+    /// same value, so the writes are idempotent and the three calls are
+    /// shape- and value-identical — the only thing that changes between
+    /// them is eager vs. captured vs. replayed execution.
+    ///
+    /// bs=1 ONLY: the documented dangling-pointer bug is in the bs>1
+    /// BATCHED graph path (`KILN_CUDA_GRAPHS_BATCHED=1`, default-off); this
+    /// test deliberately does NOT exercise that path.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_cuda_graph_bs1_decode_matches_eager() -> Result<()> {
+        let device = match new_cuda_device(0) {
+            Ok(device) => device,
+            Err(err) => {
+                eprintln!(
+                    "CUDA unavailable, skipping test_cuda_graph_bs1_decode_matches_eager: {err}"
+                );
+                return Ok(());
+            }
+        };
+        if std::env::var("KILN_DISABLE_FUSED_PAGED_DECODE").is_ok() {
+            eprintln!("fused paged decode disabled; skipping bs=1 CUDA-graph parity test");
+            return Ok(());
+        }
+        // Serialise against other env-mutating tests — this test flips
+        // `KILN_CUDA_GRAPHS` for its duration. Mirrors the residency tests.
+        let _guard = RESIDENCY_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        // #1082: `device` is a kt `Device`; the kt cache constructor takes
+        // it directly and the backend dispatch goes through the kt entry
+        // point. `CudaGraphRunner::new` is candle-typed, so bridge once.
+        let device_kt = device;
+        let candle_device = kiln_kt_bridge::candle_device_from_kt(&device_kt)
+            .context("bridge kt device to candle for CudaGraphRunner")?;
+        let backend = crate::backend::for_device_kt(&device);
+
+        // Same synthetic 1-layer full-attention fixture as the C3 test.
+        let vocab = 64usize;
+        let hidden = 512usize;
+        let intermediate = 768usize;
+        let num_heads = 16usize;
+        let num_kv_heads = 4usize;
+        let head_dim = 256usize;
+        let block_size = 16usize;
+        let start_pos = 5usize; // < block_size, so the decode slot == start_pos
+        let token_id = 7u32;
+        let weights = make_bf16_full_attention_gpu_weights(
+            vocab,
+            hidden,
+            intermediate,
+            num_heads,
+            num_kv_heads,
+            head_dim,
+            1,
+            &device,
+        )?;
+        let config = kiln_core::config::ModelConfig {
+            hidden_size: hidden,
+            num_layers: 1,
+            num_attention_heads: num_heads,
+            num_kv_heads,
+            head_dim,
+            intermediate_size: intermediate,
+            vocab_size: vocab,
+            max_position_embeddings: 1024,
+            rms_norm_eps: 1e-6,
+            rope_theta: 10_000.0,
+            dtype: kiln_core::config::DType::BF16,
+            num_full_attention_layers: 1,
+            full_attention_interval: 1,
+            attn_output_gate: false,
+            linear_num_key_heads: num_kv_heads,
+            linear_key_head_dim: head_dim,
+            linear_num_value_heads: num_heads,
+            linear_value_head_dim: head_dim,
+            linear_conv_kernel_dim: 4,
+            partial_rotary_factor: 1.0,
+        };
+
+        // Prefix K/V written at the decode position's run so the paged
+        // attention reads a real context. (Same pattern as C3.)
+        let prefix_k =
+            patterned_bf16(&[1, start_pos, num_kv_heads, head_dim], 0.002, &device)?;
+        let prefix_v =
+            patterned_bf16(&[1, start_pos, num_kv_heads, head_dim], 0.003, &device)?;
+        let block_table = BlockTable { blocks: vec![0] };
+        let positions =
+            Tensor::from_slice(&[start_pos as f32], 1usize)?.to_device(device)?;
+
+        // --- (1) Eager reference: fresh cache + fresh linear state. ---
+        let mut ref_cache = crate::PagedKvCacheKt::new(
+            1,
+            1,
+            block_size,
+            num_kv_heads,
+            head_dim,
+            kiln_tensor::DType::BF16,
+            device_kt.index().unwrap_or(0),
+        )?;
+        assert!(ref_cache.write_token_major_native(0, &block_table, 0, &prefix_k, &prefix_v)?);
+        let eager_logits = model_forward_paged(
+            &*backend,
+            &[token_id],
+            &weights,
+            &config,
+            &mut ref_cache,
+            &block_table,
+            start_pos,
+            None,
+            None,
+            Some(&positions),
+        )?;
+        synchronize_for_profile(&device)?;
+        // Bridge kt logits -> candle so both sides use the identical
+        // candle->host f32 conversion (the graph path returns candle).
+        let eager_candle = kt_logits_to_candle(&eager_logits)?;
+        assert_eq!(eager_candle.dims(), &[1usize, 1usize, vocab]);
+        let eager: Vec<f32> = eager_candle
+            .to_dtype(candle_core::DType::F32)?
+            .flatten_all()?
+            .to_vec1::<f32>()?;
+
+        // --- (2) Graph path: warmup -> capture -> replay. ---
+        // Enable graphs for the duration of this test only.
+        let prev_graphs = std::env::var("KILN_CUDA_GRAPHS").ok();
+        unsafe { std::env::set_var("KILN_CUDA_GRAPHS", "true") };
+
+        let result = (|| -> Result<()> {
+            let mut runner = crate::cuda_graph::CudaGraphRunner::new(&candle_device, true);
+            assert!(
+                runner.is_enabled(),
+                "CUDA graph runner must be enabled on a CUDA device"
+            );
+
+            let mut graph_cache = crate::PagedKvCacheKt::new(
+                1,
+                1,
+                block_size,
+                num_kv_heads,
+                head_dim,
+                kiln_tensor::DType::BF16,
+                device_kt.index().unwrap_or(0),
+            )?;
+            assert!(graph_cache.write_token_major_native(
+                0,
+                &block_table,
+                0,
+                &prefix_k,
+                &prefix_v
+            )?);
+            let mut linear_state = LinearAttentionState::new(&config, &device)?;
+
+            // Three steps at the identical (token, position, block-table)
+            // shape. Each writes the same decode K/V to slot=start_pos
+            // (idempotent value), so the only difference between the calls
+            // is eager-warmup vs. capture vs. replay. A plain local fn
+            // (not a closure) so the `&mut runner` borrow ends after each
+            // call — letting us inspect `runner` state between steps.
+            #[allow(clippy::too_many_arguments)]
+            fn run_decode_step(
+                runner: &mut crate::cuda_graph::CudaGraphRunner,
+                backend: &dyn BackendRuntime,
+                token_id: u32,
+                weights: &GpuWeights,
+                config: &kiln_core::config::ModelConfig,
+                graph_cache: &crate::PagedKvCacheKt,
+                block_table: &BlockTable,
+                start_pos: usize,
+                linear_state: &mut LinearAttentionState,
+                device: &Device,
+                vocab: usize,
+            ) -> Result<Vec<f32>> {
+                let logits_candle = runner.decode_step_paged(
+                    backend,
+                    token_id,
+                    weights,
+                    config,
+                    graph_cache,
+                    block_table,
+                    start_pos,
+                    linear_state,
+                    None,
+                )?;
+                synchronize_for_profile(device)?;
+                assert_eq!(logits_candle.dims(), &[1usize, 1usize, vocab]);
+                Ok(logits_candle
+                    .to_dtype(candle_core::DType::F32)?
+                    .flatten_all()?
+                    .to_vec1::<f32>()?)
+            }
+            let step = |runner: &mut crate::cuda_graph::CudaGraphRunner,
+                        linear_state: &mut LinearAttentionState|
+             -> Result<Vec<f32>> {
+                run_decode_step(
+                    runner,
+                    &*backend,
+                    token_id,
+                    &weights,
+                    &config,
+                    &graph_cache,
+                    &block_table,
+                    start_pos,
+                    linear_state,
+                    &device,
+                    vocab,
+                )
+            };
+
+            let _warmup = step(&mut runner, &mut linear_state)?; // call 1: eager warmup
+            let _captured = step(&mut runner, &mut linear_state)?; // call 2: stream capture
+            // Guard against silent eager fallback: a graph MUST have been
+            // captured by now, otherwise this "parity" test is comparing
+            // eager-against-eager and proves nothing about capture/replay.
+            assert!(
+                runner.is_enabled(),
+                "CUDA graph runner disabled itself (capture failed) — bs=1 graph capture \
+                 should succeed on a CUDA device; parity would be vacuous"
+            );
+            assert!(
+                runner.captured_graph_count() >= 1,
+                "no CUDA graph was captured after warmup+capture steps — decode_step_paged \
+                 silently fell back to eager, so this parity check would be vacuous"
+            );
+            let replay = step(&mut runner, &mut linear_state)?; // call 3: graph REPLAY
+
+            // --- Assertions: mirror the C3 token-parity + relative bound. ---
+            let argmax = |v: &[f32]| {
+                v.iter()
+                    .enumerate()
+                    .fold((0usize, f32::NEG_INFINITY), |(bi, bv), (i, &x)| {
+                        if x > bv { (i, x) } else { (bi, bv) }
+                    })
+                    .0
+            };
+            let (ea, ra) = (argmax(&eager), argmax(&replay));
+            // DECODE-CORRECTNESS gate: the graph-replayed decode MUST pick the
+            // same token as eager. A stale/dangling-pointer or wrong-buffer
+            // capture bug flips this; bf16 rounding noise does not (top-2 gap
+            // dwarfs it).
+            assert_eq!(
+                ea, ra,
+                "CUDA-graph replay and eager decode picked DIFFERENT tokens \
+                 (graph={ra} eager={ea}) — a real graph-replay corruption, not bf16 noise"
+            );
+            let max_abs_diff = eager
+                .iter()
+                .zip(&replay)
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0f32, f32::max);
+            let mean_abs_diff = eager
+                .iter()
+                .zip(&replay)
+                .map(|(a, b)| (a - b).abs())
+                .sum::<f32>()
+                / eager.len() as f32;
+            let max_abs_logit = eager.iter().map(|x| x.abs()).fold(0.0f32, f32::max).max(1e-6);
+            eprintln!(
+                "cuda graph bs=1 decode parity (start_pos={start_pos}, token={token_id}): \
+                 graph_token={ra} eager_token={ea} \
+                 max_abs_diff={max_abs_diff:e} ({:.3}% of max|logit|={max_abs_logit:e}) \
+                 mean_abs_diff={mean_abs_diff:e}",
+                100.0 * max_abs_diff / max_abs_logit
+            );
+            // bf16-realistic RELATIVE bound. Graph capture/replay should be
+            // bit-identical to its own eager warmup (same kernels, same
+            // pointers); any divergence vs. the independent eager reference
+            // is at most bf16 GEMM-shape noise, well under 0.5% of the logit
+            // magnitude. A capture bug would be >>1% relative.
+            assert!(
+                max_abs_diff <= 5e-3 * max_abs_logit,
+                "CUDA-graph replay max_abs_diff={max_abs_diff:e} exceeds 0.5% of \
+                 max|logit|={max_abs_logit:e} — larger than bf16 GEMM-shape noise, \
+                 indicates graph capture/replay corruption"
+            );
+            Ok(())
+        })();
+
+        // Restore the env var regardless of test outcome.
+        match prev_graphs {
+            Some(v) => unsafe { std::env::set_var("KILN_CUDA_GRAPHS", v) },
+            None => unsafe { std::env::remove_var("KILN_CUDA_GRAPHS") },
+        }
+        result
+    }
+
     #[cfg(feature = "metal")]
     #[test]
     fn test_model_forward_paged_decode_contiguous_batch_hybrid_matches_rowwise_metal() -> Result<()>

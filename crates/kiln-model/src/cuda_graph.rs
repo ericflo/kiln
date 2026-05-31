@@ -497,6 +497,22 @@ impl CudaGraphRunner {
         self.enabled
     }
 
+    /// Number of bs=1 decode graphs currently captured (one per distinct
+    /// paged-metadata shape).
+    ///
+    /// `pub(crate)` test-only accessor (#1082): exists so the bs=1
+    /// CUDA-graph-vs-eager decode-parity test
+    /// (`forward.rs::test_cuda_graph_bs1_decode_matches_eager`) can assert
+    /// that a graph was actually *captured* — i.e. the parity check
+    /// exercised the real capture+replay path and did not silently fall
+    /// back to eager (which would make the comparison vacuously pass).
+    /// Reads the private `captured` map count without exposing the map
+    /// itself; touches no graph logic.
+    #[cfg(feature = "cuda")]
+    pub(crate) fn captured_graph_count(&self) -> usize {
+        self.captured.len()
+    }
+
     /// Whether multi-batch CUDA graph capture/replay is enabled.
     ///
     /// Even when `is_enabled()` is true, the batched path is gated on
