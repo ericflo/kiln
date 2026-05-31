@@ -124,8 +124,9 @@ measurement does not depend on the app-layer tensor stack.
 
 Other proper work-packages for full saturation (per "max out the hardware in
 every config"):
-- **True multi-row batched resident decode** (bs>1 / continuous-batched is
-  currently rowwise-serialized through the fast bs=1 path).
+- **True multi-row batched resident decode** (bs>1 / continuous-batched
+  routing is wired; remaining work is end-to-end perf validation and saturation
+  tuning).
   **Update — first native resident batch primitive landed:** added
   `paged_kv_write_slots`, a Vulkan dispatch that copies `[batch,
   num_kv_heads * head_dim]` projected K/V rows into per-row resolved KV-cache
@@ -147,6 +148,15 @@ every config"):
   **Update — fused batched add+RMSNorm:** added `add_qwen_rmsnorm_batched`,
   closing the other single-row fused residual dependency in the resident block
   recorder while preserving one dispatch per residual+norm pair.
+  **Update — resident batch route wired:** greedy continuous-batched Vulkan
+  decode now defaults to the multi-row path instead of the server-side rowwise
+  loop. `model_forward_paged_decode_contiguous_batch_greedy_with_ids` routes
+  stable row-ID batches through the resident transformer-stack + argmax
+  `CommandBatch`; row prompt K/V is seeded once per full-attention layer and
+  then resident per-token slot writes remain authoritative. Mixed existing/new
+  GDN rows seed missing kt-keyed resident recurrent + conv state before batch
+  assembly. No-ID callers decline the resident route and use the portable path
+  to avoid unsafe cache reuse.
 - **Vulkan paged-attention decode kernel**: the kernel crate already had
   `paged_attn_decode_batch_paged.comp`; Vulkan now advertises
   `supports_flash_attn_paged_decode` and wires the single-query paged-decode
