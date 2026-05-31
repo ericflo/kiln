@@ -44,6 +44,7 @@ const WARMUP_ITERS: usize = 10;
 const TIMED_ITERS: usize = 30;
 const REPEATS: usize = 5;
 const DEFAULT_BATCHES: &[usize] = &[1, 4, 8, 16, 32, 64];
+const MLP_BF16_ROWS8_MIN_BATCH: usize = 128;
 
 /// Deterministic flat `Vec<bf16>` weight data for byte/slice dispatch entries.
 fn make_bf16_weight_slice(rows: usize, cols: usize) -> Vec<bf16> {
@@ -105,7 +106,8 @@ fn linear_bf16w_batched_plan(batch: usize, out_dim: usize) -> (&'static str, u32
 }
 
 fn mlp_gate_up_bf16w_batched_plan(batch: usize, intermediate: usize) -> (&'static str, u32) {
-    let rows8 = batch >= 64 && enabled_unless_disabled("KILN_DISABLE_VULKAN_MLP_BF16_ROWS8");
+    let rows8 = batch >= MLP_BF16_ROWS8_MIN_BATCH
+        && enabled_unless_disabled("KILN_DISABLE_VULKAN_MLP_BF16_ROWS8");
     let rows4 = batch >= 8
         && !rows8
         && enabled_unless_disabled("KILN_DISABLE_VULKAN_MLP_BF16_GATE_UP_ROWS4");
@@ -128,7 +130,8 @@ fn mlp_gate_up_bf16w_batched_plan(batch: usize, intermediate: usize) -> (&'stati
 }
 
 fn mlp_down_bf16w_batched_plan(batch: usize, out_dim: usize) -> (&'static str, u32) {
-    let rows8 = batch >= 64 && enabled_unless_disabled("KILN_DISABLE_VULKAN_MLP_BF16_ROWS8");
+    let rows8 = batch >= MLP_BF16_ROWS8_MIN_BATCH
+        && enabled_unless_disabled("KILN_DISABLE_VULKAN_MLP_BF16_ROWS8");
     let rows4 =
         batch >= 32 && !rows8 && enabled_unless_disabled("KILN_DISABLE_VULKAN_MLP_BF16_DOWN_ROWS4");
     if rows8 {
@@ -150,7 +153,8 @@ fn mlp_down_bf16w_batched_plan(batch: usize, out_dim: usize) -> (&'static str, u
 }
 
 fn mlp_down_add_residual_bf16w_batched_plan(batch: usize, out_dim: usize) -> (&'static str, u32) {
-    let rows8 = batch >= 64 && enabled_unless_disabled("KILN_DISABLE_VULKAN_MLP_BF16_ROWS8");
+    let rows8 = batch >= MLP_BF16_ROWS8_MIN_BATCH
+        && enabled_unless_disabled("KILN_DISABLE_VULKAN_MLP_BF16_ROWS8");
     let rows4 =
         batch >= 32 && !rows8 && enabled_unless_disabled("KILN_DISABLE_VULKAN_MLP_BF16_DOWN_ROWS4");
     if rows8 {

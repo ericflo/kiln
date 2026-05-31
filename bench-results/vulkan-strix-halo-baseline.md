@@ -174,11 +174,12 @@ every config"):
   | 8 | 92.7 ms | 86 |
   | 16 | 133.1 ms | 120 |
   | 32 | 200.0 ms | 160 |
-  | 64 | 416.7 ms | 154 |
+  | 64 | 374.6 ms | 171 |
 
-  Throughput now scales to about 160 rows/s at batch 32 on this APU; batch 64
-  is slightly worse, so the next tuning target is deeper tiling/cache reuse
-  inside the large projection/MLP shaders rather than host submit count.
+  Throughput now scales to about 171 rows/s at batch 64 on this APU after
+  keeping the batch-64 MLP path on rows4. The next tuning target is deeper
+  tiling/cache reuse inside the large projection/MLP shaders rather than host
+  submit count.
   **Update — GDN resident recorder uses row-reuse in-proj:** the batched GDN
   `CommandBatch` recorder now selects the same pair QKV/Z plus rows2/rows4
   BF16 in-proj shaders as the standalone dispatcher. Focused
@@ -210,11 +211,14 @@ every config"):
   | 4 | 2.28 ms | 1,757 |
   | 8 | 3.39 ms | 2,358 |
   | 32 | 7.16 ms | 4,467 |
-  | 64 | 16.80 ms | 3,809 |
+  | 64 | 14.83 ms | 4,315 |
 
-  This gives a realistic GDN-side decode saturation baseline. Throughput peaks
-  at batch 32 and drops at batch 64, which points to large-projection and MLP
-  tiling/memory pressure as the next useful tuning target.
+  This gives a realistic GDN-side decode saturation baseline. A follow-up
+  planner change keeps batch 64 on the rows4 MLP shader path by default because
+  rows8 was slower on STRIX_HALO at this size. That improved the GDN block from
+  16.80 ms / 3,809 rows/s to 14.83 ms / 4,315 rows/s at batch 64, and improved
+  the synthetic full-token resident batch-64 case from 416.7 ms / 154 rows/s to
+  374.6 ms / 171 rows/s.
 - **Vulkan paged-attention decode kernel**: the kernel crate already had
   `paged_attn_decode_batch_paged.comp`; Vulkan now advertises
   `supports_flash_attn_paged_decode` and wires the single-query paged-decode

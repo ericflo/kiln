@@ -6,6 +6,8 @@ use half::bf16;
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
+const MLP_BF16_ROWS8_MIN_BATCH: usize = 128;
+
 fn env_truthy_for_profile(name: &str) -> bool {
     std::env::var(name)
         .map(|value| {
@@ -4543,16 +4545,14 @@ fn dispatch_mlp_decode_cached_impl(
     let gate_up_rows2 = !gate_up_bf16_weights && use_prefill_row_pair_matmul(batch);
     // For the all-bf16 MLP, the rows4 / rows8 amortization only beats the
     // per-batch-row bf16w kernel once we have enough rows to keep the SMs
-    // full: rows4 cuts workgroup count by 4×, rows8 by 8×. On NVIDIA RTX
-    // 6000 Ada the empirical crossover is batch ≈ 32 (rows4) and batch ≈ 64
-    // (rows8) — at smaller batches the unbatched bf16w kernel wins because
-    // it puts batch×col_groups workgroups on the GPU. The f32-down rows4
-    // path keeps its older batch≥8 threshold because reading 4 B/weight
-    // makes weight-read reuse pay off sooner. See decode_microbench output
-    // in PR description for the empirical curve.
+    // full: rows4 cuts workgroup count by 4×, rows8 by 8×. Batch 64 is
+    // still faster with rows4 on the Strix Halo APU, so rows8 starts at a
+    // larger default batch and remains env-gated for experimentation. The
+    // f32-down rows4 path keeps its older batch≥8 threshold because reading
+    // 4 B/weight makes weight-read reuse pay off sooner.
     let rows8_path = gate_up_bf16_weights
         && down_bf16_weights
-        && batch >= 64
+        && batch >= MLP_BF16_ROWS8_MIN_BATCH
         && mlp_bf16_rows8_enabled();
     let down_bf16_rows4 = down_bf16_weights
         && gate_up_bf16_weights

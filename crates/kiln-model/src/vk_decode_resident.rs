@@ -39,6 +39,7 @@ use crate::backend::vulkan::VulkanBackend;
 use crate::forward::GpuLayerWeights;
 use crate::PagedKvCacheKt;
 
+const MLP_BF16_ROWS8_MIN_BATCH: usize = 128;
 
 // (#1082) The process-global `KT_WEIGHT_CANDLE_CACHE` + `kt_weight_to_candle_cached`
 // bridge are gone. They existed to give the candle-keyed `cached_*_weight_buffer`
@@ -107,7 +108,8 @@ fn linear_bf16w_batched_plan(batch: usize, out_dim: usize) -> (&'static str, u32
 }
 
 fn mlp_gate_up_bf16w_batched_plan(batch: usize, intermediate: usize) -> (&'static str, u32) {
-    let rows8 = batch >= 64 && enabled_unless_disabled("KILN_DISABLE_VULKAN_MLP_BF16_ROWS8");
+    let rows8 = batch >= MLP_BF16_ROWS8_MIN_BATCH
+        && enabled_unless_disabled("KILN_DISABLE_VULKAN_MLP_BF16_ROWS8");
     let rows4 = batch >= 8
         && !rows8
         && enabled_unless_disabled("KILN_DISABLE_VULKAN_MLP_BF16_GATE_UP_ROWS4");
@@ -130,7 +132,8 @@ fn mlp_gate_up_bf16w_batched_plan(batch: usize, intermediate: usize) -> (&'stati
 }
 
 fn mlp_down_add_residual_bf16w_batched_plan(batch: usize, out_dim: usize) -> (&'static str, u32) {
-    let rows8 = batch >= 64 && enabled_unless_disabled("KILN_DISABLE_VULKAN_MLP_BF16_ROWS8");
+    let rows8 = batch >= MLP_BF16_ROWS8_MIN_BATCH
+        && enabled_unless_disabled("KILN_DISABLE_VULKAN_MLP_BF16_ROWS8");
     let rows4 = batch >= 32
         && !rows8
         && enabled_unless_disabled("KILN_DISABLE_VULKAN_MLP_BF16_DOWN_ROWS4");
