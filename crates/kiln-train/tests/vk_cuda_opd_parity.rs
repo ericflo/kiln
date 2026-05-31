@@ -35,7 +35,7 @@ use anyhow::Result;
 // the shim) is numerically equivalent to the fused `kiln_opd_topk_kl_fwd_*`
 // kernel up to f32 associativity; the cross-engine tolerance below
 // (`1e-4` abs / `1e-3` rel) accommodates that difference.
-use kiln_train::opd_candle_shim::opd_top_k_reverse_kl_per_position_via_kt_forward_op;
+use kiln_opd_loss_kernel::opd_top_k_reverse_kl_per_position_kt;
 use kiln_vulkan_kernel::vk_ops::opd::vk_opd_top_k_reverse_kl_per_position;
 use kiln_vulkan_kernel::vk_tensor::VkTensor;
 use kiln_vulkan_kernel::VulkanDevice;
@@ -48,8 +48,9 @@ fn vk_dev() -> Option<Arc<VulkanDevice>> {
     VulkanDevice::new().ok().map(Arc::new)
 }
 
-fn cuda_dev() -> Option<candle_core::Device> {
-    candle_core::Device::new_cuda(0).ok()
+fn cuda_available() -> bool {
+    // (#1082) kt-native CUDA-availability probe (was a candle `Device::new_cuda`).
+    kiln_tensor::primary_cuda_context(0).is_ok()
 }
 
 /// Build a deterministic test case usable for both backends.
@@ -104,7 +105,6 @@ fn deterministic_case(
 }
 
 fn run_cuda_per_position(
-    cuda: &candle_core::Device,
     hidden: &[f32],
     head_vh: &[f32],
     idx: &[u32],
@@ -115,28 +115,21 @@ fn run_cuda_per_position(
     vocab_size: usize,
     top_k: usize,
 ) -> Result<Vec<f32>> {
-    // Upload as candle CUDA tensors. `head_t` is `[H, V]`; we have the
-    // weight as `[V, H]`, transpose on the way in.
-    let hidden_t =
-        candle_core::Tensor::from_vec(hidden.to_vec(), (1, seq_len, hidden_size), cuda)?;
-    let head_vh_t =
-        candle_core::Tensor::from_vec(head_vh.to_vec(), (vocab_size, hidden_size), cuda)?;
+    // (#1082) kt-native CUDA reference. Build kt CUDA tensors and run the kt
+    // forward kernel `opd_top_k_reverse_kl_per_position_kt` DIRECTLY — the same
+    // code path the trainer runs in `opd_step_loss`. No candle. `head_t` is
+    // `[H, V]`; we have the weight as `[V, H]`, transpose on the way in.
+    let hidden_t = kiln_tensor::Tensor::from_vec(hidden.to_vec(), (1, seq_len, hidden_size))?
+        .to_device(kiln_tensor::Device::Cuda(0))?;
+    let head_vh_t = kiln_tensor::Tensor::from_vec(head_vh.to_vec(), (vocab_size, hidden_size))?
+        .to_device(kiln_tensor::Device::Cuda(0))?;
     let head_t = head_vh_t.transpose(0, 1)?.contiguous()?; // [H, V]
-    // Routes through the production kt-shim: forward composite via
-    // `opd_top_k_reverse_kl_per_position_kt` on kt CUDA tensors, backward
-    // through the fused `kiln_opd_topk_kl_bwd_*` FFI symbols. This is the
-    // same code path the trainer runs in `opd_step_loss` and is the
-    // §9.2 grand-plan target we're proving cross-engine parity against.
-    let per_pos = opd_top_k_reverse_kl_per_position_via_kt_forward_op(
-        &hidden_t,
-        &head_t,
-        idx,
-        lpq,
-        label_mask,
-        top_k,
-        cuda,
-    )?;
-    let v: Vec<f32> = per_pos.to_dtype(candle_core::DType::F32)?.to_vec1()?;
+    let per_pos = opd_top_k_reverse_kl_per_position_kt(&hidden_t, &head_t, idx, lpq, label_mask, top_k)
+        .map_err(|e| anyhow::anyhow!("cuda kt per-position reverse-KL: {e}"))?;
+    let v: Vec<f32> = per_pos
+        .to_dtype(kiln_tensor::DType::F32)?
+        .flatten_all()?
+        .to_vec1::<f32>()?;
     Ok(v)
 }
 
@@ -179,10 +172,10 @@ fn run_vulkan_per_position(
 }
 
 fn check_cross_engine(top_k: usize) -> Result<()> {
-    let Some(cuda) = cuda_dev() else {
+    if !cuda_available() {
         eprintln!("No CUDA device — skipping");
         return Ok(());
-    };
+    }
     let Some(vk) = vk_dev() else {
         eprintln!("No Vulkan device — skipping");
         return Ok(());
@@ -198,7 +191,6 @@ fn check_cross_engine(top_k: usize) -> Result<()> {
     assert!(active_count > 0, "synthetic case has no active positions");
 
     let cuda_vals = run_cuda_per_position(
-        &cuda,
         &hidden,
         &head_vh,
         &idx,
