@@ -339,6 +339,8 @@ pub fn prewarm_builtin_pipelines(vk_device: &VulkanDevice) -> Result<()> {
         ("gdn_recurrent_qk_norm_step", 7, 24),
         ("gdn_chunk_prep", 12, 16),
         ("gdn_chunk_scan", 8, 16),
+        ("qwen_rmsnorm_forward", 3, 12),
+        ("qwen_rmsnorm_qk_combined", 4, 16),
         ("linear_decode", 3, 8),
         ("add_qwen_rmsnorm", 5, 8),
         ("add_qwen_rmsnorm_batched", 5, 12),
@@ -364,9 +366,12 @@ pub fn prewarm_builtin_pipelines(vk_device: &VulkanDevice) -> Result<()> {
         ("mlp_gate_up_decode_batched_rows4_bf16w", 4, 12),
         ("mlp_gate_up_decode_batched_rows8_bf16w", 4, 12),
         ("mlp_gate_up_decode_batched_rows2", 4, 12),
+        ("paged_kv_write_slot", 4, 8),
         ("paged_kv_write_slots", 5, 12),
         ("paged_attn_decode_batch", 5, 20),
         ("paged_attn_decode_batch_paged", 6, 24),
+        ("paged_attn_decode_batch_paged_splitk", 6, 28),
+        ("paged_attn_decode_batch_paged_splitk_reduce", 2, 12),
     ];
 
     for (shader_name, total_bindings, push_bytes) in shaders {

@@ -50,6 +50,12 @@ pub mod shaders {
     pub const FULL_ATTN_QKV_DECODE_BF16W: &str = shader_path!("full_attn_qkv_decode_bf16w");
     pub const FULL_ATTN_QKV_DECODE_BF16W_WIDE: &str =
         shader_path!("full_attn_qkv_decode_bf16w_wide");
+    pub const FULL_ATTN_QKV_DECODE_BATCHED: &str =
+        shader_path!("full_attn_qkv_decode_batched");
+    pub const FULL_ATTN_QKV_DECODE_BATCHED_BF16W: &str =
+        shader_path!("full_attn_qkv_decode_batched_bf16w");
+    pub const FULL_ATTN_QKV_DECODE_BATCHED_ROWS4_BF16W: &str =
+        shader_path!("full_attn_qkv_decode_batched_rows4_bf16w");
     pub const QKV_GATE_SPLIT: &str = shader_path!("qkv_gate_split");
     pub const QKV_GATE_SPLIT_BATCHED: &str = shader_path!("qkv_gate_split_batched");
     pub const VK_ROPE_F32: &str = shader_path!("vk_rope_f32");
@@ -65,12 +71,15 @@ pub mod shaders {
     pub const LINEAR_DECODE_BF16W_WIDE: &str = shader_path!("linear_decode_bf16w_wide");
     pub const LINEAR_DECODE_BF16W_ADD_RESIDUAL: &str =
         shader_path!("linear_decode_bf16w_add_residual");
+    pub const LINEAR_DECODE_BATCHED_BF16W: &str = shader_path!("linear_decode_batched_bf16w");
     pub const LINEAR_DECODE_BATCHED_BF16W_ADD_RESIDUAL: &str =
         shader_path!("linear_decode_batched_bf16w_add_residual");
     pub const ADD: &str = shader_path!("add");
     pub const ADD_QWEN_RMSNORM: &str = shader_path!("add_qwen_rmsnorm");
     pub const ADD_QWEN_RMSNORM_BATCHED: &str = shader_path!("add_qwen_rmsnorm_batched");
     pub const MLP_GATE_UP_DECODE_BF16W: &str = shader_path!("mlp_gate_up_decode_bf16w");
+    pub const MLP_GATE_UP_DECODE_BATCHED_BF16W: &str =
+        shader_path!("mlp_gate_up_decode_batched_bf16w");
     pub const GDN_IN_PROJ_SPLIT: &str = shader_path!("gdn_in_proj_split");
     pub const GDN_IN_PROJ_SPLIT_BATCHED: &str = shader_path!("gdn_in_proj_split_batched");
     pub const GDN_QKV_SPLIT: &str = shader_path!("gdn_qkv_split");

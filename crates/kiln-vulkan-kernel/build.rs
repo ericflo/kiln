@@ -19,6 +19,18 @@ const SHADERS: &[(&str, &str)] = &[
         "SPIR_V_FULL_ATTN_QKV_DECODE_BF16W",
     ),
     (
+        "full_attn_qkv_decode_batched",
+        "SPIR_V_FULL_ATTN_QKV_DECODE_BATCHED",
+    ),
+    (
+        "full_attn_qkv_decode_batched_bf16w",
+        "SPIR_V_FULL_ATTN_QKV_DECODE_BATCHED_BF16W",
+    ),
+    (
+        "full_attn_qkv_decode_batched_rows4_bf16w",
+        "SPIR_V_FULL_ATTN_QKV_DECODE_BATCHED_ROWS4_BF16W",
+    ),
+    (
         "qkv_gate_split_batched",
         "SPIR_V_QKV_GATE_SPLIT_BATCHED",
     ),
@@ -81,6 +93,10 @@ const SHADERS: &[(&str, &str)] = &[
         "causal_conv1d_state_advance",
         "SPIR_V_CAUSAL_CONV1D_STATE_ADVANCE",
     ),
+    (
+        "gdn_recurrent_qk_norm_step",
+        "SPIR_V_GDN_RECURRENT_QK_NORM_STEP",
+    ),
     ("solve_tri", "SPIR_V_SOLVE_TRI"),
     ("gdn_recurrent_prefill", "SPIR_V_GDN_RECURRENT_PREFILL"),
     (
@@ -124,6 +140,10 @@ const SHADERS: &[(&str, &str)] = &[
         "SPIR_V_VK_MATMUL_BF16W_BWD_ROWS",
     ),
     ("qwen_rmsnorm_forward", "SPIR_V_QWEN_RMSNORM_FORWARD"),
+    (
+        "qwen_rmsnorm_qk_combined",
+        "SPIR_V_QWEN_RMSNORM_QK_COMBINED",
+    ),
     ("qwen_rmsnorm_backward", "SPIR_V_QWEN_RMSNORM_BACKWARD"),
     (
         "linear_decode_batched_rows2",
@@ -195,8 +215,21 @@ const SHADERS: &[(&str, &str)] = &[
         "mlp_gate_up_decode_batched_rows2",
         "SPIR_V_MLP_GATE_UP_DECODE_BATCHED_ROWS2",
     ),
+    ("paged_kv_write_slot", "SPIR_V_PAGED_KV_WRITE_SLOT"),
     ("paged_kv_write_slots", "SPIR_V_PAGED_KV_WRITE_SLOTS"),
     ("paged_attn_decode_batch", "SPIR_V_PAGED_ATTN_DECODE_BATCH"),
+    (
+        "paged_attn_decode_batch_paged",
+        "SPIR_V_PAGED_ATTN_DECODE_BATCH_PAGED",
+    ),
+    (
+        "paged_attn_decode_batch_paged_splitk",
+        "SPIR_V_PAGED_ATTN_DECODE_BATCH_PAGED_SPLITK",
+    ),
+    (
+        "paged_attn_decode_batch_paged_splitk_reduce",
+        "SPIR_V_PAGED_ATTN_DECODE_BATCH_PAGED_SPLITK_REDUCE",
+    ),
     ("flash_attn", "SPIR_V_FLASH_ATTN"),
     ("sdpa_prefill_f32", "SPIR_V_SDPA_PREFILL_F32"),
     ("vk_flash_sdpa_fwd_f32", "SPIR_V_VK_FLASH_SDPA_FWD_F32"),
