@@ -7826,25 +7826,28 @@ pub fn dispatch_gdn_forward_substitution_bytes(
     Ok(out_data)
 }
 
-// ---------------------------------------------------------------------------
-// GDN recurrent step kernel
-pub fn copy_gdn_recurrent_state_rows_to_batch(
+/// Copy same-sized device-local row buffers into one contiguous batch buffer.
+///
+/// The layout is byte-row-major: `rows[row]` is copied into
+/// `[row * row_size .. (row + 1) * row_size)` in the returned buffer.
+/// Used by resident batched decode for both recurrent and conv GDN state.
+pub fn copy_device_buffer_rows_to_batch(
     vk_device: &VulkanDevice,
     rows: &[Arc<VulkanBuffer>],
 ) -> Result<Arc<VulkanBuffer>> {
     anyhow::ensure!(
         !rows.is_empty(),
-        "copy_gdn_recurrent_state_rows_to_batch requires at least one row"
+        "copy_device_buffer_rows_to_batch requires at least one row"
     );
     let row_size = rows[0].size();
     anyhow::ensure!(
         row_size > 0,
-        "copy_gdn_recurrent_state_rows_to_batch row size must be non-zero"
+        "copy_device_buffer_rows_to_batch row size must be non-zero"
     );
     for (idx, row) in rows.iter().enumerate() {
         anyhow::ensure!(
             row.size() == row_size,
-            "copy_gdn_recurrent_state_rows_to_batch row {idx} size {} != row 0 size {row_size}",
+            "copy_device_buffer_rows_to_batch row {idx} size {} != row 0 size {row_size}",
             row.size()
         );
     }
@@ -7862,13 +7865,13 @@ pub fn copy_gdn_recurrent_state_rows_to_batch(
     let cmd_alloc_info = make_cmd_alloc_info(*cmd_pool);
     let command_buffers =
         crate::vk_raw::allocate_command_buffers(device.handle(), &cmd_alloc_info, 1)
-            .context("failed to allocate recurrent row-to-batch copy command buffer")?;
+            .context("failed to allocate row-to-batch copy command buffer")?;
     let cmd = command_buffers[0];
 
     unsafe {
         device
             .begin_command_buffer(cmd, &make_cmd_begin_info())
-            .context("failed to begin recurrent row-to-batch copy command buffer")?;
+            .context("failed to begin row-to-batch copy command buffer")?;
         for (row_idx, row) in rows.iter().enumerate() {
             device.cmd_copy_buffer(
                 cmd,
@@ -7896,37 +7899,40 @@ pub fn copy_gdn_recurrent_state_rows_to_batch(
         );
         device
             .end_command_buffer(cmd)
-            .context("failed to end recurrent row-to-batch copy command buffer")?;
+            .context("failed to end row-to-batch copy command buffer")?;
         device
             .queue_submit(queue, &[make_submit_info(&[cmd])], vk::Fence::null())
-            .context("failed to submit recurrent row-to-batch copy")?;
+            .context("failed to submit row-to-batch copy")?;
         device
             .queue_wait_idle(queue)
-            .context("failed to wait for recurrent row-to-batch copy")?;
+            .context("failed to wait for row-to-batch copy")?;
         device.free_command_buffers(*cmd_pool, &command_buffers);
     }
 
     Ok(batch_buf)
 }
 
-pub fn split_gdn_recurrent_state_batch_rows(
+/// Split a contiguous device-local batch buffer into same-sized row buffers.
+///
+/// `batch_buffer` is interpreted as `batch` byte rows of equal size.
+pub fn split_device_buffer_batch_rows(
     vk_device: &VulkanDevice,
     batch_buffer: &VulkanBuffer,
     batch: usize,
 ) -> Result<Vec<Arc<VulkanBuffer>>> {
     anyhow::ensure!(
         batch > 0,
-        "split_gdn_recurrent_state_batch_rows requires a non-zero batch"
+        "split_device_buffer_batch_rows requires a non-zero batch"
     );
     anyhow::ensure!(
         batch_buffer.size() % batch as u64 == 0,
-        "split_gdn_recurrent_state_batch_rows buffer size {} is not divisible by batch {batch}",
+        "split_device_buffer_batch_rows buffer size {} is not divisible by batch {batch}",
         batch_buffer.size()
     );
     let row_size = batch_buffer.size() / batch as u64;
     anyhow::ensure!(
         row_size > 0,
-        "split_gdn_recurrent_state_batch_rows row size must be non-zero"
+        "split_device_buffer_batch_rows row size must be non-zero"
     );
 
     let device = vk_device.device();
@@ -7945,13 +7951,13 @@ pub fn split_gdn_recurrent_state_batch_rows(
     let cmd_alloc_info = make_cmd_alloc_info(*cmd_pool);
     let command_buffers =
         crate::vk_raw::allocate_command_buffers(device.handle(), &cmd_alloc_info, 1)
-            .context("failed to allocate recurrent batch-to-row copy command buffer")?;
+            .context("failed to allocate batch-to-row copy command buffer")?;
     let cmd = command_buffers[0];
 
     unsafe {
         device
             .begin_command_buffer(cmd, &make_cmd_begin_info())
-            .context("failed to begin recurrent batch-to-row copy command buffer")?;
+            .context("failed to begin batch-to-row copy command buffer")?;
         let pre_copy_barrier = make_memory_barrier(
             vk::AccessFlags::SHADER_WRITE,
             vk::AccessFlags::TRANSFER_READ,
@@ -7992,17 +7998,34 @@ pub fn split_gdn_recurrent_state_batch_rows(
         );
         device
             .end_command_buffer(cmd)
-            .context("failed to end recurrent batch-to-row copy command buffer")?;
+            .context("failed to end batch-to-row copy command buffer")?;
         device
             .queue_submit(queue, &[make_submit_info(&[cmd])], vk::Fence::null())
-            .context("failed to submit recurrent batch-to-row copy")?;
+            .context("failed to submit batch-to-row copy")?;
         device
             .queue_wait_idle(queue)
-            .context("failed to wait for recurrent batch-to-row copy")?;
+            .context("failed to wait for batch-to-row copy")?;
         device.free_command_buffers(*cmd_pool, &command_buffers);
     }
 
     Ok(rows)
+}
+
+// ---------------------------------------------------------------------------
+// GDN recurrent step kernel
+pub fn copy_gdn_recurrent_state_rows_to_batch(
+    vk_device: &VulkanDevice,
+    rows: &[Arc<VulkanBuffer>],
+) -> Result<Arc<VulkanBuffer>> {
+    copy_device_buffer_rows_to_batch(vk_device, rows)
+}
+
+pub fn split_gdn_recurrent_state_batch_rows(
+    vk_device: &VulkanDevice,
+    batch_buffer: &VulkanBuffer,
+    batch: usize,
+) -> Result<Vec<Arc<VulkanBuffer>>> {
+    split_device_buffer_batch_rows(vk_device, batch_buffer, batch)
 }
 
 /// Bytes-only single-token GDN recurrent dispatch.
