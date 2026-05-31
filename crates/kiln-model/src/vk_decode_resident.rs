@@ -3017,3 +3017,64 @@ pub fn prepare_batched_resident_decode_meta_buffers(
         block_size,
     })
 }
+
+/// Convenience wrapper for callers that already have host-side f32
+/// hidden rows and RoPE tables for a batched decode step.
+///
+/// This prepares the resident input/RoPE/metadata buffers, submits the
+/// full batched stack, and returns greedy token IDs. It deliberately
+/// does not do embedding lookup, RoPE table construction, or resident
+/// KV-cache seeding; those remain caller-owned so runtime routing can
+/// control session boundaries explicitly.
+#[allow(clippy::too_many_arguments)]
+pub fn submit_transformer_stack_batched_argmax_from_host(
+    backend: &VulkanBackend,
+    vk_device: &VulkanDevice,
+    hidden_rows: &[f32],
+    rope_cos: &[f32],
+    rope_sin: &[f32],
+    block_tables: &[&BlockTable],
+    start_positions: &[usize],
+    block_size: usize,
+    weights: &crate::forward::GpuWeights,
+    config: &ModelConfig,
+    vk_kv_cache: &VkPagedKvCache,
+    recurrent_states: &[kiln_tensor::Tensor],
+    conv_states: &[kiln_tensor::Tensor],
+) -> Result<Option<Vec<u32>>> {
+    let batch_size = block_tables.len();
+    let step = prepare_batched_resident_decode_step_buffers(
+        backend,
+        hidden_rows,
+        batch_size,
+        config.hidden_size,
+        rope_cos,
+        rope_sin,
+        config.rotary_dim(),
+    )?;
+    let meta = prepare_batched_resident_decode_meta_buffers(
+        backend,
+        block_tables,
+        start_positions,
+        block_size,
+    )?;
+    submit_transformer_stack_batched_argmax(
+        backend,
+        vk_device,
+        &step.input,
+        &step.scratch,
+        weights,
+        config,
+        batch_size,
+        meta.max_blocks_per_seq,
+        meta.block_size,
+        vk_kv_cache,
+        &step.rope_cos,
+        &step.rope_sin,
+        &meta.block_table,
+        &meta.seq_lens,
+        &meta.slots,
+        recurrent_states,
+        conv_states,
+    )
+}
