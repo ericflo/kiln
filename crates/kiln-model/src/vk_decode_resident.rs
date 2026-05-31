@@ -1294,6 +1294,52 @@ fn seed_conv_state(vk_device: &VulkanDevice, buf: &VulkanBuffer, state_t: &candl
     .context("seed conv state")
 }
 
+fn seed_recurrent_state_kt(
+    vk_device: &VulkanDevice,
+    buf: &VulkanBuffer,
+    state_t: &kiln_tensor::Tensor,
+) -> Result<()> {
+    let flat = if state_t.dtype() == kiln_tensor::DType::F32 {
+        state_t.flatten_all()?
+    } else {
+        state_t.to_dtype(kiln_tensor::DType::F32)?.flatten_all()?
+    };
+    let data: Vec<f32> = flat.to_vec1()?;
+    let bytes = f32_slice_to_bytes(&data);
+    VulkanBuffer::upload_data(
+        vk_device.device(),
+        vk_device.host_visible_mem_type(),
+        vk_device.queue(),
+        vk_device.queue_family_index(),
+        buf,
+        &bytes,
+    )
+    .context("seed recurrent kt state")
+}
+
+fn seed_conv_state_kt(
+    vk_device: &VulkanDevice,
+    buf: &VulkanBuffer,
+    state_t: &kiln_tensor::Tensor,
+) -> Result<()> {
+    let flat = if state_t.dtype() == kiln_tensor::DType::F32 {
+        state_t.flatten_all()?
+    } else {
+        state_t.to_dtype(kiln_tensor::DType::F32)?.flatten_all()?
+    };
+    let data: Vec<f32> = flat.to_vec1()?;
+    let bytes = f32_slice_to_bytes(&data);
+    VulkanBuffer::upload_data(
+        vk_device.device(),
+        vk_device.host_visible_mem_type(),
+        vk_device.queue(),
+        vk_device.queue_family_index(),
+        buf,
+        &bytes,
+    )
+    .context("seed conv kt state")
+}
+
 /// Seed only the blocks this request's `block_table` references —
 /// not the multi-GB full pool. For a Qwen3.5-4B request with a 32-
 /// token prompt at block_size=16 that's ~2 blocks × 8 layers × 64 KB =
@@ -1725,8 +1771,8 @@ pub fn record_gdn_block_into(
     x_out_buf: &VulkanBuffer,
     layer: &GpuLayerWeights,
     config: &ModelConfig,
-    recurrent_state_t: &candle_core::Tensor,
-    conv_state_t: &candle_core::Tensor,
+    recurrent_state_t: &kiln_tensor::Tensor,
+    conv_state_t: &kiln_tensor::Tensor,
 ) -> Result<bool> {
     let lin_weights = match &layer.attention {
         crate::forward::GpuAttentionWeights::Linear(w) => w,
@@ -1768,19 +1814,19 @@ pub fn record_gdn_block_into(
     // Persistent state (per-state-key on backend)
     let recurrent_bytes = (1 * nv * dk * dv * 4) as u64;
     let recurrent_buf =
-        backend.linear_attn_recurrent_state_buffer(state_key, recurrent_bytes)?;
+        backend.linear_attn_recurrent_state_buffer_kt(state_key, recurrent_bytes)?;
     let conv_state_bytes = (1 * qkv_dim * (conv_kernel.saturating_sub(1)) * 4) as u64;
-    let conv_buf = backend.linear_attn_conv_state_buffer(state_key, conv_state_bytes)?;
+    let conv_buf = backend.linear_attn_conv_state_buffer_kt(state_key, conv_state_bytes)?;
 
     // Seed states on first call per layer per session (must happen
     // BEFORE batch records reads from these buffers).
-    if !backend.linear_attn_layer_seeded(state_key) {
+    if !backend.linear_attn_layer_seeded_kt(state_key) {
         let Some(vk_device) = backend.vulkan_device() else {
             return Ok(false);
         };
-        seed_recurrent_state(vk_device, &recurrent_buf, recurrent_state_t)?;
-        seed_conv_state(vk_device, &conv_buf, conv_state_t)?;
-        backend.mark_linear_attn_layer_seeded(state_key);
+        seed_recurrent_state_kt(vk_device, &recurrent_buf, recurrent_state_t)?;
+        seed_conv_state_kt(vk_device, &conv_buf, conv_state_t)?;
+        backend.mark_linear_attn_layer_seeded_kt(state_key);
     }
 
     // Shared scratch (pooled, single set across all GDN layers in a batch).

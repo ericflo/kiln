@@ -103,6 +103,12 @@ pub struct VulkanBackend {
         Mutex<HashMap<candle_core::TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>>,
     /// Set of state TensorIds that have been seeded.
     seeded_linear_attn_layers: Mutex<HashSet<candle_core::TensorId>>,
+    /// kt-native mirrors for the single-submit resident decode path.
+    linear_attn_recurrent_state_kt:
+        Mutex<HashMap<kiln_tensor::TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>>,
+    linear_attn_conv_state_kt:
+        Mutex<HashMap<kiln_tensor::TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>>,
+    seeded_linear_attn_layers_kt: Mutex<HashSet<kiln_tensor::TensorId>>,
     /// Last `start_pos` we saw on the Vulkan-resident decode path.
     /// Within a single request the resident decode runs once per
     /// token with monotonically incrementing `start_pos`; a jump
@@ -577,6 +583,9 @@ impl VulkanBackend {
             linear_attn_recurrent_state: Mutex::new(HashMap::new()),
             linear_attn_conv_state: Mutex::new(HashMap::new()),
             seeded_linear_attn_layers: Mutex::new(HashSet::new()),
+            linear_attn_recurrent_state_kt: Mutex::new(HashMap::new()),
+            linear_attn_conv_state_kt: Mutex::new(HashMap::new()),
+            seeded_linear_attn_layers_kt: Mutex::new(HashSet::new()),
             last_resident_start_pos: Mutex::new(None),
             resident_scratch: Mutex::new(HashMap::new()),
             weight_cache: Mutex::new(HashMap::new()),
@@ -835,6 +844,80 @@ impl VulkanBackend {
     pub fn reset_linear_attn_seeded(&self) {
         if let Ok(mut g) = self.seeded_linear_attn_layers.lock() {
             g.clear();
+        }
+        if let Ok(mut g) = self.seeded_linear_attn_layers_kt.lock() {
+            g.clear();
+        }
+    }
+
+    pub fn linear_attn_recurrent_state_buffer_kt(
+        &self,
+        key: kiln_tensor::TensorId,
+        bytes: u64,
+    ) -> Result<Arc<kiln_vulkan_kernel::VulkanBuffer>> {
+        let dev = self
+            .vulkan_device
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
+        let mut g = self
+            .linear_attn_recurrent_state_kt
+            .lock()
+            .map_err(|_| anyhow::anyhow!("kt recurrent state mutex poisoned"))?;
+        if let Some(buf) = g.get(&key) {
+            if buf.size() >= bytes {
+                return Ok(Arc::clone(buf));
+            }
+        }
+        let buf = kiln_vulkan_kernel::VulkanBuffer::create_device_local(
+            dev.device(),
+            dev.device_local_mem_type(),
+            bytes,
+        )
+        .context("alloc kt linear-attn recurrent state buffer")?;
+        let arc = Arc::new(buf);
+        g.insert(key, Arc::clone(&arc));
+        Ok(arc)
+    }
+
+    pub fn linear_attn_conv_state_buffer_kt(
+        &self,
+        key: kiln_tensor::TensorId,
+        bytes: u64,
+    ) -> Result<Arc<kiln_vulkan_kernel::VulkanBuffer>> {
+        let dev = self
+            .vulkan_device
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
+        let mut g = self
+            .linear_attn_conv_state_kt
+            .lock()
+            .map_err(|_| anyhow::anyhow!("kt conv state mutex poisoned"))?;
+        if let Some(buf) = g.get(&key) {
+            if buf.size() >= bytes {
+                return Ok(Arc::clone(buf));
+            }
+        }
+        let buf = kiln_vulkan_kernel::VulkanBuffer::create_device_local(
+            dev.device(),
+            dev.device_local_mem_type(),
+            bytes,
+        )
+        .context("alloc kt linear-attn conv state buffer")?;
+        let arc = Arc::new(buf);
+        g.insert(key, Arc::clone(&arc));
+        Ok(arc)
+    }
+
+    pub fn linear_attn_layer_seeded_kt(&self, key: kiln_tensor::TensorId) -> bool {
+        match self.seeded_linear_attn_layers_kt.lock() {
+            Ok(g) => g.contains(&key),
+            Err(_) => false,
+        }
+    }
+
+    pub fn mark_linear_attn_layer_seeded_kt(&self, key: kiln_tensor::TensorId) {
+        if let Ok(mut g) = self.seeded_linear_attn_layers_kt.lock() {
+            g.insert(key);
         }
     }
 

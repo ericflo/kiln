@@ -22890,10 +22890,6 @@ fn model_forward_paged_last_token_resident_native_vk(
             GpuAttentionWeights::Linear(_) => {
                 let recurrent_t = &state.recurrent_states[linear_attn_idx];
                 let conv_t = &state.conv_states[linear_attn_idx];
-                // record_gdn_block_into is candle-typed; bridge the kt state
-                // tensors to candle CPU for the call (vulkan reads host bytes). (#1082)
-                let recurrent_c = crate::forward::kt_logits_to_candle(recurrent_t)?;
-                let conv_c = crate::forward::kt_logits_to_candle(conv_t)?;
                 let ok = crate::vk_decode_resident::record_gdn_block_into(
                     vk_backend,
                     &mut batch,
@@ -22901,8 +22897,8 @@ fn model_forward_paged_last_token_resident_native_vk(
                     to_buf,
                     layer,
                     config,
-                    &recurrent_c,
-                    &conv_c,
+                    recurrent_t,
+                    conv_t,
                 )?;
                 if !ok {
                     return Ok(None);
