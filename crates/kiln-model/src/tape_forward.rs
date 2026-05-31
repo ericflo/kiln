@@ -3711,8 +3711,9 @@ pub fn try_tape_transpose_cuda(
 /// after gated-RMSNorm). One differentiable input (`x`).
 #[derive(Debug)]
 pub(crate) struct CastCompositeBackward {
-    /// The candle dtype of the forward INPUT — backward casts the grad to it.
-    source_dtype: CandleDType,
+    /// The kt dtype of the forward INPUT — backward casts the grad to it. (#1082:
+    /// was `CandleDType`; now kt so the backward is candle-free.)
+    source_dtype: kiln_tensor::DType,
 }
 
 impl BackwardOp for CastCompositeBackward {
@@ -3726,23 +3727,15 @@ impl BackwardOp for CastCompositeBackward {
         &self,
         grad_output: &kiln_tensor::Tensor,
     ) -> kiln_tensor::Result<Vec<Option<kiln_tensor::Tensor>>> {
-        let grad_c = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(grad_output).map_err(|e| {
-            kiln_tensor::Error::Msg(format!("CastCompositeBackward: grad kt->candle: {e}"))
-        })?;
-        let dx = if grad_c.dtype() == self.source_dtype {
-            grad_c
+        // #1082 kt-native: cast the upstream grad back to the forward input's dtype
+        // with kt ops — no kt->candle->kt bridge. (cast adjoint = cast-back.)
+        let dx = if grad_output.dtype() == self.source_dtype {
+            grad_output.clone()
         } else {
-            grad_c.to_dtype(self.source_dtype).map_err(|e| {
-                kiln_tensor::Error::Msg(format!("CastCompositeBackward: grad cast: {e}"))
-            })?
+            grad_output.to_dtype(self.source_dtype)?
         };
-        let dx = dx
-            .contiguous()
-            .map_err(|e| kiln_tensor::Error::Msg(format!("CastCompositeBackward: contig: {e}")))?;
-        let dx_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_copy(&dx).map_err(|e| {
-            kiln_tensor::Error::Msg(format!("CastCompositeBackward: dx candle->kt: {e}"))
-        })?;
-        Ok(vec![Some(dx_kt)])
+        let dx = dx.contiguous()?;
+        Ok(vec![Some(dx)])
     }
 }
 
@@ -3758,6 +3751,44 @@ impl BackwardOp for CastCompositeBackward {
 /// recurrence) and `attn_out.to_dtype(input_dtype)` (after gated-RMSNorm,
 /// before out_proj). `Ok(None)` when the gate is off, no tape scope is active,
 /// the inputs aren't CUDA, shapes disagree, or a kt borrow fails.
+/// kt-native cast tape recorder (#1082 seam flip) — kt-only twin of
+/// [`try_tape_cast_cuda`]. Record-only: the forward cast is already done by the kt
+/// non-tape path; this records the (now kt-native) `CastCompositeBackward` linking
+/// the kt `out` back to the kt `x`. No candle round-trip.
+pub fn try_tape_cast_kt(
+    x: &kiln_tensor::Tensor,
+    out: &kiln_tensor::Tensor,
+) -> Result<Option<kiln_tensor::Tensor>> {
+    if !tape_forward_enabled() {
+        return Ok(None);
+    }
+    if !matches!(x.device(), kiln_tensor::Device::Cuda(_))
+        || !matches!(out.device(), kiln_tensor::Device::Cuda(_))
+    {
+        return Ok(None);
+    }
+    if x.dims() != out.dims() {
+        return Ok(None);
+    }
+    // No-op cast (same dtype, or out IS x): the chain already flows through x.
+    if x.dtype() == out.dtype() || x.id() == out.id() {
+        return Ok(None);
+    }
+    let recorded = with_active_tape(|tape: &mut Tape| {
+        tape.record(
+            out,
+            &[x],
+            Box::new(CastCompositeBackward {
+                source_dtype: x.dtype(),
+            }),
+        );
+    });
+    if recorded.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(out.clone()))
+}
+
 pub fn try_tape_cast_cuda(x: &Tensor, out: &Tensor) -> Result<Option<Tensor>> {
     if !tape_forward_enabled() {
         return Ok(None);
@@ -3794,7 +3825,9 @@ pub fn try_tape_cast_cuda(x: &Tensor, out: &Tensor) -> Result<Option<Tensor>> {
             &out_kt,
             &[&x_kt],
             Box::new(CastCompositeBackward {
-                source_dtype: x.dtype(),
+                // #1082: kt dtype (struct field flipped candle->kt). x_kt is the
+                // kt borrow of the candle input, so its dtype matches x's.
+                source_dtype: x_kt.dtype(),
             }),
         );
     });

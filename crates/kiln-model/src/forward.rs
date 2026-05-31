@@ -15958,21 +15958,13 @@ fn gated_deltanet_forward_decode_if(
                 // gates lineage — wrapped anyway so the recurrence node sees a
                 // chained id on every input.
                 let v_cast = v.to_dtype(input_dtype)?;
+                // #1082 seam flip: kt-native CastCompositeBackward recorder — no kt->candle->kt.
                 #[cfg(feature = "cuda")]
-                let v_cast = if crate::tape_forward::tape_forward_enabled()
-                    && kiln_kt_bridge::tape_bridge::bridge_scope_active()
+                let v_cast = match crate::tape_forward::try_tape_cast_kt(&v, &v_cast)
+                    .context("gdn recur v-cast try_tape_cast_kt")?
                 {
-                    let v_c = kt_logits_to_candle(&v)
-                        .context("gdn recur v-cast kt->candle v (tape)")?;
-                    let vc_c = kt_logits_to_candle(&v_cast)
-                        .context("gdn recur v-cast kt->candle v_cast (tape)")?;
-                    match crate::tape_forward::try_tape_cast_cuda(&v_c, &vc_c)? {
-                        Some(t) => candle_to_kt_activation(&t)
-                            .context("gdn recur v-cast candle->kt (tape)")?,
-                        None => v_cast,
-                    }
-                } else {
-                    v_cast
+                    Some(t) => t,
+                    None => v_cast,
                 };
                 let v = v_cast;
 
@@ -16200,21 +16192,13 @@ fn gated_deltanet_forward_decode_if(
             None => reshaped,
         };
         let casted = reshaped.to_dtype(input_dtype)?;
+        // #1082 seam flip: kt-native CastCompositeBackward recorder — no kt->candle->kt.
         #[cfg(feature = "cuda")]
-        let casted = if crate::tape_forward::tape_forward_enabled()
-            && kiln_kt_bridge::tape_bridge::bridge_scope_active()
+        let casted = match crate::tape_forward::try_tape_cast_kt(&reshaped, &casted)
+            .context("gdn gated-norm cast try_tape_cast_kt")?
         {
-            let r_c = kt_logits_to_candle(&reshaped)
-                .context("gdn gated-norm cast kt->candle reshaped (tape)")?;
-            let c_c = kt_logits_to_candle(&casted)
-                .context("gdn gated-norm cast kt->candle casted (tape)")?;
-            match crate::tape_forward::try_tape_cast_cuda(&r_c, &c_c)? {
-                Some(t) => candle_to_kt_activation(&t)
-                    .context("gdn gated-norm cast candle->kt (tape)")?,
-                None => casted,
-            }
-        } else {
-            casted
+            Some(t) => t,
+            None => casted,
         };
         casted
     };
