@@ -169,12 +169,12 @@ every config"):
 
   | batch | per token | rows/s |
   |---:|---:|---:|
-  | 1 | 54.4 ms | 18 |
+  | 1 | 57.3 ms | 17 |
   | 4 | 80.4 ms | 50 |
   | 8 | 139.6 ms | 57 |
-  | 16 | 162.7 ms | 98 |
-  | 32 | 274.0 ms | 117 |
-  | 64 | 503.3 ms | 127 |
+  | 16 | 164.9 ms | 97 |
+  | 32 | 278.1 ms | 115 |
+  | 64 | 508.7 ms | 126 |
 
   The resident full-attention synthetic benchmark now matches the production
   gated-Q dataflow: Q projection width is doubled for the attention output
@@ -182,9 +182,14 @@ every config"):
   post-attention residual+norm and MLP down+residual use the same fused kernels
   as the production batched recorder. Earlier synthetic numbers skipped the
   split/norm work and overstated the full-attention-only path. With the
-  corrected benchmark, throughput scales to about 127 rows/s at batch 64 on
+  corrected benchmark, throughput scales to about 126 rows/s at batch 64 on
   this APU; the next tuning target is deeper tiling/cache reuse inside the
   large projection/MLP shaders rather than host submit count.
+  A follow-up direct-output full-attention QKV+gate projection now writes
+  q/gate/k/v directly and removes the separate batched split dispatch from the
+  production resident recorder plus these microbench paths. On this APU it is
+  a command/bandwidth cleanup rather than a measurable high-batch throughput
+  win by itself.
   **Update — mixed Qwen3.5 resident token microbench:** added
   `full_token_resident_mixed_batched`, which records the real Qwen3.5-4B layer
   mix into one `CommandBatch`: 8 full-attention layers at indices
@@ -196,11 +201,11 @@ every config"):
 
   | batch | per token | rows/s |
   |---:|---:|---:|
-  | 1 | 60.8 ms | 16 |
-  | 8 | 115.5 ms | 69 |
-  | 32 | 241.8 ms | 132 |
-  | 64 | 459.7 ms | 139 |
-  | 128 | 905.9 ms | 141 |
+  | 1 | 60.6 ms | 16 |
+  | 8 | 116.3 ms | 69 |
+  | 32 | 242.9 ms | 132 |
+  | 64 | 460.3 ms | 139 |
+  | 128 | 924.0 ms | 139 |
 
   The mixed stack is now the right benchmark for resident decode tuning:
   full-attention-only synthetic decode overstates throughput because the 24
@@ -250,7 +255,7 @@ every config"):
   one workgroup per 256 row-channels, then fusing GDN split, conv, state
   advance, and QKV split. After correcting the synthetic full-attention
   subpath, the mixed full-token resident batch-64 case now measures
-  459.7 ms / 139 rows/s.
+  460.3 ms / 139 rows/s.
 - **Vulkan paged-attention decode kernel**: the kernel crate already had
   `paged_attn_decode_batch_paged.comp`; Vulkan now advertises
   `supports_flash_attn_paged_decode` and wires the single-query paged-decode
@@ -270,12 +275,13 @@ every config"):
 
   | batch | per token | rows/s |
   |---:|---:|---:|
-  | 1 | 50.8 ms | 20 |
-  | 4 | 75.2 ms | 53 |
-  | 64 | 496.9 ms | 129 |
+  | 1 | 49.9 ms | 20 |
+  | 4 | 75.0 ms | 53 |
+  | 64 | 503.2 ms | 127 |
 
-  These numbers also use the corrected gated-Q full-attention dataflow. A
-  batch-64 split-K sweep after the correction measured 505.5 ms at 1 chunk,
+  These numbers also use the corrected gated-Q full-attention dataflow and the
+  direct-output full-attention QKV+gate projection. A batch-64 split-K sweep
+  after the correction measured 505.5 ms at 1 chunk,
   500.7 ms at 2 chunks, 497.3 ms at 4 chunks, 501.5 ms at 8 chunks, and
   503.8 ms at 16 chunks, so the existing default of 4 chunks remains the best
   setting on this machine.

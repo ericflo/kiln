@@ -322,6 +322,12 @@ pub fn prewarm_builtin_pipelines(vk_device: &VulkanDevice) -> Result<()> {
         ("full_attn_qkv_decode_batched", 5usize, 24u32),
         ("full_attn_qkv_decode_batched_bf16w", 5usize, 24u32),
         ("full_attn_qkv_decode_batched_rows4_bf16w", 5usize, 24u32),
+        ("full_attn_qkv_gate_split_batched_bf16w", 8usize, 28u32),
+        (
+            "full_attn_qkv_gate_split_batched_rows4_bf16w",
+            8usize,
+            28u32,
+        ),
         ("qkv_gate_split_batched", 5usize, 16u32),
         ("gdn_gates", 6usize, 8u32),
         ("gdn_decode_gates_recurrent_rmsnorm", 11, 20),
