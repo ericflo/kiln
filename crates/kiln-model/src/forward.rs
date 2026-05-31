@@ -5615,15 +5615,12 @@ pub(crate) fn try_kt_matmul(lhs: &Tensor, rhs: &Tensor) -> Result<Option<Tensor>
     // stream — a `CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED` violation inside a
     // CUDA-graph capture window. Decode now falls straight through to the
     // kt-native `cuda_matmul` below.
-    if crate::tape_forward::tape_forward_enabled()
-        && kiln_kt_bridge::tape_bridge::bridge_scope_active()
-    {
-        let lhs_candle = kt_logits_to_candle(lhs).context("try_kt_matmul kt->candle lhs")?;
-        let rhs_candle = kt_logits_to_candle(rhs).context("try_kt_matmul kt->candle rhs")?;
-        if let Some(out) = crate::tape_forward::try_tape_matmul_cuda(&lhs_candle, &rhs_candle)? {
-            return Ok(Some(
-                candle_to_kt_activation(&out).context("try_kt_matmul candle->kt tape out")?,
-            ));
+    // #1082 seam flip: kt-native MatmulBackward recorder — no kt->candle->kt.
+    if crate::tape_forward::tape_forward_enabled() {
+        if let Some(out) = crate::tape_forward::try_tape_matmul_kt(lhs, rhs)
+            .context("try_kt_matmul try_tape_matmul_kt")?
+        {
+            return Ok(Some(out));
         }
     }
 
@@ -6517,18 +6514,13 @@ pub fn embedding_lookup(token_ids: &[u32], embed_weights: &Tensor) -> Result<Ten
     // violation when this runs inside a CUDA-graph capture window. Gating on
     // the bridge scope makes decode fall straight through to the kt-native
     // `try_kt_embedding_lookup` below.
+    // #1082 seam flip: kt-native EmbeddingBackward recorder — no kt->candle->kt.
     #[cfg(feature = "cuda")]
-    if crate::tape_forward::tape_forward_enabled()
-        && kiln_kt_bridge::tape_bridge::bridge_scope_active()
-    {
-        let w_candle =
-            kt_logits_to_candle(embed_weights).context("embedding_lookup kt->candle weights")?;
-        let idx_candle =
-            kt_logits_to_candle(&index).context("embedding_lookup kt->candle index")?;
-        if let Some(out) = crate::tape_forward::try_tape_embedding_cuda(&w_candle, &idx_candle)? {
-            return promote_cpu_activation(
-                candle_to_kt_activation(&out).context("embedding_lookup candle->kt tape out")?,
-            );
+    if crate::tape_forward::tape_forward_enabled() {
+        if let Some(out) = crate::tape_forward::try_tape_embedding_kt(embed_weights, &index)
+            .context("embedding_lookup try_tape_embedding_kt")?
+        {
+            return promote_cpu_activation(out);
         }
     }
     #[cfg(feature = "cuda")]
@@ -6548,19 +6540,13 @@ fn embedding_lookup_with_index(index: &Tensor, embed_weights: &Tensor) -> Result
     // sibling `embedding_lookup` site for the full rationale (decode has no
     // bridge scope, so the unconditional kt->candle copies were waste AND a
     // NULL-stream capture violation inside a CUDA-graph window).
+    // #1082 seam flip: kt-native EmbeddingBackward recorder — no kt->candle->kt.
     #[cfg(feature = "cuda")]
-    if crate::tape_forward::tape_forward_enabled()
-        && kiln_kt_bridge::tape_bridge::bridge_scope_active()
-    {
-        let w_candle = kt_logits_to_candle(embed_weights)
-            .context("embedding_lookup_with_index kt->candle weights")?;
-        let idx_candle =
-            kt_logits_to_candle(index).context("embedding_lookup_with_index kt->candle index")?;
-        if let Some(out) = crate::tape_forward::try_tape_embedding_cuda(&w_candle, &idx_candle)? {
-            return promote_cpu_activation(
-                candle_to_kt_activation(&out)
-                    .context("embedding_lookup_with_index candle->kt tape out")?,
-            );
+    if crate::tape_forward::tape_forward_enabled() {
+        if let Some(out) = crate::tape_forward::try_tape_embedding_kt(embed_weights, index)
+            .context("embedding_lookup_with_index try_tape_embedding_kt")?
+        {
+            return promote_cpu_activation(out);
         }
     }
     #[cfg(feature = "cuda")]

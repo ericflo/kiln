@@ -465,6 +465,66 @@ pub fn try_tape_rope_kt(
     }
 }
 
+/// kt-native matmul tape recorder (#1082 seam flip) — kt-only twin of
+/// [`try_tape_matmul_cuda`]. Records `MatmulBackward` directly from kt inputs.
+pub fn try_tape_matmul_kt(
+    a: &kiln_tensor::Tensor,
+    b: &kiln_tensor::Tensor,
+) -> Result<Option<kiln_tensor::Tensor>> {
+    if !tape_forward_enabled() {
+        return Ok(None);
+    }
+    match with_active_tape(|tape: &mut Tape| -> Result<_> {
+        let y = kiln_tensor::ops::matmul(a, b).map_err(|e| anyhow::anyhow!("kt matmul: {e}"))?;
+        tape.record(
+            &y,
+            &[a, b],
+            Box::new(MatmulBackward {
+                a: a.clone(),
+                b: b.clone(),
+            }),
+        );
+        Ok(y)
+    }) {
+        Some(result) => Ok(Some(result?)),
+        None => Ok(None),
+    }
+}
+
+/// kt-native embedding tape recorder (#1082 seam flip) — kt-only twin of
+/// [`try_tape_embedding_cuda`]. Records `EmbeddingBackward` directly from kt
+/// inputs. `Ok(None)` outside the rank-2-weights envelope.
+pub fn try_tape_embedding_kt(
+    weights: &kiln_tensor::Tensor,
+    token_ids: &kiln_tensor::Tensor,
+) -> Result<Option<kiln_tensor::Tensor>> {
+    if !tape_forward_enabled() {
+        return Ok(None);
+    }
+    if weights.shape().len() != 2 || token_ids.shape().is_empty() {
+        return Ok(None);
+    }
+    let vocab_size = weights.shape()[0];
+    let hidden = weights.shape()[1];
+    match with_active_tape(|tape: &mut Tape| -> Result<_> {
+        let y = kiln_tensor::ops::embedding(weights, token_ids)
+            .map_err(|e| anyhow::anyhow!("kt embedding: {e}"))?;
+        tape.record(
+            &y,
+            &[weights, token_ids],
+            Box::new(EmbeddingBackward {
+                vocab_size,
+                hidden,
+                token_ids: token_ids.clone(),
+            }),
+        );
+        Ok(y)
+    }) {
+        Some(result) => Ok(Some(result?)),
+        None => Ok(None),
+    }
+}
+
 /// Attempt to run an embedding lookup through the kt-typed op registry
 /// (`kiln_tensor::ops::embedding`) and record an `EmbeddingBackward`
 /// node on the active thread-local tape.
