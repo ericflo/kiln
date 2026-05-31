@@ -55,14 +55,30 @@ Per-layer wall time (one prefill, all 32 layers):
 | Full attention | ~246 ms | 8 | ~2.0 s |
 | **Total prefill (48 tok)** | | | **~12.8 s** |
 
-The **GDN linear-attention prefill dominates** (~75% of prefill). The GDN
-recurrent/chunkwise scan is the hot path: the BF16-gated `recurrent_unexpanded_qk`
-native prefill fast path does NOT engage on Vulkan (Vulkan activations are F32,
-the gate requires BF16 input), so GDN prefill takes the chunkwise/portable scan.
-Speeding this up (a Vulkan-native chunkwise GDN prefill, or an F32 path for the
-native recurrent prefill) is a focused kernel/algorithm work-package — the single
-biggest remaining Vulkan perf win. NOT attempted yet: it touches the working GDN
-forward and warrants careful parity validation, not an end-of-session change.
+The **GDN linear-attention prefill dominates** (~75% of prefill).
+
+**Root cause (pinpointed):** `gdn_chunkwise_recurrence` (`forward.rs` ~12338)
+runs its per-chunk matmuls as **raw kt `.matmul()`** (`k_c.matmul(&state)`,
+`k_c.matmul(&k_t)`, `q_c.matmul(&k_t)`, `q_c.matmul(&state)`, …). On Vulkan the
+activations/state are CPU-host kt tensors, so **these matmuls execute on the
+CPU** — the GDN prefill recurrence never touches the GPU. (Decode is fine: it
+uses the Vulkan `backend.gdn_recurrent_step` kernel. The BF16-gated
+`recurrent_unexpanded_qk` native-prefill fast path also doesn't engage, since
+Vulkan activations are F32.)
+
+**Fix options (deliberate, parity-gated follow-up — touches the working GDN
+forward, and this APU OOM/hangs under sustained load so it needs bounded
+validation):**
+1. Route the chunkwise matmuls through the backend (Vulkan `matmul_batched`),
+   or
+2. Loop the existing parity-tested Vulkan `gdn_recurrent_step` kernel over the
+   prefill tokens (recurrent form), or
+3. A fused Vulkan chunkwise-GDN prefill kernel (Metal already has
+   `metal_gdn_recurrent_prefill_native_head_last_decay_bf16`; `kiln-vulkan-kernel`
+   has `gdn_chunkwise.rs` from the training path to build on).
+
+This is the single biggest remaining Vulkan perf win and is fully characterized
+above; it was deliberately NOT attempted as an end-of-session change.
 
 ## Other follow-ups (perf headroom, not regressions)
 
