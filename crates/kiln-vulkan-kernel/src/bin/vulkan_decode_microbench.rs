@@ -29,9 +29,11 @@ const K_DIM: usize = 1024;
 const V_DIM: usize = 1024;
 const INTERMEDIATE: usize = 9216;
 
-// GDN shapes
-const QKV_DIM: usize = 4096; // linear_num_key_heads * head_dim = 16 * 128 = 2048 ish; the layout used by Qwen3.5
-const Z_DIM: usize = 4096;
+// Qwen3.5-4B GDN shapes.
+const GDN_QK_DIM: usize = 16 * 128;
+const GDN_V_DIM: usize = 32 * 128;
+const QKV_DIM: usize = 2 * GDN_QK_DIM + GDN_V_DIM;
+const Z_DIM: usize = GDN_V_DIM;
 const A_DIM: usize = 32;
 const B_DIM: usize = 32;
 

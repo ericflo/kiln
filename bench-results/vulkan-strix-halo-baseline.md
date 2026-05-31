@@ -182,14 +182,15 @@ every config"):
   **Update — GDN resident recorder uses row-reuse in-proj:** the batched GDN
   `CommandBatch` recorder now selects the same pair QKV/Z plus rows2/rows4
   BF16 in-proj shaders as the standalone dispatcher. Focused
-  `vulkan_decode_microbench gdn_in_proj` on RADV STRIX_HALO with
+  `vulkan_decode_microbench gdn_in_proj` uses real Qwen3.5-4B GDN dimensions
+  (`qkv_dim=8192`, `z_dim=4096`, `a_dim=b_dim=32`). On RADV STRIX_HALO with
   `KILN_VK_MICROBENCH_BATCHES=8,32,64`, warmup=2, timed=5, repeats=2:
 
   | batch | basic path rows/s | row-reuse rows/s |
   |---:|---:|---:|
-  | 8 | 4,911 | 6,737 |
-  | 32 | 6,407 | 15,597 |
-  | 64 | 6,176 | 20,622 |
+  | 8 | 3,626 | 6,520 |
+  | 32 | 3,749 | 13,823 |
+  | 64 | 3,383 | 14,198 |
 
   That removes the remaining basic in-proj shader choice from the GDN
   resident batch recorder, which matters because GDN layers are the majority of
