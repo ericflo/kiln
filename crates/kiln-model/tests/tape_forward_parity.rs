@@ -2805,12 +2805,14 @@ fn tape_reshape_records_node_and_passes_grad_through() {
         std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
     }
 
+    let x_kt = kt_in(&x);
     let (res, tape) = kiln_model::tape_forward::with_thread_local_tape(|| {
-        kiln_model::tape_forward::try_tape_reshape_cuda(&x, vec![2, 3, 20])
+        kiln_model::tape_forward::try_tape_reshape_kt(&x_kt, vec![2, 3, 20])
     });
-    let out = res
-        .expect("try_tape_reshape_cuda ok")
+    let out_kt = res
+        .expect("try_tape_reshape_kt ok")
         .expect("returned Some(out) — gate + scope both on");
+    let out = candle_out(&out_kt);
     assert_eq!(out.shape().dims(), &[2, 3, 20], "reshaped out shape");
     assert!(out.device().is_cuda(), "out stays on CUDA");
 
@@ -3323,12 +3325,15 @@ fn tape_gdn_l2_norm_scale_records_node_and_emits_input_grad() {
         std::env::set_var("KILN_USE_TAPE_GDN_QK_NORM", "1");
     }
 
+    let x_kt = kt_in(&x);
+    let out_in_kt = kt_in(&out);
     let (res, tape) = kiln_model::tape_forward::with_thread_local_tape(|| {
-        kiln_model::tape_forward::try_tape_gdn_l2_norm_scale_cuda(&x, scale, &out)
+        kiln_model::tape_forward::try_tape_gdn_l2_norm_scale_kt(&x_kt, scale, &out_in_kt)
     });
-    let returned = res
-        .expect("try_tape_gdn_l2_norm_scale_cuda ok")
+    let returned_kt = res
+        .expect("try_tape_gdn_l2_norm_scale_kt ok")
         .expect("returned Some(out) — gate + scope both on");
+    let returned = candle_out(&returned_kt);
     assert_eq!(returned.shape().dims(), &[b, t, nv, dk], "l2 norm out shape");
 
     assert_eq!(
@@ -3399,12 +3404,19 @@ fn tape_gdn_gated_rms_norm_records_node_and_emits_3_grads() {
         std::env::set_var("KILN_USE_TAPE_GDN_GATED_NORM", "1");
     }
 
+    let x_kt = kt_in(&x);
+    let z_kt = kt_in(&z);
+    let weight_kt = kt_in(&weight);
+    let out_in_kt = kt_in(&out);
     let (res, tape) = kiln_model::tape_forward::with_thread_local_tape(|| {
-        kiln_model::tape_forward::try_tape_gdn_gated_rms_norm_cuda(&x, &z, &weight, eps, &out)
+        kiln_model::tape_forward::try_tape_gdn_gated_rms_norm_kt(
+            &x_kt, &z_kt, &weight_kt, eps, &out_in_kt,
+        )
     });
-    let returned = res
-        .expect("try_tape_gdn_gated_rms_norm_cuda ok")
+    let returned_kt = res
+        .expect("try_tape_gdn_gated_rms_norm_kt ok")
         .expect("returned Some(out) — gate + scope both on");
+    let returned = candle_out(&returned_kt);
     assert_eq!(returned.shape().dims(), &[b, t, nv, dv], "gated norm out shape");
 
     assert_eq!(
@@ -3481,12 +3493,14 @@ fn tape_transpose_records_node_and_passes_grad_through_transposed() {
         std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
     }
 
+    let x_kt = kt_in(&x);
     let (res, tape) = kiln_model::tape_forward::with_thread_local_tape(|| {
-        kiln_model::tape_forward::try_tape_transpose_cuda(&x, 1, 2)
+        kiln_model::tape_forward::try_tape_transpose_kt(&x_kt, 1, 2)
     });
-    let out = res
-        .expect("try_tape_transpose_cuda ok")
+    let out_kt = res
+        .expect("try_tape_transpose_kt ok")
         .expect("returned Some(out) — gate + scope both on");
+    let out = candle_out(&out_kt);
     // Forward transposes axes 1<->2: [b, nv, t, dv] -> [b, t, nv, dv].
     assert_eq!(out.shape().dims(), &[b, t, nv, dv], "transposed out shape");
     assert!(out.device().is_cuda(), "transpose out stays on CUDA");
