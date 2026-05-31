@@ -3,8 +3,9 @@ pub mod backend;
 pub mod c1_attr;
 pub mod cancel;
 pub mod cuda_graph;
-#[cfg(feature = "cuda")]
-pub mod cuda_train;
+// (#1082 Wave F2) `cuda_train` deleted — the hand-rolled candle-autograd
+// CUDA training engine (`CudaTrainTensor`/`CudaBackwardOp`/`cuda_backward`)
+// is gone; the kt tape is the sole gradient producer.
 pub mod decode_buffers;
 pub mod engine;
 pub mod forward;
@@ -17,16 +18,16 @@ pub mod lora_loader;
 pub mod marlin_proj;
 pub mod mtp_debug;
 pub mod packed_weight_registry;
-pub mod paged_kv_cache;
-#[cfg(feature = "cuda")]
+// (#1082 all-hardware) `paged_kv_cache_kt` compiles on every backend now: the
+// struct, metadata accessors, and `new`/`new_with_fp8` constructors are
+// available everywhere (CPU-resident pools on the Vulkan/CPU build), while the
+// CUDA-kernel write/read methods stay `#[cfg(feature = "cuda")]` inside the
+// module. This is required because `forward.rs`/`generate.rs`/`cuda_graph.rs`/
+// `speculative.rs`/`vk_decode_resident.rs` thread `&PagedKvCacheKt` through
+// signatures that are NOT cuda-gated.
 pub mod paged_kv_cache_kt;
 pub mod quantized;
 pub mod qwen35_shapes;
-// (#1082) candle-typed glue for the rmsnorm/rope/sigmoid-mul/lora/conv1d
-// CUDA kernels, relocated here so `kiln-rmsnorm-kernel` can drop candle.
-// CUDA-only: uses candle CUDA storage + the kernel crate's FFI symbols.
-#[cfg(feature = "cuda")]
-pub mod rmsnorm_candle_shim;
 pub mod sampling;
 pub mod speculative;
 #[cfg(feature = "cuda")]
@@ -51,6 +52,6 @@ pub use generate::{
 pub use kv_cache::KvCache;
 pub use loader::{LoadModelOptions, load_model, load_model_with_options};
 pub use lora_loader::LoraWeights;
-pub use paged_kv_cache::PagedKvCache;
+pub use paged_kv_cache_kt::PagedKvCacheKt;
 pub use speculative::SpeculativeConfig;
 pub use weights::ModelWeights;

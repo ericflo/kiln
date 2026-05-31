@@ -13,7 +13,7 @@ use kiln_core::token::TokenId;
 use kiln_core::tokenizer::KilnTokenizer;
 use kiln_model::engine::Engine;
 use kiln_model::{
-    DecodeBatcher, DecodeBatcherConfig, LinearAttentionState, ModelRunner, PagedKvCache,
+    DecodeBatcher, DecodeBatcherConfig, LinearAttentionState, ModelRunner, PagedKvCacheKt,
     PagedPrefixNextToken, PagedPrefixRegistration,
 };
 use kiln_scheduler::{PrefixCacheStats, Scheduler};
@@ -1232,7 +1232,7 @@ pub enum ModelBackend {
     Real {
         runner: Arc<std::sync::RwLock<ModelRunner>>,
         block_manager: Arc<std::sync::Mutex<BlockManager>>,
-        paged_cache: Arc<PagedKvCache>,
+        paged_cache: Arc<PagedKvCacheKt>,
         prefix_cache: Arc<std::sync::Mutex<RealPrefixCache>>,
         batching_engine: Option<crate::batching_engine::BatchingEngineHandle>,
         decode_batcher: Option<Arc<DecodeBatcher>>,
@@ -1684,18 +1684,22 @@ impl AppState {
         // an `Err` from `Tensor::empty`, which we catch and retry with a smaller
         // budget instead of panicking on the first failure.
         //
-        // Routes through the `_kt` constructor so this site no longer names
-        // `candle_core::DType` or `candle_core::Device` — the bridge happens
-        // inside `new_uninit_with_fp8_kt` instead. (#1082)
-        let allocate_cache = |n: usize| -> anyhow::Result<PagedKvCache> {
-            PagedKvCache::new_uninit_with_fp8_kt(
+        // #1082 candle-drop: candle `PagedKvCache::new_uninit_with_fp8_kt(..,
+        // &device_kt, ..)` -> kt `PagedKvCacheKt::new_with_fp8(.., device_index,
+        // fp8)`. The trailing `&Device` becomes `device_index: usize`
+        // (single-GPU -> 0). NOTE: the kt constructor zero-fills the pools;
+        // the old `new_uninit_*` left them uninitialized — a one-time startup
+        // memset, not a correctness change (paged writes overwrite slots
+        // before they are read).
+        let allocate_cache = |n: usize| -> anyhow::Result<PagedKvCacheKt> {
+            PagedKvCacheKt::new_with_fp8(
                 model_config.num_full_attention_layers,
                 n,
                 block_size,
                 model_config.num_kv_heads,
                 model_config.head_dim,
                 kv_dtype,
-                &device_kt,
+                device_kt.index().unwrap_or(0),
                 fp8_enabled,
             )
         };
@@ -1717,7 +1721,7 @@ impl AppState {
                 "allocating paged KV cache (explicit num_blocks)"
             );
             let cache = allocate_cache(explicit)
-                .expect("failed to create PagedKvCache with explicit num_blocks");
+                .expect("failed to create PagedKvCacheKt with explicit num_blocks");
             (cache, explicit, configured_inference_fraction)
         } else {
             tracing::info!(
@@ -2255,7 +2259,7 @@ fn detected_gpu_total_memory(
 /// Successful auto-sizer outcome. Carries the live cache plus the metadata
 /// needed to log the final decision and update the GPU memory budget.
 struct AutoSizeSuccess {
-    cache: PagedKvCache,
+    cache: PagedKvCacheKt,
     num_blocks: usize,
     fraction: f64,
     /// `(fraction, num_blocks, error)` for each attempt that failed before
@@ -2289,7 +2293,7 @@ fn auto_size_with_retry<C, A>(
 ) -> Result<AutoSizeSuccess, AutoSizeFailure>
 where
     C: Fn(f64) -> usize,
-    A: FnMut(usize) -> Result<PagedKvCache, String>,
+    A: FnMut(usize) -> Result<PagedKvCacheKt, String>,
 {
     // Build the ordered fraction sequence: configured first, then each
     // fallback that is strictly smaller (avoids retrying the same value or
@@ -2422,21 +2426,15 @@ fn format_oom_remediation_message(
 mod tests {
     use super::*;
 
-    /// Shared CPU candle device for tests. Routes through the always-on
-    /// kt -> candle bridge so this helper no longer names
-    /// `candle_core::Device` syntactically — the macro emits the
-    /// candle value via type inference at the call site, and callers
-    /// pass `&cpu_device!()` (or `let device = cpu_device!()` followed
-    /// by `&device`) to the upstream `LinearAttentionState::new` entry
-    /// which still wants `&candle_core::Device` while that API
-    /// migrates to kt. Macro form (vs `fn`) is required because Rust
-    /// has no way to spell the candle return type without naming the
-    /// `candle_core::Device` path directly (issue #1082, candle
-    /// removal).
+    /// Shared CPU device for tests. #1082: now emits a kt `Device::Cpu`
+    /// directly — `AppState::new_real` and `LinearAttentionState::new` both take
+    /// `kt::Device` after the forward flip, so the previous kt→candle bridge
+    /// (needed while those APIs still wanted `candle_core::Device`) is gone.
+    /// Kept as a macro for call-site compatibility (`cpu_device!()` /
+    /// `&cpu_device!()`); kt `Device` is `Copy`.
     macro_rules! cpu_device {
         () => {
-            ::kiln_kt_bridge::candle_device_from_kt(&::kiln_tensor::Device::Cpu)
-                .expect("kt::Device::Cpu -> candle::Device::Cpu bridge is infallible")
+            ::kiln_tensor::Device::Cpu
         };
     }
 
@@ -3361,25 +3359,29 @@ mod tests {
         assert_eq!(budget_half.training_budget_bytes, 14 * 1024 * 1024 * 1024);
     }
 
-    /// Build a tiny CPU-resident PagedKvCache for use as the "successful
-    /// allocation" return value in the auto-sizer retry tests below. The
-    /// values are dummies — only the act of returning Ok(...) matters for
-    /// the loop logic.
+    /// Build a tiny PagedKvCacheKt for use as the "successful allocation"
+    /// return value in the auto-sizer retry tests below. The values are
+    /// dummies — only the act of returning Ok(...) matters for the loop
+    /// logic.
     ///
-    /// Routes through `new_uninit_with_fp8_kt` so this test stops naming
-    /// `candle_core::Device` directly. (#1082)
-    fn dummy_cpu_cache() -> PagedKvCache {
-        PagedKvCache::new_uninit_with_fp8_kt(
+    /// #1082 candle-drop: `PagedKvCache::new_uninit_with_fp8_kt(&Device, ..)`
+    /// -> `PagedKvCacheKt::new_with_fp8(.., device_index, fp8)`.
+    /// WARNING: `PagedKvCacheKt::new_with_fp8` zero-fills via the CUDA
+    /// allocator (`cuda_zeros_ctx`), so this helper now requires a CUDA
+    /// device at index 0 — it will fail on a CPU-only test host. See the
+    /// "non-mechanical issues" note returned with this change.
+    fn dummy_cpu_cache() -> PagedKvCacheKt {
+        PagedKvCacheKt::new_with_fp8(
             1,  // num_full_attn_layers
             8,  // num_blocks
             16, // block_size
             1,  // num_kv_heads
             4,  // head_dim
             DType::F32,
-            &kiln_tensor::Device::Cpu,
+            0, // device_index (single-GPU)
             false,
         )
-        .expect("CPU PagedKvCache allocation never fails for tiny shape")
+        .expect("PagedKvCacheKt allocation never fails for tiny shape")
     }
 
     #[test]
@@ -3473,7 +3475,7 @@ mod tests {
             0.85,
             AUTO_SIZER_FALLBACK_FRACTIONS,
             &compute,
-            |n| -> Result<PagedKvCache, String> {
+            |n| -> Result<PagedKvCacheKt, String> {
                 calls.set(calls.get() + 1);
                 Err(format!("simulated OOM at n={n}"))
             },
@@ -3497,7 +3499,7 @@ mod tests {
             0.75,
             AUTO_SIZER_FALLBACK_FRACTIONS,
             &compute,
-            |n| -> Result<PagedKvCache, String> {
+            |n| -> Result<PagedKvCacheKt, String> {
                 let frac = (n as f64) / 1000.0;
                 attempted.borrow_mut().push(frac);
                 Err(format!("OOM at n={n}"))

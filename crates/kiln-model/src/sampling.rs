@@ -24,9 +24,13 @@ use anyhow::{Context, Result};
 use rand::rngs::StdRng;
 use rand::{RngExt, SeedableRng};
 
+// #1082: bare `Tensor`/`Device`/`DType`/`D` resolve to `kiln_tensor` —
+// candle has been removed from the sampler. Mirrors `forward.rs`.
+use kiln_tensor::{Tensor, Device, DType, D};
+
 /// Extract the last-position logits from a `[..., vocab_size]` tensor and flatten
 /// them to a 1-D `[vocab_size]` tensor that still lives on the original device.
-fn last_position_logits(logits: &candle_core::Tensor) -> Result<candle_core::Tensor> {
+fn last_position_logits(logits: &Tensor) -> Result<Tensor> {
     let dims = logits.dims();
     let last_logits = if dims.len() >= 2 {
         let seq_len = dims[dims.len() - 2];
@@ -47,18 +51,23 @@ fn last_position_logits(logits: &candle_core::Tensor) -> Result<candle_core::Ten
 /// `logits`: tensor of shape `[..., vocab_size]`. Only the last position is sampled.
 ///
 /// Returns the token ID (index of the maximum logit).
-pub fn greedy_sample(logits: &candle_core::Tensor) -> Result<u32> {
+pub fn greedy_sample(logits: &Tensor) -> Result<u32> {
     let flat = last_position_logits(logits)?;
     // Phase 7 (#1082): contiguous CUDA logits of {F32, BF16, F16}
     // take the kt 1-D argmax path by default after last-position
-    // flattening. Falls through to candle's argmax when any
-    // compatibility precondition fails.
+    // flattening. Falls through to the generic argmax when any
+    // compatibility precondition fails. `flat` is already a kt tensor,
+    // so the candle->kt bridge is gone — pass it to the kt helper directly.
     #[cfg(feature = "cuda")]
-    if let Some(idx) = crate::forward::try_kt_argmax_1d(&flat)? {
-        return Ok(idx);
+    if flat.is_contiguous() {
+        if let Some(idx) = crate::forward::try_kt_argmax_1d(&flat)? {
+            return Ok(idx);
+        }
     }
-    // Argmax stays on device; only the scalar u32 token ID is transferred to host.
-    let idx = flat.argmax(0)?.to_scalar::<u32>()?;
+    // Argmax stays on device; only the scalar token ID is transferred to
+    // host. kt `argmax` yields an I64 index tensor (no implicit cast on
+    // readback), so cast to U32 before the `to_scalar::<u32>()` host read.
+    let idx = flat.argmax(0)?.to_dtype(DType::U32)?.to_scalar::<u32>()?;
     Ok(idx)
 }
 
@@ -68,21 +77,26 @@ pub fn greedy_sample(logits: &candle_core::Tensor) -> Result<u32> {
 /// the resulting token IDs. It is useful for batched verification paths where
 /// repeatedly narrowing rows and scalar-sampling would add one device op and
 /// one synchronization per verified position.
-pub fn greedy_sample_rows(logits: &candle_core::Tensor) -> Result<Vec<u32>> {
+pub fn greedy_sample_rows(logits: &Tensor) -> Result<Vec<u32>> {
     let dims = logits.dims();
     anyhow::ensure!(!dims.is_empty(), "logits tensor must have at least one dim");
     // Phase 7 (#1082): contiguous CUDA logits of {F32, BF16, F16}
     // with rank >= 1 take the kt row-argmax path by default. This
-    // replaces the candle `argmax(vocab_dim) + flatten_all +
+    // replaces the generic `argmax(vocab_dim) + flatten_all +
     // to_vec1::<u32>()` composite with a single fused kernel + one
-    // I64->u32 host copy. Falls through to the candle composite when
-    // any compatibility precondition fails.
+    // I64->u32 host copy. Falls through to the generic composite when
+    // any compatibility precondition fails. `logits` is already a kt
+    // tensor, so the candle->kt bridge is gone.
     #[cfg(feature = "cuda")]
-    if let Some(ids) = crate::forward::try_kt_sampling_argmax_rows(logits)? {
-        return Ok(ids);
+    if logits.is_contiguous() {
+        if let Some(ids) = crate::forward::try_kt_sampling_argmax_rows(logits)? {
+            return Ok(ids);
+        }
     }
     let vocab_dim = dims.len() - 1;
-    let ids = logits.argmax(vocab_dim)?.flatten_all()?;
+    // kt `argmax` yields an I64 index tensor; cast to U32 to preserve the
+    // `to_vec1::<u32>()` host read path (candle's `argmax` returned U32).
+    let ids = logits.argmax(vocab_dim)?.flatten_all()?.to_dtype(DType::U32)?;
     Ok(ids.to_vec1::<u32>()?)
 }
 
@@ -96,7 +110,7 @@ pub fn greedy_sample_rows(logits: &candle_core::Tensor) -> Result<Vec<u32>> {
 /// `history` is the slice of generated token ids so far — pass `&[]`
 /// for the first decode token (no penalties apply).
 pub fn sample_step(
-    logits: &candle_core::Tensor,
+    logits: &Tensor,
     params: &kiln_core::sampling::SamplingParams,
     step_seed: Option<u64>,
     history: &[u32],
@@ -135,7 +149,7 @@ pub fn sample_step(
 /// to the legacy [`sample_with_params`] for byte-identical behavior
 /// with the pre-Qwen3.5 sampler.
 pub fn sample_with_full_params(
-    logits: &candle_core::Tensor,
+    logits: &Tensor,
     params: &kiln_core::sampling::SamplingParams,
     token_history: &[u32],
 ) -> Result<u32> {
@@ -192,15 +206,15 @@ pub fn sample_with_full_params(
 /// hundred floats max), then index_add the delta back into the logits
 /// tensor on-device.
 fn apply_penalties_on_device(
-    logits: &candle_core::Tensor,
+    logits: &Tensor,
     history: &[u32],
     repetition: f32,
     presence: f32,
     frequency: f32,
-) -> Result<candle_core::Tensor> {
+) -> Result<Tensor> {
     let flat = last_position_logits(logits)?;
-    let flat = flat.to_dtype(candle_core::DType::F32)?;
-    let device = flat.device().clone();
+    let flat = flat.to_dtype(DType::F32)?;
+    let device = flat.device();
 
     #[cfg(feature = "cuda")]
     if let Some(out) =
@@ -215,15 +229,15 @@ fn apply_penalties_on_device(
     }
 
     // Gather current logit values for those token ids.
-    let indices = candle_core::Tensor::new(unique.as_slice(), &device)?;
+    let indices = Tensor::new(unique.as_slice(), &device)?;
     let current: Vec<f32> = flat.index_select(&indices, 0)?.to_vec1()?;
     let deltas = penalty_deltas(&unique, &counts, &current, repetition, presence, frequency);
 
-    let delta_tensor = candle_core::Tensor::new(deltas.as_slice(), &device)?;
+    let delta_tensor = Tensor::new(deltas.as_slice(), &device)?;
     // `index_add` returns a new tensor with `source` added at the given
-    // `indices` along dim 0. Available on every backend candle ships
-    // (CPU, CUDA, Metal, Vulkan-via-candle), so no backend-specific
-    // branching needed here.
+    // `indices` along dim 0. kt's `index_add` composes scatter_add + add,
+    // both of which dispatch to the holding device (CPU/CUDA/Metal), so
+    // no backend-specific branching is needed here.
     Ok(flat.index_add(&indices, &delta_tensor, 0)?)
 }
 
@@ -274,14 +288,14 @@ fn penalty_deltas(
 
 #[cfg(feature = "cuda")]
 fn try_kt_apply_penalties_on_device(
-    flat: &candle_core::Tensor,
+    flat: &Tensor,
     history: &[u32],
     repetition: f32,
     presence: f32,
     frequency: f32,
-) -> Result<Option<candle_core::Tensor>> {
-    if !matches!(flat.device(), candle_core::Device::Cuda(_))
-        || flat.dtype() != candle_core::DType::F32
+) -> Result<Option<Tensor>> {
+    if !matches!(flat.device(), Device::Cuda(_))
+        || flat.dtype() != DType::F32
         || !flat.is_contiguous()
         || flat.rank() != 1
     {
@@ -295,13 +309,15 @@ fn try_kt_apply_penalties_on_device(
 
     kiln_nvtx::range!(c"kiln/sampling_penalties_kt");
 
-    let device = flat.device().clone();
-    let indices = candle_core::Tensor::new(unique.as_slice(), &device)?;
-    let out_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_copy(flat) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
-    let indices_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&indices) {
+    // #1082: `flat` is already a kt CUDA tensor — no candle bridge. Build
+    // the index/delta tensors on the same device and drive the on-device
+    // gather + scatter-add directly. `cuda_scatter_add_dim0` mutates
+    // `out_kt` in place, so `copy()` an owned deep copy of `flat` to
+    // scatter into (a bare `contiguous()`/`clone()` would alias `flat`'s
+    // storage since it is already contiguous, corrupting the caller).
+    let device = flat.device();
+    let indices_kt = Tensor::new(unique.as_slice(), &device)?;
+    let out_kt = match flat.copy() {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
@@ -309,21 +325,13 @@ fn try_kt_apply_penalties_on_device(
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    let current = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&current_kt)
-        .map_err(|e| anyhow::anyhow!("kt sampling penalties gather copy-back failed: {e}"))?;
-    let current: Vec<f32> = current.to_vec1()?;
+    let current: Vec<f32> = current_kt.to_vec1()?;
     let deltas = penalty_deltas(&unique, &counts, &current, repetition, presence, frequency);
-    let delta_tensor = candle_core::Tensor::new(deltas.as_slice(), &device)?;
-    let delta_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&delta_tensor) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
+    let delta_kt = Tensor::new(deltas.as_slice(), &device)?;
     if kiln_tensor::cuda_scatter_add_dim0(&out_kt, &indices_kt, &delta_kt).is_err() {
         return Ok(None);
     }
-    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-        .map_err(|e| anyhow::anyhow!("kt sampling penalties output copy-back failed: {e}"))?;
-    Ok(Some(out))
+    Ok(Some(out_kt))
 }
 
 /// Sample from an already-temperature-pre-scaling logits tensor with
@@ -332,7 +340,7 @@ fn try_kt_apply_penalties_on_device(
 /// when `min_p == 0`, then adds the host-side min_p filter on the
 /// truncated top-k subset.
 fn sample_from_adjusted_logits(
-    flat_logits: &candle_core::Tensor,
+    flat_logits: &Tensor,
     temperature: f32,
     top_p: f32,
     top_k: u32,
@@ -343,7 +351,7 @@ fn sample_from_adjusted_logits(
     if SP::values_are_effectively_greedy(temperature, top_k) {
         return greedy_sample(flat_logits);
     }
-    let vocab_size = flat_logits.dims1()?;
+    let vocab_size = flat_logits.dims()[0];
 
     let scaled = flat_logits.affine(1.0 / temperature as f64, 0.0)?;
 
@@ -354,9 +362,9 @@ fn sample_from_adjusted_logits(
         && SP::top_p_disables_nucleus_filter(top_p)
         && (top_k == 0 || top_k as usize >= vocab_size)
         && min_p_no_op
-        && matches!(scaled.device(), candle_core::Device::Cuda(_) | candle_core::Device::Metal(_))
+        && matches!(scaled.device(), Device::Cuda(_) | Device::Metal(_))
     {
-        let sampled = candle_nn::sampling::gumbel_softmax(&scaled, 1.0, 0)?;
+        let sampled = kiln_tensor::ops::gumbel_softmax_sample(&scaled, 1.0, 0)?;
         return Ok(sampled.to_scalar::<u32>()?);
     }
     if SP::top_p_disables_nucleus_filter(top_p)
@@ -457,7 +465,7 @@ fn sample_from_adjusted_logits(
 ///
 /// Returns the sampled token ID.
 pub fn sample_with_params(
-    logits: &candle_core::Tensor,
+    logits: &Tensor,
     temperature: f32,
     top_p: f32,
     top_k: u32,
@@ -468,11 +476,11 @@ pub fn sample_with_params(
     }
 
     let flat = last_position_logits(logits)?;
-    let vocab_size = flat.dims1()?;
+    let vocab_size = flat.dims()[0];
 
     // Apply temperature on-device; result stays on the original device.
     let scaled = flat
-        .to_dtype(candle_core::DType::F32)?
+        .to_dtype(DType::F32)?
         .affine(1.0 / temperature as f64, 0.0)?;
 
     // Default sampling stays on-device for GPU backends. This keeps the
@@ -480,9 +488,9 @@ pub fn sample_with_params(
     if seed.is_none()
         && kiln_core::sampling::SamplingParams::top_p_disables_nucleus_filter(top_p)
         && (top_k == 0 || top_k as usize >= vocab_size)
-        && matches!(scaled.device(), candle_core::Device::Cuda(_) | candle_core::Device::Metal(_))
+        && matches!(scaled.device(), Device::Cuda(_) | Device::Metal(_))
     {
-        let sampled = candle_nn::sampling::gumbel_softmax(&scaled, 1.0, 0)?;
+        let sampled = kiln_tensor::ops::gumbel_softmax_sample(&scaled, 1.0, 0)?;
         return Ok(sampled.to_scalar::<u32>()?);
     }
 
@@ -568,7 +576,7 @@ pub fn sample_with_params(
 ///
 /// This is the fast path for the API/UI defaults: `temperature > 0`,
 /// `top_p = 1`, and `top_k = 0`.
-fn sample_full_distribution_unsorted(scaled: &candle_core::Tensor, seed: Option<u64>) -> Result<u32> {
+fn sample_full_distribution_unsorted(scaled: &Tensor, seed: Option<u64>) -> Result<u32> {
     #[cfg(feature = "cuda")]
     if let Some(weights) = try_kt_full_distribution_probs(scaled)? {
         if weights.is_empty() {
@@ -655,9 +663,9 @@ fn sample_from_distribution_weights(
 }
 
 #[cfg(feature = "cuda")]
-fn try_kt_full_distribution_probs(scaled: &candle_core::Tensor) -> Result<Option<Vec<f32>>> {
-    if !matches!(scaled.device(), candle_core::Device::Cuda(_))
-        || scaled.dtype() != candle_core::DType::F32
+fn try_kt_full_distribution_probs(scaled: &Tensor) -> Result<Option<Vec<f32>>> {
+    if !matches!(scaled.device(), Device::Cuda(_))
+        || scaled.dtype() != DType::F32
         || !scaled.is_contiguous()
         || scaled.rank() != 1
     {
@@ -666,34 +674,55 @@ fn try_kt_full_distribution_probs(scaled: &candle_core::Tensor) -> Result<Option
 
     kiln_nvtx::range!(c"kiln/sampling_softmax_kt");
 
-    let scaled_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(scaled) {
+    // #1082: `scaled` is already a kt CUDA tensor — no candle bridge.
+    // Drive the on-device softmax directly and read the probs back to host.
+    let probs_kt = match kiln_tensor::cuda_softmax_last_axis(scaled) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    let probs_kt = match kiln_tensor::cuda_softmax_last_axis(&scaled_kt) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
-    let probs = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&probs_kt)
-        .map_err(|e| anyhow::anyhow!("kt sampling softmax copy-back failed: {e}"))?;
-    Ok(Some(probs.to_vec1::<f32>()?))
+    Ok(Some(probs_kt.to_vec1::<f32>()?))
 }
 
-/// Sort `scaled` descending on-device, transfer only the top-k `(index, value)`
-/// pairs, and return them in descending order.
+/// Select the top-k of `scaled` on-device, transferring only the `k`
+/// `(index, value)` pairs back to host in descending rank order
+/// (descending value, ties broken by lower index).
 ///
-/// Fails if the device sort kernel cannot handle this tensor (e.g. insufficient
-/// shared memory for very large last-dim sizes on CUDA). Callers should catch the
-/// error and fall back to a host sort over the full vocab.
-fn try_topk_on_device(scaled: &candle_core::Tensor, top_k: usize) -> Result<Vec<(u32, f32)>> {
-    // `asc = false` -> descending sort. Returns (sorted_values, sorted_indices).
-    let (sorted_vals, sorted_indices) = scaled.sort_last_dim(false)?;
-    let top_vals = sorted_vals.narrow(0, 0, top_k)?;
-    let top_idx = sorted_indices.narrow(0, 0, top_k)?;
-    // Transfer only top_k floats + top_k u32s. Typically 50 * 8 B = 400 B vs 608 KB.
-    let values: Vec<f32> = top_vals.to_vec1()?;
-    let indices: Vec<u32> = top_idx.to_vec1()?;
-    Ok(indices.into_iter().zip(values).collect())
+/// On CUDA this routes through `kiln_tensor::cuda_topk_last_axis`, which
+/// keeps the full `[V]` row resident on the device and copies just
+/// `~k * 12` bytes over PCIe (#1082 perf-fix H9). On CPU/Vulkan/Metal —
+/// where a host read is local, not a PCIe transfer — it returns `Err` so
+/// callers fall back to `topk_via_host_sort`. Also returns `Err` if the
+/// CUDA op itself fails, so the host fallback preserves correctness.
+fn try_topk_on_device(scaled: &Tensor, top_k: usize) -> Result<Vec<(u32, f32)>> {
+    // #1082 perf-fix H9: on CUDA, select the top-k on-device and transfer
+    // ONLY the ~k (value, index) pairs (~k * 12 bytes) back to host —
+    // instead of the `topk_via_host_sort` fallback's full-[V] f32
+    // `to_vec1()` DtoH (~970 KB at V=248320) EVERY decoded token.
+    //
+    // The on-device kernel matches the host fallback's ranking exactly:
+    // descending value, ties broken by lower index. So callers see
+    // behaviourally identical `(idx, value)` pairs whichever path runs.
+    //
+    // On CPU/Vulkan/Metal we bail so callers take `topk_via_host_sort`,
+    // whose `to_vec1()` is a local read on those backends (no PCIe hop).
+    #[cfg(feature = "cuda")]
+    {
+        if matches!(scaled.device(), Device::Cuda(_))
+            && scaled.is_contiguous()
+            && scaled.rank() == 1
+            && matches!(scaled.dtype(), DType::F32 | DType::BF16 | DType::F16)
+        {
+            kiln_nvtx::range!(c"kiln/sampling_topk_kt");
+            let (values, indices) = kiln_tensor::cuda_topk_last_axis(scaled, top_k)?;
+            let pairs: Vec<(u32, f32)> =
+                indices.into_iter().zip(values).map(|(i, v)| (i, v)).collect();
+            return Ok(pairs);
+        }
+    }
+    let _ = (scaled, top_k);
+    anyhow::bail!(
+        "try_topk_on_device: no on-device top-k for this backend; falling back to host sort (#1082)"
+    )
 }
 
 /// Pull the full distribution to host and return the top-k `(idx, value)`
@@ -706,7 +735,7 @@ fn try_topk_on_device(scaled: &candle_core::Tensor, top_k: usize) -> Result<Vec<
 /// CPU/Vulkan fast path benefits the most from this — CUDA/Metal use
 /// `try_topk_on_device` which never reaches this fallback under normal
 /// operation.
-fn topk_via_host_sort(scaled: &candle_core::Tensor, top_k: Option<usize>) -> Result<Vec<(u32, f32)>> {
+fn topk_via_host_sort(scaled: &Tensor, top_k: Option<usize>) -> Result<Vec<(u32, f32)>> {
     let values: Vec<f32> = scaled.to_vec1()?;
     let vocab = values.len();
 
@@ -787,8 +816,8 @@ mod tests {
 
     #[test]
     fn test_greedy_sample_1d() -> Result<()> {
-        let device = candle_core::Device::Cpu;
-        let logits = candle_core::Tensor::new(&[1.0_f32, 5.0, 3.0, 2.0], &device)?;
+        let device = Device::Cpu;
+        let logits = Tensor::new(&[1.0_f32, 5.0, 3.0, 2.0], &device)?;
         let token = greedy_sample(&logits)?;
         assert_eq!(token, 1); // index of 5.0
         Ok(())
@@ -796,9 +825,9 @@ mod tests {
 
     #[test]
     fn test_greedy_sample_2d() -> Result<()> {
-        let device = candle_core::Device::Cpu;
+        let device = Device::Cpu;
         // [seq_len=3, vocab_size=4] — should sample from last position
-        let logits = candle_core::Tensor::new(
+        let logits = Tensor::new(
             &[
                 1.0_f32, 2.0, 3.0, 4.0, // position 0
                 5.0, 6.0, 7.0, 8.0, // position 1
@@ -814,9 +843,9 @@ mod tests {
 
     #[test]
     fn test_greedy_sample_3d() -> Result<()> {
-        let device = candle_core::Device::Cpu;
+        let device = Device::Cpu;
         // [batch=1, seq_len=2, vocab_size=3]
-        let logits = candle_core::Tensor::new(
+        let logits = Tensor::new(
             &[
                 1.0_f32, 2.0, 3.0, // position 0
                 7.0, 5.0, 6.0, // position 1 (last) — max at index 0
@@ -832,34 +861,87 @@ mod tests {
     #[test]
     #[cfg(feature = "cuda")]
     fn test_cuda_greedy_sample_kt_default_matches_expected() -> Result<()> {
-        let Ok(device) = candle_core::Device::new_cuda(0) else {
+        if !kiln_tensor::probe::cuda_is_available() {
             eprintln!(
                 "CUDA unavailable, skipping test_cuda_greedy_sample_kt_default_matches_expected"
             );
             return Ok(());
-        };
+        }
+        let device = Device::Cuda(0);
 
         let values = [
             9.0_f32, 1.0, 2.0, 3.0, // ignored non-last position
             0.0, 4.0, 8.0, 7.0, // max index 2
         ];
-        let logits = candle_core::Tensor::new(&values, &device)?.reshape((2, 4))?;
+        let logits = Tensor::new(&values, &device)?.reshape((2, 4))?;
         let flat = last_position_logits(&logits)?;
 
-        assert_eq!(crate::forward::try_kt_argmax_1d(&flat)?, Some(2));
+        // #1082: `flat` is already a kt CUDA tensor — pass it straight to the
+        // kt helper, no candle->kt bridge.
+        assert_eq!(crate::forward::try_kt_argmax_1d(&flat.contiguous()?)?, Some(2));
         assert_eq!(greedy_sample(&logits)?, 2);
 
-        let bf16_logits = logits.to_dtype(candle_core::DType::BF16)?;
+        let bf16_logits = logits.to_dtype(DType::BF16)?;
         let bf16_flat = last_position_logits(&bf16_logits)?;
-        assert_eq!(crate::forward::try_kt_argmax_1d(&bf16_flat)?, Some(2));
+        assert_eq!(
+            crate::forward::try_kt_argmax_1d(&bf16_flat.contiguous()?)?,
+            Some(2)
+        );
         assert_eq!(greedy_sample(&bf16_logits)?, 2);
         Ok(())
     }
 
     #[test]
+    #[cfg(feature = "cuda")]
+    fn test_cuda_topk_last_axis_matches_host_sort() -> Result<()> {
+        if !kiln_tensor::probe::cuda_is_available() {
+            eprintln!("CUDA unavailable, skipping test_cuda_topk_last_axis_matches_host_sort");
+            return Ok(());
+        }
+        let device = Device::Cuda(0);
+
+        // Includes a tie (two 4.0s at idx 6 and 11) to exercise the
+        // lowest-index tie-break, matching the host fallback.
+        let values: Vec<f32> =
+            vec![1.0, 5.0, 3.0, 8.0, 2.0, 7.0, 4.0, 9.0, 0.5, 6.0, 2.5, 4.0];
+        let logits = Tensor::new(values.as_slice(), &device)?;
+
+        for k in [1usize, 3, 7, 12] {
+            let (vals, idxs) = kiln_tensor::cuda_topk_last_axis(&logits, k)?;
+            assert_eq!(vals.len(), k);
+            assert_eq!(idxs.len(), k);
+
+            // Host reference: descending value, ties broken by lower index.
+            let mut expected: Vec<(u32, f32)> = values
+                .iter()
+                .copied()
+                .enumerate()
+                .map(|(i, v)| (i as u32, v))
+                .collect();
+            expected.sort_by(|a, b| {
+                b.1.partial_cmp(&a.1)
+                    .unwrap()
+                    .then_with(|| a.0.cmp(&b.0))
+            });
+            expected.truncate(k);
+
+            for (slot, ((gi, gv), (ei, ev))) in
+                idxs.iter().zip(&vals).zip(expected.iter().map(|&(i, v)| (i, v))).enumerate()
+            {
+                assert_eq!(*gi, ei, "k={k} slot={slot}: index mismatch");
+                assert!(
+                    (gv - ev).abs() < 1e-5,
+                    "k={k} slot={slot}: value {gv} != expected {ev}"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
     fn test_greedy_sample_rows_2d() -> Result<()> {
-        let device = candle_core::Device::Cpu;
-        let logits = candle_core::Tensor::new(
+        let device = Device::Cpu;
+        let logits = Tensor::new(
             &[
                 0.1_f32, 0.9, 0.2, // max index 1
                 3.0, 1.0, 2.0, // max index 0
@@ -874,8 +956,8 @@ mod tests {
 
     #[test]
     fn test_greedy_sample_rows_3d_flattens_prefix_dims() -> Result<()> {
-        let device = candle_core::Device::Cpu;
-        let logits = candle_core::Tensor::new(
+        let device = Device::Cpu;
+        let logits = Tensor::new(
             &[
                 0.1_f32, 0.9, 0.2, // max index 1
                 3.0, 1.0, 2.0, // max index 0
@@ -892,12 +974,13 @@ mod tests {
     #[test]
     #[cfg(feature = "cuda")]
     fn test_cuda_greedy_sample_rows_kt_default_matches_expected() -> Result<()> {
-        let Ok(device) = candle_core::Device::new_cuda(0) else {
+        if !kiln_tensor::probe::cuda_is_available() {
             eprintln!(
                 "CUDA unavailable, skipping test_cuda_greedy_sample_rows_kt_default_matches_expected"
             );
             return Ok(());
-        };
+        }
+        let device = Device::Cuda(0);
 
         let values = [
             1.0_f32, 2.0, 9.0, 0.0, // max index 2
@@ -906,17 +989,19 @@ mod tests {
             0.0, 5.0, 4.0, 3.0, // max index 1
         ];
         let expected = vec![2, 0, 3, 1];
-        let logits = candle_core::Tensor::new(&values, &device)?.reshape((2, 2, 4))?;
+        let logits = Tensor::new(&values, &device)?.reshape((2, 2, 4))?;
 
+        // #1082: `logits` is already a kt CUDA tensor — pass it straight to
+        // the kt helper, no candle->kt bridge.
         assert_eq!(
-            crate::forward::try_kt_sampling_argmax_rows(&logits)?,
+            crate::forward::try_kt_sampling_argmax_rows(&logits.contiguous()?)?,
             Some(expected.clone())
         );
         assert_eq!(greedy_sample_rows(&logits)?, expected);
 
-        let bf16_logits = logits.to_dtype(candle_core::DType::BF16)?;
+        let bf16_logits = logits.to_dtype(DType::BF16)?;
         assert_eq!(
-            crate::forward::try_kt_sampling_argmax_rows(&bf16_logits)?,
+            crate::forward::try_kt_sampling_argmax_rows(&bf16_logits.contiguous()?)?,
             Some(vec![2, 0, 3, 1])
         );
         assert_eq!(greedy_sample_rows(&bf16_logits)?, vec![2, 0, 3, 1]);
@@ -928,7 +1013,7 @@ mod tests {
         // On a realistic-sized vector with distinct values, on-device argmax must
         // match a naive host argmax. This guards the core correctness invariant
         // of the migration away from `to_vec1` + host `max_by`.
-        let device = candle_core::Device::Cpu;
+        let device = Device::Cpu;
         let values: Vec<f32> = (0..2048)
             .map(|i| ((i as f32) * 0.137).sin() * 7.5 + (i as f32) * 0.001)
             .collect();
@@ -938,15 +1023,15 @@ mod tests {
             .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
             .unwrap()
             .0 as u32;
-        let logits = candle_core::Tensor::new(values.as_slice(), &device)?;
+        let logits = Tensor::new(values.as_slice(), &device)?;
         assert_eq!(greedy_sample(&logits)?, expected);
         Ok(())
     }
 
     #[test]
     fn test_sample_temperature_zero_is_greedy() -> Result<()> {
-        let device = candle_core::Device::Cpu;
-        let logits = candle_core::Tensor::new(&[1.0_f32, 5.0, 3.0, 2.0], &device)?;
+        let device = Device::Cpu;
+        let logits = Tensor::new(&[1.0_f32, 5.0, 3.0, 2.0], &device)?;
         let token = sample_with_params(&logits, 0.0, 1.0, 0, Some(42))?;
         assert_eq!(token, 1); // same as greedy
         Ok(())
@@ -954,8 +1039,8 @@ mod tests {
 
     #[test]
     fn test_sample_top_k_one_is_greedy() -> Result<()> {
-        let device = candle_core::Device::Cpu;
-        let logits = candle_core::Tensor::new(&[1.0_f32, 5.0, 3.0, 2.0], &device)?;
+        let device = Device::Cpu;
+        let logits = Tensor::new(&[1.0_f32, 5.0, 3.0, 2.0], &device)?;
         for seed in 0..20 {
             let token = sample_with_params(&logits, 0.8, 0.2, 1, Some(seed))?;
             assert_eq!(
@@ -968,9 +1053,9 @@ mod tests {
 
     #[test]
     fn test_sample_very_low_temperature_is_near_greedy() -> Result<()> {
-        let device = candle_core::Device::Cpu;
+        let device = Device::Cpu;
         // With very low temperature, sampling should consistently pick the max
-        let logits = candle_core::Tensor::new(&[1.0_f32, 10.0, 3.0, 2.0], &device)?;
+        let logits = Tensor::new(&[1.0_f32, 10.0, 3.0, 2.0], &device)?;
         for seed in 0..20 {
             let token = sample_with_params(&logits, 0.01, 1.0, 0, Some(seed))?;
             assert_eq!(
@@ -983,9 +1068,9 @@ mod tests {
 
     #[test]
     fn test_top_k_filtering() -> Result<()> {
-        let device = candle_core::Device::Cpu;
+        let device = Device::Cpu;
         // With top_k=2, only the 2 highest logits should be candidates
-        let logits = candle_core::Tensor::new(&[1.0_f32, 10.0, 8.0, 2.0, 0.5], &device)?;
+        let logits = Tensor::new(&[1.0_f32, 10.0, 8.0, 2.0, 0.5], &device)?;
         for seed in 0..50 {
             let token = sample_with_params(&logits, 1.0, 1.0, 2, Some(seed))?;
             assert!(
@@ -1000,9 +1085,9 @@ mod tests {
     fn test_top_k_matches_host_topk() -> Result<()> {
         // The on-device sort + narrow path must select the same top-k set as a
         // naive host-side sort over the full vocab.
-        let device = candle_core::Device::Cpu;
+        let device = Device::Cpu;
         let values: Vec<f32> = vec![1.0, 5.0, 3.0, 8.0, 2.0, 7.0, 4.0, 9.0, 0.5, 6.0, 2.5, 4.5];
-        let logits = candle_core::Tensor::new(values.as_slice(), &device)?;
+        let logits = Tensor::new(values.as_slice(), &device)?;
 
         // Expected top-3 indices (descending by logit): 9.0->7, 8.0->3, 7.0->5
         let mut expected: Vec<(u32, f32)> = values
@@ -1028,9 +1113,9 @@ mod tests {
 
     #[test]
     fn test_top_p_filtering() -> Result<()> {
-        let device = candle_core::Device::Cpu;
+        let device = Device::Cpu;
         // Logits designed so that after softmax, token 0 has ~99.5% probability
-        let logits = candle_core::Tensor::new(&[10.0_f32, 0.0, 0.0, 0.0], &device)?;
+        let logits = Tensor::new(&[10.0_f32, 0.0, 0.0, 0.0], &device)?;
         for seed in 0..20 {
             let token = sample_with_params(&logits, 1.0, 0.95, 0, Some(seed))?;
             // With top_p=0.95, token 0 alone exceeds the threshold
@@ -1044,8 +1129,8 @@ mod tests {
 
     #[test]
     fn test_sample_with_seed_is_deterministic() -> Result<()> {
-        let device = candle_core::Device::Cpu;
-        let logits = candle_core::Tensor::new(&[1.0_f32, 2.0, 3.0, 2.5], &device)?;
+        let device = Device::Cpu;
+        let logits = Tensor::new(&[1.0_f32, 2.0, 3.0, 2.5], &device)?;
         let t1 = sample_with_params(&logits, 1.0, 1.0, 0, Some(12345))?;
         let t2 = sample_with_params(&logits, 1.0, 1.0, 0, Some(12345))?;
         assert_eq!(t1, t2, "same seed should produce same result");
@@ -1054,8 +1139,8 @@ mod tests {
 
     #[test]
     fn test_full_distribution_sampling_tolerates_non_finite_logits() -> Result<()> {
-        let device = candle_core::Device::Cpu;
-        let logits = candle_core::Tensor::new(&[f32::NAN, f32::NEG_INFINITY, f32::NAN], &device)?;
+        let device = Device::Cpu;
+        let logits = Tensor::new(&[f32::NAN, f32::NEG_INFINITY, f32::NAN], &device)?;
         let token = sample_with_params(&logits, 1.0, 1.0, 0, Some(12345))?;
         assert_eq!(token, 2);
         Ok(())
@@ -1063,8 +1148,8 @@ mod tests {
 
     #[test]
     fn test_top_p_outside_range_is_full_distribution() -> Result<()> {
-        let device = candle_core::Device::Cpu;
-        let logits = candle_core::Tensor::new(&[1.0_f32, 2.0, 3.0, 2.5, 0.25, -0.5], &device)?;
+        let device = Device::Cpu;
+        let logits = Tensor::new(&[1.0_f32, 2.0, 3.0, 2.5, 0.25, -0.5], &device)?;
         for seed in 0..80 {
             let full = sample_with_params(&logits, 1.0, 1.0, 0, Some(seed))?;
             let zero = sample_with_params(&logits, 1.0, 0.0, 0, Some(seed))?;
@@ -1089,9 +1174,9 @@ mod tests {
     #[test]
     fn test_sample_with_seed_deterministic_with_topk() -> Result<()> {
         // Determinism must also hold when the top-k on-device path is used.
-        let device = candle_core::Device::Cpu;
+        let device = Device::Cpu;
         let values: Vec<f32> = (0..512).map(|i| (i as f32 * 0.09).cos() * 3.0).collect();
-        let logits = candle_core::Tensor::new(values.as_slice(), &device)?;
+        let logits = Tensor::new(values.as_slice(), &device)?;
         for seed in [1_u64, 42, 7777, 123456] {
             let a = sample_with_params(&logits, 1.0, 0.9, 50, Some(seed))?;
             let b = sample_with_params(&logits, 1.0, 0.9, 50, Some(seed))?;
@@ -1106,7 +1191,7 @@ mod tests {
         let Some(device) = try_new_metal() else {
             return Ok(());
         };
-        let logits = candle_core::Tensor::new(&[1.0_f32, 5.0, 3.0, 2.0], &device)?;
+        let logits = Tensor::new(&[1.0_f32, 5.0, 3.0, 2.0], &device)?;
         let a = sample_with_params(&logits, 1.0, 1.0, 0, Some(12345))?;
         let b = sample_with_params(&logits, 1.0, 1.0, 0, Some(12345))?;
         assert_eq!(
@@ -1122,7 +1207,7 @@ mod tests {
         let Some(device) = try_new_metal() else {
             return Ok(());
         };
-        let logits = candle_core::Tensor::new(&[1.0_f32, 5.0, 3.0, 2.0], &device)?;
+        let logits = Tensor::new(&[1.0_f32, 5.0, 3.0, 2.0], &device)?;
         let token = sample_with_params(&logits, 1.0, 1.0, 0, None)?;
         assert!(token < 4, "sampled token out of range: {token}");
         Ok(())
@@ -1141,8 +1226,8 @@ mod tests {
 
     #[test]
     fn test_full_params_greedy_short_circuits() -> Result<()> {
-        let device = candle_core::Device::Cpu;
-        let logits = candle_core::Tensor::new(&[1.0_f32, 5.0, 3.0, 2.0], &device)?;
+        let device = Device::Cpu;
+        let logits = Tensor::new(&[1.0_f32, 5.0, 3.0, 2.0], &device)?;
         let mut params = full_params_with_seed(42);
         params.temperature = 0.0;
         let token = sample_with_full_params(&logits, &params, &[])?;
@@ -1154,8 +1239,8 @@ mod tests {
     fn test_full_params_no_op_path_matches_legacy() -> Result<()> {
         // With penalties off, min_p=0, the full sampler must produce the
         // same token as the legacy sample_with_params for any given seed.
-        let device = candle_core::Device::Cpu;
-        let logits = candle_core::Tensor::new(&[1.0_f32, 5.0, 3.0, 2.0], &device)?;
+        let device = Device::Cpu;
+        let logits = Tensor::new(&[1.0_f32, 5.0, 3.0, 2.0], &device)?;
         let mut params = full_params_with_seed(123);
         params.temperature = 1.0;
         params.top_p = 1.0;
@@ -1174,13 +1259,14 @@ mod tests {
     #[test]
     #[cfg(feature = "cuda")]
     fn test_cuda_sampling_penalties_kt_default_matches_candle_path() -> Result<()> {
-        let Ok(cuda) = candle_core::Device::new_cuda(0) else {
+        if !kiln_tensor::probe::cuda_is_available() {
             eprintln!(
                 "CUDA unavailable, skipping test_cuda_sampling_penalties_kt_default_matches_candle_path"
             );
             return Ok(());
-        };
-        let cpu = candle_core::Device::Cpu;
+        }
+        let cuda = Device::Cuda(0);
+        let cpu = Device::Cpu;
         let values = [
             0.0_f32, 5.0, -2.0, 3.0, 1.0, 0.5, // ignored non-last position
             0.5, 8.0, -4.0, 2.0, 1.5, 0.0, // sampled last position
@@ -1190,7 +1276,7 @@ mod tests {
         let presence = 0.5;
         let frequency = 0.25;
 
-        let cuda_logits = candle_core::Tensor::new(&values, &cuda)?.reshape((2, 6))?;
+        let cuda_logits = Tensor::new(&values, &cuda)?.reshape((2, 6))?;
         let got = apply_penalties_on_device(
             &cuda_logits,
             &history,
@@ -1199,7 +1285,7 @@ mod tests {
             frequency,
         )?;
 
-        let cuda_flat = last_position_logits(&cuda_logits)?.to_dtype(candle_core::DType::F32)?;
+        let cuda_flat = last_position_logits(&cuda_logits)?.to_dtype(DType::F32)?;
         let got_direct = try_kt_apply_penalties_on_device(
             &cuda_flat,
             &history,
@@ -1209,7 +1295,7 @@ mod tests {
         )?
         .context("expected CUDA kt penalty path to run")?;
 
-        let cpu_logits = candle_core::Tensor::new(&values, &cpu)?.reshape((2, 6))?;
+        let cpu_logits = Tensor::new(&values, &cpu)?.reshape((2, 6))?;
         let expected = apply_penalties_on_device(
             &cpu_logits,
             &history,
@@ -1244,14 +1330,15 @@ mod tests {
     #[test]
     #[cfg(feature = "cuda")]
     fn test_cuda_sampling_softmax_kt_helper_matches_host_probs() -> Result<()> {
-        let Ok(cuda) = candle_core::Device::new_cuda(0) else {
+        if !kiln_tensor::probe::cuda_is_available() {
             eprintln!(
                 "CUDA unavailable, skipping test_cuda_sampling_softmax_kt_helper_matches_host_probs"
             );
             return Ok(());
-        };
+        }
+        let cuda = Device::Cuda(0);
         let values = [0.0_f32, 2.0, -1.0, 6.0, 1.0, -3.0];
-        let logits = candle_core::Tensor::new(&values, &cuda)?;
+        let logits = Tensor::new(&values, &cuda)?;
 
         let got = try_kt_full_distribution_probs(&logits)?
             .context("expected CUDA kt sampler softmax path to run")?;
@@ -1275,16 +1362,17 @@ mod tests {
     #[test]
     #[cfg(feature = "cuda")]
     fn test_cuda_full_distribution_sampler_default_matches_cpu() -> Result<()> {
-        let Ok(cuda) = candle_core::Device::new_cuda(0) else {
+        if !kiln_tensor::probe::cuda_is_available() {
             eprintln!(
                 "CUDA unavailable, skipping test_cuda_full_distribution_sampler_default_matches_cpu"
             );
             return Ok(());
-        };
-        let cpu = candle_core::Device::Cpu;
+        }
+        let cuda = Device::Cuda(0);
+        let cpu = Device::Cpu;
         let values = [0.0_f32, 2.0, -1.0, 6.0, 1.0, -3.0];
-        let cuda_logits = candle_core::Tensor::new(&values, &cuda)?;
-        let cpu_logits = candle_core::Tensor::new(&values, &cpu)?;
+        let cuda_logits = Tensor::new(&values, &cuda)?;
+        let cpu_logits = Tensor::new(&values, &cpu)?;
 
         for seed in 0..32 {
             let got = sample_full_distribution_unsorted(&cuda_logits, Some(seed))?;
@@ -1299,9 +1387,9 @@ mod tests {
 
     #[test]
     fn test_min_p_drops_low_probability_tokens() -> Result<()> {
-        let device = candle_core::Device::Cpu;
+        let device = Device::Cpu;
         // Token 0 dominates the distribution (~99%); tokens 1-3 are tiny.
-        let logits = candle_core::Tensor::new(&[10.0_f32, 0.0, 0.0, 0.0], &device)?;
+        let logits = Tensor::new(&[10.0_f32, 0.0, 0.0, 0.0], &device)?;
         let mut params = full_params_with_seed(7);
         params.temperature = 1.0;
         params.top_p = 1.0;
@@ -1317,11 +1405,11 @@ mod tests {
 
     #[test]
     fn test_repetition_penalty_avoids_repeated_token() -> Result<()> {
-        let device = candle_core::Device::Cpu;
+        let device = Device::Cpu;
         // Token 1 is the natural argmax. With a strong repetition
         // penalty AND token 1 in history, the sampler should prefer
         // another token.
-        let logits = candle_core::Tensor::new(&[2.0_f32, 5.0, 4.0, 1.0], &device)?;
+        let logits = Tensor::new(&[2.0_f32, 5.0, 4.0, 1.0], &device)?;
         let mut params = full_params_with_seed(0);
         params.temperature = 1e-6; // near-greedy so the result is dominated by the highest logit
         params.top_p = 1.0;
@@ -1337,8 +1425,8 @@ mod tests {
 
     #[test]
     fn test_presence_penalty_suppresses_seen_tokens() -> Result<()> {
-        let device = candle_core::Device::Cpu;
-        let logits = candle_core::Tensor::new(&[2.0_f32, 5.0, 4.0, 1.0], &device)?;
+        let device = Device::Cpu;
+        let logits = Tensor::new(&[2.0_f32, 5.0, 4.0, 1.0], &device)?;
         let mut params = full_params_with_seed(0);
         params.temperature = 1e-6;
         params.top_p = 1.0;
@@ -1356,8 +1444,8 @@ mod tests {
 
     #[test]
     fn test_frequency_penalty_scales_with_count() -> Result<()> {
-        let device = candle_core::Device::Cpu;
-        let logits = candle_core::Tensor::new(&[2.0_f32, 5.0, 4.0, 1.0], &device)?;
+        let device = Device::Cpu;
+        let logits = Tensor::new(&[2.0_f32, 5.0, 4.0, 1.0], &device)?;
         let mut params = full_params_with_seed(0);
         params.temperature = 1e-6;
         params.top_p = 1.0;
@@ -1377,8 +1465,8 @@ mod tests {
     fn test_combined_penalties_compose() -> Result<()> {
         // Confirm that repetition + presence + frequency stack
         // additively on the same token without one stomping the other.
-        let device = candle_core::Device::Cpu;
-        let logits = candle_core::Tensor::new(&[10.0_f32, 1.0, 1.0, 1.0], &device)?;
+        let device = Device::Cpu;
+        let logits = Tensor::new(&[10.0_f32, 1.0, 1.0, 1.0], &device)?;
         let mut params = full_params_with_seed(0);
         params.temperature = 1e-6;
         params.top_p = 1.0;
@@ -1400,9 +1488,9 @@ mod tests {
 
     #[test]
     fn test_min_p_combined_with_top_k() -> Result<()> {
-        let device = candle_core::Device::Cpu;
+        let device = Device::Cpu;
         // 6 tokens with descending logits.
-        let logits = candle_core::Tensor::new(&[5.0_f32, 4.5, 4.0, 1.0, 0.5, 0.0], &device)?;
+        let logits = Tensor::new(&[5.0_f32, 4.5, 4.0, 1.0, 0.5, 0.0], &device)?;
         let mut params = full_params_with_seed(0);
         params.temperature = 1.0;
         params.top_p = 1.0;
@@ -1425,8 +1513,8 @@ mod tests {
     #[test]
     fn test_empty_history_with_penalties_no_op() -> Result<()> {
         // No generated tokens yet → penalties should be inert.
-        let device = candle_core::Device::Cpu;
-        let logits = candle_core::Tensor::new(&[10.0_f32, 1.0, 1.0, 1.0], &device)?;
+        let device = Device::Cpu;
+        let logits = Tensor::new(&[10.0_f32, 1.0, 1.0, 1.0], &device)?;
         let mut params = full_params_with_seed(0);
         params.temperature = 1e-6;
         params.repetition_penalty = 100.0;
@@ -1442,11 +1530,11 @@ mod tests {
         // The heap-based partial-top-k path must produce the same
         // (index, value) pairs as the legacy full-sort path. Run on a
         // realistic-sized vocab to exercise the actual code path.
-        let device = candle_core::Device::Cpu;
+        let device = Device::Cpu;
         let values: Vec<f32> = (0..152_064)
             .map(|i| ((i as f32) * 0.137).sin() * 7.5 + (i as f32) * 0.0001)
             .collect();
-        let logits = candle_core::Tensor::new(values.as_slice(), &device)?;
+        let logits = Tensor::new(values.as_slice(), &device)?;
         for &k in &[1, 20, 50, 200, 1024] {
             let heap = topk_via_host_sort(&logits, Some(k))?;
             let mut full: Vec<(u32, f32)> = values
@@ -1496,9 +1584,9 @@ mod tests {
         //
         // Debug builds are 10-20× slower than release; the test is
         // gated on release-only via `cfg(not(debug_assertions))`.
-        let device = candle_core::Device::Cpu;
+        let device = Device::Cpu;
         let values: Vec<f32> = (0..152_064).map(|i| (i as f32 * 0.001).sin()).collect();
-        let logits = candle_core::Tensor::new(values.as_slice(), &device)?;
+        let logits = Tensor::new(values.as_slice(), &device)?;
         let history: Vec<u32> = (0..500).map(|i| (i * 17 + 3) as u32).collect();
         let mut params = full_params_with_seed(1);
         params.temperature = 1.0;
@@ -1533,8 +1621,8 @@ mod tests {
 
     #[test]
     fn test_seed_determinism_with_full_params() -> Result<()> {
-        let device = candle_core::Device::Cpu;
-        let logits = candle_core::Tensor::new(&[1.0_f32, 2.0, 3.0, 2.5, 0.5, -1.0], &device)?;
+        let device = Device::Cpu;
+        let logits = Tensor::new(&[1.0_f32, 2.0, 3.0, 2.5, 0.5, -1.0], &device)?;
         let mut params = full_params_with_seed(42);
         params.temperature = 0.8;
         params.top_p = 0.9;

@@ -244,7 +244,8 @@ async fn load_adapter(
 
     let load_result = tokio::task::spawn_blocking(move || {
         // Load weights outside any lock (I/O + tensor allocation).
-        let lora = LoraWeights::load(&path, num_layers, &device).map_err(|e| format!("{e}"))?;
+        // #1082: LoraWeights::load is kt-native — pass the kt device directly.
+        let lora = LoraWeights::load(&path, num_layers, device).map_err(|e| format!("{e}"))?;
         // Brief write lock to swap the adapter in.
         let mut guard = runner.write().unwrap();
         guard.swap_lora(Some(lora));

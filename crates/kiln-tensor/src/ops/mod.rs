@@ -138,7 +138,7 @@ pub use flip::flip;
 pub use gather::gather;
 pub use glu::{geglu, glu, reglu, swiglu};
 pub use grad_clip::clip_grad_norm;
-pub use gumbel_sample::GumbelSampler;
+pub use gumbel_sample::{gumbel_softmax_sample, GumbelSampler};
 pub use hyperbolic::{atanh, cosh, sinh};
 pub use index_select::{index_select, IndexSelectOp};
 pub use init::{kaiming_normal, kaiming_uniform, xavier_normal, xavier_uniform};

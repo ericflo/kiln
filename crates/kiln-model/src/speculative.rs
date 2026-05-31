@@ -9,21 +9,30 @@
 //! acceptance rate (which depends on how well the first N layers predict the
 //! full model's output).
 //!
-//! # Phase 7 kt migration (#1082)
+//! # #1082 candle-drop
+//!
+//! This module is fully kt-typed. Bare `Tensor`/`Device`/`DType` are
+//! `kiln_tensor` (kt). The speculative / MTP call graph threads kt logits and
+//! kt hidden states directly: `model_forward_head` / `model_forward_paged` /
+//! `model_forward_paged_with_last_hidden` / `mtp_forward_step` all return kt
+//! tensors, and the host samplers (`greedy_sample`, `greedy_sample_rows`,
+//! `sample_with_params`) and `mtp_debug` helpers all consume kt tensors.
 //!
 //! `logits_to_probs` (used by the rejection-sampling resample path) takes a
 //! CUDA fast path that does temperature scaling and softmax on-device via
 //! `kiln_tensor::cuda_scalar_op` + `cuda_softmax_last_axis`, then a single
-//! D2H copy of the resulting probabilities. The candle host-side path is
-//! preserved as a fallback for CPU tensors and any kt-bridge precondition
-//! failure. The candle candle_core::Tensor surface is preserved so the rest of the
-//! MTP / speculative call graph (logits returned by `model_forward_*`)
-//! remains candle-typed.
+//! D2H copy of the resulting probabilities. The kt host-side path below is
+//! preserved as a fallback for CPU tensors and any precondition failure.
+//!
+//! `speculative_decode_step` calls `model_forward_kt` (flat-`KvCache` path),
+//! which is fully kt-typed and returns kt logits directly — no candle bridge.
 
 use anyhow::{Context, Result};
 
 use rand::RngExt;
 use rand::rngs::StdRng;
+
+use kiln_tensor::{DType, Tensor};
 
 use kiln_core::block::BlockTable;
 use kiln_core::config::ModelConfig;
@@ -33,12 +42,12 @@ use kiln_core::token::TokenId;
 use crate::backend::BackendRuntime;
 use crate::c1_attr;
 use crate::forward::{
-    GpuWeights, LinearAttentionState, model_forward, model_forward_embed, model_forward_head,
-    model_forward_paged, model_forward_paged_with_last_hidden, model_forward_segment,
-    mtp_forward_step,
+    GpuWeights, LinearAttentionState, model_forward_embed, model_forward_head,
+    model_forward_kt, model_forward_paged, model_forward_paged_with_last_hidden,
+    model_forward_segment, mtp_forward_step,
 };
 use crate::kv_cache::KvCache;
-use crate::paged_kv_cache::PagedKvCache;
+use crate::PagedKvCacheKt;
 use crate::sampling::{greedy_sample, greedy_sample_rows, sample_with_params};
 
 /// Phase C35 H13 A/B — read `KILN_MTP_ARGMAX_FP32=1` once per process, cached
@@ -60,9 +69,9 @@ pub fn mtp_argmax_fp32_enabled() -> bool {
 /// cheap (tensor refcount bump, no data copy) and keeps the caller's borrow
 /// of the original tensor intact for downstream uses (e.g. C1 attribution
 /// top-k extraction, MTP debug logging).
-fn argmax_input(logits: &candle_core::Tensor) -> Result<candle_core::Tensor> {
+fn argmax_input(logits: &Tensor) -> Result<Tensor> {
     if mtp_argmax_fp32_enabled() {
-        Ok(logits.to_dtype(candle_core::DType::F32)?)
+        Ok(logits.to_dtype(DType::F32)?)
     } else {
         Ok(logits.clone())
     }
@@ -130,8 +139,9 @@ fn draft_forward_hidden(
     config: &ModelConfig,
     draft_layers: usize,
     linear_state: &mut LinearAttentionState,
-) -> Result<candle_core::Tensor> {
-    // Embed tokens
+) -> Result<kiln_tensor::Tensor> {
+    // #1082: `model_forward_embed`/`_segment` are kt-typed; the draft hidden
+    // stays kt and is consumed by the kt `model_forward_head` in `draft_forward`.
     let (hidden, positions) = model_forward_embed(token_ids, weights)?;
 
     // Run only the first `draft_layers` layers
@@ -157,7 +167,7 @@ fn draft_forward(
     config: &ModelConfig,
     draft_layers: usize,
     linear_state: &mut LinearAttentionState,
-) -> Result<candle_core::Tensor> {
+) -> Result<Tensor> {
     let hidden = draft_forward_hidden(
         backend,
         token_ids,
@@ -166,6 +176,8 @@ fn draft_forward(
         draft_layers,
         linear_state,
     )?;
+    // #1082: `model_forward_head` returns kt logits; feed straight into the kt
+    // host sampler island (`greedy_sample` / `sample_with_params`).
     model_forward_head(&hidden, weights, config)
 }
 
@@ -173,13 +185,13 @@ fn draft_forward(
 ///
 /// Returns a Vec of probabilities indexed by token ID.
 ///
-/// Phase 7 (#1082): CUDA inputs take an on-device fast path that scales by
+/// #1082: CUDA inputs take an on-device fast path that scales by
 /// temperature via `kiln_tensor::cuda_scalar_op` and computes the softmax
 /// via `kiln_tensor::cuda_softmax_last_axis` before a single D2H copy. The
-/// candle host-side path below is preserved for CPU tensors and any
-/// bridge-precondition failure (non-contiguous last-position slice,
-/// unsupported dtype, etc.).
-fn logits_to_probs(logits: &candle_core::Tensor, temperature: f32) -> Result<Vec<f32>> {
+/// kt host-side path below is preserved for CPU tensors and any
+/// precondition failure (non-contiguous last-position slice, unsupported
+/// dtype, etc.).
+fn logits_to_probs(logits: &Tensor, temperature: f32) -> Result<Vec<f32>> {
     #[cfg(feature = "cuda")]
     if let Some(probs) = try_kt_logits_to_probs(logits, temperature)? {
         return Ok(probs);
@@ -197,7 +209,7 @@ fn logits_to_probs(logits: &candle_core::Tensor, temperature: f32) -> Result<Vec
         logits.clone()
     };
 
-    let flat = last_logits.flatten_all()?.to_dtype(candle_core::DType::F32)?;
+    let flat = last_logits.flatten_all()?.to_dtype(DType::F32)?;
     let mut vals = flat.to_vec1::<f32>()?;
 
     // Apply temperature
@@ -220,17 +232,17 @@ fn logits_to_probs(logits: &candle_core::Tensor, temperature: f32) -> Result<Vec
     Ok(probs)
 }
 
-/// Phase 7 (#1082): CUDA fast path for `logits_to_probs`. Extracts the
-/// last-position slice as a 1-D contiguous kt tensor, runs the temperature
-/// scaling + softmax on-device, then issues a single D2H copy of the
-/// resulting F32 probabilities. Returns `Ok(None)` on any precondition
-/// failure so the caller falls through to the candle host path.
+/// #1082: CUDA fast path for `logits_to_probs`. Extracts the last-position
+/// slice as a 1-D contiguous kt tensor, runs the temperature scaling +
+/// softmax on-device, then issues a single D2H copy of the resulting F32
+/// probabilities. Returns `Ok(None)` on any precondition failure so the
+/// caller falls through to the kt host path.
 #[cfg(feature = "cuda")]
-fn try_kt_logits_to_probs(logits: &candle_core::Tensor, temperature: f32) -> Result<Option<Vec<f32>>> {
-    if !matches!(logits.device(), candle_core::Device::Cuda(_)) {
+fn try_kt_logits_to_probs(logits: &Tensor, temperature: f32) -> Result<Option<Vec<f32>>> {
+    if !matches!(logits.device(), kiln_tensor::Device::Cuda(_)) {
         return Ok(None);
     }
-    if !matches!(logits.dtype(), candle_core::DType::F32 | candle_core::DType::BF16 | candle_core::DType::F16) {
+    if !matches!(logits.dtype(), DType::F32 | DType::BF16 | DType::F16) {
         return Ok(None);
     }
     let dims = logits.dims();
@@ -246,32 +258,26 @@ fn try_kt_logits_to_probs(logits: &candle_core::Tensor, temperature: f32) -> Res
     // Always run the softmax in F32 — `kt::cuda_softmax_last_axis` supports
     // BF16/F16, but the rejection-sample consumer takes a `Vec<f32>` so
     // promoting up front is cheaper than promoting on D2H.
-    let flat_f32 = if flat.dtype() != candle_core::DType::F32 {
-        flat.to_dtype(candle_core::DType::F32)?
+    let flat_f32 = if flat.dtype() != DType::F32 {
+        flat.to_dtype(DType::F32)?
     } else {
         flat
-    };
-    let kt_in = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&flat_f32) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
     };
     // Optional temperature scaling. `ScalarKind::DivScalar = 3`. Matches
     // the host path's `*v /= temperature` for `temperature > 0.0 && != 1.0`.
     let kt_scaled = if temperature > 0.0 && temperature != 1.0 {
-        match kiln_tensor::cuda_scalar_op(&kt_in, 3, temperature) {
+        match kiln_tensor::cuda_scalar_op(&flat_f32, 3, temperature) {
             Ok(t) => t,
             Err(_) => return Ok(None),
         }
     } else {
-        kt_in
+        flat_f32
     };
     let kt_probs = match kiln_tensor::cuda_softmax_last_axis(&kt_scaled) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    let probs_t = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&kt_probs)
-        .map_err(|e| anyhow::anyhow!("try_kt_logits_to_probs: copy-back failed: {e}"))?;
-    Ok(Some(probs_t.to_vec1::<f32>()?))
+    Ok(Some(kt_probs.to_vec1::<f32>()?))
 }
 
 /// Perform rejection sampling for speculative decoding.
@@ -460,7 +466,9 @@ pub fn speculative_decode_step(
     verify_input.push(last_token);
     verify_input.extend_from_slice(&draft_tokens);
 
-    let verify_logits = model_forward(
+    // #1082: `model_forward_kt` returns kt logits directly; feed straight into
+    // the downstream slicing + kt host samplers with no candle bridge.
+    let verify_logits = model_forward_kt(
         backend,
         &verify_input,
         weights,
@@ -613,7 +621,7 @@ pub fn speculative_decode_step_paged_greedy(
     last_token: TokenId,
     weights: &GpuWeights,
     config: &ModelConfig,
-    paged_cache: &PagedKvCache,
+    paged_cache: &PagedKvCacheKt,
     block_table: &BlockTable,
     base_pos: usize,
     linear_state: &mut LinearAttentionState,
@@ -669,6 +677,7 @@ pub fn speculative_decode_step_paged_greedy(
         None,
     )
     .context("paged skip-layer verification forward pass failed")?;
+    // #1082: `model_forward_paged` returns kt logits; feed the kt host sampler.
     let target_tokens = greedy_sample_rows(&verify_logits)
         .context("paged skip-layer batched verification greedy sampling failed")?;
     anyhow::ensure!(
@@ -775,7 +784,7 @@ pub struct MtpSpeculativeStepResult {
     /// verify pass, which predicts the bonus. On REJECT this is the hidden
     /// after replaying only `last_token`, so the next draft starts from exact
     /// base-model GDN state.
-    pub new_h_prev: candle_core::Tensor,
+    pub new_h_prev: Tensor,
     /// How many KV-cache slots the BASE model consumed this step
     /// (`= accepted_tokens.len()` when no EOS cut the step short, and
     /// matches `accepted_tokens.len()` either way: ACCEPT emits 2, REJECT
@@ -824,14 +833,14 @@ pub struct MtpSpeculativeStepResult {
 pub fn speculative_mtp_decode_step(
     backend: &dyn BackendRuntime,
     last_token: TokenId,
-    h_prev: &candle_core::Tensor,
+    h_prev: &Tensor,
     weights: &GpuWeights,
     config: &ModelConfig,
-    base_cache: &PagedKvCache,
+    base_cache: &PagedKvCacheKt,
     base_block_table: &BlockTable,
     base_pos: usize,
     linear_state: &mut LinearAttentionState,
-    mtp_cache: &PagedKvCache,
+    mtp_cache: &PagedKvCacheKt,
     mtp_block_table: &BlockTable,
     mtp_pos: usize,
     _params: &SamplingParams,
@@ -848,6 +857,8 @@ pub fn speculative_mtp_decode_step(
     // write slot in the isolated MTP paged cache. See Phase B7a evidence
     // in PR #276: without this, `post_layer` drifts monotonically with
     // `mtp_pos` (cos_sim 0.999977 → 0.999531 → 0.997527 at pos 0/1/2).
+    // #1082: `mtp_forward_step` is kt-typed and `h_prev` is kt — call directly
+    // and keep kt logits for the kt host sampler + MTP-debug island.
     let (mtp_logits, _mtp_hidden) = mtp_forward_step(
         backend,
         last_token,
@@ -890,6 +901,9 @@ pub fn speculative_mtp_decode_step(
         None, // positions_gpu: let the forward pass build positions internally.
     )
     .context("mtp two-token verify forward failed")?;
+    // #1082: `model_forward_paged_with_last_hidden` returns kt logits +
+    // kt last-hidden directly — feed the kt sampler/debug island and the
+    // kt-typed `MtpSpeculativeStepResult::new_h_prev`.
 
     // Position 0 predicts what follows `last_token`; position 1 predicts what
     // follows the accepted draft token (the speculative bonus). Sample both
@@ -1025,6 +1039,8 @@ pub fn speculative_mtp_decode_step(
             None,
         )
         .context("mtp rejection replay forward failed")?;
+        // #1082: `model_forward_paged_with_last_hidden` returns kt last-hidden
+        // directly — assign straight to the kt `new_h_prev`.
         new_h_prev = hidden_after_last;
 
         // REJECT: emit the target's token at position 0.
@@ -1127,8 +1143,8 @@ mod tests {
 
     #[test]
     fn test_logits_to_probs_sums_to_one() {
-        let device = candle_core::Device::Cpu;
-        let logits = candle_core::Tensor::new(&[1.0_f32, 2.0, 3.0, 0.5], &device).unwrap();
+        let device = kiln_tensor::Device::Cpu;
+        let logits = Tensor::new(&[1.0_f32, 2.0, 3.0, 0.5], &device).unwrap();
         let probs = logits_to_probs(&logits, 1.0).unwrap();
 
         let sum: f32 = probs.iter().sum();
@@ -1145,8 +1161,8 @@ mod tests {
 
     #[test]
     fn test_logits_to_probs_temperature_effect() {
-        let device = candle_core::Device::Cpu;
-        let logits = candle_core::Tensor::new(&[1.0_f32, 5.0, 1.0], &device).unwrap();
+        let device = kiln_tensor::Device::Cpu;
+        let logits = Tensor::new(&[1.0_f32, 5.0, 1.0], &device).unwrap();
 
         // Low temperature should make distribution more peaked
         let probs_low = logits_to_probs(&logits, 0.1).unwrap();
@@ -1163,9 +1179,9 @@ mod tests {
 
     #[test]
     fn test_logits_to_probs_2d() {
-        let device = candle_core::Device::Cpu;
+        let device = kiln_tensor::Device::Cpu;
         // [seq_len=2, vocab_size=3]
-        let logits = candle_core::Tensor::new(&[1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0], &device)
+        let logits = Tensor::new(&[1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0], &device)
             .unwrap()
             .reshape((2, 3))
             .unwrap();

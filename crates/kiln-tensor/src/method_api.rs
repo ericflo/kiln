@@ -166,7 +166,33 @@ fn broadcast_to_shape(x: &Tensor, target: &[usize]) -> Result<Tensor> {
         padded_shape.extend_from_slice(cur);
         x.reshape(padded_shape)?
     };
+    // #1082: kt's `broadcast_to` op requires a contiguous input (candle's
+    // `broadcast_as` was lenient and accepted strided/transposed views). Restore
+    // candle-compat by contiguifying here — an O(1) shared-clone when already
+    // contiguous, a device-correct `cuda_contiguous` (no host roundtrip) on
+    // CUDA — mirroring the elementwise / cast / cat façade contiguify documented
+    // below. Without this, broadcasting a non-contiguous intermediate (e.g. a
+    // transposed tensor in the GDN recurrence backward) bails.
+    let padded = if padded.is_contiguous() {
+        padded
+    } else {
+        padded.contiguous()?
+    };
     ops::broadcast_to(&padded, target)
+}
+
+/// #1082 forward-flip: kt's core elementwise/cast/concat ops require
+/// **contiguous** operands ("stride-aware path not in Phase 1.15"), whereas
+/// candle materialized strided/broadcast views implicitly. The candle-compat
+/// façade methods below restore that behavior by contiguifying non-contiguous
+/// operands here — device-correct (`.contiguous()` runs `cuda_contiguous` on
+/// CUDA, no host roundtrip), an O(1) shared-clone when already contiguous, and
+/// logged via `kiln_profile_contiguous_copy` when an actual copy happens (so
+/// the copy-counter goal is preserved). The core `ops::` entry points keep
+/// their strict contract for direct callers.
+#[inline]
+fn contig_for_op(t: &Tensor) -> Result<Tensor> {
+    t.contiguous()
 }
 
 impl Tensor {
@@ -177,22 +203,22 @@ impl Tensor {
 
     /// Elementwise `self + rhs` (same shape). Delegates to [`ops::add`].
     pub fn add(&self, rhs: &Self) -> Result<Self> {
-        ops::add(self, rhs)
+        ops::add(&contig_for_op(self)?, &contig_for_op(rhs)?)
     }
 
     /// Elementwise `self - rhs` (same shape). Delegates to [`ops::sub`].
     pub fn sub(&self, rhs: &Self) -> Result<Self> {
-        ops::sub(self, rhs)
+        ops::sub(&contig_for_op(self)?, &contig_for_op(rhs)?)
     }
 
     /// Elementwise `self * rhs` (same shape). Delegates to [`ops::mul`].
     pub fn mul(&self, rhs: &Self) -> Result<Self> {
-        ops::mul(self, rhs)
+        ops::mul(&contig_for_op(self)?, &contig_for_op(rhs)?)
     }
 
     /// Elementwise `self / rhs` (same shape). Delegates to [`ops::div`].
     pub fn div(&self, rhs: &Self) -> Result<Self> {
-        ops::div(self, rhs)
+        ops::div(&contig_for_op(self)?, &contig_for_op(rhs)?)
     }
 
     /// Elementwise `max(self, rhs)`. Delegates to [`ops::maximum`].
@@ -200,12 +226,12 @@ impl Tensor {
     /// candle types this `<T: TensorOrScalar>`; kt only needs the
     /// tensor-tensor form for the flip, so the arg is `&Self`.
     pub fn maximum(&self, rhs: &Self) -> Result<Self> {
-        ops::maximum(self, rhs)
+        ops::maximum(&contig_for_op(self)?, &contig_for_op(rhs)?)
     }
 
     /// Elementwise `min(self, rhs)`. Delegates to [`ops::minimum`].
     pub fn minimum(&self, rhs: &Self) -> Result<Self> {
-        ops::minimum(self, rhs)
+        ops::minimum(&contig_for_op(self)?, &contig_for_op(rhs)?)
     }
 
     // ==================================================================
@@ -214,12 +240,13 @@ impl Tensor {
     // ==================================================================
 
     /// Broadcasting `self + rhs` (numpy rules). Composes
-    /// [`ops::broadcast_to`] + [`ops::add`].
+    /// [`ops::broadcast_to`] + [`ops::add`]. (#1082: broadcast yields strided
+    /// views; `contig_for_op` materializes them for the strict kt op.)
     pub fn broadcast_add(&self, rhs: &Self) -> Result<Self> {
         let shape = broadcast_shape(self.shape(), rhs.shape(), "broadcast_add")?;
         ops::add(
-            &broadcast_to_shape(self, &shape)?,
-            &broadcast_to_shape(rhs, &shape)?,
+            &contig_for_op(&broadcast_to_shape(self, &shape)?)?,
+            &contig_for_op(&broadcast_to_shape(rhs, &shape)?)?,
         )
     }
 
@@ -227,8 +254,8 @@ impl Tensor {
     pub fn broadcast_sub(&self, rhs: &Self) -> Result<Self> {
         let shape = broadcast_shape(self.shape(), rhs.shape(), "broadcast_sub")?;
         ops::sub(
-            &broadcast_to_shape(self, &shape)?,
-            &broadcast_to_shape(rhs, &shape)?,
+            &contig_for_op(&broadcast_to_shape(self, &shape)?)?,
+            &contig_for_op(&broadcast_to_shape(rhs, &shape)?)?,
         )
     }
 
@@ -236,8 +263,8 @@ impl Tensor {
     pub fn broadcast_mul(&self, rhs: &Self) -> Result<Self> {
         let shape = broadcast_shape(self.shape(), rhs.shape(), "broadcast_mul")?;
         ops::mul(
-            &broadcast_to_shape(self, &shape)?,
-            &broadcast_to_shape(rhs, &shape)?,
+            &contig_for_op(&broadcast_to_shape(self, &shape)?)?,
+            &contig_for_op(&broadcast_to_shape(rhs, &shape)?)?,
         )
     }
 
@@ -245,8 +272,8 @@ impl Tensor {
     pub fn broadcast_div(&self, rhs: &Self) -> Result<Self> {
         let shape = broadcast_shape(self.shape(), rhs.shape(), "broadcast_div")?;
         ops::div(
-            &broadcast_to_shape(self, &shape)?,
-            &broadcast_to_shape(rhs, &shape)?,
+            &contig_for_op(&broadcast_to_shape(self, &shape)?)?,
+            &contig_for_op(&broadcast_to_shape(rhs, &shape)?)?,
         )
     }
 
@@ -254,8 +281,8 @@ impl Tensor {
     pub fn broadcast_maximum(&self, rhs: &Self) -> Result<Self> {
         let shape = broadcast_shape(self.shape(), rhs.shape(), "broadcast_maximum")?;
         ops::maximum(
-            &broadcast_to_shape(self, &shape)?,
-            &broadcast_to_shape(rhs, &shape)?,
+            &contig_for_op(&broadcast_to_shape(self, &shape)?)?,
+            &contig_for_op(&broadcast_to_shape(rhs, &shape)?)?,
         )
     }
 
@@ -263,8 +290,8 @@ impl Tensor {
     pub fn broadcast_minimum(&self, rhs: &Self) -> Result<Self> {
         let shape = broadcast_shape(self.shape(), rhs.shape(), "broadcast_minimum")?;
         ops::minimum(
-            &broadcast_to_shape(self, &shape)?,
-            &broadcast_to_shape(rhs, &shape)?,
+            &contig_for_op(&broadcast_to_shape(self, &shape)?)?,
+            &contig_for_op(&broadcast_to_shape(rhs, &shape)?)?,
         )
     }
 
@@ -273,8 +300,13 @@ impl Tensor {
     // ==================================================================
 
     /// Matrix multiply `self @ rhs`. Delegates to [`ops::matmul`].
+    /// #1082: kt MatmulOp requires contiguous operands (candle's cublas path
+    /// took a transpose flag); contiguify the transposed-weight (`W^T`) case.
+    /// No-op when already contiguous (the decode hot path), so no regression
+    /// there; the copy only lands on the strided/transposed training matmuls
+    /// candle materialized too.
     pub fn matmul(&self, rhs: &Self) -> Result<Self> {
-        ops::matmul(self, rhs)
+        ops::matmul(&contig_for_op(self)?, &contig_for_op(rhs)?)
     }
 
     /// Batched matmul with broadcast batch dims.
@@ -309,8 +341,8 @@ impl Tensor {
         let mut rhs_shape = batch;
         rhs_shape.extend_from_slice(&[rk, n]);
         ops::matmul(
-            &broadcast_to_shape(self, &lhs_shape)?,
-            &broadcast_to_shape(rhs, &rhs_shape)?,
+            &contig_for_op(&broadcast_to_shape(self, &lhs_shape)?)?,
+            &contig_for_op(&broadcast_to_shape(rhs, &rhs_shape)?)?,
         )
     }
 
@@ -338,92 +370,103 @@ impl Tensor {
     // candle: `pub fn exp(&self) -> Result<Self>` etc.
     // ==================================================================
 
+    // #1082: kt's unary elementwise ops require a **contiguous** input (they
+    // `bail!("{op}: input must be contiguous")`), whereas candle's unary ops
+    // accepted strided/transposed/broadcast views. Each façade method below
+    // contiguifies first — an O(1) shared-clone when already contiguous, a
+    // device-correct `cuda_contiguous` (no host roundtrip) on CUDA — restoring
+    // candle-compat (same rationale as the elementwise/cast/cat/broadcast_as
+    // façade contiguify). Without this, a non-contiguous intermediate (e.g. a
+    // strided tensor in the GDN recurrence backward, now on the kt CUDA path)
+    // bails. `self.contiguous()?` is value-faithful.
+
     /// `exp(self)`. Delegates to [`ops::exp`].
     pub fn exp(&self) -> Result<Self> {
-        ops::exp(self)
+        ops::exp(&self.contiguous()?)
     }
 
     /// `sqrt(self)`. Delegates to [`ops::sqrt`].
     pub fn sqrt(&self) -> Result<Self> {
-        ops::sqrt(self)
+        ops::sqrt(&self.contiguous()?)
     }
 
     /// `-self`. Delegates to [`ops::neg`].
     pub fn neg(&self) -> Result<Self> {
-        ops::neg(self)
+        ops::neg(&self.contiguous()?)
     }
 
     /// `|self|`. Delegates to [`ops::abs`].
     pub fn abs(&self) -> Result<Self> {
-        ops::abs(self)
+        ops::abs(&self.contiguous()?)
     }
 
     /// Natural log `ln(self)`. candle names this `log`; delegates to
     /// [`ops::ln`].
     pub fn log(&self) -> Result<Self> {
-        ops::ln(self)
+        ops::ln(&self.contiguous()?)
     }
 
     /// `1/self`. candle names this `recip`; delegates to
     /// [`ops::reciprocal`].
     pub fn recip(&self) -> Result<Self> {
-        ops::reciprocal(self)
+        ops::reciprocal(&self.contiguous()?)
     }
 
     /// `self * self`. candle's `sqr`; composed as [`ops::mul`]`(self, self)`.
     pub fn sqr(&self) -> Result<Self> {
-        ops::mul(self, self)
+        let c = self.contiguous()?;
+        ops::mul(&c, &c)
     }
 
     /// `1/sqrt(self)`. Composed as `sqrt` then [`ops::reciprocal`].
     /// (candle has no `rsqrt` method, but `forward.rs` uses the idiom.)
     pub fn rsqrt(&self) -> Result<Self> {
-        ops::reciprocal(&ops::sqrt(self)?)
+        ops::reciprocal(&ops::sqrt(&self.contiguous()?)?)
     }
 
     /// `sin(self)`. Delegates to [`ops::sin`].
     pub fn sin(&self) -> Result<Self> {
-        ops::sin(self)
+        ops::sin(&self.contiguous()?)
     }
 
     /// `cos(self)`. Delegates to [`ops::cos`].
     pub fn cos(&self) -> Result<Self> {
-        ops::cos(self)
+        ops::cos(&self.contiguous()?)
     }
 
     /// `tanh(self)`. Delegates to [`ops::tanh`].
     pub fn tanh(&self) -> Result<Self> {
-        ops::tanh(self)
+        ops::tanh(&self.contiguous()?)
     }
 
     /// `gelu(self)`. Delegates to [`ops::gelu`].
     pub fn gelu(&self) -> Result<Self> {
-        ops::gelu(self)
+        ops::gelu(&self.contiguous()?)
     }
 
     /// `relu(self)`. Delegates to [`ops::relu`].
     pub fn relu(&self) -> Result<Self> {
-        ops::relu(self)
+        ops::relu(&self.contiguous()?)
     }
 
     /// `silu(self)` (a.k.a. swish). Delegates to [`ops::silu`].
     pub fn silu(&self) -> Result<Self> {
-        ops::silu(self)
+        ops::silu(&self.contiguous()?)
     }
 
     /// `sigmoid(self)`. Delegates to [`ops::sigmoid`].
     pub fn sigmoid(&self) -> Result<Self> {
-        ops::sigmoid(self)
+        ops::sigmoid(&self.contiguous()?)
     }
 
     /// `log2(self)`. Delegates to [`ops::log2`].
     pub fn log2(&self) -> Result<Self> {
-        ops::log2(self)
+        ops::log2(&self.contiguous()?)
     }
 
     /// `log10(self)`. Delegates to [`ops::log10`].
     pub fn log10(&self) -> Result<Self> {
-        ops::log10(self)
+        ops::log10(&self.contiguous()?)
     }
 
     // ==================================================================
@@ -468,7 +511,8 @@ impl Tensor {
     /// `pub fn to_dtype(&self, dtype: DType) -> Result<Self>`. Delegates
     /// to [`ops::cast`].
     pub fn to_dtype(&self, dtype: DType) -> Result<Self> {
-        ops::cast(self, dtype)
+        // #1082: kt CastOp requires contiguous input (candle copied implicitly).
+        ops::cast(&contig_for_op(self)?, dtype)
     }
 
     // NOTE: `to_device` already exists as an inherent method on Tensor
@@ -549,6 +593,25 @@ impl Tensor {
     pub fn max_keepdim<Dm: Dim>(&self, dim: Dm) -> Result<Self> {
         let axis = dim.to_index(self.rank(), "max_keepdim")?;
         ops::max_axis(self, axis)?.unsqueeze(axis)
+    }
+
+    /// Gather along `dim` using integer `indices` (candle's `gather`).
+    /// Delegates to the [`ops::gather`] free fn (#1082 candle-compat).
+    pub fn gather<Dm: Dim>(&self, indices: &Self, dim: Dm) -> Result<Self> {
+        let axis = dim.to_index(self.rank(), "gather")?;
+        ops::gather(self, axis, indices)
+    }
+
+    /// Log-sum-exp over `dim`, removing the axis. candle's `log_sum_exp`
+    /// (single-axis). Numerically stable: `m + log(sum(exp(x - m)))` where
+    /// `m = max(x, dim)`. (#1082 candle-compat.)
+    pub fn log_sum_exp<Dm: Dim>(&self, dim: Dm) -> Result<Self> {
+        let axis = dim.to_index(self.rank(), "log_sum_exp")?;
+        let m_keep = ops::max_axis(self, axis)?.unsqueeze(axis)?;
+        let shifted = self.broadcast_sub(&m_keep)?;
+        let summed = ops::sum_axis(&shifted.exp()?, axis)?;
+        let m = ops::max_axis(self, axis)?;
+        summed.log()?.add(&m)
     }
 
     /// Min over `dim`, removing the axis. candle's `min`. Delegates to
@@ -750,6 +813,130 @@ impl Tensor {
         }
     }
 
+    /// In-place `slice_set` (candle parity:
+    /// `pub fn slice_set<D: Dim>(&self, src, dim, offset) -> Result<()>`).
+    /// Copies `src` into `self`'s existing storage along `dim` at `offset`,
+    /// mutating in place, then bumps the version counter.
+    ///
+    /// #1082: every kiln call site uses **dim 0** (the CUDA-graph output
+    /// buffer `slice_set(&logits, 0, 0)` and the GDN resident-state row
+    /// writes `slice_set(&state, 0, row)`), so only dim 0 is implemented —
+    /// dim 0 is the outermost stride, making the write a single contiguous
+    /// device→device memcpy. Requires contiguous `self`/`src`, matching
+    /// dtype + device + rank, matching inner dims, and `src.dims()[0] +
+    /// offset <= self.dims()[0]` (mirrors candle's checks). CUDA only:
+    /// kt storage is `Arc`-shared with no `RwLock`, so a safe CPU in-place
+    /// write isn't expressible here; no kiln call site needs it.
+    pub fn slice_set<Dm: Dim>(&self, src: &Self, dim: Dm, offset: usize) -> Result<()> {
+        let d = dim.to_index(self.rank(), "slice_set")?;
+        if d != 0 {
+            return Err(crate::Error::Msg(format!(
+                "Tensor::slice_set: only dim 0 supported (got {d}); all kiln call sites use dim 0"
+            )));
+        }
+        if !self.is_contiguous() || !src.is_contiguous() {
+            return Err(crate::Error::Msg(
+                "Tensor::slice_set: requires contiguous self and src".to_string(),
+            ));
+        }
+        if self.dtype() != src.dtype() {
+            return Err(crate::Error::Msg(format!(
+                "Tensor::slice_set: dtype mismatch self={:?} src={:?}",
+                self.dtype(),
+                src.dtype()
+            )));
+        }
+        if self.device() != src.device() {
+            return Err(crate::Error::Msg(
+                "Tensor::slice_set: device mismatch".to_string(),
+            ));
+        }
+        if self.rank() != src.rank() {
+            return Err(crate::Error::Msg(format!(
+                "Tensor::slice_set: rank mismatch self={} src={}",
+                self.rank(),
+                src.rank()
+            )));
+        }
+        let sd = self.dims();
+        let cd = src.dims();
+        for i in 1..sd.len() {
+            if sd[i] != cd[i] {
+                return Err(crate::Error::Msg(format!(
+                    "Tensor::slice_set: inner dim {i} mismatch self={} src={}",
+                    sd[i], cd[i]
+                )));
+            }
+        }
+        if !sd.is_empty() && cd[0] + offset > sd[0] {
+            return Err(crate::Error::Msg(format!(
+                "Tensor::slice_set: outer-dim overflow src[0]={} + offset={} > self[0]={}",
+                cd[0], offset, sd[0]
+            )));
+        }
+        match self.device() {
+            #[cfg(feature = "cuda")]
+            Device::Cuda(_) => crate::cuda_storage::cuda_slice_set_dim0(self, src, offset)?,
+            Device::Cpu => {
+                // #1082: CPU in-place slice-set (dim 0). kt `CpuStorage` has no
+                // interior lock, so we mirror the CUDA path — which writes
+                // through the device pointer obtained from `&self` — with a raw
+                // host-pointer copy. SAFETY: the `slice_set` contract is a
+                // caller-owned, layout-stable buffer written with no concurrent
+                // access (the single-threaded GDN decode conv_state update is the
+                // production caller). This is the same in-place effect candle's
+                // `slice_set` has (candle wraps storage in `RwLock`; kt's
+                // lock-free design needs the explicit unchecked write here). The
+                // outer-dim bounds were validated above.
+                if self.dtype().is_packed() {
+                    return Err(crate::Error::Msg(
+                        "Tensor::slice_set: packed dtype not supported on CPU".to_string(),
+                    ));
+                }
+                let bpe = self.dtype().size_in_bytes();
+                let inner: usize = self.dims().iter().skip(1).product();
+                let n_bytes = src.element_count() * bpe;
+                let dst_storage = self.storage();
+                let src_storage = src.storage();
+                let dst_cpu = dst_storage
+                    .as_any()
+                    .downcast_ref::<crate::CpuStorage>()
+                    .ok_or_else(|| {
+                        crate::Error::Msg("Tensor::slice_set: dst must be CPU storage".to_string())
+                    })?;
+                let src_cpu = src_storage
+                    .as_any()
+                    .downcast_ref::<crate::CpuStorage>()
+                    .ok_or_else(|| {
+                        crate::Error::Msg("Tensor::slice_set: src must be CPU storage".to_string())
+                    })?;
+                let dst_byte_off = offset * inner * bpe;
+                let src_byte_off = src.layout().start_offset() * bpe;
+                let dst_bytes = dst_cpu.as_bytes();
+                let src_bytes = src_cpu.as_bytes();
+                if dst_byte_off + n_bytes > dst_bytes.len()
+                    || src_byte_off + n_bytes > src_bytes.len()
+                {
+                    return Err(crate::Error::Msg(
+                        "Tensor::slice_set: byte range overflow".to_string(),
+                    ));
+                }
+                unsafe {
+                    let dst_ptr = (dst_bytes.as_ptr() as *mut u8).add(dst_byte_off);
+                    let src_ptr = src_bytes.as_ptr().add(src_byte_off);
+                    std::ptr::copy_nonoverlapping(src_ptr, dst_ptr, n_bytes);
+                }
+            }
+            other => {
+                return Err(crate::Error::Msg(format!(
+                    "Tensor::slice_set: backend {other} not supported (#1082)"
+                )));
+            }
+        }
+        self.bump_version();
+        Ok(())
+    }
+
     /// Detach from the autograd graph. candle:
     /// `pub fn detach(&self) -> Tensor` (returns a graph-free view that
     /// **shares** the storage; identity if already detached).
@@ -880,6 +1067,24 @@ impl Tensor {
             )));
         }
         self.to_vec::<E>()
+    }
+
+    /// Read a single-element tensor back to a host scalar `E`. candle's
+    /// `to_scalar::<S>()` equivalent (#1082).
+    ///
+    /// Errors if the tensor does not hold exactly one element (the shape
+    /// is included in the message); otherwise delegates to kt's existing
+    /// [`Tensor::to_vec`], which validates that `E` matches the tensor's
+    /// dtype and performs the host readback, and returns element `[0]`.
+    pub fn to_scalar<E: Element>(&self) -> Result<E> {
+        if self.element_count() != 1 {
+            return Err(crate::Error::Msg(format!(
+                "to_scalar: expected exactly one element, got {} (shape {:?})",
+                self.element_count(),
+                self.shape()
+            )));
+        }
+        Ok(self.to_vec::<E>()?[0])
     }
 
     /// Read a rank-2 tensor back to a host `Vec<Vec<E>>` (row-major).
@@ -1043,7 +1248,15 @@ impl Tensor {
         let refs: Vec<&Self> = tensors.iter().map(|t| t.as_ref()).collect();
         let rank = refs[0].rank();
         let axis = dim.to_index(rank, "cat")?;
-        ops::concat(&refs, axis)
+        // #1082: kt concat requires contiguous inputs (candle copied
+        // implicitly); pieces are often narrowed/transposed views. Materialize
+        // each (O(1) no-op when already contiguous).
+        let contig: Vec<Self> = refs
+            .iter()
+            .map(|t| contig_for_op(t))
+            .collect::<Result<Vec<_>>>()?;
+        let contig_refs: Vec<&Self> = contig.iter().collect();
+        ops::concat(&contig_refs, axis)
     }
 
     /// 1-D tensor `[start, start+1, …, end)` on `device`. candle:

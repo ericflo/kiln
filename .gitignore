@@ -24,3 +24,5 @@ profiling-artifacts/
 node_modules/
 package.json
 package-lock.json
+.flip-errors-iter3.txt
+.flip-errors-*.txt

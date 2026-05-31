@@ -38,7 +38,7 @@ use std::sync::Arc;
 
 use kiln_tensor::{
     ops::{
-        broadcast_to, exp, gather, index_select, ln, matmul, max_axis, mean_all, mul, mul_scalar,
+        broadcast_to, exp, index_select, ln, matmul, max_axis, mean_all, mul, mul_scalar,
         scatter_add, sub, sum_axis, to_f32,
     },
     DType as KtDType, Device as KtDevice, Error as KtError, Tensor as KtTensor,
@@ -254,7 +254,17 @@ pub fn fused_linear_cross_entropy_phase_b_kt(
         .map_err(FlceError::Kt)?
         .contiguous()
         .map_err(FlceError::Kt)?;
-    let active_idx = KtTensor::from_vec(active_positions.clone(), vec![num_active])
+    // Derive the destination device from the input `hidden`'s storage so
+    // every index/accumulator tensor lands on the same backend. `dispatch2`
+    // rejects mixed-device inputs (CPU index + CUDA logits would error), so
+    // the CPU-only `from_vec` constructor used to break the chain the moment
+    // `hidden` lives on CUDA — exactly the kt-substrate index-op gap that kept
+    // the CUDA E2E tests `#[ignore]`-d. `from_vec_on` is the device-parametric
+    // companion (#1082) that the already-correct backward
+    // (`fused_linear_cross_entropy_phase_b_backward_kt`) and the H6 CE adapter
+    // (`tape_forward::try_tape_cross_entropy_from_logits_kt`) both use.
+    let device: KtDevice = hidden.device();
+    let active_idx = KtTensor::from_vec_on(device, active_positions.clone(), vec![num_active])
         .map_err(FlceError::Kt)?;
     let active_hidden = index_select(&shift_hidden, 0, &active_idx).map_err(FlceError::Kt)?;
     let active_hidden_f32 = to_f32(&active_hidden).map_err(FlceError::Kt)?;
@@ -354,25 +364,38 @@ pub fn fused_linear_cross_entropy_phase_b_kt(
         }
         if !row_hits.is_empty() {
             let hits = row_hits.len();
-            let row_idx_t = KtTensor::from_vec(row_hits.clone(), vec![hits])
+            let row_idx_t = KtTensor::from_vec_on(device, row_hits.clone(), vec![hits])
                 .map_err(FlceError::Kt)?;
-            // Pick the rows from logits_chunk via index_select along axis 0:
-            // shape [hits, chunk_len].
+            // Gather the correct logit per hit row. kt `gather` is CPU-only
+            // (no `cuda_fwd`), so a `[hits, 1]` axis-1 gather would break on
+            // CUDA logits. Instead select the (row, col) cell with a FLAT
+            // `index_select` (CUDA-capable) over `logits_chunk` flattened to
+            // `[hits_rows * chunk_len]` — exactly the trick H6's
+            // `tape_forward::try_tape_cross_entropy_from_logits_kt` uses.
+            // First take the hit rows (axis-0 index_select is CUDA-capable),
+            // then index the flattened `[hits, chunk_len]` at `r*chunk_len + col`.
             let selected_rows = index_select(&logits_chunk, 0, &row_idx_t)
+                .map_err(FlceError::Kt)?; // [hits, chunk_len]
+            let flat_hit_idx: Vec<u32> = col_hits
+                .iter()
+                .enumerate()
+                .map(|(r, &col)| (r as u32) * (chunk_len as u32) + col)
+                .collect();
+            let flat_hit_idx_t = KtTensor::from_vec_on(device, flat_hit_idx, vec![hits])
                 .map_err(FlceError::Kt)?;
-            // Gather one column per row: gather expects index tensor with
-            // the same rank as the source; result shape matches indices'
-            // shape, so we use [hits, 1] index tensor along axis 1.
-            let col_idx_2d = KtTensor::from_vec(col_hits.clone(), vec![hits, 1])
-                .map_err(FlceError::Kt)?;
-            let gathered_2d =
-                gather(&selected_rows, 1, &col_idx_2d).map_err(FlceError::Kt)?; // [hits, 1]
-            let gathered_1d = gathered_2d.squeeze(1).map_err(FlceError::Kt)?; // [hits]
+            let gathered_1d = selected_rows
+                .contiguous()
+                .map_err(FlceError::Kt)?
+                .flatten_all()
+                .map_err(FlceError::Kt)?
+                .index_select(&flat_hit_idx_t, 0)
+                .map_err(FlceError::Kt)?; // [hits]
 
             // Scatter into `correct_logit` (shape [num_active]) using
-            // scatter_add: each row in `active_labels` falls in exactly
-            // one chunk, so each [num_active] slot is touched exactly
-            // once → scatter_add is equivalent to a scatter.
+            // scatter_add along axis 0 (CUDA-capable for 1-D U32 indices +
+            // F32 values): each active row falls in exactly one chunk, so each
+            // `[num_active]` slot is touched exactly once → scatter_add is
+            // equivalent to a scatter.
             let scattered = scatter_add(&gathered_1d, 0, &row_idx_t, num_active)
                 .map_err(FlceError::Kt)?;
             correct_logit = Some(match correct_logit.take() {

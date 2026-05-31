@@ -7,8 +7,6 @@
 //! dispatch.
 
 use anyhow::{Context, Result, bail, ensure};
-#[cfg(feature = "cuda")]
-use cudarc::driver::DevicePtr;
 
 use std::collections::BTreeMap;
 
@@ -105,12 +103,15 @@ impl PackedWeightKey {
 #[derive(Clone, Debug)]
 pub enum PackedWeightStorage {
     Bf16 {
-        tensor: candle_core::Tensor,
+        // #1082: GpuWeights fields are kiln-native (`kiln_tensor::Tensor`)
+        // after the forward-flip, so the registry stores kt tensors and the
+        // decode device-ptr accessor reads them through the kt CUDA bridge.
+        tensor: kiln_tensor::Tensor,
         dims: Vec<usize>,
         transposed: bool,
     },
     F32 {
-        tensor: candle_core::Tensor,
+        tensor: kiln_tensor::Tensor,
         dims: Vec<usize>,
     },
     MarlinW4A16 {
@@ -128,7 +129,7 @@ impl PackedWeightStorage {
         }
     }
 
-    pub fn dtype(&self) -> Option<candle_core::DType> {
+    pub fn dtype(&self) -> Option<kiln_tensor::DType> {
         match self {
             Self::Bf16 { tensor, .. } | Self::F32 { tensor, .. } => Some(tensor.dtype()),
             Self::MarlinW4A16 { .. } => None,
@@ -150,15 +151,13 @@ impl PackedWeightStorage {
         &self,
         f: impl FnOnce(*const core::ffi::c_void) -> R,
     ) -> Result<R> {
-        use half::bf16;
-
         let tensor = match self {
             Self::Bf16 { tensor, .. } => tensor,
             Self::F32 { .. } => bail!("requested BF16 pointer from FP32 registry weight"),
             Self::MarlinW4A16 { .. } => bail!("requested BF16 pointer from Marlin registry weight"),
         };
         ensure!(
-            tensor.dtype() == candle_core::DType::BF16,
+            tensor.dtype() == kiln_tensor::DType::BF16,
             "registry BF16 pointer requires BF16 tensor, got {:?}",
             tensor.dtype()
         );
@@ -166,14 +165,16 @@ impl PackedWeightStorage {
             tensor.is_contiguous(),
             "registry BF16 pointer requires contiguous tensor"
         );
-        let (storage, layout) = tensor.storage_and_layout();
-        let cuda = match &*storage {
-            candle_core::Storage::Cuda(cuda) => cuda,
-            _ => bail!("registry BF16 pointer requires CUDA storage"),
-        };
-        let stream = cuda.device.cuda_stream();
-        let slice = cuda.as_cuda_slice::<bf16>()?.slice(layout.start_offset()..);
-        let (ptr, _guard) = slice.device_ptr(&stream);
+        // #1082: read the absolute device pointer through the kt CUDA bridge
+        // instead of the candle storage chain. The kt tensor is the live
+        // weight buffer; `cuda_input_device_ptr` returns the pointer at the
+        // first element (start_offset folded in) as a `u64`.
+        let ptr = kiln_kt_bridge::cuda_input_device_ptr(
+            tensor,
+            kiln_tensor::DType::BF16,
+            "registry_bf16_device_ptr",
+        )
+        .map_err(|e| anyhow::anyhow!("registry BF16 device pointer: {e}"))?;
         Ok(f(ptr as *const core::ffi::c_void))
     }
 }
@@ -370,7 +371,7 @@ impl GpuPackedWeightRegistry {
         &mut self,
         layer: RegistryLayer,
         projection: ProjectionKind,
-        tensor: &candle_core::Tensor,
+        tensor: &kiln_tensor::Tensor,
         transposed: bool,
     ) -> Result<()> {
         let key = PackedWeightKey::new(layer, projection)?;
@@ -388,7 +389,7 @@ impl GpuPackedWeightRegistry {
         &mut self,
         layer: RegistryLayer,
         projection: ProjectionKind,
-        bf16_t: &candle_core::Tensor,
+        bf16_t: &kiln_tensor::Tensor,
         marlin: Option<crate::marlin_proj::MarlinPackedProj>,
     ) -> Result<()> {
         let key = PackedWeightKey::new(layer, projection)?;
@@ -448,8 +449,7 @@ mod tests {
 
     #[test]
     fn registry_rejects_duplicate_keys() {
-        let device = candle_core::Device::Cpu;
-        let tensor = candle_core::Tensor::zeros((2, 2), candle_core::DType::BF16, &device).unwrap();
+        let tensor = kiln_tensor::Tensor::zeros_cpu((2, 2), kiln_tensor::DType::BF16);
         let key =
             PackedWeightKey::new(RegistryLayer::Mlp { layer_idx: 0 }, ProjectionKind::MlpGate)
                 .unwrap();
@@ -465,9 +465,10 @@ mod tests {
 
     #[test]
     fn registry_returns_compile_checked_keys() {
-        let device = candle_core::Device::Cpu;
-        let tensor =
-            candle_core::Tensor::zeros((shapes::HIDDEN, shapes::MLP_HIDDEN), candle_core::DType::BF16, &device).unwrap();
+        let tensor = kiln_tensor::Tensor::zeros_cpu(
+            (shapes::HIDDEN, shapes::MLP_HIDDEN),
+            kiln_tensor::DType::BF16,
+        );
         let key = PackedWeightKey::new(RegistryLayer::Mlp { layer_idx: 7 }, ProjectionKind::MlpUp)
             .unwrap();
         let mut registry = GpuPackedWeightRegistry::new();

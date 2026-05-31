@@ -173,6 +173,74 @@ impl Default for GumbelSampler {
     }
 }
 
+/// Gumbel-max categorical sample over a logits row — the candle-free
+/// replacement for `candle_nn::sampling::gumbel_softmax(&logits, temp, 0)`
+/// used by `kiln-model`'s sampler (#1082).
+///
+/// candle's `gumbel_softmax` with `temperature == 1.0` is exactly the
+/// Gumbel-max trick — `argmax(logits + Gumbel(0, 1))` — returning the
+/// sampled token *index* (a `U32` tensor along the reduced dim), not
+/// perturbed logits or a one-hot. This free-fn reproduces that: it
+/// applies the temperature, runs [`GumbelSampler`] (which adds the
+/// Gumbel noise and argmaxes), and returns the sampled index as a `U32`
+/// tensor so the call site can read it with [`Tensor::to_scalar::<u32>`].
+///
+/// # Shapes
+///
+/// * Rank-1 `[V]` (the sole `kiln-model` call site): reshaped to `[1, V]`,
+///   sampled, and **row 0** is returned as a single-element `U32` tensor
+///   `[1]` — matching candle's scalar return from a 1-D logits argmax.
+/// * Rank-2 `[B, V]`: sampled per row, returning a `[B]` `U32` tensor.
+///
+/// # Temperature
+///
+/// `logits` are divided by `temperature` before the Gumbel-max draw
+/// (the standard Gumbel-Softmax temperature). `temperature == 1.0` is an
+/// identity scale and is skipped to avoid a needless elementwise pass —
+/// matching candle's `temperature == 1.0` special case (pure Gumbel-max).
+/// `temperature <= 0.0` is rejected (callers must route `<= 0` to a
+/// greedy argmax, exactly as candle's `gumbel_softmax` does).
+///
+/// `seed` seeds the Gumbel RNG via [`GumbelSampler::with_seed`].
+pub fn gumbel_softmax_sample(logits: &Tensor, temperature: f64, seed: u64) -> Result<Tensor> {
+    if !(temperature > 0.0) {
+        bail!(
+            "gumbel_softmax_sample: temperature must be > 0 (route temperature <= 0 to a greedy \
+             argmax), got {temperature}"
+        );
+    }
+
+    let rank1 = logits.rank() == 1;
+    let rows = if rank1 {
+        let vocab = logits.shape()[0];
+        logits.reshape(vec![1, vocab])?
+    } else if logits.rank() == 2 {
+        logits.clone()
+    } else {
+        bail!(
+            "gumbel_softmax_sample: logits must be rank-1 [vocab] or rank-2 [batch, vocab], got {:?}",
+            logits.shape()
+        );
+    };
+
+    // Temperature scaling. `1.0` is identity — skip it. `GumbelSampler`
+    // bails on non-contiguous input, so re-materialize contiguity after
+    // the (possibly view-only) reshape / scale.
+    let scaled = if (temperature - 1.0).abs() <= f64::EPSILON {
+        rows.contiguous()?
+    } else {
+        crate::ops::div_scalar(&rows, temperature as f32)?.contiguous()?
+    };
+
+    // Gumbel-max draw → `[B]` I64 token ids.
+    let ids_i64 = GumbelSampler::with_seed(seed).sample(&scaled)?;
+    // candle's `gumbel_softmax` returns a `U32` index tensor; the sole
+    // `kiln-model` call site reads it via `to_scalar::<u32>()`. Cast the
+    // I64 ids to U32 to preserve that read path.
+    let ids_u32 = crate::ops::cast(&ids_i64, DType::U32)?;
+    Ok(ids_u32)
+}
+
 // ----------------------------------------------------------------------
 // RNG helpers
 // ----------------------------------------------------------------------

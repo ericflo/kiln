@@ -675,12 +675,10 @@ fn spawn_backend_prewarm(state: AppState) {
 
     let (is_gpu, is_vulkan, device_kt) = {
         let runner_guard = runner.read().unwrap();
-        // Bridge the embed-tokens device once at this seam so the rest of the
-        // prewarm path carries kt::Device. `embed_tokens.device()` is still
-        // candle-typed because the GpuWeights struct fields are candle Tensors
-        // (tracked separately under #1082).
-        let device_kt =
-            kiln_kt_bridge::kt_device_from_candle(&runner_guard.weights.embed_tokens.device());
+        // #1082 forward-flip: `GpuWeights::embed_tokens` is now a kt `Tensor`,
+        // so `.device()` already returns a kt `Device` — use it directly
+        // (no candle bridge needed).
+        let device_kt = runner_guard.weights.embed_tokens.device();
         let is_metal = matches!(device_kt, kiln_tensor::Device::Metal(_));
         let is_vulkan = runner_guard.backend_name() == "vulkan";
         (is_metal || is_vulkan, is_vulkan, device_kt)
@@ -707,9 +705,9 @@ fn spawn_backend_prewarm(state: AppState) {
         tracing::info!("starting background inference prewarm");
         let prewarm_start = std::time::Instant::now();
         let prewarm = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
-            // `device_kt` was bridged at the read-side of the runner above
-            // (where `embed_tokens.device()` returns candle); the closure
-            // receives the kt-typed binding directly. (#1082)
+            // `device_kt` was read off `embed_tokens.device()` above (now a
+            // kt `Device` after the #1082 forward-flip); the closure receives
+            // the kt-typed binding directly.
             // Pipeline compilation does not allocate KV/model working buffers, so
             // keep it outside the opportunistic GPU lock. If the first live
             // request wins the lock, it should still benefit from compiled

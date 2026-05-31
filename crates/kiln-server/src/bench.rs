@@ -23,7 +23,7 @@ use kiln_core::vram::{detect_used_vram_bytes, detect_vram};
 use kiln_model::ModelRunner;
 use kiln_model::backend as runtime_backend;
 use kiln_model::forward::{
-    GpuWeights, LinearAttentionState, model_forward,
+    GpuWeights, LinearAttentionState, model_forward_kt,
     model_forward_paged_last_token, model_forward_paged_last_token_greedy,
     model_forward_paged_last_token_with_last_hidden, model_forward_paged_next_token_greedy,
     model_forward_paged_streaming, model_forward_paged_streaming_last_token_with_last_hidden,
@@ -34,7 +34,7 @@ use kiln_model::forward::{
     streaming_prefill_enabled_for,
 };
 use kiln_model::kv_cache::KvCache;
-use kiln_model::paged_kv_cache::PagedKvCache;
+use kiln_model::PagedKvCacheKt;
 use kiln_model::sampling::greedy_sample;
 use kiln_model::speculative::{
     SpeculativeConfig, speculative_decode_step, speculative_decode_step_paged_greedy,
@@ -138,6 +138,57 @@ fn kiln_config_dtype_to_kt(dtype: kiln_core::config::DType) -> kiln_tensor::DTyp
 /// candle Metal variant directly (issue #1082, candle removal).
 fn device_is_metal(device: &kiln_tensor::Device) -> bool {
     device.backend() == kiln_tensor::Backend::Metal
+}
+
+/// Greedy-sample a single token from kt logits.
+///
+/// The paged forward entry points (`model_forward_paged_last_token`,
+/// `model_forward_paged_streaming`, `model_forward_paged_with_kt`) now
+/// return kt `Tensor`s, but `kiln_model::sampling::greedy_sample` still
+/// consumes a candle `Tensor`. Mirror kiln-model's crate-private
+/// `kt_logits_to_candle`: CUDA-only copy-bridge then candle greedy sample;
+/// the non-CUDA arm errors at runtime since the bench decode path is
+/// CUDA-only in practice (issue #1082, candle removal).
+#[cfg(feature = "cuda")]
+fn greedy_sample_kt(logits: &kiln_tensor::Tensor) -> Result<u32> {
+    let contig;
+    let logits = if logits.is_contiguous() {
+        logits
+    } else {
+        contig = logits.contiguous()?;
+        &contig
+    };
+    // #1082: greedy_sample is kt-native — no candle bridge.
+    greedy_sample(logits)
+}
+
+#[cfg(not(feature = "cuda"))]
+fn greedy_sample_kt(_logits: &kiln_tensor::Tensor) -> Result<u32> {
+    anyhow::bail!("bench greedy_sample_kt requires the `cuda` feature (#1082)")
+}
+
+/// Copy-bridge a kt `Tensor` into a candle `Tensor`.
+///
+/// Used by the MTP bench arm to hand kt-produced activations
+/// (`h_prev`, prefill logits) to the still-candle MTP decode step and host
+/// sampler. CUDA-only copy; the non-CUDA arm errors at runtime since the
+/// bench decode path is CUDA-only in practice (issue #1082, candle removal).
+#[cfg(feature = "cuda")]
+fn bench_kt_tensor_to_candle(t: &kiln_tensor::Tensor) -> Result<kiln_kt_bridge::candle_core::Tensor> {
+    let contig;
+    let t = if t.is_contiguous() {
+        t
+    } else {
+        contig = t.contiguous()?;
+        &contig
+    };
+    kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(t)
+        .map_err(|e| anyhow::anyhow!("bench kt -> candle tensor bridge: {e}"))
+}
+
+#[cfg(not(feature = "cuda"))]
+fn bench_kt_tensor_to_candle(_t: &kiln_tensor::Tensor) -> Result<kiln_kt_bridge::candle_core::Tensor> {
+    anyhow::bail!("bench_kt_tensor_to_candle requires the `cuda` feature (#1082)")
 }
 
 struct BenchGdnRecurrentResidentStateScope<'a> {
@@ -713,7 +764,7 @@ fn bench_inference(
 
 /// Benchmark latency by directly timing prefill and each decode step.
 ///
-/// Uses `model_forward` directly for precise per-step timing.
+/// Uses `model_forward_kt` directly for precise per-step timing.
 fn bench_latency(
     weights: &GpuWeights,
     config: &ModelConfig,
@@ -740,16 +791,12 @@ fn bench_latency(
         &device_kt,
     )?;
     let backend = runtime_backend_for_bench(&device_kt, weights)?;
-    // `LinearAttentionState::new_with_batch_for_inference_backend` still
-    // takes a candle `&Device`. Bridge through the always-on kt-bridge
-    // helper so this site no longer names `candle_core::Device`
-    // (issue #1082, candle removal).
-    let candle_device_for_linear = kiln_kt_bridge::candle_device_from_kt(&device_kt)
-        .map_err(|e| anyhow::anyhow!("bench_latency: kt -> candle bridge: {e}"))?;
+    // #1082 forward-flip: `LinearAttentionState::new_with_batch_for_inference_backend`
+    // now takes a kt `&Device`, so pass `&device_kt` directly (no candle bridge).
     let mut linear_state = LinearAttentionState::new_with_batch_for_inference_backend(
         config,
         1,
-        &candle_device_for_linear,
+        &device_kt,
         Some(backend.name()),
     )?;
 
@@ -759,7 +806,7 @@ fn bench_latency(
 
     // Prefill: forward pass on all prompt tokens
     let prefill_start = Instant::now();
-    let logits = model_forward(
+    let logits = model_forward_kt(
         &*backend,
         &prompt_token_ids,
         weights,
@@ -791,7 +838,7 @@ fn bench_latency(
         }
 
         let step_start = Instant::now();
-        let logits = model_forward(
+        let logits = model_forward_kt(
             &*backend,
             &[next_token],
             weights,
@@ -861,7 +908,7 @@ fn bench_latency(
 
 /// Benchmark latency along the PAGED production path.
 ///
-/// Mirrors `bench_latency` but uses `PagedKvCache` + `BlockTable` +
+/// Mirrors `bench_latency` but uses `PagedKvCacheKt` + `BlockTable` +
 /// `model_forward_paged` (the same code path the HTTP server / scheduler
 /// drives). This is what production inference actually runs; the non-paged
 /// `bench_latency` measures a code path that no real request takes.
@@ -890,14 +937,18 @@ fn bench_latency_paged(
     let max_total = actual_prompt_tokens + max_output_tokens;
     let num_blocks = (max_total + PAGED_BLOCK_SIZE - 1) / PAGED_BLOCK_SIZE;
 
-    let paged_cache = PagedKvCache::new_kt(
+    // #1082 candle-drop: candle `PagedKvCache::new_kt(&device_kt, ...)` ->
+    // kt `PagedKvCacheKt::new(..., device_index)`. The trailing `&Device`
+    // arg becomes a plain `device_index: usize` (single-GPU -> 0; multi-GPU
+    // index comes from the kt `Device`).
+    let paged_cache = PagedKvCacheKt::new(
         config.num_full_attention_layers,
         num_blocks,
         PAGED_BLOCK_SIZE,
         config.num_kv_heads,
         config.head_dim,
         dtype,
-        &device_kt,
+        device_kt.index().unwrap_or(0),
     )?;
 
     // Phase 7 #1082: first end-to-end PagedKvCacheKt production wiring.
@@ -914,27 +965,19 @@ fn bench_latency_paged(
     // validate constructor + writer end-to-end on a real production
     // workload (the latency bench).
     //
-    // `try_kt_paged_kv_cache_new` still takes candle `Device`/`DType` at the
-    // boundary; bridge through the always-on kt-bridge helpers so this site
-    // no longer names `candle_core::*` directly (issue #1082, candle removal).
+    // #1082 forward-flip: `try_kt_paged_kv_cache_new` now takes kt
+    // `DType`/`Device` directly, so pass `dtype` and `&device_kt` without
+    // bridging to candle.
     #[cfg(feature = "cuda")]
-    let paged_cache_kt = {
-        let candle_dtype = kiln_kt_bridge::kt_dtype_to_candle(dtype).map_err(|e| {
-            anyhow::anyhow!("bench_latency_paged: kt -> candle dtype bridge: {e}")
-        })?;
-        let candle_device = kiln_kt_bridge::candle_device_from_kt(&device_kt).map_err(|e| {
-            anyhow::anyhow!("bench_latency_paged: kt -> candle device bridge: {e}")
-        })?;
-        kiln_model::forward::try_kt_paged_kv_cache_new(
-            config.num_full_attention_layers,
-            num_blocks,
-            PAGED_BLOCK_SIZE,
-            config.num_kv_heads,
-            config.head_dim,
-            candle_dtype,
-            &candle_device,
-        )?
-    };
+    let paged_cache_kt = kiln_model::forward::try_kt_paged_kv_cache_new(
+        config.num_full_attention_layers,
+        num_blocks,
+        PAGED_BLOCK_SIZE,
+        config.num_kv_heads,
+        config.head_dim,
+        dtype,
+        &device_kt,
+    )?;
     #[cfg(feature = "cuda")]
     if let Some(ref kt) = paged_cache_kt {
         eprintln!(
@@ -948,16 +991,12 @@ fn bench_latency_paged(
     }
 
     let backend = runtime_backend_for_bench(&device_kt, weights)?;
-    // `LinearAttentionState::new_with_batch_for_inference_backend` still
-    // takes a candle `&Device`. Bridge through the always-on kt-bridge
-    // helper so this site no longer names `candle_core::Device`
-    // (issue #1082, candle removal).
-    let candle_device_for_linear = kiln_kt_bridge::candle_device_from_kt(&device_kt)
-        .map_err(|e| anyhow::anyhow!("bench_latency_paged: kt -> candle bridge: {e}"))?;
+    // #1082 forward-flip: `LinearAttentionState::new_with_batch_for_inference_backend`
+    // now takes a kt `&Device`, so pass `&device_kt` directly (no candle bridge).
     let mut linear_state = LinearAttentionState::new_with_batch_for_inference_backend(
         config,
         1,
-        &candle_device_for_linear,
+        &device_kt,
         Some(backend.name()),
     )?;
 
@@ -979,7 +1018,7 @@ fn bench_latency_paged(
     // either path.
     let prefill_start = Instant::now();
     let streaming_prefill =
-        streaming_prefill_enabled_for(&candle_device_for_linear, actual_prompt_tokens);
+        streaming_prefill_enabled_for(&device_kt, actual_prompt_tokens);
     let mut next_token = if streaming_prefill {
         let logits = model_forward_paged_streaming(
             &*backend,
@@ -993,7 +1032,7 @@ fn bench_latency_paged(
             None,
         )
         .context("paged prefill forward pass (streaming) failed")?;
-        greedy_sample(&logits)?
+        greedy_sample_kt(&logits)?
     } else if device_is_metal(&device_kt) || backend.supports_linear_decode_argmax() {
         model_forward_paged_last_token_greedy(
             &*backend,
@@ -1022,7 +1061,7 @@ fn bench_latency_paged(
             None,
         )
         .context("paged prefill forward pass failed")?;
-        greedy_sample(&logits)?
+        greedy_sample_kt(&logits)?
     };
     let prefill_time = prefill_start.elapsed();
 
@@ -1106,7 +1145,7 @@ fn bench_latency_paged(
                     .context("paged decode forward pass failed")?
                 }
             };
-            greedy_sample(&logits)?
+            greedy_sample_kt(&logits)?
         };
         current_pos += 1;
         let step_time = step_start.elapsed();
@@ -1542,16 +1581,12 @@ fn bench_latency_skiplayer(
         &device_kt,
     )?;
     let backend = runtime_backend_for_bench(&device_kt, weights)?;
-    // `LinearAttentionState::new_with_batch_for_inference_backend` still
-    // takes a candle `&Device`. Bridge through the always-on kt-bridge
-    // helper so this site no longer names `candle_core::Device`
-    // (issue #1082, candle removal).
-    let candle_device_for_linear = kiln_kt_bridge::candle_device_from_kt(&device_kt)
-        .map_err(|e| anyhow::anyhow!("bench_latency_skiplayer: kt -> candle bridge: {e}"))?;
+    // #1082 forward-flip: `LinearAttentionState::new_with_batch_for_inference_backend`
+    // now takes a kt `&Device`, so pass `&device_kt` directly (no candle bridge).
     let mut linear_state = LinearAttentionState::new_with_batch_for_inference_backend(
         config,
         1,
-        &candle_device_for_linear,
+        &device_kt,
         Some(backend.name()),
     )?;
 
@@ -1564,7 +1599,7 @@ fn bench_latency_skiplayer(
 
     // Prefill: full forward pass, no speculative draft yet.
     let prefill_start = Instant::now();
-    let logits = model_forward(
+    let logits = model_forward_kt(
         &*backend,
         &prompt_token_ids,
         weights,
@@ -1710,7 +1745,7 @@ fn bench_latency_skiplayer(
 /// self-speculative implementation. It keeps the paged prefill/cache/block-table
 /// setup in this harness and delegates each decode iteration to
 /// `speculative_decode_step_paged_greedy`, which is expected to verify against
-/// `PagedKvCache` at the caller-provided `base_pos`.
+/// `PagedKvCacheKt` at the caller-provided `base_pos`.
 ///
 /// Enable with `KILN_SPEC_METHOD=skip_layer --paged`. Without `--paged`, the
 /// legacy flat-KV skip-layer benchmark remains available for comparisons.
@@ -1749,27 +1784,25 @@ fn bench_latency_paged_skiplayer(
     let max_total = actual_prompt_tokens + max_output_tokens + max_spec_window + 1;
     let num_blocks = (max_total + PAGED_BLOCK_SIZE - 1) / PAGED_BLOCK_SIZE;
 
-    let paged_cache = PagedKvCache::new_kt(
+    // #1082 candle-drop: `PagedKvCache::new_kt(&device_kt, ...)` ->
+    // `PagedKvCacheKt::new(..., device_index)`.
+    let paged_cache = PagedKvCacheKt::new(
         config.num_full_attention_layers,
         num_blocks,
         PAGED_BLOCK_SIZE,
         config.num_kv_heads,
         config.head_dim,
         dtype,
-        &device_kt,
+        device_kt.index().unwrap_or(0),
     )?;
     let backend = runtime_backend_for_bench(&device_kt, weights)?;
-    // `LinearAttentionState::new_with_batch_for_inference_backend` and
-    // `streaming_prefill_enabled_for` still take a candle `&Device`. Bridge
-    // through the always-on kt-bridge helper so this site no longer names
-    // `candle_core::Device` (issue #1082, candle removal).
-    let candle_device_for_linear = kiln_kt_bridge::candle_device_from_kt(&device_kt).map_err(
-        |e| anyhow::anyhow!("bench_latency_paged_skiplayer: kt -> candle bridge: {e}"),
-    )?;
+    // #1082 forward-flip: `LinearAttentionState::new_with_batch_for_inference_backend`
+    // and `streaming_prefill_enabled_for` now take a kt `&Device`, so pass
+    // `&device_kt` directly (no candle bridge).
     let mut linear_state = LinearAttentionState::new_with_batch_for_inference_backend(
         config,
         1,
-        &candle_device_for_linear,
+        &device_kt,
         Some(backend.name()),
     )?;
 
@@ -1786,7 +1819,7 @@ fn bench_latency_paged_skiplayer(
     );
 
     let prefill_start = Instant::now();
-    let logits = if streaming_prefill_enabled_for(&candle_device_for_linear, actual_prompt_tokens) {
+    let logits = if streaming_prefill_enabled_for(&device_kt, actual_prompt_tokens) {
         model_forward_paged_streaming(
             &*backend,
             &prompt_token_ids,
@@ -1820,7 +1853,7 @@ fn bench_latency_paged_skiplayer(
         .snapshot_for_decode_rollback_prefix(draft_linear_layers)
         .context("clone draft linear-attention prefix from paged skip-layer prefill")?;
 
-    let mut last_token = greedy_sample(&logits)?;
+    let mut last_token = greedy_sample_kt(&logits)?;
     let prefill_time = prefill_start.elapsed();
 
     eprintln!(
@@ -1968,7 +2001,7 @@ fn mtp_argmax_fp32_enabled() -> bool {
 
 /// Benchmark latency along the NATIVE-MTP speculative path.
 ///
-/// Uses two `PagedKvCache` instances (base + 1-layer MTP), threads `h_prev`
+/// Uses two `PagedKvCacheKt` instances (base + 1-layer MTP), threads `h_prev`
 /// across iterations, and drives `speculative_mtp_decode_step` per step.
 /// Reports α = `draft_accepted / total_draft_attempts`.
 ///
@@ -2025,35 +2058,34 @@ fn bench_latency_paged_mtp(
     let max_total_base = actual_prompt_tokens + 2 * max_output_tokens;
     let num_blocks = (max_total_base + PAGED_BLOCK_SIZE - 1) / PAGED_BLOCK_SIZE;
 
-    let base_cache = PagedKvCache::new_kt(
+    // #1082 candle-drop: `PagedKvCache::new_kt(&device_kt, ...)` ->
+    // `PagedKvCacheKt::new(..., device_index)` for both base + MTP caches.
+    let base_cache = PagedKvCacheKt::new(
         config.num_full_attention_layers,
         num_blocks,
         PAGED_BLOCK_SIZE,
         config.num_kv_heads,
         config.head_dim,
         dtype,
-        &device_kt,
+        device_kt.index().unwrap_or(0),
     )?;
-    let mtp_cache = PagedKvCache::new_kt(
+    let mtp_cache = PagedKvCacheKt::new(
         1,
         num_blocks,
         PAGED_BLOCK_SIZE,
         config.num_kv_heads,
         config.head_dim,
         dtype,
-        &device_kt,
+        device_kt.index().unwrap_or(0),
     )?;
     let backend = runtime_backend_for_bench(&device_kt, weights)?;
-    // `LinearAttentionState::new_with_batch_for_inference_backend` and
-    // `streaming_prefill_enabled_for` still take a candle `&Device`. Bridge
-    // through the always-on kt-bridge helper so this site no longer names
-    // `candle_core::Device` (issue #1082, candle removal).
-    let candle_device_for_linear = kiln_kt_bridge::candle_device_from_kt(&device_kt)
-        .map_err(|e| anyhow::anyhow!("bench_latency_paged_mtp: kt -> candle bridge: {e}"))?;
+    // #1082 forward-flip: `LinearAttentionState::new_with_batch_for_inference_backend`
+    // and `streaming_prefill_enabled_for` now take a kt `&Device`, so pass
+    // `&device_kt` directly (no candle bridge).
     let mut linear_state = LinearAttentionState::new_with_batch_for_inference_backend(
         config,
         1,
-        &candle_device_for_linear,
+        &device_kt,
         Some(backend.name()),
     )?;
 
@@ -2074,8 +2106,8 @@ fn bench_latency_paged_mtp(
     // Prefill: paged forward returning (logits, last-position hidden state)
     // so we can seed h_prev for the first MTP draft step.
     let prefill_start = Instant::now();
-    let (prefill_logits, mut h_prev) =
-        if streaming_prefill_enabled_for(&candle_device_for_linear, actual_prompt_tokens) {
+    let (prefill_logits, prefill_h_prev_kt) =
+        if streaming_prefill_enabled_for(&device_kt, actual_prompt_tokens) {
             model_forward_paged_streaming_last_token_with_last_hidden(
                 &*backend,
                 &prompt_token_ids,
@@ -2104,21 +2136,23 @@ fn bench_latency_paged_mtp(
             .context("MTP prefill (paged with last-hidden) failed")?
         };
 
-    // prefill_logits is already [1, 1, V].
+    // #1082 forward-flip: the paged-with-last-hidden entry now returns kt
+    // tensors. The MTP step (`speculative_mtp_decode_step`) and the candle
+    // host sampler both still consume candle tensors, so bridge the
+    // last-position hidden state to candle once here and thread the candle
+    // `h_prev` through the decode loop.
+    // #1082: speculative_mtp_decode_step + greedy_sample are kt-native now —
+    // keep h_prev / prefill_last as kt (no candle bridge).
+    let mut h_prev = prefill_h_prev_kt;
+
+    // prefill_logits is already [1, 1, V] (kt). Squeeze the time dim.
     let prefill_last = prefill_logits.squeeze(1)?;
     // Phase C35 H13 A/B — optionally cast logits to FP32 before argmax so the
     // bench prefill matches vLLM's sampler contract (rejection_sampler.py
     // casts `raw_target_logits` to float32 before greedy). BF16 argmax can
     // flip top-1 under ties when two candidates share the same BF16 bucket.
     let mut last_token = if mtp_argmax_fp32_enabled() {
-        // Bridge `kt::DType::F32` -> candle's F32 so this site no longer
-        // names `candle_core::DType` directly (issue #1082, candle
-        // removal). The `prefill_last` tensor is still candle-typed
-        // because the upstream `model_forward_paged_last_token_with_last_hidden`
-        // hasn't been migrated yet.
-        let candle_f32 = kiln_kt_bridge::kt_dtype_to_candle(kiln_tensor::DType::F32)
-            .map_err(|e| anyhow::anyhow!("bench_latency_paged_mtp: kt -> candle f32: {e}"))?;
-        let prefill_last_fp32 = prefill_last.to_dtype(candle_f32)?;
+        let prefill_last_fp32 = prefill_last.to_dtype(kiln_tensor::DType::F32)?;
         greedy_sample(&prefill_last_fp32)?
     } else {
         greedy_sample(&prefill_last)?

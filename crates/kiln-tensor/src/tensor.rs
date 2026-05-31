@@ -262,6 +262,63 @@ impl Tensor {
         }
     }
 
+    /// Build a tensor from raw little-endian bytes + an explicit `dtype`
+    /// + `shape` on `device` — the **candle-free twin** of candle's
+    /// `Tensor::from_raw_buffer` (#1082). The bytes are the dtype's native
+    /// little-endian representation (bf16/f16 = 2 bytes/elem, f32 = 4), i.e.
+    /// the on-disk / safetensors weight layout. Unlike [`Self::from_vec_on`]
+    /// this takes no `Element` type parameter, so the loader can stay generic
+    /// over the on-disk dtype without a per-dtype match + per-element
+    /// reinterpretation pass.
+    ///
+    /// CPU: wraps the byte buffer directly (zero per-element work). CUDA:
+    /// wraps on the host then H2D-uploads via the candle-free
+    /// [`crate::host_to_cuda_copy_ctx`]. Metal/Vulkan: not yet implemented
+    /// (#1082) — those loaders still build via candle.
+    pub fn from_raw_bytes_on(
+        device: Device,
+        dtype: DType,
+        bytes: Vec<u8>,
+        shape: Vec<usize>,
+    ) -> Result<Self> {
+        // Shape/byte-length agreement (CpuStorage::from_bytes also checks the
+        // multiple-of-elem-size invariant; this catches a wrong element count).
+        if !dtype.is_packed() {
+            let want: usize = shape.iter().product();
+            let per = dtype.size_in_bytes();
+            if per > 0 && bytes.len() != want * per {
+                return Err(Error::Msg(format!(
+                    "Tensor::from_raw_bytes_on: shape {shape:?} ({want} elems × {per}B) \
+                     needs {} bytes but got {}",
+                    want * per,
+                    bytes.len()
+                )));
+            }
+        }
+        let cpu = CpuStorage::from_bytes(dtype, bytes)?;
+        let storage: Storage = Arc::new(cpu);
+        let layout = Layout::contiguous(shape);
+        let cpu_tensor = Tensor {
+            storage,
+            layout,
+            id: TensorId::next(),
+            version: Arc::new(AtomicU64::new(0)),
+        };
+        match device {
+            Device::Cpu => Ok(cpu_tensor),
+            #[cfg(feature = "cuda")]
+            Device::Cuda(i) => crate::host_to_cuda_copy_ctx(&cpu_tensor, i),
+            #[cfg(not(feature = "cuda"))]
+            Device::Cuda(_) => Err(Error::Msg(
+                "Tensor::from_raw_bytes_on: CUDA device requested but `cuda` feature is not enabled"
+                    .to_string(),
+            )),
+            other @ (Device::Metal(_) | Device::Vulkan(_)) => Err(Error::Msg(format!(
+                "Tensor::from_raw_bytes_on: device {other} is not yet implemented (issue #1082)"
+            ))),
+        }
+    }
+
     /// Construct a [`Tensor`] from raw parts. Used by per-backend
     /// storage impls (Phase 1.6+ CUDA, 1.7 Metal, 1.8 Vulkan) and by
     /// view ops in this module.
@@ -379,16 +436,23 @@ impl Tensor {
         })
     }
 
-    /// Reshape — only valid on contiguous tensors. See [`Layout::reshape`].
-    ///
-    /// For non-contiguous reshape, the caller must invoke
-    /// [`contiguous()`](Tensor::contiguous) first (which logs a
-    /// `kiln_profile_contiguous_copy` event in Phase 1.x).
+    /// Reshape. Zero-copy view when `self` is contiguous; when `self` is
+    /// non-contiguous a pure view is impossible, so the data is materialized
+    /// first via [`contiguous()`](Tensor::contiguous) (which logs a
+    /// `kiln_profile_contiguous_copy` event) — matching candle's `reshape`
+    /// and honoring the "view when possible, copy only when necessary +
+    /// logged" intent. (#1082: the forward-flip reshapes many strided GDN /
+    /// attention head views that candle copied implicitly.)
     pub fn reshape(&self, new_shape: impl Into<Shape>) -> Result<Self> {
         // `new_shape` accepts any candle `Into<Shape>` (tuples are the
         // dominant `forward.rs` flip form); convert to the `Vec<usize>`
         // the layout reshape consumes.
         let dims: Vec<usize> = new_shape.into().into_dims();
+        if !self.is_contiguous() {
+            // A strided layout can't be reshaped as a view — materialize, then
+            // reshape the contiguous copy (recurses once into the view path).
+            return self.contiguous()?.reshape(dims);
+        }
         Ok(Tensor {
             storage: Arc::clone(&self.storage),
             layout: self.layout.reshape(dims)?,
@@ -989,13 +1053,21 @@ mod tests {
     }
 
     #[test]
-    fn reshape_only_on_contiguous() {
+    fn reshape_view_when_contiguous_materializes_when_not() {
         let t = Tensor::zeros_cpu(vec![3, 4], DType::F32);
+        // Contiguous reshape is a zero-copy view (shares the storage Arc).
         let r = t.reshape(vec![12]).unwrap();
         assert_eq!(r.shape(), &[12]);
+        assert!(Arc::ptr_eq(t.storage(), r.storage()));
 
+        // #1082: a non-contiguous (transposed) reshape can't be a pure view,
+        // so it now materializes (candle-parity, logged copy) rather than
+        // erroring — succeeds with the right shape and fresh storage.
         let tt = t.transpose(0, 1).unwrap();
-        assert!(tt.reshape(vec![12]).is_err());
+        assert!(!tt.is_contiguous());
+        let rr = tt.reshape(vec![12]).unwrap();
+        assert_eq!(rr.shape(), &[12]);
+        assert!(!Arc::ptr_eq(tt.storage(), rr.storage()));
     }
 
     #[test]

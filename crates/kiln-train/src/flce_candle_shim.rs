@@ -32,8 +32,8 @@
 //! - **Phase A** ([`fused_linear_cross_entropy`]) — the pure-candle
 //!   reference path (autograd flows through chunk intermediates). Kept
 //!   as the parity reference + `KILN_FLCE_PHASE_A=1` escape hatch.
-//! - **Phase B** ([`fused_linear_cross_entropy_phase_b`] +
-//!   [`fused_linear_cross_entropy_phase_b_with_provider`]) — the
+//! - **Phase B** ([`fused_linear_cross_entropy_phase_b_with_provider`])
+//!   — the
 //!   manual-backward candle `CustomOp1` (`FlceCustomOp`) whose `bwd()`
 //!   routes through the kernel crate's kt bridge on CUDA.
 //! - **kt-forward-op shim**
@@ -120,8 +120,8 @@ pub fn use_phase_a() -> bool {
 }
 
 /// Dispatch to either [`fused_linear_cross_entropy`] (Phase A) or
-/// [`fused_linear_cross_entropy_phase_b`] (Phase B) based on the
-/// `KILN_FLCE_PHASE_A` env var. Default is Phase B.
+/// [`fused_linear_cross_entropy_phase_b_with_provider`] (Phase B) based on
+/// the `KILN_FLCE_PHASE_A` env var. Default is Phase B.
 ///
 /// Trainer call sites should use this function instead of the explicit
 /// Phase A/B helpers so a single env-var flip switches every FLCE call.
@@ -481,26 +481,16 @@ fn flce_bwd_kt_bridge_disabled() -> bool {
     })
 }
 
-/// Phase B entry point: chunked FLCE with a manual-backward [`CustomOp1`].
-///
-/// Behaves identically to [`fused_linear_cross_entropy`] up to
-/// floating-point associativity in the reduction across chunks, but routes
-/// the autograd graph through a custom op so chunk intermediates do not
-/// pin ~23 GiB of VRAM at T=8192 SFT.
-pub fn fused_linear_cross_entropy_phase_b(
-    hidden: &Tensor,
-    head_t: &Tensor,
-    input_ids: &[u32],
-    label_mask: &[bool],
-    device: &Device,
-    chunk_size: usize,
-) -> Result<Tensor> {
-    fused_linear_cross_entropy_phase_b_with_provider(
-        hidden, head_t, input_ids, label_mask, device, chunk_size, None,
-    )
-}
+// (#1082) The provider-less Phase B convenience wrapper
+// `fused_linear_cross_entropy_phase_b` was removed: it had zero call
+// sites (the dispatch path and the `via_kt_forward_op` fallback both
+// call `fused_linear_cross_entropy_phase_b_with_provider` directly, and
+// no test referenced the wrapper). `_with_provider(..., None)` is the
+// drop-in replacement if a provider-less Phase B entry point is needed
+// again.
 
-/// Provider-aware variant. The optional [`FlceProvider`] is consulted for
+/// Phase B entry point: chunked FLCE with a manual-backward [`CustomOp1`].
+/// The optional [`FlceProvider`] is consulted for
 /// every chunk matmul in both forward and backward — when it returns
 /// `Ok(Some(out))` the result is used directly; on `Ok(None)` the candle
 /// CPU `broadcast_matmul` path runs as before.

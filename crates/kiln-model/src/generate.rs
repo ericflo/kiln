@@ -24,7 +24,7 @@ use crate::cuda_graph::CudaGraphRunner;
 use crate::decode_buffers::{DecodeBufferConfig, DecodeBuffers, DecodeElementType};
 use crate::forward::lm_head_sample_backend_decode_if;
 use crate::forward::{
-    GpuWeights, LinearAttentionState, model_forward, model_forward_paged,
+    GpuWeights, LinearAttentionState, model_forward_kt, model_forward_paged,
     model_forward_paged_batched_decode_hidden, model_forward_paged_decode_contiguous_batch_greedy,
     model_forward_paged_last_token, model_forward_paged_last_token_greedy,
     model_forward_paged_last_token_with_last_hidden, model_forward_paged_next_token_greedy,
@@ -34,7 +34,11 @@ use crate::forward::{
 use crate::kv_cache::KvCache;
 use crate::lora_loader::LoraWeights;
 use crate::packed_weight_registry::GpuPackedWeightRegistry;
-use crate::paged_kv_cache::PagedKvCache;
+// (#1082) the candle `crate::paged_kv_cache` module is gone; the kt twin
+// `PagedKvCacheKt` is the production cache. Alias it to `PagedKvCache` so the
+// existing call sites + the `model_forward_paged*` params (which the PAGED
+// agent resolves to the same kt cache) converge on one type.
+use crate::paged_kv_cache_kt::PagedKvCacheKt as PagedKvCache;
 use crate::sampling::{greedy_sample, sample_step, sample_with_full_params};
 use crate::speculative::{
     SpeculativeConfig, speculative_decode_step, speculative_decode_step_paged_greedy,
@@ -56,6 +60,26 @@ fn check_cancelled(cancel: Option<&CancelHandle>) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// (#1082) Map the model config dtype to the kt `DType` the kt paged cache
+/// (`PagedKvCacheKt::new`) expects.
+fn paged_cache_kt_dtype(dtype: kiln_core::config::DType) -> kiln_tensor::DType {
+    match dtype {
+        kiln_core::config::DType::BF16 => kiln_tensor::DType::BF16,
+        kiln_core::config::DType::FP16 => kiln_tensor::DType::F16,
+        kiln_core::config::DType::FP32 => kiln_tensor::DType::F32,
+    }
+}
+
+/// (#1082) Extract the CUDA device index the kt paged cache allocates on.
+/// kiln is single-GPU, so the device index is the only placement input the
+/// kt cache needs. Non-CUDA devices have no paged-cache support today.
+fn paged_cache_device_index(device: &kiln_tensor::Device) -> Result<usize> {
+    match device {
+        kiln_tensor::Device::Cuda(idx) => Ok(*idx),
+        other => anyhow::bail!("paged kv cache requires a CUDA device, got {other:?}"),
+    }
 }
 
 fn fast_batched_linear_state_scatter_enabled() -> bool {
@@ -236,7 +260,8 @@ pub struct PagedPrefixRegistration {
 #[derive(Clone)]
 pub enum PagedPrefixNextToken {
     /// Full last-position logits. Supports both greedy and stochastic sampling.
-    Logits(candle_core::Tensor),
+    // (#1082) kt-native logits — forward + sampler are both kt; no candle bridge.
+    Logits(kiln_tensor::Tensor),
     /// Greedy token only. Usable only when the later request is also greedy.
     GreedyToken(TokenId),
 }
@@ -408,7 +433,8 @@ fn decode_buffer_max_batch() -> usize {
 }
 
 enum PrefillSampleSource {
-    Logits(candle_core::Tensor),
+    // (#1082) kt-native logits — forward + sampler are both kt; no candle bridge.
+    Logits(kiln_tensor::Tensor),
     GreedyToken(TokenId),
 }
 
@@ -543,36 +569,13 @@ impl DecodeBatcherConfig {
         config
     }
 
-    pub fn from_env_for_backend(device: &candle_core::Device, backend_name: &str) -> Self {
-        let mut config = Self::from_env();
-        if std::env::var_os("KILN_DECODE_BATCH_MAX").is_none() {
-            config.max_batch = default_decode_batcher_max_batch(device, backend_name);
-        }
-        if std::env::var_os("KILN_DECODE_BATCH_WAIT_US").is_none() {
-            config.wait = default_decode_batcher_wait(device, backend_name);
-        }
-        if env_flag_value("KILN_DECODE_BATCH_MIXED_SEQ").is_none() {
-            config.allow_mixed_seq_lens =
-                default_decode_batcher_allow_mixed_seq_lens(device, backend_name);
-        }
-        config
-    }
+    // (#1082) candle-typed `from_env_for_backend`/`from_env_for_device`/
+    // `enabled_for_device` deleted — the kt-typed variants below are the sole
+    // entry points now that callers (kiln-server state.rs) and tests use kt
+    // `Device`.
 
-    pub fn from_env_for_device(device: &candle_core::Device) -> Self {
-        Self::from_env_for_backend(device, "")
-    }
-
-    pub fn enabled_for_device(device: &candle_core::Device) -> bool {
-        let _ = device;
-        env_flag_enabled("KILN_DECODE_BATCHER", true)
-    }
-
-    /// kt-typed parallel of [`Self::from_env_for_backend`].
-    ///
-    /// Same behaviour as the candle-typed entry but takes a
-    /// `&kiln_tensor::Device` so callers that have migrated off candle's
-    /// `candle_core::Device` enum don't have to bridge at every call site. Part of the
-    /// staged migration in #1082.
+    /// Builds the decode-batcher config from env, applying backend-aware
+    /// defaults derived from the kt `Device`.
     pub fn from_env_for_backend_kt(device: &kiln_tensor::Device, backend_name: &str) -> Self {
         let mut config = Self::from_env();
         if std::env::var_os("KILN_DECODE_BATCH_MAX").is_none() {
@@ -628,27 +631,8 @@ fn default_decode_batcher_wait_kt(
     }
 }
 
-fn default_decode_batcher_max_batch(device: &candle_core::Device, backend_name: &str) -> usize {
-    if matches!(device, candle_core::Device::Cuda(_)) || backend_name == "cuda" {
-        1
-    } else {
-        DecodeBatcherConfig::default().max_batch
-    }
-}
-
-fn default_decode_batcher_allow_mixed_seq_lens(device: &candle_core::Device, backend_name: &str) -> bool {
-    matches!(device, candle_core::Device::Metal(_)) || backend_name == "vulkan"
-}
-
-fn default_decode_batcher_wait(device: &candle_core::Device, backend_name: &str) -> std::time::Duration {
-    if matches!(device, candle_core::Device::Metal(_)) || backend_name == "metal" {
-        std::time::Duration::from_micros(100)
-    } else if backend_name == "vulkan" {
-        std::time::Duration::from_micros(5_000)
-    } else {
-        std::time::Duration::ZERO
-    }
-}
+// (#1082) candle-typed `default_decode_batcher_*` helpers deleted — the kt
+// twins above (`*_kt`) are the sole implementations now.
 
 fn env_flag_value(name: &str) -> Option<bool> {
     let value = std::env::var(name).ok()?;
@@ -1138,12 +1122,15 @@ pub fn append_prefix_block_table(cached_blocks: &[u32], allocated_blocks: &[u32]
 /// doesn't apply.
 fn run_legacy_lm_head_sample_batch(
     backend: &dyn crate::backend::BackendRuntime,
-    hidden: &candle_core::Tensor,
+    hidden: &kiln_tensor::Tensor,
     weights: &GpuWeights,
     config: &kiln_core::config::ModelConfig,
     params: &[SamplingParams],
     states: &[&mut PagedBatchedDecodeState],
 ) -> Result<Vec<TokenId>> {
+    // (#1082) lm head + sampler are both kt-native — `hidden` arrives kt from
+    // the batched decode forward and the sampler takes kt logits directly. No
+    // candle bridge.
     let logits = crate::forward::model_forward_head_backend_decode_if(
         Some(backend),
         hidden,
@@ -1169,7 +1156,8 @@ fn run_legacy_lm_head_sample_batch(
 }
 
 fn sample_first_decode_token(
-    logits: &candle_core::Tensor,
+    // (#1082) kt-native logits — sampler is kt now.
+    logits: &kiln_tensor::Tensor,
     params: &SamplingParams,
 ) -> Result<TokenId> {
     if params.is_effectively_greedy() {
@@ -1272,9 +1260,15 @@ impl ModelRunner {
         cuda_graphs: bool,
     ) -> Self {
         let eos_token_ids = tokenizer.eos_token_ids();
-        let device = weights.embed_tokens.device().clone();
+        // (#1082) `embed_tokens.device()` is a kt `Device`. The backend
+        // dispatcher is kt-native (`for_device_kt`). `CudaGraphRunner::new`
+        // is still candle-typed; bridge only for that consumer.
+        let kt_device = weights.embed_tokens.device();
+        let backend = backend::for_device_kt(&kt_device);
+        // (#1082) bridge — remove when CudaGraphRunner::new flips to kt Device.
+        let device = kiln_kt_bridge::candle_device_from_kt(&kt_device)
+            .expect("ModelRunner::new_with_options: kt->candle device bridge");
         let cuda_graph = CudaGraphRunner::new(&device, cuda_graphs);
-        let backend = backend::for_device(&device);
         let training_caps = backend.training_capabilities();
         tracing::info!(
             backend = backend.name(),
@@ -1320,9 +1314,10 @@ impl ModelRunner {
     /// `docs/audits/candle_cpu_residency_2026-05-11.md`.
     pub fn prewarm_backend_decode_weights(&mut self) -> Result<()> {
         self.backend.prewarm_decode_weights(&self.weights)?;
-        let device = self.weights.embed_tokens.device().clone();
+        // (#1082) `drop_uploaded_bf16_weights` is kt-native — pass kt device.
+        let kt_device = self.weights.embed_tokens.device();
         self.backend
-            .drop_uploaded_bf16_weights(&mut self.weights, &device)?;
+            .drop_uploaded_bf16_weights(&mut self.weights, &kt_device)?;
         Ok(())
     }
 
@@ -1331,10 +1326,11 @@ impl ModelRunner {
     /// The directory must contain `adapter_config.json` and `adapter_model.safetensors`.
     /// Replaces any previously loaded adapter.
     pub fn load_adapter(&mut self, path: &Path) -> Result<()> {
-        let device = self.weights.embed_tokens.device().clone();
+        // (#1082) `LoraWeights::load` is kt-native — pass kt device by value.
+        let kt_device = self.weights.embed_tokens.device();
         let num_layers = self.config.num_layers;
-        let lora =
-            LoraWeights::load(path, num_layers, &device).context("failed to load LoRA adapter")?;
+        let lora = LoraWeights::load(path, num_layers, kt_device)
+            .context("failed to load LoRA adapter")?;
         // Phase 4.1: register the adapter's LoRA tensors in the
         // backend's resident activation registry so the inference
         // path's `add_lora_delta_to_base` dispatches through
@@ -1416,8 +1412,11 @@ impl ModelRunner {
                 .expect("Qwen3.5 decode buffer config must be valid")
             })
             .clone();
-        let device = self.weights.embed_tokens.device();
-        let buffers = DecodeBuffers::allocate(cfg, device)?;
+        // (#1082) bridge — remove when DecodeBuffers::allocate flips to kt Device.
+        let kt_device = self.weights.embed_tokens.device();
+        let device = kiln_kt_bridge::candle_device_from_kt(&kt_device)
+            .map_err(|e| anyhow::anyhow!("ensure_decode_buffers device bridge: {e}"))?;
+        let buffers = DecodeBuffers::allocate(cfg, &device)?;
         // If another thread won the race, drop our newly allocated copy
         // harmlessly and fall through to the winner's buffer.
         let _ = self.decode_buffers.set(buffers);
@@ -1486,29 +1485,33 @@ impl ModelRunner {
 
     /// Create a new KV cache sized for this model.
     fn new_kv_cache(&self, max_seq_len: usize) -> Result<KvCache> {
+        // #1082: `embed_tokens.device()` is now a kt `Device` (by value);
+        // route through the kt-typed `KvCache::new_kt` so no candle Device
+        // import is needed at the call site.
         let dtype = match self.config.dtype {
-            kiln_core::config::DType::BF16 => candle_core::DType::BF16,
-            kiln_core::config::DType::FP16 => candle_core::DType::F16,
-            kiln_core::config::DType::FP32 => candle_core::DType::F32,
+            kiln_core::config::DType::BF16 => kiln_tensor::DType::BF16,
+            kiln_core::config::DType::FP16 => kiln_tensor::DType::F16,
+            kiln_core::config::DType::FP32 => kiln_tensor::DType::F32,
         };
         let device = self.weights.embed_tokens.device();
-        KvCache::new(
+        KvCache::new_kt(
             self.config.num_full_attention_layers,
             self.config.num_kv_heads,
             self.config.head_dim,
             max_seq_len,
             dtype,
-            device,
+            &device,
         )
     }
 
     /// Create a new linear attention state for GDN layers.
     fn new_linear_state(&self) -> Result<LinearAttentionState> {
+        // #1082: kt `Device` by value -> pass by reference.
         let device = self.weights.embed_tokens.device();
         LinearAttentionState::new_with_batch_for_inference_backend(
             &self.config,
             1,
-            device,
+            &device,
             Some(self.backend.name()),
         )
     }
@@ -1555,7 +1558,7 @@ impl ModelRunner {
         let mut linear_state = self.new_linear_state()?;
 
         // Prefill: run forward pass on all prompt tokens at once
-        let logits = model_forward(
+        let logits = model_forward_kt(
             &*self.backend,
             &prompt_tokens,
             &self.weights,
@@ -1631,7 +1634,7 @@ impl ModelRunner {
             }
 
             // Decode step: forward pass on just the new token
-            let logits = model_forward(
+            let logits = model_forward_kt(
                 &*self.backend,
                 &[next_token],
                 &self.weights,
@@ -1675,7 +1678,7 @@ impl ModelRunner {
         let mut linear_state = self.new_linear_state()?;
 
         // Prefill: run forward pass on all prompt tokens at once
-        let logits = model_forward(
+        let logits = model_forward_kt(
             &*self.backend,
             prompt_tokens,
             &self.weights,
@@ -1739,7 +1742,7 @@ impl ModelRunner {
             }
 
             // Decode step: forward pass on just the new token (KV cache has all previous)
-            let logits = model_forward(
+            let logits = model_forward_kt(
                 &*self.backend,
                 &[next_token],
                 &self.weights,
@@ -2282,14 +2285,14 @@ impl ModelRunner {
 
         let use_greedy_prefill_token = params.is_effectively_greedy()
             && matches!(self.backend.device(), kiln_tensor::Device::Metal(_))
-            && !streaming_prefill_enabled_for(self.weights.embed_tokens.device(), prefill_tokens.len());
+            && !streaming_prefill_enabled_for(&self.weights.embed_tokens.device(), prefill_tokens.len());
         let split_pos =
             strict_prompt_prefix_split_pos(prompt_tokens.len(), cached_tokens, block_size);
         let mut prefill_split_snapshot: Option<RollingPrefixSnapshot> = None;
         let prefill_start = std::time::Instant::now();
         let prefill_source = {
             let pc_guard = lock_paged_cache(paged_cache)?;
-            if streaming_prefill_enabled_for(self.weights.embed_tokens.device(), prefill_tokens.len()) {
+            if streaming_prefill_enabled_for(&self.weights.embed_tokens.device(), prefill_tokens.len()) {
                 if let Some(split_pos) = split_pos {
                     let head_tokens = &prompt_tokens[cached_tokens..split_pos];
                     let _ = model_forward_paged_streaming_with_progress(
@@ -2329,23 +2332,23 @@ impl ModelRunner {
                     if let Some(cancel) = cancel {
                         cancel.report_prefill_tokens_completed(prefill_tokens.len() as u64);
                     }
+                    // (#1082) kt-native logits — sampler is kt now; no candle bridge.
                     PrefillSampleSource::Logits(logits)
                 } else {
-                    PrefillSampleSource::Logits(
-                        model_forward_paged_streaming_with_progress(
-                            &*self.backend,
-                            prefill_tokens,
-                            &self.weights,
-                            &self.config,
-                            pc_guard,
-                            block_table,
-                            cached_tokens,
-                            Some(&mut linear_state),
-                            self.active_lora.as_ref(),
-                            cancel,
-                        )
-                        .context("prefill forward pass (paged prefix cache, streaming) failed")?,
+                    let logits = model_forward_paged_streaming_with_progress(
+                        &*self.backend,
+                        prefill_tokens,
+                        &self.weights,
+                        &self.config,
+                        pc_guard,
+                        block_table,
+                        cached_tokens,
+                        Some(&mut linear_state),
+                        self.active_lora.as_ref(),
+                        cancel,
                     )
+                    .context("prefill forward pass (paged prefix cache, streaming) failed")?;
+                    PrefillSampleSource::Logits(logits)
                 }
             } else if use_greedy_prefill_token {
                 PrefillSampleSource::GreedyToken(
@@ -2380,6 +2383,7 @@ impl ModelRunner {
                 if let Some(cancel) = cancel {
                     cancel.report_prefill_tokens_completed(prefill_tokens.len() as u64);
                 }
+                // (#1082) kt-native logits — sampler is kt now; no candle bridge.
                 PrefillSampleSource::Logits(logits)
             }
         };
@@ -2514,7 +2518,7 @@ impl ModelRunner {
         let prefill_start = std::time::Instant::now();
         let logits = {
             let pc_guard = lock_paged_cache(paged_cache)?;
-            if streaming_prefill_enabled_for(self.weights.embed_tokens.device(), prefill_tokens.len()) {
+            if streaming_prefill_enabled_for(&self.weights.embed_tokens.device(), prefill_tokens.len()) {
                 if let Some(split_pos) = split_pos {
                     let head_tokens = &prompt_tokens[cached_tokens..split_pos];
                     let _ = model_forward_paged_streaming_with_progress(
@@ -2553,9 +2557,10 @@ impl ModelRunner {
                     if let Some(cancel) = cancel {
                         cancel.report_prefill_tokens_completed(prefill_tokens.len() as u64);
                     }
+                    // (#1082) forward returns kt logits; sampler is kt — no bridge.
                     logits
                 } else {
-                    model_forward_paged_streaming_with_progress(
+                    let logits = model_forward_paged_streaming_with_progress(
                         &*self.backend,
                         prefill_tokens,
                         &self.weights,
@@ -2567,7 +2572,9 @@ impl ModelRunner {
                         self.active_lora.as_ref(),
                         cancel,
                     )
-                    .context("batched-engine prefill forward pass (streaming) failed")?
+                    .context("batched-engine prefill forward pass (streaming) failed")?;
+                    // (#1082) forward returns kt logits; sampler is kt — no bridge.
+                    logits
                 }
             } else if let Some(split_pos) = split_pos {
                 // Split the prefill at the last block boundary so we can
@@ -2614,6 +2621,7 @@ impl ModelRunner {
                 if let Some(cancel) = cancel {
                     cancel.report_prefill_tokens_completed(prefill_tokens.len() as u64);
                 }
+                // (#1082) forward returns kt logits; sampler is kt — no bridge.
                 logits
             } else {
                 let logits = model_forward_paged_last_token(
@@ -2632,6 +2640,7 @@ impl ModelRunner {
                 if let Some(cancel) = cancel {
                     cancel.report_prefill_tokens_completed(prefill_tokens.len() as u64);
                 }
+                // (#1082) forward returns kt logits; sampler is kt — no bridge.
                 logits
             }
         };
@@ -2840,6 +2849,8 @@ impl ModelRunner {
                         self.active_lora.as_ref(),
                     )
                     .context("batched decode CUDA graph row failed")?;
+                // #1082: `decode_step_paged` now returns a kt `Tensor` — feed it
+                // straight to the kt-typed samplers, no candle->kt bridge.
                 let token = if params[0].temperature == 0.0 {
                     greedy_sample(&row)?
                 } else {
@@ -3036,7 +3047,8 @@ impl ModelRunner {
 
     fn decode_from_prefill_logits(
         &self,
-        logits: candle_core::Tensor,
+        // (#1082) kt-native logits — sampler (greedy_sample/sample_step) is kt.
+        logits: kiln_tensor::Tensor,
         seq_len: usize,
         params: &SamplingParams,
         paged_cache: &PagedKvCache,
@@ -3292,7 +3304,7 @@ impl ModelRunner {
             // per-row after every forward — the batched state post-scatter
             // and the per-row states post-scatter are byte-for-byte
             // equivalent). Taking the cached state directly skips the
-            // per-step 24-GDN-layer × 2-state-kind `candle_core::Tensor::cat` workload
+            // per-step 24-GDN-layer × 2-state-kind tensor `cat` workload
             // (~1.6 ms / step at bs=16). The cache is only consulted when
             // the caller supplied a `row_ids` fingerprint that survives the
             // batching-engine actor's `Vec::remove` shifts.
@@ -3449,6 +3461,7 @@ impl ModelRunner {
             )
             .context("decode forward pass (paged) failed")?
         };
+        // (#1082) forward returns kt logits; sampler is kt — no bridge.
 
         let token = if params.is_effectively_greedy() {
             greedy_sample(&logits)
@@ -3578,7 +3591,7 @@ impl ModelRunner {
 
         let logits = {
             let pc_guard = lock_paged_cache(paged_cache)?;
-            if streaming_prefill_enabled_for(self.weights.embed_tokens.device(), prompt_tokens.len()) {
+            if streaming_prefill_enabled_for(&self.weights.embed_tokens.device(), prompt_tokens.len()) {
                 model_forward_paged_streaming_with_progress(
                     &*self.backend,
                     prompt_tokens,
@@ -3612,6 +3625,7 @@ impl ModelRunner {
                 logits
             }
         };
+        // (#1082) forward returns kt logits; sampler is kt — no bridge.
 
         let mut seq_len = prompt_tokens.len();
         let mut generated_tokens: Vec<TokenId> = Vec::new();
@@ -3710,24 +3724,24 @@ impl ModelRunner {
         // before the decode loop starts. The decode loop then re-acquires the
         // cache per step.
         let streaming_prefill =
-            streaming_prefill_enabled_for(self.weights.embed_tokens.device(), prompt_tokens.len());
+            streaming_prefill_enabled_for(&self.weights.embed_tokens.device(), prompt_tokens.len());
         let prefill_source = {
             let pc_guard = lock_paged_cache(paged_cache)?;
             if streaming_prefill {
-                PrefillSampleSource::Logits(
-                    model_forward_paged_streaming(
-                        &*self.backend,
-                        prompt_tokens,
-                        &self.weights,
-                        &self.config,
-                        pc_guard,
-                        block_table,
-                        0,
-                        Some(&mut linear_state),
-                        self.active_lora.as_ref(),
-                    )
-                    .context("prefill forward pass (paged, streaming) failed")?,
+                let logits = model_forward_paged_streaming(
+                    &*self.backend,
+                    prompt_tokens,
+                    &self.weights,
+                    &self.config,
+                    pc_guard,
+                    block_table,
+                    0,
+                    Some(&mut linear_state),
+                    self.active_lora.as_ref(),
                 )
+                .context("prefill forward pass (paged, streaming) failed")?;
+                // (#1082) kt-native logits — sampler is kt now; no candle bridge.
+                PrefillSampleSource::Logits(logits)
             } else if params.is_effectively_greedy()
                 && matches!(self.backend.device(), kiln_tensor::Device::Metal(_))
             {
@@ -3763,6 +3777,7 @@ impl ModelRunner {
                 if let Some(cancel) = cancel {
                     cancel.report_prefill_tokens_completed(prompt_tokens.len() as u64);
                 }
+                // (#1082) kt-native logits — sampler is kt now; no candle bridge.
                 PrefillSampleSource::Logits(logits)
             }
         };
@@ -3863,6 +3878,8 @@ impl ModelRunner {
                     )?
                 };
                 seq_len += 1;
+                // #1082: `decode_step_paged` now returns kt — feed `sample_step`
+                // directly, no candle->kt bridge.
                 sample_step(&logits, params, step_seed, &generated_tokens)?
             };
         }
@@ -3889,7 +3906,7 @@ impl ModelRunner {
 
         let logits = {
             let pc_guard = lock_paged_cache(paged_cache)?;
-            if streaming_prefill_enabled_for(self.weights.embed_tokens.device(), prompt_tokens.len()) {
+            if streaming_prefill_enabled_for(&self.weights.embed_tokens.device(), prompt_tokens.len()) {
                 model_forward_paged_streaming(
                     &*self.backend,
                     prompt_tokens,
@@ -3918,6 +3935,7 @@ impl ModelRunner {
                 .context("prefill forward pass (paged skip-layer) failed")?
             }
         };
+        // (#1082) forward returns kt logits; sampler is kt — no bridge.
 
         let mut draft_linear_state =
             self.snapshot_draft_linear_state(&linear_state, spec_config)?;
@@ -4072,22 +4090,22 @@ impl ModelRunner {
         // Long Metal prompts use tiled streaming prefill by default; env
         // overrides can force either path.
         let streaming_prefill =
-            streaming_prefill_enabled_for(self.weights.embed_tokens.device(), prompt_tokens.len());
+            streaming_prefill_enabled_for(&self.weights.embed_tokens.device(), prompt_tokens.len());
         let prefill_source = if streaming_prefill {
-            PrefillSampleSource::Logits(
-                model_forward_paged_streaming(
-                    &*self.backend,
-                    prompt_tokens,
-                    &self.weights,
-                    &self.config,
-                    paged_cache,
-                    block_table,
-                    0,
-                    Some(&mut linear_state),
-                    self.active_lora.as_ref(),
-                )
-                .context("prefill forward pass (paged, streaming) failed")?,
+            let logits = model_forward_paged_streaming(
+                &*self.backend,
+                prompt_tokens,
+                &self.weights,
+                &self.config,
+                paged_cache,
+                block_table,
+                0,
+                Some(&mut linear_state),
+                self.active_lora.as_ref(),
             )
+            .context("prefill forward pass (paged, streaming) failed")?;
+            // (#1082) kt-native logits — sampler is kt now; no candle bridge.
+            PrefillSampleSource::Logits(logits)
         } else if params.is_effectively_greedy()
             && matches!(self.backend.device(), kiln_tensor::Device::Metal(_))
         {
@@ -4107,21 +4125,21 @@ impl ModelRunner {
                 .context("greedy prefill forward pass (paged) failed")?,
             )
         } else {
-            PrefillSampleSource::Logits(
-                model_forward_paged_last_token(
-                    &*self.backend,
-                    prompt_tokens,
-                    &self.weights,
-                    &self.config,
-                    paged_cache,
-                    block_table,
-                    0,
-                    Some(&mut linear_state),
-                    self.active_lora.as_ref(),
-                    None,
-                )
-                .context("prefill forward pass (paged) failed")?,
+            let logits = model_forward_paged_last_token(
+                &*self.backend,
+                prompt_tokens,
+                &self.weights,
+                &self.config,
+                paged_cache,
+                block_table,
+                0,
+                Some(&mut linear_state),
+                self.active_lora.as_ref(),
+                None,
             )
+            .context("prefill forward pass (paged) failed")?;
+            // (#1082) kt-native logits — sampler is kt now; no candle bridge.
+            PrefillSampleSource::Logits(logits)
         };
 
         let mut seq_len = prompt_tokens.len();
@@ -4217,6 +4235,8 @@ impl ModelRunner {
                     self.active_lora.as_ref(),
                 )?;
                 seq_len += 1;
+                // #1082: `decode_step_paged` now returns kt — feed `sample_step`
+                // directly, no candle->kt bridge.
                 sample_step(&logits, params, step_seed, &generated_tokens)?
             };
         }
@@ -4291,7 +4311,7 @@ impl ModelRunner {
         let mut linear_state = self.new_linear_state()?;
 
         // Prefill: full model forward pass on all prompt tokens
-        let logits = model_forward(
+        let logits = model_forward_kt(
             &*self.backend,
             prompt_tokens,
             &self.weights,
@@ -4523,12 +4543,10 @@ impl ModelRunner {
         const BLOCK_SIZE: usize = 16;
 
         let max_total = prompt_tokens.len() + params.max_tokens;
-        let device = self.weights.embed_tokens.device();
-        let dtype = match self.config.dtype {
-            kiln_core::config::DType::BF16 => candle_core::DType::BF16,
-            kiln_core::config::DType::FP16 => candle_core::DType::F16,
-            kiln_core::config::DType::FP32 => candle_core::DType::F32,
-        };
+        // (#1082) kt-native paged cache — `PagedKvCacheKt::new` takes a kt
+        // `DType` + a CUDA `device_index: usize` (kiln is single-GPU).
+        let device_index = paged_cache_device_index(&self.weights.embed_tokens.device())?;
+        let dtype = paged_cache_kt_dtype(self.config.dtype);
 
         // Two independent paged caches:
         //   * `base_cache` covers the model's full-attention layers.
@@ -4542,7 +4560,7 @@ impl ModelRunner {
             self.config.num_kv_heads,
             self.config.head_dim,
             dtype,
-            device,
+            device_index,
         )?;
         let mtp_cache = PagedKvCache::new(
             1,
@@ -4551,7 +4569,7 @@ impl ModelRunner {
             self.config.num_kv_heads,
             self.config.head_dim,
             dtype,
-            device,
+            device_index,
         )?;
         let mut base_block_table = BlockTable::new();
         let mut mtp_block_table = BlockTable::new();
@@ -4564,8 +4582,8 @@ impl ModelRunner {
 
         // Prefill: feed the prompt through the base model and capture the
         // post-final-norm last hidden row as the seed `h_prev`.
-        let (prefill_logits, mut h_prev) =
-            if streaming_prefill_enabled_for(self.weights.embed_tokens.device(), prompt_tokens.len()) {
+        let (prefill_logits_kt, h_prev_kt) =
+            if streaming_prefill_enabled_for(&self.weights.embed_tokens.device(), prompt_tokens.len()) {
                 model_forward_paged_streaming_last_token_with_last_hidden(
                     &*self.backend,
                     prompt_tokens,
@@ -4593,6 +4611,10 @@ impl ModelRunner {
                 )
                 .context("mtp prefill forward pass failed")?
             };
+        // (#1082) MTP speculative step + speculative.rs are fully kt now —
+        // `h_prev`/`prefill_logits` stay kt; no candle bridge.
+        let prefill_logits = prefill_logits_kt;
+        let mut h_prev = h_prev_kt;
 
         // The last-row logits drive the first emitted token (same as the
         // skip-layer path).
@@ -4802,7 +4824,7 @@ impl ModelRunner {
         let mut kv_cache = self.new_kv_cache(max_total)?;
         let mut linear_state = self.new_linear_state()?;
 
-        let logits = model_forward(
+        let logits = model_forward_kt(
             &*self.backend,
             &prompt_tokens,
             &self.weights,
@@ -4975,12 +4997,9 @@ impl ModelRunner {
         const BLOCK_SIZE: usize = 16;
 
         let max_total = prompt_tokens.len() + params.max_tokens;
-        let device = self.weights.embed_tokens.device();
-        let dtype = match self.config.dtype {
-            kiln_core::config::DType::BF16 => candle_core::DType::BF16,
-            kiln_core::config::DType::FP16 => candle_core::DType::F16,
-            kiln_core::config::DType::FP32 => candle_core::DType::F32,
-        };
+        // (#1082) kt-native paged cache — kt `DType` + CUDA `device_index`.
+        let device_index = paged_cache_device_index(&self.weights.embed_tokens.device())?;
+        let dtype = paged_cache_kt_dtype(self.config.dtype);
 
         let num_blocks = Self::blocks_needed(max_total, BLOCK_SIZE);
         let base_cache = PagedKvCache::new(
@@ -4990,7 +5009,7 @@ impl ModelRunner {
             self.config.num_kv_heads,
             self.config.head_dim,
             dtype,
-            device,
+            device_index,
         )?;
         let mtp_cache = PagedKvCache::new(
             1,
@@ -4999,7 +5018,7 @@ impl ModelRunner {
             self.config.num_kv_heads,
             self.config.head_dim,
             dtype,
-            device,
+            device_index,
         )?;
         let mut base_block_table = BlockTable::new();
         let mut mtp_block_table = BlockTable::new();
@@ -5011,8 +5030,8 @@ impl ModelRunner {
         let (tx, rx) = mpsc::channel();
         let mut linear_state = self.new_linear_state()?;
 
-        let (prefill_logits, mut h_prev) =
-            if streaming_prefill_enabled_for(self.weights.embed_tokens.device(), prompt_tokens.len()) {
+        let (prefill_logits_kt, h_prev_kt) =
+            if streaming_prefill_enabled_for(&self.weights.embed_tokens.device(), prompt_tokens.len()) {
                 model_forward_paged_streaming_last_token_with_last_hidden(
                     &*self.backend,
                     &prompt_tokens,
@@ -5040,6 +5059,10 @@ impl ModelRunner {
                 )
                 .context("mtp prefill forward pass failed")?
             };
+        // (#1082) MTP speculative step + speculative.rs are fully kt now —
+        // `h_prev`/`prefill_logits` stay kt; no candle bridge.
+        let prefill_logits = prefill_logits_kt;
+        let mut h_prev = h_prev_kt;
 
         let prefill_last = prefill_logits.squeeze(1)?;
         let mut last_token = greedy_sample(&prefill_last)?;
@@ -5286,7 +5309,7 @@ impl ModelRunner {
             let mut linear_state = runner_guard.new_linear_state()?;
             let logits = {
                 let pc_guard = lock_paged_cache(paged_cache.as_ref())?;
-                if streaming_prefill_enabled_for(runner_guard.weights.embed_tokens.device(), prompt_tokens.len())
+                if streaming_prefill_enabled_for(&runner_guard.weights.embed_tokens.device(), prompt_tokens.len())
                 {
                     model_forward_paged_streaming(
                         &*runner_guard.backend,
@@ -5316,6 +5339,7 @@ impl ModelRunner {
                     .context("prefill forward pass (paged) failed")?
                 }
             };
+        // (#1082) forward returns kt logits; sampler is kt — no bridge.
             (logits, linear_state)
         };
 
@@ -5492,7 +5516,8 @@ impl ModelRunner {
         } else {
             let prefill_result =
                 (|| -> Result<(
-                    candle_core::Tensor,
+                    // (#1082) kt-native logits — store + sampler are kt now.
+                    kiln_tensor::Tensor,
                     Option<PagedPrefixRegistration>,
                     Vec<PagedPrefixRegistration>,
                 )> {
@@ -5511,7 +5536,7 @@ impl ModelRunner {
                     let logits = {
                         let pc_guard = lock_paged_cache(paged_cache.as_ref())?;
                         if streaming_prefill_enabled_for(
-                            runner_guard.weights.embed_tokens.device(),
+                            &runner_guard.weights.embed_tokens.device(),
                             prompt_tokens.len(),
                         ) {
                             if let Some(split_pos) = split_pos {
@@ -5584,6 +5609,7 @@ impl ModelRunner {
                             .context("prefill forward pass (paged prefix cache) failed")?
                         }
                     };
+                    // (#1082) kt-native logits — next-token store is kt; no bridge.
                     let registration = runner_guard.completed_prompt_registration(
                         &prompt_tokens,
                         &block_table,
@@ -5901,7 +5927,7 @@ impl ModelRunner {
         let mut prefill_split_snapshot: Option<RollingPrefixSnapshot> = None;
         let logits = {
             let pc_guard = lock_paged_cache(paged_cache)?;
-            if streaming_prefill_enabled_for(self.weights.embed_tokens.device(), prompt_tokens.len()) {
+            if streaming_prefill_enabled_for(&self.weights.embed_tokens.device(), prompt_tokens.len()) {
                 if let Some(split_pos) = split_pos {
                     let head_tokens = &prompt_tokens[cached_tokens..split_pos];
                     let _ = model_forward_paged_streaming(
@@ -5966,6 +5992,8 @@ impl ModelRunner {
                 .context("prefill forward pass (paged prefix cache) failed")?
             }
         };
+        // (#1082) kt-native logits — next-token store + sampler are both kt;
+        // no candle bridge.
 
         let registration = self.completed_prompt_registration(
             prompt_tokens,
@@ -6017,7 +6045,7 @@ impl ModelRunner {
 
         let logits = {
             let pc_guard = lock_paged_cache(paged_cache)?;
-            if streaming_prefill_enabled_for(self.weights.embed_tokens.device(), prompt_tokens.len()) {
+            if streaming_prefill_enabled_for(&self.weights.embed_tokens.device(), prompt_tokens.len()) {
                 model_forward_paged_streaming(
                     &*self.backend,
                     prompt_tokens,
@@ -6046,6 +6074,7 @@ impl ModelRunner {
                 .context("prefill forward pass (paged) failed")?
             }
         };
+        // (#1082) forward returns kt logits; sampler entry is kt now — no bridge.
 
         self.stream_decode_from_prefill_logits(
             logits,
@@ -6059,7 +6088,8 @@ impl ModelRunner {
 
     fn stream_decode_from_prefill_logits(
         &self,
-        logits: candle_core::Tensor,
+        // (#1082) kt-native logits — sample_first_decode_token is kt.
+        logits: kiln_tensor::Tensor,
         seq_len: usize,
         params: &SamplingParams,
         paged_cache: &PagedKvCache,
@@ -6173,7 +6203,7 @@ impl ModelRunner {
 
         let logits = {
             let pc_guard = lock_paged_cache(paged_cache)?;
-            if streaming_prefill_enabled_for(self.weights.embed_tokens.device(), prompt_tokens.len()) {
+            if streaming_prefill_enabled_for(&self.weights.embed_tokens.device(), prompt_tokens.len()) {
                 model_forward_paged_streaming(
                     &*self.backend,
                     prompt_tokens,
@@ -6202,6 +6232,7 @@ impl ModelRunner {
                 .context("prefill forward pass (streaming paged skip-layer) failed")?
             }
         };
+        // (#1082) forward returns kt logits; sampler is kt — no bridge.
 
         let mut draft_linear_state =
             self.snapshot_draft_linear_state(&linear_state, spec_config)?;
@@ -6371,7 +6402,7 @@ impl ModelRunner {
         // Prefill. Long Metal prompts use tiled streaming prefill by default;
         // env overrides can force either path.
         let prefill_result =
-            if streaming_prefill_enabled_for(self.weights.embed_tokens.device(), prompt_tokens.len()) {
+            if streaming_prefill_enabled_for(&self.weights.embed_tokens.device(), prompt_tokens.len()) {
                 model_forward_paged_streaming(
                     &*self.backend,
                     &prompt_tokens,
@@ -6404,6 +6435,7 @@ impl ModelRunner {
                 return Err(e.context("prefill forward pass (paged) failed"));
             }
         };
+        // (#1082) forward returns kt logits; sampler is kt — no bridge.
 
         let mut seq_len = prompt_tokens.len();
         let mut generated_tokens: Vec<TokenId> = Vec::new();
@@ -6516,6 +6548,8 @@ impl ModelRunner {
                     }
                 };
                 seq_len += 1;
+                // #1082: `decode_step_paged` now returns kt — feed `sample_step`
+                // directly, no candle->kt bridge.
                 sample_step(&logits, params, step_seed, &generated_tokens)?
             };
         }
@@ -6534,6 +6568,12 @@ impl ModelRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // #1082: `generate.rs` itself names no `Tensor`/`DType` (it operates on
+    // `GpuWeights`/op return values), so `use super::*` brings neither into the
+    // test module. `tiny_weights` builds the kt-typed `GpuWeights` fields with
+    // the candle-shaped kt constructor façade (`Tensor::randn`/`zeros`/`ones`
+    // accepting a kt `&Device`), so import the kt forms explicitly.
+    use kiln_tensor::{DType, Tensor};
 
     /// Create a tiny model config for testing.
     ///
@@ -6582,6 +6622,9 @@ mod tests {
     /// math, so 1×1 placeholder GDN tensors are sufficient — the registry only
     /// needs them to exist with the correct layer-kind tag if it's ever forced.
     fn tiny_weights(config: &ModelConfig, device: &candle_core::Device) -> GpuWeights {
+        // #1082: GpuWeights fields are kt — build all tensors on a kt
+        // device bridged from the candle `device` param.
+        let kdev = kiln_kt_bridge::kt_device_from_candle(device);
         let h = config.hidden_size;
         let inter = config.intermediate_size;
         let vocab = config.vocab_size;
@@ -6589,22 +6632,22 @@ mod tests {
         let num_kv_heads = config.num_kv_heads;
         let head_dim = config.head_dim;
 
-        let embed = candle_core::Tensor::randn(0.0_f32, 0.02, (vocab, h), device).unwrap();
+        let embed = Tensor::randn(0.0_f32, 0.02, (vocab, h), &kdev).unwrap();
         let embed_t = embed.t().unwrap().contiguous().unwrap();
-        let final_norm = candle_core::Tensor::zeros((h,), candle_core::DType::F32, device).unwrap();
+        let final_norm = Tensor::zeros((h,), DType::F32, &kdev).unwrap();
 
         let mut layers = Vec::with_capacity(config.num_layers);
         for layer_idx in 0..config.num_layers {
             let is_full = (layer_idx + 1) % config.full_attention_interval == 0;
             let attention = if is_full {
                 let q_proj =
-                    candle_core::Tensor::randn(0.0_f32, 0.02, (num_heads * head_dim, h), device).unwrap();
+                    Tensor::randn(0.0_f32, 0.02, (num_heads * head_dim, h), &kdev).unwrap();
                 let k_proj =
-                    candle_core::Tensor::randn(0.0_f32, 0.02, (num_kv_heads * head_dim, h), device).unwrap();
+                    Tensor::randn(0.0_f32, 0.02, (num_kv_heads * head_dim, h), &kdev).unwrap();
                 let v_proj =
-                    candle_core::Tensor::randn(0.0_f32, 0.02, (num_kv_heads * head_dim, h), device).unwrap();
+                    Tensor::randn(0.0_f32, 0.02, (num_kv_heads * head_dim, h), &kdev).unwrap();
                 let o_proj =
-                    candle_core::Tensor::randn(0.0_f32, 0.02, (h, num_heads * head_dim), device).unwrap();
+                    Tensor::randn(0.0_f32, 0.02, (h, num_heads * head_dim), &kdev).unwrap();
                 let q_proj_t = q_proj.t().unwrap().contiguous().unwrap();
                 let k_proj_t = k_proj.t().unwrap().contiguous().unwrap();
                 let v_proj_t = v_proj.t().unwrap().contiguous().unwrap();
@@ -6614,8 +6657,8 @@ mod tests {
                     k_proj,
                     v_proj,
                     o_proj,
-                    q_norm: candle_core::Tensor::zeros((head_dim,), candle_core::DType::F32, device).unwrap(),
-                    k_norm: candle_core::Tensor::zeros((head_dim,), candle_core::DType::F32, device).unwrap(),
+                    q_norm: Tensor::zeros((head_dim,), DType::F32, &kdev).unwrap(),
+                    k_norm: Tensor::zeros((head_dim,), DType::F32, &kdev).unwrap(),
                     q_proj_t,
                     k_proj_t,
                     v_proj_t,
@@ -6636,16 +6679,16 @@ mod tests {
                 let qk_dim = nk * dk;
                 let v_dim = nv * dv;
                 let qkv_dim = qk_dim * 2 + v_dim;
-                let in_proj_qkv = candle_core::Tensor::randn(0.0_f32, 0.02, (qkv_dim, h), device).unwrap();
-                let in_proj_z = candle_core::Tensor::randn(0.0_f32, 0.02, (v_dim, h), device).unwrap();
-                let in_proj_a = candle_core::Tensor::randn(0.0_f32, 0.02, (nv, h), device).unwrap();
-                let in_proj_b = candle_core::Tensor::randn(0.0_f32, 0.02, (nv, h), device).unwrap();
-                let out_proj = candle_core::Tensor::randn(0.0_f32, 0.02, (h, v_dim), device).unwrap();
-                let conv1d = candle_core::Tensor::randn(0.0_f32, 0.02, (qkv_dim, kernel), device).unwrap();
-                let norm = candle_core::Tensor::ones((v_dim,), candle_core::DType::F32, device).unwrap();
-                let a_log = candle_core::Tensor::zeros((nv,), candle_core::DType::F32, device).unwrap();
-                let a_log_gates = candle_core::Tensor::zeros((nv,), candle_core::DType::F32, device).unwrap();
-                let dt_bias = candle_core::Tensor::zeros((nv,), candle_core::DType::F32, device).unwrap();
+                let in_proj_qkv = Tensor::randn(0.0_f32, 0.02, (qkv_dim, h), &kdev).unwrap();
+                let in_proj_z = Tensor::randn(0.0_f32, 0.02, (v_dim, h), &kdev).unwrap();
+                let in_proj_a = Tensor::randn(0.0_f32, 0.02, (nv, h), &kdev).unwrap();
+                let in_proj_b = Tensor::randn(0.0_f32, 0.02, (nv, h), &kdev).unwrap();
+                let out_proj = Tensor::randn(0.0_f32, 0.02, (h, v_dim), &kdev).unwrap();
+                let conv1d = Tensor::randn(0.0_f32, 0.02, (qkv_dim, kernel), &kdev).unwrap();
+                let norm = Tensor::ones((v_dim,), DType::F32, &kdev).unwrap();
+                let a_log = Tensor::zeros((nv,), DType::F32, &kdev).unwrap();
+                let a_log_gates = Tensor::zeros((nv,), DType::F32, &kdev).unwrap();
+                let dt_bias = Tensor::zeros((nv,), DType::F32, &kdev).unwrap();
                 let in_proj_qkv_t = in_proj_qkv.t().unwrap().contiguous().unwrap();
                 let in_proj_z_t = in_proj_z.t().unwrap().contiguous().unwrap();
                 let in_proj_a_t = in_proj_a.t().unwrap().contiguous().unwrap();
@@ -6674,16 +6717,16 @@ mod tests {
                 )
             };
 
-            let gate_proj = candle_core::Tensor::randn(0.0_f32, 0.02, (inter, h), device).unwrap();
-            let up_proj = candle_core::Tensor::randn(0.0_f32, 0.02, (inter, h), device).unwrap();
-            let down_proj = candle_core::Tensor::randn(0.0_f32, 0.02, (h, inter), device).unwrap();
+            let gate_proj = Tensor::randn(0.0_f32, 0.02, (inter, h), &kdev).unwrap();
+            let up_proj = Tensor::randn(0.0_f32, 0.02, (inter, h), &kdev).unwrap();
+            let down_proj = Tensor::randn(0.0_f32, 0.02, (h, inter), &kdev).unwrap();
             let gate_proj_t = gate_proj.t().unwrap().contiguous().unwrap();
             let up_proj_t = up_proj.t().unwrap().contiguous().unwrap();
             let down_proj_t = down_proj.t().unwrap().contiguous().unwrap();
 
             layers.push(crate::forward::GpuLayerWeights {
-                input_layernorm: candle_core::Tensor::zeros((h,), candle_core::DType::F32, device).unwrap(),
-                post_attention_layernorm: candle_core::Tensor::zeros((h,), candle_core::DType::F32, device)
+                input_layernorm: Tensor::zeros((h,), DType::F32, &kdev).unwrap(),
+                post_attention_layernorm: Tensor::zeros((h,), DType::F32, &kdev)
                     .unwrap(),
                 attention,
                 mlp: crate::forward::GpuFfnWeights {
@@ -6702,7 +6745,7 @@ mod tests {
         }
 
         let rotary_inv_freq =
-            crate::forward::compute_rotary_inv_freq(config.rotary_dim(), config.rope_theta, device)
+            crate::forward::compute_rotary_inv_freq(config.rotary_dim(), config.rope_theta, &kdev)
                 .unwrap();
 
         GpuWeights {
@@ -6751,45 +6794,50 @@ mod tests {
 
     #[test]
     fn test_decode_batcher_default_mixed_seq_lens_backend_policy() {
-        let device = candle_core::Device::Cpu;
+        // (#1082) kt Device; candle-typed helper deleted.
+        let device = kiln_tensor::Device::Cpu;
 
-        assert!(!default_decode_batcher_allow_mixed_seq_lens(&device, "cpu"));
-        assert!(!default_decode_batcher_allow_mixed_seq_lens(
+        assert!(!default_decode_batcher_allow_mixed_seq_lens_kt(
+            &device, "cpu"
+        ));
+        assert!(!default_decode_batcher_allow_mixed_seq_lens_kt(
             &device, "cuda"
         ));
-        assert!(default_decode_batcher_allow_mixed_seq_lens(
+        assert!(default_decode_batcher_allow_mixed_seq_lens_kt(
             &device, "vulkan"
         ));
     }
 
     #[test]
     fn test_decode_batcher_default_max_batch_backend_policy() {
-        let device = candle_core::Device::Cpu;
+        // (#1082) kt Device; candle-typed helper deleted.
+        let device = kiln_tensor::Device::Cpu;
 
-        assert_eq!(default_decode_batcher_max_batch(&device, "cpu"), 8);
-        assert_eq!(default_decode_batcher_max_batch(&device, "cuda"), 1);
-        assert_eq!(default_decode_batcher_max_batch(&device, "vulkan"), 8);
-        assert_eq!(default_decode_batcher_max_batch(&device, "metal"), 8);
+        assert_eq!(default_decode_batcher_max_batch_kt(&device, "cpu"), 8);
+        assert_eq!(default_decode_batcher_max_batch_kt(&device, "cuda"), 1);
+        assert_eq!(default_decode_batcher_max_batch_kt(&device, "vulkan"), 8);
+        assert_eq!(default_decode_batcher_max_batch_kt(&device, "metal"), 8);
     }
 
     #[test]
     fn test_decode_batcher_default_wait_backend_policy() {
-        let device = candle_core::Device::Cpu;
+        // (#1082) kt Device; candle-typed helper deleted.
+        let device = kiln_tensor::Device::Cpu;
 
         assert_eq!(
-            default_decode_batcher_wait(&device, "cpu"),
+            default_decode_batcher_wait_kt(&device, "cpu"),
             std::time::Duration::ZERO
         );
         assert_eq!(
-            default_decode_batcher_wait(&device, "cuda"),
+            default_decode_batcher_wait_kt(&device, "cuda"),
             std::time::Duration::ZERO
         );
         assert_eq!(
-            default_decode_batcher_wait(&device, "vulkan"),
+            default_decode_batcher_wait_kt(&device, "vulkan"),
             std::time::Duration::from_micros(5_000)
         );
         assert_eq!(
-            default_decode_batcher_wait(&device, "metal"),
+            default_decode_batcher_wait_kt(&device, "metal"),
             std::time::Duration::from_micros(100)
         );
     }
@@ -6806,6 +6854,10 @@ mod tests {
             .contiguous()?)
     }
 
+    // (#1082) Metal-only candle weight builder. `GpuWeights` fields are kt now,
+    // so this candle-tensor builder no longer type-checks under `--features
+    // metal` and needs a kt rewrite (Wave 2 / metal). It is gated off the
+    // default + CUDA build, which is the production candle-drop path for #1082.
     #[cfg(feature = "metal")]
     fn qwen_shape_bf16_full_attention_weights(
         config: &ModelConfig,
@@ -6917,7 +6969,7 @@ mod tests {
         let prefix_v = patterned_bf16(
             &[batch, start_pos, config.num_kv_heads, config.head_dim],
             0.003,
-            &device,
+            0, // (#1082) kt paged cache device_index (metal test, broken until kt rewrite)
         )?;
         let bt0 = BlockTable { blocks: vec![0] };
         let bt1 = BlockTable { blocks: vec![1] };
@@ -6930,8 +6982,8 @@ mod tests {
             block_size,
             config.num_kv_heads,
             config.head_dim,
-            candle_core::DType::BF16,
-            &device,
+            kiln_tensor::DType::BF16,
+            0, // (#1082) kt paged cache device_index (metal test, broken until kt rewrite)
         )?;
         {
             for (row, block_table) in block_tables.iter().enumerate() {
@@ -6957,8 +7009,8 @@ mod tests {
                 block_size,
                 config.num_kv_heads,
                 config.head_dim,
-                candle_core::DType::BF16,
-                &device,
+                kiln_tensor::DType::BF16,
+                0, // (#1082) kt paged cache device_index (metal test, broken until kt rewrite)
             )?;
             let row_table = BlockTable { blocks: vec![0] };
             {
@@ -7036,12 +7088,12 @@ mod tests {
         let prefix_k = patterned_bf16(
             &[batch, start_pos, config.num_kv_heads, config.head_dim],
             0.002,
-            &device,
+            0, // (#1082) kt paged cache device_index (metal test, broken until kt rewrite)
         )?;
         let prefix_v = patterned_bf16(
             &[batch, start_pos, config.num_kv_heads, config.head_dim],
             0.003,
-            &device,
+            0, // (#1082) kt paged cache device_index (metal test, broken until kt rewrite)
         )?;
         let bt0 = BlockTable { blocks: vec![0] };
         let bt1 = BlockTable { blocks: vec![1] };
@@ -7052,8 +7104,8 @@ mod tests {
             block_size,
             config.num_kv_heads,
             config.head_dim,
-            candle_core::DType::BF16,
-            &device,
+            kiln_tensor::DType::BF16,
+            0, // (#1082) kt paged cache device_index (metal test, broken until kt rewrite)
         )?);
         {
             for (row, block_table) in block_tables.iter().enumerate() {
@@ -7119,8 +7171,8 @@ mod tests {
                 block_size,
                 config.num_kv_heads,
                 config.head_dim,
-                candle_core::DType::BF16,
-                &device,
+                kiln_tensor::DType::BF16,
+                0, // (#1082) kt paged cache device_index (metal test, broken until kt rewrite)
             )?;
             let row_table = BlockTable { blocks: vec![0] };
             {
@@ -7199,12 +7251,12 @@ mod tests {
         let prefix_k = patterned_bf16(
             &[batch, max_prefix, config.num_kv_heads, config.head_dim],
             0.002,
-            &device,
+            0, // (#1082) kt paged cache device_index (metal test, broken until kt rewrite)
         )?;
         let prefix_v = patterned_bf16(
             &[batch, max_prefix, config.num_kv_heads, config.head_dim],
             0.003,
-            &device,
+            0, // (#1082) kt paged cache device_index (metal test, broken until kt rewrite)
         )?;
         let bt0 = BlockTable { blocks: vec![0] };
         let bt1 = BlockTable { blocks: vec![1] };
@@ -7215,8 +7267,8 @@ mod tests {
             block_size,
             config.num_kv_heads,
             config.head_dim,
-            candle_core::DType::BF16,
-            &device,
+            kiln_tensor::DType::BF16,
+            0, // (#1082) kt paged cache device_index (metal test, broken until kt rewrite)
         )?);
         {
             for (row, block_table) in block_tables.iter().enumerate() {
@@ -7291,8 +7343,8 @@ mod tests {
                 block_size,
                 config.num_kv_heads,
                 config.head_dim,
-                candle_core::DType::BF16,
-                &device,
+                kiln_tensor::DType::BF16,
+                0, // (#1082) kt paged cache device_index (metal test, broken until kt rewrite)
             )?;
             let row_table = BlockTable { blocks: vec![0] };
             {
@@ -7497,10 +7549,14 @@ mod tests {
         assert!(result.is_err(), "empty prompt should error");
     }
 
+    // (#1082) Paged path uses the CUDA-only kt cache; gate off the default
+    // CPU build until a kt-CUDA paged test rewrite lands.
+    #[cfg(feature = "cuda")]
     #[test]
     fn test_generate_paged_max_tokens() -> Result<()> {
         let config = tiny_config();
-        let device = candle_core::Device::Cpu;
+        // (#1082) kt paged cache is CUDA-only; this test needs a CUDA device.
+        let device = candle_core::Device::new_cuda(0)?;
         let weights = tiny_weights(&config, &device);
         let tokenizer = test_tokenizer();
 
@@ -7515,8 +7571,8 @@ mod tests {
             block_size,
             config.num_kv_heads,
             config.head_dim,
-            candle_core::DType::F32,
-            &device,
+            kiln_tensor::DType::F32,
+            0, // (#1082) CUDA device_index for kt paged cache
         )?;
 
         let params = SamplingParams {
@@ -7545,10 +7601,14 @@ mod tests {
         Ok(())
     }
 
+    // (#1082) Paged path uses the CUDA-only kt cache; gate off the default
+    // CPU build until a kt-CUDA paged test rewrite lands.
+    #[cfg(feature = "cuda")]
     #[test]
     fn test_generate_paged_shared_max_tokens() -> Result<()> {
         let config = tiny_config();
-        let device = candle_core::Device::Cpu;
+        // (#1082) kt paged cache is CUDA-only; this test needs a CUDA device.
+        let device = candle_core::Device::new_cuda(0)?;
         let weights = tiny_weights(&config, &device);
         let tokenizer = test_tokenizer();
 
@@ -7563,8 +7623,8 @@ mod tests {
             block_size,
             config.num_kv_heads,
             config.head_dim,
-            candle_core::DType::F32,
-            &device,
+            kiln_tensor::DType::F32,
+            0, // (#1082) CUDA device_index for kt paged cache
         )?;
 
         let params = SamplingParams {
@@ -7588,10 +7648,14 @@ mod tests {
         Ok(())
     }
 
+    // (#1082) Paged path uses the CUDA-only kt cache; gate off the default
+    // CPU build until a kt-CUDA paged test rewrite lands.
+    #[cfg(feature = "cuda")]
     #[test]
     fn test_paged_vs_contiguous_equivalence() -> Result<()> {
         let config = tiny_config();
-        let device = candle_core::Device::Cpu;
+        // (#1082) kt paged cache is CUDA-only; this test needs a CUDA device.
+        let device = candle_core::Device::new_cuda(0)?;
         let weights = tiny_weights(&config, &device);
         let tokenizer = test_tokenizer();
 
@@ -7616,8 +7680,8 @@ mod tests {
             block_size,
             config.num_kv_heads,
             config.head_dim,
-            candle_core::DType::F32,
-            &device,
+            kiln_tensor::DType::F32,
+            0, // (#1082) CUDA device_index for kt paged cache
         )?;
 
         let paged_output = runner.generate_from_tokens_paged(
@@ -7638,10 +7702,14 @@ mod tests {
         Ok(())
     }
 
+    // (#1082) Paged path uses the CUDA-only kt cache; gate off the default
+    // CPU build until a kt-CUDA paged test rewrite lands.
+    #[cfg(feature = "cuda")]
     #[test]
     fn test_generate_streaming_paged() -> Result<()> {
         let config = tiny_config();
-        let device = candle_core::Device::Cpu;
+        // (#1082) kt paged cache is CUDA-only; this test needs a CUDA device.
+        let device = candle_core::Device::new_cuda(0)?;
         let weights = tiny_weights(&config, &device);
         let tokenizer = test_tokenizer();
 
@@ -7656,8 +7724,8 @@ mod tests {
             block_size,
             config.num_kv_heads,
             config.head_dim,
-            candle_core::DType::F32,
-            &device,
+            kiln_tensor::DType::F32,
+            0, // (#1082) CUDA device_index for kt paged cache
         )?;
 
         let params = SamplingParams {
@@ -7685,10 +7753,14 @@ mod tests {
         Ok(())
     }
 
+    // (#1082) Paged path uses the CUDA-only kt cache; gate off the default
+    // CPU build until a kt-CUDA paged test rewrite lands.
+    #[cfg(feature = "cuda")]
     #[test]
     fn test_generate_paged_shared_concurrent_requests_complete() -> Result<()> {
         let config = tiny_config();
-        let device = candle_core::Device::Cpu;
+        // (#1082) kt paged cache is CUDA-only; this test needs a CUDA device.
+        let device = candle_core::Device::new_cuda(0)?;
         let weights = tiny_weights(&config, &device);
         let tokenizer = test_tokenizer();
 
@@ -7703,8 +7775,8 @@ mod tests {
             block_size,
             config.num_kv_heads,
             config.head_dim,
-            candle_core::DType::F32,
-            &device,
+            kiln_tensor::DType::F32,
+            0, // (#1082) CUDA device_index for kt paged cache
         )?);
 
         let params = SamplingParams {
@@ -7766,7 +7838,8 @@ mod tests {
     #[test]
     fn exact_prefix_cache_hit_skips_prefill_and_matches_tokens() -> Result<()> {
         let config = tiny_config();
-        let device = candle_core::Device::Cpu;
+        // (#1082) kt paged cache is CUDA-only; this test needs a CUDA device.
+        let device = candle_core::Device::new_cuda(0)?;
         let weights = tiny_weights(&config, &device);
         let tokenizer = test_tokenizer();
 
@@ -7780,8 +7853,8 @@ mod tests {
             block_size,
             config.num_kv_heads,
             config.head_dim,
-            candle_core::DType::F32,
-            &device,
+            kiln_tensor::DType::F32,
+            0, // (#1082) CUDA device_index for kt paged cache
         )?;
         let params = SamplingParams {
             temperature: 0.0,
@@ -7838,7 +7911,8 @@ mod tests {
     #[test]
     fn streaming_exact_prefix_cache_hit_uses_saved_first_token_source() -> Result<()> {
         let config = tiny_config();
-        let device = candle_core::Device::Cpu;
+        // (#1082) kt paged cache is CUDA-only; this test needs a CUDA device.
+        let device = candle_core::Device::new_cuda(0)?;
         let weights = tiny_weights(&config, &device);
         let tokenizer = test_tokenizer();
 
@@ -7856,8 +7930,8 @@ mod tests {
             block_size,
             config.num_kv_heads,
             config.head_dim,
-            candle_core::DType::F32,
-            &device,
+            kiln_tensor::DType::F32,
+            0, // (#1082) CUDA device_index for kt paged cache
         )?);
         let params = SamplingParams {
             temperature: 0.0,
@@ -7930,7 +8004,8 @@ mod tests {
     #[test]
     fn batched_exact_prefix_cache_hit_skips_prefill() -> Result<()> {
         let config = tiny_config();
-        let device = candle_core::Device::Cpu;
+        // (#1082) kt paged cache is CUDA-only; this test needs a CUDA device.
+        let device = candle_core::Device::new_cuda(0)?;
         let weights = tiny_weights(&config, &device);
         let tokenizer = test_tokenizer();
 
@@ -7944,8 +8019,8 @@ mod tests {
             block_size,
             config.num_kv_heads,
             config.head_dim,
-            candle_core::DType::F32,
-            &device,
+            kiln_tensor::DType::F32,
+            0, // (#1082) CUDA device_index for kt paged cache
         )?;
         let params = SamplingParams {
             temperature: 0.0,
@@ -8018,10 +8093,14 @@ mod tests {
         );
     }
 
+    // (#1082) Paged path uses the CUDA-only kt cache; gate off the default
+    // CPU build until a kt-CUDA paged test rewrite lands.
+    #[cfg(feature = "cuda")]
     #[test]
     fn test_paged_eos_detection() -> Result<()> {
         let config = tiny_config();
-        let device = candle_core::Device::Cpu;
+        // (#1082) kt paged cache is CUDA-only; this test needs a CUDA device.
+        let device = candle_core::Device::new_cuda(0)?;
         let weights = tiny_weights(&config, &device);
         let tokenizer = test_tokenizer();
 
@@ -8040,8 +8119,8 @@ mod tests {
             block_size,
             config.num_kv_heads,
             config.head_dim,
-            candle_core::DType::F32,
-            &device,
+            kiln_tensor::DType::F32,
+            0, // (#1082) CUDA device_index for kt paged cache
         )?;
 
         let params = SamplingParams {

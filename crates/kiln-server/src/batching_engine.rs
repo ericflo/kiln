@@ -17,7 +17,7 @@ use kiln_core::sampling::SamplingParams;
 use kiln_core::token::TokenId;
 use kiln_model::{
     CancelHandle, FinishReason, GenerationOutput, ModelRunner, PagedBatchedDecodeState,
-    PagedKvCache, PagedPrefixReuse,
+    PagedKvCacheKt, PagedPrefixReuse,
 };
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
@@ -203,7 +203,7 @@ pub trait DecodeForward: Send + Sync + 'static {
 pub struct RealDecodeForward {
     runner: Arc<RwLock<ModelRunner>>,
     block_manager: Arc<Mutex<BlockManager>>,
-    paged_cache: Arc<PagedKvCache>,
+    paged_cache: Arc<PagedKvCacheKt>,
     prefix_cache: Arc<Mutex<RealPrefixCache>>,
     gpu_lock: GpuCoordinationLock,
     // When set, multi-row decode steps are dispatched as a loop of single-row
@@ -219,7 +219,7 @@ impl RealDecodeForward {
     pub fn new(
         runner: Arc<RwLock<ModelRunner>>,
         block_manager: Arc<Mutex<BlockManager>>,
-        paged_cache: Arc<PagedKvCache>,
+        paged_cache: Arc<PagedKvCacheKt>,
         prefix_cache: Arc<Mutex<RealPrefixCache>>,
         gpu_lock: GpuCoordinationLock,
     ) -> Self {

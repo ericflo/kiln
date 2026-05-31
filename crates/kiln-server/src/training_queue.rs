@@ -960,10 +960,14 @@ fn build_multi_tenant_merge_teacher(
         // this source's prompts and surface a tracing warning.
         let src_dir = adapter_dir.join(&source.adapter);
         let device = weights.embed_tokens.device().clone();
+        // #1082: `device` is kt (kt `GpuWeights`); LoraWeights::load wants
+        // candle — bridge kt->candle. A bridge failure falls through to the
+        // same graceful Err fallback below.
+        // #1082: LoraWeights::load is kt-native — pass the kt device directly.
         let teacher_lora = match kiln_model::lora_loader::LoraWeights::load(
             &src_dir,
             model_config.num_layers,
-            &device,
+            device,
         ) {
             Ok(weights) => Some(weights),
             Err(e) => {
@@ -2513,7 +2517,8 @@ fn auto_load_adapter(
         guard.weights.embed_tokens.device().clone()
     };
 
-    let lora = LoraWeights::load(adapter_path, num_layers, &device)
+    // #1082: LoraWeights::load is kt-native — pass the kt device directly.
+    let lora = LoraWeights::load(adapter_path, num_layers, device)
         .map_err(|e| format!("failed to load adapter: {e}"))?;
 
     {

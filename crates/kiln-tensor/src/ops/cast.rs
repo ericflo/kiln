@@ -70,7 +70,14 @@ impl DeviceOp1 for CastOp {
             .storage()
             .as_any()
             .downcast_ref::<CpuStorage>()
-            .ok_or_else(|| Error::from_str("CastOp: storage must be CpuStorage on CPU"))?;
+            .ok_or_else(|| {
+                Error::Msg(format!(
+                    "CastOp: storage must be CpuStorage on CPU (from {from} to {to}, device {:?}, \
+                     contiguous {}) — an unsupported CUDA cast pair fell back to the CPU branch",
+                    x.device(),
+                    x.is_contiguous()
+                ))
+            })?;
         let bytes = cpu.as_bytes();
         let n = x.element_count();
 

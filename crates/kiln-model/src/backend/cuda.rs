@@ -12,16 +12,12 @@ use std::sync::{Mutex, OnceLock};
 use super::{BackendRuntime, TrainingCapabilities};
 use crate::lora_loader::{LoraProjectionWeights, compute_lora_delta};
 
-/// Bridge `candle_core::TensorId` -> kt-native `kiln_tensor_id::TensorId`.
-///
-/// Phase 7 (#1082) Candle removal: the CUDA resident-activation registry
-/// keys on the kt-native id so the type matches the rest of the migration
-/// (vk_forward.rs already runs on `kiln_tensor_id::TensorId`). The
-/// underlying value is the candle id's raw counter widened from `usize`
-/// to `u64`; both ids share the same per-process uniqueness guarantee.
+/// kt-native `kiln_tensor_id::TensorId` for the resident-activation
+/// registry. (#1082) Candle removal: the BackendRuntime trait surface is
+/// fully kt-typed, so the registry keys directly off the kt tensor id.
 #[inline]
-fn kt_id_from_candle(tensor: &candle_core::Tensor) -> TensorId {
-    TensorId::from_raw(tensor.id().as_raw() as u64)
+fn kt_id(tensor: &kiln_tensor::Tensor) -> TensorId {
+    tensor.id()
 }
 
 static CUDA_RESIDENT_TENSOR_IDS: OnceLock<Mutex<HashSet<TensorId>>> = OnceLock::new();
@@ -80,10 +76,6 @@ pub fn reset_gdn_full_chunk_forward_dispatch_counts() {
     CUDA_GDN_FULL_CHUNK_FORWARD_SINGLE_SUCCESSES.store(0, Ordering::Relaxed);
 }
 
-fn any_tracks_op(tensors: &[&candle_core::Tensor]) -> bool {
-    tensors.iter().any(|tensor| tensor.track_op())
-}
-
 fn with_cuda_resident_ids<R>(f: impl FnOnce(&mut HashSet<TensorId>) -> R) -> R {
     let registry = CUDA_RESIDENT_TENSOR_IDS.get_or_init(|| Mutex::new(HashSet::new()));
     let mut guard = registry
@@ -92,31 +84,26 @@ fn with_cuda_resident_ids<R>(f: impl FnOnce(&mut HashSet<TensorId>) -> R) -> R {
     f(&mut guard)
 }
 
-fn cuda_optimizer_tensors_supported_for_kt(tensors: &[&candle_core::Tensor]) -> bool {
+fn cuda_optimizer_tensors_supported_for_kt(tensors: &[&kiln_tensor::Tensor]) -> bool {
     let Some(first) = tensors.first() else {
         return false;
     };
-    matches!(first.device(), candle_core::Device::Cuda(_))
-        && matches!(first.dtype(), candle_core::DType::F32 | candle_core::DType::BF16)
+    matches!(first.device(), kiln_tensor::Device::Cuda(_))
+        && matches!(first.dtype(), kiln_tensor::DType::F32 | kiln_tensor::DType::BF16)
         && first.is_contiguous()
         && tensors.iter().all(|tensor| {
-            matches!(tensor.device(), candle_core::Device::Cuda(_))
+            matches!(tensor.device(), kiln_tensor::Device::Cuda(_))
                 && tensor.dtype() == first.dtype()
-                && tensor.shape().elem_count() == first.shape().elem_count()
+                && tensor.element_count() == first.element_count()
                 && tensor.is_contiguous()
         })
 }
 
 #[derive(Debug)]
 pub struct CudaBackend {
-    /// Original candle CUDA device. Kept alongside the kt-typed device so
-    /// the many trait methods that still consume `candle_core::Tensor`
-    /// parameters can pass through to candle without re-bridging. Phase 7
-    /// of #1082 moved the `BackendRuntime::device()` accessor to return
-    /// `kiln_tensor::Device` by value; the candle device is now internal.
-    device: candle_core::Device,
-    /// `kiln_tensor::Device` form of `device`, cached at construction so
-    /// the hot trait accessor does not bridge per call. (#1082)
+    /// The kt CUDA device this backend was constructed for. (#1082 DoD-100
+    /// step 4: the formerly-cached candle `device` field was dropped — it had
+    /// zero reads; `new` now takes a `kiln_tensor::Device` directly.)
     device_kt: kiln_tensor::Device,
     /// Cached at construction: reading env vars per decode step × 24 GDN layers
     /// shows up in decode NVTX captures. Env vars don't change at runtime.
@@ -187,8 +174,11 @@ pub struct CudaBackend {
 }
 
 impl CudaBackend {
-    pub fn new(device: candle_core::Device) -> Self {
-        debug_assert!(device.is_cuda(), "CudaBackend created on non-CUDA device");
+    pub fn new(device: kiln_tensor::Device) -> Self {
+        debug_assert!(
+            matches!(device, kiln_tensor::Device::Cuda(_)),
+            "CudaBackend created on non-CUDA device"
+        );
         let gdn_enabled = std::env::var("KILN_DISABLE_GDN_KERNEL").is_err();
         let gdn_gates_enabled =
             gdn_enabled && std::env::var("KILN_DISABLE_FUSED_GDN_GATES").is_err();
@@ -227,9 +217,8 @@ impl CudaBackend {
         let lora_decode_add_enabled = std::env::var("KILN_DISABLE_CUDA_LORA_DECODE_ADD").is_err();
         let gdn_full_chunk_forward_multiblock_enabled = gdn_enabled
             && std::env::var("KILN_DISABLE_GDN_FULL_CHUNK_FORWARD_MULTIBLOCK").is_err();
-        let device_kt = kiln_kt_bridge::kt_device_from_candle(&device);
+        let device_kt = device;
         Self {
-            device,
             device_kt,
             gdn_enabled,
             gdn_gates_enabled,
@@ -246,11 +235,11 @@ impl CudaBackend {
 
     pub fn training_capabilities_static() -> TrainingCapabilities {
         TrainingCapabilities {
-            projection_training: "backend-routed candle CUDA autograd with offset chunk hook",
-            flce_loss: "FLCE CustomOp on CUDA tensors; no full logits by default",
-            rmsnorm_training: "CUDA CustomOp2 behind 47 GiB autograd VRAM gate",
-            resident_activation: "TensorId lifecycle registry; candle CUDA tensors are canonical",
-            lora_delta_training: "registered candle CUDA autograd; fused lora_decode_add declines tracked tensors",
+            projection_training: "backend-routed kt cublasLt matmul (tape-recorded) with offset chunk hook",
+            flce_loss: "FLCE analytic backward on CUDA tensors; no full logits by default",
+            rmsnorm_training: "CUDA kt-tape rmsnorm behind 47 GiB autograd VRAM gate",
+            resident_activation: "kt TensorId lifecycle registry; kt CUDA tensors are canonical",
+            lora_delta_training: "kt tape-recorded LoRA delta; fused lora_decode_add declines tape-tracked tensors",
             sgd_step: "CUDA in-place optimizer kernel for resident contiguous F32/BF16 tensors",
             adamw_step: "CUDA in-place optimizer kernel for resident contiguous F32/BF16 tensors",
             native_training: "not implemented",
@@ -275,51 +264,49 @@ impl BackendRuntime for CudaBackend {
         true
     }
 
-    fn register_resident_activation(&self, tensor: &candle_core::Tensor) -> Result<()> {
+    fn register_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> Result<()> {
         with_cuda_resident_ids(|ids| {
-            ids.insert(kt_id_from_candle(tensor));
+            ids.insert(kt_id(tensor));
         });
         Ok(())
     }
 
-    fn evict_resident_activation(&self, tensor: &candle_core::Tensor) {
+    fn evict_resident_activation(&self, tensor: &kiln_tensor::Tensor) {
         with_cuda_resident_ids(|ids| {
-            ids.remove(&kt_id_from_candle(tensor));
+            ids.remove(&kt_id(tensor));
         });
     }
 
-    fn update_resident_activation(&self, tensor: &candle_core::Tensor) -> Result<()> {
+    fn update_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> Result<()> {
         with_cuda_resident_ids(|ids| {
-            ids.insert(kt_id_from_candle(tensor));
+            ids.insert(kt_id(tensor));
         });
         Ok(())
     }
 
-    fn has_resident_activation(&self, tensor: &candle_core::Tensor) -> bool {
-        with_cuda_resident_ids(|ids| ids.contains(&kt_id_from_candle(tensor)))
+    fn has_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> bool {
+        with_cuda_resident_ids(|ids| ids.contains(&kt_id(tensor)))
     }
 
-    fn dispatch_sgd_step(&self, param: &candle_core::Tensor, grad: &candle_core::Tensor, lr: f32) -> Result<bool> {
+    fn dispatch_sgd_step(&self, param: &kiln_tensor::Tensor, grad: &kiln_tensor::Tensor, lr: f32) -> Result<bool> {
         if !self.has_resident_activation(param) || !self.has_resident_activation(grad) {
             return Ok(false);
         }
         if !cuda_optimizer_tensors_supported_for_kt(&[param, grad]) {
             return Ok(false);
         }
-        let param_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(param)
-            .context("sgd_step kt: borrow param -> kt")?;
-        let grad_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(grad)
-            .context("sgd_step kt: borrow grad -> kt")?;
-        if !kiln_rmsnorm_kernel::supports_optimizer_step_kt(&[&param_kt, &grad_kt]) {
+        // #1082: args are already kt (BackendRuntime trait flipped to kt),
+        // so there is no candle↔kt borrow — the kernel runs directly on the
+        // caller's kt tensors. Bit-exact with the prior candle shim (same
+        // FFI symbol).
+        if !kiln_rmsnorm_kernel::supports_optimizer_step_kt(&[param, grad]) {
             return Ok(false);
         }
-        // Phase 7 (#1082): kt-only. Bit-exact: the previous candle
-        // shim and this kt shell bottom out in the same FFI symbol.
         kiln_nvtx::range!(c"kiln/sgd_step_kt");
         match param.dtype() {
-            candle_core::DType::F32 => kiln_rmsnorm_kernel::sgd_step_f32_kt(&param_kt, &grad_kt, lr)
+            kiln_tensor::DType::F32 => kiln_rmsnorm_kernel::sgd_step_f32_kt(param, grad, lr)
                 .map_err(|e| anyhow::anyhow!("sgd_step kt: sgd_step_f32_kt: {e}"))?,
-            candle_core::DType::BF16 => kiln_rmsnorm_kernel::sgd_step_bf16_kt(&param_kt, &grad_kt, lr)
+            kiln_tensor::DType::BF16 => kiln_rmsnorm_kernel::sgd_step_bf16_kt(param, grad, lr)
                 .map_err(|e| anyhow::anyhow!("sgd_step kt: sgd_step_bf16_kt: {e}"))?,
             other => anyhow::bail!("sgd_step kt: unsupported dtype {other:?}"),
         }
@@ -340,10 +327,10 @@ impl BackendRuntime for CudaBackend {
     #[allow(clippy::too_many_arguments)]
     fn dispatch_adamw_step(
         &self,
-        param: &candle_core::Tensor,
-        grad: &candle_core::Tensor,
-        first_moment: &candle_core::Tensor,
-        second_moment: &candle_core::Tensor,
+        param: &kiln_tensor::Tensor,
+        grad: &kiln_tensor::Tensor,
+        first_moment: &kiln_tensor::Tensor,
+        second_moment: &kiln_tensor::Tensor,
         lr: f32,
         beta1: f32,
         beta2: f32,
@@ -361,33 +348,27 @@ impl BackendRuntime for CudaBackend {
         if !cuda_optimizer_tensors_supported_for_kt(&[param, grad, first_moment, second_moment]) {
             return Ok(false);
         }
-        let param_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(param)
-            .context("adamw_step kt: borrow param -> kt")?;
-        let grad_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(grad)
-            .context("adamw_step kt: borrow grad -> kt")?;
-        let m1_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(first_moment)
-            .context("adamw_step kt: borrow first_moment -> kt")?;
-        let m2_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(second_moment)
-            .context("adamw_step kt: borrow second_moment -> kt")?;
+        // #1082: args are already kt (BackendRuntime trait flipped to kt),
+        // so there is no candle↔kt borrow — the kernel runs directly on the
+        // caller's kt tensors. Bit-exact with the prior candle shim (same
+        // FFI symbol).
         if !kiln_rmsnorm_kernel::supports_optimizer_step_kt(&[
-            &param_kt, &grad_kt, &m1_kt, &m2_kt,
+            param, grad, first_moment, second_moment,
         ]) {
             return Ok(false);
         }
         if step == 0 {
             anyhow::bail!("adamw_step kt: step must be >= 1");
         }
-        // Phase 7 (#1082): kt-only. The candle shim computed these
-        // from `step`; the kt shell takes explicit bias corrections.
         kiln_nvtx::range!(c"kiln/adamw_step_kt");
         let bias_correction1 = (1.0f32 - beta1.powi(step as i32)).max(1e-20);
         let bias_correction2 = (1.0f32 - beta2.powi(step as i32)).max(1e-20);
         match param.dtype() {
-            candle_core::DType::F32 => kiln_rmsnorm_kernel::adamw_step_f32_kt(
-                &param_kt,
-                &grad_kt,
-                &m1_kt,
-                &m2_kt,
+            kiln_tensor::DType::F32 => kiln_rmsnorm_kernel::adamw_step_f32_kt(
+                param,
+                grad,
+                first_moment,
+                second_moment,
                 lr,
                 beta1,
                 beta2,
@@ -397,11 +378,11 @@ impl BackendRuntime for CudaBackend {
                 bias_correction2,
             )
             .map_err(|e| anyhow::anyhow!("adamw_step kt: adamw_step_f32_kt: {e}"))?,
-            candle_core::DType::BF16 => kiln_rmsnorm_kernel::adamw_step_bf16_kt(
-                &param_kt,
-                &grad_kt,
-                &m1_kt,
-                &m2_kt,
+            kiln_tensor::DType::BF16 => kiln_rmsnorm_kernel::adamw_step_bf16_kt(
+                param,
+                grad,
+                first_moment,
+                second_moment,
                 lr,
                 beta1,
                 beta2,
@@ -484,20 +465,20 @@ impl BackendRuntime for CudaBackend {
 
     fn flash_attn_prefill(
         &self,
-        q: &candle_core::Tensor,
-        k: &candle_core::Tensor,
-        v: &candle_core::Tensor,
+        q: &kiln_tensor::Tensor,
+        k: &kiln_tensor::Tensor,
+        v: &kiln_tensor::Tensor,
         softmax_scale: f32,
         causal: bool,
-    ) -> Result<Option<candle_core::Tensor>> {
+    ) -> Result<Option<kiln_tensor::Tensor>> {
         // The vendored CUDA kernel hard-errors on non-BF16. Decline here so
         // the caller falls back to the portable path instead of bubbling a
         // hard error up for non-BF16 test configs.
-        if any_tracks_op(&[q, k, v]) {
+        if q.track_op() || k.track_op() || v.track_op() {
             CUDA_FLASH_ATTN_TRACKED_DECLINES.fetch_add(1, Ordering::Relaxed);
             return Ok(None);
         }
-        if q.dtype() != candle_core::DType::BF16 {
+        if q.dtype() != kiln_tensor::DType::BF16 {
             return Ok(None);
         }
         // The vendored FA-2 kernel only supports head_dim 128/256 and
@@ -509,135 +490,108 @@ impl BackendRuntime for CudaBackend {
         if !matches!(q.dims().last(), Some(&128) | Some(&256)) {
             return Ok(None);
         }
-        // Phase 7 (#1082): kt-typed surface is now the only path.
-        // Same closeout pattern as conv1d (2ebcfb08), marlin
-        // (0841c266), GDN (86c7f134). Bit-exact: bottoms out in
-        // the same `kiln_flash_attn_fwd` FFI symbol as the candle
-        // shim; candle wrapper discards softmax_lse, kt path does
+        // Phase 7 (#1082): kt-typed surface is now the only path. Args
+        // are already kt (#1082 DoD-101/102), so the candle↔kt bridges
+        // are gone — the kernel runs directly on the caller's kt
+        // tensors. candle wrapper discards softmax_lse, kt path does
         // the same here.
         kiln_nvtx::range!(c"kiln/flash_attn_kt");
         let q_c = q.contiguous().context("flash_attn kt: q contiguous")?;
         let k_c = k.contiguous().context("flash_attn kt: k contiguous")?;
         let v_c = v.contiguous().context("flash_attn kt: v contiguous")?;
-        let q_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&q_c)
-            .context("flash_attn kt: borrow q -> kt")?;
-        let k_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&k_c)
-            .context("flash_attn kt: borrow k -> kt")?;
-        let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&v_c)
-            .context("flash_attn kt: borrow v -> kt")?;
         let (out_kt, _lse_kt) =
-            kiln_flash_attn::flash_attn_fwd_kt(&q_kt, &k_kt, &v_kt, softmax_scale, causal)
+            kiln_flash_attn::flash_attn_fwd_kt(&q_c, &k_c, &v_c, softmax_scale, causal)
                 .map_err(|e| anyhow::anyhow!("flash_attn kt: flash_attn_fwd_kt: {e}"))?;
-        let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-            .context("flash_attn kt: copy kt out -> candle")?;
-        Ok(Some(out))
+        Ok(Some(out_kt))
     }
 
     fn flash_attn_paged_decode(
         &self,
-        q: &candle_core::Tensor,
-        k_pool: &candle_core::Tensor,
-        v_pool: &candle_core::Tensor,
-        block_table: &candle_core::Tensor,
+        q: &kiln_tensor::Tensor,
+        k_pool: &kiln_tensor::Tensor,
+        v_pool: &kiln_tensor::Tensor,
+        block_table: &kiln_tensor::Tensor,
         total_seqlen_k: usize,
         page_block_size: usize,
         softmax_scale: f32,
         causal: bool,
-    ) -> Result<Option<candle_core::Tensor>> {
-        if any_tracks_op(&[q, k_pool, v_pool, block_table]) || q.dtype() != candle_core::DType::BF16 {
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        if q.track_op() || k_pool.track_op() || v_pool.track_op() || block_table.track_op()
+            || q.dtype() != kiln_tensor::DType::BF16
+        {
             return Ok(None);
         }
-        // Phase 7 (#1082): kt-only. Bit-exact with the candle path
-        // — both bottom out in `kiln_flash_attn_fwd_paged_decode`.
+        // Phase 7 (#1082): kt-only. Args are already kt (#1082
+        // DoD-101/102), so no candle↔kt bridge — the kernel runs
+        // directly on the caller's kt tensors.
         kiln_nvtx::range!(c"kiln/flash_attn_paged_decode_kt");
-        let q_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(q)
-            .context("flash_attn_paged_decode kt: borrow q -> kt")?;
-        let k_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(k_pool)
-            .context("flash_attn_paged_decode kt: borrow k_pool -> kt")?;
-        let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v_pool)
-            .context("flash_attn_paged_decode kt: borrow v_pool -> kt")?;
-        let bt_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(block_table)
-            .context("flash_attn_paged_decode kt: borrow block_table -> kt")?;
         let out_kt = kiln_flash_attn::flash_attn_paged_decode_kt(
-            &q_kt,
-            &k_kt,
-            &v_kt,
-            &bt_kt,
+            q,
+            k_pool,
+            v_pool,
+            block_table,
             total_seqlen_k,
             page_block_size,
             softmax_scale,
             causal,
         )
         .map_err(|e| anyhow::anyhow!("flash_attn_paged_decode kt: {e}"))?;
-        let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-            .context("flash_attn_paged_decode kt: copy kt out -> candle")?;
-        Ok(Some(out))
+        Ok(Some(out_kt))
     }
 
     fn flash_attn_paged_decode_contiguous_batch_dyn_seqlen(
         &self,
-        q: &candle_core::Tensor,
-        k_pool: &candle_core::Tensor,
-        v_pool: &candle_core::Tensor,
-        block_table: &candle_core::Tensor,
-        seqused_k: &candle_core::Tensor,
+        q: &kiln_tensor::Tensor,
+        k_pool: &kiln_tensor::Tensor,
+        v_pool: &kiln_tensor::Tensor,
+        block_table: &kiln_tensor::Tensor,
+        seqused_k: &kiln_tensor::Tensor,
         max_seqlen_k: usize,
         page_block_size: usize,
         softmax_scale: f32,
         causal: bool,
-    ) -> Result<Option<candle_core::Tensor>> {
-        if any_tracks_op(&[q, k_pool, v_pool, block_table, seqused_k]) || q.dtype() != candle_core::DType::BF16 {
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        if q.track_op() || k_pool.track_op() || v_pool.track_op() || block_table.track_op()
+            || seqused_k.track_op() || q.dtype() != kiln_tensor::DType::BF16
+        {
             return Ok(None);
         }
-        // Phase 7 (#1082): kt-only. Bit-exact with the candle path
-        // — both bottom out in
-        // `kiln_flash_attn_fwd_paged_decode_dyn_seqlen`. This entry
-        // always passed `graph_outputs = None`; the caller-owned-
-        // output variant lives in `_with_graph_outputs` below and
-        // still uses the candle wrapper because the kt-typed entry
-        // doesn't accept a caller-owned (out, lse) pair yet.
+        // Phase 7 (#1082): kt-only. Args are already kt (#1082
+        // DoD-101/102), so no candle↔kt bridge. This entry always
+        // passed `graph_outputs = None`; the caller-owned-output
+        // variant lives in `_with_graph_outputs` below.
         kiln_nvtx::range!(c"kiln/flash_attn_paged_decode_dyn_seqlen_kt");
-        let q_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(q)
-            .context("flash_attn_paged_decode_dyn_seqlen kt: borrow q -> kt")?;
-        let k_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(k_pool)
-            .context("flash_attn_paged_decode_dyn_seqlen kt: borrow k_pool -> kt")?;
-        let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v_pool)
-            .context("flash_attn_paged_decode_dyn_seqlen kt: borrow v_pool -> kt")?;
-        let bt_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(block_table)
-            .context("flash_attn_paged_decode_dyn_seqlen kt: borrow block_table -> kt")?;
-        let sk_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(seqused_k)
-            .context("flash_attn_paged_decode_dyn_seqlen kt: borrow seqused_k -> kt")?;
         let out_kt = kiln_flash_attn::flash_attn_paged_decode_dyn_seqlen_kt(
-            &q_kt,
-            &k_kt,
-            &v_kt,
-            &bt_kt,
-            &sk_kt,
+            q,
+            k_pool,
+            v_pool,
+            block_table,
+            seqused_k,
             max_seqlen_k,
             page_block_size,
             softmax_scale,
             causal,
         )
         .map_err(|e| anyhow::anyhow!("flash_attn_paged_decode_dyn_seqlen kt: {e}"))?;
-        let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-            .context("flash_attn_paged_decode_dyn_seqlen kt: copy kt out -> candle")?;
-        Ok(Some(out))
+        Ok(Some(out_kt))
     }
 
     fn flash_attn_paged_decode_contiguous_batch_dyn_seqlen_with_graph_outputs(
         &self,
-        q: &candle_core::Tensor,
-        k_pool: &candle_core::Tensor,
-        v_pool: &candle_core::Tensor,
-        block_table: &candle_core::Tensor,
-        seqused_k: &candle_core::Tensor,
-        graph_outputs: Option<(&candle_core::Tensor, &candle_core::Tensor)>,
+        q: &kiln_tensor::Tensor,
+        k_pool: &kiln_tensor::Tensor,
+        v_pool: &kiln_tensor::Tensor,
+        block_table: &kiln_tensor::Tensor,
+        seqused_k: &kiln_tensor::Tensor,
+        graph_outputs: Option<(&kiln_tensor::Tensor, &kiln_tensor::Tensor)>,
         max_seqlen_k: usize,
         page_block_size: usize,
         softmax_scale: f32,
         causal: bool,
-    ) -> Result<Option<candle_core::Tensor>> {
-        if any_tracks_op(&[q, k_pool, v_pool, block_table, seqused_k]) || q.dtype() != candle_core::DType::BF16 {
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        if q.track_op() || k_pool.track_op() || v_pool.track_op() || block_table.track_op()
+            || seqused_k.track_op() || q.dtype() != kiln_tensor::DType::BF16
+        {
             return Ok(None);
         }
         // Phase 7 opt-in (#1082): route through the kt-typed surface
@@ -663,41 +617,23 @@ impl BackendRuntime for CudaBackend {
         // CUDA-graph-capture contract (the kernel writes through the
         // caller's pinned `(out, lse)` pair so graph replays don't
         // dangle on freshly-allocated scratch).
+        // Phase 7 (#1082): args are already kt (#1082 DoD-101/102), so
+        // no candle↔kt bridge — the kernel runs directly on the
+        // caller's kt tensors.
         kiln_nvtx::range!(c"kiln/flash_attn_paged_decode_dyn_seqlen_kt");
-        let q_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(q)
-            .context("flash_attn_paged_decode_dyn_seqlen (graph variant) kt: borrow q -> kt")?;
-        let k_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(k_pool).context(
-            "flash_attn_paged_decode_dyn_seqlen (graph variant) kt: borrow k_pool -> kt",
-        )?;
-        let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v_pool).context(
-            "flash_attn_paged_decode_dyn_seqlen (graph variant) kt: borrow v_pool -> kt",
-        )?;
-        let bt_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(block_table).context(
-            "flash_attn_paged_decode_dyn_seqlen (graph variant) kt: borrow block_table -> kt",
-        )?;
-        let sk_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(seqused_k).context(
-            "flash_attn_paged_decode_dyn_seqlen (graph variant) kt: borrow seqused_k -> kt",
-        )?;
         if let Some((out, lse)) = graph_outputs {
-            // Caller owns `(out, lse)`. Borrow into kt and write in
-            // place via the new with_graph_outputs kt entry. The
-            // returned `out` is the caller's candle tensor — the
-            // kernel mutated its underlying CUDA buffer through the
-            // kt borrow.
-            let out_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(out).context(
-                "flash_attn_paged_decode_dyn_seqlen (graph variant) kt: borrow out -> kt",
-            )?;
-            let lse_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(lse).context(
-                "flash_attn_paged_decode_dyn_seqlen (graph variant) kt: borrow lse -> kt",
-            )?;
+            // Caller owns `(out, lse)` (kt tensors). The kernel writes
+            // in place via the with_graph_outputs kt entry; the
+            // returned `out` is the caller's kt tensor whose CUDA
+            // buffer the kernel mutated.
             kiln_flash_attn::flash_attn_paged_decode_dyn_seqlen_kt_with_graph_outputs(
-                &q_kt,
-                &k_kt,
-                &v_kt,
-                &bt_kt,
-                &sk_kt,
-                &out_kt,
-                &lse_kt,
+                q,
+                k_pool,
+                v_pool,
+                block_table,
+                seqused_k,
+                out,
+                lse,
                 max_seqlen_k,
                 page_block_size,
                 softmax_scale,
@@ -712,11 +648,11 @@ impl BackendRuntime for CudaBackend {
         }
         // No caller-owned outputs — allocate internally.
         let out_kt = kiln_flash_attn::flash_attn_paged_decode_dyn_seqlen_kt(
-            &q_kt,
-            &k_kt,
-            &v_kt,
-            &bt_kt,
-            &sk_kt,
+            q,
+            k_pool,
+            v_pool,
+            block_table,
+            seqused_k,
             max_seqlen_k,
             page_block_size,
             softmax_scale,
@@ -725,299 +661,183 @@ impl BackendRuntime for CudaBackend {
         .map_err(|e| {
             anyhow::anyhow!("flash_attn_paged_decode_dyn_seqlen (graph variant) kt: {e}")
         })?;
-        let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt).context(
-            "flash_attn_paged_decode_dyn_seqlen (graph variant) kt: copy kt out -> candle",
-        )?;
-        Ok(Some(out))
+        Ok(Some(out_kt))
     }
 
     fn gdn_forward_substitution(
         &self,
-        a_strict: &candle_core::Tensor,
-        v_prime: &candle_core::Tensor,
-        beta: &candle_core::Tensor,
-    ) -> Result<Option<candle_core::Tensor>> {
-        if a_strict.dtype() != candle_core::DType::BF16 {
+        a_strict: &kiln_tensor::Tensor,
+        v_prime: &kiln_tensor::Tensor,
+        beta: &kiln_tensor::Tensor,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        if a_strict.dtype() != kiln_tensor::DType::BF16 {
             return Ok(None);
         }
-        // Phase 7 (#1082): kt-typed surface is now the only path,
-        // same closeout pattern as conv1d (2ebcfb08) and marlin
-        // (0841c266). The borrow adapter shares the underlying CUDA
-        // buffer with the candle tensor, so this is zero-copy on
-        // inputs. The output is copied back via
-        // `kt_tensor_to_candle_cuda_copy` (one dtod memcpy on the F32
-        // forward-substitution result, mirrors marlin pattern).
+        // Phase 7 (#1082): kt-typed surface is now the only path. With
+        // the BackendRuntime decode methods flipped to kt (#1082
+        // DoD-101/102) the args are already kt, so the candle↔kt
+        // bridges are gone — the kernel runs directly on the caller's
+        // kt tensors (zero candle roundtrip).
         kiln_nvtx::range!(c"kiln/gdn_forward_substitution_kt");
-        let a_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(a_strict)
-            .with_context(|| "kt-adapter: gdn_forward_substitution a_strict → kt failed")?;
-        let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v_prime)
-            .with_context(|| "kt-adapter: gdn_forward_substitution v_prime → kt failed")?;
-        let b_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(beta)
-            .with_context(|| "kt-adapter: gdn_forward_substitution beta → kt failed")?;
-        let out_kt = kiln_gdn_kernel::gdn_forward_substitution_kt(&a_kt, &v_kt, &b_kt)
+        let out_kt = kiln_gdn_kernel::gdn_forward_substitution_kt(a_strict, v_prime, beta)
             .map_err(|e| anyhow::anyhow!("kt gdn_forward_substitution: {e}"))?;
-        let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-            .with_context(|| "kt-adapter: gdn_forward_substitution out → candle failed")?;
-        Ok(Some(out))
+        Ok(Some(out_kt))
     }
 
     fn gdn_recurrent_step(
         &self,
-        q: &candle_core::Tensor,
-        k: &candle_core::Tensor,
-        v: &candle_core::Tensor,
-        beta: &candle_core::Tensor,
-        g: &candle_core::Tensor,
-        state: &mut candle_core::Tensor,
-    ) -> Result<Option<candle_core::Tensor>> {
-        if q.dtype() != candle_core::DType::BF16 {
+        q: &kiln_tensor::Tensor,
+        k: &kiln_tensor::Tensor,
+        v: &kiln_tensor::Tensor,
+        beta: &kiln_tensor::Tensor,
+        g: &kiln_tensor::Tensor,
+        state: &mut kiln_tensor::Tensor,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        if q.dtype() != kiln_tensor::DType::BF16 {
             return Ok(None);
         }
-        // Phase 7 (#1082): kt-typed surface is now the only path,
-        // same closeout pattern as conv1d (2ebcfb08) and marlin
-        // (0841c266). The borrow adapter shares the underlying CUDA
-        // buffer with the candle tensor, so the kernel's in-place
-        // mutation of `state` surfaces through the caller's
-        // `&mut Tensor` (same pattern as conv1d_update at 695587df).
+        // Phase 7 (#1082): kt-typed surface is now the only path. Args
+        // are already kt (#1082 DoD-101/102), so no candle↔kt bridge —
+        // the kernel's in-place mutation of `state` surfaces through
+        // the caller's `&mut kt::Tensor`.
         kiln_nvtx::range!(c"kiln/gdn_recurrent_forward_kt");
-        let q_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(q)
-            .with_context(|| "kt-adapter: gdn_recurrent_step q → kt failed")?;
-        let k_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(k)
-            .with_context(|| "kt-adapter: gdn_recurrent_step k → kt failed")?;
-        let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v)
-            .with_context(|| "kt-adapter: gdn_recurrent_step v → kt failed")?;
-        let beta_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(beta)
-            .with_context(|| "kt-adapter: gdn_recurrent_step beta → kt failed")?;
-        let g_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(g)
-            .with_context(|| "kt-adapter: gdn_recurrent_step g → kt failed")?;
-        let state_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(state)
-            .with_context(|| "kt-adapter: gdn_recurrent_step state → kt failed")?;
-        let out_kt = kiln_gdn_kernel::gdn_recurrent_forward_kt(
-            &q_kt, &k_kt, &v_kt, &beta_kt, &g_kt, &state_kt,
-        )
-        .map_err(|e| anyhow::anyhow!("kt gdn_recurrent_forward: {e}"))?;
-        let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-            .with_context(|| "kt-adapter: gdn_recurrent_step out → candle failed")?;
-        Ok(Some(out))
+        let out_kt = kiln_gdn_kernel::gdn_recurrent_forward_kt(q, k, v, beta, g, state)
+            .map_err(|e| anyhow::anyhow!("kt gdn_recurrent_forward: {e}"))?;
+        Ok(Some(out_kt))
     }
 
     fn gdn_chunk_prep(
         &self,
-        g: &candle_core::Tensor,
-        v: &candle_core::Tensor,
-        kkt: &candle_core::Tensor,
-        qkt: &candle_core::Tensor,
-        ks_entry: &candle_core::Tensor,
-        q_s: &candle_core::Tensor,
-    ) -> Result<Option<(candle_core::Tensor, candle_core::Tensor, candle_core::Tensor, candle_core::Tensor, candle_core::Tensor, candle_core::Tensor)>> {
-        // Phase 7 (#1082): kt-typed surface is now the only path,
-        // same closeout pattern as conv1d (2ebcfb08) and marlin
-        // (0841c266). The kt-typed predicate (`_supports_kt`,
-        // 7da2615a) and the `gdn_chunk_prep_kt` 6-tuple-returning
-        // kernel are the only call path — the candle-typed
-        // `kiln_gdn_kernel::gdn_chunk_prep[_supports]` fallback has
-        // been deleted.
+        g: &kiln_tensor::Tensor,
+        v: &kiln_tensor::Tensor,
+        kkt: &kiln_tensor::Tensor,
+        qkt: &kiln_tensor::Tensor,
+        ks_entry: &kiln_tensor::Tensor,
+        q_s: &kiln_tensor::Tensor,
+    ) -> Result<Option<(kiln_tensor::Tensor, kiln_tensor::Tensor, kiln_tensor::Tensor, kiln_tensor::Tensor, kiln_tensor::Tensor, kiln_tensor::Tensor)>> {
+        // Phase 7 (#1082): kt-typed surface is now the only path. Args
+        // are already kt (#1082 DoD-101/102), so no candle↔kt bridge —
+        // the predicate + `gdn_chunk_prep_kt` 6-tuple kernel run
+        // directly on the caller's kt tensors and the kt outputs are
+        // returned without a copy.
         kiln_nvtx::range!(c"kiln/gdn_chunk_prep_kt");
-        let g_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(g)
-            .with_context(|| "kt-adapter: gdn_chunk_prep g → kt failed")?;
-        let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v)
-            .with_context(|| "kt-adapter: gdn_chunk_prep v → kt failed")?;
-        let kkt_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(kkt)
-            .with_context(|| "kt-adapter: gdn_chunk_prep kkt → kt failed")?;
-        let qkt_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(qkt)
-            .with_context(|| "kt-adapter: gdn_chunk_prep qkt → kt failed")?;
-        let ks_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(ks_entry)
-            .with_context(|| "kt-adapter: gdn_chunk_prep ks_entry → kt failed")?;
-        let qs_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(q_s)
-            .with_context(|| "kt-adapter: gdn_chunk_prep q_s → kt failed")?;
-        if !kiln_gdn_kernel::gdn_chunk_prep_supports_kt(
-            &g_kt, &v_kt, &kkt_kt, &qkt_kt, &ks_kt, &qs_kt,
-        ) {
+        if !kiln_gdn_kernel::gdn_chunk_prep_supports_kt(g, v, kkt, qkt, ks_entry, q_s) {
             return Ok(None);
         }
         let (o0, o1, o2, o3, o4, o5) =
-            kiln_gdn_kernel::gdn_chunk_prep_kt(&g_kt, &v_kt, &kkt_kt, &qkt_kt, &ks_kt, &qs_kt)
+            kiln_gdn_kernel::gdn_chunk_prep_kt(g, v, kkt, qkt, ks_entry, q_s)
                 .map_err(|e| anyhow::anyhow!("kt gdn_chunk_prep: {e}"))?;
-        let c0 = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&o0)
-            .with_context(|| "kt-adapter: gdn_chunk_prep o0 → candle failed")?;
-        let c1 = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&o1)
-            .with_context(|| "kt-adapter: gdn_chunk_prep o1 → candle failed")?;
-        let c2 = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&o2)
-            .with_context(|| "kt-adapter: gdn_chunk_prep o2 → candle failed")?;
-        let c3 = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&o3)
-            .with_context(|| "kt-adapter: gdn_chunk_prep o3 → candle failed")?;
-        let c4 = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&o4)
-            .with_context(|| "kt-adapter: gdn_chunk_prep o4 → candle failed")?;
-        let c5 = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&o5)
-            .with_context(|| "kt-adapter: gdn_chunk_prep o5 → candle failed")?;
-        Ok(Some((c0, c1, c2, c3, c4, c5)))
+        Ok(Some((o0, o1, o2, o3, o4, o5)))
     }
 
     fn gdn_chunk_scan(
         &self,
-        a_strict: &candle_core::Tensor,
-        b_mask: &candle_core::Tensor,
-        v_prime: &candle_core::Tensor,
-        q_s_scaled: &candle_core::Tensor,
-        beta: &candle_core::Tensor,
-        decay_last_col: &candle_core::Tensor,
-    ) -> Result<Option<(candle_core::Tensor, candle_core::Tensor)>> {
-        // Phase 7 (#1082): kt-typed surface is now the only path,
-        // same closeout pattern as conv1d (2ebcfb08) and marlin
-        // (0841c266). The kt-typed predicate (`_supports_kt`,
-        // 7da2615a) and the `gdn_chunk_scan_kt` 2-tuple-returning
-        // kernel are the only call path — the candle-typed
-        // `kiln_gdn_kernel::gdn_chunk_scan[_supports]` fallback has
-        // been deleted.
+        a_strict: &kiln_tensor::Tensor,
+        b_mask: &kiln_tensor::Tensor,
+        v_prime: &kiln_tensor::Tensor,
+        q_s_scaled: &kiln_tensor::Tensor,
+        beta: &kiln_tensor::Tensor,
+        decay_last_col: &kiln_tensor::Tensor,
+    ) -> Result<Option<(kiln_tensor::Tensor, kiln_tensor::Tensor)>> {
+        // Phase 7 (#1082): kt-typed surface is now the only path. Args
+        // are already kt (#1082 DoD-101/102), so no candle↔kt bridge.
         kiln_nvtx::range!(c"kiln/gdn_chunk_scan_kt");
-        let a_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(a_strict)
-            .with_context(|| "kt-adapter: gdn_chunk_scan a_strict → kt failed")?;
-        let m_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(b_mask)
-            .with_context(|| "kt-adapter: gdn_chunk_scan b_mask → kt failed")?;
-        let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v_prime)
-            .with_context(|| "kt-adapter: gdn_chunk_scan v_prime → kt failed")?;
-        let qs_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(q_s_scaled)
-            .with_context(|| "kt-adapter: gdn_chunk_scan q_s_scaled → kt failed")?;
-        let beta_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(beta)
-            .with_context(|| "kt-adapter: gdn_chunk_scan beta → kt failed")?;
-        let dlc_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(decay_last_col)
-            .with_context(|| "kt-adapter: gdn_chunk_scan decay_last_col → kt failed")?;
         if !kiln_gdn_kernel::gdn_chunk_scan_supports_kt(
-            &a_kt, &m_kt, &v_kt, &qs_kt, &beta_kt, &dlc_kt,
+            a_strict, b_mask, v_prime, q_s_scaled, beta, decay_last_col,
         ) {
             return Ok(None);
         }
         let (o0, o1) = kiln_gdn_kernel::gdn_chunk_scan_kt(
-            &a_kt, &m_kt, &v_kt, &qs_kt, &beta_kt, &dlc_kt,
+            a_strict, b_mask, v_prime, q_s_scaled, beta, decay_last_col,
         )
         .map_err(|e| anyhow::anyhow!("kt gdn_chunk_scan: {e}"))?;
-        let c0 = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&o0)
-            .with_context(|| "kt-adapter: gdn_chunk_scan o0 → candle failed")?;
-        let c1 = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&o1)
-            .with_context(|| "kt-adapter: gdn_chunk_scan o1 → candle failed")?;
-        Ok(Some((c0, c1)))
+        Ok(Some((o0, o1)))
     }
 
     fn gdn_full_chunk_forward(
         &self,
-        g: &candle_core::Tensor,
-        v: &candle_core::Tensor,
-        kkt: &candle_core::Tensor,
-        qkt: &candle_core::Tensor,
-        ks_entry: &candle_core::Tensor,
-        q_s: &candle_core::Tensor,
-        beta: &candle_core::Tensor,
-        k_t: &candle_core::Tensor,
-        state: &mut candle_core::Tensor,
-    ) -> Result<Option<candle_core::Tensor>> {
+        g: &kiln_tensor::Tensor,
+        v: &kiln_tensor::Tensor,
+        kkt: &kiln_tensor::Tensor,
+        qkt: &kiln_tensor::Tensor,
+        ks_entry: &kiln_tensor::Tensor,
+        q_s: &kiln_tensor::Tensor,
+        beta: &kiln_tensor::Tensor,
+        k_t: &kiln_tensor::Tensor,
+        state: &mut kiln_tensor::Tensor,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
         let dv_tile = kiln_gdn_kernel::GDN_FULL_CHUNK_FORWARD_MULTIBLOCK_DV_TILE;
         // Phase 7 (#1082): kt-typed surface is now the only path
-        // (single-block + multiblock), same closeout pattern as
-        // conv1d (2ebcfb08), marlin (0841c266), and the flash-attn
-        // paged-decode `_with_graph_outputs` site (aab07fa7). Both
-        // kt-typed predicates (`_supports_kt`, `_multiblock_supports_kt`,
-        // 7da2615a) and both kt kernels (`gdn_full_chunk_forward_kt`
-        // single-block, `gdn_full_chunk_forward_multiblock_kt`) are
-        // the only wires. State mutation surfaces through the
-        // caller's `&mut Tensor` via the shared buffer (conv1d
-        // pattern).
-        let g_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(g)
-            .with_context(|| "kt-adapter: gdn_full_chunk_forward g → kt")?;
-        let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v)
-            .with_context(|| "kt-adapter: gdn_full_chunk_forward v → kt")?;
-        let kkt_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(kkt)
-            .with_context(|| "kt-adapter: gdn_full_chunk_forward kkt → kt")?;
-        let qkt_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(qkt)
-            .with_context(|| "kt-adapter: gdn_full_chunk_forward qkt → kt")?;
-        let ks_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(ks_entry)
-            .with_context(|| "kt-adapter: gdn_full_chunk_forward ks_entry → kt")?;
-        let qs_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(q_s)
-            .with_context(|| "kt-adapter: gdn_full_chunk_forward q_s → kt")?;
-        let beta_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(beta)
-            .with_context(|| "kt-adapter: gdn_full_chunk_forward beta → kt")?;
-        let kt_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(k_t)
-            .with_context(|| "kt-adapter: gdn_full_chunk_forward k_t → kt")?;
-        let state_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(state)
-            .with_context(|| "kt-adapter: gdn_full_chunk_forward state → kt")?;
+        // (single-block + multiblock). Args are already kt (#1082
+        // DoD-101/102), so no candle↔kt bridge — both predicates and
+        // kernels run directly on the caller's kt tensors. State
+        // mutation surfaces through the caller's `&mut kt::Tensor`.
         if !kiln_gdn_kernel::gdn_full_chunk_forward_supports_kt(
-            &g_kt, &v_kt, &kkt_kt, &qkt_kt, &ks_kt, &qs_kt, &beta_kt, &kt_kt, &state_kt,
+            g, v, kkt, qkt, ks_entry, q_s, beta, k_t, state,
         ) {
             return Ok(None);
         }
         if self.gdn_full_chunk_forward_multiblock_enabled
             && kiln_gdn_kernel::gdn_full_chunk_forward_multiblock_supports_kt(
-                &g_kt, &v_kt, &kkt_kt, &qkt_kt, &ks_kt, &qs_kt, &beta_kt, &kt_kt, &state_kt,
-                dv_tile,
+                g, v, kkt, qkt, ks_entry, q_s, beta, k_t, state, dv_tile,
             )
         {
             kiln_nvtx::range!(c"kiln/gdn_full_chunk_forward_multiblock_kt");
             let out_kt = kiln_gdn_kernel::gdn_full_chunk_forward_multiblock_kt(
-                &g_kt, &v_kt, &kkt_kt, &qkt_kt, &ks_kt, &qs_kt, &beta_kt, &kt_kt, &state_kt,
-                dv_tile,
+                g, v, kkt, qkt, ks_entry, q_s, beta, k_t, state, dv_tile,
             )
             .map_err(|e| anyhow::anyhow!("kt gdn_full_chunk_forward_multiblock: {e}"))?;
-            let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-                .with_context(|| "kt-adapter: gdn_full_chunk_forward_multiblock out → candle")?;
             CUDA_GDN_FULL_CHUNK_FORWARD_MULTIBLOCK_SUCCESSES.fetch_add(1, Ordering::Relaxed);
-            return Ok(Some(out));
+            return Ok(Some(out_kt));
         }
-        // Single-block fall-through. Phase 7 (#1082): now kt-only,
-        // closing the last candle-typed gdn caller in this backend.
-        // The `gdn_full_chunk_forward_kt` wire bottoms out in the
-        // same `kiln_gdn_full_chunk_forward` FFI symbol as the old
-        // candle dispatch, so this migration is bit-exact. We reuse
-        // the kt borrows already established above — they are zero-
-        // copy adapters over the same CUDA storage as the caller's
-        // `&Tensor` / `&mut Tensor` refs, and `state` mutation
-        // surfaces through the shared buffer (multiblock pattern).
+        // Single-block fall-through. The `gdn_full_chunk_forward_kt`
+        // wire bottoms out in the same FFI symbol; `state` mutation
+        // surfaces through the caller's `&mut kt::Tensor`.
         kiln_nvtx::range!(c"kiln/gdn_full_chunk_forward_kt");
         let out_kt = kiln_gdn_kernel::gdn_full_chunk_forward_kt(
-            &g_kt, &v_kt, &kkt_kt, &qkt_kt, &ks_kt, &qs_kt, &beta_kt, &kt_kt, &state_kt,
+            g, v, kkt, qkt, ks_entry, q_s, beta, k_t, state,
         )
         .map_err(|e| anyhow::anyhow!("kt gdn_full_chunk_forward: {e}"))?;
-        let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-            .with_context(|| "kt-adapter: gdn_full_chunk_forward out → candle")?;
         CUDA_GDN_FULL_CHUNK_FORWARD_SINGLE_SUCCESSES.fetch_add(1, Ordering::Relaxed);
-        Ok(Some(out))
+        Ok(Some(out_kt))
     }
 
     #[allow(clippy::too_many_arguments)]
     fn gdn_decode_gates_recurrent(
         &self,
-        q: &candle_core::Tensor,
-        k: &candle_core::Tensor,
-        v: &candle_core::Tensor,
-        a: &candle_core::Tensor,
-        b: &candle_core::Tensor,
-        a_log: &candle_core::Tensor,
-        dt_bias: &candle_core::Tensor,
-        state: &mut candle_core::Tensor,
-        z: &candle_core::Tensor,
-        weight: &candle_core::Tensor,
+        q: &kiln_tensor::Tensor,
+        k: &kiln_tensor::Tensor,
+        v: &kiln_tensor::Tensor,
+        a: &kiln_tensor::Tensor,
+        b: &kiln_tensor::Tensor,
+        a_log: &kiln_tensor::Tensor,
+        dt_bias: &kiln_tensor::Tensor,
+        state: &mut kiln_tensor::Tensor,
+        z: &kiln_tensor::Tensor,
+        weight: &kiln_tensor::Tensor,
         eps: f64,
-    ) -> Result<Option<candle_core::Tensor>> {
+    ) -> Result<Option<kiln_tensor::Tensor>> {
         if !self.gdn_decode_fused_enabled {
             return Ok(None);
         }
-        // Phase 7 (#1082): kt-typed bf16 surface is now the only path,
-        // same closeout pattern as conv1d (2ebcfb08) and marlin
-        // (0841c266). The candle-typed
-        // `kiln_gdn_kernel::gdn_decode_gates_recurrent[_supports]`
-        // fallback has been deleted; non-bf16 envelopes return
-        // Ok(None) so the caller's split-decode fallback engages.
-        // Production decode for Qwen3.5-4B uses bf16 for q/k/v/a/b/
-        // a_log/dt_bias/state/z and f32 for the rmsnorm weight; the
-        // bf16_kt variant is the matching production hot path.
-        if !(q.dtype() == candle_core::DType::BF16
-            && k.dtype() == candle_core::DType::BF16
-            && v.dtype() == candle_core::DType::BF16
-            && a.dtype() == candle_core::DType::BF16
-            && b.dtype() == candle_core::DType::BF16
-            && a_log.dtype() == candle_core::DType::BF16
-            && dt_bias.dtype() == candle_core::DType::BF16
-            && state.dtype() == candle_core::DType::BF16
-            && z.dtype() == candle_core::DType::BF16
-            && weight.dtype() == candle_core::DType::F32)
+        // Phase 7 (#1082): kt-typed bf16 surface is now the only path.
+        // Args are already kt (#1082 DoD-101/102), so no candle↔kt
+        // bridge — the kernel runs directly on the caller's kt
+        // tensors. Non-bf16 envelopes return Ok(None) so the caller's
+        // split-decode fallback engages. Production decode for
+        // Qwen3.5-4B uses bf16 for q/k/v/a/b/a_log/dt_bias/state/z and
+        // f32 for the rmsnorm weight; the bf16_kt variant is the
+        // matching production hot path.
+        if !(q.dtype() == kiln_tensor::DType::BF16
+            && k.dtype() == kiln_tensor::DType::BF16
+            && v.dtype() == kiln_tensor::DType::BF16
+            && a.dtype() == kiln_tensor::DType::BF16
+            && b.dtype() == kiln_tensor::DType::BF16
+            && a_log.dtype() == kiln_tensor::DType::BF16
+            && dt_bias.dtype() == kiln_tensor::DType::BF16
+            && state.dtype() == kiln_tensor::DType::BF16
+            && z.dtype() == kiln_tensor::DType::BF16
+            && weight.dtype() == kiln_tensor::DType::F32)
         {
             tracing::debug!(
                 q_shape = ?q.shape(), q_dtype = ?q.dtype(),
@@ -1037,55 +857,52 @@ impl BackendRuntime for CudaBackend {
             // 1-D weight tensors (a_log, dt_bias) to BF16 if they
             // arrived as F32 from the safetensors loader; the
             // group-norm weight stays F32 (kernel contract).
-            let a_log_bf16 = if a_log.dtype() == candle_core::DType::BF16 {
+            let a_log_bf16 = if a_log.dtype() == kiln_tensor::DType::BF16 {
                 None
             } else {
-                Some(a_log.to_dtype(candle_core::DType::BF16)
+                Some(a_log.to_dtype(kiln_tensor::DType::BF16)
                     .with_context(|| "gdn_decode_gates: cast a_log -> bf16")?)
             };
-            let dt_bias_bf16 = if dt_bias.dtype() == candle_core::DType::BF16 {
+            let dt_bias_bf16 = if dt_bias.dtype() == kiln_tensor::DType::BF16 {
                 None
             } else {
-                Some(dt_bias.to_dtype(candle_core::DType::BF16)
+                Some(dt_bias.to_dtype(kiln_tensor::DType::BF16)
                     .with_context(|| "gdn_decode_gates: cast dt_bias -> bf16")?)
             };
-            let weight_f32 = if weight.dtype() == candle_core::DType::F32 {
+            let weight_f32 = if weight.dtype() == kiln_tensor::DType::F32 {
                 None
             } else {
-                Some(weight.to_dtype(candle_core::DType::F32)
+                Some(weight.to_dtype(kiln_tensor::DType::F32)
                     .with_context(|| "gdn_decode_gates: cast weight -> f32")?)
             };
             // Cast heavy tensors too. q/k/v often arrive F32 from
             // the conv1d kernel epilogue (kernel returns F32 by
-            // design — see forward.rs:14897). The candle-typed
-            // gdn_decode_*_supports already accepts F32 q/k/v
-            // (kiln-gdn-kernel/src/lib.rs:1047-1049) but the kt
-            // path is BF16-only — cast at the boundary so the kt
-            // surface still works for the production hot path. Cast
-            // cost is per-layer hidden-dim elements (small at B=1).
-            // `state` is NOT cast — the kernel mutates it in place
-            // and the caller's tensor would not see the writes
-            // through a fresh allocation.
-            if state.dtype() != candle_core::DType::BF16 {
+            // design — see forward.rs:14897). The kt path is BF16-only
+            // — cast at the boundary so the kt surface still works for
+            // the production hot path. Cast cost is per-layer
+            // hidden-dim elements (small at B=1). `state` is NOT cast
+            // — the kernel mutates it in place and the caller's tensor
+            // would not see the writes through a fresh allocation.
+            if state.dtype() != kiln_tensor::DType::BF16 {
                 return Ok(None);
             }
-            let q_bf16 = if q.dtype() == candle_core::DType::BF16 { None } else {
-                Some(q.to_dtype(candle_core::DType::BF16).with_context(|| "gdn_decode_gates: cast q -> bf16")?)
+            let q_bf16 = if q.dtype() == kiln_tensor::DType::BF16 { None } else {
+                Some(q.to_dtype(kiln_tensor::DType::BF16).with_context(|| "gdn_decode_gates: cast q -> bf16")?)
             };
-            let k_bf16 = if k.dtype() == candle_core::DType::BF16 { None } else {
-                Some(k.to_dtype(candle_core::DType::BF16).with_context(|| "gdn_decode_gates: cast k -> bf16")?)
+            let k_bf16 = if k.dtype() == kiln_tensor::DType::BF16 { None } else {
+                Some(k.to_dtype(kiln_tensor::DType::BF16).with_context(|| "gdn_decode_gates: cast k -> bf16")?)
             };
-            let v_bf16 = if v.dtype() == candle_core::DType::BF16 { None } else {
-                Some(v.to_dtype(candle_core::DType::BF16).with_context(|| "gdn_decode_gates: cast v -> bf16")?)
+            let v_bf16 = if v.dtype() == kiln_tensor::DType::BF16 { None } else {
+                Some(v.to_dtype(kiln_tensor::DType::BF16).with_context(|| "gdn_decode_gates: cast v -> bf16")?)
             };
-            let a_bf16 = if a.dtype() == candle_core::DType::BF16 { None } else {
-                Some(a.to_dtype(candle_core::DType::BF16).with_context(|| "gdn_decode_gates: cast a -> bf16")?)
+            let a_bf16 = if a.dtype() == kiln_tensor::DType::BF16 { None } else {
+                Some(a.to_dtype(kiln_tensor::DType::BF16).with_context(|| "gdn_decode_gates: cast a -> bf16")?)
             };
-            let b_bf16 = if b.dtype() == candle_core::DType::BF16 { None } else {
-                Some(b.to_dtype(candle_core::DType::BF16).with_context(|| "gdn_decode_gates: cast b -> bf16")?)
+            let b_bf16 = if b.dtype() == kiln_tensor::DType::BF16 { None } else {
+                Some(b.to_dtype(kiln_tensor::DType::BF16).with_context(|| "gdn_decode_gates: cast b -> bf16")?)
             };
-            let z_bf16 = if z.dtype() == candle_core::DType::BF16 { None } else {
-                Some(z.to_dtype(candle_core::DType::BF16).with_context(|| "gdn_decode_gates: cast z -> bf16")?)
+            let z_bf16 = if z.dtype() == kiln_tensor::DType::BF16 { None } else {
+                Some(z.to_dtype(kiln_tensor::DType::BF16).with_context(|| "gdn_decode_gates: cast z -> bf16")?)
             };
             return self.gdn_decode_gates_recurrent(
                 q_bf16.as_ref().unwrap_or(q),
@@ -1139,28 +956,8 @@ impl BackendRuntime for CudaBackend {
         let weight_c = weight
             .contiguous()
             .with_context(|| "kt-adapter: gdn_decode_gates weight contiguous failed")?;
-        let q_kt_4d = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(q)
-            .with_context(|| "kt-adapter: gdn_decode_gates q → kt (4D for supports) failed")?;
-        let k_kt_4d = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(k)
-            .with_context(|| "kt-adapter: gdn_decode_gates k → kt (4D for supports) failed")?;
-        let v_kt_4d = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v)
-            .with_context(|| "kt-adapter: gdn_decode_gates v → kt (4D for supports) failed")?;
-        let a_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&a_c)
-            .with_context(|| "kt-adapter: gdn_decode_gates a → kt failed")?;
-        let b_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&b_c)
-            .with_context(|| "kt-adapter: gdn_decode_gates b → kt failed")?;
-        let alog_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&alog_c)
-            .with_context(|| "kt-adapter: gdn_decode_gates a_log → kt failed")?;
-        let dtb_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&dtb_c)
-            .with_context(|| "kt-adapter: gdn_decode_gates dt_bias → kt failed")?;
-        let state_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&state_c)
-            .with_context(|| "kt-adapter: gdn_decode_gates state → kt failed")?;
-        let z_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&z_c)
-            .with_context(|| "kt-adapter: gdn_decode_gates z → kt failed")?;
-        let w_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&weight_c)
-            .with_context(|| "kt-adapter: gdn_decode_gates weight → kt failed")?;
         if !kiln_gdn_kernel::gdn_decode_gates_recurrent_supports_kt(
-            &q_kt_4d, &k_kt_4d, &v_kt_4d, &a_kt, &b_kt, &alog_kt, &dtb_kt, &state_kt, &z_kt, &w_kt,
+            q, k, v, &a_c, &b_c, &alog_c, &dtb_c, &state_c, &z_c, &weight_c,
         ) {
             return Ok(None);
         }
@@ -1172,26 +969,18 @@ impl BackendRuntime for CudaBackend {
             .with_context(|| "kt-adapter: gdn_decode_gates k squeeze(1) failed")?;
         let v_3d = v.squeeze(1)
             .with_context(|| "kt-adapter: gdn_decode_gates v squeeze(1) failed")?;
-        let q_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&q_3d)
-            .with_context(|| "kt-adapter: gdn_decode_gates q 3D → kt failed")?;
-        let k_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&k_3d)
-            .with_context(|| "kt-adapter: gdn_decode_gates k 3D → kt failed")?;
-        let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&v_3d)
-            .with_context(|| "kt-adapter: gdn_decode_gates v 3D → kt failed")?;
         let out_kt = kiln_gdn_kernel::gdn_decode_gates_recurrent_bf16_kt(
-            &q_kt, &k_kt, &v_kt, &a_kt, &b_kt, &alog_kt, &dtb_kt, &state_kt, &z_kt, &w_kt,
+            &q_3d, &k_3d, &v_3d, &a_c, &b_c, &alog_c, &dtb_c, &state_c, &z_c, &weight_c,
             eps as f32,
         )
         .map_err(|e| anyhow::anyhow!("kt gdn_decode_gates_recurrent: {e}"))?;
-        let out_3d = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-            .with_context(|| "kt-adapter: gdn_decode_gates out → candle failed")?;
         // kt_api allocates a 3D `[B, value_heads, dv]` output (see
         // crates/kiln-gdn-kernel/src/kt_api.rs:568) but the
         // BackendRuntime trait + production caller expect 4D
         // `[B, 1, value_heads, dv]` (see attn_out shape contract at
         // forward.rs:15595). Unsqueeze the seq_len axis back at
         // position 1; metadata-only reshape, no copy. (#1082)
-        let out = out_3d
+        let out = out_kt
             .unsqueeze(1)
             .with_context(|| "kt-adapter: gdn_decode_gates out 3D->4D unsqueeze failed")?;
         Ok(Some(out))
@@ -1200,37 +989,34 @@ impl BackendRuntime for CudaBackend {
     #[allow(clippy::too_many_arguments)]
     fn gdn_decode_qk_norm_gates_recurrent(
         &self,
-        q: &candle_core::Tensor,
-        k: &candle_core::Tensor,
-        v: &candle_core::Tensor,
-        a: &candle_core::Tensor,
-        b: &candle_core::Tensor,
-        a_log: &candle_core::Tensor,
-        dt_bias: &candle_core::Tensor,
-        state: &mut candle_core::Tensor,
+        q: &kiln_tensor::Tensor,
+        k: &kiln_tensor::Tensor,
+        v: &kiln_tensor::Tensor,
+        a: &kiln_tensor::Tensor,
+        b: &kiln_tensor::Tensor,
+        a_log: &kiln_tensor::Tensor,
+        dt_bias: &kiln_tensor::Tensor,
+        state: &mut kiln_tensor::Tensor,
         q_scale: f64,
         qk_eps: f64,
-    ) -> Result<Option<candle_core::Tensor>> {
+    ) -> Result<Option<kiln_tensor::Tensor>> {
         if !self.gdn_decode_qk_norm_recurrent_enabled {
             return Ok(None);
         }
-        // Phase 7 (#1082): kt-typed bf16 surface is now the only path,
-        // same closeout pattern as conv1d (2ebcfb08) and marlin
-        // (0841c266). The candle-typed
-        // `kiln_gdn_kernel::gdn_decode_qk_norm_gates_recurrent
-        // [_supports]` fallback has been deleted; non-bf16 envelopes
-        // return Ok(None) so the caller's split qk_norm fallback
-        // engages. Production decode for Qwen3.5-4B uses bf16 for all
-        // 8 input tensors; the bf16_kt variant is the matching
-        // production hot path.
-        if !(q.dtype() == candle_core::DType::BF16
-            && k.dtype() == candle_core::DType::BF16
-            && v.dtype() == candle_core::DType::BF16
-            && a.dtype() == candle_core::DType::BF16
-            && b.dtype() == candle_core::DType::BF16
-            && a_log.dtype() == candle_core::DType::BF16
-            && dt_bias.dtype() == candle_core::DType::BF16
-            && state.dtype() == candle_core::DType::BF16)
+        // Phase 7 (#1082): kt-typed bf16 surface is now the only path.
+        // Args are already kt (#1082 DoD-101/102), so no candle↔kt
+        // bridge. Non-bf16 envelopes return Ok(None) so the caller's
+        // split qk_norm fallback engages. Production decode for
+        // Qwen3.5-4B uses bf16 for all 8 input tensors; the bf16_kt
+        // variant is the matching production hot path.
+        if !(q.dtype() == kiln_tensor::DType::BF16
+            && k.dtype() == kiln_tensor::DType::BF16
+            && v.dtype() == kiln_tensor::DType::BF16
+            && a.dtype() == kiln_tensor::DType::BF16
+            && b.dtype() == kiln_tensor::DType::BF16
+            && a_log.dtype() == kiln_tensor::DType::BF16
+            && dt_bias.dtype() == kiln_tensor::DType::BF16
+            && state.dtype() == kiln_tensor::DType::BF16)
         {
             tracing::debug!(
                 q_shape = ?q.shape(), q_dtype = ?q.dtype(),
@@ -1250,38 +1036,38 @@ impl BackendRuntime for CudaBackend {
             // 1-D weight tensors here and recurse. The cast is cheap
             // (num_heads elements) and one-shot per call — the cost
             // is dominated by the kernel launch.
-            let a_log_bf16 = if a_log.dtype() == candle_core::DType::BF16 {
+            let a_log_bf16 = if a_log.dtype() == kiln_tensor::DType::BF16 {
                 None
             } else {
-                Some(a_log.to_dtype(candle_core::DType::BF16)
+                Some(a_log.to_dtype(kiln_tensor::DType::BF16)
                     .with_context(|| "gdn_decode_qk_norm: cast a_log -> bf16")?)
             };
-            let dt_bias_bf16 = if dt_bias.dtype() == candle_core::DType::BF16 {
+            let dt_bias_bf16 = if dt_bias.dtype() == kiln_tensor::DType::BF16 {
                 None
             } else {
-                Some(dt_bias.to_dtype(candle_core::DType::BF16)
+                Some(dt_bias.to_dtype(kiln_tensor::DType::BF16)
                     .with_context(|| "gdn_decode_qk_norm: cast dt_bias -> bf16")?)
             };
             // Same heavy-tensor cast as gdn_decode_gates_recurrent
             // above — required because conv1d kernel emits F32
             // q/k/v.
-            if state.dtype() != candle_core::DType::BF16 {
+            if state.dtype() != kiln_tensor::DType::BF16 {
                 return Ok(None);
             }
-            let q_bf16 = if q.dtype() == candle_core::DType::BF16 { None } else {
-                Some(q.to_dtype(candle_core::DType::BF16).with_context(|| "gdn_decode_qk_norm: cast q -> bf16")?)
+            let q_bf16 = if q.dtype() == kiln_tensor::DType::BF16 { None } else {
+                Some(q.to_dtype(kiln_tensor::DType::BF16).with_context(|| "gdn_decode_qk_norm: cast q -> bf16")?)
             };
-            let k_bf16 = if k.dtype() == candle_core::DType::BF16 { None } else {
-                Some(k.to_dtype(candle_core::DType::BF16).with_context(|| "gdn_decode_qk_norm: cast k -> bf16")?)
+            let k_bf16 = if k.dtype() == kiln_tensor::DType::BF16 { None } else {
+                Some(k.to_dtype(kiln_tensor::DType::BF16).with_context(|| "gdn_decode_qk_norm: cast k -> bf16")?)
             };
-            let v_bf16 = if v.dtype() == candle_core::DType::BF16 { None } else {
-                Some(v.to_dtype(candle_core::DType::BF16).with_context(|| "gdn_decode_qk_norm: cast v -> bf16")?)
+            let v_bf16 = if v.dtype() == kiln_tensor::DType::BF16 { None } else {
+                Some(v.to_dtype(kiln_tensor::DType::BF16).with_context(|| "gdn_decode_qk_norm: cast v -> bf16")?)
             };
-            let a_bf16 = if a.dtype() == candle_core::DType::BF16 { None } else {
-                Some(a.to_dtype(candle_core::DType::BF16).with_context(|| "gdn_decode_qk_norm: cast a -> bf16")?)
+            let a_bf16 = if a.dtype() == kiln_tensor::DType::BF16 { None } else {
+                Some(a.to_dtype(kiln_tensor::DType::BF16).with_context(|| "gdn_decode_qk_norm: cast a -> bf16")?)
             };
-            let b_bf16 = if b.dtype() == candle_core::DType::BF16 { None } else {
-                Some(b.to_dtype(candle_core::DType::BF16).with_context(|| "gdn_decode_qk_norm: cast b -> bf16")?)
+            let b_bf16 = if b.dtype() == kiln_tensor::DType::BF16 { None } else {
+                Some(b.to_dtype(kiln_tensor::DType::BF16).with_context(|| "gdn_decode_qk_norm: cast b -> bf16")?)
             };
             return self.gdn_decode_qk_norm_gates_recurrent(
                 q_bf16.as_ref().unwrap_or(q),
@@ -1320,24 +1106,8 @@ impl BackendRuntime for CudaBackend {
         let state_c = state
             .contiguous()
             .with_context(|| "kt-adapter: gdn_decode_qk_norm state contiguous failed")?;
-        let q_kt_4d = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(q)
-            .with_context(|| "kt-adapter: gdn_decode_qk_norm q → kt (4D) failed")?;
-        let k_kt_4d = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(k)
-            .with_context(|| "kt-adapter: gdn_decode_qk_norm k → kt (4D) failed")?;
-        let v_kt_4d = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v)
-            .with_context(|| "kt-adapter: gdn_decode_qk_norm v → kt (4D) failed")?;
-        let a_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&a_c)
-            .with_context(|| "kt-adapter: gdn_decode_qk_norm a → kt failed")?;
-        let b_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&b_c)
-            .with_context(|| "kt-adapter: gdn_decode_qk_norm b → kt failed")?;
-        let alog_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&alog_c)
-            .with_context(|| "kt-adapter: gdn_decode_qk_norm a_log → kt failed")?;
-        let dtb_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&dtb_c)
-            .with_context(|| "kt-adapter: gdn_decode_qk_norm dt_bias → kt failed")?;
-        let state_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&state_c)
-            .with_context(|| "kt-adapter: gdn_decode_qk_norm state → kt failed")?;
         if !kiln_gdn_kernel::gdn_decode_qk_norm_gates_recurrent_supports_kt(
-            &q_kt_4d, &k_kt_4d, &v_kt_4d, &a_kt, &b_kt, &alog_kt, &dtb_kt, &state_kt,
+            q, k, v, &a_c, &b_c, &alog_c, &dtb_c, &state_c,
         ) {
             return Ok(None);
         }
@@ -1348,24 +1118,16 @@ impl BackendRuntime for CudaBackend {
             .with_context(|| "kt-adapter: gdn_decode_qk_norm k squeeze(1) failed")?;
         let v_3d = v.squeeze(1)
             .with_context(|| "kt-adapter: gdn_decode_qk_norm v squeeze(1) failed")?;
-        let q_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&q_3d)
-            .with_context(|| "kt-adapter: gdn_decode_qk_norm q 3D → kt failed")?;
-        let k_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&k_3d)
-            .with_context(|| "kt-adapter: gdn_decode_qk_norm k 3D → kt failed")?;
-        let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&v_3d)
-            .with_context(|| "kt-adapter: gdn_decode_qk_norm v 3D → kt failed")?;
         let out_kt = kiln_gdn_kernel::gdn_decode_qk_norm_gates_recurrent_bf16_kt(
-            &q_kt, &k_kt, &v_kt, &a_kt, &b_kt, &alog_kt, &dtb_kt, &state_kt,
+            &q_3d, &k_3d, &v_3d, &a_c, &b_c, &alog_c, &dtb_c, &state_c,
             q_scale as f32, qk_eps as f32,
         )
         .map_err(|e| anyhow::anyhow!("kt gdn_decode_qk_norm_gates_recurrent: {e}"))?;
-        let out_3d = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-            .with_context(|| "kt-adapter: gdn_decode_qk_norm out → candle failed")?;
         // Same 3D->4D unsqueeze fix as gdn_decode_gates_recurrent
         // above. The kt_api allocates 3D `[B, value_heads, dv]`
         // (see crates/kiln-gdn-kernel/src/kt_api.rs) but the trait
         // contract is 4D `[B, 1, value_heads, dv]`. (#1082)
-        let out = out_3d
+        let out = out_kt
             .unsqueeze(1)
             .with_context(|| "kt-adapter: gdn_decode_qk_norm out 3D->4D unsqueeze failed")?;
         Ok(Some(out))
@@ -1374,42 +1136,40 @@ impl BackendRuntime for CudaBackend {
     #[allow(clippy::too_many_arguments)]
     fn gdn_decode_qk_norm_gates_recurrent_rmsnorm(
         &self,
-        q: &candle_core::Tensor,
-        k: &candle_core::Tensor,
-        v: &candle_core::Tensor,
-        a: &candle_core::Tensor,
-        b: &candle_core::Tensor,
-        a_log: &candle_core::Tensor,
-        dt_bias: &candle_core::Tensor,
-        state: &mut candle_core::Tensor,
-        z: &candle_core::Tensor,
-        weight: &candle_core::Tensor,
+        q: &kiln_tensor::Tensor,
+        k: &kiln_tensor::Tensor,
+        v: &kiln_tensor::Tensor,
+        a: &kiln_tensor::Tensor,
+        b: &kiln_tensor::Tensor,
+        a_log: &kiln_tensor::Tensor,
+        dt_bias: &kiln_tensor::Tensor,
+        state: &mut kiln_tensor::Tensor,
+        z: &kiln_tensor::Tensor,
+        weight: &kiln_tensor::Tensor,
         q_scale: f64,
         qk_eps: f64,
         rms_eps: f64,
-    ) -> Result<Option<candle_core::Tensor>> {
+    ) -> Result<Option<kiln_tensor::Tensor>> {
         if !self.gdn_decode_qk_norm_recurrent_rmsnorm_enabled {
             return Ok(None);
         }
-        // Phase 7 (#1082): kt-typed bf16 surface is now the only path,
-        // same closeout pattern as conv1d (2ebcfb08) and marlin
-        // (0841c266). The candle-typed
-        // `kiln_gdn_kernel::gdn_decode_qk_norm_gates_recurrent_rmsnorm
-        // [_supports]` fallback has been deleted; non-bf16 envelopes
-        // return Ok(None) so the caller's split gated_norm fallback
-        // engages. Production decode for Qwen3.5-4B uses bf16 for all
-        // 10 input tensors (with F32 weight); the bf16_kt variant is
-        // the matching production hot path.
-        if !(q.dtype() == candle_core::DType::BF16
-            && k.dtype() == candle_core::DType::BF16
-            && v.dtype() == candle_core::DType::BF16
-            && a.dtype() == candle_core::DType::BF16
-            && b.dtype() == candle_core::DType::BF16
-            && a_log.dtype() == candle_core::DType::BF16
-            && dt_bias.dtype() == candle_core::DType::BF16
-            && state.dtype() == candle_core::DType::BF16
-            && z.dtype() == candle_core::DType::BF16
-            && weight.dtype() == candle_core::DType::F32)
+        // Phase 7 (#1082): kt-typed bf16 surface is now the only path.
+        // Args are already kt (#1082 DoD-101/102), so no candle↔kt
+        // bridge. Non-bf16 envelopes return Ok(None) so the caller's
+        // split gated_norm fallback engages. Production decode for
+        // Qwen3.5-4B uses bf16 for all 10 input tensors (with F32
+        // weight); the bf16_kt variant is the matching production hot
+        // path.
+        if !(q.dtype() == kiln_tensor::DType::BF16
+            && k.dtype() == kiln_tensor::DType::BF16
+            && v.dtype() == kiln_tensor::DType::BF16
+            && a.dtype() == kiln_tensor::DType::BF16
+            && b.dtype() == kiln_tensor::DType::BF16
+            && a_log.dtype() == kiln_tensor::DType::BF16
+            && dt_bias.dtype() == kiln_tensor::DType::BF16
+            && state.dtype() == kiln_tensor::DType::BF16
+            && z.dtype() == kiln_tensor::DType::BF16
+            && weight.dtype() == kiln_tensor::DType::F32)
         {
             tracing::debug!(
                 q_shape = ?q.shape(), q_dtype = ?q.dtype(),
@@ -1430,46 +1190,46 @@ impl BackendRuntime for CudaBackend {
             // above. Heavier tensors (q/k/v/a/b/state/z) shouldn't
             // be non-bf16 on the production hot path; if they are,
             // decline.
-            let a_log_bf16 = if a_log.dtype() == candle_core::DType::BF16 {
+            let a_log_bf16 = if a_log.dtype() == kiln_tensor::DType::BF16 {
                 None
             } else {
-                Some(a_log.to_dtype(candle_core::DType::BF16)
+                Some(a_log.to_dtype(kiln_tensor::DType::BF16)
                     .with_context(|| "gdn_decode_rmsnorm: cast a_log -> bf16")?)
             };
-            let dt_bias_bf16 = if dt_bias.dtype() == candle_core::DType::BF16 {
+            let dt_bias_bf16 = if dt_bias.dtype() == kiln_tensor::DType::BF16 {
                 None
             } else {
-                Some(dt_bias.to_dtype(candle_core::DType::BF16)
+                Some(dt_bias.to_dtype(kiln_tensor::DType::BF16)
                     .with_context(|| "gdn_decode_rmsnorm: cast dt_bias -> bf16")?)
             };
-            let weight_f32 = if weight.dtype() == candle_core::DType::F32 {
+            let weight_f32 = if weight.dtype() == kiln_tensor::DType::F32 {
                 None
             } else {
-                Some(weight.to_dtype(candle_core::DType::F32)
+                Some(weight.to_dtype(kiln_tensor::DType::F32)
                     .with_context(|| "gdn_decode_rmsnorm: cast weight -> f32")?)
             };
             // Same heavy-tensor cast as the sibling functions
             // above — required because conv1d emits F32 q/k/v.
-            if state.dtype() != candle_core::DType::BF16 {
+            if state.dtype() != kiln_tensor::DType::BF16 {
                 return Ok(None);
             }
-            let q_bf16 = if q.dtype() == candle_core::DType::BF16 { None } else {
-                Some(q.to_dtype(candle_core::DType::BF16).with_context(|| "gdn_decode_rmsnorm: cast q -> bf16")?)
+            let q_bf16 = if q.dtype() == kiln_tensor::DType::BF16 { None } else {
+                Some(q.to_dtype(kiln_tensor::DType::BF16).with_context(|| "gdn_decode_rmsnorm: cast q -> bf16")?)
             };
-            let k_bf16 = if k.dtype() == candle_core::DType::BF16 { None } else {
-                Some(k.to_dtype(candle_core::DType::BF16).with_context(|| "gdn_decode_rmsnorm: cast k -> bf16")?)
+            let k_bf16 = if k.dtype() == kiln_tensor::DType::BF16 { None } else {
+                Some(k.to_dtype(kiln_tensor::DType::BF16).with_context(|| "gdn_decode_rmsnorm: cast k -> bf16")?)
             };
-            let v_bf16 = if v.dtype() == candle_core::DType::BF16 { None } else {
-                Some(v.to_dtype(candle_core::DType::BF16).with_context(|| "gdn_decode_rmsnorm: cast v -> bf16")?)
+            let v_bf16 = if v.dtype() == kiln_tensor::DType::BF16 { None } else {
+                Some(v.to_dtype(kiln_tensor::DType::BF16).with_context(|| "gdn_decode_rmsnorm: cast v -> bf16")?)
             };
-            let a_bf16 = if a.dtype() == candle_core::DType::BF16 { None } else {
-                Some(a.to_dtype(candle_core::DType::BF16).with_context(|| "gdn_decode_rmsnorm: cast a -> bf16")?)
+            let a_bf16 = if a.dtype() == kiln_tensor::DType::BF16 { None } else {
+                Some(a.to_dtype(kiln_tensor::DType::BF16).with_context(|| "gdn_decode_rmsnorm: cast a -> bf16")?)
             };
-            let b_bf16 = if b.dtype() == candle_core::DType::BF16 { None } else {
-                Some(b.to_dtype(candle_core::DType::BF16).with_context(|| "gdn_decode_rmsnorm: cast b -> bf16")?)
+            let b_bf16 = if b.dtype() == kiln_tensor::DType::BF16 { None } else {
+                Some(b.to_dtype(kiln_tensor::DType::BF16).with_context(|| "gdn_decode_rmsnorm: cast b -> bf16")?)
             };
-            let z_bf16 = if z.dtype() == candle_core::DType::BF16 { None } else {
-                Some(z.to_dtype(candle_core::DType::BF16).with_context(|| "gdn_decode_rmsnorm: cast z -> bf16")?)
+            let z_bf16 = if z.dtype() == kiln_tensor::DType::BF16 { None } else {
+                Some(z.to_dtype(kiln_tensor::DType::BF16).with_context(|| "gdn_decode_rmsnorm: cast z -> bf16")?)
             };
             return self.gdn_decode_qk_norm_gates_recurrent_rmsnorm(
                 q_bf16.as_ref().unwrap_or(q),
@@ -1523,28 +1283,8 @@ impl BackendRuntime for CudaBackend {
         let weight_c = weight
             .contiguous()
             .with_context(|| "kt-adapter: gdn_decode_rmsnorm weight contiguous failed")?;
-        let q_kt_4d = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(q)
-            .with_context(|| "kt-adapter: gdn_decode_rmsnorm q → kt (4D) failed")?;
-        let k_kt_4d = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(k)
-            .with_context(|| "kt-adapter: gdn_decode_rmsnorm k → kt (4D) failed")?;
-        let v_kt_4d = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(v)
-            .with_context(|| "kt-adapter: gdn_decode_rmsnorm v → kt (4D) failed")?;
-        let a_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&a_c)
-            .with_context(|| "kt-adapter: gdn_decode_rmsnorm a → kt failed")?;
-        let b_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&b_c)
-            .with_context(|| "kt-adapter: gdn_decode_rmsnorm b → kt failed")?;
-        let alog_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&alog_c)
-            .with_context(|| "kt-adapter: gdn_decode_rmsnorm a_log → kt failed")?;
-        let dtb_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&dtb_c)
-            .with_context(|| "kt-adapter: gdn_decode_rmsnorm dt_bias → kt failed")?;
-        let state_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&state_c)
-            .with_context(|| "kt-adapter: gdn_decode_rmsnorm state → kt failed")?;
-        let z_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&z_c)
-            .with_context(|| "kt-adapter: gdn_decode_rmsnorm z → kt failed")?;
-        let w_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&weight_c)
-            .with_context(|| "kt-adapter: gdn_decode_rmsnorm weight → kt failed")?;
         if !kiln_gdn_kernel::gdn_decode_qk_norm_gates_recurrent_rmsnorm_supports_kt(
-            &q_kt_4d, &k_kt_4d, &v_kt_4d, &a_kt, &b_kt, &alog_kt, &dtb_kt, &state_kt, &z_kt, &w_kt,
+            q, k, v, &a_c, &b_c, &alog_c, &dtb_c, &state_c, &z_c, &weight_c,
         ) {
             return Ok(None);
         }
@@ -1555,24 +1295,16 @@ impl BackendRuntime for CudaBackend {
             .with_context(|| "kt-adapter: gdn_decode_rmsnorm k squeeze(1) failed")?;
         let v_3d = v.squeeze(1)
             .with_context(|| "kt-adapter: gdn_decode_rmsnorm v squeeze(1) failed")?;
-        let q_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&q_3d)
-            .with_context(|| "kt-adapter: gdn_decode_rmsnorm q 3D → kt failed")?;
-        let k_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&k_3d)
-            .with_context(|| "kt-adapter: gdn_decode_rmsnorm k 3D → kt failed")?;
-        let v_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&v_3d)
-            .with_context(|| "kt-adapter: gdn_decode_rmsnorm v 3D → kt failed")?;
         let out_kt = kiln_gdn_kernel::gdn_decode_qk_norm_gates_recurrent_rmsnorm_bf16_kt(
-            &q_kt, &k_kt, &v_kt, &a_kt, &b_kt, &alog_kt, &dtb_kt, &state_kt, &z_kt, &w_kt,
+            &q_3d, &k_3d, &v_3d, &a_c, &b_c, &alog_c, &dtb_c, &state_c, &z_c, &weight_c,
             q_scale as f32, qk_eps as f32, rms_eps as f32,
         )
         .map_err(|e| anyhow::anyhow!("kt gdn_decode_qk_norm_gates_recurrent_rmsnorm: {e}"))?;
-        let out_3d = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-            .with_context(|| "kt-adapter: gdn_decode_rmsnorm out → candle failed")?;
         // Same 3D->4D unsqueeze fix as the gdn_decode_gates_recurrent
         // and gdn_decode_qk_norm_gates_recurrent wires above. The
         // kt_api allocates 3D `[B, value_heads, dv]` but the trait
         // contract is 4D `[B, 1, value_heads, dv]`. (#1082)
-        let out = out_3d
+        let out = out_kt
             .unsqueeze(1)
             .with_context(|| "kt-adapter: gdn_decode_rmsnorm out 3D->4D unsqueeze failed")?;
         Ok(Some(out))
@@ -1584,11 +1316,11 @@ impl BackendRuntime for CudaBackend {
 
     fn gdn_gates(
         &self,
-        a: &candle_core::Tensor,
-        b: &candle_core::Tensor,
-        a_log: &candle_core::Tensor,
-        dt_bias: &candle_core::Tensor,
-    ) -> Result<Option<(candle_core::Tensor, candle_core::Tensor)>> {
+        a: &kiln_tensor::Tensor,
+        b: &kiln_tensor::Tensor,
+        a_log: &kiln_tensor::Tensor,
+        dt_bias: &kiln_tensor::Tensor,
+    ) -> Result<Option<(kiln_tensor::Tensor, kiln_tensor::Tensor)>> {
         let dims = a.dims();
         let is_t1_decode = dims.len() >= 2 && dims[dims.len() - 2] == 1;
         if !is_t1_decode && std::env::var("KILN_DISABLE_CUDA_GDN_PREFILL_GATES").is_ok() {
@@ -1600,34 +1332,27 @@ impl BackendRuntime for CudaBackend {
             );
             return Ok(None);
         }
-        // Phase 7 (#1082): kt-typed bf16 surface is now the only path,
-        // same closeout pattern as conv1d (2ebcfb08) and marlin
-        // (0841c266). The candle-typed
-        // `kiln_gdn_kernel::gdn_gates[_decline_reason]` fallback has
-        // been deleted; non-bf16 envelopes (f32/f32, f32/bf16) return
+        // Phase 7 (#1082): kt-typed bf16 surface is now the only path.
+        // Args are already kt (#1082 DoD-101/102), so no candle↔kt
+        // bridge. Non-bf16 envelopes (f32/f32, f32/bf16) return
         // Ok(None) so the caller's candle fallback engages. bf16 was
         // the only envelope on the production decode/prefill path for
-        // Qwen3.5-4B GDN; the mixed-precision variants are reachable
-        // only through paths not exercised in production.
-        if !(a.dtype() == candle_core::DType::BF16
-            && b.dtype() == candle_core::DType::BF16
-            && a_log.dtype() == candle_core::DType::BF16
-            && dt_bias.dtype() == candle_core::DType::BF16)
+        // Qwen3.5-4B GDN.
+        if !(a.dtype() == kiln_tensor::DType::BF16
+            && b.dtype() == kiln_tensor::DType::BF16
+            && a_log.dtype() == kiln_tensor::DType::BF16
+            && dt_bias.dtype() == kiln_tensor::DType::BF16)
         {
             return Ok(None);
         }
         kiln_nvtx::range!(c"kiln/gdn_gates_bf16_kt");
-        // kt_tensor_from_candle_cuda_borrow requires contiguous inputs (see
-        // kiln-kt-bridge::lib.rs: "tensor must be contiguous"). At the
-        // bs>1 / prefill GDN call site, `a` and `b` arrive as
+        // At the bs>1 / prefill GDN call site, `a` and `b` arrive as
         // `ab.narrow(2, .., nv)` views on a fused A/B in-proj output,
-        // which are non-contiguous on the last dim. The candle path
-        // used to handle this by computing a collapsed row-stride and
-        // falling through to `.contiguous()` on declined stride; with
-        // the candle path now gone, we make each operand contiguous
-        // here unconditionally. This is a no-op when the upstream
-        // tensor is already contiguous (the seq_len==1 decode case).
-        // a_log and dt_bias are weight tensors and are already
+        // which are non-contiguous on the last dim. The kt kernel
+        // requires contiguous inputs, so we make each operand
+        // contiguous here unconditionally. This is a no-op when the
+        // upstream tensor is already contiguous (the seq_len==1 decode
+        // case). a_log and dt_bias are weight tensors and are already
         // contiguous; the calls are kept for symmetry / future-proofing.
         let a_c = a
             .contiguous()
@@ -1641,25 +1366,13 @@ impl BackendRuntime for CudaBackend {
         let dtb_c = dt_bias
             .contiguous()
             .with_context(|| "kt-adapter: gdn_gates dt_bias contiguous failed")?;
-        let a_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&a_c)
-            .with_context(|| "kt-adapter: gdn_gates a → kt failed")?;
-        let b_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&b_c)
-            .with_context(|| "kt-adapter: gdn_gates b → kt failed")?;
-        let alog_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&alog_c)
-            .with_context(|| "kt-adapter: gdn_gates a_log → kt failed")?;
-        let dtb_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&dtb_c)
-            .with_context(|| "kt-adapter: gdn_gates dt_bias → kt failed")?;
-        if !kiln_gdn_kernel::gdn_gates_supports_kt(&a_kt, &b_kt, &alog_kt, &dtb_kt) {
+        if !kiln_gdn_kernel::gdn_gates_supports_kt(&a_c, &b_c, &alog_c, &dtb_c) {
             return Ok(None);
         }
         let (beta_kt, g_kt) =
-            kiln_gdn_kernel::gdn_gates_bf16_kt(&a_kt, &b_kt, &alog_kt, &dtb_kt)
+            kiln_gdn_kernel::gdn_gates_bf16_kt(&a_c, &b_c, &alog_c, &dtb_c)
                 .map_err(|e| anyhow::anyhow!("kt gdn_gates_bf16: {e}"))?;
-        let beta = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&beta_kt)
-            .with_context(|| "kt-adapter: gdn_gates beta → candle failed")?;
-        let g = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&g_kt)
-            .with_context(|| "kt-adapter: gdn_gates g → candle failed")?;
-        Ok(Some((beta, g)))
+        Ok(Some((beta_kt, g_kt)))
     }
 
     fn supports_gdn_gated_rms_norm(&self) -> bool {
@@ -1668,12 +1381,12 @@ impl BackendRuntime for CudaBackend {
 
     fn lora_decode_add(
         &self,
-        base: &candle_core::Tensor,
-        x: &candle_core::Tensor,
-        a: &candle_core::Tensor,
-        b: &candle_core::Tensor,
+        base: &kiln_tensor::Tensor,
+        x: &kiln_tensor::Tensor,
+        a: &kiln_tensor::Tensor,
+        b: &kiln_tensor::Tensor,
         scale: f32,
-    ) -> Result<Option<candle_core::Tensor>> {
+    ) -> Result<Option<kiln_tensor::Tensor>> {
         if !self.lora_decode_add_enabled
             || base.track_op()
             || x.track_op()
@@ -1682,36 +1395,20 @@ impl BackendRuntime for CudaBackend {
         {
             return Ok(None);
         }
-        let base_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(base) {
-            Ok(t) => t,
-            Err(_) => return Ok(None),
-        };
-        let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x) {
-            Ok(t) => t,
-            Err(_) => return Ok(None),
-        };
-        let a_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(a) {
-            Ok(t) => t,
-            Err(_) => return Ok(None),
-        };
-        let b_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(b) {
-            Ok(t) => t,
-            Err(_) => return Ok(None),
-        };
-        if !kiln_rmsnorm_kernel::supports_lora_decode_add_kt(&base_kt, &x_kt, &a_kt, &b_kt) {
+        // #1082: args are already kt (BackendRuntime trait flipped to kt),
+        // so there is no candle↔kt bridge — the kernel runs directly on the
+        // caller's kt tensors and returns a kt result (zero candle roundtrip).
+        if !kiln_rmsnorm_kernel::supports_lora_decode_add_kt(base, x, a, b) {
             return Ok(None);
         }
-        let out_kt =
-            kiln_rmsnorm_kernel::lora_decode_add_full_kt(&base_kt, &x_kt, &a_kt, &b_kt, scale)
-                .map_err(|e| anyhow::anyhow!("kt lora_decode_add: {e}"))?;
-        let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-            .with_context(|| "kt-adapter: lora_decode_add out → candle failed")?;
-        Ok(Some(out))
+        let out_kt = kiln_rmsnorm_kernel::lora_decode_add_full_kt(base, x, a, b, scale)
+            .map_err(|e| anyhow::anyhow!("kt lora_decode_add: {e}"))?;
+        Ok(Some(out_kt))
     }
 
-    fn linear_prefill_apply(&self, x: &candle_core::Tensor, weight_t: &candle_core::Tensor) -> Result<Option<candle_core::Tensor>> {
-        if !matches!(x.device(), candle_core::Device::Cuda(_))
-            || !matches!(weight_t.device(), candle_core::Device::Cuda(_))
+    fn linear_prefill_apply(&self, x: &kiln_tensor::Tensor, weight_t: &kiln_tensor::Tensor) -> Result<Option<kiln_tensor::Tensor>> {
+        if !matches!(x.device(), kiln_tensor::Device::Cuda(_))
+            || !matches!(weight_t.device(), kiln_tensor::Device::Cuda(_))
             || x.dims().is_empty()
             || weight_t.dims().len() != 2
             || *x.dims().last().unwrap() != weight_t.dims()[0]
@@ -1725,10 +1422,14 @@ impl BackendRuntime for CudaBackend {
                 x_shape = ?x.dims(),
                 weight_t_shape = ?weight_t.dims(),
                 tracked = x.track_op() || weight_t.track_op(),
-                "CudaBackend::linear_prefill_apply first call (candle CUDA autograd)"
+                "CudaBackend::linear_prefill_apply first call (kt cublasLt; tape records bwd)"
             );
         });
 
+        // #1082: args are already kt. The kt matmul records onto the
+        // autograd tape so `Tape::backward()` produces the projection
+        // gradient — there is no candle autograd / CustomOp1 anymore.
+        //
         // candle's `broadcast_matmul` for `[B, T, K] @ [K, N]` materializes
         // the broadcasted RHS via `.broadcast_as(...).contiguous()`, which on
         // CUDA copies the entire (B × K × N) weight tensor across the batch
@@ -1746,13 +1447,10 @@ impl BackendRuntime for CudaBackend {
 
             // Phase 7 opt-in: route through the kt cublasLt handle
             // when KILN_USE_KT_API_MATMUL=1 and the dtype is supported.
-            // Brings the kt-API into the production CUDA prefill matmul
-            // path (the training/autograd path that goes through
-            // BackendRuntime::linear_prefill_apply before falling back
-            // to matmul_no_broadcast_copy). NVTX range from try_kt_matmul
-            // brackets the call as kiln/matmul_kt in nsys.
+            // NVTX range from try_kt_matmul brackets the call as
+            // kiln/matmul_kt in nsys.
             if crate::forward::cuda_use_kt_api_matmul()
-                && matches!(x2d.dtype(), candle_core::DType::BF16 | candle_core::DType::F16 | candle_core::DType::F32)
+                && matches!(x2d.dtype(), kiln_tensor::DType::BF16 | kiln_tensor::DType::F16 | kiln_tensor::DType::F32)
                 && x2d.dtype() == weight_t.dtype()
                 && x2d.is_contiguous()
                 && weight_t.is_contiguous()
@@ -1770,19 +1468,17 @@ impl BackendRuntime for CudaBackend {
             out_shape.push(out_n);
             out2d.reshape(out_shape)?
         } else {
-            // Non-contiguous x fallback. Candle's broadcast_matmul handles
-            // this by materializing a broadcasted-RHS copy internally, which
-            // is the path the comment above explicitly calls out as bad
-            // (78 % GPU time at bs=4 due to the per-step RHS copy). When
-            // the kt-API matmul gate is on and dtypes line up, force x
-            // contiguous and route through cublasLt — same 2D kt path as
-            // the is_contiguous() branch above, just paying one extra
-            // dtod for the x.contiguous() up front. That copy is bounded
-            // by (B × T × K), whereas broadcast_matmul's implicit copy
-            // scales as (B × K × N) which is typically larger by an order
-            // of magnitude on Qwen3.5-4B GDN in-proj shapes. (#1082)
+            // Non-contiguous x fallback. broadcast_matmul materializes a
+            // broadcasted-RHS copy internally (78 % GPU time at bs=4 due to
+            // the per-step RHS copy). When the kt-API matmul gate is on and
+            // dtypes line up, force x contiguous and route through cublasLt —
+            // same 2D kt path as the is_contiguous() branch above, paying one
+            // extra dtod for the x.contiguous() up front. That copy is bounded
+            // by (B × T × K), whereas broadcast_matmul's implicit copy scales
+            // as (B × K × N), typically larger by an order of magnitude on
+            // Qwen3.5-4B GDN in-proj shapes. (#1082)
             if crate::forward::cuda_use_kt_api_matmul()
-                && matches!(x.dtype(), candle_core::DType::BF16 | candle_core::DType::F16 | candle_core::DType::F32)
+                && matches!(x.dtype(), kiln_tensor::DType::BF16 | kiln_tensor::DType::F16 | kiln_tensor::DType::F32)
                 && x.dtype() == weight_t.dtype()
                 && weight_t.is_contiguous()
             {
@@ -1807,13 +1503,13 @@ impl BackendRuntime for CudaBackend {
 
     fn linear_prefill_apply_offset(
         &self,
-        x: &candle_core::Tensor,
-        full_weight_t: &candle_core::Tensor,
+        x: &kiln_tensor::Tensor,
+        full_weight_t: &kiln_tensor::Tensor,
         chunk_start: usize,
         chunk_len: usize,
-    ) -> Result<Option<candle_core::Tensor>> {
-        if !matches!(x.device(), candle_core::Device::Cuda(_))
-            || !matches!(full_weight_t.device(), candle_core::Device::Cuda(_))
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        if !matches!(x.device(), kiln_tensor::Device::Cuda(_))
+            || !matches!(full_weight_t.device(), kiln_tensor::Device::Cuda(_))
             || full_weight_t.dims().len() != 2
             || chunk_len == 0
             || chunk_start >= full_weight_t.dims()[1]
@@ -1842,26 +1538,29 @@ impl BackendRuntime for CudaBackend {
 
     fn lora_delta_resident(
         &self,
-        x: &candle_core::Tensor,
-        a: &candle_core::Tensor,
-        b: &candle_core::Tensor,
+        x: &kiln_tensor::Tensor,
+        a: &kiln_tensor::Tensor,
+        b: &kiln_tensor::Tensor,
         scale: f32,
-    ) -> Result<Option<candle_core::Tensor>> {
-        if !matches!(x.device(), candle_core::Device::Cuda(_))
-            || !matches!(a.device(), candle_core::Device::Cuda(_))
-            || !matches!(b.device(), candle_core::Device::Cuda(_))
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        if !matches!(x.device(), kiln_tensor::Device::Cuda(_))
+            || !matches!(a.device(), kiln_tensor::Device::Cuda(_))
+            || !matches!(b.device(), kiln_tensor::Device::Cuda(_))
             || !self.has_resident_activation(a)
             || !self.has_resident_activation(b)
         {
             return Ok(None);
         }
 
+        // #1082: args are already kt. `compute_lora_delta` is kt-native and
+        // records the delta matmul chain onto the autograd tape, so
+        // `Tape::backward()` produces grad_A / grad_B — no candle autograd.
         let proj = LoraProjectionWeights {
             a: a.clone(),
             b: b.clone(),
         };
         let delta = compute_lora_delta(x, &proj, scale)
-            .context("cuda registered LoRA delta via candle CUDA autograd failed")?;
+            .context("cuda registered LoRA delta (kt tape-recorded) failed")?;
 
         static FIRST_CUDA_LORA_DELTA_LOGGED: OnceLock<()> = OnceLock::new();
         FIRST_CUDA_LORA_DELTA_LOGGED.get_or_init(|| {
@@ -1870,7 +1569,7 @@ impl BackendRuntime for CudaBackend {
                 a_shape = ?a.dims(),
                 b_shape = ?b.dims(),
                 scale,
-                "CudaBackend::lora_delta_resident first call (candle CUDA autograd)"
+                "CudaBackend::lora_delta_resident first call (kt tape-recorded)"
             );
         });
 
@@ -1879,54 +1578,52 @@ impl BackendRuntime for CudaBackend {
 
     fn gdn_gated_rms_norm(
         &self,
-        x: &candle_core::Tensor,
-        z: &candle_core::Tensor,
-        weight: &candle_core::Tensor,
+        x: &kiln_tensor::Tensor,
+        z: &kiln_tensor::Tensor,
+        weight: &kiln_tensor::Tensor,
         eps: f64,
-    ) -> Result<Option<candle_core::Tensor>> {
+    ) -> Result<Option<kiln_tensor::Tensor>> {
         if !self.gdn_gated_rms_norm_enabled {
             return Ok(None);
         }
-        // Phase 7 (#1082): kt-typed bf16 surface is now the only path,
-        // same closeout pattern as conv1d (2ebcfb08) and marlin
-        // (0841c266). The candle-typed `kiln_gdn_kernel::gdn_gated_rms_
-        // norm[_supports]` fallback has been deleted; non-bf16 inputs
-        // (which the kt path declines) return Ok(None) so the caller's
-        // candle fallback engages. bf16 was the only envelope the
-        // candle path could reach in production for Qwen3.5-4B GDN.
-        if !(x.dtype() == candle_core::DType::BF16
-            && z.dtype() == candle_core::DType::BF16
-            && weight.dtype() == candle_core::DType::BF16)
+        // Phase 7 (#1082): kt-typed bf16 surface is now the only path.
+        // Args are already kt (#1082 DoD-101/102), so no candle↔kt
+        // bridge. Non-bf16 inputs (which the kt path declines) return
+        // Ok(None) so the caller's candle fallback engages. bf16 was
+        // the only production envelope for Qwen3.5-4B GDN.
+        if !(x.dtype() == kiln_tensor::DType::BF16
+            && z.dtype() == kiln_tensor::DType::BF16
+            && weight.dtype() == kiln_tensor::DType::BF16)
         {
             return Ok(None);
         }
         kiln_nvtx::range!(c"kiln/gdn_gated_rms_norm_bf16_kt");
         // The kt variant expects rank-2 [rows, hidden]; flatten higher-rank
         // x/z by folding all leading dims into rows. weight stays [hidden].
-        let x_dims = x.dims();
+        let x_dims = x.dims().to_vec();
         let hidden = *x_dims.last().expect("x has at least one dim (checked by supports_kt)");
         let rows: usize = x_dims.iter().take(x_dims.len() - 1).product();
+        // #1082: x/z arrive as transposed views (e.g. [1,7,2,16] strides
+        // [224,16,112,1] after the head transpose). candle's reshape silently
+        // copied; kt's reshape requires contiguous (and logs the copy), so
+        // contiguify explicitly first — same materialization candle did.
         let x_flat = x
+            .contiguous()
+            .context("kt-adapter: gdn_gated_rms_norm contiguous x failed")?
             .reshape((rows, hidden))
             .context("kt-adapter: gdn_gated_rms_norm reshape x → [rows, hidden] failed")?;
         let z_flat = z
+            .contiguous()
+            .context("kt-adapter: gdn_gated_rms_norm contiguous z failed")?
             .reshape((rows, hidden))
             .context("kt-adapter: gdn_gated_rms_norm reshape z → [rows, hidden] failed")?;
-        let x_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&x_flat)
-            .with_context(|| "kt-adapter: gdn_gated_rms_norm x → kt failed")?;
-        let z_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&z_flat)
-            .with_context(|| "kt-adapter: gdn_gated_rms_norm z → kt failed")?;
-        let w_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(weight)
-            .with_context(|| "kt-adapter: gdn_gated_rms_norm weight → kt failed")?;
-        if !kiln_gdn_kernel::gdn_gated_rms_norm_supports_kt(&x_kt, &z_kt, &w_kt) {
+        if !kiln_gdn_kernel::gdn_gated_rms_norm_supports_kt(&x_flat, &z_flat, weight) {
             return Ok(None);
         }
         let out_kt =
-            kiln_gdn_kernel::gdn_gated_rms_norm_bf16_kt(&x_kt, &z_kt, &w_kt, eps as f32)
+            kiln_gdn_kernel::gdn_gated_rms_norm_bf16_kt(&x_flat, &z_flat, weight, eps as f32)
                 .map_err(|e| anyhow::anyhow!("kt gdn_gated_rms_norm_bf16: {e}"))?;
-        let out_flat = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-            .with_context(|| "kt-adapter: gdn_gated_rms_norm out → candle failed")?;
-        let out = out_flat
+        let out = out_kt
             .reshape(x_dims)
             .context("kt-adapter: gdn_gated_rms_norm reshape out → original failed")?;
         Ok(Some(out))
@@ -1942,65 +1639,47 @@ impl BackendRuntime for CudaBackend {
 
     fn causal_conv1d_update(
         &self,
-        x: &candle_core::Tensor,
-        weight: &candle_core::Tensor,
-        conv_state: &mut candle_core::Tensor,
+        x: &kiln_tensor::Tensor,
+        weight: &kiln_tensor::Tensor,
+        conv_state: &mut kiln_tensor::Tensor,
         kernel_size: usize,
-    ) -> Result<Option<candle_core::Tensor>> {
+    ) -> Result<Option<kiln_tensor::Tensor>> {
         if !self.fused_conv1d_enabled {
             return Ok(None);
         }
-        // Phase 7 (#1082): kt-typed surface is now the only path.
-        // The borrow adapter shares the underlying CUDA buffer with
-        // the candle tensor, so the kernel's in-place mutation of
-        // `conv_state` surfaces through the caller's `&mut Tensor`
-        // automatically (anti-pattern 16 — owner-agnostic raw ptr).
-        // Predicate also runs on the kt-borrowed view so no
-        // candle-typed `kiln_conv1d_kernel::supports*` call survives
-        // in production code — see docs/CANDLE_REMOVAL_PLAN.md
-        // §"kiln-conv1d-kernel".
-        let x_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x)
-            .with_context(|| "kt-adapter: conv1d_update x → kt failed")?;
-        let w_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(weight)
-            .with_context(|| "kt-adapter: conv1d_update weight → kt failed")?;
-        let s_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(conv_state)
-            .with_context(|| "kt-adapter: conv1d_update conv_state → kt failed")?;
-        if !kiln_conv1d_kernel::supports_kt(&x_kt, &w_kt, &s_kt, kernel_size) {
+        // Phase 7 (#1082): kt-typed surface is now the only path; with
+        // the BackendRuntime decode methods flipped to kt (#1082
+        // DoD-101/102) the args are already kt, so the candle↔kt
+        // bridges are gone — the kernel runs directly on the caller's
+        // kt tensors. The kernel's in-place mutation of `conv_state`
+        // surfaces through the caller's `&mut kt::Tensor` automatically
+        // (anti-pattern 16 — owner-agnostic raw ptr).
+        if !kiln_conv1d_kernel::supports_kt(x, weight, conv_state, kernel_size) {
             return Ok(None);
         }
-        let out_kt = kiln_conv1d_kernel::causal_conv1d_update_kt(&x_kt, &w_kt, &s_kt, kernel_size)
+        let out_kt = kiln_conv1d_kernel::causal_conv1d_update_kt(x, weight, conv_state, kernel_size)
             .map_err(|e| anyhow::anyhow!("kt causal_conv1d_update: {e}"))?;
-        let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-            .with_context(|| "kt-adapter: conv1d_update out → candle failed")?;
-        Ok(Some(out))
+        Ok(Some(out_kt))
     }
 
     fn causal_conv1d_prefill(
         &self,
-        x: &candle_core::Tensor,
-        weight: &candle_core::Tensor,
-        conv_state: &mut candle_core::Tensor,
+        x: &kiln_tensor::Tensor,
+        weight: &kiln_tensor::Tensor,
+        conv_state: &mut kiln_tensor::Tensor,
         kernel_size: usize,
-    ) -> Result<Option<candle_core::Tensor>> {
+    ) -> Result<Option<kiln_tensor::Tensor>> {
         if !self.fused_conv1d_enabled {
             return Ok(None);
         }
         // Phase 7 (#1082): kt-typed surface is now the only path.
-        // See update path above for the borrow/in-place semantics.
-        let x_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x)
-            .with_context(|| "kt-adapter: conv1d_prefill x → kt failed")?;
-        let w_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(weight)
-            .with_context(|| "kt-adapter: conv1d_prefill weight → kt failed")?;
-        let s_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(conv_state)
-            .with_context(|| "kt-adapter: conv1d_prefill conv_state → kt failed")?;
-        if !kiln_conv1d_kernel::supports_prefill_kt(&x_kt, &w_kt, &s_kt, kernel_size) {
+        // See update path above for the in-place semantics.
+        if !kiln_conv1d_kernel::supports_prefill_kt(x, weight, conv_state, kernel_size) {
             return Ok(None);
         }
-        let out_kt = kiln_conv1d_kernel::causal_conv1d_prefill_kt(&x_kt, &w_kt, &s_kt, kernel_size)
+        let out_kt = kiln_conv1d_kernel::causal_conv1d_prefill_kt(x, weight, conv_state, kernel_size)
             .map_err(|e| anyhow::anyhow!("kt causal_conv1d_prefill: {e}"))?;
-        let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-            .with_context(|| "kt-adapter: conv1d_prefill out → candle failed")?;
-        Ok(Some(out))
+        Ok(Some(out_kt))
     }
 }
 
@@ -2009,15 +1688,11 @@ mod tests {
     use super::*;
 
     fn test_backend() -> CudaBackend {
-        // Test mock uses a CPU candle device because the unit tests in
-        // this module only exercise the candle-typed surface; the
-        // device_kt field tracks it via the same bridge the production
-        // constructor uses. (#1082)
-        let device = candle_core::Device::Cpu;
-        let device_kt = kiln_kt_bridge::kt_device_from_candle(&device);
+        // Test mock on a CPU kt device — the unit tests in this module only
+        // exercise the kt-typed surface. (#1082 DoD-100 step 4: CudaBackend's
+        // candle `device` field was dropped; `device_kt` is the sole device.)
         CudaBackend {
-            device,
-            device_kt,
+            device_kt: kiln_tensor::Device::Cpu,
             gdn_enabled: false,
             gdn_gates_enabled: false,
             gdn_gated_rms_norm_enabled: false,
@@ -2033,8 +1708,11 @@ mod tests {
 
     #[test]
     fn cuda_resident_activation_registry_lifecycle() -> Result<()> {
+        // #1082: BackendRuntime residency hooks are kt-typed; the registry
+        // keys on the kt TensorId directly.
+        use kiln_tensor::{DType as KtDType, Tensor as KtTensor};
         let backend = test_backend();
-        let tensor = candle_core::Tensor::zeros((2, 3), candle_core::DType::F32, &candle_core::Device::Cpu)?;
+        let tensor = KtTensor::zeros_cpu(vec![2, 3], KtDType::F32);
 
         assert!(backend.supports_resident_activation());
         assert!(!backend.has_resident_activation(&tensor));
@@ -2053,11 +1731,14 @@ mod tests {
 
     #[test]
     fn cuda_optimizer_dispatch_declines_without_cuda_tensors() -> Result<()> {
+        // #1082: dispatch_{sgd,adamw}_step are kt-typed. CPU kt tensors must
+        // be declined (the kernels only service CUDA-resident tensors).
+        use kiln_tensor::{DType as KtDType, Tensor as KtTensor};
         let backend = test_backend();
-        let param = candle_core::Tensor::zeros((2, 3), candle_core::DType::F32, &candle_core::Device::Cpu)?;
-        let grad = candle_core::Tensor::ones((2, 3), candle_core::DType::F32, &candle_core::Device::Cpu)?;
-        let m = candle_core::Tensor::zeros((2, 3), candle_core::DType::F32, &candle_core::Device::Cpu)?;
-        let v = candle_core::Tensor::zeros((2, 3), candle_core::DType::F32, &candle_core::Device::Cpu)?;
+        let param = KtTensor::zeros_cpu(vec![2, 3], KtDType::F32);
+        let grad = KtTensor::ones(vec![2, 3], KtDType::F32, kiln_tensor::Device::Cpu)?;
+        let m = KtTensor::zeros_cpu(vec![2, 3], KtDType::F32);
+        let v = KtTensor::zeros_cpu(vec![2, 3], KtDType::F32);
 
         assert!(
             !backend.dispatch_sgd_step(&param, &grad, 0.01)?,
@@ -2085,25 +1766,31 @@ mod tests {
         Ok(())
     }
 
+    /// #1082: build a CUDA-resident kt tensor from host data, or skip the
+    /// test when no CUDA device is available. Returns `Ok(None)` to signal
+    /// skip (mirrors the historical `candle_core::Device::new_cuda` match).
+    fn kt_cuda_f32(values: &[f32]) -> Result<Option<kiln_tensor::Tensor>> {
+        let host = kiln_tensor::Tensor::from_slice(values, vec![values.len()])?;
+        match host.to_device(kiln_tensor::Device::Cuda(0)) {
+            Ok(t) => Ok(Some(t)),
+            Err(_) => Ok(None),
+        }
+    }
+
     #[test]
     fn cuda_sgd_step_resident_round_trip_f32() -> Result<()> {
-        let device = match candle_core::Device::new_cuda(0) {
-            Ok(device) => device,
-            Err(err) => {
-                eprintln!(
-                    "CUDA unavailable, skipping cuda_sgd_step_resident_round_trip_f32: {err}"
-                );
-                return Ok(());
-            }
+        use kiln_tensor::Device as KtDevice;
+        let backend = CudaBackend::new(kiln_tensor::Device::Cpu);
+        let Some(param) = kt_cuda_f32(&[1.0f32, -2.0, 0.5, 3.0])? else {
+            eprintln!("CUDA unavailable, skipping cuda_sgd_step_resident_round_trip_f32");
+            return Ok(());
         };
-        let backend = CudaBackend::new(device.clone());
-        let param = candle_core::Tensor::from_slice(&[1.0f32, -2.0, 0.5, 3.0], (4,), &device)?;
-        let grad = candle_core::Tensor::from_slice(&[0.1f32, -0.2, 0.5, 1.0], (4,), &device)?;
+        let grad = kt_cuda_f32(&[0.1f32, -0.2, 0.5, 1.0])?.expect("cuda grad");
         backend.register_resident_activation(&param)?;
         backend.register_resident_activation(&grad)?;
 
         assert!(backend.dispatch_sgd_step(&param, &grad, 0.25)?);
-        let actual = param.to_vec1::<f32>()?;
+        let actual = param.to_device(KtDevice::Cpu)?.to_vec1::<f32>()?;
         let expected = [0.975f32, -1.95, 0.375, 2.75];
         for (a, e) in actual.iter().zip(expected.iter()) {
             assert!(
@@ -2116,20 +1803,15 @@ mod tests {
 
     #[test]
     fn cuda_adamw_step_resident_round_trip_f32() -> Result<()> {
-        let device = match candle_core::Device::new_cuda(0) {
-            Ok(device) => device,
-            Err(err) => {
-                eprintln!(
-                    "CUDA unavailable, skipping cuda_adamw_step_resident_round_trip_f32: {err}"
-                );
-                return Ok(());
-            }
+        use kiln_tensor::Device as KtDevice;
+        let backend = CudaBackend::new(kiln_tensor::Device::Cpu);
+        let Some(param) = kt_cuda_f32(&[1.0f32, -2.0, 0.5, 3.0])? else {
+            eprintln!("CUDA unavailable, skipping cuda_adamw_step_resident_round_trip_f32");
+            return Ok(());
         };
-        let backend = CudaBackend::new(device.clone());
-        let param = candle_core::Tensor::from_slice(&[1.0f32, -2.0, 0.5, 3.0], (4,), &device)?;
-        let grad = candle_core::Tensor::from_slice(&[0.5f32, -0.5, 0.25, -0.25], (4,), &device)?;
-        let m = candle_core::Tensor::zeros((4,), candle_core::DType::F32, &device)?;
-        let v = candle_core::Tensor::zeros((4,), candle_core::DType::F32, &device)?;
+        let grad = kt_cuda_f32(&[0.5f32, -0.5, 0.25, -0.25])?.expect("cuda grad");
+        let m = kt_cuda_f32(&[0.0f32, 0.0, 0.0, 0.0])?.expect("cuda m");
+        let v = kt_cuda_f32(&[0.0f32, 0.0, 0.0, 0.0])?.expect("cuda v");
         backend.register_resident_activation(&param)?;
         backend.register_resident_activation(&grad)?;
         backend.register_resident_activation(&m)?;
@@ -2153,7 +1835,7 @@ mod tests {
             1,
         )?);
 
-        let actual = param.to_vec1::<f32>()?;
+        let actual = param.to_device(KtDevice::Cpu)?.to_vec1::<f32>()?;
         let before = [1.0f32, -2.0, 0.5, 3.0];
         let grad_vals = [0.5f32, -0.5, 0.25, -0.25];
         for ((a, p0), g) in actual.iter().zip(before.iter()).zip(grad_vals.iter()) {
@@ -2161,8 +1843,8 @@ mod tests {
             let expected = p_after_wd - lr * (*g / (g.abs() + eps));
             assert!((a - expected).abs() < 1e-5, "actual={actual:?}");
         }
-        let m_actual = m.to_vec1::<f32>()?;
-        let v_actual = v.to_vec1::<f32>()?;
+        let m_actual = m.to_device(KtDevice::Cpu)?.to_vec1::<f32>()?;
+        let v_actual = v.to_device(KtDevice::Cpu)?.to_vec1::<f32>()?;
         for ((m_i, v_i), g) in m_actual.iter().zip(v_actual.iter()).zip(grad_vals.iter()) {
             assert!((m_i - (1.0 - beta1) * g).abs() < 1e-6);
             assert!((v_i - (1.0 - beta2) * g * g).abs() < 1e-6);
@@ -2172,25 +1854,28 @@ mod tests {
 
     #[test]
     fn cuda_sgd_and_adamw_resident_round_trip_bf16() -> Result<()> {
-        let device = match candle_core::Device::new_cuda(0) {
-            Ok(device) => device,
-            Err(err) => {
-                eprintln!(
-                    "CUDA unavailable, skipping cuda_sgd_and_adamw_resident_round_trip_bf16: {err}"
-                );
-                return Ok(());
+        use kiln_tensor::{DType as KtDType, Device as KtDevice};
+        let backend = CudaBackend::new(kiln_tensor::Device::Cpu);
+
+        // Build host BF16 then move to CUDA; skip when no device.
+        let mk_bf16 = |vals: &[f32]| -> Result<Option<kiln_tensor::Tensor>> {
+            let host = kiln_tensor::Tensor::from_slice(vals, vec![vals.len()])?
+                .to_dtype(KtDType::BF16)?;
+            match host.to_device(KtDevice::Cuda(0)) {
+                Ok(t) => Ok(Some(t)),
+                Err(_) => Ok(None),
             }
         };
-        let backend = CudaBackend::new(device.clone());
 
-        let param =
-            candle_core::Tensor::from_slice(&[1.0f32, -2.0, 0.5, 3.0], (4,), &device)?.to_dtype(candle_core::DType::BF16)?;
-        let grad = candle_core::Tensor::from_slice(&[0.25f32, -0.5, 0.5, -0.25], (4,), &device)?
-            .to_dtype(candle_core::DType::BF16)?;
+        let Some(param) = mk_bf16(&[1.0f32, -2.0, 0.5, 3.0])? else {
+            eprintln!("CUDA unavailable, skipping cuda_sgd_and_adamw_resident_round_trip_bf16");
+            return Ok(());
+        };
+        let grad = mk_bf16(&[0.25f32, -0.5, 0.5, -0.25])?.expect("cuda grad");
         backend.register_resident_activation(&param)?;
         backend.register_resident_activation(&grad)?;
         assert!(backend.dispatch_sgd_step(&param, &grad, 0.5)?);
-        let sgd_actual = param.to_dtype(candle_core::DType::F32)?.to_vec1::<f32>()?;
+        let sgd_actual = param.to_device(KtDevice::Cpu)?.to_dtype(KtDType::F32)?.to_vec1::<f32>()?;
         let sgd_expected = [0.875f32, -1.75, 0.25, 3.125];
         for (a, e) in sgd_actual.iter().zip(sgd_expected.iter()) {
             assert!(
@@ -2199,12 +1884,10 @@ mod tests {
             );
         }
 
-        let adam_param =
-            candle_core::Tensor::from_slice(&[1.0f32, -2.0, 0.5, 3.0], (4,), &device)?.to_dtype(candle_core::DType::BF16)?;
-        let adam_grad = candle_core::Tensor::from_slice(&[0.5f32, -0.5, 0.25, -0.25], (4,), &device)?
-            .to_dtype(candle_core::DType::BF16)?;
-        let m = candle_core::Tensor::zeros((4,), candle_core::DType::BF16, &device)?;
-        let v = candle_core::Tensor::zeros((4,), candle_core::DType::BF16, &device)?;
+        let adam_param = mk_bf16(&[1.0f32, -2.0, 0.5, 3.0])?.expect("cuda adam_param");
+        let adam_grad = mk_bf16(&[0.5f32, -0.5, 0.25, -0.25])?.expect("cuda adam_grad");
+        let m = mk_bf16(&[0.0f32, 0.0, 0.0, 0.0])?.expect("cuda m");
+        let v = mk_bf16(&[0.0f32, 0.0, 0.0, 0.0])?.expect("cuda v");
         backend.register_resident_activation(&adam_param)?;
         backend.register_resident_activation(&adam_grad)?;
         backend.register_resident_activation(&m)?;
@@ -2221,7 +1904,7 @@ mod tests {
             0.1,
             1,
         )?);
-        let adam_actual = adam_param.to_dtype(candle_core::DType::F32)?.to_vec1::<f32>()?;
+        let adam_actual = adam_param.to_device(KtDevice::Cpu)?.to_dtype(KtDType::F32)?.to_vec1::<f32>()?;
         let before = [1.0f32, -2.0, 0.5, 3.0];
         let grad_vals = [0.5f32, -0.5, 0.25, -0.25];
         for ((a, p0), g) in adam_actual.iter().zip(before.iter()).zip(grad_vals.iter()) {
@@ -2232,35 +1915,37 @@ mod tests {
     }
 
     #[test]
-    fn cuda_flash_attention_declines_tracked_training_tensors() -> Result<()> {
+    fn cuda_flash_attention_declines_unsupported_dtype() -> Result<()> {
+        // #1082 DoD-101/102: the FlashAttention BackendRuntime methods
+        // are now kt-typed. The kt forward path is detached
+        // (track_op() is always false), so the historical
+        // candle-`Var`-tracked decline gate no longer applies. The
+        // production decline contract these methods still enforce is
+        // the dtype gate: non-BF16 inputs return Ok(None) so the
+        // caller falls back to the portable SDPA path. We exercise
+        // that with F32 kt tensors here (the CPU test backend can't
+        // dispatch the real CUDA kernel anyway).
+        use kiln_tensor::{DType as KtDType, Tensor as KtTensor};
         let backend = test_backend();
 
-        let q_base = candle_core::Tensor::zeros((1, 2, 1, 128), candle_core::DType::BF16, &candle_core::Device::Cpu)?;
-        let q_var = candle_core::Var::from_tensor(&q_base)?;
-        let q = q_var.as_tensor();
-        let k = candle_core::Tensor::zeros((1, 2, 1, 128), candle_core::DType::BF16, &candle_core::Device::Cpu)?;
-        let v = candle_core::Tensor::zeros((1, 2, 1, 128), candle_core::DType::BF16, &candle_core::Device::Cpu)?;
+        let q = KtTensor::zeros_cpu(vec![1, 2, 1, 128], KtDType::F32);
+        let k = KtTensor::zeros_cpu(vec![1, 2, 1, 128], KtDType::F32);
+        let v = KtTensor::zeros_cpu(vec![1, 2, 1, 128], KtDType::F32);
         assert!(
-            q.track_op(),
-            "test precondition: q must be autograd-tracked"
-        );
-        assert!(
-            backend.flash_attn_prefill(q, &k, &v, 1.0, true)?.is_none(),
-            "CUDA FlashAttention prefill must decline tracked tensors until it has a bwd hook"
+            backend.flash_attn_prefill(&q, &k, &v, 1.0, true)?.is_none(),
+            "CUDA FlashAttention prefill must decline non-BF16 inputs"
         );
 
-        let q_decode_base = candle_core::Tensor::zeros((1, 1, 1, 128), candle_core::DType::BF16, &candle_core::Device::Cpu)?;
-        let q_decode_var = candle_core::Var::from_tensor(&q_decode_base)?;
-        let q_decode = q_decode_var.as_tensor();
-        let k_pool = candle_core::Tensor::zeros((128, 1, 128), candle_core::DType::BF16, &candle_core::Device::Cpu)?;
-        let v_pool = candle_core::Tensor::zeros((128, 1, 128), candle_core::DType::BF16, &candle_core::Device::Cpu)?;
-        let block_table = candle_core::Tensor::zeros((1, 1), candle_core::DType::U32, &candle_core::Device::Cpu)?;
-        let seqused_k = candle_core::Tensor::zeros((1,), candle_core::DType::I32, &candle_core::Device::Cpu)?;
+        let q_decode = KtTensor::zeros_cpu(vec![1, 1, 1, 128], KtDType::F32);
+        let k_pool = KtTensor::zeros_cpu(vec![128, 1, 128], KtDType::F32);
+        let v_pool = KtTensor::zeros_cpu(vec![128, 1, 128], KtDType::F32);
+        let block_table = KtTensor::zeros_cpu(vec![1, 1], KtDType::U32);
+        let seqused_k = KtTensor::zeros_cpu(vec![1], KtDType::I64);
 
         assert!(
             backend
                 .flash_attn_paged_decode(
-                    q_decode,
+                    &q_decode,
                     &k_pool,
                     &v_pool,
                     &block_table,
@@ -2270,12 +1955,12 @@ mod tests {
                     true
                 )?
                 .is_none(),
-            "CUDA paged decode attention must decline tracked tensors"
+            "CUDA paged decode attention must decline non-BF16 inputs"
         );
         assert!(
             backend
                 .flash_attn_paged_decode_contiguous_batch_dyn_seqlen(
-                    q_decode,
+                    &q_decode,
                     &k_pool,
                     &v_pool,
                     &block_table,
@@ -2286,94 +1971,90 @@ mod tests {
                     true,
                 )?
                 .is_none(),
-            "CUDA dynamic paged decode attention must decline tracked tensors"
+            "CUDA dynamic paged decode attention must decline non-BF16 inputs"
         );
 
         Ok(())
     }
 
-    #[test]
-    fn cuda_linear_prefill_apply_matches_candle_cuda_matmul() -> Result<()> {
-        let device = match candle_core::Device::new_cuda(0) {
-            Ok(device) => device,
-            Err(err) => {
-                eprintln!(
-                    "CUDA unavailable, skipping cuda_linear_prefill_apply_matches_candle_cuda_matmul: {err}"
-                );
-                return Ok(());
-            }
-        };
-        let backend = CudaBackend::new(device.clone());
+    /// #1082: build a CUDA-resident 2-D kt tensor from host data, or
+    /// `Ok(None)` to skip when no CUDA device is present.
+    fn kt_cuda_2d(values: &[f32], shape: [usize; 2]) -> Result<Option<kiln_tensor::Tensor>> {
+        let host = kiln_tensor::Tensor::from_slice(values, vec![shape[0], shape[1]])?;
+        match host.to_device(kiln_tensor::Device::Cuda(0)) {
+            Ok(t) => Ok(Some(t)),
+            Err(_) => Ok(None),
+        }
+    }
 
-        let x = candle_core::Tensor::from_slice(&[1.0f32, -2.0, 0.5, 3.0, 4.0, -1.0], (2, 3), &device)?;
-        let w = candle_core::Tensor::from_slice(
-            &[
-                0.5f32, 1.0, -1.5, 2.0, -0.25, 0.75, 1.25, -0.5, 2.0, -1.0, 0.0, 0.5,
-            ],
-            (3, 4),
-            &device,
-        )?;
+    #[test]
+    fn cuda_linear_prefill_apply_matches_reference_matmul() -> Result<()> {
+        let backend = CudaBackend::new(kiln_tensor::Device::Cpu);
+
+        let Some(x) = kt_cuda_2d(&[1.0f32, -2.0, 0.5, 3.0, 4.0, -1.0], [2, 3])? else {
+            eprintln!("CUDA unavailable, skipping cuda_linear_prefill_apply_matches_reference_matmul");
+            return Ok(());
+        };
+        let w = kt_cuda_2d(
+            &[0.5f32, 1.0, -1.5, 2.0, -0.25, 0.75, 1.25, -0.5, 2.0, -1.0, 0.0, 0.5],
+            [3, 4],
+        )?
+        .expect("cuda w");
 
         let routed = backend
             .linear_prefill_apply(&x, &w)?
             .expect("CUDA linear_prefill_apply should accept CUDA tensors");
         let expected = x.broadcast_matmul(&w)?;
-        assert_eq!(routed.to_vec2::<f32>()?, expected.to_vec2::<f32>()?);
+        assert_eq!(
+            routed.to_device(kiln_tensor::Device::Cpu)?.to_vec2::<f32>()?,
+            expected.to_device(kiln_tensor::Device::Cpu)?.to_vec2::<f32>()?
+        );
         Ok(())
     }
 
     #[test]
-    fn cuda_linear_prefill_apply_offset_matches_candle_cuda_chunk() -> Result<()> {
-        let device = match candle_core::Device::new_cuda(0) {
-            Ok(device) => device,
-            Err(err) => {
-                eprintln!(
-                    "CUDA unavailable, skipping cuda_linear_prefill_apply_offset_matches_candle_cuda_chunk: {err}"
-                );
-                return Ok(());
-            }
-        };
-        let backend = CudaBackend::new(device.clone());
+    fn cuda_linear_prefill_apply_offset_matches_reference_chunk() -> Result<()> {
+        let backend = CudaBackend::new(kiln_tensor::Device::Cpu);
 
-        let x = candle_core::Tensor::from_slice(&[1.0f32, -2.0, 0.5, 3.0, 4.0, -1.0], (2, 3), &device)?;
-        let w = candle_core::Tensor::from_slice(
+        let Some(x) = kt_cuda_2d(&[1.0f32, -2.0, 0.5, 3.0, 4.0, -1.0], [2, 3])? else {
+            eprintln!("CUDA unavailable, skipping cuda_linear_prefill_apply_offset_matches_reference_chunk");
+            return Ok(());
+        };
+        let w = kt_cuda_2d(
             &[
                 0.5f32, 1.0, -1.5, 2.0, 3.0, -0.25, 0.75, 1.25, -0.5, 0.25, 2.0, -1.0, 0.0, 0.5,
                 -2.0,
             ],
-            (3, 5),
-            &device,
-        )?;
+            [3, 5],
+        )?
+        .expect("cuda w");
 
         let routed = backend
             .linear_prefill_apply_offset(&x, &w, 1, 3)?
             .expect("CUDA linear_prefill_apply_offset should accept CUDA tensors");
         let expected_chunk = w.narrow(1, 1, 3)?.contiguous()?;
         let expected = x.broadcast_matmul(&expected_chunk)?;
-        assert_eq!(routed.to_vec2::<f32>()?, expected.to_vec2::<f32>()?);
+        assert_eq!(
+            routed.to_device(kiln_tensor::Device::Cpu)?.to_vec2::<f32>()?,
+            expected.to_device(kiln_tensor::Device::Cpu)?.to_vec2::<f32>()?
+        );
         Ok(())
     }
 
     #[test]
-    fn cuda_registered_lora_delta_matches_candle_cuda_reference() -> Result<()> {
-        let device = match candle_core::Device::new_cuda(0) {
-            Ok(device) => device,
-            Err(err) => {
-                eprintln!(
-                    "CUDA unavailable, skipping cuda_registered_lora_delta_matches_candle_cuda_reference: {err}"
-                );
-                return Ok(());
-            }
-        };
-        let backend = CudaBackend::new(device.clone());
+    fn cuda_registered_lora_delta_matches_reference() -> Result<()> {
+        let backend = CudaBackend::new(kiln_tensor::Device::Cpu);
 
-        let x = candle_core::Tensor::from_slice(&[0.5f32, -1.0, 2.0, 1.5, 0.25, -0.75], (2, 3), &device)?;
-        let a = candle_core::Tensor::from_slice(&[0.25f32, -0.5, 1.0, 1.5, 0.0, -1.0], (2, 3), &device)?;
-        let b = candle_core::Tensor::from_slice(
+        let Some(x) = kt_cuda_2d(&[0.5f32, -1.0, 2.0, 1.5, 0.25, -0.75], [2, 3])? else {
+            eprintln!("CUDA unavailable, skipping cuda_registered_lora_delta_matches_reference");
+            return Ok(());
+        };
+        let a = kt_cuda_2d(&[0.25f32, -0.5, 1.0, 1.5, 0.0, -1.0], [2, 3])?.expect("cuda a");
+        let b = kt_cuda_2d(
             &[1.0f32, -0.25, 0.5, 0.75, -1.0, 0.25, 0.0, 1.5],
-            (4, 2),
-            &device,
-        )?;
+            [4, 2],
+        )?
+        .expect("cuda b");
         let scale = 0.5;
 
         assert!(backend.lora_delta_resident(&x, &a, &b, scale)?.is_none());
@@ -2392,7 +2073,10 @@ mod tests {
             scale,
         )?;
 
-        assert_eq!(routed.to_vec2::<f32>()?, expected.to_vec2::<f32>()?);
+        assert_eq!(
+            routed.to_device(kiln_tensor::Device::Cpu)?.to_vec2::<f32>()?,
+            expected.to_device(kiln_tensor::Device::Cpu)?.to_vec2::<f32>()?
+        );
         Ok(())
     }
 }

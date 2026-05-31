@@ -178,8 +178,9 @@ impl EvalGenerator for LiveEvalGenerator {
                                 path.display()
                             ));
                         }
+                        // #1082: LoraWeights::load is kt-native — pass the kt device directly.
                         let lora =
-                            kiln_model::lora_loader::LoraWeights::load(&path, num_layers, &device)
+                            kiln_model::lora_loader::LoraWeights::load(&path, num_layers, device)
                                 .map_err(|e| format!("loading adapter `{name}`: {e}"))?;
                         runner.write().unwrap().swap_lora(Some(lora));
                     }

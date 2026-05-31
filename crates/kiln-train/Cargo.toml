@@ -45,6 +45,17 @@ kiln-tensor = { workspace = true }
 # now resolves through this unconditional dep instead of a feature
 # enable. (#1082)
 kiln-tensor-id = { workspace = true }
+# (#1082) kt-native parameter + optimizer crates. `kiln-param` provides
+# `Parameter` (one logical param, one stable kt `TensorId`, BF16/F32
+# master + LoRA-A/B forward storage) and `kiln-optim` provides the
+# `OptimStep` trait + `AdamW` (moments keyed by `Parameter::tensor_id()`).
+# Together they replace the candle `Var` + `AdamWMoments{m,v:Var}` +
+# `OptimizerState` machinery that drove the trainer's LoRA params on the
+# candle `loss.backward()` path. The trainer now threads each
+# `Parameter`'s primary kt tensor into the kt tape forward, so backward
+# yields a grad keyed by `Parameter::tensor_id()`.
+kiln-param = { workspace = true }
+kiln-optim = { workspace = true }
 candle-core = { workspace = true }
 # `candle-nn` is dev-only now: the last production caller
 # (`build_local_teacher_fixture` log_softmax) was inlined in commit
@@ -78,11 +89,11 @@ workspace = true
 optional = true
 
 [dev-dependencies]
-# Test-only: `opd::opd_train_synthetic_validation` (cfg(test)) uses
-# `candle_nn::optim::AdamW` + `Optimizer::backward_step` to drive the
-# synthetic-data convergence check. Production code is candle_nn-free
-# (log_softmax was inlined in 35ad29e6). (#1082)
-candle-nn = { workspace = true }
+# (#1082 candle-drop) `candle-nn` dev-dep removed: its sole user
+# (`opd::opd_train_synthetic_validation`, `#[cfg(test)]`, which drove the
+# synthetic-data convergence check via `candle_nn::optim::AdamW` +
+# `Optimizer::backward_step`) was deleted along with the OPD candle grad
+# path. No `candle_nn::` reference remains in the crate.
 # Test-only: `inject_gradient_parity` (cfg(test) + #[cfg(feature = "cuda")])
 # uses `half::bf16::from_f32` to build deterministic bf16 fixtures for
 # the candle ⟷ kt-tape parity assertion (substrate landed in 9b2eda8e;

@@ -276,7 +276,12 @@ fn main() -> Result<()> {
         kiln_model::LoadModelOptions { load_mtp: false },
     )
     .context("load student weights")?;
-    let gpu_weights = GpuWeights::from_model_weights(&weights, &model_config, &device)?;
+    // #1082: kt `&Device` expected; bridge the candle CUDA device.
+    let gpu_weights = GpuWeights::from_model_weights(
+        &weights,
+        &model_config,
+        &kiln_kt_bridge::kt_device_from_candle(&device),
+    )?;
     drop(weights);
     println!("student_loaded_vram_mib={}", current_vram_mib());
 

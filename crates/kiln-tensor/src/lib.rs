@@ -43,6 +43,8 @@ mod tensor;
 mod tensor_id;
 
 #[cfg(feature = "cuda")]
+mod active_stream;
+#[cfg(feature = "cuda")]
 mod cuda_allocator;
 #[cfg(feature = "cuda")]
 mod cuda_storage;
@@ -85,6 +87,8 @@ pub use tensor::Tensor;
 pub use tensor_id::TensorId;
 
 #[cfg(feature = "cuda")]
+pub use active_stream::{active_cuda_stream, with_active_cuda_stream};
+#[cfg(feature = "cuda")]
 pub use cuda_allocator::CudaAllocator;
 #[cfg(feature = "cuda")]
 pub use cuda_storage::{
@@ -93,9 +97,11 @@ pub use cuda_storage::{
     cuda_cumsum_axis, cuda_cumprod_axis, cuda_dropout, cuda_elementwise_binary,
     cuda_index_select_axis_n, cuda_index_select_dim0, cuda_l2norm_last_axis, cuda_lerp,
     cuda_layernorm_last_axis, cuda_masked_fill, cuda_max_axis, cuda_mean_axis, cuda_mean_last_axis, cuda_min_axis,
-    cuda_rmsnorm_last_axis, cuda_rope, cuda_scalar_op, cuda_scatter_add_dim0, cuda_sum_axis,
+    cuda_rmsnorm_last_axis, cuda_rope, cuda_scalar_op, cuda_scatter_add_dim0, cuda_slice_set_dim0,
+    cuda_synchronize_default_stream, cuda_write_host_in_place, cuda_sum_axis,
     cuda_diag_build, cuda_diagonal_extract, cuda_softmax_last_axis, cuda_sum_last_axis,
-    cuda_is_finite, cuda_sum_squared_last_axis, cuda_to_host_copy, cuda_where_select,
+    cuda_is_finite, cuda_sum_squared_last_axis, cuda_to_host_copy, cuda_topk_last_axis,
+    cuda_where_select,
     cuda_zeros_ctx, host_to_cuda_copy, host_to_cuda_copy_ctx, primary_cuda_context,
     CudaStorage,
 };

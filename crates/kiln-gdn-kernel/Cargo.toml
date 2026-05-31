@@ -12,7 +12,7 @@ build = "build.rs"
 half = "2"
 # Phase 7 closeout (#1082) — kiln-tensor-typed surface is the only path.
 kiln-tensor = { workspace = true, features = ["cuda"] }
-kiln-kt-bridge = { workspace = true, features = ["cuda"] }
+kiln-kt-bridge = { path = "../kiln-kt-bridge", default-features = false, features = ["cuda"] }
 
 [build-dependencies]
 cc = "1"

@@ -356,7 +356,10 @@ fn bench_config(args: &Args) -> GrpoConfig {
 
 #[cfg(feature = "cuda")]
 struct CudaState {
-    device: candle_core::Device,
+    // (#1082) kt-native device: the flipped `TrainableLoraParams` +
+    // `GpuWeights::from_model_weights` + `backend::for_device_kt` all take a
+    // `kiln_tensor::Device`. Constructed directly as `Device::Cuda(0)` below.
+    device: kiln_tensor::Device,
     backend: Arc<dyn kiln_model::backend::BackendRuntime>,
     weights: kiln_model::forward::GpuWeights,
 }
@@ -364,21 +367,27 @@ struct CudaState {
 #[cfg(feature = "cuda")]
 fn load_cuda_state(model_path: &Path, model_config: &ModelConfig) -> Result<CudaState> {
     anyhow::ensure!(
-        candle_core::utils::cuda_is_available(),
+        kiln_tensor::cuda_is_available(),
         "CUDA is not available in this build/runtime"
     );
-    let device = candle_core::Device::new_cuda(0).context("create CUDA device 0")?;
+    // (#1082) kt-native device — `Device::Cuda(0)` mirrors the candle CUDA
+    // device-0 the example used to construct, and the flipped weight/param/
+    // backend APIs all take `&kiln_tensor::Device` directly (no bridge).
+    let device = kiln_tensor::Device::Cuda(0);
     let model_weights = kiln_model::load_model_with_options(
         model_path,
         model_config,
         kiln_model::LoadModelOptions { load_mtp: false },
     )
     .context("load model weights")?;
-    let weights =
-        kiln_model::forward::GpuWeights::from_model_weights(&model_weights, model_config, &device)
-            .context("transfer model weights to CUDA")?;
+    let weights = kiln_model::forward::GpuWeights::from_model_weights(
+        &model_weights,
+        model_config,
+        &device,
+    )
+    .context("transfer model weights to CUDA")?;
     drop(model_weights);
-    let backend = kiln_model::backend::for_device(&device);
+    let backend = kiln_model::backend::for_device_kt(&device);
     Ok(CudaState {
         device,
         backend,
@@ -395,7 +404,9 @@ fn run_cuda_record(
     group: &GrpoGroup,
 ) -> Result<(GrpoBenchmarkReport, Option<u64>)> {
     let config = bench_config(args);
-    let params = TrainableLoraParams::initialize_seeded(
+    // (#1082) `mut`: the kt-flipped GRPO step mutates each LoRA `Parameter`
+    // in place, so `grpo_benchmark_training_step` now takes `&mut params`.
+    let mut params = TrainableLoraParams::initialize_seeded(
         model_config,
         &state.weights,
         args.lora_rank,
@@ -404,8 +415,24 @@ fn run_cuda_record(
         Some(args.seed),
     )?;
     params.register_with_backend(&*state.backend)?;
+    // (#1082) `allocate_adamw_state` is kt-native now and takes the resolved
+    // AdamW hyperparameters (lr from the bench config + beta1/beta2/eps/
+    // weight_decay from the `Optimizer::AdamW` variant) plus the kt device.
+    // Mirrors `trainer::make_opt_state` / `opd.rs` field extraction.
     let mut opt_state = match config.optimizer {
-        Optimizer::AdamW { .. } => Some(params.allocate_adamw_state(&state.device)?),
+        Optimizer::AdamW {
+            beta1,
+            beta2,
+            eps,
+            weight_decay,
+        } => Some(params.allocate_adamw_state(
+            config.learning_rate,
+            beta1,
+            beta2,
+            eps,
+            weight_decay,
+            &state.device,
+        )?),
         Optimizer::Sgd => None,
     };
     if let Some(state_opt) = opt_state.as_ref() {
@@ -418,7 +445,7 @@ fn run_cuda_record(
         group,
         &state.weights,
         model_config,
-        &params,
+        &mut params,
         &config,
         segments.as_deref(),
         &state.device,
