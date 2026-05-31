@@ -258,7 +258,7 @@ impl CudaBatchedGraphKey {
 #[cfg(feature = "cuda")]
 struct CapturedDecodeGraph {
     /// The instantiated CUDA graph.
-    graph: candle_core::cuda_backend::cudarc::driver::CudaGraph,
+    graph: cudarc::driver::CudaGraph,
     /// Output logits tensor — its storage is updated in-place during replay.
     /// #1082: kt-native buffer (stable device pointer baked into the graph;
     /// the captured forward writes here via `cuda_slice_set_dim0`).
@@ -324,7 +324,7 @@ struct CapturedDecodeGraph {
 #[allow(dead_code)]
 struct CapturedBatchedDecodeGraph {
     /// The instantiated CUDA graph.
-    graph: candle_core::cuda_backend::cudarc::driver::CudaGraph,
+    graph: cudarc::driver::CudaGraph,
     /// `[batch, 1, vocab]` logits — replay writes into this storage.
     /// #1082: kt-native graph-stable buffer.
     output_logits: Tensor,
@@ -1346,7 +1346,7 @@ impl CudaGraphRunner {
         linear_state: &mut LinearAttentionState,
         lora: Option<&LoraWeights>,
     ) -> Result<Tensor> {
-        use candle_core::cuda_backend::cudarc::driver::sys::CUstreamCaptureMode_enum::CU_STREAM_CAPTURE_MODE_RELAXED;
+        use cudarc::driver::sys::CUstreamCaptureMode_enum::CU_STREAM_CAPTURE_MODE_RELAXED;
 
         // #1082: the graph-stable buffers are kt-native and allocated
         // directly on the kt device (`weights.embed_tokens.device()`),
@@ -1513,7 +1513,7 @@ impl CudaGraphRunner {
 
         // End capture — instantiates the graph
         let graph_result = stream.end_capture(
-            candle_core::cuda_backend::cudarc::driver::sys::CUgraphInstantiate_flags_enum::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
+            cudarc::driver::sys::CUgraphInstantiate_flags_enum::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
         );
 
         // Check forward pass success first
@@ -1590,7 +1590,7 @@ impl CudaGraphRunner {
         sequence_lengths: &[usize],
         lora: Option<&LoraWeights>,
     ) -> Result<Vec<u32>> {
-        use candle_core::cuda_backend::cudarc::driver::sys::CUstreamCaptureMode_enum::CU_STREAM_CAPTURE_MODE_RELAXED;
+        use cudarc::driver::sys::CUstreamCaptureMode_enum::CU_STREAM_CAPTURE_MODE_RELAXED;
 
         let batch_size = token_ids.len();
         anyhow::ensure!(
@@ -1786,7 +1786,7 @@ impl CudaGraphRunner {
             // production for over a year and the matmul output for
             // shape `[1, 1, vocab]` lands at a deterministic pool
             // address in practice.
-            let no_flags: candle_core::cuda_backend::cudarc::driver::sys::CUgraphInstantiate_flags =
+            let no_flags: cudarc::driver::sys::CUgraphInstantiate_flags =
                 unsafe { std::mem::transmute::<u32, _>(0u32) };
             let graph_result = stream.end_capture(no_flags);
 
