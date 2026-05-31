@@ -16879,35 +16879,26 @@ pub fn gqa_attention_core_prefill(
     // head-FIRST `attn_output` (BEFORE the reshape-back), with the pre-expand
     // head-first q/k_he/v_he as inputs; then chains the transpose+reshape so
     // the tape stays connected to o_proj (else it fragments at the reshape).
+    // #1082 seam flip: kt-native SDPA-fallback + transpose + reshape recorders — no
+    // kt->candle->kt at the SDPA seam (q/k/v + attn output stay kt; the downstream
+    // transpose->reshape chains kt-native to o_proj).
     #[cfg(feature = "cuda")]
-    if crate::tape_forward::tape_forward_enabled()
-        && kiln_kt_bridge::tape_bridge::bridge_scope_active()
-    {
-        let q_c = kt_logits_to_candle(&q).context("sdpa-fallback kt->candle q (tape)")?;
-        let k_c = kt_logits_to_candle(&k_he).context("sdpa-fallback kt->candle k_he (tape)")?;
-        let v_c = kt_logits_to_candle(&v_he).context("sdpa-fallback kt->candle v_he (tape)")?;
-        let ao_c =
-            kt_logits_to_candle(&attn_output).context("sdpa-fallback kt->candle attn_out (tape)")?;
-        if let Some(tape_attn) = crate::tape_forward::try_tape_sdpa_fallback_cuda(
-            &q_c, &k_c, &v_c, head_dim, &ao_c,
+    if crate::tape_forward::tape_forward_enabled() {
+        if let Some(tape_attn) = crate::tape_forward::try_tape_sdpa_fallback_kt(
+            &q, &k_he, &v_he, head_dim, &attn_output,
         )? {
-            // tape_attn is [B, nq, T, hd] on the candle tape. Chain
-            // transpose(1,2) -> reshape -> [B, T, nq*hd] so the chain reaches
-            // o_proj, then bridge the candle result back to kt.
-            let transposed = match crate::tape_forward::try_tape_transpose_cuda(&tape_attn, 1, 2)? {
+            let transposed = match crate::tape_forward::try_tape_transpose_kt(&tape_attn, 1, 2)? {
                 Some(t) => t,
                 None => tape_attn.transpose(1, 2)?.contiguous()?,
             };
             let (tb, tt, th, td) = transposed.dims4()?;
             let flat = th * td;
             if let Some(reshaped) =
-                crate::tape_forward::try_tape_reshape_cuda(&transposed, vec![tb, tt, flat])?
+                crate::tape_forward::try_tape_reshape_kt(&transposed, vec![tb, tt, flat])?
             {
-                return candle_to_kt_activation(&reshaped)
-                    .context("sdpa-fallback candle->kt tape reshaped");
+                return Ok(reshaped);
             }
-            let out = transposed.reshape((tb, tt, flat))?;
-            return candle_to_kt_activation(&out).context("sdpa-fallback candle->kt tape out");
+            return Ok(transposed.reshape((tb, tt, flat))?);
         }
     }
 
@@ -17685,40 +17676,29 @@ pub fn gqa_attention_pre_o(
     // transpose-back + reshape so the chain reaches o_proj. No-ops (returns
     // None) in every other configuration; mirrors `gqa_attention_core_prefill`.
     #[cfg(feature = "cuda")]
-    if crate::tape_forward::tape_forward_enabled()
-        && kiln_kt_bridge::tape_bridge::bridge_scope_active()
-    {
+    // #1082 seam flip: kt-native SDPA-fallback + transpose + reshape recorders.
+    if crate::tape_forward::tape_forward_enabled() {
         if let Some((q_pe, k_pe, v_pe)) = sdpa_pre_expand.as_ref() {
-            let q_c =
-                kt_logits_to_candle(q_pe).context("full-attn sdpa kt->candle q_pe (tape)")?;
-            let k_c =
-                kt_logits_to_candle(k_pe).context("full-attn sdpa kt->candle k_pe (tape)")?;
-            let v_c =
-                kt_logits_to_candle(v_pe).context("full-attn sdpa kt->candle v_pe (tape)")?;
-            let ao_c = kt_logits_to_candle(&attn_output)
-                .context("full-attn sdpa kt->candle attn_out (tape)")?;
-            if let Some(tape_attn) = crate::tape_forward::try_tape_sdpa_fallback_cuda(
-                &q_c, &k_c, &v_c, head_dim, &ao_c,
+            if let Some(tape_attn) = crate::tape_forward::try_tape_sdpa_fallback_kt(
+                q_pe, k_pe, v_pe, head_dim, &attn_output,
             )? {
                 let transposed =
-                    match crate::tape_forward::try_tape_transpose_cuda(&tape_attn, 1, 2)? {
+                    match crate::tape_forward::try_tape_transpose_kt(&tape_attn, 1, 2)? {
                         Some(t) => t,
                         None => tape_attn.transpose(1, 2)?.contiguous()?,
                     };
                 let (tb, tt, th, td) = transposed.dims4()?;
                 let flat = th * td;
-                let reshaped = match crate::tape_forward::try_tape_reshape_cuda(
+                let reshaped = match crate::tape_forward::try_tape_reshape_kt(
                     &transposed,
                     vec![tb, tt, flat],
                 )? {
                     Some(r) => r,
                     None => transposed.reshape((tb, tt, flat))?,
                 };
-                let reshaped_kt = candle_to_kt_activation(&reshaped)
-                    .context("full-attn sdpa candle->kt tape out")?;
                 let attn_output = attention_output_gate_decode_if(
                     use_metal_decode_gemv,
-                    reshaped_kt,
+                    reshaped,
                     gate.as_ref(),
                 )?;
                 return Ok(attn_output);

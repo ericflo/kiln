@@ -4336,9 +4336,10 @@ pub fn tape_sdpa_enabled() -> bool {
 /// `dk`/`dv` are GQA-collapsed to `nkv` (matching the `k`/`v` `Var` layouts).
 #[derive(Debug)]
 pub(crate) struct SdpaBackward {
-    q: Tensor,
-    k: Tensor,
-    v: Tensor,
+    // #1082: candle->kt (the bwd kernel sdpa_fallback_backward_no_grad is kt-native).
+    q: kiln_tensor::Tensor,
+    k: kiln_tensor::Tensor,
+    v: kiln_tensor::Tensor,
     scale: f64,
     causal: bool,
 }
@@ -4355,20 +4356,12 @@ impl BackwardOp for SdpaBackward {
         &self,
         grad_output: &kiln_tensor::Tensor,
     ) -> kiln_tensor::Result<Vec<Option<kiln_tensor::Tensor>>> {
-        // #1082: `sdpa_fallback_backward_no_grad` is now kt-typed. Bridge the
-        // candle-stored q/k/v to kt; the upstream grad is already kt.
-        let to_kt_in = |t: &Tensor, name: &str| -> kiln_tensor::Result<kiln_tensor::Tensor> {
-            kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(t).map_err(|e| {
-                kiln_tensor::Error::Msg(format!("SdpaBackward: {name} candle->kt: {e}"))
-            })
-        };
-        let q_kt = to_kt_in(&self.q, "q")?;
-        let k_kt = to_kt_in(&self.k, "k")?;
-        let v_kt = to_kt_in(&self.v, "v")?;
+        // #1082 kt-native: q/k/v are stored kt now (no candle bridge); the bwd
+        // kernel is already kt-typed.
         let grads = sdpa_fallback_backward_no_grad(
-            &q_kt,
-            &k_kt,
-            &v_kt,
+            &self.q,
+            &self.k,
+            &self.v,
             self.scale,
             self.causal,
             grad_output,
@@ -4418,6 +4411,75 @@ impl BackwardOp for SdpaBackward {
 /// `Ok(None)` (caller's production output unchanged) when the gate is off, no
 /// tape scope is active, the inputs aren't CUDA, shapes disagree, or a kt
 /// borrow fails.
+/// kt-native naive-SDPA fallback tape recorder (#1082 seam flip) — kt-only twin of
+/// [`try_tape_sdpa_fallback_cuda`]. Record-only: records the (now kt-native)
+/// `SdpaBackward` (stores kt q/k/v; bwd kernel already kt) linking kt `out` back to
+/// kt q/k/v. The returned kt out lets the downstream transpose+reshape stay
+/// kt-native (no kt->candle->kt at the SDPA seam).
+pub fn try_tape_sdpa_fallback_kt(
+    q: &kiln_tensor::Tensor,
+    k: &kiln_tensor::Tensor,
+    v: &kiln_tensor::Tensor,
+    head_dim: usize,
+    out: &kiln_tensor::Tensor,
+) -> Result<Option<kiln_tensor::Tensor>> {
+    if !tape_forward_enabled() || !tape_sdpa_enabled() {
+        return Ok(None);
+    }
+    if !matches!(q.device(), kiln_tensor::Device::Cuda(_))
+        || !matches!(k.device(), kiln_tensor::Device::Cuda(_))
+        || !matches!(v.device(), kiln_tensor::Device::Cuda(_))
+        || !matches!(out.device(), kiln_tensor::Device::Cuda(_))
+    {
+        return Ok(None);
+    }
+    let (bq, nq, tq, dq_) = match q.dims4() {
+        Ok(d) => d,
+        Err(_) => return Ok(None),
+    };
+    let (bk, nkv, tk, dk_) = match k.dims4() {
+        Ok(d) => d,
+        Err(_) => return Ok(None),
+    };
+    let (bv, nvh, tv, dv_) = match v.dims4() {
+        Ok(d) => d,
+        Err(_) => return Ok(None),
+    };
+    if bq != bk
+        || bq != bv
+        || nkv == 0
+        || nq % nkv != 0
+        || nvh != nkv
+        || tq != tk
+        || tq != tv
+        || dq_ != head_dim
+        || dk_ != head_dim
+        || dv_ != head_dim
+        || out.dims() != [bq, nq, tq, head_dim].as_slice()
+    {
+        return Ok(None);
+    }
+    let scale = 1.0f64 / (head_dim as f64).sqrt();
+    let causal = true;
+    let recorded = with_active_tape(|tape: &mut Tape| {
+        tape.record(
+            out,
+            &[q, k, v],
+            Box::new(SdpaBackward {
+                q: q.clone(),
+                k: k.clone(),
+                v: v.clone(),
+                scale,
+                causal,
+            }),
+        );
+    });
+    if recorded.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(out.clone()))
+}
+
 pub fn try_tape_sdpa_fallback_cuda(
     q: &Tensor,
     k: &Tensor,
@@ -4493,9 +4555,10 @@ pub fn try_tape_sdpa_fallback_cuda(
             &out_kt,
             &[&q_kt, &k_kt, &v_kt],
             Box::new(SdpaBackward {
-                q: q.clone(),
-                k: k.clone(),
-                v: v.clone(),
+                // #1082: store kt (struct fields flipped candle->kt)
+                q: q_kt.clone(),
+                k: k_kt.clone(),
+                v: v_kt.clone(),
                 scale,
                 causal,
             }),
