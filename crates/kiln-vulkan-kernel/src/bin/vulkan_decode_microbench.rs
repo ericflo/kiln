@@ -659,8 +659,6 @@ fn run_full_token_resident_mixed_batched(
         let attn_out = mk(hidden_bytes)?;
 
         let gdn_in_proj_out = mk((batch * gdn_in_proj_total * 4) as u64)?;
-        let mixed_qkv = mk((batch * QKV_DIM * 4) as u64)?;
-        let conv_qkv = mk((batch * QKV_DIM * 4) as u64)?;
         let gdn_z_buf = mk((batch * Z_DIM * 4) as u64)?;
         let gdn_a_buf = mk((batch * A_DIM * 4) as u64)?;
         let gdn_b_buf = mk((batch * B_DIM * 4) as u64)?;
@@ -875,10 +873,14 @@ fn run_full_token_resident_mixed_batched(
                         Workgroups::OneD(in_proj_workgroups),
                     )?;
                     b.record_shader(
-                        shaders::GDN_IN_PROJ_SPLIT_BATCHED,
+                        shaders::GDN_DECODE_CONV_SPLIT_BATCHED,
                         &[
                             gdn_in_proj_out.handle(),
-                            mixed_qkv.handle(),
+                            gdn_conv_w.handle(),
+                            gdn_conv_state.handle(),
+                            gdn_q_buf.handle(),
+                            gdn_k_buf.handle(),
+                            gdn_v_buf.handle(),
                             gdn_z_buf.handle(),
                             gdn_a_buf.handle(),
                             gdn_b_buf.handle(),
@@ -886,40 +888,14 @@ fn run_full_token_resident_mixed_batched(
                         &[
                             batch as u32,
                             QKV_DIM as u32,
+                            GDN_QK_DIM as u32,
+                            GDN_V_DIM as u32,
                             Z_DIM as u32,
                             A_DIM as u32,
                             B_DIM as u32,
+                            conv_kernel as u32,
                         ],
                         Workgroups::OneD((batch * gdn_in_proj_total).div_ceil(256) as u32),
-                    )?;
-                    let conv_total = batch * QKV_DIM;
-                    b.record_shader(
-                        shaders::CAUSAL_CONV1D,
-                        &[
-                            mixed_qkv.handle(),
-                            gdn_conv_w.handle(),
-                            gdn_conv_state.handle(),
-                            conv_qkv.handle(),
-                        ],
-                        &[batch as u32, QKV_DIM as u32, 1u32, conv_kernel as u32],
-                        Workgroups::OneD(conv_total.div_ceil(256) as u32),
-                    )?;
-                    b.record_shader(
-                        shaders::CAUSAL_CONV1D_STATE_ADVANCE,
-                        &[mixed_qkv.handle(), gdn_conv_state.handle()],
-                        &[batch as u32, QKV_DIM as u32, 1u32, conv_kernel as u32],
-                        Workgroups::OneD(conv_total.div_ceil(256) as u32),
-                    )?;
-                    b.record_shader(
-                        shaders::GDN_QKV_SPLIT_BATCHED,
-                        &[
-                            conv_qkv.handle(),
-                            gdn_q_buf.handle(),
-                            gdn_k_buf.handle(),
-                            gdn_v_buf.handle(),
-                        ],
-                        &[batch as u32, GDN_QK_DIM as u32, GDN_V_DIM as u32],
-                        Workgroups::OneD((batch * QKV_DIM).div_ceil(256) as u32),
                     )?;
                     let l2_eps = 1e-6f32;
                     let q_scale = 1.0f32 / (GDN_HEAD_DIM as f32).sqrt();
@@ -1047,7 +1023,7 @@ fn run_gdn_block_resident_batched(
     use kiln_vulkan_kernel::Workgroups;
 
     println!(
-        "== gdn_block_resident_batched (GDN block + MLP, 14 kernels recorded into 1 cmd-buffer + 1 submit) =="
+        "== gdn_block_resident_batched (GDN block + MLP, 11 kernels recorded into 1 cmd-buffer + 1 submit) =="
     );
 
     let conv_kernel = 4usize;
@@ -1090,8 +1066,6 @@ fn run_gdn_block_resident_batched(
         let x_buf = mk_zero(hidden_bytes)?;
         let normed_pre = mk(hidden_bytes)?;
         let in_proj_out = mk((batch * in_proj_total * 4) as u64)?;
-        let mixed_qkv = mk((batch * QKV_DIM * 4) as u64)?;
-        let conv_qkv = mk((batch * QKV_DIM * 4) as u64)?;
         let z_buf = mk((batch * Z_DIM * 4) as u64)?;
         let a_buf = mk((batch * A_DIM * 4) as u64)?;
         let b_buf = mk((batch * B_DIM * 4) as u64)?;
@@ -1141,10 +1115,14 @@ fn run_gdn_block_resident_batched(
                 Workgroups::OneD(in_proj_workgroups),
             )?;
             b.record_shader(
-                shaders::GDN_IN_PROJ_SPLIT_BATCHED,
+                shaders::GDN_DECODE_CONV_SPLIT_BATCHED,
                 &[
                     in_proj_out.handle(),
-                    mixed_qkv.handle(),
+                    conv_w.handle(),
+                    conv_state.handle(),
+                    q_buf.handle(),
+                    k_buf.handle(),
+                    v_buf.handle(),
                     z_buf.handle(),
                     a_buf.handle(),
                     b_buf.handle(),
@@ -1152,40 +1130,14 @@ fn run_gdn_block_resident_batched(
                 &[
                     batch as u32,
                     QKV_DIM as u32,
+                    GDN_QK_DIM as u32,
+                    GDN_V_DIM as u32,
                     Z_DIM as u32,
                     A_DIM as u32,
                     B_DIM as u32,
+                    conv_kernel as u32,
                 ],
                 Workgroups::OneD((batch * in_proj_total).div_ceil(256) as u32),
-            )?;
-            let conv_total = batch * QKV_DIM;
-            b.record_shader(
-                shaders::CAUSAL_CONV1D,
-                &[
-                    mixed_qkv.handle(),
-                    conv_w.handle(),
-                    conv_state.handle(),
-                    conv_qkv.handle(),
-                ],
-                &[batch as u32, QKV_DIM as u32, 1u32, conv_kernel as u32],
-                Workgroups::OneD(conv_total.div_ceil(256) as u32),
-            )?;
-            b.record_shader(
-                shaders::CAUSAL_CONV1D_STATE_ADVANCE,
-                &[mixed_qkv.handle(), conv_state.handle()],
-                &[batch as u32, QKV_DIM as u32, 1u32, conv_kernel as u32],
-                Workgroups::OneD(conv_total.div_ceil(256) as u32),
-            )?;
-            b.record_shader(
-                shaders::GDN_QKV_SPLIT_BATCHED,
-                &[
-                    conv_qkv.handle(),
-                    q_buf.handle(),
-                    k_buf.handle(),
-                    v_buf.handle(),
-                ],
-                &[batch as u32, GDN_QK_DIM as u32, GDN_V_DIM as u32],
-                Workgroups::OneD((batch * QKV_DIM).div_ceil(256) as u32),
             )?;
             let l2_eps = 1e-6f32;
             let q_scale = 1.0f32 / (GDN_HEAD_DIM as f32).sqrt();

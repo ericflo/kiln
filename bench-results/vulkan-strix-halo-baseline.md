@@ -191,10 +191,10 @@ every config"):
 
   | batch | per token | rows/s |
   |---:|---:|---:|
-  | 1 | 62.4 ms | 16 |
-  | 8 | 105.0 ms | 76 |
-  | 32 | 223.6 ms | 143 |
-  | 64 | 433.5 ms | 148 |
+  | 1 | 61.8 ms | 16 |
+  | 8 | 103.3 ms | 77 |
+  | 32 | 227.4 ms | 141 |
+  | 64 | 430.7 ms | 149 |
   | 128 | 905.9 ms | 141 |
 
   The mixed stack is now the right benchmark for resident decode tuning:
@@ -220,28 +220,31 @@ every config"):
   the Qwen3.5-4B stack.
   **Update — whole GDN resident block microbench:** added
   `vulkan_decode_microbench gdn_block_resident_batched`, a Vulkan-only
-  one-submit benchmark for a full Qwen3.5-4B GDN block plus MLP. It records 14
-  shaders into one `CommandBatch`: RMSNorm, row-reuse GDN in-proj, split,
-  conv/state advance, QKV split, Q/K L2 expansion, recurrent gate/RMSNorm, GDN
+  one-submit benchmark for a full Qwen3.5-4B GDN block plus MLP. It records 11
+  shaders into one `CommandBatch`: RMSNorm, row-reuse GDN in-proj, fused
+  conv/split/state advance, Q/K L2 expansion, recurrent gate/RMSNorm, GDN
   out-proj, residual, post norm, MLP gate/up, and fused down+residual. On RADV
   STRIX_HALO with `KILN_VK_MICROBENCH_BATCHES=1,4,8,32,64`, warmup=2, timed=5,
   repeats=2:
 
   | batch | per block | rows/s |
   |---:|---:|---:|
-  | 1 | 1.94 ms | 515 |
-  | 4 | 2.28 ms | 1,757 |
-  | 8 | 3.31 ms | 2,418 |
-  | 32 | 6.94 ms | 4,613 |
-  | 64 | 14.21 ms | 4,504 |
+  | 1 | 1.89 ms | 529 |
+  | 4 | 2.29 ms | 1,745 |
+  | 8 | 3.31 ms | 2,416 |
+  | 32 | 6.84 ms | 4,675 |
+  | 64 | 14.12 ms | 4,532 |
 
   This gives a realistic GDN-side decode saturation baseline. A follow-up
   planner change keeps batch 64 on the rows4 MLP shader path by default because
   rows8 was slower on STRIX_HALO at this size. That improved the GDN block from
-  16.80 ms / 3,809 rows/s to 14.21 ms / 4,504 rows/s at batch 64 after also
+  16.80 ms / 3,809 rows/s to 14.12 ms / 4,532 rows/s at batch 64 after also
   reducing the state-advance dispatch from one workgroup per row-channel to
-  one workgroup per 256 row-channels. The synthetic mixed full-token resident
-  batch-64 case improved from 451.8 ms / 142 rows/s to 433.5 ms / 148 rows/s.
+  one workgroup per 256 row-channels, then fusing GDN split, conv, state
+  advance, and QKV split. The synthetic mixed full-token resident batch-64 case
+  improved from 451.8 ms / 142 rows/s to 430.7 ms / 149 rows/s. A longer
+  batch-32 mixed probe with warmup=3, timed=10, repeats=3 measured
+  220.2 ms / 145 rows/s.
 - **Vulkan paged-attention decode kernel**: the kernel crate already had
   `paged_attn_decode_batch_paged.comp`; Vulkan now advertises
   `supports_flash_attn_paged_decode` and wires the single-query paged-decode

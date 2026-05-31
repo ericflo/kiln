@@ -98,6 +98,8 @@ pub mod shaders {
         shader_path!("mlp_gate_up_decode_batched_rows8_bf16w");
     pub const GDN_IN_PROJ_SPLIT: &str = shader_path!("gdn_in_proj_split");
     pub const GDN_IN_PROJ_SPLIT_BATCHED: &str = shader_path!("gdn_in_proj_split_batched");
+    pub const GDN_DECODE_CONV_SPLIT_BATCHED: &str =
+        shader_path!("gdn_decode_conv_split_batched");
     pub const GDN_QKV_SPLIT: &str = shader_path!("gdn_qkv_split");
     pub const GDN_QKV_SPLIT_BATCHED: &str = shader_path!("gdn_qkv_split_batched");
     pub const GDN_IN_PROJ_DECODE_BF16W: &str = shader_path!("gdn_in_proj_decode_bf16w");

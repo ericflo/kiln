@@ -64,6 +64,10 @@ const SHADERS: &[(&str, &str)] = &[
         "gdn_in_proj_split_batched",
         "SPIR_V_GDN_IN_PROJ_SPLIT_BATCHED",
     ),
+    (
+        "gdn_decode_conv_split_batched",
+        "SPIR_V_GDN_DECODE_CONV_SPLIT_BATCHED",
+    ),
     ("gdn_qkv_split_batched", "SPIR_V_GDN_QKV_SPLIT_BATCHED"),
     (
         "gdn_in_proj_decode_batched_pair_qkv_z_rows2_bf16w",
