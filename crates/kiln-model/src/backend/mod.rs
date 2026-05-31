@@ -684,6 +684,29 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
         Ok(None)
     }
 
+    /// Gated DeltaNet PREFILL chunkwise forward (GPU-parallel, forward-only).
+    ///
+    /// `q`,`k`: `[B, nv, T, dk]`. `v`: `[B, nv, T, dv]`. `beta`,`g`: `[B, nv, T]`.
+    /// `state`: `[B, nv, dk, dv]`, replaced in place with the post-scan state.
+    /// Returns `out: [B, nv, T, dv]` — the SAME contract + layout as the
+    /// portable `gdn_chunkwise_recurrence` CPU reference, but it runs the
+    /// per-chunk matmuls (KKT, forward-sub, state update) on the GPU in parallel
+    /// instead of as raw kt matmuls (which execute on CPU-host tensors on
+    /// Vulkan). This is the proper Vulkan prefill path; the CPU chunkwise is the
+    /// fallback. (#1082) Returns `Ok(None)` to decline (caller uses the CPU path).
+    fn gdn_chunkwise_forward(
+        &self,
+        _q: &kiln_tensor::Tensor,
+        _k: &kiln_tensor::Tensor,
+        _v: &kiln_tensor::Tensor,
+        _beta: &kiln_tensor::Tensor,
+        _g: &kiln_tensor::Tensor,
+        _state: &mut kiln_tensor::Tensor,
+        _chunk_size: usize,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        Ok(None)
+    }
+
     /// Fused GDN chunk-prep kernel (prefill outer recurrence).
     ///
     /// Collapses the 7+ candle op launches (cumsum, decay matrix, exp, masked

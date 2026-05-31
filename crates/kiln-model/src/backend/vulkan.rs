@@ -4096,6 +4096,67 @@ impl BackendRuntime for VulkanBackend {
         Ok(Some(crate::forward::candle_to_kt_activation(&out)?))
     }
 
+    fn gdn_chunkwise_forward(
+        &self,
+        q: &kiln_tensor::Tensor,
+        k: &kiln_tensor::Tensor,
+        v: &kiln_tensor::Tensor,
+        beta: &kiln_tensor::Tensor,
+        g: &kiln_tensor::Tensor,
+        state_kt: &mut kiln_tensor::Tensor,
+        chunk_size: usize,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        // Proper Vulkan GDN prefill: run the chunkwise scan on the GPU in
+        // parallel (`vk_gdn_chunkwise_forward_no_grad`) instead of the CPU
+        // chunkwise (raw kt matmuls on CPU-host tensors). F32 only on Vulkan
+        // (activations are F32). kt-native: extract f32 straight from kt
+        // storage, no candle bridge. (#1082)
+        if !self.has_vulkan() || !self.gdn_enabled {
+            return Ok(None);
+        }
+        if q.dtype() != kiln_tensor::DType::F32 || state_kt.dtype() != kiln_tensor::DType::F32 {
+            return Ok(None);
+        }
+        if std::env::var("KILN_DISABLE_VULKAN_GDN_CHUNKWISE_FORWARD").is_ok() {
+            return Ok(None);
+        }
+        let Some(vk_device) = self.vulkan_device.as_ref() else {
+            return Ok(None);
+        };
+
+        let load = |t: &kiln_tensor::Tensor| -> Result<kiln_vulkan_kernel::vk_tensor::VkTensor> {
+            let shape = t.shape().to_vec();
+            let data = t
+                .flatten_all()
+                .map_err(|e| anyhow::anyhow!("gdn_chunkwise_forward: flatten: {e}"))?
+                .to_vec1::<f32>()
+                .map_err(|e| anyhow::anyhow!("gdn_chunkwise_forward: to_vec1 f32: {e}"))?;
+            kiln_vulkan_kernel::vk_tensor::VkTensor::from_f32_slice(&data, shape, vk_device.clone())
+        };
+        let q_vk = load(q)?;
+        let k_vk = load(k)?;
+        let v_vk = load(v)?;
+        let beta_vk = load(beta)?;
+        let g_vk = load(g)?;
+        let state_shape = state_kt.shape().to_vec();
+        let mut state_vk = load(state_kt)?;
+
+        let out_vk = kiln_vulkan_kernel::vk_ops::gdn_chunkwise::vk_gdn_chunkwise_forward_no_grad(
+            &q_vk, &k_vk, &v_vk, &beta_vk, &g_vk, &mut state_vk, chunk_size,
+        )
+        .context("vk_gdn_chunkwise_forward_no_grad")?;
+
+        // Read back output + the updated state into kt (CPU-host) tensors.
+        let out_shape = out_vk.shape().to_vec();
+        let out_data = out_vk.to_vec_f32()?;
+        let out_kt = kiln_tensor::Tensor::from_vec(out_data, out_shape)
+            .map_err(|e| anyhow::anyhow!("gdn_chunkwise_forward: out from_vec: {e}"))?;
+        let new_state = state_vk.to_vec_f32()?;
+        *state_kt = kiln_tensor::Tensor::from_vec(new_state, state_shape)
+            .map_err(|e| anyhow::anyhow!("gdn_chunkwise_forward: state from_vec: {e}"))?;
+        Ok(Some(out_kt))
+    }
+
     fn gdn_chunk_prep(
         &self,
         g: &kiln_tensor::Tensor,

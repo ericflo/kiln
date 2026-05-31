@@ -12214,6 +12214,21 @@ fn gdn_chunkwise_recurrence(
         return Ok(out);
     }
 
+    // (#1082 Vulkan) Proper GPU-parallel GDN prefill. The chunkwise scan below
+    // runs its per-chunk matmuls as raw kt `.matmul()`, which on Vulkan execute
+    // on CPU-host tensors — i.e. on the CPU — and dominate prefill (~75%).
+    // `backend.gdn_chunkwise_forward` runs the SAME chunkwise scan on the GPU in
+    // parallel (`vk_gdn_chunkwise_forward_no_grad`): same gated-delta-rule math,
+    // same `[B,nv,T,dv]` output, same in-place `state` replace, so it's a
+    // drop-in for the loop below. The trait default returns `Ok(None)` on every
+    // other backend (CUDA/Metal/CPU keep their existing paths) and the Vulkan
+    // impl declines on any unsupported dtype/config, falling through here.
+    if seq_len > 1 && !any_kt_tensor_tracks_op(&[q, k, v, beta, g, state]) {
+        if let Some(out) = backend.gdn_chunkwise_forward(q, k, v, beta, g, state, chunk_size)? {
+            return Ok(out);
+        }
+    }
+
     let full_chunks = seq_len / chunk_size;
     let tail = seq_len - full_chunks * chunk_size;
 
