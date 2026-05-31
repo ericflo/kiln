@@ -3857,8 +3857,8 @@ pub(crate) struct NarrowCompositeBackward {
     length: usize,
     /// `x.shape` from the forward (the target shape for `d_x`).
     source_shape: Vec<usize>,
-    /// `x.dtype` so the zero-fill matches.
-    source_dtype: CandleDType,
+    /// `x.dtype` so the zero-fill matches. (#1082: candle->kt.)
+    source_dtype: kiln_tensor::DType,
 }
 
 impl BackwardOp for NarrowCompositeBackward {
@@ -3872,36 +3872,41 @@ impl BackwardOp for NarrowCompositeBackward {
         &self,
         grad_output: &kiln_tensor::Tensor,
     ) -> kiln_tensor::Result<Vec<Option<kiln_tensor::Tensor>>> {
-        let grad_c = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(grad_output).map_err(|e| {
-            kiln_tensor::Error::Msg(format!("NarrowCompositeBackward: grad kt->candle: {e}"))
-        })?;
-        // Cast the grad to the source dtype so d_x matches `x`'s dtype (the
-        // grad arrives in whatever dtype the recurrence / qk_norm backward
-        // produced). `pad_with_zeros` reuses the grad's device.
-        let grad_c = if grad_c.dtype() == self.source_dtype {
-            grad_c
+        // #1082 kt-native: cast the grad to the source dtype with kt ops, then
+        // the narrow adjoint = zero-pad — place the grad at [offset..offset+length]
+        // along `axis`, zeros before/after — built kt-native as
+        // `cat([zeros_left, grad, zeros_right], axis)` (kt has no pad_with_zeros).
+        // No kt->candle->kt bridge.
+        let grad = if grad_output.dtype() == self.source_dtype {
+            grad_output.clone()
         } else {
-            grad_c.to_dtype(self.source_dtype).map_err(|e| {
-                kiln_tensor::Error::Msg(format!("NarrowCompositeBackward: grad cast: {e}"))
-            })?
+            grad_output.to_dtype(self.source_dtype)?
         };
-        // Narrow adjoint = zero-pad: place the grad at [offset .. offset+length]
-        // along `axis`, zero before/after. `pad_with_zeros(axis, left, right)`
-        // does exactly this in one CUDA-safe op.
         let source_axis_len = self.source_shape[self.axis];
         let right = source_axis_len - self.offset - self.length;
-        let dx = grad_c
-            .pad_with_zeros(self.axis, self.offset, right)
-            .map_err(|e| {
-                kiln_tensor::Error::Msg(format!("NarrowCompositeBackward: pad_with_zeros: {e}"))
-            })?;
-        let dx = dx
-            .contiguous()
-            .map_err(|e| kiln_tensor::Error::Msg(format!("NarrowCompositeBackward: contig: {e}")))?;
-        let dx_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_copy(&dx).map_err(|e| {
-            kiln_tensor::Error::Msg(format!("NarrowCompositeBackward: dx candle->kt: {e}"))
-        })?;
-        Ok(vec![Some(dx_kt)])
+        let dev = grad.device();
+        let mut left_sh = self.source_shape.clone();
+        left_sh[self.axis] = self.offset;
+        let mut right_sh = self.source_shape.clone();
+        right_sh[self.axis] = right;
+        let dx = match (self.offset > 0, right > 0) {
+            (true, true) => {
+                let lz = kiln_tensor::Tensor::zeros(left_sh, self.source_dtype, &dev)?;
+                let rz = kiln_tensor::Tensor::zeros(right_sh, self.source_dtype, &dev)?;
+                kiln_tensor::Tensor::cat(&[&lz, &grad, &rz], self.axis)?
+            }
+            (true, false) => {
+                let lz = kiln_tensor::Tensor::zeros(left_sh, self.source_dtype, &dev)?;
+                kiln_tensor::Tensor::cat(&[&lz, &grad], self.axis)?
+            }
+            (false, true) => {
+                let rz = kiln_tensor::Tensor::zeros(right_sh, self.source_dtype, &dev)?;
+                kiln_tensor::Tensor::cat(&[&grad, &rz], self.axis)?
+            }
+            (false, false) => grad,
+        };
+        let dx = dx.contiguous()?;
+        Ok(vec![Some(dx)])
     }
 }
 
@@ -3916,6 +3921,57 @@ impl BackwardOp for NarrowCompositeBackward {
 /// Used on the GDN path for the QKV split (`mixed_qkv.narrow(2, ·, ·)` → q/k/v).
 /// `Ok(None)` on any gate-off / non-CUDA / shape-envelope-miss / kt-borrow
 /// failure.
+/// kt-native narrow tape recorder (#1082 seam flip) — kt-only twin of
+/// [`try_tape_narrow_cuda`]. Record-only: the forward narrow is already done by the
+/// kt non-tape path; records the (now kt-native) `NarrowCompositeBackward` linking
+/// the kt `out` back to the kt `x`. No candle round-trip.
+pub fn try_tape_narrow_kt(
+    x: &kiln_tensor::Tensor,
+    axis: usize,
+    offset: usize,
+    length: usize,
+    out: &kiln_tensor::Tensor,
+) -> Result<Option<kiln_tensor::Tensor>> {
+    if !tape_forward_enabled() {
+        return Ok(None);
+    }
+    if !matches!(x.device(), kiln_tensor::Device::Cuda(_))
+        || !matches!(out.device(), kiln_tensor::Device::Cuda(_))
+    {
+        return Ok(None);
+    }
+    let x_dims = x.dims().to_vec();
+    if axis >= x_dims.len() || offset + length > x_dims[axis] {
+        return Ok(None);
+    }
+    let out_dims = out.dims();
+    if out_dims.len() != x_dims.len() || out_dims[axis] != length {
+        return Ok(None);
+    }
+    for (d, (&od, &xd)) in out_dims.iter().zip(x_dims.iter()).enumerate() {
+        if d != axis && od != xd {
+            return Ok(None);
+        }
+    }
+    let recorded = with_active_tape(|tape: &mut Tape| {
+        tape.record(
+            out,
+            &[x],
+            Box::new(NarrowCompositeBackward {
+                axis,
+                offset,
+                length,
+                source_shape: x_dims.clone(),
+                source_dtype: x.dtype(),
+            }),
+        );
+    });
+    if recorded.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(out.clone()))
+}
+
 pub fn try_tape_narrow_cuda(
     x: &Tensor,
     axis: usize,
@@ -3965,7 +4021,8 @@ pub fn try_tape_narrow_cuda(
                 offset,
                 length,
                 source_shape: x_dims.clone(),
-                source_dtype: x.dtype(),
+                // #1082: kt dtype (struct field flipped candle->kt). x_kt mirrors x's dtype.
+                source_dtype: x_kt.dtype(),
             }),
         );
     });

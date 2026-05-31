@@ -15168,22 +15168,14 @@ fn gated_deltanet_forward_decode_if(
                     // the q/k/v become fresh-borrow islands, severing in_proj_qkv
                     // from the loss. Value-preserving. (#1082 CP-4 Increment 5)
                     let nar = src.narrow(2, offset, length)?.contiguous()?;
-                    let nar = if crate::tape_forward::tape_forward_enabled()
-                        && kiln_kt_bridge::tape_bridge::bridge_scope_active()
+                    // #1082 seam flip: kt-native NarrowCompositeBackward recorder — no kt->candle->kt.
+                    let nar = match crate::tape_forward::try_tape_narrow_kt(
+                        src, 2, offset, length, &nar,
+                    )
+                    .context("gdn qkv narrow try_tape_narrow_kt")?
                     {
-                        let src_c = kt_logits_to_candle(src)
-                            .context("gdn qkv narrow kt->candle src (tape)")?;
-                        let nar_c = kt_logits_to_candle(&nar)
-                            .context("gdn qkv narrow kt->candle nar (tape)")?;
-                        match crate::tape_forward::try_tape_narrow_cuda(
-                            &src_c, 2, offset, length, &nar_c,
-                        )? {
-                            Some(t) => candle_to_kt_activation(&t)
-                                .context("gdn qkv narrow candle->kt (tape)")?,
-                            None => nar,
-                        }
-                    } else {
-                        nar
+                        Some(t) => t,
+                        None => nar,
                     };
                     let resh = nar.reshape(shape)?;
                     // #1082 seam flip: kt-native reshape recorder — no kt->candle->kt.
