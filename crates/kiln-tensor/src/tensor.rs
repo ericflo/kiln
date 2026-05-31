@@ -608,6 +608,16 @@ impl Tensor {
         if matches!(self.device(), crate::Device::Cuda(_)) {
             return crate::cuda_storage::cuda_contiguous(self);
         }
+        #[cfg(feature = "metal")]
+        if let crate::Device::Metal(i) = self.device() {
+            // Apple Silicon UMA: gather the strided/offset view to a packed
+            // host image (`metal_to_host_copy` walks the layout), then
+            // re-upload to a fresh contiguous Shared buffer. Correctness-first
+            // — a fused on-device Metal gather kernel is a Phase-2 perf
+            // follow-up (#1082). Cheap on UMA (no PCIe hop, just memcpy).
+            let host = crate::metal_to_host_copy(self)?;
+            return crate::host_to_metal_copy(&host, i);
+        }
         if !self.device().is_cpu() {
             return Err(Error::Msg(format!(
                 "Tensor::contiguous: only CPU + CUDA contiguous is implemented; \

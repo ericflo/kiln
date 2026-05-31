@@ -165,10 +165,17 @@ pub fn dispatch1<Op: DeviceOp1 + ?Sized>(op: &Op, input: &Tensor) -> Result<Tens
     if let Some(t) = result {
         return Ok(t);
     }
-    // Fallthrough: GPU backend returned None — try CPU.
-    if !input.device().is_cpu() {
-        if let Some(t) = op.cpu_fwd(input)? {
-            return Ok(t);
+    // Fallthrough: the GPU backend has no native kernel for this op
+    // (returned None). Run the canonical CPU reference on host copies of
+    // the input, then move the result back to the input's device. This is
+    // the correctness-first path (#1082) — a host round-trip is slow but
+    // exact; hot ops override `*_fwd` with a real device kernel. On UMA
+    // (Metal) the copies are plain memcpys, no PCIe hop.
+    let dev = input.device();
+    if !dev.is_cpu() {
+        let cpu_in = input.to_device(Device::Cpu)?;
+        if let Some(t) = op.cpu_fwd(&cpu_in)? {
+            return t.to_device(dev);
         }
     }
     Err(crate::Error::Msg(format!(
@@ -200,9 +207,13 @@ pub fn dispatch2<Op: DeviceOp2 + ?Sized>(op: &Op, a: &Tensor, b: &Tensor) -> Res
     if let Some(t) = result {
         return Ok(t);
     }
-    if !a.device().is_cpu() {
-        if let Some(t) = op.cpu_fwd(a, b)? {
-            return Ok(t);
+    // Correctness-first host fallback (#1082) — see `dispatch1`.
+    let dev = a.device();
+    if !dev.is_cpu() {
+        let cpu_a = a.to_device(Device::Cpu)?;
+        let cpu_b = b.to_device(Device::Cpu)?;
+        if let Some(t) = op.cpu_fwd(&cpu_a, &cpu_b)? {
+            return t.to_device(dev);
         }
     }
     Err(crate::Error::Msg(format!(
@@ -237,9 +248,14 @@ pub fn dispatch3<Op: DeviceOp3 + ?Sized>(
     if let Some(t) = result {
         return Ok(t);
     }
-    if !a.device().is_cpu() {
-        if let Some(t) = op.cpu_fwd(a, b, c)? {
-            return Ok(t);
+    // Correctness-first host fallback (#1082) — see `dispatch1`.
+    let dev = a.device();
+    if !dev.is_cpu() {
+        let cpu_a = a.to_device(Device::Cpu)?;
+        let cpu_b = b.to_device(Device::Cpu)?;
+        let cpu_c = c.to_device(Device::Cpu)?;
+        if let Some(t) = op.cpu_fwd(&cpu_a, &cpu_b, &cpu_c)? {
+            return t.to_device(dev);
         }
     }
     Err(crate::Error::Msg(format!(

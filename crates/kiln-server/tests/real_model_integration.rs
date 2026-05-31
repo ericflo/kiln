@@ -628,9 +628,13 @@ async fn test_health_with_real_backend() {
 #[cfg(feature = "metal")]
 #[tokio::test]
 async fn test_real_model_chat_completion_metal() {
-    let Some(device) = kiln_model::backend::metal::try_new_metal() else {
+    // Availability gate (candle device handle is only used to confirm a Metal
+    // GPU exists); the runner + weights are built on the kt `Device::Metal(0)`
+    // — the candle→kt forward-flip made every backend seam kt-typed (#1082).
+    if kiln_model::backend::metal::try_new_metal().is_none() {
         return;
-    };
+    }
+    let device = Device::Metal(0);
 
     let config = tiny_config();
     let weights = tiny_weights(&config, &device);
