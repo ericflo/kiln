@@ -58,19 +58,18 @@ fn env_prefix_aware_admission() -> bool {
 }
 
 /// Decide whether multi-row decode steps should be issued one-row-at-a-time
-/// instead of as a single batched forward. The current Vulkan batched-decode
-/// path materializes per-layer state cats/narrows that cost more than running
-/// N single-row forwards through the resident-decode fast path, so rowwise is
-/// the throughput win on Vulkan today. CUDA / Metal keep batched decode by
-/// default. `KILN_BATCH_DECODE_ROWWISE` (0/1) overrides the auto choice.
+/// instead of as a single batched forward. Backends now default to true batched
+/// decode; `KILN_BATCH_DECODE_ROWWISE` (0/1) remains as an operator override
+/// for focused comparisons and emergency fallback.
 fn default_rowwise_decode(backend_name: Option<&'static str>) -> bool {
+    let _ = backend_name;
     if let Ok(raw) = std::env::var("KILN_BATCH_DECODE_ROWWISE") {
         return !matches!(
             raw.trim(),
             "0" | "false" | "FALSE" | "off" | "OFF" | "no" | "NO"
         );
     }
-    matches!(backend_name, Some("vulkan"))
+    false
 }
 
 #[derive(Debug, Clone)]
@@ -207,11 +206,9 @@ pub struct RealDecodeForward {
     prefix_cache: Arc<Mutex<RealPrefixCache>>,
     gpu_lock: GpuCoordinationLock,
     // When set, multi-row decode steps are dispatched as a loop of single-row
-    // forwards instead of one batched forward. Default-on for Vulkan because
-    // the resident-decode fast path (single-row, GPU-resident state/scratch)
-    // is dramatically faster than the legacy batched-row path that materializes
-    // per-layer cats/narrows for every step. Two concurrent playground
-    // requests measured ~0.16 tok/s aggregate batched vs ~14 tok/s rowwise.
+    // forwards instead of one batched forward. Defaults off so Vulkan reaches
+    // the native multi-row resident decode route; the env override is kept for
+    // focused comparisons and fallback.
     rowwise_decode: bool,
 }
 
@@ -460,13 +457,9 @@ impl DecodeForward for RealDecodeForward {
             );
             let runner_guard = self.runner.read().unwrap();
             let next_tokens: Vec<TokenId> = if self.rowwise_decode && row_refs.len() > 1 {
-                // Dispatch one single-row forward per active slot. On Vulkan
-                // each row then hits the resident-decode fast path
-                // (`gated_deltanet_forward_decode_resident_b1` + cached weight
-                // buffers + GPU-resident scratch), which the multi-row path
-                // does not. Even though the rows now serialize on the GPU
-                // queue, total throughput is dramatically higher because the
-                // single-row kernel is hand-tuned for decode.
+                // Operator-forced comparison/fallback path: dispatch one
+                // single-row forward per active slot instead of one batched
+                // decode step.
                 let mut tokens = Vec::with_capacity(row_refs.len());
                 for (row, params) in row_refs.iter_mut().zip(decode_params.iter()) {
                     let mut single_row: [&mut PagedBatchedDecodeState; 1] = [&mut **row];
@@ -1194,7 +1187,7 @@ mod tests {
     }
 
     #[test]
-    fn default_rowwise_decode_picks_vulkan_unless_overridden() {
+    fn default_rowwise_decode_uses_batched_decode_unless_overridden() {
         // Snapshot + restore the env var so other tests that share this
         // process see the original value.
         let prior = std::env::var("KILN_BATCH_DECODE_ROWWISE").ok();
@@ -1203,7 +1196,7 @@ mod tests {
         unsafe {
             std::env::remove_var("KILN_BATCH_DECODE_ROWWISE");
         }
-        assert!(default_rowwise_decode(Some("vulkan")));
+        assert!(!default_rowwise_decode(Some("vulkan")));
         assert!(!default_rowwise_decode(Some("cuda")));
         assert!(!default_rowwise_decode(Some("metal")));
         assert!(!default_rowwise_decode(None));
@@ -1215,6 +1208,7 @@ mod tests {
         unsafe {
             std::env::set_var("KILN_BATCH_DECODE_ROWWISE", "1");
         }
+        assert!(default_rowwise_decode(Some("vulkan")));
         assert!(default_rowwise_decode(Some("cuda")));
         assert!(default_rowwise_decode(None));
         match prior {
