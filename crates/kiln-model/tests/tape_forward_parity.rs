@@ -2361,23 +2361,29 @@ fn tape_lora_add_records_fused_node_and_emits_var_grads() {
     );
 
     // --- Tape recording assertion.
+    //
+    // #1082: the kt-native production twin `try_tape_lora_add_kt` records a
+    // 4-node decomposition — base/x reshape-to-2d (`ReshapeBackward`) framing
+    // a single fused `LoraDeltaAddBackward`, then an output reshape back to
+    // the caller's rank. The fused node is the one carrying all four inputs
+    // `[base_2d, x_2d, A, B]`; the surrounding reshapes chain its grads back
+    // to the original `base`/`x` ids. (The deleted candle adapter recorded
+    // the whole thing as one node; the kt path is shape-explicit instead —
+    // the analytic gradient checks below pin correctness either way.)
     assert_eq!(
         tape.len(),
-        1,
-        "tape-forward lora_add must record exactly one fused node \
-         (got {}). An empty tape means the adapter fell through (gate \
-         off / envelope rejected); >1 node means an over-record bug.",
+        4,
+        "kt lora_add records the reshape-framed fused chain (4 nodes); got {}",
         tape.len()
     );
-    let node = &tape.nodes()[0];
-    let out_id = node.output_id;
-    let input_ids = node.input_ids.clone();
-    assert_eq!(
-        input_ids.len(),
-        4,
-        "lora_add records exactly four inputs (base, x, A, B); got {}",
-        input_ids.len()
-    );
+    let fused = tape
+        .nodes()
+        .iter()
+        .find(|n| n.input_ids.len() == 4)
+        .expect("the fused LoraDeltaAddBackward node (4 inputs) must be present");
+    let input_ids = fused.input_ids.clone();
+    // Seed at the chain's final output (the rank-restored kt result).
+    let out_id = out_kt.id();
 
     // --- Backward walk: seed grad shaped like out (sum-loss seed).
     let seed_host = vec![1.0_f32; rows * out_features];
@@ -2565,13 +2571,13 @@ fn add_lora_delta_to_base_routes_through_tape_when_gated() {
 
     // Forward via the public LoRA helper that builds out = base_matmul +
     // delta. We bypass the base matmul by exercising the dispatch helper
-    // directly through a thin shim: call `try_tape_lora_add_cuda` inside
+    // directly through a thin shim: call `try_tape_lora_add_kt` inside
     // a tape scope. The behavioural property under test is that under
     // the dispatch helper's gate, the tape adapter wins over the CUDA
     // CustomOp3 paths — `linear_with_lora_t` itself doesn't expose that
     // ordering check, but the gate is identical to the one in
     // `add_lora_delta_to_base`. We therefore assert the gate's
-    // side-effect: a tape node was recorded.
+    // side-effect: the tape chain was recorded.
     let base_kt = kt_in(&base);
     let x_kt = kt_in(&x);
     let (res, tape) = kiln_model::tape_forward::with_thread_local_tape(|| {
@@ -2582,7 +2588,20 @@ fn add_lora_delta_to_base_routes_through_tape_when_gated() {
         .expect("dispatch-gate returned Some(out) — env + scope both on");
     let out = candle_out(&out_kt);
 
-    assert_eq!(tape.len(), 1, "dispatch gate must route through the tape adapter");
+    // #1082: kt twin records the reshape-framed fused chain (4 nodes — see
+    // `tape_lora_add_records_fused_node_and_emits_var_grads`). The gate's
+    // side-effect under test is simply that it routed through the tape
+    // (recorded the chain) rather than the non-tape CustomOp3 path.
+    assert_eq!(
+        tape.len(),
+        4,
+        "dispatch gate must route through the tape adapter (kt fused chain = 4 nodes); got {}",
+        tape.len()
+    );
+    assert!(
+        tape.nodes().iter().any(|n| n.input_ids.len() == 4),
+        "the fused LoraDeltaAddBackward node (4 inputs) must be present in the recorded chain"
+    );
     assert_eq!(out.shape().dims(), &[rows, out_features]);
     assert_eq!(out.dtype(), candle_core::DType::F32);
     assert!(out.device().is_cuda());
@@ -2946,7 +2965,7 @@ fn tape_gdn_recurrent_records_node_and_emits_5_grads() {
     let v = det_f32(&device, &[b, nv, t, dv], 0.20, 0.007);
     let beta = det_f32(&device, &[b, nv, t], 0.45, 0.004);
     let g = det_f32(&device, &[b, nv, t], -0.05, -0.006);
-    let mut state = det_f32(&device, &[b, nv, dk, dv], 0.05, 0.003);
+    let state = det_f32(&device, &[b, nv, dk, dv], 0.05, 0.003);
 
     unsafe {
         std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
