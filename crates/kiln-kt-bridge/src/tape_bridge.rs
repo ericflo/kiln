@@ -465,6 +465,73 @@ where
     })
 }
 
+/// kt-loss variant of [`with_tape_authoritative_scope`] (#1082 DoD-100 step 14
+/// keystone). Identical seeding + grad-extraction, but the `forward` closure
+/// returns a **kt** scalar loss instead of a candle one — so there is NO candle
+/// loss round-trip and NO `candle_output_kt` id-resolution: the kt loss IS the
+/// recorded tape root, seeded directly. This is the seam that lets the
+/// GRPO/OPD/cross_entropy adapters stop copying their kt scalar loss back to
+/// candle purely so this scope could resolve it.
+///
+/// The returned grad map is identical in shape/semantics to
+/// [`with_tape_authoritative_scope`]'s (keyed by the recorded input ids — the
+/// LoRA-`Parameter` deposits are `KT_PARAM_DEPOSIT_TAG`-tagged via
+/// `register_input_mapping_kt`, so callers decode them with
+/// `decode_kt_param_deposit` exactly as today). The grad DEPOSIT was already
+/// kt-native; only the LOSS crosses to kt here.
+///
+/// # Contract
+///
+/// `forward` returns `(T, kt loss)` where the kt loss MUST be a tape node
+/// recorded in this scope (e.g. the kt cross_entropy / GRPO / OPD scalar-loss
+/// adapter recorded it). The tape walk seeds `dL/dL = 1` at the loss node.
+pub fn with_tape_authoritative_scope_kt<T, F>(
+    forward: F,
+) -> Result<(T, kiln_tensor::Tensor, HashMap<usize, kiln_tensor::Tensor>), BridgeError>
+where
+    F: FnOnce() -> Result<(T, kiln_tensor::Tensor), BridgeError>,
+{
+    with_io_mapping_scope(|| {
+        let (forward_res, tape): (Result<(T, kiln_tensor::Tensor), BridgeError>, Tape) =
+            with_thread_local_tape(forward);
+        let (payload, loss_kt) = forward_res?;
+
+        // The kt loss IS the tape root — seed dL/dL = 1 directly (no candle
+        // round-trip, no `candle_output_kt` resolution).
+        let seed = kiln_tensor::ops::ones_like(&loss_kt)
+            .map_err(|e| BridgeError::new(format!("tape_bridge: ones_like(loss_kt): {e}")))?;
+        let mut seeds: HashMap<KtTensorId, kiln_tensor::Tensor> = HashMap::new();
+        seeds.insert(loss_kt.id(), seed);
+        let kt_grads = tape
+            .backward_with_seeds(seeds, |a, b| kiln_tensor::ops::add(a, b))
+            .map_err(|e| {
+                BridgeError::new(format!("tape_bridge: tape-authoritative(kt) backward walk: {e}"))
+            })?;
+
+        // Same grad-map build as the candle variant: deposit each recorded kt
+        // input grad under every mapped key (the LoRA-Parameter deposits are
+        // KT_PARAM_DEPOSIT_TAG-tagged via `register_input_mapping_kt`).
+        let input_map: Vec<(u64, usize)> = BRIDGE_SCOPE.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .map(|s| {
+                    s.kt_to_candle_input
+                        .iter()
+                        .flat_map(|(k, vs)| vs.iter().map(move |v| (*k, *v)))
+                        .collect()
+                })
+                .unwrap_or_default()
+        });
+        let mut out: HashMap<usize, kiln_tensor::Tensor> = HashMap::new();
+        for (kt_in_raw, mapped_raw) in input_map {
+            if let Some(g) = kt_grads.get(KtTensorId::from_raw(kt_in_raw)) {
+                out.insert(mapped_raw, g.clone());
+            }
+        }
+        Ok((payload, loss_kt, out))
+    })
+}
+
 /// Per-segment tape-authoritative backward for gradient checkpointing (#1082).
 ///
 /// Like [`with_tape_authoritative_scope`], but seeds the backward at an
