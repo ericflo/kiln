@@ -14993,17 +14993,13 @@ fn gated_deltanet_forward_decode_if(
                             // its SiLU onto the kt Tape. See the comment on the
                             // sibling fallback branch below.
                             #[cfg(feature = "cuda")]
-                            if crate::tape_forward::tape_forward_enabled()
-                                && kiln_kt_bridge::tape_bridge::bridge_scope_active()
-                            {
-                                let mqkv_c = kt_logits_to_candle(&mixed_qkv_ct)
-                                    .context("gdn conv1d prefill kt->candle input (tape)")?;
-                                let conv_c = kt_logits_to_candle(&weights.conv1d)
-                                    .context("gdn conv1d prefill kt->candle conv1d (tape)")?;
-                                let y_c = kt_logits_to_candle(&y)
-                                    .context("gdn conv1d prefill kt->candle y (tape)")?;
-                                let _ = crate::tape_forward::try_tape_causal_conv1d_prefill_cuda(
-                                    &mqkv_c, &conv_c, &y_c, kernel_size,
+                            // #1082 seam flip: kt-native conv1d-prefill recorder — no kt->candle->kt.
+                            if crate::tape_forward::tape_forward_enabled() {
+                                let _ = crate::tape_forward::try_tape_causal_conv1d_prefill_kt(
+                                    &mixed_qkv_ct,
+                                    &weights.conv1d,
+                                    &y,
+                                    kernel_size,
                                 )?;
                             }
                             #[cfg(feature = "cuda")]
@@ -15038,16 +15034,13 @@ fn gated_deltanet_forward_decode_if(
                     // (track_op=true -> gdn_forward_only_fastpaths=false).
                     #[cfg(feature = "cuda")]
                     if crate::tape_forward::tape_forward_enabled()
-                        && kiln_kt_bridge::tape_bridge::bridge_scope_active()
                     {
-                        let mqkv_c = kt_logits_to_candle(&mixed_qkv_ct)
-                            .context("gdn conv1d prefill kt->candle input (tape)")?;
-                        let conv_c = kt_logits_to_candle(&weights.conv1d)
-                            .context("gdn conv1d prefill kt->candle conv1d (tape)")?;
-                        let y_c = kt_logits_to_candle(&y)
-                            .context("gdn conv1d prefill kt->candle y (tape)")?;
-                        let _ = crate::tape_forward::try_tape_causal_conv1d_prefill_cuda(
-                            &mqkv_c, &conv_c, &y_c, kernel_size,
+                        // #1082 seam flip: kt-native conv1d-prefill recorder — no kt->candle->kt.
+                        let _ = crate::tape_forward::try_tape_causal_conv1d_prefill_kt(
+                            &mixed_qkv_ct,
+                            &weights.conv1d,
+                            &y,
+                            kernel_size,
                         )?;
                     }
                     #[cfg(feature = "cuda")]

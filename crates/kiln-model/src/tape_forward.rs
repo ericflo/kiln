@@ -3460,8 +3460,9 @@ pub fn try_tape_causal_conv1d_cuda(
 /// `Ok(None)` envelope guard below keeps `batch>1` off this path entirely).
 #[derive(Debug)]
 pub(crate) struct CausalConv1dPrefillInputBackward {
-    /// Saved F32 CUDA conv weight `[channels, kernel]`.
-    weight: Tensor,
+    /// Saved F32 CUDA conv weight `[channels, kernel]` (#1082: candle->kt; the
+    /// bwd kernel `causal_depthwise_conv1d_bwd_input_kt` is already kt-native).
+    weight: kiln_tensor::Tensor,
     batch: usize,
     channels: usize,
     seq_len: usize,
@@ -3473,7 +3474,7 @@ pub(crate) struct CausalConv1dPrefillInputBackward {
     /// up through the dtype-preserving conv-in transpose to in_proj_qkv's
     /// `MatmulBackward`, which then runs `cuda_matmul(grad_f32, weight_bf16)` →
     /// `dtype mismatch a=f32 b=bf16`. (#1082 CP-4)
-    input_dtype: CandleDType,
+    input_dtype: kiln_tensor::DType,
 }
 
 impl BackwardOp for CausalConv1dPrefillInputBackward {
@@ -3487,69 +3488,43 @@ impl BackwardOp for CausalConv1dPrefillInputBackward {
         &self,
         grad_output: &kiln_tensor::Tensor,
     ) -> kiln_tensor::Result<Vec<Option<kiln_tensor::Tensor>>> {
-        // Upstream grad is [B, C, T] (the conv output layout). Bridge to candle.
-        let grad_c = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(grad_output).map_err(|e| {
-            kiln_tensor::Error::Msg(format!(
-                "CausalConv1dPrefillInputBackward: grad kt->candle: {e}"
-            ))
-        })?;
-        let grad_c = if grad_c.dtype() == CandleDType::F32 {
-            grad_c
+        // #1082 kt-native: grad + the saved weight are kt; the bwd kernel
+        // (`causal_depthwise_conv1d_bwd_input_kt`) is already kt-typed — no
+        // kt->candle->kt bridge. Upstream grad is [B, C, T] (conv output layout).
+        let grad_f32 = if grad_output.dtype() == kiln_tensor::DType::F32 {
+            grad_output.clone()
         } else {
-            grad_c.to_dtype(CandleDType::F32).map_err(|e| {
-                kiln_tensor::Error::Msg(format!(
-                    "CausalConv1dPrefillInputBackward: grad to f32: {e}"
-                ))
-            })?
+            grad_output.to_dtype(kiln_tensor::DType::F32)?
         };
         // [B, C, T] -> [B, T, C] -> [B*T, C] (rows = time, channels = C).
         let rows = self.batch * self.seq_len;
-        let grad_rows = grad_c
+        let grad_rows = grad_f32
             .transpose(1, 2)
             .and_then(|t| t.contiguous())
-            .and_then(|t| t.reshape((rows, self.channels)))
-            .map_err(|e| {
-                kiln_tensor::Error::Msg(format!(
-                    "CausalConv1dPrefillInputBackward: grad [B,C,T]->[rows,C]: {e}"
-                ))
-            })?;
-        let din_rows = crate::rmsnorm_candle_shim::causal_depthwise_conv1d_f32_bwd_input(
+            .and_then(|t| t.reshape(vec![rows, self.channels]))?;
+        // weight is [channels, kernel]; the kt bwd kernel takes the kernel size.
+        let kernel = self.weight.dims()[1];
+        let din_rows = kiln_rmsnorm_kernel::causal_depthwise_conv1d_bwd_input_kt(
             &grad_rows,
             &self.weight,
+            kernel,
         )
         .map_err(|e| {
-            kiln_tensor::Error::Msg(format!(
-                "CausalConv1dPrefillInputBackward: bwd_input: {e}"
-            ))
+            kiln_tensor::Error::Msg(format!("CausalConv1dPrefillInputBackward: bwd_input: {e}"))
         })?;
         // [B*T, C] -> [B, T, C] -> [B, C, T] (back to the conv input layout).
         let din = din_rows
-            .reshape((self.batch, self.seq_len, self.channels))
+            .reshape(vec![self.batch, self.seq_len, self.channels])
             .and_then(|t| t.transpose(1, 2))
-            .and_then(|t| t.contiguous())
-            .map_err(|e| {
-                kiln_tensor::Error::Msg(format!(
-                    "CausalConv1dPrefillInputBackward: din [rows,C]->[B,C,T]: {e}"
-                ))
-            })?;
-        // Cast the F32 kernel grad back to the conv input's dtype so the
-        // grad-dtype-follows-tensor invariant holds across the F32↔BF16 conv
-        // boundary (see `input_dtype` field doc). No-op when already F32.
+            .and_then(|t| t.contiguous())?;
+        // Cast the F32 kernel grad back to the conv input's dtype (grad-dtype-
+        // follows-tensor across the F32↔BF16 conv boundary). No-op when F32.
         let din = if din.dtype() == self.input_dtype {
             din
         } else {
-            din.to_dtype(self.input_dtype).map_err(|e| {
-                kiln_tensor::Error::Msg(format!(
-                    "CausalConv1dPrefillInputBackward: din cast to input dtype: {e}"
-                ))
-            })?
+            din.to_dtype(self.input_dtype)?
         };
-        let din_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_copy(&din).map_err(|e| {
-            kiln_tensor::Error::Msg(format!(
-                "CausalConv1dPrefillInputBackward: din candle->kt: {e}"
-            ))
-        })?;
-        Ok(vec![Some(din_kt)])
+        Ok(vec![Some(din)])
     }
 }
 
@@ -3568,6 +3543,84 @@ impl BackwardOp for CausalConv1dPrefillInputBackward {
 /// `try_tape_causal_conv1d_cuda`). `Ok(None)` (caller's production output
 /// unchanged) when the gate is off, no tape scope is active, the inputs aren't
 /// CUDA, `batch != 1`, shapes disagree, or a kt borrow fails — NEVER an error.
+/// kt-native GDN prefill causal-depthwise-conv1d tape recorder (#1082 seam flip)
+/// — kt-only twin of [`try_tape_causal_conv1d_prefill_cuda`]. Record-only: builds
+/// the F32 `[channels, kernel]` weight view in kt + records the (now kt-native)
+/// `CausalConv1dPrefillInputBackward` linking kt `out` back to kt `input`. The bwd
+/// kernel (`causal_depthwise_conv1d_bwd_input_kt`) is already kt — no candle bridge.
+pub fn try_tape_causal_conv1d_prefill_kt(
+    input: &kiln_tensor::Tensor,
+    weight: &kiln_tensor::Tensor,
+    out: &kiln_tensor::Tensor,
+    kernel: usize,
+) -> Result<Option<kiln_tensor::Tensor>> {
+    if !tape_forward_enabled() || !tape_gdn_conv_enabled() {
+        return Ok(None);
+    }
+    if !matches!(input.device(), kiln_tensor::Device::Cuda(_))
+        || !matches!(out.device(), kiln_tensor::Device::Cuda(_))
+        || !matches!(weight.device(), kiln_tensor::Device::Cuda(_))
+    {
+        return Ok(None);
+    }
+    if kernel < 2 {
+        return Ok(None);
+    }
+    let (batch, channels, seq_len) = match input.dims3() {
+        Ok(d) => d,
+        Err(_) => return Ok(None),
+    };
+    if batch != 1 || out.dims() != [batch, channels, seq_len].as_slice() {
+        return Ok(None);
+    }
+    let weight_2d = match weight.rank() {
+        2 => match weight.dims2() {
+            Ok((c, k)) if c == channels && k == kernel => weight.clone(),
+            _ => return Ok(None),
+        },
+        3 => match weight.dims3() {
+            Ok((c, one, k)) if c == channels && one == 1 && k == kernel => {
+                match weight.reshape(vec![channels, kernel]) {
+                    Ok(w) => w,
+                    Err(_) => return Ok(None),
+                }
+            }
+            _ => return Ok(None),
+        },
+        _ => return Ok(None),
+    };
+    let weight_f32 = if weight_2d.dtype() == kiln_tensor::DType::F32 {
+        weight_2d
+    } else {
+        match weight_2d.to_dtype(kiln_tensor::DType::F32) {
+            Ok(w) => w,
+            Err(_) => return Ok(None),
+        }
+    };
+    let weight_f32 = match weight_f32.contiguous() {
+        Ok(w) => w,
+        Err(_) => return Ok(None),
+    };
+    let input_dtype = input.dtype();
+    let recorded = with_active_tape(|tape: &mut Tape| {
+        tape.record(
+            out,
+            &[input],
+            Box::new(CausalConv1dPrefillInputBackward {
+                weight: weight_f32.clone(),
+                batch,
+                channels,
+                seq_len,
+                input_dtype,
+            }),
+        );
+    });
+    if recorded.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(out.clone()))
+}
+
 pub fn try_tape_causal_conv1d_prefill_cuda(
     input: &Tensor,
     weight: &Tensor,
@@ -3642,16 +3695,26 @@ pub fn try_tape_causal_conv1d_prefill_cuda(
         None => return Ok(None),
     };
 
+    // #1082: the backward struct stores kt now — bridge the candle weight_f32 +
+    // map the candle input dtype to kt before recording.
+    let weight_f32_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_copy(&weight_f32) {
+        Ok(t) => t,
+        Err(_) => return Ok(None),
+    };
+    let input_dtype_kt = match kiln_kt_bridge::candle_dtype_to_kt(input.dtype()) {
+        Ok(d) => d,
+        Err(_) => return Ok(None),
+    };
     let recorded = with_active_tape(|tape: &mut Tape| {
         tape.record(
             &out_kt,
             &[&input_kt],
             Box::new(CausalConv1dPrefillInputBackward {
-                weight: weight_f32.clone(),
+                weight: weight_f32_kt.clone(),
                 batch,
                 channels,
                 seq_len,
-                input_dtype: input.dtype(),
+                input_dtype: input_dtype_kt,
             }),
         );
     });
