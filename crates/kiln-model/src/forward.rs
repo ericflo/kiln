@@ -22891,12 +22891,11 @@ fn model_forward_paged_last_token_resident_native_vk(
     // costing ~12 ms / token; baking these two dispatches into the
     // batch turns that into ~5 ms of pure GPU compute on the same
     // queue submission.
-    let final_norm_buf = vk_backend.cached_f32_weight_buffer(
-        &crate::vk_decode_resident::kt_weight_to_candle_cached(&weights.final_norm)?,
-    )?;
-    let lm_head_w_buf = vk_backend.cached_bf16_packed_weight_buffer(
-        &crate::vk_decode_resident::kt_weight_to_candle_cached(&weights.embed_tokens_t)?,
-    )?;
+    // (#1082) kt-keyed weight caches: extract bytes straight from kt storage,
+    // no full candle copy of the weight (the lm_head/embed_tokens_t is 778 MB —
+    // a per-model candle copy was pure memory waste on a unified-memory APU).
+    let final_norm_buf = vk_backend.cached_f32_weight_buffer_kt(&weights.final_norm)?;
+    let lm_head_w_buf = vk_backend.cached_bf16_packed_weight_buffer_kt(&weights.embed_tokens_t)?;
     let vocab_size = weights.embed_tokens_t.dims().last().copied().unwrap_or(0);
     if vocab_size == 0 {
         return Ok(None);
