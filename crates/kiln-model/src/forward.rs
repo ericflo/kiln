@@ -2035,28 +2035,26 @@ fn try_kt_paged_kv_read(
 
 /// Non-CUDA twin of [`try_kt_paged_kv_read`].
 ///
-/// (#1082 all-hardware) `PagedKvCacheKt::read` is a CUDA-kernel method
-/// (`cuda_index_select_dim0` gather + `cuda_fp8_dequantize_direct`) and is
-/// therefore `#[cfg(feature = "cuda")]`. The only caller of this twin is the
-/// generic CPU-paged attention fallback in
-/// [`gqa_attention_paged_with_rope_tables`], which is *never reached at
-/// runtime* on the Vulkan backend — Vulkan decode goes through the
-/// single-submit resident path (`model_forward_paged_last_token_resident_native_vk`)
-/// that keeps its KV in `kiln_vulkan_kernel::VkPagedKvCache` and only seeds
-/// from `PagedKvCacheKt::pool_tensors`. So this twin compiles (keeping
-/// `--features vulkan` green) but bails with a clear error if some future
-/// path ever does dispatch the generic fallback on a non-CUDA build.
+/// (#1082 DoD-100) `PagedKvCacheKt::read` is device-agnostic now — the
+/// contiguous fast path is a zero-copy `narrow`, the gather uses the
+/// device-agnostic `index_select` (only the index H2D is CUDA-specific), and
+/// the transpose/contiguous/unsqueeze tail is pure kt; only the FP8 dequant
+/// stays CUDA-only. So the generic CPU-paged attention fallback in
+/// [`gqa_attention_paged_with_rope_tables`] can read directly from the (kt)
+/// cache on CPU. The Vulkan backend still uses its single-submit resident path
+/// (`model_forward_paged_last_token_resident_native_vk`, KV in
+/// `VkPagedKvCache`) at runtime, so this generic fallback compiles for it but
+/// is not reached.
 #[cfg(not(feature = "cuda"))]
 fn try_kt_paged_kv_read(
-    _candle_cache: &PagedKvCache,
-    _layer_idx: usize,
-    _block_table: &BlockTable,
-    _seq_len: usize,
+    candle_cache: &PagedKvCache,
+    layer_idx: usize,
+    block_table: &BlockTable,
+    seq_len: usize,
 ) -> Result<(Tensor, Tensor)> {
-    anyhow::bail!(
-        "generic paged-KV cache read is CUDA-only; the Vulkan backend uses the \
-         resident-decode path (VkPagedKvCache), not PagedKvCacheKt::read"
-    )
+    // No kt twin cache on this (non-CUDA) call site — read directly from the
+    // kt `PagedKvCacheKt` (`PagedKvCache` is its alias post candle-drop).
+    candle_cache.read(layer_idx, block_table, seq_len)
 }
 
 /// Phase 7 opt-in: route the Vulkan `linear_prefill_apply` 2D matmul

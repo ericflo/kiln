@@ -530,7 +530,11 @@ impl PagedKvCacheKt {
     ///   candle, plus one `cuda_index_select_dim0` per pool, plus
     ///   the same transpose+contiguous+unsqueeze tail as the fast
     ///   path.
-    #[cfg(feature = "cuda")]
+    // (#1082 DoD-100) Device-agnostic: the contiguous fast path (`narrow`) and
+    // the transpose/contiguous/unsqueeze tail are pure kt ops; the gather path
+    // uses the device-agnostic `index_select` (only the index H2D is CUDA). FP8
+    // dequant is CUDA-only. Restores the CPU paged read the flip's defensive
+    // `cfg(cuda)` gate had broken.
     pub fn read(
         &self,
         layer_idx: usize,
@@ -564,32 +568,29 @@ impl PagedKvCacheKt {
                 idx_data.push(slot_u32);
             }
 
-            // Build the indices kt-Tensor: kt CPU H2D via the candle-
-            // free host_to_cuda_copy_ctx (#1082). The previous candle
-            // detour (build candle Tensor on the source device, then
-            // borrow back) read .candle_device() off the k_pool
-            // CudaStorage purely to satisfy candle's Tensor::new; the
-            // kt path collapses that into a direct device_index lift.
-            let device_index = match k_pool.device() {
-                kiln_tensor::Device::Cuda(i) => i,
-                other => {
-                    return Err(anyhow::anyhow!(
-                        "kt pkv read: k_pool must be CUDA device, got {other}"
-                    ));
-                }
-            };
+            // Build the indices on the pool's device, then gather via the
+            // device-agnostic `index_select`. (#1082 DoD-100: was a CUDA-only
+            // `host_to_cuda_copy_ctx` + `cuda_index_select_dim0`; only the index
+            // H2D is CUDA-specific now, so the gather runs on CPU too.)
             let kt_indices_cpu = kiln_tensor::Tensor::from_slice(
                 idx_data.as_slice(),
                 vec![idx_data.len()],
             )
             .map_err(|e| anyhow::anyhow!("kt pkv read: build indices cpu: {e}"))?;
-            let kt_indices =
-                kiln_tensor::host_to_cuda_copy_ctx(&kt_indices_cpu, device_index)
-                    .map_err(|e| anyhow::anyhow!("kt pkv read: H2D indices: {e}"))?;
-
-            let k = kiln_tensor::cuda_index_select_dim0(k_pool, &kt_indices)
+            let kt_indices = match k_pool.device() {
+                #[cfg(feature = "cuda")]
+                kiln_tensor::Device::Cuda(i) => {
+                    kiln_tensor::host_to_cuda_copy_ctx(&kt_indices_cpu, i)
+                        .map_err(|e| anyhow::anyhow!("kt pkv read: H2D indices: {e}"))?
+                }
+                // CPU (and any non-CUDA device): indices already co-located.
+                _ => kt_indices_cpu,
+            };
+            let k = k_pool
+                .index_select(&kt_indices, 0)
                 .map_err(|e| anyhow::anyhow!("kt pkv read: index_select k_pool: {e}"))?;
-            let v = kiln_tensor::cuda_index_select_dim0(v_pool, &kt_indices)
+            let v = v_pool
+                .index_select(&kt_indices, 0)
                 .map_err(|e| anyhow::anyhow!("kt pkv read: index_select v_pool: {e}"))?;
             (k, v)
         };
@@ -600,17 +601,29 @@ impl PagedKvCacheKt {
         // materialize through `.contiguous()` first; the dequant kernel
         // is contiguous-only.
         let (k_slice, v_slice) = if self.fp8 {
-            let k_c = k_slice
-                .contiguous()
-                .map_err(|e| anyhow::anyhow!("kt pkv fp8 read: contiguous k: {e}"))?;
-            let v_c = v_slice
-                .contiguous()
-                .map_err(|e| anyhow::anyhow!("kt pkv fp8 read: contiguous v: {e}"))?;
-            let k_deq = cuda_fp8_dequantize_direct(&k_c, self.compute_dtype)
-                .map_err(|e| anyhow::anyhow!("kt pkv fp8 read: dequantize k: {e}"))?;
-            let v_deq = cuda_fp8_dequantize_direct(&v_c, self.compute_dtype)
-                .map_err(|e| anyhow::anyhow!("kt pkv fp8 read: dequantize v: {e}"))?;
-            (k_deq, v_deq)
+            // FP8 dequant uses the CUDA E4M3 kernel; the non-CUDA path supports
+            // native BF16 paged-KV only (#1082 DoD-100).
+            #[cfg(feature = "cuda")]
+            {
+                let k_c = k_slice
+                    .contiguous()
+                    .map_err(|e| anyhow::anyhow!("kt pkv fp8 read: contiguous k: {e}"))?;
+                let v_c = v_slice
+                    .contiguous()
+                    .map_err(|e| anyhow::anyhow!("kt pkv fp8 read: contiguous v: {e}"))?;
+                let k_deq = cuda_fp8_dequantize_direct(&k_c, self.compute_dtype)
+                    .map_err(|e| anyhow::anyhow!("kt pkv fp8 read: dequantize k: {e}"))?;
+                let v_deq = cuda_fp8_dequantize_direct(&v_c, self.compute_dtype)
+                    .map_err(|e| anyhow::anyhow!("kt pkv fp8 read: dequantize v: {e}"))?;
+                (k_deq, v_deq)
+            }
+            #[cfg(not(feature = "cuda"))]
+            {
+                anyhow::bail!(
+                    "fp8 paged-KV read dequant is CUDA-only; the non-CUDA path \
+                     supports the native BF16 paged-KV read only"
+                )
+            }
         } else {
             (k_slice, v_slice)
         };
