@@ -239,6 +239,22 @@ pub fn concat(inputs: &[&Tensor], axis: usize) -> Result<Tensor> {
         }
     }
 
+    // Non-CPU host fallback (Metal, and any backend without a native
+    // concat kernel): stage every input on the host, concat there, then
+    // move the result back to the source device. Correctness-first
+    // (#1082) — a Metal blit-encoder concat is a Phase-4 perf follow-up.
+    // On UMA the staging copies are plain memcpys.
+    let src_device = inputs[0].device();
+    if !src_device.is_cpu() {
+        let cpu_inputs: Vec<Tensor> = inputs
+            .iter()
+            .map(|t| t.to_device(crate::Device::Cpu))
+            .collect::<Result<_>>()?;
+        let cpu_refs: Vec<&Tensor> = cpu_inputs.iter().collect();
+        let out = concat(&cpu_refs, axis)?;
+        return out.to_device(src_device);
+    }
+
     // Output shape: input 0's shape with axis dim = sum.
     let mut out_shape = inputs[0].shape().to_vec();
     let axis_total: usize = inputs.iter().map(|t| t.shape()[axis]).sum();

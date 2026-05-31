@@ -76,6 +76,10 @@ pub fn causal_scaled_dot_product_attention(
         crate::TensorId::next(),
     )?;
     new_shape.clear();
+    // The mask is materialized on the host; move it to the scores' device
+    // so `masked_fill` sees matching-device operands (#1082 — explicit
+    // placement, no implicit cross-device op). Zero-copy/no-op on CPU.
+    let mask_t = mask_t.to_device(scores_scaled.device())?;
     let masked = masked_fill(&scores_scaled, &mask_t, f32::NEG_INFINITY)?;
     let attn = softmax_last_dim(&masked)?;
     matmul(&attn, v)

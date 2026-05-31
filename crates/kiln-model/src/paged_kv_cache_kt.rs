@@ -182,7 +182,28 @@ impl PagedKvCacheKt {
                 .with_context(|| format!("kt paged-kv: wrap v_pool layer {_i}"))?;
                 (k, v)
             };
-            #[cfg(not(feature = "cuda"))]
+            // #1082 Metal: the paged-KV pools must live on the Metal device so
+            // the Metal paged-attention kernels read them and `slice_set` writes
+            // Metal K/V into them without a cross-device mismatch. Allocated via
+            // the kt `zeros_on(Device::Metal, ..)` UMA path.
+            #[cfg(all(not(feature = "cuda"), feature = "metal"))]
+            let (k, v) = {
+                let _ = n_elements;
+                let k = KtTensor::zeros_on(
+                    kiln_tensor::Device::Metal(device_index),
+                    shape.clone(),
+                    storage_dtype,
+                )
+                .map_err(|e| anyhow::anyhow!("kt paged-kv: alloc k_pool (metal) layer {_i}: {e}"))?;
+                let v = KtTensor::zeros_on(
+                    kiln_tensor::Device::Metal(device_index),
+                    shape.clone(),
+                    storage_dtype,
+                )
+                .map_err(|e| anyhow::anyhow!("kt paged-kv: alloc v_pool (metal) layer {_i}: {e}"))?;
+                (k, v)
+            };
+            #[cfg(all(not(feature = "cuda"), not(feature = "metal")))]
             let (k, v) = {
                 let _ = (device_index, n_elements);
                 let k = KtTensor::zeros_cpu(shape.clone(), storage_dtype);

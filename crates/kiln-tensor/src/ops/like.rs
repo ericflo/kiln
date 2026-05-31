@@ -79,7 +79,14 @@ pub fn full_like(t: &Tensor, value: f32) -> Result<Tensor> {
     let _ = Error::from_str;
     let cpu = CpuStorage::from_bytes(dtype, bytes)?;
     let storage: Storage = Arc::new(cpu);
-    Tensor::from_parts(storage, Layout::contiguous(t.shape().to_vec()), TensorId::next())
+    let cpu_t =
+        Tensor::from_parts(storage, Layout::contiguous(t.shape().to_vec()), TensorId::next())?;
+    // Honor the source device: a same-shape placeholder must live where the
+    // source tensor lives, or downstream elementwise ops hit a cross-device
+    // mismatch (#1082 — `ones_like` on a Metal weight must be Metal). CUDA is
+    // served by the fast path above; CPU is a no-op clone; Metal uploads to a
+    // Shared UMA buffer.
+    cpu_t.to_device(t.device())
 }
 
 #[cfg(test)]

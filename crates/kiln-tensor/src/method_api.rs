@@ -927,6 +927,56 @@ impl Tensor {
                     std::ptr::copy_nonoverlapping(src_ptr, dst_ptr, n_bytes);
                 }
             }
+            #[cfg(feature = "metal")]
+            Device::Metal(_) => {
+                // Apple Silicon UMA in-place dim-0 write — mirrors the CPU
+                // arm via the Shared buffers' `contents()` pointers (#1082).
+                // The paged-KV pool write + GDN resident-state row write both
+                // land here. We wait on the companion first so `src`'s pending
+                // GPU writes are visible through its UMA pointer before the
+                // host memcpy.
+                if self.dtype().is_packed() {
+                    return Err(crate::Error::Msg(
+                        "Tensor::slice_set: packed dtype not supported on Metal".to_string(),
+                    ));
+                }
+                let bpe = self.dtype().size_in_bytes();
+                let inner: usize = self.dims().iter().skip(1).product();
+                let n_bytes = src.element_count() * bpe;
+                let dst_m = self
+                    .storage()
+                    .as_any()
+                    .downcast_ref::<crate::MetalStorage>()
+                    .ok_or_else(|| {
+                        crate::Error::Msg("Tensor::slice_set: dst must be Metal storage".to_string())
+                    })?;
+                let src_m = src
+                    .storage()
+                    .as_any()
+                    .downcast_ref::<crate::MetalStorage>()
+                    .ok_or_else(|| {
+                        crate::Error::Msg("Tensor::slice_set: src must be Metal storage".to_string())
+                    })?;
+                src_m.companion()?.wait_until_completed()?;
+                let dst_byte_off = offset * inner * bpe;
+                let src_byte_off = src.layout().start_offset() * bpe;
+                let dst_len = dst_m.buffer().length() as usize;
+                let src_len = src_m.buffer().length() as usize;
+                if dst_byte_off + n_bytes > dst_len || src_byte_off + n_bytes > src_len {
+                    return Err(crate::Error::Msg(
+                        "Tensor::slice_set: byte range overflow (metal)".to_string(),
+                    ));
+                }
+                // SAFETY: both are `StorageModeShared` UMA buffers with
+                // CPU-addressable `contents()`; the byte ranges are bounds-
+                // checked above; the slice_set contract is a caller-owned,
+                // single-threaded write with no concurrent access.
+                unsafe {
+                    let dst_ptr = dst_m.buffer().contents().add(dst_byte_off);
+                    let src_ptr = (src_m.buffer().contents() as *const u8).add(src_byte_off);
+                    std::ptr::copy_nonoverlapping(src_ptr, dst_ptr, n_bytes);
+                }
+            }
             other => {
                 return Err(crate::Error::Msg(format!(
                     "Tensor::slice_set: backend {other} not supported (#1082)"
