@@ -2644,20 +2644,14 @@ fn add_lora_delta_to_base(
     // `try_tape_lora_add_cuda` (candle-typed cross-file seam); bridge the kt
     // base/x to candle once for it (CUDA copy; only reached when the kt-native
     // path above declined).
+    // CP-4 (#1082) seam flip: kt-native tape-routed LoRA add — records a
+    // `LoraDeltaAddBackward` emitting grads for proj.a/proj.b (kt-keyed on their Var
+    // ids), no kt->candle->kt round-trip.
     #[cfg(feature = "cuda")]
-    let base_candle = kt_logits_to_candle(&base).context("add_lora_delta_to_base kt->candle base")?;
-    #[cfg(feature = "cuda")]
-    let x_candle = kt_logits_to_candle(x).context("add_lora_delta_to_base kt->candle x")?;
-
-    // CP-4 (#1082): tape-routed LoRA add. With both `KILN_USE_TAPE_FORWARD`
-    // and `KILN_USE_TAPE_LORA_ADD` on AND a thread-local Tape installed,
-    // the kt-fused forward records a `LoraDeltaAddBackward` node that emits
-    // grads for `proj.a` / `proj.b` keyed on their original Var ids.
-    #[cfg(feature = "cuda")]
-    if let Some(out) =
-        crate::tape_forward::try_tape_lora_add_cuda(&base_candle, &x_candle, proj, lora_scale)?
+    if let Some(out) = crate::tape_forward::try_tape_lora_add_kt(&base, x, proj, lora_scale)
+        .context("add_lora_delta_to_base try_tape_lora_add_kt")?
     {
-        return candle_to_kt_activation(&out).context("add_lora_delta_to_base candle->kt tape out");
+        return Ok(out);
     }
     // (#1082) Deleted the dead candle-CustomOp `cuda_lora_add_training_f32` /
     // `cuda_lora_add_training_bf16` fallbacks: the kt tape's

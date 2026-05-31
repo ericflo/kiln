@@ -1554,6 +1554,158 @@ pub fn try_tape_cross_entropy_from_logits_kt(
 /// See `kiln_autograd::backwards::lora_delta_add` for the math
 /// derivation.
 #[allow(clippy::too_many_lines)]
+/// kt-native LoRA delta-add tape recorder (#1082 seam flip) — kt-only twin of
+/// [`try_tape_lora_add_cuda`]. base + x already kt at the call site, so the
+/// composite (base->2d + x->2d reshapes, LoRA delta=(x2d@Aᵀ)@Bᵀ·scale, out=base2d+delta,
+/// reshape back) runs in kt ops recording the SAME ReshapeBackward + LoraDeltaAddBackward
+/// nodes (base/x reshapes recorded so their grads chain in kt — the candle adapter relied
+/// on candle-id mappings + the bridge instead). LoRA-Var grad mapping preserved. (Reached
+/// only when the fused linear+LoRA path declines — a rare fallback.)
+pub fn try_tape_lora_add_kt(
+    base: &kiln_tensor::Tensor,
+    x: &kiln_tensor::Tensor,
+    proj: &LoraProjectionWeights,
+    lora_scale: f32,
+) -> Result<Option<kiln_tensor::Tensor>> {
+    if !tape_forward_enabled() || !tape_lora_add_enabled() {
+        return Ok(None);
+    }
+    if !matches!(base.device(), kiln_tensor::Device::Cuda(_))
+        || !matches!(x.device(), kiln_tensor::Device::Cuda(_))
+        || !matches!(proj.a.device(), kiln_tensor::Device::Cuda(_))
+        || !matches!(proj.b.device(), kiln_tensor::Device::Cuda(_))
+    {
+        return Ok(None);
+    }
+    if base.dtype() != x.dtype() {
+        return Ok(None);
+    }
+    if !matches!(
+        base.dtype(),
+        kiln_tensor::DType::BF16 | kiln_tensor::DType::F32
+    ) {
+        return Ok(None);
+    }
+    if proj.a.dtype() != base.dtype() || proj.b.dtype() != base.dtype() {
+        return Ok(None);
+    }
+    let base_dims = base.dims().to_vec();
+    let x_dims = x.dims().to_vec();
+    if base_dims.len() < 2 || x_dims.len() != base_dims.len() {
+        return Ok(None);
+    }
+    if base_dims[..base_dims.len() - 1] != x_dims[..x_dims.len() - 1] {
+        return Ok(None);
+    }
+    let out_features = *base_dims.last().unwrap();
+    let in_features = *x_dims.last().unwrap();
+    let rows: usize = base_dims[..base_dims.len() - 1].iter().product();
+    if rows == 0 {
+        return Ok(None);
+    }
+    let Ok((rank, a_in)) = proj.a.dims2() else {
+        return Ok(None);
+    };
+    let Ok((b_out, b_rank)) = proj.b.dims2() else {
+        return Ok(None);
+    };
+    if a_in != in_features || b_out != out_features || b_rank != rank {
+        return Ok(None);
+    }
+    let a_kt = proj.a.clone();
+    let b_kt = proj.b.clone();
+    if !a_kt.is_contiguous() || !b_kt.is_contiguous() {
+        return Ok(None);
+    }
+    let out_kt = match with_active_tape(|tape: &mut Tape| -> Result<_> {
+        let base_c = if base.is_contiguous() {
+            base.clone()
+        } else {
+            base.contiguous()
+                .map_err(|e| anyhow::anyhow!("kt base.contiguous: {e}"))?
+        };
+        let base_2d = base_c
+            .reshape(vec![rows, out_features])
+            .map_err(|e| anyhow::anyhow!("kt base reshape -> 2d: {e}"))?;
+        tape.record(
+            &base_2d,
+            &[base],
+            Box::new(ReshapeBackward {
+                input_shape: base.shape().to_vec(),
+            }),
+        );
+        let x_c = if x.is_contiguous() {
+            x.clone()
+        } else {
+            x.contiguous()
+                .map_err(|e| anyhow::anyhow!("kt x.contiguous: {e}"))?
+        };
+        let x_2d = x_c
+            .reshape(vec![rows, in_features])
+            .map_err(|e| anyhow::anyhow!("kt x reshape -> 2d: {e}"))?;
+        tape.record(
+            &x_2d,
+            &[x],
+            Box::new(ReshapeBackward {
+                input_shape: x.shape().to_vec(),
+            }),
+        );
+        let a_t_kt = a_kt
+            .transpose(0, 1)
+            .map_err(|e| anyhow::anyhow!("kt a.transpose: {e}"))?
+            .contiguous()
+            .map_err(|e| anyhow::anyhow!("kt a_t.contiguous: {e}"))?;
+        let h_kt = kiln_tensor::ops::matmul(&x_2d, &a_t_kt)
+            .map_err(|e| anyhow::anyhow!("kt matmul x@a_t: {e}"))?;
+        let b_t_kt = b_kt
+            .transpose(0, 1)
+            .map_err(|e| anyhow::anyhow!("kt b.transpose: {e}"))?
+            .contiguous()
+            .map_err(|e| anyhow::anyhow!("kt b_t.contiguous: {e}"))?;
+        let d_kt = kiln_tensor::ops::matmul(&h_kt, &b_t_kt)
+            .map_err(|e| anyhow::anyhow!("kt matmul h@b_t: {e}"))?;
+        let delta_kt = kiln_tensor::ops::mul_scalar(&d_kt, lora_scale)
+            .map_err(|e| anyhow::anyhow!("kt mul_scalar(scale): {e}"))?;
+        let out_2d = kiln_tensor::ops::add(&base_2d, &delta_kt)
+            .map_err(|e| anyhow::anyhow!("kt add(base, delta): {e}"))?;
+        tape.record(
+            &out_2d,
+            &[&base_2d, &x_2d, &a_kt, &b_kt],
+            Box::new(LoraDeltaAddBackward {
+                x: x_2d.clone(),
+                a: a_kt.clone(),
+                b: b_kt.clone(),
+                scale: lora_scale,
+            }),
+        );
+        let out2d_c = if out_2d.is_contiguous() {
+            out_2d.clone()
+        } else {
+            out_2d
+                .contiguous()
+                .map_err(|e| anyhow::anyhow!("kt out2d.contiguous: {e}"))?
+        };
+        let out = out2d_c
+            .reshape(base_dims.clone())
+            .map_err(|e| anyhow::anyhow!("kt out reshape -> nd: {e}"))?;
+        tape.record(
+            &out,
+            &[&out_2d],
+            Box::new(ReshapeBackward {
+                input_shape: vec![rows, out_features],
+            }),
+        );
+        Ok(out)
+    }) {
+        Some(result) => result,
+        None => return Ok(None),
+    };
+    let out_kt = out_kt.context("tape_forward::try_tape_lora_add_kt: kt-tape forward failed")?;
+    kiln_kt_bridge::tape_bridge::register_input_mapping_kt(a_kt.id(), proj.a.id());
+    kiln_kt_bridge::tape_bridge::register_input_mapping_kt(b_kt.id(), proj.b.id());
+    Ok(Some(out_kt))
+}
+
 pub fn try_tape_lora_add_cuda(
     base: &Tensor,
     x: &Tensor,
