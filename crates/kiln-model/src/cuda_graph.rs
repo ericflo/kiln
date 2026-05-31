@@ -407,11 +407,12 @@ pub struct CudaGraphRunner {
 
 impl CudaGraphRunner {
     /// Create a new graph runner. Enabled only on CUDA devices with the `cuda` feature.
-    pub fn new(device: &candle_core::Device, enabled: bool) -> Self {
-        let actually_enabled = enabled && device.is_cuda();
+    pub fn new(device: &kiln_tensor::Device, enabled: bool) -> Self {
+        let is_cuda = matches!(device, kiln_tensor::Device::Cuda(_));
+        let actually_enabled = enabled && is_cuda;
         if actually_enabled {
             tracing::info!("CUDA graphs enabled for decode");
-        } else if enabled && !device.is_cuda() {
+        } else if enabled && !is_cuda {
             tracing::debug!("CUDA graphs requested but no CUDA device, using eager decode");
         }
         Self {
@@ -475,12 +476,12 @@ impl CudaGraphRunner {
         &mut self,
         batch_size: usize,
         config: &ModelConfig,
-        device: &candle_core::Device,
+        device: &kiln_tensor::Device,
     ) -> Result<Option<&mut crate::forward::LinearAttentionState>> {
         if !self.enabled {
             return Ok(None);
         }
-        if !matches!(device, candle_core::Device::Cuda(_)) {
+        if !matches!(device, kiln_tensor::Device::Cuda(_)) {
             return Ok(None);
         }
         anyhow::ensure!(
@@ -488,14 +489,12 @@ impl CudaGraphRunner {
             "persistent batched state requires batch_size > 0"
         );
         if !self.batched_state_pool.contains_key(&batch_size) {
-            // #1082: the LinearAttentionState constructor is kt-typed;
-            // bridge the candle device held by the graph runner to kt.
-            let kt_device = kiln_kt_bridge::kt_device_from_candle(device);
+            // (#1082) kt-native — the device is already kt.
             let state =
                 crate::forward::LinearAttentionState::new_with_batch_for_inference_backend(
                     config,
                     batch_size,
-                    &kt_device,
+                    device,
                     Some("cuda"),
                 )
                 .with_context(|| {
@@ -1359,13 +1358,16 @@ impl CudaGraphRunner {
         // kt op (alloc + the captured forward) lands on it.
         let device = weights.embed_tokens.device();
         let dtype = weights.embed_tokens.dtype();
-        let candle_device = kiln_kt_bridge::candle_device_from_kt(&device)
-            .context("CUDA graph capture: bridge kt device to candle for capture stream")?;
-        let cuda_dev = match &candle_device {
-            candle_core::Device::Cuda(d) => d,
+        // (#1082) kt-native capture stream: the model + captured forward run kt
+        // ops on the kt context's default stream, so capture on THAT stream
+        // directly (was a kt->candle device bridge just to reach `cuda_stream()`).
+        let device_idx = match device {
+            kiln_tensor::Device::Cuda(i) => i,
             _ => anyhow::bail!("CUDA graphs require a CUDA device"),
         };
-        let stream = cuda_dev.cuda_stream();
+        let stream = kiln_tensor::primary_cuda_context(device_idx)
+            .context("CUDA graph capture: kt primary_cuda_context for capture stream")?
+            .default_stream();
 
         // Pre-allocate graph-stable decode tensors BEFORE capture (kt
         // buffers own a persistent device pointer that gets baked into
@@ -1606,20 +1608,18 @@ impl CudaGraphRunner {
 
         // #1082: the batched graph-stable buffers are kt-native and
         // allocated directly on the kt device — no candle alloc, no
-        // per-buffer candle->kt bridge. We still need a candle
-        // `CudaStream` for the capture-control FFI (begin/end_capture,
-        // synchronize), which only exists on the candle device handle —
-        // so bridge the kt device to candle ONCE for that.
+        // per-buffer candle->kt bridge. (#1082) The capture stream is the kt
+        // context's default stream (the one the captured kt forward runs on);
+        // capture-control FFI (begin/end_capture, synchronize) drives it directly.
         let device = weights.embed_tokens.device();
         let dtype = weights.embed_tokens.dtype();
-        let candle_device = kiln_kt_bridge::candle_device_from_kt(&device).context(
-            "batched CUDA graph capture: bridge kt device to candle for capture stream",
-        )?;
-        let cuda_dev = match &candle_device {
-            candle_core::Device::Cuda(d) => d,
+        let device_idx = match device {
+            kiln_tensor::Device::Cuda(i) => i,
             _ => anyhow::bail!("CUDA graphs require a CUDA device"),
         };
-        let stream = cuda_dev.cuda_stream();
+        let stream = kiln_tensor::primary_cuda_context(device_idx)
+            .context("batched CUDA graph capture: kt primary_cuda_context for capture stream")?
+            .default_stream();
         let adapter_gen = self.adapter_generation;
 
         // Pre-allocate every device buffer the captured graph will read
@@ -1674,7 +1674,7 @@ impl CudaGraphRunner {
         // struct is already kt-typed) — no bridges.
         let captured: CapturedBatchedDecodeGraph = {
             let persistent_state = self
-                .persistent_batched_state(batch_size, config, &candle_device)?
+                .persistent_batched_state(batch_size, config, &device)?
                 .context("persistent batched state required for capture")?;
             Self::prepare_gdn_recurrent_state_for_capture(persistent_state)?;
             let mut graph_inputs = crate::forward::BatchedPagedDecodeGraphInputs {
@@ -2356,19 +2356,19 @@ mod tests {
 
     #[test]
     fn test_new_cpu_disables_graphs() {
-        let runner = CudaGraphRunner::new(&candle_core::Device::Cpu, true);
+        let runner = CudaGraphRunner::new(&kiln_tensor::Device::Cpu, true);
         assert!(!runner.is_enabled());
     }
 
     #[test]
     fn test_new_disabled() {
-        let runner = CudaGraphRunner::new(&candle_core::Device::Cpu, false);
+        let runner = CudaGraphRunner::new(&kiln_tensor::Device::Cpu, false);
         assert!(!runner.is_enabled());
     }
 
     #[test]
     fn test_invalidate_resets_state() {
-        let mut runner = CudaGraphRunner::new(&candle_core::Device::Cpu, false);
+        let mut runner = CudaGraphRunner::new(&kiln_tensor::Device::Cpu, false);
         runner.warmup_done = true;
         #[cfg(feature = "cuda")]
         {
@@ -2383,7 +2383,7 @@ mod tests {
 
     #[test]
     fn test_multiple_invalidations_increment_generation() {
-        let mut runner = CudaGraphRunner::new(&candle_core::Device::Cpu, false);
+        let mut runner = CudaGraphRunner::new(&kiln_tensor::Device::Cpu, false);
         runner.invalidate();
         runner.invalidate();
         runner.invalidate();

@@ -1265,14 +1265,11 @@ impl ModelRunner {
     ) -> Self {
         let eos_token_ids = tokenizer.eos_token_ids();
         // (#1082) `embed_tokens.device()` is a kt `Device`. The backend
-        // dispatcher is kt-native (`for_device_kt`). `CudaGraphRunner::new`
-        // is still candle-typed; bridge only for that consumer.
+        // dispatcher is kt-native (`for_device_kt`). (#1082) `CudaGraphRunner::new`
+        // is kt-native now — no candle device bridge.
         let kt_device = weights.embed_tokens.device();
         let backend = backend::for_device_kt(&kt_device);
-        // (#1082) bridge — remove when CudaGraphRunner::new flips to kt Device.
-        let device = kiln_kt_bridge::candle_device_from_kt(&kt_device)
-            .expect("ModelRunner::new_with_options: kt->candle device bridge");
-        let cuda_graph = CudaGraphRunner::new(&device, cuda_graphs);
+        let cuda_graph = CudaGraphRunner::new(&kt_device, cuda_graphs);
         let training_caps = backend.training_capabilities();
         tracing::info!(
             backend = backend.name(),
