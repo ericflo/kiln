@@ -2222,15 +2222,16 @@ fn cuda_silu(x: &Tensor) -> Result<Tensor> {
         // `CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED` violation inside a
         // CUDA-graph capture window). Decode falls straight through to the
         // kt-native `try_kt_silu_composite` below.
-        if crate::tape_forward::tape_forward_enabled()
-            && kiln_kt_bridge::tape_bridge::bridge_scope_active()
-        {
-            let x_candle = kt_logits_to_candle(x).context("cuda_silu kt->candle for tape silu")?;
-            if let Some(out) = crate::tape_forward::try_tape_silu_cuda(&x_candle)
-                .context("cuda_silu try_tape_silu_cuda")?
+        // #1082 seam flip: kt-native SiLU tape recorder — no kt->candle->kt
+        // round-trip. Records SiluBackward directly on the active tape; chaining
+        // across any downstream candle bridge is preserved by
+        // `kt_logits_to_candle`'s retain_output_for_chaining. `Ok(None)` (tape off
+        // / no scope, i.e. decode) falls through to the kt-native composite below.
+        if crate::tape_forward::tape_forward_enabled() {
+            if let Some(out) =
+                crate::tape_forward::try_tape_silu_kt(x).context("cuda_silu try_tape_silu_kt")?
             {
-                return Ok(candle_to_kt_activation(&out)
-                    .context("cuda_silu candle->kt for tape silu out")?);
+                return Ok(out);
             }
         }
         if let Some(out) = try_kt_silu_composite(x).context("cuda_silu try_kt_silu_composite")? {
@@ -10141,19 +10142,11 @@ fn swiglu_ffn_impl_no_chunk(
                     // CP-4 Increment 6 (#1082): wire SiLU(gate) onto the kt Tape so
                     // the gate-proj LoRA Vars chain through it. No-op + candle
                     // fallback unless KILN_USE_TAPE_FORWARD + a tape scope is active.
-                    let gate = if crate::tape_forward::tape_forward_enabled()
-                        && kiln_kt_bridge::tape_bridge::bridge_scope_active()
-                    {
-                        let g_candle = kt_logits_to_candle(&gate)
-                            .context("mlp silu kt->candle gate (tape)")?;
-                        match crate::tape_forward::try_tape_silu_cuda(&g_candle)? {
-                            Some(t) => candle_to_kt_activation(&t)
-                                .context("mlp silu candle->kt tape out")?,
-                            None => cuda_silu(&gate)?,
-                        }
-                    } else {
-                        cuda_silu(&gate)?
-                    };
+                    // #1082 seam flip: cuda_silu now records the kt-native
+                    // SiluBackward on the active tape internally (no kt->candle->kt
+                    // round-trip), so call it directly — the explicit candle-bridge
+                    // tape wiring here is subsumed.
+                    let gate = cuda_silu(&gate)?;
                     finish_mlp_stage_profile(
                         profile_device,
                         profile_context,
@@ -15103,19 +15096,9 @@ fn gated_deltanet_forward_decode_if(
                             }
                             #[cfg(feature = "cuda")]
                             {
-                                if crate::tape_forward::tape_forward_enabled()
-                                    && kiln_kt_bridge::tape_bridge::bridge_scope_active()
-                                {
-                                    let y_c = kt_logits_to_candle(&y)
-                                        .context("gdn conv1d silu kt->candle y (tape)")?;
-                                    match crate::tape_forward::try_tape_silu_cuda(&y_c)? {
-                                        Some(t) => candle_to_kt_activation(&t)
-                                            .context("gdn conv1d silu candle->kt (tape)")?,
-                                        None => cuda_silu(&y)?,
-                                    }
-                                } else {
-                                    cuda_silu(&y)?
-                                }
+                                // #1082 seam flip: cuda_silu records the kt-native
+                                // SiluBackward on the active tape internally.
+                                cuda_silu(&y)?
                             }
                             #[cfg(not(feature = "cuda"))]
                             {
@@ -15157,19 +15140,9 @@ fn gated_deltanet_forward_decode_if(
                     }
                     #[cfg(feature = "cuda")]
                     {
-                        if crate::tape_forward::tape_forward_enabled()
-                            && kiln_kt_bridge::tape_bridge::bridge_scope_active()
-                        {
-                            let y_c = kt_logits_to_candle(&y)
-                                .context("gdn conv1d silu kt->candle y (tape)")?;
-                            match crate::tape_forward::try_tape_silu_cuda(&y_c)? {
-                                Some(t) => candle_to_kt_activation(&t)
-                                    .context("gdn conv1d silu candle->kt (tape)")?,
-                                None => cuda_silu(&y)?,
-                            }
-                        } else {
-                            cuda_silu(&y)?
-                        }
+                        // #1082 seam flip: cuda_silu records the kt-native
+                        // SiluBackward on the active tape internally.
+                        cuda_silu(&y)?
                     }
                     #[cfg(not(feature = "cuda"))]
                     {

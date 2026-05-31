@@ -378,6 +378,33 @@ pub fn try_tape_silu_cuda(x: &Tensor) -> Result<Option<Tensor>> {
     Ok(Some(out))
 }
 
+/// kt-native SiLU tape recorder (#1082 seam flip) — the kt-only twin of
+/// [`try_tape_silu_cuda`]. Takes the kt activation directly and records a
+/// `SiluBackward` onto the active tape with **no candle round-trip** (no
+/// `kt_logits_to_candle` in, no `kt_tensor_to_candle_cuda_copy` out, no IO-map
+/// bookkeeping). Bottoms out in the same `kiln_tensor::ops::silu` +
+/// `SiluBackward` as the candle adapter, so forward + backward are bit-identical
+/// (guarded by `tape_forward_parity` + the SFT FD test). Chaining is preserved:
+/// the returned kt is a recorded tape-node output, so a downstream candle bridge
+/// re-registers it via `kt_logits_to_candle`'s `retain_output_for_chaining`, and
+/// a downstream kt-native op consumes it directly.
+///
+/// `Ok(None)` when tape-forward is off or no tape scope is active (decode /
+/// inference) — the caller falls through to the kt-native non-tape forward.
+pub fn try_tape_silu_kt(x: &kiln_tensor::Tensor) -> Result<Option<kiln_tensor::Tensor>> {
+    if !tape_forward_enabled() {
+        return Ok(None);
+    }
+    match with_active_tape(|tape: &mut Tape| -> Result<_> {
+        let y = kiln_tensor::ops::silu(x).map_err(|e| anyhow::anyhow!("kt silu: {e}"))?;
+        tape.record(&y, &[x], Box::new(SiluBackward { x: x.clone() }));
+        Ok(y)
+    }) {
+        Some(result) => Ok(Some(result?)),
+        None => Ok(None),
+    }
+}
+
 /// Attempt to run an embedding lookup through the kt-typed op registry
 /// (`kiln_tensor::ops::embedding`) and record an `EmbeddingBackward`
 /// node on the active thread-local tape.
