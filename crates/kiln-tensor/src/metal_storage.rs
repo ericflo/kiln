@@ -656,7 +656,7 @@ pub fn metal_to_host_copy(t: &crate::Tensor) -> Result<crate::Tensor> {
 ///
 /// # Implementation
 ///
-/// Calls directly into `candle_metal_kernels::call_last_softmax` (the
+/// Kiln-owned MSL (`metal_kernels`), replacing `candle_metal_kernels::call_last_softmax` (the
 /// production MSL `softmax_<dt>` kernel). Output buffer is allocated
 /// via metal-rs `Device::new_buffer` in `StorageModeShared` (Apple
 /// Silicon UMA — host and GPU share physical memory). The `MetalDevice`
@@ -681,10 +681,10 @@ pub fn metal_softmax_last_axis(x: &crate::Tensor) -> Result<crate::Tensor> {
 
     // ---- Validate kt-side preconditions ----
     let dtype = x.dtype();
-    let (dtype_size, kernel_name): (usize, &'static str) = match dtype {
-        DType::F32 => (4, "softmax_f32"),
-        DType::BF16 => (2, "softmax_bf16"),
-        DType::F16 => (2, "softmax_f16"),
+    let dtype_size: usize = match dtype {
+        DType::F32 => 4,
+        DType::BF16 => 2,
+        DType::F16 => 2,
         other => {
             return Err(Error::Msg(format!(
                 "metal_softmax_last_axis: unsupported dtype {other}"
@@ -732,33 +732,17 @@ pub fn metal_softmax_last_axis(x: &crate::Tensor) -> Result<crate::Tensor> {
         })?;
     let out_buffer_arc: Arc<MetalBuffer> = Arc::new(out_buffer);
 
-    let encoder = companion.command_encoder().map_err(|e| {
-        Error::Msg(format!(
-            "metal_softmax_last_axis: command_encoder() failed: {e:?}"
-        ))
-    })?;
-    encoder.set_label("kt_metal_softmax_last_axis");
-
-    // Direct `call_last_softmax` dispatch — the same MSL kernel
-    // candle_nn::ops::softmax_last_dim resolves internally. Drops the
-    // CandleTensor / CandleMetalStorage / candle_nn bridge (#1082).
-    candle_metal_kernels::call_last_softmax(
-        raw_device,
-        &encoder,
-        companion.kernels(),
-        kernel_name,
-        element_count,
-        last_dim,
+    // Kiln-owned MSL softmax (replaces candle's call_last_softmax) — faithful
+    // port of reduce.metal `softmax_<dt>`. One threadgroup per last-axis row.
+    let rows = element_count / last_dim;
+    crate::metal_kernels::softmax_last_axis(
+        &companion,
         kt_metal.buffer().as_ref(),
-        0,
         out_buffer_arc.as_ref(),
-    )
-    .map_err(|e| {
-        Error::Msg(format!(
-            "metal_softmax_last_axis: call_last_softmax failed: {e:?}"
-        ))
-    })?;
-    drop(encoder);
+        dtype,
+        rows,
+        last_dim,
+    )?;
 
     let out_storage = MetalStorage::from_buffer_kt(
         raw_device,
@@ -1174,7 +1158,7 @@ pub fn metal_sdpa_last_axis(
 ///
 /// # Implementation
 ///
-/// Calls directly into `candle_metal_kernels::call_rms_norm` (the
+/// Kiln-owned MSL (`metal_kernels`), replacing `candle_metal_kernels::call_rms_norm` (the
 /// production MSL `rmsnorm_<dt>` kernel). Output buffer is allocated
 /// via metal-rs `Device::new_buffer` in `StorageModeShared`. The
 /// `MetalDevice` wrapper is held only for command-queue affinity; no
@@ -1200,10 +1184,10 @@ pub fn metal_rmsnorm_last_axis(
     use candle_metal_kernels::metal::MTLResourceOptions;
 
     let dtype = x.dtype();
-    let (dtype_size, kernel_name): (usize, &'static str) = match dtype {
-        DType::F32 => (4, "rmsnorm_f32"),
-        DType::BF16 => (2, "rmsnorm_bf16"),
-        DType::F16 => (2, "rmsnorm_f16"),
+    let dtype_size: usize = match dtype {
+        DType::F32 => 4,
+        DType::BF16 => 2,
+        DType::F16 => 2,
         other => {
             return Err(Error::Msg(format!(
                 "metal_rmsnorm_last_axis: unsupported dtype {other}"
@@ -1272,36 +1256,18 @@ pub fn metal_rmsnorm_last_axis(
         })?;
     let out_buffer_arc: Arc<MetalBuffer> = Arc::new(out_buffer);
 
-    let encoder = companion.command_encoder().map_err(|e| {
-        Error::Msg(format!(
-            "metal_rmsnorm_last_axis: command_encoder() failed: {e:?}"
-        ))
-    })?;
-    encoder.set_label("kt_metal_rmsnorm_last_axis");
-
-    // Direct `call_rms_norm` dispatch — same MSL kernel candle_nn's
-    // `rms_norm` resolves internally. Drops the
-    // CandleTensor / CandleMetalStorage / candle_nn bridge (#1082).
-    candle_metal_kernels::call_rms_norm(
-        raw_device,
-        &encoder,
-        companion.kernels(),
-        kernel_name,
+    // Kiln-owned MSL RMSNorm (replaces candle's call_rms_norm) — faithful
+    // port of reduce.metal `rms_norm`. One threadgroup per last-axis row.
+    crate::metal_kernels::rms_norm(
+        &companion,
+        kt_metal_x.buffer().as_ref(),
+        kt_metal_w.buffer().as_ref(),
+        out_buffer_arc.as_ref(),
+        dtype,
         element_count_x,
         hidden,
         eps,
-        kt_metal_x.buffer().as_ref(),
-        0,
-        kt_metal_w.buffer().as_ref(),
-        0,
-        out_buffer_arc.as_ref(),
-    )
-    .map_err(|e| {
-        Error::Msg(format!(
-            "metal_rmsnorm_last_axis: call_rms_norm failed: {e:?}"
-        ))
-    })?;
-    drop(encoder);
+    )?;
 
     let out_storage =
         MetalStorage::from_buffer_kt(raw_device, device_index, dtype, out_buffer_arc)?;
@@ -1327,7 +1293,7 @@ pub fn metal_rmsnorm_last_axis(
 ///
 /// # Implementation
 ///
-/// Calls directly into `candle_metal_kernels::call_layer_norm` (the
+/// Kiln-owned MSL (`metal_kernels`), replacing `candle_metal_kernels::call_layer_norm` (the
 /// production MSL `layernorm_<dt>` kernel). Output buffer is allocated
 /// via metal-rs `Device::new_buffer` in `StorageModeShared`. No
 /// `CandleTensor` / `CandleMetalStorage` / `candle_nn` bridge — same
@@ -1354,10 +1320,10 @@ pub fn metal_layernorm_last_axis(
     use candle_metal_kernels::metal::MTLResourceOptions;
 
     let dtype = x.dtype();
-    let (dtype_size, kernel_name): (usize, &'static str) = match dtype {
-        DType::F32 => (4, "layernorm_f32"),
-        DType::BF16 => (2, "layernorm_bf16"),
-        DType::F16 => (2, "layernorm_f16"),
+    let dtype_size: usize = match dtype {
+        DType::F32 => 4,
+        DType::BF16 => 2,
+        DType::F16 => 2,
         other => {
             return Err(Error::Msg(format!(
                 "metal_layernorm_last_axis: unsupported dtype {other}"
@@ -1438,38 +1404,20 @@ pub fn metal_layernorm_last_axis(
         })?;
     let out_buffer_arc: Arc<MetalBuffer> = Arc::new(out_buffer);
 
-    let encoder = companion.command_encoder().map_err(|e| {
-        Error::Msg(format!(
-            "metal_layernorm_last_axis: command_encoder() failed: {e:?}"
-        ))
-    })?;
-    encoder.set_label("kt_metal_layernorm_last_axis");
-
-    // Direct `call_layer_norm` dispatch — same MSL kernel candle_nn's
-    // `layer_norm` resolves internally. Drops the
-    // CandleTensor / CandleMetalStorage / candle_nn bridge (#1082).
-    candle_metal_kernels::call_layer_norm(
-        raw_device,
-        &encoder,
-        companion.kernels(),
-        kernel_name,
-        element_count_x,
+    // Kiln-owned MSL LayerNorm (replaces candle's call_layer_norm) — faithful
+    // two-pass port of reduce.metal `layernorm`. One threadgroup per row.
+    let n_rows = element_count_x / hidden;
+    crate::metal_kernels::layer_norm(
+        &companion,
+        kt_metal_x.buffer().as_ref(),
+        kt_metal_w.buffer().as_ref(),
+        kt_metal_b.buffer().as_ref(),
+        out_buffer_arc.as_ref(),
+        dtype,
+        n_rows,
         hidden,
         eps,
-        kt_metal_x.buffer().as_ref(),
-        0,
-        kt_metal_w.buffer().as_ref(),
-        0,
-        kt_metal_b.buffer().as_ref(),
-        0,
-        out_buffer_arc.as_ref(),
-    )
-    .map_err(|e| {
-        Error::Msg(format!(
-            "metal_layernorm_last_axis: call_layer_norm failed: {e:?}"
-        ))
-    })?;
-    drop(encoder);
+    )?;
 
     let out_storage =
         MetalStorage::from_buffer_kt(raw_device, device_index, dtype, out_buffer_arc)?;
@@ -1489,7 +1437,7 @@ pub fn metal_layernorm_last_axis(
 /// Metal index_select along axis 0. Mirrors the role of
 /// [`crate::cuda_index_select_dim0`] for the Metal backend.
 ///
-/// Calls directly into `candle_metal_kernels::call_index_select` (the
+/// Kiln-owned MSL (`metal_kernels`), replacing `candle_metal_kernels::call_index_select` (the
 /// production MSL `is_u32_<dt>` kernel — same path
 /// `candle_core::Tensor::index_select(...)` resolves internally).
 ///
@@ -1525,13 +1473,12 @@ pub fn metal_index_select_dim0(
     indices: &crate::Tensor,
 ) -> Result<crate::Tensor> {
     use candle_metal_kernels::metal::MTLResourceOptions;
-    use candle_metal_kernels::BufferOffset;
 
     let dtype = input.dtype();
-    let (dtype_size, kernel_name): (usize, &'static str) = match dtype {
-        DType::F32 => (4, "is_u32_f32"),
-        DType::BF16 => (2, "is_u32_bf16"),
-        DType::F16 => (2, "is_u32_f16"),
+    let dtype_size: usize = match dtype {
+        DType::F32 => 4,
+        DType::BF16 => 2,
+        DType::F16 => 2,
         other => {
             return Err(Error::Msg(format!(
                 "metal_index_select_dim0: unsupported input dtype {other} \
@@ -1594,17 +1541,6 @@ pub fn metal_index_select_dim0(
     out_shape.extend(in_shape.iter().skip(1).copied());
     let out_element_count: usize = out_shape.iter().product::<usize>().max(0);
 
-    // Compute contiguous strides over the source dims (call_index_select
-    // takes `src_strides` even on the contiguous-true path so that the
-    // kernel can index along the gather dim correctly).
-    let src_strides: Vec<usize> = {
-        let mut s = vec![1usize; in_shape.len()];
-        for i in (0..in_shape.len().saturating_sub(1)).rev() {
-            s[i] = s[i + 1] * in_shape[i + 1];
-        }
-        s
-    };
-
     // Allocate output buffer directly through metal-rs (no candle).
     let byte_len = out_element_count * dtype_size;
     let raw_device = companion.device();
@@ -1617,50 +1553,21 @@ pub fn metal_index_select_dim0(
         })?;
     let out_buffer_arc: Arc<MetalBuffer> = Arc::new(out_buffer);
 
-    let encoder = companion.command_encoder().map_err(|e| {
-        Error::Msg(format!(
-            "metal_index_select_dim0: command_encoder() failed: {e:?}"
-        ))
-    })?;
-    encoder.set_label("kt_metal_index_select_dim0");
-
-    let src = BufferOffset {
-        buffer: kt_metal_in.buffer().as_ref(),
-        offset_in_bytes: 0,
-    };
-    let ids = BufferOffset {
-        buffer: kt_metal_ids.buffer().as_ref(),
-        offset_in_bytes: 0,
-    };
-
-    // Direct `call_index_select` dispatch — same MSL kernel candle's
-    // `Tensor::index_select` resolves internally. Drops the
-    // CandleTensor / CandleMetalStorage bridge (#1082).
-    //
-    // `shape` parameter is the input shape (the kernel uses it for
-    // bounds + axis_dim lookup). `contiguous=true` because we gate
-    // on input.is_contiguous() above.
-    candle_metal_kernels::call_index_select(
-        raw_device,
-        &encoder,
-        companion.kernels(),
-        kernel_name,
-        in_shape.as_slice(),
-        ids_element_count,
-        0, // dim
-        true, // contiguous
-        in_shape.as_slice(),
-        src_strides.as_slice(),
-        src,
-        ids,
+    // Kiln-owned MSL index_select dim0 (replaces candle's call_index_select).
+    // row_len = product(in_shape[1..]) (candle's `right_size`); src_dim_size =
+    // in_shape[0]; ids flattened to ids_element_count rows.
+    let row_len: usize = in_shape.iter().skip(1).product::<usize>().max(1);
+    let src_dim_size: usize = in_shape[0];
+    crate::metal_kernels::index_select_dim0(
+        &companion,
+        kt_metal_in.buffer().as_ref(),
+        kt_metal_ids.buffer().as_ref(),
         out_buffer_arc.as_ref(),
-    )
-    .map_err(|e| {
-        Error::Msg(format!(
-            "metal_index_select_dim0: call_index_select failed: {e:?}"
-        ))
-    })?;
-    drop(encoder);
+        dtype,
+        src_dim_size,
+        row_len,
+        ids_element_count,
+    )?;
 
     let out_storage =
         MetalStorage::from_buffer_kt(raw_device, device_index, dtype, out_buffer_arc)?;
@@ -1680,7 +1587,7 @@ pub fn metal_index_select_dim0(
 /// Metal dtype cast. Mirrors the role of [`crate::cuda_cast`] for the
 /// Metal backend.
 ///
-/// Calls directly into `candle_metal_kernels::call_cast_contiguous`
+/// Kiln-owned MSL (`metal_kernels`), replacing `candle_metal_kernels::call_cast_contiguous`
 /// (the production MSL `cast_<from>_<to>` kernel — same path
 /// `candle_core::Tensor::to_dtype(...)` resolves internally). Covers
 /// F32 <-> BF16 <-> F16 — the float triple. Integer round-trips
@@ -1788,7 +1695,7 @@ pub fn metal_cast(x: &crate::Tensor, to: DType) -> Result<crate::Tensor> {
 ///   - `2` -> Mul — MSL kernel `bmul_<dt>`
 ///   - `3` -> Div — MSL kernel `bdiv_<dt>`
 ///
-/// Calls directly into `candle_metal_kernels::call_binary_contiguous`.
+/// Kiln-owned MSL (`metal_kernels`), replacing `candle_metal_kernels::call_binary_contiguous`.
 /// Covers F32 / BF16 / F16. Both inputs must share shape and dtype.
 ///
 /// # Apple Silicon UMA zero-copy invariant
@@ -1815,7 +1722,6 @@ pub fn metal_elementwise_binary(
     kind_tag: i32,
 ) -> Result<crate::Tensor> {
     use candle_metal_kernels::metal::MTLResourceOptions;
-    use candle_metal_kernels::BufferOffset;
 
     if !matches!(kind_tag, 0 | 1 | 2 | 3) {
         return Err(Error::Msg(format!(
@@ -1824,7 +1730,7 @@ pub fn metal_elementwise_binary(
         )));
     }
     let dtype = a.dtype();
-    let (dtype_size, dtype_suffix): (usize, &'static str) = match dtype {
+    let (dtype_size, _dtype_suffix): (usize, &'static str) = match dtype {
         DType::F32 => (4, "f32"),
         DType::BF16 => (2, "bf16"),
         DType::F16 => (2, "f16"),
@@ -1872,28 +1778,6 @@ pub fn metal_elementwise_binary(
     let shape: Vec<usize> = a.shape().to_vec();
     let element_count: usize = a.element_count();
 
-    // Resolve (kind_tag, dtype) -> Metal kernel name. These are the
-    // same `badd_<dt>` / `bsub_<dt>` / `bmul_<dt>` / `bdiv_<dt>`
-    // MSL kernels that candle's `&a + &b` / `*` / `-` / `/`
-    // operators end up dispatching through internally — we go
-    // straight to `call_binary_contiguous` and skip the
-    // `CandleTensor` / `CandleMetalStorage` bridge.
-    //
-    // candle_metal_kernels::binary::contiguous defines named
-    // sub-modules (`badd`, `bsub`, `bmul`, `bdiv`) with FLOAT /
-    // HALF / BFLOAT constants. Their kernel string is
-    // `concat!(stringify!(<name>), "_<dt>")`, so we can equivalently
-    // construct it from (op_prefix, dtype_suffix) — that keeps the
-    // dispatch table flat instead of a 4x3 nested-match.
-    let op_prefix = match kind_tag {
-        0 => "badd",
-        1 => "bsub",
-        2 => "bmul",
-        3 => "bdiv",
-        _ => unreachable!("gated by outer matches!()"),
-    };
-    let kernel_name = format!("{op_prefix}_{dtype_suffix}");
-
     // Allocate output buffer directly through metal-rs (no candle).
     let byte_len = element_count * dtype_size;
     let raw_device = companion.device();
@@ -1906,39 +1790,16 @@ pub fn metal_elementwise_binary(
         })?;
     let out_buffer_arc: Arc<MetalBuffer> = Arc::new(out_buffer);
 
-    let encoder = companion.command_encoder().map_err(|e| {
-        Error::Msg(format!(
-            "metal_elementwise_binary: command_encoder() failed: {e:?}"
-        ))
-    })?;
-    encoder.set_label("kt_metal_elementwise_binary");
-
-    let left = BufferOffset {
-        buffer: kt_metal_a.buffer().as_ref(),
-        offset_in_bytes: 0,
-    };
-    let right = BufferOffset {
-        buffer: kt_metal_b.buffer().as_ref(),
-        offset_in_bytes: 0,
-    };
-
-    candle_metal_kernels::call_binary_contiguous(
-        raw_device,
-        &encoder,
-        companion.kernels(),
-        kernel_name.as_str(),
-        dtype_size,
-        element_count,
-        left,
-        right,
+    // Kiln-owned MSL binary op (replaces candle's call_binary_contiguous).
+    crate::metal_kernels::elementwise_binary(
+        &companion,
+        kt_metal_a.buffer().as_ref(),
+        kt_metal_b.buffer().as_ref(),
         out_buffer_arc.as_ref(),
-    )
-    .map_err(|e| {
-        Error::Msg(format!(
-            "metal_elementwise_binary: call_binary_contiguous(kind={kind_tag}) failed: {e:?}"
-        ))
-    })?;
-    drop(encoder);
+        dtype,
+        kind_tag,
+        element_count,
+    )?;
 
     let out_storage =
         MetalStorage::from_buffer_kt(raw_device, device_index, dtype, out_buffer_arc)?;
@@ -1980,7 +1841,7 @@ pub fn metal_elementwise_binary(
 ///   - `25` -> Ceil — MSL kernel `ceil_<dt>`
 ///   - `26` -> Round — MSL kernel `round_<dt>`
 ///
-/// Calls directly into `candle_metal_kernels::call_unary_contiguous`.
+/// Kiln-owned MSL (`metal_kernels`), replacing `candle_metal_kernels::call_unary_contiguous`.
 /// Covers F32 / BF16 / F16.
 ///
 /// # Apple Silicon UMA zero-copy invariant
@@ -2002,8 +1863,6 @@ pub fn metal_elementwise_binary(
 /// layout, non-Metal storage, or kernel dispatch error.
 pub fn metal_activation_unary(x: &crate::Tensor, kind_tag: i32) -> Result<crate::Tensor> {
     use candle_metal_kernels::metal::MTLResourceOptions;
-    use candle_metal_kernels::unary::contiguous;
-    use candle_metal_kernels::BufferOffset;
 
     if !matches!(
         kind_tag,
@@ -2049,63 +1908,6 @@ pub fn metal_activation_unary(x: &crate::Tensor, kind_tag: i32) -> Result<crate:
     let shape: Vec<usize> = x.shape().to_vec();
     let element_count: usize = x.element_count();
 
-    // Resolve (kind, dtype) -> contiguous kernel name. These are the
-    // same `unary_<op>_<dt>` MSL kernels that `CandleTensor::silu()` /
-    // `.gelu()` / ... go through internally — we just skip the
-    // candle_core dispatch layer (#1082 candle removal: drop the
-    // `CandleTensor` / `CandleMetalStorage` bridge in this op).
-    let kernel: contiguous::Kernel = match (kind_tag, dtype) {
-        (0, DType::F32) => contiguous::silu::FLOAT,
-        (0, DType::F16) => contiguous::silu::HALF,
-        (0, DType::BF16) => contiguous::silu::BFLOAT,
-        (2, DType::F32) => contiguous::gelu::FLOAT,
-        (2, DType::F16) => contiguous::gelu::HALF,
-        (2, DType::BF16) => contiguous::gelu::BFLOAT,
-        (3, DType::F32) => contiguous::tanh::FLOAT,
-        (3, DType::F16) => contiguous::tanh::HALF,
-        (3, DType::BF16) => contiguous::tanh::BFLOAT,
-        (4, DType::F32) => contiguous::relu::FLOAT,
-        (4, DType::F16) => contiguous::relu::HALF,
-        (4, DType::BF16) => contiguous::relu::BFLOAT,
-        (5, DType::F32) => contiguous::log::FLOAT,
-        (5, DType::F16) => contiguous::log::HALF,
-        (5, DType::BF16) => contiguous::log::BFLOAT,
-        (6, DType::F32) => contiguous::exp::FLOAT,
-        (6, DType::F16) => contiguous::exp::HALF,
-        (6, DType::BF16) => contiguous::exp::BFLOAT,
-        (7, DType::F32) => contiguous::sin::FLOAT,
-        (7, DType::F16) => contiguous::sin::HALF,
-        (7, DType::BF16) => contiguous::sin::BFLOAT,
-        (8, DType::F32) => contiguous::cos::FLOAT,
-        (8, DType::F16) => contiguous::cos::HALF,
-        (8, DType::BF16) => contiguous::cos::BFLOAT,
-        (12, DType::F32) => contiguous::neg::FLOAT,
-        (12, DType::F16) => contiguous::neg::HALF,
-        (12, DType::BF16) => contiguous::neg::BFLOAT,
-        (13, DType::F32) => contiguous::abs::FLOAT,
-        (13, DType::F16) => contiguous::abs::HALF,
-        (13, DType::BF16) => contiguous::abs::BFLOAT,
-        (14, DType::F32) => contiguous::sqrt::FLOAT,
-        (14, DType::F16) => contiguous::sqrt::HALF,
-        (14, DType::BF16) => contiguous::sqrt::BFLOAT,
-        (22, DType::F32) => contiguous::recip::FLOAT,
-        (22, DType::F16) => contiguous::recip::HALF,
-        (22, DType::BF16) => contiguous::recip::BFLOAT,
-        (23, DType::F32) => contiguous::sign::FLOAT,
-        (23, DType::F16) => contiguous::sign::HALF,
-        (23, DType::BF16) => contiguous::sign::BFLOAT,
-        (24, DType::F32) => contiguous::floor::FLOAT,
-        (24, DType::F16) => contiguous::floor::HALF,
-        (24, DType::BF16) => contiguous::floor::BFLOAT,
-        (25, DType::F32) => contiguous::ceil::FLOAT,
-        (25, DType::F16) => contiguous::ceil::HALF,
-        (25, DType::BF16) => contiguous::ceil::BFLOAT,
-        (26, DType::F32) => contiguous::round::FLOAT,
-        (26, DType::F16) => contiguous::round::HALF,
-        (26, DType::BF16) => contiguous::round::BFLOAT,
-        _ => unreachable!("gated by outer matches!() and dtype guard"),
-    };
-
     // Allocate output buffer directly through metal-rs (no candle).
     // Shared mode keeps UMA semantics consistent with the rest of the
     // substrate (`MetalStorage::zeros_kt`). The kernel runs on GPU and
@@ -2121,37 +1923,18 @@ pub fn metal_activation_unary(x: &crate::Tensor, kind_tag: i32) -> Result<crate:
         })?;
     let out_buffer_arc: Arc<MetalBuffer> = Arc::new(out_buffer);
 
-    // Get a compute encoder from the candle MetalDevice. The device
-    // wrapper is held purely for command-queue affinity here; the
-    // encoder talks straight to metal-rs underneath.
-    let encoder = companion.command_encoder().map_err(|e| {
-        Error::Msg(format!(
-            "metal_activation_unary: command_encoder() failed: {e:?}"
-        ))
-    })?;
-    encoder.set_label("kt_metal_activation_unary");
-
-    let input = BufferOffset {
-        buffer: kt_metal.buffer().as_ref(),
-        offset_in_bytes: 0,
-    };
-
-    candle_metal_kernels::call_unary_contiguous(
-        raw_device,
-        &encoder,
-        companion.kernels(),
-        kernel,
-        dtype_size,
-        element_count,
-        input,
+    // Kiln-owned MSL unary activation (replaces candle's
+    // call_unary_contiguous). All math is done in `float` (load→float,
+    // compute, store→dtype) so BF16/F16 match the kt CPU reference
+    // (`ActivationOp::apply_f32`) and F32 matches candle's unary.metal.
+    crate::metal_kernels::activation_unary(
+        &companion,
+        kt_metal.buffer().as_ref(),
         out_buffer_arc.as_ref(),
-    )
-    .map_err(|e| {
-        Error::Msg(format!(
-            "metal_activation_unary: call_unary_contiguous(kind={kind_tag}) failed: {e:?}"
-        ))
-    })?;
-    drop(encoder);
+        dtype,
+        kind_tag,
+        element_count,
+    )?;
 
     let out_storage =
         MetalStorage::from_buffer_kt(raw_device, device_index, dtype, out_buffer_arc)?;

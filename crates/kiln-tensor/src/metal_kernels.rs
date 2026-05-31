@@ -132,3 +132,622 @@ kernel void {entry}(
     drop(encoder);
     Ok(())
 }
+
+// ----------------------------------------------------------------------
+// activation_unary — replaces candle_metal_kernels::call_unary_contiguous
+// ----------------------------------------------------------------------
+
+/// MSL body computing `out = f(in)` in **float** for one activation
+/// `kind_tag`, given the float input variable `x` and producing the float
+/// result variable `y`. Computed entirely in `float` (load→float, compute
+/// in float, store→dtype) so BF16/F16 match the kt CPU reference
+/// (`ActivationOp::apply_f32`) bit-for-bit, and F32 matches candle's
+/// `unary.metal` (which computes the float ops in `T == float`).
+///
+/// Returns `None` for an unsupported `kind_tag`.
+fn unary_float_body(kind_tag: i32) -> Option<(&'static str, &'static str)> {
+    // (op-name fragment for the entry symbol, MSL float expression in `x`).
+    //
+    // Faithful ports of candle `unary.metal`'s `define_unary_op` bodies,
+    // evaluated in `float`:
+    //   silu : usilu   = x / (1 + exp(-x))
+    //   gelu : ugelu   = 0.5*x*(1 + tanh(M_2_SQRTPI_F*M_SQRT1_2_F*(x+0.044715*x^3)))
+    //                    (candle's `x>5` early-out is OMITTED — see helper docs / risks)
+    //   tanh : utanh   = precise::tanh(x)
+    //   relu : urelu   = x < 0 ? 0 : x
+    //   log  : ulog    = log(x)
+    //   exp  : uexp    = exp(x)
+    //   sin  : usin    = sin(x)
+    //   cos  : ucos    = cos(x)
+    //   neg  : uneg    = -x
+    //   abs  : uabs    = abs(float(x))
+    //   sqrt : usqrt   = sqrt(x)
+    //   recip: urecip  = 1.0 / x
+    //   sign : usign   = sign(x)
+    //   floor: ufloor  = floor(x)
+    //   ceil : uceil   = ceil(x)
+    //   round: uround  = round(x)
+    let r = match kind_tag {
+        0 => ("silu", "x / (1.0f + exp(-x))"),
+        2 => (
+            "gelu",
+            "0.5f * x * (1.0f + precise::tanh(\
+             (M_2_SQRTPI_F * M_SQRT1_2_F) * (x + 0.044715f * x * x * x)))",
+        ),
+        3 => ("tanh", "precise::tanh(x)"),
+        4 => ("relu", "(x < 0.0f ? 0.0f : x)"),
+        5 => ("log", "log(x)"),
+        6 => ("exp", "exp(x)"),
+        7 => ("sin", "sin(x)"),
+        8 => ("cos", "cos(x)"),
+        12 => ("neg", "-x"),
+        13 => ("abs", "fabs(x)"),
+        14 => ("sqrt", "sqrt(x)"),
+        22 => ("recip", "1.0f / x"),
+        23 => ("sign", "sign(x)"),
+        24 => ("floor", "floor(x)"),
+        25 => ("ceil", "ceil(x)"),
+        26 => ("round", "round(x)"),
+        _ => return None,
+    };
+    Some(r)
+}
+
+/// Contiguous element-wise unary activation `out[i] = (T)f((float)in[i])`
+/// over the float triple. Kiln-owned MSL replacement for
+/// `candle_metal_kernels::call_unary_contiguous`; dispatched via the
+/// companion's encoder. `kind_tag` follows the kt unary tag scheme
+/// (0=silu, 2=gelu, 3=tanh, 4=relu, 5=log, 6=exp, 7=sin, 8=cos, 12=neg,
+/// 13=abs, 14=sqrt, 22=recip, 23=sign, 24=floor, 25=ceil, 26=round).
+///
+/// All math is done in `float`; for BF16/F16 the value is loaded, widened
+/// to float, computed, then narrowed back — matching the kt CPU reference
+/// (`ActivationOp::apply_f32` and friends). For F32 this is bit-identical
+/// to candle's `unary.metal` float ops.
+pub(crate) fn activation_unary(
+    companion: &MetalCompanion,
+    input: &MetalBuffer,
+    output: &MetalBuffer,
+    dt: DType,
+    kind_tag: i32,
+    n: usize,
+) -> Result<()> {
+    let ty = msl_ty(dt)?;
+    let (op, expr) = unary_float_body(kind_tag).ok_or_else(|| {
+        Error::Msg(format!(
+            "metal_kernels::activation_unary: kind_tag {kind_tag} unsupported"
+        ))
+    })?;
+    let entry = format!("kt_unary_{op}_{ty}");
+    let src = format!(
+        r#"
+#include <metal_stdlib>
+#include <metal_math>
+using namespace metal;
+kernel void {entry}(
+    device const {ty}* inp [[buffer(0)]],
+    device {ty}* outp      [[buffer(1)]],
+    constant uint& n       [[buffer(2)]],
+    uint gid [[thread_position_in_grid]])
+{{
+    if (gid >= n) return;
+    float x = (float)inp[gid];
+    float y = {expr};
+    outp[gid] = ({ty})y;
+}}
+"#
+    );
+    let pipeline = op_pipeline(companion, &src, &entry)?;
+    let encoder = companion
+        .command_encoder()
+        .map_err(|e| Error::Msg(format!("metal_kernels::activation_unary: encoder: {e:?}")))?;
+    encoder.set_label("kt_unary");
+    encoder.set_compute_pipeline_state(&pipeline);
+    encoder.set_buffer(0, Some(input), 0);
+    encoder.set_buffer(1, Some(output), 0);
+    let n_u = n as u32;
+    encoder.set_bytes(2, &n_u);
+    dispatch_1d(&encoder, n);
+    drop(encoder);
+    Ok(())
+}
+
+// ----------------------------------------------------------------------
+// elementwise_binary — replaces candle_metal_kernels::call_binary_contiguous
+// ----------------------------------------------------------------------
+
+/// Contiguous element-wise binary op over the float triple, same-shape /
+/// same-dtype inputs: `out[i] = a[i] <op> b[i]` for `<op>` selected by
+/// `kind_tag` (0=add, 1=sub, 2=mul, 3=div). Operands loaded to `float`, the
+/// op evaluated in `float`, result stored back to the element dtype —
+/// matching candle's effective bf16/half arithmetic and the kt CPU reference
+/// (the parity gate). Kiln-owned MSL; one pipeline per (op, dtype).
+pub(crate) fn elementwise_binary(
+    companion: &MetalCompanion,
+    left: &MetalBuffer,
+    right: &MetalBuffer,
+    output: &MetalBuffer,
+    dtype: DType,
+    kind_tag: i32,
+    n: usize,
+) -> Result<()> {
+    let ty = msl_ty(dtype)?;
+    let (op_prefix, expr) = match kind_tag {
+        0 => ("badd", "a + b"),
+        1 => ("bsub", "a - b"),
+        2 => ("bmul", "a * b"),
+        3 => ("bdiv", "a / b"),
+        other => {
+            return Err(Error::Msg(format!(
+                "metal_kernels::elementwise_binary: kind_tag {other} not supported \
+                 (only 0=Add, 1=Sub, 2=Mul, 3=Div)"
+            )));
+        }
+    };
+    let entry = format!("kt_binary_{op_prefix}_{ty}");
+    let src = format!(
+        r#"
+#include <metal_stdlib>
+using namespace metal;
+kernel void {entry}(
+    device const {ty}* left  [[buffer(0)]],
+    device const {ty}* right [[buffer(1)]],
+    device {ty}* output      [[buffer(2)]],
+    constant uint& n         [[buffer(3)]],
+    uint gid [[thread_position_in_grid]])
+{{
+    if (gid < n) {{
+        float a = (float)left[gid];
+        float b = (float)right[gid];
+        output[gid] = ({ty})({expr});
+    }}
+}}
+"#
+    );
+    let pipeline = op_pipeline(companion, &src, &entry)?;
+    let encoder = companion
+        .command_encoder()
+        .map_err(|e| Error::Msg(format!("metal_kernels::elementwise_binary: encoder: {e:?}")))?;
+    encoder.set_label("kt_elementwise_binary");
+    encoder.set_compute_pipeline_state(&pipeline);
+    encoder.set_buffer(0, Some(left), 0);
+    encoder.set_buffer(1, Some(right), 0);
+    encoder.set_buffer(2, Some(output), 0);
+    let n_u = n as u32;
+    encoder.set_bytes(3, &n_u);
+    dispatch_1d(&encoder, n);
+    drop(encoder);
+    Ok(())
+}
+
+// ----------------------------------------------------------------------
+// softmax (last axis) — replaces candle_metal_kernels::call_last_softmax
+// ----------------------------------------------------------------------
+
+/// Build the per-row last-axis softmax MSL (online/Welford normalizer, a
+/// faithful port of candle reduce.metal's `softmax_<dt>`): running max `m`
+/// in dtype `T`, running sum `d` in `float`; online merge; finalize
+/// `dst[i] = (T)(exp(src[i]-m) * (1/d))`. One threadgroup per row.
+fn softmax_src(ty: &str, entry: &str) -> String {
+    let exp_expr = match ty {
+        "half" => "exp(v)".to_string(),
+        "bfloat" => "static_cast<bfloat>(fast::exp(static_cast<float>(v)))".to_string(),
+        _ => "fast::exp(v)".to_string(), // "float"
+    };
+    format!(
+        r#"
+#include <metal_stdlib>
+using namespace metal;
+
+struct MD_t {{
+    {ty} m;
+    float d;
+}};
+
+static inline {ty} kt_exp({ty} v) {{ return {exp_expr}; }}
+
+static inline MD_t kt_md_merge(MD_t a, MD_t b) {{
+    bool a_bigger = a.m > b.m;
+    MD_t bigger  = a_bigger ? a : b;
+    MD_t smaller = a_bigger ? b : a;
+    MD_t res;
+    res.d = bigger.d + smaller.d * (float)kt_exp((smaller.m - bigger.m));
+    res.m = bigger.m;
+    return res;
+}}
+
+kernel void {entry}(
+    constant uint& src_numel    [[buffer(0)]],
+    constant uint& el_per_block [[buffer(1)]],
+    device const {ty}* src      [[buffer(2)]],
+    device {ty}* dst            [[buffer(3)]],
+    threadgroup MD_t* shared    [[threadgroup(0)]],
+    uint tid       [[thread_index_in_threadgroup]],
+    uint dst_id    [[threadgroup_position_in_grid]],
+    uint block_dim [[threads_per_threadgroup]])
+{{
+    const uint offset   = dst_id * el_per_block;
+    const uint stop_idx = min(el_per_block + offset, src_numel);
+
+    MD_t md;
+    md.m = -INFINITY;
+    md.d = 0.0f;
+    for (uint i = tid + offset; i < stop_idx; i += block_dim) {{
+        MD_t e;
+        e.m = src[i];
+        e.d = 1.0f;
+        md = kt_md_merge(md, e);
+    }}
+
+    shared[tid] = md;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint s = block_dim / 2; s > 0; s >>= 1) {{
+        if (tid < s) {{
+            shared[tid] = kt_md_merge(shared[tid], shared[tid + s]);
+        }}
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }}
+
+    const MD_t md_total = shared[0];
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    const float d_total_inverse = 1.0f / md_total.d;
+    for (uint i = tid + offset; i < stop_idx; i += block_dim) {{
+        dst[i] = ({ty})((float)kt_exp((src[i] - md_total.m)) * d_total_inverse);
+    }}
+}}
+"#
+    )
+}
+
+/// Contiguous last-axis softmax: view buffer as `[rows, cols]`; per row
+/// `out = exp(x-max)/Σexp(x-max)`. One threadgroup per row, reduction in
+/// `MD<T>` (max in `T`, sum in `float`). Faithful port of candle's
+/// `softmax_<dt>`.
+pub(crate) fn softmax_last_axis(
+    companion: &MetalCompanion,
+    input: &MetalBuffer,
+    output: &MetalBuffer,
+    dt: DType,
+    rows: usize,
+    cols: usize,
+) -> Result<()> {
+    if rows == 0 || cols == 0 {
+        return Ok(());
+    }
+    let ty = msl_ty(dt)?;
+    let entry = format!("kt_softmax_{ty}");
+    let src = softmax_src(ty, &entry);
+    let pipeline = op_pipeline(companion, &src, &entry)?;
+
+    // candle's width: min(maxTotalThreads, (cols/2).next_pow2) — always a
+    // power of two so the reduction tree halves cleanly.
+    let width = pipeline
+        .max_total_threads_per_threadgroup()
+        .min((cols / 2).next_power_of_two().max(1));
+
+    let encoder = companion
+        .command_encoder()
+        .map_err(|e| Error::Msg(format!("metal_kernels::softmax_last_axis: encoder: {e:?}")))?;
+    encoder.set_label("kt_softmax_last_axis");
+    encoder.set_compute_pipeline_state(&pipeline);
+
+    let src_numel = (rows * cols) as u32;
+    let el_per_block = cols as u32;
+    encoder.set_bytes(0, &src_numel);
+    encoder.set_bytes(1, &el_per_block);
+    encoder.set_buffer(2, Some(input), 0);
+    encoder.set_buffer(3, Some(output), 0);
+    // shared[width] of MD_t; sizeof(MD_t) == 8 for the float triple.
+    encoder.set_threadgroup_memory_length(0, width * 8);
+
+    let groups = objc2_metal::MTLSize { width: rows, height: 1, depth: 1 };
+    let tg = objc2_metal::MTLSize { width, height: 1, depth: 1 };
+    encoder.dispatch_thread_groups(groups, tg);
+    drop(encoder);
+    Ok(())
+}
+
+// ----------------------------------------------------------------------
+// rms_norm (last axis) — replaces candle_metal_kernels::call_rms_norm
+// ----------------------------------------------------------------------
+
+/// Kiln-owned RMSNorm over the trailing axis (faithful port of candle
+/// reduce.metal `rms_norm`): `out[r,j] = x[r,j] * rsqrt(mean_k(x[r,k]^2)+eps)
+/// * weight[j]`. Sum-of-squares + scale in `float`; the two store-side
+/// multiplies in dtype `T` (matching candle). One threadgroup per row.
+pub(crate) fn rms_norm(
+    companion: &MetalCompanion,
+    input: &MetalBuffer,
+    weight: &MetalBuffer,
+    output: &MetalBuffer,
+    dtype: DType,
+    n: usize,
+    hidden: usize,
+    eps: f32,
+) -> Result<()> {
+    if n == 0 || hidden == 0 {
+        return Ok(());
+    }
+    let ty = msl_ty(dtype)?;
+    let entry = format!("kt_rmsnorm_{ty}");
+    let src = format!(
+        r#"
+#include <metal_stdlib>
+using namespace metal;
+
+#define KT_RMSNORM_IMPL(NAME, T)                                            \
+kernel void NAME(                                                           \
+    device const T* src        [[buffer(0)]],                              \
+    device const T* alpha      [[buffer(1)]],                              \
+    device T* dst              [[buffer(2)]],                              \
+    constant uint& n           [[buffer(3)]],                              \
+    constant uint& total_elems [[buffer(4)]],                              \
+    constant float& eps        [[buffer(5)]],                              \
+    threadgroup float* shared  [[threadgroup(0)]],                         \
+    uint tid       [[thread_index_in_threadgroup]],                        \
+    uint row       [[threadgroup_position_in_grid]],                       \
+    uint block_dim [[threads_per_threadgroup]])                            \
+{{                                                                          \
+    const uint offset = row * n;                                           \
+    const uint stop_idx = min(offset + n, total_elems);                    \
+    float acc = 0.0f;                                                      \
+    for (uint i = offset + tid; i < stop_idx; i += block_dim) {{           \
+        float v = float(src[i]);                                           \
+        acc += v * v;                                                      \
+    }}                                                                      \
+    shared[tid] = acc;                                                     \
+    threadgroup_barrier(mem_flags::mem_threadgroup);                       \
+    for (uint s = block_dim >> 1; s > 0; s >>= 1) {{                       \
+        if (tid < s) shared[tid] += shared[tid + s];                       \
+        threadgroup_barrier(mem_flags::mem_threadgroup);                   \
+    }}                                                                      \
+    threadgroup float total;                                              \
+    if (tid == 0) {{                                                       \
+        total = rsqrt(shared[0] / float(n) + eps);                         \
+    }}                                                                      \
+    threadgroup_barrier(mem_flags::mem_threadgroup);                       \
+    const float scale = total;                                             \
+    for (uint i = offset + tid; i < stop_idx; i += block_dim) {{           \
+        T val = src[i] * static_cast<T>(scale);                            \
+        val *= alpha[i - offset];                                          \
+        dst[i] = val;                                                      \
+    }}                                                                      \
+}}
+
+KT_RMSNORM_IMPL({entry}, {ty})
+"#
+    );
+
+    let pipeline = op_pipeline(companion, &src, &entry)?;
+
+    let rows = n / hidden;
+    // Round the threadgroup width DOWN to a power of two so the `>>1` tree
+    // reduction is exact for any `hidden` (threads beyond `hidden` simply
+    // contribute 0 via the strided loop's bound).
+    let mut tg = 256usize.min(hidden.max(1));
+    tg = if tg.is_power_of_two() {
+        tg
+    } else {
+        tg.next_power_of_two() >> 1
+    }
+    .max(1);
+    let shared_bytes = tg * std::mem::size_of::<f32>();
+
+    let encoder = companion
+        .command_encoder()
+        .map_err(|e| Error::Msg(format!("metal_kernels::rms_norm: encoder: {e:?}")))?;
+    encoder.set_label("kt_rmsnorm");
+    encoder.set_compute_pipeline_state(&pipeline);
+    encoder.set_buffer(0, Some(input), 0);
+    encoder.set_buffer(1, Some(weight), 0);
+    encoder.set_buffer(2, Some(output), 0);
+    let hidden_u = hidden as u32;
+    let total_u = n as u32;
+    encoder.set_bytes(3, &hidden_u);
+    encoder.set_bytes(4, &total_u);
+    encoder.set_bytes(5, &eps);
+    encoder.set_threadgroup_memory_length(0, shared_bytes);
+
+    let groups = objc2_metal::MTLSize { width: rows.max(1), height: 1, depth: 1 };
+    let threads = objc2_metal::MTLSize { width: tg, height: 1, depth: 1 };
+    encoder.dispatch_thread_groups(groups, threads);
+    drop(encoder);
+    Ok(())
+}
+
+// ----------------------------------------------------------------------
+// layer_norm (last axis) — replaces candle_metal_kernels::call_layer_norm
+// ----------------------------------------------------------------------
+
+/// MSL template for [`layer_norm`]; the literal `TY` token is replaced with
+/// the scalar type before compilation.
+const LAYERNORM_MSL: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+kernel void kt_layernorm_TY(
+    device const TY* src   [[buffer(0)]],
+    device TY* dst         [[buffer(1)]],
+    device const TY* alpha [[buffer(2)]],
+    device const TY* beta  [[buffer(3)]],
+    constant uint& hidden  [[buffer(4)]],
+    constant float& eps    [[buffer(5)]],
+    threadgroup float* shared [[threadgroup(0)]],
+    uint row      [[threadgroup_position_in_grid]],
+    uint tid      [[thread_index_in_threadgroup]],
+    uint nthreads [[threads_per_threadgroup]])
+{
+    const uint base = row * hidden;
+
+    float local_sum = 0.0f;
+    for (uint i = tid; i < hidden; i += nthreads) {
+        local_sum += float(src[base + i]);
+    }
+    shared[tid] = local_sum;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint stride = nthreads >> 1; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            shared[tid] += shared[tid + stride];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    const float mean = shared[0] / float(hidden);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    float local_var = 0.0f;
+    for (uint i = tid; i < hidden; i += nthreads) {
+        float d = float(src[base + i]) - mean;
+        local_var += d * d;
+    }
+    shared[tid] = local_var;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint stride = nthreads >> 1; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            shared[tid] += shared[tid + stride];
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }
+    const float var = shared[0] / float(hidden);
+    const float inv = rsqrt(var + eps);
+
+    for (uint i = tid; i < hidden; i += nthreads) {
+        float normalized = (float(src[base + i]) - mean) * inv;
+        float y = normalized * float(alpha[i]) + float(beta[i]);
+        dst[base + i] = TY(y);
+    }
+}
+"#;
+
+/// Kiln-owned LayerNorm over the trailing axis — replaces
+/// `candle_metal_kernels::call_layer_norm`. Two-pass mean/variance in
+/// `float`; affine in `float`, store narrows to `T`. One threadgroup/row.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn layer_norm(
+    companion: &MetalCompanion,
+    input: &MetalBuffer,
+    weight: &MetalBuffer,
+    bias: &MetalBuffer,
+    output: &MetalBuffer,
+    dt: DType,
+    n_rows: usize,
+    hidden: usize,
+    eps: f32,
+) -> Result<()> {
+    if n_rows == 0 || hidden == 0 {
+        return Ok(());
+    }
+    let ty = msl_ty(dt)?;
+    let entry = format!("kt_layernorm_{ty}");
+    let src = LAYERNORM_MSL.replace("TY", ty);
+
+    let pipeline = op_pipeline(companion, &src, &entry)?;
+    let encoder = companion
+        .command_encoder()
+        .map_err(|e| Error::Msg(format!("metal_kernels::layer_norm: encoder: {e:?}")))?;
+    encoder.set_label("kt_layernorm");
+    encoder.set_compute_pipeline_state(&pipeline);
+    encoder.set_buffer(0, Some(input), 0);
+    encoder.set_buffer(1, Some(output), 0);
+    encoder.set_buffer(2, Some(weight), 0);
+    encoder.set_buffer(3, Some(bias), 0);
+    let hidden_u = hidden as u32;
+    encoder.set_bytes(4, &hidden_u);
+    encoder.set_bytes(5, &eps);
+
+    // Round threadgroup width DOWN to a power of two (clean tree reduction),
+    // capped at the pipeline max and never exceeding `hidden`.
+    let max_tg = pipeline.max_total_threads_per_threadgroup();
+    let mut tg = 256usize.min(max_tg).min(hidden.max(1));
+    tg = if tg.is_power_of_two() {
+        tg
+    } else {
+        tg.next_power_of_two() >> 1
+    }
+    .max(1);
+    encoder.set_threadgroup_memory_length(0, tg * std::mem::size_of::<f32>());
+
+    let groups = objc2_metal::MTLSize { width: n_rows, height: 1, depth: 1 };
+    let tgs = objc2_metal::MTLSize { width: tg, height: 1, depth: 1 };
+    encoder.dispatch_thread_groups(groups, tgs);
+    drop(encoder);
+    Ok(())
+}
+
+// ----------------------------------------------------------------------
+// index_select dim0 — replaces candle_metal_kernels::call_index_select
+// ----------------------------------------------------------------------
+
+/// Kiln-owned `index_select` along dim 0, contiguous src (u32 ids) — replaces
+/// candle's `call_index_select` on the `is_u32_<dt>` path. Gathers
+/// `out[i*row_len + j] = input[ids[i]*row_len + j]`, with candle's sentinel
+/// (`0xFFFFFFFF` → zero row) + clamp (`min(id, src_dim_size-1)`) semantics.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn index_select_dim0(
+    companion: &MetalCompanion,
+    input: &MetalBuffer,
+    ids: &MetalBuffer,
+    output: &MetalBuffer,
+    dtype: DType,
+    src_dim_size: usize,
+    row_len: usize,
+    ids_size: usize,
+) -> Result<()> {
+    let tty = msl_ty(dtype)?;
+    let entry = format!("kt_index_select_dim0_u32_{tty}");
+    let src = format!(
+        r#"
+#include <metal_stdlib>
+using namespace metal;
+kernel void {entry}(
+    constant uint& dst_size      [[buffer(0)]],
+    constant uint& src_dim_size  [[buffer(1)]],
+    constant uint& right_size    [[buffer(2)]],
+    constant uint& ids_size      [[buffer(3)]],
+    device const {tty}* input    [[buffer(4)]],
+    device const uint* input_ids [[buffer(5)]],
+    device {tty}* output         [[buffer(6)]],
+    uint tid [[thread_position_in_grid]])
+{{
+    if (tid >= dst_size) {{
+        return;
+    }}
+    const uint id_i = (tid / right_size) % ids_size;
+    const uint raw = input_ids[id_i];
+    if (raw == 0xFFFFFFFFu) {{
+        output[tid] = static_cast<{tty}>(0);
+    }} else {{
+        const uint input_i = min(raw, src_dim_size - 1u);
+        const uint right_rank_i = tid % right_size;
+        const uint src_i = input_i * right_size + right_rank_i;
+        output[tid] = input[src_i];
+    }}
+}}
+"#
+    );
+    let pipeline = op_pipeline(companion, &src, &entry)?;
+
+    let dst_size = ids_size * row_len;
+    if dst_size == 0 {
+        return Ok(());
+    }
+    let encoder = companion
+        .command_encoder()
+        .map_err(|e| Error::Msg(format!("metal_kernels::index_select_dim0: encoder: {e:?}")))?;
+    encoder.set_label("kt_index_select_dim0");
+    encoder.set_compute_pipeline_state(&pipeline);
+    let dst_size_u = dst_size as u32;
+    let src_dim_size_u = src_dim_size as u32;
+    let right_size_u = row_len as u32;
+    let ids_size_u = ids_size as u32;
+    encoder.set_bytes(0, &dst_size_u);
+    encoder.set_bytes(1, &src_dim_size_u);
+    encoder.set_bytes(2, &right_size_u);
+    encoder.set_bytes(3, &ids_size_u);
+    encoder.set_buffer(4, Some(input), 0);
+    encoder.set_buffer(5, Some(ids), 0);
+    encoder.set_buffer(6, Some(output), 0);
+    dispatch_1d(&encoder, dst_size);
+    drop(encoder);
+    Ok(())
+}

@@ -396,3 +396,35 @@ fn matmul_matrix_core_batched_parity() {
         assert!(d < 0.02 * mref.max(1.0), "batched matmul {bdims:?} [{m},{k}]x[{k},{n}] max|Δ|={d} (ref {mref})");
     }
 }
+
+/// index_select dim0 parity — gates the kiln-owned MSL gather kernel
+/// (`metal_kernels::index_select_dim0`, replacing candle's
+/// `call_index_select`). Gather is an exact copy → demand bit-exact equality.
+#[test]
+fn index_select_dim0_parity() {
+    let Some(dev) = metal() else { eprintln!("no Metal device; skipping"); return; };
+    // (vocab, hidden, ids): repeats, last-row, row_len=1, multi-row.
+    let cases: [(usize, usize, Vec<u32>); 4] = [
+        (32, 64, vec![0, 5, 31, 5, 12, 0]),  // repeats + last valid row
+        (10, 1, vec![3, 3, 9, 0]),           // row_len == 1
+        (100, 128, vec![99, 0, 50, 50, 1]),  // embedding-ish wide row
+        (152064, 8, vec![151000, 0, 42]),    // Qwen vocab scale
+    ];
+    for (vocab, hidden, ids) in cases {
+        let w = pattern(vocab * hidden, 700 + vocab as u64);
+        let w_cpu = Tensor::from_vec(w.clone(), vec![vocab, hidden]).unwrap();
+        let w_met = Tensor::from_vec_on(dev, w, vec![vocab, hidden]).unwrap();
+        let ids_cpu = Tensor::from_vec(ids.clone(), vec![ids.len()]).unwrap();
+        let ids_met = Tensor::from_vec_on(dev, ids.clone(), vec![ids.len()]).unwrap();
+
+        let want = ops::index_select(&w_cpu, 0, &ids_cpu).unwrap();
+        let got = ops::index_select(&w_met, 0, &ids_met).unwrap();
+        assert_eq!(got.device(), dev, "index_select must stay on Metal");
+        assert_eq!(got.shape().to_vec(), vec![ids.len(), hidden], "output shape");
+
+        let want_v: Vec<f32> = want.to_vec::<f32>().unwrap();
+        let got_v: Vec<f32> = got.to_vec::<f32>().unwrap();
+        // Exact copy — no rounding; bit-for-bit equality.
+        assert_eq!(got_v, want_v, "index_select [{vocab},{hidden}] ids={ids:?}");
+    }
+}
