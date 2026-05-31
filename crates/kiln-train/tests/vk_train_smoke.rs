@@ -291,18 +291,19 @@ fn tiny_gpu_grpo_model_config() -> ModelConfig {
     }
 }
 
+// (#1082) `GpuWeights`/`GpuLayerWeights` fields are now `kiln_tensor::Tensor`
+// after the candle→kt forward-flip, so the test's weight builders construct kt
+// tensors directly (CPU-host on Vulkan) instead of candle tensors. kt `Shape`
+// accepts the same `(usize, …)` tuples the call sites pass, so they're
+// unchanged.
 fn cpu_tensor(
     data: Vec<f32>,
-    shape: impl candle_core::shape::ShapeWithOneHole,
-) -> Result<candle_core::Tensor> {
-    Ok(candle_core::Tensor::from_vec(
-        data,
-        shape,
-        &candle_core::Device::Cpu,
-    )?)
+    shape: impl Into<kiln_tensor::Shape>,
+) -> Result<kiln_tensor::Tensor> {
+    Ok(kiln_tensor::Tensor::from_vec(data, shape)?)
 }
 
-fn transpose_2d(t: &candle_core::Tensor) -> Result<candle_core::Tensor> {
+fn transpose_2d(t: &kiln_tensor::Tensor) -> Result<kiln_tensor::Tensor> {
     Ok(t.transpose(0, 1)?.contiguous()?)
 }
 
@@ -377,11 +378,10 @@ fn vk_from_gpu_weights_restores_stubbed_tied_embedding_on_device() -> Result<()>
     let config = tiny_gpu_grpo_model_config();
     let mut weights = build_tiny_gpu_grpo_weights()?;
     let expected = weights.embed_tokens.flatten_all()?.to_vec1::<f32>()?;
-    weights.embed_tokens = candle_core::Tensor::zeros(
-        (1usize,),
-        candle_core::DType::F32,
-        &candle_core::Device::Cpu,
-    )?;
+    // (#1082) Stub embed_tokens with a kt `[1]` F32 tensor (mirrors the
+    // Vulkan loader's dropped-embedding stub); `from_gpu_weights` must restore
+    // the tied embedding from `embed_tokens_t` on device.
+    weights.embed_tokens = cpu_tensor(vec![0.0_f32], (1usize,))?;
 
     let vk_weights = VkModelWeights::from_gpu_weights(&weights, &config, &dev)?;
     assert_eq!(
@@ -2083,6 +2083,11 @@ fn vk_native_grpo_jsonl_smoke_streams_and_saves_adapter() -> Result<()> {
         lora_alpha: 4.0,
         checkpoint_interval: Some(5),
         seed: Some(1234),
+        // (#1082) The kiln GRPO default flipped to TokenLevel (#1045 Phase-1
+        // recipe), which the vk-native GRPO path doesn't implement yet; this
+        // smoke test exercises the vk-native JSONL streaming + adapter-save
+        // pipeline, so pin the vk-supported PerSample aggregation.
+        loss_aggregation: kiln_train::LossAggregation::PerSample,
         ..Default::default()
     };
     let model_config = tiny_gpu_grpo_model_config();
@@ -2169,6 +2174,8 @@ fn vk_native_grpo_jsonl_smoke_streams_long_prompts() -> Result<()> {
         lora_alpha: 4.0,
         checkpoint_interval: Some(4),
         seed: Some(4321),
+        // (#1082) vk-native GRPO supports PerSample, not the TokenLevel default.
+        loss_aggregation: kiln_train::LossAggregation::PerSample,
         ..Default::default()
     };
     let model_config = tiny_gpu_grpo_model_config();
@@ -2235,6 +2242,8 @@ fn vk_native_grpo_jsonl_smoke_streams_large_dataset() -> Result<()> {
         lora_alpha: 4.0,
         checkpoint_interval: Some(32),
         seed: Some(9876),
+        // (#1082) vk-native GRPO supports PerSample, not the TokenLevel default.
+        loss_aggregation: kiln_train::LossAggregation::PerSample,
         ..Default::default()
     };
     let model_config = tiny_gpu_grpo_model_config();

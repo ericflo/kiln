@@ -416,9 +416,21 @@ fn compute_vk_grpo_advantages(rewards: &[f64], mode: AdvantageMode) -> Vec<f64> 
     }
 }
 
+/// Extract the next-token-prediction rows + labels for the positions marked
+/// active in `completion_mask`.
+///
+/// `require_nonempty` distinguishes the two callers:
+/// - **action mask** (`true`): a policy completion MUST have ≥1 active token —
+///   an empty action mask is a real error.
+/// - **env mask** (`false`): single-turn rollouts carry NO environment tokens,
+///   so an all-false env mask is legitimate and must return empty arrays (the
+///   ECHO env-CE term then no-ops via `env_rows.is_empty()`). (#1082: the
+///   unconditional non-empty assertion broke every single-turn vk-native GRPO
+///   rollout — `GRPO completion has no active completion tokens`.)
 fn grpo_active_rows_and_labels(
     input_ids: &[u32],
     completion_mask: &[bool],
+    require_nonempty: bool,
 ) -> Result<(Vec<u32>, Vec<u32>)> {
     anyhow::ensure!(
         input_ids.len() == completion_mask.len(),
@@ -435,10 +447,15 @@ fn grpo_active_rows_and_labels(
         .enumerate()
         .filter_map(|(idx, &active)| active.then_some(idx as u32))
         .collect();
-    anyhow::ensure!(
-        !active_rows.is_empty(),
-        "GRPO completion has no active completion tokens"
-    );
+    if require_nonempty {
+        anyhow::ensure!(
+            !active_rows.is_empty(),
+            "GRPO completion has no active completion tokens"
+        );
+    } else if active_rows.is_empty() {
+        // Single-turn rollout (no env tokens) — no-op, no labels.
+        return Ok((Vec::new(), Vec::new()));
+    }
     let labels = active_rows
         .iter()
         .map(|&row| input_ids[row as usize + 1])
@@ -4225,7 +4242,7 @@ pub fn vk_native_grpo_train(
         for (comp_idx, comp) in tgroup.completions.iter().enumerate() {
             optimizer_step += 1;
             let (active_rows, labels) =
-                grpo_active_rows_and_labels(&comp.input_ids, &comp.action_mask)?;
+                grpo_active_rows_and_labels(&comp.input_ids, &comp.action_mask, true)?;
             ensure_grpo_completion_scoring_layout(tgroup.prompt_ids.len(), &active_rows)?;
             let (ref_log_probs, _reference_path) = vk_grpo_reference_log_probs_dynamic(
                 &vk_weights,
@@ -4252,7 +4269,7 @@ pub fn vk_native_grpo_train(
             // Legacy single-turn rollouts pass empty arrays which the
             // function treats as a no-op.
             let (env_rows, env_labels) =
-                grpo_active_rows_and_labels(&comp.input_ids, &comp.env_mask)?;
+                grpo_active_rows_and_labels(&comp.input_ids, &comp.env_mask, false)?;
             let echo_params = config.loss.echo.as_ref().and_then(|cfg| {
                 if !config.loss.echo_enabled() || env_rows.is_empty() || comp.total_obs_len == 0 {
                     None
@@ -4701,7 +4718,7 @@ pub fn vk_native_grpo_train_jsonl(
         for (comp_idx, comp) in tgroup.completions.iter().enumerate() {
             optimizer_step += 1;
             let (active_rows, labels) =
-                grpo_active_rows_and_labels(&comp.input_ids, &comp.action_mask)?;
+                grpo_active_rows_and_labels(&comp.input_ids, &comp.action_mask, true)?;
             ensure_grpo_completion_scoring_layout(tgroup.prompt_ids.len(), &active_rows)?;
             let completed_before = comp_idx.saturating_mul(2);
             let progress_offset = line_start.saturating_add(
@@ -4794,7 +4811,7 @@ pub fn vk_native_grpo_train_jsonl(
 
             // ECHO env-CE inputs (same shape as the in-memory path above).
             let (env_rows, env_labels) =
-                grpo_active_rows_and_labels(&comp.input_ids, &comp.env_mask)?;
+                grpo_active_rows_and_labels(&comp.input_ids, &comp.env_mask, false)?;
             let echo_params = config.loss.echo.as_ref().and_then(|cfg| {
                 if !config.loss.echo_enabled() || env_rows.is_empty() || comp.total_obs_len == 0 {
                     None

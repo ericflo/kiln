@@ -42,7 +42,17 @@ impl Element for f32 {
         bytemuck::cast_slice::<f32, u8>(values).to_vec()
     }
     fn from_bytes(bytes: &[u8]) -> Vec<Self> {
-        bytemuck::cast_slice::<u8, f32>(bytes).to_vec()
+        // `cast_slice` panics (`TargetAlignmentGreaterAndInputNotAligned`) when
+        // `bytes` is empty (its dangling ptr is only 1-aligned) or is an
+        // unaligned subslice. Fast-path the aligned case via the zero-copy view;
+        // fall back to an element-wise copy otherwise (handles len==0 → []). (#1082)
+        match bytemuck::try_cast_slice::<u8, f32>(bytes) {
+            Ok(s) => s.to_vec(),
+            Err(_) => bytes
+                .chunks_exact(4)
+                .map(|c| f32::from_ne_bytes([c[0], c[1], c[2], c[3]]))
+                .collect(),
+        }
     }
 }
 
@@ -89,7 +99,14 @@ impl Element for u32 {
         bytemuck::cast_slice::<u32, u8>(values).to_vec()
     }
     fn from_bytes(bytes: &[u8]) -> Vec<Self> {
-        bytemuck::cast_slice::<u8, u32>(bytes).to_vec()
+        // See the f32 impl: empty / unaligned slices make `cast_slice` panic. (#1082)
+        match bytemuck::try_cast_slice::<u8, u32>(bytes) {
+            Ok(s) => s.to_vec(),
+            Err(_) => bytes
+                .chunks_exact(4)
+                .map(|c| u32::from_ne_bytes([c[0], c[1], c[2], c[3]]))
+                .collect(),
+        }
     }
 }
 
@@ -111,13 +128,44 @@ impl Element for i64 {
         bytemuck::cast_slice::<i64, u8>(values).to_vec()
     }
     fn from_bytes(bytes: &[u8]) -> Vec<Self> {
-        bytemuck::cast_slice::<u8, i64>(bytes).to_vec()
+        // See the f32 impl: empty / unaligned slices make `cast_slice` panic. (#1082)
+        match bytemuck::try_cast_slice::<u8, i64>(bytes) {
+            Ok(s) => s.to_vec(),
+            Err(_) => bytes
+                .chunks_exact(8)
+                .map(|c| {
+                    i64::from_ne_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]])
+                })
+                .collect(),
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // (#1082) `from_bytes` must not panic on an empty slice (dangling,
+    // 1-aligned ptr) or an unaligned subslice — the cast_slice family panics
+    // there. Regression for the empty-`rotary_inv_freq` -> to_vec1 panic that
+    // broke vk_train_smoke after the candle->kt GpuWeights flip.
+    #[test]
+    fn from_bytes_empty_returns_empty_no_panic() {
+        assert_eq!(<f32 as Element>::from_bytes(&[]), Vec::<f32>::new());
+        assert_eq!(<u32 as Element>::from_bytes(&[]), Vec::<u32>::new());
+        assert_eq!(<i64 as Element>::from_bytes(&[]), Vec::<i64>::new());
+    }
+
+    #[test]
+    fn from_bytes_unaligned_subslice_matches_aligned() {
+        // Build an f32 byte buffer, then read it from a +1 offset (forced
+        // 1-aligned) — must round-trip identically to the aligned read.
+        let vals = vec![1.0_f32, -2.5, 3.25, 42.0];
+        let mut buf = vec![0u8]; // 1-byte prefix forces misalignment
+        buf.extend_from_slice(&<f32 as Element>::to_bytes(&vals));
+        let unaligned = &buf[1..];
+        assert_eq!(<f32 as Element>::from_bytes(unaligned), vals);
+    }
 
     #[test]
     fn dtype_const_matches() {
