@@ -66,19 +66,21 @@ uses the Vulkan `backend.gdn_recurrent_step` kernel. The BF16-gated
 `recurrent_unexpanded_qk` native-prefill fast path also doesn't engage, since
 Vulkan activations are F32.)
 
-**Fix options (deliberate, parity-gated follow-up — touches the working GDN
-forward, and this APU OOM/hangs under sustained load so it needs bounded
-validation):**
-1. Route the chunkwise matmuls through the backend (Vulkan `matmul_batched`),
-   or
-2. Loop the existing parity-tested Vulkan `gdn_recurrent_step` kernel over the
-   prefill tokens (recurrent form), or
-3. A fused Vulkan chunkwise-GDN prefill kernel (Metal already has
-   `metal_gdn_recurrent_prefill_native_head_last_decay_bf16`; `kiln-vulkan-kernel`
-   has `gdn_chunkwise.rs` from the training path to build on).
+**Update — GPU-parallel chunkwise prefill wired in (commit `kiln-model/vulkan:
+run GDN prefill chunkwise scan on the GPU`):** `gdn_chunkwise_recurrence` now
+dispatches `vk_gdn_chunkwise_forward_no_grad` (the GPU-parallel forward chunkwise
+kernel that already existed for training) via a new `BackendRuntime::
+gdn_chunkwise_forward`. GDN prefill layer **400 → 246 ms**, total prefill
+**12.8 → 9.1 s (~29%)**. Validated correct (GPU and CPU chunkwise produce
+identical greedy output). CUDA/Metal untouched (trait default Ok(None)).
 
-This is the single biggest remaining Vulkan perf win and is fully characterized
-above; it was deliberately NOT attempted as an end-of-session change.
+**Still open — single-submit fusion (the proper "max out the hardware" step):**
+246 ms/layer is **dispatch-bound** — `vk_gdn_chunkwise_forward_no_grad` issues a
+separate submit+wait per chunk-op instead of chaining the whole layer's scan into
+ONE `CommandBatch` (the decode resident path's pattern, generalized to multi-token
+prefill chunks). Eliminating the per-op submit/readback is the path to fully
+saturate the APU on prefill — the next Vulkan prefill work-package. Alternative:
+an F32 path for the BF16-gated native recurrent-prefill kernel.
 
 ## Other follow-ups (perf headroom, not regressions)
 
