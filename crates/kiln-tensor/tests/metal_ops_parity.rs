@@ -239,3 +239,71 @@ fn activation_silu_f32() {
     let d = max_abs_diff(&want, &got);
     assert!(d < 1e-5, "silu f32 max|Δ|={d}");
 }
+
+/// `metal_sdpa_last_axis` parity vs the kt CPU SDPA reference — the op
+/// `flash_attn_prefill` switched to when the candle `sdpa` symbol was
+/// dropped (#1082). Validates both Metal SDPA kernels at their real
+/// selection boundary (mirrors candle's `Sdpa::metal_fwd`):
+///   - q_seq > 8 -> `call_sdpa_full`, which applies causal masking;
+///   - q_seq <= 8 -> `call_sdpa_vector`, the MLX vector kernel (decode
+///     shape), which does NOT causal-mask — same as the candle path, so
+///     this is checked non-causal.
+#[test]
+fn sdpa_last_axis_f32() {
+    let Some(dev) = metal() else {
+        eprintln!("no Metal device; skipping");
+        return;
+    };
+    let (bs, heads, hd) = (1usize, 2usize, 64usize); // head_dim 64 is whitelisted
+
+    // Full-kernel causal path (q_seq > 8): must match the CPU causal ref.
+    {
+        let seq = 16usize;
+        let n = bs * heads * seq * hd;
+        let shape = [bs, heads, seq, hd];
+        let (cpu_q, met_q) = pair(&pattern(n, 70), &shape, dev);
+        let (cpu_k, met_k) = pair(&pattern(n, 71), &shape, dev);
+        let (cpu_v, met_v) = pair(&pattern(n, 72), &shape, dev);
+        let scale = 1.0f32 / (hd as f32).sqrt();
+        let got = kiln_tensor::metal_sdpa_last_axis(&met_q, &met_k, &met_v, scale, true)
+            .unwrap()
+            .to_vec::<f32>()
+            .unwrap();
+        let want = ops::causal_scaled_dot_product_attention(&cpu_q, &cpu_k, &cpu_v)
+            .unwrap()
+            .to_vec::<f32>()
+            .unwrap();
+        let d = max_abs_diff(&want, &got);
+        assert!(d < 1e-3, "full causal sdpa f32 (q_seq=16) max|Δ|={d}");
+    }
+
+    // Vector-kernel path at its design point — q_seq=1 decode (1 query
+    // attending to k_seq keys), non-causal. This is the shape the MLX
+    // vector kernel (call_sdpa_vector) is built for; it must match the
+    // CPU non-causal reference. (candle uses the same kernel for
+    // q_seq<=8; multi-query q_seq>1 is an MLX-vector quirk shared with
+    // candle and not naive-comparable — see the full-kernel block above
+    // for the q_seq>8 prefill path that DOES causal-mask.)
+    {
+        let (q_seq, k_seq) = (1usize, 8usize);
+        let qn = bs * heads * q_seq * hd;
+        let kn = bs * heads * k_seq * hd;
+        let cpu_q = Tensor::from_vec(pattern(qn, 73), vec![bs, heads, q_seq, hd]).unwrap();
+        let met_q = Tensor::from_vec_on(dev, pattern(qn, 73), vec![bs, heads, q_seq, hd]).unwrap();
+        let cpu_k = Tensor::from_vec(pattern(kn, 74), vec![bs, heads, k_seq, hd]).unwrap();
+        let met_k = Tensor::from_vec_on(dev, pattern(kn, 74), vec![bs, heads, k_seq, hd]).unwrap();
+        let cpu_v = Tensor::from_vec(pattern(kn, 75), vec![bs, heads, k_seq, hd]).unwrap();
+        let met_v = Tensor::from_vec_on(dev, pattern(kn, 75), vec![bs, heads, k_seq, hd]).unwrap();
+        let scale = 1.0f32 / (hd as f32).sqrt();
+        let got = kiln_tensor::metal_sdpa_last_axis(&met_q, &met_k, &met_v, scale, false)
+            .unwrap()
+            .to_vec::<f32>()
+            .unwrap();
+        let want = ops::scaled_dot_product_attention(&cpu_q, &cpu_k, &cpu_v)
+            .unwrap()
+            .to_vec::<f32>()
+            .unwrap();
+        let d = max_abs_diff(&want, &got);
+        assert!(d < 1e-3, "vector sdpa f32 (q_seq=1 decode, non-causal) max|Δ|={d}");
+    }
+}
