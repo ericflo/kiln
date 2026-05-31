@@ -1420,9 +1420,7 @@ impl BackendRuntime for VulkanBackend {
     }
 
     fn supports_flash_attn_paged_decode(&self) -> bool {
-        // Not yet implemented — returning false so callers don't skip
-        // their preamble work only to get Ok(None) back.
-        false
+        self.has_vulkan() && self.paged_attn_decode_batch_enabled
     }
 
     fn supports_gdn_forward_substitution(&self) -> bool {
@@ -2163,20 +2161,126 @@ impl BackendRuntime for VulkanBackend {
 
     fn flash_attn_paged_decode(
         &self,
-        _q: &kiln_tensor::Tensor,
-        _k_pool: &kiln_tensor::Tensor,
-        _v_pool: &kiln_tensor::Tensor,
-        _block_table: &kiln_tensor::Tensor,
-        _total_seqlen_k: usize,
-        _page_block_size: usize,
-        _softmax_scale: f32,
-        _causal: bool,
+        q: &kiln_tensor::Tensor,
+        k_pool: &kiln_tensor::Tensor,
+        v_pool: &kiln_tensor::Tensor,
+        block_table: &kiln_tensor::Tensor,
+        total_seqlen_k: usize,
+        page_block_size: usize,
+        softmax_scale: f32,
+        causal: bool,
     ) -> Result<Option<kiln_tensor::Tensor>> {
-        if !self.has_vulkan() {
+        if !self.has_vulkan()
+            || !self.paged_attn_decode_batch_enabled
+            || q.dtype() != kiln_tensor::DType::F32
+            || k_pool.dtype() != kiln_tensor::DType::F32
+            || v_pool.dtype() != kiln_tensor::DType::F32
+        {
             return Ok(None);
         }
-        // TODO: Implement Vulkan paged decode dispatch
-        Ok(None)
+        if !causal {
+            return Ok(None);
+        }
+        if !matches!(q.device(), kiln_tensor::Device::Cpu)
+            || !matches!(k_pool.device(), kiln_tensor::Device::Cpu)
+            || !matches!(v_pool.device(), kiln_tensor::Device::Cpu)
+            || !matches!(block_table.device(), kiln_tensor::Device::Cpu)
+        {
+            return Ok(None);
+        }
+
+        let Ok((batch, q_len, num_heads, head_dim)) = q.dims4() else {
+            return Ok(None);
+        };
+        let Ok((total_slots, num_kv_heads, k_head_dim)) = k_pool.dims3() else {
+            return Ok(None);
+        };
+        let Ok(v_dims) = v_pool.dims3() else {
+            return Ok(None);
+        };
+        let Ok((bt_batch, max_blocks_per_seq)) = block_table.dims2() else {
+            return Ok(None);
+        };
+        if batch == 0
+            || q_len != 1
+            || total_seqlen_k == 0
+            || page_block_size == 0
+            || head_dim > 256
+            || k_head_dim != head_dim
+            || v_dims != (total_slots, num_kv_heads, head_dim)
+            || num_heads % num_kv_heads != 0
+            || bt_batch != batch
+            || total_seqlen_k.div_ceil(page_block_size) > max_blocks_per_seq
+        {
+            return Ok(None);
+        }
+
+        let block_data = block_table
+            .flatten_all()
+            .context("Vulkan paged decode: flatten block_table")?
+            .to_dtype(kiln_tensor::DType::U32)
+            .context("Vulkan paged decode: block_table to u32")?
+            .to_vec1::<u32>()
+            .context("Vulkan paged decode: read block_table")?;
+        if block_data.len() != batch * max_blocks_per_seq {
+            return Ok(None);
+        }
+
+        for row in 0..batch {
+            let blocks_needed = total_seqlen_k.div_ceil(page_block_size).max(1);
+            for block_idx in 0..blocks_needed {
+                let block = block_data[row * max_blocks_per_seq + block_idx] as usize;
+                let last_pos_in_block = if block_idx == blocks_needed - 1 {
+                    total_seqlen_k - block_idx * page_block_size - 1
+                } else {
+                    page_block_size - 1
+                };
+                let last_slot = block
+                    .checked_mul(page_block_size)
+                    .and_then(|base| base.checked_add(last_pos_in_block))
+                    .context("Vulkan paged decode slot index overflow")?;
+                if last_slot >= total_slots {
+                    return Ok(None);
+                }
+            }
+        }
+
+        let vk_device = self
+            .vulkan_device
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
+        let q_data = kt_tensor_to_f32_bytes_with_shape(q)?.0;
+        let k_pool_data = kt_tensor_to_f32_bytes_with_shape(k_pool)?.0;
+        let v_pool_data = kt_tensor_to_f32_bytes_with_shape(v_pool)?.0;
+        let seq_lens = vec![
+            u32::try_from(total_seqlen_k)
+                .context("Vulkan paged decode total_seqlen_k exceeds u32")?;
+            batch
+        ];
+
+        let out_data = kiln_vulkan_kernel::kernels::dispatch_paged_attn_decode_batch_paged_f32_bytes(
+            vk_device,
+            &q_data,
+            &k_pool_data,
+            &v_pool_data,
+            batch,
+            num_heads,
+            head_dim,
+            total_slots,
+            num_kv_heads,
+            &block_data,
+            &seq_lens,
+            max_blocks_per_seq,
+            page_block_size,
+            softmax_scale,
+        )
+        .context("Vulkan paged decode batch-paged kernel failed")?;
+
+        Ok(Some(kt_tensor_from_f32_bytes(
+            &out_data,
+            &[batch, 1, num_heads, head_dim],
+            kiln_tensor::DType::F32,
+        )?))
     }
 
     fn flash_attn_paged_decode_contiguous_batch_dyn_seqlen(

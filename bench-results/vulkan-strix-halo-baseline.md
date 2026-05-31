@@ -126,8 +126,14 @@ Other proper work-packages for full saturation (per "max out the hardware in
 every config"):
 - **True multi-row batched resident decode** (bs>1 / continuous-batched is
   currently rowwise-serialized through the fast bs=1 path).
-- **Vulkan paged-attention decode kernel** (`supports_flash_attn_paged_decode`
-  is false → long-context decode attention falls to the manual GQA path).
+- **Vulkan paged-attention decode kernel**: the kernel crate already had
+  `paged_attn_decode_batch_paged.comp`; Vulkan now advertises
+  `supports_flash_attn_paged_decode` and wires the single-query paged-decode
+  trait call through the GPU-side block-table walker from kt tensors, so the
+  long-context non-contiguous decode path no longer has to fall straight to the
+  manual GQA attention path. Remaining saturation work is the multi-row
+  resident decode orchestration below, not the existence of the paged attention
+  kernel.
 
 ## Other follow-ups (perf headroom, not regressions)
 
