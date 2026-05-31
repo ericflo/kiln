@@ -164,20 +164,21 @@ every config"):
   `KILN_VK_MICROBENCH_WARMUP`, `KILN_VK_MICROBENCH_TIMED`, and
   `KILN_VK_MICROBENCH_REPEATS`. On RADV STRIX_HALO,
   `full_token_resident_batched` (32 layers, synthetic contiguous K/V pool,
-  one submit per token) measured:
+  one submit per token) measured after routing the large-batch QKV, out-proj,
+  gate/up, and down paths through row-reuse shader variants:
 
   | batch | per token | rows/s |
   |---:|---:|---:|
   | 1 | 58.2 ms | 17 |
   | 4 | 57.9 ms | 69 |
-  | 8 | 102.0 ms | 78 |
-  | 16 | 190.2 ms | 84 |
-  | 32 | 380.6 ms | 84 |
-  | 64 | 855.3 ms | 75 |
+  | 8 | 92.7 ms | 86 |
+  | 16 | 133.1 ms | 120 |
+  | 32 | 200.0 ms | 160 |
+  | 64 | 416.7 ms | 154 |
 
-  Throughput plateaus around batch 16-32 on this APU, so the next tuning
-  target is the large batched projection/MLP stack and memory bandwidth, not
-  host submit count.
+  Throughput now scales to about 160 rows/s at batch 32 on this APU; batch 64
+  is slightly worse, so the next tuning target is deeper tiling/cache reuse
+  inside the large projection/MLP shaders rather than host submit count.
 - **Vulkan paged-attention decode kernel**: the kernel crate already had
   `paged_attn_decode_batch_paged.comp`; Vulkan now advertises
   `supports_flash_attn_paged_decode` and wires the single-query paged-decode

@@ -18,6 +18,7 @@ use kiln_vulkan_kernel::device::VulkanDevice;
 use kiln_vulkan_kernel::kernels::{
     upload_bf16_packed_buffer_from_slice, upload_f32_buffer_from_slice,
 };
+use kiln_vulkan_kernel::shaders;
 
 // Used by run_full_step_resident — keep the module-level imports here so the
 // helper itself stays terse.
@@ -69,6 +70,78 @@ fn batch_sweep() -> Vec<usize> {
         return DEFAULT_BATCHES.to_vec();
     };
     parsed
+}
+
+fn enabled_unless_disabled(name: &str) -> bool {
+    std::env::var(name).is_err()
+}
+
+fn full_attn_qkv_bf16w_plan(batch: usize, total_out: usize) -> (&'static str, u32) {
+    let rows4 = batch >= 16 && enabled_unless_disabled("KILN_DISABLE_VULKAN_FULL_ATTN_QKV_BF16W_ROWS4");
+    let row_groups = if rows4 { batch.div_ceil(4) } else { batch };
+    let shader = if rows4 {
+        shaders::FULL_ATTN_QKV_DECODE_BATCHED_ROWS4_BF16W
+    } else {
+        shaders::FULL_ATTN_QKV_DECODE_BATCHED_BF16W
+    };
+    (shader, (row_groups * total_out.div_ceil(16)) as u32)
+}
+
+fn linear_bf16w_batched_plan(batch: usize, out_dim: usize) -> (&'static str, u32) {
+    let rows4 = batch >= 32 && enabled_unless_disabled("KILN_DISABLE_VULKAN_LINEAR_BF16W_ROWS4");
+    let row_groups = if rows4 { batch.div_ceil(4) } else { batch };
+    let shader = if rows4 {
+        shaders::LINEAR_DECODE_BATCHED_ROWS4_BF16W
+    } else {
+        shaders::LINEAR_DECODE_BATCHED_BF16W
+    };
+    (shader, (row_groups * out_dim.div_ceil(32)) as u32)
+}
+
+fn mlp_gate_up_bf16w_batched_plan(batch: usize, intermediate: usize) -> (&'static str, u32) {
+    let rows8 = batch >= 64 && enabled_unless_disabled("KILN_DISABLE_VULKAN_MLP_BF16_ROWS8");
+    let rows4 = batch >= 8
+        && !rows8
+        && enabled_unless_disabled("KILN_DISABLE_VULKAN_MLP_BF16_GATE_UP_ROWS4");
+    if rows8 {
+        (
+            shaders::MLP_GATE_UP_DECODE_BATCHED_ROWS8_BF16W,
+            (batch.div_ceil(8) * intermediate.div_ceil(64)) as u32,
+        )
+    } else if rows4 {
+        (
+            shaders::MLP_GATE_UP_DECODE_BATCHED_ROWS4_BF16W,
+            (batch.div_ceil(4) * intermediate.div_ceil(64)) as u32,
+        )
+    } else {
+        (
+            shaders::MLP_GATE_UP_DECODE_BATCHED_BF16W,
+            (batch * intermediate.div_ceil(128)) as u32,
+        )
+    }
+}
+
+fn mlp_down_bf16w_batched_plan(batch: usize, out_dim: usize) -> (&'static str, u32) {
+    let rows8 = batch >= 64 && enabled_unless_disabled("KILN_DISABLE_VULKAN_MLP_BF16_ROWS8");
+    let rows4 = batch >= 32
+        && !rows8
+        && enabled_unless_disabled("KILN_DISABLE_VULKAN_MLP_BF16_DOWN_ROWS4");
+    if rows8 {
+        (
+            shaders::LINEAR_DECODE_BATCHED_ROWS8_BF16W,
+            (batch.div_ceil(8) * out_dim.div_ceil(32)) as u32,
+        )
+    } else if rows4 {
+        (
+            shaders::LINEAR_DECODE_BATCHED_ROWS4_BF16W,
+            (batch.div_ceil(4) * out_dim.div_ceil(32)) as u32,
+        )
+    } else {
+        (
+            shaders::LINEAR_DECODE_BATCHED_BF16W,
+            (batch * out_dim.div_ceil(32)) as u32,
+        )
+    }
 }
 
 fn time<F: FnMut() -> Result<()>>(label: &str, batch: usize, mut f: F) -> Result<()> {
@@ -748,10 +821,6 @@ fn run_full_step_resident_batched(
         env!("CARGO_MANIFEST_DIR"),
         "/csrc/shaders/qwen_rmsnorm_forward.comp"
     );
-    let qkv_shader = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/csrc/shaders/full_attn_qkv_decode_batched_bf16w.comp"
-    );
     let rope_shader = concat!(env!("CARGO_MANIFEST_DIR"), "/csrc/shaders/vk_rope_f32.comp");
     let paged_attn_shader = concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -761,15 +830,7 @@ fn run_full_step_resident_batched(
         env!("CARGO_MANIFEST_DIR"),
         "/csrc/shaders/vk_mul_sigmoid_gate_f32.comp"
     );
-    let linear_decode_shader = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/csrc/shaders/linear_decode_batched_bf16w.comp"
-    );
     let add_shader = concat!(env!("CARGO_MANIFEST_DIR"), "/csrc/shaders/add.comp");
-    let mlp_gate_up_shader = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/csrc/shaders/mlp_gate_up_decode_batched_bf16w.comp"
-    );
 
     for &batch in batches {
         let hidden_bytes = (batch * HIDDEN * 4) as u64;
@@ -820,6 +881,7 @@ fn run_full_step_resident_batched(
             )?;
             // 2) Fused QKV. Always use batched bf16w shader (covers b>=1).
             let total_out = Q_DIM + K_DIM + V_DIM;
+            let (qkv_shader, qkv_workgroups) = full_attn_qkv_bf16w_plan(batch, total_out);
             b.record_shader(
                 qkv_shader,
                 &[
@@ -837,7 +899,7 @@ fn run_full_step_resident_batched(
                     total_out as u32,
                     batch as u32,
                 ],
-                Workgroups::OneD((batch * total_out.div_ceil(16)) as u32),
+                Workgroups::OneD(qkv_workgroups),
             )?;
             // 3) Per-head QK norm — same rmsnorm shader, rows=batch*heads.
             b.record_shader(
@@ -924,11 +986,12 @@ fn run_full_step_resident_batched(
                 Workgroups::OneD((batch * num_heads * head_dim).div_ceil(256) as u32),
             )?;
             // 7) Attention out_proj
+            let (attn_out_shader, attn_out_workgroups) = linear_bf16w_batched_plan(batch, HIDDEN);
             b.record_shader(
-                linear_decode_shader,
+                attn_out_shader,
                 &[attn_post_gate.handle(), out_w.handle(), attn_out.handle()],
                 &[Q_DIM as u32, HIDDEN as u32, batch as u32],
-                Workgroups::OneD((batch * HIDDEN.div_ceil(32)) as u32),
+                Workgroups::OneD(attn_out_workgroups),
             )?;
             // 8) Residual: x + attn_out -> attn_residual
             b.record_shader(
@@ -949,6 +1012,8 @@ fn run_full_step_resident_batched(
                 Workgroups::OneD(batch as u32),
             )?;
             // 10) MLP gate_up
+            let (mlp_gate_up_shader, mlp_gate_up_workgroups) =
+                mlp_gate_up_bf16w_batched_plan(batch, INTERMEDIATE);
             b.record_shader(
                 mlp_gate_up_shader,
                 &[
@@ -958,14 +1023,15 @@ fn run_full_step_resident_batched(
                     scratch.handle(),
                 ],
                 &[HIDDEN as u32, INTERMEDIATE as u32, batch as u32],
-                Workgroups::OneD((batch * INTERMEDIATE.div_ceil(128)) as u32),
+                Workgroups::OneD(mlp_gate_up_workgroups),
             )?;
             // 11) MLP down
+            let (mlp_down_shader, mlp_down_workgroups) = mlp_down_bf16w_batched_plan(batch, HIDDEN);
             b.record_shader(
-                linear_decode_shader,
+                mlp_down_shader,
                 &[scratch.handle(), down_w.handle(), final_out.handle()],
                 &[INTERMEDIATE as u32, HIDDEN as u32, batch as u32],
-                Workgroups::OneD((batch * HIDDEN.div_ceil(32)) as u32),
+                Workgroups::OneD(mlp_down_workgroups),
             )?;
             // 12) Final residual
             b.record_shader(
@@ -1031,10 +1097,6 @@ fn run_full_token_resident_batched(
         env!("CARGO_MANIFEST_DIR"),
         "/csrc/shaders/qwen_rmsnorm_forward.comp"
     );
-    let qkv_shader = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/csrc/shaders/full_attn_qkv_decode_batched_bf16w.comp"
-    );
     let rope_shader = concat!(env!("CARGO_MANIFEST_DIR"), "/csrc/shaders/vk_rope_f32.comp");
     let paged_attn_shader = concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -1044,15 +1106,7 @@ fn run_full_token_resident_batched(
         env!("CARGO_MANIFEST_DIR"),
         "/csrc/shaders/vk_mul_sigmoid_gate_f32.comp"
     );
-    let linear_decode_shader = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/csrc/shaders/linear_decode_batched_bf16w.comp"
-    );
     let add_shader = concat!(env!("CARGO_MANIFEST_DIR"), "/csrc/shaders/add.comp");
-    let mlp_gate_up_shader = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/csrc/shaders/mlp_gate_up_decode_batched_bf16w.comp"
-    );
 
     for &batch in batches {
         let hidden_bytes = (batch * HIDDEN * 4) as u64;
@@ -1101,6 +1155,7 @@ fn run_full_token_resident_batched(
                     Workgroups::OneD(batch as u32),
                 )?;
                 let total_out = Q_DIM + K_DIM + V_DIM;
+                let (qkv_shader, qkv_workgroups) = full_attn_qkv_bf16w_plan(batch, total_out);
                 b.record_shader(
                     qkv_shader,
                     &[
@@ -1118,7 +1173,7 @@ fn run_full_token_resident_batched(
                         total_out as u32,
                         batch as u32,
                     ],
-                    Workgroups::OneD((batch * total_out.div_ceil(16)) as u32),
+                    Workgroups::OneD(qkv_workgroups),
                 )?;
                 b.record_shader(
                     rmsnorm_shader,
@@ -1200,11 +1255,13 @@ fn run_full_token_resident_batched(
                     &[(batch * num_heads * head_dim) as u32],
                     Workgroups::OneD((batch * num_heads * head_dim).div_ceil(256) as u32),
                 )?;
+                let (attn_out_shader, attn_out_workgroups) =
+                    linear_bf16w_batched_plan(batch, HIDDEN);
                 b.record_shader(
-                    linear_decode_shader,
+                    attn_out_shader,
                     &[attn_post_gate.handle(), out_w.handle(), attn_out.handle()],
                     &[Q_DIM as u32, HIDDEN as u32, batch as u32],
-                    Workgroups::OneD((batch * HIDDEN.div_ceil(32)) as u32),
+                    Workgroups::OneD(attn_out_workgroups),
                 )?;
                 b.record_shader(
                     add_shader,
@@ -1222,6 +1279,8 @@ fn run_full_token_resident_batched(
                     &[batch as u32, HIDDEN as u32, (1e-6f32).to_bits()],
                     Workgroups::OneD(batch as u32),
                 )?;
+                let (mlp_gate_up_shader, mlp_gate_up_workgroups) =
+                    mlp_gate_up_bf16w_batched_plan(batch, INTERMEDIATE);
                 b.record_shader(
                     mlp_gate_up_shader,
                     &[
@@ -1231,13 +1290,15 @@ fn run_full_token_resident_batched(
                         scratch.handle(),
                     ],
                     &[HIDDEN as u32, INTERMEDIATE as u32, batch as u32],
-                    Workgroups::OneD((batch * INTERMEDIATE.div_ceil(128)) as u32),
+                    Workgroups::OneD(mlp_gate_up_workgroups),
                 )?;
+                let (mlp_down_shader, mlp_down_workgroups) =
+                    mlp_down_bf16w_batched_plan(batch, HIDDEN);
                 b.record_shader(
-                    linear_decode_shader,
+                    mlp_down_shader,
                     &[scratch.handle(), down_w.handle(), final_out.handle()],
                     &[INTERMEDIATE as u32, HIDDEN as u32, batch as u32],
-                    Workgroups::OneD((batch * HIDDEN.div_ceil(32)) as u32),
+                    Workgroups::OneD(mlp_down_workgroups),
                 )?;
                 b.record_shader(
                     add_shader,
@@ -1318,10 +1379,6 @@ fn run_full_token_resident_paged(
         env!("CARGO_MANIFEST_DIR"),
         "/csrc/shaders/qwen_rmsnorm_forward.comp"
     );
-    let qkv_shader = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/csrc/shaders/full_attn_qkv_decode_batched_bf16w.comp"
-    );
     let rope_shader = concat!(env!("CARGO_MANIFEST_DIR"), "/csrc/shaders/vk_rope_f32.comp");
     let paged_attn_splitk_shader = concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -1339,15 +1396,7 @@ fn run_full_token_resident_paged(
         env!("CARGO_MANIFEST_DIR"),
         "/csrc/shaders/vk_mul_sigmoid_gate_f32.comp"
     );
-    let linear_decode_shader = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/csrc/shaders/linear_decode_batched_bf16w.comp"
-    );
     let add_shader = concat!(env!("CARGO_MANIFEST_DIR"), "/csrc/shaders/add.comp");
-    let mlp_gate_up_shader = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/csrc/shaders/mlp_gate_up_decode_batched_bf16w.comp"
-    );
 
     let mk_dev = |bytes: &[u8]| -> Result<VulkanBuffer> {
         let buf = VulkanBuffer::create_device_local(
@@ -1433,6 +1482,7 @@ fn run_full_token_resident_paged(
                 )?;
                 // 2) QKV projection (batched bf16w into one combined out)
                 let total_out = Q_DIM + K_DIM + V_DIM;
+                let (qkv_shader, qkv_workgroups) = full_attn_qkv_bf16w_plan(batch, total_out);
                 b.record_shader(
                     qkv_shader,
                     &[
@@ -1450,7 +1500,7 @@ fn run_full_token_resident_paged(
                         total_out as u32,
                         batch as u32,
                     ],
-                    Workgroups::OneD((batch * total_out.div_ceil(16)) as u32),
+                    Workgroups::OneD(qkv_workgroups),
                 )?;
                 // 3) Q-norm
                 b.record_shader(
@@ -1566,11 +1616,13 @@ fn run_full_token_resident_paged(
                     Workgroups::OneD((batch * num_heads * head_dim).div_ceil(256) as u32),
                 )?;
                 // 10) Output projection
+                let (attn_out_shader, attn_out_workgroups) =
+                    linear_bf16w_batched_plan(batch, HIDDEN);
                 b.record_shader(
-                    linear_decode_shader,
+                    attn_out_shader,
                     &[attn_post_gate.handle(), out_w.handle(), attn_out.handle()],
                     &[Q_DIM as u32, HIDDEN as u32, batch as u32],
-                    Workgroups::OneD((batch * HIDDEN.div_ceil(32)) as u32),
+                    Workgroups::OneD(attn_out_workgroups),
                 )?;
                 // 11) Residual
                 b.record_shader(
@@ -1591,6 +1643,8 @@ fn run_full_token_resident_paged(
                     Workgroups::OneD(batch as u32),
                 )?;
                 // 13) MLP gate-up
+                let (mlp_gate_up_shader, mlp_gate_up_workgroups) =
+                    mlp_gate_up_bf16w_batched_plan(batch, INTERMEDIATE);
                 b.record_shader(
                     mlp_gate_up_shader,
                     &[
@@ -1600,14 +1654,16 @@ fn run_full_token_resident_paged(
                         scratch.handle(),
                     ],
                     &[HIDDEN as u32, INTERMEDIATE as u32, batch as u32],
-                    Workgroups::OneD((batch * INTERMEDIATE.div_ceil(128)) as u32),
+                    Workgroups::OneD(mlp_gate_up_workgroups),
                 )?;
                 // 14) MLP down
+                let (mlp_down_shader, mlp_down_workgroups) =
+                    mlp_down_bf16w_batched_plan(batch, HIDDEN);
                 b.record_shader(
-                    linear_decode_shader,
+                    mlp_down_shader,
                     &[scratch.handle(), down_w.handle(), final_out.handle()],
                     &[INTERMEDIATE as u32, HIDDEN as u32, batch as u32],
-                    Workgroups::OneD((batch * HIDDEN.div_ceil(32)) as u32),
+                    Workgroups::OneD(mlp_down_workgroups),
                 )?;
                 // 15) Final residual into x for next layer
                 b.record_shader(

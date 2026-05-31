@@ -1,0 +1,114 @@
+// Batched BF16-weight linear projection fused with residual add, four rows per
+// workgroup. Reuses each packed weight load across adjacent rows.
+//
+// Computes:
+//   out[b, c] = sum_h x[b, h] * weight[h, c] + residual[b, c]
+//
+// Push constants: hidden, out_dim, batch.
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 32, local_size_y = 4, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint hidden;
+    uint out_dim;
+    uint batch;
+};
+
+layout(binding = 0) readonly  buffer XBuf        { float data_x[];        };
+layout(binding = 1) readonly  buffer WeightBuf   { uint  data_w[];        };
+layout(binding = 2) readonly  buffer ResidualBuf { float data_residual[]; };
+layout(binding = 3) writeonly buffer OutBuf      { float data_out[];      };
+
+shared float partial0[128];
+shared float partial1[128];
+shared float partial2[128];
+shared float partial3[128];
+
+float load_weight(uint idx) {
+    uint packed = data_w[idx >> 1];
+    uint bf16_bits = ((idx & 1u) == 0u) ? (packed & 0xffffu) : (packed >> 16);
+    return uintBitsToFloat(bf16_bits << 16);
+}
+
+void main() {
+    uint col_lane = gl_LocalInvocationID.x;
+    uint red_lane = gl_LocalInvocationID.y;
+    uint col_groups = (out_dim + 31u) / 32u;
+    uint row_group = gl_WorkGroupID.x / col_groups;
+    uint col_group = gl_WorkGroupID.x - row_group * col_groups;
+    uint row0 = row_group * 4u;
+    uint row1 = row0 + 1u;
+    uint row2 = row0 + 2u;
+    uint row3 = row0 + 3u;
+    uint col = col_group * 32u + col_lane;
+    uint partial_idx = col_lane * 4u + red_lane;
+
+    float sum0 = 0.0;
+    float sum1 = 0.0;
+    float sum2 = 0.0;
+    float sum3 = 0.0;
+    if (col < out_dim) {
+        bool valid0 = row0 < batch;
+        bool valid1 = row1 < batch;
+        bool valid2 = row2 < batch;
+        bool valid3 = row3 < batch;
+        uint x_base0 = row0 * hidden;
+        uint x_base1 = row1 * hidden;
+        uint x_base2 = row2 * hidden;
+        uint x_base3 = row3 * hidden;
+        for (uint h = red_lane; h < hidden; h += 4u) {
+            float w = load_weight(h * out_dim + col);
+            if (valid0) {
+                sum0 += data_x[x_base0 + h] * w;
+            }
+            if (valid1) {
+                sum1 += data_x[x_base1 + h] * w;
+            }
+            if (valid2) {
+                sum2 += data_x[x_base2 + h] * w;
+            }
+            if (valid3) {
+                sum3 += data_x[x_base3 + h] * w;
+            }
+        }
+    }
+
+    partial0[partial_idx] = sum0;
+    partial1[partial_idx] = sum1;
+    partial2[partial_idx] = sum2;
+    partial3[partial_idx] = sum3;
+    barrier();
+
+    if (red_lane == 0u && col < out_dim) {
+        float total0 = 0.0;
+        float total1 = 0.0;
+        float total2 = 0.0;
+        float total3 = 0.0;
+        for (uint lane = 0u; lane < 4u; lane++) {
+            uint idx = col_lane * 4u + lane;
+            total0 += partial0[idx];
+            total1 += partial1[idx];
+            total2 += partial2[idx];
+            total3 += partial3[idx];
+        }
+        if (row0 < batch) {
+            uint out_idx0 = row0 * out_dim + col;
+            data_out[out_idx0] = total0 + data_residual[out_idx0];
+        }
+        if (row1 < batch) {
+            uint out_idx1 = row1 * out_dim + col;
+            data_out[out_idx1] = total1 + data_residual[out_idx1];
+        }
+        if (row2 < batch) {
+            uint out_idx2 = row2 * out_dim + col;
+            data_out[out_idx2] = total2 + data_residual[out_idx2];
+        }
+        if (row3 < batch) {
+            uint out_idx3 = row3 * out_dim + col;
+            data_out[out_idx3] = total3 + data_residual[out_idx3];
+        }
+    }
+}

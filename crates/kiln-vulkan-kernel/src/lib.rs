@@ -72,8 +72,16 @@ pub mod shaders {
     pub const LINEAR_DECODE_BF16W_ADD_RESIDUAL: &str =
         shader_path!("linear_decode_bf16w_add_residual");
     pub const LINEAR_DECODE_BATCHED_BF16W: &str = shader_path!("linear_decode_batched_bf16w");
+    pub const LINEAR_DECODE_BATCHED_ROWS4_BF16W: &str =
+        shader_path!("linear_decode_batched_rows4_bf16w");
+    pub const LINEAR_DECODE_BATCHED_ROWS8_BF16W: &str =
+        shader_path!("linear_decode_batched_rows8_bf16w");
     pub const LINEAR_DECODE_BATCHED_BF16W_ADD_RESIDUAL: &str =
         shader_path!("linear_decode_batched_bf16w_add_residual");
+    pub const LINEAR_DECODE_BATCHED_BF16W_ADD_RESIDUAL_ROWS4: &str =
+        shader_path!("linear_decode_batched_bf16w_add_residual_rows4");
+    pub const LINEAR_DECODE_BATCHED_BF16W_ADD_RESIDUAL_ROWS8: &str =
+        shader_path!("linear_decode_batched_bf16w_add_residual_rows8");
     pub const LINEAR_DECODE_ARGMAX_BATCHED_BLOCKS_BF16W: &str =
         shader_path!("linear_decode_argmax_batched_blocks_bf16w");
     pub const LINEAR_DECODE_ARGMAX_BATCHED_REDUCE: &str =
@@ -84,6 +92,10 @@ pub mod shaders {
     pub const MLP_GATE_UP_DECODE_BF16W: &str = shader_path!("mlp_gate_up_decode_bf16w");
     pub const MLP_GATE_UP_DECODE_BATCHED_BF16W: &str =
         shader_path!("mlp_gate_up_decode_batched_bf16w");
+    pub const MLP_GATE_UP_DECODE_BATCHED_ROWS4_BF16W: &str =
+        shader_path!("mlp_gate_up_decode_batched_rows4_bf16w");
+    pub const MLP_GATE_UP_DECODE_BATCHED_ROWS8_BF16W: &str =
+        shader_path!("mlp_gate_up_decode_batched_rows8_bf16w");
     pub const GDN_IN_PROJ_SPLIT: &str = shader_path!("gdn_in_proj_split");
     pub const GDN_IN_PROJ_SPLIT_BATCHED: &str = shader_path!("gdn_in_proj_split_batched");
     pub const GDN_QKV_SPLIT: &str = shader_path!("gdn_qkv_split");

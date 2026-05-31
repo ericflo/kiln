@@ -124,6 +124,14 @@ const SHADERS: &[(&str, &str)] = &[
         "SPIR_V_LINEAR_DECODE_BATCHED_BF16W_ADD_RESIDUAL",
     ),
     (
+        "linear_decode_batched_bf16w_add_residual_rows4",
+        "SPIR_V_LINEAR_DECODE_BATCHED_BF16W_ADD_RESIDUAL_ROWS4",
+    ),
+    (
+        "linear_decode_batched_bf16w_add_residual_rows8",
+        "SPIR_V_LINEAR_DECODE_BATCHED_BF16W_ADD_RESIDUAL_ROWS8",
+    ),
+    (
         "linear_decode_batched_offset_bf16w",
         "SPIR_V_LINEAR_DECODE_BATCHED_OFFSET_BF16W",
     ),

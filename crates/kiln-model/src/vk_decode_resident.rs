@@ -79,6 +79,79 @@ fn timing_enabled() -> bool {
     })
 }
 
+fn enabled_unless_disabled(name: &str) -> bool {
+    std::env::var(name).is_err()
+}
+
+fn full_attn_qkv_bf16w_plan(batch: usize, total_out: usize) -> (&'static str, u32) {
+    let rows4 =
+        batch >= 16 && enabled_unless_disabled("KILN_DISABLE_VULKAN_FULL_ATTN_QKV_BF16W_ROWS4");
+    let row_groups = if rows4 { batch.div_ceil(4) } else { batch };
+    let shader = if rows4 {
+        shaders::FULL_ATTN_QKV_DECODE_BATCHED_ROWS4_BF16W
+    } else {
+        shaders::FULL_ATTN_QKV_DECODE_BATCHED_BF16W
+    };
+    (shader, (row_groups * total_out.div_ceil(16)) as u32)
+}
+
+fn linear_bf16w_batched_plan(batch: usize, out_dim: usize) -> (&'static str, u32) {
+    let rows4 = batch >= 32 && enabled_unless_disabled("KILN_DISABLE_VULKAN_LINEAR_BF16W_ROWS4");
+    let row_groups = if rows4 { batch.div_ceil(4) } else { batch };
+    let shader = if rows4 {
+        shaders::LINEAR_DECODE_BATCHED_ROWS4_BF16W
+    } else {
+        shaders::LINEAR_DECODE_BATCHED_BF16W
+    };
+    (shader, (row_groups * out_dim.div_ceil(32)) as u32)
+}
+
+fn mlp_gate_up_bf16w_batched_plan(batch: usize, intermediate: usize) -> (&'static str, u32) {
+    let rows8 = batch >= 64 && enabled_unless_disabled("KILN_DISABLE_VULKAN_MLP_BF16_ROWS8");
+    let rows4 = batch >= 8
+        && !rows8
+        && enabled_unless_disabled("KILN_DISABLE_VULKAN_MLP_BF16_GATE_UP_ROWS4");
+    if rows8 {
+        (
+            shaders::MLP_GATE_UP_DECODE_BATCHED_ROWS8_BF16W,
+            (batch.div_ceil(8) * intermediate.div_ceil(64)) as u32,
+        )
+    } else if rows4 {
+        (
+            shaders::MLP_GATE_UP_DECODE_BATCHED_ROWS4_BF16W,
+            (batch.div_ceil(4) * intermediate.div_ceil(64)) as u32,
+        )
+    } else {
+        (
+            shaders::MLP_GATE_UP_DECODE_BATCHED_BF16W,
+            (batch * intermediate.div_ceil(128)) as u32,
+        )
+    }
+}
+
+fn mlp_down_add_residual_bf16w_batched_plan(batch: usize, out_dim: usize) -> (&'static str, u32) {
+    let rows8 = batch >= 64 && enabled_unless_disabled("KILN_DISABLE_VULKAN_MLP_BF16_ROWS8");
+    let rows4 = batch >= 32
+        && !rows8
+        && enabled_unless_disabled("KILN_DISABLE_VULKAN_MLP_BF16_DOWN_ROWS4");
+    if rows8 {
+        (
+            shaders::LINEAR_DECODE_BATCHED_BF16W_ADD_RESIDUAL_ROWS8,
+            (batch.div_ceil(8) * out_dim.div_ceil(32)) as u32,
+        )
+    } else if rows4 {
+        (
+            shaders::LINEAR_DECODE_BATCHED_BF16W_ADD_RESIDUAL_ROWS4,
+            (batch.div_ceil(4) * out_dim.div_ceil(32)) as u32,
+        )
+    } else {
+        (
+            shaders::LINEAR_DECODE_BATCHED_BF16W_ADD_RESIDUAL,
+            (batch * out_dim.div_ceil(32)) as u32,
+        )
+    }
+}
+
 /// Print accumulated per-block timing to stderr and zero the counters.
 /// Call from the bench / harness once per decode token to see a
 /// per-token breakdown.
@@ -1900,8 +1973,9 @@ pub fn record_full_attn_block_batched_into(
         &[batch_size as u32, hidden as u32, eps.to_bits()],
         Workgroups::OneD(batch_size as u32),
     )?;
+    let (qkv_shader, qkv_workgroups) = full_attn_qkv_bf16w_plan(batch_size, total_qkv_out);
     batch.record_shader(
-        shaders::FULL_ATTN_QKV_DECODE_BATCHED_BF16W,
+        qkv_shader,
         &[
             normed.handle(),
             q_w.handle(),
@@ -1917,7 +1991,7 @@ pub fn record_full_attn_block_batched_into(
             total_qkv_out as u32,
             batch_size as u32,
         ],
-        Workgroups::OneD((batch_size * total_qkv_out.div_ceil(16)) as u32),
+        Workgroups::OneD(qkv_workgroups),
     )?;
     batch.record_shader(
         shaders::QKV_GATE_SPLIT_BATCHED,
@@ -2046,11 +2120,12 @@ pub fn record_full_attn_block_batched_into(
         &[(batch_size * q_h_d) as u32],
         Workgroups::OneD((batch_size * q_h_d).div_ceil(256) as u32),
     )?;
+    let (attn_out_shader, attn_out_workgroups) = linear_bf16w_batched_plan(batch_size, hidden);
     batch.record_shader(
-        shaders::LINEAR_DECODE_BATCHED_BF16W,
+        attn_out_shader,
         &[attn_post_gate.handle(), o_w.handle(), attn_out.handle()],
         &[q_h_d as u32, hidden as u32, batch_size as u32],
-        Workgroups::OneD((batch_size * hidden.div_ceil(32)) as u32),
+        Workgroups::OneD(attn_out_workgroups),
     )?;
     batch.record_shader(
         shaders::ADD_QWEN_RMSNORM_BATCHED,
@@ -2064,8 +2139,10 @@ pub fn record_full_attn_block_batched_into(
         &[batch_size as u32, hidden as u32, eps.to_bits()],
         Workgroups::OneD(batch_size as u32),
     )?;
+    let (mlp_gate_up_shader, mlp_gate_up_workgroups) =
+        mlp_gate_up_bf16w_batched_plan(batch_size, intermediate);
     batch.record_shader(
-        shaders::MLP_GATE_UP_DECODE_BATCHED_BF16W,
+        mlp_gate_up_shader,
         &[
             normed_post.handle(),
             gate_w.handle(),
@@ -2073,10 +2150,12 @@ pub fn record_full_attn_block_batched_into(
             mlp_scratch.handle(),
         ],
         &[hidden as u32, intermediate as u32, batch_size as u32],
-        Workgroups::OneD((batch_size * intermediate.div_ceil(128)) as u32),
+        Workgroups::OneD(mlp_gate_up_workgroups),
     )?;
+    let (mlp_down_shader, mlp_down_workgroups) =
+        mlp_down_add_residual_bf16w_batched_plan(batch_size, hidden);
     batch.record_shader(
-        shaders::LINEAR_DECODE_BATCHED_BF16W_ADD_RESIDUAL,
+        mlp_down_shader,
         &[
             mlp_scratch.handle(),
             down_w.handle(),
@@ -2084,7 +2163,7 @@ pub fn record_full_attn_block_batched_into(
             x_out_buf.handle(),
         ],
         &[intermediate as u32, hidden as u32, batch_size as u32],
-        Workgroups::OneD((batch_size * hidden.div_ceil(32)) as u32),
+        Workgroups::OneD(mlp_down_workgroups),
     )?;
     Ok(true)
 }
@@ -2582,11 +2661,12 @@ pub fn record_gdn_block_batched_into(
         &[nv as u32, dk as u32, dv as u32, eps.to_bits(), batch_size as u32],
         Workgroups::OneD((batch_size * nv) as u32),
     )?;
+    let (gdn_out_shader, gdn_out_workgroups) = linear_bf16w_batched_plan(batch_size, hidden);
     batch.record_shader(
-        shaders::LINEAR_DECODE_BATCHED_BF16W,
+        gdn_out_shader,
         &[gated_norm.handle(), out_w.handle(), gdn_out.handle()],
         &[v_dim as u32, hidden as u32, batch_size as u32],
-        Workgroups::OneD((batch_size * hidden.div_ceil(32)) as u32),
+        Workgroups::OneD(gdn_out_workgroups),
     )?;
     batch.record_shader(
         shaders::ADD,
@@ -2604,8 +2684,10 @@ pub fn record_gdn_block_batched_into(
         &[batch_size as u32, hidden as u32, eps.to_bits()],
         Workgroups::OneD(batch_size as u32),
     )?;
+    let (mlp_gate_up_shader, mlp_gate_up_workgroups) =
+        mlp_gate_up_bf16w_batched_plan(batch_size, intermediate);
     batch.record_shader(
-        shaders::MLP_GATE_UP_DECODE_BATCHED_BF16W,
+        mlp_gate_up_shader,
         &[
             normed_post.handle(),
             gate_w.handle(),
@@ -2613,10 +2695,12 @@ pub fn record_gdn_block_batched_into(
             mlp_scratch.handle(),
         ],
         &[hidden as u32, intermediate as u32, batch_size as u32],
-        Workgroups::OneD((batch_size * intermediate.div_ceil(128)) as u32),
+        Workgroups::OneD(mlp_gate_up_workgroups),
     )?;
+    let (mlp_down_shader, mlp_down_workgroups) =
+        mlp_down_add_residual_bf16w_batched_plan(batch_size, hidden);
     batch.record_shader(
-        shaders::LINEAR_DECODE_BATCHED_BF16W_ADD_RESIDUAL,
+        mlp_down_shader,
         &[
             mlp_scratch.handle(),
             down_w.handle(),
@@ -2624,7 +2708,7 @@ pub fn record_gdn_block_batched_into(
             x_out_buf.handle(),
         ],
         &[intermediate as u32, hidden as u32, batch_size as u32],
-        Workgroups::OneD((batch_size * hidden.div_ceil(32)) as u32),
+        Workgroups::OneD(mlp_down_workgroups),
     )?;
     Ok(true)
 }

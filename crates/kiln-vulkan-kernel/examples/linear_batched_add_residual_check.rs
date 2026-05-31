@@ -77,60 +77,62 @@ fn pack_bf16_pairs(values: &[f32]) -> (Vec<u32>, Vec<f32>) {
 
 fn main() -> Result<()> {
     let dev = VulkanDevice::new().context("create Vulkan device")?;
-    let batch = 3usize;
     let hidden = 9usize;
     let out_dim = 11usize;
 
-    let x: Vec<f32> = (0..batch * hidden)
-        .map(|i| ((i % 13) as f32 - 6.0) * 0.03125)
-        .collect();
     let w_f32: Vec<f32> = (0..hidden * out_dim)
         .map(|i| ((i % 17) as f32 - 8.0) * 0.015625)
         .collect();
-    let residual: Vec<f32> = (0..batch * out_dim)
-        .map(|i| ((i % 7) as f32 - 3.0) * 0.0625)
-        .collect();
     let (w_packed, w_rounded) = pack_bf16_pairs(&w_f32);
+    let w_buf = upload_u32_buf(&dev, &w_packed)?;
 
-    let mut expected = vec![0.0f32; batch * out_dim];
-    for b in 0..batch {
-        for c in 0..out_dim {
-            let mut acc = residual[b * out_dim + c];
-            for h in 0..hidden {
-                acc += x[b * hidden + h] * w_rounded[h * out_dim + c];
+    for &batch in &[3usize, 33, 65] {
+        let x: Vec<f32> = (0..batch * hidden)
+            .map(|i| ((i % 13) as f32 - 6.0) * 0.03125)
+            .collect();
+        let residual: Vec<f32> = (0..batch * out_dim)
+            .map(|i| ((i % 7) as f32 - 3.0) * 0.0625)
+            .collect();
+
+        let mut expected = vec![0.0f32; batch * out_dim];
+        for b in 0..batch {
+            for c in 0..out_dim {
+                let mut acc = residual[b * out_dim + c];
+                for h in 0..hidden {
+                    acc += x[b * hidden + h] * w_rounded[h * out_dim + c];
+                }
+                expected[b * out_dim + c] = acc;
             }
-            expected[b * out_dim + c] = acc;
+        }
+
+        let x_buf = upload_f32_buf(&dev, &x)?;
+        let residual_buf = upload_f32_buf(&dev, &residual)?;
+        let out_buf = alloc_f32_buf(&dev, expected.len())?;
+
+        dispatch_linear_decode_batched_bf16w_add_residual_resident(
+            &dev,
+            &x_buf,
+            &w_buf,
+            &residual_buf,
+            &out_buf,
+            batch,
+            hidden,
+            out_dim,
+        )?;
+
+        let got = read_back_f32(&dev, &out_buf)?;
+        ensure!(got.len() == expected.len(), "unexpected output length");
+        for (i, (&g, &e)) in got.iter().zip(expected.iter()).enumerate() {
+            ensure!(
+                (g - e).abs() <= 1.0e-6,
+                "batch {batch} idx {i}: got {g}, expected {e}, diff {}",
+                (g - e).abs()
+            );
         }
     }
 
-    let x_buf = upload_f32_buf(&dev, &x)?;
-    let w_buf = upload_u32_buf(&dev, &w_packed)?;
-    let residual_buf = upload_f32_buf(&dev, &residual)?;
-    let out_buf = alloc_f32_buf(&dev, expected.len())?;
-
-    dispatch_linear_decode_batched_bf16w_add_residual_resident(
-        &dev,
-        &x_buf,
-        &w_buf,
-        &residual_buf,
-        &out_buf,
-        batch,
-        hidden,
-        out_dim,
-    )?;
-
-    let got = read_back_f32(&dev, &out_buf)?;
-    ensure!(got.len() == expected.len(), "unexpected output length");
-    for (i, (&g, &e)) in got.iter().zip(expected.iter()).enumerate() {
-        ensure!(
-            (g - e).abs() <= 1.0e-6,
-            "idx {i}: got {g}, expected {e}, diff {}",
-            (g - e).abs()
-        );
-    }
-
     println!(
-        "linear_batched_add_residual_check: OK batch={batch} hidden={hidden} out_dim={out_dim}"
+        "linear_batched_add_residual_check: OK batches=3,33,65 hidden={hidden} out_dim={out_dim}"
     );
     Ok(())
 }

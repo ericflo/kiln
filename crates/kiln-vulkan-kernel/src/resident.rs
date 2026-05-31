@@ -215,10 +215,24 @@ pub fn dispatch_linear_decode_batched_bf16w_add_residual_resident(
         "linear_decode_batched_bf16w_add_residual_resident: out buffer too small"
     );
 
-    let glsl_path = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/csrc/shaders/linear_decode_batched_bf16w_add_residual.comp"
-    );
+    let rows8 = batch >= 64 && crate::kernels::mlp_bf16_rows8_enabled();
+    let rows4 = batch >= 32 && !rows8 && crate::kernels::mlp_bf16_down_rows4_enabled();
+    let glsl_path = if rows8 {
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/csrc/shaders/linear_decode_batched_bf16w_add_residual_rows8.comp"
+        )
+    } else if rows4 {
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/csrc/shaders/linear_decode_batched_bf16w_add_residual_rows4.comp"
+        )
+    } else {
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/csrc/shaders/linear_decode_batched_bf16w_add_residual.comp"
+        )
+    };
     let spirv = ShaderPipeline::compile_shader(glsl_path)?;
     let handles: [vk::Buffer; 4] = [
         x.handle(),
@@ -227,7 +241,13 @@ pub fn dispatch_linear_decode_batched_bf16w_add_residual_resident(
         out.handle(),
     ];
     let push_constants: [u32; 3] = [hidden as u32, out_dim as u32, batch as u32];
-    let workgroups = (batch * out_dim.div_ceil(32)) as u32;
+    let workgroups = if rows8 {
+        (batch.div_ceil(8) * out_dim.div_ceil(32)) as u32
+    } else if rows4 {
+        (batch.div_ceil(4) * out_dim.div_ceil(32)) as u32
+    } else {
+        (batch * out_dim.div_ceil(32)) as u32
+    };
     run_compute_pipeline(
         vk_device,
         &spirv,
