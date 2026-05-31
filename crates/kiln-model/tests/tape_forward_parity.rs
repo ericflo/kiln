@@ -2402,10 +2402,14 @@ fn tape_lora_add_records_fused_node_and_emits_var_grads() {
         .backward_with_seeds(seeds, |a, b| kiln_tensor::ops::add(a, b))
         .expect("lora_add tape backward walk");
 
-    // Input order is [base, x, A, B]; LoraDeltaAddBackward returns
-    // [grad_base, grad_x, grad_A, grad_B] in the same order.
-    let dbase_kt = grads.get(input_ids[0]).expect("d_base present");
-    let dx_kt = grads.get(input_ids[1]).expect("d_x present");
+    // Input order on the fused node is [base_2d, x_2d, A, B]. base_2d/x_2d
+    // are the reshape INTERMEDIATES — their grads are consumed by the
+    // surrounding ReshapeBackward nodes and chained back to the ORIGINAL
+    // `base`/`x` leaf ids (the intermediates are pruned from the returned
+    // grad map). A/B are direct leaf inputs of the fused node, so they read
+    // straight off the recorded input ids.
+    let dbase_kt = grads.get(base_kt.id()).expect("d_base present");
+    let dx_kt = grads.get(x_kt.id()).expect("d_x present");
     let da_kt = grads.get(input_ids[2]).expect("d_A present");
     let db_kt = grads.get(input_ids[3]).expect("d_B present");
     let dbase = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(dbase_kt)
