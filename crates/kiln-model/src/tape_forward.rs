@@ -2455,19 +2455,18 @@ impl BackwardOp for GdnRecurrentBackward {
         &self,
         grad_output: &kiln_tensor::Tensor,
     ) -> kiln_tensor::Result<Vec<Option<kiln_tensor::Tensor>>> {
-        // Bridge the upstream grad (kt) to candle for the candle composite.
-        let grad_c = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(grad_output).map_err(|e| {
-            kiln_tensor::Error::Msg(format!("GdnRecurrentBackward: grad kt->candle: {e}"))
-        })?;
-        // `gdn_recurrent_backward_no_grad` indexes the seq axis at dim 2
-        // (head-FIRST). When the recorded forward output was head-LAST
-        // `[B, T, nv, dv]`, the upstream grad arrives head-last too, so
-        // transpose it back to head-FIRST `[B, nv, T, dv]` before the
-        // backward. The saved q/k/v/beta/g/entry_state are already
-        // head-first, so the returned grads stay head-first (no transpose
-        // on the way out).
-        let grad_c = if self.head_last_output {
-            grad_c
+        // #1082 P4: the upstream grad is ALREADY kt and
+        // `gdn_recurrent_backward_no_grad` takes a kt grad — transpose
+        // head-last -> head-first IN KT directly, dropping the pointless
+        // kt->candle->kt round-trip (one [B,T,nv,dv] DtoD copy per GDN-layer
+        // backward, ×24 layers/step). `gdn_recurrent_backward_no_grad` indexes
+        // the seq axis at dim 2 (head-FIRST); when the recorded forward output
+        // was head-LAST `[B, T, nv, dv]` the upstream grad arrives head-last,
+        // so transpose back to `[B, nv, T, dv]`. The saved q/k/v/beta/g/
+        // entry_state are already head-first, so the returned grads stay
+        // head-first (no transpose on the way out).
+        let grad_out_kt = if self.head_last_output {
+            grad_output
                 .transpose(1, 2)
                 .map_err(|e| {
                     kiln_tensor::Error::Msg(format!(
@@ -2481,7 +2480,9 @@ impl BackwardOp for GdnRecurrentBackward {
                     ))
                 })?
         } else {
-            grad_c
+            grad_output.contiguous().map_err(|e| {
+                kiln_tensor::Error::Msg(format!("GdnRecurrentBackward: grad contiguous: {e}"))
+            })?
         };
         let backend = crate::backend::for_device(&self.device);
         // #1082: `gdn_recurrent_backward_no_grad` is now kt-typed (kt inputs,
@@ -2498,7 +2499,6 @@ impl BackwardOp for GdnRecurrentBackward {
         let beta_kt = to_kt_in(&self.beta, "beta")?;
         let g_kt = to_kt_in(&self.g, "g")?;
         let entry_state_kt = to_kt_in(&self.entry_state, "entry_state")?;
-        let grad_c_kt = to_kt_in(&grad_c, "grad_out")?;
         let grads = gdn_recurrent_backward_no_grad(
             &*backend,
             &q_kt,
@@ -2507,7 +2507,7 @@ impl BackwardOp for GdnRecurrentBackward {
             &beta_kt,
             &g_kt,
             &entry_state_kt,
-            &grad_c_kt,
+            &grad_out_kt,
             None,
             self.chunk_size,
         )
