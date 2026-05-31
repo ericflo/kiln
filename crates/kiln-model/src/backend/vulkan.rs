@@ -129,6 +129,21 @@ pub struct VulkanBackend {
     /// Cached packed-bf16 device-local buffers for immutable CPU weights used
     /// by Vulkan transposed linear decode paths.
     bf16_packed_weight_cache: Mutex<HashMap<candle_core::TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>>,
+    /// (#1082) kt-native twins of the two weight caches above, keyed on the
+    /// **kt** `TensorId`. The decode hot path hands weights through as kt
+    /// tensors whose `TensorId` is stable for the model's lifetime (one
+    /// Parameter, one id — issue anti-pattern #11). The candle-keyed caches
+    /// above were a trap on Vulkan: the decode methods bridged each weight via
+    /// `kt_logits_to_candle` *per call*, minting a fresh candle `TensorId`
+    /// every token, so the cache MISSED every token → re-extract + re-upload
+    /// the full weight set (~1 GB/token incl. the 778 MB lm_head) into NEW
+    /// buffers that accumulated unbounded. That single bug caused both the
+    /// 25x decode slowdown (16 → 0.6 tok/s) and the OOM. Keying on the stable
+    /// kt id uploads each weight exactly once and extracts bytes straight from
+    /// kt storage — no candle copy.
+    weight_cache_kt: Mutex<HashMap<kiln_tensor::TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>>,
+    bf16_packed_weight_cache_kt:
+        Mutex<HashMap<kiln_tensor::TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>>,
     /// Vulkan device (owned, not from candle-core).
     ///
     /// `Arc` rather than `Box` so a `CustomOp1` impl that wants to dispatch
@@ -325,6 +340,42 @@ fn tensor_to_f32_bytes_with_shape(
         .to_vec1::<f32>()
         .context("failed to extract f32 data")?;
     Ok((bytemuck::cast_slice(&f32_data).to_vec(), shape))
+}
+
+/// kt-native twin of [`tensor_to_f32_bytes_with_shape`]: extract f32 bytes +
+/// shape straight from a kt tensor, no candle bridge. (#1082)
+#[inline]
+fn kt_tensor_to_f32_bytes_with_shape(
+    tensor: &kiln_tensor::Tensor,
+) -> Result<(Vec<u8>, Vec<usize>)> {
+    let shape: Vec<usize> = tensor.shape().to_vec();
+    let f32_data = tensor
+        .flatten_all()
+        .context("kt flatten_all")?
+        .to_dtype(kiln_tensor::DType::F32)
+        .context("kt to f32")?
+        .to_vec1::<f32>()
+        .context("kt to_vec1 f32")?;
+    Ok((bytemuck::cast_slice(&f32_data).to_vec(), shape))
+}
+
+/// kt-native twin of [`tensor_from_f32_bytes`]: wrap f32 bytes as a kt tensor
+/// (CPU-host, the Vulkan activation residency), no candle bridge. (#1082)
+#[inline]
+fn kt_tensor_from_f32_bytes(
+    data: &[u8],
+    shape: &[usize],
+    dtype: kiln_tensor::DType,
+) -> Result<kiln_tensor::Tensor> {
+    let f32_data: &[f32] = bytemuck::cast_slice(data);
+    let t = kiln_tensor::Tensor::from_vec(f32_data.to_vec(), shape.to_vec())
+        .map_err(|e| anyhow::anyhow!("kt_tensor_from_f32_bytes: from_vec: {e}"))?;
+    if dtype == kiln_tensor::DType::F32 {
+        Ok(t)
+    } else {
+        t.to_dtype(dtype)
+            .map_err(|e| anyhow::anyhow!("kt_tensor_from_f32_bytes: to_dtype: {e}"))
+    }
 }
 
 #[inline]
@@ -530,6 +581,8 @@ impl VulkanBackend {
             resident_scratch: Mutex::new(HashMap::new()),
             weight_cache: Mutex::new(HashMap::new()),
             bf16_packed_weight_cache: Mutex::new(HashMap::new()),
+            weight_cache_kt: Mutex::new(HashMap::new()),
+            bf16_packed_weight_cache_kt: Mutex::new(HashMap::new()),
             vulkan_device,
         }
     }
@@ -964,6 +1017,97 @@ impl VulkanBackend {
             .lock()
             .map_err(|_| anyhow::anyhow!("Vulkan packed bf16 weight cache mutex poisoned"))?;
         Ok(Arc::clone(cache.entry(key).or_insert(buffer)))
+    }
+
+    /// kt-native twin of [`Self::cached_f32_weight_buffer`]: keys the buffer
+    /// cache on the **kt** `TensorId` (stable for the model's lifetime) and
+    /// extracts f32 bytes straight from kt storage on a miss — no candle
+    /// bridge, so a cache hit (every token after the first) does zero copy
+    /// work. (#1082)
+    pub fn cached_f32_weight_buffer_kt(
+        &self,
+        weight: &kiln_tensor::Tensor,
+    ) -> Result<Arc<kiln_vulkan_kernel::VulkanBuffer>> {
+        let vk_device = self
+            .vulkan_device
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
+        let key = weight.id();
+        {
+            let cache = self
+                .weight_cache_kt
+                .lock()
+                .map_err(|_| anyhow::anyhow!("Vulkan kt weight cache mutex poisoned"))?;
+            if let Some(buffer) = cache.get(&key) {
+                return Ok(Arc::clone(buffer));
+            }
+        }
+        let weight_f32_data: Vec<f32> = weight
+            .flatten_all()
+            .context("kt weight flatten_all")?
+            .to_dtype(kiln_tensor::DType::F32)
+            .context("kt weight to f32")?
+            .to_vec1::<f32>()
+            .context("kt weight to_vec1 f32")?;
+        let buffer = Arc::new(
+            kiln_vulkan_kernel::kernels::upload_f32_buffer_from_slice(vk_device, &weight_f32_data)
+                .context("upload kt f32 weight to Vulkan")?,
+        );
+        let mut cache = self
+            .weight_cache_kt
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Vulkan kt weight cache mutex poisoned"))?;
+        Ok(Arc::clone(cache.entry(key).or_insert(buffer)))
+    }
+
+    /// kt-native twin of [`Self::cached_bf16_packed_weight_buffer`]. Same
+    /// stable-kt-id keying; extracts bf16 straight from kt storage on a miss.
+    /// (#1082)
+    pub fn cached_bf16_packed_weight_buffer_kt(
+        &self,
+        weight: &kiln_tensor::Tensor,
+    ) -> Result<Arc<kiln_vulkan_kernel::VulkanBuffer>> {
+        let vk_device = self
+            .vulkan_device
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
+        let key = weight.id();
+        {
+            let cache = self
+                .bf16_packed_weight_cache_kt
+                .lock()
+                .map_err(|_| anyhow::anyhow!("Vulkan kt packed bf16 weight cache mutex poisoned"))?;
+            if let Some(buffer) = cache.get(&key) {
+                return Ok(Arc::clone(buffer));
+            }
+        }
+        anyhow::ensure!(
+            weight.dtype() == kiln_tensor::DType::BF16,
+            "packed bf16 upload requires BF16 kt tensor, got {:?}",
+            weight.dtype()
+        );
+        let weight_bf16_data: Vec<half::bf16> = weight
+            .flatten_all()
+            .context("kt bf16 weight flatten_all")?
+            .to_vec1::<half::bf16>()
+            .context("kt bf16 weight to_vec1")?;
+        let buffer = Arc::new(
+            kiln_vulkan_kernel::kernels::upload_bf16_packed_buffer_from_slice(
+                vk_device,
+                &weight_bf16_data,
+            )
+            .context("upload kt packed BF16 weight to Vulkan")?,
+        );
+        let mut cache = self
+            .bf16_packed_weight_cache_kt
+            .lock()
+            .map_err(|_| anyhow::anyhow!("Vulkan kt packed bf16 weight cache mutex poisoned"))?;
+        Ok(Arc::clone(cache.entry(key).or_insert(buffer)))
+    }
+
+    /// kt-native twin of [`Self::use_bf16_packed_linear_weight`].
+    fn use_bf16_packed_linear_weight_kt(&self, weight: &kiln_tensor::Tensor) -> bool {
+        self.bf16_packed_linear_weights_enabled && weight.dtype() == kiln_tensor::DType::BF16
     }
 
     fn prewarm_f32_weight(
@@ -2256,19 +2400,8 @@ impl BackendRuntime for VulkanBackend {
         {
             return Ok(None);
         }
-        // Bridge kt args -> candle locals, re-borrow under the same names so
-        // the original candle body below is unchanged.
-        let x_owned = crate::forward::kt_logits_to_candle(x)?;
-        let in_proj_qkv_t_owned = crate::forward::kt_logits_to_candle(in_proj_qkv_t)?;
-        let in_proj_z_t_owned = crate::forward::kt_logits_to_candle(in_proj_z_t)?;
-        let in_proj_a_t_owned = crate::forward::kt_logits_to_candle(in_proj_a_t)?;
-        let in_proj_b_t_owned = crate::forward::kt_logits_to_candle(in_proj_b_t)?;
-        let x = &x_owned;
-        let in_proj_qkv_t = &in_proj_qkv_t_owned;
-        let in_proj_z_t = &in_proj_z_t_owned;
-        let in_proj_a_t = &in_proj_a_t_owned;
-        let in_proj_b_t = &in_proj_b_t_owned;
-
+        // (#1082) Fully kt-native: shapes off kt, weight buffers keyed on the
+        // stable kt id (upload once), x bytes + outputs straight from/to kt.
         let Ok((batch, seq_len, hidden)) = x.dims3() else {
             return Ok(None);
         };
@@ -2297,121 +2430,38 @@ impl BackendRuntime for VulkanBackend {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
         let row_count = batch * seq_len;
-        let dispatch_x = if seq_len == 1 {
-            x.clone()
-        } else {
-            x.reshape((row_count, 1usize, hidden))?
-        };
-
-        let (qkv, z, a, b) = if self.use_bf16_packed_gdn_in_proj_weights(&[
-            in_proj_qkv_t,
-            in_proj_z_t,
-            in_proj_a_t,
-            in_proj_b_t,
-        ]) {
-            let qkv_buf = self.cached_bf16_packed_weight_buffer(in_proj_qkv_t)?;
-            let z_buf = self.cached_bf16_packed_weight_buffer(in_proj_z_t)?;
-            let a_buf = self.cached_bf16_packed_weight_buffer(in_proj_a_t)?;
-            let b_buf = self.cached_bf16_packed_weight_buffer(in_proj_b_t)?;
-            let x_data = tensor_to_f32_bytes_with_shape(&dispatch_x)?.0;
-            let (qkv_b, z_b, a_b, b_b) =
-                kiln_vulkan_kernel::kernels::dispatch_gdn_in_proj_decode_cached_bf16_weights_bytes(
-                    vk_device,
-                    &x_data,
-                    row_count,
-                    &qkv_buf,
-                    &z_buf,
-                    &a_buf,
-                    &b_buf,
-                    hidden,
-                    qkv_dim,
-                    z_dim,
-                    a_dim,
-                    b_dim,
-                )
-                .context("gdn_in_proj_decode kernel failed")?;
-            (
-                tensor_from_f32_bytes(
-                    &qkv_b,
-                    &[row_count, 1, qkv_dim],
-                    candle_core::DType::F32,
-                )?,
-                tensor_from_f32_bytes(
-                    &z_b,
-                    &[row_count, 1, z_dim],
-                    candle_core::DType::F32,
-                )?,
-                tensor_from_f32_bytes(
-                    &a_b,
-                    &[row_count, 1, a_dim],
-                    candle_core::DType::F32,
-                )?,
-                tensor_from_f32_bytes(
-                    &b_b,
-                    &[row_count, 1, b_dim],
-                    candle_core::DType::F32,
-                )?,
+        let x_data = kt_tensor_to_f32_bytes_with_shape(x)?.0;
+        let use_bf16 = self.bf16_packed_gdn_in_proj_weights_enabled
+            && in_proj_qkv_t.dtype() == kiln_tensor::DType::BF16
+            && in_proj_z_t.dtype() == kiln_tensor::DType::BF16
+            && in_proj_a_t.dtype() == kiln_tensor::DType::BF16
+            && in_proj_b_t.dtype() == kiln_tensor::DType::BF16;
+        let (qkv_b, z_b, a_b, b_b) = if use_bf16 {
+            let qkv_buf = self.cached_bf16_packed_weight_buffer_kt(in_proj_qkv_t)?;
+            let z_buf = self.cached_bf16_packed_weight_buffer_kt(in_proj_z_t)?;
+            let a_buf = self.cached_bf16_packed_weight_buffer_kt(in_proj_a_t)?;
+            let b_buf = self.cached_bf16_packed_weight_buffer_kt(in_proj_b_t)?;
+            kiln_vulkan_kernel::kernels::dispatch_gdn_in_proj_decode_cached_bf16_weights_bytes(
+                vk_device, &x_data, row_count, &qkv_buf, &z_buf, &a_buf, &b_buf, hidden, qkv_dim,
+                z_dim, a_dim, b_dim,
             )
+            .context("gdn_in_proj_decode kernel failed")?
         } else {
-            let qkv_buf = self.cached_f32_weight_buffer(in_proj_qkv_t)?;
-            let z_buf = self.cached_f32_weight_buffer(in_proj_z_t)?;
-            let a_buf = self.cached_f32_weight_buffer(in_proj_a_t)?;
-            let b_buf = self.cached_f32_weight_buffer(in_proj_b_t)?;
-            let x_data = tensor_to_f32_bytes_with_shape(&dispatch_x)?.0;
-            let (qkv_b, z_b, a_b, b_b) =
-                kiln_vulkan_kernel::kernels::dispatch_gdn_in_proj_decode_cached_bytes(
-                    vk_device,
-                    &x_data,
-                    row_count,
-                    &qkv_buf,
-                    &z_buf,
-                    &a_buf,
-                    &b_buf,
-                    hidden,
-                    qkv_dim,
-                    z_dim,
-                    a_dim,
-                    b_dim,
-                )
-                .context("gdn_in_proj_decode kernel failed")?;
-            (
-                tensor_from_f32_bytes(
-                    &qkv_b,
-                    &[row_count, 1, qkv_dim],
-                    candle_core::DType::F32,
-                )?,
-                tensor_from_f32_bytes(
-                    &z_b,
-                    &[row_count, 1, z_dim],
-                    candle_core::DType::F32,
-                )?,
-                tensor_from_f32_bytes(
-                    &a_b,
-                    &[row_count, 1, a_dim],
-                    candle_core::DType::F32,
-                )?,
-                tensor_from_f32_bytes(
-                    &b_b,
-                    &[row_count, 1, b_dim],
-                    candle_core::DType::F32,
-                )?,
+            let qkv_buf = self.cached_f32_weight_buffer_kt(in_proj_qkv_t)?;
+            let z_buf = self.cached_f32_weight_buffer_kt(in_proj_z_t)?;
+            let a_buf = self.cached_f32_weight_buffer_kt(in_proj_a_t)?;
+            let b_buf = self.cached_f32_weight_buffer_kt(in_proj_b_t)?;
+            kiln_vulkan_kernel::kernels::dispatch_gdn_in_proj_decode_cached_bytes(
+                vk_device, &x_data, row_count, &qkv_buf, &z_buf, &a_buf, &b_buf, hidden, qkv_dim,
+                z_dim, a_dim, b_dim,
             )
-        };
-        let result = if seq_len == 1 {
-            (qkv, z, a, b)
-        } else {
-            (
-                qkv.reshape((batch, seq_len, qkv_dim))?,
-                z.reshape((batch, seq_len, z_dim))?,
-                a.reshape((batch, seq_len, a_dim))?,
-                b.reshape((batch, seq_len, b_dim))?,
-            )
+            .context("gdn_in_proj_decode kernel failed")?
         };
         Ok(Some((
-            crate::forward::candle_to_kt_activation(&result.0)?,
-            crate::forward::candle_to_kt_activation(&result.1)?,
-            crate::forward::candle_to_kt_activation(&result.2)?,
-            crate::forward::candle_to_kt_activation(&result.3)?,
+            kt_tensor_from_f32_bytes(&qkv_b, &[batch, seq_len, qkv_dim], kiln_tensor::DType::F32)?,
+            kt_tensor_from_f32_bytes(&z_b, &[batch, seq_len, z_dim], kiln_tensor::DType::F32)?,
+            kt_tensor_from_f32_bytes(&a_b, &[batch, seq_len, a_dim], kiln_tensor::DType::F32)?,
+            kt_tensor_from_f32_bytes(&b_b, &[batch, seq_len, b_dim], kiln_tensor::DType::F32)?,
         )))
     }
 
@@ -2617,13 +2667,12 @@ impl BackendRuntime for VulkanBackend {
         if !matches!(x.device(), kiln_tensor::Device::Cpu) || !matches!(weight_t.device(), kiln_tensor::Device::Cpu) {
             return Ok(None);
         }
-        // (#1082) bridge kt -> candle; re-borrow under the same names so the
-        // candle body (byte-extract + cached-weight kernel dispatch) is
-        // unchanged. The kt result is bridged back at the return. Remove when
-        // the Vulkan linear-decode kernel path runs natively on kt.
-        let x = &crate::forward::kt_logits_to_candle(x)?;
-        let weight_t = &crate::forward::kt_logits_to_candle(weight_t)?;
-
+        // (#1082) Fully kt-native: read shapes off the kt tensors, extract
+        // f32 bytes straight from kt storage, and key the weight buffer cache
+        // on the **stable** kt `TensorId`. The old path bridged BOTH x and the
+        // (large) weight through `kt_logits_to_candle` every call — minting a
+        // fresh candle id per token so the weight cache missed every step and
+        // re-uploaded ~1 GB/token. Now the weight uploads exactly once.
         let Ok((batch, seq_len, hidden)) = x.dims3() else {
             return Ok(None);
         };
@@ -2639,55 +2688,31 @@ impl BackendRuntime for VulkanBackend {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
         let row_count = batch * seq_len;
-        let dispatch_x = if seq_len == 1 {
-            x.clone()
+        // x is [batch, seq_len, hidden] contiguous F32; the kernel consumes a
+        // flat [row_count, hidden] f32 buffer, so the [.,1,.] reshape the candle
+        // path did is a no-op on the bytes — extract them straight from kt.
+        let x_data = kt_tensor_to_f32_bytes_with_shape(x)?.0;
+        let packed = self.use_bf16_packed_linear_weight_kt(weight_t);
+        let weight_buf = if packed {
+            self.cached_bf16_packed_weight_buffer_kt(weight_t)?
         } else {
-            x.reshape((row_count, 1usize, hidden))?
+            self.cached_f32_weight_buffer_kt(weight_t)?
         };
-        let out = if self.use_bf16_packed_linear_weight(weight_t) {
-            let weight_buf = self.cached_bf16_packed_weight_buffer(weight_t)?;
-            let x_data = tensor_to_f32_bytes_with_shape(&dispatch_x)?.0;
-            let out_data = kiln_vulkan_kernel::kernels::dispatch_linear_decode_cached_bytes(
-                vk_device,
-                &x_data,
-                &weight_buf,
-                row_count,
-                hidden,
-                out_dim,
-                true,
-            )
-            .context("linear_decode kernel failed")?;
-            tensor_from_f32_bytes(
-                &out_data,
-                &[row_count, 1, out_dim],
-                candle_core::DType::F32,
-            )?
-        } else {
-            let weight_buf = self.cached_f32_weight_buffer(weight_t)?;
-            let x_data = tensor_to_f32_bytes_with_shape(&dispatch_x)?.0;
-            let out_data = kiln_vulkan_kernel::kernels::dispatch_linear_decode_cached_bytes(
-                vk_device,
-                &x_data,
-                &weight_buf,
-                row_count,
-                hidden,
-                out_dim,
-                false,
-            )
-            .context("linear_decode kernel failed")?;
-            tensor_from_f32_bytes(
-                &out_data,
-                &[row_count, 1, out_dim],
-                candle_core::DType::F32,
-            )?
-        };
-        let out = if seq_len == 1 {
-            out
-        } else {
-            out.reshape((batch, seq_len, out_dim))?
-        };
-        // (#1082) bridge the candle result back to kt for the kt-typed return.
-        Ok(Some(crate::forward::candle_to_kt_activation(&out)?))
+        let out_data = kiln_vulkan_kernel::kernels::dispatch_linear_decode_cached_bytes(
+            vk_device,
+            &x_data,
+            &weight_buf,
+            row_count,
+            hidden,
+            out_dim,
+            packed,
+        )
+        .context("linear_decode kernel failed")?;
+        Ok(Some(kt_tensor_from_f32_bytes(
+            &out_data,
+            &[batch, seq_len, out_dim],
+            kiln_tensor::DType::F32,
+        )?))
     }
 
     fn linear_prefill_apply(&self, _x: &kiln_tensor::Tensor, _weight_t: &kiln_tensor::Tensor) -> Result<Option<kiln_tensor::Tensor>> {
@@ -2878,13 +2903,9 @@ impl BackendRuntime for VulkanBackend {
         if !matches!(x.device(), kiln_tensor::Device::Cpu) || !matches!(weight_t.device(), kiln_tensor::Device::Cpu) {
             return Ok(None);
         }
-        // Bridge kt args -> candle locals; re-borrow under the same names so
-        // the candle body below is unchanged. Non-tensor (u32) return: no bridge.
-        let x_owned = crate::forward::kt_logits_to_candle(x)?;
-        let weight_t_owned = crate::forward::kt_logits_to_candle(weight_t)?;
-        let x = &x_owned;
-        let weight_t = &weight_t_owned;
-
+        // (#1082) Fully kt-native: the lm_head weight (the 778 MB table) was
+        // re-bridged + re-uploaded per token under the candle-id cache; key on
+        // the stable kt id so it uploads once.
         let Ok((batch, seq_len, hidden)) = x.dims3() else {
             return Ok(None);
         };
@@ -2902,9 +2923,9 @@ impl BackendRuntime for VulkanBackend {
             .vulkan_device
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
-        let x_data = tensor_to_f32_bytes_with_shape(x)?.0;
-        let token = if self.use_bf16_packed_linear_weight(weight_t) {
-            let weight_buf = self.cached_bf16_packed_weight_buffer(weight_t)?;
+        let x_data = kt_tensor_to_f32_bytes_with_shape(x)?.0;
+        let token = if self.use_bf16_packed_linear_weight_kt(weight_t) {
+            let weight_buf = self.cached_bf16_packed_weight_buffer_kt(weight_t)?;
             kiln_vulkan_kernel::kernels::dispatch_linear_decode_argmax_cached_bf16_weights_bytes(
                 vk_device,
                 &x_data,
@@ -2913,7 +2934,7 @@ impl BackendRuntime for VulkanBackend {
                 out_dim,
             )
         } else {
-            let weight_buf = self.cached_f32_weight_buffer(weight_t)?;
+            let weight_buf = self.cached_f32_weight_buffer_kt(weight_t)?;
             kiln_vulkan_kernel::kernels::dispatch_linear_decode_argmax_cached_bytes(
                 vk_device,
                 &x_data,
@@ -2961,12 +2982,7 @@ impl BackendRuntime for VulkanBackend {
         if !matches!(x.device(), kiln_tensor::Device::Cpu) || !matches!(weight_t.device(), kiln_tensor::Device::Cpu) {
             return Ok(None);
         }
-        // Bridge kt args -> candle locals; re-borrow under the same names.
-        // Non-tensor (u32) return: no bridge.
-        let x_owned = crate::forward::kt_logits_to_candle(x)?;
-        let weight_t_owned = crate::forward::kt_logits_to_candle(weight_t)?;
-        let x = &x_owned;
-        let weight_t = &weight_t_owned;
+        // (#1082) Fully kt-native: lm_head weight keyed on the stable kt id.
         let Ok((batch, seq_len, hidden)) = x.dims3() else {
             return Ok(None);
         };
@@ -2984,13 +3000,13 @@ impl BackendRuntime for VulkanBackend {
             .vulkan_device
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
-        let packed_bf16 = self.use_bf16_packed_linear_weight(weight_t);
+        let packed_bf16 = self.use_bf16_packed_linear_weight_kt(weight_t);
         let weight_buf = if packed_bf16 {
-            self.cached_bf16_packed_weight_buffer(weight_t)?
+            self.cached_bf16_packed_weight_buffer_kt(weight_t)?
         } else {
-            self.cached_f32_weight_buffer(weight_t)?
+            self.cached_f32_weight_buffer_kt(weight_t)?
         };
-        let x_data = tensor_to_f32_bytes_with_shape(x)?.0;
+        let x_data = kt_tensor_to_f32_bytes_with_shape(x)?.0;
         let token = kiln_vulkan_kernel::kernels::dispatch_linear_decode_sample_bytes(
             vk_device,
             &x_data,
@@ -3029,13 +3045,7 @@ impl BackendRuntime for VulkanBackend {
         if !matches!(x.device(), kiln_tensor::Device::Cpu) || !matches!(weight_t.device(), kiln_tensor::Device::Cpu) {
             return Ok(None);
         }
-        // Bridge kt args -> candle locals; re-borrow under the same names.
-        // Non-tensor (Vec<u32>) return: no bridge.
-        let x_owned = crate::forward::kt_logits_to_candle(x)?;
-        let weight_t_owned = crate::forward::kt_logits_to_candle(weight_t)?;
-        let x = &x_owned;
-        let weight_t = &weight_t_owned;
-
+        // (#1082) Fully kt-native: lm_head weight keyed on the stable kt id.
         let Ok((batch, seq_len, hidden)) = x.dims3() else {
             return Ok(None);
         };
@@ -3053,9 +3063,9 @@ impl BackendRuntime for VulkanBackend {
             .vulkan_device
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
-        let x_data = tensor_to_f32_bytes_with_shape(x)?.0;
-        let tokens = if self.use_bf16_packed_linear_weight(weight_t) {
-            let weight_buf = self.cached_bf16_packed_weight_buffer(weight_t)?;
+        let x_data = kt_tensor_to_f32_bytes_with_shape(x)?.0;
+        let tokens = if self.use_bf16_packed_linear_weight_kt(weight_t) {
+            let weight_buf = self.cached_bf16_packed_weight_buffer_kt(weight_t)?;
             kiln_vulkan_kernel::kernels::dispatch_linear_decode_argmax_batched_cached_bf16_weights_bytes(
                 vk_device,
                 &x_data,
@@ -3065,7 +3075,7 @@ impl BackendRuntime for VulkanBackend {
                 out_dim,
             )
         } else {
-            let weight_buf = self.cached_f32_weight_buffer(weight_t)?;
+            let weight_buf = self.cached_f32_weight_buffer_kt(weight_t)?;
             kiln_vulkan_kernel::kernels::dispatch_linear_decode_argmax_batched_cached_bytes(
                 vk_device,
                 &x_data,
@@ -3394,25 +3404,14 @@ impl BackendRuntime for VulkanBackend {
         {
             return Ok(None);
         }
-        // Bridge kt args -> candle locals; re-borrow under the same names so
-        // the candle body below is unchanged.
-        let x_owned = crate::forward::kt_logits_to_candle(x)?;
-        let q_weight_t_owned = crate::forward::kt_logits_to_candle(q_weight_t)?;
-        let k_weight_t_owned = crate::forward::kt_logits_to_candle(k_weight_t)?;
-        let v_weight_t_owned = crate::forward::kt_logits_to_candle(v_weight_t)?;
-        let x = &x_owned;
-        let q_weight_t = &q_weight_t_owned;
-        let k_weight_t = &k_weight_t_owned;
-        let v_weight_t = &v_weight_t_owned;
-
+        // (#1082) Fully kt-native: shapes off kt, QKV weight buffers keyed on
+        // the stable kt id (upload once), x bytes + outputs straight from/to kt.
         let Ok((batch, seq_len, hidden)) = x.dims3() else {
             return Ok(None);
         };
         // Multi-token (prefill-ish) shapes still go through the unfused
         // path: this kernel family is the single-token decode projection.
-        // Batched single-token decode IS supported now via the `_batched`
-        // dispatch — collapsing seq_len==1 across an arbitrary batch dim
-        // into a single fused submit was the explicit scaling fix.
+        // Batched single-token decode IS supported via the `_batched` dispatch.
         if seq_len != 1 || batch == 0 {
             return Ok(None);
         }
@@ -3433,99 +3432,49 @@ impl BackendRuntime for VulkanBackend {
             .vulkan_device
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
-        let bf16 = self.use_bf16_packed_full_attn_qkv_weights(&[q_weight_t, k_weight_t, v_weight_t]);
-        let out = if batch == 1 {
-            let x_data = tensor_to_f32_bytes_with_shape(x)?.0;
-            let (q_b, k_b, v_b) = if bf16 {
-                let q_buf = self.cached_bf16_packed_weight_buffer(q_weight_t)?;
-                let k_buf = self.cached_bf16_packed_weight_buffer(k_weight_t)?;
-                let v_buf = self.cached_bf16_packed_weight_buffer(v_weight_t)?;
+        let bf16 = self.bf16_packed_full_attn_qkv_weights_enabled
+            && q_weight_t.dtype() == kiln_tensor::DType::BF16
+            && k_weight_t.dtype() == kiln_tensor::DType::BF16
+            && v_weight_t.dtype() == kiln_tensor::DType::BF16;
+        let x_data = kt_tensor_to_f32_bytes_with_shape(x)?.0;
+        let (q_b, k_b, v_b) = if batch == 1 {
+            if bf16 {
+                let q_buf = self.cached_bf16_packed_weight_buffer_kt(q_weight_t)?;
+                let k_buf = self.cached_bf16_packed_weight_buffer_kt(k_weight_t)?;
+                let v_buf = self.cached_bf16_packed_weight_buffer_kt(v_weight_t)?;
                 kiln_vulkan_kernel::kernels::dispatch_full_attn_qkv_decode_cached_bf16_weights_bytes(
                     vk_device, &x_data, &q_buf, &k_buf, &v_buf, hidden, q_dim, k_dim, v_dim,
                 )
             } else {
-                let q_buf = self.cached_f32_weight_buffer(q_weight_t)?;
-                let k_buf = self.cached_f32_weight_buffer(k_weight_t)?;
-                let v_buf = self.cached_f32_weight_buffer(v_weight_t)?;
+                let q_buf = self.cached_f32_weight_buffer_kt(q_weight_t)?;
+                let k_buf = self.cached_f32_weight_buffer_kt(k_weight_t)?;
+                let v_buf = self.cached_f32_weight_buffer_kt(v_weight_t)?;
                 kiln_vulkan_kernel::kernels::dispatch_full_attn_qkv_decode_cached_bytes(
                     vk_device, &x_data, &q_buf, &k_buf, &v_buf, hidden, q_dim, k_dim, v_dim,
                 )
             }
-            .context("full_attn_qkv_decode kernel failed")?;
-            let q = tensor_from_f32_bytes(
-                &q_b,
-                &[1, 1, q_dim],
-                candle_core::DType::F32,
-            )?;
-            let k = tensor_from_f32_bytes(
-                &k_b,
-                &[1, 1, k_dim],
-                candle_core::DType::F32,
-            )?;
-            let v = tensor_from_f32_bytes(
-                &v_b,
-                &[1, 1, v_dim],
-                candle_core::DType::F32,
-            )?;
-            (q, k, v)
+            .context("full_attn_qkv_decode kernel failed")?
         } else if bf16 {
-            let q_buf = self.cached_bf16_packed_weight_buffer(q_weight_t)?;
-            let k_buf = self.cached_bf16_packed_weight_buffer(k_weight_t)?;
-            let v_buf = self.cached_bf16_packed_weight_buffer(v_weight_t)?;
-            let x_data = tensor_to_f32_bytes_with_shape(x)?.0;
-            let (q_b, k_b, v_b) =
-                kiln_vulkan_kernel::kernels::dispatch_full_attn_qkv_decode_cached_batched_bf16_weights_bytes(
-                    vk_device, &x_data, &q_buf, &k_buf, &v_buf, batch, hidden, q_dim, k_dim, v_dim,
-                )
-                .context("full_attn_qkv_decode_batched_bf16w kernel failed")?;
-            (
-                tensor_from_f32_bytes(
-                    &q_b,
-                    &[batch, 1, q_dim],
-                    candle_core::DType::F32,
-                )?,
-                tensor_from_f32_bytes(
-                    &k_b,
-                    &[batch, 1, k_dim],
-                    candle_core::DType::F32,
-                )?,
-                tensor_from_f32_bytes(
-                    &v_b,
-                    &[batch, 1, v_dim],
-                    candle_core::DType::F32,
-                )?,
+            let q_buf = self.cached_bf16_packed_weight_buffer_kt(q_weight_t)?;
+            let k_buf = self.cached_bf16_packed_weight_buffer_kt(k_weight_t)?;
+            let v_buf = self.cached_bf16_packed_weight_buffer_kt(v_weight_t)?;
+            kiln_vulkan_kernel::kernels::dispatch_full_attn_qkv_decode_cached_batched_bf16_weights_bytes(
+                vk_device, &x_data, &q_buf, &k_buf, &v_buf, batch, hidden, q_dim, k_dim, v_dim,
             )
+            .context("full_attn_qkv_decode_batched_bf16w kernel failed")?
         } else {
-            let q_buf = self.cached_f32_weight_buffer(q_weight_t)?;
-            let k_buf = self.cached_f32_weight_buffer(k_weight_t)?;
-            let v_buf = self.cached_f32_weight_buffer(v_weight_t)?;
-            let x_data = tensor_to_f32_bytes_with_shape(x)?.0;
-            let (q_b, k_b, v_b) =
-                kiln_vulkan_kernel::kernels::dispatch_full_attn_qkv_decode_cached_batched_bytes(
-                    vk_device, &x_data, &q_buf, &k_buf, &v_buf, batch, hidden, q_dim, k_dim, v_dim,
-                )
-                .context("full_attn_qkv_decode_batched kernel failed")?;
-            let q = tensor_from_f32_bytes(
-                &q_b,
-                &[batch, 1, q_dim],
-                candle_core::DType::F32,
-            )?;
-            let k = tensor_from_f32_bytes(
-                &k_b,
-                &[batch, 1, k_dim],
-                candle_core::DType::F32,
-            )?;
-            let v = tensor_from_f32_bytes(
-                &v_b,
-                &[batch, 1, v_dim],
-                candle_core::DType::F32,
-            )?;
-            (q, k, v)
+            let q_buf = self.cached_f32_weight_buffer_kt(q_weight_t)?;
+            let k_buf = self.cached_f32_weight_buffer_kt(k_weight_t)?;
+            let v_buf = self.cached_f32_weight_buffer_kt(v_weight_t)?;
+            kiln_vulkan_kernel::kernels::dispatch_full_attn_qkv_decode_cached_batched_bytes(
+                vk_device, &x_data, &q_buf, &k_buf, &v_buf, batch, hidden, q_dim, k_dim, v_dim,
+            )
+            .context("full_attn_qkv_decode_batched kernel failed")?
         };
         Ok(Some((
-            crate::forward::candle_to_kt_activation(&out.0)?,
-            crate::forward::candle_to_kt_activation(&out.1)?,
-            crate::forward::candle_to_kt_activation(&out.2)?,
+            kt_tensor_from_f32_bytes(&q_b, &[batch, 1, q_dim], kiln_tensor::DType::F32)?,
+            kt_tensor_from_f32_bytes(&k_b, &[batch, 1, k_dim], kiln_tensor::DType::F32)?,
+            kt_tensor_from_f32_bytes(&v_b, &[batch, 1, v_dim], kiln_tensor::DType::F32)?,
         )))
     }
 
@@ -3621,17 +3570,8 @@ impl BackendRuntime for VulkanBackend {
         {
             return Ok(None);
         }
-        // Bridge kt args -> candle locals; re-borrow under the same names so
-        // the candle body below is unchanged.
-        let x_owned = crate::forward::kt_logits_to_candle(x)?;
-        let gate_weight_t_owned = crate::forward::kt_logits_to_candle(gate_weight_t)?;
-        let up_weight_t_owned = crate::forward::kt_logits_to_candle(up_weight_t)?;
-        let down_weight_t_owned = crate::forward::kt_logits_to_candle(down_weight_t)?;
-        let x = &x_owned;
-        let gate_weight_t = &gate_weight_t_owned;
-        let up_weight_t = &up_weight_t_owned;
-        let down_weight_t = &down_weight_t_owned;
-
+        // (#1082) Fully kt-native: shapes off the kt tensors, weight buffers
+        // keyed on the stable kt id (upload once), x bytes straight from kt.
         let Ok((batch, seq_len, hidden)) = x.dims3() else {
             return Ok(None);
         };
@@ -3657,87 +3597,45 @@ impl BackendRuntime for VulkanBackend {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
         let row_count = batch * seq_len;
-        let dispatch_x = if seq_len == 1 {
-            x.clone()
-        } else {
-            x.reshape((row_count, 1usize, hidden))?
-        };
-        let use_bf16_mlp_weights =
-            self.use_bf16_packed_mlp_decode_weights(&[gate_weight_t, up_weight_t, down_weight_t]);
-        let out =
+        let x_data = kt_tensor_to_f32_bytes_with_shape(x)?.0;
+        let use_bf16_mlp_weights = self.bf16_packed_mlp_decode_weights_enabled
+            && gate_weight_t.dtype() == kiln_tensor::DType::BF16
+            && up_weight_t.dtype() == kiln_tensor::DType::BF16
+            && down_weight_t.dtype() == kiln_tensor::DType::BF16;
+        let out_data =
             if row_count >= 8 && self.mlp_bf16_gate_up_f32_down_enabled && use_bf16_mlp_weights {
-                let gate_buf = self.cached_bf16_packed_weight_buffer(gate_weight_t)?;
-                let up_buf = self.cached_bf16_packed_weight_buffer(up_weight_t)?;
-                let down_buf = self.cached_f32_weight_buffer(down_weight_t)?;
-                let x_data = tensor_to_f32_bytes_with_shape(&dispatch_x)?.0;
-                let out_data = kiln_vulkan_kernel::kernels::dispatch_mlp_decode_cached_bf16_gate_up_f32_down_bytes(
-                    vk_device,
-                    &x_data,
-                    row_count,
-                    &gate_buf,
-                    &up_buf,
-                    &down_buf,
-                    hidden,
-                    intermediate,
-                    out_dim,
+                let gate_buf = self.cached_bf16_packed_weight_buffer_kt(gate_weight_t)?;
+                let up_buf = self.cached_bf16_packed_weight_buffer_kt(up_weight_t)?;
+                let down_buf = self.cached_f32_weight_buffer_kt(down_weight_t)?;
+                kiln_vulkan_kernel::kernels::dispatch_mlp_decode_cached_bf16_gate_up_f32_down_bytes(
+                    vk_device, &x_data, row_count, &gate_buf, &up_buf, &down_buf, hidden,
+                    intermediate, out_dim,
                 )
-                .context("mlp_decode kernel failed")?;
-                tensor_from_f32_bytes(
-                    &out_data,
-                    &[row_count, 1, out_dim],
-                    candle_core::DType::F32,
-                )?
+                .context("mlp_decode kernel failed")?
             } else if use_bf16_mlp_weights {
-                let gate_buf = self.cached_bf16_packed_weight_buffer(gate_weight_t)?;
-                let up_buf = self.cached_bf16_packed_weight_buffer(up_weight_t)?;
-                let down_buf = self.cached_bf16_packed_weight_buffer(down_weight_t)?;
-                let x_data = tensor_to_f32_bytes_with_shape(&dispatch_x)?.0;
-                let out_data = kiln_vulkan_kernel::kernels::dispatch_mlp_decode_cached_bf16_weights_bytes(
-                    vk_device,
-                    &x_data,
-                    row_count,
-                    &gate_buf,
-                    &up_buf,
-                    &down_buf,
-                    hidden,
-                    intermediate,
-                    out_dim,
+                let gate_buf = self.cached_bf16_packed_weight_buffer_kt(gate_weight_t)?;
+                let up_buf = self.cached_bf16_packed_weight_buffer_kt(up_weight_t)?;
+                let down_buf = self.cached_bf16_packed_weight_buffer_kt(down_weight_t)?;
+                kiln_vulkan_kernel::kernels::dispatch_mlp_decode_cached_bf16_weights_bytes(
+                    vk_device, &x_data, row_count, &gate_buf, &up_buf, &down_buf, hidden,
+                    intermediate, out_dim,
                 )
-                .context("mlp_decode kernel failed")?;
-                tensor_from_f32_bytes(
-                    &out_data,
-                    &[row_count, 1, out_dim],
-                    candle_core::DType::F32,
-                )?
+                .context("mlp_decode kernel failed")?
             } else {
-                let gate_buf = self.cached_f32_weight_buffer(gate_weight_t)?;
-                let up_buf = self.cached_f32_weight_buffer(up_weight_t)?;
-                let down_buf = self.cached_f32_weight_buffer(down_weight_t)?;
-                let x_data = tensor_to_f32_bytes_with_shape(&dispatch_x)?.0;
-                let out_data = kiln_vulkan_kernel::kernels::dispatch_mlp_decode_cached_bytes(
-                    vk_device,
-                    &x_data,
-                    row_count,
-                    &gate_buf,
-                    &up_buf,
-                    &down_buf,
-                    hidden,
-                    intermediate,
-                    out_dim,
+                let gate_buf = self.cached_f32_weight_buffer_kt(gate_weight_t)?;
+                let up_buf = self.cached_f32_weight_buffer_kt(up_weight_t)?;
+                let down_buf = self.cached_f32_weight_buffer_kt(down_weight_t)?;
+                kiln_vulkan_kernel::kernels::dispatch_mlp_decode_cached_bytes(
+                    vk_device, &x_data, row_count, &gate_buf, &up_buf, &down_buf, hidden,
+                    intermediate, out_dim,
                 )
-                .context("mlp_decode kernel failed")?;
-                tensor_from_f32_bytes(
-                    &out_data,
-                    &[row_count, 1, out_dim],
-                    candle_core::DType::F32,
-                )?
+                .context("mlp_decode kernel failed")?
             };
-        let out = if seq_len == 1 {
-            out
-        } else {
-            out.reshape((batch, seq_len, out_dim))?
-        };
-        Ok(Some(crate::forward::candle_to_kt_activation(&out)?))
+        Ok(Some(kt_tensor_from_f32_bytes(
+            &out_data,
+            &[batch, seq_len, out_dim],
+            kiln_tensor::DType::F32,
+        )?))
     }
 
     fn gdn_forward_substitution(
