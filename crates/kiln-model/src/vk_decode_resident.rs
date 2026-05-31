@@ -2667,3 +2667,105 @@ pub fn record_final_norm_lm_head_argmax_batched_into(
     )?;
     Ok(true)
 }
+
+/// Record a full batched decode stack plus final LM-head argmax into
+/// an existing [`CommandBatch`].
+///
+/// This is intentionally record-only: the caller owns input upload,
+/// per-row paged metadata buffers, full-attention KV seeding, command
+/// submission, and output-token readback. It composes the batched
+/// full-attention/GDN block recorders and then writes u32 token IDs to
+/// `out_token_buf`.
+#[allow(clippy::too_many_arguments)]
+pub fn record_transformer_stack_batched_argmax_into(
+    backend: &VulkanBackend,
+    batch: &mut CommandBatch,
+    x_in_buf: &VulkanBuffer,
+    x_scratch_buf: &VulkanBuffer,
+    out_token_buf: &VulkanBuffer,
+    weights: &crate::forward::GpuWeights,
+    config: &ModelConfig,
+    batch_size: usize,
+    max_blocks_per_seq: usize,
+    block_size: usize,
+    vk_kv_cache: &VkPagedKvCache,
+    rope_cos_buf: &VulkanBuffer,
+    rope_sin_buf: &VulkanBuffer,
+    block_table_buf: &VulkanBuffer,
+    seq_lens_buf: &VulkanBuffer,
+    slots_buf: &VulkanBuffer,
+    recurrent_states: &[kiln_tensor::Tensor],
+    conv_states: &[kiln_tensor::Tensor],
+) -> Result<bool> {
+    anyhow::ensure!(
+        batch_size > 0,
+        "batched transformer stack: batch_size must be > 0"
+    );
+
+    let mut full_attn_layer_idx = 0usize;
+    let mut linear_attn_idx = 0usize;
+    let mut from_buf = x_in_buf;
+    let mut to_buf = x_scratch_buf;
+    for layer in weights.layers.iter() {
+        match &layer.attention {
+            crate::forward::GpuAttentionWeights::Full(_) => {
+                let ok = record_full_attn_block_batched_into(
+                    backend,
+                    batch,
+                    from_buf,
+                    to_buf,
+                    layer,
+                    config,
+                    batch_size,
+                    max_blocks_per_seq,
+                    block_size,
+                    full_attn_layer_idx,
+                    vk_kv_cache,
+                    rope_cos_buf,
+                    rope_sin_buf,
+                    block_table_buf,
+                    seq_lens_buf,
+                    slots_buf,
+                )?;
+                if !ok {
+                    return Ok(false);
+                }
+                full_attn_layer_idx += 1;
+            }
+            crate::forward::GpuAttentionWeights::Linear(_) => {
+                let Some(recurrent_t) = recurrent_states.get(linear_attn_idx) else {
+                    return Ok(false);
+                };
+                let Some(conv_t) = conv_states.get(linear_attn_idx) else {
+                    return Ok(false);
+                };
+                let ok = record_gdn_block_batched_into(
+                    backend,
+                    batch,
+                    from_buf,
+                    to_buf,
+                    layer,
+                    config,
+                    batch_size,
+                    recurrent_t,
+                    conv_t,
+                )?;
+                if !ok {
+                    return Ok(false);
+                }
+                linear_attn_idx += 1;
+            }
+        }
+        std::mem::swap(&mut from_buf, &mut to_buf);
+    }
+
+    record_final_norm_lm_head_argmax_batched_into(
+        backend,
+        batch,
+        from_buf,
+        out_token_buf,
+        weights,
+        config,
+        batch_size,
+    )
+}
