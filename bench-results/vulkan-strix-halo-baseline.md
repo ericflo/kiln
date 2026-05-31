@@ -133,6 +133,11 @@ every config"):
   b1-only assumptions in the resident decode block recorder; full bs>1 decode
   orchestration still needs the batched row path through QKV/split/RoPE/MLP and
   the resident paged-attention call.
+  **Update — second batch primitive:** added `qkv_gate_split_batched`, which
+  splits the existing batched full-attention QKV projection output into
+  `[batch, q]`, `[batch, gate]`, `[batch, k]`, and `[batch, v]` buffers on GPU.
+  This closes another one-row gap between the batched projection shaders and
+  a full multi-row resident full-attention block recorder.
 - **Vulkan paged-attention decode kernel**: the kernel crate already had
   `paged_attn_decode_batch_paged.comp`; Vulkan now advertises
   `supports_flash_attn_paged_decode` and wires the single-query paged-decode

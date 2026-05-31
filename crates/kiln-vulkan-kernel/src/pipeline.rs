@@ -50,6 +50,7 @@ const SHADER_SPIRVS: &[(&str, &[u8])] = &[
         "full_attn_qkv_decode_bf16w",
         SPIR_V_FULL_ATTN_QKV_DECODE_BF16W,
     ),
+    ("qkv_gate_split_batched", SPIR_V_QKV_GATE_SPLIT_BATCHED),
     ("gdn_gates", SPIR_V_GDN_GATES),
     (
         "gdn_decode_gates_recurrent_rmsnorm",

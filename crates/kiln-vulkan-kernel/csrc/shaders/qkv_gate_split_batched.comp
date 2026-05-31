@@ -1,0 +1,66 @@
+// Split batched full-attention QKV-with-gate projection output.
+//
+// Combined input layout per row:
+//   [0 .. q_dim)          : q_raw, [num_heads, 2, head_dim]
+//                           q_raw[h, 0, :] = q[h, :]
+//                           q_raw[h, 1, :] = gate[h, :]
+//   [q_dim .. q_dim+k_dim): k, [num_kv_heads, head_dim]
+//   [q_dim+k_dim .. end)  : v, [num_kv_heads, head_dim]
+//
+// Outputs are row-major:
+//   - q/gate: [batch, num_heads, head_dim]
+//   - k/v   : [batch, num_kv_heads, head_dim]
+//
+// Push constants: batch, num_heads, num_kv_heads, head_dim.
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint batch;
+    uint num_heads;
+    uint num_kv_heads;
+    uint head_dim;
+};
+
+layout(binding = 0) readonly  buffer CombBuf { float data_comb[]; };
+layout(binding = 1) writeonly buffer QBuf    { float data_q[];    };
+layout(binding = 2) writeonly buffer GBuf    { float data_gate[]; };
+layout(binding = 3) writeonly buffer KBuf    { float data_k[];    };
+layout(binding = 4) writeonly buffer VBuf    { float data_v[];    };
+
+void main() {
+    uint tid = gl_GlobalInvocationID.x;
+    uint full_heads_total = num_heads * head_dim;
+    uint kv_heads_total = num_kv_heads * head_dim;
+    uint per_row_total = full_heads_total + 2u * kv_heads_total;
+    uint total = batch * per_row_total;
+    if (tid >= total) return;
+
+    uint row = tid / per_row_total;
+    uint local = tid - row * per_row_total;
+    uint combined_stride = 2u * full_heads_total + 2u * kv_heads_total;
+    uint combined_base = row * combined_stride;
+
+    if (local < full_heads_total) {
+        uint h = local / head_dim;
+        uint p = local - h * head_dim;
+        uint q_idx = combined_base + h * 2u * head_dim + p;
+        uint gate_idx = combined_base + h * 2u * head_dim + head_dim + p;
+        uint dst = row * full_heads_total + local;
+        data_q[dst] = data_comb[q_idx];
+        data_gate[dst] = data_comb[gate_idx];
+    } else if (local < full_heads_total + kv_heads_total) {
+        uint kv_local = local - full_heads_total;
+        uint src = combined_base + 2u * full_heads_total + kv_local;
+        uint dst = row * kv_heads_total + kv_local;
+        data_k[dst] = data_comb[src];
+    } else {
+        uint kv_local = local - full_heads_total - kv_heads_total;
+        uint src = combined_base + 2u * full_heads_total + kv_heads_total + kv_local;
+        uint dst = row * kv_heads_total + kv_local;
+        data_v[dst] = data_comb[src];
+    }
+}

@@ -1603,6 +1603,135 @@ pub fn dispatch_qkv_gate_split_resident(
     .context("qkv_gate_split_resident kernel failed")
 }
 
+/// Batched form of [`dispatch_qkv_gate_split_resident`].
+///
+/// `combined` is `[batch, 2 * num_heads * head_dim + 2 * num_kv_heads *
+/// head_dim]`. Outputs are dense row-major buffers:
+/// `q_out`/`gate_out` as `[batch, num_heads * head_dim]`, and
+/// `k_out`/`v_out` as `[batch, num_kv_heads * head_dim]`.
+#[allow(clippy::too_many_arguments)]
+pub fn dispatch_qkv_gate_split_batched_resident(
+    vk_device: &VulkanDevice,
+    combined: &VulkanBuffer,
+    q_out: &VulkanBuffer,
+    gate_out: &VulkanBuffer,
+    k_out: &VulkanBuffer,
+    v_out: &VulkanBuffer,
+    batch: usize,
+    num_heads: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+) -> Result<()> {
+    anyhow::ensure!(
+        batch > 0,
+        "qkv_gate_split_batched_resident: batch must be > 0"
+    );
+    anyhow::ensure!(
+        batch <= u32::MAX as usize,
+        "qkv_gate_split_batched_resident: batch {batch} exceeds u32::MAX"
+    );
+    let full_heads_total = num_heads
+        .checked_mul(head_dim)
+        .context("qkv_gate_split_batched_resident: full head element count overflow")?;
+    let kv_heads_total = num_kv_heads
+        .checked_mul(head_dim)
+        .context("qkv_gate_split_batched_resident: kv head element count overflow")?;
+    let combined_stride = full_heads_total
+        .checked_mul(2)
+        .and_then(|x| x.checked_add(kv_heads_total.checked_mul(2)?))
+        .context("qkv_gate_split_batched_resident: combined row stride overflow")?;
+    let per_row_split = full_heads_total
+        .checked_add(kv_heads_total.checked_mul(2).context(
+            "qkv_gate_split_batched_resident: per-row split element count overflow",
+        )?)
+        .context("qkv_gate_split_batched_resident: per-row split element count overflow")?;
+    let combined_elems = batch
+        .checked_mul(combined_stride)
+        .context("qkv_gate_split_batched_resident: combined element count overflow")?;
+    let full_out_elems = batch
+        .checked_mul(full_heads_total)
+        .context("qkv_gate_split_batched_resident: q/gate element count overflow")?;
+    let kv_out_elems = batch
+        .checked_mul(kv_heads_total)
+        .context("qkv_gate_split_batched_resident: k/v element count overflow")?;
+    let dispatch_elems = batch
+        .checked_mul(per_row_split)
+        .context("qkv_gate_split_batched_resident: dispatch element count overflow")?;
+    anyhow::ensure!(
+        combined_elems <= u32::MAX as usize,
+        "qkv_gate_split_batched_resident: combined_elems {combined_elems} exceeds u32::MAX"
+    );
+    anyhow::ensure!(
+        dispatch_elems <= u32::MAX as usize,
+        "qkv_gate_split_batched_resident: dispatch_elems {dispatch_elems} exceeds u32::MAX"
+    );
+    let need_comb = combined_elems
+        .checked_mul(4)
+        .context("qkv_gate_split_batched_resident: combined byte count overflow")?
+        as u64;
+    let need_q = full_out_elems
+        .checked_mul(4)
+        .context("qkv_gate_split_batched_resident: q/gate byte count overflow")?
+        as u64;
+    let need_kv = kv_out_elems
+        .checked_mul(4)
+        .context("qkv_gate_split_batched_resident: k/v byte count overflow")?
+        as u64;
+    anyhow::ensure!(
+        combined.size() >= need_comb,
+        "qkv_gate_split_batched_resident: combined buffer {} bytes < required {need_comb}",
+        combined.size()
+    );
+    anyhow::ensure!(
+        q_out.size() >= need_q,
+        "qkv_gate_split_batched_resident: q_out {} < {need_q}",
+        q_out.size()
+    );
+    anyhow::ensure!(
+        gate_out.size() >= need_q,
+        "qkv_gate_split_batched_resident: gate_out {} < {need_q}",
+        gate_out.size()
+    );
+    anyhow::ensure!(
+        k_out.size() >= need_kv,
+        "qkv_gate_split_batched_resident: k_out {} < {need_kv}",
+        k_out.size()
+    );
+    anyhow::ensure!(
+        v_out.size() >= need_kv,
+        "qkv_gate_split_batched_resident: v_out {} < {need_kv}",
+        v_out.size()
+    );
+
+    let glsl_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/csrc/shaders/qkv_gate_split_batched.comp"
+    );
+    let spirv = ShaderPipeline::compile_shader(glsl_path)?;
+    let push_constants: [u32; 4] = [
+        batch as u32,
+        num_heads as u32,
+        num_kv_heads as u32,
+        head_dim as u32,
+    ];
+    let handles: [vk::Buffer; 5] = [
+        combined.handle(),
+        q_out.handle(),
+        gate_out.handle(),
+        k_out.handle(),
+        v_out.handle(),
+    ];
+    run_compute_pipeline(
+        vk_device,
+        &spirv,
+        &handles,
+        handles.len(),
+        &push_constants,
+        dispatch_elems.div_ceil(256) as u32,
+    )
+    .context("qkv_gate_split_batched_resident kernel failed")
+}
+
 /// Split the combined GDN in_proj output buffer into four distinct
 /// output buffers (mixed_qkv, z, a, b). Companion to the GDN
 /// resident wire-up: the legacy path does this with four
