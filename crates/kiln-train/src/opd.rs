@@ -3147,7 +3147,7 @@ fn opd_step_forward_backward_tape_authoritative(
         let reached = grads_by_candle_raw.len();
         let var_matches = grads_by_candle_raw
             .keys()
-            .filter_map(|k| kiln_kt_bridge::tape_bridge::decode_kt_param_deposit(**k as u64))
+            .filter_map(|k| kiln_kt_bridge::tape_bridge::decode_kt_param_deposit(*k as u64))
             .filter(|param_raw| var_raw_ids.contains(param_raw))
             .count();
         eprintln!(
