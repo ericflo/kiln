@@ -16047,35 +16047,31 @@ fn gated_deltanet_forward_decode_if(
             // the dispatch above just produced, using the head-FIRST
             // q/k/v/beta/g and the head_last flag (tuple element 1) so the
             // backward can transpose a head-last grad to head-first. No-op
-            // (returns `Ok(())`) unless `KILN_USE_TAPE_FORWARD` +
-            // `KILN_USE_TAPE_GDN` are both set AND a thread-local `Tape` is
-            // active; never re-runs the recurrence. The production output
-            // (`recurrent_result.0`) is untouched. See `crate::tape_forward`
-            // module docs.
+            // unless `KILN_USE_TAPE_FORWARD` + `KILN_USE_TAPE_GDN` are both set
+            // AND a thread-local `Tape` is active; never re-runs the
+            // recurrence. The production output (`recurrent_result.0`) is
+            // untouched. See `crate::tape_forward` module docs.
+            //
+            // #1082 P4-full: record kt DIRECTLY — the recorder
+            // (`tape_record_gdn_recurrent_kt`) is kt-native, so we no longer
+            // bridge the 7 saved tensors (out + q/k/v/beta/g + entry_state)
+            // kt->candle here (~7 DtoD copies per GDN layer per step, ×24 GDN
+            // layers). `recurrent_result.0`'s id is the production recurrence
+            // output that flows downstream (the post-transpose's
+            // `kt_logits_to_candle` retains it for chaining), so recording it
+            // as the node output keeps the recurrence→transpose seam connected.
             #[cfg(feature = "cuda")]
             if crate::tape_forward::tape_forward_enabled() {
-                let out_c = kt_logits_to_candle(&recurrent_result.0)
-                    .context("gdn recurrent record kt->candle out (tape)")?;
-                let q_c = kt_logits_to_candle(&q).context("gdn recurrent record kt->candle q")?;
-                let k_c = kt_logits_to_candle(&k).context("gdn recurrent record kt->candle k")?;
-                let v_c = kt_logits_to_candle(&v).context("gdn recurrent record kt->candle v")?;
-                let beta_c =
-                    kt_logits_to_candle(&beta).context("gdn recurrent record kt->candle beta")?;
-                let g_c = kt_logits_to_candle(&g).context("gdn recurrent record kt->candle g")?;
-                let state_c = kt_logits_to_candle(&gdn_entry_state)
-                    .context("gdn recurrent record kt->candle entry_state")?;
-                let dev_c = kiln_kt_bridge::candle_device_from_kt(&q.device())
-                    .map_err(|e| anyhow::anyhow!("gdn recurrent record kt->candle device: {e}"))?;
-                crate::tape_forward::tape_record_gdn_recurrent(
-                    &out_c,
+                crate::tape_forward::tape_record_gdn_recurrent_kt(
+                    &recurrent_result.0,
                     recurrent_result.1, // head_last
-                    &q_c,
-                    &k_c,
-                    &v_c,
-                    &beta_c,
-                    &g_c,
-                    &state_c,
-                    &dev_c,
+                    &q,
+                    &k,
+                    &v,
+                    &beta,
+                    &g,
+                    &gdn_entry_state,
+                    &q.device(),
                 )?;
             }
 
