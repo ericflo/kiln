@@ -2759,10 +2759,17 @@ fn linear_with_lora_t_backend_decode_if(
     // decode/prefill methods take/return kt directly.
     {
         // CUDA-only: tape-routed linear (candle-typed cross-file seam; early
-        // return). Self-gate the kt→candle bridge on `tape_forward_enabled()` so
-        // the hot decode path (tape off) never pays the bridge copy.
+        // return). #1082 H5: `tape_forward_enabled()` DEFAULTS ON, but DECODE
+        // has no active bridge scope, so the kt->candle copy of `x` + the full
+        // frozen weight (e.g. GDN in_proj `weight_t`) is pure waste (the tape
+        // adapter returns None without a registered input mapping anyway). AND
+        // with `bridge_scope_active()` so only the CP-4 training bridge enters
+        // this branch; decode falls straight through to the kt-native
+        // `backend.linear_decode`.
         #[cfg(feature = "cuda")]
-        if crate::tape_forward::tape_forward_enabled() {
+        if crate::tape_forward::tape_forward_enabled()
+            && kiln_kt_bridge::tape_bridge::bridge_scope_active()
+        {
             let x_candle = kt_logits_to_candle(x)
                 .context("linear_with_lora_t_backend_decode_if kt->candle x (tape)")?;
             let weight_candle = kt_logits_to_candle(weight_t)
@@ -10224,14 +10231,12 @@ fn mlp_proj_forward_decode_if(
 ) -> Result<Tensor> {
     #[cfg(feature = "cuda")]
     if let Some(packed) = marlin {
-        // #1082: Marlin matmul is candle-typed. Bridge x kt->candle, then the
-        // candle base back to kt so the kt-native LoRA delta/add chain runs.
-        let x_candle =
-            kt_logits_to_candle(x).context("mlp_proj_forward: kt->candle x (marlin)")?;
-        let base_candle = crate::marlin_proj::matmul_bf16(&x_candle, packed)
-            .context("mlp_proj_forward: marlin matmul")?;
-        let base = candle_to_kt_activation(&base_candle)
-            .context("mlp_proj_forward: candle->kt marlin base")?;
+        // #1082 H1: kt-native Marlin matmul — no kt->candle->candle->kt
+        // round-trip on the per-token activation/result. Runs gate/up/down
+        // ×32 layers/token. The kt-native LoRA delta/add chain runs directly
+        // on the kt base.
+        let base = crate::marlin_proj::matmul_bf16_kt(x, packed)
+            .context("mlp_proj_forward: kt-native marlin matmul")?;
         if let Some(proj) = lora {
             if let Some(delta) = try_kt_lora_delta(x, proj, lora_scale)
                 .context("mlp_proj_forward: kt lora delta")?
@@ -10819,7 +10824,16 @@ fn lm_head_forward_backend_decode_if(
     // kt-typed (item 4) so `linear_prefill_apply`/`linear_decode` take/return kt.
     #[cfg(feature = "cuda")]
     {
-        if crate::tape_forward::tape_forward_enabled() {
+        // #1082 H4: `tape_forward_enabled()` DEFAULTS ON, but DECODE has no
+        // active bridge scope, so the kt->candle copy of `x` + the full frozen
+        // 1.27GB lm_head weight is pure waste (the tape adapter returns None
+        // without a registered input mapping anyway). AND with
+        // `bridge_scope_active()` so only the CP-4 training bridge enters this
+        // branch; decode falls straight through to the kt-native
+        // `backend.linear_decode`.
+        if crate::tape_forward::tape_forward_enabled()
+            && kiln_kt_bridge::tape_bridge::bridge_scope_active()
+        {
             let x_c = kt_logits_to_candle(x).context("lm_head kt->candle x (tape)")?;
             let et_c =
                 kt_logits_to_candle(embed_tokens_t).context("lm_head kt->candle embed_t (tape)")?;
@@ -16308,13 +16322,12 @@ fn q_proj_forward_decode_if(
 ) -> Result<Tensor> {
     #[cfg(feature = "cuda")]
     if let Some(ref packed) = attn_weights.q_proj_marlin {
-        // #1082: Marlin matmul is candle-typed. Bridge x kt->candle, then the
-        // candle base back to kt so the kt-native LoRA delta/add chain runs.
-        let x_candle = kt_logits_to_candle(x).context("q_proj_forward: kt->candle x (marlin)")?;
-        let base_candle = crate::marlin_proj::matmul_bf16(&x_candle, packed)
-            .context("q_proj_forward: marlin matmul")?;
-        let base = candle_to_kt_activation(&base_candle)
-            .context("q_proj_forward: candle->kt marlin base")?;
+        // #1082 H2: kt-native Marlin matmul — no kt->candle->candle->kt
+        // round-trip on the per-token activation/result. Runs ×8 full-attn
+        // layers/token. The kt-native LoRA delta/add chain runs directly on
+        // the kt base.
+        let base = crate::marlin_proj::matmul_bf16_kt(x, packed)
+            .context("q_proj_forward: kt-native marlin matmul")?;
         if let Some(proj) = lora {
             if let Some(delta) = try_kt_lora_delta(x, proj, lora_scale)
                 .context("q_proj_forward: kt lora delta")?

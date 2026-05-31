@@ -319,6 +319,112 @@ pub(crate) fn matmul_bf16_2d_kt(x_bf16: &candle_core::Tensor, w: &MarlinPackedPr
     Ok(y_bf16)
 }
 
+/// Fully kt-native `x @ W` against a Marlin-packed projection.
+///
+/// `x_kt` is a contiguous-or-not kt-typed BF16 activation of shape
+/// `[.., k]` (rank 2 `[m, k]` or rank 3 `[batch, seq, k]`); the result
+/// is kt-typed BF16 matching the input rank with last dim `n`.
+///
+/// This is the per-token DECODE entry point (#1082 H1/H2/H3): it does
+/// the BF16→F16 cast, the kernel call, and the F16→BF16 cast entirely
+/// in kt-space, with **no** `kt_logits_to_candle` / `candle_to_kt_activation`
+/// round-trip on the activation or the output. The packed weight + scales
+/// (stored as candle tensors in [`MarlinPackedProj`]) are borrowed
+/// zero-copy once via [`kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow`];
+/// the I32→U32 mapping in `candle_dtype_to_kt` lets the packed weights flow
+/// through without a copy.
+///
+/// Numerically identical to [`matmul_bf16`]: same FFI symbol
+/// (`marlin_w4a16_gemm_kt`), same F16-only kernel, same BF16↔F16 cast at
+/// the boundary — the only difference is the activation/result never make a
+/// candle detour.
+#[cfg(feature = "cuda")]
+pub fn matmul_bf16_kt(
+    x_kt: &kiln_tensor::Tensor,
+    w: &MarlinPackedProj,
+) -> Result<kiln_tensor::Tensor> {
+    use kiln_tensor::DType as KtDType;
+
+    let rank = x_kt.rank();
+    // Flatten to 2D `[m, k]` for the kernel, remembering the original
+    // leading dims so we can restore the output rank.
+    let (x2_kt, restore): (kiln_tensor::Tensor, Option<(usize, usize)>) = match rank {
+        2 => {
+            let (_m, k) = x_kt.dims2().context("marlin_proj kt: x must be [m, k] when 2D")?;
+            if k != w.k {
+                anyhow::bail!("marlin_proj kt: x last-dim {k} != packed weight k {}", w.k);
+            }
+            (x_kt.contiguous().context("marlin_proj kt: x contiguous (2D)")?, None)
+        }
+        3 => {
+            let (batch, seq, k) = x_kt
+                .dims3()
+                .context("marlin_proj kt: x must be [batch, seq, k] when 3D")?;
+            if k != w.k {
+                anyhow::bail!("marlin_proj kt: x last-dim {k} != packed weight k {}", w.k);
+            }
+            let x2 = x_kt
+                .reshape((batch * seq, k))
+                .context("marlin_proj kt: reshape x [batch*seq, k]")?
+                .contiguous()
+                .context("marlin_proj kt: x2 contiguous (3D)")?;
+            (x2, Some((batch, seq)))
+        }
+        other => anyhow::bail!("marlin_proj kt: unsupported activation rank {other}"),
+    };
+
+    kiln_nvtx::range!(c"kiln/marlin_w4a16_gemm_kt");
+
+    // Kernel is F16-only; cast bf16 -> fp16 in kt-space (no candle detour).
+    let x_fp16 = if x2_kt.dtype() == KtDType::F16 {
+        x2_kt
+    } else {
+        x2_kt
+            .to_dtype(KtDType::F16)
+            .context("marlin_proj kt: cast x bf16 -> fp16")?
+            .contiguous()
+            .context("marlin_proj kt: x_fp16 contiguous")?
+    };
+
+    // Borrow the packed weight + scales (candle-stored) zero-copy into kt.
+    let b_packed = w
+        .b_packed
+        .contiguous()
+        .context("marlin_proj kt: b_packed contiguous")?;
+    let scales = w
+        .scales
+        .contiguous()
+        .context("marlin_proj kt: scales contiguous")?;
+    let b_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&b_packed)
+        .context("marlin_proj kt: borrow b_packed -> kt")?;
+    let s_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&scales)
+        .context("marlin_proj kt: borrow scales -> kt")?;
+
+    let y_fp16 = kiln_marlin_gemm::marlin_w4a16_gemm_kt(&x_fp16, &b_kt, &s_kt, w.groupsize)
+        .map_err(|e| anyhow::anyhow!("marlin_proj kt: marlin_w4a16_gemm_kt: {e}"))?;
+
+    // Cast result fp16 -> bf16 in kt-space (no candle detour).
+    let y_bf16 = y_fp16
+        .to_dtype(KtDType::BF16)
+        .context("marlin_proj kt: cast y fp16 -> bf16")?;
+
+    let out = match restore {
+        None => y_bf16,
+        Some((batch, seq)) => y_bf16
+            .reshape((batch, seq, w.n))
+            .context("marlin_proj kt: reshape output [batch, seq, n]")?,
+    };
+    Ok(out)
+}
+
+#[cfg(not(feature = "cuda"))]
+pub fn matmul_bf16_kt(
+    _x_kt: &kiln_tensor::Tensor,
+    _w: &MarlinPackedProj,
+) -> Result<kiln_tensor::Tensor> {
+    anyhow::bail!("marlin_proj::matmul_bf16_kt requires the `cuda` feature")
+}
+
 /// Run `x @ W` against a Marlin-packed projection.
 ///
 /// `x` may be 2D `[m, k]` or 3D `[batch, seq, k]`; the result matches the
@@ -330,6 +436,9 @@ pub(crate) fn matmul_bf16_2d_kt(x_bf16: &candle_core::Tensor, w: &MarlinPackedPr
 /// previous candle-typed shim — same FFI symbol bottoming out in
 /// the same kernel. Test parity coverage: `bf80b175`
 /// `test_marlin_w4a16_gemm_kt_api_parity`.
+///
+/// This remains for legacy candle callers; the per-token DECODE path uses
+/// [`matmul_bf16_kt`] directly (no candle round-trip on the activation).
 #[cfg(feature = "cuda")]
 pub fn matmul_bf16(x: &candle_core::Tensor, w: &MarlinPackedProj) -> Result<candle_core::Tensor> {
     let rank = x.rank();
