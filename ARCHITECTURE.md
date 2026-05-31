@@ -1023,3 +1023,47 @@ demotion, fallback-branch deletion) and the Tier-2 crates
 (`kiln-opd-loss-kernel`, `kiln-flce-kernel` Phase B closeout,
 `kiln-vulkan-kernel` shim cleanup). See `docs/CANDLE_REMOVAL_PLAN.md`
 for the full sequence to vendor delete.
+
+### Phase 7 Metal backend snapshot (2026-05-31)
+
+The candle→kt forward-flip (driven on the Linux CUDA box) had left the
+Metal build uncompilable — 80 errors where `forward.rs` passed kt
+`Tensor`s into `backend/metal.rs` kernel helpers that still took
+`candle_core::Tensor`. No one could catch it without Apple Silicon. This
+is now resolved and validated on an M1 (16 GiB, the consumer-floor tier):
+
+- **`cargo build --features metal` is green** and the entire forward.rs
+  **free-function Metal kernel path is candle-CORE-free.** 50 fused
+  kernels (MLP gate+up / silu*mul, transposed-coop GEMV + fused-QKV,
+  LM head + argmax, RoPE, LoRA-add, GDN gates / qk-norm / decode /
+  prefill / recurrent, gated-RMSNorm, attn-gate) source storage via the
+  kt `MetalStorage` downcast, device/encoder/pipelines via the kt
+  `MetalCompanion`, and output via `MetalStorage::zeros_kt` — all over
+  the `candle_metal_kernels` + `objc2_metal` substrate the `metal`
+  feature already pulls (and that Phase 7 keeps). Pipeline getters take
+  `&dyn MetalPipelineHost`, impl'd for both the candle `MetalDevice`
+  (transitional) and the kt `MetalCompanion` (candle-free), so one
+  compiled pipeline serves both with no call-site churn.
+- **kt Metal host I/O + sync substrate** lands in `kiln-tensor`:
+  `MetalCompanion::wait_until_completed` (the host-read sync point),
+  `host_to_metal_copy` / `metal_to_host_copy`, and Metal arms on
+  `Tensor::{to_device, from_vec_on, zeros_on, from_raw_bytes_on,
+  contiguous}` — all over `StorageModeShared` UMA (zero-copy memcpy,
+  no PCIe hop). Generic `DeviceOp{1,2,3}` ops fall back to a Metal-only
+  host round-trip when no native kernel exists (CUDA/Vulkan keep their
+  loud "implement the kernel" failure, so missing GPU kernels aren't
+  masked).
+- **Two on-M1 e2e gates pass**
+  (`crates/kiln-server/tests/real_model_integration.rs`): the FP32
+  naive path and a BF16 variant that drives the fused decode kernels
+  end-to-end through the real `ModelRunner` + HTTP layer. Plus the first
+  Metal parity suite, `crates/kiln-tensor/tests/metal_ops_parity.rs`
+  (9 tests, kt-Metal vs the canonical kt-CPU reference).
+- **Remaining for DoD-101 (candle-free Metal):** the trait-method path
+  (paged-attn d256, GDN recurrent/chunk/conv1d, gdn_in_proj, paged-kv
+  read) still bridges kt→candle→kt (~111 host-copy sites); flipping it
+  is both candle removal and a Metal decode perf win. The candle-era
+  in-file kernel tests in `forward.rs` + `metal.rs` need migration to
+  kt-native inputs (they broke from the flip; tracked follow-up). Phase
+  2 Metal perf (`simdgroup_matrix`, `MTLHeap`) and Phase 6c Metal
+  backward parity remain.
