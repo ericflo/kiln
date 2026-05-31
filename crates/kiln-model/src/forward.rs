@@ -6753,33 +6753,50 @@ pub fn rms_norm(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor> {
         let kernel_disabled = std::env::var("KILN_DISABLE_RMSNORM_KERNEL").is_ok();
         let bwd_disabled = std::env::var("KILN_DISABLE_RMSNORM_BACKWARD").is_ok();
         if !kernel_disabled && !bwd_disabled {
-            // Phase 6a/CP-4 (#1082) — experimental tape-forward path.
+            // Phase 6a/CP-4 (#1082) — kt-tape autograd/training path.
             // When `KILN_USE_TAPE_FORWARD` is set AND a thread-local
             // `Tape` is active (via
             // `crate::tape_forward::with_thread_local_tape`), route
             // RMSNorm through `fused_rmsnorm_via_kt_tape`. The forward
-            // result is bit-exact with the kt-forward-op shim (same
-            // FFI symbol underneath); the difference is that the
-            // backward node is recorded on the tape instead of wrapped
-            // in a candle CustomOp2. With the gate off (the default)
-            // this returns `Ok(None)` and we fall through to the
-            // existing dispatch.
+            // result is bit-exact with the kt-only inference branch
+            // below (same `kiln_fused_rmsnorm` FFI symbol underneath);
+            // the difference is that the backward node is recorded on
+            // the tape. Outside a tape scope (decode / inference) the
+            // `with_active_tape` closure is never invoked and we fall
+            // through to the existing dispatch.
             //
             // Production-safe: opt-in via two conditions
             // (env var + active tape scope). The default forward path
             // is unchanged. See `crate::tape_forward` module docs.
-            // tape_forward is candle-typed; only bridge when the tape is
-            // active (training). Production decode skips this copy.
-            if crate::tape_forward::tape_forward_enabled() {
-                let x_candle =
-                    kt_logits_to_candle(x).context("rms_norm kt->candle x (tape)")?;
-                let w_candle =
-                    kt_logits_to_candle(weight).context("rms_norm kt->candle weight (tape)")?;
-                if let Some(out) =
-                    crate::tape_forward::try_tape_rms_norm_cuda(&x_candle, &w_candle, eps as f32)?
-                {
-                    return candle_to_kt_activation(&out)
-                        .context("rms_norm candle->kt tape out");
+            //
+            // #1082 (RMSNorm kt-tape flip): record DIRECTLY from kt — `x` and
+            // `weight` are already `kiln_tensor::Tensor` post-flip, so we route
+            // them straight into `fused_rmsnorm_via_kt_tape` (which runs the
+            // CUDA forward via the same `kiln_fused_rmsnorm` FFI symbol AND
+            // records a kt-native `CudaFusedRmsNormBackward` node onto the
+            // active `Tape`). No candle Var / CustomOp / id-mapping bridge: the
+            // node is recorded against the connected kt `x.id()`/`weight.id()`,
+            // so the backward chain flows through RMSNorm to the upstream
+            // LoRA-affected activations (the RMSNorm `weight` is FROZEN in LoRA
+            // training — grad must flow w.r.t. `x`). The returned kt `y` is the
+            // same tensor that flows downstream, keeping the tape connected.
+            //
+            // Mirrors the kt-native P4 recorder
+            // (`tape_record_gdn_recurrent_kt`), the H6 CE-from-logits entry,
+            // and the OPD shim: call `with_active_tape` directly so this
+            // no-ops cleanly (falls through) outside a tape scope (decode /
+            // inference), and pre-check the kt envelope via
+            // `supports_rmsnorm_kt` so out-of-envelope inputs fall through to
+            // the kt-native non-tracked forward below instead of erroring.
+            if crate::tape_forward::tape_forward_enabled()
+                && kiln_rmsnorm_kernel::supports_rmsnorm_kt(x, weight)
+            {
+                if let Some(out_kt) = crate::tape_forward::with_active_tape(|tape| {
+                    kiln_rmsnorm_kernel::fused_rmsnorm_via_kt_tape(x, weight, eps as f32, tape)
+                }) {
+                    return out_kt
+                        .map_err(|e| anyhow::anyhow!("fused_rmsnorm_via_kt_tape: {e}"))
+                        .context("rms_norm kt-tape forward failed");
                 }
             }
             if !x.track_op() && !weight.track_op() {
@@ -6797,42 +6814,33 @@ pub fn rms_norm(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor> {
                     }
                 }
             }
-            // Autograd/training path: `rmsnorm_candle_shim` is candle-typed.
-            // Bridge the kt x/weight to candle and the candle result back to
-            // kt. (Reached only for tracked tensors; the non-tracked decode
-            // path returned from the kt-native branch above.)
+            // Candle CustomOp fallback (NO LONGER the production training
+            // caller). The autograd/training path now records via the
+            // kt-native `fused_rmsnorm_via_kt_tape` branch above; the
+            // non-tracked decode/inference path returns from the kt-only branch
+            // just above. This candle-typed shim is reached only as a last
+            // resort: tape inactive (or kt envelope miss) AND the kt borrow in
+            // the non-tracked branch declined — an edge that does not arise on
+            // the CUDA BF16 happy path. Kept (not deleted) so that out-of-kt-
+            // envelope cases still have an autograd-capable forward, and
+            // because the candle `fused_rmsnorm_via_kt_forward_op` fn is shared
+            // with the kt-shim. Bridge kt x/weight to candle and back.
             let x_candle = kt_logits_to_candle(x).context("rms_norm kt->candle x (shim)")?;
             let w_candle =
                 kt_logits_to_candle(weight).context("rms_norm kt->candle weight (shim)")?;
             if should_use_fused_rmsnorm()
                 && crate::rmsnorm_candle_shim::supports(&x_candle, &w_candle)
             {
-                // Phase 7 (#1082): kt-forward-op shim production caller.
-                // Replaces the candle-typed `fused_rmsnorm_with_autograd`
-                // (CustomOp2 over `kiln_fused_rmsnorm` forward + the
-                // kt-bridged `kiln_fused_rmsnorm_bwd` backward since
-                // commit `341da876`) with a single `KtForwardOp2`
-                // (commit `095f1c74`) whose forward AND backward both
-                // run through the kt-typed entries. Bit-exact with the
-                // prior path — same FFI symbols, same envelope —
-                // and falls back to `fused_rmsnorm_with_autograd`
-                // automatically when the kt-shim envelope misses
-                // (kill switch `KILN_DISABLE_RMSNORM_KT_FORWARD_OP=1`,
-                // non-CUDA, non-BF16, hidden > 8192, etc.). See
-                // `kiln-rmsnorm-kernel/src/kt_forward_op.rs` for the
-                // design rationale. Mirrors the OPD migration template
-                // in commit `f214f168`.
-                //
-                // NOTE(#1082, 2026-05-28): Phase 6a/CP-4 added a parallel
-                // `fused_rmsnorm_via_kt_tape` entry (`895162ca`) that
-                // records the backward onto `kiln_autograd::Tape` instead
-                // of wrapping it in a candle `CustomOp2`. The flip from
-                // this call site to that entry is gated on CP-4 substrate
-                // work in `kiln-train` (porting `loss.backward()` →
-                // `Tape::backward`). See
-                // `docs/rmsnorm-kt-tape-production-caller-stop-2026-05-28.md`
-                // for the audit explaining why a per-call-site flip is
-                // not progress until CP-4 lands.
+                // kt-forward-op shim: a single `KtForwardOp2` (commit
+                // `095f1c74`) whose forward AND backward both run through the
+                // kt-typed entries (same `kiln_fused_rmsnorm` /
+                // `kiln_fused_rmsnorm_bwd` FFI symbols as the kt-tape entry).
+                // Falls back to `fused_rmsnorm_with_autograd` automatically
+                // when the kt-shim envelope misses (kill switch
+                // `KILN_DISABLE_RMSNORM_KT_FORWARD_OP=1`, non-CUDA, non-BF16,
+                // hidden > 8192, etc.). See
+                // `kiln-rmsnorm-kernel/src/kt_forward_op.rs` for the design
+                // rationale.
                 let out = crate::rmsnorm_candle_shim::fused_rmsnorm_via_kt_forward_op(
                     &x_candle,
                     &w_candle,
