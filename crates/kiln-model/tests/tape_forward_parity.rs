@@ -600,9 +600,15 @@ fn tape_forward_embedding_bit_exact_parity_with_baseline() {
         std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
     }
 
-    // Path A — baseline. The adapter short-circuits on no-active-scope.
-    let baseline = kiln_model::tape_forward::try_tape_embedding_cuda(&weights, &token_ids)
-        .expect("baseline try_tape_embedding_cuda call ok");
+    // #1082: production uses the kt twin try_tape_embedding_kt; validate IT.
+    let w_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&weights)
+        .expect("weights kt borrow");
+    let ids_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&token_ids)
+        .expect("ids kt borrow");
+
+    // Path A — baseline. The kt twin short-circuits on no-active-scope.
+    let baseline = kiln_model::tape_forward::try_tape_embedding_kt(&w_kt, &ids_kt)
+        .expect("baseline try_tape_embedding_kt call ok");
     assert!(
         baseline.is_none(),
         "baseline path (no tape scope) must short-circuit to Ok(None) \
@@ -610,25 +616,22 @@ fn tape_forward_embedding_bit_exact_parity_with_baseline() {
          adapter recorded onto a tape that does not exist"
     );
 
-    // Baseline forward via the kt op-registry directly (matches what
-    // `try_tape_embedding_cuda` calls when a scope is open).
-    let w_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&weights)
-        .expect("weights kt borrow");
-    let ids_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&token_ids)
-        .expect("ids kt borrow");
+    // Baseline forward via the kt op-registry directly.
     let baseline_kt = kiln_tensor::ops::embedding(&w_kt, &ids_kt)
         .expect("kt embedding baseline");
     let baseline_out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&baseline_kt)
         .expect("baseline kt -> candle");
 
-    // Path B — tape-forward inside an active scope.
+    // Path B — tape-forward inside an active scope (the kt twin).
     let (tape_result, tape) =
         kiln_model::tape_forward::with_thread_local_tape(|| {
-            kiln_model::tape_forward::try_tape_embedding_cuda(&weights, &token_ids)
+            kiln_model::tape_forward::try_tape_embedding_kt(&w_kt, &ids_kt)
         });
-    let tape_out = tape_result
-        .expect("tape-forward try_tape_embedding_cuda ok")
+    let tape_out_kt = tape_result
+        .expect("tape-forward try_tape_embedding_kt ok")
         .expect("tape-forward returned Some(out)");
+    let tape_out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&tape_out_kt)
+        .expect("tape kt -> candle");
 
     let diff = max_abs_diff(&baseline_out, &tape_out);
     assert_eq!(
@@ -675,8 +678,10 @@ fn tape_forward_embedding_short_circuits_without_active_scope() {
     unsafe {
         std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
     }
-    let out = kiln_model::tape_forward::try_tape_embedding_cuda(&weights, &token_ids)
-        .expect("try_tape_embedding_cuda call ok");
+    let w_kt = kt_in(&weights);
+    let ids_kt = kt_in(&token_ids);
+    let out = kiln_model::tape_forward::try_tape_embedding_kt(&w_kt, &ids_kt)
+        .expect("try_tape_embedding_kt call ok");
     assert!(
         out.is_none(),
         "no active tape scope must short-circuit to Ok(None) \
@@ -744,9 +749,13 @@ fn tape_forward_swiglu_bit_exact_parity_with_baseline() {
         std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
     }
 
+    // #1082: production uses the kt twin try_tape_swiglu_kt; validate IT.
+    let gate_kt = kt_in(&gate);
+    let up_kt = kt_in(&up);
+
     // Path A — baseline. The adapter short-circuits on no-active-scope.
-    let baseline_adapter = kiln_model::tape_forward::try_tape_swiglu_cuda(&gate, &up)
-        .expect("baseline try_tape_swiglu_cuda call ok");
+    let baseline_adapter = kiln_model::tape_forward::try_tape_swiglu_kt(&gate_kt, &up_kt)
+        .expect("baseline try_tape_swiglu_kt call ok");
     assert!(
         baseline_adapter.is_none(),
         "baseline path (no tape scope) must short-circuit to Ok(None) \
@@ -755,11 +764,7 @@ fn tape_forward_swiglu_bit_exact_parity_with_baseline() {
     );
 
     // Baseline forward via the kt op-registry directly (matches what
-    // `try_tape_swiglu_cuda` calls when a scope is open).
-    let gate_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&gate)
-        .expect("gate kt borrow");
-    let up_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&up)
-        .expect("up kt borrow");
+    // `try_tape_swiglu_kt` calls when a scope is open).
     let baseline_kt =
         kiln_tensor::ops::mul_sigmoid_gate(&gate_kt, &up_kt).expect("kt mul_sigmoid_gate baseline");
     let baseline_out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&baseline_kt)
@@ -768,11 +773,13 @@ fn tape_forward_swiglu_bit_exact_parity_with_baseline() {
     // Path B — tape-forward inside an active scope.
     let (tape_result, tape) =
         kiln_model::tape_forward::with_thread_local_tape(|| {
-            kiln_model::tape_forward::try_tape_swiglu_cuda(&gate, &up)
+            kiln_model::tape_forward::try_tape_swiglu_kt(&gate_kt, &up_kt)
         });
-    let tape_out = tape_result
-        .expect("tape-forward try_tape_swiglu_cuda ok")
+    let tape_out_kt = tape_result
+        .expect("tape-forward try_tape_swiglu_kt ok")
         .expect("tape-forward returned Some(out)");
+    let tape_out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&tape_out_kt)
+        .expect("tape kt -> candle");
 
     let diff = max_abs_diff(&baseline_out, &tape_out);
     assert_eq!(
@@ -820,8 +827,10 @@ fn tape_forward_swiglu_short_circuits_without_active_scope() {
     unsafe {
         std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
     }
-    let out = kiln_model::tape_forward::try_tape_swiglu_cuda(&gate, &up)
-        .expect("try_tape_swiglu_cuda call ok");
+    let gate_kt = kt_in(&gate);
+    let up_kt = kt_in(&up);
+    let out = kiln_model::tape_forward::try_tape_swiglu_kt(&gate_kt, &up_kt)
+        .expect("try_tape_swiglu_kt call ok");
     assert!(
         out.is_none(),
         "no active tape scope must short-circuit to Ok(None) \
@@ -974,11 +983,13 @@ fn tape_backward_swiglu_matches_analytic_reference() {
         std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
     }
 
+    let gate_kt = kt_in(&gate);
+    let up_kt = kt_in(&up);
     let (res, tape) = kiln_model::tape_forward::with_thread_local_tape(|| {
-        kiln_model::tape_forward::try_tape_swiglu_cuda(&gate, &up)
+        kiln_model::tape_forward::try_tape_swiglu_kt(&gate_kt, &up_kt)
     });
     let _out = res
-        .expect("tape-forward try_tape_swiglu_cuda ok")
+        .expect("tape-forward try_tape_swiglu_kt ok")
         .expect("tape-forward returned Some(out)");
     assert_eq!(tape.len(), 1, "swiglu must record exactly one node");
     let node = &tape.nodes()[0];
@@ -1132,11 +1143,13 @@ fn tape_backward_embedding_scatter_add_conserves_mass() {
         std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
     }
 
+    let w_kt = kt_in(&weights);
+    let ids_kt = kt_in(&token_ids);
     let (res, tape) = kiln_model::tape_forward::with_thread_local_tape(|| {
-        kiln_model::tape_forward::try_tape_embedding_cuda(&weights, &token_ids)
+        kiln_model::tape_forward::try_tape_embedding_kt(&w_kt, &ids_kt)
     });
     let _out = res
-        .expect("tape-forward try_tape_embedding_cuda ok")
+        .expect("tape-forward try_tape_embedding_kt ok")
         .expect("tape-forward returned Some(out)");
     assert_eq!(tape.len(), 1, "embedding must record exactly one node");
     let node = &tape.nodes()[0];
@@ -1381,17 +1394,21 @@ fn tape_forward_rope_split_half_matches_f32_reference() {
         let (x, cos, sin) =
             build_rope_split_half_inputs(&device, batch, seq, heads, head_dim, rotary_dim);
 
+        let x_kt = kt_in(&x);
+        let cos_kt = kt_in(&cos);
+        let sin_kt = kt_in(&sin);
         let none_out =
-            kiln_model::tape_forward::try_tape_rope_cuda(&x, &cos, &sin, head_dim, rotary_dim)
+            kiln_model::tape_forward::try_tape_rope_kt(&x_kt, &cos_kt, &sin_kt, head_dim, rotary_dim)
                 .expect("baseline ok");
         assert!(none_out.is_none(), "no-scope path must be Ok(None)");
 
         let (res, tape) = kiln_model::tape_forward::with_thread_local_tape(|| {
-            kiln_model::tape_forward::try_tape_rope_cuda(&x, &cos, &sin, head_dim, rotary_dim)
+            kiln_model::tape_forward::try_tape_rope_kt(&x_kt, &cos_kt, &sin_kt, head_dim, rotary_dim)
         });
-        let out = res
-            .expect("tape try_tape_rope_cuda ok")
+        let out_kt = res
+            .expect("tape try_tape_rope_kt ok")
             .expect("tape returned Some(out)");
+        let out = candle_out(&out_kt);
         assert_eq!(tape.len(), 1, "rope must record exactly one node");
         let node = &tape.nodes()[0];
         assert_eq!(
@@ -1432,8 +1449,11 @@ fn tape_forward_rope_split_half_short_circuits_without_scope() {
     unsafe {
         std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
     }
-    let out =
-        kiln_model::tape_forward::try_tape_rope_cuda(&x, &cos, &sin, 64, 64).expect("call ok");
+    let x_kt = kt_in(&x);
+    let cos_kt = kt_in(&cos);
+    let sin_kt = kt_in(&sin);
+    let out = kiln_model::tape_forward::try_tape_rope_kt(&x_kt, &cos_kt, &sin_kt, 64, 64)
+        .expect("call ok");
     assert!(out.is_none(), "no active scope must short-circuit to Ok(None)");
 }
 
@@ -1456,8 +1476,11 @@ fn tape_backward_rope_split_half_matches_analytic_adjoint() {
     let (x, cos, sin) =
         build_rope_split_half_inputs(&device, batch, seq, heads, head_dim, rotary_dim);
 
+    let x_kt = kt_in(&x);
+    let cos_kt = kt_in(&cos);
+    let sin_kt = kt_in(&sin);
     let (res, tape) = kiln_model::tape_forward::with_thread_local_tape(|| {
-        kiln_model::tape_forward::try_tape_rope_cuda(&x, &cos, &sin, head_dim, rotary_dim)
+        kiln_model::tape_forward::try_tape_rope_kt(&x_kt, &cos_kt, &sin_kt, head_dim, rotary_dim)
     });
     let _out = res.expect("fwd ok").expect("Some(out)");
     assert_eq!(tape.len(), 1);

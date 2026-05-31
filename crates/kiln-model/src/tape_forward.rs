@@ -83,10 +83,10 @@
 //! kt-side fused kernel ships a `*_via_kt_tape` entry:
 //!
 //! * `try_tape_rms_norm_cuda` — `RmsNormBackward` (CP-4 baseline)
-//! * `try_tape_matmul_cuda` — `MatmulBackward`
-//! * `try_tape_silu_cuda` — `SiluBackward`
-//! * `try_tape_embedding_cuda` — `EmbeddingBackward`
-//! * `try_tape_swiglu_cuda` — `MulSigmoidGateBackward` (MLP gate path,
+//! * `try_tape_matmul_kt` — `MatmulBackward`
+//! * `try_tape_silu_kt` — `SiluBackward`
+//! * `try_tape_embedding_kt` — `EmbeddingBackward`
+//! * `try_tape_swiglu_kt` — `MulSigmoidGateBackward` (MLP gate path,
 //!   ~18% of decode per Phase 6 NVTX profiling)
 //!
 //! All 5 register IO mappings into the bridge when a scope is active
@@ -215,8 +215,7 @@ pub fn try_tape_rms_norm_cuda(x: &Tensor, weight: &Tensor, eps: f32) -> Result<O
     Ok(Some(out))
 }
 
-/// kt-native SiLU tape recorder (#1082 seam flip) — the kt-only twin of
-/// [`try_tape_silu_cuda`]. Takes the kt activation directly and records a
+/// kt-native SiLU tape recorder (#1082 seam flip) — the kt-native SiLU tape recorder. Takes the kt activation directly and records a
 /// `SiluBackward` onto the active tape with **no candle round-trip** (no
 /// `kt_logits_to_candle` in, no `kt_tensor_to_candle_cuda_copy` out, no IO-map
 /// bookkeeping). Bottoms out in the same `kiln_tensor::ops::silu` +
@@ -243,7 +242,7 @@ pub fn try_tape_silu_kt(x: &kiln_tensor::Tensor) -> Result<Option<kiln_tensor::T
 }
 
 /// kt-native residual-add tape recorder (#1082 seam flip) — kt-only twin of
-/// [`try_tape_add_cuda`]. Records `AddBackward` directly from kt inputs, no candle
+/// `try_tape_add_cuda`. Records `AddBackward` directly from kt inputs, no candle
 /// round-trip. `Ok(None)` on shape mismatch (defer broadcasting to the caller),
 /// tape-off, or no active scope.
 pub fn try_tape_add_kt(
@@ -266,8 +265,7 @@ pub fn try_tape_add_kt(
     }
 }
 
-/// kt-native split-half RoPE tape recorder (#1082 seam flip) — kt-only twin of
-/// [`try_tape_rope_cuda`]. Records `RopeSplitHalfBackward` directly from kt inputs,
+/// kt-native split-half RoPE tape recorder (#1082 seam flip) — the kt-native RoPE tape recorder. Records `RopeSplitHalfBackward` directly from kt inputs,
 /// no candle round-trip. `Ok(None)` outside the rank-4 envelope, tape-off, or no
 /// active scope (caller falls through to the kt-native non-tape RoPE).
 pub fn try_tape_rope_kt(
@@ -302,8 +300,7 @@ pub fn try_tape_rope_kt(
     }
 }
 
-/// kt-native matmul tape recorder (#1082 seam flip) — kt-only twin of
-/// [`try_tape_matmul_cuda`]. Records `MatmulBackward` directly from kt inputs.
+/// kt-native matmul tape recorder (#1082 seam flip) — the kt-native matmul tape recorder. Records `MatmulBackward` directly from kt inputs.
 pub fn try_tape_matmul_kt(
     a: &kiln_tensor::Tensor,
     b: &kiln_tensor::Tensor,
@@ -328,8 +325,7 @@ pub fn try_tape_matmul_kt(
     }
 }
 
-/// kt-native embedding tape recorder (#1082 seam flip) — kt-only twin of
-/// [`try_tape_embedding_cuda`]. Records `EmbeddingBackward` directly from kt
+/// kt-native embedding tape recorder (#1082 seam flip) — the kt-native embedding tape recorder. Records `EmbeddingBackward` directly from kt
 /// inputs. `Ok(None)` outside the rank-2-weights envelope.
 pub fn try_tape_embedding_kt(
     weights: &kiln_tensor::Tensor,
@@ -363,7 +359,7 @@ pub fn try_tape_embedding_kt(
 }
 
 /// kt-native SwiGLU (gate ⊙ sigmoid-gate of up) tape recorder (#1082 seam flip) —
-/// kt-only twin of [`try_tape_swiglu_cuda`].
+/// the kt-native SwiGLU tape recorder.
 pub fn try_tape_swiglu_kt(
     gate: &kiln_tensor::Tensor,
     up: &kiln_tensor::Tensor,
@@ -390,7 +386,7 @@ pub fn try_tape_swiglu_kt(
 }
 
 /// kt-native elementwise-mul tape recorder (#1082 seam flip) — kt-only twin of
-/// [`try_tape_mul_cuda`]. `Ok(None)` on shape mismatch (defer broadcasting).
+/// `try_tape_mul_cuda`. `Ok(None)` on shape mismatch (defer broadcasting).
 pub fn try_tape_mul_kt(
     a: &kiln_tensor::Tensor,
     b: &kiln_tensor::Tensor,
@@ -419,7 +415,7 @@ pub fn try_tape_mul_kt(
 }
 
 /// kt-native transpose tape recorder (#1082 seam flip) — kt-only twin of
-/// [`try_tape_transpose_cuda`]. Materialises the transposed view contiguous
+/// `try_tape_transpose_cuda`. Materialises the transposed view contiguous
 /// (the `TransposeBackward` adjoint transposes the upstream grad regardless).
 pub fn try_tape_transpose_kt(
     x: &kiln_tensor::Tensor,
@@ -455,7 +451,7 @@ pub fn try_tape_transpose_kt(
 }
 
 /// kt-native reshape tape recorder (#1082 seam flip) — kt-only twin of
-/// [`try_tape_reshape_cuda`]. The adjoint reshapes the upstream grad back to the
+/// `try_tape_reshape_cuda`. The adjoint reshapes the upstream grad back to the
 /// original input shape. `Ok(None)` on element-count mismatch.
 pub fn try_tape_reshape_kt(
     x: &kiln_tensor::Tensor,
@@ -495,333 +491,6 @@ pub fn try_tape_reshape_kt(
         Some(result) => Ok(Some(result?)),
         None => Ok(None),
     }
-}
-
-/// Attempt to run an embedding lookup through the kt-typed op registry
-/// (`kiln_tensor::ops::embedding`) and record an `EmbeddingBackward`
-/// node on the active thread-local tape.
-///
-/// Returns:
-/// * `Ok(Some(out))` — the tape-forward path ran. The returned
-///   `Tensor` is a copy of the kt-typed output into a candle CUDA
-///   tensor; an `EmbeddingBackward { vocab_size, hidden, token_ids }`
-///   node was recorded on the active thread-local tape.
-/// * `Ok(None)` — the gate was off, no thread-local tape is active,
-///   the kt-bridge borrow failed (layout / dtype / device mismatch),
-///   or the kt op-registry rejected the inputs (e.g. I64 indices, the
-///   substrate cast kernel isn't extended for those yet — see
-///   `kiln_tensor::ops::embedding::EmbeddingOp::cuda_fwd`). The
-///   caller must fall through to the existing dispatch.
-/// * `Err(...)` — an unexpected forward failure or a kt -> candle
-///   copy-back failure. Propagated so callers see the failure cleanly
-///   instead of silently masking it.
-///
-/// Mirrors the [`try_tape_matmul_cuda`] adapter: zero-copy borrow,
-/// kt-native forward via the op registry (the CUDA path dispatches to
-/// `kiln_tensor::cuda_index_select_dim0` underneath, with a
-/// flatten -> gather -> reshape step for multi-dim `token_ids`),
-/// tape record, kt -> candle copy-back. The returned tensor has no
-/// candle `BackpropOp` lineage — backward is on the tape only.
-///
-/// # CP-4 (#1082) context
-///
-/// Embedding completes the matmul / silu / embedding adapter triplet
-/// sketched in `deed13a8`'s "Out of scope" section. The backward is
-/// `kiln_autograd::backwards::EmbeddingBackward` which produces
-/// `d_weights = scatter_add(grad_output, axis=0, indices=token_ids,
-/// target_dim=vocab_size)` and `d_token_ids = None` (indices are
-/// non-differentiable). Saving `token_ids.clone()` on the
-/// `EmbeddingBackward` struct is an `Arc` bump on the kt-tensor
-/// storage handle (no allocation), so the lifetime of the saved
-/// indices extends past the local borrow at zero compute cost.
-///
-/// # Envelope
-///
-/// Same as `kiln_tensor::ops::embedding`'s CUDA fast-path:
-/// * `weights`: rank-2 `[vocab_size, hidden]`, contiguous, F32 / BF16
-///   / F16 (packed dtypes return `Ok(None)`).
-/// * `token_ids`: rank ≥ 1, contiguous, U32 (I64 returns `Ok(None)`
-///   until the substrate cast kernel grows that path).
-///
-/// Inputs outside the envelope return `Ok(None)` so the caller falls
-/// through to the existing candle `index_select` path.
-pub fn try_tape_embedding_cuda(
-    weights: &Tensor,
-    token_ids: &Tensor,
-) -> Result<Option<Tensor>> {
-    if !tape_forward_enabled() {
-        return Ok(None);
-    }
-
-    // kt borrow: zero-copy view of the candle CUDA tensors as kt
-    // tensors. Returns `Err` (which we treat as "skip") on layout /
-    // dtype / device mismatch.
-    let w_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(weights) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
-    let ids_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(token_ids) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
-
-    // Forward envelope check up front so we can read vocab_size /
-    // hidden from `weights` before any tape recording. If the rank
-    // check fails we fall through to the existing dispatch (which
-    // will surface a clearer error if applicable).
-    if w_kt.shape().len() != 2 || ids_kt.shape().is_empty() {
-        return Ok(None);
-    }
-    let vocab_size = w_kt.shape()[0];
-    let hidden = w_kt.shape()[1];
-
-    // Record only when a tape scope is active. Outside a scope,
-    // `with_active_tape` returns `None` and we fall through — matching
-    // the matmul / silu / rmsnorm adapters' contract.
-    let out_kt = match with_active_tape(|tape: &mut Tape| -> Result<_> {
-        let y = kiln_tensor::ops::embedding(&w_kt, &ids_kt)
-            .map_err(|e| anyhow::anyhow!("kt embedding: {e}"))?;
-        tape.record(
-            &y,
-            &[&w_kt, &ids_kt],
-            Box::new(EmbeddingBackward {
-                vocab_size,
-                hidden,
-                token_ids: ids_kt.clone(),
-            }),
-        );
-        Ok(y)
-    }) {
-        Some(result) => result,
-        None => return Ok(None),
-    };
-
-    let out_kt =
-        out_kt.context("tape_forward::try_tape_embedding_cuda: kt-tape forward failed")?;
-
-    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-        .context("tape_forward::try_tape_embedding_cuda: kt -> candle copy failed")?;
-
-    // CP-4 (#1082) tape_bridge: register the (kt_id ↔ candle_id) IO
-    // mappings so a surrounding `with_tape_scope_emit_to_grad_store` can
-    // transmute the tape-recorded `EmbeddingBackward` weight gradient into
-    // a candle-typed gradient in the candle GradStore. Without these, the
-    // embedding-table gradient (which is tied to `lm_head` in Qwen3.5 and
-    // therefore trainable) never reaches the optimizer — the bug the DoD
-    // "tied-weight grad accumulation parity" item guards against. No-ops
-    // cleanly when no bridge scope is active.
-    //
-    // `token_ids` is intentionally NOT mapped: integer gather indices carry
-    // no gradient, and `EmbeddingBackward` returns `None` for that input.
-    kiln_kt_bridge::tape_bridge::register_input_mapping(w_kt.id(), weights.id());
-    kiln_kt_bridge::tape_bridge::register_output_mapping(out_kt.id(), out.id());
-    kiln_kt_bridge::tape_bridge::retain_output_for_chaining(&out_kt, out.id());
-
-    Ok(Some(out))
-}
-
-/// Attempt to run the SwiGLU MLP gate-fuse (`silu(gate) * up`) through
-/// the kt-typed op registry (`kiln_tensor::ops::mul_sigmoid_gate`) and
-/// record a `MulSigmoidGateBackward` node on the active thread-local
-/// tape.
-///
-/// Returns:
-/// * `Ok(Some(out))` — the tape-forward path ran. The returned
-///   `Tensor` is a copy of the kt-typed output into a candle CUDA
-///   tensor; a `MulSigmoidGateBackward { gate, up }` node was recorded
-///   on the active thread-local tape.
-/// * `Ok(None)` — the gate was off, no thread-local tape is active,
-///   the kt-bridge borrow failed (layout / dtype / device mismatch),
-///   or the kt op-registry rejected the inputs (shape / dtype /
-///   contiguity envelope). The caller must fall through to the
-///   existing dispatch.
-/// * `Err(...)` — an unexpected forward failure or a kt -> candle
-///   copy-back failure. Propagated so callers see the failure cleanly
-///   instead of silently masking it.
-///
-/// Mirrors the [`try_tape_silu_cuda`] adapter: zero-copy borrow of
-/// both inputs, kt-native forward via the op registry (the CUDA path
-/// composes `cuda_activation_unary(kind=0)` + `cuda_elementwise_binary
-/// (kind=2)` underneath — same kernels the production
-/// `fused_mlp_silu_mul_kt` shim drives), tape record, kt -> candle
-/// copy-back. The returned tensor has no candle `BackpropOp` lineage —
-/// backward is on the tape only.
-///
-/// # CP-4 (#1082) context
-///
-/// SwiGLU's `silu(gate) * up` is the MLP gate path (`:kiln/gdn/gates`
-/// in Phase 6 profiling — ~18% of decode time). The backward is
-/// `kiln_autograd::backwards::swiglu::MulSigmoidGateBackward`:
-///
-/// ```text
-/// d_gate = dy * up * (sigmoid(gate) + gate * sigmoid(gate) * (1 - sigmoid(gate)))
-/// d_up   = dy * gate * sigmoid(gate)
-/// ```
-///
-/// Saving `gate.clone()` + `up.clone()` is an `Arc` bump on the
-/// kt-tensor's storage handle (no allocation), so the lifetime of the
-/// saved tensors extends past the local borrow at zero compute cost.
-///
-/// # Envelope
-///
-/// Same as `kiln_tensor::ops::mul_sigmoid_gate`'s CUDA fast-path:
-/// * `gate`: contiguous, F32 / BF16 / F16, shape == `up`.
-/// * `up`: contiguous, F32 / BF16 / F16, shape == `gate`.
-///
-/// Inputs outside the envelope return `Ok(None)` so the caller falls
-/// through to the existing `fused_mlp_silu_mul_kt` /
-/// `cuda_silu(gate) * up` paths.
-pub fn try_tape_swiglu_cuda(gate: &Tensor, up: &Tensor) -> Result<Option<Tensor>> {
-    if !tape_forward_enabled() {
-        return Ok(None);
-    }
-
-    // kt borrow: zero-copy view of the candle CUDA tensors as kt
-    // tensors. Returns `Err` (which we treat as "skip") on layout /
-    // dtype / device mismatch.
-    let gate_kt = match tape_kt_input(gate) {
-        Some(t) => t,
-        None => return Ok(None),
-    };
-    let up_kt = match tape_kt_input(up) {
-        Some(t) => t,
-        None => return Ok(None),
-    };
-
-    // Record only when a tape scope is active. Outside a scope,
-    // `with_active_tape` returns `None` and we fall through to the
-    // existing dispatch — matching the matmul / silu / rmsnorm /
-    // embedding adapters' contract.
-    let out_kt = match with_active_tape(|tape: &mut Tape| -> Result<_> {
-        let y = kiln_tensor::ops::mul_sigmoid_gate(&gate_kt, &up_kt)
-            .map_err(|e| anyhow::anyhow!("kt mul_sigmoid_gate: {e}"))?;
-        tape.record(
-            &y,
-            &[&gate_kt, &up_kt],
-            Box::new(MulSigmoidGateBackward {
-                gate: gate_kt.clone(),
-                up: up_kt.clone(),
-            }),
-        );
-        Ok(y)
-    }) {
-        Some(result) => result,
-        None => return Ok(None),
-    };
-
-    let out_kt = out_kt.context("tape_forward::try_tape_swiglu_cuda: kt-tape forward failed")?;
-
-    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-        .context("tape_forward::try_tape_swiglu_cuda: kt -> candle copy failed")?;
-
-    // CP-4 (#1082) tape_bridge: register the (kt_id ↔ candle_id) IO
-    // mappings so a surrounding `with_tape_scope_emit_to_grad_store`
-    // can transmute the tape-recorded `MulSigmoidGateBackward` into
-    // candle-typed gradients in the candle GradStore. No-ops cleanly
-    // when no bridge scope is active.
-    kiln_kt_bridge::tape_bridge::register_input_mapping(gate_kt.id(), gate.id());
-    kiln_kt_bridge::tape_bridge::register_input_mapping(up_kt.id(), up.id());
-    kiln_kt_bridge::tape_bridge::register_output_mapping(out_kt.id(), out.id());
-    kiln_kt_bridge::tape_bridge::retain_output_for_chaining(&out_kt, out.id());
-
-    Ok(Some(out))
-}
-
-/// Attempt to run split-half (GPT-NeoX-style) RoPE — kiln's Qwen3.5-4B
-/// rotary convention — through the kt-typed op registry
-/// (`kiln_tensor::ops::rope_split_half`) and record a
-/// `RopeSplitHalfBackward` node on the active thread-local tape.
-///
-/// Returns:
-/// * `Ok(Some(out))` — the tape-forward path ran. The returned `Tensor`
-///   is a copy of the kt-typed output into a candle CUDA tensor; a
-///   `RopeSplitHalfBackward { rotary_dim, cos, sin }` node was recorded
-///   on the active thread-local tape.
-/// * `Ok(None)` — gate off / `x` is not rank-4 / no thread-local tape /
-///   kt-bridge borrow rejected the inputs. The caller falls through to
-///   the existing dispatch.
-/// * `Err(...)` — an unexpected forward or kt -> candle copy-back failure.
-///
-/// # Why split-half (not `kiln_tensor::ops::rope`)
-///
-/// `kiln_tensor::ops::rope` uses the *interleaved* (GPT-J) convention;
-/// kiln's production `apply_rope` uses *split-half* (GPT-NeoX). The two
-/// disagree for `rotary_dim >= 4`, so the adapter must route through
-/// `rope_split_half` to stay bit-faithful to the model. The backward is
-/// the same op with `sin` negated (a rotation's adjoint), computed on the
-/// grad's own device with no host round-trip.
-///
-/// # CP-4 (#1082) context
-///
-/// `x` is `[batch, seq, num_heads, head_dim]`; `cos`/`sin` are
-/// `[seq, rotary_dim/2]` schedules — non-differentiable, so only `x`
-/// receives an IO mapping (cf. the embedding adapter's `token_ids`).
-/// `cos`/`sin` are saved on the tape node on their native (CUDA) device.
-pub fn try_tape_rope_cuda(
-    x: &Tensor,
-    cos: &Tensor,
-    sin: &Tensor,
-    head_dim: usize,
-    rotary_dim: usize,
-) -> Result<Option<Tensor>> {
-    if !tape_forward_enabled() {
-        return Ok(None);
-    }
-
-    // `rope_split_half`'s contract is rank-4 [batch, seq, num_heads,
-    // head_dim]; bail to the existing dispatch for anything else rather
-    // than recording a node that would fail at backward.
-    if x.rank() != 4 || rotary_dim == 0 || rotary_dim > head_dim {
-        return Ok(None);
-    }
-
-    let x_kt = match tape_kt_input(x) {
-        Some(t) => t,
-        None => return Ok(None),
-    };
-    let cos_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(cos) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
-    let sin_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(sin) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
-
-    // Record only when a tape scope is active. Outside a scope,
-    // `with_active_tape` returns `None` and we fall through to the
-    // existing dispatch — matching the other adapters' contract.
-    let out_kt = match with_active_tape(|tape: &mut Tape| -> Result<_> {
-        let y = kiln_tensor::ops::rope_split_half(&x_kt, &cos_kt, &sin_kt, rotary_dim)
-            .map_err(|e| anyhow::anyhow!("kt rope_split_half: {e}"))?;
-        tape.record(
-            &y,
-            &[&x_kt],
-            Box::new(RopeSplitHalfBackward {
-                rotary_dim,
-                cos: cos_kt.clone(),
-                sin: sin_kt.clone(),
-            }),
-        );
-        Ok(y)
-    }) {
-        Some(result) => result,
-        None => return Ok(None),
-    };
-
-    let out_kt = out_kt.context("tape_forward::try_tape_rope_cuda: kt-tape forward failed")?;
-
-    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-        .context("tape_forward::try_tape_rope_cuda: kt -> candle copy failed")?;
-
-    // CP-4 (#1082) tape_bridge: only `x` is differentiable; `cos`/`sin`
-    // are non-differentiable schedules (cf. embedding's `token_ids`), so
-    // they carry no input mapping.
-    kiln_kt_bridge::tape_bridge::register_input_mapping(x_kt.id(), x.id());
-    kiln_kt_bridge::tape_bridge::register_output_mapping(out_kt.id(), out.id());
-    kiln_kt_bridge::tape_bridge::retain_output_for_chaining(&out_kt, out.id());
-
-    Ok(Some(out))
 }
 
 /// Attempt to run the softmax + NLL cross-entropy LOSS through the
@@ -3295,7 +2964,7 @@ impl BackwardOp for CastCompositeBackward {
 /// before out_proj). `Ok(None)` when the gate is off, no tape scope is active,
 /// the inputs aren't CUDA, shapes disagree, or a kt borrow fails.
 /// kt-native cast tape recorder (#1082 seam flip) — kt-only twin of
-/// [`try_tape_cast_cuda`]. Record-only: the forward cast is already done by the kt
+/// `try_tape_cast_cuda`. Record-only: the forward cast is already done by the kt
 /// non-tape path; this records the (now kt-native) `CastCompositeBackward` linking
 /// the kt `out` back to the kt `x`. No candle round-trip.
 pub fn try_tape_cast_kt(
@@ -3412,7 +3081,7 @@ impl BackwardOp for NarrowCompositeBackward {
 /// `Ok(None)` on any gate-off / non-CUDA / shape-envelope-miss / kt-borrow
 /// failure.
 /// kt-native narrow tape recorder (#1082 seam flip) — kt-only twin of
-/// [`try_tape_narrow_cuda`]. Record-only: the forward narrow is already done by the
+/// `try_tape_narrow_cuda`. Record-only: the forward narrow is already done by the
 /// kt non-tape path; records the (now kt-native) `NarrowCompositeBackward` linking
 /// the kt `out` back to the kt `x`. No candle round-trip.
 pub fn try_tape_narrow_kt(
