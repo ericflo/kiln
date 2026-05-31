@@ -2598,3 +2598,72 @@ pub fn record_gdn_block_batched_into(
     )?;
     Ok(true)
 }
+
+/// Record the batched final RMSNorm plus LM-head argmax stage.
+///
+/// `hidden_in_buf` is f32 `[batch_size, hidden]`; `out_token_buf` is
+/// u32 `[batch_size]`. This avoids writing `[batch_size, vocab]`
+/// logits when the caller only needs greedy next-token IDs.
+#[allow(clippy::too_many_arguments)]
+pub fn record_final_norm_lm_head_argmax_batched_into(
+    backend: &VulkanBackend,
+    batch: &mut CommandBatch,
+    hidden_in_buf: &VulkanBuffer,
+    out_token_buf: &VulkanBuffer,
+    weights: &crate::forward::GpuWeights,
+    config: &ModelConfig,
+    batch_size: usize,
+) -> Result<bool> {
+    anyhow::ensure!(
+        batch_size > 0,
+        "batched final argmax: batch_size must be > 0"
+    );
+    let hidden = config.hidden_size;
+    let vocab_size = weights.embed_tokens_t.dims().last().copied().unwrap_or(0);
+    if vocab_size == 0 {
+        return Ok(false);
+    }
+    let eps = config.rms_norm_eps as f32;
+    let final_norm = backend.cached_f32_weight_buffer_kt(&weights.final_norm)?;
+    let lm_head_w = backend.cached_bf16_packed_weight_buffer_kt(&weights.embed_tokens_t)?;
+    let normed = backend
+        .acquire_resident_scratch("native_b_final_normed", (batch_size * hidden * 4) as u64)?;
+    let block_count = vocab_size.div_ceil(64);
+    let block_scores = backend.acquire_resident_scratch(
+        "native_b_argmax_scores",
+        (batch_size * block_count * 4) as u64,
+    )?;
+    let block_indices = backend.acquire_resident_scratch(
+        "native_b_argmax_indices",
+        (batch_size * block_count * 4) as u64,
+    )?;
+
+    batch.record_shader(
+        shaders::QWEN_RMSNORM_FORWARD,
+        &[hidden_in_buf.handle(), final_norm.handle(), normed.handle()],
+        &[batch_size as u32, hidden as u32, eps.to_bits()],
+        Workgroups::OneD(batch_size as u32),
+    )?;
+    batch.record_shader(
+        shaders::LINEAR_DECODE_ARGMAX_BATCHED_BLOCKS_BF16W,
+        &[
+            normed.handle(),
+            lm_head_w.handle(),
+            block_scores.handle(),
+            block_indices.handle(),
+        ],
+        &[hidden as u32, vocab_size as u32, block_count as u32],
+        Workgroups::OneD((batch_size * block_count) as u32),
+    )?;
+    batch.record_shader(
+        shaders::LINEAR_DECODE_ARGMAX_BATCHED_REDUCE,
+        &[
+            block_scores.handle(),
+            block_indices.handle(),
+            out_token_buf.handle(),
+        ],
+        &[block_count as u32],
+        Workgroups::OneD(batch_size as u32),
+    )?;
+    Ok(true)
+}
