@@ -1,0 +1,55 @@
+// Batched fused element-wise ADD + qwen-style RMSNorm.
+//
+// Computes for each row r:
+//   sum[r, i] = a[r, i] + b[r, i]
+//   out[r, i] = (1 + weight[i]) * sum[r, i] / sqrt(mean(sum[r]^2) + eps)
+//
+// Push constants: rows, hidden, eps_bits.
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint rows;
+    uint hidden;
+    float eps;
+};
+
+layout(binding = 0) readonly  buffer ABuf      { float data_a[];      };
+layout(binding = 1) readonly  buffer BBuf      { float data_b[];      };
+layout(binding = 2) readonly  buffer WeightBuf { float data_weight[]; };
+layout(binding = 3)           buffer SumBuf    { float data_sum[];    };
+layout(binding = 4) writeonly buffer OutBuf    { float data_out[];    };
+
+shared float sum_sh[256];
+
+void main() {
+    uint row = gl_WorkGroupID.x;
+    uint tid = gl_LocalInvocationID.x;
+    if (row >= rows) return;
+
+    uint base = row * hidden;
+    float sq_sum = 0.0;
+    for (uint col = tid; col < hidden; col += 256u) {
+        float v = data_a[base + col] + data_b[base + col];
+        data_sum[base + col] = v;
+        sq_sum += v * v;
+    }
+    sum_sh[tid] = sq_sum;
+    barrier();
+    for (uint s = 128u; s > 0u; s >>= 1) {
+        if (tid < s) {
+            sum_sh[tid] += sum_sh[tid + s];
+        }
+        barrier();
+    }
+    float rms_inv = inversesqrt(sum_sh[0] / float(hidden) + eps);
+
+    for (uint col = tid; col < hidden; col += 256u) {
+        float w = data_weight[col];
+        float v = data_sum[base + col];
+        data_out[base + col] = (1.0 + w) * v * rms_inv;
+    }
+}

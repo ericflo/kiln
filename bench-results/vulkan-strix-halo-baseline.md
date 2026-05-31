@@ -144,6 +144,9 @@ every config"):
   **Update — fused batched MLP down+residual:** added
   `linear_decode_batched_bf16w_add_residual`, closing the single-row fused
   residual-add dependency used by both resident full-attention and GDN blocks.
+  **Update — fused batched add+RMSNorm:** added `add_qwen_rmsnorm_batched`,
+  closing the other single-row fused residual dependency in the resident block
+  recorder while preserving one dispatch per residual+norm pair.
 - **Vulkan paged-attention decode kernel**: the kernel crate already had
   `paged_attn_decode_batch_paged.comp`; Vulkan now advertises
   `supports_flash_attn_paged_decode` and wires the single-query paged-decode

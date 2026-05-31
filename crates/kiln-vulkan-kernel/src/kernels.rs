@@ -340,6 +340,8 @@ pub fn prewarm_builtin_pipelines(vk_device: &VulkanDevice) -> Result<()> {
         ("gdn_chunk_prep", 12, 16),
         ("gdn_chunk_scan", 8, 16),
         ("linear_decode", 3, 8),
+        ("add_qwen_rmsnorm", 5, 8),
+        ("add_qwen_rmsnorm_batched", 5, 12),
         ("linear_decode_bf16w", 3, 8),
         ("linear_decode_bf16w_add_residual", 4, 8),
         ("linear_decode_batched", 3, 12),

@@ -91,6 +91,8 @@ const SHADERS: &[(&str, &str)] = &[
     ("gdn_full_chunk_forward", "SPIR_V_GDN_FULL_CHUNK_FORWARD"),
     ("gdn_chunk_scan", "SPIR_V_GDN_CHUNK_SCAN"),
     ("linear_decode", "SPIR_V_LINEAR_DECODE"),
+    ("add_qwen_rmsnorm", "SPIR_V_ADD_QWEN_RMSNORM"),
+    ("add_qwen_rmsnorm_batched", "SPIR_V_ADD_QWEN_RMSNORM_BATCHED"),
     ("linear_decode_bf16w", "SPIR_V_LINEAR_DECODE_BF16W"),
     (
         "linear_decode_bf16w_add_residual",

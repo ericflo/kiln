@@ -69,6 +69,7 @@ pub mod shaders {
         shader_path!("linear_decode_batched_bf16w_add_residual");
     pub const ADD: &str = shader_path!("add");
     pub const ADD_QWEN_RMSNORM: &str = shader_path!("add_qwen_rmsnorm");
+    pub const ADD_QWEN_RMSNORM_BATCHED: &str = shader_path!("add_qwen_rmsnorm_batched");
     pub const MLP_GATE_UP_DECODE_BF16W: &str = shader_path!("mlp_gate_up_decode_bf16w");
     pub const GDN_IN_PROJ_SPLIT: &str = shader_path!("gdn_in_proj_split");
     pub const GDN_IN_PROJ_SPLIT_BATCHED: &str = shader_path!("gdn_in_proj_split_batched");

@@ -295,6 +295,72 @@ pub fn dispatch_qwen_rmsnorm_forward_resident(
     .context("qwen_rmsnorm_resident kernel failed")
 }
 
+/// Batched fused residual add + Qwen RMSNorm.
+#[allow(clippy::too_many_arguments)]
+pub fn dispatch_add_qwen_rmsnorm_batched_resident(
+    vk_device: &VulkanDevice,
+    a: &VulkanBuffer,
+    b: &VulkanBuffer,
+    weight: &VulkanBuffer,
+    sum: &VulkanBuffer,
+    out: &VulkanBuffer,
+    rows: usize,
+    hidden: usize,
+    eps: f32,
+) -> Result<()> {
+    anyhow::ensure!(
+        rows > 0,
+        "add_qwen_rmsnorm_batched_resident: rows must be > 0"
+    );
+    let elems = rows
+        .checked_mul(hidden)
+        .context("add_qwen_rmsnorm_batched_resident: element count overflow")?;
+    let need = (elems * 4) as u64;
+    anyhow::ensure!(
+        a.size() >= need,
+        "add_qwen_rmsnorm_batched_resident: a buffer too small"
+    );
+    anyhow::ensure!(
+        b.size() >= need,
+        "add_qwen_rmsnorm_batched_resident: b buffer too small"
+    );
+    anyhow::ensure!(
+        sum.size() >= need,
+        "add_qwen_rmsnorm_batched_resident: sum buffer too small"
+    );
+    anyhow::ensure!(
+        out.size() >= need,
+        "add_qwen_rmsnorm_batched_resident: out buffer too small"
+    );
+    anyhow::ensure!(
+        weight.size() >= (hidden * 4) as u64,
+        "add_qwen_rmsnorm_batched_resident: weight buffer too small"
+    );
+
+    let glsl_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/csrc/shaders/add_qwen_rmsnorm_batched.comp"
+    );
+    let spirv = ShaderPipeline::compile_shader(glsl_path)?;
+    let handles: [vk::Buffer; 5] = [
+        a.handle(),
+        b.handle(),
+        weight.handle(),
+        sum.handle(),
+        out.handle(),
+    ];
+    let push_constants: [u32; 3] = [rows as u32, hidden as u32, eps.to_bits()];
+    run_compute_pipeline(
+        vk_device,
+        &spirv,
+        &handles,
+        handles.len(),
+        &push_constants,
+        rows as u32,
+    )
+    .context("add_qwen_rmsnorm_batched_resident kernel failed")
+}
+
 /// Resident per-row L2 normalization with an optional scalar scale.
 /// For each row r:
 ///   out[r,i] = x[r,i] * scale / sqrt(sum(x[r,:]^2) + eps)
