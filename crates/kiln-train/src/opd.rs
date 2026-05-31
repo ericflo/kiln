@@ -81,10 +81,12 @@ use anyhow::{Context, Result, anyhow};
 // autograd via `KtForwardOp1` / `KtForwardOp2` (kt_api.rs Phase 7).
 // (#1082 candle-drop) `Var` + `TensorId` dropped from the facade import:
 // the OPD candle grad path that used candle `Var`s + a `HashMap<TensorId,
-// Tensor>` grad map was deleted. `head_t` is still a candle `Tensor` (a
-// cross-file seam: `opd_candle_shim::try_tape_opd_scalar_mean_cuda` re-borrows
-// it as kt internally), and the OPD-loss test fixtures build candle `Tensor` /
-// `DType` values, so those two aliases stay.
+// Tensor>` grad map was deleted. The production tape-authoritative scalar path
+// is now kt-native (`opd_candle_shim::try_tape_opd_scalar_mean_cuda_kt` takes kt
+// `hidden`/`head_t` directly). The candle `Tensor` / `DType` facade aliases stay
+// for the remaining candle seam in `opd_step_loss` (the per-position candle
+// shim path, used by `opd_step_loss_simple` + parity tests) and the OPD-loss
+// test fixtures.
 use crate::cd_types::{DType, Tensor};
 // (#1082) `CdDevice` is only referenced from test-mode helpers
 // (`opd_train_synthetic_validation`, `mod tests`); gating the import
@@ -2368,16 +2370,11 @@ pub fn opd_train(
     let mut global_step = 0usize;
     let mut last_loss = 0.0_f64;
 
-    // (#1082 H8) `embed_tokens_t` is the frozen, weight-tied lm_head — CONSTANT
-    // across every OPD step. The per-step OPD-loss tape shim consumes a candle
-    // `head_t`, so bridge it kt->candle ONCE here, before the epoch/sample loops,
-    // and thread the candle copy through. Pre-flip hoisted this; the flip had
-    // re-sunk a ~1.27GB (hidden×vocab BF16) kt->candle copy INTO the per-step
-    // closure. The kt `head_t` is otherwise only used to build this copy.
+    // (#1082 P-OPD) `embed_tokens_t` is the frozen, weight-tied lm_head. The OPD
+    // scalar-loss tape root is now kt-native (`try_tape_opd_scalar_mean_cuda_kt`)
+    // and takes the kt `head_t` DIRECTLY, so the per-run kt->candle hoist (H8) is
+    // gone — thread the kt weight straight into the per-step closure.
     let head_t = weights.embed_tokens_t.clone();
-    #[cfg(feature = "cuda")]
-    let head_t_candle = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&head_t)
-        .map_err(|e| anyhow!("opd_train: hoist head_t kt->candle: {e}"))?;
 
     // §3.9 guardrail observer + per-step rollout summary buffer.
     // The guardrail watches loss / repetition / overlap signals every
@@ -2766,8 +2763,9 @@ pub fn opd_train(
                 // `loss.backward()`. Runs a SINGLE full forward
                 // (`model_forward_no_head`) inside `with_tape_authoritative_scope`
                 // so the LoRA adapters record their nodes, then roots the tape at
-                // the scalar OPD loss (`try_tape_opd_scalar_mean_cuda`) and walks
-                // the connected tape with one `Tape::backward`. Returns the LoRA
+                // the scalar OPD loss (`try_tape_opd_scalar_mean_cuda_kt`, taking
+                // kt `normed`/`head_t` directly) and walks the connected tape with
+                // one `Tape::backward`. Returns the LoRA
                 // grads as a kt-native `kiln_autograd::GradStore` (keyed by
                 // `KtTensorId`) consumed DIRECTLY by
                 // `optimizer_step_from_kt_grad_store` — NO per-step kt→candle grad
@@ -2803,7 +2801,7 @@ pub fn opd_train(
                                 model_config,
                                 &params,
                                 &device,
-                                &head_t_candle,
+                                &head_t,
                                 teacher.clone(),
                                 &active_positions,
                                 config.loss,
@@ -2983,10 +2981,10 @@ pub fn opd_train(
 ///
 /// The single full forward (`model_forward_no_head`) routes the LoRA adapters
 /// through the tape (when `KILN_USE_TAPE_FORWARD` is on — default), and the
-/// scalar loss adapter (`try_tape_opd_scalar_mean_cuda`) records the loss as
-/// the tape root with its `hidden` input threaded from the final-RMSNorm
-/// adapter's retained kt output so the recorded tape is CONNECTED from the
-/// loss back through the LoRA chain. This REPLACES the candle
+/// kt-native scalar loss adapter (`try_tape_opd_scalar_mean_cuda_kt`) records
+/// the loss as the tape root against the kt `normed` (the final-RMSNorm tape
+/// node output) DIRECTLY so the recorded tape is CONNECTED from the loss back
+/// through the LoRA chain. This REPLACES the candle
 /// gradient-checkpointing reverse-segment loop: the tape records every forward
 /// node, so one backward walk yields the LoRA grads directly.
 ///
@@ -3009,9 +3007,11 @@ fn opd_step_forward_backward_tape_authoritative(
     model_config: &kiln_core::config::ModelConfig,
     params: &crate::trainer::TrainableLoraParams,
     device: &candle_core::Device,
-    // (#1082 H8) candle copy of the frozen lm_head weight, bridged ONCE by the
-    // caller before its loop (was a ~1.27GB kt->candle copy per step here).
-    head_t_candle: &candle_core::Tensor,
+    // (#1082 P-OPD) The frozen lm_head weight as a kt tensor, passed straight
+    // through. The OPD scalar-loss tape root is now kt-native
+    // (`try_tape_opd_scalar_mean_cuda_kt`), so it takes the kt `head_t`
+    // DIRECTLY — the prior per-run `head_t`→candle hoist (H8) is gone.
+    head_t: &kiln_tensor::Tensor,
     teacher: Arc<dyn LogitSource>,
     active_positions: &[usize],
     loss_granularity: OpdLossGranularity,
@@ -3060,38 +3060,20 @@ fn opd_step_forward_backward_tape_authoritative(
             .context("opd tape-authoritative forward")
             .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?;
 
-            // (#1082) `model_forward_no_head` now returns a kt tensor, but the
-            // OPD scalar-loss tape shim consumes a candle `hidden` whose id it
-            // resolves back to the upstream kt tensor through the tape bridge
-            // (`tape_kt_input`). Bridge the kt `normed` to a candle copy and
-            // register the (kt_id -> candle_id) mapping so the shim threads the
-            // ORIGINAL kt `normed` (connected to the LoRA tape recordings) as
-            // `hidden`, keeping the Increment-0 kt grad path connected. Mirrors
-            // the SFT path, where `model_forward` returns candle and
-            // `try_tape_cross_entropy_from_logits_cuda` registers the mapping
-            // internally.
-            let normed_candle = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&normed)
-                .map_err(|e| {
-                    kiln_kt_bridge::BridgeError::new(format!("opd tape: kt->candle normed: {e}"))
-                })?;
-            // #1082 CP-4: RETAIN the kt `normed` keyed by the candle copy's id so
-            // the OPD scalar-loss shim's `tape_kt_input(normed_candle)` resolves
-            // back to the ORIGINAL recorded kt `normed` (connected to the LoRA
-            // tape recordings) instead of a fresh, un-chained borrow. The shim
-            // reads `candle_output_kt` (via `kt_input_for_candle`), which is
-            // populated by `retain_output_for_chaining` — NOT `register_input_mapping`
-            // (that populates the deposit-side `kt_to_candle_input`). Using the
-            // wrong registry severed the loss→normed→LoRA tape chain → empty grads.
-            // Mirrors the SFT path's `model_forward_logits_kt_to_candle` retain.
-            kiln_kt_bridge::tape_bridge::retain_output_for_chaining(&normed, normed_candle.id());
-
-            // (#1082 H8) `head_t_candle` is the caller-hoisted candle copy of the
-            // frozen lm_head weight — no per-step kt->candle bridge here.
-            // Record the SCALAR OPD loss as the tape root. Returns a detached
-            // candle scalar (value only); the gradient lives on the tape.
-            let loss = match crate::opd_candle_shim::try_tape_opd_scalar_mean_cuda(
-                &normed_candle,
-                head_t_candle,
+            // (#1082 P-OPD) `model_forward_no_head` returns the kt `normed`
+            // (the final-RMSNorm tape node output). Record the SCALAR OPD loss
+            // DIRECTLY against the kt `normed` + kt `head_t` via the kt-native
+            // adapter — no candle `normed`/`head_t` copies, no `normed_candle`
+            // retain dance, no per-run `head_t_candle` hoist. Because `normed`
+            // is already a recorded tape node id, the loss roots on it and the
+            // tape stays connected back through the LoRA chain natively (mirrors
+            // the SFT H6 CE-from-logits-kt path, which records against the
+            // connected kt logits id). Returns a detached candle scalar (value
+            // only, registered for the scope to seed); the gradient lives on the
+            // tape.
+            let loss = match crate::opd_candle_shim::try_tape_opd_scalar_mean_cuda_kt(
+                &normed,
+                head_t,
                 &prepared.teacher_topk_indices,
                 &prepared.teacher_topk_logprobs,
                 &prepared.label_mask,
@@ -3108,7 +3090,7 @@ fn opd_step_forward_backward_tape_authoritative(
                     // clean error — the caller's dispatch should not have
                     // selected this path if the envelope was unmet.
                     return Err(kiln_kt_bridge::BridgeError::new(
-                        "opd tape-authoritative: try_tape_opd_scalar_mean_cuda returned None \
+                        "opd tape-authoritative: try_tape_opd_scalar_mean_cuda_kt returned None \
                          (KILN_USE_TAPE_FORWARD off, empty active set, or out-of-envelope \
                          inputs). The dispatch should keep this step on the candle path.",
                     ));
@@ -4088,7 +4070,7 @@ mod tests {
     /// #1082 CP-4 endgame: validate that the tape-authoritative OPD step
     /// ([`opd_step_forward_backward_tape_authoritative`]) produces nonzero
     /// LoRA gradients — i.e. the OPD-KL scalar tape root
-    /// (`try_tape_opd_scalar_mean_cuda`) is CONNECTED through the BF16 model
+    /// (`try_tape_opd_scalar_mean_cuda_kt`) is CONNECTED through the BF16 model
     /// forward back to the LoRA `Var`s, so one `Tape::backward` routes a real
     /// gradient into each LoRA parameter.
     ///
@@ -4153,9 +4135,10 @@ mod tests {
         // `embed_tokens_t` (BF16 here, matching the BF16 model output so the
         // kt-tape dtype gate `hidden.dtype() == head_t.dtype()` passes).
         // #1082: `embed_tokens_t` is a kt tensor and
-        // `opd_step_forward_backward_tape_authoritative` now takes the kt
-        // `head_t` directly (it bridges to candle internally at the OPD-loss
-        // tape shim boundary), so thread the kt weight straight through.
+        // `opd_step_forward_backward_tape_authoritative` takes the kt `head_t`
+        // directly (the kt-native OPD-loss tape root `try_tape_opd_scalar_mean_cuda_kt`
+        // consumes the kt `head_t` with no candle copy), so thread the kt weight
+        // straight through.
         let head_t = weights.embed_tokens_t.clone();
         assert_eq!(
             head_t.dtype(),
@@ -4184,14 +4167,12 @@ mod tests {
         let backend = kiln_model::backend::for_device_kt(&device);
 
         // opd_step_forward_backward_tape_authoritative still takes a candle device
-        // (it bridges to the opd_candle_shim internally — a remaining #1082
-        // candle island); bridge the kt test device to candle for the call.
+        // (it bridges the kt device to candle for `LinearAttentionState`); bridge
+        // the kt test device to candle for the call. (#1082 P-OPD) The OPD-loss
+        // tape root is now kt-native and takes the kt `head_t` DIRECTLY — the
+        // prior per-run kt->candle `head_t_candle` bridge (H8) is gone.
         let device_cd = kiln_kt_bridge::candle_device_from_kt(&device)
             .expect("opd test: kt->candle device bridge");
-        // (#1082 H8) the per-step fn now takes a caller-hoisted candle head_t;
-        // bridge the kt test weight once for the call.
-        let head_t_candle = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&head_t)
-            .expect("opd test: kt->candle head_t bridge");
         let (loss_val, active_count, grads) = opd_step_forward_backward_tape_authoritative(
             &*backend,
             &input_ids,
@@ -4199,7 +4180,7 @@ mod tests {
             &config,
             &params,
             &device_cd,
-            &head_t_candle,
+            &head_t,
             teacher,
             &active_positions,
             OpdLossGranularity::TeacherTopK,
