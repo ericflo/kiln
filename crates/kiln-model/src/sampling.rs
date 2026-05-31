@@ -683,22 +683,45 @@ fn try_kt_full_distribution_probs(scaled: &Tensor) -> Result<Option<Vec<f32>>> {
     Ok(Some(probs_kt.to_vec1::<f32>()?))
 }
 
-/// Sort `scaled` descending on-device, transfer only the top-k `(index, value)`
-/// pairs, and return them in descending order.
+/// Select the top-k of `scaled` on-device, transferring only the `k`
+/// `(index, value)` pairs back to host in descending rank order
+/// (descending value, ties broken by lower index).
 ///
-/// Fails if the device sort kernel cannot handle this tensor (e.g. insufficient
-/// shared memory for very large last-dim sizes on CUDA). Callers should catch the
-/// error and fall back to a host sort over the full vocab.
-fn try_topk_on_device(_scaled: &Tensor, _top_k: usize) -> Result<Vec<(u32, f32)>> {
-    // #1082: kt's `sort_last_dim` is CPU-only — calling it on a CUDA
-    // tensor errors (no device sort kernel yet). Bail unconditionally so
-    // callers take the `topk_via_host_sort` fallback (full-vocab DtoH +
-    // host partial-select), which is behaviourally identical. The signature
-    // is preserved so the `match ... { Err(_) => topk_via_host_sort }` call
-    // sites are unchanged; restore a real device sort here when kt grows a
-    // CUDA `sort_last_dim`.
+/// On CUDA this routes through `kiln_tensor::cuda_topk_last_axis`, which
+/// keeps the full `[V]` row resident on the device and copies just
+/// `~k * 12` bytes over PCIe (#1082 perf-fix H9). On CPU/Vulkan/Metal —
+/// where a host read is local, not a PCIe transfer — it returns `Err` so
+/// callers fall back to `topk_via_host_sort`. Also returns `Err` if the
+/// CUDA op itself fails, so the host fallback preserves correctness.
+fn try_topk_on_device(scaled: &Tensor, top_k: usize) -> Result<Vec<(u32, f32)>> {
+    // #1082 perf-fix H9: on CUDA, select the top-k on-device and transfer
+    // ONLY the ~k (value, index) pairs (~k * 12 bytes) back to host —
+    // instead of the `topk_via_host_sort` fallback's full-[V] f32
+    // `to_vec1()` DtoH (~970 KB at V=248320) EVERY decoded token.
+    //
+    // The on-device kernel matches the host fallback's ranking exactly:
+    // descending value, ties broken by lower index. So callers see
+    // behaviourally identical `(idx, value)` pairs whichever path runs.
+    //
+    // On CPU/Vulkan/Metal we bail so callers take `topk_via_host_sort`,
+    // whose `to_vec1()` is a local read on those backends (no PCIe hop).
+    #[cfg(feature = "cuda")]
+    {
+        if matches!(scaled.device(), Device::Cuda(_))
+            && scaled.is_contiguous()
+            && scaled.rank() == 1
+            && matches!(scaled.dtype(), DType::F32 | DType::BF16 | DType::F16)
+        {
+            kiln_nvtx::range!(c"kiln/sampling_topk_kt");
+            let (values, indices) = kiln_tensor::cuda_topk_last_axis(scaled, top_k)?;
+            let pairs: Vec<(u32, f32)> =
+                indices.into_iter().zip(values).map(|(i, v)| (i, v)).collect();
+            return Ok(pairs);
+        }
+    }
+    let _ = (scaled, top_k);
     anyhow::bail!(
-        "try_topk_on_device: kt sort_last_dim is CPU-only; falling back to host sort (#1082)"
+        "try_topk_on_device: no on-device top-k for this backend; falling back to host sort (#1082)"
     )
 }
 
@@ -865,6 +888,53 @@ mod tests {
             Some(2)
         );
         assert_eq!(greedy_sample(&bf16_logits)?, 2);
+        Ok(())
+    }
+
+    #[test]
+    #[cfg(feature = "cuda")]
+    fn test_cuda_topk_last_axis_matches_host_sort() -> Result<()> {
+        if !kiln_tensor::probe::cuda_is_available() {
+            eprintln!("CUDA unavailable, skipping test_cuda_topk_last_axis_matches_host_sort");
+            return Ok(());
+        }
+        let device = Device::Cuda(0);
+
+        // Includes a tie (two 4.0s at idx 6 and 11) to exercise the
+        // lowest-index tie-break, matching the host fallback.
+        let values: Vec<f32> =
+            vec![1.0, 5.0, 3.0, 8.0, 2.0, 7.0, 4.0, 9.0, 0.5, 6.0, 2.5, 4.0];
+        let logits = Tensor::new(values.as_slice(), &device)?;
+
+        for k in [1usize, 3, 7, 12] {
+            let (vals, idxs) = kiln_tensor::cuda_topk_last_axis(&logits, k)?;
+            assert_eq!(vals.len(), k);
+            assert_eq!(idxs.len(), k);
+
+            // Host reference: descending value, ties broken by lower index.
+            let mut expected: Vec<(u32, f32)> = values
+                .iter()
+                .copied()
+                .enumerate()
+                .map(|(i, v)| (i as u32, v))
+                .collect();
+            expected.sort_by(|a, b| {
+                b.1.partial_cmp(&a.1)
+                    .unwrap()
+                    .then_with(|| a.0.cmp(&b.0))
+            });
+            expected.truncate(k);
+
+            for (slot, ((gi, gv), (ei, ev))) in
+                idxs.iter().zip(&vals).zip(expected.iter().map(|&(i, v)| (i, v))).enumerate()
+            {
+                assert_eq!(*gi, ei, "k={k} slot={slot}: index mismatch");
+                assert!(
+                    (gv - ev).abs() < 1e-5,
+                    "k={k} slot={slot}: value {gv} != expected {ev}"
+                );
+            }
+        }
         Ok(())
     }
 

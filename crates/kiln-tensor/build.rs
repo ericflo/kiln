@@ -111,6 +111,7 @@ fn build_cuda() {
     build.file(csrc_dir.join("reduce_last_axis.cu"));
     build.file(csrc_dir.join("reduce_arbitrary_axis.cu"));
     build.file(csrc_dir.join("argmax_last_axis.cu"));
+    build.file(csrc_dir.join("topk_last_axis.cu"));
     build.file(csrc_dir.join("masked_fill.cu"));
     build.file(csrc_dir.join("scatter_add.cu"));
     build.file(csrc_dir.join("cross_entropy.cu"));

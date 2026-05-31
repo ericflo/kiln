@@ -95,7 +95,8 @@ pub use cuda_storage::{
     cuda_layernorm_last_axis, cuda_masked_fill, cuda_max_axis, cuda_mean_axis, cuda_mean_last_axis, cuda_min_axis,
     cuda_rmsnorm_last_axis, cuda_rope, cuda_scalar_op, cuda_scatter_add_dim0, cuda_sum_axis,
     cuda_diag_build, cuda_diagonal_extract, cuda_softmax_last_axis, cuda_sum_last_axis,
-    cuda_is_finite, cuda_sum_squared_last_axis, cuda_to_host_copy, cuda_where_select,
+    cuda_is_finite, cuda_sum_squared_last_axis, cuda_to_host_copy, cuda_topk_last_axis,
+    cuda_where_select,
     cuda_zeros_ctx, host_to_cuda_copy, host_to_cuda_copy_ctx, primary_cuda_context,
     CudaStorage,
 };

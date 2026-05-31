@@ -619,6 +619,17 @@ unsafe extern "C" {
         stream: *mut core::ffi::c_void,
     ) -> i32;
 
+    fn kiln_topk_last_axis_async(
+        x: *const core::ffi::c_void,
+        out_vals: *mut core::ffi::c_void,
+        out_indices: *mut core::ffi::c_void,
+        n_rows: i64,
+        n_cols: i64,
+        k: i32,
+        dtype_tag: i32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
+
     fn kiln_scan_last_axis_async(
         x: *const core::ffi::c_void,
         out: *mut core::ffi::c_void,
@@ -3540,6 +3551,166 @@ pub fn cuda_argmax_last_axis(x: &crate::Tensor) -> Result<crate::Tensor> {
         crate::Layout::contiguous(out_shape),
         crate::TensorId::next(),
     )
+}
+
+/// #1082 perf-fix H9 — on-device top-k over the trailing axis of a
+/// rank-1 CUDA tensor, returning only the top-`k` `(value, index)` pairs
+/// to host.
+///
+/// This is the on-device replacement for the pre-flip
+/// `sort_last_dim(desc) → slice top-k` path. The full `[V]` logits row
+/// stays resident on the device; the kernel selects the top-`k` ranked
+/// elements (descending value, ties broken by lower index — matching the
+/// host fallback `topk_via_host_sort`) into a tiny `[k]` value buffer and
+/// `[k]` index buffer, and only those `~k * (4 + 8)` bytes are copied
+/// back over PCIe.
+///
+/// For Qwen3.5-4B decode (`V = 248320`, `k = 20`) this is ~240 bytes of
+/// D2H per token instead of the ~970 KB full-vocab f32 transfer the
+/// `topk_via_host_sort` fallback pays via `to_vec1::<f32>()` EVERY token.
+///
+/// Returns `(values, indices)` of length `k.min(vocab)` in descending
+/// rank order. `values` are F32; `indices` are `u32` (vocab fits in
+/// u32). Input must be a contiguous rank-1 CUDA tensor of dtype
+/// F32/BF16/F16.
+///
+/// Routes through `kiln_topk_last_axis_async` in `csrc/topk_last_axis.cu`.
+#[cfg(feature = "cuda")]
+pub fn cuda_topk_last_axis(x: &crate::Tensor, k: usize) -> Result<(Vec<f32>, Vec<u32>)> {
+    use cudarc::driver::DevicePtr;
+
+    let in_dtype = x.dtype();
+    let dtype_tag: i32 = match in_dtype {
+        crate::DType::F32 => 0,
+        crate::DType::BF16 => 1,
+        crate::DType::F16 => 2,
+        other => {
+            return Err(crate::Error::Msg(format!(
+                "cuda_topk_last_axis: unsupported dtype {other}"
+            )));
+        }
+    };
+    if !x.is_contiguous() {
+        return Err(crate::Error::Msg(
+            "cuda_topk_last_axis: input must be contiguous".to_string(),
+        ));
+    }
+    if x.rank() != 1 {
+        return Err(crate::Error::Msg(format!(
+            "cuda_topk_last_axis: input must be rank 1, got rank {}",
+            x.rank()
+        )));
+    }
+    let vocab = x.dims()[0];
+    if vocab == 0 {
+        return Ok((Vec::new(), Vec::new()));
+    }
+    let k = k.min(vocab);
+    if k == 0 {
+        return Ok((Vec::new(), Vec::new()));
+    }
+
+    let n_cols = vocab as i64;
+    let n_rows = 1_i64;
+
+    let x_storage = x.storage().as_any().downcast_ref::<CudaStorage>().ok_or_else(
+        || crate::Error::Msg("cuda_topk_last_axis: input must be CUDA".to_string()),
+    )?;
+    let ctx = x_storage.context();
+    let device_index = match x_storage.device {
+        crate::Device::Cuda(i) => i,
+        _ => unreachable!(),
+    };
+
+    // Tiny on-device outputs: [k] F32 values + [k] I64 indices. The
+    // kernel writes every slot, but the buffers are small enough that
+    // alloc_uninit's correctness contract is trivially satisfied; use
+    // zeros_ctx for defensiveness against any row-too-short edge.
+    let vals_storage = CudaStorage::zeros_ctx(&ctx, device_index, crate::DType::F32, k)?;
+    let idx_storage = CudaStorage::zeros_ctx(&ctx, device_index, crate::DType::I64, k)?;
+
+    let stream = ctx.default_stream();
+    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+
+    let x_base = match &x_storage.slice {
+        SliceOwner::Owned(s) => {
+            let (p, _g) = s.device_ptr(&stream);
+            p
+        }
+        SliceOwner::Borrowed { ptr, .. } => *ptr,
+    };
+    let vals_base = match &vals_storage.slice {
+        SliceOwner::Owned(s) => {
+            let (p, _g) = s.device_ptr(&stream);
+            p
+        }
+        SliceOwner::Borrowed { .. } => unreachable!("cuda zeros produces Owned"),
+    };
+    let idx_base = match &idx_storage.slice {
+        SliceOwner::Owned(s) => {
+            let (p, _g) = s.device_ptr(&stream);
+            p
+        }
+        SliceOwner::Borrowed { .. } => unreachable!("cuda zeros produces Owned"),
+    };
+
+    let x_off = (x.layout().start_offset() * in_dtype.size_in_bytes()) as u64;
+    let x_ptr = (x_base + x_off) as *const core::ffi::c_void;
+    let vals_ptr = vals_base as *mut core::ffi::c_void;
+    let idx_ptr = idx_base as *mut core::ffi::c_void;
+
+    let status = unsafe {
+        kiln_topk_last_axis_async(
+            x_ptr,
+            vals_ptr,
+            idx_ptr,
+            n_rows,
+            n_cols,
+            k as i32,
+            dtype_tag,
+            raw_stream,
+        )
+    };
+    if status != 0 {
+        return Err(crate::Error::Msg(format!(
+            "cuda_topk_last_axis: FFI returned status {status}"
+        )));
+    }
+
+    // Small D2H: only k floats + k i64 indices cross the bus. Each
+    // `memcpy_dtoh` synchronizes against the kernel launch on the same
+    // stream.
+    let vals_slice = match &vals_storage.slice {
+        SliceOwner::Owned(s) => s,
+        SliceOwner::Borrowed { .. } => unreachable!(),
+    };
+    let idx_slice = match &idx_storage.slice {
+        SliceOwner::Owned(s) => s,
+        SliceOwner::Borrowed { .. } => unreachable!(),
+    };
+
+    let mut vals_bytes = vec![0u8; k * 4];
+    stream.memcpy_dtoh(vals_slice, &mut vals_bytes).map_err(|e| {
+        crate::Error::Msg(format!("cuda_topk_last_axis: values D2H failed: {e:?}"))
+    })?;
+    let mut idx_bytes = vec![0u8; k * 8];
+    stream.memcpy_dtoh(idx_slice, &mut idx_bytes).map_err(|e| {
+        crate::Error::Msg(format!("cuda_topk_last_axis: indices D2H failed: {e:?}"))
+    })?;
+
+    let mut values = Vec::with_capacity(k);
+    for chunk in vals_bytes.chunks_exact(4) {
+        values.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+    }
+    let mut indices = Vec::with_capacity(k);
+    for chunk in idx_bytes.chunks_exact(8) {
+        let i64v = i64::from_le_bytes([
+            chunk[0], chunk[1], chunk[2], chunk[3], chunk[4], chunk[5], chunk[6], chunk[7],
+        ]);
+        indices.push(i64v as u32);
+    }
+
+    Ok((values, indices))
 }
 
 /// CUDA cross-entropy loss (Phase 4 substrate op).
