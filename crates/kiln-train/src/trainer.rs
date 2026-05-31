@@ -5622,14 +5622,32 @@ pub(crate) fn token_log_probs(
 
     let active_labels: Vec<u32> = active_positions.iter().map(|&i| shift_labels[i]).collect();
 
-    // log_softmax then gather
+    // log_softmax denominator (CUDA-capable reduce).
     let active_logits_f32 = active_logits.to_f32_dtype()?;
     let log_sum_exp = active_logits_f32.log_sum_exp(LAST_DIM)?; // [num_active]
-    let n_labels = active_labels.len();
-    let labels_2d = Tensor::from_vec_on(*device, active_labels, vec![n_labels])?
-        .to_dtype(DType::U32)?
-        .unsqueeze(1)?;
-    let correct_logits = active_logits_f32.gather(&labels_2d, 1)?.squeeze(1)?; // [num_active]
+
+    // correct_logits[a] = active_logits[a, label_a]. (#1082) kt `gather` is
+    // CPU-only (gather.rs requires both indices AND x be CpuStorage), whereas
+    // the candle gather it replaced ran on CUDA — so a direct `.gather` here
+    // breaks the CUDA GRPO path. Select via a FLAT `index_select` instead, which
+    // is CUDA-capable (the `shift_logits.index_select` above already established
+    // that on-device U32 indices work) and stays on-device (a CPU round-trip of
+    // the [num_active, vocab=248320] active logits would be prohibitive). Flatten
+    // [num_active, vocab] -> [num_active*vocab] and index at a*vocab + label_a.
+    let vocab_size = *active_logits_f32
+        .dims()
+        .last()
+        .expect("active_logits_f32 has a last dim");
+    let flat_idx: Vec<u32> = active_labels
+        .iter()
+        .enumerate()
+        .map(|(a, &lbl)| (a * vocab_size + lbl as usize) as u32)
+        .collect();
+    let flat_indices = Tensor::from_vec_on(*device, flat_idx, vec![n_active_idx])?;
+    let correct_logits = active_logits_f32
+        .contiguous()?
+        .flatten_all()? // [num_active*vocab]
+        .index_select(&flat_indices, 0)?; // [num_active]
 
     // log_prob = logit - log_sum_exp
     let log_probs = (correct_logits - log_sum_exp)?;
