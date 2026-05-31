@@ -2374,75 +2374,6 @@ fn synchronize_for_profile(device: &Device) -> Result<()> {
     }
 }
 
-// ============================================================================
-// #1082 C3 bisect instrumentation
-//
-// `test_model_forward_paged_decode_contiguous_batch_dyn_seqlen_cuda` shows
-// row-0 hidden states diverging between the batched contiguous decode path
-// (`model_forward_paged_decode_contiguous_batch_hidden_inner` ->
-// `transformer_block_paged_decode_contiguous_batch`) and the rowwise path
-// (`model_forward_paged_inner` -> `transformer_block_paged_with_rope_tables`).
-//
-// When `KILN_C3_BISECT` is set, both transformer-block fns dump a row-0
-// hidden-state checksum at each stage of the single full-attention layer
-// using IDENTICAL stage labels, so a side-by-side diff of the two runs
-// pinpoints the FIRST diverging stage. The hidden passed in may be batched
-// (`[batch, 1, hidden]`) on the batched path or `[1, 1, hidden]` on the
-// rowwise path; the dump always narrows axis 0 to row 0 so the two are
-// directly comparable.
-//
-// Cost when unset: a single `OnceLock` bool load per call site — no tensor
-// work, no device sync, zero allocations. When set, the dump does one
-// `narrow` + `abs` + `sum_all` reduction and copies a handful of scalars to
-// host, gated to the first full-attention layer only.
-// ============================================================================
-fn c3_bisect_enabled() -> bool {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("KILN_C3_BISECT").is_ok())
-}
-
-/// Dump a row-0 checksum for `hidden` under the `KILN_C3_BISECT` gate.
-///
-/// `path` is `"batched"` or `"rowwise"`; `stage` is the shared stage label;
-/// `ctx` is a free-form tag (e.g. the start position) so interleaved
-/// rowwise-per-row dumps can be told apart. `hidden` is
-/// `[batch_or_1, 1, hidden_size]`. Narrows axis 0 to row 0 so the two paths
-/// are directly comparable, then prints sum-of-abs (F32) plus the first few
-/// F32 values. No-op (after the bool check) when the gate is unset.
-///
-/// NOTE: the dump always narrows axis 0 to index 0. On the rowwise path each
-/// per-row call passes a `[1, 1, hidden]` tensor whose only row IS that
-/// request's row, so `ctx` (the start_pos) is what disambiguates which
-/// logical batch row a `rowwise` line corresponds to. To compare against the
-/// batched run, line up the batched lines (which narrow batched row 0) with
-/// the rowwise lines tagged with row 0's start_pos.
-fn c3_bisect_dump(path: &str, stage: &str, ctx: &str, hidden: &Tensor) {
-    if !c3_bisect_enabled() {
-        return;
-    }
-    // Best-effort: never let instrumentation failures perturb the run. On any
-    // error, print the error instead of bailing.
-    let res: Result<()> = (|| {
-        let row0 = hidden.narrow(0, 0, 1)?.to_dtype(DType::F32)?;
-        let abs = row0.abs()?;
-        // `sum_all` yields a scalar; `flatten_all` normalizes its rank so
-        // `to_vec1` is valid regardless of whether the backend returns rank-0
-        // or rank-1 (mirrors the test's `.max(0)?.flatten_all()?.to_vec1()`).
-        let sum_abs = abs.sum_all()?.flatten_all()?.to_vec1::<f32>()?[0];
-        let flat = row0.flatten_all()?;
-        let n = flat.element_count();
-        let lead = n.min(6);
-        let head = flat.narrow(0, 0, lead)?.to_vec1::<f32>()?;
-        eprintln!(
-            "C3_BISECT path={path} ctx={ctx} stage={stage} elems={n} sum_abs={sum_abs:.6e} lead={head:?}"
-        );
-        Ok(())
-    })();
-    if let Err(e) = res {
-        eprintln!("C3_BISECT path={path} ctx={ctx} stage={stage} DUMP_ERROR: {e}");
-    }
-}
-
 #[cfg(feature = "metal")]
 fn metal_autoreleasepool<T, F>(f: F) -> T
 where
@@ -18463,13 +18394,6 @@ fn try_flash_attn_paged_decode(
     let _ = num_kv_heads; // unused — kept in signature for symmetry / future use
     let attn_output = attn_out.reshape((batch, 1usize, num_heads * head_dim))?;
     let _ = crate::mtp_debug::capture_subop("post_attn_raw", &attn_output);
-    // #1082 C3 bisect: raw paged-decode attention-kernel output (row 0),
-    // pre-gate, pre-o_proj — the rowwise counterpart of the batched GQA's
-    // `01d_attn_kernel_out_pre_oproj` tap. `total_seq_len = start_pos + 1`.
-    if full_attn_layer_idx == 0 && c3_bisect_enabled() {
-        let c3_ctx = format!("sp{}", total_seq_len.saturating_sub(1));
-        c3_bisect_dump("rowwise", "01d_attn_kernel_out_pre_oproj", &c3_ctx, &attn_output);
-    }
 
     let stage_profile = start_full_attn_stage_profile(&q.device(), profile_context)?;
     let attn_output = attention_output_gate_decode_if(use_metal_decode_gemv, attn_output, gate)?;
@@ -19195,14 +19119,6 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
         )?;
         out
     };
-    // #1082 C3 bisect: post-RoPE q/k for the first full-attn layer (row 0).
-    // q/k are [batch, 1, num_heads|num_kv_heads, head_dim]; the dump narrows
-    // row 0. Shared labels with the rowwise GQA taps.
-    if full_attn_layer_idx == 0 && c3_bisect_enabled() {
-        let c3_ctx = format!("sp{}", start_positions.first().copied().unwrap_or(0));
-        c3_bisect_dump("batched", "01b_qk_norm_rope_q", &c3_ctx, &q);
-        c3_bisect_dump("batched", "01c_qk_norm_rope_k", &c3_ctx, &k);
-    }
     // Q stays in [batch, 1, num_heads, head_dim] for the dyn_seqlen path; the
     // strict fallback below transposes lazily into the head-major layout it
     // requires.
@@ -19457,15 +19373,6 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
     } else {
         attn_output
     };
-    // #1082 C3 bisect: raw attention-kernel output (row 0), pre-gate, pre-o_proj.
-    // This isolates the paged-decode attention kernel from the o_proj GEMM:
-    // if 01b/01c (post-RoPE q/k) match the rowwise path but this diverges,
-    // the dyn_seqlen kernel itself is the culprit; if this matches but
-    // 02_attn_block_out_pre_residual diverges, o_proj is the culprit.
-    if full_attn_layer_idx == 0 && c3_bisect_enabled() {
-        let c3_ctx = format!("sp{}", start_positions.first().copied().unwrap_or(0));
-        c3_bisect_dump("batched", "01d_attn_kernel_out_pre_oproj", &c3_ctx, &attn_output);
-    }
 
     let attn_output = {
         let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
@@ -19862,15 +19769,6 @@ fn gqa_attention_paged_with_rope_tables(
 
         (q, k, gate)
     };
-
-    // #1082 C3 bisect: post-RoPE q/k for the first full-attn layer. q is
-    // [1, 1, num_heads, head_dim], k is [1, 1, num_kv_heads, head_dim] — same
-    // pre-transpose layout the batched GQA taps at `01b`/`01c`. Shared labels.
-    if full_attn_layer_idx == 0 && c3_bisect_enabled() {
-        let c3_ctx = format!("sp{start_pos}");
-        c3_bisect_dump("rowwise", "01b_qk_norm_rope_q", &c3_ctx, &q);
-        c3_bisect_dump("rowwise", "01c_qk_norm_rope_k", &c3_ctx, &k);
-    }
 
     let v = reshape_hole0_4(&v, seq_len, num_kv_heads, head_dim)?;
 
@@ -21370,17 +21268,6 @@ fn transformer_block_paged_with_rope_tables(
         && !b12_layer_31
         && !crate::mtp_debug::is_mtp_single_token_self_attn_armed();
 
-    // #1082 C3 bisect: tap stages of the FIRST full-attention layer. Shared
-    // labels with `transformer_block_paged_decode_contiguous_batch` (batched).
-    // `ctx` is this request's start_pos so per-row rowwise dumps are
-    // distinguishable in the interleaved log. Only build `c3_ctx` when the
-    // gate is on AND this is the first full-attn layer (zero overhead else).
-    let c3_bisect = full_attn_layer_idx == 0 && c3_bisect_enabled();
-    let c3_ctx = if c3_bisect { format!("sp{start_pos}") } else { String::new() };
-    if c3_bisect {
-        c3_bisect_dump("rowwise", "00_block_in", &c3_ctx, x);
-    }
-
     // Pre-attention norm
     let normed = {
         kiln_nvtx::range!(c"kiln/norm/pre_attn");
@@ -21394,9 +21281,6 @@ fn transformer_block_paged_with_rope_tables(
     // layer 31 with the B12 capture window armed.
     if b12_layer_31 {
         crate::mtp_debug::capture_b12_gqa_tap("post_input_norm", &normed)?;
-    }
-    if c3_bisect {
-        c3_bisect_dump("rowwise", "01_post_input_norm", &c3_ctx, &normed);
     }
 
     // Self-attention with paged cache
@@ -21430,10 +21314,6 @@ fn transformer_block_paged_with_rope_tables(
     if subop_armed {
         let _ = crate::mtp_debug::capture_subop("post_attn_block", &attn_out);
     }
-    // C3 bisect: o_proj output (attention block result), pre-residual-add.
-    if c3_bisect {
-        c3_bisect_dump("rowwise", "02_attn_block_out_pre_residual", &c3_ctx, &attn_out);
-    }
 
     // Residual connection
     let x = {
@@ -21442,9 +21322,6 @@ fn transformer_block_paged_with_rope_tables(
     };
     if subop_armed {
         let _ = crate::mtp_debug::capture_subop("post_attn_residual", &x);
-    }
-    if c3_bisect {
-        c3_bisect_dump("rowwise", "03_post_attn_residual", &c3_ctx, &x);
     }
 
     // Post-attention norm
@@ -21459,9 +21336,6 @@ fn transformer_block_paged_with_rope_tables(
     // the HF reference. No-op unless layer 31 + armed.
     if b12_layer_31 {
         crate::mtp_debug::capture_b12_gqa_tap("post_attn_norm", &normed)?;
-    }
-    if c3_bisect {
-        c3_bisect_dump("rowwise", "04_post_attn_norm", &c3_ctx, &normed);
     }
 
     // Feed-forward network. For layer 31 with B12 armed, route through a
@@ -21491,18 +21365,12 @@ fn transformer_block_paged_with_rope_tables(
     if subop_armed {
         let _ = crate::mtp_debug::capture_subop("post_mlp", &ffn_out);
     }
-    if c3_bisect {
-        c3_bisect_dump("rowwise", "05_mlp_out_pre_residual", &c3_ctx, &ffn_out);
-    }
 
     // Residual connection
     let out = {
         kiln_nvtx::range!(c"kiln/residual");
         (x + ffn_out)?
     };
-    if c3_bisect {
-        c3_bisect_dump("rowwise", "06_block_out", &c3_ctx, &out);
-    }
     // Note: the final block output (`out`) is dumped as `post_layer` at the
     // outer MTP call site, so we do not re-capture it here.
     Ok(out)
@@ -21571,28 +21439,10 @@ pub fn transformer_block_paged_decode_contiguous_batch(
     let use_metal_decode_ffn = start_positions.iter().all(|&p| p > 0)
         && !crate::mtp_debug::is_mtp_single_token_self_attn_armed();
 
-    // #1082 C3 bisect: tap stages of the FIRST full-attention layer, narrowing
-    // to row 0 inside the dump so labels line up with the rowwise path
-    // (`transformer_block_paged_with_rope_tables`). `ctx` tags row 0's
-    // start_pos so it lines up with the rowwise `sp{N}` line for the same row.
-    // Only build `c3_ctx` when the gate is on (zero overhead otherwise).
-    let c3_bisect = full_attn_layer_idx == 0 && c3_bisect_enabled();
-    let c3_ctx = if c3_bisect {
-        format!("sp{}", start_positions.first().copied().unwrap_or(0))
-    } else {
-        String::new()
-    };
-    if c3_bisect {
-        c3_bisect_dump("batched", "00_block_in", &c3_ctx, x);
-    }
-
     let normed = {
         kiln_nvtx::range!(c"kiln/norm/pre_attn_batch_decode");
         rms_norm(x, &layer.input_layernorm, config.rms_norm_eps)?
     };
-    if c3_bisect {
-        c3_bisect_dump("batched", "01_post_input_norm", &c3_ctx, &normed);
-    }
     let attn_out = gqa_attention_paged_decode_contiguous_batch(
         backend,
         &normed,
@@ -21618,23 +21468,14 @@ pub fn transformer_block_paged_decode_contiguous_batch(
         #[cfg(feature = "cuda")]
         kt_paged_cache,
     )?;
-    if c3_bisect {
-        c3_bisect_dump("batched", "02_attn_block_out_pre_residual", &c3_ctx, &attn_out);
-    }
     let x = {
         kiln_nvtx::range!(c"kiln/residual_batch_decode");
         (x + attn_out)?
     };
-    if c3_bisect {
-        c3_bisect_dump("batched", "03_post_attn_residual", &c3_ctx, &x);
-    }
     let normed = {
         kiln_nvtx::range!(c"kiln/norm/pre_mlp_batch_decode");
         rms_norm(&x, &layer.post_attention_layernorm, config.rms_norm_eps)?
     };
-    if c3_bisect {
-        c3_bisect_dump("batched", "04_post_attn_norm", &c3_ctx, &normed);
-    }
     let ffn_out = swiglu_ffn_backend_profiled(
         backend,
         &normed,
@@ -21643,16 +21484,10 @@ pub fn transformer_block_paged_decode_contiguous_batch(
         use_metal_decode_ffn,
         mlp_profile_context,
     )?;
-    if c3_bisect {
-        c3_bisect_dump("batched", "05_mlp_out_pre_residual", &c3_ctx, &ffn_out);
-    }
     let out = {
         kiln_nvtx::range!(c"kiln/residual_batch_decode");
         (x + ffn_out)?
     };
-    if c3_bisect {
-        c3_bisect_dump("batched", "06_block_out", &c3_ctx, &out);
-    }
     Ok(out)
 }
 
