@@ -13317,17 +13317,17 @@ pub fn gdn_gated_rms_norm_backward_no_grad(
     })
 }
 
-/// Candle-composite analytic backward for the fused "cross-entropy from full
-/// logits" tape node ([`crate::tape_forward::CrossEntropyFromLogitsBackward`]).
+/// kt-native analytic backward for the fused "cross-entropy from full
+/// logits" tape node ([`crate::tape_forward::CrossEntropyFromLogitsKtBackward`]).
 ///
 /// Computes `dL/d(full logits)` for the next-token-prediction masked
-/// cross-entropy loss that [`crate::tape_forward::try_tape_cross_entropy_from_logits_cuda`]
+/// cross-entropy loss that [`crate::tape_forward::try_tape_cross_entropy_from_logits_kt`]
 /// (and the candle-authoritative fallback `kiln_train::trainer::cross_entropy_loss`)
-/// produces. Device-agnostic (candle F32, no kt round-trip) so the kt-tape
-/// `CrossEntropyFromLogitsBackward` op can wrap it exactly the way
-/// [`gdn_recurrent_backward_no_grad`] / [`sdpa_fallback_backward_no_grad`] are
-/// wrapped. Because it is pure candle, it runs (and is parity-tested) on CPU
-/// where candle's own autograd is the oracle — no CUDA needed.
+/// produces. Device-agnostic (F32, kt in/out — the `_candle` suffix is a misnomer
+/// kept for history) so the kt-tape `CrossEntropyFromLogitsKtBackward` op can wrap
+/// it exactly the way [`gdn_recurrent_backward_no_grad`] /
+/// [`sdpa_fallback_backward_no_grad`] are wrapped. It runs (and is parity-tested)
+/// on CPU where candle's own autograd is the oracle — no CUDA needed.
 ///
 /// # Why one fused node
 ///

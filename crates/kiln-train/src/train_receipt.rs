@@ -13,16 +13,11 @@ use std::process::Command;
 use anyhow::{Context, Result};
 // NOTE(#1082 Wave E4): the `cd_types` facade now resolves bare
 // `Tensor` / `DType` to **kt** (matching the workspace post-flip
-// convention). The only candle uses left in this file are the
-// `tensor_l2_norm(&candle_core::Tensor)` helper and its candle-parity
-// test; both are now written as explicit `candle_core::*` paths (a
-// candle island), since the helper's sole live caller — `trainer.rs`'s
-// candle-autograd gradient-norm fallback at the `.backward()` boundary —
-// is being migrated to `tensor_l2_norm_kt` in Wave E1. The production
-// adapter-norm path already uses the kt helper
-// (`tensor_l2_norm_kt` via `kt::safetensors::load_cpu`). When the last
-// candle-grad caller flips, this island and the candle dep leave the
-// crate.
+// convention). The candle `tensor_l2_norm(&candle_core::Tensor)` helper
+// and its candle-parity test were DELETED in the candle drop — the
+// trainer's candle-autograd gradient-norm fallback is gone (`GradSource`
+// has no candle variant), so every grad-norm / adapter-norm caller is
+// now kt-native via `tensor_l2_norm_kt`.
 use kiln_core::config::ModelConfig;
 use kiln_core::config_hashes::ConfigHashes;
 use kiln_core::tokenizer::KilnTokenizer;
@@ -1367,9 +1362,8 @@ pub fn lora_delta_norm_summary_from_adapter(
         return Ok(Vec::new());
     }
     // (#1082) Adapter L2-norm receipt path uses kt safetensors + kt L2 norm
-    // computation. This is a CPU-only, autograd-free diagnostic loop, which is
-    // why it can be migrated independently of the trainer's gradient-norm path
-    // (that still feeds `tensor_l2_norm` candle gradients).
+    // computation. CPU-only, autograd-free diagnostic loop. The trainer's
+    // gradient-norm path is also kt-native now (`tensor_l2_norm_kt`).
     let tensors = kt::safetensors::load_cpu(&adapter_model)
         .map_err(|e| anyhow::anyhow!("{e}"))
         .with_context(|| format!("load adapter tensors {}", adapter_model.display()))?;
@@ -1553,20 +1547,12 @@ fn population_variance(values: &[f64]) -> f64 {
         / values.len() as f64
 }
 
-// (#1082) Candle island — `trainer.rs`'s candle-autograd gradient-norm
-// fallback (`.backward()` boundary, trainer.rs:~5431) still hands a
-// candle gradient here. Pinned to explicit `candle_core::*` until Wave
-// E1 flips that caller to `tensor_l2_norm_kt`.
-pub(crate) fn tensor_l2_norm(tensor: &candle_core::Tensor) -> Result<f64> {
-    let sum_sq = tensor
-        .to_dtype(candle_core::DType::F32)?
-        .sqr()?
-        .sum_all()?
-        .to_scalar::<f32>()?;
-    Ok((sum_sq as f64).sqrt())
-}
-
-/// kt-tensor counterpart to [`tensor_l2_norm`].
+/// kt-native LoRA / gradient L2 norm.
+///
+/// (#1082) The candle counterpart `tensor_l2_norm(&candle_core::Tensor)` was
+/// deleted in the candle drop — every production grad-norm caller
+/// (`observe_lora_grad_norms_from_kt_grad_store`, `accumulate_lora_grad_sum_sq`)
+/// is kt-native, and `GradSource` no longer has a candle variant.
 ///
 /// Used by [`lora_delta_norm_summary_from_adapter`] after its
 /// safetensors loader migrated from `candle_core::safetensors::load`
@@ -2044,12 +2030,11 @@ mod tests {
         );
     }
 
-    /// (#1082) Direct parity check for the candle→kt migration of
-    /// `lora_delta_norm_summary_from_adapter`. Builds a tiny PEFT-shaped
-    /// adapter file with known weights, then verifies `tensor_l2_norm_kt`
-    /// matches `tensor_l2_norm` to numerical tolerance for the same inputs.
+    /// (#1082) Numeric check for `tensor_l2_norm_kt` against an independent
+    /// closed-form L2 norm. (The candle oracle `tensor_l2_norm` was deleted in
+    /// the candle drop; the closed-form `expected` is now the sole oracle.)
     #[test]
-    fn tensor_l2_norm_kt_matches_candle_for_f32_inputs() -> Result<()> {
+    fn tensor_l2_norm_kt_matches_closed_form_for_f32_inputs() -> Result<()> {
         let xs: Vec<f32> = vec![1.0, -2.0, 3.0, -4.0, 5.0];
         let expected = ((1.0_f64).powi(2)
             + (2.0_f64).powi(2)
@@ -2058,24 +2043,12 @@ mod tests {
             + (5.0_f64).powi(2))
         .sqrt();
 
-        let cand =
-            candle_core::Tensor::from_vec(xs.clone(), (xs.len(),), &candle_core::Device::Cpu)?;
-        let cand_norm = tensor_l2_norm(&cand)?;
-        assert!(
-            (cand_norm - expected).abs() < 1e-5,
-            "candle norm {cand_norm} != expected {expected}"
-        );
-
         let kt_t = kt::Tensor::from_vec(xs, vec![5])
             .map_err(|e| anyhow::anyhow!("{e}"))?;
         let kt_norm = tensor_l2_norm_kt(&kt_t)?;
         assert!(
             (kt_norm - expected).abs() < 1e-5,
             "kt norm {kt_norm} != expected {expected}"
-        );
-        assert!(
-            (kt_norm - cand_norm).abs() < 1e-5,
-            "kt norm {kt_norm} != candle norm {cand_norm}"
         );
         Ok(())
     }
