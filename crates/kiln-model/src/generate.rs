@@ -7835,6 +7835,8 @@ mod tests {
         assert_eq!(table.lookup(32, 16), Some((20, 0)));
     }
 
+    // (#1082) CUDA kt paged cache test — gate to the cuda build (see sibling).
+    #[cfg(feature = "cuda")]
     #[test]
     fn exact_prefix_cache_hit_skips_prefill_and_matches_tokens() -> Result<()> {
         let config = tiny_config();
@@ -7908,6 +7910,8 @@ mod tests {
         Ok(())
     }
 
+    // (#1082) CUDA kt paged cache test — gate to the cuda build (see sibling).
+    #[cfg(feature = "cuda")]
     #[test]
     fn streaming_exact_prefix_cache_hit_uses_saved_first_token_source() -> Result<()> {
         let config = tiny_config();
@@ -8001,6 +8005,10 @@ mod tests {
         Ok(())
     }
 
+    // (#1082) constructs a CUDA kt paged cache (new_cuda(0) + cuda device_index);
+    // gate to the cuda build like the sibling paged tests. The CPU paged path is
+    // covered by the device-agnostic forward tests (test_model_forward_paged_*_cpu).
+    #[cfg(feature = "cuda")]
     #[test]
     fn batched_exact_prefix_cache_hit_skips_prefill() -> Result<()> {
         let config = tiny_config();
