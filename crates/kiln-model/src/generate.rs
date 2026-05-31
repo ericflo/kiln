@@ -31,6 +31,10 @@ use crate::forward::{
     model_forward_paged_streaming, model_forward_paged_streaming_last_token_with_last_hidden,
     model_forward_paged_streaming_with_progress, streaming_prefill_enabled_for,
 };
+// (#1082) Native single-submit Vulkan-resident decode entry — only referenced
+// from the `#[cfg(feature = "vulkan")]` single-row fast path below.
+#[cfg(feature = "vulkan")]
+use crate::forward::model_forward_paged_last_token_resident;
 use crate::kv_cache::KvCache;
 use crate::lora_loader::LoraWeights;
 use crate::packed_weight_registry::GpuPackedWeightRegistry;
@@ -2825,6 +2829,41 @@ impl ModelRunner {
                     );
                 }
             }
+        }
+
+        // (#1082) Vulkan single-row GREEDY decode: route the production serving
+        // path (batching engine -> paged_batched_decode_step, row_count==1)
+        // through the native single-submit resident forward — the same path the
+        // bench greedy loop uses (~14 tok/s steady-state on Strix Halo). The
+        // default fallthrough (`model_forward_paged_batched_decode_hidden`) is
+        // the slow generic batched-decode-hidden path (~0.5 tok/s: per-op CPU
+        // readback + per-GDN-layer cat/narrow). `model_forward_paged_last_token_resident`
+        // returns logits via the native CommandBatch path and transparently
+        // falls back to the generic forward on any decline. Restricted to
+        // greedy so the only post-forward work is `greedy_sample(&logits)` (no
+        // borrow of `states[i]`, which `linear_states` holds mutably);
+        // temperature>0 sampling falls through to the generic path. Skipped when
+        // the contiguous-batched path above already produced tokens (row > 1).
+        #[cfg(feature = "vulkan")]
+        if sampled.is_none()
+            && row_count == 1
+            && params[0].temperature == 0.0
+            && self.backend.supports_resident_decode()
+        {
+            let logits = model_forward_paged_last_token_resident(
+                &*self.backend,
+                &input_tokens,
+                &self.weights,
+                &self.config,
+                paged_cache,
+                &block_tables[0],
+                sequence_lengths[0],
+                Some(&mut *linear_states[0]),
+                self.active_lora.as_ref(),
+                None,
+            )
+            .context("vulkan resident single-row decode forward failed")?;
+            sampled = Some(vec![greedy_sample(&logits)?]);
         }
 
         let sampled = if let Some(tokens) = sampled {
