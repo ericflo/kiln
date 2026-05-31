@@ -21924,6 +21924,9 @@ fn try_vulkan_resident_batched_decode_argmax(
     ) else {
         return Ok(None);
     };
+    let Some(row_ids) = row_ids else {
+        return Ok(None);
+    };
 
     let has_linear_layers = weights
         .layers
@@ -21970,45 +21973,22 @@ fn try_vulkan_resident_batched_decode_argmax(
     let rope_sin_rows = tensor_to_f32_flat_vec_vk(&rope_sin)?;
 
     let mut full_attn_idx = 0usize;
-    if let Some(row_ids) = row_ids {
-        for layer in weights.layers.iter() {
-            if matches!(layer.attention, GpuAttentionWeights::Full(_)) {
-                for (row_idx, &row_id) in row_ids.iter().enumerate() {
-                    if !vk_backend.resident_decode_row_seeded(full_attn_idx, row_id) {
-                        let row_tables = [block_tables[row_idx]];
-                        crate::vk_decode_resident::seed_vk_kv_cache_layer_blocks_from_batched_tables(
-                            vk_device,
-                            vk_kv_cache,
-                            paged_cache,
-                            full_attn_idx,
-                            &row_tables,
-                        )?;
-                        vk_backend.mark_resident_decode_row_seeded(full_attn_idx, row_id);
-                    }
-                }
-                full_attn_idx += 1;
-            }
-        }
-    } else {
-        let session_pos = *start_positions
-            .iter()
-            .min()
-            .expect("batch > 1 implies non-empty start_positions");
-        vk_backend.note_resident_session(session_pos);
-        for layer in weights.layers.iter() {
-            if matches!(layer.attention, GpuAttentionWeights::Full(_)) {
-                if !vk_backend.full_attn_layer_seeded(full_attn_idx) {
+    for layer in weights.layers.iter() {
+        if matches!(layer.attention, GpuAttentionWeights::Full(_)) {
+            for (row_idx, &row_id) in row_ids.iter().enumerate() {
+                if !vk_backend.resident_decode_row_seeded(full_attn_idx, row_id) {
+                    let row_tables = [block_tables[row_idx]];
                     crate::vk_decode_resident::seed_vk_kv_cache_layer_blocks_from_batched_tables(
                         vk_device,
                         vk_kv_cache,
                         paged_cache,
                         full_attn_idx,
-                        block_tables,
+                        &row_tables,
                     )?;
-                    vk_backend.mark_full_attn_layer_seeded(full_attn_idx);
+                    vk_backend.mark_resident_decode_row_seeded(full_attn_idx, row_id);
                 }
-                full_attn_idx += 1;
             }
+            full_attn_idx += 1;
         }
     }
 
