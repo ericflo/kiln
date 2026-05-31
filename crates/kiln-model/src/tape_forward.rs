@@ -109,7 +109,6 @@ use kiln_autograd::{
     MatmulBackward, MulBackward, MulSigmoidGateBackward, ReshapeBackward, RopeSplitHalfBackward,
     SiluBackward, Tape, TransposeBackward,
 };
-use candle_core::DType as CandleDType;
 
 use crate::backend::BackendRuntime;
 use crate::forward::{
@@ -2689,11 +2688,13 @@ impl BackwardOp for GqaExpandBackward {
         &self,
         grad_output: &kiln_tensor::Tensor,
     ) -> kiln_tensor::Result<Vec<Option<kiln_tensor::Tensor>>> {
-        let grad_c = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(grad_output).map_err(|e| {
-            kiln_tensor::Error::Msg(format!("GqaExpandBackward: grad kt->candle: {e}"))
-        })?;
-        // grad: [B, T, nv, dk] -> [B, T, nk, gqa_ratio, dk] -> sum over gqa_ratio.
-        let g = grad_c
+        // grad: [B, T, nv, dk] -> [B, T, nk, gqa_ratio, dk] -> sum over gqa_ratio
+        // (axis 3) -> [B, T, nk, dk]. (#1082) kt-NATIVE: was a kt->candle->kt
+        // round-trip (2 device copies + candle `.sum(3)`); now a single CUDA
+        // `sum_axis` (routes to the `cuda_sum_axis` kernel — verified CUDA-native,
+        // not a CPU fallback). No candle, no copies. `sum_axis` returns a fresh
+        // contiguous reduction so the old explicit `.contiguous()` is unneeded.
+        let g = grad_output
             .reshape((
                 self.batch,
                 self.seq_len,
@@ -2702,16 +2703,9 @@ impl BackwardOp for GqaExpandBackward {
                 self.head_dim,
             ))
             .map_err(|e| kiln_tensor::Error::Msg(format!("GqaExpandBackward: reshape: {e}")))?;
-        let dx = g
-            .sum(3)
-            .map_err(|e| kiln_tensor::Error::Msg(format!("GqaExpandBackward: sum: {e}")))?;
-        let dx = dx
-            .contiguous()
-            .map_err(|e| kiln_tensor::Error::Msg(format!("GqaExpandBackward: contig: {e}")))?;
-        let dx_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_copy(&dx).map_err(|e| {
-            kiln_tensor::Error::Msg(format!("GqaExpandBackward: dx candle->kt: {e}"))
-        })?;
-        Ok(vec![Some(dx_kt)])
+        let dx = kiln_tensor::ops::sum_axis(&g, 3)
+            .map_err(|e| kiln_tensor::Error::Msg(format!("GqaExpandBackward: sum_axis: {e}")))?;
+        Ok(vec![Some(dx)])
     }
 }
 
