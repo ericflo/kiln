@@ -307,13 +307,11 @@ impl VulkanBuffer {
     /// buffers in a single command buffer + single queue submission.
     ///
     /// Caller passes `&[(&dst_buffer, &payload_bytes)]`. The function
-    /// allocates one staging buffer per upload (each must hold its
-    /// own payload size — staging buffers can't safely overlap), but
-    /// only creates ONE command pool, ONE command buffer, and submits
-    /// + waits ONCE — collapsing what would otherwise be N round
-    /// trips into 1. Dramatically faster for the decode hot loop where
-    /// 4-5 per-token small inputs (RoPE cos/sin, block_table, seq_lens,
-    /// embedding) used to take ~6 ms / token through `upload_data`.
+    /// packs every payload into one staging buffer, creates one command
+    /// pool and one command buffer, then submits and waits once.
+    /// Dramatically faster for the decode hot loop where 4-5 per-token
+    /// small inputs (RoPE cos/sin, block_table, seq_lens, embedding)
+    /// used to take ~6 ms / token through `upload_data`.
     pub fn upload_data_batch(
         device: &Arc<ash::Device>,
         host_mem_type: u32,
@@ -324,22 +322,40 @@ impl VulkanBuffer {
         if uploads.is_empty() {
             return Ok(());
         }
-        // Allocate one staging buffer per upload, copy payload into
-        // its mapped memory. Keep stagings alive in `stagings` so
-        // they outlast the GPU submit.
-        let mut stagings: Vec<VulkanBuffer> = Vec::with_capacity(uploads.len());
-        for (_dst, data) in uploads.iter() {
-            let staging = VulkanBuffer::create_host_visible(device, host_mem_type, data.len() as u64)?;
-            let mapped = unsafe {
-                device
-                    .map_memory(staging.memory, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty())
-                    .map_err(|e| anyhow::anyhow!("upload_data_batch: map_memory failed: {:?}", e))?
-            };
+        let total_staging_bytes = uploads.iter().try_fold(0u64, |acc, (_, data)| {
+            acc.checked_add(data.len() as u64)
+                .ok_or_else(|| anyhow::anyhow!("upload_data_batch: staging size overflow"))
+        })?;
+        anyhow::ensure!(
+            total_staging_bytes > 0,
+            "upload_data_batch: total payload size must be non-zero"
+        );
+        let staging =
+            VulkanBuffer::create_host_visible(device, host_mem_type, total_staging_bytes)?;
+        let mapped = unsafe {
+            device
+                .map_memory(staging.memory, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty())
+                .map_err(|e| anyhow::anyhow!("upload_data_batch: map_memory failed: {:?}", e))?
+        };
+        let mut src_offsets = Vec::with_capacity(uploads.len());
+        let mut src_offset = 0u64;
+        for (idx, (_dst, data)) in uploads.iter().enumerate() {
+            anyhow::ensure!(
+                !data.is_empty(),
+                "upload_data_batch[{idx}]: payload must be non-empty"
+            );
+            src_offsets.push(src_offset);
             unsafe {
-                std::ptr::copy_nonoverlapping(data.as_ptr(), mapped as *mut u8, data.len());
-                device.unmap_memory(staging.memory);
+                std::ptr::copy_nonoverlapping(
+                    data.as_ptr(),
+                    (mapped as *mut u8).add(src_offset as usize),
+                    data.len(),
+                );
             }
-            stagings.push(staging);
+            src_offset += data.len() as u64;
+        }
+        unsafe {
+            device.unmap_memory(staging.memory);
         }
 
         let pool_info = make_pool_info(queue_family_index);
@@ -358,8 +374,10 @@ impl VulkanBuffer {
                 .begin_command_buffer(cmd, &make_begin_info())
                 .context("upload_data_batch: begin_command_buffer")?;
             for (i, (dst, data)) in uploads.iter().enumerate() {
-                let copy = vk::BufferCopy::default().size(data.len() as u64);
-                device.cmd_copy_buffer(cmd, stagings[i].buffer, dst.buffer, &[copy]);
+                let copy = vk::BufferCopy::default()
+                    .src_offset(src_offsets[i])
+                    .size(data.len() as u64);
+                device.cmd_copy_buffer(cmd, staging.buffer, dst.buffer, &[copy]);
             }
             device
                 .end_command_buffer(cmd)
@@ -373,8 +391,7 @@ impl VulkanBuffer {
             device.free_command_buffers(pool, &command_buffers);
             device.destroy_command_pool(pool, None);
         }
-        // Drop stagings here (their Drop releases the host-visible memory).
-        drop(stagings);
+        drop(staging);
         Ok(())
     }
 

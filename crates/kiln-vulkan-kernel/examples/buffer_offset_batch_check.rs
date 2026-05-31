@@ -40,6 +40,45 @@ fn main() -> Result<()> {
         got,
         expected
     );
-    println!("buffer_offset_batch_check: OK bytes={}", got.len());
+
+    let dst_a = VulkanBuffer::create_device_local(
+        dev.device(),
+        dev.device_local_mem_type(),
+        a.len() as u64,
+    )?;
+    let dst_b = VulkanBuffer::create_device_local(
+        dev.device(),
+        dev.device_local_mem_type(),
+        b.len() as u64,
+    )?;
+    VulkanBuffer::upload_data_batch(
+        dev.device(),
+        dev.host_visible_mem_type(),
+        dev.queue(),
+        dev.queue_family_index(),
+        &[(&dst_a, &a), (&dst_b, &b)],
+    )?;
+    let got_a = VulkanBuffer::read_back(
+        dev.device(),
+        dev.host_visible_mem_type(),
+        dev.queue(),
+        dev.queue_family_index(),
+        &dst_a,
+    )?;
+    let got_b = VulkanBuffer::read_back(
+        dev.device(),
+        dev.host_visible_mem_type(),
+        dev.queue(),
+        dev.queue_family_index(),
+        &dst_b,
+    )?;
+    ensure!(got_a.as_slice() == a, "batch upload dst_a mismatch");
+    ensure!(got_b.as_slice() == b, "batch upload dst_b mismatch");
+
+    println!(
+        "buffer_offset_batch_check: OK offset_bytes={} batch_bytes={}",
+        got.len(),
+        got_a.len() + got_b.len()
+    );
     Ok(())
 }
