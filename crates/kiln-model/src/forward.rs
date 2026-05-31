@@ -2775,26 +2775,15 @@ fn linear_with_lora_t_backend_decode_if(
         // with `bridge_scope_active()` so only the CP-4 training bridge enters
         // this branch; decode falls straight through to the kt-native
         // `backend.linear_decode`.
+        // #1082 seam flip: kt-native linear+LoRA recorder — no kt->candle->kt.
         #[cfg(feature = "cuda")]
-        if crate::tape_forward::tape_forward_enabled()
-            && kiln_kt_bridge::tape_bridge::bridge_scope_active()
-        {
-            let x_candle = kt_logits_to_candle(x)
-                .context("linear_with_lora_t_backend_decode_if kt->candle x (tape)")?;
-            let weight_candle = kt_logits_to_candle(weight_t)
-                .context("linear_with_lora_t_backend_decode_if kt->candle weight_t (tape)")?;
-            if let Some(out) = crate::tape_forward::try_tape_lora_linear_cuda(
-                &x_candle,
-                &weight_candle,
-                lora,
-                lora_scale,
-            )? {
-                return candle_to_kt_activation(&out)
-                    .context("linear_with_lora_t_backend_decode_if candle->kt tape out");
+        if crate::tape_forward::tape_forward_enabled() {
+            if let Some(out) =
+                crate::tape_forward::try_tape_lora_linear_kt(x, weight_t, lora, lora_scale)
+                    .context("linear_with_lora_t try_tape_lora_linear_kt")?
+            {
+                return Ok(out);
             }
-            // (#1082) Deleted the dead candle-CustomOp `cuda_lora_linear_training_bf16`
-            // fallback: the kt tape's `try_tape_lora_linear_cuda` above is the sole
-            // autograd fused-LoRA-linear producer.
         }
         // Base projection via the backend's kt-typed decode/prefill trait
         // methods — pass kt `x`/`weight_t` directly; they return kt.
@@ -10877,26 +10866,15 @@ fn lm_head_forward_backend_decode_if(
         // `bridge_scope_active()` so only the CP-4 training bridge enters this
         // branch; decode falls straight through to the kt-native
         // `backend.linear_decode`.
-        if crate::tape_forward::tape_forward_enabled()
-            && kiln_kt_bridge::tape_bridge::bridge_scope_active()
-        {
-            let x_c = kt_logits_to_candle(x).context("lm_head kt->candle x (tape)")?;
-            let et_c =
-                kt_logits_to_candle(embed_tokens_t).context("lm_head kt->candle embed_t (tape)")?;
+        // #1082 seam flip: kt-native lm_head linear recorder — no kt->candle->kt.
+        // The twin returns the RECORDED kt tape node directly (it IS the lm_head
+        // output), so cross_entropy chains to it with no id-remapping.
+        if crate::tape_forward::tape_forward_enabled() {
             if let Some(out) =
-                crate::tape_forward::try_tape_lora_linear_cuda(&x_c, &et_c, None, 0.0)?
+                crate::tape_forward::try_tape_lora_linear_kt(x, embed_tokens_t, None, 0.0)
+                    .context("lm_head try_tape_lora_linear_kt")?
             {
-                // #1082 CP-4: `try_tape_lora_linear_cuda` recorded the matmul on
-                // the kt tape and retained `out`.id() -> that kt output. Return
-                // the RECORDED kt tensor (via the chaining lookup) so the lm_head
-                // output IS the tape node — a fresh `candle_to_kt_activation`
-                // borrow would mint a new kt id, islanding the lm_head from the
-                // cross_entropy root and emptying the GradStore. Falls back to a
-                // fresh bridge if (somehow) not retained.
-                if let Some(kt) = kiln_kt_bridge::tape_bridge::kt_input_for_candle(out.id()) {
-                    return Ok(kt);
-                }
-                return candle_to_kt_activation(&out).context("lm_head candle->kt tape out");
+                return Ok(out);
             }
         }
         if let Some(backend) = backend {

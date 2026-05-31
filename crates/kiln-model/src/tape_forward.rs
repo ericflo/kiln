@@ -1795,6 +1795,165 @@ pub fn try_tape_lora_add_cuda(
 ///   preconditions fail. The caller falls through to the existing dispatch.
 /// * `Err(...)` — an unexpected kt forward or kt → candle copy-back failure.
 #[allow(clippy::too_many_lines)]
+/// kt-native linear+LoRA tape recorder (#1082 seam flip) — kt-only twin of
+/// [`try_tape_lora_linear_cuda`]. x + base weight are already kt at the call site
+/// (the loader produces kt base weights), so no candle bridging: the whole
+/// composite (x->2d reshape, base = x2d@W, LoRA delta = (x2d@Aᵀ)@Bᵀ·scale + base,
+/// reshape back) runs in kt ops with the SAME tape nodes (ReshapeBackward,
+/// MatmulBackward, LoraDeltaAddBackward) the candle adapter records. The LoRA-Var
+/// grad mapping (`register_input_mapping_kt`) is preserved so the optimiser sees
+/// dA/dB; no candle-id mapping is needed for x/out (they chain in kt directly).
+pub fn try_tape_lora_linear_kt(
+    x: &kiln_tensor::Tensor,
+    weight_t: &kiln_tensor::Tensor,
+    lora: Option<&LoraProjectionWeights>,
+    lora_scale: f32,
+) -> Result<Option<kiln_tensor::Tensor>> {
+    if !tape_forward_enabled() || !tape_lora_add_enabled() {
+        return Ok(None);
+    }
+    if !matches!(x.device(), kiln_tensor::Device::Cuda(_))
+        || !matches!(weight_t.device(), kiln_tensor::Device::Cuda(_))
+    {
+        return Ok(None);
+    }
+    if !matches!(
+        x.dtype(),
+        kiln_tensor::DType::BF16 | kiln_tensor::DType::F32
+    ) {
+        return Ok(None);
+    }
+    if weight_t.dtype() != x.dtype() {
+        return Ok(None);
+    }
+    let Ok((wk, n)) = weight_t.dims2() else {
+        return Ok(None);
+    };
+    let x_dims = x.dims().to_vec();
+    if x_dims.len() < 2 {
+        return Ok(None);
+    }
+    let k = *x_dims.last().unwrap();
+    if k != wk {
+        return Ok(None);
+    }
+    let rows: usize = x_dims[..x_dims.len() - 1].iter().product();
+    if let Some(proj) = lora {
+        if proj.a.dtype() != x.dtype() || proj.b.dtype() != x.dtype() {
+            return Ok(None);
+        }
+        let Ok((rank, a_in)) = proj.a.dims2() else {
+            return Ok(None);
+        };
+        let Ok((b_out, b_rank)) = proj.b.dims2() else {
+            return Ok(None);
+        };
+        if a_in != k || b_out != n || b_rank != rank {
+            return Ok(None);
+        }
+        if !proj.a.is_contiguous() || !proj.b.is_contiguous() {
+            return Ok(None);
+        }
+    }
+    let (a_kt, b_kt) = match lora {
+        Some(proj) => (Some(proj.a.clone()), Some(proj.b.clone())),
+        None => (None, None),
+    };
+    let out_kt = match with_active_tape(|tape: &mut Tape| -> Result<_> {
+        let x_c = if x.is_contiguous() {
+            x.clone()
+        } else {
+            x.contiguous()
+                .map_err(|e| anyhow::anyhow!("kt x.contiguous: {e}"))?
+        };
+        let x2d = x_c
+            .reshape(vec![rows, k])
+            .map_err(|e| anyhow::anyhow!("kt x reshape -> 2d: {e}"))?;
+        tape.record(
+            &x2d,
+            &[x],
+            Box::new(ReshapeBackward {
+                input_shape: x.shape().to_vec(),
+            }),
+        );
+        let base2d = kiln_tensor::ops::matmul(&x2d, weight_t)
+            .map_err(|e| anyhow::anyhow!("kt matmul x2d@w: {e}"))?;
+        tape.record(
+            &base2d,
+            &[&x2d, weight_t],
+            Box::new(MatmulBackward {
+                a: x2d.clone(),
+                b: weight_t.clone(),
+            }),
+        );
+        let out2d = match (lora, a_kt.as_ref(), b_kt.as_ref()) {
+            (Some(_proj), Some(a_kt), Some(b_kt)) => {
+                let a_t_kt = a_kt
+                    .transpose(0, 1)
+                    .map_err(|e| anyhow::anyhow!("kt a.transpose: {e}"))?
+                    .contiguous()
+                    .map_err(|e| anyhow::anyhow!("kt a_t.contiguous: {e}"))?;
+                let h_kt = kiln_tensor::ops::matmul(&x2d, &a_t_kt)
+                    .map_err(|e| anyhow::anyhow!("kt matmul x@a_t: {e}"))?;
+                let b_t_kt = b_kt
+                    .transpose(0, 1)
+                    .map_err(|e| anyhow::anyhow!("kt b.transpose: {e}"))?
+                    .contiguous()
+                    .map_err(|e| anyhow::anyhow!("kt b_t.contiguous: {e}"))?;
+                let d_kt = kiln_tensor::ops::matmul(&h_kt, &b_t_kt)
+                    .map_err(|e| anyhow::anyhow!("kt matmul h@b_t: {e}"))?;
+                let delta_kt = kiln_tensor::ops::mul_scalar(&d_kt, lora_scale)
+                    .map_err(|e| anyhow::anyhow!("kt mul_scalar(scale): {e}"))?;
+                let out2d = kiln_tensor::ops::add(&base2d, &delta_kt)
+                    .map_err(|e| anyhow::anyhow!("kt add(base, delta): {e}"))?;
+                tape.record(
+                    &out2d,
+                    &[&base2d, &x2d, a_kt, b_kt],
+                    Box::new(LoraDeltaAddBackward {
+                        x: x2d.clone(),
+                        a: a_kt.clone(),
+                        b: b_kt.clone(),
+                        scale: lora_scale,
+                    }),
+                );
+                out2d
+            }
+            _ => base2d,
+        };
+        let mut out_shape = x_dims[..x_dims.len() - 1].to_vec();
+        out_shape.push(n);
+        let out2d_c = if out2d.is_contiguous() {
+            out2d.clone()
+        } else {
+            out2d
+                .contiguous()
+                .map_err(|e| anyhow::anyhow!("kt out2d.contiguous: {e}"))?
+        };
+        let out_kt = out2d_c
+            .reshape(out_shape)
+            .map_err(|e| anyhow::anyhow!("kt out reshape -> nd: {e}"))?;
+        tape.record(
+            &out_kt,
+            &[&out2d],
+            Box::new(ReshapeBackward {
+                input_shape: vec![rows, n],
+            }),
+        );
+        Ok(out_kt)
+    }) {
+        Some(result) => result,
+        None => return Ok(None),
+    };
+    let out_kt =
+        out_kt.context("tape_forward::try_tape_lora_linear_kt: kt-tape forward failed")?;
+    // LoRA-Var grad mapping (kt-keyed) — ESSENTIAL or dA/dB never reach the optimiser.
+    if let (Some(proj), Some(a_kt), Some(b_kt)) = (lora, a_kt.as_ref(), b_kt.as_ref()) {
+        kiln_kt_bridge::tape_bridge::register_input_mapping_kt(a_kt.id(), proj.a.id());
+        kiln_kt_bridge::tape_bridge::register_input_mapping_kt(b_kt.id(), proj.b.id());
+    }
+    Ok(Some(out_kt))
+}
+
 pub fn try_tape_lora_linear_cuda(
     x: &Tensor,
     weight_t: &Tensor,
