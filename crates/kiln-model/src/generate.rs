@@ -3331,6 +3331,17 @@ impl ModelRunner {
 
         let stage_start = profile_stages.then(std::time::Instant::now);
         if has_linear_layers {
+            if self.backend.supports_resident_decode()
+                && self.backend.decode_resident_pool_ready(
+                    self.config.hidden_size,
+                    self.config.intermediate_size,
+                    64,
+                )
+            {
+                for state in linear_states.iter() {
+                    state.ensure_gdn_state_resident_kt(&*self.backend)?;
+                }
+            }
             let any_resident = linear_states
                 .iter()
                 .any(|state| state.has_any_gdn_state_resident_kt(&*self.backend));

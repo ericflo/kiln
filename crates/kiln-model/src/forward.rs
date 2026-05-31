@@ -4862,6 +4862,24 @@ impl LinearAttentionState {
                 .all(|state| backend.has_linear_attn_gdn_state_kt(state.id()))
     }
 
+    pub fn ensure_gdn_state_resident_kt(&self, backend: &dyn BackendRuntime) -> Result<bool> {
+        anyhow::ensure!(
+            self.conv_states.len() == self.recurrent_states.len(),
+            "LinearAttentionState::ensure_gdn_state_resident_kt recurrent/conv layer count mismatch"
+        );
+        if self.has_all_gdn_state_resident_kt(backend) {
+            return Ok(false);
+        }
+        let mut seeded_any = false;
+        for layer_idx in 0..self.recurrent_states.len() {
+            seeded_any |= backend.seed_linear_attn_gdn_state_kt(
+                &self.recurrent_states[layer_idx],
+                &self.conv_states[layer_idx],
+            )?;
+        }
+        Ok(seeded_any)
+    }
+
     /// Capture the current GDN recurrent + conv state into a fresh shadow
     /// `LinearAttentionState`. Used by speculative decoding to preserve the
     /// base model's O(1) GDN state before advancing into a draft: if any

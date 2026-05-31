@@ -1294,7 +1294,7 @@ fn seed_conv_state(vk_device: &VulkanDevice, buf: &VulkanBuffer, state_t: &candl
     .context("seed conv state")
 }
 
-fn seed_recurrent_state_kt(
+pub(crate) fn seed_recurrent_state_kt(
     vk_device: &VulkanDevice,
     buf: &VulkanBuffer,
     state_t: &kiln_tensor::Tensor,
@@ -1317,7 +1317,7 @@ fn seed_recurrent_state_kt(
     .context("seed recurrent kt state")
 }
 
-fn seed_conv_state_kt(
+pub(crate) fn seed_conv_state_kt(
     vk_device: &VulkanDevice,
     buf: &VulkanBuffer,
     state_t: &kiln_tensor::Tensor,

@@ -1092,6 +1092,29 @@ impl VulkanBackend {
         Ok(true)
     }
 
+    pub fn seed_linear_attn_gdn_state_kt(
+        &self,
+        recurrent_t: &kiln_tensor::Tensor,
+        conv_t: &kiln_tensor::Tensor,
+    ) -> Result<bool> {
+        let Some(vk_device) = self.vulkan_device.as_ref() else {
+            return Ok(false);
+        };
+        let key = recurrent_t.id();
+        let recurrent_bytes = (recurrent_t.elem_count() * std::mem::size_of::<f32>()) as u64;
+        let conv_bytes = (conv_t.elem_count() * std::mem::size_of::<f32>()) as u64;
+        let recurrent_buf = self.linear_attn_recurrent_state_buffer_kt(key, recurrent_bytes)?;
+        let conv_buf = self.linear_attn_conv_state_buffer_kt(key, conv_bytes)?;
+        crate::vk_decode_resident::seed_recurrent_state_kt(
+            vk_device,
+            &recurrent_buf,
+            recurrent_t,
+        )?;
+        crate::vk_decode_resident::seed_conv_state_kt(vk_device, &conv_buf, conv_t)?;
+        self.mark_linear_attn_layer_seeded_kt(key);
+        Ok(true)
+    }
+
     pub fn has_linear_attn_gdn_state_kt(&self, key: kiln_tensor::TensorId) -> bool {
         if !self.linear_attn_layer_seeded_kt(key) {
             return false;
@@ -2379,6 +2402,14 @@ impl BackendRuntime for VulkanBackend {
         row_keys: &[kiln_tensor::TensorId],
     ) -> Result<bool> {
         VulkanBackend::scatter_linear_attn_gdn_state_batch_kt(self, batch_key, row_keys)
+    }
+
+    fn seed_linear_attn_gdn_state_kt(
+        &self,
+        recurrent: &kiln_tensor::Tensor,
+        conv: &kiln_tensor::Tensor,
+    ) -> Result<bool> {
+        VulkanBackend::seed_linear_attn_gdn_state_kt(self, recurrent, conv)
     }
 
     fn has_linear_attn_gdn_state_kt(&self, key: kiln_tensor::TensorId) -> bool {

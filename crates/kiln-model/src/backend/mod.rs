@@ -536,6 +536,14 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
         Ok(false)
     }
 
+    fn seed_linear_attn_gdn_state_kt(
+        &self,
+        _recurrent: &kiln_tensor::Tensor,
+        _conv: &kiln_tensor::Tensor,
+    ) -> Result<bool> {
+        Ok(false)
+    }
+
     fn has_linear_attn_gdn_state_kt(&self, _key: kiln_tensor::TensorId) -> bool {
         false
     }
