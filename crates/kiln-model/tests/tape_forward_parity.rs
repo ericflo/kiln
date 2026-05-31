@@ -898,12 +898,14 @@ fn tape_backward_silu_matches_analytic_reference() {
         std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
     }
 
-    // Forward under the tape so a SiluBackward node is recorded.
+    // Forward under the tape so a SiluBackward node is recorded (kt twin — the
+    // production path; #1082).
+    let x_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&x).expect("x kt borrow");
     let (res, tape) = kiln_model::tape_forward::with_thread_local_tape(|| {
-        kiln_model::tape_forward::try_tape_silu_cuda(&x)
+        kiln_model::tape_forward::try_tape_silu_kt(&x_kt)
     });
     let _out = res
-        .expect("tape-forward try_tape_silu_cuda ok")
+        .expect("tape-forward try_tape_silu_kt ok")
         .expect("tape-forward returned Some(out)");
     assert_eq!(tape.len(), 1, "silu must record exactly one node");
     let node = &tape.nodes()[0];
@@ -2136,22 +2138,25 @@ fn tape_bridge_connected_three_op_adapter_chain() {
     .contiguous()
     .expect("c contig");
 
-    let a1 = a.clone();
-    let b1 = b.clone();
-    let c1 = c.clone();
-    let (res, tape) = kiln_model::tape_forward::with_thread_local_tape(|| {
-        kiln_kt_bridge::tape_bridge::with_io_mapping_scope(|| -> anyhow::Result<Tensor> {
-            let mm = kiln_model::tape_forward::try_tape_matmul_cuda(&a1, &b1)?
-                .ok_or_else(|| anyhow::anyhow!("matmul adapter returned None"))?;
+    // #1082: migrate the chain to the kt-native twins (the production path). They
+    // chain via kt tensor ids directly — no candle bridge / io-mapping scope — so
+    // the connectivity asserts below (silu.in == matmul.out, add.in == silu.out)
+    // hold on the same recorded kt nodes.
+    let a1_kt = kt_in(&a);
+    let b1_kt = kt_in(&b);
+    let c1_kt = kt_in(&c);
+    let (res, tape) =
+        kiln_model::tape_forward::with_thread_local_tape(|| -> anyhow::Result<KtTensor> {
+            let mm = kiln_model::tape_forward::try_tape_matmul_kt(&a1_kt, &b1_kt)?
+                .ok_or_else(|| anyhow::anyhow!("matmul kt twin returned None"))?;
             // silu's x reuses the matmul output (Step-1 wiring) -> connected.
-            let sl = kiln_model::tape_forward::try_tape_silu_cuda(&mm)?
-                .ok_or_else(|| anyhow::anyhow!("silu adapter returned None"))?;
+            let sl = kiln_model::tape_forward::try_tape_silu_kt(&mm)?
+                .ok_or_else(|| anyhow::anyhow!("silu kt twin returned None"))?;
             // add's first input reuses the silu output -> connected.
-            let s = kiln_model::tape_forward::try_tape_add_cuda(&sl, &c1)?
-                .ok_or_else(|| anyhow::anyhow!("add adapter returned None"))?;
+            let s = kiln_model::tape_forward::try_tape_add_kt(&sl, &c1_kt)?
+                .ok_or_else(|| anyhow::anyhow!("add kt twin returned None"))?;
             Ok(s)
-        })
-    });
+        });
     let _s = res.expect("connected 3-op forward ok");
 
     assert_eq!(tape.len(), 3, "chain records three nodes (matmul, silu, add)");
