@@ -686,3 +686,94 @@ async fn test_real_model_chat_completion_metal() {
     assert!(resp["choices"][0]["message"]["content"].is_string());
     assert!(resp["usage"]["completion_tokens"].as_u64().unwrap() > 0);
 }
+
+/// BF16 variant of the Metal e2e chat test. The projection weights are BF16,
+/// so the decode path routes through the **fused BF16 Metal kernels** that
+/// the FP32 test (head_dim=4 naive path) never touches: transposed-coop
+/// GEMV (Q/K/V/O proj), fused MLP gate+up, and SiLU*mul. This is the
+/// end-to-end plumbing gate for the candle-free fused-kernel flip (#1082) —
+/// a wrong output shape / buffer wiring would crash or produce non-finite
+/// logits and fail generation. Skipped gracefully without a Metal device.
+#[cfg(feature = "metal")]
+#[tokio::test]
+async fn test_real_model_chat_completion_metal_bf16_fused() {
+    if kiln_model::backend::metal::try_new_metal().is_none() {
+        return;
+    }
+    let device = Device::Metal(0);
+
+    let mut config = tiny_config();
+    config.dtype = kiln_core::config::DType::BF16;
+
+    // Build the standard tiny weights, then cast the projection weights
+    // (and their pre-transposed forms) to BF16 so the decode fused kernels'
+    // `_supports` gates pass. Norms / rotary / embed stay F32 (the forward
+    // casts activations to the BF16 compute dtype).
+    let mut weights = tiny_weights(&config, &device);
+    let bf16 = |t: &Tensor| kiln_tensor::ops::cast(t, DType::BF16).expect("cast bf16");
+    // Cast every weight (embed, norms, projections) to BF16 so the whole
+    // forward flows in BF16 — matching the BF16 fused kernels and avoiding
+    // F32-activation x BF16-weight matmul mismatches. Rotary tables stay F32
+    // (the RoPE op consumes F32 cos/sin tables).
+    weights.embed_tokens = bf16(&weights.embed_tokens);
+    weights.embed_tokens_t = bf16(&weights.embed_tokens_t);
+    weights.final_norm = bf16(&weights.final_norm);
+    weights.layers[0].input_layernorm = bf16(&weights.layers[0].input_layernorm);
+    weights.layers[0].post_attention_layernorm = bf16(&weights.layers[0].post_attention_layernorm);
+    if let GpuAttentionWeights::Full(ref mut attn) = weights.layers[0].attention {
+        attn.q_proj = bf16(&attn.q_proj);
+        attn.k_proj = bf16(&attn.k_proj);
+        attn.v_proj = bf16(&attn.v_proj);
+        attn.o_proj = bf16(&attn.o_proj);
+        attn.q_norm = bf16(&attn.q_norm);
+        attn.k_norm = bf16(&attn.k_norm);
+        attn.q_proj_t = bf16(&attn.q_proj_t);
+        attn.k_proj_t = bf16(&attn.k_proj_t);
+        attn.v_proj_t = bf16(&attn.v_proj_t);
+        attn.o_proj_t = bf16(&attn.o_proj_t);
+    }
+    let mlp = &mut weights.layers[0].mlp;
+    mlp.gate_proj = bf16(&mlp.gate_proj);
+    mlp.up_proj = bf16(&mlp.up_proj);
+    mlp.down_proj = bf16(&mlp.down_proj);
+    mlp.gate_proj_t = bf16(&mlp.gate_proj_t);
+    mlp.up_proj_t = bf16(&mlp.up_proj_t);
+    mlp.down_proj_t = bf16(&mlp.down_proj_t);
+
+    let runner = ModelRunner::new(weights, test_tokenizer(), config.clone());
+    let state = AppState::new_real(
+        config,
+        runner,
+        test_tokenizer(),
+        device,
+        std::path::PathBuf::from("/tmp/kiln-test-adapters-bf16"),
+        &kiln_server::config::MemoryConfig::default(),
+        300,
+        "Qwen3.5-4B".to_string(),
+        &kiln_server::config::PrefixCacheConfig::default(),
+    );
+    let app = api::router(state);
+    let body = json!({
+        "messages": [{"role": "user", "content": "t1 t2 t3"}],
+        "max_tokens": 5,
+        "temperature": 0.0
+    });
+    let request = Request::builder()
+        .method("POST")
+        .uri("/v1/chat/completions")
+        .header("content-type", "application/json")
+        .body(Body::from(serde_json::to_string(&body).unwrap()))
+        .unwrap();
+    let response = app.oneshot(request).await.unwrap();
+    let status = response.status();
+    let body_bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    if status != StatusCode::OK {
+        let body_str = String::from_utf8_lossy(&body_bytes);
+        panic!("Expected 200, got {status}: {body_str}");
+    }
+    let resp: Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert!(resp["choices"][0]["message"]["content"].is_string());
+    assert!(resp["usage"]["completion_tokens"].as_u64().unwrap() > 0);
+}
