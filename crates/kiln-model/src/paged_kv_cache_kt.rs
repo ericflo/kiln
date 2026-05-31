@@ -72,7 +72,8 @@ use anyhow::Context;
 use cudarc::driver::result as cudarc_result;
 
 use kiln_core::block::BlockTable;
-#[cfg(feature = "cuda")]
+// (#1082 DoD-100) device-agnostic slot math — used by the now-ungated
+// `write_native` on CPU as well as the CUDA fast paths.
 use kiln_core::block::contiguous_slot_run_start;
 use kiln_core::block::contiguous_slot_run_starts;
 #[cfg(feature = "cuda")]
