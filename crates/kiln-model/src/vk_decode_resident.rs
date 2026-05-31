@@ -2769,3 +2769,78 @@ pub fn record_transformer_stack_batched_argmax_into(
         batch_size,
     )
 }
+
+/// Submit a full batched resident decode stack and return the greedy
+/// next-token IDs. The caller still owns all per-step uploads and
+/// cache seeding; this helper owns only command-batch construction,
+/// token-id staging, submission, and readback.
+#[allow(clippy::too_many_arguments)]
+pub fn submit_transformer_stack_batched_argmax(
+    backend: &VulkanBackend,
+    vk_device: &VulkanDevice,
+    x_in_buf: &VulkanBuffer,
+    x_scratch_buf: &VulkanBuffer,
+    weights: &crate::forward::GpuWeights,
+    config: &ModelConfig,
+    batch_size: usize,
+    max_blocks_per_seq: usize,
+    block_size: usize,
+    vk_kv_cache: &VkPagedKvCache,
+    rope_cos_buf: &VulkanBuffer,
+    rope_sin_buf: &VulkanBuffer,
+    block_table_buf: &VulkanBuffer,
+    seq_lens_buf: &VulkanBuffer,
+    slots_buf: &VulkanBuffer,
+    recurrent_states: &[kiln_tensor::Tensor],
+    conv_states: &[kiln_tensor::Tensor],
+) -> Result<Option<Vec<u32>>> {
+    anyhow::ensure!(
+        batch_size > 0,
+        "batched transformer submit: batch_size must be > 0"
+    );
+    let out_bytes = (batch_size * 4) as u64;
+    let out_tokens =
+        backend.acquire_resident_scratch("native_b_out_tokens", out_bytes)?;
+    let out_staging = backend
+        .acquire_resident_scratch_host_visible("native_b_out_tokens_staging", out_bytes)?;
+
+    let mut batch = CommandBatch::new(vk_device)?;
+    let ok = record_transformer_stack_batched_argmax_into(
+        backend,
+        &mut batch,
+        x_in_buf,
+        x_scratch_buf,
+        &out_tokens,
+        weights,
+        config,
+        batch_size,
+        max_blocks_per_seq,
+        block_size,
+        vk_kv_cache,
+        rope_cos_buf,
+        rope_sin_buf,
+        block_table_buf,
+        seq_lens_buf,
+        slots_buf,
+        recurrent_states,
+        conv_states,
+    )?;
+    if !ok {
+        return Ok(None);
+    }
+    batch
+        .record_copy_buffer(&out_tokens, &out_staging, out_bytes)
+        .context("batched transformer submit: record token-id copy")?;
+    batch
+        .submit_and_wait("vk-resident native batched decode")
+        .context("batched transformer submit: submit CommandBatch")?;
+
+    let bytes = out_staging
+        .read_mapped(out_bytes as usize)
+        .context("batched transformer submit: read token-id staging")?;
+    let mut tokens = Vec::with_capacity(batch_size);
+    for chunk in bytes.chunks_exact(4).take(batch_size) {
+        tokens.push(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+    }
+    Ok(Some(tokens))
+}
