@@ -30,8 +30,11 @@ const V_DIM: usize = 1024;
 const INTERMEDIATE: usize = 9216;
 
 // Qwen3.5-4B GDN shapes.
-const GDN_QK_DIM: usize = 16 * 128;
-const GDN_V_DIM: usize = 32 * 128;
+const GDN_NUM_KEY_HEADS: usize = 16;
+const GDN_NUM_VALUE_HEADS: usize = 32;
+const GDN_HEAD_DIM: usize = 128;
+const GDN_QK_DIM: usize = GDN_NUM_KEY_HEADS * GDN_HEAD_DIM;
+const GDN_V_DIM: usize = GDN_NUM_VALUE_HEADS * GDN_HEAD_DIM;
 const QKV_DIM: usize = 2 * GDN_QK_DIM + GDN_V_DIM;
 const Z_DIM: usize = GDN_V_DIM;
 const A_DIM: usize = 32;
@@ -79,7 +82,8 @@ fn enabled_unless_disabled(name: &str) -> bool {
 }
 
 fn full_attn_qkv_bf16w_plan(batch: usize, total_out: usize) -> (&'static str, u32) {
-    let rows4 = batch >= 16 && enabled_unless_disabled("KILN_DISABLE_VULKAN_FULL_ATTN_QKV_BF16W_ROWS4");
+    let rows4 =
+        batch >= 16 && enabled_unless_disabled("KILN_DISABLE_VULKAN_FULL_ATTN_QKV_BF16W_ROWS4");
     let row_groups = if rows4 { batch.div_ceil(4) } else { batch };
     let shader = if rows4 {
         shaders::FULL_ATTN_QKV_DECODE_BATCHED_ROWS4_BF16W
@@ -125,9 +129,8 @@ fn mlp_gate_up_bf16w_batched_plan(batch: usize, intermediate: usize) -> (&'stati
 
 fn mlp_down_bf16w_batched_plan(batch: usize, out_dim: usize) -> (&'static str, u32) {
     let rows8 = batch >= 64 && enabled_unless_disabled("KILN_DISABLE_VULKAN_MLP_BF16_ROWS8");
-    let rows4 = batch >= 32
-        && !rows8
-        && enabled_unless_disabled("KILN_DISABLE_VULKAN_MLP_BF16_DOWN_ROWS4");
+    let rows4 =
+        batch >= 32 && !rows8 && enabled_unless_disabled("KILN_DISABLE_VULKAN_MLP_BF16_DOWN_ROWS4");
     if rows8 {
         (
             shaders::LINEAR_DECODE_BATCHED_ROWS8_BF16W,
@@ -144,6 +147,70 @@ fn mlp_down_bf16w_batched_plan(batch: usize, out_dim: usize) -> (&'static str, u
             (batch * out_dim.div_ceil(32)) as u32,
         )
     }
+}
+
+fn mlp_down_add_residual_bf16w_batched_plan(batch: usize, out_dim: usize) -> (&'static str, u32) {
+    let rows8 = batch >= 64 && enabled_unless_disabled("KILN_DISABLE_VULKAN_MLP_BF16_ROWS8");
+    let rows4 =
+        batch >= 32 && !rows8 && enabled_unless_disabled("KILN_DISABLE_VULKAN_MLP_BF16_DOWN_ROWS4");
+    if rows8 {
+        (
+            shaders::LINEAR_DECODE_BATCHED_BF16W_ADD_RESIDUAL_ROWS8,
+            (batch.div_ceil(8) * out_dim.div_ceil(32)) as u32,
+        )
+    } else if rows4 {
+        (
+            shaders::LINEAR_DECODE_BATCHED_BF16W_ADD_RESIDUAL_ROWS4,
+            (batch.div_ceil(4) * out_dim.div_ceil(32)) as u32,
+        )
+    } else {
+        (
+            shaders::LINEAR_DECODE_BATCHED_BF16W_ADD_RESIDUAL,
+            (batch * out_dim.div_ceil(32)) as u32,
+        )
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn gdn_in_proj_bf16w_batched_plan(
+    batch: usize,
+    qkv_dim: usize,
+    z_dim: usize,
+    a_dim: usize,
+    b_dim: usize,
+    total_out: usize,
+) -> (&'static str, u32) {
+    let pair_qkv_z =
+        batch > 1 && enabled_unless_disabled("KILN_DISABLE_VULKAN_GDN_IN_PROJ_BATCH_PAIR_QKV_Z");
+    let row_grouping = pair_qkv_z
+        && batch >= 3
+        && enabled_unless_disabled("KILN_DISABLE_VULKAN_GDN_IN_PROJ_BATCH_ROW_PAIR");
+    let row_group_size = if row_grouping
+        && batch >= 8
+        && enabled_unless_disabled("KILN_DISABLE_VULKAN_GDN_IN_PROJ_BATCH_ROW_QUAD")
+    {
+        4usize
+    } else if row_grouping {
+        2usize
+    } else {
+        1usize
+    };
+    let dispatch_cols = if pair_qkv_z {
+        qkv_dim.div_ceil(2) + z_dim.div_ceil(2) + a_dim + b_dim
+    } else {
+        total_out
+    };
+    let shader = if row_group_size == 4 {
+        shaders::GDN_IN_PROJ_DECODE_BATCHED_PAIR_QKV_Z_ROWS4_BF16W
+    } else if row_group_size == 2 {
+        shaders::GDN_IN_PROJ_DECODE_BATCHED_PAIR_QKV_Z_ROWS2_BF16W
+    } else if pair_qkv_z {
+        shaders::GDN_IN_PROJ_DECODE_BATCHED_PAIR_QKV_Z_BF16W
+    } else {
+        shaders::GDN_IN_PROJ_DECODE_BATCHED_BF16W
+    };
+    let row_groups = batch.div_ceil(row_group_size);
+    (shader, (row_groups * dispatch_cols.div_ceil(80)) as u32)
 }
 
 fn time<F: FnMut() -> Result<()>>(label: &str, batch: usize, mut f: F) -> Result<()> {
@@ -415,6 +482,11 @@ fn run() -> Result<()> {
         println!();
     }
 
+    if want("gdn_block_resident_batched") {
+        run_gdn_block_resident_batched(
+            &device, &qkv_buf, &z_buf, &a_buf, &b_buf, &gate_buf, &up_buf, &down_buf, &batches,
+        )?;
+    }
     if want("full_step_resident") {
         run_full_step_resident(
             &device, &q_buf, &k_buf, &v_buf, &gate_buf, &up_buf, &down_buf, &batches,
@@ -436,6 +508,269 @@ fn run() -> Result<()> {
         )?;
     }
 
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_gdn_block_resident_batched(
+    device: &VulkanDevice,
+    qkv_w: &VulkanBuffer,
+    z_w: &VulkanBuffer,
+    a_w: &VulkanBuffer,
+    b_w: &VulkanBuffer,
+    gate_w: &VulkanBuffer,
+    up_w: &VulkanBuffer,
+    down_w: &VulkanBuffer,
+    batches: &[usize],
+) -> Result<()> {
+    use kiln_vulkan_kernel::CommandBatch;
+    use kiln_vulkan_kernel::Workgroups;
+
+    println!(
+        "== gdn_block_resident_batched (GDN block + MLP, 14 kernels recorded into 1 cmd-buffer + 1 submit) =="
+    );
+
+    let conv_kernel = 4usize;
+    let in_proj_total = QKV_DIM + Z_DIM + A_DIM + B_DIM;
+    let eps = 1e-6f32;
+    let gqa_ratio = GDN_NUM_VALUE_HEADS / GDN_NUM_KEY_HEADS;
+    debug_assert_eq!(GDN_NUM_KEY_HEADS * gqa_ratio, GDN_NUM_VALUE_HEADS);
+
+    let norm_w = upload_f32_buffer_from_slice(device, &vec![1.0f32; HIDDEN])?;
+    let recurrent_norm_w = upload_f32_buffer_from_slice(device, &vec![1.0f32; GDN_HEAD_DIM])?;
+    let conv_w = upload_f32_buffer_from_slice(device, &vec![0.0f32; QKV_DIM * conv_kernel])?;
+    let a_log = upload_f32_buffer_from_slice(device, &vec![-1.0f32; GDN_NUM_VALUE_HEADS])?;
+    let dt_bias = upload_f32_buffer_from_slice(device, &vec![0.0f32; GDN_NUM_VALUE_HEADS])?;
+    let out_w =
+        upload_bf16_packed_buffer_from_slice(device, &make_bf16_weight_slice(GDN_V_DIM, HIDDEN))?;
+
+    for &batch in batches {
+        let mk = |bytes: u64| {
+            VulkanBuffer::create_device_local(
+                device.device(),
+                device.device_local_mem_type(),
+                bytes,
+            )
+        };
+        let mk_zero = |bytes: u64| -> Result<VulkanBuffer> {
+            let buf = mk(bytes)?;
+            let zeros = vec![0u8; bytes as usize];
+            VulkanBuffer::upload_data(
+                device.device(),
+                device.host_visible_mem_type(),
+                device.queue(),
+                device.queue_family_index(),
+                &buf,
+                &zeros,
+            )?;
+            Ok(buf)
+        };
+
+        let hidden_bytes = (batch * HIDDEN * 4) as u64;
+        let x_buf = mk_zero(hidden_bytes)?;
+        let normed_pre = mk(hidden_bytes)?;
+        let in_proj_out = mk((batch * in_proj_total * 4) as u64)?;
+        let mixed_qkv = mk((batch * QKV_DIM * 4) as u64)?;
+        let conv_qkv = mk((batch * QKV_DIM * 4) as u64)?;
+        let z_buf = mk((batch * Z_DIM * 4) as u64)?;
+        let a_buf = mk((batch * A_DIM * 4) as u64)?;
+        let b_buf = mk((batch * B_DIM * 4) as u64)?;
+        let q_buf = mk((batch * GDN_QK_DIM * 4) as u64)?;
+        let k_buf = mk((batch * GDN_QK_DIM * 4) as u64)?;
+        let q_expanded = mk((batch * GDN_V_DIM * 4) as u64)?;
+        let k_expanded = mk((batch * GDN_V_DIM * 4) as u64)?;
+        let v_buf = mk((batch * GDN_V_DIM * 4) as u64)?;
+        let recurrent_state =
+            mk_zero((batch * GDN_NUM_VALUE_HEADS * GDN_HEAD_DIM * GDN_HEAD_DIM * 4) as u64)?;
+        let conv_state = mk_zero((batch * QKV_DIM * (conv_kernel - 1) * 4) as u64)?;
+        let gated_norm = mk((batch * GDN_V_DIM * 4) as u64)?;
+        let gdn_out = mk(hidden_bytes)?;
+        let attn_residual = mk(hidden_bytes)?;
+        let normed_post = mk(hidden_bytes)?;
+        let mlp_scratch = mk((batch * INTERMEDIATE * 4) as u64)?;
+
+        time("gdn_block_resident_batched", batch, || {
+            let mut b = CommandBatch::new(device)?;
+            b.record_shader(
+                shaders::QWEN_RMSNORM_FORWARD,
+                &[x_buf.handle(), norm_w.handle(), normed_pre.handle()],
+                &[batch as u32, HIDDEN as u32, eps.to_bits()],
+                Workgroups::OneD(batch as u32),
+            )?;
+            let (in_proj_shader, in_proj_workgroups) =
+                gdn_in_proj_bf16w_batched_plan(batch, QKV_DIM, Z_DIM, A_DIM, B_DIM, in_proj_total);
+            b.record_shader(
+                in_proj_shader,
+                &[
+                    normed_pre.handle(),
+                    qkv_w.handle(),
+                    z_w.handle(),
+                    a_w.handle(),
+                    b_w.handle(),
+                    in_proj_out.handle(),
+                ],
+                &[
+                    HIDDEN as u32,
+                    QKV_DIM as u32,
+                    Z_DIM as u32,
+                    A_DIM as u32,
+                    B_DIM as u32,
+                    in_proj_total as u32,
+                    batch as u32,
+                ],
+                Workgroups::OneD(in_proj_workgroups),
+            )?;
+            b.record_shader(
+                shaders::GDN_IN_PROJ_SPLIT_BATCHED,
+                &[
+                    in_proj_out.handle(),
+                    mixed_qkv.handle(),
+                    z_buf.handle(),
+                    a_buf.handle(),
+                    b_buf.handle(),
+                ],
+                &[
+                    batch as u32,
+                    QKV_DIM as u32,
+                    Z_DIM as u32,
+                    A_DIM as u32,
+                    B_DIM as u32,
+                ],
+                Workgroups::OneD((batch * in_proj_total).div_ceil(256) as u32),
+            )?;
+            let conv_total = batch * QKV_DIM;
+            b.record_shader(
+                shaders::CAUSAL_CONV1D,
+                &[
+                    mixed_qkv.handle(),
+                    conv_w.handle(),
+                    conv_state.handle(),
+                    conv_qkv.handle(),
+                ],
+                &[batch as u32, QKV_DIM as u32, 1u32, conv_kernel as u32],
+                Workgroups::OneD(conv_total.div_ceil(256) as u32),
+            )?;
+            b.record_shader(
+                shaders::CAUSAL_CONV1D_STATE_ADVANCE,
+                &[mixed_qkv.handle(), conv_state.handle()],
+                &[batch as u32, QKV_DIM as u32, 1u32, conv_kernel as u32],
+                Workgroups::OneD(conv_total as u32),
+            )?;
+            b.record_shader(
+                shaders::GDN_QKV_SPLIT_BATCHED,
+                &[
+                    conv_qkv.handle(),
+                    q_buf.handle(),
+                    k_buf.handle(),
+                    v_buf.handle(),
+                ],
+                &[batch as u32, GDN_QK_DIM as u32, GDN_V_DIM as u32],
+                Workgroups::OneD((batch * QKV_DIM).div_ceil(256) as u32),
+            )?;
+            let l2_eps = 1e-6f32;
+            let q_scale = 1.0f32 / (GDN_HEAD_DIM as f32).sqrt();
+            b.record_shader(
+                shaders::L2_NORM_PER_ROW,
+                &[q_buf.handle(), q_expanded.handle()],
+                &[
+                    (batch * GDN_NUM_KEY_HEADS) as u32,
+                    GDN_HEAD_DIM as u32,
+                    l2_eps.to_bits(),
+                    q_scale.to_bits(),
+                    gqa_ratio as u32,
+                ],
+                Workgroups::OneD((batch * GDN_NUM_VALUE_HEADS) as u32),
+            )?;
+            b.record_shader(
+                shaders::L2_NORM_PER_ROW,
+                &[k_buf.handle(), k_expanded.handle()],
+                &[
+                    (batch * GDN_NUM_KEY_HEADS) as u32,
+                    GDN_HEAD_DIM as u32,
+                    l2_eps.to_bits(),
+                    1.0f32.to_bits(),
+                    gqa_ratio as u32,
+                ],
+                Workgroups::OneD((batch * GDN_NUM_VALUE_HEADS) as u32),
+            )?;
+            b.record_shader(
+                shaders::GDN_DECODE_GATES_RECURRENT_RMSNORM,
+                &[
+                    q_expanded.handle(),
+                    k_expanded.handle(),
+                    v_buf.handle(),
+                    a_buf.handle(),
+                    b_buf.handle(),
+                    a_log.handle(),
+                    dt_bias.handle(),
+                    recurrent_state.handle(),
+                    z_buf.handle(),
+                    recurrent_norm_w.handle(),
+                    gated_norm.handle(),
+                ],
+                &[
+                    GDN_NUM_VALUE_HEADS as u32,
+                    GDN_HEAD_DIM as u32,
+                    GDN_HEAD_DIM as u32,
+                    eps.to_bits(),
+                    batch as u32,
+                ],
+                Workgroups::OneD((batch * GDN_NUM_VALUE_HEADS) as u32),
+            )?;
+            let (gdn_out_shader, gdn_out_workgroups) = linear_bf16w_batched_plan(batch, HIDDEN);
+            b.record_shader(
+                gdn_out_shader,
+                &[gated_norm.handle(), out_w.handle(), gdn_out.handle()],
+                &[GDN_V_DIM as u32, HIDDEN as u32, batch as u32],
+                Workgroups::OneD(gdn_out_workgroups),
+            )?;
+            b.record_shader(
+                shaders::ADD,
+                &[x_buf.handle(), gdn_out.handle(), attn_residual.handle()],
+                &[(batch * HIDDEN) as u32],
+                Workgroups::OneD((batch * HIDDEN).div_ceil(256) as u32),
+            )?;
+            b.record_shader(
+                shaders::QWEN_RMSNORM_FORWARD,
+                &[
+                    attn_residual.handle(),
+                    norm_w.handle(),
+                    normed_post.handle(),
+                ],
+                &[batch as u32, HIDDEN as u32, eps.to_bits()],
+                Workgroups::OneD(batch as u32),
+            )?;
+            let (mlp_gate_up_shader, mlp_gate_up_workgroups) =
+                mlp_gate_up_bf16w_batched_plan(batch, INTERMEDIATE);
+            b.record_shader(
+                mlp_gate_up_shader,
+                &[
+                    normed_post.handle(),
+                    gate_w.handle(),
+                    up_w.handle(),
+                    mlp_scratch.handle(),
+                ],
+                &[HIDDEN as u32, INTERMEDIATE as u32, batch as u32],
+                Workgroups::OneD(mlp_gate_up_workgroups),
+            )?;
+            let (mlp_down_shader, mlp_down_workgroups) =
+                mlp_down_add_residual_bf16w_batched_plan(batch, HIDDEN);
+            b.record_shader(
+                mlp_down_shader,
+                &[
+                    mlp_scratch.handle(),
+                    down_w.handle(),
+                    attn_residual.handle(),
+                    x_buf.handle(),
+                ],
+                &[INTERMEDIATE as u32, HIDDEN as u32, batch as u32],
+                Workgroups::OneD(mlp_down_workgroups),
+            )?;
+            b.submit_and_wait("gdn_block_resident_batched")?;
+            Ok(())
+        })?;
+    }
+    println!();
     Ok(())
 }
 

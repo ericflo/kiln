@@ -195,6 +195,26 @@ every config"):
   That removes the remaining basic in-proj shader choice from the GDN
   resident batch recorder, which matters because GDN layers are the majority of
   the Qwen3.5-4B stack.
+  **Update — whole GDN resident block microbench:** added
+  `vulkan_decode_microbench gdn_block_resident_batched`, a Vulkan-only
+  one-submit benchmark for a full Qwen3.5-4B GDN block plus MLP. It records 14
+  shaders into one `CommandBatch`: RMSNorm, row-reuse GDN in-proj, split,
+  conv/state advance, QKV split, Q/K L2 expansion, recurrent gate/RMSNorm, GDN
+  out-proj, residual, post norm, MLP gate/up, and fused down+residual. On RADV
+  STRIX_HALO with `KILN_VK_MICROBENCH_BATCHES=1,4,8,32,64`, warmup=2, timed=5,
+  repeats=2:
+
+  | batch | per block | rows/s |
+  |---:|---:|---:|
+  | 1 | 1.90 ms | 527 |
+  | 4 | 2.28 ms | 1,757 |
+  | 8 | 3.39 ms | 2,358 |
+  | 32 | 7.16 ms | 4,467 |
+  | 64 | 16.80 ms | 3,809 |
+
+  This gives a realistic GDN-side decode saturation baseline. Throughput peaks
+  at batch 32 and drops at batch 64, which points to large-projection and MLP
+  tiling/memory pressure as the next useful tuning target.
 - **Vulkan paged-attention decode kernel**: the kernel crate already had
   `paged_attn_decode_batch_paged.comp`; Vulkan now advertises
   `supports_flash_attn_paged_decode` and wires the single-query paged-decode
