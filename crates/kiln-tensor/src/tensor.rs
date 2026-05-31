@@ -215,7 +215,26 @@ impl Tensor {
                 "Tensor::zeros_on: CUDA device requested but `cuda` feature is not enabled"
                     .to_string(),
             )),
-            other @ (Device::Metal(_) | Device::Vulkan(_)) => Err(Error::Msg(format!(
+            #[cfg(feature = "metal")]
+            Device::Metal(i) => {
+                let n: usize = shape.iter().product();
+                let storage = crate::MetalStorage::zeros_kt(
+                    crate::primary_metal_companion(i)?.device(),
+                    i,
+                    dtype,
+                    n,
+                )?;
+                Self::from_parts(
+                    std::sync::Arc::new(storage),
+                    Layout::contiguous(shape),
+                    TensorId::next(),
+                )
+            }
+            #[cfg(not(feature = "metal"))]
+            other @ Device::Metal(_) => Err(Error::Msg(format!(
+                "Tensor::zeros_on: device {other} requested but `metal` feature is not enabled"
+            ))),
+            other @ Device::Vulkan(_) => Err(Error::Msg(format!(
                 "Tensor::zeros_on: device {other} is not yet implemented (issue #1082)"
             ))),
         }
@@ -256,7 +275,16 @@ impl Tensor {
                 "Tensor::from_vec_on: CUDA device requested but `cuda` feature is not enabled"
                     .to_string(),
             )),
-            other @ (Device::Metal(_) | Device::Vulkan(_)) => Err(Error::Msg(format!(
+            #[cfg(feature = "metal")]
+            Device::Metal(i) => {
+                let cpu = Self::from_vec(values, shape)?;
+                crate::host_to_metal_copy(&cpu, i)
+            }
+            #[cfg(not(feature = "metal"))]
+            other @ Device::Metal(_) => Err(Error::Msg(format!(
+                "Tensor::from_vec_on: device {other} requested but `metal` feature is not enabled"
+            ))),
+            other @ Device::Vulkan(_) => Err(Error::Msg(format!(
                 "Tensor::from_vec_on: device {other} is not yet implemented (issue #1082)"
             ))),
         }
@@ -313,7 +341,13 @@ impl Tensor {
                 "Tensor::from_raw_bytes_on: CUDA device requested but `cuda` feature is not enabled"
                     .to_string(),
             )),
-            other @ (Device::Metal(_) | Device::Vulkan(_)) => Err(Error::Msg(format!(
+            #[cfg(feature = "metal")]
+            Device::Metal(i) => crate::host_to_metal_copy(&cpu_tensor, i),
+            #[cfg(not(feature = "metal"))]
+            other @ Device::Metal(_) => Err(Error::Msg(format!(
+                "Tensor::from_raw_bytes_on: device {other} requested but `metal` feature is not enabled"
+            ))),
+            other @ Device::Vulkan(_) => Err(Error::Msg(format!(
                 "Tensor::from_raw_bytes_on: device {other} is not yet implemented (issue #1082)"
             ))),
         }
@@ -847,6 +881,10 @@ impl Tensor {
             (Device::Cuda(i), Device::Cuda(j)) => Err(Error::Msg(format!(
                 "Tensor::to_device: cross-GPU transfer Cuda({i})→Cuda({j}) is not yet implemented (issue #1082)"
             ))),
+            #[cfg(feature = "metal")]
+            (Device::Cpu, Device::Metal(i)) => crate::host_to_metal_copy(self, i),
+            #[cfg(feature = "metal")]
+            (Device::Metal(_), Device::Cpu) => crate::metal_to_host_copy(self),
             _ => Err(Error::Msg(format!(
                 "Tensor::to_device: transition {src}→{target} is not yet implemented                  (issue #1082)"
             ))),
@@ -861,6 +899,12 @@ impl Tensor {
         let src = self.device();
         if src == target {
             return Ok(self.clone());
+        }
+        #[cfg(feature = "metal")]
+        match (src, target) {
+            (Device::Cpu, Device::Metal(i)) => return crate::host_to_metal_copy(self, i),
+            (Device::Metal(_), Device::Cpu) => return crate::metal_to_host_copy(self),
+            _ => {}
         }
         Err(Error::Msg(format!(
             "Tensor::to_device: transition {src}→{target} requires a GPU feature (cuda/metal/vulkan); none is enabled in this build"

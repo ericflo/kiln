@@ -69,7 +69,7 @@ use std::sync::Arc;
 use candle_metal_kernels::metal::Buffer as MetalBuffer;
 use candle_metal_kernels::metal::Device as MetalRawDevice;
 
-use crate::{DType, Device, Error, Result, StorageBackend};
+use crate::{CpuStorage, DType, Device, Error, Result, StorageBackend};
 
 /// Metal-backed storage. Byte-typed; dtype carried alongside for dispatch.
 ///
@@ -448,6 +448,198 @@ pub fn primary_metal_companion(
     let companion = Arc::new(crate::metal_types::MetalCompanion::from_raw(device)?);
     map.insert(device_index, companion.clone());
     Ok(companion)
+}
+
+
+// ----------------------------------------------------------------------
+// Host ↔ Metal I/O — candle-core-free UMA staging (#1082 Phase 1)
+// ----------------------------------------------------------------------
+//
+// These two helpers are the Metal arms of `Tensor::{from_vec_on,
+// from_raw_bytes_on, zeros_on}` (host→Metal) and `Tensor::to_device(Cpu)`
+// / `Tensor::to_vec` (Metal→host). They are the substrate prerequisite
+// for *every* Metal parity test (you cannot A/B a Metal op against the
+// CPU reference without constructing a Metal input from host data and
+// reading the Metal output back) and for the eventual candle-free
+// safetensors→Metal loader.
+//
+// Apple Silicon is UMA: a `StorageModeShared` buffer's `contents()`
+// pointer is addressable from both CPU and GPU, so the "copy" is a plain
+// `memcpy` with no PCIe/blit hop. The only subtlety is *ordering* — see
+// `metal_to_host_copy`'s `wait_until_completed()` call.
+
+/// Upload a host (CPU-resident) tensor to a fresh Metal `StorageModeShared`
+/// buffer on `device_index`. **Candle-core-free.**
+///
+/// The result is a contiguous, `start_offset == 0` Metal tensor in logical
+/// row-major order. The source is materialized contiguous on the host
+/// first (cheap when already contiguous), so any input layout is accepted.
+///
+/// # Errors
+///
+/// Returns [`Error::Msg`] if `cpu` is not [`CpuStorage`]-backed, no Metal
+/// device exists at `device_index`, or buffer allocation fails.
+pub fn host_to_metal_copy(cpu: &crate::Tensor, device_index: usize) -> Result<crate::Tensor> {
+    use candle_metal_kernels::metal::MTLResourceOptions;
+
+    // Materialize a packed, logical-row-major byte image on the host.
+    let contig = cpu.contiguous()?;
+    let dtype = contig.dtype();
+    let cpu_storage = contig
+        .storage()
+        .as_any()
+        .downcast_ref::<CpuStorage>()
+        .ok_or_else(|| {
+            Error::Msg("host_to_metal_copy: source tensor must be CPU-backed".to_string())
+        })?;
+    let all_bytes = cpu_storage.as_bytes();
+    // A contiguous tensor may still carry a non-zero start_offset (a
+    // narrowed-but-contiguous view shares the parent buffer); slice to the
+    // logical element range so the Metal buffer holds exactly this tensor.
+    let n_elems = contig.element_count();
+    let per = dtype.size_in_bytes();
+    let byte_len = if dtype.is_packed() {
+        all_bytes.len()
+    } else {
+        n_elems * per
+    };
+    let start_bytes = contig.layout().start_offset() * per;
+    let end_bytes = start_bytes + byte_len;
+    if end_bytes > all_bytes.len() {
+        return Err(Error::Msg(format!(
+            "host_to_metal_copy: byte range {start_bytes}..{end_bytes} exceeds CPU storage \
+             length {}",
+            all_bytes.len()
+        )));
+    }
+    let src = &all_bytes[start_bytes..end_bytes];
+
+    let companion = primary_metal_companion(device_index)?;
+    let raw_device = companion.device();
+    let alloc_len = byte_len.max(1);
+    let buffer = raw_device
+        .new_buffer(alloc_len, MTLResourceOptions::StorageModeShared)
+        .map_err(|e| {
+            Error::Msg(format!(
+                "host_to_metal_copy: new_buffer({alloc_len}, Shared) failed: {e:?}"
+            ))
+        })?;
+    // SAFETY: `buffer.contents()` is a non-null CPU-addressable pointer for
+    // Shared-mode buffers on Apple Silicon UMA; `alloc_len >= src.len()` so
+    // the copy stays within the allocation. The buffer was just allocated
+    // (single owner, no aliasing).
+    unsafe {
+        core::ptr::copy_nonoverlapping(src.as_ptr(), buffer.contents(), src.len());
+    }
+
+    let storage = MetalStorage::from_buffer_kt(raw_device, device_index, dtype, Arc::new(buffer))?;
+    crate::Tensor::from_parts(
+        Arc::new(storage),
+        crate::Layout::contiguous(contig.shape().to_vec()),
+        crate::TensorId::next(),
+    )
+}
+
+/// Read a Metal tensor back to a fresh CPU tensor, packed contiguous in
+/// logical row-major order. **Candle-core-free.**
+///
+/// Commits and waits on the companion's command queue first so the GPU
+/// writes that produced this tensor are visible through the UMA
+/// `contents()` pointer, then gathers the logical elements (handling any
+/// strided / offset view via a host-side gather).
+///
+/// # Errors
+///
+/// Returns [`Error::Msg`] if the tensor is not [`MetalStorage`]-backed or
+/// the queue sync fails.
+pub fn metal_to_host_copy(t: &crate::Tensor) -> Result<crate::Tensor> {
+    let metal = t
+        .storage()
+        .as_any()
+        .downcast_ref::<MetalStorage>()
+        .ok_or_else(|| {
+            Error::Msg("metal_to_host_copy: tensor must be Metal-backed".to_string())
+        })?;
+    // Host-read synchronization point: make GPU writes visible.
+    metal.companion()?.wait_until_completed()?;
+
+    let dtype = t.dtype();
+    let per = dtype.size_in_bytes();
+    let buffer = metal.buffer();
+    let buf_len = buffer.length() as usize;
+    // SAFETY: Shared-mode buffer `contents()` is CPU-addressable and valid
+    // for `buf_len` bytes; we only read within `[0, buf_len)`.
+    let backing: &[u8] = unsafe {
+        core::slice::from_raw_parts(buffer.contents() as *const u8, buf_len)
+    };
+
+    let layout = t.layout();
+    let n_elems = t.element_count();
+
+    if dtype.is_packed() {
+        // Packed dtypes have no per-element stride math; copy the addressed
+        // byte image directly. (Metal packed-dtype tensors are always whole
+        // contiguous buffers in the current code paths.)
+        let bytes = backing.to_vec();
+        let storage = CpuStorage::from_bytes(dtype, bytes)?;
+        return crate::Tensor::from_parts(
+            Arc::new(storage),
+            crate::Layout::contiguous(t.shape().to_vec()),
+            crate::TensorId::next(),
+        );
+    }
+
+    let start = layout.start_offset();
+    let mut out = vec![0u8; n_elems * per];
+    if layout.is_contiguous() {
+        let s = start * per;
+        let e = s + n_elems * per;
+        if e > buf_len {
+            return Err(Error::Msg(format!(
+                "metal_to_host_copy: contiguous range {s}..{e} exceeds buffer length {buf_len}"
+            )));
+        }
+        out.copy_from_slice(&backing[s..e]);
+    } else {
+        // Strided / permuted view: gather each logical element by walking
+        // the multi-dimensional index against the layout strides. Not a hot
+        // path (host readback is rare), so a per-element gather is fine.
+        let dims = layout.shape();
+        let strides = layout.strides();
+        let rank = dims.len();
+        let mut idx = vec![0usize; rank];
+        for logical in 0..n_elems {
+            // physical element offset = start + Σ idx[d] * strides[d]
+            let mut phys = start;
+            for d in 0..rank {
+                phys += idx[d] * strides[d];
+            }
+            let src = phys * per;
+            let dst = logical * per;
+            if src + per > buf_len {
+                return Err(Error::Msg(format!(
+                    "metal_to_host_copy: element offset {src}..{} exceeds buffer length {buf_len}",
+                    src + per
+                )));
+            }
+            out[dst..dst + per].copy_from_slice(&backing[src..src + per]);
+            // increment the mixed-radix logical index (row-major: last dim fastest)
+            for d in (0..rank).rev() {
+                idx[d] += 1;
+                if idx[d] < dims[d] {
+                    break;
+                }
+                idx[d] = 0;
+            }
+        }
+    }
+
+    let storage = CpuStorage::from_bytes(dtype, out)?;
+    crate::Tensor::from_parts(
+        Arc::new(storage),
+        crate::Layout::contiguous(t.shape().to_vec()),
+        crate::TensorId::next(),
+    )
 }
 
 

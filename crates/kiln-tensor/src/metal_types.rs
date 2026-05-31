@@ -465,4 +465,39 @@ impl MetalCompanion {
         // encoder return value.)
         Ok(encoder)
     }
+
+    /// Commit any pending command buffer and block until the GPU has
+    /// finished every encoded op on this companion's queue.
+    ///
+    /// This is the **host-read synchronization point** (#1082): the
+    /// `command_encoder()` path defers commit to the
+    /// `candle_metal_kernels::Commands` pool, so a freshly-written
+    /// `StorageModeShared` buffer's `contents()` pointer is not
+    /// guaranteed to reflect the GPU write until the encoding command
+    /// buffer has been committed and completed. Every Metal→host
+    /// readback (`metal_to_host_copy`, `Tensor::to_vec` on a Metal
+    /// tensor) calls this first.
+    ///
+    /// Mirror of candle's `MetalDevice::wait_until_completed()` — same
+    /// `Commands::wait_until_completed` underneath, reached through the
+    /// kt-native companion. Idempotent and cheap when nothing is
+    /// pending.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::Error::Msg`] if the `Commands` lock is poisoned
+    /// or the underlying commit/wait fails.
+    pub fn wait_until_completed(&self) -> crate::Result<()> {
+        let commands = self.commands.write().map_err(|e| {
+            crate::Error::Msg(format!(
+                "MetalCompanion::wait_until_completed: commands.write() poisoned: {e}"
+            ))
+        })?;
+        commands.wait_until_completed().map_err(|e| {
+            crate::Error::Msg(format!(
+                "MetalCompanion::wait_until_completed: Commands::wait_until_completed failed: {e:?}"
+            ))
+        })?;
+        Ok(())
+    }
 }
