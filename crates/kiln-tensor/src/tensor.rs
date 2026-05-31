@@ -262,6 +262,63 @@ impl Tensor {
         }
     }
 
+    /// Build a tensor from raw little-endian bytes + an explicit `dtype`
+    /// + `shape` on `device` — the **candle-free twin** of candle's
+    /// `Tensor::from_raw_buffer` (#1082). The bytes are the dtype's native
+    /// little-endian representation (bf16/f16 = 2 bytes/elem, f32 = 4), i.e.
+    /// the on-disk / safetensors weight layout. Unlike [`Self::from_vec_on`]
+    /// this takes no `Element` type parameter, so the loader can stay generic
+    /// over the on-disk dtype without a per-dtype match + per-element
+    /// reinterpretation pass.
+    ///
+    /// CPU: wraps the byte buffer directly (zero per-element work). CUDA:
+    /// wraps on the host then H2D-uploads via the candle-free
+    /// [`crate::host_to_cuda_copy_ctx`]. Metal/Vulkan: not yet implemented
+    /// (#1082) — those loaders still build via candle.
+    pub fn from_raw_bytes_on(
+        device: Device,
+        dtype: DType,
+        bytes: Vec<u8>,
+        shape: Vec<usize>,
+    ) -> Result<Self> {
+        // Shape/byte-length agreement (CpuStorage::from_bytes also checks the
+        // multiple-of-elem-size invariant; this catches a wrong element count).
+        if !dtype.is_packed() {
+            let want: usize = shape.iter().product();
+            let per = dtype.size_in_bytes();
+            if per > 0 && bytes.len() != want * per {
+                return Err(Error::Msg(format!(
+                    "Tensor::from_raw_bytes_on: shape {shape:?} ({want} elems × {per}B) \
+                     needs {} bytes but got {}",
+                    want * per,
+                    bytes.len()
+                )));
+            }
+        }
+        let cpu = CpuStorage::from_bytes(dtype, bytes)?;
+        let storage: Storage = Arc::new(cpu);
+        let layout = Layout::contiguous(shape);
+        let cpu_tensor = Tensor {
+            storage,
+            layout,
+            id: TensorId::next(),
+            version: Arc::new(AtomicU64::new(0)),
+        };
+        match device {
+            Device::Cpu => Ok(cpu_tensor),
+            #[cfg(feature = "cuda")]
+            Device::Cuda(i) => crate::host_to_cuda_copy_ctx(&cpu_tensor, i),
+            #[cfg(not(feature = "cuda"))]
+            Device::Cuda(_) => Err(Error::Msg(
+                "Tensor::from_raw_bytes_on: CUDA device requested but `cuda` feature is not enabled"
+                    .to_string(),
+            )),
+            other @ (Device::Metal(_) | Device::Vulkan(_)) => Err(Error::Msg(format!(
+                "Tensor::from_raw_bytes_on: device {other} is not yet implemented (issue #1082)"
+            ))),
+        }
+    }
+
     /// Construct a [`Tensor`] from raw parts. Used by per-backend
     /// storage impls (Phase 1.6+ CUDA, 1.7 Metal, 1.8 Vulkan) and by
     /// view ops in this module.

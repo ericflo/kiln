@@ -4992,8 +4992,26 @@ fn loader_candle_device(device: &Device) -> Result<candle_core::Device> {
 }
 
 /// Convert a `WeightTensor` (raw bytes + shape + dtype) to a kt `Tensor` on `device`.
-/// Builds a candle tensor leaf then copy-bridges to kt (#1082 forward-flip).
+///
+/// CUDA (#1082): kt-native — raw weight bytes upload straight into a kt CUDA
+/// tensor via `Tensor::from_raw_bytes_on`, dropping the candle `from_raw_buffer`
+/// leaf AND the subsequent device→device bridge copy the old path paid per
+/// weight (`candle_weight_to_kt`). One host→device H2D, no candle, no extra
+/// copy — a load-time win on the dominant loader entry.
+///
+/// Non-CUDA (Metal / CPU): unchanged candle leaf + copy-bridge. The pure-kt
+/// Metal loader is a follow-up (`Tensor::from_raw_bytes_on` errors on a Metal
+/// device today), so this path is byte-identical to the prior behavior.
+#[cfg(feature = "cuda")]
+fn weight_to_tensor(w: &WeightTensor, device: &Device) -> Result<Tensor> {
+    Tensor::from_raw_bytes_on(*device, weight_dtype(w), w.as_bytes().to_vec(), w.shape.clone())
+        .map_err(|e| anyhow::anyhow!("weight_to_tensor (kt-native CUDA load): {e}"))
+}
+
+/// Non-CUDA sibling of [`weight_to_tensor`]: builds a candle leaf then
+/// copy-bridges to kt (#1082 forward-flip). Kept for the Metal loader path.
 // #1082: un-stubbed for no-CUDA (see `candle_weight_to_kt`).
+#[cfg(not(feature = "cuda"))]
 fn weight_to_tensor(w: &WeightTensor, device: &Device) -> Result<Tensor> {
     let dtype = weight_dtype_candle(w);
     let cdev = loader_candle_device(device)?;
@@ -29181,6 +29199,40 @@ mod tests {
         let vals = t.to_vec2::<f32>()?;
         assert!((vals[0][0] - 1.0).abs() < 1e-6);
         assert!((vals[1][2] - 6.0).abs() < 1e-6);
+
+        Ok(())
+    }
+
+    /// (#1082) Validate the kt-native CUDA weight loader: bf16 raw bytes
+    /// (the production weight dtype) upload straight into a kt CUDA tensor via
+    /// `Tensor::from_raw_bytes_on`, with no candle leaf or device→device bridge
+    /// copy. Round-trips the bytes through H2D + D2H and checks the values +
+    /// dtype + device — the load-bearing byte-interpretation guard for the
+    /// dominant loader entry.
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_weight_to_tensor_bf16_cuda() -> Result<()> {
+        let device = Device::Cuda(0);
+        let data: Vec<half::bf16> = [1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0]
+            .iter()
+            .map(|f| half::bf16::from_f32(*f))
+            .collect();
+        let bytes: Vec<u8> = data.iter().flat_map(|b| b.to_le_bytes()).collect();
+        let wt = WeightTensor {
+            data: crate::weights::WeightData::owned(bytes),
+            shape: vec![2, 3],
+            dtype: TensorDType::BF16,
+            source: None,
+        };
+
+        let t = weight_to_tensor(&wt, &device)?;
+        assert_eq!(t.dims(), &[2, 3]);
+        assert_eq!(t.dtype(), DType::BF16);
+        assert!(matches!(t.device(), Device::Cuda(_)), "must land on CUDA");
+
+        let vals = t.to_vec2::<half::bf16>()?;
+        assert!((vals[0][0].to_f32() - 1.0).abs() < 1e-2);
+        assert!((vals[1][2].to_f32() - 6.0).abs() < 1e-2);
 
         Ok(())
     }
