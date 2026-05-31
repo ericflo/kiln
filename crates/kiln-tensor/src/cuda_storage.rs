@@ -1063,6 +1063,113 @@ pub fn cuda_slice_set_dim0(dst: &crate::Tensor, src: &crate::Tensor, offset: usi
     Ok(())
 }
 
+/// In-place host→device write into an existing CUDA tensor's buffer,
+/// preserving its device pointer.
+///
+/// #1082 CUDA-graph refresh: the kt counterpart of the candle
+/// `memcpy_htod_async`-into-the-buffer's-device-pointer dance the CUDA
+/// graph runner used to perform on its candle scalar buffers
+/// (`update_cuda_scalar`). The captured graph bakes `dst`'s device
+/// pointer; replay refreshes the contents through THIS function so the
+/// pointer never changes and the recorded kernels read the new values.
+///
+/// Unlike [`host_to_cuda_copy`] (which allocates a fresh device buffer),
+/// this writes through `dst`'s already-allocated storage. `dst` must be
+/// CUDA-backed, contiguous, `start_offset == 0`, and own exactly
+/// `host.len()` elements of its element type `E` (the element type must
+/// match `dst`'s dtype byte width). The copy runs on the kt active
+/// stream — inside a [`crate::with_active_cuda_stream`] scope it lands on
+/// the capture/replay stream (so a refresh issued during capture is
+/// recorded into the graph); outside one it's the context default stream.
+/// A stream synchronize follows so the write completes before the
+/// subsequent graph launch reads it (mirrors the old candle path).
+#[cfg(feature = "cuda")]
+pub fn cuda_write_host_in_place<E: crate::Element>(
+    dst: &crate::Tensor,
+    host: &[E],
+) -> Result<()> {
+    if dst.dtype().is_packed() {
+        return Err(crate::Error::Msg(
+            "cuda_write_host_in_place: packed dtype not supported".to_string(),
+        ));
+    }
+    if E::DTYPE.size_in_bytes() != dst.dtype().size_in_bytes() {
+        return Err(crate::Error::Msg(format!(
+            "cuda_write_host_in_place: element byte width {} != dst dtype {} byte width {}",
+            E::DTYPE.size_in_bytes(),
+            dst.dtype(),
+            dst.dtype().size_in_bytes()
+        )));
+    }
+    if !dst.is_contiguous() || dst.layout().start_offset() != 0 {
+        return Err(crate::Error::Msg(
+            "cuda_write_host_in_place: dst must be contiguous with start_offset == 0".to_string(),
+        ));
+    }
+    let n = dst.element_count();
+    if host.len() != n {
+        return Err(crate::Error::Msg(format!(
+            "cuda_write_host_in_place: host len {} != dst element count {n}",
+            host.len()
+        )));
+    }
+
+    let dst_storage = dst
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .ok_or_else(|| {
+            crate::Error::Msg("cuda_write_host_in_place: dst must be CUDA storage".to_string())
+        })?;
+
+    let ctx = dst_storage.context();
+    let stream = crate::active_cuda_stream(&ctx);
+    let (dst_ptr, _byte_len) = dst_storage.device_ptr_raw();
+
+    // SAFETY: `dst_ptr` is the start of `dst`'s contiguous device buffer
+    // (validated start_offset==0); `host` has exactly `n` elements of the
+    // same byte width as `dst`'s dtype, so the copy stays inside the
+    // allocation. The copy is issued on the kt active stream — the same
+    // stream the captured graph runs on — so there is no concurrent read
+    // between this write and the graph launch. The synchronize below
+    // ensures completion before any subsequent launch reads the buffer.
+    unsafe {
+        cudarc::driver::result::memcpy_htod_async(dst_ptr, host, stream.cu_stream())
+            .map_err(|e| {
+                crate::Error::Msg(format!(
+                    "cuda_write_host_in_place: memcpy_htod_async: {e:?}"
+                ))
+            })?;
+    }
+    stream.synchronize().map_err(|e| {
+        crate::Error::Msg(format!(
+            "cuda_write_host_in_place: stream sync after write: {e:?}"
+        ))
+    })?;
+    Ok(())
+}
+
+/// Synchronize the context default stream for `device_index`.
+///
+/// #1082 CUDA-graph fix: the graph-stable buffers are filled by
+/// `Tensor::from_vec_on` (→ `host_to_cuda_copy` → `clone_htod`), whose
+/// H2D `memcpy_htod_async` lands on the kt **default** stream. Graph
+/// capture begins on a *separate* (non-default) capture stream, so the
+/// pre-capture `capture_stream.synchronize()` does NOT cover those
+/// fills. Call this before `begin_capture` so the buffers' initial
+/// contents are guaranteed visible to the captured forward (matches the
+/// candle path, where `Tensor::new` allocated on the capture stream so a
+/// single capture-stream sync sufficed).
+#[cfg(feature = "cuda")]
+pub fn cuda_synchronize_default_stream(device_index: usize) -> Result<()> {
+    let ctx = primary_cuda_context(device_index)?;
+    ctx.default_stream().synchronize().map_err(|e| {
+        crate::Error::Msg(format!(
+            "cuda_synchronize_default_stream({device_index}): {e:?}"
+        ))
+    })
+}
+
 /// CUDA-side `index_select(src, axis=0, indices)` — gather along the
 /// outer axis of a CUDA tensor.
 ///

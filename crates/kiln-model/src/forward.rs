@@ -28449,12 +28449,11 @@ mod tests {
             Some(&positions),
         )?;
         synchronize_for_profile(&device)?;
-        // Bridge kt logits -> candle so both sides use the identical
-        // candle->host f32 conversion (the graph path returns candle).
-        let eager_candle = kt_logits_to_candle(&eager_logits)?;
-        assert_eq!(eager_candle.dims(), &[1usize, 1usize, vocab]);
-        let eager: Vec<f32> = eager_candle
-            .to_dtype(candle_core::DType::F32)?
+        // #1082: both the eager reference and the graph path now return a kt
+        // `Tensor`; read host f32 through the identical kt API on both sides.
+        assert_eq!(eager_logits.dims(), &[1usize, 1usize, vocab]);
+        let eager: Vec<f32> = eager_logits
+            .to_dtype(kiln_tensor::DType::F32)?
             .flatten_all()?
             .to_vec1::<f32>()?;
 
@@ -28508,7 +28507,9 @@ mod tests {
                 device: &Device,
                 vocab: usize,
             ) -> Result<Vec<f32>> {
-                let logits_candle = runner.decode_step_paged(
+                // #1082: `decode_step_paged` now returns a kt `Tensor`; read
+                // the host f32 logits through the kt API (no candle bridge).
+                let logits_kt = runner.decode_step_paged(
                     backend,
                     token_id,
                     weights,
@@ -28520,9 +28521,9 @@ mod tests {
                     None,
                 )?;
                 synchronize_for_profile(device)?;
-                assert_eq!(logits_candle.dims(), &[1usize, 1usize, vocab]);
-                Ok(logits_candle
-                    .to_dtype(candle_core::DType::F32)?
+                assert_eq!(logits_kt.dims(), &[1usize, 1usize, vocab]);
+                Ok(logits_kt
+                    .to_dtype(kiln_tensor::DType::F32)?
                     .flatten_all()?
                     .to_vec1::<f32>()?)
             }

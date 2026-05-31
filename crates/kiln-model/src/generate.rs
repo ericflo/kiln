@@ -2849,17 +2849,8 @@ impl ModelRunner {
                         self.active_lora.as_ref(),
                     )
                     .context("batched decode CUDA graph row failed")?;
-                // #1082: `decode_step_paged` is still a candle island (it returns
-                // `candle_core::Tensor`); the kt-typed samplers want kt. Bridge the
-                // candle logits to kt at this boundary. Materialize a local
-                // contiguous candle copy first (cheap Arc clone when already
-                // contiguous) so the borrowed kt view's backing storage stays alive
-                // for the sample calls below.
-                let row_c = row
-                    .contiguous()
-                    .context("batched decode CUDA graph row contiguous")?;
-                let row = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&row_c)
-                    .map_err(|e| anyhow::anyhow!("candle->kt logits bridge failed: {e}"))?;
+                // #1082: `decode_step_paged` now returns a kt `Tensor` — feed it
+                // straight to the kt-typed samplers, no candle->kt bridge.
                 let token = if params[0].temperature == 0.0 {
                     greedy_sample(&row)?
                 } else {
@@ -3887,14 +3878,8 @@ impl ModelRunner {
                     )?
                 };
                 seq_len += 1;
-                // #1082: `decode_step_paged` still returns candle; the kt-typed
-                // `sample_step` wants kt. Bridge candle->kt at this boundary,
-                // keeping a local contiguous candle copy alive for the borrow.
-                let logits_c = logits
-                    .contiguous()
-                    .context("decode CUDA graph logits contiguous")?;
-                let logits = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&logits_c)
-                    .map_err(|e| anyhow::anyhow!("candle->kt logits bridge failed: {e}"))?;
+                // #1082: `decode_step_paged` now returns kt — feed `sample_step`
+                // directly, no candle->kt bridge.
                 sample_step(&logits, params, step_seed, &generated_tokens)?
             };
         }
@@ -4250,14 +4235,8 @@ impl ModelRunner {
                     self.active_lora.as_ref(),
                 )?;
                 seq_len += 1;
-                // #1082: `decode_step_paged` still returns candle; the kt-typed
-                // `sample_step` wants kt. Bridge candle->kt at this boundary,
-                // keeping a local contiguous candle copy alive for the borrow.
-                let logits_c = logits
-                    .contiguous()
-                    .context("decode CUDA graph logits contiguous")?;
-                let logits = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&logits_c)
-                    .map_err(|e| anyhow::anyhow!("candle->kt logits bridge failed: {e}"))?;
+                // #1082: `decode_step_paged` now returns kt — feed `sample_step`
+                // directly, no candle->kt bridge.
                 sample_step(&logits, params, step_seed, &generated_tokens)?
             };
         }
@@ -6569,24 +6548,8 @@ impl ModelRunner {
                     }
                 };
                 seq_len += 1;
-                // #1082: `decode_step_paged` still returns candle; the kt-typed
-                // `sample_step` wants kt. Bridge candle->kt at this boundary,
-                // keeping a local contiguous candle copy alive for the borrow.
-                let logits_c = match logits.contiguous() {
-                    Ok(c) => c,
-                    Err(e) => {
-                        block_manager.free_all(&allocated_blocks);
-                        return Err(anyhow::Error::from(e)
-                            .context("decode CUDA graph logits contiguous"));
-                    }
-                };
-                let logits = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&logits_c) {
-                    Ok(t) => t,
-                    Err(e) => {
-                        block_manager.free_all(&allocated_blocks);
-                        return Err(anyhow::anyhow!("candle->kt logits bridge failed: {e}"));
-                    }
-                };
+                // #1082: `decode_step_paged` now returns kt — feed `sample_step`
+                // directly, no candle->kt bridge.
                 sample_step(&logits, params, step_seed, &generated_tokens)?
             };
         }
