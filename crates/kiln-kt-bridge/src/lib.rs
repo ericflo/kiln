@@ -73,7 +73,7 @@ pub use candle_core;
 /// `kiln-model::tape_forward` via the registration helpers
 /// `register_input_mapping` / `register_output_mapping`. Gated on both
 /// `cuda` (CudaStorage) and `candle` (GradStore). (#1082)
-#[cfg(all(feature = "cuda", feature = "candle"))]
+#[cfg(feature = "cuda")]
 pub mod tape_bridge;
 
 // `KtDType` is used by the candle-free CUDA helpers

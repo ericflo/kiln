@@ -55,7 +55,7 @@ kiln-tensor = { workspace = true }
 # `PagedKvCache::new_kt`, `GpuWeights::from_model_weights_kt`)
 # without a CUDA toolchain. The `cuda` feature is forwarded under
 # kiln-server's `cuda` to pull in the CUDA-specific helpers. (#1082)
-kiln-kt-bridge = { workspace = true }
+kiln-kt-bridge = { path = "../kiln-kt-bridge", default-features = false }
 kiln-train = { workspace = true }
 axum = { workspace = true }
 tokio = { workspace = true }
