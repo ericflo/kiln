@@ -3,12 +3,12 @@
 //! Compares the output of `kiln_model::forward::rms_norm` under two
 //! conditions:
 //!
-//!   A. **Baseline** — no Tape scope active; `try_tape_rms_norm_cuda`
+//!   A. **Baseline** — no Tape scope active; `forward::rms_norm`
 //!      short-circuits to `Ok(None)`. With `x.track_op() == false`
 //!      (the inputs we build below), the call lands in the
 //!      inference-only `fused_rmsnorm_kt` branch.
 //!   B. **Tape-forward** — env var set + active thread-local Tape;
-//!      `try_tape_rms_norm_cuda` records a node on the tape and
+//!      `forward::rms_norm` records a node on the tape and
 //!      returns a candle Tensor copied from the kt output. The kt
 //!      call inside is `fused_rmsnorm_via_kt_tape`, which is a thin
 //!      tape-recording wrapper around the same `fused_rmsnorm_kt`
@@ -156,7 +156,7 @@ fn tape_forward_rms_norm_bit_exact_parity_with_baseline() {
     // so the env must already be set by the time the cache reads.
     // The gate has two conditions (env + active scope); the BASELINE
     // run still routes through the existing dispatch because no Tape
-    // scope is active, so `try_tape_rms_norm_cuda` returns `Ok(None)`
+    // scope is active, so `forward::rms_norm` returns `Ok(None)`
     // and falls through.
     //
     // SAFETY: `std::env::set_var` is unsound across threads in
@@ -168,7 +168,7 @@ fn tape_forward_rms_norm_bit_exact_parity_with_baseline() {
     }
 
     // Path A — baseline. Env is on, but no Tape scope is open, so
-    // `try_tape_rms_norm_cuda` short-circuits to `Ok(None)` and the
+    // `forward::rms_norm` short-circuits to `Ok(None)` and the
     // call falls through to the existing kt-forward-op dispatch.
     // This is the production path today.
     // #1082: rms_norm is kt-typed — bridge candle inputs to kt for the call,
@@ -179,7 +179,7 @@ fn tape_forward_rms_norm_bit_exact_parity_with_baseline() {
         candle_out(&kiln_model::forward::rms_norm(&x_kt, &w_kt, eps).expect("baseline rms_norm"));
 
     // Path B — tape-forward. Env is on AND a Tape scope is open, so
-    // `try_tape_rms_norm_cuda` records a node and returns the kt
+    // `forward::rms_norm` records a node and returns the kt
     // output (which we copy to candle here for comparison).
     let (tape_result, tape) = kiln_model::tape_forward::with_thread_local_tape(|| {
         kiln_model::forward::rms_norm(&x_kt, &w_kt, eps)
@@ -204,7 +204,7 @@ fn tape_forward_rms_norm_bit_exact_parity_with_baseline() {
         tape.len(),
         1,
         "tape-forward rms_norm must record exactly one tape node \
-         (got {}). Empty tape means try_tape_rms_norm_cuda fell through \
+         (got {}). Empty tape means forward::rms_norm fell through \
          to the kt-forward-op path; >1 node means an over-record bug.",
         tape.len()
     );
@@ -245,7 +245,7 @@ fn tape_forward_short_circuits_without_active_scope() {
     let (x, w) = build_inputs(&device, rows, hidden);
 
     // Even with the env var set, no active Tape scope ==
-    // `try_tape_rms_norm_cuda` returns Ok(None) and the baseline
+    // `forward::rms_norm` returns Ok(None) and the baseline
     // dispatch runs.
     unsafe {
         std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
@@ -2343,12 +2343,15 @@ fn tape_lora_add_records_fused_node_and_emits_var_grads() {
 
     // Forward inside a tape scope. Records one `LoraDeltaAddBackward`
     // node with inputs `[base, x, A, B]`.
+    let base_kt = kt_in(&base);
+    let x_kt = kt_in(&x);
     let (res, tape) = kiln_model::tape_forward::with_thread_local_tape(|| {
-        kiln_model::tape_forward::try_tape_lora_add_cuda(&base, &x, &proj, lora_scale)
+        kiln_model::tape_forward::try_tape_lora_add_kt(&base_kt, &x_kt, &proj, lora_scale)
     });
-    let out = res
-        .expect("tape-forward try_tape_lora_add_cuda ok")
+    let out_kt = res
+        .expect("tape-forward try_tape_lora_add_kt ok")
         .expect("tape-forward returned Some(out) — gate must be on");
+    let out = candle_out(&out_kt);
     assert_eq!(out.shape().dims(), &[rows, out_features], "out shape");
     assert!(out.device().is_cuda(), "out stays on CUDA");
     assert_eq!(
@@ -2569,12 +2572,15 @@ fn add_lora_delta_to_base_routes_through_tape_when_gated() {
     // ordering check, but the gate is identical to the one in
     // `add_lora_delta_to_base`. We therefore assert the gate's
     // side-effect: a tape node was recorded.
+    let base_kt = kt_in(&base);
+    let x_kt = kt_in(&x);
     let (res, tape) = kiln_model::tape_forward::with_thread_local_tape(|| {
-        kiln_model::tape_forward::try_tape_lora_add_cuda(&base, &x, &proj, lora_scale)
+        kiln_model::tape_forward::try_tape_lora_add_kt(&base_kt, &x_kt, &proj, lora_scale)
     });
-    let out = res
-        .expect("dispatch-gate try_tape_lora_add_cuda ok")
+    let out_kt = res
+        .expect("dispatch-gate try_tape_lora_add_kt ok")
         .expect("dispatch-gate returned Some(out) — env + scope both on");
+    let out = candle_out(&out_kt);
 
     assert_eq!(tape.len(), 1, "dispatch gate must route through the tape adapter");
     assert_eq!(out.shape().dims(), &[rows, out_features]);
@@ -2642,12 +2648,16 @@ fn tape_flash_attn_records_node_and_emits_qkv_grads() {
 
     // Forward inside a tape scope. Records one FlashAttnBackward node with
     // inputs [q, k, v].
+    let q_kt = kt_in(&q);
+    let k_kt = kt_in(&k);
+    let v_kt = kt_in(&v);
     let (res, tape) = kiln_model::tape_forward::with_thread_local_tape(|| {
-        kiln_model::tape_forward::try_tape_flash_attn_cuda(&q, &k, &v, hq, hkv, hd)
+        kiln_model::tape_forward::try_tape_flash_attn_kt(&q_kt, &k_kt, &v_kt, hq, hkv, hd)
     });
-    let out = res
-        .expect("try_tape_flash_attn_cuda ok")
+    let out_kt = res
+        .expect("try_tape_flash_attn_kt ok")
         .expect("returned Some(out) — gate + scope both on");
+    let out = candle_out(&out_kt);
     assert_eq!(out.shape().dims(), &[b, sq, hq, hd], "attn out shape");
     assert!(out.device().is_cuda(), "out stays on CUDA");
     assert_eq!(out.dtype(), DType::BF16, "flash attn output is BF16");
@@ -2784,7 +2794,10 @@ fn tape_flash_attn_short_circuits_without_active_scope() {
     // Called OUTSIDE a `with_thread_local_tape` scope: the gate is on but
     // there is no active tape, so the adapter must return None cleanly
     // (caller falls through to the existing CustomOp3 / fast path).
-    let res = kiln_model::tape_forward::try_tape_flash_attn_cuda(&q, &k, &v, hq, hkv, hd)
+    let q_kt = kt_in(&q);
+    let k_kt = kt_in(&k);
+    let v_kt = kt_in(&v);
+    let res = kiln_model::tape_forward::try_tape_flash_attn_kt(&q_kt, &k_kt, &v_kt, hq, hkv, hd)
         .expect("adapter returns Ok with no active tape");
     assert!(
         res.is_none(),
@@ -2951,16 +2964,16 @@ fn tape_gdn_recurrent_records_node_and_emits_5_grads() {
     let mut state_kt = kt_in(&state);
 
     let (res, tape) = kiln_model::tape_forward::with_thread_local_tape(|| {
-        kiln_model::tape_forward::try_tape_gdn_recurrent_cuda(
+        kiln_model::tape_forward::try_tape_gdn_recurrent_kt(
             &*backend, &q_kt, &k_kt, &v_kt, &beta_kt, &g_kt, &mut state_kt,
         )
     });
-    let out = res
-        .expect("try_tape_gdn_recurrent_cuda ok")
+    let out_kt = res
+        .expect("try_tape_gdn_recurrent_kt ok")
         .expect("returned Some(out) — gate + scope both on");
-    // #1082: `out` is a candle Tensor (the tape adapter records candle); use
-    // candle shape/device idioms (kt's `.shape()==&[..]` / `.is_gpu()` don't
-    // apply to candle).
+    let out = candle_out(&out_kt);
+    // #1082: the kt twin returns a kt Tensor; copy to candle here so the
+    // shape/device asserts below can keep candle idioms (`dims4`/`is_cpu`).
     assert_eq!(out.dims4().unwrap(), (b, nv, t, dv), "gdn recurrence out shape");
     assert!(!out.device().is_cpu(), "out stays on GPU (CUDA)");
 
@@ -3619,12 +3632,17 @@ fn tape_sdpa_fallback_records_node_and_emits_qkv_grads() {
     }
 
     // Record inside a tape scope. One SdpaBackward node with inputs [q, k, v].
+    let q_kt = kt_in(&q);
+    let k_kt = kt_in(&k);
+    let v_kt = kt_in(&v);
+    let out_kt = kt_in(&out);
     let (res, tape) = kiln_model::tape_forward::with_thread_local_tape(|| {
-        kiln_model::tape_forward::try_tape_sdpa_fallback_cuda(&q, &k, &v, hd, &out)
+        kiln_model::tape_forward::try_tape_sdpa_fallback_kt(&q_kt, &k_kt, &v_kt, hd, &out_kt)
     });
-    let returned = res
-        .expect("try_tape_sdpa_fallback_cuda ok")
+    let returned_kt = res
+        .expect("try_tape_sdpa_fallback_kt ok")
         .expect("returned Some(out) — gate + scope both on");
+    let returned = candle_out(&returned_kt);
     assert_eq!(returned.shape().dims(), &[b, nq, t, hd], "sdpa out shape");
     assert!(returned.device().is_cuda(), "out stays on CUDA");
 
@@ -3727,7 +3745,11 @@ fn tape_sdpa_fallback_short_circuits_without_active_scope() {
     // Called OUTSIDE a `with_thread_local_tape` scope: the gate is on but there
     // is no active tape, so the adapter must return None cleanly (caller falls
     // through to the plain candle transpose+reshape).
-    let res = kiln_model::tape_forward::try_tape_sdpa_fallback_cuda(&q, &k, &v, hd, &out)
+    let q_kt = kt_in(&q);
+    let k_kt = kt_in(&k);
+    let v_kt = kt_in(&v);
+    let out_kt = kt_in(&out);
+    let res = kiln_model::tape_forward::try_tape_sdpa_fallback_kt(&q_kt, &k_kt, &v_kt, hd, &out_kt)
         .expect("adapter returns Ok with no active tape");
     assert!(
         res.is_none(),

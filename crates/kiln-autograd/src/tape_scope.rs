@@ -26,9 +26,9 @@
 //! thread-local handle without taking a `kiln-model` dependency.
 //!
 //! `kiln-model::tape_forward` re-exports these symbols for back-compat,
-//! and continues to host the candle-typed `try_tape_rms_norm_cuda`
-//! adapter (it depends on `kiln-rmsnorm-kernel` + `kiln-kt-bridge`
-//! which the autograd crate does not — and should not — pull in).
+//! and hosts the kt-native per-op tape recorders (which depend on
+//! `kiln-rmsnorm-kernel` + `kiln-kt-bridge` / `kiln-tensor` that the
+//! autograd crate does not — and should not — pull in).
 //!
 //! # Tape-scope contract
 //!
@@ -48,9 +48,8 @@
 //! `None` and recording sites do not record. Crates calling
 //! `tape_forward_enabled()` must additionally check the
 //! `KILN_USE_TAPE_FORWARD` env var (or an equivalent opt-in) before
-//! attempting a tape route — see the rmsnorm adapter at
-//! `kiln-model::tape_forward::try_tape_rms_norm_cuda` for the
-//! canonical pattern.
+//! attempting a tape route — see `kiln-model::forward::rms_norm`
+//! (the kt-native RMSNorm recorder) for the canonical pattern.
 //!
 //! # See also
 //!

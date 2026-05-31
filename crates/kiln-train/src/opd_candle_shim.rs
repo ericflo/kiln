@@ -718,8 +718,8 @@ fn cuda_via_kt_forward_op(
 //
 // Wave-13 (#1082) — OPD kt-tape production-caller adapter.
 //
-// Mirrors the rmsnorm sibling
-// `kiln-model::tape_forward::try_tape_rms_norm_cuda`. The adapter takes
+// Mirrors the kt-native RMSNorm recorder
+// `kiln-model::forward::rms_norm`. The adapter takes
 // the same candle-typed inputs the production caller in
 // `kiln-train::opd::opd_step_loss` already passes to
 // [`opd_top_k_reverse_kl_per_position_via_kt_forward_op`], checks the
@@ -813,7 +813,7 @@ pub fn try_tape_opd_per_position_cuda(
     // kt borrow: zero-copy view of the candle CUDA tensors as kt
     // tensors. `tape_kt_input` REUSES the upstream adapter's retained kt
     // output for `hidden` when it was produced by a tape adapter in the
-    // active bridge scope (e.g. the final-RMSNorm `try_tape_rms_norm_cuda`
+    // active bridge scope (e.g. the final-RMSNorm `forward::rms_norm`
     // that produced `student_hidden`) — keeping the recorded tape CONNECTED
     // from this OPD node back through the model's LoRA chain. Falls back to a
     // fresh borrow outside a bridge scope (the common case). Returns `Err`

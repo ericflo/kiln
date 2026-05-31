@@ -40,7 +40,7 @@
 //! 2. [`with_thread_local_tape`] runs a closure with a fresh `Tape` as
 //!    a thread-local. Tape-aware primitives can fetch the active tape
 //!    via [`with_active_tape`] and record onto it.
-//! 3. [`try_tape_rms_norm_cuda`] is the per-call-site adapter: it
+//! 3. `forward::rms_norm` is the production kt-native recorder: it
 //!    checks the env flag, borrows kt-tensors via `kiln_kt_bridge`,
 //!    runs `fused_rmsnorm_via_kt_tape` with the active tape, copies
 //!    the output back to a candle Tensor, and returns. When the gate
@@ -82,7 +82,6 @@
 //! corresponding `kiln_autograd::backwards::*Backward` exists and whose
 //! kt-side fused kernel ships a `*_via_kt_tape` entry:
 //!
-//! * `try_tape_rms_norm_cuda` — `RmsNormBackward` (CP-4 baseline)
 //! * `try_tape_matmul_kt` — `MatmulBackward`
 //! * `try_tape_silu_kt` — `SiluBackward`
 //! * `try_tape_embedding_kt` — `EmbeddingBackward`
@@ -141,78 +140,6 @@ fn tape_kt_input(x: &Tensor) -> Option<kiln_tensor::Tensor> {
         return Some(t);
     }
     kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(x).ok()
-}
-
-/// Attempt to run RMSNorm through the kt-tape pilot
-/// (`fused_rmsnorm_via_kt_tape`) instead of the kt-forward-op shim.
-///
-/// Returns:
-/// * `Ok(Some(out))` — the tape-forward path ran. The returned
-///   `Tensor` is a copy of the kt-tape output into a candle CUDA
-///   tensor; the backward node was recorded on the active
-///   thread-local tape.
-/// * `Ok(None)` — the gate was off, no thread-local tape is active,
-///   the kt envelope rejected the inputs, or the kt-borrow failed.
-///   The caller must fall through to the existing dispatch.
-/// * `Err(...)` — a kt-tape forward error (e.g. envelope-OK but FFI
-///   call failed). Propagated so callers see the failure cleanly
-///   instead of silently masking it.
-///
-/// The candle-typed `(x, weight)` inputs are borrowed (zero-copy via
-/// `kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow`), routed
-/// through the kt-tape entry, and the kt output is copied back into a
-/// candle CUDA tensor (no autograd link — see module docs). For the
-/// experimental gating this is the correct trade-off: the recipient
-/// of the returned tensor knows the gradient lives on the tape, not
-/// on candle's `BackpropOp`.
-pub fn try_tape_rms_norm_cuda(x: &Tensor, weight: &Tensor, eps: f32) -> Result<Option<Tensor>> {
-    if !tape_forward_enabled() {
-        return Ok(None);
-    }
-
-    // kt borrow: zero-copy view of the candle CUDA tensors as kt
-    // tensors. Returns `Err` (which we treat as "skip") on layout /
-    // dtype / device mismatch.
-    let x_kt = match tape_kt_input(x) {
-        Some(t) => t,
-        None => return Ok(None),
-    };
-    let w_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(weight) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
-
-    if !kiln_rmsnorm_kernel::supports_rmsnorm_kt(&x_kt, &w_kt) {
-        return Ok(None);
-    }
-
-    // Borrow the active tape. If no scope is open, we have nowhere to
-    // record — fall through.
-    let out_kt = match with_active_tape(|tape: &mut Tape| {
-        kiln_rmsnorm_kernel::fused_rmsnorm_via_kt_tape(&x_kt, &w_kt, eps, tape)
-    }) {
-        Some(result) => result,
-        None => return Ok(None),
-    };
-
-    let out_kt = out_kt
-        .map_err(|e| anyhow::anyhow!("fused_rmsnorm_via_kt_tape: {e}"))
-        .context("tape_forward::try_tape_rms_norm_cuda: kt-tape forward failed")?;
-
-    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-        .context("tape_forward::try_tape_rms_norm_cuda: kt -> candle copy failed")?;
-
-    // CP-4 (#1082) tape_bridge: register the (kt_id ↔ candle_id) IO
-    // mappings so a surrounding `with_tape_scope_emit_to_grad_store`
-    // can transmute the tape-recorded backward into candle-typed
-    // gradients in the candle GradStore. No-ops cleanly when no
-    // bridge scope is active.
-    kiln_kt_bridge::tape_bridge::register_input_mapping(x_kt.id(), x.id());
-    kiln_kt_bridge::tape_bridge::register_input_mapping(w_kt.id(), weight.id());
-    kiln_kt_bridge::tape_bridge::register_output_mapping(out_kt.id(), out.id());
-    kiln_kt_bridge::tape_bridge::retain_output_for_chaining(&out_kt, out.id());
-
-    Ok(Some(out))
 }
 
 /// kt-native SiLU tape recorder (#1082 seam flip) — the kt-native SiLU tape recorder. Takes the kt activation directly and records a
@@ -593,7 +520,7 @@ pub fn try_tape_cross_entropy_cuda(
 ///
 /// The earlier [`CrossEntropyFromLogitsBackward`] saved the FULL `[1, T, V]`
 /// logits as a candle `Tensor` because the forward adapter
-/// ([`try_tape_cross_entropy_from_logits_cuda`]) took candle logits — which in
+/// (`try_tape_cross_entropy_from_logits_cuda`) took candle logits — which in
 /// the tape-authoritative SFT path meant `cross_entropy_loss` first copied the
 /// kt lm_head logits into a candle `[1, T, V]` tensor (≈150 MB+/step for real
 /// shapes) purely so the candle adapter could re-borrow them. That copy was
@@ -692,14 +619,14 @@ impl BackwardOp for CrossEntropyFromLogitsKtBackward {
     }
 }
 
-/// kt-NATIVE variant of [`try_tape_cross_entropy_from_logits_cuda`]: roots the
+/// kt-NATIVE variant of `try_tape_cross_entropy_from_logits_cuda`: roots the
 /// WHOLE next-token cross-entropy loss at a SINGLE fused kt `Tape` node taking
 /// the FULL `[1, T, V]` kt logits DIRECTLY — with NO `[1, T, V]` kt -> candle
 /// copy.
 ///
 /// # Why this exists (#1082 H6)
 ///
-/// The candle-typed sibling [`try_tape_cross_entropy_from_logits_cuda`] takes
+/// The candle-typed sibling `try_tape_cross_entropy_from_logits_cuda` takes
 /// candle logits, so in the tape-authoritative SFT path `cross_entropy_loss`
 /// first bridged the kt lm_head logits into a full `[1, T, V]` candle tensor
 /// (≈150 MB+/step) just so the candle adapter could re-borrow them via
@@ -937,7 +864,7 @@ pub fn try_tape_cross_entropy_from_logits_kt(
 /// derivation.
 #[allow(clippy::too_many_lines)]
 /// kt-native LoRA delta-add tape recorder (#1082 seam flip) — kt-only twin of
-/// [`try_tape_lora_add_cuda`]. base + x already kt at the call site, so the
+/// `try_tape_lora_add_cuda`. base + x already kt at the call site, so the
 /// composite (base->2d + x->2d reshapes, LoRA delta=(x2d@Aᵀ)@Bᵀ·scale, out=base2d+delta,
 /// reshape back) runs in kt ops recording the SAME ReshapeBackward + LoraDeltaAddBackward
 /// nodes (base/x reshapes recorded so their grads chain in kt — the candle adapter relied
@@ -1088,189 +1015,6 @@ pub fn try_tape_lora_add_kt(
     Ok(Some(out_kt))
 }
 
-pub fn try_tape_lora_add_cuda(
-    base: &Tensor,
-    x: &Tensor,
-    proj: &LoraProjectionWeights,
-    lora_scale: f32,
-) -> Result<Option<Tensor>> {
-    if !tape_forward_enabled() || !tape_lora_add_enabled() {
-        return Ok(None);
-    }
-
-    // Device + dtype gate: kt matmul + kt mul_scalar are CUDA-only here
-    // (they have CPU paths too, but the bridge's `kt_tensor_from_candle_cuda_*`
-    // helpers are CUDA-only). Match the existing tape adapters.
-    // base / x are candle (the caller bridges them to candle for this
-    // cross-file seam); proj.a / proj.b are kt (#1082 — `LoraProjectionWeights`
-    // holds `kiln_tensor::Tensor`), so gate them against the kt `Device`.
-    if !matches!(base.device(), candle_core::Device::Cuda(_))
-        || !matches!(x.device(), candle_core::Device::Cuda(_))
-        || !matches!(proj.a.device(), kiln_tensor::Device::Cuda(_))
-        || !matches!(proj.b.device(), kiln_tensor::Device::Cuda(_))
-    {
-        return Ok(None);
-    }
-    if base.dtype() != x.dtype() {
-        // kt matmul requires matching dtypes throughout the composed
-        // forward; defer mixed-dtype cases to the existing CUDA path
-        // which already handles cross-dtype promotion via CustomOp3.
-        return Ok(None);
-    }
-    // Only BF16 / F32 today (matches the kt matmul envelope).
-    if !matches!(
-        base.dtype(),
-        candle_core::DType::BF16 | candle_core::DType::F32
-    ) {
-        return Ok(None);
-    }
-    // proj.a / proj.b are kt; `base` is candle. Compare in kt-space by
-    // mapping base's (BF16/F32, per the gate above) candle dtype to kt.
-    let base_kt_dtype = match kiln_kt_bridge::candle_dtype_to_kt(base.dtype()) {
-        Ok(d) => d,
-        Err(_) => return Ok(None),
-    };
-    if proj.a.dtype() != base_kt_dtype || proj.b.dtype() != base_kt_dtype {
-        // For the first cut we require A/B already pre-cast to the
-        // forward dtype. The existing CUDA path handles BF16/F16 → F32
-        // upcasts for the adapter weights via CustomOp3; that's
-        // deliberately out-of-scope here so the tape adapter stays a
-        // single-dtype primitive. The dispatch gate falls through and
-        // the existing path takes over when dtypes mismatch.
-        return Ok(None);
-    }
-
-    // Shape gate.
-    let base_dims = base.dims().to_vec();
-    let x_dims = x.dims().to_vec();
-    if base_dims.len() < 2 || x_dims.len() != base_dims.len() {
-        return Ok(None);
-    }
-    if base_dims[..base_dims.len() - 1] != x_dims[..x_dims.len() - 1] {
-        return Ok(None);
-    }
-    let out_features = *base_dims.last().unwrap();
-    let in_features = *x_dims.last().unwrap();
-    let rows: usize = base_dims[..base_dims.len() - 1].iter().product();
-    if rows == 0 {
-        return Ok(None);
-    }
-
-    let Ok((rank, a_in)) = proj.a.dims2() else {
-        return Ok(None);
-    };
-    let Ok((b_out, b_rank)) = proj.b.dims2() else {
-        return Ok(None);
-    };
-    if a_in != in_features || b_out != out_features || b_rank != rank {
-        return Ok(None);
-    }
-
-    // Reshape base + x to 2-D for the kt matmul envelope. The candle
-    // reshape is a layout view; .contiguous() materialises if needed.
-    let base_2d = base.reshape((rows, out_features))?.contiguous()?;
-    let x_2d = x.reshape((rows, in_features))?.contiguous()?;
-
-    // kt borrows: zero-copy views of the candle CUDA tensors. A/B are
-    // already 2-D and presumed contiguous (Vars allocated by the
-    // optimiser are always so); short-circuit on a non-contig borrow.
-    let base_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&base_2d) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
-    // For x, prefer to thread the kt id from an upstream tape adapter's
-    // output so the tape stays connected. The `tape_kt_input` helper
-    // looks up `x.id()` (the candle id BEFORE the reshape) — if an
-    // upstream adapter produced `x`, we'd see its kt output here. The
-    // reshape changed the candle id, so we fall through to a fresh
-    // borrow of `x_2d` for the common case (a fully-detached LoRA call).
-    let x_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&x_2d) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
-    // proj.a / proj.b are already kt (#1082) — no candle→kt borrow bridge
-    // needed; use them directly. The kt clone is cheap (Arc storage).
-    let a_kt = proj.a.clone();
-    let b_kt = proj.b.clone();
-
-    // kt envelope: matmul requires contiguous 2-D inputs. base + x are
-    // already so by construction above; A and B come straight from the
-    // LoRA loader and are contiguous Vars. If for any reason a Var is
-    // non-contig (in-place layout munging upstream), fall through.
-    if !a_kt.is_contiguous() || !b_kt.is_contiguous() {
-        return Ok(None);
-    }
-
-    // Record on the active tape (if any). Outside a scope, fall through.
-    let out_kt = match with_active_tape(|tape: &mut Tape| -> Result<_> {
-        // h = x @ A^T
-        let a_t_kt = a_kt
-            .transpose(0, 1)
-            .map_err(|e| anyhow::anyhow!("kt a.transpose: {e}"))?
-            .contiguous()
-            .map_err(|e| anyhow::anyhow!("kt a_t.contiguous: {e}"))?;
-        let h_kt = kiln_tensor::ops::matmul(&x_kt, &a_t_kt)
-            .map_err(|e| anyhow::anyhow!("kt matmul x@a_t: {e}"))?;
-        // d = h @ B^T
-        let b_t_kt = b_kt
-            .transpose(0, 1)
-            .map_err(|e| anyhow::anyhow!("kt b.transpose: {e}"))?
-            .contiguous()
-            .map_err(|e| anyhow::anyhow!("kt b_t.contiguous: {e}"))?;
-        let d_kt = kiln_tensor::ops::matmul(&h_kt, &b_t_kt)
-            .map_err(|e| anyhow::anyhow!("kt matmul h@b_t: {e}"))?;
-        // delta = d * scale  (kt elementwise)
-        let delta_kt = kiln_tensor::ops::mul_scalar(&d_kt, lora_scale)
-            .map_err(|e| anyhow::anyhow!("kt mul_scalar(scale): {e}"))?;
-        // out = base + delta  (kt elementwise add)
-        let out_kt = kiln_tensor::ops::add(&base_kt, &delta_kt)
-            .map_err(|e| anyhow::anyhow!("kt add(base, delta): {e}"))?;
-
-        // ONE fused tape node — see module docs on `LoraDeltaAddBackward`
-        // for the rationale (transpose handling, IO-mapping shape match).
-        tape.record(
-            &out_kt,
-            &[&base_kt, &x_kt, &a_kt, &b_kt],
-            Box::new(LoraDeltaAddBackward {
-                x: x_kt.clone(),
-                a: a_kt.clone(),
-                b: b_kt.clone(),
-                scale: lora_scale,
-            }),
-        );
-        Ok(out_kt)
-    }) {
-        Some(result) => result,
-        None => return Ok(None),
-    };
-
-    let out_kt = out_kt.context("tape_forward::try_tape_lora_add_cuda: kt-tape forward failed")?;
-    let out_2d = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-        .context("tape_forward::try_tape_lora_add_cuda: kt -> candle copy failed")?;
-    let out = out_2d.reshape(base_dims.clone())?;
-
-    // CP-4 (#1082) tape_bridge: register IO mappings keyed on the
-    // candle ids the optimiser cares about — proj.a and proj.b are the
-    // LoRA `Var`s; base / x are intermediate but registered for chaining
-    // completeness so a Vars-only consumer of the bridged GradStore can
-    // be added later without re-touching this adapter.
-    kiln_kt_bridge::tape_bridge::register_input_mapping(base_kt.id(), base_2d.id());
-    kiln_kt_bridge::tape_bridge::register_input_mapping(x_kt.id(), x_2d.id());
-    // proj.a / proj.b are kt Vars now (#1082) — deposit their grads under their
-    // own kt ids via the kt-keyed registration (no candle id exists for them).
-    kiln_kt_bridge::tape_bridge::register_input_mapping_kt(a_kt.id(), proj.a.id());
-    kiln_kt_bridge::tape_bridge::register_input_mapping_kt(b_kt.id(), proj.b.id());
-    // The downstream candle consumer holds `out` (the reshape-back of
-    // the kt-side 2-D output). Register the user-facing candle id only;
-    // the bridge panics on a duplicate kt output id, so we pick the one
-    // the consumer actually carries into the loss graph and chain on
-    // the same id for upstream re-use via `kt_input_for_candle(out.id())`.
-    kiln_kt_bridge::tape_bridge::register_output_mapping(out_kt.id(), out.id());
-    kiln_kt_bridge::tape_bridge::retain_output_for_chaining(&out_kt, out.id());
-
-    Ok(Some(out))
-}
-
 /// Attempt to run the FULL base projection (and optional fused LoRA delta)
 /// through the kt-typed op surface as ONE chained group of `Tape` nodes:
 /// `reshape → matmul → [lora_delta_add] → reshape`. Records the backward so
@@ -1286,7 +1030,7 @@ pub fn try_tape_lora_add_cuda(
 /// # Why a SINGLE fused adapter (base + LoRA together)
 ///
 /// CP-4 (#1082) Increment 2 — the keystone. The tape root
-/// ([`try_tape_cross_entropy_from_logits_cuda`], Increment 1) connects to the
+/// (`try_tape_cross_entropy_from_logits_cuda`, Increment 1) connects to the
 /// lm_head output, but the lm_head matmul and every q/k/v/o/gate/up/down/GDN
 /// projection were unwired, so nothing below the loss got grads
 /// (`tape_has_grad=0/50`). In the authoritative path every intermediate is a
@@ -1314,7 +1058,7 @@ pub fn try_tape_lora_add_cuda(
 ///    `[x2d, w_kt]`.
 /// 3. (lora only) `LoraDeltaAddBackward { x: x2d, a, b, scale }` — output
 ///    `out2d`, inputs `[base2d, x2d, a_kt, b_kt]` (same order as
-///    [`try_tape_lora_add_cuda`]).
+///    `try_tape_lora_add_cuda`).
 /// 4. `ReshapeBackward { input_shape: [rows, n] }` — output `out_kt`, input
 ///    `out2d` (or `base2d` when `lora` is None).
 ///
@@ -1330,7 +1074,7 @@ pub fn try_tape_lora_add_cuda(
 /// * `Err(...)` — an unexpected kt forward or kt → candle copy-back failure.
 #[allow(clippy::too_many_lines)]
 /// kt-native linear+LoRA tape recorder (#1082 seam flip) — kt-only twin of
-/// [`try_tape_lora_linear_cuda`]. x + base weight are already kt at the call site
+/// `try_tape_lora_linear_cuda`. x + base weight are already kt at the call site
 /// (the loader produces kt base weights), so no candle bridging: the whole
 /// composite (x->2d reshape, base = x2d@W, LoRA delta = (x2d@Aᵀ)@Bᵀ·scale + base,
 /// reshape back) runs in kt ops with the SAME tape nodes (ReshapeBackward,
@@ -1660,7 +1404,7 @@ impl BackwardOp for FlashAttnBackward {
 /// BF16/CUDA/contiguous/`head_dim∈{128,256}`/valid-GQA envelope, or a kt
 /// borrow fails.
 /// kt-native FlashAttention-2 tape recorder (#1082 seam flip) — kt-only twin of
-/// [`try_tape_flash_attn_cuda`]. q/k/v are already kt (recorded upstream outputs),
+/// `try_tape_flash_attn_cuda`. q/k/v are already kt (recorded upstream outputs),
 /// so no candle bridging: runs `flash_attn_fwd_kt` and records the kt-native
 /// `FlashAttnBackward` (all kt-tensor fields) directly. The returned kt out lets the
 /// downstream reshape stay kt-native too (no kt->candle->kt at the attention seam).
@@ -1737,116 +1481,6 @@ pub fn try_tape_flash_attn_kt(
         Some(result) => Ok(Some(result?)),
         None => Ok(None),
     }
-}
-
-pub fn try_tape_flash_attn_cuda(
-    q: &Tensor,
-    k: &Tensor,
-    v: &Tensor,
-    num_heads: usize,
-    num_kv_heads: usize,
-    head_dim: usize,
-) -> Result<Option<Tensor>> {
-    if !tape_forward_enabled() || !tape_flash_attn_enabled() {
-        return Ok(None);
-    }
-
-    // Device + dtype + layout envelope — mirror
-    // `cuda_flash_attention_training_bf16`'s gate so we never record a
-    // node the kernel would reject.
-    if q.dtype() != candle_core::DType::BF16
-        || k.dtype() != candle_core::DType::BF16
-        || v.dtype() != candle_core::DType::BF16
-        || !matches!(q.device(), candle_core::Device::Cuda(_))
-        || !matches!(k.device(), candle_core::Device::Cuda(_))
-        || !matches!(v.device(), candle_core::Device::Cuda(_))
-        || !q.is_contiguous()
-        || !k.is_contiguous()
-        || !v.is_contiguous()
-        || !matches!(head_dim, 128 | 256)
-        || num_kv_heads == 0
-        || num_heads % num_kv_heads != 0
-    {
-        return Ok(None);
-    }
-    let Ok((bq, _sq, hq, dq_)) = q.dims4() else {
-        return Ok(None);
-    };
-    let Ok((bk, sk, hk, dk_)) = k.dims4() else {
-        return Ok(None);
-    };
-    let Ok((bv, sv, hv, dv_)) = v.dims4() else {
-        return Ok(None);
-    };
-    if bq != bk
-        || bq != bv
-        || sk != sv
-        || hq != num_heads
-        || hk != num_kv_heads
-        || hv != num_kv_heads
-        || dq_ != head_dim
-        || dk_ != head_dim
-        || dv_ != head_dim
-    {
-        return Ok(None);
-    }
-
-    let softmax_scale = 1.0 / (head_dim as f32).sqrt();
-    let causal = true;
-
-    // kt inputs — thread upstream adapter outputs (RoPE / q_norm produced
-    // q; v straight from v_proj+lora) so the tape stays connected.
-    let q_kt = match tape_kt_input(q) {
-        Some(t) => t,
-        None => return Ok(None),
-    };
-    let k_kt = match tape_kt_input(k) {
-        Some(t) => t,
-        None => return Ok(None),
-    };
-    let v_kt = match tape_kt_input(v) {
-        Some(t) => t,
-        None => return Ok(None),
-    };
-
-    let out_kt = match with_active_tape(|tape: &mut Tape| -> Result<_> {
-        let (out_kt, lse_kt) =
-            kiln_flash_attn::flash_attn_fwd_kt(&q_kt, &k_kt, &v_kt, softmax_scale, causal)
-                .map_err(|e| anyhow::anyhow!("kt flash_attn_fwd_kt: {e:?}"))?;
-
-        tape.record(
-            &out_kt,
-            &[&q_kt, &k_kt, &v_kt],
-            Box::new(FlashAttnBackward {
-                q: q_kt.clone(),
-                k: k_kt.clone(),
-                v: v_kt.clone(),
-                out: out_kt.clone(),
-                softmax_lse: lse_kt,
-                scale: softmax_scale,
-                causal,
-                heads_q: num_heads,
-                heads_kv: num_kv_heads,
-            }),
-        );
-        Ok(out_kt)
-    }) {
-        Some(result) => result,
-        None => return Ok(None),
-    };
-
-    let out_kt =
-        out_kt.context("tape_forward::try_tape_flash_attn_cuda: kt-tape forward failed")?;
-    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-        .context("tape_forward::try_tape_flash_attn_cuda: kt -> candle copy failed")?;
-
-    kiln_kt_bridge::tape_bridge::register_input_mapping(q_kt.id(), q.id());
-    kiln_kt_bridge::tape_bridge::register_input_mapping(k_kt.id(), k.id());
-    kiln_kt_bridge::tape_bridge::register_input_mapping(v_kt.id(), v.id());
-    kiln_kt_bridge::tape_bridge::register_output_mapping(out_kt.id(), out.id());
-    kiln_kt_bridge::tape_bridge::retain_output_for_chaining(&out_kt, out.id());
-
-    Ok(Some(out))
 }
 
 /// True unless `KILN_USE_TAPE_GDN` is set to a disable value — **DEFAULTS ON**
@@ -2009,7 +1643,7 @@ impl BackwardOp for GdnRecurrentBackward {
 /// Route the GDN recurrence forward through the kt `Tape` so a
 /// tape-authoritative backward reaches the GDN-block q/k/v/beta/g
 /// projections (and their LoRA `Var`s) — the linear-attention analogue of
-/// [`try_tape_flash_attn_cuda`], covering Qwen3.5-4B's 24 GDN layers.
+/// `try_tape_flash_attn_cuda`, covering Qwen3.5-4B's 24 GDN layers.
 ///
 /// Runs [`gdn_recurrent_forward_from_parts`] (mutating `recurrent_state`)
 /// and records a [`GdnRecurrentBackward`] whose `entry_state` is the
@@ -2017,7 +1651,7 @@ impl BackwardOp for GdnRecurrentBackward {
 /// production recurrence call: `Ok(Some(out))` (with a tape node if a scope
 /// is active), or `Ok(None)` (caller runs the recurrence itself) when the
 /// gate is off, the inputs aren't CUDA, or a kt borrow fails.
-pub fn try_tape_gdn_recurrent_cuda(
+pub fn try_tape_gdn_recurrent_kt(
     backend: &dyn BackendRuntime,
     q: &kiln_tensor::Tensor,
     k: &kiln_tensor::Tensor,
@@ -2025,7 +1659,7 @@ pub fn try_tape_gdn_recurrent_cuda(
     beta: &kiln_tensor::Tensor,
     g: &kiln_tensor::Tensor,
     recurrent_state: &mut kiln_tensor::Tensor,
-) -> Result<Option<Tensor>> {
+) -> Result<Option<kiln_tensor::Tensor>> {
     if !tape_forward_enabled() || !tape_gdn_enabled() {
         return Ok(None);
     }
@@ -2054,12 +1688,9 @@ pub fn try_tape_gdn_recurrent_cuda(
         &out_kt, false, q, k, v, beta, g, &entry_state, &device,
     )?;
 
-    // The per-op parity test consumes a candle `out` (candle shape/device
-    // idioms); the recorded output node id lives on the kt tape independently
-    // of this candle copy, so the copy is test-ergonomics only.
-    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-        .context("tape gdn recurrent: out kt -> candle")?;
-    Ok(Some(out))
+    // #1082: kt-native — the recorded output node id lives on the kt tape;
+    // return the kt output directly (no kt->candle bridge).
+    Ok(Some(out_kt))
 }
 
 /// Record a [`GdnRecurrentBackward`] node for a GDN recurrence output that
@@ -2072,7 +1703,7 @@ pub fn try_tape_gdn_recurrent_cuda(
 /// `gdn_recurrent_prefill_head_last` /
 /// `gdn_chunkwise_recurrence_head_last_full_chunks` /
 /// `gdn_chunkwise_recurrence`) and then calls this to attach the tape node.
-/// Unlike [`try_tape_gdn_recurrent_cuda`] (which re-runs the recurrence via
+/// Unlike [`try_tape_gdn_recurrent_kt`] (which re-runs the recurrence via
 /// [`gdn_recurrent_forward_from_parts`] for the per-op parity tests), this
 /// adapter takes the already-computed `out` and only records.
 ///
@@ -2847,7 +2478,7 @@ impl BackwardOp for GdnGatedRmsNormBackward {
 /// `Ok(None)` (caller falls through) when the gate is off, no tape scope is
 /// active, the inputs aren't CUDA, shapes disagree, or a kt borrow fails.
 /// kt-native gated-RMSNorm tape recorder (#1082 seam flip) — kt-only twin of
-/// [`try_tape_gdn_gated_rms_norm_cuda`]. Record-only: records the (now kt-native)
+/// `try_tape_gdn_gated_rms_norm_cuda`. Record-only: records the (now kt-native)
 /// `GdnGatedRmsNormBackward` (stores kt x/z/weight; bwd kernel already kt) linking
 /// kt `out` back to kt x/z/weight. No candle round-trip.
 pub fn try_tape_gdn_gated_rms_norm_kt(
@@ -3198,7 +2829,7 @@ impl BackwardOp for GqaExpandBackward {
 /// `Ok(None)` on any gate-off / non-CUDA / shape-envelope-miss / kt-borrow
 /// failure.
 /// kt-native GQA head-expand tape recorder (#1082 seam flip) — kt-only twin of
-/// [`try_tape_gqa_expand_cuda`]. Record-only: the forward expand is already done
+/// `try_tape_gqa_expand_cuda`. Record-only: the forward expand is already done
 /// by the kt non-tape path; this records `GqaExpandBackward` (all-usize fields, no
 /// candle types) linking the kt `out` back to the kt `x`. No candle round-trip.
 pub fn try_tape_gqa_expand_kt(
@@ -3255,7 +2886,7 @@ pub fn try_tape_gqa_expand_kt(
 // to reach the GQA-block q/k/v projection LoRA `Var`s on that path, the
 // fallback must ALSO record onto the kt Tape, exactly as the flash path does.
 //
-// Mirrors `try_tape_gdn_recurrent_cuda` / `GdnRecurrentBackward`: a
+// Mirrors `try_tape_gdn_recurrent_kt` / `GdnRecurrentBackward`: a
 // candle-composite `BackwardOp` (`SdpaBackward`) wrapping the analytic
 // `forward::sdpa_fallback_backward_no_grad`, recorded on the fallback's
 // attention output with `[q, k, v]` as inputs. SDPA is stateless, so there is
@@ -3361,7 +2992,7 @@ impl BackwardOp for SdpaBackward {
 /// like `tape_record_gdn_recurrent`. The recorded [`SdpaBackward`] emits
 /// GQA-collapsed `dq`/`dk`/`dv` so a tape-authoritative backward reaches the
 /// q/k/v projections (and their LoRA `Var`s) on the non-flash path — the
-/// attention-block link the flash path covers via [`try_tape_flash_attn_cuda`].
+/// attention-block link the flash path covers via `try_tape_flash_attn_cuda`.
 ///
 /// # Arguments
 ///
@@ -3380,7 +3011,7 @@ impl BackwardOp for SdpaBackward {
 /// tape scope is active, the inputs aren't CUDA, shapes disagree, or a kt
 /// borrow fails.
 /// kt-native naive-SDPA fallback tape recorder (#1082 seam flip) — kt-only twin of
-/// [`try_tape_sdpa_fallback_cuda`]. Record-only: records the (now kt-native)
+/// `try_tape_sdpa_fallback_cuda`. Record-only: records the (now kt-native)
 /// `SdpaBackward` (stores kt q/k/v; bwd kernel already kt) linking kt `out` back to
 /// kt q/k/v. The returned kt out lets the downstream transpose+reshape stay
 /// kt-native (no kt->candle->kt at the SDPA seam).
@@ -3445,103 +3076,6 @@ pub fn try_tape_sdpa_fallback_kt(
     if recorded.is_none() {
         return Ok(None);
     }
-    Ok(Some(out.clone()))
-}
-
-pub fn try_tape_sdpa_fallback_cuda(
-    q: &Tensor,
-    k: &Tensor,
-    v: &Tensor,
-    head_dim: usize,
-    out: &Tensor,
-) -> Result<Option<Tensor>> {
-    if !tape_forward_enabled() || !tape_sdpa_enabled() {
-        return Ok(None);
-    }
-    if !matches!(q.device(), candle_core::Device::Cuda(_))
-        || !matches!(k.device(), candle_core::Device::Cuda(_))
-        || !matches!(v.device(), candle_core::Device::Cuda(_))
-        || !matches!(out.device(), candle_core::Device::Cuda(_))
-    {
-        return Ok(None);
-    }
-
-    // Shape envelope: q = [B, nq, T, hd]; k/v = [B, nkv, T, hd]; out matches q.
-    let (bq, nq, tq, dq_) = match q.dims4() {
-        Ok(d) => d,
-        Err(_) => return Ok(None),
-    };
-    let (bk, nkv, tk, dk_) = match k.dims4() {
-        Ok(d) => d,
-        Err(_) => return Ok(None),
-    };
-    let (bv, nvh, tv, dv_) = match v.dims4() {
-        Ok(d) => d,
-        Err(_) => return Ok(None),
-    };
-    if bq != bk
-        || bq != bv
-        || nkv == 0
-        || nq % nkv != 0
-        || nvh != nkv
-        || tq != tk
-        || tq != tv
-        || dq_ != head_dim
-        || dk_ != head_dim
-        || dv_ != head_dim
-        || out.dims() != [bq, nq, tq, head_dim].as_slice()
-    {
-        return Ok(None);
-    }
-
-    let scale = 1.0f64 / (head_dim as f64).sqrt();
-    let causal = true;
-
-    // kt inputs — thread the upstream q/k/v_proj (+ RoPE / norm) adapter outputs
-    // so the tape stays connected back to the LoRA Vars.
-    let q_kt = match tape_kt_input(q) {
-        Some(t) => t,
-        None => return Ok(None),
-    };
-    let k_kt = match tape_kt_input(k) {
-        Some(t) => t,
-        None => return Ok(None),
-    };
-    let v_kt = match tape_kt_input(v) {
-        Some(t) => t,
-        None => return Ok(None),
-    };
-    // The production forward already computed `out`; borrow it as the recorded
-    // node's output so we record-only (no re-run), like `tape_record_gdn_recurrent`.
-    let out_kt = match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(out) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
-
-    let recorded = with_active_tape(|tape: &mut Tape| {
-        tape.record(
-            &out_kt,
-            &[&q_kt, &k_kt, &v_kt],
-            Box::new(SdpaBackward {
-                // #1082: store kt (struct fields flipped candle->kt)
-                q: q_kt.clone(),
-                k: k_kt.clone(),
-                v: v_kt.clone(),
-                scale,
-                causal,
-            }),
-        );
-    });
-    if recorded.is_none() {
-        return Ok(None);
-    }
-
-    kiln_kt_bridge::tape_bridge::register_input_mapping(q_kt.id(), q.id());
-    kiln_kt_bridge::tape_bridge::register_input_mapping(k_kt.id(), k.id());
-    kiln_kt_bridge::tape_bridge::register_input_mapping(v_kt.id(), v.id());
-    kiln_kt_bridge::tape_bridge::register_output_mapping(out_kt.id(), out.id());
-    kiln_kt_bridge::tape_bridge::retain_output_for_chaining(&out_kt, out.id());
-
     Ok(Some(out.clone()))
 }
 
