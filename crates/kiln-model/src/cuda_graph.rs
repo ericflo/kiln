@@ -117,7 +117,7 @@ use crate::PagedKvCacheKt;
 // from_vec_on}`) and refreshed in place before each replay via
 // `kiln_tensor::cuda_write_host_in_place` — both honor the captured
 // graph's baked device pointer.
-use kiln_tensor::Tensor;
+use kiln_tensor::{Device, Tensor};
 
 use kiln_core::block::BlockTable;
 
