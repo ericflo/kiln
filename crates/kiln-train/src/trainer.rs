@@ -8148,48 +8148,22 @@ fn grpo_step_forward_backward_tape_authoritative_kt(
             .context("GRPO tape-authoritative(kt) policy forward")
             .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?;
 
-            // (#1082 forward-flip) `model_forward_kt` now returns kt logits, but
-            // the GRPO scalar-loss adapter `try_tape_grpo_pg_loss_from_logits_cuda`
-            // is still candle-typed (it owns a candle island: candle
-            // `token_log_probs` + `grpo_loss` for the forward value, and a candle
-            // `loss.backward()` recompute in its fused `GrpoPgLossFromLogitsBackward`).
-            // Bridge `policy_logits` kt -> candle AND register the original kt
-            // tensor as the producer of the candle id via
-            // `retain_output_for_chaining`, so the adapter's
-            // `kt_input_for_candle(logits.id())` lookup recovers the lm_head kt
-            // output and keeps the tape CONNECTED back to the LoRA forward (a bare
-            // copy would fall through to a fresh, un-chained borrow -> islanded
-            // forward -> empty LoRA grads). This is exactly what the in-`forward.rs`
-            // `kt_logits_to_candle` helper does; it is `pub(crate)` there so it is
-            // inlined here. `ref_log_probs` is a detached constant denominator, so a
-            // plain kt -> candle copy is sufficient (no chaining).
-            let policy_logits_candle = {
-                let lc = policy_logits.contiguous().map_err(|e| {
-                    kiln_kt_bridge::BridgeError::new(format!("GRPO(kt) logits contiguous: {e}"))
-                })?;
-                let candle = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&lc).map_err(|e| {
-                    kiln_kt_bridge::BridgeError::new(format!("GRPO(kt) logits kt->candle: {e}"))
-                })?;
-                kiln_kt_bridge::tape_bridge::retain_output_for_chaining(&policy_logits, candle.id());
-                candle
-            };
-            let ref_log_probs_candle = {
-                let rc = ref_log_probs.contiguous().map_err(|e| {
-                    kiln_kt_bridge::BridgeError::new(format!("GRPO(kt) ref_log_probs contiguous: {e}"))
-                })?;
-                kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&rc).map_err(|e| {
-                    kiln_kt_bridge::BridgeError::new(format!(
-                        "GRPO(kt) ref_log_probs kt->candle: {e}"
-                    ))
-                })?
-            };
-
+            // (#1082 DoD-100 step 8) `model_forward_kt` returns kt logits, and the
+            // GRPO scalar-loss adapter is now kt-native
+            // (`try_tape_grpo_pg_loss_from_logits_kt`): it takes the kt logits
+            // DIRECTLY — no [1, T, V] kt->candle copy. Recording against
+            // `policy_logits` (the lm_head kt tape output) keeps the tape CONNECTED
+            // back through the LoRA forward (consumer input id == producer output
+            // id). `ref_log_probs` is a detached constant denominator, passed kt
+            // as-is. (The adapter still RETURNS a detached candle scalar loss — the
+            // tape-authoritative seeding still reads a candle loss; flipping that is
+            // step 14.)
             // Record the SCALAR GRPO PG (+ KL) loss as the tape root.
-            let loss = match crate::grpo_candle_shim::try_tape_grpo_pg_loss_from_logits_cuda(
-                &policy_logits_candle,
+            let loss = match crate::grpo_candle_shim::try_tape_grpo_pg_loss_from_logits_kt(
+                &policy_logits,
                 input_ids,
                 action_mask,
-                &ref_log_probs_candle,
+                &ref_log_probs,
                 loss_params,
                 device,
             )
@@ -8199,7 +8173,7 @@ fn grpo_step_forward_backward_tape_authoritative_kt(
                 Some(l) => l,
                 None => {
                     return Err(kiln_kt_bridge::BridgeError::new(
-                        "GRPO tape-authoritative(kt): try_tape_grpo_pg_loss_from_logits_cuda \
+                        "GRPO tape-authoritative(kt): try_tape_grpo_pg_loss_from_logits_kt \
                          returned None (KILN_USE_TAPE_FORWARD off, empty active set, or \
                          non-CUDA logits). The dispatch should keep this step on the candle \
                          path.",

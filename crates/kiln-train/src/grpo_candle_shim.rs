@@ -108,21 +108,23 @@ use kiln_autograd::{tape_forward_enabled, with_active_tape, BackwardOp, Tape};
 #[cfg(feature = "cuda")]
 #[derive(Debug)]
 struct GrpoPgLossFromLogitsBackward {
-    /// FULL forward logits `[1, T, V]` (candle clone — an `Arc` bump).
-    logits: Tensor,
+    /// FULL forward logits `[1, T, V]` as a kt tensor (an `Arc` bump on the kt
+    /// storage — no device copy). (#1082 DoD-100 step 8: was a candle clone.)
+    logits: kiln_tensor::Tensor,
     /// Tokenized completion (prompt + completion), the loss positions are
     /// `{ i : action_mask[i] }` under the next-token shift.
     input_ids: Vec<u32>,
     /// Action-token mask (true at supervised completion positions).
     action_mask: Vec<bool>,
     /// Detached, constant reference log-probs `[num_active]` (the IS-ratio
-    /// denominator). Never differentiated — saved as a plain candle tensor.
-    ref_log_probs: Tensor,
+    /// denominator). Never differentiated — saved as a kt tensor (#1082 step 8).
+    ref_log_probs: kiln_tensor::Tensor,
     /// GRPO surrogate / KL parameters (advantage, clip bounds, KL estimator,
     /// loss normalizer, IS level, reinforce flag, entropy-aware quantile).
     loss_params: GrpoLossParams,
-    /// Candle device (bridged to a kt device for the analytic backward).
-    device: candle_core::Device,
+    /// kt device for the analytic backward (#1082 step 8: `CdDevice` is the kt
+    /// `Device` alias; was a candle device bridged per-call).
+    device: CdDevice,
 }
 
 #[cfg(feature = "cuda")]
@@ -143,14 +145,12 @@ impl BackwardOp for GrpoPgLossFromLogitsBackward {
         &self,
         grad_output: &kiln_tensor::Tensor,
     ) -> kiln_tensor::Result<Vec<Option<kiln_tensor::Tensor>>> {
-        // The upstream grad is the scalar dL/dloss seed (typically 1.0). Bridge
-        // it to candle and read the scalar so the analytic backward can scale the
-        // `dL/d(logits)` it derives (linearity of backward in the seed).
-        let grad_c = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(grad_output).map_err(|e| {
-            kiln_tensor::Error::Msg(format!("GrpoPgLossFromLogitsBackward: grad kt->candle: {e}"))
-        })?;
-        let grad_scalar = grad_c
-            .to_dtype(candle_core::DType::F32)
+        // The upstream grad is the scalar dL/dloss seed (typically 1.0). Read the
+        // scalar directly off the kt grad (no candle round-trip) so the analytic
+        // backward can scale the `dL/d(logits)` it derives (linearity in the seed).
+        // Mirrors `CrossEntropyFromLogitsKtBackward`.
+        let grad_scalar = grad_output
+            .to_dtype(kiln_tensor::DType::F32)
             .and_then(|t| t.flatten_all())
             .and_then(|t| t.to_vec1::<f32>())
             .map_err(|e| {
@@ -166,7 +166,11 @@ impl BackwardOp for GrpoPgLossFromLogitsBackward {
                 )
             })? as f64;
 
-        let grad_logits = grpo_pg_loss_from_logits_grad_candle(
+        // kt-native analytic dL/d(logits) — no candle. The kt logits / ref are
+        // saved directly on the struct (#1082 step 8);
+        // `grpo_pg_loss_from_logits_grad_kt` returns a `[1, T, V]` kt grad
+        // (input count 1).
+        let grad_logits_kt = grpo_pg_loss_from_logits_grad_kt(
             &self.logits,
             &self.input_ids,
             &self.action_mask,
@@ -181,161 +185,8 @@ impl BackwardOp for GrpoPgLossFromLogitsBackward {
             ))
         })?;
 
-        // The returned candle grad is already contiguous (the kt grad is made
-        // contiguous before the kt->candle bridge); this `.contiguous()` is a
-        // defensive no-op, then COPY into an owned kt tensor (not borrow),
-        // matching `CrossEntropyFromLogitsBackward`.
-        let grad_logits = grad_logits.contiguous().map_err(|e| {
-            kiln_tensor::Error::Msg(format!(
-                "GrpoPgLossFromLogitsBackward: grad contiguous: {e}"
-            ))
-        })?;
-        let grad_logits_kt =
-            kiln_kt_bridge::kt_tensor_from_candle_cuda_copy(&grad_logits).map_err(|e| {
-                kiln_tensor::Error::Msg(format!(
-                    "GrpoPgLossFromLogitsBackward: grad candle->kt: {e}"
-                ))
-            })?;
-
         Ok(vec![Some(grad_logits_kt)])
     }
-}
-
-/// kt-native analytic `dL/d(logits)` for the GRPO scalar loss — no candle
-/// autograd.
-///
-/// (#1082 C2) This replaces the previous candle-recompute body, which built a
-/// candle `Var` leaf, ran the (now kt) `token_log_probs` + `grpo_loss` forward,
-/// bridged the kt loss back to candle, and called candle's `loss.backward()`.
-/// That ALWAYS failed: once the GRPO math flipped to kt, the kt forward carried
-/// no candle autograd lineage from the leaf to the loss, so `grads.get(leaf)`
-/// was always `None` and GRPO training was fully broken. The fix derives
-/// `dL/d(logits)` directly, in kt, on-device.
-///
-/// ## Math
-///
-/// `token_log_probs(logits, input_ids, mask)` (F32) selects the active
-/// next-token positions `P = { i in 0..T-1 : mask[i+1] }` and computes, for the
-/// a-th active position `p = P[a]` with label `y_a = input_ids[p+1]`:
-///
-/// ```text
-/// policy_log_prob_a = logits[p, y_a] - logsumexp(logits[p, :])
-/// ```
-///
-/// The GRPO loss `L = grpo_loss(policy_log_probs, ref_log_probs, params)` depends
-/// on `logits` ONLY through this `[num_active]` vector. By the chain rule, for
-/// each active `a`:
-///
-/// ```text
-/// dL/d(logits[p, j]) = coeff_a * ( onehot(y_a)[j] - softmax(logits[p, :])[j] )
-/// ```
-///
-/// and `dL/d(logits[p', :]) = 0` for non-active positions. The
-/// `( onehot - softmax )` factor is the standard log-softmax Jacobian-vector
-/// product — a pure FORWARD computation (softmax + scatter the onehot), which
-/// sidesteps the kt-CUDA backward gaps in `index_select` / `gather` that blocked
-/// the per-op tape approach (the whole reason this fused node exists).
-///
-/// ## `coeff = dL/d(policy_log_probs)`
-///
-/// `grpo_loss` covers many variants (`reinforce`; `IsLevel::{Token,Sequence,
-/// Cispo}`; `KlEstimator::{None,K1,K3}`; `entropy_aware_kl_quantile`; advantage /
-/// clip / loss_normalizer / kl_coeff). For the value-differentiable variants
-/// (`Token` / `Sequence`, any KL), rather than hand-derive `coeff` per variant
-/// (the original author warned about analytic-derivation drift) we NUMERICALLY
-/// differentiate the cheap `[num_active]`-vector `grpo_loss` scalar w.r.t.
-/// `policy_log_probs` via central differences, calling the SAME kt `grpo_loss`
-/// — candle-free, ~10 tiny kt ops × `2·num_active` evals (microseconds/step).
-///
-/// The two STRAIGHT-THROUGH variants are handled analytically because their loss
-/// VALUE diverges from the autograd surface (a `.detach()` sits on a value-
-/// flowing path), so a value-FD is wrong:
-/// * REINFORCE — `exp(plp - plp.detach())` ≡ 1 by value (value-FD = 0);
-///   `coeff = -advantage · loss_normalizer`.
-/// * CISPO — detached `weight = clip(exp(plp-ref))·advantage` multiplies `plp`;
-///   `coeff = -weight + (entropy-gated) KL grad`.
-///
-/// ⚠ The REINFORCE / CISPO analytic coeffs mirror `grpo_loss`'s exact formulas;
-/// keep them in lockstep if `grpo_loss` changes.
-///
-/// Scales the whole grad by the incoming scalar seed `grad_scalar` (backward is
-/// linear in the seed) and casts back to `logits.dtype()`. The candle `logits`
-/// and `ref_log_probs` are bridged into kt ONCE (eliminating that copy is a
-/// separate later #1082 task); the final `[1, T, V]` kt grad is bridged back to
-/// candle for the return type (the `apply` caller immediately re-bridges it to
-/// kt — keeping the candle I/O bridge is fine for C2, whose goal is removing the
-/// candle `Var` / `backward()` autograd, not the I/O bridges).
-#[cfg(feature = "cuda")]
-pub(crate) fn grpo_pg_loss_from_logits_grad_candle(
-    logits: &Tensor,
-    input_ids: &[u32],
-    action_mask: &[bool],
-    ref_log_probs: &Tensor,
-    loss_params: GrpoLossParams,
-    grad_scalar: f64,
-    device: &candle_core::Device,
-) -> Result<Tensor> {
-    let logits_dtype = logits.dtype();
-    let dims = logits.dims();
-    anyhow::ensure!(
-        dims.len() == 3 && dims[0] == 1 && dims[1] == input_ids.len(),
-        "grpo_pg_loss_from_logits_grad_candle: logits must be [1, seq_len, vocab], got {dims:?} \
-         for seq_len {}",
-        input_ids.len()
-    );
-    anyhow::ensure!(
-        action_mask.len() == input_ids.len(),
-        "grpo_pg_loss_from_logits_grad_candle: action_mask len {} != input_ids len {}",
-        action_mask.len(),
-        input_ids.len()
-    );
-
-    // Bridge the candle inputs into kt ONCE; all gradient math runs in kt on the
-    // same device. (#1082) eliminating these I/O copies is a separate later task.
-    // `kt_tensor_from_candle_cuda_copy` requires contiguous inputs, and the saved
-    // lm_head logits / ref_log_probs may be views — materialise contiguous first.
-    let logits_contig = logits
-        .contiguous()
-        .context("grpo_pg_loss_from_logits_grad_candle: logits contiguous")?;
-    let ref_contig = ref_log_probs
-        .contiguous()
-        .context("grpo_pg_loss_from_logits_grad_candle: ref_log_probs contiguous")?;
-    let logits_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_copy(&logits_contig).map_err(|e| {
-        anyhow::anyhow!("grpo_pg_loss_from_logits_grad_candle: logits candle->kt: {e}")
-    })?;
-    let ref_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_copy(&ref_contig).map_err(|e| {
-        anyhow::anyhow!("grpo_pg_loss_from_logits_grad_candle: ref_log_probs candle->kt: {e}")
-    })?;
-    let device_kt = kiln_kt_bridge::kt_device_from_candle(device);
-
-    let grad_logits_kt = grpo_pg_loss_from_logits_grad_kt(
-        &logits_kt,
-        input_ids,
-        action_mask,
-        &ref_kt,
-        loss_params,
-        grad_scalar,
-        &device_kt,
-    )?;
-
-    // Bridge the `[1, T, V]` kt grad back to candle for the return type, cast to
-    // the saved logits dtype (the `apply` caller re-bridges to kt and the upstream
-    // tape node expects the lm_head output layout). Contiguous first: the kt grad
-    // is built via scatter / unsqueeze and may be non-contiguous, and the bridge
-    // requires contiguity.
-    let grad_kt_dtype = kiln_kt_bridge::candle_dtype_to_kt(logits_dtype).map_err(|e| {
-        anyhow::anyhow!("grpo_pg_loss_from_logits_grad_candle: logits dtype -> kt: {e}")
-    })?;
-    let grad_logits_kt = grad_logits_kt
-        .to_dtype(grad_kt_dtype)
-        .map_err(|e| anyhow::anyhow!("grpo_pg_loss_from_logits_grad_candle: grad to_dtype: {e}"))?
-        .contiguous()
-        .map_err(|e| {
-            anyhow::anyhow!("grpo_pg_loss_from_logits_grad_candle: grad contiguous: {e}")
-        })?;
-    let grad_logits = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&grad_logits_kt)
-        .context("grpo_pg_loss_from_logits_grad_candle: grad kt->candle")?;
-    Ok(grad_logits)
 }
 
 /// Per-active-token entropy-aware KL gate (1.0 / 0.0) mirroring the detached
@@ -365,8 +216,7 @@ fn cispo_entropy_kl_mask(plp_host: &[f32], loss_params: &GrpoLossParams) -> Vec<
 }
 
 /// kt-native analytic `dL/d(logits)` for the GRPO scalar loss. Pure kt ops on
-/// `device`; no candle. See [`grpo_pg_loss_from_logits_grad_candle`] for the
-/// derivation. Returns the `[1, T, V]` grad as F32 kt (the caller casts to the
+/// `device`; no candle. See the module-level docs for the derivation. Returns the `[1, T, V]` grad as F32 kt (the caller casts to the
 /// saved logits dtype).
 ///
 /// Inputs:
@@ -630,11 +480,11 @@ fn grpo_pg_loss_from_logits_grad_kt(
 ///   surfaces a clean `None` so a misdispatch is caught.
 /// * `Err(...)` — an unexpected forward or kt -> candle copy-back failure.
 #[cfg(feature = "cuda")]
-pub(crate) fn try_tape_grpo_pg_loss_from_logits_cuda(
-    logits: &Tensor,
+pub(crate) fn try_tape_grpo_pg_loss_from_logits_kt(
+    logits_kt: &kiln_tensor::Tensor,
     input_ids: &[u32],
     action_mask: &[bool],
-    ref_log_probs: &Tensor,
+    ref_log_probs_kt: &kiln_tensor::Tensor,
     loss_params: GrpoLossParams,
     device: &CdDevice,
 ) -> Result<Option<Tensor>> {
@@ -644,13 +494,13 @@ pub(crate) fn try_tape_grpo_pg_loss_from_logits_cuda(
 
     // Full model logits only: [1, T, V] on CUDA. Defer any other shape/device to
     // the caller (the dispatch keeps non-CUDA on the candle path anyway).
-    if logits.rank() != 3 || !matches!(logits.device(), candle_core::Device::Cuda(_)) {
-        return Ok(None);
-    }
-    let Ok((b, t, _v)) = logits.dims3() else {
-        return Ok(None);
-    };
-    if b != 1 || t != input_ids.len() || action_mask.len() != input_ids.len() {
+    let dims = logits_kt.dims().to_vec();
+    if dims.len() != 3
+        || dims[0] != 1
+        || dims[1] != input_ids.len()
+        || action_mask.len() != input_ids.len()
+        || !matches!(logits_kt.device(), kiln_tensor::Device::Cuda(_))
+    {
         return Ok(None);
     }
 
@@ -665,50 +515,31 @@ pub(crate) fn try_tape_grpo_pg_loss_from_logits_cuda(
         return Ok(None);
     }
 
-    // kt input — thread the lm_head adapter's output so the tape stays CONNECTED
-    // (consumer input id == producer output id). Fall through on borrow failure.
-    let logits_kt = match kiln_kt_bridge::tape_bridge::kt_input_for_candle(logits.id()) {
-        Some(t) => t,
-        None => match kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(logits) {
-            Ok(t) => t,
-            Err(_) => return Ok(None),
-        },
-    };
+    // FORWARD value — kt `token_log_probs` + `grpo_loss`. `logits_kt` is the
+    // lm_head tape output passed DIRECTLY by the trainer (#1082 step 8: no more
+    // [1,T,V] kt->candle copy), so recording against it keeps the tape CONNECTED
+    // back through the LoRA forward (consumer input id == producer output id).
+    // `ref_log_probs_kt` is the detached constant denominator.
+    let policy_log_probs = token_log_probs(logits_kt, input_ids, action_mask, device)
+        .context("try_tape_grpo_pg_loss_from_logits_kt: token_log_probs")?;
+    let loss_kt_forward = grpo_loss(&policy_log_probs, ref_log_probs_kt, loss_params, device)
+        .context("try_tape_grpo_pg_loss_from_logits_kt: grpo_loss")?;
 
-    // FORWARD value — the same kt `token_log_probs` + `grpo_loss` math as the
-    // tape-authoritative path, so the returned scalar is numerically identical.
-    // `ref_log_probs` is the detached constant denominator. The math functions
-    // are kt (#1082); bridge the candle `logits` / `ref_log_probs` into kt and
-    // convert the kt `device` to candle once for the saved backward state.
-    let ref_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_copy(ref_log_probs)
-        .map_err(|e| anyhow::anyhow!("try_tape_grpo_pg_loss_from_logits_cuda: ref candle->kt: {e}"))?;
-    let device_candle = kiln_kt_bridge::candle_device_from_kt(device)
-        .map_err(|e| anyhow::anyhow!("try_tape_grpo_pg_loss_from_logits_cuda: device kt->candle: {e}"))?;
-    let policy_log_probs = token_log_probs(&logits_kt, input_ids, action_mask, device)
-        .context("try_tape_grpo_pg_loss_from_logits_cuda: token_log_probs")?;
-    // kt scalar GRPO loss (already the OWNED kt copy the tape root needs — no
-    // candle round-trip; the kt loss does not dangle once the local candle
-    // `logits` drops because it carries no candle lineage).
-    let loss_kt_forward = grpo_loss(&policy_log_probs, &ref_kt, loss_params, device)
-        .context("try_tape_grpo_pg_loss_from_logits_cuda: grpo_loss")?;
-
-    // Record the fused node: the OUTPUT is the OWNED kt loss. Saved state: the
-    // FULL candle logits + host-side gather metadata + detached candle
-    // ref_log_probs + params (the candle-island backward recomputes from these).
+    // Record the fused node: OUTPUT is the OWNED kt loss; the single input is the
+    // CONNECTED kt logits. Saved state: kt logits (Arc bump) + host gather
+    // metadata + kt ref_log_probs + params (the kt-native backward recomputes).
     let loss_kt = match with_active_tape(|tape: &mut Tape| -> Result<_> {
         let loss_kt = loss_kt_forward;
-        // `loss_kt` is the kt scalar GRPO loss (no candle lineage). Record the
-        // fused candle-island backward node against the CONNECTED kt logits input.
         tape.record(
             &loss_kt,
-            &[&logits_kt],
+            &[logits_kt],
             Box::new(GrpoPgLossFromLogitsBackward {
-                logits: logits.clone(),
+                logits: logits_kt.clone(),
                 input_ids: input_ids.to_vec(),
                 action_mask: action_mask.to_vec(),
-                ref_log_probs: ref_log_probs.detach(),
+                ref_log_probs: ref_log_probs_kt.clone(),
                 loss_params,
-                device: device_candle,
+                device: *device,
             }) as Box<dyn BackwardOp>,
         );
         Ok(loss_kt)
@@ -717,22 +548,20 @@ pub(crate) fn try_tape_grpo_pg_loss_from_logits_cuda(
         None => return Ok(None),
     };
     let loss_kt = loss_kt
-        .context("try_tape_grpo_pg_loss_from_logits_cuda: kt-tape forward failed")?;
+        .context("try_tape_grpo_pg_loss_from_logits_kt: kt-tape forward failed")?;
 
-    // Return a DETACHED, lineage-free candle loss by construction (a fresh kt ->
-    // candle CUDA copy of the kt scalar loss, numerically identical to the
-    // baseline). The returned candle copy carries NO candle autograd lineage, so
-    // the tape-authoritative caller's `loss.backward()` is unconditionally
-    // `{loss: ones}` and the recorded kt node is the sole tape root (a candle
-    // lineage here could silently fill in LoRA grads, a false positive defeating
-    // the tape-coverage measurement).
+    // Return a DETACHED, lineage-free candle loss (a fresh kt -> candle CUDA copy
+    // of the kt scalar loss). The candle copy carries NO candle autograd lineage,
+    // so the tape-authoritative caller's `loss.backward()` is unconditionally
+    // `{loss: ones}` and the recorded kt node is the sole tape root. (#1082 step 8:
+    // inputs are now kt; the scalar candle loss RETURN stays — it is coupled to
+    // `with_tape_authoritative_scope`'s candle-loss seeding, flipped in step 14.)
     let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&loss_kt)
-        .context("try_tape_grpo_pg_loss_from_logits_cuda: kt -> candle copy failed")?;
+        .context("try_tape_grpo_pg_loss_from_logits_kt: kt -> candle copy failed")?;
 
-    // CP-4 (#1082) tape_bridge: only `logits` is differentiable. Map the output /
-    // retain onto the RETURNED detached copy's id so `with_tape_authoritative_scope`
-    // resolves `loss.id()` → `loss_kt` to seed the tape root.
-    kiln_kt_bridge::tape_bridge::register_input_mapping(logits_kt.id(), logits.id());
+    // Map the kt loss node to the RETURNED detached copy's id so
+    // `with_tape_authoritative_scope` resolves `loss.id()` → `loss_kt` to seed the
+    // tape root. (No input mapping: `logits_kt` is the kt tape input directly.)
     kiln_kt_bridge::tape_bridge::register_output_mapping(loss_kt.id(), out.id());
     kiln_kt_bridge::tape_bridge::retain_output_for_chaining(&loss_kt, out.id());
 
@@ -743,10 +572,10 @@ pub(crate) fn try_tape_grpo_pg_loss_from_logits_cuda(
 mod tests {
     // (#1082 C2) Finite-difference ground-truth gate for the kt-native GRPO
     // logit-grad. The whole module is CUDA-gated because the function under test
-    // (`grpo_pg_loss_from_logits_grad_candle`) is `#[cfg(feature = "cuda")]`.
+    // (`grpo_pg_loss_from_logits_grad_kt`) is `#[cfg(feature = "cuda")]`.
 
     #[cfg(feature = "cuda")]
-    use super::grpo_pg_loss_from_logits_grad_candle;
+    use super::grpo_pg_loss_from_logits_grad_kt;
     #[cfg(feature = "cuda")]
     use crate::trainer::{grpo_loss, token_log_probs, GrpoLossParams};
     #[cfg(feature = "cuda")]
@@ -759,7 +588,7 @@ mod tests {
     use rand::{RngExt, SeedableRng};
 
     /// Validate the analytic kt-native GRPO logit-grad
-    /// (`grpo_pg_loss_from_logits_grad_candle`, with `grad_scalar = 1.0`) against
+    /// (`grpo_pg_loss_from_logits_grad_kt`, with `grad_scalar = 1.0`) against
     /// an INDEPENDENT central finite-difference of the FULL GRPO loss composite
     /// `grpo_loss(token_log_probs(logits, ...), ...)` taken directly w.r.t.
     /// selected `logits[p, j]` entries.
@@ -789,8 +618,6 @@ mod tests {
             return;
         }
         let device_kt = kiln_tensor::Device::Cuda(0);
-        let device_candle =
-            kiln_kt_bridge::candle_device_from_kt(&device_kt).expect("candle cuda device");
 
         // --- Synthetic case: a few-token sequence, small vocab. ---
         // T tokens, V vocab. action_mask is true at a couple of completion
@@ -819,8 +646,6 @@ mod tests {
         let logits_kt =
             KtTensor::from_vec_on(device_kt, logits_host.clone(), vec![1, seq_len, vocab])
                 .expect("logits kt");
-        let logits_candle =
-            kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&logits_kt).expect("logits -> candle");
 
         // Reference log-probs: a detached constant [num_active] vector built from
         // the fixture's OWN policy log-probs so the IS ratio r = exp(plp - ref) =
@@ -842,8 +667,6 @@ mod tests {
         let ref_host: Vec<f32> = plp_fixture.iter().map(|&p| p - 0.1).collect();
         let ref_kt =
             KtTensor::from_vec_on(device_kt, ref_host, vec![num_active]).expect("ref kt");
-        let ref_candle =
-            kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&ref_kt).expect("ref -> candle");
 
         // Param variants to test.
         let mk_params = |is_level: IsLevel, kl: KlEstimator, reinforce: bool| GrpoLossParams {
@@ -927,18 +750,18 @@ mod tests {
 
         for (vname, params) in &variants {
             // Analytic grad [1, T, V] (the function under test, seed 1.0).
-            let grad_candle = grpo_pg_loss_from_logits_grad_candle(
-                &logits_candle,
+            // (#1082 step 8) Call the kt-native grad directly — the kt inputs are
+            // already built above (no candle bridge).
+            let grad_kt = grpo_pg_loss_from_logits_grad_kt(
+                &logits_kt,
                 &input_ids,
                 &action_mask,
-                &ref_candle,
+                &ref_kt,
                 *params,
                 1.0,
-                &device_candle,
+                &device_kt,
             )
             .unwrap_or_else(|e| panic!("[GRPO-FD] {vname}: analytic grad failed: {e:?}"));
-            let grad_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_copy(&grad_candle)
-                .unwrap_or_else(|e| panic!("[GRPO-FD] {vname}: grad -> kt: {e}"));
             let grad_host: Vec<f32> = grad_kt
                 .to_dtype(KtDType::F32)
                 .unwrap()
