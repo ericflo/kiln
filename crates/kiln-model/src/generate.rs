@@ -6689,6 +6689,7 @@ mod tests {
     /// fixture used. CPU-only paged-prefix-cache tests don't exercise GDN forward
     /// math, so 1×1 placeholder GDN tensors are sufficient — the registry only
     /// needs them to exist with the correct layer-kind tag if it's ever forced.
+    #[cfg(feature = "legacy-candle-parity")]
     fn tiny_weights(config: &ModelConfig, device: &candle_core::Device) -> GpuWeights {
         // #1082: GpuWeights fields are kt — build all tensors on a kt
         // device bridged from the candle `device` param.
@@ -7449,6 +7450,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "legacy-candle-parity")]
     fn test_generate_from_tokens_max_tokens() -> Result<()> {
         let config = tiny_config();
         let device = candle_core::Device::Cpu;
@@ -7476,6 +7478,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "legacy-candle-parity")]
     fn test_generate_from_tokens_deterministic() -> Result<()> {
         let config = tiny_config();
         let device = candle_core::Device::Cpu;
@@ -7505,6 +7508,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "legacy-candle-parity")]
     fn test_eos_detection() -> Result<()> {
         // Test that when the model produces an EOS token, generation stops.
         // We do this by generating with the tiny random model and verifying
@@ -7545,6 +7549,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "legacy-candle-parity")]
     fn test_generate_from_tokens_with_temperature() -> Result<()> {
         let config = tiny_config();
         let device = candle_core::Device::Cpu;
@@ -7575,6 +7580,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "legacy-candle-parity")]
     fn test_generate_speculative_max_tokens() -> Result<()> {
         let config = tiny_config();
         let device = candle_core::Device::Cpu;
@@ -7604,6 +7610,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "legacy-candle-parity")]
     fn test_empty_prompt_errors() {
         let config = tiny_config();
         let device = candle_core::Device::Cpu;
@@ -7621,6 +7628,7 @@ mod tests {
     // CPU build until a kt-CUDA paged test rewrite lands.
     #[cfg(feature = "cuda")]
     #[test]
+    #[cfg(feature = "legacy-candle-parity")]
     fn test_generate_paged_max_tokens() -> Result<()> {
         let config = tiny_config();
         // (#1082) kt paged cache is CUDA-only; this test needs a CUDA device.
@@ -7673,6 +7681,7 @@ mod tests {
     // CPU build until a kt-CUDA paged test rewrite lands.
     #[cfg(feature = "cuda")]
     #[test]
+    #[cfg(feature = "legacy-candle-parity")]
     fn test_generate_paged_shared_max_tokens() -> Result<()> {
         let config = tiny_config();
         // (#1082) kt paged cache is CUDA-only; this test needs a CUDA device.
@@ -7720,6 +7729,7 @@ mod tests {
     // CPU build until a kt-CUDA paged test rewrite lands.
     #[cfg(feature = "cuda")]
     #[test]
+    #[cfg(feature = "legacy-candle-parity")]
     fn test_paged_vs_contiguous_equivalence() -> Result<()> {
         let config = tiny_config();
         // (#1082) kt paged cache is CUDA-only; this test needs a CUDA device.
@@ -7774,6 +7784,7 @@ mod tests {
     // CPU build until a kt-CUDA paged test rewrite lands.
     #[cfg(feature = "cuda")]
     #[test]
+    #[cfg(feature = "legacy-candle-parity")]
     fn test_generate_streaming_paged() -> Result<()> {
         let config = tiny_config();
         // (#1082) kt paged cache is CUDA-only; this test needs a CUDA device.
@@ -7825,6 +7836,7 @@ mod tests {
     // CPU build until a kt-CUDA paged test rewrite lands.
     #[cfg(feature = "cuda")]
     #[test]
+    #[cfg(feature = "legacy-candle-parity")]
     fn test_generate_paged_shared_concurrent_requests_complete() -> Result<()> {
         let config = tiny_config();
         // (#1082) kt paged cache is CUDA-only; this test needs a CUDA device.
@@ -7906,6 +7918,7 @@ mod tests {
     // (#1082) CUDA kt paged cache test — gate to the cuda build (see sibling).
     #[cfg(feature = "cuda")]
     #[test]
+    #[cfg(feature = "legacy-candle-parity")]
     fn exact_prefix_cache_hit_skips_prefill_and_matches_tokens() -> Result<()> {
         let config = tiny_config();
         // (#1082) kt paged cache is CUDA-only; this test needs a CUDA device.
@@ -7981,6 +7994,7 @@ mod tests {
     // (#1082) CUDA kt paged cache test — gate to the cuda build (see sibling).
     #[cfg(feature = "cuda")]
     #[test]
+    #[cfg(feature = "legacy-candle-parity")]
     fn streaming_exact_prefix_cache_hit_uses_saved_first_token_source() -> Result<()> {
         let config = tiny_config();
         // (#1082) kt paged cache is CUDA-only; this test needs a CUDA device.
@@ -8078,6 +8092,7 @@ mod tests {
     // covered by the device-agnostic forward tests (test_model_forward_paged_*_cpu).
     #[cfg(feature = "cuda")]
     #[test]
+    #[cfg(feature = "legacy-candle-parity")]
     fn batched_exact_prefix_cache_hit_skips_prefill() -> Result<()> {
         let config = tiny_config();
         // (#1082) kt paged cache is CUDA-only; this test needs a CUDA device.
@@ -8173,6 +8188,7 @@ mod tests {
     // CPU build until a kt-CUDA paged test rewrite lands.
     #[cfg(feature = "cuda")]
     #[test]
+    #[cfg(feature = "legacy-candle-parity")]
     fn test_paged_eos_detection() -> Result<()> {
         let config = tiny_config();
         // (#1082) kt paged cache is CUDA-only; this test needs a CUDA device.

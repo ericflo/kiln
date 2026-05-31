@@ -12,6 +12,7 @@ use anyhow::{Context, Result};
 // The whole `CustomOp1/2/3 + BackpropOp + Storage/Layout/Shape/Error/bail/
 // CandleResult` block that backed those islands is gone. Bare `Tensor`/`Device`/
 // `DType`/`D` resolve to the kiln-native substrate.
+#[cfg(feature = "legacy-candle-parity")]
 #[allow(unused_imports)]
 use candle_core::Var;
 #[allow(unused_imports)]
@@ -6492,10 +6493,13 @@ impl GpuWeights {
         {
             // #1082: `device` is now `kiln_tensor::Device` (no `synchronize`);
             // bridge to candle for the Metal queue sync (candle Device has it).
-            kiln_kt_bridge::candle_device_from_kt(device)
-                .map_err(|e| anyhow::anyhow!("{e}"))?
-                .synchronize()
-                .context("synchronize after dropping Metal projection originals")?;
+            #[cfg(any(not(feature = "cuda"), feature = "metal"))]
+            {
+                kiln_kt_bridge::candle_device_from_kt(device)
+                    .map_err(|e| anyhow::anyhow!("{e}"))?
+                    .synchronize()
+                    .context("synchronize after dropping Metal projection originals")?;
+            }
             tracing::info!("Metal projection original buffer cache swept after load");
         }
 
@@ -25590,6 +25594,7 @@ mod tests {
     /// tests COMPILE via this bridge but are expected to be ported to a
     /// kt-tape / finite-diff oracle (the CP-4 long pole); they are NOT made to
     /// falsely pass here.
+    #[cfg(feature = "legacy-candle-parity")]
     fn kt_cpu_to_candle(t: &Tensor) -> candle_core::Tensor {
         let dims = t.dims().to_vec();
         let data = t
@@ -30845,6 +30850,7 @@ mod tests {
                  (gdn_chunkwise_recurrence is now kt, no candle graph). Compiles; \
                  needs a kt-tape / finite-diff oracle (CP-4 long pole) before it \
                  can validate again. See kiln-candle-autograd-drops-attn-conv-grads."]
+    #[cfg(feature = "legacy-candle-parity")]
     fn test_gdn_recurrent_backward_no_grad_matches_autograd_cpu() -> Result<()> {
         let device = Device::Cpu;
         let dtype = DType::F32;
@@ -31003,6 +31009,7 @@ mod tests {
     /// `test_gdn_recurrent_backward_no_grad_matches_autograd_cpu`).
     // #1082: kt analytic grad vs candle autograd-oracle grad — compare as host
     // f32 vectors (see `assert_grad_close` note above).
+    #[cfg(feature = "legacy-candle-parity")]
     fn assert_grad_close_tol(
         name: &str,
         actual: &Tensor,
@@ -31043,6 +31050,7 @@ mod tests {
     #[ignore = "#1082: candle-autograd oracle severed by the kt forward flip \
                  (gated_rms_norm_fallback is now kt). Compiles; needs a kt-tape / \
                  finite-diff oracle before it can validate again."]
+    #[cfg(feature = "legacy-candle-parity")]
     fn test_gdn_gated_rms_norm_backward_no_grad_matches_autograd_cpu() -> Result<()> {
         let device = Device::Cpu;
         let dtype = DType::F32;
@@ -31115,6 +31123,7 @@ mod tests {
     #[ignore = "#1082: candle-autograd oracle severed by the kt forward flip \
                  (l2_normalize is now kt). Compiles; needs a kt-tape / finite-diff \
                  oracle before it can validate again."]
+    #[cfg(feature = "legacy-candle-parity")]
     fn test_gdn_l2_norm_scale_backward_no_grad_matches_autograd_cpu() -> Result<()> {
         let device = Device::Cpu;
         let dtype = DType::F32;
@@ -31171,6 +31180,7 @@ mod tests {
     /// grads, and the backward fn is fed the same upstream as `grad_out` with
     /// `scale = 1/sqrt(hd)`, `causal = true`. Tolerance 1e-4 (F32).
     #[test]
+    #[cfg(feature = "legacy-candle-parity")]
     fn test_sdpa_fallback_backward_no_grad_matches_autograd_cpu() -> Result<()> {
         let device = Device::Cpu;
         let dtype = DType::F32;

@@ -1275,6 +1275,7 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
 /// Vulkan devices are detected at runtime — candle-core has no native Vulkan
 /// device, so we always pass a CPU device to `VulkanBackend` and let it
 /// manage its own `vk::Device` internally.
+#[cfg(any(feature = "metal", feature = "vulkan", feature = "legacy-candle-parity"))]
 pub fn for_device(device: &candle_core::Device) -> Arc<dyn BackendRuntime> {
     // (#1082 DoD-100 step 4) Candle-typed compat shim for the remaining
     // candle-device callers (the metal dispatch path + opd/test harnesses).
@@ -1368,6 +1369,7 @@ mod tests {
 
     #[cfg(feature = "cuda")]
     #[test]
+    #[cfg(feature = "legacy-candle-parity")]
     fn cuda_backend_declines_resident_decode() {
         // CUDA already keeps activations resident through candle's CUDA
         // device — the resident-decode plan does not apply.
@@ -1384,6 +1386,7 @@ mod tests {
 
     #[cfg(feature = "cuda")]
     #[test]
+    #[cfg(feature = "legacy-candle-parity")]
     fn cuda_backend_device_accessor_returns_kt() {
         // #1082 Phase 7: BackendRuntime::device() returns kt::Device by
         // value. The CUDA backend must round-trip the cuda(i) device

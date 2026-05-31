@@ -39,7 +39,9 @@ pub mod vk_decode_resident;
 pub mod vk_forward;
 pub mod weights;
 
-pub use backend::{BackendRuntime, for_device as backend_for_device};
+pub use backend::BackendRuntime;
+#[cfg(any(feature = "metal", feature = "vulkan", feature = "legacy-candle-parity"))]
+pub use backend::for_device as backend_for_device;
 pub use cancel::CancelHandle;
 pub use engine::Engine;
 pub use forward::LinearAttentionState;

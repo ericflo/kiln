@@ -26,7 +26,7 @@ kiln-flce-kernel = { workspace = true }
 # CUDA-only `kiln-kt-bridge/cuda` feature; the default CPU/Metal/Vulkan
 # build of `kiln-train` does not need the bridge (the wrapper is
 # called only behind `#[cfg(feature = "cuda")]` in `trainer.rs`).
-kiln-kt-bridge = { workspace = true }
+kiln-kt-bridge = { path = "../kiln-kt-bridge", default-features = false }
 kiln-model = { workspace = true }
 kiln-opd-loss-kernel = { workspace = true }
 kiln-tensor = { workspace = true }
@@ -56,7 +56,8 @@ kiln-tensor-id = { workspace = true }
 # yields a grad keyed by `Parameter::tensor_id()`.
 kiln-param = { workspace = true }
 kiln-optim = { workspace = true }
-candle-core = { workspace = true }
+# candle-core dropped from the cuda lane (#1082): kiln-train src + tests are
+# candle-code-free (the cuda+vulkan parity test pulls candle via kiln-model).
 # `candle-nn` is dev-only now: the last production caller
 # (`build_local_teacher_fixture` log_softmax) was inlined in commit
 # 35ad29e6; the only remaining refs are in
