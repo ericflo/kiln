@@ -278,8 +278,8 @@ impl KvCache {
 
         if self.seq_len == 0 {
             // First write: just quantize the new data
-            let (k_q, k_scale) = fp8::quantize_to_fp8(new_k)?;
-            let (v_q, v_scale) = fp8::quantize_to_fp8(new_v)?;
+            let (k_q, k_scale) = fp8_quantize_candle(new_k)?;
+            let (v_q, v_scale) = fp8_quantize_candle(new_v)?;
             k_cache.slice_set(&k_q, 2, 0)?;
             v_cache.slice_set(&v_q, 2, 0)?;
             self.fp8_scales[layer_idx] = (k_scale, v_scale);
@@ -291,9 +291,9 @@ impl KvCache {
             let existing_v_q = v_cache.narrow(2, 0, self.seq_len)?;
 
             let existing_k =
-                fp8::dequantize_from_fp8(&existing_k_q, old_k_scale, self.compute_dtype, &device)?;
+                fp8_dequantize_candle(&existing_k_q, old_k_scale, self.compute_dtype, &device)?;
             let existing_v =
-                fp8::dequantize_from_fp8(&existing_v_q, old_v_scale, self.compute_dtype, &device)?;
+                fp8_dequantize_candle(&existing_v_q, old_v_scale, self.compute_dtype, &device)?;
 
             let new_k_typed = new_k.to_dtype(self.compute_dtype)?;
             let new_v_typed = new_v.to_dtype(self.compute_dtype)?;
@@ -301,8 +301,8 @@ impl KvCache {
             let full_k = candle_core::Tensor::cat(&[&existing_k, &new_k_typed], 2)?;
             let full_v = candle_core::Tensor::cat(&[&existing_v, &new_v_typed], 2)?;
 
-            let (k_q, k_scale) = fp8::quantize_to_fp8(&full_k)?;
-            let (v_q, v_scale) = fp8::quantize_to_fp8(&full_v)?;
+            let (k_q, k_scale) = fp8_quantize_candle(&full_k)?;
+            let (v_q, v_scale) = fp8_quantize_candle(&full_v)?;
 
             k_cache.slice_set(&k_q, 2, 0)?;
             v_cache.slice_set(&v_q, 2, 0)?;
@@ -313,8 +313,8 @@ impl KvCache {
         let (k_scale, v_scale) = self.fp8_scales[layer_idx];
         let full_k_q = k_cache.narrow(2, 0, end)?;
         let full_v_q = v_cache.narrow(2, 0, end)?;
-        let full_k = fp8::dequantize_from_fp8(&full_k_q, k_scale, self.compute_dtype, &device)?;
-        let full_v = fp8::dequantize_from_fp8(&full_v_q, v_scale, self.compute_dtype, &device)?;
+        let full_k = fp8_dequantize_candle(&full_k_q, k_scale, self.compute_dtype, &device)?;
+        let full_v = fp8_dequantize_candle(&full_v_q, v_scale, self.compute_dtype, &device)?;
 
         Ok((full_k, full_v))
     }
@@ -340,6 +340,138 @@ fn cpu_compatible_compute_dtype(dtype: candle_core::DType, device: &candle_core:
     } else {
         dtype
     }
+}
+
+/// Bridge a candle tensor into a kt `Tensor` at the FP8 call boundary
+/// (#1082). `KvCache` is still candle-typed internally, but
+/// `crate::fp8` is now kt-native, so we translate here.
+///
+/// Device-agnostic across builds:
+/// - **CPU candle tensors** (the FP8 unit tests, the Vulkan/CPU build,
+///   and any candle CPU placement) take a typed host copy. The CUDA
+///   `kiln_kt_bridge` borrow path requires a CUDA location, so it cannot
+///   be used for CPU tensors on a CUDA build — hence the explicit host
+///   copy here.
+/// - **CUDA candle tensors** (the production decode path) reuse the
+///   zero-overhead `kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow`.
+///
+/// The tensor is made contiguous first: `kv_cache` passes `narrow`ed
+/// (possibly non-contiguous) views, and both the kt host path and the
+/// CUDA fast path expect contiguous inputs.
+fn fp8_candle_to_kt(t: &candle_core::Tensor) -> Result<kiln_tensor::Tensor> {
+    let t = t
+        .contiguous()
+        .context("fp8_candle_to_kt: contiguous")?;
+    match t.device() {
+        candle_core::Device::Cpu => {
+            let shape: Vec<usize> = t.dims().to_vec();
+            match t.dtype() {
+                candle_core::DType::F32 => {
+                    let v = t.flatten_all()?.to_vec1::<f32>()?;
+                    kiln_tensor::Tensor::from_vec(v, shape)
+                        .map_err(|e| anyhow::anyhow!("fp8_candle_to_kt f32: {e}"))
+                }
+                // BF16/F16 only flow through here on cuda/vulkan builds (the
+                // `half` dep is gated on those features; on a pure CPU build
+                // `cpu_compatible_compute_dtype` forces compute dtype to F32).
+                #[cfg(any(feature = "cuda", feature = "vulkan"))]
+                candle_core::DType::BF16 => {
+                    let v = t.flatten_all()?.to_vec1::<half::bf16>()?;
+                    kiln_tensor::Tensor::from_vec(v, shape)
+                        .map_err(|e| anyhow::anyhow!("fp8_candle_to_kt bf16: {e}"))
+                }
+                #[cfg(any(feature = "cuda", feature = "vulkan"))]
+                candle_core::DType::F16 => {
+                    let v = t.flatten_all()?.to_vec1::<half::f16>()?;
+                    kiln_tensor::Tensor::from_vec(v, shape)
+                        .map_err(|e| anyhow::anyhow!("fp8_candle_to_kt f16: {e}"))
+                }
+                candle_core::DType::U8 => {
+                    let v = t.flatten_all()?.to_vec1::<u8>()?;
+                    kiln_tensor::Tensor::from_vec(v, shape)
+                        .map_err(|e| anyhow::anyhow!("fp8_candle_to_kt u8: {e}"))
+                }
+                other => Err(anyhow::anyhow!(
+                    "fp8_candle_to_kt: unsupported CPU dtype {other:?}"
+                )),
+            }
+        }
+        _ => kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&t)
+            .map_err(|e| anyhow::anyhow!("fp8_candle_to_kt cuda bridge: {e}")),
+    }
+}
+
+/// Bridge a kt `Tensor` produced by `crate::fp8` back to a candle tensor
+/// placed on `device` (#1082). Inverse of [`fp8_candle_to_kt`].
+///
+/// - **CPU target**: typed host copy back into a candle CPU tensor.
+/// - **CUDA target**: `kiln_kt_bridge::kt_tensor_to_candle_cuda_copy`.
+fn fp8_kt_to_candle(
+    t: &kiln_tensor::Tensor,
+    device: &candle_core::Device,
+) -> Result<candle_core::Tensor> {
+    match device {
+        candle_core::Device::Cpu => {
+            let shape = t.shape().to_vec();
+            match t.dtype() {
+                kiln_tensor::DType::F32 => {
+                    let v = t.to_vec::<f32>().map_err(|e| anyhow::anyhow!("fp8_kt_to_candle f32: {e}"))?;
+                    candle_core::Tensor::from_vec(v, shape, device)
+                        .map_err(|e| anyhow::anyhow!("fp8_kt_to_candle f32 build: {e}"))
+                }
+                // BF16/F16 only flow through here on cuda/vulkan builds (the
+                // `half` dep is gated on those features).
+                #[cfg(any(feature = "cuda", feature = "vulkan"))]
+                kiln_tensor::DType::BF16 => {
+                    let v = t.to_vec::<half::bf16>().map_err(|e| anyhow::anyhow!("fp8_kt_to_candle bf16: {e}"))?;
+                    candle_core::Tensor::from_vec(v, shape, device)
+                        .map_err(|e| anyhow::anyhow!("fp8_kt_to_candle bf16 build: {e}"))
+                }
+                #[cfg(any(feature = "cuda", feature = "vulkan"))]
+                kiln_tensor::DType::F16 => {
+                    let v = t.to_vec::<half::f16>().map_err(|e| anyhow::anyhow!("fp8_kt_to_candle f16: {e}"))?;
+                    candle_core::Tensor::from_vec(v, shape, device)
+                        .map_err(|e| anyhow::anyhow!("fp8_kt_to_candle f16 build: {e}"))
+                }
+                kiln_tensor::DType::U8 => {
+                    let v = t.to_vec::<u8>().map_err(|e| anyhow::anyhow!("fp8_kt_to_candle u8: {e}"))?;
+                    candle_core::Tensor::from_vec(v, shape, device)
+                        .map_err(|e| anyhow::anyhow!("fp8_kt_to_candle u8 build: {e}"))
+                }
+                other => Err(anyhow::anyhow!(
+                    "fp8_kt_to_candle: unsupported CPU dtype {other:?}"
+                )),
+            }
+        }
+        _ => kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(t)
+            .map_err(|e| anyhow::anyhow!("fp8_kt_to_candle cuda bridge: {e}")),
+    }
+}
+
+/// Quantize a candle K/V tensor to FP8 (U8 + scale) through the kt-native
+/// `crate::fp8` path, returning a candle U8 tensor on the input device.
+fn fp8_quantize_candle(t: &candle_core::Tensor) -> Result<(candle_core::Tensor, f32)> {
+    let device = t.device().clone();
+    let kt_in = fp8_candle_to_kt(t)?;
+    let (kt_q, scale) = fp8::quantize_to_fp8(&kt_in)?;
+    let q = fp8_kt_to_candle(&kt_q, &device)?;
+    Ok((q, scale))
+}
+
+/// Dequantize a candle U8 FP8 tensor back to `target_dtype` on `device`
+/// through the kt-native `crate::fp8` path.
+fn fp8_dequantize_candle(
+    quantized: &candle_core::Tensor,
+    scale: f32,
+    target_dtype: candle_core::DType,
+    device: &candle_core::Device,
+) -> Result<candle_core::Tensor> {
+    let kt_in = fp8_candle_to_kt(quantized)?;
+    let kt_dtype = kiln_kt_bridge::candle_dtype_to_kt(target_dtype)
+        .map_err(|e| anyhow::anyhow!("fp8_dequantize_candle: target dtype: {e}"))?;
+    let kt_device = kiln_kt_bridge::kt_device_from_candle(device);
+    let kt_out = fp8::dequantize_from_fp8(&kt_in, scale, kt_dtype, &kt_device)?;
+    fp8_kt_to_candle(&kt_out, device)
 }
 
 #[cfg(test)]
