@@ -3365,7 +3365,7 @@ pub fn try_tape_causal_conv1d_prefill_cuda(
 /// `l2_normalize`'s hard-coded `1e-6`.
 #[derive(Debug)]
 pub(crate) struct GdnL2NormScaleBackward {
-    x: Tensor,
+    x: kiln_tensor::Tensor, // #1082: candle->kt (the bwd kernel is already kt-native).
     scale: f64,
     eps: f64,
 }
@@ -3381,13 +3381,9 @@ impl BackwardOp for GdnL2NormScaleBackward {
         &self,
         grad_output: &kiln_tensor::Tensor,
     ) -> kiln_tensor::Result<Vec<Option<kiln_tensor::Tensor>>> {
-        // #1082: `gdn_l2_norm_scale_backward_no_grad` is now kt-typed. Bridge
-        // the candle-stored `x` + the kt upstream grad to kt; the returned dx
-        // is already kt.
-        let x_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&self.x).map_err(|e| {
-            kiln_tensor::Error::Msg(format!("GdnL2NormScaleBackward: x candle->kt: {e}"))
-        })?;
-        let dx = gdn_l2_norm_scale_backward_no_grad(&x_kt, self.scale, self.eps, grad_output)
+        // #1082 kt-native: `x` is stored kt now (no candle bridge); the bwd kernel
+        // is already kt-typed.
+        let dx = gdn_l2_norm_scale_backward_no_grad(&self.x, self.scale, self.eps, grad_output)
             .map_err(|e| {
                 kiln_tensor::Error::Msg(format!("GdnL2NormScaleBackward: bwd: {e}"))
             })?;
@@ -3409,6 +3405,41 @@ impl BackwardOp for GdnL2NormScaleBackward {
 ///
 /// `Ok(None)` (caller falls through to the existing `gdn_qk_norm`) when the gate
 /// is off, no tape scope is active, the input isn't CUDA, or a kt borrow fails.
+/// kt-native L2-norm-scale tape recorder (#1082 seam flip) — kt-only twin of
+/// [`try_tape_gdn_l2_norm_scale_cuda`]. Record-only: records the (now kt-native)
+/// `GdnL2NormScaleBackward` (stores kt `x`; bwd kernel already kt) linking kt `out`
+/// back to kt `x`. No candle round-trip.
+pub fn try_tape_gdn_l2_norm_scale_kt(
+    x: &kiln_tensor::Tensor,
+    scale: f64,
+    out: &kiln_tensor::Tensor,
+) -> Result<Option<kiln_tensor::Tensor>> {
+    if !tape_forward_enabled() || !tape_gdn_qk_norm_enabled() {
+        return Ok(None);
+    }
+    if !matches!(x.device(), kiln_tensor::Device::Cuda(_)) {
+        return Ok(None);
+    }
+    if x.dims() != out.dims() {
+        return Ok(None);
+    }
+    let recorded = with_active_tape(|tape: &mut Tape| {
+        tape.record(
+            out,
+            &[x],
+            Box::new(GdnL2NormScaleBackward {
+                x: x.clone(),
+                scale,
+                eps: 1e-6,
+            }),
+        );
+    });
+    if recorded.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(out.clone()))
+}
+
 pub fn try_tape_gdn_l2_norm_scale_cuda(
     x: &Tensor,
     scale: f64,
@@ -3445,7 +3476,7 @@ pub fn try_tape_gdn_l2_norm_scale_cuda(
             &out_kt,
             &[&x_kt],
             Box::new(GdnL2NormScaleBackward {
-                x: x.clone(),
+                x: x_kt.clone(), // #1082: store kt (struct field flipped candle->kt)
                 scale,
                 eps: 1e-6,
             }),

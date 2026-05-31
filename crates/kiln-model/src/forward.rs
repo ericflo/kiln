@@ -11414,22 +11414,11 @@ fn gdn_qk_norm(q: &Tensor, k: &Tensor, input_dtype: DType, scale: f64) -> Result
     // re-run); no-op unless `KILN_USE_TAPE_FORWARD` + `KILN_USE_TAPE_GDN_QK_NORM`
     // are set AND a tape scope is active. The production outputs are untouched.
     // All fast paths feed through here, so the wiring covers every dispatch.
+    // #1082 seam flip: kt-native GdnL2NormScaleBackward recorder — no kt->candle->kt.
     #[cfg(feature = "cuda")]
-    // #1082 CUDA-graph fix: gate on `bridge_scope_active()` (decode skips
-    // these candle bridges — see `residual_add`).
-    if crate::tape_forward::tape_forward_enabled()
-        && kiln_kt_bridge::tape_bridge::bridge_scope_active()
-    {
-        let q_candle = kt_logits_to_candle(q).context("gdn_qk_norm kt->candle q (tape)")?;
-        let k_candle = kt_logits_to_candle(k).context("gdn_qk_norm kt->candle k (tape)")?;
-        let q_out_candle =
-            kt_logits_to_candle(&q_out).context("gdn_qk_norm kt->candle q_out (tape)")?;
-        let k_out_candle =
-            kt_logits_to_candle(&k_out).context("gdn_qk_norm kt->candle k_out (tape)")?;
-        let _ =
-            crate::tape_forward::try_tape_gdn_l2_norm_scale_cuda(&q_candle, scale, &q_out_candle)?;
-        let _ =
-            crate::tape_forward::try_tape_gdn_l2_norm_scale_cuda(&k_candle, 1.0, &k_out_candle)?;
+    if crate::tape_forward::tape_forward_enabled() {
+        let _ = crate::tape_forward::try_tape_gdn_l2_norm_scale_kt(q, scale, &q_out)?;
+        let _ = crate::tape_forward::try_tape_gdn_l2_norm_scale_kt(k, 1.0, &k_out)?;
     }
 
     Ok((q_out, k_out))
