@@ -88,8 +88,8 @@ use crate::cd_types::CdDevice;
 use crate::trainer::{grpo_loss, token_log_probs, GrpoLossParams};
 #[cfg(feature = "cuda")]
 use anyhow::{Context, Result};
-#[cfg(feature = "cuda")]
-use candle_core::Tensor;
+// (#1082) candle Tensor import removed — the GRPO PG loss adapter returns
+// `kiln_tensor::Tensor` (kt-native); no candle type remains in this module.
 #[cfg(feature = "cuda")]
 use kiln_autograd::{tape_forward_enabled, with_active_tape, BackwardOp, Tape};
 
