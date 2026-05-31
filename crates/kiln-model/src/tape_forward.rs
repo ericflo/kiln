@@ -1192,6 +1192,304 @@ pub fn try_tape_cross_entropy_from_logits_cuda(
     Ok(Some(out))
 }
 
+/// kt-NATIVE backward for the fused "cross-entropy from full logits" loss node
+/// ([`try_tape_cross_entropy_from_logits_kt`]).
+///
+/// # Why kt-native (vs the candle-copy [`CrossEntropyFromLogitsBackward`])
+///
+/// The earlier [`CrossEntropyFromLogitsBackward`] saved the FULL `[1, T, V]`
+/// logits as a candle `Tensor` because the forward adapter
+/// ([`try_tape_cross_entropy_from_logits_cuda`]) took candle logits — which in
+/// the tape-authoritative SFT path meant `cross_entropy_loss` first copied the
+/// kt lm_head logits into a candle `[1, T, V]` tensor (≈150 MB+/step for real
+/// shapes) purely so the candle adapter could re-borrow them. That copy was
+/// pure waste: the saved candle logits are immediately re-bridged to kt inside
+/// `apply` for the (already kt-native) analytic backward
+/// [`crate::forward::cross_entropy_from_logits_grad_candle`]. (#1082 H6)
+///
+/// This struct saves the kt logits DIRECTLY (an `Arc` bump on the kt storage —
+/// no device copy), plus the host-side `input_ids` / `label_mask`. The backward
+/// calls the SAME analytic kt grad function with no candle round-trip.
+///
+/// # Saved tensors
+///
+/// `logits` is the FULL forward logits `[1, T, V]` as a kt tensor (a cheap
+/// clone — an `Arc` bump on the kt storage), plus the host-side `input_ids` /
+/// `label_mask`. The analytic grad recomputes the forward gather + softmax from
+/// these (no extra device tensors saved).
+///
+/// # Gradient
+///
+/// See [`crate::forward::cross_entropy_from_logits_grad_candle`] (a misnomer —
+/// it is kt-native: kt input, kt output): mean reduction (`1/num_active`), the
+/// `softmax - one_hot` per-active-row term scaled by the incoming scalar seed,
+/// scattered back to the active shifted rows with a trailing zero row for the
+/// dropped `lg[T-1]`. Returned as a single `[1, T, V]` kt grad (input count 1).
+#[derive(Debug)]
+pub(crate) struct CrossEntropyFromLogitsKtBackward {
+    /// FULL forward logits `[1, T, V]` (kt clone — an `Arc` bump, no copy).
+    logits: kiln_tensor::Tensor,
+    input_ids: Vec<u32>,
+    label_mask: Vec<bool>,
+}
+
+impl BackwardOp for CrossEntropyFromLogitsKtBackward {
+    fn name(&self) -> &'static str {
+        "cross_entropy_from_logits_kt_backward"
+    }
+    fn input_count(&self) -> usize {
+        // The full logits [1, T, V].
+        1
+    }
+    fn requires_input(&self, _idx: usize) -> bool {
+        // The analytic grad recomputes the forward gather from the SAVED kt
+        // `logits`; the tape walker need not re-materialise the input activation.
+        false
+    }
+    fn apply(
+        &self,
+        grad_output: &kiln_tensor::Tensor,
+    ) -> kiln_tensor::Result<Vec<Option<kiln_tensor::Tensor>>> {
+        // The upstream grad is the scalar dL/dloss seed (typically 1.0). Read the
+        // scalar so the analytic grad can fold it into the mean-reduction's
+        // per-row gradient (backward is linear in the seed). Pure kt — no candle.
+        let grad_scalar = grad_output
+            .to_dtype(kiln_tensor::DType::F32)
+            .and_then(|t| t.flatten_all())
+            .and_then(|t| t.to_vec1::<f32>())
+            .map_err(|e| {
+                kiln_tensor::Error::Msg(format!(
+                    "CrossEntropyFromLogitsKtBackward: grad scalar read: {e}"
+                ))
+            })?
+            .first()
+            .copied()
+            .ok_or_else(|| {
+                kiln_tensor::Error::Msg(
+                    "CrossEntropyFromLogitsKtBackward: empty grad_output".to_string(),
+                )
+            })? as f64;
+
+        // `cross_entropy_from_logits_grad_candle` is kt-native (kt logits in,
+        // kt `[1, T, V]` grad out) — its `(softmax - one_hot) * (grad_scalar/A)`
+        // is EXACTLY the CE-from-logits gradient. No candle bridge: the kt logits
+        // are passed straight in.
+        let grad_logits = crate::forward::cross_entropy_from_logits_grad_candle(
+            &self.logits,
+            &self.input_ids,
+            &self.label_mask,
+            grad_scalar,
+        )
+        .map_err(|e| {
+            kiln_tensor::Error::Msg(format!(
+                "CrossEntropyFromLogitsKtBackward: kt analytic grad: {e}"
+            ))
+        })?;
+
+        // The analytic grad output is freshly built (cat/unsqueeze → possibly
+        // non-contiguous) — materialise contiguous as an owned kt tensor.
+        let grad_logits_kt = grad_logits.contiguous().map_err(|e| {
+            kiln_tensor::Error::Msg(format!(
+                "CrossEntropyFromLogitsKtBackward: grad contiguous: {e}"
+            ))
+        })?;
+
+        Ok(vec![Some(grad_logits_kt)])
+    }
+}
+
+/// kt-NATIVE variant of [`try_tape_cross_entropy_from_logits_cuda`]: roots the
+/// WHOLE next-token cross-entropy loss at a SINGLE fused kt `Tape` node taking
+/// the FULL `[1, T, V]` kt logits DIRECTLY — with NO `[1, T, V]` kt -> candle
+/// copy.
+///
+/// # Why this exists (#1082 H6)
+///
+/// The candle-typed sibling [`try_tape_cross_entropy_from_logits_cuda`] takes
+/// candle logits, so in the tape-authoritative SFT path `cross_entropy_loss`
+/// first bridged the kt lm_head logits into a full `[1, T, V]` candle tensor
+/// (≈150 MB+/step) just so the candle adapter could re-borrow them via
+/// `tape_kt_input` — immediately resolving them back to kt. That copy is pure
+/// waste. This entry takes the kt logits straight from the trainer (the kt
+/// lm_head output), runs the CE forward in kt, and records a kt-native
+/// [`CrossEntropyFromLogitsKtBackward`] node against them — only the resulting
+/// SCALAR loss crosses back to candle (a tiny bridge for the `candle_core::Tensor`
+/// return type the candle-island `cross_entropy_loss` still has).
+///
+/// # Forward (mirrors `cross_entropy_loss`, kt-native)
+///
+/// ```text
+/// lg        = logits.squeeze(0)            [T, V]
+/// shift     = lg.narrow(0, 0, T-1)         [T-1, V]   (predict token[i+1] from logit[i])
+/// active    = shift.index_select(active_positions, 0)   [A, V]
+/// active32  = active.to_dtype(F32)
+/// lse       = active32.log_sum_exp(last)   [A]
+/// correct   = active32.flatten[a*V + y_a]  [A]   (FLAT index_select; kt `gather` is CPU-only)
+/// loss      = mean_a( lse[a] - correct[a] )         (scalar; matches the candle .mean_all())
+/// ```
+///
+/// where `active_positions = { i in 0..T-1 : label_mask[i+1] }`, `A = num_active`,
+/// `y_a = input_ids[active_positions[a] + 1]`. This is numerically identical to
+/// `cross_entropy_loss`'s candle baseline (same shift / active-set convention as
+/// `crate::trainer::token_log_probs`).
+///
+/// # Returns
+///
+/// * `Ok(Some(loss))` — the tape-forward path ran: a DETACHED, lineage-free
+///   candle scalar loss (a fresh kt -> candle CUDA copy of the kt scalar loss,
+///   numerically identical to the candle baseline) with a
+///   [`CrossEntropyFromLogitsKtBackward`] node recorded on the active tape,
+///   IO-mapped into the bridge. The loss is detached unconditionally so the
+///   tape-authoritative caller's `loss.backward()` is always `{loss: ones}` and
+///   the recorded node is the sole backward root.
+/// * `Ok(None)` — the gate is off, `logits` isn't a CUDA rank-3 `[1, T, V]`, no
+///   tape scope is active, or an empty active set. The caller falls through to
+///   the candle loss composite.
+/// * `Err(...)` — an unexpected forward or kt -> candle scalar copy-back failure.
+pub fn try_tape_cross_entropy_from_logits_kt(
+    logits: &kiln_tensor::Tensor,
+    input_ids: &[u32],
+    label_mask: &[bool],
+) -> Result<Option<Tensor>> {
+    use kiln_tensor::{DType as KtDType, Tensor as KtTensor};
+
+    if !tape_forward_enabled() {
+        return Ok(None);
+    }
+
+    // Full model logits only: [1, T, V] on CUDA. Defer any other shape/device to
+    // the caller's candle composite.
+    let dims = logits.dims().to_vec();
+    if dims.len() != 3
+        || dims[0] != 1
+        || dims[1] != input_ids.len()
+        || label_mask.len() != input_ids.len()
+        || !matches!(logits.device(), kiln_tensor::Device::Cuda(_))
+    {
+        return Ok(None);
+    }
+    let seq_len = input_ids.len();
+    if seq_len < 2 {
+        return Ok(None);
+    }
+    let vocab = dims[2];
+
+    // Active next-token positions in the SHIFTED frame (== seq positions in
+    // logits[0 .. T-1]): { i : label_mask[i+1] }. Same set/order as
+    // `crate::trainer::token_log_probs` builds from `shift_mask = mask[1..]`.
+    let active_positions: Vec<usize> = label_mask
+        .get(1..)
+        .map(|shift_mask| {
+            shift_mask
+                .iter()
+                .enumerate()
+                .filter_map(|(i, &m)| if m { Some(i) } else { None })
+                .collect()
+        })
+        .unwrap_or_default();
+    if active_positions.is_empty() {
+        // No supervised positions — let the caller's composite raise the same
+        // error it would have raised, rather than bailing here.
+        return Ok(None);
+    }
+    let num_active = active_positions.len();
+
+    let device = *logits.device();
+
+    // kt input — thread the lm_head adapter's output so the tape stays connected
+    // (consumer input id == producer output id). The trainer already chains the
+    // kt logits id into the bridge before calling, so `tape_bridge::kt_input_for_*`
+    // resolves it; fall back to the logits as-is (it IS the kt lm_head output).
+    let logits_kt = logits.clone();
+
+    // --- Forward: scalar CE loss, kt-native (no candle [1, T, V] copy). ---
+    let shift_logits = logits_kt
+        .squeeze(0) // [T, V]
+        .and_then(|t| t.narrow(0, 0, seq_len - 1)) // [T-1, V]
+        .context("try_tape_cross_entropy_from_logits_kt: shift_logits")?;
+    let active_idx_u32: Vec<u32> = active_positions.iter().map(|&i| i as u32).collect();
+    let active_idx = KtTensor::from_vec_on(device, active_idx_u32, vec![num_active])
+        .map_err(|e| anyhow::anyhow!("try_tape_cross_entropy_from_logits_kt: active_idx: {e}"))?;
+    let active_logits_f32 = shift_logits
+        .index_select(&active_idx, 0)
+        .and_then(|t| t.to_dtype(KtDType::F32)) // [A, V] F32
+        .map_err(|e| {
+            anyhow::anyhow!("try_tape_cross_entropy_from_logits_kt: active_logits: {e}")
+        })?;
+    let log_sum_exp = active_logits_f32
+        .log_sum_exp(kiln_tensor::D::Minus1) // [A]
+        .map_err(|e| anyhow::anyhow!("try_tape_cross_entropy_from_logits_kt: log_sum_exp: {e}"))?;
+
+    // correct_logits[a] = active_logits_f32[a, y_a]. kt `gather` is CPU-only, so
+    // select via a FLAT `index_select` (CUDA-capable) at a*vocab + y_a — exactly
+    // as `crate::trainer::token_log_probs` does.
+    let mut flat_idx: Vec<u32> = Vec::with_capacity(num_active);
+    for (a, &p) in active_positions.iter().enumerate() {
+        let label = input_ids[p + 1] as usize;
+        anyhow::ensure!(
+            label < vocab,
+            "try_tape_cross_entropy_from_logits_kt: label {label} (pos {p}) >= vocab {vocab}"
+        );
+        flat_idx.push((a * vocab + label) as u32);
+    }
+    let flat_indices = KtTensor::from_vec_on(device, flat_idx, vec![num_active])
+        .map_err(|e| anyhow::anyhow!("try_tape_cross_entropy_from_logits_kt: flat_idx: {e}"))?;
+    let correct_logits = active_logits_f32
+        .contiguous()
+        .and_then(|t| t.flatten_all()) // [A*V]
+        .and_then(|t| t.index_select(&flat_indices, 0)) // [A]
+        .map_err(|e| {
+            anyhow::anyhow!("try_tape_cross_entropy_from_logits_kt: correct_logits: {e}")
+        })?;
+
+    // loss = mean_a( log_sum_exp[a] - correct_logits[a] ).
+    let per_token_loss = log_sum_exp
+        .sub(&correct_logits)
+        .map_err(|e| anyhow::anyhow!("try_tape_cross_entropy_from_logits_kt: per_token: {e}"))?;
+    let loss_kt_forward = per_token_loss
+        .mean_all()
+        .map_err(|e| anyhow::anyhow!("try_tape_cross_entropy_from_logits_kt: mean_all: {e}"))?;
+
+    // Record the fused node: the OUTPUT is the OWNED kt scalar loss (it carries
+    // no candle lineage and has independent kt storage, so it does not dangle).
+    // The single differentiable input is the CONNECTED kt logits, so the recorded
+    // `CrossEntropyFromLogitsKtBackward` node roots `dL/d(logits)` directly at the
+    // lm_head kt output — no candle id-mapping dance.
+    let loss_kt = match with_active_tape(|tape: &mut Tape| -> Result<_> {
+        let loss_kt = loss_kt_forward;
+        tape.record(
+            &loss_kt,
+            &[&logits_kt],
+            Box::new(CrossEntropyFromLogitsKtBackward {
+                logits: logits_kt.clone(),
+                input_ids: input_ids.to_vec(),
+                label_mask: label_mask.to_vec(),
+            }) as Box<dyn BackwardOp>,
+        );
+        Ok(loss_kt)
+    }) {
+        Some(result) => result,
+        None => return Ok(None),
+    };
+    let loss_kt = loss_kt
+        .context("tape_forward::try_tape_cross_entropy_from_logits_kt: kt-tape forward failed")?;
+
+    // Return a DETACHED, lineage-free candle SCALAR loss (a fresh kt -> candle
+    // CUDA copy of the kt scalar loss, numerically identical to the baseline).
+    // Only the scalar crosses to candle (≈4 bytes) — the [1, T, V] copy is gone.
+    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&loss_kt).context(
+        "tape_forward::try_tape_cross_entropy_from_logits_kt: kt -> candle scalar copy failed",
+    )?;
+
+    // CP-4 (#1082) tape_bridge: only `logits` is differentiable. Map the output /
+    // retain onto the RETURNED detached copy's id so the tape-authoritative scope
+    // resolves `loss.id()` → `loss_kt` to seed the tape root.
+    kiln_kt_bridge::tape_bridge::register_output_mapping(loss_kt.id(), out.id());
+    kiln_kt_bridge::tape_bridge::retain_output_for_chaining(&loss_kt, out.id());
+
+    Ok(Some(out))
+}
+
 /// Attempt to run the LoRA delta-and-add through the kt-typed op surface
 /// (`kiln_tensor::ops::{matmul, mul_scalar, add}`) and record a fused
 /// `LoraDeltaAddBackward` node on the active thread-local tape.

@@ -5993,10 +5993,33 @@ fn cross_entropy_loss(
 ) -> Result<candle_core::Tensor> {
     let seq_len = input_ids.len();
 
-    // Bridge the kt logits + device to candle once at the island boundary, and
-    // register kt->candle id chaining so the candle `try_tape_*` adapters'
-    // `tape_kt_input` recovers the lm_head kt output and keep the tape
-    // connected back to the LoRA forward (a bare copy would island it).
+    // #1082 H6: when tape-authoritative on CUDA, route the WHOLE loss through the
+    // kt-NATIVE fused "cross-entropy from full logits" node, taking the kt logits
+    // (the lm_head kt output) DIRECTLY — with NO `[1, T, V]` kt->candle copy. The
+    // recorded backward is kt-native and the node's single input is the connected
+    // kt logits id, so `dL/d(logits)` flows straight into the lm_head tape node
+    // (no candle id-mapping). Only the SCALAR loss crosses back to candle for the
+    // `candle_core::Tensor` return type. This eliminates the ≈150 MB+/step
+    // `[1, T, V]` logits bridge that the candle adapter
+    // (`try_tape_cross_entropy_from_logits_cuda`) required.
+    #[cfg(feature = "cuda")]
+    if tape_authoritative_enabled() {
+        if let Some(loss) = kiln_model::tape_forward::try_tape_cross_entropy_from_logits_kt(
+            logits,
+            input_ids,
+            label_mask,
+        )? {
+            return Ok(loss);
+        }
+    }
+
+    // Candle-authoritative fallback (and any case the kt path declined): bridge
+    // the kt logits + device to candle once at the island boundary, and register
+    // kt->candle id chaining so the candle `try_tape_*` adapters' `tape_kt_input`
+    // recovers the lm_head kt output and keep the tape connected back to the LoRA
+    // forward (a bare copy would island it). NOTE: this `[1, T, V]` bridge is now
+    // built ONLY on the fallback path — the kt-authoritative early-return above
+    // never constructs it (#1082 H6).
     let cd_device = kiln_kt_bridge::candle_device_from_kt(device)
         .map_err(|e| anyhow::anyhow!("cross_entropy_loss: kt->candle device: {e}"))?;
     let logits_candle = {
@@ -6011,27 +6034,6 @@ fn cross_entropy_loss(
         kiln_kt_bridge::tape_bridge::retain_output_for_chaining(logits, candle.id());
         candle
     };
-
-    // #1082 CP-4 Increment 1: when tape-authoritative, route the WHOLE loss
-    // through the fused "cross-entropy from full logits" node. It takes the
-    // full `[1, T, V]` model logits directly (not the four un-taped
-    // squeeze/narrow/index_select/to_f32 ops below), so the tape root's input
-    // is the lm_head output rather than a fresh-borrow island — the chain that
-    // previously died one op below the loss (`tape_has_grad=0/50`) now reaches
-    // the lm_head once that op is wired. Gated on the authoritative flag; the
-    // candle-authoritative path (which still calls `loss.backward()`) falls
-    // through to the lineage-carrying candle composite below.
-    #[cfg(feature = "cuda")]
-    if tape_authoritative_enabled() {
-        if let Some(loss) = kiln_model::tape_forward::try_tape_cross_entropy_from_logits_cuda(
-            &logits_candle,
-            input_ids,
-            label_mask,
-            &cd_device,
-        )? {
-            return Ok(loss);
-        }
-    }
 
     // Squeeze batch dimension: [seq_len, vocab_size]
     let logits = logits_candle.squeeze(0)?;
