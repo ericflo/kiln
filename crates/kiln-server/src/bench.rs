@@ -167,29 +167,9 @@ fn greedy_sample_kt(_logits: &kiln_tensor::Tensor) -> Result<u32> {
     anyhow::bail!("bench greedy_sample_kt requires the `cuda` feature (#1082)")
 }
 
-/// Copy-bridge a kt `Tensor` into a candle `Tensor`.
-///
-/// Used by the MTP bench arm to hand kt-produced activations
-/// (`h_prev`, prefill logits) to the still-candle MTP decode step and host
-/// sampler. CUDA-only copy; the non-CUDA arm errors at runtime since the
-/// bench decode path is CUDA-only in practice (issue #1082, candle removal).
-#[cfg(feature = "cuda")]
-fn bench_kt_tensor_to_candle(t: &kiln_tensor::Tensor) -> Result<kiln_kt_bridge::candle_core::Tensor> {
-    let contig;
-    let t = if t.is_contiguous() {
-        t
-    } else {
-        contig = t.contiguous()?;
-        &contig
-    };
-    kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(t)
-        .map_err(|e| anyhow::anyhow!("bench kt -> candle tensor bridge: {e}"))
-}
-
-#[cfg(not(feature = "cuda"))]
-fn bench_kt_tensor_to_candle(_t: &kiln_tensor::Tensor) -> Result<kiln_kt_bridge::candle_core::Tensor> {
-    anyhow::bail!("bench_kt_tensor_to_candle requires the `cuda` feature (#1082)")
-}
+// (#1082) Deleted `bench_kt_tensor_to_candle`: the MTP bench arm's decode step
+// + host sampler are now kt-native, so the kt->candle copy-bridge it provided
+// has zero callers. rustc-confirmed dead.
 
 struct BenchGdnRecurrentResidentStateScope<'a> {
     backend: &'a dyn kiln_model::BackendRuntime,
