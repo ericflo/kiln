@@ -446,30 +446,35 @@ fn tape_forward_silu_bit_exact_parity_with_baseline() {
         std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
     }
 
-    // Baseline — no scope, adapter short-circuits.
-    let none_out = kiln_model::tape_forward::try_tape_silu_cuda(&x)
-        .expect("baseline try_tape_silu_cuda ok");
+    // #1082: production uses the kt-native twin `try_tape_silu_kt`; validate it
+    // directly. Build the kt input once (the candle adapter is gone).
+    let x_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&x)
+        .expect("x kt borrow");
+
+    // Baseline — no scope, twin short-circuits.
+    let none_out = kiln_model::tape_forward::try_tape_silu_kt(&x_kt)
+        .expect("baseline try_tape_silu_kt ok");
     assert!(
         none_out.is_none(),
         "baseline path (no tape scope) must short-circuit to Ok(None)"
     );
 
     // Baseline forward via the kt op-registry directly (matches what
-    // `try_tape_silu_cuda` calls when a scope is open).
-    let x_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&x)
-        .expect("x kt borrow");
+    // `try_tape_silu_kt` calls when a scope is open).
     let baseline_kt = kiln_tensor::ops::silu(&x_kt).expect("kt silu");
     let baseline_out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&baseline_kt)
         .expect("baseline kt -> candle");
 
-    // Tape-forward inside an active scope.
+    // Tape-forward inside an active scope (the kt-native twin).
     let (tape_result, tape) =
         kiln_model::tape_forward::with_thread_local_tape(|| {
-            kiln_model::tape_forward::try_tape_silu_cuda(&x)
+            kiln_model::tape_forward::try_tape_silu_kt(&x_kt)
         });
-    let tape_out = tape_result
-        .expect("tape-forward try_tape_silu_cuda ok")
+    let tape_out_kt = tape_result
+        .expect("tape-forward try_tape_silu_kt ok")
         .expect("tape-forward returned Some(out)");
+    let tape_out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&tape_out_kt)
+        .expect("tape kt -> candle");
 
     let diff = max_abs_diff(&baseline_out, &tape_out);
     assert_eq!(
@@ -506,8 +511,10 @@ fn tape_forward_silu_short_circuits_without_active_scope() {
     unsafe {
         std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
     }
-    let out = kiln_model::tape_forward::try_tape_silu_cuda(&x)
-        .expect("try_tape_silu_cuda call ok");
+    // #1082: production uses the kt-native twin; validate IT short-circuits.
+    let x_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&x).expect("x kt borrow");
+    let out = kiln_model::tape_forward::try_tape_silu_kt(&x_kt)
+        .expect("try_tape_silu_kt call ok");
     assert!(
         out.is_none(),
         "no active tape scope must short-circuit to Ok(None)"
