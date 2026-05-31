@@ -7,8 +7,12 @@ export const meta = {
 // Disjoint subsystem groups — each agent owns a set of functions and
 // writes ONLY its own JSON file (no shared-file write conflict).
 const GROUPS = [
-  { tag: 'casc_gdn', fns: ['metal_gdn_gates_supports', 'metal_gdn_gates_bf16', 'metal_gated_rms_norm_supports', 'metal_gated_rms_norm_bf16', 'metal_gdn_recurrent_prefill_native_head_last_supports', 'metal_gdn_recurrent_prefill_native_head_last_bf16'] },
-  { tag: 'casc_coop', fns: ['metal_transposed_coop_gemv_batch_bf16', 'metal_transposed_coop_gemv_bf16_with_tile', 'metal_rotary_table_batch_stride'] },
+  { tag: 'tm_conv1d', fns: ['metal_conv1d_prefill_supports', 'metal_causal_conv1d_prefill_bf16_f32_k4', 'metal_conv1d_update_supports', 'metal_causal_conv1d_update_bf16_f32_k4'] },
+  { tag: 'tm_gdn_chunk', fns: ['metal_gdn_chunk_prep_supports', 'metal_gdn_chunk_prep_bf16', 'metal_gdn_full_chunk_forward_supports', 'metal_gdn_full_chunk_forward_bf16', 'metal_gdn_full_chunk_forward_head_last_supports', 'metal_gdn_full_chunk_forward_head_last_into_bf16', 'metal_gdn_full_chunk_forward_strided_inputs_support'] },
+  { tag: 'tm_gdn_fwdsub', fns: ['metal_gdn_forward_substitution_supports', 'metal_gdn_forward_substitution_bf16', 'metal_gdn_forward_substitution_f32'] },
+  { tag: 'tm_gdn_recur', fns: ['metal_gdn_in_proj_decode_supports', 'metal_gdn_in_proj_decode_bf16', 'metal_gdn_recurrent_supports', 'metal_gdn_recurrent_bf16', 'metal_gdn_recurrent_prefill_head_last_supports', 'metal_gdn_recurrent_prefill_head_last_bf16'] },
+  { tag: 'tm_paged_attn', fns: ['metal_paged_attn_decode_contiguous_supports', 'metal_paged_attn_decode_contiguous_bf16_d256', 'metal_paged_attn_decode_contiguous_batch_supports', 'metal_paged_attn_decode_contiguous_batch_bf16_d256', 'metal_paged_attn_decode_contiguous_batch_dyn_seqlen_supports', 'metal_paged_attn_decode_contiguous_batch_dyn_seqlen_bf16_d256'] },
+  { tag: 'tm_paged_kv', fns: ['metal_paged_kv_head_major_read_supports', 'metal_paged_kv_head_major_read_bf16', 'metal_paged_kv_head_major_read_append_token_major_supports', 'metal_paged_kv_head_major_read_append_token_major_bf16', 'metal_paged_kv_write_token_major_supports', 'metal_paged_kv_write_token_major_bf16', 'metal_paged_kv_write_token_major_batch_supports', 'metal_paged_kv_write_token_major_batch_bf16'] },
 ]
 
 const PATTERN = String.raw`
