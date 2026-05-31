@@ -15,7 +15,7 @@ half = "2"
 # surface was deleted after every `kiln-model` production caller
 # migrated to the `*_kt` wrappers.
 kiln-tensor = { workspace = true, features = ["cuda"] }
-kiln-kt-bridge = { workspace = true, features = ["cuda"] }
+kiln-kt-bridge = { path = "../kiln-kt-bridge", default-features = false, features = ["cuda"] }
 
 [build-dependencies]
 cc = "1"

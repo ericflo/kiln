@@ -12,7 +12,7 @@ build = "build.rs"
 half = "2"
 # Phase 7 (#1082) — kt-only crate, no candle dep.
 kiln-tensor = { workspace = true, features = ["cuda"] }
-kiln-kt-bridge = { workspace = true, features = ["cuda"] }
+kiln-kt-bridge = { path = "../kiln-kt-bridge", default-features = false, features = ["cuda"] }
 
 [build-dependencies]
 cc = "1"
