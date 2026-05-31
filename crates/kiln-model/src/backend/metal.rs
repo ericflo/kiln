@@ -260,10 +260,15 @@ impl MetalBackend {
 /// Compile Kiln's custom Metal library and compute pipelines ahead of the
 /// first forward pass. Candle kernels still compile lazily inside Candle, but
 /// this removes Kiln-owned pipeline setup from the first prewarm/request.
-pub fn precompile_custom_kernels(device: &candle_core::Device) -> Result<()> {
-    let candle_core::Device::Metal(metal_device) = device else {
+pub fn precompile_custom_kernels(device: &kiln_tensor::Device) -> Result<()> {
+    // #1082: kt-native prewarm — derive the companion and drive the pipeline
+    // getters through `&dyn MetalPipelineHost` (no candle device).
+    let kiln_tensor::Device::Metal(idx) = device else {
         return Ok(());
     };
+    let companion = kiln_tensor::primary_metal_companion(*idx)
+        .map_err(|e| anyhow::anyhow!("precompile_custom_kernels: companion: {e}"))?;
+    let metal_device: &MetalCompanion = &companion;
 
     metal_shared_library(metal_device)?;
     metal_rms_norm_pipeline(metal_device)?;

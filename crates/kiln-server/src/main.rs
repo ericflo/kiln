@@ -833,19 +833,9 @@ fn precompile_metal_custom_kernels(device: &kiln_tensor::Device) {
     if !matches!(device, kiln_tensor::Device::Metal(_)) {
         return;
     }
-    // TODO(#1082): kiln_model::backend::metal::precompile_custom_kernels is
-    // still candle-typed; bridge at this seam until that API gets a kt-typed
-    // parallel. `candle_device_from_kt` is always-on (no cuda gate).
-    let candle_device = match kiln_kt_bridge::candle_device_from_kt(device) {
-        Ok(d) => d,
-        Err(err) => {
-            tracing::warn!(error = %err, "kt -> candle bridge failed for Metal precompile");
-            return;
-        }
-    };
-
+    // #1082: precompile is kt-native now — pass the kt device directly.
     let start = std::time::Instant::now();
-    match kiln_model::backend::metal::precompile_custom_kernels(&candle_device) {
+    match kiln_model::backend::metal::precompile_custom_kernels(device) {
         Ok(()) => tracing::info!(
             elapsed_ms = start.elapsed().as_millis() as u64,
             "Metal custom kernels precompiled during background prewarm"
