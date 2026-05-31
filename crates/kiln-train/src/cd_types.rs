@@ -12,9 +12,8 @@
 //! **kt** types, in lockstep with the `trainer.rs` / `opd.rs`
 //! Var→`kiln_param::Parameter` + candle-grad-removal migration (Wave
 //! E1/E2). The remaining candle-API-specific aliases (`Shape`, `D`,
-//! `GradStore`, `CdResult`) and the candle constructor / safetensors
-//! shims stay pinned to explicit `candle_core::*` as a candle island
-//! (see below).
+//! `CdResult`) and the candle constructor / safetensors shims stay
+//! pinned to explicit `candle_core::*` as a candle island (see below).
 //!
 //! The handful of items that are intrinsically candle-API-specific —
 //! the candle safetensors I/O shims and the candle generic-constructor
@@ -71,13 +70,12 @@ pub(crate) type CdResult<T> = candle_core::Result<T>;
 pub(crate) type Shape = kiln_tensor::Shape;
 pub(crate) type D = kiln_tensor::D;
 
-/// candle backprop gradient store — candle island (#1082). The
-/// candle-authoritative `.backward()` paths in `trainer.rs` still hand
-/// these around (`grads: &GradStore`); Wave E1 routes those through the
-/// kt tape's `kiln_autograd::GradStore` and this alias is deleted. The
-/// kt grad store is referenced fully-qualified (`kiln_autograd::GradStore`)
-/// at the already-migrated call sites, so there is no name clash.
-pub(crate) type GradStore = candle_core::backprop::GradStore;
+// (#1082) The `GradStore` candle-island alias
+// (`candle_core::backprop::GradStore`) is GONE: Wave E1 routed every
+// `.backward()` path in `trainer.rs` through the kt tape's
+// `kiln_autograd::GradStore`, which is referenced fully-qualified at all
+// call sites. No bare `GradStore` resolves to this facade anymore, so the
+// alias had zero callers and was removed.
 
 /// Allocate a candle Tensor from an in-memory `NdArray` value (scalar /
 /// slice / array). Candle island (#1082) — `trainer.rs` E1 migrates the

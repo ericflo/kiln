@@ -9876,23 +9876,11 @@ pub(crate) mod tests {
             .map_err(Into::into)
     }
 
-    /// #1082 CPU host round-trip: candle F32 CPU tensor → kt F32 CPU tensor.
+    /// #1082 CPU host round-trip: kt F32 CPU tensor → candle F32 CPU tensor.
     /// The production kt<->candle tensor bridges are CUDA-only; this reads the
-    /// F32 host values + shape and rebuilds the kt form. Used only by
+    /// F32 host values + shape and rebuilds the candle form. Used only by
     /// `#[ignore]`d CPU parity tests whose candle-autograd oracle is severed by
     /// the kt forward flip (compile-only). Not used on any live path.
-    #[allow(dead_code)]
-    fn cpu_candle_to_kt_f32(t: &candle_core::Tensor) -> Result<kiln_tensor::Tensor> {
-        let dims = t.dims().to_vec();
-        let data = t
-            .to_dtype(candle_core::DType::F32)?
-            .flatten_all()?
-            .to_vec1::<f32>()?;
-        kiln_tensor::Tensor::from_vec(data, dims).map_err(Into::into)
-    }
-
-    /// #1082 CPU host round-trip: kt F32 CPU tensor → candle F32 CPU tensor.
-    /// Companion to [`cpu_candle_to_kt_f32`]; same `#[ignore]`-only scope.
     #[allow(dead_code)]
     fn cpu_kt_to_candle_f32(t: &kiln_tensor::Tensor) -> Result<candle_core::Tensor> {
         let dims = t.dims().to_vec();
