@@ -2368,11 +2368,16 @@ pub fn opd_train(
     let mut global_step = 0usize;
     let mut last_loss = 0.0_f64;
 
-    // (#1082) `embed_tokens_t` is kt and `opd_step_forward_backward_tape_-
-    // authoritative` now takes the kt `head_t` directly (it bridges to candle
-    // only at the internal OPD-loss tape shim boundary), so thread the kt
-    // weight straight through — the stale kt->candle bridge here is dropped.
+    // (#1082 H8) `embed_tokens_t` is the frozen, weight-tied lm_head — CONSTANT
+    // across every OPD step. The per-step OPD-loss tape shim consumes a candle
+    // `head_t`, so bridge it kt->candle ONCE here, before the epoch/sample loops,
+    // and thread the candle copy through. Pre-flip hoisted this; the flip had
+    // re-sunk a ~1.27GB (hidden×vocab BF16) kt->candle copy INTO the per-step
+    // closure. The kt `head_t` is otherwise only used to build this copy.
     let head_t = weights.embed_tokens_t.clone();
+    #[cfg(feature = "cuda")]
+    let head_t_candle = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&head_t)
+        .map_err(|e| anyhow!("opd_train: hoist head_t kt->candle: {e}"))?;
 
     // §3.9 guardrail observer + per-step rollout summary buffer.
     // The guardrail watches loss / repetition / overlap signals every
@@ -2798,7 +2803,7 @@ pub fn opd_train(
                                 model_config,
                                 &params,
                                 &device,
-                                &head_t,
+                                &head_t_candle,
                                 teacher.clone(),
                                 &active_positions,
                                 config.loss,
@@ -3004,7 +3009,9 @@ fn opd_step_forward_backward_tape_authoritative(
     model_config: &kiln_core::config::ModelConfig,
     params: &crate::trainer::TrainableLoraParams,
     device: &candle_core::Device,
-    head_t: &Tensor,
+    // (#1082 H8) candle copy of the frozen lm_head weight, bridged ONCE by the
+    // caller before its loop (was a ~1.27GB kt->candle copy per step here).
+    head_t_candle: &candle_core::Tensor,
     teacher: Arc<dyn LogitSource>,
     active_positions: &[usize],
     loss_granularity: OpdLossGranularity,
@@ -3078,18 +3085,13 @@ fn opd_step_forward_backward_tape_authoritative(
             // Mirrors the SFT path's `model_forward_logits_kt_to_candle` retain.
             kiln_kt_bridge::tape_bridge::retain_output_for_chaining(&normed, normed_candle.id());
 
-            // (#1082) candle island — the OPD scalar-loss tape shim consumes a
-            // candle `head_t`; bridge the kt `head_t` param to a candle copy at
-            // this boundary. Convert in the final pass once the shim is kt.
-            let head_t_candle = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(head_t)
-                .map_err(|e| {
-                    kiln_kt_bridge::BridgeError::new(format!("opd tape: kt->candle head_t: {e}"))
-                })?;
+            // (#1082 H8) `head_t_candle` is the caller-hoisted candle copy of the
+            // frozen lm_head weight — no per-step kt->candle bridge here.
             // Record the SCALAR OPD loss as the tape root. Returns a detached
             // candle scalar (value only); the gradient lives on the tape.
             let loss = match crate::opd_candle_shim::try_tape_opd_scalar_mean_cuda(
                 &normed_candle,
-                &head_t_candle,
+                head_t_candle,
                 &prepared.teacher_topk_indices,
                 &prepared.teacher_topk_logprobs,
                 &prepared.label_mask,
@@ -4186,6 +4188,10 @@ mod tests {
         // candle island); bridge the kt test device to candle for the call.
         let device_cd = kiln_kt_bridge::candle_device_from_kt(&device)
             .expect("opd test: kt->candle device bridge");
+        // (#1082 H8) the per-step fn now takes a caller-hoisted candle head_t;
+        // bridge the kt test weight once for the call.
+        let head_t_candle = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&head_t)
+            .expect("opd test: kt->candle head_t bridge");
         let (loss_val, active_count, grads) = opd_step_forward_backward_tape_authoritative(
             &*backend,
             &input_ids,
@@ -4193,7 +4199,7 @@ mod tests {
             &config,
             &params,
             &device_cd,
-            &head_t,
+            &head_t_candle,
             teacher,
             &active_positions,
             OpdLossGranularity::TeacherTopK,
