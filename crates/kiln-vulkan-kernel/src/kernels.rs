@@ -6,7 +6,7 @@ use half::bf16;
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
-const MLP_BF16_ROWS8_MIN_BATCH: usize = 128;
+const MLP_BF16_ROWS8_MIN_BATCH: usize = 256;
 
 fn env_truthy_for_profile(name: &str) -> bool {
     std::env::var(name)
@@ -4546,7 +4546,8 @@ fn dispatch_mlp_decode_cached_impl(
     // For the all-bf16 MLP, the rows4 / rows8 amortization only beats the
     // per-batch-row bf16w kernel once we have enough rows to keep the SMs
     // full: rows4 cuts workgroup count by 4×, rows8 by 8×. Batch 64 is
-    // still faster with rows4 on the Strix Halo APU, so rows8 starts at a
+    // still faster with rows4 on the Strix Halo APU, and batch 128 is also
+    // faster with rows4 in the mixed-stack token bench, so rows8 starts at a
     // larger default batch and remains env-gated for experimentation. The
     // f32-down rows4 path keeps its older batch≥8 threshold because reading
     // 4 B/weight makes weight-read reuse pay off sooner.

@@ -187,7 +187,7 @@ every config"):
   benchmark with direct host-slice weight uploads and shared scratch buffers,
   but it is the best current signal for decode saturation at the actual
   layer mix. On RADV STRIX_HALO with `KILN_VK_MICROBENCH_BATCHES=1,8,32,64`,
-  warmup=2, timed=5, repeats=2:
+  warmup=2, timed=5, repeats=2, plus a short batch-128 probe:
 
   | batch | per token | rows/s |
   |---:|---:|---:|
@@ -195,10 +195,13 @@ every config"):
   | 8 | 104.0 ms | 77 |
   | 32 | 237.8 ms | 135 |
   | 64 | 451.8 ms | 142 |
+  | 128 | 905.9 ms | 141 |
 
   The mixed stack is now the right benchmark for resident decode tuning:
   full-attention-only synthetic decode overstates throughput because the 24
-  GDN layers dominate the real model.
+  GDN layers dominate the real model. Batch 128 also confirmed the rows8 MLP
+  shader path was still slower than rows4 on STRIX_HALO, so the default rows8
+  crossover moved from batch 128 to batch 256.
   **Update — GDN resident recorder uses row-reuse in-proj:** the batched GDN
   `CommandBatch` recorder now selects the same pair QKV/Z plus rows2/rows4
   BF16 in-proj shaders as the standalone dispatcher. Focused

@@ -39,7 +39,7 @@ use crate::backend::vulkan::VulkanBackend;
 use crate::forward::GpuLayerWeights;
 use crate::PagedKvCacheKt;
 
-const MLP_BF16_ROWS8_MIN_BATCH: usize = 128;
+const MLP_BF16_ROWS8_MIN_BATCH: usize = 256;
 const PAGED_ATTN_SPLITK_CHUNKS_B1: usize = 8;
 const PAGED_ATTN_SPLITK_CHUNKS_BATCHED: usize = 4;
 

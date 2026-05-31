@@ -44,7 +44,7 @@ const WARMUP_ITERS: usize = 10;
 const TIMED_ITERS: usize = 30;
 const REPEATS: usize = 5;
 const DEFAULT_BATCHES: &[usize] = &[1, 4, 8, 16, 32, 64];
-const MLP_BF16_ROWS8_MIN_BATCH: usize = 128;
+const MLP_BF16_ROWS8_MIN_BATCH: usize = 256;
 const PAGED_ATTN_SPLITK_CHUNKS_B1: usize = 8;
 const PAGED_ATTN_SPLITK_CHUNKS_BATCHED: usize = 4;
 
