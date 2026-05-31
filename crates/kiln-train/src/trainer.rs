@@ -847,17 +847,28 @@ impl TrainableLoraParams {
         Ok(synced)
     }
 
-    /// (#1082) Allocate AdamW optimizer state — a single `kiln_optim::AdamW`
-    /// instance whose moments are lazily created (keyed by
-    /// `Parameter::tensor_id()`) on the first step per parameter. Replaces
-    /// the candle path that pre-allocated zero-init `m`/`v` `Var`s per LoRA
-    /// `Var`. `lr`/`beta1`/`beta2`/`eps`/`weight_decay` come from the
-    /// trainer config (constant lr across steps — no scheduler).
+    /// (#1082) Allocate AdamW optimizer state.
     ///
-    /// `_device` is retained in the signature for call-site compatibility;
-    /// the CPU `kiln_optim::AdamW` holds moments host-side regardless of the
-    /// param device (the on-device `dispatch_adamw_step` Vulkan path
-    /// registers grads per step in `apply_adamw_update_kt`).
+    /// CORRECTNESS (C1, candle-drop): the on-device CUDA AdamW kernel
+    /// (`dispatch_adamw_step`) reads/writes the first/second-moment buffers
+    /// **in place**. It therefore needs two *real* per-parameter device
+    /// tensors `m`/`v` — distinct from the param. The candle-drop interim
+    /// passed `&primary` twice in place of `m`/`v`, which aliased the moments
+    /// onto the param (corrupting the weight and keeping NO Adam state). This
+    /// restores the pre-flip design (`feaf2e99`'s `AdamWMoments{m,v}`) in
+    /// kt-native form: a zero-init device `m`/`v` per LoRA param, matching the
+    /// param master's shape/dtype/device, keyed by `Parameter::tensor_id()`.
+    ///
+    /// The CPU `kiln_optim::AdamW` instance is retained as the genuine
+    /// non-resident host fallback (it owns its own host-side moments + grad
+    /// dtype checks); the on-device path never touches it.
+    ///
+    /// `lr`/`beta1`/`beta2`/`eps`/`weight_decay` come from the trainer config
+    /// (constant lr across steps — no scheduler). `device` is the param
+    /// device; the moments are allocated on the *param's* device
+    /// (`primary_tensor().device()`) so the CUDA gate
+    /// (`cuda_optimizer_tensors_supported_for_kt`) sees four same-device
+    /// same-dtype contiguous tensors.
     pub fn allocate_adamw_state(
         &self,
         lr: f64,
@@ -874,40 +885,102 @@ impl TrainableLoraParams {
             eps,
             weight_decay,
         };
+        let mut moments: HashMap<KtTensorId, KtAdamWMoments> = HashMap::new();
+        for param in self.all_params() {
+            let primary = param.forward_storage().primary_tensor();
+            let dims: Vec<usize> = primary.dims().to_vec();
+            let dtype = primary.dtype();
+            // Allocate on the param's own device (CUDA → on-device zeros via
+            // `Tensor::zeros_on` → `cuda_zeros_ctx`, NOT zeros_cpu) so the
+            // dispatch gate's same-device/same-dtype/contiguous checks pass
+            // and the kernel updates m/v in VRAM without a host round-trip.
+            let m = KtTensor::zeros_on(primary.device(), dims.clone(), dtype)
+                .with_context(|| "allocating AdamW first-moment tensor")?;
+            let v = KtTensor::zeros_on(primary.device(), dims, dtype)
+                .with_context(|| "allocating AdamW second-moment tensor")?;
+            moments.insert(param.tensor_id(), KtAdamWMoments { m, v });
+        }
         Ok(OptimizerState {
             adamw: KtAdamW::new(hp),
+            moments,
+            step: 0,
         })
     }
 }
 
-// (#1082) The candle `AdamWMoments{m,v:Var}` struct is GONE. AdamW moment
-// state now lives inside `kiln_optim::AdamW`, whose `moments` HashMap is
-// keyed by `Parameter::tensor_id()` (the stable kt id). `OptimizerState`
-// below is a thin wrapper holding that `KtAdamW` instance so the many
-// trainer call sites can keep threading `Option<&mut OptimizerState>`
-// unchanged; the SGD path needs no state and passes `None`.
+// (#1082) C1 fix: the kt-native restoration of the pre-flip candle
+// `AdamWMoments{m,v:Var}`. The on-device CUDA AdamW kernel updates
+// param/m/v in place, so it needs real per-param device moment tensors —
+// not the param aliased onto itself. `KtAdamWMoments` holds those two
+// device tensors; `OptimizerState.moments` maps `Parameter::tensor_id()`
+// → `KtAdamWMoments`. The `KtAdamW` instance is the host (non-resident)
+// fallback only.
 
-/// (#1082) kt-native optimizer state: wraps a single `kiln_optim::AdamW`
-/// instance (which owns all per-parameter moments keyed by
-/// `Parameter::tensor_id()` + the internal step counter). Replaces the
-/// candle `HashMap<TensorId, AdamWMoments{m,v:Var}>` + manual `step`
-/// counter. The wrapper exists only so the trainer's existing
-/// `opt_state: Option<&mut OptimizerState>` signatures don't all have to
-/// change; SGD passes `None`, AdamW passes `Some(&mut state)`.
+/// (#1082) AdamW per-parameter first/second-moment device tensors.
+///
+/// `m` and `v` are zero-init kt tensors of the same shape+dtype as the
+/// LoRA param master, allocated on the param's device. The on-device
+/// CUDA AdamW kernel (`dispatch_adamw_step`) reads+writes both in place
+/// each step (decoupled WD on the param, biased moments on m/v). Restores
+/// the pre-flip candle `AdamWMoments{m: Var, v: Var}` in kt form.
+pub struct KtAdamWMoments {
+    pub m: KtTensor,
+    pub v: KtTensor,
+}
+
+/// (#1082) kt-native optimizer state.
+///
+/// - `moments`: per-param device `m`/`v` (keyed by `Parameter::tensor_id()`)
+///   that the on-device CUDA AdamW kernel updates in place. This is the
+///   real Adam state on the resident/device path.
+/// - `adamw`: the CPU reference `kiln_optim::AdamW` — the genuine host
+///   fallback for the non-resident path (owns its own host-side moments).
+/// - `step`: global 1-indexed step counter, bumped once per optimizer step
+///   (all params share it — standard AdamW bias correction). Restores the
+///   pre-flip `OptimizerState.step`. Used as the `step` argument the CUDA
+///   kernel turns into the bias-correction terms.
+///
+/// The wrapper keeps the trainer's `opt_state: Option<&mut OptimizerState>`
+/// signatures unchanged; SGD passes `None`, AdamW passes `Some(&mut state)`.
 pub struct OptimizerState {
     pub adamw: KtAdamW,
+    pub moments: HashMap<KtTensorId, KtAdamWMoments>,
+    pub step: u32,
 }
 
 impl OptimizerState {
-    /// `register_with_backend` / `evict_from_backend` / `sync_to_master`
-    /// are no longer needed: `kiln_optim::AdamW` owns its moments
-    /// host-side (CPU reference), and the on-device `dispatch_adamw_step`
-    /// path registers the grad per step in `apply_adamw_update_kt`. These
-    /// remain as no-ops so the (few) call sites stay valid. (#1082)
-    pub fn register_with_backend(&self, _backend: &dyn BackendRuntime) -> Result<()> {
+    /// Register every per-param `m`/`v` device tensor as a resident
+    /// activation so `dispatch_adamw_step`'s `has_resident_activation(m/v)`
+    /// gate passes and the on-device kernel fires (otherwise it returns
+    /// `false` → host fallback). Restores the pre-flip
+    /// `OptimizerState::register_with_backend`, which the candle-drop interim
+    /// had turned into a no-op (leaving the on-device kernel running with
+    /// garbage m/v).
+    ///
+    /// No-op on backends without resident-activation support (the host
+    /// `kiln_optim::AdamW` fallback handles those).
+    pub fn register_with_backend(&self, backend: &dyn BackendRuntime) -> Result<()> {
+        if !backend.supports_resident_activation() {
+            return Ok(());
+        }
+        for moments in self.moments.values() {
+            backend.register_resident_activation(&moments.m)?;
+            backend.register_resident_activation(&moments.v)?;
+        }
         Ok(())
     }
-    pub fn evict_from_backend(&self, _backend: &dyn BackendRuntime) {}
+
+    /// Inverse of [`Self::register_with_backend`]: release every moment
+    /// tensor from the resident registry at training completion.
+    pub fn evict_from_backend(&self, backend: &dyn BackendRuntime) {
+        if !backend.supports_resident_activation() {
+            return;
+        }
+        for moments in self.moments.values() {
+            backend.evict_resident_activation(&moments.m);
+            backend.evict_resident_activation(&moments.v);
+        }
+    }
 }
 
 /// (#1082) Build `Option<OptimizerState>` from the configured optimizer:
@@ -2298,9 +2371,14 @@ pub fn sft_train(
     params.register_with_backend(&*backend)?;
 
     // Allocate AdamW state if selected; SGD has no per-param state.
-    // Registered alongside the LoRA Vars so the on-device kernel can
-    // resolve `m` and `v` by TensorId.
+    // Register the per-param `m`/`v` device moment tensors alongside the
+    // LoRA params so the on-device AdamW kernel's
+    // `has_resident_activation(m/v)` gate passes (C1 fix — without this the
+    // device path declines and a no-op interim corrupted the param).
     let mut opt_state = make_opt_state(&params, config.optimizer, config.learning_rate, &device)?;
+    if let Some(state) = opt_state.as_ref() {
+        state.register_with_backend(&*backend)?;
+    }
 
     // Run the actual training body inside a closure so we can write the
     // outcome record (success or failure) before returning to the caller.
@@ -2783,6 +2861,12 @@ pub fn grpo_train(
     params.register_with_backend(&*backend)?;
 
     let mut opt_state = make_opt_state(&params, config.optimizer, config.learning_rate, &device)?;
+    // C1 fix: register per-param AdamW `m`/`v` device moments resident so the
+    // on-device kernel fires with REAL distinct moments (not the param aliased
+    // onto itself).
+    if let Some(state) = opt_state.as_ref() {
+        state.register_with_backend(&*backend)?;
+    }
 
     let mut train_body = || -> Result<(PathBuf, f64)> {
         let dynamic_sampling = config.dynamic_sampling;
@@ -3586,6 +3670,12 @@ pub fn grpo_train_jsonl(
     params.register_with_backend(&*backend)?;
 
     let mut opt_state = make_opt_state(&params, config.optimizer, config.learning_rate, &device)?;
+    // C1 fix: register per-param AdamW `m`/`v` device moments resident so the
+    // on-device kernel fires with REAL distinct moments (not the param aliased
+    // onto itself).
+    if let Some(state) = opt_state.as_ref() {
+        state.register_with_backend(&*backend)?;
+    }
 
     let mut train_body = || -> Result<(PathBuf, f64)> {
         // Streaming GRPO can't pre-compute max_seq_len without consuming the
@@ -6575,72 +6665,91 @@ fn apply_sgd_update_kt(
 
 /// (#1082) Apply one AdamW step to a single LoRA `Parameter`.
 ///
-/// Prefers the on-device `dispatch_adamw_step` registry path when the
-/// param is resident; otherwise drives the CPU reference
-/// `kiln_optim::AdamW` (`OptimStep::step`), which owns the moments keyed
-/// by `Parameter::tensor_id()` and installs the new master via
-/// `replace_backward_storage` (preserving `tensor_id`). The forward
-/// storage is refreshed from the new master so the next forward reads
-/// the updated weights.
+/// On-device path (resident): when the param **and** its `m`/`v` device
+/// moment tensors are all resident, dispatch the CUDA AdamW kernel which
+/// updates **param, m, and v in place** in one launch. This is the
+/// production path (BF16 CUDA, LoRA params resident). The `m`/`v` passed
+/// are the REAL per-param device moments from `OptimizerState.moments`
+/// (NOT the param aliased onto itself — that was the C1 corruption bug).
+/// The forward storage shares the master tensor (LoRA A/B are plain dense
+/// BF16, forward primary == master), so the in-place param update is
+/// immediately visible to the next forward; no refresh needed.
+///
+/// Host fallback (non-resident): drive the CPU reference
+/// `kiln_optim::AdamW` (`OptimStep::step`), which owns its own host-side
+/// moments keyed by `Parameter::tensor_id()` and installs the new master
+/// via `replace_backward_storage` (preserving `tensor_id`). The forward
+/// storage is refreshed from the new master.
+///
+/// `lr`/`beta1`/`beta2`/`eps`/`weight_decay` are threaded directly from
+/// the optimizer config (no more `ADAMW_ACTIVE_HP` thread-local shim —
+/// that hack existed only because the moments were host-side and the
+/// device path had no real hp source). `step` is the global 1-indexed
+/// step counter (shared by all params for standard AdamW bias correction).
 ///
 /// `grad` must match the param's AMP `backward_compute_dtype` (BF16 in
 /// production) — the kt tape produces grads in the activation dtype, so
-/// we cast defensively to the policy dtype before stepping.
+/// we cast defensively to the policy dtype before the host step.
+#[allow(clippy::too_many_arguments)]
 fn apply_adamw_update_kt(
     backend: &dyn BackendRuntime,
     param: &mut Parameter,
     adamw: &mut KtAdamW,
+    moments: Option<&KtAdamWMoments>,
     grad: &KtTensor,
+    lr: f64,
+    beta1: f32,
+    beta2: f32,
+    eps: f32,
+    weight_decay: f32,
+    step: u32,
     resident_activation: bool,
 ) -> Result<()> {
     let primary = param.forward_storage().primary_tensor().clone();
-    // On-device registry path: leave the heavy CPU AdamW reference alone
-    // and let the backend kernel own param/m/v. The backend resolves m/v
-    // by the param's registry slot; the kt CPU `KtAdamW` instance is the
-    // host fallback only.
-    if resident_activation && backend.has_resident_activation(&primary) {
-        backend.register_resident_activation(grad)?;
-        // The on-device AdamW kernel owns its own m/v buffers keyed by the
-        // param registry slot (Vulkan residency plan §4.2). We pass the
-        // param twice in place of the not-yet-host-resident m/v handles;
-        // the kernel ignores them when it manages residency internally.
-        // // (#1082) bridge — on-device m/v residency handles land with the Vulkan AdamW kernel.
-        let hp = adamw_hyperparameters(adamw);
-        let dispatched = match backend.dispatch_adamw_step(
-            &primary,
-            grad,
-            &primary,
-            &primary,
-            hp.lr,
-            hp.beta1,
-            hp.beta2,
-            hp.eps,
-            hp.weight_decay,
-            // The CPU `KtAdamW` step counter is the source of truth; bump
-            // it via a host step on a 1-elem dummy is wrong, so read the
-            // moment step for this param (0 before first step).
-            adamw
-                .moments(param.tensor_id())
-                .map(|m| (m.step + 1) as u32)
-                .unwrap_or(1),
-        ) {
-            Ok(b) => b,
-            Err(e) => {
+    // On-device registry path: param + grad + the REAL per-param m/v must
+    // all be resident, then the CUDA kernel updates param/m/v in place.
+    if let Some(moments) = moments {
+        if resident_activation
+            && backend.has_resident_activation(&primary)
+            && backend.has_resident_activation(&moments.m)
+            && backend.has_resident_activation(&moments.v)
+        {
+            backend.register_resident_activation(grad)?;
+            let dispatched = match backend.dispatch_adamw_step(
+                &primary,
+                grad,
+                &moments.m,
+                &moments.v,
+                lr as f32,
+                beta1,
+                beta2,
+                eps,
+                weight_decay,
+                step,
+            ) {
+                Ok(b) => b,
+                Err(e) => {
+                    backend.evict_resident_activation(grad);
+                    return Err(e);
+                }
+            };
+            if dispatched {
+                // The kernel updated param/m/v in place. Forward primary IS
+                // the master for LoRA params, so the update is already live;
+                // re-assert residency of the param buffer for the next fwd.
                 backend.evict_resident_activation(grad);
-                return Err(e);
+                backend.update_resident_activation(&primary)?;
+                return Ok(());
             }
-        };
-        if dispatched {
             backend.evict_resident_activation(grad);
-            return Ok(());
         }
-        backend.evict_resident_activation(grad);
     }
 
     // Host fallback: drive the CPU reference `kiln_optim::AdamW`. It reads
     // `param.amp_policy().backward_compute_dtype` for the grad dtype check
     // (BF16 in production) and `master_dtype` for the master update; cast
-    // the grad to the policy's backward dtype defensively.
+    // the grad to the policy's backward dtype defensively. The host AdamW
+    // owns its own host-side moments + step counter keyed by `tensor_id`.
     let want = param.amp_policy().backward_compute_dtype;
     let grad_cast = if grad.dtype() == want {
         grad.clone()
@@ -6661,40 +6770,6 @@ fn apply_adamw_update_kt(
         backend.update_resident_activation(param.forward_storage().primary_tensor())?;
     }
     Ok(())
-}
-
-/// (#1082) Read back the AdamW hyperparameters for the on-device dispatch
-/// path. `kiln_optim::AdamW` doesn't expose its `hp` publicly, so we
-/// thread the trainer-config values alongside instead via this shim that
-/// the optimizer-step dispatchers populate. Defined as a free fn taking
-/// `&KtAdamW` so the on-device path has one source of truth.
-fn adamw_hyperparameters(_adamw: &KtAdamW) -> KtAdamWHyperparameters {
-    // `KtAdamW` keeps its hp private; the dispatchers below stash the
-    // active hp in a thread-local before calling `apply_adamw_update_kt`
-    // so the on-device path can read them. In practice the on-device
-    // (Vulkan) AdamW kernel is the only consumer and it is not yet wired
-    // for CUDA/CPU production (the host CPU reference path is the one
-    // exercised today), so returning defaults here is safe until the
-    // Vulkan AdamW kernel lands and this shim is replaced with a real
-    // hp accessor on `kiln_optim::AdamW`.
-    // // (#1082) bridge — replace with a public `KtAdamW::hyperparameters()` accessor.
-    ADAMW_ACTIVE_HP.with(|c| c.get())
-}
-
-thread_local! {
-    /// (#1082) Active AdamW hyperparameters for the current optimizer
-    /// step, stashed by the dispatchers so `apply_adamw_update_kt`'s
-    /// on-device path can read lr/beta/eps/wd without a public accessor on
-    /// `kiln_optim::AdamW`. Host CPU path ignores this (it reads the hp
-    /// baked into the `KtAdamW` instance).
-    static ADAMW_ACTIVE_HP: std::cell::Cell<KtAdamWHyperparameters> =
-        std::cell::Cell::new(KtAdamWHyperparameters {
-            lr: 1e-3,
-            beta1: 0.9,
-            beta2: 0.999,
-            eps: 1e-8,
-            weight_decay: 0.0,
-        });
 }
 
 /// (#1082) Accumulate kt gradients from a kt-native [`kiln_autograd::GradStore`]
@@ -6779,24 +6854,33 @@ pub(crate) fn optimizer_step_from_map(
             let state = opt_state.ok_or_else(|| {
                 anyhow::anyhow!("optimizer_step_from_map: AdamW requires OptimizerState")
             })?;
-            let _ = lr; // baked into the KtAdamW hp at construction.
-            ADAMW_ACTIVE_HP.with(|c| {
-                c.set(KtAdamWHyperparameters {
-                    lr: lr as f32,
-                    beta1,
-                    beta2,
-                    eps,
-                    weight_decay,
-                })
-            });
+            // Global 1-indexed step counter (shared by all params), bumped
+            // once per optimizer step for AdamW bias correction. Disjoint
+            // borrows of `adamw` (mut, host fallback) vs `moments` (shared,
+            // device m/v) via destructuring.
+            state.step = state.step.saturating_add(1);
+            let OptimizerState {
+                adamw,
+                moments,
+                step,
+            } = state;
+            let step = *step;
             let resident_activation = backend.supports_resident_activation();
             for param in params.all_params_mut() {
                 if let Some(grad) = grads.get(&param.tensor_id()) {
+                    let m = moments.get(&param.tensor_id());
                     apply_adamw_update_kt(
                         backend,
                         param,
-                        &mut state.adamw,
+                        adamw,
+                        m,
                         grad,
+                        lr,
+                        beta1,
+                        beta2,
+                        eps,
+                        weight_decay,
+                        step,
                         resident_activation,
                     )?;
                 }
@@ -6846,23 +6930,33 @@ pub(crate) fn optimizer_step_from_kt_grad_store(
             let state = opt_state.ok_or_else(|| {
                 anyhow::anyhow!("optimizer_step_from_kt_grad_store: AdamW requires OptimizerState")
             })?;
-            ADAMW_ACTIVE_HP.with(|c| {
-                c.set(KtAdamWHyperparameters {
-                    lr: lr as f32,
-                    beta1,
-                    beta2,
-                    eps,
-                    weight_decay,
-                })
-            });
+            // Global 1-indexed step counter (shared by all params), bumped
+            // once per optimizer step for AdamW bias correction. Disjoint
+            // borrows of `adamw` (mut, host fallback) vs `moments` (shared,
+            // device m/v) via destructuring.
+            state.step = state.step.saturating_add(1);
+            let OptimizerState {
+                adamw,
+                moments,
+                step,
+            } = state;
+            let step = *step;
             let resident_activation = backend.supports_resident_activation();
             for param in params.all_params_mut() {
                 if let Some(kt_grad) = grads.get(param.tensor_id()) {
+                    let m = moments.get(&param.tensor_id());
                     apply_adamw_update_kt(
                         backend,
                         param,
-                        &mut state.adamw,
+                        adamw,
+                        m,
                         kt_grad,
+                        lr,
+                        beta1,
+                        beta2,
+                        eps,
+                        weight_decay,
+                        step,
                         resident_activation,
                     )?;
                 }
@@ -10350,11 +10444,14 @@ pub(crate) mod tests {
     ///   → `(loss, kiln_autograd::GradStore)` (keyed by `Parameter::tensor_id()`)
     ///   → `optimizer_step_from_kt_grad_store(.., AdamW, Some(&mut opt_state))`,
     ///   which steps each `Parameter`'s kt master in place (preserving
-    ///   `tensor_id`) via `kiln_optim::AdamW`. No candle `Var`, no
+    ///   `tensor_id`) via the ON-DEVICE CUDA AdamW kernel (params + per-param
+    ///   `m`/`v` device moments registered resident). No candle `Var`, no
     ///   `loss.backward()`, no kt→candle grad copy.
-    /// - `allocate_adamw_state` now takes the AdamW hyperparameters (the kt
-    ///   `KtAdamW` owns its moments keyed by `tensor_id`); the step counter is
-    ///   per-parameter (`opt_state.adamw.moments(id).step`).
+    /// - `allocate_adamw_state` allocates real per-param `m`/`v` device moment
+    ///   tensors (C1 fix) keyed by `tensor_id`; the AdamW step counter is the
+    ///   global `OptimizerState.step` (bumped once per optimizer step). The
+    ///   on-device kernel updates param/m/v in place with those REAL moments
+    ///   (not the param aliased onto itself).
     ///
     /// CANDLE-PARITY IS INVALID HERE: candle's `loss.backward()` severed the
     /// full-attention + GDN-conv gradient, so a candle-trained reference would
@@ -10405,12 +10502,26 @@ pub(crate) mod tests {
             eps,
             weight_decay,
         };
-        // Allocate moment state ONCE before the loop. `kiln_optim::AdamW` owns
-        // the per-parameter moments (keyed by `Parameter::tensor_id()`); the
-        // step counter is per-parameter inside those moments.
+        // Allocate moment state ONCE before the loop. `allocate_adamw_state`
+        // creates real per-param `m`/`v` device moment tensors (keyed by
+        // `Parameter::tensor_id()`) for the on-device kernel; the AdamW step
+        // counter is the global `OptimizerState.step` (one bump per step).
         let mut opt_state = params
             .allocate_adamw_state(lr, beta1, beta2, eps, weight_decay, &device)
             .expect("allocate AdamW state");
+        // Register LoRA params + the per-param `m`/`v` device moments as
+        // resident so the optimizer step takes the ON-DEVICE CUDA AdamW
+        // kernel path (the production path) — exercising the C1 fix: the
+        // kernel updates param/m/v in place with REAL distinct moments, not
+        // the param aliased onto itself. Without registration the step would
+        // silently fall back to the host `KtAdamW` reference and never test
+        // the device kernel.
+        params
+            .register_with_backend(&*backend)
+            .expect("register LoRA params resident");
+        opt_state
+            .register_with_backend(&*backend)
+            .expect("register AdamW moments resident");
 
         const STEPS: usize = 100;
         let mut losses: Vec<f64> = Vec::with_capacity(STEPS);
@@ -10488,28 +10599,58 @@ pub(crate) mod tests {
             initial_loss, losses[24], losses[49], losses[74], final_loss, min_loss
         );
 
-        // Per-parameter AdamW step counter (1-indexed, bumped once per step):
-        // every stepped param should have run exactly STEPS times, and its
-        // moment buffers must stay finite (no NaN/Inf leaked into optimizer
-        // state — a silent way training can rot).
+        // Global AdamW step counter (1-indexed, bumped once per optimizer
+        // step, shared by all params). On the on-device path the host
+        // `KtAdamW` moments are NOT populated (the CUDA kernel owns the device
+        // `m`/`v`), so we read `OptimizerState.step` (the C1-restored global
+        // counter) and validate the DEVICE moment tensors directly.
+        assert_eq!(
+            opt_state.step as usize, STEPS,
+            "CP-4 convergence: global AdamW step counter should be {STEPS}, got {}",
+            opt_state.step
+        );
+        // Every LoRA param must have a real per-param device `m`/`v` moment
+        // tensor, and after STEPS on-device updates both must stay finite (no
+        // NaN/Inf leaked into optimizer state — a silent way training rots).
+        // If `m`/`v` had been aliased onto the param (the C1 bug) the kernel
+        // would have read+written garbage; finite, distinct moments are the
+        // proof the real device state is being maintained.
         let mut stepped = 0usize;
+        let mut any_v_nonzero = false;
         for id in params.all_params().iter().map(|p| p.tensor_id()) {
-            if let Some(m) = opt_state.adamw.moments(id) {
+            if let Some(moments) = opt_state.moments.get(&id) {
                 stepped += 1;
-                assert_eq!(
-                    m.step as usize, STEPS,
-                    "CP-4 convergence: AdamW step counter for param {id:?} should be {STEPS}, got {}",
-                    m.step
-                );
-                assert!(
-                    m.m.iter().all(|x| x.is_finite()) && m.v.iter().all(|x| x.is_finite()),
-                    "CP-4 convergence: AdamW moments for param {id:?} became non-finite by step {STEPS}"
-                );
+                for (name, t) in [("m", &moments.m), ("v", &moments.v)] {
+                    let vals = t
+                        .to_dtype(KtDType::F32)
+                        .and_then(|t| t.flatten_all())
+                        .and_then(|t| t.to_vec1::<f32>())
+                        .unwrap_or_else(|e| {
+                            panic!("CP-4 convergence: read AdamW {name} for {id:?}: {e}")
+                        });
+                    assert!(
+                        vals.iter().all(|x| x.is_finite()),
+                        "CP-4 convergence: AdamW {name} moment for param {id:?} became \
+                         non-finite by step {STEPS}"
+                    );
+                    // The second moment v accumulates g^2; for any param that
+                    // received a nonzero grad it must be > 0. If m/v were
+                    // aliased onto the param (the C1 bug) we would never see
+                    // a coherent nonzero v here.
+                    if name == "v" && vals.iter().any(|x| *x > 0.0) {
+                        any_v_nonzero = true;
+                    }
+                }
             }
         }
         assert!(
             stepped > 0,
-            "CP-4 convergence: AdamW stepped 0 params — optimizer never ran"
+            "CP-4 convergence: AdamW has 0 per-param device moments — optimizer state missing"
+        );
+        assert!(
+            any_v_nonzero,
+            "CP-4 convergence: every AdamW second-moment v stayed zero — the on-device \
+             kernel never accumulated g^2 into real moment state (m/v aliasing regression?)"
         );
 
         // The HEADLINE gate: tape-authoritative SFT must STABLY IMPROVE. The
