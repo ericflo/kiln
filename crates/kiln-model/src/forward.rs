@@ -3567,6 +3567,26 @@ fn upload_mtp_gpu_weights(
     })
 }
 
+/// The kt `Device` the loader places its host-resident kt tensors on,
+/// derived from the model's logical device. (#1082 Vulkan loader fix.)
+///
+/// On Vulkan the kt-tensor *substrate* storage is not yet wired
+/// (`Tensor::zeros_on(Vulkan)` etc. deliberately `Err` to surface
+/// accidental routing — see `kiln_tensor::Tensor::zeros_on`), and the
+/// production Vulkan inference path keeps every weight as a **CPU-host**
+/// kt tensor that the `vk::Device` backend uploads into its own buffer
+/// cache lazily. So loader-internal kt constructors (stubs, the rotary
+/// `inv_freq` table) must land on `Device::Cpu` on Vulkan rather than on
+/// the logical `Device::Vulkan(_)`. CUDA / Metal / CPU pass through
+/// unchanged. Revisit when Phase 1.8 lands real kt Vulkan storage.
+#[inline]
+fn loader_kt_device(device: &Device) -> Device {
+    match device {
+        Device::Vulkan(_) => Device::Cpu,
+        d => *d,
+    }
+}
+
 /// Compute the rotary-embedding `inv_freq` tensor once and upload it to `device`.
 ///
 /// `inv_freq_i = 1.0 / (rope_theta ^ (2i / rotary_dim))` for `i` in `0..rotary_dim/2`.
@@ -3581,7 +3601,7 @@ pub fn compute_rotary_inv_freq(
         .map(|i| 1.0 / rope_theta.powf(2.0 * i as f64 / rotary_dim as f64) as f32)
         .collect();
     // kt `new` takes `Device` by value (kt Device is Copy) (#1082).
-    let t = Tensor::new(inv_freq.as_slice(), *device)
+    let t = Tensor::new(inv_freq.as_slice(), loader_kt_device(device))
         .context("failed to build rotary inv_freq tensor")?;
     Ok(t)
 }
@@ -4913,8 +4933,24 @@ fn candle_weight_to_kt(t: &candle_core::Tensor) -> Result<Tensor> {
 /// Unconditional: `candle_device_from_kt` is a pure enum mapping with no
 /// CUDA toolchain dependency, so the loader's Metal path needs it on the
 /// non-cuda build too.
+///
+/// Vulkan special case (#1082 Vulkan loader fix): a kt `Device::Vulkan(_)`
+/// has *no* candle equivalent — candle has no Vulkan backend. But the
+/// Vulkan loader never wants candle tensors on a real device: on a
+/// non-CUDA build `kt_tensor_from_candle_cuda_copy` always produces a kt
+/// *CPU* tensor (a host copy), and the `vk::Device` backend uploads those
+/// host bytes into its own buffer cache (keyed on `TensorId`) lazily at
+/// first use. So the loader's candle *intermediate* must be built on
+/// candle CPU. Mapping Vulkan→Cpu here is what makes the Vulkan weight
+/// upload path (`weight_to_tensor` / `weight_to_transposed_tensor_2d`)
+/// actually run instead of erroring with "no candle equivalent" — the
+/// regression the candle→kt forward-flip introduced and that no CUDA/Metal
+/// CI could catch.
 #[cfg(any(not(feature = "cuda"), feature = "metal"))]
 fn loader_candle_device(device: &Device) -> Result<candle_core::Device> {
+    if matches!(device, Device::Vulkan(_)) {
+        return Ok(candle_core::Device::Cpu);
+    }
     kiln_kt_bridge::candle_device_from_kt(device).map_err(|e| anyhow::anyhow!("{e}"))
 }
 
@@ -5179,8 +5215,9 @@ fn cached_transpose_for_weight(
 
 fn dropped_weight_stub(w: &WeightTensor, device: &Device) -> Result<Tensor> {
     // kt `zeros` takes `Device` by value (kt Device is Copy) and shape as
-    // `Into<Vec<usize>>` (#1082 forward-flip).
-    Ok(Tensor::zeros(vec![1usize], weight_dtype(w), *device)?)
+    // `Into<Vec<usize>>` (#1082 forward-flip). On Vulkan the stub lands on
+    // CPU-host like every other Vulkan weight (`loader_kt_device`).
+    Ok(Tensor::zeros(vec![1usize], weight_dtype(w), loader_kt_device(device))?)
 }
 
 /// True when `from_model_weights` should stub the candle CPU storage
@@ -5213,9 +5250,9 @@ impl ProjectionLoadCache {
             Ok(Self {
                 drop_projection_originals,
                 drop_projection_transposes,
-                bf16_stub: Some(Tensor::zeros(vec![1usize], DType::BF16, *device)?),
-                f16_stub: Some(Tensor::zeros(vec![1usize], DType::F16, *device)?),
-                f32_stub: Some(Tensor::zeros(vec![1usize], DType::F32, *device)?),
+                bf16_stub: Some(Tensor::zeros(vec![1usize], DType::BF16, loader_kt_device(device))?),
+                f16_stub: Some(Tensor::zeros(vec![1usize], DType::F16, loader_kt_device(device))?),
+                f32_stub: Some(Tensor::zeros(vec![1usize], DType::F32, loader_kt_device(device))?),
             })
         } else {
             Ok(Self {
@@ -5605,7 +5642,8 @@ fn promote_cpu_activation(t: Tensor) -> Result<Tensor> {
 /// site (tests, loaders) continues to compile unchanged.
 fn dropped_bf16_stub(device: &Device) -> Result<Tensor> {
     // kt `zeros`: shape as `Into<Vec<usize>>`, `Device` by value (#1082).
-    Ok(Tensor::zeros(vec![1usize], DType::BF16, *device)?)
+    // Vulkan stubs are CPU-host (`loader_kt_device`).
+    Ok(Tensor::zeros(vec![1usize], DType::BF16, loader_kt_device(device))?)
 }
 
 /// Kill switch for the Marlin BF16 residency cleanup. Setting

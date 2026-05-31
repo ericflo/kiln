@@ -34,7 +34,6 @@ use kiln_vulkan_kernel::buffer::VulkanBuffer;
 use kiln_vulkan_kernel::device::VulkanDevice;
 use kiln_vulkan_kernel::kernels::{
     upload_bf16_packed_buffer_from_slice, upload_f32_buffer_from_slice,
-    upload_tensor_bf16_packed_buffer, upload_tensor_f32_buffer,
 };
 
 // Used by run_full_step_resident — keep the module-level imports here so the
@@ -75,7 +74,11 @@ fn make_bf16_weight_slice(rows: usize, cols: usize) -> Vec<bf16> {
 }
 
 fn upload_bf16_packed(device: &VulkanDevice, t: &Tensor) -> Result<VulkanBuffer> {
-    upload_tensor_bf16_packed_buffer(device, t)
+    // #1082: the candle-typed `upload_tensor_bf16_packed_buffer` was removed
+    // in the kernels.rs candle-free pass; extract the bf16 slice and use the
+    // candle-free `_from_slice` entry point.
+    let data = t.flatten_all()?.to_dtype(DType::BF16)?.to_vec1::<bf16>()?;
+    upload_bf16_packed_buffer_from_slice(device, &data)
 }
 
 fn time<F: FnMut() -> Result<()>>(label: &str, batch: usize, mut f: F) -> Result<()> {
@@ -139,7 +142,8 @@ fn run() -> Result<()> {
     let up_buf = upload_bf16_packed(&device, &up_w)?;
     let down_buf = upload_bf16_packed(&device, &down_w)?;
     // f32 down buffer for bf16_gate_up_f32_down variant.
-    let down_f32_buf = upload_tensor_f32_buffer(&device, &down_w_f32)?;
+    let down_f32_data = down_w_f32.flatten_all()?.to_dtype(DType::F32)?.to_vec1::<f32>()?;
+    let down_f32_buf = upload_f32_buffer_from_slice(&device, &down_f32_data)?;
     let qkv_buf = upload_bf16_packed(&device, &qkv_w)?;
     let z_buf = upload_bf16_packed(&device, &z_w)?;
     let a_buf = upload_bf16_packed(&device, &a_w)?;
