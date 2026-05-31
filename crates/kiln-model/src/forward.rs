@@ -2130,63 +2130,6 @@ impl Drop for VulkanSkipGdnStateReadbackScope {
     }
 }
 
-/// Threshold above which the fused `kiln_rmsnorm_kernel::fused_rmsnorm_with_autograd`
-/// CustomOp2 path is enabled by default during training. Set to 47 GiB to draw the
-/// line between A6000-class GPUs (49 140 MiB) and A40-class GPUs (46 068 MiB).
-///
-/// See `docs/audits/PHASE10_VRAM_REGRESSION_MECHANISM.md` (PR #643) — the
-/// CustomOp2 saved-tensor expansion costs +18.6 GiB peak at T=2048 on A40 but is
-/// invisibly absorbed by the larger allocator-pool baseline that A6000 sits on
-/// permanently. Gating the default path on detected total VRAM keeps the fusion
-/// savings on production hardware while protecting smaller GPUs from OOM.
-#[cfg(feature = "cuda")]
-const FUSED_RMSNORM_VRAM_GATE_BYTES: u64 = 47 * 1024 * 1024 * 1024;
-
-/// Decide whether the fused RMSNorm CustomOp2 path should be the default
-/// dispatch on this CUDA host. Computed exactly once per process via OnceLock
-/// so the (potentially shell-out) VRAM detection is amortized away from the
-/// training inner loop.
-///
-/// Returns `true` (default-on, fused path) when one of the following holds:
-///   * `KILN_FORCE_RMSNORM_KERNEL=1` is set (debug/benchmark override that
-///     bypasses the gate even on small GPUs — useful for reproducing the A40
-///     +18.6 GiB regression locally).
-///   * Detected total VRAM is at least `FUSED_RMSNORM_VRAM_GATE_BYTES` (47 GiB).
-///
-/// Returns `false` (gated off, fall through to `rms_norm_fallback`) when:
-///   * VRAM detection failed (safer to assume small GPU).
-///   * Detected total VRAM is below the gate threshold.
-///
-/// Emits a single `tracing::info!` line at first call documenting the inputs to
-/// the decision, so a single `grep "kiln rmsnorm gate"` on a training log
-/// answers "which path is this run on?".
-///
-/// The hard kill switches `KILN_DISABLE_RMSNORM_KERNEL` and
-/// `KILN_DISABLE_RMSNORM_BACKWARD` are checked separately at the dispatch site
-/// in `rms_norm()` and take precedence over the gate.
-#[cfg(feature = "cuda")]
-fn should_use_fused_rmsnorm() -> bool {
-    static GATE: OnceLock<bool> = OnceLock::new();
-    *GATE.get_or_init(|| {
-        let force = std::env::var("KILN_FORCE_RMSNORM_KERNEL").is_ok();
-        let vram = kiln_core::vram::detect_vram();
-        let total_bytes = vram.total_bytes;
-        let total_mib = total_bytes / (1024 * 1024);
-        let threshold_mib = FUSED_RMSNORM_VRAM_GATE_BYTES / (1024 * 1024);
-        let detected_meets_threshold = total_bytes >= FUSED_RMSNORM_VRAM_GATE_BYTES;
-        let take_fused = force || detected_meets_threshold;
-        tracing::info!(
-            total_vram_mib = total_mib,
-            threshold_mib = threshold_mib,
-            detection_source = %vram.source,
-            force_override = force,
-            fused_path = if take_fused { "ON" } else { "OFF" },
-            "kiln rmsnorm gate"
-        );
-        take_fused
-    })
-}
-
 /// CUDA-compatible SiLU (Swish): `x * sigmoid(x)`.
 ///
 /// Phase 7 whole-composite migration (#1082): contiguous non-autograd CUDA
@@ -6862,41 +6805,16 @@ pub fn rms_norm(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor> {
                     }
                 }
             }
-            // Candle CustomOp fallback (NO LONGER the production training
-            // caller). The autograd/training path now records via the
-            // kt-native `fused_rmsnorm_via_kt_tape` branch above; the
-            // non-tracked decode/inference path returns from the kt-only branch
-            // just above. This candle-typed shim is reached only as a last
-            // resort: tape inactive (or kt envelope miss) AND the kt borrow in
-            // the non-tracked branch declined — an edge that does not arise on
-            // the CUDA BF16 happy path. Kept (not deleted) so that out-of-kt-
-            // envelope cases still have an autograd-capable forward, and
-            // because the candle `fused_rmsnorm_via_kt_forward_op` fn is shared
-            // with the kt-shim. Bridge kt x/weight to candle and back.
-            let x_candle = kt_logits_to_candle(x).context("rms_norm kt->candle x (shim)")?;
-            let w_candle =
-                kt_logits_to_candle(weight).context("rms_norm kt->candle weight (shim)")?;
-            if should_use_fused_rmsnorm()
-                && crate::rmsnorm_candle_shim::supports(&x_candle, &w_candle)
-            {
-                // kt-forward-op shim: a single `KtForwardOp2` (commit
-                // `095f1c74`) whose forward AND backward both run through the
-                // kt-typed entries (same `kiln_fused_rmsnorm` /
-                // `kiln_fused_rmsnorm_bwd` FFI symbols as the kt-tape entry).
-                // Falls back to `fused_rmsnorm_with_autograd` automatically
-                // when the kt-shim envelope misses (kill switch
-                // `KILN_DISABLE_RMSNORM_KT_FORWARD_OP=1`, non-CUDA, non-BF16,
-                // hidden > 8192, etc.). See
-                // `kiln-rmsnorm-kernel/src/kt_forward_op.rs` for the design
-                // rationale.
-                let out = crate::rmsnorm_candle_shim::fused_rmsnorm_via_kt_forward_op(
-                    &x_candle,
-                    &w_candle,
-                    eps as f32,
-                )
-                .context("fused_rmsnorm_via_kt_forward_op shim failed")?;
-                return candle_to_kt_activation(&out).context("rms_norm candle->kt shim out");
-            }
+            // #1082 DoD-100 (step 3a): the candle `fused_rmsnorm_via_kt_forward_op`
+            // fallback arm was deleted here. It was reached only as a last resort
+            // (tape inactive or kt-envelope miss AND the non-tracked kt borrow
+            // declined) — an edge that does NOT arise on the CUDA BF16 happy path:
+            // BF16 tracked tensors record via `fused_rmsnorm_via_kt_tape` above,
+            // and non-tracked decode/inference returns from the kt-only branch
+            // above. The only remaining cases are out-of-kt-envelope / non-BF16
+            // (e.g. dropped F32/CPU training), which now fall through to the
+            // kt-native `rms_norm_fallback` below — forward-only, matching the
+            // locked plan's CUDA-BF16-tape-authoritative-only training contract.
         }
     }
     #[cfg(feature = "metal")]
