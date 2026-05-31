@@ -126,6 +126,13 @@ Other proper work-packages for full saturation (per "max out the hardware in
 every config"):
 - **True multi-row batched resident decode** (bs>1 / continuous-batched is
   currently rowwise-serialized through the fast bs=1 path).
+  **Update — first native resident batch primitive landed:** added
+  `paged_kv_write_slots`, a Vulkan dispatch that copies `[batch,
+  num_kv_heads * head_dim]` projected K/V rows into per-row resolved KV-cache
+  slots in one submit, with a bounds-aware slot guard. This removes one of the
+  b1-only assumptions in the resident decode block recorder; full bs>1 decode
+  orchestration still needs the batched row path through QKV/split/RoPE/MLP and
+  the resident paged-attention call.
 - **Vulkan paged-attention decode kernel**: the kernel crate already had
   `paged_attn_decode_batch_paged.comp`; Vulkan now advertises
   `supports_flash_attn_paged_decode` and wires the single-query paged-decode

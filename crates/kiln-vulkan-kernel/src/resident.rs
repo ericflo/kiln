@@ -1821,6 +1821,126 @@ pub fn dispatch_paged_kv_write_slot_resident(
     .context("paged_kv_write_slot_resident kernel failed")
 }
 
+/// Resident-form batched paged KV-cache slot write.
+///
+/// Copies `batch` freshly-projected `(k, v)` decode tokens into the
+/// device-resident K/V pools. `k_in` and `v_in` are row-major
+/// `[batch, num_kv_heads * head_dim]`; `slots` is a u32 buffer with one
+/// resolved destination slot per batch row. This is the batch primitive
+/// needed by multi-row resident decode so slot selection can vary per row
+/// without recording one `paged_kv_write_slot` dispatch per request row.
+pub fn dispatch_paged_kv_write_slots_resident(
+    vk_device: &VulkanDevice,
+    k_in: &VulkanBuffer,
+    v_in: &VulkanBuffer,
+    slots: &VulkanBuffer,
+    k_pool: &VulkanBuffer,
+    v_pool: &VulkanBuffer,
+    batch: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    total_slots: usize,
+) -> Result<()> {
+    anyhow::ensure!(
+        batch > 0,
+        "paged_kv_write_slots_resident: batch must be > 0"
+    );
+    anyhow::ensure!(
+        batch <= u32::MAX as usize,
+        "paged_kv_write_slots_resident: batch {batch} exceeds u32::MAX"
+    );
+    anyhow::ensure!(
+        total_slots <= u32::MAX as usize,
+        "paged_kv_write_slots_resident: total_slots {total_slots} exceeds u32::MAX"
+    );
+    let elements_per_slot = num_kv_heads
+        .checked_mul(head_dim)
+        .context("paged_kv_write_slots_resident: elements_per_slot overflow")?;
+    anyhow::ensure!(
+        elements_per_slot <= u32::MAX as usize,
+        "paged_kv_write_slots_resident: elements_per_slot {elements_per_slot} exceeds u32::MAX"
+    );
+    let input_elems = batch
+        .checked_mul(elements_per_slot)
+        .context("paged_kv_write_slots_resident: input element count overflow")?;
+    let pool_elems = total_slots
+        .checked_mul(elements_per_slot)
+        .context("paged_kv_write_slots_resident: pool element count overflow")?;
+    anyhow::ensure!(
+        input_elems <= u32::MAX as usize,
+        "paged_kv_write_slots_resident: input_elems {input_elems} exceeds u32::MAX"
+    );
+    anyhow::ensure!(
+        pool_elems <= u32::MAX as usize,
+        "paged_kv_write_slots_resident: pool_elems {pool_elems} exceeds u32::MAX"
+    );
+    let need_in = input_elems
+        .checked_mul(4)
+        .context("paged_kv_write_slots_resident: input byte count overflow")?
+        as u64;
+    let need_slots = batch
+        .checked_mul(4)
+        .context("paged_kv_write_slots_resident: slots byte count overflow")?
+        as u64;
+    let need_pool = pool_elems
+        .checked_mul(4)
+        .context("paged_kv_write_slots_resident: pool byte count overflow")?
+        as u64;
+    anyhow::ensure!(
+        k_in.size() >= need_in,
+        "paged_kv_write_slots_resident: k_in buffer has {} bytes, needs at least {need_in}",
+        k_in.size()
+    );
+    anyhow::ensure!(
+        v_in.size() >= need_in,
+        "paged_kv_write_slots_resident: v_in buffer has {} bytes, needs at least {need_in}",
+        v_in.size()
+    );
+    anyhow::ensure!(
+        slots.size() >= need_slots,
+        "paged_kv_write_slots_resident: slots buffer has {} bytes, needs at least {need_slots}",
+        slots.size()
+    );
+    anyhow::ensure!(
+        k_pool.size() >= need_pool,
+        "paged_kv_write_slots_resident: k_pool buffer has {} bytes, needs at least {need_pool}",
+        k_pool.size()
+    );
+    anyhow::ensure!(
+        v_pool.size() >= need_pool,
+        "paged_kv_write_slots_resident: v_pool buffer has {} bytes, needs at least {need_pool}",
+        v_pool.size()
+    );
+
+    let glsl_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/csrc/shaders/paged_kv_write_slots.comp"
+    );
+    let spirv = ShaderPipeline::compile_shader(glsl_path)?;
+    let push_constants: [u32; 3] = [
+        batch as u32,
+        elements_per_slot as u32,
+        total_slots as u32,
+    ];
+    let handles: [vk::Buffer; 5] = [
+        k_in.handle(),
+        v_in.handle(),
+        slots.handle(),
+        k_pool.handle(),
+        v_pool.handle(),
+    ];
+    let workgroups = input_elems.div_ceil(256) as u32;
+    run_compute_pipeline(
+        vk_device,
+        &spirv,
+        &handles,
+        handles.len(),
+        &push_constants,
+        workgroups,
+    )
+    .context("paged_kv_write_slots_resident kernel failed")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

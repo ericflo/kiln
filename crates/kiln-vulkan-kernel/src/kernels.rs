@@ -357,6 +357,7 @@ pub fn prewarm_builtin_pipelines(vk_device: &VulkanDevice) -> Result<()> {
         ("mlp_gate_up_decode_batched_rows4_bf16w", 4, 12),
         ("mlp_gate_up_decode_batched_rows8_bf16w", 4, 12),
         ("mlp_gate_up_decode_batched_rows2", 4, 12),
+        ("paged_kv_write_slots", 5, 12),
         ("paged_attn_decode_batch", 5, 20),
         ("paged_attn_decode_batch_paged", 6, 24),
     ];
