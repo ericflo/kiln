@@ -25783,12 +25783,10 @@ mod tests {
         let x = Tensor::from_vec(vec![1.0f32, 2.0], (1, 1, 2))?.to_device(device)?;
         let weight_t = Tensor::zeros((2, 3), DType::F32, &device)?;
         let lora = LoraProjectionWeights {
-            // #1082: `LoraProjectionWeights.{a,b}` stay candle-typed (production
-            // struct); build kt then bridge kt→candle (CPU F32, lossless).
-            a: kt_cpu_to_candle(&Tensor::from_vec(vec![3.0f32, 4.0], (1, 2))?.to_device(device)?),
-            b: kt_cpu_to_candle(
-                &Tensor::from_vec(vec![5.0f32, 6.0, 7.0], (3, 1))?.to_device(device)?,
-            ),
+            // #1082: `LoraProjectionWeights.{a,b}` are now kt `KtTensor`; pass
+            // the kt tensors directly (no candle bridge).
+            a: Tensor::from_vec(vec![3.0f32, 4.0], (1, 2))?.to_device(device)?,
+            b: Tensor::from_vec(vec![5.0f32, 6.0, 7.0], (3, 1))?.to_device(device)?,
         };
         let backend = FixedLinearBackend {
             device: device.clone(),
@@ -25845,13 +25843,9 @@ mod tests {
         };
         let lora_layer = LoraLayerWeights {
             down_proj: Some(LoraProjectionWeights {
-                // #1082: candle-typed LoRA fields; bridge kt→candle (CPU F32).
-                a: kt_cpu_to_candle(
-                    &Tensor::from_vec(vec![1.0f32, 0.0], (1, 2))?.to_device(device)?,
-                ),
-                b: kt_cpu_to_candle(
-                    &Tensor::from_vec(vec![2.0f32, 4.0], (2, 1))?.to_device(device)?,
-                ),
+                // #1082: kt `KtTensor` LoRA fields; pass kt directly.
+                a: Tensor::from_vec(vec![1.0f32, 0.0], (1, 2))?.to_device(device)?,
+                b: Tensor::from_vec(vec![2.0f32, 4.0], (2, 1))?.to_device(device)?,
             }),
             ..Default::default()
         };
@@ -25917,13 +25911,9 @@ mod tests {
         };
         let lora_layer = LoraLayerWeights {
             q_proj: Some(LoraProjectionWeights {
-                // #1082: candle-typed LoRA fields; bridge kt→candle (CPU F32).
-                a: kt_cpu_to_candle(
-                    &Tensor::from_vec(vec![1.0f32, 0.0], (1, 2))?.to_device(device)?,
-                ),
-                b: kt_cpu_to_candle(
-                    &Tensor::from_vec(vec![2.0f32, 4.0], (2, 1))?.to_device(device)?,
-                ),
+                // #1082: kt `KtTensor` LoRA fields; pass kt directly.
+                a: Tensor::from_vec(vec![1.0f32, 0.0], (1, 2))?.to_device(device)?,
+                b: Tensor::from_vec(vec![2.0f32, 4.0], (2, 1))?.to_device(device)?,
             }),
             ..Default::default()
         };
@@ -27528,7 +27518,7 @@ mod tests {
         let bt1 = BlockTable { blocks: vec![1] };
         let block_tables = [&bt0, &bt1];
         let start_positions = [start_pos, start_pos];
-        let mut batch_cache = PagedKvCacheKt::new(
+        let mut batch_cache = crate::PagedKvCacheKt::new(
             1,
             2,
             block_size,
@@ -27572,7 +27562,7 @@ mod tests {
         assert_eq!(batched.dims(), &[batch, 1usize, hidden]);
 
         for row in 0..batch {
-            let mut row_cache = PagedKvCacheKt::new(
+            let mut row_cache = crate::PagedKvCacheKt::new(
                 1,
                 1,
                 block_size,
@@ -27693,7 +27683,7 @@ mod tests {
         let bt1 = BlockTable { blocks: vec![1] };
         let block_tables = [&bt0, &bt1];
         let start_positions = [start_pos, start_pos];
-        let mut batch_cache = PagedKvCacheKt::new(
+        let mut batch_cache = crate::PagedKvCacheKt::new(
             1,
             2,
             block_size,
@@ -27733,7 +27723,7 @@ mod tests {
         assert_eq!(batched.dims(), &[batch, 1usize, hidden]);
 
         for row in 0..batch {
-            let mut row_cache = PagedKvCacheKt::new(
+            let mut row_cache = crate::PagedKvCacheKt::new(
                 1,
                 1,
                 block_size,
@@ -27851,7 +27841,7 @@ mod tests {
         let block_tables = [&bt0, &bt1];
         let start_positions = [start_pos, start_pos];
         let token_ids = [7u32, 11u32];
-        let mut batch_cache = PagedKvCacheKt::new(
+        let mut batch_cache = crate::PagedKvCacheKt::new(
             1,
             2,
             block_size,
@@ -27882,7 +27872,7 @@ mod tests {
 
         let positions = Tensor::from_slice(&[start_pos as f32], 1usize)?.to_device(device)?;
         for row in 0..batch {
-            let mut row_cache = PagedKvCacheKt::new(
+            let mut row_cache = crate::PagedKvCacheKt::new(
                 1,
                 1,
                 block_size,
@@ -28037,7 +28027,7 @@ mod tests {
         let block_tables = [&bt0, &bt1];
         let token_ids = [7u32, 11u32];
 
-        let mut batch_cache = PagedKvCacheKt::new(
+        let mut batch_cache = crate::PagedKvCacheKt::new(
             1,
             2,
             block_size,
@@ -28112,7 +28102,7 @@ mod tests {
 
         for row in 0..batch {
             let row_start_pos = start_positions[row];
-            let mut row_cache = PagedKvCacheKt::new(
+            let mut row_cache = crate::PagedKvCacheKt::new(
                 1,
                 1,
                 block_size,
@@ -28222,7 +28212,7 @@ mod tests {
         let block_tables = [&bt0, &bt1];
         let start_positions = [start_pos, start_pos];
         let token_ids = [7u32, 11u32];
-        let mut batch_cache = PagedKvCacheKt::new(
+        let mut batch_cache = crate::PagedKvCacheKt::new(
             config.num_full_attention_layers,
             2,
             block_size,
@@ -28259,7 +28249,7 @@ mod tests {
 
         let positions = Tensor::from_slice(&[start_pos as f32], 1usize)?.to_device(device)?;
         for row in 0..batch {
-            let mut row_cache = PagedKvCacheKt::new(
+            let mut row_cache = crate::PagedKvCacheKt::new(
                 config.num_full_attention_layers,
                 1,
                 block_size,
@@ -32180,7 +32170,7 @@ mod tests {
         let num_blocks = (seq_len + block_size - 1) / block_size;
         // #1082: `device` is already a kt `Device`.
         let device_kt = *device;
-        let cache = PagedKvCacheKt::new(
+        let cache = crate::PagedKvCacheKt::new(
             config.num_full_attention_layers,
             num_blocks,
             block_size,
@@ -32542,10 +32532,9 @@ mod tests {
             "last-token prefill max_abs_diff={max_abs:e} exceeds 1e-5"
         );
 
-        // #1082: `last_logits` is kt (model output); `greedy_sample` is
-        // candle-typed. Bridge kt→candle (CPU F32, lossless — argmax is
-        // identical) so the greedy comparison still pins the same token.
-        let expected_token = crate::sampling::greedy_sample(&kt_cpu_to_candle(&last_logits))?;
+        // #1082: `last_logits` is kt (model output) and `greedy_sample` now
+        // takes a kt `&Tensor` directly — no candle bridge.
+        let expected_token = crate::sampling::greedy_sample(&last_logits)?;
         let (mut greedy_cache, greedy_bt) = make_paged_setup(&config, total, 64, &device)?;
         let mut greedy_state = LinearAttentionState::new(&config, &device)?;
         let greedy_token = model_forward_paged_last_token_greedy(
