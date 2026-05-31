@@ -5206,6 +5206,24 @@ pub(crate) fn transposed_weight_bytes_2d(w: &WeightTensor) -> Result<(Vec<u8>, [
 }
 
 // #1082: un-stubbed for no-CUDA (see `candle_weight_to_kt`).
+/// CUDA (#1082): kt-native — the cached transposed weight bytes upload straight
+/// into a kt CUDA tensor via `Tensor::from_raw_bytes_on`, dropping the candle
+/// `from_raw_buffer` leaf + the device→device bridge copy (same win as
+/// [`weight_to_tensor`], on the projection-weight loader entry).
+#[cfg(feature = "cuda")]
+fn weight_to_transposed_tensor_2d(w: &WeightTensor, device: &Device) -> Result<Tensor> {
+    let data = transposed_weight_bytes_2d_cached_bytes(w)?;
+    Tensor::from_raw_bytes_on(
+        *device,
+        weight_dtype(w),
+        data.as_bytes().to_vec(),
+        data.shape().to_vec(),
+    )
+    .map_err(|e| anyhow::anyhow!("weight_to_transposed_tensor_2d (kt-native CUDA load): {e}"))
+}
+
+/// Non-CUDA sibling: candle leaf + copy-bridge (kept for the Metal loader path).
+#[cfg(not(feature = "cuda"))]
 fn weight_to_transposed_tensor_2d(w: &WeightTensor, device: &Device) -> Result<Tensor> {
     let data = transposed_weight_bytes_2d_cached_bytes(w)?;
     let cdev = loader_candle_device(device)?;
