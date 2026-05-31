@@ -487,8 +487,10 @@ mod tests {
             chunk_size: 4,
         };
 
-        // Seed grad — rank-0 F32 (matches the loss).
-        let grad_loss = KtTensor::from_vec(vec![1.0f32], vec![]).expect("grad_loss");
+        // Seed grad — rank-0 F32 (matches the loss), on the SAME CUDA device as
+        // hidden/head (the production seed comes from the on-device tape; a CPU
+        // `from_vec` seed would make the backward's mul mix cuda+cpu operands).
+        let grad_loss = KtTensor::cuda_from_slice(&[1.0f32], vec![], 0).expect("grad_loss");
 
         let grads = bwd.apply(&grad_loss).expect("apply backward");
         assert_eq!(grads.len(), 2);
