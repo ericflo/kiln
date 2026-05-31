@@ -28,14 +28,24 @@ use half::f16;
 /// A q_proj / projection weight packed into Marlin's W4A16 layout.
 ///
 /// All tensors live on the same CUDA device as the source model weights. The
-/// struct is `Send + Sync` via the underlying `candle_core::Tensor` handles.
+/// struct is `Send + Sync` via the underlying `kiln_tensor::Tensor` handles.
+///
+/// # #1082 type-flip
+///
+/// `b_packed`/`scales` are stored as kt (`kiln_tensor::Tensor`) so the kt-API
+/// GEMM ([`kiln_marlin_gemm::marlin_w4a16_gemm_kt`]) consumes them directly on
+/// the decode hot path. The candle→kt bridge happens **once** at pack time in
+/// [`upload_packed`] (a single device-to-device copy at model load), not on
+/// every per-token decode call.
 #[derive(Clone, Debug)]
 pub struct MarlinPackedProj {
     /// Packed 4-bit weights in Marlin's tiled/permuted layout.
-    /// Shape: `[k / 16, n * 16 / 8]`, dtype `i32`.
-    pub b_packed: candle_core::Tensor,
+    /// Shape: `[k / 16, n * 16 / 8]`. Built from candle's `I32` packed
+    /// buffer; the kt-side dtype is `U32` (same 4-byte layout — see
+    /// `kiln_kt_bridge::candle_dtype_to_kt`'s I32→U32 mapping).
+    pub b_packed: kiln_tensor::Tensor,
     /// Per-group scales, Marlin-permuted. Shape `[k / groupsize, n]`, dtype `f16`.
-    pub scales: candle_core::Tensor,
+    pub scales: kiln_tensor::Tensor,
     /// Marlin groupsize sentinel: `-1` (per-column) or `128`.
     pub groupsize: i32,
     /// Input feature dim (rows of the original `[k, n]` weight).
@@ -155,14 +165,24 @@ pub fn upload_packed(packed: PackedHost, device: &candle_core::Device) -> Result
     } else {
         k / groupsize as usize
     };
-    let b_packed = candle_core::Tensor::from_vec(b_packed_vec, (k / 16, n * 16 / 8), &candle_core::Device::Cpu)
+    let b_packed_candle = candle_core::Tensor::from_vec(b_packed_vec, (k / 16, n * 16 / 8), &candle_core::Device::Cpu)
         .context("marlin_proj: build host b_packed tensor")?
         .to_device(device)
         .context("marlin_proj: upload b_packed to device")?;
-    let scales = candle_core::Tensor::from_vec(scales_vec, (num_groups, n), &candle_core::Device::Cpu)
+    let scales_candle = candle_core::Tensor::from_vec(scales_vec, (num_groups, n), &candle_core::Device::Cpu)
         .context("marlin_proj: build host scales tensor")?
         .to_device(device)
         .context("marlin_proj: upload scales to device")?;
+    // #1082: store the packed weight + scales as kt so the decode-hot-path
+    // GEMM (`marlin_w4a16_gemm_kt`) reads them directly. Bridge candle→kt
+    // ONCE here at model-load (a single device-to-device copy per
+    // projection), not on every per-token decode call. The candle source
+    // tensors drop at end of scope; the returned kt tensors own their own
+    // CUDA allocation.
+    let b_packed = kiln_kt_bridge::kt_tensor_from_candle_cuda_copy(&b_packed_candle)
+        .context("marlin_proj: pack-time bridge b_packed candle->kt")?;
+    let scales = kiln_kt_bridge::kt_tensor_from_candle_cuda_copy(&scales_candle)
+        .context("marlin_proj: pack-time bridge scales candle->kt")?;
     Ok(MarlinPackedProj {
         b_packed,
         scales,
@@ -277,10 +297,10 @@ pub fn pack_from_bf16_batch(inputs: &[(candle_core::Tensor, i32)]) -> Result<Vec
 /// way out — the kt-typed `marlin_w4a16_gemm_kt` accepts F16 inputs
 /// directly (the candle shim does the cast internally instead).
 ///
-/// Borrows on the activation, packed weights, and scales are
-/// zero-copy via [`kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow`];
-/// the I32→U32 mapping in `candle_dtype_to_kt` lets the packed
-/// weights flow through without a copy or a U32 reinterpret tensor.
+/// The candle activation is borrowed zero-copy into kt via
+/// [`kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow`]; the packed
+/// weights + scales are already kt-typed in [`MarlinPackedProj`]
+/// (bridged once at pack time) and handed straight to the kernel.
 #[cfg(feature = "cuda")]
 pub(crate) fn matmul_bf16_2d_kt(x_bf16: &candle_core::Tensor, w: &MarlinPackedProj) -> Result<candle_core::Tensor> {
     kiln_nvtx::range!(c"kiln/marlin_w4a16_gemm_kt");
@@ -293,22 +313,11 @@ pub(crate) fn matmul_bf16_2d_kt(x_bf16: &candle_core::Tensor, w: &MarlinPackedPr
         .context("marlin_proj kt: cast x bf16 -> fp16")?
         .contiguous()
         .context("marlin_proj kt: x_fp16 contiguous")?;
-    let b_packed = w
-        .b_packed
-        .contiguous()
-        .context("marlin_proj kt: b_packed contiguous")?;
-    let scales = w
-        .scales
-        .contiguous()
-        .context("marlin_proj kt: scales contiguous")?;
 
     let x_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&x_fp16)
         .context("marlin_proj kt: borrow x_fp16 -> kt")?;
-    let b_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&b_packed)
-        .context("marlin_proj kt: borrow b_packed -> kt")?;
-    let s_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&scales)
-        .context("marlin_proj kt: borrow scales -> kt")?;
-    let y_kt = kiln_marlin_gemm::marlin_w4a16_gemm_kt(&x_kt, &b_kt, &s_kt, w.groupsize)
+    // #1082: packed weight + scales are kt-stored — use directly.
+    let y_kt = kiln_marlin_gemm::marlin_w4a16_gemm_kt(&x_kt, &w.b_packed, &w.scales, w.groupsize)
         .map_err(|e| anyhow::anyhow!("marlin_proj kt: marlin_w4a16_gemm_kt: {e}"))?;
     let y_fp16 = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&y_kt)
         .context("marlin_proj kt: copy kt result -> candle")?;
@@ -329,10 +338,9 @@ pub(crate) fn matmul_bf16_2d_kt(x_bf16: &candle_core::Tensor, w: &MarlinPackedPr
 /// the BF16→F16 cast, the kernel call, and the F16→BF16 cast entirely
 /// in kt-space, with **no** `kt_logits_to_candle` / `candle_to_kt_activation`
 /// round-trip on the activation or the output. The packed weight + scales
-/// (stored as candle tensors in [`MarlinPackedProj`]) are borrowed
-/// zero-copy once via [`kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow`];
-/// the I32→U32 mapping in `candle_dtype_to_kt` lets the packed weights flow
-/// through without a copy.
+/// are stored as kt tensors in [`MarlinPackedProj`] (bridged once at pack
+/// time in [`upload_packed`]) and handed straight to the kernel — **no**
+/// per-call candle→kt bridge of the weights.
 ///
 /// Numerically identical to [`matmul_bf16`]: same FFI symbol
 /// (`marlin_w4a16_gemm_kt`), same F16-only kernel, same BF16↔F16 cast at
@@ -386,21 +394,11 @@ pub fn matmul_bf16_kt(
             .context("marlin_proj kt: x_fp16 contiguous")?
     };
 
-    // Borrow the packed weight + scales (candle-stored) zero-copy into kt.
-    let b_packed = w
-        .b_packed
-        .contiguous()
-        .context("marlin_proj kt: b_packed contiguous")?;
-    let scales = w
-        .scales
-        .contiguous()
-        .context("marlin_proj kt: scales contiguous")?;
-    let b_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&b_packed)
-        .context("marlin_proj kt: borrow b_packed -> kt")?;
-    let s_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&scales)
-        .context("marlin_proj kt: borrow scales -> kt")?;
-
-    let y_fp16 = kiln_marlin_gemm::marlin_w4a16_gemm_kt(&x_fp16, &b_kt, &s_kt, w.groupsize)
+    // #1082: the packed weight + scales are already kt (bridged once at
+    // pack time in `upload_packed`). Hand them straight to the kernel —
+    // no per-call candle→kt bridge on the decode hot path. They were built
+    // contiguous at pack time, so no `.contiguous()` is needed here.
+    let y_fp16 = kiln_marlin_gemm::marlin_w4a16_gemm_kt(&x_fp16, &w.b_packed, &w.scales, w.groupsize)
         .map_err(|e| anyhow::anyhow!("marlin_proj kt: marlin_w4a16_gemm_kt: {e}"))?;
 
     // Cast result fp16 -> bf16 in kt-space (no candle detour).

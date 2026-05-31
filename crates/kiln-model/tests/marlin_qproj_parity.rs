@@ -20,28 +20,28 @@
 //!
 //! # #1082 type-flip status
 //!
-//! `kiln_model::forward::q_proj_forward` and `GpuFullAttentionWeights`'s tensor
-//! fields are now kt (`kiln_tensor`) typed. This test still constructs its
-//! synthetic weights/activations with candle's `Tensor::from_vec` + `to_device`
-//! + `to_dtype` (the most ergonomic way to build deterministic on-device data),
-//! and `MarlinPackedProj.{b_packed,scales}` remain candle. The kt boundary is
-//! crossed with the CUDA kt<->candle bridge: candle weights are borrowed to kt
-//! for the struct fields/input (`kt_in`), and the kt outputs are copied back to
-//! candle (`candle_out`) so the cosine-similarity / max-abs-diff parity
-//! assertions are unchanged.
+//! `kiln_model::forward::q_proj_forward`, `GpuFullAttentionWeights`'s tensor
+//! fields, and `MarlinPackedProj.{b_packed,scales}` are now kt (`kiln_tensor`)
+//! typed. This test still constructs its synthetic weights/activations with
+//! candle's `Tensor::from_vec` + `to_device` + `to_dtype` (the most ergonomic
+//! way to build deterministic on-device data). The kt boundary is crossed with
+//! the CUDA kt<->candle bridge: candle weights are borrowed to kt for the
+//! struct fields/input (`kt_in`), and the kt outputs are copied back to candle
+//! (`candle_out`) so the cosine-similarity / max-abs-diff parity assertions are
+//! unchanged.
 
 #[cfg(feature = "cuda")]
 use candle_core::{DType, Device, Tensor};
 #[cfg(feature = "cuda")]
 use kiln_tensor::Tensor as KtTensor;
 
-// #1082 type-flip: `GpuFullAttentionWeights` fields and `q_proj_forward`'s
-// activation input/output are now kt (`kiln_tensor`) tensors, while the test
-// still builds its synthetic weights/activations as candle tensors (and
-// `MarlinPackedProj.{b_packed,scales}` remain candle). This is a CUDA-only test,
-// so the CUDA kt<->candle bridge is available: build candle on-device, borrow to
-// kt for the fields/input, and copy the kt outputs back to candle for the
-// (unchanged) cosine/max-abs-diff parity assertions.
+// #1082 type-flip: `GpuFullAttentionWeights` fields, `q_proj_forward`'s
+// activation input/output, and `MarlinPackedProj.{b_packed,scales}` are now kt
+// (`kiln_tensor`) tensors, while the test still builds its synthetic
+// weights/activations as candle tensors. This is a CUDA-only test, so the CUDA
+// kt<->candle bridge is available: build candle on-device, borrow to kt for the
+// fields/input, and copy the kt outputs back to candle for the (unchanged)
+// cosine/max-abs-diff parity assertions.
 #[cfg(feature = "cuda")]
 fn kt_in(t: &Tensor) -> KtTensor {
     kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(t)
@@ -137,18 +137,23 @@ fn run_parity(device: &Device, m: usize, k: usize, n: usize) {
         .expect("acts -> cuda");
 
     // Construct MarlinPackedProj from the same packed/scales as above.
-    let b_packed = Tensor::from_vec(b_packed_vec, (k / 16, n * 16 / 8), &Device::Cpu)
+    // #1082: `MarlinPackedProj.{b_packed,scales}` are now kt tensors, so
+    // build the candle on-device tensors here and bridge them to kt once
+    // (CUDA borrow) — mirroring the one-time pack-time bridge in
+    // `upload_packed`. The data + device are unchanged; only the field
+    // type at the struct boundary is kt.
+    let b_packed_candle = Tensor::from_vec(b_packed_vec, (k / 16, n * 16 / 8), &Device::Cpu)
         .expect("b_packed cpu tensor")
         .to_device(device)
         .expect("b_packed -> cuda");
     let num_groups = k / groupsize as usize;
-    let scales = Tensor::from_vec(scales_vec, (num_groups, n), &Device::Cpu)
+    let scales_candle = Tensor::from_vec(scales_vec, (num_groups, n), &Device::Cpu)
         .expect("scales cpu tensor")
         .to_device(device)
         .expect("scales -> cuda");
     let packed = MarlinPackedProj {
-        b_packed,
-        scales,
+        b_packed: kt_in(&b_packed_candle),
+        scales: kt_in(&scales_candle),
         groupsize,
         k,
         n,
