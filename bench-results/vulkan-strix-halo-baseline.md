@@ -138,6 +138,9 @@ every config"):
   `[batch, q]`, `[batch, gate]`, `[batch, k]`, and `[batch, v]` buffers on GPU.
   This closes another one-row gap between the batched projection shaders and
   a full multi-row resident full-attention block recorder.
+  **Update — GDN split primitives:** added batched GDN in-proj and mixed-QKV
+  split kernels, so the existing batched GDN projection/conv kernels can feed
+  the recurrent step without rowwise host-side slicing.
 - **Vulkan paged-attention decode kernel**: the kernel crate already had
   `paged_attn_decode_batch_paged.comp`; Vulkan now advertises
   `supports_flash_attn_paged_decode` and wires the single-query paged-decode

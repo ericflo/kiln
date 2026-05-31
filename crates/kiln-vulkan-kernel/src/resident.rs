@@ -1810,6 +1810,105 @@ pub fn dispatch_gdn_in_proj_split_resident(
     .context("gdn_in_proj_split_resident kernel failed")
 }
 
+/// Batched GDN in-projection split.
+///
+/// `combined` uses the batched projection-major layout:
+/// `qkv[batch, qkv_dim], z[batch, z_dim], a[batch, a_dim], b[batch, b_dim]`.
+#[allow(clippy::too_many_arguments)]
+pub fn dispatch_gdn_in_proj_split_batched_resident(
+    vk_device: &VulkanDevice,
+    combined: &VulkanBuffer,
+    mixed_qkv_out: &VulkanBuffer,
+    z_out: &VulkanBuffer,
+    a_out: &VulkanBuffer,
+    b_out: &VulkanBuffer,
+    batch: usize,
+    qkv_dim: usize,
+    z_dim: usize,
+    a_dim: usize,
+    b_dim: usize,
+) -> Result<()> {
+    anyhow::ensure!(
+        batch > 0,
+        "gdn_in_proj_split_batched_resident: batch must be > 0"
+    );
+    let qkv_total = batch
+        .checked_mul(qkv_dim)
+        .context("gdn_in_proj_split_batched_resident: qkv element count overflow")?;
+    let z_total = batch
+        .checked_mul(z_dim)
+        .context("gdn_in_proj_split_batched_resident: z element count overflow")?;
+    let a_total = batch
+        .checked_mul(a_dim)
+        .context("gdn_in_proj_split_batched_resident: a element count overflow")?;
+    let b_total = batch
+        .checked_mul(b_dim)
+        .context("gdn_in_proj_split_batched_resident: b element count overflow")?;
+    let total = qkv_total
+        .checked_add(z_total)
+        .and_then(|x| x.checked_add(a_total))
+        .and_then(|x| x.checked_add(b_total))
+        .context("gdn_in_proj_split_batched_resident: total element count overflow")?;
+    anyhow::ensure!(
+        total <= u32::MAX as usize,
+        "gdn_in_proj_split_batched_resident: total {total} exceeds u32::MAX"
+    );
+    let need_comb = total
+        .checked_mul(4)
+        .context("gdn_in_proj_split_batched_resident: combined byte count overflow")?
+        as u64;
+    anyhow::ensure!(
+        combined.size() >= need_comb,
+        "gdn_in_proj_split_batched_resident: combined {} bytes < {need_comb}",
+        combined.size()
+    );
+    anyhow::ensure!(
+        mixed_qkv_out.size() >= (qkv_total * 4) as u64,
+        "gdn_in_proj_split_batched_resident: mixed_qkv_out too small"
+    );
+    anyhow::ensure!(
+        z_out.size() >= (z_total * 4) as u64,
+        "gdn_in_proj_split_batched_resident: z_out too small"
+    );
+    anyhow::ensure!(
+        a_out.size() >= (a_total * 4) as u64,
+        "gdn_in_proj_split_batched_resident: a_out too small"
+    );
+    anyhow::ensure!(
+        b_out.size() >= (b_total * 4) as u64,
+        "gdn_in_proj_split_batched_resident: b_out too small"
+    );
+
+    let glsl_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/csrc/shaders/gdn_in_proj_split_batched.comp"
+    );
+    let spirv = ShaderPipeline::compile_shader(glsl_path)?;
+    let push_constants: [u32; 5] = [
+        batch as u32,
+        qkv_dim as u32,
+        z_dim as u32,
+        a_dim as u32,
+        b_dim as u32,
+    ];
+    let handles: [vk::Buffer; 5] = [
+        combined.handle(),
+        mixed_qkv_out.handle(),
+        z_out.handle(),
+        a_out.handle(),
+        b_out.handle(),
+    ];
+    run_compute_pipeline(
+        vk_device,
+        &spirv,
+        &handles,
+        handles.len(),
+        &push_constants,
+        total.div_ceil(256) as u32,
+    )
+    .context("gdn_in_proj_split_batched_resident kernel failed")
+}
+
 /// Split the GDN mixed_qkv buffer into three distinct output buffers
 /// (q, k, v). Companion to the GDN resident wire-up: the legacy path
 /// does this with three `.narrow().contiguous()` candle ops; this
@@ -1865,6 +1964,83 @@ pub fn dispatch_gdn_qkv_split_resident(
         workgroups,
     )
     .context("gdn_qkv_split_resident kernel failed")
+}
+
+/// Batched GDN mixed-QKV split. Input is `[batch, 2*qk_dim + v_dim]`.
+pub fn dispatch_gdn_qkv_split_batched_resident(
+    vk_device: &VulkanDevice,
+    mixed_qkv: &VulkanBuffer,
+    q_out: &VulkanBuffer,
+    k_out: &VulkanBuffer,
+    v_out: &VulkanBuffer,
+    batch: usize,
+    qk_dim: usize,
+    v_dim: usize,
+) -> Result<()> {
+    anyhow::ensure!(
+        batch > 0,
+        "gdn_qkv_split_batched_resident: batch must be > 0"
+    );
+    let per_row = qk_dim
+        .checked_mul(2)
+        .and_then(|x| x.checked_add(v_dim))
+        .context("gdn_qkv_split_batched_resident: row element count overflow")?;
+    let total = batch
+        .checked_mul(per_row)
+        .context("gdn_qkv_split_batched_resident: total element count overflow")?;
+    let qk_total = batch
+        .checked_mul(qk_dim)
+        .context("gdn_qkv_split_batched_resident: q/k element count overflow")?;
+    let v_total = batch
+        .checked_mul(v_dim)
+        .context("gdn_qkv_split_batched_resident: v element count overflow")?;
+    anyhow::ensure!(
+        total <= u32::MAX as usize,
+        "gdn_qkv_split_batched_resident: total {total} exceeds u32::MAX"
+    );
+    let need = total
+        .checked_mul(4)
+        .context("gdn_qkv_split_batched_resident: input byte count overflow")?
+        as u64;
+    anyhow::ensure!(
+        mixed_qkv.size() >= need,
+        "gdn_qkv_split_batched_resident: mixed_qkv {} bytes < {need}",
+        mixed_qkv.size()
+    );
+    anyhow::ensure!(
+        q_out.size() >= (qk_total * 4) as u64,
+        "gdn_qkv_split_batched_resident: q_out too small"
+    );
+    anyhow::ensure!(
+        k_out.size() >= (qk_total * 4) as u64,
+        "gdn_qkv_split_batched_resident: k_out too small"
+    );
+    anyhow::ensure!(
+        v_out.size() >= (v_total * 4) as u64,
+        "gdn_qkv_split_batched_resident: v_out too small"
+    );
+
+    let glsl_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/csrc/shaders/gdn_qkv_split_batched.comp"
+    );
+    let spirv = ShaderPipeline::compile_shader(glsl_path)?;
+    let push_constants: [u32; 3] = [batch as u32, qk_dim as u32, v_dim as u32];
+    let handles: [vk::Buffer; 4] = [
+        mixed_qkv.handle(),
+        q_out.handle(),
+        k_out.handle(),
+        v_out.handle(),
+    ];
+    run_compute_pipeline(
+        vk_device,
+        &spirv,
+        &handles,
+        handles.len(),
+        &push_constants,
+        total.div_ceil(256) as u32,
+    )
+    .context("gdn_qkv_split_batched_resident kernel failed")
 }
 
 /// Resident-form paged KV-cache slot write: copy one freshly-projected

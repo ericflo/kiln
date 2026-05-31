@@ -327,6 +327,8 @@ pub fn prewarm_builtin_pipelines(vk_device: &VulkanDevice) -> Result<()> {
         ("gdn_in_proj_decode_bf16w", 6, 24),
         ("gdn_in_proj_decode_batched", 6, 28),
         ("gdn_in_proj_decode_batched_bf16w", 6, 28),
+        ("gdn_in_proj_split_batched", 5, 20),
+        ("gdn_qkv_split_batched", 4, 12),
         ("gdn_in_proj_decode_batched_pair_qkv_z_rows2_bf16w", 6, 28),
         ("gdn_in_proj_decode_batched_pair_qkv_z_rows4_bf16w", 6, 28),
         ("gdn_gated_rms_norm", 4, 12),

@@ -1,0 +1,50 @@
+// Split batched GDN input-projection output.
+//
+// Combined input layout is projection-major:
+//   qkv[batch, qkv_dim], z[batch, z_dim], a[batch, a_dim], b[batch, b_dim]
+//
+// Outputs preserve those dense row-major projection layouts.
+//
+// Push constants: batch, qkv_dim, z_dim, a_dim, b_dim.
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint batch;
+    uint qkv_dim;
+    uint z_dim;
+    uint a_dim;
+    uint b_dim;
+};
+
+layout(binding = 0) readonly  buffer CombBuf { float data_comb[];      };
+layout(binding = 1) writeonly buffer QkvBuf  { float data_mixed_qkv[]; };
+layout(binding = 2) writeonly buffer ZBuf    { float data_z[];         };
+layout(binding = 3) writeonly buffer ABuf    { float data_a[];         };
+layout(binding = 4) writeonly buffer BBuf    { float data_b[];         };
+
+void main() {
+    uint tid = gl_GlobalInvocationID.x;
+    uint qkv_total = batch * qkv_dim;
+    uint z_total = batch * z_dim;
+    uint a_total = batch * a_dim;
+    uint b_total = batch * b_dim;
+    uint total = qkv_total + z_total + a_total + b_total;
+    if (tid >= total) return;
+
+    if (tid < qkv_total) {
+        data_mixed_qkv[tid] = data_comb[tid];
+    } else if (tid < qkv_total + z_total) {
+        uint p = tid - qkv_total;
+        data_z[p] = data_comb[tid];
+    } else if (tid < qkv_total + z_total + a_total) {
+        uint p = tid - qkv_total - z_total;
+        data_a[p] = data_comb[tid];
+    } else {
+        uint p = tid - qkv_total - z_total - a_total;
+        data_b[p] = data_comb[tid];
+    }
+}

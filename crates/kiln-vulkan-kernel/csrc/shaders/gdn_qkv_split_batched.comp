@@ -1,0 +1,48 @@
+// Split batched GDN mixed QKV rows after causal conv.
+//
+// Input layout per row:
+//   [0 .. qk_dim)          : q
+//   [qk_dim .. 2*qk_dim)   : k
+//   [2*qk_dim .. +v_dim)   : v
+//
+// Outputs:
+//   q[batch, qk_dim], k[batch, qk_dim], v[batch, v_dim].
+//
+// Push constants: batch, qk_dim, v_dim.
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint batch;
+    uint qk_dim;
+    uint v_dim;
+};
+
+layout(binding = 0) readonly  buffer QkvBuf { float data_qkv[]; };
+layout(binding = 1) writeonly buffer QBuf   { float data_q[];   };
+layout(binding = 2) writeonly buffer KBuf   { float data_k[];   };
+layout(binding = 3) writeonly buffer VBuf   { float data_v[];   };
+
+void main() {
+    uint tid = gl_GlobalInvocationID.x;
+    uint per_row = 2u * qk_dim + v_dim;
+    uint total = batch * per_row;
+    if (tid >= total) return;
+
+    uint row = tid / per_row;
+    uint local = tid - row * per_row;
+    uint base = row * per_row;
+
+    if (local < qk_dim) {
+        data_q[row * qk_dim + local] = data_qkv[base + local];
+    } else if (local < 2u * qk_dim) {
+        uint p = local - qk_dim;
+        data_k[row * qk_dim + p] = data_qkv[base + local];
+    } else {
+        uint p = local - 2u * qk_dim;
+        data_v[row * v_dim + p] = data_qkv[base + local];
+    }
+}
