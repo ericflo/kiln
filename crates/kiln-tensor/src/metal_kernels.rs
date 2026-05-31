@@ -18,7 +18,7 @@ use std::sync::{Mutex, OnceLock};
 use crate::metal_types::{ComputePipeline, MetalCompanion};
 use crate::{DType, Error, Result};
 
-type MetalBuffer = candle_metal_kernels::metal::Buffer;
+type MetalBuffer = crate::metal_rt::Buffer;
 
 /// Compile options matching candle's GEMM path (fast math + fast FP).
 pub(crate) fn compile_options() -> objc2::rc::Retained<objc2_metal::MTLCompileOptions> {
@@ -79,7 +79,7 @@ pub(crate) fn msl_ty(dt: DType) -> Result<&'static str> {
 /// 1-D dispatch covering exactly `n` threads (non-uniform threadgroups —
 /// Apple4+; the M1 is Apple7).
 fn dispatch_1d(
-    encoder: &candle_metal_kernels::metal::ComputeCommandEncoder,
+    encoder: &crate::metal_rt::ComputeCommandEncoder,
     n: usize,
 ) {
     let tg = 256usize.min(n.max(1));

@@ -2065,7 +2065,6 @@ version = "0.2.19"
 dependencies = [
  "bytemuck",
  "candle-core",
- "candle-metal-kernels",
  "candle-nn",
  "cc",
  "cudarc 0.19.7",
@@ -2076,6 +2075,7 @@ dependencies = [
  "kiln-vulkan-kernel",
  "memmap2",
  "objc2",
+ "objc2-foundation",
  "objc2-metal",
  "safetensors 0.7.0",
  "thiserror 2.0.18",

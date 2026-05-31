@@ -41,7 +41,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use candle_metal_kernels::metal::Device as MetalRawDevice;
+use crate::metal_rt::Device as MetalRawDevice;
 
 use crate::{
     allocator_frozen_error, Allocator, AllocatorMode, DType, Device, MetalStorage, Result, Storage,

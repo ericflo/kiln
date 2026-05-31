@@ -5,7 +5,7 @@
 //! config on Apple Silicon. `#[ignore]` — run explicitly:
 //!   cargo test -p kiln-tensor --features metal --test metal_gemm_sweep -- --ignored --nocapture
 
-use kiln_tensor::{bench_gemm_cfg, bench_mlx_reference, bench_steel_cfg, GemmCfg};
+use kiln_tensor::{bench_gemm_cfg, bench_steel_cfg, GemmCfg};
 
 #[test]
 #[ignore]
@@ -20,15 +20,9 @@ fn sweep_gemm_configs() {
     let gflop = 2.0 * m as f64 * k as f64 * n as f64 / 1e9;
     println!("\n=== Metal GEMM sweep  [{m}x{k}]@[{k}x{n}]  ({gflop:.2} GFLOP/iter, {iters} iters) ===");
 
-    // Reference targets on THIS hardware (the bar the kiln GEMM must clear).
-    match bench_mlx_reference(m, k, n, iters, "bf16") {
-        Ok(g) => println!("  [ref] candle call_mlx_gemm BF16  {g:8.1} GFLOP/s"),
-        Err(e) => println!("  [ref] candle call_mlx_gemm BF16  FAILED: {e}"),
-    }
-    match bench_mlx_reference(m, k, n, iters, "f32") {
-        Ok(g) => println!("  [ref] candle call_mlx_gemm F32   {g:8.1} GFLOP/s"),
-        Err(e) => println!("  [ref] candle call_mlx_gemm F32   FAILED: {e}"),
-    }
+    // The live candle `call_mlx_gemm` reference comparison was removed
+    // (#1082 final step) when the candle_metal_kernels dependency was
+    // dropped. The kiln steel-GEMM perf was already validated against it.
 
     let cfgs = [
         // single naive baseline (established ~140 GFLOP/s, F32-staging plateau)

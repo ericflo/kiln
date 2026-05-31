@@ -66,8 +66,8 @@ use std::sync::Arc;
 // shim (`MetalStorage::candle_device()` -> `primary_metal_device`) is
 // gone — the `candle_core::metal_backend::MetalDevice` import that
 // shim's return type required has retired alongside it.
-use candle_metal_kernels::metal::Buffer as MetalBuffer;
-use candle_metal_kernels::metal::Device as MetalRawDevice;
+use crate::metal_rt::Buffer as MetalBuffer;
+use crate::metal_rt::Device as MetalRawDevice;
 
 use crate::{CpuStorage, DType, Device, Error, Result, StorageBackend};
 
@@ -175,7 +175,7 @@ impl MetalStorage {
         dtype: DType,
         n_elements: usize,
     ) -> Result<Self> {
-        use candle_metal_kernels::metal::MTLResourceOptions;
+        use crate::metal_rt::MTLResourceOptions;
 
         let byte_len = dtype.packed_buffer_bytes(n_elements);
         // Candle-free allocation through metal-rs. Apple's MTLDevice
@@ -437,7 +437,7 @@ pub fn primary_metal_companion(
     // index 0 — `Device::all()` returns it (and `Device::system_default()`
     // returns the same physical GPU). On multi-GPU Macs (Pro/Studio with
     // M-Ultra) `Device::all()` exposes each GPU at its own ordinal.
-    let devices = candle_metal_kernels::metal::Device::all();
+    let devices = crate::metal_rt::Device::all();
     let device = devices.into_iter().nth(device_index).ok_or_else(|| {
         Error::Msg(format!(
             "primary_metal_companion({device_index}): no Metal device at this ordinal \
@@ -480,7 +480,7 @@ pub fn primary_metal_companion(
 /// Returns [`Error::Msg`] if `cpu` is not [`CpuStorage`]-backed, no Metal
 /// device exists at `device_index`, or buffer allocation fails.
 pub fn host_to_metal_copy(cpu: &crate::Tensor, device_index: usize) -> Result<crate::Tensor> {
-    use candle_metal_kernels::metal::MTLResourceOptions;
+    use crate::metal_rt::MTLResourceOptions;
 
     // Materialize a packed, logical-row-major byte image on the host.
     let contig = cpu.contiguous()?;
@@ -677,7 +677,7 @@ pub fn metal_to_host_copy(t: &crate::Tensor) -> Result<crate::Tensor> {
 /// dtype is unsupported, the layout is non-contiguous, or the
 /// underlying MSL kernel dispatch fails.
 pub fn metal_softmax_last_axis(x: &crate::Tensor) -> Result<crate::Tensor> {
-    use candle_metal_kernels::metal::MTLResourceOptions;
+    use crate::metal_rt::MTLResourceOptions;
 
     // ---- Validate kt-side preconditions ----
     let dtype = x.dtype();
@@ -837,7 +837,7 @@ pub fn metal_sdpa_last_axis(
     scale: f32,
     causal: bool,
 ) -> Result<crate::Tensor> {
-    use candle_metal_kernels::metal::MTLResourceOptions;
+    use crate::metal_rt::MTLResourceOptions;
 
     // ---- Validate kt-side preconditions ----
     let dtype = q.dtype();
@@ -1049,7 +1049,7 @@ pub fn metal_rmsnorm_last_axis(
     weight: &crate::Tensor,
     eps: f32,
 ) -> Result<crate::Tensor> {
-    use candle_metal_kernels::metal::MTLResourceOptions;
+    use crate::metal_rt::MTLResourceOptions;
 
     let dtype = x.dtype();
     let dtype_size: usize = match dtype {
@@ -1185,7 +1185,7 @@ pub fn metal_layernorm_last_axis(
     bias: &crate::Tensor,
     eps: f32,
 ) -> Result<crate::Tensor> {
-    use candle_metal_kernels::metal::MTLResourceOptions;
+    use crate::metal_rt::MTLResourceOptions;
 
     let dtype = x.dtype();
     let dtype_size: usize = match dtype {
@@ -1340,7 +1340,7 @@ pub fn metal_index_select_dim0(
     input: &crate::Tensor,
     indices: &crate::Tensor,
 ) -> Result<crate::Tensor> {
-    use candle_metal_kernels::metal::MTLResourceOptions;
+    use crate::metal_rt::MTLResourceOptions;
 
     let dtype = input.dtype();
     let dtype_size: usize = match dtype {
@@ -1478,7 +1478,7 @@ pub fn metal_index_select_dim0(
 /// Returns [`Error::Msg`] on unsupported dtype pair, non-contiguous
 /// layout, non-Metal storage, or kernel dispatch error.
 pub fn metal_cast(x: &crate::Tensor, to: DType) -> Result<crate::Tensor> {
-    use candle_metal_kernels::metal::MTLResourceOptions;
+    use crate::metal_rt::MTLResourceOptions;
 
     let from = x.dtype();
     // Float triple only; integer round-trips stay on the CPU fallback
@@ -1589,7 +1589,7 @@ pub fn metal_elementwise_binary(
     b: &crate::Tensor,
     kind_tag: i32,
 ) -> Result<crate::Tensor> {
-    use candle_metal_kernels::metal::MTLResourceOptions;
+    use crate::metal_rt::MTLResourceOptions;
 
     if !matches!(kind_tag, 0 | 1 | 2 | 3) {
         return Err(Error::Msg(format!(
@@ -1730,7 +1730,7 @@ pub fn metal_elementwise_binary(
 /// Returns [`Error::Msg`] on unsupported kind, dtype, non-contiguous
 /// layout, non-Metal storage, or kernel dispatch error.
 pub fn metal_activation_unary(x: &crate::Tensor, kind_tag: i32) -> Result<crate::Tensor> {
-    use candle_metal_kernels::metal::MTLResourceOptions;
+    use crate::metal_rt::MTLResourceOptions;
 
     if !matches!(
         kind_tag,
@@ -1818,7 +1818,7 @@ pub fn metal_activation_unary(x: &crate::Tensor, kind_tag: i32) -> Result<crate:
 #[cfg(test)]
 mod tests {
     use super::*;
-    use candle_metal_kernels::metal::MTLResourceOptions;
+    use crate::metal_rt::MTLResourceOptions;
 
     fn metal_test_enabled() -> bool {
         std::env::var("KILN_TENSOR_METAL_TEST").ok().as_deref() == Some("1")

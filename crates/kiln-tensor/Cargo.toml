@@ -61,26 +61,21 @@ candle-nn = { workspace = true, optional = true }
 # the compiled crate unifies. Issue #1082 seam-removal step.
 cudarc = { workspace = true, optional = true }
 
-# Optional — only under `metal`. `metal_storage.rs` references
-# `candle_metal_kernels::metal::Buffer` / `MTLStorageMode` directly,
-# and the 7 `metal_*` substrate ops dispatch directly into the
-# `candle_metal_kernels::call_*` MSL kernel entry points (no
-# `candle_nn` / `CandleTensor` bridge). candle-core does NOT re-export
-# the `candle_metal_kernels` crate, so we depend on it explicitly
-# (matches kiln-model's pin).
-candle-metal-kernels = { version = "0.10", optional = true }
-
 # Optional — only under `metal`. Direct objc2-metal protocol-object
-# types for the #1082 Phase 7 substrate lift in `metal_types.rs`. The
-# version pin matches candle-metal-kernels 0.10.2's own objc2-metal
-# pin (`0.3.2`) so the `Retained<ProtocolObject<dyn MTL*>>` types unify
-# across the two crates — when the chokepoint flips a re-export from
-# `candle_metal_kernels::metal::*` to a raw `objc2_metal::*` protocol
-# object, callers can pass the native type straight back into
-# `candle_metal_kernels::call_*` without a conversion shim because the
-# underlying Retained handle is bit-identical.
+# types for the kiln-owned Metal substrate. `crate::metal_rt` is a
+# vendored objc2 wrapper over the Apple Metal protocol objects (Device,
+# Buffer, CommandQueue, the Commands command-buffer pool,
+# ComputeCommandEncoder, ComputePipeline, Library) — it replaces the
+# `candle_metal_kernels` dependency that #1082 removed once every compute
+# kernel (matmul / cast / unary / binary / softmax / rmsnorm / layernorm /
+# index_select / sdpa) was reimplemented as kiln-owned MSL in
+# `metal_matmul.rs` + `metal_kernels.rs`. The version pin matches what
+# candle-metal-kernels 0.10.2 used (`objc2 0.6`, `objc2-metal 0.3.2`,
+# `objc2-foundation 0.3.2`) so the vendored wrapper is bit-identical to
+# the known-good source.
 objc2 = { version = "0.6", optional = true }
 objc2-metal = { version = "0.3", optional = true }
+objc2-foundation = { version = "0.3", optional = true }
 
 
 # Optional — pulled in under the `cuda` feature only. Provides the
@@ -108,12 +103,13 @@ default = []
 cuda = ["dep:cudarc", "dep:kiln-blas"]
 # Reserved for Phase 1.7. Same pattern as `cuda`.
 #
-# `objc2` + `objc2-metal` add the direct Metal protocol-object substrate
-# in `metal_types.rs` (#1082 Phase 7 lift) — they sit alongside the
-# candle re-exports so the chokepoint can gradually move callers off the
-# candle-typed paths onto raw `Retained<ProtocolObject<dyn MTL*>>`
-# without breaking existing call sites in `kiln-model::backend::metal`.
-metal = ["dep:candle-core", "candle-core?/metal", "dep:candle-metal-kernels", "dep:candle-nn", "candle-nn?/metal", "dep:objc2", "dep:objc2-metal"]
+# `objc2` + `objc2-metal` + `objc2-foundation` back the kiln-owned Metal
+# substrate in `crate::metal_rt` (#1082): the vendored objc2 wrapper that
+# replaced the `candle_metal_kernels` dependency. candle-core / candle-nn
+# remain optional deps under this feature for the (test-only) candle-Tensor
+# interop in `kiln-model::backend::metal`'s test module; no `kiln-tensor`
+# code path names them anymore.
+metal = ["dep:candle-core", "candle-core?/metal", "dep:candle-nn", "candle-nn?/metal", "dep:objc2", "dep:objc2-metal", "dep:objc2-foundation"]
 # Phase 1.8 — Vulkan storage. Does NOT go through candle: lifts
 # kiln-vulkan-kernel's already-candle-free VulkanBuffer + VulkanDevice.
 # This is a permanent dependency (Phase 7 does not change it).

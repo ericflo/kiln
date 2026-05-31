@@ -17,33 +17,25 @@ use super::BackendRuntime;
 // substrate swaps (e.g. candle → objc2-metal) touch this single import
 // block instead of hundreds of scattered fully-qualified references.
 use kiln_tensor::metal_types::{
-    buffer_o_kt, ComputePipeline, Library, MetalCompanion, MetalDevice, MetalRawDevice,
+    buffer_o_kt, ComputePipeline, Library, MetalCompanion, MetalRawDevice,
 };
 use kiln_tensor::MetalStorage;
 
 /// Host abstraction for the per-device MSL pipeline / library caches
 /// (#1082). The `metal_*_pipeline` + `metal_shared_library` helpers take
-/// `&dyn MetalPipelineHost` so the **same** getter serves both a candle
-/// `MetalDevice` caller (during the candle→kt migration) and a
-/// candle-free kt `MetalCompanion` caller, with no change at any call
-/// site. Both expose the raw `candle_metal_kernels` device (for
-/// `new_library_with_source` / `new_compute_pipeline_state_with_function`)
-/// and a stable per-device `registry_id()` cache key — so the two paths
-/// share one compiled pipeline per physical GPU (no double-compile).
+/// `&dyn MetalPipelineHost`. The candle-free kt `MetalCompanion` is the
+/// sole implementor now that the substrate is kiln-owned
+/// (`kiln_tensor::metal_rt`); the migration-era candle `MetalDevice` impl
+/// retired alongside the `candle_metal_kernels` dependency drop. It
+/// exposes the raw kt substrate device (for `new_library_with_source` /
+/// `new_compute_pipeline_state_with_function`) and a stable per-device
+/// `registry_id()` cache key so one compiled pipeline is shared per
+/// physical GPU (no double-compile).
 pub(crate) trait MetalPipelineHost {
     /// The raw substrate device for library / pipeline construction.
     fn pipeline_raw_device(&self) -> &MetalRawDevice;
     /// Stable per-device cache key (`MTLDevice::registryID`).
     fn pipeline_cache_key(&self) -> u64;
-}
-
-impl MetalPipelineHost for MetalDevice {
-    fn pipeline_raw_device(&self) -> &MetalRawDevice {
-        self.device()
-    }
-    fn pipeline_cache_key(&self) -> u64 {
-        self.device().registry_id()
-    }
 }
 
 impl MetalPipelineHost for MetalCompanion {

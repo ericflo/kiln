@@ -57,6 +57,8 @@ mod metal_allocator;
 #[cfg(feature = "metal")]
 mod metal_kernels;
 #[cfg(feature = "metal")]
+mod metal_rt;
+#[cfg(feature = "metal")]
 mod metal_matmul;
 #[cfg(feature = "metal")]
 mod metal_storage;
@@ -125,7 +127,7 @@ pub use metal_matmul::metal_matmul;
 #[doc(hidden)]
 #[cfg(feature = "metal")]
 pub use metal_matmul::{
-    bench_gemm_cfg, bench_mlx_reference, bench_steel_cfg, gemm_pool_bytes, gen_gemm_msl,
+    bench_gemm_cfg, bench_steel_cfg, gemm_pool_bytes, gen_gemm_msl,
     gen_steel_msl, steel_cfg_valid, GemmCfg,
 };
 #[cfg(feature = "metal")]

@@ -961,59 +961,10 @@ pub fn bench_steel_cfg(c: &GemmCfg, m: usize, k: usize, n: usize, iters: usize) 
     Ok(gflop / secs)
 }
 
-/// Benchmark candle's `call_mlx_gemm` (MLX steel-gemm port) at `[M,K]@[K,N]`
-/// — the gold-standard reference the kiln GEMM must match or beat on this
-/// hardware. `dtype` ∈ {"bf16","f32"}. Returns GFLOP/s.
-#[doc(hidden)]
-pub fn bench_mlx_reference(
-    m: usize,
-    k: usize,
-    n: usize,
-    iters: usize,
-    dtype: &str,
-) -> Result<f64> {
-    use candle_metal_kernels::{call_mlx_gemm, GemmDType};
-    let (gdt, elt) = match dtype {
-        "f32" => (GemmDType::F32, DType::F32),
-        _ => (GemmDType::BF16, DType::BF16),
-    };
-    let companion = crate::primary_metal_companion(0)?;
-    let device = companion.device();
-    let kernels = companion.kernels();
-    let a = MetalStorage::zeros_kt(device, 0, elt, m * k)?;
-    let b = MetalStorage::zeros_kt(device, 0, elt, k * n)?;
-    let out = MetalStorage::zeros_kt(device, 0, elt, m * n)?;
-    // a:[1,M,K] b:[1,K,N], non-transposed (row-major) strides.
-    let lhs_stride = [m * k, k, 1];
-    let rhs_stride = [k * n, n, 1];
-    let dispatch = || -> Result<()> {
-        let enc = companion.command_encoder()?;
-        call_mlx_gemm(
-            device,
-            &enc,
-            kernels,
-            gdt,
-            (1, m, n, k),
-            &lhs_stride,
-            0,
-            a.buffer().as_ref(),
-            &rhs_stride,
-            0,
-            b.buffer().as_ref(),
-            out.buffer().as_ref(),
-        )
-        .map_err(|e| Error::Msg(format!("mlx ref dispatch: {e:?}")))?;
-        drop(enc);
-        Ok(())
-    };
-    dispatch()?;
-    companion.wait_until_completed()?;
-    let t = std::time::Instant::now();
-    for _ in 0..iters {
-        dispatch()?;
-    }
-    companion.wait_until_completed()?;
-    let secs = t.elapsed().as_secs_f64() / iters as f64;
-    let gflop = 2.0 * m as f64 * k as f64 * n as f64 / 1e9;
-    Ok(gflop / secs)
-}
+// `bench_mlx_reference` removed (#1082 final step): it was the only
+// remaining consumer of candle's `call_mlx_gemm` + the `MetalCompanion`
+// `kernels()` cache. The kiln steel-GEMM perf is already validated
+// against this reference; the live MLX A/B comparison is expendable now
+// that the candle_metal_kernels dependency is being dropped. The rest of
+// the sweep harness (`bench_gemm_cfg` / `bench_steel_cfg`, kiln-owned MSL)
+// is unchanged.
