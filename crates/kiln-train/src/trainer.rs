@@ -7700,10 +7700,16 @@ fn standard_forward_backward_tape_authoritative_kt(
         .map_err(|e| anyhow::anyhow!("tape-authoritative(kt) backward: {e}"))?;
 
     // (#1082) Build a kt-native GradStore from the tape grads, keyed by each
-    // LoRA `Parameter::tensor_id()`. The tape's `out` map is keyed by the
-    // candle-input-id-raw registered in the LoRA tape adapter via
-    // `register_input_mapping(a_kt.id(), proj.a.id())` — and `proj.a` IS the
-    // param's primary kt tensor, so the key == `param.tensor_id().as_raw()`.
+    // LoRA `Parameter::tensor_id()`. The tape's `out` map mixes candle-keyed
+    // deposits (frozen base/activation/norm tensors via `register_input_mapping`)
+    // and kt-param deposits (LoRA leaves via `register_input_mapping_kt`, which
+    // namespace-tags the key with `KT_PARAM_DEPOSIT_TAG`). Decode each key: only
+    // tagged entries are genuine LoRA-param grads — `decode_kt_param_deposit`
+    // strips the tag and yields the param's kt id, so a candle id that happens to
+    // equal a param id (independent counters, both start at 1) is rejected. This
+    // is the read side of the #1082 collision fix (a frozen RMSNorm `[hidden]`
+    // grad was aliasing the `in_proj_z` LoRA-B `[out, rank]` slot → AdamW shape
+    // mismatch `[32] != [32, 4]`).
     let param_raw_ids: std::collections::HashSet<u64> = params
         .all_params()
         .iter()
@@ -7711,9 +7717,13 @@ fn standard_forward_backward_tape_authoritative_kt(
         .collect();
     let mut grads = kiln_autograd::GradStore::new();
     for (key_raw, kt_grad) in grads_by_candle_raw {
-        let key_raw = key_raw as u64;
-        if param_raw_ids.contains(&key_raw) {
-            grads.insert(KtTensorId::from_raw(key_raw), kt_grad);
+        let Some(param_raw) =
+            kiln_kt_bridge::tape_bridge::decode_kt_param_deposit(key_raw as u64)
+        else {
+            continue;
+        };
+        if param_raw_ids.contains(&param_raw) {
+            grads.insert(KtTensorId::from_raw(param_raw), kt_grad);
         }
     }
     Ok((loss_val, grads))
@@ -7915,11 +7925,18 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
         .map_err(|e| anyhow::anyhow!("ckpt-kt: segment {seg_idx} tape backward: {e}"))?;
 
         // Accumulate this segment's LoRA param grads (disjoint across segments —
-        // each layer is in exactly one segment — but sum defensively).
+        // each layer is in exactly one segment — but sum defensively). Decode
+        // the kt-param namespace tag so candle-keyed deposits (frozen weights /
+        // activations) that happen to share a raw id with a LoRA param are not
+        // mistaken for that param's grad (#1082 collision fix).
         for (candle_raw, g) in candle_grads {
-            let key_raw = candle_raw as u64;
-            if param_raw_ids.contains(&key_raw) {
-                let key = KtTensorId::from_raw(key_raw);
+            let Some(param_raw) =
+                kiln_kt_bridge::tape_bridge::decode_kt_param_deposit(candle_raw as u64)
+            else {
+                continue;
+            };
+            if param_raw_ids.contains(&param_raw) {
+                let key = KtTensorId::from_raw(param_raw);
                 match grads.remove(key) {
                     Some(prev) => grads.insert(
                         key,
@@ -8159,12 +8176,15 @@ fn grpo_step_forward_backward_tape_authoritative_kt(
         .collect();
 
     // #1082 CP-4 diagnostic: how deep did the tape walk reach, and how many
-    // of those are LoRA params?
+    // of those are LoRA params? (Decode the kt-param namespace tag so the
+    // count reflects genuine tagged LoRA-param deposits, not candle-keyed
+    // entries — see `decode_kt_param_deposit`.)
     if std::env::var("KILN_CP4_DEBUG").is_ok() {
         let reached = grads_by_candle_raw.len();
         let var_matches = grads_by_candle_raw
             .keys()
-            .filter(|k| param_raw_ids.contains(&(**k as u64)))
+            .filter_map(|k| kiln_kt_bridge::tape_bridge::decode_kt_param_deposit(**k as u64))
+            .filter(|param_raw| param_raw_ids.contains(param_raw))
             .count();
         eprintln!(
             "[CP4-DEBUG] grpo(kt) tape walk reached {reached} mapped inputs; \
@@ -8175,9 +8195,13 @@ fn grpo_step_forward_backward_tape_authoritative_kt(
 
     let mut grads = kiln_autograd::GradStore::new();
     for (key_raw, kt_grad) in grads_by_candle_raw {
-        let key_raw = key_raw as u64;
-        if param_raw_ids.contains(&key_raw) {
-            grads.insert(KtTensorId::from_raw(key_raw), kt_grad);
+        let Some(param_raw) =
+            kiln_kt_bridge::tape_bridge::decode_kt_param_deposit(key_raw as u64)
+        else {
+            continue;
+        };
+        if param_raw_ids.contains(&param_raw) {
+            grads.insert(KtTensorId::from_raw(param_raw), kt_grad);
         }
     }
 

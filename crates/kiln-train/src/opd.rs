@@ -3141,12 +3141,14 @@ fn opd_step_forward_backward_tape_authoritative(
         .collect();
 
     // #1082 diagnostic (same shape as the SFT path): how deep did the tape walk
-    // reach, and how many of those are LoRA params?
+    // reach, and how many of those are LoRA params? (Decode the kt-param
+    // namespace tag so only genuine tagged LoRA-param deposits are counted.)
     if std::env::var("KILN_CP4_DEBUG").is_ok() {
         let reached = grads_by_candle_raw.len();
         let var_matches = grads_by_candle_raw
             .keys()
-            .filter(|k| var_raw_ids.contains(&(**k as u64)))
+            .filter_map(|k| kiln_kt_bridge::tape_bridge::decode_kt_param_deposit(**k as u64))
+            .filter(|param_raw| var_raw_ids.contains(param_raw))
             .count();
         eprintln!(
             "[CP4-DEBUG] opd tape walk reached {reached} mapped candle inputs; \
@@ -3157,15 +3159,23 @@ fn opd_step_forward_backward_tape_authoritative(
 
     let mut grads = kiln_autograd::GradStore::new();
     for (candle_raw, kt_grad) in grads_by_candle_raw {
-        let key_raw = candle_raw as u64;
-        if var_raw_ids.contains(&key_raw) {
-            // The tape `out` map keys by each LoRA param's primary kt tensor id
-            // (registered via the LoRA tape adapter), so the key ==
-            // `param.tensor_id().as_raw()`. Land the grads under that exact key
-            // so `optimizer_step_from_kt_grad_store` resolves each param's
-            // moments + grad. Mirrors SFT's
+        // The tape `out` map mixes candle-keyed deposits (frozen base /
+        // activations) with namespace-tagged kt-param deposits (the LoRA leaves,
+        // via `register_input_mapping_kt`). Only tagged keys are LoRA-param
+        // grads; `decode_kt_param_deposit` strips the tag → the param's kt id,
+        // and rejects candle ids that happen to collide with a param id
+        // (independent counters, both start at 1 — the #1082 grad-shape bug).
+        let Some(param_raw) =
+            kiln_kt_bridge::tape_bridge::decode_kt_param_deposit(candle_raw as u64)
+        else {
+            continue;
+        };
+        if var_raw_ids.contains(&param_raw) {
+            // Land the grads under the param's exact kt id so
+            // `optimizer_step_from_kt_grad_store` resolves each param's moments +
+            // grad. Mirrors SFT's
             // `standard_forward_backward_tape_authoritative_kt`.
-            grads.insert(kiln_tensor_id::TensorId::from_raw(key_raw), kt_grad);
+            grads.insert(kiln_tensor_id::TensorId::from_raw(param_raw), kt_grad);
         }
     }
 

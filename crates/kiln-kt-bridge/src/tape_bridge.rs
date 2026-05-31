@@ -183,19 +183,72 @@ pub fn register_input_mapping(kt_id: KtTensorId, candle_id: CandleTensorId) {
     });
 }
 
+/// Namespace tag OR'd onto kt-leaf deposit ids stored in the (shared,
+/// `usize`-keyed) `kt_to_candle_input` deposit map by
+/// [`register_input_mapping_kt`].
+///
+/// # Why this is REQUIRED (#1082 candle-drop grad-shape regression)
+///
+/// The deposit map mixes ids from TWO independent id namespaces:
+/// [`register_input_mapping`] stores **candle** `TensorId` raws (frozen base
+/// weights, intermediate activations, frozen RMSNorm weights, …) while
+/// [`register_input_mapping_kt`] stores **kt** `TensorId` raws (the LoRA
+/// `Parameter` leaves the optimiser actually trains). Candle's `TensorId`
+/// (`AtomicUsize::new(1)`) and kt's `TensorId` (`AtomicU64::new(1)`) are
+/// *separate* process-global counters that BOTH start at 1 and increment by 1,
+/// so their raw values overlap heavily within a single process.
+///
+/// Before the candle-drop, LoRA leaves were candle `Var`s registered via
+/// `register_input_mapping`, so the deposit map held candle ids ONLY — one id
+/// space, no collisions. The flip moved LoRA leaves to kt `Parameter` +
+/// `register_input_mapping_kt`, which silently injected kt ids into the same
+/// `usize` map. A candle id colliding with a kt LoRA-param id then overwrites
+/// that param's slot in the per-scope `out` deposit map, delivering a frozen
+/// tensor's grad to a LoRA param (observed: a frozen RMSNorm `[hidden]` grad
+/// landing on the `in_proj_z` LoRA-B `[out_features, rank]` param → optimizer
+/// shape mismatch `[32] != [32, 4]`).
+///
+/// Setting bit 63 on every kt-leaf deposit places kt-param deposits in a range
+/// disjoint from candle ids (both counters stay far below `1 << 63` for any
+/// realistic process), so a candle id can never alias a kt-param deposit key.
+/// Producers decode via [`decode_kt_param_deposit`].
+pub const KT_PARAM_DEPOSIT_TAG: u64 = 1u64 << 63;
+
+/// Decode a deposit-map key back into a kt LoRA-param `TensorId` raw, but ONLY
+/// when the key carries [`KT_PARAM_DEPOSIT_TAG`] (i.e. it was stored by
+/// [`register_input_mapping_kt`], not by the candle-keyed
+/// [`register_input_mapping`]). Returns `None` for candle-keyed deposits.
+///
+/// This is the read side of the namespace fix: a producer iterating the
+/// per-scope deposit map calls this on each key; `Some(param_raw)` means the
+/// entry is a genuine kt LoRA-param grad keyed by `param.tensor_id().as_raw()`,
+/// while `None` means a candle-keyed entry (frozen weight / activation) that
+/// must be ignored. This makes the producer's `param_raw_ids.contains(..)`
+/// match collision-proof: a candle id equal to a param id is untagged, so it
+/// decodes to `None` and is skipped.
+pub fn decode_kt_param_deposit(key_raw: u64) -> Option<u64> {
+    if key_raw & KT_PARAM_DEPOSIT_TAG != 0 {
+        Some(key_raw & !KT_PARAM_DEPOSIT_TAG)
+    } else {
+        None
+    }
+}
+
 /// Register one input mapping pair where the differentiable leaf is itself a
 /// kt tensor (e.g. a LoRA `Var` after the #1082 forward flip made
 /// `LoraProjectionWeights` hold `kiln_tensor::Tensor`).
 ///
 /// Same map (`kt_to_candle_input`) and same backward-deposit semantics as
-/// [`register_input_mapping`]: the stored "deposit" id is read back by the
-/// trainer via `KtTensorId::from_raw(key_raw as u64)` and matched against
-/// `param.tensor_id().as_raw()`. The candle variant happens to store a candle
-/// `TensorId`'s raw; this variant stores the kt leaf's own id raw directly so
-/// the deposit key == the param's kt id — no synthetic candle id needed (candle
-/// `TensorId` has no `from_raw`, so a kt leaf could not be expressed via the
-/// candle-typed entry point). On a 64-bit target `usize == u64`, so the
-/// `as_raw() -> u64` round-trips through the `usize`-keyed map losslessly.
+/// [`register_input_mapping`], EXCEPT the stored "deposit" id is namespaced
+/// with [`KT_PARAM_DEPOSIT_TAG`] (bit 63) so a kt-param id can never collide
+/// with a candle id in the shared `usize`-keyed deposit map (see the tag's docs
+/// for the collision incident). The candle variant stores a candle `TensorId`'s
+/// raw verbatim; this variant stores `kt_leaf_id | TAG`. Producers read it back
+/// via [`decode_kt_param_deposit`] (strips the tag, returns the kt leaf id) and
+/// match it against `param.tensor_id().as_raw()`. (candle `TensorId` has no
+/// `from_raw`, so a kt leaf could not be expressed via the candle-typed entry
+/// point in the first place.) On a 64-bit target `usize == u64`, so the tagged
+/// `u64` round-trips through the `usize`-keyed map losslessly.
 pub fn register_input_mapping_kt(kt_id: KtTensorId, deposit_kt_id: KtTensorId) {
     BRIDGE_SCOPE.with(|cell| {
         let mut borrow = cell.borrow_mut();
@@ -203,7 +256,9 @@ pub fn register_input_mapping_kt(kt_id: KtTensorId, deposit_kt_id: KtTensorId) {
             return;
         };
         let kt_raw = kt_id.as_raw();
-        let deposit_raw = deposit_kt_id.as_raw() as usize;
+        // Namespace the kt-leaf deposit id so it cannot alias a candle id that
+        // happens to share the same raw counter value (#1082 collision fix).
+        let deposit_raw = (deposit_kt_id.as_raw() | KT_PARAM_DEPOSIT_TAG) as usize;
         let ids = scope.kt_to_candle_input.entry(kt_raw).or_default();
         if !ids.contains(&deposit_raw) {
             ids.push(deposit_raw);
@@ -984,6 +1039,37 @@ mod tests {
             !bridge_scope_active(),
             "no scope must be active at test entry"
         );
+    }
+
+    /// #1082 collision-fix invariant: a kt-leaf deposit id round-trips through
+    /// the namespace tag, while a bare candle id (no tag) decodes to `None` —
+    /// even when its raw value equals a kt-param id. This is what prevents a
+    /// frozen tensor's candle-keyed grad from aliasing a LoRA param's slot in
+    /// the shared `usize`-keyed deposit map (the `[32] != [32, 4]` AdamW shape
+    /// mismatch).
+    #[test]
+    fn kt_param_deposit_tag_roundtrips_and_rejects_candle_ids() {
+        // A kt-param deposit raw round-trips: encode (OR tag) then decode.
+        for raw in [1u64, 2, 32, 12_345, (1u64 << 40) - 1] {
+            let encoded = raw | KT_PARAM_DEPOSIT_TAG;
+            assert_eq!(
+                decode_kt_param_deposit(encoded),
+                Some(raw),
+                "tagged kt-param deposit {encoded:#x} must decode back to {raw}"
+            );
+        }
+        // A bare candle id (no tag) is NOT a kt-param deposit — even if its raw
+        // value collides with a kt-param id like 32. Decoding rejects it, so the
+        // producer's `param_raw_ids.contains(..)` never sees it.
+        for candle_raw in [1u64, 2, 32, 12_345] {
+            assert_eq!(
+                decode_kt_param_deposit(candle_raw),
+                None,
+                "untagged candle id {candle_raw} must NOT decode as a kt-param deposit"
+            );
+        }
+        // The tag occupies bit 63 only — decoding strips exactly that bit.
+        assert_eq!(KT_PARAM_DEPOSIT_TAG, 1u64 << 63);
     }
 
     // The full end-to-end bridge tests live in
