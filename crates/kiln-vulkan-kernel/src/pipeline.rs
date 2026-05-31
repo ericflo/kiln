@@ -137,6 +137,8 @@ const SHADER_SPIRVS: &[(&str, &[u8])] = &[
         "gdn_recurrent_step_parallel",
         SPIR_V_GDN_RECURRENT_STEP_PARALLEL,
     ),
+    ("l2_norm_per_row", SPIR_V_L2_NORM_PER_ROW),
+    ("l2_norm_qk_per_row", SPIR_V_L2_NORM_QK_PER_ROW),
     ("gdn_chunk_prep", SPIR_V_GDN_CHUNK_PREP),
     ("gdn_full_chunk_forward", SPIR_V_GDN_FULL_CHUNK_FORWARD),
     ("gdn_chunk_scan", SPIR_V_GDN_CHUNK_SCAN),

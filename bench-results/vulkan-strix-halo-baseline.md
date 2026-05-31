@@ -201,11 +201,11 @@ every config"):
 
   | batch | per token | rows/s |
   |---:|---:|---:|
-  | 1 | 60.6 ms | 16 |
-  | 8 | 116.3 ms | 69 |
-  | 32 | 242.9 ms | 132 |
-  | 64 | 460.3 ms | 139 |
-  | 128 | 924.0 ms | 139 |
+  | 1 | 62.0 ms | 16 |
+  | 8 | 115.5 ms | 69 |
+  | 32 | 229.6 ms | 139 |
+  | 64 | 458.9 ms | 139 |
+  | 128 | 924.3 ms | 138 |
 
   The mixed stack is now the right benchmark for resident decode tuning:
   full-attention-only synthetic decode overstates throughput because the 24
@@ -213,7 +213,8 @@ every config"):
   shader path was still slower than rows4 on STRIX_HALO, so the default rows8
   crossover moved from batch 128 to batch 256. The table above was rerun after
   fixing the full-attention subpath to include the gated-Q split and fused Q/K
-  norm used by the production resident recorder.
+  norm used by the production resident recorder, then rerun after fusing the
+  paired GDN Q/K L2 expansion dispatches.
   **Update — mixed resident paged token microbench:** added
   `full_token_resident_mixed_paged`, which keeps the real 8 full-attention +
   24 GDN layer mix but changes each full-attention layer to use
@@ -226,11 +227,11 @@ every config"):
 
   | batch | per token | rows/s |
   |---:|---:|---:|
-  | 1 | 59.7 ms | 17 |
-  | 8 | 115.0 ms | 70 |
-  | 32 | 233.9 ms | 137 |
-  | 64 | 459.1 ms | 139 |
-  | 128 | 923.7 ms | 139 |
+  | 1 | 58.2 ms | 17 |
+  | 8 | 113.4 ms | 71 |
+  | 32 | 240.4 ms | 133 |
+  | 64 | 459.0 ms | 139 |
+  | 128 | 921.0 ms | 139 |
 
   The mixed-paged result is effectively tied with the contiguous mixed
   benchmark at batch 64/128, so the paged slot write + block-table attention
@@ -255,30 +256,30 @@ every config"):
   the Qwen3.5-4B stack.
   **Update — whole GDN resident block microbench:** added
   `vulkan_decode_microbench gdn_block_resident_batched`, a Vulkan-only
-  one-submit benchmark for a full Qwen3.5-4B GDN block plus MLP. It records 11
+  one-submit benchmark for a full Qwen3.5-4B GDN block plus MLP. It records 10
   shaders into one `CommandBatch`: RMSNorm, row-reuse GDN in-proj, fused
-  conv/split/state advance, Q/K L2 expansion, recurrent gate/RMSNorm, GDN
+  conv/split/state advance, fused Q/K L2 expansion, recurrent gate/RMSNorm, GDN
   out-proj, residual, post norm, MLP gate/up, and fused down+residual. On RADV
   STRIX_HALO with `KILN_VK_MICROBENCH_BATCHES=1,4,8,32,64`, warmup=2, timed=5,
   repeats=2:
 
   | batch | per block | rows/s |
   |---:|---:|---:|
-  | 1 | 1.89 ms | 529 |
-  | 4 | 2.29 ms | 1,745 |
-  | 8 | 3.31 ms | 2,416 |
-  | 32 | 6.84 ms | 4,675 |
-  | 64 | 14.12 ms | 4,532 |
+  | 1 | 1.86 ms | 536 |
+  | 4 | 2.19 ms | 1,828 |
+  | 8 | 3.28 ms | 2,436 |
+  | 32 | 6.76 ms | 4,733 |
+  | 64 | 13.90 ms | 4,605 |
 
   This gives a realistic GDN-side decode saturation baseline. A follow-up
   planner change keeps batch 64 on the rows4 MLP shader path by default because
   rows8 was slower on STRIX_HALO at this size. That improved the GDN block from
-  16.80 ms / 3,809 rows/s to 14.12 ms / 4,532 rows/s at batch 64 after also
+  16.80 ms / 3,809 rows/s to 13.90 ms / 4,605 rows/s at batch 64 after also
   reducing the state-advance dispatch from one workgroup per row-channel to
   one workgroup per 256 row-channels, then fusing GDN split, conv, state
-  advance, and QKV split. After correcting the synthetic full-attention
-  subpath, the mixed full-token resident batch-64 case now measures
-  460.3 ms / 139 rows/s.
+  advance, QKV split, and the paired Q/K L2 expansion. After correcting the
+  synthetic full-attention subpath, the mixed full-token resident batch-64
+  case now measures 458.9 ms / 139 rows/s.
 - **Vulkan paged-attention decode kernel**: the kernel crate already had
   `paged_attn_decode_batch_paged.comp`; Vulkan now advertises
   `supports_flash_attn_paged_decode` and wires the single-query paged-decode

@@ -962,27 +962,20 @@ pub fn transformer_block_paged_decode_gdn_resident_b1(
     debug_assert!(gqa_ratio * nk == nv, "GDN nv must be a multiple of nk");
     let l2_eps_q: f32 = 1e-6;
     let q_scale: f32 = 1.0 / (dk as f32).sqrt();
+    let k_scale: f32 = 1.0;
     batch.record_shader(
-        shaders::L2_NORM_PER_ROW,
-        &[q_buf.handle(), q_expanded.handle()],
+        shaders::L2_NORM_QK_PER_ROW,
+        &[
+            q_buf.handle(),
+            k_buf.handle(),
+            q_expanded.handle(),
+            k_expanded.handle(),
+        ],
         &[
             nk as u32,
             dk as u32,
             l2_eps_q.to_bits(),
             q_scale.to_bits(),
-            gqa_ratio as u32,
-        ],
-        Workgroups::OneD(nv as u32),
-    )?;
-    // 7) K-norm: per-head L2 normalize + GQA expansion, no scale.
-    let k_scale: f32 = 1.0;
-    batch.record_shader(
-        shaders::L2_NORM_PER_ROW,
-        &[k_buf.handle(), k_expanded.handle()],
-        &[
-            nk as u32,
-            dk as u32,
-            l2_eps_q.to_bits(),
             k_scale.to_bits(),
             gqa_ratio as u32,
         ],
@@ -1291,27 +1284,20 @@ pub fn gated_deltanet_forward_decode_resident_b1(
     debug_assert!(gqa_ratio * nk == nv, "GDN nv must be a multiple of nk");
     let l2_eps_qk: f32 = 1e-6;
     let q_scale: f32 = 1.0 / (dk as f32).sqrt();
+    let k_scale: f32 = 1.0;
     batch.record_shader(
-        shaders::L2_NORM_PER_ROW,
-        &[q_buf.handle(), q_expanded.handle()],
+        shaders::L2_NORM_QK_PER_ROW,
+        &[
+            q_buf.handle(),
+            k_buf.handle(),
+            q_expanded.handle(),
+            k_expanded.handle(),
+        ],
         &[
             nk as u32,
             dk as u32,
             l2_eps_qk.to_bits(),
             q_scale.to_bits(),
-            gqa_ratio as u32,
-        ],
-        Workgroups::OneD(nv as u32),
-    )?;
-    // 6) K-norm: per-head L2 normalize + GQA expansion, no scale.
-    let k_scale: f32 = 1.0;
-    batch.record_shader(
-        shaders::L2_NORM_PER_ROW,
-        &[k_buf.handle(), k_expanded.handle()],
-        &[
-            nk as u32,
-            dk as u32,
-            l2_eps_qk.to_bits(),
             k_scale.to_bits(),
             gqa_ratio as u32,
         ],
@@ -2375,26 +2361,20 @@ pub fn record_gdn_block_into(
     debug_assert!(gqa_ratio * nk == nv, "GDN nv must be a multiple of nk");
     let l2_eps_qk: f32 = 1e-6;
     let q_scale: f32 = 1.0 / (dk as f32).sqrt();
+    let k_scale: f32 = 1.0;
     batch.record_shader(
-        shaders::L2_NORM_PER_ROW,
-        &[q_buf.handle(), q_expanded.handle()],
+        shaders::L2_NORM_QK_PER_ROW,
+        &[
+            q_buf.handle(),
+            k_buf.handle(),
+            q_expanded.handle(),
+            k_expanded.handle(),
+        ],
         &[
             nk as u32,
             dk as u32,
             l2_eps_qk.to_bits(),
             q_scale.to_bits(),
-            gqa_ratio as u32,
-        ],
-        Workgroups::OneD(nv as u32),
-    )?;
-    let k_scale: f32 = 1.0;
-    batch.record_shader(
-        shaders::L2_NORM_PER_ROW,
-        &[k_buf.handle(), k_expanded.handle()],
-        &[
-            nk as u32,
-            dk as u32,
-            l2_eps_qk.to_bits(),
             k_scale.to_bits(),
             gqa_ratio as u32,
         ],
@@ -2633,26 +2613,20 @@ pub fn record_gdn_block_batched_into(
     debug_assert!(gqa_ratio * nk == nv, "GDN nv must be a multiple of nk");
     let l2_eps_qk: f32 = 1e-6;
     let q_scale: f32 = 1.0 / (dk as f32).sqrt();
+    let k_scale: f32 = 1.0;
     batch.record_shader(
-        shaders::L2_NORM_PER_ROW,
-        &[q_buf.handle(), q_expanded.handle()],
+        shaders::L2_NORM_QK_PER_ROW,
+        &[
+            q_buf.handle(),
+            k_buf.handle(),
+            q_expanded.handle(),
+            k_expanded.handle(),
+        ],
         &[
             (batch_size * nk) as u32,
             dk as u32,
             l2_eps_qk.to_bits(),
             q_scale.to_bits(),
-            gqa_ratio as u32,
-        ],
-        Workgroups::OneD((batch_size * nv) as u32),
-    )?;
-    let k_scale: f32 = 1.0;
-    batch.record_shader(
-        shaders::L2_NORM_PER_ROW,
-        &[k_buf.handle(), k_expanded.handle()],
-        &[
-            (batch_size * nk) as u32,
-            dk as u32,
-            l2_eps_qk.to_bits(),
             k_scale.to_bits(),
             gqa_ratio as u32,
         ],

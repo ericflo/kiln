@@ -346,6 +346,8 @@ pub fn prewarm_builtin_pipelines(vk_device: &VulkanDevice) -> Result<()> {
         ("gdn_recurrent_prefill", 7, 24),
         ("gdn_recurrent_step_parallel", 7, 24),
         ("gdn_recurrent_qk_norm_step", 7, 24),
+        ("l2_norm_per_row", 2, 20),
+        ("l2_norm_qk_per_row", 4, 24),
         ("gdn_chunk_prep", 12, 16),
         ("gdn_chunk_scan", 8, 16),
         ("qwen_rmsnorm_forward", 3, 12),

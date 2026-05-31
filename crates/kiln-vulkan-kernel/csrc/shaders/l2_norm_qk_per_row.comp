@@ -1,0 +1,68 @@
+// Fused Q/K per-row L2 normalization with GQA-style row replication.
+//
+// Inputs:
+//   q_in, k_in: [rows_in, hidden] f32 row-major
+// Outputs:
+//   q_out, k_out: [rows_in * gqa_ratio, hidden] f32 row-major
+//
+// Push constants:
+//   rows_in, hidden, eps, q_scale, k_scale, gqa_ratio
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint rows_in;
+    uint hidden;
+    float eps;
+    float q_scale;
+    float k_scale;
+    uint gqa_ratio;
+};
+
+layout(binding = 0) readonly buffer QIn { float data_q_in[]; };
+layout(binding = 1) readonly buffer KIn { float data_k_in[]; };
+layout(binding = 2) writeonly buffer QOut { float data_q_out[]; };
+layout(binding = 3) writeonly buffer KOut { float data_k_out[]; };
+
+shared float q_sq_partial[256];
+shared float k_sq_partial[256];
+
+void main() {
+    uint r_out = gl_WorkGroupID.x;
+    uint rows_out = rows_in * gqa_ratio;
+    if (r_out >= rows_out) return;
+    uint r_in = r_out / gqa_ratio;
+    uint tid = gl_LocalInvocationID.x;
+    uint base_in = r_in * hidden;
+    uint base_out = r_out * hidden;
+
+    float q_local_sq = 0.0;
+    float k_local_sq = 0.0;
+    for (uint i = tid; i < hidden; i += 256) {
+        float q = data_q_in[base_in + i];
+        float k = data_k_in[base_in + i];
+        q_local_sq += q * q;
+        k_local_sq += k * k;
+    }
+    q_sq_partial[tid] = q_local_sq;
+    k_sq_partial[tid] = k_local_sq;
+    barrier();
+
+    for (uint stride = 128; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            q_sq_partial[tid] += q_sq_partial[tid + stride];
+            k_sq_partial[tid] += k_sq_partial[tid + stride];
+        }
+        barrier();
+    }
+
+    float q_coef = inversesqrt(q_sq_partial[0] + eps) * q_scale;
+    float k_coef = inversesqrt(k_sq_partial[0] + eps) * k_scale;
+    for (uint i = tid; i < hidden; i += 256) {
+        data_q_out[base_out + i] = data_q_in[base_in + i] * q_coef;
+        data_k_out[base_out + i] = data_k_in[base_in + i] * k_coef;
+    }
+}

@@ -1027,24 +1027,18 @@ fn run_full_token_resident_mixed_batched(
                     let l2_eps = 1e-6f32;
                     let q_scale = 1.0f32 / (GDN_HEAD_DIM as f32).sqrt();
                     b.record_shader(
-                        shaders::L2_NORM_PER_ROW,
-                        &[gdn_q_buf.handle(), gdn_q_expanded.handle()],
+                        shaders::L2_NORM_QK_PER_ROW,
+                        &[
+                            gdn_q_buf.handle(),
+                            gdn_k_buf.handle(),
+                            gdn_q_expanded.handle(),
+                            gdn_k_expanded.handle(),
+                        ],
                         &[
                             (batch * GDN_NUM_KEY_HEADS) as u32,
                             GDN_HEAD_DIM as u32,
                             l2_eps.to_bits(),
                             q_scale.to_bits(),
-                            gdn_gqa_ratio as u32,
-                        ],
-                        Workgroups::OneD((batch * GDN_NUM_VALUE_HEADS) as u32),
-                    )?;
-                    b.record_shader(
-                        shaders::L2_NORM_PER_ROW,
-                        &[gdn_k_buf.handle(), gdn_k_expanded.handle()],
-                        &[
-                            (batch * GDN_NUM_KEY_HEADS) as u32,
-                            GDN_HEAD_DIM as u32,
-                            l2_eps.to_bits(),
                             1.0f32.to_bits(),
                             gdn_gqa_ratio as u32,
                         ],
@@ -1154,7 +1148,7 @@ fn run_gdn_block_resident_batched(
     use kiln_vulkan_kernel::Workgroups;
 
     println!(
-        "== gdn_block_resident_batched (GDN block + MLP, 11 kernels recorded into 1 cmd-buffer + 1 submit) =="
+        "== gdn_block_resident_batched (GDN block + MLP, 10 kernels recorded into 1 cmd-buffer + 1 submit) =="
     );
 
     let conv_kernel = 4usize;
@@ -1273,24 +1267,18 @@ fn run_gdn_block_resident_batched(
             let l2_eps = 1e-6f32;
             let q_scale = 1.0f32 / (GDN_HEAD_DIM as f32).sqrt();
             b.record_shader(
-                shaders::L2_NORM_PER_ROW,
-                &[q_buf.handle(), q_expanded.handle()],
+                shaders::L2_NORM_QK_PER_ROW,
+                &[
+                    q_buf.handle(),
+                    k_buf.handle(),
+                    q_expanded.handle(),
+                    k_expanded.handle(),
+                ],
                 &[
                     (batch * GDN_NUM_KEY_HEADS) as u32,
                     GDN_HEAD_DIM as u32,
                     l2_eps.to_bits(),
                     q_scale.to_bits(),
-                    gqa_ratio as u32,
-                ],
-                Workgroups::OneD((batch * GDN_NUM_VALUE_HEADS) as u32),
-            )?;
-            b.record_shader(
-                shaders::L2_NORM_PER_ROW,
-                &[k_buf.handle(), k_expanded.handle()],
-                &[
-                    (batch * GDN_NUM_KEY_HEADS) as u32,
-                    GDN_HEAD_DIM as u32,
-                    l2_eps.to_bits(),
                     1.0f32.to_bits(),
                     gqa_ratio as u32,
                 ],
