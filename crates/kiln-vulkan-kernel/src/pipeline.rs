@@ -118,10 +118,18 @@ const SHADER_SPIRVS: &[(&str, &[u8])] = &[
     ("gdn_chunk_scan", SPIR_V_GDN_CHUNK_SCAN),
     ("linear_decode", SPIR_V_LINEAR_DECODE),
     ("linear_decode_bf16w", SPIR_V_LINEAR_DECODE_BF16W),
+    (
+        "linear_decode_bf16w_add_residual",
+        SPIR_V_LINEAR_DECODE_BF16W_ADD_RESIDUAL,
+    ),
     ("linear_decode_batched", SPIR_V_LINEAR_DECODE_BATCHED),
     (
         "linear_decode_batched_bf16w",
         SPIR_V_LINEAR_DECODE_BATCHED_BF16W,
+    ),
+    (
+        "linear_decode_batched_bf16w_add_residual",
+        SPIR_V_LINEAR_DECODE_BATCHED_BF16W_ADD_RESIDUAL,
     ),
     ("vk_matmul_bf16w_fwd_rows", SPIR_V_VK_MATMUL_BF16W_FWD_ROWS),
     ("vk_matmul_bf16w_bwd_rows", SPIR_V_VK_MATMUL_BF16W_BWD_ROWS),

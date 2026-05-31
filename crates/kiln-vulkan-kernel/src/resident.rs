@@ -168,6 +168,77 @@ fn dispatch_linear_decode_cached_resident_impl(
     .context("linear_decode_resident kernel failed")
 }
 
+/// Batched resident BF16-weight linear projection fused with residual add.
+///
+/// `x` is `[batch, hidden]`, `weight_t` is packed-bf16 `[hidden, out_dim]`,
+/// `residual` and `out` are `[batch, out_dim]`.
+pub fn dispatch_linear_decode_batched_bf16w_add_residual_resident(
+    vk_device: &VulkanDevice,
+    x: &VulkanBuffer,
+    weight_t: &VulkanBuffer,
+    residual: &VulkanBuffer,
+    out: &VulkanBuffer,
+    batch: usize,
+    hidden: usize,
+    out_dim: usize,
+) -> Result<()> {
+    anyhow::ensure!(
+        batch > 0,
+        "linear_decode_batched_bf16w_add_residual_resident: batch must be > 0"
+    );
+    let input_elems = batch
+        .checked_mul(hidden)
+        .context("linear_decode_batched_bf16w_add_residual_resident: input overflow")?;
+    let output_elems = batch
+        .checked_mul(out_dim)
+        .context("linear_decode_batched_bf16w_add_residual_resident: output overflow")?;
+    let weight_elems = hidden
+        .checked_mul(out_dim)
+        .context("linear_decode_batched_bf16w_add_residual_resident: weight overflow")?;
+    let need_in = (input_elems * 4) as u64;
+    let need_out = (output_elems * 4) as u64;
+    let need_weight = weight_elems.div_ceil(2) as u64 * 4;
+    anyhow::ensure!(
+        x.size() >= need_in,
+        "linear_decode_batched_bf16w_add_residual_resident: x buffer too small"
+    );
+    anyhow::ensure!(
+        weight_t.size() >= need_weight,
+        "linear_decode_batched_bf16w_add_residual_resident: weight buffer too small"
+    );
+    anyhow::ensure!(
+        residual.size() >= need_out,
+        "linear_decode_batched_bf16w_add_residual_resident: residual buffer too small"
+    );
+    anyhow::ensure!(
+        out.size() >= need_out,
+        "linear_decode_batched_bf16w_add_residual_resident: out buffer too small"
+    );
+
+    let glsl_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/csrc/shaders/linear_decode_batched_bf16w_add_residual.comp"
+    );
+    let spirv = ShaderPipeline::compile_shader(glsl_path)?;
+    let handles: [vk::Buffer; 4] = [
+        x.handle(),
+        weight_t.handle(),
+        residual.handle(),
+        out.handle(),
+    ];
+    let push_constants: [u32; 3] = [hidden as u32, out_dim as u32, batch as u32];
+    let workgroups = (batch * out_dim.div_ceil(32)) as u32;
+    run_compute_pipeline(
+        vk_device,
+        &spirv,
+        &handles,
+        handles.len(),
+        &push_constants,
+        workgroups,
+    )
+    .context("linear_decode_batched_bf16w_add_residual_resident kernel failed")
+}
+
 /// Resident-form `dispatch_qwen_rmsnorm_forward`.
 ///
 /// `x` is `[..., hidden]` f32 on device; `weight` is `[hidden]` f32

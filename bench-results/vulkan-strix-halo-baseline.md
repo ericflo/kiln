@@ -141,6 +141,9 @@ every config"):
   **Update — GDN split primitives:** added batched GDN in-proj and mixed-QKV
   split kernels, so the existing batched GDN projection/conv kernels can feed
   the recurrent step without rowwise host-side slicing.
+  **Update — fused batched MLP down+residual:** added
+  `linear_decode_batched_bf16w_add_residual`, closing the single-row fused
+  residual-add dependency used by both resident full-attention and GDN blocks.
 - **Vulkan paged-attention decode kernel**: the kernel crate already had
   `paged_attn_decode_batch_paged.comp`; Vulkan now advertises
   `supports_flash_attn_paged_decode` and wires the single-query paged-decode
