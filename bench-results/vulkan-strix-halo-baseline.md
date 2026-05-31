@@ -45,15 +45,28 @@ before the loader-regression fix.
   - greedy long-output repetition is ordinary greedy degeneracy (no
     repetition penalty), not a forward bug.
 
-## Known follow-ups (perf headroom, not regressions)
+## Prefill profile (the next lever) — `KILN_PROFILE_PAGED_LAYERS=1`, 48-token prompt
 
-1. **Prefill** still runs the generic per-op path (~3.2 s for a short prompt;
-   each op round-trips through CPU). Routing prefill onto a single-submit /
-   resident-style CommandBatch is the next big win.
-2. **Sampling (temperature > 0) decode** falls through to the generic decode
-   path; only greedy bs=1 is routed to the native resident path so far (the
-   greedy path needs no `states[i]` borrow that conflicts with `linear_states`).
-3. **First-token shader compile** (~1.4 s) could be prewarmed at load.
-4. The Vulkan build still links candle via `kiln-model`'s shared
+Per-layer wall time (one prefill, all 32 layers):
+
+| layer kind | per-layer | count | subtotal |
+|---|---|---|---|
+| GDN (linear attention) | **~400 ms** | 24 | ~9.6 s |
+| Full attention | ~246 ms | 8 | ~2.0 s |
+| **Total prefill (48 tok)** | | | **~12.8 s** |
+
+The **GDN linear-attention prefill dominates** (~75% of prefill). The GDN
+recurrent/chunkwise scan is the hot path: the BF16-gated `recurrent_unexpanded_qk`
+native prefill fast path does NOT engage on Vulkan (Vulkan activations are F32,
+the gate requires BF16 input), so GDN prefill takes the chunkwise/portable scan.
+Speeding this up (a Vulkan-native chunkwise GDN prefill, or an F32 path for the
+native recurrent prefill) is a focused kernel/algorithm work-package — the single
+biggest remaining Vulkan perf win. NOT attempted yet: it touches the working GDN
+forward and warrants careful parity validation, not an end-of-session change.
+
+## Other follow-ups (perf headroom, not regressions)
+
+1. **First-token shader compile** (~1.4 s) could be prewarmed at load.
+2. The Vulkan build still links candle via `kiln-model`'s shared
    `candle-core`/`candle-nn` deps (the same islands the CUDA DoD-100 work is
    removing); the Vulkan-specific decode weight path is now candle-copy-free.
