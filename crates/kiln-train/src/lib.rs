@@ -25,10 +25,9 @@ pub mod diagnostics;
 // THIRD kernel-crate candle drop, after `kiln-opd-loss-kernel` and
 // `kiln-rmsnorm-kernel`). Holds the candle-typed `FlceMatmulProvider` trait,
 // the pure-candle Phase A reference, the Phase B candle `CustomOp1`, the
-// `KtForwardOp1`-based kt-forward-op shim, and the kt-tape production-caller
-// adapter. The kernel crate keeps the pure-kt `kt_api` + `kt_tape` building
-// blocks this module calls. See module docstring. (#1082)
-pub mod flce_candle_shim;
+// (#1082 candle-drop) `flce_candle_shim` deleted — the candle FLCE CustomOp +
+// `FlceMatmulProvider` (the `KILN_CUDA_FLCE` provider opt-in) are gone; FLCE is
+// kt-native via `kiln_flce_kernel::kt_api::fused_linear_cross_entropy_phase_b_kt`.
 // (#1082) CP-4: GRPO policy-gradient scalar-loss tape root. The
 // candle↔kt boundary for the GRPO trainer's tape-authoritative path —
 // a single fused tape node taking the full `[1, T, V]` policy logits and

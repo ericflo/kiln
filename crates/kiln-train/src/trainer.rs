@@ -57,12 +57,11 @@ use kiln_core::tokenizer::KilnTokenizer;
 // (#1082) FLCE candle-typed surface relocated to `crate::flce_candle_shim`
 // so `kiln-flce-kernel` could drop candle-core (3rd kernel-crate candle
 // drop). The kernel crate keeps only the pure-kt `kt_api` + `kt_tape`.
-#[cfg(test)]
-use crate::flce_candle_shim::fused_linear_cross_entropy;
-use crate::flce_candle_shim::{
-    DEFAULT_CHUNK_SIZE, FlceMatmulProvider, FlceProvider, fused_linear_cross_entropy_dispatch,
-    fused_linear_cross_entropy_dispatch_with_provider,
-};
+// (#1082) candle FLCE shim removed; DEFAULT_CHUNK_SIZE now sourced from the
+// kt-native kernel crate (same value). The candle `FlceMatmulProvider`/
+// `FlceProvider`/`fused_linear_cross_entropy*` opt-in (KILN_CUDA_FLCE) is gone —
+// FLCE is kt-native via `kiln_flce_kernel::kt_api::fused_linear_cross_entropy_phase_b_kt`.
+use kiln_flce_kernel::DEFAULT_CHUNK_SIZE;
 use kiln_model::backend::{self, BackendRuntime};
 use kiln_model::forward::{
     GDN_CHUNK_SIZE, GpuAttentionWeights, GpuWeights, GqaAttentionPrepared, LinearAttentionState,
@@ -2469,13 +2468,13 @@ pub fn sft_train(
                         .with_context(|| format!("retokenize SFT example {ex_idx}"))?;
                 let loss_val;
 
-                let flce_provider = build_flce_provider(&backend, &label_mask, model_config);
                 // (#1082 candle-drop) The SFT forward/backward is now UNCONDITIONALLY
                 // kt tape-authoritative — the candle checkpointed reverse + candle
-                // `loss.backward()` paths are deleted. `standard_forward_backward`
-                // and `checkpointed_forward_backward_tape_authoritative_kt` both
-                // return `GradSource::Kt`, consumed kt-native by the dispatchers
-                // (no candle grad copy, no candle `Var` master).
+                // `loss.backward()` paths are deleted, and the candle FLCE provider
+                // opt-in (KILN_CUDA_FLCE) is removed (FLCE is kt-native).
+                // `standard_forward_backward` and
+                // `checkpointed_forward_backward_tape_authoritative_kt` both return
+                // `GradSource::Kt`, consumed kt-native by the dispatchers.
                 let grads: GradSource = if let Some(ref segs) = segments {
                     #[cfg(feature = "cuda")]
                     {
@@ -2488,7 +2487,6 @@ pub fn sft_train(
                             &label_mask,
                             segs,
                             &device,
-                            flce_provider,
                         )?;
                         loss_val = lv;
                         GradSource::Kt(kt_grads)
@@ -2501,7 +2499,7 @@ pub fn sft_train(
                         // non-checkpointed `standard_forward_backward` path; reaching
                         // here means a CPU run requested checkpointing, which the
                         // candle-drop endgame does not support yet.
-                        let _ = (segs, flce_provider);
+                        let _ = segs;
                         anyhow::bail!(
                             "gradient checkpointing requires the `cuda` feature (kt-tape \
                              checkpointed reverse is CUDA-only post candle-drop)"
@@ -2516,7 +2514,6 @@ pub fn sft_train(
                         &params,
                         &label_mask,
                         &device,
-                        flce_provider,
                     )?;
                     loss_val = lv;
                     g
@@ -6214,147 +6211,6 @@ fn use_flce() -> bool {
     kiln_core::env_flag::env_flag("KILN_USE_FLCE", true)
 }
 
-/// FLCE chunk-matmul provider that dispatches `[active, hidden] @
-/// [hidden, chunk_len]` through the active `BackendRuntime`'s
-/// `linear_prefill_apply`. The provider holds an `Arc<dyn ...>` to
-/// the backend so it can satisfy the `'static` bound that
-/// [`crate::flce_candle_shim::FlceProvider`] requires.
-///
-/// Receives `full_rhs` plus chunk metadata so the underlying weight
-/// buffer is uploaded once via `linear_prefill_apply` (cached by
-/// `full_rhs.id()`) and per-chunk dispatch reuses it via the
-/// offset-aware kernel (`linear_prefill_apply_offset`). This avoids
-/// the per-chunk re-upload that made the previous (non-offset)
-/// version a net-loss on the medium payload.
-#[derive(Debug)]
-struct BackendFlceProvider {
-    backend: std::sync::Arc<dyn BackendRuntime>,
-}
-
-impl FlceMatmulProvider for BackendFlceProvider {
-    // (#1082) The FLCE path is a candle island for now: the
-    // `FlceMatmulProvider` trait (in `flce_candle_shim`) is candle-typed, so
-    // this impl signature stays candle (`&candle_core::Tensor` in/out). The
-    // backend chunk matmul (`linear_prefill_apply_offset`) is kt-native, so we
-    // bridge candle->kt on the way in and kt->candle on the way out. Drop the
-    // bridge once FLCE itself flips to kt.
-    fn chunk_matmul(
-        &self,
-        lhs: &candle_core::Tensor,
-        full_rhs: &candle_core::Tensor,
-        chunk_start: usize,
-        chunk_len: usize,
-    ) -> anyhow::Result<Option<candle_core::Tensor>> {
-        let lhs_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(lhs)
-            .map_err(|e| anyhow::anyhow!("FLCE chunk_matmul: candle->kt lhs: {e}"))?;
-        let full_rhs_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(full_rhs)
-            .map_err(|e| anyhow::anyhow!("FLCE chunk_matmul: candle->kt full_rhs: {e}"))?;
-        let lhs_3d = lhs_kt.unsqueeze(0)?;
-        let Some(out_3d) = self.backend.linear_prefill_apply_offset(
-            &lhs_3d,
-            &full_rhs_kt,
-            chunk_start,
-            chunk_len,
-        )?
-        else {
-            return Ok(None);
-        };
-        let out_kt = out_3d.squeeze(0)?;
-        let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&out_kt)
-            .map_err(|e| anyhow::anyhow!("FLCE chunk_matmul: kt->candle out: {e}"))?;
-        Ok(Some(out))
-    }
-}
-
-/// Build a backend chunk-matmul provider for FLCE.
-///
-/// Vulkan auto-enables when the payload shape suggests that chunked dispatch is
-/// the better choice than the unfused lm_head matmul + cross-entropy path.
-/// The `model_config` argument is retained for call-site stability and for a
-/// future CUDA/Vulkan crossover rule that may need vocab or hidden size again.
-/// CUDA currently exposes the same provider only through `KILN_CUDA_FLCE=1`
-/// while the offset hook is under validation; default CUDA FLCE still uses
-/// Phase B's candle CUDA chunk matmul path.
-///
-/// The crossover used to be measured against the pre-Phase-2 baseline
-/// (CPU-only `broadcast_matmul` for the unfused path); on Strix Halo the
-/// per-chunk Vulkan dispatch overhead beat the matmul savings only above
-/// `active_count × num_chunks ≥ 50_000`. Post-host-crash that comparison
-/// no longer holds: the unfused path on Vulkan queues the entire
-/// `[T, hidden] @ [hidden, vocab]` lm_head as a single submit, which
-/// queues ~4.36M workgroups at T=918 / vocab=152064 and hard-hung the
-/// host twice — see commit 1b8f5f97. The FLCE provider chunks the same
-/// matmul through `linear_prefill_apply_offset`, so each submit is
-/// bounded by `chunk_len` (4096 by default) and TDR-safe by construction.
-///
-/// New rule: engage as soon as the active count clears a small floor.
-/// At active_count ≥ 16 with vocab=152064 and chunk_size=4096 (38 chunks)
-/// the per-chunk matmul work is ~13 GFLOP — well-amortized vs the
-/// Vulkan dispatch overhead (~50 µs per chunk). Below that floor the
-/// non-FLCE path's lm_head matmul is itself trivial (16 × 2560 × 152064
-/// × 2 = ~12 GFLOP), so the unfused path is fine and FLCE's per-chunk
-/// fixed cost actually dominates.
-///
-/// `KILN_VULKAN_FLCE=1` forces the Vulkan provider on; `KILN_VULKAN_FLCE=0`
-/// forces it off; otherwise the auto-heuristic decides based on `label_mask`.
-/// `KILN_CUDA_FLCE=1` forces the CUDA provider on; unset/false keeps the
-/// existing candle CUDA Phase B behavior until a benchmark justifies auto-on.
-fn build_flce_provider(
-    backend: &std::sync::Arc<dyn BackendRuntime>,
-    label_mask: &[bool],
-    _model_config: &ModelConfig,
-) -> Option<FlceProvider> {
-    if backend.name() == "cuda" {
-        return match kiln_core::env_flag::env_tristate("KILN_CUDA_FLCE") {
-            Some(true) => Some(std::sync::Arc::new(BackendFlceProvider {
-                backend: backend.clone(),
-            })),
-            Some(false) | None => None,
-        };
-    }
-    if backend.name() != "vulkan" {
-        return None;
-    }
-    match kiln_core::env_flag::env_tristate("KILN_VULKAN_FLCE") {
-        Some(true) => {
-            return Some(std::sync::Arc::new(BackendFlceProvider {
-                backend: backend.clone(),
-            }));
-        }
-        Some(false) => return None,
-        None => {}
-    }
-    // Auto-heuristic: engage whenever the supervised batch is large
-    // enough that the unfused lm_head matmul would itself be a serious
-    // GPU dispatch.
-    let active_count = if label_mask.len() >= 2 {
-        label_mask[1..].iter().filter(|&&m| m).count()
-    } else {
-        0
-    };
-    if flce_auto_engage(active_count) {
-        Some(std::sync::Arc::new(BackendFlceProvider {
-            backend: backend.clone(),
-        }))
-    } else {
-        None
-    }
-}
-
-/// Pure predicate for the FLCE provider auto-heuristic. Extracted so it
-/// can be exercised by unit tests without a live Vulkan backend.
-///
-/// Returns true when the FLCE provider should auto-engage given the
-/// supervised-token count. The model's vocab size used to factor in
-/// (the old heuristic was `active_count × num_chunks ≥ 50_000`); after
-/// commit 6182f74 the rule simplifies to `active_count ≥ 16` because
-/// chunking is the protective path post-host-crash, not just a
-/// performance preference. See [`build_flce_provider`] for rationale.
-fn flce_auto_engage(active_count: usize) -> bool {
-    const ACTIVE_COUNT_FLOOR: usize = 16;
-    active_count >= ACTIVE_COUNT_FLOOR
-}
-
 fn recompute_checkpoint_boundaries(seq_len: usize) -> bool {
     if let Some(forced) = kiln_core::env_flag::env_tristate("KILN_RECOMPUTE_CHECKPOINT_BOUNDARIES")
     {
@@ -7413,7 +7269,6 @@ fn standard_forward_backward_tape_authoritative_kt(
     params: &TrainableLoraParams,
     label_mask: &[bool],
     device: &CdDevice,
-    _flce_provider: Option<FlceProvider>,
 ) -> Result<(f64, kiln_autograd::GradStore)> {
     let lora_weights = params.as_lora_weights();
     let mut linear_state = LinearAttentionState::new(model_config, device)?;
@@ -7529,7 +7384,6 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
     label_mask: &[bool],
     segments: &[(usize, usize)],
     device: &CdDevice,
-    flce_provider: Option<FlceProvider>,
 ) -> Result<(f64, kiln_autograd::GradStore)> {
     let num_segments = segments.len();
     anyhow::ensure!(
@@ -7550,17 +7404,6 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
     let positions: Vec<u32> = (0..input_ids.len()).map(|p| p as u32).collect();
     let lora_detached = lora_weights_detached(params);
     let lora_weights = params.as_lora_weights();
-
-    // (#1082) FLCE is the only candle island left in this checkpointed path
-    // (the analytic tail seed + cross-entropy are kt now). Bridge a kt tensor
-    // to candle just for the FLCE dispatch call.
-    let cd_out = |k: &kiln_tensor::Tensor| -> Result<candle_core::Tensor> {
-        kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(
-            &k.contiguous()
-                .map_err(|e| anyhow::anyhow!("ckpt-kt: kt contiguous: {e}"))?,
-        )
-        .map_err(|e| anyhow::anyhow!("ckpt-kt: kt->candle copy: {e}"))
-    };
 
     // Step 1: detached forward → kt boundary activations (one per segment start
     // + the final pre-final-norm hidden). NOT under a tape scope, so nothing is
@@ -7604,55 +7447,26 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
     // scopes). So FLCE only has to compute the scalar loss, not a tape-connected
     // backward.
     let loss_val = if use_flce() {
-        // (#1082 H-FLCE) FLCE loss-VALUE via the kt-native forward
-        // `fused_linear_cross_entropy_phase_b_kt` — taking the kt `normed`
-        // hidden and the kt `embed_tokens_t` head DIRECTLY. This drops the
-        // candle bridges the old candle-dispatch path required:
-        //   - `cd_out(normed)` (the [1, T, H] post-final-norm kt->candle copy),
-        //   - the FULL `embed_tokens_t` kt->candle copy (~780MB/step on
-        //     Qwen3.5-4B BF16, the copy #1082 flagged), and
-        //   - the candle device bridge.
-        // Only the resulting scalar crosses back to host (`to_scalar`). The kt
-        // forward's index/accumulator tensors are now device-parametric
-        // (from_vec_on + flat index_select), so it runs on CUDA inputs.
-        //
-        // EXCEPTION: when a `flce_provider` is bound (`KILN_CUDA_FLCE=1` — the
-        // backend chunk-matmul override), defer to the candle dispatch: the kt
-        // forward has no provider plumbing. This is a non-default opt-in path.
-        if flce_provider.is_some() {
-            // (#1082) candle island — provider-bound FLCE dispatch is candle-typed.
-            let normed =
-                cd_out(&model_forward_final_norm(&final_hidden_kt, weights, model_config)?)?;
-            let head_t_candle =
-                kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&weights.embed_tokens_t)
-                    .map_err(|e| anyhow::anyhow!("ckpt-kt: kt->candle head_t: {e}"))?;
-            let cd_device = kiln_kt_bridge::candle_device_from_kt(device)
-                .map_err(|e| anyhow::anyhow!("ckpt-kt: kt->candle device: {e}"))?;
-            let loss = fused_linear_cross_entropy_dispatch_with_provider(
-                &normed,
-                &head_t_candle,
-                input_ids,
-                label_mask,
-                &cd_device,
-                DEFAULT_CHUNK_SIZE,
-                flce_provider.clone(),
-            )
-            .context("ckpt-kt fused linear cross-entropy (final boundary, provider path)")?;
-            loss.to_scalar::<f32>()? as f64
-        } else {
-            let normed = model_forward_final_norm(&final_hidden_kt, weights, model_config)?;
-            let loss_kt = kiln_flce_kernel::kt_api::fused_linear_cross_entropy_phase_b_kt(
-                &normed,
-                &weights.embed_tokens_t,
-                input_ids,
-                label_mask,
-                DEFAULT_CHUNK_SIZE,
-            )
-            .map_err(|e| {
-                anyhow::anyhow!("ckpt-kt kt-native fused linear cross-entropy (final boundary): {e}")
-            })?;
-            loss_kt.to_scalar::<f32>()? as f64
-        }
+        // (#1082 H-FLCE / candle-drop) FLCE loss-VALUE via the kt-native forward
+        // `fused_linear_cross_entropy_phase_b_kt` — taking the kt `normed` hidden
+        // and the kt `embed_tokens_t` head DIRECTLY (no candle `cd_out` copy, no
+        // ~780MB/step `embed_tokens_t` kt->candle copy, no candle device bridge).
+        // Only the resulting scalar crosses back to host. The gradient comes
+        // entirely from the analytic tail (this FLCE node is not tape-recorded).
+        // The candle FLCE provider opt-in (`KILN_CUDA_FLCE`) was removed in the
+        // candle drop — this is now the sole FLCE path.
+        let normed = model_forward_final_norm(&final_hidden_kt, weights, model_config)?;
+        let loss_kt = kiln_flce_kernel::kt_api::fused_linear_cross_entropy_phase_b_kt(
+            &normed,
+            &weights.embed_tokens_t,
+            input_ids,
+            label_mask,
+            DEFAULT_CHUNK_SIZE,
+        )
+        .map_err(|e| {
+            anyhow::anyhow!("ckpt-kt kt-native fused linear cross-entropy (final boundary): {e}")
+        })?;
+        loss_kt.to_scalar::<f32>()? as f64
     } else {
         let logits = model_forward_head(&final_hidden_kt, weights, model_config)?;
         cross_entropy_loss(&logits, input_ids, label_mask, device)?
@@ -7760,7 +7574,6 @@ pub fn standard_forward_backward(
     params: &TrainableLoraParams,
     label_mask: &[bool],
     device: &CdDevice,
-    flce_provider: Option<FlceProvider>,
 ) -> Result<(f64, GradSource)> {
     // (#1082 candle-drop) The SFT forward/backward is now UNCONDITIONALLY
     // kt tape-authoritative on CUDA + BF16 base. The candle producers
@@ -7791,7 +7604,6 @@ pub fn standard_forward_backward(
             params,
             label_mask,
             device,
-            flce_provider,
         )?;
         Ok((loss_val, GradSource::Kt(kt_grads)))
     }
@@ -7805,7 +7617,6 @@ pub fn standard_forward_backward(
             params,
             label_mask,
             device,
-            flce_provider,
         );
         anyhow::bail!(
             "standard_forward_backward: SFT training requires the `cuda` feature \
@@ -9994,7 +9805,6 @@ pub(crate) mod tests {
             &params,
             &label_mask,
             &device,
-            None,
         )
         .expect("tape-authoritative(kt) step");
 
@@ -10089,7 +9899,6 @@ pub(crate) mod tests {
                 p,
                 &label_mask,
                 &device,
-                None,
             )
             .expect("fd loss-value forward");
             lv
@@ -10544,7 +10353,6 @@ pub(crate) mod tests {
                 &params,
                 &label_mask,
                 &device,
-                None,
             )
             .expect("tape-authoritative forward/backward");
 
@@ -11408,111 +11216,6 @@ pub(crate) mod tests {
     /// and that matmul, on Vulkan, hard-hung the host (commit 1b8f5f97).
     /// Post-fix the floor is `active_count ≥ 16`, so any non-trivial
     /// supervised batch routes through chunked FLCE.
-    #[test]
-    fn flce_auto_engages_at_sft_repro_shape() {
-        // Original /tmp/sft-data.jsonl repro: T=918, ~80% supervised
-        // → active_count ≈ 734.
-        assert!(
-            flce_auto_engage(734),
-            "T=918 SFT repro must engage FLCE — that's the shape the \
-             unfused path hung the host with"
-        );
-        // Even a tiny supervised batch should engage once it clears
-        // the per-chunk-overhead floor.
-        assert!(flce_auto_engage(16));
-        assert!(flce_auto_engage(64));
-        assert!(flce_auto_engage(256));
-    }
-
-    /// Counter-test: trivially small supervised batches should NOT
-    /// pay the per-chunk dispatch overhead. At active_count < 16 the
-    /// unfused lm_head matmul is itself tiny (~12 GFLOP, well under
-    /// the 100 GFLOP safety ceiling) so the unfused path wins.
-    #[test]
-    fn flce_auto_skips_trivial_active_count() {
-        assert!(!flce_auto_engage(0));
-        assert!(!flce_auto_engage(1));
-        assert!(!flce_auto_engage(15));
-    }
-
-    #[test]
-    fn cuda_flce_provider_requires_explicit_opt_in() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        unsafe {
-            std::env::remove_var("KILN_CUDA_FLCE");
-            std::env::remove_var("KILN_VULKAN_FLCE");
-        }
-
-        let backend = NamedTestBackend::runtime("cuda");
-        let config = tiny_config();
-        let label_mask = vec![true; 128];
-
-        assert!(
-            build_flce_provider(&backend, &label_mask, &config).is_none(),
-            "CUDA FLCE must not auto-engage while the offset hook remains opt-in"
-        );
-
-        unsafe {
-            std::env::set_var("KILN_CUDA_FLCE", "0");
-        }
-        assert!(
-            build_flce_provider(&backend, &label_mask, &config).is_none(),
-            "KILN_CUDA_FLCE=0 must force the CUDA backend provider off"
-        );
-
-        unsafe {
-            std::env::set_var("KILN_CUDA_FLCE", "1");
-        }
-        assert!(
-            build_flce_provider(&backend, &label_mask, &config).is_some(),
-            "KILN_CUDA_FLCE=1 must opt into the CUDA backend provider"
-        );
-
-        unsafe {
-            std::env::remove_var("KILN_CUDA_FLCE");
-        }
-    }
-
-    #[test]
-    fn vulkan_flce_provider_keeps_auto_heuristic() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        unsafe {
-            std::env::remove_var("KILN_CUDA_FLCE");
-            std::env::remove_var("KILN_VULKAN_FLCE");
-        }
-
-        let backend = NamedTestBackend::runtime("vulkan");
-        let config = tiny_config();
-        let active_label_mask = vec![true; 128];
-        let trivial_label_mask = vec![true; 8];
-
-        assert!(
-            build_flce_provider(&backend, &active_label_mask, &config).is_some(),
-            "Vulkan should still auto-engage for non-trivial supervised batches"
-        );
-        assert!(
-            build_flce_provider(&backend, &trivial_label_mask, &config).is_none(),
-            "Vulkan should still skip trivial supervised batches"
-        );
-
-        unsafe {
-            std::env::set_var("KILN_VULKAN_FLCE", "0");
-        }
-        assert!(
-            build_flce_provider(&backend, &active_label_mask, &config).is_none(),
-            "KILN_VULKAN_FLCE=0 must keep forcing the Vulkan provider off"
-        );
-
-        unsafe {
-            std::env::remove_var("KILN_VULKAN_FLCE");
-        }
-    }
-
-
-
-
-
-
     // =====================================================================
     // #1077 Tier 1b + 1c — Per-PR perf-regression smoke tests.
     //
