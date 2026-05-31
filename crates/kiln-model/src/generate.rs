@@ -2719,6 +2719,18 @@ impl ModelRunner {
         // `linear_states` mutable borrow below — otherwise the borrow
         // checker rejects the immutable `states.iter()`.
         let row_ids: Vec<u64> = states.iter().map(|state| state.id).collect();
+        // (#1082) Capture row-0 sampling context BEFORE the `linear_states`
+        // mutable borrow so the Vulkan native single-row decode branch below can
+        // sample (temperature > 0) without re-borrowing `states[0]` while
+        // `linear_states` holds it mutably. Only row 0 matters (the native branch
+        // is row_count == 1) and only on Vulkan; one Option copy + one small Vec
+        // clone per step.
+        #[cfg(feature = "vulkan")]
+        let vk_row0_sampling: Option<(Option<u64>, Vec<TokenId>)> = if row_count == 1 {
+            Some((states[0].step_seed, states[0].generated_tokens.clone()))
+        } else {
+            None
+        };
         let mut linear_states: Vec<&mut LinearAttentionState> = states
             .iter_mut()
             .map(|state| &mut state.linear_state)
@@ -2831,25 +2843,22 @@ impl ModelRunner {
             }
         }
 
-        // (#1082) Vulkan single-row GREEDY decode: route the production serving
-        // path (batching engine -> paged_batched_decode_step, row_count==1)
-        // through the native single-submit resident forward — the same path the
-        // bench greedy loop uses (~14 tok/s steady-state on Strix Halo). The
-        // default fallthrough (`model_forward_paged_batched_decode_hidden`) is
-        // the slow generic batched-decode-hidden path (~0.5 tok/s: per-op CPU
-        // readback + per-GDN-layer cat/narrow). `model_forward_paged_last_token_resident`
+        // (#1082) Vulkan single-row decode: route the production serving path
+        // (batching engine -> paged_batched_decode_step, row_count==1) through
+        // the native single-submit resident forward — the same path the bench
+        // loop uses (~14 tok/s steady-state on Strix Halo). The default
+        // fallthrough (`model_forward_paged_batched_decode_hidden`) is the slow
+        // generic batched-decode-hidden path (~0.5 tok/s: per-op CPU readback +
+        // per-GDN-layer cat/narrow). `model_forward_paged_last_token_resident`
         // returns logits via the native CommandBatch path and transparently
-        // falls back to the generic forward on any decline. Restricted to
-        // greedy so the only post-forward work is `greedy_sample(&logits)` (no
-        // borrow of `states[i]`, which `linear_states` holds mutably);
-        // temperature>0 sampling falls through to the generic path. Skipped when
-        // the contiguous-batched path above already produced tokens (row > 1).
+        // falls back to the generic forward on any decline. Greedy AND sampling
+        // are both routed: the row-0 sampling context (seed + generated tokens)
+        // was snapshotted into `vk_row0_sampling` before the `linear_states`
+        // mutable borrow, so the sampler doesn't re-borrow `states[0]` here.
+        // Skipped when the contiguous-batched path above already produced tokens
+        // (row > 1).
         #[cfg(feature = "vulkan")]
-        if sampled.is_none()
-            && row_count == 1
-            && params[0].temperature == 0.0
-            && self.backend.supports_resident_decode()
-        {
+        if sampled.is_none() && row_count == 1 && self.backend.supports_resident_decode() {
             let logits = model_forward_paged_last_token_resident(
                 &*self.backend,
                 &input_tokens,
@@ -2863,7 +2872,17 @@ impl ModelRunner {
                 None,
             )
             .context("vulkan resident single-row decode forward failed")?;
-            sampled = Some(vec![greedy_sample(&logits)?]);
+            let token = if params[0].temperature == 0.0 {
+                greedy_sample(&logits)?
+            } else {
+                let (step_seed, generated) = vk_row0_sampling
+                    .as_ref()
+                    .expect("vk_row0_sampling captured for row_count == 1");
+                let mut row_params = params[0].clone();
+                row_params.seed = *step_seed;
+                sample_with_full_params(&logits, &row_params, generated)?
+            };
+            sampled = Some(vec![token]);
         }
 
         let sampled = if let Some(tokens) = sampled {
