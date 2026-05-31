@@ -913,7 +913,11 @@ impl PagedKvCacheKt {
     /// on `self.fp8`. The head-major input is transposed to token-major
     /// `[new_len, num_kv_heads, head_dim]` before the per-slot writes,
     /// matching the candle reshape exactly.
-    #[cfg(feature = "cuda")]
+    // (#1082 DoD-100) Device-agnostic: the native BF16 paged-KV write is pure
+    // kt ops (squeeze/transpose/contiguous + dim-0 `slice_set`, which has a CPU
+    // path) + host-side slot math (`kiln_core::block`), so it runs on CPU too.
+    // Only the FP8 path is CUDA-only (the E4M3 quant kernel). This restores the
+    // CPU paged forward path the flip's defensive `cfg(cuda)` gate had broken.
     pub fn write(
         &self,
         layer_idx: usize,
@@ -923,13 +927,23 @@ impl PagedKvCacheKt {
         v: &KtTensor,
     ) -> Result<()> {
         if self.fp8 {
-            self.write_fp8(layer_idx, block_table, start_pos, k, v)
+            #[cfg(feature = "cuda")]
+            {
+                self.write_fp8(layer_idx, block_table, start_pos, k, v)
+            }
+            #[cfg(not(feature = "cuda"))]
+            {
+                let _ = (layer_idx, block_table, start_pos, k, v);
+                anyhow::bail!(
+                    "fp8 paged-KV write is CUDA-only (cuda_fp8_quantize_direct); the \
+                     non-CUDA path supports the native BF16 paged-KV write only"
+                )
+            }
         } else {
             self.write_native(layer_idx, block_table, start_pos, k, v)
         }
     }
 
-    #[cfg(feature = "cuda")]
     fn write_native(
         &self,
         layer_idx: usize,
@@ -1099,7 +1113,8 @@ impl PagedKvCacheKt {
     /// `[1, num_kv_heads, new_len, head_dim]` -> contiguous
     /// `[new_len, num_kv_heads, head_dim]` for both k and v. Shared by the
     /// multi-token `write_native` / `write_fp8` paths.
-    #[cfg(feature = "cuda")]
+    /// (#1082 DoD-100) Device-agnostic (pure kt squeeze/transpose/contiguous) —
+    /// ungated so the CPU `write_native` path can call it.
     fn head_major_to_token_major(
         &self,
         k: &KtTensor,
