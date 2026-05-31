@@ -87,6 +87,8 @@ pub mod shaders {
     pub const GDN_IN_PROJ_DECODE_BF16W: &str = shader_path!("gdn_in_proj_decode_bf16w");
     pub const GDN_IN_PROJ_DECODE_BF16W_WIDE: &str =
         shader_path!("gdn_in_proj_decode_bf16w_wide");
+    pub const GDN_IN_PROJ_DECODE_BATCHED_BF16W: &str =
+        shader_path!("gdn_in_proj_decode_batched_bf16w");
     pub const GDN_DECODE_GATES_RECURRENT_RMSNORM: &str =
         shader_path!("gdn_decode_gates_recurrent_rmsnorm");
     pub const L2_NORM_PER_ROW: &str = shader_path!("l2_norm_per_row");
