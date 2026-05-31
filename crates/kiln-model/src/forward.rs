@@ -27994,33 +27994,29 @@ mod tests {
         // Build per-row prefix K/V at each row's actual start_pos so that
         // the batched cache holds divergent K/V prefix lengths. Distinct
         // patterns per row catch any cross-row leakage.
-        // #1082: `patterned_bf16` builds kt tensors, but `PagedKvCache`'s
-        // `write_token_major_native` is candle-typed — bridge the kt prefix
-        // K/V to candle (CUDA copy) for the cache writes below.
-        let to_candle = |t: &Tensor| -> Result<candle_core::Tensor> {
-            kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&t.contiguous()?)
-                .map_err(|e| anyhow::anyhow!("{e}"))
-        };
-        let prefix_k_row0 = to_candle(&patterned_bf16(
+        // #1082: `patterned_bf16` builds kt tensors and `PagedKvCacheKt`'s
+        // `write_token_major_native` takes kt tensors — pass them directly
+        // (no candle bridge) for the cache writes below.
+        let prefix_k_row0 = patterned_bf16(
             &[1, start_positions[0], num_kv_heads, head_dim],
             0.002,
             &device,
-        )?)?;
-        let prefix_v_row0 = to_candle(&patterned_bf16(
+        )?;
+        let prefix_v_row0 = patterned_bf16(
             &[1, start_positions[0], num_kv_heads, head_dim],
             0.003,
             &device,
-        )?)?;
-        let prefix_k_row1 = to_candle(&patterned_bf16(
+        )?;
+        let prefix_k_row1 = patterned_bf16(
             &[1, start_positions[1], num_kv_heads, head_dim],
             0.0021,
             &device,
-        )?)?;
-        let prefix_v_row1 = to_candle(&patterned_bf16(
+        )?;
+        let prefix_v_row1 = patterned_bf16(
             &[1, start_positions[1], num_kv_heads, head_dim],
             0.0031,
             &device,
-        )?)?;
+        )?;
 
         let bt0 = BlockTable { blocks: vec![0] };
         let bt1 = BlockTable { blocks: vec![1] };
