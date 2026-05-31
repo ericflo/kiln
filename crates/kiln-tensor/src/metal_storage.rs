@@ -1704,42 +1704,23 @@ pub fn metal_index_select_dim0(
 /// layout, non-Metal storage, or kernel dispatch error.
 pub fn metal_cast(x: &crate::Tensor, to: DType) -> Result<crate::Tensor> {
     use candle_metal_kernels::metal::MTLResourceOptions;
-    use candle_metal_kernels::BufferOffset;
 
     let from = x.dtype();
-    // Map (from, to) to the float-triple cast kernel name. The
-    // production MSL kernels are `cast_<from>_<to>` (contiguous) —
-    // same names candle's `Tensor::to_dtype` resolves internally.
-    // Integer round-trips stay on the CPU fallback for now (callers'
-    // metal_fwd impl falls through), so we only enumerate the float
-    // triple here.
-    let kernel_name: &'static str = match (from, to) {
-        (DType::F32, DType::F32) => "cast_f32_f32",
-        (DType::F32, DType::BF16) => "cast_f32_bf16",
-        (DType::F32, DType::F16) => "cast_f32_f16",
-        (DType::BF16, DType::F32) => "cast_bf16_f32",
-        (DType::BF16, DType::BF16) => "cast_bf16_bf16",
-        (DType::BF16, DType::F16) => "cast_bf16_f16",
-        (DType::F16, DType::F32) => "cast_f16_f32",
-        (DType::F16, DType::BF16) => "cast_f16_bf16",
-        (DType::F16, DType::F16) => "cast_f16_f16",
-        (a, b) => {
-            return Err(Error::Msg(format!(
-                "metal_cast: unsupported cast pair {a} -> {b} \
-                 (float triple only)"
-            )));
-        }
-    };
-    let from_dtype_size: usize = match from {
-        DType::F32 => 4,
-        DType::BF16 | DType::F16 => 2,
-        _ => unreachable!("cast kernel_name match gates"),
-    };
+    // Float triple only; integer round-trips stay on the CPU fallback
+    // (callers' metal_fwd falls through). `metal_kernels::msl_ty` gates
+    // the supported dtypes.
     let to_dtype_size: usize = match to {
         DType::F32 => 4,
         DType::BF16 | DType::F16 => 2,
-        _ => unreachable!("cast kernel_name match gates"),
+        other => {
+            return Err(Error::Msg(format!(
+                "metal_cast: unsupported target dtype {other} (float triple only)"
+            )));
+        }
     };
+    // Reject unsupported source dtypes up front (mirror of the old match).
+    crate::metal_kernels::msl_ty(from)?;
+    crate::metal_kernels::msl_ty(to)?;
 
     if !x.is_contiguous() {
         return Err(Error::Msg(
@@ -1773,32 +1754,15 @@ pub fn metal_cast(x: &crate::Tensor, to: DType) -> Result<crate::Tensor> {
         })?;
     let out_buffer_arc: Arc<MetalBuffer> = Arc::new(out_buffer);
 
-    let encoder = companion
-        .command_encoder()
-        .map_err(|e| Error::Msg(format!("metal_cast: command_encoder() failed: {e:?}")))?;
-    encoder.set_label("kt_metal_cast");
-
-    let input = BufferOffset {
-        buffer: kt_metal.buffer().as_ref(),
-        offset_in_bytes: 0,
-    };
-
-    candle_metal_kernels::call_cast_contiguous(
-        raw_device,
-        &encoder,
-        companion.kernels(),
-        kernel_name,
-        from_dtype_size,
-        element_count,
-        input,
+    // Kiln-owned MSL cast (replaces candle's call_cast_contiguous).
+    crate::metal_kernels::cast(
+        &companion,
+        kt_metal.buffer().as_ref(),
         out_buffer_arc.as_ref(),
-    )
-    .map_err(|e| {
-        Error::Msg(format!(
-            "metal_cast: call_cast_contiguous({kernel_name}) failed: {e:?}"
-        ))
-    })?;
-    drop(encoder);
+        from,
+        to,
+        element_count,
+    )?;
 
     let out_storage = MetalStorage::from_buffer_kt(raw_device, device_index, to, out_buffer_arc)?;
     let out_storage_arc: crate::Storage = Arc::new(out_storage);

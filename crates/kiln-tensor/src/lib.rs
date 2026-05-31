@@ -55,6 +55,8 @@ mod fp8;
 #[cfg(feature = "metal")]
 mod metal_allocator;
 #[cfg(feature = "metal")]
+mod metal_kernels;
+#[cfg(feature = "metal")]
 mod metal_matmul;
 #[cfg(feature = "metal")]
 mod metal_storage;
