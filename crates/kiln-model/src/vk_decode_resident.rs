@@ -2855,6 +2855,78 @@ pub struct BatchedResidentDecodeMetaBuffers {
     pub block_size: usize,
 }
 
+/// Resident buffers for one batched decode step's hidden input and
+/// per-row RoPE tables.
+pub struct BatchedResidentDecodeStepBuffers {
+    pub input: std::sync::Arc<VulkanBuffer>,
+    pub scratch: std::sync::Arc<VulkanBuffer>,
+    pub rope_cos: std::sync::Arc<VulkanBuffer>,
+    pub rope_sin: std::sync::Arc<VulkanBuffer>,
+    pub batch_size: usize,
+    pub hidden: usize,
+    pub rotary_dim: usize,
+}
+
+/// Prepare resident hidden-input and RoPE buffers for a batched decode
+/// step. All slices are f32 and row-major:
+/// - `hidden_rows`: `[batch_size, hidden]`
+/// - `rope_cos` / `rope_sin`: `[batch_size, rotary_dim / 2]`
+pub fn prepare_batched_resident_decode_step_buffers(
+    backend: &VulkanBackend,
+    hidden_rows: &[f32],
+    batch_size: usize,
+    hidden: usize,
+    rope_cos: &[f32],
+    rope_sin: &[f32],
+    rotary_dim: usize,
+) -> Result<BatchedResidentDecodeStepBuffers> {
+    anyhow::ensure!(
+        batch_size > 0,
+        "batched resident decode step buffers: batch_size must be > 0"
+    );
+    anyhow::ensure!(
+        hidden_rows.len() == batch_size * hidden,
+        "batched resident decode step buffers: hidden row length mismatch"
+    );
+    anyhow::ensure!(
+        rotary_dim % 2 == 0,
+        "batched resident decode step buffers: rotary_dim must be even"
+    );
+    let half_rotary = rotary_dim / 2;
+    anyhow::ensure!(
+        rope_cos.len() == batch_size * half_rotary,
+        "batched resident decode step buffers: rope_cos length mismatch"
+    );
+    anyhow::ensure!(
+        rope_sin.len() == batch_size * half_rotary,
+        "batched resident decode step buffers: rope_sin length mismatch"
+    );
+
+    let hidden_bytes = (hidden_rows.len().max(1) * 4) as u64;
+    let rope_bytes = (rope_cos.len().max(1) * 4) as u64;
+    let input =
+        backend.acquire_resident_scratch_host_visible("native_b_io_a_hv", hidden_bytes)?;
+    let scratch = backend.acquire_resident_scratch("native_b_io_b", hidden_bytes)?;
+    let rope_cos_buf =
+        backend.acquire_resident_scratch_host_visible("native_b_rope_cos_hv", rope_bytes)?;
+    let rope_sin_buf =
+        backend.acquire_resident_scratch_host_visible("native_b_rope_sin_hv", rope_bytes)?;
+
+    input.write_mapped(bytemuck::cast_slice(hidden_rows))?;
+    rope_cos_buf.write_mapped(bytemuck::cast_slice(rope_cos))?;
+    rope_sin_buf.write_mapped(bytemuck::cast_slice(rope_sin))?;
+
+    Ok(BatchedResidentDecodeStepBuffers {
+        input,
+        scratch,
+        rope_cos: rope_cos_buf,
+        rope_sin: rope_sin_buf,
+        batch_size,
+        hidden,
+        rotary_dim,
+    })
+}
+
 /// Flatten per-row block tables and decode positions into resident
 /// metadata buffers consumed by [`submit_transformer_stack_batched_argmax`].
 ///
