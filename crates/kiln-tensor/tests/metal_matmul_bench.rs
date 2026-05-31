@@ -24,14 +24,16 @@ fn bf16_metal(data: &[f32], shape: &[usize], dev: Device) -> Tensor {
 fn time_matmul(m: usize, k: usize, n: usize, iters: usize, dev: Device) -> f64 {
     let a = bf16_metal(&pat(m * k, 1), &[m, k], dev);
     let b = bf16_metal(&pat(k * n, 2), &[k, n], dev);
-    // warmup
+    // warmup (+ sync)
     let _ = ops::matmul(&a, &b).unwrap().to_vec::<half::bf16>().unwrap();
+    // Amortize host readback/sync over  dispatches: queue all kernels,
+    // sync once at the end (Metal retains the output buffers per command-buffer,
+    // so dropped intermediates are safe). Measures GPU kernel time, not the
+    // per-call debug-mode host gather.
     let t = Instant::now();
-    for _ in 0..iters {
-        let out = ops::matmul(&a, &b).unwrap();
-        // force completion via host read of one element
-        let _ = out.to_vec::<half::bf16>().unwrap();
-    }
+    let mut last = None;
+    for _ in 0..iters { last = Some(ops::matmul(&a, &b).unwrap()); }
+    let _ = last.unwrap().to_vec::<half::bf16>().unwrap();
     t.elapsed().as_secs_f64() * 1000.0 / iters as f64
 }
 
@@ -41,9 +43,11 @@ fn bench_matmul_qwen_shapes() {
     let Some(dev) = metal() else { eprintln!("no Metal device; skipping"); return; };
     // (label, M, K, N, iters) — small iters for the (slow) CPU-fallback baseline.
     let cases = [
-        ("decode QKV   M=1   2560x4096", 1usize, 2560usize, 4096usize, 20usize),
-        ("decode gate||up M=1 2560x18432", 1, 2560, 18432, 10),
-        ("lm_head      M=1   2560x152064", 1, 2560, 152064, 3),
+        ("decode QKV   M=1   2560x4096", 1usize, 2560usize, 4096usize, 50usize),
+        ("prefill QKV  M=256 2560x4096", 256, 2560, 4096, 30),
+        ("prefill gate||up M=256 2560x18432", 256, 2560, 18432, 20),
+        ("prefill QKV  M=512 2560x4096", 512, 2560, 4096, 20),
+        ("lm_head      M=1   2560x152064", 1, 2560, 152064, 20),
     ];
     println!("\n=== Metal matmul microbench (ops::matmul, BF16) ===");
     for (label, m, k, n, iters) in cases {

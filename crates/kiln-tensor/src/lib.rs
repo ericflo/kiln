@@ -120,6 +120,12 @@ pub use fp8::{
 pub use metal_allocator::MetalAllocator;
 #[cfg(feature = "metal")]
 pub use metal_matmul::metal_matmul;
+#[doc(hidden)]
+#[cfg(feature = "metal")]
+pub use metal_matmul::{
+    bench_gemm_cfg, bench_mlx_reference, bench_steel_cfg, gemm_pool_bytes, gen_gemm_msl,
+    gen_steel_msl, steel_cfg_valid, GemmCfg,
+};
 #[cfg(feature = "metal")]
 pub use metal_storage::{
     host_to_metal_copy, metal_activation_unary, metal_cast, metal_elementwise_binary,
