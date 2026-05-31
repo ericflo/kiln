@@ -55,6 +55,8 @@ mod fp8;
 #[cfg(feature = "metal")]
 mod metal_allocator;
 #[cfg(feature = "metal")]
+mod metal_matmul;
+#[cfg(feature = "metal")]
 mod metal_storage;
 #[cfg(feature = "metal")]
 pub mod metal_types;
@@ -116,6 +118,8 @@ pub use fp8::{
 };
 #[cfg(feature = "metal")]
 pub use metal_allocator::MetalAllocator;
+#[cfg(feature = "metal")]
+pub use metal_matmul::metal_matmul;
 #[cfg(feature = "metal")]
 pub use metal_storage::{
     host_to_metal_copy, metal_activation_unary, metal_cast, metal_elementwise_binary,

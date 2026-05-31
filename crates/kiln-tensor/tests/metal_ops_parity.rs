@@ -307,3 +307,47 @@ fn sdpa_last_axis_f32() {
         assert!(d < 1e-3, "vector sdpa f32 (q_seq=1 decode, non-causal) max|Δ|={d}");
     }
 }
+
+/// kiln matrix-core GEMM (`metal_matmul` via `MatmulOp::metal_fwd`) vs the kt
+/// CPU matmul reference, at Qwen3.5-4B shapes + M-tail/edge cases (#1082).
+/// This is the on-M1 correctness gate for the simdgroup_float8x8 GEMM that
+/// replaced the prefill/bs>1 CPU host-fallback. Running it also compiles the
+/// kiln_gemm_bf16 MSL on the real Metal compiler.
+#[test]
+fn matmul_matrix_core_f32_parity() {
+    let Some(dev) = metal() else { eprintln!("no Metal device; skipping"); return; };
+    // (M, K, N): Qwen projections/MLP + M-tail (not mult of tile=64) + M=1.
+    let cases = [
+        (16usize, 256usize, 256usize),   // small, clean
+        (17, 2560, 256),                 // M-tail (17 % 64 != 0), Qwen K
+        (64, 2560, 4096),                // prefill QKV-ish
+        (8, 2560, 18432),                // gate||up wide-N
+        (1, 2560, 4096),                 // M=1 through the GEMM
+        (100, 512, 2560),                // M not mult of 64, down-proj-ish
+    ];
+    for (m, k, n) in cases {
+        let a = pattern(m * k, 100 + m as u64);
+        let b = pattern(k * n, 200 + n as u64);
+        // BF16 on both CPU and Metal from identical data.
+        let a_cpu = ops::cast(&Tensor::from_vec(a.clone(), vec![m, k]).unwrap(), DType::BF16).unwrap();
+        let b_cpu = ops::cast(&Tensor::from_vec(b.clone(), vec![k, n]).unwrap(), DType::BF16).unwrap();
+        let a_met = ops::cast(&Tensor::from_vec_on(dev, a, vec![m, k]).unwrap(), DType::BF16).unwrap();
+        let b_met = ops::cast(&Tensor::from_vec_on(dev, b, vec![k, n]).unwrap(), DType::BF16).unwrap();
+
+        // CPU reference (matmul cpu_fwd) and Metal (matmul metal_fwd -> kiln GEMM).
+        let want_t = ops::matmul(&a_cpu, &b_cpu).unwrap();
+        let got_t = ops::matmul(&a_met, &b_met).unwrap();
+        assert_eq!(got_t.device(), dev, "metal matmul must stay on Metal");
+        assert_eq!(got_t.shape().to_vec(), vec![m, n], "output shape");
+
+        let want: Vec<f32> = ops::cast(&want_t, DType::F32).unwrap().to_vec::<f32>().unwrap();
+        let got: Vec<f32> = ops::cast(&got_t, DType::F32).unwrap().to_vec::<f32>().unwrap();
+        let (d, mref) = {
+            let mut md = 0.0f32; let mut mr = 0.0f32;
+            for (g, w) in got.iter().zip(&want) { md = md.max((g - w).abs()); mr = mr.max(w.abs()); }
+            (md, mr)
+        };
+        // BF16 inputs + F32 accumulate over K; bound relative to result magnitude.
+        assert!(d < 0.02 * mref.max(1.0), "matmul [{m},{k}]x[{k},{n}] max|Δ|={d} (ref max {mref})");
+    }
+}

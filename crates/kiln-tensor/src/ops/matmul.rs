@@ -134,6 +134,23 @@ impl DeviceOp2 for MatmulOp {
         Ok(Some(crate::cuda_matmul(a, b)?))
     }
 
+    #[cfg(feature = "metal")]
+    fn metal_fwd(&self, a: &Tensor, b: &Tensor) -> Result<Option<Tensor>> {
+        // #1082: route compute-bound Metal matmul through the kiln-owned
+        // matrix-core (simdgroup_float8x8) GEMM instead of the dispatch2 host
+        // round-trip (which ran the GEMM on the CPU). BF16-only for now — the
+        // production decode/prefill dtype; F16/F32 fall through to the CPU
+        // reference. Contiguous-only (same contract as cuda_fwd).
+        if a.dtype() != DType::BF16 || b.dtype() != DType::BF16 {
+            return Ok(None);
+        }
+        if !a.is_contiguous() || !b.is_contiguous() {
+            return Ok(None);
+        }
+        validate(a, b)?;
+        Ok(Some(crate::metal_matmul(a, b)?))
+    }
+
     fn bwd(&self) -> Option<Box<dyn BackwardOp>> {
         None
     }
