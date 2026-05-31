@@ -28,11 +28,6 @@ pub mod packed_weight_registry;
 pub mod paged_kv_cache_kt;
 pub mod quantized;
 pub mod qwen35_shapes;
-// (#1082) candle-typed glue for the rmsnorm/rope/sigmoid-mul/lora/conv1d
-// CUDA kernels, relocated here so `kiln-rmsnorm-kernel` can drop candle.
-// CUDA-only: uses candle CUDA storage + the kernel crate's FFI symbols.
-#[cfg(feature = "cuda")]
-pub mod rmsnorm_candle_shim;
 pub mod sampling;
 pub mod speculative;
 #[cfg(feature = "cuda")]

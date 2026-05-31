@@ -2133,9 +2133,9 @@ pub fn try_tape_causal_conv1d_cuda(
 /// Candle-composite tape backward for the GDN PREFILL causal depthwise conv1d
 /// (`forward::causal_conv1d_prefill`, the `[B, C, T]` candle path the training
 /// forward takes when `gdn_forward_only_fastpaths` is OFF). Wraps the proven
-/// CUDA bwd-input kernel
-/// [`crate::rmsnorm_candle_shim::causal_depthwise_conv1d_f32_bwd_input`] (the SAME
-/// kernel the eager `cuda_train.rs` GDN backward uses), handling the
+/// CUDA bwd-input kernel `causal_depthwise_conv1d_f32_bwd_input` (the kt kernel
+/// in `kiln-rmsnorm-kernel`, the SAME kernel the eager `cuda_train.rs` GDN
+/// backward uses), handling the
 /// `[B, C, T]` ↔ `[rows, channels]` layout transform.
 ///
 /// # Why a candle composite (not the existing `try_tape_causal_conv1d_cuda`)
