@@ -101,14 +101,9 @@ fn cuda_optimizer_tensors_supported_for_kt(tensors: &[&kiln_tensor::Tensor]) -> 
 
 #[derive(Debug)]
 pub struct CudaBackend {
-    /// Original candle CUDA device. Kept alongside the kt-typed device so
-    /// the many trait methods that still consume `candle_core::Tensor`
-    /// parameters can pass through to candle without re-bridging. Phase 7
-    /// of #1082 moved the `BackendRuntime::device()` accessor to return
-    /// `kiln_tensor::Device` by value; the candle device is now internal.
-    device: candle_core::Device,
-    /// `kiln_tensor::Device` form of `device`, cached at construction so
-    /// the hot trait accessor does not bridge per call. (#1082)
+    /// The kt CUDA device this backend was constructed for. (#1082 DoD-100
+    /// step 4: the formerly-cached candle `device` field was dropped — it had
+    /// zero reads; `new` now takes a `kiln_tensor::Device` directly.)
     device_kt: kiln_tensor::Device,
     /// Cached at construction: reading env vars per decode step × 24 GDN layers
     /// shows up in decode NVTX captures. Env vars don't change at runtime.
@@ -179,8 +174,11 @@ pub struct CudaBackend {
 }
 
 impl CudaBackend {
-    pub fn new(device: candle_core::Device) -> Self {
-        debug_assert!(device.is_cuda(), "CudaBackend created on non-CUDA device");
+    pub fn new(device: kiln_tensor::Device) -> Self {
+        debug_assert!(
+            matches!(device, kiln_tensor::Device::Cuda(_)),
+            "CudaBackend created on non-CUDA device"
+        );
         let gdn_enabled = std::env::var("KILN_DISABLE_GDN_KERNEL").is_err();
         let gdn_gates_enabled =
             gdn_enabled && std::env::var("KILN_DISABLE_FUSED_GDN_GATES").is_err();
@@ -219,9 +217,8 @@ impl CudaBackend {
         let lora_decode_add_enabled = std::env::var("KILN_DISABLE_CUDA_LORA_DECODE_ADD").is_err();
         let gdn_full_chunk_forward_multiblock_enabled = gdn_enabled
             && std::env::var("KILN_DISABLE_GDN_FULL_CHUNK_FORWARD_MULTIBLOCK").is_err();
-        let device_kt = kiln_kt_bridge::kt_device_from_candle(&device);
+        let device_kt = device;
         Self {
-            device,
             device_kt,
             gdn_enabled,
             gdn_gates_enabled,
@@ -1787,7 +1784,7 @@ mod tests {
     #[test]
     fn cuda_sgd_step_resident_round_trip_f32() -> Result<()> {
         use kiln_tensor::Device as KtDevice;
-        let backend = CudaBackend::new(candle_core::Device::Cpu);
+        let backend = CudaBackend::new(kiln_tensor::Device::Cpu);
         let Some(param) = kt_cuda_f32(&[1.0f32, -2.0, 0.5, 3.0])? else {
             eprintln!("CUDA unavailable, skipping cuda_sgd_step_resident_round_trip_f32");
             return Ok(());
@@ -1811,7 +1808,7 @@ mod tests {
     #[test]
     fn cuda_adamw_step_resident_round_trip_f32() -> Result<()> {
         use kiln_tensor::Device as KtDevice;
-        let backend = CudaBackend::new(candle_core::Device::Cpu);
+        let backend = CudaBackend::new(kiln_tensor::Device::Cpu);
         let Some(param) = kt_cuda_f32(&[1.0f32, -2.0, 0.5, 3.0])? else {
             eprintln!("CUDA unavailable, skipping cuda_adamw_step_resident_round_trip_f32");
             return Ok(());
@@ -1862,7 +1859,7 @@ mod tests {
     #[test]
     fn cuda_sgd_and_adamw_resident_round_trip_bf16() -> Result<()> {
         use kiln_tensor::{DType as KtDType, Device as KtDevice};
-        let backend = CudaBackend::new(candle_core::Device::Cpu);
+        let backend = CudaBackend::new(kiln_tensor::Device::Cpu);
 
         // Build host BF16 then move to CUDA; skip when no device.
         let mk_bf16 = |vals: &[f32]| -> Result<Option<kiln_tensor::Tensor>> {
@@ -1996,7 +1993,7 @@ mod tests {
 
     #[test]
     fn cuda_linear_prefill_apply_matches_reference_matmul() -> Result<()> {
-        let backend = CudaBackend::new(candle_core::Device::Cpu);
+        let backend = CudaBackend::new(kiln_tensor::Device::Cpu);
 
         let Some(x) = kt_cuda_2d(&[1.0f32, -2.0, 0.5, 3.0, 4.0, -1.0], [2, 3])? else {
             eprintln!("CUDA unavailable, skipping cuda_linear_prefill_apply_matches_reference_matmul");
@@ -2021,7 +2018,7 @@ mod tests {
 
     #[test]
     fn cuda_linear_prefill_apply_offset_matches_reference_chunk() -> Result<()> {
-        let backend = CudaBackend::new(candle_core::Device::Cpu);
+        let backend = CudaBackend::new(kiln_tensor::Device::Cpu);
 
         let Some(x) = kt_cuda_2d(&[1.0f32, -2.0, 0.5, 3.0, 4.0, -1.0], [2, 3])? else {
             eprintln!("CUDA unavailable, skipping cuda_linear_prefill_apply_offset_matches_reference_chunk");
@@ -2050,7 +2047,7 @@ mod tests {
 
     #[test]
     fn cuda_registered_lora_delta_matches_reference() -> Result<()> {
-        let backend = CudaBackend::new(candle_core::Device::Cpu);
+        let backend = CudaBackend::new(kiln_tensor::Device::Cpu);
 
         let Some(x) = kt_cuda_2d(&[0.5f32, -1.0, 2.0, 1.5, 0.25, -0.75], [2, 3])? else {
             eprintln!("CUDA unavailable, skipping cuda_registered_lora_delta_matches_reference");

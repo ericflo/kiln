@@ -25487,12 +25487,10 @@ mod tests {
     /// Tests all run on `Device::Cpu`, so the `CpuBackend` (all kernel methods
     /// return `Ok(None)`) is the right dispatch target.
     fn test_backend(device: &Device) -> CpuBackend {
-        // #1082: `device` is now a kt `Device`; `CpuBackend::new` still takes a
-        // candle `Device` (it caches both forms). Bridge kt→candle. On CPU this
-        // is a trivial mapping.
-        let candle_device = kiln_kt_bridge::candle_device_from_kt(device)
-            .expect("kt→candle device bridge for test_backend");
-        CpuBackend::new(candle_device)
+        // #1082 DoD-100 step 4: `CpuBackend::new` now takes a kt `Device`
+        // directly (the candle bridge was dropped). `Device` here is the kt
+        // alias post-flip, and kt `Device` is `Copy`.
+        CpuBackend::new(*device)
     }
 
     #[derive(Debug)]

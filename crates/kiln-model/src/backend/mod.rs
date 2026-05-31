@@ -1225,23 +1225,11 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
 /// device, so we always pass a CPU device to `VulkanBackend` and let it
 /// manage its own `vk::Device` internally.
 pub fn for_device(device: &candle_core::Device) -> Arc<dyn BackendRuntime> {
-    match device {
-        #[cfg(feature = "cuda")]
-        candle_core::Device::Cuda(_) => Arc::new(cuda::CudaBackend::new(device.clone())),
-        #[cfg(feature = "metal")]
-        candle_core::Device::Metal(_) => Arc::new(metal::MetalBackend::new(device.clone())),
-        _ => {
-            // Vulkan: candle-core has no candle_core::Device::Vulkan, so we detect at runtime
-            #[cfg(feature = "vulkan")]
-            {
-                if vulkan::vulkan_is_available() {
-                    mark_vulkan_active();
-                    return Arc::new(vulkan::VulkanBackend::new(device.clone()));
-                }
-            }
-            Arc::new(cpu::CpuBackend::new(device.clone()))
-        }
-    }
+    // (#1082 DoD-100 step 4) Candle-typed compat shim for the remaining
+    // candle-device callers (the metal dispatch path + opd/test harnesses).
+    // Bridges to the kt-native `for_device_kt`, which is the production
+    // dispatcher and is candle-free on a pure-CUDA build.
+    for_device_kt(&kiln_kt_bridge::kt_device_from_candle(device))
 }
 
 /// kt-typed parallel entry to [`for_device`] (#1082 Tier 3).
@@ -1271,18 +1259,33 @@ pub fn for_device(device: &candle_core::Device) -> Arc<dyn BackendRuntime> {
 /// dependency — multi-backend builds (Metal, Vulkan, CPU) of
 /// kiln-server can call this entry without `--features cuda`. (#1082)
 pub fn for_device_kt(device: &kiln_tensor::Device) -> Arc<dyn BackendRuntime> {
-    // Vulkan goes through the candle-CPU sentinel path so the runtime
-    // detection inside `for_device` runs unchanged.
-    if matches!(device, kiln_tensor::Device::Vulkan(_)) {
-        return for_device(&candle_core::Device::Cpu);
-    }
-    match kiln_kt_bridge::candle_device_from_kt(device) {
-        Ok(cd) => for_device(&cd),
-        Err(_) => {
-            // Unmappable kt candle_core::Device (e.g. Metal without the candle metal
-            // feature). Fall back to the candle CPU path; that matches
-            // `for_device`'s default arm and keeps the function total.
-            for_device(&candle_core::Device::Cpu)
+    // (#1082 DoD-100 step 4) kt-native dispatcher. On a pure-CUDA build this
+    // references NO candle types: the Cuda arm constructs `CudaBackend` from
+    // the kt device directly, and the `_` arm builds a kt-typed `CpuBackend`.
+    // The metal/vulkan arms are cfg-gated (out of the cuda build) and still
+    // bridge to candle for those backends' candle-typed constructors.
+    match device {
+        #[cfg(feature = "cuda")]
+        kiln_tensor::Device::Cuda(_) => Arc::new(cuda::CudaBackend::new(*device)),
+        #[cfg(feature = "metal")]
+        kiln_tensor::Device::Metal(_) => {
+            // MetalBackend::new still takes a candle Device; bridge (metal-only).
+            let cd =
+                kiln_kt_bridge::candle_device_from_kt(device).unwrap_or(candle_core::Device::Cpu);
+            Arc::new(metal::MetalBackend::new(cd))
+        }
+        _ => {
+            // Vulkan is detected at runtime (kt has a Vulkan variant but the
+            // VulkanBackend manages its own vk::Device, so it takes a candle
+            // CPU sentinel). CPU/unmapped fall through to the kt CpuBackend.
+            #[cfg(feature = "vulkan")]
+            {
+                if vulkan::vulkan_is_available() {
+                    mark_vulkan_active();
+                    return Arc::new(vulkan::VulkanBackend::new(candle_core::Device::Cpu));
+                }
+            }
+            Arc::new(cpu::CpuBackend::new(kiln_tensor::Device::Cpu))
         }
     }
 }
@@ -1306,7 +1309,7 @@ mod tests {
         // every non-Vulkan backend continues to route through the
         // unchanged `model_forward_paged_last_token*` path — the
         // contract pinned by gate (c) of docs/vk_resident_decode_plan.md.
-        let cpu = cpu::CpuBackend::new(candle_core::Device::Cpu);
+        let cpu = cpu::CpuBackend::new(kiln_tensor::Device::Cpu);
         assert!(
             !cpu.supports_resident_decode(),
             "CPU backend must decline resident decode so non-Vulkan call sites \
@@ -1323,7 +1326,7 @@ mod tests {
             Ok(d) => d,
             Err(_) => return, // No CUDA at test time — skip.
         };
-        let cuda = cuda::CudaBackend::new(device);
+        let cuda = cuda::CudaBackend::new(kiln_kt_bridge::kt_device_from_candle(&device));
         assert!(
             !cuda.supports_resident_decode(),
             "CUDA backend must decline resident decode; gate (c) requires CUDA path unchanged"
@@ -1340,7 +1343,7 @@ mod tests {
             Ok(d) => d,
             Err(_) => return,
         };
-        let cuda = cuda::CudaBackend::new(device);
+        let cuda = cuda::CudaBackend::new(kiln_kt_bridge::kt_device_from_candle(&device));
         assert_eq!(cuda.device(), kiln_tensor::Device::Cuda(0));
     }
 
@@ -1349,7 +1352,7 @@ mod tests {
         // Mirrors the CUDA assertion above for the always-available CPU
         // path. Confirms the trait surface stayed kt-typed even on the
         // portable fallback. (#1082)
-        let cpu = cpu::CpuBackend::new(candle_core::Device::Cpu);
+        let cpu = cpu::CpuBackend::new(kiln_tensor::Device::Cpu);
         assert_eq!(cpu.device(), kiln_tensor::Device::Cpu);
     }
 

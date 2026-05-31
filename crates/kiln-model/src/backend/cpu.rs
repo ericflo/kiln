@@ -7,29 +7,26 @@ use super::BackendRuntime;
 
 #[derive(Debug)]
 pub struct CpuBackend {
-    /// Original candle device the backend was constructed for. Retained
-    /// for kernel trait methods that still take `candle_core::Tensor`
-    /// parameters and may need to compare against the device.
-    device: candle_core::Device,
-    /// `kiln_tensor::Device` form of the same device. Returned by the
-    /// `BackendRuntime::device()` trait method. Cached at construction so
-    /// the hot accessor does not bridge on every call. (#1082)
+    /// The kt device this backend was constructed for. Returned by the
+    /// `BackendRuntime::device()` trait method. (#1082 DoD-100 step 4: the
+    /// formerly-cached candle `device` field was dropped — `new` now takes a
+    /// `kiln_tensor::Device` directly and `name()` matches on it.)
     device_kt: kiln_tensor::Device,
 }
 
 impl CpuBackend {
-    pub fn new(device: candle_core::Device) -> Self {
-        let device_kt = kiln_kt_bridge::kt_device_from_candle(&device);
-        Self { device, device_kt }
+    pub fn new(device: kiln_tensor::Device) -> Self {
+        Self { device_kt: device }
     }
 }
 
 impl BackendRuntime for CpuBackend {
     fn name(&self) -> &'static str {
-        match self.device {
-            candle_core::Device::Cpu => "cpu",
-            candle_core::Device::Metal(_) => "metal-portable",
-            candle_core::Device::Cuda(_) => "cuda-portable",
+        match self.device_kt {
+            kiln_tensor::Device::Cpu => "cpu",
+            kiln_tensor::Device::Metal(_) => "metal-portable",
+            kiln_tensor::Device::Cuda(_) => "cuda-portable",
+            kiln_tensor::Device::Vulkan(_) => "vulkan-portable",
         }
     }
 

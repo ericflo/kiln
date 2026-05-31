@@ -2200,7 +2200,7 @@ pub fn opd_train(
     let device_kt = weights.embed_tokens.device();
     let device = kiln_kt_bridge::candle_device_from_kt(&device_kt)
         .map_err(|e| anyhow!("opd_train: kt -> candle device: {e}"))?;
-    let backend_rt = backend::for_device(&device);
+    let backend_rt = backend::for_device_kt(&device_kt);
 
     // Cache VRAM + base-model footprint estimate for the per-step
     // gradient-checkpointing auto-tune below. OPD's input_ids length
