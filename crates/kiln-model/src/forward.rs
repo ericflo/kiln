@@ -17548,18 +17548,12 @@ pub fn gqa_attention_pre_o(
             "kv_cache_update",
             seq_len,
         )?;
-        // #1082: the legacy contiguous `KvCache` stores candle tensors and its
-        // `update` is candle-typed. Bridge the kt K/V in, then bring the full
-        // cached K/V back to kt for the kt SDPA path below.
-        let k_c = kt_logits_to_candle(&k).context("KV cache update kt->candle k")?;
-        let v_c = kt_logits_to_candle(&v).context("KV cache update kt->candle v")?;
-        let (full_k_c, full_v_c) = cache
-            .update(full_attn_layer_idx, &k_c, &v_c)
+        // #1082: the contiguous `KvCache` is now kt-native (token-major
+        // storage, kt `slice_set`/`narrow`). K/V flow straight through — no
+        // candle bridge.
+        let (full_k, full_v) = cache
+            .update(full_attn_layer_idx, &k, &v)
             .context("KV cache update failed")?;
-        let full_k =
-            candle_to_kt_activation(&full_k_c).context("KV cache update candle->kt full_k")?;
-        let full_v =
-            candle_to_kt_activation(&full_v_c).context("KV cache update candle->kt full_v")?;
         finish_full_attn_stage_profile(
             profile_device,
             profile_context,
@@ -22197,6 +22191,12 @@ pub fn model_forward_kt(
 /// seams take/return kt, every call site here threads kt directly and this
 /// helper is deleted. CUDA-only copy; the non-CUDA arm errors at runtime since
 /// production decode is CUDA.
+///
+/// #1082: now `#[cfg(feature = "vulkan")]` — the CUDA decode path is fully
+/// kt-native (the last cuda caller, the contiguous-`KvCache` update bridge,
+/// is gone), so the only remaining callers are the vulkan-resident decode /
+/// backend seams the Vulkan agent owns. Out of the cuda build entirely.
+#[cfg(feature = "vulkan")]
 pub(crate) fn kt_logits_to_candle(logits: &Tensor) -> Result<candle_core::Tensor> {
     let contig;
     let lc = if logits.is_contiguous() {
@@ -22226,6 +22226,11 @@ pub(crate) fn kt_logits_to_candle(logits: &Tensor) -> Result<candle_core::Tensor
 /// candle seams (`try_tape_*` adapters, `BackendRuntime` trait, candle
 /// composites) still return. Deleted once those seams are kt-native. CUDA-only
 /// copy; non-CUDA errors at runtime.
+///
+/// #1082: now `#[cfg(feature = "vulkan")]` — see [`kt_logits_to_candle`]; the
+/// cuda decode path no longer round-trips through candle, so this bridge is
+/// vulkan-only.
+#[cfg(feature = "vulkan")]
 pub(crate) fn candle_to_kt_activation(t: &candle_core::Tensor) -> Result<Tensor> {
     // #1082 CP-4: if `t` was produced by a tape adapter / kt→candle bridge in
     // the active tape scope (registered via `retain_output_for_chaining`),
@@ -28358,8 +28363,6 @@ mod tests {
         // it directly and the backend dispatch goes through the kt entry
         // point. `CudaGraphRunner::new` is candle-typed, so bridge once.
         let device_kt = device;
-        let candle_device = kiln_kt_bridge::candle_device_from_kt(&device_kt)
-            .context("bridge kt device to candle for CudaGraphRunner")?;
         let backend = crate::backend::for_device_kt(&device);
 
         // Same synthetic 1-layer full-attention fixture as the C3 test.
@@ -28453,7 +28456,7 @@ mod tests {
         unsafe { std::env::set_var("KILN_CUDA_GRAPHS", "true") };
 
         let result = (|| -> Result<()> {
-            let mut runner = crate::cuda_graph::CudaGraphRunner::new(&candle_device, true);
+            let mut runner = crate::cuda_graph::CudaGraphRunner::new(&device_kt, true);
             assert!(
                 runner.is_enabled(),
                 "CUDA graph runner must be enabled on a CUDA device"

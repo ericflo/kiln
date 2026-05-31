@@ -7,22 +7,44 @@
 //! Supports optional FP8 (E4M3FN) quantization for ~2x memory savings.
 //! When enabled, K/V values are quantized to 8-bit on write and dequantized
 //! back to the compute dtype on read.
+//!
+//! # CUDA-native, token-major layout (#1082)
+//!
+//! The cache is `kiln_tensor` (`kt`)-native — no candle. K/V are stored
+//! **token-major** `[max_seq_len, num_kv_heads, head_dim]` (sequence is the
+//! outermost dim). That layout is what makes the per-step append a single
+//! contiguous dim-0 [`kiln_tensor::Tensor::slice_set`] — one device→device
+//! memcpy of just the new rows (`O(new_len)`, no realloc), kt's only supported
+//! `slice_set` dim and the coalesced one. The old candle path stored
+//! head-major `[1, nkv, max, hd]` and wrote along dim 2; that is a candle-ism
+//! (dim-2 in-place writes are strided and aren't expressible in kt). Going
+//! token-major is the "proper for the engine" choice, not a candle-shaped
+//! port: writes are fully coalesced and the buffer is never reallocated.
+//!
+//! The public [`KvCache::update`] contract is unchanged — callers still pass
+//! and receive head-major `[1, nkv, len, hd]`. The token-major ↔ head-major
+//! transposes happen at the cache boundary (`head_major_to_token_major` /
+//! `token_major_to_head_major`); the read transpose is the only added copy
+//! versus the old strided-view narrow, and it is `O(end · nkv · hd)` — smaller
+//! than the GQA head-expansion copy the attention path already pays downstream.
 
 use anyhow::{Context, Result};
+use kiln_tensor::{DType, Device, Tensor};
 
 use crate::fp8;
 
 /// Per-layer KV cache for full-attention layers.
 ///
-/// Each full-attention layer gets a pair of pre-allocated tensors
-/// `[1, num_kv_heads, max_seq_len, head_dim]` that are progressively filled
-/// as tokens are processed. Only full-attention layers need KV cache;
-/// linear attention (Gated DeltaNet) layers maintain O(1) recurrent state.
+/// Each full-attention layer gets a pair of pre-allocated token-major tensors
+/// `[max_seq_len, num_kv_heads, head_dim]` that are progressively filled as
+/// tokens are processed. Only full-attention layers need KV cache; linear
+/// attention (Gated DeltaNet) layers maintain O(1) recurrent state.
 pub struct KvCache {
-    /// Per full-attention layer: (k_cache, v_cache) tensors.
+    /// Per full-attention layer: (k_cache, v_cache), token-major
+    /// `[max_seq_len, num_kv_heads, head_dim]`.
     /// When `fp8` is false: dtype matches `compute_dtype`.
     /// When `fp8` is true: dtype is U8 (FP8 E4M3 bit patterns).
-    layers: Vec<(candle_core::Tensor, candle_core::Tensor)>,
+    layers: Vec<(Tensor, Tensor)>,
     /// Current sequence length (number of cached positions).
     seq_len: usize,
     /// Maximum sequence length the cache can hold.
@@ -32,8 +54,8 @@ pub struct KvCache {
     /// Per-layer FP8 scale factors: (k_scale, v_scale).
     /// Only used when `fp8` is true. Updated on each write.
     fp8_scales: Vec<(f32, f32)>,
-    /// The original compute dtype (e.g. BF16) for dequantization.
-    compute_dtype: candle_core::DType,
+    /// The compute dtype (e.g. BF16) for the returned K/V (and dequant target).
+    compute_dtype: DType,
 }
 
 impl KvCache {
@@ -50,8 +72,8 @@ impl KvCache {
         num_kv_heads: usize,
         head_dim: usize,
         max_seq_len: usize,
-        dtype: candle_core::DType,
-        device: &candle_core::Device,
+        dtype: DType,
+        device: &Device,
     ) -> Result<Self> {
         Self::new_with_fp8(
             num_full_attn_layers,
@@ -64,110 +86,82 @@ impl KvCache {
         )
     }
 
-    /// kt-typed parallel entry to [`Self::new`] (#1082 Tier 3).
+    /// kt-typed alias of [`Self::new`] (#1082).
     ///
-    /// Takes `kiln_tensor::DType` + `&kiln_tensor::Device` instead of
-    /// the candle equivalents, bridges at the boundary, and delegates
-    /// to the existing candle-typed constructor. The returned
-    /// `KvCache` still owns candle Tensors internally — the kt
-    /// typing applies only to the public surface so callers in
-    /// kiln-server / kiln-model can build a contiguous KV cache
-    /// without importing `candle_core::DType` + `candle_core::Device`
-    /// at the call site.
-    ///
-    /// Errors when the kt candle_core::Device has no candle equivalent on this
-    /// build (e.g. `Vulkan(_)`; the kiln-server Vulkan path uses a
-    /// CPU candle device by convention) or when the kt candle_core::DType cannot
-    /// be represented in candle (e.g. `F8E4M3` — use
-    /// [`Self::new_with_fp8_kt`] with the dequant dtype + `fp8=true`).
-    ///
-    /// Matches the shape of `PagedKvCacheKt::new`: same kt -> candle
-    /// boundary, same delegation pattern. See that constructor for
-    /// the rationale on why this minimum-effort wrapper unblocks
-    /// candle-import removal at upstream call sites today even
-    /// though the cache's interior storage remains candle. (#1082)
+    /// Identical to [`Self::new`] now that the cache is kt-native (both take
+    /// `kiln_tensor::DType` + `&kiln_tensor::Device`). Retained so the
+    /// kiln-server / kiln-model call sites that use `new_kt` keep compiling
+    /// without a churn pass.
     pub fn new_kt(
         num_full_attn_layers: usize,
         num_kv_heads: usize,
         head_dim: usize,
         max_seq_len: usize,
-        dtype: kiln_tensor::DType,
-        device: &kiln_tensor::Device,
+        dtype: DType,
+        device: &Device,
     ) -> Result<Self> {
-        let candle_dtype = kiln_kt_bridge::kt_dtype_to_candle(dtype)
-            .map_err(|e| anyhow::anyhow!("KvCache::new_kt dtype: {e}"))?;
-        let candle_device = kiln_kt_bridge::candle_device_from_kt(device)
-            .map_err(|e| anyhow::anyhow!("KvCache::new_kt device: {e}"))?;
         Self::new(
             num_full_attn_layers,
             num_kv_heads,
             head_dim,
             max_seq_len,
-            candle_dtype,
-            &candle_device,
+            dtype,
+            device,
         )
     }
 
-    /// kt-typed parallel entry to [`Self::new_with_fp8`] (#1082).
+    /// kt-typed alias of [`Self::new_with_fp8`] (#1082).
     ///
-    /// Same shape as [`Self::new_kt`]: takes `kiln_tensor::DType` +
-    /// `&kiln_tensor::Device`, bridges at the boundary, and delegates
-    /// to the candle-typed constructor. The `fp8` flag passes
-    /// through unchanged.
-    ///
-    /// See [`Self::new_kt`] for the error / Vulkan-CPU-placeholder
-    /// semantics; they apply here verbatim. Mirrors
-    /// `PagedKvCacheKt::new_with_fp8` for the contiguous
-    /// cache shape. (#1082)
+    /// Identical to [`Self::new_with_fp8`] now that the cache is kt-native.
+    /// Retained for call-site compatibility (see [`Self::new_kt`]).
     #[allow(clippy::too_many_arguments)]
     pub fn new_with_fp8_kt(
         num_full_attn_layers: usize,
         num_kv_heads: usize,
         head_dim: usize,
         max_seq_len: usize,
-        dtype: kiln_tensor::DType,
-        device: &kiln_tensor::Device,
+        dtype: DType,
+        device: &Device,
         fp8: bool,
     ) -> Result<Self> {
-        let candle_dtype = kiln_kt_bridge::kt_dtype_to_candle(dtype)
-            .map_err(|e| anyhow::anyhow!("KvCache::new_with_fp8_kt dtype: {e}"))?;
-        let candle_device = kiln_kt_bridge::candle_device_from_kt(device)
-            .map_err(|e| anyhow::anyhow!("KvCache::new_with_fp8_kt device: {e}"))?;
         Self::new_with_fp8(
             num_full_attn_layers,
             num_kv_heads,
             head_dim,
             max_seq_len,
-            candle_dtype,
-            &candle_device,
+            dtype,
+            device,
             fp8,
         )
     }
 
     /// Create a new KV cache with optional FP8 quantization.
+    #[allow(clippy::too_many_arguments)]
     pub fn new_with_fp8(
         num_full_attn_layers: usize,
         num_kv_heads: usize,
         head_dim: usize,
         max_seq_len: usize,
-        dtype: candle_core::DType,
-        device: &candle_core::Device,
+        dtype: DType,
+        device: &Device,
         fp8: bool,
     ) -> Result<Self> {
         let dtype = cpu_compatible_compute_dtype(dtype, device);
-        let storage_dtype = if fp8 { candle_core::DType::U8 } else { dtype };
+        let storage_dtype = if fp8 { DType::U8 } else { dtype };
         let mut layers = Vec::with_capacity(num_full_attn_layers);
         for i in 0..num_full_attn_layers {
-            let k = candle_core::Tensor::zeros(
-                (1, num_kv_heads, max_seq_len, head_dim),
+            // Token-major: sequence outermost so the per-step append is a
+            // contiguous dim-0 `slice_set`.
+            let k = Tensor::zeros_on(
+                *device,
+                vec![max_seq_len, num_kv_heads, head_dim],
                 storage_dtype,
-                device,
             )
             .with_context(|| format!("allocating k_cache for full-attn layer {i}"))?;
-            let v = candle_core::Tensor::zeros(
-                (1, num_kv_heads, max_seq_len, head_dim),
+            let v = Tensor::zeros_on(
+                *device,
+                vec![max_seq_len, num_kv_heads, head_dim],
                 storage_dtype,
-                device,
             )
             .with_context(|| format!("allocating v_cache for full-attn layer {i}"))?;
             layers.push((k, v));
@@ -193,38 +187,31 @@ impl KvCache {
         self.fp8
     }
 
-    /// kt-typed accessor for the cache's stored compute dtype (#1082).
+    /// The cache's stored compute dtype (#1082).
     ///
-    /// Mirror of `PagedKvCacheKt::compute_dtype`. Returns the
-    /// dequant target dtype as `kiln_tensor::DType` so callers can
-    /// match against kt types without importing
-    /// `candle_core::DType`. For FP8 caches this is the dtype the
-    /// pool dequantizes to on [`Self::update`]; for native caches
-    /// it is the storage dtype itself.
-    ///
-    /// Errors only if the internal candle dtype cannot be mapped to
-    /// a kt dtype, which would indicate a constructor invariant
-    /// violation. See `PagedKvCacheKt::compute_dtype` for the full
-    /// rationale on the error path. (#1082)
-    pub fn compute_dtype_kt(&self) -> Result<kiln_tensor::DType> {
-        kiln_kt_bridge::candle_dtype_to_kt(self.compute_dtype)
-            .map_err(|e| anyhow::anyhow!("KvCache::compute_dtype_kt: {e}"))
+    /// For FP8 caches this is the dtype the cache dequantizes to on
+    /// [`Self::update`]; for native caches it is the storage dtype itself.
+    /// Infallible now that the cache is kt-native (kept `Result` for
+    /// call-site compatibility with the previous candle bridge).
+    pub fn compute_dtype_kt(&self) -> Result<DType> {
+        Ok(self.compute_dtype)
     }
 
     /// Append new K/V for a full-attention layer and return the full
     /// (cached + new) K/V tensors in compute dtype.
     ///
     /// - `layer_idx`: 0-based index into full-attention layers only
-    /// - `new_k`: `[1, num_kv_heads, new_len, head_dim]`
-    /// - `new_v`: `[1, num_kv_heads, new_len, head_dim]`
+    /// - `new_k`: head-major `[1, num_kv_heads, new_len, head_dim]`
+    /// - `new_v`: head-major `[1, num_kv_heads, new_len, head_dim]`
     ///
-    /// Returns `(full_k, full_v)` each shaped `[1, num_kv_heads, seq_len + new_len, head_dim]`.
+    /// Returns `(full_k, full_v)` each head-major
+    /// `[1, num_kv_heads, seq_len + new_len, head_dim]`.
     pub fn update(
         &mut self,
         layer_idx: usize,
-        new_k: &candle_core::Tensor,
-        new_v: &candle_core::Tensor,
-    ) -> Result<(candle_core::Tensor, candle_core::Tensor)> {
+        new_k: &Tensor,
+        new_v: &Tensor,
+    ) -> Result<(Tensor, Tensor)> {
         let new_len = new_k.dim(2)?;
         let end = self.seq_len + new_len;
         anyhow::ensure!(
@@ -242,22 +229,37 @@ impl KvCache {
         }
     }
 
-    /// Native (non-FP8) cache update — same as original implementation.
+    /// Native (non-FP8) cache update.
+    ///
+    /// Transposes the head-major inputs to token-major, writes the new rows
+    /// in place via a dim-0 `slice_set`, then reads `[0, end)` back and
+    /// transposes to the head-major attention contract.
     fn update_native(
         &mut self,
         layer_idx: usize,
-        new_k: &candle_core::Tensor,
-        new_v: &candle_core::Tensor,
+        new_k: &Tensor,
+        new_v: &Tensor,
         end: usize,
-    ) -> Result<(candle_core::Tensor, candle_core::Tensor)> {
-        let (k_cache, v_cache) = &mut self.layers[layer_idx];
+    ) -> Result<(Tensor, Tensor)> {
+        let new_k_tm = head_major_to_token_major(new_k).context("kv update_native new_k")?;
+        let new_v_tm = head_major_to_token_major(new_v).context("kv update_native new_v")?;
 
-        k_cache.slice_set(new_k, 2, self.seq_len)?;
-        v_cache.slice_set(new_v, 2, self.seq_len)?;
+        {
+            let (k_cache, v_cache) = &self.layers[layer_idx];
+            // In-place dim-0 append (kt slice_set mutates the Arc-shared storage).
+            k_cache
+                .slice_set(&new_k_tm, 0, self.seq_len)
+                .map_err(|e| anyhow::anyhow!("kv update_native k slice_set: {e}"))?;
+            v_cache
+                .slice_set(&new_v_tm, 0, self.seq_len)
+                .map_err(|e| anyhow::anyhow!("kv update_native v slice_set: {e}"))?;
+        }
 
-        let full_k = k_cache.narrow(2, 0, end)?;
-        let full_v = v_cache.narrow(2, 0, end)?;
-
+        let (k_cache, v_cache) = &self.layers[layer_idx];
+        let full_k_tm = k_cache.narrow(0, 0, end)?;
+        let full_v_tm = v_cache.narrow(0, 0, end)?;
+        let full_k = token_major_to_head_major(&full_k_tm).context("kv update_native full_k")?;
+        let full_v = token_major_to_head_major(&full_v_tm).context("kv update_native full_v")?;
         Ok((full_k, full_v))
     }
 
@@ -266,55 +268,82 @@ impl KvCache {
     /// Strategy: we re-quantize the entire filled region each time new tokens arrive.
     /// This ensures consistent scaling across all cached positions. For decode (new_len=1),
     /// this is a small overhead since the dequant+requant only touches the active portion.
+    ///
+    /// All math is token-major and kt-native (`crate::fp8` quant/dequant +
+    /// `kiln_tensor::ops::concat` along dim 0); the head-major transpose is
+    /// applied only to the final dequantized output.
     fn update_fp8(
         &mut self,
         layer_idx: usize,
-        new_k: &candle_core::Tensor,
-        new_v: &candle_core::Tensor,
+        new_k: &Tensor,
+        new_v: &Tensor,
         end: usize,
-    ) -> Result<(candle_core::Tensor, candle_core::Tensor)> {
-        let device = new_k.device().clone();
-        let (k_cache, v_cache) = &mut self.layers[layer_idx];
+    ) -> Result<(Tensor, Tensor)> {
+        let device = new_k.device();
+        let new_k_tm = head_major_to_token_major(new_k).context("kv update_fp8 new_k")?;
+        let new_v_tm = head_major_to_token_major(new_v).context("kv update_fp8 new_v")?;
 
         if self.seq_len == 0 {
-            // First write: just quantize the new data
-            let (k_q, k_scale) = fp8_quantize_candle(new_k)?;
-            let (v_q, v_scale) = fp8_quantize_candle(new_v)?;
-            k_cache.slice_set(&k_q, 2, 0)?;
-            v_cache.slice_set(&v_q, 2, 0)?;
+            // First write: just quantize the new data.
+            let (k_q, k_scale) = fp8::quantize_to_fp8(&new_k_tm)?;
+            let (v_q, v_scale) = fp8::quantize_to_fp8(&new_v_tm)?;
+            {
+                let (k_cache, v_cache) = &self.layers[layer_idx];
+                k_cache
+                    .slice_set(&k_q, 0, 0)
+                    .map_err(|e| anyhow::anyhow!("kv update_fp8 k slice_set: {e}"))?;
+                v_cache
+                    .slice_set(&v_q, 0, 0)
+                    .map_err(|e| anyhow::anyhow!("kv update_fp8 v slice_set: {e}"))?;
+            }
             self.fp8_scales[layer_idx] = (k_scale, v_scale);
         } else {
-            // Incremental: dequantize existing, concat new, re-quantize
+            // Incremental: dequantize existing, concat new, re-quantize.
             let (old_k_scale, old_v_scale) = self.fp8_scales[layer_idx];
-
-            let existing_k_q = k_cache.narrow(2, 0, self.seq_len)?;
-            let existing_v_q = v_cache.narrow(2, 0, self.seq_len)?;
+            let (existing_k_q, existing_v_q) = {
+                let (k_cache, v_cache) = &self.layers[layer_idx];
+                (
+                    k_cache.narrow(0, 0, self.seq_len)?,
+                    v_cache.narrow(0, 0, self.seq_len)?,
+                )
+            };
 
             let existing_k =
-                fp8_dequantize_candle(&existing_k_q, old_k_scale, self.compute_dtype, &device)?;
+                fp8::dequantize_from_fp8(&existing_k_q, old_k_scale, self.compute_dtype, &device)?;
             let existing_v =
-                fp8_dequantize_candle(&existing_v_q, old_v_scale, self.compute_dtype, &device)?;
+                fp8::dequantize_from_fp8(&existing_v_q, old_v_scale, self.compute_dtype, &device)?;
 
-            let new_k_typed = new_k.to_dtype(self.compute_dtype)?;
-            let new_v_typed = new_v.to_dtype(self.compute_dtype)?;
+            let new_k_typed = new_k_tm.to_dtype(self.compute_dtype)?;
+            let new_v_typed = new_v_tm.to_dtype(self.compute_dtype)?;
 
-            let full_k = candle_core::Tensor::cat(&[&existing_k, &new_k_typed], 2)?;
-            let full_v = candle_core::Tensor::cat(&[&existing_v, &new_v_typed], 2)?;
+            let full_k = kiln_tensor::ops::concat(&[&existing_k, &new_k_typed], 0)?;
+            let full_v = kiln_tensor::ops::concat(&[&existing_v, &new_v_typed], 0)?;
 
-            let (k_q, k_scale) = fp8_quantize_candle(&full_k)?;
-            let (v_q, v_scale) = fp8_quantize_candle(&full_v)?;
+            let (k_q, k_scale) = fp8::quantize_to_fp8(&full_k)?;
+            let (v_q, v_scale) = fp8::quantize_to_fp8(&full_v)?;
 
-            k_cache.slice_set(&k_q, 2, 0)?;
-            v_cache.slice_set(&v_q, 2, 0)?;
+            {
+                let (k_cache, v_cache) = &self.layers[layer_idx];
+                k_cache
+                    .slice_set(&k_q, 0, 0)
+                    .map_err(|e| anyhow::anyhow!("kv update_fp8 k slice_set: {e}"))?;
+                v_cache
+                    .slice_set(&v_q, 0, 0)
+                    .map_err(|e| anyhow::anyhow!("kv update_fp8 v slice_set: {e}"))?;
+            }
             self.fp8_scales[layer_idx] = (k_scale, v_scale);
         }
 
-        // Read back the full region and dequantize for attention computation
+        // Read back the full region and dequantize for attention computation.
         let (k_scale, v_scale) = self.fp8_scales[layer_idx];
-        let full_k_q = k_cache.narrow(2, 0, end)?;
-        let full_v_q = v_cache.narrow(2, 0, end)?;
-        let full_k = fp8_dequantize_candle(&full_k_q, k_scale, self.compute_dtype, &device)?;
-        let full_v = fp8_dequantize_candle(&full_v_q, v_scale, self.compute_dtype, &device)?;
+        let (full_k_q, full_v_q) = {
+            let (k_cache, v_cache) = &self.layers[layer_idx];
+            (k_cache.narrow(0, 0, end)?, v_cache.narrow(0, 0, end)?)
+        };
+        let full_k_tm = fp8::dequantize_from_fp8(&full_k_q, k_scale, self.compute_dtype, &device)?;
+        let full_v_tm = fp8::dequantize_from_fp8(&full_v_q, v_scale, self.compute_dtype, &device)?;
+        let full_k = token_major_to_head_major(&full_k_tm).context("kv update_fp8 full_k")?;
+        let full_v = token_major_to_head_major(&full_v_tm).context("kv update_fp8 full_v")?;
 
         Ok((full_k, full_v))
     }
@@ -334,164 +363,58 @@ impl KvCache {
     }
 }
 
-fn cpu_compatible_compute_dtype(dtype: candle_core::DType, device: &candle_core::Device) -> candle_core::DType {
-    if matches!(device, candle_core::Device::Cpu) && dtype != candle_core::DType::F32 {
-        candle_core::DType::F32
+/// Convert a head-major `[1, nkv, len, hd]` K/V tensor (the public `update`
+/// input contract) to the cache's token-major `[len, nkv, hd]` storage layout.
+/// Contiguous result, ready for a dim-0 `slice_set`.
+fn head_major_to_token_major(t: &Tensor) -> Result<Tensor> {
+    // [1, nkv, len, hd] -> [nkv, len, hd] -> [len, nkv, hd]
+    t.squeeze(0)?
+        .transpose(0, 1)?
+        .contiguous()
+        .map_err(|e| anyhow::anyhow!("head_major_to_token_major: {e}"))
+}
+
+/// Inverse of [`head_major_to_token_major`]: token-major `[len, nkv, hd]` ->
+/// head-major `[1, nkv, len, hd]` for the attention path. Contiguous so the
+/// downstream GQA-expand / SDPA path can rely on a packed buffer regardless of
+/// `gqa_ratio`.
+fn token_major_to_head_major(t: &Tensor) -> Result<Tensor> {
+    // [len, nkv, hd] -> [nkv, len, hd] -> [1, nkv, len, hd]
+    t.transpose(0, 1)?
+        .unsqueeze(0)?
+        .contiguous()
+        .map_err(|e| anyhow::anyhow!("token_major_to_head_major: {e}"))
+}
+
+/// CPU has no half-precision compute path in kt's host kernels, so a CPU cache
+/// stores/returns F32. (Production decode is CUDA; this only affects the CPU
+/// unit tests + any CPU type-check build.)
+fn cpu_compatible_compute_dtype(dtype: DType, device: &Device) -> DType {
+    if matches!(device, Device::Cpu) && dtype != DType::F32 {
+        DType::F32
     } else {
         dtype
     }
-}
-
-/// Bridge a candle tensor into a kt `Tensor` at the FP8 call boundary
-/// (#1082). `KvCache` is still candle-typed internally, but
-/// `crate::fp8` is now kt-native, so we translate here.
-///
-/// Device-agnostic across builds:
-/// - **CPU candle tensors** (the FP8 unit tests, the Vulkan/CPU build,
-///   and any candle CPU placement) take a typed host copy. The CUDA
-///   `kiln_kt_bridge` borrow path requires a CUDA location, so it cannot
-///   be used for CPU tensors on a CUDA build — hence the explicit host
-///   copy here.
-/// - **CUDA candle tensors** (the production decode path) reuse the
-///   zero-overhead `kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow`.
-///
-/// The tensor is made contiguous first: `kv_cache` passes `narrow`ed
-/// (possibly non-contiguous) views, and both the kt host path and the
-/// CUDA fast path expect contiguous inputs.
-fn fp8_candle_to_kt(t: &candle_core::Tensor) -> Result<kiln_tensor::Tensor> {
-    let t = t
-        .contiguous()
-        .context("fp8_candle_to_kt: contiguous")?;
-    match t.device() {
-        candle_core::Device::Cpu => {
-            let shape: Vec<usize> = t.dims().to_vec();
-            match t.dtype() {
-                candle_core::DType::F32 => {
-                    let v = t.flatten_all()?.to_vec1::<f32>()?;
-                    kiln_tensor::Tensor::from_vec(v, shape)
-                        .map_err(|e| anyhow::anyhow!("fp8_candle_to_kt f32: {e}"))
-                }
-                // BF16/F16 only flow through here on cuda/vulkan builds (the
-                // `half` dep is gated on those features; on a pure CPU build
-                // `cpu_compatible_compute_dtype` forces compute dtype to F32).
-                #[cfg(any(feature = "cuda", feature = "vulkan"))]
-                candle_core::DType::BF16 => {
-                    let v = t.flatten_all()?.to_vec1::<half::bf16>()?;
-                    kiln_tensor::Tensor::from_vec(v, shape)
-                        .map_err(|e| anyhow::anyhow!("fp8_candle_to_kt bf16: {e}"))
-                }
-                #[cfg(any(feature = "cuda", feature = "vulkan"))]
-                candle_core::DType::F16 => {
-                    let v = t.flatten_all()?.to_vec1::<half::f16>()?;
-                    kiln_tensor::Tensor::from_vec(v, shape)
-                        .map_err(|e| anyhow::anyhow!("fp8_candle_to_kt f16: {e}"))
-                }
-                candle_core::DType::U8 => {
-                    let v = t.flatten_all()?.to_vec1::<u8>()?;
-                    kiln_tensor::Tensor::from_vec(v, shape)
-                        .map_err(|e| anyhow::anyhow!("fp8_candle_to_kt u8: {e}"))
-                }
-                other => Err(anyhow::anyhow!(
-                    "fp8_candle_to_kt: unsupported CPU dtype {other:?}"
-                )),
-            }
-        }
-        _ => kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&t)
-            .map_err(|e| anyhow::anyhow!("fp8_candle_to_kt cuda bridge: {e}")),
-    }
-}
-
-/// Bridge a kt `Tensor` produced by `crate::fp8` back to a candle tensor
-/// placed on `device` (#1082). Inverse of [`fp8_candle_to_kt`].
-///
-/// - **CPU target**: typed host copy back into a candle CPU tensor.
-/// - **CUDA target**: `kiln_kt_bridge::kt_tensor_to_candle_cuda_copy`.
-fn fp8_kt_to_candle(
-    t: &kiln_tensor::Tensor,
-    device: &candle_core::Device,
-) -> Result<candle_core::Tensor> {
-    match device {
-        candle_core::Device::Cpu => {
-            let shape = t.shape().to_vec();
-            match t.dtype() {
-                kiln_tensor::DType::F32 => {
-                    let v = t.to_vec::<f32>().map_err(|e| anyhow::anyhow!("fp8_kt_to_candle f32: {e}"))?;
-                    candle_core::Tensor::from_vec(v, shape, device)
-                        .map_err(|e| anyhow::anyhow!("fp8_kt_to_candle f32 build: {e}"))
-                }
-                // BF16/F16 only flow through here on cuda/vulkan builds (the
-                // `half` dep is gated on those features).
-                #[cfg(any(feature = "cuda", feature = "vulkan"))]
-                kiln_tensor::DType::BF16 => {
-                    let v = t.to_vec::<half::bf16>().map_err(|e| anyhow::anyhow!("fp8_kt_to_candle bf16: {e}"))?;
-                    candle_core::Tensor::from_vec(v, shape, device)
-                        .map_err(|e| anyhow::anyhow!("fp8_kt_to_candle bf16 build: {e}"))
-                }
-                #[cfg(any(feature = "cuda", feature = "vulkan"))]
-                kiln_tensor::DType::F16 => {
-                    let v = t.to_vec::<half::f16>().map_err(|e| anyhow::anyhow!("fp8_kt_to_candle f16: {e}"))?;
-                    candle_core::Tensor::from_vec(v, shape, device)
-                        .map_err(|e| anyhow::anyhow!("fp8_kt_to_candle f16 build: {e}"))
-                }
-                kiln_tensor::DType::U8 => {
-                    let v = t.to_vec::<u8>().map_err(|e| anyhow::anyhow!("fp8_kt_to_candle u8: {e}"))?;
-                    candle_core::Tensor::from_vec(v, shape, device)
-                        .map_err(|e| anyhow::anyhow!("fp8_kt_to_candle u8 build: {e}"))
-                }
-                other => Err(anyhow::anyhow!(
-                    "fp8_kt_to_candle: unsupported CPU dtype {other:?}"
-                )),
-            }
-        }
-        _ => kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(t)
-            .map_err(|e| anyhow::anyhow!("fp8_kt_to_candle cuda bridge: {e}")),
-    }
-}
-
-/// Quantize a candle K/V tensor to FP8 (U8 + scale) through the kt-native
-/// `crate::fp8` path, returning a candle U8 tensor on the input device.
-fn fp8_quantize_candle(t: &candle_core::Tensor) -> Result<(candle_core::Tensor, f32)> {
-    let device = t.device().clone();
-    let kt_in = fp8_candle_to_kt(t)?;
-    let (kt_q, scale) = fp8::quantize_to_fp8(&kt_in)?;
-    let q = fp8_kt_to_candle(&kt_q, &device)?;
-    Ok((q, scale))
-}
-
-/// Dequantize a candle U8 FP8 tensor back to `target_dtype` on `device`
-/// through the kt-native `crate::fp8` path.
-fn fp8_dequantize_candle(
-    quantized: &candle_core::Tensor,
-    scale: f32,
-    target_dtype: candle_core::DType,
-    device: &candle_core::Device,
-) -> Result<candle_core::Tensor> {
-    let kt_in = fp8_candle_to_kt(quantized)?;
-    let kt_dtype = kiln_kt_bridge::candle_dtype_to_kt(target_dtype)
-        .map_err(|e| anyhow::anyhow!("fp8_dequantize_candle: target dtype: {e}"))?;
-    let kt_device = kiln_kt_bridge::kt_device_from_candle(device);
-    let kt_out = fp8::dequantize_from_fp8(&kt_in, scale, kt_dtype, &kt_device)?;
-    fp8_kt_to_candle(&kt_out, device)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Build a head-major `[1, nkv, len, hd]` kt CPU F32 tensor from a flat
+    /// row-major value vec (the `update` input contract).
+    fn kv(values: Vec<f32>, nkv: usize, len: usize, hd: usize) -> Tensor {
+        Tensor::from_vec(values, vec![1, nkv, len, hd]).expect("kv from_vec")
+    }
+
+    /// Build a head-major all-ones `[1, nkv, len, hd]` kt CPU F32 tensor.
+    fn kv_ones(nkv: usize, len: usize, hd: usize) -> Tensor {
+        kv(vec![1.0_f32; nkv * len * hd], nkv, len, hd)
+    }
+
     #[test]
     fn test_kv_cache_new() -> Result<()> {
-        // Migrated to `new_kt` (#1082); the `new`/`new_kt` pair are equivalent
-        // — `new_kt` bridges kiln_tensor::DType + &kiln_tensor::Device to
-        // candle and delegates to `new`, so the assertions on the candle
-        // storage internals (`layers.len()`, `is_fp8()`) still hold.
-        let cache = KvCache::new_kt(
-            2,
-            4,
-            8,
-            128,
-            kiln_tensor::DType::F32,
-            &kiln_tensor::Device::Cpu,
-        )?;
+        let cache = KvCache::new_kt(2, 4, 8, 128, DType::F32, &Device::Cpu)?;
         assert_eq!(cache.seq_len(), 0);
         assert_eq!(cache.layers.len(), 2);
         assert!(!cache.is_fp8());
@@ -500,29 +423,20 @@ mod tests {
 
     #[test]
     fn test_kv_cache_update_and_advance() -> Result<()> {
-        let device = candle_core::Device::Cpu;
-        // Migrated to `new_kt` (#1082).
-        let mut cache = KvCache::new_kt(
-            1,
-            2,
-            4,
-            32,
-            kiln_tensor::DType::F32,
-            &kiln_tensor::Device::Cpu,
-        )?;
+        let mut cache = KvCache::new_kt(1, 2, 4, 32, DType::F32, &Device::Cpu)?;
 
-        // Simulate prefill with 3 tokens
-        let k = candle_core::Tensor::ones((1, 2, 3, 4), candle_core::DType::F32, &device)?;
-        let v = candle_core::Tensor::ones((1, 2, 3, 4), candle_core::DType::F32, &device)?;
+        // Simulate prefill with 3 tokens.
+        let k = kv_ones(2, 3, 4);
+        let v = kv_ones(2, 3, 4);
         let (full_k, full_v) = cache.update(0, &k, &v)?;
         assert_eq!(full_k.dims(), &[1, 2, 3, 4]);
         assert_eq!(full_v.dims(), &[1, 2, 3, 4]);
         cache.advance(3);
         assert_eq!(cache.seq_len(), 3);
 
-        // Simulate decode with 1 token
-        let k2 = candle_core::Tensor::ones((1, 2, 1, 4), candle_core::DType::F32, &device)?;
-        let v2 = candle_core::Tensor::ones((1, 2, 1, 4), candle_core::DType::F32, &device)?;
+        // Simulate decode with 1 token.
+        let k2 = kv_ones(2, 1, 4);
+        let v2 = kv_ones(2, 1, 4);
         let (full_k, full_v) = cache.update(0, &k2, &v2)?;
         assert_eq!(full_k.dims(), &[1, 2, 4, 4]); // 3 + 1 = 4
         assert_eq!(full_v.dims(), &[1, 2, 4, 4]);
@@ -534,25 +448,16 @@ mod tests {
 
     #[test]
     fn test_kv_cache_overflow() -> Result<()> {
-        let device = candle_core::Device::Cpu;
-        // Migrated to `new_kt` (#1082).
-        let mut cache = KvCache::new_kt(
-            1,
-            1,
-            4,
-            4,
-            kiln_tensor::DType::F32,
-            &kiln_tensor::Device::Cpu,
-        )?;
+        let mut cache = KvCache::new_kt(1, 1, 4, 4, DType::F32, &Device::Cpu)?;
 
-        let k = candle_core::Tensor::ones((1, 1, 3, 4), candle_core::DType::F32, &device)?;
-        let v = candle_core::Tensor::ones((1, 1, 3, 4), candle_core::DType::F32, &device)?;
+        let k = kv_ones(1, 3, 4);
+        let v = kv_ones(1, 3, 4);
         cache.update(0, &k, &v)?;
         cache.advance(3);
 
-        // This should overflow: 3 + 2 > 4
-        let k2 = candle_core::Tensor::ones((1, 1, 2, 4), candle_core::DType::F32, &device)?;
-        let v2 = candle_core::Tensor::ones((1, 1, 2, 4), candle_core::DType::F32, &device)?;
+        // This should overflow: 3 + 2 > 4.
+        let k2 = kv_ones(1, 2, 4);
+        let v2 = kv_ones(1, 2, 4);
         let result = cache.update(0, &k2, &v2);
         assert!(result.is_err());
 
@@ -561,19 +466,10 @@ mod tests {
 
     #[test]
     fn test_kv_cache_reset() -> Result<()> {
-        let device = candle_core::Device::Cpu;
-        // Migrated to `new_kt` (#1082).
-        let mut cache = KvCache::new_kt(
-            1,
-            1,
-            4,
-            16,
-            kiln_tensor::DType::F32,
-            &kiln_tensor::Device::Cpu,
-        )?;
+        let mut cache = KvCache::new_kt(1, 1, 4, 16, DType::F32, &Device::Cpu)?;
 
-        let k = candle_core::Tensor::ones((1, 1, 5, 4), candle_core::DType::F32, &device)?;
-        let v = candle_core::Tensor::ones((1, 1, 5, 4), candle_core::DType::F32, &device)?;
+        let k = kv_ones(1, 5, 4);
+        let v = kv_ones(1, 5, 4);
         cache.update(0, &k, &v)?;
         cache.advance(5);
         assert_eq!(cache.seq_len(), 5);
@@ -586,33 +482,24 @@ mod tests {
 
     #[test]
     fn test_kv_cache_content_preserved() -> Result<()> {
-        let device = candle_core::Device::Cpu;
-        // Migrated to `new_kt` (#1082).
-        let mut cache = KvCache::new_kt(
-            1,
-            1,
-            2,
-            8,
-            kiln_tensor::DType::F32,
-            &kiln_tensor::Device::Cpu,
-        )?;
+        let mut cache = KvCache::new_kt(1, 1, 2, 8, DType::F32, &Device::Cpu)?;
 
-        // Write known values for first 2 positions
-        let k1 = candle_core::Tensor::new(&[[[[1.0_f32, 2.0], [3.0, 4.0]]]], &device)?; // [1,1,2,2]
-        let v1 = candle_core::Tensor::new(&[[[[5.0_f32, 6.0], [7.0, 8.0]]]], &device)?;
+        // Write known values for first 2 positions: [1,1,2,2].
+        let k1 = kv(vec![1.0, 2.0, 3.0, 4.0], 1, 2, 2);
+        let v1 = kv(vec![5.0, 6.0, 7.0, 8.0], 1, 2, 2);
         cache.update(0, &k1, &v1)?;
         cache.advance(2);
 
-        // Write 1 more position
-        let k2 = candle_core::Tensor::new(&[[[[9.0_f32, 10.0]]]], &device)?; // [1,1,1,2]
-        let v2 = candle_core::Tensor::new(&[[[[11.0_f32, 12.0]]]], &device)?;
+        // Write 1 more position: [1,1,1,2].
+        let k2 = kv(vec![9.0, 10.0], 1, 1, 2);
+        let v2 = kv(vec![11.0, 12.0], 1, 1, 2);
         let (full_k, full_v) = cache.update(0, &k2, &v2)?;
         cache.advance(1);
 
-        // Verify all 3 positions are correct
-        let k_vals = full_k.flatten_all()?.to_vec1::<f32>()?;
+        // Verify all 3 positions are correct (head-major flatten).
+        let k_vals = full_k.to_vec::<f32>().map_err(|e| anyhow::anyhow!("{e}"))?;
         assert_eq!(k_vals, vec![1.0, 2.0, 3.0, 4.0, 9.0, 10.0]);
-        let v_vals = full_v.flatten_all()?.to_vec1::<f32>()?;
+        let v_vals = full_v.to_vec::<f32>().map_err(|e| anyhow::anyhow!("{e}"))?;
         assert_eq!(v_vals, vec![5.0, 6.0, 7.0, 8.0, 11.0, 12.0]);
 
         Ok(())
@@ -622,50 +509,30 @@ mod tests {
 
     #[test]
     fn test_kv_cache_fp8_new() -> Result<()> {
-        let device = candle_core::Device::Cpu;
-        // Migrated to `new_with_fp8_kt` (#1082).
-        let cache = KvCache::new_with_fp8_kt(
-            2,
-            4,
-            8,
-            128,
-            kiln_tensor::DType::F32,
-            &kiln_tensor::Device::Cpu,
-            true,
-        )?;
+        let cache = KvCache::new_with_fp8_kt(2, 4, 8, 128, DType::F32, &Device::Cpu, true)?;
         assert_eq!(cache.seq_len(), 0);
         assert!(cache.is_fp8());
-        // Storage should be U8
-        assert_eq!(cache.layers[0].0.dtype(), candle_core::DType::U8);
-        assert_eq!(cache.layers[0].1.dtype(), candle_core::DType::U8);
+        // Storage should be U8.
+        assert_eq!(cache.layers[0].0.dtype(), DType::U8);
+        assert_eq!(cache.layers[0].1.dtype(), DType::U8);
         Ok(())
     }
 
     #[test]
     fn test_kv_cache_fp8_update_and_advance() -> Result<()> {
-        let device = candle_core::Device::Cpu;
-        // Migrated to `new_with_fp8_kt` (#1082).
-        let mut cache = KvCache::new_with_fp8_kt(
-            1,
-            2,
-            4,
-            32,
-            kiln_tensor::DType::F32,
-            &kiln_tensor::Device::Cpu,
-            true,
-        )?;
+        let mut cache = KvCache::new_with_fp8_kt(1, 2, 4, 32, DType::F32, &Device::Cpu, true)?;
 
-        let k = candle_core::Tensor::ones((1, 2, 3, 4), candle_core::DType::F32, &device)?;
-        let v = candle_core::Tensor::ones((1, 2, 3, 4), candle_core::DType::F32, &device)?;
+        let k = kv_ones(2, 3, 4);
+        let v = kv_ones(2, 3, 4);
         let (full_k, full_v) = cache.update(0, &k, &v)?;
         assert_eq!(full_k.dims(), &[1, 2, 3, 4]);
         assert_eq!(full_v.dims(), &[1, 2, 3, 4]);
-        // Output should be in compute dtype (F32)
-        assert_eq!(full_k.dtype(), candle_core::DType::F32);
+        // Output should be in compute dtype (F32).
+        assert_eq!(full_k.dtype(), DType::F32);
         cache.advance(3);
 
-        let k2 = candle_core::Tensor::ones((1, 2, 1, 4), candle_core::DType::F32, &device)?;
-        let v2 = candle_core::Tensor::ones((1, 2, 1, 4), candle_core::DType::F32, &device)?;
+        let k2 = kv_ones(2, 1, 4);
+        let v2 = kv_ones(2, 1, 4);
         let (full_k, full_v) = cache.update(0, &k2, &v2)?;
         assert_eq!(full_k.dims(), &[1, 2, 4, 4]);
         assert_eq!(full_v.dims(), &[1, 2, 4, 4]);
@@ -677,30 +544,20 @@ mod tests {
 
     #[test]
     fn test_kv_cache_fp8_approximate_values() -> Result<()> {
-        let device = candle_core::Device::Cpu;
-        // Migrated to `new_with_fp8_kt` (#1082).
-        let mut cache = KvCache::new_with_fp8_kt(
-            1,
-            1,
-            2,
-            8,
-            kiln_tensor::DType::F32,
-            &kiln_tensor::Device::Cpu,
-            true,
-        )?;
+        let mut cache = KvCache::new_with_fp8_kt(1, 1, 2, 8, DType::F32, &Device::Cpu, true)?;
 
-        let k1 = candle_core::Tensor::new(&[[[[1.0_f32, 2.0], [3.0, 4.0]]]], &device)?;
-        let v1 = candle_core::Tensor::new(&[[[[5.0_f32, 6.0], [7.0, 8.0]]]], &device)?;
+        let k1 = kv(vec![1.0, 2.0, 3.0, 4.0], 1, 2, 2);
+        let v1 = kv(vec![5.0, 6.0, 7.0, 8.0], 1, 2, 2);
         cache.update(0, &k1, &v1)?;
         cache.advance(2);
 
-        let k2 = candle_core::Tensor::new(&[[[[9.0_f32, 10.0]]]], &device)?;
-        let v2 = candle_core::Tensor::new(&[[[[11.0_f32, 12.0]]]], &device)?;
+        let k2 = kv(vec![9.0, 10.0], 1, 1, 2);
+        let v2 = kv(vec![11.0, 12.0], 1, 1, 2);
         let (full_k, full_v) = cache.update(0, &k2, &v2)?;
         cache.advance(1);
 
-        // FP8 has limited precision — check approximate match
-        let k_vals = full_k.flatten_all()?.to_vec1::<f32>()?;
+        // FP8 has limited precision — check approximate match.
+        let k_vals = full_k.to_vec::<f32>().map_err(|e| anyhow::anyhow!("{e}"))?;
         let expected_k = vec![1.0, 2.0, 3.0, 4.0, 9.0, 10.0];
         for (i, (got, exp)) in k_vals.iter().zip(expected_k.iter()).enumerate() {
             let rel_err = (got - exp).abs() / exp.abs().max(0.01);
@@ -710,7 +567,7 @@ mod tests {
             );
         }
 
-        let v_vals = full_v.flatten_all()?.to_vec1::<f32>()?;
+        let v_vals = full_v.to_vec::<f32>().map_err(|e| anyhow::anyhow!("{e}"))?;
         let expected_v = vec![5.0, 6.0, 7.0, 8.0, 11.0, 12.0];
         for (i, (got, exp)) in v_vals.iter().zip(expected_v.iter()).enumerate() {
             let rel_err = (got - exp).abs() / exp.abs().max(0.01);
@@ -725,55 +582,28 @@ mod tests {
 
     #[test]
     fn test_kv_cache_fp8_memory_savings() -> Result<()> {
-        let device = candle_core::Device::Cpu;
-        // FP8 cache stores U8 (1 byte), native stores F32 (4 bytes) or BF16 (2 bytes)
-        // Migrated to `_kt` constructors (#1082).
-        let fp8_cache = KvCache::new_with_fp8_kt(
-            1,
-            4,
-            256,
-            1024,
-            kiln_tensor::DType::F32,
-            &kiln_tensor::Device::Cpu,
-            true,
-        )?;
-        let native_cache = KvCache::new_kt(
-            1,
-            4,
-            256,
-            1024,
-            kiln_tensor::DType::F32,
-            &kiln_tensor::Device::Cpu,
-        )?;
+        // FP8 cache stores U8 (1 byte), native stores F32 (4 bytes) or BF16 (2 bytes).
+        let fp8_cache = KvCache::new_with_fp8_kt(1, 4, 256, 1024, DType::F32, &Device::Cpu, true)?;
+        let native_cache = KvCache::new_kt(1, 4, 256, 1024, DType::F32, &Device::Cpu)?;
 
-        // FP8 cache tensors are U8 (1 byte each)
+        // Same number of elements.
         let fp8_elem = fp8_cache.layers[0].0.elem_count();
         let native_elem = native_cache.layers[0].0.elem_count();
         assert_eq!(fp8_elem, native_elem, "Same number of elements");
 
-        // But FP8 uses 1 byte per element vs 4 bytes for F32
-        assert_eq!(fp8_cache.layers[0].0.dtype(), candle_core::DType::U8);
-        assert_eq!(native_cache.layers[0].0.dtype(), candle_core::DType::F32);
+        // But FP8 uses 1 byte per element vs 4 bytes for F32.
+        assert_eq!(fp8_cache.layers[0].0.dtype(), DType::U8);
+        assert_eq!(native_cache.layers[0].0.dtype(), DType::F32);
 
         Ok(())
     }
 
     #[test]
     fn test_kv_cache_fp8_reset() -> Result<()> {
-        let device = candle_core::Device::Cpu;
-        // Migrated to `new_with_fp8_kt` (#1082).
-        let mut cache = KvCache::new_with_fp8_kt(
-            1,
-            1,
-            4,
-            16,
-            kiln_tensor::DType::F32,
-            &kiln_tensor::Device::Cpu,
-            true,
-        )?;
+        let mut cache = KvCache::new_with_fp8_kt(1, 1, 4, 16, DType::F32, &Device::Cpu, true)?;
 
-        let k = candle_core::Tensor::ones((1, 1, 5, 4), candle_core::DType::F32, &device)?;
-        let v = candle_core::Tensor::ones((1, 1, 5, 4), candle_core::DType::F32, &device)?;
+        let k = kv_ones(1, 5, 4);
+        let v = kv_ones(1, 5, 4);
         cache.update(0, &k, &v)?;
         cache.advance(5);
         assert_eq!(cache.seq_len(), 5);
