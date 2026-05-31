@@ -27,7 +27,7 @@
 
 use anyhow::{Context, Result};
 
-use kiln_core::block::BlockTable;
+use kiln_core::block::{unique_physical_blocks, BlockTable};
 use kiln_core::config::ModelConfig;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
@@ -1400,6 +1400,29 @@ pub fn seed_vk_kv_cache_layer_blocks_from_legacy(
         .map(|(bid, k_bytes, v_bytes)| (*bid, k_bytes.as_slice(), v_bytes.as_slice()))
         .collect();
     vk_cache.upload_layer_blocks_from_f32(vk_device, layer_idx, &uploads)
+}
+
+/// Seed one full-attention layer from the union of physical blocks
+/// referenced by a batched decode step.
+///
+/// Returns the number of unique physical blocks copied.
+pub fn seed_vk_kv_cache_layer_blocks_from_batched_tables(
+    vk_device: &VulkanDevice,
+    vk_cache: &VkPagedKvCache,
+    paged_cache: &PagedKvCacheKt,
+    layer_idx: usize,
+    block_tables: &[&BlockTable],
+) -> Result<usize> {
+    let block_ids = unique_physical_blocks(block_tables);
+    let seeded = block_ids.len();
+    seed_vk_kv_cache_layer_blocks_from_legacy(
+        vk_device,
+        vk_cache,
+        paged_cache,
+        layer_idx,
+        &block_ids,
+    )?;
+    Ok(seeded)
 }
 
 /// Full-slab seed kept for callers that explicitly want the whole

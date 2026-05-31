@@ -141,6 +141,22 @@ impl BlockTable {
     }
 }
 
+/// Return physical block IDs referenced by the supplied tables, preserving
+/// first-seen order and dropping duplicates.
+pub fn unique_physical_blocks(block_tables: &[&BlockTable]) -> Vec<u32> {
+    let total_blocks = block_tables.iter().map(|table| table.blocks.len()).sum();
+    let mut out = Vec::with_capacity(total_blocks);
+    let mut seen = std::collections::HashSet::with_capacity(total_blocks);
+    for table in block_tables {
+        for &block_id in &table.blocks {
+            if seen.insert(block_id) {
+                out.push(block_id);
+            }
+        }
+    }
+    out
+}
+
 /// Return the physical start slot when `[start_pos .. start_pos+len]`
 /// resolves to one contiguous slot run in the shared paged KV pool, else
 /// `None`.
@@ -267,6 +283,23 @@ mod tests {
         assert_eq!(bt.slot_for(0, block_size), Some(80));
         // Token 17 → slot 12*16 + 1 = 193
         assert_eq!(bt.slot_for(17, block_size), Some(193));
+    }
+
+    #[test]
+    fn unique_physical_blocks_preserves_first_seen_order() {
+        let mut first = BlockTable::new();
+        first.push(5);
+        first.push(9);
+        first.push(5);
+
+        let mut second = BlockTable::new();
+        second.push(9);
+        second.push(2);
+        second.push(7);
+
+        let empty = BlockTable::new();
+        let block_tables = [&first, &empty, &second];
+        assert_eq!(unique_physical_blocks(&block_tables), vec![5, 9, 2, 7]);
     }
 
     // Relocated from kiln_model::paged_kv_cache during the #1082 candle-drop.
