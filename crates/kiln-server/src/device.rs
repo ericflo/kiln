@@ -43,22 +43,21 @@ pub fn select_device_with_options_kt(cuda_graphs: bool) -> Result<kiln_tensor::D
 
     #[cfg(feature = "cuda")]
     if kiln_tensor::cuda_is_available() {
+        // #1082: kt-native — no candle device. The kt CUDA-graph capture path
+        // (`CudaGraphRunner` + `with_active_cuda_stream`) routes kernel
+        // launches / allocs / memcpys onto its OWN capture stream, derived from
+        // the kt `primary_cuda_context`. It does NOT need the device opened on a
+        // special candle stream with event tracking disabled — and in fact that
+        // candle device was always discarded here (only `Device::Cuda(0)`
+        // survived `kt_device_from_candle`, since kt `Device` is index-only).
+        // So both modes simply return the plain kt CUDA device.
         if cuda_graphs {
-            tracing::info!("CUDA available — using GPU device 0 with graph-capturable stream");
-            // The cuda-graph device construction MUST go through the
-            // kt-bridge helper because the underlying
-            // `Device::new_cuda_with_stream` + `disable_event_tracking`
-            // pair both live in candle's API surface. The bridge owns
-            // the unsafe call. We translate back to kt at the boundary
-            // (the candle device is dropped here; kt-typed downstream
-            // call paths build their own candle device via
-            // `candle_device_from_kt` when needed). (#1082)
-            let candle_device =
-                kiln_kt_bridge::candle_cuda_device_with_stream_no_event_tracking(0)
-                    .map_err(|e| anyhow::anyhow!("{e}"))?;
-            return Ok(kiln_kt_bridge::kt_device_from_candle(&candle_device));
+            tracing::info!(
+                "CUDA available — using GPU device 0 (graph-capturable via the kt capture stream)"
+            );
+        } else {
+            tracing::info!("CUDA available — using GPU device 0");
         }
-        tracing::info!("CUDA available — using GPU device 0");
         return Ok(kiln_tensor::Device::Cuda(0));
     }
 
