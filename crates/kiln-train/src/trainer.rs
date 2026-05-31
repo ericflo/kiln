@@ -1138,16 +1138,17 @@ impl TrainableLoraParams {
         device: &CdDevice,
     ) -> Result<usize> {
         let st_path = adapter_dir.join("adapter_model.safetensors");
-        // (#1082) candle island — safetensors I/O is candle. Bridge the kt
-        // device to candle for the candle `safetensors::load` shim.
-        let cd_device = kiln_kt_bridge::candle_device_from_kt(device)
-            .map_err(|e| anyhow::anyhow!("load adapter: kt->candle device: {e}"))?;
-        let tensors = safetensors_load_file(&st_path, &cd_device)
+        // (#1082) kt-native safetensors load — `kiln_tensor::safetensors::load_cpu`
+        // returns CPU kt tensors; each is moved to the training device and
+        // installed directly. No candle: was a candle `safetensors::load` + a
+        // per-tensor candle->kt borrow.
+        let tensors = kiln_tensor::safetensors::load_cpu(&st_path)
             .with_context(|| format!("loading adapter safetensors from {}", st_path.display()))?;
 
-        let install = |param: &mut Parameter, t: &candle_core::Tensor, key: &str| -> Result<()> {
-            let kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(t)
-                .map_err(|e| anyhow::anyhow!("load adapter {key}: candle->kt: {e}"))?;
+        let install = |param: &mut Parameter, t: &KtTensor, key: &str| -> Result<()> {
+            let kt = t
+                .to_device(*device)
+                .map_err(|e| anyhow::anyhow!("load adapter {key}: to device: {e}"))?;
             param.replace_forward_storage(KtForwardStorage::Plain(kt.clone()));
             param.replace_backward_storage(Some(kt));
             Ok(())
@@ -1215,20 +1216,12 @@ impl TrainableLoraParams {
         let config_path = output_dir.join("adapter_config.json");
         std::fs::write(&config_path, serde_json::to_string_pretty(&config)?)?;
 
-        // Collect all tensors for safetensors serialization.
-        // (#1082) candle island — the safetensors writer is candle, so the
-        // collected tensors are candle (bridged from kt below).
-        let mut tensor_data: HashMap<String, candle_core::Tensor> = HashMap::new();
-
-        // (#1082) Save reads each `Parameter`'s primary kt tensor and
-        // bridges it to candle for the safetensors writer (the
-        // `safetensors_save_file` shim is candle). Cross-file candle
-        // island until kiln-tensor's own safetensors save is wired in.
-        // // (#1082) bridge — safetensors I/O is still a candle island.
-        let kt_to_cd = |kt: &KtTensor, key: &str| -> Result<candle_core::Tensor> {
-            kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(kt)
-                .map_err(|e| anyhow::anyhow!("save adapter {key}: kt->candle: {e}"))
-        };
+        // Collect all LoRA tensors for safetensors serialization.
+        // (#1082) kt-native: read each `Parameter`'s primary kt tensor, move it
+        // to CPU (contiguous) for the writer, and serialize via
+        // `kiln_tensor::safetensors::save_cpu`. No candle: was a per-tensor
+        // kt->candle copy + a candle writer.
+        let mut owned: Vec<(String, KtTensor)> = Vec::new();
         for (layer_idx, layer) in self.layers.iter().enumerate() {
             let mut save_proj =
                 |name: &str, pair: &Option<(Parameter, Parameter)>, is_attn: bool| -> Result<()> {
@@ -1236,12 +1229,17 @@ impl TrainableLoraParams {
                         let sub = if is_attn { "self_attn" } else { "mlp" };
                         let prefix =
                             format!("base_model.model.model.layers.{layer_idx}.{sub}.{name}");
+                        let to_cpu = |kt: &KtTensor, key: &str| -> Result<KtTensor> {
+                            kt.to_device(kiln_tensor::Device::Cpu)
+                                .and_then(|t| t.contiguous())
+                                .map_err(|e| anyhow::anyhow!("save adapter {key}: to cpu: {e}"))
+                        };
                         let a_key = format!("{prefix}.lora_A.weight");
                         let b_key = format!("{prefix}.lora_B.weight");
-                        let a_cd = kt_to_cd(a.forward_storage().primary_tensor(), &a_key)?;
-                        let b_cd = kt_to_cd(b.forward_storage().primary_tensor(), &b_key)?;
-                        tensor_data.insert(a_key, a_cd);
-                        tensor_data.insert(b_key, b_cd);
+                        let a_cpu = to_cpu(a.forward_storage().primary_tensor(), &a_key)?;
+                        let b_cpu = to_cpu(b.forward_storage().primary_tensor(), &b_key)?;
+                        owned.push((a_key, a_cpu));
+                        owned.push((b_key, b_cpu));
                     }
                     Ok(())
                 };
@@ -1258,9 +1256,10 @@ impl TrainableLoraParams {
             save_proj("down_proj", &layer.down_proj, false)?;
         }
 
-        // Save using candle's safetensors support
         let st_path = output_dir.join("adapter_model.safetensors");
-        safetensors_save_file(&tensor_data, &st_path)
+        let save_map: std::collections::HashMap<&str, &KtTensor> =
+            owned.iter().map(|(k, v)| (k.as_str(), v)).collect();
+        kiln_tensor::safetensors::save_cpu(&save_map, &st_path)
             .with_context(|| format!("saving safetensors to {}", st_path.display()))?;
         let adapter_name = output_dir
             .file_name()
@@ -1273,7 +1272,7 @@ impl TrainableLoraParams {
 
         tracing::info!(
             path = %output_dir.display(),
-            num_tensors = tensor_data.len(),
+            num_tensors = owned.len(),
             "saved PEFT adapter"
         );
 
@@ -6244,17 +6243,20 @@ impl SpooledCheckpointBoundaries {
         Ok(Self { _dir: dir, paths })
     }
 
-    // (#1082) Spool checkpoint I/O is a candle island: candle's per-tensor
-    // `save_safetensors` / `safetensors::load` have no kt counterpart yet.
-    // The activation tensors are kt, so bridge kt->candle on save and
-    // candle->kt on load. Drop the bridge once kiln-tensor grows safetensors.
+    // (#1082) kt-native spool checkpoint I/O — the activation tensor is kt;
+    // move it to CPU (contiguous) and write/read via
+    // `kiln_tensor::safetensors::{save_cpu,load_cpu}`. No candle round-trip.
     fn save(&self, boundary_idx: usize, tensor: &Tensor) -> Result<()> {
         let path = self.paths.get(boundary_idx).ok_or_else(|| {
             anyhow::anyhow!("checkpoint boundary index {boundary_idx} out of spool range")
         })?;
-        let tensor_cd = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(tensor)
-            .map_err(|e| anyhow::anyhow!("spool save: kt->candle: {e}"))?;
-        tensor_cd.save_safetensors("hidden", path).with_context(|| {
+        let cpu = tensor
+            .to_device(kiln_tensor::Device::Cpu)
+            .and_then(|t| t.contiguous())
+            .map_err(|e| anyhow::anyhow!("spool save: to cpu: {e}"))?;
+        let map: std::collections::HashMap<&str, &Tensor> =
+            std::collections::HashMap::from([("hidden", &cpu)]);
+        kiln_tensor::safetensors::save_cpu(&map, path).with_context(|| {
             format!(
                 "save checkpoint boundary {boundary_idx} to {}",
                 path.display()
@@ -6266,19 +6268,18 @@ impl SpooledCheckpointBoundaries {
         let path = self.paths.get(boundary_idx).ok_or_else(|| {
             anyhow::anyhow!("checkpoint boundary index {boundary_idx} out of spool range")
         })?;
-        let cd_device = kiln_kt_bridge::candle_device_from_kt(device)
-            .map_err(|e| anyhow::anyhow!("spool load: kt->candle device: {e}"))?;
-        let mut tensors = safetensors_load_file(path, &cd_device).with_context(|| {
+        let mut tensors = kiln_tensor::safetensors::load_cpu(path).with_context(|| {
             format!(
                 "load checkpoint boundary {boundary_idx} from {}",
                 path.display()
             )
         })?;
-        let tensor_cd = tensors.remove("hidden").ok_or_else(|| {
+        let hidden = tensors.remove("hidden").ok_or_else(|| {
             anyhow::anyhow!("checkpoint boundary {boundary_idx} missing `hidden` tensor")
         })?;
-        kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&tensor_cd)
-            .map_err(|e| anyhow::anyhow!("spool load: candle->kt: {e}"))
+        hidden
+            .to_device(*device)
+            .map_err(|e| anyhow::anyhow!("spool load: to device: {e}"))
     }
 }
 
@@ -9397,21 +9398,9 @@ pub(crate) mod tests {
             .map_err(Into::into)
     }
 
-    /// #1082 CPU host round-trip: kt F32 CPU tensor → candle F32 CPU tensor.
-    /// The production kt<->candle tensor bridges are CUDA-only; this reads the
-    /// F32 host values + shape and rebuilds the candle form. Used only by
-    /// `#[ignore]`d CPU parity tests whose candle-autograd oracle is severed by
-    /// the kt forward flip (compile-only). Not used on any live path.
-    #[allow(dead_code)]
-    fn cpu_kt_to_candle_f32(t: &kiln_tensor::Tensor) -> Result<candle_core::Tensor> {
-        let dims = t.dims().to_vec();
-        let data = t
-            .to_dtype(kiln_tensor::DType::F32)?
-            .flatten_all()?
-            .to_vec1::<f32>()?;
-        // candle island (CPU host rebuild) — explicit candle CPU device.
-        tensor_from_vec(data, dims, &candle_core::Device::Cpu).map_err(Into::into)
-    }
+    // (#1082) Deleted dead `cpu_kt_to_candle_f32` helper (the last
+    // `tensor_from_vec` caller) — it was `#[allow(dead_code)]`, used only by
+    // `#[ignore]`d CPU parity tests whose candle-autograd oracle is severed.
 
     fn randn_like_seeded(
         rng: &mut StdRng,
@@ -10736,11 +10725,9 @@ pub(crate) mod tests {
             );
         }
 
-        let saved = safetensors_load_file(
+        // (#1082) kt-native adapter read-back.
+        let saved = kiln_tensor::safetensors::load_cpu(
             &adapter_dir.path().join("adapter_model.safetensors"),
-            // safetensors_load_file is a candle island (adapter I/O); it wants a
-            // candle device. (#1082)
-            &candle_core::Device::Cpu,
         )?;
         for module in ["in_proj_qkv", "in_proj_z", "out_proj"] {
             let key = format!(

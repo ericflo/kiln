@@ -32,7 +32,6 @@
 //! id), the bridge is the identity function and every call site keys on
 //! kt ids natively.
 
-use std::path::Path;
 
 // ---------------------------------------------------------------------------
 // (#1082) Wave E4 — bare type aliases now resolve to kt, matching the
@@ -47,20 +46,6 @@ pub(crate) type CdDevice = kiln_tensor::Device;
 pub(crate) type DType = kiln_tensor::DType;
 pub(crate) type TensorId = kiln_tensor::TensorId;
 
-// ---------------------------------------------------------------------------
-// (#1082) Candle island — safetensors I/O shims + generic constructors.
-//
-// These are intrinsically candle-API-specific (candle's `safetensors`
-// module, candle's `NdArray` / `WithDType` trait bounds) and have no
-// drop-in kt counterpart. They stay as explicit `candle_core::*` paths
-// (a candle island) while their `trainer.rs` callers are migrated off
-// candle in Wave E1. Delete once those callers flip.
-//
-// NOTE: `CdResult<T>` is candle's `Result`, used only by these shims.
-// ---------------------------------------------------------------------------
-
-/// candle `Result` — used by the candle-island safetensors shims below.
-pub(crate) type CdResult<T> = candle_core::Result<T>;
 
 /// candle `Shape` / `D` — candle island (#1082). Still named in the
 /// candle-authoritative helper signatures in `trainer.rs` (e.g.
@@ -77,46 +62,3 @@ pub(crate) type D = kiln_tensor::D;
 // call sites. No bare `GradStore` resolves to this facade anymore, so the
 // alias had zero callers and was removed.
 
-/// Allocate a candle Tensor from an in-memory `NdArray` value (scalar /
-/// slice / array). Candle island (#1082) — `trainer.rs` E1 migrates the
-/// caller off candle; the helper goes when the last caller flips.
-#[inline]
-pub(crate) fn tensor_new<A: candle_core::NdArray>(
-    value: A,
-    device: &candle_core::Device,
-) -> anyhow::Result<candle_core::Tensor> {
-    Ok(candle_core::Tensor::new(value, device)?)
-}
-
-/// Allocate a candle Tensor from a Vec + shape on `device`. Candle
-/// island (#1082) — see [`tensor_new`].
-#[inline]
-pub(crate) fn tensor_from_vec<T: candle_core::WithDType, S: Into<candle_core::Shape>>(
-    values: Vec<T>,
-    shape: S,
-    device: &candle_core::Device,
-) -> anyhow::Result<candle_core::Tensor> {
-    Ok(candle_core::Tensor::from_vec(values, shape, device)?)
-}
-
-/// Load a safetensors file into a HashMap<String, candle Tensor> on
-/// `device`. Candle island (#1082) — adapter on-disk format; migrates
-/// to `kt::safetensors::load_cpu` when the trainer's candle adapter I/O
-/// flips.
-#[inline]
-pub(crate) fn safetensors_load_file(
-    path: &Path,
-    device: &candle_core::Device,
-) -> CdResult<std::collections::HashMap<String, candle_core::Tensor>> {
-    candle_core::safetensors::load(path, device)
-}
-
-/// Save a HashMap<String, candle Tensor> as a safetensors file at
-/// `path`. Candle island (#1082) — see [`safetensors_load_file`].
-#[inline]
-pub(crate) fn safetensors_save_file(
-    tensors: &std::collections::HashMap<String, candle_core::Tensor>,
-    path: &Path,
-) -> CdResult<()> {
-    candle_core::safetensors::save(tensors, path)
-}
