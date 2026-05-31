@@ -17,8 +17,7 @@ use super::BackendRuntime;
 // substrate swaps (e.g. candle → objc2-metal) touch this single import
 // block instead of hundreds of scattered fully-qualified references.
 use kiln_tensor::metal_types::{
-    buffer_o_kt, sdpa, ComputePipeline, Library, MetalCompanion, MetalDevice, MetalRawDevice,
-    Storage,
+    buffer_o_kt, ComputePipeline, Library, MetalCompanion, MetalDevice, MetalRawDevice,
 };
 use kiln_tensor::MetalStorage;
 
@@ -102,43 +101,6 @@ fn kt_metal_alloc(
         kiln_tensor::TensorId::next(),
     )
     .map_err(|e| anyhow::anyhow!("kt_metal_alloc: {e}"))
-}
-
-#[inline]
-fn kt_layout_from_candle(l: &candle_core::Layout) -> kiln_tensor::Layout {
-    // `from_parts` only fails when shape.len() != strides.len(), which
-    // is structurally impossible coming from a candle Layout (both come
-    // from the same Shape). The unwrap is therefore total.
-    kiln_tensor::Layout::from_parts(
-        l.dims().to_vec(),
-        l.stride().to_vec(),
-        l.start_offset(),
-    )
-    .expect("candle Layout shape.len() == stride.len() by construction")
-}
-
-#[inline]
-fn kt_dtype_from_candle(d: candle_core::DType) -> kiln_tensor::DType {
-    // Covers every dtype currently named in `kiln-model::backend::metal`.
-    // Extend as new candle dtypes appear in BF16-quantized or paged-KV
-    // code paths.
-    match d {
-        candle_core::DType::F32 => kiln_tensor::DType::F32,
-        candle_core::DType::BF16 => kiln_tensor::DType::BF16,
-        candle_core::DType::F16 => kiln_tensor::DType::F16,
-        candle_core::DType::U32 => kiln_tensor::DType::U32,
-        candle_core::DType::U8 => kiln_tensor::DType::U8,
-        candle_core::DType::I64 => kiln_tensor::DType::I64,
-        // candle's I32 maps to kt's U32 (same 4-byte storage layout) —
-        // mirrors the convention in `kiln_kt_bridge::candle_dtype_to_kt`.
-        candle_core::DType::I32 => kiln_tensor::DType::U32,
-        // F64 has no kt counterpart yet; metal.rs never names it, so
-        // hitting this arm signals a previously-unseen path. Fail loudly.
-        other => panic!(
-            "kt_dtype_from_candle: candle dtype {:?} has no kiln_tensor::DType equivalent",
-            other
-        ),
-    }
 }
 
 const DISABLE_METAL_SDPA: &str = "KILN_DISABLE_METAL_SDPA";
@@ -246,14 +208,9 @@ impl MetalTransposedCoopGemvTile {
 
 #[derive(Debug)]
 pub struct MetalBackend {
-    /// Original candle Metal device. Retained alongside the kt-typed
-    /// device so trait methods that still consume `candle_core::Tensor`
-    /// parameters continue to dispatch through candle without bridging.
-    /// (#1082)
-    device: candle_core::Device,
-    /// `kiln_tensor::Device` form of `device`, cached at construction so
-    /// the `BackendRuntime::device()` accessor does not bridge per call.
-    /// (#1082)
+    /// The kt Metal device this backend dispatches on. (#1082: the
+    /// formerly-retained candle `device` field is gone — every trait
+    /// method is kt-native, so no candle handle is held.)
     device_kt: kiln_tensor::Device,
     /// Cached at construction to keep env-var reads off per-token support gates.
     disable: MetalKernelDisables,
@@ -288,15 +245,13 @@ impl MetalKernelDisables {
 }
 
 impl MetalBackend {
-    pub fn new(device: candle_core::Device) -> Self {
+    pub fn new(device: kiln_tensor::Device) -> Self {
         debug_assert!(
-            matches!(device, candle_core::Device::Metal(_)),
+            matches!(device, kiln_tensor::Device::Metal(_)),
             "MetalBackend created on non-Metal device"
         );
-        let device_kt = kiln_kt_bridge::kt_device_from_candle(&device);
         Self {
-            device,
-            device_kt,
+            device_kt: device,
             disable: MetalKernelDisables::from_env(),
         }
     }

@@ -1269,10 +1269,8 @@ pub fn for_device_kt(device: &kiln_tensor::Device) -> Arc<dyn BackendRuntime> {
         kiln_tensor::Device::Cuda(_) => Arc::new(cuda::CudaBackend::new(*device)),
         #[cfg(feature = "metal")]
         kiln_tensor::Device::Metal(_) => {
-            // MetalBackend::new still takes a candle Device; bridge (metal-only).
-            let cd =
-                kiln_kt_bridge::candle_device_from_kt(device).unwrap_or(candle_core::Device::Cpu);
-            Arc::new(metal::MetalBackend::new(cd))
+            // #1082: MetalBackend is kt-native — pass the kt device directly.
+            Arc::new(metal::MetalBackend::new(*device))
         }
         _ => {
             // Vulkan is detected at runtime (kt has a Vulkan variant but the
