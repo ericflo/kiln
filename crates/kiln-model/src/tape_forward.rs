@@ -3933,6 +3933,53 @@ impl BackwardOp for GqaExpandBackward {
 ///
 /// `Ok(None)` on any gate-off / non-CUDA / shape-envelope-miss / kt-borrow
 /// failure.
+/// kt-native GQA head-expand tape recorder (#1082 seam flip) — kt-only twin of
+/// [`try_tape_gqa_expand_cuda`]. Record-only: the forward expand is already done
+/// by the kt non-tape path; this records `GqaExpandBackward` (all-usize fields, no
+/// candle types) linking the kt `out` back to the kt `x`. No candle round-trip.
+pub fn try_tape_gqa_expand_kt(
+    x: &kiln_tensor::Tensor,
+    gqa_ratio: usize,
+    out: &kiln_tensor::Tensor,
+) -> Result<Option<kiln_tensor::Tensor>> {
+    if !tape_forward_enabled() {
+        return Ok(None);
+    }
+    if !matches!(x.device(), kiln_tensor::Device::Cuda(_))
+        || !matches!(out.device(), kiln_tensor::Device::Cuda(_))
+    {
+        return Ok(None);
+    }
+    if gqa_ratio <= 1 {
+        return Ok(None);
+    }
+    let (batch, seq_len, nk, head_dim) = match x.dims4() {
+        Ok(d) => d,
+        Err(_) => return Ok(None),
+    };
+    let nv = nk * gqa_ratio;
+    if out.dims() != [batch, seq_len, nv, head_dim].as_slice() {
+        return Ok(None);
+    }
+    let recorded = with_active_tape(|tape: &mut Tape| {
+        tape.record(
+            out,
+            &[x],
+            Box::new(GqaExpandBackward {
+                batch,
+                seq_len,
+                nk,
+                gqa_ratio,
+                head_dim,
+            }),
+        );
+    });
+    if recorded.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(out.clone()))
+}
+
 pub fn try_tape_gqa_expand_cuda(
     x: &Tensor,
     gqa_ratio: usize,

@@ -15396,41 +15396,24 @@ fn gated_deltanet_forward_decode_if(
                             // post-split q/k (and thence in_proj_qkv). No-op +
                             // candle fallback unless the gate is on + a tape
                             // scope is active.
+                            // #1082 seam flip: kt-native GqaExpandBackward recorder — no kt->candle->kt.
                             #[cfg(feature = "cuda")]
-                            let q_exp = if crate::tape_forward::tape_forward_enabled()
-                                && kiln_kt_bridge::tape_bridge::bridge_scope_active()
+                            let q_exp = match crate::tape_forward::try_tape_gqa_expand_kt(
+                                &q, gqa_ratio, &q_exp,
+                            )
+                            .context("gdn gqa-expand try_tape_gqa_expand_kt q")?
                             {
-                                let q_c = kt_logits_to_candle(&q)
-                                    .context("gdn gqa-expand kt->candle q (tape)")?;
-                                let qe_c = kt_logits_to_candle(&q_exp)
-                                    .context("gdn gqa-expand kt->candle q_exp (tape)")?;
-                                match crate::tape_forward::try_tape_gqa_expand_cuda(
-                                    &q_c, gqa_ratio, &qe_c,
-                                )? {
-                                    Some(t) => candle_to_kt_activation(&t)
-                                        .context("gdn gqa-expand candle->kt q (tape)")?,
-                                    None => q_exp,
-                                }
-                            } else {
-                                q_exp
+                                Some(t) => t,
+                                None => q_exp,
                             };
                             #[cfg(feature = "cuda")]
-                            let k_exp = if crate::tape_forward::tape_forward_enabled()
-                                && kiln_kt_bridge::tape_bridge::bridge_scope_active()
+                            let k_exp = match crate::tape_forward::try_tape_gqa_expand_kt(
+                                &k, gqa_ratio, &k_exp,
+                            )
+                            .context("gdn gqa-expand try_tape_gqa_expand_kt k")?
                             {
-                                let k_c = kt_logits_to_candle(&k)
-                                    .context("gdn gqa-expand kt->candle k (tape)")?;
-                                let ke_c = kt_logits_to_candle(&k_exp)
-                                    .context("gdn gqa-expand kt->candle k_exp (tape)")?;
-                                match crate::tape_forward::try_tape_gqa_expand_cuda(
-                                    &k_c, gqa_ratio, &ke_c,
-                                )? {
-                                    Some(t) => candle_to_kt_activation(&t)
-                                        .context("gdn gqa-expand candle->kt k (tape)")?,
-                                    None => k_exp,
-                                }
-                            } else {
-                                k_exp
+                                Some(t) => t,
+                                None => k_exp,
                             };
                             (q_exp, k_exp)
                         } else {
@@ -15818,37 +15801,20 @@ fn gated_deltanet_forward_decode_if(
             // recurrence path (qk_expanded == false). Off the BF16-prefill
             // training path (which sets qk_expanded == true) but wired for
             // parity across configs.
+            // #1082 seam flip: kt-native GqaExpandBackward recorder — no kt->candle->kt.
             #[cfg(feature = "cuda")]
-            let q_exp = if crate::tape_forward::tape_forward_enabled()
-                && kiln_kt_bridge::tape_bridge::bridge_scope_active()
+            let q_exp = match crate::tape_forward::try_tape_gqa_expand_kt(&q, gqa_ratio, &q_exp)
+                .context("gdn gqa-expand-recur try_tape_gqa_expand_kt q")?
             {
-                let q_c = kt_logits_to_candle(&q)
-                    .context("gdn gqa-expand-recur kt->candle q (tape)")?;
-                let qe_c = kt_logits_to_candle(&q_exp)
-                    .context("gdn gqa-expand-recur kt->candle q_exp (tape)")?;
-                match crate::tape_forward::try_tape_gqa_expand_cuda(&q_c, gqa_ratio, &qe_c)? {
-                    Some(t) => candle_to_kt_activation(&t)
-                        .context("gdn gqa-expand-recur candle->kt q (tape)")?,
-                    None => q_exp,
-                }
-            } else {
-                q_exp
+                Some(t) => t,
+                None => q_exp,
             };
             #[cfg(feature = "cuda")]
-            let k_exp = if crate::tape_forward::tape_forward_enabled()
-                && kiln_kt_bridge::tape_bridge::bridge_scope_active()
+            let k_exp = match crate::tape_forward::try_tape_gqa_expand_kt(&k, gqa_ratio, &k_exp)
+                .context("gdn gqa-expand-recur try_tape_gqa_expand_kt k")?
             {
-                let k_c = kt_logits_to_candle(&k)
-                    .context("gdn gqa-expand-recur kt->candle k (tape)")?;
-                let ke_c = kt_logits_to_candle(&k_exp)
-                    .context("gdn gqa-expand-recur kt->candle k_exp (tape)")?;
-                match crate::tape_forward::try_tape_gqa_expand_cuda(&k_c, gqa_ratio, &ke_c)? {
-                    Some(t) => candle_to_kt_activation(&t)
-                        .context("gdn gqa-expand-recur candle->kt k (tape)")?,
-                    None => k_exp,
-                }
-            } else {
-                k_exp
+                Some(t) => t,
+                None => k_exp,
             };
             Ok((q_exp, k_exp))
         }
