@@ -2190,6 +2190,86 @@ impl BackwardOp for FlashAttnBackward {
 /// when: the gate is off, no tape scope is active, the inputs leave the
 /// BF16/CUDA/contiguous/`head_dim∈{128,256}`/valid-GQA envelope, or a kt
 /// borrow fails.
+/// kt-native FlashAttention-2 tape recorder (#1082 seam flip) — kt-only twin of
+/// [`try_tape_flash_attn_cuda`]. q/k/v are already kt (recorded upstream outputs),
+/// so no candle bridging: runs `flash_attn_fwd_kt` and records the kt-native
+/// `FlashAttnBackward` (all kt-tensor fields) directly. The returned kt out lets the
+/// downstream reshape stay kt-native too (no kt->candle->kt at the attention seam).
+pub fn try_tape_flash_attn_kt(
+    q: &kiln_tensor::Tensor,
+    k: &kiln_tensor::Tensor,
+    v: &kiln_tensor::Tensor,
+    num_heads: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+) -> Result<Option<kiln_tensor::Tensor>> {
+    if !tape_forward_enabled() || !tape_flash_attn_enabled() {
+        return Ok(None);
+    }
+    if q.dtype() != kiln_tensor::DType::BF16
+        || k.dtype() != kiln_tensor::DType::BF16
+        || v.dtype() != kiln_tensor::DType::BF16
+        || !matches!(q.device(), kiln_tensor::Device::Cuda(_))
+        || !matches!(k.device(), kiln_tensor::Device::Cuda(_))
+        || !matches!(v.device(), kiln_tensor::Device::Cuda(_))
+        || !q.is_contiguous()
+        || !k.is_contiguous()
+        || !v.is_contiguous()
+        || !matches!(head_dim, 128 | 256)
+        || num_kv_heads == 0
+        || num_heads % num_kv_heads != 0
+    {
+        return Ok(None);
+    }
+    let Ok((bq, _sq, hq, dq_)) = q.dims4() else {
+        return Ok(None);
+    };
+    let Ok((bk, sk, hk, dk_)) = k.dims4() else {
+        return Ok(None);
+    };
+    let Ok((bv, sv, hv, dv_)) = v.dims4() else {
+        return Ok(None);
+    };
+    if bq != bk
+        || bq != bv
+        || sk != sv
+        || hq != num_heads
+        || hk != num_kv_heads
+        || hv != num_kv_heads
+        || dq_ != head_dim
+        || dk_ != head_dim
+        || dv_ != head_dim
+    {
+        return Ok(None);
+    }
+    let softmax_scale = 1.0 / (head_dim as f32).sqrt();
+    let causal = true;
+    match with_active_tape(|tape: &mut Tape| -> Result<_> {
+        let (out_kt, lse_kt) =
+            kiln_flash_attn::flash_attn_fwd_kt(q, k, v, softmax_scale, causal)
+                .map_err(|e| anyhow::anyhow!("kt flash_attn_fwd_kt: {e:?}"))?;
+        tape.record(
+            &out_kt,
+            &[q, k, v],
+            Box::new(FlashAttnBackward {
+                q: q.clone(),
+                k: k.clone(),
+                v: v.clone(),
+                out: out_kt.clone(),
+                softmax_lse: lse_kt,
+                scale: softmax_scale,
+                causal,
+                heads_q: num_heads,
+                heads_kv: num_kv_heads,
+            }),
+        );
+        Ok(out_kt)
+    }) {
+        Some(result) => Ok(Some(result?)),
+        None => Ok(None),
+    }
+}
+
 pub fn try_tape_flash_attn_cuda(
     q: &Tensor,
     k: &Tensor,
