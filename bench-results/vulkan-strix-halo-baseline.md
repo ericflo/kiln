@@ -108,6 +108,20 @@ end-to-end prefill timing still needs a kt/Vulkan-only bench path; do not count
 the existing release bench binary as proof for this item because it still links
 the old candle-facing app stack.
 
+**Update — kt/Vulkan-only microbench for the single-submit path:** added
+`crates/kiln-vulkan-kernel/examples/gdn_chunkwise_prefill_microbench.rs`, which
+uploads raw F32 inputs directly into `VkTensor`s and compares the previous
+per-dispatch Vulkan chunkwise path with the new single-submit path. The
+benchmark excludes input upload and includes output/intermediate allocation,
+command recording, queue submits, and GPU waits. `cargo tree -p
+kiln-vulkan-kernel --edges normal,build -i candle-core` prints nothing, so this
+measurement does not depend on the app-layer tensor stack.
+
+| shape | legacy per-dispatch | single-submit | speedup | correctness |
+|---|---:|---:|---:|---|
+| B=1, H=32, T=48, DK=128, DV=128, C=64 | 0.655 ms | 0.251 ms | **2.61x** | out/state max abs err 0 |
+| B=1, H=32, T=128, DK=128, DV=128, C=64 | 1.531 ms | 0.771 ms | **1.98x** | out/state max abs err 0 |
+
 Other proper work-packages for full saturation (per "max out the hardware in
 every config"):
 - **True multi-row batched resident decode** (bs>1 / continuous-batched is
