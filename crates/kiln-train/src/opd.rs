@@ -2117,15 +2117,10 @@ pub fn opd_train(
         );
     }
 
-    // (#1082) `embed_tokens.device()` is the kt Device. The OPD per-step
-    // forward/backward is a candle island (the OPD-loss tape shim + candle
-    // dispatch fns that take `&candle_core::Device`), so we bridge once to a
-    // candle `device` for those consumers. The kt-typed `TrainableLoraParams`
-    // constructors (`initialize_seeded` / `allocate_adamw_state`) take the kt
-    // device directly. Convert the candle island in the final pass.
+    // (#1082) `embed_tokens.device()` is the kt Device — threaded straight
+    // through. The per-step forward/backward (`opd_step_forward_backward_tape_authoritative`)
+    // now takes the kt device directly; the candle round-trip bridge is gone.
     let device_kt = weights.embed_tokens.device();
-    let device = kiln_kt_bridge::candle_device_from_kt(&device_kt)
-        .map_err(|e| anyhow!("opd_train: kt -> candle device: {e}"))?;
     let backend_rt = backend::for_device_kt(&device_kt);
 
     // Cache VRAM + base-model footprint estimate for the per-step
@@ -2726,7 +2721,7 @@ pub fn opd_train(
                                 weights,
                                 model_config,
                                 &params,
-                                &device,
+                                &device_kt,
                                 &head_t,
                                 teacher.clone(),
                                 &active_positions,
@@ -2932,7 +2927,7 @@ fn opd_step_forward_backward_tape_authoritative(
     weights: &kiln_model::forward::GpuWeights,
     model_config: &kiln_core::config::ModelConfig,
     params: &crate::trainer::TrainableLoraParams,
-    device: &candle_core::Device,
+    device: &kiln_tensor::Device,
     // (#1082 P-OPD) The frozen lm_head weight as a kt tensor, passed straight
     // through. The OPD scalar-loss tape root is now kt-native
     // (`try_tape_opd_scalar_mean_cuda_kt`), so it takes the kt `head_t`
@@ -2972,7 +2967,7 @@ fn opd_step_forward_backward_tape_authoritative(
             // thread it as `hidden` and keep the tape connected.
             let mut linear_state = kiln_model::forward::LinearAttentionState::new(
                 model_config,
-                &kiln_kt_bridge::kt_device_from_candle(device),
+                device,
             )
             .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("opd tape: linear_state: {e:#}")))?;
             let normed = model_forward_no_head(
@@ -4092,20 +4087,15 @@ mod tests {
 
         let backend = kiln_model::backend::for_device_kt(&device);
 
-        // opd_step_forward_backward_tape_authoritative still takes a candle device
-        // (it bridges the kt device to candle for `LinearAttentionState`); bridge
-        // the kt test device to candle for the call. (#1082 P-OPD) The OPD-loss
-        // tape root is now kt-native and takes the kt `head_t` DIRECTLY — the
-        // prior per-run kt->candle `head_t_candle` bridge (H8) is gone.
-        let device_cd = kiln_kt_bridge::candle_device_from_kt(&device)
-            .expect("opd test: kt->candle device bridge");
+        // (#1082) opd_step_forward_backward_tape_authoritative takes the kt device
+        // directly now — no candle bridge.
         let (loss_val, active_count, grads) = opd_step_forward_backward_tape_authoritative(
             &*backend,
             &input_ids,
             &weights,
             &config,
             &params,
-            &device_cd,
+            &device,
             &head_t,
             teacher,
             &active_positions,
