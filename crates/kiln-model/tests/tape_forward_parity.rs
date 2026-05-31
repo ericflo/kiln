@@ -1554,13 +1554,17 @@ fn tape_forward_add_matches_reference() {
     let (rows, cols) = (32usize, 2560usize);
     let (a, b) = build_add_inputs(&device, rows, cols);
 
-    let none_out = kiln_model::tape_forward::try_tape_add_cuda(&a, &b).expect("baseline ok");
+    // #1082: production uses the kt-native twin try_tape_add_kt.
+    let a_kt = kt_in(&a);
+    let b_kt = kt_in(&b);
+    let none_out = kiln_model::tape_forward::try_tape_add_kt(&a_kt, &b_kt).expect("baseline ok");
     assert!(none_out.is_none(), "no-scope path must be Ok(None)");
 
     let (res, tape) = kiln_model::tape_forward::with_thread_local_tape(|| {
-        kiln_model::tape_forward::try_tape_add_cuda(&a, &b)
+        kiln_model::tape_forward::try_tape_add_kt(&a_kt, &b_kt)
     });
-    let out = res.expect("tape ok").expect("Some(out)");
+    let out_kt = res.expect("tape ok").expect("Some(out)");
+    let out = candle_out(&out_kt);
     assert_eq!(tape.len(), 1, "add must record exactly one node");
     assert_eq!(tape.nodes()[0].input_ids.len(), 2, "add records two inputs (a, b)");
     assert_eq!(out.shape().dims(), &[rows, cols]);
@@ -1589,7 +1593,9 @@ fn tape_forward_add_short_circuits_without_scope() {
     unsafe {
         std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
     }
-    let out = kiln_model::tape_forward::try_tape_add_cuda(&a, &b).expect("call ok");
+    let a_kt = kt_in(&a);
+    let b_kt = kt_in(&b);
+    let out = kiln_model::tape_forward::try_tape_add_kt(&a_kt, &b_kt).expect("call ok");
     assert!(out.is_none(), "no active scope must short-circuit to Ok(None)");
 }
 
@@ -1610,8 +1616,10 @@ fn tape_backward_add_routes_grad_to_both_inputs() {
     let (rows, cols) = (32usize, 2560usize);
     let (a, b) = build_add_inputs(&device, rows, cols);
 
+    let a_kt = kt_in(&a);
+    let b_kt = kt_in(&b);
     let (res, tape) = kiln_model::tape_forward::with_thread_local_tape(|| {
-        kiln_model::tape_forward::try_tape_add_cuda(&a, &b)
+        kiln_model::tape_forward::try_tape_add_kt(&a_kt, &b_kt)
     });
     let _out = res.expect("fwd ok").expect("Some(out)");
     assert_eq!(tape.len(), 1);
