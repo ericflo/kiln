@@ -1368,7 +1368,10 @@ pub fn seed_vk_kv_cache_layer_blocks_from_legacy(
     // [block_idx*block_size, (block_idx+1)*block_size)). Slice
     // block-by-block — each block is small (block_size × kv_heads ×
     // head_dim × 4 bytes; ~64 KB on Qwen3.5-4B) and uploads to the
-    // resident pool's matching slot range.
+    // resident pool's matching slot range. The payloads are collected
+    // first so K/V for all active blocks land through one Vulkan
+    // transfer submit for this layer.
+    let mut block_payloads = Vec::with_capacity(block_ids.len());
     for &block_id in block_ids {
         let bid = block_id as usize;
         let slot_start = bid * block_size;
@@ -1390,9 +1393,13 @@ pub fn seed_vk_kv_cache_layer_blocks_from_legacy(
         let v_data: Vec<f32> = v_block_f32.to_vec1()?;
         let k_bytes = f32_slice_to_bytes(&k_data);
         let v_bytes = f32_slice_to_bytes(&v_data);
-        vk_cache.upload_layer_block_from_f32(vk_device, layer_idx, bid, &k_bytes, &v_bytes)?;
+        block_payloads.push((bid, k_bytes, v_bytes));
     }
-    Ok(())
+    let uploads: Vec<(usize, &[u8], &[u8])> = block_payloads
+        .iter()
+        .map(|(bid, k_bytes, v_bytes)| (*bid, k_bytes.as_slice(), v_bytes.as_slice()))
+        .collect();
+    vk_cache.upload_layer_blocks_from_f32(vk_device, layer_idx, &uploads)
 }
 
 /// Full-slab seed kept for callers that explicitly want the whole

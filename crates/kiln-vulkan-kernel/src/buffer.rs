@@ -1,7 +1,5 @@
 use anyhow::{Context, Result};
 use ash::vk;
-use std::mem::MaybeUninit;
-use std::ptr::write_bytes;
 use std::sync::Arc;
 
 /// Vulkan buffer wrapper for Kiln tensor data.
@@ -376,6 +374,89 @@ impl VulkanBuffer {
             device.destroy_command_pool(pool, None);
         }
         // Drop stagings here (their Drop releases the host-visible memory).
+        drop(stagings);
+        Ok(())
+    }
+
+    /// Batch-upload multiple payloads to destination offsets in a
+    /// single command buffer + single queue submission.
+    pub fn upload_data_at_offset_batch(
+        device: &Arc<ash::Device>,
+        host_mem_type: u32,
+        queue: vk::Queue,
+        queue_family_index: u32,
+        uploads: &[(&VulkanBuffer, u64, &[u8])],
+    ) -> Result<()> {
+        if uploads.is_empty() {
+            return Ok(());
+        }
+
+        let mut stagings: Vec<VulkanBuffer> = Vec::with_capacity(uploads.len());
+        for (idx, (dst, dst_offset, data)) in uploads.iter().enumerate() {
+            let end = dst_offset.checked_add(data.len() as u64).ok_or_else(|| {
+                anyhow::anyhow!("upload_data_at_offset_batch[{idx}]: offset overflow")
+            })?;
+            anyhow::ensure!(
+                end <= dst.size,
+                "upload_data_at_offset_batch[{idx}]: range [{dst_offset}, {end}) exceeds buffer size {}",
+                dst.size
+            );
+
+            let staging =
+                VulkanBuffer::create_host_visible(device, host_mem_type, data.len() as u64)?;
+            let mapped = unsafe {
+                device
+                    .map_memory(
+                        staging.memory,
+                        0,
+                        vk::WHOLE_SIZE,
+                        vk::MemoryMapFlags::empty(),
+                    )
+                    .map_err(|e| {
+                        anyhow::anyhow!("upload_data_at_offset_batch: map_memory failed: {:?}", e)
+                    })?
+            };
+            unsafe {
+                std::ptr::copy_nonoverlapping(data.as_ptr(), mapped as *mut u8, data.len());
+                device.unmap_memory(staging.memory);
+            }
+            stagings.push(staging);
+        }
+
+        let pool_info = make_pool_info(queue_family_index);
+        let pool = unsafe {
+            device
+                .create_command_pool(&pool_info, None)
+                .context("upload_data_at_offset_batch: create_command_pool")?
+        };
+        let alloc_info = make_alloc_info(pool);
+        let command_buffers =
+            crate::vk_raw::allocate_command_buffers(device.handle(), &alloc_info, 1)
+                .context("upload_data_at_offset_batch: allocate_command_buffers")?;
+        let cmd = command_buffers[0];
+        unsafe {
+            device
+                .begin_command_buffer(cmd, &make_begin_info())
+                .context("upload_data_at_offset_batch: begin_command_buffer")?;
+            for (i, (dst, dst_offset, data)) in uploads.iter().enumerate() {
+                let copy = vk::BufferCopy::default()
+                    .src_offset(0)
+                    .dst_offset(*dst_offset)
+                    .size(data.len() as u64);
+                device.cmd_copy_buffer(cmd, stagings[i].buffer, dst.buffer, &[copy]);
+            }
+            device
+                .end_command_buffer(cmd)
+                .context("upload_data_at_offset_batch: end_command_buffer")?;
+            device
+                .queue_submit(queue, &[make_submit_info(&[cmd])], vk::Fence::null())
+                .context("upload_data_at_offset_batch: queue_submit")?;
+            device
+                .queue_wait_idle(queue)
+                .context("upload_data_at_offset_batch: queue_wait_idle")?;
+            device.free_command_buffers(pool, &command_buffers);
+            device.destroy_command_pool(pool, None);
+        }
         drop(stagings);
         Ok(())
     }
