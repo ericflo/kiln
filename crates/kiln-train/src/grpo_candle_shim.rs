@@ -822,10 +822,24 @@ mod tests {
         let logits_candle =
             kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&logits_kt).expect("logits -> candle");
 
-        // Reference log-probs: a detached constant [num_active] vector. Use a
-        // nonzero, slightly-varying ref so the IS ratio != 1 (exercises the
-        // ratio / clip path for the K1 variant).
-        let ref_host: Vec<f32> = (0..num_active).map(|a| -1.0 - 0.1 * a as f32).collect();
+        // Reference log-probs: a detached constant [num_active] vector built from
+        // the fixture's OWN policy log-probs so the IS ratio r = exp(plp - ref) =
+        // exp(0.1) ≈ 1.105 lands INSIDE the clip range [1-clip_low, 1+clip_high] =
+        // [0.8, 1.2]. With random logits and an arbitrary fixed ref the ratio is
+        // ~exp(-1.8) ≈ 0.17 (far below the 0.8 floor), which fully clips the PPO
+        // surrogate into a flat region → ZERO gradient everywhere → a vacuous
+        // test. Keeping r in-range leaves the surrogate UNCLIPPED (nonzero grad)
+        // and gives log_ratio=0.1 to exercise the K1 KL term.
+        let plp_fixture: Vec<f32> =
+            token_log_probs(&logits_kt, &input_ids, &action_mask, &device_kt)
+                .expect("fixture token_log_probs")
+                .to_dtype(KtDType::F32)
+                .expect("plp f32")
+                .flatten_all()
+                .expect("plp flat")
+                .to_vec1::<f32>()
+                .expect("plp host");
+        let ref_host: Vec<f32> = plp_fixture.iter().map(|&p| p - 0.1).collect();
         let ref_kt =
             KtTensor::from_vec_on(device_kt, ref_host, vec![num_active]).expect("ref kt");
         let ref_candle =
