@@ -4,28 +4,49 @@
 //! matmul on Metal (matmul has no native Metal kernel → it ran the GEMM on
 //! the CPU). This is the compute-bound path: prefill QKV/O, MLP gate/up/down
 //! at seq>1, the LM head, and any bs>1 decode. It uses Apple's matrix units
-//! via `simdgroup_float8x8` (NOT candle's `call_mlx_gemm`) — kiln owns the
-//! MSL and dispatches it through objc2-metal via the `MetalCompanion`.
+//! via `simdgroup_matrix` — kiln owns the MSL ([`gen_steel_msl`]) and
+//! dispatches it through objc2-metal via the `MetalCompanion` (NOT candle's
+//! `call_mlx_gemm`).
 //!
-//! Design (judge-panel synthesized): `C[M,N] = A[M,K] @ B[K,N]`, BF16 in/out,
-//! **F32 accumulation** (the matrix-unit FMA), with the weight pre-transposed
-//! to `B=[K,N]` (N-contiguous) so both operands stage row-major-coalesced. A
-//! 64×64 output tile per threadgroup (4 simdgroups, each owning a 32×32
-//! subtile = 4×4 array of 8×8 F32 accumulators), K-tiled by 8 through
-//! threadgroup memory. Inputs are staged to threadgroup **F32** (the
-//! cooperative load casts BF16→F32) so the matrix path is unambiguously
-//! F32×F32→F32 — there is no `simdgroup_matrix<bfloat>` MMA overload; you
-//! load into `simdgroup_float8x8` and the load up-converts.
+//! The primary kernel is the **kiln steel GEMM** ([`gen_steel_msl`]): a
+//! specialized port of MLX's steel_gemm technique. `C[M,N] = A[M,K] @ B[K,N]`,
+//! BF16 in/out, **F32 accumulation**, weight pre-transposed to `B=[K,N]`. Its
+//! three load-bearing techniques (vs the ~12x-slower naive kernel that remains
+//! the arbitrary-K fallback below):
 //!
-//! M=1 decode (memory-bound GEMV) is left to the model's
-//! `metal_transposed_coop_gemv` fast path; this GEMM handles M=1 correctly
-//! too (it just pads to an 8-row tile) but the matrix units idle 7/8 there,
-//! so the decode projection path does not route here.
+//! 1. **BF16 staging + manual F32 fragment fill** via `thread_elements()` —
+//!    the MMA runs on `simdgroup_matrix<float>` (fast), never the M1-emulated
+//!    `simdgroup_matrix<bfloat>` (~5x slower).
+//! 2. **Direct register→device store** (no F32 `Cs` round-trip → ~5 KiB
+//!    threadgroup → high occupancy).
+//! 3. **`unroll(full)` on the fragment loops** so `results[]`/`Af[]`/`Bf[]`
+//!    stay register-resident — without it, TM*TN≥16 spills to memory and
+//!    collapses to ~40 GFLOP/s.
+//!
+//! On the M1 at the QKV prefill shape: ~1589 GFLOP/s (89% of candle's MLX
+//! reference; the naive kernel was ~140). See [`STEEL_CFG`] for tuning.
+//!
+//! M=1 decode (memory-bound GEMV) is handled correctly here (boundary-tile
+//! path) but the matrix units idle, so the model's `metal_transposed_coop_gemv`
+//! remains the production decode-projection fast path.
 
 use std::sync::Arc;
 
 use crate::metal_types::{buffer_o_kt, ComputePipeline};
 use crate::{DType, Error, MetalStorage, Result};
+
+/// Compile options matching candle's GEMM path: fast math + fast FP
+/// functions. The default (`None`) compile path is precise/relaxed; the
+/// MLX reference is compiled with these, so the kiln steel kernel must
+/// match to be measured on equal footing (and to let the compiler use the
+/// cheaper FP intrinsics in the hot MMA loop).
+fn fast_compile_options() -> objc2::rc::Retained<objc2_metal::MTLCompileOptions> {
+    use objc2_metal::{MTLCompileOptions, MTLMathFloatingPointFunctions, MTLMathMode};
+    let opts = MTLCompileOptions::new();
+    opts.setMathMode(MTLMathMode::Fast);
+    opts.setMathFloatingPointFunctions(MTLMathFloatingPointFunctions::Fast);
+    opts
+}
 
 const KILN_GEMM_MSL: &str = r#"
 #include <metal_stdlib>
@@ -141,14 +162,18 @@ kernel void kiln_gemm_bf16(
 const TILE: usize = 64; // BM == BN (naive fallback)
 const TG_THREADS: usize = 128;
 
-/// Production config for the kiln steel GEMM. `BM=BN=32, BK=16, WM=WN=2`
-/// keeps `TM*TN == 4` simdgroup-matrix accumulators per simdgroup — below
-/// the M1 register-spill cliff (TM*TN=8 → ~2x slower, =16 → ~30x slower in
-/// the sweep) — and measured **~1190 GFLOP/s** at the QKV prefill shape
-/// (vs candle's MLX reference ~1788; the naive kernel was ~140).
+/// Production config for the kiln steel GEMM: `BM=BN=64, BK=16, WM=WN=2`
+/// (TM*TN=16 accumulators/simdgroup, 128 threads). With the `unroll(full)`
+/// pragmas keeping the fragment arrays register-resident, this measured
+/// **~1589 GFLOP/s** at the QKV prefill shape — 89% of candle's MLX
+/// reference (~1777) and 11x the naive kernel (~140). It beats the smaller
+/// 32x32 tile (~1213) because the larger 64x64 tile has higher arithmetic
+/// intensity (more reuse per threadgroup-memory load). TM*TN=32 (e.g.
+/// WM=1,WN=2 — MLX's own generic pick) still register-spills here (~43),
+/// so 64x64 W2x2 is the kiln optimum on the M1.
 const STEEL_CFG: GemmCfg = GemmCfg {
-    bm: 32,
-    bn: 32,
+    bm: 64,
+    bn: 64,
     bk: 16,
     wm: 2,
     wn: 2,
@@ -172,9 +197,10 @@ fn steel_pipeline(metal: &MetalStorage) -> Result<ComputePipeline> {
         }
     }
     let msl = gen_steel_msl(&STEEL_CFG);
+    let opts = fast_compile_options();
     let lib = companion
         .device()
-        .new_library_with_source(&msl, None)
+        .new_library_with_source(&msl, Some(&opts))
         .map_err(|e| Error::Msg(format!("metal_matmul: compile kiln_gemm library: {e:?}")))?;
     let func = lib
         .get_function("kiln_gemm", None)
@@ -635,17 +661,17 @@ kernel void kiln_gemm(
 
         // ---- load A tile [BM][BK] (rows=M, cols=K) ----
         if (a_full) {{
-            #pragma unroll
+            #pragma clang loop unroll(full)
             for (uint i = 0; i < {n_rows_a}; i++) {{
                 uint row = bi_a + i * {trows_a};
                 *((threadgroup VecA*)(As + row * LDA + bj_a)) =
                     *((const device VecA*)(Ab + (size_t)row * K + k0 + bj_a));
             }}
         }} else {{
-            #pragma unroll
+            #pragma clang loop unroll(full)
             for (uint i = 0; i < {n_rows_a}; i++) {{
                 uint row = bi_a + i * {trows_a};
-                #pragma unroll
+                #pragma clang loop unroll(full)
                 for (uint v = 0; v < {vec_a}; v++) {{
                     As[row * LDA + bj_a + v] =
                         (row < tgp_bm) ? Ab[(size_t)row * K + k0 + bj_a + v] : (bfloat)0;
@@ -655,17 +681,17 @@ kernel void kiln_gemm(
 
         // ---- load B tile [BK][BN] (rows=K, cols=N) ----
         if (b_full) {{
-            #pragma unroll
+            #pragma clang loop unroll(full)
             for (uint i = 0; i < {n_rows_b}; i++) {{
                 uint row = bi_b + i * {trows_b};
                 *((threadgroup VecB*)(Bs + row * LDB + bj_b)) =
                     *((const device VecB*)(Bb + (size_t)(k0 + row) * N + bj_b));
             }}
         }} else {{
-            #pragma unroll
+            #pragma clang loop unroll(full)
             for (uint i = 0; i < {n_rows_b}; i++) {{
                 uint row = bi_b + i * {trows_b};
-                #pragma unroll
+                #pragma clang loop unroll(full)
                 for (uint v = 0; v < {vec_b}; v++) {{
                     Bs[row * LDB + bj_b + v] =
                         ((bj_b + v) < tgp_bn) ? Bb[(size_t)(k0 + row) * N + bj_b + v] : (bfloat)0;
@@ -680,24 +706,24 @@ kernel void kiln_gemm(
         threadgroup const bfloat* Bs_p = Bs + Bs_off;
         simdgroup_matrix<float, 8, 8> Af[TM];
         simdgroup_matrix<float, 8, 8> Bf[TN];
-        #pragma unroll
+        #pragma clang loop unroll(full)
         for (uint kk = 0; kk < BK; kk += 8) {{
             simdgroup_barrier(mem_flags::mem_none);
-            #pragma unroll
+            #pragma clang loop unroll(full)
             for (uint i = 0; i < TM; i++) {{
                 Af[i].thread_elements()[0] = (float)As_p[i * SIMD_STRIDE_A + 0];
                 Af[i].thread_elements()[1] = (float)As_p[i * SIMD_STRIDE_A + 1];
             }}
             simdgroup_barrier(mem_flags::mem_none);
-            #pragma unroll
+            #pragma clang loop unroll(full)
             for (uint j = 0; j < TN; j++) {{
                 Bf[j].thread_elements()[0] = (float)Bs_p[j * SIMD_STRIDE_B + 0];
                 Bf[j].thread_elements()[1] = (float)Bs_p[j * SIMD_STRIDE_B + 1];
             }}
             simdgroup_barrier(mem_flags::mem_none);
-            #pragma unroll
+            #pragma clang loop unroll(full)
             for (uint i = 0; i < TM; i++) {{
-                #pragma unroll
+                #pragma clang loop unroll(full)
                 for (uint j = 0; j < TN; j++) {{
                     uint js = (i % 2) ? (TN - 1 - j) : j;
                     simdgroup_multiply_accumulate(
@@ -712,9 +738,9 @@ kernel void kiln_gemm(
     // ---- store accumulators directly to device ----
     device bfloat* Dp = Db + (sm + tm) * N + (tn + sn);
     if (a_full && b_full) {{
-        #pragma unroll
+        #pragma clang loop unroll(full)
         for (uint i = 0; i < TM; i++) {{
-            #pragma unroll
+            #pragma clang loop unroll(full)
             for (uint j = 0; j < TN; j++) {{
                 thread const auto& acc = results[i * TN + j].thread_elements();
                 uint off = i * TM_STRIDE * N + j * TN_STRIDE;
@@ -725,10 +751,10 @@ kernel void kiln_gemm(
     }} else {{
         int rem_y = (int)tgp_bm - (int)(sm + tm);
         int rem_x = (int)tgp_bn - (int)(tn + sn);
-        #pragma unroll
+        #pragma clang loop unroll(full)
         for (uint i = 0; i < TM; i++) {{
             if ((int)(i * TM_STRIDE) < rem_y) {{
-                #pragma unroll
+                #pragma clang loop unroll(full)
                 for (uint j = 0; j < TN; j++) {{
                     thread const auto& acc = results[i * TN + j].thread_elements();
                     uint off = i * TM_STRIDE * N + j * TN_STRIDE;
@@ -875,8 +901,9 @@ pub fn bench_steel_cfg(c: &GemmCfg, m: usize, k: usize, n: usize, iters: usize) 
     let companion = crate::primary_metal_companion(0)?;
     let device = companion.device();
     let msl = gen_steel_msl(c);
+    let opts = fast_compile_options();
     let lib = device
-        .new_library_with_source(&msl, None)
+        .new_library_with_source(&msl, Some(&opts))
         .map_err(|e| Error::Msg(format!("steel compile {}: {e:?}", c.label())))?;
     let func = lib
         .get_function("kiln_gemm", None)
