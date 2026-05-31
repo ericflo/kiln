@@ -391,36 +391,54 @@ impl VulkanBuffer {
             return Ok(());
         }
 
-        let mut stagings: Vec<VulkanBuffer> = Vec::with_capacity(uploads.len());
+        let total_staging_bytes = uploads.iter().try_fold(0u64, |acc, (_, _, data)| {
+            acc.checked_add(data.len() as u64)
+                .ok_or_else(|| anyhow::anyhow!("upload_data_at_offset_batch: staging size overflow"))
+        })?;
+        anyhow::ensure!(
+            total_staging_bytes > 0,
+            "upload_data_at_offset_batch: total payload size must be non-zero"
+        );
+        let staging = VulkanBuffer::create_host_visible(device, host_mem_type, total_staging_bytes)?;
+        let mapped = unsafe {
+            device
+                .map_memory(
+                    staging.memory,
+                    0,
+                    vk::WHOLE_SIZE,
+                    vk::MemoryMapFlags::empty(),
+                )
+                .map_err(|e| {
+                    anyhow::anyhow!("upload_data_at_offset_batch: map_memory failed: {:?}", e)
+                })?
+        };
+        let mut src_offsets = Vec::with_capacity(uploads.len());
+        let mut src_offset = 0u64;
         for (idx, (dst, dst_offset, data)) in uploads.iter().enumerate() {
             let end = dst_offset.checked_add(data.len() as u64).ok_or_else(|| {
                 anyhow::anyhow!("upload_data_at_offset_batch[{idx}]: offset overflow")
             })?;
             anyhow::ensure!(
+                !data.is_empty(),
+                "upload_data_at_offset_batch[{idx}]: payload must be non-empty"
+            );
+            anyhow::ensure!(
                 end <= dst.size,
                 "upload_data_at_offset_batch[{idx}]: range [{dst_offset}, {end}) exceeds buffer size {}",
                 dst.size
             );
-
-            let staging =
-                VulkanBuffer::create_host_visible(device, host_mem_type, data.len() as u64)?;
-            let mapped = unsafe {
-                device
-                    .map_memory(
-                        staging.memory,
-                        0,
-                        vk::WHOLE_SIZE,
-                        vk::MemoryMapFlags::empty(),
-                    )
-                    .map_err(|e| {
-                        anyhow::anyhow!("upload_data_at_offset_batch: map_memory failed: {:?}", e)
-                    })?
-            };
+            src_offsets.push(src_offset);
             unsafe {
-                std::ptr::copy_nonoverlapping(data.as_ptr(), mapped as *mut u8, data.len());
-                device.unmap_memory(staging.memory);
+                std::ptr::copy_nonoverlapping(
+                    data.as_ptr(),
+                    (mapped as *mut u8).add(src_offset as usize),
+                    data.len(),
+                );
             }
-            stagings.push(staging);
+            src_offset += data.len() as u64;
+        }
+        unsafe {
+            device.unmap_memory(staging.memory);
         }
 
         let pool_info = make_pool_info(queue_family_index);
@@ -440,10 +458,10 @@ impl VulkanBuffer {
                 .context("upload_data_at_offset_batch: begin_command_buffer")?;
             for (i, (dst, dst_offset, data)) in uploads.iter().enumerate() {
                 let copy = vk::BufferCopy::default()
-                    .src_offset(0)
+                    .src_offset(src_offsets[i])
                     .dst_offset(*dst_offset)
                     .size(data.len() as u64);
-                device.cmd_copy_buffer(cmd, stagings[i].buffer, dst.buffer, &[copy]);
+                device.cmd_copy_buffer(cmd, staging.buffer, dst.buffer, &[copy]);
             }
             device
                 .end_command_buffer(cmd)
@@ -457,7 +475,7 @@ impl VulkanBuffer {
             device.free_command_buffers(pool, &command_buffers);
             device.destroy_command_pool(pool, None);
         }
-        drop(stagings);
+        drop(staging);
         Ok(())
     }
 
