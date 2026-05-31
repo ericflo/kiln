@@ -858,7 +858,7 @@ impl BatchingEngineActor {
                     self.snapshot.total_errors += 1;
                     let _ = queued
                         .response_tx
-                        .blocking_send(EngineEvent::Error(err.to_string()));
+                        .blocking_send(EngineEvent::Error(format!("{err:#}")));
                 }
             }
         }
@@ -936,7 +936,7 @@ impl BatchingEngineActor {
                 }
                 Ok(false) => {}
                 Err(err) => {
-                    self.finish_one_with_error(idx, err.to_string());
+                    self.finish_one_with_error(idx, format!("{err:#}"));
                     continue;
                 }
             }
@@ -945,7 +945,7 @@ impl BatchingEngineActor {
             {
                 Ok(count) => count,
                 Err(err) => {
-                    self.finish_one_with_error(idx, err.to_string());
+                    self.finish_one_with_error(idx, format!("{err:#}"));
                     continue;
                 }
             };
@@ -976,7 +976,7 @@ impl BatchingEngineActor {
                 }
                 Ok(None) => {}
                 Err(err) => {
-                    self.finish_one_with_error(idx, err.to_string());
+                    self.finish_one_with_error(idx, format!("{err:#}"));
                     continue;
                 }
             }

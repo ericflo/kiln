@@ -12,11 +12,18 @@
 //
 // Layout:
 //   q, k, v, out : `[B, T, H, dh]` (token-major), F32, row-major
-// One workgroup per (q_row, head, batch). 128 threads per workgroup —
-// matches Qwen3.5's head_dim. For other head_dim the threads with
-// `tid >= head_dim` fall out of the parallel dot product but still
-// participate in barriers + softmax updates so the workgroup stays
-// uniform-control-flow.
+// One workgroup per (q_row, head, batch). 128 threads per workgroup.
+//
+// head_dim support (#1082 Vulkan): each thread owns a GRID-STRIDED set of
+// head_dim elements `d = tid, tid+128, tid+256, ...` (`ELEMS_PER_THREAD`
+// of them). With 128 threads this covers head_dim up to
+// `128 * ELEMS_PER_THREAD`. Qwen3.5-4B uses head_dim=256, so two elements
+// per thread. The previous kernel hard-assumed head_dim <= 128 (one thread
+// per element) and silently dropped the upper half of every Q/K/V vector
+// for the target model — making the Vulkan SDPA never engage for
+// Qwen3.5-4B (it bailed at the `head_dim > 128` guard and fell through to
+// the manual CPU SDPA fallback). 128 stays the workgroup size because it is
+// universally supported and one tree-reduction step cheaper than 256.
 //
 // Push constants:
 //   batch, seq_len, num_heads, head_dim, softmax_scale (f32 bits),
@@ -26,6 +33,11 @@
 #extension GL_EXT_control_flow_attributes : enable
 
 layout(local_size_x = 128, local_size_y = 1, local_size_z = 1) in;
+
+// Max head_dim a single thread spans = 128 * ELEMS_PER_THREAD. Bump in
+// lockstep with the `head_dim` guard in `dispatch_sdpa_prefill_f32_bytes`.
+#define WG 128u
+#define ELEMS_PER_THREAD 2
 
 layout(push_constant) uniform Parameters {
     uint batch;
@@ -56,23 +68,36 @@ void main() {
     uint stride_batch = seq_len * stride_token;
     uint q_base = batch_idx * stride_batch + q_idx * stride_token + head * head_dim;
 
-    // Each thread caches one Q[d] in register.
-    float q_val = (tid < head_dim) ? data_q[q_base + tid] : 0.0;
+    // Each thread caches its grid-strided Q[d] elements in registers.
+    float q_val[ELEMS_PER_THREAD];
+    [[unroll]] for (uint e = 0u; e < uint(ELEMS_PER_THREAD); e++) {
+        uint d = tid + e * WG;
+        q_val[e] = (d < head_dim) ? data_q[q_base + d] : 0.0;
+    }
 
     // Online-softmax accumulators. All threads compute the same
     // (max_logit, sum_logit) — they're derived from a workgroup-wide
     // reduction, so no divergence — but each thread keeps its own
-    // out_acc for output element `out[b, q, h, tid]`.
+    // out_acc[e] for output elements `out[b, q, h, tid + e*WG]`.
     float max_logit = -1.0e30;
     float sum_logit = 0.0;
-    float out_acc   = 0.0;
+    float out_acc[ELEMS_PER_THREAD];
+    [[unroll]] for (uint e = 0u; e < uint(ELEMS_PER_THREAD); e++) {
+        out_acc[e] = 0.0;
+    }
 
     uint k_max = (causal != 0u) ? (q_idx + 1u) : seq_len;
     for (uint k_idx = 0u; k_idx < k_max; k_idx++) {
         uint k_base = batch_idx * stride_batch + k_idx * stride_token + head * head_dim;
 
-        // ---- Q.K parallel reduction over head_dim.
-        float term = (tid < head_dim) ? (q_val * data_k[k_base + tid]) : 0.0;
+        // ---- Q.K partial dot over this thread's grid-strided elements.
+        float term = 0.0;
+        [[unroll]] for (uint e = 0u; e < uint(ELEMS_PER_THREAD); e++) {
+            uint d = tid + e * WG;
+            if (d < head_dim) {
+                term += q_val[e] * data_k[k_base + d];
+            }
+        }
         reduce_sh[tid] = term;
         barrier();
         // Tree reduction. local_size_x = 128 → first stride is 64.
@@ -89,9 +114,12 @@ void main() {
         float beta  = exp(logit - new_max);
         sum_logit = sum_logit * alpha + beta;
 
-        if (tid < head_dim) {
-            float v_val = data_v[k_base + tid];
-            out_acc = out_acc * alpha + beta * v_val;
+        [[unroll]] for (uint e = 0u; e < uint(ELEMS_PER_THREAD); e++) {
+            uint d = tid + e * WG;
+            if (d < head_dim) {
+                float v_val = data_v[k_base + d];
+                out_acc[e] = out_acc[e] * alpha + beta * v_val;
+            }
         }
         max_logit = new_max;
 
@@ -99,7 +127,10 @@ void main() {
         barrier();
     }
 
-    if (tid < head_dim) {
-        data_out[q_base + tid] = out_acc / sum_logit;
+    [[unroll]] for (uint e = 0u; e < uint(ELEMS_PER_THREAD); e++) {
+        uint d = tid + e * WG;
+        if (d < head_dim) {
+            data_out[q_base + d] = out_acc[e] / sum_logit;
+        }
     }
 }

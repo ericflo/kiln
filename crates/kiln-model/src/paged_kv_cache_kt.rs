@@ -971,6 +971,32 @@ impl PagedKvCacheKt {
             .map_err(|e| anyhow::anyhow!("kt pkv write_native: k.dim(2): {e}"))?;
         let (k_pool, v_pool) = &self.layers[layer_idx];
 
+        // (#1082 Vulkan/non-CUDA) The pool is allocated in the cache's storage
+        // dtype (BF16 for Qwen3.5-4B — matches the CUDA cache + the memory
+        // budget). The non-CUDA forward can hand us F32 K/V (the Vulkan
+        // attention path computes K/V projections in F32). `slice_set` requires
+        // matching dtypes, so cast K/V to the pool dtype before scattering —
+        // mirroring the CUDA fast paths that require BF16 K/V. A no-op clone
+        // (Arc bump) when the dtypes already match (e.g. CPU BF16 fixtures).
+        let k_cast;
+        let k = if k.dtype() != k_pool.dtype() {
+            k_cast = k
+                .to_dtype(k_pool.dtype())
+                .map_err(|e| anyhow::anyhow!("kt pkv write_native: cast k to pool dtype: {e}"))?;
+            &k_cast
+        } else {
+            k
+        };
+        let v_cast;
+        let v = if v.dtype() != v_pool.dtype() {
+            v_cast = v
+                .to_dtype(v_pool.dtype())
+                .map_err(|e| anyhow::anyhow!("kt pkv write_native: cast v to pool dtype: {e}"))?;
+            &v_cast
+        } else {
+            v
+        };
+
         if new_len == 1 {
             let slot = block_table
                 .slot_for(start_pos, self.block_size)

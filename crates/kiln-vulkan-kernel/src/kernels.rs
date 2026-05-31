@@ -9811,9 +9811,13 @@ pub fn dispatch_sdpa_prefill_f32_bytes(
         v_data.len(),
         expected_bytes,
     );
+    // The shader spreads head_dim over 128 threads with ELEMS_PER_THREAD=2
+    // grid-strided elements each, so it covers head_dim up to 256 (Qwen3.5-4B
+    // uses head_dim=256). Bump ELEMS_PER_THREAD in the shader in lockstep to
+    // raise this. (#1082 Vulkan SDPA head_dim=256 support.)
     anyhow::ensure!(
-        head_dim <= 128,
-        "sdpa_prefill_f32: head_dim {head_dim} > 128 (workgroup size limit)"
+        head_dim <= 256,
+        "sdpa_prefill_f32: head_dim {head_dim} > 256 (shader covers 128 threads × 2 elems)"
     );
     // Vulkan spec only guarantees `maxComputeWorkGroupCount[i] >= 65535`
     // per axis. The dispatch grid is (seq_len, num_heads, batch); if any

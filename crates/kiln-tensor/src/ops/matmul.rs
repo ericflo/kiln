@@ -186,7 +186,7 @@ fn validate(a: &Tensor, b: &Tensor) -> Result<()> {
     }
     if a.dtype() != b.dtype() {
         bail!(
-            "MatmulOp: dtype mismatch: a={}, b={} (Phase 1.18 requires equal dtypes)",
+            "MatmulOp: dtype mismatch: a={} {a_shape:?}, b={} {b_shape:?} (Phase 1.18 requires equal dtypes)",
             a.dtype(),
             b.dtype()
         );

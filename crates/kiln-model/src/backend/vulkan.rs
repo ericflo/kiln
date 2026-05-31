@@ -1125,9 +1125,13 @@ impl VulkanBackend {
             .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
 
         let (batch, seq_len, num_heads, head_dim) = q.dims4()?;
-        // sdpa_prefill_f32.comp uses local_size_x=128. Larger head_dim
-        // would need a multi-pass reduction the v1 kernel doesn't do.
-        if head_dim > 128 {
+        // sdpa_prefill_f32.comp uses local_size_x=128 with ELEMS_PER_THREAD=2
+        // grid-strided head_dim elements per thread → covers head_dim up to
+        // 256, which is Qwen3.5-4B's head_dim. (#1082: the previous `> 128`
+        // bound made this kernel decline the target model entirely, falling
+        // through to the manual CPU SDPA — which then hit a strict-kt F32/BF16
+        // matmul mismatch.)
+        if head_dim > 256 {
             return Ok(None);
         }
 
@@ -1974,7 +1978,20 @@ impl BackendRuntime for VulkanBackend {
         causal: bool,
     ) -> Result<Option<kiln_tensor::Tensor>> {
         // kt guard read directly off the kt args (before the bridge).
-        if q.dtype() != kiln_tensor::DType::BF16 || !self.has_vulkan() {
+        // (#1082 Vulkan) Accept F32 *or* BF16 Q: the Vulkan full-attention
+        // forward computes its projections in F32 (`linear_decode` is F32-in/
+        // F32-out), so q arrives F32 here — the previous BF16-only guard
+        // (a CUDA-style assumption) rejected the target model's activations
+        // and silently fell the attention through to the manual CPU SDPA,
+        // which then tripped the strict-kt F32/BF16 matmul mismatch.
+        // `flash_attn_prefill_vulkan` upcasts BF16→F32 internally and returns
+        // in the input dtype, so both are correct.
+        if !self.has_vulkan()
+            || !matches!(
+                q.dtype(),
+                kiln_tensor::DType::F32 | kiln_tensor::DType::BF16
+            )
+        {
             return Ok(None);
         }
         // Bridge kt args -> candle locals (CPU host round-trip; the Vulkan
