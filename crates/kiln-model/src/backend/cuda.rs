@@ -1688,15 +1688,11 @@ mod tests {
     use super::*;
 
     fn test_backend() -> CudaBackend {
-        // Test mock uses a CPU candle device because the unit tests in
-        // this module only exercise the candle-typed surface; the
-        // device_kt field tracks it via the same bridge the production
-        // constructor uses. (#1082)
-        let device = candle_core::Device::Cpu;
-        let device_kt = kiln_kt_bridge::kt_device_from_candle(&device);
+        // Test mock on a CPU kt device — the unit tests in this module only
+        // exercise the kt-typed surface. (#1082 DoD-100 step 4: CudaBackend's
+        // candle `device` field was dropped; `device_kt` is the sole device.)
         CudaBackend {
-            device,
-            device_kt,
+            device_kt: kiln_tensor::Device::Cpu,
             gdn_enabled: false,
             gdn_gates_enabled: false,
             gdn_gated_rms_norm_enabled: false,

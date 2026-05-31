@@ -27,6 +27,9 @@ impl BackendRuntime for CpuBackend {
             kiln_tensor::Device::Metal(_) => "metal-portable",
             kiln_tensor::Device::Cuda(_) => "cuda-portable",
             kiln_tensor::Device::Vulkan(_) => "vulkan-portable",
+            // `kiln_tensor::Device` is #[non_exhaustive]; future device kinds
+            // route through the portable CPU fallback backend.
+            _ => "portable",
         }
     }
 
