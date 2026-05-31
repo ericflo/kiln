@@ -152,6 +152,48 @@ fn mlp_down_add_residual_bf16w_batched_plan(batch: usize, out_dim: usize) -> (&'
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn gdn_in_proj_bf16w_batched_plan(
+    batch: usize,
+    qkv_dim: usize,
+    z_dim: usize,
+    a_dim: usize,
+    b_dim: usize,
+    total_out: usize,
+) -> (&'static str, u32) {
+    let pair_qkv_z =
+        batch > 1 && enabled_unless_disabled("KILN_DISABLE_VULKAN_GDN_IN_PROJ_BATCH_PAIR_QKV_Z");
+    let row_grouping = pair_qkv_z
+        && batch >= 3
+        && enabled_unless_disabled("KILN_DISABLE_VULKAN_GDN_IN_PROJ_BATCH_ROW_PAIR");
+    let row_group_size = if row_grouping
+        && batch >= 8
+        && enabled_unless_disabled("KILN_DISABLE_VULKAN_GDN_IN_PROJ_BATCH_ROW_QUAD")
+    {
+        4usize
+    } else if row_grouping {
+        2usize
+    } else {
+        1usize
+    };
+    let dispatch_cols = if pair_qkv_z {
+        qkv_dim.div_ceil(2) + z_dim.div_ceil(2) + a_dim + b_dim
+    } else {
+        total_out
+    };
+    let shader = if row_group_size == 4 {
+        shaders::GDN_IN_PROJ_DECODE_BATCHED_PAIR_QKV_Z_ROWS4_BF16W
+    } else if row_group_size == 2 {
+        shaders::GDN_IN_PROJ_DECODE_BATCHED_PAIR_QKV_Z_ROWS2_BF16W
+    } else if pair_qkv_z {
+        shaders::GDN_IN_PROJ_DECODE_BATCHED_PAIR_QKV_Z_BF16W
+    } else {
+        shaders::GDN_IN_PROJ_DECODE_BATCHED_BF16W
+    };
+    let row_groups = batch.div_ceil(row_group_size);
+    (shader, (row_groups * dispatch_cols.div_ceil(80)) as u32)
+}
+
 /// Print accumulated per-block timing to stderr and zero the counters.
 /// Call from the bench / harness once per decode token to see a
 /// per-token breakdown.
@@ -2544,8 +2586,16 @@ pub fn record_gdn_block_batched_into(
         &[batch_size as u32, hidden as u32, eps.to_bits()],
         Workgroups::OneD(batch_size as u32),
     )?;
+    let (gdn_in_proj_shader, gdn_in_proj_workgroups) = gdn_in_proj_bf16w_batched_plan(
+        batch_size,
+        qkv_dim,
+        z_dim,
+        a_dim,
+        b_dim,
+        in_proj_total,
+    );
     batch.record_shader(
-        shaders::GDN_IN_PROJ_DECODE_BATCHED_BF16W,
+        gdn_in_proj_shader,
         &[
             normed_pre.handle(),
             qkv_w.handle(),
@@ -2563,7 +2613,7 @@ pub fn record_gdn_block_batched_into(
             in_proj_total as u32,
             batch_size as u32,
         ],
-        Workgroups::OneD((batch_size * in_proj_total.div_ceil(80)) as u32),
+        Workgroups::OneD(gdn_in_proj_workgroups),
     )?;
     batch.record_shader(
         shaders::GDN_IN_PROJ_SPLIT_BATCHED,

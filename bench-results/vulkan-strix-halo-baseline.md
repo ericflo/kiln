@@ -179,6 +179,21 @@ every config"):
   Throughput now scales to about 160 rows/s at batch 32 on this APU; batch 64
   is slightly worse, so the next tuning target is deeper tiling/cache reuse
   inside the large projection/MLP shaders rather than host submit count.
+  **Update — GDN resident recorder uses row-reuse in-proj:** the batched GDN
+  `CommandBatch` recorder now selects the same pair QKV/Z plus rows2/rows4
+  BF16 in-proj shaders as the standalone dispatcher. Focused
+  `vulkan_decode_microbench gdn_in_proj` on RADV STRIX_HALO with
+  `KILN_VK_MICROBENCH_BATCHES=8,32,64`, warmup=2, timed=5, repeats=2:
+
+  | batch | basic path rows/s | row-reuse rows/s |
+  |---:|---:|---:|
+  | 8 | 4,911 | 6,737 |
+  | 32 | 6,407 | 15,597 |
+  | 64 | 6,176 | 20,622 |
+
+  That removes the remaining basic in-proj shader choice from the GDN
+  resident batch recorder, which matters because GDN layers are the majority of
+  the Qwen3.5-4B stack.
 - **Vulkan paged-attention decode kernel**: the kernel crate already had
   `paged_attn_decode_batch_paged.comp`; Vulkan now advertises
   `supports_flash_attn_paged_decode` and wires the single-query paged-decode
