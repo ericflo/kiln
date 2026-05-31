@@ -2844,3 +2844,104 @@ pub fn submit_transformer_stack_batched_argmax(
     }
     Ok(Some(tokens))
 }
+
+/// Host-visible Vulkan buffers for one batched resident decode step's
+/// paged metadata.
+pub struct BatchedResidentDecodeMetaBuffers {
+    pub block_table: std::sync::Arc<VulkanBuffer>,
+    pub seq_lens: std::sync::Arc<VulkanBuffer>,
+    pub slots: std::sync::Arc<VulkanBuffer>,
+    pub max_blocks_per_seq: usize,
+    pub block_size: usize,
+}
+
+/// Flatten per-row block tables and decode positions into resident
+/// metadata buffers consumed by [`submit_transformer_stack_batched_argmax`].
+///
+/// `start_positions[row]` is the absolute token position being decoded
+/// for that row; this helper writes `seq_lens[row] = start_pos + 1`
+/// and `slots[row] = block_table[row].slot_for(start_pos)`.
+pub fn prepare_batched_resident_decode_meta_buffers(
+    backend: &VulkanBackend,
+    block_tables: &[&BlockTable],
+    start_positions: &[usize],
+    block_size: usize,
+) -> Result<BatchedResidentDecodeMetaBuffers> {
+    let batch_size = block_tables.len();
+    anyhow::ensure!(
+        batch_size > 0,
+        "batched resident decode metadata: batch_size must be > 0"
+    );
+    anyhow::ensure!(
+        start_positions.len() == batch_size,
+        "batched resident decode metadata: start position count mismatch"
+    );
+    anyhow::ensure!(
+        block_size > 0,
+        "batched resident decode metadata: block_size must be > 0"
+    );
+    let max_blocks_per_seq = block_tables
+        .iter()
+        .map(|bt| bt.blocks.len())
+        .max()
+        .unwrap_or(0)
+        .max(1);
+
+    let mut block_table_flat = Vec::<u32>::with_capacity(batch_size * max_blocks_per_seq);
+    let mut seq_lens = Vec::<u32>::with_capacity(batch_size);
+    let mut slots = Vec::<u32>::with_capacity(batch_size);
+    for (row, (&block_table, &start_pos)) in block_tables
+        .iter()
+        .zip(start_positions.iter())
+        .enumerate()
+    {
+        let seq_len = start_pos
+            .checked_add(1)
+            .context("batched resident decode metadata: seq_len overflow")?;
+        anyhow::ensure!(
+            block_table.capacity(block_size) >= seq_len,
+            "batched resident decode metadata row {row}: block table capacity {} < seq_len {seq_len}",
+            block_table.capacity(block_size),
+        );
+        let slot = block_table
+            .slot_for(start_pos, block_size)
+            .ok_or_else(|| anyhow::anyhow!("batched resident decode metadata row {row}: no slot for start_pos {start_pos}"))?;
+        seq_lens.push(
+            u32::try_from(seq_len)
+                .context("batched resident decode metadata: seq_len exceeds u32")?,
+        );
+        slots.push(
+            u32::try_from(slot)
+                .context("batched resident decode metadata: slot exceeds u32")?,
+        );
+
+        let pad_block = *block_table.blocks.last().unwrap_or(&0);
+        for idx in 0..max_blocks_per_seq {
+            block_table_flat.push(*block_table.blocks.get(idx).unwrap_or(&pad_block));
+        }
+    }
+
+    let block_table_buf = backend.acquire_resident_scratch_host_visible(
+        "native_b_block_table_hv",
+        (block_table_flat.len().max(1) * 4) as u64,
+    )?;
+    let seq_lens_buf = backend.acquire_resident_scratch_host_visible(
+        "native_b_seq_lens_hv",
+        (seq_lens.len().max(1) * 4) as u64,
+    )?;
+    let slots_buf = backend.acquire_resident_scratch_host_visible(
+        "native_b_slots_hv",
+        (slots.len().max(1) * 4) as u64,
+    )?;
+    block_table_buf.write_mapped(bytemuck::cast_slice(&block_table_flat))?;
+    seq_lens_buf.write_mapped(bytemuck::cast_slice(&seq_lens))?;
+    slots_buf.write_mapped(bytemuck::cast_slice(&slots))?;
+
+    Ok(BatchedResidentDecodeMetaBuffers {
+        block_table: block_table_buf,
+        seq_lens: seq_lens_buf,
+        slots: slots_buf,
+        max_blocks_per_seq,
+        block_size,
+    })
+}
