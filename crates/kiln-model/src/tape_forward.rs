@@ -1394,7 +1394,7 @@ pub fn try_tape_cross_entropy_from_logits_kt(
     }
     let num_active = active_positions.len();
 
-    let device = *logits.device();
+    let device = logits.device(); // kt `Device` is returned by value (Copy)
 
     // kt input — thread the lm_head adapter's output so the tape stays connected
     // (consumer input id == producer output id). The trainer already chains the
