@@ -110,9 +110,9 @@ use crate::{ChatMessage, Optimizer, default_alpha, default_rank};
 use kiln_opd_loss_kernel::DEFAULT_CHUNK_SIZE;
 // (#1082) The candle-typed OPD glue (Phase A reference, kt-forward-op
 // shim, kt-tape adapters) was relocated from `kiln-opd-loss-kernel` into
-// `crate::opd_candle_shim` so the kernel crate could drop candle. The
-// call sites below are unchanged except for the new module path.
-use crate::opd_candle_shim::opd_top_k_reverse_kl_per_position_via_kt_forward_op;
+// (#1082) `opd_step_loss` now calls the kt forward
+// `kiln_opd_loss_kernel::opd_top_k_reverse_kl_per_position_kt` directly — the
+// candle `opd_top_k_reverse_kl_per_position_via_kt_forward_op` shim import is gone.
 
 /// §6 default top-K for the `TeacherTopK` loss path. Picked by Fu et al.
 /// (2026) ablation table 3: K = 32 is the optimum across math and
@@ -1288,105 +1288,31 @@ pub fn opd_step_loss(inputs: OpdStepInputs<'_>) -> Result<OpdStepOutputs> {
         teacher_active_positions,
     )?;
 
-    // (#1082) candle island — the OPD-loss shim (`opd_candle_shim`) is the
-    // remaining candle-autograd path (`mean_kl.backward()` roots on it). The
-    // public OPD surface (`OpdStepInputs` / `OpdStepOutputs`) is now kt-typed,
-    // so we bridge kt -> candle at the shim boundary here and candle -> kt for
-    // the returned struct. Convert to a kt-typed loss path in the final pass.
-    let student_hidden_cd = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(student_hidden)
-        .map_err(|e| anyhow!("opd_step_loss: bridge student_hidden kt->candle: {e}"))?;
-    let head_t_cd = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(head_t)
-        .map_err(|e| anyhow!("opd_step_loss: bridge head_t kt->candle: {e}"))?;
-    let device = student_hidden_cd.device().clone();
-    // chunk_size is plumbed through to the kernel when we switch to
-    // Phase B end-to-end (next milestone). Phase A doesn't chunk —
-    // the autograd graph holds the whole `[T_active, K]` tensor live
-    // anyway, so chunking buys nothing. Keep the field on the
-    // `OpdStepInputs` so the call site doesn't churn when we flip.
-    let _chunk_size = if chunk_size == 0 {
-        DEFAULT_CHUNK_SIZE
-    } else {
-        chunk_size
-    };
-
-    // (#1082) The per-position OPD loss now routes through the
-    // `KtForwardOp1` candle-autograd shim (commit `095f1c74`) over the
-    // kt-typed forward + backward kernels. The shim collapses the old
-    // pure-candle Phase A composite (~8 candle ops: `index_select` →
-    // `matmul` → `log_softmax_last` → `exp` → broadcast subtract →
-    // multiply → `sum`) into a single `CustomOp1` whose backward calls
-    // the same fused `kiln_opd_topk_kl_bwd_*` FFI symbols the Phase B
-    // candle path already uses (bit-exact by construction).
+    // (#1082) kt-NATIVE per-position reverse-KL — straight through the kt
+    // forward kernel (`opd_top_k_reverse_kl_per_position_kt`) on the kt
+    // `student_hidden` + `head_t` DIRECTLY. No candle: the old path bridged both
+    // inputs kt->candle, ran a `KtForwardOp1` candle-autograd shim (or the
+    // pure-candle Phase A composite), then copied the result candle->kt.
     //
-    // Out-of-envelope inputs (non-CUDA, K ∉ {16, 32}, dtype ∉
-    // {F32, BF16}, or `hidden.dtype() != head_t.dtype()`) fall back
-    // to the pure-candle Phase A reference path so this call still
-    // covers the full OPD trainer envelope; the kill switch
-    // `KILN_DISABLE_OPD_KT_FORWARD_OP=1` forces that fallback
-    // regardless. In every code path the resulting tensor remains an
-    // autograd descendant of `student_hidden`'s LoRA-Var parents, so
-    // `mean_kl.backward()` flows gradients into the LoRA parameters
-    // the trainer is optimizing.
-    //
-    // Wave-13 (#1082): when `KILN_USE_TAPE_FORWARD=1` AND a thread-
-    // local `kiln_autograd::Tape` scope is active, route through
-    // `try_tape_opd_per_position_cuda` instead. The forward result is
-    // bit-exact with the kt-shim (same FFI symbols underneath); the
-    // backward node is recorded on the tape for `Tape::backward`. With
-    // either gate off (the default) `try_tape_opd_per_position_cuda`
-    // returns `Ok(None)` and we fall through to the existing kt-shim.
-    // The kt-shim's candle-autograd chain is preserved when the tape
-    // path short-circuits — which is the correct path for any caller
-    // still driving gradients via `loss.backward()`.
-    // candle island (#1082): `per_position_kl_cd` is a candle tensor (the
-    // shim's autograd descendant). Bridged to kt below for `OpdStepOutputs`.
-    let per_position_kl_cd = {
-        #[cfg(feature = "cuda")]
-        {
-            if let Some(out) = crate::opd_candle_shim::try_tape_opd_per_position_cuda(
-                &student_hidden_cd,
-                &head_t_cd,
-                &teacher_topk_indices,
-                &teacher_topk_logprobs,
-                &label_mask,
-                resolved_top_k,
-            )? {
-                out
-            } else {
-                opd_top_k_reverse_kl_per_position_via_kt_forward_op(
-                    &student_hidden_cd,
-                    &head_t_cd,
-                    &teacher_topk_indices,
-                    &teacher_topk_logprobs,
-                    &label_mask,
-                    resolved_top_k,
-                    &device,
-                )?
-            }
-        }
-        #[cfg(not(feature = "cuda"))]
-        {
-            opd_top_k_reverse_kl_per_position_via_kt_forward_op(
-                &student_hidden_cd,
-                &head_t_cd,
-                &teacher_topk_indices,
-                &teacher_topk_logprobs,
-                &label_mask,
-                resolved_top_k,
-                &device,
-            )?
-        }
-    };
-    let mean_kl_cd = per_position_kl_cd
-        .mean_all()
-        .context("mean per-position KL")?;
-
-    // (#1082) candle island — convert to kt at the boundary for the kt-typed
-    // `OpdStepOutputs`. Convert in final pass once the loss path is kt-native.
-    let per_position_kl = kiln_kt_bridge::kt_tensor_from_candle_cuda_copy(&per_position_kl_cd)
-        .map_err(|e| anyhow!("opd_step_loss: bridge per_position_kl candle->kt: {e}"))?;
-    let mean_kl = kiln_kt_bridge::kt_tensor_from_candle_cuda_copy(&mean_kl_cd)
-        .map_err(|e| anyhow!("opd_step_loss: bridge mean_kl candle->kt: {e}"))?;
+    // `opd_step_loss` is a VALUE/metrics API — the OPD training GRADIENT comes
+    // from the separate scalar-mean tape path
+    // (`opd_step_forward_backward_tape_authoritative`, kt-native). So a plain kt
+    // forward (no tape recording) is correct here; `OpdStepOutputs` carries the
+    // per-position KL + its mean for reporting/guardrails. `chunk_size` is not
+    // consumed by the per-position kernel (kept on `OpdStepInputs` for API
+    // stability).
+    let _ = chunk_size;
+    let per_position_kl = kiln_opd_loss_kernel::opd_top_k_reverse_kl_per_position_kt(
+        student_hidden,
+        head_t,
+        &teacher_topk_indices,
+        &teacher_topk_logprobs,
+        &label_mask,
+        resolved_top_k,
+    )
+    .map_err(|e| anyhow!("opd_step_loss: per-position reverse-KL (kt): {e}"))?;
+    let mean_kl = kiln_tensor::ops::mean_all(&per_position_kl)
+        .map_err(|e| anyhow!("opd_step_loss: mean per-position KL (kt): {e}"))?;
 
     Ok(OpdStepOutputs {
         per_position_kl,
