@@ -7699,16 +7699,13 @@ fn rotary_embedding_from_tables(
 fn residual_add(a: Tensor, b: Tensor) -> Result<Tensor> {
     #[cfg(feature = "cuda")]
     {
-        // #1082 CUDA-graph fix: gate on `bridge_scope_active()` — decode has
-        // no bridge scope, so these kt->candle copies were waste AND a
-        // NULL-stream capture violation inside a CUDA-graph window.
-        if crate::tape_forward::tape_forward_enabled()
-            && kiln_kt_bridge::tape_bridge::bridge_scope_active()
-        {
-            let a_candle = kt_logits_to_candle(&a).context("residual_add kt->candle a")?;
-            let b_candle = kt_logits_to_candle(&b).context("residual_add kt->candle b")?;
-            if let Some(out) = crate::tape_forward::try_tape_add_cuda(&a_candle, &b_candle)? {
-                return candle_to_kt_activation(&out).context("residual_add candle->kt tape out");
+        // #1082 seam flip: kt-native AddBackward recorder — no kt->candle->kt
+        // round-trip (decode: tape off -> Ok(None) -> falls to the plain add below).
+        if crate::tape_forward::tape_forward_enabled() {
+            if let Some(out) = crate::tape_forward::try_tape_add_kt(&a, &b)
+                .context("residual_add try_tape_add_kt")?
+            {
+                return Ok(out);
             }
         }
     }
@@ -7734,24 +7731,13 @@ fn apply_rope(
         // KILN_USE_TAPE_FORWARD is set and a tape scope is active. No-ops
         // (returns None) otherwise — the production fast-path below is
         // untouched in the default configuration.
-        // #1082 CUDA-graph fix: gate on `bridge_scope_active()` (decode skips
-        // these candle bridges — see `residual_add`).
-        if crate::tape_forward::tape_forward_enabled()
-            && kiln_kt_bridge::tape_bridge::bridge_scope_active()
-        {
-            let x_candle = kt_logits_to_candle(x).context("apply_rope kt->candle x (tape)")?;
-            let cos_candle =
-                kt_logits_to_candle(cos).context("apply_rope kt->candle cos (tape)")?;
-            let sin_candle =
-                kt_logits_to_candle(sin).context("apply_rope kt->candle sin (tape)")?;
-            if let Some(out) = crate::tape_forward::try_tape_rope_cuda(
-                &x_candle,
-                &cos_candle,
-                &sin_candle,
-                head_dim,
-                rotary_dim,
-            )? {
-                return candle_to_kt_activation(&out).context("apply_rope candle->kt tape out");
+        // #1082 seam flip: kt-native split-half RoPE recorder — no kt->candle->kt.
+        if crate::tape_forward::tape_forward_enabled() {
+            if let Some(out) =
+                crate::tape_forward::try_tape_rope_kt(x, cos, sin, head_dim, rotary_dim)
+                    .context("apply_rope try_tape_rope_kt")?
+            {
+                return Ok(out);
             }
         }
         // #1082 forward-flip: `apply_rope` is kt-native now. The candle
