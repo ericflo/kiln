@@ -75,12 +75,30 @@ gdn_chunkwise_forward`. GDN prefill layer **400 → 246 ms**, total prefill
 identical greedy output). CUDA/Metal untouched (trait default Ok(None)).
 
 **Still open — single-submit fusion (the proper "max out the hardware" step):**
-246 ms/layer is **dispatch-bound** — `vk_gdn_chunkwise_forward_no_grad` issues a
-separate submit+wait per chunk-op instead of chaining the whole layer's scan into
-ONE `CommandBatch` (the decode resident path's pattern, generalized to multi-token
-prefill chunks). Eliminating the per-op submit/readback is the path to fully
-saturate the APU on prefill — the next Vulkan prefill work-package. Alternative:
-an F32 path for the BF16-gated native recurrent-prefill kernel.
+246 ms/layer is **dispatch-bound** — `vk_gdn_chunkwise_forward_no_grad` issues
+~20-30 submit+wait per layer (`chunk_forward_no_grad` does 6-8
+`vk_matmul_batched_no_grad`, each self-submits+reads-back, + `state_update`),
+instead of chaining the whole layer's scan into ONE `CommandBatch`.
+
+Implementation plan (confirmed feasible — `CommandBatch::record_shader` +
+`record_copy_buffer` + one `submit_and_wait` already host this pattern in
+`vk_decode_resident::record_gdn_block_into`): write a
+`record_gdn_chunkwise_prefill_block_into` that pre-allocates the chunk
+intermediates (q_s, ks, kkt, qkt, b_mask, w_weighted, p_last, k_t, per-chunk
+out, state) as device-local buffers and `record_shader`s the matmul / forward-
+sub / state-update dispatches in dependency order across all chunks (the
+cross-chunk state dep is just the next chunk reading the prior chunk's updated
+state buffer — no readback). One submit per layer instead of ~20-30. Then route
+`gdn_chunkwise_recurrence` to it. This is correctness-critical (a wrong binding
+corrupts all output) → implement deliberately with incremental parity vs the
+current GPU chunkwise (already validated identical to CPU), not rushed.
+
+Other proper work-packages for full saturation (per "max out the hardware in
+every config"):
+- **True multi-row batched resident decode** (bs>1 / continuous-batched is
+  currently rowwise-serialized through the fast bs=1 path).
+- **Vulkan paged-attention decode kernel** (`supports_flash_attn_paged_decode`
+  is false → long-context decode attention falls to the manual GQA path).
 
 ## Other follow-ups (perf headroom, not regressions)
 
