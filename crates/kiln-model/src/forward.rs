@@ -4634,6 +4634,33 @@ impl LinearAttentionState {
         Ok(assembled_any)
     }
 
+    /// Assemble backend-resident recurrent + conv row buffers into this
+    /// batched state using kt tensor IDs only.
+    pub fn assemble_gdn_state_resident_batch_rows_kt(
+        &self,
+        backend: &dyn BackendRuntime,
+        rows: &[&Self],
+    ) -> Result<bool> {
+        let batch = self.batch_size()?;
+        anyhow::ensure!(
+            rows.len() == batch,
+            "LinearAttentionState::assemble_gdn_state_resident_batch_rows_kt row count mismatch ({} vs {})",
+            rows.len(),
+            batch
+        );
+        let mut assembled_any = false;
+        for layer_idx in 0..self.recurrent_states.len() {
+            let row_keys: Vec<kiln_tensor::TensorId> = rows
+                .iter()
+                .map(|row| row.recurrent_states[layer_idx].id())
+                .collect();
+            let batch_key = self.recurrent_states[layer_idx].id();
+            assembled_any |=
+                backend.assemble_linear_attn_gdn_state_batch_kt(&row_keys, batch_key)?;
+        }
+        Ok(assembled_any)
+    }
+
     /// Refresh THIS batched state's recurrent + conv tensors *in place*
     /// from the supplied per-row states, preserving device pointers.
     /// Required by the multi-batch CUDA graph replay path: the captured
@@ -4749,6 +4776,48 @@ impl LinearAttentionState {
         Ok(())
     }
 
+    /// Scatter backend-resident batched recurrent + conv buffers back into
+    /// per-row resident buffers using kt tensor IDs only.
+    pub fn scatter_gdn_state_resident_batch_rows_kt(
+        &self,
+        backend: &dyn BackendRuntime,
+        destinations: &mut [&mut Self],
+    ) -> Result<bool> {
+        let batch = self.batch_size()?;
+        anyhow::ensure!(
+            destinations.len() == batch,
+            "LinearAttentionState::scatter_gdn_state_resident_batch_rows_kt destination count mismatch ({} vs {})",
+            destinations.len(),
+            batch
+        );
+        for (row_idx, dst) in destinations.iter_mut().enumerate() {
+            anyhow::ensure!(
+                dst.recurrent_states.len() == self.recurrent_states.len(),
+                "LinearAttentionState::scatter_gdn_state_resident_batch_rows_kt recurrent layer count mismatch for row {row_idx} ({} vs {})",
+                dst.recurrent_states.len(),
+                self.recurrent_states.len()
+            );
+            anyhow::ensure!(
+                dst.conv_states.len() == self.conv_states.len(),
+                "LinearAttentionState::scatter_gdn_state_resident_batch_rows_kt conv layer count mismatch for row {row_idx} ({} vs {})",
+                dst.conv_states.len(),
+                self.conv_states.len()
+            );
+        }
+
+        let mut scattered_any = false;
+        for layer_idx in 0..self.recurrent_states.len() {
+            let row_keys: Vec<kiln_tensor::TensorId> = destinations
+                .iter()
+                .map(|dst| dst.recurrent_states[layer_idx].id())
+                .collect();
+            let batch_key = self.recurrent_states[layer_idx].id();
+            scattered_any |=
+                backend.scatter_linear_attn_gdn_state_batch_kt(batch_key, &row_keys)?;
+        }
+        Ok(scattered_any)
+    }
+
     pub fn materialize_gdn_recurrent_resident_states(
         &mut self,
         backend: &dyn BackendRuntime,
@@ -4777,6 +4846,20 @@ impl LinearAttentionState {
                 .recurrent_states
                 .iter()
                 .all(|state| backend.has_gdn_recurrent_resident_state(state))
+    }
+
+    pub fn has_any_gdn_state_resident_kt(&self, backend: &dyn BackendRuntime) -> bool {
+        self.recurrent_states
+            .iter()
+            .any(|state| backend.has_linear_attn_gdn_state_kt(state.id()))
+    }
+
+    pub fn has_all_gdn_state_resident_kt(&self, backend: &dyn BackendRuntime) -> bool {
+        !self.recurrent_states.is_empty()
+            && self
+                .recurrent_states
+                .iter()
+                .all(|state| backend.has_linear_attn_gdn_state_kt(state.id()))
     }
 
     /// Capture the current GDN recurrent + conv state into a fresh shadow

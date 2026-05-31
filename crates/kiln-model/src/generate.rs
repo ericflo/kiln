@@ -3333,22 +3333,22 @@ impl ModelRunner {
         if has_linear_layers {
             let any_resident = linear_states
                 .iter()
-                .any(|state| state.has_any_gdn_recurrent_resident_state(&*self.backend));
+                .any(|state| state.has_any_gdn_state_resident_kt(&*self.backend));
             let all_resident = any_resident
                 && linear_states
                     .iter()
-                    .all(|state| state.has_all_gdn_recurrent_resident_states(&*self.backend));
+                    .all(|state| state.has_all_gdn_state_resident_kt(&*self.backend));
             if any_resident && !all_resident {
-                for state in linear_states.iter_mut() {
-                    state.materialize_gdn_recurrent_resident_states(&*self.backend)?;
-                }
+                anyhow::bail!(
+                    "mixed kt-resident GDN state rows are not supported for batched decode"
+                );
             }
         }
 
         let all_rows_resident = has_linear_layers
             && linear_states
                 .iter()
-                .all(|state| state.has_all_gdn_recurrent_resident_states(&*self.backend));
+                .all(|state| state.has_all_gdn_state_resident_kt(&*self.backend));
         let mut batched_state_cache_hit = false;
         let mut batch_state = if has_linear_layers {
             // Cache lookup: when the same set of per-row state IDs came in
@@ -3390,7 +3390,7 @@ impl ModelRunner {
                 let state = LinearAttentionState::from_batch_rows(&state_refs)?;
                 if all_rows_resident {
                     state
-                        .assemble_gdn_recurrent_resident_batch_rows(&*self.backend, &state_refs)?;
+                        .assemble_gdn_state_resident_batch_rows_kt(&*self.backend, &state_refs)?;
                 }
                 Some(state)
             }
@@ -3428,7 +3428,9 @@ impl ModelRunner {
         if let Some(state) = batch_state.as_ref() {
             let stage_start = profile_stages.then(std::time::Instant::now);
             if fast_batched_linear_state_scatter_enabled() {
-                state.scatter_batch_rows_replace_with_backend(&*self.backend, linear_states)?;
+                if !state.scatter_gdn_state_resident_batch_rows_kt(&*self.backend, linear_states)? {
+                    state.scatter_batch_rows_replace(linear_states)?;
+                }
                 finish_decode_batcher_stage_profile(
                     "batch_state_scatter_replace",
                     batch,

@@ -1092,6 +1092,23 @@ impl VulkanBackend {
         Ok(true)
     }
 
+    pub fn has_linear_attn_gdn_state_kt(&self, key: kiln_tensor::TensorId) -> bool {
+        if !self.linear_attn_layer_seeded_kt(key) {
+            return false;
+        }
+        let recurrent_present = self
+            .linear_attn_recurrent_state_kt
+            .lock()
+            .map(|g| g.contains_key(&key))
+            .unwrap_or(false);
+        let conv_present = self
+            .linear_attn_conv_state_kt
+            .lock()
+            .map(|g| g.contains_key(&key))
+            .unwrap_or(false);
+        recurrent_present && conv_present
+    }
+
     /// Acquire (or lazily create) a persistent scratch
     /// [`VulkanBuffer`] under the given role key, sized to at least
     /// `min_bytes`. The same buffer is returned on every subsequent
@@ -2346,6 +2363,26 @@ impl BackendRuntime for VulkanBackend {
         });
 
         Ok(true)
+    }
+
+    fn assemble_linear_attn_gdn_state_batch_kt(
+        &self,
+        row_keys: &[kiln_tensor::TensorId],
+        batch_key: kiln_tensor::TensorId,
+    ) -> Result<bool> {
+        VulkanBackend::assemble_linear_attn_gdn_state_batch_kt(self, row_keys, batch_key)
+    }
+
+    fn scatter_linear_attn_gdn_state_batch_kt(
+        &self,
+        batch_key: kiln_tensor::TensorId,
+        row_keys: &[kiln_tensor::TensorId],
+    ) -> Result<bool> {
+        VulkanBackend::scatter_linear_attn_gdn_state_batch_kt(self, batch_key, row_keys)
+    }
+
+    fn has_linear_attn_gdn_state_kt(&self, key: kiln_tensor::TensorId) -> bool {
+        VulkanBackend::has_linear_attn_gdn_state_kt(self, key)
     }
 
     fn supports_gdn_chunk_prep(&self) -> bool {

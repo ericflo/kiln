@@ -520,6 +520,26 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
         Ok(false)
     }
 
+    fn assemble_linear_attn_gdn_state_batch_kt(
+        &self,
+        _row_keys: &[kiln_tensor::TensorId],
+        _batch_key: kiln_tensor::TensorId,
+    ) -> Result<bool> {
+        Ok(false)
+    }
+
+    fn scatter_linear_attn_gdn_state_batch_kt(
+        &self,
+        _batch_key: kiln_tensor::TensorId,
+        _row_keys: &[kiln_tensor::TensorId],
+    ) -> Result<bool> {
+        Ok(false)
+    }
+
+    fn has_linear_attn_gdn_state_kt(&self, _key: kiln_tensor::TensorId) -> bool {
+        false
+    }
+
     fn supports_gdn_chunk_prep(&self) -> bool {
         false
     }
