@@ -3038,8 +3038,8 @@ fn opd_step_forward_backward_tape_authoritative(
 
     let lora_weights = params.as_lora_weights();
 
-    let (loss_val, _loss, grads_by_candle_raw) =
-        kiln_kt_bridge::tape_bridge::with_tape_authoritative_scope(|| {
+    let (loss_val, _loss_kt, grads_by_candle_raw) =
+        kiln_kt_bridge::tape_bridge::with_tape_authoritative_scope_kt(|| {
             // Single full forward (embed -> layers -> final RMSNorm). The
             // LoRA adapters inside record onto the active tape; the final
             // RMSNorm retains its kt output so the OPD loss adapter can

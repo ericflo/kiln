@@ -918,7 +918,7 @@ pub fn try_tape_opd_scalar_mean_cuda_kt(
     teacher_topk_logprobs: &[f32],
     label_mask: &[bool],
     top_k: usize,
-) -> Result<Option<Tensor>> {
+) -> Result<Option<kiln_tensor::Tensor>> {
     use kiln_autograd::{tape_forward_enabled, with_active_tape, Tape};
     use kiln_opd_loss_kernel::opd_top_k_reverse_kl_phase_b_via_kt_tape;
 
@@ -960,22 +960,11 @@ pub fn try_tape_opd_scalar_mean_cuda_kt(
         .map_err(|e: kiln_tensor::Error| anyhow::anyhow!("opd_top_k scalar kt-tape (kt): {e}"))
         .context("try_tape_opd_scalar_mean_cuda_kt: kt-tape forward failed")?;
 
-    // Value-identical candle copy of the scalar loss for the caller (loss_val +
-    // metrics). The returned candle tensor carries NO candle autograd lineage —
-    // the gradient lives on the tape.
-    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&loss_kt)
-        .context("try_tape_opd_scalar_mean_cuda_kt: kt -> candle copy failed")?;
-
-    // CP-4 (#1082) tape_bridge: map / retain the loss output keyed on the
-    // RETURNED copy's id so `with_tape_authoritative_scope` resolves
-    // `loss.id()` → `loss_kt` to seed the tape root. The differentiable input
-    // (`hidden`) is itself a tape node output (the final RMSNorm), so it needs
-    // no `register_input_mapping` here — `head_t` is non-differentiable in this
-    // op (the kernel emits `d_hidden` only). No-ops cleanly outside a scope.
-    kiln_kt_bridge::tape_bridge::register_output_mapping(loss_kt.id(), out.id());
-    kiln_kt_bridge::tape_bridge::retain_output_for_chaining(&loss_kt, out.id());
-
-    Ok(Some(out))
+    // (#1082 keystone) Return the kt scalar loss DIRECTLY. The caller seeds it as
+    // the tape root via `with_tape_authoritative_scope_kt` (ones_like at
+    // `loss_kt.id()`) — no kt->candle copy, no `register_output_mapping`. The
+    // differentiable input (`hidden`) is already a recorded tape node.
+    Ok(Some(loss_kt))
 }
 
 // ---------------------------------------------------------------------------

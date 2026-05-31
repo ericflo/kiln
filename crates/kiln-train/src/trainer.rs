@@ -6004,12 +6004,18 @@ fn cross_entropy_loss(
     // (`try_tape_cross_entropy_from_logits_cuda`) required.
     #[cfg(feature = "cuda")]
     if tape_authoritative_enabled() {
-        if let Some(loss) = kiln_model::tape_forward::try_tape_cross_entropy_from_logits_kt(
+        if let Some(loss_kt) = kiln_model::tape_forward::try_tape_cross_entropy_from_logits_kt(
             logits,
             input_ids,
             label_mask,
         )? {
-            return Ok(loss);
+            // (#1082 keystone) from_logits_kt now returns a KT scalar loss; bridge
+            // it to candle for this fn's candle return type (the value-only callers
+            // — checkpoint/FLCE-compare/tests). The tape-authoritative SFT path
+            // calls from_logits_kt DIRECTLY via with_tape_authoritative_scope_kt to
+            // keep the loss kt (no copy), so it does NOT go through here.
+            return Ok(kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&loss_kt)
+                .context("cross_entropy_loss: kt->candle scalar copy")?);
         }
     }
 
@@ -7695,8 +7701,8 @@ fn standard_forward_backward_tape_authoritative_kt(
     let lora_weights = params.as_lora_weights();
     let mut linear_state = LinearAttentionState::new(model_config, device)?;
 
-    let (loss_val, _loss, grads_by_candle_raw) =
-        kiln_kt_bridge::tape_bridge::with_tape_authoritative_scope(|| {
+    let (loss_val, _loss_kt, grads_by_candle_raw) =
+        kiln_kt_bridge::tape_bridge::with_tape_authoritative_scope_kt(|| {
             let logits = model_forward_kt(
                 backend,
                 input_ids,
@@ -7708,14 +7714,28 @@ fn standard_forward_backward_tape_authoritative_kt(
             )
             .context("tape-authoritative(kt) forward")
             .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?;
-            let loss = cross_entropy_loss(&logits, input_ids, label_mask, device)
-                .context("tape-authoritative(kt) cross_entropy_loss")
-                .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?;
-            let loss_val = loss
+            // (#1082 keystone) Record the kt CE-from-logits tape root DIRECTLY and
+            // return the kt loss (no kt->candle scalar copy). `_kt` scope seeds the
+            // kt loss node directly — the candle round-trip is gone.
+            let loss_kt = kiln_model::tape_forward::try_tape_cross_entropy_from_logits_kt(
+                &logits,
+                input_ids,
+                label_mask,
+            )
+            .context("tape-authoritative(kt) cross_entropy_from_logits_kt")
+            .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?
+            .ok_or_else(|| {
+                kiln_kt_bridge::BridgeError::new(
+                    "tape-authoritative(kt) SFT: cross_entropy_from_logits_kt returned None \
+                     (kt CE envelope declined — expected [1, T, V] CUDA logits)"
+                        .to_string(),
+                )
+            })?;
+            let loss_val = loss_kt
                 .to_scalar::<f32>()
-                .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("loss.to_scalar: {e}")))?
+                .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("loss_kt.to_scalar: {e}")))?
                 as f64;
-            Ok((loss_val, loss))
+            Ok((loss_val, loss_kt))
         })
         .map_err(|e| anyhow::anyhow!("tape-authoritative(kt) backward: {e}"))?;
 
@@ -8131,8 +8151,8 @@ fn grpo_step_forward_backward_tape_authoritative_kt(
     let mut linear_state = LinearAttentionState::new(model_config, device)?;
     let step_started = Instant::now();
 
-    let (loss_val, _loss, grads_by_candle_raw) =
-        kiln_kt_bridge::tape_bridge::with_tape_authoritative_scope(|| {
+    let (loss_val, _loss_kt, grads_by_candle_raw) =
+        kiln_kt_bridge::tape_bridge::with_tape_authoritative_scope_kt(|| {
             // Single policy forward (embed -> layers -> final RMSNorm -> lm_head).
             // The LoRA adapters inside record onto the active tape; the lm_head
             // output (logits) is retained so the GRPO loss root can thread it.

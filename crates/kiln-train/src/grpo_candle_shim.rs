@@ -487,7 +487,7 @@ pub(crate) fn try_tape_grpo_pg_loss_from_logits_kt(
     ref_log_probs_kt: &kiln_tensor::Tensor,
     loss_params: GrpoLossParams,
     device: &CdDevice,
-) -> Result<Option<Tensor>> {
+) -> Result<Option<kiln_tensor::Tensor>> {
     if !tape_forward_enabled() {
         return Ok(None);
     }
@@ -550,22 +550,11 @@ pub(crate) fn try_tape_grpo_pg_loss_from_logits_kt(
     let loss_kt = loss_kt
         .context("try_tape_grpo_pg_loss_from_logits_kt: kt-tape forward failed")?;
 
-    // Return a DETACHED, lineage-free candle loss (a fresh kt -> candle CUDA copy
-    // of the kt scalar loss). The candle copy carries NO candle autograd lineage,
-    // so the tape-authoritative caller's `loss.backward()` is unconditionally
-    // `{loss: ones}` and the recorded kt node is the sole tape root. (#1082 step 8:
-    // inputs are now kt; the scalar candle loss RETURN stays — it is coupled to
-    // `with_tape_authoritative_scope`'s candle-loss seeding, flipped in step 14.)
-    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&loss_kt)
-        .context("try_tape_grpo_pg_loss_from_logits_kt: kt -> candle copy failed")?;
-
-    // Map the kt loss node to the RETURNED detached copy's id so
-    // `with_tape_authoritative_scope` resolves `loss.id()` → `loss_kt` to seed the
-    // tape root. (No input mapping: `logits_kt` is the kt tape input directly.)
-    kiln_kt_bridge::tape_bridge::register_output_mapping(loss_kt.id(), out.id());
-    kiln_kt_bridge::tape_bridge::retain_output_for_chaining(&loss_kt, out.id());
-
-    Ok(Some(out))
+    // (#1082 keystone) Return the kt scalar loss DIRECTLY. The caller seeds it as
+    // the tape root via `with_tape_authoritative_scope_kt` (ones_like at
+    // `loss_kt.id()`) — no kt->candle copy, no `register_output_mapping` candle
+    // round-trip. `logits_kt` is already the recorded tape input.
+    Ok(Some(loss_kt))
 }
 
 #[cfg(test)]

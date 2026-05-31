@@ -671,7 +671,7 @@ pub fn try_tape_cross_entropy_from_logits_kt(
     logits: &kiln_tensor::Tensor,
     input_ids: &[u32],
     label_mask: &[bool],
-) -> Result<Option<Tensor>> {
+) -> Result<Option<kiln_tensor::Tensor>> {
     use kiln_tensor::{DType as KtDType, Tensor as KtTensor};
 
     if !tape_forward_enabled() {
@@ -795,20 +795,12 @@ pub fn try_tape_cross_entropy_from_logits_kt(
     let loss_kt = loss_kt
         .context("tape_forward::try_tape_cross_entropy_from_logits_kt: kt-tape forward failed")?;
 
-    // Return a DETACHED, lineage-free candle SCALAR loss (a fresh kt -> candle
-    // CUDA copy of the kt scalar loss, numerically identical to the baseline).
-    // Only the scalar crosses to candle (≈4 bytes) — the [1, T, V] copy is gone.
-    let out = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&loss_kt).context(
-        "tape_forward::try_tape_cross_entropy_from_logits_kt: kt -> candle scalar copy failed",
-    )?;
-
-    // CP-4 (#1082) tape_bridge: only `logits` is differentiable. Map the output /
-    // retain onto the RETURNED detached copy's id so the tape-authoritative scope
-    // resolves `loss.id()` → `loss_kt` to seed the tape root.
-    kiln_kt_bridge::tape_bridge::register_output_mapping(loss_kt.id(), out.id());
-    kiln_kt_bridge::tape_bridge::retain_output_for_chaining(&loss_kt, out.id());
-
-    Ok(Some(out))
+    // (#1082 DoD-100 keystone) Return the KT scalar loss DIRECTLY — no kt->candle
+    // copy, no candle-id output mapping. The kt loss IS the recorded tape root;
+    // `with_tape_authoritative_scope_kt` seeds it directly. (The candle-typed
+    // `cross_entropy_loss` wrapper bridges this to candle for its value-only
+    // callers; the SFT authoritative path takes the kt loss straight.)
+    Ok(Some(loss_kt))
 }
 
 /// Attempt to run the LoRA delta-and-add through the kt-typed op surface
