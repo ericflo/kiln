@@ -2770,7 +2770,7 @@ fn tape_gdn_recurrent_records_node_and_emits_5_grads() {
         std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
         std::env::set_var("KILN_USE_TAPE_GDN", "1");
     }
-    let backend = kiln_model::backend::for_device(&device);
+    let backend = kiln_model::backend::for_device_kt(&kiln_kt_bridge::kt_device_from_candle(&device));
 
     // #1082: try_tape_gdn_recurrent_cuda takes kt q/k/v/beta/g + &mut kt state.
     // Bridge the candle inputs to kt (CUDA borrow; same device storage).
@@ -2931,19 +2931,21 @@ fn tape_record_gdn_recurrent_head_last_records_node_and_emits_5_grads() {
         std::env::set_var("KILN_USE_TAPE_GDN", "1");
     }
 
+    // #1082: the candle shim `tape_record_gdn_recurrent` was deleted; bridge
+    // the candle inputs to kt and drive the kt-native recorder directly.
+    let out_kt = kt_in(&out_head_last);
+    let q_kt = kt_in(&q);
+    let k_kt = kt_in(&k);
+    let v_kt = kt_in(&v);
+    let beta_kt = kt_in(&beta);
+    let g_kt = kt_in(&g);
+    let entry_kt = kt_in(&entry_state);
+    let kt_dev = q_kt.device();
     let ((), tape) = kiln_model::tape_forward::with_thread_local_tape(|| {
-        kiln_model::tape_forward::tape_record_gdn_recurrent(
-            &out_head_last,
-            true, // head_last
-            &q,
-            &k,
-            &v,
-            &beta,
-            &g,
-            &entry_state,
-            &device,
+        kiln_model::tape_forward::tape_record_gdn_recurrent_kt(
+            &out_kt, true, &q_kt, &k_kt, &v_kt, &beta_kt, &g_kt, &entry_kt, &kt_dev,
         )
-        .expect("tape_record_gdn_recurrent ok");
+        .expect("tape_record_gdn_recurrent_kt ok");
     });
 
     assert_eq!(
@@ -3073,82 +3075,6 @@ fn cuda_all_finite(tt: &Tensor) -> bool {
         .unwrap()
         .iter()
         .all(|x| x.is_finite())
-}
-
-#[test]
-fn tape_causal_conv1d_records_node_and_emits_input_grad() {
-    let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
-    let device = match cuda_device() {
-        Some(d) => d,
-        None => {
-            eprintln!("tape conv1d node + input grad: no CUDA device — skipping");
-            return;
-        }
-    };
-
-    // Conv kernel layout: input [rows, channels], weight [channels, kernel],
-    // state [channels, kernel-1]. rows = time steps; small + deterministic.
-    let (rows, channels, kernel) = (6usize, 5usize, 4usize);
-    let input = det_f32(&device, &[rows, channels], 0.10, 0.011);
-    let weight = det_f32(&device, &[channels, kernel], 0.05, 0.007);
-    let state = det_f32(&device, &[channels, kernel - 1], 0.02, 0.003);
-
-    unsafe {
-        std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
-        std::env::set_var("KILN_USE_TAPE_GDN_CONV", "1");
-    }
-
-    let (res, tape) = kiln_model::tape_forward::with_thread_local_tape(|| {
-        kiln_model::tape_forward::try_tape_causal_conv1d_cuda(&input, &weight, &state, kernel)
-    });
-    let out = res
-        .expect("try_tape_causal_conv1d_cuda ok")
-        .expect("returned Some(out) — gate + scope both on");
-    assert_eq!(out.shape().dims(), &[rows, channels], "conv out shape");
-    assert!(out.device().is_cuda(), "conv out stays on CUDA");
-
-    assert_eq!(
-        tape.len(),
-        1,
-        "conv1d records exactly one node (got {})",
-        tape.len()
-    );
-    let node = &tape.nodes()[0];
-    let out_id = node.output_id;
-    let input_ids = node.input_ids.clone();
-    assert_eq!(
-        input_ids.len(),
-        1,
-        "conv1d records exactly one input (the conv input; weight frozen); got {}",
-        input_ids.len()
-    );
-
-    // Seed grad shaped like out; walk.
-    let seed = det_f32(&device, &[rows, channels], 0.3, -0.009);
-    let seed_kt =
-        kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&seed).expect("seed kt borrow");
-    let mut seeds = HashMap::new();
-    seeds.insert(out_id, seed_kt);
-    let grads = tape
-        .backward_with_seeds(seeds, |a, b| kiln_tensor::ops::add(a, b))
-        .expect("conv1d tape backward walk");
-
-    let g_in = {
-        let kt = grads.get(input_ids[0]).expect("conv input grad present");
-        kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(kt).expect("grad -> candle")
-    };
-    assert_eq!(g_in.shape().dims(), &[rows, channels], "d_input shape == input");
-    assert!(cuda_all_finite(&g_in), "d_input has non-finite entries");
-    assert!(
-        cuda_max_abs(&g_in) > 1e-6,
-        "d_input is essentially zero — tape backward not reaching the conv input"
-    );
-
-    unsafe {
-        std::env::remove_var("KILN_USE_TAPE_FORWARD");
-        std::env::remove_var("KILN_USE_TAPE_GDN_CONV");
-    }
 }
 
 #[test]

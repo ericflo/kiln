@@ -45,9 +45,7 @@
 // unconditional so candle-free CUDA consumers can use them, and the
 // pure `candle <-> kt` Device/DType enum-mapping helpers compile on any
 // `candle` build (CUDA toolchain not required for the enum mappers).
-// (#1082)
-#[cfg(all(feature = "cuda", feature = "candle"))]
-pub mod forward_op;
+// (#1082) Deleted `pub mod forward_op` (KtForwardOp1/2/3 candle CustomOp shims) — dead, no callers.
 
 // (#1082) `inject_grad_shim` (the `InjectGradientCandleShim` candle CustomOp1 +
 // `inject_gradient_via_shim`) is DELETED — its only user was the test-only

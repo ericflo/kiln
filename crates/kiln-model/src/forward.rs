@@ -2308,19 +2308,26 @@ fn synchronize_for_profile(device: &Device) -> Result<()> {
     // enqueue cost rather than execution cost. Call the device-level
     // synchronize for any async backend (CUDA, Metal); CPU is already
     // synchronous so the match-and-skip there avoids the extra call.
-    // #1082 forward-flip: `device` is a kt `Device`, which has no
-    // `synchronize`. Bridge to a candle device for the (profiling-only) sync.
     match device {
         Device::Cpu => Ok(()),
-        // Any async GPU backend (CUDA / Metal / Vulkan) needs a device
-        // sync before timing. kt `Device` is `#[non_exhaustive]`, so the
-        // wildcard arm both folds in future backends and satisfies the
-        // exhaustiveness check for this out-of-crate match.
+        // #1082: CUDA sync is kt-native — drain the device's default stream via
+        // the kt cuda API; no candle bridge in the cuda lane.
+        #[cfg(feature = "cuda")]
+        Device::Cuda(idx) => kiln_tensor::cuda_synchronize_default_stream(*idx)
+            .map_err(|e| anyhow::anyhow!("synchronize_for_profile: {e}")),
+        // Non-CUDA async backends (Metal/Vulkan) bridge to a candle device for
+        // the profiling-only sync. kt `Device` is `#[non_exhaustive]`, so this
+        // wildcard also satisfies exhaustiveness. Excluded from the cuda build.
+        #[cfg(not(feature = "cuda"))]
         _ => {
             let candle_device = kiln_kt_bridge::candle_device_from_kt(device)
                 .map_err(|e| anyhow::anyhow!("synchronize_for_profile: {e}"))?;
             candle_device.synchronize().map_err(Into::into)
         }
+        // In a cuda build the only async backend is CUDA (handled above); the
+        // wildcard keeps the `#[non_exhaustive]` match exhaustive.
+        #[cfg(feature = "cuda")]
+        _ => Ok(()),
     }
 }
 
