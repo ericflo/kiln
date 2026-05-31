@@ -40,6 +40,8 @@ use crate::forward::GpuLayerWeights;
 use crate::PagedKvCacheKt;
 
 const MLP_BF16_ROWS8_MIN_BATCH: usize = 128;
+const PAGED_ATTN_SPLITK_CHUNKS_B1: usize = 8;
+const PAGED_ATTN_SPLITK_CHUNKS_BATCHED: usize = 4;
 
 // (#1082) The process-global `KT_WEIGHT_CANDLE_CACHE` + `kt_weight_to_candle_cached`
 // bridge are gone. They existed to give the candle-keyed `cached_*_weight_buffer`
@@ -82,6 +84,18 @@ fn timing_enabled() -> bool {
 
 fn enabled_unless_disabled(name: &str) -> bool {
     std::env::var(name).is_err()
+}
+
+fn paged_attn_splitk_chunks(batch_size: usize) -> usize {
+    std::env::var("KILN_VK_PAGED_ATTN_SPLITK_CHUNKS")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|&n| n >= 1)
+        .unwrap_or(if batch_size <= 1 {
+            PAGED_ATTN_SPLITK_CHUNKS_B1
+        } else {
+            PAGED_ATTN_SPLITK_CHUNKS_BATCHED
+        })
 }
 
 fn full_attn_qkv_bf16w_plan(batch: usize, total_out: usize) -> (&'static str, u32) {
@@ -1803,11 +1817,7 @@ pub fn record_full_attn_block_into(
     // ≈90% of the RTX 6000 Ada's 144 SMs) — tunable via
     // `KILN_VK_PAGED_ATTN_SPLITK_CHUNKS`. Anything ≥ seq_len degrades
     // gracefully (chunks beyond `seq_len` write neutral identities).
-    let num_chunks: usize = std::env::var("KILN_VK_PAGED_ATTN_SPLITK_CHUNKS")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .filter(|&n| n >= 1)
-        .unwrap_or(8);
+    let num_chunks = paged_attn_splitk_chunks(1);
     let partials_stride = 2 + head_dim;
     let partials_bytes = (1 * num_heads * num_chunks * partials_stride * 4) as u64;
     let attn_partials =
@@ -2120,11 +2130,7 @@ pub fn record_full_attn_block_batched_into(
         Workgroups::OneD((batch_size * elements_per_slot).div_ceil(256) as u32),
     )?;
 
-    let num_chunks: usize = std::env::var("KILN_VK_PAGED_ATTN_SPLITK_CHUNKS")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .filter(|&n| n >= 1)
-        .unwrap_or(8);
+    let num_chunks = paged_attn_splitk_chunks(batch_size);
     let partials_stride = 2 + head_dim;
     let partials_bytes = (batch_size * num_heads * num_chunks * partials_stride * 4) as u64;
     let attn_partials = backend.acquire_resident_scratch("nfa_b_attn_partials", partials_bytes)?;

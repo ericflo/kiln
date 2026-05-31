@@ -45,6 +45,8 @@ const TIMED_ITERS: usize = 30;
 const REPEATS: usize = 5;
 const DEFAULT_BATCHES: &[usize] = &[1, 4, 8, 16, 32, 64];
 const MLP_BF16_ROWS8_MIN_BATCH: usize = 128;
+const PAGED_ATTN_SPLITK_CHUNKS_B1: usize = 8;
+const PAGED_ATTN_SPLITK_CHUNKS_BATCHED: usize = 4;
 
 /// Deterministic flat `Vec<bf16>` weight data for byte/slice dispatch entries.
 fn make_bf16_weight_slice(rows: usize, cols: usize) -> Vec<bf16> {
@@ -80,6 +82,18 @@ fn batch_sweep() -> Vec<usize> {
 
 fn enabled_unless_disabled(name: &str) -> bool {
     std::env::var(name).is_err()
+}
+
+fn paged_attn_splitk_chunks(batch: usize) -> usize {
+    std::env::var("KILN_VK_PAGED_ATTN_SPLITK_CHUNKS")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|&n| n >= 1)
+        .unwrap_or(if batch <= 1 {
+            PAGED_ATTN_SPLITK_CHUNKS_B1
+        } else {
+            PAGED_ATTN_SPLITK_CHUNKS_BATCHED
+        })
 }
 
 fn full_attn_qkv_bf16w_plan(batch: usize, total_out: usize) -> (&'static str, u32) {
@@ -1699,11 +1713,6 @@ fn run_full_token_resident_paged(
     let blocks_per_seq = 32usize;
     let cur_seq_len = 256usize;
     let softmax_scale = (head_dim as f32).sqrt().recip();
-    let num_chunks: usize = std::env::var("KILN_VK_PAGED_ATTN_SPLITK_CHUNKS")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .filter(|&n| n >= 1)
-        .unwrap_or(8);
 
     // Upload weights directly from host slices.
     let weight_norm = upload_f32_buffer_from_slice(device, &vec![1.0f32; HIDDEN])?;
@@ -1757,6 +1766,7 @@ fn run_full_token_resident_paged(
     };
 
     for &batch in batches {
+        let num_chunks = paged_attn_splitk_chunks(batch);
         let total_blocks = batch * blocks_per_seq;
         let cache = VkPagedKvCache::new(
             device,

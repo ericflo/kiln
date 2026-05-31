@@ -230,13 +230,17 @@ every config"):
   **Update — multi-row resident paged microbench:** `full_token_resident_paged`
   now uses `paged_kv_write_slots` plus split-K
   `paged_attn_decode_batch_paged_splitk` and reduce over real per-row block
-  tables. With default iterations and `KILN_VK_MICROBENCH_BATCHES=1,4` on RADV
+  tables. The default split-K policy keeps 8 chunks for batch 1 and uses 4
+  chunks for multi-row resident batches, with
+  `KILN_VK_PAGED_ATTN_SPLITK_CHUNKS` still available for forced sweeps. With
+  `KILN_VK_MICROBENCH_BATCHES=1,4,64`, warmup=2, timed=5, repeats=2 on RADV
   STRIX_HALO:
 
   | batch | per token | rows/s |
   |---:|---:|---:|
-  | 1 | 48.3 ms | 21 |
-  | 4 | 52.9 ms | 76 |
+  | 1 | 49.2 ms | 20 |
+  | 4 | 52.8 ms | 76 |
+  | 64 | 372.0 ms | 172 |
 
 ## Other follow-ups (perf headroom, not regressions)
 
