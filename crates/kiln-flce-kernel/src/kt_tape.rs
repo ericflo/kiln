@@ -367,18 +367,17 @@ mod tests {
 
     /// CUDA forward records a tape node tagged with the saved
     /// (hidden, head_t) ids. Skips cleanly without a CUDA device.
-    /// CUDA E2E forward — currently `#[ignore]`-d: the kt-typed
-    /// forward (`fused_linear_cross_entropy_phase_b_kt`) builds
-    /// per-chunk index tensors on the CPU (e.g. `row_idx_t`,
-    /// `col_idx_2d` in `kt_api`'s gather loop). On CUDA inputs the
-    /// resulting `DeviceOp2 "index_select"` call fails with
-    /// "inputs on different devices: a=cuda:0, b=cpu". This is a
-    /// known kt-substrate gap (kt-tensor index-op constructors don't
-    /// yet honour the parent tensor's device) — not a kt-tape
-    /// regression. Re-enable once the kt-substrate work that closes
-    /// the gap lands; the test body is otherwise correct.
+    /// CUDA E2E forward. (#1082 H-FLCE) Previously `#[ignore]`-d
+    /// because the kt-typed forward (`fused_linear_cross_entropy_phase_b_kt`)
+    /// built per-chunk index tensors on the CPU (`active_idx`, `row_idx_t`,
+    /// `col_idx_2d`) so `DeviceOp2 "index_select"` failed with "inputs on
+    /// different devices: a=cuda:0, b=cpu". That gap is now closed: the
+    /// forward derives `device = hidden.device()` and allocates every index
+    /// tensor via `from_vec_on(device, ...)`, and the correct-logit gather
+    /// uses a CUDA-capable flat `index_select` instead of CPU-only `gather`
+    /// (mirroring the already-correct backward + the H6 CE adapter). Runs on
+    /// CUDA, skips cleanly when no GPU is present.
     #[cfg(feature = "cuda")]
-    #[ignore]
     #[test]
     fn forward_records_tape_node_when_cuda_available() {
         if !cuda_available() {
@@ -445,13 +444,12 @@ mod tests {
     /// matched (hidden, head_t) shape and asserts the returned
     /// dhidden has the original hidden dtype + shape and that the
     /// head_t slot is `None`. Skips cleanly without a CUDA device.
-    /// CUDA E2E backward — currently `#[ignore]`-d for the same
-    /// reason as `forward_records_tape_node_when_cuda_available`
-    /// (see that test). The backward kernel re-enters the kt-typed
-    /// chunk loop and hits the same `mul`/`index_select` cross-
-    /// device error until the kt-substrate index-op gap closes.
+    /// CUDA E2E backward. (#1082 H-FLCE) The backward already allocated its
+    /// index/accumulator tensors device-parametrically; with the matching
+    /// forward fix (see `forward_records_tape_node_when_cuda_available`) the
+    /// full kt-tape FLCE path now runs on CUDA. Runs on CUDA, skips cleanly
+    /// when no GPU is present.
     #[cfg(feature = "cuda")]
-    #[ignore]
     #[test]
     fn backward_apply_returns_dhidden_shape_and_none_for_head() {
         if !cuda_available() {

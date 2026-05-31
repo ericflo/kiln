@@ -7861,26 +7861,61 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
     // `analytic_sft_tail_grad_pre_final_norm` is kt-native and returns
     // d(loss)/d(pre-final-norm hidden) as kt F32 [1, T, H] — exactly the
     // upstream grad to seed the LAST segment's backward (its output IS that
-    // hidden). The loss value is only needed as a scalar; FLCE remains a candle
-    // island (bridge kt->candle for that dispatch only).
+    // hidden). The loss value here is ONLY consumed as a scalar `loss_val`; the
+    // gradient comes entirely from the analytic tail (the FLCE node is NOT
+    // recorded on any tape — this block runs outside the per-segment tape
+    // scopes). So FLCE only has to compute the scalar loss, not a tape-connected
+    // backward.
     let loss_val = if use_flce() {
-        // (#1082) candle island — FLCE dispatch is candle-typed.
-        let normed = cd_out(&model_forward_final_norm(&final_hidden_kt, weights, model_config)?)?;
-        let head_t_candle = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&weights.embed_tokens_t)
-            .map_err(|e| anyhow::anyhow!("ckpt-kt: kt->candle head_t: {e}"))?;
-        let cd_device = kiln_kt_bridge::candle_device_from_kt(device)
-            .map_err(|e| anyhow::anyhow!("ckpt-kt: kt->candle device: {e}"))?;
-        let loss = fused_linear_cross_entropy_dispatch_with_provider(
-            &normed,
-            &head_t_candle,
-            input_ids,
-            label_mask,
-            &cd_device,
-            DEFAULT_CHUNK_SIZE,
-            flce_provider.clone(),
-        )
-        .context("ckpt-kt fused linear cross-entropy (final boundary)")?;
-        loss.to_scalar::<f32>()? as f64
+        // (#1082 H-FLCE) FLCE loss-VALUE via the kt-native forward
+        // `fused_linear_cross_entropy_phase_b_kt` — taking the kt `normed`
+        // hidden and the kt `embed_tokens_t` head DIRECTLY. This drops the
+        // candle bridges the old candle-dispatch path required:
+        //   - `cd_out(normed)` (the [1, T, H] post-final-norm kt->candle copy),
+        //   - the FULL `embed_tokens_t` kt->candle copy (~780MB/step on
+        //     Qwen3.5-4B BF16, the copy #1082 flagged), and
+        //   - the candle device bridge.
+        // Only the resulting scalar crosses back to host (`to_scalar`). The kt
+        // forward's index/accumulator tensors are now device-parametric
+        // (from_vec_on + flat index_select), so it runs on CUDA inputs.
+        //
+        // EXCEPTION: when a `flce_provider` is bound (`KILN_CUDA_FLCE=1` — the
+        // backend chunk-matmul override), defer to the candle dispatch: the kt
+        // forward has no provider plumbing. This is a non-default opt-in path.
+        if flce_provider.is_some() {
+            // (#1082) candle island — provider-bound FLCE dispatch is candle-typed.
+            let normed =
+                cd_out(&model_forward_final_norm(&final_hidden_kt, weights, model_config)?)?;
+            let head_t_candle =
+                kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&weights.embed_tokens_t)
+                    .map_err(|e| anyhow::anyhow!("ckpt-kt: kt->candle head_t: {e}"))?;
+            let cd_device = kiln_kt_bridge::candle_device_from_kt(device)
+                .map_err(|e| anyhow::anyhow!("ckpt-kt: kt->candle device: {e}"))?;
+            let loss = fused_linear_cross_entropy_dispatch_with_provider(
+                &normed,
+                &head_t_candle,
+                input_ids,
+                label_mask,
+                &cd_device,
+                DEFAULT_CHUNK_SIZE,
+                flce_provider.clone(),
+            )
+            .context("ckpt-kt fused linear cross-entropy (final boundary, provider path)")?;
+            loss.to_scalar::<f32>()? as f64
+        } else {
+            let normed = model_forward_final_norm(&final_hidden_kt, weights, model_config)?;
+            let loss_kt = kiln_flce_kernel::kt_api::fused_linear_cross_entropy_phase_b_kt(
+                &normed,
+                &weights.embed_tokens_t,
+                input_ids,
+                label_mask,
+                DEFAULT_CHUNK_SIZE,
+            )
+            .map_err(|e| {
+                anyhow::anyhow!("ckpt-kt kt-native fused linear cross-entropy (final boundary): {e}")
+            })?;
+            loss_kt.to_scalar::<f32>()? as f64
+        }
     } else {
         let logits = model_forward_head(&final_hidden_kt, weights, model_config)?;
         let loss = cross_entropy_loss(&logits, input_ids, label_mask, device)?;
