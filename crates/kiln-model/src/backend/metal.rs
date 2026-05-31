@@ -17,8 +17,44 @@ use super::BackendRuntime;
 // substrate swaps (e.g. candle → objc2-metal) touch this single import
 // block instead of hundreds of scattered fully-qualified references.
 use kiln_tensor::metal_types::{
-    buffer_o_kt, sdpa, ComputePipeline, DeviceId, Library, MetalDevice, Storage,
+    buffer_o_kt, sdpa, ComputePipeline, Library, MetalCompanion, MetalDevice, MetalRawDevice,
+    Storage,
 };
+use kiln_tensor::MetalStorage;
+
+/// Host abstraction for the per-device MSL pipeline / library caches
+/// (#1082). The `metal_*_pipeline` + `metal_shared_library` helpers take
+/// `&dyn MetalPipelineHost` so the **same** getter serves both a candle
+/// `MetalDevice` caller (during the candle→kt migration) and a
+/// candle-free kt `MetalCompanion` caller, with no change at any call
+/// site. Both expose the raw `candle_metal_kernels` device (for
+/// `new_library_with_source` / `new_compute_pipeline_state_with_function`)
+/// and a stable per-device `registry_id()` cache key — so the two paths
+/// share one compiled pipeline per physical GPU (no double-compile).
+pub(crate) trait MetalPipelineHost {
+    /// The raw substrate device for library / pipeline construction.
+    fn pipeline_raw_device(&self) -> &MetalRawDevice;
+    /// Stable per-device cache key (`MTLDevice::registryID`).
+    fn pipeline_cache_key(&self) -> u64;
+}
+
+impl MetalPipelineHost for MetalDevice {
+    fn pipeline_raw_device(&self) -> &MetalRawDevice {
+        self.device()
+    }
+    fn pipeline_cache_key(&self) -> u64 {
+        self.device().registry_id()
+    }
+}
+
+impl MetalPipelineHost for MetalCompanion {
+    fn pipeline_raw_device(&self) -> &MetalRawDevice {
+        self.device()
+    }
+    fn pipeline_cache_key(&self) -> u64 {
+        self.device_id()
+    }
+}
 
 // Per-function pipeline-cache helpers reach for these std types; hoisted to
 // module-level so the 46 pipeline-builder helpers below stop repeating the
@@ -34,6 +70,40 @@ use std::sync::{Mutex, OnceLock};
 // is negligible relative to a Metal encoder dispatch and stays well
 // below 100ns per call. Returns a kt Layout that round-trips
 // `start_offset()` exactly, which is what `buffer_o_kt` reads.
+/// Downcast a kt `Tensor`'s storage to `&MetalStorage` — the standard
+/// entry every candle-free Metal kernel helper uses to reach `.buffer()`
+/// + `.companion()`. (#1082)
+#[inline]
+fn kt_metal(t: &kiln_tensor::Tensor) -> Result<&MetalStorage> {
+    t.storage()
+        .as_any()
+        .downcast_ref::<MetalStorage>()
+        .context("expected a Metal-backed kiln_tensor::Tensor")
+}
+
+/// Allocate a fresh contiguous Metal output tensor of `dtype` × `dims` on
+/// the same device as `like`'s companion. Zero-initialized via the UMA
+/// `StorageModeShared` path (`MetalStorage::zeros_kt`); kernels that fully
+/// overwrite their output pay a cheap UMA zero-fill — correctness-first
+/// per #1082 ("ship parity before optimizing"). Replaces the candle
+/// `Tensor::empty(dims, dtype, x.device())` output allocation in the
+/// kt-flipped kernel helpers. (#1082)
+fn kt_metal_alloc(
+    like: &MetalStorage,
+    dtype: kiln_tensor::DType,
+    dims: &[usize],
+) -> Result<kiln_tensor::Tensor> {
+    let companion = like.companion()?;
+    let n: usize = dims.iter().product();
+    let storage = MetalStorage::zeros_kt(companion.device(), like.device_index(), dtype, n)?;
+    kiln_tensor::Tensor::from_parts(
+        std::sync::Arc::new(storage),
+        kiln_tensor::Layout::contiguous(dims.to_vec()),
+        kiln_tensor::TensorId::next(),
+    )
+    .map_err(|e| anyhow::anyhow!("kt_metal_alloc: {e}"))
+}
+
 #[inline]
 fn kt_layout_from_candle(l: &candle_core::Layout) -> kiln_tensor::Layout {
     // `from_parts` only fails when shape.len() != strides.len(), which
@@ -979,24 +1049,17 @@ impl BackendRuntime for MetalBackend {
         g: &kiln_tensor::Tensor,
         state: &mut kiln_tensor::Tensor,
     ) -> Result<Option<kiln_tensor::Tensor>> {
-        let q = crate::forward::kt_logits_to_candle(q)?;
-        let k = crate::forward::kt_logits_to_candle(k)?;
-        let v = crate::forward::kt_logits_to_candle(v)?;
-        let beta = crate::forward::kt_logits_to_candle(beta)?;
-        let g = crate::forward::kt_logits_to_candle(g)?;
-        let mut state_c = crate::forward::kt_logits_to_candle(state)?;
+        // #1082: kt-native — helpers take kt directly, no candle bridge.
+        // The recurrent state is mutated in place through its shared UMA
+        // buffer (the &mut state is the same tensor the caller holds).
         if self.disable.gdn_recurrent
-            || !metal_gdn_recurrent_prefill_native_head_last_supports(
-                &q, &k, &v, &beta, &g, &state_c,
-            )
+            || !metal_gdn_recurrent_prefill_native_head_last_supports(q, k, v, beta, g, state)
         {
             return Ok(None);
         }
-        let out =
-            metal_gdn_recurrent_prefill_native_head_last_bf16(&q, &k, &v, &beta, &g, &mut state_c)
-                .context("metal gdn_recurrent_prefill_native_head_last kernel failed")?;
-        *state = crate::forward::candle_to_kt_activation(&state_c)?;
-        Ok(Some(crate::forward::candle_to_kt_activation(&out)?))
+        let out = metal_gdn_recurrent_prefill_native_head_last_bf16(q, k, v, beta, g, state)
+            .context("metal gdn_recurrent_prefill_native_head_last kernel failed")?;
+        Ok(Some(out))
     }
 
     fn gdn_in_proj_decode(
@@ -1042,19 +1105,13 @@ impl BackendRuntime for MetalBackend {
         a_log: &kiln_tensor::Tensor,
         dt_bias: &kiln_tensor::Tensor,
     ) -> Result<Option<(kiln_tensor::Tensor, kiln_tensor::Tensor)>> {
-        let a = crate::forward::kt_logits_to_candle(a)?;
-        let b = crate::forward::kt_logits_to_candle(b)?;
-        let a_log = crate::forward::kt_logits_to_candle(a_log)?;
-        let dt_bias = crate::forward::kt_logits_to_candle(dt_bias)?;
-        if self.disable.gdn_gates || !metal_gdn_gates_supports(&a, &b, &a_log, &dt_bias) {
+        // #1082: kt-native — helpers take kt directly, no candle bridge.
+        if self.disable.gdn_gates || !metal_gdn_gates_supports(a, b, a_log, dt_bias) {
             return Ok(None);
         }
-        let (beta, g) = metal_gdn_gates_bf16(&a, &b, &a_log, &dt_bias)
+        let (beta, g) = metal_gdn_gates_bf16(a, b, a_log, dt_bias)
             .context("metal gdn_gates kernel failed")?;
-        Ok(Some((
-            crate::forward::candle_to_kt_activation(&beta)?,
-            crate::forward::candle_to_kt_activation(&g)?,
-        )))
+        Ok(Some((beta, g)))
     }
 
     fn gdn_gated_rms_norm(
@@ -1064,15 +1121,13 @@ impl BackendRuntime for MetalBackend {
         weight: &kiln_tensor::Tensor,
         eps: f64,
     ) -> Result<Option<kiln_tensor::Tensor>> {
-        let x = crate::forward::kt_logits_to_candle(x)?;
-        let z = crate::forward::kt_logits_to_candle(z)?;
-        let weight = crate::forward::kt_logits_to_candle(weight)?;
-        if self.disable.gated_rms_norm || !metal_gated_rms_norm_supports(&x, &z, &weight) {
+        // #1082: kt-native — helpers take kt directly, no candle bridge.
+        if self.disable.gated_rms_norm || !metal_gated_rms_norm_supports(x, z, weight) {
             return Ok(None);
         }
-        let out = metal_gated_rms_norm_bf16(&x, &z, &weight, eps as f32)
+        let out = metal_gated_rms_norm_bf16(x, z, weight, eps as f32)
             .context("metal gated_rms_norm kernel failed")?;
-        Ok(Some(crate::forward::candle_to_kt_activation(&out)?))
+        Ok(Some(out))
     }
 }
 
@@ -1387,18 +1442,18 @@ fn metal_conv1d_update_supports(
         .is_ok_and(|(b, c, k)| (b, c, k) == (batch, channels, kernel_size - 1))
 }
 
-fn metal_gdn_gates_supports(a: &candle_core::Tensor, b: &candle_core::Tensor, a_log: &candle_core::Tensor, dt_bias: &candle_core::Tensor) -> bool {
-    if !matches!(a.device(), candle_core::Device::Metal(_))
-        || !matches!(b.device(), candle_core::Device::Metal(_))
-        || !matches!(a_log.device(), candle_core::Device::Metal(_))
-        || !matches!(dt_bias.device(), candle_core::Device::Metal(_))
+fn metal_gdn_gates_supports(a: &kiln_tensor::Tensor, b: &kiln_tensor::Tensor, a_log: &kiln_tensor::Tensor, dt_bias: &kiln_tensor::Tensor) -> bool {
+    if !matches!(a.device(), kiln_tensor::Device::Metal(_))
+        || !matches!(b.device(), kiln_tensor::Device::Metal(_))
+        || !matches!(a_log.device(), kiln_tensor::Device::Metal(_))
+        || !matches!(dt_bias.device(), kiln_tensor::Device::Metal(_))
     {
         return false;
     }
-    if a.dtype() != candle_core::DType::BF16
-        || b.dtype() != candle_core::DType::BF16
-        || a_log.dtype() != candle_core::DType::F32
-        || dt_bias.dtype() != candle_core::DType::BF16
+    if a.dtype() != kiln_tensor::DType::BF16
+        || b.dtype() != kiln_tensor::DType::BF16
+        || a_log.dtype() != kiln_tensor::DType::F32
+        || dt_bias.dtype() != kiln_tensor::DType::BF16
     {
         return false;
     }
@@ -1418,26 +1473,26 @@ fn metal_gdn_gates_supports(a: &candle_core::Tensor, b: &candle_core::Tensor, a_
 }
 
 pub(crate) fn metal_gdn_gates_decay_supports(
-    a: &candle_core::Tensor,
-    b: &candle_core::Tensor,
-    a_log: &candle_core::Tensor,
-    dt_bias: &candle_core::Tensor,
+    a: &kiln_tensor::Tensor,
+    b: &kiln_tensor::Tensor,
+    a_log: &kiln_tensor::Tensor,
+    dt_bias: &kiln_tensor::Tensor,
 ) -> bool {
     !metal_gdn_prefill_decay_recurrent_disabled() && metal_gdn_gates_supports(a, b, a_log, dt_bias)
 }
 
 pub(crate) fn metal_gdn_prefill_ab_in_proj_supports(
-    x: &candle_core::Tensor,
-    in_proj_ab_t: &candle_core::Tensor,
+    x: &kiln_tensor::Tensor,
+    in_proj_ab_t: &kiln_tensor::Tensor,
     nv: usize,
 ) -> bool {
     if metal_gdn_prefill_ab_in_proj_disabled() {
         return false;
     }
-    if x.dtype() != candle_core::DType::BF16 || in_proj_ab_t.dtype() != candle_core::DType::BF16 {
+    if x.dtype() != kiln_tensor::DType::BF16 || in_proj_ab_t.dtype() != kiln_tensor::DType::BF16 {
         return false;
     }
-    if !matches!(x.device(), candle_core::Device::Metal(_)) || !matches!(in_proj_ab_t.device(), candle_core::Device::Metal(_))
+    if !matches!(x.device(), kiln_tensor::Device::Metal(_)) || !matches!(in_proj_ab_t.device(), kiln_tensor::Device::Metal(_))
     {
         return false;
     }
@@ -1454,20 +1509,20 @@ pub(crate) fn metal_gdn_prefill_ab_in_proj_supports(
 }
 
 pub(crate) fn metal_gdn_gates_decay_ab_supports(
-    ab: &candle_core::Tensor,
-    a_log: &candle_core::Tensor,
-    dt_bias: &candle_core::Tensor,
+    ab: &kiln_tensor::Tensor,
+    a_log: &kiln_tensor::Tensor,
+    dt_bias: &kiln_tensor::Tensor,
     nv: usize,
 ) -> bool {
     if metal_gdn_prefill_ab_in_proj_disabled() || metal_gdn_prefill_decay_recurrent_disabled() {
         return false;
     }
-    if ab.dtype() != candle_core::DType::BF16 || a_log.dtype() != candle_core::DType::F32 || dt_bias.dtype() != candle_core::DType::BF16 {
+    if ab.dtype() != kiln_tensor::DType::BF16 || a_log.dtype() != kiln_tensor::DType::F32 || dt_bias.dtype() != kiln_tensor::DType::BF16 {
         return false;
     }
-    if !matches!(ab.device(), candle_core::Device::Metal(_))
-        || !matches!(a_log.device(), candle_core::Device::Metal(_))
-        || !matches!(dt_bias.device(), candle_core::Device::Metal(_))
+    if !matches!(ab.device(), kiln_tensor::Device::Metal(_))
+        || !matches!(a_log.device(), kiln_tensor::Device::Metal(_))
+        || !matches!(dt_bias.device(), kiln_tensor::Device::Metal(_))
     {
         return false;
     }
@@ -1849,28 +1904,28 @@ fn metal_gdn_recurrent_prefill_head_last_supports(
 }
 
 fn metal_gdn_recurrent_prefill_native_head_last_supports(
-    q: &candle_core::Tensor,
-    k: &candle_core::Tensor,
-    v: &candle_core::Tensor,
-    beta: &candle_core::Tensor,
-    g: &candle_core::Tensor,
-    state: &candle_core::Tensor,
+    q: &kiln_tensor::Tensor,
+    k: &kiln_tensor::Tensor,
+    v: &kiln_tensor::Tensor,
+    beta: &kiln_tensor::Tensor,
+    g: &kiln_tensor::Tensor,
+    state: &kiln_tensor::Tensor,
 ) -> bool {
-    if !matches!(q.device(), candle_core::Device::Metal(_))
-        || !matches!(k.device(), candle_core::Device::Metal(_))
-        || !matches!(v.device(), candle_core::Device::Metal(_))
-        || !matches!(beta.device(), candle_core::Device::Metal(_))
-        || !matches!(g.device(), candle_core::Device::Metal(_))
-        || !matches!(state.device(), candle_core::Device::Metal(_))
+    if !matches!(q.device(), kiln_tensor::Device::Metal(_))
+        || !matches!(k.device(), kiln_tensor::Device::Metal(_))
+        || !matches!(v.device(), kiln_tensor::Device::Metal(_))
+        || !matches!(beta.device(), kiln_tensor::Device::Metal(_))
+        || !matches!(g.device(), kiln_tensor::Device::Metal(_))
+        || !matches!(state.device(), kiln_tensor::Device::Metal(_))
     {
         return false;
     }
-    if q.dtype() != candle_core::DType::BF16
-        || k.dtype() != candle_core::DType::BF16
-        || v.dtype() != candle_core::DType::BF16
-        || beta.dtype() != candle_core::DType::BF16
-        || g.dtype() != candle_core::DType::BF16
-        || state.dtype() != candle_core::DType::BF16
+    if q.dtype() != kiln_tensor::DType::BF16
+        || k.dtype() != kiln_tensor::DType::BF16
+        || v.dtype() != kiln_tensor::DType::BF16
+        || beta.dtype() != kiln_tensor::DType::BF16
+        || g.dtype() != kiln_tensor::DType::BF16
+        || state.dtype() != kiln_tensor::DType::BF16
     {
         return false;
     }
@@ -1908,48 +1963,48 @@ fn metal_gdn_recurrent_prefill_native_head_last_supports(
 }
 
 pub(crate) fn metal_gdn_recurrent_prefill_native_head_last_decay_supports(
-    q: &candle_core::Tensor,
-    k: &candle_core::Tensor,
-    v: &candle_core::Tensor,
-    beta: &candle_core::Tensor,
-    decay: &candle_core::Tensor,
-    state: &candle_core::Tensor,
+    q: &kiln_tensor::Tensor,
+    k: &kiln_tensor::Tensor,
+    v: &kiln_tensor::Tensor,
+    beta: &kiln_tensor::Tensor,
+    decay: &kiln_tensor::Tensor,
+    state: &kiln_tensor::Tensor,
 ) -> bool {
     !metal_gdn_prefill_decay_recurrent_disabled()
         && metal_gdn_recurrent_prefill_native_head_last_supports(q, k, v, beta, decay, state)
 }
 
 pub(crate) fn metal_gdn_decode_gates_recurrent_supports(
-    q: &candle_core::Tensor,
-    k: &candle_core::Tensor,
-    v: &candle_core::Tensor,
-    a: &candle_core::Tensor,
-    b: &candle_core::Tensor,
-    a_log: &candle_core::Tensor,
-    dt_bias: &candle_core::Tensor,
-    state: &candle_core::Tensor,
+    q: &kiln_tensor::Tensor,
+    k: &kiln_tensor::Tensor,
+    v: &kiln_tensor::Tensor,
+    a: &kiln_tensor::Tensor,
+    b: &kiln_tensor::Tensor,
+    a_log: &kiln_tensor::Tensor,
+    dt_bias: &kiln_tensor::Tensor,
+    state: &kiln_tensor::Tensor,
 ) -> bool {
-    if metal_gdn_decode_gates_recurrent_disabled() || !matches!(q.device(), candle_core::Device::Metal(_)) {
+    if metal_gdn_decode_gates_recurrent_disabled() || !matches!(q.device(), kiln_tensor::Device::Metal(_)) {
         return false;
     }
-    if !matches!(k.device(), candle_core::Device::Metal(_))
-        || !matches!(v.device(), candle_core::Device::Metal(_))
-        || !matches!(a.device(), candle_core::Device::Metal(_))
-        || !matches!(b.device(), candle_core::Device::Metal(_))
-        || !matches!(a_log.device(), candle_core::Device::Metal(_))
-        || !matches!(dt_bias.device(), candle_core::Device::Metal(_))
-        || !matches!(state.device(), candle_core::Device::Metal(_))
+    if !matches!(k.device(), kiln_tensor::Device::Metal(_))
+        || !matches!(v.device(), kiln_tensor::Device::Metal(_))
+        || !matches!(a.device(), kiln_tensor::Device::Metal(_))
+        || !matches!(b.device(), kiln_tensor::Device::Metal(_))
+        || !matches!(a_log.device(), kiln_tensor::Device::Metal(_))
+        || !matches!(dt_bias.device(), kiln_tensor::Device::Metal(_))
+        || !matches!(state.device(), kiln_tensor::Device::Metal(_))
     {
         return false;
     }
-    if q.dtype() != candle_core::DType::BF16
-        || k.dtype() != candle_core::DType::BF16
-        || v.dtype() != candle_core::DType::BF16
-        || a.dtype() != candle_core::DType::BF16
-        || b.dtype() != candle_core::DType::BF16
-        || a_log.dtype() != candle_core::DType::F32
-        || dt_bias.dtype() != candle_core::DType::BF16
-        || state.dtype() != candle_core::DType::BF16
+    if q.dtype() != kiln_tensor::DType::BF16
+        || k.dtype() != kiln_tensor::DType::BF16
+        || v.dtype() != kiln_tensor::DType::BF16
+        || a.dtype() != kiln_tensor::DType::BF16
+        || b.dtype() != kiln_tensor::DType::BF16
+        || a_log.dtype() != kiln_tensor::DType::F32
+        || dt_bias.dtype() != kiln_tensor::DType::BF16
+        || state.dtype() != kiln_tensor::DType::BF16
     {
         return false;
     }
@@ -1996,16 +2051,16 @@ pub(crate) fn metal_gdn_decode_gates_recurrent_supports(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn metal_gdn_decode_gates_recurrent_rmsnorm_supports(
-    q: &candle_core::Tensor,
-    k: &candle_core::Tensor,
-    v: &candle_core::Tensor,
-    a: &candle_core::Tensor,
-    b: &candle_core::Tensor,
-    a_log: &candle_core::Tensor,
-    dt_bias: &candle_core::Tensor,
-    state: &candle_core::Tensor,
-    z: &candle_core::Tensor,
-    weight: &candle_core::Tensor,
+    q: &kiln_tensor::Tensor,
+    k: &kiln_tensor::Tensor,
+    v: &kiln_tensor::Tensor,
+    a: &kiln_tensor::Tensor,
+    b: &kiln_tensor::Tensor,
+    a_log: &kiln_tensor::Tensor,
+    dt_bias: &kiln_tensor::Tensor,
+    state: &kiln_tensor::Tensor,
+    z: &kiln_tensor::Tensor,
+    weight: &kiln_tensor::Tensor,
 ) -> bool {
     if metal_gdn_decode_gates_recurrent_rmsnorm_disabled() {
         return false;
@@ -2016,14 +2071,14 @@ pub(crate) fn metal_gdn_decode_gates_recurrent_rmsnorm_supports(
     metal_gated_rms_norm_supports(v, z, weight)
 }
 
-fn metal_gated_rms_norm_supports(x: &candle_core::Tensor, z: &candle_core::Tensor, weight: &candle_core::Tensor) -> bool {
-    if !matches!(x.device(), candle_core::Device::Metal(_))
-        || !matches!(z.device(), candle_core::Device::Metal(_))
-        || !matches!(weight.device(), candle_core::Device::Metal(_))
+fn metal_gated_rms_norm_supports(x: &kiln_tensor::Tensor, z: &kiln_tensor::Tensor, weight: &kiln_tensor::Tensor) -> bool {
+    if !matches!(x.device(), kiln_tensor::Device::Metal(_))
+        || !matches!(z.device(), kiln_tensor::Device::Metal(_))
+        || !matches!(weight.device(), kiln_tensor::Device::Metal(_))
     {
         return false;
     }
-    if x.dtype() != candle_core::DType::BF16 || z.dtype() != candle_core::DType::BF16 || weight.dtype() != candle_core::DType::F32 {
+    if x.dtype() != kiln_tensor::DType::BF16 || z.dtype() != kiln_tensor::DType::BF16 || weight.dtype() != kiln_tensor::DType::F32 {
         return false;
     }
     let Ok((batch, seq_len, heads, hidden)) = x.dims4() else {
@@ -2035,33 +2090,33 @@ fn metal_gated_rms_norm_supports(x: &candle_core::Tensor, z: &candle_core::Tenso
     if (z_batch, z_seq_len, z_heads, z_hidden) != (batch, seq_len, heads, hidden) {
         return false;
     }
-    weight.dims() == &[hidden] && hidden <= 1024
+    weight.dims() == [hidden] && hidden <= 1024
 }
 
-pub(crate) fn metal_rms_norm_supports(x: &candle_core::Tensor, weight: &candle_core::Tensor) -> bool {
+pub(crate) fn metal_rms_norm_supports(x: &kiln_tensor::Tensor, weight: &kiln_tensor::Tensor) -> bool {
     if metal_rms_norm_disabled() {
         return false;
     }
-    if !matches!(x.device(), candle_core::Device::Metal(_)) || !matches!(weight.device(), candle_core::Device::Metal(_)) {
+    if !matches!(x.device(), kiln_tensor::Device::Metal(_)) || !matches!(weight.device(), kiln_tensor::Device::Metal(_)) {
         return false;
     }
-    if x.dtype() != candle_core::DType::BF16 || weight.dtype() != candle_core::DType::BF16 {
+    if x.dtype() != kiln_tensor::DType::BF16 || weight.dtype() != kiln_tensor::DType::BF16 {
         return false;
     }
     let Some(hidden) = x.dims().last().copied() else {
         return false;
     };
-    x.rank() >= 1 && weight.dims() == &[hidden] && hidden <= 8192
+    x.rank() >= 1 && weight.dims() == [hidden] && hidden <= 8192
 }
 
-pub(crate) fn metal_gdn_qk_norm_supports(q: &candle_core::Tensor, k: &candle_core::Tensor) -> bool {
+pub(crate) fn metal_gdn_qk_norm_supports(q: &kiln_tensor::Tensor, k: &kiln_tensor::Tensor) -> bool {
     if metal_gdn_qk_norm_disabled() {
         return false;
     }
-    if !matches!(q.device(), candle_core::Device::Metal(_)) || !matches!(k.device(), candle_core::Device::Metal(_)) {
+    if !matches!(q.device(), kiln_tensor::Device::Metal(_)) || !matches!(k.device(), kiln_tensor::Device::Metal(_)) {
         return false;
     }
-    if q.dtype() != candle_core::DType::F32 || k.dtype() != candle_core::DType::F32 {
+    if q.dtype() != kiln_tensor::DType::F32 || k.dtype() != kiln_tensor::DType::F32 {
         return false;
     }
     let Some(hidden) = q.dims().last().copied() else {
@@ -2070,14 +2125,14 @@ pub(crate) fn metal_gdn_qk_norm_supports(q: &candle_core::Tensor, k: &candle_cor
     q.rank() >= 1 && q.dims() == k.dims() && hidden <= 8192
 }
 
-pub(crate) fn metal_gdn_qk_norm_gqa_supports(q: &candle_core::Tensor, k: &candle_core::Tensor, nv: usize) -> bool {
+pub(crate) fn metal_gdn_qk_norm_gqa_supports(q: &kiln_tensor::Tensor, k: &kiln_tensor::Tensor, nv: usize) -> bool {
     if metal_gdn_qk_norm_disabled() {
         return false;
     }
-    if !matches!(q.device(), candle_core::Device::Metal(_)) || !matches!(k.device(), candle_core::Device::Metal(_)) {
+    if !matches!(q.device(), kiln_tensor::Device::Metal(_)) || !matches!(k.device(), kiln_tensor::Device::Metal(_)) {
         return false;
     }
-    if q.dtype() != candle_core::DType::F32 || k.dtype() != candle_core::DType::F32 {
+    if q.dtype() != kiln_tensor::DType::F32 || k.dtype() != kiln_tensor::DType::F32 {
         return false;
     }
     let Ok((_, _, nk, hidden)) = q.dims4() else {
@@ -2093,9 +2148,9 @@ pub(crate) fn metal_gdn_qk_norm_gqa_supports(q: &candle_core::Tensor, k: &candle
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn metal_gdn_decode_qkv_conv_norm_supports(
-    mixed_qkv: &candle_core::Tensor,
-    weight: &candle_core::Tensor,
-    conv_state: &candle_core::Tensor,
+    mixed_qkv: &kiln_tensor::Tensor,
+    weight: &kiln_tensor::Tensor,
+    conv_state: &kiln_tensor::Tensor,
     kernel_size: usize,
     nk: usize,
     dk: usize,
@@ -2108,15 +2163,15 @@ pub(crate) fn metal_gdn_decode_qkv_conv_norm_supports(
     if kernel_size != 4 || dk != 128 || dv != 128 {
         return false;
     }
-    if !matches!(mixed_qkv.device(), candle_core::Device::Metal(_))
-        || !matches!(weight.device(), candle_core::Device::Metal(_))
-        || !matches!(conv_state.device(), candle_core::Device::Metal(_))
+    if !matches!(mixed_qkv.device(), kiln_tensor::Device::Metal(_))
+        || !matches!(weight.device(), kiln_tensor::Device::Metal(_))
+        || !matches!(conv_state.device(), kiln_tensor::Device::Metal(_))
     {
         return false;
     }
-    if mixed_qkv.dtype() != candle_core::DType::BF16
-        || weight.dtype() != candle_core::DType::BF16
-        || conv_state.dtype() != candle_core::DType::F32
+    if mixed_qkv.dtype() != kiln_tensor::DType::BF16
+        || weight.dtype() != kiln_tensor::DType::BF16
+        || conv_state.dtype() != kiln_tensor::DType::F32
     {
         return false;
     }
@@ -2161,24 +2216,24 @@ pub(crate) fn metal_gdn_decode_qkv_conv_norm_supports(
 }
 
 pub(crate) fn metal_rotary_embedding_supports(
-    q: &candle_core::Tensor,
-    k: &candle_core::Tensor,
-    cos: &candle_core::Tensor,
-    sin: &candle_core::Tensor,
+    q: &kiln_tensor::Tensor,
+    k: &kiln_tensor::Tensor,
+    cos: &kiln_tensor::Tensor,
+    sin: &kiln_tensor::Tensor,
     head_dim: usize,
     rotary_dim: usize,
 ) -> bool {
-    if !matches!(q.device(), candle_core::Device::Metal(_))
-        || !matches!(k.device(), candle_core::Device::Metal(_))
-        || !matches!(cos.device(), candle_core::Device::Metal(_))
-        || !matches!(sin.device(), candle_core::Device::Metal(_))
+    if !matches!(q.device(), kiln_tensor::Device::Metal(_))
+        || !matches!(k.device(), kiln_tensor::Device::Metal(_))
+        || !matches!(cos.device(), kiln_tensor::Device::Metal(_))
+        || !matches!(sin.device(), kiln_tensor::Device::Metal(_))
     {
         return false;
     }
-    if q.dtype() != candle_core::DType::BF16
-        || k.dtype() != candle_core::DType::BF16
-        || cos.dtype() != candle_core::DType::F32
-        || sin.dtype() != candle_core::DType::F32
+    if q.dtype() != kiln_tensor::DType::BF16
+        || k.dtype() != kiln_tensor::DType::BF16
+        || cos.dtype() != kiln_tensor::DType::F32
+        || sin.dtype() != kiln_tensor::DType::F32
     {
         return false;
     }
@@ -2227,8 +2282,8 @@ pub(crate) fn metal_rotary_embedding_supports(
 }
 
 fn metal_rotary_table_batch_stride(
-    cos: &candle_core::Tensor,
-    sin: &candle_core::Tensor,
+    cos: &kiln_tensor::Tensor,
+    sin: &kiln_tensor::Tensor,
     batch: usize,
     seq_len: usize,
     half_rotary: usize,
@@ -5930,15 +5985,15 @@ kernel void kiln_paged_kv_write_token_major_batch_bf16(
 "#;
 
 fn metal_shared_library(
-    device: &MetalDevice,
+    device: &dyn MetalPipelineHost,
 ) -> Result<Library> {
 
-    static LIBRARIES: OnceLock<Mutex<HashMap<DeviceId, Library>>> = OnceLock::new();
+    static LIBRARIES: OnceLock<Mutex<HashMap<u64, Library>>> = OnceLock::new();
     let cache = LIBRARIES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache
         .lock()
         .map_err(|_| anyhow::anyhow!("metal shared library cache poisoned"))?;
-    if let Some(library) = cache.get(&device.id()) {
+    if let Some(library) = cache.get(&device.pipeline_cache_key()) {
         return Ok(library.clone());
     }
 
@@ -5971,23 +6026,23 @@ fn metal_shared_library(
     ]
     .join("");
     let library = device
-        .device()
+        .pipeline_raw_device()
         .new_library_with_source(&shared_source, None)
         .map_err(|e| anyhow::anyhow!("compile metal shared library: {e:?}"))?;
-    cache.insert(device.id(), library.clone());
+    cache.insert(device.pipeline_cache_key(), library.clone());
     Ok(library)
 }
 
 fn metal_rms_norm_pipeline(
-    device: &MetalDevice,
+    device: &dyn MetalPipelineHost,
 ) -> Result<ComputePipeline> {
 
-    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    static PIPELINES: OnceLock<Mutex<HashMap<u64, ComputePipeline>>> = OnceLock::new();
     let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache
         .lock()
         .map_err(|_| anyhow::anyhow!("metal rmsnorm pipeline cache poisoned"))?;
-    if let Some(pipeline) = cache.get(&device.id()) {
+    if let Some(pipeline) = cache.get(&device.pipeline_cache_key()) {
         return Ok(pipeline.clone());
     }
 
@@ -5996,23 +6051,23 @@ fn metal_rms_norm_pipeline(
         .get_function("kiln_rmsnorm_bf16", None)
         .map_err(|e| anyhow::anyhow!("load metal rmsnorm function: {e:?}"))?;
     let pipeline = device
-        .device()
+        .pipeline_raw_device()
         .new_compute_pipeline_state_with_function(&function)
         .map_err(|e| anyhow::anyhow!("build metal rmsnorm pipeline: {e:?}"))?;
-    cache.insert(device.id(), pipeline.clone());
+    cache.insert(device.pipeline_cache_key(), pipeline.clone());
     Ok(pipeline)
 }
 
 fn metal_rotary_qk_pipeline(
-    device: &MetalDevice,
+    device: &dyn MetalPipelineHost,
 ) -> Result<ComputePipeline> {
 
-    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    static PIPELINES: OnceLock<Mutex<HashMap<u64, ComputePipeline>>> = OnceLock::new();
     let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache
         .lock()
         .map_err(|_| anyhow::anyhow!("metal rotary qk pipeline cache poisoned"))?;
-    if let Some(pipeline) = cache.get(&device.id()) {
+    if let Some(pipeline) = cache.get(&device.pipeline_cache_key()) {
         return Ok(pipeline.clone());
     }
 
@@ -6021,23 +6076,23 @@ fn metal_rotary_qk_pipeline(
         .get_function("kiln_rotary_qk_bf16", None)
         .map_err(|e| anyhow::anyhow!("load metal rotary qk function: {e:?}"))?;
     let pipeline = device
-        .device()
+        .pipeline_raw_device()
         .new_compute_pipeline_state_with_function(&function)
         .map_err(|e| anyhow::anyhow!("build metal rotary qk pipeline: {e:?}"))?;
-    cache.insert(device.id(), pipeline.clone());
+    cache.insert(device.pipeline_cache_key(), pipeline.clone());
     Ok(pipeline)
 }
 
 fn metal_gdn_qk_norm_pipeline(
-    device: &MetalDevice,
+    device: &dyn MetalPipelineHost,
 ) -> Result<ComputePipeline> {
 
-    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    static PIPELINES: OnceLock<Mutex<HashMap<u64, ComputePipeline>>> = OnceLock::new();
     let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache
         .lock()
         .map_err(|_| anyhow::anyhow!("metal gdn qk norm pipeline cache poisoned"))?;
-    if let Some(pipeline) = cache.get(&device.id()) {
+    if let Some(pipeline) = cache.get(&device.pipeline_cache_key()) {
         return Ok(pipeline.clone());
     }
 
@@ -6046,23 +6101,23 @@ fn metal_gdn_qk_norm_pipeline(
         .get_function("kiln_gdn_qk_norm_f32_bf16", None)
         .map_err(|e| anyhow::anyhow!("load metal gdn qk norm function: {e:?}"))?;
     let pipeline = device
-        .device()
+        .pipeline_raw_device()
         .new_compute_pipeline_state_with_function(&function)
         .map_err(|e| anyhow::anyhow!("build metal gdn qk norm pipeline: {e:?}"))?;
-    cache.insert(device.id(), pipeline.clone());
+    cache.insert(device.pipeline_cache_key(), pipeline.clone());
     Ok(pipeline)
 }
 
 fn metal_gdn_qk_norm_gqa_pipeline(
-    device: &MetalDevice,
+    device: &dyn MetalPipelineHost,
 ) -> Result<ComputePipeline> {
 
-    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    static PIPELINES: OnceLock<Mutex<HashMap<u64, ComputePipeline>>> = OnceLock::new();
     let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache
         .lock()
         .map_err(|_| anyhow::anyhow!("metal gdn qk norm gqa pipeline cache poisoned"))?;
-    if let Some(pipeline) = cache.get(&device.id()) {
+    if let Some(pipeline) = cache.get(&device.pipeline_cache_key()) {
         return Ok(pipeline.clone());
     }
 
@@ -6071,23 +6126,23 @@ fn metal_gdn_qk_norm_gqa_pipeline(
         .get_function("kiln_gdn_qk_norm_gqa_f32_bf16", None)
         .map_err(|e| anyhow::anyhow!("load metal gdn qk norm gqa function: {e:?}"))?;
     let pipeline = device
-        .device()
+        .pipeline_raw_device()
         .new_compute_pipeline_state_with_function(&function)
         .map_err(|e| anyhow::anyhow!("build metal gdn qk norm gqa pipeline: {e:?}"))?;
-    cache.insert(device.id(), pipeline.clone());
+    cache.insert(device.pipeline_cache_key(), pipeline.clone());
     Ok(pipeline)
 }
 
 fn metal_gdn_decode_qkv_conv_norm_pipeline(
-    device: &MetalDevice,
+    device: &dyn MetalPipelineHost,
 ) -> Result<ComputePipeline> {
 
-    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    static PIPELINES: OnceLock<Mutex<HashMap<u64, ComputePipeline>>> = OnceLock::new();
     let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache
         .lock()
         .map_err(|_| anyhow::anyhow!("metal gdn decode qkv conv/norm pipeline cache poisoned"))?;
-    if let Some(pipeline) = cache.get(&device.id()) {
+    if let Some(pipeline) = cache.get(&device.pipeline_cache_key()) {
         return Ok(pipeline.clone());
     }
 
@@ -6096,23 +6151,23 @@ fn metal_gdn_decode_qkv_conv_norm_pipeline(
         .get_function("kiln_gdn_decode_qkv_conv_norm_bf16", None)
         .map_err(|e| anyhow::anyhow!("load metal gdn decode qkv conv/norm function: {e:?}"))?;
     let pipeline = device
-        .device()
+        .pipeline_raw_device()
         .new_compute_pipeline_state_with_function(&function)
         .map_err(|e| anyhow::anyhow!("build metal gdn decode qkv conv/norm pipeline: {e:?}"))?;
-    cache.insert(device.id(), pipeline.clone());
+    cache.insert(device.pipeline_cache_key(), pipeline.clone());
     Ok(pipeline)
 }
 
 fn metal_lm_head_pipeline(
-    device: &MetalDevice,
+    device: &dyn MetalPipelineHost,
 ) -> Result<ComputePipeline> {
 
-    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    static PIPELINES: OnceLock<Mutex<HashMap<u64, ComputePipeline>>> = OnceLock::new();
     let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache
         .lock()
         .map_err(|_| anyhow::anyhow!("metal lm head pipeline cache poisoned"))?;
-    if let Some(pipeline) = cache.get(&device.id()) {
+    if let Some(pipeline) = cache.get(&device.pipeline_cache_key()) {
         return Ok(pipeline.clone());
     }
 
@@ -6121,23 +6176,23 @@ fn metal_lm_head_pipeline(
         .get_function("kiln_lm_head_bf16", None)
         .map_err(|e| anyhow::anyhow!("load metal lm head function: {e:?}"))?;
     let pipeline = device
-        .device()
+        .pipeline_raw_device()
         .new_compute_pipeline_state_with_function(&function)
         .map_err(|e| anyhow::anyhow!("build metal lm head pipeline: {e:?}"))?;
-    cache.insert(device.id(), pipeline.clone());
+    cache.insert(device.pipeline_cache_key(), pipeline.clone());
     Ok(pipeline)
 }
 
 fn metal_lm_head_argmax_pipeline(
-    device: &MetalDevice,
+    device: &dyn MetalPipelineHost,
 ) -> Result<ComputePipeline> {
 
-    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    static PIPELINES: OnceLock<Mutex<HashMap<u64, ComputePipeline>>> = OnceLock::new();
     let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache
         .lock()
         .map_err(|_| anyhow::anyhow!("metal lm head argmax pipeline cache poisoned"))?;
-    if let Some(pipeline) = cache.get(&device.id()) {
+    if let Some(pipeline) = cache.get(&device.pipeline_cache_key()) {
         return Ok(pipeline.clone());
     }
 
@@ -6146,23 +6201,23 @@ fn metal_lm_head_argmax_pipeline(
         .get_function("kiln_lm_head_argmax_chunks_bf16", None)
         .map_err(|e| anyhow::anyhow!("load metal lm head argmax function: {e:?}"))?;
     let pipeline = device
-        .device()
+        .pipeline_raw_device()
         .new_compute_pipeline_state_with_function(&function)
         .map_err(|e| anyhow::anyhow!("build metal lm head argmax pipeline: {e:?}"))?;
-    cache.insert(device.id(), pipeline.clone());
+    cache.insert(device.pipeline_cache_key(), pipeline.clone());
     Ok(pipeline)
 }
 
 fn metal_lm_head_argmax_reduce_pipeline(
-    device: &MetalDevice,
+    device: &dyn MetalPipelineHost,
 ) -> Result<ComputePipeline> {
 
-    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    static PIPELINES: OnceLock<Mutex<HashMap<u64, ComputePipeline>>> = OnceLock::new();
     let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache
         .lock()
         .map_err(|_| anyhow::anyhow!("metal lm head argmax reduce pipeline cache poisoned"))?;
-    if let Some(pipeline) = cache.get(&device.id()) {
+    if let Some(pipeline) = cache.get(&device.pipeline_cache_key()) {
         return Ok(pipeline.clone());
     }
 
@@ -6171,23 +6226,23 @@ fn metal_lm_head_argmax_reduce_pipeline(
         .get_function("kiln_lm_head_argmax_reduce_f32", None)
         .map_err(|e| anyhow::anyhow!("load metal lm head argmax reduce function: {e:?}"))?;
     let pipeline = device
-        .device()
+        .pipeline_raw_device()
         .new_compute_pipeline_state_with_function(&function)
         .map_err(|e| anyhow::anyhow!("build metal lm head argmax reduce pipeline: {e:?}"))?;
-    cache.insert(device.id(), pipeline.clone());
+    cache.insert(device.pipeline_cache_key(), pipeline.clone());
     Ok(pipeline)
 }
 
 fn metal_lm_head_argmax_batch_pipeline(
-    device: &MetalDevice,
+    device: &dyn MetalPipelineHost,
 ) -> Result<ComputePipeline> {
 
-    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    static PIPELINES: OnceLock<Mutex<HashMap<u64, ComputePipeline>>> = OnceLock::new();
     let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache
         .lock()
         .map_err(|_| anyhow::anyhow!("metal lm head argmax batch pipeline cache poisoned"))?;
-    if let Some(pipeline) = cache.get(&device.id()) {
+    if let Some(pipeline) = cache.get(&device.pipeline_cache_key()) {
         return Ok(pipeline.clone());
     }
 
@@ -6196,23 +6251,23 @@ fn metal_lm_head_argmax_batch_pipeline(
         .get_function("kiln_lm_head_argmax_chunks_batch_bf16", None)
         .map_err(|e| anyhow::anyhow!("load metal lm head argmax batch function: {e:?}"))?;
     let pipeline = device
-        .device()
+        .pipeline_raw_device()
         .new_compute_pipeline_state_with_function(&function)
         .map_err(|e| anyhow::anyhow!("build metal lm head argmax batch pipeline: {e:?}"))?;
-    cache.insert(device.id(), pipeline.clone());
+    cache.insert(device.pipeline_cache_key(), pipeline.clone());
     Ok(pipeline)
 }
 
 fn metal_lm_head_argmax_reduce_batch_pipeline(
-    device: &MetalDevice,
+    device: &dyn MetalPipelineHost,
 ) -> Result<ComputePipeline> {
 
-    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    static PIPELINES: OnceLock<Mutex<HashMap<u64, ComputePipeline>>> = OnceLock::new();
     let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache.lock().map_err(|_| {
         anyhow::anyhow!("metal lm head argmax reduce batch pipeline cache poisoned")
     })?;
-    if let Some(pipeline) = cache.get(&device.id()) {
+    if let Some(pipeline) = cache.get(&device.pipeline_cache_key()) {
         return Ok(pipeline.clone());
     }
 
@@ -6221,23 +6276,23 @@ fn metal_lm_head_argmax_reduce_batch_pipeline(
         .get_function("kiln_lm_head_argmax_reduce_batch_f32", None)
         .map_err(|e| anyhow::anyhow!("load metal lm head argmax reduce batch function: {e:?}"))?;
     let pipeline = device
-        .device()
+        .pipeline_raw_device()
         .new_compute_pipeline_state_with_function(&function)
         .map_err(|e| anyhow::anyhow!("build metal lm head argmax reduce batch pipeline: {e:?}"))?;
-    cache.insert(device.id(), pipeline.clone());
+    cache.insert(device.pipeline_cache_key(), pipeline.clone());
     Ok(pipeline)
 }
 
 fn metal_mlp_gate_up_pipeline(
-    device: &MetalDevice,
+    device: &dyn MetalPipelineHost,
 ) -> Result<ComputePipeline> {
 
-    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    static PIPELINES: OnceLock<Mutex<HashMap<u64, ComputePipeline>>> = OnceLock::new();
     let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache
         .lock()
         .map_err(|_| anyhow::anyhow!("metal mlp gate/up pipeline cache poisoned"))?;
-    if let Some(pipeline) = cache.get(&device.id()) {
+    if let Some(pipeline) = cache.get(&device.pipeline_cache_key()) {
         return Ok(pipeline.clone());
     }
 
@@ -6246,23 +6301,23 @@ fn metal_mlp_gate_up_pipeline(
         .get_function("kiln_mlp_gate_up_bf16", None)
         .map_err(|e| anyhow::anyhow!("load metal mlp gate/up function: {e:?}"))?;
     let pipeline = device
-        .device()
+        .pipeline_raw_device()
         .new_compute_pipeline_state_with_function(&function)
         .map_err(|e| anyhow::anyhow!("build metal mlp gate/up pipeline: {e:?}"))?;
-    cache.insert(device.id(), pipeline.clone());
+    cache.insert(device.pipeline_cache_key(), pipeline.clone());
     Ok(pipeline)
 }
 
 fn metal_mlp_gate_up_serial_pipeline(
-    device: &MetalDevice,
+    device: &dyn MetalPipelineHost,
 ) -> Result<ComputePipeline> {
 
-    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    static PIPELINES: OnceLock<Mutex<HashMap<u64, ComputePipeline>>> = OnceLock::new();
     let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache
         .lock()
         .map_err(|_| anyhow::anyhow!("metal mlp gate/up serial pipeline cache poisoned"))?;
-    if let Some(pipeline) = cache.get(&device.id()) {
+    if let Some(pipeline) = cache.get(&device.pipeline_cache_key()) {
         return Ok(pipeline.clone());
     }
 
@@ -6271,23 +6326,23 @@ fn metal_mlp_gate_up_serial_pipeline(
         .get_function("kiln_mlp_gate_up_serial_bf16", None)
         .map_err(|e| anyhow::anyhow!("load metal mlp gate/up serial function: {e:?}"))?;
     let pipeline = device
-        .device()
+        .pipeline_raw_device()
         .new_compute_pipeline_state_with_function(&function)
         .map_err(|e| anyhow::anyhow!("build metal mlp gate/up serial pipeline: {e:?}"))?;
-    cache.insert(device.id(), pipeline.clone());
+    cache.insert(device.pipeline_cache_key(), pipeline.clone());
     Ok(pipeline)
 }
 
 fn metal_mlp_silu_mul_pipeline(
-    device: &MetalDevice,
+    device: &dyn MetalPipelineHost,
 ) -> Result<ComputePipeline> {
 
-    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    static PIPELINES: OnceLock<Mutex<HashMap<u64, ComputePipeline>>> = OnceLock::new();
     let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache
         .lock()
         .map_err(|_| anyhow::anyhow!("metal mlp silu*mul pipeline cache poisoned"))?;
-    if let Some(pipeline) = cache.get(&device.id()) {
+    if let Some(pipeline) = cache.get(&device.pipeline_cache_key()) {
         return Ok(pipeline.clone());
     }
 
@@ -6296,23 +6351,23 @@ fn metal_mlp_silu_mul_pipeline(
         .get_function("kiln_mlp_silu_mul_bf16", None)
         .map_err(|e| anyhow::anyhow!("load metal mlp silu*mul function: {e:?}"))?;
     let pipeline = device
-        .device()
+        .pipeline_raw_device()
         .new_compute_pipeline_state_with_function(&function)
         .map_err(|e| anyhow::anyhow!("build metal mlp silu*mul pipeline: {e:?}"))?;
-    cache.insert(device.id(), pipeline.clone());
+    cache.insert(device.pipeline_cache_key(), pipeline.clone());
     Ok(pipeline)
 }
 
 fn metal_attn_gate_sigmoid_mul_pipeline(
-    device: &MetalDevice,
+    device: &dyn MetalPipelineHost,
 ) -> Result<ComputePipeline> {
 
-    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    static PIPELINES: OnceLock<Mutex<HashMap<u64, ComputePipeline>>> = OnceLock::new();
     let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache
         .lock()
         .map_err(|_| anyhow::anyhow!("metal attn gate sigmoid/mul pipeline cache poisoned"))?;
-    if let Some(pipeline) = cache.get(&device.id()) {
+    if let Some(pipeline) = cache.get(&device.pipeline_cache_key()) {
         return Ok(pipeline.clone());
     }
 
@@ -6321,26 +6376,26 @@ fn metal_attn_gate_sigmoid_mul_pipeline(
         .get_function("kiln_attn_gate_sigmoid_mul_bf16", None)
         .map_err(|e| anyhow::anyhow!("load metal attn gate sigmoid/mul function: {e:?}"))?;
     let pipeline = device
-        .device()
+        .pipeline_raw_device()
         .new_compute_pipeline_state_with_function(&function)
         .map_err(|e| anyhow::anyhow!("build metal attn gate sigmoid/mul pipeline: {e:?}"))?;
-    cache.insert(device.id(), pipeline.clone());
+    cache.insert(device.pipeline_cache_key(), pipeline.clone());
     Ok(pipeline)
 }
 
 fn metal_transposed_coop_gemv_pipeline(
-    device: &MetalDevice,
+    device: &dyn MetalPipelineHost,
     tile: MetalTransposedCoopGemvTile,
 ) -> Result<ComputePipeline> {
 
     static PIPELINES: OnceLock<
-        Mutex<HashMap<(DeviceId, MetalTransposedCoopGemvTile), ComputePipeline>>,
+        Mutex<HashMap<(u64, MetalTransposedCoopGemvTile), ComputePipeline>>,
     > = OnceLock::new();
     let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache
         .lock()
         .map_err(|_| anyhow::anyhow!("metal transposed coop GEMV pipeline cache poisoned"))?;
-    let key = (device.id(), tile);
+    let key = (device.pipeline_cache_key(), tile);
     if let Some(pipeline) = cache.get(&key) {
         return Ok(pipeline.clone());
     }
@@ -6350,7 +6405,7 @@ fn metal_transposed_coop_gemv_pipeline(
         .get_function(tile.function_name(), None)
         .map_err(|e| anyhow::anyhow!("load metal transposed coop GEMV function: {e:?}"))?;
     let pipeline = device
-        .device()
+        .pipeline_raw_device()
         .new_compute_pipeline_state_with_function(&function)
         .map_err(|e| anyhow::anyhow!("build metal transposed coop GEMV pipeline: {e:?}"))?;
     cache.insert(key, pipeline.clone());
@@ -6358,15 +6413,15 @@ fn metal_transposed_coop_gemv_pipeline(
 }
 
 fn metal_transposed_coop_gemv_batch_pipeline(
-    device: &MetalDevice,
+    device: &dyn MetalPipelineHost,
 ) -> Result<ComputePipeline> {
 
-    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    static PIPELINES: OnceLock<Mutex<HashMap<u64, ComputePipeline>>> = OnceLock::new();
     let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache
         .lock()
         .map_err(|_| anyhow::anyhow!("metal batch transposed coop GEMV cache poisoned"))?;
-    if let Some(pipeline) = cache.get(&device.id()) {
+    if let Some(pipeline) = cache.get(&device.pipeline_cache_key()) {
         return Ok(pipeline.clone());
     }
 
@@ -6375,23 +6430,23 @@ fn metal_transposed_coop_gemv_batch_pipeline(
         .get_function("kiln_transposed_coop_gemv8_batch_bf16", None)
         .map_err(|e| anyhow::anyhow!("load metal batch transposed coop GEMV function: {e:?}"))?;
     let pipeline = device
-        .device()
+        .pipeline_raw_device()
         .new_compute_pipeline_state_with_function(&function)
         .map_err(|e| anyhow::anyhow!("build metal batch transposed coop GEMV pipeline: {e:?}"))?;
-    cache.insert(device.id(), pipeline.clone());
+    cache.insert(device.pipeline_cache_key(), pipeline.clone());
     Ok(pipeline)
 }
 
 fn metal_transposed_coop_gemv_batch_row_triple_tile8_pipeline(
-    device: &MetalDevice,
+    device: &dyn MetalPipelineHost,
 ) -> Result<ComputePipeline> {
 
-    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    static PIPELINES: OnceLock<Mutex<HashMap<u64, ComputePipeline>>> = OnceLock::new();
     let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache.lock().map_err(|_| {
         anyhow::anyhow!("metal batch transposed coop GEMV row-triple tile8 cache poisoned")
     })?;
-    if let Some(pipeline) = cache.get(&device.id()) {
+    if let Some(pipeline) = cache.get(&device.pipeline_cache_key()) {
         return Ok(pipeline.clone());
     }
 
@@ -6407,27 +6462,27 @@ fn metal_transposed_coop_gemv_batch_row_triple_tile8_pipeline(
             )
         })?;
     let pipeline = device
-        .device()
+        .pipeline_raw_device()
         .new_compute_pipeline_state_with_function(&function)
         .map_err(|e| {
             anyhow::anyhow!(
                 "build metal batch transposed coop GEMV row-triple tile8 pipeline: {e:?}"
             )
         })?;
-    cache.insert(device.id(), pipeline.clone());
+    cache.insert(device.pipeline_cache_key(), pipeline.clone());
     Ok(pipeline)
 }
 
 fn metal_transposed_coop_gemv_batch_row_quad_tile8_pipeline(
-    device: &MetalDevice,
+    device: &dyn MetalPipelineHost,
 ) -> Result<ComputePipeline> {
 
-    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    static PIPELINES: OnceLock<Mutex<HashMap<u64, ComputePipeline>>> = OnceLock::new();
     let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache.lock().map_err(|_| {
         anyhow::anyhow!("metal batch transposed coop GEMV row-quad tile8 cache poisoned")
     })?;
-    if let Some(pipeline) = cache.get(&device.id()) {
+    if let Some(pipeline) = cache.get(&device.pipeline_cache_key()) {
         return Ok(pipeline.clone());
     }
 
@@ -6438,25 +6493,25 @@ fn metal_transposed_coop_gemv_batch_row_quad_tile8_pipeline(
             anyhow::anyhow!("load metal batch transposed coop GEMV row-quad tile8 function: {e:?}")
         })?;
     let pipeline = device
-        .device()
+        .pipeline_raw_device()
         .new_compute_pipeline_state_with_function(&function)
         .map_err(|e| {
             anyhow::anyhow!("build metal batch transposed coop GEMV row-quad tile8 pipeline: {e:?}")
         })?;
-    cache.insert(device.id(), pipeline.clone());
+    cache.insert(device.pipeline_cache_key(), pipeline.clone());
     Ok(pipeline)
 }
 
 fn metal_fused_qkv_transposed_coop_gemv_pipeline(
-    device: &MetalDevice,
+    device: &dyn MetalPipelineHost,
 ) -> Result<ComputePipeline> {
 
-    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    static PIPELINES: OnceLock<Mutex<HashMap<u64, ComputePipeline>>> = OnceLock::new();
     let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache
         .lock()
         .map_err(|_| anyhow::anyhow!("metal fused QKV projection pipeline cache poisoned"))?;
-    if let Some(pipeline) = cache.get(&device.id()) {
+    if let Some(pipeline) = cache.get(&device.pipeline_cache_key()) {
         return Ok(pipeline.clone());
     }
 
@@ -6465,23 +6520,23 @@ fn metal_fused_qkv_transposed_coop_gemv_pipeline(
         .get_function("kiln_fused_qkv_transposed_coop_gemv8_bf16", None)
         .map_err(|e| anyhow::anyhow!("load metal fused QKV projection function: {e:?}"))?;
     let pipeline = device
-        .device()
+        .pipeline_raw_device()
         .new_compute_pipeline_state_with_function(&function)
         .map_err(|e| anyhow::anyhow!("build metal fused QKV projection pipeline: {e:?}"))?;
-    cache.insert(device.id(), pipeline.clone());
+    cache.insert(device.pipeline_cache_key(), pipeline.clone());
     Ok(pipeline)
 }
 
 fn metal_lora_hidden_decode_pipeline(
-    device: &MetalDevice,
+    device: &dyn MetalPipelineHost,
 ) -> Result<ComputePipeline> {
 
-    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    static PIPELINES: OnceLock<Mutex<HashMap<u64, ComputePipeline>>> = OnceLock::new();
     let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache
         .lock()
         .map_err(|_| anyhow::anyhow!("metal LoRA hidden decode pipeline cache poisoned"))?;
-    if let Some(pipeline) = cache.get(&device.id()) {
+    if let Some(pipeline) = cache.get(&device.pipeline_cache_key()) {
         return Ok(pipeline.clone());
     }
 
@@ -6490,23 +6545,23 @@ fn metal_lora_hidden_decode_pipeline(
         .get_function("kiln_lora_hidden_decode_bf16", None)
         .map_err(|e| anyhow::anyhow!("load metal LoRA hidden decode function: {e:?}"))?;
     let pipeline = device
-        .device()
+        .pipeline_raw_device()
         .new_compute_pipeline_state_with_function(&function)
         .map_err(|e| anyhow::anyhow!("build metal LoRA hidden decode pipeline: {e:?}"))?;
-    cache.insert(device.id(), pipeline.clone());
+    cache.insert(device.pipeline_cache_key(), pipeline.clone());
     Ok(pipeline)
 }
 
 fn metal_lora_add_decode_pipeline(
-    device: &MetalDevice,
+    device: &dyn MetalPipelineHost,
 ) -> Result<ComputePipeline> {
 
-    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    static PIPELINES: OnceLock<Mutex<HashMap<u64, ComputePipeline>>> = OnceLock::new();
     let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache
         .lock()
         .map_err(|_| anyhow::anyhow!("metal LoRA add decode pipeline cache poisoned"))?;
-    if let Some(pipeline) = cache.get(&device.id()) {
+    if let Some(pipeline) = cache.get(&device.pipeline_cache_key()) {
         return Ok(pipeline.clone());
     }
 
@@ -6515,23 +6570,23 @@ fn metal_lora_add_decode_pipeline(
         .get_function("kiln_lora_add_decode_bf16", None)
         .map_err(|e| anyhow::anyhow!("load metal LoRA add decode function: {e:?}"))?;
     let pipeline = device
-        .device()
+        .pipeline_raw_device()
         .new_compute_pipeline_state_with_function(&function)
         .map_err(|e| anyhow::anyhow!("build metal LoRA add decode pipeline: {e:?}"))?;
-    cache.insert(device.id(), pipeline.clone());
+    cache.insert(device.pipeline_cache_key(), pipeline.clone());
     Ok(pipeline)
 }
 
 fn metal_gdn_in_proj_pipeline(
-    device: &MetalDevice,
+    device: &dyn MetalPipelineHost,
 ) -> Result<ComputePipeline> {
 
-    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    static PIPELINES: OnceLock<Mutex<HashMap<u64, ComputePipeline>>> = OnceLock::new();
     let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache
         .lock()
         .map_err(|_| anyhow::anyhow!("metal gdn in-proj pipeline cache poisoned"))?;
-    if let Some(pipeline) = cache.get(&device.id()) {
+    if let Some(pipeline) = cache.get(&device.pipeline_cache_key()) {
         return Ok(pipeline.clone());
     }
 
@@ -6540,23 +6595,23 @@ fn metal_gdn_in_proj_pipeline(
         .get_function("kiln_gdn_in_proj_decode_bf16", None)
         .map_err(|e| anyhow::anyhow!("load metal gdn in-proj function: {e:?}"))?;
     let pipeline = device
-        .device()
+        .pipeline_raw_device()
         .new_compute_pipeline_state_with_function(&function)
         .map_err(|e| anyhow::anyhow!("build metal gdn in-proj pipeline: {e:?}"))?;
-    cache.insert(device.id(), pipeline.clone());
+    cache.insert(device.pipeline_cache_key(), pipeline.clone());
     Ok(pipeline)
 }
 
 fn metal_paged_kv_head_major_read_pipeline(
-    device: &MetalDevice,
+    device: &dyn MetalPipelineHost,
 ) -> Result<ComputePipeline> {
 
-    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    static PIPELINES: OnceLock<Mutex<HashMap<u64, ComputePipeline>>> = OnceLock::new();
     let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache
         .lock()
         .map_err(|_| anyhow::anyhow!("metal paged kv read pipeline cache poisoned"))?;
-    if let Some(pipeline) = cache.get(&device.id()) {
+    if let Some(pipeline) = cache.get(&device.pipeline_cache_key()) {
         return Ok(pipeline.clone());
     }
 
@@ -6565,23 +6620,23 @@ fn metal_paged_kv_head_major_read_pipeline(
         .get_function("kiln_paged_kv_head_major_read_bf16", None)
         .map_err(|e| anyhow::anyhow!("load metal paged kv read function: {e:?}"))?;
     let pipeline = device
-        .device()
+        .pipeline_raw_device()
         .new_compute_pipeline_state_with_function(&function)
         .map_err(|e| anyhow::anyhow!("build metal paged kv read pipeline: {e:?}"))?;
-    cache.insert(device.id(), pipeline.clone());
+    cache.insert(device.pipeline_cache_key(), pipeline.clone());
     Ok(pipeline)
 }
 
 fn metal_paged_kv_head_major_read_append_token_major_pipeline(
-    device: &MetalDevice,
+    device: &dyn MetalPipelineHost,
 ) -> Result<ComputePipeline> {
 
-    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    static PIPELINES: OnceLock<Mutex<HashMap<u64, ComputePipeline>>> = OnceLock::new();
     let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache
         .lock()
         .map_err(|_| anyhow::anyhow!("metal paged kv read+append pipeline cache poisoned"))?;
-    if let Some(pipeline) = cache.get(&device.id()) {
+    if let Some(pipeline) = cache.get(&device.pipeline_cache_key()) {
         return Ok(pipeline.clone());
     }
 
@@ -6593,23 +6648,23 @@ fn metal_paged_kv_head_major_read_append_token_major_pipeline(
         )
         .map_err(|e| anyhow::anyhow!("load metal paged kv read+append function: {e:?}"))?;
     let pipeline = device
-        .device()
+        .pipeline_raw_device()
         .new_compute_pipeline_state_with_function(&function)
         .map_err(|e| anyhow::anyhow!("build metal paged kv read+append pipeline: {e:?}"))?;
-    cache.insert(device.id(), pipeline.clone());
+    cache.insert(device.pipeline_cache_key(), pipeline.clone());
     Ok(pipeline)
 }
 
 fn metal_paged_attn_decode_contiguous_pipeline(
-    device: &MetalDevice,
+    device: &dyn MetalPipelineHost,
 ) -> Result<ComputePipeline> {
 
-    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    static PIPELINES: OnceLock<Mutex<HashMap<u64, ComputePipeline>>> = OnceLock::new();
     let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache
         .lock()
         .map_err(|_| anyhow::anyhow!("metal contiguous paged decode attention cache poisoned"))?;
-    if let Some(pipeline) = cache.get(&device.id()) {
+    if let Some(pipeline) = cache.get(&device.pipeline_cache_key()) {
         return Ok(pipeline.clone());
     }
 
@@ -6618,23 +6673,23 @@ fn metal_paged_attn_decode_contiguous_pipeline(
         .get_function("kiln_paged_attn_decode_contiguous_bf16_d256", None)
         .map_err(|e| anyhow::anyhow!("load metal contiguous paged decode attention: {e:?}"))?;
     let pipeline = device
-        .device()
+        .pipeline_raw_device()
         .new_compute_pipeline_state_with_function(&function)
         .map_err(|e| anyhow::anyhow!("build metal contiguous paged decode attention: {e:?}"))?;
-    cache.insert(device.id(), pipeline.clone());
+    cache.insert(device.pipeline_cache_key(), pipeline.clone());
     Ok(pipeline)
 }
 
 fn metal_paged_attn_decode_contiguous_batch_pipeline(
-    device: &MetalDevice,
+    device: &dyn MetalPipelineHost,
 ) -> Result<ComputePipeline> {
 
-    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    static PIPELINES: OnceLock<Mutex<HashMap<u64, ComputePipeline>>> = OnceLock::new();
     let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache
         .lock()
         .map_err(|_| anyhow::anyhow!("metal contiguous paged batch decode pipeline poisoned"))?;
-    if let Some(pipeline) = cache.get(&device.id()) {
+    if let Some(pipeline) = cache.get(&device.pipeline_cache_key()) {
         return Ok(pipeline.clone());
     }
 
@@ -6645,25 +6700,25 @@ fn metal_paged_attn_decode_contiguous_batch_pipeline(
             anyhow::anyhow!("load metal contiguous paged batch decode attention: {e:?}")
         })?;
     let pipeline = device
-        .device()
+        .pipeline_raw_device()
         .new_compute_pipeline_state_with_function(&function)
         .map_err(|e| {
             anyhow::anyhow!("build metal contiguous paged batch decode attention: {e:?}")
         })?;
-    cache.insert(device.id(), pipeline.clone());
+    cache.insert(device.pipeline_cache_key(), pipeline.clone());
     Ok(pipeline)
 }
 
 fn metal_paged_attn_decode_contiguous_batch_dyn_seqlen_pipeline(
-    device: &MetalDevice,
+    device: &dyn MetalPipelineHost,
 ) -> Result<ComputePipeline> {
 
-    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    static PIPELINES: OnceLock<Mutex<HashMap<u64, ComputePipeline>>> = OnceLock::new();
     let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache
         .lock()
         .map_err(|_| anyhow::anyhow!("metal dyn-seqlen paged batch decode pipeline poisoned"))?;
-    if let Some(pipeline) = cache.get(&device.id()) {
+    if let Some(pipeline) = cache.get(&device.pipeline_cache_key()) {
         return Ok(pipeline.clone());
     }
 
@@ -6677,25 +6732,25 @@ fn metal_paged_attn_decode_contiguous_batch_dyn_seqlen_pipeline(
             anyhow::anyhow!("load metal dyn-seqlen paged batch decode attention: {e:?}")
         })?;
     let pipeline = device
-        .device()
+        .pipeline_raw_device()
         .new_compute_pipeline_state_with_function(&function)
         .map_err(|e| {
             anyhow::anyhow!("build metal dyn-seqlen paged batch decode attention: {e:?}")
         })?;
-    cache.insert(device.id(), pipeline.clone());
+    cache.insert(device.pipeline_cache_key(), pipeline.clone());
     Ok(pipeline)
 }
 
 fn metal_paged_kv_write_token_major_pipeline(
-    device: &MetalDevice,
+    device: &dyn MetalPipelineHost,
 ) -> Result<ComputePipeline> {
 
-    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    static PIPELINES: OnceLock<Mutex<HashMap<u64, ComputePipeline>>> = OnceLock::new();
     let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache
         .lock()
         .map_err(|_| anyhow::anyhow!("metal paged kv write pipeline cache poisoned"))?;
-    if let Some(pipeline) = cache.get(&device.id()) {
+    if let Some(pipeline) = cache.get(&device.pipeline_cache_key()) {
         return Ok(pipeline.clone());
     }
 
@@ -6704,23 +6759,23 @@ fn metal_paged_kv_write_token_major_pipeline(
         .get_function("kiln_paged_kv_write_token_major_bf16", None)
         .map_err(|e| anyhow::anyhow!("load metal paged kv write function: {e:?}"))?;
     let pipeline = device
-        .device()
+        .pipeline_raw_device()
         .new_compute_pipeline_state_with_function(&function)
         .map_err(|e| anyhow::anyhow!("build metal paged kv write pipeline: {e:?}"))?;
-    cache.insert(device.id(), pipeline.clone());
+    cache.insert(device.pipeline_cache_key(), pipeline.clone());
     Ok(pipeline)
 }
 
 fn metal_paged_kv_write_token_major_batch_pipeline(
-    device: &MetalDevice,
+    device: &dyn MetalPipelineHost,
 ) -> Result<ComputePipeline> {
 
-    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    static PIPELINES: OnceLock<Mutex<HashMap<u64, ComputePipeline>>> = OnceLock::new();
     let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache
         .lock()
         .map_err(|_| anyhow::anyhow!("metal paged kv batch write pipeline cache poisoned"))?;
-    if let Some(pipeline) = cache.get(&device.id()) {
+    if let Some(pipeline) = cache.get(&device.pipeline_cache_key()) {
         return Ok(pipeline.clone());
     }
 
@@ -6729,18 +6784,18 @@ fn metal_paged_kv_write_token_major_batch_pipeline(
         .get_function("kiln_paged_kv_write_token_major_batch_bf16", None)
         .map_err(|e| anyhow::anyhow!("load metal paged kv batch write function: {e:?}"))?;
     let pipeline = device
-        .device()
+        .pipeline_raw_device()
         .new_compute_pipeline_state_with_function(&function)
         .map_err(|e| anyhow::anyhow!("build metal paged kv batch write pipeline: {e:?}"))?;
-    cache.insert(device.id(), pipeline.clone());
+    cache.insert(device.pipeline_cache_key(), pipeline.clone());
     Ok(pipeline)
 }
 
-pub(crate) fn metal_lm_head_supports(x: &candle_core::Tensor, weight_t: &candle_core::Tensor) -> bool {
-    if !matches!(x.dtype(), candle_core::DType::BF16) || !matches!(weight_t.dtype(), candle_core::DType::BF16) {
+pub(crate) fn metal_lm_head_supports(x: &kiln_tensor::Tensor, weight_t: &kiln_tensor::Tensor) -> bool {
+    if !matches!(x.dtype(), kiln_tensor::DType::BF16) || !matches!(weight_t.dtype(), kiln_tensor::DType::BF16) {
         return false;
     }
-    if !matches!(x.device(), candle_core::Device::Metal(_)) || !matches!(weight_t.device(), candle_core::Device::Metal(_)) {
+    if !matches!(x.device(), kiln_tensor::Device::Metal(_)) || !matches!(weight_t.device(), kiln_tensor::Device::Metal(_)) {
         return false;
     }
     if !x.is_contiguous() || !weight_t.is_contiguous() {
@@ -6759,7 +6814,7 @@ pub(crate) fn metal_lm_head_supports(x: &candle_core::Tensor, weight_t: &candle_
         && vocab <= u32::MAX as usize
 }
 
-pub(crate) fn metal_lm_head_argmax_supports(x: &candle_core::Tensor, weight_t: &candle_core::Tensor) -> bool {
+pub(crate) fn metal_lm_head_argmax_supports(x: &kiln_tensor::Tensor, weight_t: &kiln_tensor::Tensor) -> bool {
     if metal_lm_head_argmax_disabled() {
         return false;
     }
@@ -6775,14 +6830,14 @@ pub(crate) fn metal_lm_head_argmax_supports(x: &candle_core::Tensor, weight_t: &
     num_groups > 0 && num_groups <= 1024
 }
 
-pub(crate) fn metal_lm_head_argmax_rows_supports(x: &candle_core::Tensor, weight_t: &candle_core::Tensor) -> bool {
+pub(crate) fn metal_lm_head_argmax_rows_supports(x: &kiln_tensor::Tensor, weight_t: &kiln_tensor::Tensor) -> bool {
     if metal_lm_head_argmax_rows_disabled() {
         return false;
     }
-    if !matches!(x.dtype(), candle_core::DType::BF16) || !matches!(weight_t.dtype(), candle_core::DType::BF16) {
+    if !matches!(x.dtype(), kiln_tensor::DType::BF16) || !matches!(weight_t.dtype(), kiln_tensor::DType::BF16) {
         return false;
     }
-    if !matches!(x.device(), candle_core::Device::Metal(_)) || !matches!(weight_t.device(), candle_core::Device::Metal(_)) {
+    if !matches!(x.device(), kiln_tensor::Device::Metal(_)) || !matches!(weight_t.device(), kiln_tensor::Device::Metal(_)) {
         return false;
     }
     if !x.is_contiguous() || !weight_t.is_contiguous() {
@@ -6804,7 +6859,7 @@ pub(crate) fn metal_lm_head_argmax_rows_supports(x: &candle_core::Tensor, weight
         && num_groups <= 1024
 }
 
-pub(crate) fn metal_lm_head_bf16(x: &candle_core::Tensor, weight_t: &candle_core::Tensor) -> Result<candle_core::Tensor> {
+pub(crate) fn metal_lm_head_bf16(x: &kiln_tensor::Tensor, weight_t: &kiln_tensor::Tensor) -> Result<kiln_tensor::Tensor> {
     anyhow::ensure!(
         metal_lm_head_supports(x, weight_t),
         "metal lm head supports only BF16 [1,1,H] x [H,V] on Metal"
@@ -6812,52 +6867,37 @@ pub(crate) fn metal_lm_head_bf16(x: &candle_core::Tensor, weight_t: &candle_core
     let (_, _, hidden) = x.dims3()?;
     let (_, vocab) = weight_t.dims2()?;
 
+    let x_metal = kt_metal(x)?;
     // The kernel writes every vocab element.
-    let out = unsafe { candle_core::Tensor::empty((1usize, 1usize, vocab), candle_core::DType::BF16, x.device())? };
+    let out = kt_metal_alloc(x_metal, kiln_tensor::DType::BF16, &[1usize, 1usize, vocab])?;
 
-    let candle_core::Device::Metal(device) = x.device() else {
-        anyhow::bail!("metal lm head requires Metal tensors");
-    };
-    let pipeline = metal_lm_head_pipeline(device)?;
-    let encoder = device.command_encoder()?;
+    let companion = x_metal.companion()?;
+    let pipeline = metal_lm_head_pipeline(&*companion)?;
+    let encoder = companion.command_encoder()?;
     encoder.set_label("kiln_lm_head_bf16");
     encoder.set_compute_pipeline_state(&pipeline);
 
     {
-        let (x_storage, x_layout) = x.storage_and_layout();
-        let (w_storage, w_layout) = weight_t.storage_and_layout();
-        let (o_storage, o_layout) = out.storage_and_layout();
-
-        let x_metal = match &*x_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal lm head x must be on Metal"),
-        };
-        let w_metal = match &*w_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal lm head weight must be on Metal"),
-        };
-        let out_metal = match &*o_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal lm head out must be on Metal"),
-        };
+        let w_metal = kt_metal(weight_t)?;
+        let out_metal = kt_metal(&out)?;
 
         // #1082 Step 4 lm_head-family: `buffer_o` → `buffer_o_kt`.
         // The kt-typed helper reads `start_offset()` + `size_in_bytes()`
         // off the kt Layout/DType; everything else is bit-identical.
         let x_buf = buffer_o_kt(
-            x_metal.buffer(),
-            &kt_layout_from_candle(x_layout),
-            kt_dtype_from_candle(x.dtype()),
+            x_metal.buffer().as_ref(),
+            x.layout(),
+            x.dtype(),
         );
         let w_buf = buffer_o_kt(
-            w_metal.buffer(),
-            &kt_layout_from_candle(w_layout),
-            kt_dtype_from_candle(weight_t.dtype()),
+            w_metal.buffer().as_ref(),
+            weight_t.layout(),
+            weight_t.dtype(),
         );
         let out_buf = buffer_o_kt(
-            out_metal.buffer(),
-            &kt_layout_from_candle(o_layout),
-            kt_dtype_from_candle(out.dtype()),
+            out_metal.buffer().as_ref(),
+            out.layout(),
+            out.dtype(),
         );
 
         encoder.set_buffer(0, Some(x_buf.buffer), x_buf.offset_in_bytes);
@@ -6885,7 +6925,7 @@ pub(crate) fn metal_lm_head_bf16(x: &candle_core::Tensor, weight_t: &candle_core
     Ok(out)
 }
 
-pub(crate) fn metal_lm_head_argmax_bf16(x: &candle_core::Tensor, weight_t: &candle_core::Tensor) -> Result<u32> {
+pub(crate) fn metal_lm_head_argmax_bf16(x: &kiln_tensor::Tensor, weight_t: &kiln_tensor::Tensor) -> Result<u32> {
     anyhow::ensure!(
         metal_lm_head_argmax_supports(x, weight_t),
         "metal lm head argmax supports only BF16 [1,1,H] x [H,V] on Metal with <= 262144 vocab"
@@ -6895,53 +6935,32 @@ pub(crate) fn metal_lm_head_argmax_bf16(x: &candle_core::Tensor, weight_t: &cand
 
     let chunk_width = 256usize;
     let num_groups = vocab.div_ceil(chunk_width);
-    let partial_scores = unsafe { candle_core::Tensor::empty((num_groups,), candle_core::DType::F32, x.device())? };
-    let partial_indices = unsafe { candle_core::Tensor::empty((num_groups,), candle_core::DType::F32, x.device())? };
+    let x_metal = kt_metal(x)?;
+    let partial_scores = kt_metal_alloc(x_metal, kiln_tensor::DType::F32, &[num_groups])?;
+    let partial_indices = kt_metal_alloc(x_metal, kiln_tensor::DType::F32, &[num_groups])?;
     let final_index = if metal_lm_head_argmax_gpu_reduce_disabled() {
         None
     } else {
-        Some(unsafe { candle_core::Tensor::empty((1usize,), candle_core::DType::F32, x.device())? })
+        Some(kt_metal_alloc(x_metal, kiln_tensor::DType::F32, &[1usize])?)
     };
 
-    let candle_core::Device::Metal(device) = x.device() else {
-        anyhow::bail!("metal lm head argmax requires Metal tensors");
-    };
-    let pipeline = metal_lm_head_argmax_pipeline(device)?;
+    let companion = x_metal.companion()?;
+    let pipeline = metal_lm_head_argmax_pipeline(&*companion)?;
     let reduce_pipeline = if final_index.is_some() {
-        Some(metal_lm_head_argmax_reduce_pipeline(device)?)
+        Some(metal_lm_head_argmax_reduce_pipeline(&*companion)?)
     } else {
         None
     };
-    let encoder = device.command_encoder()?;
+    let encoder = companion.command_encoder()?;
     encoder.set_label("kiln_lm_head_argmax_chunks_bf16");
     encoder.set_compute_pipeline_state(&pipeline);
 
     {
-        let (x_storage, x_layout) = x.storage_and_layout();
-        let (w_storage, w_layout) = weight_t.storage_and_layout();
-        let (ps_storage, ps_layout) = partial_scores.storage_and_layout();
-        let (pi_storage, pi_layout) = partial_indices.storage_and_layout();
-        let final_storage_and_layout = final_index.as_ref().map(candle_core::Tensor::storage_and_layout);
-
-        let x_metal = match &*x_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal lm head argmax x must be on Metal"),
-        };
-        let w_metal = match &*w_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal lm head argmax weight must be on Metal"),
-        };
-        let ps_metal = match &*ps_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal lm head argmax partial scores must be on Metal"),
-        };
-        let pi_metal = match &*pi_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal lm head argmax partial indices must be on Metal"),
-        };
-        let final_metal = match final_storage_and_layout.as_ref().map(|(s, l)| (&**s, l)) {
-            Some((Storage::Metal(s), layout)) => Some((s, layout)),
-            Some(_) => anyhow::bail!("metal lm head argmax final index must be on Metal"),
+        let w_metal = kt_metal(weight_t)?;
+        let ps_metal = kt_metal(&partial_scores)?;
+        let pi_metal = kt_metal(&partial_indices)?;
+        let final_metal = match final_index.as_ref() {
+            Some(t) => Some((kt_metal(t)?, t)),
             None => None,
         };
 
@@ -6949,30 +6968,30 @@ pub(crate) fn metal_lm_head_argmax_bf16(x: &candle_core::Tensor, weight_t: &cand
         // The kt-typed helper reads `start_offset()` + `size_in_bytes()`
         // off the kt Layout/DType; everything else is bit-identical.
         let x_buf = buffer_o_kt(
-            x_metal.buffer(),
-            &kt_layout_from_candle(x_layout),
-            kt_dtype_from_candle(x.dtype()),
+            x_metal.buffer().as_ref(),
+            x.layout(),
+            x.dtype(),
         );
         let w_buf = buffer_o_kt(
-            w_metal.buffer(),
-            &kt_layout_from_candle(w_layout),
-            kt_dtype_from_candle(weight_t.dtype()),
+            w_metal.buffer().as_ref(),
+            weight_t.layout(),
+            weight_t.dtype(),
         );
         let ps_buf = buffer_o_kt(
-            ps_metal.buffer(),
-            &kt_layout_from_candle(ps_layout),
-            kt_dtype_from_candle(partial_scores.dtype()),
+            ps_metal.buffer().as_ref(),
+            partial_scores.layout(),
+            partial_scores.dtype(),
         );
         let pi_buf = buffer_o_kt(
-            pi_metal.buffer(),
-            &kt_layout_from_candle(pi_layout),
-            kt_dtype_from_candle(partial_indices.dtype()),
+            pi_metal.buffer().as_ref(),
+            partial_indices.layout(),
+            partial_indices.dtype(),
         );
-        let final_buf = final_metal.map(|(storage, layout)| {
+        let final_buf = final_metal.map(|(storage, tensor)| {
             buffer_o_kt(
-                storage.buffer(),
-                &kt_layout_from_candle(layout),
-                kt_dtype_from_candle(candle_core::DType::F32),
+                storage.buffer().as_ref(),
+                tensor.layout(),
+                kiln_tensor::DType::F32,
             )
         });
 
@@ -7055,7 +7074,7 @@ pub(crate) fn metal_lm_head_argmax_bf16(x: &candle_core::Tensor, weight_t: &cand
     Ok(best_idx)
 }
 
-pub(crate) fn metal_lm_head_argmax_rows_bf16(x: &candle_core::Tensor, weight_t: &candle_core::Tensor) -> Result<Vec<u32>> {
+pub(crate) fn metal_lm_head_argmax_rows_bf16(x: &kiln_tensor::Tensor, weight_t: &kiln_tensor::Tensor) -> Result<Vec<u32>> {
     anyhow::ensure!(
         metal_lm_head_argmax_rows_supports(x, weight_t),
         "metal lm head row argmax supports only BF16 [B,1,H] x [H,V] on Metal with <= 262144 vocab"
@@ -7065,53 +7084,32 @@ pub(crate) fn metal_lm_head_argmax_rows_bf16(x: &candle_core::Tensor, weight_t: 
 
     let chunk_width = 256usize;
     let num_groups = vocab.div_ceil(chunk_width);
-    let partial_scores = unsafe { candle_core::Tensor::empty((batch, num_groups), candle_core::DType::F32, x.device())? };
-    let partial_indices = unsafe { candle_core::Tensor::empty((batch, num_groups), candle_core::DType::F32, x.device())? };
+    let x_metal = kt_metal(x)?;
+    let partial_scores = kt_metal_alloc(x_metal, kiln_tensor::DType::F32, &[batch, num_groups])?;
+    let partial_indices = kt_metal_alloc(x_metal, kiln_tensor::DType::F32, &[batch, num_groups])?;
     let final_indices = if metal_lm_head_argmax_gpu_reduce_disabled() {
         None
     } else {
-        Some(unsafe { candle_core::Tensor::empty((batch,), candle_core::DType::F32, x.device())? })
+        Some(kt_metal_alloc(x_metal, kiln_tensor::DType::F32, &[batch])?)
     };
 
-    let candle_core::Device::Metal(device) = x.device() else {
-        anyhow::bail!("metal lm head row argmax requires Metal tensors");
-    };
-    let pipeline = metal_lm_head_argmax_batch_pipeline(device)?;
+    let companion = x_metal.companion()?;
+    let pipeline = metal_lm_head_argmax_batch_pipeline(&*companion)?;
     let reduce_pipeline = if final_indices.is_some() {
-        Some(metal_lm_head_argmax_reduce_batch_pipeline(device)?)
+        Some(metal_lm_head_argmax_reduce_batch_pipeline(&*companion)?)
     } else {
         None
     };
-    let encoder = device.command_encoder()?;
+    let encoder = companion.command_encoder()?;
     encoder.set_label("kiln_lm_head_argmax_chunks_batch_bf16");
     encoder.set_compute_pipeline_state(&pipeline);
 
     {
-        let (x_storage, x_layout) = x.storage_and_layout();
-        let (w_storage, w_layout) = weight_t.storage_and_layout();
-        let (ps_storage, ps_layout) = partial_scores.storage_and_layout();
-        let (pi_storage, pi_layout) = partial_indices.storage_and_layout();
-        let final_storage_and_layout = final_indices.as_ref().map(candle_core::Tensor::storage_and_layout);
-
-        let x_metal = match &*x_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal lm head row argmax x must be on Metal"),
-        };
-        let w_metal = match &*w_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal lm head row argmax weight must be on Metal"),
-        };
-        let ps_metal = match &*ps_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal lm head row argmax partial scores must be on Metal"),
-        };
-        let pi_metal = match &*pi_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal lm head row argmax partial indices must be on Metal"),
-        };
-        let final_metal = match final_storage_and_layout.as_ref().map(|(s, l)| (&**s, l)) {
-            Some((Storage::Metal(s), layout)) => Some((s, layout)),
-            Some(_) => anyhow::bail!("metal lm head row argmax final indices must be on Metal"),
+        let w_metal = kt_metal(weight_t)?;
+        let ps_metal = kt_metal(&partial_scores)?;
+        let pi_metal = kt_metal(&partial_indices)?;
+        let final_metal = match final_indices.as_ref() {
+            Some(t) => Some((kt_metal(t)?, t)),
             None => None,
         };
 
@@ -7119,30 +7117,30 @@ pub(crate) fn metal_lm_head_argmax_rows_bf16(x: &candle_core::Tensor, weight_t: 
         // The kt-typed helper reads `start_offset()` + `size_in_bytes()`
         // off the kt Layout/DType; everything else is bit-identical.
         let x_buf = buffer_o_kt(
-            x_metal.buffer(),
-            &kt_layout_from_candle(x_layout),
-            kt_dtype_from_candle(x.dtype()),
+            x_metal.buffer().as_ref(),
+            x.layout(),
+            x.dtype(),
         );
         let w_buf = buffer_o_kt(
-            w_metal.buffer(),
-            &kt_layout_from_candle(w_layout),
-            kt_dtype_from_candle(weight_t.dtype()),
+            w_metal.buffer().as_ref(),
+            weight_t.layout(),
+            weight_t.dtype(),
         );
         let ps_buf = buffer_o_kt(
-            ps_metal.buffer(),
-            &kt_layout_from_candle(ps_layout),
-            kt_dtype_from_candle(partial_scores.dtype()),
+            ps_metal.buffer().as_ref(),
+            partial_scores.layout(),
+            partial_scores.dtype(),
         );
         let pi_buf = buffer_o_kt(
-            pi_metal.buffer(),
-            &kt_layout_from_candle(pi_layout),
-            kt_dtype_from_candle(partial_indices.dtype()),
+            pi_metal.buffer().as_ref(),
+            partial_indices.layout(),
+            partial_indices.dtype(),
         );
-        let final_buf = final_metal.map(|(storage, layout)| {
+        let final_buf = final_metal.map(|(storage, tensor)| {
             buffer_o_kt(
-                storage.buffer(),
-                &kt_layout_from_candle(layout),
-                kt_dtype_from_candle(candle_core::DType::F32),
+                storage.buffer().as_ref(),
+                tensor.layout(),
+                kiln_tensor::DType::F32,
             )
         });
 
@@ -7230,13 +7228,13 @@ pub(crate) fn metal_lm_head_argmax_rows_bf16(x: &candle_core::Tensor, weight_t: 
     Ok(out)
 }
 
-pub(crate) fn metal_mlp_gate_up_supports(x: &candle_core::Tensor, gate_t: &candle_core::Tensor, up_t: &candle_core::Tensor) -> bool {
-    if x.dtype() != candle_core::DType::BF16 || gate_t.dtype() != candle_core::DType::BF16 || up_t.dtype() != candle_core::DType::BF16 {
+pub(crate) fn metal_mlp_gate_up_supports(x: &kiln_tensor::Tensor, gate_t: &kiln_tensor::Tensor, up_t: &kiln_tensor::Tensor) -> bool {
+    if x.dtype() != kiln_tensor::DType::BF16 || gate_t.dtype() != kiln_tensor::DType::BF16 || up_t.dtype() != kiln_tensor::DType::BF16 {
         return false;
     }
-    if !matches!(x.device(), candle_core::Device::Metal(_))
-        || !matches!(gate_t.device(), candle_core::Device::Metal(_))
-        || !matches!(up_t.device(), candle_core::Device::Metal(_))
+    if !matches!(x.device(), kiln_tensor::Device::Metal(_))
+        || !matches!(gate_t.device(), kiln_tensor::Device::Metal(_))
+        || !matches!(up_t.device(), kiln_tensor::Device::Metal(_))
     {
         return false;
     }
@@ -7269,7 +7267,7 @@ pub(crate) fn metal_mlp_gate_up_supports(x: &candle_core::Tensor, gate_t: &candl
         && total <= u32::MAX as usize
 }
 
-pub(crate) fn metal_mlp_gate_up_bf16(x: &candle_core::Tensor, gate_t: &candle_core::Tensor, up_t: &candle_core::Tensor) -> Result<candle_core::Tensor> {
+pub(crate) fn metal_mlp_gate_up_bf16(x: &kiln_tensor::Tensor, gate_t: &kiln_tensor::Tensor, up_t: &kiln_tensor::Tensor) -> Result<kiln_tensor::Tensor> {
     anyhow::ensure!(
         metal_mlp_gate_up_supports(x, gate_t, up_t),
         "metal mlp gate/up supports only BF16 [B,1,H] x [H,I] on Metal"
@@ -7295,59 +7293,40 @@ pub(crate) fn metal_mlp_gate_up_bf16(x: &candle_core::Tensor, gate_t: &candle_co
     let row_groups = rows.div_ceil(row_group_size);
     let total = row_groups * intermediate.div_ceil(2);
 
+    let x_metal = kt_metal(x)?;
     // The kernel writes every row/intermediate element.
-    let out = unsafe { candle_core::Tensor::empty((batch, seq_len, intermediate), candle_core::DType::BF16, x.device())? };
+    let out = kt_metal_alloc(x_metal, kiln_tensor::DType::BF16, &[batch, seq_len, intermediate])?;
 
-    let candle_core::Device::Metal(device) = x.device() else {
-        anyhow::bail!("metal mlp gate/up requires Metal tensors");
-    };
-    let encoder = device.command_encoder()?;
+    let companion = x_metal.companion()?;
+    let encoder = companion.command_encoder()?;
 
     {
-        let (x_storage, x_layout) = x.storage_and_layout();
-        let (gate_storage, gate_layout) = gate_t.storage_and_layout();
-        let (up_storage, up_layout) = up_t.storage_and_layout();
-        let (out_storage, out_layout) = out.storage_and_layout();
-
-        let x_metal = match &*x_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal mlp gate/up x must be on Metal"),
-        };
-        let gate_metal = match &*gate_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal mlp gate/up gate_t must be on Metal"),
-        };
-        let up_metal = match &*up_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal mlp gate/up up_t must be on Metal"),
-        };
-        let out_metal = match &*out_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal mlp gate/up out must be on Metal"),
-        };
+        let gate_metal = kt_metal(gate_t)?;
+        let up_metal = kt_metal(up_t)?;
+        let out_metal = kt_metal(&out)?;
 
         // #1082 Step 4 mlp-family: `buffer_o` → `buffer_o_kt`.
         // The kt-typed helper reads `start_offset()` + `size_in_bytes()`
         // off the kt Layout/DType; everything else is bit-identical.
         let x_buf = buffer_o_kt(
-            x_metal.buffer(),
-            &kt_layout_from_candle(x_layout),
-            kt_dtype_from_candle(x.dtype()),
+            x_metal.buffer().as_ref(),
+            x.layout(),
+            x.dtype(),
         );
         let gate_buf = buffer_o_kt(
-            gate_metal.buffer(),
-            &kt_layout_from_candle(gate_layout),
-            kt_dtype_from_candle(gate_t.dtype()),
+            gate_metal.buffer().as_ref(),
+            gate_t.layout(),
+            gate_t.dtype(),
         );
         let up_buf = buffer_o_kt(
-            up_metal.buffer(),
-            &kt_layout_from_candle(up_layout),
-            kt_dtype_from_candle(up_t.dtype()),
+            up_metal.buffer().as_ref(),
+            up_t.layout(),
+            up_t.dtype(),
         );
         let out_buf = buffer_o_kt(
-            out_metal.buffer(),
-            &kt_layout_from_candle(out_layout),
-            kt_dtype_from_candle(out.dtype()),
+            out_metal.buffer().as_ref(),
+            out.layout(),
+            out.dtype(),
         );
 
         encoder.set_buffer(0, Some(x_buf.buffer), x_buf.offset_in_bytes);
@@ -7365,13 +7344,13 @@ pub(crate) fn metal_mlp_gate_up_bf16(x: &candle_core::Tensor, gate_t: &candle_co
             && up_buf.offset_in_bytes % 4 == 0;
         let serial_dedicated = serial_vector_safe && !metal_mlp_gate_up_serial_dedicated_disabled();
         if serial_dedicated {
-            let pipeline = metal_mlp_gate_up_serial_pipeline(device)?;
+            let pipeline = metal_mlp_gate_up_serial_pipeline(&*companion)?;
             encoder.set_label("kiln_mlp_gate_up_serial_bf16");
             encoder.set_compute_pipeline_state(&pipeline);
             encoder.set_bytes(4, &hidden_u32);
             encoder.set_bytes(5, &intermediate_u32);
         } else {
-            let pipeline = metal_mlp_gate_up_pipeline(device)?;
+            let pipeline = metal_mlp_gate_up_pipeline(&*companion)?;
             encoder.set_label("kiln_mlp_gate_up_bf16");
             encoder.set_compute_pipeline_state(&pipeline);
             let rows_u32 = rows as u32;
@@ -7415,14 +7394,14 @@ pub(crate) fn metal_mlp_gate_up_bf16(x: &candle_core::Tensor, gate_t: &candle_co
     Ok(out)
 }
 
-pub(crate) fn metal_mlp_silu_mul_supports(gate: &candle_core::Tensor, up: &candle_core::Tensor) -> bool {
+pub(crate) fn metal_mlp_silu_mul_supports(gate: &kiln_tensor::Tensor, up: &kiln_tensor::Tensor) -> bool {
     if metal_mlp_silu_mul_disabled() {
         return false;
     }
-    if gate.dtype() != candle_core::DType::BF16 || up.dtype() != candle_core::DType::BF16 {
+    if gate.dtype() != kiln_tensor::DType::BF16 || up.dtype() != kiln_tensor::DType::BF16 {
         return false;
     }
-    if !matches!(gate.device(), candle_core::Device::Metal(_)) || !matches!(up.device(), candle_core::Device::Metal(_)) {
+    if !matches!(gate.device(), kiln_tensor::Device::Metal(_)) || !matches!(up.device(), kiln_tensor::Device::Metal(_)) {
         return false;
     }
     if !gate.is_contiguous() || !up.is_contiguous() || gate.shape() != up.shape() {
@@ -7431,7 +7410,7 @@ pub(crate) fn metal_mlp_silu_mul_supports(gate: &candle_core::Tensor, up: &candl
     gate.elem_count() > 0 && gate.elem_count() <= u32::MAX as usize
 }
 
-pub(crate) fn metal_mlp_silu_mul_bf16(gate: &candle_core::Tensor, up: &candle_core::Tensor) -> Result<candle_core::Tensor> {
+pub(crate) fn metal_mlp_silu_mul_bf16(gate: &kiln_tensor::Tensor, up: &kiln_tensor::Tensor) -> Result<kiln_tensor::Tensor> {
     anyhow::ensure!(
         metal_mlp_silu_mul_supports(gate, up),
         "metal mlp silu*mul supports only matching contiguous BF16 Metal tensors"
@@ -7439,51 +7418,36 @@ pub(crate) fn metal_mlp_silu_mul_bf16(gate: &candle_core::Tensor, up: &candle_co
     let total = gate.elem_count();
     let gate = gate.contiguous()?;
     let up = up.contiguous()?;
-    let out = unsafe { candle_core::Tensor::empty(gate.dims(), candle_core::DType::BF16, gate.device())? };
+    let gate_metal = kt_metal(&gate)?;
+    let out = kt_metal_alloc(gate_metal, kiln_tensor::DType::BF16, gate.dims())?;
 
-    let candle_core::Device::Metal(device) = gate.device() else {
-        anyhow::bail!("metal mlp silu*mul requires Metal tensors");
-    };
-    let pipeline = metal_mlp_silu_mul_pipeline(device)?;
-    let encoder = device.command_encoder()?;
+    let companion = gate_metal.companion()?;
+    let pipeline = metal_mlp_silu_mul_pipeline(&*companion)?;
+    let encoder = companion.command_encoder()?;
     encoder.set_label("kiln_mlp_silu_mul_bf16");
     encoder.set_compute_pipeline_state(&pipeline);
 
     {
-        let (gate_storage, gate_layout) = gate.storage_and_layout();
-        let (up_storage, up_layout) = up.storage_and_layout();
-        let (out_storage, out_layout) = out.storage_and_layout();
-
-        let gate_metal = match &*gate_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal mlp silu*mul gate must be on Metal"),
-        };
-        let up_metal = match &*up_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal mlp silu*mul up must be on Metal"),
-        };
-        let out_metal = match &*out_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal mlp silu*mul out must be on Metal"),
-        };
+        let up_metal = kt_metal(&up)?;
+        let out_metal = kt_metal(&out)?;
 
         // #1082 Step 4 mlp-family: `buffer_o` → `buffer_o_kt`.
         // The kt-typed helper reads `start_offset()` + `size_in_bytes()`
         // off the kt Layout/DType; everything else is bit-identical.
         let gate_buf = buffer_o_kt(
-            gate_metal.buffer(),
-            &kt_layout_from_candle(gate_layout),
-            kt_dtype_from_candle(gate.dtype()),
+            gate_metal.buffer().as_ref(),
+            gate.layout(),
+            gate.dtype(),
         );
         let up_buf = buffer_o_kt(
-            up_metal.buffer(),
-            &kt_layout_from_candle(up_layout),
-            kt_dtype_from_candle(up.dtype()),
+            up_metal.buffer().as_ref(),
+            up.layout(),
+            up.dtype(),
         );
         let out_buf = buffer_o_kt(
-            out_metal.buffer(),
-            &kt_layout_from_candle(out_layout),
-            kt_dtype_from_candle(out.dtype()),
+            out_metal.buffer().as_ref(),
+            out.layout(),
+            out.dtype(),
         );
 
         encoder.set_buffer(0, Some(gate_buf.buffer), gate_buf.offset_in_bytes);
@@ -7509,14 +7473,14 @@ pub(crate) fn metal_mlp_silu_mul_bf16(gate: &candle_core::Tensor, up: &candle_co
     Ok(out)
 }
 
-pub(crate) fn metal_attn_gate_sigmoid_mul_supports(x: &candle_core::Tensor, gate: &candle_core::Tensor) -> bool {
+pub(crate) fn metal_attn_gate_sigmoid_mul_supports(x: &kiln_tensor::Tensor, gate: &kiln_tensor::Tensor) -> bool {
     if metal_attn_gate_fusion_disabled() {
         return false;
     }
-    if x.dtype() != candle_core::DType::BF16 || gate.dtype() != candle_core::DType::BF16 {
+    if x.dtype() != kiln_tensor::DType::BF16 || gate.dtype() != kiln_tensor::DType::BF16 {
         return false;
     }
-    if !matches!(x.device(), candle_core::Device::Metal(_)) || !matches!(gate.device(), candle_core::Device::Metal(_)) {
+    if !matches!(x.device(), kiln_tensor::Device::Metal(_)) || !matches!(gate.device(), kiln_tensor::Device::Metal(_)) {
         return false;
     }
     if !x.is_contiguous() || !gate.is_contiguous() {
@@ -7543,7 +7507,7 @@ pub(crate) fn metal_attn_gate_sigmoid_mul_supports(x: &candle_core::Tensor, gate
         && total <= u32::MAX as usize
 }
 
-pub(crate) fn metal_attn_gate_sigmoid_mul_bf16(x: &candle_core::Tensor, gate: &candle_core::Tensor) -> Result<candle_core::Tensor> {
+pub(crate) fn metal_attn_gate_sigmoid_mul_bf16(x: &kiln_tensor::Tensor, gate: &kiln_tensor::Tensor) -> Result<kiln_tensor::Tensor> {
     anyhow::ensure!(
         metal_attn_gate_sigmoid_mul_supports(x, gate),
         "metal attn gate sigmoid/mul supports only BF16 [B,1,H] tensors on Metal"
@@ -7552,39 +7516,24 @@ pub(crate) fn metal_attn_gate_sigmoid_mul_bf16(x: &candle_core::Tensor, gate: &c
     let total = batch * seq_len * hidden;
 
     // The kernel writes every hidden element exactly once.
-    let out = unsafe { candle_core::Tensor::empty((batch, seq_len, hidden), candle_core::DType::BF16, x.device())? };
+    let x_metal = kt_metal(&x)?;
+    let out = kt_metal_alloc(x_metal, kiln_tensor::DType::BF16, &[batch, seq_len, hidden])?;
 
-    let candle_core::Device::Metal(device) = x.device() else {
-        anyhow::bail!("metal attn gate sigmoid/mul requires Metal tensors");
-    };
-    let pipeline = metal_attn_gate_sigmoid_mul_pipeline(device)?;
-    let encoder = device.command_encoder()?;
+    let companion = x_metal.companion()?;
+    let pipeline = metal_attn_gate_sigmoid_mul_pipeline(&*companion)?;
+    let encoder = companion.command_encoder()?;
     encoder.set_label("kiln_attn_gate_sigmoid_mul_bf16");
     encoder.set_compute_pipeline_state(&pipeline);
 
     {
-        let (x_storage, x_layout) = x.storage_and_layout();
-        let (gate_storage, gate_layout) = gate.storage_and_layout();
-        let (out_storage, out_layout) = out.storage_and_layout();
+        let gate_metal = kt_metal(&gate)?;
+        let out_metal = kt_metal(&out)?;
 
-        let x_metal = match &*x_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal attn gate sigmoid/mul x must be on Metal"),
-        };
-        let gate_metal = match &*gate_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal attn gate sigmoid/mul gate must be on Metal"),
-        };
-        let out_metal = match &*out_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal attn gate sigmoid/mul out must be on Metal"),
-        };
-
-        let x_buf = buffer_o_kt(x_metal.buffer(), &kt_layout_from_candle(x_layout), kt_dtype_from_candle(x.dtype()));
+        let x_buf = buffer_o_kt(x_metal.buffer().as_ref(), x.layout(), x.dtype());
         let gate_buf =
-            buffer_o_kt(gate_metal.buffer(), &kt_layout_from_candle(gate_layout), kt_dtype_from_candle(gate.dtype()));
+            buffer_o_kt(gate_metal.buffer().as_ref(), gate.layout(), gate.dtype());
         let out_buf =
-            buffer_o_kt(out_metal.buffer(), &kt_layout_from_candle(out_layout), kt_dtype_from_candle(out.dtype()));
+            buffer_o_kt(out_metal.buffer().as_ref(), out.layout(), out.dtype());
 
         encoder.set_buffer(0, Some(x_buf.buffer), x_buf.offset_in_bytes);
         encoder.set_buffer(1, Some(gate_buf.buffer), gate_buf.offset_in_bytes);
@@ -7609,14 +7558,14 @@ pub(crate) fn metal_attn_gate_sigmoid_mul_bf16(x: &candle_core::Tensor, gate: &c
     Ok(out)
 }
 
-pub(crate) fn metal_transposed_coop_gemv_supports(x: &candle_core::Tensor, weight_t: &candle_core::Tensor) -> bool {
+pub(crate) fn metal_transposed_coop_gemv_supports(x: &kiln_tensor::Tensor, weight_t: &kiln_tensor::Tensor) -> bool {
     if metal_transposed_coop_gemv_disabled() {
         return false;
     }
-    if x.dtype() != candle_core::DType::BF16 || weight_t.dtype() != candle_core::DType::BF16 {
+    if x.dtype() != kiln_tensor::DType::BF16 || weight_t.dtype() != kiln_tensor::DType::BF16 {
         return false;
     }
-    if !matches!(x.device(), candle_core::Device::Metal(_)) || !matches!(weight_t.device(), candle_core::Device::Metal(_)) {
+    if !matches!(x.device(), kiln_tensor::Device::Metal(_)) || !matches!(weight_t.device(), kiln_tensor::Device::Metal(_)) {
         return false;
     }
     if !x.is_contiguous() || !weight_t.is_contiguous() {
@@ -7639,16 +7588,16 @@ pub(crate) fn metal_transposed_coop_gemv_supports(x: &candle_core::Tensor, weigh
 }
 
 pub(crate) fn metal_transposed_coop_gemv_decode_batch_supports(
-    x: &candle_core::Tensor,
-    weight_t: &candle_core::Tensor,
+    x: &kiln_tensor::Tensor,
+    weight_t: &kiln_tensor::Tensor,
 ) -> bool {
     if metal_transposed_coop_gemv_disabled() {
         return false;
     }
-    if x.dtype() != candle_core::DType::BF16 || weight_t.dtype() != candle_core::DType::BF16 {
+    if x.dtype() != kiln_tensor::DType::BF16 || weight_t.dtype() != kiln_tensor::DType::BF16 {
         return false;
     }
-    if !matches!(x.device(), candle_core::Device::Metal(_)) || !matches!(weight_t.device(), candle_core::Device::Metal(_)) {
+    if !matches!(x.device(), kiln_tensor::Device::Metal(_)) || !matches!(weight_t.device(), kiln_tensor::Device::Metal(_)) {
         return false;
     }
     if !x.is_contiguous() || !weight_t.is_contiguous() {
@@ -7675,7 +7624,7 @@ pub(crate) fn metal_transposed_coop_gemv_decode_batch_supports(
         && total <= u32::MAX as usize
 }
 
-pub(crate) fn metal_transposed_coop_gemv_bf16(x: &candle_core::Tensor, weight_t: &candle_core::Tensor) -> Result<candle_core::Tensor> {
+pub(crate) fn metal_transposed_coop_gemv_bf16(x: &kiln_tensor::Tensor, weight_t: &kiln_tensor::Tensor) -> Result<kiln_tensor::Tensor> {
     if metal_transposed_coop_gemv_decode_batch_supports(x, weight_t) {
         return metal_transposed_coop_gemv_batch_bf16(x, weight_t);
     }
@@ -7690,10 +7639,10 @@ pub(crate) fn metal_transposed_coop_gemv_bf16(x: &candle_core::Tensor, weight_t:
 }
 
 fn metal_transposed_coop_gemv_bf16_with_tile(
-    x: &candle_core::Tensor,
-    weight_t: &candle_core::Tensor,
+    x: &kiln_tensor::Tensor,
+    weight_t: &kiln_tensor::Tensor,
     tile: MetalTransposedCoopGemvTile,
-) -> Result<candle_core::Tensor> {
+) -> Result<kiln_tensor::Tensor> {
     anyhow::ensure!(
         metal_transposed_coop_gemv_supports(x, weight_t),
         "metal transposed coop GEMV supports only BF16 [1,1,K] x [K,N] on Metal"
@@ -7701,52 +7650,37 @@ fn metal_transposed_coop_gemv_bf16_with_tile(
     let (_, _, input_dim) = x.dims3()?;
     let (_, output_dim) = weight_t.dims2()?;
 
+    let x_metal = kt_metal(&x)?;
     // The kernel writes every output channel exactly once.
-    let out = unsafe { candle_core::Tensor::empty((1usize, 1usize, output_dim), candle_core::DType::BF16, x.device())? };
+    let out = kt_metal_alloc(x_metal, kiln_tensor::DType::BF16, &[1usize, 1usize, output_dim])?;
 
-    let candle_core::Device::Metal(device) = x.device() else {
-        anyhow::bail!("metal transposed coop GEMV requires Metal tensors");
-    };
-    let pipeline = metal_transposed_coop_gemv_pipeline(device, tile)?;
-    let encoder = device.command_encoder()?;
+    let companion = x_metal.companion()?;
+    let pipeline = metal_transposed_coop_gemv_pipeline(&*companion, tile)?;
+    let encoder = companion.command_encoder()?;
     encoder.set_label(tile.label());
     encoder.set_compute_pipeline_state(&pipeline);
 
     {
-        let (x_storage, x_layout) = x.storage_and_layout();
-        let (w_storage, w_layout) = weight_t.storage_and_layout();
-        let (o_storage, o_layout) = out.storage_and_layout();
-
-        let x_metal = match &*x_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal transposed coop GEMV x must be on Metal"),
-        };
-        let w_metal = match &*w_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal transposed coop GEMV weight_t must be on Metal"),
-        };
-        let out_metal = match &*o_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal transposed coop GEMV out must be on Metal"),
-        };
+        let w_metal = kt_metal(&weight_t)?;
+        let out_metal = kt_metal(&out)?;
 
         // #1082 Step 5 gemv/matmul-family: `buffer_o` → `buffer_o_kt`.
         // The kt-typed helper reads `start_offset()` + `size_in_bytes()`
         // off the kt Layout/DType; everything else is bit-identical.
         let x_buf = buffer_o_kt(
-            x_metal.buffer(),
-            &kt_layout_from_candle(x_layout),
-            kt_dtype_from_candle(x.dtype()),
+            x_metal.buffer().as_ref(),
+            x.layout(),
+            x.dtype(),
         );
         let w_buf = buffer_o_kt(
-            w_metal.buffer(),
-            &kt_layout_from_candle(w_layout),
-            kt_dtype_from_candle(weight_t.dtype()),
+            w_metal.buffer().as_ref(),
+            weight_t.layout(),
+            weight_t.dtype(),
         );
         let out_buf = buffer_o_kt(
-            out_metal.buffer(),
-            &kt_layout_from_candle(o_layout),
-            kt_dtype_from_candle(out.dtype()),
+            out_metal.buffer().as_ref(),
+            out.layout(),
+            out.dtype(),
         );
 
         encoder.set_buffer(0, Some(x_buf.buffer), x_buf.offset_in_bytes);
@@ -7775,7 +7709,7 @@ fn metal_transposed_coop_gemv_bf16_with_tile(
     Ok(out)
 }
 
-fn metal_transposed_coop_gemv_batch_bf16(x: &candle_core::Tensor, weight_t: &candle_core::Tensor) -> Result<candle_core::Tensor> {
+fn metal_transposed_coop_gemv_batch_bf16(x: &kiln_tensor::Tensor, weight_t: &kiln_tensor::Tensor) -> Result<kiln_tensor::Tensor> {
     anyhow::ensure!(
         metal_transposed_coop_gemv_decode_batch_supports(x, weight_t),
         "metal batch transposed coop GEMV supports only BF16 [B,1,K] x [K,N] with B > 1 on Metal"
@@ -7803,20 +7737,19 @@ fn metal_transposed_coop_gemv_batch_bf16(x: &candle_core::Tensor, weight_t: &can
     };
     let row_groups = batch.div_ceil(row_group_size);
 
+    let x_metal = kt_metal(&x)?;
     // The kernel writes every batch/output channel exactly once.
-    let out = unsafe { candle_core::Tensor::empty((batch, 1usize, output_dim), candle_core::DType::BF16, x.device())? };
+    let out = kt_metal_alloc(x_metal, kiln_tensor::DType::BF16, &[batch, 1usize, output_dim])?;
 
-    let candle_core::Device::Metal(device) = x.device() else {
-        anyhow::bail!("metal batch transposed coop GEMV requires Metal tensors");
-    };
+    let companion = x_metal.companion()?;
     let pipeline = if row_triple_tile8_enabled {
-        metal_transposed_coop_gemv_batch_row_triple_tile8_pipeline(device)?
+        metal_transposed_coop_gemv_batch_row_triple_tile8_pipeline(&*companion)?
     } else if row_quad_tile8_enabled {
-        metal_transposed_coop_gemv_batch_row_quad_tile8_pipeline(device)?
+        metal_transposed_coop_gemv_batch_row_quad_tile8_pipeline(&*companion)?
     } else {
-        metal_transposed_coop_gemv_batch_pipeline(device)?
+        metal_transposed_coop_gemv_batch_pipeline(&*companion)?
     };
-    let encoder = device.command_encoder()?;
+    let encoder = companion.command_encoder()?;
     encoder.set_label(if row_triple_tile8_enabled {
         "kiln_transposed_coop_gemv8_batch_row_triple_tile8_bf16"
     } else if row_quad_tile8_enabled {
@@ -7827,40 +7760,26 @@ fn metal_transposed_coop_gemv_batch_bf16(x: &candle_core::Tensor, weight_t: &can
     encoder.set_compute_pipeline_state(&pipeline);
 
     {
-        let (x_storage, x_layout) = x.storage_and_layout();
-        let (w_storage, w_layout) = weight_t.storage_and_layout();
-        let (o_storage, o_layout) = out.storage_and_layout();
-
-        let x_metal = match &*x_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal batch transposed coop GEMV x must be on Metal"),
-        };
-        let w_metal = match &*w_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal batch transposed coop GEMV weight_t must be on Metal"),
-        };
-        let out_metal = match &*o_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal batch transposed coop GEMV out must be on Metal"),
-        };
+        let w_metal = kt_metal(&weight_t)?;
+        let out_metal = kt_metal(&out)?;
 
         // #1082 Step 5 gemv/matmul-family: `buffer_o` → `buffer_o_kt`.
         // The kt-typed helper reads `start_offset()` + `size_in_bytes()`
         // off the kt Layout/DType; everything else is bit-identical.
         let x_buf = buffer_o_kt(
-            x_metal.buffer(),
-            &kt_layout_from_candle(x_layout),
-            kt_dtype_from_candle(x.dtype()),
+            x_metal.buffer().as_ref(),
+            x.layout(),
+            x.dtype(),
         );
         let w_buf = buffer_o_kt(
-            w_metal.buffer(),
-            &kt_layout_from_candle(w_layout),
-            kt_dtype_from_candle(weight_t.dtype()),
+            w_metal.buffer().as_ref(),
+            weight_t.layout(),
+            weight_t.dtype(),
         );
         let out_buf = buffer_o_kt(
-            out_metal.buffer(),
-            &kt_layout_from_candle(o_layout),
-            kt_dtype_from_candle(out.dtype()),
+            out_metal.buffer().as_ref(),
+            out.layout(),
+            out.dtype(),
         );
 
         encoder.set_buffer(0, Some(x_buf.buffer), x_buf.offset_in_bytes);
@@ -7906,10 +7825,10 @@ fn metal_transposed_coop_gemv_batch_bf16(x: &candle_core::Tensor, weight_t: &can
 }
 
 pub(crate) fn metal_fused_qkv_transposed_coop_gemv_supports(
-    x: &candle_core::Tensor,
-    q_t: &candle_core::Tensor,
-    k_t: &candle_core::Tensor,
-    v_t: &candle_core::Tensor,
+    x: &kiln_tensor::Tensor,
+    q_t: &kiln_tensor::Tensor,
+    k_t: &kiln_tensor::Tensor,
+    v_t: &kiln_tensor::Tensor,
 ) -> bool {
     if metal_fused_qkv_proj_disabled() {
         return false;
@@ -7937,11 +7856,11 @@ pub(crate) fn metal_fused_qkv_transposed_coop_gemv_supports(
 }
 
 pub(crate) fn metal_fused_qkv_transposed_coop_gemv_bf16(
-    x: &candle_core::Tensor,
-    q_t: &candle_core::Tensor,
-    k_t: &candle_core::Tensor,
-    v_t: &candle_core::Tensor,
-) -> Result<(candle_core::Tensor, candle_core::Tensor, candle_core::Tensor)> {
+    x: &kiln_tensor::Tensor,
+    q_t: &kiln_tensor::Tensor,
+    k_t: &kiln_tensor::Tensor,
+    v_t: &kiln_tensor::Tensor,
+) -> Result<(kiln_tensor::Tensor, kiln_tensor::Tensor, kiln_tensor::Tensor)> {
     anyhow::ensure!(
         metal_fused_qkv_transposed_coop_gemv_supports(x, q_t, k_t, v_t),
         "metal fused QKV projection supports only BF16 [1,1,K] x [K,Nq/Nk/Nv] on Metal"
@@ -7955,95 +7874,64 @@ pub(crate) fn metal_fused_qkv_transposed_coop_gemv_bf16(
     // The kernel writes each projection output independently with the existing
     // tile8 cooperative GEMV mapping. Back the three result views with one
     // allocation to avoid repeated small Metal buffer allocations in decode.
+    let x_metal = kt_metal(&x)?;
     let fused_out =
-        unsafe { candle_core::Tensor::empty((1usize, 1usize, total_output_dim), candle_core::DType::BF16, x.device())? };
+        kt_metal_alloc(x_metal, kiln_tensor::DType::BF16, &[1usize, 1usize, total_output_dim])?;
     let q_out = fused_out.narrow(2, 0, q_output_dim)?;
     let k_out = fused_out.narrow(2, q_output_dim, k_output_dim)?;
     let v_out = fused_out.narrow(2, q_output_dim + k_output_dim, v_output_dim)?;
 
-    let candle_core::Device::Metal(device) = x.device() else {
-        anyhow::bail!("metal fused QKV projection requires Metal tensors");
-    };
-    let pipeline = metal_fused_qkv_transposed_coop_gemv_pipeline(device)?;
-    let encoder = device.command_encoder()?;
+    let companion = x_metal.companion()?;
+    let pipeline = metal_fused_qkv_transposed_coop_gemv_pipeline(&*companion)?;
+    let encoder = companion.command_encoder()?;
     encoder.set_label("kiln_fused_qkv_transposed_coop_gemv8_bf16");
     encoder.set_compute_pipeline_state(&pipeline);
 
     {
-        let (x_storage, x_layout) = x.storage_and_layout();
-        let (q_storage, q_layout) = q_t.storage_and_layout();
-        let (k_storage, k_layout) = k_t.storage_and_layout();
-        let (v_storage, v_layout) = v_t.storage_and_layout();
-        let (q_out_storage, q_out_layout) = q_out.storage_and_layout();
-        let (k_out_storage, k_out_layout) = k_out.storage_and_layout();
-        let (v_out_storage, v_out_layout) = v_out.storage_and_layout();
-
-        let x_metal = match &*x_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal fused QKV projection x must be on Metal"),
-        };
-        let q_metal = match &*q_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal fused QKV projection q_t must be on Metal"),
-        };
-        let k_metal = match &*k_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal fused QKV projection k_t must be on Metal"),
-        };
-        let v_metal = match &*v_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal fused QKV projection v_t must be on Metal"),
-        };
-        let q_out_metal = match &*q_out_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal fused QKV projection q_out must be on Metal"),
-        };
-        let k_out_metal = match &*k_out_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal fused QKV projection k_out must be on Metal"),
-        };
-        let v_out_metal = match &*v_out_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal fused QKV projection v_out must be on Metal"),
-        };
+        let q_metal = kt_metal(&q_t)?;
+        let k_metal = kt_metal(&k_t)?;
+        let v_metal = kt_metal(&v_t)?;
+        let q_out_metal = kt_metal(&q_out)?;
+        let k_out_metal = kt_metal(&k_out)?;
+        let v_out_metal = kt_metal(&v_out)?;
 
         // #1082 Step 5 gemv/matmul-family: `buffer_o` → `buffer_o_kt`.
         // The kt-typed helper reads `start_offset()` + `size_in_bytes()`
         // off the kt Layout/DType; everything else is bit-identical.
         let x_buf = buffer_o_kt(
-            x_metal.buffer(),
-            &kt_layout_from_candle(x_layout),
-            kt_dtype_from_candle(x.dtype()),
+            x_metal.buffer().as_ref(),
+            x.layout(),
+            x.dtype(),
         );
         let q_buf = buffer_o_kt(
-            q_metal.buffer(),
-            &kt_layout_from_candle(q_layout),
-            kt_dtype_from_candle(q_t.dtype()),
+            q_metal.buffer().as_ref(),
+            q_t.layout(),
+            q_t.dtype(),
         );
         let k_buf = buffer_o_kt(
-            k_metal.buffer(),
-            &kt_layout_from_candle(k_layout),
-            kt_dtype_from_candle(k_t.dtype()),
+            k_metal.buffer().as_ref(),
+            k_t.layout(),
+            k_t.dtype(),
         );
         let v_buf = buffer_o_kt(
-            v_metal.buffer(),
-            &kt_layout_from_candle(v_layout),
-            kt_dtype_from_candle(v_t.dtype()),
+            v_metal.buffer().as_ref(),
+            v_t.layout(),
+            v_t.dtype(),
         );
         let q_out_buf = buffer_o_kt(
-            q_out_metal.buffer(),
-            &kt_layout_from_candle(q_out_layout),
-            kt_dtype_from_candle(q_out.dtype()),
+            q_out_metal.buffer().as_ref(),
+            q_out.layout(),
+            q_out.dtype(),
         );
         let k_out_buf = buffer_o_kt(
-            k_out_metal.buffer(),
-            &kt_layout_from_candle(k_out_layout),
-            kt_dtype_from_candle(k_out.dtype()),
+            k_out_metal.buffer().as_ref(),
+            k_out.layout(),
+            k_out.dtype(),
         );
         let v_out_buf = buffer_o_kt(
-            v_out_metal.buffer(),
-            &kt_layout_from_candle(v_out_layout),
-            kt_dtype_from_candle(v_out.dtype()),
+            v_out_metal.buffer().as_ref(),
+            v_out.layout(),
+            v_out.dtype(),
         );
 
         encoder.set_buffer(0, Some(x_buf.buffer), x_buf.offset_in_bytes);
@@ -8086,25 +7974,25 @@ pub(crate) fn metal_fused_qkv_transposed_coop_gemv_bf16(
 }
 
 pub(crate) fn metal_lora_add_decode_supports(
-    base: &candle_core::Tensor,
-    x: &candle_core::Tensor,
-    a: &candle_core::Tensor,
-    b: &candle_core::Tensor,
+    base: &kiln_tensor::Tensor,
+    x: &kiln_tensor::Tensor,
+    a: &kiln_tensor::Tensor,
+    b: &kiln_tensor::Tensor,
 ) -> bool {
     if metal_lora_delta_decode_disabled() {
         return false;
     }
-    if base.dtype() != candle_core::DType::BF16
-        || x.dtype() != candle_core::DType::BF16
-        || a.dtype() != candle_core::DType::BF16
-        || b.dtype() != candle_core::DType::BF16
+    if base.dtype() != kiln_tensor::DType::BF16
+        || x.dtype() != kiln_tensor::DType::BF16
+        || a.dtype() != kiln_tensor::DType::BF16
+        || b.dtype() != kiln_tensor::DType::BF16
     {
         return false;
     }
-    if !matches!(base.device(), candle_core::Device::Metal(_))
-        || !matches!(x.device(), candle_core::Device::Metal(_))
-        || !matches!(a.device(), candle_core::Device::Metal(_))
-        || !matches!(b.device(), candle_core::Device::Metal(_))
+    if !matches!(base.device(), kiln_tensor::Device::Metal(_))
+        || !matches!(x.device(), kiln_tensor::Device::Metal(_))
+        || !matches!(a.device(), kiln_tensor::Device::Metal(_))
+        || !matches!(b.device(), kiln_tensor::Device::Metal(_))
     {
         return false;
     }
@@ -8152,12 +8040,12 @@ pub(crate) fn metal_lora_add_decode_supports(
 }
 
 pub(crate) fn metal_lora_add_decode_bf16(
-    base: &candle_core::Tensor,
-    x: &candle_core::Tensor,
-    a: &candle_core::Tensor,
-    b: &candle_core::Tensor,
+    base: &kiln_tensor::Tensor,
+    x: &kiln_tensor::Tensor,
+    a: &kiln_tensor::Tensor,
+    b: &kiln_tensor::Tensor,
     scale: f32,
-) -> Result<candle_core::Tensor> {
+) -> Result<kiln_tensor::Tensor> {
     anyhow::ensure!(
         metal_lora_add_decode_supports(base, x, a, b),
         "metal LoRA decode add supports only contiguous BF16 Metal base/x/A/B decode tensors"
@@ -8166,42 +8054,28 @@ pub(crate) fn metal_lora_add_decode_bf16(
     let (_, _, output_dim) = base.dims3()?;
     let (rank, _) = a.dims2()?;
 
-    let hidden = unsafe { candle_core::Tensor::empty((batch, rank), candle_core::DType::BF16, x.device())? };
-    let out = unsafe { candle_core::Tensor::empty((batch, 1usize, output_dim), candle_core::DType::BF16, base.device())? };
+    let x_metal = kt_metal(&x)?;
+    let base_metal = kt_metal(&base)?;
+    let hidden = kt_metal_alloc(x_metal, kiln_tensor::DType::BF16, &[batch, rank])?;
+    let out = kt_metal_alloc(base_metal, kiln_tensor::DType::BF16, &[batch, 1usize, output_dim])?;
 
-    let candle_core::Device::Metal(device) = x.device() else {
-        anyhow::bail!("metal LoRA decode add requires Metal tensors");
-    };
-    let encoder = device.command_encoder()?;
+    let companion = x_metal.companion()?;
+    let encoder = companion.command_encoder()?;
 
     {
-        let pipeline = metal_lora_hidden_decode_pipeline(device)?;
+        let pipeline = metal_lora_hidden_decode_pipeline(&*companion)?;
         encoder.set_label("kiln_lora_hidden_decode_bf16");
         encoder.set_compute_pipeline_state(&pipeline);
 
-        let (x_storage, x_layout) = x.storage_and_layout();
-        let (a_storage, a_layout) = a.storage_and_layout();
-        let (hidden_storage, hidden_layout) = hidden.storage_and_layout();
+        let a_metal = kt_metal(&a)?;
+        let hidden_metal = kt_metal(&hidden)?;
 
-        let x_metal = match &*x_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal LoRA hidden x must be on Metal"),
-        };
-        let a_metal = match &*a_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal LoRA hidden A must be on Metal"),
-        };
-        let hidden_metal = match &*hidden_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal LoRA hidden output must be on Metal"),
-        };
-
-        let x_buf = buffer_o_kt(x_metal.buffer(), &kt_layout_from_candle(x_layout), kt_dtype_from_candle(x.dtype()));
-        let a_buf = buffer_o_kt(a_metal.buffer(), &kt_layout_from_candle(a_layout), kt_dtype_from_candle(a.dtype()));
+        let x_buf = buffer_o_kt(x_metal.buffer().as_ref(), x.layout(), x.dtype());
+        let a_buf = buffer_o_kt(a_metal.buffer().as_ref(), a.layout(), a.dtype());
         let hidden_buf = buffer_o_kt(
-            hidden_metal.buffer(),
-            &kt_layout_from_candle(hidden_layout),
-            kt_dtype_from_candle(hidden.dtype()),
+            hidden_metal.buffer().as_ref(),
+            hidden.layout(),
+            hidden.dtype(),
         );
 
         encoder.set_buffer(0, Some(x_buf.buffer), x_buf.offset_in_bytes);
@@ -8229,42 +8103,25 @@ pub(crate) fn metal_lora_add_decode_bf16(
     }
 
     {
-        let pipeline = metal_lora_add_decode_pipeline(device)?;
+        let pipeline = metal_lora_add_decode_pipeline(&*companion)?;
         encoder.set_label("kiln_lora_add_decode_bf16");
         encoder.set_compute_pipeline_state(&pipeline);
 
-        let (hidden_storage, hidden_layout) = hidden.storage_and_layout();
-        let (b_storage, b_layout) = b.storage_and_layout();
-        let (base_storage, base_layout) = base.storage_and_layout();
-        let (out_storage, out_layout) = out.storage_and_layout();
-
-        let hidden_metal = match &*hidden_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal LoRA add hidden must be on Metal"),
-        };
-        let b_metal = match &*b_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal LoRA add B must be on Metal"),
-        };
-        let base_metal = match &*base_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal LoRA add base must be on Metal"),
-        };
-        let out_metal = match &*out_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal LoRA add output must be on Metal"),
-        };
+        let hidden_metal = kt_metal(&hidden)?;
+        let b_metal = kt_metal(&b)?;
+        let base_metal = kt_metal(&base)?;
+        let out_metal = kt_metal(&out)?;
 
         let hidden_buf = buffer_o_kt(
-            hidden_metal.buffer(),
-            &kt_layout_from_candle(hidden_layout),
-            kt_dtype_from_candle(hidden.dtype()),
+            hidden_metal.buffer().as_ref(),
+            hidden.layout(),
+            hidden.dtype(),
         );
-        let b_buf = buffer_o_kt(b_metal.buffer(), &kt_layout_from_candle(b_layout), kt_dtype_from_candle(b.dtype()));
+        let b_buf = buffer_o_kt(b_metal.buffer().as_ref(), b.layout(), b.dtype());
         let base_buf =
-            buffer_o_kt(base_metal.buffer(), &kt_layout_from_candle(base_layout), kt_dtype_from_candle(base.dtype()));
+            buffer_o_kt(base_metal.buffer().as_ref(), base.layout(), base.dtype());
         let out_buf =
-            buffer_o_kt(out_metal.buffer(), &kt_layout_from_candle(out_layout), kt_dtype_from_candle(out.dtype()));
+            buffer_o_kt(out_metal.buffer().as_ref(), out.layout(), out.dtype());
 
         encoder.set_buffer(0, Some(hidden_buf.buffer), hidden_buf.offset_in_bytes);
         encoder.set_buffer(1, Some(b_buf.buffer), b_buf.offset_in_bytes);
@@ -8592,13 +8449,13 @@ fn metal_gdn_in_proj_decode_bf16(
 }
 
 pub(crate) fn metal_rotary_embedding_bf16(
-    q: &candle_core::Tensor,
-    k: &candle_core::Tensor,
-    cos: &candle_core::Tensor,
-    sin: &candle_core::Tensor,
+    q: &kiln_tensor::Tensor,
+    k: &kiln_tensor::Tensor,
+    cos: &kiln_tensor::Tensor,
+    sin: &kiln_tensor::Tensor,
     head_dim: usize,
     rotary_dim: usize,
-) -> Result<(candle_core::Tensor, candle_core::Tensor)> {
+) -> Result<(kiln_tensor::Tensor, kiln_tensor::Tensor)> {
     anyhow::ensure!(
         metal_rotary_embedding_supports(q, k, cos, sin, head_dim, rotary_dim),
         "metal rotary qk unsupported shape"
@@ -8610,84 +8467,57 @@ pub(crate) fn metal_rotary_embedding_bf16(
             .context("metal rotary qk unsupported position table shape")?;
     let q_shape = q.dims().to_vec();
     let k_shape = k.dims().to_vec();
+    let q_metal = kt_metal(&q)?;
+    let k_metal = kt_metal(&k)?;
     // SAFETY: the kernel dispatch writes every Q output element exactly once.
-    let q_out = unsafe { candle_core::Tensor::empty(q_shape.as_slice(), candle_core::DType::BF16, q.device())? };
+    let q_out = kt_metal_alloc(q_metal, kiln_tensor::DType::BF16, q_shape.as_slice())?;
     // SAFETY: the kernel dispatch writes every K output element exactly once.
-    let k_out = unsafe { candle_core::Tensor::empty(k_shape.as_slice(), candle_core::DType::BF16, k.device())? };
+    let k_out = kt_metal_alloc(k_metal, kiln_tensor::DType::BF16, k_shape.as_slice())?;
 
-    let candle_core::Device::Metal(device) = q.device() else {
-        anyhow::bail!("metal rotary qk requires Metal tensors");
-    };
-    let pipeline = metal_rotary_qk_pipeline(device)?;
-    let encoder = device.command_encoder()?;
+    let companion = q_metal.companion()?;
+    let pipeline = metal_rotary_qk_pipeline(&*companion)?;
+    let encoder = companion.command_encoder()?;
     encoder.set_label("kiln_rotary_qk_bf16");
     encoder.set_compute_pipeline_state(&pipeline);
 
     {
-        let (q_storage, q_layout) = q.storage_and_layout();
-        let (k_storage, k_layout) = k.storage_and_layout();
-        let (c_storage, c_layout) = cos.storage_and_layout();
-        let (s_storage, s_layout) = sin.storage_and_layout();
-        let (qo_storage, qo_layout) = q_out.storage_and_layout();
-        let (ko_storage, ko_layout) = k_out.storage_and_layout();
-
-        let q_metal = match &*q_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal rotary q must be on Metal"),
-        };
-        let k_metal = match &*k_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal rotary k must be on Metal"),
-        };
-        let cos_metal = match &*c_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal rotary cos must be on Metal"),
-        };
-        let sin_metal = match &*s_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal rotary sin must be on Metal"),
-        };
-        let q_out_metal = match &*qo_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal rotary q_out must be on Metal"),
-        };
-        let k_out_metal = match &*ko_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal rotary k_out must be on Metal"),
-        };
+        let cos_metal = kt_metal(&cos)?;
+        let sin_metal = kt_metal(&sin)?;
+        let q_out_metal = kt_metal(&q_out)?;
+        let k_out_metal = kt_metal(&k_out)?;
 
         // #1082 Step 4 embedding-family: `buffer_o` → `buffer_o_kt`.
         // The kt-typed helper reads `start_offset()` + `size_in_bytes()`
         // off the kt Layout/DType; everything else is bit-identical.
         let q_buf = buffer_o_kt(
-            q_metal.buffer(),
-            &kt_layout_from_candle(q_layout),
-            kt_dtype_from_candle(q.dtype()),
+            q_metal.buffer().as_ref(),
+            q.layout(),
+            q.dtype(),
         );
         let k_buf = buffer_o_kt(
-            k_metal.buffer(),
-            &kt_layout_from_candle(k_layout),
-            kt_dtype_from_candle(k.dtype()),
+            k_metal.buffer().as_ref(),
+            k.layout(),
+            k.dtype(),
         );
         let cos_buf = buffer_o_kt(
-            cos_metal.buffer(),
-            &kt_layout_from_candle(c_layout),
-            kt_dtype_from_candle(cos.dtype()),
+            cos_metal.buffer().as_ref(),
+            cos.layout(),
+            cos.dtype(),
         );
         let sin_buf = buffer_o_kt(
-            sin_metal.buffer(),
-            &kt_layout_from_candle(s_layout),
-            kt_dtype_from_candle(sin.dtype()),
+            sin_metal.buffer().as_ref(),
+            sin.layout(),
+            sin.dtype(),
         );
         let q_out_buf = buffer_o_kt(
-            q_out_metal.buffer(),
-            &kt_layout_from_candle(qo_layout),
-            kt_dtype_from_candle(q_out.dtype()),
+            q_out_metal.buffer().as_ref(),
+            q_out.layout(),
+            q_out.dtype(),
         );
         let k_out_buf = buffer_o_kt(
-            k_out_metal.buffer(),
-            &kt_layout_from_candle(ko_layout),
-            kt_dtype_from_candle(k_out.dtype()),
+            k_out_metal.buffer().as_ref(),
+            k_out.layout(),
+            k_out.dtype(),
         );
 
         encoder.set_buffer(0, Some(q_buf.buffer), q_buf.offset_in_bytes);
@@ -9951,7 +9781,7 @@ pub(crate) fn metal_paged_kv_write_token_major_batch_bf16(
     Ok(())
 }
 
-pub(crate) fn metal_rms_norm_bf16(x: &candle_core::Tensor, weight: &candle_core::Tensor, eps: f32) -> Result<candle_core::Tensor> {
+pub(crate) fn metal_rms_norm_bf16(x: &kiln_tensor::Tensor, weight: &kiln_tensor::Tensor, eps: f32) -> Result<kiln_tensor::Tensor> {
     let x_dims = x.dims().to_vec();
     let hidden = *x_dims
         .last()
@@ -9965,57 +9795,30 @@ pub(crate) fn metal_rms_norm_bf16(x: &candle_core::Tensor, weight: &candle_core:
 
     let x = x.contiguous()?;
     let weight = weight.contiguous()?;
+
+    let x_metal = kt_metal(&x)?;
     // The kernel writes every hidden element for every row.
-    let out = unsafe { candle_core::Tensor::empty(x_dims.as_slice(), candle_core::DType::BF16, x.device())? };
+    let out = kt_metal_alloc(x_metal, kiln_tensor::DType::BF16, &x_dims)?;
 
     if rows == 0 {
         return Ok(out);
     }
 
-    let candle_core::Device::Metal(device) = x.device() else {
-        anyhow::bail!("metal rmsnorm requires a Metal tensor");
-    };
-    let pipeline = metal_rms_norm_pipeline(device)?;
-    let encoder = device.command_encoder()?;
+    let companion = x_metal.companion()?;
+    let pipeline = metal_rms_norm_pipeline(&*companion)?;
+    let encoder = companion.command_encoder()?;
     encoder.set_label("kiln_rmsnorm_bf16");
     encoder.set_compute_pipeline_state(&pipeline);
 
     {
-        let (x_storage, x_layout) = x.storage_and_layout();
-        let (w_storage, w_layout) = weight.storage_and_layout();
-        let (o_storage, o_layout) = out.storage_and_layout();
+        let w_metal = kt_metal(&weight)?;
+        let out_metal = kt_metal(&out)?;
 
-        let x_metal = match &*x_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal rmsnorm x must be on Metal"),
-        };
-        let w_metal = match &*w_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal rmsnorm weight must be on Metal"),
-        };
-        let out_metal = match &*o_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal rmsnorm out must be on Metal"),
-        };
-
-        // #1082 Step 4 rmsnorm-family: `buffer_o` → `buffer_o_kt`.
-        // The kt-typed helper reads `start_offset()` + `size_in_bytes()`
-        // off the kt Layout/DType; everything else is bit-identical.
-        let x_buf = buffer_o_kt(
-            x_metal.buffer(),
-            &kt_layout_from_candle(x_layout),
-            kt_dtype_from_candle(x.dtype()),
-        );
-        let w_buf = buffer_o_kt(
-            w_metal.buffer(),
-            &kt_layout_from_candle(w_layout),
-            kt_dtype_from_candle(weight.dtype()),
-        );
-        let out_buf = buffer_o_kt(
-            out_metal.buffer(),
-            &kt_layout_from_candle(o_layout),
-            kt_dtype_from_candle(out.dtype()),
-        );
+        // #1082 candle-free: buffers + layout + dtype come straight off the
+        // kt MetalStorage / kt Tensor — no candle storage_and_layout bridge.
+        let x_buf = buffer_o_kt(x_metal.buffer().as_ref(), x.layout(), x.dtype());
+        let w_buf = buffer_o_kt(w_metal.buffer().as_ref(), weight.layout(), weight.dtype());
+        let out_buf = buffer_o_kt(out_metal.buffer().as_ref(), out.layout(), out.dtype());
 
         encoder.set_buffer(0, Some(x_buf.buffer), x_buf.offset_in_bytes);
         encoder.set_buffer(1, Some(w_buf.buffer), w_buf.offset_in_bytes);
@@ -10047,11 +9850,11 @@ pub(crate) fn metal_rms_norm_bf16(x: &candle_core::Tensor, weight: &candle_core:
 }
 
 pub(crate) fn metal_gdn_qk_norm_f32_bf16(
-    q: &candle_core::Tensor,
-    k: &candle_core::Tensor,
+    q: &kiln_tensor::Tensor,
+    k: &kiln_tensor::Tensor,
     q_scale: f32,
     eps: f32,
-) -> Result<(candle_core::Tensor, candle_core::Tensor)> {
+) -> Result<(kiln_tensor::Tensor, kiln_tensor::Tensor)> {
     let dims = q.dims().to_vec();
     let hidden = *dims
         .last()
@@ -10067,64 +9870,45 @@ pub(crate) fn metal_gdn_qk_norm_f32_bf16(
     let q = q.contiguous()?;
     let k = k.contiguous()?;
     // The kernel writes every Q/K element for every row.
-    let q_out = unsafe { candle_core::Tensor::empty(dims.as_slice(), candle_core::DType::BF16, q.device())? };
-    let k_out = unsafe { candle_core::Tensor::empty(dims.as_slice(), candle_core::DType::BF16, q.device())? };
+    let q_metal = kt_metal(&q)?;
+    let q_out = kt_metal_alloc(q_metal, kiln_tensor::DType::BF16, dims.as_slice())?;
+    let k_out = kt_metal_alloc(q_metal, kiln_tensor::DType::BF16, dims.as_slice())?;
 
     if rows == 0 {
         return Ok((q_out, k_out));
     }
 
-    let candle_core::Device::Metal(device) = q.device() else {
-        anyhow::bail!("metal gdn qk norm requires Metal tensors");
-    };
-    let pipeline = metal_gdn_qk_norm_pipeline(device)?;
-    let encoder = device.command_encoder()?;
+    let companion = q_metal.companion()?;
+    let pipeline = metal_gdn_qk_norm_pipeline(&*companion)?;
+    let encoder = companion.command_encoder()?;
     encoder.set_label("kiln_gdn_qk_norm_f32_bf16");
     encoder.set_compute_pipeline_state(&pipeline);
 
     {
-        let (q_storage, q_layout) = q.storage_and_layout();
-        let (k_storage, k_layout) = k.storage_and_layout();
-        let (qo_storage, qo_layout) = q_out.storage_and_layout();
-        let (ko_storage, ko_layout) = k_out.storage_and_layout();
-
-        let q_metal = match &*q_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal gdn qk norm q must be on Metal"),
-        };
-        let k_metal = match &*k_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal gdn qk norm k must be on Metal"),
-        };
-        let qo_metal = match &*qo_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal gdn qk norm q_out must be on Metal"),
-        };
-        let ko_metal = match &*ko_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal gdn qk norm k_out must be on Metal"),
-        };
+        let k_metal = kt_metal(&k)?;
+        let qo_metal = kt_metal(&q_out)?;
+        let ko_metal = kt_metal(&k_out)?;
 
         // #1082 Step 4 rmsnorm-family: `buffer_o` → `buffer_o_kt`.
         let q_buf = buffer_o_kt(
-            q_metal.buffer(),
-            &kt_layout_from_candle(q_layout),
-            kt_dtype_from_candle(q.dtype()),
+            q_metal.buffer().as_ref(),
+            q.layout(),
+            q.dtype(),
         );
         let k_buf = buffer_o_kt(
-            k_metal.buffer(),
-            &kt_layout_from_candle(k_layout),
-            kt_dtype_from_candle(k.dtype()),
+            k_metal.buffer().as_ref(),
+            k.layout(),
+            k.dtype(),
         );
         let qo_buf = buffer_o_kt(
-            qo_metal.buffer(),
-            &kt_layout_from_candle(qo_layout),
-            kt_dtype_from_candle(q_out.dtype()),
+            qo_metal.buffer().as_ref(),
+            q_out.layout(),
+            q_out.dtype(),
         );
         let ko_buf = buffer_o_kt(
-            ko_metal.buffer(),
-            &kt_layout_from_candle(ko_layout),
-            kt_dtype_from_candle(k_out.dtype()),
+            ko_metal.buffer().as_ref(),
+            k_out.layout(),
+            k_out.dtype(),
         );
 
         encoder.set_buffer(0, Some(q_buf.buffer), q_buf.offset_in_bytes);
@@ -10159,12 +9943,12 @@ pub(crate) fn metal_gdn_qk_norm_f32_bf16(
 }
 
 pub(crate) fn metal_gdn_qk_norm_gqa_f32_bf16(
-    q: &candle_core::Tensor,
-    k: &candle_core::Tensor,
+    q: &kiln_tensor::Tensor,
+    k: &kiln_tensor::Tensor,
     nv: usize,
     q_scale: f32,
     eps: f32,
-) -> Result<(candle_core::Tensor, candle_core::Tensor)> {
+) -> Result<(kiln_tensor::Tensor, kiln_tensor::Tensor)> {
     anyhow::ensure!(
         metal_gdn_qk_norm_gqa_supports(q, k, nv),
         "metal gdn qk norm gqa unsupported shape"
@@ -10183,64 +9967,45 @@ pub(crate) fn metal_gdn_qk_norm_gqa_f32_bf16(
     let q = q.contiguous()?;
     let k = k.contiguous()?;
     // Each source head writes all replicated value-head outputs.
-    let q_out = unsafe { candle_core::Tensor::empty((batch, seq_len, nv, hidden), candle_core::DType::BF16, q.device())? };
-    let k_out = unsafe { candle_core::Tensor::empty((batch, seq_len, nv, hidden), candle_core::DType::BF16, q.device())? };
+    let q_metal = kt_metal(&q)?;
+    let q_out = kt_metal_alloc(q_metal, kiln_tensor::DType::BF16, &[batch, seq_len, nv, hidden])?;
+    let k_out = kt_metal_alloc(q_metal, kiln_tensor::DType::BF16, &[batch, seq_len, nv, hidden])?;
 
     if rows == 0 {
         return Ok((q_out, k_out));
     }
 
-    let candle_core::Device::Metal(device) = q.device() else {
-        anyhow::bail!("metal gdn qk norm gqa requires Metal tensors");
-    };
-    let pipeline = metal_gdn_qk_norm_gqa_pipeline(device)?;
-    let encoder = device.command_encoder()?;
+    let companion = q_metal.companion()?;
+    let pipeline = metal_gdn_qk_norm_gqa_pipeline(&*companion)?;
+    let encoder = companion.command_encoder()?;
     encoder.set_label("kiln_gdn_qk_norm_gqa_f32_bf16");
     encoder.set_compute_pipeline_state(&pipeline);
 
     {
-        let (q_storage, q_layout) = q.storage_and_layout();
-        let (k_storage, k_layout) = k.storage_and_layout();
-        let (qo_storage, qo_layout) = q_out.storage_and_layout();
-        let (ko_storage, ko_layout) = k_out.storage_and_layout();
-
-        let q_metal = match &*q_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal gdn qk norm gqa q must be on Metal"),
-        };
-        let k_metal = match &*k_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal gdn qk norm gqa k must be on Metal"),
-        };
-        let qo_metal = match &*qo_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal gdn qk norm gqa q_out must be on Metal"),
-        };
-        let ko_metal = match &*ko_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal gdn qk norm gqa k_out must be on Metal"),
-        };
+        let k_metal = kt_metal(&k)?;
+        let qo_metal = kt_metal(&q_out)?;
+        let ko_metal = kt_metal(&k_out)?;
 
         // #1082 Step 4 rmsnorm-family: `buffer_o` → `buffer_o_kt`.
         let q_buf = buffer_o_kt(
-            q_metal.buffer(),
-            &kt_layout_from_candle(q_layout),
-            kt_dtype_from_candle(q.dtype()),
+            q_metal.buffer().as_ref(),
+            q.layout(),
+            q.dtype(),
         );
         let k_buf = buffer_o_kt(
-            k_metal.buffer(),
-            &kt_layout_from_candle(k_layout),
-            kt_dtype_from_candle(k.dtype()),
+            k_metal.buffer().as_ref(),
+            k.layout(),
+            k.dtype(),
         );
         let qo_buf = buffer_o_kt(
-            qo_metal.buffer(),
-            &kt_layout_from_candle(qo_layout),
-            kt_dtype_from_candle(q_out.dtype()),
+            qo_metal.buffer().as_ref(),
+            q_out.layout(),
+            q_out.dtype(),
         );
         let ko_buf = buffer_o_kt(
-            ko_metal.buffer(),
-            &kt_layout_from_candle(ko_layout),
-            kt_dtype_from_candle(k_out.dtype()),
+            ko_metal.buffer().as_ref(),
+            k_out.layout(),
+            k_out.dtype(),
         );
 
         encoder.set_buffer(0, Some(q_buf.buffer), q_buf.offset_in_bytes);
@@ -10282,9 +10047,9 @@ pub(crate) fn metal_gdn_qk_norm_gqa_f32_bf16(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn metal_gdn_decode_qkv_conv_norm_bf16(
-    mixed_qkv: &candle_core::Tensor,
-    weight: &candle_core::Tensor,
-    conv_state: &mut candle_core::Tensor,
+    mixed_qkv: &kiln_tensor::Tensor,
+    weight: &kiln_tensor::Tensor,
+    conv_state: &mut kiln_tensor::Tensor,
     kernel_size: usize,
     nk: usize,
     dk: usize,
@@ -10292,7 +10057,7 @@ pub(crate) fn metal_gdn_decode_qkv_conv_norm_bf16(
     dv: usize,
     q_scale: f32,
     eps: f32,
-) -> Result<(candle_core::Tensor, candle_core::Tensor, candle_core::Tensor)> {
+) -> Result<(kiln_tensor::Tensor, kiln_tensor::Tensor, kiln_tensor::Tensor)> {
     anyhow::ensure!(
         metal_gdn_decode_qkv_conv_norm_supports(
             mixed_qkv,
@@ -10327,81 +10092,55 @@ pub(crate) fn metal_gdn_decode_qkv_conv_norm_bf16(
 
     // The kernel writes every unexpanded Q/K and V element, and updates each
     // convolution state channel exactly once.
-    let q_out = unsafe { candle_core::Tensor::empty((batch, 1usize, nk, dk), candle_core::DType::BF16, mixed_qkv.device())? };
-    let k_out = unsafe { candle_core::Tensor::empty((batch, 1usize, nk, dk), candle_core::DType::BF16, mixed_qkv.device())? };
-    let v_out = unsafe { candle_core::Tensor::empty((batch, 1usize, nv, dv), candle_core::DType::BF16, mixed_qkv.device())? };
+    let mixed_qkv_metal = kt_metal(&mixed_qkv)?;
+    let q_out = kt_metal_alloc(mixed_qkv_metal, kiln_tensor::DType::BF16, &[batch, 1usize, nk, dk])?;
+    let k_out = kt_metal_alloc(mixed_qkv_metal, kiln_tensor::DType::BF16, &[batch, 1usize, nk, dk])?;
+    let v_out = kt_metal_alloc(mixed_qkv_metal, kiln_tensor::DType::BF16, &[batch, 1usize, nv, dv])?;
 
-    let candle_core::Device::Metal(device) = mixed_qkv.device() else {
-        anyhow::bail!("metal gdn decode qkv conv/norm requires Metal tensors");
-    };
-    let pipeline = metal_gdn_decode_qkv_conv_norm_pipeline(device)?;
-    let encoder = device.command_encoder()?;
+    let companion = mixed_qkv_metal.companion()?;
+    let pipeline = metal_gdn_decode_qkv_conv_norm_pipeline(&*companion)?;
+    let encoder = companion.command_encoder()?;
     encoder.set_label("kiln_gdn_decode_qkv_conv_norm_bf16");
     encoder.set_compute_pipeline_state(&pipeline);
 
     {
-        let (x_storage, x_layout) = mixed_qkv.storage_and_layout();
-        let (w_storage, w_layout) = weight.storage_and_layout();
-        let (s_storage, s_layout) = conv_state.storage_and_layout();
-        let (qo_storage, qo_layout) = q_out.storage_and_layout();
-        let (ko_storage, ko_layout) = k_out.storage_and_layout();
-        let (vo_storage, vo_layout) = v_out.storage_and_layout();
-
-        let x_metal = match &*x_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal gdn decode qkv conv/norm mixed_qkv must be on Metal"),
-        };
-        let w_metal = match &*w_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal gdn decode qkv conv/norm weight must be on Metal"),
-        };
-        let s_metal = match &*s_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal gdn decode qkv conv/norm state must be on Metal"),
-        };
-        let qo_metal = match &*qo_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal gdn decode qkv conv/norm q_out must be on Metal"),
-        };
-        let ko_metal = match &*ko_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal gdn decode qkv conv/norm k_out must be on Metal"),
-        };
-        let vo_metal = match &*vo_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal gdn decode qkv conv/norm v_out must be on Metal"),
-        };
+        let x_metal = kt_metal(&mixed_qkv)?;
+        let w_metal = kt_metal(&weight)?;
+        let s_metal = kt_metal(&conv_state)?;
+        let qo_metal = kt_metal(&q_out)?;
+        let ko_metal = kt_metal(&k_out)?;
+        let vo_metal = kt_metal(&v_out)?;
 
         // #1082 Step 4 gdn-family: `buffer_o` → `buffer_o_kt`.
         let x_buf = buffer_o_kt(
-            x_metal.buffer(),
-            &kt_layout_from_candle(x_layout),
-            kt_dtype_from_candle(mixed_qkv.dtype()),
+            x_metal.buffer().as_ref(),
+            mixed_qkv.layout(),
+            mixed_qkv.dtype(),
         );
         let w_buf = buffer_o_kt(
-            w_metal.buffer(),
-            &kt_layout_from_candle(w_layout),
-            kt_dtype_from_candle(weight.dtype()),
+            w_metal.buffer().as_ref(),
+            weight.layout(),
+            weight.dtype(),
         );
         let s_buf = buffer_o_kt(
-            s_metal.buffer(),
-            &kt_layout_from_candle(s_layout),
-            kt_dtype_from_candle(conv_state.dtype()),
+            s_metal.buffer().as_ref(),
+            conv_state.layout(),
+            conv_state.dtype(),
         );
         let qo_buf = buffer_o_kt(
-            qo_metal.buffer(),
-            &kt_layout_from_candle(qo_layout),
-            kt_dtype_from_candle(q_out.dtype()),
+            qo_metal.buffer().as_ref(),
+            q_out.layout(),
+            q_out.dtype(),
         );
         let ko_buf = buffer_o_kt(
-            ko_metal.buffer(),
-            &kt_layout_from_candle(ko_layout),
-            kt_dtype_from_candle(k_out.dtype()),
+            ko_metal.buffer().as_ref(),
+            k_out.layout(),
+            k_out.dtype(),
         );
         let vo_buf = buffer_o_kt(
-            vo_metal.buffer(),
-            &kt_layout_from_candle(vo_layout),
-            kt_dtype_from_candle(v_out.dtype()),
+            vo_metal.buffer().as_ref(),
+            v_out.layout(),
+            v_out.dtype(),
         );
 
         encoder.set_buffer(0, Some(x_buf.buffer), x_buf.offset_in_bytes);
@@ -10723,15 +10462,15 @@ kernel void kiln_gdn_decode_gates_recurrent_rmsnorm_bf16(
 "#;
 
 fn metal_gdn_gates_pipeline(
-    device: &MetalDevice,
+    device: &dyn MetalPipelineHost,
 ) -> Result<ComputePipeline> {
 
-    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    static PIPELINES: OnceLock<Mutex<HashMap<u64, ComputePipeline>>> = OnceLock::new();
     let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache
         .lock()
         .map_err(|_| anyhow::anyhow!("metal gdn_gates pipeline cache poisoned"))?;
-    if let Some(pipeline) = cache.get(&device.id()) {
+    if let Some(pipeline) = cache.get(&device.pipeline_cache_key()) {
         return Ok(pipeline.clone());
     }
 
@@ -10740,23 +10479,23 @@ fn metal_gdn_gates_pipeline(
         .get_function("kiln_gdn_gates_bf16", None)
         .map_err(|e| anyhow::anyhow!("load metal gdn_gates function: {e:?}"))?;
     let pipeline = device
-        .device()
+        .pipeline_raw_device()
         .new_compute_pipeline_state_with_function(&function)
         .map_err(|e| anyhow::anyhow!("build metal gdn_gates pipeline: {e:?}"))?;
-    cache.insert(device.id(), pipeline.clone());
+    cache.insert(device.pipeline_cache_key(), pipeline.clone());
     Ok(pipeline)
 }
 
 fn metal_gdn_gates_decay_pipeline(
-    device: &MetalDevice,
+    device: &dyn MetalPipelineHost,
 ) -> Result<ComputePipeline> {
 
-    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    static PIPELINES: OnceLock<Mutex<HashMap<u64, ComputePipeline>>> = OnceLock::new();
     let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache
         .lock()
         .map_err(|_| anyhow::anyhow!("metal gdn_gates decay pipeline cache poisoned"))?;
-    if let Some(pipeline) = cache.get(&device.id()) {
+    if let Some(pipeline) = cache.get(&device.pipeline_cache_key()) {
         return Ok(pipeline.clone());
     }
 
@@ -10765,23 +10504,23 @@ fn metal_gdn_gates_decay_pipeline(
         .get_function("kiln_gdn_gates_decay_bf16", None)
         .map_err(|e| anyhow::anyhow!("load metal gdn_gates decay function: {e:?}"))?;
     let pipeline = device
-        .device()
+        .pipeline_raw_device()
         .new_compute_pipeline_state_with_function(&function)
         .map_err(|e| anyhow::anyhow!("build metal gdn_gates decay pipeline: {e:?}"))?;
-    cache.insert(device.id(), pipeline.clone());
+    cache.insert(device.pipeline_cache_key(), pipeline.clone());
     Ok(pipeline)
 }
 
 fn metal_gdn_gates_decay_ab_pipeline(
-    device: &MetalDevice,
+    device: &dyn MetalPipelineHost,
 ) -> Result<ComputePipeline> {
 
-    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    static PIPELINES: OnceLock<Mutex<HashMap<u64, ComputePipeline>>> = OnceLock::new();
     let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache
         .lock()
         .map_err(|_| anyhow::anyhow!("metal gdn_gates decay A/B pipeline cache poisoned"))?;
-    if let Some(pipeline) = cache.get(&device.id()) {
+    if let Some(pipeline) = cache.get(&device.pipeline_cache_key()) {
         return Ok(pipeline.clone());
     }
 
@@ -10790,23 +10529,23 @@ fn metal_gdn_gates_decay_ab_pipeline(
         .get_function("kiln_gdn_gates_decay_ab_bf16", None)
         .map_err(|e| anyhow::anyhow!("load metal gdn_gates decay A/B function: {e:?}"))?;
     let pipeline = device
-        .device()
+        .pipeline_raw_device()
         .new_compute_pipeline_state_with_function(&function)
         .map_err(|e| anyhow::anyhow!("build metal gdn_gates decay A/B pipeline: {e:?}"))?;
-    cache.insert(device.id(), pipeline.clone());
+    cache.insert(device.pipeline_cache_key(), pipeline.clone());
     Ok(pipeline)
 }
 
 fn metal_gdn_decode_gates_recurrent_pipeline(
-    device: &MetalDevice,
+    device: &dyn MetalPipelineHost,
 ) -> Result<ComputePipeline> {
 
-    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    static PIPELINES: OnceLock<Mutex<HashMap<u64, ComputePipeline>>> = OnceLock::new();
     let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache
         .lock()
         .map_err(|_| anyhow::anyhow!("metal gdn decode gates+recurrent pipeline cache poisoned"))?;
-    if let Some(pipeline) = cache.get(&device.id()) {
+    if let Some(pipeline) = cache.get(&device.pipeline_cache_key()) {
         return Ok(pipeline.clone());
     }
 
@@ -10815,23 +10554,23 @@ fn metal_gdn_decode_gates_recurrent_pipeline(
         .get_function("kiln_gdn_decode_gates_recurrent_bf16", None)
         .map_err(|e| anyhow::anyhow!("load metal gdn decode gates+recurrent function: {e:?}"))?;
     let pipeline = device
-        .device()
+        .pipeline_raw_device()
         .new_compute_pipeline_state_with_function(&function)
         .map_err(|e| anyhow::anyhow!("build metal gdn decode gates+recurrent pipeline: {e:?}"))?;
-    cache.insert(device.id(), pipeline.clone());
+    cache.insert(device.pipeline_cache_key(), pipeline.clone());
     Ok(pipeline)
 }
 
 fn metal_gdn_decode_gates_recurrent_rmsnorm_pipeline(
-    device: &MetalDevice,
+    device: &dyn MetalPipelineHost,
 ) -> Result<ComputePipeline> {
 
-    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    static PIPELINES: OnceLock<Mutex<HashMap<u64, ComputePipeline>>> = OnceLock::new();
     let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache.lock().map_err(|_| {
         anyhow::anyhow!("metal gdn decode gates+recurrent+rmsnorm pipeline cache poisoned")
     })?;
-    if let Some(pipeline) = cache.get(&device.id()) {
+    if let Some(pipeline) = cache.get(&device.pipeline_cache_key()) {
         return Ok(pipeline.clone());
     }
 
@@ -10842,21 +10581,21 @@ fn metal_gdn_decode_gates_recurrent_rmsnorm_pipeline(
             anyhow::anyhow!("load metal gdn decode gates+recurrent+rmsnorm function: {e:?}")
         })?;
     let pipeline = device
-        .device()
+        .pipeline_raw_device()
         .new_compute_pipeline_state_with_function(&function)
         .map_err(|e| {
             anyhow::anyhow!("build metal gdn decode gates+recurrent+rmsnorm pipeline: {e:?}")
         })?;
-    cache.insert(device.id(), pipeline.clone());
+    cache.insert(device.pipeline_cache_key(), pipeline.clone());
     Ok(pipeline)
 }
 
 fn metal_gdn_gates_bf16(
-    a: &candle_core::Tensor,
-    b: &candle_core::Tensor,
-    a_log: &candle_core::Tensor,
-    dt_bias: &candle_core::Tensor,
-) -> Result<(candle_core::Tensor, candle_core::Tensor)> {
+    a: &kiln_tensor::Tensor,
+    b: &kiln_tensor::Tensor,
+    a_log: &kiln_tensor::Tensor,
+    dt_bias: &kiln_tensor::Tensor,
+) -> Result<(kiln_tensor::Tensor, kiln_tensor::Tensor)> {
     let shape = a.dims().to_vec();
     let nv = *shape
         .last()
@@ -10872,81 +10611,54 @@ fn metal_gdn_gates_bf16(
     let b = b.contiguous()?;
     let a_log = a_log.contiguous()?;
     let dt_bias = dt_bias.contiguous()?;
+    let a_metal = kt_metal(&a)?;
     // The gates kernel writes every beta/g element.
-    let beta = unsafe { candle_core::Tensor::empty(shape.clone(), candle_core::DType::BF16, a.device())? };
-    let g = unsafe { candle_core::Tensor::empty(shape, candle_core::DType::BF16, a.device())? };
+    let beta = kt_metal_alloc(a_metal, kiln_tensor::DType::BF16, &shape)?;
+    let g = kt_metal_alloc(a_metal, kiln_tensor::DType::BF16, &shape)?;
 
-    let candle_core::Device::Metal(device) = a.device() else {
-        anyhow::bail!("metal gdn_gates requires a Metal tensor");
-    };
-    let pipeline = metal_gdn_gates_pipeline(device)?;
-    let encoder = device.command_encoder()?;
+    let companion = a_metal.companion()?;
+    let pipeline = metal_gdn_gates_pipeline(&*companion)?;
+    let encoder = companion.command_encoder()?;
     encoder.set_label("kiln_gdn_gates_bf16");
     encoder.set_compute_pipeline_state(&pipeline);
 
     {
-        let (a_storage, a_layout) = a.storage_and_layout();
-        let (b_storage, b_layout) = b.storage_and_layout();
-        let (al_storage, al_layout) = a_log.storage_and_layout();
-        let (dt_storage, dt_layout) = dt_bias.storage_and_layout();
-        let (beta_storage, beta_layout) = beta.storage_and_layout();
-        let (g_storage, g_layout) = g.storage_and_layout();
-
-        let a_metal = match &*a_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal gdn_gates a must be on Metal"),
-        };
-        let b_metal = match &*b_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal gdn_gates b must be on Metal"),
-        };
-        let al_metal = match &*al_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal gdn_gates a_log must be on Metal"),
-        };
-        let dt_metal = match &*dt_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal gdn_gates dt_bias must be on Metal"),
-        };
-        let beta_metal = match &*beta_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal gdn_gates beta output must be on Metal"),
-        };
-        let g_metal = match &*g_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal gdn_gates g output must be on Metal"),
-        };
+        let b_metal = kt_metal(&b)?;
+        let al_metal = kt_metal(&a_log)?;
+        let dt_metal = kt_metal(&dt_bias)?;
+        let beta_metal = kt_metal(&beta)?;
+        let g_metal = kt_metal(&g)?;
 
         // #1082 Step 4 gdn-family: `buffer_o` → `buffer_o_kt`.
         let a_buf = buffer_o_kt(
-            a_metal.buffer(),
-            &kt_layout_from_candle(a_layout),
-            kt_dtype_from_candle(a.dtype()),
+            a_metal.buffer().as_ref(),
+            a.layout(),
+            a.dtype(),
         );
         let b_buf = buffer_o_kt(
-            b_metal.buffer(),
-            &kt_layout_from_candle(b_layout),
-            kt_dtype_from_candle(b.dtype()),
+            b_metal.buffer().as_ref(),
+            b.layout(),
+            b.dtype(),
         );
         let al_buf = buffer_o_kt(
-            al_metal.buffer(),
-            &kt_layout_from_candle(al_layout),
-            kt_dtype_from_candle(a_log.dtype()),
+            al_metal.buffer().as_ref(),
+            a_log.layout(),
+            a_log.dtype(),
         );
         let dt_buf = buffer_o_kt(
-            dt_metal.buffer(),
-            &kt_layout_from_candle(dt_layout),
-            kt_dtype_from_candle(dt_bias.dtype()),
+            dt_metal.buffer().as_ref(),
+            dt_bias.layout(),
+            dt_bias.dtype(),
         );
         let beta_buf = buffer_o_kt(
-            beta_metal.buffer(),
-            &kt_layout_from_candle(beta_layout),
-            kt_dtype_from_candle(beta.dtype()),
+            beta_metal.buffer().as_ref(),
+            beta.layout(),
+            beta.dtype(),
         );
         let g_buf = buffer_o_kt(
-            g_metal.buffer(),
-            &kt_layout_from_candle(g_layout),
-            kt_dtype_from_candle(g.dtype()),
+            g_metal.buffer().as_ref(),
+            g.layout(),
+            g.dtype(),
         );
 
         encoder.set_buffer(0, Some(a_buf.buffer), a_buf.offset_in_bytes);
@@ -10978,10 +10690,10 @@ fn metal_gdn_gates_bf16(
 }
 
 pub(crate) fn metal_gdn_prefill_ab_in_proj_bf16(
-    x: &candle_core::Tensor,
-    in_proj_ab_t: &candle_core::Tensor,
+    x: &kiln_tensor::Tensor,
+    in_proj_ab_t: &kiln_tensor::Tensor,
     nv: usize,
-) -> Result<(candle_core::Tensor, candle_core::Tensor, candle_core::Tensor)> {
+) -> Result<(kiln_tensor::Tensor, kiln_tensor::Tensor, kiln_tensor::Tensor)> {
     anyhow::ensure!(
         metal_gdn_prefill_ab_in_proj_supports(x, in_proj_ab_t, nv),
         "metal gdn prefill A/B in-proj unsupported shape"
@@ -10995,11 +10707,11 @@ pub(crate) fn metal_gdn_prefill_ab_in_proj_bf16(
 }
 
 pub(crate) fn metal_gdn_gates_decay_bf16(
-    a: &candle_core::Tensor,
-    b: &candle_core::Tensor,
-    a_log: &candle_core::Tensor,
-    dt_bias: &candle_core::Tensor,
-) -> Result<(candle_core::Tensor, candle_core::Tensor)> {
+    a: &kiln_tensor::Tensor,
+    b: &kiln_tensor::Tensor,
+    a_log: &kiln_tensor::Tensor,
+    dt_bias: &kiln_tensor::Tensor,
+) -> Result<(kiln_tensor::Tensor, kiln_tensor::Tensor)> {
     anyhow::ensure!(
         metal_gdn_gates_decay_supports(a, b, a_log, dt_bias),
         "metal gdn_gates decay unsupported shape"
@@ -11022,80 +10734,53 @@ pub(crate) fn metal_gdn_gates_decay_bf16(
     let b = b.contiguous()?;
     let a_log = a_log.contiguous()?;
     let dt_bias = dt_bias.contiguous()?;
-    let beta = unsafe { candle_core::Tensor::empty(shape.clone(), candle_core::DType::BF16, a.device())? };
-    let decay = unsafe { candle_core::Tensor::empty(shape, candle_core::DType::BF16, a.device())? };
+    let a_metal = kt_metal(&a)?;
+    let beta = kt_metal_alloc(a_metal, kiln_tensor::DType::BF16, shape.as_slice())?;
+    let decay = kt_metal_alloc(a_metal, kiln_tensor::DType::BF16, shape.as_slice())?;
 
-    let candle_core::Device::Metal(device) = a.device() else {
-        anyhow::bail!("metal gdn_gates decay requires a Metal tensor");
-    };
-    let pipeline = metal_gdn_gates_decay_pipeline(device)?;
-    let encoder = device.command_encoder()?;
+    let companion = a_metal.companion()?;
+    let pipeline = metal_gdn_gates_decay_pipeline(&*companion)?;
+    let encoder = companion.command_encoder()?;
     encoder.set_label("kiln_gdn_gates_decay_bf16");
     encoder.set_compute_pipeline_state(&pipeline);
 
     {
-        let (a_storage, a_layout) = a.storage_and_layout();
-        let (b_storage, b_layout) = b.storage_and_layout();
-        let (al_storage, al_layout) = a_log.storage_and_layout();
-        let (dt_storage, dt_layout) = dt_bias.storage_and_layout();
-        let (beta_storage, beta_layout) = beta.storage_and_layout();
-        let (decay_storage, decay_layout) = decay.storage_and_layout();
-
-        let a_metal = match &*a_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal gdn_gates decay a must be on Metal"),
-        };
-        let b_metal = match &*b_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal gdn_gates decay b must be on Metal"),
-        };
-        let al_metal = match &*al_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal gdn_gates decay a_log must be on Metal"),
-        };
-        let dt_metal = match &*dt_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal gdn_gates decay dt_bias must be on Metal"),
-        };
-        let beta_metal = match &*beta_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal gdn_gates decay beta output must be on Metal"),
-        };
-        let decay_metal = match &*decay_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal gdn_gates decay output must be on Metal"),
-        };
+        let b_metal = kt_metal(&b)?;
+        let al_metal = kt_metal(&a_log)?;
+        let dt_metal = kt_metal(&dt_bias)?;
+        let beta_metal = kt_metal(&beta)?;
+        let decay_metal = kt_metal(&decay)?;
 
         // #1082 Step 4 gdn-family: `buffer_o` → `buffer_o_kt`.
         let a_buf = buffer_o_kt(
-            a_metal.buffer(),
-            &kt_layout_from_candle(a_layout),
-            kt_dtype_from_candle(a.dtype()),
+            a_metal.buffer().as_ref(),
+            a.layout(),
+            a.dtype(),
         );
         let b_buf = buffer_o_kt(
-            b_metal.buffer(),
-            &kt_layout_from_candle(b_layout),
-            kt_dtype_from_candle(b.dtype()),
+            b_metal.buffer().as_ref(),
+            b.layout(),
+            b.dtype(),
         );
         let al_buf = buffer_o_kt(
-            al_metal.buffer(),
-            &kt_layout_from_candle(al_layout),
-            kt_dtype_from_candle(a_log.dtype()),
+            al_metal.buffer().as_ref(),
+            a_log.layout(),
+            a_log.dtype(),
         );
         let dt_buf = buffer_o_kt(
-            dt_metal.buffer(),
-            &kt_layout_from_candle(dt_layout),
-            kt_dtype_from_candle(dt_bias.dtype()),
+            dt_metal.buffer().as_ref(),
+            dt_bias.layout(),
+            dt_bias.dtype(),
         );
         let beta_buf = buffer_o_kt(
-            beta_metal.buffer(),
-            &kt_layout_from_candle(beta_layout),
-            kt_dtype_from_candle(beta.dtype()),
+            beta_metal.buffer().as_ref(),
+            beta.layout(),
+            beta.dtype(),
         );
         let decay_buf = buffer_o_kt(
-            decay_metal.buffer(),
-            &kt_layout_from_candle(decay_layout),
-            kt_dtype_from_candle(decay.dtype()),
+            decay_metal.buffer().as_ref(),
+            decay.layout(),
+            decay.dtype(),
         );
 
         encoder.set_buffer(0, Some(a_buf.buffer), a_buf.offset_in_bytes);
@@ -11127,11 +10812,11 @@ pub(crate) fn metal_gdn_gates_decay_bf16(
 }
 
 pub(crate) fn metal_gdn_gates_decay_ab_bf16(
-    ab: &candle_core::Tensor,
-    a_log: &candle_core::Tensor,
-    dt_bias: &candle_core::Tensor,
+    ab: &kiln_tensor::Tensor,
+    a_log: &kiln_tensor::Tensor,
+    dt_bias: &kiln_tensor::Tensor,
     nv: usize,
-) -> Result<(candle_core::Tensor, candle_core::Tensor)> {
+) -> Result<(kiln_tensor::Tensor, kiln_tensor::Tensor)> {
     anyhow::ensure!(
         metal_gdn_gates_decay_ab_supports(ab, a_log, dt_bias, nv),
         "metal gdn_gates decay A/B unsupported shape"
@@ -11154,70 +10839,47 @@ pub(crate) fn metal_gdn_gates_decay_ab_bf16(
     let a_log = a_log.contiguous()?;
     let dt_bias = dt_bias.contiguous()?;
     let shape = vec![batch, seq_len, nv];
-    let beta = unsafe { candle_core::Tensor::empty(shape.clone(), candle_core::DType::BF16, ab.device())? };
-    let decay = unsafe { candle_core::Tensor::empty(shape, candle_core::DType::BF16, ab.device())? };
+    let ab_metal = kt_metal(&ab)?;
+    let beta = kt_metal_alloc(ab_metal, kiln_tensor::DType::BF16, shape.as_slice())?;
+    let decay = kt_metal_alloc(ab_metal, kiln_tensor::DType::BF16, shape.as_slice())?;
 
-    let candle_core::Device::Metal(device) = ab.device() else {
-        anyhow::bail!("metal gdn_gates decay A/B requires a Metal tensor");
-    };
-    let pipeline = metal_gdn_gates_decay_ab_pipeline(device)?;
-    let encoder = device.command_encoder()?;
+    let companion = ab_metal.companion()?;
+    let pipeline = metal_gdn_gates_decay_ab_pipeline(&*companion)?;
+    let encoder = companion.command_encoder()?;
     encoder.set_label("kiln_gdn_gates_decay_ab_bf16");
     encoder.set_compute_pipeline_state(&pipeline);
 
     {
-        let (ab_storage, ab_layout) = ab.storage_and_layout();
-        let (al_storage, al_layout) = a_log.storage_and_layout();
-        let (dt_storage, dt_layout) = dt_bias.storage_and_layout();
-        let (beta_storage, beta_layout) = beta.storage_and_layout();
-        let (decay_storage, decay_layout) = decay.storage_and_layout();
-
-        let ab_metal = match &*ab_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal gdn_gates decay A/B input must be on Metal"),
-        };
-        let al_metal = match &*al_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal gdn_gates decay A/B a_log must be on Metal"),
-        };
-        let dt_metal = match &*dt_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal gdn_gates decay A/B dt_bias must be on Metal"),
-        };
-        let beta_metal = match &*beta_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal gdn_gates decay A/B beta output must be on Metal"),
-        };
-        let decay_metal = match &*decay_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal gdn_gates decay A/B output must be on Metal"),
-        };
+        let al_metal = kt_metal(&a_log)?;
+        let dt_metal = kt_metal(&dt_bias)?;
+        let beta_metal = kt_metal(&beta)?;
+        let decay_metal = kt_metal(&decay)?;
 
         // #1082 Step 4 gdn-family: `buffer_o` → `buffer_o_kt`.
         let ab_buf = buffer_o_kt(
-            ab_metal.buffer(),
-            &kt_layout_from_candle(ab_layout),
-            kt_dtype_from_candle(ab.dtype()),
+            ab_metal.buffer().as_ref(),
+            ab.layout(),
+            ab.dtype(),
         );
         let al_buf = buffer_o_kt(
-            al_metal.buffer(),
-            &kt_layout_from_candle(al_layout),
-            kt_dtype_from_candle(a_log.dtype()),
+            al_metal.buffer().as_ref(),
+            a_log.layout(),
+            a_log.dtype(),
         );
         let dt_buf = buffer_o_kt(
-            dt_metal.buffer(),
-            &kt_layout_from_candle(dt_layout),
-            kt_dtype_from_candle(dt_bias.dtype()),
+            dt_metal.buffer().as_ref(),
+            dt_bias.layout(),
+            dt_bias.dtype(),
         );
         let beta_buf = buffer_o_kt(
-            beta_metal.buffer(),
-            &kt_layout_from_candle(beta_layout),
-            kt_dtype_from_candle(beta.dtype()),
+            beta_metal.buffer().as_ref(),
+            beta.layout(),
+            beta.dtype(),
         );
         let decay_buf = buffer_o_kt(
-            decay_metal.buffer(),
-            &kt_layout_from_candle(decay_layout),
-            kt_dtype_from_candle(decay.dtype()),
+            decay_metal.buffer().as_ref(),
+            decay.layout(),
+            decay.dtype(),
         );
 
         encoder.set_buffer(0, Some(ab_buf.buffer), ab_buf.offset_in_bytes);
@@ -11249,15 +10911,15 @@ pub(crate) fn metal_gdn_gates_decay_ab_bf16(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn metal_gdn_decode_gates_recurrent_bf16(
-    q: &candle_core::Tensor,
-    k: &candle_core::Tensor,
-    v: &candle_core::Tensor,
-    a: &candle_core::Tensor,
-    b: &candle_core::Tensor,
-    a_log: &candle_core::Tensor,
-    dt_bias: &candle_core::Tensor,
-    state: &mut candle_core::Tensor,
-) -> Result<candle_core::Tensor> {
+    q: &kiln_tensor::Tensor,
+    k: &kiln_tensor::Tensor,
+    v: &kiln_tensor::Tensor,
+    a: &kiln_tensor::Tensor,
+    b: &kiln_tensor::Tensor,
+    a_log: &kiln_tensor::Tensor,
+    dt_bias: &kiln_tensor::Tensor,
+    state: &mut kiln_tensor::Tensor,
+) -> Result<kiln_tensor::Tensor> {
     anyhow::ensure!(
         metal_gdn_decode_gates_recurrent_supports(q, k, v, a, b, a_log, dt_bias, state),
         "metal gdn decode gates+recurrent unsupported shape"
@@ -11281,109 +10943,70 @@ pub(crate) fn metal_gdn_decode_gates_recurrent_bf16(
     let b = b.contiguous()?;
     let a_log = a_log.contiguous()?;
     let dt_bias = dt_bias.contiguous()?;
-    let out = unsafe { candle_core::Tensor::empty((batch, seq_len, value_heads, dv), candle_core::DType::BF16, q.device())? };
+    let q_metal = kt_metal(&q)?;
+    let out = kt_metal_alloc(q_metal, kiln_tensor::DType::BF16, &[batch, seq_len, value_heads, dv])?;
 
-    let candle_core::Device::Metal(device) = q.device() else {
-        anyhow::bail!("metal gdn decode gates+recurrent requires a Metal tensor");
-    };
-    let pipeline = metal_gdn_decode_gates_recurrent_pipeline(device)?;
-    let encoder = device.command_encoder()?;
+    let companion = q_metal.companion()?;
+    let pipeline = metal_gdn_decode_gates_recurrent_pipeline(&*companion)?;
+    let encoder = companion.command_encoder()?;
     encoder.set_label("kiln_gdn_decode_gates_recurrent_bf16");
     encoder.set_compute_pipeline_state(&pipeline);
 
     {
-        let (q_storage, q_layout) = q.storage_and_layout();
-        let (k_storage, k_layout) = k.storage_and_layout();
-        let (v_storage, v_layout) = v.storage_and_layout();
-        let (a_storage, a_layout) = a.storage_and_layout();
-        let (b_storage, b_layout) = b.storage_and_layout();
-        let (al_storage, al_layout) = a_log.storage_and_layout();
-        let (dt_storage, dt_layout) = dt_bias.storage_and_layout();
-        let (state_storage, state_layout) = state.storage_and_layout();
-        let (out_storage, out_layout) = out.storage_and_layout();
-
-        let q_metal = match &*q_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal gdn decode gates+recurrent q must be on Metal"),
-        };
-        let k_metal = match &*k_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal gdn decode gates+recurrent k must be on Metal"),
-        };
-        let v_metal = match &*v_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal gdn decode gates+recurrent v must be on Metal"),
-        };
-        let a_metal = match &*a_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal gdn decode gates+recurrent a must be on Metal"),
-        };
-        let b_metal = match &*b_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal gdn decode gates+recurrent b must be on Metal"),
-        };
-        let al_metal = match &*al_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal gdn decode gates+recurrent a_log must be on Metal"),
-        };
-        let dt_metal = match &*dt_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal gdn decode gates+recurrent dt_bias must be on Metal"),
-        };
-        let state_metal = match &*state_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal gdn decode gates+recurrent state must be on Metal"),
-        };
-        let out_metal = match &*out_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal gdn decode gates+recurrent out must be on Metal"),
-        };
+        let k_metal = kt_metal(&k)?;
+        let v_metal = kt_metal(&v)?;
+        let a_metal = kt_metal(&a)?;
+        let b_metal = kt_metal(&b)?;
+        let al_metal = kt_metal(&a_log)?;
+        let dt_metal = kt_metal(&dt_bias)?;
+        let state_metal = kt_metal(&state)?;
+        let out_metal = kt_metal(&out)?;
 
         // #1082 Step 4 gdn-family: `buffer_o` → `buffer_o_kt`.
         let q_buf = buffer_o_kt(
-            q_metal.buffer(),
-            &kt_layout_from_candle(q_layout),
-            kt_dtype_from_candle(q.dtype()),
+            q_metal.buffer().as_ref(),
+            q.layout(),
+            q.dtype(),
         );
         let k_buf = buffer_o_kt(
-            k_metal.buffer(),
-            &kt_layout_from_candle(k_layout),
-            kt_dtype_from_candle(k.dtype()),
+            k_metal.buffer().as_ref(),
+            k.layout(),
+            k.dtype(),
         );
         let v_buf = buffer_o_kt(
-            v_metal.buffer(),
-            &kt_layout_from_candle(v_layout),
-            kt_dtype_from_candle(v.dtype()),
+            v_metal.buffer().as_ref(),
+            v.layout(),
+            v.dtype(),
         );
         let a_buf = buffer_o_kt(
-            a_metal.buffer(),
-            &kt_layout_from_candle(a_layout),
-            kt_dtype_from_candle(a.dtype()),
+            a_metal.buffer().as_ref(),
+            a.layout(),
+            a.dtype(),
         );
         let b_buf = buffer_o_kt(
-            b_metal.buffer(),
-            &kt_layout_from_candle(b_layout),
-            kt_dtype_from_candle(b.dtype()),
+            b_metal.buffer().as_ref(),
+            b.layout(),
+            b.dtype(),
         );
         let al_buf = buffer_o_kt(
-            al_metal.buffer(),
-            &kt_layout_from_candle(al_layout),
-            kt_dtype_from_candle(a_log.dtype()),
+            al_metal.buffer().as_ref(),
+            a_log.layout(),
+            a_log.dtype(),
         );
         let dt_buf = buffer_o_kt(
-            dt_metal.buffer(),
-            &kt_layout_from_candle(dt_layout),
-            kt_dtype_from_candle(dt_bias.dtype()),
+            dt_metal.buffer().as_ref(),
+            dt_bias.layout(),
+            dt_bias.dtype(),
         );
         let state_buf = buffer_o_kt(
-            state_metal.buffer(),
-            &kt_layout_from_candle(state_layout),
-            kt_dtype_from_candle(state.dtype()),
+            state_metal.buffer().as_ref(),
+            state.layout(),
+            state.dtype(),
         );
         let out_buf = buffer_o_kt(
-            out_metal.buffer(),
-            &kt_layout_from_candle(out_layout),
-            kt_dtype_from_candle(out.dtype()),
+            out_metal.buffer().as_ref(),
+            out.layout(),
+            out.dtype(),
         );
 
         encoder.set_buffer(0, Some(q_buf.buffer), q_buf.offset_in_bytes);
@@ -11425,18 +11048,18 @@ pub(crate) fn metal_gdn_decode_gates_recurrent_bf16(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn metal_gdn_decode_gates_recurrent_rmsnorm_bf16(
-    q: &candle_core::Tensor,
-    k: &candle_core::Tensor,
-    v: &candle_core::Tensor,
-    a: &candle_core::Tensor,
-    b: &candle_core::Tensor,
-    a_log: &candle_core::Tensor,
-    dt_bias: &candle_core::Tensor,
-    state: &mut candle_core::Tensor,
-    z: &candle_core::Tensor,
-    weight: &candle_core::Tensor,
+    q: &kiln_tensor::Tensor,
+    k: &kiln_tensor::Tensor,
+    v: &kiln_tensor::Tensor,
+    a: &kiln_tensor::Tensor,
+    b: &kiln_tensor::Tensor,
+    a_log: &kiln_tensor::Tensor,
+    dt_bias: &kiln_tensor::Tensor,
+    state: &mut kiln_tensor::Tensor,
+    z: &kiln_tensor::Tensor,
+    weight: &kiln_tensor::Tensor,
     eps: f32,
-) -> Result<candle_core::Tensor> {
+) -> Result<kiln_tensor::Tensor> {
     anyhow::ensure!(
         metal_gdn_decode_gates_recurrent_rmsnorm_supports(
             q, k, v, a, b, a_log, dt_bias, state, z, weight
@@ -11464,129 +11087,82 @@ pub(crate) fn metal_gdn_decode_gates_recurrent_rmsnorm_bf16(
     let dt_bias = dt_bias.contiguous()?;
     let z = z.contiguous()?;
     let weight = weight.contiguous()?;
-    let out = unsafe { candle_core::Tensor::empty((batch, seq_len, value_heads, dv), candle_core::DType::BF16, q.device())? };
+    let q_metal = kt_metal(&q)?;
+    let out = kt_metal_alloc(q_metal, kiln_tensor::DType::BF16, &[batch, seq_len, value_heads, dv])?;
 
-    let candle_core::Device::Metal(device) = q.device() else {
-        anyhow::bail!("metal gdn decode gates+recurrent+rmsnorm requires a Metal tensor");
-    };
-    let pipeline = metal_gdn_decode_gates_recurrent_rmsnorm_pipeline(device)?;
-    let encoder = device.command_encoder()?;
+    let companion = q_metal.companion()?;
+    let pipeline = metal_gdn_decode_gates_recurrent_rmsnorm_pipeline(&*companion)?;
+    let encoder = companion.command_encoder()?;
     encoder.set_label("kiln_gdn_decode_gates_recurrent_rmsnorm_bf16");
     encoder.set_compute_pipeline_state(&pipeline);
 
     {
-        let (q_storage, q_layout) = q.storage_and_layout();
-        let (k_storage, k_layout) = k.storage_and_layout();
-        let (v_storage, v_layout) = v.storage_and_layout();
-        let (a_storage, a_layout) = a.storage_and_layout();
-        let (b_storage, b_layout) = b.storage_and_layout();
-        let (al_storage, al_layout) = a_log.storage_and_layout();
-        let (dt_storage, dt_layout) = dt_bias.storage_and_layout();
-        let (state_storage, state_layout) = state.storage_and_layout();
-        let (z_storage, z_layout) = z.storage_and_layout();
-        let (w_storage, w_layout) = weight.storage_and_layout();
-        let (out_storage, out_layout) = out.storage_and_layout();
-
-        let q_metal = match &*q_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal gdn decode gates+recurrent+rmsnorm q must be on Metal"),
-        };
-        let k_metal = match &*k_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal gdn decode gates+recurrent+rmsnorm k must be on Metal"),
-        };
-        let v_metal = match &*v_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal gdn decode gates+recurrent+rmsnorm v must be on Metal"),
-        };
-        let a_metal = match &*a_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal gdn decode gates+recurrent+rmsnorm a must be on Metal"),
-        };
-        let b_metal = match &*b_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal gdn decode gates+recurrent+rmsnorm b must be on Metal"),
-        };
-        let al_metal = match &*al_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal gdn decode gates+recurrent+rmsnorm a_log must be on Metal"),
-        };
-        let dt_metal = match &*dt_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal gdn decode gates+recurrent+rmsnorm dt_bias must be on Metal"),
-        };
-        let state_metal = match &*state_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal gdn decode gates+recurrent+rmsnorm state must be on Metal"),
-        };
-        let z_metal = match &*z_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal gdn decode gates+recurrent+rmsnorm z must be on Metal"),
-        };
-        let w_metal = match &*w_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal gdn decode gates+recurrent+rmsnorm weight must be on Metal"),
-        };
-        let out_metal = match &*out_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal gdn decode gates+recurrent+rmsnorm out must be on Metal"),
-        };
+        let k_metal = kt_metal(&k)?;
+        let v_metal = kt_metal(&v)?;
+        let a_metal = kt_metal(&a)?;
+        let b_metal = kt_metal(&b)?;
+        let al_metal = kt_metal(&a_log)?;
+        let dt_metal = kt_metal(&dt_bias)?;
+        let state_metal = kt_metal(&state)?;
+        let z_metal = kt_metal(&z)?;
+        let w_metal = kt_metal(&weight)?;
+        let out_metal = kt_metal(&out)?;
 
         // #1082 Step 4 rmsnorm-family: `buffer_o` → `buffer_o_kt`.
         let q_buf = buffer_o_kt(
-            q_metal.buffer(),
-            &kt_layout_from_candle(q_layout),
-            kt_dtype_from_candle(q.dtype()),
+            q_metal.buffer().as_ref(),
+            q.layout(),
+            q.dtype(),
         );
         let k_buf = buffer_o_kt(
-            k_metal.buffer(),
-            &kt_layout_from_candle(k_layout),
-            kt_dtype_from_candle(k.dtype()),
+            k_metal.buffer().as_ref(),
+            k.layout(),
+            k.dtype(),
         );
         let v_buf = buffer_o_kt(
-            v_metal.buffer(),
-            &kt_layout_from_candle(v_layout),
-            kt_dtype_from_candle(v.dtype()),
+            v_metal.buffer().as_ref(),
+            v.layout(),
+            v.dtype(),
         );
         let a_buf = buffer_o_kt(
-            a_metal.buffer(),
-            &kt_layout_from_candle(a_layout),
-            kt_dtype_from_candle(a.dtype()),
+            a_metal.buffer().as_ref(),
+            a.layout(),
+            a.dtype(),
         );
         let b_buf = buffer_o_kt(
-            b_metal.buffer(),
-            &kt_layout_from_candle(b_layout),
-            kt_dtype_from_candle(b.dtype()),
+            b_metal.buffer().as_ref(),
+            b.layout(),
+            b.dtype(),
         );
         let al_buf = buffer_o_kt(
-            al_metal.buffer(),
-            &kt_layout_from_candle(al_layout),
-            kt_dtype_from_candle(a_log.dtype()),
+            al_metal.buffer().as_ref(),
+            a_log.layout(),
+            a_log.dtype(),
         );
         let dt_buf = buffer_o_kt(
-            dt_metal.buffer(),
-            &kt_layout_from_candle(dt_layout),
-            kt_dtype_from_candle(dt_bias.dtype()),
+            dt_metal.buffer().as_ref(),
+            dt_bias.layout(),
+            dt_bias.dtype(),
         );
         let state_buf = buffer_o_kt(
-            state_metal.buffer(),
-            &kt_layout_from_candle(state_layout),
-            kt_dtype_from_candle(state.dtype()),
+            state_metal.buffer().as_ref(),
+            state.layout(),
+            state.dtype(),
         );
         let z_buf = buffer_o_kt(
-            z_metal.buffer(),
-            &kt_layout_from_candle(z_layout),
-            kt_dtype_from_candle(z.dtype()),
+            z_metal.buffer().as_ref(),
+            z.layout(),
+            z.dtype(),
         );
         let w_buf = buffer_o_kt(
-            w_metal.buffer(),
-            &kt_layout_from_candle(w_layout),
-            kt_dtype_from_candle(weight.dtype()),
+            w_metal.buffer().as_ref(),
+            weight.layout(),
+            weight.dtype(),
         );
         let out_buf = buffer_o_kt(
-            out_metal.buffer(),
-            &kt_layout_from_candle(out_layout),
-            kt_dtype_from_candle(out.dtype()),
+            out_metal.buffer().as_ref(),
+            out.layout(),
+            out.dtype(),
         );
 
         encoder.set_buffer(0, Some(q_buf.buffer), q_buf.offset_in_bytes);
@@ -11679,15 +11255,15 @@ kernel void kiln_gated_rmsnorm_bf16(
 "#;
 
 fn metal_gated_rms_norm_pipeline(
-    device: &MetalDevice,
+    device: &dyn MetalPipelineHost,
 ) -> Result<ComputePipeline> {
 
-    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    static PIPELINES: OnceLock<Mutex<HashMap<u64, ComputePipeline>>> = OnceLock::new();
     let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache
         .lock()
         .map_err(|_| anyhow::anyhow!("metal gated rmsnorm pipeline cache poisoned"))?;
-    if let Some(pipeline) = cache.get(&device.id()) {
+    if let Some(pipeline) = cache.get(&device.pipeline_cache_key()) {
         return Ok(pipeline.clone());
     }
 
@@ -11696,14 +11272,14 @@ fn metal_gated_rms_norm_pipeline(
         .get_function("kiln_gated_rmsnorm_bf16", None)
         .map_err(|e| anyhow::anyhow!("load metal gated rmsnorm function: {e:?}"))?;
     let pipeline = device
-        .device()
+        .pipeline_raw_device()
         .new_compute_pipeline_state_with_function(&function)
         .map_err(|e| anyhow::anyhow!("build metal gated rmsnorm pipeline: {e:?}"))?;
-    cache.insert(device.id(), pipeline.clone());
+    cache.insert(device.pipeline_cache_key(), pipeline.clone());
     Ok(pipeline)
 }
 
-fn metal_gated_rms_norm_bf16(x: &candle_core::Tensor, z: &candle_core::Tensor, weight: &candle_core::Tensor, eps: f32) -> Result<candle_core::Tensor> {
+fn metal_gated_rms_norm_bf16(x: &kiln_tensor::Tensor, z: &kiln_tensor::Tensor, weight: &kiln_tensor::Tensor, eps: f32) -> Result<kiln_tensor::Tensor> {
     let (batch, seq_len, heads, hidden) = x.dims4()?;
     let rows = batch
         .checked_mul(seq_len)
@@ -11718,64 +11294,45 @@ fn metal_gated_rms_norm_bf16(x: &candle_core::Tensor, z: &candle_core::Tensor, w
     let x = x.contiguous()?;
     let z = z.contiguous()?;
     let weight = weight.contiguous()?;
+    let x_metal = kt_metal(&x)?;
     // The kernel writes every hidden element for every row.
-    let out = unsafe { candle_core::Tensor::empty((batch, seq_len, heads, hidden), candle_core::DType::BF16, x.device())? };
+    let out = kt_metal_alloc(x_metal, kiln_tensor::DType::BF16, &[batch, seq_len, heads, hidden])?;
 
     if rows == 0 {
         return Ok(out);
     }
 
-    let candle_core::Device::Metal(device) = x.device() else {
-        anyhow::bail!("metal gated rmsnorm requires a Metal tensor");
-    };
-    let pipeline = metal_gated_rms_norm_pipeline(device)?;
-    let encoder = device.command_encoder()?;
+    let companion = x_metal.companion()?;
+    let pipeline = metal_gated_rms_norm_pipeline(&*companion)?;
+    let encoder = companion.command_encoder()?;
     encoder.set_label("kiln_gated_rmsnorm_bf16");
     encoder.set_compute_pipeline_state(&pipeline);
 
     {
-        let (x_storage, x_layout) = x.storage_and_layout();
-        let (z_storage, z_layout) = z.storage_and_layout();
-        let (w_storage, w_layout) = weight.storage_and_layout();
-        let (o_storage, o_layout) = out.storage_and_layout();
-
-        let x_metal = match &*x_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal gated rmsnorm x must be on Metal"),
-        };
-        let z_metal = match &*z_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal gated rmsnorm z must be on Metal"),
-        };
-        let w_metal = match &*w_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal gated rmsnorm weight must be on Metal"),
-        };
-        let out_metal = match &*o_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal gated rmsnorm out must be on Metal"),
-        };
+        let z_metal = kt_metal(&z)?;
+        let w_metal = kt_metal(&weight)?;
+        let out_metal = kt_metal(&out)?;
 
         // #1082 Step 4 rmsnorm-family: `buffer_o` → `buffer_o_kt`.
         let x_buf = buffer_o_kt(
-            x_metal.buffer(),
-            &kt_layout_from_candle(x_layout),
-            kt_dtype_from_candle(x.dtype()),
+            x_metal.buffer().as_ref(),
+            x.layout(),
+            x.dtype(),
         );
         let z_buf = buffer_o_kt(
-            z_metal.buffer(),
-            &kt_layout_from_candle(z_layout),
-            kt_dtype_from_candle(z.dtype()),
+            z_metal.buffer().as_ref(),
+            z.layout(),
+            z.dtype(),
         );
         let w_buf = buffer_o_kt(
-            w_metal.buffer(),
-            &kt_layout_from_candle(w_layout),
-            kt_dtype_from_candle(weight.dtype()),
+            w_metal.buffer().as_ref(),
+            weight.layout(),
+            weight.dtype(),
         );
         let out_buf = buffer_o_kt(
-            out_metal.buffer(),
-            &kt_layout_from_candle(o_layout),
-            kt_dtype_from_candle(out.dtype()),
+            out_metal.buffer().as_ref(),
+            out.layout(),
+            out.dtype(),
         );
 
         encoder.set_buffer(0, Some(x_buf.buffer), x_buf.offset_in_bytes);
@@ -12384,15 +11941,15 @@ kernel void kiln_gdn_full_chunk_forward_bf16(
 "#;
 
 fn metal_gdn_recurrent_pipeline(
-    device: &MetalDevice,
+    device: &dyn MetalPipelineHost,
 ) -> Result<ComputePipeline> {
 
-    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    static PIPELINES: OnceLock<Mutex<HashMap<u64, ComputePipeline>>> = OnceLock::new();
     let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache
         .lock()
         .map_err(|_| anyhow::anyhow!("metal gdn recurrent pipeline cache poisoned"))?;
-    if let Some(pipeline) = cache.get(&device.id()) {
+    if let Some(pipeline) = cache.get(&device.pipeline_cache_key()) {
         return Ok(pipeline.clone());
     }
 
@@ -12401,23 +11958,23 @@ fn metal_gdn_recurrent_pipeline(
         .get_function("kiln_gdn_recurrent_bf16", None)
         .map_err(|e| anyhow::anyhow!("load metal gdn recurrent function: {e:?}"))?;
     let pipeline = device
-        .device()
+        .pipeline_raw_device()
         .new_compute_pipeline_state_with_function(&function)
         .map_err(|e| anyhow::anyhow!("build metal gdn recurrent pipeline: {e:?}"))?;
-    cache.insert(device.id(), pipeline.clone());
+    cache.insert(device.pipeline_cache_key(), pipeline.clone());
     Ok(pipeline)
 }
 
 fn metal_gdn_recurrent_prefill_head_last_pipeline(
-    device: &MetalDevice,
+    device: &dyn MetalPipelineHost,
 ) -> Result<ComputePipeline> {
 
-    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    static PIPELINES: OnceLock<Mutex<HashMap<u64, ComputePipeline>>> = OnceLock::new();
     let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache
         .lock()
         .map_err(|_| anyhow::anyhow!("metal gdn recurrent prefill pipeline cache poisoned"))?;
-    if let Some(pipeline) = cache.get(&device.id()) {
+    if let Some(pipeline) = cache.get(&device.pipeline_cache_key()) {
         return Ok(pipeline.clone());
     }
 
@@ -12426,23 +11983,23 @@ fn metal_gdn_recurrent_prefill_head_last_pipeline(
         .get_function("kiln_gdn_recurrent_prefill_head_last_bf16", None)
         .map_err(|e| anyhow::anyhow!("load metal gdn recurrent prefill function: {e:?}"))?;
     let pipeline = device
-        .device()
+        .pipeline_raw_device()
         .new_compute_pipeline_state_with_function(&function)
         .map_err(|e| anyhow::anyhow!("build metal gdn recurrent prefill pipeline: {e:?}"))?;
-    cache.insert(device.id(), pipeline.clone());
+    cache.insert(device.pipeline_cache_key(), pipeline.clone());
     Ok(pipeline)
 }
 
 fn metal_gdn_forward_substitution_pipeline(
-    device: &MetalDevice,
+    device: &dyn MetalPipelineHost,
 ) -> Result<ComputePipeline> {
 
-    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    static PIPELINES: OnceLock<Mutex<HashMap<u64, ComputePipeline>>> = OnceLock::new();
     let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache
         .lock()
         .map_err(|_| anyhow::anyhow!("metal gdn forward-substitution pipeline cache poisoned"))?;
-    if let Some(pipeline) = cache.get(&device.id()) {
+    if let Some(pipeline) = cache.get(&device.pipeline_cache_key()) {
         return Ok(pipeline.clone());
     }
 
@@ -12451,23 +12008,23 @@ fn metal_gdn_forward_substitution_pipeline(
         .get_function("kiln_gdn_forward_substitution_bf16", None)
         .map_err(|e| anyhow::anyhow!("load metal gdn forward-substitution function: {e:?}"))?;
     let pipeline = device
-        .device()
+        .pipeline_raw_device()
         .new_compute_pipeline_state_with_function(&function)
         .map_err(|e| anyhow::anyhow!("build metal gdn forward-substitution pipeline: {e:?}"))?;
-    cache.insert(device.id(), pipeline.clone());
+    cache.insert(device.pipeline_cache_key(), pipeline.clone());
     Ok(pipeline)
 }
 
 fn metal_gdn_forward_substitution_f32_pipeline(
-    device: &MetalDevice,
+    device: &dyn MetalPipelineHost,
 ) -> Result<ComputePipeline> {
 
-    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    static PIPELINES: OnceLock<Mutex<HashMap<u64, ComputePipeline>>> = OnceLock::new();
     let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache.lock().map_err(|_| {
         anyhow::anyhow!("metal gdn forward-substitution f32 pipeline cache poisoned")
     })?;
-    if let Some(pipeline) = cache.get(&device.id()) {
+    if let Some(pipeline) = cache.get(&device.pipeline_cache_key()) {
         return Ok(pipeline.clone());
     }
 
@@ -12476,23 +12033,23 @@ fn metal_gdn_forward_substitution_f32_pipeline(
         .get_function("kiln_gdn_forward_substitution_f32", None)
         .map_err(|e| anyhow::anyhow!("load metal gdn forward-substitution f32 function: {e:?}"))?;
     let pipeline = device
-        .device()
+        .pipeline_raw_device()
         .new_compute_pipeline_state_with_function(&function)
         .map_err(|e| anyhow::anyhow!("build metal gdn forward-substitution f32 pipeline: {e:?}"))?;
-    cache.insert(device.id(), pipeline.clone());
+    cache.insert(device.pipeline_cache_key(), pipeline.clone());
     Ok(pipeline)
 }
 
 fn metal_gdn_chunk_prep_pipeline(
-    device: &MetalDevice,
+    device: &dyn MetalPipelineHost,
 ) -> Result<ComputePipeline> {
 
-    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    static PIPELINES: OnceLock<Mutex<HashMap<u64, ComputePipeline>>> = OnceLock::new();
     let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache
         .lock()
         .map_err(|_| anyhow::anyhow!("metal gdn chunk-prep pipeline cache poisoned"))?;
-    if let Some(pipeline) = cache.get(&device.id()) {
+    if let Some(pipeline) = cache.get(&device.pipeline_cache_key()) {
         return Ok(pipeline.clone());
     }
 
@@ -12501,23 +12058,23 @@ fn metal_gdn_chunk_prep_pipeline(
         .get_function("kiln_gdn_chunk_prep_bf16", None)
         .map_err(|e| anyhow::anyhow!("load metal gdn chunk-prep function: {e:?}"))?;
     let pipeline = device
-        .device()
+        .pipeline_raw_device()
         .new_compute_pipeline_state_with_function(&function)
         .map_err(|e| anyhow::anyhow!("build metal gdn chunk-prep pipeline: {e:?}"))?;
-    cache.insert(device.id(), pipeline.clone());
+    cache.insert(device.pipeline_cache_key(), pipeline.clone());
     Ok(pipeline)
 }
 
 fn metal_gdn_recurrent_prefill_head_last_decay_pipeline(
-    device: &MetalDevice,
+    device: &dyn MetalPipelineHost,
 ) -> Result<ComputePipeline> {
 
-    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    static PIPELINES: OnceLock<Mutex<HashMap<u64, ComputePipeline>>> = OnceLock::new();
     let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache.lock().map_err(|_| {
         anyhow::anyhow!("metal gdn recurrent prefill decay pipeline cache poisoned")
     })?;
-    if let Some(pipeline) = cache.get(&device.id()) {
+    if let Some(pipeline) = cache.get(&device.pipeline_cache_key()) {
         return Ok(pipeline.clone());
     }
 
@@ -12526,23 +12083,23 @@ fn metal_gdn_recurrent_prefill_head_last_decay_pipeline(
         .get_function("kiln_gdn_recurrent_prefill_head_last_decay_bf16", None)
         .map_err(|e| anyhow::anyhow!("load metal gdn recurrent prefill decay function: {e:?}"))?;
     let pipeline = device
-        .device()
+        .pipeline_raw_device()
         .new_compute_pipeline_state_with_function(&function)
         .map_err(|e| anyhow::anyhow!("build metal gdn recurrent prefill decay pipeline: {e:?}"))?;
-    cache.insert(device.id(), pipeline.clone());
+    cache.insert(device.pipeline_cache_key(), pipeline.clone());
     Ok(pipeline)
 }
 
 fn metal_gdn_full_chunk_forward_pipeline(
-    device: &MetalDevice,
+    device: &dyn MetalPipelineHost,
 ) -> Result<ComputePipeline> {
 
-    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    static PIPELINES: OnceLock<Mutex<HashMap<u64, ComputePipeline>>> = OnceLock::new();
     let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache
         .lock()
         .map_err(|_| anyhow::anyhow!("metal gdn full-chunk pipeline cache poisoned"))?;
-    if let Some(pipeline) = cache.get(&device.id()) {
+    if let Some(pipeline) = cache.get(&device.pipeline_cache_key()) {
         return Ok(pipeline.clone());
     }
 
@@ -12551,10 +12108,10 @@ fn metal_gdn_full_chunk_forward_pipeline(
         .get_function("kiln_gdn_full_chunk_forward_bf16", None)
         .map_err(|e| anyhow::anyhow!("load metal gdn full-chunk function: {e:?}"))?;
     let pipeline = device
-        .device()
+        .pipeline_raw_device()
         .new_compute_pipeline_state_with_function(&function)
         .map_err(|e| anyhow::anyhow!("build metal gdn full-chunk pipeline: {e:?}"))?;
-    cache.insert(device.id(), pipeline.clone());
+    cache.insert(device.pipeline_cache_key(), pipeline.clone());
     Ok(pipeline)
 }
 
@@ -13732,13 +13289,13 @@ fn metal_gdn_recurrent_prefill_head_last_bf16(
 }
 
 fn metal_gdn_recurrent_prefill_native_head_last_bf16(
-    q: &candle_core::Tensor,
-    k: &candle_core::Tensor,
-    v: &candle_core::Tensor,
-    beta: &candle_core::Tensor,
-    g: &candle_core::Tensor,
-    state: &mut candle_core::Tensor,
-) -> Result<candle_core::Tensor> {
+    q: &kiln_tensor::Tensor,
+    k: &kiln_tensor::Tensor,
+    v: &kiln_tensor::Tensor,
+    beta: &kiln_tensor::Tensor,
+    g: &kiln_tensor::Tensor,
+    state: &mut kiln_tensor::Tensor,
+) -> Result<kiln_tensor::Tensor> {
     anyhow::ensure!(
         metal_gdn_recurrent_prefill_native_head_last_supports(q, k, v, beta, g, state),
         "metal gdn recurrent native prefill unsupported shape"
@@ -13764,91 +13321,60 @@ fn metal_gdn_recurrent_prefill_native_head_last_bf16(
     if !state.is_contiguous() {
         *state = state.contiguous()?;
     }
+    let q_metal = kt_metal(&q)?;
     // SAFETY: the kernel dispatch covers every (batch, token, value-head, dv)
     // output element exactly once via `gid=batch_head*dv+d` and the token loop.
-    let out = unsafe { candle_core::Tensor::empty((batch, seq_len, value_heads, dv), candle_core::DType::BF16, q.device())? };
+    let out = kt_metal_alloc(q_metal, kiln_tensor::DType::BF16, &[batch, seq_len, value_heads, dv])?;
 
-    let candle_core::Device::Metal(device) = q.device() else {
-        anyhow::bail!("metal gdn recurrent native prefill requires a Metal tensor");
-    };
-    let pipeline = metal_gdn_recurrent_prefill_head_last_pipeline(device)?;
-    let encoder = device.command_encoder()?;
+    let companion = q_metal.companion()?;
+    let pipeline = metal_gdn_recurrent_prefill_head_last_pipeline(&*companion)?;
+    let encoder = companion.command_encoder()?;
     encoder.set_label("kiln_gdn_recurrent_prefill_native_head_last_bf16");
     encoder.set_compute_pipeline_state(&pipeline);
 
     {
-        let (q_storage, q_layout) = q.storage_and_layout();
-        let (k_storage, k_layout) = k.storage_and_layout();
-        let (v_storage, v_layout) = v.storage_and_layout();
-        let (beta_storage, beta_layout) = beta.storage_and_layout();
-        let (g_storage, g_layout) = g.storage_and_layout();
-        let (state_storage, state_layout) = state.storage_and_layout();
-        let (out_storage, out_layout) = out.storage_and_layout();
-
-        let q_metal = match &*q_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal gdn recurrent native prefill q must be on Metal"),
-        };
-        let k_metal = match &*k_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal gdn recurrent native prefill k must be on Metal"),
-        };
-        let v_metal = match &*v_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal gdn recurrent native prefill v must be on Metal"),
-        };
-        let beta_metal = match &*beta_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal gdn recurrent native prefill beta must be on Metal"),
-        };
-        let g_metal = match &*g_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal gdn recurrent native prefill g must be on Metal"),
-        };
-        let state_metal = match &*state_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal gdn recurrent native prefill state must be on Metal"),
-        };
-        let out_metal = match &*out_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal gdn recurrent native prefill out must be on Metal"),
-        };
+        let k_metal = kt_metal(&k)?;
+        let v_metal = kt_metal(&v)?;
+        let beta_metal = kt_metal(&beta)?;
+        let g_metal = kt_metal(&g)?;
+        let state_metal = kt_metal(state)?;
+        let out_metal = kt_metal(&out)?;
 
         // #1082 Step 4 gdn-family: `buffer_o` → `buffer_o_kt`.
         let q_buf = buffer_o_kt(
-            q_metal.buffer(),
-            &kt_layout_from_candle(q_layout),
-            kt_dtype_from_candle(q.dtype()),
+            q_metal.buffer().as_ref(),
+            q.layout(),
+            q.dtype(),
         );
         let k_buf = buffer_o_kt(
-            k_metal.buffer(),
-            &kt_layout_from_candle(k_layout),
-            kt_dtype_from_candle(k.dtype()),
+            k_metal.buffer().as_ref(),
+            k.layout(),
+            k.dtype(),
         );
         let v_buf = buffer_o_kt(
-            v_metal.buffer(),
-            &kt_layout_from_candle(v_layout),
-            kt_dtype_from_candle(v.dtype()),
+            v_metal.buffer().as_ref(),
+            v.layout(),
+            v.dtype(),
         );
         let beta_buf = buffer_o_kt(
-            beta_metal.buffer(),
-            &kt_layout_from_candle(beta_layout),
-            kt_dtype_from_candle(beta.dtype()),
+            beta_metal.buffer().as_ref(),
+            beta.layout(),
+            beta.dtype(),
         );
         let g_buf = buffer_o_kt(
-            g_metal.buffer(),
-            &kt_layout_from_candle(g_layout),
-            kt_dtype_from_candle(g.dtype()),
+            g_metal.buffer().as_ref(),
+            g.layout(),
+            g.dtype(),
         );
         let state_buf = buffer_o_kt(
-            state_metal.buffer(),
-            &kt_layout_from_candle(state_layout),
-            kt_dtype_from_candle(state.dtype()),
+            state_metal.buffer().as_ref(),
+            state.layout(),
+            state.dtype(),
         );
         let out_buf = buffer_o_kt(
-            out_metal.buffer(),
-            &kt_layout_from_candle(out_layout),
-            kt_dtype_from_candle(out.dtype()),
+            out_metal.buffer().as_ref(),
+            out.layout(),
+            out.dtype(),
         );
 
         encoder.set_buffer(0, Some(q_buf.buffer), q_buf.offset_in_bytes);
@@ -13891,13 +13417,13 @@ fn metal_gdn_recurrent_prefill_native_head_last_bf16(
 }
 
 pub(crate) fn metal_gdn_recurrent_prefill_native_head_last_decay_bf16(
-    q: &candle_core::Tensor,
-    k: &candle_core::Tensor,
-    v: &candle_core::Tensor,
-    beta: &candle_core::Tensor,
-    decay: &candle_core::Tensor,
-    state: &mut candle_core::Tensor,
-) -> Result<candle_core::Tensor> {
+    q: &kiln_tensor::Tensor,
+    k: &kiln_tensor::Tensor,
+    v: &kiln_tensor::Tensor,
+    beta: &kiln_tensor::Tensor,
+    decay: &kiln_tensor::Tensor,
+    state: &mut kiln_tensor::Tensor,
+) -> Result<kiln_tensor::Tensor> {
     anyhow::ensure!(
         metal_gdn_recurrent_prefill_native_head_last_decay_supports(q, k, v, beta, decay, state),
         "metal gdn recurrent native prefill decay unsupported shape"
@@ -13923,89 +13449,58 @@ pub(crate) fn metal_gdn_recurrent_prefill_native_head_last_decay_bf16(
     if !state.is_contiguous() {
         *state = state.contiguous()?;
     }
-    let out = unsafe { candle_core::Tensor::empty((batch, seq_len, value_heads, dv), candle_core::DType::BF16, q.device())? };
+    let q_metal = kt_metal(&q)?;
+    let out = kt_metal_alloc(q_metal, kiln_tensor::DType::BF16, &[batch, seq_len, value_heads, dv])?;
 
-    let candle_core::Device::Metal(device) = q.device() else {
-        anyhow::bail!("metal gdn recurrent native prefill decay requires a Metal tensor");
-    };
-    let pipeline = metal_gdn_recurrent_prefill_head_last_decay_pipeline(device)?;
-    let encoder = device.command_encoder()?;
+    let companion = q_metal.companion()?;
+    let pipeline = metal_gdn_recurrent_prefill_head_last_decay_pipeline(&*companion)?;
+    let encoder = companion.command_encoder()?;
     encoder.set_label("kiln_gdn_recurrent_prefill_native_head_last_decay_bf16");
     encoder.set_compute_pipeline_state(&pipeline);
 
     {
-        let (q_storage, q_layout) = q.storage_and_layout();
-        let (k_storage, k_layout) = k.storage_and_layout();
-        let (v_storage, v_layout) = v.storage_and_layout();
-        let (beta_storage, beta_layout) = beta.storage_and_layout();
-        let (decay_storage, decay_layout) = decay.storage_and_layout();
-        let (state_storage, state_layout) = state.storage_and_layout();
-        let (out_storage, out_layout) = out.storage_and_layout();
-
-        let q_metal = match &*q_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal gdn recurrent native prefill decay q must be on Metal"),
-        };
-        let k_metal = match &*k_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal gdn recurrent native prefill decay k must be on Metal"),
-        };
-        let v_metal = match &*v_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal gdn recurrent native prefill decay v must be on Metal"),
-        };
-        let beta_metal = match &*beta_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal gdn recurrent native prefill decay beta must be on Metal"),
-        };
-        let decay_metal = match &*decay_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal gdn recurrent native prefill decay tensor must be on Metal"),
-        };
-        let state_metal = match &*state_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal gdn recurrent native prefill decay state must be on Metal"),
-        };
-        let out_metal = match &*out_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal gdn recurrent native prefill decay out must be on Metal"),
-        };
+        let k_metal = kt_metal(&k)?;
+        let v_metal = kt_metal(&v)?;
+        let beta_metal = kt_metal(&beta)?;
+        let decay_metal = kt_metal(&decay)?;
+        let state_metal = kt_metal(state)?;
+        let out_metal = kt_metal(&out)?;
 
         // #1082 Step 4 gdn-family: `buffer_o` → `buffer_o_kt`.
         let q_buf = buffer_o_kt(
-            q_metal.buffer(),
-            &kt_layout_from_candle(q_layout),
-            kt_dtype_from_candle(q.dtype()),
+            q_metal.buffer().as_ref(),
+            q.layout(),
+            q.dtype(),
         );
         let k_buf = buffer_o_kt(
-            k_metal.buffer(),
-            &kt_layout_from_candle(k_layout),
-            kt_dtype_from_candle(k.dtype()),
+            k_metal.buffer().as_ref(),
+            k.layout(),
+            k.dtype(),
         );
         let v_buf = buffer_o_kt(
-            v_metal.buffer(),
-            &kt_layout_from_candle(v_layout),
-            kt_dtype_from_candle(v.dtype()),
+            v_metal.buffer().as_ref(),
+            v.layout(),
+            v.dtype(),
         );
         let beta_buf = buffer_o_kt(
-            beta_metal.buffer(),
-            &kt_layout_from_candle(beta_layout),
-            kt_dtype_from_candle(beta.dtype()),
+            beta_metal.buffer().as_ref(),
+            beta.layout(),
+            beta.dtype(),
         );
         let decay_buf = buffer_o_kt(
-            decay_metal.buffer(),
-            &kt_layout_from_candle(decay_layout),
-            kt_dtype_from_candle(decay.dtype()),
+            decay_metal.buffer().as_ref(),
+            decay.layout(),
+            decay.dtype(),
         );
         let state_buf = buffer_o_kt(
-            state_metal.buffer(),
-            &kt_layout_from_candle(state_layout),
-            kt_dtype_from_candle(state.dtype()),
+            state_metal.buffer().as_ref(),
+            state.layout(),
+            state.dtype(),
         );
         let out_buf = buffer_o_kt(
-            out_metal.buffer(),
-            &kt_layout_from_candle(out_layout),
-            kt_dtype_from_candle(out.dtype()),
+            out_metal.buffer().as_ref(),
+            out.layout(),
+            out.dtype(),
         );
 
         encoder.set_buffer(0, Some(q_buf.buffer), q_buf.offset_in_bytes);
@@ -14232,15 +13727,15 @@ kernel void kiln_causal_conv1d_update_bf16_f32_k4(
 "#;
 
 fn metal_conv1d_prefill_pipeline(
-    device: &MetalDevice,
+    device: &dyn MetalPipelineHost,
 ) -> Result<ComputePipeline> {
 
-    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    static PIPELINES: OnceLock<Mutex<HashMap<u64, ComputePipeline>>> = OnceLock::new();
     let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache
         .lock()
         .map_err(|_| anyhow::anyhow!("metal conv1d prefill pipeline cache poisoned"))?;
-    if let Some(pipeline) = cache.get(&device.id()) {
+    if let Some(pipeline) = cache.get(&device.pipeline_cache_key()) {
         return Ok(pipeline.clone());
     }
 
@@ -14249,23 +13744,23 @@ fn metal_conv1d_prefill_pipeline(
         .get_function("kiln_causal_conv1d_prefill_bf16_f32_k4", None)
         .map_err(|e| anyhow::anyhow!("load metal conv1d prefill function: {e:?}"))?;
     let pipeline = device
-        .device()
+        .pipeline_raw_device()
         .new_compute_pipeline_state_with_function(&function)
         .map_err(|e| anyhow::anyhow!("build metal conv1d prefill pipeline: {e:?}"))?;
-    cache.insert(device.id(), pipeline.clone());
+    cache.insert(device.pipeline_cache_key(), pipeline.clone());
     Ok(pipeline)
 }
 
 fn metal_gdn_prefill_qkv_conv_split_pipeline(
-    device: &MetalDevice,
+    device: &dyn MetalPipelineHost,
 ) -> Result<ComputePipeline> {
 
-    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    static PIPELINES: OnceLock<Mutex<HashMap<u64, ComputePipeline>>> = OnceLock::new();
     let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache
         .lock()
         .map_err(|_| anyhow::anyhow!("metal gdn prefill qkv conv-split pipeline cache poisoned"))?;
-    if let Some(pipeline) = cache.get(&device.id()) {
+    if let Some(pipeline) = cache.get(&device.pipeline_cache_key()) {
         return Ok(pipeline.clone());
     }
 
@@ -14274,23 +13769,23 @@ fn metal_gdn_prefill_qkv_conv_split_pipeline(
         .get_function("kiln_gdn_prefill_qkv_conv_split_bf16_f32_k4", None)
         .map_err(|e| anyhow::anyhow!("load metal gdn prefill qkv conv-split function: {e:?}"))?;
     let pipeline = device
-        .device()
+        .pipeline_raw_device()
         .new_compute_pipeline_state_with_function(&function)
         .map_err(|e| anyhow::anyhow!("build metal gdn prefill qkv conv-split pipeline: {e:?}"))?;
-    cache.insert(device.id(), pipeline.clone());
+    cache.insert(device.pipeline_cache_key(), pipeline.clone());
     Ok(pipeline)
 }
 
 fn metal_conv1d_update_pipeline(
-    device: &MetalDevice,
+    device: &dyn MetalPipelineHost,
 ) -> Result<ComputePipeline> {
 
-    static PIPELINES: OnceLock<Mutex<HashMap<DeviceId, ComputePipeline>>> = OnceLock::new();
+    static PIPELINES: OnceLock<Mutex<HashMap<u64, ComputePipeline>>> = OnceLock::new();
     let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
     let mut cache = cache
         .lock()
         .map_err(|_| anyhow::anyhow!("metal conv1d update pipeline cache poisoned"))?;
-    if let Some(pipeline) = cache.get(&device.id()) {
+    if let Some(pipeline) = cache.get(&device.pipeline_cache_key()) {
         return Ok(pipeline.clone());
     }
 
@@ -14299,18 +13794,19 @@ fn metal_conv1d_update_pipeline(
         .get_function("kiln_causal_conv1d_update_bf16_f32_k4", None)
         .map_err(|e| anyhow::anyhow!("load metal conv1d update function: {e:?}"))?;
     let pipeline = device
-        .device()
+        .pipeline_raw_device()
         .new_compute_pipeline_state_with_function(&function)
         .map_err(|e| anyhow::anyhow!("build metal conv1d update pipeline: {e:?}"))?;
-    cache.insert(device.id(), pipeline.clone());
+    cache.insert(device.pipeline_cache_key(), pipeline.clone());
     Ok(pipeline)
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn metal_gdn_prefill_qkv_conv_split_supports(
-    mixed_qkv: &candle_core::Tensor,
-    weight: &candle_core::Tensor,
-    conv_state: &candle_core::Tensor,
+    mixed_qkv: &kiln_tensor::Tensor,
+    weight: &kiln_tensor::Tensor,
+    conv_state: &kiln_tensor::Tensor,
     kernel_size: usize,
     nk: usize,
     dk: usize,
@@ -14320,15 +13816,15 @@ pub(crate) fn metal_gdn_prefill_qkv_conv_split_supports(
     if metal_gdn_prefill_qkv_conv_split_disabled() {
         return false;
     }
-    if mixed_qkv.dtype() != candle_core::DType::BF16
-        || weight.dtype() != candle_core::DType::BF16
-        || conv_state.dtype() != candle_core::DType::F32
+    if mixed_qkv.dtype() != kiln_tensor::DType::BF16
+        || weight.dtype() != kiln_tensor::DType::BF16
+        || conv_state.dtype() != kiln_tensor::DType::F32
     {
         return false;
     }
-    if !matches!(mixed_qkv.device(), candle_core::Device::Metal(_))
-        || !matches!(weight.device(), candle_core::Device::Metal(_))
-        || !matches!(conv_state.device(), candle_core::Device::Metal(_))
+    if !matches!(mixed_qkv.device(), kiln_tensor::Device::Metal(_))
+        || !matches!(weight.device(), kiln_tensor::Device::Metal(_))
+        || !matches!(conv_state.device(), kiln_tensor::Device::Metal(_))
     {
         return false;
     }
@@ -14364,16 +13860,17 @@ pub(crate) fn metal_gdn_prefill_qkv_conv_split_supports(
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn metal_gdn_prefill_qkv_conv_split_bf16_f32_k4(
-    mixed_qkv: &candle_core::Tensor,
-    weight: &candle_core::Tensor,
-    conv_state: &mut candle_core::Tensor,
+    mixed_qkv: &kiln_tensor::Tensor,
+    weight: &kiln_tensor::Tensor,
+    conv_state: &mut kiln_tensor::Tensor,
     kernel_size: usize,
     nk: usize,
     dk: usize,
     nv: usize,
     dv: usize,
-) -> Result<(candle_core::Tensor, candle_core::Tensor, candle_core::Tensor)> {
+) -> Result<(kiln_tensor::Tensor, kiln_tensor::Tensor, kiln_tensor::Tensor)> {
     anyhow::ensure!(
         metal_gdn_prefill_qkv_conv_split_supports(
             mixed_qkv,
@@ -14400,81 +13897,54 @@ pub(crate) fn metal_gdn_prefill_qkv_conv_split_bf16_f32_k4(
     if !conv_state.is_contiguous() {
         *conv_state = conv_state.contiguous()?;
     }
-    let q = unsafe { candle_core::Tensor::empty((batch, seq_len, nk, dk), candle_core::DType::F32, mixed_qkv.device())? };
-    let k = unsafe { candle_core::Tensor::empty((batch, seq_len, nk, dk), candle_core::DType::F32, mixed_qkv.device())? };
-    let v = unsafe { candle_core::Tensor::empty((batch, seq_len, nv, dv), candle_core::DType::BF16, mixed_qkv.device())? };
+    let mixed_qkv_metal = kt_metal(mixed_qkv)?;
+    let q = kt_metal_alloc(mixed_qkv_metal, kiln_tensor::DType::F32, &[batch, seq_len, nk, dk])?;
+    let k = kt_metal_alloc(mixed_qkv_metal, kiln_tensor::DType::F32, &[batch, seq_len, nk, dk])?;
+    let v = kt_metal_alloc(mixed_qkv_metal, kiln_tensor::DType::BF16, &[batch, seq_len, nv, dv])?;
 
-    let candle_core::Device::Metal(device) = mixed_qkv.device() else {
-        anyhow::bail!("metal gdn prefill qkv conv-split requires a Metal tensor");
-    };
-    let pipeline = metal_gdn_prefill_qkv_conv_split_pipeline(device)?;
-    let encoder = device.command_encoder()?;
+    let companion = mixed_qkv_metal.companion()?;
+    let pipeline = metal_gdn_prefill_qkv_conv_split_pipeline(&*companion)?;
+    let encoder = companion.command_encoder()?;
     encoder.set_label("kiln_gdn_prefill_qkv_conv_split_bf16_f32_k4");
     encoder.set_compute_pipeline_state(&pipeline);
 
     {
-        let (x_storage, x_layout) = mixed_qkv.storage_and_layout();
-        let (w_storage, w_layout) = weight.storage_and_layout();
-        let (s_storage, s_layout) = conv_state.storage_and_layout();
-        let (q_storage, q_layout) = q.storage_and_layout();
-        let (k_storage, k_layout) = k.storage_and_layout();
-        let (v_storage, v_layout) = v.storage_and_layout();
-
-        let x_metal = match &*x_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal gdn prefill qkv conv-split x must be on Metal"),
-        };
-        let w_metal = match &*w_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal gdn prefill qkv conv-split weight must be on Metal"),
-        };
-        let s_metal = match &*s_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal gdn prefill qkv conv-split state must be on Metal"),
-        };
-        let q_metal = match &*q_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal gdn prefill qkv conv-split q output must be on Metal"),
-        };
-        let k_metal = match &*k_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal gdn prefill qkv conv-split k output must be on Metal"),
-        };
-        let v_metal = match &*v_storage {
-            Storage::Metal(s) => s,
-            _ => anyhow::bail!("metal gdn prefill qkv conv-split v output must be on Metal"),
-        };
+        let w_metal = kt_metal(&weight)?;
+        let s_metal = kt_metal(conv_state)?;
+        let q_metal = kt_metal(&q)?;
+        let k_metal = kt_metal(&k)?;
+        let v_metal = kt_metal(&v)?;
 
         // #1082 Step 4 gdn-family: `buffer_o` → `buffer_o_kt`.
         let x_buf = buffer_o_kt(
-            x_metal.buffer(),
-            &kt_layout_from_candle(x_layout),
-            kt_dtype_from_candle(mixed_qkv.dtype()),
+            mixed_qkv_metal.buffer().as_ref(),
+            mixed_qkv.layout(),
+            mixed_qkv.dtype(),
         );
         let w_buf = buffer_o_kt(
-            w_metal.buffer(),
-            &kt_layout_from_candle(w_layout),
-            kt_dtype_from_candle(weight.dtype()),
+            w_metal.buffer().as_ref(),
+            weight.layout(),
+            weight.dtype(),
         );
         let s_buf = buffer_o_kt(
-            s_metal.buffer(),
-            &kt_layout_from_candle(s_layout),
-            kt_dtype_from_candle(conv_state.dtype()),
+            s_metal.buffer().as_ref(),
+            conv_state.layout(),
+            conv_state.dtype(),
         );
         let q_buf = buffer_o_kt(
-            q_metal.buffer(),
-            &kt_layout_from_candle(q_layout),
-            kt_dtype_from_candle(q.dtype()),
+            q_metal.buffer().as_ref(),
+            q.layout(),
+            q.dtype(),
         );
         let k_buf = buffer_o_kt(
-            k_metal.buffer(),
-            &kt_layout_from_candle(k_layout),
-            kt_dtype_from_candle(k.dtype()),
+            k_metal.buffer().as_ref(),
+            k.layout(),
+            k.dtype(),
         );
         let v_buf = buffer_o_kt(
-            v_metal.buffer(),
-            &kt_layout_from_candle(v_layout),
-            kt_dtype_from_candle(v.dtype()),
+            v_metal.buffer().as_ref(),
+            v.layout(),
+            v.dtype(),
         );
 
         encoder.set_buffer(0, Some(x_buf.buffer), x_buf.offset_in_bytes);

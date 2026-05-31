@@ -14456,11 +14456,17 @@ pub fn gated_deltanet_forward_streaming(
         let tile_out = {
             #[cfg(feature = "metal")]
             {
-                if matches!(tile_device, Device::Metal(_)) {
+                if let Device::Metal(mi) = tile_device {
                     let tile_out = metal_autoreleasepool(|| run_tile())?;
-                    tile_device.synchronize().with_context(|| {
-                        format!("synchronize streaming GDN tile [{cursor}, {end}) of {total}")
-                    })?;
+                    // #1082: kt-native device sync — wait on the Metal
+                    // companion's command queue (candle's `Device::synchronize`
+                    // is gone). Bounds the streaming-GDN tile's GPU work before
+                    // the host reads the next tile.
+                    kiln_tensor::primary_metal_companion(mi)
+                        .and_then(|c| c.wait_until_completed())
+                        .with_context(|| {
+                            format!("synchronize streaming GDN tile [{cursor}, {end}) of {total}")
+                        })?;
                     tile_out
                 } else {
                     run_tile()?

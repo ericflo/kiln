@@ -1000,6 +1000,19 @@ impl Tensor {
         Ok(self.shape()[axis])
     }
 
+    /// Rank-1 shape as a scalar, erroring on other ranks. candle's
+    /// `dims1`.
+    pub fn dims1(&self) -> Result<usize> {
+        let d = self.shape();
+        if d.len() != 1 {
+            return Err(crate::Error::Msg(format!(
+                "dims1: expected rank 1, got rank {} (shape {d:?})",
+                d.len()
+            )));
+        }
+        Ok(d[0])
+    }
+
     /// Rank-2 shape as a tuple, erroring on other ranks. candle's
     /// `dims2`.
     pub fn dims2(&self) -> Result<(usize, usize)> {

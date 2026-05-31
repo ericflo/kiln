@@ -107,6 +107,19 @@ pub use candle_metal_kernels::utils::BufferOffset;
 /// alongside that flip.
 pub use candle_core::metal_backend::MetalDevice;
 
+/// The raw `candle_metal_kernels` Metal device — the candle-CORE-free
+/// substrate handle every MSL pipeline / library build and every
+/// `call_*` kernel entry actually consumes. `MetalCompanion::device()`
+/// returns `&MetalRawDevice`; candle's `MetalDevice::device()` does too.
+///
+/// (#1082) The `metal_*_pipeline` helpers in `kiln-model::backend::metal`
+/// migrate their `device.id()` / `device.device()` candle calls onto a
+/// `&dyn MetalPipelineHost` parameter whose `pipeline_raw_device()`
+/// returns this type — so the same getter serves both a candle
+/// `MetalDevice` caller (during migration) and a kt `MetalCompanion`
+/// caller (the candle-free end state) with no per-call-site change.
+pub use candle_metal_kernels::metal::Device as MetalRawDevice;
+
 /// Candle `DeviceId` re-export — the `usize` newtype used as the cache
 /// key in every per-device pipeline / library `HashMap` in the
 /// `metal_*_pipeline` helpers. Same Phase-7 rationale as `MetalDevice`:
