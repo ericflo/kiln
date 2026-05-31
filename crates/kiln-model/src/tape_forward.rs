@@ -581,6 +581,85 @@ pub fn try_tape_mul_kt(
     }
 }
 
+/// kt-native transpose tape recorder (#1082 seam flip) — kt-only twin of
+/// [`try_tape_transpose_cuda`]. Materialises the transposed view contiguous
+/// (the `TransposeBackward` adjoint transposes the upstream grad regardless).
+pub fn try_tape_transpose_kt(
+    x: &kiln_tensor::Tensor,
+    axis_a: usize,
+    axis_b: usize,
+) -> Result<Option<kiln_tensor::Tensor>> {
+    if !tape_forward_enabled() {
+        return Ok(None);
+    }
+    if !matches!(x.device(), kiln_tensor::Device::Cuda(_)) {
+        return Ok(None);
+    }
+    let rank = x.rank();
+    if axis_a >= rank || axis_b >= rank {
+        return Ok(None);
+    }
+    match with_active_tape(|tape: &mut Tape| -> Result<_> {
+        let y = x
+            .transpose(axis_a, axis_b)
+            .map_err(|e| anyhow::anyhow!("kt transpose: {e}"))?;
+        let y = if y.is_contiguous() {
+            y
+        } else {
+            y.contiguous()
+                .map_err(|e| anyhow::anyhow!("kt transpose: contiguous: {e}"))?
+        };
+        tape.record(&y, &[x], Box::new(TransposeBackward { axis_a, axis_b }));
+        Ok(y)
+    }) {
+        Some(result) => Ok(Some(result?)),
+        None => Ok(None),
+    }
+}
+
+/// kt-native reshape tape recorder (#1082 seam flip) — kt-only twin of
+/// [`try_tape_reshape_cuda`]. The adjoint reshapes the upstream grad back to the
+/// original input shape. `Ok(None)` on element-count mismatch.
+pub fn try_tape_reshape_kt(
+    x: &kiln_tensor::Tensor,
+    new_shape: Vec<usize>,
+) -> Result<Option<kiln_tensor::Tensor>> {
+    if !tape_forward_enabled() {
+        return Ok(None);
+    }
+    if !matches!(x.device(), kiln_tensor::Device::Cuda(_)) {
+        return Ok(None);
+    }
+    let input_shape = x.shape().to_vec();
+    let in_elems: usize = input_shape.iter().product();
+    let out_elems: usize = new_shape.iter().product();
+    if in_elems != out_elems {
+        return Ok(None);
+    }
+    match with_active_tape(|tape: &mut Tape| -> Result<_> {
+        let x_c = if x.is_contiguous() {
+            x.clone()
+        } else {
+            x.contiguous()
+                .map_err(|e| anyhow::anyhow!("kt reshape: x.contiguous: {e}"))?
+        };
+        let out_kt = x_c
+            .reshape(new_shape.clone())
+            .map_err(|e| anyhow::anyhow!("kt reshape: {e}"))?;
+        tape.record(
+            &out_kt,
+            &[x],
+            Box::new(ReshapeBackward {
+                input_shape: input_shape.clone(),
+            }),
+        );
+        Ok(out_kt)
+    }) {
+        Some(result) => Ok(Some(result?)),
+        None => Ok(None),
+    }
+}
+
 /// Attempt to run an embedding lookup through the kt-typed op registry
 /// (`kiln_tensor::ops::embedding`) and record an `EmbeddingBackward`
 /// node on the active thread-local tape.

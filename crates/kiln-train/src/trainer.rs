@@ -10241,8 +10241,22 @@ pub(crate) mod tests {
         let device = CdDevice::Cuda(0);
         let config = tiny_config_bf16();
         let weights = tiny_weights_bf16(&config, &device).expect("bf16 tiny weights on cuda");
-        let mut params =
-            TrainableLoraParams::initialize(&config, &weights, 4, 8.0, &device).expect("params");
+        // #1082: seed the LoRA init so this test is DETERMINISTIC. `initialize`
+        // (no seed) falls back to `StdRng::seed_from_u64(rand::random())`, drawing
+        // different LoRA weights each run — which changed the FD target ranking /
+        // grad magnitudes / convergence trajectory run-to-run (~1/5 FD flake on a
+        // borderline attention row at rel ~0.555 just over the 0.5 tol). A fixed
+        // seed pins the init; `tiny_weights_bf16` is already seeded, so this is the
+        // last RNG source. Makes both the FD gate and the convergence check reproducible.
+        let mut params = TrainableLoraParams::initialize_seeded(
+            &config,
+            &weights,
+            4,
+            8.0,
+            &device,
+            Some(0xF1_17E_D1FF_u64),
+        )
+        .expect("params");
         let input_ids: Vec<u32> = vec![1, 5, 10, 3, 7, 2, 8];
         let label_mask = vec![false, false, true, true, true, true, false];
         let backend = backend::for_device_kt(&device);
@@ -10710,8 +10724,22 @@ pub(crate) mod tests {
         let device = CdDevice::Cuda(0);
         let config = tiny_config_bf16();
         let weights = tiny_weights_bf16(&config, &device).expect("bf16 tiny weights on cuda");
-        let mut params =
-            TrainableLoraParams::initialize(&config, &weights, 4, 8.0, &device).expect("params");
+        // #1082: seed the LoRA init so this test is DETERMINISTIC. `initialize`
+        // (no seed) falls back to `StdRng::seed_from_u64(rand::random())`, drawing
+        // different LoRA weights each run — which changed the FD target ranking /
+        // grad magnitudes / convergence trajectory run-to-run (~1/5 FD flake on a
+        // borderline attention row at rel ~0.555 just over the 0.5 tol). A fixed
+        // seed pins the init; `tiny_weights_bf16` is already seeded, so this is the
+        // last RNG source. Makes both the FD gate and the convergence check reproducible.
+        let mut params = TrainableLoraParams::initialize_seeded(
+            &config,
+            &weights,
+            4,
+            8.0,
+            &device,
+            Some(0xF1_17E_D1FF_u64),
+        )
+        .expect("params");
         let input_ids: Vec<u32> = vec![1, 5, 10, 3, 7, 2, 8];
         let label_mask = vec![false, false, true, true, true, true, false];
         let backend = backend::for_device_kt(&device);
