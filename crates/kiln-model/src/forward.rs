@@ -4958,6 +4958,7 @@ impl LinearAttentionState {
 // no-CUDA CPU host variant, so this loader bridge works on any build (candle is
 // a hard dep of kiln-model). The CPU/Metal loader paths previously bailed
 // "requires the cuda feature" and broke the no-CUDA `cargo test` runtime.
+#[cfg(any(not(feature = "cuda"), feature = "metal"))]
 fn candle_weight_to_kt(t: &candle_core::Tensor) -> Result<Tensor> {
     let contig = t
         .contiguous()
@@ -4971,6 +4972,7 @@ fn candle_weight_to_kt(t: &candle_core::Tensor) -> Result<Tensor> {
 /// Unconditional: `candle_device_from_kt` is a pure enum mapping with no
 /// CUDA toolchain dependency, so the loader's Metal path needs it on the
 /// non-cuda build too.
+#[cfg(any(not(feature = "cuda"), feature = "metal"))]
 fn loader_candle_device(device: &Device) -> Result<candle_core::Device> {
     kiln_kt_bridge::candle_device_from_kt(device).map_err(|e| anyhow::anyhow!("{e}"))
 }
@@ -5017,6 +5019,7 @@ fn weight_dtype(w: &WeightTensor) -> DType {
 /// constructs candle tensors before copy-bridging). (#1082)
 /// Unconditional: pure `TensorDType`→`candle_core::DType` map, no cuda dep;
 /// the loader's Metal path needs it on the non-cuda build too.
+#[cfg(any(not(feature = "cuda"), feature = "metal"))]
 fn weight_dtype_candle(w: &WeightTensor) -> candle_core::DType {
     match w.dtype {
         TensorDType::F16 => candle_core::DType::F16,
@@ -5396,6 +5399,7 @@ fn projection_tensors_for_load(
     }
 }
 
+#[cfg(feature = "metal")]
 fn parallel_projection_load_disabled() -> bool {
     matches!(
         std::env::var("KILN_DISABLE_PARALLEL_PROJECTION_LOAD")
@@ -5413,53 +5417,56 @@ fn projection_tensors_for_load_batch(
     device: &Device,
     cache: &ProjectionLoadCache,
 ) -> Result<Vec<(Tensor, Tensor)>> {
-    if !matches!(device, Device::Metal(_)) || parallel_projection_load_disabled() {
-        return weights
-            .iter()
+    // Metal-only parallel fast-path. It builds a candle leaf per weight then
+    // copy-bridges to kt, so it is gated to the `metal` build (#1082 DoD-100):
+    // the candle helpers it calls (`loader_candle_device` / `weight_dtype_candle`
+    // / `candle_weight_to_kt`) are NOT compiled into a pure-CUDA build, which is
+    // why this whole block is `cfg(metal)`. Every other device (incl. all of
+    // CUDA, where `device` is never Metal) falls through to the serial
+    // kt-native path below. (Pure-Metal kt loader = iteration-2 concern.)
+    #[cfg(feature = "metal")]
+    if matches!(device, Device::Metal(_)) && !parallel_projection_load_disabled() {
+        use rayon::prelude::*;
+
+        let transposed: Result<Vec<CachedTransposedWeightBytes>> = weights
+            .par_iter()
             .map(|(name, w)| {
-                projection_tensors_for_load(w, device, cache)
-                    .with_context(|| format!("{name} projection tensors"))
+                transposed_weight_bytes_2d_cached_bytes(w)
+                    .with_context(|| format!("{name} transposed projection bytes"))
+            })
+            .collect();
+
+        let cache = cache.clone();
+        let device = device.clone();
+        return transposed?
+            .into_par_iter()
+            .zip(weights.par_iter())
+            .map(|(data, (name, w))| {
+                let cdev = loader_candle_device(&device)?;
+                let transposed_candle = candle_core::Tensor::from_raw_buffer(
+                    data.as_bytes(),
+                    weight_dtype_candle(w),
+                    &data.shape(),
+                    &cdev,
+                )
+                .with_context(|| format!("{name} transposed projection upload"))?;
+                let transposed = candle_weight_to_kt(&transposed_candle)
+                    .with_context(|| format!("{name} transposed projection kt bridge"))?;
+                let original_stub = match cache.stub_for(weight_dtype(w)) {
+                    Some(stub) => stub,
+                    None => dropped_weight_stub(w, &device)
+                        .with_context(|| format!("{name} projection stub"))?,
+                };
+                Ok((original_stub, transposed))
             })
             .collect();
     }
 
-    use rayon::prelude::*;
-
-    let transposed: Result<Vec<CachedTransposedWeightBytes>> = weights
-        .par_iter()
+    weights
+        .iter()
         .map(|(name, w)| {
-            transposed_weight_bytes_2d_cached_bytes(w)
-                .with_context(|| format!("{name} transposed projection bytes"))
-        })
-        .collect();
-
-    let cache = cache.clone();
-    let device = device.clone();
-    transposed?
-        .into_par_iter()
-        .zip(weights.par_iter())
-        .map(|(data, (name, w))| {
-            // Metal-only parallel path. The `Gpu*Weights` fields are kt
-            // (#1082 forward-flip), so build a candle leaf then copy-bridge.
-            // `candle_weight_to_kt` is CUDA-gated; this path is unreachable on
-            // the CUDA production build (device is never Metal) but still
-            // type-checks there. (Pure-Metal kt loader = iteration-2 concern.)
-            let cdev = loader_candle_device(&device)?;
-            let transposed_candle = candle_core::Tensor::from_raw_buffer(
-                data.as_bytes(),
-                weight_dtype_candle(w),
-                &data.shape(),
-                &cdev,
-            )
-            .with_context(|| format!("{name} transposed projection upload"))?;
-            let transposed = candle_weight_to_kt(&transposed_candle)
-                .with_context(|| format!("{name} transposed projection kt bridge"))?;
-            let original_stub = match cache.stub_for(weight_dtype(w)) {
-                Some(stub) => stub,
-                None => dropped_weight_stub(w, &device)
-                    .with_context(|| format!("{name} projection stub"))?,
-            };
-            Ok((original_stub, transposed))
+            projection_tensors_for_load(w, device, cache)
+                .with_context(|| format!("{name} projection tensors"))
         })
         .collect()
 }
