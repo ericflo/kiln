@@ -921,6 +921,177 @@ impl VulkanBackend {
         }
     }
 
+    fn assemble_linear_attn_state_batch_kt(
+        &self,
+        state_map: &Mutex<
+            HashMap<kiln_tensor::TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>,
+        >,
+        row_keys: &[kiln_tensor::TensorId],
+        batch_key: kiln_tensor::TensorId,
+        label: &'static str,
+    ) -> Result<bool> {
+        if row_keys.is_empty() {
+            return Ok(false);
+        }
+        let Some(vk_device) = self.vulkan_device.as_ref() else {
+            return Ok(false);
+        };
+        let row_buffers = {
+            let g = state_map
+                .lock()
+                .map_err(|_| anyhow::anyhow!("kt {label} state mutex poisoned"))?;
+            let mut out = Vec::with_capacity(row_keys.len());
+            for key in row_keys {
+                let Some(buf) = g.get(key) else {
+                    return Ok(false);
+                };
+                out.push(Arc::clone(buf));
+            }
+            out
+        };
+        let batch_buffer =
+            kiln_vulkan_kernel::kernels::copy_device_buffer_rows_to_batch(vk_device, &row_buffers)
+                .with_context(|| format!("assemble kt {label} state batch rows"))?;
+        state_map
+            .lock()
+            .map_err(|_| anyhow::anyhow!("kt {label} state mutex poisoned"))?
+            .insert(batch_key, batch_buffer);
+        Ok(true)
+    }
+
+    fn scatter_linear_attn_state_batch_kt(
+        &self,
+        state_map: &Mutex<
+            HashMap<kiln_tensor::TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>,
+        >,
+        batch_key: kiln_tensor::TensorId,
+        row_keys: &[kiln_tensor::TensorId],
+        label: &'static str,
+    ) -> Result<bool> {
+        if row_keys.is_empty() {
+            return Ok(false);
+        }
+        let Some(vk_device) = self.vulkan_device.as_ref() else {
+            return Ok(false);
+        };
+        let batch_buffer = {
+            let g = state_map
+                .lock()
+                .map_err(|_| anyhow::anyhow!("kt {label} state mutex poisoned"))?;
+            let Some(buf) = g.get(&batch_key) else {
+                return Ok(false);
+            };
+            Arc::clone(buf)
+        };
+        let row_buffers = kiln_vulkan_kernel::kernels::split_device_buffer_batch_rows(
+            vk_device,
+            &batch_buffer,
+            row_keys.len(),
+        )
+        .with_context(|| format!("scatter kt {label} state batch rows"))?;
+        {
+            let mut g = state_map
+                .lock()
+                .map_err(|_| anyhow::anyhow!("kt {label} state mutex poisoned"))?;
+            for (key, buf) in row_keys.iter().copied().zip(row_buffers.into_iter()) {
+                g.insert(key, buf);
+            }
+        }
+        Ok(true)
+    }
+
+    fn assemble_linear_attn_recurrent_state_batch_kt(
+        &self,
+        row_keys: &[kiln_tensor::TensorId],
+        batch_key: kiln_tensor::TensorId,
+    ) -> Result<bool> {
+        self.assemble_linear_attn_state_batch_kt(
+            &self.linear_attn_recurrent_state_kt,
+            row_keys,
+            batch_key,
+            "recurrent",
+        )
+    }
+
+    fn assemble_linear_attn_conv_state_batch_kt(
+        &self,
+        row_keys: &[kiln_tensor::TensorId],
+        batch_key: kiln_tensor::TensorId,
+    ) -> Result<bool> {
+        self.assemble_linear_attn_state_batch_kt(
+            &self.linear_attn_conv_state_kt,
+            row_keys,
+            batch_key,
+            "conv",
+        )
+    }
+
+    fn scatter_linear_attn_recurrent_state_batch_kt(
+        &self,
+        batch_key: kiln_tensor::TensorId,
+        row_keys: &[kiln_tensor::TensorId],
+    ) -> Result<bool> {
+        self.scatter_linear_attn_state_batch_kt(
+            &self.linear_attn_recurrent_state_kt,
+            batch_key,
+            row_keys,
+            "recurrent",
+        )
+    }
+
+    fn scatter_linear_attn_conv_state_batch_kt(
+        &self,
+        batch_key: kiln_tensor::TensorId,
+        row_keys: &[kiln_tensor::TensorId],
+    ) -> Result<bool> {
+        self.scatter_linear_attn_state_batch_kt(
+            &self.linear_attn_conv_state_kt,
+            batch_key,
+            row_keys,
+            "conv",
+        )
+    }
+
+    pub fn assemble_linear_attn_gdn_state_batch_kt(
+        &self,
+        row_keys: &[kiln_tensor::TensorId],
+        batch_key: kiln_tensor::TensorId,
+    ) -> Result<bool> {
+        let recurrent_ok =
+            self.assemble_linear_attn_recurrent_state_batch_kt(row_keys, batch_key)?;
+        if !recurrent_ok {
+            return Ok(false);
+        }
+        let conv_ok = self.assemble_linear_attn_conv_state_batch_kt(row_keys, batch_key)?;
+        if !conv_ok {
+            return Ok(false);
+        }
+        self.mark_linear_attn_layer_seeded_kt(batch_key);
+        Ok(true)
+    }
+
+    pub fn scatter_linear_attn_gdn_state_batch_kt(
+        &self,
+        batch_key: kiln_tensor::TensorId,
+        row_keys: &[kiln_tensor::TensorId],
+    ) -> Result<bool> {
+        let recurrent_ok =
+            self.scatter_linear_attn_recurrent_state_batch_kt(batch_key, row_keys)?;
+        if !recurrent_ok {
+            return Ok(false);
+        }
+        let conv_ok = self.scatter_linear_attn_conv_state_batch_kt(batch_key, row_keys)?;
+        if !conv_ok {
+            return Ok(false);
+        }
+        if let Ok(mut seeded) = self.seeded_linear_attn_layers_kt.lock() {
+            for key in row_keys {
+                seeded.insert(*key);
+            }
+        }
+        Ok(true)
+    }
+
     /// Acquire (or lazily create) a persistent scratch
     /// [`VulkanBuffer`] under the given role key, sized to at least
     /// `min_bytes`. The same buffer is returned on every subsequent
