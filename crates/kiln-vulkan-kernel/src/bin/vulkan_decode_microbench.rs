@@ -25,9 +25,12 @@ use kiln_vulkan_kernel::shaders;
 
 const HIDDEN: usize = 2560;
 const Q_DIM: usize = 4096;
+const Q_GATE_DIM: usize = 2 * Q_DIM;
 const K_DIM: usize = 1024;
 const V_DIM: usize = 1024;
 const INTERMEDIATE: usize = 9216;
+const FULL_ATTN_TOTAL_OUT: usize = Q_GATE_DIM + K_DIM + V_DIM;
+const FULL_ATTN_SPLIT_TOTAL: usize = Q_DIM + K_DIM + V_DIM;
 
 // Qwen3.5-4B GDN shapes.
 const GDN_NUM_KEY_HEADS: usize = 16;
@@ -276,7 +279,7 @@ fn run() -> Result<()> {
     let want = |name: &str| only.as_deref().is_none_or(|s| s == name);
 
     // Pre-upload weights once.
-    let q_w = make_bf16_weight_slice(HIDDEN, Q_DIM);
+    let q_w = make_bf16_weight_slice(HIDDEN, Q_GATE_DIM);
     let k_w = make_bf16_weight_slice(HIDDEN, K_DIM);
     let v_w = make_bf16_weight_slice(HIDDEN, V_DIM);
     let gate_w = make_bf16_weight_slice(HIDDEN, INTERMEDIATE);
@@ -304,14 +307,15 @@ fn run() -> Result<()> {
     let batches = batch_sweep();
 
     if want("full_attn_qkv") {
-        println!("== full_attn QKV (fused, bf16w) ==");
+        println!("== full_attn QKV+gate (fused, bf16w) ==");
         for &batch in batches.as_slice() {
             // x = zeros [batch, 1, HIDDEN] f32. Bytes-typed dispatch
             // takes &[u8] directly, with no tensor-object staging.
             let x_bytes = vec![0u8; batch * HIDDEN * 4];
             time("full_attn_qkv_decode", batch, || {
                 kiln_vulkan_kernel::kernels::dispatch_full_attn_qkv_decode_cached_batched_bf16_weights_bytes(
-                    &device, &x_bytes, &q_buf, &k_buf, &v_buf, batch, HIDDEN, Q_DIM, K_DIM, V_DIM,
+                    &device, &x_bytes, &q_buf, &k_buf, &v_buf, batch, HIDDEN, Q_GATE_DIM, K_DIM,
+                    V_DIM,
                 )?;
                 Ok(())
             })?;
@@ -635,11 +639,12 @@ fn run_full_token_resident_mixed_batched(
         let residual_hidden = mk(hidden_bytes)?;
         let final_out = mk(hidden_bytes)?;
 
-        let fa_qkv_combined = mk((batch * (Q_DIM + K_DIM + V_DIM) * 4) as u64)?;
+        let fa_qkv_combined = mk((batch * FULL_ATTN_TOTAL_OUT * 4) as u64)?;
         let fa_q_buf = mk((batch * num_heads * head_dim * 4) as u64)?;
         let fa_q_rot = mk((batch * num_heads * head_dim * 4) as u64)?;
         let fa_k_buf = mk((batch * num_kv_heads * head_dim * 4) as u64)?;
         let fa_k_rot = mk((batch * num_kv_heads * head_dim * 4) as u64)?;
+        let fa_v_buf = mk((batch * num_kv_heads * head_dim * 4) as u64)?;
         let fa_gate_buf = mk((batch * num_heads * head_dim * 4) as u64)?;
         let k_pool = mk((batch * max_seqlen * num_kv_heads * head_dim * 4) as u64)?;
         let v_pool = mk((batch * max_seqlen * num_kv_heads * head_dim * 4) as u64)?;
@@ -683,7 +688,7 @@ fn run_full_token_resident_mixed_batched(
                         &[batch as u32, HIDDEN as u32, eps.to_bits()],
                         Workgroups::OneD(batch as u32),
                     )?;
-                    let total_out = Q_DIM + K_DIM + V_DIM;
+                    let total_out = FULL_ATTN_TOTAL_OUT;
                     let (qkv_shader, qkv_workgroups) =
                         full_attn_qkv_bf16w_plan(batch, total_out);
                     b.record_shader(
@@ -697,7 +702,7 @@ fn run_full_token_resident_mixed_batched(
                         ],
                         &[
                             HIDDEN as u32,
-                            Q_DIM as u32,
+                            Q_GATE_DIM as u32,
                             K_DIM as u32,
                             V_DIM as u32,
                             total_out as u32,
@@ -706,24 +711,37 @@ fn run_full_token_resident_mixed_batched(
                         Workgroups::OneD(qkv_workgroups),
                     )?;
                     b.record_shader(
-                        rmsnorm_shader,
-                        &[fa_q_buf.handle(), weight_qknorm.handle(), fa_q_buf.handle()],
+                        shaders::QKV_GATE_SPLIT_BATCHED,
                         &[
-                            (batch * num_heads) as u32,
-                            head_dim as u32,
-                            eps.to_bits(),
+                            fa_qkv_combined.handle(),
+                            fa_q_buf.handle(),
+                            fa_gate_buf.handle(),
+                            fa_k_buf.handle(),
+                            fa_v_buf.handle(),
                         ],
-                        Workgroups::OneD((batch * num_heads) as u32),
+                        &[
+                            batch as u32,
+                            num_heads as u32,
+                            num_kv_heads as u32,
+                            head_dim as u32,
+                        ],
+                        Workgroups::OneD((batch * FULL_ATTN_SPLIT_TOTAL).div_ceil(256) as u32),
                     )?;
                     b.record_shader(
-                        rmsnorm_shader,
-                        &[fa_k_buf.handle(), weight_qknorm.handle(), fa_k_buf.handle()],
+                        shaders::QWEN_RMSNORM_QK_COMBINED,
                         &[
+                            fa_q_buf.handle(),
+                            weight_qknorm.handle(),
+                            fa_k_buf.handle(),
+                            weight_qknorm.handle(),
+                        ],
+                        &[
+                            (batch * num_heads) as u32,
                             (batch * num_kv_heads) as u32,
                             head_dim as u32,
                             eps.to_bits(),
                         ],
-                        Workgroups::OneD((batch * num_kv_heads) as u32),
+                        Workgroups::OneD((batch * (num_heads + num_kv_heads)) as u32),
                     )?;
                     b.record_shader(
                         rope_shader,
@@ -1600,7 +1618,7 @@ fn run_full_step_resident_batched(
     use std::sync::Arc;
 
     println!(
-        "== full_step_resident_batched (same 11 kernels, recorded into 1 command-buffer + 1 submit) =="
+        "== full_step_resident_batched (gated-Q full-attn block, recorded into 1 command-buffer + 1 submit) =="
     );
 
     let num_heads = 16usize;
@@ -1653,12 +1671,12 @@ fn run_full_step_resident_batched(
         let x_buf = mk(hidden_bytes)?;
         let final_out = mk(hidden_bytes)?;
         let scratch = mk((batch * INTERMEDIATE * 4) as u64)?;
-        let qkv_combined = mk((batch * (Q_DIM + K_DIM + V_DIM) * 4) as u64)?;
+        let qkv_combined = mk((batch * FULL_ATTN_TOTAL_OUT * 4) as u64)?;
         let q_buf = mk((batch * num_heads * head_dim * 4) as u64)?;
         let q_rot = mk((batch * num_heads * head_dim * 4) as u64)?;
         let k_buf = mk((batch * num_kv_heads * head_dim * 4) as u64)?;
         let k_rot = mk((batch * num_kv_heads * head_dim * 4) as u64)?;
-        let _v_buf = mk((batch * num_kv_heads * head_dim * 4) as u64)?;
+        let v_buf = mk((batch * num_kv_heads * head_dim * 4) as u64)?;
         let gate_buf = mk((batch * num_heads * head_dim * 4) as u64)?;
         let k_pool = mk((batch * max_seqlen * num_kv_heads * head_dim * 4) as u64)?;
         let v_pool = mk((batch * max_seqlen * num_kv_heads * head_dim * 4) as u64)?;
@@ -1689,7 +1707,7 @@ fn run_full_step_resident_batched(
                 Workgroups::OneD(batch as u32),
             )?;
             // 2) Fused QKV. Always use batched bf16w shader (covers b>=1).
-            let total_out = Q_DIM + K_DIM + V_DIM;
+            let total_out = FULL_ATTN_TOTAL_OUT;
             let (qkv_shader, qkv_workgroups) = full_attn_qkv_bf16w_plan(batch, total_out);
             b.record_shader(
                 qkv_shader,
@@ -1702,7 +1720,7 @@ fn run_full_step_resident_batched(
                 ],
                 &[
                     HIDDEN as u32,
-                    Q_DIM as u32,
+                    Q_GATE_DIM as u32,
                     K_DIM as u32,
                     V_DIM as u32,
                     total_out as u32,
@@ -1710,26 +1728,38 @@ fn run_full_step_resident_batched(
                 ],
                 Workgroups::OneD(qkv_workgroups),
             )?;
-            // 3) Per-head QK norm — same rmsnorm shader, rows=batch*heads.
             b.record_shader(
-                rmsnorm_shader,
-                &[q_buf.handle(), weight_qknorm.handle(), q_buf.handle()],
+                shaders::QKV_GATE_SPLIT_BATCHED,
                 &[
-                    (batch * num_heads) as u32,
-                    head_dim as u32,
-                    (1e-6f32).to_bits(),
+                    qkv_combined.handle(),
+                    q_buf.handle(),
+                    gate_buf.handle(),
+                    k_buf.handle(),
+                    v_buf.handle(),
                 ],
-                Workgroups::OneD((batch * num_heads) as u32),
+                &[
+                    batch as u32,
+                    num_heads as u32,
+                    num_kv_heads as u32,
+                    head_dim as u32,
+                ],
+                Workgroups::OneD((batch * FULL_ATTN_SPLIT_TOTAL).div_ceil(256) as u32),
             )?;
             b.record_shader(
-                rmsnorm_shader,
-                &[k_buf.handle(), weight_qknorm.handle(), k_buf.handle()],
+                shaders::QWEN_RMSNORM_QK_COMBINED,
                 &[
+                    q_buf.handle(),
+                    weight_qknorm.handle(),
+                    k_buf.handle(),
+                    weight_qknorm.handle(),
+                ],
+                &[
+                    (batch * num_heads) as u32,
                     (batch * num_kv_heads) as u32,
                     head_dim as u32,
                     (1e-6f32).to_bits(),
                 ],
-                Workgroups::OneD((batch * num_kv_heads) as u32),
+                Workgroups::OneD((batch * (num_heads + num_kv_heads)) as u32),
             )?;
             // 4) RoPE on Q
             b.record_shader(
@@ -1880,7 +1910,7 @@ fn run_full_token_resident_batched(
 
     const NUM_LAYERS: usize = 32;
     println!(
-        "== full_token_resident_batched ({NUM_LAYERS} layers × 11 kernels recorded into 1 cmd-buffer + 1 submit) =="
+        "== full_token_resident_batched ({NUM_LAYERS} gated-Q full-attn layers recorded into 1 cmd-buffer + 1 submit) =="
     );
 
     let num_heads = 16usize;
@@ -1928,11 +1958,12 @@ fn run_full_token_resident_batched(
         };
         let x_buf = mk(hidden_bytes)?;
         let scratch = mk((batch * INTERMEDIATE * 4) as u64)?;
-        let qkv_combined = mk((batch * (Q_DIM + K_DIM + V_DIM) * 4) as u64)?;
+        let qkv_combined = mk((batch * FULL_ATTN_TOTAL_OUT * 4) as u64)?;
         let q_buf = mk((batch * num_heads * head_dim * 4) as u64)?;
         let q_rot = mk((batch * num_heads * head_dim * 4) as u64)?;
         let k_buf = mk((batch * num_kv_heads * head_dim * 4) as u64)?;
         let k_rot = mk((batch * num_kv_heads * head_dim * 4) as u64)?;
+        let v_buf = mk((batch * num_kv_heads * head_dim * 4) as u64)?;
         let gate_buf = mk((batch * num_heads * head_dim * 4) as u64)?;
         let k_pool = mk((batch * max_seqlen * num_kv_heads * head_dim * 4) as u64)?;
         let v_pool = mk((batch * max_seqlen * num_kv_heads * head_dim * 4) as u64)?;
@@ -1963,7 +1994,7 @@ fn run_full_token_resident_batched(
                     &[batch as u32, HIDDEN as u32, (1e-6f32).to_bits()],
                     Workgroups::OneD(batch as u32),
                 )?;
-                let total_out = Q_DIM + K_DIM + V_DIM;
+                let total_out = FULL_ATTN_TOTAL_OUT;
                 let (qkv_shader, qkv_workgroups) = full_attn_qkv_bf16w_plan(batch, total_out);
                 b.record_shader(
                     qkv_shader,
@@ -1976,7 +2007,7 @@ fn run_full_token_resident_batched(
                     ],
                     &[
                         HIDDEN as u32,
-                        Q_DIM as u32,
+                        Q_GATE_DIM as u32,
                         K_DIM as u32,
                         V_DIM as u32,
                         total_out as u32,
@@ -1985,24 +2016,37 @@ fn run_full_token_resident_batched(
                     Workgroups::OneD(qkv_workgroups),
                 )?;
                 b.record_shader(
-                    rmsnorm_shader,
-                    &[q_buf.handle(), weight_qknorm.handle(), q_buf.handle()],
+                    shaders::QKV_GATE_SPLIT_BATCHED,
                     &[
-                        (batch * num_heads) as u32,
-                        head_dim as u32,
-                        (1e-6f32).to_bits(),
+                        qkv_combined.handle(),
+                        q_buf.handle(),
+                        gate_buf.handle(),
+                        k_buf.handle(),
+                        v_buf.handle(),
                     ],
-                    Workgroups::OneD((batch * num_heads) as u32),
+                    &[
+                        batch as u32,
+                        num_heads as u32,
+                        num_kv_heads as u32,
+                        head_dim as u32,
+                    ],
+                    Workgroups::OneD((batch * FULL_ATTN_SPLIT_TOTAL).div_ceil(256) as u32),
                 )?;
                 b.record_shader(
-                    rmsnorm_shader,
-                    &[k_buf.handle(), weight_qknorm.handle(), k_buf.handle()],
+                    shaders::QWEN_RMSNORM_QK_COMBINED,
                     &[
+                        q_buf.handle(),
+                        weight_qknorm.handle(),
+                        k_buf.handle(),
+                        weight_qknorm.handle(),
+                    ],
+                    &[
+                        (batch * num_heads) as u32,
                         (batch * num_kv_heads) as u32,
                         head_dim as u32,
                         (1e-6f32).to_bits(),
                     ],
-                    Workgroups::OneD((batch * num_kv_heads) as u32),
+                    Workgroups::OneD((batch * (num_heads + num_kv_heads)) as u32),
                 )?;
                 b.record_shader(
                     rope_shader,
@@ -2255,7 +2299,7 @@ fn run_full_token_resident_paged(
         };
         let x_buf = mk(hidden_bytes)?;
         let scratch = mk((batch * INTERMEDIATE * 4) as u64)?;
-        let qkv_combined = mk((batch * (Q_DIM + K_DIM + V_DIM) * 4) as u64)?;
+        let qkv_combined = mk((batch * FULL_ATTN_TOTAL_OUT * 4) as u64)?;
         let q_buf = mk((batch * num_heads * head_dim * 4) as u64)?;
         let q_rot = mk((batch * num_heads * head_dim * 4) as u64)?;
         let k_buf = mk((batch * num_kv_heads * head_dim * 4) as u64)?;
@@ -2286,7 +2330,7 @@ fn run_full_token_resident_paged(
                     Workgroups::OneD(batch as u32),
                 )?;
                 // 2) QKV projection (batched bf16w into one combined out)
-                let total_out = Q_DIM + K_DIM + V_DIM;
+                let total_out = FULL_ATTN_TOTAL_OUT;
                 let (qkv_shader, qkv_workgroups) = full_attn_qkv_bf16w_plan(batch, total_out);
                 b.record_shader(
                     qkv_shader,
@@ -2299,7 +2343,7 @@ fn run_full_token_resident_paged(
                     ],
                     &[
                         HIDDEN as u32,
-                        Q_DIM as u32,
+                        Q_GATE_DIM as u32,
                         K_DIM as u32,
                         V_DIM as u32,
                         total_out as u32,
@@ -2307,27 +2351,38 @@ fn run_full_token_resident_paged(
                     ],
                     Workgroups::OneD(qkv_workgroups),
                 )?;
-                // 3) Q-norm
                 b.record_shader(
-                    rmsnorm_shader,
-                    &[q_buf.handle(), weight_qknorm.handle(), q_buf.handle()],
+                    shaders::QKV_GATE_SPLIT_BATCHED,
+                    &[
+                        qkv_combined.handle(),
+                        q_buf.handle(),
+                        gate_buf.handle(),
+                        k_buf.handle(),
+                        v_buf.handle(),
+                    ],
+                    &[
+                        batch as u32,
+                        num_heads as u32,
+                        num_kv_heads as u32,
+                        head_dim as u32,
+                    ],
+                    Workgroups::OneD((batch * FULL_ATTN_SPLIT_TOTAL).div_ceil(256) as u32),
+                )?;
+                b.record_shader(
+                    shaders::QWEN_RMSNORM_QK_COMBINED,
+                    &[
+                        q_buf.handle(),
+                        weight_qknorm.handle(),
+                        k_buf.handle(),
+                        weight_qknorm.handle(),
+                    ],
                     &[
                         (batch * num_heads) as u32,
-                        head_dim as u32,
-                        (1e-6f32).to_bits(),
-                    ],
-                    Workgroups::OneD((batch * num_heads) as u32),
-                )?;
-                // 4) K-norm
-                b.record_shader(
-                    rmsnorm_shader,
-                    &[k_buf.handle(), weight_qknorm.handle(), k_buf.handle()],
-                    &[
                         (batch * num_kv_heads) as u32,
                         head_dim as u32,
                         (1e-6f32).to_bits(),
                     ],
-                    Workgroups::OneD((batch * num_kv_heads) as u32),
+                    Workgroups::OneD((batch * (num_heads + num_kv_heads)) as u32),
                 )?;
                 // 5) RoPE Q
                 b.record_shader(
