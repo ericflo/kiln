@@ -97,8 +97,11 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 
+#[cfg(feature = "candle")]
 use candle_core::backprop::GradStore as CandleGradStore;
+#[cfg(feature = "candle")]
 use candle_core::Tensor as CandleTensor;
+#[cfg(feature = "candle")]
 use candle_core::TensorId as CandleTensorId;
 use kiln_autograd::{with_active_tape, with_thread_local_tape, Tape};
 use kiln_tensor::TensorId as KtTensorId;
@@ -114,6 +117,7 @@ use crate::BridgeError;
 ///   recorded `kt_output_id`.
 /// * Convert kt input grads → candle grads keyed on the recorded
 ///   `candle_input_id`.
+#[cfg_attr(not(feature = "candle"), allow(dead_code))]
 #[derive(Debug, Default)]
 struct IoMappingScope {
     /// `kt_input_id → candle_input_id` for inputs registered by
@@ -163,6 +167,7 @@ thread_local! {
 /// No-ops cleanly when no bridge scope is active — callers can
 /// register unconditionally and the cost is one `RefCell::borrow_mut`
 /// + early return when the scope is off.
+#[cfg(feature = "candle")]
 pub fn register_input_mapping(kt_id: KtTensorId, candle_id: CandleTensorId) {
     BRIDGE_SCOPE.with(|cell| {
         let mut borrow = cell.borrow_mut();
@@ -272,6 +277,7 @@ pub fn register_input_mapping_kt(kt_id: KtTensorId, deposit_kt_id: KtTensorId) {
 /// the `output_id` field under; the candle-side TensorId is the new
 /// candle Tensor's `.id()` that the adapter is about to return to
 /// the caller (and which downstream candle ops will reference).
+#[cfg(feature = "candle")]
 pub fn register_output_mapping(kt_id: KtTensorId, candle_id: CandleTensorId) {
     BRIDGE_SCOPE.with(|cell| {
         let mut borrow = cell.borrow_mut();
@@ -304,6 +310,7 @@ pub fn register_output_mapping(kt_id: KtTensorId, candle_id: CandleTensorId) {
 /// kt `Tape` CONNECTED (consumer input id == producer output id) — the
 /// prerequisite for a tape-authoritative backward walk over a chain of
 /// adapters. No-op outside a bridge scope. (#1082 CP-4 endgame, Step A.)
+#[cfg(feature = "candle")]
 pub fn retain_output_for_chaining(kt_out: &kiln_tensor::Tensor, candle_id: CandleTensorId) {
     BRIDGE_SCOPE.with(|cell| {
         if let Some(scope) = cell.borrow_mut().as_mut() {
@@ -320,6 +327,7 @@ pub fn retain_output_for_chaining(kt_out: &kiln_tensor::Tensor, candle_id: Candl
 /// the tape connected. Returns `None` outside a bridge scope or for a
 /// candle tensor not produced by an adapter (caller should fresh-borrow).
 /// (#1082 CP-4 endgame, Step A.)
+#[cfg(feature = "candle")]
 pub fn kt_input_for_candle(candle_id: CandleTensorId) -> Option<kiln_tensor::Tensor> {
     BRIDGE_SCOPE.with(|cell| {
         cell.borrow()
@@ -560,6 +568,7 @@ pub fn bridge_scope_active() -> bool {
 ///   bridge).
 /// * Tape walk errors (e.g. anti-pattern 16 version drift).
 /// * kt → candle grad copy fails.
+#[cfg(feature = "candle")]
 pub fn with_tape_scope_emit_to_grad_store<T, F>(
     forward: F,
 ) -> Result<(T, CandleGradStore), BridgeError>
@@ -718,6 +727,7 @@ where
 ///
 /// (`GradStore::get_id` takes `TensorId`; we can't reconstruct one
 /// directly. Iterating is fine — the store is small.)
+#[cfg(feature = "candle")]
 fn lookup_candle_grad_by_raw(
     store: &CandleGradStore,
     target_raw: usize,
@@ -744,6 +754,7 @@ fn lookup_candle_grad_by_raw(
 /// candle backward never visited the input, we return an error so
 /// the wiring bug surfaces rather than dropping the gradient
 /// silently.
+#[cfg(feature = "candle")]
 fn insert_or_add_by_raw(
     store: &mut CandleGradStore,
     target_raw: usize,
