@@ -11923,6 +11923,10 @@ pub(crate) mod tests {
     /// pre-existing `tiny_config` / `tiny_weights` helpers from this module
     /// + a minimal chat-template tokenizer. Returns everything needed to
     /// drive `sft_train` end-to-end on CPU in well under a second per step.
+    /// (#1082) Only the engine-gated sft_train smokes use it now (CPU-only
+    /// training dropped), so gate it to match and avoid a dead-code warning on
+    /// the no-backend default build.
+    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
     fn build_perf_regression_cpu_fixture()
     -> Result<(ModelConfig, GpuWeights, KilnTokenizer, Vec<crate::SftExample>)> {
         let config = tiny_config();
@@ -11961,6 +11965,11 @@ pub(crate) mod tests {
     /// Wall-clock perf assertion is purely an upper bound — this test is
     /// not the actual perf gate. That lives in the nightly A6000
     /// workflow (Tier 2).
+    // (#1082) The candle-drop made SFT training (kt-tape checkpointed reverse)
+    // backend-gated — CPU-only (no engine) training is dropped. This smoke runs
+    // on any of the three engines; it must pass on at least one (CUDA today).
+    // The no-backend default build excludes it (CPU training is gone).
+    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
     #[test]
     fn perf_regression_sft_train_cpu_smoke_completes_under_30s() -> Result<()> {
         let (config, weights, tokenizer, examples) = build_perf_regression_cpu_fixture()?;
@@ -12032,6 +12041,10 @@ pub(crate) mod tests {
     ///   2. Run `sft_train` end-to-end so refactors that break the
     ///      training-side `from_env` call at trainer.rs:3234 still get
     ///      caught.
+    // (#1082) runs sft_train end-to-end → backend-gated post candle-drop (CPU-only
+    // training dropped). Gate to the three engines (CUDA today); excluded on the
+    // no-backend default build.
+    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
     #[test]
     fn perf_regression_sft_train_emits_auto_tune_log_line() -> Result<()> {
         // RAII guard so the env override is scrubbed even if a later
