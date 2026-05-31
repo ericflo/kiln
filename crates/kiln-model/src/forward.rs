@@ -21852,6 +21852,140 @@ pub fn model_forward_paged_decode_contiguous_batch(
     Ok(logits)
 }
 
+#[cfg(feature = "vulkan")]
+fn tensor_to_f32_flat_vec_vk(t: &Tensor) -> Result<Vec<f32>> {
+    let flat = if t.dtype() == DType::F32 {
+        t.flatten_all()?
+    } else {
+        t.to_dtype(DType::F32)?.flatten_all()?
+    };
+    flat.to_vec1::<f32>()
+}
+
+#[cfg(feature = "vulkan")]
+#[allow(clippy::too_many_arguments)]
+fn try_vulkan_resident_batched_decode_argmax(
+    backend: &dyn BackendRuntime,
+    token_ids: &[u32],
+    weights: &GpuWeights,
+    config: &kiln_core::config::ModelConfig,
+    paged_cache: &PagedKvCache,
+    block_tables: &[&BlockTable],
+    start_positions: &[usize],
+    linear_state: Option<&LinearAttentionState>,
+    lora: Option<&LoraWeights>,
+) -> Result<Option<Vec<u32>>> {
+    let batch = token_ids.len();
+    if batch <= 1
+        || block_tables.len() != batch
+        || start_positions.len() != batch
+        || start_positions.iter().any(|&p| p == 0)
+        || lora.is_some()
+        || !config.attn_output_gate
+        || !kiln_core::env_flag::env_flag("KILN_VK_RESIDENT_DECODE_NATIVE", true)
+        || !backend.supports_resident_decode()
+        || !resident_decode_pool_ready(backend, config)
+        || crate::mtp_debug::is_subop_capture_armed()
+        || crate::mtp_debug::current_b12_layer_is_31()
+        || crate::mtp_debug::is_mtp_single_token_self_attn_armed()
+    {
+        return Ok(None);
+    }
+
+    let Some(vk_backend) = backend
+        .as_any()
+        .downcast_ref::<crate::backend::vulkan::VulkanBackend>()
+    else {
+        return Ok(None);
+    };
+    let Some(vk_device) = vk_backend.vulkan_device() else {
+        return Ok(None);
+    };
+    let Some(vk_kv_cache) = vk_backend.vk_paged_kv_cache(
+        config.num_full_attention_layers,
+        paged_cache.num_blocks(),
+        paged_cache.block_size(),
+        config.num_kv_heads,
+        config.head_dim,
+    ) else {
+        return Ok(None);
+    };
+
+    let has_linear_layers = weights
+        .layers
+        .iter()
+        .any(|layer| matches!(layer.attention, GpuAttentionWeights::Linear(_)));
+    let empty_states: &[Tensor] = &[];
+    let (recurrent_states, conv_states): (&[Tensor], &[Tensor]) = if has_linear_layers {
+        if std::env::var("KILN_DISABLE_FAST_BATCHED_LINEAR_STATE_SCATTER").is_ok() {
+            return Ok(None);
+        }
+        let Some(state) = linear_state else {
+            return Ok(None);
+        };
+        if state.batch_size()? != batch {
+            return Ok(None);
+        }
+        (
+            state.recurrent_states.as_slice(),
+            state.conv_states.as_slice(),
+        )
+    } else {
+        (empty_states, empty_states)
+    };
+
+    let hidden = embedding_lookup_from_weights(token_ids, weights)?;
+    let expected_hidden = [batch, config.hidden_size];
+    if hidden.dims() != expected_hidden.as_slice() {
+        return Ok(None);
+    }
+    let hidden_rows = tensor_to_f32_flat_vec_vk(&hidden)?;
+
+    let device = weights.embed_tokens.device();
+    let positions_f32: Vec<f32> = start_positions.iter().map(|&p| p as f32).collect();
+    let positions = Tensor::from_vec_on(device, positions_f32, vec![batch])?;
+    let (rope_cos, rope_sin) =
+        rotary_tables_from_tensor(&positions, &weights.rotary_inv_freq)?;
+    let expected_rope = [batch, config.rotary_dim() / 2];
+    if rope_cos.dims() != expected_rope.as_slice()
+        || rope_sin.dims() != expected_rope.as_slice()
+    {
+        return Ok(None);
+    }
+    let rope_cos_rows = tensor_to_f32_flat_vec_vk(&rope_cos)?;
+    let rope_sin_rows = tensor_to_f32_flat_vec_vk(&rope_sin)?;
+
+    let mut full_attn_idx = 0usize;
+    for layer in weights.layers.iter() {
+        if matches!(layer.attention, GpuAttentionWeights::Full(_)) {
+            crate::vk_decode_resident::seed_vk_kv_cache_layer_blocks_from_batched_tables(
+                vk_device,
+                vk_kv_cache,
+                paged_cache,
+                full_attn_idx,
+                block_tables,
+            )?;
+            full_attn_idx += 1;
+        }
+    }
+
+    crate::vk_decode_resident::submit_transformer_stack_batched_argmax_from_host(
+        vk_backend,
+        vk_device,
+        &hidden_rows,
+        &rope_cos_rows,
+        &rope_sin_rows,
+        block_tables,
+        start_positions,
+        paged_cache.block_size(),
+        weights,
+        config,
+        vk_kv_cache,
+        recurrent_states,
+        conv_states,
+    )
+}
+
 /// Strict batched single-token paged decode that returns greedy next-token IDs
 /// without materializing full logits when a backend has a fused argmax path.
 #[allow(clippy::too_many_arguments)]
@@ -21866,6 +22000,21 @@ pub fn model_forward_paged_decode_contiguous_batch_greedy(
     linear_state: Option<&mut LinearAttentionState>,
     lora: Option<&LoraWeights>,
 ) -> Result<Vec<u32>> {
+    #[cfg(feature = "vulkan")]
+    if let Some(next_tokens) = try_vulkan_resident_batched_decode_argmax(
+        backend,
+        token_ids,
+        weights,
+        config,
+        paged_cache,
+        block_tables,
+        start_positions,
+        linear_state.as_deref(),
+        lora,
+    )? {
+        return Ok(next_tokens);
+    }
+
     let hidden = model_forward_paged_decode_contiguous_batch_hidden(
         backend,
         token_ids,
