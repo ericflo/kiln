@@ -7,28 +7,11 @@
 //! of `x` and host readback of the output, so the numbers reflect
 //! end-to-end per-call cost.
 //!
-//! Usage: `cargo run --release --example decode_microbench -p kiln-vulkan-kernel`.
+//! Usage: `cargo run --release -p kiln-vulkan-kernel --bin vulkan_decode_microbench`.
 
 use std::time::Instant;
 
 use anyhow::Result;
-// TODO(#1082): The top-level dispatch surface this microbench exercises in
-// `run()` (full_attn_qkv, mlp gate_up, mlp_bf16_gu_f32_d, mlp_bf16w,
-// linear_decode, causal_conv1d_update, gdn_gated_norm, qwen_rmsnorm,
-// gdn_gates, gdn_in_proj) is now called through the candle-free `*_bytes`
-// companions in `kiln_vulkan_kernel::kernels`. Weight uploads use
-// `upload_bf16_packed_buffer_from_slice` / `upload_f32_buffer_from_slice`.
-//
-// The resident-path helpers (`run_full_step_resident*`,
-// `run_full_token_resident*`) have also been migrated to the candle-free
-// `*_from_slice` upload helpers and no longer construct candle Tensors.
-//
-// What still pins `candle_core` in this file: the `run()` setup at the
-// top uses the candle-typed `make_bf16_weight` + `upload_bf16_packed`
-// shims (plus a `down_w.to_dtype(DType::F32)` conversion). These can be
-// migrated when their candle-free counterparts are wired through Zone A.
-// Tracked as a follow-up under #1082.
-use candle_core::{DType, Device, Tensor};
 use half::bf16;
 use kiln_vulkan_kernel::buffer::VulkanBuffer;
 use kiln_vulkan_kernel::device::VulkanDevice;
@@ -54,18 +37,9 @@ const B_DIM: usize = 32;
 const WARMUP_ITERS: usize = 10;
 const TIMED_ITERS: usize = 30;
 const REPEATS: usize = 5;
+const DEFAULT_BATCHES: &[usize] = &[1, 4, 8, 16, 32, 64];
 
-fn make_bf16_weight(rows: usize, cols: usize) -> Result<Tensor> {
-    let n = rows * cols;
-    let data: Vec<bf16> = (0..n)
-        .map(|i| bf16::from_f32(((i % 31) as f32 - 15.0) * 0.01))
-        .collect();
-    Tensor::from_vec(data, (rows, cols), &Device::Cpu).map_err(Into::into)
-}
-
-/// Candle-free counterpart to `make_bf16_weight` for the bytes-typed
-/// dispatch entries. Returns a flat `Vec<bf16>` with the same fill
-/// pattern as `make_bf16_weight`. (#1082)
+/// Deterministic flat `Vec<bf16>` weight data for byte/slice dispatch entries.
 fn make_bf16_weight_slice(rows: usize, cols: usize) -> Vec<bf16> {
     let n = rows * cols;
     (0..n)
@@ -73,25 +47,44 @@ fn make_bf16_weight_slice(rows: usize, cols: usize) -> Vec<bf16> {
         .collect()
 }
 
-fn upload_bf16_packed(device: &VulkanDevice, t: &Tensor) -> Result<VulkanBuffer> {
-    // #1082: the candle-typed `upload_tensor_bf16_packed_buffer` was removed
-    // in the kernels.rs candle-free pass; extract the bf16 slice and use the
-    // candle-free `_from_slice` entry point.
-    let data = t.flatten_all()?.to_dtype(DType::BF16)?.to_vec1::<bf16>()?;
-    upload_bf16_packed_buffer_from_slice(device, &data)
+fn env_usize(name: &str, default: usize) -> usize {
+    std::env::var(name)
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(default)
+}
+
+fn batch_sweep() -> Vec<usize> {
+    let Some(parsed) = std::env::var("KILN_VK_MICROBENCH_BATCHES")
+        .ok()
+        .map(|s| {
+            s.split(',')
+                .filter_map(|part| part.trim().parse::<usize>().ok())
+                .filter(|&n| n > 0)
+                .collect::<Vec<_>>()
+        })
+        .filter(|values| !values.is_empty())
+    else {
+        return DEFAULT_BATCHES.to_vec();
+    };
+    parsed
 }
 
 fn time<F: FnMut() -> Result<()>>(label: &str, batch: usize, mut f: F) -> Result<()> {
-    for _ in 0..WARMUP_ITERS {
+    let warmup_iters = env_usize("KILN_VK_MICROBENCH_WARMUP", WARMUP_ITERS);
+    let timed_iters = env_usize("KILN_VK_MICROBENCH_TIMED", TIMED_ITERS);
+    let repeats = env_usize("KILN_VK_MICROBENCH_REPEATS", REPEATS);
+    for _ in 0..warmup_iters {
         f()?;
     }
     // Take the minimum per-iter time across REPEATS independent timed blocks.
     // The fastest block is the cleanest signal of steady-state kernel cost;
     // mean is dragged around by background load and GPU thermal swings.
     let mut best_ns = u128::MAX;
-    for _ in 0..REPEATS {
+    for _ in 0..repeats {
         let start = Instant::now();
-        for _ in 0..TIMED_ITERS {
+        for _ in 0..timed_iters {
             f()?;
         }
         let elapsed = start.elapsed().as_nanos();
@@ -99,8 +92,8 @@ fn time<F: FnMut() -> Result<()>>(label: &str, batch: usize, mut f: F) -> Result
             best_ns = elapsed;
         }
     }
-    let per_iter_us = (best_ns as f64 / TIMED_ITERS as f64) / 1_000.0;
-    let rows_per_sec = (batch as f64 * TIMED_ITERS as f64) / (best_ns as f64 / 1e9);
+    let per_iter_us = (best_ns as f64 / timed_iters as f64) / 1_000.0;
+    let rows_per_sec = (batch as f64 * timed_iters as f64) / (best_ns as f64 / 1e9);
     println!(
         "{label:<32} batch={batch:>3}  per_iter={per_iter_us:>8.1} us  rows/s={rows_per_sec:>10.0}"
     );
@@ -123,39 +116,38 @@ fn run() -> Result<()> {
     let want = |name: &str| only.as_deref().is_none_or(|s| s == name);
 
     // Pre-upload weights once.
-    let q_w = make_bf16_weight(HIDDEN, Q_DIM)?;
-    let k_w = make_bf16_weight(HIDDEN, K_DIM)?;
-    let v_w = make_bf16_weight(HIDDEN, V_DIM)?;
-    let gate_w = make_bf16_weight(HIDDEN, INTERMEDIATE)?;
-    let up_w = make_bf16_weight(HIDDEN, INTERMEDIATE)?;
-    let down_w = make_bf16_weight(INTERMEDIATE, HIDDEN)?;
-    let down_w_f32 = down_w.to_dtype(DType::F32)?;
-    let qkv_w = make_bf16_weight(HIDDEN, QKV_DIM)?;
-    let z_w = make_bf16_weight(HIDDEN, Z_DIM)?;
-    let a_w = make_bf16_weight(HIDDEN, A_DIM)?;
-    let b_w = make_bf16_weight(HIDDEN, B_DIM)?;
+    let q_w = make_bf16_weight_slice(HIDDEN, Q_DIM);
+    let k_w = make_bf16_weight_slice(HIDDEN, K_DIM);
+    let v_w = make_bf16_weight_slice(HIDDEN, V_DIM);
+    let gate_w = make_bf16_weight_slice(HIDDEN, INTERMEDIATE);
+    let up_w = make_bf16_weight_slice(HIDDEN, INTERMEDIATE);
+    let down_w = make_bf16_weight_slice(INTERMEDIATE, HIDDEN);
+    let down_w_f32: Vec<f32> = down_w.iter().map(|v| v.to_f32()).collect();
+    let qkv_w = make_bf16_weight_slice(HIDDEN, QKV_DIM);
+    let z_w = make_bf16_weight_slice(HIDDEN, Z_DIM);
+    let a_w = make_bf16_weight_slice(HIDDEN, A_DIM);
+    let b_w = make_bf16_weight_slice(HIDDEN, B_DIM);
 
-    let q_buf = upload_bf16_packed(&device, &q_w)?;
-    let k_buf = upload_bf16_packed(&device, &k_w)?;
-    let v_buf = upload_bf16_packed(&device, &v_w)?;
-    let gate_buf = upload_bf16_packed(&device, &gate_w)?;
-    let up_buf = upload_bf16_packed(&device, &up_w)?;
-    let down_buf = upload_bf16_packed(&device, &down_w)?;
+    let q_buf = upload_bf16_packed_buffer_from_slice(&device, &q_w)?;
+    let k_buf = upload_bf16_packed_buffer_from_slice(&device, &k_w)?;
+    let v_buf = upload_bf16_packed_buffer_from_slice(&device, &v_w)?;
+    let gate_buf = upload_bf16_packed_buffer_from_slice(&device, &gate_w)?;
+    let up_buf = upload_bf16_packed_buffer_from_slice(&device, &up_w)?;
+    let down_buf = upload_bf16_packed_buffer_from_slice(&device, &down_w)?;
     // f32 down buffer for bf16_gate_up_f32_down variant.
-    let down_f32_data = down_w_f32.flatten_all()?.to_dtype(DType::F32)?.to_vec1::<f32>()?;
-    let down_f32_buf = upload_f32_buffer_from_slice(&device, &down_f32_data)?;
-    let qkv_buf = upload_bf16_packed(&device, &qkv_w)?;
-    let z_buf = upload_bf16_packed(&device, &z_w)?;
-    let a_buf = upload_bf16_packed(&device, &a_w)?;
-    let b_buf = upload_bf16_packed(&device, &b_w)?;
+    let down_f32_buf = upload_f32_buffer_from_slice(&device, &down_w_f32)?;
+    let qkv_buf = upload_bf16_packed_buffer_from_slice(&device, &qkv_w)?;
+    let z_buf = upload_bf16_packed_buffer_from_slice(&device, &z_w)?;
+    let a_buf = upload_bf16_packed_buffer_from_slice(&device, &a_w)?;
+    let b_buf = upload_bf16_packed_buffer_from_slice(&device, &b_w)?;
 
-    let batches: [usize; 6] = [1, 4, 8, 16, 32, 64];
+    let batches = batch_sweep();
 
     if want("full_attn_qkv") {
         println!("== full_attn QKV (fused, bf16w) ==");
-        for &batch in &batches {
+        for &batch in batches.as_slice() {
             // x = zeros [batch, 1, HIDDEN] f32. Bytes-typed dispatch
-            // takes &[u8] directly — no candle Tensor staging. (#1082)
+            // takes &[u8] directly, with no tensor-object staging.
             let x_bytes = vec![0u8; batch * HIDDEN * 4];
             time("full_attn_qkv_decode", batch, || {
                 kiln_vulkan_kernel::kernels::dispatch_full_attn_qkv_decode_cached_batched_bf16_weights_bytes(
@@ -169,7 +161,7 @@ fn run() -> Result<()> {
 
     if want("mlp_bf16_gu_f32_d") {
         println!("== MLP gate_up + down (bf16 g/u, f32 down) ==");
-        for &batch in &batches {
+        for &batch in batches.as_slice() {
             let x_bytes = vec![0u8; batch * HIDDEN * 4];
             time("mlp_decode_bf16_gu_f32_d", batch, || {
                 kiln_vulkan_kernel::kernels::dispatch_mlp_decode_cached_bf16_gate_up_f32_down_bytes(
@@ -191,7 +183,7 @@ fn run() -> Result<()> {
 
     if want("mlp_bf16w") {
         println!("== MLP gate_up + down (full bf16) ==");
-        for &batch in &batches {
+        for &batch in batches.as_slice() {
             let x_bytes = vec![0u8; batch * HIDDEN * 4];
             time("mlp_decode_bf16w", batch, || {
                 kiln_vulkan_kernel::kernels::dispatch_mlp_decode_cached_bf16_weights_bytes(
@@ -215,14 +207,15 @@ fn run() -> Result<()> {
         // Q-out / GDN-out shape: take Q dim → hidden. Exercises the
         // standalone bf16w linear decode used for attention out_proj.
         println!("== linear_decode_cached_bf16w (Q out, q_dim→hidden) ==");
-        // Build the bf16w buffer from a candle-free bf16 slice. (#1082)
+        // Build the bf16w buffer from a bf16 slice.
         let q_out_weight = make_bf16_weight_slice(Q_DIM, HIDDEN);
         let q_out_buf = upload_bf16_packed_buffer_from_slice(&device, &q_out_weight)?;
-        for &batch in &batches {
+        for &batch in batches.as_slice() {
             let x_bytes = vec![0u8; batch * Q_DIM * 4];
             time("linear_decode_bf16w_qout", batch, || {
                 kiln_vulkan_kernel::kernels::dispatch_linear_decode_cached_bytes(
-                    &device, &x_bytes, &q_out_buf, batch, Q_DIM, HIDDEN, /*packed_bf16_weights=*/ true,
+                    &device, &x_bytes, &q_out_buf, batch, Q_DIM, HIDDEN,
+                    /*packed_bf16_weights=*/ true,
                 )?;
                 Ok(())
             })?;
@@ -238,7 +231,7 @@ fn run() -> Result<()> {
         // [batch, channels, kernel_size - 1], x shape [batch, channels, 1].
         // All f32. The bytes-typed dispatch takes them as &[u8]. (#1082)
         let weight_bytes = vec![0u8; channels * kernel_size * 4];
-        for &batch in &batches {
+        for &batch in batches.as_slice() {
             let x_bytes = vec![0u8; batch * channels * 1 * 4];
             let state_bytes = vec![0u8; batch * channels * (kernel_size - 1) * 4];
             time("causal_conv1d_update", batch, || {
@@ -260,10 +253,10 @@ fn run() -> Result<()> {
 
     if want("gdn_gated_norm") {
         println!("== gdn_gated_rms_norm_cached (hidden=2560) ==");
-        // Weight = ones(HIDDEN, f32). Candle-free upload via from_slice.
+        // Weight = ones(HIDDEN, f32).
         let weight_data: Vec<f32> = vec![1.0; HIDDEN];
         let weight = upload_f32_buffer_from_slice(&device, &weight_data)?;
-        for &batch in &batches {
+        for &batch in batches.as_slice() {
             let x_bytes = vec![0u8; batch * HIDDEN * 4];
             let z_bytes = vec![0u8; batch * HIDDEN * 4];
             time("gdn_gated_norm_cached", batch, || {
@@ -285,10 +278,10 @@ fn run() -> Result<()> {
     if want("qwen_rmsnorm") {
         println!("== qwen_rmsnorm_forward (hidden=2560 per row) ==");
         // weight = ones(HIDDEN). Both x and weight are passed as raw
-        // f32 bytes to the candle-free dispatch. (#1082)
+        // f32 bytes to the raw-byte dispatch.
         let weight_data: Vec<f32> = vec![1.0; HIDDEN];
         let weight_bytes: &[u8] = bytemuck::cast_slice(&weight_data);
-        for &batch in &batches {
+        for &batch in batches.as_slice() {
             let x_bytes = vec![0u8; batch * HIDDEN * 4];
             time("qwen_rmsnorm_forward", batch, || {
                 kiln_vulkan_kernel::kernels::dispatch_qwen_rmsnorm_forward_bytes(
@@ -313,7 +306,7 @@ fn run() -> Result<()> {
         let dt_bias_w = make_bf16_weight_slice(1, nv);
         let a_log = upload_bf16_packed_buffer_from_slice(&device, &a_log_w)?;
         let dt_bias = upload_bf16_packed_buffer_from_slice(&device, &dt_bias_w)?;
-        for &batch in &batches {
+        for &batch in batches.as_slice() {
             let a_bytes = vec![0u8; batch * 1 * nv * 4];
             let b_bytes = vec![0u8; batch * 1 * nv * 4];
             time("gdn_gates_cached", batch, || {
@@ -334,11 +327,12 @@ fn run() -> Result<()> {
 
     if want("gdn_in_proj") {
         println!("== GDN in_proj (qkv|z|a|b fused, bf16w) ==");
-        for &batch in &batches {
+        for &batch in batches.as_slice() {
             let x_bytes = vec![0u8; batch * HIDDEN * 4];
             time("gdn_in_proj_decode", batch, || {
                 kiln_vulkan_kernel::kernels::dispatch_gdn_in_proj_decode_cached_bf16_weights_bytes(
-                    &device, &x_bytes, batch, &qkv_buf, &z_buf, &a_buf, &b_buf, HIDDEN, QKV_DIM, Z_DIM, A_DIM, B_DIM,
+                    &device, &x_bytes, batch, &qkv_buf, &z_buf, &a_buf, &b_buf, HIDDEN, QKV_DIM,
+                    Z_DIM, A_DIM, B_DIM,
                 )?;
                 Ok(())
             })?;
@@ -420,7 +414,7 @@ fn run_full_step_resident(
     let dev_arc = Arc::new(VulkanDevice::new()?);
     let pool = DecodeResidentPool::try_new(&dev_arc, HIDDEN, INTERMEDIATE, 64)?
         .expect("RTX 6000 Ada has plenty of room for the resident pool");
-    // Candle-free uploads via *_from_slice helpers. (#1082)
+    // Upload weights directly from host slices.
     let weight_norm = upload_f32_buffer_from_slice(device, &vec![1.0f32; HIDDEN])?;
     let weight_qknorm = upload_f32_buffer_from_slice(device, &vec![1.0f32; head_dim])?;
     let out_w =
@@ -480,7 +474,7 @@ fn run_full_step_resident(
             device.device_local_mem_type(),
             kv_buf_dim,
         )?;
-        let v_buf = VulkanBuffer::create_device_local(
+        let _v_buf = VulkanBuffer::create_device_local(
             device.device(),
             device.device_local_mem_type(),
             kv_buf_dim,
@@ -660,13 +654,7 @@ fn run_full_step_resident(
                 HIDDEN,
             )?;
             // 8) Residual: x + attn_out
-            dispatch_add_resident(
-                device,
-                &x_buf,
-                &attn_out,
-                &attn_residual,
-                batch * HIDDEN,
-            )?;
+            dispatch_add_resident(device, &x_buf, &attn_out, &attn_residual, batch * HIDDEN)?;
             // 9) Pre-MLP rmsnorm
             let normed2 = pool.acquire();
             dispatch_qwen_rmsnorm_forward_resident(
@@ -744,7 +732,7 @@ fn run_full_step_resident_batched(
     let dev_arc = Arc::new(VulkanDevice::new()?);
     let _pool = DecodeResidentPool::try_new(&dev_arc, HIDDEN, INTERMEDIATE, 64)?
         .expect("RTX 6000 Ada has plenty of room for the resident pool");
-    // Candle-free uploads via *_from_slice helpers. (#1082)
+    // Upload weights directly from host slices.
     let weight_norm = upload_f32_buffer_from_slice(device, &vec![1.0f32; HIDDEN])?;
     let weight_qknorm = upload_f32_buffer_from_slice(device, &vec![1.0f32; head_dim])?;
     let out_w =
@@ -764,10 +752,7 @@ fn run_full_step_resident_batched(
         env!("CARGO_MANIFEST_DIR"),
         "/csrc/shaders/full_attn_qkv_decode_batched_bf16w.comp"
     );
-    let rope_shader = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/csrc/shaders/vk_rope_f32.comp"
-    );
+    let rope_shader = concat!(env!("CARGO_MANIFEST_DIR"), "/csrc/shaders/vk_rope_f32.comp");
     let paged_attn_shader = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/csrc/shaders/paged_attn_decode_batch.comp"
@@ -858,19 +843,32 @@ fn run_full_step_resident_batched(
             b.record_shader(
                 rmsnorm_shader,
                 &[q_buf.handle(), weight_qknorm.handle(), q_buf.handle()],
-                &[(batch * num_heads) as u32, head_dim as u32, (1e-6f32).to_bits()],
+                &[
+                    (batch * num_heads) as u32,
+                    head_dim as u32,
+                    (1e-6f32).to_bits(),
+                ],
                 Workgroups::OneD((batch * num_heads) as u32),
             )?;
             b.record_shader(
                 rmsnorm_shader,
                 &[k_buf.handle(), weight_qknorm.handle(), k_buf.handle()],
-                &[(batch * num_kv_heads) as u32, head_dim as u32, (1e-6f32).to_bits()],
+                &[
+                    (batch * num_kv_heads) as u32,
+                    head_dim as u32,
+                    (1e-6f32).to_bits(),
+                ],
                 Workgroups::OneD((batch * num_kv_heads) as u32),
             )?;
             // 4) RoPE on Q
             b.record_shader(
                 rope_shader,
-                &[q_buf.handle(), cos_buf.handle(), sin_buf.handle(), q_rot.handle()],
+                &[
+                    q_buf.handle(),
+                    cos_buf.handle(),
+                    sin_buf.handle(),
+                    q_rot.handle(),
+                ],
                 &[
                     batch as u32,
                     num_heads as u32,
@@ -881,7 +879,12 @@ fn run_full_step_resident_batched(
             )?;
             b.record_shader(
                 rope_shader,
-                &[k_buf.handle(), cos_buf.handle(), sin_buf.handle(), k_rot.handle()],
+                &[
+                    k_buf.handle(),
+                    cos_buf.handle(),
+                    sin_buf.handle(),
+                    k_rot.handle(),
+                ],
                 &[
                     batch as u32,
                     num_kv_heads as u32,
@@ -912,7 +915,11 @@ fn run_full_step_resident_batched(
             // 6) Output gate
             b.record_shader(
                 mul_sigmoid_shader,
-                &[attn_pre_gate.handle(), gate_buf.handle(), attn_post_gate.handle()],
+                &[
+                    attn_pre_gate.handle(),
+                    gate_buf.handle(),
+                    attn_post_gate.handle(),
+                ],
                 &[(batch * num_heads * head_dim) as u32],
                 Workgroups::OneD((batch * num_heads * head_dim).div_ceil(256) as u32),
             )?;
@@ -933,7 +940,11 @@ fn run_full_step_resident_batched(
             // 9) Pre-MLP rmsnorm
             b.record_shader(
                 rmsnorm_shader,
-                &[attn_residual.handle(), weight_norm.handle(), qkv_combined.handle()],
+                &[
+                    attn_residual.handle(),
+                    weight_norm.handle(),
+                    qkv_combined.handle(),
+                ],
                 &[batch as u32, HIDDEN as u32, (1e-6f32).to_bits()],
                 Workgroups::OneD(batch as u32),
             )?;
@@ -1005,7 +1016,7 @@ fn run_full_token_resident_batched(
     let max_seqlen = 256usize;
     let softmax_scale = (head_dim as f32).sqrt().recip();
 
-    // Candle-free uploads via *_from_slice helpers. (#1082)
+    // Upload weights directly from host slices.
     let weight_norm = upload_f32_buffer_from_slice(device, &vec![1.0f32; HIDDEN])?;
     let weight_qknorm = upload_f32_buffer_from_slice(device, &vec![1.0f32; head_dim])?;
     let out_w =
@@ -1024,10 +1035,7 @@ fn run_full_token_resident_batched(
         env!("CARGO_MANIFEST_DIR"),
         "/csrc/shaders/full_attn_qkv_decode_batched_bf16w.comp"
     );
-    let rope_shader = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/csrc/shaders/vk_rope_f32.comp"
-    );
+    let rope_shader = concat!(env!("CARGO_MANIFEST_DIR"), "/csrc/shaders/vk_rope_f32.comp");
     let paged_attn_shader = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/csrc/shaders/paged_attn_decode_batch.comp"
@@ -1115,18 +1123,31 @@ fn run_full_token_resident_batched(
                 b.record_shader(
                     rmsnorm_shader,
                     &[q_buf.handle(), weight_qknorm.handle(), q_buf.handle()],
-                    &[(batch * num_heads) as u32, head_dim as u32, (1e-6f32).to_bits()],
+                    &[
+                        (batch * num_heads) as u32,
+                        head_dim as u32,
+                        (1e-6f32).to_bits(),
+                    ],
                     Workgroups::OneD((batch * num_heads) as u32),
                 )?;
                 b.record_shader(
                     rmsnorm_shader,
                     &[k_buf.handle(), weight_qknorm.handle(), k_buf.handle()],
-                    &[(batch * num_kv_heads) as u32, head_dim as u32, (1e-6f32).to_bits()],
+                    &[
+                        (batch * num_kv_heads) as u32,
+                        head_dim as u32,
+                        (1e-6f32).to_bits(),
+                    ],
                     Workgroups::OneD((batch * num_kv_heads) as u32),
                 )?;
                 b.record_shader(
                     rope_shader,
-                    &[q_buf.handle(), cos_buf.handle(), sin_buf.handle(), q_rot.handle()],
+                    &[
+                        q_buf.handle(),
+                        cos_buf.handle(),
+                        sin_buf.handle(),
+                        q_rot.handle(),
+                    ],
                     &[
                         batch as u32,
                         num_heads as u32,
@@ -1137,7 +1158,12 @@ fn run_full_token_resident_batched(
                 )?;
                 b.record_shader(
                     rope_shader,
-                    &[k_buf.handle(), cos_buf.handle(), sin_buf.handle(), k_rot.handle()],
+                    &[
+                        k_buf.handle(),
+                        cos_buf.handle(),
+                        sin_buf.handle(),
+                        k_rot.handle(),
+                    ],
                     &[
                         batch as u32,
                         num_kv_heads as u32,
@@ -1176,11 +1202,7 @@ fn run_full_token_resident_batched(
                 )?;
                 b.record_shader(
                     linear_decode_shader,
-                    &[
-                        attn_post_gate.handle(),
-                        out_w.handle(),
-                        attn_out.handle(),
-                    ],
+                    &[attn_post_gate.handle(), out_w.handle(), attn_out.handle()],
                     &[Q_DIM as u32, HIDDEN as u32, batch as u32],
                     Workgroups::OneD((batch * HIDDEN.div_ceil(32)) as u32),
                 )?;
@@ -1219,11 +1241,7 @@ fn run_full_token_resident_batched(
                 )?;
                 b.record_shader(
                     add_shader,
-                    &[
-                        attn_residual.handle(),
-                        final_out.handle(),
-                        x_buf.handle(),
-                    ],
+                    &[attn_residual.handle(), final_out.handle(), x_buf.handle()],
                     &[(batch * HIDDEN) as u32],
                     Workgroups::OneD((batch * HIDDEN).div_ceil(256) as u32),
                 )?;
@@ -1238,17 +1256,16 @@ fn run_full_token_resident_batched(
 
 /// Per-token decode bench against a *real* Vulkan-resident paged KV
 /// cache: each layer writes its freshly-projected K/V into the
-/// VkPagedKvCache via `dispatch_paged_kv_write_slot_resident` and
-/// reads the entire window back via
-/// `dispatch_paged_attn_decode_batch_paged_f32_resident`.
+/// VkPagedKvCache via a batched slot write and reads the entire
+/// window back via split-K paged attention.
 ///
 /// Distinct from `full_token_resident_batched` which uses a
 /// non-paged contiguous K/V pool sized for `max_seqlen` and never
 /// actually writes to it — that mode measures only compute + submit.
-/// This mode adds the per-step KV-write cost (one slot-write per
-/// layer) and the paged-attention read cost over a real block table,
-/// which is what real Qwen3.5-4B decode pays. The full token still
-/// records into one `CommandBatch` and ships as a single submit.
+/// This mode adds the per-step KV-write cost and the paged-attention
+/// read cost over real per-row block tables, which is what real
+/// Qwen3.5-4B decode pays. The full token still records into one
+/// `CommandBatch` and ships as a single submit.
 #[allow(clippy::too_many_arguments)]
 fn run_full_token_resident_paged(
     device: &VulkanDevice,
@@ -1277,14 +1294,16 @@ fn run_full_token_resident_paged(
     // Realistic Qwen3.5-4B decode window: ≈ 256 tokens of history
     // already in the cache, current decode step at position 256.
     let block_size = 16usize;
-    let num_blocks = 32usize;
+    let blocks_per_seq = 32usize;
     let cur_seq_len = 256usize;
     let softmax_scale = (head_dim as f32).sqrt().recip();
+    let num_chunks: usize = std::env::var("KILN_VK_PAGED_ATTN_SPLITK_CHUNKS")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|&n| n >= 1)
+        .unwrap_or(8);
 
-    // Per-step write slot for *this* decode token.
-    let write_slot = cur_seq_len;
-
-    // Candle-free uploads via *_from_slice helpers. (#1082)
+    // Upload weights directly from host slices.
     let weight_norm = upload_f32_buffer_from_slice(device, &vec![1.0f32; HIDDEN])?;
     let weight_qknorm = upload_f32_buffer_from_slice(device, &vec![1.0f32; head_dim])?;
     let out_w =
@@ -1303,17 +1322,18 @@ fn run_full_token_resident_paged(
         env!("CARGO_MANIFEST_DIR"),
         "/csrc/shaders/full_attn_qkv_decode_batched_bf16w.comp"
     );
-    let rope_shader = concat!(
+    let rope_shader = concat!(env!("CARGO_MANIFEST_DIR"), "/csrc/shaders/vk_rope_f32.comp");
+    let paged_attn_splitk_shader = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/csrc/shaders/vk_rope_f32.comp"
+        "/csrc/shaders/paged_attn_decode_batch_paged_splitk.comp"
     );
-    let paged_attn_paged_shader = concat!(
+    let paged_attn_reduce_shader = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/csrc/shaders/paged_attn_decode_batch_paged.comp"
+        "/csrc/shaders/paged_attn_decode_batch_paged_splitk_reduce.comp"
     );
-    let kv_write_shader = concat!(
+    let kv_write_slots_shader = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/csrc/shaders/paged_kv_write_slot.comp"
+        "/csrc/shaders/paged_kv_write_slots.comp"
     );
     let mul_sigmoid_shader = concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -1329,19 +1349,6 @@ fn run_full_token_resident_paged(
         "/csrc/shaders/mlp_gate_up_decode_batched_bf16w.comp"
     );
 
-    // VkPagedKvCache with NUM_LAYERS layers, each [max_seqlen, num_kv_heads, head_dim].
-    let cache = VkPagedKvCache::new(
-        device,
-        NUM_LAYERS,
-        num_blocks,
-        block_size,
-        num_kv_heads,
-        head_dim,
-    )?;
-
-    // Identity block table: block i → physical block i.
-    let block_ids: Vec<u32> = (0..num_blocks as u32).collect();
-    let block_table_bytes: Vec<u8> = bytemuck::cast_slice(&block_ids).to_vec();
     let mk_dev = |bytes: &[u8]| -> Result<VulkanBuffer> {
         let buf = VulkanBuffer::create_device_local(
             device.device(),
@@ -1358,16 +1365,32 @@ fn run_full_token_resident_paged(
         )?;
         Ok(buf)
     };
-    let block_table_buf = mk_dev(&block_table_bytes)?;
-    let seq_lens_data_template: Vec<u32> = vec![(cur_seq_len + 1) as u32];
-    let seq_lens_bytes: Vec<u8> = bytemuck::cast_slice(&seq_lens_data_template).to_vec();
 
     for &batch in batches {
-        // The paged-paged attn shader is batch-dim = 1 right now;
-        // we'd need a different layout for batch > 1. Skip those.
-        if batch != 1 {
-            continue;
+        let total_blocks = batch * blocks_per_seq;
+        let cache = VkPagedKvCache::new(
+            device,
+            NUM_LAYERS,
+            total_blocks,
+            block_size,
+            num_kv_heads,
+            head_dim,
+        )?;
+        let mut block_ids = Vec::with_capacity(batch * blocks_per_seq);
+        for row in 0..batch {
+            let row_block_base = row * blocks_per_seq;
+            for block in 0..blocks_per_seq {
+                block_ids.push((row_block_base + block) as u32);
+            }
         }
+        let block_table_bytes: Vec<u8> = bytemuck::cast_slice(&block_ids).to_vec();
+        let block_table_buf = mk_dev(&block_table_bytes)?;
+        let seq_lens_data: Vec<u32> = vec![(cur_seq_len + 1) as u32; batch];
+        let seq_lens_bytes: Vec<u8> = bytemuck::cast_slice(&seq_lens_data).to_vec();
+        let slots_data: Vec<u32> = (0..batch)
+            .map(|row| (row * blocks_per_seq * block_size + cur_seq_len) as u32)
+            .collect();
+        let slots_bytes: Vec<u8> = bytemuck::cast_slice(&slots_data).to_vec();
         let hidden_bytes = (batch * HIDDEN * 4) as u64;
         let mk = |bytes: u64| {
             VulkanBuffer::create_device_local(
@@ -1386,7 +1409,10 @@ fn run_full_token_resident_paged(
         let v_buf = mk((batch * num_kv_heads * head_dim * 4) as u64)?;
         let gate_buf = mk((batch * num_heads * head_dim * 4) as u64)?;
         let seq_lens_buf = mk_dev(&seq_lens_bytes)?;
+        let slots_buf = mk_dev(&slots_bytes)?;
         let attn_pre_gate = mk((batch * num_heads * head_dim * 4) as u64)?;
+        let partials_stride = 2 + head_dim;
+        let attn_partials = mk((batch * num_heads * num_chunks * partials_stride * 4) as u64)?;
         let attn_post_gate = mk((batch * num_heads * head_dim * 4) as u64)?;
         let attn_out = mk(hidden_bytes)?;
         let attn_residual = mk(hidden_bytes)?;
@@ -1430,20 +1456,33 @@ fn run_full_token_resident_paged(
                 b.record_shader(
                     rmsnorm_shader,
                     &[q_buf.handle(), weight_qknorm.handle(), q_buf.handle()],
-                    &[(batch * num_heads) as u32, head_dim as u32, (1e-6f32).to_bits()],
+                    &[
+                        (batch * num_heads) as u32,
+                        head_dim as u32,
+                        (1e-6f32).to_bits(),
+                    ],
                     Workgroups::OneD((batch * num_heads) as u32),
                 )?;
                 // 4) K-norm
                 b.record_shader(
                     rmsnorm_shader,
                     &[k_buf.handle(), weight_qknorm.handle(), k_buf.handle()],
-                    &[(batch * num_kv_heads) as u32, head_dim as u32, (1e-6f32).to_bits()],
+                    &[
+                        (batch * num_kv_heads) as u32,
+                        head_dim as u32,
+                        (1e-6f32).to_bits(),
+                    ],
                     Workgroups::OneD((batch * num_kv_heads) as u32),
                 )?;
                 // 5) RoPE Q
                 b.record_shader(
                     rope_shader,
-                    &[q_buf.handle(), cos_buf.handle(), sin_buf.handle(), q_rot.handle()],
+                    &[
+                        q_buf.handle(),
+                        cos_buf.handle(),
+                        sin_buf.handle(),
+                        q_rot.handle(),
+                    ],
                     &[
                         batch as u32,
                         num_heads as u32,
@@ -1455,7 +1494,12 @@ fn run_full_token_resident_paged(
                 // 6) RoPE K
                 b.record_shader(
                     rope_shader,
-                    &[k_buf.handle(), cos_buf.handle(), sin_buf.handle(), k_rot.handle()],
+                    &[
+                        k_buf.handle(),
+                        cos_buf.handle(),
+                        sin_buf.handle(),
+                        k_rot.handle(),
+                    ],
                     &[
                         batch as u32,
                         num_kv_heads as u32,
@@ -1464,38 +1508,50 @@ fn run_full_token_resident_paged(
                     ],
                     Workgroups::OneD((batch * num_kv_heads * head_dim).div_ceil(256) as u32),
                 )?;
-                // 7) Write K/V to resident paged pool at write_slot
+                // 7) Write K/V to resident paged pool at each row's slot.
                 let elements_per_slot = num_kv_heads * head_dim;
                 b.record_shader(
-                    kv_write_shader,
+                    kv_write_slots_shader,
                     &[
                         k_rot.handle(),
                         v_buf.handle(),
+                        slots_buf.handle(),
                         k_pool.handle(),
                         v_pool.handle(),
                     ],
-                    &[write_slot as u32, elements_per_slot as u32],
-                    Workgroups::OneD(elements_per_slot.div_ceil(64) as u32),
+                    &[
+                        batch as u32,
+                        elements_per_slot as u32,
+                        cache.total_slots() as u32,
+                    ],
+                    Workgroups::OneD((batch * elements_per_slot).div_ceil(256) as u32),
                 )?;
-                // 8) Paged-paged attention against the whole pool
+                // 8) Split-K paged attention against the whole pool.
                 b.record_shader(
-                    paged_attn_paged_shader,
+                    paged_attn_splitk_shader,
                     &[
                         q_rot.handle(),
                         k_pool.handle(),
                         v_pool.handle(),
                         block_table_buf.handle(),
                         seq_lens_buf.handle(),
-                        attn_pre_gate.handle(),
+                        attn_partials.handle(),
                     ],
                     &[
-                        num_blocks as u32,
+                        blocks_per_seq as u32,
                         block_size as u32,
                         num_heads as u32,
                         num_kv_heads as u32,
                         head_dim as u32,
                         softmax_scale.to_bits(),
+                        num_chunks as u32,
                     ],
+                    Workgroups::OneD((batch * num_heads * num_chunks) as u32),
+                )?;
+                b.record_shader(
+                    paged_attn_reduce_shader,
+                    &[attn_partials.handle(), attn_pre_gate.handle()],
+                    &[num_heads as u32, head_dim as u32, num_chunks as u32],
                     Workgroups::OneD((batch * num_heads) as u32),
                 )?;
                 // 9) Attention output gate
@@ -1512,11 +1568,7 @@ fn run_full_token_resident_paged(
                 // 10) Output projection
                 b.record_shader(
                     linear_decode_shader,
-                    &[
-                        attn_post_gate.handle(),
-                        out_w.handle(),
-                        attn_out.handle(),
-                    ],
+                    &[attn_post_gate.handle(), out_w.handle(), attn_out.handle()],
                     &[Q_DIM as u32, HIDDEN as u32, batch as u32],
                     Workgroups::OneD((batch * HIDDEN.div_ceil(32)) as u32),
                 )?;
@@ -1560,11 +1612,7 @@ fn run_full_token_resident_paged(
                 // 15) Final residual into x for next layer
                 b.record_shader(
                     add_shader,
-                    &[
-                        attn_residual.handle(),
-                        final_out.handle(),
-                        x_buf.handle(),
-                    ],
+                    &[attn_residual.handle(), final_out.handle(), x_buf.handle()],
                     &[(batch * HIDDEN) as u32],
                     Workgroups::OneD((batch * HIDDEN).div_ceil(256) as u32),
                 )?;
@@ -1580,4 +1628,3 @@ fn run_full_token_resident_paged(
 fn main() -> Result<()> {
     run()
 }
-

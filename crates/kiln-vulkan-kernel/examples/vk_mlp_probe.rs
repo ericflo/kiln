@@ -57,9 +57,8 @@ const WARMUP_ITERS: usize = 8;
 const BATCH_SWEEP: &[usize] = &[1, 4, 16, 64, 256, 1024];
 
 fn make_bf16_weight(seed: u64, rows: usize, cols: usize) -> Vec<bf16> {
-    // Same deterministic-pattern fill as `decode_microbench.rs` so the two
-    // are comparable. Candle-free: host-side Vec<bf16> ready for upload
-    // via the new bf16-slice uploader. (#1082)
+    // Same deterministic-pattern fill as `vulkan_decode_microbench.rs` so the
+    // two are comparable. Host-side Vec<bf16> is ready for direct upload.
     let n = rows * cols;
     (0..n)
         .map(|i| {
@@ -220,4 +219,3 @@ fn main() -> Result<()> {
     }
     Ok(())
 }
-

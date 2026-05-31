@@ -157,6 +157,27 @@ every config"):
   GDN rows seed missing kt-keyed resident recurrent + conv state before batch
   assembly. No-ID callers decline the resident route and use the portable path
   to avoid unsafe cache reuse.
+  **Update — Vulkan-only resident token microbench:** moved the decode
+  microbench to the normal `kiln-vulkan-kernel` binary
+  `vulkan_decode_microbench`, with direct host-slice weight uploads and
+  targeted sweep controls via `KILN_VK_MICROBENCH_BATCHES`,
+  `KILN_VK_MICROBENCH_WARMUP`, `KILN_VK_MICROBENCH_TIMED`, and
+  `KILN_VK_MICROBENCH_REPEATS`. On RADV STRIX_HALO,
+  `full_token_resident_batched` (32 layers, synthetic contiguous K/V pool,
+  one submit per token) measured:
+
+  | batch | per token | rows/s |
+  |---:|---:|---:|
+  | 1 | 58.2 ms | 17 |
+  | 4 | 57.9 ms | 69 |
+  | 8 | 102.0 ms | 78 |
+  | 16 | 190.2 ms | 84 |
+  | 32 | 380.6 ms | 84 |
+  | 64 | 855.3 ms | 75 |
+
+  Throughput plateaus around batch 16-32 on this APU, so the next tuning
+  target is the large batched projection/MLP stack and memory bandwidth, not
+  host submit count.
 - **Vulkan paged-attention decode kernel**: the kernel crate already had
   `paged_attn_decode_batch_paged.comp`; Vulkan now advertises
   `supports_flash_attn_paged_decode` and wires the single-query paged-decode
@@ -165,6 +186,16 @@ every config"):
   manual GQA attention path. Remaining saturation work is the multi-row
   resident decode orchestration below, not the existence of the paged attention
   kernel.
+  **Update — multi-row resident paged microbench:** `full_token_resident_paged`
+  now uses `paged_kv_write_slots` plus split-K
+  `paged_attn_decode_batch_paged_splitk` and reduce over real per-row block
+  tables. With default iterations and `KILN_VK_MICROBENCH_BATCHES=1,4` on RADV
+  STRIX_HALO:
+
+  | batch | per token | rows/s |
+  |---:|---:|---:|
+  | 1 | 48.3 ms | 21 |
+  | 4 | 52.9 ms | 76 |
 
 ## Other follow-ups (perf headroom, not regressions)
 

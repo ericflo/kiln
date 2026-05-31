@@ -7,6 +7,12 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[[bin]]
+name = "vulkan_decode_microbench"
+path = "src/bin/vulkan_decode_microbench.rs"
+test = false
+bench = false
+
 [dependencies]
 kiln-tensor-id = { workspace = true }
 anyhow = { workspace = true }
