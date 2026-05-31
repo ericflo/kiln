@@ -1404,6 +1404,16 @@ impl CudaGraphRunner {
         let position_buffer = Self::new_position_buffer(&device, seq_len)?;
         let output_logits = Self::new_output_logits(config, &device, candle_dtype)?;
         let output_logits_for_capture = output_logits.clone();
+        // #1082 CUDA-graph fix: bridge the graph-stable `output_logits`
+        // candle buffer to kt ZERO-COPY (borrow preserves the device
+        // pointer the captured graph bakes in). Inside capture we copy the
+        // lm-head logits into this kt view with a kt-native copy that runs
+        // on the capture stream — replacing the old `kt_logits_to_candle`
+        // bridge (which allocated + memcpy'd on candle's NULL default
+        // stream, a `CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED` violation
+        // independent of the kt-side stream fix).
+        let output_logits_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(&output_logits)
+            .context("CUDA graph: bridge output_logits buffer candle->kt")?;
         let rotary_cos_buffer = Self::new_rotary_cos_buffer(config, &device, seq_len)?;
         let rotary_sin_buffer = Self::new_rotary_sin_buffer(config, &device, seq_len)?;
         let key = CudaGraphKey::new(block_table, paged_cache, seq_len);
@@ -1537,9 +1547,16 @@ impl CudaGraphRunner {
         // `_paged_decode_outputs`. The wrapper is gone; the inner
         // closure is invoked directly.
         let _ = &gdn_decode_outputs;
-        let logits_result = crate::forward::with_lm_head_output_buffer(
-            lm_head_output_buffer_kt.clone(),
-            || {
+        // #1082 CUDA-graph fix (Part C): engage the thread-local active-stream
+        // override for the whole capture window so every kt CUDA op
+        // (kernel launch / alloc / memcpy, resolved via
+        // `active_cuda_stream`) lands on THIS capture stream instead of the
+        // legacy NULL default stream. Issuing work on the NULL stream while
+        // `stream` is mid-capture is the `CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED`
+        // root cause. Outside this scope `active_cuda_stream` returns
+        // `ctx.default_stream()` — zero behavior change for all other paths.
+        let logits_result = kiln_tensor::with_active_cuda_stream(stream.clone(), || {
+            crate::forward::with_lm_head_output_buffer(lm_head_output_buffer_kt.clone(), || {
                 let logits = model_forward_paged_with_graph_inputs(
                     backend,
                     &[token_id],
@@ -1554,18 +1571,20 @@ impl CudaGraphRunner {
                     &position_buffer_kt,
                     graph_inputs.as_ref(),
                 )?;
-                // `logits` is kt; the graph-stable `output_logits_for_capture`
-                // is candle. Bridge kt->candle (the helper materializes a
-                // contiguous copy if needed), then candle `slice_set` copies
-                // into the stable device pointer the captured graph reads.
-                let logits_candle = crate::forward::kt_logits_to_candle(&logits)
-                    .context("CUDA graph: bridge logits kt->candle for stable output")?;
-                output_logits_for_capture
-                    .slice_set(&logits_candle, 0, 0)
-                    .context("copy CUDA graph logits into stable output")?;
+                // #1082 CUDA-graph fix (Part D): `logits` is kt; copy it into
+                // the graph-stable `output_logits` via a KT-NATIVE copy that
+                // runs on the capture stream (the override above makes
+                // `cuda_slice_set_dim0` resolve to `stream`). This replaces the
+                // old `kt_logits_to_candle` + candle `slice_set` pair, which
+                // allocated a fresh candle Tensor and memcpy'd on candle's NULL
+                // default stream — a capture violation that the kt-side stream
+                // fix alone could not resolve. The copy is recorded into the
+                // graph, so every replay refreshes `output_logits` in place.
+                kiln_tensor::cuda_slice_set_dim0(&output_logits_kt, &logits, 0)
+                    .context("CUDA graph: copy kt logits into stable output_logits")?;
                 Ok::<candle_core::Tensor, anyhow::Error>(output_logits_for_capture)
-            },
-        );
+            })
+        });
 
         // End capture — instantiates the graph
         let graph_result = stream.end_capture(

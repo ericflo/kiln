@@ -138,13 +138,15 @@ impl CudaStorage {
         n_elements: usize,
     ) -> Result<Self> {
         let byte_len = dtype.packed_buffer_bytes(n_elements);
-        // Candle-free allocation through cudarc's default-stream entry.
-        let slice = ctx
-            .default_stream()
+        // Candle-free allocation through cudarc. #1082 CUDA-graph fix:
+        // route through the thread-local active stream so the alloc is
+        // captured on the capture stream during graph capture; outside a
+        // capture scope this is exactly `ctx.default_stream()`.
+        let slice = crate::active_cuda_stream(ctx)
             .alloc_zeros::<u8>(byte_len)
             .map_err(|e| {
                 Error::Msg(format!(
-                    "CudaStorage::zeros_ctx: ctx.default_stream().alloc_zeros::<u8>({byte_len}) \
+                    "CudaStorage::zeros_ctx: active_cuda_stream(ctx).alloc_zeros::<u8>({byte_len}) \
                      failed: {e:?}"
                 ))
             })?;
@@ -183,9 +185,13 @@ impl CudaStorage {
         // SAFETY: cudarc's `alloc` returns uninitialized device memory. The
         // caller contract (documented above) requires a full overwrite before
         // any read, so the uninitialized contents are never observed.
-        let slice = unsafe { ctx.default_stream().alloc::<u8>(byte_len) }.map_err(|e| {
+        // #1082 CUDA-graph fix: route through the thread-local active
+        // stream so the alloc is captured on the capture stream during
+        // graph capture; outside a capture scope this is exactly
+        // `ctx.default_stream()`.
+        let slice = unsafe { crate::active_cuda_stream(ctx).alloc::<u8>(byte_len) }.map_err(|e| {
             Error::Msg(format!(
-                "CudaStorage::alloc_uninit_ctx: ctx.default_stream().alloc::<u8>({byte_len}) \
+                "CudaStorage::alloc_uninit_ctx: active_cuda_stream(ctx).alloc::<u8>({byte_len}) \
                  failed: {e:?}"
             ))
         })?;
@@ -347,9 +353,11 @@ impl CudaStorage {
         match &self.slice {
             SliceOwner::Owned(s) => {
                 use cudarc::driver::DevicePtr;
-                // Use a default-stream device_ptr just to extract the raw bits;
-                // the SyncOnDrop is dropped immediately, recording nothing.
-                let stream = self.ctx.default_stream();
+                // Use the active stream's device_ptr just to extract the raw
+                // bits; the SyncOnDrop is dropped immediately, recording
+                // nothing. #1082 CUDA-graph fix: outside a capture scope this
+                // is exactly `self.ctx.default_stream()`.
+                let stream = crate::active_cuda_stream(&self.ctx);
                 let (ptr, _g) = s.device_ptr(&stream);
                 (ptr, s.len())
             }
@@ -393,7 +401,11 @@ impl CudaStorage {
     /// lifetime of `self`. Callers passing it to a CUDA FFI must
     /// not store it past the borrow.
     pub fn cuda_stream_raw(&self) -> *mut core::ffi::c_void {
-        let stream = self.ctx.default_stream();
+        // #1082 CUDA-graph fix: resolve through the thread-local active
+        // stream so kernel launches land on the capture stream during
+        // graph capture. Outside a capture scope this returns
+        // `self.ctx.default_stream()` — identical to the prior behavior.
+        let stream = crate::active_cuda_stream(&self.ctx);
         stream.cu_stream() as *mut core::ffi::c_void
     }
 
@@ -910,7 +922,7 @@ pub fn cuda_contiguous(src: &crate::Tensor) -> Result<crate::Tensor> {
 
     // Extract raw device pointers. Source base + start_offset; dst
     // base.
-    let stream = ctx.default_stream();
+    let stream = crate::active_cuda_stream(&ctx);
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
     let src_base = match &src_storage.slice {
@@ -1003,7 +1015,7 @@ pub fn cuda_slice_set_dim0(dst: &crate::Tensor, src: &crate::Tensor, offset: usi
         .ok_or_else(|| crate::Error::Msg("cuda_slice_set: src must be CUDA storage".to_string()))?;
 
     let ctx = dst_storage.context();
-    let stream = ctx.default_stream();
+    let stream = crate::active_cuda_stream(&ctx);
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
     let src_base = match &src_storage.slice {
@@ -1142,7 +1154,7 @@ pub fn cuda_index_select_dim0(
         n_out_elements,
     )?;
 
-    let stream = ctx.default_stream();
+    let stream = crate::active_cuda_stream(&ctx);
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
     let src_base = match &src_storage.slice {
@@ -1300,7 +1312,7 @@ pub fn cuda_index_select_axis_n(
         n_out_elements,
     )?;
 
-    let stream = ctx.default_stream();
+    let stream = crate::active_cuda_stream(&ctx);
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
     let src_base = match &src_storage.slice {
@@ -1434,7 +1446,7 @@ pub fn cuda_elementwise_binary(
         n,
     )?;
 
-    let stream = ctx.default_stream();
+    let stream = crate::active_cuda_stream(&ctx);
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
     let a_base = match &a_storage.slice {
@@ -1564,7 +1576,7 @@ pub fn cuda_binary_minmax(
     // (out[i] = min/max(a[i], b[i]) for all n); uninit skips the memset.
     let out_storage = CudaStorage::alloc_uninit_ctx(&ctx, device_index, dtype, n)?;
 
-    let stream = ctx.default_stream();
+    let stream = crate::active_cuda_stream(&ctx);
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
     let a_base = match &a_storage.slice {
@@ -1684,7 +1696,7 @@ pub fn cuda_lerp(a: &crate::Tensor, b: &crate::Tensor, weight: f32) -> Result<cr
     // (out[i] = a[i] + w*(b[i]-a[i]) for all n); uninit skips the memset.
     let out_storage = CudaStorage::alloc_uninit_ctx(&ctx, device_index, dtype, n)?;
 
-    let stream = ctx.default_stream();
+    let stream = crate::active_cuda_stream(&ctx);
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
     let a_base = match &a_storage.slice {
@@ -1794,7 +1806,7 @@ pub fn cuda_activation_unary(x: &crate::Tensor, kind: i32) -> Result<crate::Tens
         n,
     )?;
 
-    let stream = ctx.default_stream();
+    let stream = crate::active_cuda_stream(&ctx);
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
     let x_base = match &x_storage.slice {
@@ -1899,7 +1911,7 @@ pub fn cuda_cast(src: &crate::Tensor, target: crate::DType) -> Result<crate::Ten
     // before any read — allocate uninitialized to skip the cudaMemsetAsync.
     let dst_storage = CudaStorage::alloc_uninit_ctx(&ctx, device_index, target, n)?;
 
-    let stream = ctx.default_stream();
+    let stream = crate::active_cuda_stream(&ctx);
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
     let src_base = match &src_storage.slice {
@@ -2064,7 +2076,7 @@ pub fn cuda_scatter_add_dim0(
         })?;
 
     let ctx = out_storage.context();
-    let stream = ctx.default_stream();
+    let stream = crate::active_cuda_stream(&ctx);
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
     let upd_base = match &upd_storage.slice {
@@ -2410,7 +2422,7 @@ pub fn cuda_softmax_last_axis(x: &crate::Tensor) -> Result<crate::Tensor> {
     let out_storage =
         CudaStorage::alloc_uninit_ctx(&ctx, device_index, dtype, x.element_count())?;
 
-    let stream = ctx.default_stream();
+    let stream = crate::active_cuda_stream(&ctx);
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
     let x_base = match &x_storage.slice {
@@ -2506,7 +2518,10 @@ pub fn cuda_to_host_copy(src: &crate::Tensor) -> Result<crate::Tensor> {
     // retires another .candle_device() read (#1082).
     let slice = contig_storage.slice();
     let mut host_bytes = vec![0u8; byte_len];
-    let stream = contig_storage.context().default_stream();
+    // #1082 CUDA-graph fix: route through the thread-local active stream
+    // (outside a capture scope this is exactly `ctx.default_stream()`).
+    let ctx = contig_storage.context();
+    let stream = crate::active_cuda_stream(&ctx);
     stream
         .memcpy_dtoh(slice, &mut host_bytes)
         .map_err(|e| {
@@ -2606,7 +2621,7 @@ pub fn cuda_is_finite(src: &crate::Tensor) -> Result<bool> {
         1,
     )?;
 
-    let stream = ctx.default_stream();
+    let stream = crate::active_cuda_stream(&ctx);
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
     let x_base = match &contig_storage.slice {
@@ -2735,7 +2750,7 @@ pub fn host_to_cuda_copy(
     // which is the same primary-context retain candle's
     // `Device::new_cuda` performs under the hood.
     let ctx = primary_cuda_context(device_index)?;
-    let stream = ctx.default_stream();
+    let stream = crate::active_cuda_stream(&ctx);
     let device_slice = stream
         .clone_htod(bytes)
         .map_err(|e| {
@@ -2828,7 +2843,7 @@ pub fn cuda_sum_squared_last_axis(x: &crate::Tensor) -> Result<crate::Tensor> {
         n_rows as usize,
     )?;
 
-    let stream = ctx.default_stream();
+    let stream = crate::active_cuda_stream(&ctx);
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
     let x_base = match &x_storage.slice {
@@ -2939,7 +2954,7 @@ pub fn cuda_l2norm_last_axis(x: &crate::Tensor, eps: f32) -> Result<crate::Tenso
     let out_storage =
         CudaStorage::alloc_uninit_ctx(&ctx, device_index, dtype, x.element_count())?;
 
-    let stream = ctx.default_stream();
+    let stream = crate::active_cuda_stream(&ctx);
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
     let x_base = match &x_storage.slice {
@@ -3095,7 +3110,7 @@ pub fn cuda_rmsnorm_last_axis(
     let out_storage =
         CudaStorage::alloc_uninit_ctx(&ctx, device_index, dtype, x.element_count())?;
 
-    let stream = ctx.default_stream();
+    let stream = crate::active_cuda_stream(&ctx);
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
     let x_base = match &x_storage.slice {
@@ -3259,7 +3274,7 @@ pub fn cuda_layernorm_last_axis(
     let out_storage =
         CudaStorage::alloc_uninit_ctx(&ctx, device_index, dtype, x.element_count())?;
 
-    let stream = ctx.default_stream();
+    let stream = crate::active_cuda_stream(&ctx);
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
     let x_base = match &x_storage.slice {
@@ -3396,7 +3411,7 @@ pub fn cuda_masked_fill(
     };
     let out_storage = CudaStorage::zeros_ctx(&ctx, device_index, dtype, n)?;
 
-    let stream = ctx.default_stream();
+    let stream = crate::active_cuda_stream(&ctx);
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
     let x_base = match &x_storage.slice {
@@ -3514,7 +3529,7 @@ pub fn cuda_argmax_last_axis(x: &crate::Tensor) -> Result<crate::Tensor> {
         out_elem_count,
     )?;
 
-    let stream = ctx.default_stream();
+    let stream = crate::active_cuda_stream(&ctx);
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
     let x_base = match &x_storage.slice {
@@ -3629,7 +3644,7 @@ pub fn cuda_topk_last_axis(x: &crate::Tensor, k: usize) -> Result<(Vec<f32>, Vec
     let vals_storage = CudaStorage::zeros_ctx(&ctx, device_index, crate::DType::F32, k)?;
     let idx_storage = CudaStorage::zeros_ctx(&ctx, device_index, crate::DType::I64, k)?;
 
-    let stream = ctx.default_stream();
+    let stream = crate::active_cuda_stream(&ctx);
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
     let x_base = match &x_storage.slice {
@@ -3840,7 +3855,7 @@ pub fn cuda_cross_entropy_loss(
     // kernel overwrites it.
     let out_storage = CudaStorage::zeros_ctx(&ctx, device_index, dtype, 1)?;
 
-    let stream = ctx.default_stream();
+    let stream = crate::active_cuda_stream(&ctx);
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
     let logits_base = match &logits_storage.slice {
@@ -4005,7 +4020,7 @@ fn cuda_reduce_last_axis_impl(x: &crate::Tensor, divisor: f32, label: &str) -> R
     let out_storage =
         CudaStorage::zeros_ctx(&ctx, device_index, dtype, out_elem_count)?;
 
-    let stream = ctx.default_stream();
+    let stream = crate::active_cuda_stream(&ctx);
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
     let x_base = match &x_storage.slice {
@@ -4144,7 +4159,7 @@ fn cuda_reduce_arbitrary_axis_impl(
     let out_storage =
         CudaStorage::zeros_ctx(&ctx, device_index, dtype, out_elem_count)?;
 
-    let stream = ctx.default_stream();
+    let stream = crate::active_cuda_stream(&ctx);
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
     let x_base = match &x_storage.slice {
@@ -4311,7 +4326,7 @@ fn cuda_minmax_arbitrary_axis_impl(
     let out_storage =
         CudaStorage::zeros_ctx(&ctx, device_index, dtype, out_elem_count)?;
 
-    let stream = ctx.default_stream();
+    let stream = crate::active_cuda_stream(&ctx);
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
     let x_base = match &x_storage.slice {
@@ -4440,7 +4455,7 @@ pub fn cuda_bool_reduce_axis(
         out_elem_count,
     )?;
 
-    let stream = ctx.default_stream();
+    let stream = crate::active_cuda_stream(&ctx);
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
     let x_base = match &x_storage.slice {
@@ -4595,7 +4610,7 @@ pub fn cuda_concat(inputs: &[&crate::Tensor], axis: usize) -> Result<crate::Tens
         CudaStorage::zeros_ctx(&ctx, device_index, dtype, n_out_elements)?;
 
     // Collect per-input source pointers (base + start_offset bytes).
-    let stream = ctx.default_stream();
+    let stream = crate::active_cuda_stream(&ctx);
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
     let mut src_ptrs: Vec<*const core::ffi::c_void> = Vec::with_capacity(inputs.len());
@@ -4805,7 +4820,7 @@ pub fn cuda_rope(
     };
     let out_storage = CudaStorage::zeros_ctx(&ctx, device_index, x_dtype, n)?;
 
-    let stream = ctx.default_stream();
+    let stream = crate::active_cuda_stream(&ctx);
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
     let cs_bpe = cs_dtype.size_in_bytes();
@@ -4947,7 +4962,7 @@ pub fn cuda_dropout(
     let mask_storage =
         CudaStorage::zeros_ctx(&ctx, device_index, crate::DType::U8, n)?;
 
-    let stream = ctx.default_stream();
+    let stream = crate::active_cuda_stream(&ctx);
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
     let x_base = match &x_storage.slice {
@@ -5079,7 +5094,7 @@ pub fn cuda_scalar_op(x: &crate::Tensor, kind: i32, c: f32) -> Result<crate::Ten
         n,
     )?;
 
-    let stream = ctx.default_stream();
+    let stream = crate::active_cuda_stream(&ctx);
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
     let x_base = match &x_storage.slice {
@@ -5181,7 +5196,7 @@ pub fn cuda_clamp_pow(
     // (out[i] = clamp/pow(x[i]) for all n); uninit skips the memset.
     let out_storage = CudaStorage::alloc_uninit_ctx(&ctx, device_index, dtype, n)?;
 
-    let stream = ctx.default_stream();
+    let stream = crate::active_cuda_stream(&ctx);
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
     let x_base = match &x_storage.slice {
@@ -5306,7 +5321,7 @@ pub fn cuda_compare(
         n,
     )?;
 
-    let stream = ctx.default_stream();
+    let stream = crate::active_cuda_stream(&ctx);
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
     let a_base = match &a_storage.slice {
@@ -5435,7 +5450,7 @@ pub fn cuda_where_select(
     let out_storage =
         CudaStorage::zeros_ctx(&ctx, device_index, dtype, n)?;
 
-    let stream = ctx.default_stream();
+    let stream = crate::active_cuda_stream(&ctx);
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
     let mask_base = match &mask_storage.slice {
@@ -5548,7 +5563,7 @@ pub fn cuda_diagonal_extract(x: &crate::Tensor) -> Result<crate::Tensor> {
     let out_storage =
         CudaStorage::zeros_ctx(&ctx, device_index, dtype, n)?;
 
-    let stream = ctx.default_stream();
+    let stream = crate::active_cuda_stream(&ctx);
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
     let x_base = match &x_storage.slice {
@@ -5636,7 +5651,7 @@ pub fn cuda_diag_build(v: &crate::Tensor) -> Result<crate::Tensor> {
     let out_storage =
         CudaStorage::zeros_ctx(&ctx, device_index, dtype, n * n)?;
 
-    let stream = ctx.default_stream();
+    let stream = crate::active_cuda_stream(&ctx);
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
     let v_base = match &v_storage.slice {
@@ -5762,7 +5777,7 @@ fn cuda_scan_axis_impl(
     let out_storage =
         CudaStorage::zeros_ctx(&ctx, device_index, dtype, x.element_count())?;
 
-    let stream = ctx.default_stream();
+    let stream = crate::active_cuda_stream(&ctx);
     let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
 
     let x_base = match &x_storage.slice {

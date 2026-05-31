@@ -113,7 +113,9 @@ pub fn cuda_fp8_quantize_with_scale(
     let ctx = src_storage.context();
     let out_storage = CudaStorage::zeros_ctx(&ctx, device_index, DType::U8, n)?;
 
-    let stream = ctx.default_stream();
+    // #1082 CUDA-graph fix: route through the thread-local active stream
+    // (outside a capture scope this is exactly `ctx.default_stream()`).
+    let stream = crate::active_cuda_stream(&ctx);
     let raw_stream = src_storage.cuda_stream_raw();
 
     let src_base = match src_storage.slice_owner() {
@@ -291,7 +293,9 @@ pub fn cuda_fp8_dequantize(
     let ctx = src_storage.context();
     let out_storage = CudaStorage::zeros_ctx(&ctx, device_index, target_dtype, n)?;
 
-    let stream = ctx.default_stream();
+    // #1082 CUDA-graph fix: route through the thread-local active stream
+    // (outside a capture scope this is exactly `ctx.default_stream()`).
+    let stream = crate::active_cuda_stream(&ctx);
     let raw_stream = src_storage.cuda_stream_raw();
 
     let src_base = match src_storage.slice_owner() {

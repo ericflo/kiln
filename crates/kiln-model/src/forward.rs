@@ -2216,7 +2216,15 @@ fn cuda_silu(x: &Tensor) -> Result<Tensor> {
         // (kt->candle in, candle->kt out) when the tape is actually active —
         // the hot inference path skips the copy entirely and falls straight
         // to the kt-native `try_kt_silu_composite` below.
-        if crate::tape_forward::tape_forward_enabled() {
+        // #1082 CUDA-graph fix: gate on `bridge_scope_active()` too — decode
+        // has no bridge scope, so this kt->candle copy was waste AND ran a
+        // candle alloc+memcpy on candle's NULL default stream (a
+        // `CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED` violation inside a
+        // CUDA-graph capture window). Decode falls straight through to the
+        // kt-native `try_kt_silu_composite` below.
+        if crate::tape_forward::tape_forward_enabled()
+            && kiln_kt_bridge::tape_bridge::bridge_scope_active()
+        {
             let x_candle = kt_logits_to_candle(x).context("cuda_silu kt->candle for tape silu")?;
             if let Some(out) = crate::tape_forward::try_tape_silu_cuda(&x_candle)
                 .context("cuda_silu try_tape_silu_cuda")?
@@ -5563,7 +5571,16 @@ pub(crate) fn try_kt_matmul(lhs: &Tensor, rhs: &Tensor) -> Result<Option<Tensor>
     // candle Tensor. With the gate off (the default) this returns
     // `Ok(None)` and we fall through to the existing dispatch.
     // tape_forward is candle-typed; bridge only when the tape is active.
-    if crate::tape_forward::tape_forward_enabled() {
+    // #1082 CUDA-graph fix: gate on `bridge_scope_active()` too. Decode has
+    // no bridge scope, so the unconditional kt->candle copies of lhs/rhs
+    // were waste (the tape adapter returns None without a registered input
+    // mapping) AND ran a candle alloc+memcpy on candle's NULL default
+    // stream — a `CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED` violation inside a
+    // CUDA-graph capture window. Decode now falls straight through to the
+    // kt-native `cuda_matmul` below.
+    if crate::tape_forward::tape_forward_enabled()
+        && kiln_kt_bridge::tape_bridge::bridge_scope_active()
+    {
         let lhs_candle = kt_logits_to_candle(lhs).context("try_kt_matmul kt->candle lhs")?;
         let rhs_candle = kt_logits_to_candle(rhs).context("try_kt_matmul kt->candle rhs")?;
         if let Some(out) = crate::tape_forward::try_tape_matmul_cuda(&lhs_candle, &rhs_candle)? {
@@ -6453,8 +6470,20 @@ pub fn embedding_lookup(token_ids: &[u32], embed_weights: &Tensor) -> Result<Ten
     // result as a no-autograd candle Tensor. With the gate off (the
     // default) this returns `Ok(None)` and we fall through.
     // tape_forward is candle-typed; bridge only when the tape is active.
+    // #1082 CUDA-graph fix: also gate on `bridge_scope_active()` (matching
+    // the decode-skip pattern at `linear_with_lora_t_backend_decode_if`).
+    // `tape_forward_enabled()` DEFAULTS ON, but DECODE has no active bridge
+    // scope, so the unconditional `kt_logits_to_candle` copies here were
+    // pure waste (the tape adapter returns None without a registered input
+    // mapping anyway) — AND they ran a candle alloc+memcpy on candle's NULL
+    // default stream, which is a `CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED`
+    // violation when this runs inside a CUDA-graph capture window. Gating on
+    // the bridge scope makes decode fall straight through to the kt-native
+    // `try_kt_embedding_lookup` below.
     #[cfg(feature = "cuda")]
-    if crate::tape_forward::tape_forward_enabled() {
+    if crate::tape_forward::tape_forward_enabled()
+        && kiln_kt_bridge::tape_bridge::bridge_scope_active()
+    {
         let w_candle =
             kt_logits_to_candle(embed_weights).context("embedding_lookup kt->candle weights")?;
         let idx_candle =
@@ -6478,8 +6507,14 @@ fn embedding_lookup_with_index(index: &Tensor, embed_weights: &Tensor) -> Result
     // sibling branch in `embedding_lookup` for the production-safety
     // rationale; this site mirrors it for the index-already-built
     // call path used by the batched-decode and prefill loops.
+    // #1082 CUDA-graph fix: gate on `bridge_scope_active()` too — see the
+    // sibling `embedding_lookup` site for the full rationale (decode has no
+    // bridge scope, so the unconditional kt->candle copies were waste AND a
+    // NULL-stream capture violation inside a CUDA-graph window).
     #[cfg(feature = "cuda")]
-    if crate::tape_forward::tape_forward_enabled() {
+    if crate::tape_forward::tape_forward_enabled()
+        && kiln_kt_bridge::tape_bridge::bridge_scope_active()
+    {
         let w_candle = kt_logits_to_candle(embed_weights)
             .context("embedding_lookup_with_index kt->candle weights")?;
         let idx_candle =
@@ -7627,7 +7662,12 @@ fn rotary_embedding_from_tables(
 fn residual_add(a: Tensor, b: Tensor) -> Result<Tensor> {
     #[cfg(feature = "cuda")]
     {
-        if crate::tape_forward::tape_forward_enabled() {
+        // #1082 CUDA-graph fix: gate on `bridge_scope_active()` — decode has
+        // no bridge scope, so these kt->candle copies were waste AND a
+        // NULL-stream capture violation inside a CUDA-graph window.
+        if crate::tape_forward::tape_forward_enabled()
+            && kiln_kt_bridge::tape_bridge::bridge_scope_active()
+        {
             let a_candle = kt_logits_to_candle(&a).context("residual_add kt->candle a")?;
             let b_candle = kt_logits_to_candle(&b).context("residual_add kt->candle b")?;
             if let Some(out) = crate::tape_forward::try_tape_add_cuda(&a_candle, &b_candle)? {
@@ -7657,7 +7697,11 @@ fn apply_rope(
         // KILN_USE_TAPE_FORWARD is set and a tape scope is active. No-ops
         // (returns None) otherwise — the production fast-path below is
         // untouched in the default configuration.
-        if crate::tape_forward::tape_forward_enabled() {
+        // #1082 CUDA-graph fix: gate on `bridge_scope_active()` (decode skips
+        // these candle bridges — see `residual_add`).
+        if crate::tape_forward::tape_forward_enabled()
+            && kiln_kt_bridge::tape_bridge::bridge_scope_active()
+        {
             let x_candle = kt_logits_to_candle(x).context("apply_rope kt->candle x (tape)")?;
             let cos_candle =
                 kt_logits_to_candle(cos).context("apply_rope kt->candle cos (tape)")?;
@@ -9275,7 +9319,11 @@ pub fn swiglu_ffn_gated_hidden(
             // gate off (the default) this returns `Ok(None)` and we
             // fall through to the existing `fused_mlp_silu_mul_kt`
             // dispatch.
-            if crate::tape_forward::tape_forward_enabled() {
+            // #1082 CUDA-graph fix: gate on `bridge_scope_active()` (decode
+            // skips these candle bridges — see `residual_add`).
+            if crate::tape_forward::tape_forward_enabled()
+                && kiln_kt_bridge::tape_bridge::bridge_scope_active()
+            {
                 let gate_candle =
                     kt_logits_to_candle(&gate).context("swiglu kt->candle gate (tape)")?;
                 let up_candle = kt_logits_to_candle(&up).context("swiglu kt->candle up (tape)")?;
@@ -10057,7 +10105,9 @@ fn swiglu_ffn_impl_no_chunk(
                     // CP-4 Increment 6 (#1082): wire SiLU(gate) onto the kt Tape so
                     // the gate-proj LoRA Vars chain through it. No-op + candle
                     // fallback unless KILN_USE_TAPE_FORWARD + a tape scope is active.
-                    let gate = if crate::tape_forward::tape_forward_enabled() {
+                    let gate = if crate::tape_forward::tape_forward_enabled()
+                        && kiln_kt_bridge::tape_bridge::bridge_scope_active()
+                    {
                         let g_candle = kt_logits_to_candle(&gate)
                             .context("mlp silu kt->candle gate (tape)")?;
                         match crate::tape_forward::try_tape_silu_cuda(&g_candle)? {
@@ -10082,7 +10132,9 @@ fn swiglu_ffn_impl_no_chunk(
                     // so SiLU(gate) and up chain back to the gate/up projections
                     // (down_proj reaches the loss via the FFN residual, but without
                     // this its dL/dx never flows to gate/up — they stayed islands).
-                    let hidden = if crate::tape_forward::tape_forward_enabled() {
+                    let hidden = if crate::tape_forward::tape_forward_enabled()
+                        && kiln_kt_bridge::tape_bridge::bridge_scope_active()
+                    {
                         let g_candle = kt_logits_to_candle(&gate)
                             .context("mlp mul kt->candle gate (tape)")?;
                         let u_candle =
@@ -11377,7 +11429,11 @@ fn gdn_qk_norm(q: &Tensor, k: &Tensor, input_dtype: DType, scale: f64) -> Result
     // are set AND a tape scope is active. The production outputs are untouched.
     // All fast paths feed through here, so the wiring covers every dispatch.
     #[cfg(feature = "cuda")]
-    if crate::tape_forward::tape_forward_enabled() {
+    // #1082 CUDA-graph fix: gate on `bridge_scope_active()` (decode skips
+    // these candle bridges — see `residual_add`).
+    if crate::tape_forward::tape_forward_enabled()
+        && kiln_kt_bridge::tape_bridge::bridge_scope_active()
+    {
         let q_candle = kt_logits_to_candle(q).context("gdn_qk_norm kt->candle q (tape)")?;
         let k_candle = kt_logits_to_candle(k).context("gdn_qk_norm kt->candle k (tape)")?;
         let q_out_candle =
@@ -14925,7 +14981,9 @@ fn gated_deltanet_forward_decode_if(
                     // active.
                     #[cfg(feature = "cuda")]
                     {
-                        if crate::tape_forward::tape_forward_enabled() {
+                        if crate::tape_forward::tape_forward_enabled()
+                            && kiln_kt_bridge::tape_bridge::bridge_scope_active()
+                        {
                             let in_candle = kt_logits_to_candle(&mixed_qkv)
                                 .context("gdn conv transpose kt->candle (tape)")?;
                             match crate::tape_forward::try_tape_transpose_cuda(&in_candle, 1, 2)? {
@@ -14994,7 +15052,9 @@ fn gated_deltanet_forward_decode_if(
                             // its SiLU onto the kt Tape. See the comment on the
                             // sibling fallback branch below.
                             #[cfg(feature = "cuda")]
-                            if crate::tape_forward::tape_forward_enabled() {
+                            if crate::tape_forward::tape_forward_enabled()
+                                && kiln_kt_bridge::tape_bridge::bridge_scope_active()
+                            {
                                 let mqkv_c = kt_logits_to_candle(&mixed_qkv_ct)
                                     .context("gdn conv1d prefill kt->candle input (tape)")?;
                                 let conv_c = kt_logits_to_candle(&weights.conv1d)
@@ -15007,7 +15067,9 @@ fn gated_deltanet_forward_decode_if(
                             }
                             #[cfg(feature = "cuda")]
                             {
-                                if crate::tape_forward::tape_forward_enabled() {
+                                if crate::tape_forward::tape_forward_enabled()
+                                    && kiln_kt_bridge::tape_bridge::bridge_scope_active()
+                                {
                                     let y_c = kt_logits_to_candle(&y)
                                         .context("gdn conv1d silu kt->candle y (tape)")?;
                                     match crate::tape_forward::try_tape_silu_cuda(&y_c)? {
@@ -15044,7 +15106,9 @@ fn gated_deltanet_forward_decode_if(
                     // AND a tape scope is active. This is the training path
                     // (track_op=true -> gdn_forward_only_fastpaths=false).
                     #[cfg(feature = "cuda")]
-                    if crate::tape_forward::tape_forward_enabled() {
+                    if crate::tape_forward::tape_forward_enabled()
+                        && kiln_kt_bridge::tape_bridge::bridge_scope_active()
+                    {
                         let mqkv_c = kt_logits_to_candle(&mixed_qkv_ct)
                             .context("gdn conv1d prefill kt->candle input (tape)")?;
                         let conv_c = kt_logits_to_candle(&weights.conv1d)
@@ -15057,7 +15121,9 @@ fn gated_deltanet_forward_decode_if(
                     }
                     #[cfg(feature = "cuda")]
                     {
-                        if crate::tape_forward::tape_forward_enabled() {
+                        if crate::tape_forward::tape_forward_enabled()
+                            && kiln_kt_bridge::tape_bridge::bridge_scope_active()
+                        {
                             let y_c = kt_logits_to_candle(&y)
                                 .context("gdn conv1d silu kt->candle y (tape)")?;
                             match crate::tape_forward::try_tape_silu_cuda(&y_c)? {
@@ -15089,7 +15155,9 @@ fn gated_deltanet_forward_decode_if(
             // scope is active.
             #[cfg(feature = "cuda")]
             {
-                if crate::tape_forward::tape_forward_enabled() {
+                if crate::tape_forward::tape_forward_enabled()
+                    && kiln_kt_bridge::tape_bridge::bridge_scope_active()
+                {
                     let ps_c = kt_logits_to_candle(&post_silu)
                         .context("gdn conv-out transpose kt->candle (tape)")?;
                     match crate::tape_forward::try_tape_transpose_cuda(&ps_c, 1, 2)? {
@@ -15146,7 +15214,9 @@ fn gated_deltanet_forward_decode_if(
                     // the q/k/v become fresh-borrow islands, severing in_proj_qkv
                     // from the loss. Value-preserving. (#1082 CP-4 Increment 5)
                     let nar = src.narrow(2, offset, length)?.contiguous()?;
-                    let nar = if crate::tape_forward::tape_forward_enabled() {
+                    let nar = if crate::tape_forward::tape_forward_enabled()
+                        && kiln_kt_bridge::tape_bridge::bridge_scope_active()
+                    {
                         let src_c = kt_logits_to_candle(src)
                             .context("gdn qkv narrow kt->candle src (tape)")?;
                         let nar_c = kt_logits_to_candle(&nar)
@@ -15162,7 +15232,9 @@ fn gated_deltanet_forward_decode_if(
                         nar
                     };
                     let resh = nar.reshape(shape)?;
-                    if crate::tape_forward::tape_forward_enabled() {
+                    if crate::tape_forward::tape_forward_enabled()
+                        && kiln_kt_bridge::tape_bridge::bridge_scope_active()
+                    {
                         let nar_c = kt_logits_to_candle(&nar)
                             .context("gdn qkv reshape kt->candle nar (tape)")?;
                         match crate::tape_forward::try_tape_reshape_cuda(
@@ -15187,7 +15259,9 @@ fn gated_deltanet_forward_decode_if(
             let v = narrow_then_reshape(&mixed_qkv, 2 * qk_dim, v_dim, (batch, seq_len, nv, dv))?;
             let z_reshaped = z.reshape((batch, seq_len, nv, dv))?;
             #[cfg(feature = "cuda")]
-            let z_reshaped = if crate::tape_forward::tape_forward_enabled() {
+            let z_reshaped = if crate::tape_forward::tape_forward_enabled()
+                && kiln_kt_bridge::tape_bridge::bridge_scope_active()
+            {
                 let z_c = kt_logits_to_candle(&z).context("gdn z reshape kt->candle (tape)")?;
                 match crate::tape_forward::try_tape_reshape_cuda(
                     &z_c,
@@ -15380,7 +15454,9 @@ fn gated_deltanet_forward_decode_if(
                             // candle fallback unless the gate is on + a tape
                             // scope is active.
                             #[cfg(feature = "cuda")]
-                            let q_exp = if crate::tape_forward::tape_forward_enabled() {
+                            let q_exp = if crate::tape_forward::tape_forward_enabled()
+                                && kiln_kt_bridge::tape_bridge::bridge_scope_active()
+                            {
                                 let q_c = kt_logits_to_candle(&q)
                                     .context("gdn gqa-expand kt->candle q (tape)")?;
                                 let qe_c = kt_logits_to_candle(&q_exp)
@@ -15396,7 +15472,9 @@ fn gated_deltanet_forward_decode_if(
                                 q_exp
                             };
                             #[cfg(feature = "cuda")]
-                            let k_exp = if crate::tape_forward::tape_forward_enabled() {
+                            let k_exp = if crate::tape_forward::tape_forward_enabled()
+                                && kiln_kt_bridge::tape_bridge::bridge_scope_active()
+                            {
                                 let k_c = kt_logits_to_candle(&k)
                                     .context("gdn gqa-expand kt->candle k (tape)")?;
                                 let ke_c = kt_logits_to_candle(&k_exp)
@@ -15798,7 +15876,9 @@ fn gated_deltanet_forward_decode_if(
             // training path (which sets qk_expanded == true) but wired for
             // parity across configs.
             #[cfg(feature = "cuda")]
-            let q_exp = if crate::tape_forward::tape_forward_enabled() {
+            let q_exp = if crate::tape_forward::tape_forward_enabled()
+                && kiln_kt_bridge::tape_bridge::bridge_scope_active()
+            {
                 let q_c = kt_logits_to_candle(&q)
                     .context("gdn gqa-expand-recur kt->candle q (tape)")?;
                 let qe_c = kt_logits_to_candle(&q_exp)
@@ -15812,7 +15892,9 @@ fn gated_deltanet_forward_decode_if(
                 q_exp
             };
             #[cfg(feature = "cuda")]
-            let k_exp = if crate::tape_forward::tape_forward_enabled() {
+            let k_exp = if crate::tape_forward::tape_forward_enabled()
+                && kiln_kt_bridge::tape_bridge::bridge_scope_active()
+            {
                 let k_c = kt_logits_to_candle(&k)
                     .context("gdn gqa-expand-recur kt->candle k (tape)")?;
                 let ke_c = kt_logits_to_candle(&k_exp)
@@ -15968,7 +16050,9 @@ fn gated_deltanet_forward_decode_if(
                 // chained id on every input.
                 let v_cast = v.to_dtype(input_dtype)?;
                 #[cfg(feature = "cuda")]
-                let v_cast = if crate::tape_forward::tape_forward_enabled() {
+                let v_cast = if crate::tape_forward::tape_forward_enabled()
+                    && kiln_kt_bridge::tape_bridge::bridge_scope_active()
+                {
                     let v_c = kt_logits_to_candle(&v)
                         .context("gdn recur v-cast kt->candle v (tape)")?;
                     let vc_c = kt_logits_to_candle(&v_cast)
@@ -15986,7 +16070,9 @@ fn gated_deltanet_forward_decode_if(
                 // Transpose to [B, nv, T, dim] for per-head processing.
                 #[cfg(feature = "cuda")]
                 let transpose12 = |t: &Tensor| -> Result<Tensor> {
-                    if crate::tape_forward::tape_forward_enabled() {
+                    if crate::tape_forward::tape_forward_enabled()
+                        && kiln_kt_bridge::tape_bridge::bridge_scope_active()
+                    {
                         let t_c = kt_logits_to_candle(t)
                             .context("gdn recur transpose kt->candle (tape)")?;
                         match crate::tape_forward::try_tape_transpose_cuda(&t_c, 1, 2)? {
@@ -16119,7 +16205,9 @@ fn gated_deltanet_forward_decode_if(
             // active.
             #[cfg(feature = "cuda")]
             {
-                if crate::tape_forward::tape_forward_enabled() {
+                if crate::tape_forward::tape_forward_enabled()
+                    && kiln_kt_bridge::tape_bridge::bridge_scope_active()
+                {
                     let ao_c = kt_logits_to_candle(&attn_out)
                         .context("gdn attn_out transpose kt->candle (tape)")?;
                     match crate::tape_forward::try_tape_transpose_cuda(&ao_c, 1, 2)? {
@@ -16173,7 +16261,9 @@ fn gated_deltanet_forward_decode_if(
             // `KILN_USE_TAPE_GDN_GATED_NORM` are set AND a tape scope is active;
             // the production output (`gated`) is untouched either way.
             #[cfg(feature = "cuda")]
-            if crate::tape_forward::tape_forward_enabled() {
+            if crate::tape_forward::tape_forward_enabled()
+                && kiln_kt_bridge::tape_bridge::bridge_scope_active()
+            {
                 let ao_c = kt_logits_to_candle(&attn_out)
                     .context("gdn gated-norm kt->candle attn_out (tape)")?;
                 let z_c = kt_logits_to_candle(&z).context("gdn gated-norm kt->candle z (tape)")?;
@@ -16202,7 +16292,9 @@ fn gated_deltanet_forward_decode_if(
         // is active.
         let reshaped = attn_out.reshape((batch, seq_len, v_dim))?;
         #[cfg(feature = "cuda")]
-        let reshaped = if crate::tape_forward::tape_forward_enabled() {
+        let reshaped = if crate::tape_forward::tape_forward_enabled()
+            && kiln_kt_bridge::tape_bridge::bridge_scope_active()
+        {
             let ao_c = kt_logits_to_candle(&attn_out)
                 .context("gdn gated-norm reshape kt->candle (tape)")?;
             match crate::tape_forward::try_tape_reshape_cuda(&ao_c, vec![batch, seq_len, v_dim])? {
@@ -16215,7 +16307,9 @@ fn gated_deltanet_forward_decode_if(
         };
         let casted = reshaped.to_dtype(input_dtype)?;
         #[cfg(feature = "cuda")]
-        let casted = if crate::tape_forward::tape_forward_enabled() {
+        let casted = if crate::tape_forward::tape_forward_enabled()
+            && kiln_kt_bridge::tape_bridge::bridge_scope_active()
+        {
             let r_c = kt_logits_to_candle(&reshaped)
                 .context("gdn gated-norm cast kt->candle reshaped (tape)")?;
             let c_c = kt_logits_to_candle(&casted)
@@ -16832,7 +16926,9 @@ pub fn gqa_attention_core_prefill(
         // #1082: tape flash-attn + the training CustomOp are candle islands.
         // Bridge q/k/v kt->candle only when the tape is active / training.
         #[cfg(feature = "cuda")]
-        if crate::tape_forward::tape_forward_enabled() {
+        if crate::tape_forward::tape_forward_enabled()
+            && kiln_kt_bridge::tape_bridge::bridge_scope_active()
+        {
             let q_c = kt_logits_to_candle(&q).context("flash kt->candle q (tape)")?;
             let k_c = kt_logits_to_candle(&k).context("flash kt->candle k (tape)")?;
             let v_c = kt_logits_to_candle(&v).context("flash kt->candle v (tape)")?;
@@ -16940,7 +17036,9 @@ pub fn gqa_attention_core_prefill(
     // head-first q/k_he/v_he as inputs; then chains the transpose+reshape so
     // the tape stays connected to o_proj (else it fragments at the reshape).
     #[cfg(feature = "cuda")]
-    if crate::tape_forward::tape_forward_enabled() {
+    if crate::tape_forward::tape_forward_enabled()
+        && kiln_kt_bridge::tape_bridge::bridge_scope_active()
+    {
         let q_c = kt_logits_to_candle(&q).context("sdpa-fallback kt->candle q (tape)")?;
         let k_c = kt_logits_to_candle(&k_he).context("sdpa-fallback kt->candle k_he (tape)")?;
         let v_c = kt_logits_to_candle(&v_he).context("sdpa-fallback kt->candle v_he (tape)")?;
@@ -17160,7 +17258,9 @@ pub fn gqa_attention_pre_o_chunked_prefill(
 fn tape_reshape_full_attn(x: &Tensor, dims: &[ReshapeArg]) -> Result<Tensor> {
     #[cfg(feature = "cuda")]
     {
-        if crate::tape_forward::tape_forward_enabled() {
+        if crate::tape_forward::tape_forward_enabled()
+            && kiln_kt_bridge::tape_bridge::bridge_scope_active()
+        {
             if let Some(concrete) = resolve_reshape_dims(x.elem_count(), dims) {
                 let x_c = kt_logits_to_candle(x)
                     .context("tape_reshape_full_attn kt->candle (tape)")?;
@@ -17183,7 +17283,9 @@ fn tape_reshape_full_attn(x: &Tensor, dims: &[ReshapeArg]) -> Result<Tensor> {
 fn tape_transpose_contig_full_attn(x: &Tensor, axis_a: usize, axis_b: usize) -> Result<Tensor> {
     #[cfg(feature = "cuda")]
     {
-        if crate::tape_forward::tape_forward_enabled() {
+        if crate::tape_forward::tape_forward_enabled()
+            && kiln_kt_bridge::tape_bridge::bridge_scope_active()
+        {
             let x_c = kt_logits_to_candle(x)
                 .context("tape_transpose_contig_full_attn kt->candle (tape)")?;
             if let Some(out) = crate::tape_forward::try_tape_transpose_cuda(&x_c, axis_a, axis_b)? {
@@ -17515,7 +17617,9 @@ pub fn gqa_attention_pre_o(
         // gate-on models (a follow-up gate adapter closes that); gate-off
         // (e.g. Qwen3.5-4B default) chains straight through to o_proj.
         #[cfg(feature = "cuda")]
-        if crate::tape_forward::tape_forward_enabled() {
+        if crate::tape_forward::tape_forward_enabled()
+            && kiln_kt_bridge::tape_bridge::bridge_scope_active()
+        {
             let q_c = kt_logits_to_candle(&q).context("full-attn flash kt->candle q (tape)")?;
             let k_c = kt_logits_to_candle(&k).context("full-attn flash kt->candle k (tape)")?;
             let v_c = kt_logits_to_candle(&v).context("full-attn flash kt->candle v (tape)")?;
@@ -17751,7 +17855,9 @@ pub fn gqa_attention_pre_o(
     // transpose-back + reshape so the chain reaches o_proj. No-ops (returns
     // None) in every other configuration; mirrors `gqa_attention_core_prefill`.
     #[cfg(feature = "cuda")]
-    if crate::tape_forward::tape_forward_enabled() {
+    if crate::tape_forward::tape_forward_enabled()
+        && kiln_kt_bridge::tape_bridge::bridge_scope_active()
+    {
         if let Some((q_pe, k_pe, v_pe)) = sdpa_pre_expand.as_ref() {
             let q_c =
                 kt_logits_to_candle(q_pe).context("full-attn sdpa kt->candle q_pe (tape)")?;

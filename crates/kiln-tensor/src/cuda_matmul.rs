@@ -253,7 +253,9 @@ pub fn cuda_matmul(a: &Tensor, b: &Tensor) -> Result<Tensor> {
     let b_batch_stride = (k_b * n * bpe) as u64;
     let c_batch_stride = (m * n * bpe) as u64;
 
-    let stream = ctx.default_stream();
+    // #1082 CUDA-graph fix: route through the thread-local active stream
+    // (outside a capture scope this is exactly `ctx.default_stream()`).
+    let stream = crate::active_cuda_stream(&ctx);
     let raw_stream = stream.cu_stream();
 
     // Base device pointers for each operand. `device_ptr_raw` honors
@@ -459,7 +461,9 @@ pub fn cuda_matmul_into(a: &Tensor, b: &Tensor, dst: &Tensor) -> Result<()> {
     let b_batch_stride = (k_b * n * bpe) as u64;
     let c_batch_stride = (m * n * bpe) as u64;
 
-    let stream = ctx.default_stream();
+    // #1082 CUDA-graph fix: route through the thread-local active stream
+    // (outside a capture scope this is exactly `ctx.default_stream()`).
+    let stream = crate::active_cuda_stream(&ctx);
     let raw_stream = stream.cu_stream();
 
     let (a_base, _) = a_storage.device_ptr_raw();
@@ -653,7 +657,9 @@ pub fn cuda_matmul_with_bias(
     let c_batch_stride = (m * n * bpe) as u64;
     // B is 2-D and shared across batches — no stride.
 
-    let stream = ctx.default_stream();
+    // #1082 CUDA-graph fix: route through the thread-local active stream
+    // (outside a capture scope this is exactly `ctx.default_stream()`).
+    let stream = crate::active_cuda_stream(&ctx);
     let raw_stream = stream.cu_stream();
 
     let (a_base, _) = a_storage.device_ptr_raw();
