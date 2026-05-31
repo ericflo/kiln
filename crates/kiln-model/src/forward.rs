@@ -14965,20 +14965,14 @@ fn gated_deltanet_forward_decode_if(
                     // the `.contiguous()` here), so it's value-faithful. No-op +
                     // candle fallback unless the gate is on + a tape scope is
                     // active.
+                    // #1082 seam flip: kt-native transpose recorder — no kt->candle->kt.
                     #[cfg(feature = "cuda")]
                     {
-                        if crate::tape_forward::tape_forward_enabled()
-                            && kiln_kt_bridge::tape_bridge::bridge_scope_active()
+                        match crate::tape_forward::try_tape_transpose_kt(&mixed_qkv, 1, 2)
+                            .context("gdn conv transpose try_tape_transpose_kt")?
                         {
-                            let in_candle = kt_logits_to_candle(&mixed_qkv)
-                                .context("gdn conv transpose kt->candle (tape)")?;
-                            match crate::tape_forward::try_tape_transpose_cuda(&in_candle, 1, 2)? {
-                                Some(t) => candle_to_kt_activation(&t)
-                                    .context("gdn conv transpose candle->kt (tape)")?,
-                                None => mixed_qkv.transpose(1, 2)?.contiguous()?,
-                            }
-                        } else {
-                            mixed_qkv.transpose(1, 2)?.contiguous()?
+                            Some(t) => t,
+                            None => mixed_qkv.transpose(1, 2)?.contiguous()?,
                         }
                     }
                     #[cfg(not(feature = "cuda"))]
@@ -15119,20 +15113,14 @@ fn gated_deltanet_forward_decode_if(
             // qkv_split. Wrap it so the split's narrow grads flow back through
             // the conv. No-op + candle fallback unless the gate is on + a tape
             // scope is active.
+            // #1082 seam flip: kt-native transpose recorder — no kt->candle->kt.
             #[cfg(feature = "cuda")]
             {
-                if crate::tape_forward::tape_forward_enabled()
-                    && kiln_kt_bridge::tape_bridge::bridge_scope_active()
+                match crate::tape_forward::try_tape_transpose_kt(&post_silu, 1, 2)
+                    .context("gdn conv-out transpose try_tape_transpose_kt")?
                 {
-                    let ps_c = kt_logits_to_candle(&post_silu)
-                        .context("gdn conv-out transpose kt->candle (tape)")?;
-                    match crate::tape_forward::try_tape_transpose_cuda(&ps_c, 1, 2)? {
-                        Some(t) => candle_to_kt_activation(&t)
-                            .context("gdn conv-out transpose candle->kt (tape)")?,
-                        None => post_silu.transpose(1, 2)?,
-                    }
-                } else {
-                    post_silu.transpose(1, 2)?
+                    Some(t) => t,
+                    None => post_silu.transpose(1, 2)?,
                 }
             }
             #[cfg(not(feature = "cuda"))]
@@ -15198,21 +15186,15 @@ fn gated_deltanet_forward_decode_if(
                         nar
                     };
                     let resh = nar.reshape(shape)?;
-                    if crate::tape_forward::tape_forward_enabled()
-                        && kiln_kt_bridge::tape_bridge::bridge_scope_active()
+                    // #1082 seam flip: kt-native reshape recorder — no kt->candle->kt.
+                    match crate::tape_forward::try_tape_reshape_kt(
+                        &nar,
+                        vec![shape.0, shape.1, shape.2, shape.3],
+                    )
+                    .context("gdn qkv reshape try_tape_reshape_kt")?
                     {
-                        let nar_c = kt_logits_to_candle(&nar)
-                            .context("gdn qkv reshape kt->candle nar (tape)")?;
-                        match crate::tape_forward::try_tape_reshape_cuda(
-                            &nar_c,
-                            vec![shape.0, shape.1, shape.2, shape.3],
-                        )? {
-                            Some(t) => Ok(candle_to_kt_activation(&t)
-                                .context("gdn qkv reshape candle->kt (tape)")?),
-                            None => Ok(resh),
-                        }
-                    } else {
-                        Ok(resh)
+                        Some(t) => Ok(t),
+                        None => Ok(resh),
                     }
                 };
             #[cfg(not(feature = "cuda"))]
@@ -15224,21 +15206,16 @@ fn gated_deltanet_forward_decode_if(
             let k = narrow_then_reshape(&mixed_qkv, qk_dim, qk_dim, (batch, seq_len, nk, dk))?;
             let v = narrow_then_reshape(&mixed_qkv, 2 * qk_dim, v_dim, (batch, seq_len, nv, dv))?;
             let z_reshaped = z.reshape((batch, seq_len, nv, dv))?;
+            // #1082 seam flip: kt-native reshape recorder — no kt->candle->kt.
             #[cfg(feature = "cuda")]
-            let z_reshaped = if crate::tape_forward::tape_forward_enabled()
-                && kiln_kt_bridge::tape_bridge::bridge_scope_active()
+            let z_reshaped = match crate::tape_forward::try_tape_reshape_kt(
+                &z,
+                vec![batch, seq_len, nv, dv],
+            )
+            .context("gdn z reshape try_tape_reshape_kt")?
             {
-                let z_c = kt_logits_to_candle(&z).context("gdn z reshape kt->candle (tape)")?;
-                match crate::tape_forward::try_tape_reshape_cuda(
-                    &z_c,
-                    vec![batch, seq_len, nv, dv],
-                )? {
-                    Some(t) => candle_to_kt_activation(&t)
-                        .context("gdn z reshape candle->kt (tape)")?,
-                    None => z_reshaped,
-                }
-            } else {
-                z_reshaped
+                Some(t) => t,
+                None => z_reshaped,
             };
             (q, k, v, z_reshaped)
         };
@@ -16034,20 +16011,14 @@ fn gated_deltanet_forward_decode_if(
                 let v = v_cast;
 
                 // Transpose to [B, nv, T, dim] for per-head processing.
+                // #1082 seam flip: kt-native transpose recorder — no kt->candle->kt.
                 #[cfg(feature = "cuda")]
                 let transpose12 = |t: &Tensor| -> Result<Tensor> {
-                    if crate::tape_forward::tape_forward_enabled()
-                        && kiln_kt_bridge::tape_bridge::bridge_scope_active()
+                    match crate::tape_forward::try_tape_transpose_kt(t, 1, 2)
+                        .context("gdn recur transpose try_tape_transpose_kt")?
                     {
-                        let t_c = kt_logits_to_candle(t)
-                            .context("gdn recur transpose kt->candle (tape)")?;
-                        match crate::tape_forward::try_tape_transpose_cuda(&t_c, 1, 2)? {
-                            Some(out) => candle_to_kt_activation(&out)
-                                .context("gdn recur transpose candle->kt (tape)"),
-                            None => Ok(t.transpose(1, 2)?),
-                        }
-                    } else {
-                        Ok(t.transpose(1, 2)?)
+                        Some(out) => Ok(out),
+                        None => Ok(t.transpose(1, 2)?),
                     }
                 };
                 #[cfg(not(feature = "cuda"))]
@@ -16169,20 +16140,14 @@ fn gated_deltanet_forward_decode_if(
             // LoRA grads never flow). No-op + falls through to the plain candle
             // transpose unless `KILN_USE_TAPE_FORWARD` is set AND a tape scope is
             // active.
+            // #1082 seam flip: kt-native transpose recorder — no kt->candle->kt.
             #[cfg(feature = "cuda")]
             {
-                if crate::tape_forward::tape_forward_enabled()
-                    && kiln_kt_bridge::tape_bridge::bridge_scope_active()
+                match crate::tape_forward::try_tape_transpose_kt(&attn_out, 1, 2)
+                    .context("gdn attn_out transpose try_tape_transpose_kt")?
                 {
-                    let ao_c = kt_logits_to_candle(&attn_out)
-                        .context("gdn attn_out transpose kt->candle (tape)")?;
-                    match crate::tape_forward::try_tape_transpose_cuda(&ao_c, 1, 2)? {
-                        Some(t) => candle_to_kt_activation(&t)
-                            .context("gdn attn_out transpose candle->kt (tape)")?,
-                        None => attn_out.transpose(1, 2)?,
-                    }
-                } else {
-                    attn_out.transpose(1, 2)?
+                    Some(t) => t,
+                    None => attn_out.transpose(1, 2)?,
                 }
             }
             #[cfg(not(feature = "cuda"))]
@@ -16257,19 +16222,16 @@ fn gated_deltanet_forward_decode_if(
         // candle fallback unless `KILN_USE_TAPE_FORWARD` is set AND a tape scope
         // is active.
         let reshaped = attn_out.reshape((batch, seq_len, v_dim))?;
+        // #1082 seam flip: kt-native reshape recorder — no kt->candle->kt.
         #[cfg(feature = "cuda")]
-        let reshaped = if crate::tape_forward::tape_forward_enabled()
-            && kiln_kt_bridge::tape_bridge::bridge_scope_active()
+        let reshaped = match crate::tape_forward::try_tape_reshape_kt(
+            &attn_out,
+            vec![batch, seq_len, v_dim],
+        )
+        .context("gdn gated-norm reshape try_tape_reshape_kt")?
         {
-            let ao_c = kt_logits_to_candle(&attn_out)
-                .context("gdn gated-norm reshape kt->candle (tape)")?;
-            match crate::tape_forward::try_tape_reshape_cuda(&ao_c, vec![batch, seq_len, v_dim])? {
-                Some(t) => candle_to_kt_activation(&t)
-                    .context("gdn gated-norm reshape candle->kt (tape)")?,
-                None => reshaped,
-            }
-        } else {
-            reshaped
+            Some(t) => t,
+            None => reshaped,
         };
         let casted = reshaped.to_dtype(input_dtype)?;
         #[cfg(feature = "cuda")]
@@ -17222,18 +17184,14 @@ pub fn gqa_attention_pre_o_chunked_prefill(
 /// kt reshape needs concrete dims, so the inferred axis is resolved from the
 /// input's element count before recording.
 fn tape_reshape_full_attn(x: &Tensor, dims: &[ReshapeArg]) -> Result<Tensor> {
+    // #1082 seam flip: kt-native reshape recorder — no kt->candle->kt.
     #[cfg(feature = "cuda")]
     {
-        if crate::tape_forward::tape_forward_enabled()
-            && kiln_kt_bridge::tape_bridge::bridge_scope_active()
-        {
-            if let Some(concrete) = resolve_reshape_dims(x.elem_count(), dims) {
-                let x_c = kt_logits_to_candle(x)
-                    .context("tape_reshape_full_attn kt->candle (tape)")?;
-                if let Some(out) = crate::tape_forward::try_tape_reshape_cuda(&x_c, concrete)? {
-                    return candle_to_kt_activation(&out)
-                        .context("tape_reshape_full_attn candle->kt (tape)");
-                }
+        if let Some(concrete) = resolve_reshape_dims(x.elem_count(), dims) {
+            if let Some(out) = crate::tape_forward::try_tape_reshape_kt(x, concrete)
+                .context("tape_reshape_full_attn try_tape_reshape_kt")?
+            {
+                return Ok(out);
             }
         }
     }
@@ -17247,17 +17205,13 @@ fn tape_reshape_full_attn(x: &Tensor, dims: &[ReshapeArg]) -> Result<Tensor> {
 /// connected across the naive-SDPA layout transpose. Falls through to the plain
 /// candle `transpose().contiguous()` otherwise.
 fn tape_transpose_contig_full_attn(x: &Tensor, axis_a: usize, axis_b: usize) -> Result<Tensor> {
+    // #1082 seam flip: kt-native transpose recorder — no kt->candle->kt.
     #[cfg(feature = "cuda")]
     {
-        if crate::tape_forward::tape_forward_enabled()
-            && kiln_kt_bridge::tape_bridge::bridge_scope_active()
+        if let Some(out) = crate::tape_forward::try_tape_transpose_kt(x, axis_a, axis_b)
+            .context("tape_transpose_contig_full_attn try_tape_transpose_kt")?
         {
-            let x_c = kt_logits_to_candle(x)
-                .context("tape_transpose_contig_full_attn kt->candle (tape)")?;
-            if let Some(out) = crate::tape_forward::try_tape_transpose_cuda(&x_c, axis_a, axis_b)? {
-                return candle_to_kt_activation(&out)
-                    .context("tape_transpose_contig_full_attn candle->kt (tape)");
-            }
+            return Ok(out);
         }
     }
     Ok(x.transpose(axis_a, axis_b)?.contiguous()?)
