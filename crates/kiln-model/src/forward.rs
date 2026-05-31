@@ -16130,23 +16130,15 @@ fn gated_deltanet_forward_decode_if(
             // No-op (returns `Ok(None)`) unless `KILN_USE_TAPE_FORWARD` +
             // `KILN_USE_TAPE_GDN_GATED_NORM` are set AND a tape scope is active;
             // the production output (`gated`) is untouched either way.
+            // #1082 seam flip: kt-native GdnGatedRmsNormBackward recorder — no kt->candle->kt.
             #[cfg(feature = "cuda")]
-            if crate::tape_forward::tape_forward_enabled()
-                && kiln_kt_bridge::tape_bridge::bridge_scope_active()
-            {
-                let ao_c = kt_logits_to_candle(&attn_out)
-                    .context("gdn gated-norm kt->candle attn_out (tape)")?;
-                let z_c = kt_logits_to_candle(&z).context("gdn gated-norm kt->candle z (tape)")?;
-                let norm_c = kt_logits_to_candle(&weights.norm)
-                    .context("gdn gated-norm kt->candle norm (tape)")?;
-                let gated_c =
-                    kt_logits_to_candle(&gated).context("gdn gated-norm kt->candle gated (tape)")?;
-                let _ = crate::tape_forward::try_tape_gdn_gated_rms_norm_cuda(
-                    &ao_c,
-                    &z_c,
-                    &norm_c,
+            if crate::tape_forward::tape_forward_enabled() {
+                let _ = crate::tape_forward::try_tape_gdn_gated_rms_norm_kt(
+                    &attn_out,
+                    &z,
+                    &weights.norm,
                     config.rms_norm_eps,
-                    &gated_c,
+                    &gated,
                 )?;
             }
             gated

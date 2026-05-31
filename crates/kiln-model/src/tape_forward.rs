@@ -3503,9 +3503,10 @@ pub fn try_tape_gdn_l2_norm_scale_cuda(
 /// `weight` is the GDN `norm` `Var`.
 #[derive(Debug)]
 pub(crate) struct GdnGatedRmsNormBackward {
-    x: Tensor,
-    z: Tensor,
-    weight: Tensor,
+    // #1082: candle->kt (the bwd kernel gdn_gated_rms_norm_backward_no_grad is kt-native).
+    x: kiln_tensor::Tensor,
+    z: kiln_tensor::Tensor,
+    weight: kiln_tensor::Tensor,
     eps: f64,
 }
 
@@ -3521,20 +3522,12 @@ impl BackwardOp for GdnGatedRmsNormBackward {
         &self,
         grad_output: &kiln_tensor::Tensor,
     ) -> kiln_tensor::Result<Vec<Option<kiln_tensor::Tensor>>> {
-        // #1082: `gdn_gated_rms_norm_backward_no_grad` is now kt-typed. Bridge
-        // the candle-stored x/z/weight to kt; the upstream grad is already kt.
-        let to_kt_in = |t: &Tensor, name: &str| -> kiln_tensor::Result<kiln_tensor::Tensor> {
-            kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(t).map_err(|e| {
-                kiln_tensor::Error::Msg(format!("GdnGatedRmsNormBackward: {name} candle->kt: {e}"))
-            })
-        };
-        let x_kt = to_kt_in(&self.x, "x")?;
-        let z_kt = to_kt_in(&self.z, "z")?;
-        let weight_kt = to_kt_in(&self.weight, "weight")?;
+        // #1082 kt-native: x/z/weight are stored kt now (no candle bridge); the bwd
+        // kernel is already kt-typed.
         let grads = gdn_gated_rms_norm_backward_no_grad(
-            &x_kt,
-            &z_kt,
-            &weight_kt,
+            &self.x,
+            &self.z,
+            &self.weight,
             self.eps,
             grad_output,
         )
@@ -3564,6 +3557,47 @@ impl BackwardOp for GdnGatedRmsNormBackward {
 ///
 /// `Ok(None)` (caller falls through) when the gate is off, no tape scope is
 /// active, the inputs aren't CUDA, shapes disagree, or a kt borrow fails.
+/// kt-native gated-RMSNorm tape recorder (#1082 seam flip) — kt-only twin of
+/// [`try_tape_gdn_gated_rms_norm_cuda`]. Record-only: records the (now kt-native)
+/// `GdnGatedRmsNormBackward` (stores kt x/z/weight; bwd kernel already kt) linking
+/// kt `out` back to kt x/z/weight. No candle round-trip.
+pub fn try_tape_gdn_gated_rms_norm_kt(
+    x: &kiln_tensor::Tensor,
+    z: &kiln_tensor::Tensor,
+    weight: &kiln_tensor::Tensor,
+    eps: f64,
+    out: &kiln_tensor::Tensor,
+) -> Result<Option<kiln_tensor::Tensor>> {
+    if !tape_forward_enabled() || !tape_gdn_gated_norm_enabled() {
+        return Ok(None);
+    }
+    if !matches!(x.device(), kiln_tensor::Device::Cuda(_)) {
+        return Ok(None);
+    }
+    if x.dims() != z.dims() || x.dims() != out.dims() {
+        return Ok(None);
+    }
+    if weight.rank() != 1 || *x.dims().last().unwrap() != weight.dims()[0] {
+        return Ok(None);
+    }
+    let recorded = with_active_tape(|tape: &mut Tape| {
+        tape.record(
+            out,
+            &[x, z, weight],
+            Box::new(GdnGatedRmsNormBackward {
+                x: x.clone(),
+                z: z.clone(),
+                weight: weight.clone(),
+                eps,
+            }),
+        );
+    });
+    if recorded.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(out.clone()))
+}
+
 pub fn try_tape_gdn_gated_rms_norm_cuda(
     x: &Tensor,
     z: &Tensor,
@@ -3612,9 +3646,10 @@ pub fn try_tape_gdn_gated_rms_norm_cuda(
             &out_kt,
             &[&x_kt, &z_kt, &weight_kt],
             Box::new(GdnGatedRmsNormBackward {
-                x: x.clone(),
-                z: z.clone(),
-                weight: weight.clone(),
+                // #1082: store kt (struct fields flipped candle->kt)
+                x: x_kt.clone(),
+                z: z_kt.clone(),
+                weight: weight_kt.clone(),
                 eps,
             }),
         );
