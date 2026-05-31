@@ -49,16 +49,11 @@
 #[cfg(all(feature = "cuda", feature = "candle"))]
 pub mod forward_op;
 
-/// `CustomOp1` shim for gradient injection
-/// (`InjectGradientCandleShim` + `inject_gradient_via_shim`).
-/// Hosted here rather than in `tape_bridge` so the
-/// `kiln-train::trainer` `InjectTensorGradient::apply_op1` flip can
-/// land on every `candle` build (the shim is pure candle — no cuda
-/// crate refs). The CUDA-only `tape_bridge::inject_gradient_kt` is a
-/// thin wrapper that adds a kt-tape side channel. Candle-gated because
-/// it `impl candle_core::CustomOp1`. (#1082 CP-4 step 2-3)
-#[cfg(feature = "candle")]
-pub mod inject_grad_shim;
+// (#1082) `inject_grad_shim` (the `InjectGradientCandleShim` candle CustomOp1 +
+// `inject_gradient_via_shim`) is DELETED — its only user was the test-only
+// `tape_bridge::inject_gradient_kt`, itself called only by the now-deleted
+// `inject_gradient_parity` test. Gradient injection lives natively in
+// `kiln_autograd::InjectGradientBackward`.
 
 /// Re-export of `candle_core` (#1082). During the migration, consumer
 /// crates that bridge to candle islands but don't carry candle as a
