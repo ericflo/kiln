@@ -922,7 +922,7 @@ mod tests {
                 1.0,
                 &device_candle,
             )
-            .unwrap_or_else(|e| panic!("[GRPO-FD] {vname}: analytic grad failed: {e}"));
+            .unwrap_or_else(|e| panic!("[GRPO-FD] {vname}: analytic grad failed: {e:?}"));
             let grad_kt = kiln_kt_bridge::kt_tensor_from_candle_cuda_copy(&grad_candle)
                 .unwrap_or_else(|e| panic!("[GRPO-FD] {vname}: grad -> kt: {e}"));
             let grad_host: Vec<f32> = grad_kt
