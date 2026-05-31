@@ -525,6 +525,62 @@ pub fn try_tape_embedding_kt(
     }
 }
 
+/// kt-native SwiGLU (gate ⊙ sigmoid-gate of up) tape recorder (#1082 seam flip) —
+/// kt-only twin of [`try_tape_swiglu_cuda`].
+pub fn try_tape_swiglu_kt(
+    gate: &kiln_tensor::Tensor,
+    up: &kiln_tensor::Tensor,
+) -> Result<Option<kiln_tensor::Tensor>> {
+    if !tape_forward_enabled() {
+        return Ok(None);
+    }
+    match with_active_tape(|tape: &mut Tape| -> Result<_> {
+        let y = kiln_tensor::ops::mul_sigmoid_gate(gate, up)
+            .map_err(|e| anyhow::anyhow!("kt mul_sigmoid_gate: {e}"))?;
+        tape.record(
+            &y,
+            &[gate, up],
+            Box::new(MulSigmoidGateBackward {
+                gate: gate.clone(),
+                up: up.clone(),
+            }),
+        );
+        Ok(y)
+    }) {
+        Some(result) => Ok(Some(result?)),
+        None => Ok(None),
+    }
+}
+
+/// kt-native elementwise-mul tape recorder (#1082 seam flip) — kt-only twin of
+/// [`try_tape_mul_cuda`]. `Ok(None)` on shape mismatch (defer broadcasting).
+pub fn try_tape_mul_kt(
+    a: &kiln_tensor::Tensor,
+    b: &kiln_tensor::Tensor,
+) -> Result<Option<kiln_tensor::Tensor>> {
+    if !tape_forward_enabled() {
+        return Ok(None);
+    }
+    if a.dims() != b.dims() {
+        return Ok(None);
+    }
+    match with_active_tape(|tape: &mut Tape| -> Result<_> {
+        let y = kiln_tensor::ops::mul(a, b).map_err(|e| anyhow::anyhow!("kt mul: {e}"))?;
+        tape.record(
+            &y,
+            &[a, b],
+            Box::new(MulBackward {
+                a: a.clone(),
+                b: b.clone(),
+            }),
+        );
+        Ok(y)
+    }) {
+        Some(result) => Ok(Some(result?)),
+        None => Ok(None),
+    }
+}
+
 /// Attempt to run an embedding lookup through the kt-typed op registry
 /// (`kiln_tensor::ops::embedding`) and record an `EmbeddingBackward`
 /// node on the active thread-local tape.

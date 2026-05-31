@@ -9328,20 +9328,12 @@ pub fn swiglu_ffn_gated_hidden(
             // gate off (the default) this returns `Ok(None)` and we
             // fall through to the existing `fused_mlp_silu_mul_kt`
             // dispatch.
-            // #1082 CUDA-graph fix: gate on `bridge_scope_active()` (decode
-            // skips these candle bridges — see `residual_add`).
-            if crate::tape_forward::tape_forward_enabled()
-                && kiln_kt_bridge::tape_bridge::bridge_scope_active()
-            {
-                let gate_candle =
-                    kt_logits_to_candle(&gate).context("swiglu kt->candle gate (tape)")?;
-                let up_candle = kt_logits_to_candle(&up).context("swiglu kt->candle up (tape)")?;
-                if let Some(out) =
-                    crate::tape_forward::try_tape_swiglu_cuda(&gate_candle, &up_candle)
-                        .context("swiglu_ffn_gated_hidden try_tape_swiglu_cuda")?
+            // #1082 seam flip: kt-native SwiGLU recorder — no kt->candle->kt.
+            if crate::tape_forward::tape_forward_enabled() {
+                if let Some(out) = crate::tape_forward::try_tape_swiglu_kt(&gate, &up)
+                    .context("swiglu_ffn_gated_hidden try_tape_swiglu_kt")?
                 {
-                    return candle_to_kt_activation(&out)
-                        .context("swiglu candle->kt tape out");
+                    return Ok(out);
                 }
             }
             if let (Some(gate_kt), Some(up_kt)) =
@@ -10133,20 +10125,13 @@ fn swiglu_ffn_impl_no_chunk(
                     // so SiLU(gate) and up chain back to the gate/up projections
                     // (down_proj reaches the loss via the FFN residual, but without
                     // this its dL/dx never flows to gate/up — they stayed islands).
-                    let hidden = if crate::tape_forward::tape_forward_enabled()
-                        && kiln_kt_bridge::tape_bridge::bridge_scope_active()
+                    // #1082 seam flip: kt-native MulBackward recorder — no
+                    // kt->candle->kt. Ok(None) (tape off / no scope) -> plain mul.
+                    let hidden = match crate::tape_forward::try_tape_mul_kt(&gate, &up)
+                        .context("mlp mul try_tape_mul_kt")?
                     {
-                        let g_candle = kt_logits_to_candle(&gate)
-                            .context("mlp mul kt->candle gate (tape)")?;
-                        let u_candle =
-                            kt_logits_to_candle(&up).context("mlp mul kt->candle up (tape)")?;
-                        match crate::tape_forward::try_tape_mul_cuda(&g_candle, &u_candle)? {
-                            Some(t) => candle_to_kt_activation(&t)
-                                .context("mlp mul candle->kt tape out")?,
-                            None => (gate * up)?,
-                        }
-                    } else {
-                        (gate * up)?
+                        Some(t) => t,
+                        None => (gate * up)?,
                     };
                     finish_mlp_stage_profile(
                         profile_device,
