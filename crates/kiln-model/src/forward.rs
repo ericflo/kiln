@@ -28322,6 +28322,25 @@ dedicated hidden-state-bisection fix; do NOT relax the tolerance to 're-green' i
             eprintln!(
                 "dyn_seqlen batched contiguous model decode row {row} (start_pos={row_start_pos}): max_abs_diff={max:e} mean_abs_diff={mean:e}"
             );
+            // C3 probe: does the bf16 GEMM-path divergence flip the decoded (argmax) token?
+            {
+                let br = batch_row.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+                let rw = rowwise.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+                let amax = |v: &[f32]| {
+                    v.iter().enumerate().fold((0usize, f32::NEG_INFINITY), |(bi, bv), (i, &x)| {
+                        if x > bv { (i, x) } else { (bi, bv) }
+                    })
+                };
+                let (ba, bv) = amax(&br);
+                let (ra, rv) = amax(&rw);
+                let mut srt = rw.clone();
+                srt.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+                let gap = if srt.len() >= 2 { srt[0] - srt[1] } else { f32::INFINITY };
+                eprintln!(
+                    "C3_ARGMAX row {row}: batched_argmax={ba}(v={bv:.5}) rowwise_argmax={ra}(v={rv:.5}) match={} rowwise_top2_gap={gap:.5}",
+                    ba == ra
+                );
+            }
             assert!(
                 max <= 3e-2,
                 "row {row} dyn_seqlen batched contiguous model decode max_abs_diff={max:e}"
