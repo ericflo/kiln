@@ -791,7 +791,7 @@ pub fn metal_softmax_last_axis(x: &crate::Tensor) -> Result<crate::Tensor> {
 /// # Implementation
 ///
 /// Mirror of [`metal_softmax_last_axis`]: dispatches directly into the
-/// `candle_metal_kernels::call_sdpa_*` MSL kernel family — the same FFI
+/// kiln-owned unified flash-attention MSL (`metal_kernels::sdpa`), replacing the candle `call_sdpa_*` family — the same FFI
 /// entry points `candle_nn::ops::sdpa` uses internally. The wire-level
 /// kernel call is bit-exact; this op only adds the kt-typed signature.
 ///
@@ -838,14 +838,13 @@ pub fn metal_sdpa_last_axis(
     causal: bool,
 ) -> Result<crate::Tensor> {
     use candle_metal_kernels::metal::MTLResourceOptions;
-    use candle_metal_kernels::SdpaDType;
 
     // ---- Validate kt-side preconditions ----
     let dtype = q.dtype();
-    let (dtype_size, sdpa_dtype): (usize, SdpaDType) = match dtype {
-        DType::F32 => (4, SdpaDType::F32),
-        DType::BF16 => (2, SdpaDType::BF16),
-        DType::F16 => (2, SdpaDType::F16),
+    let dtype_size: usize = match dtype {
+        DType::F32 => 4,
+        DType::BF16 => 2,
+        DType::F16 => 2,
         other => {
             return Err(Error::Msg(format!(
                 "metal_sdpa_last_axis: unsupported dtype {other} (F32/BF16/F16 only)"
@@ -868,11 +867,9 @@ pub fn metal_sdpa_last_axis(
             v.rank()
         )));
     }
-    if !q.is_contiguous() || !k.is_contiguous() || !v.is_contiguous() {
-        return Err(Error::Msg(
-            "metal_sdpa_last_axis: q/k/v must all be contiguous".to_string(),
-        ));
-    }
+    // NOTE: q/k/v may be strided (e.g. a KV-cache view); the kiln SDPA kernel
+    // indexes via each tensor's element strides + start offset, so no
+    // contiguity precondition is required here. (out is freshly contiguous.)
 
     let q_dims = q.shape();
     let k_dims = k.shape();
@@ -903,30 +900,18 @@ pub fn metal_sdpa_last_axis(
     let head_dim = q_dims[3];
     let q_seq = q_dims[2];
     let k_seq = k_dims[2];
-
-    let supported_head_dim = matches!(
-        head_dim,
-        32 | 64 | 72 | 80 | 96 | 128 | 256 | 512
-    );
-    if !supported_head_dim {
+    // v's head_dim must match q/k (the kernel writes a head_dim-wide output row),
+    // and k/v must share seqlen.
+    if v_dims[3] != head_dim {
         return Err(Error::Msg(format!(
-            "metal_sdpa_last_axis: head_dim {head_dim} not supported \
-             (expected one of 32, 64, 72, 80, 96, 128, 256, 512); \
-             q dims {:?}, k dims {:?}, v dims {:?}",
-            q_dims, k_dims, v_dims
+            "metal_sdpa_last_axis: v head_dim ({}) must match q/k head_dim ({head_dim})",
+            v_dims[3]
         )));
     }
-
-    // F32 full attention at head_dim=512 exceeds 32KB Metal threadgroup memory.
-    let supports_sdpa_full_dtype = !(head_dim == 512 && dtype == DType::F32);
-    let supports_sdpa_full = q_seq > 8 && supports_sdpa_full_dtype;
-    let supports_sdpa_vector = q_seq <= 8 && q_seq <= k_seq;
-
-    if !supports_sdpa_full && !supports_sdpa_vector {
+    if k_dims[2] != v_dims[2] {
         return Err(Error::Msg(format!(
-            "metal_sdpa_last_axis: q dims {:?}, k dims {:?}, v dims {:?} \
-             not supported by vector or full SDPA kernels",
-            q_dims, k_dims, v_dims
+            "metal_sdpa_last_axis: k and v seqlen must match (got k={}, v={})",
+            k_dims[2], v_dims[2]
         )));
     }
 
@@ -981,153 +966,36 @@ pub fn metal_sdpa_last_axis(
     // Output layout (contiguous), needed by call_sdpa_full for o_strides.
     let out_layout = crate::Layout::contiguous(out_shape.clone());
 
-    let encoder = companion.command_encoder().map_err(|e| {
-        Error::Msg(format!(
-            "metal_sdpa_last_axis: command_encoder() failed: {e:?}"
-        ))
-    })?;
-
-    // ---- Dispatch ----
-    // Mirrors `Sdpa::metal_fwd` in candle-nn 0.10.2 ops.rs:1080-1226.
-    // The wire-level FFI is identical; the kt-typed signature is the
-    // only added piece (#1082).
-    if supports_sdpa_vector {
-        // Route to the 2-pass fused attention when k seqlen is large.
-        // (See MLX PR #1597.)
-        const TWO_PASS_K_THRESHOLD: usize = 1024;
-        if k_seq >= TWO_PASS_K_THRESHOLD {
-            let mut intermediate_shape = [
-                &out_shape[0..out_shape.len() - 2],
-                &[candle_metal_kernels::SDPA_2PASS_BLOCKS],
-                &[out_shape[out_shape.len() - 1]],
-            ]
-            .concat();
-            let intermediate_elem: usize = intermediate_shape.iter().product();
-            // The 2-pass intermediate is F32 (matches candle's
-            // `device.new_buffer(..., DType::F32, ...)` path); use 4 bytes
-            // per element here regardless of the q/k/v dtype.
-            let intermediate = raw_device
-                .new_buffer(
-                    (intermediate_elem * 4).max(1),
-                    MTLResourceOptions::StorageModeShared,
-                )
-                .map_err(|e| {
-                    Error::Msg(format!(
-                        "metal_sdpa_last_axis: new_buffer(intermediate) failed: {e:?}"
-                    ))
-                })?;
-            let _ = intermediate_shape.pop().unwrap();
-            let sums_maxs_elem: usize = intermediate_shape.iter().product();
-            let sums = raw_device
-                .new_buffer(
-                    (sums_maxs_elem * 4).max(1),
-                    MTLResourceOptions::StorageModeShared,
-                )
-                .map_err(|e| {
-                    Error::Msg(format!(
-                        "metal_sdpa_last_axis: new_buffer(sums) failed: {e:?}"
-                    ))
-                })?;
-            let maxs = raw_device
-                .new_buffer(
-                    (sums_maxs_elem * 4).max(1),
-                    MTLResourceOptions::StorageModeShared,
-                )
-                .map_err(|e| {
-                    Error::Msg(format!(
-                        "metal_sdpa_last_axis: new_buffer(maxs) failed: {e:?}"
-                    ))
-                })?;
-
-            encoder.set_label("kt_metal_sdpa_vector_2pass");
-            candle_metal_kernels::call_sdpa_vector_2pass(
-                raw_device,
-                &encoder,
-                companion.kernels(),
-                q.layout().start_offset(),
-                q_dims,
-                q_metal.buffer().as_ref(),
-                k.layout().start_offset(),
-                k_dims,
-                k.layout().strides(),
-                k_metal.buffer().as_ref(),
-                v.layout().start_offset(),
-                v.layout().strides(),
-                v_metal.buffer().as_ref(),
-                out_buffer_arc.as_ref(),
-                &intermediate,
-                &sums,
-                &maxs,
-                scale,
-                1.0, // softcapping disabled
-                sdpa_dtype,
-            )
-            .map_err(|e| {
-                Error::Msg(format!(
-                    "metal_sdpa_last_axis: call_sdpa_vector_2pass failed: {e:?}"
-                ))
-            })?;
-        } else {
-            encoder.set_label("kt_metal_sdpa_vector");
-            candle_metal_kernels::call_sdpa_vector(
-                raw_device,
-                &encoder,
-                companion.kernels(),
-                q.layout().start_offset(),
-                q_dims,
-                q_metal.buffer().as_ref(),
-                k.layout().start_offset(),
-                k_dims,
-                k.layout().strides(),
-                k_metal.buffer().as_ref(),
-                v.layout().start_offset(),
-                v.layout().strides(),
-                v_metal.buffer().as_ref(),
-                out_buffer_arc.as_ref(),
-                scale,
-                1.0, // softcapping disabled
-                sdpa_dtype,
-            )
-            .map_err(|e| {
-                Error::Msg(format!(
-                    "metal_sdpa_last_axis: call_sdpa_vector failed: {e:?}"
-                ))
-            })?;
-        }
-    } else {
-        // supports_sdpa_full
-        encoder.set_label("kt_metal_sdpa_full");
-        candle_metal_kernels::call_sdpa_full(
-            raw_device,
-            &encoder,
-            companion.kernels(),
-            q.layout().start_offset(),
-            q_dims,
-            q.layout().strides(),
-            q_metal.buffer().as_ref(),
-            k.layout().start_offset(),
-            k_dims,
-            k.layout().strides(),
-            k_metal.buffer().as_ref(),
-            v.layout().start_offset(),
-            v_metal.buffer().as_ref(),
-            v.layout().strides(),
-            None, // mask_type
-            None, // mask_buffer
-            None, // m_strides
-            out_buffer_arc.as_ref(),
-            out_layout.strides(),
-            scale,
-            causal,
-            sdpa_dtype,
-        )
-        .map_err(|e| {
-            Error::Msg(format!(
-                "metal_sdpa_last_axis: call_sdpa_full failed: {e:?}"
-            ))
-        })?;
-    }
-    drop(encoder);
+    // ---- Dispatch the kiln-owned unified flash-attention SDPA ----
+    // Replaces candle's call_sdpa_{vector,vector_2pass,full} trio with one
+    // online-softmax kernel handling vector + full + GQA + causal + strided
+    // q/k/v. The helper opens its own encoder (start offsets ride in params,
+    // so the buffer byte-offsets stay 0).
+    let batch = q_dims[0];
+    let n_heads = q_dims[1];
+    let n_kv_heads = k_dims[1];
+    crate::metal_kernels::sdpa(
+        &companion,
+        q_metal.buffer().as_ref(),
+        k_metal.buffer().as_ref(),
+        v_metal.buffer().as_ref(),
+        out_buffer_arc.as_ref(),
+        dtype,
+        batch,
+        n_heads,
+        n_kv_heads,
+        q_seq,
+        k_seq,
+        head_dim,
+        scale,
+        causal,
+        q.layout().strides(),
+        q.layout().start_offset(),
+        k.layout().strides(),
+        k.layout().start_offset(),
+        v.layout().strides(),
+        v.layout().start_offset(),
+    )?;
 
     let out_storage = MetalStorage::from_buffer_kt(
         raw_device,

@@ -751,3 +751,248 @@ kernel void {entry}(
     drop(encoder);
     Ok(())
 }
+
+// ----------------------------------------------------------------------
+// sdpa — replaces candle_metal_kernels::call_sdpa_{vector,vector_2pass,full}
+// ----------------------------------------------------------------------
+
+/// Packed params for the SDPA kernel (set_bytes). Field order MUST match the
+/// MSL `struct SdpaParams` exactly. Strides/offsets are in ELEMENTS.
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct SdpaParams {
+    head_dim: u32,
+    q_seq: u32,
+    k_seq: u32,
+    hq: u32,
+    gqa: u32,
+    causal: u32,
+    scale: f32,
+    nthreads: u32,
+    q_s0: u32,
+    q_s1: u32,
+    q_s2: u32,
+    q_s3: u32,
+    q_off: u32,
+    k_s0: u32,
+    k_s1: u32,
+    k_s2: u32,
+    k_s3: u32,
+    k_off: u32,
+    v_s0: u32,
+    v_s1: u32,
+    v_s2: u32,
+    v_s3: u32,
+    v_off: u32,
+}
+
+/// Unified online-softmax (flash) SDPA MSL. One threadgroup per (qi, h, b);
+/// `nthreads` is a power of two ≥ head_dim, threads with tid<D own output dim
+/// tid. q/k/v indexed via element strides + start offsets (handles strided
+/// KV-cache views); GQA maps `kv_h = h / (Hq/Hkv)`; causal limits keys to
+/// `0..=(Sk-Sq+qi)`. All exp/accumulate in float, store narrows to dtype.
+/// `__KTY__` (not bare `TY`) is the type placeholder — a bare `TY` would also
+/// hit the `INFINITY` identifier.
+const SDPA_MSL: &str = r#"
+#include <metal_stdlib>
+using namespace metal;
+
+struct SdpaParams {
+    uint head_dim;
+    uint q_seq;
+    uint k_seq;
+    uint hq;
+    uint gqa;
+    uint causal;
+    float scale;
+    uint nthreads;
+    uint q_s0; uint q_s1; uint q_s2; uint q_s3; uint q_off;
+    uint k_s0; uint k_s1; uint k_s2; uint k_s3; uint k_off;
+    uint v_s0; uint v_s1; uint v_s2; uint v_s3; uint v_off;
+};
+
+kernel void kt_sdpa___KTY__(
+    device const __KTY__* q     [[buffer(0)]],
+    device const __KTY__* k     [[buffer(1)]],
+    device const __KTY__* v     [[buffer(2)]],
+    device __KTY__* out         [[buffer(3)]],
+    constant SdpaParams& p      [[buffer(4)]],
+    threadgroup float* scratch  [[threadgroup(0)]],
+    uint3 tgpos    [[threadgroup_position_in_grid]],
+    uint tid       [[thread_index_in_threadgroup]])
+{
+    const uint qi = tgpos.x;   // query position 0..q_seq
+    const uint h  = tgpos.y;   // query head    0..hq
+    const uint b  = tgpos.z;   // batch         0..B
+    const uint nthreads = p.nthreads;
+
+    if (qi >= p.q_seq || h >= p.hq) return;
+
+    const uint D     = p.head_dim;
+    const uint kv_h  = h / p.gqa;              // GQA head mapping
+    const bool active = tid < D;
+
+    // Base element offsets for this (b,h,qi) into q, and (b,kv_h) into k/v.
+    const uint q_base = p.q_off + b * p.q_s0 + h * p.q_s1 + qi * p.q_s2;
+    const uint k_base = p.k_off + b * p.k_s0 + kv_h * p.k_s1;
+    const uint v_base = p.v_off + b * p.v_s0 + kv_h * p.v_s1;
+
+    // This thread's q component (active threads only).
+    const float qf = active ? (float)q[q_base + tid * p.q_s3] : 0.0f;
+
+    // Causal key limit: query qi attends keys 0..=(k_seq - q_seq + qi).
+    uint key_limit = p.k_seq;
+    if (p.causal != 0) {
+        key_limit = (p.k_seq + qi + 1u);
+        key_limit = (key_limit >= p.q_seq) ? (key_limit - p.q_seq) : 0u;
+        if (key_limit > p.k_seq) key_limit = p.k_seq;
+    }
+
+    // Online-softmax state (each thread keeps its own m,l; acc is its out dim).
+    float m = -INFINITY;
+    float l = 0.0f;
+    float acc = 0.0f;
+
+    for (uint kj = 0u; kj < key_limit; ++kj) {
+        const uint k_row = k_base + kj * p.k_s2;
+        // Partial dot-product term for this thread (0 for inactive threads).
+        scratch[tid] = active ? (qf * (float)k[k_row + tid * p.k_s3]) : 0.0f;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        // Tree reduction over the power-of-two thread count.
+        for (uint s = nthreads >> 1; s > 0u; s >>= 1) {
+            if (tid < s) scratch[tid] += scratch[tid + s];
+            threadgroup_barrier(mem_flags::mem_threadgroup);
+        }
+        const float score = p.scale * scratch[0];
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        // Online-softmax merge (each thread updates its own m,l,acc).
+        const float m_new = max(m, score);
+        const float corr = exp(m - m_new);
+        const float pj = exp(score - m_new);
+        l = l * corr + pj;
+        if (active) {
+            const float vv = (float)v[v_base + kj * p.v_s2 + tid * p.v_s3];
+            acc = acc * corr + pj * vv;
+        }
+        m = m_new;
+    }
+
+    // out is contiguous [B, Hq, Sq, D].
+    if (active) {
+        const uint out_base = ((b * p.hq + h) * p.q_seq + qi) * D;
+        out[out_base + tid] = (__KTY__)(l > 0.0f ? (acc / l) : 0.0f);
+    }
+}
+"#;
+
+/// Kiln-owned unified flash-attention SDPA — replaces
+/// `candle_metal_kernels::call_sdpa_vector` / `_vector_2pass` / `_full`.
+/// `q [B,Hq,Sq,D] @ k [B,Hkv,Sk,D]^T`, softmax, `@ v [B,Hkv,Sk,D]` →
+/// `out [B,Hq,Sq,D]` (contiguous). GQA, causal, and strided q/k/v supported.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn sdpa(
+    companion: &MetalCompanion,
+    q: &MetalBuffer,
+    k: &MetalBuffer,
+    v: &MetalBuffer,
+    out: &MetalBuffer,
+    dtype: DType,
+    b: usize,
+    hq: usize,
+    hkv: usize,
+    sq: usize,
+    sk: usize,
+    head_dim: usize,
+    scale: f32,
+    causal: bool,
+    q_strides: &[usize],
+    q_offset: usize,
+    k_strides: &[usize],
+    k_offset: usize,
+    v_strides: &[usize],
+    v_offset: usize,
+) -> Result<()> {
+    if b == 0 || hq == 0 || sq == 0 || head_dim == 0 {
+        return Ok(());
+    }
+    if hkv == 0 || hq % hkv != 0 {
+        return Err(Error::Msg(format!(
+            "metal_kernels::sdpa: invalid GQA (hq={hq}, hkv={hkv})"
+        )));
+    }
+    if q_strides.len() != 4 || k_strides.len() != 4 || v_strides.len() != 4 {
+        return Err(Error::Msg(
+            "metal_kernels::sdpa: q/k/v strides must be rank-4".to_string(),
+        ));
+    }
+    let ty = msl_ty(dtype)?;
+    let entry = format!("kt_sdpa_{ty}");
+    let src = SDPA_MSL.replace("__KTY__", ty);
+    let pipeline = op_pipeline(companion, &src, &entry)?;
+
+    // Threads per threadgroup: power of two >= head_dim, capped at the
+    // pipeline max. The score reduction tree halves `nthreads` cleanly, and
+    // threads with tid >= head_dim contribute 0.
+    let max_tpt = pipeline.max_total_threads_per_threadgroup();
+    let mut tpt = head_dim.next_power_of_two();
+    if tpt > max_tpt {
+        let mut p2 = max_tpt;
+        if !p2.is_power_of_two() {
+            p2 = p2.next_power_of_two() >> 1;
+        }
+        tpt = p2;
+        if tpt < head_dim {
+            return Err(Error::Msg(format!(
+                "metal_kernels::sdpa: head_dim {head_dim} exceeds device \
+                 max threadgroup size {max_tpt}"
+            )));
+        }
+    }
+    let tpt = tpt.max(1);
+
+    let gqa = hq / hkv;
+    let params = SdpaParams {
+        head_dim: head_dim as u32,
+        q_seq: sq as u32,
+        k_seq: sk as u32,
+        hq: hq as u32,
+        gqa: gqa as u32,
+        causal: u32::from(causal),
+        scale,
+        nthreads: tpt as u32,
+        q_s0: q_strides[0] as u32,
+        q_s1: q_strides[1] as u32,
+        q_s2: q_strides[2] as u32,
+        q_s3: q_strides[3] as u32,
+        q_off: q_offset as u32,
+        k_s0: k_strides[0] as u32,
+        k_s1: k_strides[1] as u32,
+        k_s2: k_strides[2] as u32,
+        k_s3: k_strides[3] as u32,
+        k_off: k_offset as u32,
+        v_s0: v_strides[0] as u32,
+        v_s1: v_strides[1] as u32,
+        v_s2: v_strides[2] as u32,
+        v_s3: v_strides[3] as u32,
+        v_off: v_offset as u32,
+    };
+
+    let encoder = companion
+        .command_encoder()
+        .map_err(|e| Error::Msg(format!("metal_kernels::sdpa: encoder: {e:?}")))?;
+    encoder.set_label("kt_sdpa");
+    encoder.set_compute_pipeline_state(&pipeline);
+    encoder.set_buffer(0, Some(q), 0);
+    encoder.set_buffer(1, Some(k), 0);
+    encoder.set_buffer(2, Some(v), 0);
+    encoder.set_buffer(3, Some(out), 0);
+    encoder.set_bytes(4, &params);
+    encoder.set_threadgroup_memory_length(0, tpt * std::mem::size_of::<f32>());
+
+    let groups = objc2_metal::MTLSize { width: sq, height: hq, depth: b };
+    let threads = objc2_metal::MTLSize { width: tpt, height: 1, depth: 1 };
+    encoder.dispatch_thread_groups(groups, threads);
+    drop(encoder);
+    Ok(())
+}
