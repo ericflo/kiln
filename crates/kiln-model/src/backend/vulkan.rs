@@ -1278,6 +1278,18 @@ impl VulkanBackend {
         if head_dim > 256 {
             return Ok(None);
         }
+        // (#1082) This is a SELF-attention kernel: q/k/v must span the same
+        // sequence length (it computes a causal [T,T] online softmax). The
+        // prefill-with-history / split-tail path (start_pos > 0) attends q's
+        // new tokens over a LONGER cached K/V (q_len < kv_len), which this
+        // kernel cannot express — decline so the caller falls through to the
+        // manual GQA path (which masks an arbitrary kv_len). Erroring here on
+        // the byte-length mismatch was a 500 on every prompt longer than one
+        // KV block.
+        let kv_len = k.dims4().map(|d| d.1).unwrap_or(seq_len);
+        if kv_len != seq_len {
+            return Ok(None);
+        }
 
         // Cast to F32 if needed — the kernel is F32-in/F32-out. The
         // BF16→F32 promotion is cheap relative to the SDPA compute

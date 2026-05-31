@@ -20272,6 +20272,19 @@ fn gqa_attention_paged_with_rope_tables(
     let gqa_ratio = num_heads / num_kv_heads;
     let batch = k.dim(0)?;
 
+    // (#1082 Vulkan) The paged-cache read returns K/V in the pool dtype (BF16),
+    // but the Vulkan attention computes in F32 (q comes from F32 projections)
+    // and the kt matmul requires equal operand dtypes. Cast K/V to q's dtype so
+    // the manual GQA SDPA (Q@Kᵀ and probs@V below) doesn't trip the strict-kt
+    // "dtype mismatch: a=f32, b=bf16" bail. No-op on CUDA (q/k/v all BF16) and
+    // whenever the dtypes already match. This is the cross-length prefill /
+    // split-tail fallback the self-attention flash kernel declines.
+    let (k, v) = if k.dtype() != q.dtype() {
+        (k.to_dtype(q.dtype())?, v.to_dtype(q.dtype())?)
+    } else {
+        (k, v)
+    };
+
     // Optimized decode path (seq_len == 1): reshape Q instead of expanding K/V.
     // Q is [batch, num_heads, 1, head_dim] (1 token) while K/V is
     // [batch, num_kv_heads, kv_len, head_dim] (full history). Expanding K/V
