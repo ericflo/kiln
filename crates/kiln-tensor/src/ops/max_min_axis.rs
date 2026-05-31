@@ -62,6 +62,13 @@ fn apply(kind: MinMaxKind, x: &Tensor, axis: usize) -> Result<Tensor> {
             };
         }
     }
+    // Non-CPU host fallback (#1082): no Metal/Vulkan minmax kernel yet —
+    // stage on host, reduce, move the result back. Recurses with a CPU
+    // input so it terminates on the CPU path below.
+    if !x.device().is_cpu() {
+        let x_cpu = x.to_device(crate::Device::Cpu)?;
+        return apply(kind, &x_cpu, axis)?.to_device(x.device());
+    }
     let dtype = x.dtype();
     let shape = x.shape().to_vec();
     let outer: usize = shape[..axis].iter().product::<usize>().max(1);
