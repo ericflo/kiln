@@ -214,6 +214,29 @@ every config"):
   crossover moved from batch 128 to batch 256. The table above was rerun after
   fixing the full-attention subpath to include the gated-Q split and fused Q/K
   norm used by the production resident recorder.
+  **Update — mixed resident paged token microbench:** added
+  `full_token_resident_mixed_paged`, which keeps the real 8 full-attention +
+  24 GDN layer mix but changes each full-attention layer to use
+  `paged_kv_write_slots` plus split-K
+  `paged_attn_decode_batch_paged_splitk`/reduce over real per-row block
+  tables. This is the closest Vulkan-only synthetic benchmark to production
+  continuous-batched decode at the current 256-token history window. On RADV
+  STRIX_HALO with `KILN_VK_MICROBENCH_BATCHES=1,8,32,64`, warmup=2, timed=5,
+  repeats=2, plus a batch-128 probe:
+
+  | batch | per token | rows/s |
+  |---:|---:|---:|
+  | 1 | 59.7 ms | 17 |
+  | 8 | 115.0 ms | 70 |
+  | 32 | 233.9 ms | 137 |
+  | 64 | 459.1 ms | 139 |
+  | 128 | 923.7 ms | 139 |
+
+  The mixed-paged result is effectively tied with the contiguous mixed
+  benchmark at batch 64/128, so the paged slot write + block-table attention
+  path is not the dominant saturation limit at this window; the remaining
+  high-batch ceiling is still in the projection/MLP/GDN-heavy parts of the
+  recorded token.
   **Update — GDN resident recorder uses row-reuse in-proj:** the batched GDN
   `CommandBatch` recorder now selects the same pair QKV/Z plus rows2/rows4
   BF16 in-proj shaders as the standalone dispatcher. Focused

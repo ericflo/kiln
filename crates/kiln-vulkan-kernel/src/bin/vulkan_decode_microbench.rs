@@ -503,7 +503,13 @@ fn run() -> Result<()> {
     if want("full_token_resident_mixed_batched") {
         run_full_token_resident_mixed_batched(
             &device, &q_buf, &k_buf, &v_buf, &qkv_buf, &z_buf, &a_buf, &b_buf, &gate_buf, &up_buf,
-            &down_buf, &batches,
+            &down_buf, &batches, false,
+        )?;
+    }
+    if want("full_token_resident_mixed_paged") {
+        run_full_token_resident_mixed_batched(
+            &device, &q_buf, &k_buf, &v_buf, &qkv_buf, &z_buf, &a_buf, &b_buf, &gate_buf, &up_buf,
+            &down_buf, &batches, true,
         )?;
     }
     if want("full_token_resident_paged") {
@@ -529,15 +535,27 @@ fn run_full_token_resident_mixed_batched(
     up_w: &VulkanBuffer,
     down_w: &VulkanBuffer,
     batches: &[usize],
+    use_paged_attention: bool,
 ) -> Result<()> {
     use kiln_vulkan_kernel::CommandBatch;
+    use kiln_vulkan_kernel::VkPagedKvCache;
     use kiln_vulkan_kernel::Workgroups;
 
     const NUM_LAYERS: usize = 32;
     const FULL_ATTN_LAYERS: usize = 8;
     const GDN_LAYERS: usize = 24;
+    let label = if use_paged_attention {
+        "full_token_resident_mixed_paged"
+    } else {
+        "full_token_resident_mixed"
+    };
+    let attn_mode = if use_paged_attention {
+        "paged KV + split-K paged-attn"
+    } else {
+        "contiguous K/V attention"
+    };
     println!(
-        "== full_token_resident_mixed_batched ({FULL_ATTN_LAYERS} full-attn + {GDN_LAYERS} GDN layers, 1 cmd-buffer + 1 submit) =="
+        "== {label} ({FULL_ATTN_LAYERS} full-attn + {GDN_LAYERS} GDN layers, {attn_mode}, 1 cmd-buffer + 1 submit) =="
     );
 
     let num_heads = 16usize;
@@ -546,6 +564,9 @@ fn run_full_token_resident_mixed_batched(
     let rotary_dim = 64usize;
     let half_rot = rotary_dim / 2;
     let max_seqlen = 256usize;
+    let block_size = 16usize;
+    let blocks_per_seq = 32usize;
+    let cur_seq_len = 256usize;
     let softmax_scale = (head_dim as f32).sqrt().recip();
 
     let conv_kernel = 4usize;
@@ -558,8 +579,7 @@ fn run_full_token_resident_mixed_batched(
     let weight_qknorm = upload_f32_buffer_from_slice(device, &vec![1.0f32; head_dim])?;
     let attn_out_w =
         upload_bf16_packed_buffer_from_slice(device, &make_bf16_weight_slice(Q_DIM, HIDDEN))?;
-    let gdn_recurrent_norm_w =
-        upload_f32_buffer_from_slice(device, &vec![1.0f32; GDN_HEAD_DIM])?;
+    let gdn_recurrent_norm_w = upload_f32_buffer_from_slice(device, &vec![1.0f32; GDN_HEAD_DIM])?;
     let gdn_conv_w = upload_f32_buffer_from_slice(device, &vec![0.0f32; QKV_DIM * conv_kernel])?;
     let gdn_a_log = upload_f32_buffer_from_slice(device, &vec![-1.0f32; GDN_NUM_VALUE_HEADS])?;
     let gdn_dt_bias = upload_f32_buffer_from_slice(device, &vec![0.0f32; GDN_NUM_VALUE_HEADS])?;
@@ -579,6 +599,18 @@ fn run_full_token_resident_mixed_batched(
     let paged_attn_shader = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/csrc/shaders/paged_attn_decode_batch.comp"
+    );
+    let paged_attn_splitk_shader = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/csrc/shaders/paged_attn_decode_batch_paged_splitk.comp"
+    );
+    let paged_attn_reduce_shader = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/csrc/shaders/paged_attn_decode_batch_paged_splitk_reduce.comp"
+    );
+    let kv_write_slots_shader = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/csrc/shaders/paged_kv_write_slots.comp"
     );
     let mul_sigmoid_shader = concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -605,6 +637,18 @@ fn run_full_token_resident_mixed_batched(
             )?;
             Ok(buf)
         };
+        let mk_dev = |bytes: &[u8]| -> Result<VulkanBuffer> {
+            let buf = mk(bytes.len() as u64)?;
+            VulkanBuffer::upload_data(
+                device.device(),
+                device.host_visible_mem_type(),
+                device.queue(),
+                device.queue_family_index(),
+                &buf,
+                bytes,
+            )?;
+            Ok(buf)
+        };
 
         let hidden_bytes = (batch * HIDDEN * 4) as u64;
         let x_buf = mk_zero(hidden_bytes)?;
@@ -619,20 +663,69 @@ fn run_full_token_resident_mixed_batched(
         let fa_k_rot = mk((batch * num_kv_heads * head_dim * 4) as u64)?;
         let fa_v_buf = mk((batch * num_kv_heads * head_dim * 4) as u64)?;
         let fa_gate_buf = mk((batch * num_heads * head_dim * 4) as u64)?;
-        let k_pool = mk((batch * max_seqlen * num_kv_heads * head_dim * 4) as u64)?;
-        let v_pool = mk((batch * max_seqlen * num_kv_heads * head_dim * 4) as u64)?;
-        let seq_lens_data: Vec<u32> = vec![max_seqlen as u32; batch];
+        let k_pool = if use_paged_attention {
+            None
+        } else {
+            Some(mk(
+                (batch * max_seqlen * num_kv_heads * head_dim * 4) as u64
+            )?)
+        };
+        let v_pool = if use_paged_attention {
+            None
+        } else {
+            Some(mk(
+                (batch * max_seqlen * num_kv_heads * head_dim * 4) as u64
+            )?)
+        };
+        let seq_lens_data: Vec<u32> = if use_paged_attention {
+            vec![(cur_seq_len + 1) as u32; batch]
+        } else {
+            vec![max_seqlen as u32; batch]
+        };
         let seq_lens_bytes: Vec<u8> = bytemuck::cast_slice(&seq_lens_data).to_vec();
-        let seq_lens_buf = mk(seq_lens_bytes.len() as u64)?;
-        VulkanBuffer::upload_data(
-            device.device(),
-            device.host_visible_mem_type(),
-            device.queue(),
-            device.queue_family_index(),
-            &seq_lens_buf,
-            &seq_lens_bytes,
-        )?;
+        let seq_lens_buf = mk_dev(&seq_lens_bytes)?;
+        let num_chunks = paged_attn_splitk_chunks(batch);
+        let paged_cache = if use_paged_attention {
+            Some(VkPagedKvCache::new(
+                device,
+                NUM_LAYERS,
+                batch * blocks_per_seq,
+                block_size,
+                num_kv_heads,
+                head_dim,
+            )?)
+        } else {
+            None
+        };
+        let block_table_buf = if use_paged_attention {
+            let mut block_ids = Vec::with_capacity(batch * blocks_per_seq);
+            for row in 0..batch {
+                let row_block_base = row * blocks_per_seq;
+                for block in 0..blocks_per_seq {
+                    block_ids.push((row_block_base + block) as u32);
+                }
+            }
+            Some(mk_dev(bytemuck::cast_slice(&block_ids))?)
+        } else {
+            None
+        };
+        let slots_buf = if use_paged_attention {
+            let slots: Vec<u32> = (0..batch)
+                .map(|row| (row * blocks_per_seq * block_size + cur_seq_len) as u32)
+                .collect();
+            Some(mk_dev(bytemuck::cast_slice(&slots))?)
+        } else {
+            None
+        };
         let attn_pre_gate = mk((batch * num_heads * head_dim * 4) as u64)?;
+        let attn_partials = if use_paged_attention {
+            let partials_stride = 2 + head_dim;
+            Some(mk(
+                (batch * num_heads * num_chunks * partials_stride * 4) as u64
+            )?)
+        } else {
+            None
+        };
         let attn_post_gate = mk((batch * num_heads * head_dim * 4) as u64)?;
         let attn_out = mk(hidden_bytes)?;
 
@@ -651,13 +744,17 @@ fn run_full_token_resident_mixed_batched(
         let gdn_gated_norm = mk((batch * GDN_V_DIM * 4) as u64)?;
         let gdn_out = mk(hidden_bytes)?;
 
-        time("full_token_resident_mixed", batch, || {
+        time(label, batch, || {
             let mut b = CommandBatch::new(device)?;
             for layer in 0..NUM_LAYERS {
                 if layer % 4 == 3 {
                     b.record_shader(
                         rmsnorm_shader,
-                        &[x_buf.handle(), weight_norm.handle(), fa_qkv_combined.handle()],
+                        &[
+                            x_buf.handle(),
+                            weight_norm.handle(),
+                            fa_qkv_combined.handle(),
+                        ],
                         &[batch as u32, HIDDEN as u32, eps.to_bits()],
                         Workgroups::OneD(batch as u32),
                     )?;
@@ -735,24 +832,77 @@ fn run_full_token_resident_mixed_batched(
                         ],
                         Workgroups::OneD((batch * num_kv_heads * head_dim).div_ceil(256) as u32),
                     )?;
-                    b.record_shader(
-                        paged_attn_shader,
-                        &[
-                            fa_q_rot.handle(),
-                            k_pool.handle(),
-                            v_pool.handle(),
-                            seq_lens_buf.handle(),
-                            attn_pre_gate.handle(),
-                        ],
-                        &[
-                            max_seqlen as u32,
-                            num_heads as u32,
-                            num_kv_heads as u32,
-                            head_dim as u32,
-                            softmax_scale.to_bits(),
-                        ],
-                        Workgroups::OneD((batch * num_heads) as u32),
-                    )?;
+                    if use_paged_attention {
+                        let cache = paged_cache.as_ref().expect("paged cache");
+                        let elements_per_slot = num_kv_heads * head_dim;
+                        let k_pool = cache.k_buffer(layer).expect("full-attn layer K pool");
+                        let v_pool = cache.v_buffer(layer).expect("full-attn layer V pool");
+                        b.record_shader(
+                            kv_write_slots_shader,
+                            &[
+                                fa_k_rot.handle(),
+                                fa_v_buf.handle(),
+                                slots_buf.as_ref().expect("slots").handle(),
+                                k_pool.handle(),
+                                v_pool.handle(),
+                            ],
+                            &[
+                                batch as u32,
+                                elements_per_slot as u32,
+                                cache.total_slots() as u32,
+                            ],
+                            Workgroups::OneD((batch * elements_per_slot).div_ceil(256) as u32),
+                        )?;
+                        b.record_shader(
+                            paged_attn_splitk_shader,
+                            &[
+                                fa_q_rot.handle(),
+                                k_pool.handle(),
+                                v_pool.handle(),
+                                block_table_buf.as_ref().expect("block table").handle(),
+                                seq_lens_buf.handle(),
+                                attn_partials.as_ref().expect("partials").handle(),
+                            ],
+                            &[
+                                blocks_per_seq as u32,
+                                block_size as u32,
+                                num_heads as u32,
+                                num_kv_heads as u32,
+                                head_dim as u32,
+                                softmax_scale.to_bits(),
+                                num_chunks as u32,
+                            ],
+                            Workgroups::OneD((batch * num_heads * num_chunks) as u32),
+                        )?;
+                        b.record_shader(
+                            paged_attn_reduce_shader,
+                            &[
+                                attn_partials.as_ref().expect("partials").handle(),
+                                attn_pre_gate.handle(),
+                            ],
+                            &[num_heads as u32, head_dim as u32, num_chunks as u32],
+                            Workgroups::OneD((batch * num_heads) as u32),
+                        )?;
+                    } else {
+                        b.record_shader(
+                            paged_attn_shader,
+                            &[
+                                fa_q_rot.handle(),
+                                k_pool.as_ref().expect("contiguous K pool").handle(),
+                                v_pool.as_ref().expect("contiguous V pool").handle(),
+                                seq_lens_buf.handle(),
+                                attn_pre_gate.handle(),
+                            ],
+                            &[
+                                max_seqlen as u32,
+                                num_heads as u32,
+                                num_kv_heads as u32,
+                                head_dim as u32,
+                                softmax_scale.to_bits(),
+                            ],
+                            Workgroups::OneD((batch * num_heads) as u32),
+                        )?;
+                    }
                     b.record_shader(
                         mul_sigmoid_shader,
                         &[
@@ -767,7 +917,11 @@ fn run_full_token_resident_mixed_batched(
                         linear_bf16w_batched_plan(batch, HIDDEN);
                     b.record_shader(
                         attn_out_shader,
-                        &[attn_post_gate.handle(), attn_out_w.handle(), attn_out.handle()],
+                        &[
+                            attn_post_gate.handle(),
+                            attn_out_w.handle(),
+                            attn_out.handle(),
+                        ],
                         &[Q_DIM as u32, HIDDEN as u32, batch as u32],
                         Workgroups::OneD(attn_out_workgroups),
                     )?;
@@ -924,7 +1078,11 @@ fn run_full_token_resident_mixed_batched(
                         linear_bf16w_batched_plan(batch, HIDDEN);
                     b.record_shader(
                         gdn_out_shader,
-                        &[gdn_gated_norm.handle(), gdn_out_w.handle(), gdn_out.handle()],
+                        &[
+                            gdn_gated_norm.handle(),
+                            gdn_out_w.handle(),
+                            gdn_out.handle(),
+                        ],
                         &[GDN_V_DIM as u32, HIDDEN as u32, batch as u32],
                         Workgroups::OneD(gdn_out_workgroups),
                     )?;
