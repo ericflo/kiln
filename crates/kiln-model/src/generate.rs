@@ -1416,11 +1416,9 @@ impl ModelRunner {
                 .expect("Qwen3.5 decode buffer config must be valid")
             })
             .clone();
-        // (#1082) bridge — remove when DecodeBuffers::allocate flips to kt Device.
+        // (#1082) kt-native — DecodeBuffers::allocate takes the kt device directly.
         let kt_device = self.weights.embed_tokens.device();
-        let device = kiln_kt_bridge::candle_device_from_kt(&kt_device)
-            .map_err(|e| anyhow::anyhow!("ensure_decode_buffers device bridge: {e}"))?;
-        let buffers = DecodeBuffers::allocate(cfg, &device)?;
+        let buffers = DecodeBuffers::allocate(cfg, &kt_device)?;
         // If another thread won the race, drop our newly allocated copy
         // harmlessly and fall through to the winner's buffer.
         let _ = self.decode_buffers.set(buffers);

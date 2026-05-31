@@ -22,11 +22,11 @@ pub enum DecodeElementType {
 }
 
 impl DecodeElementType {
-    pub fn candle_dtype(self) -> candle_core::DType {
+    pub fn kt_dtype(self) -> kiln_tensor::DType {
         match self {
-            Self::Bf16 => candle_core::DType::BF16,
-            Self::Fp8E4M3 => candle_core::DType::U8,
-            Self::Fp32 => candle_core::DType::F32,
+            Self::Bf16 => kiln_tensor::DType::BF16,
+            Self::Fp8E4M3 => kiln_tensor::DType::U8,
+            Self::Fp32 => kiln_tensor::DType::F32,
         }
     }
 
@@ -91,7 +91,7 @@ impl BufferShape {
 
 pub struct DecodeBuffer<T: DecodeDType> {
     kind: DecodeBufferKind,
-    tensor: candle_core::Tensor,
+    tensor: kiln_tensor::Tensor,
     dims: Vec<usize>,
     _dtype: PhantomData<T>,
 }
@@ -110,7 +110,7 @@ impl<T: DecodeDType> DecodeBuffer<T> {
     pub fn allocate(
         kind: DecodeBufferKind,
         dims: impl Into<Vec<usize>>,
-        device: &candle_core::Device,
+        device: &kiln_tensor::Device,
     ) -> Result<Self> {
         let dims = dims.into();
         ensure!(
@@ -121,7 +121,8 @@ impl<T: DecodeDType> DecodeBuffer<T> {
             dims.iter().all(|&dim| dim > 0),
             "decode buffer {kind:?} dimensions must be non-zero: {dims:?}"
         );
-        let tensor = candle_core::Tensor::zeros(dims.as_slice(), T::ELEMENT_TYPE.candle_dtype(), device)
+        // (#1082) kt-native allocation — no candle.
+        let tensor = kiln_tensor::Tensor::zeros_on(*device, dims.clone(), T::ELEMENT_TYPE.kt_dtype())
             .with_context(|| format!("allocate decode buffer {kind:?} {dims:?}"))?;
         ensure!(
             tensor.is_contiguous(),
@@ -147,47 +148,15 @@ impl<T: DecodeDType> DecodeBuffer<T> {
         T::ELEMENT_TYPE
     }
 
-    pub fn tensor(&self) -> &candle_core::Tensor {
-        &self.tensor
-    }
-
-    pub fn tensor_mut(&mut self) -> &mut candle_core::Tensor {
-        &mut self.tensor
-    }
+    // (#1082) `tensor()` / `tensor_mut()` (candle accessors) and the
+    // `with_bf16_device_ptr` raw-pointer helper were DELETED — all three had
+    // zero callers crate-wide (the decode-buffer pool's contents aren't read on
+    // the current decode path; the kv-bytes live in `PagedKvCacheKt` / the
+    // resident-decode path). The buffer struct keeps only its kt storage +
+    // metadata accessors. Reintroduce a kt-native accessor when a consumer needs it.
 
     pub fn byte_len(&self) -> usize {
         self.dims.iter().product::<usize>() * T::ELEMENT_TYPE.bytes()
-    }
-
-    #[cfg(feature = "cuda")]
-    pub fn with_bf16_device_ptr<R>(
-        &self,
-        f: impl FnOnce(*const core::ffi::c_void) -> R,
-    ) -> Result<R> {
-        use half::bf16;
-
-        ensure!(
-            T::ELEMENT_TYPE == DecodeElementType::Bf16,
-            "decode buffer {:?} is not BF16",
-            self.kind
-        );
-        ensure!(
-            self.tensor.is_contiguous(),
-            "decode buffer {:?} must be contiguous for raw pointer access",
-            self.kind
-        );
-        let (storage, layout) = self.tensor.storage_and_layout();
-        let cuda = match &*storage {
-            candle_core::Storage::Cuda(cuda) => cuda,
-            _ => bail!(
-                "decode buffer {:?} must be on CUDA for raw pointer access",
-                self.kind
-            ),
-        };
-        let stream = cuda.device.cuda_stream();
-        let slice = cuda.as_cuda_slice::<bf16>()?.slice(layout.start_offset()..);
-        let (ptr, _guard) = slice.device_ptr(&stream);
-        Ok(f(ptr as *const core::ffi::c_void))
     }
 }
 
@@ -301,7 +270,7 @@ pub struct DecodeBuffers {
 }
 
 impl DecodeBuffers {
-    pub fn allocate(config: DecodeBufferConfig, device: &candle_core::Device) -> Result<Self> {
+    pub fn allocate(config: DecodeBufferConfig, device: &kiln_tensor::Device) -> Result<Self> {
         let hidden =
             DecodeBuffer::allocate(DecodeBufferKind::Hidden, config.hidden_dims(), device)?;
         let q = DecodeBuffer::allocate(DecodeBufferKind::Q, config.full_q_dims(), device)?;
@@ -396,7 +365,7 @@ mod tests {
 
     #[test]
     fn decode_buffer_metadata_tracks_bytes() {
-        let device = candle_core::Device::Cpu;
+        let device = kiln_tensor::Device::Cpu;
         let buffer =
             DecodeBuffer::<Fp32>::allocate(DecodeBufferKind::Logits, [2, 4], &device).unwrap();
         assert_eq!(buffer.dims(), &[2, 4]);
