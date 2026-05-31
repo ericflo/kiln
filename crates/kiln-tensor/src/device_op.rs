@@ -165,18 +165,30 @@ pub fn dispatch1<Op: DeviceOp1 + ?Sized>(op: &Op, input: &Tensor) -> Result<Tens
     if let Some(t) = result {
         return Ok(t);
     }
-    // Fallthrough: the GPU backend has no native kernel for this op
-    // (returned None). Run the canonical CPU reference on host copies of
-    // the input, then move the result back to the input's device. This is
-    // the correctness-first path (#1082) — a host round-trip is slow but
-    // exact; hot ops override `*_fwd` with a real device kernel. On UMA
-    // (Metal) the copies are plain memcpys, no PCIe hop.
+    // Fallthrough: the GPU backend has no native kernel for this op.
     let dev = input.device();
-    if !dev.is_cpu() {
-        let cpu_in = input.to_device(Device::Cpu)?;
-        if let Some(t) = op.cpu_fwd(&cpu_in)? {
-            return t.to_device(dev);
+    match dev {
+        // Metal correctness-first host fallback (#1082): no native kernel —
+        // stage on host (UMA memcpy), run the CPU reference, move back.
+        // Scoped to Metal on purpose (the backend this PR brings up); a silent
+        // host round-trip is the intended transitional behavior here.
+        #[cfg(feature = "metal")]
+        Device::Metal(_) => {
+            let cpu_in = input.to_device(Device::Cpu)?;
+            if let Some(t) = op.cpu_fwd(&cpu_in)? {
+                return t.to_device(dev);
+            }
         }
+        // CUDA / Vulkan: preserve the original behavior — call cpu_fwd
+        // directly (errors on GPU storage). A missing `*_fwd` surfaces loudly
+        // rather than being masked by a silent host round-trip, so the
+        // CUDA/Vulkan tracks keep their "implement the kernel" signal.
+        _ if !dev.is_cpu() => {
+            if let Some(t) = op.cpu_fwd(input)? {
+                return Ok(t);
+            }
+        }
+        _ => {}
     }
     Err(crate::Error::Msg(format!(
         "DeviceOp1 {:?}: no backend produced output for device {}",
@@ -207,14 +219,24 @@ pub fn dispatch2<Op: DeviceOp2 + ?Sized>(op: &Op, a: &Tensor, b: &Tensor) -> Res
     if let Some(t) = result {
         return Ok(t);
     }
-    // Correctness-first host fallback (#1082) — see `dispatch1`.
+    // Metal-scoped host fallback (#1082) — see `dispatch1`. CUDA/Vulkan keep
+    // the original loud behavior so missing `*_fwd` kernels aren't masked.
     let dev = a.device();
-    if !dev.is_cpu() {
-        let cpu_a = a.to_device(Device::Cpu)?;
-        let cpu_b = b.to_device(Device::Cpu)?;
-        if let Some(t) = op.cpu_fwd(&cpu_a, &cpu_b)? {
-            return t.to_device(dev);
+    match dev {
+        #[cfg(feature = "metal")]
+        Device::Metal(_) => {
+            let cpu_a = a.to_device(Device::Cpu)?;
+            let cpu_b = b.to_device(Device::Cpu)?;
+            if let Some(t) = op.cpu_fwd(&cpu_a, &cpu_b)? {
+                return t.to_device(dev);
+            }
         }
+        _ if !dev.is_cpu() => {
+            if let Some(t) = op.cpu_fwd(a, b)? {
+                return Ok(t);
+            }
+        }
+        _ => {}
     }
     Err(crate::Error::Msg(format!(
         "DeviceOp2 {:?}: no backend produced output for device {}",
@@ -248,15 +270,25 @@ pub fn dispatch3<Op: DeviceOp3 + ?Sized>(
     if let Some(t) = result {
         return Ok(t);
     }
-    // Correctness-first host fallback (#1082) — see `dispatch1`.
+    // Metal-scoped host fallback (#1082) — see `dispatch1`. CUDA/Vulkan keep
+    // the original loud behavior so missing `*_fwd` kernels aren't masked.
     let dev = a.device();
-    if !dev.is_cpu() {
-        let cpu_a = a.to_device(Device::Cpu)?;
-        let cpu_b = b.to_device(Device::Cpu)?;
-        let cpu_c = c.to_device(Device::Cpu)?;
-        if let Some(t) = op.cpu_fwd(&cpu_a, &cpu_b, &cpu_c)? {
-            return t.to_device(dev);
+    match dev {
+        #[cfg(feature = "metal")]
+        Device::Metal(_) => {
+            let cpu_a = a.to_device(Device::Cpu)?;
+            let cpu_b = b.to_device(Device::Cpu)?;
+            let cpu_c = c.to_device(Device::Cpu)?;
+            if let Some(t) = op.cpu_fwd(&cpu_a, &cpu_b, &cpu_c)? {
+                return t.to_device(dev);
+            }
         }
+        _ if !dev.is_cpu() => {
+            if let Some(t) = op.cpu_fwd(a, b, c)? {
+                return Ok(t);
+            }
+        }
+        _ => {}
     }
     Err(crate::Error::Msg(format!(
         "DeviceOp3 {:?}: no backend produced output for device {}",
