@@ -2381,8 +2381,10 @@ fn tape_lora_add_records_fused_node_and_emits_var_grads() {
     }
 
     let proj = kiln_model::lora_loader::LoraProjectionWeights {
-        a: a.clone(),
-        b: b.clone(),
+        // #1082: LoraProjectionWeights.{a,b} are kt now — bridge the candle
+        // fixture tensors (CUDA borrow, same device storage).
+        a: kt_in(&a),
+        b: kt_in(&b),
     };
 
     // Forward inside a tape scope. Records one `LoraDeltaAddBackward`
@@ -2598,8 +2600,10 @@ fn add_lora_delta_to_base_routes_through_tape_when_gated() {
     }
 
     let proj = kiln_model::lora_loader::LoraProjectionWeights {
-        a: a.clone(),
-        b: b.clone(),
+        // #1082: LoraProjectionWeights.{a,b} are kt now — bridge the candle
+        // fixture tensors (CUDA borrow, same device storage).
+        a: kt_in(&a),
+        b: kt_in(&b),
     };
 
     // Forward via the public LoRA helper that builds out = base_matmul +
