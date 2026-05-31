@@ -25,8 +25,9 @@ use crate::decode_buffers::{DecodeBufferConfig, DecodeBuffers, DecodeElementType
 use crate::forward::lm_head_sample_backend_decode_if;
 use crate::forward::{
     GpuWeights, LinearAttentionState, model_forward_kt, model_forward_paged,
-    model_forward_paged_batched_decode_hidden, model_forward_paged_decode_contiguous_batch_greedy,
-    model_forward_paged_last_token, model_forward_paged_last_token_greedy,
+    model_forward_paged_batched_decode_hidden,
+    model_forward_paged_decode_contiguous_batch_greedy_with_ids, model_forward_paged_last_token,
+    model_forward_paged_last_token_greedy,
     model_forward_paged_last_token_with_last_hidden, model_forward_paged_next_token_greedy,
     model_forward_paged_streaming, model_forward_paged_streaming_last_token_with_last_hidden,
     model_forward_paged_streaming_with_progress, streaming_prefill_enabled_for,
@@ -3421,7 +3422,7 @@ impl ModelRunner {
         let stage_start = profile_stages.then(std::time::Instant::now);
         let tokens = {
             let pc_guard = lock_paged_cache(paged_cache)?;
-            model_forward_paged_decode_contiguous_batch_greedy(
+            model_forward_paged_decode_contiguous_batch_greedy_with_ids(
                 &*self.backend,
                 input_tokens,
                 &self.weights,
@@ -3431,6 +3432,7 @@ impl ModelRunner {
                 seq_lens,
                 batch_state.as_mut(),
                 self.active_lora.as_ref(),
+                row_ids,
             )
             .context("batched greedy decode forward pass (paged) failed")?
         };

@@ -21884,6 +21884,7 @@ fn try_vulkan_resident_batched_decode_argmax(
     paged_cache: &PagedKvCache,
     block_tables: &[&BlockTable],
     start_positions: &[usize],
+    row_ids: Option<&[u64]>,
     linear_state: Option<&LinearAttentionState>,
     lora: Option<&LoraWeights>,
 ) -> Result<Option<Vec<u32>>> {
@@ -21891,6 +21892,7 @@ fn try_vulkan_resident_batched_decode_argmax(
     if batch <= 1
         || block_tables.len() != batch
         || start_positions.len() != batch
+        || row_ids.is_some_and(|ids| ids.len() != batch)
         || start_positions.iter().any(|&p| p == 0)
         || lora.is_some()
         || !config.attn_output_gate
@@ -21968,16 +21970,45 @@ fn try_vulkan_resident_batched_decode_argmax(
     let rope_sin_rows = tensor_to_f32_flat_vec_vk(&rope_sin)?;
 
     let mut full_attn_idx = 0usize;
-    for layer in weights.layers.iter() {
-        if matches!(layer.attention, GpuAttentionWeights::Full(_)) {
-            crate::vk_decode_resident::seed_vk_kv_cache_layer_blocks_from_batched_tables(
-                vk_device,
-                vk_kv_cache,
-                paged_cache,
-                full_attn_idx,
-                block_tables,
-            )?;
-            full_attn_idx += 1;
+    if let Some(row_ids) = row_ids {
+        for layer in weights.layers.iter() {
+            if matches!(layer.attention, GpuAttentionWeights::Full(_)) {
+                for (row_idx, &row_id) in row_ids.iter().enumerate() {
+                    if !vk_backend.resident_decode_row_seeded(full_attn_idx, row_id) {
+                        let row_tables = [block_tables[row_idx]];
+                        crate::vk_decode_resident::seed_vk_kv_cache_layer_blocks_from_batched_tables(
+                            vk_device,
+                            vk_kv_cache,
+                            paged_cache,
+                            full_attn_idx,
+                            &row_tables,
+                        )?;
+                        vk_backend.mark_resident_decode_row_seeded(full_attn_idx, row_id);
+                    }
+                }
+                full_attn_idx += 1;
+            }
+        }
+    } else {
+        let session_pos = *start_positions
+            .iter()
+            .min()
+            .expect("batch > 1 implies non-empty start_positions");
+        vk_backend.note_resident_session(session_pos);
+        for layer in weights.layers.iter() {
+            if matches!(layer.attention, GpuAttentionWeights::Full(_)) {
+                if !vk_backend.full_attn_layer_seeded(full_attn_idx) {
+                    crate::vk_decode_resident::seed_vk_kv_cache_layer_blocks_from_batched_tables(
+                        vk_device,
+                        vk_kv_cache,
+                        paged_cache,
+                        full_attn_idx,
+                        block_tables,
+                    )?;
+                    vk_backend.mark_full_attn_layer_seeded(full_attn_idx);
+                }
+                full_attn_idx += 1;
+            }
         }
     }
 
@@ -22012,6 +22043,33 @@ pub fn model_forward_paged_decode_contiguous_batch_greedy(
     linear_state: Option<&mut LinearAttentionState>,
     lora: Option<&LoraWeights>,
 ) -> Result<Vec<u32>> {
+    model_forward_paged_decode_contiguous_batch_greedy_with_ids(
+        backend,
+        token_ids,
+        weights,
+        config,
+        paged_cache,
+        block_tables,
+        start_positions,
+        linear_state,
+        lora,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn model_forward_paged_decode_contiguous_batch_greedy_with_ids(
+    backend: &dyn BackendRuntime,
+    token_ids: &[u32],
+    weights: &GpuWeights,
+    config: &kiln_core::config::ModelConfig,
+    paged_cache: &PagedKvCache,
+    block_tables: &[&BlockTable],
+    start_positions: &[usize],
+    linear_state: Option<&mut LinearAttentionState>,
+    lora: Option<&LoraWeights>,
+    row_ids: Option<&[u64]>,
+) -> Result<Vec<u32>> {
     #[cfg(feature = "vulkan")]
     if let Some(next_tokens) = try_vulkan_resident_batched_decode_argmax(
         backend,
@@ -22021,6 +22079,7 @@ pub fn model_forward_paged_decode_contiguous_batch_greedy(
         paged_cache,
         block_tables,
         start_positions,
+        row_ids,
         linear_state.as_deref(),
         lora,
     )? {

@@ -93,6 +93,9 @@ pub struct VulkanBackend {
     /// first call to the resident block helper for that layer; subsequent
     /// decode steps only do per-token slot writes.
     seeded_full_attn_layers: Mutex<HashSet<usize>>,
+    /// Batched resident decode rows whose prompt K/V blocks have been seeded.
+    /// Keyed by `(full_attention_layer_idx, decode_row_id)`.
+    seeded_resident_decode_rows: Mutex<HashSet<(usize, u64)>>,
     /// Per linear-attention layer recurrent state buffer (f32, persistent),
     /// keyed by the candle candle_core::Tensor's `candle_core::TensorId`. Seeded from the candle_core::Tensor on
     /// the first resident call that sees it.
@@ -580,6 +583,7 @@ impl VulkanBackend {
             decode_resident_pool: OnceLock::new(),
             vk_paged_kv_cache: OnceLock::new(),
             seeded_full_attn_layers: Mutex::new(HashSet::new()),
+            seeded_resident_decode_rows: Mutex::new(HashSet::new()),
             linear_attn_recurrent_state: Mutex::new(HashMap::new()),
             linear_attn_conv_state: Mutex::new(HashMap::new()),
             seeded_linear_attn_layers: Mutex::new(HashSet::new()),
@@ -719,6 +723,22 @@ impl VulkanBackend {
     pub fn reset_full_attn_seeded(&self) {
         if let Ok(mut g) = self.seeded_full_attn_layers.lock() {
             g.clear();
+        }
+        if let Ok(mut g) = self.seeded_resident_decode_rows.lock() {
+            g.clear();
+        }
+    }
+
+    pub fn resident_decode_row_seeded(&self, layer_idx: usize, row_id: u64) -> bool {
+        match self.seeded_resident_decode_rows.lock() {
+            Ok(g) => g.contains(&(layer_idx, row_id)),
+            Err(_) => false,
+        }
+    }
+
+    pub fn mark_resident_decode_row_seeded(&self, layer_idx: usize, row_id: u64) {
+        if let Ok(mut g) = self.seeded_resident_decode_rows.lock() {
+            g.insert((layer_idx, row_id));
         }
     }
 
