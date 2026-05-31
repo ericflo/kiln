@@ -908,7 +908,7 @@ fn run_full_token_resident_mixed_batched(
                         shaders::CAUSAL_CONV1D_STATE_ADVANCE,
                         &[mixed_qkv.handle(), gdn_conv_state.handle()],
                         &[batch as u32, QKV_DIM as u32, 1u32, conv_kernel as u32],
-                        Workgroups::OneD(conv_total as u32),
+                        Workgroups::OneD(conv_total.div_ceil(256) as u32),
                     )?;
                     b.record_shader(
                         shaders::GDN_QKV_SPLIT_BATCHED,
@@ -1174,7 +1174,7 @@ fn run_gdn_block_resident_batched(
                 shaders::CAUSAL_CONV1D_STATE_ADVANCE,
                 &[mixed_qkv.handle(), conv_state.handle()],
                 &[batch as u32, QKV_DIM as u32, 1u32, conv_kernel as u32],
-                Workgroups::OneD(conv_total as u32),
+                Workgroups::OneD(conv_total.div_ceil(256) as u32),
             )?;
             b.record_shader(
                 shaders::GDN_QKV_SPLIT_BATCHED,

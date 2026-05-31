@@ -2659,7 +2659,7 @@ pub fn record_gdn_block_batched_into(
         shaders::CAUSAL_CONV1D_STATE_ADVANCE,
         &[mixed_qkv.handle(), conv_buf.handle()],
         &[batch_size as u32, qkv_dim as u32, 1u32, conv_kernel as u32],
-        Workgroups::OneD(conv_total as u32),
+        Workgroups::OneD(conv_total.div_ceil(256) as u32),
     )?;
     batch.record_shader(
         shaders::GDN_QKV_SPLIT_BATCHED,

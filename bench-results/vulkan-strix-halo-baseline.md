@@ -191,10 +191,10 @@ every config"):
 
   | batch | per token | rows/s |
   |---:|---:|---:|
-  | 1 | 62.7 ms | 16 |
-  | 8 | 104.0 ms | 77 |
-  | 32 | 237.8 ms | 135 |
-  | 64 | 451.8 ms | 142 |
+  | 1 | 62.4 ms | 16 |
+  | 8 | 105.0 ms | 76 |
+  | 32 | 223.6 ms | 143 |
+  | 64 | 433.5 ms | 148 |
   | 128 | 905.9 ms | 141 |
 
   The mixed stack is now the right benchmark for resident decode tuning:
@@ -229,18 +229,19 @@ every config"):
 
   | batch | per block | rows/s |
   |---:|---:|---:|
-  | 1 | 1.90 ms | 527 |
+  | 1 | 1.94 ms | 515 |
   | 4 | 2.28 ms | 1,757 |
-  | 8 | 3.39 ms | 2,358 |
-  | 32 | 7.16 ms | 4,467 |
-  | 64 | 14.83 ms | 4,315 |
+  | 8 | 3.31 ms | 2,418 |
+  | 32 | 6.94 ms | 4,613 |
+  | 64 | 14.21 ms | 4,504 |
 
   This gives a realistic GDN-side decode saturation baseline. A follow-up
   planner change keeps batch 64 on the rows4 MLP shader path by default because
   rows8 was slower on STRIX_HALO at this size. That improved the GDN block from
-  16.80 ms / 3,809 rows/s to 14.83 ms / 4,315 rows/s at batch 64, and improved
-  the synthetic full-token resident batch-64 case from 416.7 ms / 154 rows/s to
-  374.6 ms / 171 rows/s.
+  16.80 ms / 3,809 rows/s to 14.21 ms / 4,504 rows/s at batch 64 after also
+  reducing the state-advance dispatch from one workgroup per row-channel to
+  one workgroup per 256 row-channels. The synthetic mixed full-token resident
+  batch-64 case improved from 451.8 ms / 142 rows/s to 433.5 ms / 148 rows/s.
 - **Vulkan paged-attention decode kernel**: the kernel crate already had
   `paged_attn_decode_batch_paged.comp`; Vulkan now advertises
   `supports_flash_attn_paged_decode` and wires the single-query paged-decode

@@ -1287,7 +1287,7 @@ pub fn dispatch_causal_conv1d_update_resident(
         seq_len as u32,
         kernel_size as u32,
     ];
-    let state_wg = (batch * channels) as u32;
+    let state_wg = (batch * channels).div_ceil(256) as u32;
     run_compute_pipeline(
         vk_device,
         &spirv_state,

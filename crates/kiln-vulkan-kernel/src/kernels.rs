@@ -5971,7 +5971,7 @@ fn dispatch_causal_conv1d_update_bytes_core(
         seq_len as u32,
         kernel_size as u32,
     ];
-    let state_wg = (batch * channels) as u32;
+    let state_wg = (batch * channels).div_ceil(256) as u32;
 
     let (out_data, state_data_out) = if causal_conv1d_single_submit_enabled() {
         let readbacks = run_two_stage_compute_pipeline_with_transfers(
@@ -6142,7 +6142,7 @@ pub fn dispatch_causal_conv1d_prefill_bytes(
         seq_len as u32,
         kernel_size as u32,
     ];
-    let state_wg = (batch * channels) as u32;
+    let state_wg = (batch * channels).div_ceil(256) as u32;
 
     let (out_data, state_data) = if causal_conv1d_single_submit_enabled() {
         let readbacks = run_two_stage_compute_pipeline_with_transfers(
@@ -6299,7 +6299,7 @@ pub fn dispatch_causal_conv1d_prefill_cached_weight_bytes(
         seq_len as u32,
         kernel_size as u32,
     ];
-    let state_wg = (batch * channels) as u32;
+    let state_wg = (batch * channels).div_ceil(256) as u32;
 
     let readbacks = run_two_stage_compute_pipeline_with_transfers(
         vk_device,
