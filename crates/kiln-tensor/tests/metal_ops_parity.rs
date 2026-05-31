@@ -324,6 +324,10 @@ fn matmul_matrix_core_f32_parity() {
         (8, 2560, 18432),                // gate||up wide-N
         (1, 2560, 4096),                 // M=1 through the GEMM
         (100, 512, 2560),                // M not mult of 64, down-proj-ish
+        (16, 256, 100),                  // N-tail (100 % 64 != 0): b_full=false, store_safe
+        (33, 2560, 130),                 // M-tail + N-tail together
+        (64, 100, 128),                  // K=100 % 16 != 0: naive-kernel fallback path
+        (40, 130, 96),                   // K-tail + N-tail through the fallback
     ];
     for (m, k, n) in cases {
         let a = pattern(m * k, 100 + m as u64);
@@ -349,5 +353,46 @@ fn matmul_matrix_core_f32_parity() {
         };
         // BF16 inputs + F32 accumulate over K; bound relative to result magnitude.
         assert!(d < 0.02 * mref.max(1.0), "matmul [{m},{k}]x[{k},{n}] max|Δ|={d} (ref max {mref})");
+    }
+}
+
+/// Batched matmul parity — exercises the kiln GEMM's `tid.z` per-batch
+/// dispatch + per-batch element strides (a_bs/b_bs/c_bs), which the 2D
+/// cases above never touch. `[B,M,K] @ [B,K,N] -> [B,M,N]`.
+#[test]
+fn matmul_matrix_core_batched_parity() {
+    let Some(dev) = metal() else { eprintln!("no Metal device; skipping"); return; };
+    // (B, M, K, N): full tiles, M/N-tail, and a 3-leading-dim batch.
+    let cases = [
+        (vec![4usize], 64usize, 256usize, 128usize), // clean batch
+        (vec![3], 17, 512, 100),                      // batched + M-tail + N-tail
+        (vec![2, 2], 8, 256, 64),                     // 2 leading batch dims
+    ];
+    for (bdims, m, k, n) in cases {
+        let batch: usize = bdims.iter().product();
+        let a = pattern(batch * m * k, 300 + m as u64);
+        let b = pattern(batch * k * n, 400 + n as u64);
+        let mut a_shape = bdims.clone();
+        a_shape.extend_from_slice(&[m, k]);
+        let mut b_shape = bdims.clone();
+        b_shape.extend_from_slice(&[k, n]);
+
+        let a_cpu = ops::cast(&Tensor::from_vec(a.clone(), a_shape.clone()).unwrap(), DType::BF16).unwrap();
+        let b_cpu = ops::cast(&Tensor::from_vec(b.clone(), b_shape.clone()).unwrap(), DType::BF16).unwrap();
+        let a_met = ops::cast(&Tensor::from_vec_on(dev, a, a_shape).unwrap(), DType::BF16).unwrap();
+        let b_met = ops::cast(&Tensor::from_vec_on(dev, b, b_shape).unwrap(), DType::BF16).unwrap();
+
+        let want_t = ops::matmul(&a_cpu, &b_cpu).unwrap();
+        let got_t = ops::matmul(&a_met, &b_met).unwrap();
+        assert_eq!(got_t.device(), dev, "metal batched matmul must stay on Metal");
+        let mut out_shape = bdims.clone();
+        out_shape.extend_from_slice(&[m, n]);
+        assert_eq!(got_t.shape().to_vec(), out_shape, "batched output shape");
+
+        let want: Vec<f32> = ops::cast(&want_t, DType::F32).unwrap().to_vec::<f32>().unwrap();
+        let got: Vec<f32> = ops::cast(&got_t, DType::F32).unwrap().to_vec::<f32>().unwrap();
+        let d = max_abs_diff(&got, &want);
+        let mref = want.iter().fold(0.0f32, |m, &w| m.max(w.abs()));
+        assert!(d < 0.02 * mref.max(1.0), "batched matmul {bdims:?} [{m},{k}]x[{k},{n}] max|Δ|={d} (ref {mref})");
     }
 }
