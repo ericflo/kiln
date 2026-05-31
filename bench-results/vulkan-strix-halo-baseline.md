@@ -180,6 +180,25 @@ every config"):
   keeping the batch-64 MLP path on rows4. The next tuning target is deeper
   tiling/cache reuse inside the large projection/MLP shaders rather than host
   submit count.
+  **Update — mixed Qwen3.5 resident token microbench:** added
+  `full_token_resident_mixed_batched`, which records the real Qwen3.5-4B layer
+  mix into one `CommandBatch`: 8 full-attention layers at indices
+  `3,7,11,...,31` plus 24 GDN layers. This is still a Vulkan-only synthetic
+  benchmark with direct host-slice weight uploads and shared scratch buffers,
+  but it is the best current signal for decode saturation at the actual
+  layer mix. On RADV STRIX_HALO with `KILN_VK_MICROBENCH_BATCHES=1,8,32,64`,
+  warmup=2, timed=5, repeats=2:
+
+  | batch | per token | rows/s |
+  |---:|---:|---:|
+  | 1 | 62.7 ms | 16 |
+  | 8 | 104.0 ms | 77 |
+  | 32 | 237.8 ms | 135 |
+  | 64 | 451.8 ms | 142 |
+
+  The mixed stack is now the right benchmark for resident decode tuning:
+  full-attention-only synthetic decode overstates throughput because the 24
+  GDN layers dominate the real model.
   **Update — GDN resident recorder uses row-reuse in-proj:** the batched GDN
   `CommandBatch` recorder now selects the same pair QKV/Z plus rows2/rows4
   BF16 in-proj shaders as the standalone dispatcher. Focused
