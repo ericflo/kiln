@@ -5976,135 +5976,37 @@ fn has_supervised_shifted_labels(label_mask: &[bool]) -> bool {
 /// `input_ids`: token IDs (used as labels, shifted by 1)
 /// `label_mask`: which positions to include in the loss
 ///
-/// Returns: scalar loss tensor (tracked by autograd).
-// (#1082) `cross_entropy_loss` is a CANDLE-autograd loss island. It returns a
-// candle `Tensor`: the SFT tape-authoritative scope
-// (`with_tape_authoritative_scope`) structurally requires the loss to be the
-// candle tensor produced (and id-registered) by the candle `try_tape_*`
-// adapters so the tape backward can seed from it; the candle composite below
-// is the historical `loss.backward()` path. Callers thread kt logits/device in
-// and this fn bridges to candle once at the boundary (with id chaining).
-// // (#1082) candle island — SFT cross-entropy loss is candle-autograd.
+/// SFT next-token cross-entropy loss VALUE (scalar `f64`), kt-native, CUDA-only.
+///
+/// (#1082 candle-drop) This is a value-only reader: it returns the scalar loss
+/// for logging / the gradient-checkpoint final-boundary readback. The
+/// *differentiable* CE root is `try_tape_cross_entropy_from_logits_kt` recorded
+/// DIRECTLY by the SFT/GRPO/OPD `with_tape_authoritative_scope_kt` closures — it
+/// does NOT go through here. The old candle `[1, T, V]` bridge + candle
+/// log-sum-exp/gather composite + the candle `try_tape_cross_entropy_cuda`
+/// adapter are deleted; F32/CPU CE is dropped (kt CE is CUDA BF16 only). The kt
+/// CE math itself is covered by `tape_forward_parity`
+/// (`tape_forward_cross_entropy_matches_reference`,
+/// `tape_backward_cross_entropy_matches_analytic_gradient`).
+#[cfg(feature = "cuda")]
 fn cross_entropy_loss(
     logits: &KtTensor,
     input_ids: &[u32],
     label_mask: &[bool],
-    device: &CdDevice,
-) -> Result<candle_core::Tensor> {
-    let seq_len = input_ids.len();
-
-    // #1082 H6: when tape-authoritative on CUDA, route the WHOLE loss through the
-    // kt-NATIVE fused "cross-entropy from full logits" node, taking the kt logits
-    // (the lm_head kt output) DIRECTLY — with NO `[1, T, V]` kt->candle copy. The
-    // recorded backward is kt-native and the node's single input is the connected
-    // kt logits id, so `dL/d(logits)` flows straight into the lm_head tape node
-    // (no candle id-mapping). Only the SCALAR loss crosses back to candle for the
-    // `candle_core::Tensor` return type. This eliminates the ≈150 MB+/step
-    // `[1, T, V]` logits bridge that the candle adapter
-    // (`try_tape_cross_entropy_from_logits_cuda`) required.
-    #[cfg(feature = "cuda")]
-    if tape_authoritative_enabled() {
-        if let Some(loss_kt) = kiln_model::tape_forward::try_tape_cross_entropy_from_logits_kt(
-            logits,
-            input_ids,
-            label_mask,
-        )? {
-            // (#1082 keystone) from_logits_kt now returns a KT scalar loss; bridge
-            // it to candle for this fn's candle return type (the value-only callers
-            // — checkpoint/FLCE-compare/tests). The tape-authoritative SFT path
-            // calls from_logits_kt DIRECTLY via with_tape_authoritative_scope_kt to
-            // keep the loss kt (no copy), so it does NOT go through here.
-            return Ok(kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&loss_kt)
-                .context("cross_entropy_loss: kt->candle scalar copy")?);
-        }
-    }
-
-    // Candle-authoritative fallback (and any case the kt path declined): bridge
-    // the kt logits + device to candle once at the island boundary, and register
-    // kt->candle id chaining so the candle `try_tape_*` adapters' `tape_kt_input`
-    // recovers the lm_head kt output and keep the tape connected back to the LoRA
-    // forward (a bare copy would island it). NOTE: this `[1, T, V]` bridge is now
-    // built ONLY on the fallback path — the kt-authoritative early-return above
-    // never constructs it (#1082 H6).
-    let cd_device = kiln_kt_bridge::candle_device_from_kt(device)
-        .map_err(|e| anyhow::anyhow!("cross_entropy_loss: kt->candle device: {e}"))?;
-    let logits_candle = {
-        let lc = logits
-            .contiguous()
-            .context("cross_entropy_loss: logits contiguous")?;
-        let candle = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(&lc)
-            .map_err(|e| anyhow::anyhow!("cross_entropy_loss: logits kt->candle: {e}"))?;
-        // tape_bridge is the CUDA kt-tape chaining hint; no-cuda/vulkan training
-        // is not the live path (kt tape is CUDA-only), so it's skippable there.
-        #[cfg(feature = "cuda")]
-        kiln_kt_bridge::tape_bridge::retain_output_for_chaining(logits, candle.id());
-        candle
-    };
-
-    // Squeeze batch dimension: [seq_len, vocab_size]
-    let logits = logits_candle.squeeze(0)?;
-
-    // For next-token prediction: predict token[i+1] from logits[i]
-    // So we use logits[0..seq_len-1] to predict input_ids[1..seq_len]
-    let shift_logits = logits.narrow(0, 0, seq_len - 1)?; // [seq_len-1, vocab_size]
-    let shift_labels: Vec<u32> = input_ids[1..].to_vec();
-    let shift_mask: Vec<bool> = label_mask[1..].to_vec();
-
-    // Find positions where we should compute loss
-    let active_positions: Vec<usize> = shift_mask
-        .iter()
-        .enumerate()
-        .filter_map(|(i, &m)| if m { Some(i) } else { None })
-        .collect();
-
-    anyhow::ensure!(
-        !active_positions.is_empty(),
-        "cross_entropy_loss called with no supervised shifted-label positions"
-    );
-
-    // Gather active logits and labels (candle island).
-    let indices = tensor_new(
-        active_positions
-            .iter()
-            .map(|&i| i as u32)
-            .collect::<Vec<_>>()
-            .as_slice(),
-        &cd_device,
-    )?;
-    let active_logits = shift_logits.index_select(&indices, 0)?; // [num_active, vocab_size]
-
-    let active_labels: Vec<u32> = active_positions.iter().map(|&i| shift_labels[i]).collect();
-    let labels_tensor =
-        tensor_new(active_labels.as_slice(), &cd_device)?.to_dtype(candle_core::DType::U32)?;
-
-    // Cross-entropy: -log(softmax(logits)[label])
-    // Use log-sum-exp trick for numerical stability
-    let active_logits_f32 = active_logits.to_dtype(candle_core::DType::F32)?;
-
-    // #1082 CP-4: when tape-authoritative, route the loss through the
-    // cross_entropy adapter so it records the scalar loss as the tape root.
-    #[cfg(feature = "cuda")]
-    if tape_authoritative_enabled() {
-        if let Some(loss) = kiln_model::tape_forward::try_tape_cross_entropy_cuda(
-            &active_logits_f32,
-            &labels_tensor,
-        )? {
-            return Ok(loss);
-        }
-    }
-    let log_sum_exp = active_logits_f32.log_sum_exp(candle_core::D::Minus1)?; // [num_active]
-
-    // Gather the logit for the correct class at each position
-    let labels_2d = labels_tensor.unsqueeze(1)?; // [num_active, 1]
-    let correct_logits =
-        active_logits_f32.gather(&labels_2d.to_dtype(candle_core::DType::U32)?, 1)?; // [num_active, 1]
-    let correct_logits = correct_logits.squeeze(1)?; // [num_active]
-
-    // loss = mean(log_sum_exp - correct_logit)
-    let per_token_loss = (log_sum_exp - correct_logits)?;
-    let loss = per_token_loss.mean_all()?;
-
-    Ok(loss)
+    _device: &CdDevice,
+) -> Result<f64> {
+    let loss_kt = kiln_model::tape_forward::try_tape_cross_entropy_from_logits_kt(
+        logits,
+        input_ids,
+        label_mask,
+    )?
+    .ok_or_else(|| {
+        anyhow::anyhow!(
+            "cross_entropy_loss: kt CE-from-logits declined (requires CUDA BF16 [1, T, V] \
+             logits; F32/CPU cross-entropy was dropped in the candle drop, #1082)"
+        )
+    })?;
+    Ok(loss_kt.to_scalar::<f32>()? as f64)
 }
 
 /// Analytic SFT tail seed: `d loss / d hidden` for final RMSNorm + tied
@@ -7753,8 +7655,7 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
         }
     } else {
         let logits = model_forward_head(&final_hidden_kt, weights, model_config)?;
-        let loss = cross_entropy_loss(&logits, input_ids, label_mask, device)?;
-        loss.to_scalar::<f32>()? as f64
+        cross_entropy_loss(&logits, input_ids, label_mask, device)?
     };
     let mut upstream_grad = analytic_sft_tail_grad_pre_final_norm(
         &final_hidden_kt,
@@ -11043,40 +10944,6 @@ pub(crate) mod tests {
         Ok(())
     }
 
-    #[test]
-    fn test_cross_entropy_loss_basic() -> Result<()> {
-        let device = cpu_device();
-
-        // 3 tokens, vocab size 4
-        // logits: [1, 3, 4]
-        let logits = tnd(
-            vec![
-                2.0f32, 1.0, 0.1, 0.0, //
-                0.0, 3.0, 0.1, 0.0, //
-                0.0, 0.0, 0.0, 5.0,
-            ],
-            (1, 3, 4),
-        )?;
-
-        // input_ids: [A, B, C] — predict B from logits[0], C from logits[1]
-        let input_ids = vec![0u32, 1, 3];
-        // Only train on position 1 (predicting token 3 from logits[1])
-        let label_mask = vec![false, true, false];
-
-        let loss = cross_entropy_loss(&logits, &input_ids, &label_mask, &device)?;
-        let loss_val = loss.to_scalar::<f32>()?;
-
-        // After next-token-prediction shift:
-        // shift_logits[0] = [2, 1, 0.1, 0] predicting label 1
-        // shift_mask = [true, false] — only position 0 is active
-        // log_sum_exp([2,1,0.1,0]) = log(7.389 + 2.718 + 1.105 + 1) ≈ 2.50
-        // correct_logit = 1.0
-        // loss ≈ 2.50 - 1.0 = 1.50
-        assert!((loss_val - 1.50).abs() < 0.1, "loss = {loss_val}");
-
-        Ok(())
-    }
-
     // #1082: `kiln_model::forward::rms_norm_fallback` is now a kt op, so the
     // candle `Var`/`loss.backward()` autograd oracle this test relies on is
     // SEVERED — candle's tape cannot trace through the kt RMSNorm, so
@@ -11225,90 +11092,6 @@ pub(crate) mod tests {
 
         Ok(())
     }
-
-    #[test]
-    fn test_flce_parity_vs_naive_loss() -> Result<()> {
-        // Kill-switch parity: naive `model_forward_head` + `cross_entropy_loss`
-        // must match `model_forward_no_head` + `fused_linear_cross_entropy`
-        // on the same weights and inputs, up to floating-point associativity
-        // in the chunked vocab reduction.
-        //
-        // This is the trainer-integration equivalent of the CPU parity tests
-        // inside `kiln-flce-kernel`: those validate the kernel in isolation,
-        // this validates the wiring end-to-end through the real transformer
-        // stack so enabling `KILN_USE_FLCE` for SFT is a no-op on the loss.
-        let device = cpu_device();
-        let config = tiny_config();
-        let weights = tiny_weights(&config, &device)?;
-
-        let input_ids: Vec<u32> = vec![1, 5, 10, 3, 7, 2, 8];
-        let label_mask = vec![false, false, true, true, true, true, false];
-
-        let backend = backend::for_device_kt(&device);
-
-        // Naive path: full forward → logits → cross_entropy_loss.
-        let mut linear_state_naive = LinearAttentionState::new(&config, &device)?;
-        let logits = model_forward_kt(
-            &*backend,
-            &input_ids,
-            &weights,
-            &config,
-            None,
-            Some(&mut linear_state_naive),
-            None,
-        )?;
-        let loss_naive =
-            cross_entropy_loss(&logits, &input_ids, &label_mask, &device)?.to_scalar::<f32>()?;
-
-        // FLCE path: no-head forward → fused LCE (small chunk to exercise the
-        // chunked reduction on a modest vocab size).
-        let mut linear_state_flce = LinearAttentionState::new(&config, &device)?;
-        let hidden = model_forward_no_head(
-            &*backend,
-            &input_ids,
-            &weights,
-            &config,
-            Some(&mut linear_state_flce),
-            None,
-        )?;
-        // #1082: `model_forward_no_head` returns kt `hidden` and
-        // `embed_tokens_t` is kt, but `fused_linear_cross_entropy` is candle
-        // (the FLCE candle shim). Bridge both kt→candle (CPU F32, lossless) so
-        // the naive-CE vs FLCE parity bound is unchanged.
-        let hidden_c = cpu_kt_to_candle_f32(&hidden)?;
-        let head_t_c = cpu_kt_to_candle_f32(&weights.embed_tokens_t)?;
-        // candle island — `fused_linear_cross_entropy` is candle-typed; use a
-        // candle CPU device (parity test runs on CPU).
-        let loss_flce = fused_linear_cross_entropy(
-            &hidden_c,
-            &head_t_c,
-            &input_ids,
-            &label_mask,
-            &candle_core::Device::Cpu,
-            8, // small chunk to exercise uneven-chunk path
-        )?
-        .to_scalar::<f32>()?;
-
-        let abs_err = (loss_naive - loss_flce).abs();
-        let rel_err = if loss_naive.abs() > 1e-6 {
-            abs_err / loss_naive.abs()
-        } else {
-            abs_err
-        };
-        assert!(
-            abs_err < 1e-4 || rel_err < 1e-4,
-            "FLCE trainer parity failed: naive={loss_naive:.6} flce={loss_flce:.6} \
-             abs_err={abs_err:.2e} rel_err={rel_err:.2e}",
-        );
-
-        Ok(())
-    }
-
-
-
-
-
-
 
     #[test]
     #[ignore = "#1082 flip: candle gradient-checkpointing reverse is grad-severed (model_forward_segment is kt-internal; candle .backward() can't trace the kt<->candle copy bridge to the segment-input/LoRA Vars). The monolithic kt-tape path is the CP-4-validated grad producer; porting checkpointing onto the kt tape (+ CPU tape) is a tracked #1082 endgame increment. See note kiln-candle-autograd-drops-attn-conv-grads."]
