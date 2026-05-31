@@ -6327,19 +6327,9 @@ impl GpuWeights {
         // force the legacy serial pack for A/B measurements or rollback.
         if w4a16_enabled && !marlin_pack_inputs.is_empty() {
             let pack_start = std::time::Instant::now();
-            // #1082: `marlin_pack_inputs` holds kt tensors, but the marlin
-            // packer (`pack_from_bf16_batch`) is a candle-typed quantization
-            // island. Bridge each weight kt->candle once here.
-            let marlin_pack_inputs_candle: Vec<(candle_core::Tensor, i32)> = marlin_pack_inputs
-                .iter()
-                .map(|(t, group)| {
-                    Ok::<_, anyhow::Error>((
-                        kt_logits_to_candle(t).context("marlin batch pack: kt->candle weight")?,
-                        *group,
-                    ))
-                })
-                .collect::<Result<_>>()?;
-            let packed = crate::marlin_proj::pack_from_bf16_batch(&marlin_pack_inputs_candle)
+            // (#1082) `pack_from_bf16_batch` is kt-native now — `marlin_pack_inputs`
+            // (kt weights) goes straight in, no kt->candle bridge.
+            let packed = crate::marlin_proj::pack_from_bf16_batch(&marlin_pack_inputs)
                 .context("marlin batch pack")?;
             let pack_elapsed_ms = pack_start.elapsed().as_millis();
             let parallel = !crate::marlin_proj::parallel_pack_disabled();
