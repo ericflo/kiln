@@ -59,9 +59,21 @@ feeds back once). The per-step KV write reads `inputs.kv_slot` (the in-place-ref
 device buffer), not a host immediate (`forward.rs:19964`). So the defect is in the
 captured-graph computation/replay semantics — consistent with the in-code suspect
 "per-step KV-slot writer baked-immediate correctness under graph replay across
-start_pos." Next step: instrument the KV cache contents + attention length per replay
-step (dump `kv_slot`, `seqused_k`, and the slot the write actually lands in) to find
-why position N's replay behaves like an earlier position.
+start_pos."
+
+**Update (instrumented `update_paged_metadata_buffers`):** the per-replay metadata is
+**correct** — across replay steps the dump showed `slot` advancing 19→31, `attn_len`
+20→32, `block_table=[0,1,2,2,2,2]` consistent. So BUG 2 is **NOT** the metadata refresh
+or the KV-slot value; it is in the **captured-kernel computation on replay**. Since
+24/32 layers are GDN (Gated DeltaNet, recurrent linear-attn), the prime suspect is the
+**GDN recurrent-state handling under capture/replay** — the non-idempotent `linear_state`
+the capture code snapshots/restores around the Pass1/Pass2 double-forward
+(`cuda_graph.rs:~1494,1506`). Either (a) a GDN per-layer recurrent/conv state buffer is
+not frozen by the capture arena (so the captured graph reads/writes a stale buffer and
+the state stops evolving across replays), or (b) the snapshot/restore leaves the first
+replay starting from an off-by-one state that compounds. Next step: instrument GDN
+recurrent-state norms per replay step (does the state evolve, or is it frozen/stale?),
+and verify every GDN state buffer enters the capture arena's retained set.
 
 ## Status of #1082 boxes 98–101
 
