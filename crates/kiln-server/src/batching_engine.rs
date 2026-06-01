@@ -813,6 +813,16 @@ impl BatchingEngineActor {
         }
     }
 
+    fn has_ready_decode_row(&self) -> bool {
+        self.active.iter().any(|active| match &active.slot {
+            DecodeSlot::Real {
+                first_token_pending,
+                ..
+            } => !*first_token_pending,
+            DecodeSlot::Mock { .. } => true,
+        })
+    }
+
     fn handle_command(&mut self, cmd: EngineCommand) {
         match cmd {
             EngineCommand::Enqueue { req, response_tx } => {
@@ -872,8 +882,13 @@ impl BatchingEngineActor {
 
     fn admit_waiting(&mut self) {
         let mut admitted = 0usize;
+        let admission_limit = if self.has_ready_decode_row() {
+            1
+        } else {
+            self.max_prefill_admissions_per_cycle
+        };
         while self.active.len() < self.max_decode_batch
-            && admitted < self.max_prefill_admissions_per_cycle
+            && admitted < admission_limit
             && !self.waiting.is_empty()
         {
             let Some(waiting_idx) = self
@@ -1517,11 +1532,53 @@ mod tests {
         assert_eq!(actor.snapshot.total_prefill_admission_cycles, 1);
         assert_eq!(actor.snapshot.total_prefill_tokens, 6);
 
+        actor.run_decode_batch();
+        assert_eq!(actor.active.len(), 0);
+
         actor.admit_waiting();
-        assert_eq!(actor.active.len(), 6);
+        assert_eq!(actor.active.len(), 3);
         assert_eq!(actor.waiting.len(), 2);
         assert_eq!(actor.snapshot.total_prefill_admission_cycles, 2);
         assert_eq!(actor.snapshot.total_prefill_tokens, 12);
+    }
+
+    #[test]
+    fn ready_decode_rows_limit_followup_prefill_admission_to_one() {
+        let (_tx, rx) = mpsc::channel(DEFAULT_ENGINE_CHANNEL);
+        let forward = Arc::new(PendingFirstTokenForward::default());
+        let mut actor = BatchingEngineActor::new(rx, forward.clone(), 8, false, 3);
+        let mut receivers = Vec::new();
+        for idx in 0..6 {
+            let (response_tx, response_rx) = mpsc::channel(DEFAULT_RESPONSE_CHANNEL);
+            actor.waiting.push_back(QueuedRequest {
+                req: request(100 + idx as TokenId, 2),
+                response_tx,
+            });
+            receivers.push(response_rx);
+        }
+
+        actor.admit_waiting();
+        assert_eq!(actor.active.len(), 3);
+        assert_eq!(actor.waiting.len(), 3);
+        assert_eq!(actor.snapshot.total_prefill_admission_cycles, 1);
+        assert_eq!(actor.snapshot.total_prefill_tokens, 6);
+        assert_eq!(actor.snapshot.total_decode_tokens, 3);
+        assert!(forward.calls.lock().unwrap().is_empty());
+
+        actor.admit_waiting();
+        assert_eq!(actor.active.len(), 4);
+        assert_eq!(actor.waiting.len(), 2);
+        assert_eq!(actor.snapshot.total_prefill_admission_cycles, 2);
+        assert_eq!(actor.snapshot.total_prefill_tokens, 8);
+        assert_eq!(actor.snapshot.total_decode_tokens, 4);
+        assert!(forward.calls.lock().unwrap().is_empty());
+
+        for (idx, rx) in receivers.iter_mut().take(4).enumerate() {
+            assert_eq!(
+                rx.blocking_recv(),
+                Some(EngineEvent::Token(110 + idx as TokenId))
+            );
+        }
     }
 
     #[test]

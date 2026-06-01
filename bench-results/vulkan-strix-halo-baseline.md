@@ -577,6 +577,16 @@ every config"):
   `batching_engine::tests::` unit subset and
   `cargo check -p kiln-server --bins --no-default-features --features vulkan`
   pass with the repo's existing warning backlog.
+  **Update — active rows yield prefill admission back to decode:** the batching
+  actor now uses the full prefill admission quantum only when no row is ready
+  for model decode. Once resident decode rows are ready, each scheduler pass
+  admits at most one additional cold row before yielding back to the batched
+  decode step. This keeps the 64-row Vulkan ceiling and the cold-start quantum,
+  but prevents active rows from waiting behind another full prefill quantum.
+  Focused checks: the Vulkan-profile `batching_engine::tests::` unit subset
+  now covers the active-row cap and passes; `cargo check -p kiln-server --bins
+  --no-default-features --features vulkan` also passes with the existing
+  warning backlog.
   **Update — resident parity test restored for Vulkan profiles:** the
   `vk_resident_decode_parity` integration test now builds against the current kt
   device/cache surface instead of stale test-only APIs. Without
@@ -860,13 +870,10 @@ every config"):
 
 ## Other follow-ups (perf headroom, not regressions)
 
-1. **Batch-admission/TTFT policy** is now the next latency target for live
-   serving: the warmed 8-row fixture above shows first token waiting for the
-   actor to finish serial prefill/admission of the group before the first
-   batched decode step, even though model prefill/decode timings are much
-   smaller than end-to-end TTFT. Throughput-oriented batches can keep filling
-   to the hardware-saturating width; latency-sensitive traffic likely needs an
-   admission policy that can launch an earlier decode wave without giving up
+1. **Batch-admission/TTFT policy live validation** remains the next serving
+   latency target: first-token emission and active-row admission yielding are
+   now implemented, but the warmed multi-row fixture should be rerun to measure
+   how much wall-clock TTFT moved under real request timing while preserving
    the 64-wide saturation path.
 2. Complete the remaining shared-stack dependency cleanup audit for any
    non-Vulkan decode islands; the Vulkan-specific decode weight path is now
