@@ -51,6 +51,8 @@ mod cuda_storage;
 #[cfg(feature = "cuda")]
 mod cuda_matmul;
 #[cfg(feature = "cuda")]
+mod cuda_stream_priority;
+#[cfg(feature = "cuda")]
 mod fp8;
 #[cfg(feature = "metal")]
 mod metal_allocator;
@@ -96,6 +98,11 @@ pub use tensor_id::TensorId;
 pub use active_stream::{active_cuda_stream, with_active_cuda_stream};
 #[cfg(feature = "cuda")]
 pub use cuda_allocator::CudaAllocator;
+#[cfg(feature = "cuda")]
+pub use cuda_stream_priority::{
+    cuda_stream_priority_range, new_cuda_stream_with_priority, PrioritizedCudaStream,
+    StreamPriority,
+};
 #[cfg(feature = "cuda")]
 pub use cuda_storage::{
     cuda_activation_unary, cuda_argmax_last_axis, cuda_binary_minmax, cuda_bool_reduce_axis, cuda_cast,
