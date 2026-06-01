@@ -49,6 +49,8 @@ const DEFAULT_BATCHES: &[usize] = &[1, 4, 8, 16, 32, 64];
 const MLP_BF16_ROWS8_MIN_BATCH: usize = 256;
 const PAGED_ATTN_SPLITK_CHUNKS_B1: usize = 32;
 const PAGED_ATTN_SPLITK_CHUNKS_BATCHED: usize = 4;
+const PAGED_ATTN_SPLITK_CHUNKS_BATCHED_LONG: usize = 2;
+const PAGED_ATTN_SPLITK_LONG_MIN_BLOCKS: usize = 64;
 
 /// Deterministic flat `Vec<bf16>` weight data for byte/slice dispatch entries.
 fn make_bf16_weight_slice(rows: usize, cols: usize) -> Vec<bf16> {
@@ -91,13 +93,15 @@ fn linear_bf16w_rows4_enabled() -> bool {
         && enabled_unless_disabled("KILN_DISABLE_VULKAN_LINEAR_BF16W_ROWS4")
 }
 
-fn paged_attn_splitk_chunks(batch: usize) -> usize {
+fn paged_attn_splitk_chunks(batch: usize, blocks_per_seq: usize) -> usize {
     std::env::var("KILN_VK_PAGED_ATTN_SPLITK_CHUNKS")
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
         .filter(|&n| n >= 1)
         .unwrap_or(if batch <= 1 {
             PAGED_ATTN_SPLITK_CHUNKS_B1
+        } else if blocks_per_seq >= PAGED_ATTN_SPLITK_LONG_MIN_BLOCKS {
+            PAGED_ATTN_SPLITK_CHUNKS_BATCHED_LONG
         } else {
             PAGED_ATTN_SPLITK_CHUNKS_BATCHED
         })
@@ -700,7 +704,7 @@ fn run_full_token_resident_mixed_batched(
         };
         let seq_lens_bytes: Vec<u8> = bytemuck::cast_slice(&seq_lens_data).to_vec();
         let seq_lens_buf = mk_dev(&seq_lens_bytes)?;
-        let num_chunks = paged_attn_splitk_chunks(batch);
+        let num_chunks = paged_attn_splitk_chunks(batch, blocks_per_seq);
         let paged_cache = if use_paged_attention {
             Some(VkPagedKvCache::new(
                 device,
@@ -2336,7 +2340,7 @@ fn run_full_token_resident_paged(
     };
 
     for &batch in batches {
-        let num_chunks = paged_attn_splitk_chunks(batch);
+        let num_chunks = paged_attn_splitk_chunks(batch, blocks_per_seq);
         let total_blocks = batch * blocks_per_seq;
         let cache = VkPagedKvCache::new(
             device,

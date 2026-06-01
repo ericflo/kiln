@@ -278,6 +278,16 @@ every config"):
   at longer contexts without changing the conclusion: at practical resident
   batch sizes, the dominant mixed-stack cost is still the projection/MLP/GDN
   shader work, not paged K/V slot writes or block-table attention.
+  **Update — adaptive batched split-K chunks:** short same-session sweeps show
+  the batched paged-attention default should keep 4 chunks at the 16-block
+  256-token window but use 2 chunks once `max_blocks_per_seq >= 64`. At
+  history 256, batch 8 measured 106.8 ms with 2 chunks vs. 106.1 ms with 4,
+  and batch 64 measured 464.2 ms with 2 vs. 462.5 ms with 4. At history 1024,
+  batch 32 measured 255.4 ms with 2 chunks vs. 260.7 ms with 4. At history
+  2048, batch 8 measured 123.5 ms with 1 chunk, 112.1 ms with 2, 113.1 ms
+  with 4, and 115.4 ms with 8. Patched no-override smoke checks measured
+  history 2048 / batch 8 at 113.0 ms / 71 rows/s and history 256 / batch 64
+  at 460.3 ms / 139 rows/s.
   **Update — GDN resident recorder uses row-reuse in-proj:** the batched GDN
   `CommandBatch` recorder now selects the same pair QKV/Z plus rows2/rows4
   BF16 in-proj shaders as the standalone dispatcher. Focused

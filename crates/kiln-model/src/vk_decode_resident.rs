@@ -42,6 +42,8 @@ use crate::PagedKvCacheKt;
 const MLP_BF16_ROWS8_MIN_BATCH: usize = 256;
 const PAGED_ATTN_SPLITK_CHUNKS_B1: usize = 32;
 const PAGED_ATTN_SPLITK_CHUNKS_BATCHED: usize = 4;
+const PAGED_ATTN_SPLITK_CHUNKS_BATCHED_LONG: usize = 2;
+const PAGED_ATTN_SPLITK_LONG_MIN_BLOCKS: usize = 64;
 
 // (#1082) The previous process-global bridge cache is gone. It existed to give
 // shared upload helpers a stable `TensorId` per weight, but memoized a full
@@ -90,13 +92,15 @@ fn linear_bf16w_rows4_enabled() -> bool {
         && enabled_unless_disabled("KILN_DISABLE_VULKAN_LINEAR_BF16W_ROWS4")
 }
 
-fn paged_attn_splitk_chunks(batch_size: usize) -> usize {
+fn paged_attn_splitk_chunks(batch_size: usize, max_blocks_per_seq: usize) -> usize {
     std::env::var("KILN_VK_PAGED_ATTN_SPLITK_CHUNKS")
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
         .filter(|&n| n >= 1)
         .unwrap_or(if batch_size <= 1 {
             PAGED_ATTN_SPLITK_CHUNKS_B1
+        } else if max_blocks_per_seq >= PAGED_ATTN_SPLITK_LONG_MIN_BLOCKS {
+            PAGED_ATTN_SPLITK_CHUNKS_BATCHED_LONG
         } else {
             PAGED_ATTN_SPLITK_CHUNKS_BATCHED
         })
@@ -1808,7 +1812,7 @@ pub fn record_full_attn_block_into(
     // remains tunable via
     // `KILN_VK_PAGED_ATTN_SPLITK_CHUNKS`. Anything ≥ seq_len degrades
     // gracefully (chunks beyond `seq_len` write neutral identities).
-    let num_chunks = paged_attn_splitk_chunks(1);
+    let num_chunks = paged_attn_splitk_chunks(1, max_blocks_per_seq);
     let partials_stride = 2 + head_dim;
     let partials_bytes = (1 * num_heads * num_chunks * partials_stride * 4) as u64;
     let attn_partials =
@@ -2104,7 +2108,7 @@ pub fn record_full_attn_block_batched_into(
         Workgroups::OneD((batch_size * elements_per_slot).div_ceil(256) as u32),
     )?;
 
-    let num_chunks = paged_attn_splitk_chunks(batch_size);
+    let num_chunks = paged_attn_splitk_chunks(batch_size, max_blocks_per_seq);
     let partials_stride = 2 + head_dim;
     let partials_bytes = (batch_size * num_heads * num_chunks * partials_stride * 4) as u64;
     let attn_partials = backend.acquire_resident_scratch("nfa_b_attn_partials", partials_bytes)?;
