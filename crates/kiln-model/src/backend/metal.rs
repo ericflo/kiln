@@ -13320,15 +13320,13 @@ fn metal_causal_conv1d_update_bf16_f32_k4(
     Ok(out)
 }
 
-/// Test helper: try to initialize a Metal device, returning `None` if Metal
-/// isn't available OR if candle-metal's `MetalDevice::new` panics (observed on
-/// GitHub's macos-14 runners, where the CI sandbox can produce an empty device
-/// list and candle 0.10.2's `swap_remove` panics instead of returning `Err`).
+/// Test/helper: try to initialize a kt Metal device, returning `None` if Metal
+/// isn't available or if device discovery panics in a sandboxed runner.
 #[doc(hidden)]
-pub fn try_new_metal() -> Option<candle_core::Device> {
-    let result = std::panic::catch_unwind(|| candle_core::Device::new_metal(0));
+pub fn try_new_metal() -> Option<kiln_tensor::Device> {
+    let result = std::panic::catch_unwind(|| kiln_tensor::primary_metal_companion(0));
     match result {
-        Ok(Ok(d)) => Some(d),
+        Ok(Ok(_)) => Some(kiln_tensor::Device::Metal(0)),
         Ok(Err(e)) => {
             eprintln!("Metal unavailable: {e}");
             None
@@ -13340,7 +13338,7 @@ pub fn try_new_metal() -> Option<candle_core::Device> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "legacy-candle-parity"))]
 mod tests {
     use super::*;
     use crate::lora_loader::{LoraProjectionWeights, compute_lora_delta};
@@ -13355,6 +13353,21 @@ mod tests {
     const QWEN35_INTERMEDIATE: usize = 9216;
     const QWEN35_ATTN_QKV_OUT: usize = 4096;
     const QWEN35_GDN_VALUE_OUT: usize = 4096;
+
+    fn try_new_metal() -> Option<candle_core::Device> {
+        let result = std::panic::catch_unwind(|| candle_core::Device::new_metal(0));
+        match result {
+            Ok(Ok(d)) => Some(d),
+            Ok(Err(e)) => {
+                eprintln!("Metal unavailable: {e}");
+                None
+            }
+            Err(_) => {
+                eprintln!("Metal device init panicked (likely CI sandbox with no Metal access)");
+                None
+            }
+        }
+    }
 
     #[test]
     fn test_precompile_custom_kernels_smoke() -> Result<()> {

@@ -642,6 +642,67 @@ pub fn metal_to_host_copy(t: &crate::Tensor) -> Result<crate::Tensor> {
     )
 }
 
+/// Deep-copy a Metal tensor to a fresh Metal buffer.
+///
+/// Contiguous tensors use the Apple Silicon UMA fast path: wait for queued GPU
+/// writes, allocate a new Shared-mode `MTLBuffer`, then copy the addressed byte
+/// range directly. Non-contiguous and packed tensors fall back through the
+/// existing logical host image path so layout semantics stay exact.
+pub fn metal_deep_copy(t: &crate::Tensor) -> Result<crate::Tensor> {
+    use crate::metal_rt::MTLResourceOptions;
+
+    let metal = t
+        .storage()
+        .as_any()
+        .downcast_ref::<MetalStorage>()
+        .ok_or_else(|| Error::Msg("metal_deep_copy: tensor must be Metal-backed".to_string()))?;
+    let device_index = metal.device_index();
+    let dtype = t.dtype();
+
+    if dtype.is_packed() || !t.layout().is_contiguous() {
+        let host = metal_to_host_copy(t)?;
+        return host_to_metal_copy(&host, device_index);
+    }
+
+    metal.companion()?.wait_until_completed()?;
+
+    let per = dtype.size_in_bytes();
+    let byte_len = t.element_count() * per;
+    let start_bytes = t.layout().start_offset() * per;
+    let end_bytes = start_bytes + byte_len;
+    let source_buffer = metal.buffer();
+    let source_len = source_buffer.length() as usize;
+    if end_bytes > source_len {
+        return Err(Error::Msg(format!(
+            "metal_deep_copy: byte range {start_bytes}..{end_bytes} exceeds buffer length \
+             {source_len}"
+        )));
+    }
+
+    let companion = primary_metal_companion(device_index)?;
+    let raw_device = companion.device();
+    let alloc_len = byte_len.max(1);
+    let buffer = raw_device
+        .new_buffer(alloc_len, MTLResourceOptions::StorageModeShared)
+        .map_err(|e| {
+            Error::Msg(format!(
+                "metal_deep_copy: new_buffer({alloc_len}, Shared) failed: {e:?}"
+            ))
+        })?;
+
+    unsafe {
+        let src = (source_buffer.contents() as *const u8).add(start_bytes);
+        core::ptr::copy_nonoverlapping(src, buffer.contents(), byte_len);
+    }
+
+    let storage = MetalStorage::from_buffer_kt(raw_device, device_index, dtype, Arc::new(buffer))?;
+    crate::Tensor::from_parts(
+        Arc::new(storage),
+        crate::Layout::contiguous(t.shape().to_vec()),
+        crate::TensorId::next(),
+    )
+}
+
 
 // ----------------------------------------------------------------------
 // metal_softmax_last_axis — Phase 4 Metal substrate op (#1082)
@@ -1891,5 +1952,34 @@ mod tests {
         } else {
             assert!(result.unwrap_err().to_string().contains("not a multiple"));
         }
+    }
+
+    #[test]
+    fn metal_tensor_copy_preserves_values_and_allocates_fresh_buffer() {
+        let Some(_dev) = maybe_metal_raw_device() else {
+            eprintln!("skip: KILN_TENSOR_METAL_TEST unset or no Metal device");
+            return;
+        };
+
+        let values = vec![1.0f32, 2.0, 3.5, 4.25];
+        let cpu = crate::Tensor::from_slice(&values, vec![2, 2]).unwrap();
+        let metal = host_to_metal_copy(&cpu, 0).unwrap();
+        let copied = metal.copy().unwrap();
+
+        assert_eq!(copied.device(), Device::Metal(0));
+        let roundtrip = copied.to_device(Device::Cpu).unwrap();
+        assert_eq!(roundtrip.to_vec::<f32>().unwrap(), values);
+
+        let src = metal
+            .storage()
+            .as_any()
+            .downcast_ref::<MetalStorage>()
+            .unwrap();
+        let dst = copied
+            .storage()
+            .as_any()
+            .downcast_ref::<MetalStorage>()
+            .unwrap();
+        assert!(!Arc::ptr_eq(src.buffer(), dst.buffer()));
     }
 }

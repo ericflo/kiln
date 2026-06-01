@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, RwLockReadGuard, RwLockWriteGuard};
 use std::sync::atomic::AtomicBool;
 use tokio::sync::{Mutex, watch};
 
@@ -183,6 +183,30 @@ impl GpuMemoryBudget {
 /// Training should acquire this per-segment (for gradient-checkpointed training),
 /// not for the entire job, to minimize inference latency impact.
 pub type GpuCoordinationLock = Arc<std::sync::RwLock<()>>;
+
+pub(crate) fn gpu_coordination_read_guard(
+    gpu_lock: &GpuCoordinationLock,
+) -> RwLockReadGuard<'_, ()> {
+    gpu_lock.read().unwrap_or_else(|err| {
+        tracing::warn!(
+            error = %err,
+            "gpu coordination lock poisoned; continuing because the lock carries no state"
+        );
+        err.into_inner()
+    })
+}
+
+pub(crate) fn gpu_coordination_write_guard(
+    gpu_lock: &GpuCoordinationLock,
+) -> RwLockWriteGuard<'_, ()> {
+    gpu_lock.write().unwrap_or_else(|err| {
+        tracing::warn!(
+            error = %err,
+            "gpu coordination lock poisoned; continuing because the lock carries no state"
+        );
+        err.into_inner()
+    })
+}
 
 /// Type of training job.
 #[derive(Debug, Clone, Copy, Serialize, serde::Deserialize)]
@@ -2458,6 +2482,21 @@ mod tests {
         () => {
             ::kiln_tensor::Device::Cpu
         };
+    }
+
+    #[test]
+    fn gpu_coordination_guards_recover_from_poisoned_empty_lock() {
+        let gpu_lock: GpuCoordinationLock = std::sync::Arc::new(std::sync::RwLock::new(()));
+        let poison_lock = gpu_lock.clone();
+        let poisoned = std::panic::catch_unwind(move || {
+            let _guard = poison_lock.write().unwrap();
+            panic!("poison gpu coordination lock for regression coverage");
+        });
+        assert!(poisoned.is_err());
+        assert!(gpu_lock.is_poisoned());
+
+        drop(gpu_coordination_read_guard(&gpu_lock));
+        drop(gpu_coordination_write_guard(&gpu_lock));
     }
 
     fn tiny_linear_config() -> ModelConfig {

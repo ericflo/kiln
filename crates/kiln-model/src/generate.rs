@@ -7732,7 +7732,7 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "metal")]
+    #[cfg(all(feature = "metal", feature = "legacy-candle-parity"))]
     fn patterned_bf16(shape: &[usize], scale: f32, device: &candle_core::Device) -> Result<candle_core::Tensor> {
         let n: usize = shape.iter().product();
         let data: Vec<f32> = (0..n)
@@ -7748,7 +7748,7 @@ mod tests {
     // so this candle-tensor builder no longer type-checks under `--features
     // metal` and needs a kt rewrite (Wave 2 / metal). It is gated off the
     // default + CUDA build, which is the production candle-drop path for #1082.
-    #[cfg(feature = "metal")]
+    #[cfg(all(feature = "metal", feature = "legacy-candle-parity"))]
     fn qwen_shape_bf16_full_attention_weights(
         config: &ModelConfig,
         device: &candle_core::Device,
@@ -7812,7 +7812,7 @@ mod tests {
         })
     }
 
-    #[cfg(feature = "metal")]
+    #[cfg(all(feature = "metal", feature = "legacy-candle-parity"))]
     #[test]
     fn test_decode_next_tokens_paged_contiguous_batch_greedy_matches_rowwise_metal() -> Result<()> {
         let Some(device) = crate::backend::metal::try_new_metal() else {
@@ -7932,7 +7932,7 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(feature = "metal")]
+    #[cfg(all(feature = "metal", feature = "legacy-candle-parity"))]
     #[test]
     fn test_decode_batcher_batches_two_greedy_jobs_metal() -> Result<()> {
         let Some(device) = crate::backend::metal::try_new_metal() else {
@@ -8094,7 +8094,7 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(feature = "metal")]
+    #[cfg(all(feature = "metal", feature = "legacy-candle-parity"))]
     #[test]
     fn test_decode_batcher_batches_mixed_seq_lens_metal() -> Result<()> {
         let Some(device) = crate::backend::metal::try_new_metal() else {

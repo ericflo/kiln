@@ -1341,15 +1341,40 @@ fn sdpa_split_w(q_seq: usize, k_seq: usize, hkv: usize, b: usize, gf: usize, d: 
 /// the M1's 32 KiB. (WN is always 1.) `dtype_bytes` shrinks `BK` further for
 /// F32 (4 B/elem) so the `Qs+Ks+Vs` BF16/F32 staging pool stays under budget
 /// even at `head_dim=128` (F32 D=128 would be 38 KiB at BK=16 → use BK=8).
-fn sdpa_steel_cfg(head_dim: usize, dtype_bytes: usize) -> (usize, usize, usize) {
-    let bk = if head_dim < 128 {
-        32
-    } else if dtype_bytes >= 4 {
-        8
+const SDPA_STEEL_THREADGROUP_LIMIT_BYTES: usize = 32 * 1024;
+
+fn sdpa_steel_threadgroup_bytes(
+    head_dim: usize,
+    dtype_bytes: usize,
+    bq: usize,
+    bk: usize,
+) -> usize {
+    let dpad = head_dim.div_ceil(8) * 8;
+    let ld_q = dpad + 8;
+    let ld_k = bk + 8;
+    let ld_v = dpad + 8;
+    let q_bytes = bq * ld_q * dtype_bytes;
+    let k_bytes = dpad * ld_k * dtype_bytes;
+    let v_bytes = bk * ld_v * dtype_bytes;
+    q_bytes + k_bytes + v_bytes
+}
+
+fn sdpa_steel_cfg(head_dim: usize, dtype_bytes: usize) -> Option<(usize, usize, usize)> {
+    let bk_candidates: &[usize] = if head_dim < 128 {
+        &[32usize, 16, 8]
     } else {
-        16
+        &[16usize, 8]
     };
-    (32, bk, 4) // (BQ, BK, WM)
+    for (bq, wm) in [(32usize, 4usize), (16, 2), (8, 1)] {
+        for &bk in bk_candidates {
+            if sdpa_steel_threadgroup_bytes(head_dim, dtype_bytes, bq, bk)
+                <= SDPA_STEEL_THREADGROUP_LIMIT_BYTES
+            {
+                return Some((bq, bk, wm));
+            }
+        }
+    }
+    None
 }
 
 /// Threshold (in `q_seq`) at/above which the compute-bound **matrix-core
@@ -1456,20 +1481,15 @@ pub(crate) fn sdpa(
     // DECODE (small q_seq, memory-bound): the simd_sum/split-K kernel.
     if sq >= sdpa_prefill_threshold() {
         let dtype_bytes = dtype.size_in_bytes();
-        return sdpa_dispatch_steel(
-            companion,
-            q,
-            k,
-            v,
-            out,
-            ty,
-            dtype_bytes,
-            b,
-            hq,
-            sq,
-            head_dim,
-            &params,
-        );
+        if let Some((bq, bk, wm)) = sdpa_steel_cfg(head_dim, dtype_bytes) {
+            if sdpa_dispatch_steel(
+                companion, q, k, v, out, ty, b, hq, sq, head_dim, &params, bq, bk, wm,
+            )
+            .is_ok()
+            {
+                return Ok(());
+            }
+        }
     }
 
     // GQA-shared-KV decode: one threadgroup per GQA *group* — grid is
@@ -1519,14 +1539,15 @@ fn sdpa_dispatch_steel(
     v: &MetalBuffer,
     out: &MetalBuffer,
     ty: &str,
-    dtype_bytes: usize,
     b: usize,
     hq: usize,
     sq: usize,
     head_dim: usize,
     params: &SdpaParams,
+    bq: usize,
+    bk: usize,
+    wm: usize,
 ) -> Result<()> {
-    let (bq, bk, wm) = sdpa_steel_cfg(head_dim, dtype_bytes);
     let entry = format!("kt_sdpa_steel_{ty}_d{head_dim}_bq{bq}_bk{bk}_wm{wm}");
     let src = sdpa_steel_src(ty, head_dim, bq, bk, wm, &entry);
     let pipeline = op_pipeline(companion, &src, &entry)?;
@@ -1551,4 +1572,26 @@ fn sdpa_dispatch_steel(
     encoder.dispatch_thread_groups(groups, threads);
     drop(encoder);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sdpa_steel_cfg_keeps_qwen_bf16_d256_under_threadgroup_limit() {
+        assert_eq!(
+            sdpa_steel_threadgroup_bytes(256, 2, 32, 16),
+            37_632,
+            "old Qwen3.5 BF16 D=256 steel tile must remain recognized as oversized"
+        );
+        let (bq, bk, wm) = sdpa_steel_cfg(256, 2).expect("BF16 D=256 steel tile");
+        assert_eq!((bq, bk, wm), (32, 8, 4));
+        assert!(sdpa_steel_threadgroup_bytes(256, 2, bq, bk) <= SDPA_STEEL_THREADGROUP_LIMIT_BYTES);
+    }
+
+    #[test]
+    fn sdpa_steel_cfg_declines_unfittable_f32_d256_tile() {
+        assert!(sdpa_steel_cfg(256, 4).is_none());
+    }
 }

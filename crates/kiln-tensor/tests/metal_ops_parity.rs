@@ -46,6 +46,16 @@ fn max_abs_diff(a: &[f32], b: &[f32]) -> f32 {
     a.iter().zip(b).fold(0.0f32, |m, (x, y)| m.max((x - y).abs()))
 }
 
+fn bf16_to_f32_vec(t: &Tensor) -> Vec<f32> {
+    t.to_device(Device::Cpu)
+        .unwrap()
+        .to_vec::<half::bf16>()
+        .unwrap()
+        .into_iter()
+        .map(half::bf16::to_f32)
+        .collect()
+}
+
 /// Build the same data on CPU and Metal, returning both tensors.
 fn pair(data: &[f32], shape: &[usize], dev: Device) -> (Tensor, Tensor) {
     let cpu = Tensor::from_vec(data.to_vec(), shape.to_vec()).unwrap();
@@ -374,6 +384,48 @@ fn sdpa_steel_prefill_parity() {
         let d = max_abs_diff(&want, &got);
         assert!(d < 2e-3, "steel sdpa [{label}] max|Δ|={d}");
     }
+}
+
+/// Qwen3.5-4B production prefill shape that previously compiled the
+/// oversized `BF16 D=256 BQ=32 BK=16` Steel variant. This test must enter
+/// the matrix-core prefill path and compile/run a BF16 D=256 GQA kernel on
+/// real Metal hardware.
+#[test]
+fn sdpa_steel_prefill_qwen_bf16_d256_parity() {
+    let Some(dev) = metal() else {
+        eprintln!("no Metal device; skipping");
+        return;
+    };
+    let (bs, hq, hkv, q_seq, k_seq, hd) = (1usize, 16usize, 4usize, 32usize, 32usize, 256usize);
+    let gqa = hq / hkv;
+    let qn = bs * hq * q_seq * hd;
+    let kn = bs * hkv * k_seq * hd;
+    let q_shape = [bs, hq, q_seq, hd];
+    let kv_shape = [bs, hkv, k_seq, hd];
+
+    let (cpu_q_f32, met_q_f32) = pair(&pattern(qn, 83), &q_shape, dev);
+    let (cpu_k_f32, met_k_f32) = pair(&pattern(kn, 84), &kv_shape, dev);
+    let (cpu_v_f32, met_v_f32) = pair(&pattern(kn, 85), &kv_shape, dev);
+    let cpu_q = ops::cast(&cpu_q_f32, DType::BF16).unwrap();
+    let cpu_k = ops::cast(&cpu_k_f32, DType::BF16).unwrap();
+    let cpu_v = ops::cast(&cpu_v_f32, DType::BF16).unwrap();
+    let met_q = ops::cast(&met_q_f32, DType::BF16).unwrap();
+    let met_k = ops::cast(&met_k_f32, DType::BF16).unwrap();
+    let met_v = ops::cast(&met_v_f32, DType::BF16).unwrap();
+
+    let scale = 1.0f32 / (hd as f32).sqrt();
+    let got_t = kiln_tensor::metal_sdpa_last_axis(&met_q, &met_k, &met_v, scale, true).unwrap();
+    assert_eq!(got_t.dtype(), DType::BF16);
+    let got = bf16_to_f32_vec(&got_t);
+
+    let ck = ops::repeat_interleave(&cpu_k, 1, gqa).unwrap();
+    let cv = ops::repeat_interleave(&cpu_v, 1, gqa).unwrap();
+    let want_t = ops::causal_scaled_dot_product_attention(&cpu_q, &ck, &cv).unwrap();
+    assert_eq!(want_t.dtype(), DType::BF16);
+    let want = bf16_to_f32_vec(&want_t);
+
+    let d = max_abs_diff(&want, &got);
+    assert!(d < 3e-2, "steel sdpa [Qwen BF16 D256 GQA] max|Δ|={d}");
 }
 
 /// **GQA-shared-KV decode** parity (#1082). At `q_seq < 16` (decode)

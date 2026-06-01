@@ -21,7 +21,7 @@ use kiln_model::{
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
-use crate::state::{GpuCoordinationLock, RealPrefixCache};
+use crate::state::{GpuCoordinationLock, RealPrefixCache, gpu_coordination_read_guard};
 
 const DEFAULT_ENGINE_CHANNEL: usize = 1024;
 const DEFAULT_RESPONSE_CHANNEL: usize = 64;
@@ -277,10 +277,35 @@ impl RealDecodeForward {
         self
     }
 
+    fn runner_guard(&self) -> Result<std::sync::RwLockReadGuard<'_, ModelRunner>> {
+        self.runner
+            .read()
+            .map_err(|e| anyhow::anyhow!("model runner lock poisoned: {e}"))
+    }
+
+    fn prefix_cache_guard(&self) -> Result<std::sync::MutexGuard<'_, RealPrefixCache>> {
+        self.prefix_cache
+            .lock()
+            .map_err(|e| anyhow::anyhow!("prefix cache lock poisoned: {e}"))
+    }
+
+    fn block_manager_guard(&self) -> Result<std::sync::MutexGuard<'_, BlockManager>> {
+        self.block_manager
+            .lock()
+            .map_err(|e| anyhow::anyhow!("block manager lock poisoned: {e}"))
+    }
+
     fn release_hit(&self, hit_entry_id: Option<u64>) {
         if let Some(entry_id) = hit_entry_id {
-            if let Ok(mut cache) = self.prefix_cache.lock() {
-                cache.release_hit(entry_id);
+            match self.prefix_cache.lock() {
+                Ok(mut cache) => cache.release_hit(entry_id),
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        entry_id,
+                        "prefix cache lock poisoned while releasing a cache hit"
+                    );
+                }
             }
         }
     }
@@ -289,29 +314,38 @@ impl RealDecodeForward {
         &self,
         output: &mut kiln_model::PrefixCachedGenerationOutput,
         adapter: Option<String>,
-    ) {
+    ) -> Result<()> {
         let registration = output.registration.take();
         let extra_registrations = std::mem::take(&mut output.extra_registrations);
         let allocated_blocks = std::mem::take(&mut output.allocated_blocks);
         let mut retained_blocks: Vec<u32> = Vec::new();
         let mut evicted_blocks: Vec<u32> = Vec::new();
-        {
-            let mut cache = self.prefix_cache.lock().unwrap();
-            if let Some(registration) = registration {
-                let outcome = cache.register(adapter.clone(), registration);
-                retained_blocks.extend(outcome.retained_blocks);
-                evicted_blocks.extend(outcome.evicted_blocks);
-            }
-            // Register the extra (block-aligned, strict-prefix-reusable)
-            // entries after the prompt entry so that, when the cache is at
-            // capacity, LRU eviction prefers the older prompt-only entry.
-            // Multi-turn agentic workloads care about these landing — they
-            // are the entries the next turn's prefix lookup will hit on a
-            // length beyond what the bare prompt registration could match.
-            for reg in extra_registrations {
-                let outcome = cache.register(adapter.clone(), reg);
-                retained_blocks.extend(outcome.retained_blocks);
-                evicted_blocks.extend(outcome.evicted_blocks);
+        if registration.is_some() || !extra_registrations.is_empty() {
+            match self.prefix_cache.lock() {
+                Ok(mut cache) => {
+                    if let Some(registration) = registration {
+                        let outcome = cache.register(adapter.clone(), registration);
+                        retained_blocks.extend(outcome.retained_blocks);
+                        evicted_blocks.extend(outcome.evicted_blocks);
+                    }
+                    // Register the extra (block-aligned, strict-prefix-reusable)
+                    // entries after the prompt entry so that, when the cache is at
+                    // capacity, LRU eviction prefers the older prompt-only entry.
+                    // Multi-turn agentic workloads care about these landing — they
+                    // are the entries the next turn's prefix lookup will hit on a
+                    // length beyond what the bare prompt registration could match.
+                    for reg in extra_registrations {
+                        let outcome = cache.register(adapter.clone(), reg);
+                        retained_blocks.extend(outcome.retained_blocks);
+                        evicted_blocks.extend(outcome.evicted_blocks);
+                    }
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        "prefix cache lock poisoned; skipping prefix cache registration"
+                    );
+                }
             }
         }
 
@@ -341,17 +375,14 @@ impl RealDecodeForward {
             blocks_to_free.iter().all(|id| seen.insert(*id))
         });
         if !blocks_to_free.is_empty() {
-            let mut bm_guard = self.block_manager.lock().unwrap();
+            let mut bm_guard = self.block_manager_guard()?;
             bm_guard.free_all(&blocks_to_free);
         }
+        Ok(())
     }
 
     fn grow_ready_decode_slots(&self, slots: &mut [&mut DecodeSlot]) -> Result<()> {
-        let block_size = self
-            .block_manager
-            .lock()
-            .map_err(|e| anyhow::anyhow!("failed to lock block manager: {e}"))?
-            .block_size();
+        let block_size = self.block_manager_guard()?.block_size();
 
         let missing_by_slot: Vec<usize> = slots
             .iter()
@@ -374,10 +405,7 @@ impl RealDecodeForward {
         }
 
         let allocated_blocks = {
-            let mut bm_guard = self
-                .block_manager
-                .lock()
-                .map_err(|e| anyhow::anyhow!("failed to lock block manager: {e}"))?;
+            let mut bm_guard = self.block_manager_guard()?;
             bm_guard
                 .allocate(total_missing)
                 .map_err(|e| anyhow::anyhow!("{e}"))?
@@ -410,9 +438,9 @@ impl DecodeForward for RealDecodeForward {
     }
 
     fn prepare_request(&self, req: &EngineRequest) -> Result<DecodeSlot> {
-        let _gpu_guard = self.gpu_lock.read().unwrap();
+        let _gpu_guard = gpu_coordination_read_guard(&self.gpu_lock);
         let hit = {
-            let mut cache = self.prefix_cache.lock().unwrap();
+            let mut cache = self.prefix_cache_guard()?;
             if cache.is_enabled() {
                 cache.lookup(&req.adapter, &req.prompt_tokens)?
             } else {
@@ -428,9 +456,7 @@ impl DecodeForward for RealDecodeForward {
         });
 
         let prepared = self
-            .runner
-            .read()
-            .unwrap()
+            .runner_guard()?
             .prepare_paged_batched_decode_with_prefix_cache(
                 &req.prompt_tokens,
                 &req.sampling,
@@ -465,7 +491,7 @@ impl DecodeForward for RealDecodeForward {
             collect_ready_decode_indices(slots, sampling, &mut output)?;
 
         if !decode_indices.is_empty() {
-            let _gpu_guard = self.gpu_lock.read().unwrap();
+            let _gpu_guard = gpu_coordination_read_guard(&self.gpu_lock);
             let mut row_refs: Vec<&mut PagedBatchedDecodeState> =
                 Vec::with_capacity(decode_indices.len());
             let mut next_decode_index = decode_indices.iter().copied().peekable();
@@ -496,7 +522,7 @@ impl DecodeForward for RealDecodeForward {
                 row_refs.len(),
                 decode_params.len()
             );
-            let runner_guard = self.runner.read().unwrap();
+            let runner_guard = self.runner_guard()?;
             let next_tokens: Vec<TokenId> = if self.rowwise_decode && row_refs.len() > 1 {
                 // Operator-forced comparison/fallback path: dispatch one
                 // single-row forward per active slot instead of one batched
@@ -534,7 +560,7 @@ impl DecodeForward for RealDecodeForward {
     }
 
     fn is_eos_token(&self, token: TokenId) -> Result<bool> {
-        Ok(self.runner.read().unwrap().is_eos_token(token))
+        Ok(self.runner_guard()?.is_eos_token(token))
     }
 
     fn stop_reason_after_emit(
@@ -543,9 +569,7 @@ impl DecodeForward for RealDecodeForward {
         sampling: &SamplingParams,
     ) -> Result<Option<FinishReason>> {
         if let Some(stop) = self
-            .runner
-            .read()
-            .unwrap()
+            .runner_guard()?
             .stop_sequence_match(generated_tokens, sampling)?
         {
             return Ok(Some(FinishReason::StopSequence(stop)));
@@ -585,13 +609,11 @@ impl DecodeForward for RealDecodeForward {
         };
         self.release_hit(hit_entry_id);
         let mut output = self
-            .runner
-            .read()
-            .unwrap()
+            .runner_guard()?
             .finish_paged_batched_decode(state, finish_reason)?;
         let prefill_duration = output.prefill_duration;
         let decode_duration = output.decode_duration;
-        self.free_uncached_blocks(&mut output, adapter);
+        self.free_uncached_blocks(&mut output, adapter)?;
         Ok(DecodeForwardOutput {
             output: output.output,
             prefill_duration,
@@ -620,7 +642,12 @@ impl DecodeForward for RealDecodeForward {
                 prefill_duration: state.prefill_duration,
                 decode_duration: state.decode_duration,
             };
-            self.free_uncached_blocks(&mut output, adapter);
+            if let Err(err) = self.free_uncached_blocks(&mut output, adapter) {
+                tracing::warn!(
+                    error = %format!("{err:#}"),
+                    "failed to free discarded request blocks"
+                );
+            }
         }
     }
 }

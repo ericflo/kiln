@@ -761,14 +761,18 @@ impl Tensor {
     ///
     /// - CUDA: routes through `cuda_contiguous`, which always allocates
     ///   a fresh device buffer (even for contiguous inputs).
+    /// - Metal: for contiguous tensors, copies the addressed UMA byte
+    ///   range into a fresh Shared-mode buffer; other layouts use the
+    ///   logical host-image fallback.
     /// - CPU: rebuilds a fresh [`crate::CpuStorage`] from the
     ///   materialized row-major bytes.
-    /// - Metal / Vulkan: not yet implemented (errors) — no `copy` call
-    ///   site reaches those backends today (#1082).
+    /// - Vulkan: not yet implemented (errors).
     pub fn copy(&self) -> Result<Self> {
         match self.device() {
             #[cfg(feature = "cuda")]
             Device::Cuda(_) => crate::cuda_storage::cuda_contiguous(self),
+            #[cfg(feature = "metal")]
+            Device::Metal(_) => crate::metal_deep_copy(self),
             Device::Cpu => {
                 // Materialize a contiguous CPU view, then rebuild fresh
                 // storage from its addressable bytes so the result never

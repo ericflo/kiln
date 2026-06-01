@@ -5016,80 +5016,29 @@ impl LinearAttentionState {
     }
 }
 
-/// #1082 forward-flip loader bridge: the `Gpu*Weights` fields are now
-/// `kiln_tensor::Tensor` (the bare `Tensor` alias). The loader still
-/// reads candle safetensors and builds candle tensors leaf-by-leaf, so
-/// each leaf builds a `candle_core::Tensor` and copy-bridges it into a
-/// kt tensor here. CUDA-only: the copy bridge requires a CUDA device.
-/// The non-CUDA loader device branches (Metal stub / Vulkan / CPU) are
-/// type-checked on a CUDA build but error at runtime — production is
-/// CUDA (A6000); non-CUDA loader paths are an iteration-2 concern.
-// #1082: un-stubbed for no-CUDA. `kt_tensor_from_candle_cuda_copy` now has a
-// no-CUDA CPU host variant, so this loader bridge works on any build (candle is
-// a hard dep of kiln-model). The CPU/Metal loader paths previously bailed
-// "requires the cuda feature" and broke the no-CUDA `cargo test` runtime.
-#[cfg(any(not(feature = "cuda"), feature = "metal"))]
-fn candle_weight_to_kt(t: &candle_core::Tensor) -> Result<Tensor> {
-    let contig = t
-        .contiguous()
-        .context("candle_weight_to_kt: contiguous")?;
-    kiln_kt_bridge::kt_tensor_from_candle_cuda_copy(&contig)
-        .map_err(|e| anyhow::anyhow!("candle_weight_to_kt copy bridge: {e}"))
-}
-
-/// Resolve the candle device the loader builds its intermediate candle
-/// tensors on, from the kt `Device` passed through the loader. (#1082)
-/// Unconditional: `candle_device_from_kt` is a pure enum mapping with no
-/// CUDA toolchain dependency, so the loader's Metal path needs it on the
-/// non-cuda build too.
-///
-/// Vulkan special case (#1082 Vulkan loader fix): a kt `Device::Vulkan(_)`
-/// has *no* candle equivalent — candle has no Vulkan backend. But the
-/// Vulkan loader never wants candle tensors on a real device: on a
-/// non-CUDA build `kt_tensor_from_candle_cuda_copy` always produces a kt
-/// *CPU* tensor (a host copy), and the `vk::Device` backend uploads those
-/// host bytes into its own buffer cache (keyed on `TensorId`) lazily at
-/// first use. So the loader's candle *intermediate* must be built on
-/// candle CPU. Mapping Vulkan→Cpu here is what makes the Vulkan weight
-/// upload path (`weight_to_tensor` / `weight_to_transposed_tensor_2d`)
-/// actually run instead of erroring with "no candle equivalent" — the
-/// regression the candle→kt forward-flip introduced and that no CUDA/Metal
-/// CI could catch.
-#[cfg(any(not(feature = "cuda"), feature = "metal"))]
-fn loader_candle_device(device: &Device) -> Result<candle_core::Device> {
-    if matches!(device, Device::Vulkan(_)) {
-        return Ok(candle_core::Device::Cpu);
-    }
-    kiln_kt_bridge::candle_device_from_kt(device).map_err(|e| anyhow::anyhow!("{e}"))
-}
-
 /// Convert a `WeightTensor` (raw bytes + shape + dtype) to a kt `Tensor` on `device`.
 ///
 /// CUDA (#1082): kt-native — raw weight bytes upload straight into a kt CUDA
 /// tensor via `Tensor::from_raw_bytes_on`, dropping the candle `from_raw_buffer`
 /// leaf AND the subsequent device→device bridge copy the old path paid per
-/// weight (`candle_weight_to_kt`). One host→device H2D, no candle, no extra
+/// weight bridge. One host→device H2D, no candle, no extra
 /// copy — a load-time win on the dominant loader entry.
 ///
-/// Non-CUDA (Metal / CPU): unchanged candle leaf + copy-bridge. The pure-kt
-/// Metal loader is a follow-up (`Tensor::from_raw_bytes_on` errors on a Metal
-/// device today), so this path is byte-identical to the prior behavior.
+/// Non-CUDA (Metal / CPU): kt-native raw byte construction. Metal uploads via
+/// `Tensor::from_raw_bytes_on`, so the loader no longer creates a CPU/Candle
+/// tensor and bridges it after the fact.
 #[cfg(feature = "cuda")]
 fn weight_to_tensor(w: &WeightTensor, device: &Device) -> Result<Tensor> {
     Tensor::from_raw_bytes_on(*device, weight_dtype(w), w.as_bytes().to_vec(), w.shape.clone())
         .map_err(|e| anyhow::anyhow!("weight_to_tensor (kt-native CUDA load): {e}"))
 }
 
-/// Non-CUDA sibling of [`weight_to_tensor`]: builds a candle leaf then
-/// copy-bridges to kt (#1082 forward-flip). Kept for the Metal loader path.
-// #1082: un-stubbed for no-CUDA (see `candle_weight_to_kt`).
+/// Non-CUDA sibling of [`weight_to_tensor`]: builds the kt tensor directly on
+/// the requested device.
 #[cfg(not(feature = "cuda"))]
 fn weight_to_tensor(w: &WeightTensor, device: &Device) -> Result<Tensor> {
-    let dtype = weight_dtype_candle(w);
-    let cdev = loader_candle_device(device)?;
-    let t = candle_core::Tensor::from_raw_buffer(w.as_bytes(), dtype, &w.shape, &cdev)
-        .context("failed to create tensor from raw buffer")?;
-    candle_weight_to_kt(&t)
+    Tensor::from_raw_bytes_on(*device, weight_dtype(w), w.as_bytes().to_vec(), w.shape.clone())
+        .map_err(|e| anyhow::anyhow!("weight_to_tensor (kt-native load): {e}"))
 }
 
 fn weight_dtype(w: &WeightTensor) -> DType {
@@ -5097,20 +5046,6 @@ fn weight_dtype(w: &WeightTensor) -> DType {
         TensorDType::F16 => DType::F16,
         TensorDType::BF16 => DType::BF16,
         TensorDType::F32 => DType::F32,
-    }
-}
-
-/// candle-typed sibling of [`weight_dtype`] for the loader's candle
-/// intermediates (the `Gpu*Weights` fields are kt, but the loader still
-/// constructs candle tensors before copy-bridging). (#1082)
-/// Unconditional: pure `TensorDType`→`candle_core::DType` map, no cuda dep;
-/// the loader's Metal path needs it on the non-cuda build too.
-#[cfg(any(not(feature = "cuda"), feature = "metal"))]
-fn weight_dtype_candle(w: &WeightTensor) -> candle_core::DType {
-    match w.dtype {
-        TensorDType::F16 => candle_core::DType::F16,
-        TensorDType::BF16 => candle_core::DType::BF16,
-        TensorDType::F32 => candle_core::DType::F32,
     }
 }
 
@@ -5278,11 +5213,11 @@ pub(crate) fn transposed_weight_bytes_2d(w: &WeightTensor) -> Result<(Vec<u8>, [
     Ok((out, [cols, rows]))
 }
 
-// #1082: un-stubbed for no-CUDA (see `candle_weight_to_kt`).
 /// CUDA (#1082): kt-native — the cached transposed weight bytes upload straight
 /// into a kt CUDA tensor via `Tensor::from_raw_bytes_on`, dropping the candle
 /// `from_raw_buffer` leaf + the device→device bridge copy (same win as
-/// [`weight_to_tensor`], on the projection-weight loader entry).
+/// [`weight_to_tensor`], on the projection-weight loader entry). Metal/CPU use
+/// the same kt-native raw byte path.
 #[cfg(feature = "cuda")]
 fn weight_to_transposed_tensor_2d(w: &WeightTensor, device: &Device) -> Result<Tensor> {
     let data = transposed_weight_bytes_2d_cached_bytes(w)?;
@@ -5295,19 +5230,17 @@ fn weight_to_transposed_tensor_2d(w: &WeightTensor, device: &Device) -> Result<T
     .map_err(|e| anyhow::anyhow!("weight_to_transposed_tensor_2d (kt-native CUDA load): {e}"))
 }
 
-/// Non-CUDA sibling: candle leaf + copy-bridge (kept for the Metal loader path).
+/// Non-CUDA sibling: upload the cached transposed bytes directly through kt.
 #[cfg(not(feature = "cuda"))]
 fn weight_to_transposed_tensor_2d(w: &WeightTensor, device: &Device) -> Result<Tensor> {
     let data = transposed_weight_bytes_2d_cached_bytes(w)?;
-    let cdev = loader_candle_device(device)?;
-    let t = candle_core::Tensor::from_raw_buffer(
-        data.as_bytes(),
-        weight_dtype_candle(w),
-        &data.shape(),
-        &cdev,
+    Tensor::from_raw_bytes_on(
+        *device,
+        weight_dtype(w),
+        data.as_bytes().to_vec(),
+        data.shape().to_vec(),
     )
-    .context("failed to create transposed tensor from raw buffer")?;
-    candle_weight_to_kt(&t)
+    .map_err(|e| anyhow::anyhow!("weight_to_transposed_tensor_2d (kt-native load): {e}"))
 }
 
 fn cached_transpose_for_weight(
@@ -5504,13 +5437,9 @@ fn projection_tensors_for_load_batch(
     device: &Device,
     cache: &ProjectionLoadCache,
 ) -> Result<Vec<(Tensor, Tensor)>> {
-    // Metal-only parallel fast-path. It builds a candle leaf per weight then
-    // copy-bridges to kt, so it is gated to the `metal` build (#1082 DoD-100):
-    // the candle helpers it calls (`loader_candle_device` / `weight_dtype_candle`
-    // / `candle_weight_to_kt`) are NOT compiled into a pure-CUDA build, which is
-    // why this whole block is `cfg(metal)`. Every other device (incl. all of
-    // CUDA, where `device` is never Metal) falls through to the serial
-    // kt-native path below. (Pure-Metal kt loader = iteration-2 concern.)
+    // Metal-only parallel fast path. It pre-transposes the raw weight bytes in
+    // parallel and uploads them straight into kt Metal tensors. Every other
+    // device falls through to the serial kt-native path below.
     #[cfg(feature = "metal")]
     if matches!(device, Device::Metal(_)) && !parallel_projection_load_disabled() {
         use rayon::prelude::*;
@@ -5529,16 +5458,13 @@ fn projection_tensors_for_load_batch(
             .into_par_iter()
             .zip(weights.par_iter())
             .map(|(data, (name, w))| {
-                let cdev = loader_candle_device(&device)?;
-                let transposed_candle = candle_core::Tensor::from_raw_buffer(
-                    data.as_bytes(),
-                    weight_dtype_candle(w),
-                    &data.shape(),
-                    &cdev,
+                let transposed = Tensor::from_raw_bytes_on(
+                    device,
+                    weight_dtype(w),
+                    data.as_bytes().to_vec(),
+                    data.shape().to_vec(),
                 )
                 .with_context(|| format!("{name} transposed projection upload"))?;
-                let transposed = candle_weight_to_kt(&transposed_candle)
-                    .with_context(|| format!("{name} transposed projection kt bridge"))?;
                 let original_stub = match cache.stub_for(weight_dtype(w)) {
                     Some(stub) => stub,
                     None => dropped_weight_stub(w, &device)
@@ -19318,31 +19244,17 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
         if !kv_write_done {
             // #1082: `PagedKvCacheKt::write_token_major_native_batch` takes kt
             // tensors; `k`/`v` are already kt, so pass them with no candle bridge.
-            // (#1082 all-hardware) The native batch writer is a CUDA-kernel
-            // method (`paged_kv_write_token_major_bf16_batch_slot_kt` / `slice_set`)
-            // and is `#[cfg(feature = "cuda")]`. The Vulkan backend never reaches
-            // this generic batched-contiguous path at runtime (it uses the
-            // resident-decode `VkPagedKvCache` path), so the non-CUDA arm bails
-            // explicitly rather than mis-writing.
-            #[cfg(feature = "cuda")]
-            {
-                if !paged_cache.write_token_major_native_batch(
-                    full_attn_layer_idx,
-                    block_tables,
-                    start_positions,
-                    &k,
-                    &v,
-                )? {
-                    anyhow::bail!("batched contiguous paged attention KV write declined");
-                }
-            }
-            #[cfg(not(feature = "cuda"))]
-            {
-                let _ = (&paged_cache, full_attn_layer_idx, block_tables, start_positions, &k, &v);
-                anyhow::bail!(
-                    "batched contiguous paged-KV write is CUDA-only; the Vulkan backend \
-                     uses the resident-decode path (VkPagedKvCache), not PagedKvCacheKt"
-                );
+            // CUDA uses its host-slot writer; Metal uses its batched token-major
+            // kernel; unsupported native BF16 placements fall back inside the
+            // cache writer to the generic kt head-major scatter.
+            if !paged_cache.write_token_major_native_batch(
+                full_attn_layer_idx,
+                block_tables,
+                start_positions,
+                &k,
+                &v,
+            )? {
+                anyhow::bail!("batched contiguous paged attention KV write declined");
             }
         }
         finish_full_attn_stage_profile(
@@ -28374,6 +28286,26 @@ mod tests {
     }
 
     #[cfg(feature = "metal")]
+    fn write_token_major_prefix_for_test(
+        cache: &mut crate::PagedKvCacheKt,
+        layer_idx: usize,
+        block_table: &BlockTable,
+        start_pos: usize,
+        k: &Tensor,
+        v: &Tensor,
+    ) -> Result<()> {
+        let k_head_major = k.transpose(1, 2)?.contiguous()?;
+        let v_head_major = v.transpose(1, 2)?.contiguous()?;
+        cache.write(
+            layer_idx,
+            block_table,
+            start_pos,
+            &k_head_major,
+            &v_head_major,
+        )
+    }
+
+    #[cfg(feature = "metal")]
     #[test]
     fn test_gqa_attention_paged_decode_contiguous_batch_matches_rowwise_metal() -> Result<()> {
         let Some(device) = crate::backend::metal::try_new_metal() else {
@@ -28421,7 +28353,14 @@ mod tests {
         for (row, block_table) in block_tables.iter().enumerate() {
             let row_k = prefix_k.narrow(0, row, 1)?.contiguous()?;
             let row_v = prefix_v.narrow(0, row, 1)?.contiguous()?;
-            assert!(batch_cache.write_token_major_native(0, block_table, 0, &row_k, &row_v)?);
+            write_token_major_prefix_for_test(
+                &mut batch_cache,
+                0,
+                block_table,
+                0,
+                &row_k,
+                &row_v,
+            )?;
         }
 
         let batched = gqa_attention_paged_decode_contiguous_batch(
@@ -28465,7 +28404,14 @@ mod tests {
             let row_table = BlockTable { blocks: vec![0] };
             let row_k = prefix_k.narrow(0, row, 1)?.contiguous()?;
             let row_v = prefix_v.narrow(0, row, 1)?.contiguous()?;
-            assert!(row_cache.write_token_major_native(0, &row_table, 0, &row_k, &row_v)?);
+            write_token_major_prefix_for_test(
+                &mut row_cache,
+                0,
+                &row_table,
+                0,
+                &row_k,
+                &row_v,
+            )?;
             let row_x = x.narrow(0, row, 1)?.contiguous()?;
             let rowwise = gqa_attention_paged(
                 &*backend,
@@ -28586,7 +28532,14 @@ mod tests {
         for (row, block_table) in block_tables.iter().enumerate() {
             let row_k = prefix_k.narrow(0, row, 1)?.contiguous()?;
             let row_v = prefix_v.narrow(0, row, 1)?.contiguous()?;
-            assert!(batch_cache.write_token_major_native(0, block_table, 0, &row_k, &row_v)?);
+            write_token_major_prefix_for_test(
+                &mut batch_cache,
+                0,
+                block_table,
+                0,
+                &row_k,
+                &row_v,
+            )?;
         }
 
         let batched = transformer_block_paged_decode_contiguous_batch(
@@ -28626,7 +28579,14 @@ mod tests {
             let row_table = BlockTable { blocks: vec![0] };
             let row_k = prefix_k.narrow(0, row, 1)?.contiguous()?;
             let row_v = prefix_v.narrow(0, row, 1)?.contiguous()?;
-            assert!(row_cache.write_token_major_native(0, &row_table, 0, &row_k, &row_v)?);
+            write_token_major_prefix_for_test(
+                &mut row_cache,
+                0,
+                &row_table,
+                0,
+                &row_k,
+                &row_v,
+            )?;
             let row_x = x.narrow(0, row, 1)?.contiguous()?;
             let rowwise = transformer_block_paged(
                 &*backend,
@@ -28744,7 +28704,14 @@ mod tests {
         for (row, block_table) in block_tables.iter().enumerate() {
             let row_k = prefix_k.narrow(0, row, 1)?.contiguous()?;
             let row_v = prefix_v.narrow(0, row, 1)?.contiguous()?;
-            assert!(batch_cache.write_token_major_native(0, block_table, 0, &row_k, &row_v)?);
+            write_token_major_prefix_for_test(
+                &mut batch_cache,
+                0,
+                block_table,
+                0,
+                &row_k,
+                &row_v,
+            )?;
         }
 
         let batched = model_forward_paged_decode_contiguous_batch(
@@ -28775,7 +28742,14 @@ mod tests {
             let row_table = BlockTable { blocks: vec![0] };
             let row_k = prefix_k.narrow(0, row, 1)?.contiguous()?;
             let row_v = prefix_v.narrow(0, row, 1)?.contiguous()?;
-            assert!(row_cache.write_token_major_native(0, &row_table, 0, &row_k, &row_v)?);
+            write_token_major_prefix_for_test(
+                &mut row_cache,
+                0,
+                &row_table,
+                0,
+                &row_k,
+                &row_v,
+            )?;
             let rowwise = model_forward_paged(
                 &*backend,
                 &token_ids[row..row + 1],
@@ -29481,7 +29455,14 @@ mod tests {
         for (row, block_table) in block_tables.iter().enumerate() {
             let row_k = prefix_k.narrow(0, row, 1)?.contiguous()?;
             let row_v = prefix_v.narrow(0, row, 1)?.contiguous()?;
-            assert!(batch_cache.write_token_major_native(0, block_table, 0, &row_k, &row_v)?);
+            write_token_major_prefix_for_test(
+                &mut batch_cache,
+                0,
+                block_table,
+                0,
+                &row_k,
+                &row_v,
+            )?;
         }
 
         let mut row_states = Vec::with_capacity(batch);
@@ -29518,7 +29499,14 @@ mod tests {
             let row_table = BlockTable { blocks: vec![0] };
             let row_k = prefix_k.narrow(0, row, 1)?.contiguous()?;
             let row_v = prefix_v.narrow(0, row, 1)?.contiguous()?;
-            assert!(row_cache.write_token_major_native(0, &row_table, 0, &row_k, &row_v)?);
+            write_token_major_prefix_for_test(
+                &mut row_cache,
+                0,
+                &row_table,
+                0,
+                &row_k,
+                &row_v,
+            )?;
             let rowwise = model_forward_paged(
                 &*backend,
                 &token_ids[row..row + 1],
@@ -30088,7 +30076,7 @@ mod tests {
             source: None,
         };
 
-        let direct = weight_to_transposed_tensor_2d(&wt, &device)?.to_device(&cpu)?;
+        let direct = weight_to_transposed_tensor_2d(&wt, &device)?.to_device(cpu)?;
         let baseline = cached_transpose(&weight_to_tensor(&wt, &cpu)?)?;
 
         assert!(direct.is_contiguous());
@@ -30887,7 +30875,7 @@ mod tests {
             None,
         )?;
 
-        let metal_backend = crate::backend::for_device(&metal_device);
+        let metal_backend = crate::backend::for_device_kt(&metal_device);
         let mut metal_linear = LinearAttentionState::new(&config, &metal_device)?;
         let logits_metal = model_forward_kt(
             &*metal_backend,
@@ -30903,7 +30891,7 @@ mod tests {
 
         let cpu_flat = logits_cpu.flatten_all()?.to_vec1::<f32>()?;
         let metal_flat = logits_metal
-            .to_device(&cpu_device)?
+            .to_device(cpu_device)?
             .flatten_all()?
             .to_vec1::<f32>()?;
 

@@ -30,7 +30,7 @@ use uuid::Uuid;
 
 use crate::api::completions::{Message, encode_prompt_tokens, render_prompt_text};
 use crate::batching_engine::{EngineEvent, EngineRequest};
-use crate::state::{AppState, ModelBackend};
+use crate::state::{AppState, ModelBackend, gpu_coordination_read_guard};
 
 /// Result of a single generation call — what the executor needs to score
 /// the example and record cost metadata.
@@ -269,7 +269,7 @@ impl EvalGenerator for LiveEvalGenerator {
             // is `!Send` and can't cross an await).
             let active_adapter = state.active_adapter_name.read().unwrap().clone();
             let enqueue_fut = {
-                let _gpu_guard = state.gpu_lock.read().unwrap();
+                let _gpu_guard = gpu_coordination_read_guard(&state.gpu_lock);
                 batching_engine.enqueue(EngineRequest {
                     request_id,
                     prompt_tokens: prompt_tokens.clone(),

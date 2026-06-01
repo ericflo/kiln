@@ -19,7 +19,7 @@ use serde::Serialize;
 
 use crate::metrics::{TrainingMetricStatus, TrainingMetricType};
 use crate::recent_requests::now_unix_ms;
-use crate::state::{AppState, ModelBackend, TrainingJobType};
+use crate::state::{AppState, ModelBackend, TrainingJobType, gpu_coordination_write_guard};
 use crate::training_history;
 
 /// Mark the tracked job terminal (Completed / Failed), stamp `finished_at`
@@ -2160,7 +2160,7 @@ fn execute_job(state: AppState, entry: QueueEntry) {
                 request_body,
                 base_model: base_model.clone(),
             };
-            let _gpu_guard = state.gpu_lock.write().unwrap();
+            let _gpu_guard = gpu_coordination_write_guard(&state.gpu_lock);
             let guard = runner_arc.read().unwrap();
             let backend_name = guard.backend_name();
             // Native CUDA/Vulkan training keeps forward intermediates and
@@ -2195,7 +2195,7 @@ fn execute_job(state: AppState, entry: QueueEntry) {
                 request_body,
                 base_model: base_model.clone(),
             };
-            let _gpu_guard = state.gpu_lock.write().unwrap();
+            let _gpu_guard = gpu_coordination_write_guard(&state.gpu_lock);
             let guard = runner_arc.read().unwrap();
             let backend_name = guard.backend_name();
             let cuda_native = native_training_env_enabled("KILN_CUDA_NATIVE_TRAINING");
@@ -2218,7 +2218,7 @@ fn execute_job(state: AppState, entry: QueueEntry) {
             if req.config.checkpoint_interval.is_none() {
                 req.config.checkpoint_interval = server_checkpoint_interval;
             }
-            let _gpu_guard = state.gpu_lock.write().unwrap();
+            let _gpu_guard = gpu_coordination_write_guard(&state.gpu_lock);
             let guard = runner_arc.read().unwrap();
             let backend_name = guard.backend_name();
             let vk_native = vk_native_opd_enabled(backend_name);
@@ -2236,7 +2236,7 @@ fn execute_job(state: AppState, entry: QueueEntry) {
             )
         }
         QueuedJob::DistillRefresh(req) => {
-            let _gpu_guard = state.gpu_lock.write().unwrap();
+            let _gpu_guard = gpu_coordination_write_guard(&state.gpu_lock);
             let guard = runner_arc.read().unwrap();
             run_distill_refresh(
                 &req,
@@ -2251,7 +2251,7 @@ fn execute_job(state: AppState, entry: QueueEntry) {
             )
         }
         QueuedJob::DistillMerge(req) => {
-            let _gpu_guard = state.gpu_lock.write().unwrap();
+            let _gpu_guard = gpu_coordination_write_guard(&state.gpu_lock);
             let guard = runner_arc.read().unwrap();
             run_distill_merge(
                 &req,
@@ -2265,7 +2265,7 @@ fn execute_job(state: AppState, entry: QueueEntry) {
             )
         }
         QueuedJob::DistillPump(req) => {
-            let _gpu_guard = state.gpu_lock.write().unwrap();
+            let _gpu_guard = gpu_coordination_write_guard(&state.gpu_lock);
             let guard = runner_arc.read().unwrap();
             run_distill_pump(
                 &req,
@@ -2280,7 +2280,7 @@ fn execute_job(state: AppState, entry: QueueEntry) {
             )
         }
         QueuedJob::DistillSelf(req) => {
-            let _gpu_guard = state.gpu_lock.write().unwrap();
+            let _gpu_guard = gpu_coordination_write_guard(&state.gpu_lock);
             let guard = runner_arc.read().unwrap();
             run_distill_self(
                 &req,

@@ -42,19 +42,9 @@
 // `kiln_vulkan_kernel::VkPagedKvCache`), mirroring how the deleted candle
 // `PagedKvCache` held CPU-resident tensors for the Vulkan backend.
 //
-// The KV **write/read kernel methods** (`write*`, `read`,
-// `write_token_major_native*`, `write_contiguous_slot_run`) are
-// fundamentally CUDA constructs: they scatter via the
-// `kiln_flash_attn::paged_kv_write_token_major_bf16*_kt` device kernels,
-// gather via `cuda_index_select_dim0`, quantize via `cuda_fp8_*_direct`, and
-// mutate the Arc-shared pool storage in place via `slice_set` (which kt only
-// implements for CUDA — see `kiln_tensor::Tensor::slice_set`, "CUDA only: kt
-// storage is Arc-shared with no RwLock, so a safe CPU in-place write isn't
-// expressible here"). They are therefore `#[cfg(feature = "cuda")]`. On the
-// Vulkan/CPU build the generic CPU-paged attention fallback that would have
-// called them is never reached at runtime (the resident-decode path runs
-// instead); the un-cuda call sites in `forward.rs` are gated to bail with a
-// clear error rather than silently mis-write.
+// The CUDA graph and FP8 KV methods remain CUDA-only. Native BF16 writes and
+// reads are device-parametric kt paths now; Metal also has a batched decode
+// writer wired through `backend::metal`.
 use anyhow::Result;
 #[cfg(feature = "cuda")]
 use anyhow::Context;
@@ -576,37 +566,26 @@ impl PagedKvCacheKt {
                 .map_err(|e| anyhow::anyhow!("kt pkv read: narrow v: {e}"))?;
             (k, v)
         } else {
-            // Gather path — build u32 indices on host, upload via
-            // candle, wrap as kt-Tensor, call cuda_index_select_dim0.
+            // Gather path: build the slot indices directly on the pool
+            // device so `index_select` can stay backend-local. Metal in
+            // particular requires the index tensor to be Metal-resident;
+            // using a CPU index against Metal K/V pools trips dispatch2's
+            // mixed-device guard before its Metal gather kernel can run.
             let mut idx_data: Vec<u32> = Vec::with_capacity(seq_len);
             for pos in 0..seq_len {
                 let slot = block_table.slot_for(pos, self.block_size).ok_or_else(|| {
                     anyhow::anyhow!("kt pkv read: no slot for position {pos} in block table")
                 })?;
-                let slot_u32 = u32::try_from(slot).map_err(|_| {
-                    anyhow::anyhow!("kt pkv read: slot {slot} exceeds u32")
-                })?;
+                let slot_u32 = u32::try_from(slot)
+                    .map_err(|_| anyhow::anyhow!("kt pkv read: slot {slot} exceeds u32"))?;
                 idx_data.push(slot_u32);
             }
 
-            // Build the indices on the pool's device, then gather via the
-            // device-agnostic `index_select`. (#1082 DoD-100: was a CUDA-only
-            // `host_to_cuda_copy_ctx` + `cuda_index_select_dim0`; only the index
-            // H2D is CUDA-specific now, so the gather runs on CPU too.)
-            let kt_indices_cpu = kiln_tensor::Tensor::from_slice(
-                idx_data.as_slice(),
-                vec![idx_data.len()],
-            )
-            .map_err(|e| anyhow::anyhow!("kt pkv read: build indices cpu: {e}"))?;
-            let kt_indices = match k_pool.device() {
-                #[cfg(feature = "cuda")]
-                kiln_tensor::Device::Cuda(i) => {
-                    kiln_tensor::host_to_cuda_copy_ctx(&kt_indices_cpu, i)
-                        .map_err(|e| anyhow::anyhow!("kt pkv read: H2D indices: {e}"))?
-                }
-                // CPU (and any non-CUDA device): indices already co-located.
-                _ => kt_indices_cpu,
-            };
+            let kt_indices =
+                kiln_tensor::Tensor::from_vec_on(k_pool.device(), idx_data, vec![seq_len])
+                    .map_err(|e| {
+                        anyhow::anyhow!("kt pkv read: build indices on {}: {e}", k_pool.device())
+                    })?;
             let k = k_pool
                 .index_select(&kt_indices, 0)
                 .map_err(|e| anyhow::anyhow!("kt pkv read: index_select k_pool: {e}"))?;
@@ -806,16 +785,13 @@ impl PagedKvCacheKt {
     /// - `start_positions`: absolute write position for each batch row
     /// - `k`, `v`: `[batch, 1, num_kv_heads, head_dim]` BF16
     ///
-    /// Returns `Ok(false)` when the cache is FP8-backed so callers can
-    /// fall back to [`Self::write`].
+    /// Returns `Ok(false)` when the cache is FP8-backed so callers can decide
+    /// whether to fall back.
     ///
-    /// LIVE prod path (forward.rs batched contiguous paged decode). The
-    /// candle version's Metal branch is dropped here — this twin is
-    /// CUDA-only — so the implementation is the per-row loop: each row
-    /// is squeezed to `[1, 1, num_kv_heads, head_dim]` and handed to
-    /// [`Self::write_token_major_native`], which uses the BF16 host-slot
-    /// CUDA kernel.
-    #[cfg(feature = "cuda")]
+    /// LIVE prod path (forward.rs batched contiguous paged decode). CUDA keeps
+    /// the per-row host-slot kernel path. Metal routes through the existing
+    /// batched token-major writer kernel. Other native BF16 placements fall
+    /// back to the generic head-major kt writer.
     pub fn write_token_major_native_batch(
         &self,
         layer_idx: usize,
@@ -844,11 +820,81 @@ impl PagedKvCacheKt {
             "batched token-major KV write metadata length mismatch"
         );
 
-        // Validate every row resolves to a slot up front (parity with the
-        // candle path's `contiguous_slot_run_starts` precheck), then write
-        // each row through the host-slot kernel.
-        if contiguous_slot_run_starts(block_tables, self.block_size, start_positions, 1).is_none() {
-            anyhow::bail!("batched token-major KV write slot lookup failed");
+        let mut slots = Vec::with_capacity(batch);
+        for idx in 0..batch {
+            let slot = block_tables[idx]
+                .slot_for(start_positions[idx], self.block_size)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("batched token-major KV write slot lookup failed for row {idx}")
+                })?;
+            let slot_u32 = u32::try_from(slot).map_err(|_| {
+                anyhow::anyhow!("batched token-major KV write slot {slot} exceeds u32")
+            })?;
+            slots.push(slot_u32);
+        }
+
+        #[cfg(feature = "metal")]
+        if matches!(k.device(), kiln_tensor::Device::Metal(_)) {
+            let (k_pool, v_pool) = &self.layers[layer_idx];
+            let slots_tensor = KtTensor::from_vec_on(k.device(), slots, vec![batch])
+                .map_err(|e| anyhow::anyhow!("kt pkv metal batch: build slots: {e}"))?;
+            let k_c = k
+                .contiguous()
+                .map_err(|e| anyhow::anyhow!("kt pkv metal batch: contiguous k: {e}"))?;
+            let v_c = v
+                .contiguous()
+                .map_err(|e| anyhow::anyhow!("kt pkv metal batch: contiguous v: {e}"))?;
+            if crate::backend::metal::metal_paged_kv_write_token_major_batch_supports(
+                k_pool,
+                v_pool,
+                &slots_tensor,
+                &k_c,
+                &v_c,
+            ) {
+                crate::backend::metal::metal_paged_kv_write_token_major_batch_bf16(
+                    k_pool,
+                    v_pool,
+                    &slots_tensor,
+                    &k_c,
+                    &v_c,
+                )
+                .map_err(|e| anyhow::anyhow!("kt pkv metal batch write: {e}"))?;
+                return Ok(true);
+            }
+        }
+
+        #[cfg(feature = "cuda")]
+        if matches!(k.device(), kiln_tensor::Device::Cuda(_)) {
+            // Validate every row resolves to a slot up front (parity with the
+            // candle path's `contiguous_slot_run_starts` precheck), then write
+            // each row through the host-slot kernel.
+            if contiguous_slot_run_starts(block_tables, self.block_size, start_positions, 1)
+                .is_none()
+            {
+                anyhow::bail!("batched token-major KV write slot lookup failed");
+            }
+
+            for idx in 0..batch {
+                let k_row = k
+                    .narrow(0, idx, 1)
+                    .map_err(|e| anyhow::anyhow!("kt pkv batch: narrow k row {idx}: {e}"))?
+                    .contiguous()
+                    .map_err(|e| anyhow::anyhow!("kt pkv batch: contiguous k row {idx}: {e}"))?;
+                let v_row = v
+                    .narrow(0, idx, 1)
+                    .map_err(|e| anyhow::anyhow!("kt pkv batch: narrow v row {idx}: {e}"))?
+                    .contiguous()
+                    .map_err(|e| anyhow::anyhow!("kt pkv batch: contiguous v row {idx}: {e}"))?;
+                self.write_token_major_native(
+                    layer_idx,
+                    block_tables[idx],
+                    start_positions[idx],
+                    &k_row,
+                    &v_row,
+                )?;
+            }
+
+            return Ok(true);
         }
 
         for idx in 0..batch {
@@ -862,12 +908,22 @@ impl PagedKvCacheKt {
                 .map_err(|e| anyhow::anyhow!("kt pkv batch: narrow v row {idx}: {e}"))?
                 .contiguous()
                 .map_err(|e| anyhow::anyhow!("kt pkv batch: contiguous v row {idx}: {e}"))?;
-            self.write_token_major_native(
+            let k_head = k_row
+                .transpose(1, 2)
+                .map_err(|e| anyhow::anyhow!("kt pkv batch: transpose k row {idx}: {e}"))?
+                .contiguous()
+                .map_err(|e| anyhow::anyhow!("kt pkv batch: contiguous k head row {idx}: {e}"))?;
+            let v_head = v_row
+                .transpose(1, 2)
+                .map_err(|e| anyhow::anyhow!("kt pkv batch: transpose v row {idx}: {e}"))?
+                .contiguous()
+                .map_err(|e| anyhow::anyhow!("kt pkv batch: contiguous v head row {idx}: {e}"))?;
+            self.write(
                 layer_idx,
                 block_tables[idx],
                 start_positions[idx],
-                &k_row,
-                &v_row,
+                &k_head,
+                &v_head,
             )?;
         }
 

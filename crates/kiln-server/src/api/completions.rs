@@ -41,6 +41,7 @@ use crate::state::{
     DeterministicCompletionCacheClaim, DeterministicCompletionCacheKey,
     DeterministicCompletionCacheProbe, DeterministicCompletionCacheValue,
     DeterministicCompletionInFlightState, ModelBackend, RealPrefixCache,
+    gpu_coordination_read_guard,
 };
 
 /// Max characters retained in the prompt preview for the recent-requests panel.
@@ -3613,7 +3614,7 @@ async fn real_prompt_logprobs(
     let gpu_lock = state.gpu_lock.clone();
     let timeout = state.request_timeout;
     let handle = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<Vec<f32>>> {
-        let _gpu_guard = gpu_lock.read().unwrap();
+        let _gpu_guard = gpu_coordination_read_guard(&gpu_lock);
         let runner_guard = runner.read().unwrap();
         // #1082 candle-drop: candle `model_forward` was removed; route through
         // the kt-native `model_forward_kt`, which returns a kt
@@ -5241,7 +5242,7 @@ async fn generate_real(
     let generation = tokio::task::spawn_blocking(move || {
         // Acquire GPU coordination read lock — allows concurrent inference,
         // but blocks while training holds the write lock.
-        let _gpu_guard = gpu_lock.read().unwrap();
+        let _gpu_guard = gpu_coordination_read_guard(&gpu_lock);
         let runner_guard = runner.read().unwrap();
         match speculative_mode {
             ResolvedSpeculativeMode::Off => {
@@ -5714,7 +5715,7 @@ async fn generate_real_streaming(
                     // instead of buffering everything until generation is
                     // done.
                     match tokio::task::spawn_blocking(move || {
-                        let _gpu_guard = gpu_lock.read().unwrap();
+                        let _gpu_guard = gpu_coordination_read_guard(&gpu_lock);
                         let prefix_enabled = {
                             let cache = prefix_cache.lock().unwrap();
                             cache.is_enabled()
@@ -5880,7 +5881,7 @@ async fn generate_real_streaming(
                 ResolvedSpeculativeMode::SkipLayer(spec_config) => {
                     let prefix_cache_diagnostic = prefix_cache_diagnostic.clone();
                     match tokio::task::spawn_blocking(move || {
-                        let _gpu_guard = gpu_lock.read().unwrap();
+                        let _gpu_guard = gpu_coordination_read_guard(&gpu_lock);
                         let runner_guard = runner.read().unwrap();
                         *prefix_cache_diagnostic.lock().unwrap() = "not_used_speculative";
                         if params.temperature == 0.0 {
@@ -5916,7 +5917,7 @@ async fn generate_real_streaming(
                 ResolvedSpeculativeMode::Mtp => {
                     let prefix_cache_diagnostic = prefix_cache_diagnostic.clone();
                     match tokio::task::spawn_blocking(move || {
-                        let _gpu_guard = gpu_lock.read().unwrap();
+                        let _gpu_guard = gpu_coordination_read_guard(&gpu_lock);
                         let runner_guard = runner.read().unwrap();
                         *prefix_cache_diagnostic.lock().unwrap() = "not_used_speculative";
                         runner_guard.generate_streaming_mtp_speculative(&prompt, &params)

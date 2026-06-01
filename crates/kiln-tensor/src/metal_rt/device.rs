@@ -101,7 +101,7 @@ impl Device {
         let raw = self
             .as_ref()
             .newLibraryWithSource_options_error(&NSString::from_str(source), options)
-            .unwrap();
+            .map_err(|e| MetalRtError::FailedToCreateResource(format!("Library: {e:?}")))?;
 
         Ok(Library::new(raw))
     }
@@ -113,7 +113,9 @@ impl Device {
         let raw = self
             .as_ref()
             .newComputePipelineStateWithFunction_error(function.as_ref())
-            .unwrap();
+            .map_err(|e| {
+                MetalRtError::FailedToCreateResource(format!("ComputePipelineState: {e:?}"))
+            })?;
         Ok(ComputePipeline::new(raw))
     }
 
