@@ -1077,12 +1077,19 @@ impl CudaGraphRunner {
                     // captured compute matches eager on the capture step).
                     if crate::forward::read_layer_norm_debug().is_some() {
                         if let Ok(snap) = linear_state.snapshot() {
-                            let _ = Self::eager_forward(
+                            let elog = Self::eager_forward(
                                 backend, token_id, weights, config, paged_cache,
                                 block_table, seq_len, linear_state, lora,
                             );
                             if let Some(n) = crate::forward::read_layer_norm_debug() {
                                 eprintln!("SAMESTEP EAGER step={seq_len} {n:?}");
+                            }
+                            // Dump the eager LOGITS sumsq — the per-layer probe
+                            // stops at layer 31, so this catches a stale
+                            // final_norm/lm_head/output_logits on the replay side.
+                            if let Ok(el) = &elog {
+                                let ess = el.sqr().and_then(|s| s.sum_all()).and_then(|s| s.to_vec::<f32>()).ok();
+                                eprintln!("SAMESTEP EAGER_LOGITS step={seq_len} sumsq={ess:?}");
                             }
                             *linear_state = snap;
                         }
@@ -1097,6 +1104,17 @@ impl CudaGraphRunner {
                             );
                             if let Some(n) = crate::forward::read_layer_norm_debug() {
                                 eprintln!("SAMESTEP REPLAY step={seq_len} {n:?}");
+                                // Replay LOGITS sumsq — compare to SAMESTEP
+                                // EAGER_LOGITS. If layers 0-31 match but these
+                                // differ, the stale op is in final_norm/lm_head/
+                                // output_logits on the replay path.
+                                let rss = captured
+                                    .output_logits
+                                    .sqr()
+                                    .and_then(|s| s.sum_all())
+                                    .and_then(|s| s.to_vec::<f32>())
+                                    .ok();
+                                eprintln!("SAMESTEP REPLAY_LOGITS step={seq_len} sumsq={rss:?}");
                             }
                             Self::debug_dump_gdn_state("replay", seq_len, linear_state);
                             return Ok(captured.output_logits.clone());
