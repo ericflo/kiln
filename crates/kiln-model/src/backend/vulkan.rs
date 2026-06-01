@@ -742,6 +742,12 @@ impl VulkanBackend {
         }
     }
 
+    pub fn reset_resident_decode_row_seeded(&self) {
+        if let Ok(mut g) = self.seeded_resident_decode_rows.lock() {
+            g.clear();
+        }
+    }
+
     /// Note this resident decode call's `start_pos`. Within one
     /// request the resident path advances `start_pos` by 1 per token;
     /// a discontinuity (first call after server boot, or a new

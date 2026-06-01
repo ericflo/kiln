@@ -293,6 +293,12 @@ every config"):
   `batch * 4` byte token-id output directly into the persistent host-visible
   staging buffer. This removes the tiny device-local token buffer and the
   recorded copy command from each batched decode submit.
+  **Update — no-ID batched resident route:** callers without stable row IDs now
+  still use the same native batched resident decode stack. The row-ID path keeps
+  its per-row seed cache; the no-ID path conservatively re-seeds each active
+  full-attention row from the paged cache on every call and clears the row-ID
+  seed cache before doing so, avoiding unsafe cache reuse while eliminating the
+  previous forced portable/rowwise route.
   **Update — GDN resident recorder uses row-reuse in-proj:** the batched GDN
   `CommandBatch` recorder now selects the same pair QKV/Z plus rows2/rows4
   BF16 in-proj shaders as the standalone dispatcher. Focused
