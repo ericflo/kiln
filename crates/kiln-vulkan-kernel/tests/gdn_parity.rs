@@ -92,6 +92,31 @@ fn silu_f32(x: f32) -> f32 {
     }
 }
 
+fn gdn_gates_reference(
+    a: &[f32],
+    b: &[f32],
+    a_log: &[f32],
+    dt_bias: &[f32],
+    nv: usize,
+) -> (Vec<f32>, Vec<f32>) {
+    let mut beta = Vec::with_capacity(a.len());
+    let mut g = Vec::with_capacity(a.len());
+    for i in 0..a.len() {
+        let h = i % nv;
+        let bv = b[i];
+        beta.push(if bv >= 0.0 {
+            1.0 / (1.0 + (-bv).exp())
+        } else {
+            let e = bv.exp();
+            e / (1.0 + e)
+        });
+        let x = a[i] + dt_bias[h];
+        let softplus = if x > 20.0 { x } else { (1.0 + x.exp()).ln() };
+        g.push(-a_log[h].exp() * softplus);
+    }
+    (beta, g)
+}
+
 fn causal_conv1d_reference(
     x: &[f32],
     weight: &[f32],
@@ -446,6 +471,66 @@ fn linear_decode_batched_matches_cpu_reference() -> Result<()> {
         "linear decode batched",
         &got,
         &x.broadcast_matmul(&weight)?,
+        1e-5,
+    )?;
+    Ok(())
+}
+
+#[test]
+fn gdn_gates_cached_bytes_matches_cpu_reference() -> Result<()> {
+    let Some(vk) = maybe_vulkan() else {
+        eprintln!("skipping: Vulkan device unavailable");
+        return Ok(());
+    };
+
+    let (batch, seq_len, nv) = (2usize, 5usize, 4usize);
+    let total = batch * seq_len * nv;
+    let a_data = (0..total)
+        .map(|i| ((i as f32) * 0.17 - 0.4).sin())
+        .collect::<Vec<_>>();
+    let b_data = (0..total)
+        .map(|i| ((i as f32) * 0.11 + 0.6).cos())
+        .collect::<Vec<_>>();
+    let a_log_data = (0..nv)
+        .map(|i| -0.35 * (i as f32 + 1.0))
+        .collect::<Vec<_>>();
+    let dt_bias_data = (0..nv)
+        .map(|i| (i as f32 - 1.5) * 0.07)
+        .collect::<Vec<_>>();
+
+    let a = cpu_f32(a_data.clone(), (batch, seq_len, nv))?;
+    let b = cpu_f32(b_data.clone(), (batch, seq_len, nv))?;
+    let a_log = cpu_f32(a_log_data.clone(), nv)?;
+    let dt_bias = cpu_f32(dt_bias_data.clone(), nv)?;
+    let a_log_buf = upload_tensor_f32_buffer(&vk, &a_log)?;
+    let dt_bias_buf = upload_tensor_f32_buffer(&vk, &dt_bias)?;
+    let (a_bytes, _) = extract_tensor_bytes(&a)?;
+    let (b_bytes, _) = extract_tensor_bytes(&b)?;
+
+    let (beta_bytes, g_bytes) = kiln_vulkan_kernel::kernels::dispatch_gdn_gates_cached_bytes(
+        &vk,
+        &a_bytes,
+        &b_bytes,
+        &a_log_buf,
+        &dt_bias_buf,
+        nv,
+        &[batch, seq_len, nv],
+    )?;
+    let beta = create_tensor_from_data(&beta_bytes, &[batch, seq_len, nv], DType::F32)?;
+    let g = create_tensor_from_data(&g_bytes, &[batch, seq_len, nv], DType::F32)?;
+    let (expected_beta, expected_g) =
+        gdn_gates_reference(&a_data, &b_data, &a_log_data, &dt_bias_data, nv);
+
+    assert_close(
+        "gdn gates cached beta",
+        &beta,
+        &cpu_f32(expected_beta, (batch, seq_len, nv))?,
+        1e-5,
+    )?;
+    assert_close(
+        "gdn gates cached g",
+        &g,
+        &cpu_f32(expected_g, (batch, seq_len, nv))?,
         1e-5,
     )?;
     Ok(())

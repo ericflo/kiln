@@ -897,6 +897,14 @@ every config"):
   133 rows/s, and batch 64 at 453.5 ms / 141 rows/s; the full token remains
   dominated by projection/GDN work, but the paged-attention reduce no longer
   spends barriers on lanes that cannot contain chunk sums.
+  **Update — shared multi-output readbacks use one staging buffer:** the
+  single-submit helper paths that produce multiple host results now pack their
+  device-to-host copies into one host-visible staging buffer instead of one
+  staging allocation/map per output. This covers the cached GDN gates helper and
+  the two-dispatch helper used by causal-conv prefill/update and split-K paged
+  attention wrapper checks. Focused coverage:
+  `gdn_gates_cached_bytes_matches_cpu_reference` and
+  `causal_conv1d_prefill_matches_stateful_cpu_reference` pass on Vulkan hardware.
 
   These numbers also use the corrected gated-Q full-attention dataflow and the
   direct-output full-attention QKV+gate projection. A batch-64 split-K sweep

@@ -7274,13 +7274,26 @@ fn run_compute_pipeline_with_transfers_readbacks(
         VulkanBuffer::write_host_visible(device, &stage, data)?;
         upload_stages.push(stage);
     }
-    let mut readback_stages = Vec::with_capacity(readbacks.len());
-    for (_, size) in readbacks {
-        readback_stages.push(
-            VulkanBuffer::create_host_visible(device, host_visible_mt, *size)
-                .context("failed to create transfers-readbacks readback staging buffer")?,
+    let mut readback_offsets = Vec::with_capacity(readbacks.len());
+    let mut readback_total = 0u64;
+    for (idx, (_, size)) in readbacks.iter().enumerate() {
+        anyhow::ensure!(
+            *size > 0,
+            "run_compute_pipeline_with_transfers_readbacks[{idx}]: readback size must be non-zero"
         );
+        readback_offsets.push(readback_total);
+        readback_total = readback_total.checked_add(*size).ok_or_else(|| {
+            anyhow::anyhow!("run_compute_pipeline_with_transfers_readbacks: readback size overflow")
+        })?;
     }
+    let readback_stage = if readback_total > 0 {
+        Some(
+            VulkanBuffer::create_host_visible(device, host_visible_mt, readback_total)
+                .context("failed to create transfers-readbacks staging buffer")?,
+        )
+    } else {
+        None
+    };
 
     let (set_layout, layout, pipeline) = vk_device.get_or_create_compute_pipeline(
         spirv,
@@ -7391,13 +7404,13 @@ fn run_compute_pipeline_with_transfers_readbacks(
             &[],
             &[],
         );
-        for ((src, size), stage) in readbacks.iter().zip(readback_stages.iter()) {
-            device.cmd_copy_buffer(
-                cmd,
-                src.handle(),
-                stage.handle(),
-                &[vk::BufferCopy::default().size(*size)],
-            );
+        if let Some(stage) = &readback_stage {
+            for (idx, (src, size)) in readbacks.iter().enumerate() {
+                let copy = vk::BufferCopy::default()
+                    .dst_offset(readback_offsets[idx])
+                    .size(*size);
+                device.cmd_copy_buffer(cmd, src.handle(), stage.handle(), &[copy]);
+            }
         }
         device
             .end_command_buffer(cmd)
@@ -7412,12 +7425,22 @@ fn run_compute_pipeline_with_transfers_readbacks(
         device.free_command_buffers(*cmd_pool, &command_buffers);
     }
 
-    let mut outputs = Vec::with_capacity(readback_stages.len());
-    for stage in readback_stages {
-        outputs.push(
-            VulkanBuffer::read_host_visible(device, &stage)
-                .context("failed to read transfers-readbacks output")?,
-        );
+    let staging_bytes = if let Some(stage) = readback_stage {
+        VulkanBuffer::read_host_visible(device, &stage)
+            .context("failed to read transfers-readbacks output")?
+    } else {
+        Vec::new()
+    };
+    let mut outputs = Vec::with_capacity(readbacks.len());
+    for (idx, (_, size)) in readbacks.iter().enumerate() {
+        let start = usize::try_from(readback_offsets[idx])
+            .context("run_compute_pipeline_with_transfers_readbacks: offset exceeds usize")?;
+        let len = usize::try_from(*size)
+            .context("run_compute_pipeline_with_transfers_readbacks: size exceeds usize")?;
+        let end = start.checked_add(len).ok_or_else(|| {
+            anyhow::anyhow!("run_compute_pipeline_with_transfers_readbacks[{idx}]: slice overflow")
+        })?;
+        outputs.push(staging_bytes[start..end].to_vec());
     }
     Ok(outputs)
 }
@@ -7999,13 +8022,26 @@ fn run_two_stage_compute_pipeline_with_transfers(
         upload_stages.push(stage);
     }
 
-    let mut readback_stages = Vec::with_capacity(readbacks.len());
-    for buffer in readbacks {
-        readback_stages.push(
-            VulkanBuffer::create_host_visible(device, host_visible_mt, buffer.size())
-                .context("failed to create two-stage readback staging buffer")?,
+    let mut readback_offsets = Vec::with_capacity(readbacks.len());
+    let mut readback_total = 0u64;
+    for (idx, buffer) in readbacks.iter().enumerate() {
+        anyhow::ensure!(
+            buffer.size() > 0,
+            "run_two_stage_compute_pipeline_with_transfers[{idx}]: readback size must be non-zero"
         );
+        readback_offsets.push(readback_total);
+        readback_total = readback_total.checked_add(buffer.size()).ok_or_else(|| {
+            anyhow::anyhow!("run_two_stage_compute_pipeline_with_transfers: readback size overflow")
+        })?;
     }
+    let readback_stage = if readback_total > 0 {
+        Some(
+            VulkanBuffer::create_host_visible(device, host_visible_mt, readback_total)
+                .context("failed to create two-stage readback staging buffer")?,
+        )
+    } else {
+        None
+    };
 
     let (first_set_layout, first_layout, first_pipeline) = vk_device
         .get_or_create_compute_pipeline(
@@ -8178,13 +8214,13 @@ fn run_two_stage_compute_pipeline_with_transfers(
             &[],
         );
 
-        for (src, stage) in readbacks.iter().zip(readback_stages.iter()) {
-            device.cmd_copy_buffer(
-                cmd,
-                src.handle(),
-                stage.handle(),
-                &[vk::BufferCopy::default().size(src.size())],
-            );
+        if let Some(stage) = &readback_stage {
+            for (idx, src) in readbacks.iter().enumerate() {
+                let copy = vk::BufferCopy::default()
+                    .dst_offset(readback_offsets[idx])
+                    .size(src.size());
+                device.cmd_copy_buffer(cmd, src.handle(), stage.handle(), &[copy]);
+            }
         }
 
         device
@@ -8200,11 +8236,24 @@ fn run_two_stage_compute_pipeline_with_transfers(
         device.free_command_buffers(*cmd_pool, &command_buffers);
     }
 
-    readback_stages
-        .iter()
-        .map(|stage| VulkanBuffer::read_host_visible(device, stage))
-        .collect::<Result<Vec<_>>>()
-        .context("failed to read transfer two-stage outputs")
+    let staging_bytes = if let Some(stage) = readback_stage {
+        VulkanBuffer::read_host_visible(device, &stage)
+            .context("failed to read transfer two-stage outputs")?
+    } else {
+        Vec::new()
+    };
+    let mut outputs = Vec::with_capacity(readbacks.len());
+    for (idx, src) in readbacks.iter().enumerate() {
+        let start = usize::try_from(readback_offsets[idx])
+            .context("run_two_stage_compute_pipeline_with_transfers: offset exceeds usize")?;
+        let len = usize::try_from(src.size())
+            .context("run_two_stage_compute_pipeline_with_transfers: size exceeds usize")?;
+        let end = start.checked_add(len).ok_or_else(|| {
+            anyhow::anyhow!("run_two_stage_compute_pipeline_with_transfers[{idx}]: slice overflow")
+        })?;
+        outputs.push(staging_bytes[start..end].to_vec());
+    }
+    Ok(outputs)
 }
 
 // ---------------------------------------------------------------------------
