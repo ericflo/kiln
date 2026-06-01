@@ -49,14 +49,6 @@ pub use crate::metal_rt::BufferOffset;
 /// `MetalCompanion::device()` returns `&MetalRawDevice`.
 pub use crate::metal_rt::Device as MetalRawDevice;
 
-/// Candle `sdpa` re-export — the MLX-style fused scaled-dot-product
-/// attention kernel shipped in `candle_nn::ops::sdpa`. Used by the
-/// candle-Tensor interop tests in `kiln-model::backend::metal` (the
-/// production SDPA path is the kiln-owned `metal_sdpa_last_axis`). This
-/// is `candle-nn`, NOT `candle_metal_kernels` — it is unaffected by the
-/// #1082 candle_metal_kernels drop.
-pub use candle_nn::ops::sdpa;
-
 /// Build a [`BufferOffset`] from a [`MetalRawDevice`]-allocated `Buffer`
 /// + `kiln_tensor::Layout` + `kiln_tensor::DType`.
 ///

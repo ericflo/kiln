@@ -43,18 +43,11 @@ bytemuck = { version = "1", features = ["extern_crate_alloc"] }
 safetensors = { workspace = true }
 memmap2 = { workspace = true }
 
-# Optional — pulled in under the `cuda` / `metal` features only. This is
-# the workspace's candle dep so the cudarc version stays coherent with
-# the rest of the crates. Phase 7 of #1082 (candle removal) replaces
-# this with a direct cudarc dependency.
-candle-core = { workspace = true, optional = true }
-
-# Optional — pulled in under the `metal` feature only. Used by the
-# `metal_types::sdpa` chokepoint re-export so `kiln-model::backend::metal`
-# can call `kiln_tensor::metal_types::sdpa(...)` instead of naming
-# `candle_nn::ops::sdpa` directly at 9 callsites. Phase 7 follow-up
-# replaces this with a kt-native fused SDPA op.
-candle-nn = { workspace = true, optional = true }
+# candle-core / candle-nn optional deps removed (#1082): kiln-tensor is now
+# fully candle-free under every feature. The last user was the
+# `metal_types::sdpa` chokepoint re-export of `candle_nn::ops::sdpa`, which
+# was dead weight — production attention runs the kt-native
+# `metal_sdpa_last_axis` (crate::metal_rt MSL), not candle's sdpa.
 
 # Direct cudarc — replaces candle re-exports of driver types
 # (`DevicePtr`) in `fp8.rs`. Same workspace pin as candle vendors so
@@ -105,11 +98,11 @@ cuda = ["dep:cudarc", "dep:kiln-blas"]
 #
 # `objc2` + `objc2-metal` + `objc2-foundation` back the kiln-owned Metal
 # substrate in `crate::metal_rt` (#1082): the vendored objc2 wrapper that
-# replaced the `candle_metal_kernels` dependency. candle-core / candle-nn
-# remain optional deps under this feature for the (test-only) candle-Tensor
-# interop in `kiln-model::backend::metal`'s test module; no `kiln-tensor`
-# code path names them anymore.
-metal = ["dep:candle-core", "candle-core?/metal", "dep:candle-nn", "candle-nn?/metal", "dep:objc2", "dep:objc2-metal", "dep:objc2-foundation"]
+# replaced the `candle_metal_kernels` dependency. The metal lane is now
+# fully candle-free — every compute kernel (matmul / cast / unary / binary /
+# softmax / rmsnorm / layernorm / index_select / sdpa) is kiln-owned MSL, and
+# production attention runs `metal_sdpa_last_axis`, not candle's sdpa.
+metal = ["dep:objc2", "dep:objc2-metal", "dep:objc2-foundation"]
 # Phase 1.8 — Vulkan storage. Does NOT go through candle: lifts
 # kiln-vulkan-kernel's already-candle-free VulkanBuffer + VulkanDevice.
 # This is a permanent dependency (Phase 7 does not change it).
