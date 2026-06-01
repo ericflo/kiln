@@ -662,6 +662,14 @@ fn env_flag_enabled(name: &str, default: bool) -> bool {
     env_flag_value(name).unwrap_or(default)
 }
 
+fn decode_batcher_rowwise_retry_enabled(backend: &dyn BackendRuntime) -> bool {
+    if backend.name() == "vulkan" {
+        env_flag_enabled("KILN_VULKAN_DECODE_BATCH_ROWWISE_RETRY", false)
+    } else {
+        true
+    }
+}
+
 /// Shared live decode rendezvous for greedy streaming requests.
 ///
 /// Requests keep ownership of stop handling, output routing, block lifetime,
@@ -975,9 +983,10 @@ fn process_decode_batch_jobs(
     };
 
     let backend = &*runner_guard.backend;
+    let rowwise_retry_enabled = decode_batcher_rowwise_retry_enabled(backend);
     let tokens = match decode_batch_jobs_with_runner(&runner_guard, paged_cache, &mut jobs) {
         Ok(tokens) => Ok(tokens),
-        Err(err) if jobs.len() > 1 => {
+        Err(err) if jobs.len() > 1 && rowwise_retry_enabled => {
             tracing::debug!(
                 batch = jobs.len(),
                 error = %err,
@@ -1002,6 +1011,14 @@ fn process_decode_batch_jobs(
                 Some(err) => Err(err),
                 None => Ok(tokens),
             }
+        }
+        Err(err) if jobs.len() > 1 => {
+            tracing::debug!(
+                batch = jobs.len(),
+                error = %err,
+                "batched greedy decode failed; rowwise retry disabled"
+            );
+            Err(err)
         }
         Err(err) => Err(err),
     };

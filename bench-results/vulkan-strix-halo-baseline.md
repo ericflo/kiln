@@ -320,6 +320,11 @@ every config"):
   full-attention row from the paged cache on every call and clears the row-ID
   seed cache before doing so, avoiding unsafe cache reuse while eliminating the
   previous forced portable/rowwise route.
+  **Update — Vulkan rowwise retry disabled by default:** the live decode worker
+  now treats a failed Vulkan multi-row batch as a visible error instead of
+  silently retrying one row at a time. That prevents hidden throughput collapse
+  back to serialized decode while still allowing explicit debug opt-in with
+  `KILN_VULKAN_DECODE_BATCH_ROWWISE_RETRY=1`.
   **Update — Vulkan live decode batch default:** the live greedy decode batcher
   now defaults Vulkan to a 64-row max batch instead of 32; the real-model
   batching-engine actor applies the same backend-aware default when
