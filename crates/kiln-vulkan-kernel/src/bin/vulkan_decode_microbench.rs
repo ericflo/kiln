@@ -1102,16 +1102,12 @@ fn run_full_token_resident_mixed_batched(
                         Workgroups::OneD(gdn_out_workgroups),
                     )?;
                     b.record_shader(
-                        shaders::ADD,
-                        &[x_buf.handle(), gdn_out.handle(), residual_hidden.handle()],
-                        &[(batch * HIDDEN) as u32],
-                        Workgroups::OneD((batch * HIDDEN).div_ceil(256) as u32),
-                    )?;
-                    b.record_shader(
-                        shaders::QWEN_RMSNORM_FORWARD,
+                        shaders::ADD_QWEN_RMSNORM_BATCHED,
                         &[
-                            residual_hidden.handle(),
+                            x_buf.handle(),
+                            gdn_out.handle(),
                             weight_norm.handle(),
+                            residual_hidden.handle(),
                             normed_hidden.handle(),
                         ],
                         &[batch as u32, HIDDEN as u32, eps.to_bits()],
@@ -1169,7 +1165,7 @@ fn run_gdn_block_resident_batched(
     use kiln_vulkan_kernel::Workgroups;
 
     println!(
-        "== gdn_block_resident_batched (GDN block + MLP, 10 kernels recorded into 1 cmd-buffer + 1 submit) =="
+        "== gdn_block_resident_batched (GDN block + MLP, 9 kernels recorded into 1 cmd-buffer + 1 submit) =="
     );
 
     let conv_kernel = 4usize;
@@ -1337,16 +1333,12 @@ fn run_gdn_block_resident_batched(
                 Workgroups::OneD(gdn_out_workgroups),
             )?;
             b.record_shader(
-                shaders::ADD,
-                &[x_buf.handle(), gdn_out.handle(), attn_residual.handle()],
-                &[(batch * HIDDEN) as u32],
-                Workgroups::OneD((batch * HIDDEN).div_ceil(256) as u32),
-            )?;
-            b.record_shader(
-                shaders::QWEN_RMSNORM_FORWARD,
+                shaders::ADD_QWEN_RMSNORM_BATCHED,
                 &[
-                    attn_residual.handle(),
+                    x_buf.handle(),
+                    gdn_out.handle(),
                     norm_w.handle(),
+                    attn_residual.handle(),
                     normed_post.handle(),
                 ],
                 &[batch as u32, HIDDEN as u32, eps.to_bits()],

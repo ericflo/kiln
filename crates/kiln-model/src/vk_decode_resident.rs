@@ -2414,19 +2414,15 @@ pub fn record_gdn_block_into(
         Workgroups::OneD(hidden.div_ceil(16) as u32),
     )?;
     batch.record_shader(
-        shaders::ADD,
-        &[x_in_buf.handle(), gdn_out.handle(), attn_residual.handle()],
-        &[hidden as u32],
-        Workgroups::OneD(hidden.div_ceil(256) as u32),
-    )?;
-    batch.record_shader(
-        shaders::QWEN_RMSNORM_FORWARD,
+        shaders::ADD_QWEN_RMSNORM,
         &[
-            attn_residual.handle(),
+            x_in_buf.handle(),
+            gdn_out.handle(),
             post_norm.handle(),
+            attn_residual.handle(),
             normed_post.handle(),
         ],
-        &[1u32, hidden as u32, eps.to_bits()],
+        &[hidden as u32, eps.to_bits()],
         Workgroups::OneD(1),
     )?;
     batch.record_shader(
@@ -2667,16 +2663,12 @@ pub fn record_gdn_block_batched_into(
         Workgroups::OneD(gdn_out_workgroups),
     )?;
     batch.record_shader(
-        shaders::ADD,
-        &[x_in_buf.handle(), gdn_out.handle(), attn_residual.handle()],
-        &[(batch_size * hidden) as u32],
-        Workgroups::OneD((batch_size * hidden).div_ceil(256) as u32),
-    )?;
-    batch.record_shader(
-        shaders::QWEN_RMSNORM_FORWARD,
+        shaders::ADD_QWEN_RMSNORM_BATCHED,
         &[
-            attn_residual.handle(),
+            x_in_buf.handle(),
+            gdn_out.handle(),
             post_norm.handle(),
+            attn_residual.handle(),
             normed_post.handle(),
         ],
         &[batch_size as u32, hidden as u32, eps.to_bits()],

@@ -345,10 +345,10 @@ every config"):
   the Qwen3.5-4B stack.
   **Update — whole GDN resident block microbench:** added
   `vulkan_decode_microbench gdn_block_resident_batched`, a Vulkan-only
-  one-submit benchmark for a full Qwen3.5-4B GDN block plus MLP. It records 10
+  one-submit benchmark for a full Qwen3.5-4B GDN block plus MLP. It records 9
   shaders into one `CommandBatch`: RMSNorm, row-reuse GDN in-proj, fused
   conv/split/state advance, fused Q/K L2 expansion, recurrent gate/RMSNorm, GDN
-  out-proj, residual, post norm, MLP gate/up, and fused down+residual. On RADV
+  out-proj, fused residual+post norm, MLP gate/up, and fused down+residual. On RADV
   STRIX_HALO with `KILN_VK_MICROBENCH_BATCHES=1,4,8,32,64`, warmup=2, timed=5,
   repeats=2:
 
@@ -372,7 +372,12 @@ every config"):
   the bf16 down+residual rows4 path disabled at batch 8, but enables it from
   batch 16: on STRIX_HALO the GDN block batch-16 path moved from 4.73 ms to
   4.19 ms, and the mixed paged token batch-16 path moved from 150.1 ms to
-  146.6 ms in a same-session A/B.
+  146.6 ms in a same-session A/B. The post-GDN residual add and post-attention
+  RMSNorm are now fused through the same batched add+RMSNorm shader used by the
+  full-attention path, removing one recorded dispatch per GDN layer. Current
+  smokes measured the 9-dispatch GDN block at batch 32: 6.79 ms / 4,712 rows/s
+  and batch 64: 14.05 ms / 4,554 rows/s; the full mixed-paged token measured
+  batch 32: 236.4 ms / 135 rows/s and batch 64: 463.1 ms / 138 rows/s.
 - **Vulkan paged-attention decode kernel**: the kernel crate already had
   `paged_attn_decode_batch_paged.comp`; Vulkan now advertises
   `supports_flash_attn_paged_decode` and wires the single-query paged-decode
