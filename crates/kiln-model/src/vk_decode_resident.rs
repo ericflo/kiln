@@ -940,7 +940,7 @@ pub fn transformer_block_paged_decode_gdn_resident_b1(
         Workgroups::OneD(conv_total.div_ceil(256) as u32),
     )?;
     // 4b) causal_conv1d stage 2: state advance
-    batch.record_shader(
+    batch.record_shader_no_previous_barrier(
         shaders::CAUSAL_CONV1D_STATE_ADVANCE,
         &[mixed_qkv.handle(), conv_buf.handle()],
         &[1u32, qkv_dim as u32, 1u32, conv_kernel as u32],
@@ -1271,7 +1271,7 @@ pub fn gated_deltanet_forward_decode_resident_b1(
         Workgroups::OneD(conv_total.div_ceil(256) as u32),
     )?;
     // 3b) causal_conv1d stage 2: state advance.
-    batch.record_shader(
+    batch.record_shader_no_previous_barrier(
         shaders::CAUSAL_CONV1D_STATE_ADVANCE,
         &[mixed_qkv.handle(), conv_buf.handle()],
         &[1u32, qkv_dim as u32, 1u32, conv_kernel as u32],
@@ -2351,7 +2351,7 @@ pub fn record_gdn_block_into(
         &[1u32, qkv_dim as u32, 1u32, conv_kernel as u32],
         Workgroups::OneD(conv_total.div_ceil(256) as u32),
     )?;
-    batch.record_shader(
+    batch.record_shader_no_previous_barrier(
         shaders::CAUSAL_CONV1D_STATE_ADVANCE,
         &[mixed_qkv.handle(), conv_buf.handle()],
         &[1u32, qkv_dim as u32, 1u32, conv_kernel as u32],
