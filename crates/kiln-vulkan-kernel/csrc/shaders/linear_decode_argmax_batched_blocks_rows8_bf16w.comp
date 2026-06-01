@@ -1,0 +1,108 @@
+// Batched single-token transposed linear projection argmax with packed bf16
+// weights, grouped across eight adjacent rows.
+//
+// This keeps the block-score/block-index layout identical to the one-row and
+// rows4 BF16 argmax block shaders, but reuses each packed weight load across
+// eight decode rows for wide resident greedy batches.
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 64, local_size_y = 4, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint hidden;
+    uint out_dim;
+    uint block_count;
+    uint batch;
+};
+
+layout(binding = 0) readonly buffer XBuf { float data_x[]; };
+layout(binding = 1) readonly buffer WeightBuf { uint data_w[]; };
+layout(binding = 2) writeonly buffer BlockScoreBuf { float data_block_score[]; };
+layout(binding = 3) writeonly buffer BlockIndexBuf { uint data_block_index[]; };
+
+shared float partial[2048];
+shared float scores[512];
+shared uint indices[64];
+
+float load_weight(uint idx) {
+    uint packed = data_w[idx >> 1];
+    uint bf16_bits = ((idx & 1u) == 0u) ? (packed & 0xffffu) : (packed >> 16);
+    return uintBitsToFloat(bf16_bits << 16);
+}
+
+void main() {
+    const uint global_group = gl_WorkGroupID.x;
+    const uint row_group = global_group / block_count;
+    const uint block = global_group - row_group * block_count;
+    const uint row0 = row_group * 8;
+    const uint col_lane = gl_LocalInvocationID.x;
+    const uint red_lane = gl_LocalInvocationID.y;
+    const uint col = block * 64 + col_lane;
+    const uint partial_idx = col_lane * 4 + red_lane;
+
+    float sum[8];
+    for (uint r = 0; r < 8; r++) {
+        sum[r] = 0.0;
+    }
+    if (col < out_dim) {
+        bool valid[8];
+        uint x_base[8];
+        for (uint r = 0; r < 8; r++) {
+            const uint row = row0 + r;
+            valid[r] = row < batch;
+            x_base[r] = row * hidden;
+        }
+        for (uint h = red_lane; h < hidden; h += 4) {
+            const float w = load_weight(h * out_dim + col);
+            [[unroll]] for (uint r = 0; r < 8; r++) {
+                if (valid[r]) {
+                    sum[r] += data_x[x_base[r] + h] * w;
+                }
+            }
+        }
+    }
+
+    [[unroll]] for (uint r = 0; r < 8; r++) {
+        partial[r * 256 + partial_idx] = sum[r];
+    }
+    barrier();
+
+    if (red_lane == 0) {
+        [[unroll]] for (uint r = 0; r < 8; r++) {
+            float score = 0.0;
+            for (uint lane = 0; lane < 4; lane++) {
+                score += partial[r * 256 + col_lane * 4 + lane];
+            }
+            if (col >= out_dim) {
+                score = -3.4028234663852886e38;
+            }
+            scores[r * 64 + col_lane] = score;
+        }
+        indices[col_lane] = col;
+    }
+    barrier();
+
+    if (gl_LocalInvocationIndex == 0) {
+        [[unroll]] for (uint r = 0; r < 8; r++) {
+            const uint row = row0 + r;
+            if (row < batch) {
+                float best_score = scores[r * 64];
+                uint best_index = indices[0];
+                for (uint i = 1; i < 64; i++) {
+                    const float candidate_score = scores[r * 64 + i];
+                    const uint candidate_index = indices[i];
+                    if (candidate_score > best_score ||
+                        (candidate_score == best_score && candidate_index < best_index)) {
+                        best_score = candidate_score;
+                        best_index = candidate_index;
+                    }
+                }
+                const uint dst = row * block_count + block;
+                data_block_score[dst] = best_score;
+                data_block_index[dst] = best_index;
+            }
+        }
+    }
+}

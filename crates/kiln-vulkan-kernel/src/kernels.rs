@@ -8,6 +8,7 @@ use std::time::Instant;
 
 pub(crate) const MLP_BF16_ROWS8_MIN_BATCH: usize = 256;
 pub(crate) const GDN_IN_PROJ_ROWS4_MIN_BATCH: usize = 16;
+pub(crate) const LINEAR_DECODE_BF16W_ROWS8_MIN_BATCH: usize = 64;
 
 fn env_truthy_for_profile(name: &str) -> bool {
     std::env::var(name)
@@ -48,6 +49,14 @@ pub(crate) fn linear_decode_bf16w_rows4_enabled() -> bool {
     *ENABLED.get_or_init(|| {
         std::env::var("KILN_DISABLE_VULKAN_LINEAR_DECODE_BF16W_ROWS4").is_err()
             && std::env::var("KILN_DISABLE_VULKAN_LINEAR_BF16W_ROWS4").is_err()
+    })
+}
+
+pub(crate) fn linear_decode_bf16w_rows8_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("KILN_DISABLE_VULKAN_LINEAR_DECODE_BF16W_ROWS8").is_err()
+            && std::env::var("KILN_DISABLE_VULKAN_LINEAR_BF16W_ROWS8").is_err()
     })
 }
 
@@ -400,6 +409,7 @@ pub fn prewarm_builtin_pipelines(vk_device: &VulkanDevice) -> Result<()> {
         ("linear_decode_argmax_batched_blocks", 4, 12),
         ("linear_decode_argmax_batched_blocks_bf16w", 4, 12),
         ("linear_decode_argmax_batched_blocks_rows4_bf16w", 4, 16),
+        ("linear_decode_argmax_batched_blocks_rows8_bf16w", 4, 16),
         ("linear_decode_argmax_batched_reduce", 3, 4),
         ("mlp_gate_up_decode", 4, 8),
         ("mlp_gate_up_decode_bf16w", 4, 8),
@@ -3456,9 +3466,14 @@ pub fn dispatch_linear_decode_sample_batch_bytes(
         VulkanBuffer::create_host_visible(device, host_visible_mt, (batch * 4) as u64)
             .context("failed to create linear_decode_sample_batch output staging buffer")?;
 
-    let rows4 = packed_bf16_weights && batch >= 16 && linear_decode_bf16w_rows4_enabled();
+    let rows8 = packed_bf16_weights
+        && batch >= LINEAR_DECODE_BF16W_ROWS8_MIN_BATCH
+        && linear_decode_bf16w_rows8_enabled();
+    let rows4 = packed_bf16_weights && !rows8 && batch >= 16 && linear_decode_bf16w_rows4_enabled();
     let lm_glsl = if packed_bf16_weights {
-        if rows4 {
+        if rows8 {
+            crate::shaders::LINEAR_DECODE_BATCHED_ROWS8_BF16W
+        } else if rows4 {
             crate::shaders::LINEAR_DECODE_BATCHED_ROWS4_BF16W
         } else {
             crate::shaders::LINEAR_DECODE_BATCHED_BF16W
@@ -3466,7 +3481,13 @@ pub fn dispatch_linear_decode_sample_batch_bytes(
     } else {
         crate::shaders::LINEAR_DECODE_BATCHED
     };
-    let row_groups = if rows4 { batch.div_ceil(4) } else { batch };
+    let row_groups = if rows8 {
+        batch.div_ceil(8)
+    } else if rows4 {
+        batch.div_ceil(4)
+    } else {
+        batch
+    };
 
     let mut batch_rec = crate::CommandBatch::new(vk_device)
         .context("linear_decode_sample_batch: create CommandBatch")?;
@@ -3621,8 +3642,16 @@ fn dispatch_linear_decode_argmax_batched_cached_impl_bytes(
     let out_stage = VulkanBuffer::create_host_visible(device, host_visible_mt, (batch * 4) as u64)
         .context("failed to create batched linear argmax output staging buffer")?;
 
-    let rows4 = packed_bf16_weights && batch >= 16 && linear_decode_bf16w_rows4_enabled();
-    let blocks_glsl = if rows4 {
+    let rows8 = packed_bf16_weights
+        && batch >= LINEAR_DECODE_BF16W_ROWS8_MIN_BATCH
+        && linear_decode_bf16w_rows8_enabled();
+    let rows4 = packed_bf16_weights && !rows8 && batch >= 16 && linear_decode_bf16w_rows4_enabled();
+    let blocks_glsl = if rows8 {
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/csrc/shaders/linear_decode_argmax_batched_blocks_rows8_bf16w.comp"
+        )
+    } else if rows4 {
         concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/csrc/shaders/linear_decode_argmax_batched_blocks_rows4_bf16w.comp"
@@ -3639,7 +3668,7 @@ fn dispatch_linear_decode_argmax_batched_cached_impl_bytes(
         )
     };
     let blocks_spirv = crate::pipeline::ShaderPipeline::compile_shader(blocks_glsl)?;
-    let block_push: Vec<u32> = if rows4 {
+    let block_push: Vec<u32> = if rows8 || rows4 {
         vec![
             hidden as u32,
             out_dim as u32,
@@ -3649,7 +3678,9 @@ fn dispatch_linear_decode_argmax_batched_cached_impl_bytes(
     } else {
         vec![hidden as u32, out_dim as u32, block_count as u32]
     };
-    let block_workgroups = if rows4 {
+    let block_workgroups = if rows8 {
+        batch.div_ceil(8) * block_count
+    } else if rows4 {
         batch.div_ceil(4) * block_count
     } else {
         total_blocks

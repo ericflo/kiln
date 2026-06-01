@@ -58,3 +58,34 @@ fn batched_bf16_argmax_rows4_matches_cpu_with_tail_rows() -> Result<()> {
     assert_eq!(got, expected);
     Ok(())
 }
+
+#[test]
+fn batched_bf16_argmax_rows8_matches_cpu_with_tail_rows() -> Result<()> {
+    let Ok(dev) = VulkanDevice::new() else {
+        eprintln!("skipping: Vulkan device unavailable");
+        return Ok(());
+    };
+
+    let batch = 65usize;
+    let hidden = 11usize;
+    let out_dim = 131usize;
+    let x: Vec<f32> = (0..batch * hidden)
+        .map(|i| ((i % 29) as f32 - 14.0) * 0.0234375)
+        .collect();
+    let weight_t: Vec<bf16> = (0..hidden * out_dim)
+        .map(|i| bf16::from_f32(((i % 37) as f32 - 18.0) * 0.0068359375))
+        .collect();
+    let expected = expected_argmax(&x, &weight_t, batch, hidden, out_dim);
+    let weight_buf = kernels::upload_bf16_packed_buffer_from_slice(&dev, &weight_t)?;
+
+    let got = kernels::dispatch_linear_decode_argmax_batched_cached_bf16_weights_bytes(
+        &dev,
+        bytemuck::cast_slice(&x),
+        &weight_buf,
+        batch,
+        hidden,
+        out_dim,
+    )?;
+    assert_eq!(got, expected);
+    Ok(())
+}

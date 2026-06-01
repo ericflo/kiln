@@ -1000,6 +1000,13 @@ every config"):
   sampled LM-head projection. Focused Vulkan coverage:
   `batched_bf16_argmax_rows4_matches_cpu_with_tail_rows` passes with a
   17-row tail batch and partial final vocab block.
+  **Update — wide batched BF16 projections use rows8 at saturation:** the
+  resident batched linear BF16 helper and both LM-head token paths now select
+  rows8 kernels once a batch reaches the 64-wide serving saturation point. The
+  sampled path reuses the existing rows8 projection shader, while greedy argmax
+  adds a rows8 block-score shader that preserves the existing reduce stage.
+  Focused Vulkan coverage now includes 65-row tail batches for greedy argmax
+  and top-1 sampling.
 
 ## Other follow-ups (perf headroom, not regressions)
 

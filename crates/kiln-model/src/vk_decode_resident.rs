@@ -43,6 +43,7 @@ use crate::PagedKvCacheKt;
 const MLP_BF16_ROWS8_MIN_BATCH: usize = 256;
 const GDN_IN_PROJ_ROWS4_MIN_BATCH: usize = 16;
 const LM_HEAD_BF16_ROWS4_MIN_BATCH: usize = 16;
+const LINEAR_BF16_ROWS8_MIN_BATCH: usize = 64;
 
 // (#1082) The previous process-global bridge cache is gone. It existed to give
 // shared upload helpers a stable `TensorId` per weight, but memoized a full
@@ -91,6 +92,11 @@ fn linear_bf16w_rows4_enabled() -> bool {
         && enabled_unless_disabled("KILN_DISABLE_VULKAN_LINEAR_BF16W_ROWS4")
 }
 
+fn linear_bf16w_rows8_enabled() -> bool {
+    enabled_unless_disabled("KILN_DISABLE_VULKAN_LINEAR_DECODE_BF16W_ROWS8")
+        && enabled_unless_disabled("KILN_DISABLE_VULKAN_LINEAR_BF16W_ROWS8")
+}
+
 fn full_attn_qkv_gate_split_bf16w_plan(batch: usize, total_out: usize) -> (&'static str, u32) {
     let rows4 =
         batch >= 2 && enabled_unless_disabled("KILN_DISABLE_VULKAN_FULL_ATTN_QKV_BF16W_ROWS4");
@@ -104,9 +110,18 @@ fn full_attn_qkv_gate_split_bf16w_plan(batch: usize, total_out: usize) -> (&'sta
 }
 
 fn linear_bf16w_batched_plan(batch: usize, out_dim: usize) -> (&'static str, u32) {
-    let rows4 = batch >= 16 && linear_bf16w_rows4_enabled();
-    let row_groups = if rows4 { batch.div_ceil(4) } else { batch };
-    let shader = if rows4 {
+    let rows8 = batch >= LINEAR_BF16_ROWS8_MIN_BATCH && linear_bf16w_rows8_enabled();
+    let rows4 = batch >= 16 && !rows8 && linear_bf16w_rows4_enabled();
+    let row_groups = if rows8 {
+        batch.div_ceil(8)
+    } else if rows4 {
+        batch.div_ceil(4)
+    } else {
+        batch
+    };
+    let shader = if rows8 {
+        shaders::LINEAR_DECODE_BATCHED_ROWS8_BF16W
+    } else if rows4 {
         shaders::LINEAR_DECODE_BATCHED_ROWS4_BF16W
     } else {
         shaders::LINEAR_DECODE_BATCHED_BF16W
@@ -2747,13 +2762,16 @@ pub fn record_final_norm_lm_head_argmax_batched_into(
         &[batch_size as u32, hidden as u32, eps.to_bits()],
         Workgroups::OneD(batch_size as u32),
     )?;
-    let rows4 = batch_size >= LM_HEAD_BF16_ROWS4_MIN_BATCH;
-    let block_shader = if rows4 {
+    let rows8 = batch_size >= LINEAR_BF16_ROWS8_MIN_BATCH && linear_bf16w_rows8_enabled();
+    let rows4 = batch_size >= LM_HEAD_BF16_ROWS4_MIN_BATCH && !rows8;
+    let block_shader = if rows8 {
+        shaders::LINEAR_DECODE_ARGMAX_BATCHED_BLOCKS_ROWS8_BF16W
+    } else if rows4 {
         shaders::LINEAR_DECODE_ARGMAX_BATCHED_BLOCKS_ROWS4_BF16W
     } else {
         shaders::LINEAR_DECODE_ARGMAX_BATCHED_BLOCKS_BF16W
     };
-    let block_push = if rows4 {
+    let block_push = if rows8 || rows4 {
         vec![
             hidden as u32,
             vocab_size as u32,
@@ -2763,7 +2781,9 @@ pub fn record_final_norm_lm_head_argmax_batched_into(
     } else {
         vec![hidden as u32, vocab_size as u32, block_count as u32]
     };
-    let block_workgroups = if rows4 {
+    let block_workgroups = if rows8 {
+        batch_size.div_ceil(8) * block_count
+    } else if rows4 {
         batch_size.div_ceil(4) * block_count
     } else {
         batch_size * block_count
@@ -2833,13 +2853,22 @@ pub fn record_final_norm_lm_head_sample_batched_into(
         &[batch_size as u32, hidden as u32, eps.to_bits()],
         Workgroups::OneD(batch_size as u32),
     )?;
-    let rows4 = batch_size >= LM_HEAD_BF16_ROWS4_MIN_BATCH;
-    let lm_shader = if rows4 {
+    let rows8 = batch_size >= LINEAR_BF16_ROWS8_MIN_BATCH && linear_bf16w_rows8_enabled();
+    let rows4 = batch_size >= LM_HEAD_BF16_ROWS4_MIN_BATCH && !rows8;
+    let lm_shader = if rows8 {
+        shaders::LINEAR_DECODE_BATCHED_ROWS8_BF16W
+    } else if rows4 {
         shaders::LINEAR_DECODE_BATCHED_ROWS4_BF16W
     } else {
         shaders::LINEAR_DECODE_BATCHED_BF16W
     };
-    let row_groups = if rows4 { batch_size.div_ceil(4) } else { batch_size };
+    let row_groups = if rows8 {
+        batch_size.div_ceil(8)
+    } else if rows4 {
+        batch_size.div_ceil(4)
+    } else {
+        batch_size
+    };
     batch.record_shader(
         lm_shader,
         &[normed.handle(), lm_head_w.handle(), logits.handle()],

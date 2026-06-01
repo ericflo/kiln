@@ -208,6 +208,10 @@ const SHADERS: &[(&str, &str)] = &[
         "SPIR_V_LINEAR_DECODE_ARGMAX_BATCHED_BLOCKS_ROWS4_BF16W",
     ),
     (
+        "linear_decode_argmax_batched_blocks_rows8_bf16w",
+        "SPIR_V_LINEAR_DECODE_ARGMAX_BATCHED_BLOCKS_ROWS8_BF16W",
+    ),
+    (
         "linear_decode_argmax_batched_reduce",
         "SPIR_V_LINEAR_DECODE_ARGMAX_BATCHED_REDUCE",
     ),
