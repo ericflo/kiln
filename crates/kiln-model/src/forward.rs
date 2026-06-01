@@ -18042,7 +18042,28 @@ pub(crate) struct BatchedPagedDecodeGraphInputs<'a> {
     /// `slice_set` so replay always reads from the same device
     /// pointer; the runner argmax-reduces and DtoH-transfers tokens
     /// outside the captured region.
+    ///
+    /// NOTE (#1082 boxes 432/433/438, STEP 1): superseded by
+    /// [`Self::output_hidden`] for the box-102 BUG2 fix port — steps 2-3
+    /// drop this field once the batched capture/replay path moves to the
+    /// HiddenOnly + eager-lm_head contract. Kept for now so the existing
+    /// [`model_forward_paged_batched_with_graph_inputs`] /
+    /// [`CapturedBatchedDecodeGraph`] capture flow still compiles
+    /// unchanged.
     pub output_logits: &'a Tensor,
+    /// `[batch, 1, hidden_size]` stable PRE-final-norm hidden buffer
+    /// (#1082 box-102 BUG2 fix port — STEP 1). The new
+    /// [`model_forward_paged_batched_hidden_with_graph_inputs`] writes the
+    /// transformer-stack output here via `slice_set` and returns WITHOUT
+    /// running `final_norm` / lm_head. `final_norm` + the large-N
+    /// (`vocab = 151936`) cublasLt lm_head GEMV then run EAGERLY off the
+    /// graph via [`lm_head_from_batched_hidden_eager`], mirroring the bs=1
+    /// `HiddenOnly` contract ([`PagedDecodeGraphInputs`] has no logits
+    /// buffer; the bs=1 hidden lives on [`crate::cuda_graph::CapturedDecodeGraph::output_hidden`]).
+    /// This is the structural fix for the lm_head replay-nondeterminism
+    /// ("BUG2" token-doubling). Not wired into capture/replay yet (steps
+    /// 2-3); kept additive so the existing logits flow is untouched.
+    pub output_hidden: &'a mut Tensor,
     /// Persistent batched [`LinearAttentionState`] slot used by the
     /// captured forward. Lifetime is the graph runner's; the captured
     /// graph reads recurrent/conv state from these device pointers.
@@ -24336,6 +24357,125 @@ pub(crate) fn model_forward_paged_batched_with_graph_inputs(
         .slice_set(&logits, 0, 0)
         .context("copy graph-wrapper logits into stable output_logits buffer")?;
     Ok(())
+}
+
+/// #1082 boxes 432/433/438 (STEP 1) — batched twin of
+/// [`model_forward_paged_hidden_with_graph_inputs`].
+///
+/// Identical to [`model_forward_paged_batched_with_graph_inputs`] EXCEPT it
+/// stops BEFORE the final RMSNorm + lm_head: it writes the PRE-final-norm
+/// transformer-stack hidden (`[batch, 1, hidden_size]`) into the caller-owned
+/// stable [`BatchedPagedDecodeGraphInputs::output_hidden`] buffer via
+/// `slice_set` and returns `Ok(())`. NO `rms_norm`, NO
+/// `lm_head_forward_backend_decode_if` inside — `final_norm` + the large-N
+/// (`vocab = 151936`) cublasLt lm_head GEMV run EAGERLY off the captured graph
+/// via [`lm_head_from_batched_hidden_eager`].
+///
+/// This mirrors the bs=1 `HiddenOnly` contract
+/// ([`model_forward_paged_hidden_with_graph_inputs`] →
+/// `model_forward_paged_inner(..., LmHeadMode::HiddenOnly)`): the lm_head GEMV
+/// is not CUDA-graph-replay-deterministic at large N, so moving it out of the
+/// captured region is the structural fix for the "BUG2" token-doubling.
+///
+/// STEP 1 is ADDITIVE scaffolding: not yet wired into
+/// `try_capture_batched` / `decode_step_paged_batched` (steps 2-3 do that),
+/// so this is `#[allow(dead_code)]` until the batched capture/replay path
+/// switches off `output_logits`.
+#[cfg(feature = "cuda")]
+#[allow(clippy::too_many_arguments)]
+#[allow(dead_code)]
+pub(crate) fn model_forward_paged_batched_hidden_with_graph_inputs(
+    backend: &dyn BackendRuntime,
+    input_tokens: &[u32],
+    weights: &GpuWeights,
+    config: &kiln_core::config::ModelConfig,
+    paged_cache: &PagedKvCache,
+    block_tables: &[&BlockTable],
+    sequence_lengths: &[usize],
+    lora: Option<&LoraWeights>,
+    graph_inputs: &mut BatchedPagedDecodeGraphInputs<'_>,
+) -> Result<()> {
+    // Run the identical bs>1 hidden path as
+    // `model_forward_paged_batched_with_graph_inputs` — same persistent
+    // linear-state slot and the same graph-stable token-id / position /
+    // block_table / seqused_k / per-layer paged-decode scratch / rotary /
+    // kv_slot device buffers threaded through. See that function's body for
+    // the per-buffer dangling-pointer rationale (#1082 suspects 1-4); this
+    // twin diverges ONLY in what it does with the resulting `hidden`.
+    let hidden = model_forward_paged_decode_contiguous_batch_hidden_inner(
+        backend,
+        input_tokens,
+        weights,
+        config,
+        paged_cache,
+        block_tables,
+        sequence_lengths,
+        Some(graph_inputs.linear_state),
+        lora,
+        Some(graph_inputs.positions),
+        Some(graph_inputs.token_ids),
+        Some(graph_inputs.block_table),
+        Some(graph_inputs.seqused_k),
+        Some(graph_inputs.attn_out),
+        Some(graph_inputs.softmax_lse),
+        Some(graph_inputs.rotary_cos),
+        Some(graph_inputs.rotary_sin),
+        Some(graph_inputs.kv_slot),
+    )?;
+    // #1082 box-102 BUG2 fix (batched): write the PRE-final-norm hidden into
+    // the caller-owned stable `output_hidden` buffer (`[batch, 1, hidden]`)
+    // and return. `final_norm` + lm_head run EAGERLY later via
+    // `lm_head_from_batched_hidden_eager` — mirrors the bs=1 contract
+    // (`lm_head_from_hidden_eager`). CRITICAL: no device→host transfer here
+    // (same constraint the `output_logits` twin documents — a synchronous
+    // DtoH during capture is not recorded cleanly by the driver).
+    graph_inputs
+        .output_hidden
+        .slice_set(&hidden, 0, 0)
+        .context("copy graph-wrapper hidden into stable output_hidden buffer")?;
+    Ok(())
+}
+
+/// #1082 boxes 432/433/438 (STEP 1) — batched twin of
+/// [`lm_head_from_hidden_eager`].
+///
+/// Runs the final RMSNorm + lm_head projection EAGERLY (outside any captured
+/// CUDA graph) on the **pre-final-norm** batched hidden state the captured
+/// batched decode graph produced into
+/// [`BatchedPagedDecodeGraphInputs::output_hidden`] (via
+/// [`model_forward_paged_batched_hidden_with_graph_inputs`]).
+///
+/// `output_hidden` is `[batch, 1, hidden_size]`; the returned logits are
+/// `[batch, 1, vocab_size]`. The runner argmax-reduces per row to produce the
+/// `[batch]` next-token IDs. Numerically identical to the `output_logits`
+/// twin's tail (`rms_norm` + `lm_head_forward_backend_decode_if` on the same
+/// `final_norm` / `embed_tokens_t`) — only the lm_head cublasLt GEMV now runs
+/// eagerly off the graph, sidestepping the replay-nondeterminism that doubled
+/// output ("BUG2"). Cost is one extra eager batched vocab GEMV + one RMSNorm
+/// per decode step.
+///
+/// STEP 1 is ADDITIVE; the runner does not call this yet (steps 2-3 wire it
+/// after the captured forward switches to `output_hidden`), hence
+/// `#[allow(dead_code)]`.
+#[cfg(feature = "cuda")]
+#[allow(dead_code)]
+pub(crate) fn lm_head_from_batched_hidden_eager(
+    backend: &dyn BackendRuntime,
+    output_hidden: &Tensor,
+    weights: &GpuWeights,
+    config: &kiln_core::config::ModelConfig,
+) -> Result<Tensor> {
+    kiln_nvtx::range!(c"kiln/lm_head_eager_batched");
+    // Same `final_norm` RMSNorm + lm_head as the bs=1 eager twin, but the
+    // input/output carry the leading `batch` dim ([batch, 1, hidden] →
+    // [batch, 1, vocab]). `rms_norm` normalizes over the last (hidden) axis
+    // and `lm_head_forward_backend_decode_if` projects the last axis to
+    // vocab, both of which are rank-agnostic over the leading dims, so no
+    // reshape is needed (mirrors how `model_forward_paged_batched_with_graph_inputs`
+    // feeds its `[batch, 1, hidden]` `hidden` straight through `rms_norm` +
+    // `lm_head_forward_backend_decode_if`).
+    let normed = rms_norm(output_hidden, &weights.final_norm, config.rms_norm_eps)?;
+    lm_head_forward_backend_decode_if(Some(backend), &normed, &weights.embed_tokens_t)
 }
 
 /// Batched paged decode API for real continuous-batching work.
