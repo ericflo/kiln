@@ -1103,6 +1103,15 @@ every config"):
   to 8, `KILN_VULKAN_MLP_BF16_DOWN_ROWS4_MIN_BATCH` defaults to 16, and
   `KILN_VULKAN_MLP_F32_DOWN_ROWS4_MIN_BATCH` defaults to 8, preserving the
   measured Strix Halo choices while letting other Vulkan devices sweep them.
+  **Update — GDN in-proj conv/split fusion stays opt-in:** added a rows4 BF16
+  GDN input-projection variant that writes Q/K/V/Z/A/B directly and advances the
+  conv state in the projection shader, removing the separate conv/split dispatch
+  when `KILN_ENABLE_VULKAN_GDN_IN_PROJ_CONV_SPLIT_FUSION=1` is set. Focused
+  Vulkan coverage `gdn_in_proj_rows4_conv_split_matches_cpu_with_tail_rows_and_odd_pairs`
+  checks tail rows, odd paired projection widths, split outputs, and conv-state
+  advancement. On Strix Halo this is not the default because a same-session GDN
+  block A/B measured the existing path faster: batch 16 was 4.108 ms default vs
+  4.156 ms fused, and batch 64 was 13.789 ms default vs 13.960 ms fused.
 
 ## Other follow-ups (perf headroom, not regressions)
 

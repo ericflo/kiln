@@ -140,6 +140,8 @@ pub mod shaders {
         shader_path!("gdn_in_proj_decode_batched_pair_qkv_z_rows2_bf16w");
     pub const GDN_IN_PROJ_DECODE_BATCHED_PAIR_QKV_Z_ROWS4_BF16W: &str =
         shader_path!("gdn_in_proj_decode_batched_pair_qkv_z_rows4_bf16w");
+    pub const GDN_IN_PROJ_DECODE_BATCHED_PAIR_QKV_Z_ROWS4_BF16W_CONV_SPLIT: &str =
+        shader_path!("gdn_in_proj_decode_batched_pair_qkv_z_rows4_bf16w_conv_split");
     pub const GDN_IN_PROJ_DECODE_BATCHED_PAIR_QKV_Z_ROWS8_BF16W: &str =
         shader_path!("gdn_in_proj_decode_batched_pair_qkv_z_rows8_bf16w");
     pub const GDN_DECODE_GATES_RECURRENT_RMSNORM: &str =

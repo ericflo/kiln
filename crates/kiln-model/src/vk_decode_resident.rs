@@ -2637,12 +2637,29 @@ pub fn record_gdn_block_batched_into(
         backend.mark_linear_attn_layer_seeded_kt(state_key);
     }
 
+    let (gdn_in_proj_shader, gdn_in_proj_workgroups) = gdn_in_proj_bf16w_batched_plan(
+        batch_size,
+        qkv_dim,
+        z_dim,
+        a_dim,
+        b_dim,
+        in_proj_total,
+    );
+    let fuse_gdn_in_proj_conv_split =
+        gdn_in_proj_shader == shaders::GDN_IN_PROJ_DECODE_BATCHED_PAIR_QKV_Z_ROWS4_BF16W
+            && env_truthy("KILN_ENABLE_VULKAN_GDN_IN_PROJ_CONV_SPLIT_FUSION")
+            && enabled_unless_disabled("KILN_DISABLE_VULKAN_GDN_IN_PROJ_CONV_SPLIT_FUSION");
+
     let normed_pre =
         backend.acquire_resident_scratch("ngd_b_normed_pre", (batch_size * hidden * 4) as u64)?;
-    let in_proj_out = backend.acquire_resident_scratch(
-        "ngd_b_in_proj_out",
-        (batch_size * in_proj_total * 4) as u64,
-    )?;
+    let in_proj_out = if fuse_gdn_in_proj_conv_split {
+        None
+    } else {
+        Some(backend.acquire_resident_scratch(
+            "ngd_b_in_proj_out",
+            (batch_size * in_proj_total * 4) as u64,
+        )?)
+    };
     let z_buf = backend.acquire_resident_scratch("ngd_b_z", (batch_size * z_dim * 4) as u64)?;
     let a_buf = backend.acquire_resident_scratch("ngd_b_a", (batch_size * a_dim * 4) as u64)?;
     let b_buf = backend.acquire_resident_scratch("ngd_b_b", (batch_size * b_dim * 4) as u64)?;
@@ -2670,60 +2687,89 @@ pub fn record_gdn_block_batched_into(
         &[batch_size as u32, hidden as u32, eps.to_bits()],
         Workgroups::OneD(batch_size as u32),
     )?;
-    let (gdn_in_proj_shader, gdn_in_proj_workgroups) = gdn_in_proj_bf16w_batched_plan(
-        batch_size,
-        qkv_dim,
-        z_dim,
-        a_dim,
-        b_dim,
-        in_proj_total,
-    );
-    batch.record_shader(
-        gdn_in_proj_shader,
-        &[
-            normed_pre.handle(),
-            qkv_w.handle(),
-            z_w.handle(),
-            a_w.handle(),
-            b_w.handle(),
-            in_proj_out.handle(),
-        ],
-        &[
-            hidden as u32,
-            qkv_dim as u32,
-            z_dim as u32,
-            a_dim as u32,
-            b_dim as u32,
-            in_proj_total as u32,
-            batch_size as u32,
-        ],
-        Workgroups::OneD(gdn_in_proj_workgroups),
-    )?;
-    batch.record_shader(
-        shaders::GDN_DECODE_CONV_SPLIT_BATCHED,
-        &[
-            in_proj_out.handle(),
-            conv_w.handle(),
-            conv_buf.handle(),
-            q_buf.handle(),
-            k_buf.handle(),
-            v_buf.handle(),
-            z_buf.handle(),
-            a_buf.handle(),
-            b_buf.handle(),
-        ],
-        &[
-            batch_size as u32,
-            qkv_dim as u32,
-            qk_dim as u32,
-            v_dim as u32,
-            z_dim as u32,
-            a_dim as u32,
-            b_dim as u32,
-            conv_kernel as u32,
-        ],
-        Workgroups::OneD((batch_size * in_proj_total).div_ceil(256) as u32),
-    )?;
+    if fuse_gdn_in_proj_conv_split {
+        batch.record_shader(
+            shaders::GDN_IN_PROJ_DECODE_BATCHED_PAIR_QKV_Z_ROWS4_BF16W_CONV_SPLIT,
+            &[
+                normed_pre.handle(),
+                qkv_w.handle(),
+                z_w.handle(),
+                a_w.handle(),
+                b_w.handle(),
+                conv_w.handle(),
+                conv_buf.handle(),
+                q_buf.handle(),
+                k_buf.handle(),
+                v_buf.handle(),
+                z_buf.handle(),
+                a_buf.handle(),
+                b_buf.handle(),
+            ],
+            &[
+                hidden as u32,
+                qkv_dim as u32,
+                z_dim as u32,
+                a_dim as u32,
+                b_dim as u32,
+                in_proj_total as u32,
+                batch_size as u32,
+                qk_dim as u32,
+                v_dim as u32,
+                conv_kernel as u32,
+            ],
+            Workgroups::OneD(gdn_in_proj_workgroups),
+        )?;
+    } else {
+        let in_proj_out = in_proj_out
+            .as_ref()
+            .context("batched GDN block missing in-proj scratch")?;
+        batch.record_shader(
+            gdn_in_proj_shader,
+            &[
+                normed_pre.handle(),
+                qkv_w.handle(),
+                z_w.handle(),
+                a_w.handle(),
+                b_w.handle(),
+                in_proj_out.handle(),
+            ],
+            &[
+                hidden as u32,
+                qkv_dim as u32,
+                z_dim as u32,
+                a_dim as u32,
+                b_dim as u32,
+                in_proj_total as u32,
+                batch_size as u32,
+            ],
+            Workgroups::OneD(gdn_in_proj_workgroups),
+        )?;
+        batch.record_shader(
+            shaders::GDN_DECODE_CONV_SPLIT_BATCHED,
+            &[
+                in_proj_out.handle(),
+                conv_w.handle(),
+                conv_buf.handle(),
+                q_buf.handle(),
+                k_buf.handle(),
+                v_buf.handle(),
+                z_buf.handle(),
+                a_buf.handle(),
+                b_buf.handle(),
+            ],
+            &[
+                batch_size as u32,
+                qkv_dim as u32,
+                qk_dim as u32,
+                v_dim as u32,
+                z_dim as u32,
+                a_dim as u32,
+                b_dim as u32,
+                conv_kernel as u32,
+            ],
+            Workgroups::OneD((batch_size * in_proj_total).div_ceil(256) as u32),
+        )?;
+    }
 
     let gqa_ratio = nv / nk;
     debug_assert!(gqa_ratio * nk == nv, "GDN nv must be a multiple of nk");

@@ -497,6 +497,11 @@ pub fn prewarm_builtin_pipelines(vk_device: &VulkanDevice) -> Result<()> {
         ("gdn_qkv_split_batched", 4, 12),
         ("gdn_in_proj_decode_batched_pair_qkv_z_rows2_bf16w", 6, 28),
         ("gdn_in_proj_decode_batched_pair_qkv_z_rows4_bf16w", 6, 28),
+        (
+            "gdn_in_proj_decode_batched_pair_qkv_z_rows4_bf16w_conv_split",
+            13,
+            40,
+        ),
         ("gdn_in_proj_decode_batched_pair_qkv_z_rows8_bf16w", 6, 28),
         ("gdn_gated_rms_norm", 4, 12),
         ("causal_conv1d", 4, 16),
@@ -654,6 +659,11 @@ pub fn prewarm_builtin_pipelines(vk_device: &VulkanDevice) -> Result<()> {
             crate::shaders::GDN_IN_PROJ_DECODE_BATCHED_PAIR_QKV_Z_ROWS4_BF16W,
             6,
             28,
+        ),
+        (
+            crate::shaders::GDN_IN_PROJ_DECODE_BATCHED_PAIR_QKV_Z_ROWS4_BF16W_CONV_SPLIT,
+            13,
+            40,
         ),
         (
             crate::shaders::GDN_IN_PROJ_DECODE_BATCHED_PAIR_QKV_Z_ROWS8_BF16W,

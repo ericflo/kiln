@@ -1,0 +1,265 @@
+// Batched single-token GDN input projection fused with seq-len-1 conv,
+// state advance, and projection split.
+//
+// This is the rows4 high-batch variant: QKV and Z columns are paired per
+// lane, groups of four batch rows share each packed bf16 weight load, and
+// the post-projection QKV value is immediately convolved/split into Q/K/V.
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 80, local_size_y = 3, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint hidden;
+    uint qkv_dim;
+    uint z_dim;
+    uint a_dim;
+    uint b_dim;
+    uint total_out;
+    uint batch;
+    uint qk_dim;
+    uint v_dim;
+    uint kernel_size;
+};
+
+layout(binding = 0) readonly buffer XBuf { float data_x[]; };
+layout(binding = 1) readonly buffer QkvWeightBuf { uint data_qkv_w[]; };
+layout(binding = 2) readonly buffer ZWeightBuf { uint data_z_w[]; };
+layout(binding = 3) readonly buffer AWeightBuf { uint data_a_w[]; };
+layout(binding = 4) readonly buffer BWeightBuf { uint data_b_w[]; };
+layout(binding = 5) readonly buffer ConvWeightBuf { float data_conv_w[]; };
+layout(binding = 6) buffer ConvStateBuf { float data_conv_state[]; };
+layout(binding = 7) writeonly buffer QBuf { float data_q[]; };
+layout(binding = 8) writeonly buffer KBuf { float data_k[]; };
+layout(binding = 9) writeonly buffer VBuf { float data_v[]; };
+layout(binding = 10) writeonly buffer ZBuf { float data_z[]; };
+layout(binding = 11) writeonly buffer ABuf { float data_a[]; };
+layout(binding = 12) writeonly buffer BBuf { float data_b[]; };
+
+shared float partial00[240];
+shared float partial01[240];
+shared float partial10[240];
+shared float partial11[240];
+shared float partial20[240];
+shared float partial21[240];
+shared float partial30[240];
+shared float partial31[240];
+
+float unpack_bf16(uint packed, uint idx) {
+    uint bf16_bits = ((idx & 1u) == 0u) ? (packed & 0xffffu) : (packed >> 16);
+    return uintBitsToFloat(bf16_bits << 16);
+}
+
+float silu(float x) {
+    if (x >= 0.0) {
+        return x / (1.0 + exp(-x));
+    }
+    float e = exp(x);
+    return x * e / (1.0 + e);
+}
+
+void write_projected(uint row, uint projection, uint col, float value) {
+    if (projection == 0u) {
+        uint state_len = kernel_size - 1u;
+        uint state_base = (row * qkv_dim + col) * state_len;
+
+        float sum = 0.0;
+        for (uint k = 0u; k < kernel_size; k++) {
+            float x_val = (k < state_len) ? data_conv_state[state_base + k] : value;
+            sum += x_val * data_conv_w[col * kernel_size + k];
+        }
+
+        if (state_len > 0u) {
+            for (uint s = 0u; s + 1u < state_len; s++) {
+                data_conv_state[state_base + s] = data_conv_state[state_base + s + 1u];
+            }
+            data_conv_state[state_base + state_len - 1u] = value;
+        }
+
+        float y = silu(sum);
+        if (col < qk_dim) {
+            data_q[row * qk_dim + col] = y;
+        } else if (col < 2u * qk_dim) {
+            data_k[row * qk_dim + (col - qk_dim)] = y;
+        } else if (col < 2u * qk_dim + v_dim) {
+            data_v[row * v_dim + (col - 2u * qk_dim)] = y;
+        }
+    } else if (projection == 1u) {
+        data_z[row * z_dim + col] = value;
+    } else if (projection == 2u) {
+        data_a[row * a_dim + col] = value;
+    } else {
+        data_b[row * b_dim + col] = value;
+    }
+}
+
+void main() {
+    uint col_lane = gl_LocalInvocationID.x;
+    uint red_lane = gl_LocalInvocationID.y;
+    uint qkv_pairs = (qkv_dim + 1u) / 2u;
+    uint z_pairs = (z_dim + 1u) / 2u;
+    uint dispatch_cols = qkv_pairs + z_pairs + a_dim + b_dim;
+    uint col_groups = (dispatch_cols + 79u) / 80u;
+    uint row_group = gl_WorkGroupID.x / col_groups;
+    uint col_group = gl_WorkGroupID.x - row_group * col_groups;
+    uint row0 = row_group * 4u;
+    uint row1 = row0 + 1u;
+    uint row2 = row0 + 2u;
+    uint row3 = row0 + 3u;
+    uint unit_idx = col_group * 80u + col_lane;
+    uint partial_idx = col_lane * 3u + red_lane;
+
+    uint col0 = 0u;
+    uint width = qkv_dim;
+    uint projection = 0u;
+    bool paired = false;
+
+    if (unit_idx < qkv_pairs) {
+        col0 = unit_idx * 2u;
+        width = qkv_dim;
+        projection = 0u;
+        paired = true;
+    } else if (unit_idx < qkv_pairs + z_pairs) {
+        col0 = (unit_idx - qkv_pairs) * 2u;
+        width = z_dim;
+        projection = 1u;
+        paired = true;
+    } else if (unit_idx < qkv_pairs + z_pairs + a_dim) {
+        col0 = unit_idx - qkv_pairs - z_pairs;
+        width = a_dim;
+        projection = 2u;
+    } else {
+        col0 = unit_idx - qkv_pairs - z_pairs - a_dim;
+        width = b_dim;
+        projection = 3u;
+    }
+
+    float sum00 = 0.0;
+    float sum01 = 0.0;
+    float sum10 = 0.0;
+    float sum11 = 0.0;
+    float sum20 = 0.0;
+    float sum21 = 0.0;
+    float sum30 = 0.0;
+    float sum31 = 0.0;
+    bool valid_unit = unit_idx < dispatch_cols && col0 < width;
+    bool valid_col1 = paired && (col0 + 1u) < width;
+    bool valid_row0 = row0 < batch;
+    bool valid_row1 = row1 < batch;
+    bool valid_row2 = row2 < batch;
+    bool valid_row3 = row3 < batch;
+
+    if (valid_unit) {
+        uint x_base0 = row0 * hidden;
+        uint x_base1 = row1 * hidden;
+        uint x_base2 = row2 * hidden;
+        uint x_base3 = row3 * hidden;
+        for (uint h = red_lane; h < hidden; h += 3u) {
+            uint off0 = h * width + col0;
+            float w0 = 0.0;
+            float w1 = 0.0;
+            if (projection == 0u) {
+                uint packed = data_qkv_w[off0 >> 1u];
+                w0 = unpack_bf16(packed, off0);
+                if (valid_col1) {
+                    w1 = unpack_bf16(data_qkv_w[(off0 + 1u) >> 1u], off0 + 1u);
+                }
+            } else if (projection == 1u) {
+                uint packed = data_z_w[off0 >> 1u];
+                w0 = unpack_bf16(packed, off0);
+                if (valid_col1) {
+                    w1 = unpack_bf16(data_z_w[(off0 + 1u) >> 1u], off0 + 1u);
+                }
+            } else if (projection == 2u) {
+                w0 = unpack_bf16(data_a_w[off0 >> 1u], off0);
+            } else {
+                w0 = unpack_bf16(data_b_w[off0 >> 1u], off0);
+            }
+            if (valid_row0) {
+                float xv0 = data_x[x_base0 + h];
+                sum00 += xv0 * w0;
+                if (valid_col1) {
+                    sum01 += xv0 * w1;
+                }
+            }
+            if (valid_row1) {
+                float xv1 = data_x[x_base1 + h];
+                sum10 += xv1 * w0;
+                if (valid_col1) {
+                    sum11 += xv1 * w1;
+                }
+            }
+            if (valid_row2) {
+                float xv2 = data_x[x_base2 + h];
+                sum20 += xv2 * w0;
+                if (valid_col1) {
+                    sum21 += xv2 * w1;
+                }
+            }
+            if (valid_row3) {
+                float xv3 = data_x[x_base3 + h];
+                sum30 += xv3 * w0;
+                if (valid_col1) {
+                    sum31 += xv3 * w1;
+                }
+            }
+        }
+    }
+
+    partial00[partial_idx] = sum00;
+    partial01[partial_idx] = sum01;
+    partial10[partial_idx] = sum10;
+    partial11[partial_idx] = sum11;
+    partial20[partial_idx] = sum20;
+    partial21[partial_idx] = sum21;
+    partial30[partial_idx] = sum30;
+    partial31[partial_idx] = sum31;
+    barrier();
+
+    if (red_lane == 0u && valid_unit) {
+        float total00 = 0.0;
+        float total01 = 0.0;
+        float total10 = 0.0;
+        float total11 = 0.0;
+        float total20 = 0.0;
+        float total21 = 0.0;
+        float total30 = 0.0;
+        float total31 = 0.0;
+        for (uint lane = 0u; lane < 3u; lane++) {
+            uint idx = col_lane * 3u + lane;
+            total00 += partial00[idx];
+            total01 += partial01[idx];
+            total10 += partial10[idx];
+            total11 += partial11[idx];
+            total20 += partial20[idx];
+            total21 += partial21[idx];
+            total30 += partial30[idx];
+            total31 += partial31[idx];
+        }
+
+        if (valid_row0) {
+            write_projected(row0, projection, col0, total00);
+            if (valid_col1) {
+                write_projected(row0, projection, col0 + 1u, total01);
+            }
+        }
+        if (valid_row1) {
+            write_projected(row1, projection, col0, total10);
+            if (valid_col1) {
+                write_projected(row1, projection, col0 + 1u, total11);
+            }
+        }
+        if (valid_row2) {
+            write_projected(row2, projection, col0, total20);
+            if (valid_col1) {
+                write_projected(row2, projection, col0 + 1u, total21);
+            }
+        }
+        if (valid_row3) {
+            write_projected(row3, projection, col0, total30);
+            if (valid_col1) {
+                write_projected(row3, projection, col0 + 1u, total31);
+            }
+        }
+    }
+}

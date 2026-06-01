@@ -329,6 +329,12 @@ fn gdn_in_proj_bf16w_batched_plan(
     (shader, (row_groups * dispatch_cols.div_ceil(80)) as u32)
 }
 
+fn gdn_in_proj_conv_split_fused(shader: &'static str) -> bool {
+    shader == shaders::GDN_IN_PROJ_DECODE_BATCHED_PAIR_QKV_Z_ROWS4_BF16W
+        && env_truthy("KILN_ENABLE_VULKAN_GDN_IN_PROJ_CONV_SPLIT_FUSION")
+        && enabled_unless_disabled("KILN_DISABLE_VULKAN_GDN_IN_PROJ_CONV_SPLIT_FUSION")
+}
+
 fn time<F: FnMut() -> Result<()>>(label: &str, batch: usize, mut f: F) -> Result<()> {
     let warmup_iters = env_usize("KILN_VK_MICROBENCH_WARMUP", WARMUP_ITERS);
     let timed_iters = env_usize("KILN_VK_MICROBENCH_TIMED", TIMED_ITERS);
@@ -1113,52 +1119,86 @@ fn run_full_token_resident_mixed_batched(
                         B_DIM,
                         gdn_in_proj_total,
                     );
-                    b.record_shader(
-                        in_proj_shader,
-                        &[
-                            normed_hidden.handle(),
-                            gdn_qkv_w.handle(),
-                            gdn_z_w.handle(),
-                            gdn_a_w.handle(),
-                            gdn_b_w.handle(),
-                            gdn_in_proj_out.handle(),
-                        ],
-                        &[
-                            HIDDEN as u32,
-                            QKV_DIM as u32,
-                            Z_DIM as u32,
-                            A_DIM as u32,
-                            B_DIM as u32,
-                            gdn_in_proj_total as u32,
-                            batch as u32,
-                        ],
-                        Workgroups::OneD(in_proj_workgroups),
-                    )?;
-                    b.record_shader(
-                        shaders::GDN_DECODE_CONV_SPLIT_BATCHED,
-                        &[
-                            gdn_in_proj_out.handle(),
-                            gdn_conv_w.handle(),
-                            gdn_conv_state.handle(),
-                            gdn_q_buf.handle(),
-                            gdn_k_buf.handle(),
-                            gdn_v_buf.handle(),
-                            gdn_z_buf.handle(),
-                            gdn_a_buf.handle(),
-                            gdn_b_buf.handle(),
-                        ],
-                        &[
-                            batch as u32,
-                            QKV_DIM as u32,
-                            GDN_QK_DIM as u32,
-                            GDN_V_DIM as u32,
-                            Z_DIM as u32,
-                            A_DIM as u32,
-                            B_DIM as u32,
-                            conv_kernel as u32,
-                        ],
-                        Workgroups::OneD((batch * gdn_in_proj_total).div_ceil(256) as u32),
-                    )?;
+                    if gdn_in_proj_conv_split_fused(in_proj_shader) {
+                        b.record_shader(
+                            shaders::GDN_IN_PROJ_DECODE_BATCHED_PAIR_QKV_Z_ROWS4_BF16W_CONV_SPLIT,
+                            &[
+                                normed_hidden.handle(),
+                                gdn_qkv_w.handle(),
+                                gdn_z_w.handle(),
+                                gdn_a_w.handle(),
+                                gdn_b_w.handle(),
+                                gdn_conv_w.handle(),
+                                gdn_conv_state.handle(),
+                                gdn_q_buf.handle(),
+                                gdn_k_buf.handle(),
+                                gdn_v_buf.handle(),
+                                gdn_z_buf.handle(),
+                                gdn_a_buf.handle(),
+                                gdn_b_buf.handle(),
+                            ],
+                            &[
+                                HIDDEN as u32,
+                                QKV_DIM as u32,
+                                Z_DIM as u32,
+                                A_DIM as u32,
+                                B_DIM as u32,
+                                gdn_in_proj_total as u32,
+                                batch as u32,
+                                GDN_QK_DIM as u32,
+                                GDN_V_DIM as u32,
+                                conv_kernel as u32,
+                            ],
+                            Workgroups::OneD(in_proj_workgroups),
+                        )?;
+                    } else {
+                        b.record_shader(
+                            in_proj_shader,
+                            &[
+                                normed_hidden.handle(),
+                                gdn_qkv_w.handle(),
+                                gdn_z_w.handle(),
+                                gdn_a_w.handle(),
+                                gdn_b_w.handle(),
+                                gdn_in_proj_out.handle(),
+                            ],
+                            &[
+                                HIDDEN as u32,
+                                QKV_DIM as u32,
+                                Z_DIM as u32,
+                                A_DIM as u32,
+                                B_DIM as u32,
+                                gdn_in_proj_total as u32,
+                                batch as u32,
+                            ],
+                            Workgroups::OneD(in_proj_workgroups),
+                        )?;
+                        b.record_shader(
+                            shaders::GDN_DECODE_CONV_SPLIT_BATCHED,
+                            &[
+                                gdn_in_proj_out.handle(),
+                                gdn_conv_w.handle(),
+                                gdn_conv_state.handle(),
+                                gdn_q_buf.handle(),
+                                gdn_k_buf.handle(),
+                                gdn_v_buf.handle(),
+                                gdn_z_buf.handle(),
+                                gdn_a_buf.handle(),
+                                gdn_b_buf.handle(),
+                            ],
+                            &[
+                                batch as u32,
+                                QKV_DIM as u32,
+                                GDN_QK_DIM as u32,
+                                GDN_V_DIM as u32,
+                                Z_DIM as u32,
+                                A_DIM as u32,
+                                B_DIM as u32,
+                                conv_kernel as u32,
+                            ],
+                            Workgroups::OneD((batch * gdn_in_proj_total).div_ceil(256) as u32),
+                        )?;
+                    }
                     let l2_eps = 1e-6f32;
                     let q_scale = 1.0f32 / (GDN_HEAD_DIM as f32).sqrt();
                     b.record_shader(
@@ -1279,7 +1319,7 @@ fn run_gdn_block_resident_batched(
     use kiln_vulkan_kernel::Workgroups;
 
     println!(
-        "== gdn_block_resident_batched (GDN block + MLP, 9 kernels recorded into 1 cmd-buffer + 1 submit) =="
+        "== gdn_block_resident_batched (GDN block + MLP, 9 kernels into 1 cmd-buffer; opt-in rows4 conv-split fusion records 8) =="
     );
 
     let conv_kernel = 4usize;
@@ -1349,52 +1389,86 @@ fn run_gdn_block_resident_batched(
             )?;
             let (in_proj_shader, in_proj_workgroups) =
                 gdn_in_proj_bf16w_batched_plan(batch, QKV_DIM, Z_DIM, A_DIM, B_DIM, in_proj_total);
-            b.record_shader(
-                in_proj_shader,
-                &[
-                    normed_pre.handle(),
-                    qkv_w.handle(),
-                    z_w.handle(),
-                    a_w.handle(),
-                    b_w.handle(),
-                    in_proj_out.handle(),
-                ],
-                &[
-                    HIDDEN as u32,
-                    QKV_DIM as u32,
-                    Z_DIM as u32,
-                    A_DIM as u32,
-                    B_DIM as u32,
-                    in_proj_total as u32,
-                    batch as u32,
-                ],
-                Workgroups::OneD(in_proj_workgroups),
-            )?;
-            b.record_shader(
-                shaders::GDN_DECODE_CONV_SPLIT_BATCHED,
-                &[
-                    in_proj_out.handle(),
-                    conv_w.handle(),
-                    conv_state.handle(),
-                    q_buf.handle(),
-                    k_buf.handle(),
-                    v_buf.handle(),
-                    z_buf.handle(),
-                    a_buf.handle(),
-                    b_buf.handle(),
-                ],
-                &[
-                    batch as u32,
-                    QKV_DIM as u32,
-                    GDN_QK_DIM as u32,
-                    GDN_V_DIM as u32,
-                    Z_DIM as u32,
-                    A_DIM as u32,
-                    B_DIM as u32,
-                    conv_kernel as u32,
-                ],
-                Workgroups::OneD((batch * in_proj_total).div_ceil(256) as u32),
-            )?;
+            if gdn_in_proj_conv_split_fused(in_proj_shader) {
+                b.record_shader(
+                    shaders::GDN_IN_PROJ_DECODE_BATCHED_PAIR_QKV_Z_ROWS4_BF16W_CONV_SPLIT,
+                    &[
+                        normed_pre.handle(),
+                        qkv_w.handle(),
+                        z_w.handle(),
+                        a_w.handle(),
+                        b_w.handle(),
+                        conv_w.handle(),
+                        conv_state.handle(),
+                        q_buf.handle(),
+                        k_buf.handle(),
+                        v_buf.handle(),
+                        z_buf.handle(),
+                        a_buf.handle(),
+                        b_buf.handle(),
+                    ],
+                    &[
+                        HIDDEN as u32,
+                        QKV_DIM as u32,
+                        Z_DIM as u32,
+                        A_DIM as u32,
+                        B_DIM as u32,
+                        in_proj_total as u32,
+                        batch as u32,
+                        GDN_QK_DIM as u32,
+                        GDN_V_DIM as u32,
+                        conv_kernel as u32,
+                    ],
+                    Workgroups::OneD(in_proj_workgroups),
+                )?;
+            } else {
+                b.record_shader(
+                    in_proj_shader,
+                    &[
+                        normed_pre.handle(),
+                        qkv_w.handle(),
+                        z_w.handle(),
+                        a_w.handle(),
+                        b_w.handle(),
+                        in_proj_out.handle(),
+                    ],
+                    &[
+                        HIDDEN as u32,
+                        QKV_DIM as u32,
+                        Z_DIM as u32,
+                        A_DIM as u32,
+                        B_DIM as u32,
+                        in_proj_total as u32,
+                        batch as u32,
+                    ],
+                    Workgroups::OneD(in_proj_workgroups),
+                )?;
+                b.record_shader(
+                    shaders::GDN_DECODE_CONV_SPLIT_BATCHED,
+                    &[
+                        in_proj_out.handle(),
+                        conv_w.handle(),
+                        conv_state.handle(),
+                        q_buf.handle(),
+                        k_buf.handle(),
+                        v_buf.handle(),
+                        z_buf.handle(),
+                        a_buf.handle(),
+                        b_buf.handle(),
+                    ],
+                    &[
+                        batch as u32,
+                        QKV_DIM as u32,
+                        GDN_QK_DIM as u32,
+                        GDN_V_DIM as u32,
+                        Z_DIM as u32,
+                        A_DIM as u32,
+                        B_DIM as u32,
+                        conv_kernel as u32,
+                    ],
+                    Workgroups::OneD((batch * in_proj_total).div_ceil(256) as u32),
+                )?;
+            }
             let l2_eps = 1e-6f32;
             let q_scale = 1.0f32 / (GDN_HEAD_DIM as f32).sqrt();
             b.record_shader(
