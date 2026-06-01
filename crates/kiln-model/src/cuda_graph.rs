@@ -1067,6 +1067,26 @@ impl CudaGraphRunner {
                         )?;
                     }
 
+                    // #1082 box-102 TOKPROBE (KILN_BOX102_TOKPROBE=1): after the
+                    // per-replay update_token_buffer + default-stream sync, read
+                    // token_buffer device->host and compare to the intended
+                    // token_id. This isolates the BUG2 doubling root cause:
+                    //   buffer_holds == [token_id]  => update+sync are correct;
+                    //     the captured embedding kernel must be reading a STALE
+                    //     copy (baked capture-time token / an arena-copied index
+                    //     tensor) rather than this persistent buffer's device ptr.
+                    //   buffer_holds != [token_id]  => update_token_buffer /
+                    //     cuda_synchronize_default_stream is not landing before
+                    //     the readback (ordering/allocation bug in the write path).
+                    // Graph replay runs captured KERNELS only, so this Rust-side
+                    // readback is the only way to observe the buffer the kernels see.
+                    if std::env::var("KILN_BOX102_TOKPROBE").ok().as_deref() == Some("1") {
+                        let holds = captured.token_buffer.to_vec::<u32>().ok();
+                        eprintln!(
+                            "[BOX102-TOKPROBE] replay seq_len={seq_len} intended_token={token_id} buffer_holds={holds:?}"
+                        );
+                    }
+
                     // #1082 box-102 SAME-STEP differential (KILN_DEBUG_LAYER_NORMS):
                     // run the EAGER forward on THIS replay step's identical inputs
                     // (snapshot + restore linear_state; the KV write is idempotent
