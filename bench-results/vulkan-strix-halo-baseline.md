@@ -711,6 +711,13 @@ every config"):
   4694 rows/s. A production-shaped `full_token_resident_mixed_paged` check
   with history 256, warmup=2, timed=4, repeats=3 measured batch 32 at
   233.8 ms / 137 rows/s and batch 64 at 451.9 ms / 142 rows/s.
+  **Update — resident scratch pool drops dead MLP outputs:** the single-row
+  full-attention and GDN resident recorders no longer acquire unused
+  `nfa_mlp_out` / `ngd_mlp_out` scratch buffers. The fused down+residual
+  dispatches write final block outputs directly, so these pool slots were
+  never bound. Focused check: `cargo check -p kiln-model
+  --no-default-features --features vulkan` passes and the two stale resident
+  scratch warnings are gone.
 - **Vulkan paged-attention decode kernel**: the kernel crate already had
   `paged_attn_decode_batch_paged.comp`; Vulkan now advertises
   `supports_flash_attn_paged_decode` and wires the single-query paged-decode

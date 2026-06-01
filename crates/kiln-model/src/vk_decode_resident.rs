@@ -1725,7 +1725,6 @@ pub fn record_full_attn_block_into(
     let normed_post = backend.acquire_resident_scratch("nfa_normed_post", (hidden * 4) as u64)?;
     let mlp_scratch =
         backend.acquire_resident_scratch("nfa_mlp_scratch", (intermediate * 4) as u64)?;
-    let mlp_out = backend.acquire_resident_scratch("nfa_mlp_out", (hidden * 4) as u64)?;
 
     let k_pool = vk_kv_cache
         .k_buffer(full_attn_layer_idx)
@@ -2316,7 +2315,6 @@ pub fn record_gdn_block_into(
     let attn_residual = backend.acquire_resident_scratch("ngd_attn_residual", (hidden * 4) as u64)?;
     let normed_post = backend.acquire_resident_scratch("ngd_normed_post", (hidden * 4) as u64)?;
     let mlp_scratch = backend.acquire_resident_scratch("ngd_mlp_scratch", (intermediate * 4) as u64)?;
-    let mlp_out = backend.acquire_resident_scratch("ngd_mlp_out", (hidden * 4) as u64)?;
 
     // Dispatch sequence (mirrors transformer_block_paged_decode_gdn_resident_b1 body)
     batch.record_shader(
