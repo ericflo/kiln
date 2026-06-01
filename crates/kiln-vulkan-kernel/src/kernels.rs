@@ -405,6 +405,110 @@ pub fn prewarm_builtin_pipelines(vk_device: &VulkanDevice) -> Result<()> {
             .with_context(|| format!("create Vulkan pipeline {shader_name}"))?;
     }
 
+    let command_batch_shaders = [
+        (crate::shaders::QWEN_RMSNORM_FORWARD, 3usize, 12u32),
+        (crate::shaders::QWEN_RMSNORM_QK_COMBINED, 4, 16),
+        (crate::shaders::FULL_ATTN_QKV_DECODE_BF16W, 5, 20),
+        (crate::shaders::FULL_ATTN_QKV_DECODE_BATCHED_BF16W, 5, 24),
+        (
+            crate::shaders::FULL_ATTN_QKV_DECODE_BATCHED_ROWS4_BF16W,
+            5,
+            24,
+        ),
+        (
+            crate::shaders::FULL_ATTN_QKV_GATE_SPLIT_BATCHED_BF16W,
+            8,
+            28,
+        ),
+        (
+            crate::shaders::FULL_ATTN_QKV_GATE_SPLIT_BATCHED_ROWS4_BF16W,
+            8,
+            28,
+        ),
+        (crate::shaders::QKV_GATE_SPLIT, 5, 16),
+        (crate::shaders::QKV_GATE_SPLIT_BATCHED, 5, 16),
+        (crate::shaders::VK_ROPE_F32, 4, 16),
+        (crate::shaders::PAGED_KV_WRITE_SLOT, 4, 8),
+        (crate::shaders::PAGED_KV_WRITE_SLOTS, 5, 12),
+        (crate::shaders::PAGED_ATTN_DECODE_BATCH_PAGED, 6, 24),
+        (
+            crate::shaders::PAGED_ATTN_DECODE_BATCH_PAGED_SPLITK,
+            6,
+            28,
+        ),
+        (
+            crate::shaders::PAGED_ATTN_DECODE_BATCH_PAGED_SPLITK_REDUCE,
+            2,
+            12,
+        ),
+        (crate::shaders::VK_MUL_SIGMOID_GATE_F32, 3, 4),
+        (crate::shaders::LINEAR_DECODE_BF16W, 3, 8),
+        (crate::shaders::LINEAR_DECODE_BF16W_ADD_RESIDUAL, 4, 8),
+        (crate::shaders::LINEAR_DECODE_BATCHED_BF16W, 3, 12),
+        (crate::shaders::LINEAR_DECODE_BATCHED_ROWS4_BF16W, 3, 12),
+        (
+            crate::shaders::LINEAR_DECODE_BATCHED_BF16W_ADD_RESIDUAL,
+            4,
+            12,
+        ),
+        (
+            crate::shaders::LINEAR_DECODE_BATCHED_BF16W_ADD_RESIDUAL_ROWS4,
+            4,
+            12,
+        ),
+        (
+            crate::shaders::LINEAR_DECODE_BATCHED_BF16W_ADD_RESIDUAL_ROWS8,
+            4,
+            12,
+        ),
+        (crate::shaders::ADD_QWEN_RMSNORM, 5, 8),
+        (crate::shaders::ADD_QWEN_RMSNORM_BATCHED, 5, 12),
+        (crate::shaders::MLP_GATE_UP_DECODE_BF16W, 4, 8),
+        (crate::shaders::MLP_GATE_UP_DECODE_BATCHED_BF16W, 4, 12),
+        (
+            crate::shaders::MLP_GATE_UP_DECODE_BATCHED_ROWS4_BF16W,
+            4,
+            12,
+        ),
+        (
+            crate::shaders::MLP_GATE_UP_DECODE_BATCHED_ROWS8_BF16W,
+            4,
+            12,
+        ),
+        (crate::shaders::GDN_IN_PROJ_DECODE_BF16W, 6, 24),
+        (crate::shaders::GDN_IN_PROJ_SPLIT, 5, 20),
+        (crate::shaders::GDN_IN_PROJ_DECODE_BATCHED_BF16W, 6, 28),
+        (
+            crate::shaders::GDN_IN_PROJ_DECODE_BATCHED_PAIR_QKV_Z_BF16W,
+            6,
+            28,
+        ),
+        (
+            crate::shaders::GDN_IN_PROJ_DECODE_BATCHED_PAIR_QKV_Z_ROWS2_BF16W,
+            6,
+            28,
+        ),
+        (
+            crate::shaders::GDN_IN_PROJ_DECODE_BATCHED_PAIR_QKV_Z_ROWS4_BF16W,
+            6,
+            28,
+        ),
+        (crate::shaders::GDN_IN_PROJ_SPLIT_BATCHED, 5, 20),
+        (crate::shaders::GDN_DECODE_CONV_SPLIT_BATCHED, 9, 32),
+        (crate::shaders::GDN_QKV_SPLIT, 4, 12),
+        (crate::shaders::GDN_QKV_SPLIT_BATCHED, 4, 12),
+        (crate::shaders::CAUSAL_CONV1D, 4, 16),
+        (crate::shaders::CAUSAL_CONV1D_STATE_ADVANCE, 2, 16),
+        (crate::shaders::L2_NORM_QK_PER_ROW, 4, 24),
+        (crate::shaders::GDN_DECODE_GATES_RECURRENT_RMSNORM, 11, 20),
+    ];
+
+    for (shader_path, total_bindings, push_bytes) in command_batch_shaders {
+        vk_device
+            .get_compute_pipeline_by_path(shader_path, total_bindings, push_bytes)
+            .with_context(|| format!("prewarm Vulkan command-batch path {shader_path}"))?;
+    }
+
     Ok(())
 }
 

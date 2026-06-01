@@ -433,9 +433,10 @@ every config"):
 ## Other follow-ups (perf headroom, not regressions)
 
 1. **First-token shader compile** should be remeasured in live serving after the
-   expanded Vulkan pipeline prewarm list; it now includes the resident decode
-   RoPE, attention gate, batch-2 GDN in-proj, and rows4/rows8 down+residual
-   variants that were previously still lazy-created.
+   expanded Vulkan pipeline prewarm. It now includes the resident decode RoPE,
+   attention gate, batch-2 GDN in-proj, and rows4/rows8 down+residual variants,
+   and it also fills the path-keyed cache used by `CommandBatch::record_shader`
+   so the first recorded decode step does not do first-use path lookups.
 2. Complete the remaining shared-stack dependency cleanup audit for any
    non-Vulkan decode islands; the Vulkan-specific decode weight path is now
    duplicate-copy-free.
