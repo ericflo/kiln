@@ -40,8 +40,8 @@ pub mod vk_forward;
 pub mod weights;
 
 pub use backend::BackendRuntime;
-#[cfg(feature = "legacy-candle-parity")]
-pub use backend::for_device as backend_for_device;
+// (#1082 candle removal) `backend::for_device` (candle-typed shim) was deleted
+// with the candle-parity opt-in feature; production uses `for_device_kt`.
 pub use cancel::CancelHandle;
 pub use engine::Engine;
 pub use forward::LinearAttentionState;

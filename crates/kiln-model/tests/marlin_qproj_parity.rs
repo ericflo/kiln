@@ -18,46 +18,36 @@
 //! bounds against a dequant baseline; this test confirms the forward plumbing
 //! preserves that fidelity end to end.
 //!
-//! # #1082 type-flip status
+//! # #1082 candle removal
 //!
 //! `kiln_model::forward::q_proj_forward`, `GpuFullAttentionWeights`'s tensor
-//! fields, and `MarlinPackedProj.{b_packed,scales}` are now kt (`kiln_tensor`)
-//! typed. This test still constructs its synthetic weights/activations with
-//! candle's `Tensor::from_vec` + `to_device` + `to_dtype` (the most ergonomic
-//! way to build deterministic on-device data). The kt boundary is crossed with
-//! the CUDA kt<->candle bridge: candle weights are borrowed to kt for the
-//! struct fields/input (`kt_in`), and the kt outputs are copied back to candle
-//! (`candle_out`) so the cosine-similarity / max-abs-diff parity assertions are
-//! unchanged.
-//!
-//! (#1082) Candle parity oracle (kt↔candle bridge via the candle-gated
-//! kt-bridge adapters). File-level gated to `legacy-candle-parity` so plain
-//! `--features cuda` builds candle-free. Run with
-//! `--features cuda,legacy-candle-parity`.
+//! fields, and `MarlinPackedProj.{b_packed,scales}` are kt (`kiln_tensor`)
+//! typed. This file is now fully kt-native: the synthetic weights/activations
+//! and the Marlin pack fixtures are built directly on the CUDA device via the
+//! candle-free kt constructor path (`Tensor::from_vec(..).to_dtype(..)
+//! .to_device(Device::Cuda(0))`), and `q_proj_forward` returns kt tensors. The
+//! cosine-similarity / max-abs-diff parity assertions are unchanged. Runs under
+//! plain `--features cuda`.
 
-#![cfg(all(feature = "cuda", feature = "legacy-candle-parity"))]
+#![cfg(feature = "cuda")]
 
 #[cfg(feature = "cuda")]
-use candle_core::{DType, Device, Tensor};
-#[cfg(feature = "cuda")]
-use kiln_tensor::Tensor as KtTensor;
+use kiln_tensor::{DType, Device, Tensor};
 
-// #1082 type-flip: `GpuFullAttentionWeights` fields, `q_proj_forward`'s
-// activation input/output, and `MarlinPackedProj.{b_packed,scales}` are now kt
-// (`kiln_tensor`) tensors, while the test still builds its synthetic
-// weights/activations as candle tensors. This is a CUDA-only test, so the CUDA
-// kt<->candle bridge is available: build candle on-device, borrow to kt for the
-// fields/input, and copy the kt outputs back to candle for the (unchanged)
-// cosine/max-abs-diff parity assertions.
+// #1082 candle removal: `GpuFullAttentionWeights` fields, `q_proj_forward`'s
+// activation input/output, and `MarlinPackedProj.{b_packed,scales}` are kt
+// (`kiln_tensor`) tensors, and this file builds its synthetic weights/
+// activations directly on the CUDA device via the candle-free kt constructor
+// path. `kt_in`/`candle_out` collapsed to identity once candle was dropped;
+// kept as thin passthroughs so the call sites stay readable.
 #[cfg(feature = "cuda")]
-fn kt_in(t: &Tensor) -> KtTensor {
-    kiln_kt_bridge::kt_tensor_from_candle_cuda_borrow(t)
-        .expect("candle -> kt borrow (cuda)")
+fn kt_in(t: &Tensor) -> Tensor {
+    t.clone()
 }
 
 #[cfg(feature = "cuda")]
-fn candle_out(t: &KtTensor) -> Tensor {
-    kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(t).expect("kt -> candle copy (cuda)")
+fn candle_out(t: &Tensor) -> Tensor {
+    t.clone()
 }
 
 #[cfg(feature = "cuda")]
@@ -88,9 +78,9 @@ fn cosine_similarity(a: &Tensor, b: &Tensor) -> f32 {
     let dot = (&af * &bf).expect("dot mul").sum_all().expect("dot sum");
     let na = (&af * &af).expect("a sq").sum_all().expect("a nrm sum");
     let nb = (&bf * &bf).expect("b sq").sum_all().expect("b nrm sum");
-    let dot = dot.to_vec0::<f32>().expect("dot scalar");
-    let na = na.to_vec0::<f32>().expect("a nrm scalar").sqrt();
-    let nb = nb.to_vec0::<f32>().expect("b nrm scalar").sqrt();
+    let dot = dot.to_scalar::<f32>().expect("dot scalar");
+    let na = na.to_scalar::<f32>().expect("a nrm scalar").sqrt();
+    let nb = nb.to_scalar::<f32>().expect("b nrm scalar").sqrt();
     let denom = (na * nb).max(1e-12);
     dot / denom
 }
@@ -121,11 +111,11 @@ fn run_parity(device: &Device, m: usize, k: usize, n: usize) {
         kiln_marlin_gemm::pack::quantize_and_pack(&weight_host, k, n, groupsize as i64);
 
     // Baseline q_proj_t is the dequantized weight in [k, n] layout, on device.
-    let q_proj_t = Tensor::from_vec(dequant_f32, (k, n), &Device::Cpu)
+    let q_proj_t = Tensor::from_vec(dequant_f32, (k, n))
         .expect("dequant cpu tensor")
         .to_dtype(DType::BF16)
         .expect("dequant -> bf16")
-        .to_device(device)
+        .to_device(*device)
         .expect("dequant -> cuda")
         .contiguous()
         .expect("q_proj_t contiguous");
@@ -136,31 +126,33 @@ fn run_parity(device: &Device, m: usize, k: usize, n: usize) {
     // --- Build a synthetic activation of shape [1, m, k] (the forward path
     // consumes `[batch, seq, hidden]`).
     let acts_host = random_vec(m * k, 0xDEAD_BEEF_F00D_BABE ^ (m as u64), 0.25);
-    let acts_cpu = Tensor::from_vec(acts_host, (1, m, k), &Device::Cpu).expect("acts cpu tensor");
+    let acts_cpu = Tensor::from_vec(acts_host, (1, m, k)).expect("acts cpu tensor");
     let x = acts_cpu
         .to_dtype(DType::BF16)
         .expect("acts -> bf16")
-        .to_device(device)
+        .to_device(*device)
         .expect("acts -> cuda");
 
     // Construct MarlinPackedProj from the same packed/scales as above.
-    // #1082: `MarlinPackedProj.{b_packed,scales}` are now kt tensors, so
-    // build the candle on-device tensors here and bridge them to kt once
-    // (CUDA borrow) — mirroring the one-time pack-time bridge in
-    // `upload_packed`. The data + device are unchanged; only the field
-    // type at the struct boundary is kt.
-    let b_packed_candle = Tensor::from_vec(b_packed_vec, (k / 16, n * 16 / 8), &Device::Cpu)
+    // #1082 candle removal: `MarlinPackedProj.{b_packed,scales}` are kt
+    // tensors — build them directly on the CUDA device, mirroring production
+    // `marlin_proj::upload_packed`. The packer emits the packed weight as
+    // `i32`; kt has no I32 variant, so reinterpret as U32 (a bit-identical
+    // 4-byte cast — exactly what the kernel's opaque-32-bit-word surface and
+    // the old candle `I32 → kt U32` bridge did). Scales stay f16.
+    let b_packed_u32: Vec<u32> = b_packed_vec.into_iter().map(|x| x as u32).collect();
+    let b_packed = Tensor::from_vec(b_packed_u32, (k / 16, n * 16 / 8))
         .expect("b_packed cpu tensor")
-        .to_device(device)
+        .to_device(*device)
         .expect("b_packed -> cuda");
     let num_groups = k / groupsize as usize;
-    let scales_candle = Tensor::from_vec(scales_vec, (num_groups, n), &Device::Cpu)
+    let scales = Tensor::from_vec(scales_vec, (num_groups, n))
         .expect("scales cpu tensor")
-        .to_device(device)
+        .to_device(*device)
         .expect("scales -> cuda");
     let packed = MarlinPackedProj {
-        b_packed: kt_in(&b_packed_candle),
-        scales: kt_in(&scales_candle),
+        b_packed,
+        scales,
         groupsize,
         k,
         n,
@@ -171,9 +163,8 @@ fn run_parity(device: &Device, m: usize, k: usize, n: usize) {
     // other fields can alias q_proj and zero-filled norm vectors.
     let q_norm = Tensor::ones((1,), DType::BF16, device).expect("q_norm ones");
 
-    // #1082: GpuFullAttentionWeights fields are kt — bridge the candle weights
-    // to kt (CUDA borrow). The data + device are unchanged; only the static
-    // type at the field boundary changes.
+    // #1082: GpuFullAttentionWeights fields are kt; the synthetic weights are
+    // already kt, so these are plain clones (kt_in is identity post-candle).
     let q_proj_kt = kt_in(&q_proj);
     let q_proj_t_kt = kt_in(&q_proj_t);
     let q_norm_kt = kt_in(&q_norm);
@@ -216,7 +207,7 @@ fn run_parity(device: &Device, m: usize, k: usize, n: usize) {
     // --- Marlin (KILN_W4A16 set): W4A16 kernel + (optional) LoRA delta.
     let marlin = q_proj_forward(&x_kt, &marlin_weights, None, 0.0).expect("marlin q_proj_forward");
 
-    // Outputs are kt — copy back to candle for the (unchanged) parity helpers.
+    // Outputs are kt; candle_out is identity post-candle (kept for readability).
     let baseline = candle_out(&baseline);
     let marlin = candle_out(&marlin);
 
@@ -238,7 +229,9 @@ fn run_parity(device: &Device, m: usize, k: usize, n: usize) {
 fn q_proj_marlin_parity_qwen35_4b() {
     #[cfg(feature = "cuda")]
     {
-        let device = match Device::new_cuda(0).ok() {
+        let device = match (kiln_tensor::primary_cuda_context(0).is_ok())
+            .then_some(Device::Cuda(0))
+        {
             Some(d) => d,
             None => {
                 eprintln!("CUDA not available, skipping marlin q_proj parity test");
