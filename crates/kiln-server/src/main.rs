@@ -706,9 +706,9 @@ fn spawn_backend_prewarm(state: AppState) {
 
     if vk_native_training_enabled(is_vulkan) {
         tracing::info!(
-            "skipping background inference prewarm because Vulkan-native training is enabled"
+            "skipping synthetic inference prewarm because Vulkan-native training is enabled"
         );
-        prewarm_complete.store(true, Ordering::Release);
+        spawn_vulkan_decode_weight_prewarm(runner, gpu_lock, device_kt, prewarm_complete);
         return;
     }
 
@@ -736,7 +736,7 @@ fn spawn_backend_prewarm(state: AppState) {
             precompile_vulkan_custom_kernels(&device_kt);
             // Write lock — `prewarm_backend_decode_weights` now mutates
             // `weights` to stub the pre-transposed bf16 caches after Vulkan
-            // upload (frees ~6-7 GB of candle CPU residency). Prewarm runs
+            // upload (frees ~6-7 GB of local CPU residency). Prewarm runs
             // once at startup so the brief exclusive lock is fine.
             let mut runner_guard = runner.write().unwrap();
             runner_guard
@@ -803,6 +803,50 @@ fn spawn_backend_prewarm(state: AppState) {
             }
             Ok(Err(err)) => tracing::warn!(error = %err, "background inference prewarm failed"),
             Err(err) => tracing::warn!(error = %err, "background inference prewarm task failed"),
+        }
+        prewarm_complete.store(true, Ordering::Release);
+    });
+}
+
+fn spawn_vulkan_decode_weight_prewarm(
+    runner: Arc<std::sync::RwLock<ModelRunner>>,
+    gpu_lock: Arc<std::sync::RwLock<()>>,
+    device_kt: kiln_tensor::Device,
+    prewarm_complete: Arc<std::sync::atomic::AtomicBool>,
+) {
+    tokio::spawn(async move {
+        tracing::info!("starting Vulkan decode weight prewarm");
+        let prewarm_start = std::time::Instant::now();
+        let prewarm = tokio::task::spawn_blocking(move || -> anyhow::Result<bool> {
+            // Pipeline compilation is cheap and independent of model working
+            // buffers, so do it even if a request wins the GPU lock.
+            precompile_vulkan_custom_kernels(&device_kt);
+
+            let Ok(_gpu_guard) = gpu_lock.try_write() else {
+                tracing::info!("skipping Vulkan decode weight prewarm because GPU is already busy");
+                return Ok(false);
+            };
+
+            precompile_vulkan_custom_kernels(&device_kt);
+            let mut runner_guard = runner.write().unwrap();
+            runner_guard
+                .prewarm_backend_decode_weights()
+                .context("Vulkan decode weight prewarm failed")?;
+            Ok(true)
+        })
+        .await;
+
+        match prewarm {
+            Ok(Ok(true)) => tracing::info!(
+                elapsed_ms = prewarm_start.elapsed().as_millis() as u64,
+                "Vulkan decode weight prewarm complete"
+            ),
+            Ok(Ok(false)) => tracing::info!(
+                elapsed_ms = prewarm_start.elapsed().as_millis() as u64,
+                "Vulkan decode weight prewarm skipped"
+            ),
+            Ok(Err(err)) => tracing::warn!(error = %err, "Vulkan decode weight prewarm failed"),
+            Err(err) => tracing::warn!(error = %err, "Vulkan decode weight prewarm task failed"),
         }
         prewarm_complete.store(true, Ordering::Release);
     });

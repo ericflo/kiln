@@ -451,6 +451,17 @@ every config"):
   `Vulkan-resident decode pool ready` followed by
   `Vulkan resident decode pool startup allocation max_batch=64 ready=true`
   before `max_decode_batch=64` and live `max_batch=64` startup logs.
+  **Update — default Vulkan decode-weight prewarm restored:** the server still
+  skips synthetic token-generation prewarm when Vulkan-native training is
+  enabled, but now starts the kt-native decode-weight prewarm in the background
+  instead of marking prewarm complete immediately. Updated release boot on RADV
+  STRIX_HALO logged `starting Vulkan decode weight prewarm`, uploaded
+  `weights=96 f32_cache_mb=8640 bf16_packed_weights=249
+  bf16_packed_cache_mb=8020 elapsed_ms=12232`, stubbed `248` local
+  pre-transposed BF16 weight caches, then completed the background task in
+  `elapsed_ms=26973`. That makes the kt-native cache/memory-residency cleanup
+  active on the default Vulkan serving path without running a synthetic decode
+  request at startup.
   **Update — resident parity test restored for Vulkan profiles:** the
   `vk_resident_decode_parity` integration test now builds against the current kt
   device/cache surface instead of stale test-only APIs. Without
