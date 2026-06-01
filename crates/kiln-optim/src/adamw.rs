@@ -200,6 +200,16 @@ impl OptimStep for AdamW {
             self.rounding,
             step_count,
         )?;
+        // `build_master_tensor` produces a CPU tensor; move it back to the
+        // master's original device (e.g. Metal) so the next forward reads the
+        // updated weights on-device. No-op when the master already lived on CPU.
+        let new_master = if matches!(master.device(), kiln_tensor::Device::Cpu) {
+            new_master
+        } else {
+            new_master
+                .to_device(master.device())
+                .map_err(StepError::Tensor)?
+        };
         param.replace_backward_storage(Some(new_master));
         // #1082 Phase 2.7: end-of-optimizer-step epoch bump. A serving
         // thread polling `Parameter::version_handle` observes this as
@@ -311,7 +321,18 @@ fn build_master_tensor(
 }
 
 fn read_to_f32(t: &Tensor) -> Result<Vec<f32>, StepError> {
-    let cpu = t
+    // The CPU reference step reads host bytes. Device-resident tensors
+    // (CUDA / Metal grads + masters, e.g. the Metal tape-authoritative SFT
+    // path) are D2H-copied first — the on-device kernel fast path
+    // (`dispatch_adamw_step`) handles the resident case; this host fallback
+    // is the portable reference.
+    let host = if matches!(t.device(), kiln_tensor::Device::Cpu) {
+        t.clone()
+    } else {
+        t.to_device(kiln_tensor::Device::Cpu)
+            .map_err(StepError::Tensor)?
+    };
+    let cpu = host
         .storage()
         .as_any()
         .downcast_ref::<CpuStorage>()

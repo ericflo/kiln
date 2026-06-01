@@ -100,7 +100,7 @@
 //! * Tape-routing for rotary / layernorm / fused-attn — non-trivial
 //!   substrate decisions about which kernels carry their own backward.
 
-#![cfg(feature = "cuda")]
+#![cfg(any(feature = "cuda", feature = "metal"))]
 
 use anyhow::{Context, Result};
 use kiln_autograd::{
@@ -204,6 +204,173 @@ pub fn try_tape_rope_kt(
                 rotary_dim,
                 cos: cos.clone(),
                 sin: sin.clone(),
+            }),
+        );
+        Ok(y)
+    }) {
+        Some(result) => Ok(Some(result?)),
+        None => Ok(None),
+    }
+}
+
+/// Device-agnostic RMSNorm backward expressed as a composite of
+/// `kiln_tensor::ops` (works on Metal/CUDA storage, unlike the CPU-only
+/// `kiln_autograd::RmsNormBackward` whose hand-rolled loop requires
+/// `CpuStorage`).
+///
+/// Uses the **unit-offset** RMSNorm convention `w_eff = 1 + weight` —
+/// matching the production Qwen3.5 Metal/CUDA kernels
+/// (`scale = 1.0f + weight[col]` in `backend::metal`). This matters: the
+/// test models initialise norm weights to ZERO, so the no-offset
+/// `x·w/r` form (`kiln_tensor::ops::rms_norm`) would zero the output AND
+/// the input gradient — severing every in-block LoRA param from the loss.
+///
+/// Forward: `r = sqrt(mean_j(x_j²) + eps)`, `y_i = x_i * (1 + w_i) / r`.
+/// Backward (per trailing-axis row of size `D`, with `w' = 1 + w`):
+/// ```text
+/// S    = Σⱼ dy_j * x_j * w'_j
+/// dx_k = (dy_k * w'_k) / r  -  x_k * S / (D * r³)
+/// dw_k = Σ_rows (dy_k * x_k) / r        (∂w'/∂w = 1)
+/// ```
+/// All intermediate math runs in F32 then casts back to the input dtype.
+#[derive(Debug)]
+struct RmsNormKtBackward {
+    x: kiln_tensor::Tensor,
+    weight: kiln_tensor::Tensor,
+    eps: f32,
+}
+
+impl BackwardOp for RmsNormKtBackward {
+    fn name(&self) -> &'static str {
+        "rmsnorm_kt_backward"
+    }
+    fn input_count(&self) -> usize {
+        2
+    }
+    fn requires_input(&self, idx: usize) -> bool {
+        idx == 0 || idx == 1
+    }
+    fn apply(
+        &self,
+        grad_output: &kiln_tensor::Tensor,
+    ) -> kiln_tensor::Result<Vec<Option<kiln_tensor::Tensor>>> {
+        use kiln_tensor::ops::{add_scalar, cast, mul, mul_scalar, sqrt, sum_axis};
+        use kiln_tensor::DType;
+
+        let dt = self.x.dtype();
+        let shape = self.x.shape().to_vec();
+        let last = shape.len() - 1;
+        let hidden = shape[last];
+        let d_inv = 1.0f32 / hidden as f32;
+
+        let map = |e: kiln_tensor::Error| e;
+        let xf = cast(&self.x, DType::F32).map_err(map)?;
+        // Unit-offset convention: w' = 1 + weight.
+        let wf = add_scalar(&cast(&self.weight, DType::F32).map_err(map)?, 1.0).map_err(map)?; // [hidden]
+        let dyf = cast(grad_output, DType::F32).map_err(map)?;
+
+        // r = sqrt(mean(x²)+eps), shape [..., 1] for broadcast.
+        let xsq = mul(&xf, &xf).map_err(map)?;
+        let mean_sq =
+            mul_scalar(&sum_axis(&xsq, last).map_err(map)?, d_inv).map_err(map)?;
+        let mut r_shape = shape.clone();
+        r_shape[last] = 1;
+        let r = sqrt(&add_scalar(&mean_sq, self.eps).map_err(map)?)
+            .map_err(map)?
+            .reshape(r_shape.clone())
+            .map_err(map)?;
+        let inv_r = kiln_tensor::ops::reciprocal(&r).map_err(map)?; // [..., 1]
+
+        // dy * w (broadcast w over rows): [...] * [hidden].
+        let dyw = dyf.broadcast_mul(&wf).map_err(map)?;
+        // S = Σⱼ dy_j * x_j * w_j, shape [..., 1].
+        let s = mul(&dyw, &xf)
+            .and_then(|t| sum_axis(&t, last))
+            .map_err(map)?
+            .reshape(r_shape.clone())
+            .map_err(map)?;
+
+        // dx = dyw * inv_r - x * S * inv_r³ * (1/D).
+        let term1 = dyw.broadcast_mul(&inv_r).map_err(map)?;
+        let inv_r3 = mul(&inv_r, &mul(&inv_r, &inv_r).map_err(map)?).map_err(map)?;
+        let s_scaled = mul_scalar(&mul(&s, &inv_r3).map_err(map)?, d_inv).map_err(map)?;
+        let term2 = xf.broadcast_mul(&s_scaled).map_err(map)?;
+        let dx_f = kiln_tensor::ops::sub(&term1, &term2).map_err(map)?;
+        let dx = cast(&dx_f, dt).map_err(map)?;
+
+        // dw = Σ_rows (dy * x) * inv_r, summed over all non-trailing axes -> [hidden].
+        let dxw = mul(&dyf, &xf)
+            .map_err(map)?
+            .broadcast_mul(&inv_r)
+            .map_err(map)?;
+        let rows: usize = shape[..last].iter().product();
+        let dxw_2d = dxw.reshape(vec![rows, hidden]).map_err(map)?;
+        let dw_f = sum_axis(&dxw_2d, 0).map_err(map)?; // [hidden]
+        let dw = cast(&dw_f, dt).map_err(map)?;
+
+        Ok(vec![Some(dx), Some(dw)])
+    }
+}
+
+/// kt-native RMSNorm tape recorder (#1082 Metal lane).
+///
+/// On CUDA, `forward::rms_norm` records the fused `CudaFusedRmsNormBackward`
+/// via `kiln_rmsnorm_kernel::fused_rmsnorm_via_kt_tape`. That kernel crate is
+/// CUDA-only, so on Metal the production `rms_norm` falls through to a
+/// forward-only kernel that does NOT record — severing the tape between the
+/// QK-norm and the attention/loss (LoRA grads come back empty).
+///
+/// This adapter closes that seam with the device-agnostic
+/// `kiln_tensor::ops::rms_norm` forward + the device-agnostic
+/// [`RmsNormKtBackward`] composite (the `kiln_autograd::RmsNormBackward` loop
+/// is CPU-only), recorded against the connected kt `x.id()`. The RMSNorm
+/// weight is FROZEN in LoRA training, so only the `dL/dx` edge matters; the
+/// recorded node keeps the upstream LoRA-affected activations connected to the
+/// loss. Returns `Ok(None)` (caller falls through to the forward-only path)
+/// outside a tape scope or out of the BF16/F32 contiguous CUDA/Metal envelope.
+pub fn try_tape_rms_norm_kt(
+    x: &kiln_tensor::Tensor,
+    weight: &kiln_tensor::Tensor,
+    eps: f32,
+) -> Result<Option<kiln_tensor::Tensor>> {
+    if !tape_forward_enabled() {
+        return Ok(None);
+    }
+    if !matches!(x.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_))
+        || !matches!(weight.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_))
+    {
+        return Ok(None);
+    }
+    if weight.rank() != 1
+        || x.rank() == 0
+        || *x.shape().last().unwrap() != weight.shape()[0]
+        || !matches!(x.dtype(), kiln_tensor::DType::BF16 | kiln_tensor::DType::F32)
+        || x.dtype() != weight.dtype()
+        || !x.is_contiguous()
+        || !weight.is_contiguous()
+    {
+        return Ok(None);
+    }
+    match with_active_tape(|tape: &mut Tape| -> Result<_> {
+        // Unit-offset convention (`w' = 1 + weight`) to match the production
+        // Qwen3.5 Metal/CUDA RMSNorm kernels. `ops::rms_norm` computes
+        // `x·w/r`, so feed it `1 + weight` (cast to the input dtype) to get
+        // `x·(1+weight)/r`. The recorded backward applies the same offset.
+        let one_plus_w = kiln_tensor::ops::scalar::add_scalar(
+            &kiln_tensor::ops::cast(weight, x.dtype())
+                .map_err(|e| anyhow::anyhow!("kt rms_norm weight cast: {e}"))?,
+            1.0,
+        )
+        .map_err(|e| anyhow::anyhow!("kt rms_norm 1+weight: {e}"))?;
+        let y = kiln_tensor::ops::rms_norm(x, &one_plus_w, eps)
+            .map_err(|e| anyhow::anyhow!("kt rms_norm: {e}"))?;
+        tape.record(
+            &y,
+            &[x, weight],
+            Box::new(RmsNormKtBackward {
+                x: x.clone(),
+                weight: weight.clone(),
+                eps,
             }),
         );
         Ok(y)
@@ -338,7 +505,7 @@ pub fn try_tape_transpose_kt(
     if !tape_forward_enabled() {
         return Ok(None);
     }
-    if !matches!(x.device(), kiln_tensor::Device::Cuda(_)) {
+    if !matches!(x.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_)) {
         return Ok(None);
     }
     let rank = x.rank();
@@ -373,7 +540,7 @@ pub fn try_tape_reshape_kt(
     if !tape_forward_enabled() {
         return Ok(None);
     }
-    if !matches!(x.device(), kiln_tensor::Device::Cuda(_)) {
+    if !matches!(x.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_)) {
         return Ok(None);
     }
     let input_shape = x.shape().to_vec();
@@ -579,7 +746,7 @@ pub fn try_tape_cross_entropy_from_logits_kt(
         || dims[0] != 1
         || dims[1] != input_ids.len()
         || label_mask.len() != input_ids.len()
-        || !matches!(logits.device(), kiln_tensor::Device::Cuda(_))
+        || !matches!(logits.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_))
     {
         return Ok(None);
     }
@@ -765,10 +932,10 @@ pub fn try_tape_lora_add_kt(
     if !tape_forward_enabled() || !tape_lora_add_enabled() {
         return Ok(None);
     }
-    if !matches!(base.device(), kiln_tensor::Device::Cuda(_))
-        || !matches!(x.device(), kiln_tensor::Device::Cuda(_))
-        || !matches!(proj.a.device(), kiln_tensor::Device::Cuda(_))
-        || !matches!(proj.b.device(), kiln_tensor::Device::Cuda(_))
+    if !matches!(base.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_))
+        || !matches!(x.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_))
+        || !matches!(proj.a.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_))
+        || !matches!(proj.b.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_))
     {
         return Ok(None);
     }
@@ -976,8 +1143,8 @@ pub fn try_tape_lora_linear_kt(
     if !tape_forward_enabled() || !tape_lora_add_enabled() {
         return Ok(None);
     }
-    if !matches!(x.device(), kiln_tensor::Device::Cuda(_))
-        || !matches!(weight_t.device(), kiln_tensor::Device::Cuda(_))
+    if !matches!(x.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_))
+        || !matches!(weight_t.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_))
     {
         return Ok(None);
     }
@@ -1172,6 +1339,7 @@ pub fn tape_flash_attn_enabled() -> bool {
 /// `CudaFlashAttentionTrainingBf16::bwd` candle path exactly. The collapse
 /// runs in F32 (cast → sum → cast back to BF16) so the group reduction
 /// doesn't lose precision in BF16.
+#[cfg(feature = "cuda")]
 #[derive(Debug)]
 pub(crate) struct FlashAttnBackward {
     q: kiln_tensor::Tensor,
@@ -1185,6 +1353,7 @@ pub(crate) struct FlashAttnBackward {
     heads_kv: usize,
 }
 
+#[cfg(feature = "cuda")]
 impl BackwardOp for FlashAttnBackward {
     fn name(&self) -> &'static str {
         "flash_attn_backward"
@@ -1305,12 +1474,22 @@ pub fn try_tape_flash_attn_kt(
     if !tape_forward_enabled() || !tape_flash_attn_enabled() {
         return Ok(None);
     }
+    // Fused FlashAttention-2 is a CUDA kernel; on Metal/CPU the kt-native
+    // unfused SDPA fallback (`try_tape_sdpa_fallback_kt`) records attention
+    // backward instead.
+    #[cfg(not(feature = "cuda"))]
+    {
+        let _ = (q, k, v, num_heads, num_kv_heads, head_dim);
+        return Ok(None);
+    }
+    #[cfg(feature = "cuda")]
+    {
     if q.dtype() != kiln_tensor::DType::BF16
         || k.dtype() != kiln_tensor::DType::BF16
         || v.dtype() != kiln_tensor::DType::BF16
-        || !matches!(q.device(), kiln_tensor::Device::Cuda(_))
-        || !matches!(k.device(), kiln_tensor::Device::Cuda(_))
-        || !matches!(v.device(), kiln_tensor::Device::Cuda(_))
+        || !matches!(q.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_))
+        || !matches!(k.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_))
+        || !matches!(v.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_))
         || !q.is_contiguous()
         || !k.is_contiguous()
         || !v.is_contiguous()
@@ -1366,6 +1545,7 @@ pub fn try_tape_flash_attn_kt(
     }) {
         Some(result) => Ok(Some(result?)),
         None => Ok(None),
+    }
     }
 }
 
@@ -1553,7 +1733,7 @@ pub fn try_tape_gdn_recurrent_kt(
     // production recurrence `gdn_recurrent_forward_from_parts`) and the record
     // adapter (`tape_record_gdn_recurrent_kt`) is now kt-native — no kt->candle
     // bridge on the saved inputs.
-    if !matches!(q.device(), kiln_tensor::Device::Cuda(_)) {
+    if !matches!(q.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_)) {
         return Ok(None);
     }
 
@@ -1626,7 +1806,7 @@ pub fn tape_record_gdn_recurrent_kt(
     if !tape_forward_enabled() || !tape_gdn_enabled() {
         return Ok(false);
     }
-    if !matches!(device, kiln_tensor::Device::Cuda(_)) {
+    if !matches!(device, kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_)) {
         return Ok(false);
     }
 
@@ -1756,6 +1936,7 @@ pub fn tape_gdn_gated_norm_enabled() -> bool {
 /// training shape) so flattening never mixes batches across a row boundary;
 /// declines (`apply` errors only on a true kernel failure — the adapter's
 /// `Ok(None)` envelope guard below keeps `batch>1` off this path entirely).
+#[cfg(feature = "cuda")]
 #[derive(Debug)]
 pub(crate) struct CausalConv1dPrefillInputBackward {
     /// Saved F32 CUDA conv weight `[channels, kernel]` (#1082: candle->kt; the
@@ -1775,6 +1956,7 @@ pub(crate) struct CausalConv1dPrefillInputBackward {
     input_dtype: kiln_tensor::DType,
 }
 
+#[cfg(feature = "cuda")]
 impl BackwardOp for CausalConv1dPrefillInputBackward {
     fn name(&self) -> &'static str {
         "gdn_causal_conv1d_prefill_input_backward"
@@ -1855,9 +2037,18 @@ pub fn try_tape_causal_conv1d_prefill_kt(
     if !tape_forward_enabled() || !tape_gdn_conv_enabled() {
         return Ok(None);
     }
-    if !matches!(input.device(), kiln_tensor::Device::Cuda(_))
-        || !matches!(out.device(), kiln_tensor::Device::Cuda(_))
-        || !matches!(weight.device(), kiln_tensor::Device::Cuda(_))
+    // GDN causal-conv1d backward kernel is CUDA-only; declines on Metal — GDN
+    // training on Metal is not yet supported.
+    #[cfg(not(feature = "cuda"))]
+    {
+        let _ = (input, weight, out, kernel);
+        return Ok(None);
+    }
+    #[cfg(feature = "cuda")]
+    {
+    if !matches!(input.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_))
+        || !matches!(out.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_))
+        || !matches!(weight.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_))
     {
         return Ok(None);
     }
@@ -1917,6 +2108,7 @@ pub fn try_tape_causal_conv1d_prefill_kt(
         return Ok(None);
     }
     Ok(Some(out.clone()))
+    }
 }
 
 /// Candle-composite tape backward for the GDN L2-qk-norm `y =
@@ -1981,7 +2173,7 @@ pub fn try_tape_gdn_l2_norm_scale_kt(
     if !tape_forward_enabled() || !tape_gdn_qk_norm_enabled() {
         return Ok(None);
     }
-    if !matches!(x.device(), kiln_tensor::Device::Cuda(_)) {
+    if !matches!(x.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_)) {
         return Ok(None);
     }
     if x.dims() != out.dims() {
@@ -2082,7 +2274,7 @@ pub fn try_tape_gdn_gated_rms_norm_kt(
     if !tape_forward_enabled() || !tape_gdn_gated_norm_enabled() {
         return Ok(None);
     }
-    if !matches!(x.device(), kiln_tensor::Device::Cuda(_)) {
+    if !matches!(x.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_)) {
         return Ok(None);
     }
     if x.dims() != z.dims() || x.dims() != out.dims() {
@@ -2196,8 +2388,8 @@ pub fn try_tape_cast_kt(
     if !tape_forward_enabled() {
         return Ok(None);
     }
-    if !matches!(x.device(), kiln_tensor::Device::Cuda(_))
-        || !matches!(out.device(), kiln_tensor::Device::Cuda(_))
+    if !matches!(x.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_))
+        || !matches!(out.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_))
     {
         return Ok(None);
     }
@@ -2316,8 +2508,8 @@ pub fn try_tape_narrow_kt(
     if !tape_forward_enabled() {
         return Ok(None);
     }
-    if !matches!(x.device(), kiln_tensor::Device::Cuda(_))
-        || !matches!(out.device(), kiln_tensor::Device::Cuda(_))
+    if !matches!(x.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_))
+        || !matches!(out.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_))
     {
         return Ok(None);
     }
@@ -2426,8 +2618,8 @@ pub fn try_tape_gqa_expand_kt(
     if !tape_forward_enabled() {
         return Ok(None);
     }
-    if !matches!(x.device(), kiln_tensor::Device::Cuda(_))
-        || !matches!(out.device(), kiln_tensor::Device::Cuda(_))
+    if !matches!(x.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_))
+        || !matches!(out.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_))
     {
         return Ok(None);
     }
@@ -2611,10 +2803,10 @@ pub fn try_tape_sdpa_fallback_kt(
     if !tape_forward_enabled() || !tape_sdpa_enabled() {
         return Ok(None);
     }
-    if !matches!(q.device(), kiln_tensor::Device::Cuda(_))
-        || !matches!(k.device(), kiln_tensor::Device::Cuda(_))
-        || !matches!(v.device(), kiln_tensor::Device::Cuda(_))
-        || !matches!(out.device(), kiln_tensor::Device::Cuda(_))
+    if !matches!(q.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_))
+        || !matches!(k.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_))
+        || !matches!(v.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_))
+        || !matches!(out.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_))
     {
         return Ok(None);
     }

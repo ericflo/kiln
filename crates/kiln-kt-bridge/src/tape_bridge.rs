@@ -92,7 +92,7 @@
 //!   `kt_tensor_to_candle_cuda_copy` / `kt_tensor_from_candle_cuda_copy`
 //!   helpers it depends on are CUDA-only today.
 
-#![cfg(feature = "cuda")]
+#![cfg(any(feature = "cuda", feature = "metal"))]
 
 use std::cell::RefCell;
 use std::collections::HashMap;

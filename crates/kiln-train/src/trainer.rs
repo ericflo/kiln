@@ -2475,7 +2475,7 @@ pub fn sft_train(
                 // `checkpointed_forward_backward_tape_authoritative_kt` both return
                 // `GradSource::Kt`, consumed kt-native by the dispatchers.
                 let grads: GradSource = if let Some(ref segs) = segments {
-                    #[cfg(feature = "cuda")]
+                    #[cfg(any(feature = "cuda", feature = "metal"))]
                     {
                         let (lv, kt_grads) = checkpointed_forward_backward_tape_authoritative_kt(
                             &*backend,
@@ -2490,7 +2490,7 @@ pub fn sft_train(
                         loss_val = lv;
                         GradSource::Kt(kt_grads)
                     }
-                    #[cfg(not(feature = "cuda"))]
+                    #[cfg(not(any(feature = "cuda", feature = "metal")))]
                     {
                         // Non-CUDA build: the kt tape adapters don't record on a
                         // CPU candle device, so checkpointed kt-tape backward is a
@@ -5984,7 +5984,7 @@ fn has_supervised_shifted_labels(label_mask: &[bool]) -> bool {
 /// CE math itself is covered by `tape_forward_parity`
 /// (`tape_forward_cross_entropy_matches_reference`,
 /// `tape_backward_cross_entropy_matches_analytic_gradient`).
-#[cfg(feature = "cuda")]
+#[cfg(any(feature = "cuda", feature = "metal"))]
 fn cross_entropy_loss(
     logits: &KtTensor,
     input_ids: &[u32],
@@ -7211,7 +7211,7 @@ fn exact_gdn_backward_tile_tokens_for(device: &CdDevice) -> usize {
 // `pub(crate)` so the OPD trainer (`opd.rs`) can reuse the EXACT same gate
 // for its tape-authoritative dispatch — single source of truth for the
 // `KILN_USE_TAPE_AUTHORITATIVE` env semantics (#1082 CP-4 endgame).
-#[cfg(feature = "cuda")]
+#[cfg(any(feature = "cuda", feature = "metal"))]
 pub(crate) fn tape_authoritative_enabled() -> bool {
     std::env::var("KILN_USE_TAPE_AUTHORITATIVE")
         .map(|v| !matches!(v.trim(), "" | "0" | "false" | "no" | "off"))
@@ -7231,7 +7231,7 @@ pub(crate) fn tape_authoritative_enabled() -> bool {
 /// (`embed_tokens` dtype = the activation dtype); an F32 base (e.g. the
 /// `tiny_config` F32 test model) falls through to the candle path below, which
 /// trains F32 correctly. Production (Qwen3.5-4B) is BF16 → kt path.
-#[cfg(feature = "cuda")]
+#[cfg(any(feature = "cuda", feature = "metal"))]
 fn base_dtype_supports_tape(weights: &GpuWeights) -> bool {
     // (#1082) `embed_tokens.dtype()` is now kt `DType`.
     matches!(weights.embed_tokens.dtype(), kiln_tensor::DType::BF16)
@@ -7261,7 +7261,7 @@ fn base_dtype_supports_tape(weights: &GpuWeights) -> bool {
 /// same key. (#1082 Inc-0 PR4) NOW WIRED IN: `standard_forward_backward`'s
 /// tape-authoritative CUDA branch calls this and returns `GradSource::Kt`, so
 /// the SFT loop + the CP-4 gates exercise this kt-native path.
-#[cfg(feature = "cuda")]
+#[cfg(any(feature = "cuda", feature = "metal"))]
 fn standard_forward_backward_tape_authoritative_kt(
     backend: &dyn BackendRuntime,
     input_ids: &[u32],
@@ -7374,7 +7374,7 @@ fn standard_forward_backward_tape_authoritative_kt(
 /// record only on CUDA, so a CPU checkpointing-tape path would need them
 /// un-gated first (the deeper #1082 endgame). The dispatch below keeps the
 /// candle path for F32/CPU/ECHO.
-#[cfg(feature = "cuda")]
+#[cfg(any(feature = "cuda", feature = "metal"))]
 #[allow(clippy::too_many_arguments)]
 fn checkpointed_forward_backward_tape_authoritative_kt(
     backend: &dyn BackendRuntime,
@@ -7583,10 +7583,10 @@ pub fn standard_forward_backward(
     // `loss.backward()` path) are all DELETED. F32/CPU training is dropped
     // (the kt fused tape adapters are BF16-only; see
     // `base_dtype_supports_tape` + note `kiln-cp4-tape-adapters-bf16-only`).
-    #[cfg(feature = "cuda")]
+    #[cfg(any(feature = "cuda", feature = "metal"))]
     {
         anyhow::ensure!(
-            matches!(device, kiln_tensor::Device::Cuda(_)),
+            matches!(device, kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_)),
             "standard_forward_backward: kt tape-authoritative SFT requires a CUDA \
              device post candle-drop (the candle CPU `loss.backward()` path was \
              removed in #1082)."
@@ -7608,7 +7608,7 @@ pub fn standard_forward_backward(
         )?;
         Ok((loss_val, GradSource::Kt(kt_grads)))
     }
-    #[cfg(not(feature = "cuda"))]
+    #[cfg(not(any(feature = "cuda", feature = "metal")))]
     {
         let _ = (
             backend,

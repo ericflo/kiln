@@ -25,6 +25,12 @@ fn to_cpu(t: &Tensor) -> Result<Tensor> {
             return crate::cuda_to_host_copy(t);
         }
     }
+    #[cfg(feature = "metal")]
+    {
+        if matches!(t.device(), crate::Device::Metal(_)) {
+            return crate::metal_to_host_copy(t);
+        }
+    }
     Ok(t.clone())
 }
 

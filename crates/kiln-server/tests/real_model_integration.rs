@@ -626,6 +626,7 @@ async fn test_real_model_chat_completion_metal() {
     if kiln_model::backend::metal::try_new_metal().is_none() {
         return;
     }
+    let _gpu = metal_gpu_guard();
     let device = Device::Metal(0);
 
     let config = tiny_config();
@@ -692,6 +693,7 @@ async fn test_real_model_chat_completion_metal_bf16_fused() {
     if kiln_model::backend::metal::try_new_metal().is_none() {
         return;
     }
+    let _gpu = metal_gpu_guard();
     let device = Device::Metal(0);
 
     let mut config = tiny_config();
@@ -768,4 +770,175 @@ async fn test_real_model_chat_completion_metal_bf16_fused() {
     let resp: Value = serde_json::from_slice(&body_bytes).unwrap();
     assert!(resp["choices"][0]["message"]["content"].is_string());
     assert!(resp["usage"]["completion_tokens"].as_u64().unwrap() > 0);
+}
+
+// ---------------------------------------------------------------------------
+// (#1082) End-to-end TRAINING smokes on Device::Metal(0).
+//
+// Until now nothing exercised SFT/GRPO/OPD on Metal *hardware*: the autograd
+// math tests run the kt tape on CPU tensors, and the server route tests only
+// assert that a job *queues*. These build the tiny random-weight model on
+// Device::Metal(0) and drive a real (tiny) training run through the kt-native
+// trainer (`for_device_kt` -> `MetalBackend`), so the forward AND the kt-tape
+// backward + AdamW optimizer step all execute Metal kernels. Asserts the run
+// completes, writes a `.safetensors` adapter, and does not blow up. Skipped
+// gracefully without a Metal device.
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "metal")]
+fn metal_chat_msg(role: &str, content: &str) -> kiln_train::ChatMessage {
+    kiln_train::ChatMessage {
+        role: role.to_string(),
+        content: content.to_string(),
+    }
+}
+
+/// Serialize GPU-heavy Metal tests in this binary. The process-global
+/// `MetalCompanion` command pool is shared across all threads; concurrent
+/// submission from cargo's parallel test threads perturbs BF16 numerics
+/// (different reduction ordering), which the marginal training-loss-decrease
+/// assertions are sensitive to. Holding this lock makes each GPU test run in
+/// isolation (matching the deterministic single-run behavior). NOTE: the
+/// underlying concurrency sensitivity of the shared Metal companion is a real
+/// follow-up beyond these smokes.
+#[cfg(feature = "metal")]
+fn metal_gpu_guard() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+#[cfg(feature = "metal")]
+fn assert_adapter_written(out: &std::path::Path) {
+    assert!(out.exists(), "adapter output dir {out:?} should exist");
+    let entries: Vec<_> = std::fs::read_dir(out)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        entries.iter().any(|n| n.ends_with(".safetensors")),
+        "expected an adapter .safetensors in {out:?}, got {entries:?}"
+    );
+}
+
+/// Tiny random-weight model with all projections/norms/embeddings cast to BF16.
+/// The kt tape-authoritative training adapters are BF16-only
+/// (`base_dtype_supports_tape`), so SFT/GRPO/OPD smokes need a BF16 base.
+/// Mirrors the cast recipe in `test_real_model_chat_completion_metal_bf16_fused`.
+#[cfg(feature = "metal")]
+fn tiny_weights_bf16(config: &ModelConfig, device: &Device) -> GpuWeights {
+    let mut weights = tiny_weights(config, device);
+    let bf16 = |t: &Tensor| kiln_tensor::ops::cast(t, DType::BF16).expect("cast bf16");
+    weights.embed_tokens = bf16(&weights.embed_tokens);
+    weights.embed_tokens_t = bf16(&weights.embed_tokens_t);
+    weights.final_norm = bf16(&weights.final_norm);
+    weights.layers[0].input_layernorm = bf16(&weights.layers[0].input_layernorm);
+    weights.layers[0].post_attention_layernorm = bf16(&weights.layers[0].post_attention_layernorm);
+    if let GpuAttentionWeights::Full(ref mut attn) = weights.layers[0].attention {
+        attn.q_proj = bf16(&attn.q_proj);
+        attn.k_proj = bf16(&attn.k_proj);
+        attn.v_proj = bf16(&attn.v_proj);
+        attn.o_proj = bf16(&attn.o_proj);
+        attn.q_norm = bf16(&attn.q_norm);
+        attn.k_norm = bf16(&attn.k_norm);
+        attn.q_proj_t = bf16(&attn.q_proj_t);
+        attn.k_proj_t = bf16(&attn.k_proj_t);
+        attn.v_proj_t = bf16(&attn.v_proj_t);
+        attn.o_proj_t = bf16(&attn.o_proj_t);
+    }
+    let mlp = &mut weights.layers[0].mlp;
+    mlp.gate_proj = bf16(&mlp.gate_proj);
+    mlp.up_proj = bf16(&mlp.up_proj);
+    mlp.down_proj = bf16(&mlp.down_proj);
+    mlp.gate_proj_t = bf16(&mlp.gate_proj_t);
+    mlp.up_proj_t = bf16(&mlp.up_proj_t);
+    mlp.down_proj_t = bf16(&mlp.down_proj_t);
+    weights
+}
+
+/// Capture training loss per progress tick into a shared vec, for the
+/// loss-decrease assertion.
+#[cfg(feature = "metal")]
+fn loss_capture_cb() -> (
+    std::sync::Arc<std::sync::Mutex<Vec<f64>>>,
+    kiln_train::trainer::ProgressCallback,
+) {
+    let losses = std::sync::Arc::new(std::sync::Mutex::new(Vec::<f64>::new()));
+    let sink = losses.clone();
+    let cb: kiln_train::trainer::ProgressCallback =
+        Box::new(move |p: kiln_train::trainer::TrainingProgress| {
+            sink.lock().unwrap().push(p.loss);
+        });
+    (losses, cb)
+}
+
+#[cfg(feature = "metal")]
+fn assert_loss_decreases(losses: &[f64]) {
+    assert!(!losses.is_empty(), "progress callback recorded no losses");
+    assert!(
+        losses.iter().all(|l| l.is_finite()),
+        "all training losses must be finite, got {losses:?}"
+    );
+    assert!(
+        losses.last().unwrap() < losses.first().unwrap(),
+        "training loss should decrease over the run, got {losses:?}"
+    );
+}
+
+#[cfg(feature = "metal")]
+#[test]
+fn test_real_model_sft_metal() {
+    if kiln_model::backend::metal::try_new_metal().is_none() {
+        eprintln!("No Metal device — skipping SFT-on-Metal smoke");
+        return;
+    }
+    let _gpu = metal_gpu_guard();
+    let device = Device::Metal(0);
+    let mut config = tiny_config();
+    config.dtype = kiln_core::config::DType::BF16;
+    let weights = tiny_weights_bf16(&config, &device);
+    let tokenizer = test_tokenizer();
+
+    let examples = vec![
+        kiln_train::SftExample {
+            messages: vec![
+                metal_chat_msg("user", "t1 t2 t3"),
+                metal_chat_msg("assistant", "t2 t3 t1"),
+            ],
+        },
+        kiln_train::SftExample {
+            messages: vec![
+                metal_chat_msg("user", "t3 t1"),
+                metal_chat_msg("assistant", "t1 t2 t3"),
+            ],
+        },
+    ];
+    let sft_config = kiln_train::SftConfig {
+        epochs: 3,
+        learning_rate: 1e-3,
+        lora_rank: 2,
+        lora_alpha: 4.0,
+        auto_load: false,
+        seed: Some(0),
+        ..Default::default()
+    };
+
+    let (losses, cb) = loss_capture_cb();
+    let adapter_dir = tempfile::tempdir().unwrap();
+    let out = kiln_train::trainer::sft_train(
+        &examples,
+        &sft_config,
+        &config,
+        &weights,
+        &tokenizer,
+        adapter_dir.path(),
+        "sft-metal-smoke",
+        Some(cb),
+        None,
+    )
+    .expect("SFT training on Device::Metal(0) should complete");
+    assert_adapter_written(&out);
+    assert_loss_decreases(&losses.lock().unwrap());
 }
