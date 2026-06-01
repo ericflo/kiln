@@ -1088,7 +1088,7 @@ impl CudaGraphRunner {
                             // stops at layer 31, so this catches a stale
                             // final_norm/lm_head/output_logits on the replay side.
                             if let Ok(el) = &elog {
-                                let ess = el.sqr().and_then(|s| s.sum_all()).and_then(|s| s.to_vec::<f32>()).ok();
+                                let ess = el.sqr().and_then(|s| s.sum_all()).and_then(|s| s.to_dtype(kiln_tensor::DType::F32)).and_then(|s| s.to_vec::<f32>()).ok();
                                 eprintln!("SAMESTEP EAGER_LOGITS step={seq_len} sumsq={ess:?}");
                             }
                             *linear_state = snap;
@@ -1112,6 +1112,7 @@ impl CudaGraphRunner {
                                     .output_logits
                                     .sqr()
                                     .and_then(|s| s.sum_all())
+                                    .and_then(|s| s.to_dtype(kiln_tensor::DType::F32))
                                     .and_then(|s| s.to_vec::<f32>())
                                     .ok();
                                 eprintln!("SAMESTEP REPLAY_LOGITS step={seq_len} sumsq={rss:?}");
