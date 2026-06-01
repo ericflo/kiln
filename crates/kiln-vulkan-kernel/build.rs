@@ -369,6 +369,14 @@ const SHADERS: &[(&str, &str)] = &[
         "vk_embedding_lookup_bf16w_f32",
         "SPIR_V_VK_EMBEDDING_LOOKUP_BF16W_F32",
     ),
+    (
+        "vk_embedding_lookup_t_f32",
+        "SPIR_V_VK_EMBEDDING_LOOKUP_T_F32",
+    ),
+    (
+        "vk_embedding_lookup_t_bf16w_f32",
+        "SPIR_V_VK_EMBEDDING_LOOKUP_T_BF16W_F32",
+    ),
     ("vk_flce_chunk_stats_f32", "SPIR_V_VK_FLCE_CHUNK_STATS_F32"),
     (
         "vk_flce_gather_correct_f32",

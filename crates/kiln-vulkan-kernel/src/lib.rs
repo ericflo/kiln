@@ -96,6 +96,12 @@ pub mod shaders {
     pub const APPLY_TOKEN_PENALTIES_BATCHED: &str = shader_path!("apply_token_penalties_batched");
     pub const TOPK_SAMPLE: &str = shader_path!("topk_sample");
     pub const TOPK_SAMPLE_BATCHED: &str = shader_path!("topk_sample_batched");
+    pub const VK_EMBEDDING_LOOKUP_F32: &str = shader_path!("vk_embedding_lookup_f32");
+    pub const VK_EMBEDDING_LOOKUP_BF16W_F32: &str =
+        shader_path!("vk_embedding_lookup_bf16w_f32");
+    pub const VK_EMBEDDING_LOOKUP_T_F32: &str = shader_path!("vk_embedding_lookup_t_f32");
+    pub const VK_EMBEDDING_LOOKUP_T_BF16W_F32: &str =
+        shader_path!("vk_embedding_lookup_t_bf16w_f32");
     pub const ADD: &str = shader_path!("add");
     pub const ADD_QWEN_RMSNORM: &str = shader_path!("add_qwen_rmsnorm");
     pub const ADD_QWEN_RMSNORM_BATCHED: &str = shader_path!("add_qwen_rmsnorm_batched");

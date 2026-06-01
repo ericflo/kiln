@@ -22018,123 +22018,6 @@ pub fn model_forward_paged_decode_contiguous_batch(
 }
 
 #[cfg(feature = "vulkan")]
-fn tensor_to_f32_flat_vec_vk(t: &Tensor) -> Result<Vec<f32>> {
-    let flat = if t.dtype() == DType::F32 {
-        t.flatten_all()?
-    } else {
-        t.to_dtype(DType::F32)?.flatten_all()?
-    };
-    Ok(flat.to_vec1::<f32>()?)
-}
-
-#[cfg(feature = "vulkan")]
-fn cpu_tensor_storage_bytes_vk(t: &Tensor) -> Option<&[u8]> {
-    if !matches!(t.device(), Device::Cpu) || !t.is_contiguous() {
-        return None;
-    }
-    t.storage()
-        .as_any()
-        .downcast_ref::<kiln_tensor::CpuStorage>()
-        .map(|storage| storage.as_bytes())
-}
-
-#[cfg(feature = "vulkan")]
-fn read_cpu_scalar_as_f32_vk(bytes: &[u8], offset: usize, dtype: DType) -> Option<f32> {
-    match dtype {
-        DType::F32 => {
-            let chunk = bytes.get(offset..offset.checked_add(4)?)?;
-            Some(f32::from_le_bytes(chunk.try_into().ok()?))
-        }
-        DType::BF16 => {
-            let chunk = bytes.get(offset..offset.checked_add(2)?)?;
-            Some(half::bf16::from_le_bytes(chunk.try_into().ok()?).to_f32())
-        }
-        DType::F16 => {
-            let chunk = bytes.get(offset..offset.checked_add(2)?)?;
-            Some(half::f16::from_le_bytes(chunk.try_into().ok()?).to_f32())
-        }
-        _ => None,
-    }
-}
-
-#[cfg(feature = "vulkan")]
-fn gather_embedding_rows_f32_vk(
-    token_ids: &[u32],
-    table: &Tensor,
-    hidden: usize,
-    transposed: bool,
-) -> Result<Option<Vec<f32>>> {
-    let dims = table.dims();
-    if dims.len() != 2 {
-        return Ok(None);
-    }
-    let (vocab, table_hidden) = if transposed {
-        (dims[1], dims[0])
-    } else {
-        (dims[0], dims[1])
-    };
-    if table_hidden != hidden {
-        return Ok(None);
-    }
-    let Some(bytes) = cpu_tensor_storage_bytes_vk(table) else {
-        return Ok(None);
-    };
-    let elem_bytes = match table.dtype() {
-        DType::F32 => 4usize,
-        DType::BF16 | DType::F16 => 2usize,
-        _ => return Ok(None),
-    };
-    let expected_bytes = dims[0]
-        .checked_mul(dims[1])
-        .and_then(|n| n.checked_mul(elem_bytes))
-        .context("vulkan resident embedding gather byte size overflow")?;
-    if bytes.len() < expected_bytes {
-        return Ok(None);
-    }
-
-    let mut out = Vec::with_capacity(token_ids.len() * hidden);
-    for &token in token_ids {
-        let token = token as usize;
-        anyhow::ensure!(
-            token < vocab,
-            "vulkan resident embedding gather token id {token} exceeds vocab {vocab}"
-        );
-        for h in 0..hidden {
-            let elem = if transposed {
-                h.checked_mul(vocab)
-                    .and_then(|base| base.checked_add(token))
-            } else {
-                token
-                    .checked_mul(hidden)
-                    .and_then(|base| base.checked_add(h))
-            }
-            .context("vulkan resident embedding gather index overflow")?;
-            let offset = elem
-                .checked_mul(elem_bytes)
-                .context("vulkan resident embedding gather offset overflow")?;
-            let value = read_cpu_scalar_as_f32_vk(bytes, offset, table.dtype())
-                .context("vulkan resident embedding gather scalar read failed")?;
-            out.push(value);
-        }
-    }
-    Ok(Some(out))
-}
-
-#[cfg(feature = "vulkan")]
-fn embedding_rows_host_f32_vk(
-    token_ids: &[u32],
-    weights: &GpuWeights,
-    hidden: usize,
-) -> Result<Option<Vec<f32>>> {
-    if let Some(rows) =
-        gather_embedding_rows_f32_vk(token_ids, &weights.embed_tokens, hidden, false)?
-    {
-        return Ok(Some(rows));
-    }
-    gather_embedding_rows_f32_vk(token_ids, &weights.embed_tokens_t, hidden, true)
-}
-
-#[cfg(feature = "vulkan")]
 fn rotary_tables_host_f32_vk(
     start_positions: &[usize],
     rotary_dim: usize,
@@ -22236,19 +22119,6 @@ fn try_vulkan_resident_batched_decode_argmax(
         (empty_states, empty_states)
     };
 
-    let hidden_rows = if let Some(rows) =
-        embedding_rows_host_f32_vk(token_ids, weights, config.hidden_size)?
-    {
-        rows
-    } else {
-        let hidden = embedding_lookup_from_weights(token_ids, weights)?;
-        let expected_hidden = [batch, config.hidden_size];
-        if hidden.dims() != expected_hidden.as_slice() {
-            return Ok(None);
-        }
-        tensor_to_f32_flat_vec_vk(&hidden)?
-    };
-
     let (rope_cos_rows, rope_sin_rows) =
         rotary_tables_host_f32_vk(start_positions, config.rotary_dim(), config.rope_theta)?;
 
@@ -22298,10 +22168,10 @@ fn try_vulkan_resident_batched_decode_argmax(
         }
     }
 
-    crate::vk_decode_resident::submit_transformer_stack_batched_argmax_from_host(
+    crate::vk_decode_resident::submit_transformer_stack_batched_argmax_from_tokens(
         vk_backend,
         vk_device,
-        &hidden_rows,
+        token_ids,
         &rope_cos_rows,
         &rope_sin_rows,
         block_tables,
@@ -22388,19 +22258,6 @@ fn try_vulkan_resident_batched_decode_hidden(
         (empty_states, empty_states)
     };
 
-    let hidden_rows = if let Some(rows) =
-        embedding_rows_host_f32_vk(token_ids, weights, config.hidden_size)?
-    {
-        rows
-    } else {
-        let hidden = embedding_lookup_from_weights(token_ids, weights)?;
-        let expected_hidden = [batch, config.hidden_size];
-        if hidden.dims() != expected_hidden.as_slice() {
-            return Ok(None);
-        }
-        tensor_to_f32_flat_vec_vk(&hidden)?
-    };
-
     let (rope_cos_rows, rope_sin_rows) =
         rotary_tables_host_f32_vk(start_positions, config.rotary_dim(), config.rope_theta)?;
 
@@ -22450,10 +22307,10 @@ fn try_vulkan_resident_batched_decode_hidden(
         }
     }
 
-    let Some(hidden_rows) = crate::vk_decode_resident::submit_transformer_stack_batched_hidden_from_host(
+    let Some(hidden_rows) = crate::vk_decode_resident::submit_transformer_stack_batched_hidden_from_tokens(
         vk_backend,
         vk_device,
-        &hidden_rows,
+        token_ids,
         &rope_cos_rows,
         &rope_sin_rows,
         block_tables,
@@ -22561,19 +22418,6 @@ fn try_vulkan_resident_batched_decode_sample(
         (empty_states, empty_states)
     };
 
-    let hidden_rows = if let Some(rows) =
-        embedding_rows_host_f32_vk(token_ids, weights, config.hidden_size)?
-    {
-        rows
-    } else {
-        let hidden = embedding_lookup_from_weights(token_ids, weights)?;
-        let expected_hidden = [batch, config.hidden_size];
-        if hidden.dims() != expected_hidden.as_slice() {
-            return Ok(None);
-        }
-        tensor_to_f32_flat_vec_vk(&hidden)?
-    };
-
     let (rope_cos_rows, rope_sin_rows) =
         rotary_tables_host_f32_vk(start_positions, config.rotary_dim(), config.rope_theta)?;
 
@@ -22623,10 +22467,10 @@ fn try_vulkan_resident_batched_decode_sample(
         }
     }
 
-    crate::vk_decode_resident::submit_transformer_stack_batched_sample_from_host(
+    crate::vk_decode_resident::submit_transformer_stack_batched_sample_from_tokens(
         vk_backend,
         vk_device,
-        &hidden_rows,
+        token_ids,
         &rope_cos_rows,
         &rope_sin_rows,
         block_tables,
@@ -23668,7 +23512,7 @@ fn model_forward_paged_last_token_resident_native_vk(
     start_pos: usize,
     linear_state: Option<&LinearAttentionState>,
 ) -> Result<Option<Tensor>> {
-    use kiln_vulkan_kernel::{CommandBatch, VulkanBuffer};
+    use kiln_vulkan_kernel::CommandBatch;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     static NATIVE_PHASE_TIMING: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     let timing_enabled = *NATIVE_PHASE_TIMING.get_or_init(|| {
@@ -23693,24 +23537,13 @@ fn model_forward_paged_last_token_resident_native_vk(
     let Some(state) = linear_state else {
         return Ok(None);
     };
+    if token_ids.len() != 1 {
+        return Ok(None);
+    }
     let hidden_size = config.hidden_size;
     let device = weights.embed_tokens.device();
 
-    // 1. Embedding lookup: produce resident upload rows as f32.
-    let hidden_data = if let Some(rows) =
-        embedding_rows_host_f32_vk(token_ids, weights, hidden_size)?
-    {
-        rows
-    } else {
-        let mut hidden = embedding_lookup_from_weights(token_ids, weights)?;
-        hidden = hidden.unsqueeze(0)?;
-        let hidden_flat = if hidden.dtype() == DType::F32 {
-            hidden.flatten_all()?
-        } else {
-            hidden.to_dtype(DType::F32)?.flatten_all()?
-        };
-        hidden_flat.to_vec1()?
-    };
+    // 1. Token embedding is recorded into the main command batch.
     if timing_enabled {
         EMBED_NS.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }
@@ -23727,74 +23560,22 @@ fn model_forward_paged_last_token_resident_native_vk(
     }
     let t_upload = std::time::Instant::now();
 
-    // 3. Acquire the two persistent IO buffers (alternating across layers).
-    // io_a is the LAYER-0 INPUT (uploaded from host once per token), so
-    // it lives in host-visible memory — the GPU pulls it into L2 on
-    // the first dispatch's read and subsequent reads hit cache.
-    // io_b lives in device-local memory since it's a pure GPU-only
-    // ping-pong buffer; the alternating pattern means each io_a write
-    // happens on the GPU side too. Mixing matters less than keeping
-    // the host-write surface as small as possible.
-    let io_a = vk_backend
-        .acquire_resident_scratch_host_visible("native_io_a_hv", (hidden_size * 4) as u64)?;
-    let io_b =
-        vk_backend.acquire_resident_scratch("native_io_b", (hidden_size * 4) as u64)?;
-
-    // 4. Prep the per-token upload payloads (embedding, RoPE cos/sin,
-    //    block_table, seq_lens) and ship them all to GPU in ONE
-    //    batched submit. Previously this phase issued 5 separate
-    //    `VulkanBuffer::upload_data` calls, each with its own command
-    //    pool create + queue_submit + queue_wait_idle round-trip,
-    //    which cost ~6 ms / token of pure orchestration.
-    let mut hidden_bytes: Vec<u8> = Vec::with_capacity(hidden_data.len() * 4);
-    for &x in &hidden_data {
-        hidden_bytes.extend_from_slice(&x.to_le_bytes());
-    }
-
-    let rope_bytes = (rope_cos_data.len() * 4).max(4) as u64;
-    // The small per-token inputs (RoPE cos/sin, block_table,
-    // seq_lens) are each read once by the GPU within the main batch,
-    // so host-visible memory is fine — no staging buffer + transfer
-    // submit needed. We just `map → memcpy → unmap` straight into the
-    // GPU-readable backing memory and the layer's read pulls them
-    // over PCIe on demand. Eliminates ~4 of 5 staging-buffer creates
-    // (≈ 2 ms / token) the batched upload would otherwise pay.
-    let rope_cos_buf =
-        vk_backend.acquire_resident_scratch_host_visible("native_rope_cos_hv", rope_bytes)?;
-    let rope_sin_buf =
-        vk_backend.acquire_resident_scratch_host_visible("native_rope_sin_hv", rope_bytes)?;
-    let mut rope_cos_bytes: Vec<u8> = Vec::with_capacity(rope_cos_data.len() * 4);
-    for &x in &rope_cos_data {
-        rope_cos_bytes.extend_from_slice(&x.to_le_bytes());
-    }
-    let mut rope_sin_bytes: Vec<u8> = Vec::with_capacity(rope_sin_data.len() * 4);
-    for &x in &rope_sin_data {
-        rope_sin_bytes.extend_from_slice(&x.to_le_bytes());
-    }
-
-    let blocks: Vec<u32> = block_table.blocks.clone();
-    let block_table_bytes_size = (blocks.len() * 4).max(4) as u64;
-    let block_table_buf = vk_backend
-        .acquire_resident_scratch_host_visible("native_block_table_hv", block_table_bytes_size)?;
-    let mut block_table_bytes: Vec<u8> = Vec::with_capacity(blocks.len() * 4);
-    for &x in &blocks {
-        block_table_bytes.extend_from_slice(&x.to_le_bytes());
-    }
-    let seq_lens: [u32; 1] = [(start_pos + 1) as u32];
-    let seq_lens_buf = vk_backend.acquire_resident_scratch_host_visible("native_seq_lens_hv", 4)?;
-    let seq_lens_bytes: Vec<u8> = seq_lens[0].to_le_bytes().to_vec();
-
-    // Write directly into the host-visible buffers (no command
-    // submission). The previous batched upload now handles only the
-    // 10 KB hidden state into device-local io_a.
-    rope_cos_buf.write_mapped(&rope_cos_bytes)?;
-    rope_sin_buf.write_mapped(&rope_sin_bytes)?;
-    block_table_buf.write_mapped(&block_table_bytes)?;
-    seq_lens_buf.write_mapped(&seq_lens_bytes)?;
-
-    // io_a is host-visible; just memcpy directly into it.
-    io_a.write_mapped(&hidden_bytes)
-        .context("native: write hidden state to io_a")?;
+    let block_tables = [block_table];
+    let start_positions = [start_pos];
+    let step = crate::vk_decode_resident::prepare_batched_resident_decode_token_step_buffers(
+        vk_backend,
+        token_ids,
+        hidden_size,
+        &rope_cos_data,
+        &rope_sin_data,
+        config.rotary_dim(),
+    )?;
+    let meta = crate::vk_decode_resident::prepare_batched_resident_decode_meta_buffers(
+        vk_backend,
+        &block_tables,
+        &start_positions,
+        paged_cache.block_size(),
+    )?;
     if timing_enabled {
         UPLOAD_NS.fetch_add(t_upload.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }
@@ -23849,58 +23630,39 @@ fn model_forward_paged_last_token_resident_native_vk(
     }
     let t_record = std::time::Instant::now();
 
-    // 8. Build ONE CommandBatch with all 32 layer blocks recorded.
+    // 8. Build ONE CommandBatch with token embedding plus all layer
+    // blocks recorded.
     let mut batch = CommandBatch::new(vk_device)?;
-    let mut full_attn_layer_idx: usize = 0;
-    let mut linear_attn_idx: usize = 0;
-    let mut from_buf: &std::sync::Arc<VulkanBuffer> = &io_a;
-    let mut to_buf: &std::sync::Arc<VulkanBuffer> = &io_b;
-    for layer in weights.layers.iter() {
-        match &layer.attention {
-            GpuAttentionWeights::Full(_) => {
-                let ok = crate::vk_decode_resident::record_full_attn_block_into(
-                    vk_backend,
-                    &mut batch,
-                    from_buf,
-                    to_buf,
-                    layer,
-                    config,
-                    start_pos,
-                    block_table,
-                    full_attn_layer_idx,
-                    paged_cache,
-                    vk_kv_cache,
-                    &rope_cos_buf,
-                    &rope_sin_buf,
-                    &block_table_buf,
-                    &seq_lens_buf,
-                )?;
-                if !ok {
-                    return Ok(None);
-                }
-                full_attn_layer_idx += 1;
-            }
-            GpuAttentionWeights::Linear(_) => {
-                let recurrent_t = &state.recurrent_states[linear_attn_idx];
-                let conv_t = &state.conv_states[linear_attn_idx];
-                let ok = crate::vk_decode_resident::record_gdn_block_into(
-                    vk_backend,
-                    &mut batch,
-                    from_buf,
-                    to_buf,
-                    layer,
-                    config,
-                    recurrent_t,
-                    conv_t,
-                )?;
-                if !ok {
-                    return Ok(None);
-                }
-                linear_attn_idx += 1;
-            }
-        }
-        std::mem::swap(&mut from_buf, &mut to_buf);
-    }
+    let Some(final_in_input) =
+        crate::vk_decode_resident::record_transformer_stack_batched_hidden_from_tokens_into(
+            vk_backend,
+            &mut batch,
+            token_ids,
+            &step.token_ids,
+            &step.input,
+            &step.scratch,
+            weights,
+            config,
+            1,
+            meta.max_blocks_per_seq,
+            meta.block_size,
+            vk_kv_cache,
+            &step.rope_cos,
+            &step.rope_sin,
+            &meta.block_table,
+            &meta.seq_lens,
+            &meta.slots,
+            state.recurrent_states.as_slice(),
+            state.conv_states.as_slice(),
+        )?
+    else {
+        return Ok(None);
+    };
+    let from_buf = if final_in_input {
+        &step.input
+    } else {
+        &step.scratch
+    };
 
     // Fold final RMSNorm + LM head GEMM into the same CommandBatch —
     // no intermediate readback or Tensor bridge between the last
@@ -27737,25 +27499,6 @@ mod tests {
             "host RoPE sin table max_abs_diff={max_sin:e}"
         );
 
-        Ok(())
-    }
-
-    #[cfg(feature = "vulkan")]
-    #[test]
-    fn test_vulkan_resident_embedding_gather_reads_transposed_bf16_table() -> Result<()> {
-        let hidden = 3usize;
-        let vocab = 4usize;
-        let mut values = Vec::new();
-        for h in 0..hidden {
-            for token in 0..vocab {
-                values.push(half::bf16::from_f32((h * 10 + token) as f32));
-            }
-        }
-        let table = Tensor::from_slice(&values, vec![hidden, vocab])?;
-        let rows = gather_embedding_rows_f32_vk(&[2, 0], &table, hidden, true)?
-            .expect("transposed BF16 table should use direct gather");
-
-        assert_eq!(rows, vec![2.0, 12.0, 22.0, 0.0, 10.0, 20.0]);
         Ok(())
     }
 

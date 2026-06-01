@@ -2980,6 +2980,61 @@ pub fn record_transformer_stack_batched_hidden_into(
     Ok(Some(from_is_input))
 }
 
+/// Record token embedding gather plus the full batched decode stack
+/// into an existing [`CommandBatch`].
+#[allow(clippy::too_many_arguments)]
+pub fn record_transformer_stack_batched_hidden_from_tokens_into(
+    backend: &VulkanBackend,
+    batch: &mut CommandBatch,
+    token_ids: &[u32],
+    token_ids_buf: &VulkanBuffer,
+    x_in_buf: &VulkanBuffer,
+    x_scratch_buf: &VulkanBuffer,
+    weights: &crate::forward::GpuWeights,
+    config: &ModelConfig,
+    batch_size: usize,
+    max_blocks_per_seq: usize,
+    block_size: usize,
+    vk_kv_cache: &VkPagedKvCache,
+    rope_cos_buf: &VulkanBuffer,
+    rope_sin_buf: &VulkanBuffer,
+    block_table_buf: &VulkanBuffer,
+    seq_lens_buf: &VulkanBuffer,
+    slots_buf: &VulkanBuffer,
+    recurrent_states: &[kiln_tensor::Tensor],
+    conv_states: &[kiln_tensor::Tensor],
+) -> Result<Option<bool>> {
+    anyhow::ensure!(
+        token_ids.len() == batch_size,
+        "batched transformer token stack: token id count mismatch"
+    );
+    let Some(embed) = resident_decode_embedding_source(backend, weights, config.hidden_size)?
+    else {
+        return Ok(None);
+    };
+    ensure_resident_decode_embedding_ids(token_ids, embed.vocab)?;
+    record_resident_decode_embedding_into(batch, &embed, token_ids_buf, x_in_buf, batch_size)?;
+    record_transformer_stack_batched_hidden_into(
+        backend,
+        batch,
+        x_in_buf,
+        x_scratch_buf,
+        weights,
+        config,
+        batch_size,
+        max_blocks_per_seq,
+        block_size,
+        vk_kv_cache,
+        rope_cos_buf,
+        rope_sin_buf,
+        block_table_buf,
+        seq_lens_buf,
+        slots_buf,
+        recurrent_states,
+        conv_states,
+    )
+}
+
 /// Record a full batched decode stack plus final LM-head argmax into
 /// an existing [`CommandBatch`].
 ///
@@ -3312,6 +3367,313 @@ pub fn submit_transformer_stack_batched_hidden(
     Ok(Some(hidden))
 }
 
+/// Submit a full batched resident decode stack from token IDs. The
+/// first dispatch gathers embedding rows into the resident input buffer,
+/// so the hidden input upload is avoided.
+#[allow(clippy::too_many_arguments)]
+pub fn submit_transformer_stack_batched_argmax_from_tokens(
+    backend: &VulkanBackend,
+    vk_device: &VulkanDevice,
+    token_ids: &[u32],
+    rope_cos: &[f32],
+    rope_sin: &[f32],
+    block_tables: &[&BlockTable],
+    start_positions: &[usize],
+    block_size: usize,
+    weights: &crate::forward::GpuWeights,
+    config: &ModelConfig,
+    vk_kv_cache: &VkPagedKvCache,
+    recurrent_states: &[kiln_tensor::Tensor],
+    conv_states: &[kiln_tensor::Tensor],
+) -> Result<Option<Vec<u32>>> {
+    let batch_size = block_tables.len();
+    anyhow::ensure!(
+        token_ids.len() == batch_size,
+        "batched transformer token argmax: token id count mismatch"
+    );
+    let Some(embed) = resident_decode_embedding_source(backend, weights, config.hidden_size)?
+    else {
+        return Ok(None);
+    };
+    ensure_resident_decode_embedding_ids(token_ids, embed.vocab)?;
+    let step = prepare_batched_resident_decode_token_step_buffers(
+        backend,
+        token_ids,
+        config.hidden_size,
+        rope_cos,
+        rope_sin,
+        config.rotary_dim(),
+    )?;
+    let meta = prepare_batched_resident_decode_meta_buffers(
+        backend,
+        block_tables,
+        start_positions,
+        block_size,
+    )?;
+    let out_bytes = (batch_size * 4) as u64;
+    let out_staging = backend
+        .acquire_resident_scratch_host_visible("native_b_out_tokens_staging", out_bytes)?;
+
+    let mut batch = CommandBatch::new(vk_device)?;
+    record_resident_decode_embedding_into(
+        &mut batch,
+        &embed,
+        &step.token_ids,
+        &step.input,
+        batch_size,
+    )?;
+    let ok = record_transformer_stack_batched_argmax_into(
+        backend,
+        &mut batch,
+        &step.input,
+        &step.scratch,
+        &out_staging,
+        weights,
+        config,
+        batch_size,
+        meta.max_blocks_per_seq,
+        meta.block_size,
+        vk_kv_cache,
+        &step.rope_cos,
+        &step.rope_sin,
+        &meta.block_table,
+        &meta.seq_lens,
+        &meta.slots,
+        recurrent_states,
+        conv_states,
+    )?;
+    if !ok {
+        return Ok(None);
+    }
+    batch
+        .submit_and_wait("vk-resident native token batched decode")
+        .context("batched transformer token argmax: submit CommandBatch")?;
+
+    let bytes = out_staging
+        .read_mapped(out_bytes as usize)
+        .context("batched transformer token argmax: read token-id staging")?;
+    let mut tokens = Vec::with_capacity(batch_size);
+    for chunk in bytes.chunks_exact(4).take(batch_size) {
+        tokens.push(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+    }
+    Ok(Some(tokens))
+}
+
+/// Submit a full batched resident decode stack plus sampler from token
+/// IDs, keeping embedding, hidden rows, logits, and sampling on Vulkan.
+#[allow(clippy::too_many_arguments)]
+pub fn submit_transformer_stack_batched_sample_from_tokens(
+    backend: &VulkanBackend,
+    vk_device: &VulkanDevice,
+    token_ids: &[u32],
+    rope_cos: &[f32],
+    rope_sin: &[f32],
+    block_tables: &[&BlockTable],
+    start_positions: &[usize],
+    block_size: usize,
+    weights: &crate::forward::GpuWeights,
+    config: &ModelConfig,
+    vk_kv_cache: &VkPagedKvCache,
+    recurrent_states: &[kiln_tensor::Tensor],
+    conv_states: &[kiln_tensor::Tensor],
+    history_rows: &[u32],
+    history_indices: &[u32],
+    history_counts: &[u32],
+    repetition_penalties: &[f32],
+    presence_penalties: &[f32],
+    frequency_penalties: &[f32],
+    temperatures: &[f32],
+    top_k: &[u32],
+    top_p: &[f32],
+    min_p: &[f32],
+    seeds: &[u64],
+) -> Result<Option<Vec<u32>>> {
+    let batch_size = block_tables.len();
+    anyhow::ensure!(
+        token_ids.len() == batch_size,
+        "batched transformer token sample: token id count mismatch"
+    );
+    let Some(embed) = resident_decode_embedding_source(backend, weights, config.hidden_size)?
+    else {
+        return Ok(None);
+    };
+    ensure_resident_decode_embedding_ids(token_ids, embed.vocab)?;
+    let step = prepare_batched_resident_decode_token_step_buffers(
+        backend,
+        token_ids,
+        config.hidden_size,
+        rope_cos,
+        rope_sin,
+        config.rotary_dim(),
+    )?;
+    let meta = prepare_batched_resident_decode_meta_buffers(
+        backend,
+        block_tables,
+        start_positions,
+        block_size,
+    )?;
+    let sample = prepare_batched_resident_sample_buffers(
+        backend,
+        batch_size,
+        history_rows,
+        history_indices,
+        history_counts,
+        repetition_penalties,
+        presence_penalties,
+        frequency_penalties,
+        temperatures,
+        top_k,
+        top_p,
+        min_p,
+        seeds,
+    )?;
+    let out_bytes = (batch_size * 4) as u64;
+    let out_staging = backend
+        .acquire_resident_scratch_host_visible("native_b_sample_tokens_staging", out_bytes)?;
+
+    let mut batch = CommandBatch::new(vk_device)?;
+    record_resident_decode_embedding_into(
+        &mut batch,
+        &embed,
+        &step.token_ids,
+        &step.input,
+        batch_size,
+    )?;
+    let ok = record_transformer_stack_batched_sample_into(
+        backend,
+        &mut batch,
+        &step.input,
+        &step.scratch,
+        &out_staging,
+        &sample,
+        weights,
+        config,
+        batch_size,
+        meta.max_blocks_per_seq,
+        meta.block_size,
+        vk_kv_cache,
+        &step.rope_cos,
+        &step.rope_sin,
+        &meta.block_table,
+        &meta.seq_lens,
+        &meta.slots,
+        recurrent_states,
+        conv_states,
+    )?;
+    if !ok {
+        return Ok(None);
+    }
+    batch
+        .submit_and_wait("vk-resident native token batched sample decode")
+        .context("batched transformer token sample: submit CommandBatch")?;
+
+    let bytes = out_staging
+        .read_mapped(out_bytes as usize)
+        .context("batched transformer token sample: read token-id staging")?;
+    let mut tokens = Vec::with_capacity(batch_size);
+    for chunk in bytes.chunks_exact(4).take(batch_size) {
+        tokens.push(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+    }
+    Ok(Some(tokens))
+}
+
+/// Submit a full batched resident decode stack from token IDs and
+/// return final hidden rows as f32 `[batch_size, hidden]`.
+#[allow(clippy::too_many_arguments)]
+pub fn submit_transformer_stack_batched_hidden_from_tokens(
+    backend: &VulkanBackend,
+    vk_device: &VulkanDevice,
+    token_ids: &[u32],
+    rope_cos: &[f32],
+    rope_sin: &[f32],
+    block_tables: &[&BlockTable],
+    start_positions: &[usize],
+    block_size: usize,
+    weights: &crate::forward::GpuWeights,
+    config: &ModelConfig,
+    vk_kv_cache: &VkPagedKvCache,
+    recurrent_states: &[kiln_tensor::Tensor],
+    conv_states: &[kiln_tensor::Tensor],
+) -> Result<Option<Vec<f32>>> {
+    let batch_size = block_tables.len();
+    anyhow::ensure!(
+        token_ids.len() == batch_size,
+        "batched transformer token hidden: token id count mismatch"
+    );
+    let Some(embed) = resident_decode_embedding_source(backend, weights, config.hidden_size)?
+    else {
+        return Ok(None);
+    };
+    ensure_resident_decode_embedding_ids(token_ids, embed.vocab)?;
+    let step = prepare_batched_resident_decode_token_step_buffers(
+        backend,
+        token_ids,
+        config.hidden_size,
+        rope_cos,
+        rope_sin,
+        config.rotary_dim(),
+    )?;
+    let meta = prepare_batched_resident_decode_meta_buffers(
+        backend,
+        block_tables,
+        start_positions,
+        block_size,
+    )?;
+    let hidden_bytes = (batch_size * config.hidden_size * 4) as u64;
+    let out_staging = backend
+        .acquire_resident_scratch_host_visible("native_b_hidden_staging", hidden_bytes)?;
+
+    let mut batch = CommandBatch::new(vk_device)?;
+    record_resident_decode_embedding_into(
+        &mut batch,
+        &embed,
+        &step.token_ids,
+        &step.input,
+        batch_size,
+    )?;
+    let Some(final_in_input) = record_transformer_stack_batched_hidden_into(
+        backend,
+        &mut batch,
+        &step.input,
+        &step.scratch,
+        weights,
+        config,
+        batch_size,
+        meta.max_blocks_per_seq,
+        meta.block_size,
+        vk_kv_cache,
+        &step.rope_cos,
+        &step.rope_sin,
+        &meta.block_table,
+        &meta.seq_lens,
+        &meta.slots,
+        recurrent_states,
+        conv_states,
+    )? else {
+        return Ok(None);
+    };
+    let hidden_src = if final_in_input {
+        &step.input
+    } else {
+        &step.scratch
+    };
+    batch
+        .record_copy_buffer(hidden_src, &out_staging, hidden_bytes)
+        .context("batched transformer token hidden: record hidden readback")?;
+    batch
+        .submit_and_wait("vk-resident native token batched hidden decode")
+        .context("batched transformer token hidden: submit CommandBatch")?;
+
+    let bytes = out_staging
+        .read_mapped(hidden_bytes as usize)
+        .context("batched transformer token hidden: read hidden staging")?;
+    let mut hidden = Vec::with_capacity(batch_size * config.hidden_size);
+    for chunk in bytes.chunks_exact(4).take(batch_size * config.hidden_size) {
+        hidden.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+    }
+    Ok(Some(hidden))
+}
+
 /// Host-visible Vulkan buffers for one batched resident decode step's
 /// paged metadata.
 pub struct BatchedResidentDecodeMetaBuffers {
@@ -3352,6 +3714,114 @@ pub struct BatchedResidentDecodeStepBuffers {
     pub batch_size: usize,
     pub hidden: usize,
     pub rotary_dim: usize,
+}
+
+/// Resident buffers for a batched decode step whose input hidden rows
+/// are produced by a Vulkan token-embedding gather.
+pub struct BatchedResidentDecodeTokenStepBuffers {
+    pub input: std::sync::Arc<VulkanBuffer>,
+    pub scratch: std::sync::Arc<VulkanBuffer>,
+    pub token_ids: std::sync::Arc<VulkanBuffer>,
+    pub rope_cos: std::sync::Arc<VulkanBuffer>,
+    pub rope_sin: std::sync::Arc<VulkanBuffer>,
+    pub batch_size: usize,
+    pub hidden: usize,
+    pub rotary_dim: usize,
+}
+
+struct ResidentDecodeEmbeddingSource {
+    weight: std::sync::Arc<VulkanBuffer>,
+    shader: &'static str,
+    vocab: usize,
+    hidden: usize,
+}
+
+fn resident_decode_embedding_source_for_table(
+    backend: &VulkanBackend,
+    table: &kiln_tensor::Tensor,
+    hidden: usize,
+    transposed: bool,
+) -> Result<Option<ResidentDecodeEmbeddingSource>> {
+    let dims = table.dims();
+    if dims.len() != 2 {
+        return Ok(None);
+    }
+    let (vocab, table_hidden) = if transposed {
+        (dims[1], dims[0])
+    } else {
+        (dims[0], dims[1])
+    };
+    if table_hidden != hidden || vocab == 0 {
+        return Ok(None);
+    }
+
+    let (weight, shader) = match (table.dtype(), transposed) {
+        (kiln_tensor::DType::BF16, false) => (
+            backend.cached_bf16_packed_weight_buffer_kt(table)?,
+            shaders::VK_EMBEDDING_LOOKUP_BF16W_F32,
+        ),
+        (kiln_tensor::DType::BF16, true) => (
+            backend.cached_bf16_packed_weight_buffer_kt(table)?,
+            shaders::VK_EMBEDDING_LOOKUP_T_BF16W_F32,
+        ),
+        (kiln_tensor::DType::F32 | kiln_tensor::DType::F16, false) => (
+            backend.cached_f32_weight_buffer_kt(table)?,
+            shaders::VK_EMBEDDING_LOOKUP_F32,
+        ),
+        (kiln_tensor::DType::F32 | kiln_tensor::DType::F16, true) => (
+            backend.cached_f32_weight_buffer_kt(table)?,
+            shaders::VK_EMBEDDING_LOOKUP_T_F32,
+        ),
+        _ => return Ok(None),
+    };
+
+    Ok(Some(ResidentDecodeEmbeddingSource {
+        weight,
+        shader,
+        vocab,
+        hidden,
+    }))
+}
+
+fn resident_decode_embedding_source(
+    backend: &VulkanBackend,
+    weights: &crate::forward::GpuWeights,
+    hidden: usize,
+) -> Result<Option<ResidentDecodeEmbeddingSource>> {
+    if let Some(source) =
+        resident_decode_embedding_source_for_table(backend, &weights.embed_tokens, hidden, false)?
+    {
+        return Ok(Some(source));
+    }
+    resident_decode_embedding_source_for_table(backend, &weights.embed_tokens_t, hidden, true)
+}
+
+fn record_resident_decode_embedding_into(
+    batch: &mut CommandBatch,
+    source: &ResidentDecodeEmbeddingSource,
+    token_ids: &VulkanBuffer,
+    out: &VulkanBuffer,
+    batch_size: usize,
+) -> Result<()> {
+    let total = batch_size
+        .checked_mul(source.hidden)
+        .context("resident embedding gather: output element count overflow")?;
+    batch.record_shader(
+        source.shader,
+        &[token_ids.handle(), source.weight.handle(), out.handle()],
+        &[batch_size as u32, source.hidden as u32, source.vocab as u32],
+        Workgroups::OneD(total.div_ceil(256) as u32),
+    )
+}
+
+fn ensure_resident_decode_embedding_ids(token_ids: &[u32], vocab: usize) -> Result<()> {
+    for (row, &token) in token_ids.iter().enumerate() {
+        anyhow::ensure!(
+            (token as usize) < vocab,
+            "resident embedding gather row {row}: token id {token} exceeds vocab {vocab}"
+        );
+    }
+    Ok(())
 }
 
 /// Prepare resident hidden-input and RoPE buffers for a batched decode
@@ -3406,6 +3876,64 @@ pub fn prepare_batched_resident_decode_step_buffers(
     Ok(BatchedResidentDecodeStepBuffers {
         input,
         scratch,
+        rope_cos: rope_cos_buf,
+        rope_sin: rope_sin_buf,
+        batch_size,
+        hidden,
+        rotary_dim,
+    })
+}
+
+/// Prepare resident token-id and RoPE buffers for a batched decode
+/// step. The hidden input buffer is device-local and filled by the
+/// recorded embedding gather before the transformer stack.
+pub fn prepare_batched_resident_decode_token_step_buffers(
+    backend: &VulkanBackend,
+    token_ids: &[u32],
+    hidden: usize,
+    rope_cos: &[f32],
+    rope_sin: &[f32],
+    rotary_dim: usize,
+) -> Result<BatchedResidentDecodeTokenStepBuffers> {
+    let batch_size = token_ids.len();
+    anyhow::ensure!(
+        batch_size > 0,
+        "batched resident decode token step buffers: batch_size must be > 0"
+    );
+    anyhow::ensure!(
+        rotary_dim % 2 == 0,
+        "batched resident decode token step buffers: rotary_dim must be even"
+    );
+    let half_rotary = rotary_dim / 2;
+    anyhow::ensure!(
+        rope_cos.len() == batch_size * half_rotary,
+        "batched resident decode token step buffers: rope_cos length mismatch"
+    );
+    anyhow::ensure!(
+        rope_sin.len() == batch_size * half_rotary,
+        "batched resident decode token step buffers: rope_sin length mismatch"
+    );
+
+    let hidden_bytes = (batch_size * hidden).max(1) as u64 * 4;
+    let token_bytes = token_ids.len().max(1) as u64 * 4;
+    let rope_bytes = (rope_cos.len().max(1) * 4) as u64;
+    let input = backend.acquire_resident_scratch("native_b_io_a", hidden_bytes)?;
+    let scratch = backend.acquire_resident_scratch("native_b_io_b", hidden_bytes)?;
+    let token_ids_buf =
+        backend.acquire_resident_scratch_host_visible("native_b_token_ids_hv", token_bytes)?;
+    let rope_cos_buf =
+        backend.acquire_resident_scratch_host_visible("native_b_rope_cos_hv", rope_bytes)?;
+    let rope_sin_buf =
+        backend.acquire_resident_scratch_host_visible("native_b_rope_sin_hv", rope_bytes)?;
+
+    token_ids_buf.write_mapped(bytemuck::cast_slice(token_ids))?;
+    rope_cos_buf.write_mapped(bytemuck::cast_slice(rope_cos))?;
+    rope_sin_buf.write_mapped(bytemuck::cast_slice(rope_sin))?;
+
+    Ok(BatchedResidentDecodeTokenStepBuffers {
+        input,
+        scratch,
+        token_ids: token_ids_buf,
         rope_cos: rope_cos_buf,
         rope_sin: rope_sin_buf,
         batch_size,
