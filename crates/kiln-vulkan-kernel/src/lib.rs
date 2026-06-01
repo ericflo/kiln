@@ -66,6 +66,8 @@ pub mod shaders {
     pub const QKV_GATE_SPLIT_BATCHED: &str = shader_path!("qkv_gate_split_batched");
     pub const VK_ROPE_F32: &str = shader_path!("vk_rope_f32");
     pub const VK_ROPE_QK_F32: &str = shader_path!("vk_rope_qk_f32");
+    pub const VK_ROPE_Q_KV_WRITE_SLOTS_F32: &str =
+        shader_path!("vk_rope_q_kv_write_slots_f32");
     pub const VK_ROPE_TABLES_FROM_SEQ_LENS_F32: &str =
         shader_path!("vk_rope_tables_from_seq_lens_f32");
     pub const PAGED_KV_WRITE_SLOT: &str = shader_path!("paged_kv_write_slot");

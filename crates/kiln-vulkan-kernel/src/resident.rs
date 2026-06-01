@@ -1526,6 +1526,138 @@ pub fn dispatch_rotary_qk_resident(
     .context("rotary_qk_resident kernel failed")
 }
 
+/// Resident-form fused Q RoPE plus K RoPE + V paged-cache write for batched
+/// decode. This replaces the separate Q/K RoPE and `paged_kv_write_slots`
+/// dispatches in the multi-row full-attention resident path.
+#[allow(clippy::too_many_arguments)]
+pub fn dispatch_rotary_q_paged_kv_write_slots_resident(
+    vk_device: &VulkanDevice,
+    q: &VulkanBuffer,
+    k: &VulkanBuffer,
+    v: &VulkanBuffer,
+    cos: &VulkanBuffer,
+    sin: &VulkanBuffer,
+    slots: &VulkanBuffer,
+    q_out: &VulkanBuffer,
+    k_pool: &VulkanBuffer,
+    v_pool: &VulkanBuffer,
+    batch: usize,
+    num_q_heads: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    rotary_dim: usize,
+    total_slots: usize,
+) -> Result<()> {
+    anyhow::ensure!(
+        batch > 0,
+        "rotary_q_paged_kv_write_slots_resident: batch must be > 0"
+    );
+    anyhow::ensure!(
+        batch <= u32::MAX as usize
+            && num_q_heads <= u32::MAX as usize
+            && num_kv_heads <= u32::MAX as usize
+            && head_dim <= u32::MAX as usize
+            && rotary_dim <= u32::MAX as usize
+            && total_slots <= u32::MAX as usize,
+        "rotary_q_paged_kv_write_slots_resident: push constant dimension exceeds u32"
+    );
+    anyhow::ensure!(
+        rotary_dim <= head_dim && rotary_dim % 2 == 0,
+        "rotary_q_paged_kv_write_slots_resident: rotary_dim={rotary_dim} must be <= head_dim={head_dim} and even"
+    );
+    let q_elems = batch
+        .checked_mul(num_q_heads)
+        .and_then(|n| n.checked_mul(head_dim))
+        .context("rotary_q_paged_kv_write_slots_resident: q element count overflow")?;
+    let kv_elems = batch
+        .checked_mul(num_kv_heads)
+        .and_then(|n| n.checked_mul(head_dim))
+        .context("rotary_q_paged_kv_write_slots_resident: kv element count overflow")?;
+    let pool_elems = total_slots
+        .checked_mul(num_kv_heads)
+        .and_then(|n| n.checked_mul(head_dim))
+        .context("rotary_q_paged_kv_write_slots_resident: pool element count overflow")?;
+    let q_need = q_elems
+        .checked_mul(4)
+        .context("rotary_q_paged_kv_write_slots_resident: q byte count overflow")?
+        as u64;
+    let kv_need = kv_elems
+        .checked_mul(4)
+        .context("rotary_q_paged_kv_write_slots_resident: kv byte count overflow")?
+        as u64;
+    let slots_need = batch
+        .checked_mul(4)
+        .context("rotary_q_paged_kv_write_slots_resident: slots byte count overflow")?
+        as u64;
+    let pool_need = pool_elems
+        .checked_mul(4)
+        .context("rotary_q_paged_kv_write_slots_resident: pool byte count overflow")?
+        as u64;
+    anyhow::ensure!(
+        q.size() >= q_need,
+        "rotary_q_paged_kv_write_slots_resident: q buffer too small"
+    );
+    anyhow::ensure!(
+        k.size() >= kv_need,
+        "rotary_q_paged_kv_write_slots_resident: k buffer too small"
+    );
+    anyhow::ensure!(
+        v.size() >= kv_need,
+        "rotary_q_paged_kv_write_slots_resident: v buffer too small"
+    );
+    anyhow::ensure!(
+        slots.size() >= slots_need,
+        "rotary_q_paged_kv_write_slots_resident: slots buffer too small"
+    );
+    anyhow::ensure!(
+        q_out.size() >= q_need,
+        "rotary_q_paged_kv_write_slots_resident: q_out buffer too small"
+    );
+    anyhow::ensure!(
+        k_pool.size() >= pool_need,
+        "rotary_q_paged_kv_write_slots_resident: k_pool buffer too small"
+    );
+    anyhow::ensure!(
+        v_pool.size() >= pool_need,
+        "rotary_q_paged_kv_write_slots_resident: v_pool buffer too small"
+    );
+
+    let glsl_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/csrc/shaders/vk_rope_q_kv_write_slots_f32.comp"
+    );
+    let spirv = ShaderPipeline::compile_shader(glsl_path)?;
+    let push_constants: [u32; 6] = [
+        batch as u32,
+        num_q_heads as u32,
+        num_kv_heads as u32,
+        head_dim as u32,
+        rotary_dim as u32,
+        total_slots as u32,
+    ];
+    let handles: [vk::Buffer; 9] = [
+        q.handle(),
+        k.handle(),
+        v.handle(),
+        cos.handle(),
+        sin.handle(),
+        slots.handle(),
+        q_out.handle(),
+        k_pool.handle(),
+        v_pool.handle(),
+    ];
+    let total = q_elems + kv_elems;
+    run_compute_pipeline(
+        vk_device,
+        &spirv,
+        &handles,
+        handles.len(),
+        &push_constants,
+        total.div_ceil(256) as u32,
+    )
+    .context("rotary_q_paged_kv_write_slots_resident kernel failed")
+}
+
 /// Resident-form GDN single-token recurrent step (fallback path used
 /// when the fully-fused `dispatch_gdn_decode_gates_recurrent_rmsnorm`
 /// is declined). Writes `out: [batch * heads * dv]` f32 and mutates
@@ -2701,6 +2833,24 @@ mod tests {
         )?)
     }
 
+    fn upload_u32_buffer(vk_device: &VulkanDevice, data: &[u32]) -> anyhow::Result<VulkanBuffer> {
+        let bytes = bytemuck::cast_slice(data);
+        let buf = VulkanBuffer::create_device_local(
+            vk_device.device(),
+            vk_device.device_local_mem_type(),
+            bytes.len().max(4) as u64,
+        )?;
+        VulkanBuffer::upload_data(
+            vk_device.device(),
+            vk_device.host_visible_mem_type(),
+            vk_device.queue(),
+            vk_device.queue_family_index(),
+            &buf,
+            bytes,
+        )?;
+        Ok(buf)
+    }
+
     fn upload_tensor_bf16_packed_buffer(
         vk_device: &VulkanDevice,
         tensor: &Tensor,
@@ -3745,6 +3895,120 @@ mod tests {
         }
         for (i, (e, g)) in cpu_rope(&k_data, num_kv_heads).iter().zip(got_k.iter()).enumerate() {
             assert!((e - g).abs() <= 1e-5, "k idx {i}: cpu {e} vs gpu {g}");
+        }
+    }
+
+    #[test]
+    fn rotary_q_paged_kv_write_slots_resident_matches_cpu_reference() {
+        let Some(dev) = try_device() else { return };
+        let batch = 3usize;
+        let num_q_heads = 4usize;
+        let num_kv_heads = 2usize;
+        let head_dim = 16usize;
+        let rotary_dim = 8usize;
+        let half = rotary_dim / 2;
+        let total_slots = 7usize;
+        let slots = [4u32, 1, 5];
+        let q_n = batch * num_q_heads * head_dim;
+        let kv_n = batch * num_kv_heads * head_dim;
+        let pool_n = total_slots * num_kv_heads * head_dim;
+        let q_data: Vec<f32> = (0..q_n).map(|i| ((i % 29) as f32 - 13.0) * 0.04).collect();
+        let k_data: Vec<f32> = (0..kv_n).map(|i| ((i % 31) as f32 - 17.0) * 0.03).collect();
+        let v_data: Vec<f32> = (0..kv_n).map(|i| 1000.0 + i as f32).collect();
+        let cos_data: Vec<f32> = (0..batch * half)
+            .map(|i| ((i as f32) * 0.11).cos())
+            .collect();
+        let sin_data: Vec<f32> = (0..batch * half)
+            .map(|i| ((i as f32) * 0.11).sin())
+            .collect();
+
+        let q = Tensor::from_vec(q_data.clone(), (batch, num_q_heads, head_dim), &Device::Cpu).unwrap();
+        let k = Tensor::from_vec(k_data.clone(), (batch, num_kv_heads, head_dim), &Device::Cpu).unwrap();
+        let v = Tensor::from_vec(v_data.clone(), (batch, num_kv_heads, head_dim), &Device::Cpu).unwrap();
+        let cos_t =
+            Tensor::from_vec(cos_data.clone(), (batch, half), &Device::Cpu).unwrap();
+        let sin_t =
+            Tensor::from_vec(sin_data.clone(), (batch, half), &Device::Cpu).unwrap();
+        let zero_pool = Tensor::from_vec(vec![0f32; pool_n], pool_n, &Device::Cpu).unwrap();
+
+        let q_buf = upload_tensor_f32_buffer(&dev, &q).unwrap();
+        let k_buf = upload_tensor_f32_buffer(&dev, &k).unwrap();
+        let v_buf = upload_tensor_f32_buffer(&dev, &v).unwrap();
+        let cos_buf = upload_tensor_f32_buffer(&dev, &cos_t).unwrap();
+        let sin_buf = upload_tensor_f32_buffer(&dev, &sin_t).unwrap();
+        let slots_buf = upload_u32_buffer(&dev, &slots).unwrap();
+        let q_out = alloc_out(&dev, (q_n * 4) as u64);
+        let k_pool = upload_tensor_f32_buffer(&dev, &zero_pool).unwrap();
+        let v_pool = upload_tensor_f32_buffer(&dev, &zero_pool).unwrap();
+
+        dispatch_rotary_q_paged_kv_write_slots_resident(
+            &dev,
+            &q_buf,
+            &k_buf,
+            &v_buf,
+            &cos_buf,
+            &sin_buf,
+            &slots_buf,
+            &q_out,
+            &k_pool,
+            &v_pool,
+            batch,
+            num_q_heads,
+            num_kv_heads,
+            head_dim,
+            rotary_dim,
+            total_slots,
+        )
+        .unwrap();
+
+        let cpu_rope = |data: &[f32], heads: usize| -> Vec<f32> {
+            let mut out = vec![0f32; batch * heads * head_dim];
+            for r in 0..batch {
+                for h in 0..heads {
+                    let base = (r * heads + h) * head_dim;
+                    for d in 0..head_dim {
+                        let idx = base + d;
+                        if d >= rotary_dim {
+                            out[idx] = data[idx];
+                            continue;
+                        }
+                        let (pair, is_low) = if d < half { (d, true) } else { (d - half, false) };
+                        let low = data[base + pair];
+                        let high = data[base + pair + half];
+                        let c = cos_data[r * half + pair];
+                        let s = sin_data[r * half + pair];
+                        out[idx] = if is_low { low * c - high * s } else { low * s + high * c };
+                    }
+                }
+            }
+            out
+        };
+
+        let expected_q = cpu_rope(&q_data, num_q_heads);
+        let expected_k_rows = cpu_rope(&k_data, num_kv_heads);
+        let mut expected_k_pool = vec![0f32; pool_n];
+        let mut expected_v_pool = vec![0f32; pool_n];
+        let elems_per_slot = num_kv_heads * head_dim;
+        for row in 0..batch {
+            let src = row * elems_per_slot;
+            let dst = slots[row] as usize * elems_per_slot;
+            expected_k_pool[dst..dst + elems_per_slot]
+                .copy_from_slice(&expected_k_rows[src..src + elems_per_slot]);
+            expected_v_pool[dst..dst + elems_per_slot]
+                .copy_from_slice(&v_data[src..src + elems_per_slot]);
+        }
+
+        let got_q = read_back_f32(&dev, &q_out);
+        let got_k_pool = read_back_f32(&dev, &k_pool);
+        let got_v_pool = read_back_f32(&dev, &v_pool);
+        for (i, (e, g)) in expected_q.iter().zip(got_q.iter()).enumerate() {
+            assert!((e - g).abs() <= 1e-5, "q idx {i}: cpu {e} vs gpu {g}");
+        }
+        for (i, (e, g)) in expected_k_pool.iter().zip(got_k_pool.iter()).enumerate() {
+            assert!((e - g).abs() <= 1e-5, "k pool idx {i}: cpu {e} vs gpu {g}");
+        }
+        for (i, (e, g)) in expected_v_pool.iter().zip(got_v_pool.iter()).enumerate() {
+            assert!((e - g).abs() <= 1e-6, "v pool idx {i}: cpu {e} vs gpu {g}");
         }
     }
 

@@ -2137,7 +2137,6 @@ pub fn record_full_attn_block_batched_into(
     let k_buf = backend.acquire_resident_scratch("nfa_b_k", (batch_size * k_dim * 4) as u64)?;
     let v_buf = backend.acquire_resident_scratch("nfa_b_v", (batch_size * v_dim * 4) as u64)?;
     let q_rot = backend.acquire_resident_scratch("nfa_b_q_rot", (batch_size * q_h_d * 4) as u64)?;
-    let k_rot = backend.acquire_resident_scratch("nfa_b_k_rot", (batch_size * k_dim * 4) as u64)?;
     let attn_pre_gate =
         backend.acquire_resident_scratch("nfa_b_attn_pre_gate", (batch_size * q_h_d * 4) as u64)?;
     let attn_post_gate = backend
@@ -2207,14 +2206,17 @@ pub fn record_full_attn_block_batched_into(
         Workgroups::OneD((batch_size * (num_heads + num_kv_heads)) as u32),
     )?;
     batch.record_shader(
-        shaders::VK_ROPE_QK_F32,
+        shaders::VK_ROPE_Q_KV_WRITE_SLOTS_F32,
         &[
             q_buf.handle(),
             k_buf.handle(),
+            v_buf.handle(),
             rope_cos_buf.handle(),
             rope_sin_buf.handle(),
+            slots_buf.handle(),
             q_rot.handle(),
-            k_rot.handle(),
+            k_pool.handle(),
+            v_pool.handle(),
         ],
         &[
             batch_size as u32,
@@ -2222,24 +2224,9 @@ pub fn record_full_attn_block_batched_into(
             num_kv_heads as u32,
             head_dim as u32,
             rotary_dim as u32,
-        ],
-        Workgroups::OneD((batch_size * (q_h_d + k_dim)).div_ceil(256) as u32),
-    )?;
-    batch.record_shader(
-        shaders::PAGED_KV_WRITE_SLOTS,
-        &[
-            k_rot.handle(),
-            v_buf.handle(),
-            slots_buf.handle(),
-            k_pool.handle(),
-            v_pool.handle(),
-        ],
-        &[
-            batch_size as u32,
-            elements_per_slot as u32,
             vk_kv_cache.total_slots() as u32,
         ],
-        Workgroups::OneD((batch_size * elements_per_slot).div_ceil(256) as u32),
+        Workgroups::OneD((batch_size * (q_h_d + elements_per_slot)).div_ceil(256) as u32),
     )?;
 
     let num_chunks = paged_attn_splitk_chunks(batch_size, max_blocks_per_seq);

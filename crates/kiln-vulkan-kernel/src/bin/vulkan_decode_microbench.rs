@@ -730,6 +730,10 @@ fn run_full_token_resident_mixed_batched(
         env!("CARGO_MANIFEST_DIR"),
         "/csrc/shaders/vk_rope_qk_f32.comp"
     );
+    let rope_q_kv_write_slots_shader = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/csrc/shaders/vk_rope_q_kv_write_slots_f32.comp"
+    );
     let paged_attn_shader = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/csrc/shaders/paged_attn_decode_batch.comp"
@@ -741,10 +745,6 @@ fn run_full_token_resident_mixed_batched(
     let paged_attn_reduce_shader = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/csrc/shaders/paged_attn_decode_batch_paged_splitk_reduce.comp"
-    );
-    let kv_write_slots_shader = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/csrc/shaders/paged_kv_write_slots.comp"
     );
     let mul_sigmoid_shader = concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -934,27 +934,6 @@ fn run_full_token_resident_mixed_batched(
                         ],
                         Workgroups::OneD((batch * (num_heads + num_kv_heads)) as u32),
                     )?;
-                    b.record_shader(
-                        rope_qk_shader,
-                        &[
-                            fa_q_buf.handle(),
-                            fa_k_buf.handle(),
-                            cos_buf.handle(),
-                            sin_buf.handle(),
-                            fa_q_rot.handle(),
-                            fa_k_rot.handle(),
-                        ],
-                        &[
-                            batch as u32,
-                            num_heads as u32,
-                            num_kv_heads as u32,
-                            head_dim as u32,
-                            rotary_dim as u32,
-                        ],
-                        Workgroups::OneD(
-                            (batch * (num_heads + num_kv_heads) * head_dim).div_ceil(256) as u32,
-                        ),
-                    )?;
                     if use_paged_attention {
                         let cache = paged_cache.as_ref().expect("paged cache");
                         let cache_layer = layer / 4;
@@ -962,20 +941,30 @@ fn run_full_token_resident_mixed_batched(
                         let k_pool = cache.k_buffer(cache_layer).expect("full-attn layer K pool");
                         let v_pool = cache.v_buffer(cache_layer).expect("full-attn layer V pool");
                         b.record_shader(
-                            kv_write_slots_shader,
+                            rope_q_kv_write_slots_shader,
                             &[
-                                fa_k_rot.handle(),
+                                fa_q_buf.handle(),
+                                fa_k_buf.handle(),
                                 fa_v_buf.handle(),
+                                cos_buf.handle(),
+                                sin_buf.handle(),
                                 slots_buf.as_ref().expect("slots").handle(),
+                                fa_q_rot.handle(),
                                 k_pool.handle(),
                                 v_pool.handle(),
                             ],
                             &[
                                 batch as u32,
-                                elements_per_slot as u32,
+                                num_heads as u32,
+                                num_kv_heads as u32,
+                                head_dim as u32,
+                                rotary_dim as u32,
                                 cache.total_slots() as u32,
                             ],
-                            Workgroups::OneD((batch * elements_per_slot).div_ceil(256) as u32),
+                            Workgroups::OneD(
+                                (batch * (num_heads * head_dim + elements_per_slot)).div_ceil(256)
+                                    as u32,
+                            ),
                         )?;
                         b.record_shader(
                             paged_attn_splitk_shader,
@@ -1008,6 +997,28 @@ fn run_full_token_resident_mixed_batched(
                             Workgroups::OneD((batch * num_heads) as u32),
                         )?;
                     } else {
+                        b.record_shader(
+                            rope_qk_shader,
+                            &[
+                                fa_q_buf.handle(),
+                                fa_k_buf.handle(),
+                                cos_buf.handle(),
+                                sin_buf.handle(),
+                                fa_q_rot.handle(),
+                                fa_k_rot.handle(),
+                            ],
+                            &[
+                                batch as u32,
+                                num_heads as u32,
+                                num_kv_heads as u32,
+                                head_dim as u32,
+                                rotary_dim as u32,
+                            ],
+                            Workgroups::OneD(
+                                (batch * (num_heads + num_kv_heads) * head_dim).div_ceil(256)
+                                    as u32,
+                            ),
+                        )?;
                         b.record_shader(
                             paged_attn_shader,
                             &[
@@ -2384,9 +2395,9 @@ fn run_full_token_resident_paged(
         env!("CARGO_MANIFEST_DIR"),
         "/csrc/shaders/qwen_rmsnorm_forward.comp"
     );
-    let rope_qk_shader = concat!(
+    let rope_q_kv_write_slots_shader = concat!(
         env!("CARGO_MANIFEST_DIR"),
-        "/csrc/shaders/vk_rope_qk_f32.comp"
+        "/csrc/shaders/vk_rope_q_kv_write_slots_f32.comp"
     );
     let paged_attn_splitk_shader = concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -2395,10 +2406,6 @@ fn run_full_token_resident_paged(
     let paged_attn_reduce_shader = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/csrc/shaders/paged_attn_decode_batch_paged_splitk_reduce.comp"
-    );
-    let kv_write_slots_shader = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/csrc/shaders/paged_kv_write_slots.comp"
     );
     let mul_sigmoid_shader = concat!(
         env!("CARGO_MANIFEST_DIR"),
@@ -2461,7 +2468,6 @@ fn run_full_token_resident_paged(
         let q_buf = mk((batch * num_heads * head_dim * 4) as u64)?;
         let q_rot = mk((batch * num_heads * head_dim * 4) as u64)?;
         let k_buf = mk((batch * num_kv_heads * head_dim * 4) as u64)?;
-        let k_rot = mk((batch * num_kv_heads * head_dim * 4) as u64)?;
         let v_buf = mk((batch * num_kv_heads * head_dim * 4) as u64)?;
         let gate_buf = mk((batch * num_heads * head_dim * 4) as u64)?;
         let seq_lens_buf = mk_dev(&seq_lens_bytes)?;
@@ -2529,16 +2535,19 @@ fn run_full_token_resident_paged(
                     ],
                     Workgroups::OneD((batch * (num_heads + num_kv_heads)) as u32),
                 )?;
-                // 5) RoPE Q+K
+                // 5) RoPE Q plus K RoPE + paged K/V write.
                 b.record_shader(
-                    rope_qk_shader,
+                    rope_q_kv_write_slots_shader,
                     &[
                         q_buf.handle(),
                         k_buf.handle(),
+                        v_buf.handle(),
                         cos_buf.handle(),
                         sin_buf.handle(),
+                        slots_buf.handle(),
                         q_rot.handle(),
-                        k_rot.handle(),
+                        k_pool.handle(),
+                        v_pool.handle(),
                     ],
                     &[
                         batch as u32,
@@ -2546,28 +2555,11 @@ fn run_full_token_resident_paged(
                         num_kv_heads as u32,
                         head_dim as u32,
                         rotary_dim as u32,
+                        cache.total_slots() as u32,
                     ],
                     Workgroups::OneD(
                         (batch * (num_heads + num_kv_heads) * head_dim).div_ceil(256) as u32,
                     ),
-                )?;
-                // 7) Write K/V to resident paged pool at each row's slot.
-                let elements_per_slot = num_kv_heads * head_dim;
-                b.record_shader(
-                    kv_write_slots_shader,
-                    &[
-                        k_rot.handle(),
-                        v_buf.handle(),
-                        slots_buf.handle(),
-                        k_pool.handle(),
-                        v_pool.handle(),
-                    ],
-                    &[
-                        batch as u32,
-                        elements_per_slot as u32,
-                        cache.total_slots() as u32,
-                    ],
-                    Workgroups::OneD((batch * elements_per_slot).div_ceil(256) as u32),
                 )?;
                 // 8) Split-K paged attention against the whole pool.
                 b.record_shader(

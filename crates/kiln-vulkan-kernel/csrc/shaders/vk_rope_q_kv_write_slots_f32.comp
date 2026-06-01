@@ -1,0 +1,89 @@
+// Combined Q RoPE plus K RoPE + paged-KV slot write for F32 resident decode.
+//
+// Q input/output shape: [batch, num_q_heads, head_dim]
+// K/V input shape:      [batch, num_kv_heads, head_dim]
+// Cos/sin table:        [batch, rotary_dim/2]
+// Slots:                [batch], one resolved destination slot per row
+// K/V pool shape:       [total_slots, num_kv_heads, head_dim]
+//
+// Push constants:
+// [batch, num_q_heads, num_kv_heads, head_dim, rotary_dim, total_slots]
+//
+// Bindings: q_in, k_in, v_in, cos, sin, slots, q_out, k_pool, v_pool
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint batch;
+    uint num_q_heads;
+    uint num_kv_heads;
+    uint head_dim;
+    uint rotary_dim;
+    uint total_slots;
+};
+
+layout(binding = 0) readonly  buffer QInBuf   { float q_in[];   };
+layout(binding = 1) readonly  buffer KInBuf   { float k_in[];   };
+layout(binding = 2) readonly  buffer VInBuf   { float v_in[];   };
+layout(binding = 3) readonly  buffer CosBuf   { float data_cos[]; };
+layout(binding = 4) readonly  buffer SinBuf   { float data_sin[]; };
+layout(binding = 5) readonly  buffer SlotsBuf { uint  slots[];  };
+layout(binding = 6) writeonly buffer QOutBuf  { float q_out[];  };
+layout(binding = 7) writeonly buffer KPoolBuf { float k_pool[]; };
+layout(binding = 8) writeonly buffer VPoolBuf { float v_pool[]; };
+
+void main() {
+    uint linear = gl_GlobalInvocationID.x;
+    uint q_total = batch * num_q_heads * head_dim;
+    uint k_total = batch * num_kv_heads * head_dim;
+    uint total = q_total + k_total;
+    if (linear >= total) return;
+
+    bool is_q = linear < q_total;
+    uint local = is_q ? linear : linear - q_total;
+    uint num_heads = is_q ? num_q_heads : num_kv_heads;
+    uint d = local % head_dim;
+    uint h_and_row = local / head_dim;
+    uint h = h_and_row % num_heads;
+    uint row = h_and_row / num_heads;
+
+    float out_val;
+    if (d >= rotary_dim) {
+        out_val = is_q ? q_in[local] : k_in[local];
+    } else {
+        uint half_r = rotary_dim / 2u;
+        uint pair_index;
+        bool is_low_half;
+        if (d < half_r) {
+            pair_index = d;
+            is_low_half = true;
+        } else {
+            pair_index = d - half_r;
+            is_low_half = false;
+        }
+
+        uint base_h = (row * num_heads + h) * head_dim;
+        float low = is_q ? q_in[base_h + pair_index] : k_in[base_h + pair_index];
+        float high = is_q
+            ? q_in[base_h + pair_index + half_r]
+            : k_in[base_h + pair_index + half_r];
+        float c = data_cos[row * half_r + pair_index];
+        float s = data_sin[row * half_r + pair_index];
+        out_val = is_low_half ? low * c - high * s : low * s + high * c;
+    }
+
+    if (is_q) {
+        q_out[local] = out_val;
+    } else {
+        uint slot = slots[row];
+        if (slot >= total_slots) return;
+        uint elem = h * head_dim + d;
+        uint src = row * (num_kv_heads * head_dim) + elem;
+        uint dst = slot * (num_kv_heads * head_dim) + elem;
+        k_pool[dst] = out_val;
+        v_pool[dst] = v_in[src];
+    }
+}
