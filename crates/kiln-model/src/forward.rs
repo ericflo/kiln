@@ -2316,14 +2316,19 @@ fn synchronize_for_profile(device: &Device) -> Result<()> {
         #[cfg(feature = "cuda")]
         Device::Cuda(idx) => kiln_tensor::cuda_synchronize_default_stream(*idx)
             .map_err(|e| anyhow::anyhow!("synchronize_for_profile: {e}")),
-        // Metal bridges to a candle device for the profiling-only sync. kt
-        // `Device` is `#[non_exhaustive]`, so this wildcard also satisfies
-        // exhaustiveness. Excluded from the cuda build.
+        // (#1082) Metal: kt-native queue drain. Block until the
+        // MetalCompanion's command pool — the queue that actually ran the
+        // compute — completes. `wait_until_completed` is the same host-read
+        // sync point every Metal->host readback uses, so it drains the right
+        // queue (the former candle-device bridge drained candle's separate
+        // queue). kt `Device` is `#[non_exhaustive]`, so this wildcard also
+        // satisfies exhaustiveness. Excluded from the cuda build.
         #[cfg(feature = "metal")]
         _ => {
-            let candle_device = kiln_kt_bridge::candle_device_from_kt(device)
-                .map_err(|e| anyhow::anyhow!("synchronize_for_profile: {e}"))?;
-            candle_device.synchronize().map_err(Into::into)
+            let idx = if let Device::Metal(i) = device { *i } else { 0 };
+            kiln_tensor::primary_metal_companion(idx)
+                .and_then(|c| c.wait_until_completed())
+                .map_err(|e| anyhow::anyhow!("synchronize_for_profile: {e}"))
         }
         // (#1082) Vulkan (and any other non-CUDA, non-Metal build) keeps the
         // kt seam CPU-resident — tensors live on `Device::Cpu` at the kt<->vk
@@ -6426,18 +6431,19 @@ impl GpuWeights {
 
         if projection_load_cache.drops_projection_originals() && matches!(device, Device::Metal(_))
         {
-            // #1082: `device` is now `kiln_tensor::Device` (no `synchronize`);
-            // bridge to candle for the Metal queue sync (candle Device has it).
-            // This whole block only ever runs when `device` is `Metal(_)` (see
-            // the `matches!` guard above), so the candle-device bridge is
-            // Metal-only. The vulkan lane has no candle bridge (and never
-            // reaches here — vulkan tensors are CPU-resident, never
+            // #1082: kt-native Metal queue drain after freeing the projection
+            // originals. This whole block only ever runs when `device` is
+            // `Metal(_)` (see the `matches!` guard above). `wait_until_completed`
+            // drains the same MetalCompanion command pool the compute ran on, so
+            // no pending GPU write can read a freed buffer. The vulkan lane never
+            // reaches here (vulkan tensors are CPU-resident, never
             // `Device::Metal`), so it is excluded from this arm. (#1082)
             #[cfg(feature = "metal")]
             {
-                kiln_kt_bridge::candle_device_from_kt(device)
-                    .map_err(|e| anyhow::anyhow!("{e}"))?
-                    .synchronize()
+                let idx = if let Device::Metal(i) = device { *i } else { 0 };
+                kiln_tensor::primary_metal_companion(idx)
+                    .and_then(|c| c.wait_until_completed())
+                    .map_err(|e| anyhow::anyhow!("{e}"))
                     .context("synchronize after dropping Metal projection originals")?;
             }
             tracing::info!("Metal projection original buffer cache swept after load");

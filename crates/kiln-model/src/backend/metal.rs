@@ -565,7 +565,7 @@ impl BackendRuntime for MetalBackend {
         // sdpa(q, k, v, mask, do_causal, scale, softcapping). softcapping=1.0
         // disables it; kiln's prefill path is always causal.
         let out = kiln_tensor::metal_sdpa_last_axis(&q_t, &k_t, &v_t, softmax_scale, causal)
-            .context("candle-metal sdpa failed")?;
+            .context("kt-native metal sdpa (prefill) failed")?;
 
         let out = out.transpose(1, 2)?.contiguous()?;
         Ok(Some(out))
@@ -597,7 +597,7 @@ impl BackendRuntime for MetalBackend {
         }
 
         let out = kiln_tensor::metal_sdpa_last_axis(q, k, v, softmax_scale, causal)
-            .context("candle-metal head-major sdpa failed")?;
+            .context("kt-native metal sdpa (head-major prefill) failed")?;
         Ok(Some(out))
     }
 
@@ -674,7 +674,7 @@ impl BackendRuntime for MetalBackend {
         let v_sdpa = v_live.unsqueeze(0)?.transpose(1, 2)?.contiguous()?;
 
         let out = kiln_tensor::metal_sdpa_last_axis(&q_sdpa, &k_sdpa, &v_sdpa, softmax_scale, causal)
-            .context("candle-metal paged sdpa failed")?;
+            .context("kt-native metal paged sdpa (decode) failed")?;
 
         // Back to [1, 1, num_heads, head_dim].
         let out = out.transpose(1, 2)?.contiguous()?;
