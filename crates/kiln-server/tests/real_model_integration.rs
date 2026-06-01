@@ -5,18 +5,10 @@ use std::collections::HashMap;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-// TODO(#1082): migrate this test off candle once GpuWeights / GpuLayerWeights /
-// GpuFullAttentionWeights / GpuFfnWeights expose kt-typed constructors. The
-// `tiny_weights` helper below builds candle `Tensor`s directly into those
-// struct fields (which are themselves candle `Tensor`s in production). The
-// candle `Device::Cpu` here is bridged to `kt::Device` at each `AppState::new_real`
-// call site below — `new_real` itself was migrated to take `kt::Device` in #1082;
-// the bridge is necessary because `tiny_weights` still wants the candle device
-// to construct candle `Tensor` fields on the production weight structs.
-// #1082: GpuWeights / GpuLayerWeights / GpuFullAttentionWeights / GpuFfnWeights
-// fields are now kt-typed, so `tiny_weights` builds kt `Tensor`s directly. The
-// device is a kt `Device::Cpu` (passed straight to `AppState::new_real`, which
-// takes `kt::Device` since #1082 — no candle bridge needed).
+// (#1082) Fully kt-typed: `tiny_weights` builds kt `Tensor`s directly into the
+// (now kt-typed) GpuWeights / GpuLayerWeights / GpuFullAttentionWeights /
+// GpuFfnWeights fields, and `AppState::new_real` takes a kt `Device`. No candle
+// anywhere — kiln-server's candle-core dev-dep was dropped accordingly.
 use kiln_tensor::{DType, Device, Tensor};
 use serde_json::{Value, json};
 use tower::ServiceExt; // for `oneshot`

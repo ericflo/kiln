@@ -263,10 +263,10 @@ fn main() -> Result<()> {
 
     let tokenizer = load_tokenizer(&args.model_path)?;
     anyhow::ensure!(
-        candle_core::utils::cuda_is_available(),
+        kiln_tensor::cuda_is_available(),
         "CUDA not available"
     );
-    let device = candle_core::Device::new_cuda(0)?;
+    let device = kiln_tensor::Device::Cuda(0);
     let model_config = ModelConfig::qwen3_5_4b();
 
     println!("loading_student={}", args.model_path.display());
@@ -276,11 +276,11 @@ fn main() -> Result<()> {
         kiln_model::LoadModelOptions { load_mtp: false },
     )
     .context("load student weights")?;
-    // #1082: kt `&Device` expected; bridge the candle CUDA device.
+    // #1082: kt-native — `device` is a kt `Device::Cuda(0)`, passed directly.
     let gpu_weights = GpuWeights::from_model_weights(
         &weights,
         &model_config,
-        &kiln_kt_bridge::kt_device_from_candle(&device),
+        &device,
     )?;
     drop(weights);
     println!("student_loaded_vram_mib={}", current_vram_mib());

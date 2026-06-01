@@ -100,7 +100,11 @@ nvtx = ["kiln-model/nvtx"]
 [dev-dependencies]
 tempfile = { workspace = true }
 safetensors = { workspace = true }
-candle-core = { workspace = true }
+# (#1082) candle-core dev-dep dropped: kiln-server has zero candle code — src
+# and tests are kt-typed (`real_model_integration::tiny_weights` builds kt
+# Tensors directly; the candle bridge was removed when GpuWeights went
+# kt-typed). Makes kiln-server fully candle-free (runtime + dev); verified by
+# `cargo tree -p kiln-server --features cuda -i candle-core` → empty.
 tower = { workspace = true, features = ["util"] }
 # Integration tests use filetime to pre-age fake composed-cache entries so
 # LRU eviction order is deterministic.

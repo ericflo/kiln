@@ -851,10 +851,10 @@ fn main() -> Result<()> {
     }
 
     anyhow::ensure!(
-        candle_core::utils::cuda_is_available(),
+        kiln_tensor::cuda_is_available(),
         "CUDA is not available in this build/runtime"
     );
-    let device = candle_core::Device::new_cuda(0).context("create CUDA device 0")?;
+    let device = kiln_tensor::Device::Cuda(0);
     println!("loading_model={}", args.model_path.display());
     let model_weights = kiln_model::load_model_with_options(
         &args.model_path,
@@ -862,11 +862,11 @@ fn main() -> Result<()> {
         kiln_model::LoadModelOptions { load_mtp: false },
     )
     .context("load model weights")?;
-    // #1082: kt `&Device` expected; bridge the candle CUDA device.
+    // #1082: kt-native — `device` is a kt `Device::Cuda(0)`, passed directly.
     let gpu_weights = GpuWeights::from_model_weights(
         &model_weights,
         &model_config,
-        &kiln_kt_bridge::kt_device_from_candle(&device),
+        &device,
     )
     .context("transfer weights to CUDA")?;
     drop(model_weights);
