@@ -114,7 +114,7 @@ fn fused_l2_norm_qk_per_row_matches_cpu() -> Result<()> {
             k_scale.to_bits(),
             gqa_ratio as u32,
         ],
-        Workgroups::OneD(rows_out as u32),
+        Workgroups::OneD(rows_in as u32),
     )?;
     batch.submit_and_wait("l2_norm_qk_per_row_parity")?;
 

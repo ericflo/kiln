@@ -1064,7 +1064,7 @@ fn run_full_token_resident_mixed_batched(
                             1.0f32.to_bits(),
                             gdn_gqa_ratio as u32,
                         ],
-                        Workgroups::OneD((batch * GDN_NUM_VALUE_HEADS) as u32),
+                        Workgroups::OneD((batch * GDN_NUM_KEY_HEADS) as u32),
                     )?;
                     b.record_shader(
                         shaders::GDN_DECODE_GATES_RECURRENT_RMSNORM,
@@ -1300,7 +1300,7 @@ fn run_gdn_block_resident_batched(
                     1.0f32.to_bits(),
                     gqa_ratio as u32,
                 ],
-                Workgroups::OneD((batch * GDN_NUM_VALUE_HEADS) as u32),
+                Workgroups::OneD((batch * GDN_NUM_KEY_HEADS) as u32),
             )?;
             b.record_shader(
                 shaders::GDN_DECODE_GATES_RECURRENT_RMSNORM,

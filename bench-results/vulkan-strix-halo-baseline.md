@@ -634,6 +634,18 @@ every config"):
   direct-output QKV+gate cutoff measured history 256, warmup=1, timed=3,
   repeats=2 at batch 8: 101.8 ms / 79 rows/s, batch 32: 236.5 ms / 135 rows/s,
   and batch 64: 463.6 ms / 138 rows/s.
+  **Update — GDN Q/K L2 expansion no longer recomputes replicated rows:** the
+  fused Q/K L2 expansion shader now launches one workgroup per input key head
+  row and writes all GQA-replicated output rows from that single reduction.
+  The previous dispatch launched one workgroup per expanded value-head row,
+  so Qwen3.5's GQA ratio 2 recomputed the same norm twice. Focused
+  `gdn_block_resident_batched` checks with warmup=2, timed=5, repeats=2
+  measured batch 8 at 2.966 ms / 2697 rows/s, batch 16 at 4.020 ms /
+  3980 rows/s, batch 32 at 6.616 ms / 4837 rows/s, and batch 64 at
+  13.706 ms / 4669 rows/s. A production-shaped mixed-paged token smoke at
+  history 256, warmup=1, timed=4, repeats=3 measured batch 8 at 96.6 ms /
+  83 rows/s, batch 32 at 226.2 ms / 141 rows/s, and batch 64 at 452.9 ms /
+  141 rows/s.
 - **Vulkan paged-attention decode kernel**: the kernel crate already had
   `paged_attn_decode_batch_paged.comp`; Vulkan now advertises
   `supports_flash_attn_paged_decode` and wires the single-query paged-decode

@@ -31,13 +31,10 @@ shared float q_sq_partial[256];
 shared float k_sq_partial[256];
 
 void main() {
-    uint r_out = gl_WorkGroupID.x;
-    uint rows_out = rows_in * gqa_ratio;
-    if (r_out >= rows_out) return;
-    uint r_in = r_out / gqa_ratio;
+    uint r_in = gl_WorkGroupID.x;
+    if (r_in >= rows_in) return;
     uint tid = gl_LocalInvocationID.x;
     uint base_in = r_in * hidden;
-    uint base_out = r_out * hidden;
 
     float q_local_sq = 0.0;
     float k_local_sq = 0.0;
@@ -62,7 +59,13 @@ void main() {
     float q_coef = inversesqrt(q_sq_partial[0] + eps) * q_scale;
     float k_coef = inversesqrt(k_sq_partial[0] + eps) * k_scale;
     for (uint i = tid; i < hidden; i += 256) {
-        data_q_out[base_out + i] = data_q_in[base_in + i] * q_coef;
-        data_k_out[base_out + i] = data_k_in[base_in + i] * k_coef;
+        float q = data_q_in[base_in + i] * q_coef;
+        float k = data_k_in[base_in + i] * k_coef;
+        uint out_base = r_in * gqa_ratio * hidden + i;
+        for (uint g = 0; g < gqa_ratio; g++) {
+            uint out_idx = out_base + g * hidden;
+            data_q_out[out_idx] = q;
+            data_k_out[out_idx] = k;
+        }
     }
 }

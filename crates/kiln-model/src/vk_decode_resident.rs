@@ -971,7 +971,7 @@ pub fn transformer_block_paged_decode_gdn_resident_b1(
             k_scale.to_bits(),
             gqa_ratio as u32,
         ],
-        Workgroups::OneD(nv as u32),
+        Workgroups::OneD(nk as u32),
     )?;
     // 8) Fused gates+recurrent+rmsnorm — reads Q/K from the GQA-expanded
     //    [nv, dk] buffers written by the L2-norm step above.
@@ -1293,7 +1293,7 @@ pub fn gated_deltanet_forward_decode_resident_b1(
             k_scale.to_bits(),
             gqa_ratio as u32,
         ],
-        Workgroups::OneD(nv as u32),
+        Workgroups::OneD(nk as u32),
     )?;
     // 7) Fused gates+recurrent+rmsnorm. push = [nv, dk, dv, eps_bits, batch],
     //    workgroups = batch*nv. Reads Q/K from the GQA-expanded buffers.
@@ -2371,7 +2371,7 @@ pub fn record_gdn_block_into(
             k_scale.to_bits(),
             gqa_ratio as u32,
         ],
-        Workgroups::OneD(nv as u32),
+        Workgroups::OneD(nk as u32),
     )?;
     batch.record_shader(
         shaders::GDN_DECODE_GATES_RECURRENT_RMSNORM,
@@ -2619,7 +2619,7 @@ pub fn record_gdn_block_batched_into(
             k_scale.to_bits(),
             gqa_ratio as u32,
         ],
-        Workgroups::OneD((batch_size * nv) as u32),
+        Workgroups::OneD((batch_size * nk) as u32),
     )?;
     batch.record_shader(
         shaders::GDN_DECODE_GATES_RECURRENT_RMSNORM,
