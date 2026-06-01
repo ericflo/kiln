@@ -299,6 +299,14 @@ every config"):
   full-attention row from the paged cache on every call and clears the row-ID
   seed cache before doing so, avoiding unsafe cache reuse while eliminating the
   previous forced portable/rowwise route.
+  **Update — Vulkan live decode batch default:** the live greedy decode batcher
+  now defaults Vulkan to a 16-row max batch instead of 8. Focused resident
+  mixed-paged decode microbench on RADV STRIX_HALO, history 256, warmup=1,
+  timed=4, repeats=3 measured batch 8 at 105.1 ms / 76 rows/s and batch 16 at
+  142.7 ms / 112 rows/s. A second pass measured batch 16 at 148.4 ms /
+  108 rows/s and batch 32 at 241.8 ms / 132 rows/s; keep the default at 16 as
+  the conservative memory/throughput step, with env overrides still available
+  for 32/64-row sweeps.
   **Update — GDN resident recorder uses row-reuse in-proj:** the batched GDN
   `CommandBatch` recorder now selects the same pair QKV/Z plus rows2/rows4
   BF16 in-proj shaders as the standalone dispatcher. Focused

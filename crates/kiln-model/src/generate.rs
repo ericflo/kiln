@@ -416,7 +416,10 @@ fn strict_prompt_prefix_split_pos(
     (split_pos > cached_tokens && split_pos < prompt_len).then_some(split_pos)
 }
 
-fn decode_buffer_max_batch() -> usize {
+const DEFAULT_DECODE_BUFFER_MAX_BATCH: usize = 8;
+const VULKAN_DECODE_BUFFER_MAX_BATCH: usize = 16;
+
+fn decode_buffer_max_batch(backend_name: &str) -> usize {
     let explicit = std::env::var("KILN_DECODE_BUFFER_MAX_BATCH")
         .ok()
         .and_then(|value| value.trim().parse::<usize>().ok())
@@ -424,17 +427,26 @@ fn decode_buffer_max_batch() -> usize {
     if let Some(value) = explicit {
         return value;
     }
-    // When the batching-engine actor is configured for a wider decode batch
-    // via `KILN_MAX_DECODE_BATCH`, scale the per-step decode buffer up to
-    // match so the actor doesn't immediately error with `decode batch N
-    // exceeds buffer max_batch 8`. The 8-row default stays in place for the
-    // unconfigured case.
+    // Scale the per-step decode buffer to the widest configured scheduler so
+    // the first large batch does not immediately error with `decode batch N
+    // exceeds buffer max_batch M`. Vulkan gets a wider unconfigured default
+    // because its resident path now has better row throughput at b16 than b8.
     let actor_max = std::env::var("KILN_MAX_DECODE_BATCH")
         .ok()
         .and_then(|raw| raw.trim().parse::<usize>().ok())
         .filter(|&value| value > 0)
         .unwrap_or(0);
-    actor_max.max(8)
+    let live_batcher_max = std::env::var("KILN_DECODE_BATCH_MAX")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<usize>().ok())
+        .filter(|&value| value > 0)
+        .unwrap_or(0);
+    let backend_default = if backend_name == "vulkan" {
+        VULKAN_DECODE_BUFFER_MAX_BATCH
+    } else {
+        DEFAULT_DECODE_BUFFER_MAX_BATCH
+    };
+    actor_max.max(live_batcher_max).max(backend_default)
 }
 
 enum PrefillSampleSource {
@@ -611,6 +623,8 @@ impl DecodeBatcherConfig {
 fn default_decode_batcher_max_batch_kt(device: &kiln_tensor::Device, backend_name: &str) -> usize {
     if matches!(device, kiln_tensor::Device::Cuda(_)) || backend_name == "cuda" {
         1
+    } else if matches!(device, kiln_tensor::Device::Vulkan(_)) || backend_name == "vulkan" {
+        VULKAN_DECODE_BUFFER_MAX_BATCH
     } else {
         DecodeBatcherConfig::default().max_batch
     }
@@ -1405,7 +1419,7 @@ impl ModelRunner {
             .decode_buffer_config
             .get_or_init(|| {
                 DecodeBufferConfig::graph_bucket(
-                    decode_buffer_max_batch(),
+                    decode_buffer_max_batch(self.backend.name()),
                     self.config.max_position_embeddings,
                     1,
                     16,
