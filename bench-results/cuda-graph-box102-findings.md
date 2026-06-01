@@ -84,7 +84,23 @@ and verify every GDN state buffer enters the capture arena's retained set.
 
 **Precise symptom (pod, W4A16, graphs+stable_metadata):** graph output is the SAME token sequence as eager but each token repeated a decreasing count: `Here's a a a a a a a thinking thinking process process that that leads leads to to the the the story story story story` vs eager `Here's a thinking process that could lead to the story`. Reads like the effective context/state advances slower than the token count — the model re-emits a token until the state catches up.
 
-**Remaining approach for BUG 2 — the hard part:** graph REPLAY runs the captured KERNELS only (the Rust forward does not execute), so a Rust per-layer dump cannot observe replay. Localizing requires a CUDA-side dump baked INTO the captured graph (e.g. a kernel that writes per-layer hidden-state norms to a persistent buffer the graph includes), then diff eager-vs-replay. That is a substantial kernel-instrumentation effort. Everything checkable from Rust (metadata refresh, KV-slot liveness, GDN snapshot/restore, AUTO_FREE) is correct; the bug is a fused-kernel-under-capture state/scratch issue that only kernel-level instrumentation will pin down.
+## BUG 2 ROOT CAUSE — CONFIRMED (2026-06-01, on pod, `KILN_DEBUG_GDN_STATE` probe)
+
+**The GDN recurrent + conv state does not advance across graph replays.** A `KILN_DEBUG_GDN_STATE`-gated dump of `linear_state.recurrent_states[0]`/`conv_states[0]` sum-of-squares after each decode step (added to `eager_forward` + the replay-success path in cuda_graph.rs, branch `wip/1082-box2-gdn-probe`) showed, on the W4A16 graphs+stable_metadata path:
+```
+GDNSTATE [replay] step=15 rs0_sumsq=773.337871 conv0_sumsq=54433.580599
+GDNSTATE [replay] step=16 rs0_sumsq=773.337871 conv0_sumsq=54433.580599   <- identical
+GDNSTATE [replay] step=17 rs0_sumsq=773.337871 conv0_sumsq=54433.580599   <- identical
+GDNSTATE [replay] step=18 rs0_sumsq=773.337871 conv0_sumsq=54433.580599   <- identical
+GDNSTATE [replay] step=19 rs0_sumsq=886.110784 conv0_sumsq=72051.618362   <- JUMP (re-capture's eager warm pass)
+GDNSTATE [replay] step=20 rs0_sumsq=886.110784 conv0_sumsq=72051.618362   <- frozen again
+GDNSTATE [replay] step=21 rs0_sumsq=886.110784 conv0_sumsq=72051.618362
+```
+A recurrent state MUST change every decode step (`S_t = f(S_{t-1}, x_t)`). Here it is FROZEN between re-capture boundaries and only jumps when `try_capture`'s eager warm pass advances it once. So the captured graph's GDN state update **does not persist into the `linear_state` buffer the next replay reads** — the new state lands in a capture-time / arena buffer and the Rust-side linkage that would point `linear_state` at it does not run on replay. The model decodes against a stuck state → re-emits each token until the next re-capture nudges it → the observed token-doubling.
+
+**THE FIX (next session):** the GDN decode recurrent + conv state update must be TRULY IN-PLACE into the persistent `linear_state.recurrent_states[i]` / `conv_states[i]` buffers the next replay reads — captured kernel reads+writes the SAME persistent device pointer, NO functional new-tensor + Rust-swap. Audit the GDN decode in `forward.rs` (`model_forward_paged*`): find where `recurrent_states[i]`/`conv_states[i]` are produced and ensure the write targets the persistent (resident) buffer in-place. (The KV cache already survives replay because its writer takes the pool + a live slot ptr and writes in-place — the GDN state needs the same treatment; cf. `LinearAttentionState::materialize_gdn_recurrent_resident_states` / the Vulkan resident pattern.) Re-run the probe after the fix: the state must change every step.
+
+(Earlier note, now superseded: "replay runs captured kernels only, so a Rust per-layer dump can't observe replay" — true, but the persistent `linear_state` IS Rust-readable BETWEEN replay steps, which is exactly how this probe localized the bug without kernel-level instrumentation.)
 
 ## Status of #1082 boxes 98–101
 
