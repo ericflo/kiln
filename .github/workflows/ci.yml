@@ -96,6 +96,41 @@ jobs:
       - name: Test (default features)
         run: cargo test --locked -- --skip test_health_with_real_backend
 
+  cuda-candle-free:
+    name: CUDA dep tree is candle-free (#1082)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust stable
+        run: |
+          rustup set profile minimal
+          rustup default stable
+          rustc --version
+
+      - name: Fetch dependencies
+        run: cargo fetch
+
+      - name: Assert no candle in the --features cuda runtime dep tree
+        # #1082 DoD line 100: `cargo build --release --features cuda` must have
+        # no candle in its dep tree. `cargo tree` resolves manifest metadata
+        # only — it never compiles and never runs build scripts — so this is a
+        # zero-cost guard on a GPU-less runner (no CUDA toolchain needed).
+        # `-e normal` restricts to runtime/build edges; candle survives the
+        # CUDA lane only as kiln-server's `[dev-dependencies] candle-core`
+        # (integration tests), which `cargo build` never compiles. This guard
+        # catches a default-features / feature-list Cargo.toml edit silently
+        # resurrecting candle on the CUDA build graph (landed `24e9b5d0`).
+        run: |
+          set -euo pipefail
+          echo "Resolving runtime dep tree: kiln-server --features cuda (normal edges) ..."
+          tree="$(cargo tree --locked -p kiln-server --features cuda -e normal)"
+          if echo "$tree" | grep -i candle; then
+            echo "::error::candle is in the --features cuda runtime dep tree — #1082 DoD line 100 regressed. A Cargo.toml feature/default-features edit likely resurrected candle on the CUDA lane."
+            exit 1
+          fi
+          echo "OK — no candle in the CUDA runtime dep tree."
+
   linux-vulkan:
     name: Linux / Vulkan
     runs-on: ubuntu-22.04
