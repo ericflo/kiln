@@ -741,6 +741,22 @@ every config"):
   (**1.57x**). A resident full-token paged smoke running only
   `full_token_resident_paged` at history 2048, batch 1, warmup=1, timed=2,
   repeats=2 measured 54.620 ms / 18 rows/s for the 32-layer paged route.
+  **Update — split-K reduce skips empty barrier levels:** the split-K reduce
+  shader now starts its scalar `chunk_sum` reduction at the first power-of-two
+  stride needed for `num_chunks` instead of always starting at 128. The common
+  resident cases therefore reduce 4 chunks with strides 2/1 and single-row
+  32-chunk generic decode with 16/8/4/2/1, avoiding empty shared-memory
+  barriers. A same-session batch-1 `paged_attn_splitk_check` A/B at 2048-token
+  history, 32 query heads, 8 K/V heads, head_dim 128, chunks 32, warmup=2,
+  iters=5, repeats=5 moved split-K from 3.702 ms to 2.804 ms with max abs diff
+  `1.713634e-7`. The production-shaped attention probe at batch 8, 16 query
+  heads, 4 K/V heads, head_dim 256, 256-token history, chunks 4 measured
+  non-split 2.894 ms vs. split-K 2.815 ms with max abs diff `3.352761e-8`.
+  A full mixed resident-paged token smoke at history 256, warmup=1, timed=4,
+  repeats=3 measured batch 8 at 96.7 ms / 83 rows/s, batch 32 at 240.5 ms /
+  133 rows/s, and batch 64 at 453.5 ms / 141 rows/s; the full token remains
+  dominated by projection/GDN work, but the paged-attention reduce no longer
+  spends barriers on lanes that cannot contain chunk sums.
 
   These numbers also use the corrected gated-Q full-attention dataflow and the
   direct-output full-attention QKV+gate projection. A batch-64 split-K sweep

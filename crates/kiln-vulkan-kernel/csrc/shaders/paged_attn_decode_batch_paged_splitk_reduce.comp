@@ -31,6 +31,34 @@ shared float shared_combined_sum;
 shared float shared_scales[256];
 shared float partial_sum[256];
 
+uint first_reduce_stride(uint count) {
+    if (count <= 1u) {
+        return 0u;
+    }
+    if (count <= 2u) {
+        return 1u;
+    }
+    if (count <= 4u) {
+        return 2u;
+    }
+    if (count <= 8u) {
+        return 4u;
+    }
+    if (count <= 16u) {
+        return 8u;
+    }
+    if (count <= 32u) {
+        return 16u;
+    }
+    if (count <= 64u) {
+        return 32u;
+    }
+    if (count <= 128u) {
+        return 64u;
+    }
+    return 128u;
+}
+
 void main() {
     uint pair_idx = gl_WorkGroupID.x;
     uint q_head = pair_idx % num_heads;
@@ -64,7 +92,8 @@ void main() {
         partial_sum[lane] = 0.0;
     }
     barrier();
-    for (uint reduce_stride = 128u; reduce_stride > 0u; reduce_stride >>= 1) {
+    for (uint reduce_stride = first_reduce_stride(num_chunks); reduce_stride > 0u;
+         reduce_stride >>= 1) {
         if (lane < reduce_stride) {
             partial_sum[lane] += partial_sum[lane + reduce_stride];
         }
