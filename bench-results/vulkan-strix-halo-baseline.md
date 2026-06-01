@@ -904,7 +904,9 @@ every config"):
   the two-dispatch helper used by causal-conv prefill/update and split-K paged
   attention wrapper checks. The same helpers also pack their multiple
   host-to-device inputs into one upload staging buffer while preserving the same
-  recorded copy offsets before dispatch. Focused coverage:
+  recorded copy offsets before dispatch, and that packing now maps the staging
+  allocation once instead of first building an intermediate packed host vector.
+  Focused coverage:
   `gdn_gates_cached_bytes_matches_cpu_reference` and
   `causal_conv1d_prefill_matches_stateful_cpu_reference` pass on Vulkan hardware.
 

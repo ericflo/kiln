@@ -813,6 +813,57 @@ impl VulkanBuffer {
         Ok(())
     }
 
+    /// Create a host-visible buffer and fill it with disjoint byte slices in
+    /// order, using one map/unmap pair. Returns each slice's byte offset.
+    pub fn create_host_visible_with_segments(
+        device: &Arc<ash::Device>,
+        mem_type_index: u32,
+        segments: &[&[u8]],
+    ) -> Result<(Self, Vec<u64>)> {
+        anyhow::ensure!(
+            !segments.is_empty(),
+            "create_host_visible_with_segments: at least one segment is required"
+        );
+
+        let mut offsets = Vec::with_capacity(segments.len());
+        let mut total = 0u64;
+        for (idx, segment) in segments.iter().enumerate() {
+            anyhow::ensure!(
+                !segment.is_empty(),
+                "create_host_visible_with_segments[{idx}]: segment must be non-empty"
+            );
+            offsets.push(total);
+            total = total.checked_add(segment.len() as u64).ok_or_else(|| {
+                anyhow::anyhow!("create_host_visible_with_segments: size overflow")
+            })?;
+        }
+
+        let buffer = VulkanBuffer::create_host_visible(device, mem_type_index, total)
+            .context("create_host_visible_with_segments: create host-visible buffer")?;
+        let mapped_ptr = unsafe {
+            device
+                .map_memory(buffer.memory, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty())
+                .map_err(|e| {
+                    anyhow::anyhow!(
+                        "create_host_visible_with_segments: map_memory failed: {:?}",
+                        e
+                    )
+                })?
+        };
+        unsafe {
+            for (offset, segment) in offsets.iter().zip(segments.iter()) {
+                std::ptr::copy_nonoverlapping(
+                    segment.as_ptr(),
+                    (mapped_ptr as *mut u8).add(*offset as usize),
+                    segment.len(),
+                );
+            }
+            device.unmap_memory(buffer.memory);
+        }
+
+        Ok((buffer, offsets))
+    }
+
     /// Read directly from a host-visible buffer.
     pub fn read_host_visible(device: &Arc<ash::Device>, src: &VulkanBuffer) -> Result<Vec<u8>> {
         let mapped_ptr = unsafe {
@@ -943,6 +994,29 @@ mod tests {
             &empty,
         )?
         .is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn create_host_visible_with_segments_packs_offsets() -> Result<()> {
+        let Ok(vk_device) = crate::VulkanDevice::new() else {
+            eprintln!("Vulkan device unavailable, skipping");
+            return Ok(());
+        };
+        let vk_device = Arc::new(vk_device);
+        let first = [1u8, 2, 3, 4];
+        let second = [9u8, 8, 7];
+        let third = [42u8, 43];
+        let (buffer, offsets) = VulkanBuffer::create_host_visible_with_segments(
+            vk_device.device(),
+            vk_device.host_visible_mem_type(),
+            &[&first, &second, &third],
+        )?;
+
+        assert_eq!(offsets, vec![0, first.len() as u64, (first.len() + second.len()) as u64]);
+        assert_eq!(buffer.size(), (first.len() + second.len() + third.len()) as u64);
+        let bytes = VulkanBuffer::read_host_visible(vk_device.device(), &buffer)?;
+        assert_eq!(bytes, [first.as_slice(), second.as_slice(), third.as_slice()].concat());
         Ok(())
     }
 }

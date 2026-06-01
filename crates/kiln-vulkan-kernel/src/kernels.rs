@@ -7251,30 +7251,10 @@ fn create_packed_upload_stage(
     if uploads.is_empty() {
         return Ok((None, Vec::new()));
     }
-
-    let mut offsets = Vec::with_capacity(uploads.len());
-    let mut total = 0u64;
-    for (idx, (_, data)) in uploads.iter().enumerate() {
-        anyhow::ensure!(
-            !data.is_empty(),
-            "{context}[{idx}]: upload payload must be non-empty"
-        );
-        offsets.push(total);
-        total = total.checked_add(data.len() as u64).ok_or_else(|| {
-            anyhow::anyhow!("{context}: upload staging size overflow")
-        })?;
-    }
-    let total_len =
-        usize::try_from(total).with_context(|| format!("{context}: upload size exceeds usize"))?;
-    let mut packed = Vec::with_capacity(total_len);
-    for (_, data) in uploads {
-        packed.extend_from_slice(data);
-    }
-
-    let stage = VulkanBuffer::create_host_visible(device, host_visible_mt, total)
-        .with_context(|| format!("failed to create {context} upload staging buffer"))?;
-    VulkanBuffer::write_host_visible(device, &stage, &packed)
-        .with_context(|| format!("failed to fill {context} upload staging buffer"))?;
+    let segments = uploads.iter().map(|(_, data)| *data).collect::<Vec<_>>();
+    let (stage, offsets) =
+        VulkanBuffer::create_host_visible_with_segments(device, host_visible_mt, &segments)
+            .with_context(|| format!("failed to create {context} upload staging buffer"))?;
     Ok((Some(stage), offsets))
 }
 
