@@ -10422,13 +10422,35 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
 }
 
+// #1082 box-102 BUG2 (iter 2): SIGN-SENSITIVE companion to the sumsq probe.
+// Records `hidden.sum_all()` (element sum — direction/sign-sensitive, NOT
+// squared) at the SAME per-point indices as LAYER_NORM_DEBUG_BUFFER. A hidden
+// vector that is ROTATED on replay (same norm, different direction) has a
+// MATCHING sumsq but a DIVERGING sum. So the FIRST index where the sum differs
+// while the sumsq still matches localizes a KV/attention-path rotation;
+// whereas matching sums for layers 0-31 with a divergence only at slot 40
+// (final_norm/lm_head) or in the logits localizes a late-path stale buffer.
+// Same persistent-buffer mechanics as the sumsq probe: a captured slice_set
+// writes it at its baked pointer on every replay, read back to host between
+// steps. Off by default; zero cost on the production path.
+#[cfg(feature = "cuda")]
+thread_local! {
+    static LAYER_SUM_DEBUG_BUFFER: std::cell::RefCell<Option<Tensor>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 #[cfg(feature = "cuda")]
 fn layer_norm_debug_enabled() -> bool {
     std::env::var("KILN_DEBUG_LAYER_NORMS").ok().as_deref() == Some("1")
 }
 
-/// Record layer `layer_idx`'s hidden sum-of-squares into the debug buffer
-/// (a captured device reduction). No-op unless `KILN_DEBUG_LAYER_NORMS=1`.
+/// Record point `layer_idx`'s hidden sum-of-squares AND element sum into the
+/// two debug buffers (captured device reductions). No-op unless
+/// `KILN_DEBUG_LAYER_NORMS=1`. `layer_idx` is a per-point slot: 0-31 =
+/// transformer block outputs; slot 40 = final_norm output / lm_head input
+/// (#1082 iter-2 extension past layer 31). The element sum is sign-sensitive
+/// so a replay ROTATION (matching sumsq, differing sum) is distinguishable
+/// from a true magnitude divergence and from a late-path stale buffer.
 #[cfg(feature = "cuda")]
 fn record_layer_norm_debug(hidden: &Tensor, layer_idx: usize) {
     if !layer_norm_debug_enabled() || layer_idx >= 64 {
@@ -10452,16 +10474,44 @@ fn record_layer_norm_debug(hidden: &Tensor, layer_idx: usize) {
                 .and_then(|s| buf.slice_set(&s, 0, layer_idx));
         }
     });
+    // #1082 iter-2 sign-sensitive companion: element sum (NOT squared) at the
+    // same slot. Captured op → observable on replay via `read_layer_sum_debug`.
+    LAYER_SUM_DEBUG_BUFFER.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        if slot.is_none() {
+            match Tensor::zeros_on(hidden.device(), vec![64], kiln_tensor::DType::F32) {
+                Ok(buf) => *slot = Some(buf),
+                Err(_) => return,
+            }
+        }
+        if let Some(buf) = slot.as_ref() {
+            let _ = hidden
+                .sum_all()
+                .and_then(|s| s.reshape(vec![1]))
+                .and_then(|s| s.to_dtype(kiln_tensor::DType::F32))
+                .and_then(|s| buf.slice_set(&s, 0, layer_idx));
+        }
+    });
 }
 
-/// Read the per-layer norm debug buffer to host (call BETWEEN decode steps,
-/// where Rust runs even though replay didn't). #1082 box-102 probe.
+/// Read the per-layer norm (sumsq) debug buffer to host (call BETWEEN decode
+/// steps, where Rust runs even though replay didn't). #1082 box-102 probe.
 #[cfg(feature = "cuda")]
 pub fn read_layer_norm_debug() -> Option<Vec<f32>> {
     if !layer_norm_debug_enabled() {
         return None;
     }
     LAYER_NORM_DEBUG_BUFFER.with(|cell| cell.borrow().as_ref().and_then(|b| b.to_vec::<f32>().ok()))
+}
+
+/// Read the sign-sensitive per-point element-sum debug buffer to host.
+/// #1082 box-102 iter-2 probe (companion to [`read_layer_norm_debug`]).
+#[cfg(feature = "cuda")]
+pub fn read_layer_sum_debug() -> Option<Vec<f32>> {
+    if !layer_norm_debug_enabled() {
+        return None;
+    }
+    LAYER_SUM_DEBUG_BUFFER.with(|cell| cell.borrow().as_ref().and_then(|b| b.to_vec::<f32>().ok()))
 }
 
 /// Attempt to consume the thread-local lm-head output buffer if its
@@ -10885,6 +10935,23 @@ fn kt_lm_head_native(lhs_kt: &KtTensor, rhs_kt: &KtTensor) -> Result<KtTensor> {
 /// [`broadcast_matmul_cpu_compatible`]. NVTX range `kiln/lm_head_kt`
 /// brackets the migrated call so nsys traces separate the path from
 /// the candle baseline.
+// #1082 box-102 BUG2 (iter 2) DIAGNOSTIC — RULED OUT (negative result).
+// When `KILN_BOX102_LMHEAD_NO_FASTPATH=1`, `try_kt_lm_head` ignores any
+// installed `lm_head_output_buffer` and routes through `kt_lm_head_native`
+// (output allocated via the capture-arena-aware `alloc_uninit_ctx` → a
+// graph-stable Borrowed view on replay). Hypothesis was that the fast-path
+// (`cuda_matmul_into` into a NON-arena preallocated buffer) was the BUG2
+// cause. VERIFIED FALSE on A6000 2026-06-01: with the flag ON the replay
+// output is STILL doubled and SAMESTEP REPLAY_LOGITS still diverges from
+// EAGER_LOGITS, while the lm-head INPUT (slot 40) is bit-identical on every
+// step. Conclusion: BUG2 is in the captured cublasLt lm-head matmul COMPUTE
+// under graph replay (huge N=vocab GEMV), independent of the output buffer.
+// Kept as a gated diagnostic so the next iteration doesn't re-test this path.
+#[cfg(feature = "cuda")]
+fn box102_lmhead_no_fastpath() -> bool {
+    std::env::var("KILN_BOX102_LMHEAD_NO_FASTPATH").ok().as_deref() == Some("1")
+}
+
 #[cfg(feature = "cuda")]
 fn try_kt_lm_head(x: &Tensor, embed_tokens_t: &Tensor) -> Result<Option<Tensor>> {
     if !cuda_use_kt_api_lm_head() {
@@ -10936,7 +11003,14 @@ fn try_kt_lm_head(x: &Tensor, embed_tokens_t: &Tensor) -> Result<Option<Tensor>>
     // `CUDA_ERROR_ILLEGAL_ADDRESS` fault at
     // `greedy_sample_rows(captured.output_logits)` documented in
     // `bench-results/cuda-graph-status.md` (2026-05-26 entries).
-    if let Some(dst) = try_take_lm_head_output_buffer(&out_shape, x.dtype()) {
+    let installed_output_buffer = if box102_lmhead_no_fastpath() {
+        // #1082 box-102 iter-2 fix experiment: skip the fast-path so the
+        // matmul output is arena-allocated (graph-stable) via the native path.
+        None
+    } else {
+        try_take_lm_head_output_buffer(&out_shape, x.dtype())
+    };
+    if let Some(dst) = installed_output_buffer {
         // The thread-local hands us a kt Tensor shaped like `[batch, 1, vocab]`.
         // Reshape it to the 2-D `[lead, out_n]` matmul output shape and write
         // the matmul result directly into its graph-stable storage.
@@ -25338,6 +25412,14 @@ fn model_forward_paged_inner(
             let logits = {
                 kiln_nvtx::range!(c"kiln/lm_head");
                 hidden = rms_norm(&hidden, &weights.final_norm, config.rms_norm_eps)?;
+                // #1082 box-102 iter-2: record final_norm output / lm_head input
+                // (slot 40) as a CAPTURED op so the replay value is observable
+                // via read_layer_norm_debug / read_layer_sum_debug. This is the
+                // decode path (model_forward_paged passes LmHeadMode::Full), so
+                // slot 40 extends the layers-0-31 probe past the transformer
+                // blocks into the late path the prior iter could not see.
+                #[cfg(feature = "cuda")]
+                record_layer_norm_debug(&hidden, 40);
                 lm_head_forward_backend_decode_if(Some(backend), &hidden, &weights.embed_tokens_t)?
             };
             Ok((Some(logits), None, None))

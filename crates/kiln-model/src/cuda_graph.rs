@@ -1104,12 +1104,21 @@ impl CudaGraphRunner {
                             if let Some(n) = crate::forward::read_layer_norm_debug() {
                                 eprintln!("SAMESTEP EAGER step={seq_len} {n:?}");
                             }
-                            // Dump the eager LOGITS sumsq — the per-layer probe
-                            // stops at layer 31, so this catches a stale
+                            // #1082 iter-2: sign-sensitive element-sum at every
+                            // recorded slot (0-31 blocks + slot 40 final_norm/
+                            // lm_head input). A ROTATED hidden has matching sumsq
+                            // (above) but a DIVERGING sum (here) — the first slot
+                            // where the sum differs localizes the divergence.
+                            if let Some(s) = crate::forward::read_layer_sum_debug() {
+                                eprintln!("SAMESTEP EAGER_SUM step={seq_len} {s:?}");
+                            }
+                            // Dump the eager LOGITS sumsq AND sum — the per-layer
+                            // probe stops at the blocks, so this catches a stale
                             // final_norm/lm_head/output_logits on the replay side.
                             if let Ok(el) = &elog {
                                 let ess = el.sqr().and_then(|s| s.sum_all()).and_then(|s| s.to_dtype(kiln_tensor::DType::F32)).and_then(|s| s.to_vec::<f32>()).ok();
-                                eprintln!("SAMESTEP EAGER_LOGITS step={seq_len} sumsq={ess:?}");
+                                let esum = el.to_dtype(kiln_tensor::DType::F32).and_then(|s| s.sum_all()).and_then(|s| s.to_vec::<f32>()).ok();
+                                eprintln!("SAMESTEP EAGER_LOGITS step={seq_len} sumsq={ess:?} sum={esum:?}");
                             }
                             *linear_state = snap;
                         }
@@ -1124,7 +1133,17 @@ impl CudaGraphRunner {
                             );
                             if let Some(n) = crate::forward::read_layer_norm_debug() {
                                 eprintln!("SAMESTEP REPLAY step={seq_len} {n:?}");
-                                // Replay LOGITS sumsq — compare to SAMESTEP
+                                // #1082 iter-2: sign-sensitive element-sum on the
+                                // REPLAY path. Compare slot-by-slot to SAMESTEP
+                                // EAGER_SUM. The FIRST slot where sum diverges:
+                                //   within 0-31 (sumsq matched) => hidden ROTATION
+                                //     upstream => KV/attention path at that block;
+                                //   only at slot 40 / logits => late-path stale
+                                //     final_norm/lm_head buffer on replay.
+                                if let Some(s) = crate::forward::read_layer_sum_debug() {
+                                    eprintln!("SAMESTEP REPLAY_SUM step={seq_len} {s:?}");
+                                }
+                                // Replay LOGITS sumsq AND sum — compare to SAMESTEP
                                 // EAGER_LOGITS. If layers 0-31 match but these
                                 // differ, the stale op is in final_norm/lm_head/
                                 // output_logits on the replay path.
@@ -1135,7 +1154,13 @@ impl CudaGraphRunner {
                                     .and_then(|s| s.to_dtype(kiln_tensor::DType::F32))
                                     .and_then(|s| s.to_vec::<f32>())
                                     .ok();
-                                eprintln!("SAMESTEP REPLAY_LOGITS step={seq_len} sumsq={rss:?}");
+                                let rsum = captured
+                                    .output_logits
+                                    .to_dtype(kiln_tensor::DType::F32)
+                                    .and_then(|s| s.sum_all())
+                                    .and_then(|s| s.to_vec::<f32>())
+                                    .ok();
+                                eprintln!("SAMESTEP REPLAY_LOGITS step={seq_len} sumsq={rss:?} sum={rsum:?}");
                             }
                             Self::debug_dump_gdn_state("replay", seq_len, linear_state);
                             return Ok(captured.output_logits.clone());
