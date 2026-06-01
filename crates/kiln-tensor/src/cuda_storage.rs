@@ -950,7 +950,7 @@ pub fn cuda_contiguous(src: &crate::Tensor) -> Result<crate::Tensor> {
             let (p, _g) = s.device_ptr(&stream);
             p
         }
-        SliceOwner::Borrowed { .. } => unreachable!("cuda_zeros produces Owned"),
+        SliceOwner::Borrowed { ptr, .. } => *ptr,
     };
 
     // Source pointer at the live region's start (start_offset applied).
@@ -1296,7 +1296,7 @@ pub fn cuda_index_select_dim0(
             let (p, _g) = s.device_ptr(&stream);
             p
         }
-        SliceOwner::Borrowed { .. } => unreachable!("cuda_zeros produces Owned"),
+        SliceOwner::Borrowed { ptr, .. } => *ptr,
     };
 
     let src_byte_off = (src.layout().start_offset() * bpe) as u64;
@@ -1454,7 +1454,7 @@ pub fn cuda_index_select_axis_n(
             let (p, _g) = s.device_ptr(&stream);
             p
         }
-        SliceOwner::Borrowed { .. } => unreachable!("cuda_zeros produces Owned"),
+        SliceOwner::Borrowed { ptr, .. } => *ptr,
     };
 
     let src_byte_off = (src.layout().start_offset() * bpe) as u64;
@@ -1588,7 +1588,7 @@ pub fn cuda_elementwise_binary(
             let (p, _g) = s.device_ptr(&stream);
             p
         }
-        SliceOwner::Borrowed { .. } => unreachable!("alloc_uninit produces Owned"),
+        SliceOwner::Borrowed { ptr, .. } => *ptr,
     };
 
     let a_off = (a.layout().start_offset() * bpe) as u64;
@@ -1718,7 +1718,7 @@ pub fn cuda_binary_minmax(
             let (p, _g) = s.device_ptr(&stream);
             p
         }
-        SliceOwner::Borrowed { .. } => unreachable!("alloc_uninit produces Owned"),
+        SliceOwner::Borrowed { ptr, .. } => *ptr,
     };
 
     let per = dtype.size_in_bytes();
@@ -1838,7 +1838,7 @@ pub fn cuda_lerp(a: &crate::Tensor, b: &crate::Tensor, weight: f32) -> Result<cr
             let (p, _g) = s.device_ptr(&stream);
             p
         }
-        SliceOwner::Borrowed { .. } => unreachable!("alloc_uninit produces Owned"),
+        SliceOwner::Borrowed { ptr, .. } => *ptr,
     };
 
     let per = dtype.size_in_bytes();
@@ -1941,7 +1941,7 @@ pub fn cuda_activation_unary(x: &crate::Tensor, kind: i32) -> Result<crate::Tens
             let (p, _g) = s.device_ptr(&stream);
             p
         }
-        SliceOwner::Borrowed { .. } => unreachable!("alloc_uninit produces Owned"),
+        SliceOwner::Borrowed { ptr, .. } => *ptr,
     };
 
     let x_off = (x.layout().start_offset() * bpe) as u64;
@@ -2046,7 +2046,7 @@ pub fn cuda_cast(src: &crate::Tensor, target: crate::DType) -> Result<crate::Ten
             let (p, _g) = s.device_ptr(&stream);
             p
         }
-        SliceOwner::Borrowed { .. } => unreachable!("cuda_zeros produces Owned"),
+        SliceOwner::Borrowed { ptr, .. } => *ptr,
     };
 
     let src_off = (src.layout().start_offset() * from_bpe) as u64;
@@ -2557,7 +2557,7 @@ pub fn cuda_softmax_last_axis(x: &crate::Tensor) -> Result<crate::Tensor> {
             let (p, _g) = s.device_ptr(&stream);
             p
         }
-        SliceOwner::Borrowed { .. } => unreachable!("alloc_uninit produces Owned"),
+        SliceOwner::Borrowed { ptr, .. } => *ptr,
     };
 
     let x_off = (x.layout().start_offset() * dtype.size_in_bytes()) as u64;
@@ -2756,7 +2756,7 @@ pub fn cuda_is_finite(src: &crate::Tensor) -> Result<bool> {
             let (p, _g) = s.device_ptr(&stream);
             p
         }
-        SliceOwner::Borrowed { .. } => unreachable!("cuda zeros produces Owned"),
+        SliceOwner::Borrowed { ptr, .. } => *ptr,
     };
 
     // `cuda_contiguous` produces start_offset == 0, so no byte_off math.
@@ -2978,7 +2978,7 @@ pub fn cuda_sum_squared_last_axis(x: &crate::Tensor) -> Result<crate::Tensor> {
             let (p, _g) = s.device_ptr(&stream);
             p
         }
-        SliceOwner::Borrowed { .. } => unreachable!("cuda zeros produces Owned"),
+        SliceOwner::Borrowed { ptr, .. } => *ptr,
     };
 
     let x_off = (x.layout().start_offset() * dtype.size_in_bytes()) as u64;
@@ -3089,14 +3089,14 @@ pub fn cuda_l2norm_last_axis(x: &crate::Tensor, eps: f32) -> Result<crate::Tenso
             let (p, _g) = s.device_ptr(&stream);
             p
         }
-        SliceOwner::Borrowed { .. } => unreachable!("alloc_uninit produces Owned"),
+        SliceOwner::Borrowed { ptr, .. } => *ptr,
     };
     let out_base = match &out_storage.slice {
         SliceOwner::Owned(s) => {
             let (p, _g) = s.device_ptr(&stream);
             p
         }
-        SliceOwner::Borrowed { .. } => unreachable!("alloc_uninit produces Owned"),
+        SliceOwner::Borrowed { ptr, .. } => *ptr,
     };
 
     let x_off = (x.layout().start_offset() * dtype.size_in_bytes()) as u64;
@@ -3252,7 +3252,7 @@ pub fn cuda_rmsnorm_last_axis(
             let (p, _g) = s.device_ptr(&stream);
             p
         }
-        SliceOwner::Borrowed { .. } => unreachable!("cuda zeros produces Owned"),
+        SliceOwner::Borrowed { ptr, .. } => *ptr,
     };
 
     let x_off = (x.layout().start_offset() * dtype.size_in_bytes()) as u64;
@@ -3423,7 +3423,7 @@ pub fn cuda_layernorm_last_axis(
             let (p, _g) = s.device_ptr(&stream);
             p
         }
-        SliceOwner::Borrowed { .. } => unreachable!("cuda zeros produces Owned"),
+        SliceOwner::Borrowed { ptr, .. } => *ptr,
     };
 
     let x_off = (x.layout().start_offset() * dtype.size_in_bytes()) as u64;
@@ -3553,7 +3553,7 @@ pub fn cuda_masked_fill(
             let (p, _g) = s.device_ptr(&stream);
             p
         }
-        SliceOwner::Borrowed { .. } => unreachable!("cuda_zeros produces Owned"),
+        SliceOwner::Borrowed { ptr, .. } => *ptr,
     };
 
     // mask dtype is U8 → bpe = 1.
@@ -3664,7 +3664,7 @@ pub fn cuda_argmax_last_axis(x: &crate::Tensor) -> Result<crate::Tensor> {
             let (p, _g) = s.device_ptr(&stream);
             p
         }
-        SliceOwner::Borrowed { .. } => unreachable!("cuda zeros produces Owned"),
+        SliceOwner::Borrowed { ptr, .. } => *ptr,
     };
 
     let x_off = (x.layout().start_offset() * in_dtype.size_in_bytes()) as u64;
@@ -3779,14 +3779,14 @@ pub fn cuda_topk_last_axis(x: &crate::Tensor, k: usize) -> Result<(Vec<f32>, Vec
             let (p, _g) = s.device_ptr(&stream);
             p
         }
-        SliceOwner::Borrowed { .. } => unreachable!("cuda zeros produces Owned"),
+        SliceOwner::Borrowed { ptr, .. } => *ptr,
     };
     let idx_base = match &idx_storage.slice {
         SliceOwner::Owned(s) => {
             let (p, _g) = s.device_ptr(&stream);
             p
         }
-        SliceOwner::Borrowed { .. } => unreachable!("cuda zeros produces Owned"),
+        SliceOwner::Borrowed { ptr, .. } => *ptr,
     };
 
     let x_off = (x.layout().start_offset() * in_dtype.size_in_bytes()) as u64;
@@ -3997,21 +3997,21 @@ pub fn cuda_cross_entropy_loss(
             let (p, _g) = s.device_ptr(&stream);
             p
         }
-        SliceOwner::Borrowed { .. } => unreachable!("cuda zeros produces Owned"),
+        SliceOwner::Borrowed { ptr, .. } => *ptr,
     };
     let row_err_base = match &row_err_storage.slice {
         SliceOwner::Owned(s) => {
             let (p, _g) = s.device_ptr(&stream);
             p
         }
-        SliceOwner::Borrowed { .. } => unreachable!("cuda zeros produces Owned"),
+        SliceOwner::Borrowed { ptr, .. } => *ptr,
     };
     let out_base = match &out_storage.slice {
         SliceOwner::Owned(s) => {
             let (p, _g) = s.device_ptr(&stream);
             p
         }
-        SliceOwner::Borrowed { .. } => unreachable!("cuda zeros produces Owned"),
+        SliceOwner::Borrowed { ptr, .. } => *ptr,
     };
 
     let logits_off = (logits.layout().start_offset() * dtype.size_in_bytes()) as u64;
@@ -4155,7 +4155,7 @@ fn cuda_reduce_last_axis_impl(x: &crate::Tensor, divisor: f32, label: &str) -> R
             let (p, _g) = s.device_ptr(&stream);
             p
         }
-        SliceOwner::Borrowed { .. } => unreachable!("cuda zeros produces Owned"),
+        SliceOwner::Borrowed { ptr, .. } => *ptr,
     };
 
     let x_off = (x.layout().start_offset() * dtype.size_in_bytes()) as u64;
@@ -4294,7 +4294,7 @@ fn cuda_reduce_arbitrary_axis_impl(
             let (p, _g) = s.device_ptr(&stream);
             p
         }
-        SliceOwner::Borrowed { .. } => unreachable!("cuda zeros produces Owned"),
+        SliceOwner::Borrowed { ptr, .. } => *ptr,
     };
 
     let x_off = (x.layout().start_offset() * dtype.size_in_bytes()) as u64;
@@ -4461,7 +4461,7 @@ fn cuda_minmax_arbitrary_axis_impl(
             let (p, _g) = s.device_ptr(&stream);
             p
         }
-        SliceOwner::Borrowed { .. } => unreachable!("cuda zeros produces Owned"),
+        SliceOwner::Borrowed { ptr, .. } => *ptr,
     };
 
     let x_off = (x.layout().start_offset() * dtype.size_in_bytes()) as u64;
@@ -4590,7 +4590,7 @@ pub fn cuda_bool_reduce_axis(
             let (p, _g) = s.device_ptr(&stream);
             p
         }
-        SliceOwner::Borrowed { .. } => unreachable!("cuda zeros produces Owned"),
+        SliceOwner::Borrowed { ptr, .. } => *ptr,
     };
 
     let x_off = (mask.layout().start_offset() * crate::DType::U8.size_in_bytes()) as u64;
@@ -4762,7 +4762,7 @@ pub fn cuda_concat(inputs: &[&crate::Tensor], axis: usize) -> Result<crate::Tens
             let (p, _g) = s.device_ptr(&stream);
             p
         }
-        SliceOwner::Borrowed { .. } => unreachable!("cuda_zeros produces Owned"),
+        SliceOwner::Borrowed { ptr, .. } => *ptr,
     };
     let dst_ptr = dst_base as *mut core::ffi::c_void;
 
@@ -4971,7 +4971,7 @@ pub fn cuda_rope(
             let (p, _g) = s.device_ptr(&stream);
             p
         }
-        SliceOwner::Borrowed { .. } => unreachable!("cuda_zeros produces Owned"),
+        SliceOwner::Borrowed { ptr, .. } => *ptr,
     };
 
     let x_off = (x.layout().start_offset() * x_bpe) as u64;
@@ -5097,14 +5097,14 @@ pub fn cuda_dropout(
             let (p, _g) = s.device_ptr(&stream);
             p
         }
-        SliceOwner::Borrowed { .. } => unreachable!("cuda_zeros produces Owned"),
+        SliceOwner::Borrowed { ptr, .. } => *ptr,
     };
     let mask_base = match &mask_storage.slice {
         SliceOwner::Owned(s) => {
             let (p, _g) = s.device_ptr(&stream);
             p
         }
-        SliceOwner::Borrowed { .. } => unreachable!("cuda_zeros produces Owned"),
+        SliceOwner::Borrowed { ptr, .. } => *ptr,
     };
 
     let x_off = (x.layout().start_offset() * x_bpe) as u64;
@@ -5229,7 +5229,7 @@ pub fn cuda_scalar_op(x: &crate::Tensor, kind: i32, c: f32) -> Result<crate::Ten
             let (p, _g) = s.device_ptr(&stream);
             p
         }
-        SliceOwner::Borrowed { .. } => unreachable!("alloc_uninit produces Owned"),
+        SliceOwner::Borrowed { ptr, .. } => *ptr,
     };
 
     let x_off = (x.layout().start_offset() * bpe) as u64;
@@ -5331,7 +5331,7 @@ pub fn cuda_clamp_pow(
             let (p, _g) = s.device_ptr(&stream);
             p
         }
-        SliceOwner::Borrowed { .. } => unreachable!("alloc_uninit produces Owned"),
+        SliceOwner::Borrowed { ptr, .. } => *ptr,
     };
 
     let x_off = (x.layout().start_offset() * bpe) as u64;
@@ -5463,7 +5463,7 @@ pub fn cuda_compare(
             let (p, _g) = s.device_ptr(&stream);
             p
         }
-        SliceOwner::Borrowed { .. } => unreachable!("cuda_zeros produces Owned"),
+        SliceOwner::Borrowed { ptr, .. } => *ptr,
     };
 
     let a_off = (a.layout().start_offset() * bpe) as u64;
@@ -5599,7 +5599,7 @@ pub fn cuda_where_select(
             let (p, _g) = s.device_ptr(&stream);
             p
         }
-        SliceOwner::Borrowed { .. } => unreachable!("cuda_zeros produces Owned"),
+        SliceOwner::Borrowed { ptr, .. } => *ptr,
     };
 
     // mask is U8 — one byte per element regardless of dtype.
@@ -5698,7 +5698,7 @@ pub fn cuda_diagonal_extract(x: &crate::Tensor) -> Result<crate::Tensor> {
             let (p, _g) = s.device_ptr(&stream);
             p
         }
-        SliceOwner::Borrowed { .. } => unreachable!("cuda_zeros produces Owned"),
+        SliceOwner::Borrowed { ptr, .. } => *ptr,
     };
 
     let x_off = (x.layout().start_offset() * bpe) as u64;
@@ -5786,7 +5786,7 @@ pub fn cuda_diag_build(v: &crate::Tensor) -> Result<crate::Tensor> {
             let (p, _g) = s.device_ptr(&stream);
             p
         }
-        SliceOwner::Borrowed { .. } => unreachable!("cuda_zeros produces Owned"),
+        SliceOwner::Borrowed { ptr, .. } => *ptr,
     };
 
     let v_off = (v.layout().start_offset() * bpe) as u64;
@@ -5912,7 +5912,7 @@ fn cuda_scan_axis_impl(
             let (p, _g) = s.device_ptr(&stream);
             p
         }
-        SliceOwner::Borrowed { .. } => unreachable!("cuda zeros produces Owned"),
+        SliceOwner::Borrowed { ptr, .. } => *ptr,
     };
 
     let x_off = (x.layout().start_offset() * dtype.size_in_bytes()) as u64;
