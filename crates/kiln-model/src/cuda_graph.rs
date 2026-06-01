@@ -2073,9 +2073,18 @@ impl CudaGraphRunner {
         if padded.is_empty() {
             anyhow::bail!("paged decode graph block table is empty");
         }
+        // #1082 box-102: pad with the LAST REAL block index (repeated), NOT an
+        // incrementing one. Incrementing past the last real block can name a
+        // page BEYOND the allocated KV cache; if the captured flash kernel
+        // touches a padded entry (its `n_block` range derives from the baked
+        // `max_seqlen_k`, not the live length) it computes a K base pointer
+        // `k_pool + padded_block*stride` past the pool → the
+        // CUDA_ERROR_ILLEGAL_ADDRESS at flash_fwd_kernel.h:827 (K-tile load,
+        // sanitizer-confirmed). A repeated valid block index is always
+        // in-bounds; the `seqused_k` predicate masks its redundant data.
+        let pad_block = *padded.last().expect("padded is non-empty (checked above)");
         while padded.len() < max_blocks_per_seq {
-            let next = padded.last().copied().unwrap_or(0).wrapping_add(1);
-            padded.push(next);
+            padded.push(pad_block);
         }
         Ok(padded)
     }
