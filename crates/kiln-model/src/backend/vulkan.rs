@@ -1339,25 +1339,6 @@ impl VulkanBackend {
         Ok(Arc::clone(cache.entry(key).or_insert(buffer)))
     }
 
-    fn use_bf16_packed_linear_weight(&self, weight: &candle_core::Tensor) -> bool {
-        self.bf16_packed_linear_weights_enabled && weight.dtype() == candle_core::DType::BF16
-    }
-
-    fn use_bf16_packed_gdn_in_proj_weights(&self, weights: &[&candle_core::Tensor]) -> bool {
-        self.bf16_packed_gdn_in_proj_weights_enabled
-            && weights.iter().all(|weight| weight.dtype() == candle_core::DType::BF16)
-    }
-
-    fn use_bf16_packed_full_attn_qkv_weights(&self, weights: &[&candle_core::Tensor]) -> bool {
-        self.bf16_packed_full_attn_qkv_weights_enabled
-            && weights.iter().all(|weight| weight.dtype() == candle_core::DType::BF16)
-    }
-
-    fn use_bf16_packed_mlp_decode_weights(&self, weights: &[&candle_core::Tensor]) -> bool {
-        self.bf16_packed_mlp_decode_weights_enabled
-            && weights.iter().all(|weight| weight.dtype() == candle_core::DType::BF16)
-    }
-
     pub fn cached_bf16_packed_weight_buffer(
         &self,
         weight: &candle_core::Tensor,
@@ -1496,72 +1477,96 @@ impl VulkanBackend {
         self.bf16_packed_linear_weights_enabled && weight.dtype() == kiln_tensor::DType::BF16
     }
 
-    fn prewarm_f32_weight(
+    fn use_bf16_packed_gdn_in_proj_weights_kt(&self, weights: &[&kiln_tensor::Tensor]) -> bool {
+        self.bf16_packed_gdn_in_proj_weights_enabled
+            && weights
+                .iter()
+                .all(|weight| weight.dtype() == kiln_tensor::DType::BF16)
+    }
+
+    fn use_bf16_packed_full_attn_qkv_weights_kt(
+        &self,
+        weights: &[&kiln_tensor::Tensor],
+    ) -> bool {
+        self.bf16_packed_full_attn_qkv_weights_enabled
+            && weights
+                .iter()
+                .all(|weight| weight.dtype() == kiln_tensor::DType::BF16)
+    }
+
+    fn use_bf16_packed_mlp_decode_weights_kt(&self, weights: &[&kiln_tensor::Tensor]) -> bool {
+        self.bf16_packed_mlp_decode_weights_enabled
+            && weights
+                .iter()
+                .all(|weight| weight.dtype() == kiln_tensor::DType::BF16)
+    }
+
+    fn prewarm_f32_weight_kt(
         &self,
         name: &str,
-        weight: &candle_core::Tensor,
+        weight: &kiln_tensor::Tensor,
         count: &mut usize,
         bytes: &mut usize,
     ) -> Result<()> {
-        self.cached_f32_weight_buffer(weight)
+        self.cached_f32_weight_buffer_kt(weight)
             .with_context(|| format!("prewarm Vulkan decode weight {name}"))?;
         *count += 1;
         *bytes += weight.elem_count() * std::mem::size_of::<f32>();
         Ok(())
     }
 
-    fn prewarm_bf16_packed_weight(
+    fn prewarm_bf16_packed_weight_kt(
         &self,
         name: &str,
-        weight: &candle_core::Tensor,
+        weight: &kiln_tensor::Tensor,
         count: &mut usize,
         bytes: &mut usize,
     ) -> Result<()> {
-        self.cached_bf16_packed_weight_buffer(weight)
+        self.cached_bf16_packed_weight_buffer_kt(weight)
             .with_context(|| format!("prewarm Vulkan packed BF16 decode weight {name}"))?;
         *count += 1;
         *bytes += weight.elem_count().div_ceil(2) * std::mem::size_of::<u32>();
         Ok(())
     }
 
-    fn prewarm_linear_weight(
+    fn prewarm_linear_weight_kt(
         &self,
         name: &str,
-        weight: &candle_core::Tensor,
+        weight: &kiln_tensor::Tensor,
         f32_count: &mut usize,
         f32_bytes: &mut usize,
         bf16_count: &mut usize,
         bf16_bytes: &mut usize,
     ) -> Result<()> {
-        if self.use_bf16_packed_linear_weight(weight) {
-            self.prewarm_bf16_packed_weight(name, weight, bf16_count, bf16_bytes)
+        if self.use_bf16_packed_linear_weight_kt(weight) {
+            self.prewarm_bf16_packed_weight_kt(name, weight, bf16_count, bf16_bytes)
         } else {
-            self.prewarm_f32_weight(name, weight, f32_count, f32_bytes)
+            self.prewarm_f32_weight_kt(name, weight, f32_count, f32_bytes)
         }
     }
 
-    fn prewarm_gdn_in_proj_weight(
+    fn prewarm_gdn_in_proj_weight_kt(
         &self,
         name: &str,
-        weight: &candle_core::Tensor,
+        weight: &kiln_tensor::Tensor,
         f32_count: &mut usize,
         f32_bytes: &mut usize,
         bf16_count: &mut usize,
         bf16_bytes: &mut usize,
     ) -> Result<()> {
-        if self.bf16_packed_gdn_in_proj_weights_enabled && weight.dtype() == candle_core::DType::BF16 {
-            self.prewarm_bf16_packed_weight(name, weight, bf16_count, bf16_bytes)
+        if self.use_bf16_packed_gdn_in_proj_weights_kt(&[weight]) {
+            self.prewarm_bf16_packed_weight_kt(name, weight, bf16_count, bf16_bytes)
         } else {
-            self.prewarm_f32_weight(name, weight, f32_count, f32_bytes)
+            self.prewarm_f32_weight_kt(name, weight, f32_count, f32_bytes)
         }
     }
 
-    fn prewarm_full_attn_qkv_weights(
+    fn prewarm_full_attn_qkv_weights_kt(
         &self,
         layer_idx: usize,
-        q_weight_t: &candle_core::Tensor,
-        k_weight_t: &candle_core::Tensor,
-        v_weight_t: &candle_core::Tensor,
+        q_weight_t: &kiln_tensor::Tensor,
+        k_weight_t: &kiln_tensor::Tensor,
+        v_weight_t: &kiln_tensor::Tensor,
         f32_count: &mut usize,
         f32_bytes: &mut usize,
         bf16_count: &mut usize,
@@ -1572,9 +1577,9 @@ impl VulkanBackend {
             ("k_proj_t", k_weight_t),
             ("v_proj_t", v_weight_t),
         ];
-        if self.use_bf16_packed_full_attn_qkv_weights(&[q_weight_t, k_weight_t, v_weight_t]) {
+        if self.use_bf16_packed_full_attn_qkv_weights_kt(&[q_weight_t, k_weight_t, v_weight_t]) {
             for (suffix, weight) in weights {
-                self.prewarm_bf16_packed_weight(
+                self.prewarm_bf16_packed_weight_kt(
                     &format!("layers.{layer_idx}.attention.{suffix}"),
                     weight,
                     bf16_count,
@@ -1583,7 +1588,7 @@ impl VulkanBackend {
             }
         } else {
             for (suffix, weight) in weights {
-                self.prewarm_f32_weight(
+                self.prewarm_f32_weight_kt(
                     &format!("layers.{layer_idx}.attention.{suffix}"),
                     weight,
                     f32_count,
@@ -1594,12 +1599,12 @@ impl VulkanBackend {
         Ok(())
     }
 
-    fn prewarm_mlp_decode_weights(
+    fn prewarm_mlp_decode_weights_kt(
         &self,
         layer_idx: usize,
-        gate_weight_t: &candle_core::Tensor,
-        up_weight_t: &candle_core::Tensor,
-        down_weight_t: &candle_core::Tensor,
+        gate_weight_t: &kiln_tensor::Tensor,
+        up_weight_t: &kiln_tensor::Tensor,
+        down_weight_t: &kiln_tensor::Tensor,
         f32_count: &mut usize,
         f32_bytes: &mut usize,
         bf16_count: &mut usize,
@@ -1610,9 +1615,10 @@ impl VulkanBackend {
             ("up_proj_t", up_weight_t),
             ("down_proj_t", down_weight_t),
         ];
-        if self.use_bf16_packed_mlp_decode_weights(&[gate_weight_t, up_weight_t, down_weight_t]) {
+        if self.use_bf16_packed_mlp_decode_weights_kt(&[gate_weight_t, up_weight_t, down_weight_t])
+        {
             for (suffix, weight) in weights {
-                self.prewarm_bf16_packed_weight(
+                self.prewarm_bf16_packed_weight_kt(
                     &format!("layers.{layer_idx}.mlp.{suffix}"),
                     weight,
                     bf16_count,
@@ -1620,7 +1626,7 @@ impl VulkanBackend {
                 )?;
             }
             for (suffix, weight) in weights {
-                self.prewarm_f32_weight(
+                self.prewarm_f32_weight_kt(
                     &format!("layers.{layer_idx}.mlp.{suffix}"),
                     weight,
                     f32_count,
@@ -1629,7 +1635,7 @@ impl VulkanBackend {
             }
         } else {
             for (suffix, weight) in weights {
-                self.prewarm_f32_weight(
+                self.prewarm_f32_weight_kt(
                     &format!("layers.{layer_idx}.mlp.{suffix}"),
                     weight,
                     f32_count,
@@ -1753,11 +1759,11 @@ impl BackendRuntime for VulkanBackend {
 
     fn training_capabilities(&self) -> TrainingCapabilities {
         TrainingCapabilities {
-            projection_training: "kt-tape-recorded matmul (candle CustomOp1 wrapper removed #1082)",
+            projection_training: "kt-tape-recorded matmul (legacy autograd wrapper removed #1082)",
             flce_loss: "Vulkan offset matmul provider when enabled; FLCE remains chunked",
             rmsnorm_training: "Vulkan RMSNorm autograd path auto-gated by row count",
             resident_activation: "Vulkan buffer registry",
-            lora_delta_training: "kt-tape-recorded LoRA delta (candle CustomOp3 wrapper removed #1082)",
+            lora_delta_training: "kt-tape-recorded LoRA delta (legacy autograd wrapper removed #1082)",
             sgd_step: "Vulkan in-place registry update when operands are resident",
             adamw_step: "Vulkan in-place registry update when operands are resident",
             native_training: "vk_native_sft_train/vk_native_grpo_train enabled by default on Vulkan",
@@ -3556,14 +3562,9 @@ impl BackendRuntime for VulkanBackend {
         let mut bf16_packed_count = 0usize;
         let mut bf16_packed_bytes = 0usize;
 
-        // Bridge each kt weight tensor to candle for the internal candle-typed
-        // prewarm helpers. The Vulkan prewarm path reads host bytes off the
-        // CPU-resident tensor and uploads them to a VulkanBuffer, so the
-        // kt->candle CPU bridge is runtime-correct, not just a compile hack.
-        let embed_tokens_t_c = crate::forward::kt_logits_to_candle(&weights.embed_tokens_t)?;
-        self.prewarm_linear_weight(
+        self.prewarm_linear_weight_kt(
             "embed_tokens_t",
-            &embed_tokens_t_c,
+            &weights.embed_tokens_t,
             &mut count,
             &mut bytes,
             &mut bf16_packed_count,
@@ -3573,23 +3574,19 @@ impl BackendRuntime for VulkanBackend {
         for (layer_idx, layer) in weights.layers.iter().enumerate() {
             match &layer.attention {
                 GpuAttentionWeights::Full(attn) => {
-                    let q_proj_t_c = crate::forward::kt_logits_to_candle(&attn.q_proj_t)?;
-                    let k_proj_t_c = crate::forward::kt_logits_to_candle(&attn.k_proj_t)?;
-                    let v_proj_t_c = crate::forward::kt_logits_to_candle(&attn.v_proj_t)?;
-                    self.prewarm_full_attn_qkv_weights(
+                    self.prewarm_full_attn_qkv_weights_kt(
                         layer_idx,
-                        &q_proj_t_c,
-                        &k_proj_t_c,
-                        &v_proj_t_c,
+                        &attn.q_proj_t,
+                        &attn.k_proj_t,
+                        &attn.v_proj_t,
                         &mut count,
                         &mut bytes,
                         &mut bf16_packed_count,
                         &mut bf16_packed_bytes,
                     )?;
-                    let o_proj_t_c = crate::forward::kt_logits_to_candle(&attn.o_proj_t)?;
-                    self.prewarm_linear_weight(
+                    self.prewarm_linear_weight_kt(
                         &format!("layers.{layer_idx}.attention.o_proj_t"),
-                        &o_proj_t_c,
+                        &attn.o_proj_t,
                         &mut count,
                         &mut bytes,
                         &mut bf16_packed_count,
@@ -3597,46 +3594,41 @@ impl BackendRuntime for VulkanBackend {
                     )?;
                 }
                 GpuAttentionWeights::Linear(attn) => {
-                    let in_proj_qkv_t_c = crate::forward::kt_logits_to_candle(&attn.in_proj_qkv_t)?;
-                    self.prewarm_gdn_in_proj_weight(
+                    self.prewarm_gdn_in_proj_weight_kt(
                         &format!("layers.{layer_idx}.attention.in_proj_qkv_t"),
-                        &in_proj_qkv_t_c,
+                        &attn.in_proj_qkv_t,
                         &mut count,
                         &mut bytes,
                         &mut bf16_packed_count,
                         &mut bf16_packed_bytes,
                     )?;
-                    let in_proj_z_t_c = crate::forward::kt_logits_to_candle(&attn.in_proj_z_t)?;
-                    self.prewarm_gdn_in_proj_weight(
+                    self.prewarm_gdn_in_proj_weight_kt(
                         &format!("layers.{layer_idx}.attention.in_proj_z_t"),
-                        &in_proj_z_t_c,
+                        &attn.in_proj_z_t,
                         &mut count,
                         &mut bytes,
                         &mut bf16_packed_count,
                         &mut bf16_packed_bytes,
                     )?;
-                    let in_proj_a_t_c = crate::forward::kt_logits_to_candle(&attn.in_proj_a_t)?;
-                    self.prewarm_gdn_in_proj_weight(
+                    self.prewarm_gdn_in_proj_weight_kt(
                         &format!("layers.{layer_idx}.attention.in_proj_a_t"),
-                        &in_proj_a_t_c,
+                        &attn.in_proj_a_t,
                         &mut count,
                         &mut bytes,
                         &mut bf16_packed_count,
                         &mut bf16_packed_bytes,
                     )?;
-                    let in_proj_b_t_c = crate::forward::kt_logits_to_candle(&attn.in_proj_b_t)?;
-                    self.prewarm_gdn_in_proj_weight(
+                    self.prewarm_gdn_in_proj_weight_kt(
                         &format!("layers.{layer_idx}.attention.in_proj_b_t"),
-                        &in_proj_b_t_c,
+                        &attn.in_proj_b_t,
                         &mut count,
                         &mut bytes,
                         &mut bf16_packed_count,
                         &mut bf16_packed_bytes,
                     )?;
-                    let out_proj_t_c = crate::forward::kt_logits_to_candle(&attn.out_proj_t)?;
-                    self.prewarm_linear_weight(
+                    self.prewarm_linear_weight_kt(
                         &format!("layers.{layer_idx}.attention.out_proj_t"),
-                        &out_proj_t_c,
+                        &attn.out_proj_t,
                         &mut count,
                         &mut bytes,
                         &mut bf16_packed_count,
@@ -3645,14 +3637,11 @@ impl BackendRuntime for VulkanBackend {
                 }
             }
 
-            let gate_proj_t_c = crate::forward::kt_logits_to_candle(&layer.mlp.gate_proj_t)?;
-            let up_proj_t_c = crate::forward::kt_logits_to_candle(&layer.mlp.up_proj_t)?;
-            let down_proj_t_c = crate::forward::kt_logits_to_candle(&layer.mlp.down_proj_t)?;
-            self.prewarm_mlp_decode_weights(
+            self.prewarm_mlp_decode_weights_kt(
                 layer_idx,
-                &gate_proj_t_c,
-                &up_proj_t_c,
-                &down_proj_t_c,
+                &layer.mlp.gate_proj_t,
+                &layer.mlp.up_proj_t,
+                &layer.mlp.down_proj_t,
                 &mut count,
                 &mut bytes,
                 &mut bf16_packed_count,
@@ -3706,10 +3695,10 @@ impl BackendRuntime for VulkanBackend {
         // 2 bytes of storage; broadcast_as(target_shape) creates views
         // with stride [0, 0] sharing the same backing storage. Each per-
         // weight stub costs ~24 bytes of metadata (Layout + Tensor
-        // struct), not `hidden * out_dim * 2` bytes. The weights are now
-        // kt-typed (#1082 forward-flip), so the stub is a kt tensor; the
-        // candle-id-keyed `bf16_packed_weight_cache` is re-keyed via a
-        // candle bridge of the kt tensor.
+        // struct), not `hidden * out_dim * 2` bytes. The weights are
+        // kt-typed (#1082 forward-flip), and the Vulkan buffer cache is
+        // re-keyed directly from the old kt TensorId to the stub's kt
+        // TensorId.
         let broadcast_base = kiln_tensor::Tensor::zeros(
             (1usize, 1usize),
             kiln_tensor::DType::BF16,
@@ -3717,10 +3706,14 @@ impl BackendRuntime for VulkanBackend {
         )
         .context("drop_uploaded_bf16_weights: create broadcast base")?;
         let _ = device;
-        let mut cache = self
-            .bf16_packed_weight_cache
+        let mut bf16_cache = self
+            .bf16_packed_weight_cache_kt
             .lock()
             .map_err(|_| anyhow::anyhow!("bf16 weight cache mutex poisoned"))?;
+        let mut f32_cache = self
+            .weight_cache_kt
+            .lock()
+            .map_err(|_| anyhow::anyhow!("f32 weight cache mutex poisoned"))?;
 
         // Per-tensor replacement closure. Returns true if the tensor
         // was stubbed (was BF16, rank-2, and in the cache).
@@ -3731,15 +3724,19 @@ impl BackendRuntime for VulkanBackend {
         //   2-byte base to that shape (so downstream `weight_t.dims2()`
         //   reads continue to return the right shape, but the storage
         //   bytes drop to ~zero).
-        // - Re-keys the cache so subsequent
-        //   `cached_bf16_packed_weight_buffer(weight_t)` lookups by the
-        //   new candle_core::TensorId still find the original `Arc<VulkanBuffer>`.
-        //   The cache key is derived by bridging the kt tensor to candle
-        //   (`kt_logits_to_candle`) and reading its candle `id()`, matching
-        //   the candle-id the decode path bridges produce.
+        // - Re-keys the packed cache and any F32 shadow cache entry so
+        //   subsequent kt-native lookups by the stub's new TensorId still find
+        //   the original `Arc<VulkanBuffer>`s.
         fn replace(
             t: &mut kiln_tensor::Tensor,
-            cache: &mut std::collections::HashMap<candle_core::TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>,
+            bf16_cache: &mut std::collections::HashMap<
+                kiln_tensor::TensorId,
+                Arc<kiln_vulkan_kernel::VulkanBuffer>,
+            >,
+            f32_cache: &mut std::collections::HashMap<
+                kiln_tensor::TensorId,
+                Arc<kiln_vulkan_kernel::VulkanBuffer>,
+            >,
             broadcast_base: &kiln_tensor::Tensor,
         ) -> bool {
             if t.dtype() != kiln_tensor::DType::BF16 {
@@ -3750,26 +3747,24 @@ impl BackendRuntime for VulkanBackend {
                 return false; // Only rank-2 transposed-cache tensors are stubbable.
             }
             let (d0, d1) = (dims[0], dims[1]);
-            let Ok(old_c) = crate::forward::kt_logits_to_candle(t) else {
+            let old_id = t.id();
+            let Some(bf16_buf) = bf16_cache.remove(&old_id) else {
                 return false;
             };
-            let old_id = old_c.id();
-            let Some(buf) = cache.remove(&old_id) else {
-                return false;
-            };
+            let f32_buf = f32_cache.remove(&old_id);
             let Ok(new_stub) = broadcast_base.broadcast_as((d0, d1)) else {
-                cache.insert(old_id, buf); // restore on failure
+                bf16_cache.insert(old_id, bf16_buf); // restore on failure
+                if let Some(buf) = f32_buf {
+                    f32_cache.insert(old_id, buf);
+                }
                 return false;
             };
-            let new_id = match crate::forward::kt_logits_to_candle(&new_stub) {
-                Ok(c) => c.id(),
-                Err(_) => {
-                    cache.insert(old_id, buf); // restore on failure
-                    return false;
-                }
-            };
+            let new_id = new_stub.id();
             *t = new_stub;
-            cache.insert(new_id, buf);
+            bf16_cache.insert(new_id, bf16_buf);
+            if let Some(buf) = f32_buf {
+                f32_cache.insert(new_id, buf);
+            }
             true
         }
 
@@ -3780,9 +3775,9 @@ impl BackendRuntime for VulkanBackend {
         // `embed_tokens_t.index_select(idx, 1)` which reads the
         // tensor's data (not just shape), so a 1-element stub would
         // make the embedding lookup return garbage. The other `*_proj_t`
-        // caches go through `cached_bf16_packed_weight_buffer` (candle_core::TensorId
-        // → Arc<VulkanBuffer>) so they only need shape/dtype metadata
-        // on the candle side. Embedding savings (~750 MB) are small
+        // caches go through the kt TensorId → Arc<VulkanBuffer> packed cache,
+        // so they only need shape/dtype metadata locally. Embedding savings
+        // (~750 MB) are small
         // next to the per-layer transposes (~5-6 GB across 32 layers).
 
         // Per-layer attention + MLP transposes.
@@ -3795,12 +3790,12 @@ impl BackendRuntime for VulkanBackend {
                         &mut attn.v_proj_t,
                         &mut attn.o_proj_t,
                     ] {
-                        if replace(t, &mut cache, &broadcast_base) {
+                        if replace(t, &mut bf16_cache, &mut f32_cache, &broadcast_base) {
                             stubbed += 1;
                         }
                     }
                     if let Some(qkv_t) = attn.qkv_proj_t.as_mut() {
-                        if replace(qkv_t, &mut cache, &broadcast_base) {
+                        if replace(qkv_t, &mut bf16_cache, &mut f32_cache, &broadcast_base) {
                             stubbed += 1;
                         }
                     }
@@ -3813,12 +3808,12 @@ impl BackendRuntime for VulkanBackend {
                         &mut attn.in_proj_b_t,
                         &mut attn.out_proj_t,
                     ] {
-                        if replace(t, &mut cache, &broadcast_base) {
+                        if replace(t, &mut bf16_cache, &mut f32_cache, &broadcast_base) {
                             stubbed += 1;
                         }
                     }
                     if let Some(ab_t) = attn.in_proj_ab_t.as_mut() {
-                        if replace(ab_t, &mut cache, &broadcast_base) {
+                        if replace(ab_t, &mut bf16_cache, &mut f32_cache, &broadcast_base) {
                             stubbed += 1;
                         }
                     }
@@ -3829,7 +3824,7 @@ impl BackendRuntime for VulkanBackend {
                 &mut layer.mlp.up_proj_t,
                 &mut layer.mlp.down_proj_t,
             ] {
-                if replace(t, &mut cache, &broadcast_base) {
+                if replace(t, &mut bf16_cache, &mut f32_cache, &broadcast_base) {
                     stubbed += 1;
                 }
             }
@@ -3837,7 +3832,7 @@ impl BackendRuntime for VulkanBackend {
 
         tracing::info!(
             stubbed,
-            "dropped candle CPU storage of pre-transposed bf16 weight caches"
+            "dropped CPU storage of pre-transposed bf16 weight caches"
         );
         Ok(stubbed)
     }

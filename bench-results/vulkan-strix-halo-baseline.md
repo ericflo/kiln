@@ -432,6 +432,16 @@ every config"):
   each completion. This is live-route evidence for the 64-wide default and a
   better long fixture than the four-row smoke, while the synthetic mixed-paged
   microbench remains the main saturation signal.
+  **Update — kt-native Vulkan decode prewarm cleanup:** Vulkan decode-weight
+  prewarm now fills the same kt TensorId-keyed F32/BF16-packed buffer caches
+  used by resident decode, and the post-upload BF16 weight-stubbing path
+  re-keys the packed cache plus any F32 shadow cache entry when it replaces
+  local transposed weights with shape-preserving stubs. This removes the
+  forbidden legacy-stack bridge from the Vulkan prewarm/stub cleanup path and
+  keeps the duplicate-copy memory win aligned with the resident decode cache
+  that production actually reads. Focused check: `cargo check -p kiln-model
+  --no-default-features --features vulkan` passes with the repo's existing
+  warning backlog.
   **Update — resident parity test restored for Vulkan profiles:** the
   `vk_resident_decode_parity` integration test now builds against the current kt
   device/cache surface instead of stale test-only APIs. Without
