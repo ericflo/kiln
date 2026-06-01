@@ -98,8 +98,9 @@ current GPU chunkwise (already validated identical to CPU), not rushed.
 narrow/matmul/prep/solve/update/scatter sequence into one `CommandBatch`, owns
 all transient buffers until submit completion, and exposes
 `vk_gdn_chunkwise_forward_no_grad_single_submit`. The Vulkan backend tries this
-path first for GDN prefill and can fall back to the existing Vulkan chunkwise
-path if the recorder rejects a shape/config. Direct parity test coverage is
+path first for GDN prefill and now treats recorder failure as visible by
+default; the older per-dispatch Vulkan chunkwise path is debug opt-in via
+`KILN_VULKAN_GDN_CHUNKWISE_FALLBACK=1`. Direct parity test coverage is
 legacy-stack-free and passes against a CPU recurrence oracle on a multi-chunk shape:
 output max abs err `1.117587e-8`, state max abs err `5.960464e-8`
 (`vk_gdn_chunkwise_single_submit_matches_cpu_multichunk`). Full

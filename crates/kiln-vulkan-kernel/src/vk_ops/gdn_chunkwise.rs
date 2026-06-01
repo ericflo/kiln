@@ -1175,6 +1175,17 @@ pub fn vk_gdn_chunkwise_forward_no_grad(
     concat_time(&out_chunks, dv)
 }
 
+fn gdn_chunkwise_fallback_enabled() -> bool {
+    std::env::var("KILN_VULKAN_GDN_CHUNKWISE_FALLBACK")
+        .map(|value| {
+            !matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "" | "0" | "false" | "off" | "no"
+            )
+        })
+        .unwrap_or(false)
+}
+
 // ---------------------------------------------------------------------------
 // Phase 5: autograd-aware vk_gdn_chunkwise + GdnChunkwiseBackward op
 // ---------------------------------------------------------------------------
@@ -1721,10 +1732,16 @@ pub fn vk_gdn_chunkwise(
             ) {
                 Ok(out) => return Ok(out),
                 Err(err) => {
-                    tracing::warn!(
-                        error = %err,
-                        "single-submit vk_gdn_chunkwise no-grad path failed; falling back"
-                    );
+                    if gdn_chunkwise_fallback_enabled() {
+                        tracing::warn!(
+                            error = %err,
+                            "single-submit vk_gdn_chunkwise no-grad path failed; falling back"
+                        );
+                    } else {
+                        return Err(err).context(
+                            "single-submit vk_gdn_chunkwise no-grad path failed; fallback disabled",
+                        );
+                    }
                 }
             }
         }

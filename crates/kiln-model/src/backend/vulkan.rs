@@ -4606,20 +4606,29 @@ impl BackendRuntime for VulkanBackend {
                 ) {
                     Ok(out) => out,
                     Err(err) => {
-                        tracing::warn!(
-                            error = %err,
-                            "single-submit Vulkan GDN chunkwise prefill failed; falling back"
-                        );
-                        kiln_vulkan_kernel::vk_ops::gdn_chunkwise::vk_gdn_chunkwise_forward_no_grad(
-                            &q_vk,
-                            &k_vk,
-                            &v_vk,
-                            &beta_vk,
-                            &g_vk,
-                            &mut state_vk,
-                            chunk_size,
-                        )
-                        .context("vk_gdn_chunkwise_forward_no_grad fallback")?
+                        if kiln_core::env_flag::env_flag(
+                            "KILN_VULKAN_GDN_CHUNKWISE_FALLBACK",
+                            false,
+                        ) {
+                            tracing::warn!(
+                                error = %err,
+                                "single-submit Vulkan GDN chunkwise prefill failed; falling back"
+                            );
+                            kiln_vulkan_kernel::vk_ops::gdn_chunkwise::vk_gdn_chunkwise_forward_no_grad(
+                                &q_vk,
+                                &k_vk,
+                                &v_vk,
+                                &beta_vk,
+                                &g_vk,
+                                &mut state_vk,
+                                chunk_size,
+                            )
+                            .context("vk_gdn_chunkwise_forward_no_grad fallback")?
+                        } else {
+                            return Err(err).context(
+                                "single-submit Vulkan GDN chunkwise prefill failed; fallback disabled",
+                            );
+                        }
                     }
                 }
             } else {
