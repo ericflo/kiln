@@ -8,6 +8,8 @@
 //! end-to-end per-call cost.
 //!
 //! Usage: `cargo run --release -p kiln-vulkan-kernel --bin vulkan_decode_microbench`.
+//! Pass one case name as argv[1], or set `KILN_VK_MICROBENCH_ONLY` to one or
+//! more comma-separated case names, to run a focused subset.
 
 use std::time::Instant;
 
@@ -80,6 +82,20 @@ fn batch_sweep() -> Vec<usize> {
         return DEFAULT_BATCHES.to_vec();
     };
     parsed
+}
+
+fn selected_benches() -> Option<Vec<String>> {
+    std::env::args()
+        .nth(1)
+        .or_else(|| std::env::var("KILN_VK_MICROBENCH_ONLY").ok())
+        .map(|s| {
+            s.split(',')
+                .map(str::trim)
+                .filter(|part| !part.is_empty())
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .filter(|selected| !selected.is_empty())
 }
 
 fn enabled_unless_disabled(name: &str) -> bool {
@@ -241,11 +257,12 @@ fn run() -> Result<()> {
     );
     println!();
 
-    // Allow caller to run a single kernel ("mlp_bf16w", "mlp_bf16_gu_f32_d",
-    // "full_attn_qkv", "gdn_in_proj") so they can iterate fast without
-    // perturbation from sibling tests heating the GPU.
-    let only = std::env::args().nth(1);
-    let want = |name: &str| only.as_deref().is_none_or(|s| s == name);
+    // Allow callers to run focused subsets so sibling tests do not heat the GPU.
+    let only = selected_benches();
+    let want = |name: &str| {
+        only.as_ref()
+            .is_none_or(|selected| selected.iter().any(|s| s == name))
+    };
 
     // Pre-upload weights once.
     let q_w = make_bf16_weight_slice(HIDDEN, Q_GATE_DIM);

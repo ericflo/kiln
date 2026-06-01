@@ -23,9 +23,26 @@ Strix Halo APU dev box. This is the regression gate for the DoD line
 | Decode forward / token | **69.8 ms** | `last_forward_ms`; ~14.3 tok/s steady-state |
 | Decode tok/s (steady) | **~14.3 tok/s** | one CommandBatch per token (native resident path) |
 | First-token cost | ~1.4 s (one-time) | SPIR-V pipeline compile on first decode of a fresh process |
-| Prefill (~14-tok prompt) | ~3.2 s | historical server baseline; GDN chunkwise single-submit now verified by Vulkan-only microbench below, current full app prefill timing pending |
+| Prefill (~14-tok prompt) | ~3.2 s | historical server baseline; current app-level paged latency smoke below measured 6.6 s for the bench's 10-token prompt |
 | Model load | ~20–31 s | CPU-host weights + lazy first-forward vk upload |
 | Memory (load → decode) | ~19 GiB, **flat** | no per-token growth, no OOM (kt-keyed weight caches) |
+
+Current app-level paged latency smoke after the resident/paged routing and
+fallback-gate changes:
+
+```bash
+KILN_NUM_BLOCKS=2048 KILN_BENCH_LOG_ITL=1 KILN_VK_RESIDENT_DECODE_TIMING=1 \
+  ./target/release/kiln-bench --model-path Qwen3.5-4B --latency-only \
+  --paged --prompt-tokens 8 --max-output-tokens 6 --latency-warmup-runs 1 \
+  --skip-training
+```
+
+This rebuilt release binary reported `backend: vulkan`, model load 19.85 s,
+10 prompt tokens, prefill 6596.4 ms, first decode step 1061.5 ms, p50 decode
+ITL 68.8 ms, mean ITL 234.0 ms across 7 generated tokens, and 4.27 decode
+tok/s. The p50 steady decode matches the native resident single-submit baseline;
+the first decode step remains the visible first-use pipeline cost in this
+app-level path.
 
 Pre-fix baseline (for reference — the bug state this session resolved):
 decode was **~1588 ms/token (~0.5 tok/s)** through the generic
@@ -399,8 +416,10 @@ every config"):
   conservative re-seed-every-call policy, so prompt K/V is seeded once per
   single-row session. Direct Vulkan-only `full_token_resident_mixed_paged`
   smoke with history 256, batch 1, warmup=1, timed=4, repeats=3 measured
-  59.0 ms / 17 rows/s. This validates the kernel route reached by serving;
-  current app-level serving timing remains pending.
+  59.0 ms / 17 rows/s. This validates the kernel route reached by serving.
+  The app-level paged latency smoke at the top of this note measured p50 decode
+  ITL 68.8 ms after one warmup pass, with first-use pipeline cost still visible
+  in the first decode step.
   **Update — GDN resident recorder uses row-reuse in-proj:** the batched GDN
   `CommandBatch` recorder now selects the same pair QKV/Z plus rows2/rows4
   BF16 in-proj shaders as the standalone dispatcher. Focused
@@ -554,6 +573,11 @@ every config"):
   | synthetic all full-attention, paged KV + split-K paged attention | 8 | 104.2 ms | 77 |
   | synthetic all full-attention, paged KV + split-K paged attention | 32 | 271.0 ms | 118 |
   | synthetic all full-attention, paged KV + split-K paged attention | 64 | 509.0 ms | 126 |
+
+  The microbench selector now also honors `KILN_VK_MICROBENCH_ONLY`, so
+  future resident/paged checks can avoid heating the GPU with sibling sweeps.
+  A focused selector smoke with batch 1, warmup=1, timed=1, repeats=1 ran only
+  `full_token_resident_paged` and measured 49.4 ms / 20 rows/s.
 
   These numbers also use the corrected gated-Q full-attention dataflow and the
   direct-output full-attention QKV+gate projection. A batch-64 split-K sweep
