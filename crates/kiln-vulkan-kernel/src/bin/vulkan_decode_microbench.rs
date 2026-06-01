@@ -47,6 +47,7 @@ const TIMED_ITERS: usize = 30;
 const REPEATS: usize = 5;
 const DEFAULT_BATCHES: &[usize] = &[1, 4, 8, 16, 32, 64];
 const MLP_BF16_ROWS8_MIN_BATCH: usize = 256;
+const GDN_IN_PROJ_ROWS4_MIN_BATCH: usize = 16;
 const PAGED_ATTN_SPLITK_CHUNKS_B1: usize = 32;
 const PAGED_ATTN_SPLITK_CHUNKS_BATCHED: usize = 4;
 const PAGED_ATTN_SPLITK_CHUNKS_BATCHED_LONG: usize = 2;
@@ -192,7 +193,7 @@ fn gdn_in_proj_bf16w_batched_plan(
         && batch >= 3
         && enabled_unless_disabled("KILN_DISABLE_VULKAN_GDN_IN_PROJ_BATCH_ROW_PAIR");
     let row_group_size = if row_grouping
-        && batch >= 8
+        && batch >= GDN_IN_PROJ_ROWS4_MIN_BATCH
         && enabled_unless_disabled("KILN_DISABLE_VULKAN_GDN_IN_PROJ_BATCH_ROW_QUAD")
     {
         4usize

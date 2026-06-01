@@ -964,7 +964,7 @@ pub fn dispatch_gdn_in_proj_decode_cached_resident(
         && batch >= 3
         && crate::kernels::gdn_in_proj_batch_row_pair_enabled();
     let row_group_size = if row_grouping
-        && batch >= 8
+        && batch >= crate::kernels::GDN_IN_PROJ_ROWS4_MIN_BATCH
         && crate::kernels::gdn_in_proj_batch_row_quad_enabled()
     {
         4usize

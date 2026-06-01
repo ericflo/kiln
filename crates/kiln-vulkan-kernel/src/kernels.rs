@@ -7,6 +7,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 pub(crate) const MLP_BF16_ROWS8_MIN_BATCH: usize = 256;
+pub(crate) const GDN_IN_PROJ_ROWS4_MIN_BATCH: usize = 16;
 
 fn env_truthy_for_profile(name: &str) -> bool {
     std::env::var(name)
@@ -1060,7 +1061,10 @@ fn dispatch_gdn_in_proj_decode_cached_impl(
     let pair_qkv_z = batch > 1 && gdn_in_proj_batch_pair_qkv_z_enabled();
     let row_grouping =
         packed_bf16_weights && pair_qkv_z && batch >= 3 && gdn_in_proj_batch_row_pair_enabled();
-    let row_group_size = if row_grouping && batch >= 8 && gdn_in_proj_batch_row_quad_enabled() {
+    let row_group_size = if row_grouping
+        && batch >= GDN_IN_PROJ_ROWS4_MIN_BATCH
+        && gdn_in_proj_batch_row_quad_enabled()
+    {
         4usize
     } else if row_grouping {
         2usize

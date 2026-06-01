@@ -378,6 +378,14 @@ every config"):
   smokes measured the 9-dispatch GDN block at batch 32: 6.79 ms / 4,712 rows/s
   and batch 64: 14.05 ms / 4,554 rows/s; the full mixed-paged token measured
   batch 32: 236.4 ms / 135 rows/s and batch 64: 463.1 ms / 138 rows/s.
+  A follow-up row-grouping A/B showed the GDN in-proj rows4 shader starts too
+  early at batch 8 on STRIX_HALO: standalone in-proj moved from 1.23 ms to
+  1.07 ms when using rows2, and the full GDN block moved from 3.30 ms to
+  3.11 ms. Rows4 still wins from batch 16 upward, so the rows4 crossover is
+  now batch 16. Patched mixed-paged token smokes at history 256, warmup=1,
+  timed=3, repeats=2 measured batch 8: 101.6 ms / 79 rows/s, batch 16:
+  139.1 ms / 115 rows/s, batch 32: 245.8 ms / 130 rows/s, and batch 64:
+  455.9 ms / 140 rows/s.
 - **Vulkan paged-attention decode kernel**: the kernel crate already had
   `paged_attn_decode_batch_paged.comp`; Vulkan now advertises
   `supports_flash_attn_paged_decode` and wires the single-query paged-decode
