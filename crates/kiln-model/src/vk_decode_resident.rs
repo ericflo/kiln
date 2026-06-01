@@ -332,7 +332,7 @@ pub fn transformer_block_paged_decode_full_attn_resident_b1(
     let up_w_buf = backend.cached_bf16_packed_weight_buffer_kt(&layer.mlp.up_proj_t)?;
     let down_w_buf = backend.cached_bf16_packed_weight_buffer_kt(&layer.mlp.down_proj_t)?;
 
-    // RMSnorm weights: f32 (the candle storage may be bf16; the cache
+    // RMSnorm weights: f32 (the kt storage may be bf16; the cache
     // helper converts on first lookup).
     let in_norm_buf = backend.cached_f32_weight_buffer_kt(&layer.input_layernorm)?;
     let post_norm_buf = backend.cached_f32_weight_buffer_kt(&layer.post_attention_layernorm)?;
@@ -636,6 +636,96 @@ pub fn transformer_block_paged_decode_full_attn_resident_b1(
     Ok(Some(out_tensor))
 }
 
+/// Run one GDN decode block on the Vulkan-resident path with kt inputs.
+#[allow(clippy::too_many_arguments)]
+pub fn transformer_block_paged_decode_gdn_resident_b1_kt(
+    backend: &VulkanBackend,
+    x: &kiln_tensor::Tensor,
+    layer: &GpuLayerWeights,
+    config: &ModelConfig,
+    recurrent_state_t: &kiln_tensor::Tensor,
+    conv_state_t: &kiln_tensor::Tensor,
+) -> Result<Option<kiln_tensor::Tensor>> {
+    let dims = x.dims();
+    if dims.len() != 3 || dims[0] != 1 || dims[1] != 1 {
+        return Ok(None);
+    }
+    let hidden = dims[2];
+    if hidden != config.hidden_size {
+        return Ok(None);
+    }
+    let Some(vk_device) = backend.vulkan_device() else {
+        return Ok(None);
+    };
+
+    let gdn_t0 = if timing_enabled() { Some(Instant::now()) } else { None };
+    let x_dtype = x.dtype();
+    let x_buf = backend.acquire_resident_scratch("gdn_kt_x", (hidden * 4) as u64)?;
+    let out_buf = backend.acquire_resident_scratch("gdn_kt_out", (hidden * 4) as u64)?;
+
+    let upload_t0 = gdn_t0.map(|_| Instant::now());
+    let x_data = kt_tensor_to_f32_vec(x).context("extract x f32 data for resident GDN block")?;
+    let x_bytes = f32_slice_to_bytes(&x_data);
+    VulkanBuffer::upload_data(
+        vk_device.device(),
+        vk_device.host_visible_mem_type(),
+        vk_device.queue(),
+        vk_device.queue_family_index(),
+        &x_buf,
+        &x_bytes,
+    )
+    .context("upload x for resident GDN block")?;
+    if let Some(t) = upload_t0 {
+        GDNFB_UPLOAD_NS.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    }
+
+    let submit_t0 = gdn_t0.map(|_| Instant::now());
+    let mut batch = CommandBatch::new(vk_device)?;
+    if !record_gdn_block_into(
+        backend,
+        &mut batch,
+        &x_buf,
+        &out_buf,
+        layer,
+        config,
+        recurrent_state_t,
+        conv_state_t,
+    )? {
+        return Ok(None);
+    }
+    batch
+        .submit_and_wait("vk-resident GDN full-block kt")
+        .context("submit resident GDN full-block kt CommandBatch")?;
+    if let Some(t) = submit_t0 {
+        GDNFB_SUBMIT_NS.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    }
+
+    let readback_t0 = gdn_t0.map(|_| Instant::now());
+    let out_bytes = VulkanBuffer::read_back(
+        vk_device.device(),
+        vk_device.host_visible_mem_type(),
+        vk_device.queue(),
+        vk_device.queue_family_index(),
+        &out_buf,
+    )
+    .context("read back resident GDN block output")?;
+    let out_f32 = bytes_to_f32_vec(&out_bytes);
+    let out_tensor = kiln_tensor::Tensor::from_vec(out_f32, vec![1usize, 1usize, hidden])?;
+    let out_tensor = if x_dtype == kiln_tensor::DType::F32 {
+        out_tensor
+    } else {
+        out_tensor.to_dtype(x_dtype)?
+    };
+    if let Some(t) = readback_t0 {
+        GDNFB_READBACK_NS.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    }
+    if let Some(t) = gdn_t0 {
+        GDNFB_TOTAL_NS.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        GDNFB_CALLS.fetch_add(1, Ordering::Relaxed);
+    }
+    Ok(Some(out_tensor))
+}
+
 fn kt_tensor_to_f32_vec(tensor: &kiln_tensor::Tensor) -> Result<Vec<f32>> {
     let flat = if tensor.dtype() == kiln_tensor::DType::F32 {
         tensor.flatten_all()?
@@ -694,7 +784,7 @@ fn upload_u32_slice(vk_device: &VulkanDevice, data: &[u32]) -> Result<VulkanBuff
 /// Run the GDN linear-attention sub-block on the Vulkan-resident path.
 ///
 /// Returns `Ok(Some(output))` — the attention output shape `[1, 1, hidden]`
-/// f32, on the same candle device as `x`. The caller is responsible for
+/// f32, as a kt tensor. The caller is responsible for
 /// the residual add and the post-attention norm + MLP (this helper is
 /// only the GDN-specific portion).
 ///
@@ -711,7 +801,7 @@ fn upload_u32_slice(vk_device: &VulkanDevice, data: &[u32]) -> Result<VulkanBuff
 ///   → MLP gate_up + down → +residual
 ///
 /// Lifting all of this into one `CommandBatch` per layer eliminates the
-/// 24 GDN layers × 5 candle ops (pre-norm + residual + post-norm + MLP
+/// 24 GDN layers x 5 host-side ops (pre-norm + residual + post-norm + MLP
 /// + final-residual) that previously dominated decode ITL (~17 ms /
 /// GDN layer = ~408 ms / token observed via `KILN_VK_RESIDENT_DECODE_TIMING`).
 ///
@@ -721,12 +811,12 @@ fn upload_u32_slice(vk_device: &VulkanDevice, data: &[u32]) -> Result<VulkanBuff
 #[allow(clippy::too_many_arguments)]
 pub fn transformer_block_paged_decode_gdn_resident_b1(
     backend: &VulkanBackend,
-    x: &candle_core::Tensor,
+    x: &kiln_tensor::Tensor,
     layer: &GpuLayerWeights,
     config: &ModelConfig,
-    recurrent_state_t: &candle_core::Tensor,
-    conv_state_t: &candle_core::Tensor,
-) -> Result<Option<candle_core::Tensor>> {
+    recurrent_state_t: &kiln_tensor::Tensor,
+    conv_state_t: &kiln_tensor::Tensor,
+) -> Result<Option<kiln_tensor::Tensor>> {
     let state_key = recurrent_state_t.id();
     let dims = x.dims();
     if dims.len() != 3 || dims[0] != 1 || dims[1] != 1 {
@@ -780,14 +870,14 @@ pub fn transformer_block_paged_decode_gdn_resident_b1(
     // --- persistent state buffers --------------------------------
     let recurrent_bytes = (1 * nv * dk * dv * 4) as u64;
     let recurrent_buf =
-        backend.linear_attn_recurrent_state_buffer(state_key, recurrent_bytes)?;
+        backend.linear_attn_recurrent_state_buffer_kt(state_key, recurrent_bytes)?;
     let conv_state_bytes = (1 * qkv_dim * (conv_kernel.saturating_sub(1)) * 4) as u64;
-    let conv_buf = backend.linear_attn_conv_state_buffer(state_key, conv_state_bytes)?;
+    let conv_buf = backend.linear_attn_conv_state_buffer_kt(state_key, conv_state_bytes)?;
 
-    if !backend.linear_attn_layer_seeded(state_key) {
-        seed_recurrent_state(vk_device, &recurrent_buf, recurrent_state_t)?;
-        seed_conv_state(vk_device, &conv_buf, conv_state_t)?;
-        backend.mark_linear_attn_layer_seeded(state_key);
+    if !backend.linear_attn_layer_seeded_kt(state_key) {
+        seed_recurrent_state_kt(vk_device, &recurrent_buf, recurrent_state_t)?;
+        seed_conv_state_kt(vk_device, &conv_buf, conv_state_t)?;
+        backend.mark_linear_attn_layer_seeded_kt(state_key);
     }
 
     // --- pooled scratch buffers (own keyspace from full-attn / per-call GDN) ---
@@ -825,10 +915,10 @@ pub fn transformer_block_paged_decode_gdn_resident_b1(
 
     // --- upload x ------------------------------------------------
     let upload_t0 = fb_t0.map(|_| Instant::now());
-    let x_f32 = if x.dtype() == candle_core::DType::F32 {
+    let x_f32 = if x.dtype() == kiln_tensor::DType::F32 {
         x.flatten_all()?
     } else {
-        x.to_dtype(candle_core::DType::F32)?.flatten_all()?
+        x.to_dtype(kiln_tensor::DType::F32)?.flatten_all()?
     };
     let x_data: Vec<f32> = x_f32.to_vec1()?;
     VulkanBuffer::upload_data(
@@ -1050,8 +1140,12 @@ pub fn transformer_block_paged_decode_gdn_resident_b1(
     )
     .context("read back GDN full-block final_out")?;
     let out_f32 = bytes_to_f32_vec(&out_bytes);
-    let out_tensor = candle_core::Tensor::from_vec(out_f32, (1usize, 1usize, hidden), x.device())?
-        .to_dtype(x.dtype())?;
+    let out_tensor = kiln_tensor::Tensor::from_vec(out_f32, vec![1usize, 1usize, hidden])?;
+    let out_tensor = if x.dtype() == kiln_tensor::DType::F32 {
+        out_tensor
+    } else {
+        out_tensor.to_dtype(x.dtype())?
+    };
     if let Some(t) = readback_t0 {
         GDNFB_READBACK_NS.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }
@@ -1062,22 +1156,22 @@ pub fn transformer_block_paged_decode_gdn_resident_b1(
     Ok(Some(out_tensor))
 }
 
-/// configuration; caller falls back to the legacy
+/// configuration; caller falls back to the nonresident
 /// `gated_deltanet_forward_decode_if` path.
 ///
 /// Persistent state: the recurrent_state and conv_state buffers live
 /// on `VulkanBackend` (per-layer, allocated lazily). On first call per
-/// layer, they're seeded from the legacy `LinearAttentionState` Tensors
+/// layer, they're seeded from the kt `LinearAttentionState` Tensors
 /// so any prefill GDN state is preserved.
 #[allow(clippy::too_many_arguments)]
-pub fn gated_deltanet_forward_decode_resident_b1(
+pub fn gated_deltanet_forward_decode_resident_b1_kt(
     backend: &VulkanBackend,
-    x_normed: &candle_core::Tensor,
+    x_normed: &kiln_tensor::Tensor,
     weights: &crate::forward::GpuLinearAttentionWeights,
     config: &ModelConfig,
-    recurrent_state_t: &candle_core::Tensor,
-    conv_state_t: &candle_core::Tensor,
-) -> Result<Option<candle_core::Tensor>> {
+    recurrent_state_t: &kiln_tensor::Tensor,
+    conv_state_t: &kiln_tensor::Tensor,
+) -> Result<Option<kiln_tensor::Tensor>> {
     let state_key = recurrent_state_t.id();
     // --- supported-config gate -----------------------------------
     let dims = x_normed.dims();
@@ -1121,17 +1215,17 @@ pub fn gated_deltanet_forward_decode_resident_b1(
     // --- persistent state buffers --------------------------------
     let recurrent_bytes = (1 * nv * dk * dv * 4) as u64;
     let recurrent_buf =
-        backend.linear_attn_recurrent_state_buffer(state_key, recurrent_bytes)?;
+        backend.linear_attn_recurrent_state_buffer_kt(state_key, recurrent_bytes)?;
     // conv_state shape: [batch, conv_dim, kernel_size - 1] f32 where
     // conv_dim = qkv_dim (the conv1d operates on the full mixed_qkv).
     let conv_state_bytes = (1 * qkv_dim * (conv_kernel.saturating_sub(1)) * 4) as u64;
-    let conv_buf = backend.linear_attn_conv_state_buffer(state_key, conv_state_bytes)?;
+    let conv_buf = backend.linear_attn_conv_state_buffer_kt(state_key, conv_state_bytes)?;
 
-    // --- seed state from legacy Tensors on first use -------------
-    if !backend.linear_attn_layer_seeded(state_key) {
-        seed_recurrent_state(vk_device, &recurrent_buf, recurrent_state_t)?;
-        seed_conv_state(vk_device, &conv_buf, conv_state_t)?;
-        backend.mark_linear_attn_layer_seeded(state_key);
+    // --- seed state from kt tensors on first use ------------------
+    if !backend.linear_attn_layer_seeded_kt(state_key) {
+        seed_recurrent_state_kt(vk_device, &recurrent_buf, recurrent_state_t)?;
+        seed_conv_state_kt(vk_device, &conv_buf, conv_state_t)?;
+        backend.mark_linear_attn_layer_seeded_kt(state_key);
     }
 
     // --- acquire pooled intermediate buffers ---------------------
@@ -1159,10 +1253,10 @@ pub fn gated_deltanet_forward_decode_resident_b1(
 
     // --- upload x -----------------------------------------------
     let gdn_upload_t0 = gdn_t0.map(|_| Instant::now());
-    let x_f32 = if x_normed.dtype() == candle_core::DType::F32 {
+    let x_f32 = if x_normed.dtype() == kiln_tensor::DType::F32 {
         x_normed.flatten_all()?
     } else {
-        x_normed.to_dtype(candle_core::DType::F32)?.flatten_all()?
+        x_normed.to_dtype(kiln_tensor::DType::F32)?.flatten_all()?
     };
     let x_data: Vec<f32> = x_f32.to_vec1()?;
     VulkanBuffer::upload_data(
@@ -1330,8 +1424,12 @@ pub fn gated_deltanet_forward_decode_resident_b1(
     )
     .context("read back GDN out_buf")?;
     let out_f32 = bytes_to_f32_vec(&out_bytes);
-    let out_tensor = candle_core::Tensor::from_vec(out_f32, (1usize, 1usize, hidden), x_normed.device())?
-        .to_dtype(x_normed.dtype())?;
+    let out_tensor = kiln_tensor::Tensor::from_vec(out_f32, vec![1usize, 1usize, hidden])?;
+    let out_tensor = if x_normed.dtype() == kiln_tensor::DType::F32 {
+        out_tensor
+    } else {
+        out_tensor.to_dtype(x_normed.dtype())?
+    };
     if let Some(t) = gdn_readback_t0 {
         GDN_READBACK_NS.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }
@@ -1342,49 +1440,6 @@ pub fn gated_deltanet_forward_decode_resident_b1(
     Ok(Some(out_tensor))
 }
 
-fn seed_recurrent_state(
-    vk_device: &VulkanDevice,
-    buf: &VulkanBuffer,
-    state_t: &candle_core::Tensor,
-) -> Result<()> {
-    let flat = if state_t.dtype() == candle_core::DType::F32 {
-        state_t.flatten_all()?
-    } else {
-        state_t.to_dtype(candle_core::DType::F32)?.flatten_all()?
-    };
-    let data: Vec<f32> = flat.to_vec1()?;
-    let bytes = f32_slice_to_bytes(&data);
-    VulkanBuffer::upload_data(
-        vk_device.device(),
-        vk_device.host_visible_mem_type(),
-        vk_device.queue(),
-        vk_device.queue_family_index(),
-        buf,
-        &bytes,
-    )
-    .context("seed recurrent state")
-}
-
-fn seed_conv_state(vk_device: &VulkanDevice, buf: &VulkanBuffer, state_t: &candle_core::Tensor) -> Result<()> {
-    let flat = if state_t.dtype() == candle_core::DType::F32 {
-        state_t.flatten_all()?
-    } else {
-        state_t.to_dtype(candle_core::DType::F32)?.flatten_all()?
-    };
-    let data: Vec<f32> = flat.to_vec1()?;
-    let bytes = f32_slice_to_bytes(&data);
-    // The legacy conv_state may be smaller than the allocated buffer (we
-    // sized off qkv_dim × (kernel_size - 1), the candle candle_core::Tensor matches).
-    VulkanBuffer::upload_data(
-        vk_device.device(),
-        vk_device.host_visible_mem_type(),
-        vk_device.queue(),
-        vk_device.queue_family_index(),
-        buf,
-        &bytes,
-    )
-    .context("seed conv state")
-}
 
 pub(crate) fn seed_recurrent_state_kt(
     vk_device: &VulkanDevice,
@@ -1470,7 +1525,7 @@ pub fn seed_vk_kv_cache_layer_blocks_from_legacy(
         let k_block = k_tensor.narrow(0, slot_start, block_size)?.contiguous()?;
         let v_block = v_tensor.narrow(0, slot_start, block_size)?.contiguous()?;
         // #1082: `pool_tensors` now hands back `kiln_tensor::Tensor` (kt), so
-        // compare/convert against kt's `DType`, not candle's.
+        // compare/convert against kt's `DType`, not the old dtype enum.
         let k_block_f32 = if k_block.dtype() == kiln_tensor::DType::F32 {
             k_block.flatten_all()?
         } else {
@@ -1551,7 +1606,7 @@ pub fn seed_vk_kv_cache_layer_from_legacy(
 // Cross-layer chained record helpers + native orchestrator.
 //
 // The per-layer block helpers above each create a `CommandBatch`,
-// submit, wait, and candle_core::Tensor-bridge their input and output. That's one
+// submit, wait, and round-trip their input and output. That's one
 // submit + one upload + one readback PER LAYER → 32 submits and 32
 // CPU round-trips per decode token. The microbench
 // `full_token_resident_paged` shows 32 layers in ONE CommandBatch +

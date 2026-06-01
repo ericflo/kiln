@@ -14690,23 +14690,17 @@ fn gated_deltanet_forward_decode_if(
                 .as_any()
                 .downcast_ref::<crate::backend::vulkan::VulkanBackend>()
             {
-                // The resident-decode entry is candle-typed (vk_decode_resident.rs
-                // operates on CPU-resident candle tensors). Bridge the kt locals to
-                // candle for the call, then bridge the candle result back to kt. (#1082)
-                let x_c = crate::forward::kt_logits_to_candle(x)?;
-                let recurrent_state_c = crate::forward::kt_logits_to_candle(recurrent_state)?;
-                let conv_state_c = crate::forward::kt_logits_to_candle(conv_state)?;
                 if let Some(out) =
-                    crate::vk_decode_resident::gated_deltanet_forward_decode_resident_b1(
+                    crate::vk_decode_resident::gated_deltanet_forward_decode_resident_b1_kt(
                         vk_backend,
-                        &x_c,
+                        x,
                         weights,
                         config,
-                        &recurrent_state_c,
-                        &conv_state_c,
+                        recurrent_state,
+                        conv_state,
                     )?
                 {
-                    return crate::forward::candle_to_kt_activation(&out);
+                    return Ok(out);
                 }
             }
         }
@@ -25357,23 +25351,17 @@ fn model_forward_paged_inner(
                         {
                             let recurrent_t = &state.recurrent_states[linear_attn_idx];
                             let conv_t = &state.conv_states[linear_attn_idx];
-                            // transformer_block_paged_decode_gdn_resident_b1 is
-                            // candle-typed; bridge the kt locals to candle for the
-                            // call, then bridge the candle result back to kt. (#1082)
-                            let hidden_c = crate::forward::kt_logits_to_candle(&hidden)?;
-                            let recurrent_c = crate::forward::kt_logits_to_candle(recurrent_t)?;
-                            let conv_c = crate::forward::kt_logits_to_candle(conv_t)?;
                             if let Some(out) =
-                                crate::vk_decode_resident::transformer_block_paged_decode_gdn_resident_b1(
+                                crate::vk_decode_resident::transformer_block_paged_decode_gdn_resident_b1_kt(
                                     vk_backend,
-                                    &hidden_c,
+                                    &hidden,
                                     layer,
                                     config,
-                                    &recurrent_c,
-                                    &conv_c,
+                                    recurrent_t,
+                                    conv_t,
                                 )?
                             {
-                                hidden = crate::forward::candle_to_kt_activation(&out)?;
+                                hidden = out;
                                 linear_attn_idx += 1;
                                 if let Some(start) = layer_profile_start {
                                     synchronize_for_profile(&device)?;
