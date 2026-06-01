@@ -4586,7 +4586,27 @@ impl BackendRuntime for VulkanBackend {
         let mut state_vk = load(state_kt)?;
 
         let out_vk =
-            if std::env::var("KILN_DISABLE_VULKAN_GDN_CHUNKWISE_SINGLE_SUBMIT").is_err() {
+            if std::env::var("KILN_DISABLE_VULKAN_GDN_CHUNKWISE_SINGLE_SUBMIT").is_ok() {
+                if kiln_core::env_flag::env_flag("KILN_VULKAN_GDN_CHUNKWISE_FALLBACK", false) {
+                    tracing::warn!(
+                        "single-submit Vulkan GDN chunkwise prefill disabled; falling back"
+                    );
+                    kiln_vulkan_kernel::vk_ops::gdn_chunkwise::vk_gdn_chunkwise_forward_no_grad(
+                        &q_vk,
+                        &k_vk,
+                        &v_vk,
+                        &beta_vk,
+                        &g_vk,
+                        &mut state_vk,
+                        chunk_size,
+                    )
+                    .context("vk_gdn_chunkwise_forward_no_grad fallback")?
+                } else {
+                    anyhow::bail!(
+                        "single-submit Vulkan GDN chunkwise prefill disabled; fallback disabled"
+                    );
+                }
+            } else {
                 match kiln_vulkan_kernel::vk_ops::gdn_chunkwise::vk_gdn_chunkwise_forward_no_grad_single_submit(
                     &q_vk,
                     &k_vk,
@@ -4623,17 +4643,6 @@ impl BackendRuntime for VulkanBackend {
                         }
                     }
                 }
-            } else {
-                kiln_vulkan_kernel::vk_ops::gdn_chunkwise::vk_gdn_chunkwise_forward_no_grad(
-                    &q_vk,
-                    &k_vk,
-                    &v_vk,
-                    &beta_vk,
-                    &g_vk,
-                    &mut state_vk,
-                    chunk_size,
-                )
-                .context("vk_gdn_chunkwise_forward_no_grad")?
             };
 
         // Read back output + the updated state into kt (CPU-host) tensors.

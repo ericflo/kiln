@@ -138,6 +138,14 @@ transpose still emits the visibility barrier for all prior slice writes. A
 rerun of the T=512 shape after that change measured legacy per-dispatch 6.591 ms
 vs. single-submit 2.941 ms (**2.24x**) with output/state max abs err 0.
 
+The single-submit route is now mandatory by default even when
+`KILN_DISABLE_VULKAN_GDN_CHUNKWISE_SINGLE_SUBMIT` is set: that debug override
+must be paired with `KILN_VULKAN_GDN_CHUNKWISE_FALLBACK=1` before the older
+per-dispatch chunkwise implementation can run. This keeps production prefill
+from silently losing the one-CommandBatch path. A post-gate Vulkan-only smoke
+on the T=128 shape measured legacy per-dispatch 2.325 ms vs. single-submit
+0.852 ms (**2.73x**) with output/state max abs err 0.
+
 Other proper work-packages for full saturation (per "max out the hardware in
 every config"):
 - **True multi-row batched resident decode** (bs>1 / continuous-batched

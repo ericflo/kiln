@@ -1726,22 +1726,32 @@ pub fn vk_gdn_chunkwise(
         || g.requires_grad();
 
     if !needs_grad {
-        if std::env::var("KILN_DISABLE_VULKAN_GDN_CHUNKWISE_SINGLE_SUBMIT").is_err() {
-            match vk_gdn_chunkwise_forward_no_grad_single_submit(
-                q, k, v, beta, g, state, chunk_size,
-            ) {
-                Ok(out) => return Ok(out),
-                Err(err) => {
-                    if gdn_chunkwise_fallback_enabled() {
-                        tracing::warn!(
-                            error = %err,
-                            "single-submit vk_gdn_chunkwise no-grad path failed; falling back"
-                        );
-                    } else {
-                        return Err(err).context(
-                            "single-submit vk_gdn_chunkwise no-grad path failed; fallback disabled",
-                        );
-                    }
+        if std::env::var("KILN_DISABLE_VULKAN_GDN_CHUNKWISE_SINGLE_SUBMIT").is_ok() {
+            if gdn_chunkwise_fallback_enabled() {
+                tracing::warn!(
+                    "single-submit vk_gdn_chunkwise no-grad path disabled; falling back"
+                );
+                return vk_gdn_chunkwise_forward_no_grad(q, k, v, beta, g, state, chunk_size);
+            }
+            anyhow::bail!(
+                "single-submit vk_gdn_chunkwise no-grad path disabled; fallback disabled"
+            );
+        }
+
+        match vk_gdn_chunkwise_forward_no_grad_single_submit(
+            q, k, v, beta, g, state, chunk_size,
+        ) {
+            Ok(out) => return Ok(out),
+            Err(err) => {
+                if gdn_chunkwise_fallback_enabled() {
+                    tracing::warn!(
+                        error = %err,
+                        "single-submit vk_gdn_chunkwise no-grad path failed; falling back"
+                    );
+                } else {
+                    return Err(err).context(
+                        "single-submit vk_gdn_chunkwise no-grad path failed; fallback disabled",
+                    );
                 }
             }
         }
