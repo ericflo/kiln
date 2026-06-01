@@ -699,6 +699,16 @@ every config"):
   single-row generic paged decode, while multi-row generic decode stays on the
   non-split paged wrapper unless `KILN_VK_PAGED_ATTN_SPLITK_CHUNKS` explicitly
   forces a split-K sweep.
+  **Update — generic multi-row paged decode adopts the shared split-K
+  selector:** after the reduce pass started skipping empty chunk-sum barrier
+  levels, the older multi-row generic exclusion is no longer correct. The
+  generic helper now uses `paged_attn_decode_splitk_chunks` for all batch
+  sizes, so it follows the same long-context policy as resident decode while
+  still honoring `KILN_VK_PAGED_ATTN_SPLITK_CHUNKS`. Current
+  `paged_attn_splitk_check` probes measured batch 8 / history 1024 at
+  non-split 15.406 ms vs. split-K 15.018 ms, batch 8 / history 2048 at
+  37.952 ms vs. 36.719 ms, and batch 16 / history 2048 at 72.457 ms vs.
+  58.201 ms, all with max abs diff below `2.5e-7`.
   **Update — generic Vulkan paged decode accepts non-contiguous block tables:**
   the shared single-row paged helper no longer applies the physical
   intra-chunk contiguity precheck before calling Vulkan's block-table gather

@@ -232,11 +232,7 @@ fn paged_decode_gpu_gather_enabled() -> bool {
 }
 
 fn generic_paged_decode_splitk_chunks(batch: usize, max_blocks_per_seq: usize) -> usize {
-    if batch <= 1 || std::env::var("KILN_VK_PAGED_ATTN_SPLITK_CHUNKS").is_ok() {
-        kiln_vulkan_kernel::kernels::paged_attn_decode_splitk_chunks(batch, max_blocks_per_seq)
-    } else {
-        1
-    }
+    kiln_vulkan_kernel::kernels::paged_attn_decode_splitk_chunks(batch, max_blocks_per_seq)
 }
 
 #[allow(clippy::too_many_arguments)]
