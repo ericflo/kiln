@@ -438,6 +438,12 @@ every config"):
   manual GQA attention path. Remaining saturation work is the multi-row
   resident decode orchestration below, not the existence of the paged attention
   kernel.
+  **Update — generic single-row Vulkan route skips compact-probe:** when the
+  fused paged-decode helper is reached, Vulkan now goes straight to the
+  block-table paged kernel instead of first probing the contiguous/prefill-style
+  branch that can build compact K/V views before declining. Resident decode
+  remains the preferred serving route; this keeps the generic long-context
+  fallback aligned with the paged-kernel objective.
   **Update — multi-row resident paged microbench:** `full_token_resident_paged`
   now uses `paged_kv_write_slots` plus split-K
   `paged_attn_decode_batch_paged_splitk` and reduce over real per-row block

@@ -17992,16 +17992,18 @@ fn try_flash_attn_paged_decode(
     // pool. In that case we can bypass the paged gather path entirely and feed
     // the fused prefill kernel a direct `[1, total_seq_len, kv_heads, head_dim]`
     // narrow of the live K/V window.
-    // CUDA has a native GQA paged-decode kernel. The contiguous branch below
-    // falls back to prefill attention on CUDA, expanding K/V heads and losing
-    // time on the single-request decode path.
-    let use_cuda_direct_paged_decode =
-        backend.name() == "cuda" && !cuda_direct_paged_decode_disabled();
+    // CUDA and Vulkan have native GQA paged-decode kernels. The contiguous
+    // branch below is useful for backends with an implemented contiguous decode
+    // kernel, but otherwise it can build compact K/V views before reaching the
+    // real paged path.
+    let use_direct_paged_decode =
+        (backend.name() == "cuda" && !cuda_direct_paged_decode_disabled())
+            || backend.name() == "vulkan";
     #[cfg(feature = "cuda")]
     let is_fp8 = try_kt_paged_kv_is_fp8(paged_cache.is_fp8(), kt_paged_cache);
     #[cfg(not(feature = "cuda"))]
     let is_fp8 = paged_cache.is_fp8();
-    if !is_fp8 && !use_cuda_direct_paged_decode {
+    if !is_fp8 && !use_direct_paged_decode {
         if let Some(start_slot) =
             contiguous_slot_run_start(block_table, block_size, 0, total_seq_len)
         {
