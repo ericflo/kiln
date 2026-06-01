@@ -170,16 +170,15 @@ impl CaptureArena {
         let stream = crate::active_cuda_stream(&self.ctx);
         let cu_stream = stream.cu_stream();
         // SAFETY: `ptr` points at `byte_len` valid device bytes owned by the
-        // arena (alive via `storage`); `cu_stream` is the active capture stream.
+        // arena (alive via `storage`); `cu_stream` is the active capture stream
+        // the buffer was (re)used on. Stream-ordered zero-fill, recorded into
+        // the graph during the replay (capture) pass.
         unsafe {
-            cudarc::driver::sys::lib()
-                .cuMemsetD8Async(ptr, 0, byte_len, cu_stream)
-                .result()
-                .map_err(|e| {
-                    Error::Msg(format!(
-                        "CaptureArena::memset_zero: cuMemsetD8Async({byte_len}) failed: {e:?}"
-                    ))
-                })?;
+            cudarc::driver::result::memset_d8_async(ptr, 0u8, byte_len, cu_stream).map_err(|e| {
+                Error::Msg(format!(
+                    "CaptureArena::memset_zero: memset_d8_async({byte_len}) failed: {e:?}"
+                ))
+            })?;
         }
         Ok(())
     }
