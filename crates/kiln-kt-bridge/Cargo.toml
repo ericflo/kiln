@@ -5,64 +5,25 @@ publish = false
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Shared helpers for Phase 7 kt-API ports (CudaStorage downcast, alloc, device-pointer extraction, plus pure candle<->kt Device/DType mapping)."
+description = "Shared helpers for Phase 7 kt-API ports (CudaStorage downcast, alloc, device-pointer extraction, plus kt-native tape scopes)."
 
 [features]
-# candle is DEFAULT-ON so every existing kt-bridge consumer is
-# unchanged. Only a consumer that explicitly opts out
-# (`default-features = false`) becomes candle-free — today that's just
-# `kiln-opd-loss-kernel`, the first kernel crate whose own candle dep
-# was dropped and which uses only the kt-native bridge surface
-# (BridgeError + alloc_cuda_tensor + cuda_*_device_ptr +
-# cuda_storage_and_byte_offset). (#1082)
-default = ["candle"]
-
-# Gates the entire candle⟷kt bridge surface: the Device/DType enum
-# mappers, the candle CUDA Tensor borrow/copy adapters, the
-# `forward_op`/`inject_grad_shim`/`tape_bridge` CustomOp + GradStore
-# modules, and the graph-ready candle CUDA device constructor. With
-# this feature OFF the crate still exposes the kt-native helpers
-# (BridgeError, CudaStorage downcast, alloc, device-pointer
-# extraction) so a candle-free consumer can use them on a CUDA build
-# without dragging in candle. (#1082)
-candle = ["dep:candle-core"]
+# (#1082) candle fully removed from kiln-kt-bridge — kt-native bridge only.
+default = []
 
 # Enables the CUDA-touching kt-native helpers (CudaStorage downcast,
-# alloc, device-pointer extraction). Pulls `kiln-tensor/cuda` so the
-# cudarc-typed code paths compile. This feature is candle-INDEPENDENT:
-# `--features cuda` alone (no `candle`) builds the candle-free CUDA
-# surface; `--features cuda,candle` additionally forwards
-# `candle-core/cuda` (via the weak `candle-core?/cuda` below) so the
-# candle CUDA adapters compile. The weak `candle-core?/cuda` is a
-# no-op when `candle` is off, so the `cuda` feature never resurrects
-# candle. (#1082)
-cuda = ["kiln-tensor/cuda", "candle-core?/cuda"]
+# alloc, device-pointer extraction) and the kt-native `tape_bridge`
+# scopes. Pulls `kiln-tensor/cuda` so the cudarc-typed code paths
+# compile. (#1082)
+cuda = ["kiln-tensor/cuda"]
 
 # Forwards `kiln-tensor/metal` only — the metal lane is candle-free (#1082).
-# `metal` no longer implies `candle`: the candle-typed Device mappers
-# (`kt_device_from_candle` / `candle_device_from_kt`) are gated behind the
-# `candle` feature, and the default metal build (kiln-model `--features metal`)
-# no longer calls them (forward.rs drains the queue via the kt-native
-# `primary_metal_companion`, and `for_device_kt` builds `MetalBackend` from the
-# kt device directly). The `KtDevice::Metal(_)` variant is unconditional on the
-# kt side. When candle is also on (e.g. `legacy-candle-parity`) those mappers'
-# Metal arms still compile.
+# Enables the device-agnostic `tape_bridge` scopes on the metal build.
 metal = ["kiln-tensor/metal"]
 
 [dependencies]
-# Candle is OPTIONAL (default-on via the `candle` feature). Consumers
-# that use only the kt-native bridge surface can opt out with
-# `default-features = false` to become candle-free. The `cuda` feature
-# forwards `candle-core?/cuda` (weak — no-op without `candle`) and
-# `kiln-tensor/cuda` to pull in the cudarc-typed code paths.
-candle-core = { workspace = true, optional = true }
 kiln-tensor = { workspace = true }
-# Phase 6a/CP-4 (#1082): the `tape_bridge` module owns the
-# candle⟷kt TensorId mapping that lets `kiln_autograd::Tape::backward`
-# emit gradients into a `candle_core::backprop::GradStore`. Pure
-# `kiln-autograd` cannot pull in candle, so the bridge lives here
-# (the only crate that already depends on both halves).
+# CP-4 (#1082): the `tape_bridge` module owns the kt-native tape scopes
+# (IO-mapping + tape-authoritative backward) used by the `_kt` training
+# adapters. It depends on `kiln-autograd` for the `Tape` substrate.
 kiln-autograd = { workspace = true }
-# Half-precision floats — needed for the per-dtype `as_cuda_slice<T>()`
-# dispatch in the candle-to-kt copying adapter (cuda feature only).
-half = "2"
