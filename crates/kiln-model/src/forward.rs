@@ -14618,7 +14618,72 @@ pub fn gated_deltanet_forward_streaming(
 }
 
 #[allow(clippy::too_many_arguments)]
+/// #1082 box-102 BUG2 fix: wrap the GDN decode so the recurrent + conv state
+/// update lands IN-PLACE in the caller's persistent buffers. The inner decode
+/// updates them functionally (`*state = <new tensor>`); under CUDA-graph capture
+/// that Rust reassignment never runs on replay, so the next replay reads a stale
+/// state → the GDN state freezes across replays → token-doubling (confirmed via
+/// the `KILN_DEBUG_GDN_STATE` probe: rs0_sumsq identical for 4 steps, jumping
+/// only at re-capture boundaries). Snapshot the persistent buffers, run the
+/// decode, then copy the new state back into them in-place via `slice_set` — a
+/// captured device→device copy that survives replay — and restore the slots.
+/// `Tensor::clone` shares the storage Arc + copies the id, so an unchanged slot
+/// (already in-place, e.g. the Vulkan resident path) is detected by id-equality
+/// and skipped. Eager decode is value-identical (the copy preserves the state).
+#[allow(clippy::too_many_arguments)]
 fn gated_deltanet_forward_decode_if(
+    backend: &dyn BackendRuntime,
+    x: &Tensor,
+    weights: &GpuLinearAttentionWeights,
+    config: &kiln_core::config::ModelConfig,
+    recurrent_state: &mut Tensor,
+    conv_state: &mut Tensor,
+    capture_b11_taps: bool,
+    capture_c41_taps: bool,
+    use_fused_gdn_gates: bool,
+    use_metal_decode_gemv: bool,
+    profile_context: Option<(usize, usize)>,
+    allow_forward_only_fastpaths: bool,
+    allow_prefill_recurrent_kernel: bool,
+    lora: Option<(&LoraLayerWeights, f32)>,
+) -> Result<Tensor> {
+    let rs_persist = recurrent_state.clone();
+    let cv_persist = conv_state.clone();
+    let out = gated_deltanet_forward_decode_if_inner(
+        backend,
+        x,
+        weights,
+        config,
+        recurrent_state,
+        conv_state,
+        capture_b11_taps,
+        capture_c41_taps,
+        use_fused_gdn_gates,
+        use_metal_decode_gemv,
+        profile_context,
+        allow_forward_only_fastpaths,
+        allow_prefill_recurrent_kernel,
+        lora,
+    )?;
+    if recurrent_state.id() != rs_persist.id() {
+        let src = recurrent_state.contiguous()?;
+        rs_persist
+            .slice_set(&src, 0, 0)
+            .context("box-102: in-place GDN recurrent-state restore")?;
+        *recurrent_state = rs_persist;
+    }
+    if conv_state.id() != cv_persist.id() {
+        let src = conv_state.contiguous()?;
+        cv_persist
+            .slice_set(&src, 0, 0)
+            .context("box-102: in-place GDN conv-state restore")?;
+        *conv_state = cv_persist;
+    }
+    Ok(out)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn gated_deltanet_forward_decode_if_inner(
     backend: &dyn BackendRuntime,
     x: &Tensor,
     weights: &GpuLinearAttentionWeights,
