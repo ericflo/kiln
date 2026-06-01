@@ -734,6 +734,17 @@ every config"):
   tables moved to persistent host-visible scratch. The same Vulkan-profile
   `cargo check` now leaves no warnings from `vk_decode_resident.rs` or the
   native decode helper body.
+  **Update — resident RoPE setup avoids temporary tensor tables:** the native
+  resident single-row route plus the batched argmax/hidden routes now build
+  per-row RoPE cos/sin tables directly into host f32 slices from
+  `start_positions`/`start_pos` and `rope_theta`, then upload those slices with
+  the rest of the resident step metadata. This removes the prior temporary
+  tensor table build plus flatten/readback step before the one-submit Vulkan
+  transformer stack. Focused check:
+  `test_vulkan_resident_host_rope_tables_match_tensor_tables` passes under
+  `cargo test -p kiln-model --lib --no-default-features --features vulkan`,
+  and `cargo check -p kiln-model --no-default-features --features vulkan`
+  passes with the existing warning backlog.
 - **Vulkan paged-attention decode kernel**: the kernel crate already had
   `paged_attn_decode_batch_paged.comp`; Vulkan now advertises
   `supports_flash_attn_paged_decode` and wires the single-query paged-decode
