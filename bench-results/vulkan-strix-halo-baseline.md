@@ -316,6 +316,15 @@ every config"):
   108 rows/s and batch 32 at 241.8 ms / 132 rows/s; keep the default at 16 as
   the conservative memory/throughput step, with env overrides still available
   for 32/64-row sweeps.
+  **Update — bs=1 greedy token-only route:** `model_forward_paged_last_token_greedy`
+  now tries the resident transformer-stack + final argmax path before the older
+  resident logits fallback. For callers without stable row IDs, bs=1 uses the
+  existing start-position session tracker instead of the multi-row no-ID
+  conservative re-seed-every-call policy, so prompt K/V is seeded once per
+  single-row session. Direct Vulkan-only `full_token_resident_mixed_paged`
+  smoke with history 256, batch 1, warmup=1, timed=4, repeats=3 measured
+  59.0 ms / 17 rows/s. This validates the kernel route reached by serving;
+  current app-level serving timing remains pending.
   **Update — GDN resident recorder uses row-reuse in-proj:** the batched GDN
   `CommandBatch` recorder now selects the same pair QKV/Z plus rows2/rows4
   BF16 in-proj shaders as the standalone dispatcher. Focused
