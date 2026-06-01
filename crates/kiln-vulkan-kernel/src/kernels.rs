@@ -7242,6 +7242,42 @@ fn run_compute_pipeline_with_transfer_readback(
         .context("failed to read transfer-readback output")
 }
 
+fn create_packed_upload_stage(
+    device: &Arc<ash::Device>,
+    host_visible_mt: u32,
+    uploads: &[(&VulkanBuffer, &[u8])],
+    context: &'static str,
+) -> Result<(Option<VulkanBuffer>, Vec<u64>)> {
+    if uploads.is_empty() {
+        return Ok((None, Vec::new()));
+    }
+
+    let mut offsets = Vec::with_capacity(uploads.len());
+    let mut total = 0u64;
+    for (idx, (_, data)) in uploads.iter().enumerate() {
+        anyhow::ensure!(
+            !data.is_empty(),
+            "{context}[{idx}]: upload payload must be non-empty"
+        );
+        offsets.push(total);
+        total = total.checked_add(data.len() as u64).ok_or_else(|| {
+            anyhow::anyhow!("{context}: upload staging size overflow")
+        })?;
+    }
+    let total_len =
+        usize::try_from(total).with_context(|| format!("{context}: upload size exceeds usize"))?;
+    let mut packed = Vec::with_capacity(total_len);
+    for (_, data) in uploads {
+        packed.extend_from_slice(data);
+    }
+
+    let stage = VulkanBuffer::create_host_visible(device, host_visible_mt, total)
+        .with_context(|| format!("failed to create {context} upload staging buffer"))?;
+    VulkanBuffer::write_host_visible(device, &stage, &packed)
+        .with_context(|| format!("failed to fill {context} upload staging buffer"))?;
+    Ok((Some(stage), offsets))
+}
+
 /// Single-submit multi-upload + dispatch + multi-readback. Variant of
 /// `run_compute_pipeline_with_transfer_readback` for kernels that take
 /// several disjoint input buffers AND produce several disjoint output
@@ -7267,13 +7303,12 @@ fn run_compute_pipeline_with_transfers_readbacks(
     let device = vk_device.device();
     let host_visible_mt = vk_device.host_visible_mem_type();
 
-    let mut upload_stages = Vec::with_capacity(uploads.len());
-    for (_, data) in uploads {
-        let stage = VulkanBuffer::create_host_visible(device, host_visible_mt, data.len() as u64)
-            .context("failed to create transfers-readbacks upload staging buffer")?;
-        VulkanBuffer::write_host_visible(device, &stage, data)?;
-        upload_stages.push(stage);
-    }
+    let (upload_stage, upload_offsets) = create_packed_upload_stage(
+        device,
+        host_visible_mt,
+        uploads,
+        "transfers-readbacks",
+    )?;
     let mut readback_offsets = Vec::with_capacity(readbacks.len());
     let mut readback_total = 0u64;
     for (idx, (_, size)) in readbacks.iter().enumerate() {
@@ -7351,27 +7386,29 @@ fn run_compute_pipeline_with_transfers_readbacks(
         device
             .begin_command_buffer(cmd, &make_cmd_begin_info())
             .context("failed to begin transfers-readbacks command buffer")?;
-        for ((dst, data), stage) in uploads.iter().zip(upload_stages.iter()) {
-            device.cmd_copy_buffer(
+        if let Some(stage) = &upload_stage {
+            for (idx, (dst, data)) in uploads.iter().enumerate() {
+                let copy = vk::BufferCopy::default()
+                    .src_offset(upload_offsets[idx])
+                    .size(data.len() as u64);
+                device.cmd_copy_buffer(cmd, stage.handle(), dst.handle(), &[copy]);
+            }
+        }
+        if !uploads.is_empty() {
+            let upload_barrier = make_memory_barrier(
+                vk::AccessFlags::TRANSFER_WRITE | vk::AccessFlags::HOST_WRITE,
+                vk::AccessFlags::SHADER_READ,
+            );
+            device.cmd_pipeline_barrier(
                 cmd,
-                stage.handle(),
-                dst.handle(),
-                &[vk::BufferCopy::default().size(data.len() as u64)],
+                vk::PipelineStageFlags::TRANSFER | vk::PipelineStageFlags::HOST,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::DependencyFlags::empty(),
+                &[upload_barrier],
+                &[],
+                &[],
             );
         }
-        let upload_barrier = make_memory_barrier(
-            vk::AccessFlags::TRANSFER_WRITE | vk::AccessFlags::HOST_WRITE,
-            vk::AccessFlags::SHADER_READ,
-        );
-        device.cmd_pipeline_barrier(
-            cmd,
-            vk::PipelineStageFlags::TRANSFER | vk::PipelineStageFlags::HOST,
-            vk::PipelineStageFlags::COMPUTE_SHADER,
-            vk::DependencyFlags::empty(),
-            &[upload_barrier],
-            &[],
-            &[],
-        );
 
         device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, pipeline);
         device.cmd_bind_descriptor_sets(
@@ -7470,13 +7507,12 @@ fn run_compute_pipeline_with_transfers_readback(
     let device = vk_device.device();
     let host_visible_mt = vk_device.host_visible_mem_type();
 
-    let mut upload_stages = Vec::with_capacity(uploads.len());
-    for (_, data) in uploads {
-        let stage = VulkanBuffer::create_host_visible(device, host_visible_mt, data.len() as u64)
-            .context("failed to create transfers-readback upload staging buffer")?;
-        VulkanBuffer::write_host_visible(device, &stage, data)?;
-        upload_stages.push(stage);
-    }
+    let (upload_stage, upload_offsets) = create_packed_upload_stage(
+        device,
+        host_visible_mt,
+        uploads,
+        "transfers-readback",
+    )?;
     let readback_stage = VulkanBuffer::create_host_visible(device, host_visible_mt, readback_size)
         .context("failed to create transfers-readback readback staging buffer")?;
 
@@ -7536,27 +7572,29 @@ fn run_compute_pipeline_with_transfers_readback(
         device
             .begin_command_buffer(cmd, &make_cmd_begin_info())
             .context("failed to begin transfers-readback command buffer")?;
-        for ((dst, data), stage) in uploads.iter().zip(upload_stages.iter()) {
-            device.cmd_copy_buffer(
+        if let Some(stage) = &upload_stage {
+            for (idx, (dst, data)) in uploads.iter().enumerate() {
+                let copy = vk::BufferCopy::default()
+                    .src_offset(upload_offsets[idx])
+                    .size(data.len() as u64);
+                device.cmd_copy_buffer(cmd, stage.handle(), dst.handle(), &[copy]);
+            }
+        }
+        if !uploads.is_empty() {
+            let upload_barrier = make_memory_barrier(
+                vk::AccessFlags::TRANSFER_WRITE | vk::AccessFlags::HOST_WRITE,
+                vk::AccessFlags::SHADER_READ,
+            );
+            device.cmd_pipeline_barrier(
                 cmd,
-                stage.handle(),
-                dst.handle(),
-                &[vk::BufferCopy::default().size(data.len() as u64)],
+                vk::PipelineStageFlags::TRANSFER | vk::PipelineStageFlags::HOST,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::DependencyFlags::empty(),
+                &[upload_barrier],
+                &[],
+                &[],
             );
         }
-        let upload_barrier = make_memory_barrier(
-            vk::AccessFlags::TRANSFER_WRITE | vk::AccessFlags::HOST_WRITE,
-            vk::AccessFlags::SHADER_READ,
-        );
-        device.cmd_pipeline_barrier(
-            cmd,
-            vk::PipelineStageFlags::TRANSFER | vk::PipelineStageFlags::HOST,
-            vk::PipelineStageFlags::COMPUTE_SHADER,
-            vk::DependencyFlags::empty(),
-            &[upload_barrier],
-            &[],
-            &[],
-        );
 
         device.cmd_bind_pipeline(cmd, vk::PipelineBindPoint::COMPUTE, pipeline);
         device.cmd_bind_descriptor_sets(
@@ -8014,13 +8052,8 @@ fn run_two_stage_compute_pipeline_with_transfers(
     let device = vk_device.device();
     let host_visible_mt = vk_device.host_visible_mem_type();
 
-    let mut upload_stages = Vec::with_capacity(uploads.len());
-    for (_, data) in uploads {
-        let stage = VulkanBuffer::create_host_visible(device, host_visible_mt, data.len() as u64)
-            .context("failed to create two-stage upload staging buffer")?;
-        VulkanBuffer::write_host_visible(device, &stage, data)?;
-        upload_stages.push(stage);
-    }
+    let (upload_stage, upload_offsets) =
+        create_packed_upload_stage(device, host_visible_mt, uploads, "two-stage")?;
 
     let mut readback_offsets = Vec::with_capacity(readbacks.len());
     let mut readback_total = 0u64;
@@ -8126,13 +8159,13 @@ fn run_two_stage_compute_pipeline_with_transfers(
             .begin_command_buffer(cmd, &make_cmd_begin_info())
             .context("failed to begin transfer two-stage command buffer")?;
 
-        for ((dst, data), stage) in uploads.iter().zip(upload_stages.iter()) {
-            device.cmd_copy_buffer(
-                cmd,
-                stage.handle(),
-                dst.handle(),
-                &[vk::BufferCopy::default().size(data.len() as u64)],
-            );
+        if let Some(stage) = &upload_stage {
+            for (idx, (dst, data)) in uploads.iter().enumerate() {
+                let copy = vk::BufferCopy::default()
+                    .src_offset(upload_offsets[idx])
+                    .size(data.len() as u64);
+                device.cmd_copy_buffer(cmd, stage.handle(), dst.handle(), &[copy]);
+            }
         }
         if !uploads.is_empty() {
             let upload_barrier = make_memory_barrier(

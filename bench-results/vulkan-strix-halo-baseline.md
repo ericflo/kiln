@@ -902,7 +902,9 @@ every config"):
   device-to-host copies into one host-visible staging buffer instead of one
   staging allocation/map per output. This covers the cached GDN gates helper and
   the two-dispatch helper used by causal-conv prefill/update and split-K paged
-  attention wrapper checks. Focused coverage:
+  attention wrapper checks. The same helpers also pack their multiple
+  host-to-device inputs into one upload staging buffer while preserving the same
+  recorded copy offsets before dispatch. Focused coverage:
   `gdn_gates_cached_bytes_matches_cpu_reference` and
   `causal_conv1d_prefill_matches_stateful_cpu_reference` pass on Vulkan hardware.
 
