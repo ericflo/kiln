@@ -604,6 +604,17 @@ async fn main() -> Result<()> {
     );
     cli::print_ready_line(host, port);
     spawn_tokenizer_warmup(tokenizer_prewarm);
+    // (#1082 Phase 2) Restore the cublasLt autotune cache from disk before
+    // prewarm so this run reuses the tuned algos instead of re-running the
+    // cublasLt heuristic search (~50-200ms x ~20 Qwen3.5-4B GEMM shapes).
+    // Best-effort; a missing/corrupt file is ignored. Single-GPU kiln → dev 0.
+    #[cfg(feature = "cuda")]
+    {
+        let restored = kiln_tensor::load_algo_cache_from_disk(0);
+        if restored > 0 {
+            tracing::info!(entries = restored, "cublaslt autotune cache restored from disk");
+        }
+    }
     spawn_backend_prewarm(prewarm_state);
     // Graceful shutdown: listen for SIGTERM/SIGINT, cancel in-flight
     // inference via the batching engine (so SSE streams terminate
@@ -771,10 +782,25 @@ fn spawn_backend_prewarm(state: AppState) {
         .await;
 
         match prewarm {
-            Ok(Ok(())) => tracing::info!(
-                elapsed_ms = prewarm_start.elapsed().as_millis() as u64,
-                "background inference prewarm complete"
-            ),
+            Ok(Ok(())) => {
+                tracing::info!(
+                    elapsed_ms = prewarm_start.elapsed().as_millis() as u64,
+                    "background inference prewarm complete"
+                );
+                // (#1082 Phase 2) Prewarm just exercised every Qwen3.5-4B GEMM
+                // shape, so the autotune cache is fully populated — flush it to
+                // disk so future cold-starts skip the cublasLt heuristic search.
+                #[cfg(feature = "cuda")]
+                match kiln_tensor::flush_algo_cache_to_disk(0) {
+                    Ok(n) if n > 0 => {
+                        tracing::info!(entries = n, "cublaslt autotune cache flushed to disk")
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::warn!(error = %e, "cublaslt autotune cache flush failed (continuing)")
+                    }
+                }
+            }
             Ok(Err(err)) => tracing::warn!(error = %err, "background inference prewarm failed"),
             Err(err) => tracing::warn!(error = %err, "background inference prewarm task failed"),
         }
@@ -906,6 +932,18 @@ async fn shutdown_signal(
     // Tell training/eval workers + every shutdown-aware code path to stop
     // accepting work.
     shutdown_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+
+    // (#1082 Phase 2) Persist the autotune cache on graceful shutdown so the
+    // next cold-start reuses it — catches algos tuned during serving that the
+    // post-warmup flush didn't capture. CPU-only + fast.
+    #[cfg(feature = "cuda")]
+    match kiln_tensor::flush_algo_cache_to_disk(0) {
+        Ok(n) if n > 0 => {
+            tracing::info!(entries = n, "cublaslt autotune cache flushed on shutdown")
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!(error = %e, "cublaslt autotune cache flush failed on shutdown"),
+    }
 
     // Proactively cancel every in-flight inference request. Without this
     // step, axum's graceful_shutdown waits for the model to naturally

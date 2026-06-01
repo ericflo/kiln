@@ -121,6 +121,67 @@ pub fn snapshot_algo_cache() -> AlgoCache {
         .clone()
 }
 
+/// Merge entries from a disk-loaded autotune cache into the live shared cache.
+/// First-writer wins: an algo already chosen in-process this run is kept, so
+/// this is safe to call after some matmuls have run (though the intended call
+/// site is once at startup, before the first matmul). Thread-safe via the
+/// shared `Mutex`. (#1082 Phase 2 — disk-persistent autotune cache.)
+pub fn restore_into_shared_cache(loaded: AlgoCache) {
+    let reg = handle_registry();
+    let mut cache = reg.shared_cache.lock().expect("algo cache mutex poisoned");
+    for (k, v) in loaded.iter() {
+        if cache.get(k).is_none() {
+            cache.insert(k.clone(), v.clone());
+        }
+    }
+}
+
+/// Standard on-disk path for the cublasLt autotune cache on `device_index`:
+/// `~/.cache/kiln/autotune/cublaslt-sm{major}{minor}-dev{index}.json`. Returns
+/// `None` if the device's compute capability can't be queried. The
+/// `sm{major}{minor}` fingerprint is portable across identical GPUs (cublasLt
+/// algo ids are per-SM-arch), unlike a per-physical-card UUID. Honors the
+/// `KILN_AUTOTUNE_CACHE_DIR` override via `AlgoCache::standard_path`'s HOME use.
+pub fn cublaslt_cache_path(device_index: usize) -> Option<std::path::PathBuf> {
+    let ctx = crate::primary_cuda_context(device_index).ok()?;
+    let (major, minor) = ctx.compute_capability().ok()?;
+    let fingerprint = format!("sm{major}{minor}-dev{device_index}");
+    Some(AlgoCache::standard_path("cublaslt", &fingerprint))
+}
+
+/// Flush the live shared autotune cache to its standard on-disk path. Returns
+/// the number of entries written (`0` if the cache is empty or the device
+/// fingerprint is unavailable). Never panics; surfaces I/O errors so the
+/// caller (kiln-server, which has `tracing`) can warn-and-continue.
+pub fn flush_algo_cache_to_disk(device_index: usize) -> std::io::Result<usize> {
+    let Some(path) = cublaslt_cache_path(device_index) else {
+        return Ok(0);
+    };
+    let snapshot = snapshot_algo_cache();
+    if snapshot.is_empty() {
+        return Ok(0);
+    }
+    kiln_blas::save_to_path(&snapshot, &path)?;
+    Ok(snapshot.len())
+}
+
+/// Load the on-disk autotune cache for `device_index` (if present) and merge
+/// it into the live shared cache. Returns the number of entries loaded (`0`
+/// if the file is missing/corrupt or the fingerprint is unavailable).
+/// Best-effort and self-contained so kiln-server can call it without a direct
+/// `kiln-blas` dependency. Intended to run once at startup, before prewarm.
+pub fn load_algo_cache_from_disk(device_index: usize) -> usize {
+    let Some(path) = cublaslt_cache_path(device_index) else {
+        return 0;
+    };
+    let loaded = kiln_blas::load_from_path(&path);
+    let n = loaded.len();
+    if n > 0 {
+        restore_into_shared_cache(loaded);
+    }
+    n
+}
+
 // ----------------------------------------------------------------------
 // Public entry point
 // ----------------------------------------------------------------------

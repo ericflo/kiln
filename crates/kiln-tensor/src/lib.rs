@@ -113,7 +113,9 @@ pub use cuda_storage::{
 };
 #[cfg(feature = "cuda")]
 pub use cuda_matmul::{
-    cuda_matmul, cuda_matmul_into, cuda_matmul_with_bias, snapshot_algo_cache,
+    cuda_matmul, cuda_matmul_into, cuda_matmul_with_bias, cublaslt_cache_path,
+    flush_algo_cache_to_disk, load_algo_cache_from_disk, restore_into_shared_cache,
+    snapshot_algo_cache,
 };
 #[cfg(feature = "cuda")]
 pub use fp8::{
