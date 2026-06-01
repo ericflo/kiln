@@ -218,7 +218,12 @@ every config"):
   crossover moved from batch 128 to batch 256. The table above was rerun after
   fixing the full-attention subpath to include the gated-Q split and fused Q/K
   norm used by the production resident recorder, then rerun after fusing the
-  paired GDN Q/K L2 expansion dispatches.
+  paired GDN Q/K L2 expansion dispatches. A follow-up source audit found the
+  standalone MLP path had the 256-row rows8 cutoff, but resident MLP dispatch
+  selection still had older batch-64 rows8 checks; resident decode now shares
+  the same 256-row cutoff so production and benchmark routing match. A short
+  patched rerun with warmup=1, timed=3, repeats=2 measured batch 64 at
+  462.1 ms / 139 rows/s and batch 128 at 934.6 ms / 137 rows/s.
   **Update — mixed resident paged token microbench:** added
   `full_token_resident_mixed_paged`, which keeps the real 8 full-attention +
   24 GDN layer mix but changes each full-attention layer to use

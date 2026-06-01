@@ -6,7 +6,7 @@ use half::bf16;
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
-const MLP_BF16_ROWS8_MIN_BATCH: usize = 256;
+pub(crate) const MLP_BF16_ROWS8_MIN_BATCH: usize = 256;
 
 fn env_truthy_for_profile(name: &str) -> bool {
     std::env::var(name)

@@ -24,7 +24,7 @@ use crate::kernels::{run_compute_pipeline, run_compute_pipeline_3d};
 use crate::pipeline::ShaderPipeline;
 use crate::{VulkanBuffer, VulkanDevice};
 
-use crate::kernels::linear_decode_bf16w_rows4_enabled;
+use crate::kernels::{linear_decode_bf16w_rows4_enabled, MLP_BF16_ROWS8_MIN_BATCH};
 
 /// Selection helper shared between the f32-weights and packed-bf16
 /// linear-decode resident variants. Returns the shader source path,
@@ -215,7 +215,7 @@ pub fn dispatch_linear_decode_batched_bf16w_add_residual_resident(
         "linear_decode_batched_bf16w_add_residual_resident: out buffer too small"
     );
 
-    let rows8 = batch >= 64 && crate::kernels::mlp_bf16_rows8_enabled();
+    let rows8 = batch >= MLP_BF16_ROWS8_MIN_BATCH && crate::kernels::mlp_bf16_rows8_enabled();
     let rows4 = batch >= 16 && !rows8 && crate::kernels::mlp_bf16_down_rows4_enabled();
     let glsl_path = if rows8 {
         concat!(
@@ -472,7 +472,7 @@ fn mlp_decode_shader_plan(
     let gate_up_rows2 = !gate_up_bf16_weights && use_prefill_row_pair_matmul(batch);
     let rows8_path = gate_up_bf16_weights
         && down_bf16_weights
-        && batch >= 64
+        && batch >= MLP_BF16_ROWS8_MIN_BATCH
         && mlp_bf16_rows8_enabled();
     let down_bf16_rows4 = down_bf16_weights
         && gate_up_bf16_weights
