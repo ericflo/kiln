@@ -160,7 +160,8 @@ impl OptimStep for AdamW {
             ))));
         }
         entry.step += 1;
-        let step = entry.step as f32;
+        let step_count = entry.step;
+        let step = step_count as f32;
         let beta1 = self.hp.beta1;
         let beta2 = self.hp.beta2;
         let bc1 = 1.0 - beta1.powf(step);
@@ -182,12 +183,23 @@ impl OptimStep for AdamW {
         // Build a fresh master Tensor and swap it into the
         // Parameter. Preserves `param.tensor_id()` per anti-pattern
         // 11 — `self.moments` keyed on `tensor_id` survives the swap.
-        let new_master = build_master_tensor(master_dtype, master.shape(), &master_f32)?;
-        // The Phase 1.x stochastic-rounding policy lands inside
-        // `build_master_tensor` once the bf16 master-write story is
-        // wired; today the policy is read but its branch is not yet
-        // exercised on CPU.
-        let _ = self.rounding;
+        //
+        // #1082 box L416: when the master is BF16 and the policy is
+        // `Stochastic` (`KILN_BF16_STOCHASTIC_ROUND=1`), the f32→bf16
+        // master write rounds stochastically — round up/down with
+        // probability proportional to the truncated mantissa — so the
+        // update is unbiased in expectation under small learning rates
+        // (round-to-nearest otherwise drops every sub-ULP update). The
+        // per-parameter `step_count` varies the per-element RNG so
+        // successive steps don't reuse a rounding pattern; the policy
+        // seed keeps a given run reproducible.
+        let new_master = build_master_tensor(
+            master_dtype,
+            master.shape(),
+            &master_f32,
+            self.rounding,
+            step_count,
+        )?;
         param.replace_backward_storage(Some(new_master));
         Ok(())
     }
@@ -201,10 +213,53 @@ impl OptimStep for AdamW {
 // CPU helpers
 // ----------------------------------------------------------------------
 
+/// Stochastically round an `f32` to a `bf16` bit pattern.
+///
+/// `bf16` is the top 16 bits of an `f32`; round-to-nearest truncates
+/// the low 16 mantissa bits and rounds, which discards every update
+/// smaller than half a `bf16` ULP. Stochastic rounding instead adds a
+/// uniform 16-bit random value to the full bit pattern before
+/// truncating: the carry into bit 16 (a round-*up*) then fires with
+/// probability `dropped_bits / 2^16`, i.e. proportional to the
+/// truncated mantissa. This rounds the *magnitude* up or down with the
+/// correct probability for both signs (the sign bit is untouched and
+/// truncation always moves toward zero), so the result is unbiased in
+/// expectation. The carry propagates from mantissa into exponent
+/// naturally (`wrapping_add`); NaN is passed through round-to-nearest
+/// so its payload isn't perturbed.
+#[inline]
+fn f32_to_bf16_stochastic_bits(v: f32, r: u16) -> u16 {
+    let bits = v.to_bits();
+    // NaN (exp all ones, non-zero mantissa): don't perturb.
+    if (bits & 0x7fff_ffff) > 0x7f80_0000 {
+        return half::bf16::from_f32(v).to_bits();
+    }
+    let rounded = bits.wrapping_add(r as u32);
+    (rounded >> 16) as u16
+}
+
+/// Deterministic, reproducible per-element uniform 16-bit value from
+/// `(seed, step, idx)` via a splitmix64 finalizer. Same `(seed, step,
+/// idx)` always yields the same draw, so a run is reproducible at a
+/// fixed policy seed; varying `step` decorrelates successive optimizer
+/// steps and `idx` decorrelates elements within a step.
+#[inline]
+fn stochastic_round_rng16(seed: u64, step: u64, idx: usize) -> u16 {
+    let mut z = seed
+        ^ step.wrapping_mul(0x9e37_79b9_7f4a_7c15)
+        ^ (idx as u64).wrapping_mul(0xd1b5_4a32_d192_ed03);
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    z ^= z >> 31;
+    (z >> 32) as u16
+}
+
 fn build_master_tensor(
     dtype: DType,
     shape: &[usize],
     values: &[f32],
+    rounding: StochasticRoundingPolicy,
+    step: u64,
 ) -> Result<Tensor, StepError> {
     use kiln_tensor::{Layout, Storage, TensorId};
     use std::sync::Arc;
@@ -216,12 +271,23 @@ fn build_master_tensor(
                 bytes[i * 4..i * 4 + 4].copy_from_slice(&v.to_le_bytes());
             }
         }
-        DType::BF16 => {
-            for (i, &v) in values.iter().enumerate() {
-                bytes[i * 2..i * 2 + 2]
-                    .copy_from_slice(&half::bf16::from_f32(v).to_le_bytes());
+        // #1082 box L416: stochastic rounding applies to the BF16
+        // master write (the box is scoped to "BF16 master updates").
+        DType::BF16 => match rounding {
+            StochasticRoundingPolicy::Stochastic { seed } => {
+                for (i, &v) in values.iter().enumerate() {
+                    let r = stochastic_round_rng16(seed, step, i);
+                    let b = f32_to_bf16_stochastic_bits(v, r);
+                    bytes[i * 2..i * 2 + 2].copy_from_slice(&b.to_le_bytes());
+                }
             }
-        }
+            StochasticRoundingPolicy::RoundToNearest => {
+                for (i, &v) in values.iter().enumerate() {
+                    bytes[i * 2..i * 2 + 2]
+                        .copy_from_slice(&half::bf16::from_f32(v).to_le_bytes());
+                }
+            }
+        },
         DType::F16 => {
             for (i, &v) in values.iter().enumerate() {
                 bytes[i * 2..i * 2 + 2]
@@ -296,6 +362,110 @@ mod tests {
     use super::*;
     use kiln_param::{AmpPolicy, ForwardStorage};
     use kiln_tensor::{DType, Tensor};
+
+    // ---- #1082 box L416: BF16 stochastic rounding ----
+
+    /// The two bf16 grid points bracketing `v` (truncate, and truncate+1).
+    fn bf16_neighbors(v: f32) -> (f32, f32) {
+        let top = (v.to_bits() >> 16) as u16;
+        (
+            half::bf16::from_bits(top).to_f32(),
+            half::bf16::from_bits(top.wrapping_add(1)).to_f32(),
+        )
+    }
+
+    #[test]
+    fn stochastic_bf16_rounds_only_to_the_two_neighbors() {
+        let v = 0.1f32; // not bf16-representable
+        let (down, up) = bf16_neighbors(v);
+        for r in 0u32..=0xffff {
+            let f = half::bf16::from_bits(f32_to_bf16_stochastic_bits(v, r as u16)).to_f32();
+            assert!(
+                f == down || f == up,
+                "stochastic bf16 {f} not in {{{down}, {up}}} at r={r}"
+            );
+        }
+    }
+
+    #[test]
+    fn stochastic_bf16_is_unbiased_over_full_rng_range() {
+        // Averaging across every 16-bit draw reproduces the f32 value:
+        // P(round up) == truncated_mantissa / 2^16, so E[round] == v.
+        for &v in &[0.1f32, -0.1, 1.00390625, -3.7, 1234.567] {
+            let mut sum = 0.0f64;
+            for r in 0u32..=0xffff {
+                sum +=
+                    half::bf16::from_bits(f32_to_bf16_stochastic_bits(v, r as u16)).to_f32() as f64;
+            }
+            let mean = sum / 65536.0;
+            let (down, up) = bf16_neighbors(v);
+            let ulp = ((up - down).abs() as f64).max(f64::MIN_POSITIVE);
+            assert!(
+                (mean - v as f64).abs() < ulp * 0.01,
+                "stochastic bf16 mean {mean} biased vs {v} (ulp {ulp})"
+            );
+        }
+    }
+
+    #[test]
+    fn stochastic_bf16_leaves_exact_values_unchanged() {
+        // A bf16-representable value has zero dropped bits, so no draw
+        // can carry into the kept mantissa — it must round to itself.
+        let v = 1.5f32;
+        for r in 0u32..=0xffff {
+            let f = half::bf16::from_bits(f32_to_bf16_stochastic_bits(v, r as u16)).to_f32();
+            assert_eq!(f, v, "exact value perturbed at r={r}");
+        }
+    }
+
+    #[test]
+    fn stochastic_bf16_passes_through_nan_and_inf() {
+        let nan = half::bf16::from_bits(f32_to_bf16_stochastic_bits(f32::NAN, 0x1234)).to_f32();
+        assert!(nan.is_nan());
+        let inf = half::bf16::from_bits(f32_to_bf16_stochastic_bits(f32::INFINITY, 0xffff)).to_f32();
+        assert!(inf.is_infinite() && inf > 0.0);
+    }
+
+    #[test]
+    fn stochastic_round_rng16_is_reproducible_and_decorrelates() {
+        assert_eq!(
+            stochastic_round_rng16(42, 7, 3),
+            stochastic_round_rng16(42, 7, 3)
+        );
+        let a = stochastic_round_rng16(42, 7, 0);
+        let b = stochastic_round_rng16(42, 7, 1);
+        let c = stochastic_round_rng16(42, 8, 0);
+        assert!(a != b || a != c, "rng16 failed to decorrelate idx/step");
+    }
+
+    #[test]
+    fn build_master_tensor_bf16_stochastic_branch_is_wired() {
+        // v sits exactly half a bf16 ULP above 1.0 (dropped bits =
+        // 0x8000), so the stochastic branch rounds up ~50% of the time:
+        // over 256 elements it must produce BOTH neighbors, whereas
+        // round-to-nearest is constant. P(no variation) = 2^-256.
+        let v = 1.00390625f32;
+        let vals = vec![v; 256];
+        let rtn =
+            build_master_tensor(DType::BF16, &[256], &vals, StochasticRoundingPolicy::RoundToNearest, 0)
+                .unwrap();
+        let sto = build_master_tensor(
+            DType::BF16,
+            &[256],
+            &vals,
+            StochasticRoundingPolicy::Stochastic { seed: 1 },
+            1,
+        )
+        .unwrap();
+        let rtn_v = read_to_f32(&rtn).unwrap();
+        let sto_v = read_to_f32(&sto).unwrap();
+        assert!(rtn_v.iter().all(|&x| x == rtn_v[0]), "round-to-nearest not constant");
+        let (down, up) = bf16_neighbors(v);
+        assert!(
+            sto_v.iter().any(|&x| x == down) && sto_v.iter().any(|&x| x == up),
+            "stochastic branch did not produce both neighbors (down={down} up={up})"
+        );
+    }
 
     fn fresh_param() -> Parameter {
         let fwd = Tensor::from_slice(&[1.0f32, 2.0, 3.0, 4.0], vec![4]).unwrap();
