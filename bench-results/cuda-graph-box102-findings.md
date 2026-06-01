@@ -141,3 +141,19 @@ EXACT PLUMBING (fresh-focus session):
 4. Run graphs-ON; the eager (capture-pass) norms vs replay norms diverge at the FIRST broken layer → that layer's captured op is the doubling bug. Fix it (likely an in-place/scratch issue analogous to the GDN recurrent-state fix), re-validate (output coherent), then merge the keystone + check boxes 98-101.
 
 Partial-fix branch (recurrent-state in-place wrapper, validated): `wip/1082-box2-fix-validate`. Do NOT merge until output is coherent.
+
+## BUG 2 — per-layer probe WORKS; replay norms show front-to-back convergence (2026-06-01)
+
+Implemented the per-layer captured-norm dump (`KILN_DEBUG_LAYER_NORMS`, branch `wip/1082-box2-fix-validate`): a persistent `[64]` f32 buffer, lazily alloc'd on the first `record_layer_norm_debug` call (pre-capture warmup → persistent), written by a captured `sqr→sum_all→slice_set` after each block (forward.rs ~25293), read post-replay via `read_layer_norm_debug` in cuda_graph.rs. It works — replay per-layer norms (layer 0 → 31):
+```
+step15 [4,16,26,33,47,60,70,78, 76,76,80,74,70,66,76,84, 88,88,110,129,166,209,250,296, 362,424,520,592,716,908,1208,1472]
+step16 [4, 6, 8,14,47,60,70,78, 76,76,80,...                                                            ...,1472]
+step17 [4, 6, 8,14,20,31,36,44, 76,76,80,...                                                            ...,1472]
+```
+The small early-layer norms (where rounding doesn't hide variation) show a **"fresh frontier" advancing ~4 layers per replay step** — layers beyond the frontier hold the previous step's values. The hidden states converge front-to-back to a FIXED POINT = the model collapsing into a repetition loop = the observed token-doubling. (Later layers' large norms are rounding-dominated so their per-step variation is hidden; not necessarily frozen.)
+
+This shows the SYMPTOM shape (convergence to repetition) but not yet the single offending op. **Two things needed to pinpoint:**
+1. The EAGER baseline did NOT print — the read hook in `cuda_graph.rs::{eager_forward, replay-success}` apparently doesn't fire on the server's `KILN_CUDA_GRAPHS=false` path (same as the earlier empty-eager GDN dump). The `record` (in forward.rs) DOES fire eager (writes the buffer), but the READ isn't reached. FIX: add the `read_layer_norm_debug()` + eprintln directly in the generate decode loop (generate.rs, after each `decode_step_paged`/`sample_step`) so BOTH eager and graph runs dump per-step — then diff to find the FIRST layer where replay ≠ eager.
+2. Use higher-precision norms (print `{x:.3}` or per-layer max-abs) so the large late-layer norms' per-step variation isn't lost to integer rounding.
+
+Then the first-diverging layer's op is the box-102 root cause. Recurrent-state fix (validated) is on this branch; do NOT merge until output coherent.
