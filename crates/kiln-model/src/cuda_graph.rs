@@ -345,7 +345,32 @@ struct CapturedBatchedDecodeGraph {
     graph: cudarc::driver::CudaGraph,
     /// `[batch, 1, vocab]` logits — replay writes into this storage.
     /// #1082: kt-native graph-stable buffer.
+    ///
+    /// NOTE (#1082 boxes 432/433/438, STEP 1): superseded by
+    /// [`Self::output_hidden`] for the box-102 BUG2 fix port. Steps 2-3
+    /// drop this field once the batched capture/replay path moves to the
+    /// HiddenOnly + eager-lm_head contract; kept now so the existing
+    /// capture flow compiles unchanged.
     output_logits: Tensor,
+    /// #1082 box-102 BUG2 fix port (STEP 1): graph-stable PRE-final-norm
+    /// hidden buffer, shape `[batch, 1, hidden_size]`. The captured
+    /// `HiddenOnly` batched forward
+    /// ([`crate::forward::model_forward_paged_batched_hidden_with_graph_inputs`])
+    /// writes here; `final_norm` + lm_head then run EAGERLY on this buffer
+    /// (off the graph, via
+    /// [`crate::forward::lm_head_from_batched_hidden_eager`]) because the
+    /// large-N lm_head cublasLt GEMV is not CUDA-graph-replay-safe (the
+    /// BUG2 doubling). Mirrors [`CapturedDecodeGraph::output_hidden`].
+    /// ADDITIVE in STEP 1 — not yet populated by `try_capture_batched`
+    /// (steps 2-3 wire it), hence `#[allow(dead_code)]` on the struct.
+    output_hidden: Tensor,
+    /// The non-default capture stream the batched graph launches on.
+    /// Retained so the replay path can `synchronize()` it after
+    /// `graph.launch()` — making the freshly-written `output_hidden`
+    /// visible before the eager batched lm_head reads it. Mirrors
+    /// [`CapturedDecodeGraph::capture_stream`] (#1082 box-102 fix port,
+    /// STEP 1). Not yet populated (steps 2-3).
+    capture_stream: std::sync::Arc<cudarc::driver::CudaStream>,
     /// Adapter generation when captured (invalidate on mismatch).
     adapter_gen: u64,
     /// `[batch]` u32 token-id buffer; updated before replay.
@@ -1979,6 +2004,15 @@ impl CudaGraphRunner {
         // `with_lm_head_output_buffer` thread-local approach).
         let lm_head_output_buffer =
             Self::new_lm_head_output_buffer(config, device, dtype, batch_size)?;
+        // #1082 boxes 432/433/438 (STEP 1) — pre-allocate the batched
+        // PRE-final-norm hidden buffer that the box-102 BUG2 fix port
+        // (`model_forward_paged_batched_hidden_with_graph_inputs`) will
+        // write into. ADDITIVE only: this constructor still drives the
+        // existing logits flow below; the hidden buffer is allocated so
+        // the new `BatchedPagedDecodeGraphInputs::output_hidden` field
+        // has a stable backing tensor. Steps 2-3 switch the captured
+        // forward to consume it (and drop `output_logits`).
+        let mut output_hidden = Self::new_batched_output_hidden(config, device, dtype, batch_size)?;
 
         // Capture + forward inside a scope so the `&mut` borrow on
         // `self.batched_state_pool` (taken by `persistent_batched_state`)
@@ -2002,6 +2036,10 @@ impl CudaGraphRunner {
                 attn_out: &paged_decode_outputs[..],
                 softmax_lse: &paged_decode_lse[..],
                 output_logits: &output_logits,
+                // #1082 STEP 1 — additive field; the existing capture
+                // flow below still writes through `output_logits`. Steps
+                // 2-3 flip the forward to write `output_hidden` instead.
+                output_hidden: &mut output_hidden,
                 linear_state: persistent_state,
             };
 
@@ -2125,6 +2163,14 @@ impl CudaGraphRunner {
             let captured = CapturedBatchedDecodeGraph {
                 graph,
                 output_logits,
+                // #1082 STEP 1 — additive fields. The existing capture
+                // flow above still writes through `output_logits`; these
+                // carry the pre-allocated batched hidden buffer + the
+                // capture stream so the struct compiles. Steps 2-3 flip
+                // the captured forward to write `output_hidden` and run
+                // the eager batched lm_head on it (mirroring bs=1).
+                output_hidden,
+                capture_stream: stream.clone(),
                 adapter_gen,
                 token_buffer,
                 position_buffer,
@@ -2623,6 +2669,27 @@ impl CudaGraphRunner {
         anyhow::ensure!(batch > 0, "batched output logits require batch > 0");
         Tensor::zeros_on(device, vec![batch, 1, config.vocab_size], dtype)
             .context("create CUDA graph batched output logits")
+    }
+
+    /// `[batch, 1, hidden_size]` PRE-final-norm hidden buffer for batched
+    /// capture (#1082 boxes 432/433/438, STEP 1). Batched twin of
+    /// [`new_output_hidden`] (which is `[1, 1, hidden_size]`). The captured
+    /// `HiddenOnly` batched forward writes the transformer-stack output here
+    /// via `slice_set`; `final_norm` + lm_head run EAGERLY on it off the
+    /// graph (see [`CapturedBatchedDecodeGraph::output_hidden`]). ADDITIVE
+    /// in STEP 1 — not yet wired into `try_capture_batched`/replay (steps
+    /// 2-3), hence `#[allow(dead_code)]`.
+    #[cfg(feature = "cuda")]
+    #[allow(dead_code)]
+    fn new_batched_output_hidden(
+        config: &ModelConfig,
+        device: Device,
+        dtype: kiln_tensor::DType,
+        batch: usize,
+    ) -> Result<Tensor> {
+        anyhow::ensure!(batch > 0, "batched output hidden requires batch > 0");
+        Tensor::zeros_on(device, vec![batch, 1, config.hidden_size], dtype)
+            .context("create CUDA graph batched output hidden")
     }
 
     /// Per-full-attention-layer paged decode outputs and LSE scratch,
