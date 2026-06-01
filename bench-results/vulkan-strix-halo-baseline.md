@@ -500,6 +500,15 @@ every config"):
   single-row generic paged decode, while multi-row generic decode stays on the
   non-split paged wrapper unless `KILN_VK_PAGED_ATTN_SPLITK_CHUNKS` explicitly
   forces a split-K sweep.
+  **Update — generic Vulkan paged decode accepts non-contiguous block tables:**
+  the shared single-row paged helper no longer applies the physical
+  intra-chunk contiguity precheck before calling Vulkan's block-table gather
+  kernel. That precheck belongs to backends whose paged kernel assumes compact
+  physical pages; Vulkan now reaches `flash_attn_paged_decode` for arbitrary
+  valid block tables instead of declining into the materialized attention path.
+  Current kernel-crate smoke on the non-contiguous default shape measured
+  max abs diff `2.980232e-8`, non-split `0.373 ms`, split-K `0.249 ms`
+  (**1.50x**) on RADV STRIX_HALO.
   **Update — multi-row resident paged microbench:** `full_token_resident_paged`
   now uses `paged_kv_write_slots` plus split-K
   `paged_attn_decode_batch_paged_splitk` and reduce over real per-row block

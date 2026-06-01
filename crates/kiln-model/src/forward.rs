@@ -18180,19 +18180,21 @@ fn try_flash_attn_paged_decode(
         // Block table too short for the requested seqlen.
         return Ok(None);
     }
-    for c in 0..n_chunks {
-        let base_idx = c * pages_per_chunk;
-        if base_idx >= allocated {
-            break;
-        }
-        let base_phys = blocks[base_idx];
-        for i in 1..pages_per_chunk {
-            let idx = base_idx + i;
-            if idx >= allocated {
+    if backend.name() != "vulkan" {
+        for c in 0..n_chunks {
+            let base_idx = c * pages_per_chunk;
+            if base_idx >= allocated {
                 break;
             }
-            if blocks[idx] != base_phys + i as u32 {
-                return Ok(None);
+            let base_phys = blocks[base_idx];
+            for i in 1..pages_per_chunk {
+                let idx = base_idx + i;
+                if idx >= allocated {
+                    break;
+                }
+                if blocks[idx] != base_phys + i as u32 {
+                    return Ok(None);
+                }
             }
         }
     }
