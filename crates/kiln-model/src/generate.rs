@@ -424,7 +424,7 @@ fn env_positive_usize(name: &str) -> Option<usize> {
 }
 
 const DEFAULT_DECODE_BUFFER_MAX_BATCH: usize = 8;
-const VULKAN_DECODE_BUFFER_MAX_BATCH: usize = 16;
+const VULKAN_DECODE_BUFFER_MAX_BATCH: usize = 32;
 
 fn decode_buffer_max_batch(backend_name: &str) -> usize {
     let explicit = env_positive_usize("KILN_DECODE_BUFFER_MAX_BATCH");
@@ -434,7 +434,7 @@ fn decode_buffer_max_batch(backend_name: &str) -> usize {
     // Scale the per-step decode buffer to the widest configured scheduler so
     // the first large batch does not immediately error with `decode batch N
     // exceeds buffer max_batch M`. Vulkan gets a wider unconfigured default
-    // because its resident path now has better row throughput at b16 than b8.
+    // because its resident path keeps scaling past b16 on this target.
     let actor_max = env_positive_usize("KILN_MAX_DECODE_BATCH").unwrap_or(0);
     let live_batcher_max = env_positive_usize("KILN_DECODE_BATCH_MAX").unwrap_or(0);
     let backend_default = if backend_name == "vulkan" {
@@ -6912,7 +6912,7 @@ mod tests {
 
         assert_eq!(default_decode_batcher_max_batch_kt(&device, "cpu"), 8);
         assert_eq!(default_decode_batcher_max_batch_kt(&device, "cuda"), 1);
-        assert_eq!(default_decode_batcher_max_batch_kt(&device, "vulkan"), 16);
+        assert_eq!(default_decode_batcher_max_batch_kt(&device, "vulkan"), 32);
         assert_eq!(default_decode_batcher_max_batch_kt(&device, "metal"), 8);
     }
 
@@ -6930,7 +6930,7 @@ mod tests {
         let device = kiln_tensor::Device::Cpu;
         assert_eq!(
             DecodeBatcherConfig::from_env_for_backend_kt(&device, "vulkan").max_batch,
-            16
+            32
         );
         unsafe {
             std::env::set_var("KILN_MAX_DECODE_BATCH", "24");

@@ -27,7 +27,7 @@ use crate::state::{GpuCoordinationLock, RealPrefixCache};
 const DEFAULT_ENGINE_CHANNEL: usize = 1024;
 const DEFAULT_RESPONSE_CHANNEL: usize = 64;
 const DEFAULT_MAX_DECODE_BATCH: usize = 8;
-const VULKAN_MAX_DECODE_BATCH: usize = 16;
+const VULKAN_MAX_DECODE_BATCH: usize = 32;
 const DEFAULT_PREFIX_AWARE_ADMISSION: bool = true;
 
 fn blocks_needed_for_tokens(num_tokens: usize, block_size: usize) -> usize {
@@ -1231,7 +1231,7 @@ mod tests {
             std::env::remove_var("KILN_MAX_DECODE_BATCH");
         }
         assert_eq!(env_max_decode_batch_for_backend(None), 8);
-        assert_eq!(env_max_decode_batch_for_backend(Some("vulkan")), 16);
+        assert_eq!(env_max_decode_batch_for_backend(Some("vulkan")), 32);
         assert_eq!(env_max_decode_batch_for_backend(Some("metal")), 8);
         unsafe {
             std::env::set_var("KILN_MAX_DECODE_BATCH", "24");

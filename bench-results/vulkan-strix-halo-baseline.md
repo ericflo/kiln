@@ -305,7 +305,7 @@ every config"):
   seed cache before doing so, avoiding unsafe cache reuse while eliminating the
   previous forced portable/rowwise route.
   **Update — Vulkan live decode batch default:** the live greedy decode batcher
-  now defaults Vulkan to a 16-row max batch instead of 8; the real-model
+  now defaults Vulkan to a 32-row max batch instead of 16; the real-model
   batching-engine actor applies the same backend-aware default when
   `KILN_MAX_DECODE_BATCH` is unset, and the live worker now also treats
   `KILN_MAX_DECODE_BATCH` as the shared width override unless its
@@ -313,9 +313,10 @@ every config"):
   decode microbench on RADV STRIX_HALO, history 256, warmup=1, timed=4,
   repeats=3 measured batch 8 at 105.1 ms / 76 rows/s and batch 16 at
   142.7 ms / 112 rows/s. A second pass measured batch 16 at 148.4 ms /
-  108 rows/s and batch 32 at 241.8 ms / 132 rows/s; keep the default at 16 as
-  the conservative memory/throughput step, with env overrides still available
-  for 32/64-row sweeps.
+  108 rows/s and batch 32 at 241.8 ms / 132 rows/s; a current batch-32 smoke
+  measured 239.3 ms / 134 rows/s, so the default now favors the
+  higher-throughput 32-row target. Env overrides remain available for
+  smaller-memory 16-row runs or wider 64-row sweeps.
   **Update — bs=1 greedy token-only route:** `model_forward_paged_last_token_greedy`
   now tries the resident transformer-stack + final argmax path before the older
   resident logits fallback. For callers without stable row IDs, bs=1 uses the
