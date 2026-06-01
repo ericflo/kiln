@@ -180,12 +180,24 @@ impl CudaGraphKey {
 /// `0`) is healthy: bs=64 → 498 tok/s on A6000 at HEAD `2d9d4fc4`
 /// after the GDN-decode contiguity fix in the same commit.
 ///
-/// The earlier validation trail in `bench-results/cuda-graph-status.md`
-/// ("Phase 5 sanitizer sweep") covered the bs=1 capture + bs=1 replay
-/// path; the production caller hits batched capture which has a
-/// separate uninvestigated bug (suspect 1 in the comment at
-/// `cuda_graph.rs:1595`: per-step KV-slot writer baked-immediate
-/// correctness under graph replay across `start_pos` values).
+/// ⚠️ CORRECTION (2026-06-01, server-path repro): the earlier
+/// "Phase 5 sanitizer sweep" claim that the **bs=1** capture+replay
+/// path was validated is FALSE. Driving the real graph path
+/// (`kiln serve` → `decode_step_paged`, NOT `kiln-bench` which bypasses
+/// the runner) surfaces TWO bugs even at bs=1. See
+/// `bench-results/cuda-graph-box102-findings.md`:
+///   BUG 1 (OOB, root-caused + fix confirmed): the graph-stable
+///   metadata buffers are gated behind `KILN_CUDA_GRAPH_STABLE_PAGED_METADATA`
+///   (default OFF, `cuda_graph.rs:156`). With it off the captured forward
+///   builds a TRANSIENT block_table that is freed after capture, so the
+///   captured `flash_fwd_splitkv_kernel` reads a dangling pointer →
+///   `CUDA_ERROR_ILLEGAL_ADDRESS` (compute-sanitizer: wild/wrapped read
+///   address). Setting the env to `1` eliminates the OOB.
+///   BUG 2 (replay correctness, OPEN): with the env on, replay no longer
+///   crashes but emits token-doubling garbage ("a a thinking thinking …"
+///   vs eager "a thinking …"); not a stream race (persists under
+///   `CUDA_LAUNCH_BLOCKING=1`). This matches the KV-slot-under-replay
+///   suspect below. The keystone is NOT mergeable until BUG 2 is fixed.
 ///
 /// Set `KILN_CUDA_GRAPHS_BATCHED=1` to opt in once the underlying
 /// capture bug is fixed and re-validated end-to-end against
