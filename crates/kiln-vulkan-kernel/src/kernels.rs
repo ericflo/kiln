@@ -3121,13 +3121,6 @@ pub fn dispatch_linear_decode_sample_bytes(
     // ---- Allocate the device-local buffers ----
     let x_buf = VulkanBuffer::create_device_local(device, device_local_mt, x_data.len() as u64)
         .context("failed to create linear_decode_sample x buffer")?;
-    let (x_stage, _) = VulkanBuffer::create_host_visible_with_segments(
-        device,
-        host_visible_mt,
-        &[x_data],
-    )
-    .context("failed to stage linear_decode_sample x buffer")?;
-
     // Logits buffer is `[out_dim]` f32. Stays on device for the entire
     // pipeline — never copied back to host.
     let logits_buf =
@@ -3141,8 +3134,8 @@ pub fn dispatch_linear_decode_sample_bytes(
             || (frequency_penalty.is_finite() && frequency_penalty != 0.0));
     let _history_idx_buf;
     let _history_cnt_buf;
-    let _history_idx_stage;
-    let _history_cnt_stage;
+    let mut upload_segments = Vec::with_capacity(if penalties_active { 3 } else { 1 });
+    upload_segments.push(x_data);
     if penalties_active {
         let idx_buf = VulkanBuffer::create_device_local(
             device,
@@ -3156,30 +3149,19 @@ pub fn dispatch_linear_decode_sample_bytes(
             (history_counts.len() * 4) as u64,
         )
         .context("failed to create penalty history-count buffer")?;
-        let (idx_stage, _) = VulkanBuffer::create_host_visible_with_segments(
-            device,
-            host_visible_mt,
-            &[bytemuck::cast_slice(history_indices)],
-        )
-        .context("failed to stage penalty history-index buffer")?;
-        let (cnt_stage, _) = VulkanBuffer::create_host_visible_with_segments(
-            device,
-            host_visible_mt,
-            &[bytemuck::cast_slice(history_counts)],
-        )
-        .context("failed to stage penalty history-count buffer")?;
+        upload_segments.push(bytemuck::cast_slice(history_indices));
+        upload_segments.push(bytemuck::cast_slice(history_counts));
 
         // Keep buffers alive until the command batch has completed.
         _history_idx_buf = Some(idx_buf);
         _history_cnt_buf = Some(cnt_buf);
-        _history_idx_stage = Some(idx_stage);
-        _history_cnt_stage = Some(cnt_stage);
     } else {
         _history_idx_buf = None;
         _history_cnt_buf = None;
-        _history_idx_stage = None;
-        _history_cnt_stage = None;
     }
+    let (upload_stage, upload_offsets) =
+        VulkanBuffer::create_host_visible_with_segments(device, host_visible_mt, &upload_segments)
+            .context("failed to stage linear_decode_sample uploads")?;
 
     // ---- Step 3: record lm_head + optional penalties + sample + readback ----
     let out_token_buf = VulkanBuffer::create_device_local(device, device_local_mt, 4)
@@ -3195,19 +3177,32 @@ pub fn dispatch_linear_decode_sample_bytes(
     let mut batch = crate::CommandBatch::new(vk_device)
         .context("linear_decode_sample: create CommandBatch")?;
     batch
-        .record_upload_buffer(&x_stage, &x_buf, x_data.len() as u64)
+        .record_upload_buffer_region(
+            &upload_stage,
+            &x_buf,
+            upload_offsets[0],
+            0,
+            x_data.len() as u64,
+        )
         .context("linear_decode_sample: record x upload")?;
-    if let (Some(idx_stage), Some(cnt_stage), Some(idx_buf), Some(cnt_buf)) = (
-        &_history_idx_stage,
-        &_history_cnt_stage,
-        &_history_idx_buf,
-        &_history_cnt_buf,
-    ) {
+    if let (Some(idx_buf), Some(cnt_buf)) = (&_history_idx_buf, &_history_cnt_buf) {
         batch
-            .record_upload_buffer(idx_stage, idx_buf, (history_indices.len() * 4) as u64)
+            .record_upload_buffer_region(
+                &upload_stage,
+                idx_buf,
+                upload_offsets[1],
+                0,
+                (history_indices.len() * 4) as u64,
+            )
             .context("linear_decode_sample: record penalty history-index upload")?;
         batch
-            .record_upload_buffer(cnt_stage, cnt_buf, (history_counts.len() * 4) as u64)
+            .record_upload_buffer_region(
+                &upload_stage,
+                cnt_buf,
+                upload_offsets[2],
+                0,
+                (history_counts.len() * 4) as u64,
+            )
             .context("linear_decode_sample: record penalty history-count upload")?;
     }
     batch

@@ -635,6 +635,9 @@ every config"):
   upload, LM head, penalties, sampler, and token readback. Focused Vulkan coverage:
   `cargo test -p kiln-vulkan-kernel --test linear_decode_sample -- --nocapture`
   covers both the no-penalty top-1 path and the optional penalty dispatch.
+  The helper now also packs the hidden row and optional token-history arrays
+  into one host-visible upload staging buffer and records offsetted copies from
+  that buffer, avoiding separate map/allocation setup for each small upload.
   **Update — legacy bridge removed from the old bs=1 resident block helper:**
   the older single-row resident full-attention fallback now extracts the input
   activation and RoPE tables directly from kt tensors, uploads those f32 slices

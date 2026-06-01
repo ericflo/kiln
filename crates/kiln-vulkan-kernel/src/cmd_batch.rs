@@ -356,6 +356,20 @@ impl<'a> CommandBatch<'a> {
         dst: &VulkanBuffer,
         size: u64,
     ) -> Result<()> {
+        self.record_upload_buffer_region(src, dst, 0, 0, size)
+    }
+
+    /// Offset-aware variant of [`Self::record_upload_buffer`]. This is useful
+    /// when several small upload payloads share one packed host-visible staging
+    /// buffer.
+    pub fn record_upload_buffer_region(
+        &mut self,
+        src: &VulkanBuffer,
+        dst: &VulkanBuffer,
+        src_offset: u64,
+        dst_offset: u64,
+        size: u64,
+    ) -> Result<()> {
         anyhow::ensure!(!self.finished, "CommandBatch: already submitted");
         anyhow::ensure!(
             self.dispatch_count == 0,
@@ -363,7 +377,10 @@ impl<'a> CommandBatch<'a> {
         );
         let device = self.vk_device.device();
         unsafe {
-            let copy = vk::BufferCopy::default().size(size);
+            let copy = vk::BufferCopy::default()
+                .src_offset(src_offset)
+                .dst_offset(dst_offset)
+                .size(size);
             device.cmd_copy_buffer(self.cmd, src.handle(), dst.handle(), &[copy]);
             let barrier = vk::MemoryBarrier::default()
                 .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
