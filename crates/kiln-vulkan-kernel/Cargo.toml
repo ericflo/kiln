@@ -24,11 +24,15 @@ libc = "0.2"
 libloading = "0.9"
 
 [dev-dependencies]
+# kiln-tensor is the in-house CPU oracle for the parity tests after
+# #1082. `tests/gdn_parity.rs` builds its GDN reference on kiln_tensor
+# instead of candle-core; remaining test files are migrating off candle.
+kiln-tensor = { workspace = true }
 # candle-core is dev-only after #1082: the production crate is
 # candle-free, but a handful of in-tree `#[cfg(test)]` blocks and
 # `tests/*.rs` parity tests still build CPU candle tensors as the
 # numerical reference.
-candle-core = { workspace = true }
+# (#1082) candle-core dev-dep DROPPED: test oracles de-candled to kiln_tensor / finite-diff (a00ea3d4 follow-up).
 # Phase 0.9 probe writes a JSON report. Dev-only so production builds
 # don't pick it up.
 serde_json = { workspace = true }

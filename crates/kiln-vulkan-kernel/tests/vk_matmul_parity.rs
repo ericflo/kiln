@@ -1,6 +1,8 @@
 //! Phase B parity tests: vk_matmul forward + backward vs an analytical
-//! reference (with a single candle Var-based oracle scoped to the
-//! LoRA composition backward in `vk_lora_style_composition_backward_parity`).
+//! reference. Fully candle-free: the LoRA composition backward in
+//! `vk_lora_style_composition_backward_parity` is checked against a
+//! finite-difference numerical gradient of the same scalar loss,
+//! replacing the former candle Var-based oracle. (#1082)
 //!
 //! Test factories are candle-free via the kt-native
 //! `VkTensor::from_f32_slice` / `from_f32_slice_as_bf16` /
@@ -64,6 +66,58 @@ fn naive_matmul(a: &[f32], b: &[f32], m: usize, n: usize, k: usize) -> Vec<f32> 
         }
     }
     c
+}
+
+/// Scalar loss of the LoRA-style composition as a pure function of its
+/// three inputs: loss = mean( ((x @ A.T) @ B.T) * scale ).
+///   x: [batch, in_features], A: [rank, in_features], B: [out_features, rank]
+/// Used as the inner function for finite-difference gradients (candle-free).
+#[allow(clippy::too_many_arguments)]
+fn lora_scalar_loss(
+    x: &[f32],
+    a: &[f32],
+    b: &[f32],
+    scale: f32,
+    batch: usize,
+    in_features: usize,
+    rank: usize,
+    out_features: usize,
+) -> f32 {
+    // A.T : [in_features, rank]
+    let mut a_t = vec![0.0_f32; in_features * rank];
+    for r in 0..rank {
+        for c in 0..in_features {
+            a_t[c * rank + r] = a[r * in_features + c];
+        }
+    }
+    // B.T : [rank, out_features]
+    let mut b_t = vec![0.0_f32; rank * out_features];
+    for r in 0..out_features {
+        for c in 0..rank {
+            b_t[c * out_features + r] = b[r * rank + c];
+        }
+    }
+    let h = naive_matmul(x, &a_t, batch, rank, in_features);
+    let mm = naive_matmul(&h, &b_t, batch, out_features, rank);
+    let n_total = (batch * out_features) as f32;
+    mm.iter().map(|v| v * scale).sum::<f32>() / n_total
+}
+
+/// Central finite-difference gradient of `loss(param)` w.r.t. each entry of
+/// `param`, where `loss` is the closure recomputing the scalar loss after
+/// mutating `param` in place. eps ~ 1e-3 for f32.
+fn fd_grad(param: &mut [f32], eps: f32, mut loss: impl FnMut(&[f32]) -> f32) -> Vec<f32> {
+    let mut grad = vec![0.0_f32; param.len()];
+    for i in 0..param.len() {
+        let orig = param[i];
+        param[i] = orig + eps;
+        let lp = loss(param);
+        param[i] = orig - eps;
+        let lm = loss(param);
+        param[i] = orig;
+        grad[i] = (lp - lm) / (2.0 * eps);
+    }
+    grad
 }
 
 #[test]
@@ -285,44 +339,60 @@ fn vk_lora_style_composition_backward_parity() -> Result<()> {
     //   d loss / d x = (d loss / d h) @ A
     //   d loss / d A = h_for_a path: d loss / d A = (d loss / d h).T @ x ... etc.
     //
-    // The candle-free reference here is intricate; use a fresh candle
-    // path for the reference instead. This is the one legitimate
-    // candle use left in this file — scoped to a single test as an
-    // analytical-grad oracle. (#1082)
-    use candle_core::{DType, Device, Tensor, Var};
-    let dev_c = Device::Cpu;
-    let xv = Var::from_tensor(&Tensor::from_vec(
-        x_data.clone(),
-        (batch, in_features),
-        &dev_c,
-    )?)?;
-    let av = Var::from_tensor(&Tensor::from_vec(
-        a_data.clone(),
-        (rank, in_features),
-        &dev_c,
-    )?)?;
-    let bv = Var::from_tensor(&Tensor::from_vec(
-        b_data.clone(),
-        (out_features, rank),
-        &dev_c,
-    )?)?;
-    let x_c = xv.as_tensor();
-    let a_c = av.as_tensor();
-    let b_c = bv.as_tensor();
-    let h_c = x_c.matmul(&a_c.transpose(0, 1)?)?;
-    let delta_c = h_c.matmul(&b_c.transpose(0, 1)?)?;
-    let delta_c = (delta_c * (scale as f64))?;
-    let loss_c = delta_c.mean_all()?.to_dtype(DType::F32)?;
-    let grads_c = loss_c.backward()?;
-    let exp_dx = grads_c.get(x_c).unwrap().flatten_all()?.to_vec1::<f32>()?;
-    let exp_da = grads_c.get(a_c).unwrap().flatten_all()?.to_vec1::<f32>()?;
-    let exp_db = grads_c.get(b_c).unwrap().flatten_all()?.to_vec1::<f32>()?;
+    // The closed-form reference here is intricate, so instead of hand-coding
+    // each path we cross-check the Vulkan backward against a central
+    // finite-difference numerical gradient of the same scalar loss
+    // `loss = mean( ((x @ A.T) @ B.T) * scale )`. This replaces the former
+    // candle Var-based autograd oracle, leaving the file candle-free. (#1082)
+    let eps = 1e-3_f32;
+    let mut x_pert = x_data.clone();
+    let exp_dx = fd_grad(&mut x_pert, eps, |xp| {
+        lora_scalar_loss(
+            xp,
+            &a_data,
+            &b_data,
+            scale,
+            batch,
+            in_features,
+            rank,
+            out_features,
+        )
+    });
+    let mut a_pert = a_data.clone();
+    let exp_da = fd_grad(&mut a_pert, eps, |ap| {
+        lora_scalar_loss(
+            &x_data,
+            ap,
+            &b_data,
+            scale,
+            batch,
+            in_features,
+            rank,
+            out_features,
+        )
+    });
+    let mut b_pert = b_data.clone();
+    let exp_db = fd_grad(&mut b_pert, eps, |bp| {
+        lora_scalar_loss(
+            &x_data,
+            &a_data,
+            bp,
+            scale,
+            batch,
+            in_features,
+            rank,
+            out_features,
+        )
+    });
 
+    // Tolerances loosened from 1e-4 to 2e-3 to absorb finite-difference
+    // truncation/rounding error; the loss is smooth (pure matmuls), so the
+    // central difference is accurate well within this band.
     let mad_x = max_abs_diff(&grad_x, &exp_dx);
     let mad_a = max_abs_diff(&grad_a, &exp_da);
     let mad_b = max_abs_diff(&grad_b, &exp_db);
-    assert!(mad_x < 1e-4, "dx mad {mad_x}");
-    assert!(mad_a < 1e-4, "dA mad {mad_a}");
-    assert!(mad_b < 1e-4, "dB mad {mad_b}");
+    assert!(mad_x < 2e-3, "dx mad {mad_x}");
+    assert!(mad_a < 2e-3, "dA mad {mad_a}");
+    assert!(mad_b < 2e-3, "dB mad {mad_b}");
     Ok(())
 }
