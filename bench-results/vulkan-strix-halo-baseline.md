@@ -163,6 +163,17 @@ from silently losing the one-CommandBatch path. A post-gate Vulkan-only smoke
 on the T=128 shape measured legacy per-dispatch 2.325 ms vs. single-submit
 0.852 ms (**2.73x**) with output/state max abs err 0.
 
+**Update — app-facing GDN prefill input upload is batched:** the Vulkan backend
+now borrows contiguous CPU F32 kt storage bytes for q/k/v/beta/g/state and
+uploads all six GDN chunkwise prefill inputs through one staging buffer and one
+Vulkan queue submission before recording the single-submit scan. Unsupported
+layouts still use the previous flatten/upload path. Focused helper coverage
+checks exact F32 byte borrowing and non-F32 rejection under
+`cargo test -p kiln-model --lib --no-default-features --features vulkan
+cpu_contiguous_f32_tensor_upload -- --nocapture`; the Vulkan round-trip test
+`gdn_chunkwise_batched_input_upload_round_trips_on_vulkan` verifies the
+batched-upload path itself when a Vulkan device is present.
+
 **Update — full-attention prefill wrapper stays kt-native:** the Vulkan
 `flash_attn_prefill` implementation now extracts Q/K/V F32 bytes directly from
 kt tensors and reconstructs the SDPA output as a kt tensor. This removes the

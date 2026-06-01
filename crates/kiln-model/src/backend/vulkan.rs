@@ -18,6 +18,139 @@ use std::sync::{Arc, Mutex, OnceLock};
 use super::{BackendRuntime, TrainingCapabilities};
 use crate::forward::{GpuAttentionWeights, GpuWeights};
 
+struct F32TensorUpload<'a> {
+    bytes: &'a [u8],
+    shape: Vec<usize>,
+}
+
+fn cpu_contiguous_f32_tensor_upload_vk(t: &kiln_tensor::Tensor) -> Option<F32TensorUpload<'_>> {
+    if !matches!(t.device(), kiln_tensor::Device::Cpu)
+        || t.dtype() != kiln_tensor::DType::F32
+        || !t.is_contiguous()
+    {
+        return None;
+    }
+
+    let per = t.dtype().size_in_bytes();
+    let n = t.element_count();
+    let start = t.layout().start_offset().checked_mul(per)?;
+    let len = n.checked_mul(per)?;
+    let end = start.checked_add(len)?;
+    let storage = t
+        .storage()
+        .as_any()
+        .downcast_ref::<kiln_tensor::CpuStorage>()?;
+    let bytes = storage.as_bytes().get(start..end)?;
+    Some(F32TensorUpload {
+        bytes,
+        shape: t.shape().to_vec(),
+    })
+}
+
+fn upload_f32_tensors_from_cpu_bytes_vk(
+    vk_device: &Arc<kiln_vulkan_kernel::VulkanDevice>,
+    specs: &[F32TensorUpload<'_>],
+) -> Result<Vec<kiln_vulkan_kernel::vk_tensor::VkTensor>> {
+    use kiln_vulkan_kernel::vk_tensor::{VkDType, VkTensor};
+    use kiln_vulkan_kernel::VulkanBuffer;
+
+    let mut buffers = Vec::with_capacity(specs.len());
+    for spec in specs {
+        let nelem = spec.shape.iter().try_fold(1usize, |acc, &dim| {
+            acc.checked_mul(dim)
+                .ok_or_else(|| anyhow::anyhow!("Vulkan F32 upload shape overflow"))
+        })?;
+        let expected = nelem
+            .checked_mul(std::mem::size_of::<f32>())
+            .ok_or_else(|| anyhow::anyhow!("Vulkan F32 upload byte-size overflow"))?;
+        anyhow::ensure!(
+            spec.bytes.len() == expected,
+            "Vulkan F32 upload byte length mismatch: got {}, expected {} for shape {:?}",
+            spec.bytes.len(),
+            expected,
+            spec.shape
+        );
+        let buffer = VulkanBuffer::create_device_local(
+            vk_device.device(),
+            vk_device.device_local_mem_type(),
+            expected.max(std::mem::size_of::<f32>()) as u64,
+        )
+        .context("Vulkan F32 batch upload: create device-local buffer")?;
+        buffers.push(Arc::new(buffer));
+    }
+
+    let uploads: Vec<(&VulkanBuffer, &[u8])> = buffers
+        .iter()
+        .zip(specs.iter())
+        .map(|(buffer, spec)| (buffer.as_ref(), spec.bytes))
+        .collect();
+    VulkanBuffer::upload_data_batch(
+        vk_device.device(),
+        vk_device.host_visible_mem_type(),
+        vk_device.queue(),
+        vk_device.queue_family_index(),
+        &uploads,
+    )
+    .context("Vulkan F32 batch upload")?;
+
+    Ok(buffers
+        .into_iter()
+        .zip(specs.iter())
+        .map(|(buffer, spec)| {
+            VkTensor::from_buffer(
+                buffer,
+                spec.shape.clone(),
+                VkDType::F32,
+                Arc::clone(vk_device),
+            )
+        })
+        .collect())
+}
+
+fn upload_gdn_chunkwise_inputs_from_cpu_bytes_vk(
+    vk_device: &Arc<kiln_vulkan_kernel::VulkanDevice>,
+    q: &kiln_tensor::Tensor,
+    k: &kiln_tensor::Tensor,
+    v: &kiln_tensor::Tensor,
+    beta: &kiln_tensor::Tensor,
+    g: &kiln_tensor::Tensor,
+    state: &kiln_tensor::Tensor,
+) -> Result<Option<[kiln_vulkan_kernel::vk_tensor::VkTensor; 6]>> {
+    let Some(q_upload) = cpu_contiguous_f32_tensor_upload_vk(q) else {
+        return Ok(None);
+    };
+    let Some(k_upload) = cpu_contiguous_f32_tensor_upload_vk(k) else {
+        return Ok(None);
+    };
+    let Some(v_upload) = cpu_contiguous_f32_tensor_upload_vk(v) else {
+        return Ok(None);
+    };
+    let Some(beta_upload) = cpu_contiguous_f32_tensor_upload_vk(beta) else {
+        return Ok(None);
+    };
+    let Some(g_upload) = cpu_contiguous_f32_tensor_upload_vk(g) else {
+        return Ok(None);
+    };
+    let Some(state_upload) = cpu_contiguous_f32_tensor_upload_vk(state) else {
+        return Ok(None);
+    };
+    let uploads = [
+        q_upload,
+        k_upload,
+        v_upload,
+        beta_upload,
+        g_upload,
+        state_upload,
+    ];
+    let tensors = upload_f32_tensors_from_cpu_bytes_vk(vk_device, &uploads)?;
+    tensors.try_into().map(Some).map_err(|tensors: Vec<_>| {
+        anyhow::anyhow!(
+            "Vulkan GDN chunkwise input upload produced {} tensors, expected 6",
+            tensors.len()
+        )
+    })
+}
+
 /// Vulkan backend for Kiln.
 ///
 /// Manages its own Vulkan device and dispatches compute shaders for
@@ -4520,22 +4653,31 @@ impl BackendRuntime for VulkanBackend {
             return Ok(None);
         };
 
-        let load = |t: &kiln_tensor::Tensor| -> Result<kiln_vulkan_kernel::vk_tensor::VkTensor> {
-            let shape = t.shape().to_vec();
-            let data = t
-                .flatten_all()
-                .map_err(|e| anyhow::anyhow!("gdn_chunkwise_forward: flatten: {e}"))?
-                .to_vec1::<f32>()
-                .map_err(|e| anyhow::anyhow!("gdn_chunkwise_forward: to_vec1 f32: {e}"))?;
-            kiln_vulkan_kernel::vk_tensor::VkTensor::from_f32_slice(&data, shape, vk_device.clone())
-        };
-        let q_vk = load(q)?;
-        let k_vk = load(k)?;
-        let v_vk = load(v)?;
-        let beta_vk = load(beta)?;
-        let g_vk = load(g)?;
         let state_shape = state_kt.shape().to_vec();
-        let mut state_vk = load(state_kt)?;
+        let (q_vk, k_vk, v_vk, beta_vk, g_vk, mut state_vk) =
+            if let Some([q_vk, k_vk, v_vk, beta_vk, g_vk, state_vk]) =
+                upload_gdn_chunkwise_inputs_from_cpu_bytes_vk(
+                    vk_device, q, k, v, beta, g, state_kt,
+                )?
+            {
+                (q_vk, k_vk, v_vk, beta_vk, g_vk, state_vk)
+            } else {
+                let load =
+                    |t: &kiln_tensor::Tensor| -> Result<kiln_vulkan_kernel::vk_tensor::VkTensor> {
+                        let shape = t.shape().to_vec();
+                        let data = t
+                            .flatten_all()
+                            .map_err(|e| anyhow::anyhow!("gdn_chunkwise_forward: flatten: {e}"))?
+                            .to_vec1::<f32>()
+                            .map_err(|e| anyhow::anyhow!("gdn_chunkwise_forward: to_vec1 f32: {e}"))?;
+                        kiln_vulkan_kernel::vk_tensor::VkTensor::from_f32_slice(
+                            &data,
+                            shape,
+                            vk_device.clone(),
+                        )
+                    };
+                (load(q)?, load(k)?, load(v)?, load(beta)?, load(g)?, load(state_kt)?)
+            };
 
         let out_vk =
             if std::env::var("KILN_DISABLE_VULKAN_GDN_CHUNKWISE_SINGLE_SUBMIT").is_ok() {
@@ -5153,6 +5295,71 @@ pub fn precompile_custom_kernels() -> Result<()> {
     kiln_vulkan_kernel::kernels::prewarm_builtin_pipelines(&vk_device)?;
     tracing::info!("Vulkan shader and pipeline verification complete");
     Ok(())
+}
+
+#[cfg(test)]
+mod vk_upload_tests {
+    use super::*;
+
+    #[test]
+    fn cpu_contiguous_f32_tensor_upload_borrows_exact_bytes() -> Result<()> {
+        let tensor = kiln_tensor::Tensor::from_slice(&[1.25f32, -2.5, 3.75], vec![3])?;
+        let upload = cpu_contiguous_f32_tensor_upload_vk(&tensor)
+            .expect("contiguous CPU F32 tensor should expose upload bytes");
+        let expected = [1.25f32, -2.5, 3.75]
+            .into_iter()
+            .flat_map(f32::to_le_bytes)
+            .collect::<Vec<u8>>();
+
+        assert_eq!(upload.shape, vec![3]);
+        assert_eq!(upload.bytes, expected.as_slice());
+        Ok(())
+    }
+
+    #[test]
+    fn cpu_contiguous_f32_tensor_upload_rejects_non_f32() -> Result<()> {
+        let tensor = kiln_tensor::Tensor::from_slice(
+            &[half::bf16::from_f32(1.0), half::bf16::from_f32(2.0)],
+            vec![2],
+        )?;
+        assert!(cpu_contiguous_f32_tensor_upload_vk(&tensor).is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn gdn_chunkwise_batched_input_upload_round_trips_on_vulkan() -> Result<()> {
+        let Ok(vk_device) = kiln_vulkan_kernel::VulkanDevice::new() else {
+            eprintln!("Vulkan device unavailable, skipping");
+            return Ok(());
+        };
+        let vk_device = Arc::new(vk_device);
+        let q_data = vec![1.0f32, 2.0, 3.0, 4.0];
+        let k_data = vec![5.0f32, 6.0, 7.0, 8.0];
+        let v_data = vec![9.0f32, 10.0, 11.0, 12.0];
+        let beta_data = vec![0.25f32, 0.5];
+        let g_data = vec![0.75f32, 1.0];
+        let state_data = vec![13.0f32, 14.0, 15.0, 16.0];
+        let q = kiln_tensor::Tensor::from_slice(&q_data, vec![1, 1, 2, 2])?;
+        let k = kiln_tensor::Tensor::from_slice(&k_data, vec![1, 1, 2, 2])?;
+        let v = kiln_tensor::Tensor::from_slice(&v_data, vec![1, 1, 2, 2])?;
+        let beta = kiln_tensor::Tensor::from_slice(&beta_data, vec![1, 1, 2])?;
+        let g = kiln_tensor::Tensor::from_slice(&g_data, vec![1, 1, 2])?;
+        let state = kiln_tensor::Tensor::from_slice(&state_data, vec![1, 1, 2, 2])?;
+
+        let [q_vk, k_vk, v_vk, beta_vk, g_vk, state_vk] =
+            upload_gdn_chunkwise_inputs_from_cpu_bytes_vk(
+                &vk_device, &q, &k, &v, &beta, &g, &state,
+            )?
+            .expect("contiguous F32 inputs should use batched upload");
+
+        assert_eq!(q_vk.to_vec_f32()?, q_data);
+        assert_eq!(k_vk.to_vec_f32()?, k_data);
+        assert_eq!(v_vk.to_vec_f32()?, v_data);
+        assert_eq!(beta_vk.to_vec_f32()?, beta_data);
+        assert_eq!(g_vk.to_vec_f32()?, g_data);
+        assert_eq!(state_vk.to_vec_f32()?, state_data);
+        Ok(())
+    }
 }
 
 // (#1082) The Vulkan residency / optimizer / `lora_delta_resident` tests
