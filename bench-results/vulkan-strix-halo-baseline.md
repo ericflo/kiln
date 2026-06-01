@@ -1022,6 +1022,12 @@ every config"):
   stack dispatch still emits the visibility barrier before reading both
   buffers, removing one conservative compute-to-compute barrier per token
   batch across argmax, sampling, and hidden-output routes.
+  **Update — resident full-attention RoPE combines Q and K:** full-attention
+  resident blocks now record one `vk_rope_qk_f32` dispatch for Q and K instead
+  of separate Q and K RoPE dispatches. The combined shader preserves the
+  existing rotation math for different Q/K head counts while removing one
+  recorded compute dispatch per full-attention block in both single-row and
+  batched resident decode. Kernel parity covers the direct resident helper.
   **Update — greedy LM-head argmax reuses BF16 weights across four rows:** the
   batched BF16 argmax block stage now has a rows4 shader for larger batches.
   It computes the same per-row/per-vocab-block score and index buffers as the

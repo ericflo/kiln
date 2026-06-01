@@ -616,29 +616,26 @@ pub fn transformer_block_paged_decode_full_attn_resident_b1(
         &[num_kv_heads as u32, head_dim as u32, eps.to_bits()],
         Workgroups::OneD(num_kv_heads as u32),
     )?;
-    // 6) RoPE Q. vk_rope_f32 push: [rows, num_heads, head_dim, rotary_dim].
+    // 6) RoPE Q+K. vk_rope_qk_f32 push:
+    // [rows, num_q_heads, num_kv_heads, head_dim, rotary_dim].
     batch.record_shader(
-        shaders::VK_ROPE_F32,
+        shaders::VK_ROPE_QK_F32,
         &[
             q_buf.handle(),
-            rope_cos_buf.handle(),
-            rope_sin_buf.handle(),
-            q_rot_buf.handle(),
-        ],
-        &[1u32, num_heads as u32, head_dim as u32, rotary_dim as u32],
-        Workgroups::OneD((num_heads * head_dim).div_ceil(256) as u32),
-    )?;
-    // 7) RoPE K
-    batch.record_shader_no_previous_barrier(
-        shaders::VK_ROPE_F32,
-        &[
             k_buf.handle(),
             rope_cos_buf.handle(),
             rope_sin_buf.handle(),
+            q_rot_buf.handle(),
             k_rot_buf.handle(),
         ],
-        &[1u32, num_kv_heads as u32, head_dim as u32, rotary_dim as u32],
-        Workgroups::OneD((num_kv_heads * head_dim).div_ceil(256) as u32),
+        &[
+            1u32,
+            num_heads as u32,
+            num_kv_heads as u32,
+            head_dim as u32,
+            rotary_dim as u32,
+        ],
+        Workgroups::OneD(((num_heads + num_kv_heads) * head_dim).div_ceil(256) as u32),
     )?;
     // 8) Write K/V into Vulkan-resident paged pool
     batch.record_shader(
@@ -1937,26 +1934,23 @@ pub fn record_full_attn_block_into(
         Workgroups::OneD((num_heads + num_kv_heads) as u32),
     )?;
     batch.record_shader(
-        shaders::VK_ROPE_F32,
+        shaders::VK_ROPE_QK_F32,
         &[
             q_buf.handle(),
-            rope_cos_buf.handle(),
-            rope_sin_buf.handle(),
-            q_rot.handle(),
-        ],
-        &[1u32, num_heads as u32, head_dim as u32, rotary_dim as u32],
-        Workgroups::OneD((num_heads * head_dim).div_ceil(256) as u32),
-    )?;
-    batch.record_shader_no_previous_barrier(
-        shaders::VK_ROPE_F32,
-        &[
             k_buf.handle(),
             rope_cos_buf.handle(),
             rope_sin_buf.handle(),
+            q_rot.handle(),
             k_rot.handle(),
         ],
-        &[1u32, num_kv_heads as u32, head_dim as u32, rotary_dim as u32],
-        Workgroups::OneD((num_kv_heads * head_dim).div_ceil(256) as u32),
+        &[
+            1u32,
+            num_heads as u32,
+            num_kv_heads as u32,
+            head_dim as u32,
+            rotary_dim as u32,
+        ],
+        Workgroups::OneD(((num_heads + num_kv_heads) * head_dim).div_ceil(256) as u32),
     )?;
     batch.record_shader(
         shaders::PAGED_KV_WRITE_SLOT,
@@ -2213,36 +2207,23 @@ pub fn record_full_attn_block_batched_into(
         Workgroups::OneD((batch_size * (num_heads + num_kv_heads)) as u32),
     )?;
     batch.record_shader(
-        shaders::VK_ROPE_F32,
+        shaders::VK_ROPE_QK_F32,
         &[
             q_buf.handle(),
-            rope_cos_buf.handle(),
-            rope_sin_buf.handle(),
-            q_rot.handle(),
-        ],
-        &[
-            batch_size as u32,
-            num_heads as u32,
-            head_dim as u32,
-            rotary_dim as u32,
-        ],
-        Workgroups::OneD((batch_size * q_h_d).div_ceil(256) as u32),
-    )?;
-    batch.record_shader_no_previous_barrier(
-        shaders::VK_ROPE_F32,
-        &[
             k_buf.handle(),
             rope_cos_buf.handle(),
             rope_sin_buf.handle(),
+            q_rot.handle(),
             k_rot.handle(),
         ],
         &[
             batch_size as u32,
+            num_heads as u32,
             num_kv_heads as u32,
             head_dim as u32,
             rotary_dim as u32,
         ],
-        Workgroups::OneD((batch_size * k_dim).div_ceil(256) as u32),
+        Workgroups::OneD((batch_size * (q_h_d + k_dim)).div_ceil(256) as u32),
     )?;
     batch.record_shader(
         shaders::PAGED_KV_WRITE_SLOTS,

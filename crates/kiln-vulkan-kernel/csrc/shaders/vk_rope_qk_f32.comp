@@ -1,0 +1,80 @@
+// Combined Q/K RoPE forward for F32 resident decode.
+//
+// Q input/output shape: [rows, num_q_heads, head_dim]
+// K input/output shape: [rows, num_kv_heads, head_dim]
+// Cos/sin table:       [rows, rotary_dim/2]
+//
+// Push constants: [rows, num_q_heads, num_kv_heads, head_dim, rotary_dim]
+// Bindings: q_in, k_in, cos, sin, q_out, k_out
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint rows;
+    uint num_q_heads;
+    uint num_kv_heads;
+    uint head_dim;
+    uint rotary_dim;
+};
+
+layout(binding = 0) readonly  buffer QInBuf  { float q_in[]; };
+layout(binding = 1) readonly  buffer KInBuf  { float k_in[]; };
+layout(binding = 2) readonly  buffer CosBuf  { float data_cos[]; };
+layout(binding = 3) readonly  buffer SinBuf  { float data_sin[]; };
+layout(binding = 4) writeonly buffer QOutBuf { float q_out[]; };
+layout(binding = 5) writeonly buffer KOutBuf { float k_out[]; };
+
+void main() {
+    uint linear = gl_GlobalInvocationID.x;
+    uint q_total = rows * num_q_heads * head_dim;
+    uint k_total = rows * num_kv_heads * head_dim;
+    uint total = q_total + k_total;
+    if (linear >= total) return;
+
+    bool is_q = linear < q_total;
+    uint local = is_q ? linear : linear - q_total;
+    uint num_heads = is_q ? num_q_heads : num_kv_heads;
+    uint d = local % head_dim;
+    uint h_and_r = local / head_dim;
+    uint h = h_and_r % num_heads;
+    uint r = h_and_r / num_heads;
+
+    if (d >= rotary_dim) {
+        if (is_q) {
+            q_out[local] = q_in[local];
+        } else {
+            k_out[local] = k_in[local];
+        }
+        return;
+    }
+
+    uint half_r = rotary_dim / 2u;
+    uint pair_index;
+    bool is_low_half;
+    if (d < half_r) {
+        pair_index = d;
+        is_low_half = true;
+    } else {
+        pair_index = d - half_r;
+        is_low_half = false;
+    }
+
+    uint base_h = (r * num_heads + h) * head_dim;
+    float low = is_q ? q_in[base_h + pair_index] : k_in[base_h + pair_index];
+    float high = is_q
+        ? q_in[base_h + pair_index + half_r]
+        : k_in[base_h + pair_index + half_r];
+
+    float c = data_cos[r * half_r + pair_index];
+    float s = data_sin[r * half_r + pair_index];
+    float out_val = is_low_half ? low * c - high * s : low * s + high * c;
+
+    if (is_q) {
+        q_out[local] = out_val;
+    } else {
+        k_out[local] = out_val;
+    }
+}

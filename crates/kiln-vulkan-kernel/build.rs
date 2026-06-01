@@ -351,6 +351,7 @@ const SHADERS: &[(&str, &str)] = &[
     ("vk_silu_bwd_f32", "SPIR_V_VK_SILU_BWD_F32"),
     ("vk_silu_bwd_f32_offset", "SPIR_V_VK_SILU_BWD_F32_OFFSET"),
     ("vk_rope_f32", "SPIR_V_VK_ROPE_F32"),
+    ("vk_rope_qk_f32", "SPIR_V_VK_ROPE_QK_F32"),
     ("vk_rope_bwd_f32", "SPIR_V_VK_ROPE_BWD_F32"),
     ("vk_causal_mask_add_f32", "SPIR_V_VK_CAUSAL_MASK_ADD_F32"),
     ("vk_scale_inplace_f32", "SPIR_V_VK_SCALE_INPLACE_F32"),

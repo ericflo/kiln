@@ -726,7 +726,10 @@ fn run_full_token_resident_mixed_batched(
         env!("CARGO_MANIFEST_DIR"),
         "/csrc/shaders/qwen_rmsnorm_forward.comp"
     );
-    let rope_shader = concat!(env!("CARGO_MANIFEST_DIR"), "/csrc/shaders/vk_rope_f32.comp");
+    let rope_qk_shader = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/csrc/shaders/vk_rope_qk_f32.comp"
+    );
     let paged_attn_shader = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/csrc/shaders/paged_attn_decode_batch.comp"
@@ -932,36 +935,25 @@ fn run_full_token_resident_mixed_batched(
                         Workgroups::OneD((batch * (num_heads + num_kv_heads)) as u32),
                     )?;
                     b.record_shader(
-                        rope_shader,
+                        rope_qk_shader,
                         &[
                             fa_q_buf.handle(),
-                            cos_buf.handle(),
-                            sin_buf.handle(),
-                            fa_q_rot.handle(),
-                        ],
-                        &[
-                            batch as u32,
-                            num_heads as u32,
-                            head_dim as u32,
-                            rotary_dim as u32,
-                        ],
-                        Workgroups::OneD((batch * num_heads * head_dim).div_ceil(256) as u32),
-                    )?;
-                    b.record_shader_no_previous_barrier(
-                        rope_shader,
-                        &[
                             fa_k_buf.handle(),
                             cos_buf.handle(),
                             sin_buf.handle(),
+                            fa_q_rot.handle(),
                             fa_k_rot.handle(),
                         ],
                         &[
                             batch as u32,
+                            num_heads as u32,
                             num_kv_heads as u32,
                             head_dim as u32,
                             rotary_dim as u32,
                         ],
-                        Workgroups::OneD((batch * num_kv_heads * head_dim).div_ceil(256) as u32),
+                        Workgroups::OneD(
+                            (batch * (num_heads + num_kv_heads) * head_dim).div_ceil(256) as u32,
+                        ),
                     )?;
                     if use_paged_attention {
                         let cache = paged_cache.as_ref().expect("paged cache");
@@ -1873,7 +1865,10 @@ fn run_full_step_resident_batched(
         env!("CARGO_MANIFEST_DIR"),
         "/csrc/shaders/qwen_rmsnorm_forward.comp"
     );
-    let rope_shader = concat!(env!("CARGO_MANIFEST_DIR"), "/csrc/shaders/vk_rope_f32.comp");
+    let rope_qk_shader = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/csrc/shaders/vk_rope_qk_f32.comp"
+    );
     let paged_attn_shader = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/csrc/shaders/paged_attn_decode_batch.comp"
@@ -1971,38 +1966,27 @@ fn run_full_step_resident_batched(
                 ],
                 Workgroups::OneD((batch * (num_heads + num_kv_heads)) as u32),
             )?;
-            // 4) RoPE on Q
+            // 4) RoPE on Q and K.
             b.record_shader(
-                rope_shader,
+                rope_qk_shader,
                 &[
                     q_buf.handle(),
-                    cos_buf.handle(),
-                    sin_buf.handle(),
-                    q_rot.handle(),
-                ],
-                &[
-                    batch as u32,
-                    num_heads as u32,
-                    head_dim as u32,
-                    rotary_dim as u32,
-                ],
-                Workgroups::OneD((batch * num_heads * head_dim).div_ceil(256) as u32),
-            )?;
-            b.record_shader_no_previous_barrier(
-                rope_shader,
-                &[
                     k_buf.handle(),
                     cos_buf.handle(),
                     sin_buf.handle(),
+                    q_rot.handle(),
                     k_rot.handle(),
                 ],
                 &[
                     batch as u32,
+                    num_heads as u32,
                     num_kv_heads as u32,
                     head_dim as u32,
                     rotary_dim as u32,
                 ],
-                Workgroups::OneD((batch * num_kv_heads * head_dim).div_ceil(256) as u32),
+                Workgroups::OneD(
+                    (batch * (num_heads + num_kv_heads) * head_dim).div_ceil(256) as u32,
+                ),
             )?;
             // 5) Paged attention
             b.record_shader(
@@ -2138,7 +2122,10 @@ fn run_full_token_resident_batched(
         env!("CARGO_MANIFEST_DIR"),
         "/csrc/shaders/qwen_rmsnorm_forward.comp"
     );
-    let rope_shader = concat!(env!("CARGO_MANIFEST_DIR"), "/csrc/shaders/vk_rope_f32.comp");
+    let rope_qk_shader = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/csrc/shaders/vk_rope_qk_f32.comp"
+    );
     let paged_attn_shader = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/csrc/shaders/paged_attn_decode_batch.comp"
@@ -2236,36 +2223,25 @@ fn run_full_token_resident_batched(
                     Workgroups::OneD((batch * (num_heads + num_kv_heads)) as u32),
                 )?;
                 b.record_shader(
-                    rope_shader,
+                    rope_qk_shader,
                     &[
                         q_buf.handle(),
-                        cos_buf.handle(),
-                        sin_buf.handle(),
-                        q_rot.handle(),
-                    ],
-                    &[
-                        batch as u32,
-                        num_heads as u32,
-                        head_dim as u32,
-                        rotary_dim as u32,
-                    ],
-                    Workgroups::OneD((batch * num_heads * head_dim).div_ceil(256) as u32),
-                )?;
-                b.record_shader_no_previous_barrier(
-                    rope_shader,
-                    &[
                         k_buf.handle(),
                         cos_buf.handle(),
                         sin_buf.handle(),
+                        q_rot.handle(),
                         k_rot.handle(),
                     ],
                     &[
                         batch as u32,
+                        num_heads as u32,
                         num_kv_heads as u32,
                         head_dim as u32,
                         rotary_dim as u32,
                     ],
-                    Workgroups::OneD((batch * num_kv_heads * head_dim).div_ceil(256) as u32),
+                    Workgroups::OneD(
+                        (batch * (num_heads + num_kv_heads) * head_dim).div_ceil(256) as u32,
+                    ),
                 )?;
                 b.record_shader(
                     paged_attn_shader,
@@ -2408,7 +2384,10 @@ fn run_full_token_resident_paged(
         env!("CARGO_MANIFEST_DIR"),
         "/csrc/shaders/qwen_rmsnorm_forward.comp"
     );
-    let rope_shader = concat!(env!("CARGO_MANIFEST_DIR"), "/csrc/shaders/vk_rope_f32.comp");
+    let rope_qk_shader = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/csrc/shaders/vk_rope_qk_f32.comp"
+    );
     let paged_attn_splitk_shader = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/csrc/shaders/paged_attn_decode_batch_paged_splitk.comp"
@@ -2550,39 +2529,27 @@ fn run_full_token_resident_paged(
                     ],
                     Workgroups::OneD((batch * (num_heads + num_kv_heads)) as u32),
                 )?;
-                // 5) RoPE Q
+                // 5) RoPE Q+K
                 b.record_shader(
-                    rope_shader,
+                    rope_qk_shader,
                     &[
                         q_buf.handle(),
-                        cos_buf.handle(),
-                        sin_buf.handle(),
-                        q_rot.handle(),
-                    ],
-                    &[
-                        batch as u32,
-                        num_heads as u32,
-                        head_dim as u32,
-                        rotary_dim as u32,
-                    ],
-                    Workgroups::OneD((batch * num_heads * head_dim).div_ceil(256) as u32),
-                )?;
-                // 6) RoPE K
-                b.record_shader_no_previous_barrier(
-                    rope_shader,
-                    &[
                         k_buf.handle(),
                         cos_buf.handle(),
                         sin_buf.handle(),
+                        q_rot.handle(),
                         k_rot.handle(),
                     ],
                     &[
                         batch as u32,
+                        num_heads as u32,
                         num_kv_heads as u32,
                         head_dim as u32,
                         rotary_dim as u32,
                     ],
-                    Workgroups::OneD((batch * num_kv_heads * head_dim).div_ceil(256) as u32),
+                    Workgroups::OneD(
+                        (batch * (num_heads + num_kv_heads) * head_dim).div_ceil(256) as u32,
+                    ),
                 )?;
                 // 7) Write K/V to resident paged pool at each row's slot.
                 let elements_per_slot = num_kv_heads * head_dim;
