@@ -178,6 +178,11 @@ raw F32 bytes and rebuilds CPU kt tensors with `Tensor::from_raw_bytes_on`,
 avoiding the previous `to_vec_f32` typed decode and `Tensor::from_vec`
 rehydration. `vk_f32_tensor_to_cpu_tensor_rebuilds_from_raw_bytes` covers that
 readback helper on Vulkan hardware.
+The output/state pair now also shares one readback staging buffer and one queue
+submission through `VulkanBuffer::read_back_batch`; kernel-crate coverage
+(`read_back_batch_matches_individual_reads`) checks the generic primitive, and
+`vk_f32_tensors_to_cpu_tensors_batched_rebuilds_from_raw_bytes` covers the
+app-facing F32 tensor reconstruction path.
 
 **Update — full-attention prefill wrapper stays kt-native:** the Vulkan
 `flash_attn_prefill` implementation now extracts Q/K/V F32 bytes directly from

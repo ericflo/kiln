@@ -632,6 +632,103 @@ impl VulkanBuffer {
         Ok(data)
     }
 
+    /// Read multiple device buffers back through one staging buffer and one
+    /// queue submission.
+    pub fn read_back_batch(
+        device: &Arc<ash::Device>,
+        host_mem_type: u32,
+        queue: vk::Queue,
+        queue_family_index: u32,
+        sources: &[&VulkanBuffer],
+    ) -> Result<Vec<Vec<u8>>> {
+        if sources.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut dst_offsets = Vec::with_capacity(sources.len());
+        let mut total_staging_bytes = 0u64;
+        for (idx, src) in sources.iter().enumerate() {
+            anyhow::ensure!(
+                src.size > 0,
+                "read_back_batch[{idx}]: source buffer must be non-empty"
+            );
+            dst_offsets.push(total_staging_bytes);
+            total_staging_bytes = total_staging_bytes.checked_add(src.size).ok_or_else(|| {
+                anyhow::anyhow!("read_back_batch: staging size overflow")
+            })?;
+        }
+        let total_len = usize::try_from(total_staging_bytes)
+            .context("read_back_batch: staging size exceeds usize")?;
+        let staging =
+            VulkanBuffer::create_host_visible(device, host_mem_type, total_staging_bytes)?;
+
+        let pool_info = make_pool_info(queue_family_index);
+        let pool = unsafe {
+            device
+                .create_command_pool(&pool_info, None)
+                .context("read_back_batch: create_command_pool")?
+        };
+        let alloc_info = make_alloc_info(pool);
+        let command_buffers =
+            crate::vk_raw::allocate_command_buffers(device.handle(), &alloc_info, 1)
+                .context("read_back_batch: allocate_command_buffers")?;
+        let cmd = command_buffers[0];
+
+        unsafe {
+            device
+                .begin_command_buffer(cmd, &make_begin_info())
+                .context("read_back_batch: begin_command_buffer")?;
+            for (i, src) in sources.iter().enumerate() {
+                let copy = vk::BufferCopy::default()
+                    .dst_offset(dst_offsets[i])
+                    .size(src.size);
+                device.cmd_copy_buffer(cmd, src.buffer, staging.buffer, &[copy]);
+            }
+            device
+                .end_command_buffer(cmd)
+                .context("read_back_batch: end_command_buffer")?;
+            device
+                .queue_submit(queue, &[make_submit_info(&[cmd])], vk::Fence::null())
+                .context("read_back_batch: queue_submit")?;
+            device
+                .queue_wait_idle(queue)
+                .context("read_back_batch: queue_wait_idle")?;
+        }
+
+        let mapped_ptr = unsafe {
+            device
+                .map_memory(
+                    staging.memory,
+                    0,
+                    vk::WHOLE_SIZE,
+                    vk::MemoryMapFlags::empty(),
+                )
+                .map_err(|e| anyhow::anyhow!("read_back_batch: map_memory failed: {:?}", e))?
+        };
+        let mapped = unsafe {
+            std::slice::from_raw_parts(mapped_ptr as *const u8, total_len)
+        };
+        let mut out = Vec::with_capacity(sources.len());
+        for (idx, src) in sources.iter().enumerate() {
+            let start = usize::try_from(dst_offsets[idx])
+                .context("read_back_batch: offset exceeds usize")?;
+            let len = usize::try_from(src.size)
+                .context("read_back_batch: source size exceeds usize")?;
+            let end = start
+                .checked_add(len)
+                .ok_or_else(|| anyhow::anyhow!("read_back_batch[{idx}]: slice overflow"))?;
+            out.push(mapped[start..end].to_vec());
+        }
+
+        unsafe {
+            device.unmap_memory(staging.memory);
+            device.free_command_buffers(pool, &command_buffers);
+            device.destroy_command_pool(pool, None);
+        }
+
+        Ok(out)
+    }
+
     /// Read data back using an externally synchronized reusable command pool.
     pub fn read_back_with_command_pool(
         device: &Arc<ash::Device>,
@@ -782,5 +879,70 @@ impl VulkanBuffer {
             self.device.unmap_memory(self.memory);
         }
         Ok(bytes)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn read_back_batch_matches_individual_reads() -> Result<()> {
+        let Ok(vk_device) = crate::VulkanDevice::new() else {
+            eprintln!("Vulkan device unavailable, skipping");
+            return Ok(());
+        };
+        let vk_device = Arc::new(vk_device);
+        let first = (0u8..16).collect::<Vec<_>>();
+        let second = (32u8..56).collect::<Vec<_>>();
+
+        let first_buffer = VulkanBuffer::create_device_local(
+            vk_device.device(),
+            vk_device.device_local_mem_type(),
+            first.len() as u64,
+        )?;
+        let second_buffer = VulkanBuffer::create_device_local(
+            vk_device.device(),
+            vk_device.device_local_mem_type(),
+            second.len() as u64,
+        )?;
+        VulkanBuffer::upload_data(
+            vk_device.device(),
+            vk_device.host_visible_mem_type(),
+            vk_device.queue(),
+            vk_device.queue_family_index(),
+            &first_buffer,
+            &first,
+        )?;
+        VulkanBuffer::upload_data(
+            vk_device.device(),
+            vk_device.host_visible_mem_type(),
+            vk_device.queue(),
+            vk_device.queue_family_index(),
+            &second_buffer,
+            &second,
+        )?;
+
+        let batched = VulkanBuffer::read_back_batch(
+            vk_device.device(),
+            vk_device.host_visible_mem_type(),
+            vk_device.queue(),
+            vk_device.queue_family_index(),
+            &[&first_buffer, &second_buffer],
+        )?;
+
+        assert_eq!(batched.len(), 2);
+        assert_eq!(batched[0], first);
+        assert_eq!(batched[1], second);
+        let empty: Vec<&VulkanBuffer> = Vec::new();
+        assert!(VulkanBuffer::read_back_batch(
+            vk_device.device(),
+            vk_device.host_visible_mem_type(),
+            vk_device.queue(),
+            vk_device.queue_family_index(),
+            &empty,
+        )?
+        .is_empty());
+        Ok(())
     }
 }

@@ -151,8 +151,9 @@ fn upload_gdn_chunkwise_inputs_from_cpu_bytes_vk(
     })
 }
 
-fn vk_f32_tensor_to_cpu_tensor_vk(
+fn cpu_f32_tensor_from_vk_bytes_vk(
     tensor: &kiln_vulkan_kernel::vk_tensor::VkTensor,
+    mut bytes: Vec<u8>,
     context: &'static str,
 ) -> Result<kiln_tensor::Tensor> {
     anyhow::ensure!(
@@ -160,8 +161,18 @@ fn vk_f32_tensor_to_cpu_tensor_vk(
         "{context}: expected F32 VkTensor, got {:?}",
         tensor.dtype()
     );
+    let logical = tensor
+        .num_elements()
+        .checked_mul(tensor.dtype().byte_size())
+        .ok_or_else(|| anyhow::anyhow!("{context}: byte-size overflow"))?;
+    anyhow::ensure!(
+        bytes.len() >= logical,
+        "{context}: readback produced {} bytes, expected at least {}",
+        bytes.len(),
+        logical
+    );
+    bytes.truncate(logical);
     let shape = tensor.shape().to_vec();
-    let bytes = tensor.to_bytes().with_context(|| format!("{context}: read bytes"))?;
     kiln_tensor::Tensor::from_raw_bytes_on(
         kiln_tensor::Device::Cpu,
         kiln_tensor::DType::F32,
@@ -169,6 +180,64 @@ fn vk_f32_tensor_to_cpu_tensor_vk(
         shape,
     )
     .map_err(|e| anyhow::anyhow!("{context}: rebuild CPU kt tensor from bytes: {e}"))
+}
+
+#[cfg(test)]
+fn vk_f32_tensor_to_cpu_tensor_vk(
+    tensor: &kiln_vulkan_kernel::vk_tensor::VkTensor,
+    context: &'static str,
+) -> Result<kiln_tensor::Tensor> {
+    let bytes = tensor.to_bytes().with_context(|| format!("{context}: read bytes"))?;
+    cpu_f32_tensor_from_vk_bytes_vk(tensor, bytes, context)
+}
+
+fn vk_f32_tensors_to_cpu_tensors_batched_vk(
+    tensors: &[(&kiln_vulkan_kernel::vk_tensor::VkTensor, &'static str)],
+) -> Result<Vec<kiln_tensor::Tensor>> {
+    use kiln_vulkan_kernel::VulkanBuffer;
+
+    if tensors.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let vk_device = tensors[0].0.device();
+    for (tensor, context) in tensors {
+        anyhow::ensure!(
+            tensor.dtype() == kiln_vulkan_kernel::vk_tensor::VkDType::F32,
+            "{context}: expected F32 VkTensor, got {:?}",
+            tensor.dtype()
+        );
+        anyhow::ensure!(
+            Arc::ptr_eq(tensor.device(), vk_device),
+            "{context}: batched readback requires one Vulkan device"
+        );
+    }
+
+    let buffers: Vec<&VulkanBuffer> = tensors
+        .iter()
+        .map(|(tensor, _)| tensor.buffer().as_ref())
+        .collect();
+    let raw_bytes = VulkanBuffer::read_back_batch(
+        vk_device.device(),
+        vk_device.host_visible_mem_type(),
+        vk_device.queue(),
+        vk_device.queue_family_index(),
+        &buffers,
+    )
+    .context("Vulkan F32 batch readback")?;
+    anyhow::ensure!(
+        raw_bytes.len() == tensors.len(),
+        "Vulkan F32 batch readback returned {} buffers, expected {}",
+        raw_bytes.len(),
+        tensors.len()
+    );
+
+    let mut out = Vec::with_capacity(tensors.len());
+    for (idx, bytes) in raw_bytes.into_iter().enumerate() {
+        let (tensor, context) = tensors[idx];
+        out.push(cpu_f32_tensor_from_vk_bytes_vk(tensor, bytes, context)?);
+    }
+    Ok(out)
 }
 
 /// Vulkan backend for Kiln.
@@ -4759,11 +4828,20 @@ impl BackendRuntime for VulkanBackend {
                 }
             };
 
-        // Read back output + the updated state into CPU-host kt tensors
-        // without decoding the raw F32 bytes through an intermediate Vec<f32>.
-        let out_kt = vk_f32_tensor_to_cpu_tensor_vk(&out_vk, "gdn_chunkwise_forward output")?;
-        let new_state =
-            vk_f32_tensor_to_cpu_tensor_vk(&state_vk, "gdn_chunkwise_forward state")?;
+        // Read back output + the updated state together, then rebuild CPU-host
+        // kt tensors without decoding through an intermediate Vec<f32>.
+        let [out_kt, new_state]: [kiln_tensor::Tensor; 2] =
+            vk_f32_tensors_to_cpu_tensors_batched_vk(&[
+                (&out_vk, "gdn_chunkwise_forward output"),
+                (&state_vk, "gdn_chunkwise_forward state"),
+            ])?
+            .try_into()
+            .map_err(|readbacks: Vec<_>| {
+                anyhow::anyhow!(
+                    "gdn_chunkwise_forward: read back {} tensors, expected 2",
+                    readbacks.len()
+                )
+            })?;
         anyhow::ensure!(
             new_state.shape() == state_shape.as_slice(),
             "gdn_chunkwise_forward: state shape mismatch after readback: got {:?}, expected {:?}",
@@ -5402,6 +5480,43 @@ mod vk_upload_tests {
 
         assert_eq!(cpu_tensor.shape(), &[2, 2]);
         assert_eq!(cpu_tensor.flatten_all()?.to_vec1::<f32>()?, data);
+        Ok(())
+    }
+
+    #[test]
+    fn vk_f32_tensors_to_cpu_tensors_batched_rebuilds_from_raw_bytes() -> Result<()> {
+        let Ok(vk_device) = kiln_vulkan_kernel::VulkanDevice::new() else {
+            eprintln!("Vulkan device unavailable, skipping");
+            return Ok(());
+        };
+        let vk_device = Arc::new(vk_device);
+        let out_data = vec![1.0f32, 2.0, 3.0, 4.0];
+        let state_data = vec![5.5f32, 6.5, 7.5, 8.5, 9.5, 10.5];
+        let out_vk = kiln_vulkan_kernel::vk_tensor::VkTensor::from_f32_slice(
+            &out_data,
+            vec![2, 2],
+            Arc::clone(&vk_device),
+        )?;
+        let state_vk = kiln_vulkan_kernel::vk_tensor::VkTensor::from_f32_slice(
+            &state_data,
+            vec![1, 2, 3],
+            vk_device,
+        )?;
+
+        let [out_cpu, state_cpu]: [kiln_tensor::Tensor; 2] =
+            vk_f32_tensors_to_cpu_tensors_batched_vk(&[
+                (&out_vk, "test batched output readback"),
+                (&state_vk, "test batched state readback"),
+            ])?
+            .try_into()
+            .map_err(|readbacks: Vec<_>| {
+                anyhow::anyhow!("test batched readback returned {} tensors", readbacks.len())
+            })?;
+
+        assert_eq!(out_cpu.shape(), &[2, 2]);
+        assert_eq!(state_cpu.shape(), &[1, 2, 3]);
+        assert_eq!(out_cpu.flatten_all()?.to_vec1::<f32>()?, out_data);
+        assert_eq!(state_cpu.flatten_all()?.to_vec1::<f32>()?, state_data);
         Ok(())
     }
 }
