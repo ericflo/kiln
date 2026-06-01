@@ -111,3 +111,13 @@ A recurrent state MUST change every decode step (`S_t = f(S_{t-1}, x_t)`). Here 
 - 100/101 (bs>1 batched): separate path, still gated off.
 
 None are merge-complete. The bs=1 keystone needs BUG 1 fix + BUG 2 fix together.
+
+## BUG 2 FIX — partial, validated (2026-06-01, branch `wip/1082-box2-fix-validate`)
+
+Applied an in-place-restore wrapper around `gated_deltanet_forward_decode_if` (forward.rs): snapshot the persistent recurrent+conv state buffers, run the (functional) decode, then `slice_set` the new state back into the persistent buffers (captured copy, survives replay) and restore the slots. Re-ran the `KILN_DEBUG_GDN_STATE` probe under graphs+replay:
+
+- **RECURRENT state now ADVANCES every step** (rs0_sumsq 1483→1421→1508→1602→1503→1487… all distinct) — the fix works for `recurrent_states`. ✓
+- **CONV state still partially frozen** (conv0_sumsq has consecutive repeats: 98572 at steps 49/50 & 56/57; 79703 at 58/59) — `conv_states` is not fully advancing under replay. ✗
+- **Output still doubled** ("Here's a a a a thinking thinking thinking thinking…") — so fixing the recurrent state alone does NOT fix the doubling; the conv state (and possibly other per-decode buffers) freezing under replay is still in play.
+
+**Conclusion:** the "functional state update doesn't survive replay" bug is a CLASS, not a single site. The recurrent-state half is fixed + validated; the conv-state half is not (the id-guard wrapper either skips it because the conv update is already "in-place" to a NON-persistent buffer, or the conv update path differs from the recurrent one). **Next:** trace the conv-state (`causal_conv1d_update` / `conv_states[i]`) decode update — confirm whether it writes the persistent `conv_states[i]` buffer in-place under capture, or a transient one; apply the same in-place-into-persistent treatment. Then re-run the probe (conv0_sumsq must change every step) AND confirm coherent output before merging. The fix is NOT mergeable until the output is coherent.
