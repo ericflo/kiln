@@ -192,6 +192,16 @@ the same `sdpa_prefill_f32` Vulkan kernel route and shape gates. Focused check:
 `cargo check -p kiln-model --no-default-features --features vulkan` passes with
 the repo's existing warning backlog.
 
+**Update — generic BF16 linear rows8 threshold is runtime-tunable:** the rows8
+selector used by attention out-proj, GDN out-proj, resident BF16 linear, and
+batched lm-head argmax/sample now honors
+`KILN_VULKAN_LINEAR_BF16_ROWS8_MIN_BATCH`, defaulting to 64; the existing rows8
+disable envs still win. Same-session mixed-paged batch64 microbench on Strix
+Halo kept the default: generic BF16 linear rows8 enabled measured 450.6 ms/iter
+(142 rows/s), while forcing it off measured 459.1 ms/iter (139 rows/s).
+Disabling full-attention QKV rows8 was also slower at 452.3 ms/iter. Treat this
+as a hardware-portability tuning hook, not a default flip.
+
 Other proper work-packages for full saturation (per "max out the hardware in
 every config"):
 - **True multi-row batched resident decode** (bs>1 / continuous-batched

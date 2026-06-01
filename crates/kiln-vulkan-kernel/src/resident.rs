@@ -28,7 +28,7 @@ use crate::{shaders, CommandBatch, VulkanBuffer, VulkanDevice, Workgroups};
 
 use crate::kernels::{
     linear_decode_bf16w_rows4_enabled, linear_decode_bf16w_rows8_enabled,
-    mlp_bf16_rows8_min_batch, LINEAR_DECODE_BF16W_ROWS8_MIN_BATCH,
+    linear_decode_bf16w_rows8_min_batch, mlp_bf16_rows8_min_batch,
 };
 
 /// Selection helper shared between the f32-weights and packed-bf16
@@ -58,7 +58,7 @@ fn linear_decode_shader_plan(
         (glsl_path, push, wg)
     } else {
         let rows8 = packed_bf16_weights
-            && batch >= LINEAR_DECODE_BF16W_ROWS8_MIN_BATCH
+            && batch >= linear_decode_bf16w_rows8_min_batch()
             && linear_decode_bf16w_rows8_enabled();
         let rows4 = packed_bf16_weights
             && batch >= 16

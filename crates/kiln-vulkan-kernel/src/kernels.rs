@@ -7,9 +7,9 @@ use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 const DEFAULT_MLP_BF16_ROWS8_MIN_BATCH: usize = 256;
+const DEFAULT_LINEAR_DECODE_BF16W_ROWS8_MIN_BATCH: usize = 64;
 pub(crate) const GDN_IN_PROJ_ROWS4_MIN_BATCH: usize = 16;
 pub(crate) const GDN_IN_PROJ_ROWS8_MIN_BATCH: usize = 64;
-pub(crate) const LINEAR_DECODE_BF16W_ROWS8_MIN_BATCH: usize = 64;
 
 fn env_truthy(name: &str) -> bool {
     std::env::var(name)
@@ -69,6 +69,17 @@ pub(crate) fn linear_decode_bf16w_rows8_enabled() -> bool {
     *ENABLED.get_or_init(|| {
         std::env::var("KILN_DISABLE_VULKAN_LINEAR_DECODE_BF16W_ROWS8").is_err()
             && std::env::var("KILN_DISABLE_VULKAN_LINEAR_BF16W_ROWS8").is_err()
+    })
+}
+
+pub(crate) fn linear_decode_bf16w_rows8_min_batch() -> usize {
+    static VALUE: OnceLock<usize> = OnceLock::new();
+    *VALUE.get_or_init(|| {
+        std::env::var("KILN_VULKAN_LINEAR_BF16_ROWS8_MIN_BATCH")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(DEFAULT_LINEAR_DECODE_BF16W_ROWS8_MIN_BATCH)
     })
 }
 
@@ -3513,7 +3524,7 @@ pub fn dispatch_linear_decode_sample_batch_bytes(
             .context("failed to create linear_decode_sample_batch output staging buffer")?;
 
     let rows8 = packed_bf16_weights
-        && batch >= LINEAR_DECODE_BF16W_ROWS8_MIN_BATCH
+        && batch >= linear_decode_bf16w_rows8_min_batch()
         && linear_decode_bf16w_rows8_enabled();
     let rows4 = packed_bf16_weights && !rows8 && batch >= 16 && linear_decode_bf16w_rows4_enabled();
     let lm_glsl = if packed_bf16_weights {
@@ -3689,7 +3700,7 @@ fn dispatch_linear_decode_argmax_batched_cached_impl_bytes(
         .context("failed to create batched linear argmax output staging buffer")?;
 
     let rows8 = packed_bf16_weights
-        && batch >= LINEAR_DECODE_BF16W_ROWS8_MIN_BATCH
+        && batch >= linear_decode_bf16w_rows8_min_batch()
         && linear_decode_bf16w_rows8_enabled();
     let rows4 = packed_bf16_weights && !rows8 && batch >= 16 && linear_decode_bf16w_rows4_enabled();
     let blocks_glsl = if rows8 {

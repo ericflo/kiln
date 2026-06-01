@@ -45,7 +45,7 @@ const FULL_ATTN_QKV_BF16_ROWS8_MIN_BATCH: usize = 64;
 const GDN_IN_PROJ_ROWS4_MIN_BATCH: usize = 16;
 const GDN_IN_PROJ_ROWS8_MIN_BATCH: usize = 64;
 const LM_HEAD_BF16_ROWS4_MIN_BATCH: usize = 16;
-const LINEAR_BF16_ROWS8_MIN_BATCH: usize = 64;
+const DEFAULT_LINEAR_BF16_ROWS8_MIN_BATCH: usize = 64;
 
 // (#1082) The previous process-global bridge cache is gone. It existed to give
 // shared upload helpers a stable `TensorId` per weight, but memoized a full
@@ -116,6 +116,17 @@ fn mlp_bf16_rows8_min_batch() -> usize {
     })
 }
 
+fn linear_bf16_rows8_min_batch() -> usize {
+    static VALUE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *VALUE.get_or_init(|| {
+        std::env::var("KILN_VULKAN_LINEAR_BF16_ROWS8_MIN_BATCH")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(DEFAULT_LINEAR_BF16_ROWS8_MIN_BATCH)
+    })
+}
+
 fn full_attn_qkv_gate_split_bf16w_plan(batch: usize, total_out: usize) -> (&'static str, u32) {
     let rows8 = batch >= FULL_ATTN_QKV_BF16_ROWS8_MIN_BATCH
         && enabled_unless_disabled("KILN_DISABLE_VULKAN_FULL_ATTN_QKV_BF16W_ROWS8");
@@ -140,7 +151,7 @@ fn full_attn_qkv_gate_split_bf16w_plan(batch: usize, total_out: usize) -> (&'sta
 }
 
 fn linear_bf16w_batched_plan(batch: usize, out_dim: usize) -> (&'static str, u32) {
-    let rows8 = batch >= LINEAR_BF16_ROWS8_MIN_BATCH && linear_bf16w_rows8_enabled();
+    let rows8 = batch >= linear_bf16_rows8_min_batch() && linear_bf16w_rows8_enabled();
     let rows4 = batch >= 16 && !rows8 && linear_bf16w_rows4_enabled();
     let row_groups = if rows8 {
         batch.div_ceil(8)
@@ -2800,7 +2811,7 @@ pub fn record_final_norm_lm_head_argmax_batched_into(
         &[batch_size as u32, hidden as u32, eps.to_bits()],
         Workgroups::OneD(batch_size as u32),
     )?;
-    let rows8 = batch_size >= LINEAR_BF16_ROWS8_MIN_BATCH && linear_bf16w_rows8_enabled();
+    let rows8 = batch_size >= linear_bf16_rows8_min_batch() && linear_bf16w_rows8_enabled();
     let rows4 = batch_size >= LM_HEAD_BF16_ROWS4_MIN_BATCH && !rows8;
     let block_shader = if rows8 {
         shaders::LINEAR_DECODE_ARGMAX_BATCHED_BLOCKS_ROWS8_BF16W
@@ -2891,7 +2902,7 @@ pub fn record_final_norm_lm_head_sample_batched_into(
         &[batch_size as u32, hidden as u32, eps.to_bits()],
         Workgroups::OneD(batch_size as u32),
     )?;
-    let rows8 = batch_size >= LINEAR_BF16_ROWS8_MIN_BATCH && linear_bf16w_rows8_enabled();
+    let rows8 = batch_size >= linear_bf16_rows8_min_batch() && linear_bf16w_rows8_enabled();
     let rows4 = batch_size >= LM_HEAD_BF16_ROWS4_MIN_BATCH && !rows8;
     let lm_shader = if rows8 {
         shaders::LINEAR_DECODE_BATCHED_ROWS8_BF16W
