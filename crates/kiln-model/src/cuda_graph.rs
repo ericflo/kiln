@@ -1566,6 +1566,20 @@ impl CudaGraphRunner {
                     "CUDA graph captured for decode ({} layers)",
                     config.num_layers,
                 );
+                // (#1082 Phase 5) Stream capture only RECORDS the forward — its
+                // kernels did NOT execute, so `output_logits` is still the
+                // uninitialized capture-time buffer and the in-place recurrent/
+                // KV state was not advanced. Launch the instantiated graph once
+                // now (the token/position/rotary/metadata buffers already hold
+                // THIS step's inputs) to actually compute this step + advance
+                // state, then sync so `logits` (which aliases output_logits'
+                // storage) is valid before we return it.
+                graph
+                    .launch()
+                    .context("execute captured decode graph (first run)")?;
+                stream
+                    .synchronize()
+                    .map_err(|e| anyhow::anyhow!("sync after first captured-graph launch: {e}"))?;
                 let max_seqlen_k = key.max_seqlen_k;
                 self.captured.insert(
                     key,
@@ -1864,6 +1878,17 @@ impl CudaGraphRunner {
             };
             captured
         };
+        // (#1082 Phase 5) Stream capture only RECORDED the batched forward — it
+        // did NOT execute. Launch the instantiated graph once now so
+        // output_logits holds real results (and the recurrent/KV state is
+        // advanced) before we sample, then sync.
+        captured
+            .graph
+            .launch()
+            .context("execute captured batched decode graph (first run)")?;
+        stream
+            .synchronize()
+            .map_err(|e| anyhow::anyhow!("sync after first batched captured-graph launch: {e}"))?;
         // Argmax + DtoH happens OUTSIDE the capture window — `output_logits`
         // holds the captured forward's final-norm + LM-head result.
         // #1082: `output_logits` is now a kt-native graph-stable buffer;
