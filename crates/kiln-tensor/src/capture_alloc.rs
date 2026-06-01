@@ -146,7 +146,15 @@ impl CaptureArena {
                 }
                 let storage = buf.storage.clone();
                 let view = self.borrow_view(dtype, &storage)?;
-                if zero {
+                // #1082 box-102 BUG2 diagnostic: KILN_ARENA_FORCE_ZERO=1 forces a
+                // captured per-replay memset on EVERY arena buffer (not just the
+                // `zero=true` ones). If this un-freezes the late layers on replay,
+                // the doubling is caused by an uninitialized (`zero=false`) arena
+                // buffer that the captured kernel does NOT fully overwrite — it
+                // reads the previous replay's value (stale) → the front-to-back
+                // freeze. Off by default; zero production cost.
+                let force_zero = std::env::var("KILN_ARENA_FORCE_ZERO").ok().as_deref() == Some("1");
+                if zero || force_zero {
                     // Captured memset on the active (capture) stream — recorded
                     // into the graph so every replay re-zeros the buffer.
                     self.memset_zero(&storage)?;
