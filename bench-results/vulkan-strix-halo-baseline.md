@@ -285,14 +285,17 @@ every config"):
   shader work, not paged K/V slot writes or block-table attention.
   **Update — adaptive batched split-K chunks:** short same-session sweeps show
   the batched paged-attention default should keep 4 chunks at the 16-block
-  256-token window but use 2 chunks once `max_blocks_per_seq >= 64`. At
+  256-token window, use 2 chunks once `max_blocks_per_seq >= 64` for smaller
+  batches, and keep 4 chunks for saturated batch-64+ long-context decode. At
   history 256, batch 8 measured 106.8 ms with 2 chunks vs. 106.1 ms with 4,
   and batch 64 measured 464.2 ms with 2 vs. 462.5 ms with 4. At history 1024,
   batch 32 measured 255.4 ms with 2 chunks vs. 260.7 ms with 4. At history
   2048, batch 8 measured 123.5 ms with 1 chunk, 112.1 ms with 2, 113.1 ms
   with 4, and 115.4 ms with 8. Patched no-override smoke checks measured
   history 2048 / batch 8 at 113.0 ms / 71 rows/s and history 256 / batch 64
-  at 460.3 ms / 139 rows/s.
+  at 460.3 ms / 139 rows/s. A later history-1024 batch-64 repeat measured
+  488.1 ms with 2 chunks vs. 486.5 ms with 4, so saturated long-context
+  batches now stay on 4 chunks while smaller long-context batches keep 2.
   **Update — batched argmax readback cleanup:** the native batched resident
   decode submit path now lets the final LM-head argmax reduce shader write its
   `batch * 4` byte token-id output directly into the persistent host-visible

@@ -100,6 +100,8 @@ fn paged_attn_splitk_chunks(batch_size: usize, max_blocks_per_seq: usize) -> usi
         .filter(|&n| n >= 1)
         .unwrap_or(if batch_size <= 1 {
             PAGED_ATTN_SPLITK_CHUNKS_B1
+        } else if batch_size >= 64 {
+            PAGED_ATTN_SPLITK_CHUNKS_BATCHED
         } else if max_blocks_per_seq >= PAGED_ATTN_SPLITK_LONG_MIN_BLOCKS {
             PAGED_ATTN_SPLITK_CHUNKS_BATCHED_LONG
         } else {
