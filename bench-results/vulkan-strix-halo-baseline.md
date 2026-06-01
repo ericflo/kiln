@@ -343,6 +343,13 @@ every config"):
   existing default should stay at 64 rows: history 256, warmup=1, timed=2,
   repeats=1 measured batch 64 at 461.4 ms / 139 rows/s and batch 128 at
   936.8 ms / 137 rows/s.
+  **Update — batched resident KV seeding:** when a resident batch contains
+  multiple rows that still need prompt K/V copied into the Vulkan cache, the
+  native argmax route now seeds the union of those rows' physical blocks once
+  per full-attention layer instead of calling the seeding helper one row at a
+  time. Stable row-ID batches still mark each row as seeded after the shared
+  upload; no-ID multi-row batches remain conservatively re-seeded each call,
+  but with one union upload per layer.
   **Update — Vulkan live decode batch default:** the live greedy decode batcher
   now defaults Vulkan to a 64-row max batch instead of 32; the real-model
   batching-engine actor applies the same backend-aware default when

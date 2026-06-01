@@ -21990,6 +21990,8 @@ fn try_vulkan_resident_batched_decode_argmax(
     let mut full_attn_idx = 0usize;
     for layer in weights.layers.iter() {
         if matches!(layer.attention, GpuAttentionWeights::Full(_)) {
+            let mut seed_rows = Vec::new();
+            let mut seed_tables = Vec::new();
             for row_idx in 0..batch {
                 let should_seed = if single_unidentified_row {
                     !vk_backend.full_attn_layer_seeded(full_attn_idx)
@@ -22001,17 +22003,22 @@ fn try_vulkan_resident_batched_decode_argmax(
                         .unwrap_or(true)
                 };
                 if should_seed {
-                    let row_tables = [block_tables[row_idx]];
-                    crate::vk_decode_resident::seed_vk_kv_cache_layer_blocks_from_batched_tables(
-                        vk_device,
-                        vk_kv_cache,
-                        paged_cache,
-                        full_attn_idx,
-                        &row_tables,
-                    )?;
-                    if single_unidentified_row {
-                        vk_backend.mark_full_attn_layer_seeded(full_attn_idx);
-                    } else if let Some(ids) = row_ids {
+                    seed_rows.push(row_idx);
+                    seed_tables.push(block_tables[row_idx]);
+                }
+            }
+            if !seed_tables.is_empty() {
+                crate::vk_decode_resident::seed_vk_kv_cache_layer_blocks_from_batched_tables(
+                    vk_device,
+                    vk_kv_cache,
+                    paged_cache,
+                    full_attn_idx,
+                    &seed_tables,
+                )?;
+                if single_unidentified_row {
+                    vk_backend.mark_full_attn_layer_seeded(full_attn_idx);
+                } else if let Some(ids) = row_ids {
+                    for row_idx in seed_rows {
                         vk_backend.mark_resident_decode_row_seeded(full_attn_idx, ids[row_idx]);
                     }
                 }
