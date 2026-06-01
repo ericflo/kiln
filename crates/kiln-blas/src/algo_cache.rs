@@ -201,6 +201,85 @@ pub fn save_to_path(cache: &AlgoCache, path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Parse a JSON cache blob produced by [`serialize_to_json`]. Returns an
+/// empty cache on any parse error so a corrupt or incompatible on-disk file
+/// never blocks startup. Parsed with `serde_json` (the writer is hand-rolled,
+/// but the format is plain one-level JSON), then field-extracted so missing or
+/// renamed fields degrade gracefully rather than rejecting the whole file.
+pub fn deserialize_from_json(json: &str) -> AlgoCache {
+    let mut cache = AlgoCache::new();
+    let val: serde_json::Value = match serde_json::from_str(json) {
+        Ok(v) => v,
+        Err(_) => return cache,
+    };
+    let Some(arr) = val.as_array() else {
+        return cache;
+    };
+    for entry in arr {
+        let (Some(k), Some(v)) = (entry.get("key"), entry.get("value")) else {
+            continue;
+        };
+        let shape = match k.get("shape").and_then(|s| s.as_array()) {
+            Some(a) if a.len() == 3 => [
+                a[0].as_u64().unwrap_or(0),
+                a[1].as_u64().unwrap_or(0),
+                a[2].as_u64().unwrap_or(0),
+            ],
+            _ => continue,
+        };
+        let transpose = match k.get("transpose").and_then(|t| t.as_array()) {
+            Some(a) if a.len() == 2 => [
+                a[0].as_bool().unwrap_or(false),
+                a[1].as_bool().unwrap_or(false),
+            ],
+            _ => [false, false],
+        };
+        let key = AlgoCacheKey {
+            shape,
+            input_dtype: str_field(k, "input_dtype"),
+            output_dtype: str_field(k, "output_dtype"),
+            compute_dtype: str_field(k, "compute_dtype"),
+            transpose,
+            expected_concurrent_streams: k
+                .get("expected_concurrent_streams")
+                .and_then(|x| x.as_u64())
+                .unwrap_or(1) as u8,
+            kiln_version_major: k
+                .get("kiln_version_major")
+                .and_then(|x| x.as_u64())
+                .unwrap_or(0) as u32,
+        };
+        let value = AlgoCacheValue {
+            algo_id: v.get("algo_id").and_then(|x| x.as_i64()).unwrap_or(-1) as i32,
+            workspace_bytes: v.get("workspace_bytes").and_then(|x| x.as_u64()).unwrap_or(0),
+            recorded_ms: v.get("recorded_ms").and_then(|x| x.as_f64()).unwrap_or(0.0) as f32,
+            algo_blob: v
+                .get("algo_blob_b64")
+                .and_then(|x| x.as_str())
+                .map(base64_decode)
+                .unwrap_or_default(),
+        };
+        cache.insert(key, value);
+    }
+    cache
+}
+
+/// Load a cache from `path`. Returns an empty cache (no panic) if the file is
+/// missing, unreadable, or unparseable — a stale cache must never break boot.
+pub fn load_from_path(path: &Path) -> AlgoCache {
+    match std::fs::read_to_string(path) {
+        Ok(json) => deserialize_from_json(&json),
+        Err(_) => AlgoCache::new(),
+    }
+}
+
+fn str_field(obj: &serde_json::Value, field: &str) -> String {
+    obj.get(field)
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string()
+}
+
 fn json_str(s: &str) -> String {
     // Minimal JSON-string escaper. Sufficient for short dtype names.
     let mut out = String::with_capacity(s.len() + 2);
@@ -246,6 +325,56 @@ fn base64_encode(bytes: &[u8]) -> String {
         } else {
             out.push('=');
             out.push('=');
+        }
+    }
+    out
+}
+
+/// Inverse of [`base64_encode`] — tolerant stdlib base64 decoder. Ignores
+/// `=` padding and whitespace; stops at the first invalid character.
+fn base64_decode(s: &str) -> Vec<u8> {
+    fn dval(c: u8) -> Option<u8> {
+        match c {
+            b'A'..=b'Z' => Some(c - b'A'),
+            b'a'..=b'z' => Some(c - b'a' + 26),
+            b'0'..=b'9' => Some(c - b'0' + 52),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+    let bytes: Vec<u8> = s
+        .bytes()
+        .filter(|&c| c != b'=' && !c.is_ascii_whitespace())
+        .collect();
+    let mut out = Vec::with_capacity(bytes.len() / 4 * 3);
+    for chunk in bytes.chunks(4) {
+        let mut buf = [0u8; 4];
+        let mut ok = true;
+        for (i, &c) in chunk.iter().enumerate() {
+            match dval(c) {
+                Some(x) => buf[i] = x,
+                None => {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        if !ok {
+            break;
+        }
+        let triple = ((buf[0] as u32) << 18)
+            | ((buf[1] as u32) << 12)
+            | ((buf[2] as u32) << 6)
+            | (buf[3] as u32);
+        if chunk.len() >= 2 {
+            out.push((triple >> 16) as u8);
+        }
+        if chunk.len() >= 3 {
+            out.push((triple >> 8) as u8);
+        }
+        if chunk.len() >= 4 {
+            out.push(triple as u8);
         }
     }
     out
@@ -336,5 +465,97 @@ mod tests {
         assert_eq!(base64_encode(b"AB"), "QUI=");
         assert_eq!(base64_encode(b"ABC"), "QUJD");
         assert_eq!(base64_encode(&[0xCA, 0xFE, 0xBA, 0xBE]), "yv66vg==");
+    }
+
+    #[test]
+    fn base64_decode_inverts_encode() {
+        for case in [
+            &b""[..],
+            b"A",
+            b"AB",
+            b"ABC",
+            &[0xCA, 0xFE, 0xBA, 0xBE][..],
+            &[0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02, 0x03][..],
+        ] {
+            assert_eq!(base64_decode(&base64_encode(case)), case.to_vec());
+        }
+    }
+
+    #[test]
+    fn deserialize_round_trips_serialize_all_fields() {
+        let mut c = AlgoCache::new();
+        // Non-default values in every field so the round-trip exercises them all.
+        let key = AlgoCacheKey {
+            shape: [2048, 18432, 2560],
+            input_dtype: "bf16".to_string(),
+            output_dtype: "f32".to_string(),
+            compute_dtype: "f32".to_string(),
+            transpose: [false, true],
+            expected_concurrent_streams: 4,
+            kiln_version_major: 1,
+        };
+        let val = AlgoCacheValue {
+            algo_id: 5,
+            workspace_bytes: 4_194_304,
+            recorded_ms: 0.25, // exactly representable in f32
+            algo_blob: vec![0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02, 0x03, 0x04],
+        };
+        c.insert(key.clone(), val.clone());
+        let restored = deserialize_from_json(&serialize_to_json(&c));
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored.get(&key), Some(&val));
+    }
+
+    #[test]
+    fn deserialize_negative_algo_id_round_trips() {
+        let mut c = AlgoCache::new();
+        let key = AlgoCacheKey::new(64, 64, 32, "f16");
+        c.insert(
+            key.clone(),
+            AlgoCacheValue {
+                algo_id: -1,
+                workspace_bytes: 0,
+                recorded_ms: 0.0,
+                algo_blob: vec![],
+            },
+        );
+        let restored = deserialize_from_json(&serialize_to_json(&c));
+        assert_eq!(restored.get(&key).unwrap().algo_id, -1);
+    }
+
+    #[test]
+    fn load_from_path_empty_on_missing_or_corrupt() {
+        let missing = std::path::Path::new("/tmp/kiln-nonexistent-algocache-xyz.json");
+        let _ = std::fs::remove_file(missing);
+        assert!(load_from_path(missing).is_empty());
+
+        let corrupt = std::env::temp_dir().join("kiln-corrupt-algocache.json");
+        std::fs::write(&corrupt, b"not valid json {{{").unwrap();
+        assert!(load_from_path(&corrupt).is_empty());
+        let _ = std::fs::remove_file(&corrupt);
+    }
+
+    #[test]
+    fn save_then_load_round_trip_via_disk() {
+        let tmp = std::env::temp_dir().join("kiln-algocache-disk-roundtrip.json");
+        let _ = std::fs::remove_file(&tmp);
+        let mut c = AlgoCache::new();
+        c.insert(
+            AlgoCacheKey::new(1024, 9216, 2560, "bf16"),
+            AlgoCacheValue {
+                algo_id: 11,
+                workspace_bytes: 65536,
+                recorded_ms: 0.5,
+                algo_blob: vec![1, 2, 3, 4, 5],
+            },
+        );
+        save_to_path(&c, &tmp).unwrap();
+        let loaded = load_from_path(&tmp);
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(
+            loaded.get(&AlgoCacheKey::new(1024, 9216, 2560, "bf16")).unwrap().algo_id,
+            11
+        );
+        let _ = std::fs::remove_file(&tmp);
     }
 }
