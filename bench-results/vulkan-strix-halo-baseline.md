@@ -311,15 +311,15 @@ every config"):
   **Update — multi-row resident paged microbench:** `full_token_resident_paged`
   now uses `paged_kv_write_slots` plus split-K
   `paged_attn_decode_batch_paged_splitk` and reduce over real per-row block
-  tables. The default split-K policy keeps 8 chunks for batch 1 and uses 4
-  chunks for multi-row resident batches, with
+  tables. The default split-K policy uses 32 chunks for batch 1 and 4 chunks
+  for multi-row resident batches, with
   `KILN_VK_PAGED_ATTN_SPLITK_CHUNKS` still available for forced sweeps. With
   `KILN_VK_MICROBENCH_BATCHES=1,4,64`, warmup=2, timed=5, repeats=2 on RADV
   STRIX_HALO:
 
   | batch | per token | rows/s |
   |---:|---:|---:|
-  | 1 | 49.9 ms | 20 |
+  | 1 | 49.3 ms | 20 |
   | 4 | 75.0 ms | 53 |
   | 64 | 503.2 ms | 127 |
 
@@ -328,11 +328,16 @@ every config"):
   after the correction measured 505.5 ms at 1 chunk,
   500.7 ms at 2 chunks, 497.3 ms at 4 chunks, 501.5 ms at 8 chunks, and
   503.8 ms at 16 chunks, so the existing default of 4 chunks remains the best
-  setting on this machine.
+  setting on this machine. A batch-1 sweep at history 2048 measured 65.5 ms
+  at 4 chunks, 62.2 ms at 8 chunks, 60.9 ms at 16 chunks, 58.1 ms at 32
+  chunks, and 60.5 ms at 64 chunks, so the single-row default moves to 32
+  chunks. History 1024 and 256 also showed a small/no-regression edge for 32
+  chunks, including 49.3 ms vs 50.0 ms on the paged-only batch-1 history-256
+  path.
 
 ## Other follow-ups (perf headroom, not regressions)
 
 1. **First-token shader compile** (~1.4 s) could be prewarmed at load.
-2. The Vulkan build still links candle via `kiln-model`'s shared
-   `candle-core`/`candle-nn` deps (the same islands the CUDA DoD-100 work is
-   removing); the Vulkan-specific decode weight path is now candle-copy-free.
+2. Complete the remaining shared-stack dependency cleanup audit for any
+   non-Vulkan decode islands; the Vulkan-specific decode weight path is now
+   duplicate-copy-free.

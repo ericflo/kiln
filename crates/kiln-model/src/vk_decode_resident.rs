@@ -40,18 +40,17 @@ use crate::forward::GpuLayerWeights;
 use crate::PagedKvCacheKt;
 
 const MLP_BF16_ROWS8_MIN_BATCH: usize = 256;
-const PAGED_ATTN_SPLITK_CHUNKS_B1: usize = 8;
+const PAGED_ATTN_SPLITK_CHUNKS_B1: usize = 32;
 const PAGED_ATTN_SPLITK_CHUNKS_BATCHED: usize = 4;
 
-// (#1082) The process-global `KT_WEIGHT_CANDLE_CACHE` + `kt_weight_to_candle_cached`
-// bridge are gone. They existed to give the candle-keyed `cached_*_weight_buffer`
-// helpers a STABLE candle `TensorId` per weight — but that meant memoizing a full
-// candle COPY of every projection/norm weight (~9 GB for Qwen3.5-4B, incl. the
-// 778 MB lm_head) ON TOP of the kt weights and the vk buffers: triple residency
+// (#1082) The previous process-global bridge cache is gone. It existed to give
+// shared upload helpers a stable `TensorId` per weight, but memoized a full
+// duplicate of every projection/norm weight (~9 GB for Qwen3.5-4B, including
+// the 778 MB lm_head) on top of the kt weights and vk buffers: triple residency
 // that pushed the unified-memory APU into OOM. The resident-decode upload sites
 // now call the kt-native `backend.cached_*_weight_buffer_kt(&kt_weight)` helpers
 // directly, which key the vk-buffer cache on the stable kt `TensorId` and extract
-// bytes straight from kt storage — upload-once, no candle weight copy.
+// bytes straight from kt storage -- upload-once, no duplicate weight copy.
 
 // Env-gated per-block timing accumulators. Enable with
 // `KILN_VK_RESIDENT_DECODE_TIMING=1`. Each accumulator records nanos
@@ -1799,8 +1798,9 @@ pub fn record_full_attn_block_into(
     // Split-K paged attention: spread each (batch, q_head) pair's K/V
     // scan across `num_chunks` workgroups so we use more SMs.
     // Combined via a reduce pass that performs the online-softmax
-    // recurrence. Default 8 chunks (16 heads × 8 = 128 workgroups,
-    // ≈90% of the RTX 6000 Ada's 144 SMs) — tunable via
+    // recurrence. Default 32 chunks on the batch-1 path; this keeps the
+    // long-context decode scan better occupied on the STRIX_HALO APU and
+    // remains tunable via
     // `KILN_VK_PAGED_ATTN_SPLITK_CHUNKS`. Anything ≥ seq_len degrades
     // gracefully (chunks beyond `seq_len` write neutral identities).
     let num_chunks = paged_attn_splitk_chunks(1);
