@@ -13,48 +13,25 @@
 //! host without the model still passes. The non-Vulkan workspace
 //! build skips at the `cfg(feature = "vulkan")` gate.
 //!
-//! The resident entry point is a strict superset of the legacy fn
+//! The resident entry point is a strict superset of the non-resident fn
 //! today: when the per-layer resident wiring lands, this test gates
 //! correctness; when the entry point is still delegating to the
-//! legacy fn, the test verifies the delegation contract stays
+//! non-resident fn, the test verifies the delegation contract stays
 //! bit-identical.
-//!
-//! # TODO(#1082): candle-removal STOP
-//!
-//! This test cannot drop its `candle_core::Device` import today.
-//!
-//! - `kiln_core::paged_kv_cache::PagedKvCache::new` takes a
-//!   `&candle_core::Device` and a `candle_core::DType` (see the
-//!   `build_cache` helper below, which maps `kiln_core::config::DType`
-//!   → `candle_core::DType` explicitly).
-//! - `kiln_model::backend::for_device` takes `&candle_core::Device`.
-//! - `GpuWeights::from_model_weights` and the
-//!   `model_forward_paged_last_token*` entry points are candle-typed.
-//!
-//! Migrating off candle requires the Tier 7 `PagedKvCacheKt` work
-//! (tracked in `forward.rs` around `try_kt_paged_kv_cache_new` /
-//! `PagedKvCacheKt::new`, ~line 1430-1616). Until the kt twin is
-//! wired into the forward path, this test must construct candle
-//! `Device::Cpu` + candle `DType` to feed the existing API.
-//!
-//! Precedent for STOP-doc-only commits in this sweep: 6d3fc88d
-//! (kiln-opd-loss-kernel), 9a95adc2 (kiln-flce-kernel), acd00bb4
-//! (kiln-rmsnorm-kernel phase10_microbench).
 
 #![cfg(feature = "vulkan")]
 
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use candle_core::Device;
 use kiln_core::block::BlockTable;
 use kiln_core::config::ModelConfig;
 use kiln_model::backend;
 use kiln_model::forward::{
     GpuWeights, model_forward_paged_last_token, model_forward_paged_last_token_resident,
 };
-use kiln_model::paged_kv_cache::PagedKvCache;
-use kiln_model::{LoadModelOptions, load_model_with_options};
+use kiln_model::{LoadModelOptions, PagedKvCacheKt as PagedKvCache, load_model_with_options};
+use kiln_tensor::{DType, Device};
 
 const MODEL_ENV: &str = "KILN_RESIDENT_DECODE_PARITY_MODEL";
 
@@ -75,7 +52,7 @@ fn run(model_dir: &std::path::Path) -> Result<()> {
     let model_weights = load_model_with_options(model_dir, &config, opts)?;
 
     let device = Device::Cpu;
-    let runtime = backend::for_device(&device);
+    let runtime = backend::for_device_kt(&device);
 
     if !runtime.supports_resident_decode() {
         eprintln!(
@@ -116,8 +93,10 @@ fn run(model_dir: &std::path::Path) -> Result<()> {
 
     // Prefill on both caches identically — same KV state going into the
     // single decode step we actually compare.
-    let mut lin_legacy = kiln_model::forward::LinearAttentionState::new_for_inference(&config, &device)?;
-    let mut lin_resident = kiln_model::forward::LinearAttentionState::new_for_inference(&config, &device)?;
+    let mut lin_legacy =
+        kiln_model::forward::LinearAttentionState::new_for_inference(&config, &device)?;
+    let mut lin_resident =
+        kiln_model::forward::LinearAttentionState::new_for_inference(&config, &device)?;
     let _ = model_forward_paged_last_token(
         runtime.as_ref(),
         &prompt_tokens,
@@ -211,15 +190,14 @@ fn run(model_dir: &std::path::Path) -> Result<()> {
 
 fn build_cache(
     config: &ModelConfig,
-    device: &Device,
+    _device: &Device,
     num_blocks: usize,
     block_size: usize,
 ) -> Result<PagedKvCache> {
-    // Map kiln_core::config::DType → candle_core::DType.
     let dtype = match config.dtype {
-        kiln_core::config::DType::BF16 => candle_core::DType::BF16,
-        kiln_core::config::DType::FP16 => candle_core::DType::F16,
-        kiln_core::config::DType::FP32 => candle_core::DType::F32,
+        kiln_core::config::DType::BF16 => DType::BF16,
+        kiln_core::config::DType::FP16 => DType::F16,
+        kiln_core::config::DType::FP32 => DType::F32,
     };
     PagedKvCache::new(
         config.num_full_attention_layers,
@@ -228,6 +206,6 @@ fn build_cache(
         config.num_kv_heads,
         config.head_dim,
         dtype,
-        device,
+        0,
     )
 }

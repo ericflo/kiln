@@ -419,6 +419,13 @@ every config"):
   reported a `Vulkan-resident decode pool ready` event with `num_slots=4`, so
   this smoke reached the live multi-row resident route; it is a short
   validation fixture, not a saturation benchmark.
+  **Update — resident parity test restored for Vulkan profiles:** the
+  `vk_resident_decode_parity` integration test now builds against the current kt
+  device/cache surface instead of stale test-only APIs. Without
+  `KILN_RESIDENT_DECODE_PARITY_MODEL` it still skips at runtime, but both the
+  specific integration test and the broader filtered Vulkan test command now
+  compile the parity target successfully. This restores a usable correctness
+  gate for the resident decode path when the local Qwen3.5-4B model env is set.
   **Update — bs=1 greedy token-only route:** `model_forward_paged_last_token_greedy`
   now tries the resident transformer-stack + final argmax path before the older
   resident logits fallback. For callers without stable row IDs, bs=1 uses the
