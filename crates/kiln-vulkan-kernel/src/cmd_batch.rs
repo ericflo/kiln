@@ -21,7 +21,6 @@
 //! TRANSFER_READ barrier so the resident path's readback at the end
 //! of the step is well-defined.
 
-use crate::pipeline::ShaderPipeline;
 use crate::{VulkanBuffer, VulkanDevice};
 use anyhow::{Context, Result};
 use ash::vk;
@@ -75,8 +74,6 @@ pub struct CommandBatch<'a> {
 }
 
 const COMMAND_BATCH_MAX_DISPATCHES: u32 = 1024;
-const COMMAND_BATCH_MAX_BINDINGS: u32 = 64 * COMMAND_BATCH_MAX_DISPATCHES;
-
 impl<'a> CommandBatch<'a> {
     /// Allocate a fresh command pool + descriptor pool sized for one
     /// decode step (up to `COMMAND_BATCH_MAX_DISPATCHES` dispatches,
@@ -156,6 +153,7 @@ impl<'a> CommandBatch<'a> {
             plan.handles,
             plan.push_constants,
             plan.workgroups,
+            true,
         )
     }
 
@@ -172,6 +170,7 @@ impl<'a> CommandBatch<'a> {
         handles: &[vk::Buffer],
         push_constants: &[u32],
         workgroups: Workgroups,
+        barrier_before: bool,
     ) -> Result<()> {
         anyhow::ensure!(!self.finished, "CommandBatch: already submitted");
         anyhow::ensure!(
@@ -185,18 +184,16 @@ impl<'a> CommandBatch<'a> {
             handles.len(),
         );
         let device = self.vk_device.device();
-        // Descriptor-set cache fast-path: keyed by `(layout, &handles)`,
-        // looked up on the device. After first call per shape the set
-        // is just a lookup; no `allocate_descriptor_sets` /
-        // `update_descriptor_sets` round-trip per dispatch.
+        // Descriptor sets are allocated per batch because buffer handles can be
+        // recycled after destruction; caching by handle risks stale bindings.
         let descriptor_set = self
             .vk_device
             .alloc_descriptor_set(set_layout, handles)?;
         unsafe {
 
-            // Inter-dispatch barrier — needed BEFORE this dispatch so it
-            // sees the previous dispatch's writes (skip on first call).
-            if self.dispatch_count > 0 {
+            // Inter-dispatch barrier — needed BEFORE this dispatch when it
+            // reads the immediately preceding dispatch's writes.
+            if self.dispatch_count > 0 && barrier_before {
                 let barrier = vk::MemoryBarrier::default()
                     .src_access_mask(vk::AccessFlags::SHADER_WRITE)
                     .dst_access_mask(vk::AccessFlags::SHADER_READ)
@@ -253,7 +250,41 @@ impl<'a> CommandBatch<'a> {
             handles.len(),
             (push_constants.len() * 4) as u32,
         )?;
-        self.record_with_pipeline(set_layout, layout, pipeline, handles, push_constants, workgroups)
+        self.record_with_pipeline(
+            set_layout,
+            layout,
+            pipeline,
+            handles,
+            push_constants,
+            workgroups,
+            true,
+        )
+    }
+
+    /// Record a dispatch whose inputs do not depend on writes from the
+    /// immediately preceding dispatch. Earlier barriers still make older
+    /// dependencies visible to this dispatch.
+    pub fn record_shader_no_previous_barrier(
+        &mut self,
+        glsl_path: &'static str,
+        handles: &[vk::Buffer],
+        push_constants: &[u32],
+        workgroups: Workgroups,
+    ) -> Result<()> {
+        let (set_layout, layout, pipeline) = self.vk_device.get_compute_pipeline_by_path(
+            glsl_path,
+            handles.len(),
+            (push_constants.len() * 4) as u32,
+        )?;
+        self.record_with_pipeline(
+            set_layout,
+            layout,
+            pipeline,
+            handles,
+            push_constants,
+            workgroups,
+            false,
+        )
     }
 
     /// Record a `cmd_copy_buffer` from `src` (typically a device-local

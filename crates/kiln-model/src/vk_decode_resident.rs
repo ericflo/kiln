@@ -531,7 +531,7 @@ pub fn transformer_block_paged_decode_full_attn_resident_b1(
         Workgroups::OneD((num_heads * head_dim).div_ceil(256) as u32),
     )?;
     // 7) RoPE K
-    batch.record_shader(
+    batch.record_shader_no_previous_barrier(
         shaders::VK_ROPE_F32,
         &[
             k_buf.handle(),
@@ -1783,7 +1783,7 @@ pub fn record_full_attn_block_into(
         &[1u32, num_heads as u32, head_dim as u32, rotary_dim as u32],
         Workgroups::OneD((num_heads * head_dim).div_ceil(256) as u32),
     )?;
-    batch.record_shader(
+    batch.record_shader_no_previous_barrier(
         shaders::VK_ROPE_F32,
         &[
             k_buf.handle(),
@@ -2076,7 +2076,7 @@ pub fn record_full_attn_block_batched_into(
         ],
         Workgroups::OneD((batch_size * q_h_d).div_ceil(256) as u32),
     )?;
-    batch.record_shader(
+    batch.record_shader_no_previous_barrier(
         shaders::VK_ROPE_F32,
         &[
             k_buf.handle(),

@@ -850,7 +850,7 @@ fn make_write_descriptor_set_buf(
     dst_set: vk::DescriptorSet,
     dst_binding: u32,
     bui: &vk::DescriptorBufferInfo,
-) -> vk::WriteDescriptorSet {
+) -> vk::WriteDescriptorSet<'_> {
     use std::mem::MaybeUninit;
     use std::ptr::write_bytes;
 

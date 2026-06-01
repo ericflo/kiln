@@ -837,7 +837,7 @@ fn run_full_token_resident_mixed_batched(
                         ],
                         Workgroups::OneD((batch * num_heads * head_dim).div_ceil(256) as u32),
                     )?;
-                    b.record_shader(
+                    b.record_shader_no_previous_barrier(
                         rope_shader,
                         &[
                             fa_k_buf.handle(),
@@ -1878,7 +1878,7 @@ fn run_full_step_resident_batched(
                 ],
                 Workgroups::OneD((batch * num_heads * head_dim).div_ceil(256) as u32),
             )?;
-            b.record_shader(
+            b.record_shader_no_previous_barrier(
                 rope_shader,
                 &[
                     k_buf.handle(),
@@ -2141,7 +2141,7 @@ fn run_full_token_resident_batched(
                     ],
                     Workgroups::OneD((batch * num_heads * head_dim).div_ceil(256) as u32),
                 )?;
-                b.record_shader(
+                b.record_shader_no_previous_barrier(
                     rope_shader,
                     &[
                         k_buf.handle(),
@@ -2458,7 +2458,7 @@ fn run_full_token_resident_paged(
                     Workgroups::OneD((batch * num_heads * head_dim).div_ceil(256) as u32),
                 )?;
                 // 6) RoPE K
-                b.record_shader(
+                b.record_shader_no_previous_barrier(
                     rope_shader,
                     &[
                         k_buf.handle(),

@@ -386,6 +386,12 @@ every config"):
   timed=3, repeats=2 measured batch 8: 101.6 ms / 79 rows/s, batch 16:
   139.1 ms / 115 rows/s, batch 32: 245.8 ms / 130 rows/s, and batch 64:
   455.9 ms / 140 rows/s.
+  A follow-up recorder cleanup skips the redundant memory barrier between the
+  independent Q RoPE and K RoPE dispatches in full-attention blocks. Focused
+  history-256 mixed-paged smokes with warmup=1, timed=4, repeats=3 measured
+  batch 8: 101.0 ms / 79 rows/s, batch 32: 234.9 ms / 136 rows/s, and batch
+  64: 461.5 ms / 139 rows/s; the effect is small because full-attention is only
+  8 of the 32 Qwen3.5 layers, but it removes 8 conservative barriers per token.
 - **Vulkan paged-attention decode kernel**: the kernel crate already had
   `paged_attn_decode_batch_paged.comp`; Vulkan now advertises
   `supports_flash_attn_paged_decode` and wires the single-query paged-decode
