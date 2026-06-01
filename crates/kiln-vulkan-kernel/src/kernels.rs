@@ -51,6 +51,27 @@ pub(crate) fn linear_decode_bf16w_rows4_enabled() -> bool {
     })
 }
 
+const PAGED_ATTN_SPLITK_CHUNKS_B1: usize = 32;
+const PAGED_ATTN_SPLITK_CHUNKS_BATCHED: usize = 4;
+const PAGED_ATTN_SPLITK_CHUNKS_BATCHED_LONG: usize = 2;
+const PAGED_ATTN_SPLITK_LONG_MIN_BLOCKS: usize = 64;
+
+pub fn paged_attn_decode_splitk_chunks(batch_size: usize, max_blocks_per_seq: usize) -> usize {
+    std::env::var("KILN_VK_PAGED_ATTN_SPLITK_CHUNKS")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .filter(|&n| n >= 1)
+        .unwrap_or(if batch_size <= 1 {
+            PAGED_ATTN_SPLITK_CHUNKS_B1
+        } else if batch_size >= 64 {
+            PAGED_ATTN_SPLITK_CHUNKS_BATCHED
+        } else if max_blocks_per_seq >= PAGED_ATTN_SPLITK_LONG_MIN_BLOCKS {
+            PAGED_ATTN_SPLITK_CHUNKS_BATCHED_LONG
+        } else {
+            PAGED_ATTN_SPLITK_CHUNKS_BATCHED
+        })
+}
+
 fn paged_attn_single_submit_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
@@ -4510,6 +4531,270 @@ pub fn dispatch_paged_attn_decode_batch_paged_f32_bytes(
         .context("failed to read back paged_attn_decode_batch_paged output")?
     };
     let _ = (batch, num_heads, head_dim);
+    Ok(out_data)
+}
+
+/// Split-K paged-pool variant of [`dispatch_paged_attn_decode_batch_paged_f32_bytes`].
+///
+/// Records the chunk scan and reduction in one command submit when the
+/// single-submit path is enabled, so generic paged decode can use the same
+/// higher-occupancy attention primitive as the resident decode path.
+#[allow(clippy::too_many_arguments)]
+pub fn dispatch_paged_attn_decode_batch_paged_splitk_f32_bytes(
+    vk_device: &VulkanDevice,
+    q_data_in: &[u8],
+    k_pool_data_in: &[u8],
+    v_pool_data_in: &[u8],
+    batch: usize,
+    num_heads: usize,
+    head_dim: usize,
+    total_slots: usize,
+    num_kv_heads: usize,
+    block_table_u32: &[u32],
+    seq_lens: &[u32],
+    max_blocks_per_seq: usize,
+    page_block_size: usize,
+    softmax_scale: f32,
+    num_chunks: usize,
+) -> Result<Vec<u8>> {
+    let device = vk_device.device();
+    let queue = vk_device.queue();
+    let device_local_mt = vk_device.device_local_mem_type();
+    let host_visible_mt = vk_device.host_visible_mem_type();
+
+    anyhow::ensure!(
+        batch > 0 && max_blocks_per_seq > 0 && page_block_size > 0 && num_chunks > 0,
+        "paged_attn_decode_batch_paged_splitk: batch/max_blocks_per_seq/page_block_size/num_chunks must be > 0"
+    );
+    let block_table_expected = batch
+        .checked_mul(max_blocks_per_seq)
+        .context("paged_attn_decode_batch_paged_splitk block table size overflow")?;
+    let q_expected = batch
+        .checked_mul(num_heads)
+        .and_then(|n| n.checked_mul(head_dim))
+        .and_then(|n| n.checked_mul(4))
+        .context("paged_attn_decode_batch_paged_splitk q byte size overflow")?;
+    let kv_expected = total_slots
+        .checked_mul(num_kv_heads)
+        .and_then(|n| n.checked_mul(head_dim))
+        .and_then(|n| n.checked_mul(4))
+        .context("paged_attn_decode_batch_paged_splitk kv byte size overflow")?;
+    anyhow::ensure!(
+        seq_lens.len() == batch,
+        "paged_attn_decode_batch_paged_splitk: seq_lens length {} != batch {batch}",
+        seq_lens.len()
+    );
+    anyhow::ensure!(
+        block_table_u32.len() == block_table_expected,
+        "paged_attn_decode_batch_paged_splitk: block_table length {} != batch*max_blocks_per_seq {}",
+        block_table_u32.len(),
+        block_table_expected
+    );
+    anyhow::ensure!(
+        q_data_in.len() == q_expected,
+        "paged_attn_decode_batch_paged_splitk: q bytes {} mismatch expected {}",
+        q_data_in.len(),
+        q_expected,
+    );
+    anyhow::ensure!(
+        k_pool_data_in.len() == kv_expected,
+        "paged_attn_decode_batch_paged_splitk: k_pool bytes {} mismatch expected {}",
+        k_pool_data_in.len(),
+        kv_expected,
+    );
+    anyhow::ensure!(
+        v_pool_data_in.len() == kv_expected,
+        "paged_attn_decode_batch_paged_splitk: v_pool bytes {} mismatch expected {}",
+        v_pool_data_in.len(),
+        kv_expected,
+    );
+    anyhow::ensure!(
+        num_kv_heads > 0 && num_heads % num_kv_heads == 0,
+        "paged_attn_decode_batch_paged_splitk: requires integer GQA ratio"
+    );
+    for &len in seq_lens {
+        anyhow::ensure!(
+            len > 0,
+            "paged_attn_decode_batch_paged_splitk: zero-length seq_len not supported"
+        );
+    }
+
+    let q_data: Vec<u8> = q_data_in.to_vec();
+    let k_data: Vec<u8> = k_pool_data_in.to_vec();
+    let v_data: Vec<u8> = v_pool_data_in.to_vec();
+    let bt_bytes: Vec<u8> = bytemuck::cast_slice(block_table_u32).to_vec();
+    let seq_bytes: Vec<u8> = bytemuck::cast_slice(seq_lens).to_vec();
+
+    let make_input = |data: &[u8], label: &str| -> Result<VulkanBuffer> {
+        VulkanBuffer::create_device_local(device, device_local_mt, data.len() as u64)
+            .with_context(|| {
+                format!("failed to create paged_attn_decode_batch_paged_splitk {label} buffer")
+            })
+    };
+    let q_buf = make_input(&q_data, "q")?;
+    let k_buf = make_input(&k_data, "k_pool")?;
+    let v_buf = make_input(&v_data, "v_pool")?;
+    let bt_buf = make_input(&bt_bytes, "block_table")?;
+    let seq_buf = make_input(&seq_bytes, "seq_lens")?;
+
+    let partials_stride = 2usize
+        .checked_add(head_dim)
+        .context("paged_attn_decode_batch_paged_splitk partial stride overflow")?;
+    let partials_elems = batch
+        .checked_mul(num_heads)
+        .and_then(|n| n.checked_mul(num_chunks))
+        .and_then(|n| n.checked_mul(partials_stride))
+        .context("paged_attn_decode_batch_paged_splitk partial size overflow")?;
+    let partials_size = u64::try_from(partials_elems)
+        .context("paged_attn_decode_batch_paged_splitk partial size exceeds u64")?
+        .checked_mul(4)
+        .context("paged_attn_decode_batch_paged_splitk partial bytes overflow")?;
+    let partials_buf = VulkanBuffer::create_device_local(device, device_local_mt, partials_size)
+        .context("failed to create paged_attn_decode_batch_paged_splitk partials buffer")?;
+
+    let out_size = u64::try_from(q_expected)
+        .context("paged_attn_decode_batch_paged_splitk output size exceeds u64")?;
+    let out_buf = VulkanBuffer::create_device_local(device, device_local_mt, out_size)
+        .context("failed to create paged_attn_decode_batch_paged_splitk output buffer")?;
+
+    let split_glsl_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/csrc/shaders/paged_attn_decode_batch_paged_splitk.comp"
+    );
+    let reduce_glsl_path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/csrc/shaders/paged_attn_decode_batch_paged_splitk_reduce.comp"
+    );
+    let split_spirv = crate::pipeline::ShaderPipeline::compile_shader(split_glsl_path)?;
+    let reduce_spirv = crate::pipeline::ShaderPipeline::compile_shader(reduce_glsl_path)?;
+    let split_push_constants = [
+        max_blocks_per_seq as u32,
+        page_block_size as u32,
+        num_heads as u32,
+        num_kv_heads as u32,
+        head_dim as u32,
+        softmax_scale.to_bits(),
+        num_chunks as u32,
+    ];
+    let reduce_push_constants = [num_heads as u32, head_dim as u32, num_chunks as u32];
+    let split_handles = vec![
+        q_buf.handle(),
+        k_buf.handle(),
+        v_buf.handle(),
+        bt_buf.handle(),
+        seq_buf.handle(),
+        partials_buf.handle(),
+    ];
+    let reduce_handles = vec![partials_buf.handle(), out_buf.handle()];
+    let split_workgroups = batch
+        .checked_mul(num_heads)
+        .and_then(|n| n.checked_mul(num_chunks))
+        .context("paged_attn_decode_batch_paged_splitk workgroup count overflow")?;
+    let reduce_workgroups = batch
+        .checked_mul(num_heads)
+        .context("paged_attn_decode_batch_paged_splitk reduce workgroup count overflow")?;
+    let split_workgroups = u32::try_from(split_workgroups)
+        .context("paged_attn_decode_batch_paged_splitk workgroup count exceeds u32")?;
+    let reduce_workgroups = u32::try_from(reduce_workgroups)
+        .context("paged_attn_decode_batch_paged_splitk reduce workgroup count exceeds u32")?;
+    let limit_x = vk_device.max_compute_work_group_count(0);
+    anyhow::ensure!(
+        split_workgroups <= limit_x && reduce_workgroups <= limit_x,
+        "paged_attn_decode_batch_paged_splitk workgroups exceed device x-axis limit {limit_x}"
+    );
+
+    let out_data = if paged_attn_single_submit_enabled() {
+        let readbacks = run_two_stage_compute_pipeline_with_transfers(
+            vk_device,
+            &[
+                (&q_buf, &q_data),
+                (&k_buf, &k_data),
+                (&v_buf, &v_data),
+                (&bt_buf, &bt_bytes),
+                (&seq_buf, &seq_bytes),
+            ],
+            &[&out_buf],
+            &split_spirv,
+            &split_handles,
+            &split_push_constants,
+            split_workgroups,
+            &reduce_spirv,
+            &reduce_handles,
+            &reduce_push_constants,
+            reduce_workgroups,
+        )
+        .context("paged_attn_decode_batch_paged_splitk single-submit failed")?;
+        anyhow::ensure!(
+            readbacks.len() == 1,
+            "paged_attn_decode_batch_paged_splitk expected one readback, got {}",
+            readbacks.len()
+        );
+        readbacks.into_iter().next().unwrap()
+    } else {
+        {
+            let command_pool = vk_device.transient_command_pool()?;
+            if paged_attn_batched_uploads_enabled() {
+                upload_buffers_with_command_pool(
+                    device,
+                    host_visible_mt,
+                    queue,
+                    *command_pool,
+                    &[
+                        (&q_buf, &q_data),
+                        (&k_buf, &k_data),
+                        (&v_buf, &v_data),
+                        (&bt_buf, &bt_bytes),
+                        (&seq_buf, &seq_bytes),
+                    ],
+                )
+                .context("failed to upload paged_attn_decode_batch_paged_splitk inputs")?;
+            } else {
+                for (buf, data, label) in [
+                    (&q_buf, &q_data, "q"),
+                    (&k_buf, &k_data, "k_pool"),
+                    (&v_buf, &v_data, "v_pool"),
+                    (&bt_buf, &bt_bytes, "block_table"),
+                    (&seq_buf, &seq_bytes, "seq_lens"),
+                ] {
+                    VulkanBuffer::upload_data_with_command_pool(
+                        device,
+                        host_visible_mt,
+                        queue,
+                        *command_pool,
+                        buf,
+                        data,
+                    )
+                    .with_context(|| {
+                        format!(
+                            "failed to upload paged_attn_decode_batch_paged_splitk {label} buffer"
+                        )
+                    })?;
+                }
+            }
+        }
+        run_two_stage_compute_pipeline(
+            vk_device,
+            &split_spirv,
+            &split_handles,
+            &split_push_constants,
+            split_workgroups,
+            &reduce_spirv,
+            &reduce_handles,
+            &reduce_push_constants,
+            reduce_workgroups,
+        )
+        .context("paged_attn_decode_batch_paged_splitk kernels failed")?;
+        let command_pool = vk_device.transient_command_pool()?;
+        VulkanBuffer::read_back_with_command_pool(
+            device,
+            host_visible_mt,
+            queue,
+            *command_pool,
+            &out_buf,
+        )
+        .context("failed to read back paged_attn_decode_batch_paged_splitk output")?
+    };
+
     Ok(out_data)
 }
 

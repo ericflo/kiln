@@ -32,6 +32,7 @@ use kiln_core::config::ModelConfig;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
 
+use kiln_vulkan_kernel::kernels::paged_attn_decode_splitk_chunks as paged_attn_splitk_chunks;
 use kiln_vulkan_kernel::shaders as shaders;
 use kiln_vulkan_kernel::{CommandBatch, VkPagedKvCache, VulkanBuffer, VulkanDevice, Workgroups};
 
@@ -41,10 +42,6 @@ use crate::PagedKvCacheKt;
 
 const MLP_BF16_ROWS8_MIN_BATCH: usize = 256;
 const GDN_IN_PROJ_ROWS4_MIN_BATCH: usize = 16;
-const PAGED_ATTN_SPLITK_CHUNKS_B1: usize = 32;
-const PAGED_ATTN_SPLITK_CHUNKS_BATCHED: usize = 4;
-const PAGED_ATTN_SPLITK_CHUNKS_BATCHED_LONG: usize = 2;
-const PAGED_ATTN_SPLITK_LONG_MIN_BLOCKS: usize = 64;
 
 // (#1082) The previous process-global bridge cache is gone. It existed to give
 // shared upload helpers a stable `TensorId` per weight, but memoized a full
@@ -91,22 +88,6 @@ fn enabled_unless_disabled(name: &str) -> bool {
 fn linear_bf16w_rows4_enabled() -> bool {
     enabled_unless_disabled("KILN_DISABLE_VULKAN_LINEAR_DECODE_BF16W_ROWS4")
         && enabled_unless_disabled("KILN_DISABLE_VULKAN_LINEAR_BF16W_ROWS4")
-}
-
-fn paged_attn_splitk_chunks(batch_size: usize, max_blocks_per_seq: usize) -> usize {
-    std::env::var("KILN_VK_PAGED_ATTN_SPLITK_CHUNKS")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .filter(|&n| n >= 1)
-        .unwrap_or(if batch_size <= 1 {
-            PAGED_ATTN_SPLITK_CHUNKS_B1
-        } else if batch_size >= 64 {
-            PAGED_ATTN_SPLITK_CHUNKS_BATCHED
-        } else if max_blocks_per_seq >= PAGED_ATTN_SPLITK_LONG_MIN_BLOCKS {
-            PAGED_ATTN_SPLITK_CHUNKS_BATCHED_LONG
-        } else {
-            PAGED_ATTN_SPLITK_CHUNKS_BATCHED
-        })
 }
 
 fn full_attn_qkv_gate_split_bf16w_plan(batch: usize, total_out: usize) -> (&'static str, u32) {

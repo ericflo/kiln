@@ -221,14 +221,73 @@ fn fused_gdn_resident_state_enabled() -> bool {
 
 /// When set, the multi-batch paged attention decode path walks the
 /// block_table inside the Vulkan shader instead of compacting K/V on the
-/// host with `candle_core::Tensor::index_select`. Default: enabled. Disable via
-/// `KILN_DISABLE_VULKAN_PAGED_DECODE_GPU_GATHER=1` to fall back to the
-/// host-side gather path for parity comparisons.
+/// host. Default: enabled. Disable via
+/// `KILN_DISABLE_VULKAN_PAGED_DECODE_GPU_GATHER=1` to force a visible native
+/// helper error for parity comparisons.
 fn paged_decode_gpu_gather_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
         std::env::var("KILN_DISABLE_VULKAN_PAGED_DECODE_GPU_GATHER").is_err()
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn dispatch_vulkan_paged_decode_bytes(
+    vk_device: &kiln_vulkan_kernel::VulkanDevice,
+    q_data: &[u8],
+    k_pool_data: &[u8],
+    v_pool_data: &[u8],
+    batch: usize,
+    num_heads: usize,
+    head_dim: usize,
+    total_slots: usize,
+    num_kv_heads: usize,
+    block_data: &[u32],
+    seq_lens: &[u32],
+    max_blocks_per_seq: usize,
+    page_block_size: usize,
+    softmax_scale: f32,
+) -> Result<Vec<u8>> {
+    let num_chunks =
+        kiln_vulkan_kernel::kernels::paged_attn_decode_splitk_chunks(batch, max_blocks_per_seq);
+    if num_chunks > 1 {
+        kiln_vulkan_kernel::kernels::dispatch_paged_attn_decode_batch_paged_splitk_f32_bytes(
+            vk_device,
+            q_data,
+            k_pool_data,
+            v_pool_data,
+            batch,
+            num_heads,
+            head_dim,
+            total_slots,
+            num_kv_heads,
+            block_data,
+            seq_lens,
+            max_blocks_per_seq,
+            page_block_size,
+            softmax_scale,
+            num_chunks,
+        )
+        .context("Vulkan split-K paged decode kernel failed")
+    } else {
+        kiln_vulkan_kernel::kernels::dispatch_paged_attn_decode_batch_paged_f32_bytes(
+            vk_device,
+            q_data,
+            k_pool_data,
+            v_pool_data,
+            batch,
+            num_heads,
+            head_dim,
+            total_slots,
+            num_kv_heads,
+            block_data,
+            seq_lens,
+            max_blocks_per_seq,
+            page_block_size,
+            softmax_scale,
+        )
+        .context("Vulkan paged decode kernel failed")
+    }
 }
 
 /// Read `KILN_VULKAN_LINEAR` env var. When enabled, the autograd-safe
@@ -2606,7 +2665,7 @@ impl BackendRuntime for VulkanBackend {
             batch
         ];
 
-        let out_data = kiln_vulkan_kernel::kernels::dispatch_paged_attn_decode_batch_paged_f32_bytes(
+        let out_data = dispatch_vulkan_paged_decode_bytes(
             vk_device,
             &q_data,
             &k_pool_data,
@@ -2643,8 +2702,6 @@ impl BackendRuntime for VulkanBackend {
         softmax_scale: f32,
         causal: bool,
     ) -> Result<Option<kiln_tensor::Tensor>> {
-        // kt dtype/device guards read directly off the kt args before the
-        // bridge. (Mirrors the candle guards below, lifted to kt types.)
         if !self.has_vulkan()
             || !self.paged_attn_decode_batch_enabled
             || q.dtype() != kiln_tensor::DType::F32
@@ -2664,18 +2721,9 @@ impl BackendRuntime for VulkanBackend {
         {
             return Ok(None);
         }
-        // Bridge kt args -> candle locals, then re-borrow under the same
-        // names so the original candle body below is unchanged.
-        let q_owned = crate::forward::kt_logits_to_candle(q)?;
-        let k_pool_owned = crate::forward::kt_logits_to_candle(k_pool)?;
-        let v_pool_owned = crate::forward::kt_logits_to_candle(v_pool)?;
-        let block_table_owned = crate::forward::kt_logits_to_candle(block_table)?;
-        let seqused_k_owned = crate::forward::kt_logits_to_candle(seqused_k)?;
-        let q = &q_owned;
-        let k_pool = &k_pool_owned;
-        let v_pool = &v_pool_owned;
-        let block_table = &block_table_owned;
-        let seqused_k = &seqused_k_owned;
+        if !paged_decode_gpu_gather_enabled() {
+            anyhow::bail!("Vulkan paged decode GPU block-table gather disabled");
+        }
 
         let Ok((batch, q_len, num_heads, head_dim)) = q.dims4() else {
             return Ok(None);
@@ -2709,15 +2757,15 @@ impl BackendRuntime for VulkanBackend {
 
         let block_data = block_table
             .flatten_all()?
-            .to_dtype(candle_core::DType::U32)?
+            .to_dtype(kiln_tensor::DType::U32)?
             .to_vec1::<u32>()?;
-        let seq_i32 = seqused_k
+        let seq_i64 = seqused_k
             .flatten_all()?
-            .to_dtype(candle_core::DType::I32)?
-            .to_vec1::<i32>()?;
+            .to_dtype(kiln_tensor::DType::I64)?
+            .to_vec1::<i64>()?;
         let mut seq_lens = Vec::with_capacity(batch);
         for row in 0..batch {
-            let row_len = usize::try_from(seq_i32[row])
+            let row_len = usize::try_from(seq_i64[row])
                 .context("Vulkan paged decode seqused_k contains negative length")?;
             if row_len == 0 || row_len > max_seqlen_k {
                 return Ok(None);
@@ -2754,94 +2802,31 @@ impl BackendRuntime for VulkanBackend {
             .vulkan_device
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
-        // Skip the host-side gather + candle index_select entirely when the
-        // GPU-paged path is enabled (default on for batch > 1). The shader
-        // walks `block_table` inline against the resident pool, so the host
-        // never materializes a `batch * max_seqlen_k * num_kv_heads * head_dim`
-        // compacted tensor and never runs a CPU index_select over the pool.
-        if paged_decode_gpu_gather_enabled() && batch > 1 {
-            let q_data = tensor_to_f32_bytes_with_shape(q)?.0;
-            let k_pool_data = tensor_to_f32_bytes_with_shape(k_pool)?.0;
-            let v_pool_data = tensor_to_f32_bytes_with_shape(v_pool)?.0;
-            let out_data = kiln_vulkan_kernel::kernels::dispatch_paged_attn_decode_batch_paged_f32_bytes(
-                vk_device,
-                &q_data,
-                &k_pool_data,
-                &v_pool_data,
-                batch,
-                num_heads,
-                head_dim,
-                total_slots,
-                num_kv_heads,
-                &block_data,
-                &seq_lens,
-                max_blocks_per_seq,
-                page_block_size,
-                softmax_scale,
-            )
-            .context("paged_attn_decode_batch_paged kernel failed")?;
-            let out = tensor_from_f32_bytes(
-                &out_data,
-                &[batch, 1, num_heads, head_dim],
-                candle_core::DType::F32,
-            )?;
-            return Ok(Some(crate::forward::candle_to_kt_activation(&out)?));
-        }
-
-        // Single-row fallback (batch == 1) keeps the original compacted path
-        // for now — the gather cost is negligible at batch=1 and the kernel
-        // is well-tuned for that shape. Build the gather indices and slice
-        // the pool.
-        let mut gather_slots = Vec::with_capacity(batch * max_seqlen_k);
-        for row in 0..batch {
-            let row_len = seq_lens[row] as usize;
-            for pos in 0..max_seqlen_k {
-                if pos >= row_len {
-                    gather_slots.push(0);
-                    continue;
-                }
-                let block_idx = pos / page_block_size;
-                let offset = pos % page_block_size;
-                let block = block_data[row * max_blocks_per_seq + block_idx] as usize;
-                let slot = block * page_block_size + offset;
-                gather_slots
-                    .push(u32::try_from(slot).context("Vulkan paged decode slot exceeds u32")?);
-            }
-        }
-        let gather =
-            candle_core::Tensor::from_slice(gather_slots.as_slice(), batch * max_seqlen_k, q.device())?;
-        let k_compact = k_pool
-            .index_select(&gather, 0)?
-            .reshape((batch, max_seqlen_k, num_kv_heads, head_dim))?
-            .contiguous()?;
-        let v_compact = v_pool
-            .index_select(&gather, 0)?
-            .reshape((batch, max_seqlen_k, num_kv_heads, head_dim))?
-            .contiguous()?;
-
-        let q_data = tensor_to_f32_bytes_with_shape(q)?.0;
-        let k_data = tensor_to_f32_bytes_with_shape(&k_compact)?.0;
-        let v_data = tensor_to_f32_bytes_with_shape(&v_compact)?.0;
-        let out_data = kiln_vulkan_kernel::kernels::dispatch_paged_attn_decode_batch_f32_bytes(
+        let q_data = kt_tensor_to_f32_bytes_with_shape(q)?.0;
+        let k_pool_data = kt_tensor_to_f32_bytes_with_shape(k_pool)?.0;
+        let v_pool_data = kt_tensor_to_f32_bytes_with_shape(v_pool)?.0;
+        let out_data = dispatch_vulkan_paged_decode_bytes(
             vk_device,
             &q_data,
-            &k_data,
-            &v_data,
+            &k_pool_data,
+            &v_pool_data,
             batch,
             num_heads,
             head_dim,
-            max_seqlen_k,
+            total_slots,
             num_kv_heads,
+            &block_data,
             &seq_lens,
+            max_blocks_per_seq,
+            page_block_size,
             softmax_scale,
         )
-        .context("paged_attn_decode_batch kernel failed")?;
-        let out = tensor_from_f32_bytes(
+        .context("paged_attn_decode_batch_paged kernel failed")?;
+        Ok(Some(kt_tensor_from_f32_bytes(
             &out_data,
             &[batch, 1, num_heads, head_dim],
-            candle_core::DType::F32,
-        )?;
-        Ok(Some(crate::forward::candle_to_kt_activation(&out)?))
+            kiln_tensor::DType::F32,
+        )?))
     }
 
     fn gdn_in_proj_decode(
