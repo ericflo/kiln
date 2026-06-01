@@ -3025,7 +3025,13 @@ pub fn record_transformer_stack_batched_hidden_from_tokens_into(
     )? {
         return Ok(None);
     }
-    record_resident_decode_embedding_into(batch, &embed, token_ids_buf, x_in_buf, batch_size)?;
+    record_resident_decode_embedding_independent_into(
+        batch,
+        &embed,
+        token_ids_buf,
+        x_in_buf,
+        batch_size,
+    )?;
     record_transformer_stack_batched_hidden_into(
         backend,
         batch,
@@ -3435,7 +3441,7 @@ pub fn submit_transformer_stack_batched_argmax_from_tokens(
     )? {
         return Ok(None);
     }
-    record_resident_decode_embedding_into(
+    record_resident_decode_embedding_independent_into(
         &mut batch,
         &embed,
         &step.token_ids,
@@ -3560,7 +3566,7 @@ pub fn submit_transformer_stack_batched_sample_from_tokens(
     )? {
         return Ok(None);
     }
-    record_resident_decode_embedding_into(
+    record_resident_decode_embedding_independent_into(
         &mut batch,
         &embed,
         &step.token_ids,
@@ -3660,7 +3666,7 @@ pub fn submit_transformer_stack_batched_hidden_from_tokens(
     )? {
         return Ok(None);
     }
-    record_resident_decode_embedding_into(
+    record_resident_decode_embedding_independent_into(
         &mut batch,
         &embed,
         &step.token_ids,
@@ -3832,7 +3838,7 @@ fn resident_decode_embedding_source(
     resident_decode_embedding_source_for_table(backend, &weights.embed_tokens_t, hidden, true)
 }
 
-fn record_resident_decode_embedding_into(
+fn record_resident_decode_embedding_independent_into(
     batch: &mut CommandBatch,
     source: &ResidentDecodeEmbeddingSource,
     token_ids: &VulkanBuffer,
@@ -3842,7 +3848,7 @@ fn record_resident_decode_embedding_into(
     let total = batch_size
         .checked_mul(source.hidden)
         .context("resident embedding gather: output element count overflow")?;
-    batch.record_shader(
+    batch.record_shader_no_previous_barrier(
         source.shader,
         &[token_ids.handle(), source.weight.handle(), out.handle()],
         &[batch_size as u32, source.hidden as u32, source.vocab as u32],

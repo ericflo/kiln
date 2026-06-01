@@ -984,6 +984,13 @@ every config"):
   decode instead of building a synthetic batch and scattering it back. This
   keeps uncommon sampler fallback settings from reintroducing the per-step
   24-layer state cat/scatter cost on bs=1.
+  **Update — resident token embedding skips an independent barrier:** the
+  token-id resident paths now record RoPE table generation followed by the
+  embedding gather with `record_shader_no_previous_barrier` for the embedding
+  dispatch. Those two writes are independent, and the following transformer
+  stack dispatch still emits the visibility barrier before reading both
+  buffers, removing one conservative compute-to-compute barrier per token
+  batch across argmax, sampling, and hidden-output routes.
 
 ## Other follow-ups (perf headroom, not regressions)
 
