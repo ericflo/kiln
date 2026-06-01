@@ -841,7 +841,7 @@ pub fn dispatch_full_attn_qkv_decode_cached_batched_resident(
     );
 
     let rows4 = bf16_weights
-        && batch >= 16
+        && batch >= 2
         && crate::kernels::full_attn_qkv_bf16w_rows4_enabled();
     let glsl_path = if bf16_weights {
         if rows4 {

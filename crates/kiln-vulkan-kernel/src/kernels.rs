@@ -3795,7 +3795,7 @@ fn dispatch_full_attn_qkv_decode_cached_batched_impl(
         .and_then(|n| n.checked_add(v_dim))
         .context("full_attn_qkv_decode_batched: total_out overflow")?;
     anyhow::ensure!(total_out > 0, "full_attn_qkv_decode_batched: total_out is zero");
-    let full_attn_qkv_rows4 = bf16_weights && batch >= 16 && full_attn_qkv_bf16w_rows4_enabled();
+    let full_attn_qkv_rows4 = bf16_weights && batch >= 2 && full_attn_qkv_bf16w_rows4_enabled();
     let glsl_path = if bf16_weights {
         if full_attn_qkv_rows4 {
             concat!(

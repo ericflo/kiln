@@ -189,7 +189,11 @@ every config"):
   q/gate/k/v directly and removes the separate batched split dispatch from the
   production resident recorder plus these microbench paths. On this APU it is
   a command/bandwidth cleanup rather than a measurable high-batch throughput
-  win by itself.
+  win by itself. The older combined-QKV dispatcher still waits until batch 2
+  before using its rows4 shader because same-session standalone A/B showed
+  batch 1 regressing from 403 us to 471 us, while batch 2 improved from 671 us
+  to 529 us, batch 4 from 1.23 ms to 0.67 ms, and batch 8 from 2.32 ms to
+  1.13 ms.
   **Update — mixed Qwen3.5 resident token microbench:** added
   `full_token_resident_mixed_batched`, which records the real Qwen3.5-4B layer
   mix into one `CommandBatch`: 8 full-attention layers at indices
