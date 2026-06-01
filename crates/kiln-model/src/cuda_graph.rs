@@ -1541,6 +1541,14 @@ impl CudaGraphRunner {
             })
         });
         warm_result.context("freeze-pointers warm (Record) pass failed")?;
+        // #1082 box-102 differential: Pass-1 (warm/EAGER) per-layer norms for
+        // THIS capture-step input. Compared below against the first captured
+        // launch's norms (same input) → first diverging layer = the broken
+        // captured op. If these PASS1 norms look sane (monotonic, distinct per
+        // layer) the per-layer probe is NOT an arena-aliasing artifact.
+        if let Some(n) = crate::forward::read_layer_norm_debug() {
+            eprintln!("BOX102DIFF PASS1 {n:?}");
+        }
         // Restore the GDN recurrent state so the captured pass advances it
         // exactly once (KV writes are idempotent and need no restore).
         *linear_state = gdn_snapshot;
@@ -1660,6 +1668,14 @@ impl CudaGraphRunner {
                 stream
                     .synchronize()
                     .map_err(|e| anyhow::anyhow!("sync after first captured-graph launch: {e}"))?;
+                // #1082 box-102 differential: first CAPTURED-launch per-layer
+                // norms for the SAME capture-step input as PASS1 above. Diff
+                // PASS1 vs FIRSTLAUNCH → the first layer where they differ is
+                // where the captured graph computes wrong values on launch =
+                // the doubling root cause.
+                if let Some(n) = crate::forward::read_layer_norm_debug() {
+                    eprintln!("BOX102DIFF FIRSTLAUNCH {n:?}");
+                }
                 let max_seqlen_k = key.max_seqlen_k;
                 self.captured.insert(
                     key,
