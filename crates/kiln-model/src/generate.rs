@@ -27,7 +27,8 @@ use crate::forward::{
     GpuWeights, LinearAttentionState, model_forward_kt, model_forward_paged,
     model_forward_paged_batched_decode_hidden,
     model_forward_paged_decode_contiguous_batch_hidden_with_ids,
-    model_forward_paged_decode_contiguous_batch_greedy_with_ids, model_forward_paged_last_token,
+    model_forward_paged_decode_contiguous_batch_greedy_with_ids,
+    model_forward_paged_decode_contiguous_batch_sample_with_ids, model_forward_paged_last_token,
     model_forward_paged_last_token_greedy,
     model_forward_paged_last_token_with_last_hidden, model_forward_paged_next_token_greedy,
     model_forward_paged_streaming, model_forward_paged_streaming_last_token_with_last_hidden,
@@ -3095,56 +3096,102 @@ impl ModelRunner {
             && self.active_lora.is_none()
         {
             let block_table_refs: Vec<&BlockTable> = block_tables.iter().collect();
-            let hidden_result = if has_linear_layers {
+            let (step_seeds, generated_tokens) = vk_batch_sampling_contexts
+                .as_ref()
+                .expect("vk_batch_sampling_contexts captured for non-greedy row_count > 1");
+            let sample_result = if has_linear_layers {
                 let mut linear_state_refs: Vec<&mut LinearAttentionState> =
                     linear_states.iter_mut().map(|s| &mut **s).collect();
-                self.decode_hidden_paged_contiguous_batch_with_ids(
+                self.decode_sample_paged_contiguous_batch_with_ids(
                     &input_tokens,
                     paged_cache,
                     &block_table_refs,
                     &sequence_lengths,
                     &mut linear_state_refs,
                     Some(&row_ids),
+                    params,
+                    step_seeds,
+                    generated_tokens,
                 )
             } else {
                 let mut no_linear_states: [&mut LinearAttentionState; 0] = [];
-                self.decode_hidden_paged_contiguous_batch_with_ids(
+                self.decode_sample_paged_contiguous_batch_with_ids(
                     &input_tokens,
                     paged_cache,
                     &block_table_refs,
                     &sequence_lengths,
                     &mut no_linear_states,
                     Some(&row_ids),
+                    params,
+                    step_seeds,
+                    generated_tokens,
                 )
             };
-            match hidden_result {
-                Ok(hidden) => {
-                    let (step_seeds, generated_tokens) = vk_batch_sampling_contexts
-                        .as_ref()
-                        .expect("vk_batch_sampling_contexts captured for non-greedy row_count > 1");
-                    let tokens = run_lm_head_sample_batch_with_contexts(
-                        &*self.backend,
-                        &hidden,
-                        &self.weights,
-                        &self.config,
-                        params,
-                        step_seeds,
-                        generated_tokens,
-                    )
-                    .context("sample Vulkan resident multi-row hidden batch")?;
-                    sampled = Some(tokens);
-                }
+            match sample_result {
+                Ok(Some(tokens)) => sampled = Some(tokens),
+                Ok(None) => {}
                 Err(err) if !decode_batch_generic_fallback_enabled(&*self.backend) => {
                     return Err(err).context(
-                        "resident batched hidden decode declined and generic fallback is disabled",
+                        "resident batched sample decode declined and generic fallback is disabled",
                     );
                 }
                 Err(err) => {
                     tracing::debug!(
                         batch = row_count,
                         error = %err,
-                        "resident batched hidden decode declined; falling back to generic hidden path"
+                        "resident batched sample decode declined; falling back to hidden path"
                     );
+                }
+            }
+            if sampled.is_none() {
+                let hidden_result = if has_linear_layers {
+                    let mut linear_state_refs: Vec<&mut LinearAttentionState> =
+                        linear_states.iter_mut().map(|s| &mut **s).collect();
+                    self.decode_hidden_paged_contiguous_batch_with_ids(
+                        &input_tokens,
+                        paged_cache,
+                        &block_table_refs,
+                        &sequence_lengths,
+                        &mut linear_state_refs,
+                        Some(&row_ids),
+                    )
+                } else {
+                    let mut no_linear_states: [&mut LinearAttentionState; 0] = [];
+                    self.decode_hidden_paged_contiguous_batch_with_ids(
+                        &input_tokens,
+                        paged_cache,
+                        &block_table_refs,
+                        &sequence_lengths,
+                        &mut no_linear_states,
+                        Some(&row_ids),
+                    )
+                };
+                match hidden_result {
+                    Ok(hidden) => {
+                        let tokens = run_lm_head_sample_batch_with_contexts(
+                            &*self.backend,
+                            &hidden,
+                            &self.weights,
+                            &self.config,
+                            params,
+                            step_seeds,
+                            generated_tokens,
+                        )
+                        .context("sample Vulkan resident multi-row hidden batch")?;
+                        sampled = Some(tokens);
+                    }
+                    Err(err) if !decode_batch_generic_fallback_enabled(&*self.backend) => {
+                        return Err(err).context(
+                            "resident batched hidden decode declined and generic fallback is disabled",
+                        );
+                    }
+                    Err(err) => {
+                        tracing::debug!(
+                            batch = row_count,
+                            error = %err,
+                            "resident batched hidden decode declined; falling back to generic hidden path"
+                        );
+                    }
                 }
             }
         }
@@ -3742,6 +3789,241 @@ impl ModelRunner {
         finish_decode_batcher_stage_profile("decode_total", batch, total_start);
 
         Ok(tokens)
+    }
+
+    /// Decode multiple compatible paged requests through the transformer stack,
+    /// returning final hidden states for caller-owned sampling.
+    ///
+    /// This mirrors the greedy continuous-batch state assembly/scatter path, but
+    /// stops before the LM-head argmax so mixed sampling parameters can still be
+    /// handled by the existing sampler.
+    #[allow(clippy::too_many_arguments)]
+    fn decode_sample_paged_contiguous_batch_with_ids(
+        &self,
+        input_tokens: &[TokenId],
+        paged_cache: &PagedKvCache,
+        block_tables: &[&BlockTable],
+        seq_lens: &[usize],
+        linear_states: &mut [&mut LinearAttentionState],
+        row_ids: Option<&[u64]>,
+        params: &[SamplingParams],
+        step_seeds: &[Option<u64>],
+        generated_tokens: &[Vec<TokenId>],
+    ) -> Result<Option<Vec<TokenId>>> {
+        let top_k_values: Vec<u32> = params.iter().map(|param| param.top_k).collect();
+        let temperature_values: Vec<f32> = params.iter().map(|param| param.temperature).collect();
+        if !self
+            .backend
+            .supports_linear_decode_sample_batch(&top_k_values, &temperature_values)
+        {
+            return Ok(None);
+        }
+
+        let _resident_scope = GdnRecurrentResidentStateScope::new(&*self.backend);
+        let batch = input_tokens.len();
+        let profile_stages = profile_decode_batcher_stages_enabled();
+        let total_start = profile_stages.then(std::time::Instant::now);
+        anyhow::ensure!(batch > 0, "batched sample decode requires at least one row");
+        anyhow::ensure!(
+            block_tables.len() == batch
+                && seq_lens.len() == batch
+                && params.len() == batch
+                && step_seeds.len() == batch
+                && generated_tokens.len() == batch,
+            "batched sample decode metadata length mismatch"
+        );
+
+        let mut repetition_values = Vec::with_capacity(batch);
+        let mut presence_values = Vec::with_capacity(batch);
+        let mut frequency_values = Vec::with_capacity(batch);
+        let mut top_p_values = Vec::with_capacity(batch);
+        let mut min_p_values = Vec::with_capacity(batch);
+        let mut seed_values = Vec::with_capacity(batch);
+        let mut history_rows = Vec::new();
+        let mut history_indices = Vec::new();
+        let mut history_counts = Vec::new();
+        for (row_idx, ((param, step_seed), history)) in params
+            .iter()
+            .zip(step_seeds.iter())
+            .zip(generated_tokens.iter())
+            .enumerate()
+        {
+            repetition_values.push(param.repetition_penalty);
+            presence_values.push(param.presence_penalty);
+            frequency_values.push(param.frequency_penalty);
+            top_p_values.push(param.top_p);
+            min_p_values.push(param.min_p);
+            seed_values.push(sample_seed_for_batch_row(*step_seed, history));
+            if param.is_effectively_greedy()
+                || param.token_penalties_are_no_op()
+                || history.is_empty()
+            {
+                continue;
+            }
+            let (indices, counts) = unique_history_counts_for_batch_sample(history);
+            for (idx, count) in indices.into_iter().zip(counts.into_iter()) {
+                history_rows.push(row_idx as u32);
+                history_indices.push(idx);
+                history_counts.push(count);
+            }
+        }
+
+        let has_linear_layers = self.has_linear_attention_layers();
+        if has_linear_layers {
+            anyhow::ensure!(
+                linear_states.len() == batch,
+                "batched sample decode requires one LinearAttentionState per row"
+            );
+        } else {
+            anyhow::ensure!(
+                linear_states.is_empty(),
+                "full-attention-only batched sample decode does not accept linear states"
+            );
+        }
+
+        let stage_start = profile_stages.then(std::time::Instant::now);
+        if has_linear_layers {
+            if self.backend.supports_resident_decode()
+                && self.backend.decode_resident_pool_ready(
+                    self.config.hidden_size,
+                    self.config.intermediate_size,
+                    64,
+                )
+            {
+                for state in linear_states.iter() {
+                    state.ensure_gdn_state_resident_kt(&*self.backend)?;
+                }
+            }
+            let any_resident = linear_states
+                .iter()
+                .any(|state| state.has_any_gdn_state_resident_kt(&*self.backend));
+            let all_resident = any_resident
+                && linear_states
+                    .iter()
+                    .all(|state| state.has_all_gdn_state_resident_kt(&*self.backend));
+            if any_resident && !all_resident {
+                anyhow::bail!(
+                    "mixed kt-resident GDN state rows are not supported for batched sample decode"
+                );
+            }
+        }
+
+        let all_rows_resident = has_linear_layers
+            && linear_states
+                .iter()
+                .all(|state| state.has_all_gdn_state_resident_kt(&*self.backend));
+        let mut batched_state_cache_hit = false;
+        let mut batch_state = if has_linear_layers {
+            let mut cache_guard = self
+                .batched_state_cache
+                .lock()
+                .map_err(|e| anyhow::anyhow!("failed to lock batched state cache: {e}"))?;
+            let id_match = match (row_ids, cache_guard.as_ref()) {
+                (
+                    Some(ids),
+                    Some(CachedBatchedState {
+                        row_ids: cached, ..
+                    }),
+                ) => cached == ids,
+                _ => false,
+            };
+            if id_match {
+                let cached = cache_guard
+                    .take()
+                    .expect("id_match implies cache_guard.is_some()");
+                batched_state_cache_hit = true;
+                drop(cache_guard);
+                Some(cached.state)
+            } else {
+                *cache_guard = None;
+                drop(cache_guard);
+                let state_refs: Vec<&LinearAttentionState> =
+                    linear_states.iter().map(|state| &**state).collect();
+                let state = LinearAttentionState::from_batch_rows(&state_refs)?;
+                if all_rows_resident {
+                    state
+                        .assemble_gdn_state_resident_batch_rows_kt(&*self.backend, &state_refs)?;
+                }
+                Some(state)
+            }
+        } else {
+            None
+        };
+        if batched_state_cache_hit {
+            finish_decode_batcher_stage_profile(
+                "sample_batch_state_assemble_cache_hit",
+                batch,
+                stage_start,
+            );
+        } else {
+            finish_decode_batcher_stage_profile("sample_batch_state_assemble", batch, stage_start);
+        }
+
+        let stage_start = profile_stages.then(std::time::Instant::now);
+        let tokens = {
+            let pc_guard = lock_paged_cache(paged_cache)?;
+            model_forward_paged_decode_contiguous_batch_sample_with_ids(
+                &*self.backend,
+                input_tokens,
+                &self.weights,
+                &self.config,
+                pc_guard,
+                block_tables,
+                seq_lens,
+                batch_state.as_ref(),
+                self.active_lora.as_ref(),
+                row_ids,
+                &history_rows,
+                &history_indices,
+                &history_counts,
+                &repetition_values,
+                &presence_values,
+                &frequency_values,
+                &temperature_values,
+                &top_k_values,
+                &top_p_values,
+                &min_p_values,
+                &seed_values,
+            )
+            .context("batched sample decode forward pass (paged) failed")?
+        };
+        let Some(tokens) = tokens else {
+            return Ok(None);
+        };
+        finish_decode_batcher_stage_profile("sample_batched_forward", batch, stage_start);
+
+        if let Some(state) = batch_state.as_ref() {
+            let stage_start = profile_stages.then(std::time::Instant::now);
+            if fast_batched_linear_state_scatter_enabled() {
+                if !state.scatter_gdn_state_resident_batch_rows_kt(&*self.backend, linear_states)? {
+                    state.scatter_batch_rows_replace(linear_states)?;
+                }
+                finish_decode_batcher_stage_profile(
+                    "sample_batch_state_scatter_replace",
+                    batch,
+                    stage_start,
+                );
+            } else {
+                state.scatter_batch_rows(linear_states)?;
+                finish_decode_batcher_stage_profile(
+                    "sample_batch_state_scatter_copy",
+                    batch,
+                    stage_start,
+                );
+            }
+        }
+
+        if let (Some(state), Some(ids)) = (batch_state.take(), row_ids) {
+            if let Ok(mut cache_guard) = self.batched_state_cache.lock() {
+                *cache_guard = Some(CachedBatchedState {
+                    state,
+                    row_ids: ids.to_vec(),
+                });
+            }
+        }
+        finish_decode_batcher_stage_profile("sample_decode_total", batch, total_start);
+
+        Ok(Some(tokens))
     }
 
     /// Decode multiple compatible paged requests through the transformer stack,

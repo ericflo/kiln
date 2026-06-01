@@ -945,6 +945,14 @@ every config"):
   path reads back only one `u32` token per row when every active row is within
   the sampler kernel's top-k limit, with existing logits fallback preserved for
   unsupported sampler settings.
+  **Update — resident decode now chains into batched sampling:** the Vulkan
+  multi-row non-greedy branch now tries a resident decode-to-sampler helper
+  before the hidden-row fallback. The new helper records the batched
+  transformer stack, final RMSNorm, BF16 LM head, optional row-specific token
+  penalties, top-k/top-p/min-p sampling, and token-id output in one
+  `CommandBatch`, so the hot path no longer has to read final hidden rows back
+  just to upload them into the sampler path again. Unsupported sampler settings
+  still decline into the existing hidden/logits fallback.
 
 ## Other follow-ups (perf headroom, not regressions)
 

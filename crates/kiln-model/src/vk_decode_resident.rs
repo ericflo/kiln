@@ -42,6 +42,7 @@ use crate::PagedKvCacheKt;
 
 const MLP_BF16_ROWS8_MIN_BATCH: usize = 256;
 const GDN_IN_PROJ_ROWS4_MIN_BATCH: usize = 16;
+const LM_HEAD_BF16_ROWS4_MIN_BATCH: usize = 16;
 
 // (#1082) The previous process-global bridge cache is gone. It existed to give
 // shared upload helpers a stable `TensorId` per weight, but memoized a full
@@ -2791,6 +2792,120 @@ pub fn record_final_norm_lm_head_argmax_batched_into(
     Ok(true)
 }
 
+/// Record the batched final RMSNorm plus LM-head stochastic sampler stage.
+///
+/// `hidden_in_buf` is f32 `[batch_size, hidden]`; `out_token_buf` is u32
+/// `[batch_size]`. Unlike the hidden-returning path, this keeps full-vocab
+/// logits resident and reads back only one token per row.
+#[allow(clippy::too_many_arguments)]
+pub fn record_final_norm_lm_head_sample_batched_into(
+    backend: &VulkanBackend,
+    batch: &mut CommandBatch,
+    hidden_in_buf: &VulkanBuffer,
+    out_token_buf: &VulkanBuffer,
+    sample: &BatchedResidentSampleBuffers,
+    weights: &crate::forward::GpuWeights,
+    config: &ModelConfig,
+    batch_size: usize,
+) -> Result<bool> {
+    anyhow::ensure!(
+        batch_size > 0 && sample.batch_size == batch_size,
+        "batched final sample: batch size mismatch"
+    );
+    let hidden = config.hidden_size;
+    let vocab_size = weights.embed_tokens_t.dims().last().copied().unwrap_or(0);
+    if vocab_size == 0 {
+        return Ok(false);
+    }
+    let eps = config.rms_norm_eps as f32;
+    let final_norm = backend.cached_f32_weight_buffer_kt(&weights.final_norm)?;
+    let lm_head_w = backend.cached_bf16_packed_weight_buffer_kt(&weights.embed_tokens_t)?;
+    let normed = backend
+        .acquire_resident_scratch("native_b_sample_normed", (batch_size * hidden * 4) as u64)?;
+    let logits = backend.acquire_resident_scratch(
+        "native_b_sample_logits",
+        (batch_size * vocab_size * 4) as u64,
+    )?;
+
+    batch.record_shader(
+        shaders::QWEN_RMSNORM_FORWARD,
+        &[hidden_in_buf.handle(), final_norm.handle(), normed.handle()],
+        &[batch_size as u32, hidden as u32, eps.to_bits()],
+        Workgroups::OneD(batch_size as u32),
+    )?;
+    let rows4 = batch_size >= LM_HEAD_BF16_ROWS4_MIN_BATCH;
+    let lm_shader = if rows4 {
+        shaders::LINEAR_DECODE_BATCHED_ROWS4_BF16W
+    } else {
+        shaders::LINEAR_DECODE_BATCHED_BF16W
+    };
+    let row_groups = if rows4 { batch_size.div_ceil(4) } else { batch_size };
+    batch.record_shader(
+        lm_shader,
+        &[normed.handle(), lm_head_w.handle(), logits.handle()],
+        &[hidden as u32, vocab_size as u32, batch_size as u32],
+        Workgroups::OneD((row_groups * vocab_size.div_ceil(32)) as u32),
+    )?;
+
+    if sample.history_items > 0 {
+        let rows = sample
+            .history_rows
+            .as_ref()
+            .context("batched final sample: missing history rows buffer")?;
+        let indices = sample
+            .history_indices
+            .as_ref()
+            .context("batched final sample: missing history indices buffer")?;
+        let counts = sample
+            .history_counts
+            .as_ref()
+            .context("batched final sample: missing history counts buffer")?;
+        let repetitions = sample
+            .repetitions
+            .as_ref()
+            .context("batched final sample: missing repetitions buffer")?;
+        let presences = sample
+            .presences
+            .as_ref()
+            .context("batched final sample: missing presences buffer")?;
+        let frequencies = sample
+            .frequencies
+            .as_ref()
+            .context("batched final sample: missing frequencies buffer")?;
+        batch.record_shader(
+            shaders::APPLY_TOKEN_PENALTIES_BATCHED,
+            &[
+                logits.handle(),
+                indices.handle(),
+                counts.handle(),
+                rows.handle(),
+                repetitions.handle(),
+                presences.handle(),
+                frequencies.handle(),
+            ],
+            &[sample.history_items as u32, vocab_size as u32, batch_size as u32],
+            Workgroups::OneD((sample.history_items as u32).div_ceil(64)),
+        )?;
+    }
+
+    batch.record_shader(
+        shaders::TOPK_SAMPLE_BATCHED,
+        &[
+            logits.handle(),
+            out_token_buf.handle(),
+            sample.top_k.handle(),
+            sample.temperatures.handle(),
+            sample.top_p.handle(),
+            sample.min_p.handle(),
+            sample.seed_lo.handle(),
+            sample.seed_hi.handle(),
+        ],
+        &[vocab_size as u32, batch_size as u32],
+        Workgroups::ThreeD(1, batch_size as u32, 1),
+    )?;
+    Ok(true)
+}
+
 /// Record a full batched decode stack into an existing [`CommandBatch`].
 ///
 /// This is intentionally record-only: the caller owns input upload,
@@ -2948,6 +3063,64 @@ pub fn record_transformer_stack_batched_argmax_into(
     )
 }
 
+/// Record a full batched decode stack plus final resident stochastic sampler
+/// into an existing [`CommandBatch`].
+#[allow(clippy::too_many_arguments)]
+pub fn record_transformer_stack_batched_sample_into(
+    backend: &VulkanBackend,
+    batch: &mut CommandBatch,
+    x_in_buf: &VulkanBuffer,
+    x_scratch_buf: &VulkanBuffer,
+    out_token_buf: &VulkanBuffer,
+    sample: &BatchedResidentSampleBuffers,
+    weights: &crate::forward::GpuWeights,
+    config: &ModelConfig,
+    batch_size: usize,
+    max_blocks_per_seq: usize,
+    block_size: usize,
+    vk_kv_cache: &VkPagedKvCache,
+    rope_cos_buf: &VulkanBuffer,
+    rope_sin_buf: &VulkanBuffer,
+    block_table_buf: &VulkanBuffer,
+    seq_lens_buf: &VulkanBuffer,
+    slots_buf: &VulkanBuffer,
+    recurrent_states: &[kiln_tensor::Tensor],
+    conv_states: &[kiln_tensor::Tensor],
+) -> Result<bool> {
+    let Some(final_in_input) = record_transformer_stack_batched_hidden_into(
+        backend,
+        batch,
+        x_in_buf,
+        x_scratch_buf,
+        weights,
+        config,
+        batch_size,
+        max_blocks_per_seq,
+        block_size,
+        vk_kv_cache,
+        rope_cos_buf,
+        rope_sin_buf,
+        block_table_buf,
+        seq_lens_buf,
+        slots_buf,
+        recurrent_states,
+        conv_states,
+    )? else {
+        return Ok(false);
+    };
+    let hidden_buf = if final_in_input { x_in_buf } else { x_scratch_buf };
+    record_final_norm_lm_head_sample_batched_into(
+        backend,
+        batch,
+        hidden_buf,
+        out_token_buf,
+        sample,
+        weights,
+        config,
+        batch_size,
+    )
+}
+
 /// Submit a full batched resident decode stack and return the greedy
 /// next-token IDs. The caller still owns all per-step uploads and
 /// cache seeding; this helper owns only command-batch construction,
@@ -3011,6 +3184,77 @@ pub fn submit_transformer_stack_batched_argmax(
     let bytes = out_staging
         .read_mapped(out_bytes as usize)
         .context("batched transformer submit: read token-id staging")?;
+    let mut tokens = Vec::with_capacity(batch_size);
+    for chunk in bytes.chunks_exact(4).take(batch_size) {
+        tokens.push(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+    }
+    Ok(Some(tokens))
+}
+
+/// Submit a full batched resident decode stack and return sampled next-token
+/// IDs. This keeps the final hidden rows and full-vocab logits resident; only
+/// `[batch_size]` token IDs are read after the single command-batch submit.
+#[allow(clippy::too_many_arguments)]
+pub fn submit_transformer_stack_batched_sample(
+    backend: &VulkanBackend,
+    vk_device: &VulkanDevice,
+    x_in_buf: &VulkanBuffer,
+    x_scratch_buf: &VulkanBuffer,
+    sample: &BatchedResidentSampleBuffers,
+    weights: &crate::forward::GpuWeights,
+    config: &ModelConfig,
+    batch_size: usize,
+    max_blocks_per_seq: usize,
+    block_size: usize,
+    vk_kv_cache: &VkPagedKvCache,
+    rope_cos_buf: &VulkanBuffer,
+    rope_sin_buf: &VulkanBuffer,
+    block_table_buf: &VulkanBuffer,
+    seq_lens_buf: &VulkanBuffer,
+    slots_buf: &VulkanBuffer,
+    recurrent_states: &[kiln_tensor::Tensor],
+    conv_states: &[kiln_tensor::Tensor],
+) -> Result<Option<Vec<u32>>> {
+    anyhow::ensure!(
+        batch_size > 0,
+        "batched transformer sample submit: batch_size must be > 0"
+    );
+    let out_bytes = (batch_size * 4) as u64;
+    let out_staging = backend
+        .acquire_resident_scratch_host_visible("native_b_sample_tokens_staging", out_bytes)?;
+
+    let mut batch = CommandBatch::new(vk_device)?;
+    let ok = record_transformer_stack_batched_sample_into(
+        backend,
+        &mut batch,
+        x_in_buf,
+        x_scratch_buf,
+        &out_staging,
+        sample,
+        weights,
+        config,
+        batch_size,
+        max_blocks_per_seq,
+        block_size,
+        vk_kv_cache,
+        rope_cos_buf,
+        rope_sin_buf,
+        block_table_buf,
+        seq_lens_buf,
+        slots_buf,
+        recurrent_states,
+        conv_states,
+    )?;
+    if !ok {
+        return Ok(None);
+    }
+    batch
+        .submit_and_wait("vk-resident native batched sample decode")
+        .context("batched transformer sample submit: submit CommandBatch")?;
+
+    let bytes = out_staging
+        .read_mapped(out_bytes as usize)
+        .context("batched transformer sample submit: read token-id staging")?;
     let mut tokens = Vec::with_capacity(batch_size);
     for chunk in bytes.chunks_exact(4).take(batch_size) {
         tokens.push(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
@@ -3097,6 +3341,26 @@ pub struct BatchedResidentDecodeMetaBuffers {
     pub slots: std::sync::Arc<VulkanBuffer>,
     pub max_blocks_per_seq: usize,
     pub block_size: usize,
+}
+
+/// Host-visible sampler metadata consumed by the batched resident decode
+/// sample tail. These buffers are written before command recording and read by
+/// the final penalty/sample shaders in the same submitted command batch.
+pub struct BatchedResidentSampleBuffers {
+    pub top_k: std::sync::Arc<VulkanBuffer>,
+    pub temperatures: std::sync::Arc<VulkanBuffer>,
+    pub top_p: std::sync::Arc<VulkanBuffer>,
+    pub min_p: std::sync::Arc<VulkanBuffer>,
+    pub seed_lo: std::sync::Arc<VulkanBuffer>,
+    pub seed_hi: std::sync::Arc<VulkanBuffer>,
+    pub history_rows: Option<std::sync::Arc<VulkanBuffer>>,
+    pub history_indices: Option<std::sync::Arc<VulkanBuffer>>,
+    pub history_counts: Option<std::sync::Arc<VulkanBuffer>>,
+    pub repetitions: Option<std::sync::Arc<VulkanBuffer>>,
+    pub presences: Option<std::sync::Arc<VulkanBuffer>>,
+    pub frequencies: Option<std::sync::Arc<VulkanBuffer>>,
+    pub batch_size: usize,
+    pub history_items: usize,
 }
 
 /// Resident buffers for one batched decode step's hidden input and
@@ -3262,6 +3526,157 @@ pub fn prepare_batched_resident_decode_meta_buffers(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
+pub fn prepare_batched_resident_sample_buffers(
+    backend: &VulkanBackend,
+    batch_size: usize,
+    history_rows: &[u32],
+    history_indices: &[u32],
+    history_counts: &[u32],
+    repetition_penalties: &[f32],
+    presence_penalties: &[f32],
+    frequency_penalties: &[f32],
+    temperatures: &[f32],
+    top_k: &[u32],
+    top_p: &[f32],
+    min_p: &[f32],
+    seeds: &[u64],
+) -> Result<BatchedResidentSampleBuffers> {
+    anyhow::ensure!(
+        batch_size > 0,
+        "batched resident sampler: batch_size must be > 0"
+    );
+    anyhow::ensure!(
+        history_rows.len() == history_indices.len() && history_indices.len() == history_counts.len(),
+        "batched resident sampler: history row/index/count length mismatch"
+    );
+    anyhow::ensure!(
+        history_rows.iter().all(|&row| (row as usize) < batch_size),
+        "batched resident sampler: history row out of range"
+    );
+    anyhow::ensure!(
+        repetition_penalties.len() == batch_size
+            && presence_penalties.len() == batch_size
+            && frequency_penalties.len() == batch_size
+            && temperatures.len() == batch_size
+            && top_k.len() == batch_size
+            && top_p.len() == batch_size
+            && min_p.len() == batch_size
+            && seeds.len() == batch_size,
+        "batched resident sampler: per-row parameter length mismatch"
+    );
+    for row in 0..batch_size {
+        let temp = temperatures[row];
+        let k = top_k[row];
+        let greedy = temp == 0.0 || (k == 1 && temp.is_finite() && temp > 0.0);
+        anyhow::ensure!(
+            greedy || (temp.is_finite() && temp > 0.0),
+            "batched resident sampler: row {row} invalid temperature {temp}"
+        );
+        anyhow::ensure!(
+            greedy
+                || (k > 0 && k <= kiln_vulkan_kernel::kernels::TOPK_SAMPLE_KERNEL_K_MAX),
+            "batched resident sampler: row {row} top_k {k} out of supported range"
+        );
+    }
+
+    let seed_lo: Vec<u32> = seeds
+        .iter()
+        .map(|seed| (*seed & 0xFFFF_FFFF) as u32)
+        .collect();
+    let seed_hi: Vec<u32> = seeds.iter().map(|seed| (*seed >> 32) as u32).collect();
+
+    let top_k_buf =
+        backend.acquire_resident_scratch_host_visible("native_b_sample_top_k_hv", (batch_size * 4) as u64)?;
+    let temperatures_buf = backend.acquire_resident_scratch_host_visible(
+        "native_b_sample_temperatures_hv",
+        (batch_size * 4) as u64,
+    )?;
+    let top_p_buf =
+        backend.acquire_resident_scratch_host_visible("native_b_sample_top_p_hv", (batch_size * 4) as u64)?;
+    let min_p_buf =
+        backend.acquire_resident_scratch_host_visible("native_b_sample_min_p_hv", (batch_size * 4) as u64)?;
+    let seed_lo_buf =
+        backend.acquire_resident_scratch_host_visible("native_b_sample_seed_lo_hv", (batch_size * 4) as u64)?;
+    let seed_hi_buf =
+        backend.acquire_resident_scratch_host_visible("native_b_sample_seed_hi_hv", (batch_size * 4) as u64)?;
+
+    top_k_buf.write_mapped(bytemuck::cast_slice(top_k))?;
+    temperatures_buf.write_mapped(bytemuck::cast_slice(temperatures))?;
+    top_p_buf.write_mapped(bytemuck::cast_slice(top_p))?;
+    min_p_buf.write_mapped(bytemuck::cast_slice(min_p))?;
+    seed_lo_buf.write_mapped(bytemuck::cast_slice(&seed_lo))?;
+    seed_hi_buf.write_mapped(bytemuck::cast_slice(&seed_hi))?;
+
+    let history_items = history_indices.len();
+    let (
+        history_rows_buf,
+        history_indices_buf,
+        history_counts_buf,
+        repetitions_buf,
+        presences_buf,
+        frequencies_buf,
+    ) = if history_items > 0 {
+        let history_rows_buf = backend.acquire_resident_scratch_host_visible(
+            "native_b_sample_history_rows_hv",
+            (history_items * 4) as u64,
+        )?;
+        let history_indices_buf = backend.acquire_resident_scratch_host_visible(
+            "native_b_sample_history_indices_hv",
+            (history_items * 4) as u64,
+        )?;
+        let history_counts_buf = backend.acquire_resident_scratch_host_visible(
+            "native_b_sample_history_counts_hv",
+            (history_items * 4) as u64,
+        )?;
+        let repetitions_buf = backend.acquire_resident_scratch_host_visible(
+            "native_b_sample_repetitions_hv",
+            (batch_size * 4) as u64,
+        )?;
+        let presences_buf = backend.acquire_resident_scratch_host_visible(
+            "native_b_sample_presences_hv",
+            (batch_size * 4) as u64,
+        )?;
+        let frequencies_buf = backend.acquire_resident_scratch_host_visible(
+            "native_b_sample_frequencies_hv",
+            (batch_size * 4) as u64,
+        )?;
+        history_rows_buf.write_mapped(bytemuck::cast_slice(history_rows))?;
+        history_indices_buf.write_mapped(bytemuck::cast_slice(history_indices))?;
+        history_counts_buf.write_mapped(bytemuck::cast_slice(history_counts))?;
+        repetitions_buf.write_mapped(bytemuck::cast_slice(repetition_penalties))?;
+        presences_buf.write_mapped(bytemuck::cast_slice(presence_penalties))?;
+        frequencies_buf.write_mapped(bytemuck::cast_slice(frequency_penalties))?;
+        (
+            Some(history_rows_buf),
+            Some(history_indices_buf),
+            Some(history_counts_buf),
+            Some(repetitions_buf),
+            Some(presences_buf),
+            Some(frequencies_buf),
+        )
+    } else {
+        (None, None, None, None, None, None)
+    };
+
+    Ok(BatchedResidentSampleBuffers {
+        top_k: top_k_buf,
+        temperatures: temperatures_buf,
+        top_p: top_p_buf,
+        min_p: min_p_buf,
+        seed_lo: seed_lo_buf,
+        seed_hi: seed_hi_buf,
+        history_rows: history_rows_buf,
+        history_indices: history_indices_buf,
+        history_counts: history_counts_buf,
+        repetitions: repetitions_buf,
+        presences: presences_buf,
+        frequencies: frequencies_buf,
+        batch_size,
+        history_items,
+    })
+}
+
 /// Convenience wrapper for callers that already have host-side f32
 /// hidden rows and RoPE tables for a batched decode step.
 ///
@@ -3307,6 +3722,88 @@ pub fn submit_transformer_stack_batched_argmax_from_host(
         vk_device,
         &step.input,
         &step.scratch,
+        weights,
+        config,
+        batch_size,
+        meta.max_blocks_per_seq,
+        meta.block_size,
+        vk_kv_cache,
+        &step.rope_cos,
+        &step.rope_sin,
+        &meta.block_table,
+        &meta.seq_lens,
+        &meta.slots,
+        recurrent_states,
+        conv_states,
+    )
+}
+
+/// Convenience wrapper for callers that want the native resident stack and
+/// stochastic sampler in one command-batch submit.
+#[allow(clippy::too_many_arguments)]
+pub fn submit_transformer_stack_batched_sample_from_host(
+    backend: &VulkanBackend,
+    vk_device: &VulkanDevice,
+    hidden_rows: &[f32],
+    rope_cos: &[f32],
+    rope_sin: &[f32],
+    block_tables: &[&BlockTable],
+    start_positions: &[usize],
+    block_size: usize,
+    weights: &crate::forward::GpuWeights,
+    config: &ModelConfig,
+    vk_kv_cache: &VkPagedKvCache,
+    recurrent_states: &[kiln_tensor::Tensor],
+    conv_states: &[kiln_tensor::Tensor],
+    history_rows: &[u32],
+    history_indices: &[u32],
+    history_counts: &[u32],
+    repetition_penalties: &[f32],
+    presence_penalties: &[f32],
+    frequency_penalties: &[f32],
+    temperatures: &[f32],
+    top_k: &[u32],
+    top_p: &[f32],
+    min_p: &[f32],
+    seeds: &[u64],
+) -> Result<Option<Vec<u32>>> {
+    let batch_size = block_tables.len();
+    let step = prepare_batched_resident_decode_step_buffers(
+        backend,
+        hidden_rows,
+        batch_size,
+        config.hidden_size,
+        rope_cos,
+        rope_sin,
+        config.rotary_dim(),
+    )?;
+    let meta = prepare_batched_resident_decode_meta_buffers(
+        backend,
+        block_tables,
+        start_positions,
+        block_size,
+    )?;
+    let sample = prepare_batched_resident_sample_buffers(
+        backend,
+        batch_size,
+        history_rows,
+        history_indices,
+        history_counts,
+        repetition_penalties,
+        presence_penalties,
+        frequency_penalties,
+        temperatures,
+        top_k,
+        top_p,
+        min_p,
+        seeds,
+    )?;
+    submit_transformer_stack_batched_sample(
+        backend,
+        vk_device,
+        &step.input,
+        &step.scratch,
+        &sample,
         weights,
         config,
         batch_size,
