@@ -139,6 +139,55 @@ fn softmax_last_axis_f32() {
 }
 
 #[test]
+fn log_softmax_last_axis_f32() {
+    let Some(dev) = metal() else {
+        eprintln!("no Metal device; skipping");
+        return;
+    };
+    for (rows, cols, seed) in [(8usize, 128usize, 13u64), (1, 2560, 14), (32, 64, 15)] {
+        let data = pattern(rows * cols, seed);
+        let (cpu, met) = pair(&data, &[rows, cols], dev);
+        // CPU reference (canonical) vs Metal kernel via the same op
+        // entry point — ops::log_softmax_last_dim routes Metal storage
+        // through the kiln-owned MSL kernel.
+        let want = ops::log_softmax_last_dim(&cpu).unwrap().to_vec::<f32>().unwrap();
+        let got = kiln_tensor::metal_log_softmax_last_axis(&met)
+            .unwrap()
+            .to_vec::<f32>()
+            .unwrap();
+        let d = max_abs_diff(&want, &got);
+        assert!(d < 1e-5, "log_softmax f32 [{rows},{cols}] max|Δ|={d}");
+        // Also exercise the dispatch path (ops::log_softmax_last_dim on
+        // Metal storage must produce the same numbers).
+        let got_dispatch = ops::log_softmax_last_dim(&met).unwrap().to_vec::<f32>().unwrap();
+        let dd = max_abs_diff(&want, &got_dispatch);
+        assert!(dd < 1e-5, "log_softmax f32 dispatch [{rows},{cols}] max|Δ|={dd}");
+    }
+}
+
+#[test]
+fn log_softmax_last_axis_bf16() {
+    let Some(dev) = metal() else {
+        eprintln!("no Metal device; skipping");
+        return;
+    };
+    for (rows, cols, seed) in [(8usize, 128usize, 16u64), (4, 256, 17)] {
+        let data = pattern(rows * cols, seed);
+        let cpu_f32 = Tensor::from_vec(data.clone(), vec![rows, cols]).unwrap();
+        let met_f32 = Tensor::from_vec_on(dev, data, vec![rows, cols]).unwrap();
+        let cpu = ops::cast(&cpu_f32, DType::BF16).unwrap();
+        let met = ops::cast(&met_f32, DType::BF16).unwrap();
+        let want = bf16_to_f32_vec(&ops::log_softmax_last_dim(&cpu).unwrap());
+        let got_t = kiln_tensor::metal_log_softmax_last_axis(&met).unwrap();
+        assert_eq!(got_t.dtype(), DType::BF16);
+        let got = bf16_to_f32_vec(&got_t);
+        let d = max_abs_diff(&want, &got);
+        // BF16 round-trips through float exp/log; loosen the tolerance.
+        assert!(d < 5e-2, "log_softmax bf16 [{rows},{cols}] max|Δ|={d}");
+    }
+}
+
+#[test]
 fn rmsnorm_last_axis_f32() {
     let Some(dev) = metal() else {
         eprintln!("no Metal device; skipping");

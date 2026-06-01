@@ -821,6 +821,108 @@ pub fn metal_softmax_last_axis(x: &crate::Tensor) -> Result<crate::Tensor> {
 }
 
 // ----------------------------------------------------------------------
+// metal_log_softmax_last_axis — Metal substrate op (#1082 OPD lane)
+// ----------------------------------------------------------------------
+
+/// Metal log-softmax over the trailing axis. Mirrors the role of the
+/// CPU `ops::log_softmax_last_dim` for the Metal backend, and is the
+/// Metal twin of [`metal_softmax_last_axis`].
+///
+/// Operates on a contiguous `[..., D]` Metal-backed tensor; produces a
+/// fresh contiguous tensor of the same shape and dtype with each
+/// `[..., :]` row replaced by `x - logsumexp(x)` (numerically stable —
+/// row-max subtracted before the `exp`).
+///
+/// # Requirements
+///
+/// - `x` must be backed by [`MetalStorage`]
+/// - `x.dtype()` must be `F32`, `BF16`, or `F16`
+/// - `x.rank() >= 1`
+/// - `x.is_contiguous()` must hold
+pub fn metal_log_softmax_last_axis(x: &crate::Tensor) -> Result<crate::Tensor> {
+    use crate::metal_rt::MTLResourceOptions;
+
+    // ---- Validate kt-side preconditions ----
+    let dtype = x.dtype();
+    let dtype_size: usize = match dtype {
+        DType::F32 => 4,
+        DType::BF16 => 2,
+        DType::F16 => 2,
+        other => {
+            return Err(Error::Msg(format!(
+                "metal_log_softmax_last_axis: unsupported dtype {other}"
+            )));
+        }
+    };
+    if x.rank() == 0 {
+        return Err(Error::Msg(
+            "metal_log_softmax_last_axis: input must have rank >= 1".to_string(),
+        ));
+    }
+    if !x.is_contiguous() {
+        return Err(Error::Msg(
+            "metal_log_softmax_last_axis: input must be contiguous".to_string(),
+        ));
+    }
+
+    let kt_metal = x
+        .storage()
+        .as_any()
+        .downcast_ref::<MetalStorage>()
+        .ok_or_else(|| {
+            Error::Msg("metal_log_softmax_last_axis: input must be Metal-backed".to_string())
+        })?;
+
+    let companion = kt_metal.companion()?;
+    let device_index = match kt_metal.device() {
+        Device::Metal(i) => i,
+        _ => unreachable!("MetalStorage::device() returns Device::Metal"),
+    };
+
+    let shape: Vec<usize> = x.shape().to_vec();
+    let element_count: usize = x.element_count();
+    let last_dim = *shape.last().unwrap();
+
+    // Allocate output buffer directly through metal-rs (no candle).
+    let byte_len = element_count * dtype_size;
+    let raw_device = companion.device();
+    let out_buffer = raw_device
+        .new_buffer(byte_len.max(1), MTLResourceOptions::StorageModeShared)
+        .map_err(|e| {
+            Error::Msg(format!(
+                "metal_log_softmax_last_axis: new_buffer({byte_len}) failed: {e:?}"
+            ))
+        })?;
+    let out_buffer_arc: Arc<MetalBuffer> = Arc::new(out_buffer);
+
+    // Kiln-owned MSL log-softmax — same online normalizer as softmax,
+    // log finalize. One threadgroup per last-axis row.
+    let rows = element_count / last_dim;
+    crate::metal_kernels::log_softmax_last_axis(
+        &companion,
+        kt_metal.buffer().as_ref(),
+        out_buffer_arc.as_ref(),
+        dtype,
+        rows,
+        last_dim,
+    )?;
+
+    let out_storage = MetalStorage::from_buffer_kt(
+        raw_device,
+        device_index,
+        dtype,
+        out_buffer_arc,
+    )?;
+    let out_storage_arc: crate::Storage = Arc::new(out_storage);
+
+    crate::Tensor::from_parts(
+        out_storage_arc,
+        crate::Layout::contiguous(shape),
+        crate::TensorId::next(),
+    )
+}
+
+// ----------------------------------------------------------------------
 // metal_sdpa_last_axis — Phase 7 Metal substrate op (#1082)
 // ----------------------------------------------------------------------
 

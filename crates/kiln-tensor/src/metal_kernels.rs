@@ -449,6 +449,144 @@ pub(crate) fn softmax_last_axis(
 }
 
 // ----------------------------------------------------------------------
+// log_softmax (last axis) — numerically-stable y_i = x_i - lse(row)
+// ----------------------------------------------------------------------
+
+/// Build the per-row last-axis log-softmax MSL. Same online (Welford)
+/// max+sum-exp normalizer as [`softmax_src`], but the finalize step
+/// writes the LOG of the softmax rather than the softmax itself:
+///
+///   lse  = m + log(d)          (d = Σ_j exp(x_j - m))
+///   y_i  = x_i - lse           ( = x_i - m - log(d) )
+///
+/// numerically stable because the max `m` is subtracted before any
+/// `exp`. Accumulations (`m` in dtype `T`, `d` in `float`) mirror the
+/// softmax kernel; only the per-element store differs. One threadgroup
+/// per last-axis row.
+fn log_softmax_src(ty: &str, entry: &str) -> String {
+    let exp_expr = match ty {
+        "half" => "exp(v)".to_string(),
+        "bfloat" => "static_cast<bfloat>(fast::exp(static_cast<float>(v)))".to_string(),
+        _ => "fast::exp(v)".to_string(), // "float"
+    };
+    format!(
+        r#"
+#include <metal_stdlib>
+using namespace metal;
+
+struct MD_t {{
+    {ty} m;
+    float d;
+}};
+
+static inline {ty} kt_exp({ty} v) {{ return {exp_expr}; }}
+
+static inline MD_t kt_md_merge(MD_t a, MD_t b) {{
+    bool a_bigger = a.m > b.m;
+    MD_t bigger  = a_bigger ? a : b;
+    MD_t smaller = a_bigger ? b : a;
+    MD_t res;
+    res.d = bigger.d + smaller.d * (float)kt_exp((smaller.m - bigger.m));
+    res.m = bigger.m;
+    return res;
+}}
+
+kernel void {entry}(
+    constant uint& src_numel    [[buffer(0)]],
+    constant uint& el_per_block [[buffer(1)]],
+    device const {ty}* src      [[buffer(2)]],
+    device {ty}* dst            [[buffer(3)]],
+    threadgroup MD_t* shared    [[threadgroup(0)]],
+    uint tid       [[thread_index_in_threadgroup]],
+    uint dst_id    [[threadgroup_position_in_grid]],
+    uint block_dim [[threads_per_threadgroup]])
+{{
+    const uint offset   = dst_id * el_per_block;
+    const uint stop_idx = min(el_per_block + offset, src_numel);
+
+    MD_t md;
+    md.m = ({ty})(-INFINITY);
+    md.d = 0.0f;
+    for (uint i = tid + offset; i < stop_idx; i += block_dim) {{
+        MD_t e;
+        e.m = src[i];
+        e.d = 1.0f;
+        md = kt_md_merge(md, e);
+    }}
+
+    shared[tid] = md;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint s = block_dim / 2; s > 0; s >>= 1) {{
+        if (tid < s) {{
+            shared[tid] = kt_md_merge(shared[tid], shared[tid + s]);
+        }}
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+    }}
+
+    const MD_t md_total = shared[0];
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // lse = m + log(Σ exp(x - m)); y_i = x_i - lse. All math in float;
+    // store back in dtype T.
+    const float lse = (float)md_total.m + log(md_total.d);
+    for (uint i = tid + offset; i < stop_idx; i += block_dim) {{
+        dst[i] = ({ty})((float)src[i] - lse);
+    }}
+}}
+"#
+    )
+}
+
+/// Contiguous last-axis log-softmax: view buffer as `[rows, cols]`; per
+/// row `out = x - logsumexp(x)`. One threadgroup per row, reduction in
+/// `MD<T>` (max in `T`, sum-exp in `float`) — same normalizer as
+/// [`softmax_last_axis`], log finalize. Mirrors the CPU reference in
+/// `ops::log_softmax_last_dim`.
+pub(crate) fn log_softmax_last_axis(
+    companion: &MetalCompanion,
+    input: &MetalBuffer,
+    output: &MetalBuffer,
+    dt: DType,
+    rows: usize,
+    cols: usize,
+) -> Result<()> {
+    if rows == 0 || cols == 0 {
+        return Ok(());
+    }
+    let ty = msl_ty(dt)?;
+    let entry = format!("kt_log_softmax_{ty}");
+    let src = log_softmax_src(ty, &entry);
+    let pipeline = op_pipeline(companion, &src, &entry)?;
+
+    // candle's width: min(maxTotalThreads, (cols/2).next_pow2) — always a
+    // power of two so the reduction tree halves cleanly.
+    let width = pipeline
+        .max_total_threads_per_threadgroup()
+        .min((cols / 2).next_power_of_two().max(1));
+
+    let encoder = companion
+        .command_encoder()
+        .map_err(|e| Error::Msg(format!("metal_kernels::log_softmax_last_axis: encoder: {e:?}")))?;
+    encoder.set_label("kt_log_softmax_last_axis");
+    encoder.set_compute_pipeline_state(&pipeline);
+
+    let src_numel = (rows * cols) as u32;
+    let el_per_block = cols as u32;
+    encoder.set_bytes(0, &src_numel);
+    encoder.set_bytes(1, &el_per_block);
+    encoder.set_buffer(2, Some(input), 0);
+    encoder.set_buffer(3, Some(output), 0);
+    // shared[width] of MD_t; sizeof(MD_t) == 8 for the float triple.
+    encoder.set_threadgroup_memory_length(0, width * 8);
+
+    let groups = objc2_metal::MTLSize { width: rows, height: 1, depth: 1 };
+    let tg = objc2_metal::MTLSize { width, height: 1, depth: 1 };
+    encoder.dispatch_thread_groups(groups, tg);
+    drop(encoder);
+    Ok(())
+}
+
+// ----------------------------------------------------------------------
 // rms_norm (last axis) — replaces candle_metal_kernels::call_rms_norm
 // ----------------------------------------------------------------------
 

@@ -68,15 +68,18 @@ use kiln_tensor::{
     Error as KtError, Tensor as KtTensor,
 };
 
-// `scatter_add` + `DType` are only used by the CUDA fused backward (the
-// d_hidden scatter + the dtype gate). The test module supplies its own
-// `DType as KtDType`. Gating them keeps the Metal-lane lib build (which
-// compiles the kt-native forward + the bail!-only kt-tape backward)
-// warning-clean.
+// `DType` is used by both the CUDA fused backward (the dtype gate) and
+// the device-agnostic kt-composite backward
+// ([`opd_top_k_reverse_kl_phase_b_bwd_composite_kt`], which runs on
+// CPU/Metal/CUDA) — so it's unconditional. The test module aliases it
+// again locally.
+use kiln_tensor::DType as KtDType;
+
+// `scatter_add` is the CUDA fused backward's d_hidden scatter; the
+// composite imports it locally inside its body. Gating the top-level
+// import keeps the non-CUDA lib build warning-clean.
 #[cfg(feature = "cuda")]
 use kiln_tensor::ops::scatter_add;
-#[cfg(feature = "cuda")]
-use kiln_tensor::DType as KtDType;
 
 #[cfg(feature = "cuda")]
 use kiln_kt_bridge::BridgeError;
@@ -702,6 +705,237 @@ pub enum OpdLossOutputKt {
     /// Per-position vector of shape `[T_active]`; the kernel multiplies
     /// position-wise.
     PerPosition,
+}
+
+/// Device-agnostic kt-composite backward for the OPD top-K reverse-KL
+/// loss — the analytic gradient `d_hidden` derived directly from the
+/// CUDA kernel's math (`csrc/opd_topk_kl.cu`), expressed purely in
+/// [`kiln_tensor`] ops so it runs on CPU / Metal / CUDA with no FFI,
+/// no cudarc, and no candle.
+///
+/// This is the OPD analogue of SFT's pure-kt analytic CE backward
+/// (`kiln_model::tape_forward::CrossEntropyFromLogitsKtBackward`): it
+/// re-derives the forward state (`s_logits`, `log_p_hat`, `log_q_hat`,
+/// `KL_t`) from `(hidden, head_t, teacher_topk_*)` and emits the exact
+/// analytic gradient.
+///
+/// # Gradient (matches `opd_topk_kl_bwd_kernel` exactly)
+///
+/// The forward is `KL_t = Σ_k p̂[t,k] (log p̂[t,k] − log q̂[t,k])`
+/// where `p̂ = softmax(s_logits)` over the K support and
+/// `s_logits[t,k] = Σ_h hidden[t,h] · head_t[h, idx[t,k]]`. The
+/// reverse-KL gradient w.r.t. the student logits is
+///
+///   `dKL_t/ds_logits[t,k] = p̂[t,k] · (log p̂[t,k] − log q̂[t,k] − KL_t)`
+///
+/// scaled by the per-position upstream gradient (`grad_loss/T_active`
+/// for `ScalarMean`, `grad_loss[t]` for `PerPosition`). The hidden
+/// gradient is the matmul transpose
+///
+///   `d_hidden[t,h] = Σ_k d_s_logits[t,k] · head_t[h, idx[t,k]]`
+///
+/// which is the batched matmul `head_gather[t] @ d_s_logits[t]` —
+/// `head_gather` being the same `[T_active, H, K]` gather of `head_t`
+/// columns the forward builds. Non-active positions get a zero row via
+/// `scatter_add` into a `[T, H]` zero buffer along axis 0.
+///
+/// # Shape contract / returns
+///
+/// Identical to [`opd_top_k_reverse_kl_phase_b_bwd_kt`]:
+/// `d_hidden` of shape `[1, T, H]` in the same dtype as `hidden`.
+///
+/// # Correctness gate
+///
+/// Validated against a central finite-difference of the forward loss
+/// in the `composite_bwd_finite_difference` unit test below (CPU,
+/// deterministic).
+pub fn opd_top_k_reverse_kl_phase_b_bwd_composite_kt(
+    hidden: &KtTensor,
+    head_t: &KtTensor,
+    teacher_topk_indices: &[u32],
+    teacher_topk_logprobs: &[f32],
+    label_mask: &[bool],
+    grad_loss: &KtTensor,
+    top_k: usize,
+    output_mode: OpdLossOutputKt,
+) -> Result<KtTensor, OpdLossError> {
+    use kiln_tensor::ops::{broadcast_to, scatter_add, sum_axis};
+    use kiln_tensor::Device as KtDevice;
+
+    // -- 1. Validate shapes (same envelope as the FFI backward). --------
+    validate_inputs_kt(
+        hidden,
+        head_t,
+        teacher_topk_indices,
+        teacher_topk_logprobs,
+        label_mask,
+        top_k,
+    )?;
+
+    let dtype = hidden.dtype();
+    let seq_len = hidden.shape()[1];
+    let hidden_size = hidden.shape()[2];
+    let dev = hidden.device();
+
+    let active_positions: Vec<u32> = label_mask
+        .iter()
+        .enumerate()
+        .filter_map(|(i, &m)| if m { Some(i as u32) } else { None })
+        .collect();
+    let active_count = active_positions.len();
+
+    // Same device-aware host-tensor upload helper the forward uses.
+    let upload_u32 = |vals: &[u32], shape: Vec<usize>| -> Result<KtTensor, OpdLossError> {
+        match dev {
+            KtDevice::Cpu => KtTensor::from_vec(vals.to_vec(), shape).map_err(OpdLossError::Kt),
+            #[cfg(feature = "cuda")]
+            KtDevice::Cuda(i) => {
+                KtTensor::cuda_from_slice(vals, shape, i).map_err(OpdLossError::Kt)
+            }
+            #[cfg(feature = "metal")]
+            KtDevice::Metal(_) => KtTensor::from_vec(vals.to_vec(), shape)
+                .and_then(|t| t.to_device(dev))
+                .map_err(OpdLossError::Kt),
+            #[allow(unreachable_patterns)]
+            other => Err(OpdLossError::msg(format!(
+                "kt-opd-loss bwd composite: unsupported device for index tensor {other}"
+            ))),
+        }
+    };
+    let upload_f32 = |vals: &[f32], shape: Vec<usize>| -> Result<KtTensor, OpdLossError> {
+        match dev {
+            KtDevice::Cpu => KtTensor::from_vec(vals.to_vec(), shape).map_err(OpdLossError::Kt),
+            #[cfg(feature = "cuda")]
+            KtDevice::Cuda(i) => {
+                KtTensor::cuda_from_slice(vals, shape, i).map_err(OpdLossError::Kt)
+            }
+            #[cfg(feature = "metal")]
+            KtDevice::Metal(_) => KtTensor::from_vec(vals.to_vec(), shape)
+                .and_then(|t| t.to_device(dev))
+                .map_err(OpdLossError::Kt),
+            #[allow(unreachable_patterns)]
+            other => Err(OpdLossError::msg(format!(
+                "kt-opd-loss bwd composite: unsupported device for f32 tensor {other}"
+            ))),
+        }
+    };
+
+    // Short-circuit: no active rows ⇒ d_hidden is all zeros in the
+    // input dtype on the input device.
+    if active_count == 0 {
+        let zeros = KtTensor::from_vec(vec![0.0f32; seq_len * hidden_size], vec![1, seq_len, hidden_size])
+            .map_err(OpdLossError::Kt)?;
+        let zeros = zeros.to_device(dev).map_err(OpdLossError::Kt)?;
+        let zeros = if dtype == KtDType::F32 {
+            zeros
+        } else {
+            kiln_tensor::ops::cast(&zeros, dtype).map_err(OpdLossError::Kt)?
+        };
+        return Ok(zeros);
+    }
+
+    // -- 2. Per-position upstream gradient `upstream[t]` ----------------
+    //
+    // ScalarMean : upstream[t] = grad_loss[0] / T_active
+    // PerPosition: upstream[t] = grad_loss[t]
+    //
+    // Read grad_loss to the host (it's a tiny [1] or [T_active] F32
+    // tensor) so we can fold the scale uniformly; the result is uploaded
+    // back to `dev` as a `[T_active, 1]` column for broadcasting.
+    let grad_f32 = to_f32(grad_loss)?.contiguous()?;
+    let grad_host = {
+        use kiln_tensor::CpuStorage;
+        let on_cpu = grad_f32.to_device(KtDevice::Cpu).map_err(OpdLossError::Kt)?;
+        let cpu = on_cpu
+            .storage()
+            .as_any()
+            .downcast_ref::<CpuStorage>()
+            .ok_or_else(|| {
+                OpdLossError::msg("kt-opd-loss bwd composite: grad_loss host read failed")
+            })?;
+        cpu.as_bytes()
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
+            .collect::<Vec<f32>>()
+    };
+    let upstream: Vec<f32> = match output_mode {
+        OpdLossOutputKt::ScalarMean => {
+            if grad_host.len() != 1 {
+                return Err(OpdLossError::msg(format!(
+                    "kt-opd-loss bwd composite: ScalarMean grad_loss must have 1 element, got {}",
+                    grad_host.len(),
+                )));
+            }
+            let s = grad_host[0] / (active_count as f32);
+            vec![s; active_count]
+        }
+        OpdLossOutputKt::PerPosition => {
+            if grad_host.len() != active_count {
+                return Err(OpdLossError::msg(format!(
+                    "kt-opd-loss bwd composite: PerPosition grad_loss must have {active_count} elements, got {}",
+                    grad_host.len(),
+                )));
+            }
+            grad_host
+        }
+    };
+    // [T_active, 1] column for broadcasting against the [T_active, K]
+    // gradient.
+    let upstream_col = upload_f32(&upstream, vec![active_count, 1])?;
+
+    // -- 3. Re-run the forward to recover (s_logits, log_p_hat, ---------
+    //       log_q_hat, p_hat, KL_t) and the gather `head_gather`.
+    //
+    //       This mirrors `per_position_forward_kt` exactly; we keep the
+    //       intermediate `head_gather` so the d_hidden matmul-transpose
+    //       can reuse it.
+    let hidden_2d = hidden.squeeze(0)?;
+    let active_idx = upload_u32(&active_positions, vec![active_count])?;
+    let active_hidden = index_select(&hidden_2d, 0, &active_idx)?;
+    let active_hidden_f32 = to_f32(&active_hidden)?;
+    let head_t_f32 = to_f32(head_t)?;
+
+    let flat_indices = upload_u32(teacher_topk_indices, vec![active_count * top_k])?;
+    let gathered = index_select(&head_t_f32, 1, &flat_indices)?;
+    let reshaped = gathered.reshape(vec![hidden_size, active_count, top_k])?;
+    let head_gather = reshaped.permute(&[1, 0, 2])?.contiguous()?; // [T_active, H, K]
+
+    let lhs = active_hidden_f32.unsqueeze(1)?; // [T_active, 1, H]
+    let s_logits = matmul(&lhs, &head_gather)?.squeeze(1)?.contiguous()?; // [T_active, K]
+
+    let q_logprobs = upload_f32(teacher_topk_logprobs, vec![active_count, top_k])?;
+    let log_p_hat = log_softmax_last_dim(&s_logits)?; // [T_active, K]
+    let log_q_hat = log_softmax_last_dim(&q_logprobs)?; // [T_active, K]
+    let p_hat = exp(&log_p_hat)?; // [T_active, K]
+    let diff = sub(&log_p_hat, &log_q_hat)?; // log p̂ − log q̂
+
+    // KL_t = Σ_k p̂ · diff  →  [T_active], broadcast to [T_active, K].
+    let kl_t = sum_axis(&mul(&p_hat, &diff)?, 1)?; // [T_active]
+    let kl_col = kl_t.reshape(vec![active_count, 1])?; // [T_active, 1]
+    let kl_b = broadcast_to(&kl_col, &[active_count, top_k])?; // [T_active, K]
+
+    // -- 4. d_s_logits[t,k] = p̂ · (diff − KL_t) · upstream[t] ----------
+    let inner = sub(&diff, &kl_b)?; // [T_active, K]
+    let d_s_logits = mul(&p_hat, &inner)?; // [T_active, K]
+    let upstream_b = broadcast_to(&upstream_col, &[active_count, top_k])?; // [T_active, K]
+    let d_s_logits = mul(&d_s_logits, &upstream_b)?; // [T_active, K]
+
+    // -- 5. d_hidden[t,h] = Σ_k d_s_logits[t,k] · head_gather[t,h,k] ----
+    //       = head_gather[t] @ d_s_logits[t] as a batched matmul:
+    //       [T_active, H, K] @ [T_active, K, 1] → [T_active, H, 1].
+    let d_s_col = d_s_logits.unsqueeze(2)?; // [T_active, K, 1]
+    let d_hidden_active = matmul(&head_gather, &d_s_col)?.squeeze(2)?.contiguous()?; // [T_active, H]
+
+    // -- 6. Cast to hidden dtype + scatter active rows into [T, H]. -----
+    let d_hidden_active = if dtype == KtDType::F32 {
+        d_hidden_active
+    } else {
+        kiln_tensor::ops::cast(&d_hidden_active, dtype).map_err(OpdLossError::Kt)?
+    };
+    let d_hidden_2d = scatter_add(&d_hidden_active, 0, &active_idx, seq_len)?; // [T, H]
+    let d_hidden_3d = d_hidden_2d.reshape(vec![1, seq_len, hidden_size])?;
+
+    Ok(d_hidden_3d)
 }
 
 /// CUDA-only kt-typed backward for the fused OPD top-K reverse-KL
@@ -1429,4 +1663,172 @@ mod tests {
         assert!(m.entropy_gap_vec().is_empty());
     }
 
+    // -----------------------------------------------------------------------
+    // Device-agnostic composite backward — MANDATORY correctness gate.
+    //
+    // Compares the analytic composite gradient
+    // (`opd_top_k_reverse_kl_phase_b_bwd_composite_kt`) against a CENTRAL
+    // finite-difference of the forward loss, on CPU (deterministic, no GPU).
+    // -----------------------------------------------------------------------
+
+    /// Scalar forward loss for the FD check, computed from a flat
+    /// `[1, T, H]` hidden buffer. `grad_w` are the per-active-position
+    /// weights folded into the loss:
+    ///   ScalarMean  : L = (1/T_active) Σ_t KL_t     (grad_w all = 1)
+    ///   PerPosition : L = Σ_t grad_w[t] · KL_t
+    fn forward_loss_for_fd(
+        hidden_flat: &[f32],
+        seq_len: usize,
+        hidden_size: usize,
+        head: &KtTensor,
+        idx: &[u32],
+        lp: &[f32],
+        mask: &[bool],
+        top_k: usize,
+        grad_w: &[f32],
+        scalar_mean: bool,
+    ) -> f64 {
+        let hidden =
+            KtTensor::from_vec(hidden_flat.to_vec(), vec![1, seq_len, hidden_size]).unwrap();
+        let active: Vec<u32> = mask
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &m)| if m { Some(i as u32) } else { None })
+            .collect();
+        let (per_token, _, _) =
+            per_position_forward_kt(&hidden, head, idx, lp, &active, top_k).unwrap();
+        let kl = read_f32(&per_token);
+        if scalar_mean {
+            let n = kl.len() as f64;
+            kl.iter().map(|&v| v as f64).sum::<f64>() / n
+        } else {
+            kl.iter()
+                .zip(grad_w.iter())
+                .map(|(&k, &w)| (k as f64) * (w as f64))
+                .sum::<f64>()
+        }
+    }
+
+    fn run_fd_check(scalar_mean: bool) {
+        // Small deterministic fixture. T=5 (3 active), H=6, V=10, K=3.
+        let seq_len = 5usize;
+        let hidden_size = 6usize;
+        let vocab = 10usize;
+        let top_k = 3usize;
+        let mask = vec![true, false, true, true, false];
+        let active_count = mask.iter().filter(|&&m| m).count();
+
+        // Deterministic non-degenerate hidden / head.
+        let hidden_flat: Vec<f32> = (0..seq_len * hidden_size)
+            .map(|i| ((i as f32) * 0.37).sin() * 0.8 + 0.1)
+            .collect();
+        let head_flat: Vec<f32> = (0..hidden_size * vocab)
+            .map(|i| ((i as f32) * 0.21).cos() * 0.6)
+            .collect();
+        let head = KtTensor::from_vec(head_flat, vec![hidden_size, vocab]).unwrap();
+
+        // Distinct teacher top-K indices per active row + non-uniform
+        // teacher logprobs so q̂ ≠ uniform (exercises the log_q term).
+        let mut idx: Vec<u32> = Vec::with_capacity(active_count * top_k);
+        for r in 0..active_count {
+            for k in 0..top_k {
+                idx.push(((r * 2 + k) % vocab) as u32);
+            }
+        }
+        let lp: Vec<f32> = (0..active_count * top_k)
+            .map(|i| -0.5 - ((i as f32) * 0.17).cos().abs())
+            .collect();
+
+        // Upstream weights. ScalarMean: grad_loss scalar 1.0 (so the
+        // composite folds 1/T_active internally and L = mean KL).
+        // PerPosition: a non-trivial per-position grad vector.
+        let grad_w: Vec<f32> = if scalar_mean {
+            vec![1.0; active_count]
+        } else {
+            (0..active_count).map(|t| 0.3 + 0.5 * (t as f32)).collect()
+        };
+        let (grad_loss, mode) = if scalar_mean {
+            (
+                KtTensor::from_vec(vec![1.0f32], vec![1]).unwrap(),
+                OpdLossOutputKt::ScalarMean,
+            )
+        } else {
+            (
+                KtTensor::from_vec(grad_w.clone(), vec![active_count]).unwrap(),
+                OpdLossOutputKt::PerPosition,
+            )
+        };
+
+        let hidden = KtTensor::from_vec(hidden_flat.clone(), vec![1, seq_len, hidden_size]).unwrap();
+        let analytic = opd_top_k_reverse_kl_phase_b_bwd_composite_kt(
+            &hidden, &head, &idx, &lp, &mask, &grad_loss, top_k, mode,
+        )
+        .expect("composite backward");
+        assert_eq!(analytic.shape(), &[1, seq_len, hidden_size]);
+        let g_analytic = read_f32(&analytic);
+
+        // Central finite difference: ∂L/∂hidden[i] ≈ (L(x+h)-L(x-h))/2h.
+        let h = 1e-3f32;
+        let mut max_abs_err = 0.0f64;
+        let mut max_ref = 0.0f64;
+        for i in 0..seq_len * hidden_size {
+            let mut xp = hidden_flat.clone();
+            let mut xm = hidden_flat.clone();
+            xp[i] += h;
+            xm[i] -= h;
+            let lp_loss = forward_loss_for_fd(
+                &xp, seq_len, hidden_size, &head, &idx, &lp, &mask, top_k, &grad_w, scalar_mean,
+            );
+            let lm_loss = forward_loss_for_fd(
+                &xm, seq_len, hidden_size, &head, &idx, &lp, &mask, top_k, &grad_w, scalar_mean,
+            );
+            let fd = (lp_loss - lm_loss) / (2.0 * h as f64);
+            let an = g_analytic[i] as f64;
+            let err = (fd - an).abs();
+            max_abs_err = max_abs_err.max(err);
+            max_ref = max_ref.max(fd.abs()).max(an.abs());
+        }
+        // Relative tolerance: max abs err < 1e-2 * max magnitude (with a
+        // small absolute floor for near-zero gradients).
+        let tol = 1e-2 * max_ref.max(1e-3);
+        assert!(
+            max_abs_err < tol,
+            "composite backward FD mismatch (scalar_mean={scalar_mean}): \
+             max_abs_err={max_abs_err:.3e} tol={tol:.3e} max_ref={max_ref:.3e}"
+        );
+        eprintln!(
+            "[OPD-FD] scalar_mean={scalar_mean}: max_abs_err={max_abs_err:.3e} \
+             tol={tol:.3e} max_ref={max_ref:.3e}"
+        );
+    }
+
+    #[test]
+    fn composite_bwd_finite_difference_scalar_mean() {
+        run_fd_check(true);
+    }
+
+    #[test]
+    fn composite_bwd_finite_difference_per_position() {
+        run_fd_check(false);
+    }
+
+    /// No-active-positions short-circuit must return an all-zero
+    /// `[1, T, H]` grad of the right dtype.
+    #[test]
+    fn composite_bwd_no_active_returns_zeros() {
+        let h = dummy_hidden(4, 8);
+        let w = dummy_head_t(8, 16);
+        let idx: Vec<u32> = vec![];
+        let lp: Vec<f32> = vec![];
+        let mask = vec![false; 4];
+        let grad = KtTensor::from_vec(vec![1.0f32], vec![1]).unwrap();
+        let out = opd_top_k_reverse_kl_phase_b_bwd_composite_kt(
+            &h, &w, &idx, &lp, &mask, &grad, 4, OpdLossOutputKt::ScalarMean,
+        )
+        .expect("composite backward no-active");
+        assert_eq!(out.shape(), &[1, 4, 8]);
+        for v in read_f32(&out) {
+            assert_eq!(v, 0.0);
+        }
+    }
 }

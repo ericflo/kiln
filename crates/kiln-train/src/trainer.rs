@@ -5172,7 +5172,7 @@ fn observe_lora_grad_norms_from_map(
 /// norm per module. The per-param norm is computed KT-NATIVELY via
 /// `train_receipt::tensor_l2_norm_kt` (cast-to-F32 on-device + single D2H
 /// scalar readback) — NO full-tensor kt->candle grad copy.
-fn observe_lora_grad_norms_from_kt_grad_store(
+pub(crate) fn observe_lora_grad_norms_from_kt_grad_store(
     accumulator: &mut crate::train_receipt::LoraGradNormAccumulator,
     params: &TrainableLoraParams,
     grads: &kiln_autograd::GradStore,

@@ -1086,23 +1086,27 @@ fn test_real_model_grpo_metal() {
 /// scalar-loss tape root (`opd_candle_shim::try_tape_opd_scalar_mean_cuda_kt` ->
 /// `kiln_opd_loss_kernel::opd_top_k_reverse_kl_phase_b_via_kt_tape`).
 ///
-/// # Deliberate scope boundary (#1082 Metal lane)
+/// # End-to-end on Metal (#1082 Metal lane)
 ///
-/// Unlike SFT (CE) and GRPO (policy-grad), whose tape backwards are
-/// device-agnostic `kiln_tensor` composites that run on Metal, the OPD top-K
-/// reverse-KL BACKWARD is a genuine CUDA FFI kernel
-/// (`kiln_opd_topk_kl_bwd_{f32,bf16}`, declared in
-/// `kiln-opd-loss-kernel/src/phase_b.rs`, dispatched by
-/// `kt_api::opd_top_k_reverse_kl_phase_b_bwd_kt`) with NO device-agnostic kt
-/// path. The kt-tape backward op (`CudaOpdTopKReverseKlPhaseBBackward::apply`)
-/// `bail!`s under `#[cfg(not(feature = "cuda"))]`.
+/// Like SFT (CE) and GRPO (policy-grad), OPD now runs fully on Metal: both
+/// op-gaps that previously blocked it are closed.
 ///
-/// So this smoke proves the OPD **forward + loss are reachable on Metal** (the
-/// run executes the Metal forward and records the OPD loss node before the
-/// backward walk), and pins the EXACT stopping point: the run errors during the
-/// tape backward walk with the OPD CUDA-FFI-backward message. Writing a Metal
-/// OPD top-K reverse-KL backward kernel is a documented follow-up; until then
-/// OPD training is CUDA-only end-to-end while the forward/loss are Metal-ready.
+///  (A) FORWARD: `log_softmax_last_dim` has a Metal MSL kernel
+///      (`metal_log_softmax_last_axis`), so the kt-native OPD forward
+///      (`per_position_forward_kt`) completes on Metal storage.
+///
+///  (B) BACKWARD: the OPD top-K reverse-KL backward is now a
+///      device-agnostic analytic kt-composite
+///      (`kt_api::opd_top_k_reverse_kl_phase_b_bwd_composite_kt`, derived
+///      from the CUDA kernel's math and validated against finite-difference)
+///      — the same "pure-kt analytic backward" pattern SFT's CE uses. The
+///      kt-tape backward op (`CudaOpdTopKReverseKlPhaseBBackward::apply`)
+///      routes CPU/Metal through the composite and keeps the perf-tuned CUDA
+///      FFI kernel for `Device::Cuda(_)`.
+///
+/// This smoke now runs OPD to completion on Metal: it asserts the full
+/// SFT/GRPO-style contract — adapter written, finite losses, and LoRA grads
+/// flowed through the kt tape-authoritative path.
 #[cfg(feature = "metal")]
 #[test]
 fn test_real_model_opd_metal() {
@@ -1182,9 +1186,10 @@ fn test_real_model_opd_metal() {
 
     match result {
         Ok(out) => {
-            // If a Metal OPD backward kernel (or a device-agnostic kt backward)
-            // ever lands, the run completes — assert the full SFT/GRPO-style
-            // contract (adapter written + finite losses + grads flowed).
+            // Both op-gaps are closed (Metal `log_softmax` kernel + the
+            // device-agnostic kt-composite OPD backward), so OPD runs to
+            // completion on Metal — assert the full SFT/GRPO-style contract
+            // (adapter written + finite losses + grads flowed).
             assert_adapter_written(&out);
             let losses = losses.lock().unwrap();
             assert!(!losses.is_empty(), "OPD progress callback recorded no losses");
@@ -1199,55 +1204,20 @@ fn test_real_model_opd_metal() {
                  through the kt tape-authoritative path on Metal"
             );
             eprintln!(
-                "[OPD-METAL] run completed (Metal OPD backward now available): \
+                "[OPD-METAL] run completed (Metal OPD forward + composite backward): \
                  losses={losses:?} lora_grad_norm_modules={grad_norm_modules} \
                  max_mean_norm={max_mean_norm}"
             );
         }
         Err(e) => {
-            // Expected today: OPD on Metal stops at one of TWO documented,
-            // out-of-scope gaps (a new Metal kernel is needed for either; both
-            // are deliberate scope boundaries for the #1082 Metal lane):
-            //
-            //  (A) FORWARD/loss-composite gap — the kt-native OPD top-K reverse-KL
-            //      forward (`per_position_forward_kt`) uses `log_softmax_last_dim`,
-            //      which is CPU-only in `kiln_tensor` (no Metal kernel). The device
-            //      gather + index uploads now run on Metal (the index-tensor
-            //      device-parity fix in `kt_api::per_position_forward_kt`), but the
-            //      composite hits this CPU-only op before producing the loss.
-            //
-            //  (B) BACKWARD gap — if/when `log_softmax` gets a Metal kernel, the
-            //      forward+loss complete and the run reaches the tape backward,
-            //      where the OPD top-K reverse-KL backward
-            //      (`kiln_opd_topk_kl_bwd_*`, CUDA FFI, gated behind
-            //      `feature = "cuda"`) `bail!`s — it has NO device-agnostic kt
-            //      path, unlike SFT's CE / GRPO's policy-grad.
-            //
-            // The run must stop at one of these KNOWN op-level gaps — NOT at an
-            // unexpected failure (device-mismatch panic, wrong shape, teacher
-            // wiring). Match the precise op-gap signatures (avoid loose
-            // `contains("cuda")`, which would false-match the `..._cuda_kt`
-            // adapter name).
+            // OPD now runs end-to-end on Metal (forward via the Metal
+            // `log_softmax` kernel; backward via the device-agnostic
+            // kt-composite). Any error here is a real regression — fail loudly.
             let chain = format!("{e:#}");
-            let forward_logsoftmax_gap = chain.contains("log_softmax")
-                && chain.contains("must be CpuStorage");
-            let backward_ffi_gap = chain.contains("without `cuda` feature")
-                || chain.contains("fused backward requires CUDA");
-            assert!(
-                forward_logsoftmax_gap || backward_ffi_gap,
-                "OPD-on-Metal failed, but NOT at a documented Metal op-gap. The run \
-                 should reach the kt-native OPD forward on Metal and stop only at \
-                 (A) the CPU-only `log_softmax_last_dim` op or (B) the CUDA-FFI OPD \
-                 backward. Got unexpected error chain:\n{chain}"
-            );
-            let which = if backward_ffi_gap {
-                "BACKWARD (CUDA-FFI kiln_opd_topk_kl_bwd_*; no device-agnostic kt path)"
-            } else {
-                "FORWARD (CPU-only log_softmax_last_dim; no Metal kernel)"
-            };
-            eprintln!(
-                "[OPD-METAL] OPD producer reachable on Metal up to the documented \
-                 op-gap: stopped at {which}. Full chain:\n{chain}"
+            panic!(
+                "[OPD-METAL] OPD-on-Metal must now run to completion (both the \
+                 forward `log_softmax` Metal kernel and the device-agnostic \
+                 kt-composite backward are wired). Got error chain:\n{chain}"
             );
         }
     }

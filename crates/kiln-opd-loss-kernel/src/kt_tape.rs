@@ -68,8 +68,8 @@ use kiln_tensor::{
 };
 
 use crate::kt_api::{
-    opd_top_k_reverse_kl_kt, opd_top_k_reverse_kl_per_position_kt, OpdLossError,
-    OpdLossOutputKt,
+    opd_top_k_reverse_kl_kt, opd_top_k_reverse_kl_per_position_kt,
+    opd_top_k_reverse_kl_phase_b_bwd_composite_kt, OpdLossError, OpdLossOutputKt,
 };
 
 #[cfg(feature = "cuda")]
@@ -177,21 +177,25 @@ impl BackwardOp for CudaOpdTopKReverseKlPhaseBBackward {
     }
 
     fn apply(&self, grad_output: &KtTensor) -> KtResult<Vec<Option<KtTensor>>> {
-        // CUDA path is the only kernel path; the non-CUDA branch
-        // exists so the kt-tape entry can return a clean error rather
-        // than ICE when something records the op in a non-CUDA build.
-        #[cfg(not(feature = "cuda"))]
-        {
-            let _ = grad_output;
-            bail!(
-                "opd_top_k_reverse_kl_phase_b_kt_tape bwd: \
-                 kiln-opd-loss-kernel built without `cuda` feature; \
-                 fused backward requires CUDA"
-            );
-        }
-
+        // Backward dispatch by device:
+        //
+        //  - CUDA storage (only reachable on a `cuda`-feature build):
+        //    route through the perf-tuned fused FFI kernel
+        //    `kiln_opd_topk_kl_bwd_{f32,bf16}` via
+        //    `opd_top_k_reverse_kl_phase_b_bwd_kt`. Bit-identical to the
+        //    candle/kt-tape CUDA paths — unchanged.
+        //
+        //  - CPU / Metal storage: route through the device-agnostic
+        //    analytic kt-composite `..._bwd_composite_kt`, which derives
+        //    the same `d_hidden` gradient purely from `kiln_tensor` ops
+        //    (validated against finite-difference in `kt_api` tests). No
+        //    FFI / cudarc / candle — runs on every backend.
+        //
+        // The composite is correct on CUDA too (pure kt), but the FFI
+        // kernel stays the CUDA path to preserve its validated numerics
+        // and performance.
         #[cfg(feature = "cuda")]
-        {
+        if matches!(self.hidden.device(), KtDevice::Cuda(_)) {
             // Shape + device + dtype checks happen inside
             // `opd_top_k_reverse_kl_phase_b_bwd_kt` (it validates
             // grad_loss against output_mode + active_count); we
@@ -207,15 +211,30 @@ impl BackwardOp for CudaOpdTopKReverseKlPhaseBBackward {
                 self.output_mode,
             )
             .map_err(|e: OpdLossError| {
-                kiln_tensor::Error::Msg(format!(
-                    "opd kt-tape bwd: kt call: {e}"
-                ))
+                kiln_tensor::Error::Msg(format!("opd kt-tape bwd: kt call: {e}"))
             })?;
 
             // (Some(d_hidden), None) — kernel only produces hidden grad;
             // head_t is treated as non-differentiable in this op.
-            Ok(vec![Some(d_hidden), None])
+            return Ok(vec![Some(d_hidden), None]);
         }
+
+        // Non-CUDA (CPU / Metal) device-agnostic composite path.
+        let d_hidden = opd_top_k_reverse_kl_phase_b_bwd_composite_kt(
+            &self.hidden,
+            &self.head_t,
+            &self.teacher_topk_indices,
+            &self.teacher_topk_logprobs,
+            &self.label_mask,
+            grad_output,
+            self.top_k,
+            self.output_mode,
+        )
+        .map_err(|e: OpdLossError| {
+            kiln_tensor::Error::Msg(format!("opd kt-tape bwd composite: kt call: {e}"))
+        })?;
+
+        Ok(vec![Some(d_hidden), None])
     }
 
     fn requires_input(&self, idx: usize) -> bool {

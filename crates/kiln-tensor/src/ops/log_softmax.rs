@@ -25,6 +25,18 @@ pub fn log_softmax_last_dim(x: &Tensor) -> Result<Tensor> {
         return Ok(logged);
     }
 
+    // Metal fast path: kiln-owned MSL log-softmax kernel (numerically
+    // stable y_i = x_i - logsumexp(row)). Mirrors the CUDA fast path and
+    // the CPU reference below; required by the OPD forward composite
+    // (`per_position_forward_kt`) on Metal storage (#1082 OPD lane).
+    #[cfg(feature = "metal")]
+    if matches!(x.device(), crate::Device::Metal(_))
+        && matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16)
+        && x.is_contiguous()
+    {
+        return crate::metal_log_softmax_last_axis(x);
+    }
+
     if !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16) {
         bail!(
             "log_softmax_last_dim: dtype must be F32/BF16/F16, got {}",

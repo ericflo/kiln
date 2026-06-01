@@ -2109,6 +2109,7 @@ pub fn opd_train(
             run_started.elapsed().as_millis() as u64,
             None,
             None,
+            Vec::new(),
             Some(message.to_string()),
         );
         anyhow::bail!(
@@ -2194,6 +2195,7 @@ pub fn opd_train(
                 run_started.elapsed().as_millis() as u64,
                 None,
                 None,
+                Vec::new(),
                 Some(format!("{err:#}")),
             );
             return Err(crate::train_receipt::annotate_training_error(err));
@@ -2277,6 +2279,7 @@ pub fn opd_train(
             run_started.elapsed().as_millis() as u64,
             Some(alpha_over_rank),
             None,
+            Vec::new(),
             Some(message.to_string()),
         );
         anyhow::bail!(
@@ -2290,6 +2293,12 @@ pub fn opd_train(
     let total_steps = epochs * tokenized.len() * effective_samples_per_prompt.max(1);
     let mut global_step = 0usize;
     let mut last_loss = 0.0_f64;
+    // Per-module LoRA grad-norm accumulator — mirrors the SFT/GRPO
+    // tape-authoritative producers. Populated each step from the
+    // kt-native grad store and finalized into the train receipt so the
+    // receipt's `lora_grad_norms` reflects that gradients flowed (matches
+    // SFT/GRPO; previously OPD left it empty).
+    let mut lora_grad_norms = crate::train_receipt::LoraGradNormAccumulator::default();
 
     // (#1082 P-OPD) `embed_tokens_t` is the frozen, weight-tied lm_head. The OPD
     // scalar-loss tape root is now kt-native (`try_tape_opd_scalar_mean_cuda_kt`)
@@ -2731,6 +2740,17 @@ pub fn opd_train(
                                 teacher_active_opt,
                             )?;
 
+                        // Observe per-module LoRA grad norms from the kt-native
+                        // grad store BEFORE the optimizer consumes it — same
+                        // pattern as SFT/GRPO. Records that gradients flowed
+                        // (the receipt's `lora_grad_norms` is the oracle the
+                        // Metal smoke checks).
+                        crate::trainer::observe_lora_grad_norms_from_kt_grad_store(
+                            &mut lora_grad_norms,
+                            &params,
+                            &kt_grads,
+                        )?;
+
                         // Consume the kt-native grads DIRECTLY (no kt→candle
                         // copy): `optimizer_step_from_kt_grad_store` bridges each
                         // LoRA Var's grad at its own per-Var boundary inside the
@@ -2885,6 +2905,7 @@ pub fn opd_train(
         run_started.elapsed().as_millis() as u64,
         Some(alpha_over_rank),
         Some(last_loss),
+        lora_grad_norms.finish(),
         None,
     );
 
@@ -3106,6 +3127,7 @@ fn write_opd_train_receipt_best_effort(
     wall_clock_ms: u64,
     alpha_over_rank: Option<f32>,
     final_opd_loss: Option<f64>,
+    lora_grad_norms: Vec<crate::train_receipt::LoraGradNormSummary>,
     status_error: Option<String>,
 ) {
     let mut receipt = crate::train_receipt::TrainReceipt::new(
@@ -3129,6 +3151,7 @@ fn write_opd_train_receipt_best_effort(
         path: None,
         sha256: training_data_sha256,
     };
+    receipt.lora_grad_norms = lora_grad_norms;
     receipt.opd = Some(crate::train_receipt::OpdReceipt {
         training_mode: serde_json::to_value(config.training_mode)
             .ok()
