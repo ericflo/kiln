@@ -6,7 +6,7 @@ use half::bf16;
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
-pub(crate) const MLP_BF16_ROWS8_MIN_BATCH: usize = 256;
+const DEFAULT_MLP_BF16_ROWS8_MIN_BATCH: usize = 256;
 pub(crate) const GDN_IN_PROJ_ROWS4_MIN_BATCH: usize = 16;
 pub(crate) const GDN_IN_PROJ_ROWS8_MIN_BATCH: usize = 64;
 pub(crate) const LINEAR_DECODE_BF16W_ROWS8_MIN_BATCH: usize = 64;
@@ -43,6 +43,17 @@ pub(crate) fn mlp_bf16_down_rows4_enabled() -> bool {
 pub(crate) fn mlp_bf16_rows8_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_MLP_BF16_ROWS8").is_err())
+}
+
+pub(crate) fn mlp_bf16_rows8_min_batch() -> usize {
+    static VALUE: OnceLock<usize> = OnceLock::new();
+    *VALUE.get_or_init(|| {
+        std::env::var("KILN_VULKAN_MLP_BF16_ROWS8_MIN_BATCH")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(DEFAULT_MLP_BF16_ROWS8_MIN_BATCH)
+    })
 }
 
 pub(crate) fn linear_decode_bf16w_rows4_enabled() -> bool {
@@ -5377,19 +5388,14 @@ fn dispatch_mlp_decode_cached_impl(
     let host_visible_mt = vk_device.host_visible_mem_type();
     let profile_stages = profile_vulkan_mlp_kernel_stages_enabled();
     let gate_up_rows2 = !gate_up_bf16_weights && use_prefill_row_pair_matmul(batch);
-    // For the all-bf16 MLP, the rows4 / rows8 amortization only beats the
-    // per-batch-row bf16w kernel once we have enough rows to keep the SMs
-    // full: rows4 cuts workgroup count by 4×, rows8 by 8×. Batch 64 is
-    // still faster with rows4 on the Strix Halo APU, and batch 128 is also
-    // faster with rows4 in the mixed-stack token bench, so rows8 starts at a
-    // larger default batch and remains env-gated for experimentation. The
-    // f32-down rows4 keeps its older batch>=8 threshold because reading
-    // 4 B/weight makes weight-read reuse pay off sooner. The bf16-down rows4
-    // path starts at batch 16 on STRIX_HALO; batch 8 regresses, while batch 16
-    // improves both the GDN block and the mixed paged token bench.
+    // For the all-bf16 MLP, rows4 / rows8 amortization only wins once there
+    // are enough rows to keep the SMs full. The default rows8 crossover is
+    // runtime-tunable because standalone component timings and full mixed
+    // paged token timings can disagree across devices. The Strix Halo default
+    // keeps batch 64 on rows4 unless an override proves faster.
     let rows8_path = gate_up_bf16_weights
         && down_bf16_weights
-        && batch >= MLP_BF16_ROWS8_MIN_BATCH
+        && batch >= mlp_bf16_rows8_min_batch()
         && mlp_bf16_rows8_enabled();
     let down_bf16_rows4 = down_bf16_weights
         && gate_up_bf16_weights

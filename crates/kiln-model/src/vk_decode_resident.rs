@@ -40,7 +40,7 @@ use crate::backend::vulkan::VulkanBackend;
 use crate::forward::GpuLayerWeights;
 use crate::PagedKvCacheKt;
 
-const MLP_BF16_ROWS8_MIN_BATCH: usize = 256;
+const DEFAULT_MLP_BF16_ROWS8_MIN_BATCH: usize = 256;
 const FULL_ATTN_QKV_BF16_ROWS8_MIN_BATCH: usize = 64;
 const GDN_IN_PROJ_ROWS4_MIN_BATCH: usize = 16;
 const GDN_IN_PROJ_ROWS8_MIN_BATCH: usize = 64;
@@ -105,6 +105,17 @@ fn linear_bf16w_rows8_enabled() -> bool {
         && enabled_unless_disabled("KILN_DISABLE_VULKAN_LINEAR_BF16W_ROWS8")
 }
 
+fn mlp_bf16_rows8_min_batch() -> usize {
+    static VALUE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *VALUE.get_or_init(|| {
+        std::env::var("KILN_VULKAN_MLP_BF16_ROWS8_MIN_BATCH")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(DEFAULT_MLP_BF16_ROWS8_MIN_BATCH)
+    })
+}
+
 fn full_attn_qkv_gate_split_bf16w_plan(batch: usize, total_out: usize) -> (&'static str, u32) {
     let rows8 = batch >= FULL_ATTN_QKV_BF16_ROWS8_MIN_BATCH
         && enabled_unless_disabled("KILN_DISABLE_VULKAN_FULL_ATTN_QKV_BF16W_ROWS8");
@@ -149,7 +160,7 @@ fn linear_bf16w_batched_plan(batch: usize, out_dim: usize) -> (&'static str, u32
 }
 
 fn mlp_gate_up_bf16w_batched_plan(batch: usize, intermediate: usize) -> (&'static str, u32) {
-    let rows8 = batch >= MLP_BF16_ROWS8_MIN_BATCH
+    let rows8 = batch >= mlp_bf16_rows8_min_batch()
         && enabled_unless_disabled("KILN_DISABLE_VULKAN_MLP_BF16_ROWS8");
     let rows4 = batch >= 8
         && !rows8
@@ -173,7 +184,7 @@ fn mlp_gate_up_bf16w_batched_plan(batch: usize, intermediate: usize) -> (&'stati
 }
 
 fn mlp_down_add_residual_bf16w_batched_plan(batch: usize, out_dim: usize) -> (&'static str, u32) {
-    let rows8 = batch >= MLP_BF16_ROWS8_MIN_BATCH
+    let rows8 = batch >= mlp_bf16_rows8_min_batch()
         && enabled_unless_disabled("KILN_DISABLE_VULKAN_MLP_BF16_ROWS8");
     let rows4 = batch >= 16
         && !rows8

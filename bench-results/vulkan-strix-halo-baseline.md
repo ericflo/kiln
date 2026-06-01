@@ -1034,6 +1034,13 @@ every config"):
   its actual packed word, which keeps odd-width projection coverage correct.
   Focused Vulkan coverage:
   `gdn_in_proj_rows8_matches_cpu_with_tail_rows_and_odd_pairs`.
+  **Update — MLP rows8 crossover is runtime-tunable, defaulting to batch 256:**
+  the model recorder, kernel helper, resident helper, and decode microbench now
+  all read `KILN_VULKAN_MLP_BF16_ROWS8_MIN_BATCH` before choosing the full-BF16
+  MLP rows8 shaders. A steadier same-session mixed-paged token check kept the
+  Strix Halo default at 256: batch 64 measured 465.0 ms with a 64-row crossover
+  vs 446.2 ms with the 256-row crossover. The override remains available for
+  devices where the measured crossover differs.
 
 ## Other follow-ups (perf headroom, not regressions)
 

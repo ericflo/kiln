@@ -28,7 +28,7 @@ use crate::{shaders, CommandBatch, VulkanBuffer, VulkanDevice, Workgroups};
 
 use crate::kernels::{
     linear_decode_bf16w_rows4_enabled, linear_decode_bf16w_rows8_enabled,
-    LINEAR_DECODE_BF16W_ROWS8_MIN_BATCH, MLP_BF16_ROWS8_MIN_BATCH,
+    mlp_bf16_rows8_min_batch, LINEAR_DECODE_BF16W_ROWS8_MIN_BATCH,
 };
 
 /// Selection helper shared between the f32-weights and packed-bf16
@@ -233,7 +233,7 @@ pub fn dispatch_linear_decode_batched_bf16w_add_residual_resident(
         "linear_decode_batched_bf16w_add_residual_resident: out buffer too small"
     );
 
-    let rows8 = batch >= MLP_BF16_ROWS8_MIN_BATCH && crate::kernels::mlp_bf16_rows8_enabled();
+    let rows8 = batch >= mlp_bf16_rows8_min_batch() && crate::kernels::mlp_bf16_rows8_enabled();
     let rows4 = batch >= 16 && !rows8 && crate::kernels::mlp_bf16_down_rows4_enabled();
     let glsl_path = if rows8 {
         concat!(
@@ -490,7 +490,7 @@ fn mlp_decode_shader_plan(
     let gate_up_rows2 = !gate_up_bf16_weights && use_prefill_row_pair_matmul(batch);
     let rows8_path = gate_up_bf16_weights
         && down_bf16_weights
-        && batch >= MLP_BF16_ROWS8_MIN_BATCH
+        && batch >= mlp_bf16_rows8_min_batch()
         && mlp_bf16_rows8_enabled();
     let down_bf16_rows4 = down_bf16_weights
         && gate_up_bf16_weights
@@ -3008,6 +3008,65 @@ mod tests {
         .unwrap();
         let resident = read_back_f32(&dev, &out_buf);
 
+        for (i, (b, r)) in baseline.iter().zip(resident.iter()).enumerate() {
+            assert_eq!(b.to_bits(), r.to_bits(), "row {i}: baseline {b} vs resident {r}");
+        }
+    }
+
+    #[test]
+    fn mlp_decode_bf16w_resident_matches_nonresident_b257_rows8_tail() {
+        use crate::kernels::dispatch_mlp_decode_cached_bf16_weights_bytes;
+        let Some(dev) = try_device() else { return };
+        let batch = 257;
+        let hidden = 64;
+        let intermediate = 96;
+        let out_dim = 80;
+        let x = make_x_f32(batch, hidden);
+        let gate = make_bf16_weight(hidden, intermediate);
+        let up = make_bf16_weight(hidden, intermediate);
+        let down = make_bf16_weight(intermediate, out_dim);
+        let g_buf = upload_tensor_bf16_packed_buffer(&dev, &gate).unwrap();
+        let u_buf = upload_tensor_bf16_packed_buffer(&dev, &up).unwrap();
+        let d_buf = upload_tensor_bf16_packed_buffer(&dev, &down).unwrap();
+
+        let x_bytes = extract_tensor_bytes(&x).unwrap().0;
+        let baseline_bytes = dispatch_mlp_decode_cached_bf16_weights_bytes(
+            &dev,
+            &x_bytes,
+            batch,
+            &g_buf,
+            &u_buf,
+            &d_buf,
+            hidden,
+            intermediate,
+            out_dim,
+        )
+        .unwrap();
+        let baseline: Vec<f32> = baseline_bytes
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+
+        let x_buf = upload_x(&dev, &x);
+        let scratch = alloc_out(&dev, (batch * intermediate * 4) as u64);
+        let out_buf = alloc_out(&dev, (batch * out_dim * 4) as u64);
+        dispatch_mlp_decode_cached_bf16_weights_resident(
+            &dev,
+            &x_buf,
+            &g_buf,
+            &u_buf,
+            &d_buf,
+            &scratch,
+            &out_buf,
+            batch,
+            hidden,
+            intermediate,
+            out_dim,
+        )
+        .unwrap();
+        let resident = read_back_f32(&dev, &out_buf);
+
+        assert_eq!(baseline.len(), resident.len());
         for (i, (b, r)) in baseline.iter().zip(resident.iter()).enumerate() {
             assert_eq!(b.to_bits(), r.to_bits(), "row {i}: baseline {b} vs resident {r}");
         }
