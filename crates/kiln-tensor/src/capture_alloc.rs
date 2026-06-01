@@ -190,6 +190,17 @@ impl CaptureArena {
     pub fn into_retained(self) -> Vec<Arc<CudaStorage>> {
         self.bufs.into_iter().map(|b| b.storage).collect()
     }
+
+    /// Drain the retained owned buffers out of the arena (leaving it empty),
+    /// returning them so the caller can keep them mapped for every replay.
+    /// Use when the arena is behind an `Rc<RefCell<…>>` and can't be consumed
+    /// by value.
+    pub fn take_retained(&mut self) -> Vec<Arc<CudaStorage>> {
+        std::mem::take(&mut self.bufs)
+            .into_iter()
+            .map(|b| b.storage)
+            .collect()
+    }
 }
 
 thread_local! {

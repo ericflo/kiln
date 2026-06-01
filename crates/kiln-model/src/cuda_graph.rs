@@ -313,6 +313,15 @@ struct CapturedDecodeGraph {
     /// defense-in-depth fix that matches the bs>1 structural fix
     /// (#1082 Phase 5).
     _lm_head_output_buffer: Tensor,
+    /// #1082 freeze-pointers (Phase 5): every forward intermediate the captured
+    /// graph touches — Q/K/V projections, per-layer activations, the
+    /// `Flash_fwd_params` backing pointers — is handed to the forward as a
+    /// `Borrowed` view into a buffer the capture arena owns. Those owned buffers
+    /// are retained here so their device pointers stay mapped for every replay.
+    /// Generalizes the per-buffer pinning above to ALL intermediates — the
+    /// structural fix for the `flash_fwd_splitkv_kernel` ILLEGAL_ADDRESS that
+    /// compute-sanitizer pinned (freed Q/activation read on replay).
+    _capture_arena_buffers: Vec<std::sync::Arc<kiln_tensor::CudaStorage>>,
 }
 
 /// Captured graph + stable buffers for a batched (`bs > 1`) decode step.
@@ -1470,6 +1479,62 @@ impl CudaGraphRunner {
             Self::new_lm_head_output_buffer(config, device, dtype, 1)?;
         Self::prepare_gdn_recurrent_state_for_capture(linear_state)?;
 
+        // === #1082 freeze-pointers Pass 1 (Record / warm) ===
+        // The captured forward allocates Q/K/V projections + per-layer
+        // activations via `zeros_ctx` / `alloc_uninit_ctx`; on `main` those go
+        // straight to `cudaMallocAsync` and are FREED when this fn returns, so
+        // the captured `flash_fwd_splitkv_kernel` dereferences a dangling
+        // pointer on replay (compute-sanitizer-confirmed ILLEGAL_ADDRESS — a
+        // garbage `Flash_fwd_params` device pointer). Fix: route every such
+        // alloc through a thread-local capture arena. Pass 1 runs the SAME
+        // forward once BEFORE `begin_capture` to allocate + retain those buffers;
+        // Pass 2 (the captured run below) hands out `Borrowed` views of them so
+        // every recorded device pointer stays mapped for the graph's lifetime.
+        //
+        // Running the forward twice double-mutates decode state: the paged-KV
+        // write is idempotent (same token -> same slot -> same K/V), but the GDN
+        // recurrent `linear_state` is not, so snapshot it before Pass 1 and
+        // restore before the captured Pass 2.
+        let arena_device_index = device.index().ok_or_else(|| {
+            anyhow::anyhow!("freeze-pointers: CUDA-graph capture requires a CUDA device index")
+        })?;
+        let arena_ctx = kiln_tensor::primary_cuda_context(arena_device_index)
+            .context("freeze-pointers: primary_cuda_context for capture arena")?;
+        let arena = std::rc::Rc::new(std::cell::RefCell::new(
+            kiln_tensor::CaptureArena::new_record(arena_ctx, arena_device_index),
+        ));
+        let gdn_snapshot = linear_state
+            .snapshot()
+            .context("freeze-pointers: snapshot GDN recurrent state before warm pass")?;
+        let warm_result = kiln_tensor::with_capture_arena(arena.clone(), || {
+            crate::forward::with_lm_head_output_buffer(lm_head_output_buffer.clone(), || {
+                let logits = model_forward_paged_with_graph_inputs(
+                    backend,
+                    &[token_id],
+                    weights,
+                    config,
+                    paged_cache,
+                    block_table,
+                    seq_len,
+                    Some(linear_state),
+                    lora,
+                    &token_buffer,
+                    &position_buffer,
+                    graph_inputs.as_ref(),
+                )?;
+                kiln_tensor::cuda_slice_set_dim0(&output_logits, &logits, 0)
+                    .context("freeze-pointers warm pass: copy logits into stable output")?;
+                Ok::<(), anyhow::Error>(())
+            })
+        });
+        warm_result.context("freeze-pointers warm (Record) pass failed")?;
+        // Restore the GDN recurrent state so the captured pass advances it
+        // exactly once (KV writes are idempotent and need no restore).
+        *linear_state = gdn_snapshot;
+        // Flip to Replay: Pass 2 hands out Borrowed views of the recorded
+        // buffers instead of allocating fresh ones.
+        arena.borrow_mut().begin_replay();
+
         // #1082: the kt buffer allocs above filled their contents via an
         // H2D on the kt DEFAULT stream (not the capture stream below), so
         // sync the default stream before capture to guarantee those fills
@@ -1516,7 +1581,8 @@ impl CudaGraphRunner {
         // `stream` is mid-capture is the `CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED`
         // root cause. Outside this scope `active_cuda_stream` returns
         // `ctx.default_stream()` — zero behavior change for all other paths.
-        let logits_result = kiln_tensor::with_active_cuda_stream(stream.clone(), || {
+        let logits_result = kiln_tensor::with_capture_arena(arena.clone(), || {
+            kiln_tensor::with_active_cuda_stream(stream.clone(), || {
             crate::forward::with_lm_head_output_buffer(lm_head_output_buffer.clone(), || {
                 let logits = model_forward_paged_with_graph_inputs(
                     backend,
@@ -1541,6 +1607,7 @@ impl CudaGraphRunner {
                 kiln_tensor::cuda_slice_set_dim0(&output_logits, &logits, 0)
                     .context("CUDA graph: copy kt logits into stable output_logits")?;
                 Ok::<Tensor, anyhow::Error>(output_logits.clone())
+            })
             })
         });
 
@@ -1599,6 +1666,7 @@ impl CudaGraphRunner {
                         max_seqlen_k,
                         _gdn_decode_outputs: gdn_decode_outputs,
                         _lm_head_output_buffer: lm_head_output_buffer,
+                        _capture_arena_buffers: arena.borrow_mut().take_retained(),
                     },
                 );
                 Ok(logits)
