@@ -978,6 +978,12 @@ every config"):
   assembling a synthetic batch with `from_batch_rows`, then scattering it back
   after sampling. The resident buffers are already keyed by the row tensors, so
   this removes the extra CPU-side cat/scatter cycle from stochastic bs=1 decode.
+  **Update — single-row hidden fallback skips batch-state cat/scatter:** the
+  unsupported-sampler hidden fallback now mirrors the resident sampler path for
+  row-count 1. It passes the row's `LinearAttentionState` directly into paged
+  decode instead of building a synthetic batch and scattering it back. This
+  keeps uncommon sampler fallback settings from reintroducing the per-step
+  24-layer state cat/scatter cost on bs=1.
 
 ## Other follow-ups (perf headroom, not regressions)
 
