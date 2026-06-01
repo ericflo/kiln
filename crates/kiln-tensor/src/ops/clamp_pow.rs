@@ -65,6 +65,19 @@ fn apply_unary(x: &Tensor, f: impl Fn(f32) -> f32, name: &str) -> Result<Tensor>
     if !x.is_contiguous() {
         bail!("{name}: input must be contiguous");
     }
+    // Device parity: the byte-wise apply below runs on a CPU image. When the
+    // input lives on a non-CPU device with no dedicated kernel (e.g. Metal —
+    // the kt clamp/pow have no Metal kernel yet), round-trip through the host:
+    // copy D2H, apply on CPU, then copy the result H2D back to the original
+    // device so the op is transparent to GPU callers (mirrors how the kt
+    // free fns lean on `to_device`'s `metal_to_host_copy` / `host_to_metal_copy`
+    // bridges). On CPU this is a no-op (`to_device` short-circuits).
+    let src_device = x.device();
+    if !matches!(src_device, crate::Device::Cpu) {
+        let host = x.to_device(crate::Device::Cpu)?;
+        let host_out = apply_unary(&host, f, name)?;
+        return host_out.to_device(src_device);
+    }
     let dtype = x.dtype();
     let cpu = x
         .storage()

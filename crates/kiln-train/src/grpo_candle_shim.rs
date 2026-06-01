@@ -82,15 +82,15 @@
 //!   derivation handles every variant uniformly because it just re-runs
 //!   `grpo_loss`.
 
-#[cfg(feature = "cuda")]
+#[cfg(any(feature = "cuda", feature = "metal"))]
 use crate::cd_types::CdDevice;
-#[cfg(feature = "cuda")]
+#[cfg(any(feature = "cuda", feature = "metal"))]
 use crate::trainer::{grpo_loss, token_log_probs, GrpoLossParams};
-#[cfg(feature = "cuda")]
+#[cfg(any(feature = "cuda", feature = "metal"))]
 use anyhow::{Context, Result};
 // (#1082) candle Tensor import removed — the GRPO PG loss adapter returns
 // `kiln_tensor::Tensor` (kt-native); no candle type remains in this module.
-#[cfg(feature = "cuda")]
+#[cfg(any(feature = "cuda", feature = "metal"))]
 use kiln_autograd::{tape_forward_enabled, with_active_tape, BackwardOp, Tape};
 
 /// Fused backward for the GRPO scalar PG (+ KL) loss taken from the full
@@ -105,7 +105,7 @@ use kiln_autograd::{tape_forward_enabled, with_active_tape, BackwardOp, Tape};
 /// `requires_input` returns `false`: the backward recomputes the forward gather
 /// from the SAVED `logits`, so the tape walker need not re-materialise the input
 /// activation (mirrors `CrossEntropyFromLogitsBackward`).
-#[cfg(feature = "cuda")]
+#[cfg(any(feature = "cuda", feature = "metal"))]
 #[derive(Debug)]
 struct GrpoPgLossFromLogitsBackward {
     /// FULL forward logits `[1, T, V]` as a kt tensor (an `Arc` bump on the kt
@@ -127,7 +127,7 @@ struct GrpoPgLossFromLogitsBackward {
     device: CdDevice,
 }
 
-#[cfg(feature = "cuda")]
+#[cfg(any(feature = "cuda", feature = "metal"))]
 impl BackwardOp for GrpoPgLossFromLogitsBackward {
     fn name(&self) -> &'static str {
         "grpo_pg_loss_from_logits_backward"
@@ -195,7 +195,7 @@ impl BackwardOp for GrpoPgLossFromLogitsBackward {
 /// the CISPO analytic coeff (the KL grad it adds must respect the same gate).
 ///
 /// ⚠ DRIFT COUPLING with `grpo_loss`'s entropy-quantile block — keep in lockstep.
-#[cfg(feature = "cuda")]
+#[cfg(any(feature = "cuda", feature = "metal"))]
 fn cispo_entropy_kl_mask(plp_host: &[f32], loss_params: &GrpoLossParams) -> Vec<f64> {
     let n = plp_host.len();
     match loss_params.entropy_aware_kl_quantile {
@@ -226,7 +226,7 @@ fn cispo_entropy_kl_mask(plp_host: &[f32], loss_params: &GrpoLossParams) -> Vec<
 /// * `ref_log_probs_kt` — `[num_active]` detached reference log-probs.
 /// * `loss_params` — the GRPO surrogate / KL params.
 /// * `grad_scalar` — the upstream scalar seed `dL/dloss` (backward is linear).
-#[cfg(feature = "cuda")]
+#[cfg(any(feature = "cuda", feature = "metal"))]
 fn grpo_pg_loss_from_logits_grad_kt(
     logits_kt: &kiln_tensor::Tensor,
     input_ids: &[u32],
@@ -246,6 +246,13 @@ fn grpo_pg_loss_from_logits_grad_kt(
          seq_len {seq_len}"
     );
     let vocab = dims[2];
+    // The grad must come back in the SAVED logits dtype so it threads cleanly
+    // into the (BF16) model/LoRA backward matmuls — exactly as the SFT
+    // `cross_entropy_from_logits_grad_candle` casts its final grad to
+    // `logits_dtype`. Returning F32 here severs the BF16 LoRA backward with a
+    // `MatmulOp: dtype mismatch` (the prior parity gap on Metal). All interior
+    // math stays F32; only the returned tensor is cast.
+    let logits_dtype = logits_kt.dtype();
 
     // Active next-token positions in the SHIFTED frame (== seq positions in
     // `logits[0 .. T-1]`): { i : action_mask[i+1] }. This is exactly the set
@@ -268,6 +275,7 @@ fn grpo_pg_loss_from_logits_grad_kt(
     // logits — return an all-zero `[1, T, V]` F32 grad.
     if num_active == 0 {
         return KtTensor::zeros(vec![1, seq_len, vocab], KtDType::F32, *device)
+            .and_then(|t| t.to_dtype(logits_dtype))
             .map_err(Into::into);
     }
 
@@ -457,6 +465,11 @@ fn grpo_pg_loss_from_logits_grad_kt(
     let grad_logits = grad_2d
         .unsqueeze(0) // [1, T, V]
         .map_err(|e| anyhow::anyhow!("grpo_pg_loss_from_logits_grad_kt: unsqueeze: {e}"))?;
+    // Cast back to the saved logits dtype (BF16 in production) so the grad
+    // threads into the LoRA backward matmuls (parity with the SFT CE grad).
+    let grad_logits = grad_logits
+        .to_dtype(logits_dtype)
+        .map_err(|e| anyhow::anyhow!("grpo_pg_loss_from_logits_grad_kt: grad cast: {e}"))?;
     Ok(grad_logits)
 }
 
@@ -479,7 +492,7 @@ fn grpo_pg_loss_from_logits_grad_kt(
 ///   path if the envelope is unmet (the dispatch device-/ECHO-gates it); this
 ///   surfaces a clean `None` so a misdispatch is caught.
 /// * `Err(...)` — an unexpected forward or kt -> candle copy-back failure.
-#[cfg(feature = "cuda")]
+#[cfg(any(feature = "cuda", feature = "metal"))]
 pub(crate) fn try_tape_grpo_pg_loss_from_logits_kt(
     logits_kt: &kiln_tensor::Tensor,
     input_ids: &[u32],
@@ -492,14 +505,18 @@ pub(crate) fn try_tape_grpo_pg_loss_from_logits_kt(
         return Ok(None);
     }
 
-    // Full model logits only: [1, T, V] on CUDA. Defer any other shape/device to
-    // the caller (the dispatch keeps non-CUDA on the candle path anyway).
+    // Full model logits only: [1, T, V] on a GPU device. Defer any other
+    // shape/device to the caller (the dispatch keeps non-GPU on the candle path
+    // anyway).
     let dims = logits_kt.dims().to_vec();
     if dims.len() != 3
         || dims[0] != 1
         || dims[1] != input_ids.len()
         || action_mask.len() != input_ids.len()
-        || !matches!(logits_kt.device(), kiln_tensor::Device::Cuda(_))
+        || !matches!(
+            logits_kt.device(),
+            kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_)
+        )
     {
         return Ok(None);
     }

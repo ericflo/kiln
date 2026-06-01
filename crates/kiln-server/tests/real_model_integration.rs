@@ -942,3 +942,138 @@ fn test_real_model_sft_metal() {
     assert_adapter_written(&out);
     assert_loss_decreases(&losses.lock().unwrap());
 }
+
+/// Read the `lora_grad_norms` array out of the GRPO `train_receipt.json` the
+/// trainer writes to the output dir. Returns `(num_modules, max_mean_norm)`: a
+/// non-zero module count proves the tape walked and deposited grads (an
+/// empty/severed tape records none), and a strictly-positive max mean-norm
+/// proves the deposited grads carried real signal (not an all-zero no-op).
+#[cfg(feature = "metal")]
+fn receipt_lora_grad_norms(out: &std::path::Path) -> (usize, f64) {
+    let receipt_path = out.join("train_receipt.json");
+    let json = std::fs::read_to_string(&receipt_path)
+        .unwrap_or_else(|e| panic!("read GRPO train receipt {receipt_path:?}: {e}"));
+    let v: Value = serde_json::from_str(&json)
+        .unwrap_or_else(|e| panic!("parse GRPO train receipt {receipt_path:?}: {e}"));
+    let arr = v["lora_grad_norms"].as_array().cloned().unwrap_or_default();
+    let max_mean = arr
+        .iter()
+        .filter_map(|s| s["mean"].as_f64())
+        .fold(0.0f64, f64::max);
+    (arr.len(), max_mean)
+}
+
+/// GRPO on Metal smoke. Exercises the kt tape-authoritative GRPO producer
+/// (`grpo_step_forward_backward_tape_authoritative_kt` + the
+/// `grpo_candle_shim` scalar-loss tape root) on a real BF16 tiny model on
+/// `Device::Metal(0)`. One group with VARIED rewards (1.0 / 0.0) so the
+/// group-relative advantage is non-zero and a genuine policy gradient flows.
+/// KL is off (`kl_coeff = 0`) and ECHO is disabled so the per-completion step
+/// stays on the tape-authoritative path (no `no_policy_loss`, no env-CE root).
+#[cfg(feature = "metal")]
+#[test]
+fn test_real_model_grpo_metal() {
+    if kiln_model::backend::metal::try_new_metal().is_none() {
+        eprintln!("No Metal device — skipping GRPO-on-Metal smoke");
+        return;
+    }
+    let _gpu = metal_gpu_guard();
+    let device = Device::Metal(0);
+    let mut config = tiny_config();
+    config.dtype = kiln_core::config::DType::BF16;
+    let weights = tiny_weights_bf16(&config, &device);
+    let tokenizer = test_tokenizer();
+
+    // A few groups, each a user prompt + two scored completions with DIFFERENT
+    // rewards so the within-group advantage is non-degenerate (1.0 vs 0.0).
+    // GRPO does a single pass over the groups; with `PerSample` aggregation each
+    // completion drives its own optimizer step + loss tick, so the run produces
+    // a multi-element loss vector and exercises the producer per completion.
+    // Legacy single-turn rollouts (no trajectory) keep ECHO inactive regardless.
+    let mk_group = |prompt: &str, win: &str, lose: &str| kiln_train::GrpoGroup {
+        messages: vec![metal_chat_msg("user", prompt)],
+        completions: vec![
+            kiln_train::ScoredRollout::legacy(win.to_string(), 1.0),
+            kiln_train::ScoredRollout::legacy(lose.to_string(), 0.0),
+        ],
+    };
+    let groups = vec![
+        mk_group("t1 t2 t3", "t2 t3 t1", "t3 t1 t2"),
+        mk_group("t3 t1", "t1 t2 t3", "t3 t3 t3"),
+        mk_group("t2 t1 t3", "t3 t2 t1", "t1 t1 t1"),
+    ];
+
+    let mut grpo_config = kiln_train::GrpoConfig {
+        learning_rate: 1e-3,
+        kl_coeff: 0.0,
+        lora_rank: 2,
+        lora_alpha: 4.0,
+        auto_load: false,
+        seed: Some(0),
+        // Each group already has reward variance; disable dynamic sampling so
+        // none is filtered as degenerate.
+        dynamic_sampling: false,
+        // PerSample (one optimizer step per completion). The default TokenLevel
+        // aggregation SUMS the per-completion grads within a group before the
+        // step; since GRPO advantages are mean-zero within a group, on this
+        // near-uniform tiny init the completions' grads (each ~ advantage x a
+        // common direction) cancel to a zero group gradient — a real GRPO
+        // degeneracy, not a Metal bug. PerSample sidesteps it so each step has a
+        // genuine non-zero policy gradient to validate grad flow on Metal.
+        loss_aggregation: kiln_train::LossAggregation::PerSample,
+        ..kiln_train::GrpoConfig::default()
+    };
+    // Disable ECHO so the step stays on the kt tape-authoritative path.
+    grpo_config.loss.echo = None;
+    grpo_config.loss.no_policy_loss = false;
+
+    let (losses, cb) = loss_capture_cb();
+    let adapter_dir = tempfile::tempdir().unwrap();
+    let out = kiln_train::trainer::grpo_train(
+        &groups,
+        &grpo_config,
+        &config,
+        &weights,
+        &tokenizer,
+        adapter_dir.path(),
+        "grpo-metal-smoke",
+        Some(cb),
+        None,
+    )
+    .expect("GRPO training on Device::Metal(0) should complete");
+
+    assert_adapter_written(&out);
+
+    let losses = losses.lock().unwrap();
+    assert!(!losses.is_empty(), "GRPO progress callback recorded no losses");
+    assert!(
+        losses.iter().all(|l| l.is_finite()),
+        "all GRPO training losses must be finite, got {losses:?}"
+    );
+
+    // Gradients must have flowed through the kt tape-authoritative GRPO step:
+    // the receipt records a per-module grad-norm summary for every LoRA module
+    // that received a gradient. An empty list means the tape severed and no
+    // grads reached the adapter — the failure mode this smoke guards against.
+    // A strictly-positive max mean-norm additionally proves the grads carried
+    // real policy-gradient signal (varied rewards => non-zero advantage), not a
+    // degenerate all-zero deposit. NOTE: the scalar group loss can be ~0 even
+    // when grads are large — a single two-completion group with opposite
+    // advantages (+1 / -1) has its per-completion losses cancel in the group
+    // mean, while the per-completion gradients are real and non-canceling.
+    let (grad_norm_modules, max_mean_norm) = receipt_lora_grad_norms(&out);
+    assert!(
+        grad_norm_modules > 0,
+        "GRPO step recorded no LoRA grad norms — gradients did not flow through \
+         the kt tape-authoritative path on Metal (losses were {losses:?})"
+    );
+    assert!(
+        max_mean_norm > 0.0,
+        "GRPO LoRA grad norms are all zero — the tape walked but deposited no \
+         signal (modules={grad_norm_modules}, losses={losses:?})"
+    );
+    eprintln!(
+        "[GRPO-METAL] losses={losses:?} lora_grad_norm_modules={grad_norm_modules} \
+         max_mean_norm={max_mean_norm}"
+    );
+}

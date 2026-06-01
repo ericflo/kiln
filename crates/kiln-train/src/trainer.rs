@@ -4858,7 +4858,7 @@ fn train_tokenized_grpo_group_with_grad_norms(
         // eligible, the kt `Tape` records the FULL forward, so gradient
         // checkpointing (the candle reverse-segment loop) is unnecessary — we
         // route to the non-checkpointed tape branch below even when `segments`
-        // is `Some`. Gated to CUDA (tape adapters are CUDA-only), no ACTIVE ECHO
+        // is `Some`. Gated to CUDA/Metal (tape adapters), no ACTIVE ECHO
         // env-CE (no tape root — carved out), and not the `no_policy_loss`
         // constant-zero-without-ECHO config. Mirrors how OPD's tape path REPLACES
         // its candle gradient-checkpointing loop. This is the SINGLE source of
@@ -4866,15 +4866,18 @@ fn train_tokenized_grpo_group_with_grad_norms(
         // (`active_segments` below) and the non-checkpointed-branch dispatch read
         // it. Kept local + cfg-split so the non-cuda build doesn't reference the
         // cuda-only gate fn.
-        #[cfg(feature = "cuda")]
+        #[cfg(any(feature = "cuda", feature = "metal"))]
         let tape_auth_eligible = tape_authoritative_enabled()
-            && matches!(device, kiln_tensor::Device::Cuda(_))
+            && matches!(
+                device,
+                kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_)
+            )
             && !(config.loss.echo.is_some()
                 && config.loss.echo_enabled()
                 && comp_env_count > 0
                 && comp.total_obs_len > 0)
             && !config.loss.no_policy_loss;
-        #[cfg(not(feature = "cuda"))]
+        #[cfg(not(any(feature = "cuda", feature = "metal")))]
         let tape_auth_eligible = false;
 
         let ref_log_probs = if skip_reference {
@@ -4995,7 +4998,7 @@ fn train_tokenized_grpo_group_with_grad_norms(
         // reverse-segment loop. Keep the binding silenced.
         let _ = segments;
         let grads: GradSource = {
-            #[cfg(feature = "cuda")]
+            #[cfg(any(feature = "cuda", feature = "metal"))]
             {
                 let (lv, kt_grads) = grpo_step_forward_backward_tape_authoritative_kt(
                     backend,
@@ -5018,13 +5021,13 @@ fn train_tokenized_grpo_group_with_grad_norms(
                 comp_echo_env_ce = None;
                 GradSource::Kt(kt_grads)
             }
-            #[cfg(not(feature = "cuda"))]
+            #[cfg(not(any(feature = "cuda", feature = "metal")))]
             {
-                // `tape_auth_eligible` is a const `false` without the cuda
-                // feature, so the ensure! above already bailed; this arm is
-                // unreachable but keeps `loss_val` definitely-assigned.
+                // `tape_auth_eligible` is a const `false` without the cuda or
+                // metal feature, so the ensure! above already bailed; this arm
+                // is unreachable but keeps `loss_val` definitely-assigned.
                 let _ = (&ref_log_probs, num_active, comp_env_count, comp_idx);
-                unreachable!("GRPO kt path requires the cuda feature");
+                unreachable!("GRPO kt path requires the cuda or metal feature");
             }
         };
         if token_level {
@@ -7656,7 +7659,7 @@ pub fn standard_forward_backward(
 ///
 /// ECHO is NOT handled here (same as the candle-hack producer): the dispatch
 /// keeps any ECHO-active step on the candle path, so this is non-ECHO GRPO only.
-#[cfg(feature = "cuda")]
+#[cfg(any(feature = "cuda", feature = "metal"))]
 #[allow(clippy::too_many_arguments)]
 fn grpo_step_forward_backward_tape_authoritative_kt(
     backend: &dyn BackendRuntime,

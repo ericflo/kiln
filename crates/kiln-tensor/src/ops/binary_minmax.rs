@@ -38,6 +38,21 @@ fn apply(f: impl Fn(f32, f32) -> f32, a: &Tensor, b: &Tensor, name: &str) -> Res
         }
     }
 
+    // Device parity: the byte-wise apply below runs on CPU images. When the
+    // inputs live on a non-CPU device with no dedicated kernel (e.g. Metal —
+    // no kt min/max Metal kernel yet), round-trip through the host: copy both
+    // operands D2H, apply on CPU, then copy the result H2D back to the original
+    // device so the op is transparent to GPU callers (leans on `to_device`'s
+    // `metal_to_host_copy` / `host_to_metal_copy` bridges). On CPU this is a
+    // no-op (`to_device` short-circuits).
+    let a_device = a.device();
+    if !matches!(a_device, crate::Device::Cpu) || !matches!(b.device(), crate::Device::Cpu) {
+        let a_host = a.to_device(crate::Device::Cpu)?;
+        let b_host = b.to_device(crate::Device::Cpu)?;
+        let host_out = apply(f, &a_host, &b_host, name)?;
+        return host_out.to_device(a_device);
+    }
+
     let dtype = a.dtype();
     let per = dtype.size_in_bytes();
     let n = a.element_count();
