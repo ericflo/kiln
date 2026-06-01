@@ -900,11 +900,13 @@ impl BatchingEngineActor {
                     self.snapshot.last_prefill_ms = started.elapsed().as_secs_f64() * 1000.0;
                     self.snapshot.total_prefill_tokens += queued.req.prompt_tokens.len() as u64;
                     admitted += 1;
+                    let active_idx = self.active.len();
                     self.active.push(ActiveRequest {
                         req: queued.req,
                         response_tx: queued.response_tx,
                         slot,
                     });
+                    self.emit_pending_first_token_at(active_idx);
                 }
                 Err(err) => {
                     self.snapshot.total_errors += 1;
@@ -921,6 +923,79 @@ impl BatchingEngineActor {
                 .saturating_add(1);
         }
         self.refresh_snapshot();
+    }
+
+    fn pending_first_token_at(&mut self, idx: usize) -> Option<TokenId> {
+        match self.active.get_mut(idx).map(|active| &mut active.slot) {
+            Some(DecodeSlot::Real {
+                state,
+                first_token_pending,
+                ..
+            }) if *first_token_pending => {
+                *first_token_pending = false;
+                Some(state.next_token)
+            }
+            _ => None,
+        }
+    }
+
+    fn emit_pending_first_token_at(&mut self, idx: usize) -> bool {
+        let Some(token) = self.pending_first_token_at(idx) else {
+            return false;
+        };
+
+        self.emit_output_token_at(idx, token);
+        true
+    }
+
+    fn emit_output_token_at(&mut self, idx: usize, token: TokenId) {
+        match self.forward.is_eos_token(token) {
+            Ok(true) => {
+                self.finish_active(idx, FinishReason::Eos);
+                return;
+            }
+            Ok(false) => {}
+            Err(err) => {
+                self.finish_one_with_error(idx, format!("{err:#}"));
+                return;
+            }
+        }
+
+        let generated_count = match self.forward.accept_token(&mut self.active[idx].slot, token) {
+            Ok(count) => count,
+            Err(err) => {
+                self.finish_one_with_error(idx, format!("{err:#}"));
+                return;
+            }
+        };
+        self.snapshot.total_decode_tokens += 1;
+
+        if self.active[idx]
+            .response_tx
+            .blocking_send(EngineEvent::Token(token))
+            .is_err()
+        {
+            self.forward.discard_request(self.active.remove(idx).slot);
+            return;
+        }
+
+        let generated_tokens = self.generated_tokens_for(idx).to_vec();
+        let sampling = self.active[idx].req.sampling.clone();
+        match self
+            .forward
+            .stop_reason_after_emit(&generated_tokens, &sampling)
+        {
+            Ok(Some(reason)) => {
+                self.finish_active(idx, reason);
+            }
+            Ok(None) if generated_count >= sampling.max_tokens => {
+                self.finish_active(idx, FinishReason::MaxTokens);
+            }
+            Ok(None) => {}
+            Err(err) => {
+                self.finish_one_with_error(idx, format!("{err:#}"));
+            }
+        }
     }
 
     fn should_defer_for_active_prefix(&self, queued: &QueuedRequest) -> bool {
@@ -997,58 +1072,7 @@ impl BatchingEngineActor {
             if idx >= self.active.len() {
                 continue;
             }
-            let token = output_tokens[idx];
-            match self.forward.is_eos_token(token) {
-                Ok(true) => {
-                    self.finish_active(idx, FinishReason::Eos);
-                    continue;
-                }
-                Ok(false) => {}
-                Err(err) => {
-                    self.finish_one_with_error(idx, format!("{err:#}"));
-                    continue;
-                }
-            }
-
-            let generated_count = match self.forward.accept_token(&mut self.active[idx].slot, token)
-            {
-                Ok(count) => count,
-                Err(err) => {
-                    self.finish_one_with_error(idx, format!("{err:#}"));
-                    continue;
-                }
-            };
-            self.snapshot.total_decode_tokens += 1;
-
-            if self.active[idx]
-                .response_tx
-                .blocking_send(EngineEvent::Token(token))
-                .is_err()
-            {
-                self.forward.discard_request(self.active.remove(idx).slot);
-                continue;
-            }
-
-            let generated_tokens = self.generated_tokens_for(idx).to_vec();
-            let sampling = self.active[idx].req.sampling.clone();
-            match self
-                .forward
-                .stop_reason_after_emit(&generated_tokens, &sampling)
-            {
-                Ok(Some(reason)) => {
-                    self.finish_active(idx, reason);
-                    continue;
-                }
-                Ok(None) if generated_count >= sampling.max_tokens => {
-                    self.finish_active(idx, FinishReason::MaxTokens);
-                    continue;
-                }
-                Ok(None) => {}
-                Err(err) => {
-                    self.finish_one_with_error(idx, format!("{err:#}"));
-                    continue;
-                }
-            }
+            self.emit_output_token_at(idx, output_tokens[idx]);
         }
         self.refresh_snapshot();
     }
@@ -1149,6 +1173,11 @@ mod tests {
         reusable_prefixes: bool,
     }
 
+    #[derive(Default)]
+    struct PendingFirstTokenForward {
+        calls: StdMutex<Vec<Vec<TokenId>>>,
+    }
+
     impl DecodeForward for MockForward {
         fn can_reuse_as_strict_prefix(&self, prompt_token_len: usize) -> bool {
             self.reusable_prefixes && prompt_token_len > 0
@@ -1209,6 +1238,66 @@ mod tests {
                 output: GenerationOutput {
                     text: String::new(),
                     token_ids: generated_tokens,
+                    finish_reason,
+                },
+                prefill_duration: Duration::ZERO,
+                decode_duration: Duration::ZERO,
+            })
+        }
+    }
+
+    impl DecodeForward for PendingFirstTokenForward {
+        fn prepare_request(&self, req: &EngineRequest) -> Result<DecodeSlot> {
+            let next_token = req
+                .prompt_tokens
+                .last()
+                .copied()
+                .unwrap_or_default()
+                .saturating_add(10);
+            Ok(real_slot(next_token, true))
+        }
+
+        fn forward_decode(
+            &self,
+            slots: &mut [&mut DecodeSlot],
+            _sampling: &[SamplingParams],
+        ) -> Result<Vec<TokenId>> {
+            let input_tokens: Vec<TokenId> = slots
+                .iter()
+                .map(|slot| match slot {
+                    DecodeSlot::Real { state, .. } => state.next_token,
+                    DecodeSlot::Mock { .. } => unreachable!(),
+                })
+                .collect();
+            self.calls.lock().unwrap().push(input_tokens.clone());
+            Ok(input_tokens.iter().map(|token| token + 10).collect())
+        }
+
+        fn is_eos_token(&self, _token: TokenId) -> Result<bool> {
+            Ok(false)
+        }
+
+        fn accept_token(&self, slot: &mut DecodeSlot, token: TokenId) -> Result<usize> {
+            let DecodeSlot::Real { state, .. } = slot else {
+                unreachable!();
+            };
+            state.generated_tokens.push(token);
+            state.next_token = token;
+            Ok(state.generated_tokens.len())
+        }
+
+        fn finish_request(
+            &self,
+            slot: DecodeSlot,
+            finish_reason: FinishReason,
+        ) -> Result<DecodeForwardOutput> {
+            let DecodeSlot::Real { state, .. } = slot else {
+                unreachable!();
+            };
+            Ok(DecodeForwardOutput {
+                output: GenerationOutput {
+                    text: String::new(),
+                    token_ids: state.generated_tokens,
                     finish_reason,
                 },
                 prefill_duration: Duration::ZERO,
@@ -1433,6 +1522,51 @@ mod tests {
         assert_eq!(actor.waiting.len(), 2);
         assert_eq!(actor.snapshot.total_prefill_admission_cycles, 2);
         assert_eq!(actor.snapshot.total_prefill_tokens, 12);
+    }
+
+    #[test]
+    fn admission_emits_prefill_first_tokens_without_model_decode() {
+        let (_tx, rx) = mpsc::channel(DEFAULT_ENGINE_CHANNEL);
+        let forward = Arc::new(PendingFirstTokenForward::default());
+        let mut actor = BatchingEngineActor::new(rx, forward.clone(), 8, false, 3);
+        let mut receivers = Vec::new();
+        for idx in 0..4 {
+            let (response_tx, response_rx) = mpsc::channel(DEFAULT_RESPONSE_CHANNEL);
+            actor.waiting.push_back(QueuedRequest {
+                req: request(100 + idx as TokenId, 1),
+                response_tx,
+            });
+            receivers.push(response_rx);
+        }
+
+        actor.admit_waiting();
+
+        assert_eq!(actor.active.len(), 0);
+        assert_eq!(actor.waiting.len(), 1);
+        assert_eq!(actor.snapshot.total_prefill_admission_cycles, 1);
+        assert_eq!(actor.snapshot.total_prefill_tokens, 6);
+        assert_eq!(actor.snapshot.total_decode_tokens, 3);
+        assert_eq!(actor.snapshot.total_decode_forwards, 0);
+        assert_eq!(actor.snapshot.total_batched_decode_forwards, 0);
+        assert_eq!(actor.snapshot.total_decode_rows, 0);
+        assert!(forward.calls.lock().unwrap().is_empty());
+
+        for (idx, rx) in receivers.iter_mut().take(3).enumerate() {
+            let expected = 110 + idx as TokenId;
+            assert_eq!(rx.blocking_recv(), Some(EngineEvent::Token(expected)));
+            assert!(matches!(
+                rx.blocking_recv(),
+                Some(EngineEvent::Done {
+                    output: BatchedGenerationOutput {
+                        completion_tokens: 1,
+                        token_ids,
+                        finish_reason: FinishReason::MaxTokens,
+                        ..
+                    }
+                }) if token_ids == vec![expected]
+            ));
+        }
+        assert!(receivers[3].try_recv().is_err());
     }
 
     #[tokio::test]

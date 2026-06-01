@@ -560,6 +560,15 @@ every config"):
   `kiln_batching_engine_errors_total 0`. This preserves the observed 8-row live
   decode width on the short fixture while replacing the prior full-group cold
   admission with two bounded prefill rounds.
+  **Update — prefill first tokens emit during admission:** newly admitted real
+  rows now flush their prefill-produced first token immediately instead of
+  waiting for the actor to finish the whole prefill admission quantum and enter
+  the next decode batch. Later model decode steps still use the same batched
+  resident route, and first-token emission now shares the same EOS/stop/error
+  handler as normal decode output. Focused checks: the Vulkan-profile
+  `batching_engine::tests::` unit subset and
+  `cargo check -p kiln-server --bins --no-default-features --features vulkan`
+  pass with the repo's existing warning backlog.
   **Update — resident parity test restored for Vulkan profiles:** the
   `vk_resident_decode_parity` integration test now builds against the current kt
   device/cache surface instead of stale test-only APIs. Without
