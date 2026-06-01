@@ -966,6 +966,12 @@ every config"):
   Once the resident path has selected native execution, an error returns
   immediately instead of replaying the same decode step through the hidden
   fallback after KV/GDN state may have been updated on device.
+  **Update — single-row stochastic decode uses resident sampler first:** the
+  row-count-1 non-greedy Vulkan serving path now tries the same resident
+  decode-to-sampler helper as continuous batches, so supported top-k/top-p/min-p
+  settings read back one sampled token instead of materializing full logits for
+  host-side sampling. Unsupported sampler settings still fall back to the older
+  resident-logits route.
 
 ## Other follow-ups (perf headroom, not regressions)
 

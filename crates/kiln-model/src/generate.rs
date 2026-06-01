@@ -3028,17 +3028,13 @@ impl ModelRunner {
 
         // (#1082) Vulkan single-row decode: route the production serving path
         // (batching engine -> paged_batched_decode_step, row_count==1) through
-        // the native single-submit resident forward — the same path the bench
-        // loop uses (~14 tok/s steady-state on Strix Halo). The default
-        // fallthrough (`model_forward_paged_batched_decode_hidden`) is the slow
-        // generic batched-decode-hidden path (~0.5 tok/s: per-op CPU readback +
-        // per-GDN-layer cat/narrow). `model_forward_paged_last_token_resident`
-        // returns logits via the native CommandBatch path for sampling and
-        // transparently falls back to the generic forward on any decline.
-        // Greedy uses the token-only resident argmax entry instead. The row-0
-        // sampling context (seed + generated tokens) was snapshotted into
-        // `vk_row0_sampling` before the `linear_states` mutable borrow, so the
-        // sampler doesn't re-borrow `states[0]` here.
+        // native single-submit resident forwards. Greedy uses the token-only
+        // resident argmax entry. Stochastic rows try the resident decode +
+        // sampler tail first so they only read back one token; unsupported
+        // sampler settings fall back to the older resident-logits path.
+        // The row-0 sampling context (seed + generated tokens) was snapshotted
+        // into `vk_row0_sampling` before the `linear_states` mutable borrow, so
+        // the sampler doesn't re-borrow `states[0]` here.
         // Skipped when the contiguous-batched path above already produced tokens
         // (row > 1).
         #[cfg(feature = "vulkan")]
@@ -3063,25 +3059,73 @@ impl ModelRunner {
                 )
                 .context("vulkan resident single-row greedy decode forward failed")?
             } else {
-                let logits = model_forward_paged_last_token_resident(
-                    &*self.backend,
-                    &input_tokens,
-                    &self.weights,
-                    &self.config,
-                    paged_cache,
-                    &block_tables[0],
-                    sequence_lengths[0],
-                    Some(&mut *linear_states[0]),
-                    self.active_lora.as_ref(),
-                    None,
-                )
-                .context("vulkan resident single-row decode forward failed")?;
                 let (step_seed, generated) = vk_row0_sampling
                     .as_ref()
                     .expect("vk_row0_sampling captured for row_count == 1");
-                let mut row_params = params[0].clone();
-                row_params.seed = *step_seed;
-                sample_with_full_params(&logits, &row_params, generated)?
+                let sample_result = if !cache_is_fp8
+                    && self.backend.name() == "vulkan"
+                    && self.active_lora.is_none()
+                {
+                    let block_table_refs = [&block_tables[0]];
+                    if has_linear_layers {
+                        let mut linear_state_refs: [&mut LinearAttentionState; 1] =
+                            [&mut *linear_states[0]];
+                        self.decode_sample_paged_contiguous_batch_with_ids(
+                            &input_tokens[..1],
+                            paged_cache,
+                            &block_table_refs,
+                            &sequence_lengths[..1],
+                            &mut linear_state_refs,
+                            Some(&row_ids[..1]),
+                            &params[..1],
+                            std::slice::from_ref(step_seed),
+                            std::slice::from_ref(generated),
+                        )
+                    } else {
+                        let mut no_linear_states: [&mut LinearAttentionState; 0] = [];
+                        self.decode_sample_paged_contiguous_batch_with_ids(
+                            &input_tokens[..1],
+                            paged_cache,
+                            &block_table_refs,
+                            &sequence_lengths[..1],
+                            &mut no_linear_states,
+                            Some(&row_ids[..1]),
+                            &params[..1],
+                            std::slice::from_ref(step_seed),
+                            std::slice::from_ref(generated),
+                        )
+                    }
+                } else {
+                    Ok(None)
+                };
+                match sample_result {
+                    Ok(Some(tokens)) => *tokens
+                        .first()
+                        .context("resident single-row sample returned no token")?,
+                    Ok(None) => {
+                        let logits = model_forward_paged_last_token_resident(
+                            &*self.backend,
+                            &input_tokens,
+                            &self.weights,
+                            &self.config,
+                            paged_cache,
+                            &block_tables[0],
+                            sequence_lengths[0],
+                            Some(&mut *linear_states[0]),
+                            self.active_lora.as_ref(),
+                            None,
+                        )
+                        .context("vulkan resident single-row decode forward failed")?;
+                        let mut row_params = params[0].clone();
+                        row_params.seed = *step_seed;
+                        sample_with_full_params(&logits, &row_params, generated)?
+                    }
+                    Err(err) => {
+                        return Err(err).context(
+                            "resident single-row sample decode failed after native path selection",
+                        );
+                    }
+                }
             };
             sampled = Some(vec![token]);
         }
