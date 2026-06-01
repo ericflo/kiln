@@ -3945,12 +3945,13 @@ impl ModelRunner {
             }
         }
 
+        let single_row_direct_state = has_linear_layers && batch == 1;
         let all_rows_resident = has_linear_layers
             && linear_states
                 .iter()
                 .all(|state| state.has_all_gdn_state_resident_kt(&*self.backend));
         let mut batched_state_cache_hit = false;
-        let mut batch_state = if has_linear_layers {
+        let mut batch_state = if has_linear_layers && !single_row_direct_state {
             let mut cache_guard = self
                 .batched_state_cache
                 .lock()
@@ -3986,7 +3987,13 @@ impl ModelRunner {
         } else {
             None
         };
-        if batched_state_cache_hit {
+        if single_row_direct_state {
+            finish_decode_batcher_stage_profile(
+                "sample_batch_state_direct_row",
+                batch,
+                stage_start,
+            );
+        } else if batched_state_cache_hit {
             finish_decode_batcher_stage_profile(
                 "sample_batch_state_assemble_cache_hit",
                 batch,
@@ -3999,6 +4006,11 @@ impl ModelRunner {
         let stage_start = profile_stages.then(std::time::Instant::now);
         let tokens = {
             let pc_guard = lock_paged_cache(paged_cache)?;
+            let linear_state_for_forward = if single_row_direct_state {
+                Some(&*linear_states[0])
+            } else {
+                batch_state.as_ref()
+            };
             model_forward_paged_decode_contiguous_batch_sample_with_ids(
                 &*self.backend,
                 input_tokens,
@@ -4007,7 +4019,7 @@ impl ModelRunner {
                 pc_guard,
                 block_tables,
                 seq_lens,
-                batch_state.as_ref(),
+                linear_state_for_forward,
                 self.active_lora.as_ref(),
                 row_ids,
                 &history_rows,

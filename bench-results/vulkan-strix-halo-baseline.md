@@ -972,6 +972,12 @@ every config"):
   settings read back one sampled token instead of materializing full logits for
   host-side sampling. Unsupported sampler settings still fall back to the older
   resident-logits route.
+  **Update — single-row sample skips batch-state cat/scatter:** when that
+  row-count-1 resident sampler path has GDN layers, it now passes the existing
+  per-row `LinearAttentionState` directly into the resident stack instead of
+  assembling a synthetic batch with `from_batch_rows`, then scattering it back
+  after sampling. The resident buffers are already keyed by the row tensors, so
+  this removes the extra CPU-side cat/scatter cycle from stochastic bs=1 decode.
 
 ## Other follow-ups (perf headroom, not regressions)
 
