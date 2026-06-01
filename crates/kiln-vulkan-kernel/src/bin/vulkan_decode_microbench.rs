@@ -50,8 +50,8 @@ const TIMED_ITERS: usize = 30;
 const REPEATS: usize = 5;
 const DEFAULT_BATCHES: &[usize] = &[1, 4, 8, 16, 32, 64];
 const DEFAULT_MLP_BF16_ROWS8_MIN_BATCH: usize = 256;
-const GDN_IN_PROJ_ROWS4_MIN_BATCH: usize = 16;
-const GDN_IN_PROJ_ROWS8_MIN_BATCH: usize = 64;
+const DEFAULT_GDN_IN_PROJ_ROWS4_MIN_BATCH: usize = 16;
+const DEFAULT_GDN_IN_PROJ_ROWS8_MIN_BATCH: usize = 64;
 const FULL_ATTN_QKV_BF16_ROWS8_MIN_BATCH: usize = 64;
 const DEFAULT_LINEAR_DECODE_BF16W_ROWS8_MIN_BATCH: usize = 64;
 
@@ -132,6 +132,20 @@ fn linear_bf16w_rows8_min_batch() -> usize {
     env_usize(
         "KILN_VULKAN_LINEAR_BF16_ROWS8_MIN_BATCH",
         DEFAULT_LINEAR_DECODE_BF16W_ROWS8_MIN_BATCH,
+    )
+}
+
+fn gdn_in_proj_rows4_min_batch() -> usize {
+    env_usize(
+        "KILN_VULKAN_GDN_IN_PROJ_ROWS4_MIN_BATCH",
+        DEFAULT_GDN_IN_PROJ_ROWS4_MIN_BATCH,
+    )
+}
+
+fn gdn_in_proj_rows8_min_batch() -> usize {
+    env_usize(
+        "KILN_VULKAN_GDN_IN_PROJ_ROWS8_MIN_BATCH",
+        DEFAULT_GDN_IN_PROJ_ROWS8_MIN_BATCH,
     )
 }
 
@@ -240,13 +254,13 @@ fn gdn_in_proj_bf16w_batched_plan(
         && batch >= 3
         && enabled_unless_disabled("KILN_DISABLE_VULKAN_GDN_IN_PROJ_BATCH_ROW_PAIR");
     let row_group_size = if row_grouping
-        && batch >= GDN_IN_PROJ_ROWS8_MIN_BATCH
+        && batch >= gdn_in_proj_rows8_min_batch()
         && env_truthy("KILN_ENABLE_VULKAN_GDN_IN_PROJ_BATCH_ROW_OCTET")
         && enabled_unless_disabled("KILN_DISABLE_VULKAN_GDN_IN_PROJ_BATCH_ROW_OCTET")
     {
         8usize
     } else if row_grouping
-        && batch >= GDN_IN_PROJ_ROWS4_MIN_BATCH
+        && batch >= gdn_in_proj_rows4_min_batch()
         && enabled_unless_disabled("KILN_DISABLE_VULKAN_GDN_IN_PROJ_BATCH_ROW_QUAD")
     {
         4usize

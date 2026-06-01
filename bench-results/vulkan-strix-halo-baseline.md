@@ -1060,6 +1060,14 @@ every config"):
   its actual packed word, which keeps odd-width projection coverage correct.
   Focused Vulkan coverage:
   `gdn_in_proj_rows8_matches_cpu_with_tail_rows_and_odd_pairs`.
+  The GDN in-proj rows4/rows8 cutoffs are now runtime-tunable with
+  `KILN_VULKAN_GDN_IN_PROJ_ROWS4_MIN_BATCH` and
+  `KILN_VULKAN_GDN_IN_PROJ_ROWS8_MIN_BATCH`, defaulting to the Strix Halo
+  values 16 and 64. Rows8 remains opt-in through
+  `KILN_ENABLE_VULKAN_GDN_IN_PROJ_BATCH_ROW_OCTET`, but the model recorder,
+  kernel dispatcher, direct resident helper, and decode microbench now share
+  the same thresholds. Direct resident parity now covers a 65-row tail batch,
+  and the rows8 opt-in validation uses the same test with the octet env set.
   **Update — MLP rows8 crossover is runtime-tunable, defaulting to batch 256:**
   the model recorder, kernel helper, resident helper, and decode microbench now
   all read `KILN_VULKAN_MLP_BF16_ROWS8_MIN_BATCH` before choosing the full-BF16

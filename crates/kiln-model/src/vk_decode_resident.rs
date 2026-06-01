@@ -42,8 +42,8 @@ use crate::PagedKvCacheKt;
 
 const DEFAULT_MLP_BF16_ROWS8_MIN_BATCH: usize = 256;
 const FULL_ATTN_QKV_BF16_ROWS8_MIN_BATCH: usize = 64;
-const GDN_IN_PROJ_ROWS4_MIN_BATCH: usize = 16;
-const GDN_IN_PROJ_ROWS8_MIN_BATCH: usize = 64;
+const DEFAULT_GDN_IN_PROJ_ROWS4_MIN_BATCH: usize = 16;
+const DEFAULT_GDN_IN_PROJ_ROWS8_MIN_BATCH: usize = 64;
 const LM_HEAD_BF16_ROWS4_MIN_BATCH: usize = 16;
 const DEFAULT_LINEAR_BF16_ROWS8_MIN_BATCH: usize = 64;
 
@@ -124,6 +124,28 @@ fn linear_bf16_rows8_min_batch() -> usize {
             .and_then(|s| s.parse::<usize>().ok())
             .filter(|&n| n > 0)
             .unwrap_or(DEFAULT_LINEAR_BF16_ROWS8_MIN_BATCH)
+    })
+}
+
+fn gdn_in_proj_rows4_min_batch() -> usize {
+    static VALUE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *VALUE.get_or_init(|| {
+        std::env::var("KILN_VULKAN_GDN_IN_PROJ_ROWS4_MIN_BATCH")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(DEFAULT_GDN_IN_PROJ_ROWS4_MIN_BATCH)
+    })
+}
+
+fn gdn_in_proj_rows8_min_batch() -> usize {
+    static VALUE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *VALUE.get_or_init(|| {
+        std::env::var("KILN_VULKAN_GDN_IN_PROJ_ROWS8_MIN_BATCH")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(DEFAULT_GDN_IN_PROJ_ROWS8_MIN_BATCH)
     })
 }
 
@@ -233,13 +255,13 @@ fn gdn_in_proj_bf16w_batched_plan(
         && batch >= 3
         && enabled_unless_disabled("KILN_DISABLE_VULKAN_GDN_IN_PROJ_BATCH_ROW_PAIR");
     let row_group_size = if row_grouping
-        && batch >= GDN_IN_PROJ_ROWS8_MIN_BATCH
+        && batch >= gdn_in_proj_rows8_min_batch()
         && env_truthy("KILN_ENABLE_VULKAN_GDN_IN_PROJ_BATCH_ROW_OCTET")
         && enabled_unless_disabled("KILN_DISABLE_VULKAN_GDN_IN_PROJ_BATCH_ROW_OCTET")
     {
         8usize
     } else if row_grouping
-        && batch >= GDN_IN_PROJ_ROWS4_MIN_BATCH
+        && batch >= gdn_in_proj_rows4_min_batch()
         && enabled_unless_disabled("KILN_DISABLE_VULKAN_GDN_IN_PROJ_BATCH_ROW_QUAD")
     {
         4usize

@@ -943,8 +943,8 @@ pub fn dispatch_mlp_decode_cached_bf16_gate_up_f32_down_resident(
 }
 
 /// Resident-form fused GDN input projection. Writes the combined
-/// `[batch, qkv_dim + z_dim + a_dim + b_dim]` row-major output into
-/// `out`. Shader selection mirrors `dispatch_gdn_in_proj_decode_cached_impl`.
+/// projection-major `[qkv, z, a, b]` output into `out`. Shader
+/// selection mirrors `dispatch_gdn_in_proj_decode_cached_impl`.
 #[allow(clippy::too_many_arguments)]
 pub fn dispatch_gdn_in_proj_decode_cached_resident(
     vk_device: &VulkanDevice,
@@ -982,7 +982,12 @@ pub fn dispatch_gdn_in_proj_decode_cached_resident(
         && batch >= 3
         && crate::kernels::gdn_in_proj_batch_row_pair_enabled();
     let row_group_size = if row_grouping
-        && batch >= crate::kernels::GDN_IN_PROJ_ROWS4_MIN_BATCH
+        && batch >= crate::kernels::gdn_in_proj_rows8_min_batch()
+        && crate::kernels::gdn_in_proj_batch_row_octet_enabled()
+    {
+        8usize
+    } else if row_grouping
+        && batch >= crate::kernels::gdn_in_proj_rows4_min_batch()
         && crate::kernels::gdn_in_proj_batch_row_quad_enabled()
     {
         4usize
@@ -1010,7 +1015,12 @@ pub fn dispatch_gdn_in_proj_decode_cached_resident(
             )
         }
     } else if packed_bf16_weights {
-        if row_group_size == 4 {
+        if row_group_size == 8 {
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/csrc/shaders/gdn_in_proj_decode_batched_pair_qkv_z_rows8_bf16w.comp"
+            )
+        } else if row_group_size == 4 {
             concat!(
                 env!("CARGO_MANIFEST_DIR"),
                 "/csrc/shaders/gdn_in_proj_decode_batched_pair_qkv_z_rows4_bf16w.comp"
@@ -3206,6 +3216,66 @@ mod tests {
         let resident = read_back_f32(&dev, &out_buf);
         for (i, (e, r)) in expected.iter().zip(resident.iter()).enumerate() {
             assert_eq!(e.to_bits(), r.to_bits(), "idx {i}: expected {e} vs resident {r}");
+        }
+    }
+
+    #[test]
+    fn gdn_in_proj_bf16w_resident_matches_nonresident_b65_tail() {
+        use crate::kernels::dispatch_gdn_in_proj_decode_cached_bf16_weights_bytes;
+        let Some(dev) = try_device() else { return };
+        let batch = 65;
+        let hidden = 48;
+        let qkv_dim = 65;
+        let z_dim = 63;
+        let a_dim = 7;
+        let b_dim = 5;
+        let total_out = qkv_dim + z_dim + a_dim + b_dim;
+        let x = make_x_f32(batch, hidden);
+        let qkv_w = make_bf16_weight(hidden, qkv_dim);
+        let z_w = make_bf16_weight(hidden, z_dim);
+        let a_w = make_bf16_weight(hidden, a_dim);
+        let b_w = make_bf16_weight(hidden, b_dim);
+        let qkv_buf = upload_tensor_bf16_packed_buffer(&dev, &qkv_w).unwrap();
+        let z_buf = upload_tensor_bf16_packed_buffer(&dev, &z_w).unwrap();
+        let a_buf = upload_tensor_bf16_packed_buffer(&dev, &a_w).unwrap();
+        let b_buf = upload_tensor_bf16_packed_buffer(&dev, &b_w).unwrap();
+
+        let x_bytes = extract_tensor_bytes(&x).unwrap().0;
+        let (qkv_b, z_b, a_b, b_b) = dispatch_gdn_in_proj_decode_cached_bf16_weights_bytes(
+            &dev, &x_bytes, batch, &qkv_buf, &z_buf, &a_buf, &b_buf, hidden, qkv_dim, z_dim,
+            a_dim, b_dim,
+        )
+        .unwrap();
+        let to_f32 = |bytes: &[u8]| -> Vec<f32> {
+            bytes
+                .chunks_exact(4)
+                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect()
+        };
+        let qkv_v = to_f32(&qkv_b);
+        let z_v = to_f32(&z_b);
+        let a_v = to_f32(&a_b);
+        let b_v = to_f32(&b_b);
+        let mut expected: Vec<f32> = Vec::with_capacity(batch * total_out);
+        expected.extend(qkv_v);
+        expected.extend(z_v);
+        expected.extend(a_v);
+        expected.extend(b_v);
+
+        let x_buf = upload_x(&dev, &x);
+        let out_buf = alloc_out(&dev, (batch * total_out * 4) as u64);
+        dispatch_gdn_in_proj_decode_cached_resident(
+            &dev, &x_buf, &qkv_buf, &z_buf, &a_buf, &b_buf, &out_buf, batch, hidden, qkv_dim,
+            z_dim, a_dim, b_dim, true,
+        )
+        .unwrap();
+        let resident = read_back_f32(&dev, &out_buf);
+        for (i, (e, r)) in expected.iter().zip(resident.iter()).enumerate() {
+            assert_eq!(
+                e.to_bits(),
+                r.to_bits(),
+                "idx {i}: expected {e} vs resident {r}"
+            );
         }
     }
 

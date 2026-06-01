@@ -8,8 +8,8 @@ use std::time::Instant;
 
 const DEFAULT_MLP_BF16_ROWS8_MIN_BATCH: usize = 256;
 const DEFAULT_LINEAR_DECODE_BF16W_ROWS8_MIN_BATCH: usize = 64;
-pub(crate) const GDN_IN_PROJ_ROWS4_MIN_BATCH: usize = 16;
-pub(crate) const GDN_IN_PROJ_ROWS8_MIN_BATCH: usize = 64;
+const DEFAULT_GDN_IN_PROJ_ROWS4_MIN_BATCH: usize = 16;
+const DEFAULT_GDN_IN_PROJ_ROWS8_MIN_BATCH: usize = 64;
 
 fn env_truthy(name: &str) -> bool {
     std::env::var(name)
@@ -80,6 +80,28 @@ pub(crate) fn linear_decode_bf16w_rows8_min_batch() -> usize {
             .and_then(|s| s.parse::<usize>().ok())
             .filter(|&n| n > 0)
             .unwrap_or(DEFAULT_LINEAR_DECODE_BF16W_ROWS8_MIN_BATCH)
+    })
+}
+
+pub(crate) fn gdn_in_proj_rows4_min_batch() -> usize {
+    static VALUE: OnceLock<usize> = OnceLock::new();
+    *VALUE.get_or_init(|| {
+        std::env::var("KILN_VULKAN_GDN_IN_PROJ_ROWS4_MIN_BATCH")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(DEFAULT_GDN_IN_PROJ_ROWS4_MIN_BATCH)
+    })
+}
+
+pub(crate) fn gdn_in_proj_rows8_min_batch() -> usize {
+    static VALUE: OnceLock<usize> = OnceLock::new();
+    *VALUE.get_or_init(|| {
+        std::env::var("KILN_VULKAN_GDN_IN_PROJ_ROWS8_MIN_BATCH")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(DEFAULT_GDN_IN_PROJ_ROWS8_MIN_BATCH)
     })
 }
 
@@ -1334,12 +1356,12 @@ fn dispatch_gdn_in_proj_decode_cached_impl(
     let row_grouping =
         packed_bf16_weights && pair_qkv_z && batch >= 3 && gdn_in_proj_batch_row_pair_enabled();
     let row_group_size = if row_grouping
-        && batch >= GDN_IN_PROJ_ROWS8_MIN_BATCH
+        && batch >= gdn_in_proj_rows8_min_batch()
         && gdn_in_proj_batch_row_octet_enabled()
     {
         8usize
     } else if row_grouping
-        && batch >= GDN_IN_PROJ_ROWS4_MIN_BATCH
+        && batch >= gdn_in_proj_rows4_min_batch()
         && gdn_in_proj_batch_row_quad_enabled()
     {
         4usize
