@@ -313,7 +313,7 @@ pub fn gc_tracked_jobs(state: &AppState) -> usize {
     removed
 }
 
-/// Dispatch one SFT job to either the candle trainer, the CUDA-native trainer,
+/// Dispatch one SFT job to either the default in-process kt-tape trainer, the CUDA-native trainer,
 /// or the vk-native trainer.
 ///
 /// The candle path takes a `replay_ctx` (request_body + lineage
@@ -362,7 +362,7 @@ fn run_sft(
             tracing::warn!(
                 job_id = %job_id,
                 "KILN_CUDA_NATIVE_TRAINING=1 set but kiln-server was built without \
-                 --features cuda - falling back to candle SFT trainer"
+                 --features cuda - falling back to the default in-process SFT trainer (kt-tape)"
             );
         }
     }
@@ -390,7 +390,7 @@ fn run_sft(
             tracing::warn!(
                 job_id = %job_id,
                 "KILN_VK_NATIVE_TRAINING=1 set but kiln-server was built without \
-                 --features vulkan — falling back to candle SFT trainer"
+                 --features vulkan — falling back to the default in-process SFT trainer (kt-tape)"
             );
         }
     }
@@ -502,7 +502,7 @@ fn run_grpo(
                 tracing::warn!(
                     job_id = %job_id,
                     "KILN_CUDA_NATIVE_TRAINING=1 set but kiln-server was built without \
-                     --features cuda - falling back to candle GRPO trainer"
+                     --features cuda - falling back to the default in-process GRPO trainer (kt-tape)"
                 );
             }
         }
@@ -579,7 +579,7 @@ fn run_grpo(
             tracing::warn!(
                 job_id = %job_id,
                 "KILN_CUDA_NATIVE_TRAINING=1 set but kiln-server was built without \
-                 --features cuda - falling back to candle GRPO trainer"
+                 --features cuda - falling back to the default in-process GRPO trainer (kt-tape)"
             );
         }
     }
@@ -827,7 +827,7 @@ fn run_opd(
             tracing::warn!(
                 job_id = %job_id,
                 "KILN_VK_NATIVE_OPD=1 set but kiln-server was built without \
-                 --features vulkan - falling back to candle OPD trainer"
+                 --features vulkan - falling back to the default in-process OPD trainer (kt-tape)"
             );
             kiln_train::opd::opd_train(
                 prompts,
