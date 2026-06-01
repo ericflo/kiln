@@ -745,6 +745,16 @@ every config"):
   `cargo test -p kiln-model --lib --no-default-features --features vulkan`,
   and `cargo check -p kiln-model --no-default-features --features vulkan`
   passes with the existing warning backlog.
+  **Update — resident embedding setup bypasses tensor gather:** the same
+  resident single-row and batched decode entry points now gather token
+  embeddings directly from CPU-resident F32/BF16/F16 embedding tables into the
+  f32 upload rows consumed by the Vulkan resident stack. On the Vulkan weight
+  layout this reads the transposed table and avoids building a temporary
+  gather/transpose tensor only to flatten it back to host memory before upload.
+  Focused checks: the Vulkan-profile `test_vulkan_resident_` unit subset
+  covers the RoPE and BF16 transposed embedding helpers and passes; `cargo
+  check -p kiln-model --no-default-features --features vulkan` also passes
+  with the existing warning backlog.
 - **Vulkan paged-attention decode kernel**: the kernel crate already had
   `paged_attn_decode_batch_paged.comp`; Vulkan now advertises
   `supports_flash_attn_paged_decode` and wires the single-query paged-decode

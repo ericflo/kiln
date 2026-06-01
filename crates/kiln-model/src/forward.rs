@@ -21949,6 +21949,113 @@ fn tensor_to_f32_flat_vec_vk(t: &Tensor) -> Result<Vec<f32>> {
 }
 
 #[cfg(feature = "vulkan")]
+fn cpu_tensor_storage_bytes_vk(t: &Tensor) -> Option<&[u8]> {
+    if !matches!(t.device(), Device::Cpu) || !t.is_contiguous() {
+        return None;
+    }
+    t.storage()
+        .as_any()
+        .downcast_ref::<kiln_tensor::CpuStorage>()
+        .map(|storage| storage.as_bytes())
+}
+
+#[cfg(feature = "vulkan")]
+fn read_cpu_scalar_as_f32_vk(bytes: &[u8], offset: usize, dtype: DType) -> Option<f32> {
+    match dtype {
+        DType::F32 => {
+            let chunk = bytes.get(offset..offset.checked_add(4)?)?;
+            Some(f32::from_le_bytes(chunk.try_into().ok()?))
+        }
+        DType::BF16 => {
+            let chunk = bytes.get(offset..offset.checked_add(2)?)?;
+            Some(half::bf16::from_le_bytes(chunk.try_into().ok()?).to_f32())
+        }
+        DType::F16 => {
+            let chunk = bytes.get(offset..offset.checked_add(2)?)?;
+            Some(half::f16::from_le_bytes(chunk.try_into().ok()?).to_f32())
+        }
+        _ => None,
+    }
+}
+
+#[cfg(feature = "vulkan")]
+fn gather_embedding_rows_f32_vk(
+    token_ids: &[u32],
+    table: &Tensor,
+    hidden: usize,
+    transposed: bool,
+) -> Result<Option<Vec<f32>>> {
+    let dims = table.dims();
+    if dims.len() != 2 {
+        return Ok(None);
+    }
+    let (vocab, table_hidden) = if transposed {
+        (dims[1], dims[0])
+    } else {
+        (dims[0], dims[1])
+    };
+    if table_hidden != hidden {
+        return Ok(None);
+    }
+    let Some(bytes) = cpu_tensor_storage_bytes_vk(table) else {
+        return Ok(None);
+    };
+    let elem_bytes = match table.dtype() {
+        DType::F32 => 4usize,
+        DType::BF16 | DType::F16 => 2usize,
+        _ => return Ok(None),
+    };
+    let expected_bytes = dims[0]
+        .checked_mul(dims[1])
+        .and_then(|n| n.checked_mul(elem_bytes))
+        .context("vulkan resident embedding gather byte size overflow")?;
+    if bytes.len() < expected_bytes {
+        return Ok(None);
+    }
+
+    let mut out = Vec::with_capacity(token_ids.len() * hidden);
+    for &token in token_ids {
+        let token = token as usize;
+        anyhow::ensure!(
+            token < vocab,
+            "vulkan resident embedding gather token id {token} exceeds vocab {vocab}"
+        );
+        for h in 0..hidden {
+            let elem = if transposed {
+                h.checked_mul(vocab)
+                    .and_then(|base| base.checked_add(token))
+            } else {
+                token
+                    .checked_mul(hidden)
+                    .and_then(|base| base.checked_add(h))
+            }
+            .context("vulkan resident embedding gather index overflow")?;
+            let offset = elem
+                .checked_mul(elem_bytes)
+                .context("vulkan resident embedding gather offset overflow")?;
+            let value = read_cpu_scalar_as_f32_vk(bytes, offset, table.dtype())
+                .context("vulkan resident embedding gather scalar read failed")?;
+            out.push(value);
+        }
+    }
+    Ok(Some(out))
+}
+
+#[cfg(feature = "vulkan")]
+fn embedding_rows_host_f32_vk(
+    token_ids: &[u32],
+    weights: &GpuWeights,
+    hidden: usize,
+) -> Result<Option<Vec<f32>>> {
+    if let Some(rows) =
+        gather_embedding_rows_f32_vk(token_ids, &weights.embed_tokens, hidden, false)?
+    {
+        return Ok(Some(rows));
+    }
+    gather_embedding_rows_f32_vk(token_ids, &weights.embed_tokens_t, hidden, true)
+}
+
+#[cfg(feature = "vulkan")]
 fn rotary_tables_host_f32_vk(
     start_positions: &[usize],
     rotary_dim: usize,
@@ -22050,12 +22157,18 @@ fn try_vulkan_resident_batched_decode_argmax(
         (empty_states, empty_states)
     };
 
-    let hidden = embedding_lookup_from_weights(token_ids, weights)?;
-    let expected_hidden = [batch, config.hidden_size];
-    if hidden.dims() != expected_hidden.as_slice() {
-        return Ok(None);
-    }
-    let hidden_rows = tensor_to_f32_flat_vec_vk(&hidden)?;
+    let hidden_rows = if let Some(rows) =
+        embedding_rows_host_f32_vk(token_ids, weights, config.hidden_size)?
+    {
+        rows
+    } else {
+        let hidden = embedding_lookup_from_weights(token_ids, weights)?;
+        let expected_hidden = [batch, config.hidden_size];
+        if hidden.dims() != expected_hidden.as_slice() {
+            return Ok(None);
+        }
+        tensor_to_f32_flat_vec_vk(&hidden)?
+    };
 
     let (rope_cos_rows, rope_sin_rows) =
         rotary_tables_host_f32_vk(start_positions, config.rotary_dim(), config.rope_theta)?;
@@ -22196,12 +22309,18 @@ fn try_vulkan_resident_batched_decode_hidden(
         (empty_states, empty_states)
     };
 
-    let hidden = embedding_lookup_from_weights(token_ids, weights)?;
-    let expected_hidden = [batch, config.hidden_size];
-    if hidden.dims() != expected_hidden.as_slice() {
-        return Ok(None);
-    }
-    let hidden_rows = tensor_to_f32_flat_vec_vk(&hidden)?;
+    let hidden_rows = if let Some(rows) =
+        embedding_rows_host_f32_vk(token_ids, weights, config.hidden_size)?
+    {
+        rows
+    } else {
+        let hidden = embedding_lookup_from_weights(token_ids, weights)?;
+        let expected_hidden = [batch, config.hidden_size];
+        if hidden.dims() != expected_hidden.as_slice() {
+            return Ok(None);
+        }
+        tensor_to_f32_flat_vec_vk(&hidden)?
+    };
 
     let (rope_cos_rows, rope_sin_rows) =
         rotary_tables_host_f32_vk(start_positions, config.rotary_dim(), config.rope_theta)?;
@@ -23324,9 +23443,21 @@ fn model_forward_paged_last_token_resident_native_vk(
     let hidden_size = config.hidden_size;
     let device = weights.embed_tokens.device();
 
-    // 1. Embedding lookup (CPU/candle): produces [1, 1, hidden] f32.
-    let mut hidden = embedding_lookup_from_weights(token_ids, weights)?;
-    hidden = hidden.unsqueeze(0)?;
+    // 1. Embedding lookup: produce resident upload rows as f32.
+    let hidden_data = if let Some(rows) =
+        embedding_rows_host_f32_vk(token_ids, weights, hidden_size)?
+    {
+        rows
+    } else {
+        let mut hidden = embedding_lookup_from_weights(token_ids, weights)?;
+        hidden = hidden.unsqueeze(0)?;
+        let hidden_flat = if hidden.dtype() == DType::F32 {
+            hidden.flatten_all()?
+        } else {
+            hidden.to_dtype(DType::F32)?.flatten_all()?
+        };
+        hidden_flat.to_vec1()?
+    };
     if timing_enabled {
         EMBED_NS.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }
@@ -23362,12 +23493,6 @@ fn model_forward_paged_last_token_resident_native_vk(
     //    `VulkanBuffer::upload_data` calls, each with its own command
     //    pool create + queue_submit + queue_wait_idle round-trip,
     //    which cost ~6 ms / token of pure orchestration.
-    let hidden_flat = if hidden.dtype() == DType::F32 {
-        hidden.flatten_all()?
-    } else {
-        hidden.to_dtype(DType::F32)?.flatten_all()?
-    };
-    let hidden_data: Vec<f32> = hidden_flat.to_vec1()?;
     let mut hidden_bytes: Vec<u8> = Vec::with_capacity(hidden_data.len() * 4);
     for &x in &hidden_data {
         hidden_bytes.extend_from_slice(&x.to_le_bytes());
@@ -27359,6 +27484,25 @@ mod tests {
             "host RoPE sin table max_abs_diff={max_sin:e}"
         );
 
+        Ok(())
+    }
+
+    #[cfg(feature = "vulkan")]
+    #[test]
+    fn test_vulkan_resident_embedding_gather_reads_transposed_bf16_table() -> Result<()> {
+        let hidden = 3usize;
+        let vocab = 4usize;
+        let mut values = Vec::new();
+        for h in 0..hidden {
+            for token in 0..vocab {
+                values.push(half::bf16::from_f32((h * 10 + token) as f32));
+            }
+        }
+        let table = Tensor::from_slice(&values, vec![hidden, vocab])?;
+        let rows = gather_embedding_rows_f32_vk(&[2, 0], &table, hidden, true)?
+            .expect("transposed BF16 table should use direct gather");
+
+        assert_eq!(rows, vec![2.0, 12.0, 22.0, 0.0, 10.0, 20.0]);
         Ok(())
     }
 
