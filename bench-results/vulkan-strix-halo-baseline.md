@@ -163,6 +163,14 @@ from silently losing the one-CommandBatch path. A post-gate Vulkan-only smoke
 on the T=128 shape measured legacy per-dispatch 2.325 ms vs. single-submit
 0.852 ms (**2.73x**) with output/state max abs err 0.
 
+**Update — full-attention prefill wrapper stays kt-native:** the Vulkan
+`flash_attn_prefill` implementation now extracts Q/K/V F32 bytes directly from
+kt tensors and reconstructs the SDPA output as a kt tensor. This removes the
+deprecated tensor bridge from the full-attention prefill wrapper while keeping
+the same `sdpa_prefill_f32` Vulkan kernel route and shape gates. Focused check:
+`cargo check -p kiln-model --no-default-features --features vulkan` passes with
+the repo's existing warning backlog.
+
 Other proper work-packages for full saturation (per "max out the hardware in
 every config"):
 - **True multi-row batched resident decode** (bs>1 / continuous-batched

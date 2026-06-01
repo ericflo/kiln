@@ -1645,65 +1645,43 @@ impl VulkanBackend {
     /// Dispatch FlashAttention-2 prefill kernel via Vulkan.
     fn flash_attn_prefill_vulkan(
         &self,
-        q: &candle_core::Tensor,
-        k: &candle_core::Tensor,
-        v: &candle_core::Tensor,
+        q: &kiln_tensor::Tensor,
+        k: &kiln_tensor::Tensor,
+        v: &kiln_tensor::Tensor,
         softmax_scale: f32,
         causal: bool,
-    ) -> Result<Option<candle_core::Tensor>> {
+    ) -> Result<Option<kiln_tensor::Tensor>> {
         let vk_device = self
             .vulkan_device
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
 
-        let (batch, seq_len, num_heads, head_dim) = q.dims4()?;
-        // sdpa_prefill_f32.comp uses local_size_x=128 with ELEMS_PER_THREAD=2
-        // grid-strided head_dim elements per thread → covers head_dim up to
-        // 256, which is Qwen3.5-4B's head_dim. (#1082: the previous `> 128`
-        // bound made this kernel decline the target model entirely, falling
-        // through to the manual CPU SDPA — which then hit a strict-kt F32/BF16
-        // matmul mismatch.)
-        if head_dim > 256 {
+        let Ok((batch, seq_len, num_heads, head_dim)) = q.dims4() else {
             return Ok(None);
-        }
-        // (#1082) This is a SELF-attention kernel: q/k/v must span the same
-        // sequence length (it computes a causal [T,T] online softmax). The
-        // prefill-with-history / split-tail path (start_pos > 0) attends q's
-        // new tokens over a LONGER cached K/V (q_len < kv_len), which this
-        // kernel cannot express — decline so the caller falls through to the
-        // manual GQA path (which masks an arbitrary kv_len). Erroring here on
-        // the byte-length mismatch was a 500 on every prompt longer than one
-        // KV block.
-        let kv_len = k.dims4().map(|d| d.1).unwrap_or(seq_len);
-        if kv_len != seq_len {
+        };
+        let Ok((k_batch, kv_len, k_heads, k_head_dim)) = k.dims4() else {
+            return Ok(None);
+        };
+        let Ok((v_batch, v_len, v_heads, v_head_dim)) = v.dims4() else {
+            return Ok(None);
+        };
+        if head_dim > 256
+            || kv_len != seq_len
+            || k_batch != batch
+            || v_batch != batch
+            || v_len != seq_len
+            || k_heads != num_heads
+            || v_heads != num_heads
+            || k_head_dim != head_dim
+            || v_head_dim != head_dim
+        {
             return Ok(None);
         }
 
-        // Cast to F32 if needed — the kernel is F32-in/F32-out. The
-        // BF16→F32 promotion is cheap relative to the SDPA compute
-        // (e.g. T=918, H=16, dh=128 ≈ 7.5 MB to convert vs. 7 GFLOP
-        // to compute) and matches what the candle CPU baseline did
-        // implicitly via broadcast_matmul_cpu_compatible.
         let in_dtype = q.dtype();
-        let q_f32 = if in_dtype == candle_core::DType::F32 {
-            q.clone()
-        } else {
-            q.to_dtype(candle_core::DType::F32)?
-        };
-        let k_f32 = if in_dtype == candle_core::DType::F32 {
-            k.clone()
-        } else {
-            k.to_dtype(candle_core::DType::F32)?
-        };
-        let v_f32 = if in_dtype == candle_core::DType::F32 {
-            v.clone()
-        } else {
-            v.to_dtype(candle_core::DType::F32)?
-        };
-
-        let q_data = tensor_to_f32_bytes_with_shape(&q_f32)?.0;
-        let k_data = tensor_to_f32_bytes_with_shape(&k_f32)?.0;
-        let v_data = tensor_to_f32_bytes_with_shape(&v_f32)?.0;
+        let q_data = kt_tensor_to_f32_bytes_with_shape(q)?.0;
+        let k_data = kt_tensor_to_f32_bytes_with_shape(k)?.0;
+        let v_data = kt_tensor_to_f32_bytes_with_shape(v)?.0;
         let out_data = kiln_vulkan_kernel::kernels::dispatch_sdpa_prefill_f32_bytes(
             vk_device,
             &q_data,
@@ -1716,13 +1694,13 @@ impl VulkanBackend {
             softmax_scale,
             causal,
         )?;
-        let out_f32 = tensor_from_f32_bytes(
+        let out_f32 = kt_tensor_from_f32_bytes(
             &out_data,
             &[batch, seq_len, num_heads, head_dim],
-            candle_core::DType::F32,
+            kiln_tensor::DType::F32,
         )?;
 
-        let out = if in_dtype == candle_core::DType::F32 {
+        let out = if in_dtype == kiln_tensor::DType::F32 {
             out_f32
         } else {
             out_f32.to_dtype(in_dtype)?
@@ -2547,15 +2525,6 @@ impl BackendRuntime for VulkanBackend {
         softmax_scale: f32,
         causal: bool,
     ) -> Result<Option<kiln_tensor::Tensor>> {
-        // kt guard read directly off the kt args (before the bridge).
-        // (#1082 Vulkan) Accept F32 *or* BF16 Q: the Vulkan full-attention
-        // forward computes its projections in F32 (`linear_decode` is F32-in/
-        // F32-out), so q arrives F32 here — the previous BF16-only guard
-        // (a CUDA-style assumption) rejected the target model's activations
-        // and silently fell the attention through to the manual CPU SDPA,
-        // which then tripped the strict-kt F32/BF16 matmul mismatch.
-        // `flash_attn_prefill_vulkan` upcasts BF16→F32 internally and returns
-        // in the input dtype, so both are correct.
         if !self.has_vulkan()
             || !matches!(
                 q.dtype(),
@@ -2564,15 +2533,7 @@ impl BackendRuntime for VulkanBackend {
         {
             return Ok(None);
         }
-        // Bridge kt args -> candle locals (CPU host round-trip; the Vulkan
-        // backend's model is CPU-resident on the candle surface).
-        let q_c = crate::forward::kt_logits_to_candle(q)?;
-        let k_c = crate::forward::kt_logits_to_candle(k)?;
-        let v_c = crate::forward::kt_logits_to_candle(v)?;
-        match self.flash_attn_prefill_vulkan(&q_c, &k_c, &v_c, softmax_scale, causal)? {
-            Some(out) => Ok(Some(crate::forward::candle_to_kt_activation(&out)?)),
-            None => Ok(None),
-        }
+        self.flash_attn_prefill_vulkan(q, k, v, softmax_scale, causal)
     }
 
     fn flash_attn_paged_decode(
