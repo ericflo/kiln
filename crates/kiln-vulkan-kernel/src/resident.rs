@@ -20,9 +20,11 @@
 use anyhow::{Context, Result};
 use ash::vk;
 
-use crate::kernels::{run_compute_pipeline, run_compute_pipeline_3d};
+use crate::kernels::{
+    run_compute_pipeline, run_compute_pipeline_3d, PAGED_ATTN_SPLITK_MAX_CHUNKS,
+};
 use crate::pipeline::ShaderPipeline;
-use crate::{VulkanBuffer, VulkanDevice};
+use crate::{shaders, CommandBatch, VulkanBuffer, VulkanDevice, Workgroups};
 
 use crate::kernels::{linear_decode_bf16w_rows4_enabled, MLP_BF16_ROWS8_MIN_BATCH};
 
@@ -1668,6 +1670,187 @@ pub fn dispatch_paged_attn_decode_batch_paged_f32_resident(
         (batch * num_heads) as u32,
     )
     .context("paged_attn_decode_batch_paged_f32_resident kernel failed")
+}
+
+/// Record the resident split-K paged-attention scan and reduce into an
+/// existing command batch.
+///
+/// This is the resident form of
+/// `dispatch_paged_attn_decode_batch_paged_splitk_f32_bytes`: all tensors are
+/// already device-local buffers, and the caller owns the partials scratch. It
+/// is used by the full decode stack so the long-context attention scan stays
+/// inside the same per-token submit as the surrounding projection, KV-write,
+/// and MLP work.
+#[allow(clippy::too_many_arguments)]
+pub fn record_paged_attn_decode_batch_paged_splitk_resident(
+    batch_rec: &mut CommandBatch<'_>,
+    q: &VulkanBuffer,
+    k_pool: &VulkanBuffer,
+    v_pool: &VulkanBuffer,
+    block_table: &VulkanBuffer,
+    seq_lens: &VulkanBuffer,
+    partials: &VulkanBuffer,
+    out: &VulkanBuffer,
+    batch_size: usize,
+    num_heads: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    max_blocks_per_seq: usize,
+    page_block_size: usize,
+    softmax_scale: f32,
+    num_chunks: usize,
+) -> Result<()> {
+    anyhow::ensure!(
+        batch_size > 0
+            && num_heads > 0
+            && num_kv_heads > 0
+            && max_blocks_per_seq > 0
+            && page_block_size > 0
+            && num_chunks > 0,
+        "paged_attn_splitk_resident: dimensions must be > 0"
+    );
+    anyhow::ensure!(
+        head_dim <= 256,
+        "paged_attn_splitk_resident: head_dim {head_dim} > 256"
+    );
+    anyhow::ensure!(
+        num_chunks <= PAGED_ATTN_SPLITK_MAX_CHUNKS,
+        "paged_attn_splitk_resident: num_chunks {num_chunks} exceeds max {PAGED_ATTN_SPLITK_MAX_CHUNKS}"
+    );
+    anyhow::ensure!(
+        num_heads % num_kv_heads == 0,
+        "paged_attn_splitk_resident: num_heads not divisible by num_kv_heads"
+    );
+
+    let out_bytes = batch_size
+        .checked_mul(num_heads)
+        .and_then(|n| n.checked_mul(head_dim))
+        .and_then(|n| n.checked_mul(4))
+        .context("paged_attn_splitk_resident output size overflow")?;
+    anyhow::ensure!(
+        out.size() >= out_bytes as u64,
+        "paged_attn_splitk_resident: out buffer too small"
+    );
+    let partials_stride = 2usize
+        .checked_add(head_dim)
+        .context("paged_attn_splitk_resident partial stride overflow")?;
+    let partials_bytes = batch_size
+        .checked_mul(num_heads)
+        .and_then(|n| n.checked_mul(num_chunks))
+        .and_then(|n| n.checked_mul(partials_stride))
+        .and_then(|n| n.checked_mul(4))
+        .context("paged_attn_splitk_resident partial size overflow")?;
+    anyhow::ensure!(
+        partials.size() >= partials_bytes as u64,
+        "paged_attn_splitk_resident: partials buffer too small"
+    );
+    let split_workgroups = batch_size
+        .checked_mul(num_heads)
+        .and_then(|n| n.checked_mul(num_chunks))
+        .context("paged_attn_splitk_resident split workgroup count overflow")?;
+    let reduce_workgroups = batch_size
+        .checked_mul(num_heads)
+        .context("paged_attn_splitk_resident reduce workgroup count overflow")?;
+    let split_workgroups = u32::try_from(split_workgroups)
+        .context("paged_attn_splitk_resident split workgroup count exceeds u32")?;
+    let reduce_workgroups = u32::try_from(reduce_workgroups)
+        .context("paged_attn_splitk_resident reduce workgroup count exceeds u32")?;
+
+    batch_rec.record_shader(
+        shaders::PAGED_ATTN_DECODE_BATCH_PAGED_SPLITK,
+        &[
+            q.handle(),
+            k_pool.handle(),
+            v_pool.handle(),
+            block_table.handle(),
+            seq_lens.handle(),
+            partials.handle(),
+        ],
+        &[
+            max_blocks_per_seq as u32,
+            page_block_size as u32,
+            num_heads as u32,
+            num_kv_heads as u32,
+            head_dim as u32,
+            softmax_scale.to_bits(),
+            num_chunks as u32,
+        ],
+        Workgroups::OneD(split_workgroups),
+    )?;
+    batch_rec.record_shader(
+        shaders::PAGED_ATTN_DECODE_BATCH_PAGED_SPLITK_REDUCE,
+        &[partials.handle(), out.handle()],
+        &[num_heads as u32, head_dim as u32, num_chunks as u32],
+        Workgroups::OneD(reduce_workgroups),
+    )
+}
+
+/// Resident-form split-K paged-pool batched attention.
+#[allow(clippy::too_many_arguments)]
+pub fn dispatch_paged_attn_decode_batch_paged_splitk_f32_resident(
+    vk_device: &VulkanDevice,
+    q: &VulkanBuffer,
+    k_pool: &VulkanBuffer,
+    v_pool: &VulkanBuffer,
+    block_table: &VulkanBuffer,
+    seq_lens: &VulkanBuffer,
+    out: &VulkanBuffer,
+    batch_size: usize,
+    num_heads: usize,
+    num_kv_heads: usize,
+    head_dim: usize,
+    max_blocks_per_seq: usize,
+    page_block_size: usize,
+    softmax_scale: f32,
+    num_chunks: usize,
+) -> Result<()> {
+    anyhow::ensure!(
+        batch_size > 0
+            && num_heads > 0
+            && num_kv_heads > 0
+            && max_blocks_per_seq > 0
+            && page_block_size > 0
+            && num_chunks > 0,
+        "paged_attn_splitk_resident: dimensions must be > 0"
+    );
+    let partials_stride = 2usize
+        .checked_add(head_dim)
+        .context("paged_attn_splitk_resident partial stride overflow")?;
+    let partials_bytes = batch_size
+        .checked_mul(num_heads)
+        .and_then(|n| n.checked_mul(num_chunks))
+        .and_then(|n| n.checked_mul(partials_stride))
+        .and_then(|n| n.checked_mul(4))
+        .context("paged_attn_splitk_resident partial size overflow")?;
+    let partials = VulkanBuffer::create_device_local(
+        vk_device.device(),
+        vk_device.device_local_mem_type(),
+        partials_bytes as u64,
+    )
+    .context("failed to create paged_attn_splitk_resident partials buffer")?;
+    let mut batch_rec =
+        CommandBatch::new(vk_device).context("paged_attn_splitk_resident: create CommandBatch")?;
+    record_paged_attn_decode_batch_paged_splitk_resident(
+        &mut batch_rec,
+        q,
+        k_pool,
+        v_pool,
+        block_table,
+        seq_lens,
+        &partials,
+        out,
+        batch_size,
+        num_heads,
+        num_kv_heads,
+        head_dim,
+        max_blocks_per_seq,
+        page_block_size,
+        softmax_scale,
+        num_chunks,
+    )?;
+    batch_rec
+        .submit_and_wait("paged_attn_decode_batch_paged_splitk_f32_resident")
+        .context("paged_attn_decode_batch_paged_splitk_f32_resident kernel failed")
 }
 
 /// Split the combined QKV-with-gate buffer into four distinct output
@@ -3841,6 +4024,27 @@ mod tests {
         .unwrap();
         let got = read_back_f32(&dev, &out_buf);
 
+        let splitk_out_buf = alloc_out(&dev, (batch * num_heads * head_dim * 4) as u64);
+        dispatch_paged_attn_decode_batch_paged_splitk_f32_resident(
+            &dev,
+            &q_buf,
+            k_pool_buf,
+            v_pool_buf,
+            &block_table_buf,
+            &seq_buf,
+            &splitk_out_buf,
+            batch,
+            num_heads,
+            num_kv_heads,
+            head_dim,
+            max_blocks_per_seq,
+            block_size,
+            softmax_scale,
+            4,
+        )
+        .unwrap();
+        let got_splitk = read_back_f32(&dev, &splitk_out_buf);
+
         // CPU reference: standard MHA softmax over the seq.
         let mut expected = vec![0.0f32; num_heads * head_dim];
         for h in 0..num_heads {
@@ -3880,6 +4084,12 @@ mod tests {
             assert!(
                 rel <= 1e-4,
                 "idx {i}: expected {e:e} got {g:e} (rel err {rel:e})"
+            );
+            let gs = got_splitk[i];
+            let rel_splitk = (e - gs).abs() / e.abs().max(gs.abs()).max(1e-6);
+            assert!(
+                rel_splitk <= 1e-4,
+                "split-K idx {i}: expected {e:e} got {gs:e} (rel err {rel_splitk:e})"
             );
         }
     }

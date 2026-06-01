@@ -55,7 +55,7 @@ const PAGED_ATTN_SPLITK_CHUNKS_B1: usize = 32;
 const PAGED_ATTN_SPLITK_CHUNKS_BATCHED: usize = 4;
 const PAGED_ATTN_SPLITK_CHUNKS_BATCHED_LONG: usize = 2;
 const PAGED_ATTN_SPLITK_LONG_MIN_BLOCKS: usize = 64;
-const PAGED_ATTN_SPLITK_MAX_CHUNKS: usize = 256;
+pub(crate) const PAGED_ATTN_SPLITK_MAX_CHUNKS: usize = 256;
 
 pub fn paged_attn_decode_splitk_chunks(batch_size: usize, max_blocks_per_seq: usize) -> usize {
     std::env::var("KILN_VK_PAGED_ATTN_SPLITK_CHUNKS")

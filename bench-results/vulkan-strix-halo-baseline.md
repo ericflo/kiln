@@ -953,6 +953,13 @@ every config"):
   `CommandBatch`, so the hot path no longer has to read final hidden rows back
   just to upload them into the sampler path again. Unsupported sampler settings
   still decline into the existing hidden/logits fallback.
+  **Update — resident split-K paged attention has one recorder:** the Vulkan
+  kernel crate now exposes a resident split-K paged-attention recorder/wrapper,
+  and the model resident decode stack routes both single-row and multi-row
+  full-attention blocks through it. The resident KV-cache roundtrip test now
+  checks the split-K resident wrapper against the same CPU softmax reference as
+  the non-split resident path, keeping the long-context decode kernel wiring
+  covered at the kernel boundary used by the serving stack.
 
 ## Other follow-ups (perf headroom, not regressions)
 

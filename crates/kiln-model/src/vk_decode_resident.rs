@@ -1838,35 +1838,23 @@ pub fn record_full_attn_block_into(
     let partials_bytes = (1 * num_heads * num_chunks * partials_stride * 4) as u64;
     let attn_partials =
         backend.acquire_resident_scratch("nfa_attn_partials", partials_bytes)?;
-    batch.record_shader(
-        shaders::PAGED_ATTN_DECODE_BATCH_PAGED_SPLITK,
-        &[
-            q_rot.handle(),
-            k_pool.handle(),
-            v_pool.handle(),
-            block_table_buf.handle(),
-            seq_lens_buf.handle(),
-            attn_partials.handle(),
-        ],
-        &[
-            max_blocks_per_seq as u32,
-            block_size as u32,
-            num_heads as u32,
-            num_kv_heads as u32,
-            head_dim as u32,
-            softmax_scale.to_bits(),
-            num_chunks as u32,
-        ],
-        Workgroups::OneD((num_heads * num_chunks) as u32),
-    )?;
-    batch.record_shader(
-        shaders::PAGED_ATTN_DECODE_BATCH_PAGED_SPLITK_REDUCE,
-        &[
-            attn_partials.handle(),
-            attn_pre_gate.handle(),
-        ],
-        &[num_heads as u32, head_dim as u32, num_chunks as u32],
-        Workgroups::OneD(num_heads as u32),
+    kiln_vulkan_kernel::resident::record_paged_attn_decode_batch_paged_splitk_resident(
+        batch,
+        q_rot.as_ref(),
+        k_pool,
+        v_pool,
+        block_table_buf,
+        seq_lens_buf,
+        &attn_partials,
+        attn_pre_gate.as_ref(),
+        1,
+        num_heads,
+        num_kv_heads,
+        head_dim,
+        max_blocks_per_seq,
+        block_size,
+        softmax_scale,
+        num_chunks,
     )?;
     batch.record_shader(
         shaders::VK_MUL_SIGMOID_GATE_F32,
@@ -2133,32 +2121,23 @@ pub fn record_full_attn_block_batched_into(
     let partials_stride = 2 + head_dim;
     let partials_bytes = (batch_size * num_heads * num_chunks * partials_stride * 4) as u64;
     let attn_partials = backend.acquire_resident_scratch("nfa_b_attn_partials", partials_bytes)?;
-    batch.record_shader(
-        shaders::PAGED_ATTN_DECODE_BATCH_PAGED_SPLITK,
-        &[
-            q_rot.handle(),
-            k_pool.handle(),
-            v_pool.handle(),
-            block_table_buf.handle(),
-            seq_lens_buf.handle(),
-            attn_partials.handle(),
-        ],
-        &[
-            max_blocks_per_seq as u32,
-            block_size as u32,
-            num_heads as u32,
-            num_kv_heads as u32,
-            head_dim as u32,
-            softmax_scale.to_bits(),
-            num_chunks as u32,
-        ],
-        Workgroups::OneD((batch_size * num_heads * num_chunks) as u32),
-    )?;
-    batch.record_shader(
-        shaders::PAGED_ATTN_DECODE_BATCH_PAGED_SPLITK_REDUCE,
-        &[attn_partials.handle(), attn_pre_gate.handle()],
-        &[num_heads as u32, head_dim as u32, num_chunks as u32],
-        Workgroups::OneD((batch_size * num_heads) as u32),
+    kiln_vulkan_kernel::resident::record_paged_attn_decode_batch_paged_splitk_resident(
+        batch,
+        q_rot.as_ref(),
+        k_pool,
+        v_pool,
+        block_table_buf,
+        seq_lens_buf,
+        &attn_partials,
+        attn_pre_gate.as_ref(),
+        batch_size,
+        num_heads,
+        num_kv_heads,
+        head_dim,
+        max_blocks_per_seq,
+        block_size,
+        softmax_scale,
+        num_chunks,
     )?;
     batch.record_shader(
         shaders::VK_MUL_SIGMOID_GATE_F32,
