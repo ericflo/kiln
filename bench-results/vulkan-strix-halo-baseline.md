@@ -538,6 +538,23 @@ every config"):
   | 4 | 75.0 ms | 53 |
   | 64 | 503.2 ms | 127 |
 
+  Current smoke after tightening the Vulkan decline gates used
+  `KILN_VK_MICROBENCH_BATCHES=1,8,32,64`, warmup=1, timed=3,
+  repeats=2. The selector env was intentionally scoped to resident paged
+  decode, but this binary ran the full decode sweep; only the resident paged
+  rows are recorded here. On RADV STRIX_HALO:
+
+  | case | batch | per token | rows/s |
+  |---|---:|---:|---:|
+  | real layer mix, paged KV + split-K paged attention | 1 | 57.0 ms | 18 |
+  | real layer mix, paged KV + split-K paged attention | 8 | 99.2 ms | 81 |
+  | real layer mix, paged KV + split-K paged attention | 32 | 246.8 ms | 130 |
+  | real layer mix, paged KV + split-K paged attention | 64 | 463.2 ms | 138 |
+  | synthetic all full-attention, paged KV + split-K paged attention | 1 | 49.9 ms | 20 |
+  | synthetic all full-attention, paged KV + split-K paged attention | 8 | 104.2 ms | 77 |
+  | synthetic all full-attention, paged KV + split-K paged attention | 32 | 271.0 ms | 118 |
+  | synthetic all full-attention, paged KV + split-K paged attention | 64 | 509.0 ms | 126 |
+
   These numbers also use the corrected gated-Q full-attention dataflow and the
   direct-output full-attention QKV+gate projection. A batch-64 split-K sweep
   after the correction measured 505.5 ms at 1 chunk,
