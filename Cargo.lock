@@ -2090,7 +2090,6 @@ name = "kiln-train"
 version = "0.2.19"
 dependencies = [
  "anyhow",
- "candle-core",
  "chrono",
  "console 0.16.3",
  "flate2",
