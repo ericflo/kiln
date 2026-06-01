@@ -4,10 +4,11 @@
 //! `VkTensor::from_f32_slice` / `from_f32_slice_as_bf16` /
 //! `parameter_from_f32_slice` constructors.
 //!
-//! The remaining candle reference is scoped to a single oracle
-//! (`candle_selected_log_probs_and_grpo`) where candle is used
-//! deliberately as the analytical-gradient reference for the GRPO
-//! backward. (#1082)
+//! Fully candle-free: the second GRPO gradient oracle
+//! (`fd_selected_log_probs_and_grpo`) cross-checks the Vulkan backward
+//! against a finite-difference numerical gradient of the exact same
+//! scalar GRPO loss the kernel optimizes, replacing the former candle
+//! autograd reference. (#1082)
 
 use anyhow::Result;
 use half::bf16;
@@ -185,8 +186,11 @@ fn cpu_selected_log_probs_and_grpo(
     (log_probs, loss_sum / num_active as f32, grad_hidden)
 }
 
+/// Scalar GRPO loss as a pure function of `hidden`, matching the exact
+/// loss the kernel optimizes (same formula as `cpu_selected_log_probs_and_grpo`).
+/// Used only as the inner function for finite-difference gradients.
 #[allow(clippy::too_many_arguments)]
-fn candle_selected_log_probs_and_grpo(
+fn grpo_scalar_loss(
     hidden: &[f32],
     weight: &[f32],
     labels: &[u32],
@@ -197,50 +201,110 @@ fn candle_selected_log_probs_and_grpo(
     num_active: usize,
     hidden_dim: usize,
     vocab: usize,
-) -> Result<(Vec<f32>, f32, Vec<f32>)> {
-    // Scoped candle reference: this oracle is deliberately implemented
-    // via candle's autograd for analytical-gradient parity. (#1082)
-    use candle_core::{D, DType, Device, Tensor, Var};
+) -> f32 {
+    let mut loss_sum = 0.0_f32;
+    for n in 0..num_active {
+        let mut logits = vec![0.0_f32; vocab];
+        for v in 0..vocab {
+            let mut s = 0.0_f32;
+            for d in 0..hidden_dim {
+                s += hidden[n * hidden_dim + d] * weight[v * hidden_dim + d];
+            }
+            logits[v] = s;
+        }
+        let mx = logits.iter().cloned().fold(f32::MIN, f32::max);
+        let mut z = 0.0_f32;
+        for v in 0..vocab {
+            z += (logits[v] - mx).exp();
+        }
+        let lse = mx + z.ln();
+        let label = labels[n] as usize;
+        let policy_logprob = logits[label] - lse;
 
-    let dev = Device::Cpu;
-    let hidden_var = Var::from_tensor(&Tensor::from_vec(
-        hidden.to_vec(),
-        (num_active, hidden_dim),
-        &dev,
-    )?)?;
-    let hidden_t = hidden_var.as_tensor();
-    let weight_t = Tensor::from_vec(weight.to_vec(), (vocab, hidden_dim), &dev)?;
-    let logits = hidden_t.matmul(&weight_t.transpose(0, 1)?)?;
-    let logits_f32 = logits.to_dtype(DType::F32)?;
-    let log_sum_exp = logits_f32.log_sum_exp(D::Minus1)?;
-    let labels_2d = Tensor::new(labels, &dev)?
-        .to_dtype(DType::U32)?
-        .unsqueeze(1)?;
-    let correct_logits = logits_f32.gather(&labels_2d, 1)?.squeeze(1)?;
-    let policy_log_probs = (correct_logits - log_sum_exp)?;
+        let log_ratio = policy_logprob - ref_log_probs[n];
+        let ratio = log_ratio.exp();
+        let lo = 1.0 - clip_epsilon;
+        let hi = 1.0 + clip_epsilon;
+        let clipped_ratio = ratio.clamp(lo, hi);
+        let surr1 = ratio * advantage;
+        let surr2 = clipped_ratio * advantage;
+        let surrogate = if surr1 <= surr2 { surr1 } else { surr2 };
+        loss_sum += -surrogate + kl_coeff * log_ratio;
+    }
+    loss_sum / num_active as f32
+}
 
-    let ref_t = Tensor::new(ref_log_probs, &dev)?.to_dtype(DType::F32)?;
-    let log_ratio = (&policy_log_probs - &ref_t)?;
-    let ratio = log_ratio.exp()?;
-    let ratio_shape = ratio.shape().clone();
-    let lo = Tensor::new(1.0_f32 - clip_epsilon, &dev)?.broadcast_as(&ratio_shape)?;
-    let hi = Tensor::new(1.0_f32 + clip_epsilon, &dev)?.broadcast_as(&ratio_shape)?;
-    let clipped_ratio = ratio.clamp(&lo, &hi)?;
-    let adv_t = Tensor::new(advantage, &dev)?.broadcast_as(&ratio_shape)?;
-    let surr1 = (&ratio * &adv_t)?;
-    let surr2 = (&clipped_ratio * &adv_t)?;
-    let surrogate = surr1.minimum(&surr2)?;
-    let neg_surrogate = surrogate.neg()?;
-    let kl_penalty = log_ratio.affine(kl_coeff as f64, 0.0)?;
-    let loss = (&neg_surrogate + &kl_penalty)?.mean_all()?;
-    let loss_val = loss.to_scalar::<f32>()?;
-    let grads = loss.backward()?;
-    let grad_hidden = grads
-        .get(hidden_t)
-        .expect("candle d hidden")
-        .flatten_all()?
-        .to_vec1::<f32>()?;
-    Ok((policy_log_probs.to_vec1::<f32>()?, loss_val, grad_hidden))
+/// Candle-free gradient oracle: returns the analytic forward log_probs +
+/// scalar loss, and a finite-difference (central-difference) numerical
+/// gradient of the scalar GRPO loss w.r.t. `hidden`. Replaces the former
+/// candle autograd reference. (#1082)
+#[allow(clippy::too_many_arguments)]
+fn fd_selected_log_probs_and_grpo(
+    hidden: &[f32],
+    weight: &[f32],
+    labels: &[u32],
+    ref_log_probs: &[f32],
+    advantage: f32,
+    clip_epsilon: f32,
+    kl_coeff: f32,
+    num_active: usize,
+    hidden_dim: usize,
+    vocab: usize,
+) -> (Vec<f32>, f32, Vec<f32>) {
+    // Forward log_probs + scalar loss via the analytic reference.
+    let (log_probs, loss_val, _) = cpu_selected_log_probs_and_grpo(
+        hidden,
+        weight,
+        labels,
+        ref_log_probs,
+        advantage,
+        clip_epsilon,
+        kl_coeff,
+        num_active,
+        hidden_dim,
+        vocab,
+    );
+
+    // Central finite difference: d loss / d hidden[i] ≈
+    //   (L(hidden + eps e_i) - L(hidden - eps e_i)) / (2 eps).
+    // eps ~ 1e-3 keeps truncation + f32 rounding both small for this
+    // well-scaled, smooth-around-the-clip-region loss.
+    let eps = 1e-3_f32;
+    let mut grad_hidden = vec![0.0_f32; hidden.len()];
+    let mut h = hidden.to_vec();
+    for i in 0..h.len() {
+        let orig = h[i];
+        h[i] = orig + eps;
+        let lp = grpo_scalar_loss(
+            &h,
+            weight,
+            labels,
+            ref_log_probs,
+            advantage,
+            clip_epsilon,
+            kl_coeff,
+            num_active,
+            hidden_dim,
+            vocab,
+        );
+        h[i] = orig - eps;
+        let lm = grpo_scalar_loss(
+            &h,
+            weight,
+            labels,
+            ref_log_probs,
+            advantage,
+            clip_epsilon,
+            kl_coeff,
+            num_active,
+            hidden_dim,
+            vocab,
+        );
+        h[i] = orig;
+        grad_hidden[i] = (lp - lm) / (2.0 * eps);
+    }
+
+    (log_probs, loss_val, grad_hidden)
 }
 
 #[test]
@@ -359,7 +423,11 @@ fn vk_selected_logprob_and_grpo_parity_small() -> Result<()> {
         .fold(0.0_f32, f32::max);
     assert!(mad < 1e-4, "grpo d_hidden mad {mad}");
 
-    let (candle_log_probs, candle_loss, candle_dh) = candle_selected_log_probs_and_grpo(
+    // Candle-free finite-difference gradient oracle. log_probs + loss are
+    // the exact analytic values (tolerance kept at 1e-4); the gradient is
+    // a central finite difference of the same scalar GRPO loss, so its
+    // tolerance is loosened to 2e-3 to absorb FD truncation/rounding.
+    let (fd_log_probs, fd_loss, fd_dh) = fd_selected_log_probs_and_grpo(
         &h_data,
         &w_data,
         &labels,
@@ -370,28 +438,28 @@ fn vk_selected_logprob_and_grpo_parity_small() -> Result<()> {
         num_active,
         hidden_dim,
         vocab,
-    )?;
-    let candle_logp_mad = selected
+    );
+    let fd_logp_mad = selected
         .iter()
-        .zip(candle_log_probs.iter())
+        .zip(fd_log_probs.iter())
         .map(|(g, e)| (g - e).abs())
         .fold(0.0_f32, f32::max);
     assert!(
-        candle_logp_mad < 1e-4,
-        "selected logprob vs candle mad {candle_logp_mad}"
+        fd_logp_mad < 1e-4,
+        "selected logprob vs analytic mad {fd_logp_mad}"
     );
     assert!(
-        (got_loss - candle_loss).abs() < 1e-4,
-        "grpo loss {got_loss} vs candle {candle_loss}"
+        (got_loss - fd_loss).abs() < 1e-4,
+        "grpo loss {got_loss} vs analytic {fd_loss}"
     );
-    let candle_mad = grad_h
+    let fd_mad = grad_h
         .iter()
-        .zip(candle_dh.iter())
+        .zip(fd_dh.iter())
         .map(|(g, e)| (g - e).abs())
         .fold(0.0_f32, f32::max);
     assert!(
-        candle_mad < 1e-4,
-        "grpo d_hidden vs candle mad {candle_mad}"
+        fd_mad < 2e-3,
+        "grpo d_hidden vs finite-difference mad {fd_mad}"
     );
     Ok(())
 }

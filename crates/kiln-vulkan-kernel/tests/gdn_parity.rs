@@ -1,17 +1,17 @@
 use anyhow::{Context, Result};
-use candle_core::{DType, Device, Tensor, shape::ShapeWithOneHole};
+use kiln_tensor::{D, DType, Shape, Tensor};
 use kiln_vulkan_kernel::{VulkanBuffer, VulkanDevice};
 
-// Local test-only candle ↔ bytes/buffer helpers. These mirror the
+// Local test-only kiln_tensor ↔ bytes/buffer helpers. These mirror the
 // behaviour of the historical `kernels::{extract_tensor_bytes,
 // create_tensor_from_data, upload_tensor_f32_buffer}` surface, which
 // went away with the `candle_bridge` module in #1082. The production
 // crate is now candle-free; these helpers stay scoped to this
-// integration test file so candle-core can remain a dev-dependency
-// only. (#1082)
+// integration test file. The CPU oracle is built on the in-house
+// `kiln_tensor` substrate (no candle-core dev-dependency). (#1082)
 
 fn extract_tensor_bytes(tensor: &Tensor) -> Result<(Vec<u8>, Vec<usize>)> {
-    let shape: Vec<usize> = tensor.shape().dims().to_vec();
+    let shape: Vec<usize> = tensor.shape().to_vec();
     let flat = tensor.flatten_all()?;
     let f32_data = flat.to_dtype(DType::F32)?.to_vec1::<f32>()?;
     Ok((bytemuck::cast_slice(&f32_data).to_vec(), shape))
@@ -19,8 +19,7 @@ fn extract_tensor_bytes(tensor: &Tensor) -> Result<(Vec<u8>, Vec<usize>)> {
 
 fn create_tensor_from_data(data: &[u8], shape: &[usize], dtype: DType) -> Result<Tensor> {
     let f32_data: &[f32] = bytemuck::cast_slice(data);
-    let tensor =
-        Tensor::from_vec(f32_data.to_vec(), f32_data.len(), &Device::Cpu)?.reshape(shape)?;
+    let tensor = Tensor::from_vec(f32_data.to_vec(), f32_data.len())?.reshape(shape)?;
     if dtype == DType::BF16 {
         Ok(tensor.to_dtype(DType::BF16)?)
     } else {
@@ -43,12 +42,12 @@ fn upload_tensor_f32_buffer(vk_device: &VulkanDevice, tensor: &Tensor) -> Result
     )?)
 }
 
-fn cpu_bf16(data: Vec<f32>, shape: impl ShapeWithOneHole) -> Result<Tensor> {
-    Ok(Tensor::from_vec(data, shape, &Device::Cpu)?.to_dtype(DType::BF16)?)
+fn cpu_bf16(data: Vec<f32>, shape: impl Into<Shape>) -> Result<Tensor> {
+    Ok(Tensor::from_vec(data, shape)?.to_dtype(DType::BF16)?)
 }
 
-fn cpu_f32(data: Vec<f32>, shape: impl ShapeWithOneHole) -> Result<Tensor> {
-    Ok(Tensor::from_vec(data, shape, &Device::Cpu)?)
+fn cpu_f32(data: Vec<f32>, shape: impl Into<Shape>) -> Result<Tensor> {
+    Ok(Tensor::from_vec(data, shape)?)
 }
 
 fn tensor_data_f32(t: &Tensor) -> Result<Vec<f32>> {
@@ -424,7 +423,7 @@ fn linear_decode_matches_cpu_reference() -> Result<()> {
     let got = create_tensor_from_data(
         &got_bytes,
         &[1, 1, out_dim],
-        candle_core::DType::F32,
+        DType::F32,
     )?;
     assert_close("linear decode", &got, &x.broadcast_matmul(&weight)?, 1e-5)?;
     Ok(())
@@ -465,7 +464,7 @@ fn linear_decode_batched_matches_cpu_reference() -> Result<()> {
     let got = create_tensor_from_data(
         &got_bytes,
         &[batch, 1, out_dim],
-        candle_core::DType::F32,
+        DType::F32,
     )?;
     assert_close(
         "linear decode batched",
@@ -572,12 +571,12 @@ fn causal_conv1d_prefill_matches_stateful_cpu_reference() -> Result<()> {
         let got_out = create_tensor_from_data(
             &got_out_bytes,
             &[batch, channels, seq_len],
-            candle_core::DType::F32,
+            DType::F32,
         )?;
         let got_state = create_tensor_from_data(
             &got_state_bytes,
             &[batch, channels, kernel_size - 1],
-            candle_core::DType::F32,
+            DType::F32,
         )?;
 
         let (exp_out, exp_state) = causal_conv1d_reference(
@@ -622,12 +621,12 @@ fn causal_conv1d_prefill_matches_stateful_cpu_reference() -> Result<()> {
         let got_cached_out = create_tensor_from_data(
             &got_cached_out_bytes,
             &[batch, channels, seq_len],
-            candle_core::DType::F32,
+            DType::F32,
         )?;
         let got_cached_state = create_tensor_from_data(
             &got_cached_state_bytes,
             &[batch, channels, kernel_size - 1],
-            candle_core::DType::F32,
+            DType::F32,
         )?;
         assert_close(
             &format!("causal conv1d cached prefill out seq_len={seq_len}"),
@@ -1043,11 +1042,11 @@ fn gdn_recurrent_qk_norm_native_head_last_matches_split_path() -> Result<()> {
     let q_sq = q
         .to_dtype(DType::F32)?
         .sqr()?
-        .sum_keepdim(candle_core::D::Minus1)?;
+        .sum_keepdim(D::Minus1)?;
     let k_sq = k
         .to_dtype(DType::F32)?
         .sqr()?
-        .sum_keepdim(candle_core::D::Minus1)?;
+        .sum_keepdim(D::Minus1)?;
     let q_norm = (q
         .to_dtype(DType::F32)?
         .broadcast_div(&(q_sq + 1e-6)?.sqrt()?)?
@@ -1968,22 +1967,22 @@ fn gdn_chunk_prep_and_scan_match_cpu_reference() -> Result<()> {
     let decay_shape_p = [b_p, h_p, c_p];
     let p_last_shape_p = [b_p, h_p];
     let a_strict = create_tensor_from_data(
-        &a_strict_bytes, &cc_shape_p, candle_core::DType::BF16,
+        &a_strict_bytes, &cc_shape_p, DType::BF16,
     )?;
     let b_mask = create_tensor_from_data(
-        &b_mask_bytes, &cc_shape_p, candle_core::DType::BF16,
+        &b_mask_bytes, &cc_shape_p, DType::BF16,
     )?;
     let v_prime = create_tensor_from_data(
-        &v_prime_bytes, &cv_shape_p, candle_core::DType::BF16,
+        &v_prime_bytes, &cv_shape_p, DType::BF16,
     )?;
     let q_s_scaled = create_tensor_from_data(
-        &q_s_scaled_bytes, &cv_shape_p, candle_core::DType::BF16,
+        &q_s_scaled_bytes, &cv_shape_p, DType::BF16,
     )?;
     let decay_last_col = create_tensor_from_data(
-        &decay_last_col_bytes, &decay_shape_p, candle_core::DType::BF16,
+        &decay_last_col_bytes, &decay_shape_p, DType::BF16,
     )?;
     let p_last = create_tensor_from_data(
-        &p_last_bytes, &p_last_shape_p, candle_core::DType::BF16,
+        &p_last_bytes, &p_last_shape_p, DType::BF16,
     )?;
 
     let gd = tensor_data_f32(&g)?;
@@ -2060,12 +2059,12 @@ fn gdn_chunk_prep_and_scan_match_cpu_reference() -> Result<()> {
     let got_out = create_tensor_from_data(
         &got_out_bytes_a,
         &[vp_b, vp_h, vp_c, vp_dv],
-        candle_core::DType::BF16,
+        DType::BF16,
     )?;
     let got_w_weighted = create_tensor_from_data(
         &got_w_weighted_bytes,
         &[vp_b, vp_h, vp_c, vp_dv],
-        candle_core::DType::BF16,
+        DType::BF16,
     )?;
 
     let ad = tensor_data_f32(&a_strict)?;
@@ -2190,22 +2189,22 @@ fn gdn_full_chunk_forward_matches_split_vulkan_path() -> Result<()> {
     let decay_shape_p = [b_p, h_p, c_p];
     let p_last_shape_p = [b_p, h_p];
     let a_strict = create_tensor_from_data(
-        &a_strict_bytes, &cc_shape_p, candle_core::DType::BF16,
+        &a_strict_bytes, &cc_shape_p, DType::BF16,
     )?;
     let b_mask = create_tensor_from_data(
-        &b_mask_bytes, &cc_shape_p, candle_core::DType::BF16,
+        &b_mask_bytes, &cc_shape_p, DType::BF16,
     )?;
     let v_prime = create_tensor_from_data(
-        &v_prime_bytes, &cv_shape_p, candle_core::DType::BF16,
+        &v_prime_bytes, &cv_shape_p, DType::BF16,
     )?;
     let q_s_scaled = create_tensor_from_data(
-        &q_s_scaled_bytes, &cv_shape_p, candle_core::DType::BF16,
+        &q_s_scaled_bytes, &cv_shape_p, DType::BF16,
     )?;
     let decay_last_col = create_tensor_from_data(
-        &decay_last_col_bytes, &decay_shape_p, candle_core::DType::BF16,
+        &decay_last_col_bytes, &decay_shape_p, DType::BF16,
     )?;
     let p_last = create_tensor_from_data(
-        &p_last_bytes, &p_last_shape_p, candle_core::DType::BF16,
+        &p_last_bytes, &p_last_shape_p, DType::BF16,
     )?;
     let a_strict_data_b = extract_tensor_bytes(&a_strict)?.0;
     let b_mask_data_b = extract_tensor_bytes(&b_mask)?.0;
@@ -2232,12 +2231,12 @@ fn gdn_full_chunk_forward_matches_split_vulkan_path() -> Result<()> {
     let expected_out = create_tensor_from_data(
         &expected_out_bytes,
         &[vp_b2, vp_h2, vp_c2, vp_dv2],
-        candle_core::DType::BF16,
+        DType::BF16,
     )?;
     let w_weighted = create_tensor_from_data(
         &w_weighted_bytes,
         &[vp_b2, vp_h2, vp_c2, vp_dv2],
-        candle_core::DType::BF16,
+        DType::BF16,
     )?;
 
     let g_data_b = extract_tensor_bytes(&g)?.0;
@@ -2260,12 +2259,12 @@ fn gdn_full_chunk_forward_matches_split_vulkan_path() -> Result<()> {
     let got_out = create_tensor_from_data(
         &got_out_bytes,
         &[batch, heads, chunk, dv],
-        candle_core::DType::BF16,
+        DType::BF16,
     )?;
     let got_state = create_tensor_from_data(
         &got_state_bytes,
         &state_dims,
-        candle_core::DType::BF16,
+        DType::BF16,
     )?;
 
     let p_last = tensor_data_f32(&p_last)?;
@@ -2320,7 +2319,7 @@ fn cpu_sdpa_reference(
                 }
             }
         }
-        let mask = Tensor::from_vec(mask, (t, t), &Device::Cpu)?
+        let mask = Tensor::from_vec(mask, (t, t))?
             .reshape((1, 1, t, t))?
             .broadcast_as((b, h, t, t))?;
         scores.broadcast_add(&mask)?

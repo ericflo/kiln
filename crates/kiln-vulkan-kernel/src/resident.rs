@@ -2781,56 +2781,38 @@ mod tests {
     use crate::kernels::{
         dispatch_linear_decode_cached_bytes, dispatch_qwen_rmsnorm_forward_bytes,
     };
-    use candle_core::{DType, Device, Tensor};
     use half::bf16;
     use std::sync::Arc;
 
-    // Test-only candle ↔ bytes/buffer helpers. These mirror the legacy
-    // `kernels::{extract_tensor_bytes, create_tensor_from_data,
-    // upload_tensor_f32_buffer, upload_tensor_bf16_packed_buffer}`
-    // surface that this mod historically reached through the deleted
-    // `crate::candle_bridge` module. The production code paths no longer
-    // need candle, so these helpers stay scoped to the test module and
-    // candle-core stays a dev-dependency only. (#1082)
+    // Test-only byte/buffer helpers. These replaced the legacy candle-based
+    // versions as part of #1082 candle removal. Production code paths are
+    // already candle-free; these helpers operate on plain Vec<f32>/Vec<bf16>
+    // and raw byte slices — no candle_core dependency needed.
 
-    fn extract_tensor_bytes(tensor: &Tensor) -> anyhow::Result<(Vec<u8>, Vec<usize>)> {
-        let shape: Vec<usize> = tensor.shape().dims().to_vec();
-        let flat = tensor.flatten_all()?;
-        let f32_data = flat.to_dtype(DType::F32)?.to_vec1::<f32>()?;
-        Ok((bytemuck::cast_slice(&f32_data).to_vec(), shape))
+    /// Convert a &[f32] to a raw byte Vec (little-endian f32 words).
+    fn f32_to_bytes(data: &[f32]) -> Vec<u8> {
+        bytemuck::cast_slice(data).to_vec()
     }
 
-    fn create_tensor_from_data(
-        data: &[u8],
-        shape: &[usize],
-        dtype: DType,
-    ) -> anyhow::Result<Tensor> {
-        let f32_data: &[f32] = bytemuck::cast_slice(data);
-        let tensor = Tensor::from_vec(f32_data.to_vec(), f32_data.len(), &Device::Cpu)?
-            .reshape(shape)?;
-        if dtype == DType::BF16 {
-            Ok(tensor.to_dtype(DType::BF16)?)
-        } else {
-            Ok(tensor)
-        }
+    /// Parse raw f32 bytes back to a Vec<f32>.
+    fn bytes_to_f32(data: &[u8]) -> Vec<f32> {
+        data.chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect()
     }
 
-    fn upload_tensor_f32_buffer(
+    fn upload_f32_slice(
         vk_device: &VulkanDevice,
-        tensor: &Tensor,
+        data: &[f32],
     ) -> anyhow::Result<VulkanBuffer> {
-        let tensor_f32;
-        let tensor = if tensor.dtype() == DType::F32 {
-            tensor
-        } else {
-            tensor_f32 = tensor.to_dtype(DType::F32)?;
-            &tensor_f32
-        };
-        let (data, _) = extract_tensor_bytes(tensor)?;
-        Ok(crate::kernels::upload_f32_buffer_from_slice(
-            vk_device,
-            bytemuck::cast_slice(&data),
-        )?)
+        Ok(crate::kernels::upload_f32_buffer_from_slice(vk_device, data)?)
+    }
+
+    fn upload_bf16_slice(
+        vk_device: &VulkanDevice,
+        data: &[bf16],
+    ) -> anyhow::Result<VulkanBuffer> {
+        Ok(crate::kernels::upload_bf16_packed_buffer_from_slice(vk_device, data)?)
     }
 
     fn upload_u32_buffer(vk_device: &VulkanDevice, data: &[u32]) -> anyhow::Result<VulkanBuffer> {
@@ -2851,22 +2833,6 @@ mod tests {
         Ok(buf)
     }
 
-    fn upload_tensor_bf16_packed_buffer(
-        vk_device: &VulkanDevice,
-        tensor: &Tensor,
-    ) -> anyhow::Result<VulkanBuffer> {
-        anyhow::ensure!(
-            tensor.dtype() == DType::BF16,
-            "packed bf16 upload requires BF16 tensor, got {:?}",
-            tensor.dtype()
-        );
-        let flat = tensor.flatten_all()?;
-        let bf16_data = flat.to_vec1::<bf16>()?;
-        Ok(crate::kernels::upload_bf16_packed_buffer_from_slice(
-            vk_device, &bf16_data,
-        )?)
-    }
-
     fn try_device() -> Option<Arc<VulkanDevice>> {
         VulkanDevice::new().ok().map(Arc::new)
     }
@@ -2884,25 +2850,22 @@ mod tests {
         bytemuck::cast_slice::<u8, f32>(&bytes).to_vec()
     }
 
-    fn make_x_f32(batch: usize, hidden: usize) -> Tensor {
+    fn make_x_f32(batch: usize, hidden: usize) -> Vec<f32> {
         let n = batch * hidden;
-        let data: Vec<f32> = (0..n)
+        (0..n)
             .map(|i| ((i % 17) as f32 - 8.0) * 0.025)
-            .collect();
-        Tensor::from_vec(data, (batch, 1, hidden), &Device::Cpu).unwrap()
+            .collect()
     }
 
-    fn make_bf16_weight(rows: usize, cols: usize) -> Tensor {
+    fn make_bf16_weight(rows: usize, cols: usize) -> Vec<bf16> {
         let n = rows * cols;
-        let data: Vec<bf16> = (0..n)
+        (0..n)
             .map(|i| bf16::from_f32(((i % 31) as f32 - 15.0) * 0.01))
-            .collect();
-        Tensor::from_vec(data, (rows, cols), &Device::Cpu).unwrap()
+            .collect()
     }
 
-    fn upload_x(dev: &VulkanDevice, x: &Tensor) -> VulkanBuffer {
-        // Same bytes the legacy dispatcher would extract.
-        let bytes = extract_tensor_bytes(x).unwrap().0;
+    fn upload_x(dev: &VulkanDevice, x: &[f32]) -> VulkanBuffer {
+        let bytes = f32_to_bytes(x);
         let buf = VulkanBuffer::create_device_local(
             dev.device(),
             dev.device_local_mem_type(),
@@ -2934,22 +2897,14 @@ mod tests {
         let out_dim = 64;
         let x = make_x_f32(batch, hidden);
         let w = make_bf16_weight(hidden, out_dim);
-        let w_buf = upload_tensor_bf16_packed_buffer(&dev, &w).unwrap();
+        let w_buf = upload_bf16_slice(&dev, &w).unwrap();
 
-        let x_data = extract_tensor_bytes(&x).unwrap().0;
+        let x_bytes = f32_to_bytes(&x);
         let baseline_bytes = dispatch_linear_decode_cached_bytes(
-            &dev, &x_data, &w_buf, batch, hidden, out_dim, true,
+            &dev, &x_bytes, &w_buf, batch, hidden, out_dim, true,
         )
         .unwrap();
-        let baseline = create_tensor_from_data(
-            &baseline_bytes, &[batch, 1, out_dim], DType::F32,
-        )
-        .unwrap();
-        let baseline = baseline
-            .flatten_all()
-            .unwrap()
-            .to_vec1::<f32>()
-            .unwrap();
+        let baseline = bytes_to_f32(&baseline_bytes);
 
         let x_buf = upload_x(&dev, &x);
         let out_buf = alloc_out(&dev, (batch * out_dim * 4) as u64);
@@ -2973,22 +2928,14 @@ mod tests {
         let out_dim = 80;
         let x = make_x_f32(batch, hidden);
         let w = make_bf16_weight(hidden, out_dim);
-        let w_buf = upload_tensor_bf16_packed_buffer(&dev, &w).unwrap();
+        let w_buf = upload_bf16_slice(&dev, &w).unwrap();
 
-        let x_data = extract_tensor_bytes(&x).unwrap().0;
+        let x_bytes = f32_to_bytes(&x);
         let baseline_bytes = dispatch_linear_decode_cached_bytes(
-            &dev, &x_data, &w_buf, batch, hidden, out_dim, true,
+            &dev, &x_bytes, &w_buf, batch, hidden, out_dim, true,
         )
         .unwrap();
-        let baseline = create_tensor_from_data(
-            &baseline_bytes, &[batch, 1, out_dim], DType::F32,
-        )
-        .unwrap();
-        let baseline = baseline
-            .flatten_all()
-            .unwrap()
-            .to_vec1::<f32>()
-            .unwrap();
+        let baseline = bytes_to_f32(&baseline_bytes);
 
         let x_buf = upload_x(&dev, &x);
         let out_buf = alloc_out(&dev, (batch * out_dim * 4) as u64);
@@ -3011,22 +2958,14 @@ mod tests {
         let out_dim = 37;
         let x = make_x_f32(batch, hidden);
         let w = make_bf16_weight(hidden, out_dim);
-        let w_buf = upload_tensor_bf16_packed_buffer(&dev, &w).unwrap();
+        let w_buf = upload_bf16_slice(&dev, &w).unwrap();
 
-        let x_data = extract_tensor_bytes(&x).unwrap().0;
+        let x_bytes = f32_to_bytes(&x);
         let baseline_bytes = dispatch_linear_decode_cached_bytes(
-            &dev, &x_data, &w_buf, batch, hidden, out_dim, true,
+            &dev, &x_bytes, &w_buf, batch, hidden, out_dim, true,
         )
         .unwrap();
-        let baseline = create_tensor_from_data(
-            &baseline_bytes, &[batch, 1, out_dim], DType::F32,
-        )
-        .unwrap();
-        let baseline = baseline
-            .flatten_all()
-            .unwrap()
-            .to_vec1::<f32>()
-            .unwrap();
+        let baseline = bytes_to_f32(&baseline_bytes);
 
         let x_buf = upload_x(&dev, &x);
         let out_buf = alloc_out(&dev, (batch * out_dim * 4) as u64);
@@ -3049,30 +2988,16 @@ mod tests {
         let hidden = 128;
         let out_dim = 64;
         let x = make_x_f32(batch, hidden);
-        let w_f32 = Tensor::from_vec(
-            (0..hidden * out_dim)
-                .map(|i| ((i % 19) as f32 - 9.0) * 0.02)
-                .collect::<Vec<_>>(),
-            (hidden, out_dim),
-            &Device::Cpu,
-        )
-        .unwrap();
-        let w_buf = upload_tensor_f32_buffer(&dev, &w_f32).unwrap();
+        let w_f32: Vec<f32> = (0..hidden * out_dim)
+            .map(|i| ((i % 19) as f32 - 9.0) * 0.02)
+            .collect();
+        let w_buf = upload_f32_slice(&dev, &w_f32).unwrap();
 
-        let x_bytes = extract_tensor_bytes(&x).unwrap().0;
+        let x_bytes = f32_to_bytes(&x);
         let baseline_bytes =
             dispatch_linear_decode_cached_bytes(&dev, &x_bytes, &w_buf, batch, hidden, out_dim, false)
                 .unwrap();
-        let baseline = create_tensor_from_data(
-            &baseline_bytes,
-            &[batch, 1, out_dim],
-            DType::F32,
-        )
-        .unwrap()
-        .flatten_all()
-        .unwrap()
-        .to_vec1::<f32>()
-        .unwrap();
+        let baseline = bytes_to_f32(&baseline_bytes);
 
         let x_buf = upload_x(&dev, &x);
         let out_buf = alloc_out(&dev, (batch * out_dim * 4) as u64);
@@ -3099,11 +3024,11 @@ mod tests {
         let gate = make_bf16_weight(hidden, intermediate);
         let up = make_bf16_weight(hidden, intermediate);
         let down = make_bf16_weight(intermediate, out_dim);
-        let g_buf = upload_tensor_bf16_packed_buffer(&dev, &gate).unwrap();
-        let u_buf = upload_tensor_bf16_packed_buffer(&dev, &up).unwrap();
-        let d_buf = upload_tensor_bf16_packed_buffer(&dev, &down).unwrap();
+        let g_buf = upload_bf16_slice(&dev, &gate).unwrap();
+        let u_buf = upload_bf16_slice(&dev, &up).unwrap();
+        let d_buf = upload_bf16_slice(&dev, &down).unwrap();
 
-        let x_bytes = extract_tensor_bytes(&x).unwrap().0;
+        let x_bytes = f32_to_bytes(&x);
         let baseline_bytes = dispatch_mlp_decode_cached_bf16_weights_bytes(
             &dev,
             &x_bytes,
@@ -3158,11 +3083,11 @@ mod tests {
         let gate = make_bf16_weight(hidden, intermediate);
         let up = make_bf16_weight(hidden, intermediate);
         let down = make_bf16_weight(intermediate, out_dim);
-        let g_buf = upload_tensor_bf16_packed_buffer(&dev, &gate).unwrap();
-        let u_buf = upload_tensor_bf16_packed_buffer(&dev, &up).unwrap();
-        let d_buf = upload_tensor_bf16_packed_buffer(&dev, &down).unwrap();
+        let g_buf = upload_bf16_slice(&dev, &gate).unwrap();
+        let u_buf = upload_bf16_slice(&dev, &up).unwrap();
+        let d_buf = upload_bf16_slice(&dev, &down).unwrap();
 
-        let x_bytes = extract_tensor_bytes(&x).unwrap().0;
+        let x_bytes = f32_to_bytes(&x);
         let baseline_bytes = dispatch_mlp_decode_cached_bf16_weights_bytes(
             &dev,
             &x_bytes,
@@ -3216,11 +3141,11 @@ mod tests {
         let gate = make_bf16_weight(hidden, intermediate);
         let up = make_bf16_weight(hidden, intermediate);
         let down = make_bf16_weight(intermediate, out_dim);
-        let g_buf = upload_tensor_bf16_packed_buffer(&dev, &gate).unwrap();
-        let u_buf = upload_tensor_bf16_packed_buffer(&dev, &up).unwrap();
-        let d_buf = upload_tensor_bf16_packed_buffer(&dev, &down).unwrap();
+        let g_buf = upload_bf16_slice(&dev, &gate).unwrap();
+        let u_buf = upload_bf16_slice(&dev, &up).unwrap();
+        let d_buf = upload_bf16_slice(&dev, &down).unwrap();
 
-        let x_bytes = extract_tensor_bytes(&x).unwrap().0;
+        let x_bytes = f32_to_bytes(&x);
         let baseline_bytes = dispatch_mlp_decode_cached_bf16_weights_bytes(
             &dev,
             &x_bytes,
@@ -3275,20 +3200,15 @@ mod tests {
         let q_w = make_bf16_weight(hidden, q_dim);
         let k_w = make_bf16_weight(hidden, k_dim);
         let v_w = make_bf16_weight(hidden, v_dim);
-        let q_buf = upload_tensor_bf16_packed_buffer(&dev, &q_w).unwrap();
-        let k_buf = upload_tensor_bf16_packed_buffer(&dev, &k_w).unwrap();
-        let v_buf = upload_tensor_bf16_packed_buffer(&dev, &v_w).unwrap();
+        let q_buf = upload_bf16_slice(&dev, &q_w).unwrap();
+        let k_buf = upload_bf16_slice(&dev, &k_w).unwrap();
+        let v_buf = upload_bf16_slice(&dev, &v_w).unwrap();
 
-        let x_bytes = extract_tensor_bytes(&x).unwrap().0;
+        let x_bytes = f32_to_bytes(&x);
         let (q_bytes, k_bytes, v_bytes) = dispatch_full_attn_qkv_decode_cached_bf16_weights_bytes(
             &dev, &x_bytes, &q_buf, &k_buf, &v_buf, hidden, q_dim, k_dim, v_dim,
         )
         .unwrap();
-        let bytes_to_f32 = |b: &[u8]| -> Vec<f32> {
-            b.chunks_exact(4)
-                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-                .collect()
-        };
         let mut expected: Vec<f32> = bytes_to_f32(&q_bytes);
         expected.extend(bytes_to_f32(&k_bytes));
         expected.extend(bytes_to_f32(&v_bytes));
@@ -3318,18 +3238,18 @@ mod tests {
         let q_w = make_bf16_weight(hidden, q_dim);
         let k_w = make_bf16_weight(hidden, k_dim);
         let v_w = make_bf16_weight(hidden, v_dim);
-        let q_buf = upload_tensor_bf16_packed_buffer(&dev, &q_w).unwrap();
-        let k_buf = upload_tensor_bf16_packed_buffer(&dev, &k_w).unwrap();
-        let v_buf = upload_tensor_bf16_packed_buffer(&dev, &v_w).unwrap();
+        let q_buf = upload_bf16_slice(&dev, &q_w).unwrap();
+        let k_buf = upload_bf16_slice(&dev, &k_w).unwrap();
+        let v_buf = upload_bf16_slice(&dev, &v_w).unwrap();
 
-        let x_bytes = extract_tensor_bytes(&x).unwrap().0;
+        let x_bytes = f32_to_bytes(&x);
         let (q_bytes, k_bytes, v_bytes) = dispatch_full_attn_qkv_decode_cached_batched_bf16_weights_bytes(
             &dev, &x_bytes, &q_buf, &k_buf, &v_buf, batch, hidden, q_dim, k_dim, v_dim,
         )
         .unwrap();
-        let q_v: Vec<f32> = q_bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
-        let k_v: Vec<f32> = k_bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
-        let v_v: Vec<f32> = v_bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+        let q_v: Vec<f32> = bytes_to_f32(&q_bytes);
+        let k_v: Vec<f32> = bytes_to_f32(&k_bytes);
+        let v_v: Vec<f32> = bytes_to_f32(&v_bytes);
         let total_out = q_dim + k_dim + v_dim;
         let mut expected: Vec<f32> = Vec::with_capacity(batch * total_out);
         for r in 0..batch {
@@ -3366,26 +3286,20 @@ mod tests {
         let z_w = make_bf16_weight(hidden, z_dim);
         let a_w = make_bf16_weight(hidden, a_dim);
         let b_w = make_bf16_weight(hidden, b_dim);
-        let qkv_buf = upload_tensor_bf16_packed_buffer(&dev, &qkv_w).unwrap();
-        let z_buf = upload_tensor_bf16_packed_buffer(&dev, &z_w).unwrap();
-        let a_buf = upload_tensor_bf16_packed_buffer(&dev, &a_w).unwrap();
-        let b_buf = upload_tensor_bf16_packed_buffer(&dev, &b_w).unwrap();
+        let qkv_buf = upload_bf16_slice(&dev, &qkv_w).unwrap();
+        let z_buf = upload_bf16_slice(&dev, &z_w).unwrap();
+        let a_buf = upload_bf16_slice(&dev, &a_w).unwrap();
+        let b_buf = upload_bf16_slice(&dev, &b_w).unwrap();
 
-        let x_bytes = extract_tensor_bytes(&x).unwrap().0;
+        let x_bytes = f32_to_bytes(&x);
         let (qkv_b, z_b, a_b, b_b) = dispatch_gdn_in_proj_decode_cached_bf16_weights_bytes(
             &dev, &x_bytes, 1, &qkv_buf, &z_buf, &a_buf, &b_buf, hidden, qkv_dim, z_dim, a_dim, b_dim,
         )
         .unwrap();
-        let to_f32 = |bytes: &[u8]| -> Vec<f32> {
-            bytes
-                .chunks_exact(4)
-                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-                .collect()
-        };
-        let mut expected: Vec<f32> = to_f32(&qkv_b);
-        expected.extend(to_f32(&z_b));
-        expected.extend(to_f32(&a_b));
-        expected.extend(to_f32(&b_b));
+        let mut expected: Vec<f32> = bytes_to_f32(&qkv_b);
+        expected.extend(bytes_to_f32(&z_b));
+        expected.extend(bytes_to_f32(&a_b));
+        expected.extend(bytes_to_f32(&b_b));
 
         let x_buf = upload_x(&dev, &x);
         let out_buf = alloc_out(&dev, (total_out * 4) as u64);
@@ -3416,27 +3330,21 @@ mod tests {
         let z_w = make_bf16_weight(hidden, z_dim);
         let a_w = make_bf16_weight(hidden, a_dim);
         let b_w = make_bf16_weight(hidden, b_dim);
-        let qkv_buf = upload_tensor_bf16_packed_buffer(&dev, &qkv_w).unwrap();
-        let z_buf = upload_tensor_bf16_packed_buffer(&dev, &z_w).unwrap();
-        let a_buf = upload_tensor_bf16_packed_buffer(&dev, &a_w).unwrap();
-        let b_buf = upload_tensor_bf16_packed_buffer(&dev, &b_w).unwrap();
+        let qkv_buf = upload_bf16_slice(&dev, &qkv_w).unwrap();
+        let z_buf = upload_bf16_slice(&dev, &z_w).unwrap();
+        let a_buf = upload_bf16_slice(&dev, &a_w).unwrap();
+        let b_buf = upload_bf16_slice(&dev, &b_w).unwrap();
 
-        let x_bytes = extract_tensor_bytes(&x).unwrap().0;
+        let x_bytes = f32_to_bytes(&x);
         let (qkv_b, z_b, a_b, b_b) = dispatch_gdn_in_proj_decode_cached_bf16_weights_bytes(
             &dev, &x_bytes, batch, &qkv_buf, &z_buf, &a_buf, &b_buf, hidden, qkv_dim, z_dim,
             a_dim, b_dim,
         )
         .unwrap();
-        let to_f32 = |bytes: &[u8]| -> Vec<f32> {
-            bytes
-                .chunks_exact(4)
-                .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-                .collect()
-        };
-        let qkv_v = to_f32(&qkv_b);
-        let z_v = to_f32(&z_b);
-        let a_v = to_f32(&a_b);
-        let b_v = to_f32(&b_b);
+        let qkv_v = bytes_to_f32(&qkv_b);
+        let z_v = bytes_to_f32(&z_b);
+        let a_v = bytes_to_f32(&a_b);
+        let b_v = bytes_to_f32(&b_b);
         let mut expected: Vec<f32> = Vec::with_capacity(batch * total_out);
         expected.extend(qkv_v);
         expected.extend(z_v);
@@ -3468,35 +3376,15 @@ mod tests {
         let nv = 8;
         let t = 1;
         let elem_count = batch * t * nv;
-        let a = Tensor::from_vec(
-            (0..elem_count).map(|i| (i as f32 * 0.013) - 0.5).collect::<Vec<_>>(),
-            (batch, t, nv),
-            &Device::Cpu,
-        )
-        .unwrap();
-        let b = Tensor::from_vec(
-            (0..elem_count).map(|i| (i as f32 * 0.017) - 0.7).collect::<Vec<_>>(),
-            (batch, t, nv),
-            &Device::Cpu,
-        )
-        .unwrap();
-        let a_log = Tensor::from_vec(
-            (0..nv).map(|i| (i as f32 + 1.0).ln() * -0.1).collect::<Vec<_>>(),
-            (nv,),
-            &Device::Cpu,
-        )
-        .unwrap();
-        let dt_bias = Tensor::from_vec(
-            (0..nv).map(|i| (i as f32) * 0.011).collect::<Vec<_>>(),
-            (nv,),
-            &Device::Cpu,
-        )
-        .unwrap();
-        let a_log_buf = upload_tensor_f32_buffer(&dev, &a_log).unwrap();
-        let dt_bias_buf = upload_tensor_f32_buffer(&dev, &dt_bias).unwrap();
+        let a: Vec<f32> = (0..elem_count).map(|i| (i as f32 * 0.013) - 0.5).collect();
+        let b: Vec<f32> = (0..elem_count).map(|i| (i as f32 * 0.017) - 0.7).collect();
+        let a_log: Vec<f32> = (0..nv).map(|i| (i as f32 + 1.0).ln() * -0.1).collect();
+        let dt_bias: Vec<f32> = (0..nv).map(|i| (i as f32) * 0.011).collect();
+        let a_log_buf = upload_f32_slice(&dev, &a_log).unwrap();
+        let dt_bias_buf = upload_f32_slice(&dev, &dt_bias).unwrap();
 
-        let a_bytes = extract_tensor_bytes(&a).unwrap().0;
-        let b_bytes = extract_tensor_bytes(&b).unwrap().0;
+        let a_bytes = f32_to_bytes(&a);
+        let b_bytes = f32_to_bytes(&b);
         let (beta_bytes, g_bytes) = dispatch_gdn_gates_cached_bytes(
             &dev,
             &a_bytes,
@@ -3507,17 +3395,11 @@ mod tests {
             &[batch, t, nv],
         )
         .unwrap();
-        let beta_exp: Vec<f32> = beta_bytes
-            .chunks_exact(4)
-            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-            .collect();
-        let g_exp: Vec<f32> = g_bytes
-            .chunks_exact(4)
-            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-            .collect();
+        let beta_exp = bytes_to_f32(&beta_bytes);
+        let g_exp = bytes_to_f32(&g_bytes);
 
-        let a_buf_d = upload_tensor_f32_buffer(&dev, &a).unwrap();
-        let b_buf_d = upload_tensor_f32_buffer(&dev, &b).unwrap();
+        let a_buf_d = upload_f32_slice(&dev, &a).unwrap();
+        let b_buf_d = upload_f32_slice(&dev, &b).unwrap();
         let beta_buf = alloc_out(&dev, (elem_count * 4) as u64);
         let g_buf = alloc_out(&dev, (elem_count * 4) as u64);
         dispatch_gdn_gates_cached_resident(
@@ -3549,28 +3431,13 @@ mod tests {
         let rows = 6;
         let hidden = 64;
         let eps = 1e-6f32;
-        let x = Tensor::from_vec(
-            (0..rows * hidden).map(|i| (i as f32 * 0.013) - 0.5).collect::<Vec<_>>(),
-            (rows, hidden),
-            &Device::Cpu,
-        )
-        .unwrap();
-        let z = Tensor::from_vec(
-            (0..rows * hidden).map(|i| (i as f32 * 0.017) - 0.3).collect::<Vec<_>>(),
-            (rows, hidden),
-            &Device::Cpu,
-        )
-        .unwrap();
-        let weight = Tensor::from_vec(
-            (0..hidden).map(|i| (i as f32) * 0.02 + 1.0).collect::<Vec<_>>(),
-            (hidden,),
-            &Device::Cpu,
-        )
-        .unwrap();
-        let weight_buf = upload_tensor_f32_buffer(&dev, &weight).unwrap();
+        let x: Vec<f32> = (0..rows * hidden).map(|i| (i as f32 * 0.013) - 0.5).collect();
+        let z: Vec<f32> = (0..rows * hidden).map(|i| (i as f32 * 0.017) - 0.3).collect();
+        let weight: Vec<f32> = (0..hidden).map(|i| (i as f32) * 0.02 + 1.0).collect();
+        let weight_buf = upload_f32_slice(&dev, &weight).unwrap();
 
-        let x_bytes = extract_tensor_bytes(&x).unwrap().0;
-        let z_bytes = extract_tensor_bytes(&z).unwrap().0;
+        let x_bytes = f32_to_bytes(&x);
+        let z_bytes = f32_to_bytes(&z);
         let baseline_bytes = dispatch_gdn_gated_rms_norm_cached_bytes(
             &dev,
             &x_bytes,
@@ -3581,13 +3448,10 @@ mod tests {
             &[rows, hidden],
         )
         .unwrap();
-        let expected: Vec<f32> = baseline_bytes
-            .chunks_exact(4)
-            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-            .collect();
+        let expected = bytes_to_f32(&baseline_bytes);
 
-        let x_buf = upload_tensor_f32_buffer(&dev, &x).unwrap();
-        let z_buf = upload_tensor_f32_buffer(&dev, &z).unwrap();
+        let x_buf = upload_f32_slice(&dev, &x).unwrap();
+        let z_buf = upload_f32_slice(&dev, &z).unwrap();
         let out_buf = alloc_out(&dev, (rows * hidden * 4) as u64);
         dispatch_gdn_gated_rms_norm_cached_resident(
             &dev, &x_buf, &z_buf, &weight_buf, &out_buf, rows, hidden, eps,
@@ -3609,35 +3473,20 @@ mod tests {
         let head_dim = 32;
         let max_seqlen = 8;
         let softmax_scale = (head_dim as f32).sqrt().recip();
-        let q = Tensor::from_vec(
-            (0..batch * 1 * num_heads * head_dim)
-                .map(|i| (i as f32 * 0.013) - 1.0)
-                .collect::<Vec<_>>(),
-            (batch, 1, num_heads, head_dim),
-            &Device::Cpu,
-        )
-        .unwrap();
-        let k = Tensor::from_vec(
-            (0..batch * max_seqlen * num_kv_heads * head_dim)
-                .map(|i| (i as f32 * 0.011) - 0.5)
-                .collect::<Vec<_>>(),
-            (batch, max_seqlen, num_kv_heads, head_dim),
-            &Device::Cpu,
-        )
-        .unwrap();
-        let v = Tensor::from_vec(
-            (0..batch * max_seqlen * num_kv_heads * head_dim)
-                .map(|i| (i as f32 * 0.007) + 0.1)
-                .collect::<Vec<_>>(),
-            (batch, max_seqlen, num_kv_heads, head_dim),
-            &Device::Cpu,
-        )
-        .unwrap();
+        let q: Vec<f32> = (0..batch * 1 * num_heads * head_dim)
+            .map(|i| (i as f32 * 0.013) - 1.0)
+            .collect();
+        let k: Vec<f32> = (0..batch * max_seqlen * num_kv_heads * head_dim)
+            .map(|i| (i as f32 * 0.011) - 0.5)
+            .collect();
+        let v: Vec<f32> = (0..batch * max_seqlen * num_kv_heads * head_dim)
+            .map(|i| (i as f32 * 0.007) + 0.1)
+            .collect();
         let seq_lens: Vec<u32> = vec![max_seqlen as u32; batch];
 
-        let q_bytes = extract_tensor_bytes(&q).unwrap().0;
-        let k_bytes = extract_tensor_bytes(&k).unwrap().0;
-        let v_bytes = extract_tensor_bytes(&v).unwrap().0;
+        let q_bytes = f32_to_bytes(&q);
+        let k_bytes = f32_to_bytes(&k);
+        let v_bytes = f32_to_bytes(&v);
         let baseline_bytes = dispatch_paged_attn_decode_batch_f32_bytes(
             &dev,
             &q_bytes,
@@ -3652,14 +3501,11 @@ mod tests {
             softmax_scale,
         )
         .unwrap();
-        let expected: Vec<f32> = baseline_bytes
-            .chunks_exact(4)
-            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-            .collect();
+        let expected = bytes_to_f32(&baseline_bytes);
 
-        let q_buf = upload_tensor_f32_buffer(&dev, &q).unwrap();
-        let k_buf = upload_tensor_f32_buffer(&dev, &k).unwrap();
-        let v_buf = upload_tensor_f32_buffer(&dev, &v).unwrap();
+        let q_buf = upload_f32_slice(&dev, &q).unwrap();
+        let k_buf = upload_f32_slice(&dev, &k).unwrap();
+        let v_buf = upload_f32_slice(&dev, &v).unwrap();
         // seq_lens uploaded as raw u32 bytes
         let seq_bytes: Vec<u8> = bytemuck::cast_slice(&seq_lens).to_vec();
         let seq_buf = {
@@ -3699,10 +3545,8 @@ mod tests {
         let n = 1024usize;
         let a: Vec<f32> = (0..n).map(|i| (i as f32) * 0.013 - 0.5).collect();
         let b: Vec<f32> = (0..n).map(|i| (i as f32) * 0.019 + 0.2).collect();
-        let a_t = Tensor::from_vec(a.clone(), n, &Device::Cpu).unwrap();
-        let b_t = Tensor::from_vec(b.clone(), n, &Device::Cpu).unwrap();
-        let a_buf = upload_tensor_f32_buffer(&dev, &a_t).unwrap();
-        let b_buf = upload_tensor_f32_buffer(&dev, &b_t).unwrap();
+        let a_buf = upload_f32_slice(&dev, &a).unwrap();
+        let b_buf = upload_f32_slice(&dev, &b).unwrap();
         let out_buf = alloc_out(&dev, (n * 4) as u64);
         dispatch_add_resident(&dev, &a_buf, &b_buf, &out_buf, n).unwrap();
         let got = read_back_f32(&dev, &out_buf);
@@ -3722,10 +3566,8 @@ mod tests {
         let n = 1024usize;
         let a: Vec<f32> = (0..n).map(|i| (i as f32) * 0.013 - 0.5).collect();
         let g: Vec<f32> = (0..n).map(|i| (i as f32) * 0.011 - 5.0).collect();
-        let a_t = Tensor::from_vec(a.clone(), n, &Device::Cpu).unwrap();
-        let g_t = Tensor::from_vec(g.clone(), n, &Device::Cpu).unwrap();
-        let a_buf = upload_tensor_f32_buffer(&dev, &a_t).unwrap();
-        let g_buf = upload_tensor_f32_buffer(&dev, &g_t).unwrap();
+        let a_buf = upload_f32_slice(&dev, &a).unwrap();
+        let g_buf = upload_f32_slice(&dev, &g).unwrap();
         let out_buf = alloc_out(&dev, (n * 4) as u64);
         dispatch_mul_sigmoid_gate_resident(&dev, &a_buf, &g_buf, &out_buf, n).unwrap();
         let got = read_back_f32(&dev, &out_buf);
@@ -3767,15 +3609,9 @@ mod tests {
         let sin_data: Vec<f32> = (0..rows * half)
             .map(|i| ((i as f32) * 0.13).sin())
             .collect();
-        let x = Tensor::from_vec(x_data.clone(), (rows, num_heads, head_dim), &Device::Cpu).unwrap();
-        let cos_t =
-            Tensor::from_vec(cos_data.clone(), (rows, half), &Device::Cpu).unwrap();
-        let sin_t =
-            Tensor::from_vec(sin_data.clone(), (rows, half), &Device::Cpu).unwrap();
-
-        let x_buf = upload_tensor_f32_buffer(&dev, &x).unwrap();
-        let cos_buf = upload_tensor_f32_buffer(&dev, &cos_t).unwrap();
-        let sin_buf = upload_tensor_f32_buffer(&dev, &sin_t).unwrap();
+        let x_buf = upload_f32_slice(&dev, &x_data).unwrap();
+        let cos_buf = upload_f32_slice(&dev, &cos_data).unwrap();
+        let sin_buf = upload_f32_slice(&dev, &sin_data).unwrap();
         let out_buf = alloc_out(&dev, (n * 4) as u64);
         dispatch_rotary_one_resident(
             &dev, &x_buf, &cos_buf, &sin_buf, &out_buf, rows, num_heads, head_dim, rotary_dim,
@@ -3836,17 +3672,10 @@ mod tests {
         let sin_data: Vec<f32> = (0..rows * half)
             .map(|i| ((i as f32) * 0.11).sin())
             .collect();
-        let q = Tensor::from_vec(q_data.clone(), (rows, num_q_heads, head_dim), &Device::Cpu).unwrap();
-        let k = Tensor::from_vec(k_data.clone(), (rows, num_kv_heads, head_dim), &Device::Cpu).unwrap();
-        let cos_t =
-            Tensor::from_vec(cos_data.clone(), (rows, half), &Device::Cpu).unwrap();
-        let sin_t =
-            Tensor::from_vec(sin_data.clone(), (rows, half), &Device::Cpu).unwrap();
-
-        let q_buf = upload_tensor_f32_buffer(&dev, &q).unwrap();
-        let k_buf = upload_tensor_f32_buffer(&dev, &k).unwrap();
-        let cos_buf = upload_tensor_f32_buffer(&dev, &cos_t).unwrap();
-        let sin_buf = upload_tensor_f32_buffer(&dev, &sin_t).unwrap();
+        let q_buf = upload_f32_slice(&dev, &q_data).unwrap();
+        let k_buf = upload_f32_slice(&dev, &k_data).unwrap();
+        let cos_buf = upload_f32_slice(&dev, &cos_data).unwrap();
+        let sin_buf = upload_f32_slice(&dev, &sin_data).unwrap();
         let q_out = alloc_out(&dev, (q_n * 4) as u64);
         let k_out = alloc_out(&dev, (k_n * 4) as u64);
         dispatch_rotary_qk_resident(
@@ -3922,24 +3751,17 @@ mod tests {
             .map(|i| ((i as f32) * 0.11).sin())
             .collect();
 
-        let q = Tensor::from_vec(q_data.clone(), (batch, num_q_heads, head_dim), &Device::Cpu).unwrap();
-        let k = Tensor::from_vec(k_data.clone(), (batch, num_kv_heads, head_dim), &Device::Cpu).unwrap();
-        let v = Tensor::from_vec(v_data.clone(), (batch, num_kv_heads, head_dim), &Device::Cpu).unwrap();
-        let cos_t =
-            Tensor::from_vec(cos_data.clone(), (batch, half), &Device::Cpu).unwrap();
-        let sin_t =
-            Tensor::from_vec(sin_data.clone(), (batch, half), &Device::Cpu).unwrap();
-        let zero_pool = Tensor::from_vec(vec![0f32; pool_n], pool_n, &Device::Cpu).unwrap();
+        let zero_pool = vec![0f32; pool_n];
 
-        let q_buf = upload_tensor_f32_buffer(&dev, &q).unwrap();
-        let k_buf = upload_tensor_f32_buffer(&dev, &k).unwrap();
-        let v_buf = upload_tensor_f32_buffer(&dev, &v).unwrap();
-        let cos_buf = upload_tensor_f32_buffer(&dev, &cos_t).unwrap();
-        let sin_buf = upload_tensor_f32_buffer(&dev, &sin_t).unwrap();
+        let q_buf = upload_f32_slice(&dev, &q_data).unwrap();
+        let k_buf = upload_f32_slice(&dev, &k_data).unwrap();
+        let v_buf = upload_f32_slice(&dev, &v_data).unwrap();
+        let cos_buf = upload_f32_slice(&dev, &cos_data).unwrap();
+        let sin_buf = upload_f32_slice(&dev, &sin_data).unwrap();
         let slots_buf = upload_u32_buffer(&dev, &slots).unwrap();
         let q_out = alloc_out(&dev, (q_n * 4) as u64);
-        let k_pool = upload_tensor_f32_buffer(&dev, &zero_pool).unwrap();
-        let v_pool = upload_tensor_f32_buffer(&dev, &zero_pool).unwrap();
+        let k_pool = upload_f32_slice(&dev, &zero_pool).unwrap();
+        let v_pool = upload_f32_slice(&dev, &zero_pool).unwrap();
 
         dispatch_rotary_q_paged_kv_write_slots_resident(
             &dev,
@@ -4020,49 +3842,19 @@ mod tests {
         let heads = 4;
         let dk = 32;
         let dv = 16;
-        let q = Tensor::from_vec(
-            (0..batch * heads * dk).map(|i| (i as f32 * 0.013) - 0.5).collect::<Vec<_>>(),
-            (batch, heads, dk),
-            &Device::Cpu,
-        )
-        .unwrap();
-        let k = Tensor::from_vec(
-            (0..batch * heads * dk).map(|i| (i as f32 * 0.017) - 0.3).collect::<Vec<_>>(),
-            (batch, heads, dk),
-            &Device::Cpu,
-        )
-        .unwrap();
-        let v = Tensor::from_vec(
-            (0..batch * heads * dv).map(|i| (i as f32 * 0.019) + 0.2).collect::<Vec<_>>(),
-            (batch, heads, dv),
-            &Device::Cpu,
-        )
-        .unwrap();
-        let beta = Tensor::from_vec(
-            (0..batch * heads).map(|i| (i as f32 * 0.05) + 0.1).collect::<Vec<_>>(),
-            (batch, heads),
-            &Device::Cpu,
-        )
-        .unwrap();
-        let g = Tensor::from_vec(
-            (0..batch * heads).map(|i| ((i as f32) * 0.03 - 0.1).tanh()).collect::<Vec<_>>(),
-            (batch, heads),
-            &Device::Cpu,
-        )
-        .unwrap();
-        let state = Tensor::from_vec(
-            (0..batch * heads * dk * dv).map(|i| (i as f32 * 0.0017) - 0.05).collect::<Vec<_>>(),
-            (batch, heads, dk, dv),
-            &Device::Cpu,
-        )
-        .unwrap();
+        let q: Vec<f32> = (0..batch * heads * dk).map(|i| (i as f32 * 0.013) - 0.5).collect();
+        let k: Vec<f32> = (0..batch * heads * dk).map(|i| (i as f32 * 0.017) - 0.3).collect();
+        let v: Vec<f32> = (0..batch * heads * dv).map(|i| (i as f32 * 0.019) + 0.2).collect();
+        let beta: Vec<f32> = (0..batch * heads).map(|i| (i as f32 * 0.05) + 0.1).collect();
+        let g: Vec<f32> = (0..batch * heads).map(|i| ((i as f32) * 0.03 - 0.1).tanh()).collect();
+        let state: Vec<f32> = (0..batch * heads * dk * dv).map(|i| (i as f32 * 0.0017) - 0.05).collect();
 
-        let q_bytes_ref = extract_tensor_bytes(&q).unwrap().0;
-        let k_bytes_ref = extract_tensor_bytes(&k).unwrap().0;
-        let v_bytes_ref = extract_tensor_bytes(&v).unwrap().0;
-        let beta_bytes_ref = extract_tensor_bytes(&beta).unwrap().0;
-        let g_bytes_ref = extract_tensor_bytes(&g).unwrap().0;
-        let state_bytes_ref = extract_tensor_bytes(&state).unwrap().0;
+        let q_bytes_ref = f32_to_bytes(&q);
+        let k_bytes_ref = f32_to_bytes(&k);
+        let v_bytes_ref = f32_to_bytes(&v);
+        let beta_bytes_ref = f32_to_bytes(&beta);
+        let g_bytes_ref = f32_to_bytes(&g);
+        let state_bytes_ref = f32_to_bytes(&state);
         let (out_data, new_state_data) = dispatch_gdn_recurrent_step_with_options_bytes(
             &dev,
             &q_bytes_ref,
@@ -4078,16 +3870,16 @@ mod tests {
             false,
         )
         .unwrap();
-        let out_t = create_tensor_from_data(&out_data, &[batch, heads, dv], q.dtype()).unwrap();
         let _new_state_t = new_state_data.expect("state present when skip_state_readback=false");
-        let expected = out_t.flatten_all().unwrap().to_vec1::<f32>().unwrap();
+        // out_data is raw f32 LE bytes; cast directly to Vec<f32>.
+        let expected: Vec<f32> = bytes_to_f32(&out_data);
 
-        let q_buf = upload_tensor_f32_buffer(&dev, &q).unwrap();
-        let k_buf = upload_tensor_f32_buffer(&dev, &k).unwrap();
-        let v_buf = upload_tensor_f32_buffer(&dev, &v).unwrap();
-        let beta_buf = upload_tensor_f32_buffer(&dev, &beta).unwrap();
-        let g_buf = upload_tensor_f32_buffer(&dev, &g).unwrap();
-        let state_buf = upload_tensor_f32_buffer(&dev, &state).unwrap();
+        let q_buf = upload_f32_slice(&dev, &q).unwrap();
+        let k_buf = upload_f32_slice(&dev, &k).unwrap();
+        let v_buf = upload_f32_slice(&dev, &v).unwrap();
+        let beta_buf = upload_f32_slice(&dev, &beta).unwrap();
+        let g_buf = upload_f32_slice(&dev, &g).unwrap();
+        let state_buf = upload_f32_slice(&dev, &state).unwrap();
         let out_buf = alloc_out(&dev, (batch * heads * dv * 4) as u64);
         dispatch_gdn_recurrent_step_resident(
             &dev, &q_buf, &k_buf, &v_buf, &beta_buf, &g_buf, &state_buf, &out_buf, batch, heads, dk,
@@ -4106,33 +3898,20 @@ mod tests {
         let rows = 7;
         let hidden = 96;
         let eps = 1e-6f32;
-        let x = Tensor::from_vec(
-            (0..rows * hidden)
-                .map(|i| ((i % 23) as f32 - 11.0) * 0.05)
-                .collect::<Vec<_>>(),
-            (rows, hidden),
-            &Device::Cpu,
-        )
-        .unwrap();
-        let weight = Tensor::from_vec(
-            (0..hidden).map(|i| ((i % 7) as f32) * 0.03).collect::<Vec<_>>(),
-            (hidden,),
-            &Device::Cpu,
-        )
-        .unwrap();
+        let x: Vec<f32> = (0..rows * hidden)
+            .map(|i| ((i % 23) as f32 - 11.0) * 0.05)
+            .collect();
+        let weight: Vec<f32> = (0..hidden).map(|i| ((i % 7) as f32) * 0.03).collect();
 
-        let x_bytes = extract_tensor_bytes(&x).unwrap().0;
-        let weight_bytes = extract_tensor_bytes(&weight).unwrap().0;
+        let x_bytes = f32_to_bytes(&x);
+        let weight_bytes = f32_to_bytes(&weight);
         let baseline_bytes =
             dispatch_qwen_rmsnorm_forward_bytes(&dev, &x_bytes, &weight_bytes, rows, hidden, eps)
                 .unwrap();
-        let baseline: Vec<f32> = baseline_bytes
-            .chunks_exact(4)
-            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-            .collect();
+        let baseline = bytes_to_f32(&baseline_bytes);
 
-        let x_buf = upload_tensor_f32_buffer(&dev, &x).unwrap();
-        let weight_buf = upload_tensor_f32_buffer(&dev, &weight).unwrap();
+        let x_buf = upload_f32_slice(&dev, &x).unwrap();
+        let weight_buf = upload_f32_slice(&dev, &weight).unwrap();
         let out_buf = alloc_out(&dev, (rows * hidden * 4) as u64);
         dispatch_qwen_rmsnorm_forward_resident(
             &dev,
@@ -4164,8 +3943,7 @@ mod tests {
         let x: Vec<f32> = (0..rows_in * hidden)
             .map(|i| ((i % 37) as f32 - 18.0) * 0.07)
             .collect();
-        let x_t = Tensor::from_vec(x.clone(), (rows_in, hidden), &Device::Cpu).unwrap();
-        let x_buf = upload_tensor_f32_buffer(&dev, &x_t).unwrap();
+        let x_buf = upload_f32_slice(&dev, &x).unwrap();
         let out_buf = alloc_out(&dev, (rows_out * hidden * 4) as u64);
 
         dispatch_l2_norm_per_row_resident(
@@ -4216,10 +3994,8 @@ mod tests {
         let v_data: Vec<f32> = (0..elements_per_slot)
             .map(|i| (i as f32) * 0.019 + 0.2)
             .collect();
-        let k_t = Tensor::from_vec(k_data.clone(), elements_per_slot, &Device::Cpu).unwrap();
-        let v_t = Tensor::from_vec(v_data.clone(), elements_per_slot, &Device::Cpu).unwrap();
-        let k_in_buf = upload_tensor_f32_buffer(&dev, &k_t).unwrap();
-        let v_in_buf = upload_tensor_f32_buffer(&dev, &v_t).unwrap();
+        let k_in_buf = upload_f32_slice(&dev, &k_data).unwrap();
+        let v_in_buf = upload_f32_slice(&dev, &v_data).unwrap();
 
         // Allocate zero-initialised pool buffers via VkPagedKvCache so
         // the test exercises the same allocation path the resident
@@ -4307,8 +4083,7 @@ mod tests {
         // Build a deterministic input where the index in the combined
         // buffer is directly recoverable, so any misindexing is obvious.
         let comb_data: Vec<f32> = (0..comb_len).map(|i| i as f32).collect();
-        let comb_t = Tensor::from_vec(comb_data.clone(), comb_len, &Device::Cpu).unwrap();
-        let comb_buf = upload_tensor_f32_buffer(&dev, &comb_t).unwrap();
+        let comb_buf = upload_f32_slice(&dev, &comb_data).unwrap();
 
         let q_buf = alloc_out(&dev, (num_heads * head_dim * 4) as u64);
         let gate_buf = alloc_out(&dev, (num_heads * head_dim * 4) as u64);
@@ -4365,8 +4140,7 @@ mod tests {
         let total = qkv_dim + z_dim + a_dim + b_dim;
 
         let comb_data: Vec<f32> = (0..total).map(|i| i as f32 + 0.5).collect();
-        let comb_t = Tensor::from_vec(comb_data.clone(), total, &Device::Cpu).unwrap();
-        let comb_buf = upload_tensor_f32_buffer(&dev, &comb_t).unwrap();
+        let comb_buf = upload_f32_slice(&dev, &comb_data).unwrap();
 
         let qkv_buf = alloc_out(&dev, (qkv_dim * 4) as u64);
         let z_buf = alloc_out(&dev, (z_dim * 4) as u64);
@@ -4419,8 +4193,7 @@ mod tests {
         let total = 2 * qk_dim + v_dim;
 
         let qkv_data: Vec<f32> = (0..total).map(|i| (i as f32) * 0.013 - 0.7).collect();
-        let qkv_t = Tensor::from_vec(qkv_data.clone(), total, &Device::Cpu).unwrap();
-        let qkv_buf = upload_tensor_f32_buffer(&dev, &qkv_t).unwrap();
+        let qkv_buf = upload_f32_slice(&dev, &qkv_data).unwrap();
 
         let q_buf = alloc_out(&dev, (qk_dim * 4) as u64);
         let k_buf = alloc_out(&dev, (qk_dim * 4) as u64);
@@ -4514,10 +4287,8 @@ mod tests {
             let v_token: Vec<f32> = v_data[p * num_kv_heads * head_dim
                 ..(p + 1) * num_kv_heads * head_dim]
                 .to_vec();
-            let k_t = Tensor::from_vec(k_token, num_kv_heads * head_dim, &Device::Cpu).unwrap();
-            let v_t = Tensor::from_vec(v_token, num_kv_heads * head_dim, &Device::Cpu).unwrap();
-            let k_buf = upload_tensor_f32_buffer(&dev, &k_t).unwrap();
-            let v_buf = upload_tensor_f32_buffer(&dev, &v_t).unwrap();
+            let k_buf = upload_f32_slice(&dev, &k_token).unwrap();
+            let v_buf = upload_f32_slice(&dev, &v_token).unwrap();
             let slot = slot_for(p);
             dispatch_paged_kv_write_slot_resident(
                 &dev,
@@ -4535,9 +4306,7 @@ mod tests {
 
         // Pack Q into a contiguous buffer, build seq_lens and the
         // block table buffer on device.
-        let q_t = Tensor::from_vec(q_data.clone(), (batch, 1, num_heads, head_dim), &Device::Cpu)
-            .unwrap();
-        let q_buf = upload_tensor_f32_buffer(&dev, &q_t).unwrap();
+        let q_buf = upload_f32_slice(&dev, &q_data).unwrap();
 
         let seq_lens: Vec<u32> = vec![seq_len as u32];
         let seq_bytes: Vec<u8> = bytemuck::cast_slice(&seq_lens).to_vec();
