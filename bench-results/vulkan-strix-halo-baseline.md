@@ -409,14 +409,16 @@ every config"):
   461.7 ms / 139 rows/s. The default now favors the highest-throughput
   saturated batch width, with env overrides still available for lower-latency
   or smaller-memory 16/32-row runs.
-  **Update — live four-row batch smoke:** a current release server run with
-  `KILN_NUM_BLOCKS=2048`, prefix cache disabled, and
-  `/v1/completions/batch` using 4 distinct prompts, `temperature=0`,
-  `top_p=1`, and `max_tokens=4` returned 4 completions / 16 generated tokens
-  in 18.495 s wall time. The server log reported a
-  `Vulkan-resident decode pool ready` event with `num_slots=4`, so this smoke
-  reached the live multi-row resident route; it is a short validation fixture,
-  not a saturation benchmark.
+  **Update — live four-row batch smoke:** after rebuilding the current `kiln`
+  release binary with `--no-default-features --features vulkan`, server startup
+  with `KILN_NUM_BLOCKS=2048` and prefix cache disabled logged
+  `max_decode_batch=64` for the batching actor and `max_batch=64` for the live
+  greedy decode batcher. A `/v1/completions/batch` request with 4 distinct
+  prompts, `temperature=0`, `top_p=1`, and `max_tokens=4` returned
+  4 completions / 16 generated tokens in 26.068 s wall time. The server log
+  reported a `Vulkan-resident decode pool ready` event with `num_slots=4`, so
+  this smoke reached the live multi-row resident route; it is a short
+  validation fixture, not a saturation benchmark.
   **Update — bs=1 greedy token-only route:** `model_forward_paged_last_token_greedy`
   now tries the resident transformer-stack + final argmax path before the older
   resident logits fallback. For callers without stable row IDs, bs=1 uses the
