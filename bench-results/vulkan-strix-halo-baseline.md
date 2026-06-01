@@ -1046,6 +1046,10 @@ every config"):
   gate, K, and V buffers, while keeping the rows4 path for smaller batches.
   The Vulkan decode microbench planner uses the same threshold, and
   `direct_full_attn_qkv_gate_split_rows8_matches_cpu` covers a tail-row batch.
+  The rows8 crossover is now runtime-tunable with
+  `KILN_VULKAN_FULL_ATTN_QKV_BF16_ROWS8_MIN_BATCH`, defaulting to the same
+  batch-64 Strix Halo setting. This mirrors the MLP, generic linear, and GDN
+  in-proj threshold knobs while preserving the current measured default.
   **Update — GDN input projection rows8 is opt-in pending better hardware
   data:** the resident GDN block has a rows8 packed-BF16 input-projection
   shader that keeps QKV/Z column pairing and shares each packed weight load

@@ -41,7 +41,7 @@ use crate::forward::GpuLayerWeights;
 use crate::PagedKvCacheKt;
 
 const DEFAULT_MLP_BF16_ROWS8_MIN_BATCH: usize = 256;
-const FULL_ATTN_QKV_BF16_ROWS8_MIN_BATCH: usize = 64;
+const DEFAULT_FULL_ATTN_QKV_BF16_ROWS8_MIN_BATCH: usize = 64;
 const DEFAULT_GDN_IN_PROJ_ROWS4_MIN_BATCH: usize = 16;
 const DEFAULT_GDN_IN_PROJ_ROWS8_MIN_BATCH: usize = 64;
 const LM_HEAD_BF16_ROWS4_MIN_BATCH: usize = 16;
@@ -149,8 +149,19 @@ fn gdn_in_proj_rows8_min_batch() -> usize {
     })
 }
 
+fn full_attn_qkv_bf16_rows8_min_batch() -> usize {
+    static VALUE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *VALUE.get_or_init(|| {
+        std::env::var("KILN_VULKAN_FULL_ATTN_QKV_BF16_ROWS8_MIN_BATCH")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(DEFAULT_FULL_ATTN_QKV_BF16_ROWS8_MIN_BATCH)
+    })
+}
+
 fn full_attn_qkv_gate_split_bf16w_plan(batch: usize, total_out: usize) -> (&'static str, u32) {
-    let rows8 = batch >= FULL_ATTN_QKV_BF16_ROWS8_MIN_BATCH
+    let rows8 = batch >= full_attn_qkv_bf16_rows8_min_batch()
         && enabled_unless_disabled("KILN_DISABLE_VULKAN_FULL_ATTN_QKV_BF16W_ROWS8");
     let rows4 = batch >= 2
         && !rows8

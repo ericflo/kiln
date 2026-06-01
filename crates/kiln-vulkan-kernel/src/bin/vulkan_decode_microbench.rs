@@ -52,7 +52,7 @@ const DEFAULT_BATCHES: &[usize] = &[1, 4, 8, 16, 32, 64];
 const DEFAULT_MLP_BF16_ROWS8_MIN_BATCH: usize = 256;
 const DEFAULT_GDN_IN_PROJ_ROWS4_MIN_BATCH: usize = 16;
 const DEFAULT_GDN_IN_PROJ_ROWS8_MIN_BATCH: usize = 64;
-const FULL_ATTN_QKV_BF16_ROWS8_MIN_BATCH: usize = 64;
+const DEFAULT_FULL_ATTN_QKV_BF16_ROWS8_MIN_BATCH: usize = 64;
 const DEFAULT_LINEAR_DECODE_BF16W_ROWS8_MIN_BATCH: usize = 64;
 
 /// Deterministic flat `Vec<bf16>` weight data for byte/slice dispatch entries.
@@ -149,8 +149,15 @@ fn gdn_in_proj_rows8_min_batch() -> usize {
     )
 }
 
+fn full_attn_qkv_bf16_rows8_min_batch() -> usize {
+    env_usize(
+        "KILN_VULKAN_FULL_ATTN_QKV_BF16_ROWS8_MIN_BATCH",
+        DEFAULT_FULL_ATTN_QKV_BF16_ROWS8_MIN_BATCH,
+    )
+}
+
 fn full_attn_qkv_gate_split_bf16w_plan(batch: usize, total_out: usize) -> (&'static str, u32) {
-    let rows8 = batch >= FULL_ATTN_QKV_BF16_ROWS8_MIN_BATCH
+    let rows8 = batch >= full_attn_qkv_bf16_rows8_min_batch()
         && enabled_unless_disabled("KILN_DISABLE_VULKAN_FULL_ATTN_QKV_BF16W_ROWS8");
     let rows4 = batch >= 2
         && !rows8
