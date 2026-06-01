@@ -137,6 +137,13 @@ impl CudaStorage {
         dtype: DType,
         n_elements: usize,
     ) -> Result<Self> {
+        // #1082 freeze-pointers (boxes 98-101): when a capture arena is
+        // active on this thread, route through it — the forward gets a
+        // Borrowed view into an arena-retained buffer whose device pointer
+        // stays valid across every graph replay. No-op (None) outside capture.
+        if let Some(result) = crate::capture_arena_alloc(dtype, n_elements, true) {
+            return result;
+        }
         let byte_len = dtype.packed_buffer_bytes(n_elements);
         // Candle-free allocation through cudarc. #1082 CUDA-graph fix:
         // route through the thread-local active stream so the alloc is
@@ -181,6 +188,12 @@ impl CudaStorage {
         dtype: DType,
         n_elements: usize,
     ) -> Result<Self> {
+        // #1082 freeze-pointers: route uninitialized allocs through the active
+        // capture arena too (zero = false → no captured memset). No-op outside
+        // capture.
+        if let Some(result) = crate::capture_arena_alloc(dtype, n_elements, false) {
+            return result;
+        }
         let byte_len = dtype.packed_buffer_bytes(n_elements);
         // SAFETY: cudarc's `alloc` returns uninitialized device memory. The
         // caller contract (documented above) requires a full overwrite before
