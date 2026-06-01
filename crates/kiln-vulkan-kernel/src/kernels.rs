@@ -55,6 +55,7 @@ const PAGED_ATTN_SPLITK_CHUNKS_B1: usize = 32;
 const PAGED_ATTN_SPLITK_CHUNKS_BATCHED: usize = 4;
 const PAGED_ATTN_SPLITK_CHUNKS_BATCHED_LONG: usize = 2;
 const PAGED_ATTN_SPLITK_LONG_MIN_BLOCKS: usize = 64;
+const PAGED_ATTN_SPLITK_MAX_CHUNKS: usize = 256;
 
 pub fn paged_attn_decode_splitk_chunks(batch_size: usize, max_blocks_per_seq: usize) -> usize {
     std::env::var("KILN_VK_PAGED_ATTN_SPLITK_CHUNKS")
@@ -70,6 +71,7 @@ pub fn paged_attn_decode_splitk_chunks(batch_size: usize, max_blocks_per_seq: us
         } else {
             PAGED_ATTN_SPLITK_CHUNKS_BATCHED
         })
+        .min(PAGED_ATTN_SPLITK_MAX_CHUNKS)
 }
 
 fn paged_attn_single_submit_enabled() -> bool {
@@ -4565,6 +4567,10 @@ pub fn dispatch_paged_attn_decode_batch_paged_splitk_f32_bytes(
     anyhow::ensure!(
         batch > 0 && max_blocks_per_seq > 0 && page_block_size > 0 && num_chunks > 0,
         "paged_attn_decode_batch_paged_splitk: batch/max_blocks_per_seq/page_block_size/num_chunks must be > 0"
+    );
+    anyhow::ensure!(
+        num_chunks <= PAGED_ATTN_SPLITK_MAX_CHUNKS,
+        "paged_attn_decode_batch_paged_splitk: num_chunks {num_chunks} exceeds max {PAGED_ATTN_SPLITK_MAX_CHUNKS}"
     );
     let block_table_expected = batch
         .checked_mul(max_blocks_per_seq)

@@ -708,6 +708,17 @@ every config"):
   future resident/paged checks can avoid heating the GPU with sibling sweeps.
   A focused selector smoke with batch 1, warmup=1, timed=1, repeats=1 ran only
   `full_token_resident_paged` and measured 49.4 ms / 20 rows/s.
+  **Update — split-K reduce scale reuse:** the split-K paged-attention reduce
+  shader now computes each chunk's `exp(chunk_max - combined_max)` scale once
+  per workgroup, stores it in shared memory, and reuses it across all output
+  lanes. The selector still caps explicit split-K chunk sweeps to the 256-lane
+  workgroup size. On RADV STRIX_HALO, the focused
+  `paged_attn_splitk_check` probe at batch 1, 32 query heads, 8 K/V heads,
+  head_dim 128, 2048-token history, chunks 32, warmup=1, iters=3, repeats=2
+  measured max abs diff `1.713634e-7`, non-split 4.783 ms, split-K 3.037 ms
+  (**1.57x**). A resident full-token paged smoke running only
+  `full_token_resident_paged` at history 2048, batch 1, warmup=1, timed=2,
+  repeats=2 measured 54.620 ms / 18 rows/s for the 32-layer paged route.
 
   These numbers also use the corrected gated-Q full-attention dataflow and the
   direct-output full-attention QKV+gate projection. A batch-64 split-K sweep

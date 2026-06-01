@@ -28,6 +28,8 @@ layout(binding = 1) writeonly buffer OutBuf      { float data_out[]; };
 
 shared float shared_combined_max;
 shared float shared_combined_sum;
+shared float shared_scales[256];
+shared float partial_sum[256];
 
 void main() {
     uint pair_idx = gl_WorkGroupID.x;
@@ -50,15 +52,26 @@ void main() {
     barrier();
     float combined_max = shared_combined_max;
 
-    // 2) Combined_sum = sum_c(chunk_sum[c] * exp(chunk_max[c] - combined_max)).
-    if (lane == 0u) {
-        float s = 0.0;
-        for (uint c = 0u; c < num_chunks; c++) {
-            float cm = data_partials[pair_base + c * stride];
-            float cs = data_partials[pair_base + c * stride + 1u];
-            s += cs * exp(cm - combined_max);
+    // 2) Cache each chunk's softmax scale once per workgroup. The previous
+    // version recomputed exp(chunk_max - combined_max) in every output lane.
+    if (lane < num_chunks) {
+        float cm = data_partials[pair_base + lane * stride];
+        float cs = data_partials[pair_base + lane * stride + 1u];
+        float scale = exp(cm - combined_max);
+        shared_scales[lane] = scale;
+        partial_sum[lane] = cs * scale;
+    } else {
+        partial_sum[lane] = 0.0;
+    }
+    barrier();
+    for (uint reduce_stride = 128u; reduce_stride > 0u; reduce_stride >>= 1) {
+        if (lane < reduce_stride) {
+            partial_sum[lane] += partial_sum[lane + reduce_stride];
         }
-        shared_combined_sum = s;
+        barrier();
+    }
+    if (lane == 0u) {
+        shared_combined_sum = partial_sum[0];
     }
     barrier();
     float combined_sum = shared_combined_sum;
@@ -67,10 +80,8 @@ void main() {
     if (lane < head_dim) {
         float acc = 0.0;
         for (uint c = 0u; c < num_chunks; c++) {
-            float cm = data_partials[pair_base + c * stride];
-            float scale = exp(cm - combined_max);
             float ca = data_partials[pair_base + c * stride + 2u + lane];
-            acc += ca * scale;
+            acc += ca * shared_scales[c];
         }
         uint out_idx = (batch_idx * num_heads + q_head) * head_dim + lane;
         data_out[out_idx] = acc / combined_sum;
