@@ -11,7 +11,7 @@ pub(crate) const GDN_IN_PROJ_ROWS4_MIN_BATCH: usize = 16;
 pub(crate) const GDN_IN_PROJ_ROWS8_MIN_BATCH: usize = 64;
 pub(crate) const LINEAR_DECODE_BF16W_ROWS8_MIN_BATCH: usize = 64;
 
-fn env_truthy_for_profile(name: &str) -> bool {
+fn env_truthy(name: &str) -> bool {
     std::env::var(name)
         .map(|value| {
             let value = value.trim().to_ascii_lowercase();
@@ -22,7 +22,7 @@ fn env_truthy_for_profile(name: &str) -> bool {
 
 fn profile_vulkan_mlp_kernel_stages_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| env_truthy_for_profile("KILN_PROFILE_VULKAN_MLP_KERNEL_STAGES"))
+    *ENABLED.get_or_init(|| env_truthy("KILN_PROFILE_VULKAN_MLP_KERNEL_STAGES"))
 }
 
 pub(crate) fn mlp_bf16_gate_up_rows4_enabled() -> bool {
@@ -146,13 +146,13 @@ fn mlp_chained_transfer_submit_enabled() -> bool {
 
 fn profile_vulkan_gdn_in_proj_kernel_stages_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| env_truthy_for_profile("KILN_PROFILE_VULKAN_GDN_IN_PROJ_KERNEL_STAGES"))
+    *ENABLED.get_or_init(|| env_truthy("KILN_PROFILE_VULKAN_GDN_IN_PROJ_KERNEL_STAGES"))
 }
 
 fn profile_vulkan_gdn_recurrent_kernel_stages_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED
-        .get_or_init(|| env_truthy_for_profile("KILN_PROFILE_VULKAN_GDN_RECURRENT_KERNEL_STAGES"))
+        .get_or_init(|| env_truthy("KILN_PROFILE_VULKAN_GDN_RECURRENT_KERNEL_STAGES"))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -313,8 +313,10 @@ pub(crate) fn gdn_in_proj_batch_row_quad_enabled() -> bool {
 
 pub(crate) fn gdn_in_proj_batch_row_octet_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED
-        .get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_GDN_IN_PROJ_BATCH_ROW_OCTET").is_err())
+    *ENABLED.get_or_init(|| {
+        env_truthy("KILN_ENABLE_VULKAN_GDN_IN_PROJ_BATCH_ROW_OCTET")
+            && std::env::var("KILN_DISABLE_VULKAN_GDN_IN_PROJ_BATCH_ROW_OCTET").is_err()
+    })
 }
 
 fn gdn_gates_batched_transfers_enabled() -> bool {

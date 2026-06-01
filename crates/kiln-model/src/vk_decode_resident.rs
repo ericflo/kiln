@@ -89,6 +89,12 @@ fn enabled_unless_disabled(name: &str) -> bool {
     std::env::var(name).is_err()
 }
 
+fn env_truthy(name: &str) -> bool {
+    std::env::var(name)
+        .map(|v| !matches!(v.trim(), "" | "0" | "false" | "off" | "no"))
+        .unwrap_or(false)
+}
+
 fn linear_bf16w_rows4_enabled() -> bool {
     enabled_unless_disabled("KILN_DISABLE_VULKAN_LINEAR_DECODE_BF16W_ROWS4")
         && enabled_unless_disabled("KILN_DISABLE_VULKAN_LINEAR_BF16W_ROWS4")
@@ -206,6 +212,7 @@ fn gdn_in_proj_bf16w_batched_plan(
         && enabled_unless_disabled("KILN_DISABLE_VULKAN_GDN_IN_PROJ_BATCH_ROW_PAIR");
     let row_group_size = if row_grouping
         && batch >= GDN_IN_PROJ_ROWS8_MIN_BATCH
+        && env_truthy("KILN_ENABLE_VULKAN_GDN_IN_PROJ_BATCH_ROW_OCTET")
         && enabled_unless_disabled("KILN_DISABLE_VULKAN_GDN_IN_PROJ_BATCH_ROW_OCTET")
     {
         8usize

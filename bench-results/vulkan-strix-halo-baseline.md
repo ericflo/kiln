@@ -1014,14 +1014,20 @@ every config"):
   gate, K, and V buffers, while keeping the rows4 path for smaller batches.
   The Vulkan decode microbench planner uses the same threshold, and
   `direct_full_attn_qkv_gate_split_rows8_matches_cpu` covers a tail-row batch.
-  **Update — GDN input projection uses rows8 at saturation:** the resident
-  GDN block now selects a rows8 packed-BF16 input-projection shader for
-  64-wide continuous batches. The shader keeps QKV/Z column pairing and shares
-  each packed weight load across up to eight active rows before writing the
-  packed projection layout consumed by the existing conv/split stage. The
-  paired-column shaders now also load the second column from its actual packed
-  word, which keeps odd-width projection coverage correct. Focused Vulkan
-  coverage: `gdn_in_proj_rows8_matches_cpu_with_tail_rows_and_odd_pairs`.
+  **Update — GDN input projection rows8 is opt-in pending better hardware
+  data:** the resident GDN block has a rows8 packed-BF16 input-projection
+  shader that keeps QKV/Z column pairing and shares each packed weight load
+  across up to eight active rows before writing the packed projection layout
+  consumed by the existing conv/split stage. On Strix Halo, rows4 remains
+  faster at batch 64, 128, and 256, so the default planner stays on rows4 and
+  rows8 requires `KILN_ENABLE_VULKAN_GDN_IN_PROJ_BATCH_ROW_OCTET=1` for further
+  experiments. Focused `gdn_in_proj` microbench numbers on this APU were:
+  rows4/default 4.56 ms vs rows8/opt-in 5.53 ms at batch 64, 9.25 ms vs
+  11.02 ms at batch 128, and 21.17 ms vs 23.16 ms at batch 256. The
+  paired-column shaders now also load the second column from
+  its actual packed word, which keeps odd-width projection coverage correct.
+  Focused Vulkan coverage:
+  `gdn_in_proj_rows8_matches_cpu_with_tail_rows_and_odd_pairs`.
 
 ## Other follow-ups (perf headroom, not regressions)
 
