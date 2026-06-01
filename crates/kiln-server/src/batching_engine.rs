@@ -27,6 +27,7 @@ use crate::state::{GpuCoordinationLock, RealPrefixCache};
 const DEFAULT_ENGINE_CHANNEL: usize = 1024;
 const DEFAULT_RESPONSE_CHANNEL: usize = 64;
 const DEFAULT_MAX_DECODE_BATCH: usize = 8;
+const VULKAN_MAX_DECODE_BATCH: usize = 16;
 const DEFAULT_PREFIX_AWARE_ADMISSION: bool = true;
 
 fn blocks_needed_for_tokens(num_tokens: usize, block_size: usize) -> usize {
@@ -34,17 +35,21 @@ fn blocks_needed_for_tokens(num_tokens: usize, block_size: usize) -> usize {
 }
 
 /// Resolve the actor's `max_decode_batch` from the environment, falling back
-/// to [`DEFAULT_MAX_DECODE_BATCH`] when `KILN_MAX_DECODE_BATCH` is unset or
-/// cannot be parsed as a positive integer. The actor caps `active.len()` at
-/// this value, so it is the effective concurrent-decode width — bumping it
-/// without a corresponding scheduler-side improvement is a no-op past the
-/// natural single-stream-row-loop ceiling.
-fn env_max_decode_batch() -> usize {
+/// to a backend-aware default when `KILN_MAX_DECODE_BATCH` is unset or cannot
+/// be parsed as a positive integer. The actor caps `active.len()` at this
+/// value, so it is the effective concurrent-decode width.
+pub(crate) fn env_max_decode_batch_for_backend(backend_name: Option<&str>) -> usize {
     std::env::var("KILN_MAX_DECODE_BATCH")
         .ok()
         .and_then(|raw| raw.trim().parse::<usize>().ok())
         .filter(|&n| n > 0)
-        .unwrap_or(DEFAULT_MAX_DECODE_BATCH)
+        .unwrap_or_else(|| {
+            if matches!(backend_name, Some("vulkan")) {
+                VULKAN_MAX_DECODE_BATCH
+            } else {
+                DEFAULT_MAX_DECODE_BATCH
+            }
+        })
 }
 
 fn env_prefix_aware_admission() -> bool {
@@ -585,7 +590,7 @@ pub struct BatchingEngineHandle {
 
 impl BatchingEngineHandle {
     pub fn start(forward: Arc<dyn DecodeForward>) -> Self {
-        Self::start_with_options(forward, env_max_decode_batch())
+        Self::start_with_options(forward, env_max_decode_batch_for_backend(None))
     }
 
     pub fn start_with_options(forward: Arc<dyn DecodeForward>, max_decode_batch: usize) -> Self {
@@ -1214,6 +1219,28 @@ mod tests {
         match prior {
             Some(v) => unsafe { std::env::set_var("KILN_BATCH_DECODE_ROWWISE", v) },
             None => unsafe { std::env::remove_var("KILN_BATCH_DECODE_ROWWISE") },
+        }
+    }
+
+    #[test]
+    fn max_decode_batch_default_is_backend_aware() {
+        let prior = std::env::var("KILN_MAX_DECODE_BATCH").ok();
+        // SAFETY: tests in this crate that touch this env var must not run in
+        // parallel; cargo defaults to serial within a single test binary.
+        unsafe {
+            std::env::remove_var("KILN_MAX_DECODE_BATCH");
+        }
+        assert_eq!(env_max_decode_batch_for_backend(None), 8);
+        assert_eq!(env_max_decode_batch_for_backend(Some("vulkan")), 16);
+        assert_eq!(env_max_decode_batch_for_backend(Some("metal")), 8);
+        unsafe {
+            std::env::set_var("KILN_MAX_DECODE_BATCH", "24");
+        }
+        assert_eq!(env_max_decode_batch_for_backend(None), 24);
+        assert_eq!(env_max_decode_batch_for_backend(Some("vulkan")), 24);
+        match prior {
+            Some(v) => unsafe { std::env::set_var("KILN_MAX_DECODE_BATCH", v) },
+            None => unsafe { std::env::remove_var("KILN_MAX_DECODE_BATCH") },
         }
     }
 

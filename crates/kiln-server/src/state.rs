@@ -1904,16 +1904,24 @@ impl AppState {
             Ok("0") | Ok("false") | Ok("FALSE") | Ok("off") | Ok("OFF")
         );
         let batching_engine = (!batching_engine_disabled).then(|| {
-            tracing::info!("batching engine enabled — routing streaming and non-streaming real completions through batching actor (set KILN_BATCHING_ENGINE=0 to disable)");
-            crate::batching_engine::BatchingEngineHandle::start(Arc::new(
-                crate::batching_engine::RealDecodeForward::new(
+            let backend_name = runner.read().unwrap().backend_name();
+            let max_decode_batch =
+                crate::batching_engine::env_max_decode_batch_for_backend(Some(backend_name));
+            tracing::info!(
+                backend = backend_name,
+                max_decode_batch,
+                "batching engine enabled — routing streaming and non-streaming real completions through batching actor (set KILN_BATCHING_ENGINE=0 to disable)"
+            );
+            crate::batching_engine::BatchingEngineHandle::start_with_options(
+                Arc::new(crate::batching_engine::RealDecodeForward::new(
                     runner.clone(),
                     block_manager.clone(),
                     paged_cache.clone(),
                     prefix_cache.clone(),
                     gpu_lock.clone(),
-                ),
-            ))
+                )),
+                max_decode_batch,
+            )
         });
         let decode_batcher = if DecodeBatcherConfig::enabled_for_device_kt(&device_kt) {
             let backend_name = runner.read().unwrap().backend_name();
