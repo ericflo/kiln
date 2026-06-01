@@ -892,7 +892,16 @@ impl CudaGraphRunner {
         linear_state: &mut LinearAttentionState,
         lora: Option<&LoraWeights>,
     ) -> Result<Tensor> {
-        if !self.enabled {
+        // #1082 box-102 diagnostic: KILN_FORCE_EAGER_DECODE=1 forces the bs=1
+        // EAGER decode forward every step (never captures/replays the graph).
+        // If output STILL doubles under this, the doubling is in the bs=1
+        // `model_forward_paged` forward itself, NOT the cuda-graph machinery
+        // (the graph would just be faithfully replaying a buggy forward). The
+        // coherent baseline (graphs off, server) uses a DIFFERENT batched
+        // forward, so it would not reveal a bs=1-forward bug.
+        if !self.enabled
+            || std::env::var("KILN_FORCE_EAGER_DECODE").ok().as_deref() == Some("1")
+        {
             return Self::eager_forward(
                 backend,
                 token_id,
