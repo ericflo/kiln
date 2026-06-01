@@ -3176,35 +3176,33 @@ pub fn dispatch_linear_decode_sample_bytes(
     };
     let mut batch = crate::CommandBatch::new(vk_device)
         .context("linear_decode_sample: create CommandBatch")?;
-    batch
-        .record_upload_buffer_region(
-            &upload_stage,
-            &x_buf,
-            upload_offsets[0],
-            0,
-            x_data.len() as u64,
-        )
-        .context("linear_decode_sample: record x upload")?;
+    let mut upload_copies = Vec::with_capacity(if penalties_active { 3 } else { 1 });
+    upload_copies.push((
+        &upload_stage,
+        &x_buf,
+        upload_offsets[0],
+        0,
+        x_data.len() as u64,
+    ));
     if let (Some(idx_buf), Some(cnt_buf)) = (&_history_idx_buf, &_history_cnt_buf) {
-        batch
-            .record_upload_buffer_region(
-                &upload_stage,
-                idx_buf,
-                upload_offsets[1],
-                0,
-                (history_indices.len() * 4) as u64,
-            )
-            .context("linear_decode_sample: record penalty history-index upload")?;
-        batch
-            .record_upload_buffer_region(
-                &upload_stage,
-                cnt_buf,
-                upload_offsets[2],
-                0,
-                (history_counts.len() * 4) as u64,
-            )
-            .context("linear_decode_sample: record penalty history-count upload")?;
+        upload_copies.push((
+            &upload_stage,
+            idx_buf,
+            upload_offsets[1],
+            0,
+            (history_indices.len() * 4) as u64,
+        ));
+        upload_copies.push((
+            &upload_stage,
+            cnt_buf,
+            upload_offsets[2],
+            0,
+            (history_counts.len() * 4) as u64,
+        ));
     }
+    batch
+        .record_upload_buffer_regions(&upload_copies)
+        .context("linear_decode_sample: record uploads")?;
     batch
         .record_shader(
             lm_glsl,

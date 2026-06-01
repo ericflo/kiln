@@ -370,18 +370,32 @@ impl<'a> CommandBatch<'a> {
         dst_offset: u64,
         size: u64,
     ) -> Result<()> {
+        self.record_upload_buffer_regions(&[(src, dst, src_offset, dst_offset, size)])
+    }
+
+    /// Record several pre-dispatch staging-buffer uploads and emit one
+    /// TRANSFER_WRITE → SHADER_READ barrier for the whole group.
+    pub fn record_upload_buffer_regions(
+        &mut self,
+        copies: &[(&VulkanBuffer, &VulkanBuffer, u64, u64, u64)],
+    ) -> Result<()> {
         anyhow::ensure!(!self.finished, "CommandBatch: already submitted");
         anyhow::ensure!(
             self.dispatch_count == 0,
             "CommandBatch: upload copies must be recorded before compute dispatches"
         );
+        if copies.is_empty() {
+            return Ok(());
+        }
         let device = self.vk_device.device();
         unsafe {
-            let copy = vk::BufferCopy::default()
-                .src_offset(src_offset)
-                .dst_offset(dst_offset)
-                .size(size);
-            device.cmd_copy_buffer(self.cmd, src.handle(), dst.handle(), &[copy]);
+            for (src, dst, src_offset, dst_offset, size) in copies {
+                let copy = vk::BufferCopy::default()
+                    .src_offset(*src_offset)
+                    .dst_offset(*dst_offset)
+                    .size(*size);
+                device.cmd_copy_buffer(self.cmd, src.handle(), dst.handle(), &[copy]);
+            }
             let barrier = vk::MemoryBarrier::default()
                 .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
                 .dst_access_mask(vk::AccessFlags::SHADER_READ);

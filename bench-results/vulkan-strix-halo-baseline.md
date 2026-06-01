@@ -638,6 +638,8 @@ every config"):
   The helper now also packs the hidden row and optional token-history arrays
   into one host-visible upload staging buffer and records offsetted copies from
   that buffer, avoiding separate map/allocation setup for each small upload.
+  Those upload copies now share one transfer-to-compute barrier before LM-head
+  dispatch instead of one barrier per staged segment.
   **Update — legacy bridge removed from the old bs=1 resident block helper:**
   the older single-row resident full-attention fallback now extracts the input
   activation and RoPE tables directly from kt tensors, uploads those f32 slices
