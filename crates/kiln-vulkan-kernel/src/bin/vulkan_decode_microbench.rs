@@ -53,6 +53,7 @@ const MLP_BF16_ROWS8_MIN_BATCH: usize = 256;
 const GDN_IN_PROJ_ROWS4_MIN_BATCH: usize = 16;
 const GDN_IN_PROJ_ROWS8_MIN_BATCH: usize = 64;
 const FULL_ATTN_QKV_BF16_ROWS8_MIN_BATCH: usize = 64;
+const LINEAR_DECODE_BF16W_ROWS8_MIN_BATCH: usize = 64;
 
 /// Deterministic flat `Vec<bf16>` weight data for byte/slice dispatch entries.
 fn make_bf16_weight_slice(rows: usize, cols: usize) -> Vec<bf16> {
@@ -115,6 +116,11 @@ fn linear_bf16w_rows4_enabled() -> bool {
         && enabled_unless_disabled("KILN_DISABLE_VULKAN_LINEAR_BF16W_ROWS4")
 }
 
+fn linear_bf16w_rows8_enabled() -> bool {
+    enabled_unless_disabled("KILN_DISABLE_VULKAN_LINEAR_DECODE_BF16W_ROWS8")
+        && enabled_unless_disabled("KILN_DISABLE_VULKAN_LINEAR_BF16W_ROWS8")
+}
+
 fn full_attn_qkv_gate_split_bf16w_plan(batch: usize, total_out: usize) -> (&'static str, u32) {
     let rows8 = batch >= FULL_ATTN_QKV_BF16_ROWS8_MIN_BATCH
         && enabled_unless_disabled("KILN_DISABLE_VULKAN_FULL_ATTN_QKV_BF16W_ROWS8");
@@ -139,9 +145,18 @@ fn full_attn_qkv_gate_split_bf16w_plan(batch: usize, total_out: usize) -> (&'sta
 }
 
 fn linear_bf16w_batched_plan(batch: usize, out_dim: usize) -> (&'static str, u32) {
-    let rows4 = batch >= 16 && linear_bf16w_rows4_enabled();
-    let row_groups = if rows4 { batch.div_ceil(4) } else { batch };
-    let shader = if rows4 {
+    let rows8 = batch >= LINEAR_DECODE_BF16W_ROWS8_MIN_BATCH && linear_bf16w_rows8_enabled();
+    let rows4 = batch >= 16 && !rows8 && linear_bf16w_rows4_enabled();
+    let row_groups = if rows8 {
+        batch.div_ceil(8)
+    } else if rows4 {
+        batch.div_ceil(4)
+    } else {
+        batch
+    };
+    let shader = if rows8 {
+        shaders::LINEAR_DECODE_BATCHED_ROWS8_BF16W
+    } else if rows4 {
         shaders::LINEAR_DECODE_BATCHED_ROWS4_BF16W
     } else {
         shaders::LINEAR_DECODE_BATCHED_BF16W
