@@ -363,6 +363,13 @@ every config"):
   `model_forward_paged_decode_contiguous_batch_hidden` tries it before the
   generic hidden path. This gives non-argmax callers a resident stack route and
   keeps hidden-path declines visible by default on Vulkan.
+  **Update — multi-row sampling reaches resident hidden decode:** live Vulkan
+  batches with mixed sampling params now snapshot per-row sampling context,
+  assemble the same row-ID-keyed batched GDN state used by greedy decode, run
+  `model_forward_paged_decode_contiguous_batch_hidden_with_ids`, scatter the
+  updated resident state back to rows, and then sample from the returned hidden
+  batch. Greedy still uses the token-only resident argmax route; non-greedy
+  multi-row serving no longer has to enter the generic hidden stack first.
   **Update — Vulkan live decode batch default:** the live greedy decode batcher
   now defaults Vulkan to a 64-row max batch instead of 32; the real-model
   batching-engine actor applies the same backend-aware default when

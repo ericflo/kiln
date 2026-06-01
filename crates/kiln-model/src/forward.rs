@@ -21496,6 +21496,33 @@ fn model_forward_paged_decode_contiguous_batch_hidden(
     mut linear_state: Option<&mut LinearAttentionState>,
     lora: Option<&LoraWeights>,
 ) -> Result<Tensor> {
+    model_forward_paged_decode_contiguous_batch_hidden_with_ids(
+        backend,
+        token_ids,
+        weights,
+        config,
+        paged_cache,
+        block_tables,
+        start_positions,
+        linear_state.as_deref_mut(),
+        lora,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn model_forward_paged_decode_contiguous_batch_hidden_with_ids(
+    backend: &dyn BackendRuntime,
+    token_ids: &[u32],
+    weights: &GpuWeights,
+    config: &kiln_core::config::ModelConfig,
+    paged_cache: &PagedKvCache,
+    block_tables: &[&BlockTable],
+    start_positions: &[usize],
+    mut linear_state: Option<&mut LinearAttentionState>,
+    lora: Option<&LoraWeights>,
+    row_ids: Option<&[u64]>,
+) -> Result<Tensor> {
     #[cfg(feature = "vulkan")]
     {
         if let Some(hidden) = try_vulkan_resident_batched_decode_hidden(
@@ -21506,7 +21533,7 @@ fn model_forward_paged_decode_contiguous_batch_hidden(
             paged_cache,
             block_tables,
             start_positions,
-            None,
+            row_ids,
             linear_state.as_deref(),
             lora,
         )? {
