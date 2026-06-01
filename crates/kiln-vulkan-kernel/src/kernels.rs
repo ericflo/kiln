@@ -7,6 +7,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
 const DEFAULT_MLP_BF16_ROWS8_MIN_BATCH: usize = 256;
+const DEFAULT_FULL_ATTN_QKV_BF16_ROWS4_MIN_BATCH: usize = 2;
 const DEFAULT_LINEAR_DECODE_BF16W_ROWS8_MIN_BATCH: usize = 64;
 const DEFAULT_GDN_IN_PROJ_ROWS4_MIN_BATCH: usize = 16;
 const DEFAULT_GDN_IN_PROJ_ROWS8_MIN_BATCH: usize = 64;
@@ -102,6 +103,17 @@ pub(crate) fn gdn_in_proj_rows8_min_batch() -> usize {
             .and_then(|s| s.parse::<usize>().ok())
             .filter(|&n| n > 0)
             .unwrap_or(DEFAULT_GDN_IN_PROJ_ROWS8_MIN_BATCH)
+    })
+}
+
+pub(crate) fn full_attn_qkv_bf16w_rows4_min_batch() -> usize {
+    static VALUE: OnceLock<usize> = OnceLock::new();
+    *VALUE.get_or_init(|| {
+        std::env::var("KILN_VULKAN_FULL_ATTN_QKV_BF16_ROWS4_MIN_BATCH")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(DEFAULT_FULL_ATTN_QKV_BF16_ROWS4_MIN_BATCH)
     })
 }
 
@@ -4396,7 +4408,9 @@ fn dispatch_full_attn_qkv_decode_cached_batched_impl(
         .and_then(|n| n.checked_add(v_dim))
         .context("full_attn_qkv_decode_batched: total_out overflow")?;
     anyhow::ensure!(total_out > 0, "full_attn_qkv_decode_batched: total_out is zero");
-    let full_attn_qkv_rows4 = bf16_weights && batch >= 2 && full_attn_qkv_bf16w_rows4_enabled();
+    let full_attn_qkv_rows4 = bf16_weights
+        && batch >= full_attn_qkv_bf16w_rows4_min_batch()
+        && full_attn_qkv_bf16w_rows4_enabled();
     let glsl_path = if bf16_weights {
         if full_attn_qkv_rows4 {
             concat!(

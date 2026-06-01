@@ -1050,6 +1050,10 @@ every config"):
   `KILN_VULKAN_FULL_ATTN_QKV_BF16_ROWS8_MIN_BATCH`, defaulting to the same
   batch-64 Strix Halo setting. This mirrors the MLP, generic linear, and GDN
   in-proj threshold knobs while preserving the current measured default.
+  The rows4 crossover is now tunable too via
+  `KILN_VULKAN_FULL_ATTN_QKV_BF16_ROWS4_MIN_BATCH`, defaulting to batch 2
+  because direct block A/B on this APU showed batch 1 slower on rows4 while
+  batch 2+ favored it.
   **Update — GDN input projection rows8 is opt-in pending better hardware
   data:** the resident GDN block has a rows8 packed-BF16 input-projection
   shader that keeps QKV/Z column pairing and shares each packed weight load

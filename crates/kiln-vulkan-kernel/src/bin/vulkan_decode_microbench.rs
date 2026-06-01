@@ -50,6 +50,7 @@ const TIMED_ITERS: usize = 30;
 const REPEATS: usize = 5;
 const DEFAULT_BATCHES: &[usize] = &[1, 4, 8, 16, 32, 64];
 const DEFAULT_MLP_BF16_ROWS8_MIN_BATCH: usize = 256;
+const DEFAULT_FULL_ATTN_QKV_BF16_ROWS4_MIN_BATCH: usize = 2;
 const DEFAULT_GDN_IN_PROJ_ROWS4_MIN_BATCH: usize = 16;
 const DEFAULT_GDN_IN_PROJ_ROWS8_MIN_BATCH: usize = 64;
 const DEFAULT_FULL_ATTN_QKV_BF16_ROWS8_MIN_BATCH: usize = 64;
@@ -156,10 +157,17 @@ fn full_attn_qkv_bf16_rows8_min_batch() -> usize {
     )
 }
 
+fn full_attn_qkv_bf16_rows4_min_batch() -> usize {
+    env_usize(
+        "KILN_VULKAN_FULL_ATTN_QKV_BF16_ROWS4_MIN_BATCH",
+        DEFAULT_FULL_ATTN_QKV_BF16_ROWS4_MIN_BATCH,
+    )
+}
+
 fn full_attn_qkv_gate_split_bf16w_plan(batch: usize, total_out: usize) -> (&'static str, u32) {
     let rows8 = batch >= full_attn_qkv_bf16_rows8_min_batch()
         && enabled_unless_disabled("KILN_DISABLE_VULKAN_FULL_ATTN_QKV_BF16W_ROWS8");
-    let rows4 = batch >= 2
+    let rows4 = batch >= full_attn_qkv_bf16_rows4_min_batch()
         && !rows8
         && enabled_unless_disabled("KILN_DISABLE_VULKAN_FULL_ATTN_QKV_BF16W_ROWS4");
     let row_groups = if rows8 {
