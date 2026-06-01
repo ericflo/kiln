@@ -96,6 +96,34 @@ jobs:
       - name: Test (default features)
         run: cargo test --locked -- --skip test_health_with_real_backend
 
+  candle-free-crate-tests:
+    name: Linux / candle-free crate tests (#1082 transition)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust stable
+        run: |
+          rustup set profile minimal
+          rustup default stable
+          rustc --version
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+
+      - name: Fetch dependencies
+        run: cargo fetch
+
+      - name: Test candle-free leaf crates directly
+        # During the #1082 candle removal the whole-workspace `cargo test`
+        # cannot compile `kiln-model` yet (mid-migration candle break), so
+        # the per-crate tests in already-candle-free leaf crates never run
+        # in the default job. Test them directly to keep coverage and to
+        # validate #1082 box work that lands in them (e.g. the kiln-optim
+        # AdamW stochastic-rounding path). None of these depend on
+        # kiln-model, so they compile and run on a GPU-less runner.
+        run: cargo test --locked -p kiln-optim
+
   cuda-candle-free:
     name: CUDA dep tree is candle-free (#1082)
     runs-on: ubuntu-22.04
