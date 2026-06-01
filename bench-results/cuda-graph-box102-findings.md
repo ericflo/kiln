@@ -75,6 +75,13 @@ replay starting from an off-by-one state that compounds. Next step: instrument G
 recurrent-state norms per replay step (does the state evolve, or is it frozen/stale?),
 and verify every GDN state buffer enters the capture arena's retained set.
 
+**Hypotheses tested + RULED OUT for BUG 2 (2026-06-01):**
+1. Metadata refresh wrong — RULED OUT (instrumented dump shows slot/attn_len/block_table all correct per replay).
+2. GDN recurrent-state double-advance during capture — RULED OUT on reading: CUDA stream capture only RECORDS (kernels don't execute), so Pass2 does not advance state; the single first-launch advances it once (`cuda_graph.rs:1648-1655` comment is correct). Snapshot/restore at `:1543-1545` is sound.
+3. `AUTO_FREE_ON_LAUNCH` freeing an arena-missed `cudaMemAllocNode` → dangling on replay — RULED OUT: switching the bs=1 `end_capture` to the batched path's `no_flags` (0) produced identical doubling.
+
+**Remaining approach for BUG 2:** differential per-layer instrumentation — capture the per-layer hidden-state norm (or logits) at decode step N via BOTH eager and graph-replay for the same inputs, and find the first layer where they diverge. That localizes which captured kernel/buffer produces wrong values on replay (candidate: a GDN conv/recurrent intermediate, an RMSNorm/residual scratch, or an attention-softmax accumulator that isn't reset/frozen between replays). This needs a small KILN_-gated dump hook in the forward, not black-box probing.
+
 ## Status of #1082 boxes 98–101
 
 - 98 (freeze-pointers allocator mode): arena exists + retains forward activations.
