@@ -325,6 +325,11 @@ every config"):
   silently retrying one row at a time. That prevents hidden throughput collapse
   back to serialized decode while still allowing explicit debug opt-in with
   `KILN_VULKAN_DECODE_BATCH_ROWWISE_RETRY=1`.
+  **Update — Vulkan generic batch fallback disabled by default:** the lower
+  multi-row greedy helper now also errors if the native resident argmax route
+  declines on Vulkan, instead of entering the generic hidden path that can
+  rowwise full-attention work internally. Debug A/B runs can opt into that path
+  with `KILN_VULKAN_DECODE_BATCH_GENERIC_FALLBACK=1`.
   **Update — Vulkan live decode batch default:** the live greedy decode batcher
   now defaults Vulkan to a 64-row max batch instead of 32; the real-model
   batching-engine actor applies the same backend-aware default when

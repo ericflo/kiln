@@ -22077,19 +22077,34 @@ pub fn model_forward_paged_decode_contiguous_batch_greedy_with_ids(
     row_ids: Option<&[u64]>,
 ) -> Result<Vec<u32>> {
     #[cfg(feature = "vulkan")]
-    if let Some(next_tokens) = try_vulkan_resident_batched_decode_argmax(
-        backend,
-        token_ids,
-        weights,
-        config,
-        paged_cache,
-        block_tables,
-        start_positions,
-        row_ids,
-        linear_state.as_deref(),
-        lora,
-    )? {
-        return Ok(next_tokens);
+    {
+        if let Some(next_tokens) = try_vulkan_resident_batched_decode_argmax(
+            backend,
+            token_ids,
+            weights,
+            config,
+            paged_cache,
+            block_tables,
+            start_positions,
+            row_ids,
+            linear_state.as_deref(),
+            lora,
+        )? {
+            return Ok(next_tokens);
+        }
+
+        if token_ids.len() > 1
+            && backend.name() == "vulkan"
+            && !kiln_core::env_flag::env_flag(
+                "KILN_VULKAN_DECODE_BATCH_GENERIC_FALLBACK",
+                false,
+            )
+        {
+            anyhow::bail!(
+                "vulkan multi-row greedy decode declined native resident path; \
+                 generic fallback disabled (set KILN_VULKAN_DECODE_BATCH_GENERIC_FALLBACK=1 to opt in)"
+            );
+        }
     }
 
     let hidden = model_forward_paged_decode_contiguous_batch_hidden(
