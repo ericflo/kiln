@@ -333,6 +333,16 @@ every config"):
   with `KILN_VULKAN_DECODE_BATCH_GENERIC_FALLBACK=1`. The serving batched-step
   wrapper uses the same gate, so it no longer swallows that error and continues
   into per-row decode by default.
+  **Update — single-row decode fallback also visible by default:** the same
+  native-required policy now covers bs=1 Vulkan decode entry points
+  (`model_forward_paged`, `_last_token`, and greedy `_last_token_greedy`).
+  If the resident token/argmax or resident logits path declines for an
+  otherwise native-eligible decode step, the call now errors unless
+  `KILN_VULKAN_DECODE_BATCH_GENERIC_FALLBACK=1` is set for explicit A/B
+  debugging. A short same-binary scheduler-width smoke also confirmed the
+  existing default should stay at 64 rows: history 256, warmup=1, timed=2,
+  repeats=1 measured batch 64 at 461.4 ms / 139 rows/s and batch 128 at
+  936.8 ms / 137 rows/s.
   **Update — Vulkan live decode batch default:** the live greedy decode batcher
   now defaults Vulkan to a 64-row max batch instead of 32; the real-model
   batching-engine actor applies the same backend-aware default when

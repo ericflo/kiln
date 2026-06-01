@@ -21884,7 +21884,7 @@ fn tensor_to_f32_flat_vec_vk(t: &Tensor) -> Result<Vec<f32>> {
     } else {
         t.to_dtype(DType::F32)?.flatten_all()?
     };
-    flat.to_vec1::<f32>()
+    Ok(flat.to_vec1::<f32>()?)
 }
 
 #[cfg(feature = "vulkan")]
@@ -22037,6 +22037,32 @@ fn try_vulkan_resident_batched_decode_argmax(
     )
 }
 
+#[cfg(feature = "vulkan")]
+fn vulkan_decode_generic_fallback_enabled() -> bool {
+    kiln_core::env_flag::env_flag("KILN_VULKAN_DECODE_BATCH_GENERIC_FALLBACK", false)
+}
+
+#[cfg(feature = "vulkan")]
+fn vulkan_native_resident_decode_required(
+    backend: &dyn BackendRuntime,
+    token_ids: &[u32],
+    start_positions: &[usize],
+    config: &kiln_core::config::ModelConfig,
+    lora: Option<&LoraWeights>,
+) -> bool {
+    backend.name() == "vulkan"
+        && !token_ids.is_empty()
+        && start_positions.len() == token_ids.len()
+        && start_positions.iter().all(|&pos| pos > 0)
+        && lora.is_none()
+        && config.attn_output_gate
+        && kiln_core::env_flag::env_flag("KILN_VK_RESIDENT_DECODE_NATIVE", true)
+        && backend.supports_resident_decode()
+        && !crate::mtp_debug::is_subop_capture_armed()
+        && !crate::mtp_debug::current_b12_layer_is_31()
+        && !crate::mtp_debug::is_mtp_single_token_self_attn_armed()
+}
+
 /// Strict batched single-token paged decode that returns greedy next-token IDs
 /// without materializing full logits when a backend has a fused argmax path.
 #[allow(clippy::too_many_arguments)]
@@ -22095,15 +22121,16 @@ pub fn model_forward_paged_decode_contiguous_batch_greedy_with_ids(
             return Ok(next_tokens);
         }
 
-        if token_ids.len() > 1
-            && backend.name() == "vulkan"
-            && !kiln_core::env_flag::env_flag(
-                "KILN_VULKAN_DECODE_BATCH_GENERIC_FALLBACK",
-                false,
-            )
+        if vulkan_native_resident_decode_required(
+            backend,
+            token_ids,
+            start_positions,
+            config,
+            lora,
+        ) && !vulkan_decode_generic_fallback_enabled()
         {
             anyhow::bail!(
-                "vulkan multi-row greedy decode declined native resident path; \
+                "vulkan greedy decode declined native resident path; \
                  generic fallback disabled (set KILN_VULKAN_DECODE_BATCH_GENERIC_FALLBACK=1 to opt in)"
             );
         }
@@ -22663,6 +22690,20 @@ pub fn model_forward_paged(
                 }
             }
         }
+
+        if vulkan_native_resident_decode_required(
+            backend,
+            token_ids,
+            &[start_pos],
+            config,
+            lora,
+        ) && !vulkan_decode_generic_fallback_enabled()
+        {
+            anyhow::bail!(
+                "vulkan decode declined native resident path; \
+                 generic fallback disabled (set KILN_VULKAN_DECODE_BATCH_GENERIC_FALLBACK=1 to opt in)"
+            );
+        }
     }
 
     let (logits, _hidden, _token) = model_forward_paged_inner(
@@ -22862,6 +22903,20 @@ pub fn model_forward_paged_last_token(
                 }
             }
         }
+
+        if vulkan_native_resident_decode_required(
+            backend,
+            token_ids,
+            &[start_pos],
+            config,
+            lora,
+        ) && !vulkan_decode_generic_fallback_enabled()
+        {
+            anyhow::bail!(
+                "vulkan last-token decode declined native resident path; \
+                 generic fallback disabled (set KILN_VULKAN_DECODE_BATCH_GENERIC_FALLBACK=1 to opt in)"
+            );
+        }
     }
 
     let (logits, _hidden, _token) = model_forward_paged_inner(
@@ -22890,7 +22945,8 @@ pub fn model_forward_paged_last_token(
 /// Vulkan-resident decode entry-point. Same signature as
 /// [`model_forward_paged_last_token`]; routes through the Vulkan-resident
 /// dispatchers when the backend supports it AND the per-step buffer pool
-/// is feasible, else falls back transparently to the per-call Tensor path.
+/// is feasible. Vulkan decode declines are visible by default; set
+/// `KILN_VULKAN_DECODE_BATCH_GENERIC_FALLBACK=1` for explicit A/B fallback.
 ///
 /// Gate (a)/(c) of `docs/vk_resident_decode_plan.md`. The runtime predicate
 /// `Backend::supports_resident_decode()` returns `false` on CPU / CUDA /
@@ -22900,11 +22956,9 @@ pub fn model_forward_paged_last_token(
 /// cached on the backend.
 ///
 /// This entry point is a strict superset of `model_forward_paged_last_token`:
-/// the resident path is a fast-path overlay, and any code path it can't
-/// service yet delegates to the legacy function. Callers can switch to this
-/// entry point without behavioural change while the layer-by-layer
-/// resident wiring fills in (gate (e) measurable wins arrive progressively
-/// as more layer types route through the resident dispatchers).
+/// the resident path is a fast-path overlay for non-Vulkan backends. On Vulkan,
+/// native-eligible decode failures stop instead of silently moving to a slower
+/// generic route, so occupancy regressions are caught where they happen.
 #[allow(clippy::too_many_arguments)]
 pub fn model_forward_paged_last_token_resident(
     backend: &dyn BackendRuntime,
@@ -23562,6 +23616,20 @@ pub fn model_forward_paged_last_token_greedy(
                     return Ok(best_idx);
                 }
             }
+        }
+
+        if vulkan_native_resident_decode_required(
+            backend,
+            token_ids,
+            &start_positions,
+            config,
+            lora,
+        ) && !vulkan_decode_generic_fallback_enabled()
+        {
+            anyhow::bail!(
+                "vulkan greedy decode declined native resident path; \
+                 generic fallback disabled (set KILN_VULKAN_DECODE_BATCH_GENERIC_FALLBACK=1 to opt in)"
+            );
         }
     }
 
