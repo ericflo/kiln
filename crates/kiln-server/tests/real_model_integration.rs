@@ -626,7 +626,6 @@ async fn test_real_model_chat_completion_metal() {
     if kiln_model::backend::metal::try_new_metal().is_none() {
         return;
     }
-    let _gpu = metal_gpu_guard();
     let device = Device::Metal(0);
 
     let config = tiny_config();
@@ -693,7 +692,6 @@ async fn test_real_model_chat_completion_metal_bf16_fused() {
     if kiln_model::backend::metal::try_new_metal().is_none() {
         return;
     }
-    let _gpu = metal_gpu_guard();
     let device = Device::Metal(0);
 
     let mut config = tiny_config();
@@ -793,21 +791,14 @@ fn metal_chat_msg(role: &str, content: &str) -> kiln_train::ChatMessage {
     }
 }
 
-/// Serialize GPU-heavy Metal tests in this binary. The process-global
-/// `MetalCompanion` command pool is shared across all threads; concurrent
-/// submission from cargo's parallel test threads perturbs BF16 numerics
-/// (different reduction ordering), which the marginal training-loss-decrease
-/// assertions are sensitive to. Holding this lock makes each GPU test run in
-/// isolation (matching the deterministic single-run behavior). NOTE: the
-/// underlying concurrency sensitivity of the shared Metal companion is a real
-/// follow-up beyond these smokes.
-#[cfg(feature = "metal")]
-fn metal_gpu_guard() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-    LOCK.get_or_init(|| std::sync::Mutex::new(()))
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
+// The former `metal_gpu_guard()` process-global serialization mutex was
+// removed (#1082): the shared `MetalCompanion` command-buffer stream is now
+// correct under cross-thread concurrency (the deferred-commit pool no longer
+// reorders data-dependent ops across command buffers — see the re-architected
+// `kiln_tensor::metal_rt::commands`). These GPU-heavy Metal smokes now run
+// concurrently with cargo's parallel test threads and remain deterministic,
+// which is exactly the production guarantee (server inference races a training
+// job on the same GPU).
 
 #[cfg(feature = "metal")]
 fn assert_adapter_written(out: &std::path::Path) {
@@ -894,7 +885,6 @@ fn test_real_model_sft_metal() {
         eprintln!("No Metal device — skipping SFT-on-Metal smoke");
         return;
     }
-    let _gpu = metal_gpu_guard();
     let device = Device::Metal(0);
     let mut config = tiny_config();
     config.dtype = kiln_core::config::DType::BF16;
@@ -977,7 +967,6 @@ fn test_real_model_grpo_metal() {
         eprintln!("No Metal device — skipping GRPO-on-Metal smoke");
         return;
     }
-    let _gpu = metal_gpu_guard();
     let device = Device::Metal(0);
     let mut config = tiny_config();
     config.dtype = kiln_core::config::DType::BF16;
@@ -1116,7 +1105,6 @@ fn test_real_model_opd_metal() {
         eprintln!("No Metal device — skipping OPD-on-Metal smoke");
         return;
     }
-    let _gpu = metal_gpu_guard();
     let device = Device::Metal(0);
     let mut config = tiny_config();
     config.dtype = kiln_core::config::DType::BF16;
