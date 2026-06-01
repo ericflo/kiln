@@ -17,13 +17,8 @@
 #![cfg(feature = "vulkan")]
 
 use anyhow::Result;
-// TODO(#1082): inline-qualify the remaining `candle_core::*` sites once kiln_model's
-// `GpuWeights`, the `VkTensor::from_candle` upload boundary, and
-// `candle_core::safetensors::{load,save}` I/O accept kt::Tensor instead of candle
-// Tensor. As of this commit those APIs still require candle types. Every candle
-// reference in this file is now spelled `candle_core::*` inline so the file has no
-// top-level `use candle_*` import (mirrors the kiln-vulkan-kernel/kernels.rs pattern
-// from PR f476cb97).
+// (#1082) candle-free: safetensors weight-readback uses
+// `kiln_tensor::safetensors::load_cpu` (same HashMap<String, Tensor> contract).
 use kiln_core::config::{DType, ModelConfig};
 use kiln_core::tokenizer::KilnTokenizer;
 use kiln_model::forward::{
@@ -1809,7 +1804,7 @@ fn vk_native_full_pipeline_saves_loadable_adapter() -> Result<()> {
     let alpha = 8.0;
     save_vk_lora_adapter(&lora_layers, rank, alpha, &tmp)?;
     // Read it back via candle safetensors and verify keys
-    let loaded = candle_core::safetensors::load(&tmp, &candle_core::Device::Cpu)?;
+    let loaded = kiln_tensor::safetensors::load_cpu(&tmp)?;
     println!("vk_native_full_pipeline saved {} tensors", loaded.len());
     for key in [
         "self_attn.q_proj.lora_A.weight",
@@ -2105,10 +2100,7 @@ fn vk_native_grpo_jsonl_smoke_streams_and_saves_adapter() -> Result<()> {
     )?;
 
     let loaded =
-        candle_core::safetensors::load(
-            out.join("adapter_model.safetensors"),
-            &candle_core::Device::Cpu,
-        )?;
+        kiln_tensor::safetensors::load_cpu(out.join("adapter_model.safetensors"))?;
     assert_vk_adapter_config_targets(&out)?;
     for key in [
         "self_attn.q_proj.lora_A.weight",
@@ -2131,7 +2123,7 @@ fn vk_native_grpo_jsonl_smoke_streams_and_saves_adapter() -> Result<()> {
     );
     assert_vk_adapter_config_targets(checkpoint.parent().unwrap())?;
     let checkpoint_loaded =
-        candle_core::safetensors::load(&checkpoint, &candle_core::Device::Cpu)?;
+        kiln_tensor::safetensors::load_cpu(&checkpoint)?;
     assert!(
         checkpoint_loaded
             .keys()
@@ -2425,7 +2417,7 @@ fn vk_native_opd_train_smoke_saves_adapter() -> Result<()> {
         "vk-native OPD adapter not found at {}",
         adapter_path.display()
     );
-    let loaded = candle_core::safetensors::load(&adapter_path, &candle_core::Device::Cpu)?;
+    let loaded = kiln_tensor::safetensors::load_cpu(&adapter_path)?;
     for key in [
         "self_attn.q_proj.lora_A.weight",
         "self_attn.o_proj.lora_A.weight",
@@ -2888,7 +2880,7 @@ fn vk_gdn_lora_recompute_updates_and_saves_gdn_targets() -> Result<()> {
         std::process::id()
     ));
     save_vk_lora_adapter(&lora_layers, 4, 8.0, &tmp)?;
-    let loaded = candle_core::safetensors::load(&tmp, &candle_core::Device::Cpu)?;
+    let loaded = kiln_tensor::safetensors::load_cpu(&tmp)?;
     for key in [
         "self_attn.in_proj_qkv.lora_A.weight",
         "self_attn.in_proj_z.lora_A.weight",
