@@ -329,7 +329,9 @@ every config"):
   multi-row greedy helper now also errors if the native resident argmax route
   declines on Vulkan, instead of entering the generic hidden path that can
   rowwise full-attention work internally. Debug A/B runs can opt into that path
-  with `KILN_VULKAN_DECODE_BATCH_GENERIC_FALLBACK=1`.
+  with `KILN_VULKAN_DECODE_BATCH_GENERIC_FALLBACK=1`. The serving batched-step
+  wrapper uses the same gate, so it no longer swallows that error and continues
+  into per-row decode by default.
   **Update — Vulkan live decode batch default:** the live greedy decode batcher
   now defaults Vulkan to a 64-row max batch instead of 32; the real-model
   batching-engine actor applies the same backend-aware default when

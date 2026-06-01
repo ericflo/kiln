@@ -670,6 +670,14 @@ fn decode_batcher_rowwise_retry_enabled(backend: &dyn BackendRuntime) -> bool {
     }
 }
 
+fn decode_batch_generic_fallback_enabled(backend: &dyn BackendRuntime) -> bool {
+    if backend.name() == "vulkan" {
+        env_flag_enabled("KILN_VULKAN_DECODE_BATCH_GENERIC_FALLBACK", false)
+    } else {
+        true
+    }
+}
+
 /// Shared live decode rendezvous for greedy streaming requests.
 ///
 /// Requests keep ownership of stop handling, output routing, block lifetime,
@@ -2856,6 +2864,11 @@ impl ModelRunner {
             };
             match result {
                 Ok(tokens) => sampled = Some(tokens),
+                Err(err) if !decode_batch_generic_fallback_enabled(&*self.backend) => {
+                    return Err(err).context(
+                        "contiguous-batched decode declined and generic fallback is disabled",
+                    );
+                }
                 Err(err) => {
                     tracing::debug!(
                         batch = row_count,
