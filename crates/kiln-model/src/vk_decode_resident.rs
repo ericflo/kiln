@@ -348,6 +348,19 @@ fn gdn_in_proj_bf16w_batched_plan(
     (shader, (row_groups * dispatch_cols.div_ceil(80)) as u32)
 }
 
+fn gdn_qk_norm_recurrent_fusion_enabled(
+    batch_size: usize,
+    gqa_ratio: usize,
+    dk: usize,
+    dv: usize,
+) -> bool {
+    (2..=16).contains(&batch_size)
+        && gqa_ratio == 2
+        && dk == dv
+        && gqa_ratio * dv <= 256
+        && enabled_unless_disabled("KILN_DISABLE_VULKAN_GDN_QK_NORM_RECURRENT_FUSION")
+}
+
 /// Print accumulated per-block timing to stderr and zero the counters.
 /// Call from the bench / harness once per decode token to see a
 /// per-token breakdown.
@@ -2649,6 +2662,10 @@ pub fn record_gdn_block_batched_into(
         gdn_in_proj_shader == shaders::GDN_IN_PROJ_DECODE_BATCHED_PAIR_QKV_Z_ROWS4_BF16W
             && env_truthy("KILN_ENABLE_VULKAN_GDN_IN_PROJ_CONV_SPLIT_FUSION")
             && enabled_unless_disabled("KILN_DISABLE_VULKAN_GDN_IN_PROJ_CONV_SPLIT_FUSION");
+    let gqa_ratio = nv / nk;
+    debug_assert!(gqa_ratio * nk == nv, "GDN nv must be a multiple of nk");
+    let fuse_qk_norm_recurrent =
+        gdn_qk_norm_recurrent_fusion_enabled(batch_size, gqa_ratio, dk, dv);
 
     let normed_pre =
         backend.acquire_resident_scratch("ngd_b_normed_pre", (batch_size * hidden * 4) as u64)?;
@@ -2665,10 +2682,22 @@ pub fn record_gdn_block_batched_into(
     let b_buf = backend.acquire_resident_scratch("ngd_b_b", (batch_size * b_dim * 4) as u64)?;
     let q_buf = backend.acquire_resident_scratch("ngd_b_q", (batch_size * qk_dim * 4) as u64)?;
     let k_buf = backend.acquire_resident_scratch("ngd_b_k", (batch_size * qk_dim * 4) as u64)?;
-    let q_expanded =
-        backend.acquire_resident_scratch("ngd_b_q_expanded", (batch_size * nv * dk * 4) as u64)?;
-    let k_expanded =
-        backend.acquire_resident_scratch("ngd_b_k_expanded", (batch_size * nv * dk * 4) as u64)?;
+    let q_expanded = if fuse_qk_norm_recurrent {
+        None
+    } else {
+        Some(
+            backend
+                .acquire_resident_scratch("ngd_b_q_expanded", (batch_size * nv * dk * 4) as u64)?,
+        )
+    };
+    let k_expanded = if fuse_qk_norm_recurrent {
+        None
+    } else {
+        Some(
+            backend
+                .acquire_resident_scratch("ngd_b_k_expanded", (batch_size * nv * dk * 4) as u64)?,
+        )
+    };
     let v_buf = backend.acquire_resident_scratch("ngd_b_v", (batch_size * v_dim * 4) as u64)?;
     let gated_norm =
         backend.acquire_resident_scratch("ngd_b_gated_norm", (batch_size * v_dim * 4) as u64)?;
@@ -2771,47 +2800,82 @@ pub fn record_gdn_block_batched_into(
         )?;
     }
 
-    let gqa_ratio = nv / nk;
-    debug_assert!(gqa_ratio * nk == nv, "GDN nv must be a multiple of nk");
     let l2_eps_qk: f32 = 1e-6;
     let q_scale: f32 = 1.0 / (dk as f32).sqrt();
     let k_scale: f32 = 1.0;
-    batch.record_shader(
-        shaders::L2_NORM_QK_PER_ROW,
-        &[
-            q_buf.handle(),
-            k_buf.handle(),
-            q_expanded.handle(),
-            k_expanded.handle(),
-        ],
-        &[
-            (batch_size * nk) as u32,
-            dk as u32,
-            l2_eps_qk.to_bits(),
-            q_scale.to_bits(),
-            k_scale.to_bits(),
-            gqa_ratio as u32,
-        ],
-        Workgroups::OneD((batch_size * nk) as u32),
-    )?;
-    batch.record_shader(
-        shaders::GDN_DECODE_GATES_RECURRENT_RMSNORM,
-        &[
-            q_expanded.handle(),
-            k_expanded.handle(),
-            v_buf.handle(),
-            a_buf.handle(),
-            b_buf.handle(),
-            a_log.handle(),
-            dt_bias.handle(),
-            recurrent_buf.handle(),
-            z_buf.handle(),
-            qk_norm.handle(),
-            gated_norm.handle(),
-        ],
-        &[nv as u32, dk as u32, dv as u32, eps.to_bits(), batch_size as u32],
-        Workgroups::OneD((batch_size * nv) as u32),
-    )?;
+    if fuse_qk_norm_recurrent {
+        batch.record_shader(
+            shaders::GDN_DECODE_QK_NORM_GATES_RECURRENT_RMSNORM,
+            &[
+                q_buf.handle(),
+                k_buf.handle(),
+                v_buf.handle(),
+                a_buf.handle(),
+                b_buf.handle(),
+                a_log.handle(),
+                dt_bias.handle(),
+                recurrent_buf.handle(),
+                z_buf.handle(),
+                qk_norm.handle(),
+                gated_norm.handle(),
+            ],
+            &[
+                nk as u32,
+                dk as u32,
+                dv as u32,
+                eps.to_bits(),
+                batch_size as u32,
+                gqa_ratio as u32,
+                l2_eps_qk.to_bits(),
+                q_scale.to_bits(),
+                k_scale.to_bits(),
+            ],
+            Workgroups::OneD((batch_size * nk) as u32),
+        )?;
+    } else {
+        let q_expanded = q_expanded
+            .as_ref()
+            .context("batched GDN block missing expanded Q scratch")?;
+        let k_expanded = k_expanded
+            .as_ref()
+            .context("batched GDN block missing expanded K scratch")?;
+        batch.record_shader(
+            shaders::L2_NORM_QK_PER_ROW,
+            &[
+                q_buf.handle(),
+                k_buf.handle(),
+                q_expanded.handle(),
+                k_expanded.handle(),
+            ],
+            &[
+                (batch_size * nk) as u32,
+                dk as u32,
+                l2_eps_qk.to_bits(),
+                q_scale.to_bits(),
+                k_scale.to_bits(),
+                gqa_ratio as u32,
+            ],
+            Workgroups::OneD((batch_size * nk) as u32),
+        )?;
+        batch.record_shader(
+            shaders::GDN_DECODE_GATES_RECURRENT_RMSNORM,
+            &[
+                q_expanded.handle(),
+                k_expanded.handle(),
+                v_buf.handle(),
+                a_buf.handle(),
+                b_buf.handle(),
+                a_log.handle(),
+                dt_bias.handle(),
+                recurrent_buf.handle(),
+                z_buf.handle(),
+                qk_norm.handle(),
+                gated_norm.handle(),
+            ],
+            &[nv as u32, dk as u32, dv as u32, eps.to_bits(), batch_size as u32],
+            Workgroups::OneD((batch_size * nv) as u32),
+        )?;
+    }
     let (gdn_out_shader, gdn_out_workgroups) = linear_bf16w_batched_plan(batch_size, hidden);
     batch.record_shader(
         gdn_out_shader,

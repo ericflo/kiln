@@ -146,6 +146,8 @@ pub mod shaders {
         shader_path!("gdn_in_proj_decode_batched_pair_qkv_z_rows8_bf16w");
     pub const GDN_DECODE_GATES_RECURRENT_RMSNORM: &str =
         shader_path!("gdn_decode_gates_recurrent_rmsnorm");
+    pub const GDN_DECODE_QK_NORM_GATES_RECURRENT_RMSNORM: &str =
+        shader_path!("gdn_decode_qk_norm_gates_recurrent_rmsnorm");
     pub const L2_NORM_PER_ROW: &str = shader_path!("l2_norm_per_row");
     pub const L2_NORM_QK_PER_ROW: &str = shader_path!("l2_norm_qk_per_row");
     pub const CAUSAL_CONV1D: &str = shader_path!("causal_conv1d");

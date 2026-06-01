@@ -1,0 +1,155 @@
+// Fused GDN Q/K L2 normalization + recurrent update + gated RMSNorm.
+//
+// Workgroup grid: one group per [batch, input_key_head]. For Qwen3.5-4B
+// GDN decode this means one group normalizes a Q/K row once, then processes
+// the two GQA-replicated value heads that share that normalized row.
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint nk;
+    uint dk;
+    uint dv;
+    float eps;
+    uint batch;
+    uint gqa_ratio;
+    float l2_eps;
+    float q_scale;
+    float k_scale;
+};
+
+layout(binding = 0) readonly buffer QBuf { float data_q[]; };
+layout(binding = 1) readonly buffer KBuf { float data_k[]; };
+layout(binding = 2) readonly buffer VBuf { float data_v[]; };
+layout(binding = 3) readonly buffer ABuf { float data_a[]; };
+layout(binding = 4) readonly buffer BBuf { float data_b[]; };
+layout(binding = 5) readonly buffer ALogBuf { float data_a_log[]; };
+layout(binding = 6) readonly buffer DtBiasBuf { float data_dt_bias[]; };
+layout(binding = 7) buffer StateBuf { float data_state[]; };
+layout(binding = 8) readonly buffer ZBuf { float data_z[]; };
+layout(binding = 9) readonly buffer WeightBuf { float data_weight[]; };
+layout(binding = 10) writeonly buffer OutBuf { float data_out[]; };
+
+shared float q_sq_partial[256];
+shared float k_sq_partial[256];
+shared float q_norm[256];
+shared float k_norm[256];
+shared float raw_out[256];
+shared float rms_partial[256];
+shared float rms_inv_shared[8];
+
+float stable_sigmoid(float x) {
+    if (x >= 0.0) {
+        return 1.0 / (1.0 + exp(-x));
+    }
+    float ex = exp(x);
+    return ex / (1.0 + ex);
+}
+
+float stable_softplus(float x) {
+    return max(x, 0.0) + log(1.0 + exp(-abs(x)));
+}
+
+void main() {
+    uint group = gl_WorkGroupID.x;
+    uint bidx = group / nk;
+    uint kh = group - bidx * nk;
+    if (bidx >= batch || kh >= nk) {
+        return;
+    }
+
+    uint tid = gl_LocalInvocationID.x;
+    uint nv = nk * gqa_ratio;
+    uint key_base = (bidx * nk + kh) * dk;
+
+    float q_sq = 0.0;
+    float k_sq = 0.0;
+    for (uint i = tid; i < dk; i += 256u) {
+        float qv = data_q[key_base + i];
+        float kv = data_k[key_base + i];
+        q_sq += qv * qv;
+        k_sq += kv * kv;
+    }
+    q_sq_partial[tid] = q_sq;
+    k_sq_partial[tid] = k_sq;
+    barrier();
+
+    for (uint stride = 128u; stride > 0u; stride >>= 1u) {
+        if (tid < stride) {
+            q_sq_partial[tid] += q_sq_partial[tid + stride];
+            k_sq_partial[tid] += k_sq_partial[tid + stride];
+        }
+        barrier();
+    }
+
+    float q_coef = inversesqrt(q_sq_partial[0] + l2_eps) * q_scale;
+    float k_coef = inversesqrt(k_sq_partial[0] + l2_eps) * k_scale;
+    if (tid < dk) {
+        q_norm[tid] = data_q[key_base + tid] * q_coef;
+        k_norm[tid] = data_k[key_base + tid] * k_coef;
+    }
+    barrier();
+
+    uint total_value_lanes = gqa_ratio * dv;
+    if (tid < total_value_lanes) {
+        uint copy = tid / dv;
+        uint d = tid - copy * dv;
+        uint vh = kh * gqa_ratio + copy;
+        uint head_base = bidx * nv + vh;
+        uint v_base = head_base * dv;
+        uint state_base = head_base * dk * dv;
+
+        float beta = stable_sigmoid(data_b[head_base]);
+        float gate = -exp(data_a_log[vh]) * stable_softplus(data_a[head_base] + data_dt_bias[vh]);
+        float decay = exp(gate);
+
+        float v_pred = 0.0;
+        float q_state = 0.0;
+        float qk_dot = 0.0;
+        for (uint i = 0u; i < dk; i++) {
+            float qi = q_norm[i];
+            float ki = k_norm[i];
+            float decayed_s = decay * data_state[state_base + i * dv + d];
+            v_pred += ki * decayed_s;
+            q_state += qi * decayed_s;
+            qk_dot += qi * ki;
+        }
+
+        float delta = beta * (data_v[v_base + d] - v_pred);
+        for (uint i = 0u; i < dk; i++) {
+            uint state_idx = state_base + i * dv + d;
+            float new_s = decay * data_state[state_idx] + k_norm[i] * delta;
+            data_state[state_idx] = new_s;
+        }
+
+        float out_acc = q_state + delta * qk_dot;
+        raw_out[tid] = out_acc;
+        rms_partial[tid] = out_acc * out_acc;
+    } else {
+        rms_partial[tid] = 0.0;
+    }
+    barrier();
+
+    if (tid < gqa_ratio) {
+        float sum_sq = 0.0;
+        uint base = tid * dv;
+        for (uint d = 0u; d < dv; d++) {
+            sum_sq += rms_partial[base + d];
+        }
+        rms_inv_shared[tid] = inversesqrt(sum_sq / float(dv) + eps);
+    }
+    barrier();
+
+    if (tid < total_value_lanes) {
+        uint copy = tid / dv;
+        uint d = tid - copy * dv;
+        uint vh = kh * gqa_ratio + copy;
+        uint head_base = bidx * nv + vh;
+        float zv = data_z[head_base * dv + d];
+        float silu_z = zv * stable_sigmoid(zv);
+        data_out[head_base * dv + d] =
+            raw_out[tid] * rms_inv_shared[copy] * data_weight[d] * silu_z;
+    }
+}

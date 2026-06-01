@@ -790,6 +790,21 @@ every config"):
   4694 rows/s. A production-shaped `full_token_resident_mixed_paged` check
   with history 256, warmup=2, timed=4, repeats=3 measured batch 32 at
   233.8 ms / 137 rows/s and batch 64 at 451.9 ms / 142 rows/s.
+  **Update — GDN Q/K norm and recurrent small-batch fusion:** added a Vulkan
+  shader that normalizes each raw Q/K key-head row once, keeps the normalized
+  row in shared memory, and immediately runs the two GQA-replicated recurrent
+  value-head lanes plus gated RMSNorm. The resident batched route enables it
+  only for batch 2..16 with Qwen3.5's GQA ratio 2 and equal Q/K/V head dims;
+  batch 1 and batch 32+ stay on the prior two-dispatch path because same-device
+  A/B did not show a saturated-batch win. Correctness check
+  `gdn_qk_norm_recurrent_fusion_matches_two_dispatch_path` compares output and
+  mutated recurrent state against the existing two-dispatch route. Focused
+  mixed-paged history-256 A/B measured batch 16 at 135.6 ms / 118 rows/s with
+  the fused path versus 137.3 ms / 117 rows/s with it disabled, while batch 64
+  remains on the prior route and measured about 450.1 ms / 142 rows/s. The
+  GDN-block-only A/B was noisier and slightly favored the old route at batch
+  16 (4.128 ms fused versus 4.097 ms disabled), so the default gate is based
+  on the production-shaped mixed-token route rather than the isolated block.
   **Update — resident scratch pool drops dead MLP outputs:** the single-row
   full-attention and GDN resident recorders no longer acquire unused
   `nfa_mlp_out` / `ngd_mlp_out` scratch buffers. The fused down+residual

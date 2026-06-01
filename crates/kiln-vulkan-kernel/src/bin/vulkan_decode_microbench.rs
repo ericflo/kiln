@@ -335,6 +335,14 @@ fn gdn_in_proj_conv_split_fused(shader: &'static str) -> bool {
         && enabled_unless_disabled("KILN_DISABLE_VULKAN_GDN_IN_PROJ_CONV_SPLIT_FUSION")
 }
 
+fn gdn_qk_norm_recurrent_fused(batch: usize, gqa_ratio: usize, dk: usize, dv: usize) -> bool {
+    (2..=16).contains(&batch)
+        && gqa_ratio == 2
+        && dk == dv
+        && gqa_ratio * dv <= 256
+        && enabled_unless_disabled("KILN_DISABLE_VULKAN_GDN_QK_NORM_RECURRENT_FUSION")
+}
+
 fn time<F: FnMut() -> Result<()>>(label: &str, batch: usize, mut f: F) -> Result<()> {
     let warmup_iters = env_usize("KILN_VK_MICROBENCH_WARMUP", WARMUP_ITERS);
     let timed_iters = env_usize("KILN_VK_MICROBENCH_TIMED", TIMED_ITERS);
@@ -1201,48 +1209,84 @@ fn run_full_token_resident_mixed_batched(
                     }
                     let l2_eps = 1e-6f32;
                     let q_scale = 1.0f32 / (GDN_HEAD_DIM as f32).sqrt();
-                    b.record_shader(
-                        shaders::L2_NORM_QK_PER_ROW,
-                        &[
-                            gdn_q_buf.handle(),
-                            gdn_k_buf.handle(),
-                            gdn_q_expanded.handle(),
-                            gdn_k_expanded.handle(),
-                        ],
-                        &[
-                            (batch * GDN_NUM_KEY_HEADS) as u32,
-                            GDN_HEAD_DIM as u32,
-                            l2_eps.to_bits(),
-                            q_scale.to_bits(),
-                            1.0f32.to_bits(),
-                            gdn_gqa_ratio as u32,
-                        ],
-                        Workgroups::OneD((batch * GDN_NUM_KEY_HEADS) as u32),
-                    )?;
-                    b.record_shader(
-                        shaders::GDN_DECODE_GATES_RECURRENT_RMSNORM,
-                        &[
-                            gdn_q_expanded.handle(),
-                            gdn_k_expanded.handle(),
-                            gdn_v_buf.handle(),
-                            gdn_a_buf.handle(),
-                            gdn_b_buf.handle(),
-                            gdn_a_log.handle(),
-                            gdn_dt_bias.handle(),
-                            gdn_recurrent_state.handle(),
-                            gdn_z_buf.handle(),
-                            gdn_recurrent_norm_w.handle(),
-                            gdn_gated_norm.handle(),
-                        ],
-                        &[
-                            GDN_NUM_VALUE_HEADS as u32,
-                            GDN_HEAD_DIM as u32,
-                            GDN_HEAD_DIM as u32,
-                            eps.to_bits(),
-                            batch as u32,
-                        ],
-                        Workgroups::OneD((batch * GDN_NUM_VALUE_HEADS) as u32),
-                    )?;
+                    if gdn_qk_norm_recurrent_fused(
+                        batch,
+                        gdn_gqa_ratio,
+                        GDN_HEAD_DIM,
+                        GDN_HEAD_DIM,
+                    ) {
+                        b.record_shader(
+                            shaders::GDN_DECODE_QK_NORM_GATES_RECURRENT_RMSNORM,
+                            &[
+                                gdn_q_buf.handle(),
+                                gdn_k_buf.handle(),
+                                gdn_v_buf.handle(),
+                                gdn_a_buf.handle(),
+                                gdn_b_buf.handle(),
+                                gdn_a_log.handle(),
+                                gdn_dt_bias.handle(),
+                                gdn_recurrent_state.handle(),
+                                gdn_z_buf.handle(),
+                                gdn_recurrent_norm_w.handle(),
+                                gdn_gated_norm.handle(),
+                            ],
+                            &[
+                                GDN_NUM_KEY_HEADS as u32,
+                                GDN_HEAD_DIM as u32,
+                                GDN_HEAD_DIM as u32,
+                                eps.to_bits(),
+                                batch as u32,
+                                gdn_gqa_ratio as u32,
+                                l2_eps.to_bits(),
+                                q_scale.to_bits(),
+                                1.0f32.to_bits(),
+                            ],
+                            Workgroups::OneD((batch * GDN_NUM_KEY_HEADS) as u32),
+                        )?;
+                    } else {
+                        b.record_shader(
+                            shaders::L2_NORM_QK_PER_ROW,
+                            &[
+                                gdn_q_buf.handle(),
+                                gdn_k_buf.handle(),
+                                gdn_q_expanded.handle(),
+                                gdn_k_expanded.handle(),
+                            ],
+                            &[
+                                (batch * GDN_NUM_KEY_HEADS) as u32,
+                                GDN_HEAD_DIM as u32,
+                                l2_eps.to_bits(),
+                                q_scale.to_bits(),
+                                1.0f32.to_bits(),
+                                gdn_gqa_ratio as u32,
+                            ],
+                            Workgroups::OneD((batch * GDN_NUM_KEY_HEADS) as u32),
+                        )?;
+                        b.record_shader(
+                            shaders::GDN_DECODE_GATES_RECURRENT_RMSNORM,
+                            &[
+                                gdn_q_expanded.handle(),
+                                gdn_k_expanded.handle(),
+                                gdn_v_buf.handle(),
+                                gdn_a_buf.handle(),
+                                gdn_b_buf.handle(),
+                                gdn_a_log.handle(),
+                                gdn_dt_bias.handle(),
+                                gdn_recurrent_state.handle(),
+                                gdn_z_buf.handle(),
+                                gdn_recurrent_norm_w.handle(),
+                                gdn_gated_norm.handle(),
+                            ],
+                            &[
+                                GDN_NUM_VALUE_HEADS as u32,
+                                GDN_HEAD_DIM as u32,
+                                GDN_HEAD_DIM as u32,
+                                eps.to_bits(),
+                                batch as u32,
+                            ],
+                            Workgroups::OneD((batch * GDN_NUM_VALUE_HEADS) as u32),
+                        )?;
+                    }
                     let (gdn_out_shader, gdn_out_workgroups) =
                         linear_bf16w_batched_plan(batch, HIDDEN);
                     b.record_shader(
@@ -1319,7 +1363,7 @@ fn run_gdn_block_resident_batched(
     use kiln_vulkan_kernel::Workgroups;
 
     println!(
-        "== gdn_block_resident_batched (GDN block + MLP, 9 kernels into 1 cmd-buffer; opt-in rows4 conv-split fusion records 8) =="
+        "== gdn_block_resident_batched (GDN block + MLP, one cmd-buffer; default QK/recurrent fusion records 8 at batch 2..16, opt-in rows4 conv-split can record 7) =="
     );
 
     let conv_kernel = 4usize;
@@ -1471,48 +1515,79 @@ fn run_gdn_block_resident_batched(
             }
             let l2_eps = 1e-6f32;
             let q_scale = 1.0f32 / (GDN_HEAD_DIM as f32).sqrt();
-            b.record_shader(
-                shaders::L2_NORM_QK_PER_ROW,
-                &[
-                    q_buf.handle(),
-                    k_buf.handle(),
-                    q_expanded.handle(),
-                    k_expanded.handle(),
-                ],
-                &[
-                    (batch * GDN_NUM_KEY_HEADS) as u32,
-                    GDN_HEAD_DIM as u32,
-                    l2_eps.to_bits(),
-                    q_scale.to_bits(),
-                    1.0f32.to_bits(),
-                    gqa_ratio as u32,
-                ],
-                Workgroups::OneD((batch * GDN_NUM_KEY_HEADS) as u32),
-            )?;
-            b.record_shader(
-                shaders::GDN_DECODE_GATES_RECURRENT_RMSNORM,
-                &[
-                    q_expanded.handle(),
-                    k_expanded.handle(),
-                    v_buf.handle(),
-                    a_buf.handle(),
-                    b_buf.handle(),
-                    a_log.handle(),
-                    dt_bias.handle(),
-                    recurrent_state.handle(),
-                    z_buf.handle(),
-                    recurrent_norm_w.handle(),
-                    gated_norm.handle(),
-                ],
-                &[
-                    GDN_NUM_VALUE_HEADS as u32,
-                    GDN_HEAD_DIM as u32,
-                    GDN_HEAD_DIM as u32,
-                    eps.to_bits(),
-                    batch as u32,
-                ],
-                Workgroups::OneD((batch * GDN_NUM_VALUE_HEADS) as u32),
-            )?;
+            if gdn_qk_norm_recurrent_fused(batch, gqa_ratio, GDN_HEAD_DIM, GDN_HEAD_DIM) {
+                b.record_shader(
+                    shaders::GDN_DECODE_QK_NORM_GATES_RECURRENT_RMSNORM,
+                    &[
+                        q_buf.handle(),
+                        k_buf.handle(),
+                        v_buf.handle(),
+                        a_buf.handle(),
+                        b_buf.handle(),
+                        a_log.handle(),
+                        dt_bias.handle(),
+                        recurrent_state.handle(),
+                        z_buf.handle(),
+                        recurrent_norm_w.handle(),
+                        gated_norm.handle(),
+                    ],
+                    &[
+                        GDN_NUM_KEY_HEADS as u32,
+                        GDN_HEAD_DIM as u32,
+                        GDN_HEAD_DIM as u32,
+                        eps.to_bits(),
+                        batch as u32,
+                        gqa_ratio as u32,
+                        l2_eps.to_bits(),
+                        q_scale.to_bits(),
+                        1.0f32.to_bits(),
+                    ],
+                    Workgroups::OneD((batch * GDN_NUM_KEY_HEADS) as u32),
+                )?;
+            } else {
+                b.record_shader(
+                    shaders::L2_NORM_QK_PER_ROW,
+                    &[
+                        q_buf.handle(),
+                        k_buf.handle(),
+                        q_expanded.handle(),
+                        k_expanded.handle(),
+                    ],
+                    &[
+                        (batch * GDN_NUM_KEY_HEADS) as u32,
+                        GDN_HEAD_DIM as u32,
+                        l2_eps.to_bits(),
+                        q_scale.to_bits(),
+                        1.0f32.to_bits(),
+                        gqa_ratio as u32,
+                    ],
+                    Workgroups::OneD((batch * GDN_NUM_KEY_HEADS) as u32),
+                )?;
+                b.record_shader(
+                    shaders::GDN_DECODE_GATES_RECURRENT_RMSNORM,
+                    &[
+                        q_expanded.handle(),
+                        k_expanded.handle(),
+                        v_buf.handle(),
+                        a_buf.handle(),
+                        b_buf.handle(),
+                        a_log.handle(),
+                        dt_bias.handle(),
+                        recurrent_state.handle(),
+                        z_buf.handle(),
+                        recurrent_norm_w.handle(),
+                        gated_norm.handle(),
+                    ],
+                    &[
+                        GDN_NUM_VALUE_HEADS as u32,
+                        GDN_HEAD_DIM as u32,
+                        GDN_HEAD_DIM as u32,
+                        eps.to_bits(),
+                        batch as u32,
+                    ],
+                    Workgroups::OneD((batch * GDN_NUM_VALUE_HEADS) as u32),
+                )?;
+            }
             let (gdn_out_shader, gdn_out_workgroups) = linear_bf16w_batched_plan(batch, HIDDEN);
             b.record_shader(
                 gdn_out_shader,

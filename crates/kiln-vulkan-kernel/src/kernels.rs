@@ -487,6 +487,7 @@ pub fn prewarm_builtin_pipelines(vk_device: &VulkanDevice) -> Result<()> {
         ("qkv_gate_split_batched", 5usize, 16u32),
         ("gdn_gates", 6usize, 8u32),
         ("gdn_decode_gates_recurrent_rmsnorm", 11, 20),
+        ("gdn_decode_qk_norm_gates_recurrent_rmsnorm", 11, 36),
         ("gdn_in_proj_decode", 6, 24),
         ("gdn_in_proj_decode_bf16w", 6, 24),
         ("gdn_in_proj_decode_batched", 6, 28),
@@ -678,6 +679,11 @@ pub fn prewarm_builtin_pipelines(vk_device: &VulkanDevice) -> Result<()> {
         (crate::shaders::CAUSAL_CONV1D_STATE_ADVANCE, 2, 16),
         (crate::shaders::L2_NORM_QK_PER_ROW, 4, 24),
         (crate::shaders::GDN_DECODE_GATES_RECURRENT_RMSNORM, 11, 20),
+        (
+            crate::shaders::GDN_DECODE_QK_NORM_GATES_RECURRENT_RMSNORM,
+            11,
+            36,
+        ),
     ];
 
     for (shader_path, total_bindings, push_bytes) in command_batch_shaders {

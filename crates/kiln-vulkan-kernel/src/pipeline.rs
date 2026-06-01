@@ -80,6 +80,10 @@ const SHADER_SPIRVS: &[(&str, &[u8])] = &[
         "gdn_decode_gates_recurrent_rmsnorm",
         SPIR_V_GDN_DECODE_GATES_RECURRENT_RMSNORM,
     ),
+    (
+        "gdn_decode_qk_norm_gates_recurrent_rmsnorm",
+        SPIR_V_GDN_DECODE_QK_NORM_GATES_RECURRENT_RMSNORM,
+    ),
     ("gdn_in_proj_decode", SPIR_V_GDN_IN_PROJ_DECODE),
     ("gdn_in_proj_decode_bf16w", SPIR_V_GDN_IN_PROJ_DECODE_BF16W),
     (
