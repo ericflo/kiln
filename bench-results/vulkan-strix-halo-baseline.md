@@ -221,7 +221,7 @@ every config"):
   `paged_kv_write_slots` plus split-K
   `paged_attn_decode_batch_paged_splitk`/reduce over real per-row block
   tables. This is the closest Vulkan-only synthetic benchmark to production
-  continuous-batched decode at the current 256-token history window. On RADV
+  continuous-batched decode at the default 256-token history window. On RADV
   STRIX_HALO with `KILN_VK_MICROBENCH_BATCHES=1,8,32,64`, warmup=2, timed=5,
   repeats=2, plus a batch-128 probe:
 
@@ -238,6 +238,26 @@ every config"):
   path is not the dominant saturation limit at this window; the remaining
   high-batch ceiling is still in the projection/MLP/GDN-heavy parts of the
   recorded token.
+  **Update — long-context mixed-paged sweep:** the mixed-paged benchmark now
+  exposes `KILN_VK_PAGED_HISTORY` and `KILN_VK_PAGED_BLOCK_SIZE`, sizes
+  `blocks_per_seq` from the requested decode position, and allocates resident
+  paged K/V storage only for the 8 full-attention layers in the real Qwen3.5-4B
+  layer mix. This keeps the Vulkan-only benchmark representative while making
+  longer history windows measurable on the APU. With block size 16, warmup=1,
+  timed=3, repeats=2:
+
+  | history | batch | per token | rows/s |
+  |---:|---:|---:|---:|
+  | 256 | 8 | 113.2 ms | 71 |
+  | 256 | 64 | 460.2 ms | 139 |
+  | 1024 | 8 | 117.2 ms | 68 |
+  | 1024 | 32 | 247.0 ms | 130 |
+  | 2048 | 8 | 121.9 ms | 66 |
+
+  The 1024/2048-token runs verify the split-K paged-attention block-table path
+  at longer contexts without changing the conclusion: at practical resident
+  batch sizes, the dominant mixed-stack cost is still the projection/MLP/GDN
+  shader work, not paged K/V slot writes or block-table attention.
   **Update — GDN resident recorder uses row-reuse in-proj:** the batched GDN
   `CommandBatch` recorder now selects the same pair QKV/Z plus rows2/rows4
   BF16 in-proj shaders as the standalone dispatcher. Focused

@@ -554,20 +554,31 @@ fn run_full_token_resident_mixed_batched(
     } else {
         "contiguous K/V attention"
     };
-    println!(
-        "== {label} ({FULL_ATTN_LAYERS} full-attn + {GDN_LAYERS} GDN layers, {attn_mode}, 1 cmd-buffer + 1 submit) =="
-    );
-
     let num_heads = 16usize;
     let num_kv_heads = 4usize;
     let head_dim = 256usize;
     let rotary_dim = 64usize;
     let half_rot = rotary_dim / 2;
-    let max_seqlen = 256usize;
-    let block_size = 16usize;
-    let blocks_per_seq = 32usize;
-    let cur_seq_len = 256usize;
+    let history_env = if use_paged_attention {
+        "KILN_VK_PAGED_HISTORY"
+    } else {
+        "KILN_VK_ATTENTION_HISTORY"
+    };
+    let cur_seq_len = env_usize(history_env, 256);
+    let max_seqlen = cur_seq_len.max(1);
+    let block_size = env_usize("KILN_VK_PAGED_BLOCK_SIZE", 16);
+    anyhow::ensure!(block_size > 0, "KILN_VK_PAGED_BLOCK_SIZE must be > 0");
+    let blocks_per_seq = (cur_seq_len + 1).div_ceil(block_size).max(1);
     let softmax_scale = (head_dim as f32).sqrt().recip();
+    if use_paged_attention {
+        println!(
+            "== {label} ({FULL_ATTN_LAYERS} full-attn + {GDN_LAYERS} GDN layers, {attn_mode}, history={cur_seq_len}, block={block_size}, 1 cmd-buffer + 1 submit) =="
+        );
+    } else {
+        println!(
+            "== {label} ({FULL_ATTN_LAYERS} full-attn + {GDN_LAYERS} GDN layers, {attn_mode}, history={cur_seq_len}, 1 cmd-buffer + 1 submit) =="
+        );
+    }
 
     let conv_kernel = 4usize;
     let gdn_in_proj_total = QKV_DIM + Z_DIM + A_DIM + B_DIM;
@@ -688,7 +699,7 @@ fn run_full_token_resident_mixed_batched(
         let paged_cache = if use_paged_attention {
             Some(VkPagedKvCache::new(
                 device,
-                NUM_LAYERS,
+                FULL_ATTN_LAYERS,
                 batch * blocks_per_seq,
                 block_size,
                 num_kv_heads,
@@ -834,9 +845,10 @@ fn run_full_token_resident_mixed_batched(
                     )?;
                     if use_paged_attention {
                         let cache = paged_cache.as_ref().expect("paged cache");
+                        let cache_layer = layer / 4;
                         let elements_per_slot = num_kv_heads * head_dim;
-                        let k_pool = cache.k_buffer(layer).expect("full-attn layer K pool");
-                        let v_pool = cache.v_buffer(layer).expect("full-attn layer V pool");
+                        let k_pool = cache.k_buffer(cache_layer).expect("full-attn layer K pool");
+                        let v_pool = cache.v_buffer(cache_layer).expect("full-attn layer V pool");
                         b.record_shader(
                             kv_write_slots_shader,
                             &[
@@ -2254,21 +2266,20 @@ fn run_full_token_resident_paged(
     use kiln_vulkan_kernel::Workgroups;
 
     const NUM_LAYERS: usize = 32;
-    println!(
-        "== full_token_resident_paged ({NUM_LAYERS} layers, paged KV cache, 1 KV-write + paged-attn read per layer, 1 submit / token) =="
-    );
 
     let num_heads = 16usize;
     let num_kv_heads = 4usize;
     let head_dim = 256usize;
     let rotary_dim = 64usize;
     let half_rot = rotary_dim / 2;
-    // Realistic Qwen3.5-4B decode window: ≈ 256 tokens of history
-    // already in the cache, current decode step at position 256.
-    let block_size = 16usize;
-    let blocks_per_seq = 32usize;
-    let cur_seq_len = 256usize;
+    let cur_seq_len = env_usize("KILN_VK_PAGED_HISTORY", 256);
+    let block_size = env_usize("KILN_VK_PAGED_BLOCK_SIZE", 16);
+    anyhow::ensure!(block_size > 0, "KILN_VK_PAGED_BLOCK_SIZE must be > 0");
+    let blocks_per_seq = (cur_seq_len + 1).div_ceil(block_size).max(1);
     let softmax_scale = (head_dim as f32).sqrt().recip();
+    println!(
+        "== full_token_resident_paged ({NUM_LAYERS} layers, paged KV cache, history={cur_seq_len}, block={block_size}, 1 KV-write + paged-attn read per layer, 1 submit / token) =="
+    );
 
     // Upload weights directly from host slices.
     let weight_norm = upload_f32_buffer_from_slice(device, &vec![1.0f32; HIDDEN])?;
