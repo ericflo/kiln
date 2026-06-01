@@ -157,3 +157,15 @@ This shows the SYMPTOM shape (convergence to repetition) but not yet the single 
 2. Use higher-precision norms (print `{x:.3}` or per-layer max-abs) so the large late-layer norms' per-step variation isn't lost to integer rounding.
 
 Then the first-diverging layer's op is the box-102 root cause. Recurrent-state fix (validated) is on this branch; do NOT merge until output coherent.
+
+## BUG 2 — per-layer probe CAVEATS + the real blockers to a clean pinpoint (2026-06-01)
+
+Two complications found when trying to turn the per-layer probe into a clean root-cause pinpoint:
+
+1. **No apples-to-apples eager baseline from the server.** The server's `KILN_CUDA_GRAPHS=false` path does NOT call `decode_step_paged`→`eager_forward` — `generate_from_tokens_paged_shared` (generate.rs:2937) only calls `decode_step_paged` when `graph_runner.is_enabled() && row_count==1`; with graphs off it takes the ELSE branch (`model_forward_paged_batched_decode_hidden`), a DIFFERENT forward that may not even hit the `record_layer_norm_debug` call site in `model_forward_paged_inner`. So "run graphs=off to get the eager per-layer norms" doesn't work via the server, and the two paths aren't the same code anyway.
+
+2. **The per-layer probe may be an arena-aliasing ARTIFACT.** `record_layer_norm_debug` does `hidden.sqr()?.sum_all()?` — those temps allocate during the captured Pass 2 and go through the freeze-pointers capture arena. If the arena hands the SAME Borrowed buffer to multiple layers' sqr/sum_all temps (slab reuse), the 32 captured records corrupt each other on replay → the observed "front-to-back frontier" could be a PROBE artifact, not real hidden-state behavior. MUST verify before trusting it.
+
+**Clean pinpoint plan (fresh focus):** write a dedicated test/CLI (not the server) that runs ONE decode step through BOTH (a) eager `model_forward_paged_with_graph_inputs` and (b) capture-then-replay, on IDENTICAL (token, position, linear_state, KV) inputs, and compares per-layer hidden tensors directly (full tensors, not norms) — OR fix the probe to use a NON-arena scratch for sqr/sum_all (so no aliasing) and read the eager baseline from the warmup step (decode_step_paged warmup branch, which IS eager through `inner`). Then the first layer where replay ≠ eager is the box-102 root cause.
+
+Net keystone state: BUG 1 (OOB) fixed; recurrent-state-freeze fixed+validated; conv/KV ruled out (in-place); per-layer probe built (tooling on branch, but interpretation has the arena-artifact caveat above). The doubling root cause is in the per-layer captured compute; pinpointing it needs the clean harness above. Branch `wip/1082-box2-fix-validate`; do NOT merge (output garbage).
