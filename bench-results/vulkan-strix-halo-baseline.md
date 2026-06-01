@@ -619,6 +619,16 @@ every config"):
   timed=3, repeats=2 measured batch 8: 101.6 ms / 79 rows/s, batch 16:
   139.1 ms / 115 rows/s, batch 32: 245.8 ms / 130 rows/s, and batch 64:
   455.9 ms / 140 rows/s.
+  **Update — bf16 output projection rows4 at batch 16:** the ordinary
+  batched bf16 linear-output planner now joins the residual/down planner in
+  selecting rows4 from batch 16. Direct `linear_decode` on the Q-out/GDN-out
+  shape moved batch 16 from 570.5 us to 541.9 us in a same-session A/B, while
+  batch 32/64 stayed flat. In the full mixed resident-paged token route at
+  history 256, warmup=1, timed=3, repeats=3, the same-session baseline
+  measured batch 16 at 141.1 ms / 113 rows/s, batch 32 at 241.0 ms /
+  133 rows/s, and batch 64 at 453.2 ms / 141 rows/s; patched rerun measured
+  batch 16 at 138.2 ms / 116 rows/s, batch 32 at 240.5 ms / 133 rows/s, and
+  batch 64 at 451.8 ms / 142 rows/s.
   A follow-up recorder cleanup skips the redundant memory barrier between the
   independent Q RoPE and K RoPE dispatches in full-attention blocks. Focused
   history-256 mixed-paged smokes with warmup=1, timed=4, repeats=3 measured

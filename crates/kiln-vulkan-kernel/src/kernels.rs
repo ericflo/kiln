@@ -2395,7 +2395,7 @@ fn dispatch_linear_decode_cached_bytes_core(
         )
         .context("linear_decode kernel failed")?;
     } else {
-        let rows4 = packed_bf16_weights && batch >= 32 && linear_decode_bf16w_rows4_enabled();
+        let rows4 = packed_bf16_weights && batch >= 16 && linear_decode_bf16w_rows4_enabled();
         let glsl_path = if packed_bf16_weights {
             if rows4 {
                 concat!(
@@ -2487,7 +2487,7 @@ fn dispatch_linear_decode_cached_single_submit_bytes(
             out_dim.div_ceil(16) as u32,
         )
     } else {
-        let rows4 = packed_bf16_weights && batch >= 32 && linear_decode_bf16w_rows4_enabled();
+        let rows4 = packed_bf16_weights && batch >= 16 && linear_decode_bf16w_rows4_enabled();
         let glsl_path = if packed_bf16_weights {
             if rows4 {
                 concat!(

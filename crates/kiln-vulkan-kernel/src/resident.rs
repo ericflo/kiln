@@ -52,7 +52,7 @@ fn linear_decode_shader_plan(
         let wg = out_dim.div_ceil(16) as u32;
         (glsl_path, push, wg)
     } else {
-        let rows4 = packed_bf16_weights && batch >= 32 && linear_decode_bf16w_rows4_enabled();
+        let rows4 = packed_bf16_weights && batch >= 16 && linear_decode_bf16w_rows4_enabled();
         let glsl_path = if packed_bf16_weights {
             if rows4 {
                 concat!(

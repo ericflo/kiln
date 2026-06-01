@@ -120,7 +120,7 @@ fn full_attn_qkv_gate_split_bf16w_plan(batch: usize, total_out: usize) -> (&'sta
 }
 
 fn linear_bf16w_batched_plan(batch: usize, out_dim: usize) -> (&'static str, u32) {
-    let rows4 = batch >= 32 && linear_bf16w_rows4_enabled();
+    let rows4 = batch >= 16 && linear_bf16w_rows4_enabled();
     let row_groups = if rows4 { batch.div_ceil(4) } else { batch };
     let shader = if rows4 {
         shaders::LINEAR_DECODE_BATCHED_ROWS4_BF16W
