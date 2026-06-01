@@ -13338,14 +13338,20 @@ pub fn try_new_metal() -> Option<kiln_tensor::Device> {
     }
 }
 
-#[cfg(all(test, feature = "legacy-candle-parity"))]
+// (#1082 candle removal) This candle-metal-interop test module was the last
+// thing gated on the now-deleted candle-parity opt-in feature. candle-core is
+// gone from kiln-model, so the module is compiled out via `cfg(any())`
+// (always-false) — the same dead-module-pending-kt-report precedent the Vulkan
+// backend uses. The test logic is preserved verbatim for the follow-up that
+// re-ports these candle-metal assertions onto the kt-native Metal surface
+// (`metal_sdpa_last_axis`, kt qk-norm / LoRA-delta), which requires Apple
+// hardware to validate. It does NOT compile today (no candle in the dep graph).
+#[cfg(any())]
 mod tests {
     use super::*;
     use crate::lora_loader::{LoraProjectionWeights, compute_lora_delta};
     // Tests operate on `candle_core::Tensor` directly (they exercise candle-metal
-    // interop), so the negative-axis selector imports straight from candle. The
-    // production code path no longer depends on the kt-side `D` chokepoint
-    // re-export (#1082 chokepoint reduction).
+    // interop), so the negative-axis selector imports straight from candle.
     use candle_core::D;
     use std::time::Instant;
 

@@ -15,8 +15,11 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 safetensors = { workspace = true }
 memmap2 = { workspace = true }
-candle-core = { workspace = true, optional = true }
-candle-nn = { workspace = true, optional = true }
+# (#1082) candle-core is fully dropped from kiln-model. The last activator
+# was the `legacy-candle-parity` opt-in feature (candle-typed `for_device`
+# shim + candle-bridge parity-oracle tests); both are gone, so no `cuda` /
+# `metal` / `vulkan` build pulls candle. Tensor math is kt-native
+# (`kiln_tensor`) end to end.
 kiln-conv1d-kernel = { workspace = true, optional = true }
 kiln-flash-attn = { workspace = true, optional = true }
 kiln-gdn-kernel = { workspace = true, optional = true }
@@ -71,19 +74,12 @@ objc2-metal = { version = "0.3", optional = true }
 
 [features]
 cuda = ["dep:cudarc", "dep:kiln-conv1d-kernel", "dep:kiln-flash-attn", "dep:kiln-gdn-kernel", "dep:kiln-marlin-gemm", "dep:kiln-rmsnorm-kernel", "dep:kiln-tensor-id", "kiln-kt-bridge/cuda", "kiln-tensor/cuda", "dep:half", "dep:bytemuck", "dep:kiln-autograd"]
-# Phase 7 (#1082): opt-in feature to compile the candle-typed GDN
-# parity tests in forward.rs against `kiln_gdn_kernel::gdn_chunk_*`
-# / `gdn_full_chunk_forward*`. Production decode goes through the
-# kt-typed surface; these tests exist to validate kernel changes
-# against the candle reference. Enable with
-# `--features cuda,legacy-candle-parity`.
-legacy-candle-parity = ["dep:candle-core", "kiln-kt-bridge/candle"]
 # Metal backend on Apple Silicon — fully candle-free (#1082). Every compute
 # kernel is kiln-owned MSL (kiln-tensor `crate::metal_rt`), production attention
 # runs `metal_sdpa_last_axis`, and the queue sync is the kt-native
 # `primary_metal_companion(idx).wait_until_completed()`. The candle-typed
-# `for_device` shim + candle-Tensor interop tests now live under
-# `legacy-candle-parity`, so plain `--features metal` pulls no candle-core.
+# `for_device` shim + candle-Tensor interop tests were deleted with the
+# candle-parity opt-in feature (#1082), so `--features metal` pulls no candle.
 metal = ["kiln-kt-bridge/metal", "dep:objc2", "dep:objc2-metal", "kiln-tensor/metal"]
 # Emit NVTX ranges around the hot paths in `forward.rs` so nsys can attribute
 # kernel time per call site. Off by default; pulls in kiln-nvtx's libnvToolsExt
