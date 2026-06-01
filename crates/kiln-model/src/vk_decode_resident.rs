@@ -16,10 +16,10 @@
 //! - no LoRA, no debug taps, no MTP, no Marlin
 //!
 //! Any unsupported config returns `Ok(None)` so the caller can
-//! fall back transparently to the legacy
+//! fall back transparently to the nonresident
 //! `transformer_block_paged_with_rope_tables`. The lifted overhead
 //! is the per-kernel `extract + upload + readback` boundary that
-//! dominates the legacy Vulkan decode path at 1.04 tok/s on
+//! dominates the nonresident Vulkan decode path at 1.04 tok/s on
 //! Qwen3.5-4B — the resident microbench measures the same kernel
 //! sequence at 29 tok/s when chained through a `CommandBatch`.
 
@@ -1491,12 +1491,12 @@ pub(crate) fn seed_conv_state_kt(
 /// not the multi-GB full pool. For a Qwen3.5-4B request with a 32-
 /// token prompt at block_size=16 that's ~2 blocks × 8 layers × 64 KB =
 /// ~1 MB seeded per first-decode call, vs. the 11 GB the full-slab
-/// `seed_vk_kv_cache_layer_from_legacy` would have to copy across
+/// `seed_vk_kv_cache_layer_from_kt` would have to copy across
 /// unified memory on every fresh request. Untouched slots stay at
 /// their previous content; the attention seq-len mask ignores
 /// anything past the active range, so unused-slot contents are
 /// irrelevant.
-pub fn seed_vk_kv_cache_layer_blocks_from_legacy(
+pub fn seed_vk_kv_cache_layer_blocks_from_kt(
     vk_device: &VulkanDevice,
     vk_cache: &VkPagedKvCache,
     paged_cache: &PagedKvCacheKt,
@@ -1508,7 +1508,7 @@ pub fn seed_vk_kv_cache_layer_blocks_from_legacy(
     }
     let (k_tensor, v_tensor) = paged_cache
         .pool_tensors(layer_idx)
-        .ok_or_else(|| anyhow::anyhow!("legacy paged_cache layer {layer_idx} out of range"))?;
+        .ok_or_else(|| anyhow::anyhow!("kt paged_cache layer {layer_idx} out of range"))?;
     let block_size = paged_cache.block_size();
     // pool_tensors are shaped [total_slots, num_kv_heads, head_dim]
     // (flat slot index — block_idx maps to slot range
@@ -1562,7 +1562,7 @@ pub fn seed_vk_kv_cache_layer_blocks_from_batched_tables(
 ) -> Result<usize> {
     let block_ids = unique_physical_blocks(block_tables);
     let seeded = block_ids.len();
-    seed_vk_kv_cache_layer_blocks_from_legacy(
+    seed_vk_kv_cache_layer_blocks_from_kt(
         vk_device,
         vk_cache,
         paged_cache,
@@ -1575,7 +1575,7 @@ pub fn seed_vk_kv_cache_layer_blocks_from_batched_tables(
 /// Full-slab seed kept for callers that explicitly want the whole
 /// layer uploaded at once. Production resident decode uses the
 /// per-block variant above to keep per-request seeding bounded.
-pub fn seed_vk_kv_cache_layer_from_legacy(
+pub fn seed_vk_kv_cache_layer_from_kt(
     vk_device: &VulkanDevice,
     vk_cache: &VkPagedKvCache,
     paged_cache: &PagedKvCacheKt,
@@ -1583,7 +1583,7 @@ pub fn seed_vk_kv_cache_layer_from_legacy(
 ) -> Result<()> {
     let (k_tensor, v_tensor) = paged_cache
         .pool_tensors(layer_idx)
-        .ok_or_else(|| anyhow::anyhow!("legacy paged_cache layer {layer_idx} out of range"))?;
+        .ok_or_else(|| anyhow::anyhow!("kt paged_cache layer {layer_idx} out of range"))?;
     // #1082: kt pool tensors — compare/convert against kt's `DType`.
     let k_flat = if k_tensor.dtype() == kiln_tensor::DType::F32 {
         k_tensor.flatten_all()?
@@ -1620,7 +1620,7 @@ pub fn seed_vk_kv_cache_layer_from_legacy(
 // layers). The native orchestrator pre-uploads x once, pre-seeds any
 // KV/conv/recurrent state, records all 32 layers' dispatches into a
 // single batch, submits once, reads back the final hidden, and runs
-// the final RMSNorm + LM head via the legacy path (cheap, one shot).
+// the final RMSNorm + LM head via the nonresident path (cheap, one shot).
 // =====================================================================
 
 /// Record one full-attention transformer block's dispatches into

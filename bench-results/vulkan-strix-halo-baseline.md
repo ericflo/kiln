@@ -470,6 +470,14 @@ every config"):
   that production actually reads. Focused check: `cargo check -p kiln-model
   --no-default-features --features vulkan` passes with the repo's existing
   warning backlog.
+  **Update — resident K/V seeding is named kt-native:** the Vulkan resident
+  K/V seed helpers now advertise the actual dataflow: they read block ranges
+  from `PagedKvCacheKt` pool tensors and upload those kt-derived F32 bytes into
+  `VkPagedKvCache`. The old helper names implied a deprecated pool bridge even
+  though the implementation was already kt-native, so the production call sites
+  now use `seed_vk_kv_cache_layer_blocks_from_kt`. Focused check:
+  `cargo check -p kiln-model --no-default-features --features vulkan` passes
+  with the repo's existing warning backlog.
   **Update — resident pool allocated at startup:** server initialization now
   resolves the backend-aware batching actor width and live decode-batcher width,
   then eagerly calls the resident-pool feasibility/allocation path with their

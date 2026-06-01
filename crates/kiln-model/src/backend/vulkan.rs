@@ -121,7 +121,7 @@ pub struct VulkanBackend {
     /// seeded sets so the next call re-seeds the resident
     /// `VkPagedKvCache` from this request's prefill. Cheap because
     /// the re-seed is now slot-range-aware (see
-    /// `vk_decode_resident::seed_vk_kv_cache_layer_blocks_from_legacy`).
+    /// `vk_decode_resident::seed_vk_kv_cache_layer_blocks_from_kt`).
     last_resident_start_pos: Mutex<Option<usize>>,
     /// Scratch activation buffers reused across resident decode calls,
     /// keyed by a stable role string. Each entry persists for the
@@ -779,7 +779,7 @@ impl VulkanBackend {
     }
 
     /// Reset the seeded-layer set. Tests / multi-session callers call
-    /// this when the legacy paged cache may have been reset between
+    /// this when the kt paged cache may have been reset between
     /// resident decode calls; otherwise the resident path keeps reusing
     /// stale K/V state.
     pub fn reset_full_attn_seeded(&self) {
