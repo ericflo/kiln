@@ -268,12 +268,14 @@ every config"):
   benchmark at batch 64/128, so the paged slot write + block-table attention
   path is not the dominant saturation limit at this window; the remaining
   high-batch ceiling is still in the projection/MLP/GDN-heavy parts of the
-  recorded token. Same-session A/Bs then lowered the full-attention QKV+gate
-  rows4 threshold to batch 1: mixed paged batch 1 moved from 61.2 ms / 16
-  rows/s to 59.2 ms / 17 rows/s, batch 2 moved from 65.6 ms / 31 rows/s to
-  60.8 ms / 33 rows/s, batch 4 moved from 71.5 ms / 56 rows/s to 68.6 ms /
-  58 rows/s, and batch 8 moved from 114.6 ms / 70 rows/s to 104.3 ms / 77
-  rows/s.
+  recorded token. An earlier same-session A/B temporarily lowered the
+  full-attention QKV+gate rows4 threshold to batch 1: mixed paged batch 1 moved
+  from 61.2 ms / 16 rows/s to 59.2 ms / 17 rows/s, batch 2 moved from 65.6 ms
+  / 31 rows/s to 60.8 ms / 33 rows/s, batch 4 moved from 71.5 ms / 56 rows/s
+  to 68.6 ms / 58 rows/s, and batch 8 moved from 114.6 ms / 70 rows/s to
+  104.3 ms / 77 rows/s. A later direct block-level A/B below moved the
+  production and microbench cutoff back to batch 2 because rows4 is slower for
+  the batch-1 direct-output projection on this APU.
   **Update — long-context mixed-paged sweep:** the mixed-paged benchmark now
   exposes `KILN_VK_PAGED_HISTORY` and `KILN_VK_PAGED_BLOCK_SIZE`, sizes
   `blocks_per_seq` from the requested decode position, and allocates resident
@@ -411,6 +413,10 @@ every config"):
   path: with rows4 at batch 1 the block measured 1.847 ms, while forcing the
   regular row path measured 1.771 ms; batch 2 still favored rows4 at 1.861 ms
   vs. 2.012 ms.
+  A current mixed-paged smoke after the later barrier cleanups and batch-2
+  direct-output QKV+gate cutoff measured history 256, warmup=1, timed=3,
+  repeats=2 at batch 8: 101.8 ms / 79 rows/s, batch 32: 236.5 ms / 135 rows/s,
+  and batch 64: 463.6 ms / 138 rows/s.
 - **Vulkan paged-attention decode kernel**: the kernel crate already had
   `paged_attn_decode_batch_paged.comp`; Vulkan now advertises
   `supports_flash_attn_paged_decode` and wires the single-query paged-decode
