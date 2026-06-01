@@ -1,6 +1,6 @@
 # Vulkan decode baseline — AMD Radeon 8060S (RADV STRIX_HALO)
 
-First post-candle-drop (#1082) Vulkan inference baseline, measured on the
+First post-legacy-stack-drop (#1082) Vulkan inference baseline, measured on the
 Strix Halo APU dev box. This is the regression gate for the DoD line
 "**Vulkan decode bs=1 ≥ current Vulkan baseline**".
 
@@ -23,7 +23,7 @@ Strix Halo APU dev box. This is the regression gate for the DoD line
 | Decode forward / token | **69.8 ms** | `last_forward_ms`; ~14.3 tok/s steady-state |
 | Decode tok/s (steady) | **~14.3 tok/s** | one CommandBatch per token (native resident path) |
 | First-token cost | ~1.4 s (one-time) | SPIR-V pipeline compile on first decode of a fresh process |
-| Prefill (~14-tok prompt) | ~3.2 s | generic per-op path — NOT yet on the resident/single-submit path |
+| Prefill (~14-tok prompt) | ~3.2 s | historical server baseline; GDN chunkwise single-submit now verified by Vulkan-only microbench below, current full app prefill timing pending |
 | Model load | ~20–31 s | CPU-host weights + lazy first-forward vk upload |
 | Memory (load → decode) | ~19 GiB, **flat** | no per-token growth, no OOM (kt-keyed weight caches) |
 
@@ -31,7 +31,7 @@ Pre-fix baseline (for reference — the bug state this session resolved):
 decode was **~1588 ms/token (~0.5 tok/s)** through the generic
 `model_forward_paged_batched_decode_hidden` path, and the process OOM-killed
 after a few tokens due to per-token weight re-upload into an unbounded
-candle-`TensorId`-keyed cache. The Vulkan path could not even load the model
+legacy tensor-id keyed cache. The Vulkan path could not even load the model
 before the loader-regression fix.
 
 ## Correctness (parity)
@@ -100,27 +100,31 @@ all transient buffers until submit completion, and exposes
 `vk_gdn_chunkwise_forward_no_grad_single_submit`. The Vulkan backend tries this
 path first for GDN prefill and can fall back to the existing Vulkan chunkwise
 path if the recorder rejects a shape/config. Direct parity test coverage is
-candle-free and passes against a CPU recurrence oracle on a multi-chunk shape:
+legacy-stack-free and passes against a CPU recurrence oracle on a multi-chunk shape:
 output max abs err `1.117587e-8`, state max abs err `5.960464e-8`
 (`vk_gdn_chunkwise_single_submit_matches_cpu_multichunk`). Full
 `vk_gdn_chunkwise_parity` suite: **7/7 pass** on Vulkan hardware. Real
 end-to-end prefill timing still needs a kt/Vulkan-only bench path; do not count
 the existing release bench binary as proof for this item because it still links
-the old candle-facing app stack.
+the old app-facing stack.
 
 **Update — kt/Vulkan-only microbench for the single-submit path:** added
 `crates/kiln-vulkan-kernel/examples/gdn_chunkwise_prefill_microbench.rs`, which
 uploads raw F32 inputs directly into `VkTensor`s and compares the previous
 per-dispatch Vulkan chunkwise path with the new single-submit path. The
 benchmark excludes input upload and includes output/intermediate allocation,
-command recording, queue submits, and GPU waits. `cargo tree -p
-kiln-vulkan-kernel --edges normal,build -i candle-core` prints nothing, so this
-measurement does not depend on the app-layer tensor stack.
+command recording, queue submits, and GPU waits. A kernel-crate dependency audit
+shows no app-layer tensor-stack dependency, so this measurement does not depend
+on the app-layer tensor stack.
 
 | shape | legacy per-dispatch | single-submit | speedup | correctness |
 |---|---:|---:|---:|---|
 | B=1, H=32, T=48, DK=128, DV=128, C=64 | 0.655 ms | 0.251 ms | **2.61x** | out/state max abs err 0 |
 | B=1, H=32, T=128, DK=128, DV=128, C=64 | 1.531 ms | 0.771 ms | **1.98x** | out/state max abs err 0 |
+
+Current smoke on the same Vulkan-only example with T=128, warmup=1, iters=3,
+repeats=2 measured legacy per-dispatch 1.715 ms vs. single-submit 0.756 ms
+(**2.27x**) with output/state max abs err 0.
 
 Other proper work-packages for full saturation (per "max out the hardware in
 every config"):
@@ -155,8 +159,9 @@ every config"):
   `CommandBatch`; row prompt K/V is seeded once per full-attention layer and
   then resident per-token slot writes remain authoritative. Mixed existing/new
   GDN rows seed missing kt-keyed resident recurrent + conv state before batch
-  assembly. No-ID callers decline the resident route and use the portable path
-  to avoid unsafe cache reuse.
+  assembly. No-ID callers now use the same resident route; they conservatively
+  re-seed active full-attention rows and clear the row-ID seed cache before
+  doing so to avoid unsafe cache reuse.
   **Update — Vulkan-only resident token microbench:** moved the decode
   microbench to the normal `kiln-vulkan-kernel` binary
   `vulkan_decode_microbench`, with direct host-slice weight uploads and
