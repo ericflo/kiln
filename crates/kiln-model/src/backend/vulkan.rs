@@ -151,6 +151,26 @@ fn upload_gdn_chunkwise_inputs_from_cpu_bytes_vk(
     })
 }
 
+fn vk_f32_tensor_to_cpu_tensor_vk(
+    tensor: &kiln_vulkan_kernel::vk_tensor::VkTensor,
+    context: &'static str,
+) -> Result<kiln_tensor::Tensor> {
+    anyhow::ensure!(
+        tensor.dtype() == kiln_vulkan_kernel::vk_tensor::VkDType::F32,
+        "{context}: expected F32 VkTensor, got {:?}",
+        tensor.dtype()
+    );
+    let shape = tensor.shape().to_vec();
+    let bytes = tensor.to_bytes().with_context(|| format!("{context}: read bytes"))?;
+    kiln_tensor::Tensor::from_raw_bytes_on(
+        kiln_tensor::Device::Cpu,
+        kiln_tensor::DType::F32,
+        bytes,
+        shape,
+    )
+    .map_err(|e| anyhow::anyhow!("{context}: rebuild CPU kt tensor from bytes: {e}"))
+}
+
 /// Vulkan backend for Kiln.
 ///
 /// Manages its own Vulkan device and dispatches compute shaders for
@@ -4739,14 +4759,18 @@ impl BackendRuntime for VulkanBackend {
                 }
             };
 
-        // Read back output + the updated state into kt (CPU-host) tensors.
-        let out_shape = out_vk.shape().to_vec();
-        let out_data = out_vk.to_vec_f32()?;
-        let out_kt = kiln_tensor::Tensor::from_vec(out_data, out_shape)
-            .map_err(|e| anyhow::anyhow!("gdn_chunkwise_forward: out from_vec: {e}"))?;
-        let new_state = state_vk.to_vec_f32()?;
-        *state_kt = kiln_tensor::Tensor::from_vec(new_state, state_shape)
-            .map_err(|e| anyhow::anyhow!("gdn_chunkwise_forward: state from_vec: {e}"))?;
+        // Read back output + the updated state into CPU-host kt tensors
+        // without decoding the raw F32 bytes through an intermediate Vec<f32>.
+        let out_kt = vk_f32_tensor_to_cpu_tensor_vk(&out_vk, "gdn_chunkwise_forward output")?;
+        let new_state =
+            vk_f32_tensor_to_cpu_tensor_vk(&state_vk, "gdn_chunkwise_forward state")?;
+        anyhow::ensure!(
+            new_state.shape() == state_shape.as_slice(),
+            "gdn_chunkwise_forward: state shape mismatch after readback: got {:?}, expected {:?}",
+            new_state.shape(),
+            state_shape
+        );
+        *state_kt = new_state;
         Ok(Some(out_kt))
     }
 
@@ -5358,6 +5382,26 @@ mod vk_upload_tests {
         assert_eq!(beta_vk.to_vec_f32()?, beta_data);
         assert_eq!(g_vk.to_vec_f32()?, g_data);
         assert_eq!(state_vk.to_vec_f32()?, state_data);
+        Ok(())
+    }
+
+    #[test]
+    fn vk_f32_tensor_to_cpu_tensor_rebuilds_from_raw_bytes() -> Result<()> {
+        let Ok(vk_device) = kiln_vulkan_kernel::VulkanDevice::new() else {
+            eprintln!("Vulkan device unavailable, skipping");
+            return Ok(());
+        };
+        let data = vec![1.5f32, -2.25, 3.75, 4.5];
+        let vk_tensor = kiln_vulkan_kernel::vk_tensor::VkTensor::from_f32_slice(
+            &data,
+            vec![2, 2],
+            Arc::new(vk_device),
+        )?;
+        let cpu_tensor =
+            vk_f32_tensor_to_cpu_tensor_vk(&vk_tensor, "test raw byte readback")?;
+
+        assert_eq!(cpu_tensor.shape(), &[2, 2]);
+        assert_eq!(cpu_tensor.flatten_all()?.to_vec1::<f32>()?, data);
         Ok(())
     }
 }

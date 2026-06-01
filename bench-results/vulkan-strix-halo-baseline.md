@@ -173,6 +173,11 @@ checks exact F32 byte borrowing and non-F32 rejection under
 cpu_contiguous_f32_tensor_upload -- --nocapture`; the Vulkan round-trip test
 `gdn_chunkwise_batched_input_upload_round_trips_on_vulkan` verifies the
 batched-upload path itself when a Vulkan device is present.
+The same boundary now reads the scan output and updated recurrent state back as
+raw F32 bytes and rebuilds CPU kt tensors with `Tensor::from_raw_bytes_on`,
+avoiding the previous `to_vec_f32` typed decode and `Tensor::from_vec`
+rehydration. `vk_f32_tensor_to_cpu_tensor_rebuilds_from_raw_bytes` covers that
+readback helper on Vulkan hardware.
 
 **Update — full-attention prefill wrapper stays kt-native:** the Vulkan
 `flash_attn_prefill` implementation now extracts Q/K/V F32 bytes directly from
