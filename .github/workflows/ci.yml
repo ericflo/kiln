@@ -96,6 +96,16 @@ jobs:
       - name: Test (default features)
         run: cargo test --locked -- --skip test_health_with_real_backend
 
+      - name: Test (anomaly trap + deterministic envelope on the training path — #1082 boxes 128/495)
+        # Validate KILN_DETECT_ANOMALY (the NaN/Inf trap wired through the
+        # autograd tape) and KILN_DETERMINISTIC=1 on a real CPU SFT step
+        # (forward + backward + optimizer). The perf-regression smoke tests'
+        # own asserts (adapter written, < 30 s) double as the gate: a
+        # false-positive anomaly trap or a broken deterministic codepath
+        # would fail the training step here. Single-threaded so the
+        # process-global env vars don't race other tests.
+        run: KILN_DETECT_ANOMALY=1 KILN_DETERMINISTIC=1 cargo test --locked -p kiln-train perf_regression_sft_train -- --test-threads=1
+
   cuda-candle-free:
     name: CUDA dep tree is candle-free (#1082)
     runs-on: ubuntu-22.04
