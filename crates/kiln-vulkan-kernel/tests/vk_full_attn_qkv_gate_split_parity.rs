@@ -122,7 +122,9 @@ fn run_case(shader: &'static str, batch: usize) -> Result<()> {
         (batch * v_dim * 4) as u64,
     )?;
 
-    let row_groups = if shader == shaders::FULL_ATTN_QKV_GATE_SPLIT_BATCHED_ROWS4_BF16W {
+    let row_groups = if shader == shaders::FULL_ATTN_QKV_GATE_SPLIT_BATCHED_ROWS8_BF16W {
+        batch.div_ceil(8)
+    } else if shader == shaders::FULL_ATTN_QKV_GATE_SPLIT_BATCHED_ROWS4_BF16W {
         batch.div_ceil(4)
     } else {
         batch
@@ -198,4 +200,12 @@ fn direct_full_attn_qkv_gate_split_rows4_b1_matches_cpu() -> Result<()> {
         return Ok(());
     }
     run_case(shaders::FULL_ATTN_QKV_GATE_SPLIT_BATCHED_ROWS4_BF16W, 1)
+}
+
+#[test]
+fn direct_full_attn_qkv_gate_split_rows8_matches_cpu() -> Result<()> {
+    if !VulkanDevice::probe() {
+        return Ok(());
+    }
+    run_case(shaders::FULL_ATTN_QKV_GATE_SPLIT_BATCHED_ROWS8_BF16W, 9)
 }

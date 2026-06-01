@@ -60,6 +60,8 @@ pub mod shaders {
         shader_path!("full_attn_qkv_gate_split_batched_bf16w");
     pub const FULL_ATTN_QKV_GATE_SPLIT_BATCHED_ROWS4_BF16W: &str =
         shader_path!("full_attn_qkv_gate_split_batched_rows4_bf16w");
+    pub const FULL_ATTN_QKV_GATE_SPLIT_BATCHED_ROWS8_BF16W: &str =
+        shader_path!("full_attn_qkv_gate_split_batched_rows8_bf16w");
     pub const QKV_GATE_SPLIT: &str = shader_path!("qkv_gate_split");
     pub const QKV_GATE_SPLIT_BATCHED: &str = shader_path!("qkv_gate_split_batched");
     pub const VK_ROPE_F32: &str = shader_path!("vk_rope_f32");

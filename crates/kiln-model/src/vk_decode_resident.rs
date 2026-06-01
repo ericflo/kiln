@@ -41,6 +41,7 @@ use crate::forward::GpuLayerWeights;
 use crate::PagedKvCacheKt;
 
 const MLP_BF16_ROWS8_MIN_BATCH: usize = 256;
+const FULL_ATTN_QKV_BF16_ROWS8_MIN_BATCH: usize = 64;
 const GDN_IN_PROJ_ROWS4_MIN_BATCH: usize = 16;
 const LM_HEAD_BF16_ROWS4_MIN_BATCH: usize = 16;
 const LINEAR_BF16_ROWS8_MIN_BATCH: usize = 64;
@@ -98,10 +99,21 @@ fn linear_bf16w_rows8_enabled() -> bool {
 }
 
 fn full_attn_qkv_gate_split_bf16w_plan(batch: usize, total_out: usize) -> (&'static str, u32) {
-    let rows4 =
-        batch >= 2 && enabled_unless_disabled("KILN_DISABLE_VULKAN_FULL_ATTN_QKV_BF16W_ROWS4");
-    let row_groups = if rows4 { batch.div_ceil(4) } else { batch };
-    let shader = if rows4 {
+    let rows8 = batch >= FULL_ATTN_QKV_BF16_ROWS8_MIN_BATCH
+        && enabled_unless_disabled("KILN_DISABLE_VULKAN_FULL_ATTN_QKV_BF16W_ROWS8");
+    let rows4 = batch >= 2
+        && !rows8
+        && enabled_unless_disabled("KILN_DISABLE_VULKAN_FULL_ATTN_QKV_BF16W_ROWS4");
+    let row_groups = if rows8 {
+        batch.div_ceil(8)
+    } else if rows4 {
+        batch.div_ceil(4)
+    } else {
+        batch
+    };
+    let shader = if rows8 {
+        shaders::FULL_ATTN_QKV_GATE_SPLIT_BATCHED_ROWS8_BF16W
+    } else if rows4 {
         shaders::FULL_ATTN_QKV_GATE_SPLIT_BATCHED_ROWS4_BF16W
     } else {
         shaders::FULL_ATTN_QKV_GATE_SPLIT_BATCHED_BF16W

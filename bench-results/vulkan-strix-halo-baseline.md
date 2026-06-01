@@ -1007,6 +1007,13 @@ every config"):
   adds a rows8 block-score shader that preserves the existing reduce stage.
   Focused Vulkan coverage now includes 65-row tail batches for greedy argmax
   and top-1 sampling.
+  **Update — full-attention QKV/gate projection uses rows8 at saturation:** the
+  resident full-attention block now selects a rows8 packed-BF16 QKV/gate split
+  projection for 64-wide continuous batches. This shares each Q/K/V weight load
+  across up to eight active rows before writing directly into the resident Q,
+  gate, K, and V buffers, while keeping the rows4 path for smaller batches.
+  The Vulkan decode microbench planner uses the same threshold, and
+  `direct_full_attn_qkv_gate_split_rows8_matches_cpu` covers a tail-row batch.
 
 ## Other follow-ups (perf headroom, not regressions)
 

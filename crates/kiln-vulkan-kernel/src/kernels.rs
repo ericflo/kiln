@@ -362,6 +362,11 @@ pub fn prewarm_builtin_pipelines(vk_device: &VulkanDevice) -> Result<()> {
             8usize,
             28u32,
         ),
+        (
+            "full_attn_qkv_gate_split_batched_rows8_bf16w",
+            8usize,
+            28u32,
+        ),
         ("vk_rope_f32", 4, 16),
         ("vk_mul_sigmoid_gate_f32", 3, 4),
         ("qkv_gate_split_batched", 5usize, 16u32),
@@ -456,6 +461,11 @@ pub fn prewarm_builtin_pipelines(vk_device: &VulkanDevice) -> Result<()> {
         ),
         (
             crate::shaders::FULL_ATTN_QKV_GATE_SPLIT_BATCHED_ROWS4_BF16W,
+            8,
+            28,
+        ),
+        (
+            crate::shaders::FULL_ATTN_QKV_GATE_SPLIT_BATCHED_ROWS8_BF16W,
             8,
             28,
         ),

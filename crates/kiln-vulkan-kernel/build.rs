@@ -39,6 +39,10 @@ const SHADERS: &[(&str, &str)] = &[
         "SPIR_V_FULL_ATTN_QKV_GATE_SPLIT_BATCHED_ROWS4_BF16W",
     ),
     (
+        "full_attn_qkv_gate_split_batched_rows8_bf16w",
+        "SPIR_V_FULL_ATTN_QKV_GATE_SPLIT_BATCHED_ROWS8_BF16W",
+    ),
+    (
         "qkv_gate_split_batched",
         "SPIR_V_QKV_GATE_SPLIT_BATCHED",
     ),
