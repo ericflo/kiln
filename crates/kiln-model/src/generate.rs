@@ -6898,7 +6898,7 @@ mod tests {
 
         assert_eq!(default_decode_batcher_max_batch_kt(&device, "cpu"), 8);
         assert_eq!(default_decode_batcher_max_batch_kt(&device, "cuda"), 1);
-        assert_eq!(default_decode_batcher_max_batch_kt(&device, "vulkan"), 8);
+        assert_eq!(default_decode_batcher_max_batch_kt(&device, "vulkan"), 16);
         assert_eq!(default_decode_batcher_max_batch_kt(&device, "metal"), 8);
     }
 
