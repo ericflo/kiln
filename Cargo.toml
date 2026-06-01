@@ -129,16 +129,9 @@ memmap2 = "0.9"
 tar = "0.4"
 flate2 = "1"
 
-# Tensor compute
-candle-core = "0.10"
-candle-nn = "0.10"
-
-# cudarc — direct CUDA driver bindings. Pinned to match the version
-# candle-core 0.10 vendors so cudarc types unify in cargo's graph
-# (kiln-blas exchanges CUstream / CudaSlice / DevicePtr with candle-
-# owned CudaDevice). Issue #1082 Phase 7 swap-out of candle proceeds
-# crate-by-crate; this dep is the seam for crates that only need
-# cudarc and not the full candle Tensor surface.
+# cudarc — direct CUDA driver bindings for the kiln-tensor CUDA substrate.
+# (#1082) candle-core/candle-nn are fully removed from kiln; cudarc is pinned
+# to the version the substrate's cublas/driver bindings require.
 cudarc = { version = "0.19.4", default-features = false, features = [
     "std",
     "cublas",
@@ -190,6 +183,3 @@ kiln-server = { path = "crates/kiln-server" }
 kiln-tensor = { path = "crates/kiln-tensor" }
 kiln-tensor-id = { path = "crates/kiln-tensor-id" }
 kiln-train = { path = "crates/kiln-train" }
-
-[patch.crates-io]
-candle-core = { path = "vendor/candle-core" }
