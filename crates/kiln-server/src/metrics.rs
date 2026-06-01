@@ -518,6 +518,16 @@ impl Metrics {
             ),
         );
 
+        out.push_str("# HELP kiln_batching_engine_prefill_admission_quantum Maximum queued requests prefilled before yielding to decode.\n");
+        out.push_str("# TYPE kiln_batching_engine_prefill_admission_quantum gauge\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_batching_engine_prefill_admission_quantum {}",
+                gauges.batching_engine.max_prefill_admission_quantum
+            ),
+        );
+
         out.push_str("# HELP kiln_batching_engine_last_batch_size Last decode batch size selected by the real-model batching engine.\n");
         out.push_str("# TYPE kiln_batching_engine_last_batch_size gauge\n");
         push_line(
@@ -587,6 +597,16 @@ impl Metrics {
             &format!(
                 "kiln_batching_engine_decode_rows_total {}",
                 gauges.batching_engine.total_decode_rows
+            ),
+        );
+
+        out.push_str("# HELP kiln_batching_engine_prefill_admission_cycles_total Prefill admission rounds that admitted at least one request.\n");
+        out.push_str("# TYPE kiln_batching_engine_prefill_admission_cycles_total counter\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_batching_engine_prefill_admission_cycles_total {}",
+                gauges.batching_engine.total_prefill_admission_cycles
             ),
         );
 
@@ -1104,6 +1124,7 @@ mod tests {
             batching_engine: BatchingEngineSnapshot {
                 queue_depth: 2,
                 active_decode: 3,
+                max_prefill_admission_quantum: 2,
                 last_batch_size: 3,
                 max_observed_batch_size: 4,
                 last_forward_ms: 12.5,
@@ -1111,6 +1132,7 @@ mod tests {
                 total_decode_forwards: 17,
                 total_batched_decode_forwards: 15,
                 total_decode_rows: 48,
+                total_prefill_admission_cycles: 6,
                 total_decode_tokens: 128,
                 total_prefill_tokens: 8192,
                 total_errors: 1,
@@ -1156,6 +1178,7 @@ mod tests {
         assert!(output.contains("kiln_batching_engine_enabled 1"));
         assert!(output.contains("kiln_batching_engine_queue_depth 2"));
         assert!(output.contains("kiln_batching_engine_active_decode 3"));
+        assert!(output.contains("kiln_batching_engine_prefill_admission_quantum 2"));
         assert!(output.contains("kiln_batching_engine_last_batch_size 3"));
         assert!(output.contains("kiln_batching_engine_max_observed_batch 4"));
         assert!(output.contains("kiln_batching_engine_last_forward_ms 12.500000"));
@@ -1165,6 +1188,7 @@ mod tests {
             "kiln_batching_engine_batched_decode_forwards_total 15"
         ));
         assert!(output.contains("kiln_batching_engine_decode_rows_total 48"));
+        assert!(output.contains("kiln_batching_engine_prefill_admission_cycles_total 6"));
         assert!(output.contains("kiln_batching_engine_decode_tokens_total 128"));
         assert!(output.contains("kiln_batching_engine_prefill_tokens_total 8192"));
         assert!(output.contains("kiln_batching_engine_errors_total 1"));

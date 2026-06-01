@@ -28,6 +28,7 @@ const DEFAULT_ENGINE_CHANNEL: usize = 1024;
 const DEFAULT_RESPONSE_CHANNEL: usize = 64;
 const DEFAULT_MAX_DECODE_BATCH: usize = 8;
 const VULKAN_MAX_DECODE_BATCH: usize = 64;
+const DEFAULT_PREFILL_ADMISSION_QUANTUM: usize = 4;
 const DEFAULT_PREFIX_AWARE_ADMISSION: bool = true;
 
 fn blocks_needed_for_tokens(num_tokens: usize, block_size: usize) -> usize {
@@ -60,6 +61,20 @@ fn env_prefix_aware_admission() -> bool {
         ),
         Err(_) => DEFAULT_PREFIX_AWARE_ADMISSION,
     }
+}
+
+/// Cap how many queued requests the actor prefills before yielding to a decode
+/// step. This preserves the high `max_decode_batch` ceiling for saturation,
+/// but avoids serializing an entire large queue of prompt prefills before the
+/// first active rows can emit a token.
+pub(crate) fn env_prefill_admission_quantum(max_decode_batch: usize) -> usize {
+    let max_decode_batch = max_decode_batch.max(1);
+    std::env::var("KILN_BATCH_PREFILL_ADMISSION_QUANTUM")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<usize>().ok())
+        .filter(|&n| n > 0)
+        .unwrap_or(DEFAULT_PREFILL_ADMISSION_QUANTUM)
+        .clamp(1, max_decode_batch)
 }
 
 /// Decide whether multi-row decode steps should be issued one-row-at-a-time
@@ -118,6 +133,7 @@ pub struct BatchingEngineSnapshot {
     pub accepting: bool,
     pub queue_depth: usize,
     pub active_decode: usize,
+    pub max_prefill_admission_quantum: usize,
     pub current_batch_size: usize,
     pub last_batch_size: usize,
     pub max_observed_batch_size: usize,
@@ -126,6 +142,7 @@ pub struct BatchingEngineSnapshot {
     pub total_decode_forwards: u64,
     pub total_batched_decode_forwards: u64,
     pub total_decode_rows: u64,
+    pub total_prefill_admission_cycles: u64,
     pub total_decode_tokens: u64,
     pub total_prefill_tokens: u64,
     pub total_errors: u64,
@@ -612,10 +629,12 @@ impl BatchingEngineHandle {
     }
 
     pub fn start_with_options(forward: Arc<dyn DecodeForward>, max_decode_batch: usize) -> Self {
+        let max_decode_batch = max_decode_batch.max(1);
         Self::start_with_policy(
             forward,
-            max_decode_batch.max(1),
+            max_decode_batch,
             env_prefix_aware_admission(),
+            env_prefill_admission_quantum(max_decode_batch),
         )
     }
 
@@ -623,10 +642,16 @@ impl BatchingEngineHandle {
         forward: Arc<dyn DecodeForward>,
         max_decode_batch: usize,
         prefix_aware_admission: bool,
+        prefill_admission_quantum: usize,
     ) -> Self {
         let (tx, rx) = mpsc::channel(DEFAULT_ENGINE_CHANNEL);
-        let actor =
-            BatchingEngineActor::new(rx, forward, max_decode_batch.max(1), prefix_aware_admission);
+        let actor = BatchingEngineActor::new(
+            rx,
+            forward,
+            max_decode_batch.max(1),
+            prefix_aware_admission,
+            prefill_admission_quantum,
+        );
         thread::Builder::new()
             .name("kiln-batching-engine".to_string())
             .spawn(move || actor.run())
@@ -720,6 +745,7 @@ struct BatchingEngineActor {
     stopped: bool,
     max_decode_batch: usize,
     prefix_aware_admission: bool,
+    max_prefill_admissions_per_cycle: usize,
     snapshot: BatchingEngineSnapshot,
 }
 
@@ -729,7 +755,10 @@ impl BatchingEngineActor {
         forward: Arc<dyn DecodeForward>,
         max_decode_batch: usize,
         prefix_aware_admission: bool,
+        prefill_admission_quantum: usize,
     ) -> Self {
+        let max_decode_batch = max_decode_batch.max(1);
+        let max_prefill_admissions_per_cycle = prefill_admission_quantum.clamp(1, max_decode_batch);
         Self {
             rx,
             forward,
@@ -739,8 +768,10 @@ impl BatchingEngineActor {
             stopped: false,
             max_decode_batch,
             prefix_aware_admission,
+            max_prefill_admissions_per_cycle,
             snapshot: BatchingEngineSnapshot {
                 accepting: true,
+                max_prefill_admission_quantum: max_prefill_admissions_per_cycle,
                 ..BatchingEngineSnapshot::default()
             },
         }
@@ -840,7 +871,11 @@ impl BatchingEngineActor {
     }
 
     fn admit_waiting(&mut self) {
-        while self.active.len() < self.max_decode_batch && !self.waiting.is_empty() {
+        let mut admitted = 0usize;
+        while self.active.len() < self.max_decode_batch
+            && admitted < self.max_prefill_admissions_per_cycle
+            && !self.waiting.is_empty()
+        {
             let Some(waiting_idx) = self
                 .waiting
                 .iter()
@@ -864,6 +899,7 @@ impl BatchingEngineActor {
                 Ok(slot) => {
                     self.snapshot.last_prefill_ms = started.elapsed().as_secs_f64() * 1000.0;
                     self.snapshot.total_prefill_tokens += queued.req.prompt_tokens.len() as u64;
+                    admitted += 1;
                     self.active.push(ActiveRequest {
                         req: queued.req,
                         response_tx: queued.response_tx,
@@ -877,6 +913,12 @@ impl BatchingEngineActor {
                         .blocking_send(EngineEvent::Error(format!("{err:#}")));
                 }
             }
+        }
+        if admitted > 0 {
+            self.snapshot.total_prefill_admission_cycles = self
+                .snapshot
+                .total_prefill_admission_cycles
+                .saturating_add(1);
         }
         self.refresh_snapshot();
     }
@@ -1282,6 +1324,39 @@ mod tests {
     }
 
     #[test]
+    fn prefill_admission_quantum_default_and_override() {
+        let prior = std::env::var("KILN_BATCH_PREFILL_ADMISSION_QUANTUM").ok();
+        // SAFETY: tests in this crate that touch this env var must not run in
+        // parallel; cargo defaults to serial within a single test binary.
+        unsafe {
+            std::env::remove_var("KILN_BATCH_PREFILL_ADMISSION_QUANTUM");
+        }
+        assert_eq!(env_prefill_admission_quantum(64), 4);
+        assert_eq!(env_prefill_admission_quantum(2), 2);
+        assert_eq!(env_prefill_admission_quantum(0), 1);
+        unsafe {
+            std::env::set_var("KILN_BATCH_PREFILL_ADMISSION_QUANTUM", "24");
+        }
+        assert_eq!(env_prefill_admission_quantum(64), 24);
+        unsafe {
+            std::env::set_var("KILN_BATCH_PREFILL_ADMISSION_QUANTUM", "999");
+        }
+        assert_eq!(env_prefill_admission_quantum(64), 64);
+        unsafe {
+            std::env::set_var("KILN_BATCH_PREFILL_ADMISSION_QUANTUM", "0");
+        }
+        assert_eq!(env_prefill_admission_quantum(64), 4);
+        unsafe {
+            std::env::set_var("KILN_BATCH_PREFILL_ADMISSION_QUANTUM", "bad");
+        }
+        assert_eq!(env_prefill_admission_quantum(64), 4);
+        match prior {
+            Some(v) => unsafe { std::env::set_var("KILN_BATCH_PREFILL_ADMISSION_QUANTUM", v) },
+            None => unsafe { std::env::remove_var("KILN_BATCH_PREFILL_ADMISSION_QUANTUM") },
+        }
+    }
+
+    #[test]
     fn real_decode_selection_skips_first_token_rows_for_model_step() {
         let mut pending_a = real_slot(101, true);
         let mut ready_a = real_slot(202, false);
@@ -1333,6 +1408,33 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn prefill_admission_quantum_limits_each_actor_cycle() {
+        let (_tx, rx) = mpsc::channel(DEFAULT_ENGINE_CHANNEL);
+        let forward = Arc::new(MockForward::default());
+        let mut actor = BatchingEngineActor::new(rx, forward, 8, false, 3);
+        for idx in 0..8 {
+            let (response_tx, _response_rx) = mpsc::channel(DEFAULT_RESPONSE_CHANNEL);
+            actor.waiting.push_back(QueuedRequest {
+                req: request(100 + idx as TokenId, 1),
+                response_tx,
+            });
+        }
+
+        actor.admit_waiting();
+        assert_eq!(actor.active.len(), 3);
+        assert_eq!(actor.waiting.len(), 5);
+        assert_eq!(actor.snapshot.max_prefill_admission_quantum, 3);
+        assert_eq!(actor.snapshot.total_prefill_admission_cycles, 1);
+        assert_eq!(actor.snapshot.total_prefill_tokens, 6);
+
+        actor.admit_waiting();
+        assert_eq!(actor.active.len(), 6);
+        assert_eq!(actor.waiting.len(), 2);
+        assert_eq!(actor.snapshot.total_prefill_admission_cycles, 2);
+        assert_eq!(actor.snapshot.total_prefill_tokens, 12);
+    }
+
     #[tokio::test]
     async fn enqueue_batches_forward_shape_and_routes_responses() {
         let forward = Arc::new(MockForward::default());
@@ -1382,7 +1484,7 @@ mod tests {
             reusable_prefixes: true,
             ..MockForward::default()
         });
-        let handle = BatchingEngineHandle::start_with_policy(forward.clone(), 8, true);
+        let handle = BatchingEngineHandle::start_with_policy(forward.clone(), 8, true, 8);
 
         let mut prefix_rx = handle
             .enqueue(request_with_tokens(vec![1, 2], 1))

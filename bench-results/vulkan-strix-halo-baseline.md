@@ -507,6 +507,31 @@ every config"):
   bottleneck concrete: the model kernels are warm and multi-row decode is
   active, but the first token waits for the actor to prefill/admit the full
   group before issuing the first batched decode step.
+  **Update — bounded prefill admission before decode:** the batching actor now
+  caps successful queued prefill admissions per scheduler cycle with
+  `KILN_BATCH_PREFILL_ADMISSION_QUANTUM` (default 4, clamped to the effective
+  max decode batch). This keeps the Vulkan `KILN_MAX_DECODE_BATCH` default at
+  64 for saturation, but launches the first decode wave after four cold rows
+  and fills the remaining rows on later cycles. A rebuilt release server on
+  RADV STRIX_HALO with `KILN_NUM_BLOCKS=2048`, startup resident-pool allocation
+  `max_batch=64 ready=true`, decode-weight prewarm complete at
+  `elapsed_ms=26249`, and `KILN_BATCH_PREFILL_ADMISSION_QUANTUM=4` ran an
+  8-distinct-prompt `/v1/completions/batch` fixture with `max_tokens=2`. The
+  request returned HTTP 200 in 59.504 s with `prompt_tokens=192`,
+  `completion_tokens=16`, and `total_tokens=208`. Recent-request rows showed
+  the first four rows at `ttft_ms=43033` and the second four at
+  `ttft_ms=59274`; per-row `model_prefill_ms` ranged 3940 to 5559 ms and
+  `model_decode_ms` was 220 to 239 ms. The immediate `/metrics` scrape showed
+  `kiln_batching_engine_prefill_admission_quantum 4`,
+  `kiln_batching_engine_prefill_admission_cycles_total 2`,
+  `kiln_batching_engine_max_observed_batch 8`,
+  `kiln_batching_engine_decode_forwards_total 3`,
+  `kiln_batching_engine_batched_decode_forwards_total 3`,
+  `kiln_batching_engine_decode_rows_total 16`,
+  `kiln_batching_engine_prefill_tokens_total 192`, and
+  `kiln_batching_engine_errors_total 0`. This preserves the observed 8-row live
+  decode width on the short fixture while replacing the prior full-group cold
+  admission with two bounded prefill rounds.
   **Update — resident parity test restored for Vulkan profiles:** the
   `vk_resident_decode_parity` integration test now builds against the current kt
   device/cache surface instead of stale test-only APIs. Without
