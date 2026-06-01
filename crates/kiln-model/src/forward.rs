@@ -21900,7 +21900,7 @@ fn try_vulkan_resident_batched_decode_argmax(
     lora: Option<&LoraWeights>,
 ) -> Result<Option<Vec<u32>>> {
     let batch = token_ids.len();
-    if batch <= 1
+    if batch == 0
         || block_tables.len() != batch
         || start_positions.len() != batch
         || row_ids.is_some_and(|ids| ids.len() != batch)
@@ -21979,16 +21979,25 @@ fn try_vulkan_resident_batched_decode_argmax(
     let rope_cos_rows = tensor_to_f32_flat_vec_vk(&rope_cos)?;
     let rope_sin_rows = tensor_to_f32_flat_vec_vk(&rope_sin)?;
 
-    if row_ids.is_none() {
+    let single_unidentified_row = row_ids.is_none() && batch == 1;
+    if single_unidentified_row {
+        vk_backend.note_resident_session(start_positions[0]);
+    } else if row_ids.is_none() {
         vk_backend.reset_resident_decode_row_seeded();
     }
     let mut full_attn_idx = 0usize;
     for layer in weights.layers.iter() {
         if matches!(layer.attention, GpuAttentionWeights::Full(_)) {
             for row_idx in 0..batch {
-                let should_seed = row_ids
-                    .map(|ids| !vk_backend.resident_decode_row_seeded(full_attn_idx, ids[row_idx]))
-                    .unwrap_or(true);
+                let should_seed = if single_unidentified_row {
+                    !vk_backend.full_attn_layer_seeded(full_attn_idx)
+                } else {
+                    row_ids
+                        .map(|ids| {
+                            !vk_backend.resident_decode_row_seeded(full_attn_idx, ids[row_idx])
+                        })
+                        .unwrap_or(true)
+                };
                 if should_seed {
                     let row_tables = [block_tables[row_idx]];
                     crate::vk_decode_resident::seed_vk_kv_cache_layer_blocks_from_batched_tables(
@@ -21998,7 +22007,9 @@ fn try_vulkan_resident_batched_decode_argmax(
                         full_attn_idx,
                         &row_tables,
                     )?;
-                    if let Some(ids) = row_ids {
+                    if single_unidentified_row {
+                        vk_backend.mark_full_attn_layer_seeded(full_attn_idx);
+                    } else if let Some(ids) = row_ids {
                         vk_backend.mark_resident_decode_row_seeded(full_attn_idx, ids[row_idx]);
                     }
                 }
@@ -23476,6 +23487,25 @@ pub fn model_forward_paged_last_token_greedy(
     // generation loop entirely.
     #[cfg(feature = "vulkan")]
     {
+        let block_tables = [block_table];
+        let start_positions = [start_pos];
+        if let Some(next_tokens) = try_vulkan_resident_batched_decode_argmax(
+            backend,
+            token_ids,
+            weights,
+            config,
+            paged_cache,
+            &block_tables,
+            &start_positions,
+            None,
+            linear_state.as_deref(),
+            lora,
+        )? {
+            if let Some(&token) = next_tokens.first() {
+                return Ok(token);
+            }
+        }
+
         if token_ids.len() == 1
             && start_pos > 0
             && lora.is_none()
