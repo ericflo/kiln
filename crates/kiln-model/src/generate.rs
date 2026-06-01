@@ -3130,16 +3130,9 @@ impl ModelRunner {
             match sample_result {
                 Ok(Some(tokens)) => sampled = Some(tokens),
                 Ok(None) => {}
-                Err(err) if !decode_batch_generic_fallback_enabled(&*self.backend) => {
-                    return Err(err).context(
-                        "resident batched sample decode declined and generic fallback is disabled",
-                    );
-                }
                 Err(err) => {
-                    tracing::debug!(
-                        batch = row_count,
-                        error = %err,
-                        "resident batched sample decode declined; falling back to hidden path"
+                    return Err(err).context(
+                        "resident batched sample decode failed after native path selection",
                     );
                 }
             }

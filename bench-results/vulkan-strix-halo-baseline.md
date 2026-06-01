@@ -960,6 +960,12 @@ every config"):
   checks the split-K resident wrapper against the same CPU softmax reference as
   the non-split resident path, keeping the long-context decode kernel wiring
   covered at the kernel boundary used by the serving stack.
+  **Update — resident sample errors do not replay the step:** the multi-row
+  non-greedy branch now only falls back to the hidden-row sampler when the
+  resident sample path cleanly declines before native command recording.
+  Once the resident path has selected native execution, an error returns
+  immediately instead of replaying the same decode step through the hidden
+  fallback after KV/GDN state may have been updated on device.
 
 ## Other follow-ups (perf headroom, not regressions)
 
