@@ -86,6 +86,11 @@ fn enabled_unless_disabled(name: &str) -> bool {
     std::env::var(name).is_err()
 }
 
+fn linear_bf16w_rows4_enabled() -> bool {
+    enabled_unless_disabled("KILN_DISABLE_VULKAN_LINEAR_DECODE_BF16W_ROWS4")
+        && enabled_unless_disabled("KILN_DISABLE_VULKAN_LINEAR_BF16W_ROWS4")
+}
+
 fn paged_attn_splitk_chunks(batch: usize) -> usize {
     std::env::var("KILN_VK_PAGED_ATTN_SPLITK_CHUNKS")
         .ok()
@@ -111,7 +116,7 @@ fn full_attn_qkv_gate_split_bf16w_plan(batch: usize, total_out: usize) -> (&'sta
 }
 
 fn linear_bf16w_batched_plan(batch: usize, out_dim: usize) -> (&'static str, u32) {
-    let rows4 = batch >= 32 && enabled_unless_disabled("KILN_DISABLE_VULKAN_LINEAR_BF16W_ROWS4");
+    let rows4 = batch >= 32 && linear_bf16w_rows4_enabled();
     let row_groups = if rows4 { batch.div_ceil(4) } else { batch };
     let shader = if rows4 {
         shaders::LINEAR_DECODE_BATCHED_ROWS4_BF16W

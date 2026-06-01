@@ -46,6 +46,7 @@ pub(crate) fn linear_decode_bf16w_rows4_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| {
         std::env::var("KILN_DISABLE_VULKAN_LINEAR_DECODE_BF16W_ROWS4").is_err()
+            && std::env::var("KILN_DISABLE_VULKAN_LINEAR_BF16W_ROWS4").is_err()
     })
 }
 

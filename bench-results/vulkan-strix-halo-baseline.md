@@ -223,7 +223,11 @@ every config"):
   selection still had older batch-64 rows8 checks; resident decode now shares
   the same 256-row cutoff so production and benchmark routing match. A short
   patched rerun with warmup=1, timed=3, repeats=2 measured batch 64 at
-  462.1 ms / 139 rows/s and batch 128 at 934.6 ms / 137 rows/s.
+  462.1 ms / 139 rows/s and batch 128 at 934.6 ms / 137 rows/s. The linear
+  bf16 rows4 disable knob is now honored under both the canonical
+  `KILN_DISABLE_VULKAN_LINEAR_DECODE_BF16W_ROWS4` name and the older
+  command-batch planner name, so production and microbench A/Bs use the same
+  routing control.
   **Update — mixed resident paged token microbench:** added
   `full_token_resident_mixed_paged`, which keeps the real 8 full-attention +
   24 GDN layer mix but changes each full-attention layer to use
