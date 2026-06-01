@@ -1303,7 +1303,11 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
 /// Vulkan devices are detected at runtime — candle-core has no native Vulkan
 /// device, so we always pass a CPU device to `VulkanBackend` and let it
 /// manage its own `vk::Device` internally.
-#[cfg(any(feature = "metal", feature = "vulkan", feature = "legacy-candle-parity"))]
+// (#1082 vulkan candle rip) `vulkan` dropped from this cfg: the candle-typed
+// `for_device` shim is unavailable on a candle-free vulkan build. Vulkan
+// callers use the kt-native `for_device_kt`. Metal/legacy-candle-parity still
+// carry candle and keep this compat entry.
+#[cfg(any(feature = "metal", feature = "legacy-candle-parity"))]
 pub fn for_device(device: &candle_core::Device) -> Arc<dyn BackendRuntime> {
     // (#1082 DoD-100 step 4) Candle-typed compat shim for the remaining
     // candle-device callers (the metal dispatch path + opd/test harnesses).
@@ -1354,13 +1358,13 @@ pub fn for_device_kt(device: &kiln_tensor::Device) -> Arc<dyn BackendRuntime> {
         }
         _ => {
             // Vulkan is detected at runtime (kt has a Vulkan variant but the
-            // VulkanBackend manages its own vk::Device, so it takes a candle
-            // CPU sentinel). CPU/unmapped fall through to the kt CpuBackend.
+            // VulkanBackend manages its own vk::Device, so it takes a kt
+            // Cpu sentinel). CPU/unmapped fall through to the kt CpuBackend.
             #[cfg(feature = "vulkan")]
             {
                 if vulkan::vulkan_is_available() {
                     mark_vulkan_active();
-                    return Arc::new(vulkan::VulkanBackend::new(candle_core::Device::Cpu));
+                    return Arc::new(vulkan::VulkanBackend::new(kiln_tensor::Device::Cpu));
                 }
             }
             Arc::new(cpu::CpuBackend::new(kiln_tensor::Device::Cpu))

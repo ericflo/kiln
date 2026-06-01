@@ -2316,15 +2316,24 @@ fn synchronize_for_profile(device: &Device) -> Result<()> {
         #[cfg(feature = "cuda")]
         Device::Cuda(idx) => kiln_tensor::cuda_synchronize_default_stream(*idx)
             .map_err(|e| anyhow::anyhow!("synchronize_for_profile: {e}")),
-        // Non-CUDA async backends (Metal/Vulkan) bridge to a candle device for
-        // the profiling-only sync. kt `Device` is `#[non_exhaustive]`, so this
-        // wildcard also satisfies exhaustiveness. Excluded from the cuda build.
-        #[cfg(not(feature = "cuda"))]
+        // Metal bridges to a candle device for the profiling-only sync. kt
+        // `Device` is `#[non_exhaustive]`, so this wildcard also satisfies
+        // exhaustiveness. Excluded from the cuda build.
+        #[cfg(feature = "metal")]
         _ => {
             let candle_device = kiln_kt_bridge::candle_device_from_kt(device)
                 .map_err(|e| anyhow::anyhow!("synchronize_for_profile: {e}"))?;
             candle_device.synchronize().map_err(Into::into)
         }
+        // (#1082) Vulkan (and any other non-CUDA, non-Metal build) keeps the
+        // kt seam CPU-resident — tensors live on `Device::Cpu` at the kt<->vk
+        // boundary (`loader_kt_device` coerces `Vulkan(_)` to `Cpu`), and the
+        // CPU is already synchronous, so there is no async queue to drain. The
+        // former candle-device bridge is gone from the vulkan lane; this
+        // wildcard is the no-op profiling sync. kt `Device` is
+        // `#[non_exhaustive]`, so it also satisfies exhaustiveness.
+        #[cfg(all(not(feature = "cuda"), not(feature = "metal")))]
+        _ => Ok(()),
         // In a cuda build the only async backend is CUDA (handled above); the
         // wildcard keeps the `#[non_exhaustive]` match exhaustive.
         #[cfg(feature = "cuda")]
@@ -6419,7 +6428,12 @@ impl GpuWeights {
         {
             // #1082: `device` is now `kiln_tensor::Device` (no `synchronize`);
             // bridge to candle for the Metal queue sync (candle Device has it).
-            #[cfg(any(not(feature = "cuda"), feature = "metal"))]
+            // This whole block only ever runs when `device` is `Metal(_)` (see
+            // the `matches!` guard above), so the candle-device bridge is
+            // Metal-only. The vulkan lane has no candle bridge (and never
+            // reaches here — vulkan tensors are CPU-resident, never
+            // `Device::Metal`), so it is excluded from this arm. (#1082)
+            #[cfg(feature = "metal")]
             {
                 kiln_kt_bridge::candle_device_from_kt(device)
                     .map_err(|e| anyhow::anyhow!("{e}"))?
@@ -6930,20 +6944,23 @@ fn vulkan_rmsnorm_forward_inference_enabled() -> bool {
     })
 }
 
-/// File-private candle⇔bytes helpers — migrated inline from
+/// File-private kt⇔bytes helpers — migrated inline from
 /// `kiln_vulkan_kernel::kernels::{extract_tensor_bytes, create_tensor_from_data}`
 /// as part of issue #1082 (drop candle from kiln-vulkan-kernel).
 ///
-/// Mirror the public bridge implementations exactly so the vulkan-feature
-/// rmsnorm paths in this file can perform candle ↔ raw-bytes conversions
-/// without routing through the kiln-vulkan-kernel candle bridge surface. (#1082)
+/// #1082 vulkan candle removal: the vulkan feature no longer pulls in
+/// `candle-core`, so these helpers operate directly on the kt
+/// `kiln_tensor::Tensor` (which is CPU-resident at the kt<->vk seam — see
+/// `loader_kt_device`). kt exposes the same `flatten_all`/`to_dtype`/
+/// `to_vec1`/`from_vec`/`reshape` surface, so the byte layout is identical;
+/// this is a pure type-substrate swap with no behavior change.
 #[cfg(feature = "vulkan")]
 #[inline]
-fn vk_tensor_to_f32_bytes_with_shape(tensor: &candle_core::Tensor) -> Result<(Vec<u8>, Vec<usize>)> {
-    let shape: Vec<usize> = tensor.shape().dims().to_vec();
+fn vk_tensor_to_f32_bytes_with_shape(tensor: &Tensor) -> Result<(Vec<u8>, Vec<usize>)> {
+    let shape: Vec<usize> = tensor.dims().to_vec();
     let flat = tensor.flatten_all().context("failed to flatten tensor")?;
     let f32_data = flat
-        .to_dtype(candle_core::DType::F32)?
+        .to_dtype(DType::F32)?
         .to_vec1::<f32>()
         .context("failed to extract f32 data")?;
     Ok((bytemuck::cast_slice(&f32_data).to_vec(), shape))
@@ -6954,13 +6971,14 @@ fn vk_tensor_to_f32_bytes_with_shape(tensor: &candle_core::Tensor) -> Result<(Ve
 fn vk_tensor_from_f32_bytes(
     data: &[u8],
     shape: &[usize],
-    dtype: candle_core::DType,
-) -> Result<candle_core::Tensor> {
+    dtype: DType,
+) -> Result<Tensor> {
     let f32_data: &[f32] = bytemuck::cast_slice(data);
-    let tensor = candle_core::Tensor::from_vec(f32_data.to_vec(), f32_data.len(), &candle_core::Device::Cpu)?
+    // kt `from_vec` is CPU-resident and takes no device arg.
+    let tensor = Tensor::from_vec(f32_data.to_vec(), f32_data.len())?
         .reshape(shape)?;
-    if dtype == candle_core::DType::BF16 {
-        Ok(tensor.to_dtype(candle_core::DType::BF16)?)
+    if dtype == DType::BF16 {
+        Ok(tensor.to_dtype(DType::BF16)?)
     } else {
         Ok(tensor)
     }
@@ -6990,12 +7008,12 @@ fn try_vulkan_rmsnorm_forward(x: &Tensor, weight: &Tensor, eps: f32) -> Result<O
         .last()
         .ok_or_else(|| anyhow::anyhow!("rmsnorm: x has no dims"))?;
     let rows: usize = x_dims[..x_dims.len() - 1].iter().product();
-    // The byte helpers are candle-typed (they build CPU candle tensors for the
-    // autograd CustomOp1). Bridge the kt locals to candle for extraction. (#1082)
-    let x_f32_c = crate::forward::kt_logits_to_candle(&x_f32)?;
-    let w_f32_c = crate::forward::kt_logits_to_candle(&w_f32)?;
-    let x_bytes = vk_tensor_to_f32_bytes_with_shape(&x_f32_c)?.0;
-    let w_bytes = vk_tensor_to_f32_bytes_with_shape(&w_f32_c)?.0;
+    // #1082 vulkan candle removal: the byte helpers are kt-typed now (the
+    // vulkan feature no longer links candle). The kt tensors are already
+    // CPU-resident at the kt<->vk seam, so extraction runs directly on them
+    // with no candle round-trip.
+    let x_bytes = vk_tensor_to_f32_bytes_with_shape(&x_f32)?.0;
+    let w_bytes = vk_tensor_to_f32_bytes_with_shape(&w_f32)?.0;
     let out_bytes = kiln_vulkan_kernel::kernels::dispatch_qwen_rmsnorm_forward_bytes(
         vk_device.as_ref(),
         &x_bytes,
@@ -7004,13 +7022,11 @@ fn try_vulkan_rmsnorm_forward(x: &Tensor, weight: &Tensor, eps: f32) -> Result<O
         hidden,
         eps,
     )?;
-    let out_f32_c = vk_tensor_from_f32_bytes(
+    let out_f32 = vk_tensor_from_f32_bytes(
         &out_bytes,
         &x_dims,
-        candle_core::DType::F32,
+        DType::F32,
     )?;
-    // Bridge the candle result back to kt before the kt-typed dtype cast. (#1082)
-    let out_f32 = crate::forward::candle_to_kt_activation(&out_f32_c)?;
     let out = if out_f32.dtype() == in_dtype {
         out_f32
     } else {
@@ -22833,78 +22849,46 @@ pub fn model_forward_kt(
 //   returns kt logits directly now — no candle bridge.
 
 
-/// (#1082) bridge — remove when the cross-file candle seams flip to kt.
+/// (#1082) kt seam passthrough — the former kt→candle copy-bridge.
 ///
-/// In-file kt→candle copy-bridge retained ONLY to feed the candle-typed
-/// cross-file seams that other agents still own: the `crate::tape_forward::try_tape_*`
-/// kt-tape adapters (candle-typed I/O, owned by the tape_forward agent), the
-/// `BackendRuntime` trait methods (candle-typed until the Wave F seam flip), and
-/// the candle composites in `lora_loader` / `rmsnorm_candle_shim`. Once those
-/// seams take/return kt, every call site here threads kt directly and this
-/// helper is deleted. CUDA-only copy; the non-CUDA arm errors at runtime since
-/// production decode is CUDA.
+/// Under `--features vulkan` the kiln-model crate no longer links `candle-core`
+/// (the vulkan feature does not pull in `dep:candle-core` or
+/// `kiln-kt-bridge/candle`), so this helper can no longer mint a
+/// `candle_core::Tensor`. The vulkan lane is fully kt-native and CPU-resident
+/// at the kt<->vk seam, so the bridge collapses to an identity passthrough: it
+/// normalizes contiguity (callers downstream consume a contiguous tensor) and
+/// returns the kt tensor directly. No copy, no candle round-trip.
 ///
-/// #1082: now `#[cfg(feature = "vulkan")]` — the CUDA decode path is fully
-/// kt-native (the last cuda caller, the contiguous-`KvCache` update bridge,
-/// is gone), so the only remaining callers are the vulkan-resident decode /
-/// backend seams the Vulkan agent owns. Out of the cuda build entirely.
+/// Kept `pub(crate)` because the sibling vulkan seams (`vk_forward.rs`,
+/// `backend/vulkan.rs`) still call it; those call sites pass kt tensors and
+/// consume the kt result through the identical `kiln_tensor::Tensor` method
+/// surface, so the passthrough is behavior-preserving there. (#1082)
 #[cfg(feature = "vulkan")]
-pub(crate) fn kt_logits_to_candle(logits: &Tensor) -> Result<candle_core::Tensor> {
-    let contig;
-    let lc = if logits.is_contiguous() {
-        logits
+pub(crate) fn kt_logits_to_candle(logits: &Tensor) -> Result<Tensor> {
+    if logits.is_contiguous() {
+        Ok(logits.clone())
     } else {
-        contig = logits.contiguous()?;
-        &contig
-    };
-    let candle = kiln_kt_bridge::kt_tensor_to_candle_cuda_copy(lc)
-        .map_err(|e| anyhow::anyhow!("kt_logits_to_candle bridge: {e}"))?;
-    // #1082 CP-4: register the ORIGINAL kt tensor (a recorded tape node output)
-    // as the producer of this candle id, so a downstream tape adapter /
-    // `candle_to_kt_activation` re-entering the kt tape chains back to it
-    // instead of fresh-borrowing — keeping the tape connected across the candle
-    // island. Self-gates on the bridge scope (no-op on the inference path).
-    // CUDA-only: the `tape_bridge` registry is part of the CP-4 GPU tape path.
-    #[cfg(feature = "cuda")]
-    kiln_kt_bridge::tape_bridge::retain_output_for_chaining(logits, candle.id());
-    Ok(candle)
+        Ok(logits.contiguous()?)
+    }
 }
 
 
-/// (#1082) bridge — remove when the cross-file candle seams flip to kt.
+/// (#1082) kt seam passthrough — the former candle→kt copy-bridge, inverse of
+/// [`kt_logits_to_candle`].
 ///
-/// In-file candle→kt copy-bridge: the inverse of [`kt_logits_to_candle`],
-/// retained only to re-enter kt from the candle results that the cross-file
-/// candle seams (`try_tape_*` adapters, `BackendRuntime` trait, candle
-/// composites) still return. Deleted once those seams are kt-native. CUDA-only
-/// copy; non-CUDA errors at runtime.
-///
-/// #1082: now `#[cfg(feature = "vulkan")]` — see [`kt_logits_to_candle`]; the
-/// cuda decode path no longer round-trips through candle, so this bridge is
-/// vulkan-only.
+/// Under `--features vulkan` candle is gone (see [`kt_logits_to_candle`]), so
+/// the input is already a kt `kiln_tensor::Tensor`. The bridge collapses to an
+/// identity passthrough: normalize contiguity and return the kt tensor
+/// directly. The former CP-4 `tape_bridge` re-entry was `#[cfg(feature =
+/// "cuda")]`-only and never compiled in the vulkan lane, so dropping it is a
+/// no-op here. (#1082)
 #[cfg(feature = "vulkan")]
-pub(crate) fn candle_to_kt_activation(t: &candle_core::Tensor) -> Result<Tensor> {
-    // #1082 CP-4: if `t` was produced by a tape adapter / kt→candle bridge in
-    // the active tape scope (registered via `retain_output_for_chaining`),
-    // reuse that recorded kt tensor so the kt tape stays connected ACROSS the
-    // candle island instead of re-entering as a fresh, un-chained kt id (which
-    // islands the upstream forward from the loss → empty grads). Self-gates on
-    // the bridge scope (returns `None` outside it), so the inference / decode
-    // path takes the plain fresh copy below unchanged. CUDA-only: the
-    // `tape_bridge` registry is part of the CP-4 GPU tape path.
-    #[cfg(feature = "cuda")]
-    if let Some(kt) = kiln_kt_bridge::tape_bridge::kt_input_for_candle(t.id()) {
-        return Ok(kt);
-    }
-    let contig;
-    let t = if t.is_contiguous() {
-        t
+pub(crate) fn candle_to_kt_activation(t: &Tensor) -> Result<Tensor> {
+    if t.is_contiguous() {
+        Ok(t.clone())
     } else {
-        contig = t.contiguous()?;
-        &contig
-    };
-    kiln_kt_bridge::kt_tensor_from_candle_cuda_copy(t)
-        .map_err(|e| anyhow::anyhow!("candle_to_kt_activation bridge: {e}"))
+        Ok(t.contiguous()?)
+    }
 }
 
 
