@@ -40,6 +40,8 @@ use crate::backend::vulkan::VulkanBackend;
 use crate::forward::GpuLayerWeights;
 use crate::PagedKvCacheKt;
 
+const DEFAULT_MLP_BF16_DOWN_ROWS4_MIN_BATCH: usize = 16;
+const DEFAULT_MLP_BF16_GATE_UP_ROWS4_MIN_BATCH: usize = 8;
 const DEFAULT_MLP_BF16_ROWS8_MIN_BATCH: usize = 256;
 const DEFAULT_FULL_ATTN_QKV_BF16_ROWS4_MIN_BATCH: usize = 2;
 const DEFAULT_FULL_ATTN_QKV_BF16_ROWS8_MIN_BATCH: usize = 64;
@@ -114,6 +116,28 @@ fn mlp_bf16_rows8_min_batch() -> usize {
             .and_then(|s| s.parse::<usize>().ok())
             .filter(|&n| n > 0)
             .unwrap_or(DEFAULT_MLP_BF16_ROWS8_MIN_BATCH)
+    })
+}
+
+fn mlp_bf16_gate_up_rows4_min_batch() -> usize {
+    static VALUE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *VALUE.get_or_init(|| {
+        std::env::var("KILN_VULKAN_MLP_BF16_GATE_UP_ROWS4_MIN_BATCH")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(DEFAULT_MLP_BF16_GATE_UP_ROWS4_MIN_BATCH)
+    })
+}
+
+fn mlp_bf16_down_rows4_min_batch() -> usize {
+    static VALUE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *VALUE.get_or_init(|| {
+        std::env::var("KILN_VULKAN_MLP_BF16_DOWN_ROWS4_MIN_BATCH")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(DEFAULT_MLP_BF16_DOWN_ROWS4_MIN_BATCH)
     })
 }
 
@@ -229,7 +253,7 @@ fn linear_bf16w_batched_plan(batch: usize, out_dim: usize) -> (&'static str, u32
 fn mlp_gate_up_bf16w_batched_plan(batch: usize, intermediate: usize) -> (&'static str, u32) {
     let rows8 = batch >= mlp_bf16_rows8_min_batch()
         && enabled_unless_disabled("KILN_DISABLE_VULKAN_MLP_BF16_ROWS8");
-    let rows4 = batch >= 8
+    let rows4 = batch >= mlp_bf16_gate_up_rows4_min_batch()
         && !rows8
         && enabled_unless_disabled("KILN_DISABLE_VULKAN_MLP_BF16_GATE_UP_ROWS4");
     if rows8 {
@@ -253,7 +277,7 @@ fn mlp_gate_up_bf16w_batched_plan(batch: usize, intermediate: usize) -> (&'stati
 fn mlp_down_add_residual_bf16w_batched_plan(batch: usize, out_dim: usize) -> (&'static str, u32) {
     let rows8 = batch >= mlp_bf16_rows8_min_batch()
         && enabled_unless_disabled("KILN_DISABLE_VULKAN_MLP_BF16_ROWS8");
-    let rows4 = batch >= 16
+    let rows4 = batch >= mlp_bf16_down_rows4_min_batch()
         && !rows8
         && enabled_unless_disabled("KILN_DISABLE_VULKAN_MLP_BF16_DOWN_ROWS4");
     if rows8 {

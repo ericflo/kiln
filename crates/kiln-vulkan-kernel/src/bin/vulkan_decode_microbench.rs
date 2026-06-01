@@ -49,6 +49,8 @@ const WARMUP_ITERS: usize = 10;
 const TIMED_ITERS: usize = 30;
 const REPEATS: usize = 5;
 const DEFAULT_BATCHES: &[usize] = &[1, 4, 8, 16, 32, 64];
+const DEFAULT_MLP_BF16_DOWN_ROWS4_MIN_BATCH: usize = 16;
+const DEFAULT_MLP_BF16_GATE_UP_ROWS4_MIN_BATCH: usize = 8;
 const DEFAULT_MLP_BF16_ROWS8_MIN_BATCH: usize = 256;
 const DEFAULT_FULL_ATTN_QKV_BF16_ROWS4_MIN_BATCH: usize = 2;
 const DEFAULT_GDN_IN_PROJ_ROWS4_MIN_BATCH: usize = 16;
@@ -127,6 +129,20 @@ fn mlp_bf16_rows8_min_batch() -> usize {
     env_usize(
         "KILN_VULKAN_MLP_BF16_ROWS8_MIN_BATCH",
         DEFAULT_MLP_BF16_ROWS8_MIN_BATCH,
+    )
+}
+
+fn mlp_bf16_gate_up_rows4_min_batch() -> usize {
+    env_usize(
+        "KILN_VULKAN_MLP_BF16_GATE_UP_ROWS4_MIN_BATCH",
+        DEFAULT_MLP_BF16_GATE_UP_ROWS4_MIN_BATCH,
+    )
+}
+
+fn mlp_bf16_down_rows4_min_batch() -> usize {
+    env_usize(
+        "KILN_VULKAN_MLP_BF16_DOWN_ROWS4_MIN_BATCH",
+        DEFAULT_MLP_BF16_DOWN_ROWS4_MIN_BATCH,
     )
 }
 
@@ -218,7 +234,7 @@ fn linear_bf16w_batched_plan(batch: usize, out_dim: usize) -> (&'static str, u32
 fn mlp_gate_up_bf16w_batched_plan(batch: usize, intermediate: usize) -> (&'static str, u32) {
     let rows8 = batch >= mlp_bf16_rows8_min_batch()
         && enabled_unless_disabled("KILN_DISABLE_VULKAN_MLP_BF16_ROWS8");
-    let rows4 = batch >= 8
+    let rows4 = batch >= mlp_bf16_gate_up_rows4_min_batch()
         && !rows8
         && enabled_unless_disabled("KILN_DISABLE_VULKAN_MLP_BF16_GATE_UP_ROWS4");
     if rows8 {
@@ -242,8 +258,9 @@ fn mlp_gate_up_bf16w_batched_plan(batch: usize, intermediate: usize) -> (&'stati
 fn mlp_down_add_residual_bf16w_batched_plan(batch: usize, out_dim: usize) -> (&'static str, u32) {
     let rows8 = batch >= mlp_bf16_rows8_min_batch()
         && enabled_unless_disabled("KILN_DISABLE_VULKAN_MLP_BF16_ROWS8");
-    let rows4 =
-        batch >= 16 && !rows8 && enabled_unless_disabled("KILN_DISABLE_VULKAN_MLP_BF16_DOWN_ROWS4");
+    let rows4 = batch >= mlp_bf16_down_rows4_min_batch()
+        && !rows8
+        && enabled_unless_disabled("KILN_DISABLE_VULKAN_MLP_BF16_DOWN_ROWS4");
     if rows8 {
         (
             shaders::LINEAR_DECODE_BATCHED_BF16W_ADD_RESIDUAL_ROWS8,

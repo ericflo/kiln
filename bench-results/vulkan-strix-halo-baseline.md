@@ -1087,7 +1087,11 @@ every config"):
   MLP rows8 shaders. A steadier same-session mixed-paged token check kept the
   Strix Halo default at 256: batch 64 measured 465.0 ms with a 64-row crossover
   vs 446.2 ms with the 256-row crossover. The override remains available for
-  devices where the measured crossover differs.
+  devices where the measured crossover differs. The MLP rows4 crossovers are
+  now tunable as well: `KILN_VULKAN_MLP_BF16_GATE_UP_ROWS4_MIN_BATCH` defaults
+  to 8, `KILN_VULKAN_MLP_BF16_DOWN_ROWS4_MIN_BATCH` defaults to 16, and
+  `KILN_VULKAN_MLP_F32_DOWN_ROWS4_MIN_BATCH` defaults to 8, preserving the
+  measured Strix Halo choices while letting other Vulkan devices sweep them.
 
 ## Other follow-ups (perf headroom, not regressions)
 

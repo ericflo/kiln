@@ -6,7 +6,10 @@ use half::bf16;
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 
+const DEFAULT_MLP_BF16_DOWN_ROWS4_MIN_BATCH: usize = 16;
+const DEFAULT_MLP_BF16_GATE_UP_ROWS4_MIN_BATCH: usize = 8;
 const DEFAULT_MLP_BF16_ROWS8_MIN_BATCH: usize = 256;
+const DEFAULT_MLP_F32_DOWN_ROWS4_MIN_BATCH: usize = 8;
 const DEFAULT_FULL_ATTN_QKV_BF16_ROWS4_MIN_BATCH: usize = 2;
 const DEFAULT_LINEAR_DECODE_BF16W_ROWS4_MIN_BATCH: usize = 16;
 const DEFAULT_LINEAR_DECODE_BF16W_ROWS8_MIN_BATCH: usize = 64;
@@ -55,6 +58,39 @@ pub(crate) fn mlp_bf16_rows8_min_batch() -> usize {
             .and_then(|s| s.parse::<usize>().ok())
             .filter(|&n| n > 0)
             .unwrap_or(DEFAULT_MLP_BF16_ROWS8_MIN_BATCH)
+    })
+}
+
+pub(crate) fn mlp_bf16_gate_up_rows4_min_batch() -> usize {
+    static VALUE: OnceLock<usize> = OnceLock::new();
+    *VALUE.get_or_init(|| {
+        std::env::var("KILN_VULKAN_MLP_BF16_GATE_UP_ROWS4_MIN_BATCH")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(DEFAULT_MLP_BF16_GATE_UP_ROWS4_MIN_BATCH)
+    })
+}
+
+pub(crate) fn mlp_bf16_down_rows4_min_batch() -> usize {
+    static VALUE: OnceLock<usize> = OnceLock::new();
+    *VALUE.get_or_init(|| {
+        std::env::var("KILN_VULKAN_MLP_BF16_DOWN_ROWS4_MIN_BATCH")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(DEFAULT_MLP_BF16_DOWN_ROWS4_MIN_BATCH)
+    })
+}
+
+pub(crate) fn mlp_f32_down_rows4_min_batch() -> usize {
+    static VALUE: OnceLock<usize> = OnceLock::new();
+    *VALUE.get_or_init(|| {
+        std::env::var("KILN_VULKAN_MLP_F32_DOWN_ROWS4_MIN_BATCH")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(DEFAULT_MLP_F32_DOWN_ROWS4_MIN_BATCH)
     })
 }
 
@@ -5468,7 +5504,7 @@ fn dispatch_mlp_decode_cached_impl(
         && mlp_bf16_rows8_enabled();
     let down_bf16_rows4 = down_bf16_weights
         && gate_up_bf16_weights
-        && batch >= 16
+        && batch >= mlp_bf16_down_rows4_min_batch()
         && !rows8_path
         && mlp_bf16_down_rows4_enabled();
     // gate_up rows4 reuses weights across 4 rows. The intermediate dim is
@@ -5478,11 +5514,14 @@ fn dispatch_mlp_decode_cached_impl(
     // bf16-weight MLP at batch ≥ 8, independent of which linear-down
     // path takes over. Decouple it from `down_bf16_rows4`.
     let gate_up_rows4 = gate_up_bf16_weights
-        && batch >= 8
+        && batch >= mlp_bf16_gate_up_rows4_min_batch()
         && !rows8_path
         && mlp_bf16_gate_up_rows4_enabled();
     let down_rows4 =
-        gate_up_bf16_weights && !down_bf16_weights && batch >= 8 && mlp_f32_down_rows4_enabled();
+        gate_up_bf16_weights
+            && !down_bf16_weights
+            && batch >= mlp_f32_down_rows4_min_batch()
+            && mlp_f32_down_rows4_enabled();
     let down_rows2 = !down_bf16_weights && !down_rows4 && use_prefill_row_pair_matmul(batch);
     let chained_dispatch = mlp_chained_dispatch_enabled();
     let chained_transfer_submit = chained_dispatch && mlp_chained_transfer_submit_enabled();

@@ -29,7 +29,7 @@ use crate::{shaders, CommandBatch, VulkanBuffer, VulkanDevice, Workgroups};
 use crate::kernels::{
     linear_decode_bf16w_rows4_enabled, linear_decode_bf16w_rows8_enabled,
     linear_decode_bf16w_rows4_min_batch, linear_decode_bf16w_rows8_min_batch,
-    mlp_bf16_rows8_min_batch,
+    mlp_bf16_down_rows4_min_batch, mlp_bf16_rows8_min_batch,
 };
 
 /// Selection helper shared between the f32-weights and packed-bf16
@@ -235,7 +235,9 @@ pub fn dispatch_linear_decode_batched_bf16w_add_residual_resident(
     );
 
     let rows8 = batch >= mlp_bf16_rows8_min_batch() && crate::kernels::mlp_bf16_rows8_enabled();
-    let rows4 = batch >= 16 && !rows8 && crate::kernels::mlp_bf16_down_rows4_enabled();
+    let rows4 = batch >= mlp_bf16_down_rows4_min_batch()
+        && !rows8
+        && crate::kernels::mlp_bf16_down_rows4_enabled();
     let glsl_path = if rows8 {
         concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -485,8 +487,10 @@ fn mlp_decode_shader_plan(
     down_bf16_weights: bool,
 ) -> (&'static str, &'static str, Vec<u32>, u32, Vec<u32>, u32) {
     use crate::kernels::{
-        mlp_bf16_down_rows4_enabled, mlp_bf16_gate_up_rows4_enabled, mlp_bf16_rows8_enabled,
-        mlp_f32_down_rows4_enabled, use_prefill_row_pair_matmul,
+        mlp_bf16_down_rows4_enabled, mlp_bf16_down_rows4_min_batch,
+        mlp_bf16_gate_up_rows4_enabled, mlp_bf16_gate_up_rows4_min_batch,
+        mlp_bf16_rows8_enabled, mlp_f32_down_rows4_enabled, mlp_f32_down_rows4_min_batch,
+        use_prefill_row_pair_matmul,
     };
     let gate_up_rows2 = !gate_up_bf16_weights && use_prefill_row_pair_matmul(batch);
     let rows8_path = gate_up_bf16_weights
@@ -495,16 +499,16 @@ fn mlp_decode_shader_plan(
         && mlp_bf16_rows8_enabled();
     let down_bf16_rows4 = down_bf16_weights
         && gate_up_bf16_weights
-        && batch >= 16
+        && batch >= mlp_bf16_down_rows4_min_batch()
         && !rows8_path
         && mlp_bf16_down_rows4_enabled();
     let gate_up_rows4 = gate_up_bf16_weights
-        && batch >= 8
+        && batch >= mlp_bf16_gate_up_rows4_min_batch()
         && !rows8_path
         && mlp_bf16_gate_up_rows4_enabled();
     let down_rows4 = gate_up_bf16_weights
         && !down_bf16_weights
-        && batch >= 8
+        && batch >= mlp_f32_down_rows4_min_batch()
         && mlp_f32_down_rows4_enabled();
     let down_rows2 = !down_bf16_weights && !down_rows4 && use_prefill_row_pair_matmul(batch);
 
