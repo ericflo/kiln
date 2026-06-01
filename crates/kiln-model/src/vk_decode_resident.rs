@@ -99,7 +99,7 @@ fn paged_attn_splitk_chunks(batch_size: usize) -> usize {
 
 fn full_attn_qkv_gate_split_bf16w_plan(batch: usize, total_out: usize) -> (&'static str, u32) {
     let rows4 =
-        batch >= 4 && enabled_unless_disabled("KILN_DISABLE_VULKAN_FULL_ATTN_QKV_BF16W_ROWS4");
+        batch >= 1 && enabled_unless_disabled("KILN_DISABLE_VULKAN_FULL_ATTN_QKV_BF16W_ROWS4");
     let row_groups = if rows4 { batch.div_ceil(4) } else { batch };
     let shader = if rows4 {
         shaders::FULL_ATTN_QKV_GATE_SPLIT_BATCHED_ROWS4_BF16W

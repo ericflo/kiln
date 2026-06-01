@@ -227,7 +227,9 @@ every config"):
 
   | batch | per token | rows/s |
   |---:|---:|---:|
-  | 1 | 58.2 ms | 17 |
+  | 1 | 59.2 ms | 17 |
+  | 2 | 60.8 ms | 33 |
+  | 4 | 68.6 ms | 58 |
   | 8 | 104.3 ms | 77 |
   | 32 | 240.4 ms | 133 |
   | 64 | 459.0 ms | 139 |
@@ -238,9 +240,11 @@ every config"):
   path is not the dominant saturation limit at this window; the remaining
   high-batch ceiling is still in the projection/MLP/GDN-heavy parts of the
   recorded token. Same-session A/Bs then lowered the full-attention QKV+gate
-  rows4 threshold to batch 4: mixed paged batch 4 moved from 71.5 ms / 56
-  rows/s to 68.6 ms / 58 rows/s, and batch 8 moved from 114.6 ms / 70 rows/s
-  to 104.3 ms / 77 rows/s.
+  rows4 threshold to batch 1: mixed paged batch 1 moved from 61.2 ms / 16
+  rows/s to 59.2 ms / 17 rows/s, batch 2 moved from 65.6 ms / 31 rows/s to
+  60.8 ms / 33 rows/s, batch 4 moved from 71.5 ms / 56 rows/s to 68.6 ms /
+  58 rows/s, and batch 8 moved from 114.6 ms / 70 rows/s to 104.3 ms / 77
+  rows/s.
   **Update — long-context mixed-paged sweep:** the mixed-paged benchmark now
   exposes `KILN_VK_PAGED_HISTORY` and `KILN_VK_PAGED_BLOCK_SIZE`, sizes
   `blocks_per_seq` from the requested decode position, and allocates resident

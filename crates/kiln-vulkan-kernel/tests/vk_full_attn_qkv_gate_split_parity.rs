@@ -191,3 +191,11 @@ fn direct_full_attn_qkv_gate_split_rows4_matches_cpu() -> Result<()> {
     }
     run_case(shaders::FULL_ATTN_QKV_GATE_SPLIT_BATCHED_ROWS4_BF16W, 5)
 }
+
+#[test]
+fn direct_full_attn_qkv_gate_split_rows4_b1_matches_cpu() -> Result<()> {
+    if !VulkanDevice::probe() {
+        return Ok(());
+    }
+    run_case(shaders::FULL_ATTN_QKV_GATE_SPLIT_BATCHED_ROWS4_BF16W, 1)
+}
