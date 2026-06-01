@@ -442,6 +442,15 @@ every config"):
   that production actually reads. Focused check: `cargo check -p kiln-model
   --no-default-features --features vulkan` passes with the repo's existing
   warning backlog.
+  **Update — resident pool allocated at startup:** server initialization now
+  resolves the backend-aware batching actor width and live decode-batcher width,
+  then eagerly calls the resident-pool feasibility/allocation path with their
+  maximum before returning the real `AppState`. This moves the 4-slot pool
+  allocation out of the first live request. Updated release boot on RADV
+  STRIX_HALO with `KILN_NUM_BLOCKS=2048` and prefix cache disabled logged
+  `Vulkan-resident decode pool ready` followed by
+  `Vulkan resident decode pool startup allocation max_batch=64 ready=true`
+  before `max_decode_batch=64` and live `max_batch=64` startup logs.
   **Update — resident parity test restored for Vulkan profiles:** the
   `vk_resident_decode_parity` integration test now builds against the current kt
   device/cache surface instead of stale test-only APIs. Without

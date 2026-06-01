@@ -1892,6 +1892,24 @@ impl AppState {
         let paged_cache = Arc::new(paged_cache);
         let prefix_cache = Arc::new(std::sync::Mutex::new(prefix_cache));
         let gpu_lock = Arc::new(std::sync::RwLock::new(()));
+        let backend_name = runner.read().unwrap().backend_name();
+        let max_decode_batch =
+            crate::batching_engine::env_max_decode_batch_for_backend(Some(backend_name));
+        let decode_batcher_config = DecodeBatcherConfig::enabled_for_device_kt(&device_kt)
+            .then(|| DecodeBatcherConfig::from_env_for_backend_kt(&device_kt, backend_name));
+        if backend_name == "vulkan" {
+            let resident_max_batch = max_decode_batch
+                .max(decode_batcher_config.map(|config| config.max_batch).unwrap_or(1));
+            let ready = runner
+                .read()
+                .unwrap()
+                .warm_resident_decode_pool(resident_max_batch);
+            tracing::info!(
+                max_batch = resident_max_batch,
+                ready,
+                "Vulkan resident decode pool startup allocation"
+            );
+        }
         // Batching engine is on by default — the eval system, the judgment
         // flywheel, and the high-throughput chat/completion paths all
         // depend on it, and starting up with it disabled means the first
@@ -1904,9 +1922,6 @@ impl AppState {
             Ok("0") | Ok("false") | Ok("FALSE") | Ok("off") | Ok("OFF")
         );
         let batching_engine = (!batching_engine_disabled).then(|| {
-            let backend_name = runner.read().unwrap().backend_name();
-            let max_decode_batch =
-                crate::batching_engine::env_max_decode_batch_for_backend(Some(backend_name));
             tracing::info!(
                 backend = backend_name,
                 max_decode_batch,
@@ -1923,9 +1938,7 @@ impl AppState {
                 max_decode_batch,
             )
         });
-        let decode_batcher = if DecodeBatcherConfig::enabled_for_device_kt(&device_kt) {
-            let backend_name = runner.read().unwrap().backend_name();
-            let config = DecodeBatcherConfig::from_env_for_backend_kt(&device_kt, backend_name);
+        let decode_batcher = if let Some(config) = decode_batcher_config {
             tracing::info!(
                 backend = backend_name,
                 max_batch = config.max_batch,

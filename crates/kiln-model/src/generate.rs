@@ -1380,6 +1380,17 @@ impl ModelRunner {
         self.backend.name()
     }
 
+    /// Eagerly allocate the backend-resident decode scratch ring when the
+    /// backend supports it. This keeps the first live decode request from
+    /// paying the pool feasibility/allocation cost on the request path.
+    pub fn warm_resident_decode_pool(&self, max_batch: usize) -> bool {
+        self.backend.decode_resident_pool_ready(
+            self.config.hidden_size,
+            self.config.intermediate_size,
+            max_batch,
+        )
+    }
+
     /// Preload backend-specific decode weights into any persistent device cache.
     ///
     /// After upload, on backends that opt in (Vulkan today), drop the
