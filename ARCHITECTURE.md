@@ -955,6 +955,34 @@ Anti-pattern 2 (every materializing `contiguous()` is logged) is wired
 through `kiln_tensor::profile::emit_contiguous_copy()`, which
 `Tensor::contiguous()` bumps on its non-fast-path branch.
 
+### Reproducibility & anomaly-detection flags
+
+Two environment flags give the SFT/GRPO loop reproducibility and fail-fast
+corruption detection. Both are **off by default** (release + CI); the
+training-parity CI suite turns them on so a regression surfaces at the
+producing op, not 100 steps later when loss diverges.
+
+**`KILN_DETERMINISTIC=1`** — selects the deterministic variant of every
+`Determinism::ToleranceBounded` op
+(`crates/kiln-tensor/src/determinism.rs`, `deterministic_enabled()`):
+cuBLAS workspace pin (`CUBLAS_WORKSPACE_CONFIG=:4096:8`), the
+deterministic-`atomicAdd` embedding backward, the deterministic
+reduction-tree softmax / RMSNorm / cross-entropy backward, and
+warp-shuffle-free reductions. It is the single user-facing contract for
+"make this run match yesterday's run" — one env var, not a doc-read —
+and two runs at the same seed under the envelope are bit-reproducible.
+
+**`KILN_DETECT_ANOMALY=1`** — a NaN/Inf trap on the autograd tape
+(`crates/kiln-autograd/src/anomaly.rs`, `anomaly_detection_enabled()`).
+`Tape::backward` (`tape.rs`) scans each `BackwardOp::apply` output for
+non-finite elements before propagating the gradient; the first violation
+panics with the offending op's `name()` (matches the NVTX range +
+`parity-tolerance.csv` key), its tape position (`node_index`), and the
+first violating element (`NaN` / `+Inf` / `-Inf`). Cost is ~5% per step,
+so it is off by default and on under the CI training-parity tests. It
+composes with the in-place tape-version invariant (anti-pattern 16) —
+both are tape-position-aware safety nets.
+
 ### What's NOT yet ported (subsequent PRs)
 
 - Per-backend GPU `DeviceOp` impls — Phase 2 fills these in (CUDA via
