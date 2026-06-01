@@ -59,6 +59,7 @@ use crate::{CudaStorage, DType, Error, Result};
 /// `Borrowed` [`CudaStorage`] view of `storage`; the `Arc` here (and the
 /// keep-alive clone inside each view) keeps the real allocation mapped for the
 /// lifetime of the captured graph.
+#[derive(Debug)]
 struct ArenaBuf {
     dtype: DType,
     n_elements: usize,
@@ -75,6 +76,7 @@ enum ArenaMode {
 
 /// Owns the freeze-pointer buffers for one captured decode graph and hands the
 /// forward Borrowed views into them. See the module docs.
+#[derive(Debug)]
 pub struct CaptureArena {
     ctx: Arc<CudaContext>,
     device_index: usize,
