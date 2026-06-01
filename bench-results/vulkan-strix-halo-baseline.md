@@ -570,6 +570,13 @@ every config"):
   The app-level paged latency smoke at the top of this note measured p50 decode
   ITL 68.8 ms after one warmup pass, with first-use pipeline cost still visible
   in the first decode step.
+  **Update — legacy bridge removed from the old bs=1 resident block helper:**
+  the older single-row resident full-attention fallback now extracts the input
+  activation and RoPE tables directly from kt tensors, uploads those f32 slices
+  to Vulkan, and reconstructs the readback as a kt tensor. The default serving
+  route remains the native whole-token resident stack above; this cleanup keeps
+  the older helper aligned with the kt/Vulkan-only constraint instead of
+  crossing the deprecated tensor bridge.
   **Update — GDN resident recorder uses row-reuse in-proj:** the batched GDN
   `CommandBatch` recorder now selects the same pair QKV/Z plus rows2/rows4
   BF16 in-proj shaders as the standalone dispatcher. Focused

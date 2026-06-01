@@ -257,16 +257,15 @@ pub fn drain_resident_decode_timing() {
 
 /// Run one full-attention decode block on the Vulkan-resident path.
 ///
-/// Returns `Ok(Some(output_tensor))` on success — the post-MLP residual,
-/// shape `[1, 1, hidden_size]`, `candle_core::DType::F32`, on the same candle device
-/// as `x`.
+/// Returns `Ok(Some(output_tensor))` on success -- the post-MLP residual,
+/// shape `[1, 1, hidden_size]`, as a kt tensor.
 ///
 /// Returns `Ok(None)` when the input does not match the supported
 /// configuration (see module docs); the caller should fall back to the
-/// legacy block helper.
+/// older block helper.
 ///
 /// The KV cache write lands in the supplied `VkPagedKvCache` at the
-/// block-table-resolved slot for `start_pos`. The legacy `PagedKvCacheKt`
+/// block-table-resolved slot for `start_pos`. The source `PagedKvCacheKt`
 /// is **not** updated — once the resident path is engaged for a layer,
 /// it owns that layer's KV state for the remainder of the decode
 /// session.
@@ -284,17 +283,6 @@ pub fn transformer_block_paged_decode_full_attn_resident_b1(
     rope_cos: &kiln_tensor::Tensor,
     rope_sin: &kiln_tensor::Tensor,
 ) -> Result<Option<kiln_tensor::Tensor>> {
-    // #1082 forward-flip: the kt-typed caller hands kt activations; the Vulkan
-    // resident body operates on CPU-resident candle tensors (reads host bytes,
-    // uploads to vk buffers). Bridge the kt inputs to candle host copies once at
-    // the boundary so the existing candle body is unchanged; the candle result
-    // is bridged back to kt before returning. Runtime-correct on the CPU-resident
-    // Vulkan path (value-faithful host copy).
-    let x = &crate::forward::kt_logits_to_candle(x).context("bridge kt x for resident full-attn")?;
-    let rope_cos =
-        &crate::forward::kt_logits_to_candle(rope_cos).context("bridge kt rope_cos")?;
-    let rope_sin =
-        &crate::forward::kt_logits_to_candle(rope_sin).context("bridge kt rope_sin")?;
     // --- supported-config gate ---------------------------------------
     let dims = x.dims();
     if dims.len() != 3 || dims[0] != 1 || dims[1] != 1 {
@@ -352,24 +340,10 @@ pub fn transformer_block_paged_decode_full_attn_resident_b1(
     let k_norm_buf = backend.cached_f32_weight_buffer_kt(&attn.k_norm)?;
 
     // --- rope cos/sin upload (per-step, single position) -------------
-    // Inlined replacement for `kernels::upload_tensor_f32_buffer`:
-    // extract f32 values from the candle tensors directly and call the
-    // candle-free `kernels::upload_f32_buffer_from_slice` upload path.
-    // Removes another candle-typed surface from the bridge. (#1082)
-    let rope_cos_data: Vec<f32> = rope_cos
-        .flatten_all()
-        .context("flatten rope_cos for upload")?
-        .to_dtype(candle_core::DType::F32)?
-        .to_vec1::<f32>()
-        .context("extract rope_cos f32 data")?;
+    let rope_cos_data = kt_tensor_to_f32_vec(rope_cos).context("extract rope_cos f32 data")?;
     let rope_cos_buf =
         kiln_vulkan_kernel::kernels::upload_f32_buffer_from_slice(vk_device, &rope_cos_data)?;
-    let rope_sin_data: Vec<f32> = rope_sin
-        .flatten_all()
-        .context("flatten rope_sin for upload")?
-        .to_dtype(candle_core::DType::F32)?
-        .to_vec1::<f32>()
-        .context("extract rope_sin f32 data")?;
+    let rope_sin_data = kt_tensor_to_f32_vec(rope_sin).context("extract rope_sin f32 data")?;
     let rope_sin_buf =
         kiln_vulkan_kernel::kernels::upload_f32_buffer_from_slice(vk_device, &rope_sin_data)?;
 
@@ -413,12 +387,8 @@ pub fn transformer_block_paged_decode_full_attn_resident_b1(
 
     // --- upload x ----------------------------------------------------
     let upload_t0 = fa_t0.map(|_| Instant::now());
-    let x_f32 = if x.dtype() == candle_core::DType::F32 {
-        x.flatten_all()?
-    } else {
-        x.to_dtype(candle_core::DType::F32)?.flatten_all()?
-    };
-    let x_data: Vec<f32> = x_f32.to_vec1()?;
+    let x_dtype = x.dtype();
+    let x_data = kt_tensor_to_f32_vec(x).context("extract x f32 data for resident block")?;
     let x_bytes: Vec<u8> = f32_slice_to_bytes(&x_data);
     VulkanBuffer::upload_data(
         vk_device.device(),
@@ -639,7 +609,7 @@ pub fn transformer_block_paged_decode_full_attn_resident_b1(
         FA_SUBMIT_NS.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }
 
-    // --- read back final_out as a candle candle_core::Tensor on the input's device
+    // --- read back final_out as a kt tensor
     let readback_t0 = fa_t0.map(|_| Instant::now());
     let out_bytes = VulkanBuffer::read_back(
         vk_device.device(),
@@ -650,8 +620,12 @@ pub fn transformer_block_paged_decode_full_attn_resident_b1(
     )
     .context("read back final_out")?;
     let out_f32: Vec<f32> = bytes_to_f32_vec(&out_bytes);
-    let out_tensor =
-        candle_core::Tensor::from_vec(out_f32, (1usize, 1usize, hidden), x.device())?.to_dtype(x.dtype())?;
+    let out_tensor = kiln_tensor::Tensor::from_vec(out_f32, vec![1usize, 1usize, hidden])?;
+    let out_tensor = if x_dtype == kiln_tensor::DType::F32 {
+        out_tensor
+    } else {
+        out_tensor.to_dtype(x_dtype)?
+    };
     if let Some(t) = readback_t0 {
         FA_READBACK_NS.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }
@@ -659,9 +633,17 @@ pub fn transformer_block_paged_decode_full_attn_resident_b1(
         FA_TOTAL_NS.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
         FA_CALLS.fetch_add(1, Ordering::Relaxed);
     }
-    // #1082 forward-flip: bridge the candle decode output back to a kt tensor
-    // for the kt-typed caller (host copy on the CPU-resident Vulkan path).
-    Ok(Some(crate::forward::candle_to_kt_activation(&out_tensor)?))
+    Ok(Some(out_tensor))
+}
+
+fn kt_tensor_to_f32_vec(tensor: &kiln_tensor::Tensor) -> Result<Vec<f32>> {
+    let flat = if tensor.dtype() == kiln_tensor::DType::F32 {
+        tensor.flatten_all()?
+    } else {
+        tensor.to_dtype(kiln_tensor::DType::F32)?.flatten_all()?
+    };
+    flat.to_vec1::<f32>()
+        .context("extract kt tensor f32 data")
 }
 
 fn f32_slice_to_bytes(data: &[f32]) -> Vec<u8> {
