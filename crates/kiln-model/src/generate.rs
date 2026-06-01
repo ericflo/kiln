@@ -2856,31 +2856,49 @@ impl ModelRunner {
         // fallthrough (`model_forward_paged_batched_decode_hidden`) is the slow
         // generic batched-decode-hidden path (~0.5 tok/s: per-op CPU readback +
         // per-GDN-layer cat/narrow). `model_forward_paged_last_token_resident`
-        // returns logits via the native CommandBatch path and transparently
-        // falls back to the generic forward on any decline. Greedy AND sampling
-        // are both routed: the row-0 sampling context (seed + generated tokens)
-        // was snapshotted into `vk_row0_sampling` before the `linear_states`
-        // mutable borrow, so the sampler doesn't re-borrow `states[0]` here.
+        // returns logits via the native CommandBatch path for sampling and
+        // transparently falls back to the generic forward on any decline.
+        // Greedy uses the token-only resident argmax entry instead. The row-0
+        // sampling context (seed + generated tokens) was snapshotted into
+        // `vk_row0_sampling` before the `linear_states` mutable borrow, so the
+        // sampler doesn't re-borrow `states[0]` here.
         // Skipped when the contiguous-batched path above already produced tokens
         // (row > 1).
         #[cfg(feature = "vulkan")]
         if sampled.is_none() && row_count == 1 && self.backend.supports_resident_decode() {
-            let logits = model_forward_paged_last_token_resident(
-                &*self.backend,
-                &input_tokens,
-                &self.weights,
-                &self.config,
-                paged_cache,
-                &block_tables[0],
-                sequence_lengths[0],
-                Some(&mut *linear_states[0]),
-                self.active_lora.as_ref(),
-                None,
-            )
-            .context("vulkan resident single-row decode forward failed")?;
             let token = if params[0].temperature == 0.0 {
-                greedy_sample(&logits)?
+                let linear_state = if has_linear_layers {
+                    Some(&mut *linear_states[0])
+                } else {
+                    None
+                };
+                model_forward_paged_next_token_greedy(
+                    &*self.backend,
+                    input_tokens[0],
+                    &self.weights,
+                    &self.config,
+                    paged_cache,
+                    &block_tables[0],
+                    sequence_lengths[0],
+                    linear_state,
+                    self.active_lora.as_ref(),
+                    None,
+                )
+                .context("vulkan resident single-row greedy decode forward failed")?
             } else {
+                let logits = model_forward_paged_last_token_resident(
+                    &*self.backend,
+                    &input_tokens,
+                    &self.weights,
+                    &self.config,
+                    paged_cache,
+                    &block_tables[0],
+                    sequence_lengths[0],
+                    Some(&mut *linear_states[0]),
+                    self.active_lora.as_ref(),
+                    None,
+                )
+                .context("vulkan resident single-row decode forward failed")?;
                 let (step_seed, generated) = vk_row0_sampling
                     .as_ref()
                     .expect("vk_row0_sampling captured for row_count == 1");
