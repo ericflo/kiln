@@ -421,6 +421,17 @@ pub struct CudaGraphRunner {
     /// Whether we already warned that the paged metadata graph cache is full.
     #[cfg(feature = "cuda")]
     cache_full_warned: bool,
+    /// #1082 box-102 BUG-B fix: identity (recurrent-state `TensorId`) of the
+    /// request whose GDN recurrent/conv state the captured bs=1 graph currently
+    /// holds. A fresh `LinearAttentionState` per request (generate.rs
+    /// `new_linear_state`) yields a new id; it is stable within a request (the
+    /// graph replay path does not reassign `linear_state`). On change we evict
+    /// the captured graph so the new request RE-CAPTURES with its own
+    /// post-prefill state instead of replaying on the PRIOR request's leftover
+    /// recurrent state (which produced deterministic garbage on every request
+    /// after the first).
+    #[cfg(feature = "cuda")]
+    last_request_state_id: Option<kiln_tensor::TensorId>,
 }
 
 impl CudaGraphRunner {
@@ -447,6 +458,8 @@ impl CudaGraphRunner {
             warmup_done: false,
             #[cfg(feature = "cuda")]
             cache_full_warned: false,
+            #[cfg(feature = "cuda")]
+            last_request_state_id: None,
         }
     }
 
@@ -910,6 +923,32 @@ impl CudaGraphRunner {
                 linear_state,
                 lora,
             );
+        }
+
+        // #1082 box-102 BUG-B fix: evict the captured bs=1 decode graph when
+        // the request changes. The captured graph carries GDN recurrent/conv
+        // state in its own buffers (evolved in-place across a request's
+        // replays); a NEW request reuses the same graph (the stable-metadata
+        // key zeros block_table/seq_len) but the replay path never re-injects
+        // the new request's post-prefill state, so request #2+ ran on request
+        // #1's leftover state -> deterministic garbage. A fresh
+        // `LinearAttentionState` per request gives a new recurrent-state
+        // TensorId (stable within a request); on change, evict so the new
+        // request re-captures with its own state. Re-capture cost is ~one
+        // warm+capture per request; the within-request replays are preserved.
+        #[cfg(feature = "cuda")]
+        {
+            let cur_state_id = linear_state.recurrent_states.first().map(|t| t.id());
+            if cur_state_id.is_some() && cur_state_id != self.last_request_state_id {
+                if !self.captured.is_empty() {
+                    tracing::debug!(
+                        "CUDA graph: new request (GDN recurrent-state id changed) — evicting \
+                         captured bs=1 graph so it re-captures with the new request's state"
+                    );
+                    self.captured.clear();
+                }
+                self.last_request_state_id = cur_state_id;
+            }
         }
 
         // Phase 1: warmup — run eagerly to prime GPU memory pools
