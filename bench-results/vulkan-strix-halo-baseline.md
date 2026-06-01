@@ -322,6 +322,16 @@ every config"):
   at longer contexts without changing the conclusion: at practical resident
   batch sizes, the dominant mixed-stack cost is still the projection/MLP/GDN
   shader work, not paged K/V slot writes or block-table attention.
+  **Update — GDN paired bf16 packed-word reuse:** the paired QKV/Z GDN in-proj
+  bf16 shaders now unpack both adjacent bf16 columns from one loaded `uint`
+  instead of reloading the same packed word for the second column. Direct
+  `gdn_in_proj` on RADV STRIX_HALO with warmup=5, timed=20, repeats=5 moved
+  batch 8 from 1093.9 us to 929.6 us, batch 16 from 1277.9 us to 1155.2 us,
+  batch 32 from 2319.2 us to 2123.6 us, and batch 64 from 4520.6 us to
+  4113.6 us. A production-shaped `full_token_resident_mixed_paged` check with
+  history 256, warmup=1, timed=4, repeats=3 measured batch 8 at 95.6 ms /
+  84 rows/s, batch 32 at 225.3 ms / 142 rows/s, and batch 64 at 453.2 ms /
+  141 rows/s.
   **Update — adaptive batched split-K chunks:** short same-session sweeps show
   the batched paged-attention default should keep 4 chunks at the 16-block
   256-token window, use 2 chunks once `max_blocks_per_seq >= 64` for smaller
