@@ -449,7 +449,10 @@ every config"):
   decode, with the shared chunk policy centralized in the kernel crate. Both
   generic paged decode entry points route through that wrapper and the dynamic
   per-row-length path now extracts kt bytes directly instead of compacting K/V
-  through the forbidden legacy stack before dispatch.
+  through the forbidden legacy stack before dispatch. Added
+  `paged_attn_splitk_check`, a kernel-crate-only Vulkan probe comparing the
+  split-K wrapper with the non-split paged wrapper on a non-contiguous
+  multi-row block table; release run measured max abs diff `2.980232e-8`.
   **Update — multi-row resident paged microbench:** `full_token_resident_paged`
   now uses `paged_kv_write_slots` plus split-K
   `paged_attn_decode_batch_paged_splitk` and reduce over real per-row block
