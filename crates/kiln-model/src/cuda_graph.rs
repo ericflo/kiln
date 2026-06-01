@@ -1058,6 +1058,27 @@ impl CudaGraphRunner {
                         )?;
                     }
 
+                    // #1082 box-102 SAME-STEP differential (KILN_DEBUG_LAYER_NORMS):
+                    // run the EAGER forward on THIS replay step's identical inputs
+                    // (snapshot + restore linear_state; the KV write is idempotent
+                    // for the same token→slot), dump its per-layer norms, then let
+                    // the replay below dump its own (via debug_dump_gdn_state). The
+                    // FIRST layer where EAGER ≠ replay is the box-102 root cause —
+                    // eager is the correct reference (PASS1==FIRSTLAUNCH proved the
+                    // captured compute matches eager on the capture step).
+                    if crate::forward::read_layer_norm_debug().is_some() {
+                        if let Ok(snap) = linear_state.snapshot() {
+                            let _ = Self::eager_forward(
+                                backend, token_id, weights, config, paged_cache,
+                                block_table, seq_len, linear_state, lora,
+                            );
+                            if let Some(n) = crate::forward::read_layer_norm_debug() {
+                                eprintln!("SAMESTEP EAGER step={seq_len} {n:?}");
+                            }
+                            *linear_state = snap;
+                        }
+                    }
+
                     match captured.graph.launch() {
                         Ok(()) => {
                             tracing::debug!(
@@ -1065,6 +1086,9 @@ impl CudaGraphRunner {
                                 max_blocks_per_seq = requested_key.max_blocks_per_seq,
                                 "CUDA graph replay succeeded"
                             );
+                            if let Some(n) = crate::forward::read_layer_norm_debug() {
+                                eprintln!("SAMESTEP REPLAY step={seq_len} {n:?}");
+                            }
                             Self::debug_dump_gdn_state("replay", seq_len, linear_state);
                             return Ok(captured.output_logits.clone());
                         }
