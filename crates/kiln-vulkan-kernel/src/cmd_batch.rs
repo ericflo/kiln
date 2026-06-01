@@ -343,6 +343,44 @@ impl<'a> CommandBatch<'a> {
         Ok(())
     }
 
+    /// Record a host-visible staging-buffer upload into a device-local buffer
+    /// before subsequent compute dispatches in this batch read `dst`.
+    ///
+    /// This is intentionally restricted to the pre-dispatch phase: it emits the
+    /// TRANSFER_WRITE → SHADER_READ visibility barrier needed by later compute
+    /// work, but it does not handle SHADER_WRITE → TRANSFER_READ ordering from
+    /// earlier dispatches.
+    pub fn record_upload_buffer(
+        &mut self,
+        src: &VulkanBuffer,
+        dst: &VulkanBuffer,
+        size: u64,
+    ) -> Result<()> {
+        anyhow::ensure!(!self.finished, "CommandBatch: already submitted");
+        anyhow::ensure!(
+            self.dispatch_count == 0,
+            "CommandBatch: upload copies must be recorded before compute dispatches"
+        );
+        let device = self.vk_device.device();
+        unsafe {
+            let copy = vk::BufferCopy::default().size(size);
+            device.cmd_copy_buffer(self.cmd, src.handle(), dst.handle(), &[copy]);
+            let barrier = vk::MemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                .dst_access_mask(vk::AccessFlags::SHADER_READ);
+            device.cmd_pipeline_barrier(
+                self.cmd,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::DependencyFlags::empty(),
+                &[barrier],
+                &[],
+                &[],
+            );
+        }
+        Ok(())
+    }
+
     /// Number of dispatches currently in the batch (excluding the final
     /// transfer barrier).
     pub fn dispatch_count(&self) -> usize {

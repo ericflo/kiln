@@ -71,6 +71,7 @@ pub mod shaders {
     pub const PAGED_ATTN_DECODE_BATCH_PAGED_SPLITK_REDUCE: &str =
         shader_path!("paged_attn_decode_batch_paged_splitk_reduce");
     pub const VK_MUL_SIGMOID_GATE_F32: &str = shader_path!("vk_mul_sigmoid_gate_f32");
+    pub const LINEAR_DECODE: &str = shader_path!("linear_decode");
     pub const LINEAR_DECODE_BF16W: &str = shader_path!("linear_decode_bf16w");
     pub const LINEAR_DECODE_BF16W_WIDE: &str = shader_path!("linear_decode_bf16w_wide");
     pub const LINEAR_DECODE_BF16W_ADD_RESIDUAL: &str =
@@ -90,6 +91,8 @@ pub mod shaders {
         shader_path!("linear_decode_argmax_batched_blocks_bf16w");
     pub const LINEAR_DECODE_ARGMAX_BATCHED_REDUCE: &str =
         shader_path!("linear_decode_argmax_batched_reduce");
+    pub const APPLY_TOKEN_PENALTIES: &str = shader_path!("apply_token_penalties");
+    pub const TOPK_SAMPLE: &str = shader_path!("topk_sample");
     pub const ADD: &str = shader_path!("add");
     pub const ADD_QWEN_RMSNORM: &str = shader_path!("add_qwen_rmsnorm");
     pub const ADD_QWEN_RMSNORM_BATCHED: &str = shader_path!("add_qwen_rmsnorm_batched");

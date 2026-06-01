@@ -626,6 +626,15 @@ every config"):
   The app-level paged latency smoke at the top of this note measured p50 decode
   ITL 68.8 ms after one warmup pass, with first-use pipeline cost still visible
   in the first decode step.
+  **Update — single-row on-device sampler is one-submit end-to-end:** the
+  Vulkan `linear_decode_sample` helper now records hidden upload, optional
+  token-history uploads, LM-head projection, optional token-penalty scatter,
+  fused top-k/top-p sampling, and the 4-byte token readback copy into one
+  `CommandBatch`. The sampled token is then read from host-visible staging, so
+  the non-greedy bs=1 route no longer pays separate queue submissions for
+  upload, LM head, penalties, sampler, and token readback. Focused Vulkan coverage:
+  `cargo test -p kiln-vulkan-kernel --test linear_decode_sample -- --nocapture`
+  covers both the no-penalty top-1 path and the optional penalty dispatch.
   **Update — legacy bridge removed from the old bs=1 resident block helper:**
   the older single-row resident full-attention fallback now extracts the input
   activation and RoPE tables directly from kt tensors, uploads those f32 slices

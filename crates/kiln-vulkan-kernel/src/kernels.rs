@@ -3096,7 +3096,6 @@ pub fn dispatch_linear_decode_sample_bytes(
     seed: u64,
 ) -> Result<u32> {
     let device = vk_device.device();
-    let queue = vk_device.queue();
     let device_local_mt = vk_device.device_local_mem_type();
     let host_visible_mt = vk_device.host_visible_mem_type();
 
@@ -3122,18 +3121,12 @@ pub fn dispatch_linear_decode_sample_bytes(
     // ---- Allocate the device-local buffers ----
     let x_buf = VulkanBuffer::create_device_local(device, device_local_mt, x_data.len() as u64)
         .context("failed to create linear_decode_sample x buffer")?;
-    {
-        let command_pool = vk_device.transient_command_pool()?;
-        VulkanBuffer::upload_data_with_command_pool(
-            device,
-            host_visible_mt,
-            queue,
-            *command_pool,
-            &x_buf,
-            &x_data,
-        )
-        .context("failed to upload linear_decode_sample x buffer")?;
-    }
+    let (x_stage, _) = VulkanBuffer::create_host_visible_with_segments(
+        device,
+        host_visible_mt,
+        &[x_data],
+    )
+    .context("failed to stage linear_decode_sample x buffer")?;
 
     // Logits buffer is `[out_dim]` f32. Stays on device for the entire
     // pipeline — never copied back to host.
@@ -3141,40 +3134,16 @@ pub fn dispatch_linear_decode_sample_bytes(
         VulkanBuffer::create_device_local(device, device_local_mt, (out_dim * 4) as u64)
             .context("failed to create linear_decode_sample logits buffer")?;
 
-    // ---- Step 1: lm_head matmul ----
-    let lm_glsl = if packed_bf16_weights {
-        concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/csrc/shaders/linear_decode_bf16w.comp"
-        )
-    } else {
-        concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/csrc/shaders/linear_decode.comp"
-        )
-    };
-    let lm_spirv = crate::pipeline::ShaderPipeline::compile_shader(lm_glsl)?;
-    let lm_push: [u32; 2] = [hidden as u32, out_dim as u32];
-    let lm_handles = vec![x_buf.handle(), weight_t.handle(), logits_buf.handle()];
-    run_compute_pipeline(
-        vk_device,
-        &lm_spirv,
-        &lm_handles,
-        lm_handles.len(),
-        &lm_push,
-        out_dim.div_ceil(16) as u32,
-    )
-    .context("linear_decode_sample: lm_head dispatch failed")?;
-
-    // ---- Step 2: (optional) apply_token_penalties scatter ----
+    // ---- Step 2: prepare optional penalty buffers before recording ----
     let penalties_active = !history_indices.is_empty()
         && ((repetition_penalty.is_finite() && (repetition_penalty - 1.0).abs() > f32::EPSILON)
             || (presence_penalty.is_finite() && presence_penalty != 0.0)
             || (frequency_penalty.is_finite() && frequency_penalty != 0.0));
     let _history_idx_buf;
     let _history_cnt_buf;
+    let _history_idx_stage;
+    let _history_cnt_stage;
     if penalties_active {
-        let n_unique = history_indices.len() as u32;
         let idx_buf = VulkanBuffer::create_device_local(
             device,
             device_local_mt,
@@ -3187,104 +3156,117 @@ pub fn dispatch_linear_decode_sample_bytes(
             (history_counts.len() * 4) as u64,
         )
         .context("failed to create penalty history-count buffer")?;
-        {
-            let command_pool = vk_device.transient_command_pool()?;
-            VulkanBuffer::upload_data_with_command_pool(
-                device,
-                host_visible_mt,
-                queue,
-                *command_pool,
-                &idx_buf,
-                bytemuck::cast_slice(history_indices),
-            )
-            .context("failed to upload penalty history-index buffer")?;
-            VulkanBuffer::upload_data_with_command_pool(
-                device,
-                host_visible_mt,
-                queue,
-                *command_pool,
-                &cnt_buf,
-                bytemuck::cast_slice(history_counts),
-            )
-            .context("failed to upload penalty history-count buffer")?;
-        }
-
-        let pen_glsl = concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/csrc/shaders/apply_token_penalties.comp"
-        );
-        let pen_spirv = crate::pipeline::ShaderPipeline::compile_shader(pen_glsl)?;
-        // Push constants: u32 n_unique, u32 vocab_size, f32 rep, f32 presence, f32 frequency.
-        let pen_push: [u32; 5] = [
-            n_unique,
-            out_dim as u32,
-            repetition_penalty.to_bits(),
-            presence_penalty.to_bits(),
-            frequency_penalty.to_bits(),
-        ];
-        let pen_handles = vec![logits_buf.handle(), idx_buf.handle(), cnt_buf.handle()];
-        run_compute_pipeline(
-            vk_device,
-            &pen_spirv,
-            &pen_handles,
-            pen_handles.len(),
-            &pen_push,
-            n_unique.div_ceil(64),
+        let (idx_stage, _) = VulkanBuffer::create_host_visible_with_segments(
+            device,
+            host_visible_mt,
+            &[bytemuck::cast_slice(history_indices)],
         )
-        .context("linear_decode_sample: apply_token_penalties dispatch failed")?;
-        // Keep buffers alive until the queue idles (run_compute_pipeline waits inside).
+        .context("failed to stage penalty history-index buffer")?;
+        let (cnt_stage, _) = VulkanBuffer::create_host_visible_with_segments(
+            device,
+            host_visible_mt,
+            &[bytemuck::cast_slice(history_counts)],
+        )
+        .context("failed to stage penalty history-count buffer")?;
+
+        // Keep buffers alive until the command batch has completed.
         _history_idx_buf = Some(idx_buf);
         _history_cnt_buf = Some(cnt_buf);
+        _history_idx_stage = Some(idx_stage);
+        _history_cnt_stage = Some(cnt_stage);
     } else {
         _history_idx_buf = None;
         _history_cnt_buf = None;
+        _history_idx_stage = None;
+        _history_cnt_stage = None;
     }
 
-    // ---- Step 3: fused topk_sample → 4-byte token ----
+    // ---- Step 3: record lm_head + optional penalties + sample + readback ----
     let out_token_buf = VulkanBuffer::create_device_local(device, device_local_mt, 4)
         .context("failed to create linear_decode_sample out-token buffer")?;
-    let sample_glsl = concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/csrc/shaders/topk_sample.comp"
-    );
-    let sample_spirv = crate::pipeline::ShaderPipeline::compile_shader(sample_glsl)?;
+    let out_staging = VulkanBuffer::create_host_visible(device, host_visible_mt, 4)
+        .context("failed to create linear_decode_sample output staging buffer")?;
+
+    let lm_glsl = if packed_bf16_weights {
+        crate::shaders::LINEAR_DECODE_BF16W
+    } else {
+        crate::shaders::LINEAR_DECODE
+    };
+    let mut batch = crate::CommandBatch::new(vk_device)
+        .context("linear_decode_sample: create CommandBatch")?;
+    batch
+        .record_upload_buffer(&x_stage, &x_buf, x_data.len() as u64)
+        .context("linear_decode_sample: record x upload")?;
+    if let (Some(idx_stage), Some(cnt_stage), Some(idx_buf), Some(cnt_buf)) = (
+        &_history_idx_stage,
+        &_history_cnt_stage,
+        &_history_idx_buf,
+        &_history_cnt_buf,
+    ) {
+        batch
+            .record_upload_buffer(idx_stage, idx_buf, (history_indices.len() * 4) as u64)
+            .context("linear_decode_sample: record penalty history-index upload")?;
+        batch
+            .record_upload_buffer(cnt_stage, cnt_buf, (history_counts.len() * 4) as u64)
+            .context("linear_decode_sample: record penalty history-count upload")?;
+    }
+    batch
+        .record_shader(
+            lm_glsl,
+            &[x_buf.handle(), weight_t.handle(), logits_buf.handle()],
+            &[hidden as u32, out_dim as u32],
+            crate::Workgroups::OneD(out_dim.div_ceil(16) as u32),
+        )
+        .context("linear_decode_sample: record lm_head dispatch")?;
+
+    if let (Some(idx_buf), Some(cnt_buf)) = (&_history_idx_buf, &_history_cnt_buf) {
+        let n_unique = history_indices.len() as u32;
+        batch
+            .record_shader(
+                crate::shaders::APPLY_TOKEN_PENALTIES,
+                &[logits_buf.handle(), idx_buf.handle(), cnt_buf.handle()],
+                &[
+                    n_unique,
+                    out_dim as u32,
+                    repetition_penalty.to_bits(),
+                    presence_penalty.to_bits(),
+                    frequency_penalty.to_bits(),
+                ],
+                crate::Workgroups::OneD(n_unique.div_ceil(64)),
+            )
+            .context("linear_decode_sample: record apply_token_penalties dispatch")?;
+    }
+
     let seed_lo = (seed & 0xFFFF_FFFF) as u32;
     let seed_hi = (seed >> 32) as u32;
     // Push constants: u32 vocab_size, u32 top_k, f32 temperature, f32 top_p, f32 min_p, u32 seed_lo, u32 seed_hi
-    let sample_push: [u32; 7] = [
-        out_dim as u32,
-        top_k,
-        temperature.to_bits(),
-        top_p.to_bits(),
-        min_p.to_bits(),
-        seed_lo,
-        seed_hi,
-    ];
-    let sample_handles = vec![logits_buf.handle(), out_token_buf.handle()];
-    // The fused topk_sample shader is a SINGLE workgroup pass (its own
-    // tree reduction is inside the shader). Always dispatch x=1.
-    run_compute_pipeline(
-        vk_device,
-        &sample_spirv,
-        &sample_handles,
-        sample_handles.len(),
-        &sample_push,
-        1,
-    )
-    .context("linear_decode_sample: topk_sample dispatch failed")?;
-
-    // ---- Step 4: read back the 4-byte token ----
-    let out_data = {
-        let command_pool = vk_device.transient_command_pool()?;
-        VulkanBuffer::read_back_with_command_pool(
-            device,
-            host_visible_mt,
-            queue,
-            *command_pool,
-            &out_token_buf,
+    batch
+        .record_shader(
+            crate::shaders::TOPK_SAMPLE,
+            &[logits_buf.handle(), out_token_buf.handle()],
+            &[
+                out_dim as u32,
+                top_k,
+                temperature.to_bits(),
+                top_p.to_bits(),
+                min_p.to_bits(),
+                seed_lo,
+                seed_hi,
+            ],
+            crate::Workgroups::OneD(1),
         )
-        .context("failed to read back linear_decode_sample token")?
-    };
+        .context("linear_decode_sample: record topk_sample dispatch")?;
+    batch
+        .record_copy_buffer(&out_token_buf, &out_staging, 4)
+        .context("linear_decode_sample: record token readback copy")?;
+    batch
+        .submit_and_wait("linear_decode_sample")
+        .context("linear_decode_sample: submit CommandBatch")?;
+
+    // ---- Step 4: map the 4-byte token copied by the command batch ----
+    let out_data = out_staging
+        .read_mapped(4)
+        .context("failed to read mapped linear_decode_sample token")?;
     let tokens: &[u32] = bytemuck::cast_slice(&out_data);
     tokens
         .first()
