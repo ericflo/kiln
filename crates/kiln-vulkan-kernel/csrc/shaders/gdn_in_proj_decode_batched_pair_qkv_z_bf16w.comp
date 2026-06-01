@@ -85,13 +85,13 @@ void main() {
                 uint packed = data_qkv_w[off0 >> 1];
                 sum0 += xv * unpack_bf16(packed, off0);
                 if (valid1) {
-                    sum1 += xv * unpack_bf16(packed, off0 + 1);
+                    sum1 += xv * unpack_bf16(data_qkv_w[(off0 + 1) >> 1], off0 + 1);
                 }
             } else if (projection == 1) {
                 uint packed = data_z_w[off0 >> 1];
                 sum0 += xv * unpack_bf16(packed, off0);
                 if (valid1) {
-                    sum1 += xv * unpack_bf16(packed, off0 + 1);
+                    sum1 += xv * unpack_bf16(data_z_w[(off0 + 1) >> 1], off0 + 1);
                 }
             } else if (projection == 2) {
                 sum0 += xv * unpack_bf16(data_a_w[off0 >> 1], off0);

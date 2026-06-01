@@ -89,6 +89,10 @@ const SHADERS: &[(&str, &str)] = &[
         "gdn_in_proj_decode_batched_pair_qkv_z_rows4_bf16w",
         "SPIR_V_GDN_IN_PROJ_DECODE_BATCHED_PAIR_QKV_Z_ROWS4_BF16W",
     ),
+    (
+        "gdn_in_proj_decode_batched_pair_qkv_z_rows8_bf16w",
+        "SPIR_V_GDN_IN_PROJ_DECODE_BATCHED_PAIR_QKV_Z_ROWS8_BF16W",
+    ),
     ("gdn_gated_rms_norm", "SPIR_V_GDN_GATED_RMS_NORM"),
     ("causal_conv1d", "SPIR_V_CAUSAL_CONV1D"),
     ("causal_conv1d_offset", "SPIR_V_CAUSAL_CONV1D_OFFSET"),

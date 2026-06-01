@@ -1014,6 +1014,14 @@ every config"):
   gate, K, and V buffers, while keeping the rows4 path for smaller batches.
   The Vulkan decode microbench planner uses the same threshold, and
   `direct_full_attn_qkv_gate_split_rows8_matches_cpu` covers a tail-row batch.
+  **Update — GDN input projection uses rows8 at saturation:** the resident
+  GDN block now selects a rows8 packed-BF16 input-projection shader for
+  64-wide continuous batches. The shader keeps QKV/Z column pairing and shares
+  each packed weight load across up to eight active rows before writing the
+  packed projection layout consumed by the existing conv/split stage. The
+  paired-column shaders now also load the second column from its actual packed
+  word, which keeps odd-width projection coverage correct. Focused Vulkan
+  coverage: `gdn_in_proj_rows8_matches_cpu_with_tail_rows_and_odd_pairs`.
 
 ## Other follow-ups (perf headroom, not regressions)
 

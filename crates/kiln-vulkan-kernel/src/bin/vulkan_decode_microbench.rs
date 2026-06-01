@@ -51,6 +51,7 @@ const REPEATS: usize = 5;
 const DEFAULT_BATCHES: &[usize] = &[1, 4, 8, 16, 32, 64];
 const MLP_BF16_ROWS8_MIN_BATCH: usize = 256;
 const GDN_IN_PROJ_ROWS4_MIN_BATCH: usize = 16;
+const GDN_IN_PROJ_ROWS8_MIN_BATCH: usize = 64;
 const FULL_ATTN_QKV_BF16_ROWS8_MIN_BATCH: usize = 64;
 
 /// Deterministic flat `Vec<bf16>` weight data for byte/slice dispatch entries.
@@ -204,6 +205,11 @@ fn gdn_in_proj_bf16w_batched_plan(
         && batch >= 3
         && enabled_unless_disabled("KILN_DISABLE_VULKAN_GDN_IN_PROJ_BATCH_ROW_PAIR");
     let row_group_size = if row_grouping
+        && batch >= GDN_IN_PROJ_ROWS8_MIN_BATCH
+        && enabled_unless_disabled("KILN_DISABLE_VULKAN_GDN_IN_PROJ_BATCH_ROW_OCTET")
+    {
+        8usize
+    } else if row_grouping
         && batch >= GDN_IN_PROJ_ROWS4_MIN_BATCH
         && enabled_unless_disabled("KILN_DISABLE_VULKAN_GDN_IN_PROJ_BATCH_ROW_QUAD")
     {
@@ -218,7 +224,9 @@ fn gdn_in_proj_bf16w_batched_plan(
     } else {
         total_out
     };
-    let shader = if row_group_size == 4 {
+    let shader = if row_group_size == 8 {
+        shaders::GDN_IN_PROJ_DECODE_BATCHED_PAIR_QKV_Z_ROWS8_BF16W
+    } else if row_group_size == 4 {
         shaders::GDN_IN_PROJ_DECODE_BATCHED_PAIR_QKV_Z_ROWS4_BF16W
     } else if row_group_size == 2 {
         shaders::GDN_IN_PROJ_DECODE_BATCHED_PAIR_QKV_Z_ROWS2_BF16W

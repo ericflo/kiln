@@ -8,6 +8,7 @@ use std::time::Instant;
 
 pub(crate) const MLP_BF16_ROWS8_MIN_BATCH: usize = 256;
 pub(crate) const GDN_IN_PROJ_ROWS4_MIN_BATCH: usize = 16;
+pub(crate) const GDN_IN_PROJ_ROWS8_MIN_BATCH: usize = 64;
 pub(crate) const LINEAR_DECODE_BF16W_ROWS8_MIN_BATCH: usize = 64;
 
 fn env_truthy_for_profile(name: &str) -> bool {
@@ -310,6 +311,12 @@ pub(crate) fn gdn_in_proj_batch_row_quad_enabled() -> bool {
         .get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_GDN_IN_PROJ_BATCH_ROW_QUAD").is_err())
 }
 
+pub(crate) fn gdn_in_proj_batch_row_octet_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED
+        .get_or_init(|| std::env::var("KILN_DISABLE_VULKAN_GDN_IN_PROJ_BATCH_ROW_OCTET").is_err())
+}
+
 fn gdn_gates_batched_transfers_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED
@@ -382,6 +389,7 @@ pub fn prewarm_builtin_pipelines(vk_device: &VulkanDevice) -> Result<()> {
         ("gdn_qkv_split_batched", 4, 12),
         ("gdn_in_proj_decode_batched_pair_qkv_z_rows2_bf16w", 6, 28),
         ("gdn_in_proj_decode_batched_pair_qkv_z_rows4_bf16w", 6, 28),
+        ("gdn_in_proj_decode_batched_pair_qkv_z_rows8_bf16w", 6, 28),
         ("gdn_gated_rms_norm", 4, 12),
         ("causal_conv1d", 4, 16),
         ("causal_conv1d_state_advance", 2, 16),
@@ -534,6 +542,11 @@ pub fn prewarm_builtin_pipelines(vk_device: &VulkanDevice) -> Result<()> {
         ),
         (
             crate::shaders::GDN_IN_PROJ_DECODE_BATCHED_PAIR_QKV_Z_ROWS4_BF16W,
+            6,
+            28,
+        ),
+        (
+            crate::shaders::GDN_IN_PROJ_DECODE_BATCHED_PAIR_QKV_Z_ROWS8_BF16W,
             6,
             28,
         ),
@@ -1297,6 +1310,11 @@ fn dispatch_gdn_in_proj_decode_cached_impl(
     let row_grouping =
         packed_bf16_weights && pair_qkv_z && batch >= 3 && gdn_in_proj_batch_row_pair_enabled();
     let row_group_size = if row_grouping
+        && batch >= GDN_IN_PROJ_ROWS8_MIN_BATCH
+        && gdn_in_proj_batch_row_octet_enabled()
+    {
+        8usize
+    } else if row_grouping
         && batch >= GDN_IN_PROJ_ROWS4_MIN_BATCH
         && gdn_in_proj_batch_row_quad_enabled()
     {
@@ -1333,7 +1351,12 @@ fn dispatch_gdn_in_proj_decode_cached_impl(
         }
     } else {
         if packed_bf16_weights {
-            if row_group_size == 4 {
+            if row_group_size == 8 {
+                concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/csrc/shaders/gdn_in_proj_decode_batched_pair_qkv_z_rows8_bf16w.comp"
+                )
+            } else if row_group_size == 4 {
                 concat!(
                     env!("CARGO_MANIFEST_DIR"),
                     "/csrc/shaders/gdn_in_proj_decode_batched_pair_qkv_z_rows4_bf16w.comp"
