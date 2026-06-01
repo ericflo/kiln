@@ -2058,7 +2058,7 @@ impl CudaGraphRunner {
         // #1082 box-102 BUG2 localization: per-layer hidden-state norms
         // (gated by KILN_DEBUG_LAYER_NORMS inside read_layer_norm_debug).
         if let Some(norms) = crate::forward::read_layer_norm_debug() {
-            let shown: Vec<String> = norms.iter().take(34).map(|x| format!("{x:.0}")).collect();
+            let shown: Vec<String> = norms.iter().take(32).map(|x| format!("{x:.3}")).collect();
             eprintln!("LAYERNORM [{tag}] step={seq_len} [{}]", shown.join(","));
         }
     }
