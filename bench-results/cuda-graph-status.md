@@ -33,10 +33,18 @@ removal and is STALE.** Re-validated on A6000 @ candle-free `main` (`a8a7be05`):
   cudarc `CudaContext::new_stream()`): capture now ENGAGES (8 captured/replay
   markers, 0 `STREAM_CAPTURE_UNSUPPORTED`, bs=1..64 all succeed) — but the
   captured graph **replays WRONG output** (greedy graph-on ≠ eager; corrupted).
-  Necessary-not-sufficient: the per-replay input-buffer refresh runs on the
-  default stream while the graph launches on the new capture stream without
-  cross-stream ordering → stale reads. **NOT merged** (fast-but-wrong is worse
-  than main's correct eager fallback).
+  Necessary-not-sufficient. A follow-up commit (`4dd6c393`) added a
+  `cuda_synchronize_default_stream()` before both `graph.launch()` sites — it did
+  NOT change the output, so the per-replay input-write race is ruled OUT. The
+  graph DECODE itself is degenerate (prefix correct from eager prefill, then
+  `!!!!!!!!` = degenerate argmax) → the captured forward is MISSING compute or
+  mishandling state. Next-session candidates: (1) audit that every kernel-crate
+  launch (gdn / flash-attn / marlin / rmsnorm / conv1d) and kt op inside the
+  captured forward routes its stream through `active_cuda_stream` — any left on
+  the NULL default stream ran un-captured and never replay → garbage; (2)
+  GDN-recurrent / paged-KV state coherence across capture/replay
+  (`prepare_gdn_recurrent_state_for_capture`). **NOT merged** (fast-but-wrong is
+  worse than main's correct eager fallback).
 - **Remaining work:** order the replay-path refresh vs. `graph.launch` correctly
   (refresh on the capture stream, or event-sync the capture stream against the
   default-stream refresh), re-check greedy==eager; then investigate why bs=64
