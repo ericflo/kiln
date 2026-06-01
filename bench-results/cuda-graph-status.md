@@ -11,6 +11,39 @@ the production batched capture path (`kiln-model/src/cuda_graph.rs`)
 landed in parallel. Future planners should treat this as the
 canonical "what's already done" reference.
 
+## 2026-06-01 — STALE-DOC CORRECTION: the blocker is the NULL capture stream, not ILLEGAL_ADDRESS
+
+**Everything dated 2026-05-26 and earlier below predates the #1082 candle
+removal and is STALE.** Re-validated on A6000 @ candle-free `main` (`a8a7be05`):
+
+- **The bs>1 ILLEGAL_ADDRESS is GONE.** Its root cause — candle's host pool
+  allocator churning buffer VAs across replays, blamed throughout the bs2
+  memcheck docs — no longer exists: candle is out of the cuda path and
+  captured-graph buffers are kt-native (`kt_tensor_to_candle_cuda_copy` is now
+  `#[cfg(vulkan)]`). The concurrent bs-sweep returns `successes=N/N` for
+  bs=1..64 with zero errors.
+- **Why no graph actually runs (bs=1 AND bs>1):** `CudaGraphRunner::try_capture`
+  / `try_capture_batched` called `primary_cuda_context(idx).default_stream()`,
+  which is the legacy **NULL stream (`0x0`)**. `cuStreamBeginCapture` on the NULL
+  stream returns `CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED` → silent eager fallback
+  (`cuda_graph_state":"disabled"`). Trace under
+  `RUST_LOG=kiln_model::cuda_graph=trace`:
+  `capture_status:"CU_STREAM_CAPTURE_STATUS_NONE","stream":"0x0"`.
+- **Partial fix on branch `wip/1082-p5-capture-stream`** (`default_stream()` →
+  cudarc `CudaContext::new_stream()`): capture now ENGAGES (8 captured/replay
+  markers, 0 `STREAM_CAPTURE_UNSUPPORTED`, bs=1..64 all succeed) — but the
+  captured graph **replays WRONG output** (greedy graph-on ≠ eager; corrupted).
+  Necessary-not-sufficient: the per-replay input-buffer refresh runs on the
+  default stream while the graph launches on the new capture stream without
+  cross-stream ordering → stale reads. **NOT merged** (fast-but-wrong is worse
+  than main's correct eager fallback).
+- **Remaining work:** order the replay-path refresh vs. `graph.launch` correctly
+  (refresh on the capture stream, or event-sync the capture stream against the
+  default-stream refresh), re-check greedy==eager; then investigate why bs=64
+  tok/s stayed flat (~150, same as eager) even once the graph engaged.
+
+---
+
 ## 2026-05-26 (late evening) — lm-head buffer pre-allocation lands, still insufficient (L40S)
 
 The structural fix recommended in the prior "Next step recommendation"
