@@ -528,6 +528,16 @@ impl Metrics {
             ),
         );
 
+        out.push_str("# HELP kiln_batching_engine_max_observed_batch Largest decode batch selected by the real-model batching engine since process start.\n");
+        out.push_str("# TYPE kiln_batching_engine_max_observed_batch gauge\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_batching_engine_max_observed_batch {}",
+                gauges.batching_engine.max_observed_batch_size
+            ),
+        );
+
         out.push_str("# HELP kiln_batching_engine_last_forward_ms Last decode forward wall time in milliseconds.\n");
         out.push_str("# TYPE kiln_batching_engine_last_forward_ms gauge\n");
         push_line(
@@ -547,6 +557,36 @@ impl Metrics {
             &format!(
                 "kiln_batching_engine_last_prefill_ms {:.6}",
                 gauges.batching_engine.last_prefill_ms
+            ),
+        );
+
+        out.push_str("# HELP kiln_batching_engine_decode_forwards_total Decode forward calls issued by the real-model batching engine.\n");
+        out.push_str("# TYPE kiln_batching_engine_decode_forwards_total counter\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_batching_engine_decode_forwards_total {}",
+                gauges.batching_engine.total_decode_forwards
+            ),
+        );
+
+        out.push_str("# HELP kiln_batching_engine_batched_decode_forwards_total Decode forward calls issued with batch size greater than one.\n");
+        out.push_str("# TYPE kiln_batching_engine_batched_decode_forwards_total counter\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_batching_engine_batched_decode_forwards_total {}",
+                gauges.batching_engine.total_batched_decode_forwards
+            ),
+        );
+
+        out.push_str("# HELP kiln_batching_engine_decode_rows_total Decode rows submitted by the real-model batching engine.\n");
+        out.push_str("# TYPE kiln_batching_engine_decode_rows_total counter\n");
+        push_line(
+            &mut out,
+            &format!(
+                "kiln_batching_engine_decode_rows_total {}",
+                gauges.batching_engine.total_decode_rows
             ),
         );
 
@@ -1065,8 +1105,12 @@ mod tests {
                 queue_depth: 2,
                 active_decode: 3,
                 last_batch_size: 3,
+                max_observed_batch_size: 4,
                 last_forward_ms: 12.5,
                 last_prefill_ms: 250.0,
+                total_decode_forwards: 17,
+                total_batched_decode_forwards: 15,
+                total_decode_rows: 48,
                 total_decode_tokens: 128,
                 total_prefill_tokens: 8192,
                 total_errors: 1,
@@ -1113,8 +1157,14 @@ mod tests {
         assert!(output.contains("kiln_batching_engine_queue_depth 2"));
         assert!(output.contains("kiln_batching_engine_active_decode 3"));
         assert!(output.contains("kiln_batching_engine_last_batch_size 3"));
+        assert!(output.contains("kiln_batching_engine_max_observed_batch 4"));
         assert!(output.contains("kiln_batching_engine_last_forward_ms 12.500000"));
         assert!(output.contains("kiln_batching_engine_last_prefill_ms 250.000000"));
+        assert!(output.contains("kiln_batching_engine_decode_forwards_total 17"));
+        assert!(output.contains(
+            "kiln_batching_engine_batched_decode_forwards_total 15"
+        ));
+        assert!(output.contains("kiln_batching_engine_decode_rows_total 48"));
         assert!(output.contains("kiln_batching_engine_decode_tokens_total 128"));
         assert!(output.contains("kiln_batching_engine_prefill_tokens_total 8192"));
         assert!(output.contains("kiln_batching_engine_errors_total 1"));

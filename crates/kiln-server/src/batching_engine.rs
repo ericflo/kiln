@@ -112,8 +112,12 @@ pub struct BatchingEngineSnapshot {
     pub active_decode: usize,
     pub current_batch_size: usize,
     pub last_batch_size: usize,
+    pub max_observed_batch_size: usize,
     pub last_forward_ms: f64,
     pub last_prefill_ms: f64,
+    pub total_decode_forwards: u64,
+    pub total_batched_decode_forwards: u64,
+    pub total_decode_rows: u64,
     pub total_decode_tokens: u64,
     pub total_prefill_tokens: u64,
     pub total_errors: u64,
@@ -894,6 +898,17 @@ impl BatchingEngineActor {
             .collect();
 
         self.snapshot.current_batch_size = batch_len;
+        self.snapshot.max_observed_batch_size =
+            self.snapshot.max_observed_batch_size.max(batch_len);
+        self.snapshot.total_decode_forwards = self.snapshot.total_decode_forwards.saturating_add(1);
+        self.snapshot.total_decode_rows = self
+            .snapshot
+            .total_decode_rows
+            .saturating_add(batch_len as u64);
+        if batch_len > 1 {
+            self.snapshot.total_batched_decode_forwards =
+                self.snapshot.total_batched_decode_forwards.saturating_add(1);
+        }
         let started = Instant::now();
         let result = self.forward.forward_decode(&mut slots, &sampling);
         self.snapshot.last_forward_ms = started.elapsed().as_secs_f64() * 1000.0;
@@ -1329,6 +1344,13 @@ mod tests {
 
         let calls = forward.calls.lock().unwrap().clone();
         assert_eq!(calls, vec![vec![101, 202]]);
+        let snapshot = handle.snapshot().await.unwrap();
+        assert_eq!(snapshot.last_batch_size, 2);
+        assert_eq!(snapshot.max_observed_batch_size, 2);
+        assert_eq!(snapshot.total_decode_forwards, 1);
+        assert_eq!(snapshot.total_batched_decode_forwards, 1);
+        assert_eq!(snapshot.total_decode_rows, 2);
+        assert_eq!(snapshot.total_decode_tokens, 2);
         handle.stop().await.unwrap();
     }
 

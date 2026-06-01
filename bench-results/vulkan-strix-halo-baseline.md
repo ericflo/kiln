@@ -166,8 +166,8 @@ on the T=128 shape measured legacy per-dispatch 2.325 ms vs. single-submit
 Other proper work-packages for full saturation (per "max out the hardware in
 every config"):
 - **True multi-row batched resident decode** (bs>1 / continuous-batched
-  routing is wired; remaining work is saturation tuning and longer server
-  fixtures).
+  routing is wired and live-instrumented; remaining work is saturation tuning,
+  not route reachability).
   **Update — first native resident batch primitive landed:** added
   `paged_kv_write_slots`, a Vulkan dispatch that copies `[batch,
   num_kv_heads * head_dim]` projected K/V rows into per-row resolved KV-cache
@@ -471,6 +471,23 @@ every config"):
   the default live route after startup prewarm; because this prompt set
   generated more tokens than the prior 96-token warmed fixture, treat it as
   route evidence rather than a strict throughput A/B.
+  **Update — live batch-width telemetry:** the batching actor now records
+  persistent decode width counters in its snapshot, health/debug JSON, and
+  Prometheus output. A rebuilt release server on RADV STRIX_HALO with
+  `KILN_NUM_BLOCKS=2048`, prefix cache disabled, default Vulkan batch ceilings,
+  startup resident-pool allocation `max_batch=64 ready=true`, and decode-weight
+  prewarm complete at `elapsed_ms=23698` returned a 16-distinct-prompt
+  `/v1/completions/batch` fixture in 58.408 s. Response usage was
+  `prompt_tokens=325`, `completion_tokens=77`, `total_tokens=402`. An immediate
+  `/metrics` scrape showed `kiln_batching_engine_max_observed_batch 16`,
+  `kiln_batching_engine_decode_forwards_total 6`,
+  `kiln_batching_engine_batched_decode_forwards_total 5`,
+  `kiln_batching_engine_decode_rows_total 61`,
+  `kiln_batching_engine_prefill_tokens_total 325`, and
+  `kiln_batching_engine_errors_total 0`. `last_batch_size` was 1 because the
+  final tail row finished after the multi-row steps; the max/counter metrics
+  are the durable live proof that the default route issued true multi-row
+  decode work.
   **Update — resident parity test restored for Vulkan profiles:** the
   `vk_resident_decode_parity` integration test now builds against the current kt
   device/cache surface instead of stale test-only APIs. Without
@@ -662,12 +679,11 @@ every config"):
 
 ## Other follow-ups (perf headroom, not regressions)
 
-1. **First-token shader compile** should be remeasured in live serving after the
-   expanded Vulkan pipeline prewarm. It now includes the resident decode RoPE,
-   attention gate, batch-2 GDN in-proj, and rows4/rows8 down+residual variants,
-   and it also fills the path-keyed cache used by `CommandBatch::record_shader`
-   so the first recorded decode or chunkwise-prefill step does not do first-use
-   path lookups.
+1. **First-token latency breakdown** should be remeasured with the current
+   startup path now that resident-pool allocation, decode-weight prewarm, and
+   batch-width telemetry are all visible before/after a live request. Route
+   reachability is proven; the remaining question is how much first-token time
+   is prompt prefill, first decode, sampling, or HTTP/task overhead.
 2. Complete the remaining shared-stack dependency cleanup audit for any
    non-Vulkan decode islands; the Vulkan-specific decode weight path is now
    duplicate-copy-free.
