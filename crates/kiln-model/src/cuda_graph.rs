@@ -1365,9 +1365,17 @@ impl CudaGraphRunner {
             kiln_tensor::Device::Cuda(i) => i,
             _ => anyhow::bail!("CUDA graphs require a CUDA device"),
         };
+        // (#1082 Phase 5) Capture on a FRESH non-default CUstream, NOT
+        // `default_stream()`: the kt default stream is the legacy NULL stream
+        // (0x0), and `cuStreamBeginCapture` on the NULL stream returns
+        // CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED (silent eager fallback — the
+        // capture stream printed `0x0` in the trace). The
+        // `with_active_cuda_stream` scope below routes every kt op in the
+        // captured forward onto this stream so its launches are recorded.
         let stream = kiln_tensor::primary_cuda_context(device_idx)
             .context("CUDA graph capture: kt primary_cuda_context for capture stream")?
-            .default_stream();
+            .new_stream()
+            .context("CUDA graph capture: create non-default capture stream")?;
 
         // Pre-allocate graph-stable decode tensors BEFORE capture (kt
         // buffers own a persistent device pointer that gets baked into
@@ -1617,9 +1625,14 @@ impl CudaGraphRunner {
             kiln_tensor::Device::Cuda(i) => i,
             _ => anyhow::bail!("CUDA graphs require a CUDA device"),
         };
+        // (#1082 Phase 5) Fresh non-default capture stream — see the bs=1
+        // try_capture note. `default_stream()` is the legacy NULL stream (0x0)
+        // which cannot be captured; `with_active_cuda_stream` routes the
+        // captured batched forward onto this stream.
         let stream = kiln_tensor::primary_cuda_context(device_idx)
             .context("batched CUDA graph capture: kt primary_cuda_context for capture stream")?
-            .default_stream();
+            .new_stream()
+            .context("batched CUDA graph capture: create non-default capture stream")?;
         let adapter_gen = self.adapter_generation;
 
         // Pre-allocate every device buffer the captured graph will read
