@@ -1,13 +1,13 @@
 //! Vulkan backend: FlashAttention-2 and Gated DeltaNet fused kernels via Vulkan.
 //!
-//! candle-core 0.10.x has no native Vulkan device, so this backend manages
-//! its own `vk::Device`. Normal inference still exposes a candle `candle_core::Device::Cpu`
-//! surface and may fall back to portable candle ops when a Vulkan backend method
-//! declines a call. Vulkan-native SFT/GRPO training use the separate `VkTensor`
-//! stack to keep weights, activations, loss, backward, and optimizer updates
-//! resident on Vulkan buffers.
+//! kt (`kiln_tensor`) has no native Vulkan device, so this backend manages
+//! its own `vk::Device`. Normal inference still exposes a kt
+//! `kiln_tensor::Device::Cpu` surface and may fall back to portable kt ops
+//! when a Vulkan backend method declines a call. Vulkan-native SFT/GRPO
+//! training use the separate `VkTensor` stack to keep weights, activations,
+//! loss, backward, and optimizer updates resident on Vulkan buffers.
 //!
-//! `Ok(None)` responses route the caller to the portable candle path.
+//! `Ok(None)` responses route the caller to the portable kt path.
 
 use anyhow::{Context, Result};
 
@@ -293,7 +293,7 @@ pub struct VulkanBackend {
     /// `OnceLock<Option<...>>` so a backend that fails the pool
     /// feasibility check (Strix Halo near the 16 GiB UMA limit) caches
     /// the `None` and routes every subsequent call to the per-call
-    /// candle_core::Tensor path without re-checking.
+    /// kt `kiln_tensor::Tensor` path without re-checking.
     decode_resident_pool:
         OnceLock<Option<Arc<kiln_vulkan_kernel::DecodeResidentPool>>>,
     /// Lazily constructed Vulkan-resident paged KV cache. Mirrors the
@@ -370,9 +370,9 @@ thread_local! {
         RefCell::new(HashMap::new());
 }
 
-/// General-purpose resident-activation registry keyed by candle
-/// `candle_core::TensorId`. Process-global (not thread-local) so worker threads
-/// spawned by candle's internal parallelism, rayon, etc. see the
+/// General-purpose resident-activation registry keyed by the kt
+/// `kiln_tensor::TensorId`. Process-global (not thread-local) so worker threads
+/// spawned by rayon, etc. see the
 /// same registry as the thread that registered. Phase 3.1 of the
 /// residency plan — the registry the `register_resident_activation`
 /// / `evict_resident_activation` / `has_resident_activation` /
@@ -725,7 +725,7 @@ impl VulkanBackend {
         // benchmarks. Keep it opt-in until it is tiled/tuned.
         let mlp_gate_up_enabled = std::env::var("KILN_ENABLE_VULKAN_MLP_GATE_UP").is_ok();
         let weight_prewarm_enabled = std::env::var("KILN_DISABLE_VULKAN_WEIGHT_PREWARM").is_err();
-        // candle_core::Device-resident recurrent state is correct but regressed the live
+        // Device-resident recurrent state is correct but regressed the live
         // Strix Halo batcher A/B in A129 because row/batch buffer copies cost
         // more than the saved readback/upload at the current batch shape.
         let recurrent_state_residency_enabled = gdn_enabled
@@ -735,7 +735,7 @@ impl VulkanBackend {
         // wants to route decode through the resident path. Pool feasibility
         // is checked later at first use; if the device can't fit the ring
         // (Strix Halo near memory limit) the call site falls back
-        // transparently to the per-call candle_core::Tensor path and emits a one-time
+        // transparently to the per-call kt `kiln_tensor::Tensor` path and emits a one-time
         // tracing::warn! — exactly the contract spelled out in gate (b)
         // of docs/vk_resident_decode_plan.md.
         let resident_decode_enabled =
@@ -840,7 +840,7 @@ impl VulkanBackend {
     /// Returns `None` (after a one-time `tracing::warn!`) when the
     /// device can't fit the minimum 3 slots — e.g. Strix Halo near
     /// its 16 GiB UMA limit. The `None` outcome is cached so the
-    /// per-call candle_core::Tensor fallback does not re-probe on every decode
+    /// per-call kt `kiln_tensor::Tensor` fallback does not re-probe on every decode
     /// step.
     pub fn decode_resident_pool(
         &self,
@@ -863,7 +863,7 @@ impl VulkanBackend {
                         tracing::warn!(
                             error = %e,
                             "Vulkan-resident decode pool construction errored; \
-                             falling back to per-call candle_core::Tensor path"
+                             falling back to per-call kt Tensor path"
                         );
                         None
                     }
@@ -1886,7 +1886,7 @@ impl BackendRuntime for VulkanBackend {
 
     /// Phase 3.1 hook: register a non-weight tensor as resident on the
     /// device. Uploads `tensor`'s bytes to a fresh `VulkanBuffer` and
-    /// records the buffer under the tensor's `candle_core::TensorId`. The caller
+    /// records the buffer under the tensor's `kiln_tensor::TensorId`. The caller
     /// owns lifecycle — Phase 3.2 will pair every register with a
     /// matching evict at the appropriate autograd boundary. Until then
     /// any caller using this hook must clean up explicitly to avoid
@@ -5139,26 +5139,32 @@ mod vk_upload_tests {
     }
 }
 
-// (#1082) The Vulkan residency / optimizer / `lora_delta_resident` tests
-// below exercise the *candle-TensorId-keyed* registry internals through candle
-// tensors and candle `Var`s (for id-stability across `Var::set`). With the
-// `BackendRuntime` trait surface flipped to kt, the production methods reach
-// that registry via the `kt_logits_to_candle` / `candle_to_kt_activation`
-// copy-bridges — and those bridges are CUDA-only and allocate a *fresh* candle
-// id per call, so a kt tensor handed to `register_*` and then to `has_*`/
-// `resolve_*` no longer round-trips to the same registry key. They also
-// require a Vulkan device (no CUDA), so the CUDA-only bridge can't even run.
+// (#1082) Vulkan residency / optimizer / `lora_delta_resident` tests.
 //
-// Faithfully re-porting these to kt requires re-keying the Vulkan registry on
-// the kt `TensorId` natively (a Vulkan-native follow-up beyond this file's
-// trait-flip scope). Until then the module is compiled out via `cfg(any())`
-// (always-false) so the crate builds with the kt-typed trait while preserving
-// the test logic verbatim for the follow-up that makes the registry kt-native.
-// The `lora_delta_resident` success tests in particular assert behavior that
-// was removed: that hook now declines (kt tape produces grad_A/grad_B), so
-// those tests must be rewritten against the decline contract during the
-// re-port, not just mechanically bridged.
-#[cfg(any())]
+// These exercise the resident-activation registry internals (register /
+// update / has / evict / resolve), the on-device SGD + AdamW kernels, and the
+// `lora_delta_resident` decline contract. The registry is now **kt-native** —
+// it is keyed directly on the kt `TensorId` (`tensor.id()`), with byte
+// extraction reading straight from kt storage (see
+// `register_resident_activation` and friends above). There is no candle
+// bridge anymore, so a kt tensor handed to `register_*` and then to `has_*` /
+// `resolve_*` round-trips to the same registry key — which is what re-enables
+// these tests under the kt-typed `BackendRuntime` trait.
+//
+// id-stability across an in-place content change (formerly provided by candle
+// `Var::set`) is reproduced with kt `Tensor::slice_set` (dim-0 in-place
+// overwrite that preserves the tensor's `TensorId` and bumps its version
+// counter) — the kt analog of `Var::set`.
+//
+// `lora_delta_resident` was rewritten from on-device dispatch (a
+// `candle_core::CustomOp3` autograd island) to an unconditional decline: the
+// kt autograd tape (`kiln_autograd`) is now the sole grad producer, and the
+// forward LoRA delta is recorded by the portable kt `compute_lora_delta` path
+// in forward.rs. The former "dispatches on-device + reflects post-update
+// weights" success test had no kt analog (its whole point was the removed
+// dispatch path), so it was dropped; the surviving lora tests assert the new
+// decline contract instead.
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::backend::BackendRuntime;
@@ -5175,212 +5181,95 @@ mod tests {
     /// the update path too.
     #[test]
     fn update_resident_activation_overwrites_buffer() -> Result<()> {
-        let backend = VulkanBackend::new(candle_core::Device::Cpu);
+        let backend = VulkanBackend::new(kiln_tensor::Device::Cpu);
         if !backend.has_vulkan() {
             eprintln!("Vulkan device unavailable, skipping");
             return Ok(());
         }
-        // Use a BF16 tensor — that's the LoRA Var case the production
+        // Use a BF16 tensor — that's the LoRA-param case the production
         // path exercises. The update path's encoding choice depends
         // on dtype, so testing BF16 specifically (not just F32)
         // guards against regression in the dtype branch.
-        let initial = candle_core::Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (2, 2), &candle_core::Device::Cpu)?
-            .to_dtype(candle_core::DType::BF16)?;
+        let initial =
+            kiln_tensor::Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (2, 2))?
+                .to_dtype(kiln_tensor::DType::BF16)?;
         backend.register_resident_activation(&initial)?;
         // Sanity: registered with initial values.
         let resolved = backend
-            .resolve_resident_activation(&initial, &[2, 2], candle_core::DType::BF16)?
+            .resolve_resident_activation(&initial, &[2, 2], kiln_tensor::DType::BF16)?
             .expect("must resolve right after register");
         let init_v: Vec<f32> = resolved
-            .to_dtype(candle_core::DType::F32)?
+            .to_dtype(kiln_tensor::DType::F32)?
             .flatten_all()?
             .to_vec1::<f32>()?;
         assert_eq!(init_v, vec![1.0, 2.0, 3.0, 4.0]);
 
-        // Mutate the tensor's storage out-of-band — analogous to what
-        // candle Var::set does. Use to_dtype roundtrip + a fresh tensor
-        // since we can't mutate in place. The candle_core::TensorId stays the same
-        // because we update the same Var-equivalent reference.
-        // Workaround: create a NEW tensor with the same candle_core::TensorId by
-        // using `.copy()` semantics — actually candle doesn't expose
-        // that. So instead simulate the post-SGD state by registering
-        // a different tensor (with a different id) and verify the
-        // update-via-the-original-reference path still works on the
-        // ORIGINAL id.
-        //
-        // Concretely: hand `update_resident_activation` a tensor whose
-        // BYTES differ from what's in the buffer but whose .id() is
-        // the original. We can do that via `Var::set`-like:
-        // use the original candle_core::Tensor object (.id() unchanged) and
-        // overwrite its underlying storage by re-running update with
-        // a tensor that has different DATA but the same shape. Since
-        // update keys on tensor.id(), we have to use a Var to keep
-        // the id stable across a content change.
-        let v = candle_core::Var::from_tensor(&initial)?;
-        let new_data = candle_core::Tensor::from_vec(vec![10.0f32, 20.0, 30.0, 40.0], (2, 2), &candle_core::Device::Cpu)?
-            .to_dtype(candle_core::DType::BF16)?;
-        v.set(&new_data)?;
-        // v.as_tensor() now wraps the same candle_core::TensorId as the original
-        // Var construction — but Var wraps a candle_core::Tensor that has its own
-        // id, distinct from `initial`. So this test path actually
-        // demonstrates that the update applies to whatever id we hand
-        // it, not to the unchanged `initial`.
-        //
-        // Register v.as_tensor() and update it with newer data.
-        backend.register_resident_activation(v.as_tensor())?;
-        // Build "newer" data (v already holds new_data; resolve and
-        // confirm the registry sees IT, not initial).
+        // Mutate the tensor's storage in place — the kt analog of
+        // candle `Var::set`. `slice_set` (dim-0 full overwrite at
+        // offset 0) rewrites `v`'s existing storage and bumps its
+        // version counter while preserving its `TensorId`, so the
+        // registry (keyed on `v.id()`) keeps mapping to the same
+        // buffer even as the bytes change. This is exactly the
+        // post-SGD-style content change the update path must track.
+        let v = kiln_tensor::Tensor::from_vec(vec![10.0f32, 20.0, 30.0, 40.0], (2, 2))?
+            .to_dtype(kiln_tensor::DType::BF16)?;
+        // Register v with its initial bytes [10,20,30,40].
+        backend.register_resident_activation(&v)?;
+        // Confirm the registry sees v's bytes, not `initial`'s.
         let resolved_v = backend
-            .resolve_resident_activation(v.as_tensor(), &[2, 2], candle_core::DType::BF16)?
+            .resolve_resident_activation(&v, &[2, 2], kiln_tensor::DType::BF16)?
             .expect("v must resolve after register");
         let v_init_v: Vec<f32> = resolved_v
-            .to_dtype(candle_core::DType::F32)?
+            .to_dtype(kiln_tensor::DType::F32)?
             .flatten_all()?
             .to_vec1::<f32>()?;
         assert_eq!(v_init_v, vec![10.0, 20.0, 30.0, 40.0]);
 
-        // Now mutate v further and call update.
+        // Now mutate v in place (same id) and call update.
         let newer_data =
-            candle_core::Tensor::from_vec(vec![100.0f32, 200.0, 300.0, 400.0], (2, 2), &candle_core::Device::Cpu)?
-                .to_dtype(candle_core::DType::BF16)?;
-        v.set(&newer_data)?;
-        backend.update_resident_activation(v.as_tensor())?;
+            kiln_tensor::Tensor::from_vec(vec![100.0f32, 200.0, 300.0, 400.0], (2, 2))?
+                .to_dtype(kiln_tensor::DType::BF16)?;
+        v.slice_set(&newer_data, 0, 0)?;
+        backend.update_resident_activation(&v)?;
         let resolved_after = backend
-            .resolve_resident_activation(v.as_tensor(), &[2, 2], candle_core::DType::BF16)?
+            .resolve_resident_activation(&v, &[2, 2], kiln_tensor::DType::BF16)?
             .expect("v must resolve after update");
         let after_v: Vec<f32> = resolved_after
-            .to_dtype(candle_core::DType::F32)?
+            .to_dtype(kiln_tensor::DType::F32)?
             .flatten_all()?
             .to_vec1::<f32>()?;
         assert_eq!(after_v, vec![100.0, 200.0, 300.0, 400.0]);
 
         backend.evict_resident_activation(&initial);
-        backend.evict_resident_activation(v.as_tensor());
+        backend.evict_resident_activation(&v);
         Ok(())
     }
 
-    /// End-to-end Phase 4.1 chain: register A and B → call
-    /// `lora_delta_resident` → mutate A via `Var::set` → call
-    /// `update_resident_activation` → call `lora_delta_resident`
-    /// again → second result must reflect the new A.
-    ///
-    /// This is the contract `sgd_step + update_resident_activation`
-    /// relies on: the next forward inference pass after SGD must see
-    /// the updated weights.
-    #[test]
-    fn lora_delta_resident_reflects_post_update_weights() -> Result<()> {
-        let backend = VulkanBackend::new(candle_core::Device::Cpu);
-        if !backend.has_vulkan() {
-            eprintln!("Vulkan device unavailable, skipping");
-            return Ok(());
-        }
-        let in_features = 8usize;
-        let rank = 4usize;
-        let out_features = 6usize;
-        let scale = 1.0f32;
-
-        let x_data: Vec<f32> = (0..in_features).map(|i| (i as f32) * 0.1).collect();
-        let a_init: Vec<f32> = (0..rank * in_features).map(|i| (i as f32) * 0.01).collect();
-        let b_init: Vec<f32> = (0..out_features * rank)
-            .map(|i| (i as f32) * 0.02)
-            .collect();
-
-        let x =
-            candle_core::Tensor::from_vec(x_data, (1, 1, in_features), &candle_core::Device::Cpu)?.to_dtype(candle_core::DType::BF16)?;
-        let a_var = candle_core::Var::from_tensor(
-            &candle_core::Tensor::from_vec(a_init, (rank, in_features), &candle_core::Device::Cpu)?.to_dtype(candle_core::DType::BF16)?,
-        )?;
-        let b_var = candle_core::Var::from_tensor(
-            &candle_core::Tensor::from_vec(b_init, (out_features, rank), &candle_core::Device::Cpu)?.to_dtype(candle_core::DType::BF16)?,
-        )?;
-
-        backend.register_resident_activation(a_var.as_tensor())?;
-        backend.register_resident_activation(b_var.as_tensor())?;
-
-        // First forward: gets the init delta.
-        let delta_init = backend
-            .lora_delta_resident(&x, a_var.as_tensor(), b_var.as_tensor(), scale)?
-            .expect("must dispatch on-device when registered");
-
-        // Mutate A — simulate what sgd_step does. New A bytes are
-        // intentionally far from the init values so the resulting
-        // delta will be visibly different.
-        let a_post: Vec<f32> = (0..rank * in_features)
-            .map(|i| 5.0 - (i as f32) * 0.05)
-            .collect();
-        let a_post_tensor =
-            candle_core::Tensor::from_vec(a_post, (rank, in_features), &candle_core::Device::Cpu)?.to_dtype(candle_core::DType::BF16)?;
-        a_var.set(&a_post_tensor)?;
-        // Critical: keep the registry in sync.
-        backend.update_resident_activation(a_var.as_tensor())?;
-
-        // Second forward: must use the new A bytes.
-        let delta_post = backend
-            .lora_delta_resident(&x, a_var.as_tensor(), b_var.as_tensor(), scale)?
-            .expect("must dispatch on-device when registered");
-
-        // The two deltas must differ — if update_resident_activation
-        // were a no-op or used the wrong encoding, delta_post would
-        // equal delta_init.
-        let init_v: Vec<f32> = delta_init
-            .to_dtype(candle_core::DType::F32)?
-            .flatten_all()?
-            .to_vec1::<f32>()?;
-        let post_v: Vec<f32> = delta_post
-            .to_dtype(candle_core::DType::F32)?
-            .flatten_all()?
-            .to_vec1::<f32>()?;
-        assert_eq!(init_v.len(), post_v.len());
-        let max_diff = init_v
-            .iter()
-            .zip(post_v.iter())
-            .map(|(a, b)| (a - b).abs())
-            .fold(0.0f32, f32::max);
-        assert!(
-            max_diff > 0.1,
-            "delta should differ noticeably after A update; max_diff={max_diff}, \
-             init={init_v:?}, post={post_v:?}"
-        );
-
-        // Compare delta_post against a CPU reference computed with
-        // the new A bytes — they should match to bf16 precision.
-        let a_post_round = a_var.as_tensor().to_dtype(candle_core::DType::F32)?;
-        let b_round = b_var.as_tensor().to_dtype(candle_core::DType::F32)?;
-        let x_f32 = x.to_dtype(candle_core::DType::F32)?;
-        let hidden = x_f32.broadcast_matmul(&a_post_round.t()?)?;
-        let cpu_delta_post = hidden
-            .broadcast_matmul(&b_round.t()?)?
-            .to_dtype(candle_core::DType::BF16)?;
-        let cpu_post_v: Vec<f32> = cpu_delta_post
-            .to_dtype(candle_core::DType::F32)?
-            .flatten_all()?
-            .to_vec1::<f32>()?;
-        for (i, (vk, cpu)) in post_v.iter().zip(cpu_post_v.iter()).enumerate() {
-            let abs = (vk - cpu).abs();
-            let rel = abs / cpu.abs().max(1e-3);
-            assert!(
-                abs < 5e-2 || rel < 5e-2,
-                "idx {i}: vk={vk:.6} cpu={cpu:.6} abs={abs:e} rel={rel:e}"
-            );
-        }
-
-        backend.evict_resident_activation(a_var.as_tensor());
-        backend.evict_resident_activation(b_var.as_tensor());
-        Ok(())
-    }
+    // (#1082) removed: `lora_delta_resident_reflects_post_update_weights`.
+    // Its entire premise was that `lora_delta_resident` dispatches the LoRA
+    // delta on-device (via the candle `CustomOp3` autograd island) and that a
+    // second dispatch reflects post-SGD weight updates. That hook now
+    // unconditionally declines (`Ok(None)`) — the kt autograd tape is the sole
+    // grad producer and the forward delta is recorded by the portable kt
+    // `compute_lora_delta` path in forward.rs — so there is no on-device
+    // dispatch to assert against. The "update_resident_activation reflects new
+    // bytes under a stable id" coverage that this test also exercised is
+    // preserved by `update_resident_activation_overwrites_buffer`; the
+    // "declines even when A/B are resident" contract is covered by
+    // `lora_delta_resident_declines_even_when_resident`.
 
     /// `update_resident_activation` is a no-op when the tensor isn't
     /// registered — avoids surprising errors when caller is
     /// dtype-agnostic (e.g. a sgd_step that fires for both
-    /// registered LoRA Vars and unregistered legacy Vars).
+    /// registered LoRA params and unregistered legacy params).
     #[test]
     fn update_resident_activation_noop_when_not_registered() -> Result<()> {
-        let backend = VulkanBackend::new(candle_core::Device::Cpu);
+        let backend = VulkanBackend::new(kiln_tensor::Device::Cpu);
         if !backend.has_vulkan() {
             eprintln!("Vulkan device unavailable, skipping");
             return Ok(());
         }
-        let t = candle_core::Tensor::from_vec(vec![1.0f32; 4], (4,), &candle_core::Device::Cpu)?;
+        let t = kiln_tensor::Tensor::from_vec(vec![1.0f32; 4], (4,))?;
         // Not registered — must not error.
         backend.update_resident_activation(&t)?;
         assert!(!backend.has_resident_activation(&t));
@@ -5393,17 +5282,17 @@ mod tests {
     /// TensorIds, but conceptually the same lifecycle).
     #[test]
     fn resident_activation_re_register_after_evict() -> Result<()> {
-        let backend = VulkanBackend::new(candle_core::Device::Cpu);
+        let backend = VulkanBackend::new(kiln_tensor::Device::Cpu);
         if !backend.has_vulkan() {
             eprintln!("Vulkan device unavailable, skipping");
             return Ok(());
         }
-        let t = candle_core::Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (2, 2), &candle_core::Device::Cpu)?;
+        let t = kiln_tensor::Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (2, 2))?;
         backend.register_resident_activation(&t)?;
         assert!(backend.has_resident_activation(&t));
         backend.evict_resident_activation(&t);
         assert!(!backend.has_resident_activation(&t));
-        // Re-register with the same candle_core::TensorId — must succeed and
+        // Re-register with the same kt TensorId — must succeed and
         // re-upload (the previous buffer was dropped at eviction).
         backend.register_resident_activation(&t)?;
         assert!(
@@ -5413,7 +5302,7 @@ mod tests {
         // Resolve to confirm the bytes round-tripped correctly the
         // second time too.
         let resolved = backend
-            .resolve_resident_activation(&t, &[2, 2], candle_core::DType::F32)?
+            .resolve_resident_activation(&t, &[2, 2], kiln_tensor::DType::F32)?
             .expect("must resolve after re-register");
         let data: Vec<f32> = resolved.flatten_all()?.to_vec1::<f32>()?;
         assert_eq!(data, vec![1.0, 2.0, 3.0, 4.0]);
@@ -5426,12 +5315,13 @@ mod tests {
     /// false and the caller falls through to its CPU path.
     #[test]
     fn register_resident_activation_handles_empty_tensor() -> Result<()> {
-        let backend = VulkanBackend::new(candle_core::Device::Cpu);
+        let backend = VulkanBackend::new(kiln_tensor::Device::Cpu);
         if !backend.has_vulkan() {
             eprintln!("Vulkan device unavailable, skipping");
             return Ok(());
         }
-        let empty: candle_core::Tensor = candle_core::Tensor::from_vec(Vec::<f32>::new(), (0,), &candle_core::Device::Cpu)?;
+        let empty: kiln_tensor::Tensor =
+            kiln_tensor::Tensor::from_vec(Vec::<f32>::new(), (0,))?;
         backend.register_resident_activation(&empty)?;
         assert!(
             !backend.has_resident_activation(&empty),
@@ -5440,26 +5330,26 @@ mod tests {
         Ok(())
     }
 
-    /// resolve_resident_activation must reconstruct a candle_core::Tensor whose
+    /// resolve_resident_activation must reconstruct a kt Tensor whose
     /// data matches the originally-registered tensor's bytes.
     /// Returns Ok(None) when the tensor isn't in the registry.
     #[test]
     fn resolve_resident_activation_round_trip() -> Result<()> {
-        let backend = VulkanBackend::new(candle_core::Device::Cpu);
+        let backend = VulkanBackend::new(kiln_tensor::Device::Cpu);
         if !backend.has_vulkan() {
             eprintln!("Vulkan device unavailable, skipping");
             return Ok(());
         }
         let original_data = vec![1.5f32, -2.5, 3.25, -4.75];
-        let t = candle_core::Tensor::from_vec(original_data.clone(), (2, 2), &candle_core::Device::Cpu)?;
+        let t = kiln_tensor::Tensor::from_vec(original_data.clone(), (2, 2))?;
 
         // Not registered yet → resolve returns None.
-        let unresolved = backend.resolve_resident_activation(&t, &[2, 2], candle_core::DType::F32)?;
+        let unresolved = backend.resolve_resident_activation(&t, &[2, 2], kiln_tensor::DType::F32)?;
         assert!(unresolved.is_none(), "unregistered tensor must not resolve");
 
         backend.register_resident_activation(&t)?;
         let resolved = backend
-            .resolve_resident_activation(&t, &[2, 2], candle_core::DType::F32)?
+            .resolve_resident_activation(&t, &[2, 2], kiln_tensor::DType::F32)?
             .expect("must resolve once registered");
         assert_eq!(resolved.dims(), &[2, 2]);
         let resolved_data: Vec<f32> = resolved.flatten_all()?.to_vec1::<f32>()?;
@@ -5469,7 +5359,7 @@ mod tests {
 
         backend.evict_resident_activation(&t);
         // After eviction → resolve returns None again.
-        let unresolved = backend.resolve_resident_activation(&t, &[2, 2], candle_core::DType::F32)?;
+        let unresolved = backend.resolve_resident_activation(&t, &[2, 2], kiln_tensor::DType::F32)?;
         assert!(unresolved.is_none());
         Ok(())
     }
@@ -5479,7 +5369,7 @@ mod tests {
     /// CPU reference to f32 precision.
     #[test]
     fn dispatch_sgd_step_resident_round_trip() -> Result<()> {
-        let backend = VulkanBackend::new(candle_core::Device::Cpu);
+        let backend = VulkanBackend::new(kiln_tensor::Device::Cpu);
         if !backend.has_vulkan() {
             eprintln!("Vulkan device unavailable, skipping");
             return Ok(());
@@ -5494,8 +5384,8 @@ mod tests {
             .map(|(&p, &g)| p - lr * g)
             .collect();
 
-        let param = candle_core::Tensor::from_vec(param_data, (n,), &candle_core::Device::Cpu)?;
-        let grad = candle_core::Tensor::from_vec(grad_data, (n,), &candle_core::Device::Cpu)?;
+        let param = kiln_tensor::Tensor::from_vec(param_data, (n,))?;
+        let grad = kiln_tensor::Tensor::from_vec(grad_data, (n,))?;
 
         // Both must be resident before dispatch_sgd_step succeeds.
         backend.register_resident_activation(&param)?;
@@ -5540,13 +5430,13 @@ mod tests {
     /// (resident? × resident?) combinations.
     #[test]
     fn dispatch_sgd_step_falls_back_when_not_resident() -> Result<()> {
-        let backend = VulkanBackend::new(candle_core::Device::Cpu);
+        let backend = VulkanBackend::new(kiln_tensor::Device::Cpu);
         if !backend.has_vulkan() {
             eprintln!("Vulkan device unavailable, skipping");
             return Ok(());
         }
-        let p = candle_core::Tensor::from_vec(vec![1.0f32; 4], (4,), &candle_core::Device::Cpu)?;
-        let g = candle_core::Tensor::from_vec(vec![0.5f32; 4], (4,), &candle_core::Device::Cpu)?;
+        let p = kiln_tensor::Tensor::from_vec(vec![1.0f32; 4], (4,))?;
+        let g = kiln_tensor::Tensor::from_vec(vec![0.5f32; 4], (4,))?;
         // Neither registered — fall back.
         assert!(!backend.dispatch_sgd_step(&p, &g, 0.01)?);
         // Only param registered — fall back (grad missing).
@@ -5565,13 +5455,13 @@ mod tests {
     /// surfacing immediately.
     #[test]
     fn dispatch_sgd_step_errors_on_shape_mismatch() -> Result<()> {
-        let backend = VulkanBackend::new(candle_core::Device::Cpu);
+        let backend = VulkanBackend::new(kiln_tensor::Device::Cpu);
         if !backend.has_vulkan() {
             eprintln!("Vulkan device unavailable, skipping");
             return Ok(());
         }
-        let p = candle_core::Tensor::from_vec(vec![1.0f32; 4], (4,), &candle_core::Device::Cpu)?;
-        let g = candle_core::Tensor::from_vec(vec![0.5f32; 8], (8,), &candle_core::Device::Cpu)?;
+        let p = kiln_tensor::Tensor::from_vec(vec![1.0f32; 4], (4,))?;
+        let g = kiln_tensor::Tensor::from_vec(vec![0.5f32; 8], (8,))?;
         backend.register_resident_activation(&p)?;
         backend.register_resident_activation(&g)?;
         let err = backend.dispatch_sgd_step(&p, &g, 0.01).unwrap_err();
@@ -5584,17 +5474,27 @@ mod tests {
         Ok(())
     }
 
-    /// Vulkan lora_delta_resident must match the candle CPU
-    /// `compute_lora_delta` (i.e. `(x @ A.T @ B.T) * scale`) to bf16
-    /// numerics tolerance when A and B are registered.
+    /// (#1082) `lora_delta_resident` declines (`Ok(None)`) even when A and B
+    /// are resident in the registry.
+    ///
+    /// Formerly (`lora_delta_resident_matches_cpu_reference`) this asserted the
+    /// hook dispatched the LoRA delta on-device (a `candle_core::CustomOp3`
+    /// autograd island) and matched a CPU `(x @ A.T @ B.T) * scale` reference.
+    /// That dispatch path was removed: the kt autograd tape (`kiln_autograd`)
+    /// is the sole grad producer and the forward LoRA delta is recorded by the
+    /// portable kt `compute_lora_delta` path in forward.rs. The hook now
+    /// unconditionally declines, routing the caller to that kt-recorded path —
+    /// and it must do so *even* when A and B are resident (residency is no
+    /// longer a dispatch trigger). This is the inverse-condition partner of
+    /// `lora_delta_resident_falls_back_when_not_resident`.
     #[test]
-    fn lora_delta_resident_matches_cpu_reference() -> Result<()> {
-        let backend = VulkanBackend::new(candle_core::Device::Cpu);
+    fn lora_delta_resident_declines_even_when_resident() -> Result<()> {
+        let backend = VulkanBackend::new(kiln_tensor::Device::Cpu);
         if !backend.has_vulkan() {
             eprintln!("Vulkan device unavailable, skipping");
             return Ok(());
         }
-        // Small LoRA-shape: rank=4, in=8, out=6.
+        // Same LoRA-shape setup the old success test used: rank=4, in=8, out=6.
         let t = 5usize;
         let in_features = 8usize;
         let rank = 4usize;
@@ -5607,53 +5507,26 @@ mod tests {
             .map(|i| (i as f32) * 0.03)
             .collect();
 
-        let x = candle_core::Tensor::from_vec(x_data, (1, t, in_features), &candle_core::Device::Cpu)?;
-        let a_f32 = candle_core::Tensor::from_vec(a_data, (rank, in_features), &candle_core::Device::Cpu)?;
-        let b_f32 = candle_core::Tensor::from_vec(b_data, (out_features, rank), &candle_core::Device::Cpu)?;
-        let a_bf16 = a_f32.to_dtype(candle_core::DType::BF16)?;
-        let b_bf16 = b_f32.to_dtype(candle_core::DType::BF16)?;
-        let x_bf16 = x.to_dtype(candle_core::DType::BF16)?;
+        let x_bf16 = kiln_tensor::Tensor::from_vec(x_data, (1, t, in_features))?
+            .to_dtype(kiln_tensor::DType::BF16)?;
+        let a_bf16 = kiln_tensor::Tensor::from_vec(a_data, (rank, in_features))?
+            .to_dtype(kiln_tensor::DType::BF16)?;
+        let b_bf16 = kiln_tensor::Tensor::from_vec(b_data, (out_features, rank))?
+            .to_dtype(kiln_tensor::DType::BF16)?;
 
-        // CPU baseline (manual, F32) — `compute_lora_delta` casts to
-        // x.dtype() which would be BF16 here, but candle CPU doesn't
-        // support BF16 matmul. The math we want to validate is
-        // identical: (x @ A.T @ B.T) * scale, computed against the
-        // same BF16-quantised A and B that the Vulkan path reads
-        // from the registry (we round-trip through bf16 to match
-        // the bytes the kernel sees).
-        let a_round = a_bf16.to_dtype(candle_core::DType::F32)?;
-        let b_round = b_bf16.to_dtype(candle_core::DType::F32)?;
-        let hidden_cpu = x.broadcast_matmul(&a_round.t()?)?;
-        let delta_cpu = hidden_cpu.broadcast_matmul(&b_round.t()?)?;
-        let cpu_delta = (delta_cpu * scale as f64)?.to_dtype(candle_core::DType::BF16)?;
-
-        // Register A and B in the registry.
+        // Register A and B in the registry — residency must NOT trigger a
+        // dispatch under the kt decline contract.
         backend.register_resident_activation(&a_bf16)?;
         backend.register_resident_activation(&b_bf16)?;
 
-        // Vulkan path.
-        let vk_delta = backend
-            .lora_delta_resident(&x_bf16, &a_bf16, &b_bf16, scale)?
-            .expect("lora_delta_resident must succeed when A and B are registered");
-
-        assert_eq!(vk_delta.dims(), cpu_delta.dims());
-        assert_eq!(vk_delta.dtype(), cpu_delta.dtype());
-        let cpu_v: Vec<f32> = cpu_delta
-            .flatten_all()?
-            .to_dtype(candle_core::DType::F32)?
-            .to_vec1::<f32>()?;
-        let vk_v: Vec<f32> = vk_delta
-            .flatten_all()?
-            .to_dtype(candle_core::DType::F32)?
-            .to_vec1::<f32>()?;
-        for (i, (c, v)) in cpu_v.iter().zip(vk_v.iter()).enumerate() {
-            let abs = (c - v).abs();
-            let rel = abs / c.abs().max(1e-3);
-            assert!(
-                abs < 5e-2 || rel < 5e-2,
-                "idx {i}: cpu={c:.6} vk={v:.6} abs={abs:e} rel={rel:e}"
-            );
-        }
+        assert!(
+            backend
+                .lora_delta_resident(&x_bf16, &a_bf16, &b_bf16, scale)?
+                .is_none(),
+            "lora_delta_resident must decline even when A and B are resident \
+             (kt tape is the sole grad producer; forward delta is recorded by \
+             the portable compute_lora_delta path)"
+        );
 
         backend.evict_resident_activation(&a_bf16);
         backend.evict_resident_activation(&b_bf16);
@@ -5661,18 +5534,18 @@ mod tests {
     }
 
     /// lora_delta_resident must return Ok(None) when A or B is not
-    /// registered — caller falls back to candle CPU.
+    /// registered — caller falls back to the portable kt path.
     #[test]
     fn lora_delta_resident_falls_back_when_not_resident() -> Result<()> {
-        let backend = VulkanBackend::new(candle_core::Device::Cpu);
+        let backend = VulkanBackend::new(kiln_tensor::Device::Cpu);
         if !backend.has_vulkan() {
             eprintln!("Vulkan device unavailable, skipping");
             return Ok(());
         }
         let x =
-            candle_core::Tensor::from_vec(vec![0.0f32; 16], (1, 2, 8), &candle_core::Device::Cpu)?.to_dtype(candle_core::DType::BF16)?;
-        let a = candle_core::Tensor::from_vec(vec![0.0f32; 32], (4, 8), &candle_core::Device::Cpu)?.to_dtype(candle_core::DType::BF16)?;
-        let b = candle_core::Tensor::from_vec(vec![0.0f32; 24], (6, 4), &candle_core::Device::Cpu)?.to_dtype(candle_core::DType::BF16)?;
+            kiln_tensor::Tensor::from_vec(vec![0.0f32; 16], (1, 2, 8))?.to_dtype(kiln_tensor::DType::BF16)?;
+        let a = kiln_tensor::Tensor::from_vec(vec![0.0f32; 32], (4, 8))?.to_dtype(kiln_tensor::DType::BF16)?;
+        let b = kiln_tensor::Tensor::from_vec(vec![0.0f32; 24], (6, 4))?.to_dtype(kiln_tensor::DType::BF16)?;
         // Neither registered — fall back.
         assert!(backend.lora_delta_resident(&x, &a, &b, 0.5)?.is_none());
         // Only A registered — fall back.
@@ -5689,11 +5562,11 @@ mod tests {
     /// dispatch_sgd_step on BF16 operands must NOW succeed (post-Phase
     /// 4.x bf16 SGD kernel) and produce results that match the F32
     /// reference computation to bf16 precision. This is the path
-    /// that lets LoRA Vars (BF16 by convention) update on-device
-    /// without the candle CPU re-upload round-trip.
+    /// that lets LoRA params (BF16 by convention) update on-device
+    /// without the host re-upload round-trip.
     #[test]
     fn dispatch_sgd_step_bf16_resident_round_trip() -> Result<()> {
-        let backend = VulkanBackend::new(candle_core::Device::Cpu);
+        let backend = VulkanBackend::new(kiln_tensor::Device::Cpu);
         if !backend.has_vulkan() {
             eprintln!("Vulkan device unavailable, skipping");
             return Ok(());
@@ -5709,10 +5582,10 @@ mod tests {
             .map(|(&p, &g)| p - lr * g)
             .collect();
 
-        let p_f32 = candle_core::Tensor::from_vec(p_data, (n,), &candle_core::Device::Cpu)?;
-        let g_f32 = candle_core::Tensor::from_vec(g_data, (n,), &candle_core::Device::Cpu)?;
-        let p_bf16 = p_f32.to_dtype(candle_core::DType::BF16)?;
-        let g_bf16 = g_f32.to_dtype(candle_core::DType::BF16)?;
+        let p_f32 = kiln_tensor::Tensor::from_vec(p_data, (n,))?;
+        let g_f32 = kiln_tensor::Tensor::from_vec(g_data, (n,))?;
+        let p_bf16 = p_f32.to_dtype(kiln_tensor::DType::BF16)?;
+        let g_bf16 = g_f32.to_dtype(kiln_tensor::DType::BF16)?;
 
         backend.register_resident_activation(&p_bf16)?;
         backend.register_resident_activation(&g_bf16)?;
@@ -5725,10 +5598,10 @@ mod tests {
 
         // Read the updated param buffer back via resolve.
         let resolved = backend
-            .resolve_resident_activation(&p_bf16, &[n], candle_core::DType::BF16)?
+            .resolve_resident_activation(&p_bf16, &[n], kiln_tensor::DType::BF16)?
             .expect("must resolve");
         let updated_v: Vec<f32> = resolved
-            .to_dtype(candle_core::DType::F32)?
+            .to_dtype(kiln_tensor::DType::F32)?
             .flatten_all()?
             .to_vec1::<f32>()?;
         for (i, (got, want)) in updated_v.iter().zip(expected_f32.iter()).enumerate() {
@@ -5753,7 +5626,7 @@ mod tests {
     /// the bias-correction precompute path.
     #[test]
     fn dispatch_adamw_step_resident_round_trip_f32() -> Result<()> {
-        let backend = VulkanBackend::new(candle_core::Device::Cpu);
+        let backend = VulkanBackend::new(kiln_tensor::Device::Cpu);
         if !backend.has_vulkan() {
             eprintln!("Vulkan device unavailable, skipping");
             return Ok(());
@@ -5787,10 +5660,10 @@ mod tests {
             })
             .collect();
 
-        let param = candle_core::Tensor::from_vec(p_data, (n,), &candle_core::Device::Cpu)?;
-        let grad = candle_core::Tensor::from_vec(g_data, (n,), &candle_core::Device::Cpu)?;
-        let m = candle_core::Tensor::from_vec(m_data, (n,), &candle_core::Device::Cpu)?;
-        let v = candle_core::Tensor::from_vec(v_data, (n,), &candle_core::Device::Cpu)?;
+        let param = kiln_tensor::Tensor::from_vec(p_data, (n,))?;
+        let grad = kiln_tensor::Tensor::from_vec(g_data, (n,))?;
+        let m = kiln_tensor::Tensor::from_vec(m_data, (n,))?;
+        let v = kiln_tensor::Tensor::from_vec(v_data, (n,))?;
 
         backend.register_resident_activation(&param)?;
         backend.register_resident_activation(&grad)?;
@@ -5815,7 +5688,7 @@ mod tests {
         );
 
         let resolved = backend
-            .resolve_resident_activation(&param, &[n], candle_core::DType::F32)?
+            .resolve_resident_activation(&param, &[n], kiln_tensor::DType::F32)?
             .expect("param must resolve after dispatch");
         let got: Vec<f32> = resolved.flatten_all()?.to_vec1::<f32>()?;
         for (i, (g, w)) in got.iter().zip(expected.iter()).enumerate() {
@@ -5836,7 +5709,7 @@ mod tests {
     /// in-place buffer updates don't carry across steps.
     #[test]
     fn dispatch_adamw_step_resident_round_trip_bf16_two_step() -> Result<()> {
-        let backend = VulkanBackend::new(candle_core::Device::Cpu);
+        let backend = VulkanBackend::new(kiln_tensor::Device::Cpu);
         if !backend.has_vulkan() {
             eprintln!("Vulkan device unavailable, skipping");
             return Ok(());
@@ -5871,14 +5744,14 @@ mod tests {
             }
         }
 
-        let p_f32 = candle_core::Tensor::from_vec(p_data, (n,), &candle_core::Device::Cpu)?;
-        let g_f32 = candle_core::Tensor::from_vec(g_data, (n,), &candle_core::Device::Cpu)?;
-        let m_f32 = candle_core::Tensor::from_vec(vec![0.0f32; n], (n,), &candle_core::Device::Cpu)?;
-        let v_f32 = candle_core::Tensor::from_vec(vec![0.0f32; n], (n,), &candle_core::Device::Cpu)?;
-        let p_bf16 = p_f32.to_dtype(candle_core::DType::BF16)?;
-        let g_bf16 = g_f32.to_dtype(candle_core::DType::BF16)?;
-        let m_bf16 = m_f32.to_dtype(candle_core::DType::BF16)?;
-        let v_bf16 = v_f32.to_dtype(candle_core::DType::BF16)?;
+        let p_f32 = kiln_tensor::Tensor::from_vec(p_data, (n,))?;
+        let g_f32 = kiln_tensor::Tensor::from_vec(g_data, (n,))?;
+        let m_f32 = kiln_tensor::Tensor::from_vec(vec![0.0f32; n], (n,))?;
+        let v_f32 = kiln_tensor::Tensor::from_vec(vec![0.0f32; n], (n,))?;
+        let p_bf16 = p_f32.to_dtype(kiln_tensor::DType::BF16)?;
+        let g_bf16 = g_f32.to_dtype(kiln_tensor::DType::BF16)?;
+        let m_bf16 = m_f32.to_dtype(kiln_tensor::DType::BF16)?;
+        let v_bf16 = v_f32.to_dtype(kiln_tensor::DType::BF16)?;
 
         backend.register_resident_activation(&p_bf16)?;
         backend.register_resident_activation(&g_bf16)?;
@@ -5902,10 +5775,10 @@ mod tests {
         }
 
         let resolved = backend
-            .resolve_resident_activation(&p_bf16, &[n], candle_core::DType::BF16)?
+            .resolve_resident_activation(&p_bf16, &[n], kiln_tensor::DType::BF16)?
             .expect("param must resolve");
         let got: Vec<f32> = resolved
-            .to_dtype(candle_core::DType::F32)?
+            .to_dtype(kiln_tensor::DType::F32)?
             .flatten_all()?
             .to_vec1::<f32>()?;
         for (i, (g, w)) in got.iter().zip(ref_p.iter()).enumerate() {
@@ -5929,15 +5802,15 @@ mod tests {
     /// four operand buffers isn't resident.
     #[test]
     fn dispatch_adamw_step_falls_back_when_not_resident() -> Result<()> {
-        let backend = VulkanBackend::new(candle_core::Device::Cpu);
+        let backend = VulkanBackend::new(kiln_tensor::Device::Cpu);
         if !backend.has_vulkan() {
             eprintln!("Vulkan device unavailable, skipping");
             return Ok(());
         }
-        let p = candle_core::Tensor::from_vec(vec![1.0f32; 4], (4,), &candle_core::Device::Cpu)?;
-        let g = candle_core::Tensor::from_vec(vec![0.5f32; 4], (4,), &candle_core::Device::Cpu)?;
-        let m = candle_core::Tensor::from_vec(vec![0.0f32; 4], (4,), &candle_core::Device::Cpu)?;
-        let v = candle_core::Tensor::from_vec(vec![0.0f32; 4], (4,), &candle_core::Device::Cpu)?;
+        let p = kiln_tensor::Tensor::from_vec(vec![1.0f32; 4], (4,))?;
+        let g = kiln_tensor::Tensor::from_vec(vec![0.5f32; 4], (4,))?;
+        let m = kiln_tensor::Tensor::from_vec(vec![0.0f32; 4], (4,))?;
+        let v = kiln_tensor::Tensor::from_vec(vec![0.0f32; 4], (4,))?;
         // Nothing registered.
         let dispatched =
             backend.dispatch_adamw_step(&p, &g, &m, &v, 0.01, 0.9, 0.999, 1e-8, 0.0, 1)?;
@@ -5953,21 +5826,21 @@ mod tests {
         Ok(())
     }
 
-    /// Lazy candle-storage sync end-to-end. Register a `Var`, run an
-    /// on-device SGD step against its registry buffer (which the
-    /// trainer now does *without* calling `var.set`), then verify
-    /// that:
-    ///   1. Candle storage is STALE — `var.as_tensor()` data still
-    ///      matches the pre-step values.
+    /// Lazy host-storage sync end-to-end. Register a param tensor, run an
+    /// on-device SGD step against its registry buffer (which the trainer now
+    /// does *without* writing the host tensor's storage), then verify that:
+    ///   1. The param's host storage is STALE — `p.flatten_all()` still
+    ///      matches the pre-step values (the kernel wrote the Vulkan registry
+    ///      buffer, not the kt tensor's CPU storage).
     ///   2. The registry buffer is CURRENT — `resolve_resident_activation`
     ///      returns the post-step values.
-    ///   3. After explicit `var.set(resolve(...))` (which is what
-    ///      `TrainableLoraParams::sync_to_candle` does internally),
-    ///      candle storage matches the registry.
+    ///   3. After an explicit in-place sync (`p.slice_set(resolve(...))`,
+    ///      the kt analog of candle `Var::set` — id-stable in-place overwrite),
+    ///      the param's host storage matches the registry.
     /// This is the contract the lazy-sync flow relies on.
     #[test]
-    fn lazy_sync_keeps_candle_stale_until_explicit_sync() -> Result<()> {
-        let backend = VulkanBackend::new(candle_core::Device::Cpu);
+    fn lazy_sync_keeps_host_stale_until_explicit_sync() -> Result<()> {
+        let backend = VulkanBackend::new(kiln_tensor::Device::Cpu);
         if !backend.has_vulkan() {
             eprintln!("Vulkan device unavailable, skipping");
             return Ok(());
@@ -5982,27 +5855,30 @@ mod tests {
             .map(|(&p, &g)| p - lr * g)
             .collect();
 
-        let p_var =
-            candle_core::Var::from_tensor(&candle_core::Tensor::from_vec(init.clone(), (n,), &candle_core::Device::Cpu)?)?;
-        let g_tensor = candle_core::Tensor::from_vec(grad, (n,), &candle_core::Device::Cpu)?;
+        // kt has no `Var`; the param is a plain kt Tensor. Its `TensorId` is
+        // stable (the registry keys on it) and `slice_set` mutates its storage
+        // in place — exactly the id-stable, lazy-host-sync semantics candle's
+        // `Var` provided here.
+        let p = kiln_tensor::Tensor::from_vec(init.clone(), (n,))?;
+        let g_tensor = kiln_tensor::Tensor::from_vec(grad, (n,))?;
 
-        backend.register_resident_activation(p_var.as_tensor())?;
+        backend.register_resident_activation(&p)?;
         backend.register_resident_activation(&g_tensor)?;
-        let dispatched = backend.dispatch_sgd_step(p_var.as_tensor(), &g_tensor, lr)?;
+        let dispatched = backend.dispatch_sgd_step(&p, &g_tensor, lr)?;
         assert!(dispatched);
 
-        // (1) Candle storage is still the initial values.
-        let stale: Vec<f32> = p_var.as_tensor().flatten_all()?.to_vec1::<f32>()?;
+        // (1) Host storage is still the initial values.
+        let stale: Vec<f32> = p.flatten_all()?.to_vec1::<f32>()?;
         for (i, (s, w)) in stale.iter().zip(init.iter()).enumerate() {
             assert!(
                 (s - w).abs() < 1e-7,
-                "candle storage must be stale post-dispatch: idx {i}: got {s}, init {w}"
+                "host storage must be stale post-dispatch: idx {i}: got {s}, init {w}"
             );
         }
 
         // (2) Registry has post-step values.
         let resolved = backend
-            .resolve_resident_activation(p_var.as_tensor(), &[n], candle_core::DType::F32)?
+            .resolve_resident_activation(&p, &[n], kiln_tensor::DType::F32)?
             .expect("must resolve after on-device dispatch");
         let resolved_v: Vec<f32> = resolved.flatten_all()?.to_vec1::<f32>()?;
         for (i, (r, w)) in resolved_v.iter().zip(expected.iter()).enumerate() {
@@ -6012,17 +5888,17 @@ mod tests {
             );
         }
 
-        // (3) After explicit var.set, candle storage matches.
-        p_var.set(&resolved)?;
-        let fresh: Vec<f32> = p_var.as_tensor().flatten_all()?.to_vec1::<f32>()?;
+        // (3) After explicit in-place sync, host storage matches.
+        p.slice_set(&resolved, 0, 0)?;
+        let fresh: Vec<f32> = p.flatten_all()?.to_vec1::<f32>()?;
         for (i, (f, w)) in fresh.iter().zip(expected.iter()).enumerate() {
             assert!(
                 (f - w).abs() < 1e-6,
-                "candle storage must match registry post-sync: idx {i}: got {f}, want {w}"
+                "host storage must match registry post-sync: idx {i}: got {f}, want {w}"
             );
         }
 
-        backend.evict_resident_activation(p_var.as_tensor());
+        backend.evict_resident_activation(&p);
         backend.evict_resident_activation(&g_tensor);
         Ok(())
     }
@@ -6032,13 +5908,13 @@ mod tests {
     /// an F32 master copy that we don't maintain.
     #[test]
     fn dispatch_sgd_step_falls_back_on_dtype_mismatch() -> Result<()> {
-        let backend = VulkanBackend::new(candle_core::Device::Cpu);
+        let backend = VulkanBackend::new(kiln_tensor::Device::Cpu);
         if !backend.has_vulkan() {
             eprintln!("Vulkan device unavailable, skipping");
             return Ok(());
         }
-        let p = candle_core::Tensor::from_vec(vec![1.0f32; 4], (4,), &candle_core::Device::Cpu)?.to_dtype(candle_core::DType::BF16)?;
-        let g = candle_core::Tensor::from_vec(vec![0.5f32; 4], (4,), &candle_core::Device::Cpu)?; // F32
+        let p = kiln_tensor::Tensor::from_vec(vec![1.0f32; 4], (4,))?.to_dtype(kiln_tensor::DType::BF16)?;
+        let g = kiln_tensor::Tensor::from_vec(vec![0.5f32; 4], (4,))?; // F32
         backend.register_resident_activation(&p)?;
         backend.register_resident_activation(&g)?;
         let dispatched = backend.dispatch_sgd_step(&p, &g, 0.01)?;
@@ -6050,7 +5926,7 @@ mod tests {
 
     #[test]
     fn resident_activation_register_evict_round_trip() -> Result<()> {
-        let backend = VulkanBackend::new(candle_core::Device::Cpu);
+        let backend = VulkanBackend::new(kiln_tensor::Device::Cpu);
         // The capability bit is true regardless of whether a Vulkan
         // device exists in the test environment — it advertises the
         // backend's *intent* to handle these hooks non-trivially.
@@ -6067,7 +5943,7 @@ mod tests {
         // Small synthetic tensor — no specific shape required, the
         // hook just uploads `extract_tensor_bytes(tensor).0` and
         // keys on `tensor.id()`.
-        let t = candle_core::Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (2, 2), &candle_core::Device::Cpu)?;
+        let t = kiln_tensor::Tensor::from_vec(vec![1.0f32, 2.0, 3.0, 4.0], (2, 2))?;
         assert!(
             !backend.has_resident_activation(&t),
             "fresh tensor must not be registered"
