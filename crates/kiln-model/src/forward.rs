@@ -20066,13 +20066,12 @@ fn gqa_attention_paged_with_rope_tables(
     // Eliminates the materializing `paged_cache.read()` (an `index_select` /
     // u8→bf16 dequant) on the decode hot path. Limited to:
     //   * Backends that advertise `supports_flash_attn_paged_decode()`
-    //     (CUDA + bf16 today)
     //   * Decode steps (seq_len == 1)
     //   * Non-FP8 caches (the kernel reads bf16 pool slots directly)
     //   * Page sizes that divide kBlockN=128 (block_size=16 satisfies this)
-    //   * Single sequence with physically contiguous block allocation
-    //     (kiln's BlockManager allocates blocks in order from a free list, so
-    //     a freshly-allocated single sequence is always contiguous)
+    //   * CUDA still requires one physically-contiguous page run per kBlockN
+    //     chunk. Vulkan uses the block-table gather kernel and supports
+    //     non-contiguous physical pages.
     //   * Phase C8: not in single-token self-attn mode (kernel reads the
     //     full cache history, defeating the kv_len = 1 contract).
     if seq_len == 1
@@ -20119,6 +20118,13 @@ fn gqa_attention_paged_with_rope_tables(
         };
         if let Some(out) = out_opt {
             return Ok(out);
+        }
+        #[cfg(feature = "vulkan")]
+        if backend.name() == "vulkan" && !vulkan_decode_generic_fallback_enabled() {
+            anyhow::bail!(
+                "vulkan paged decode declined native paged-attention path; \
+                 generic fallback disabled (set KILN_VULKAN_DECODE_BATCH_GENERIC_FALLBACK=1 to opt in)"
+            );
         }
     }
 

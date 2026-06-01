@@ -507,8 +507,14 @@ every config"):
   physical pages; Vulkan now reaches `flash_attn_paged_decode` for arbitrary
   valid block tables instead of declining into the materialized attention path.
   Current kernel-crate smoke on the non-contiguous default shape measured
-  max abs diff `2.980232e-8`, non-split `0.373 ms`, split-K `0.249 ms`
-  (**1.50x**) on RADV STRIX_HALO.
+  max abs diff `2.980232e-8`, non-split `0.210 ms`, split-K `0.225 ms`
+  (`0.93x`) on RADV STRIX_HALO.
+  **Update — paged-attention declines are visible by default on Vulkan:** once
+  a Vulkan decode step is eligible for the native paged-attention path, a
+  kernel decline now errors instead of silently materializing K/V and running
+  fallback attention. The existing
+  `KILN_VULKAN_DECODE_BATCH_GENERIC_FALLBACK=1` debug opt-in re-enables the
+  fallback for A/B runs.
   **Update — multi-row resident paged microbench:** `full_token_resident_paged`
   now uses `paged_kv_write_slots` plus split-K
   `paged_attn_decode_batch_paged_splitk` and reduce over real per-row block
