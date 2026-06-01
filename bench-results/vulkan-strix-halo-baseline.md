@@ -356,6 +356,13 @@ every config"):
   its rowwise full-attention fallback. The same
   `KILN_VULKAN_DECODE_BATCH_GENERIC_FALLBACK=1` debug opt-in re-enables the
   fallback for A/B runs.
+  **Update — resident hidden-output submit:** the native batched resident stack
+  now has a hidden-output submit sibling to the final-argmax submit. It records
+  the same full-attention/GDN stack, copies the final `[batch, hidden]` buffer
+  into host-visible staging inside the same command batch, and
+  `model_forward_paged_decode_contiguous_batch_hidden` tries it before the
+  generic hidden path. This gives non-argmax callers a resident stack route and
+  keeps hidden-path declines visible by default on Vulkan.
   **Update — Vulkan live decode batch default:** the live greedy decode batcher
   now defaults Vulkan to a 64-row max batch instead of 32; the real-model
   batching-engine actor applies the same backend-aware default when

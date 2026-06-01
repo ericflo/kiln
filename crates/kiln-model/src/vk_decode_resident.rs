@@ -2756,6 +2756,101 @@ pub fn record_final_norm_lm_head_argmax_batched_into(
     Ok(true)
 }
 
+/// Record a full batched decode stack into an existing [`CommandBatch`].
+///
+/// This is intentionally record-only: the caller owns input upload,
+/// per-row paged metadata buffers, full-attention KV seeding, command
+/// submission, and output readback. It composes the batched
+/// full-attention/GDN block recorders and returns whether the final
+/// `[batch_size, hidden]` rows are in `x_in_buf` (`true`) or
+/// `x_scratch_buf` (`false`).
+#[allow(clippy::too_many_arguments)]
+pub fn record_transformer_stack_batched_hidden_into(
+    backend: &VulkanBackend,
+    batch: &mut CommandBatch,
+    x_in_buf: &VulkanBuffer,
+    x_scratch_buf: &VulkanBuffer,
+    weights: &crate::forward::GpuWeights,
+    config: &ModelConfig,
+    batch_size: usize,
+    max_blocks_per_seq: usize,
+    block_size: usize,
+    vk_kv_cache: &VkPagedKvCache,
+    rope_cos_buf: &VulkanBuffer,
+    rope_sin_buf: &VulkanBuffer,
+    block_table_buf: &VulkanBuffer,
+    seq_lens_buf: &VulkanBuffer,
+    slots_buf: &VulkanBuffer,
+    recurrent_states: &[kiln_tensor::Tensor],
+    conv_states: &[kiln_tensor::Tensor],
+) -> Result<Option<bool>> {
+    anyhow::ensure!(
+        batch_size > 0,
+        "batched transformer stack: batch_size must be > 0"
+    );
+
+    let mut full_attn_layer_idx = 0usize;
+    let mut linear_attn_idx = 0usize;
+    let mut from_buf = x_in_buf;
+    let mut to_buf = x_scratch_buf;
+    let mut from_is_input = true;
+    for layer in weights.layers.iter() {
+        match &layer.attention {
+            crate::forward::GpuAttentionWeights::Full(_) => {
+                let ok = record_full_attn_block_batched_into(
+                    backend,
+                    batch,
+                    from_buf,
+                    to_buf,
+                    layer,
+                    config,
+                    batch_size,
+                    max_blocks_per_seq,
+                    block_size,
+                    full_attn_layer_idx,
+                    vk_kv_cache,
+                    rope_cos_buf,
+                    rope_sin_buf,
+                    block_table_buf,
+                    seq_lens_buf,
+                    slots_buf,
+                )?;
+                if !ok {
+                    return Ok(None);
+                }
+                full_attn_layer_idx += 1;
+            }
+            crate::forward::GpuAttentionWeights::Linear(_) => {
+                let Some(recurrent_t) = recurrent_states.get(linear_attn_idx) else {
+                    return Ok(None);
+                };
+                let Some(conv_t) = conv_states.get(linear_attn_idx) else {
+                    return Ok(None);
+                };
+                let ok = record_gdn_block_batched_into(
+                    backend,
+                    batch,
+                    from_buf,
+                    to_buf,
+                    layer,
+                    config,
+                    batch_size,
+                    recurrent_t,
+                    conv_t,
+                )?;
+                if !ok {
+                    return Ok(None);
+                }
+                linear_attn_idx += 1;
+            }
+        }
+        std::mem::swap(&mut from_buf, &mut to_buf);
+        from_is_input = !from_is_input;
+    }
+
+    Ok(Some(from_is_input))
+}
+
 /// Record a full batched decode stack plus final LM-head argmax into
 /// an existing [`CommandBatch`].
 ///
@@ -2785,72 +2880,32 @@ pub fn record_transformer_stack_batched_argmax_into(
     recurrent_states: &[kiln_tensor::Tensor],
     conv_states: &[kiln_tensor::Tensor],
 ) -> Result<bool> {
-    anyhow::ensure!(
-        batch_size > 0,
-        "batched transformer stack: batch_size must be > 0"
-    );
-
-    let mut full_attn_layer_idx = 0usize;
-    let mut linear_attn_idx = 0usize;
-    let mut from_buf = x_in_buf;
-    let mut to_buf = x_scratch_buf;
-    for layer in weights.layers.iter() {
-        match &layer.attention {
-            crate::forward::GpuAttentionWeights::Full(_) => {
-                let ok = record_full_attn_block_batched_into(
-                    backend,
-                    batch,
-                    from_buf,
-                    to_buf,
-                    layer,
-                    config,
-                    batch_size,
-                    max_blocks_per_seq,
-                    block_size,
-                    full_attn_layer_idx,
-                    vk_kv_cache,
-                    rope_cos_buf,
-                    rope_sin_buf,
-                    block_table_buf,
-                    seq_lens_buf,
-                    slots_buf,
-                )?;
-                if !ok {
-                    return Ok(false);
-                }
-                full_attn_layer_idx += 1;
-            }
-            crate::forward::GpuAttentionWeights::Linear(_) => {
-                let Some(recurrent_t) = recurrent_states.get(linear_attn_idx) else {
-                    return Ok(false);
-                };
-                let Some(conv_t) = conv_states.get(linear_attn_idx) else {
-                    return Ok(false);
-                };
-                let ok = record_gdn_block_batched_into(
-                    backend,
-                    batch,
-                    from_buf,
-                    to_buf,
-                    layer,
-                    config,
-                    batch_size,
-                    recurrent_t,
-                    conv_t,
-                )?;
-                if !ok {
-                    return Ok(false);
-                }
-                linear_attn_idx += 1;
-            }
-        }
-        std::mem::swap(&mut from_buf, &mut to_buf);
-    }
-
+    let Some(final_in_input) = record_transformer_stack_batched_hidden_into(
+        backend,
+        batch,
+        x_in_buf,
+        x_scratch_buf,
+        weights,
+        config,
+        batch_size,
+        max_blocks_per_seq,
+        block_size,
+        vk_kv_cache,
+        rope_cos_buf,
+        rope_sin_buf,
+        block_table_buf,
+        seq_lens_buf,
+        slots_buf,
+        recurrent_states,
+        conv_states,
+    )? else {
+        return Ok(false);
+    };
+    let hidden_buf = if final_in_input { x_in_buf } else { x_scratch_buf };
     record_final_norm_lm_head_argmax_batched_into(
         backend,
         batch,
-        from_buf,
+        hidden_buf,
         out_token_buf,
         weights,
         config,
@@ -2926,6 +2981,77 @@ pub fn submit_transformer_stack_batched_argmax(
         tokens.push(u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
     }
     Ok(Some(tokens))
+}
+
+/// Submit a full batched resident decode stack and return final hidden
+/// rows as f32 `[batch_size, hidden]`. The caller owns embedding, RoPE,
+/// metadata preparation, and cache seeding.
+#[allow(clippy::too_many_arguments)]
+pub fn submit_transformer_stack_batched_hidden(
+    backend: &VulkanBackend,
+    vk_device: &VulkanDevice,
+    x_in_buf: &VulkanBuffer,
+    x_scratch_buf: &VulkanBuffer,
+    weights: &crate::forward::GpuWeights,
+    config: &ModelConfig,
+    batch_size: usize,
+    max_blocks_per_seq: usize,
+    block_size: usize,
+    vk_kv_cache: &VkPagedKvCache,
+    rope_cos_buf: &VulkanBuffer,
+    rope_sin_buf: &VulkanBuffer,
+    block_table_buf: &VulkanBuffer,
+    seq_lens_buf: &VulkanBuffer,
+    slots_buf: &VulkanBuffer,
+    recurrent_states: &[kiln_tensor::Tensor],
+    conv_states: &[kiln_tensor::Tensor],
+) -> Result<Option<Vec<f32>>> {
+    anyhow::ensure!(
+        batch_size > 0,
+        "batched transformer hidden submit: batch_size must be > 0"
+    );
+    let hidden_bytes = (batch_size * config.hidden_size * 4) as u64;
+    let out_staging = backend
+        .acquire_resident_scratch_host_visible("native_b_hidden_staging", hidden_bytes)?;
+
+    let mut batch = CommandBatch::new(vk_device)?;
+    let Some(final_in_input) = record_transformer_stack_batched_hidden_into(
+        backend,
+        &mut batch,
+        x_in_buf,
+        x_scratch_buf,
+        weights,
+        config,
+        batch_size,
+        max_blocks_per_seq,
+        block_size,
+        vk_kv_cache,
+        rope_cos_buf,
+        rope_sin_buf,
+        block_table_buf,
+        seq_lens_buf,
+        slots_buf,
+        recurrent_states,
+        conv_states,
+    )? else {
+        return Ok(None);
+    };
+    let hidden_src = if final_in_input { x_in_buf } else { x_scratch_buf };
+    batch
+        .record_copy_buffer(hidden_src, &out_staging, hidden_bytes)
+        .context("batched transformer hidden submit: record hidden readback")?;
+    batch
+        .submit_and_wait("vk-resident native batched hidden decode")
+        .context("batched transformer hidden submit: submit CommandBatch")?;
+
+    let bytes = out_staging
+        .read_mapped(hidden_bytes as usize)
+        .context("batched transformer hidden submit: read hidden staging")?;
+    let mut hidden = Vec::with_capacity(batch_size * config.hidden_size);
+    for chunk in bytes.chunks_exact(4).take(batch_size * config.hidden_size) {
+        hidden.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+    }
+    Ok(Some(hidden))
 }
 
 /// Host-visible Vulkan buffers for one batched resident decode step's
@@ -3142,6 +3268,61 @@ pub fn submit_transformer_stack_batched_argmax_from_host(
         block_size,
     )?;
     submit_transformer_stack_batched_argmax(
+        backend,
+        vk_device,
+        &step.input,
+        &step.scratch,
+        weights,
+        config,
+        batch_size,
+        meta.max_blocks_per_seq,
+        meta.block_size,
+        vk_kv_cache,
+        &step.rope_cos,
+        &step.rope_sin,
+        &meta.block_table,
+        &meta.seq_lens,
+        &meta.slots,
+        recurrent_states,
+        conv_states,
+    )
+}
+
+/// Convenience wrapper for callers that want the native resident stack
+/// output instead of the final greedy argmax.
+#[allow(clippy::too_many_arguments)]
+pub fn submit_transformer_stack_batched_hidden_from_host(
+    backend: &VulkanBackend,
+    vk_device: &VulkanDevice,
+    hidden_rows: &[f32],
+    rope_cos: &[f32],
+    rope_sin: &[f32],
+    block_tables: &[&BlockTable],
+    start_positions: &[usize],
+    block_size: usize,
+    weights: &crate::forward::GpuWeights,
+    config: &ModelConfig,
+    vk_kv_cache: &VkPagedKvCache,
+    recurrent_states: &[kiln_tensor::Tensor],
+    conv_states: &[kiln_tensor::Tensor],
+) -> Result<Option<Vec<f32>>> {
+    let batch_size = block_tables.len();
+    let step = prepare_batched_resident_decode_step_buffers(
+        backend,
+        hidden_rows,
+        batch_size,
+        config.hidden_size,
+        rope_cos,
+        rope_sin,
+        config.rotary_dim(),
+    )?;
+    let meta = prepare_batched_resident_decode_meta_buffers(
+        backend,
+        block_tables,
+        start_positions,
+        block_size,
+    )?;
+    submit_transformer_stack_batched_hidden(
         backend,
         vk_device,
         &step.input,
