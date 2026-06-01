@@ -1429,7 +1429,7 @@ fn tape_forward_rope_split_half_matches_f32_reference() {
         );
         let want_t = Tensor::from_vec(want, (batch, seq, heads, head_dim))
             .expect("ref cpu")
-            .to_device(*device)
+            .to_device(device)
             .expect("ref -> cuda");
         let diff = max_abs_diff(&out, &want_t);
         assert!(
@@ -1532,7 +1532,7 @@ fn tape_backward_rope_split_half_matches_analytic_adjoint() {
     }
     let want_t = Tensor::from_vec(want, (batch, seq, heads, head_dim))
         .expect("ref cpu")
-        .to_device(*device)
+        .to_device(device)
         .expect("ref -> cuda");
     let diff = max_abs_diff(&dx, &want_t);
     assert!(
@@ -1609,7 +1609,7 @@ fn tape_forward_add_matches_reference() {
     let want: Vec<f32> = af.iter().zip(bf.iter()).map(|(x, y)| x + y).collect();
     let want_t = Tensor::from_vec(want, (rows, cols))
         .expect("ref cpu")
-        .to_device(*device)
+        .to_device(device)
         .expect("ref -> cuda");
     let diff = max_abs_diff(&out, &want_t);
     assert!(diff < 3e-2, "add forward diverges from f32 reference (max-abs-diff {diff})");
@@ -1731,7 +1731,7 @@ fn tape_connected_chain_backward_walk_parity() {
         (m, n),
     )
     .expect("c cpu")
-    .to_device(*device)
+    .to_device(device)
     .expect("c -> cuda")
     .contiguous()
     .expect("c contig");
@@ -1851,7 +1851,7 @@ fn tape_bridge_connected_adapter_chain_walk_parity() {
         (m, n),
     )
     .expect("c cpu")
-    .to_device(*device)
+    .to_device(device)
     .expect("c -> cuda")
     .contiguous()
     .expect("c contig");
@@ -1965,7 +1965,7 @@ fn tape_bridge_connected_three_op_adapter_chain() {
         (m, n),
     )
     .expect("c cpu")
-    .to_device(*device)
+    .to_device(device)
     .expect("c -> cuda")
     .contiguous()
     .expect("c contig");
@@ -2183,7 +2183,7 @@ fn tape_lora_add_records_fused_node_and_emits_var_grads() {
     let seed_host = vec![1.0_f32; rows * out_features];
     let seed = Tensor::from_vec(seed_host, vec![rows, out_features])
         .expect("seed cpu")
-        .to_device(*device)
+        .to_device(device)
         .expect("seed -> cuda")
         .contiguous()
         .expect("seed contig");
@@ -2500,7 +2500,7 @@ fn tape_flash_attn_records_node_and_emits_qkv_grads() {
     let seed_host = vec![half::bf16::from_f32(1.0); b * sq * hq * hd];
     let seed = Tensor::from_vec(seed_host, (b, sq, hq, hd))
         .expect("seed cpu")
-        .to_device(*device)
+        .to_device(device)
         .expect("seed -> cuda")
         .contiguous()
         .expect("seed contig");
@@ -2686,7 +2686,7 @@ fn tape_reshape_records_node_and_passes_grad_through() {
         .collect();
     let seed = Tensor::from_vec(seed_host, (2, 3, 20))
         .expect("seed cpu")
-        .to_device(*device)
+        .to_device(device)
         .expect("seed -> cuda")
         .contiguous()
         .expect("seed contig");
