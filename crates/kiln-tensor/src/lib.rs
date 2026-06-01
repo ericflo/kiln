@@ -45,6 +45,8 @@ mod tensor_id;
 #[cfg(feature = "cuda")]
 mod active_stream;
 #[cfg(feature = "cuda")]
+mod capture_alloc;
+#[cfg(feature = "cuda")]
 mod cuda_allocator;
 #[cfg(feature = "cuda")]
 mod cuda_storage;
@@ -94,6 +96,10 @@ pub use tensor_id::TensorId;
 
 #[cfg(feature = "cuda")]
 pub use active_stream::{active_cuda_stream, with_active_cuda_stream};
+#[cfg(feature = "cuda")]
+pub use capture_alloc::{
+    capture_arena_active, capture_arena_alloc, with_capture_arena, CaptureArena,
+};
 #[cfg(feature = "cuda")]
 pub use cuda_allocator::CudaAllocator;
 #[cfg(feature = "cuda")]
