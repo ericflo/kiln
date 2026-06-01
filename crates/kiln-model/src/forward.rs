@@ -23418,11 +23418,6 @@ fn model_forward_paged_last_token_resident_native_vk(
     let t_seed = std::time::Instant::now();
 
     // 6. VkPagedKvCache (size matches paged cache).
-    let num_full_attn_layers = weights
-        .layers
-        .iter()
-        .filter(|l| matches!(l.attention, GpuAttentionWeights::Full(_)))
-        .count();
     let vk_kv_cache_arc = match vk_backend.vk_paged_kv_cache(
         config.num_full_attention_layers,
         paged_cache.num_blocks(),
@@ -23638,33 +23633,6 @@ fn model_forward_paged_last_token_resident_native_vk(
         );
     }
     Ok(Some(logits))
-}
-
-/// Local helper used only by the native orchestrator.
-#[cfg(feature = "vulkan")]
-fn upload_u32_slice_native(
-    vk_device: &kiln_vulkan_kernel::VulkanDevice,
-    data: &[u32],
-) -> Result<kiln_vulkan_kernel::VulkanBuffer> {
-    use kiln_vulkan_kernel::VulkanBuffer;
-    let mut bytes: Vec<u8> = Vec::with_capacity(data.len() * 4);
-    for &x in data {
-        bytes.extend_from_slice(&x.to_le_bytes());
-    }
-    let buf = VulkanBuffer::create_device_local(
-        vk_device.device(),
-        vk_device.device_local_mem_type(),
-        bytes.len().max(4) as u64,
-    )?;
-    VulkanBuffer::upload_data(
-        vk_device.device(),
-        vk_device.host_visible_mem_type(),
-        vk_device.queue(),
-        vk_device.queue_family_index(),
-        &buf,
-        &bytes,
-    )?;
-    Ok(buf)
 }
 
 /// Try the Vulkan-resident full-attention decode block. Returns

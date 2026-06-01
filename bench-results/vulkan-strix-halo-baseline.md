@@ -718,6 +718,12 @@ every config"):
   never bound. Focused check: `cargo check -p kiln-model
   --no-default-features --features vulkan` passes and the two stale resident
   scratch warnings are gone.
+  **Update — native decode stale helper cleanup:** the native bs=1 resident
+  orchestrator no longer computes an unused full-attention-layer count and no
+  longer carries the unused device-local u32 upload helper from before block
+  tables moved to persistent host-visible scratch. The same Vulkan-profile
+  `cargo check` now leaves no warnings from `vk_decode_resident.rs` or the
+  native decode helper body.
 - **Vulkan paged-attention decode kernel**: the kernel crate already had
   `paged_attn_decode_batch_paged.comp`; Vulkan now advertises
   `supports_flash_attn_paged_decode` and wires the single-query paged-decode
