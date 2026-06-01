@@ -1007,6 +1007,12 @@ every config"):
   adds a rows8 block-score shader that preserves the existing reduce stage.
   Focused Vulkan coverage now includes 65-row tail batches for greedy argmax
   and top-1 sampling.
+  **Update — non-recorded resident linear helper matches rows8 routing:** the
+  direct resident BF16 linear helper now selects the same rows8 projection
+  shader as the generic bytes helper and recorded model stack at batch 64. A
+  focused `full_step_resident` batch-64 microbench measured 11.98 ms by
+  default vs 12.29 ms with rows8 disabled, and resident parity now covers a
+  65-row tail batch through the helper path.
   **Update — full-attention QKV/gate projection uses rows8 at saturation:** the
   resident full-attention block now selects a rows8 packed-BF16 QKV/gate split
   projection for 64-wide continuous batches. This shares each Q/K/V weight load

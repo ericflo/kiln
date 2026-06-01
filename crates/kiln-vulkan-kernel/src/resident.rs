@@ -26,7 +26,10 @@ use crate::kernels::{
 use crate::pipeline::ShaderPipeline;
 use crate::{shaders, CommandBatch, VulkanBuffer, VulkanDevice, Workgroups};
 
-use crate::kernels::{linear_decode_bf16w_rows4_enabled, MLP_BF16_ROWS8_MIN_BATCH};
+use crate::kernels::{
+    linear_decode_bf16w_rows4_enabled, linear_decode_bf16w_rows8_enabled,
+    LINEAR_DECODE_BF16W_ROWS8_MIN_BATCH, MLP_BF16_ROWS8_MIN_BATCH,
+};
 
 /// Selection helper shared between the f32-weights and packed-bf16
 /// linear-decode resident variants. Returns the shader source path,
@@ -54,9 +57,20 @@ fn linear_decode_shader_plan(
         let wg = out_dim.div_ceil(16) as u32;
         (glsl_path, push, wg)
     } else {
-        let rows4 = packed_bf16_weights && batch >= 16 && linear_decode_bf16w_rows4_enabled();
+        let rows8 = packed_bf16_weights
+            && batch >= LINEAR_DECODE_BF16W_ROWS8_MIN_BATCH
+            && linear_decode_bf16w_rows8_enabled();
+        let rows4 = packed_bf16_weights
+            && batch >= 16
+            && !rows8
+            && linear_decode_bf16w_rows4_enabled();
         let glsl_path = if packed_bf16_weights {
-            if rows4 {
+            if rows8 {
+                concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/csrc/shaders/linear_decode_batched_rows8_bf16w.comp"
+                )
+            } else if rows4 {
                 concat!(
                     env!("CARGO_MANIFEST_DIR"),
                     "/csrc/shaders/linear_decode_batched_rows4_bf16w.comp"
@@ -74,7 +88,9 @@ fn linear_decode_shader_plan(
             )
         };
         let push = vec![hidden as u32, out_dim as u32, batch as u32];
-        let wg = if rows4 {
+        let wg = if rows8 {
+            (batch.div_ceil(8) * out_dim.div_ceil(32)) as u32
+        } else if rows4 {
             (batch.div_ceil(4) * out_dim.div_ceil(32)) as u32
         } else {
             (batch * out_dim.div_ceil(32)) as u32
@@ -2791,6 +2807,45 @@ mod tests {
         .unwrap();
         let resident = read_back_f32(&dev, &out_buf);
 
+        for (i, (b, r)) in baseline.iter().zip(resident.iter()).enumerate() {
+            assert_eq!(b.to_bits(), r.to_bits(), "row {i}: baseline {b} vs resident {r}");
+        }
+    }
+
+    #[test]
+    fn linear_decode_bf16w_resident_matches_nonresident_b65_rows8_tail() {
+        let Some(dev) = try_device() else { return };
+        let batch = 65;
+        let hidden = 33;
+        let out_dim = 37;
+        let x = make_x_f32(batch, hidden);
+        let w = make_bf16_weight(hidden, out_dim);
+        let w_buf = upload_tensor_bf16_packed_buffer(&dev, &w).unwrap();
+
+        let x_data = extract_tensor_bytes(&x).unwrap().0;
+        let baseline_bytes = dispatch_linear_decode_cached_bytes(
+            &dev, &x_data, &w_buf, batch, hidden, out_dim, true,
+        )
+        .unwrap();
+        let baseline = create_tensor_from_data(
+            &baseline_bytes, &[batch, 1, out_dim], DType::F32,
+        )
+        .unwrap();
+        let baseline = baseline
+            .flatten_all()
+            .unwrap()
+            .to_vec1::<f32>()
+            .unwrap();
+
+        let x_buf = upload_x(&dev, &x);
+        let out_buf = alloc_out(&dev, (batch * out_dim * 4) as u64);
+        dispatch_linear_decode_cached_bf16_weights_resident(
+            &dev, &x_buf, &w_buf, &out_buf, batch, hidden, out_dim,
+        )
+        .unwrap();
+        let resident = read_back_f32(&dev, &out_buf);
+
+        assert_eq!(baseline.len(), resident.len());
         for (i, (b, r)) in baseline.iter().zip(resident.iter()).enumerate() {
             assert_eq!(b.to_bits(), r.to_bits(), "row {i}: baseline {b} vs resident {r}");
         }
