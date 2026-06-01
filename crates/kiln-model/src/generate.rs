@@ -424,7 +424,7 @@ fn env_positive_usize(name: &str) -> Option<usize> {
 }
 
 const DEFAULT_DECODE_BUFFER_MAX_BATCH: usize = 8;
-const VULKAN_DECODE_BUFFER_MAX_BATCH: usize = 32;
+const VULKAN_DECODE_BUFFER_MAX_BATCH: usize = 64;
 
 fn decode_buffer_max_batch(backend_name: &str) -> usize {
     let explicit = env_positive_usize("KILN_DECODE_BUFFER_MAX_BATCH");
@@ -6912,7 +6912,7 @@ mod tests {
 
         assert_eq!(default_decode_batcher_max_batch_kt(&device, "cpu"), 8);
         assert_eq!(default_decode_batcher_max_batch_kt(&device, "cuda"), 1);
-        assert_eq!(default_decode_batcher_max_batch_kt(&device, "vulkan"), 32);
+        assert_eq!(default_decode_batcher_max_batch_kt(&device, "vulkan"), 64);
         assert_eq!(default_decode_batcher_max_batch_kt(&device, "metal"), 8);
     }
 
@@ -6930,7 +6930,7 @@ mod tests {
         let device = kiln_tensor::Device::Cpu;
         assert_eq!(
             DecodeBatcherConfig::from_env_for_backend_kt(&device, "vulkan").max_batch,
-            32
+            64
         );
         unsafe {
             std::env::set_var("KILN_MAX_DECODE_BATCH", "24");
