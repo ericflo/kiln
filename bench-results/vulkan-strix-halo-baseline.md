@@ -419,6 +419,19 @@ every config"):
   reported a `Vulkan-resident decode pool ready` event with `num_slots=4`, so
   this smoke reached the live multi-row resident route; it is a short
   validation fixture, not a saturation benchmark.
+  **Update — live sixteen-row warmed batch fixture:** a longer serving fixture
+  on the same release binary used 16 distinct `/v1/completions/batch` prompts,
+  `temperature=0`, `top_p=1`, `max_tokens=8`, prefix cache disabled, and
+  default Vulkan batch ceilings. Startup logged `max_decode_batch=64`,
+  `max_batch=64`, and prefix-cache `max_blocks=0`. The first request returned
+  16 completions / 100 generated tokens in 86.971 s and constructed the
+  resident pool mid-request (`Vulkan-resident decode pool ready`,
+  `num_slots=4`). A warmed repeat with new distinct prompts returned
+  16 completions / 96 generated tokens in 62.884 s; the server reported the
+  batch endpoint at `duration_ms=62881.663398000004` with batching enabled for
+  each completion. This is live-route evidence for the 64-wide default and a
+  better long fixture than the four-row smoke, while the synthetic mixed-paged
+  microbench remains the main saturation signal.
   **Update — resident parity test restored for Vulkan profiles:** the
   `vk_resident_decode_parity` integration test now builds against the current kt
   device/cache surface instead of stale test-only APIs. Without
