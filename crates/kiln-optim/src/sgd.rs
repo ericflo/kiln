@@ -170,6 +170,8 @@ impl OptimStep for Sgd {
         // keyed on `param.tensor_id()` (`self.velocities`) survives.
         let new_master = write_f32_to_tensor(policy.master_dtype, master.shape(), &master_f32)?;
         param.replace_backward_storage(Some(new_master));
+        // #1082 Phase 2.7: end-of-optimizer-step epoch bump (see AdamW).
+        param.bump_epoch();
         Ok(())
     }
 

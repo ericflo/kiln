@@ -201,6 +201,10 @@ impl OptimStep for AdamW {
             step_count,
         )?;
         param.replace_backward_storage(Some(new_master));
+        // #1082 Phase 2.7: end-of-optimizer-step epoch bump. A serving
+        // thread polling `Parameter::version_handle` observes this as
+        // the signal that the master advanced (forward view now stale).
+        param.bump_epoch();
         Ok(())
     }
 

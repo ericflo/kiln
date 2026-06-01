@@ -15,6 +15,7 @@
 //! `crates/kiln-train/src/trainer.rs:555,592`) get orphaned on
 //! weight-form transitions.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use kiln_tensor::{Result, Storage, Tensor, TensorId};
@@ -238,7 +239,16 @@ pub struct Parameter {
     ///
     /// Initialized to 0 by both constructors; starts incrementing at
     /// the first optimizer step.
-    epoch: u64,
+    ///
+    /// **Atomic + Arc-shared** (#1082 Phase 2.7): a serving thread
+    /// holding a [`Parameter::version_handle`] reads the live epoch
+    /// lock-free while the trainer mutates this Parameter under its
+    /// own lock and `bump_epoch()`s at end-of-step. `#[derive(Clone)]`
+    /// shares the counter (the live-handle semantic); [`snapshot`]
+    /// detaches it so a snapshot's epoch stays frozen at capture time.
+    ///
+    /// [`snapshot`]: Parameter::snapshot
+    epoch: Arc<AtomicU64>,
 }
 
 impl Parameter {
@@ -255,7 +265,7 @@ impl Parameter {
             amp_policy: AmpPolicy::default(),
             name: None,
             forward_stale: false,
-            epoch: 0,
+            epoch: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -272,7 +282,7 @@ impl Parameter {
             amp_policy: policy,
             name: None,
             forward_stale: false,
-            epoch: 0,
+            epoch: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -317,14 +327,41 @@ impl Parameter {
     /// the snapshot through the Arc-shared storage even as the
     /// master mutates underneath at later epochs.
     pub fn current_epoch(&self) -> u64 {
-        self.epoch
+        self.epoch.load(Ordering::Acquire)
     }
 
     /// Advance the epoch counter — called at end-of-optimizer-step.
-    /// Saturating add: at u64::MAX the counter sticks (in practice
-    /// no training run reaches 2^64 steps).
-    pub fn bump_epoch(&mut self) {
-        self.epoch = self.epoch.saturating_add(1);
+    ///
+    /// Atomic `fetch_add(1, Release)` so a serving thread reading via
+    /// [`Parameter::version_handle`] / [`Parameter::current_epoch`]
+    /// observes the bump **without holding any lock** on the
+    /// Parameter. Takes `&self` (not `&mut self`) precisely so the
+    /// bump composes with a shared/concurrent read path — the trainer
+    /// can bump through a shared reference held alongside serving
+    /// readers. **Saturating** at `u64::MAX` — the counter is
+    /// monotonically non-decreasing, so a stale reader can never be
+    /// fooled into thinking its cached forward view is fresh by a
+    /// wrap-around (in practice no run reaches 2^64 steps anyway).
+    pub fn bump_epoch(&self) {
+        // Atomic saturating add via a CAS loop (`fetch_add` would wrap;
+        // a version counter must stay monotonic — see above).
+        let _ = self.epoch.fetch_update(Ordering::Release, Ordering::Acquire, |v| {
+            Some(v.saturating_add(1))
+        });
+    }
+
+    /// Lock-free reader handle on the live epoch counter (#1082 Phase
+    /// 2.7 "live serve + train coexistence").
+    ///
+    /// A serving thread clones this `Arc<AtomicU64>` once and polls
+    /// `load(Ordering::Acquire)` to observe the trainer's
+    /// [`bump_epoch`](Parameter::bump_epoch) advances without locking
+    /// the Parameter. This is the primitive the next box ("replace the
+    /// whole-GPU `RwLock` with a Parameter-versioned read path") builds
+    /// on: a reader compares the epoch it last quantized against the
+    /// live epoch to decide whether its cached forward view is stale.
+    pub fn version_handle(&self) -> Arc<AtomicU64> {
+        Arc::clone(&self.epoch)
     }
 
     /// Phase 2.5 tied-parameter check (#1082 line 288).
@@ -375,7 +412,16 @@ impl Parameter {
     /// **Cost:** O(1). Tensor clones are Arc refcount bumps; no
     /// device-memory copy.
     pub fn snapshot(&self) -> Self {
-        self.clone()
+        // `#[derive(Clone)]` shares the live `Arc<AtomicU64>` epoch (the
+        // live-handle semantic). A snapshot must instead FREEZE the
+        // epoch at capture time so it reports a stable version even as
+        // the master advances under later `bump_epoch()` calls (#1082
+        // Phase 2.7 "eval-while-training via Parameter snapshot"):
+        // detach into an independent counter holding the captured
+        // value.
+        let mut snap = self.clone();
+        snap.epoch = Arc::new(AtomicU64::new(self.current_epoch()));
+        snap
     }
 
     /// Stable identity.
@@ -1020,6 +1066,96 @@ mod tests {
             p.bump_epoch();
         }
         assert_eq!(p.current_epoch(), 1000);
+    }
+
+    #[test]
+    fn bump_epoch_takes_shared_ref() {
+        // #1082 Phase 2.7: `bump_epoch` is `&self` so the trainer can
+        // advance the version through a shared reference held alongside
+        // serving readers — not `&mut self`. Compile-checking shape:
+        // calling it through `&Parameter` must type-check.
+        let fs = plain_f32();
+        let master_tensor = fs.primary_tensor().clone();
+        let p = Parameter::trainable(fs, master_tensor, AmpPolicy::default());
+        let r: &Parameter = &p;
+        r.bump_epoch();
+        r.bump_epoch();
+        assert_eq!(p.current_epoch(), 2);
+    }
+
+    #[test]
+    fn version_handle_observes_live_bumps() {
+        // The lock-free reader handle tracks the LIVE counter: after the
+        // parameter bumps, a previously-taken handle sees the new value
+        // (it is the same Arc<AtomicU64>, not a copy).
+        let fs = plain_f32();
+        let master_tensor = fs.primary_tensor().clone();
+        let p = Parameter::trainable(fs, master_tensor, AmpPolicy::default());
+        let handle = p.version_handle();
+        assert_eq!(handle.load(Ordering::Acquire), 0);
+        p.bump_epoch();
+        p.bump_epoch();
+        p.bump_epoch();
+        assert_eq!(handle.load(Ordering::Acquire), 3);
+        assert_eq!(handle.load(Ordering::Acquire), p.current_epoch());
+    }
+
+    #[test]
+    fn snapshot_version_handle_is_frozen() {
+        // A snapshot's handle is DETACHED: it stays frozen at the
+        // captured epoch even as the parent advances. This is what lets
+        // an eval pass read a consistent version while training rolls on.
+        let fs = plain_f32();
+        let master_tensor = fs.primary_tensor().clone();
+        let p = Parameter::trainable(fs, master_tensor, AmpPolicy::default());
+        p.bump_epoch();
+        let s = p.snapshot();
+        let s_handle = s.version_handle();
+        assert_eq!(s_handle.load(Ordering::Acquire), 1);
+        p.bump_epoch();
+        p.bump_epoch();
+        // Parent moved on; the snapshot's handle is unaffected.
+        assert_eq!(s_handle.load(Ordering::Acquire), 1);
+        assert_eq!(p.current_epoch(), 3);
+    }
+
+    #[test]
+    fn concurrent_read_during_bump_is_safe_and_monotonic() {
+        // The defining Phase 2.7 capability: a serving thread polls the
+        // version lock-free while the trainer bumps it. Only the
+        // Arc<AtomicU64> handle (Send + Sync) crosses to the reader
+        // thread — the Parameter itself stays on the main thread — so
+        // this exercises exactly the serve-while-train read path.
+        use std::sync::atomic::AtomicBool;
+
+        let fs = plain_f32();
+        let master_tensor = fs.primary_tensor().clone();
+        let p = Parameter::trainable(fs, master_tensor, AmpPolicy::default());
+        let handle = p.version_handle();
+        let done = Arc::new(AtomicBool::new(false));
+        let done_reader = Arc::clone(&done);
+
+        let reader = std::thread::spawn(move || {
+            let mut last = 0u64;
+            let mut max_seen = 0u64;
+            while !done_reader.load(Ordering::Acquire) {
+                let v = handle.load(Ordering::Acquire);
+                assert!(v >= last, "version went backwards: {v} < {last}");
+                last = v;
+                max_seen = max_seen.max(v);
+            }
+            // One final read after the writer is done.
+            max_seen.max(handle.load(Ordering::Acquire))
+        });
+
+        for _ in 0..2000 {
+            p.bump_epoch();
+        }
+        done.store(true, Ordering::Release);
+
+        let max_seen = reader.join().unwrap();
+        assert_eq!(p.current_epoch(), 2000);
+        assert!(max_seen <= 2000, "reader saw an impossible epoch {max_seen}");
     }
 
     #[test]

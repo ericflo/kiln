@@ -120,9 +120,10 @@ jobs:
         # the per-crate tests in already-candle-free leaf crates never run
         # in the default job. Test them directly to keep coverage and to
         # validate #1082 box work that lands in them (e.g. the kiln-optim
-        # AdamW stochastic-rounding path). None of these depend on
-        # kiln-model, so they compile and run on a GPU-less runner.
-        run: cargo test --locked -p kiln-optim
+        # AdamW stochastic-rounding path, and the kiln-param Phase 2.7
+        # atomic `Parameter::version` epoch counter). None of these depend
+        # on kiln-model, so they compile and run on a GPU-less runner.
+        run: cargo test --locked -p kiln-optim -p kiln-param
 
   cuda-candle-free:
     name: CUDA dep tree is candle-free (#1082)
