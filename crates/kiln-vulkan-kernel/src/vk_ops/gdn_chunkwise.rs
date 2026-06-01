@@ -92,6 +92,7 @@ fn record_narrow_lastdim_no_grad(
     t: &VkTensor,
     start: usize,
     len: usize,
+    barrier_before: bool,
 ) -> Result<VkTensor> {
     anyhow::ensure!(t.dtype() == VkDType::F32, "vk_narrow(record): F32-only");
     let dims = t.shape();
@@ -112,12 +113,21 @@ fn record_narrow_lastdim_no_grad(
     if total <= tile_elements {
         let workgroups = ((total + 255) / 256) as u32;
         let push = [outer as u32, inner_in as u32, start as u32, len as u32];
-        batch.record_shader(
-            SHADER_NARROW_LASTDIM_F32,
-            &[t.buffer().handle(), out_buf.handle()],
-            &push,
-            Workgroups::OneD(workgroups),
-        )?;
+        if barrier_before {
+            batch.record_shader(
+                SHADER_NARROW_LASTDIM_F32,
+                &[t.buffer().handle(), out_buf.handle()],
+                &push,
+                Workgroups::OneD(workgroups),
+            )?;
+        } else {
+            batch.record_shader_no_previous_barrier(
+                SHADER_NARROW_LASTDIM_F32,
+                &[t.buffer().handle(), out_buf.handle()],
+                &push,
+                Workgroups::OneD(workgroups),
+            )?;
+        }
     } else {
         crate::vk_ops::for_each_1d_tile(total, tile_elements, |offset, chunk_len| {
             let workgroups = ((chunk_len + 255) / 256) as u32;
@@ -129,12 +139,21 @@ fn record_narrow_lastdim_no_grad(
                 chunk_len as u32,
                 offset as u32,
             ];
-            batch.record_shader(
-                SHADER_NARROW_LASTDIM_F32_OFFSET,
-                &[t.buffer().handle(), out_buf.handle()],
-                &push,
-                Workgroups::OneD(workgroups),
-            )
+            if barrier_before {
+                batch.record_shader(
+                    SHADER_NARROW_LASTDIM_F32_OFFSET,
+                    &[t.buffer().handle(), out_buf.handle()],
+                    &push,
+                    Workgroups::OneD(workgroups),
+                )
+            } else {
+                batch.record_shader_no_previous_barrier(
+                    SHADER_NARROW_LASTDIM_F32_OFFSET,
+                    &[t.buffer().handle(), out_buf.handle()],
+                    &push,
+                    Workgroups::OneD(workgroups),
+                )
+            }
         })?;
     }
 
@@ -749,6 +768,7 @@ fn record_time_narrow_no_grad(
     t_start: usize,
     t_len: usize,
     last_axis: usize,
+    barrier_before: bool,
 ) -> Result<VkTensor> {
     let dims = t.shape();
     debug_assert!(dims.len() >= 3, "time_narrow(record): rank >= 3");
@@ -758,8 +778,13 @@ fn record_time_narrow_no_grad(
     debug_assert!(t_start + t_len <= t_total);
 
     let input_2d = vk_reshape(t, &[bh, t_total * last_axis])?;
-    let narrowed =
-        record_narrow_lastdim_no_grad(batch, &input_2d, t_start * last_axis, t_len * last_axis)?;
+    let narrowed = record_narrow_lastdim_no_grad(
+        batch,
+        &input_2d,
+        t_start * last_axis,
+        t_len * last_axis,
+        barrier_before,
+    )?;
     let mut out_shape = dims[..dims.len() - 2].to_vec();
     out_shape.push(t_len);
     out_shape.push(last_axis);
@@ -771,13 +796,14 @@ fn record_time_narrow_3d_no_grad(
     t: &VkTensor,
     t_start: usize,
     t_len: usize,
+    barrier_before: bool,
 ) -> Result<VkTensor> {
     let dims = t.shape();
     debug_assert_eq!(dims.len(), 3);
     let bh = dims[0] * dims[1];
     let t_total = dims[2];
     let input_2d = vk_reshape(t, &[bh, t_total])?;
-    let narrowed = record_narrow_lastdim_no_grad(batch, &input_2d, t_start, t_len)?;
+    let narrowed = record_narrow_lastdim_no_grad(batch, &input_2d, t_start, t_len, barrier_before)?;
     vk_reshape(&narrowed, &[dims[0], dims[1], t_len])
 }
 
@@ -1009,11 +1035,13 @@ pub fn record_gdn_chunkwise_prefill_block_into(
         let c = if is_tail { tail } else { chunk_size };
         let t_start = ci * chunk_size;
 
-        let q_c = record_time_narrow_no_grad(batch_rec, q, t_start, c, dk)?;
-        let k_c = record_time_narrow_no_grad(batch_rec, k, t_start, c, dk)?;
-        let v_c = record_time_narrow_no_grad(batch_rec, v, t_start, c, dv)?;
-        let beta_c = record_time_narrow_3d_no_grad(batch_rec, beta, t_start, c)?;
-        let g_c = record_time_narrow_3d_no_grad(batch_rec, g, t_start, c)?;
+        // These slice copies are independent; the first consumer below records
+        // a normal compute barrier before reading any of their outputs.
+        let q_c = record_time_narrow_no_grad(batch_rec, q, t_start, c, dk, false)?;
+        let k_c = record_time_narrow_no_grad(batch_rec, k, t_start, c, dk, false)?;
+        let v_c = record_time_narrow_no_grad(batch_rec, v, t_start, c, dv, false)?;
+        let beta_c = record_time_narrow_3d_no_grad(batch_rec, beta, t_start, c, false)?;
+        let g_c = record_time_narrow_3d_no_grad(batch_rec, g, t_start, c, false)?;
         keepalive.extend([
             q_c.clone(),
             k_c.clone(),

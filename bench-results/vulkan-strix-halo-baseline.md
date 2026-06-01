@@ -131,6 +131,11 @@ The expanded Vulkan pipeline prewarm now also fills the path-keyed
 `CommandBatch::record_shader` cache for the chunkwise-prefill recorder's narrow,
 scatter, batched matmul, transpose, solve, broadcast, and elementwise stages, so
 the first recorded GDN prefill no longer lazily creates those pipelines.
+The recorder also skips conservative compute barriers between each chunk's
+independent q/k/v/beta/g narrow-copy dispatches; the first dependent matmul or
+transpose still emits the visibility barrier for all prior slice writes. A
+rerun of the T=512 shape after that change measured legacy per-dispatch 6.591 ms
+vs. single-submit 2.941 ms (**2.24x**) with output/state max abs err 0.
 
 Other proper work-packages for full saturation (per "max out the hardware in
 every config"):
