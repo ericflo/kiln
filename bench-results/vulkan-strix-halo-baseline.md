@@ -462,6 +462,15 @@ every config"):
   `elapsed_ms=26973`. That makes the kt-native cache/memory-residency cleanup
   active on the default Vulkan serving path without running a synthetic decode
   request at startup.
+  A same-binary post-prewarm `/v1/completions/batch` fixture with 16 distinct
+  prompts, `temperature=0`, `top_p=1`, `max_tokens=8`, prefix cache disabled,
+  resident pool already allocated, and decode weights already prewarmed
+  returned 16 completions / 120 generated tokens in 80.763 s wall time. The
+  server reported `duration_ms=80758.438312` with batching enabled for each
+  completion and no resident-pool allocation during the request. This validates
+  the default live route after startup prewarm; because this prompt set
+  generated more tokens than the prior 96-token warmed fixture, treat it as
+  route evidence rather than a strict throughput A/B.
   **Update — resident parity test restored for Vulkan profiles:** the
   `vk_resident_decode_parity` integration test now builds against the current kt
   device/cache surface instead of stale test-only APIs. Without
