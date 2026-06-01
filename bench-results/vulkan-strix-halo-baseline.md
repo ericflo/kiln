@@ -302,9 +302,11 @@ every config"):
   **Update — Vulkan live decode batch default:** the live greedy decode batcher
   now defaults Vulkan to a 16-row max batch instead of 8; the real-model
   batching-engine actor applies the same backend-aware default when
-  `KILN_MAX_DECODE_BATCH` is unset. Focused resident mixed-paged decode
-  microbench on RADV STRIX_HALO, history 256, warmup=1, timed=4, repeats=3
-  measured batch 8 at 105.1 ms / 76 rows/s and batch 16 at
+  `KILN_MAX_DECODE_BATCH` is unset, and the live worker now also treats
+  `KILN_MAX_DECODE_BATCH` as the shared width override unless its
+  worker-specific `KILN_DECODE_BATCH_MAX` is set. Focused resident mixed-paged
+  decode microbench on RADV STRIX_HALO, history 256, warmup=1, timed=4,
+  repeats=3 measured batch 8 at 105.1 ms / 76 rows/s and batch 16 at
   142.7 ms / 112 rows/s. A second pass measured batch 16 at 148.4 ms /
   108 rows/s and batch 32 at 241.8 ms / 132 rows/s; keep the default at 16 as
   the conservative memory/throughput step, with env overrides still available

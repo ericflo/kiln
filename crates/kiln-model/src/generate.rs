@@ -416,14 +416,18 @@ fn strict_prompt_prefix_split_pos(
     (split_pos > cached_tokens && split_pos < prompt_len).then_some(split_pos)
 }
 
+fn env_positive_usize(name: &str) -> Option<usize> {
+    std::env::var(name)
+        .ok()
+        .and_then(|raw| raw.trim().parse::<usize>().ok())
+        .filter(|&value| value > 0)
+}
+
 const DEFAULT_DECODE_BUFFER_MAX_BATCH: usize = 8;
 const VULKAN_DECODE_BUFFER_MAX_BATCH: usize = 16;
 
 fn decode_buffer_max_batch(backend_name: &str) -> usize {
-    let explicit = std::env::var("KILN_DECODE_BUFFER_MAX_BATCH")
-        .ok()
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        .filter(|&value| value > 0);
+    let explicit = env_positive_usize("KILN_DECODE_BUFFER_MAX_BATCH");
     if let Some(value) = explicit {
         return value;
     }
@@ -431,16 +435,8 @@ fn decode_buffer_max_batch(backend_name: &str) -> usize {
     // the first large batch does not immediately error with `decode batch N
     // exceeds buffer max_batch M`. Vulkan gets a wider unconfigured default
     // because its resident path now has better row throughput at b16 than b8.
-    let actor_max = std::env::var("KILN_MAX_DECODE_BATCH")
-        .ok()
-        .and_then(|raw| raw.trim().parse::<usize>().ok())
-        .filter(|&value| value > 0)
-        .unwrap_or(0);
-    let live_batcher_max = std::env::var("KILN_DECODE_BATCH_MAX")
-        .ok()
-        .and_then(|raw| raw.trim().parse::<usize>().ok())
-        .filter(|&value| value > 0)
-        .unwrap_or(0);
+    let actor_max = env_positive_usize("KILN_MAX_DECODE_BATCH").unwrap_or(0);
+    let live_batcher_max = env_positive_usize("KILN_DECODE_BATCH_MAX").unwrap_or(0);
     let backend_default = if backend_name == "vulkan" {
         VULKAN_DECODE_BUFFER_MAX_BATCH
     } else {
@@ -544,8 +540,9 @@ enum StreamTokenDisposition {
 /// per worker pass because the current coalesced CUDA GDN decode path is slower
 /// than rowwise scheduling. Set `KILN_DECODE_BATCHER=0` to force the legacy
 /// direct rowwise path, `KILN_DECODE_BATCH_WAIT_US` to override the admission
-/// delay, or `KILN_DECODE_BATCH_MAX` to force a backend batch size for A/B
-/// testing. Vulkan defaults to a longer wait because same-position peers tend
+/// delay, `KILN_DECODE_BATCH_MAX` to force this worker's batch size for A/B
+/// testing, or `KILN_MAX_DECODE_BATCH` to set the shared actor/worker batch
+/// width. Vulkan defaults to a longer wait because same-position peers tend
 /// to arrive just outside a short polling window after independent prefills.
 #[derive(Debug, Clone, Copy)]
 pub struct DecodeBatcherConfig {
@@ -570,10 +567,8 @@ impl Default for DecodeBatcherConfig {
 impl DecodeBatcherConfig {
     pub fn from_env() -> Self {
         let mut config = Self::default();
-        if let Ok(value) = std::env::var("KILN_DECODE_BATCH_MAX")
-            && let Ok(parsed) = value.parse::<usize>()
-        {
-            config.max_batch = parsed.max(1);
+        if let Some(parsed) = env_positive_usize("KILN_DECODE_BATCH_MAX") {
+            config.max_batch = parsed;
         }
         if let Ok(value) = std::env::var("KILN_DECODE_BATCH_WAIT_US")
             && let Ok(parsed) = value.parse::<u64>()
@@ -595,8 +590,9 @@ impl DecodeBatcherConfig {
     /// defaults derived from the kt `Device`.
     pub fn from_env_for_backend_kt(device: &kiln_tensor::Device, backend_name: &str) -> Self {
         let mut config = Self::from_env();
-        if std::env::var_os("KILN_DECODE_BATCH_MAX").is_none() {
-            config.max_batch = default_decode_batcher_max_batch_kt(device, backend_name);
+        if env_positive_usize("KILN_DECODE_BATCH_MAX").is_none() {
+            config.max_batch = env_positive_usize("KILN_MAX_DECODE_BATCH")
+                .unwrap_or_else(|| default_decode_batcher_max_batch_kt(device, backend_name));
         }
         if std::env::var_os("KILN_DECODE_BATCH_WAIT_US").is_none() {
             config.wait = default_decode_batcher_wait_kt(device, backend_name);
@@ -6900,6 +6896,47 @@ mod tests {
         assert_eq!(default_decode_batcher_max_batch_kt(&device, "cuda"), 1);
         assert_eq!(default_decode_batcher_max_batch_kt(&device, "vulkan"), 16);
         assert_eq!(default_decode_batcher_max_batch_kt(&device, "metal"), 8);
+    }
+
+    #[test]
+    fn test_decode_batcher_max_batch_env_policy() {
+        let prior_specific = std::env::var("KILN_DECODE_BATCH_MAX").ok();
+        let prior_shared = std::env::var("KILN_MAX_DECODE_BATCH").ok();
+        // SAFETY: tests in this module that touch these env vars restore them
+        // before returning.
+        unsafe {
+            std::env::remove_var("KILN_DECODE_BATCH_MAX");
+            std::env::remove_var("KILN_MAX_DECODE_BATCH");
+        }
+
+        let device = kiln_tensor::Device::Cpu;
+        assert_eq!(
+            DecodeBatcherConfig::from_env_for_backend_kt(&device, "vulkan").max_batch,
+            16
+        );
+        unsafe {
+            std::env::set_var("KILN_MAX_DECODE_BATCH", "24");
+        }
+        assert_eq!(
+            DecodeBatcherConfig::from_env_for_backend_kt(&device, "vulkan").max_batch,
+            24
+        );
+        unsafe {
+            std::env::set_var("KILN_DECODE_BATCH_MAX", "12");
+        }
+        assert_eq!(
+            DecodeBatcherConfig::from_env_for_backend_kt(&device, "vulkan").max_batch,
+            12
+        );
+
+        match prior_specific {
+            Some(v) => unsafe { std::env::set_var("KILN_DECODE_BATCH_MAX", v) },
+            None => unsafe { std::env::remove_var("KILN_DECODE_BATCH_MAX") },
+        }
+        match prior_shared {
+            Some(v) => unsafe { std::env::set_var("KILN_MAX_DECODE_BATCH", v) },
+            None => unsafe { std::env::remove_var("KILN_MAX_DECODE_BATCH") },
+        }
     }
 
     #[test]
