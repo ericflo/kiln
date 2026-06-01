@@ -38,17 +38,16 @@ candle = ["dep:candle-core"]
 # candle. (#1082)
 cuda = ["kiln-tensor/cuda", "candle-core?/cuda"]
 
-# Enables Metal-aware Device enum mapping in `kt_device_from_candle`
-# and `candle_device_from_kt`. Those helpers are themselves
-# candle-gated, so the metal feature implies `candle`. Without the
-# candle feature there's nothing Metal-mapping to enable; with it on,
-# the feature forwards `candle-core/metal` so that
-# `MetalDevice::location()` returns a real `DeviceLocation::Metal {
-# gpu_id }` instead of the `dummy_metal_backend` `fail!()` stub.
-# `kiln-tensor/metal` is forwarded for parity with the `cuda` pattern;
-# the `KtDevice::Metal(_)` variant itself is unconditional on the kt
-# side. (#1082)
-metal = ["candle", "candle-core/metal", "kiln-tensor/metal"]
+# Forwards `kiln-tensor/metal` only — the metal lane is candle-free (#1082).
+# `metal` no longer implies `candle`: the candle-typed Device mappers
+# (`kt_device_from_candle` / `candle_device_from_kt`) are gated behind the
+# `candle` feature, and the default metal build (kiln-model `--features metal`)
+# no longer calls them (forward.rs drains the queue via the kt-native
+# `primary_metal_companion`, and `for_device_kt` builds `MetalBackend` from the
+# kt device directly). The `KtDevice::Metal(_)` variant is unconditional on the
+# kt side. When candle is also on (e.g. `legacy-candle-parity`) those mappers'
+# Metal arms still compile.
+metal = ["kiln-tensor/metal"]
 
 [dependencies]
 # Candle is OPTIONAL (default-on via the `candle` feature). Consumers

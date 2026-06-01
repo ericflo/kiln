@@ -40,7 +40,7 @@ pub mod vk_forward;
 pub mod weights;
 
 pub use backend::BackendRuntime;
-#[cfg(any(feature = "metal", feature = "legacy-candle-parity"))]
+#[cfg(feature = "legacy-candle-parity")]
 pub use backend::for_device as backend_for_device;
 pub use cancel::CancelHandle;
 pub use engine::Engine;

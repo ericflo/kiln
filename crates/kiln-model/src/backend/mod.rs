@@ -1303,11 +1303,14 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
 /// Vulkan devices are detected at runtime — candle-core has no native Vulkan
 /// device, so we always pass a CPU device to `VulkanBackend` and let it
 /// manage its own `vk::Device` internally.
-// (#1082 vulkan candle rip) `vulkan` dropped from this cfg: the candle-typed
-// `for_device` shim is unavailable on a candle-free vulkan build. Vulkan
-// callers use the kt-native `for_device_kt`. Metal/legacy-candle-parity still
-// carry candle and keep this compat entry.
-#[cfg(any(feature = "metal", feature = "legacy-candle-parity"))]
+// (#1082 vulkan + metal candle rip) `vulkan` and `metal` dropped from this
+// cfg: the candle-typed `for_device` shim is unavailable on a candle-free
+// vulkan/metal build. Those backends' callers use the kt-native
+// `for_device_kt` — the metal arm constructs `MetalBackend::new(kt_device)`
+// directly, with no candle round-trip. Only `legacy-candle-parity` still
+// carries candle and keeps this compat entry for the candle-device test
+// harnesses.
+#[cfg(feature = "legacy-candle-parity")]
 pub fn for_device(device: &candle_core::Device) -> Arc<dyn BackendRuntime> {
     // (#1082 DoD-100 step 4) Candle-typed compat shim for the remaining
     // candle-device callers (the metal dispatch path + opd/test harnesses).
