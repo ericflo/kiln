@@ -10404,6 +10404,66 @@ pub fn with_lm_head_output_buffer<R>(buf: Tensor, f: impl FnOnce() -> R) -> R {
     result
 }
 
+// #1082 box-102 BUG2 localization probe (gated by KILN_DEBUG_LAYER_NORMS).
+// A persistent `[64]` f32 device buffer holding per-layer hidden-state
+// sum-of-squares, written by a CAPTURED op (sqr→sum_all→slice_set) after
+// each transformer block. Because graph REPLAY runs only the captured
+// kernels (the Rust forward does not execute), this is the only way to
+// observe per-layer values on replay: the recorded slice_set writes this
+// buffer at its baked pointer on every replay, and we read it back to host
+// (`read_layer_norm_debug`) AFTER the step (Rust runs between steps). The
+// buffer is lazily allocated on the FIRST `record` call — which lands in the
+// pre-capture warmup decode step — so it is a persistent, non-arena
+// allocation reused across capture + every replay. Never restored (process
+// lifetime). Off by default; zero cost on the production path.
+#[cfg(feature = "cuda")]
+thread_local! {
+    static LAYER_NORM_DEBUG_BUFFER: std::cell::RefCell<Option<Tensor>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(feature = "cuda")]
+fn layer_norm_debug_enabled() -> bool {
+    std::env::var("KILN_DEBUG_LAYER_NORMS").ok().as_deref() == Some("1")
+}
+
+/// Record layer `layer_idx`'s hidden sum-of-squares into the debug buffer
+/// (a captured device reduction). No-op unless `KILN_DEBUG_LAYER_NORMS=1`.
+#[cfg(feature = "cuda")]
+fn record_layer_norm_debug(hidden: &Tensor, layer_idx: usize) {
+    if !layer_norm_debug_enabled() || layer_idx >= 64 {
+        return;
+    }
+    LAYER_NORM_DEBUG_BUFFER.with(|cell| {
+        let mut slot = cell.borrow_mut();
+        if slot.is_none() {
+            // Lazy alloc on the first call (pre-capture warmup → persistent).
+            match Tensor::zeros_on(hidden.device(), vec![64], kiln_tensor::DType::F32) {
+                Ok(buf) => *slot = Some(buf),
+                Err(_) => return,
+            }
+        }
+        if let Some(buf) = slot.as_ref() {
+            let _ = hidden
+                .sqr()
+                .and_then(|s| s.sum_all())
+                .and_then(|s| s.reshape(vec![1]))
+                .and_then(|s| s.to_dtype(kiln_tensor::DType::F32))
+                .and_then(|s| buf.slice_set(&s, 0, layer_idx));
+        }
+    });
+}
+
+/// Read the per-layer norm debug buffer to host (call BETWEEN decode steps,
+/// where Rust runs even though replay didn't). #1082 box-102 probe.
+#[cfg(feature = "cuda")]
+pub fn read_layer_norm_debug() -> Option<Vec<f32>> {
+    if !layer_norm_debug_enabled() {
+        return None;
+    }
+    LAYER_NORM_DEBUG_BUFFER.with(|cell| cell.borrow().as_ref().and_then(|b| b.to_vec::<f32>().ok()))
+}
+
 /// Attempt to consume the thread-local lm-head output buffer if its
 /// shape and dtype match the caller-provided expectations. Returns
 /// `Ok(None)` if no buffer is installed, the shape doesn't match, the
@@ -25230,6 +25290,12 @@ fn model_forward_paged_inner(
                 }
             }
         }
+
+        // #1082 box-102 BUG2 localization: record this block's output norm
+        // (captured op under graph capture; observable on replay via
+        // `read_layer_norm_debug`). Gated by KILN_DEBUG_LAYER_NORMS.
+        #[cfg(feature = "cuda")]
+        record_layer_norm_debug(&hidden, i);
 
         // Phase B10: capture last-row hidden state at boundary layers when
         // `KILN_MTP_DUMP_HIDDEN_STATES=1` and a capture window has been armed

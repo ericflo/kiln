@@ -2025,21 +2025,26 @@ impl CudaGraphRunner {
     /// bug. Off by default; zero cost on the production path.
     #[cfg(feature = "cuda")]
     fn debug_dump_gdn_state(tag: &str, seq_len: usize, linear_state: &LinearAttentionState) {
-        if std::env::var("KILN_DEBUG_GDN_STATE").ok().as_deref() != Some("1") {
-            return;
-        }
-        fn sumsq(t: &Tensor) -> f64 {
-            match t
-                .to_dtype(kiln_tensor::DType::F32)
-                .and_then(|f| f.to_vec::<f32>())
-            {
-                Ok(v) => v.iter().map(|x| (*x as f64) * (*x as f64)).sum(),
-                Err(_) => -1.0,
+        if std::env::var("KILN_DEBUG_GDN_STATE").ok().as_deref() == Some("1") {
+            fn sumsq(t: &Tensor) -> f64 {
+                match t
+                    .to_dtype(kiln_tensor::DType::F32)
+                    .and_then(|f| f.to_vec::<f32>())
+                {
+                    Ok(v) => v.iter().map(|x| (*x as f64) * (*x as f64)).sum(),
+                    Err(_) => -1.0,
+                }
             }
+            let r = linear_state.recurrent_states.first().map(sumsq).unwrap_or(-1.0);
+            let c = linear_state.conv_states.first().map(sumsq).unwrap_or(-1.0);
+            eprintln!("GDNSTATE [{tag}] step={seq_len} rs0_sumsq={r:.6} conv0_sumsq={c:.6}");
         }
-        let r = linear_state.recurrent_states.first().map(sumsq).unwrap_or(-1.0);
-        let c = linear_state.conv_states.first().map(sumsq).unwrap_or(-1.0);
-        eprintln!("GDNSTATE [{tag}] step={seq_len} rs0_sumsq={r:.6} conv0_sumsq={c:.6}");
+        // #1082 box-102 BUG2 localization: per-layer hidden-state norms
+        // (gated by KILN_DEBUG_LAYER_NORMS inside read_layer_norm_debug).
+        if let Some(norms) = crate::forward::read_layer_norm_debug() {
+            let shown: Vec<String> = norms.iter().take(34).map(|x| format!("{x:.0}")).collect();
+            eprintln!("LAYERNORM [{tag}] step={seq_len} [{}]", shown.join(","));
+        }
     }
 
     #[cfg(feature = "cuda")]
