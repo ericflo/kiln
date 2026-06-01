@@ -1367,37 +1367,41 @@ pub fn vk_step_backward(loss: &VkTensor) -> Result<VkGradStore> {
 }
 
 // ---------------------------------------------------------------------------
-// Real-weights bridge: candle GpuWeights → VkModelWeights
+// Real-weights bridge: GpuWeights (kt) → VkModelWeights
 // ---------------------------------------------------------------------------
 
-/// Extract a candle CPU tensor as `(little-endian bytes, shape, VkDType)`.
+/// Extract a kt CPU tensor as `(little-endian bytes, shape, VkDType)`.
 ///
 /// Forces the tensor contiguous and onto CPU before flattening. The
 /// returned byte buffer is laid out exactly as `VkTensor::from_bytes`
 /// expects (F32 = 4 bytes/elem LE, BF16 = 2 bytes/elem LE u16 bits).
 ///
-/// Only F32 / BF16 candle dtypes are accepted; anything else bails
-/// since vk-native is F32-or-BF16-only. (#1082)
-fn candle_tensor_to_vk_bytes(t: &candle_core::Tensor) -> Result<(Vec<u8>, Vec<usize>, VkDType)> {
+/// Only F32 / BF16 kt dtypes are accepted; anything else bails
+/// since vk-native is F32-or-BF16-only. (#1082 candle removal)
+fn kt_tensor_to_vk_bytes(
+    t: &kiln_tensor::Tensor,
+) -> Result<(Vec<u8>, Vec<usize>, VkDType)> {
     let dtype = match t.dtype() {
-        candle_core::DType::F32 => VkDType::F32,
-        candle_core::DType::BF16 => VkDType::Bf16,
+        kiln_tensor::DType::F32 => VkDType::F32,
+        kiln_tensor::DType::BF16 => VkDType::Bf16,
         other => bail!(
             "vk-native: unsupported tensor dtype {:?} (only F32 and BF16 are supported)",
             other
         ),
     };
-    let t = t.contiguous().context("candle_tensor_to_vk_bytes: contiguous")?;
-    let t = t.to_device(&candle_core::Device::Cpu)
-        .context("candle_tensor_to_vk_bytes: to CPU")?;
+    let t = t
+        .contiguous()
+        .context("kt_tensor_to_vk_bytes: contiguous")?;
+    let t = t
+        .to_device(kiln_tensor::Device::Cpu)
+        .context("kt_tensor_to_vk_bytes: to CPU")?;
     let shape: Vec<usize> = t.dims().to_vec();
     let nelem: usize = shape.iter().product();
     let bytes = match dtype {
         VkDType::F32 => {
             let data: Vec<f32> = t
-                .flatten_all()?
-                .to_vec1::<f32>()
-                .context("candle_tensor_to_vk_bytes: f32 readout")?;
+                .to_vec::<f32>()
+                .context("kt_tensor_to_vk_bytes: f32 readout")?;
             let mut bytes = Vec::with_capacity(nelem * 4);
             for v in data {
                 bytes.extend_from_slice(&v.to_le_bytes());
@@ -1405,25 +1409,12 @@ fn candle_tensor_to_vk_bytes(t: &candle_core::Tensor) -> Result<(Vec<u8>, Vec<us
             bytes
         }
         VkDType::Bf16 => {
-            // Read BF16 → F32 in candle (lossless: BF16 values are an
-            // exact subset of F32, the low 16 mantissa bits are simply
-            // zeroed). Repack to BF16 LE bytes on the host by keeping
-            // the high 16 bits of each F32 — no rounding needed because
-            // the candle→F32 cast leaves the low 16 bits zero.
-            //
-            // This avoids depending on `half::bf16` directly from this
-            // crate (kiln-model only pulls in `half` under the `cuda`
-            // feature). (#1082)
-            let data: Vec<f32> = t
-                .to_dtype(candle_core::DType::F32)
-                .context("candle_tensor_to_vk_bytes: bf16→f32 cast")?
-                .flatten_all()?
-                .to_vec1::<f32>()
-                .context("candle_tensor_to_vk_bytes: bf16-as-f32 readout")?;
+            let data: Vec<half::bf16> = t
+                .to_vec::<half::bf16>()
+                .context("kt_tensor_to_vk_bytes: bf16 readout")?;
             let mut bytes = Vec::with_capacity(nelem * 2);
             for v in data {
-                let bf16_bits = (v.to_bits() >> 16) as u16;
-                bytes.extend_from_slice(&bf16_bits.to_le_bytes());
+                bytes.extend_from_slice(&v.to_le_bytes());
             }
             bytes
         }
@@ -1431,55 +1422,57 @@ fn candle_tensor_to_vk_bytes(t: &candle_core::Tensor) -> Result<(Vec<u8>, Vec<us
     Ok((bytes, shape, dtype))
 }
 
-/// Convert a candle tensor to VkTensor, preserving F32 / BF16 dtype.
+/// Convert a kt tensor to VkTensor, preserving F32 / BF16 dtype.
 /// Anything else (F16, etc.) bails — vk-native is BF16-or-F32-only.
 ///
-/// Lowers to `VkTensor::from_bytes` (candle-free upload boundary). The
-/// candle-typed bytes extraction is local to this file so `vk_tensor.rs`
-/// stays candle-free. (#1082)
-fn vk_from_candle_typed(t: &candle_core::Tensor, device: &Arc<VulkanDevice>) -> Result<VkTensor> {
-    let (bytes, shape, dtype) = candle_tensor_to_vk_bytes(t)?;
+/// Lowers to `VkTensor::from_bytes`. The kt bytes extraction is
+/// local to this file so `vk_tensor.rs` stays candle-free. (#1082)
+fn vk_from_kt_typed(t: &kiln_tensor::Tensor, device: &Arc<VulkanDevice>) -> Result<VkTensor> {
+    let (bytes, shape, dtype) = kt_tensor_to_vk_bytes(t)?;
     VkTensor::from_bytes(&bytes, shape, dtype, Arc::clone(device))
 }
 
-/// Force-upload a small candle tensor as F32. Used for RMSNorm
-/// weights, biases, q/k_norm — vk_rmsnorm and friends require F32
-/// weights regardless of model dtype. The size is small (~hidden =
-/// 2560 floats per layer × 2 norms = 5 MB total for Qwen3.5-4B).
-fn vk_from_candle_as_f32(t: &candle_core::Tensor, device: &Arc<VulkanDevice>) -> Result<VkTensor> {
-    let t_f32 = match t.dtype() {
-        candle_core::DType::F32 => t.clone(),
-        _ => t.to_dtype(candle_core::DType::F32)?,
+/// Force-upload a kt tensor as F32. Used for RMSNorm weights, biases,
+/// q/k_norm — vk_rmsnorm and friends require F32 weights regardless of
+/// model dtype. The size is small (~hidden = 2560 floats per layer × 2
+/// norms = 5 MB total for Qwen3.5-4B). (#1082)
+fn vk_from_kt_as_f32(t: &kiln_tensor::Tensor, device: &Arc<VulkanDevice>) -> Result<VkTensor> {
+    let t_f32 = if t.dtype() == kiln_tensor::DType::F32 {
+        t.clone()
+    } else {
+        t.to_dtype(kiln_tensor::DType::F32)?
     };
-    let (bytes, shape, dtype) = candle_tensor_to_vk_bytes(&t_f32)?;
+    let (bytes, shape, dtype) = kt_tensor_to_vk_bytes(&t_f32)?;
     debug_assert_eq!(dtype, VkDType::F32);
     VkTensor::from_bytes(&bytes, shape, dtype, Arc::clone(device))
 }
 
-/// Pick a projection weight from candle, handling the case where the
-/// "main" weight has been stubbed by the inference loader (Vulkan
-/// stubs the non-_t version after uploading the _t cache, see
+/// Pick a projection weight from the kt GpuWeights, handling the case
+/// where the "main" weight has been stubbed by the inference loader
+/// (Vulkan stubs the non-_t version after uploading the _t cache, see
 /// `dropped_weight_stub` in forward.rs).
 ///
 /// Returns the weight as `[out_dim, in_dim]` (vk_matmul_bf16w's
 /// convention), transposing the _t cache (`[in_dim, out_dim]`) when
-/// the main is stubbed.
+/// the main is stubbed. (#1082 candle removal)
 fn pick_projection_weight(
-    main: &candle_core::Tensor,
-    transposed: &candle_core::Tensor,
+    main: &kiln_tensor::Tensor,
+    transposed: &kiln_tensor::Tensor,
     device: &Arc<VulkanDevice>,
     name: &str,
 ) -> Result<VkTensor> {
     let main_dims = main.dims();
     let t_dims = transposed.dims();
-    let chosen = if main_dims.len() == 2 && main_dims[0] > 1 {
-        main.clone()
+    let chosen;
+    let chosen_ref: &kiln_tensor::Tensor = if main_dims.len() == 2 && main_dims[0] > 1 {
+        main
     } else if t_dims.len() == 2 {
-        transposed
-            .t()
-            .with_context(|| format!("{name}: .t() on _t cache"))?
+        chosen = transposed
+            .transpose(0, 1)
+            .with_context(|| format!("{name}: transpose on _t cache"))?
             .contiguous()
-            .with_context(|| format!("{name}: contiguous after _t transpose"))?
+            .with_context(|| format!("{name}: contiguous after _t transpose"))?;
+        &chosen
     } else {
         bail!(
             "{name}: cannot resolve weight — main {:?} transposed {:?}",
@@ -1487,7 +1480,7 @@ fn pick_projection_weight(
             t_dims
         );
     };
-    let uploaded = vk_from_candle_typed(&chosen, device).with_context(|| name.to_string())?;
+    let uploaded = vk_from_kt_typed(chosen_ref, device).with_context(|| name.to_string())?;
     if std::env::var("KILN_VK_DEBUG_WEIGHTS").is_ok() {
         let l2: f32 = uploaded
             .to_vec_f32()
@@ -1499,7 +1492,7 @@ fn pick_projection_weight(
         eprintln!(
             "  [weight] {} shape={:?} l2={:.3e}",
             name,
-            chosen.dims(),
+            chosen_ref.dims(),
             l2
         );
     }
@@ -1524,30 +1517,26 @@ impl VkModelWeights {
         model_config: &ModelConfig,
         device: &Arc<VulkanDevice>,
     ) -> Result<Self> {
-        // On Vulkan-active processes, candle's `embed_tokens` is stubbed
-        // to a single-element placeholder (shape [1]) — see
+        // On Vulkan-active processes, the kt `embed_tokens` tensor may be
+        // stubbed to a single-element placeholder (shape [1]) — see
         // `dropped_weight_stub` in forward.rs. The real data lives in
         // `embed_tokens_t` with shape [hidden, vocab]. Detect this and
         // transpose back to [vocab, hidden] for vk-native consumption.
+        // (#1082 candle removal: use kt directly, no kt_logits_to_candle bridge)
         let (embed_tokens, vocab, hidden) = {
             let et_dims = weights.embed_tokens.dims();
             let ett_dims = weights.embed_tokens_t.dims();
             if et_dims.len() == 2 && et_dims[0] > 1 {
-                // Real [vocab, hidden] available
-                let embed_tokens_c = crate::forward::kt_logits_to_candle(&weights.embed_tokens)?;
+                // Real [vocab, hidden] available — upload directly from kt.
                 let embed_tokens =
-                    vk_from_candle_typed(&embed_tokens_c, device).context("embed_tokens")?;
+                    vk_from_kt_typed(&weights.embed_tokens, device).context("embed_tokens")?;
                 (embed_tokens, et_dims[0], et_dims[1])
             } else if ett_dims.len() == 2 {
                 // Stubbed; reconstruct [vocab, hidden] on Vulkan by
                 // transposing embed_tokens_t (which is [hidden, vocab]).
-                // Doing this through candle would materialize a multi-GiB
-                // CPU transpose before native GRPO can dispatch.
                 let hidden = ett_dims[0];
                 let vocab = ett_dims[1];
-                let embed_tokens_t_c =
-                    crate::forward::kt_logits_to_candle(&weights.embed_tokens_t)?;
-                let embed_t = vk_from_candle_typed(&embed_tokens_t_c, device)
+                let embed_t = vk_from_kt_typed(&weights.embed_tokens_t, device)
                     .context("embed_tokens_t")?;
                 let restored = vk_transpose_2d_no_grad(&embed_t)
                     .context("embed_tokens_t Vulkan transpose to [vocab, hidden]")?;
@@ -1563,9 +1552,8 @@ impl VkModelWeights {
         };
         let embed_dtype = embed_tokens.dtype();
         // Norm weights must be F32 (vk_rmsnorm requirement).
-        let final_norm_c = crate::forward::kt_logits_to_candle(&weights.final_norm)?;
         let final_norm_weight =
-            vk_from_candle_as_f32(&final_norm_c, device).context("final_norm")?;
+            vk_from_kt_as_f32(&weights.final_norm, device).context("final_norm")?;
         // lm_head is tied to embed_tokens for Qwen3.5. Share the same
         // Vulkan buffer instead of uploading a second copy; Vulkan
         // FLCE/GRPO handles BF16 weights directly.
@@ -1576,67 +1564,61 @@ impl VkModelWeights {
         for (li, lw) in weights.layers.iter().enumerate() {
             let layer = match &lw.attention {
                 crate::forward::GpuAttentionWeights::Full(attn) => {
-                    // Bridge kt weights to candle for the CPU-resident vk upload
-                    // helpers (#1082 forward-flip; vulkan path is CPU-resident, so
-                    // the host bridge is runtime-correct).
-                    let input_layernorm_c =
-                        crate::forward::kt_logits_to_candle(&lw.input_layernorm)?;
-                    let input_layernorm_weight = vk_from_candle_as_f32(&input_layernorm_c, device)
-                        .with_context(|| format!("layer {li} input_layernorm"))?;
-                    let post_attention_layernorm_c =
-                        crate::forward::kt_logits_to_candle(&lw.post_attention_layernorm)?;
+                    // kt weights are CPU-resident at the vk seam — upload
+                    // directly via kt_tensor_to_vk_bytes. (#1082 candle removal)
+                    let input_layernorm_weight =
+                        vk_from_kt_as_f32(&lw.input_layernorm, device)
+                            .with_context(|| format!("layer {li} input_layernorm"))?;
                     let post_attention_layernorm_weight =
-                        vk_from_candle_as_f32(&post_attention_layernorm_c, device)
+                        vk_from_kt_as_f32(&lw.post_attention_layernorm, device)
                             .with_context(|| format!("layer {li} post_attention_layernorm"))?;
                     let q_proj = pick_projection_weight(
-                        &crate::forward::kt_logits_to_candle(&attn.q_proj)?,
-                        &crate::forward::kt_logits_to_candle(&attn.q_proj_t)?,
+                        &attn.q_proj,
+                        &attn.q_proj_t,
                         device,
                         &format!("layer {li} q_proj"),
                     )?;
                     let k_proj = pick_projection_weight(
-                        &crate::forward::kt_logits_to_candle(&attn.k_proj)?,
-                        &crate::forward::kt_logits_to_candle(&attn.k_proj_t)?,
+                        &attn.k_proj,
+                        &attn.k_proj_t,
                         device,
                         &format!("layer {li} k_proj"),
                     )?;
                     let v_proj = pick_projection_weight(
-                        &crate::forward::kt_logits_to_candle(&attn.v_proj)?,
-                        &crate::forward::kt_logits_to_candle(&attn.v_proj_t)?,
+                        &attn.v_proj,
+                        &attn.v_proj_t,
                         device,
                         &format!("layer {li} v_proj"),
                     )?;
                     let o_proj = pick_projection_weight(
-                        &crate::forward::kt_logits_to_candle(&attn.o_proj)?,
-                        &crate::forward::kt_logits_to_candle(&attn.o_proj_t)?,
+                        &attn.o_proj,
+                        &attn.o_proj_t,
                         device,
                         &format!("layer {li} o_proj"),
                     )?;
-                    let q_norm_c = crate::forward::kt_logits_to_candle(&attn.q_norm)?;
                     let q_norm = Some(
-                        vk_from_candle_as_f32(&q_norm_c, device)
+                        vk_from_kt_as_f32(&attn.q_norm, device)
                             .with_context(|| format!("layer {li} q_norm"))?,
                     );
-                    let k_norm_c = crate::forward::kt_logits_to_candle(&attn.k_norm)?;
                     let k_norm = Some(
-                        vk_from_candle_as_f32(&k_norm_c, device)
+                        vk_from_kt_as_f32(&attn.k_norm, device)
                             .with_context(|| format!("layer {li} k_norm"))?,
                     );
                     let gate_proj = pick_projection_weight(
-                        &crate::forward::kt_logits_to_candle(&lw.mlp.gate_proj)?,
-                        &crate::forward::kt_logits_to_candle(&lw.mlp.gate_proj_t)?,
+                        &lw.mlp.gate_proj,
+                        &lw.mlp.gate_proj_t,
                         device,
                         &format!("layer {li} mlp.gate_proj"),
                     )?;
                     let up_proj = pick_projection_weight(
-                        &crate::forward::kt_logits_to_candle(&lw.mlp.up_proj)?,
-                        &crate::forward::kt_logits_to_candle(&lw.mlp.up_proj_t)?,
+                        &lw.mlp.up_proj,
+                        &lw.mlp.up_proj_t,
                         device,
                         &format!("layer {li} mlp.up_proj"),
                     )?;
                     let down_proj = pick_projection_weight(
-                        &crate::forward::kt_logits_to_candle(&lw.mlp.down_proj)?,
-                        &crate::forward::kt_logits_to_candle(&lw.mlp.down_proj_t)?,
+                        &lw.mlp.down_proj,
+                        &lw.mlp.down_proj_t,
                         device,
                         &format!("layer {li} mlp.down_proj"),
                     )?;
@@ -1660,80 +1642,70 @@ impl VkModelWeights {
                     })
                 }
                 crate::forward::GpuAttentionWeights::Linear(attn) => {
-                    // Bridge kt weights to candle for the CPU-resident vk upload
-                    // helpers (#1082 forward-flip; vulkan path is CPU-resident, so
-                    // the host bridge is runtime-correct).
-                    let input_layernorm_c =
-                        crate::forward::kt_logits_to_candle(&lw.input_layernorm)?;
-                    let layer_norm = vk_from_candle_as_f32(&input_layernorm_c, device)
+                    // kt weights are CPU-resident at the vk seam — upload
+                    // directly via kt_tensor_to_vk_bytes. (#1082 candle removal)
+                    let layer_norm = vk_from_kt_as_f32(&lw.input_layernorm, device)
                         .with_context(|| format!("layer {li} (GDN) input_layernorm"))?;
-                    let post_attention_layernorm_c =
-                        crate::forward::kt_logits_to_candle(&lw.post_attention_layernorm)?;
                     let post_attention_layernorm_weight =
-                        vk_from_candle_as_f32(&post_attention_layernorm_c, device).with_context(
+                        vk_from_kt_as_f32(&lw.post_attention_layernorm, device).with_context(
                             || format!("layer {li} (GDN) post_attention_layernorm"),
                         )?;
                     let in_proj_qkv = pick_projection_weight(
-                        &crate::forward::kt_logits_to_candle(&attn.in_proj_qkv)?,
-                        &crate::forward::kt_logits_to_candle(&attn.in_proj_qkv_t)?,
+                        &attn.in_proj_qkv,
+                        &attn.in_proj_qkv_t,
                         device,
                         &format!("layer {li} in_proj_qkv"),
                     )?;
                     let in_proj_z = pick_projection_weight(
-                        &crate::forward::kt_logits_to_candle(&attn.in_proj_z)?,
-                        &crate::forward::kt_logits_to_candle(&attn.in_proj_z_t)?,
+                        &attn.in_proj_z,
+                        &attn.in_proj_z_t,
                         device,
                         &format!("layer {li} in_proj_z"),
                     )?;
                     let in_proj_a = pick_projection_weight(
-                        &crate::forward::kt_logits_to_candle(&attn.in_proj_a)?,
-                        &crate::forward::kt_logits_to_candle(&attn.in_proj_a_t)?,
+                        &attn.in_proj_a,
+                        &attn.in_proj_a_t,
                         device,
                         &format!("layer {li} in_proj_a"),
                     )?;
                     let in_proj_b = pick_projection_weight(
-                        &crate::forward::kt_logits_to_candle(&attn.in_proj_b)?,
-                        &crate::forward::kt_logits_to_candle(&attn.in_proj_b_t)?,
+                        &attn.in_proj_b,
+                        &attn.in_proj_b_t,
                         device,
                         &format!("layer {li} in_proj_b"),
                     )?;
                     // conv1d is small (channels × kernel_size), gates/bias are F32-required.
-                    let conv1d_c = crate::forward::kt_logits_to_candle(&attn.conv1d)?;
-                    let conv1d = vk_from_candle_as_f32(&conv1d_c, device)
+                    let conv1d = vk_from_kt_as_f32(&attn.conv1d, device)
                         .with_context(|| format!("layer {li} conv1d"))?;
-                    let a_log_c = crate::forward::kt_logits_to_candle(&attn.a_log)?;
-                    let a_log = vk_from_candle_as_f32(&a_log_c, device)
+                    let a_log = vk_from_kt_as_f32(&attn.a_log, device)
                         .with_context(|| format!("layer {li} a_log"))?;
-                    let a_log_gates_c = crate::forward::kt_logits_to_candle(&attn.a_log_gates)?;
-                    let a_log_gates = vk_from_candle_as_f32(&a_log_gates_c, device)
+                    let a_log_gates = vk_from_kt_as_f32(&attn.a_log_gates, device)
                         .with_context(|| format!("layer {li} a_log_gates"))?;
-                    let dt_bias_c = crate::forward::kt_logits_to_candle(&attn.dt_bias)?;
-                    let dt_bias = vk_from_candle_as_f32(&dt_bias_c, device)
+                    let dt_bias = vk_from_kt_as_f32(&attn.dt_bias, device)
                         .with_context(|| format!("layer {li} dt_bias"))?;
-                    let gated_norm_c = crate::forward::kt_logits_to_candle(&attn.norm)?;
-                    let gated_norm = vk_from_candle_as_f32(&gated_norm_c, device)
+                    let gated_norm = vk_from_kt_as_f32(&attn.norm, device)
                         .with_context(|| format!("layer {li} (GDN) gated_norm"))?;
                     let out_proj = pick_projection_weight(
-                        &crate::forward::kt_logits_to_candle(&attn.out_proj)?,
-                        &crate::forward::kt_logits_to_candle(&attn.out_proj_t)?,
+                        &attn.out_proj,
+                        &attn.out_proj_t,
                         device,
                         &format!("layer {li} (GDN) out_proj"),
                     )?;
                     let gate_proj = pick_projection_weight(
-                        &crate::forward::kt_logits_to_candle(&lw.mlp.gate_proj)?,
-                        &crate::forward::kt_logits_to_candle(&lw.mlp.gate_proj_t)?,
+                        &lw.mlp.gate_proj,
+                        &lw.mlp.gate_proj_t,
                         device,
                         &format!("layer {li} (GDN) mlp.gate_proj"),
                     )?;
                     let up_proj = pick_projection_weight(
-                        &crate::forward::kt_logits_to_candle(&lw.mlp.up_proj)?,
-                        &crate::forward::kt_logits_to_candle(&lw.mlp.up_proj_t)?,
+                        &lw.mlp.up_proj,
+                        &lw.mlp.up_proj_t,
                         device,
                         &format!("layer {li} (GDN) mlp.up_proj"),
                     )?;
                     let down_proj = pick_projection_weight(
-                        &crate::forward::kt_logits_to_candle(&lw.mlp.down_proj)?,
-                        &crate::forward::kt_logits_to_candle(&lw.mlp.down_proj_t)?,
+                        &lw.mlp.down_proj,
+                        &lw.mlp.down_proj_t,
                         device,
                         &format!("layer {li} (GDN) mlp.down_proj"),
                     )?;

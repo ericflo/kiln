@@ -1354,13 +1354,13 @@ pub fn for_device_kt(device: &kiln_tensor::Device) -> Arc<dyn BackendRuntime> {
         }
         _ => {
             // Vulkan is detected at runtime (kt has a Vulkan variant but the
-            // VulkanBackend manages its own vk::Device, so it takes a candle
-            // CPU sentinel). CPU/unmapped fall through to the kt CpuBackend.
+            // VulkanBackend manages its own vk::Device, so it takes a kt
+            // Cpu sentinel). CPU/unmapped fall through to the kt CpuBackend.
             #[cfg(feature = "vulkan")]
             {
                 if vulkan::vulkan_is_available() {
                     mark_vulkan_active();
-                    return Arc::new(vulkan::VulkanBackend::new(candle_core::Device::Cpu));
+                    return Arc::new(vulkan::VulkanBackend::new(kiln_tensor::Device::Cpu));
                 }
             }
             Arc::new(cpu::CpuBackend::new(kiln_tensor::Device::Cpu))

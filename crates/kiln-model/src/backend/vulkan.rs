@@ -246,12 +246,6 @@ fn vk_f32_tensors_to_cpu_tensors_batched_vk(
 /// FlashAttention-2, Gated DeltaNet, and supporting operations.
 #[derive(Debug)]
 pub struct VulkanBackend {
-    /// Candle device the backend was constructed with — always `candle_core::Device::Cpu`
-    /// today because candle-core has no native Vulkan device. Retained for
-    /// the kernel trait methods that still consume `candle_core::Tensor`
-    /// parameters (they live on this candle CPU device until kt-typed
-    /// siblings land). (#1082)
-    device: candle_core::Device,
     /// `kiln_tensor::Device` form advertised by `BackendRuntime::device()`.
     /// `kt::Device::Vulkan(0)` when the Vulkan logical device is up;
     /// `kt::Device::Cpu` otherwise, matching the CPU-fallback advertised
@@ -318,16 +312,6 @@ pub struct VulkanBackend {
     /// Batched resident decode rows whose prompt K/V blocks have been seeded.
     /// Keyed by `(full_attention_layer_idx, decode_row_id)`.
     seeded_resident_decode_rows: Mutex<HashSet<(usize, u64)>>,
-    /// Per linear-attention layer recurrent state buffer (f32, persistent),
-    /// keyed by the candle candle_core::Tensor's `candle_core::TensorId`. Seeded from the candle_core::Tensor on
-    /// the first resident call that sees it.
-    linear_attn_recurrent_state:
-        Mutex<HashMap<candle_core::TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>>,
-    /// Per linear-attention layer conv1d state buffer, keyed by candle_core::TensorId.
-    linear_attn_conv_state:
-        Mutex<HashMap<candle_core::TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>>,
-    /// Set of state TensorIds that have been seeded.
-    seeded_linear_attn_layers: Mutex<HashSet<candle_core::TensorId>>,
     /// kt-native mirrors for the single-submit resident decode path.
     linear_attn_recurrent_state_kt:
         Mutex<HashMap<kiln_tensor::TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>>,
@@ -352,26 +336,21 @@ pub struct VulkanBackend {
     /// `create_device_local` + `Drop` pair that ran on every call
     /// (≈ 200 µs × 12 buffers × N layers per token).
     resident_scratch: Mutex<HashMap<&'static str, Arc<kiln_vulkan_kernel::VulkanBuffer>>>,
-    /// Cached f32 device-local buffers for immutable CPU weight tensors.
+    /// (#1082) kt-native weight caches keyed on the **kt** `TensorId`. The
+    /// decode hot path hands weights through as kt tensors whose `TensorId`
+    /// is stable for the model's lifetime (one Parameter, one id — issue
+    /// anti-pattern #11). The earlier candle-keyed caches were a trap on
+    /// Vulkan: the decode methods bridged each weight via `kt_logits_to_candle`
+    /// *per call*, minting a fresh candle `TensorId` every token, so the cache
+    /// MISSED every token → re-extract + re-upload the full weight set (~1
+    /// GB/token incl. the 778 MB lm_head) into NEW buffers that accumulated
+    /// unbounded. That single bug caused both the 25x decode slowdown (16 →
+    /// 0.6 tok/s) and the OOM. Keying on the stable kt id uploads each weight
+    /// exactly once and extracts bytes straight from kt storage — no candle
+    /// copy.
     ///
     /// This field must drop before `vulkan_device`: `VulkanBuffer` owns raw
     /// memory that must be freed before the logical Vulkan device is destroyed.
-    weight_cache: Mutex<HashMap<candle_core::TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>>,
-    /// Cached packed-bf16 device-local buffers for immutable CPU weights used
-    /// by Vulkan transposed linear decode paths.
-    bf16_packed_weight_cache: Mutex<HashMap<candle_core::TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>>,
-    /// (#1082) kt-native twins of the two weight caches above, keyed on the
-    /// **kt** `TensorId`. The decode hot path hands weights through as kt
-    /// tensors whose `TensorId` is stable for the model's lifetime (one
-    /// Parameter, one id — issue anti-pattern #11). The candle-keyed caches
-    /// above were a trap on Vulkan: the decode methods bridged each weight via
-    /// `kt_logits_to_candle` *per call*, minting a fresh candle `TensorId`
-    /// every token, so the cache MISSED every token → re-extract + re-upload
-    /// the full weight set (~1 GB/token incl. the 778 MB lm_head) into NEW
-    /// buffers that accumulated unbounded. That single bug caused both the
-    /// 25x decode slowdown (16 → 0.6 tok/s) and the OOM. Keying on the stable
-    /// kt id uploads each weight exactly once and extracts bytes straight from
-    /// kt storage — no candle copy.
     weight_cache_kt: Mutex<HashMap<kiln_tensor::TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>>,
     bf16_packed_weight_cache_kt:
         Mutex<HashMap<kiln_tensor::TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>>,
@@ -387,7 +366,7 @@ pub struct VulkanBackend {
 
 thread_local! {
     static RECURRENT_STATE_RESIDENT_SCOPE_DEPTH: Cell<usize> = const { Cell::new(0) };
-    static RECURRENT_STATE_RESIDENT_CACHE: RefCell<HashMap<candle_core::TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>> =
+    static RECURRENT_STATE_RESIDENT_CACHE: RefCell<HashMap<kiln_tensor::TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>> =
         RefCell::new(HashMap::new());
 }
 
@@ -408,11 +387,11 @@ thread_local! {
 /// scope-limited lifecycle without growing accidental coupling to
 /// non-recurrent activations.
 static RESIDENT_ACTIVATION_REGISTRY: std::sync::OnceLock<
-    std::sync::Mutex<HashMap<candle_core::TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>>,
+    std::sync::Mutex<HashMap<kiln_tensor::TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>>,
 > = std::sync::OnceLock::new();
 
 fn resident_registry()
--> &'static std::sync::Mutex<HashMap<candle_core::TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>> {
+-> &'static std::sync::Mutex<HashMap<kiln_tensor::TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>> {
     RESIDENT_ACTIVATION_REGISTRY.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
 }
 
@@ -422,7 +401,7 @@ fn resident_registry()
 /// it.
 fn with_resident_registry<F, R>(f: F) -> R
 where
-    F: FnOnce(&mut HashMap<candle_core::TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>) -> R,
+    F: FnOnce(&mut HashMap<kiln_tensor::TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>) -> R,
 {
     let mut guard = resident_registry()
         .lock()
@@ -620,22 +599,7 @@ fn exit_recurrent_state_resident_scope() {
 /// here lets `vulkan.rs` perform the candle ↔ raw-bytes conversions on
 /// its own, so kiln-vulkan-kernel can eventually delete the corresponding
 /// bridge exports. (#1082)
-#[inline]
-fn tensor_to_f32_bytes_with_shape(
-    tensor: &candle_core::Tensor,
-) -> Result<(Vec<u8>, Vec<usize>)> {
-    let shape: Vec<usize> = tensor.shape().dims().to_vec();
-    let flat = tensor
-        .flatten_all()
-        .context("failed to flatten tensor")?;
-    let f32_data = flat
-        .to_dtype(candle_core::DType::F32)?
-        .to_vec1::<f32>()
-        .context("failed to extract f32 data")?;
-    Ok((bytemuck::cast_slice(&f32_data).to_vec(), shape))
-}
-
-/// kt-native twin of [`tensor_to_f32_bytes_with_shape`]: extract f32 bytes +
+/// kt-native f32 byte + shape extraction.
 /// shape straight from a kt tensor, no candle bridge. (#1082)
 #[inline]
 fn kt_tensor_to_f32_bytes_with_shape(
@@ -652,7 +616,7 @@ fn kt_tensor_to_f32_bytes_with_shape(
     Ok((bytemuck::cast_slice(&f32_data).to_vec(), shape))
 }
 
-/// kt-native twin of [`tensor_from_f32_bytes`]: wrap f32 bytes as a kt tensor
+/// kt-native: wrap f32 bytes as a kt tensor
 /// (CPU-host, the Vulkan activation residency), no candle bridge. (#1082)
 #[inline]
 fn kt_tensor_from_f32_bytes(
@@ -671,39 +635,19 @@ fn kt_tensor_from_f32_bytes(
     }
 }
 
-#[inline]
-fn tensor_from_f32_bytes(
-    data: &[u8],
-    shape: &[usize],
-    dtype: candle_core::DType,
-) -> Result<candle_core::Tensor> {
-    let f32_data: &[f32] = bytemuck::cast_slice(data);
-    let tensor = candle_core::Tensor::from_vec(
-        f32_data.to_vec(),
-        f32_data.len(),
-        &candle_core::Device::Cpu,
-    )?
-    .reshape(shape)?;
-    if dtype == candle_core::DType::BF16 {
-        Ok(tensor.to_dtype(candle_core::DType::BF16)?)
-    } else {
-        Ok(tensor)
-    }
-}
-
-/// Packed bf16 extraction with shape — mirrors the tuple shape of
+/// kt-native packed bf16 extraction with shape — mirrors the tuple shape of
 /// `kiln_vulkan_kernel::kernels::extract_tensor_packed_bf16_bytes_pub`
 /// so call sites that use the `.0` (bytes) projection stay identical.
 #[inline]
-fn tensor_to_packed_bf16_bytes_with_shape(
-    tensor: &candle_core::Tensor,
+fn kt_tensor_to_packed_bf16_bytes_with_shape(
+    tensor: &kiln_tensor::Tensor,
 ) -> Result<(Vec<u8>, Vec<usize>)> {
     anyhow::ensure!(
-        tensor.dtype() == candle_core::DType::BF16,
+        tensor.dtype() == kiln_tensor::DType::BF16,
         "packed bf16 upload requires BF16 tensor, got {:?}",
         tensor.dtype()
     );
-    let shape: Vec<usize> = tensor.shape().dims().to_vec();
+    let shape: Vec<usize> = tensor.shape().to_vec();
     let flat = tensor.flatten_all().context("failed to flatten tensor")?;
     let bf16_data = flat
         .to_vec1::<half::bf16>()
@@ -718,7 +662,7 @@ fn tensor_to_packed_bf16_bytes_with_shape(
 }
 
 impl VulkanBackend {
-    pub fn new(device: candle_core::Device) -> Self {
+    pub fn new(device: kiln_tensor::Device) -> Self {
         let gdn_enabled = std::env::var("KILN_DISABLE_GDN_KERNEL").is_err();
         let gdn_prefill_in_proj_enabled =
             gdn_enabled && std::env::var("KILN_DISABLE_VULKAN_GDN_PREFILL_IN_PROJ").is_err();
@@ -832,11 +776,10 @@ impl VulkanBackend {
         let device_kt = if vulkan_device.is_some() {
             kiln_tensor::Device::Vulkan(0)
         } else {
-            kiln_kt_bridge::kt_device_from_candle(&device)
+            device
         };
 
         Self {
-            device,
             device_kt,
             gdn_enabled,
             gdn_prefill_in_proj_enabled,
@@ -868,16 +811,11 @@ impl VulkanBackend {
             vk_paged_kv_cache: OnceLock::new(),
             seeded_full_attn_layers: Mutex::new(HashSet::new()),
             seeded_resident_decode_rows: Mutex::new(HashSet::new()),
-            linear_attn_recurrent_state: Mutex::new(HashMap::new()),
-            linear_attn_conv_state: Mutex::new(HashMap::new()),
-            seeded_linear_attn_layers: Mutex::new(HashSet::new()),
             linear_attn_recurrent_state_kt: Mutex::new(HashMap::new()),
             linear_attn_conv_state_kt: Mutex::new(HashMap::new()),
             seeded_linear_attn_layers_kt: Mutex::new(HashSet::new()),
             last_resident_start_pos: Mutex::new(None),
             resident_scratch: Mutex::new(HashMap::new()),
-            weight_cache: Mutex::new(HashMap::new()),
-            bf16_packed_weight_cache: Mutex::new(HashMap::new()),
             weight_cache_kt: Mutex::new(HashMap::new()),
             bf16_packed_weight_cache_kt: Mutex::new(HashMap::new()),
             vulkan_device,
@@ -1074,87 +1012,7 @@ impl VulkanBackend {
         is_new_session
     }
 
-    /// Get or allocate the persistent recurrent-state buffer for a
-    /// GDN linear-attention layer, keyed by the candle candle_core::Tensor's
-    /// `candle_core::TensorId`. Subsequent calls with the same candle_core::Tensor return the
-    /// same buffer so the resident GDN block reads/writes state in
-    /// place across decode steps.
-    pub fn linear_attn_recurrent_state_buffer(
-        &self,
-        key: candle_core::TensorId,
-        bytes: u64,
-    ) -> Result<Arc<kiln_vulkan_kernel::VulkanBuffer>> {
-        let dev = self
-            .vulkan_device
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
-        let mut g = self
-            .linear_attn_recurrent_state
-            .lock()
-            .map_err(|_| anyhow::anyhow!("recurrent state mutex poisoned"))?;
-        if let Some(buf) = g.get(&key) {
-            if buf.size() >= bytes {
-                return Ok(Arc::clone(buf));
-            }
-        }
-        let buf = kiln_vulkan_kernel::VulkanBuffer::create_device_local(
-            dev.device(),
-            dev.device_local_mem_type(),
-            bytes,
-        )
-        .context("alloc linear-attn recurrent state buffer")?;
-        let arc = Arc::new(buf);
-        g.insert(key, Arc::clone(&arc));
-        Ok(arc)
-    }
-
-    /// Get or allocate the persistent conv1d-state buffer.
-    pub fn linear_attn_conv_state_buffer(
-        &self,
-        key: candle_core::TensorId,
-        bytes: u64,
-    ) -> Result<Arc<kiln_vulkan_kernel::VulkanBuffer>> {
-        let dev = self
-            .vulkan_device
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
-        let mut g = self
-            .linear_attn_conv_state
-            .lock()
-            .map_err(|_| anyhow::anyhow!("conv state mutex poisoned"))?;
-        if let Some(buf) = g.get(&key) {
-            if buf.size() >= bytes {
-                return Ok(Arc::clone(buf));
-            }
-        }
-        let buf = kiln_vulkan_kernel::VulkanBuffer::create_device_local(
-            dev.device(),
-            dev.device_local_mem_type(),
-            bytes,
-        )
-        .context("alloc linear-attn conv state buffer")?;
-        let arc = Arc::new(buf);
-        g.insert(key, Arc::clone(&arc));
-        Ok(arc)
-    }
-
-    pub fn linear_attn_layer_seeded(&self, key: candle_core::TensorId) -> bool {
-        match self.seeded_linear_attn_layers.lock() {
-            Ok(g) => g.contains(&key),
-            Err(_) => false,
-        }
-    }
-
-    pub fn mark_linear_attn_layer_seeded(&self, key: candle_core::TensorId) {
-        if let Ok(mut g) = self.seeded_linear_attn_layers.lock() {
-            g.insert(key);
-        }
-    }
-
     pub fn reset_linear_attn_seeded(&self) {
-        if let Ok(mut g) = self.seeded_linear_attn_layers.lock() {
-            g.clear();
-        }
         if let Ok(mut g) = self.seeded_linear_attn_layers_kt.lock() {
             g.clear();
         }
@@ -1514,97 +1372,7 @@ impl VulkanBackend {
         Ok(arc)
     }
 
-    pub fn cached_f32_weight_buffer(
-        &self,
-        weight: &candle_core::Tensor,
-    ) -> Result<Arc<kiln_vulkan_kernel::VulkanBuffer>> {
-        let vk_device = self
-            .vulkan_device
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
-        let key = weight.id();
-
-        {
-            let cache = self
-                .weight_cache
-                .lock()
-                .map_err(|_| anyhow::anyhow!("Vulkan weight cache mutex poisoned"))?;
-            if let Some(buffer) = cache.get(&key) {
-                return Ok(Arc::clone(buffer));
-            }
-        }
-
-        // Inlined from `kiln_vulkan_kernel::kernels::upload_tensor_f32_buffer`
-        // candle-shim: cast to F32 if needed, extract f32 vec, then use the
-        // candle-free `upload_f32_buffer_from_slice` upload path. (#1082)
-        let weight_f32_data: Vec<f32> = weight
-            .flatten_all()
-            .context("failed to flatten weight tensor")?
-            .to_dtype(candle_core::DType::F32)?
-            .to_vec1::<f32>()
-            .context("failed to extract f32 data from weight tensor")?;
-        let buffer = kiln_vulkan_kernel::kernels::upload_f32_buffer_from_slice(
-            vk_device,
-            &weight_f32_data,
-        )
-        .context("upload GDN projection weight to Vulkan")?;
-        let buffer = Arc::new(buffer);
-
-        let mut cache = self
-            .weight_cache
-            .lock()
-            .map_err(|_| anyhow::anyhow!("Vulkan weight cache mutex poisoned"))?;
-        Ok(Arc::clone(cache.entry(key).or_insert(buffer)))
-    }
-
-    pub fn cached_bf16_packed_weight_buffer(
-        &self,
-        weight: &candle_core::Tensor,
-    ) -> Result<Arc<kiln_vulkan_kernel::VulkanBuffer>> {
-        let vk_device = self
-            .vulkan_device
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
-        let key = weight.id();
-
-        {
-            let cache = self
-                .bf16_packed_weight_cache
-                .lock()
-                .map_err(|_| anyhow::anyhow!("Vulkan packed bf16 weight cache mutex poisoned"))?;
-            if let Some(buffer) = cache.get(&key) {
-                return Ok(Arc::clone(buffer));
-            }
-        }
-
-        // Inlined from `kiln_vulkan_kernel::kernels::upload_tensor_bf16_packed_buffer`
-        // candle-shim: extract bf16 vec, then use the candle-free
-        // `upload_bf16_packed_buffer_from_slice` upload path. (#1082)
-        anyhow::ensure!(
-            weight.dtype() == candle_core::DType::BF16,
-            "packed bf16 upload requires BF16 tensor, got {:?}",
-            weight.dtype()
-        );
-        let weight_bf16_data: Vec<half::bf16> = weight
-            .flatten_all()
-            .context("failed to flatten bf16 weight tensor")?
-            .to_vec1::<half::bf16>()
-            .context("failed to extract bf16 data from weight tensor")?;
-        let buffer = kiln_vulkan_kernel::kernels::upload_bf16_packed_buffer_from_slice(
-            vk_device,
-            &weight_bf16_data,
-        )
-        .context("upload packed BF16 projection weight to Vulkan")?;
-        let buffer = Arc::new(buffer);
-
-        let mut cache = self
-            .bf16_packed_weight_cache
-            .lock()
-            .map_err(|_| anyhow::anyhow!("Vulkan packed bf16 weight cache mutex poisoned"))?;
-        Ok(Arc::clone(cache.entry(key).or_insert(buffer)))
-    }
-
-    /// kt-native twin of [`Self::cached_f32_weight_buffer`]: keys the buffer
+    /// kt-native f32 weight buffer cache: keys the buffer
     /// cache on the **kt** `TensorId` (stable for the model's lifetime) and
     /// extracts f32 bytes straight from kt storage on a miss — no candle
     /// bridge, so a cache hit (every token after the first) does zero copy
@@ -1645,9 +1413,8 @@ impl VulkanBackend {
         Ok(Arc::clone(cache.entry(key).or_insert(buffer)))
     }
 
-    /// kt-native twin of [`Self::cached_bf16_packed_weight_buffer`]. Same
-    /// stable-kt-id keying; extracts bf16 straight from kt storage on a miss.
-    /// (#1082)
+    /// kt-native bf16-packed weight buffer cache. Stable-kt-id keying;
+    /// extracts bf16 straight from kt storage on a miss. (#1082)
     pub fn cached_bf16_packed_weight_buffer_kt(
         &self,
         weight: &kiln_tensor::Tensor,
@@ -1690,7 +1457,7 @@ impl VulkanBackend {
         Ok(Arc::clone(cache.entry(key).or_insert(buffer)))
     }
 
-    /// kt-native twin of [`Self::use_bf16_packed_linear_weight`].
+    /// kt-native: whether to use the bf16-packed linear-weight decode path.
     fn use_bf16_packed_linear_weight_kt(&self, weight: &kiln_tensor::Tensor) -> bool {
         self.bf16_packed_linear_weights_enabled && weight.dtype() == kiln_tensor::DType::BF16
     }
@@ -1933,7 +1700,14 @@ impl VulkanBackend {
 
 impl Drop for VulkanBackend {
     fn drop(&mut self) {
-        if let Ok(mut cache) = self.weight_cache.lock() {
+        // The `VulkanBuffer`s in these caches own raw device memory that must
+        // be freed before `vulkan_device` is destroyed. Clear them explicitly
+        // so the drop order is deterministic. (#1082: candle-keyed twins gone;
+        // only the kt-keyed caches remain.)
+        if let Ok(mut cache) = self.weight_cache_kt.lock() {
+            cache.clear();
+        }
+        if let Ok(mut cache) = self.bf16_packed_weight_cache_kt.lock() {
             cache.clear();
         }
     }
@@ -2048,19 +1822,17 @@ impl BackendRuntime for VulkanBackend {
         if !self.recurrent_state_residency_enabled {
             return Ok(());
         }
-        // Bridge kt -> candle mirror; body keys the (candle-TensorId-keyed)
-        // RECURRENT_STATE_RESIDENT_CACHE off the candle id, and writes the
-        // materialized state back to the kt arg after. (See report: the
-        // candle-id-keyed residency cache is an opt-in path; this CPU
-        // round-trip changes its cache identity — flagged.)
-        let mut state_c = crate::forward::kt_logits_to_candle(state_kt)?;
-        let state: &mut candle_core::Tensor = &mut state_c;
-        let state_id = state.id();
+        // (#1082) kt-native: the RECURRENT_STATE_RESIDENT_CACHE is keyed on the
+        // kt `TensorId` directly (stable across the state's lifetime), and the
+        // materialized state is written back into the kt arg in place.
+        let state_id = state_kt.id();
         let resident_state =
             RECURRENT_STATE_RESIDENT_CACHE.with(|cache| cache.borrow_mut().remove(&state_id));
         let Some(resident_state) = resident_state else {
             return Ok(());
         };
+        let state_dims = state_kt.dims().to_vec();
+        let state_dtype = state_kt.dtype();
 
         let vk_device = self
             .vulkan_device
@@ -2074,13 +1846,11 @@ impl BackendRuntime for VulkanBackend {
             &resident_state,
         )
         .context("failed to materialize resident GDN recurrent state")?;
-        *state = tensor_from_f32_bytes(
+        *state_kt = kt_tensor_from_f32_bytes(
             &data,
-            state.dims().as_ref(),
-            state.dtype(),
+            &state_dims,
+            state_dtype,
         )?;
-        // Push the materialized candle state mirror back to the kt arg.
-        *state_kt = crate::forward::candle_to_kt_activation(state)?;
         Ok(())
     }
 
@@ -2088,11 +1858,7 @@ impl BackendRuntime for VulkanBackend {
         if !self.recurrent_state_residency_enabled {
             return;
         }
-        // Bridge kt -> candle to key the (candle-TensorId-keyed) cache.
-        // (Flagged: candle-id-keyed residency cache, opt-in path.)
-        let Ok(state) = crate::forward::kt_logits_to_candle(state) else {
-            return;
-        };
+        // (#1082) kt-native: key the cache on the kt `TensorId` directly.
         let state_id = state.id();
         RECURRENT_STATE_RESIDENT_CACHE.with(|cache| {
             cache.borrow_mut().remove(&state_id);
@@ -2103,11 +1869,7 @@ impl BackendRuntime for VulkanBackend {
         if !self.recurrent_state_residency_enabled {
             return false;
         }
-        // Bridge kt -> candle to key the (candle-TensorId-keyed) cache.
-        // (Flagged: candle-id-keyed residency cache, opt-in path.)
-        let Ok(state) = crate::forward::kt_logits_to_candle(state) else {
-            return false;
-        };
+        // (#1082) kt-native: key the cache on the kt `TensorId` directly.
         let state_id = state.id();
         RECURRENT_STATE_RESIDENT_CACHE.with(|cache| cache.borrow().contains_key(&state_id))
     }
@@ -2133,11 +1895,8 @@ impl BackendRuntime for VulkanBackend {
         let Some(vk_device) = self.vulkan_device.as_ref() else {
             return Ok(());
         };
-        // (#1082) bridge kt -> candle and re-borrow under the same name so the
-        // candle body (byte-extract + buffer upload, candle-TensorId-keyed
-        // registry) is unchanged. Remove when the Vulkan residency registry
-        // is re-keyed on kt TensorId directly.
-        let tensor = &crate::forward::kt_logits_to_candle(tensor)?;
+        // (#1082) kt-native: the residency registry is keyed on the kt
+        // `TensorId` directly; byte extraction reads straight from kt storage.
         let id = tensor.id();
         let already_registered = with_resident_registry(|cache| cache.contains_key(&id));
         if already_registered {
@@ -2156,10 +1915,10 @@ impl BackendRuntime for VulkanBackend {
         //
         // `resolve_resident_activation` knows about both encodings
         // and reconstructs Tensors appropriately.
-        let bytes = if tensor.dtype() == candle_core::DType::BF16 {
-            tensor_to_packed_bf16_bytes_with_shape(tensor)?.0
+        let bytes = if tensor.dtype() == kiln_tensor::DType::BF16 {
+            kt_tensor_to_packed_bf16_bytes_with_shape(tensor)?.0
         } else {
-            tensor_to_f32_bytes_with_shape(tensor)?.0
+            kt_tensor_to_f32_bytes_with_shape(tensor)?.0
         };
         // Some Vulkan drivers reject zero-size buffer allocations; we
         // also have no use for a zero-byte registry entry. Bail
@@ -2210,12 +1969,7 @@ impl BackendRuntime for VulkanBackend {
     }
 
     fn evict_resident_activation(&self, tensor: &kiln_tensor::Tensor) {
-        // (#1082) bridge kt -> candle for the candle-TensorId-keyed registry.
-        // evict on a failed bridge is a no-op (nothing to remove). Remove the
-        // bridge when the registry is re-keyed on kt TensorId.
-        let Ok(tensor) = crate::forward::kt_logits_to_candle(tensor) else {
-            return;
-        };
+        // (#1082) kt-native: registry keyed on the kt `TensorId` directly.
         let id = tensor.id();
         with_resident_registry(|cache| {
             cache.remove(&id);
@@ -2226,9 +1980,7 @@ impl BackendRuntime for VulkanBackend {
         let Some(vk_device) = self.vulkan_device.as_ref() else {
             return Ok(());
         };
-        // (#1082) bridge kt -> candle; candle body unchanged. Remove when the
-        // residency registry is re-keyed on kt TensorId.
-        let tensor = &crate::forward::kt_logits_to_candle(tensor)?;
+        // (#1082) kt-native: registry keyed on the kt `TensorId` directly.
         let id = tensor.id();
         let buffer = with_resident_registry(|cache| cache.get(&id).cloned());
         let Some(buffer) = buffer else {
@@ -2237,10 +1989,10 @@ impl BackendRuntime for VulkanBackend {
             return Ok(());
         };
         // Same encoding choice as register_resident_activation.
-        let bytes = if tensor.dtype() == candle_core::DType::BF16 {
-            tensor_to_packed_bf16_bytes_with_shape(tensor)?.0
+        let bytes = if tensor.dtype() == kiln_tensor::DType::BF16 {
+            kt_tensor_to_packed_bf16_bytes_with_shape(tensor)?.0
         } else {
-            tensor_to_f32_bytes_with_shape(tensor)?.0
+            kt_tensor_to_f32_bytes_with_shape(tensor)?.0
         };
         if bytes.is_empty() {
             return Ok(());
@@ -2264,11 +2016,7 @@ impl BackendRuntime for VulkanBackend {
     }
 
     fn has_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> bool {
-        // (#1082) bridge kt -> candle for the candle-TensorId-keyed registry.
-        // A failed bridge means the tensor cannot be resident here.
-        let Ok(tensor) = crate::forward::kt_logits_to_candle(tensor) else {
-            return false;
-        };
+        // (#1082) kt-native: registry keyed on the kt `TensorId` directly.
         let id = tensor.id();
         with_resident_registry(|cache| cache.contains_key(&id))
     }
@@ -2282,14 +2030,8 @@ impl BackendRuntime for VulkanBackend {
         let Some(vk_device) = self.vulkan_device.as_ref() else {
             return Ok(None);
         };
-        // (#1082) bridge kt -> candle: registry key + reconstructed Tensor.
-        // The candle body builds a candle Tensor of `dtype`; the trait now
-        // takes/returns kt, so bridge the kt dtype to candle here and the
-        // result Tensor back to kt at the return. Remove when the registry +
-        // resolve path run natively on kt.
-        let dtype = kiln_kt_bridge::kt_dtype_to_candle(dtype)
-            .map_err(|e| anyhow::anyhow!("resolve_resident_activation: kt dtype -> candle: {e}"))?;
-        let tensor = &crate::forward::kt_logits_to_candle(tensor)?;
+        // (#1082) kt-native: registry keyed on the kt `TensorId`; the result
+        // is reconstructed directly as a kt tensor of `dtype`.
         let id = tensor.id();
         let buffer = with_resident_registry(|cache| cache.get(&id).cloned());
         let Some(buffer) = buffer else {
@@ -2305,11 +2047,9 @@ impl BackendRuntime for VulkanBackend {
         .context("resolve_resident_activation: read_back")?;
         // Inverse of the encoding choice in register_resident_activation.
         // BF16 registry entries hold packed bf16 (2 bytes/elem);
-        // other dtypes hold F32 bytes. To avoid a `half` crate dep
-        // (only enabled under the cuda feature), reconstruct BF16 by
-        // bit-expanding each 16-bit lane into f32 (`bits << 16`) and
-        // then casting back to BF16 via candle.
-        let resolved = if dtype == candle_core::DType::BF16 {
+        // other dtypes hold F32 bytes. Reconstruct BF16 by bit-expanding each
+        // 16-bit lane into f32 (`bits << 16`) and then casting back to BF16.
+        let resolved = if dtype == kiln_tensor::DType::BF16 {
             anyhow::ensure!(
                 bytes.len() % 2 == 0,
                 "resolve_resident_activation BF16: buffer byte count {} is not a multiple of 2",
@@ -2332,14 +2072,15 @@ impl BackendRuntime for VulkanBackend {
                 let bf16_bits = (hi << 8) | lo;
                 f32_data.push(f32::from_bits(bf16_bits << 16));
             }
-            candle_core::Tensor::from_vec(f32_data, shape, &candle_core::Device::Cpu)?.to_dtype(candle_core::DType::BF16)?
+            kiln_tensor::Tensor::from_vec(f32_data, shape.to_vec())
+                .map_err(|e| anyhow::anyhow!("resolve_resident_activation BF16: from_vec: {e}"))?
+                .to_dtype(kiln_tensor::DType::BF16)
+                .map_err(|e| anyhow::anyhow!("resolve_resident_activation BF16: to_dtype: {e}"))?
         } else {
-            tensor_from_f32_bytes(&bytes, shape, dtype)
+            kt_tensor_from_f32_bytes(&bytes, shape, dtype)
                 .context("resolve_resident_activation: create_tensor_from_data")?
         };
-        // (#1082) bridge the reconstructed candle Tensor back to kt for the
-        // kt-typed trait return. Remove when resolve runs natively on kt.
-        Ok(Some(crate::forward::candle_to_kt_activation(&resolved)?))
+        Ok(Some(resolved))
     }
 
     fn dispatch_sgd_step(&self, param: &kiln_tensor::Tensor, grad: &kiln_tensor::Tensor, lr: f32) -> Result<bool> {
@@ -2347,10 +2088,8 @@ impl BackendRuntime for VulkanBackend {
             return Ok(false);
         };
         // (#1082) bridge kt -> candle and re-borrow under the same names so the
-        // candle body (candle-TensorId-keyed registry lookup + dtype dispatch)
-        // is unchanged. Remove when the registry is re-keyed on kt TensorId.
-        let param = &crate::forward::kt_logits_to_candle(param)?;
-        let grad = &crate::forward::kt_logits_to_candle(grad)?;
+        // (#1082) kt-native: registry keyed on the kt `TensorId`; dispatch
+        // reads dtype/element-count straight off the kt args.
         // Both operands must be resident — no support for mixed
         // resident/CPU yet (would require a per-call upload that
         // defeats the purpose of the on-device update).
@@ -2371,12 +2110,12 @@ impl BackendRuntime for VulkanBackend {
         if param.dtype() != grad.dtype() {
             return Ok(false);
         }
-        let n_elements: usize = param.shape().elem_count();
-        if n_elements != grad.shape().elem_count() {
+        let n_elements: usize = param.element_count();
+        if n_elements != grad.element_count() {
             anyhow::bail!(
                 "dispatch_sgd_step: param ({:?}) and grad ({:?}) have different element counts",
-                param.shape(),
-                grad.shape(),
+                param.dims(),
+                grad.dims(),
             );
         }
         static FIRST_SGD_LOGGED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
@@ -2389,13 +2128,13 @@ impl BackendRuntime for VulkanBackend {
             );
         });
         match param.dtype() {
-            candle_core::DType::F32 => {
+            kiln_tensor::DType::F32 => {
                 kiln_vulkan_kernel::kernels::dispatch_sgd_step_f32(
                     vk_device, &param_buf, &grad_buf, n_elements, lr,
                 )?;
                 Ok(true)
             }
-            candle_core::DType::BF16 => {
+            kiln_tensor::DType::BF16 => {
                 kiln_vulkan_kernel::kernels::dispatch_sgd_step_bf16(
                     vk_device, &param_buf, &grad_buf, n_elements, lr,
                 )?;
@@ -2421,13 +2160,8 @@ impl BackendRuntime for VulkanBackend {
         let Some(vk_device) = self.vulkan_device.as_ref() else {
             return Ok(false);
         };
-        // (#1082) bridge kt -> candle and re-borrow under the same names so the
-        // candle body (candle-TensorId-keyed registry + dtype dispatch) is
-        // unchanged. Remove when the registry is re-keyed on kt TensorId.
-        let param = &crate::forward::kt_logits_to_candle(param)?;
-        let grad = &crate::forward::kt_logits_to_candle(grad)?;
-        let first_moment = &crate::forward::kt_logits_to_candle(first_moment)?;
-        let second_moment = &crate::forward::kt_logits_to_candle(second_moment)?;
+        // (#1082) kt-native: registry keyed on the kt `TensorId`; dispatch
+        // reads dtype/element-count straight off the kt args.
         if step < 1 {
             anyhow::bail!("dispatch_adamw_step: step must be 1-indexed (>=1), got {step}");
         }
@@ -2443,17 +2177,17 @@ impl BackendRuntime for VulkanBackend {
                 second_moment.dtype(),
             );
         }
-        let n_elements: usize = param.shape().elem_count();
-        if n_elements != grad.shape().elem_count()
-            || n_elements != first_moment.shape().elem_count()
-            || n_elements != second_moment.shape().elem_count()
+        let n_elements: usize = param.element_count();
+        if n_elements != grad.element_count()
+            || n_elements != first_moment.element_count()
+            || n_elements != second_moment.element_count()
         {
             anyhow::bail!(
                 "dispatch_adamw_step: element count mismatch (param={}, grad={}, m={}, v={})",
                 n_elements,
-                grad.shape().elem_count(),
-                first_moment.shape().elem_count(),
-                second_moment.shape().elem_count(),
+                grad.element_count(),
+                first_moment.element_count(),
+                second_moment.element_count(),
             );
         }
         let p_id = param.id();
@@ -2485,7 +2219,7 @@ impl BackendRuntime for VulkanBackend {
             );
         });
         match param.dtype() {
-            candle_core::DType::F32 => {
+            kiln_tensor::DType::F32 => {
                 kiln_vulkan_kernel::kernels::dispatch_adamw_step_f32(
                     vk_device,
                     &param_buf,
@@ -2502,7 +2236,7 @@ impl BackendRuntime for VulkanBackend {
                 )?;
                 Ok(true)
             }
-            candle_core::DType::BF16 => {
+            kiln_tensor::DType::BF16 => {
                 kiln_vulkan_kernel::kernels::dispatch_adamw_step_bf16(
                     vk_device,
                     &param_buf,
@@ -2555,18 +2289,8 @@ impl BackendRuntime for VulkanBackend {
         {
             return Ok(false);
         }
-        // Bridge kt args -> candle locals; re-borrow `rows`/`batch` under the
-        // same names so the candle body below is unchanged. (Flagged: the
-        // candle-TensorId-keyed RECURRENT_STATE_RESIDENT_CACHE is keyed off
-        // these bridged candle ids on an opt-in residency path.)
-        let rows_owned: Vec<candle_core::Tensor> = rows
-            .iter()
-            .map(|r| crate::forward::kt_logits_to_candle(r))
-            .collect::<Result<Vec<_>>>()?;
-        let batch_owned = crate::forward::kt_logits_to_candle(batch)?;
-        let rows: Vec<&candle_core::Tensor> = rows_owned.iter().collect();
-        let rows = rows.as_slice();
-        let batch = &batch_owned;
+        // (#1082) kt-native: `rows`/`batch` are already kt; the
+        // RECURRENT_STATE_RESIDENT_CACHE is keyed on the kt `TensorId` directly.
         let Ok((batch_rows, heads, dk, dv)) = batch.dims4() else {
             return Ok(false);
         };
@@ -2579,7 +2303,7 @@ impl BackendRuntime for VulkanBackend {
             };
             if (row_batch, row_heads, row_dk, row_dv) != (1, heads, dk, dv)
                 || row.dtype() != batch.dtype()
-                || !matches!(row.device(), candle_core::Device::Cpu)
+                || !matches!(row.device(), kiln_tensor::Device::Cpu)
             {
                 return Ok(false);
             }
@@ -2622,13 +2346,8 @@ impl BackendRuntime for VulkanBackend {
         {
             return Ok(false);
         }
-        // Bridge `batch` kt -> candle; re-borrow under the same name so the
-        // candle body below is unchanged. `destinations` stay kt: each dst
-        // write/cache-key is bridged in the loop. (Flagged: the
-        // candle-TensorId-keyed residency cache is keyed off these bridged
-        // candle ids on an opt-in residency path.)
-        let batch_owned = crate::forward::kt_logits_to_candle(batch)?;
-        let batch = &batch_owned;
+        // (#1082) kt-native: `batch`/`destinations` are already kt; the
+        // residency cache is keyed on the kt `TensorId` directly.
         let Ok((batch_rows, heads, dk, dv)) = batch.dims4() else {
             return Ok(false);
         };
@@ -2656,19 +2375,19 @@ impl BackendRuntime for VulkanBackend {
             .zip(row_buffers.into_iter())
             .enumerate()
         {
-            // Candle id of the current (kt) destination keys the cache eviction.
-            let old_id = crate::forward::kt_logits_to_candle(dst)?.id();
+            // kt id of the current destination keys the cache eviction.
+            let old_id = dst.id();
             let placeholder = batch.narrow(0, row_idx, 1)?.contiguous()?;
             if placeholder.dtype() != batch.dtype()
                 || placeholder.dims() != [1, heads, dk, dv]
-                || !matches!(placeholder.device(), candle_core::Device::Cpu)
+                || !matches!(placeholder.device(), kiln_tensor::Device::Cpu)
             {
                 return Ok(false);
             }
-            // Write the candle placeholder back into the kt destination.
-            **dst = crate::forward::candle_to_kt_activation(&placeholder)?;
-            // Candle id of the newly-written kt destination keys the insert.
-            let new_id = crate::forward::kt_logits_to_candle(dst)?.id();
+            // Write the placeholder back into the kt destination.
+            **dst = placeholder;
+            // kt id of the newly-written destination keys the insert.
+            let new_id = dst.id();
             RECURRENT_STATE_RESIDENT_CACHE.with(|cache| {
                 let mut cache = cache.borrow_mut();
                 cache.remove(&old_id);
@@ -3137,29 +2856,8 @@ impl BackendRuntime for VulkanBackend {
         {
             return Ok(None);
         }
-        // Bridge kt args -> candle locals. `state` is the candle mirror of the
-        // kt `state_kt`; mutations to it are pushed back to the kt arg at each
-        // return that may have updated it.
-        let q_owned = crate::forward::kt_logits_to_candle(q)?;
-        let k_owned = crate::forward::kt_logits_to_candle(k)?;
-        let v_owned = crate::forward::kt_logits_to_candle(v)?;
-        let a_owned = crate::forward::kt_logits_to_candle(a)?;
-        let b_owned = crate::forward::kt_logits_to_candle(b)?;
-        let a_log_owned = crate::forward::kt_logits_to_candle(a_log)?;
-        let dt_bias_owned = crate::forward::kt_logits_to_candle(dt_bias)?;
-        let z_owned = crate::forward::kt_logits_to_candle(z)?;
-        let weight_owned = crate::forward::kt_logits_to_candle(weight)?;
-        let mut state_c = crate::forward::kt_logits_to_candle(state_kt)?;
-        let q = &q_owned;
-        let k = &k_owned;
-        let v = &v_owned;
-        let a = &a_owned;
-        let b = &b_owned;
-        let a_log = &a_log_owned;
-        let dt_bias = &dt_bias_owned;
-        let z = &z_owned;
-        let weight = &weight_owned;
-        let state: &mut candle_core::Tensor = &mut state_c;
+        // (#1082) kt-native: all args are already kt. `state_kt` is mutated in
+        // place at each return that may have updated the recurrent state.
         let Ok((batch, seq_len, nv, dk)) = q.dims4() else {
             return Ok(None);
         };
@@ -3172,7 +2870,7 @@ impl BackendRuntime for VulkanBackend {
         let Ok((z_batch, z_seq, z_nv, z_dv)) = z.dims4() else {
             return Ok(None);
         };
-        let Ok((state_batch, state_nv, state_dk, state_dv)) = state.dims4() else {
+        let Ok((state_batch, state_nv, state_dk, state_dv)) = state_kt.dims4() else {
             return Ok(None);
         };
         if batch == 1 && !self.gdn_decode_fused_enabled {
@@ -3216,23 +2914,23 @@ impl BackendRuntime for VulkanBackend {
             && fused_gdn_resident_state_enabled()
             && recurrent_state_resident_scope_active()
         {
-            let state_id = state.id();
+            let state_id = state_kt.id();
             let resident_state =
                 RECURRENT_STATE_RESIDENT_CACHE.with(|cache| cache.borrow().get(&state_id).cloned());
             let (batch_d, _, nv, dk) = q.dims4()?;
             let dv = v.dims4()?.3;
             let q_dtype = q.dtype();
-            let q_b = tensor_to_f32_bytes_with_shape(q)?.0;
-            let k_b = tensor_to_f32_bytes_with_shape(k)?.0;
-            let v_b = tensor_to_f32_bytes_with_shape(v)?.0;
-            let a_b = tensor_to_f32_bytes_with_shape(a)?.0;
-            let b_b = tensor_to_f32_bytes_with_shape(b)?.0;
-            let a_log_b = tensor_to_f32_bytes_with_shape(a_log)?.0;
-            let dt_bias_b = tensor_to_f32_bytes_with_shape(dt_bias)?.0;
-            let z_b = tensor_to_f32_bytes_with_shape(z)?.0;
-            let weight_b = tensor_to_f32_bytes_with_shape(weight)?.0;
+            let q_b = kt_tensor_to_f32_bytes_with_shape(q)?.0;
+            let k_b = kt_tensor_to_f32_bytes_with_shape(k)?.0;
+            let v_b = kt_tensor_to_f32_bytes_with_shape(v)?.0;
+            let a_b = kt_tensor_to_f32_bytes_with_shape(a)?.0;
+            let b_b = kt_tensor_to_f32_bytes_with_shape(b)?.0;
+            let a_log_b = kt_tensor_to_f32_bytes_with_shape(a_log)?.0;
+            let dt_bias_b = kt_tensor_to_f32_bytes_with_shape(dt_bias)?.0;
+            let z_b = kt_tensor_to_f32_bytes_with_shape(z)?.0;
+            let weight_b = kt_tensor_to_f32_bytes_with_shape(weight)?.0;
             let state_b = if resident_state.is_none() {
-                Some(tensor_to_f32_bytes_with_shape(state)?.0)
+                Some(kt_tensor_to_f32_bytes_with_shape(state_kt)?.0)
             } else {
                 None
             };
@@ -3247,7 +2945,7 @@ impl BackendRuntime for VulkanBackend {
                     resident_state,
                 )
                 .context("gdn_decode_gates_recurrent_rmsnorm resident-state kernel failed")?;
-            let out = tensor_from_f32_bytes(
+            let out = kt_tensor_from_f32_bytes(
                 &out_data,
                 &[batch_d, 1, nv, dv],
                 q_dtype,
@@ -3255,19 +2953,18 @@ impl BackendRuntime for VulkanBackend {
             RECURRENT_STATE_RESIDENT_CACHE.with(|cache| {
                 cache.borrow_mut().insert(state_id, resident_state);
             });
-            // Push the (possibly mutated) candle state mirror back to the kt arg.
-            *state_kt = crate::forward::candle_to_kt_activation(state)?;
-            return Ok(Some(crate::forward::candle_to_kt_activation(&out)?));
+            return Ok(Some(out));
         }
         let (batch, _, nv, dk) = q.dims4()?;
         let dv = v.dims4()?.3;
         let q_dtype = q.dtype();
-        let state_dtype = state.dtype();
-        let state_dims = state.dims().to_vec();
-        let input_tensors: [&candle_core::Tensor; 10] = [q, k, v, a, b, a_log, dt_bias, state, z, weight];
+        let state_dtype = state_kt.dtype();
+        let state_dims = state_kt.dims().to_vec();
+        let input_tensors: [&kiln_tensor::Tensor; 10] =
+            [q, k, v, a, b, a_log, dt_bias, &*state_kt, z, weight];
         let mut input_data: Vec<Vec<u8>> = Vec::with_capacity(input_tensors.len());
         for tensor in &input_tensors {
-            input_data.push(tensor_to_f32_bytes_with_shape(tensor)?.0);
+            input_data.push(kt_tensor_to_f32_bytes_with_shape(tensor)?.0);
         }
         let (out_data, new_state_data) =
             kiln_vulkan_kernel::kernels::dispatch_gdn_decode_gates_recurrent_rmsnorm_bytes(
@@ -3281,23 +2978,21 @@ impl BackendRuntime for VulkanBackend {
                 skip_state_readback,
             )
             .context("gdn_decode_gates_recurrent_rmsnorm kernel failed")?;
-        let out = tensor_from_f32_bytes(
+        let out = kt_tensor_from_f32_bytes(
             &out_data,
             &[batch, 1, nv, dv],
             q_dtype,
         )?;
         if !skip_state_readback {
             if let Some(sd) = new_state_data {
-                *state = tensor_from_f32_bytes(
+                *state_kt = kt_tensor_from_f32_bytes(
                     &sd,
                     &state_dims,
                     state_dtype,
                 )?;
             }
         }
-        // Push the (possibly mutated) candle state mirror back to the kt arg.
-        *state_kt = crate::forward::candle_to_kt_activation(state)?;
-        Ok(Some(crate::forward::candle_to_kt_activation(&out)?))
+        Ok(Some(out))
     }
 
     fn linear_decode(&self, x: &kiln_tensor::Tensor, weight_t: &kiln_tensor::Tensor) -> Result<Option<kiln_tensor::Tensor>> {
@@ -3392,13 +3087,9 @@ impl BackendRuntime for VulkanBackend {
         if full_weight_t.dtype() != kiln_tensor::DType::BF16 {
             return Ok(None);
         }
-        // (#1082) bridge kt -> candle; re-borrow under the same names so the
-        // candle body (cached-weight offset kernel + FLOP-ceiling sub-chunking)
-        // is unchanged. The FLCE caller owns its own analytic backward, so the
-        // forward-only candle result is bridged back to kt at the return.
-        // Remove when the offset kernel path runs natively on kt.
-        let x = &crate::forward::kt_logits_to_candle(x)?;
-        let full_weight_t = &crate::forward::kt_logits_to_candle(full_weight_t)?;
+        // (#1082) kt-native: the cached-weight offset kernel + FLOP-ceiling
+        // sub-chunking run directly on the kt args (the FLCE caller owns its
+        // own analytic backward, so this is forward-only).
         let Ok((_batch, _seq_len, hidden_x)) = x.dims3() else {
             return Ok(None);
         };
@@ -3416,14 +3107,14 @@ impl BackendRuntime for VulkanBackend {
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?
             .clone();
-        let weight_buffer = self.cached_bf16_packed_weight_buffer(full_weight_t)?;
+        let weight_buffer = self.cached_bf16_packed_weight_buffer_kt(full_weight_t)?;
         // Promote x to f32 for the kernel (kernel expects f32 input).
-        let x_f32 = if x.dtype() == candle_core::DType::F32 {
+        let x_f32 = if x.dtype() == kiln_tensor::DType::F32 {
             x.clone()
         } else {
-            x.to_dtype(candle_core::DType::F32)?
+            x.to_dtype(kiln_tensor::DType::F32)?
         };
-        let dims = x_f32.shape().dims().to_vec();
+        let dims = x_f32.dims().to_vec();
         let row_count: usize = dims[..dims.len() - 1].iter().product();
         let dispatch_x = if dims.len() == 3 && dims[1] == 1 {
             x_f32
@@ -3443,7 +3134,7 @@ impl BackendRuntime for VulkanBackend {
             chunk_len
         };
         let out = if sub_chunk_len == chunk_len {
-            let x_data = tensor_to_f32_bytes_with_shape(&dispatch_x)?.0;
+            let x_data = kt_tensor_to_f32_bytes_with_shape(&dispatch_x)?.0;
             let out_bytes =
                 kiln_vulkan_kernel::kernels::dispatch_linear_decode_cached_bf16_weights_offset_bytes(
                     vk_device.as_ref(),
@@ -3456,10 +3147,10 @@ impl BackendRuntime for VulkanBackend {
                     full_out_dim,
                 )
                 .context("VulkanBackend: linear_prefill_apply_offset dispatch failed")?;
-            tensor_from_f32_bytes(
+            kt_tensor_from_f32_bytes(
                 &out_bytes,
                 &[row_count, 1, chunk_len],
-                candle_core::DType::F32,
+                kiln_tensor::DType::F32,
             )?
         } else {
             // One-shot trace so the operator can see when FLCE chunks
@@ -3490,9 +3181,9 @@ impl BackendRuntime for VulkanBackend {
             // outputs along the last axis. Same kernel/buffer per
             // sub-dispatch, just different `chunk_start` offsets and
             // smaller `chunk_len` per submit.
-            let mut sub_outputs: Vec<candle_core::Tensor> = Vec::new();
+            let mut sub_outputs: Vec<kiln_tensor::Tensor> = Vec::new();
             let mut sub_offset = 0usize;
-            let x_data = tensor_to_f32_bytes_with_shape(&dispatch_x)?.0;
+            let x_data = kt_tensor_to_f32_bytes_with_shape(&dispatch_x)?.0;
             while sub_offset < chunk_len {
                 let cur_len = (chunk_len - sub_offset).min(sub_chunk_len);
                 let sub_bytes =
@@ -3513,23 +3204,23 @@ impl BackendRuntime for VulkanBackend {
                           chunk_start={chunk_start}, chunk_len={chunk_len}) failed"
                         )
                     })?;
-                let sub = tensor_from_f32_bytes(
+                let sub = kt_tensor_from_f32_bytes(
                     &sub_bytes,
                     &[row_count, 1, cur_len],
-                    candle_core::DType::F32,
+                    kiln_tensor::DType::F32,
                 )?;
                 sub_outputs.push(sub);
                 sub_offset += cur_len;
             }
-            candle_core::Tensor::cat(&sub_outputs, 2).context("offset sub-chunk concat")?
+            let sub_refs: Vec<&kiln_tensor::Tensor> = sub_outputs.iter().collect();
+            kiln_tensor::ops::concat(&sub_refs, 2).context("offset sub-chunk concat")?
         };
         // Output from kernel is `[row_count, 1, chunk_len]`. Restore the
         // caller's leading dims with chunk_len in the last position.
         let mut out_dims = dims;
         *out_dims.last_mut().unwrap() = chunk_len;
         let reshaped = out.reshape(out_dims.as_slice())?;
-        // (#1082) bridge the candle result back to kt for the kt-typed return.
-        Ok(Some(crate::forward::candle_to_kt_activation(&reshaped)?))
+        Ok(Some(reshaped))
     }
 
     fn supports_linear_decode_argmax(&self) -> bool {
@@ -3928,23 +3619,23 @@ impl BackendRuntime for VulkanBackend {
         Ok(())
     }
 
-    /// Phase 4.x residency: drop the candle CPU storage of every
+    /// Phase 4.x residency: drop the CPU storage of every
     /// pre-transposed weight cache (`*_proj_t`, `embed_tokens_t`)
     /// whose BF16-packed bytes are already resident in
-    /// [`Self::bf16_packed_weight_cache`]. Replace each with a
+    /// `bf16_packed_weight_cache_kt`. Replace each with a
     /// 1-element BF16 stub and re-key the cache so subsequent
-    /// lookups against the new candle_core::TensorId still find the same
+    /// lookups against the new kt `TensorId` still find the same
     /// `Arc<VulkanBuffer>`.
     ///
     /// Saves ~6-7 GB peak RSS on Qwen3.5-4B training at T=918 — the
     /// transposed-cache copies are the dominant remaining
-    /// candle-side residency item documented in
+    /// CPU-side residency item documented in
     /// `docs/audits/candle_cpu_residency_2026-05-11.md`.
     ///
     /// Safe because:
     /// - The bf16-packed Vulkan code paths read the weight via the
-    ///   `Arc<VulkanBuffer>` looked up in `bf16_packed_weight_cache`.
-    ///   They never re-read the candle storage of the source tensor
+    ///   `Arc<VulkanBuffer>` looked up in `bf16_packed_weight_cache_kt`.
+    ///   They never re-read the CPU storage of the source tensor
     ///   after the buffer is cached.
     /// - `VulkanLinearOp::bwd` for BF16 weights routes through the
     ///   transposed Vulkan kernel (also buffer-backed). The F32
@@ -4213,15 +3904,8 @@ impl BackendRuntime for VulkanBackend {
         {
             return Ok(None);
         }
-        // Bridge kt args -> candle locals; re-borrow under the same names so
-        // the candle body below is unchanged.
-        let x_owned = crate::forward::kt_logits_to_candle(x)?;
-        let gate_weight_t_owned = crate::forward::kt_logits_to_candle(gate_weight_t)?;
-        let up_weight_t_owned = crate::forward::kt_logits_to_candle(up_weight_t)?;
-        let x = &x_owned;
-        let gate_weight_t = &gate_weight_t_owned;
-        let up_weight_t = &up_weight_t_owned;
-
+        // (#1082) kt-native: shapes off the kt tensors, weight buffers keyed
+        // on the stable kt id (upload once), x bytes straight from kt storage.
         let Ok((batch, seq_len, hidden)) = x.dims3() else {
             return Ok(None);
         };
@@ -4239,15 +3923,15 @@ impl BackendRuntime for VulkanBackend {
             .vulkan_device
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
-        let gate_buf = self.cached_f32_weight_buffer(gate_weight_t)?;
-        let up_buf = self.cached_f32_weight_buffer(up_weight_t)?;
+        let gate_buf = self.cached_f32_weight_buffer_kt(gate_weight_t)?;
+        let up_buf = self.cached_f32_weight_buffer_kt(up_weight_t)?;
         let row_count = batch * seq_len;
         let dispatch_x = if seq_len == 1 {
             x.clone()
         } else {
             x.reshape((row_count, 1usize, hidden))?
         };
-        let x_data = tensor_to_f32_bytes_with_shape(&dispatch_x)?.0;
+        let x_data = kt_tensor_to_f32_bytes_with_shape(&dispatch_x)?.0;
         let out_data = kiln_vulkan_kernel::kernels::dispatch_mlp_gate_up_decode_cached_bytes(
             vk_device,
             &x_data,
@@ -4258,17 +3942,17 @@ impl BackendRuntime for VulkanBackend {
             &up_buf,
         )
         .context("mlp_gate_up_decode kernel failed")?;
-        let out = tensor_from_f32_bytes(
+        let out = kt_tensor_from_f32_bytes(
             &out_data,
             &[row_count, 1, intermediate],
-            candle_core::DType::F32,
+            kiln_tensor::DType::F32,
         )?;
         let out = if seq_len == 1 {
             out
         } else {
             out.reshape((batch, seq_len, intermediate))?
         };
-        Ok(Some(crate::forward::candle_to_kt_activation(&out)?))
+        Ok(Some(out))
     }
 
     fn mlp_decode(
@@ -4370,14 +4054,7 @@ impl BackendRuntime for VulkanBackend {
         if a_strict.dtype() != kiln_tensor::DType::BF16 {
             return Ok(None);
         }
-        // Bridge kt args -> candle locals; re-borrow under the same names so
-        // the candle body below is unchanged.
-        let a_strict_owned = crate::forward::kt_logits_to_candle(a_strict)?;
-        let v_prime_owned = crate::forward::kt_logits_to_candle(v_prime)?;
-        let beta_owned = crate::forward::kt_logits_to_candle(beta)?;
-        let a_strict = &a_strict_owned;
-        let v_prime = &v_prime_owned;
-        let beta = &beta_owned;
+        // (#1082) kt-native: byte extraction reads straight from kt storage.
         let vk_device = self
             .vulkan_device
             .as_ref()
@@ -4385,9 +4062,9 @@ impl BackendRuntime for VulkanBackend {
 
         let v_dims = v_prime.dims();
         let (batch, heads, chunk, dv) = (v_dims[0], v_dims[1], v_dims[2], v_dims[3]);
-        let a_strict_bytes = tensor_to_f32_bytes_with_shape(a_strict)?.0;
-        let v_prime_bytes = tensor_to_f32_bytes_with_shape(v_prime)?.0;
-        let beta_bytes = tensor_to_f32_bytes_with_shape(beta)?.0;
+        let a_strict_bytes = kt_tensor_to_f32_bytes_with_shape(a_strict)?.0;
+        let v_prime_bytes = kt_tensor_to_f32_bytes_with_shape(v_prime)?.0;
+        let beta_bytes = kt_tensor_to_f32_bytes_with_shape(beta)?.0;
         let out_data = kiln_vulkan_kernel::kernels::dispatch_gdn_forward_substitution_bytes(
             vk_device,
             &a_strict_bytes,
@@ -4399,12 +4076,12 @@ impl BackendRuntime for VulkanBackend {
             dv,
         )
         .context("gdn_forward_substitution kernel failed")?;
-        let out = tensor_from_f32_bytes(
+        let out = kt_tensor_from_f32_bytes(
             &out_data,
             &[batch, heads, chunk, dv],
-            candle_core::DType::F32,
+            kiln_tensor::DType::F32,
         )?;
-        Ok(Some(crate::forward::candle_to_kt_activation(&out)?))
+        Ok(Some(out))
     }
 
     fn gdn_recurrent_prefill_native_head_last(
@@ -4432,20 +4109,8 @@ impl BackendRuntime for VulkanBackend {
         {
             return Ok(None);
         }
-        // Bridge kt args -> candle locals. `state` mirrors `state_kt`; the
-        // mutated mirror is pushed back to the kt arg at each return below.
-        let q_owned = crate::forward::kt_logits_to_candle(q)?;
-        let k_owned = crate::forward::kt_logits_to_candle(k)?;
-        let v_owned = crate::forward::kt_logits_to_candle(v)?;
-        let beta_owned = crate::forward::kt_logits_to_candle(beta)?;
-        let g_owned = crate::forward::kt_logits_to_candle(g)?;
-        let mut state_c = crate::forward::kt_logits_to_candle(state_kt)?;
-        let q = &q_owned;
-        let k = &k_owned;
-        let v = &v_owned;
-        let beta = &beta_owned;
-        let g = &g_owned;
-        let state: &mut candle_core::Tensor = &mut state_c;
+        // (#1082) kt-native: all args are already kt; `state_kt` is mutated in
+        // place. The RECURRENT_STATE_RESIDENT_CACHE keys on the kt `TensorId`.
         let Ok((batch, seq_len, q_heads, dk)) = q.dims4() else {
             return Ok(None);
         };
@@ -4461,7 +4126,7 @@ impl BackendRuntime for VulkanBackend {
         let Ok((g_batch, g_seq_len, g_heads)) = g.dims3() else {
             return Ok(None);
         };
-        let Ok((state_batch, state_heads, state_dk, state_dv)) = state.dims4() else {
+        let Ok((state_batch, state_heads, state_dk, state_dv)) = state_kt.dims4() else {
             return Ok(None);
         };
         if seq_len != 1
@@ -4493,18 +4158,18 @@ impl BackendRuntime for VulkanBackend {
             .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
         if self.recurrent_state_residency_enabled
             && recurrent_state_resident_scope_active()
-            && state.dtype() == q.dtype()
+            && state_kt.dtype() == q.dtype()
         {
-            let state_id = state.id();
+            let state_id = state_kt.id();
             let resident_state =
                 RECURRENT_STATE_RESIDENT_CACHE.with(|cache| cache.borrow().get(&state_id).cloned());
-            let q_data = tensor_to_f32_bytes_with_shape(q)?.0;
-            let k_data = tensor_to_f32_bytes_with_shape(k)?.0;
-            let v_data = tensor_to_f32_bytes_with_shape(v)?.0;
-            let beta_data = tensor_to_f32_bytes_with_shape(beta)?.0;
-            let g_data = tensor_to_f32_bytes_with_shape(g)?.0;
+            let q_data = kt_tensor_to_f32_bytes_with_shape(q)?.0;
+            let k_data = kt_tensor_to_f32_bytes_with_shape(k)?.0;
+            let v_data = kt_tensor_to_f32_bytes_with_shape(v)?.0;
+            let beta_data = kt_tensor_to_f32_bytes_with_shape(beta)?.0;
+            let g_data = kt_tensor_to_f32_bytes_with_shape(g)?.0;
             let state_data_owned = if resident_state.is_none() {
-                Some(tensor_to_f32_bytes_with_shape(state)?.0)
+                Some(kt_tensor_to_f32_bytes_with_shape(state_kt)?.0)
             } else {
                 None
             };
@@ -4521,8 +4186,8 @@ impl BackendRuntime for VulkanBackend {
                 )
                 .context("gdn_recurrent_step native-head resident-state Vulkan kernel failed")?;
             // `out_data` is the un-unsqueezed [batch, heads, dv] layout.
-            // Reconstruct the candle tensor and re-unsqueeze to match prior public shape.
-            let out_no_seq = tensor_from_f32_bytes(
+            // Reconstruct the kt tensor and re-unsqueeze to match prior public shape.
+            let out_no_seq = kt_tensor_from_f32_bytes(
                 &out_data,
                 &[batch, heads, dv],
                 q_dtype,
@@ -4531,22 +4196,20 @@ impl BackendRuntime for VulkanBackend {
             RECURRENT_STATE_RESIDENT_CACHE.with(|cache| {
                 cache.borrow_mut().insert(state_id, resident_state);
             });
-            // Push the (possibly mutated) candle state mirror back to the kt arg.
-            *state_kt = crate::forward::candle_to_kt_activation(state)?;
-            return Ok(Some(crate::forward::candle_to_kt_activation(&out)?));
+            return Ok(Some(out));
         }
         let skip_state_readback = crate::forward::vulkan_skip_gdn_state_readback_active();
         let (batch, _seq, q_heads, dk) = q.dims4()?;
         let (_, _, heads, dv) = v.dims4()?;
         let q_dtype = q.dtype();
-        let state_dtype = state.dtype();
-        let state_dims = state.dims().to_vec();
-        let q_data = tensor_to_f32_bytes_with_shape(q)?.0;
-        let k_data = tensor_to_f32_bytes_with_shape(k)?.0;
-        let v_data = tensor_to_f32_bytes_with_shape(v)?.0;
-        let beta_data = tensor_to_f32_bytes_with_shape(beta)?.0;
-        let g_data = tensor_to_f32_bytes_with_shape(g)?.0;
-        let state_data = tensor_to_f32_bytes_with_shape(state)?.0;
+        let state_dtype = state_kt.dtype();
+        let state_dims = state_kt.dims().to_vec();
+        let q_data = kt_tensor_to_f32_bytes_with_shape(q)?.0;
+        let k_data = kt_tensor_to_f32_bytes_with_shape(k)?.0;
+        let v_data = kt_tensor_to_f32_bytes_with_shape(v)?.0;
+        let beta_data = kt_tensor_to_f32_bytes_with_shape(beta)?.0;
+        let g_data = kt_tensor_to_f32_bytes_with_shape(g)?.0;
+        let state_data = kt_tensor_to_f32_bytes_with_shape(state_kt)?.0;
         let (out_data, new_state_data) =
             kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_native_head_last_with_options_bytes(
                 vk_device,
@@ -4564,22 +4227,20 @@ impl BackendRuntime for VulkanBackend {
                 skip_state_readback,
             )
             .context("gdn_recurrent_step native-head Vulkan kernel failed")?;
-        let out = tensor_from_f32_bytes(
+        let out = kt_tensor_from_f32_bytes(
             &out_data,
             &[batch, heads, dv],
             q_dtype,
         )?
         .unsqueeze(1)?;
         if let Some(sd) = new_state_data {
-            *state = tensor_from_f32_bytes(
+            *state_kt = kt_tensor_from_f32_bytes(
                 &sd,
                 &state_dims,
                 state_dtype,
             )?;
         }
-        // Push the (possibly mutated) candle state mirror back to the kt arg.
-        *state_kt = crate::forward::candle_to_kt_activation(state)?;
-        Ok(Some(crate::forward::candle_to_kt_activation(&out)?))
+        Ok(Some(out))
     }
 
     fn gdn_recurrent_qk_norm_prefill_native_head_last(
@@ -4609,20 +4270,8 @@ impl BackendRuntime for VulkanBackend {
         {
             return Ok(None);
         }
-        // Bridge kt args -> candle locals. `state` mirrors `state_kt`; the
-        // mutated mirror is pushed back to the kt arg at the return below.
-        let q_owned = crate::forward::kt_logits_to_candle(q)?;
-        let k_owned = crate::forward::kt_logits_to_candle(k)?;
-        let v_owned = crate::forward::kt_logits_to_candle(v)?;
-        let beta_owned = crate::forward::kt_logits_to_candle(beta)?;
-        let g_owned = crate::forward::kt_logits_to_candle(g)?;
-        let mut state_c = crate::forward::kt_logits_to_candle(state_kt)?;
-        let q = &q_owned;
-        let k = &k_owned;
-        let v = &v_owned;
-        let beta = &beta_owned;
-        let g = &g_owned;
-        let state: &mut candle_core::Tensor = &mut state_c;
+        // (#1082) kt-native: all args are already kt; `state_kt` is mutated in
+        // place at the return below.
         let Ok((_, _, _, dk)) = q.dims4() else {
             return Ok(None);
         };
@@ -4637,14 +4286,14 @@ impl BackendRuntime for VulkanBackend {
         let skip_state_readback = crate::forward::vulkan_skip_gdn_state_readback_active();
         let (batch, _seq, q_heads, dk) = q.dims4()?;
         let (_, _, heads, dv) = v.dims4()?;
-        let state_dtype = state.dtype();
-        let state_dims = state.dims().to_vec();
-        let q_data = tensor_to_f32_bytes_with_shape(q)?.0;
-        let k_data = tensor_to_f32_bytes_with_shape(k)?.0;
-        let v_data = tensor_to_f32_bytes_with_shape(v)?.0;
-        let beta_data = tensor_to_f32_bytes_with_shape(beta)?.0;
-        let g_data = tensor_to_f32_bytes_with_shape(g)?.0;
-        let state_data = tensor_to_f32_bytes_with_shape(state)?.0;
+        let state_dtype = state_kt.dtype();
+        let state_dims = state_kt.dims().to_vec();
+        let q_data = kt_tensor_to_f32_bytes_with_shape(q)?.0;
+        let k_data = kt_tensor_to_f32_bytes_with_shape(k)?.0;
+        let v_data = kt_tensor_to_f32_bytes_with_shape(v)?.0;
+        let beta_data = kt_tensor_to_f32_bytes_with_shape(beta)?.0;
+        let g_data = kt_tensor_to_f32_bytes_with_shape(g)?.0;
+        let state_data = kt_tensor_to_f32_bytes_with_shape(state_kt)?.0;
         let (out_data, new_state_data) =
             kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_qk_norm_step_native_head_last_with_options_bytes(
                 vk_device,
@@ -4662,22 +4311,20 @@ impl BackendRuntime for VulkanBackend {
                 skip_state_readback,
             )
             .context("gdn_recurrent_qk_norm native-head Vulkan kernel failed")?;
-        let out = tensor_from_f32_bytes(
+        let out = kt_tensor_from_f32_bytes(
             &out_data,
             &[batch, heads, dv],
             state_dtype,
         )?
         .unsqueeze(1)?;
         if let Some(sd) = new_state_data {
-            *state = tensor_from_f32_bytes(
+            *state_kt = kt_tensor_from_f32_bytes(
                 &sd,
                 &state_dims,
                 state_dtype,
             )?;
         }
-        // Push the (possibly mutated) candle state mirror back to the kt arg.
-        *state_kt = crate::forward::candle_to_kt_activation(state)?;
-        Ok(Some(crate::forward::candle_to_kt_activation(&out)?))
+        Ok(Some(out))
     }
 
     fn gdn_recurrent_step(
@@ -4696,37 +4343,25 @@ impl BackendRuntime for VulkanBackend {
         if !matches!(q.dtype(), kiln_tensor::DType::BF16 | kiln_tensor::DType::F32) {
             return Ok(None);
         }
-        // Bridge kt args -> candle locals. `state` mirrors `state_kt`; the
-        // mutated mirror is pushed back to the kt arg at each return below.
-        let q_owned = crate::forward::kt_logits_to_candle(q)?;
-        let k_owned = crate::forward::kt_logits_to_candle(k)?;
-        let v_owned = crate::forward::kt_logits_to_candle(v)?;
-        let beta_owned = crate::forward::kt_logits_to_candle(beta)?;
-        let g_owned = crate::forward::kt_logits_to_candle(g)?;
-        let mut state_c = crate::forward::kt_logits_to_candle(state_kt)?;
-        let q = &q_owned;
-        let k = &k_owned;
-        let v = &v_owned;
-        let beta = &beta_owned;
-        let g = &g_owned;
-        let state: &mut candle_core::Tensor = &mut state_c;
+        // (#1082) kt-native: all args are already kt; `state_kt` is mutated in
+        // place. The RECURRENT_STATE_RESIDENT_CACHE keys on the kt `TensorId`.
         let vk_device = self
             .vulkan_device
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
 
         if self.recurrent_state_residency_enabled && recurrent_state_resident_scope_active() {
-            let state_id = state.id();
+            let state_id = state_kt.id();
             let resident_state =
                 RECURRENT_STATE_RESIDENT_CACHE.with(|cache| cache.borrow().get(&state_id).cloned());
 
-            let q_data = tensor_to_f32_bytes_with_shape(q)?.0;
-            let k_data = tensor_to_f32_bytes_with_shape(k)?.0;
-            let v_data = tensor_to_f32_bytes_with_shape(v)?.0;
-            let beta_data = tensor_to_f32_bytes_with_shape(beta)?.0;
-            let g_data = tensor_to_f32_bytes_with_shape(g)?.0;
+            let q_data = kt_tensor_to_f32_bytes_with_shape(q)?.0;
+            let k_data = kt_tensor_to_f32_bytes_with_shape(k)?.0;
+            let v_data = kt_tensor_to_f32_bytes_with_shape(v)?.0;
+            let beta_data = kt_tensor_to_f32_bytes_with_shape(beta)?.0;
+            let g_data = kt_tensor_to_f32_bytes_with_shape(g)?.0;
             let state_data_owned = if resident_state.is_none() {
-                Some(tensor_to_f32_bytes_with_shape(state)?.0)
+                Some(kt_tensor_to_f32_bytes_with_shape(state_kt)?.0)
             } else {
                 None
             };
@@ -4743,7 +4378,7 @@ impl BackendRuntime for VulkanBackend {
                     resident_state,
                 )
                 .context("gdn_recurrent_step resident-state kernel failed")?;
-            let out = tensor_from_f32_bytes(
+            let out = kt_tensor_from_f32_bytes(
                 &out_data,
                 &[batch, heads, dv],
                 q_dtype,
@@ -4752,9 +4387,7 @@ impl BackendRuntime for VulkanBackend {
             RECURRENT_STATE_RESIDENT_CACHE.with(|cache| {
                 cache.borrow_mut().insert(state_id, resident_state);
             });
-            // Push the (possibly mutated) candle state mirror back to the kt arg.
-            *state_kt = crate::forward::candle_to_kt_activation(state)?;
-            return Ok(Some(crate::forward::candle_to_kt_activation(&out)?));
+            return Ok(Some(out));
         }
 
         let skip_state_readback = crate::forward::vulkan_skip_gdn_state_readback_active();
@@ -4762,14 +4395,14 @@ impl BackendRuntime for VulkanBackend {
         let (batch, heads, dk) = (q_dims[0], q_dims[1], q_dims[2]);
         let dv = v.dims()[2];
         let q_dtype = q.dtype();
-        let state_dtype = state.dtype();
-        let state_dims = state.dims().to_vec();
-        let q_data = tensor_to_f32_bytes_with_shape(q)?.0;
-        let k_data = tensor_to_f32_bytes_with_shape(k)?.0;
-        let v_data = tensor_to_f32_bytes_with_shape(v)?.0;
-        let beta_data = tensor_to_f32_bytes_with_shape(beta)?.0;
-        let g_data = tensor_to_f32_bytes_with_shape(g)?.0;
-        let state_data = tensor_to_f32_bytes_with_shape(state)?.0;
+        let state_dtype = state_kt.dtype();
+        let state_dims = state_kt.dims().to_vec();
+        let q_data = kt_tensor_to_f32_bytes_with_shape(q)?.0;
+        let k_data = kt_tensor_to_f32_bytes_with_shape(k)?.0;
+        let v_data = kt_tensor_to_f32_bytes_with_shape(v)?.0;
+        let beta_data = kt_tensor_to_f32_bytes_with_shape(beta)?.0;
+        let g_data = kt_tensor_to_f32_bytes_with_shape(g)?.0;
+        let state_data = kt_tensor_to_f32_bytes_with_shape(state_kt)?.0;
         let (out_data, new_state_data) =
             kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_with_options_bytes(
                 vk_device,
@@ -4786,21 +4419,19 @@ impl BackendRuntime for VulkanBackend {
                 skip_state_readback,
             )
             .context("gdn_recurrent_step kernel failed")?;
-        let out = tensor_from_f32_bytes(
+        let out = kt_tensor_from_f32_bytes(
             &out_data,
             &[batch, heads, dv],
             q_dtype,
         )?;
         if let Some(sd) = new_state_data {
-            *state = tensor_from_f32_bytes(
+            *state_kt = kt_tensor_from_f32_bytes(
                 &sd,
                 &state_dims,
                 state_dtype,
             )?;
         }
-        // Push the (possibly mutated) candle state mirror back to the kt arg.
-        *state_kt = crate::forward::candle_to_kt_activation(state)?;
-        Ok(Some(crate::forward::candle_to_kt_activation(&out)?))
+        Ok(Some(out))
     }
 
     fn gdn_chunkwise_forward(
@@ -4957,31 +4588,18 @@ impl BackendRuntime for VulkanBackend {
         if g.dtype() != kiln_tensor::DType::BF16 {
             return Ok(None);
         }
-        // Bridge kt args -> candle locals; re-borrow under the same names so
-        // the candle body below is unchanged.
-        let g_owned = crate::forward::kt_logits_to_candle(g)?;
-        let v_owned = crate::forward::kt_logits_to_candle(v)?;
-        let kkt_owned = crate::forward::kt_logits_to_candle(kkt)?;
-        let qkt_owned = crate::forward::kt_logits_to_candle(qkt)?;
-        let ks_entry_owned = crate::forward::kt_logits_to_candle(ks_entry)?;
-        let q_s_owned = crate::forward::kt_logits_to_candle(q_s)?;
-        let g = &g_owned;
-        let v = &v_owned;
-        let kkt = &kkt_owned;
-        let qkt = &qkt_owned;
-        let ks_entry = &ks_entry_owned;
-        let q_s = &q_s_owned;
+        // (#1082) kt-native: byte extraction + reconstruction run on kt args.
         let vk_device = self
             .vulkan_device
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
 
-        let g_data = tensor_to_f32_bytes_with_shape(g)?.0;
-        let v_data = tensor_to_f32_bytes_with_shape(v)?.0;
-        let kkt_data = tensor_to_f32_bytes_with_shape(kkt)?.0;
-        let qkt_data = tensor_to_f32_bytes_with_shape(qkt)?.0;
-        let ks_entry_data = tensor_to_f32_bytes_with_shape(ks_entry)?.0;
-        let q_s_data = tensor_to_f32_bytes_with_shape(q_s)?.0;
+        let g_data = kt_tensor_to_f32_bytes_with_shape(g)?.0;
+        let v_data = kt_tensor_to_f32_bytes_with_shape(v)?.0;
+        let kkt_data = kt_tensor_to_f32_bytes_with_shape(kkt)?.0;
+        let qkt_data = kt_tensor_to_f32_bytes_with_shape(qkt)?.0;
+        let ks_entry_data = kt_tensor_to_f32_bytes_with_shape(ks_entry)?.0;
+        let q_s_data = kt_tensor_to_f32_bytes_with_shape(q_s)?.0;
         let g_dims = g.dims();
         let (batch, heads, chunk) = (g_dims[0], g_dims[1], g_dims[2]);
         let dv = v.dims()[3];
@@ -4996,31 +4614,13 @@ impl BackendRuntime for VulkanBackend {
         let cv_shape = [batch, heads, chunk, dv];
         let decay_shape = [batch, heads, chunk];
         let p_last_shape = [batch, heads];
-        let a_strict_t = tensor_from_f32_bytes(
-            &a_strict_b, &cc_shape, candle_core::DType::BF16,
-        )?;
-        let b_mask_t = tensor_from_f32_bytes(
-            &b_mask_b, &cc_shape, candle_core::DType::BF16,
-        )?;
-        let v_prime_t = tensor_from_f32_bytes(
-            &v_prime_b, &cv_shape, candle_core::DType::BF16,
-        )?;
-        let q_s_scaled_t = tensor_from_f32_bytes(
-            &q_s_scaled_b, &cv_shape, candle_core::DType::BF16,
-        )?;
-        let decay_last_col_t = tensor_from_f32_bytes(
-            &decay_last_col_b, &decay_shape, candle_core::DType::BF16,
-        )?;
-        let p_last_t = tensor_from_f32_bytes(
-            &p_last_b, &p_last_shape, candle_core::DType::BF16,
-        )?;
         Ok(Some((
-            crate::forward::candle_to_kt_activation(&a_strict_t)?,
-            crate::forward::candle_to_kt_activation(&b_mask_t)?,
-            crate::forward::candle_to_kt_activation(&v_prime_t)?,
-            crate::forward::candle_to_kt_activation(&q_s_scaled_t)?,
-            crate::forward::candle_to_kt_activation(&decay_last_col_t)?,
-            crate::forward::candle_to_kt_activation(&p_last_t)?,
+            kt_tensor_from_f32_bytes(&a_strict_b, &cc_shape, kiln_tensor::DType::BF16)?,
+            kt_tensor_from_f32_bytes(&b_mask_b, &cc_shape, kiln_tensor::DType::BF16)?,
+            kt_tensor_from_f32_bytes(&v_prime_b, &cv_shape, kiln_tensor::DType::BF16)?,
+            kt_tensor_from_f32_bytes(&q_s_scaled_b, &cv_shape, kiln_tensor::DType::BF16)?,
+            kt_tensor_from_f32_bytes(&decay_last_col_b, &decay_shape, kiln_tensor::DType::BF16)?,
+            kt_tensor_from_f32_bytes(&p_last_b, &p_last_shape, kiln_tensor::DType::BF16)?,
         )))
     }
 
@@ -5040,31 +4640,18 @@ impl BackendRuntime for VulkanBackend {
         if a_strict.dtype() != kiln_tensor::DType::BF16 {
             return Ok(None);
         }
-        // Bridge kt args -> candle locals; re-borrow under the same names so
-        // the candle body below is unchanged.
-        let a_strict_owned = crate::forward::kt_logits_to_candle(a_strict)?;
-        let b_mask_owned = crate::forward::kt_logits_to_candle(b_mask)?;
-        let v_prime_owned = crate::forward::kt_logits_to_candle(v_prime)?;
-        let q_s_scaled_owned = crate::forward::kt_logits_to_candle(q_s_scaled)?;
-        let beta_owned = crate::forward::kt_logits_to_candle(beta)?;
-        let decay_last_col_owned = crate::forward::kt_logits_to_candle(decay_last_col)?;
-        let a_strict = &a_strict_owned;
-        let b_mask = &b_mask_owned;
-        let v_prime = &v_prime_owned;
-        let q_s_scaled = &q_s_scaled_owned;
-        let beta = &beta_owned;
-        let decay_last_col = &decay_last_col_owned;
+        // (#1082) kt-native: byte extraction + reconstruction run on kt args.
         let vk_device = self
             .vulkan_device
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
 
-        let a_strict_data = tensor_to_f32_bytes_with_shape(a_strict)?.0;
-        let b_mask_data = tensor_to_f32_bytes_with_shape(b_mask)?.0;
-        let v_prime_data = tensor_to_f32_bytes_with_shape(v_prime)?.0;
-        let q_s_scaled_data = tensor_to_f32_bytes_with_shape(q_s_scaled)?.0;
-        let beta_data = tensor_to_f32_bytes_with_shape(beta)?.0;
-        let decay_last_col_data = tensor_to_f32_bytes_with_shape(decay_last_col)?.0;
+        let a_strict_data = kt_tensor_to_f32_bytes_with_shape(a_strict)?.0;
+        let b_mask_data = kt_tensor_to_f32_bytes_with_shape(b_mask)?.0;
+        let v_prime_data = kt_tensor_to_f32_bytes_with_shape(v_prime)?.0;
+        let q_s_scaled_data = kt_tensor_to_f32_bytes_with_shape(q_s_scaled)?.0;
+        let beta_data = kt_tensor_to_f32_bytes_with_shape(beta)?.0;
+        let decay_last_col_data = kt_tensor_to_f32_bytes_with_shape(decay_last_col)?.0;
         let v_prime_dims = v_prime.dims();
         let (batch, heads, chunk, dv) =
             (v_prime_dims[0], v_prime_dims[1], v_prime_dims[2], v_prime_dims[3]);
@@ -5080,20 +4667,17 @@ impl BackendRuntime for VulkanBackend {
                 batch, heads, chunk, dv,
             )
             .context("gdn_chunk_scan kernel failed")?;
-        let out_tensor = tensor_from_f32_bytes(
+        let out_tensor = kt_tensor_from_f32_bytes(
             &out_data,
             &[batch, heads, chunk, dv],
-            candle_core::DType::BF16,
+            kiln_tensor::DType::BF16,
         )?;
-        let p_out_tensor = tensor_from_f32_bytes(
+        let p_out_tensor = kt_tensor_from_f32_bytes(
             &p_out_data,
             &[batch, heads, chunk, dv],
-            candle_core::DType::BF16,
+            kiln_tensor::DType::BF16,
         )?;
-        Ok(Some((
-            crate::forward::candle_to_kt_activation(&out_tensor)?,
-            crate::forward::candle_to_kt_activation(&p_out_tensor)?,
-        )))
+        Ok(Some((out_tensor, p_out_tensor)))
     }
 
     fn gdn_full_chunk_forward(
@@ -5115,45 +4699,27 @@ impl BackendRuntime for VulkanBackend {
         if g.dtype() != kiln_tensor::DType::BF16 {
             return Ok(None);
         }
-        // Bridge kt args -> candle locals. `state` mirrors `state_kt`; the
-        // mutated mirror is pushed back to the kt arg at the return below.
-        let g_owned = crate::forward::kt_logits_to_candle(g)?;
-        let v_owned = crate::forward::kt_logits_to_candle(v)?;
-        let kkt_owned = crate::forward::kt_logits_to_candle(kkt)?;
-        let qkt_owned = crate::forward::kt_logits_to_candle(qkt)?;
-        let ks_entry_owned = crate::forward::kt_logits_to_candle(ks_entry)?;
-        let q_s_owned = crate::forward::kt_logits_to_candle(q_s)?;
-        let beta_owned = crate::forward::kt_logits_to_candle(beta)?;
-        let k_t_owned = crate::forward::kt_logits_to_candle(k_t)?;
-        let mut state_c = crate::forward::kt_logits_to_candle(state_kt)?;
-        let g = &g_owned;
-        let v = &v_owned;
-        let kkt = &kkt_owned;
-        let qkt = &qkt_owned;
-        let ks_entry = &ks_entry_owned;
-        let q_s = &q_s_owned;
-        let beta = &beta_owned;
-        let k_t = &k_t_owned;
-        let state: &mut candle_core::Tensor = &mut state_c;
+        // (#1082) kt-native: all args are already kt; `state_kt` is mutated in
+        // place at the return below.
         let vk_device = self
             .vulkan_device
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
 
-        let g_data = tensor_to_f32_bytes_with_shape(g)?.0;
-        let v_data = tensor_to_f32_bytes_with_shape(v)?.0;
-        let kkt_data = tensor_to_f32_bytes_with_shape(kkt)?.0;
-        let qkt_data = tensor_to_f32_bytes_with_shape(qkt)?.0;
-        let ks_entry_data = tensor_to_f32_bytes_with_shape(ks_entry)?.0;
-        let q_s_data = tensor_to_f32_bytes_with_shape(q_s)?.0;
-        let beta_data = tensor_to_f32_bytes_with_shape(beta)?.0;
-        let k_t_data = tensor_to_f32_bytes_with_shape(k_t)?.0;
-        let state_data = tensor_to_f32_bytes_with_shape(state)?.0;
+        let g_data = kt_tensor_to_f32_bytes_with_shape(g)?.0;
+        let v_data = kt_tensor_to_f32_bytes_with_shape(v)?.0;
+        let kkt_data = kt_tensor_to_f32_bytes_with_shape(kkt)?.0;
+        let qkt_data = kt_tensor_to_f32_bytes_with_shape(qkt)?.0;
+        let ks_entry_data = kt_tensor_to_f32_bytes_with_shape(ks_entry)?.0;
+        let q_s_data = kt_tensor_to_f32_bytes_with_shape(q_s)?.0;
+        let beta_data = kt_tensor_to_f32_bytes_with_shape(beta)?.0;
+        let k_t_data = kt_tensor_to_f32_bytes_with_shape(k_t)?.0;
+        let state_data = kt_tensor_to_f32_bytes_with_shape(state_kt)?.0;
         let g_dims = g.dims();
         let (batch, heads, chunk) = (g_dims[0], g_dims[1], g_dims[2]);
         let dv = v.dims()[3];
         let dk = k_t.dims()[2];
-        let state_dims = state.dims().as_ref().to_vec();
+        let state_dims = state_kt.dims().to_vec();
         let (out_data, new_state_data) =
             kiln_vulkan_kernel::kernels::dispatch_gdn_full_chunk_forward_bytes(
                 vk_device, &g_data, &v_data, &kkt_data, &qkt_data, &ks_entry_data,
@@ -5161,20 +4727,17 @@ impl BackendRuntime for VulkanBackend {
                 batch, heads, chunk, dk, dv,
             )
             .context("gdn_full_chunk_forward kernel failed")?;
-        let out = tensor_from_f32_bytes(
+        let out = kt_tensor_from_f32_bytes(
             &out_data,
             &[batch, heads, chunk, dv],
-            candle_core::DType::BF16,
+            kiln_tensor::DType::BF16,
         )?;
-        let new_state = tensor_from_f32_bytes(
+        *state_kt = kt_tensor_from_f32_bytes(
             &new_state_data,
             &state_dims,
-            candle_core::DType::BF16,
+            kiln_tensor::DType::BF16,
         )?;
-        *state = new_state;
-        // Push the (mutated) candle state mirror back to the kt arg.
-        *state_kt = crate::forward::candle_to_kt_activation(state)?;
-        Ok(Some(crate::forward::candle_to_kt_activation(&out)?))
+        Ok(Some(out))
     }
 
     fn gdn_gates(
@@ -5191,16 +4754,8 @@ impl BackendRuntime for VulkanBackend {
         if !matches!(a.dtype(), kiln_tensor::DType::BF16 | kiln_tensor::DType::F32) {
             return Ok(None);
         }
-        // Bridge kt args -> candle locals; re-borrow under the same names so
-        // the candle body below is unchanged.
-        let a_owned = crate::forward::kt_logits_to_candle(a)?;
-        let b_owned = crate::forward::kt_logits_to_candle(b)?;
-        let a_log_owned = crate::forward::kt_logits_to_candle(a_log)?;
-        let dt_bias_owned = crate::forward::kt_logits_to_candle(dt_bias)?;
-        let a = &a_owned;
-        let b = &b_owned;
-        let a_log = &a_log_owned;
-        let dt_bias = &dt_bias_owned;
+        // (#1082) kt-native: weight buffers keyed on the stable kt id; byte
+        // extraction + reconstruction run on the kt args.
         let vk_device = self
             .vulkan_device
             .as_ref()
@@ -5209,13 +4764,13 @@ impl BackendRuntime for VulkanBackend {
         if dt_bias.elem_count() != nv {
             return Ok(None);
         }
-        let a_log_buf = self.cached_f32_weight_buffer(a_log)?;
-        let dt_bias_buf = self.cached_f32_weight_buffer(dt_bias)?;
+        let a_log_buf = self.cached_f32_weight_buffer_kt(a_log)?;
+        let dt_bias_buf = self.cached_f32_weight_buffer_kt(dt_bias)?;
 
         // Output shape matches input shape [B, T, nv]
-        let out_shape = a.dims().as_ref().to_vec();
-        let a_data = tensor_to_f32_bytes_with_shape(a)?.0;
-        let b_data = tensor_to_f32_bytes_with_shape(b)?.0;
+        let out_shape = a.dims().to_vec();
+        let a_data = kt_tensor_to_f32_bytes_with_shape(a)?.0;
+        let b_data = kt_tensor_to_f32_bytes_with_shape(b)?.0;
         let output_dtype = a.dtype();
         let (beta_b, g_b) = kiln_vulkan_kernel::kernels::dispatch_gdn_gates_cached_bytes(
             vk_device,
@@ -5228,13 +4783,10 @@ impl BackendRuntime for VulkanBackend {
         )
         .context("gdn_gates kernel failed")?;
         let beta =
-            tensor_from_f32_bytes(&beta_b, &out_shape, output_dtype)?;
+            kt_tensor_from_f32_bytes(&beta_b, &out_shape, output_dtype)?;
         let g =
-            tensor_from_f32_bytes(&g_b, &out_shape, output_dtype)?;
-        Ok(Some((
-            crate::forward::candle_to_kt_activation(&beta)?,
-            crate::forward::candle_to_kt_activation(&g)?,
-        )))
+            kt_tensor_from_f32_bytes(&g_b, &out_shape, output_dtype)?;
+        Ok(Some((beta, g)))
     }
 
     fn gdn_gated_rms_norm(
@@ -5251,14 +4803,8 @@ impl BackendRuntime for VulkanBackend {
         if !matches!(x.dtype(), kiln_tensor::DType::BF16 | kiln_tensor::DType::F32) {
             return Ok(None);
         }
-        // Bridge kt args -> candle locals; re-borrow under the same names so
-        // the candle body below is unchanged.
-        let x_owned = crate::forward::kt_logits_to_candle(x)?;
-        let z_owned = crate::forward::kt_logits_to_candle(z)?;
-        let weight_owned = crate::forward::kt_logits_to_candle(weight)?;
-        let x = &x_owned;
-        let z = &z_owned;
-        let weight = &weight_owned;
+        // (#1082) kt-native: weight buffer keyed on the stable kt id; byte
+        // extraction + reconstruction run on the kt args.
         let vk_device = self
             .vulkan_device
             .as_ref()
@@ -5267,12 +4813,12 @@ impl BackendRuntime for VulkanBackend {
         if hidden == 0 || x.elem_count() % hidden != 0 {
             return Ok(None);
         }
-        let weight_buf = self.cached_f32_weight_buffer(weight)?;
+        let weight_buf = self.cached_f32_weight_buffer_kt(weight)?;
 
         // Output shape matches x shape
-        let out_shape = x.dims().as_ref().to_vec();
-        let x_data = tensor_to_f32_bytes_with_shape(x)?.0;
-        let z_data = tensor_to_f32_bytes_with_shape(z)?.0;
+        let out_shape = x.dims().to_vec();
+        let x_data = kt_tensor_to_f32_bytes_with_shape(x)?.0;
+        let z_data = kt_tensor_to_f32_bytes_with_shape(z)?.0;
         let output_dtype = x.dtype();
         let out_data = kiln_vulkan_kernel::kernels::dispatch_gdn_gated_rms_norm_cached_bytes(
             vk_device,
@@ -5284,12 +4830,12 @@ impl BackendRuntime for VulkanBackend {
             &out_shape,
         )
         .context("gdn_gated_rms_norm kernel failed")?;
-        let out = tensor_from_f32_bytes(
+        let out = kt_tensor_from_f32_bytes(
             &out_data,
             &out_shape,
             output_dtype,
         )?;
-        Ok(Some(crate::forward::candle_to_kt_activation(&out)?))
+        Ok(Some(out))
     }
 
     fn causal_conv1d_update(
@@ -5306,22 +4852,16 @@ impl BackendRuntime for VulkanBackend {
         if !matches!(x.dtype(), kiln_tensor::DType::BF16 | kiln_tensor::DType::F32) {
             return Ok(None);
         }
-        // Bridge kt args -> candle locals. `conv_state` mirrors `conv_state_kt`;
-        // the mutated mirror is pushed back to the kt arg at the return below.
-        let x_owned = crate::forward::kt_logits_to_candle(x)?;
-        let weight_owned = crate::forward::kt_logits_to_candle(weight)?;
-        let mut conv_state_c = crate::forward::kt_logits_to_candle(conv_state_kt)?;
-        let x = &x_owned;
-        let weight = &weight_owned;
-        let conv_state: &mut candle_core::Tensor = &mut conv_state_c;
+        // (#1082) kt-native: all args are already kt; `conv_state_kt` is
+        // mutated in place at the return below.
         let vk_device = self
             .vulkan_device
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
 
-        let x_data = tensor_to_f32_bytes_with_shape(x)?.0;
-        let weight_data = tensor_to_f32_bytes_with_shape(weight)?.0;
-        let state_data = tensor_to_f32_bytes_with_shape(conv_state)?.0;
+        let x_data = kt_tensor_to_f32_bytes_with_shape(x)?.0;
+        let weight_data = kt_tensor_to_f32_bytes_with_shape(weight)?.0;
+        let state_data = kt_tensor_to_f32_bytes_with_shape(conv_state_kt)?.0;
         let dims = x.dims();
         anyhow::ensure!(
             dims.len() == 3,
@@ -5329,7 +4869,7 @@ impl BackendRuntime for VulkanBackend {
             dims
         );
         let (batch, channels, seq_len) = (dims[0], dims[1], dims[2]);
-        let conv_state_shape = conv_state.dims().as_ref().to_vec();
+        let conv_state_shape = conv_state_kt.dims().to_vec();
         let (out_data, state_data_out) =
             kiln_vulkan_kernel::kernels::dispatch_causal_conv1d_update_bytes(
                 vk_device,
@@ -5344,16 +4884,13 @@ impl BackendRuntime for VulkanBackend {
             .context("causal_conv1d_update kernel failed")?;
         let out_shape: Vec<usize> = dims.to_vec();
         let out =
-            tensor_from_f32_bytes(&out_data, &out_shape, candle_core::DType::F32)?;
-        let new_state = tensor_from_f32_bytes(
+            kt_tensor_from_f32_bytes(&out_data, &out_shape, kiln_tensor::DType::F32)?;
+        *conv_state_kt = kt_tensor_from_f32_bytes(
             &state_data_out,
             &conv_state_shape,
-            candle_core::DType::F32,
+            kiln_tensor::DType::F32,
         )?;
-        *conv_state = new_state;
-        // Push the (mutated) candle conv_state mirror back to the kt arg.
-        *conv_state_kt = crate::forward::candle_to_kt_activation(conv_state)?;
-        Ok(Some(crate::forward::candle_to_kt_activation(&out)?))
+        Ok(Some(out))
     }
 
     fn causal_conv1d_prefill(
@@ -5370,26 +4907,20 @@ impl BackendRuntime for VulkanBackend {
         if !matches!(x.dtype(), kiln_tensor::DType::BF16 | kiln_tensor::DType::F32) {
             return Ok(None);
         }
-        // Bridge kt args -> candle locals. `conv_state` mirrors `conv_state_kt`;
-        // the mutated mirror is pushed back to the kt arg at the return below.
-        let x_owned = crate::forward::kt_logits_to_candle(x)?;
-        let weight_owned = crate::forward::kt_logits_to_candle(weight)?;
-        let mut conv_state_c = crate::forward::kt_logits_to_candle(conv_state_kt)?;
-        let x = &x_owned;
-        let weight = &weight_owned;
-        let conv_state: &mut candle_core::Tensor = &mut conv_state_c;
+        // (#1082) kt-native: all args are already kt; `conv_state_kt` is
+        // mutated in place at the return below.
         let vk_device = self
             .vulkan_device
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
 
         let (out, new_state) = if self.conv1d_prefill_single_submit_enabled {
-            let weight_buf = self.cached_f32_weight_buffer(weight)?;
-            let x_data = tensor_to_f32_bytes_with_shape(x)?.0;
-            let state_data = tensor_to_f32_bytes_with_shape(conv_state)?.0;
+            let weight_buf = self.cached_f32_weight_buffer_kt(weight)?;
+            let x_data = kt_tensor_to_f32_bytes_with_shape(x)?.0;
+            let state_data = kt_tensor_to_f32_bytes_with_shape(conv_state_kt)?.0;
             let x_dims = x.dims();
             let (batch, channels, seq_len) = (x_dims[0], x_dims[1], x_dims[2]);
-            let conv_state_dims = conv_state.dims().as_ref().to_vec();
+            let conv_state_dims = conv_state_kt.dims().to_vec();
             let (out_data, new_state_data) =
                 kiln_vulkan_kernel::kernels::dispatch_causal_conv1d_prefill_cached_weight_bytes(
                     vk_device,
@@ -5402,25 +4933,25 @@ impl BackendRuntime for VulkanBackend {
                     kernel_size,
                 )
                 .context("causal_conv1d_prefill cached-weight single-submit kernel failed")?;
-            let out = tensor_from_f32_bytes(
+            let out = kt_tensor_from_f32_bytes(
                 &out_data,
                 x_dims,
-                candle_core::DType::F32,
+                kiln_tensor::DType::F32,
             )?;
-            let new_state = tensor_from_f32_bytes(
+            let new_state = kt_tensor_from_f32_bytes(
                 &new_state_data,
                 &conv_state_dims,
-                candle_core::DType::F32,
+                kiln_tensor::DType::F32,
             )?;
             (out, new_state)
         } else {
             {
-                let x_data = tensor_to_f32_bytes_with_shape(x)?.0;
-                let weight_data = tensor_to_f32_bytes_with_shape(weight)?.0;
-                let state_data = tensor_to_f32_bytes_with_shape(conv_state)?.0;
+                let x_data = kt_tensor_to_f32_bytes_with_shape(x)?.0;
+                let weight_data = kt_tensor_to_f32_bytes_with_shape(weight)?.0;
+                let state_data = kt_tensor_to_f32_bytes_with_shape(conv_state_kt)?.0;
                 let x_dims = x.dims();
                 let (batch, channels, seq_len) = (x_dims[0], x_dims[1], x_dims[2]);
-                let conv_state_dims = conv_state.dims().as_ref().to_vec();
+                let conv_state_dims = conv_state_kt.dims().to_vec();
                 let (out_data, new_state_data) =
                     kiln_vulkan_kernel::kernels::dispatch_causal_conv1d_prefill_bytes(
                         vk_device,
@@ -5433,23 +4964,21 @@ impl BackendRuntime for VulkanBackend {
                         kernel_size,
                     )
                     .context("causal_conv1d_prefill kernel failed")?;
-                let out = tensor_from_f32_bytes(
+                let out = kt_tensor_from_f32_bytes(
                     &out_data,
                     x_dims,
-                    candle_core::DType::F32,
+                    kiln_tensor::DType::F32,
                 )?;
-                let new_state = tensor_from_f32_bytes(
+                let new_state = kt_tensor_from_f32_bytes(
                     &new_state_data,
                     &conv_state_dims,
-                    candle_core::DType::F32,
+                    kiln_tensor::DType::F32,
                 )?;
                 (out, new_state)
             }
         };
-        *conv_state = new_state;
-        // Push the (mutated) candle conv_state mirror back to the kt arg.
-        *conv_state_kt = crate::forward::candle_to_kt_activation(conv_state)?;
-        Ok(Some(crate::forward::candle_to_kt_activation(&out)?))
+        *conv_state_kt = new_state;
+        Ok(Some(out))
     }
 }
 
