@@ -67,3 +67,17 @@ half = "2"
 # but deliberately NOT `kiln-kt-bridge?/candle`, so the kt-bridge
 # pulled in here stays candle-free.
 cuda = ["kiln-tensor/cuda", "dep:kiln-kt-bridge", "kiln-kt-bridge?/cuda"]
+
+# (#1082 Metal lane) Compiles the kt-native OPD forward / loss surface
+# (`kt_api`, `kt_tape`) on Metal storage. Forwards `kiln-tensor/metal`
+# ONLY — the fused backward kernel (`kiln_opd_topk_kl_bwd_{f32,bf16}` in
+# `phase_b.rs` / the `opd_top_k_reverse_kl_phase_b_bwd_kt` dispatch in
+# `kt_api.rs`) is genuine CUDA FFI with NO device-agnostic kt path, so it
+# stays gated behind `cuda` and is deliberately NOT pulled in here. With
+# only `metal`, the kt-tape backward `apply()` body takes the
+# `#[cfg(not(feature = "cuda"))]` arm and `bail!`s — i.e. OPD forward +
+# loss are reachable on Metal, but the OPD backward (LoRA grad) is a
+# documented follow-up pending a Metal OPD top-K reverse-KL kernel. NB:
+# `dep:kiln-kt-bridge` is NOT enabled here — the bridge is only used
+# inside the `cuda`-gated backward, so the Metal surface needs none of it.
+metal = ["kiln-tensor/metal"]

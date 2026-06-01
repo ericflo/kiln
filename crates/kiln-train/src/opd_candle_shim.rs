@@ -85,9 +85,12 @@ use anyhow::{Context, Result, anyhow};
 ///
 /// # Envelope
 ///
-/// Same as [`try_tape_opd_per_position_cuda`]: CUDA + matching F32/BF16
-/// `(hidden, head_t)` dtype + `top_k ∈ {16, 32}`.
-#[cfg(feature = "cuda")]
+/// Same as [`try_tape_opd_per_position_cuda`]: CUDA or Metal + matching
+/// F32/BF16 `(hidden, head_t)` dtype + `top_k ∈ {16, 32}`. (#1082 Metal lane)
+/// On Metal the FORWARD + loss record onto the tape; the recorded backward
+/// (`CudaOpdTopKReverseKlPhaseBBackward::apply`) is CUDA-FFI-only and `bail!`s
+/// on Metal — the OPD Metal backward is a documented follow-up.
+#[cfg(any(feature = "cuda", feature = "metal"))]
 pub fn try_tape_opd_scalar_mean_cuda_kt(
     hidden: &kiln_tensor::Tensor,
     head_t: &kiln_tensor::Tensor,

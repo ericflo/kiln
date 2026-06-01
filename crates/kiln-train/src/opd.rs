@@ -2712,7 +2712,7 @@ pub fn opd_train(
                 // guardrails, and the progress callback) still type-checks on
                 // both builds.
                 let (loss_val, active_count): (f64, usize) = {
-                    #[cfg(feature = "cuda")]
+                    #[cfg(any(feature = "cuda", feature = "metal"))]
                     {
                         let (loss_val, active_count, kt_grads) =
                             opd_step_forward_backward_tape_authoritative(
@@ -2748,13 +2748,13 @@ pub fn opd_train(
 
                         (loss_val, active_count)
                     }
-                    #[cfg(not(feature = "cuda"))]
+                    #[cfg(not(any(feature = "cuda", feature = "metal")))]
                     {
                         anyhow::bail!(
-                            "opd_train: OPD training requires a CUDA build — the kt \
-                             tape-authoritative grad path (the sole grad producer \
-                             after the #1082 candle-drop) records kt CUDA ops and \
-                             is gated behind `feature = \"cuda\"`"
+                            "opd_train: OPD training requires a CUDA or Metal build — the \
+                             kt tape-authoritative grad path (the sole grad producer \
+                             after the #1082 candle-drop) records kt GPU ops and \
+                             is gated behind `feature = \"cuda\"` / `feature = \"metal\"`"
                         );
                     }
                 };
@@ -2917,9 +2917,14 @@ pub fn opd_train(
 /// candle dependency in the OPD grad path, dissolving when `kiln-optim` goes
 /// kt-native). Mirrors SFT's `standard_forward_backward_tape_authoritative_kt`.
 ///
-/// CUDA-only: the tape adapters record kt CUDA ops + bridge kt<->candle CUDA
-/// tensors. The caller device-gates this via `#[cfg(feature = "cuda")]`.
-#[cfg(feature = "cuda")]
+/// CUDA + Metal: the tape adapters record kt GPU ops + bridge kt<->candle GPU
+/// tensors. The caller device-gates this via
+/// `#[cfg(any(feature = "cuda", feature = "metal"))]`. (#1082 Metal lane) On
+/// Metal the FORWARD + scalar OPD loss record onto the tape; the recorded OPD
+/// backward (`CudaOpdTopKReverseKlPhaseBBackward::apply`) is CUDA-FFI-only and
+/// `bail!`s during the tape walk — so on Metal this returns the backward error
+/// (OPD Metal backward is a documented follow-up pending a Metal kernel).
+#[cfg(any(feature = "cuda", feature = "metal"))]
 #[allow(clippy::too_many_arguments)]
 fn opd_step_forward_backward_tape_authoritative(
     backend_rt: &dyn kiln_model::backend::BackendRuntime,

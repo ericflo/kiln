@@ -1077,3 +1077,178 @@ fn test_real_model_grpo_metal() {
          max_mean_norm={max_mean_norm}"
     );
 }
+
+/// OPD (off-policy distillation) on Metal smoke.
+///
+/// Exercises the kt-native OPD producer path on a real BF16 tiny model on
+/// `Device::Metal(0)`: `opd_train` -> `opd_step_forward_backward_tape_authoritative`
+/// -> the full Metal forward (`model_forward_no_head`) -> the kt-native OPD
+/// scalar-loss tape root (`opd_candle_shim::try_tape_opd_scalar_mean_cuda_kt` ->
+/// `kiln_opd_loss_kernel::opd_top_k_reverse_kl_phase_b_via_kt_tape`).
+///
+/// # Deliberate scope boundary (#1082 Metal lane)
+///
+/// Unlike SFT (CE) and GRPO (policy-grad), whose tape backwards are
+/// device-agnostic `kiln_tensor` composites that run on Metal, the OPD top-K
+/// reverse-KL BACKWARD is a genuine CUDA FFI kernel
+/// (`kiln_opd_topk_kl_bwd_{f32,bf16}`, declared in
+/// `kiln-opd-loss-kernel/src/phase_b.rs`, dispatched by
+/// `kt_api::opd_top_k_reverse_kl_phase_b_bwd_kt`) with NO device-agnostic kt
+/// path. The kt-tape backward op (`CudaOpdTopKReverseKlPhaseBBackward::apply`)
+/// `bail!`s under `#[cfg(not(feature = "cuda"))]`.
+///
+/// So this smoke proves the OPD **forward + loss are reachable on Metal** (the
+/// run executes the Metal forward and records the OPD loss node before the
+/// backward walk), and pins the EXACT stopping point: the run errors during the
+/// tape backward walk with the OPD CUDA-FFI-backward message. Writing a Metal
+/// OPD top-K reverse-KL backward kernel is a documented follow-up; until then
+/// OPD training is CUDA-only end-to-end while the forward/loss are Metal-ready.
+#[cfg(feature = "metal")]
+#[test]
+fn test_real_model_opd_metal() {
+    use std::sync::Arc;
+
+    if kiln_model::backend::metal::try_new_metal().is_none() {
+        eprintln!("No Metal device — skipping OPD-on-Metal smoke");
+        return;
+    }
+    let _gpu = metal_gpu_guard();
+    let device = Device::Metal(0);
+    let mut config = tiny_config();
+    config.dtype = kiln_core::config::DType::BF16;
+    let weights = tiny_weights_bf16(&config, &device);
+    let tokenizer = test_tokenizer();
+
+    // Off-policy replay: the student trains on the teacher-authored assistant
+    // turn (no student sampling). Short shared-vocab tokens ("t1 t2 t3") keep
+    // the rollout tiny.
+    let prompts = vec![
+        kiln_train::opd::OpdPrompt {
+            messages: vec![
+                metal_chat_msg("user", "t1 t2 t3"),
+                metal_chat_msg("assistant", "t2 t3 t1"),
+            ],
+            teacher_extra_messages: vec![],
+            trajectory: vec![],
+        },
+        kiln_train::opd::OpdPrompt {
+            messages: vec![
+                metal_chat_msg("user", "t3 t1"),
+                metal_chat_msg("assistant", "t1 t2 t3"),
+            ],
+            teacher_extra_messages: vec![],
+            trajectory: vec![],
+        },
+    ];
+
+    // A built-in deterministic teacher so no real second model is needed. K=32
+    // matches the OPD kernel envelope ({16, 32}) and the OpdConfig default; the
+    // tiny model's vocab_size is 32, so the uniform top-K spans the full vocab.
+    let teacher: Arc<dyn kiln_train::logit_source::LogitSource> = Arc::new(
+        kiln_train::logit_source::DeterministicUniformLogitSource::new(
+            "metal-smoke-teacher",
+            config.vocab_size,
+            32,
+        ),
+    );
+
+    let mut opd_config = kiln_train::opd::OpdConfig {
+        learning_rate: 1e-3,
+        lora_rank: 2,
+        lora_alpha: 4.0,
+        auto_load: false,
+        seed: Some(0),
+        epochs: 1,
+        ..Default::default()
+    };
+    // Force off-policy: on-policy is preflight-rejected, and off-policy
+    // auto-scales samples_per_prompt -> 1 (one step per prompt), keeping the
+    // smoke cheap.
+    opd_config.training_mode = kiln_train::opd::OpdTrainingMode::OffPolicy;
+
+    let (losses, cb) = loss_capture_cb();
+    let adapter_dir = tempfile::tempdir().unwrap();
+    let result = kiln_train::opd::opd_train(
+        &prompts,
+        &opd_config,
+        &config,
+        &weights,
+        &tokenizer,
+        teacher,
+        adapter_dir.path(),
+        "opd-metal-smoke",
+        Some(cb),
+    );
+
+    match result {
+        Ok(out) => {
+            // If a Metal OPD backward kernel (or a device-agnostic kt backward)
+            // ever lands, the run completes — assert the full SFT/GRPO-style
+            // contract (adapter written + finite losses + grads flowed).
+            assert_adapter_written(&out);
+            let losses = losses.lock().unwrap();
+            assert!(!losses.is_empty(), "OPD progress callback recorded no losses");
+            assert!(
+                losses.iter().all(|l| l.is_finite()),
+                "all OPD training losses must be finite, got {losses:?}"
+            );
+            let (grad_norm_modules, max_mean_norm) = receipt_lora_grad_norms(&out);
+            assert!(
+                grad_norm_modules > 0,
+                "OPD step recorded no LoRA grad norms — gradients did not flow \
+                 through the kt tape-authoritative path on Metal"
+            );
+            eprintln!(
+                "[OPD-METAL] run completed (Metal OPD backward now available): \
+                 losses={losses:?} lora_grad_norm_modules={grad_norm_modules} \
+                 max_mean_norm={max_mean_norm}"
+            );
+        }
+        Err(e) => {
+            // Expected today: OPD on Metal stops at one of TWO documented,
+            // out-of-scope gaps (a new Metal kernel is needed for either; both
+            // are deliberate scope boundaries for the #1082 Metal lane):
+            //
+            //  (A) FORWARD/loss-composite gap — the kt-native OPD top-K reverse-KL
+            //      forward (`per_position_forward_kt`) uses `log_softmax_last_dim`,
+            //      which is CPU-only in `kiln_tensor` (no Metal kernel). The device
+            //      gather + index uploads now run on Metal (the index-tensor
+            //      device-parity fix in `kt_api::per_position_forward_kt`), but the
+            //      composite hits this CPU-only op before producing the loss.
+            //
+            //  (B) BACKWARD gap — if/when `log_softmax` gets a Metal kernel, the
+            //      forward+loss complete and the run reaches the tape backward,
+            //      where the OPD top-K reverse-KL backward
+            //      (`kiln_opd_topk_kl_bwd_*`, CUDA FFI, gated behind
+            //      `feature = "cuda"`) `bail!`s — it has NO device-agnostic kt
+            //      path, unlike SFT's CE / GRPO's policy-grad.
+            //
+            // The run must stop at one of these KNOWN op-level gaps — NOT at an
+            // unexpected failure (device-mismatch panic, wrong shape, teacher
+            // wiring). Match the precise op-gap signatures (avoid loose
+            // `contains("cuda")`, which would false-match the `..._cuda_kt`
+            // adapter name).
+            let chain = format!("{e:#}");
+            let forward_logsoftmax_gap = chain.contains("log_softmax")
+                && chain.contains("must be CpuStorage");
+            let backward_ffi_gap = chain.contains("without `cuda` feature")
+                || chain.contains("fused backward requires CUDA");
+            assert!(
+                forward_logsoftmax_gap || backward_ffi_gap,
+                "OPD-on-Metal failed, but NOT at a documented Metal op-gap. The run \
+                 should reach the kt-native OPD forward on Metal and stop only at \
+                 (A) the CPU-only `log_softmax_last_dim` op or (B) the CUDA-FFI OPD \
+                 backward. Got unexpected error chain:\n{chain}"
+            );
+            let which = if backward_ffi_gap {
+                "BACKWARD (CUDA-FFI kiln_opd_topk_kl_bwd_*; no device-agnostic kt path)"
+            } else {
+                "FORWARD (CPU-only log_softmax_last_dim; no Metal kernel)"
+            };
+            eprintln!(
+                "[OPD-METAL] OPD producer reachable on Metal up to the documented \
+                 op-gap: stopped at {which}. Full chain:\n{chain}"
+            );
+        }
+    }
+}

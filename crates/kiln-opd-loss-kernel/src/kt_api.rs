@@ -63,11 +63,20 @@
 
 use kiln_tensor::{
     ops::{
-        exp, index_select, log_softmax_last_dim, matmul, mean_all, mul, neg, scatter_add, sub,
-        sum_axis, to_f32,
+        exp, index_select, log_softmax_last_dim, matmul, mean_all, mul, neg, sub, sum_axis, to_f32,
     },
-    DType as KtDType, Error as KtError, Tensor as KtTensor,
+    Error as KtError, Tensor as KtTensor,
 };
+
+// `scatter_add` + `DType` are only used by the CUDA fused backward (the
+// d_hidden scatter + the dtype gate). The test module supplies its own
+// `DType as KtDType`. Gating them keeps the Metal-lane lib build (which
+// compiles the kt-native forward + the bail!-only kt-tape backward)
+// warning-clean.
+#[cfg(feature = "cuda")]
+use kiln_tensor::ops::scatter_add;
+#[cfg(feature = "cuda")]
+use kiln_tensor::DType as KtDType;
 
 #[cfg(feature = "cuda")]
 use kiln_kt_bridge::BridgeError;
@@ -264,7 +273,11 @@ fn per_position_forward_kt(
     // were all CPU; the OPD-trainer migration introduced via
     // `kiln-opd-loss-kernel::kt_forward_op` (commit (#1082)) is the
     // first CUDA caller, which is why this device-awareness fix
-    // landed alongside the production-caller migration.
+    // landed alongside the production-caller migration. (#1082 Metal
+    // lane) Metal is the second GPU caller — the OPD FORWARD runs on
+    // Metal storage (only the fused CUDA backward stays CUDA-only), so
+    // the Metal arm builds the host index/scratch tensor on CPU and
+    // moves it to the Metal device via `to_device` (`host_to_metal_copy`).
     use kiln_tensor::Device as KtDevice;
     let dev = hidden.device();
     let upload_u32 = |vals: &[u32], shape: Vec<usize>| -> Result<KtTensor, OpdLossError> {
@@ -274,11 +287,11 @@ fn per_position_forward_kt(
             KtDevice::Cuda(i) => {
                 KtTensor::cuda_from_slice(vals, shape, i).map_err(OpdLossError::Kt)
             }
-            #[cfg(not(feature = "cuda"))]
-            other => Err(OpdLossError::msg(format!(
-                "kt-opd-loss: unsupported device for index tensor {other}"
-            ))),
-            #[cfg(feature = "cuda")]
+            #[cfg(feature = "metal")]
+            KtDevice::Metal(_) => KtTensor::from_vec(vals.to_vec(), shape)
+                .and_then(|t| t.to_device(dev))
+                .map_err(OpdLossError::Kt),
+            #[allow(unreachable_patterns)]
             other => Err(OpdLossError::msg(format!(
                 "kt-opd-loss: unsupported device for index tensor {other}"
             ))),
@@ -291,11 +304,11 @@ fn per_position_forward_kt(
             KtDevice::Cuda(i) => {
                 KtTensor::cuda_from_slice(vals, shape, i).map_err(OpdLossError::Kt)
             }
-            #[cfg(not(feature = "cuda"))]
-            other => Err(OpdLossError::msg(format!(
-                "kt-opd-loss: unsupported device for q_logprobs {other}"
-            ))),
-            #[cfg(feature = "cuda")]
+            #[cfg(feature = "metal")]
+            KtDevice::Metal(_) => KtTensor::from_vec(vals.to_vec(), shape)
+                .and_then(|t| t.to_device(dev))
+                .map_err(OpdLossError::Kt),
+            #[allow(unreachable_patterns)]
             other => Err(OpdLossError::msg(format!(
                 "kt-opd-loss: unsupported device for q_logprobs {other}"
             ))),
