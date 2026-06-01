@@ -345,6 +345,16 @@ every config"):
   at 460.3 ms / 139 rows/s. A later history-1024 batch-64 repeat measured
   488.1 ms with 2 chunks vs. 486.5 ms with 4, so saturated long-context
   batches now stay on 4 chunks while smaller long-context batches keep 2.
+  **Update — long-context split-K keeps 4 chunks from batch 16:** after the
+  reduce pass stopped spending barrier levels on empty chunk lanes, the
+  long-context crossover moved lower. At history 2048, warmup=2, timed=3,
+  repeats=5, the old default 2-chunk policy measured batch 16 at 179.2 ms /
+  89 rows/s and batch 32 at 274.1 ms / 117 rows/s. Forcing 4 chunks measured
+  batch 16 at 154.7 ms / 103 rows/s and batch 32 at 263.5 ms / 121 rows/s;
+  the patched no-override selector measured 157.7 ms / 101 rows/s and
+  253.7 ms / 126 rows/s, respectively. Batch 8 remains on the smaller
+  long-context 2-chunk policy because 4 chunks was effectively tied/slightly
+  slower in the same sweep.
   **Update — batched argmax readback cleanup:** the native batched resident
   decode submit path now lets the final LM-head argmax reduce shader write its
   `batch * 4` byte token-id output directly into the persistent host-visible
