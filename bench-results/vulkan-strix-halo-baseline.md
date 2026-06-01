@@ -166,8 +166,8 @@ on the T=128 shape measured legacy per-dispatch 2.325 ms vs. single-submit
 Other proper work-packages for full saturation (per "max out the hardware in
 every config"):
 - **True multi-row batched resident decode** (bs>1 / continuous-batched
-  routing is wired; remaining work is end-to-end perf validation and saturation
-  tuning).
+  routing is wired; remaining work is saturation tuning and longer server
+  fixtures).
   **Update — first native resident batch primitive landed:** added
   `paged_kv_write_slots`, a Vulkan dispatch that copies `[batch,
   num_kv_heads * head_dim]` projected K/V rows into per-row resolved KV-cache
@@ -409,6 +409,14 @@ every config"):
   461.7 ms / 139 rows/s. The default now favors the highest-throughput
   saturated batch width, with env overrides still available for lower-latency
   or smaller-memory 16/32-row runs.
+  **Update — live four-row batch smoke:** a current release server run with
+  `KILN_NUM_BLOCKS=2048`, prefix cache disabled, and
+  `/v1/completions/batch` using 4 distinct prompts, `temperature=0`,
+  `top_p=1`, and `max_tokens=4` returned 4 completions / 16 generated tokens
+  in 18.495 s wall time. The server log reported a
+  `Vulkan-resident decode pool ready` event with `num_slots=4`, so this smoke
+  reached the live multi-row resident route; it is a short validation fixture,
+  not a saturation benchmark.
   **Update — bs=1 greedy token-only route:** `model_forward_paged_last_token_greedy`
   now tries the resident transformer-stack + final argmax path before the older
   resident logits fallback. For callers without stable row IDs, bs=1 uses the
