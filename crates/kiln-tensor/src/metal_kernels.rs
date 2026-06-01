@@ -938,6 +938,296 @@ kernel void {entry}(
     )
 }
 
+/// Build the **matrix-core tiled flash-attention** MSL for prefill (large
+/// `q_seq`) — a kiln-owned faithful port of candle/MLX's `steel_attention`
+/// (`call_sdpa_full`). FA-2 online softmax with **both** `S = Q·Kᵀ` and
+/// `O += P·V` running on Apple's simdgroup matrix units (the same idioms the
+/// kiln steel GEMM uses: BF16/dtype threadgroup staging, 8×8
+/// `simdgroup_matrix` fragments, `simdgroup_multiply_accumulate`, and
+/// `#pragma clang loop unroll(full)` on every fragment loop so the
+/// register-resident fragment arrays never spill).
+///
+/// Tiling (matching MLX's `bd<512` pick): `BQ=32` query rows per threadgroup,
+/// `BK` key cols per K/V block, `WM=4` simdgroups down Q, `WN=1`. With
+/// `TQ = BQ/(WM*8) = 1` each simdgroup owns exactly **one** 8-row Q fragment,
+/// so the per-row softmax reductions are entirely intra-simdgroup (no
+/// cross-simdgroup combine) — that's what makes this layout clean.
+///
+/// **Fragment layout** (8×8, 32 lanes, 2 elems/lane — Apple's MMA map). Lane
+/// `L` owns S-tile row `sm = (qid&4)+(L/2)%4` (`qid=L/4`) and the two columns
+/// `sn = (qid&2)*2 + (L%2)*2`, `sn+1`. So `S[8][BK]` lives across the 32 lanes
+/// as `TK = BK/8` fragments, each lane holding 2 cols per fragment for its one
+/// row. The running `m`/`l` and the `O[8][D]` accumulator (`TD = D/8`
+/// fragments) are per-lane registers; the per-row online rescale by
+/// `exp2(m_old-m_new)` is applied to each lane's 2 O-elements via the same row
+/// index `sm` (`row_bin_op`). Row reductions (max, sum) fold a lane's 2
+/// elements then `simd_shuffle_xor(.,1)` and `simd_shuffle_xor(.,8)` to sum
+/// across the fragment's 8 columns — exactly MLX's `BaseMMAFrag::row_reduce`.
+///
+/// Softmax is done in the FA-2 `exp2` form: Q is pre-scaled by
+/// `scale * log2(e)` so `exp2(s - m)` equals `exp(scale*qk - m')`. Accumulate
+/// dtype is **float**. Causal masking is right-aligned (`q_off = kL - qL`):
+/// key `c` is masked for query row `r` when `r + q_off < c`. K/V blocks past
+/// the per-row causal limit are skipped at block granularity, the boundary
+/// block is masked per element. `D` is baked per-variant (`d{D}`); a non-
+/// multiple-of-8 `D` rounds the staged head-dim up to `TD*8` and zero-pads.
+fn sdpa_steel_src(ty: &str, head_dim: usize, bq: usize, bk: usize, wm: usize, entry: &str) -> String {
+    let td = head_dim.div_ceil(8); // head-dim fragments (zero-padded if D%8!=0)
+    let dpad = td * 8; // staged/padded head dim
+    let tk = bk / 8; // key fragments per block
+    let tgp = wm * 32; // threads per group (WN=1)
+    // Threadgroup leading dims with +pad to dodge bank conflicts (bytes→elems).
+    let ld_q = dpad + 8; // Qs[BQ][dpad+8]
+    let ld_k = bk + 8; // Ks[dpad][bk+8]  (K staged transposed: [d][k])
+    let ld_v = dpad + 8; // Vs[bk][dpad+8]
+    format!(
+        r#"
+#include <metal_stdlib>
+#include <metal_simdgroup_matrix>
+using namespace metal;
+
+constant constexpr uint D    = {head_dim};
+constant constexpr uint DPAD = {dpad};
+constant constexpr uint BQ   = {bq};
+constant constexpr uint BK   = {bk};
+constant constexpr uint WM   = {wm};
+constant constexpr uint TD   = {td};
+constant constexpr uint TK   = {tk};
+constant constexpr uint TGP  = {tgp};
+constant constexpr uint LDQ  = {ld_q};
+constant constexpr uint LDK  = {ld_k};
+constant constexpr uint LDV  = {ld_v};
+constant constexpr float LOG2E = 1.44269504088896340736f;
+
+struct SdpaParams {{
+    uint q_seq;
+    uint k_seq;
+    uint hq;
+    uint gqa;
+    uint causal;
+    float scale;
+    uint q_s0; uint q_s1; uint q_s2; uint q_s3; uint q_off;
+    uint k_s0; uint k_s1; uint k_s2; uint k_s3; uint k_off;
+    uint v_s0; uint v_s1; uint v_s2; uint v_s3; uint v_off;
+}};
+
+// Apple 8x8 MMA fragment coord: lane L owns row `fm`, cols `fn`,`fn+1`.
+static inline void frag_coord(uint lane, thread uint& fm, thread uint& fn) {{
+    uint qid = lane / 4u;
+    fm = (qid & 4u) + (lane / 2u) % 4u;
+    fn = (qid & 2u) * 2u + (lane % 2u) * 2u;
+}}
+
+kernel void {entry}(
+    device const {ty}* q     [[buffer(0)]],
+    device const {ty}* k     [[buffer(1)]],
+    device const {ty}* v     [[buffer(2)]],
+    device {ty}* out         [[buffer(3)]],
+    constant SdpaParams& p   [[buffer(4)]],
+    uint3 tgpos [[threadgroup_position_in_grid]],   // x=q-block, y=h, z=b
+    uint sg     [[simdgroup_index_in_threadgroup]], // 0..WM-1
+    uint lane   [[thread_index_in_simdgroup]])      // 0..31
+{{
+    const uint qb = tgpos.x;        // query block index
+    const uint h  = tgpos.y;
+    const uint b  = tgpos.z;
+    if (h >= p.hq) return;
+    const uint kv_h = h / p.gqa;
+    const uint q0 = qb * BQ;        // first query row of this block
+
+    threadgroup {ty} Qs[BQ * LDQ];        // [BQ][DPAD]   (pre-scaled)
+    threadgroup {ty} Ks[DPAD * LDK];      // [DPAD][BK]   (K transposed)
+    threadgroup {ty} Vs[BK * LDV];        // [BK][DPAD]
+
+    const uint q_base = p.q_off + b * p.q_s0 + h * p.q_s1;
+    const uint k_base = p.k_off + b * p.k_s0 + kv_h * p.k_s1;
+    const uint v_base = p.v_off + b * p.v_s0 + kv_h * p.v_s1;
+
+    const uint tid = sg * 32u + lane;
+
+    // ---- Stage the Q block, pre-scaled by scale*log2(e) (FA-2 exp2). ----
+    // Qs[r][d] for r in [0,BQ), d in [0,DPAD).
+    const {ty} qscale = ({ty})(p.scale * LOG2E);
+    for (uint idx = tid; idx < BQ * DPAD; idx += TGP) {{
+        uint r = idx / DPAD;
+        uint d = idx % DPAD;
+        uint qr = q0 + r;
+        {ty} val = (qr < p.q_seq && d < D)
+            ? ({ty})(q[q_base + qr * p.q_s2 + d * p.q_s3] * qscale)
+            : ({ty})0;
+        Qs[r * LDQ + d] = val;
+    }}
+
+    // Each simdgroup owns one 8-row Q fragment (TQ=1). `simdgroup_load`/`mma`
+    // and `thread_elements()` all use Apple's native lane->element layout
+    // (== MLX get_coord), so the per-lane row index for masking/softmax is
+    // `sm` and the per-lane cols are `sn`,`sn+1`.
+    uint sm, sn;
+    frag_coord(lane, sm, sn);
+    const uint row_base = sg * 8u;      // this simd's first query row in tile
+
+    // Online-softmax running state for this lane's single row.
+    float m_run = -INFINITY;
+    float l_run = 0.0f;
+    // O accumulator: TD float fragments, 2 elems/lane each.
+    simdgroup_matrix<float, 8, 8> Oacc[TD];
+#pragma clang loop unroll(full)
+    for (uint i = 0; i < TD; i++) Oacc[i] = make_filled_simdgroup_matrix<float, 8>(0.0f);
+
+    // Causal: query row r attends keys 0..=(k_seq - q_seq + r). Right-aligned
+    // offset q_off = k_seq - q_seq (may be negative if k_seq<q_seq -> clamp 0).
+    const int q_off = (int)p.k_seq - (int)p.q_seq;
+    uint nk = (p.k_seq + BK - 1u) / BK;     // number of key blocks
+    uint kb_lim = nk;
+    if (p.causal != 0) {{
+        // max key index any row in this block can attend = (q0+BQ-1)+q_off.
+        int qmax = (int)(q0 + BQ - 1u) + q_off;
+        if (qmax < 0) qmax = 0;
+        kb_lim = (uint)((qmax + (int)BK) / (int)BK);  // ceil((qmax+1)/BK)
+        if (kb_lim > nk) kb_lim = nk;
+    }}
+
+    for (uint kb = 0; kb < kb_lim; kb++) {{
+        const uint k0 = kb * BK;        // first key of this block
+
+        // ---- Stage K block transposed: Ks[d][kk] = K[k0+kk][d]. ----
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint idx = tid; idx < DPAD * BK; idx += TGP) {{
+            uint d  = idx / BK;
+            uint kk = idx % BK;
+            uint kr = k0 + kk;
+            {ty} val = (kr < p.k_seq && d < D)
+                ? k[k_base + kr * p.k_s2 + d * p.k_s3]
+                : ({ty})0;
+            Ks[d * LDK + kk] = val;
+        }}
+        // ---- Stage V block: Vs[kk][d] = V[k0+kk][d]. ----
+        for (uint idx = tid; idx < BK * DPAD; idx += TGP) {{
+            uint kk = idx / DPAD;
+            uint d  = idx % DPAD;
+            uint kr = k0 + kk;
+            {ty} val = (kr < p.k_seq && d < D)
+                ? v[v_base + kr * p.v_s2 + d * p.v_s3]
+                : ({ty})0;
+            Vs[kk * LDV + d] = val;
+        }}
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+
+        // ---- S = Q @ K^T  (contract over D). Stile[8 q][BK k]. ----
+        simdgroup_matrix<float, 8, 8> Stile[TK];
+#pragma clang loop unroll(full)
+        for (uint j = 0; j < TK; j++) Stile[j] = make_filled_simdgroup_matrix<float, 8>(0.0f);
+
+#pragma clang loop unroll(full)
+        for (uint dd = 0; dd < TD; dd++) {{
+            simdgroup_barrier(mem_flags::mem_none);
+            // Q fragment [8 q][8 d]: base row `row_base`, col `dd*8` in Qs.
+            simdgroup_matrix<{ty}, 8, 8> Qf;
+            simdgroup_load(Qf, Qs + row_base * LDQ + dd * 8u, LDQ);
+#pragma clang loop unroll(full)
+            for (uint j = 0; j < TK; j++) {{
+                // K fragment [8 d][8 k] from Ks (transposed staging).
+                simdgroup_matrix<{ty}, 8, 8> Kf;
+                simdgroup_load(Kf, Ks + dd * 8u * LDK + j * 8u, LDK);
+                simdgroup_multiply_accumulate(Stile[j], Qf, Kf, Stile[j]);
+            }}
+        }}
+
+        // ---- Per-element causal / length masking on Stile. ----
+        const int row_pos = (int)(q0 + row_base + sm) + q_off;  // this lane's query key-index
+        if (p.causal != 0 || (k0 + BK) > p.k_seq) {{
+#pragma clang loop unroll(full)
+            for (uint j = 0; j < TK; j++) {{
+                int col0 = (int)(k0 + j * 8u + sn);
+                thread auto& el = Stile[j].thread_elements();
+#pragma clang loop unroll(full)
+                for (uint jj = 0; jj < 2u; jj++) {{
+                    int col = col0 + (int)jj;
+                    bool masked = (col >= (int)p.k_seq)
+                        || (p.causal != 0 && row_pos < col);
+                    if (masked) el[jj] = -INFINITY;
+                }}
+            }}
+        }}
+
+        // ---- Online softmax (FA-2, base-2). Each lane owns one row. ----
+        // Row max over this block's BK keys (this lane's 2*TK elements +
+        // cross-column shuffle).
+        float s_max = -INFINITY;
+#pragma clang loop unroll(full)
+        for (uint j = 0; j < TK; j++) {{
+            thread const auto& el = Stile[j].thread_elements();
+            s_max = max(s_max, max(el[0], el[1]));
+        }}
+        s_max = max(s_max, simd_shuffle_xor(s_max, 1u));
+        s_max = max(s_max, simd_shuffle_xor(s_max, 8u));
+
+        const float m_new = max(m_run, s_max);
+        // P = exp2(S - m_new); guard fully-masked row (m_new == -inf -> 0).
+        float p_sum = 0.0f;
+#pragma clang loop unroll(full)
+        for (uint j = 0; j < TK; j++) {{
+            thread auto& el = Stile[j].thread_elements();
+#pragma clang loop unroll(full)
+            for (uint jj = 0; jj < 2u; jj++) {{
+                float e = (m_new == -INFINITY) ? 0.0f : fast::exp2(el[jj] - m_new);
+                el[jj] = e;
+                p_sum += e;
+            }}
+        }}
+        p_sum += simd_shuffle_xor(p_sum, 1u);
+        p_sum += simd_shuffle_xor(p_sum, 8u);
+
+        // Rescale running acc + l by exp2(m_old - m_new); guard m_old==-inf.
+        const float corr = (m_run == -INFINITY) ? 0.0f : fast::exp2(m_run - m_new);
+        l_run = l_run * corr + p_sum;
+#pragma clang loop unroll(full)
+        for (uint i = 0; i < TD; i++) {{
+            thread auto& o = Oacc[i].thread_elements();
+            o[0] *= corr;
+            o[1] *= corr;
+        }}
+        m_run = m_new;
+
+        // ---- O += P @ V  (contract over BK keys). ----
+        // P (=Stile) is float; cast to a {ty} fragment for the MMA so V (dtype
+        // staged) matches. Stile[j] is [8 q][8 k]; Vf is [8 k][8 d].
+#pragma clang loop unroll(full)
+        for (uint j = 0; j < TK; j++) {{
+            simdgroup_barrier(mem_flags::mem_none);
+            simdgroup_matrix<{ty}, 8, 8> Pf;
+            {{
+                thread const auto& sf = Stile[j].thread_elements();
+                thread auto& pf = Pf.thread_elements();
+                pf[0] = ({ty})sf[0];
+                pf[1] = ({ty})sf[1];
+            }}
+#pragma clang loop unroll(full)
+            for (uint dd = 0; dd < TD; dd++) {{
+                simdgroup_matrix<{ty}, 8, 8> Vf;
+                simdgroup_load(Vf, Vs + j * 8u * LDV + dd * 8u, LDV);
+                simdgroup_multiply_accumulate(Oacc[dd], Pf, Vf, Oacc[dd]);
+            }}
+        }}
+    }}
+
+    // ---- Normalize O by l_run and store this lane's 2 elems per d-fragment. ----
+    const float inv_l = (l_run > 0.0f) ? (1.0f / l_run) : 0.0f;
+    const uint qr = q0 + row_base + sm;     // this lane's global query row
+    if (qr >= p.q_seq) return;
+    const uint out_base = ((b * p.hq + h) * p.q_seq + qr) * D;
+#pragma clang loop unroll(full)
+    for (uint dd = 0; dd < TD; dd++) {{
+        thread const auto& o = Oacc[dd].thread_elements();
+        uint d0 = dd * 8u + sn;
+        if (d0 + 0u < D) out[out_base + d0 + 0u] = ({ty})(o[0] * inv_l);
+        if (d0 + 1u < D) out[out_base + d0 + 1u] = ({ty})(o[1] * inv_l);
+    }}
+}}
+"#
+    )
+}
+
 /// Pick the split-K width `W` (simdgroups per query). Prefill (q_seq>8) uses
 /// W=1 — the q_seq*Hq*B queries already saturate the GPU. Decode (small q_seq,
 /// long context) splits the key loop across W simdgroups for parallelism.
@@ -952,6 +1242,76 @@ fn sdpa_split_w(q_seq: usize, k_seq: usize) -> usize {
         1
     } else {
         8
+    }
+}
+
+/// Q-block / K-block / simdgroups-down-Q tiling for the matrix-core prefill
+/// kernel ([`sdpa_steel_src`]) — MLX's `bd<512` pick (BQ=32, WM=4) with a
+/// smaller K-block at large head-dim to keep the threadgroup-memory pool under
+/// the M1's 32 KiB. (WN is always 1.) `dtype_bytes` shrinks `BK` further for
+/// F32 (4 B/elem) so the `Qs+Ks+Vs` BF16/F32 staging pool stays under budget
+/// even at `head_dim=128` (F32 D=128 would be 38 KiB at BK=16 → use BK=8).
+fn sdpa_steel_cfg(head_dim: usize, dtype_bytes: usize) -> (usize, usize, usize) {
+    let bk = if head_dim < 128 {
+        32
+    } else if dtype_bytes >= 4 {
+        8
+    } else {
+        16
+    };
+    (32, bk, 4) // (BQ, BK, WM)
+}
+
+/// Threshold (in `q_seq`) at/above which the compute-bound **matrix-core
+/// tiled** prefill path is used; below it the memory-bound simd_sum/split-K
+/// decode path. Overridable via `KILN_SDPA_PREFILL_MIN` (for A/B + tuning).
+fn sdpa_prefill_threshold() -> usize {
+    if let Ok(s) = std::env::var("KILN_SDPA_PREFILL_MIN") {
+        if let Ok(t) = s.parse::<usize>() {
+            return t;
+        }
+    }
+    16
+}
+
+/// Build the packed [`SdpaParams`] for a dispatch.
+#[allow(clippy::too_many_arguments)]
+fn build_sdpa_params(
+    sq: usize,
+    sk: usize,
+    hq: usize,
+    gqa: usize,
+    causal: bool,
+    scale: f32,
+    q_strides: &[usize],
+    q_offset: usize,
+    k_strides: &[usize],
+    k_offset: usize,
+    v_strides: &[usize],
+    v_offset: usize,
+) -> SdpaParams {
+    SdpaParams {
+        q_seq: sq as u32,
+        k_seq: sk as u32,
+        hq: hq as u32,
+        gqa: gqa as u32,
+        causal: u32::from(causal),
+        scale,
+        q_s0: q_strides[0] as u32,
+        q_s1: q_strides[1] as u32,
+        q_s2: q_strides[2] as u32,
+        q_s3: q_strides[3] as u32,
+        q_off: q_offset as u32,
+        k_s0: k_strides[0] as u32,
+        k_s1: k_strides[1] as u32,
+        k_s2: k_strides[2] as u32,
+        k_s3: k_strides[3] as u32,
+        k_off: k_offset as u32,
+        v_s0: v_strides[0] as u32,
+        v_s1: v_strides[1] as u32,
+        v_s2: v_strides[2] as u32,
+        v_s3: v_strides[3] as u32,
+        v_off: v_offset as u32,
     }
 }
 
@@ -996,35 +1356,36 @@ pub(crate) fn sdpa(
         ));
     }
     let ty = msl_ty(dtype)?;
+    let gqa = hq / hkv;
+    let params = build_sdpa_params(
+        sq, sk, hq, gqa, causal, scale, q_strides, q_offset, k_strides, k_offset, v_strides,
+        v_offset,
+    );
+
+    // PREFILL (large q_seq, compute-bound): matrix-core tiled flash-attention.
+    // DECODE (small q_seq, memory-bound): the simd_sum/split-K kernel.
+    if sq >= sdpa_prefill_threshold() {
+        let dtype_bytes = dtype.size_in_bytes();
+        return sdpa_dispatch_steel(
+            companion,
+            q,
+            k,
+            v,
+            out,
+            ty,
+            dtype_bytes,
+            b,
+            hq,
+            sq,
+            head_dim,
+            &params,
+        );
+    }
+
     let split_w = sdpa_split_w(sq, sk);
     let entry = format!("kt_sdpa_{ty}_d{head_dim}_w{split_w}");
     let src = sdpa_src(ty, head_dim, split_w, &entry);
     let pipeline = op_pipeline(companion, &src, &entry)?;
-
-    let gqa = hq / hkv;
-    let params = SdpaParams {
-        q_seq: sq as u32,
-        k_seq: sk as u32,
-        hq: hq as u32,
-        gqa: gqa as u32,
-        causal: u32::from(causal),
-        scale,
-        q_s0: q_strides[0] as u32,
-        q_s1: q_strides[1] as u32,
-        q_s2: q_strides[2] as u32,
-        q_s3: q_strides[3] as u32,
-        q_off: q_offset as u32,
-        k_s0: k_strides[0] as u32,
-        k_s1: k_strides[1] as u32,
-        k_s2: k_strides[2] as u32,
-        k_s3: k_strides[3] as u32,
-        k_off: k_offset as u32,
-        v_s0: v_strides[0] as u32,
-        v_s1: v_strides[1] as u32,
-        v_s2: v_strides[2] as u32,
-        v_s3: v_strides[3] as u32,
-        v_off: v_offset as u32,
-    };
 
     let encoder = companion
         .command_encoder()
@@ -1045,6 +1406,54 @@ pub(crate) fn sdpa(
     // W simdgroups (W*32 lanes) per (qi, head, batch).
     let groups = objc2_metal::MTLSize { width: sq, height: hq, depth: b };
     let threads = objc2_metal::MTLSize { width: split_w * 32, height: 1, depth: 1 };
+    encoder.dispatch_thread_groups(groups, threads);
+    drop(encoder);
+    Ok(())
+}
+
+/// Dispatch the matrix-core tiled flash-attention prefill kernel
+/// ([`sdpa_steel_src`]). One threadgroup (`WM` simdgroups = `WM*32` lanes)
+/// computes one `BQ`-row query block for one (head, batch). Grid is
+/// `(ceil(q_seq/BQ), hq, b)`. Threadgroup memory is the kernel's own
+/// fixed-size `Qs/Ks/Vs` arrays (declared inside the MSL), so no
+/// `set_threadgroup_memory_length` is needed.
+#[allow(clippy::too_many_arguments)]
+fn sdpa_dispatch_steel(
+    companion: &MetalCompanion,
+    q: &MetalBuffer,
+    k: &MetalBuffer,
+    v: &MetalBuffer,
+    out: &MetalBuffer,
+    ty: &str,
+    dtype_bytes: usize,
+    b: usize,
+    hq: usize,
+    sq: usize,
+    head_dim: usize,
+    params: &SdpaParams,
+) -> Result<()> {
+    let (bq, bk, wm) = sdpa_steel_cfg(head_dim, dtype_bytes);
+    let entry = format!("kt_sdpa_steel_{ty}_d{head_dim}_bq{bq}_bk{bk}_wm{wm}");
+    let src = sdpa_steel_src(ty, head_dim, bq, bk, wm, &entry);
+    let pipeline = op_pipeline(companion, &src, &entry)?;
+
+    let encoder = companion
+        .command_encoder()
+        .map_err(|e| Error::Msg(format!("metal_kernels::sdpa(steel): encoder: {e:?}")))?;
+    encoder.set_label("kt_sdpa_steel");
+    encoder.set_compute_pipeline_state(&pipeline);
+    encoder.set_buffer(0, Some(q), 0);
+    encoder.set_buffer(1, Some(k), 0);
+    encoder.set_buffer(2, Some(v), 0);
+    encoder.set_buffer(3, Some(out), 0);
+    encoder.set_bytes(4, params);
+
+    let groups = objc2_metal::MTLSize {
+        width: sq.div_ceil(bq),
+        height: hq,
+        depth: b,
+    };
+    let threads = objc2_metal::MTLSize { width: wm * 32, height: 1, depth: 1 };
     encoder.dispatch_thread_groups(groups, threads);
     drop(encoder);
     Ok(())

@@ -308,6 +308,74 @@ fn sdpa_last_axis_f32() {
     }
 }
 
+/// Matrix-core **tiled flash-attention prefill** parity (#1082). At
+/// `q_seq >= 16` `metal_sdpa_last_axis` routes to the simdgroup_matrix
+/// (`steel`) kernel; this gates that kernel vs the kt CPU SDPA reference
+/// across the prefill design space: q_seq in {16,32,64}, causal AND
+/// non-causal, GQA (Hq>Hkv) AND MHA, and head_dim in {64,128}. GQA is
+/// referenced by expanding K/V kv-heads to Hq with `repeat_interleave`
+/// (query head h uses kv head h/(Hq/Hkv)), which exactly matches the
+/// kernel's `kv_h = h/gqa` map. tol max|Δ| < 2e-3.
+#[test]
+fn sdpa_steel_prefill_parity() {
+    let Some(dev) = metal() else {
+        eprintln!("no Metal device; skipping");
+        return;
+    };
+    // (label, bs, hq, hkv, q_seq, k_seq, head_dim, causal)
+    let cases: &[(&str, usize, usize, usize, usize, usize, usize, bool)] = &[
+        ("q16 causal MHA D64", 1, 2, 2, 16, 16, 64, true),
+        ("q16 noncausal MHA D64", 1, 2, 2, 16, 24, 64, false),
+        ("q32 causal MHA D64", 1, 2, 2, 32, 32, 64, true),
+        ("q32 noncausal MHA D128", 1, 2, 2, 32, 40, 128, false),
+        ("q64 causal MHA D128", 1, 4, 4, 64, 64, 128, true),
+        ("q16 causal GQA D64", 1, 4, 2, 16, 16, 64, true),
+        ("q32 noncausal GQA D64", 2, 4, 2, 32, 48, 64, false),
+        ("q64 causal GQA D128", 1, 8, 2, 64, 64, 128, true),
+        ("q32 causal GQA D128 b2", 2, 4, 2, 32, 32, 128, true),
+        ("q48 noncausal GQA D128", 1, 4, 2, 48, 96, 128, false),
+    ];
+    for &(label, bs, hq, hkv, q_seq, k_seq, hd, causal) in cases {
+        let gqa = hq / hkv;
+        let qn = bs * hq * q_seq * hd;
+        let kn = bs * hkv * k_seq * hd;
+        let cpu_q = Tensor::from_vec(pattern(qn, 80), vec![bs, hq, q_seq, hd]).unwrap();
+        let met_q = Tensor::from_vec_on(dev, pattern(qn, 80), vec![bs, hq, q_seq, hd]).unwrap();
+        let cpu_k = Tensor::from_vec(pattern(kn, 81), vec![bs, hkv, k_seq, hd]).unwrap();
+        let met_k = Tensor::from_vec_on(dev, pattern(kn, 81), vec![bs, hkv, k_seq, hd]).unwrap();
+        let cpu_v = Tensor::from_vec(pattern(kn, 82), vec![bs, hkv, k_seq, hd]).unwrap();
+        let met_v = Tensor::from_vec_on(dev, pattern(kn, 82), vec![bs, hkv, k_seq, hd]).unwrap();
+
+        let scale = 1.0f32 / (hd as f32).sqrt();
+        let got = kiln_tensor::metal_sdpa_last_axis(&met_q, &met_k, &met_v, scale, causal)
+            .unwrap()
+            .to_vec::<f32>()
+            .unwrap();
+
+        // CPU reference: expand kv-heads to Hq for GQA, then plain (causal)
+        // SDPA. (Non-causal CPU SDPA does NOT require q_seq==k_seq; causal
+        // does, so causal cases use q_seq==k_seq above.)
+        let (ck, cv) = if gqa > 1 {
+            (
+                ops::repeat_interleave(&cpu_k, 1, gqa).unwrap(),
+                ops::repeat_interleave(&cpu_v, 1, gqa).unwrap(),
+            )
+        } else {
+            (cpu_k, cpu_v)
+        };
+        let want = if causal {
+            ops::causal_scaled_dot_product_attention(&cpu_q, &ck, &cv).unwrap()
+        } else {
+            ops::scaled_dot_product_attention(&cpu_q, &ck, &cv).unwrap()
+        }
+        .to_vec::<f32>()
+        .unwrap();
+
+        let d = max_abs_diff(&want, &got);
+        assert!(d < 2e-3, "steel sdpa [{label}] max|Δ|={d}");
+    }
+}
+
 /// kiln matrix-core GEMM (`metal_matmul` via `MatmulOp::metal_fwd`) vs the kt
 /// CPU matmul reference, at Qwen3.5-4B shapes + M-tail/edge cases (#1082).
 /// This is the on-M1 correctness gate for the simdgroup_float8x8 GEMM that
