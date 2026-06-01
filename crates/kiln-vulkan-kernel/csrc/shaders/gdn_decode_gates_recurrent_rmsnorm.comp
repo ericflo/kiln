@@ -69,9 +69,15 @@ void main() {
         uint state_base = head_base * dk * dv;
 
         float v_pred = 0.0;
+        float q_state = 0.0;
+        float qk_dot = 0.0;
         for (uint i = 0; i < dk; i++) {
-            float s = data_state[state_base + i * dv + d];
-            v_pred += data_k[k_base + i] * (decay * s);
+            float q_i = data_q[q_base + i];
+            float k_i = data_k[k_base + i];
+            float decayed_s = decay * data_state[state_base + i * dv + d];
+            v_pred += k_i * decayed_s;
+            q_state += q_i * decayed_s;
+            qk_dot += q_i * k_i;
         }
 
         float delta = beta * (data_v[v_base + d] - v_pred);
@@ -79,8 +85,9 @@ void main() {
             uint state_idx = state_base + i * dv + d;
             float new_s = decay * data_state[state_idx] + data_k[k_base + i] * delta;
             data_state[state_idx] = new_s;
-            out_acc += data_q[q_base + i] * new_s;
         }
+        // q dot new_state = q dot (decay * old_state) + delta * (q dot k).
+        out_acc = q_state + delta * qk_dot;
         raw_out[d] = out_acc;
         rms_partial[tid] = out_acc * out_acc;
     } else {

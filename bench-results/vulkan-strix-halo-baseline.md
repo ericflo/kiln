@@ -698,6 +698,19 @@ every config"):
   history 256, warmup=1, timed=4, repeats=3 measured batch 8 at 96.6 ms /
   83 rows/s, batch 32 at 226.2 ms / 141 rows/s, and batch 64 at 452.9 ms /
   141 rows/s.
+  **Update — GDN recurrent output avoids extra Q read:** the fused
+  gates/recurrent/RMSNorm shader now computes `q dot new_state` as
+  `q dot (decay * old_state) + delta * (q dot k)`, leaving the state-write loop
+  to update recurrent state without also rereading Q and accumulating the
+  output. Focused correctness check
+  `cargo test -p kiln-vulkan-kernel --test gdn_parity
+  gdn_decode_gates_recurrent_rmsnorm -- --nocapture` passes. Current
+  `gdn_block_resident_batched` with warmup=2, timed=5, repeats=3 measured
+  batch 8 at 2.968 ms / 2696 rows/s, batch 16 at 4.013 ms / 3987 rows/s,
+  batch 32 at 6.610 ms / 4841 rows/s, and batch 64 at 13.634 ms /
+  4694 rows/s. A production-shaped `full_token_resident_mixed_paged` check
+  with history 256, warmup=2, timed=4, repeats=3 measured batch 32 at
+  233.8 ms / 137 rows/s and batch 64 at 451.9 ms / 142 rows/s.
 - **Vulkan paged-attention decode kernel**: the kernel crate already had
   `paged_attn_decode_batch_paged.comp`; Vulkan now advertises
   `supports_flash_attn_paged_decode` and wires the single-query paged-decode
