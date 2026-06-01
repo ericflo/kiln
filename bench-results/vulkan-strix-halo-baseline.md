@@ -288,6 +288,11 @@ every config"):
   with 4, and 115.4 ms with 8. Patched no-override smoke checks measured
   history 2048 / batch 8 at 113.0 ms / 71 rows/s and history 256 / batch 64
   at 460.3 ms / 139 rows/s.
+  **Update — batched argmax readback cleanup:** the native batched resident
+  decode submit path now lets the final LM-head argmax reduce shader write its
+  `batch * 4` byte token-id output directly into the persistent host-visible
+  staging buffer. This removes the tiny device-local token buffer and the
+  recorded copy command from each batched decode submit.
   **Update — GDN resident recorder uses row-reuse in-proj:** the batched GDN
   `CommandBatch` recorder now selects the same pair QKV/Z plus rows2/rows4
   BF16 in-proj shaders as the standalone dispatcher. Focused

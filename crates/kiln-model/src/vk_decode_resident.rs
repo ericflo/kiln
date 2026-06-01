@@ -2911,8 +2911,6 @@ pub fn submit_transformer_stack_batched_argmax(
         "batched transformer submit: batch_size must be > 0"
     );
     let out_bytes = (batch_size * 4) as u64;
-    let out_tokens =
-        backend.acquire_resident_scratch("native_b_out_tokens", out_bytes)?;
     let out_staging = backend
         .acquire_resident_scratch_host_visible("native_b_out_tokens_staging", out_bytes)?;
 
@@ -2922,7 +2920,7 @@ pub fn submit_transformer_stack_batched_argmax(
         &mut batch,
         x_in_buf,
         x_scratch_buf,
-        &out_tokens,
+        &out_staging,
         weights,
         config,
         batch_size,
@@ -2940,9 +2938,6 @@ pub fn submit_transformer_stack_batched_argmax(
     if !ok {
         return Ok(None);
     }
-    batch
-        .record_copy_buffer(&out_tokens, &out_staging, out_bytes)
-        .context("batched transformer submit: record token-id copy")?;
     batch
         .submit_and_wait("vk-resident native batched decode")
         .context("batched transformer submit: submit CommandBatch")?;
