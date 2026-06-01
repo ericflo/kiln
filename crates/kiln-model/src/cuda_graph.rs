@@ -421,17 +421,22 @@ pub struct CudaGraphRunner {
     /// Whether we already warned that the paged metadata graph cache is full.
     #[cfg(feature = "cuda")]
     cache_full_warned: bool,
-    /// #1082 box-102 BUG-B fix: identity (recurrent-state `TensorId`) of the
-    /// request whose GDN recurrent/conv state the captured bs=1 graph currently
-    /// holds. A fresh `LinearAttentionState` per request (generate.rs
-    /// `new_linear_state`) yields a new id; it is stable within a request (the
-    /// graph replay path does not reassign `linear_state`). On change we evict
-    /// the captured graph so the new request RE-CAPTURES with its own
-    /// post-prefill state instead of replaying on the PRIOR request's leftover
-    /// recurrent state (which produced deterministic garbage on every request
-    /// after the first).
+    /// #1082 box-102 BUG-B fix: request-boundary detection for the captured
+    /// bs=1 decode graph, which carries GDN recurrent/conv state in its own
+    /// buffers (evolved in-place across a request's replays). The captured
+    /// graph MUST be re-captured per request — a new request reusing the prior
+    /// request's graph runs on its leftover recurrent state -> deterministic
+    /// garbage. Within a bs=1 greedy request, `seq_len` increases by exactly 1
+    /// each step and the first KV block (`block_table.blocks[0]`, allocated at
+    /// prefill) is fixed; a new request breaks BOTH (seq_len resets to its
+    /// prompt length; KV blocks are reallocated). We evict when either differs.
+    /// (The recurrent-state TensorId is NOT usable here: the capture/eager path
+    /// rewrites `linear_state`'s recurrent tensors every step, so it would
+    /// thrash — evict every step, never replaying.)
     #[cfg(feature = "cuda")]
-    last_request_state_id: Option<kiln_tensor::TensorId>,
+    last_decode_seq_len: Option<usize>,
+    #[cfg(feature = "cuda")]
+    last_decode_block0: Option<u32>,
 }
 
 impl CudaGraphRunner {
@@ -459,7 +464,9 @@ impl CudaGraphRunner {
             #[cfg(feature = "cuda")]
             cache_full_warned: false,
             #[cfg(feature = "cuda")]
-            last_request_state_id: None,
+            last_decode_seq_len: None,
+            #[cfg(feature = "cuda")]
+            last_decode_block0: None,
         }
     }
 
@@ -938,17 +945,29 @@ impl CudaGraphRunner {
         // warm+capture per request; the within-request replays are preserved.
         #[cfg(feature = "cuda")]
         {
-            let cur_state_id = linear_state.recurrent_states.first().map(|t| t.id());
-            if cur_state_id.is_some() && cur_state_id != self.last_request_state_id {
-                if !self.captured.is_empty() {
-                    tracing::debug!(
-                        "CUDA graph: new request (GDN recurrent-state id changed) — evicting \
-                         captured bs=1 graph so it re-captures with the new request's state"
-                    );
-                    self.captured.clear();
-                }
-                self.last_request_state_id = cur_state_id;
+            // Detect a request boundary. Within a bs=1 greedy request, seq_len
+            // increases by exactly 1 each decode step and the first KV block
+            // (allocated at prefill) is fixed; a NEW request breaks both
+            // (seq_len resets to its prompt length; KV blocks are reallocated).
+            // On a boundary, evict the captured graph so the new request
+            // re-captures with its own recurrent state instead of replaying on
+            // the prior request's leftover state. Within a request `continues`
+            // is true -> the graph is preserved and genuinely replays.
+            let block0 = block_table.blocks.first().copied();
+            let continues = block0.is_some()
+                && self.last_decode_seq_len == Some(seq_len.wrapping_sub(1))
+                && self.last_decode_block0 == block0;
+            if !continues && !self.captured.is_empty() {
+                tracing::debug!(
+                    seq_len,
+                    last_seq_len = ?self.last_decode_seq_len,
+                    "CUDA graph: request boundary (seq_len not contiguous or KV block0 changed) \
+                     — evicting captured bs=1 graph to re-capture with the new request's GDN state"
+                );
+                self.captured.clear();
             }
+            self.last_decode_seq_len = Some(seq_len);
+            self.last_decode_block0 = block0;
         }
 
         // Phase 1: warmup — run eagerly to prime GPU memory pools
