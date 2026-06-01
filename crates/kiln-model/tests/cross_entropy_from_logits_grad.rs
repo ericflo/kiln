@@ -21,6 +21,13 @@
 //! `p - one_hot` per-active-row term scaled by the incoming scalar seed, the
 //! `index_select` scatter adjoint, and the trailing zero row for the dropped
 //! final logit.
+//!
+//! (#1082) Candle-autograd parity oracle: candle is opt-in via the
+//! `legacy-candle-parity` feature, so on the default build and plain
+//! `--features cuda` this file is excluded and the build stays candle-free.
+//! Run it with `--features legacy-candle-parity`.
+
+#![cfg(feature = "legacy-candle-parity")]
 
 use candle_core::{DType, Device, Tensor, Var, D};
 

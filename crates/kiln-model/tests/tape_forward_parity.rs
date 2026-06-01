@@ -53,8 +53,15 @@
 //!
 //! CUDA build without a visible device: the test bails out early so
 //! CI without a GPU still compiles and "runs" (skipping the body).
+//!
+//! (#1082) This is a candle parity oracle: every test builds candle inputs
+//! and bridges them to kt (`kt_in`/`candle_out` via the candle-gated kt-bridge
+//! adapters), so it needs candle + `kiln-kt-bridge/candle`. Gated to
+//! `legacy-candle-parity` so plain `--features cuda` builds candle-free. Run
+//! with `--features cuda,legacy-candle-parity`. (The kt-native FD/convergence
+//! gold tests live in kiln-train/src, not here.)
 
-#![cfg(feature = "cuda")]
+#![cfg(all(feature = "cuda", feature = "legacy-candle-parity"))]
 
 use std::collections::HashMap;
 use std::sync::Mutex;

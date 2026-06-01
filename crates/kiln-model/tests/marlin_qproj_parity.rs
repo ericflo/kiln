@@ -29,6 +29,13 @@
 //! struct fields/input (`kt_in`), and the kt outputs are copied back to candle
 //! (`candle_out`) so the cosine-similarity / max-abs-diff parity assertions are
 //! unchanged.
+//!
+//! (#1082) Candle parity oracle (kt↔candle bridge via the candle-gated
+//! kt-bridge adapters). File-level gated to `legacy-candle-parity` so plain
+//! `--features cuda` builds candle-free. Run with
+//! `--features cuda,legacy-candle-parity`.
+
+#![cfg(all(feature = "cuda", feature = "legacy-candle-parity"))]
 
 #[cfg(feature = "cuda")]
 use candle_core::{DType, Device, Tensor};
