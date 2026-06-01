@@ -458,7 +458,11 @@ every config"):
   `1.713634e-7`. Batch 8, 1024-token history measured non-split 16.109 ms vs.
   split-K 16.574 ms (0.97x), confirming that the shared chunk policy's main
   generic-path win is the long single-row occupancy case while saturated
-  multi-row resident decode remains the throughput path.
+  multi-row resident decode remains the throughput path. The generic
+  app-facing helper now follows that measurement: split-K is default for
+  single-row generic paged decode, while multi-row generic decode stays on the
+  non-split paged wrapper unless `KILN_VK_PAGED_ATTN_SPLITK_CHUNKS` explicitly
+  forces a split-K sweep.
   **Update — multi-row resident paged microbench:** `full_token_resident_paged`
   now uses `paged_kv_write_slots` plus split-K
   `paged_attn_decode_batch_paged_splitk` and reduce over real per-row block

@@ -231,6 +231,14 @@ fn paged_decode_gpu_gather_enabled() -> bool {
     })
 }
 
+fn generic_paged_decode_splitk_chunks(batch: usize, max_blocks_per_seq: usize) -> usize {
+    if batch <= 1 || std::env::var("KILN_VK_PAGED_ATTN_SPLITK_CHUNKS").is_ok() {
+        kiln_vulkan_kernel::kernels::paged_attn_decode_splitk_chunks(batch, max_blocks_per_seq)
+    } else {
+        1
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn dispatch_vulkan_paged_decode_bytes(
     vk_device: &kiln_vulkan_kernel::VulkanDevice,
@@ -248,8 +256,7 @@ fn dispatch_vulkan_paged_decode_bytes(
     page_block_size: usize,
     softmax_scale: f32,
 ) -> Result<Vec<u8>> {
-    let num_chunks =
-        kiln_vulkan_kernel::kernels::paged_attn_decode_splitk_chunks(batch, max_blocks_per_seq);
+    let num_chunks = generic_paged_decode_splitk_chunks(batch, max_blocks_per_seq);
     if num_chunks > 1 {
         kiln_vulkan_kernel::kernels::dispatch_paged_attn_decode_batch_paged_splitk_f32_bytes(
             vk_device,
