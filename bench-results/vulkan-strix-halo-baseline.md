@@ -350,6 +350,12 @@ every config"):
   time. Stable row-ID batches still mark each row as seeded after the shared
   upload; no-ID multi-row batches remain conservatively re-seeded each call,
   but with one union upload per layer.
+  **Update — hidden-path rowwise fallback disabled by default on Vulkan:** the
+  older `model_forward_paged_batched_decode_hidden` path now treats a declined
+  batched full-attention layer as a visible error on Vulkan instead of entering
+  its rowwise full-attention fallback. The same
+  `KILN_VULKAN_DECODE_BATCH_GENERIC_FALLBACK=1` debug opt-in re-enables the
+  fallback for A/B runs.
   **Update — Vulkan live decode batch default:** the live greedy decode batcher
   now defaults Vulkan to a 64-row max batch instead of 32; the real-model
   batching-engine actor applies the same backend-aware default when

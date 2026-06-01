@@ -24120,6 +24120,17 @@ pub fn model_forward_paged_batched_decode_hidden(
                 ) {
                     Ok(out) => hidden = out,
                     Err(err) => {
+                        #[cfg(feature = "vulkan")]
+                        if backend.name() == "vulkan"
+                            && !vulkan_decode_generic_fallback_enabled()
+                        {
+                            return Err(err).with_context(|| {
+                                format!(
+                                    "vulkan batched full-attention decode layer {layer_idx} declined; \
+                                     rowwise fallback disabled (set KILN_VULKAN_DECODE_BATCH_GENERIC_FALLBACK=1 to opt in)"
+                                )
+                            });
+                        }
                         tracing::debug!(
                             layer = layer_idx,
                             error = %err,
