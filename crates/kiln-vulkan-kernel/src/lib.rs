@@ -92,6 +92,8 @@ pub mod shaders {
         shader_path!("linear_decode_batched_bf16w_add_residual_rows8");
     pub const LINEAR_DECODE_ARGMAX_BATCHED_BLOCKS_BF16W: &str =
         shader_path!("linear_decode_argmax_batched_blocks_bf16w");
+    pub const LINEAR_DECODE_ARGMAX_BATCHED_BLOCKS_ROWS4_BF16W: &str =
+        shader_path!("linear_decode_argmax_batched_blocks_rows4_bf16w");
     pub const LINEAR_DECODE_ARGMAX_BATCHED_REDUCE: &str =
         shader_path!("linear_decode_argmax_batched_reduce");
     pub const APPLY_TOKEN_PENALTIES: &str = shader_path!("apply_token_penalties");

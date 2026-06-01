@@ -1,0 +1,185 @@
+// Batched single-token transposed linear projection argmax with packed bf16
+// weights, grouped across four adjacent rows.
+//
+// Each workgroup covers one output-column block and up to four batch rows,
+// reusing each packed bf16 weight load across those rows. It writes the same
+// per-row/per-block score and index layout as
+// linear_decode_argmax_batched_blocks_bf16w.comp, so the existing reduce shader
+// can consume the output unchanged.
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 64, local_size_y = 4, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint hidden;
+    uint out_dim;
+    uint block_count;
+    uint batch;
+};
+
+layout(binding = 0) readonly buffer XBuf { float data_x[]; };
+layout(binding = 1) readonly buffer WeightBuf { uint data_w[]; };
+layout(binding = 2) writeonly buffer BlockScoreBuf { float data_block_score[]; };
+layout(binding = 3) writeonly buffer BlockIndexBuf { uint data_block_index[]; };
+
+shared float partial0[256];
+shared float partial1[256];
+shared float partial2[256];
+shared float partial3[256];
+shared float scores0[64];
+shared float scores1[64];
+shared float scores2[64];
+shared float scores3[64];
+shared uint indices[64];
+
+float load_weight(uint idx) {
+    uint packed = data_w[idx >> 1];
+    uint bf16_bits = ((idx & 1u) == 0u) ? (packed & 0xffffu) : (packed >> 16);
+    return uintBitsToFloat(bf16_bits << 16);
+}
+
+void main() {
+    const uint global_group = gl_WorkGroupID.x;
+    const uint row_group = global_group / block_count;
+    const uint block = global_group - row_group * block_count;
+    const uint row0 = row_group * 4;
+    const uint row1 = row0 + 1;
+    const uint row2 = row0 + 2;
+    const uint row3 = row0 + 3;
+    const bool valid0 = row0 < batch;
+    const bool valid1 = row1 < batch;
+    const bool valid2 = row2 < batch;
+    const bool valid3 = row3 < batch;
+
+    const uint col_lane = gl_LocalInvocationID.x;
+    const uint red_lane = gl_LocalInvocationID.y;
+    const uint col = block * 64 + col_lane;
+    const uint partial_idx = col_lane * 4 + red_lane;
+
+    float sum0 = 0.0;
+    float sum1 = 0.0;
+    float sum2 = 0.0;
+    float sum3 = 0.0;
+    if (col < out_dim) {
+        const uint x_base0 = row0 * hidden;
+        const uint x_base1 = row1 * hidden;
+        const uint x_base2 = row2 * hidden;
+        const uint x_base3 = row3 * hidden;
+        for (uint h = red_lane; h < hidden; h += 4) {
+            const float w = load_weight(h * out_dim + col);
+            if (valid0) {
+                sum0 += data_x[x_base0 + h] * w;
+            }
+            if (valid1) {
+                sum1 += data_x[x_base1 + h] * w;
+            }
+            if (valid2) {
+                sum2 += data_x[x_base2 + h] * w;
+            }
+            if (valid3) {
+                sum3 += data_x[x_base3 + h] * w;
+            }
+        }
+    }
+
+    partial0[partial_idx] = sum0;
+    partial1[partial_idx] = sum1;
+    partial2[partial_idx] = sum2;
+    partial3[partial_idx] = sum3;
+    barrier();
+
+    if (red_lane == 0) {
+        float score0 = 0.0;
+        float score1 = 0.0;
+        float score2 = 0.0;
+        float score3 = 0.0;
+        for (uint lane = 0; lane < 4; lane++) {
+            const uint idx = col_lane * 4 + lane;
+            score0 += partial0[idx];
+            score1 += partial1[idx];
+            score2 += partial2[idx];
+            score3 += partial3[idx];
+        }
+        if (col >= out_dim) {
+            score0 = -3.4028234663852886e38;
+            score1 = -3.4028234663852886e38;
+            score2 = -3.4028234663852886e38;
+            score3 = -3.4028234663852886e38;
+        }
+        scores0[col_lane] = score0;
+        scores1[col_lane] = score1;
+        scores2[col_lane] = score2;
+        scores3[col_lane] = score3;
+        indices[col_lane] = col;
+    }
+    barrier();
+
+    if (gl_LocalInvocationIndex == 0) {
+        if (valid0) {
+            float best_score = scores0[0];
+            uint best_index = indices[0];
+            for (uint i = 1; i < 64; i++) {
+                const float candidate_score = scores0[i];
+                const uint candidate_index = indices[i];
+                if (candidate_score > best_score ||
+                    (candidate_score == best_score && candidate_index < best_index)) {
+                    best_score = candidate_score;
+                    best_index = candidate_index;
+                }
+            }
+            const uint dst = row0 * block_count + block;
+            data_block_score[dst] = best_score;
+            data_block_index[dst] = best_index;
+        }
+        if (valid1) {
+            float best_score = scores1[0];
+            uint best_index = indices[0];
+            for (uint i = 1; i < 64; i++) {
+                const float candidate_score = scores1[i];
+                const uint candidate_index = indices[i];
+                if (candidate_score > best_score ||
+                    (candidate_score == best_score && candidate_index < best_index)) {
+                    best_score = candidate_score;
+                    best_index = candidate_index;
+                }
+            }
+            const uint dst = row1 * block_count + block;
+            data_block_score[dst] = best_score;
+            data_block_index[dst] = best_index;
+        }
+        if (valid2) {
+            float best_score = scores2[0];
+            uint best_index = indices[0];
+            for (uint i = 1; i < 64; i++) {
+                const float candidate_score = scores2[i];
+                const uint candidate_index = indices[i];
+                if (candidate_score > best_score ||
+                    (candidate_score == best_score && candidate_index < best_index)) {
+                    best_score = candidate_score;
+                    best_index = candidate_index;
+                }
+            }
+            const uint dst = row2 * block_count + block;
+            data_block_score[dst] = best_score;
+            data_block_index[dst] = best_index;
+        }
+        if (valid3) {
+            float best_score = scores3[0];
+            uint best_index = indices[0];
+            for (uint i = 1; i < 64; i++) {
+                const float candidate_score = scores3[i];
+                const uint candidate_index = indices[i];
+                if (candidate_score > best_score ||
+                    (candidate_score == best_score && candidate_index < best_index)) {
+                    best_score = candidate_score;
+                    best_index = candidate_index;
+                }
+            }
+            const uint dst = row3 * block_count + block;
+            data_block_score[dst] = best_score;
+            data_block_index[dst] = best_index;
+        }
+    }
+}

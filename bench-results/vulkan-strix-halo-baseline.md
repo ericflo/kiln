@@ -991,6 +991,15 @@ every config"):
   stack dispatch still emits the visibility barrier before reading both
   buffers, removing one conservative compute-to-compute barrier per token
   batch across argmax, sampling, and hidden-output routes.
+  **Update — greedy LM-head argmax reuses BF16 weights across four rows:** the
+  batched BF16 argmax block stage now has a rows4 shader for larger batches.
+  It computes the same per-row/per-vocab-block score and index buffers as the
+  existing one-row shader, so the reduce stage is unchanged, but each packed
+  weight load is shared across up to four adjacent decode rows. The resident
+  greedy path selects this rows4 block stage at the same batch threshold as the
+  sampled LM-head projection. Focused Vulkan coverage:
+  `batched_bf16_argmax_rows4_matches_cpu_with_tail_rows` passes with a
+  17-row tail batch and partial final vocab block.
 
 ## Other follow-ups (perf headroom, not regressions)
 

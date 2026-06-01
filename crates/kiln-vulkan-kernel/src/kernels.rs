@@ -399,6 +399,7 @@ pub fn prewarm_builtin_pipelines(vk_device: &VulkanDevice) -> Result<()> {
         ("linear_decode_argmax_reduce", 3, 4),
         ("linear_decode_argmax_batched_blocks", 4, 12),
         ("linear_decode_argmax_batched_blocks_bf16w", 4, 12),
+        ("linear_decode_argmax_batched_blocks_rows4_bf16w", 4, 16),
         ("linear_decode_argmax_batched_reduce", 3, 4),
         ("mlp_gate_up_decode", 4, 8),
         ("mlp_gate_up_decode_bf16w", 4, 8),
@@ -3620,7 +3621,13 @@ fn dispatch_linear_decode_argmax_batched_cached_impl_bytes(
     let out_stage = VulkanBuffer::create_host_visible(device, host_visible_mt, (batch * 4) as u64)
         .context("failed to create batched linear argmax output staging buffer")?;
 
-    let blocks_glsl = if packed_bf16_weights {
+    let rows4 = packed_bf16_weights && batch >= 16 && linear_decode_bf16w_rows4_enabled();
+    let blocks_glsl = if rows4 {
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/csrc/shaders/linear_decode_argmax_batched_blocks_rows4_bf16w.comp"
+        )
+    } else if packed_bf16_weights {
         concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/csrc/shaders/linear_decode_argmax_batched_blocks_bf16w.comp"
@@ -3632,7 +3639,21 @@ fn dispatch_linear_decode_argmax_batched_cached_impl_bytes(
         )
     };
     let blocks_spirv = crate::pipeline::ShaderPipeline::compile_shader(blocks_glsl)?;
-    let block_push: [u32; 3] = [hidden as u32, out_dim as u32, block_count as u32];
+    let block_push: Vec<u32> = if rows4 {
+        vec![
+            hidden as u32,
+            out_dim as u32,
+            block_count as u32,
+            batch as u32,
+        ]
+    } else {
+        vec![hidden as u32, out_dim as u32, block_count as u32]
+    };
+    let block_workgroups = if rows4 {
+        batch.div_ceil(4) * block_count
+    } else {
+        total_blocks
+    };
     let block_handles = vec![
         x_buf.handle(),
         weight_t.handle(),
@@ -3770,7 +3791,7 @@ fn dispatch_linear_decode_argmax_batched_cached_impl_bytes(
             0,
             bytemuck::cast_slice(&block_push),
         );
-        device.cmd_dispatch(cmd, total_blocks as u32, 1, 1);
+        device.cmd_dispatch(cmd, block_workgroups as u32, 1, 1);
 
         let block_barrier =
             make_memory_barrier(vk::AccessFlags::SHADER_WRITE, vk::AccessFlags::SHADER_READ);

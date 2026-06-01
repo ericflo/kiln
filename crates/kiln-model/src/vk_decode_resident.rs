@@ -2747,16 +2747,37 @@ pub fn record_final_norm_lm_head_argmax_batched_into(
         &[batch_size as u32, hidden as u32, eps.to_bits()],
         Workgroups::OneD(batch_size as u32),
     )?;
+    let rows4 = batch_size >= LM_HEAD_BF16_ROWS4_MIN_BATCH;
+    let block_shader = if rows4 {
+        shaders::LINEAR_DECODE_ARGMAX_BATCHED_BLOCKS_ROWS4_BF16W
+    } else {
+        shaders::LINEAR_DECODE_ARGMAX_BATCHED_BLOCKS_BF16W
+    };
+    let block_push = if rows4 {
+        vec![
+            hidden as u32,
+            vocab_size as u32,
+            block_count as u32,
+            batch_size as u32,
+        ]
+    } else {
+        vec![hidden as u32, vocab_size as u32, block_count as u32]
+    };
+    let block_workgroups = if rows4 {
+        batch_size.div_ceil(4) * block_count
+    } else {
+        batch_size * block_count
+    };
     batch.record_shader(
-        shaders::LINEAR_DECODE_ARGMAX_BATCHED_BLOCKS_BF16W,
+        block_shader,
         &[
             normed.handle(),
             lm_head_w.handle(),
             block_scores.handle(),
             block_indices.handle(),
         ],
-        &[hidden as u32, vocab_size as u32, block_count as u32],
-        Workgroups::OneD((batch_size * block_count) as u32),
+        &block_push,
+        Workgroups::OneD(block_workgroups as u32),
     )?;
     batch.record_shader(
         shaders::LINEAR_DECODE_ARGMAX_BATCHED_REDUCE,
