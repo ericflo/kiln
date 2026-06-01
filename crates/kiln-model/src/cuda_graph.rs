@@ -738,6 +738,16 @@ impl CudaGraphRunner {
                 );
                 return Ok(None);
             }
+            // (#1082 Phase 5) The Step-(3) refreshes above run on the kt DEFAULT
+            // stream, but the captured graph launches on its non-default capture
+            // stream. Sync the default stream so the refreshed token/position/
+            // metadata are visible before replay (else stale reads → garbage).
+            if let Some(idx) = captured.token_buffer.device().index() {
+                if let Err(e) = kiln_tensor::cuda_synchronize_default_stream(idx) {
+                    tracing::warn!(batch_size, error = %e, "batched: sync before graph launch failed, falling back to eager");
+                    return Ok(None);
+                }
+            }
             // Step (4): launch.
             if let Err(e) = captured.graph.launch() {
                 tracing::warn!(
@@ -1012,6 +1022,19 @@ impl CudaGraphRunner {
                                 lora,
                             );
                         }
+                    }
+
+                    // (#1082 Phase 5) The per-replay input writes above
+                    // (update_token/position/rotary/paged_metadata via
+                    // cuda_write_host_in_place) land on the kt DEFAULT stream,
+                    // but the captured graph launches on its non-default capture
+                    // stream — without ordering, replay reads a stale token_id
+                    // and the decode diverges into garbage. Sync the default
+                    // stream so those writes are visible before launch.
+                    if let Some(idx) = captured.token_buffer.device().index() {
+                        kiln_tensor::cuda_synchronize_default_stream(idx).context(
+                            "sync per-replay input writes before CUDA graph launch",
+                        )?;
                     }
 
                     match captured.graph.launch() {
