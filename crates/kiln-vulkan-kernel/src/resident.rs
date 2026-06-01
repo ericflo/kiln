@@ -216,7 +216,7 @@ pub fn dispatch_linear_decode_batched_bf16w_add_residual_resident(
     );
 
     let rows8 = batch >= 64 && crate::kernels::mlp_bf16_rows8_enabled();
-    let rows4 = batch >= 32 && !rows8 && crate::kernels::mlp_bf16_down_rows4_enabled();
+    let rows4 = batch >= 16 && !rows8 && crate::kernels::mlp_bf16_down_rows4_enabled();
     let glsl_path = if rows8 {
         concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -476,7 +476,7 @@ fn mlp_decode_shader_plan(
         && mlp_bf16_rows8_enabled();
     let down_bf16_rows4 = down_bf16_weights
         && gate_up_bf16_weights
-        && batch >= 32
+        && batch >= 16
         && !rows8_path
         && mlp_bf16_down_rows4_enabled();
     let gate_up_rows4 = gate_up_bf16_weights

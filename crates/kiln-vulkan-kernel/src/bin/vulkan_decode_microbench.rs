@@ -149,7 +149,7 @@ fn mlp_down_add_residual_bf16w_batched_plan(batch: usize, out_dim: usize) -> (&'
     let rows8 = batch >= MLP_BF16_ROWS8_MIN_BATCH
         && enabled_unless_disabled("KILN_DISABLE_VULKAN_MLP_BF16_ROWS8");
     let rows4 =
-        batch >= 32 && !rows8 && enabled_unless_disabled("KILN_DISABLE_VULKAN_MLP_BF16_DOWN_ROWS4");
+        batch >= 16 && !rows8 && enabled_unless_disabled("KILN_DISABLE_VULKAN_MLP_BF16_DOWN_ROWS4");
     if rows8 {
         (
             shaders::LINEAR_DECODE_BATCHED_BF16W_ADD_RESIDUAL_ROWS8,

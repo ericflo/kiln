@@ -4558,15 +4558,17 @@ fn dispatch_mlp_decode_cached_impl(
     // still faster with rows4 on the Strix Halo APU, and batch 128 is also
     // faster with rows4 in the mixed-stack token bench, so rows8 starts at a
     // larger default batch and remains env-gated for experimentation. The
-    // f32-down rows4 path keeps its older batch≥8 threshold because reading
-    // 4 B/weight makes weight-read reuse pay off sooner.
+    // f32-down rows4 keeps its older batch>=8 threshold because reading
+    // 4 B/weight makes weight-read reuse pay off sooner. The bf16-down rows4
+    // path starts at batch 16 on STRIX_HALO; batch 8 regresses, while batch 16
+    // improves both the GDN block and the mixed paged token bench.
     let rows8_path = gate_up_bf16_weights
         && down_bf16_weights
         && batch >= MLP_BF16_ROWS8_MIN_BATCH
         && mlp_bf16_rows8_enabled();
     let down_bf16_rows4 = down_bf16_weights
         && gate_up_bf16_weights
-        && batch >= 32
+        && batch >= 16
         && !rows8_path
         && mlp_bf16_down_rows4_enabled();
     // gate_up rows4 reuses weights across 4 rows. The intermediate dim is

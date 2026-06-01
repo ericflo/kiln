@@ -299,7 +299,11 @@ every config"):
   one workgroup per 256 row-channels, then fusing GDN split, conv, state
   advance, QKV split, and the paired Q/K L2 expansion. After correcting the
   synthetic full-attention subpath, the mixed full-token resident batch-64
-  case now measures 458.9 ms / 139 rows/s.
+  case now measures 458.9 ms / 139 rows/s. A follow-up MLP planner sweep keeps
+  the bf16 down+residual rows4 path disabled at batch 8, but enables it from
+  batch 16: on STRIX_HALO the GDN block batch-16 path moved from 4.73 ms to
+  4.19 ms, and the mixed paged token batch-16 path moved from 150.1 ms to
+  146.6 ms in a same-session A/B.
 - **Vulkan paged-attention decode kernel**: the kernel crate already had
   `paged_attn_decode_batch_paged.comp`; Vulkan now advertises
   `supports_flash_attn_paged_decode` and wires the single-query paged-decode

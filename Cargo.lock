@@ -2022,7 +2022,6 @@ version = "0.2.19"
 dependencies = [
  "anyhow",
  "axum",
- "candle-core",
  "chrono",
  "clap",
  "console 0.16.3",
