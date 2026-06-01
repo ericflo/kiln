@@ -44,6 +44,10 @@ pub struct RequestRecord {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ttft_ms: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_prefill_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_decode_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub thinking_mode: Option<String>,

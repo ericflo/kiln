@@ -99,10 +99,18 @@ pub struct BatchedGenerationOutput {
     pub token_ids: Vec<TokenId>,
     pub finish_reason: FinishReason,
     pub completion_tokens: usize,
+    pub prefill_duration: Duration,
+    pub decode_duration: Duration,
 }
 
 fn completion_usage_tokens(visible_token_count: usize, finish_reason: &FinishReason) -> usize {
     visible_token_count + usize::from(matches!(finish_reason, FinishReason::Eos))
+}
+
+pub struct DecodeForwardOutput {
+    pub output: GenerationOutput,
+    pub prefill_duration: Duration,
+    pub decode_duration: Duration,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -204,7 +212,7 @@ pub trait DecodeForward: Send + Sync + 'static {
         &self,
         slot: DecodeSlot,
         finish_reason: FinishReason,
-    ) -> Result<GenerationOutput>;
+    ) -> Result<DecodeForwardOutput>;
     fn discard_request(&self, _slot: DecodeSlot) {}
 }
 
@@ -541,7 +549,7 @@ impl DecodeForward for RealDecodeForward {
         &self,
         slot: DecodeSlot,
         finish_reason: FinishReason,
-    ) -> Result<GenerationOutput> {
+    ) -> Result<DecodeForwardOutput> {
         let DecodeSlot::Real {
             state,
             hit_entry_id,
@@ -557,8 +565,14 @@ impl DecodeForward for RealDecodeForward {
             .read()
             .unwrap()
             .finish_paged_batched_decode(state, finish_reason)?;
+        let prefill_duration = output.prefill_duration;
+        let decode_duration = output.decode_duration;
         self.free_uncached_blocks(&mut output, adapter);
-        Ok(output.output)
+        Ok(DecodeForwardOutput {
+            output: output.output,
+            prefill_duration,
+            decode_duration,
+        })
     }
 
     fn discard_request(&self, slot: DecodeSlot) {
@@ -1010,14 +1024,18 @@ impl BatchingEngineActor {
         let active = self.active.remove(idx);
         match self.forward.finish_request(active.slot, finish_reason) {
             Ok(output) => {
-                let completion_tokens =
-                    completion_usage_tokens(output.token_ids.len(), &output.finish_reason);
+                let completion_tokens = completion_usage_tokens(
+                    output.output.token_ids.len(),
+                    &output.output.finish_reason,
+                );
                 let _ = active.response_tx.blocking_send(EngineEvent::Done {
                     output: BatchedGenerationOutput {
-                        text: output.text,
-                        token_ids: output.token_ids,
-                        finish_reason: output.finish_reason,
+                        text: output.output.text,
+                        token_ids: output.output.token_ids,
+                        finish_reason: output.output.finish_reason,
                         completion_tokens,
+                        prefill_duration: output.prefill_duration,
+                        decode_duration: output.decode_duration,
                     },
                 });
             }
@@ -1138,17 +1156,21 @@ mod tests {
             &self,
             slot: DecodeSlot,
             finish_reason: FinishReason,
-        ) -> Result<GenerationOutput> {
+        ) -> Result<DecodeForwardOutput> {
             let DecodeSlot::Mock {
                 generated_tokens, ..
             } = slot
             else {
                 unreachable!();
             };
-            Ok(GenerationOutput {
-                text: String::new(),
-                token_ids: generated_tokens,
-                finish_reason,
+            Ok(DecodeForwardOutput {
+                output: GenerationOutput {
+                    text: String::new(),
+                    token_ids: generated_tokens,
+                    finish_reason,
+                },
+                prefill_duration: Duration::ZERO,
+                decode_duration: Duration::ZERO,
             })
         }
     }

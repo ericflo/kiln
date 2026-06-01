@@ -488,6 +488,25 @@ every config"):
   final tail row finished after the multi-row steps; the max/counter metrics
   are the durable live proof that the default route issued true multi-row
   decode work.
+  **Update — first-token timing breakdown:** the batching finish path now
+  carries model prefill/decode durations through `BatchedGenerationOutput`,
+  records them in recent-request rows, exposes them in opt-in chat performance
+  metadata, and includes them in slow-request logs. A rebuilt release server on
+  RADV STRIX_HALO with startup resident-pool allocation `max_batch=64
+  ready=true` and decode-weight prewarm complete at `elapsed_ms=23921` ran an
+  8-distinct-prompt `/v1/completions/batch` fixture after prewarm. The request
+  returned 8 completions / 39 completion tokens in 29.975 s. Immediate
+  `/v1/stats/recent-requests` rows showed shared `ttft_ms=28931`, per-row
+  `model_prefill_ms` from 3568 to 3692 ms, and `model_decode_ms` from 715 to
+  1035 ms; `/metrics` showed prefill histogram count 8 / sum 28.896 s and
+  decode histogram count 8 / sum 6.703 s. The batch-width counters reported
+  `kiln_batching_engine_max_observed_batch 8`,
+  `kiln_batching_engine_batched_decode_forwards_total 4`,
+  `kiln_batching_engine_decode_rows_total 31`, and
+  `kiln_batching_engine_errors_total 0`. This makes the current first-token
+  bottleneck concrete: the model kernels are warm and multi-row decode is
+  active, but the first token waits for the actor to prefill/admit the full
+  group before issuing the first batched decode step.
   **Update — resident parity test restored for Vulkan profiles:** the
   `vk_resident_decode_parity` integration test now builds against the current kt
   device/cache surface instead of stale test-only APIs. Without
@@ -679,11 +698,14 @@ every config"):
 
 ## Other follow-ups (perf headroom, not regressions)
 
-1. **First-token latency breakdown** should be remeasured with the current
-   startup path now that resident-pool allocation, decode-weight prewarm, and
-   batch-width telemetry are all visible before/after a live request. Route
-   reachability is proven; the remaining question is how much first-token time
-   is prompt prefill, first decode, sampling, or HTTP/task overhead.
+1. **Batch-admission/TTFT policy** is now the next latency target for live
+   serving: the warmed 8-row fixture above shows first token waiting for the
+   actor to finish serial prefill/admission of the group before the first
+   batched decode step, even though model prefill/decode timings are much
+   smaller than end-to-end TTFT. Throughput-oriented batches can keep filling
+   to the hardware-saturating width; latency-sensitive traffic likely needs an
+   admission policy that can launch an earlier decode wave without giving up
+   the 64-wide saturation path.
 2. Complete the remaining shared-stack dependency cleanup audit for any
    non-Vulkan decode islands; the Vulkan-specific decode weight path is now
    duplicate-copy-free.

@@ -250,6 +250,10 @@ fn duration_ms_f64(duration: std::time::Duration) -> f64 {
     duration.as_secs_f64() * 1000.0
 }
 
+fn duration_ms_u64(duration: std::time::Duration) -> u64 {
+    duration.as_millis().min(u128::from(u64::MAX)) as u64
+}
+
 fn adapter_used_for_performance_metadata(state: &AppState) -> String {
     state
         .loaded_adapter_name
@@ -291,6 +295,7 @@ fn attach_chat_performance_metadata(
     resp: &mut ChatCompletionResponse,
     request_start: std::time::Instant,
     ttft: Option<std::time::Duration>,
+    prefill_duration: Option<std::time::Duration>,
     decode_duration: Option<std::time::Duration>,
 ) {
     if chat_config_hash_metadata_enabled(state, req) {
@@ -311,6 +316,8 @@ fn attach_chat_performance_metadata(
         prompt_tokens: resp.usage.prompt_tokens,
         completion_tokens: resp.usage.completion_tokens,
         ttft_ms: ttft.map(duration_ms_f64),
+        prefill_ms: prefill_duration.map(duration_ms_f64),
+        decode_ms: decode_duration.map(duration_ms_f64),
         total_latency_ms: duration_ms_f64(total_latency),
         decode_tokens_per_sec: decode_tokens_per_sec_for_performance_metadata(
             resp.usage.completion_tokens,
@@ -1150,6 +1157,9 @@ fn maybe_log_slow_chat_completion(state: &AppState, record: &RequestRecord) {
         generated_tokens = values.generated_tokens,
         elapsed_ms = values.elapsed_ms,
         threshold_ms = values.threshold_ms,
+        ttft_ms = ?values.ttft_ms,
+        model_prefill_ms = ?values.model_prefill_ms,
+        model_decode_ms = ?values.model_decode_ms,
         batching_engine_state = %values.batching_engine_state,
         thinking_mode = %values.thinking_mode,
         cuda_graph_state = %values.cuda_graph_state,
@@ -1170,6 +1180,9 @@ struct SlowRequestLogValues {
     generated_tokens: u32,
     elapsed_ms: u64,
     threshold_ms: u64,
+    ttft_ms: Option<u64>,
+    model_prefill_ms: Option<u64>,
+    model_decode_ms: Option<u64>,
     batching_engine_state: &'static str,
     thinking_mode: String,
     cuda_graph_state: &'static str,
@@ -1203,6 +1216,9 @@ fn slow_request_log_values(
         generated_tokens: record.completion_tokens,
         elapsed_ms: record.duration_ms,
         threshold_ms: threshold.as_millis() as u64,
+        ttft_ms: record.ttft_ms,
+        model_prefill_ms: record.model_prefill_ms,
+        model_decode_ms: record.model_decode_ms,
         batching_engine_state,
         thinking_mode: record
             .thinking_mode
@@ -2230,6 +2246,7 @@ fn response_from_cached_completion(
         request_start,
         Some(std::time::Duration::ZERO),
         Some(std::time::Duration::ZERO),
+        Some(std::time::Duration::ZERO),
     );
     response
 }
@@ -2337,6 +2354,7 @@ fn response_from_cached_chat_choices(
         req,
         &mut response,
         request_start,
+        Some(std::time::Duration::ZERO),
         Some(std::time::Duration::ZERO),
         Some(std::time::Duration::ZERO),
     );
@@ -3105,6 +3123,8 @@ pub struct ChatCompletionPerformanceMetadata {
     pub prompt_tokens: usize,
     pub completion_tokens: usize,
     pub ttft_ms: Option<f64>,
+    pub prefill_ms: Option<f64>,
+    pub decode_ms: Option<f64>,
     pub total_latency_ms: f64,
     pub decode_tokens_per_sec: Option<f64>,
     pub adapter_used: String,
@@ -3893,6 +3913,7 @@ async fn chat_completions_inner(
             request_start,
             Some(std::time::Duration::ZERO),
             Some(std::time::Duration::ZERO),
+            Some(std::time::Duration::ZERO),
         );
         return Ok(Json(resp).into_response());
     }
@@ -4679,9 +4700,15 @@ async fn generate_real_batched(
         }
     };
     cancel.clear_prefill_progress();
+    state
+        .metrics
+        .observe_prefill_duration(output.prefill_duration.as_secs_f64());
+    state
+        .metrics
+        .observe_decode_duration(output.decode_duration.as_secs_f64());
     observe_post_prefill_vram(&state.memory_budget);
 
-    let finish_reason = match output.finish_reason {
+    let finish_reason = match &output.finish_reason {
         kiln_model::FinishReason::Eos => "stop",
         kiln_model::FinishReason::MaxTokens => "length",
         kiln_model::FinishReason::StopSequence(_) => "stop",
@@ -4703,6 +4730,7 @@ async fn generate_real_batched(
         fold_reasoning_into_content_for_request(state, req),
     );
     let preview_source = assistant_output.preview_source();
+    let ttft = first_token_at.map(|instant| instant.duration_since(request_start));
     record_recent_request(
         state,
         RequestRecord {
@@ -4712,6 +4740,9 @@ async fn generate_real_batched(
             completion_tokens: completion_tokens as u32,
             duration_ms: request_start.elapsed().as_millis() as u64,
             finish_reason: assistant_output.finish_reason.clone(),
+            ttft_ms: ttft.map(duration_ms_u64),
+            model_prefill_ms: Some(duration_ms_u64(output.prefill_duration)),
+            model_decode_ms: Some(duration_ms_u64(output.decode_duration)),
             thinking_mode: Some(thinking_mode_for_prompt(prompt_text).to_string()),
             prefix_cache: Some("batching_engine".to_string()),
             ..request_record_from_req(req, &id, &model, false)
@@ -4744,8 +4775,15 @@ async fn generate_real_batched(
         },
         metadata,
     };
-    let ttft = first_token_at.map(|instant| instant.duration_since(request_start));
-    attach_chat_performance_metadata(state, req, &mut response, request_start, ttft, None);
+    attach_chat_performance_metadata(
+        state,
+        req,
+        &mut response,
+        request_start,
+        ttft,
+        Some(output.prefill_duration),
+        Some(output.decode_duration),
+    );
     Ok(response)
 }
 
@@ -4831,6 +4869,8 @@ async fn generate_real_batched_streaming(
                     top_p: req_top_p,
                     max_tokens: req_max_tokens,
                     ttft_ms: None,
+                    model_prefill_ms: None,
+                    model_decode_ms: None,
                     error: None,
                 };
                 record_recent_request(&state_for_record, record);
@@ -5452,6 +5492,9 @@ async fn generate_real(
             completion_tokens: completion_tokens as u32,
             duration_ms: request_start.elapsed().as_millis() as u64,
             finish_reason: assistant_output.finish_reason.clone(),
+            ttft_ms: ttft.map(duration_ms_u64),
+            model_prefill_ms: ttft.map(duration_ms_u64),
+            model_decode_ms: decode_duration.map(duration_ms_u64),
             thinking_mode: Some(thinking_mode_for_prompt(prompt_text).to_string()),
             prefix_cache: Some(prefix_cache.to_string()),
             ..request_record_from_req(req, &id, &model, false)
@@ -5489,6 +5532,7 @@ async fn generate_real(
         req,
         &mut response,
         request_start,
+        ttft,
         ttft,
         decode_duration,
     );
@@ -5610,6 +5654,8 @@ async fn generate_real_streaming(
                     top_p: req_top_p,
                     max_tokens: req_max_tokens,
                     ttft_ms: None,
+                    model_prefill_ms: None,
+                    model_decode_ms: None,
                     error: None,
                 };
                 record_recent_request(&state_for_record, record);
@@ -6351,7 +6397,7 @@ async fn generate_mock(
         metadata,
     };
     let ttft = first_token_at.map(|instant| instant.duration_since(request_start));
-    attach_chat_performance_metadata(state, req, &mut response, request_start, ttft, None);
+    attach_chat_performance_metadata(state, req, &mut response, request_start, ttft, None, None);
     Ok(response)
 }
 
@@ -7780,6 +7826,7 @@ async fn generate_multi_chat_response(
             request_start,
             Some(std::time::Duration::ZERO),
             Some(std::time::Duration::ZERO),
+            Some(std::time::Duration::ZERO),
         );
         return chat_response_from_multi_responses(
             state,
@@ -7923,7 +7970,7 @@ fn chat_response_from_multi_responses(
         },
         metadata: metadata.unwrap_or_else(|| chat_completion_metadata_from_request(state, req)),
     };
-    attach_chat_performance_metadata(state, req, &mut response, request_start, None, None);
+    attach_chat_performance_metadata(state, req, &mut response, request_start, None, None, None);
     Ok(response)
 }
 
@@ -10349,6 +10396,8 @@ mod tests {
         assert_eq!(perf["prompt_tokens"], json["usage"]["prompt_tokens"]);
         assert_eq!(perf["completion_tokens"], 0);
         assert_eq!(perf["ttft_ms"], 0.0);
+        assert_eq!(perf["prefill_ms"], 0.0);
+        assert_eq!(perf["decode_ms"], 0.0);
         assert!(perf["total_latency_ms"].as_f64().unwrap() >= 0.0);
         assert_eq!(perf["decode_tokens_per_sec"], 0.0);
         assert_eq!(perf["adapter_used"], "base");
