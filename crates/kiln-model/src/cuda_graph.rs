@@ -106,7 +106,7 @@ use crate::backend::BackendRuntime;
 #[cfg(feature = "cuda")]
 use crate::forward::PagedDecodeGraphInputs;
 #[cfg(feature = "cuda")]
-use crate::forward::model_forward_paged_with_graph_inputs;
+use crate::forward::model_forward_paged_hidden_with_graph_inputs;
 use crate::forward::{GpuWeights, LinearAttentionState, model_forward_paged};
 use crate::lora_loader::LoraWeights;
 use crate::PagedKvCacheKt;
@@ -271,10 +271,18 @@ impl CudaBatchedGraphKey {
 struct CapturedDecodeGraph {
     /// The instantiated CUDA graph.
     graph: cudarc::driver::CudaGraph,
-    /// Output logits tensor — its storage is updated in-place during replay.
-    /// #1082: kt-native buffer (stable device pointer baked into the graph;
-    /// the captured forward writes here via `cuda_slice_set_dim0`).
-    output_logits: Tensor,
+    /// #1082 box-102 FIX: graph-stable PRE-final-norm hidden buffer, shape
+    /// `[1, 1, hidden_size]`. The captured `HiddenOnly` forward writes here via
+    /// `cuda_slice_set_dim0`; its storage is refreshed in place on every replay.
+    /// `final_norm` + lm_head then run EAGERLY on this buffer (off the graph,
+    /// via `crate::forward::lm_head_from_hidden_eager`) because the lm_head
+    /// cublasLt GEMV is not CUDA-graph-replay-safe (the BUG2 doubling).
+    output_hidden: Tensor,
+    /// The non-default capture stream the graph launches on. Retained so the
+    /// replay path can `synchronize()` it after `graph.launch()` — making the
+    /// freshly-written `output_hidden` visible before the eager lm_head reads
+    /// it on the default stream. (#1082 box-102 FIX)
+    capture_stream: std::sync::Arc<cudarc::driver::CudaStream>,
     /// Adapter generation when captured (invalidate on mismatch).
     adapter_gen: u64,
     /// Pre-allocated token-id buffer on GPU (u32, shape [1]).
@@ -314,17 +322,6 @@ struct CapturedDecodeGraph {
     /// Their device pointers are captured by the graph and must stay alive for
     /// replay.
     _gdn_decode_outputs: Vec<Tensor>,
-    /// Pre-allocated lm-head matmul output buffer, shape `[1, 1, vocab]`.
-    /// Installed via [`crate::forward::with_lm_head_output_buffer`] at
-    /// capture time so the kt-typed lm_head matmul writes into a
-    /// graph-stable device address instead of allocating a fresh kt
-    /// `Tensor` inside the capture window. Without this, the captured
-    /// `slice_set` source pointer (the lm_head output) would dangle on
-    /// replay → `CUDA_ERROR_ILLEGAL_ADDRESS`. The bs=1 path works in
-    /// production by allocator-determinism luck — pinning it here is a
-    /// defense-in-depth fix that matches the bs>1 structural fix
-    /// (#1082 Phase 5).
-    _lm_head_output_buffer: Tensor,
     /// #1082 freeze-pointers (Phase 5): every forward intermediate the captured
     /// graph touches — Q/K/V projections, per-layer activations, the
     /// `Flash_fwd_params` backing pointers — is handed to the forward as a
@@ -1131,31 +1128,46 @@ impl CudaGraphRunner {
                                 max_blocks_per_seq = requested_key.max_blocks_per_seq,
                                 "CUDA graph replay succeeded"
                             );
+                            // #1082 box-102 FIX: the captured graph replayed the
+                            // transformer and wrote the PRE-final-norm hidden into
+                            // the graph-stable `output_hidden` on its capture
+                            // stream. Sync that stream so the write is visible,
+                            // then run final_norm + lm_head EAGERLY (off the graph)
+                            // to produce this step's logits. The captured lm_head
+                            // cublasLt GEMV was the BUG2 source (wrong logits on
+                            // replay despite a bit-identical input hidden); the
+                            // captured transformer win is preserved.
+                            captured.capture_stream.synchronize().map_err(|e| {
+                                anyhow::anyhow!(
+                                    "box-102 fix: sync capture stream after replay launch: {e}"
+                                )
+                            })?;
+                            let replay_logits = crate::forward::lm_head_from_hidden_eager(
+                                backend,
+                                &captured.output_hidden,
+                                weights,
+                                config,
+                            )
+                            .context("box-102 fix: eager lm_head on replayed hidden")?;
                             if let Some(n) = crate::forward::read_layer_norm_debug() {
                                 eprintln!("SAMESTEP REPLAY step={seq_len} {n:?}");
                                 // #1082 iter-2: sign-sensitive element-sum on the
-                                // REPLAY path. Compare slot-by-slot to SAMESTEP
-                                // EAGER_SUM. The FIRST slot where sum diverges:
-                                //   within 0-31 (sumsq matched) => hidden ROTATION
-                                //     upstream => KV/attention path at that block;
-                                //   only at slot 40 / logits => late-path stale
-                                //     final_norm/lm_head buffer on replay.
+                                // REPLAY path. Blocks 0-31 come from the captured
+                                // graph; slot 40 from the eager `final_norm` in
+                                // `lm_head_from_hidden_eager` above.
                                 if let Some(s) = crate::forward::read_layer_sum_debug() {
                                     eprintln!("SAMESTEP REPLAY_SUM step={seq_len} {s:?}");
                                 }
-                                // Replay LOGITS sumsq AND sum — compare to SAMESTEP
-                                // EAGER_LOGITS. If layers 0-31 match but these
-                                // differ, the stale op is in final_norm/lm_head/
-                                // output_logits on the replay path.
-                                let rss = captured
-                                    .output_logits
+                                // Replay LOGITS sumsq AND sum — now computed by the
+                                // EAGER lm_head on the replayed hidden, so they
+                                // should MATCH SAMESTEP EAGER_LOGITS (the fix).
+                                let rss = replay_logits
                                     .sqr()
                                     .and_then(|s| s.sum_all())
                                     .and_then(|s| s.to_dtype(kiln_tensor::DType::F32))
                                     .and_then(|s| s.to_vec::<f32>())
                                     .ok();
-                                let rsum = captured
-                                    .output_logits
+                                let rsum = replay_logits
                                     .to_dtype(kiln_tensor::DType::F32)
                                     .and_then(|s| s.sum_all())
                                     .and_then(|s| s.to_vec::<f32>())
@@ -1163,7 +1175,7 @@ impl CudaGraphRunner {
                                 eprintln!("SAMESTEP REPLAY_LOGITS step={seq_len} sumsq={rss:?} sum={rsum:?}");
                             }
                             Self::debug_dump_gdn_state("replay", seq_len, linear_state);
-                            return Ok(captured.output_logits.clone());
+                            return Ok(replay_logits);
                         }
                         Err(e) => {
                             tracing::warn!("CUDA graph replay failed: {e}, falling back to eager");
@@ -1528,7 +1540,7 @@ impl CudaGraphRunner {
         // inside the capture/replay window.
         let token_buffer = Self::new_token_buffer(device, token_id)?;
         let position_buffer = Self::new_position_buffer(device, seq_len)?;
-        let output_logits = Self::new_output_logits(config, device, dtype)?;
+        let output_hidden = Self::new_output_hidden(config, device, dtype)?;
         let rotary_cos_buffer = Self::new_rotary_cos_buffer(config, device, seq_len)?;
         let rotary_sin_buffer = Self::new_rotary_sin_buffer(config, device, seq_len)?;
         let key = CudaGraphKey::new(block_table, paged_cache, seq_len);
@@ -1577,16 +1589,10 @@ impl CudaGraphRunner {
             _ => None,
         };
         let gdn_decode_outputs = Self::new_gdn_decode_outputs(config, device)?;
-        // Phase 5 #1082 — pre-allocate the lm-head matmul output
-        // buffer OUTSIDE the capture window. Installed via
-        // `crate::forward::with_lm_head_output_buffer` below; the
-        // captured `slice_set(&logits, 0, 0)` will then memcpy from
-        // this graph-stable pointer instead of a transient
-        // pool-allocated address. Defense-in-depth for the bs=1 path
-        // (which has historically worked by allocator-determinism
-        // luck at small `[1, 1, vocab]` shapes).
-        let lm_head_output_buffer =
-            Self::new_lm_head_output_buffer(config, device, dtype, 1)?;
+        // #1082 box-102 FIX: no lm-head output buffer for the bs=1 path — the
+        // captured forward stops at the pre-final-norm hidden (`HiddenOnly`),
+        // and final_norm + lm_head run EAGERLY on the replayed hidden, off the
+        // captured graph (the lm_head cublasLt GEMV is not replay-safe).
         Self::prepare_gdn_recurrent_state_for_capture(linear_state)?;
 
         // === #1082 freeze-pointers Pass 1 (Record / warm) ===
@@ -1617,25 +1623,23 @@ impl CudaGraphRunner {
             .snapshot()
             .context("freeze-pointers: snapshot GDN recurrent state before warm pass")?;
         let warm_result = kiln_tensor::with_capture_arena(arena.clone(), || {
-            crate::forward::with_lm_head_output_buffer(lm_head_output_buffer.clone(), || {
-                let logits = model_forward_paged_with_graph_inputs(
-                    backend,
-                    &[token_id],
-                    weights,
-                    config,
-                    paged_cache,
-                    block_table,
-                    seq_len,
-                    Some(linear_state),
-                    lora,
-                    &token_buffer,
-                    &position_buffer,
-                    graph_inputs.as_ref(),
-                )?;
-                kiln_tensor::cuda_slice_set_dim0(&output_logits, &logits, 0)
-                    .context("freeze-pointers warm pass: copy logits into stable output")?;
-                Ok::<(), anyhow::Error>(())
-            })
+            let hidden = model_forward_paged_hidden_with_graph_inputs(
+                backend,
+                &[token_id],
+                weights,
+                config,
+                paged_cache,
+                block_table,
+                seq_len,
+                Some(linear_state),
+                lora,
+                &token_buffer,
+                &position_buffer,
+                graph_inputs.as_ref(),
+            )?;
+            kiln_tensor::cuda_slice_set_dim0(&output_hidden, &hidden, 0)
+                .context("freeze-pointers warm pass: copy hidden into stable output")?;
+            Ok::<(), anyhow::Error>(())
         });
         warm_result.context("freeze-pointers warm (Record) pass failed")?;
         // #1082 box-102 differential: Pass-1 (warm/EAGER) per-layer norms for
@@ -1699,10 +1703,12 @@ impl CudaGraphRunner {
         // `stream` is mid-capture is the `CUDA_ERROR_STREAM_CAPTURE_UNSUPPORTED`
         // root cause. Outside this scope `active_cuda_stream` returns
         // `ctx.default_stream()` — zero behavior change for all other paths.
-        let logits_result = kiln_tensor::with_capture_arena(arena.clone(), || {
+        let capture_result = kiln_tensor::with_capture_arena(arena.clone(), || {
             kiln_tensor::with_active_cuda_stream(stream.clone(), || {
-            crate::forward::with_lm_head_output_buffer(lm_head_output_buffer.clone(), || {
-                let logits = model_forward_paged_with_graph_inputs(
+                // #1082 box-102 FIX: capture the PRE-final-norm HIDDEN
+                // (`HiddenOnly`), NOT the logits — the lm_head cublasLt GEMV is
+                // excluded from the graph and run eagerly on replay.
+                let hidden = model_forward_paged_hidden_with_graph_inputs(
                     backend,
                     &[token_id],
                     weights,
@@ -1716,16 +1722,15 @@ impl CudaGraphRunner {
                     &position_buffer,
                     graph_inputs.as_ref(),
                 )?;
-                // #1082 CUDA-graph fix (Part D): `logits` is kt; copy it into
-                // the graph-stable kt `output_logits` via a KT-NATIVE copy
-                // that runs on the capture stream (the override above makes
-                // `cuda_slice_set_dim0` resolve to `stream`). The copy is
-                // recorded into the graph, so every replay refreshes
-                // `output_logits` in place at the same device pointer.
-                kiln_tensor::cuda_slice_set_dim0(&output_logits, &logits, 0)
-                    .context("CUDA graph: copy kt logits into stable output_logits")?;
-                Ok::<Tensor, anyhow::Error>(output_logits.clone())
-            })
+                // `hidden` is kt; copy it into the graph-stable kt
+                // `output_hidden` via a KT-NATIVE copy that runs on the capture
+                // stream (the override above makes `cuda_slice_set_dim0` resolve
+                // to `stream`). The copy is recorded into the graph, so every
+                // replay refreshes `output_hidden` in place at the same device
+                // pointer.
+                kiln_tensor::cuda_slice_set_dim0(&output_hidden, &hidden, 0)
+                    .context("CUDA graph: copy kt hidden into stable output_hidden")?;
+                Ok::<(), anyhow::Error>(())
             })
         });
 
@@ -1735,13 +1740,11 @@ impl CudaGraphRunner {
         );
 
         // Check forward pass success first
-        let logits = logits_result.context("forward pass failed during graph capture")?;
+        capture_result.context("forward pass failed during graph capture")?;
 
         // #1082: `graph_inputs` borrows the owned kt buffers
         // (`block_table_buffer`, `rotary_*`, `paged_decode_*`, …); drop it
         // so those buffers can be moved into `CapturedDecodeGraph` below.
-        // `logits` is an independent Arc clone of `output_logits`'s storage,
-        // so the move of `output_logits` into the struct is fine.
         drop(graph_inputs);
 
         // Check graph capture success
@@ -1752,24 +1755,32 @@ impl CudaGraphRunner {
                     config.num_layers,
                 );
                 // (#1082 Phase 5) Stream capture only RECORDS the forward — its
-                // kernels did NOT execute, so `output_logits` is still the
+                // kernels did NOT execute, so `output_hidden` is still the
                 // uninitialized capture-time buffer and the in-place recurrent/
                 // KV state was not advanced. Launch the instantiated graph once
                 // now (the token/position/rotary/metadata buffers already hold
                 // THIS step's inputs) to actually compute this step + advance
-                // state, then sync so `logits` (which aliases output_logits'
-                // storage) is valid before we return it.
+                // state, then sync so `output_hidden` is valid before we read it.
                 graph
                     .launch()
                     .context("execute captured decode graph (first run)")?;
                 stream
                     .synchronize()
                     .map_err(|e| anyhow::anyhow!("sync after first captured-graph launch: {e}"))?;
+                // #1082 box-102 FIX: run final_norm + lm_head EAGERLY on the
+                // capture-step hidden to produce this step's logits — the lm_head
+                // cublasLt GEMV is OUT of the captured graph. `output_hidden` now
+                // holds the first-launch hidden (synced above).
+                let logits = crate::forward::lm_head_from_hidden_eager(
+                    backend,
+                    &output_hidden,
+                    weights,
+                    config,
+                )
+                .context("box-102 fix: eager lm_head on captured hidden (first launch)")?;
                 // #1082 box-102 differential: first CAPTURED-launch per-layer
-                // norms for the SAME capture-step input as PASS1 above. Diff
-                // PASS1 vs FIRSTLAUNCH → the first layer where they differ is
-                // where the captured graph computes wrong values on launch =
-                // the doubling root cause.
+                // norms for the SAME capture-step input as PASS1 above (blocks
+                // 0-31 from the captured graph; slot 40 from the eager lm_head).
                 if let Some(n) = crate::forward::read_layer_norm_debug() {
                     eprintln!("BOX102DIFF FIRSTLAUNCH {n:?}");
                 }
@@ -1778,7 +1789,8 @@ impl CudaGraphRunner {
                     key,
                     CapturedDecodeGraph {
                         graph,
-                        output_logits,
+                        output_hidden,
+                        capture_stream: stream.clone(),
                         adapter_gen: self.adapter_generation,
                         token_buffer,
                         position_buffer,
@@ -1791,7 +1803,6 @@ impl CudaGraphRunner {
                         _paged_decode_lse: paged_decode_lse,
                         max_seqlen_k,
                         _gdn_decode_outputs: gdn_decode_outputs,
-                        _lm_head_output_buffer: lm_head_output_buffer,
                         _capture_arena_buffers: arena.borrow_mut().take_retained(),
                     },
                 );
@@ -2399,14 +2410,18 @@ impl CudaGraphRunner {
             .context("create CUDA graph rotary sin buffer")
     }
 
+    /// #1082 box-102 FIX: graph-stable `[1, 1, hidden_size]` PRE-final-norm
+    /// hidden buffer. The captured `HiddenOnly` forward writes here; final_norm
+    /// + lm_head run eagerly on it after replay (the lm_head GEMV is not
+    /// graph-replay-safe). Dtype matches the model's hidden dtype (bf16).
     #[cfg(feature = "cuda")]
-    fn new_output_logits(
+    fn new_output_hidden(
         config: &ModelConfig,
         device: Device,
         dtype: kiln_tensor::DType,
     ) -> Result<Tensor> {
-        Tensor::zeros_on(device, vec![1, 1, config.vocab_size], dtype)
-            .context("create CUDA graph output logits")
+        Tensor::zeros_on(device, vec![1, 1, config.hidden_size], dtype)
+            .context("create CUDA graph output hidden")
     }
 
     /// `[batch, 1, vocab_size]` lm-head matmul output buffer. Used as

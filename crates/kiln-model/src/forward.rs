@@ -23801,6 +23801,90 @@ pub fn model_forward_paged_next_token_greedy(
     )
 }
 
+/// #1082 box-102 FIX — graph-capture twin of
+/// [`model_forward_paged_with_graph_inputs`] that stops at the
+/// **pre-final-norm** hidden state (`LmHeadMode::HiddenOnly`) instead of
+/// projecting to logits.
+///
+/// The bs=1 paged-decode CUDA graph captures THIS forward (transformer blocks
+/// only — paged-KV + GDN recurrent state still advance exactly as before), so
+/// the large-N (`vocab = 151936`) cublasLt lm_head GEMV is NOT recorded into
+/// the graph. The caller (`CudaGraphRunner::{try_capture, decode_step_paged}`)
+/// runs `final_norm` + lm_head EAGERLY on the replayed hidden via
+/// [`lm_head_from_hidden_eager`].
+///
+/// Why: replaying the captured lm_head matmul produced WRONG logits
+/// (token-doubling, "BUG2") despite a bit-identical input hidden. The slot-40
+/// sign-sum probe proved the lm_head INPUT matches eager-vs-replay on every
+/// step while the OUTPUT logits diverge up to 97%; transformer blocks 0-31 also
+/// match. The large-N cublasLt algo is not CUDA-graph-replay-deterministic; the
+/// small per-layer matmuls are. Moving final_norm + lm_head out of the captured
+/// region is the structural fix — the captured 32-layer transformer (the actual
+/// decode win) is preserved.
+#[cfg(feature = "cuda")]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn model_forward_paged_hidden_with_graph_inputs(
+    backend: &dyn BackendRuntime,
+    token_ids: &[u32],
+    weights: &GpuWeights,
+    config: &kiln_core::config::ModelConfig,
+    paged_cache: &PagedKvCache,
+    block_table: &BlockTable,
+    start_pos: usize,
+    linear_state: Option<&mut LinearAttentionState>,
+    lora: Option<&LoraWeights>,
+    token_ids_gpu: &Tensor,
+    positions_gpu: &Tensor,
+    graph_inputs: Option<&PagedDecodeGraphInputs<'_>>,
+) -> Result<Tensor> {
+    let (_logits, hidden, _token) = model_forward_paged_inner(
+        backend,
+        token_ids,
+        weights,
+        config,
+        paged_cache,
+        block_table,
+        start_pos,
+        linear_state,
+        lora,
+        Some(token_ids_gpu),
+        Some(positions_gpu),
+        graph_inputs,
+        // Phase 7 #1082: no kt twin from this caller — forward `None` so the
+        // candle writer remains authoritative (mirrors the logits twin).
+        None,
+        LmHeadMode::HiddenOnly,
+    )?;
+    Ok(hidden.expect("LmHeadMode::HiddenOnly always returns hidden"))
+}
+
+/// #1082 box-102 FIX — run the final RMSNorm + LM head projection EAGERLY
+/// (outside any captured CUDA graph) on the **pre-final-norm** hidden state the
+/// captured bs=1 decode graph produced ([`model_forward_paged_hidden_with_graph_inputs`]).
+///
+/// Numerically identical to the `LmHeadMode::Full` arm of
+/// [`model_forward_paged_inner`] (same `final_norm` RMSNorm, same
+/// `lm_head_forward_backend_decode_if`), so the logits match the eager decode
+/// path exactly — but the lm_head cublasLt GEMV runs eagerly, off the graph,
+/// sidestepping the replay-nondeterminism that doubled output ("BUG2"). Cost is
+/// one extra eager vocab GEMV + one RMSNorm per decode token — negligible next
+/// to the captured 32-layer transformer.
+#[cfg(feature = "cuda")]
+pub(crate) fn lm_head_from_hidden_eager(
+    backend: &dyn BackendRuntime,
+    hidden: &Tensor,
+    weights: &GpuWeights,
+    config: &kiln_core::config::ModelConfig,
+) -> Result<Tensor> {
+    kiln_nvtx::range!(c"kiln/lm_head_eager");
+    let normed = rms_norm(hidden, &weights.final_norm, config.rms_norm_eps)?;
+    // Mirror the `Full` arm's slot-40 record (final_norm output / lm_head
+    // input) so the box-102 SAMESTEP probe observes the replay-path value here
+    // — the captured graph no longer records slot 40 under `HiddenOnly`.
+    record_layer_norm_debug(&normed, 40);
+    lm_head_forward_backend_decode_if(Some(backend), &normed, &weights.embed_tokens_t)
+}
+
 #[allow(clippy::too_many_arguments, dead_code)]
 pub(crate) fn model_forward_paged_with_graph_inputs(
     backend: &dyn BackendRuntime,
