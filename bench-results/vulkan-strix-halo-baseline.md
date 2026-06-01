@@ -429,7 +429,10 @@ every config"):
 
 ## Other follow-ups (perf headroom, not regressions)
 
-1. **First-token shader compile** (~1.4 s) could be prewarmed at load.
+1. **First-token shader compile** should be remeasured in live serving after the
+   expanded Vulkan pipeline prewarm list; it now includes the resident decode
+   RoPE, attention gate, batch-2 GDN in-proj, and rows4/rows8 down+residual
+   variants that were previously still lazy-created.
 2. Complete the remaining shared-stack dependency cleanup audit for any
    non-Vulkan decode islands; the Vulkan-specific decode weight path is now
    duplicate-copy-free.
