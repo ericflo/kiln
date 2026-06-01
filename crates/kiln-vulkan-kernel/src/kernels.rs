@@ -509,6 +509,88 @@ pub fn prewarm_builtin_pipelines(vk_device: &VulkanDevice) -> Result<()> {
             .with_context(|| format!("prewarm Vulkan command-batch path {shader_path}"))?;
     }
 
+    let chunkwise_prefill_paths = [
+        (
+            concat!(env!("CARGO_MANIFEST_DIR"), "/csrc/shaders/vk_narrow_lastdim_f32.comp"),
+            2usize,
+            16u32,
+        ),
+        (
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/csrc/shaders/vk_narrow_lastdim_f32_offset.comp"
+            ),
+            2,
+            24,
+        ),
+        (
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/csrc/shaders/vk_narrow_lastdim_bwd_f32.comp"
+            ),
+            2,
+            16,
+        ),
+        (
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/csrc/shaders/vk_narrow_lastdim_bwd_f32_offset.comp"
+            ),
+            2,
+            24,
+        ),
+        (
+            concat!(env!("CARGO_MANIFEST_DIR"), "/csrc/shaders/vk_matmul_batched_f32.comp"),
+            3,
+            16,
+        ),
+        (
+            concat!(env!("CARGO_MANIFEST_DIR"), "/csrc/shaders/vk_transpose_3d_f32.comp"),
+            2,
+            12,
+        ),
+        (
+            concat!(env!("CARGO_MANIFEST_DIR"), "/csrc/shaders/gdn_chunk_prep.comp"),
+            12,
+            16,
+        ),
+        (
+            concat!(env!("CARGO_MANIFEST_DIR"), "/csrc/shaders/vk_solve_tri_v2.comp"),
+            4,
+            16,
+        ),
+        (
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/csrc/shaders/vk_broadcast_mul_lastdim.comp"
+            ),
+            3,
+            8,
+        ),
+        (
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/csrc/shaders/vk_elementwise_binary_f32.comp"
+            ),
+            3,
+            8,
+        ),
+        (
+            concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/csrc/shaders/vk_elementwise_binary_f32_offset.comp"
+            ),
+            3,
+            12,
+        ),
+    ];
+
+    for (shader_path, total_bindings, push_bytes) in chunkwise_prefill_paths {
+        vk_device
+            .get_compute_pipeline_by_path(shader_path, total_bindings, push_bytes)
+            .with_context(|| format!("prewarm Vulkan chunkwise-prefill path {shader_path}"))?;
+    }
+
     Ok(())
 }
 

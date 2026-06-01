@@ -121,10 +121,16 @@ on the app-layer tensor stack.
 |---|---:|---:|---:|---|
 | B=1, H=32, T=48, DK=128, DV=128, C=64 | 0.655 ms | 0.251 ms | **2.61x** | out/state max abs err 0 |
 | B=1, H=32, T=128, DK=128, DV=128, C=64 | 1.531 ms | 0.771 ms | **1.98x** | out/state max abs err 0 |
+| B=1, H=32, T=512, DK=128, DV=128, C=64 | 7.070 ms | 3.041 ms | **2.32x** | out/state max abs err 0 |
 
 Current smoke on the same Vulkan-only example with T=128, warmup=1, iters=3,
 repeats=2 measured legacy per-dispatch 1.715 ms vs. single-submit 0.756 ms
 (**2.27x**) with output/state max abs err 0.
+
+The expanded Vulkan pipeline prewarm now also fills the path-keyed
+`CommandBatch::record_shader` cache for the chunkwise-prefill recorder's narrow,
+scatter, batched matmul, transpose, solve, broadcast, and elementwise stages, so
+the first recorded GDN prefill no longer lazily creates those pipelines.
 
 Other proper work-packages for full saturation (per "max out the hardware in
 every config"):
@@ -436,7 +442,8 @@ every config"):
    expanded Vulkan pipeline prewarm. It now includes the resident decode RoPE,
    attention gate, batch-2 GDN in-proj, and rows4/rows8 down+residual variants,
    and it also fills the path-keyed cache used by `CommandBatch::record_shader`
-   so the first recorded decode step does not do first-use path lookups.
+   so the first recorded decode or chunkwise-prefill step does not do first-use
+   path lookups.
 2. Complete the remaining shared-stack dependency cleanup audit for any
    non-Vulkan decode islands; the Vulkan-specific decode weight path is now
    duplicate-copy-free.
