@@ -2192,6 +2192,10 @@ impl CudaGraphRunner {
         )
         .context("eager decode forward pass failed");
         if out.is_ok() {
+            // `debug_dump_gdn_state` is `#[cfg(feature = "cuda")]`; gate the call
+            // so the eager path (compiled on every backend, incl. Vulkan/Metal)
+            // still builds. Debug-only, default-off.
+            #[cfg(feature = "cuda")]
             Self::debug_dump_gdn_state("eager", seq_len, linear_state);
         }
         out
