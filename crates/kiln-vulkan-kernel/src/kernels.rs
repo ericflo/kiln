@@ -8,6 +8,7 @@ use std::time::Instant;
 
 const DEFAULT_MLP_BF16_ROWS8_MIN_BATCH: usize = 256;
 const DEFAULT_FULL_ATTN_QKV_BF16_ROWS4_MIN_BATCH: usize = 2;
+const DEFAULT_LINEAR_DECODE_BF16W_ROWS4_MIN_BATCH: usize = 16;
 const DEFAULT_LINEAR_DECODE_BF16W_ROWS8_MIN_BATCH: usize = 64;
 const DEFAULT_GDN_IN_PROJ_ROWS4_MIN_BATCH: usize = 16;
 const DEFAULT_GDN_IN_PROJ_ROWS8_MIN_BATCH: usize = 64;
@@ -81,6 +82,17 @@ pub(crate) fn linear_decode_bf16w_rows8_min_batch() -> usize {
             .and_then(|s| s.parse::<usize>().ok())
             .filter(|&n| n > 0)
             .unwrap_or(DEFAULT_LINEAR_DECODE_BF16W_ROWS8_MIN_BATCH)
+    })
+}
+
+pub(crate) fn linear_decode_bf16w_rows4_min_batch() -> usize {
+    static VALUE: OnceLock<usize> = OnceLock::new();
+    *VALUE.get_or_init(|| {
+        std::env::var("KILN_VULKAN_LINEAR_BF16_ROWS4_MIN_BATCH")
+            .ok()
+            .and_then(|s| s.parse::<usize>().ok())
+            .filter(|&n| n > 0)
+            .unwrap_or(DEFAULT_LINEAR_DECODE_BF16W_ROWS4_MIN_BATCH)
     })
 }
 
@@ -2497,7 +2509,9 @@ fn dispatch_linear_decode_cached_bytes_core(
         )
         .context("linear_decode kernel failed")?;
     } else {
-        let rows4 = packed_bf16_weights && batch >= 16 && linear_decode_bf16w_rows4_enabled();
+        let rows4 = packed_bf16_weights
+            && batch >= linear_decode_bf16w_rows4_min_batch()
+            && linear_decode_bf16w_rows4_enabled();
         let glsl_path = if packed_bf16_weights {
             if rows4 {
                 concat!(
@@ -2589,7 +2603,9 @@ fn dispatch_linear_decode_cached_single_submit_bytes(
             out_dim.div_ceil(16) as u32,
         )
     } else {
-        let rows4 = packed_bf16_weights && batch >= 16 && linear_decode_bf16w_rows4_enabled();
+        let rows4 = packed_bf16_weights
+            && batch >= linear_decode_bf16w_rows4_min_batch()
+            && linear_decode_bf16w_rows4_enabled();
         let glsl_path = if packed_bf16_weights {
             if rows4 {
                 concat!(
@@ -3560,7 +3576,10 @@ pub fn dispatch_linear_decode_sample_batch_bytes(
     let rows8 = packed_bf16_weights
         && batch >= linear_decode_bf16w_rows8_min_batch()
         && linear_decode_bf16w_rows8_enabled();
-    let rows4 = packed_bf16_weights && !rows8 && batch >= 16 && linear_decode_bf16w_rows4_enabled();
+    let rows4 = packed_bf16_weights
+        && !rows8
+        && batch >= linear_decode_bf16w_rows4_min_batch()
+        && linear_decode_bf16w_rows4_enabled();
     let lm_glsl = if packed_bf16_weights {
         if rows8 {
             crate::shaders::LINEAR_DECODE_BATCHED_ROWS8_BF16W
@@ -3736,7 +3755,10 @@ fn dispatch_linear_decode_argmax_batched_cached_impl_bytes(
     let rows8 = packed_bf16_weights
         && batch >= linear_decode_bf16w_rows8_min_batch()
         && linear_decode_bf16w_rows8_enabled();
-    let rows4 = packed_bf16_weights && !rows8 && batch >= 16 && linear_decode_bf16w_rows4_enabled();
+    let rows4 = packed_bf16_weights
+        && !rows8
+        && batch >= linear_decode_bf16w_rows4_min_batch()
+        && linear_decode_bf16w_rows4_enabled();
     let blocks_glsl = if rows8 {
         concat!(
             env!("CARGO_MANIFEST_DIR"),

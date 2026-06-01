@@ -201,6 +201,11 @@ Halo kept the default: generic BF16 linear rows8 enabled measured 450.6 ms/iter
 (142 rows/s), while forcing it off measured 459.1 ms/iter (139 rows/s).
 Disabling full-attention QKV rows8 was also slower at 452.3 ms/iter. Treat this
 as a hardware-portability tuning hook, not a default flip.
+The same selector family now also honors
+`KILN_VULKAN_LINEAR_BF16_ROWS4_MIN_BATCH`, defaulting to 16. This covers the
+rows4 crossover for attention out-proj, GDN out-proj, direct resident BF16
+linear, and batched lm-head argmax/sample while keeping the Strix Halo default
+unchanged.
 
 Other proper work-packages for full saturation (per "max out the hardware in
 every config"):
