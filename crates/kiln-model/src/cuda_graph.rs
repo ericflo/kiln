@@ -1065,6 +1065,7 @@ impl CudaGraphRunner {
                                 max_blocks_per_seq = requested_key.max_blocks_per_seq,
                                 "CUDA graph replay succeeded"
                             );
+                            Self::debug_dump_gdn_state("replay", seq_len, linear_state);
                             return Ok(captured.output_logits.clone());
                         }
                         Err(e) => {
@@ -1995,7 +1996,7 @@ impl CudaGraphRunner {
         // #1082: `model_forward_paged` is kt-typed (returns kt logits) and
         // `decode_step_paged` now returns kt too — return the kt logits
         // directly, no candle bridge.
-        model_forward_paged(
+        let out = model_forward_paged(
             backend,
             &[token_id],
             weights,
@@ -2007,7 +2008,38 @@ impl CudaGraphRunner {
             lora,
             None, // no pre-allocated position buffer — creates one internally
         )
-        .context("eager decode forward pass failed")
+        .context("eager decode forward pass failed");
+        if out.is_ok() {
+            Self::debug_dump_gdn_state("eager", seq_len, linear_state);
+        }
+        out
+    }
+
+    /// #1082 box-102 BUG2 probe (gated by `KILN_DEBUG_GDN_STATE=1`): dump the
+    /// sum-of-squares of layer-0 GDN recurrent + conv state after a decode
+    /// step. Compares the eager path (state advances every step) against the
+    /// captured-graph replay path: if the replay state norm is FROZEN across
+    /// steps, the recurrent state is not surviving replay (the captured graph
+    /// updates an arena buffer but the Rust-side `linear_state` swap never runs
+    /// on replay) — the leading hypothesis for the token-doubling correctness
+    /// bug. Off by default; zero cost on the production path.
+    #[cfg(feature = "cuda")]
+    fn debug_dump_gdn_state(tag: &str, seq_len: usize, linear_state: &LinearAttentionState) {
+        if std::env::var("KILN_DEBUG_GDN_STATE").ok().as_deref() != Some("1") {
+            return;
+        }
+        fn sumsq(t: &Tensor) -> f64 {
+            match t
+                .to_dtype(kiln_tensor::DType::F32)
+                .and_then(|f| f.to_vec::<f32>())
+            {
+                Ok(v) => v.iter().map(|x| (*x as f64) * (*x as f64)).sum(),
+                Err(_) => -1.0,
+            }
+        }
+        let r = linear_state.recurrent_states.first().map(sumsq).unwrap_or(-1.0);
+        let c = linear_state.conv_states.first().map(sumsq).unwrap_or(-1.0);
+        eprintln!("GDNSTATE [{tag}] step={seq_len} rs0_sumsq={r:.6} conv0_sumsq={c:.6}");
     }
 
     #[cfg(feature = "cuda")]
