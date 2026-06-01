@@ -70,6 +70,7 @@ pub struct CommandBatch<'a> {
     cmd: vk::CommandBuffer,
     cmd_buffers_to_free: Vec<vk::CommandBuffer>,
     dispatch_count: usize,
+    tail_shader_barrier_needed: bool,
     finished: bool,
 }
 
@@ -116,6 +117,7 @@ impl<'a> CommandBatch<'a> {
             cmd,
             cmd_buffers_to_free: cmd_buffers,
             dispatch_count: 0,
+            tail_shader_barrier_needed: false,
             finished: false,
         })
     }
@@ -229,6 +231,7 @@ impl<'a> CommandBatch<'a> {
             device.cmd_dispatch(self.cmd, wx, wy, wz);
         }
         self.dispatch_count += 1;
+        self.tail_shader_barrier_needed = true;
         Ok(())
     }
 
@@ -340,6 +343,7 @@ impl<'a> CommandBatch<'a> {
                 &[],
             );
         }
+        self.tail_shader_barrier_needed = false;
         Ok(())
     }
 
@@ -425,7 +429,7 @@ impl<'a> CommandBatch<'a> {
             // Final tail barrier: SHADER_WRITE → TRANSFER_READ + HOST_READ
             // so the next readback / copy off the batch's last output
             // buffer sees the writes.
-            if self.dispatch_count > 0 {
+            if self.tail_shader_barrier_needed {
                 let barrier = vk::MemoryBarrier::default()
                     .src_access_mask(vk::AccessFlags::SHADER_WRITE)
                     .dst_access_mask(vk::AccessFlags::TRANSFER_READ | vk::AccessFlags::HOST_READ)
@@ -563,6 +567,57 @@ mod tests {
         let got: Vec<f32> = bytemuck::cast_slice::<u8, f32>(&got_bytes).to_vec();
         for i in 0..n {
             let expected = a[i] + b[i] + c[i];
+            assert!(
+                (expected - got[i]).abs() <= 1e-6,
+                "idx {i}: {expected} vs {}",
+                got[i]
+            );
+        }
+    }
+
+    #[test]
+    fn command_batch_readback_copy_skips_tail_shader_barrier_path() {
+        let Ok(dev) = VulkanDevice::new() else {
+            return;
+        };
+        let n = 256usize;
+        let a: Vec<f32> = (0..n).map(|i| (i as f32) * 0.01).collect();
+        let b: Vec<f32> = (0..n).map(|i| (i as f32) * 0.02).collect();
+        let a_buf = upload_f32_slice(&dev, &a);
+        let b_buf = upload_f32_slice(&dev, &b);
+        let out = VulkanBuffer::create_device_local(
+            dev.device(),
+            dev.device_local_mem_type(),
+            (n * 4) as u64,
+        )
+        .unwrap();
+        let staging = VulkanBuffer::create_host_visible(
+            dev.device(),
+            dev.host_visible_mem_type(),
+            (n * 4) as u64,
+        )
+        .unwrap();
+        let glsl_path = concat!(env!("CARGO_MANIFEST_DIR"), "/csrc/shaders/add.comp");
+        let push: [u32; 1] = [n as u32];
+        let wg = Workgroups::OneD(n.div_ceil(256) as u32);
+        {
+            let mut batch = CommandBatch::new(&dev).unwrap();
+            batch
+                .record_shader(
+                    glsl_path,
+                    &[a_buf.handle(), b_buf.handle(), out.handle()],
+                    &push,
+                    wg,
+                )
+                .unwrap();
+            batch.record_copy_buffer(&out, &staging, (n * 4) as u64).unwrap();
+            assert_eq!(batch.dispatch_count(), 1);
+            batch.submit_and_wait("test_chain_copy").unwrap();
+        }
+        let got_bytes = staging.read_mapped(n * 4).unwrap();
+        let got: Vec<f32> = bytemuck::cast_slice::<u8, f32>(&got_bytes).to_vec();
+        for i in 0..n {
+            let expected = a[i] + b[i];
             assert!(
                 (expected - got[i]).abs() <= 1e-6,
                 "idx {i}: {expected} vs {}",

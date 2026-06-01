@@ -640,6 +640,9 @@ every config"):
   that buffer, avoiding separate map/allocation setup for each small upload.
   Those upload copies now share one transfer-to-compute barrier before LM-head
   dispatch instead of one barrier per staged segment.
+  Command batches that end with an in-batch readback copy now also skip the
+  redundant submit-time shader tail barrier; the copy already records the
+  shader-to-transfer and transfer-to-host barriers needed for the mapped token.
   **Update — legacy bridge removed from the old bs=1 resident block helper:**
   the older single-row resident full-attention fallback now extracts the input
   activation and RoPE tables directly from kt tensors, uploads those f32 slices
