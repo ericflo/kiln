@@ -211,7 +211,12 @@ const SHADERS: &[(&str, &str)] = &[
         "apply_token_penalties",
         "SPIR_V_APPLY_TOKEN_PENALTIES",
     ),
+    (
+        "apply_token_penalties_batched",
+        "SPIR_V_APPLY_TOKEN_PENALTIES_BATCHED",
+    ),
     ("topk_sample", "SPIR_V_TOPK_SAMPLE"),
+    ("topk_sample_batched", "SPIR_V_TOPK_SAMPLE_BATCHED"),
     ("mlp_gate_up_decode", "SPIR_V_MLP_GATE_UP_DECODE"),
     (
         "mlp_gate_up_decode_bf16w",

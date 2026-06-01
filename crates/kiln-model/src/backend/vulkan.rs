@@ -3670,6 +3670,95 @@ impl BackendRuntime for VulkanBackend {
         Ok(Some(token))
     }
 
+    fn supports_linear_decode_sample_batch(&self, top_k: &[u32], temperatures: &[f32]) -> bool {
+        self.has_vulkan()
+            && self.linear_decode_enabled
+            && top_k.len() == temperatures.len()
+            && !top_k.is_empty()
+            && top_k.iter().zip(temperatures.iter()).all(|(&k, &temp)| {
+                let greedy = temp == 0.0 || (k == 1 && temp.is_finite() && temp > 0.0);
+                greedy
+                    || (temp.is_finite()
+                        && temp > 0.0
+                        && k > 0
+                        && k <= kiln_vulkan_kernel::kernels::TOPK_SAMPLE_KERNEL_K_MAX)
+            })
+    }
+
+    fn linear_decode_sample_batch(
+        &self,
+        x: &kiln_tensor::Tensor,
+        weight_t: &kiln_tensor::Tensor,
+        history_rows: &[u32],
+        history_indices: &[u32],
+        history_counts: &[u32],
+        repetition_penalties: &[f32],
+        presence_penalties: &[f32],
+        frequency_penalties: &[f32],
+        temperatures: &[f32],
+        top_k: &[u32],
+        top_p: &[f32],
+        min_p: &[f32],
+        seeds: &[u64],
+    ) -> Result<Option<Vec<u32>>> {
+        if !self.supports_linear_decode_sample_batch(top_k, temperatures)
+            || x.dtype() != kiln_tensor::DType::F32
+        {
+            return Ok(None);
+        }
+        if !matches!(x.device(), kiln_tensor::Device::Cpu)
+            || !matches!(weight_t.device(), kiln_tensor::Device::Cpu)
+        {
+            return Ok(None);
+        }
+        let Ok((batch, seq_len, hidden)) = x.dims3() else {
+            return Ok(None);
+        };
+        if batch == 0 || seq_len != 1 {
+            return Ok(None);
+        }
+        let Ok((weight_hidden, out_dim)) = weight_t.dims2() else {
+            return Ok(None);
+        };
+        if weight_hidden != hidden {
+            return Ok(None);
+        }
+
+        let vk_device = self
+            .vulkan_device
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
+        let packed_bf16 = self.use_bf16_packed_linear_weight_kt(weight_t);
+        let weight_buf = if packed_bf16 {
+            self.cached_bf16_packed_weight_buffer_kt(weight_t)?
+        } else {
+            self.cached_f32_weight_buffer_kt(weight_t)?
+        };
+        let x_data = kt_tensor_to_f32_bytes_with_shape(x)?.0;
+        let tokens = kiln_vulkan_kernel::kernels::dispatch_linear_decode_sample_batch_bytes(
+            vk_device,
+            &x_data,
+            &weight_buf,
+            packed_bf16,
+            batch,
+            hidden,
+            out_dim,
+            history_rows,
+            history_indices,
+            history_counts,
+            repetition_penalties,
+            presence_penalties,
+            frequency_penalties,
+            temperatures,
+            top_k,
+            top_p,
+            min_p,
+            seeds,
+        )
+        .context("fused linear_decode_sample_batch dispatch failed")?;
+        Ok(Some(tokens))
+    }
+
     fn linear_decode_argmax_batch(
         &self,
         x: &kiln_tensor::Tensor,

@@ -1,0 +1,54 @@
+// Batched in-place token penalties for decode logits.
+//
+// The flattened history arrays contain one entry per unique token per row.
+// Each invocation updates exactly one `(row, token)` logit, so rows can share
+// token ids without write conflicts.
+
+#version 450
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint n_items;
+    uint vocab_size;
+    uint batch;
+};
+
+layout(binding = 0) buffer LogitsBuf { float logits[]; };
+layout(binding = 1) readonly buffer IndicesBuf { uint history_indices[]; };
+layout(binding = 2) readonly buffer CountsBuf { uint history_counts[]; };
+layout(binding = 3) readonly buffer RowsBuf { uint history_rows[]; };
+layout(binding = 4) readonly buffer RepetitionBuf { float repetitions[]; };
+layout(binding = 5) readonly buffer PresenceBuf { float presences[]; };
+layout(binding = 6) readonly buffer FrequencyBuf { float frequencies[]; };
+
+void main() {
+    uint tid = gl_GlobalInvocationID.x;
+    if (tid >= n_items) {
+        return;
+    }
+
+    uint row = history_rows[tid];
+    uint idx = history_indices[tid];
+    if (row >= batch || idx >= vocab_size) {
+        return;
+    }
+
+    uint count = history_counts[tid];
+    uint offset = row * vocab_size + idx;
+    float l = logits[offset];
+
+    float repetition = repetitions[row];
+    if (repetition != 1.0) {
+        if (l > 0.0) {
+            l = l / repetition;
+        } else {
+            l = l * repetition;
+        }
+    }
+
+    l -= presences[row];
+    l -= frequencies[row] * float(count);
+
+    logits[offset] = l;
+}

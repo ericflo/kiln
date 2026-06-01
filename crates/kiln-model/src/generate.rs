@@ -1196,6 +1196,33 @@ fn run_legacy_lm_head_sample_batch(
     Ok(sampled)
 }
 
+fn unique_history_counts_for_batch_sample(history: &[u32]) -> (Vec<u32>, Vec<u32>) {
+    let mut counts: std::collections::BTreeMap<u32, u32> = std::collections::BTreeMap::new();
+    for &token in history {
+        *counts.entry(token).or_default() += 1;
+    }
+    let mut indices = Vec::with_capacity(counts.len());
+    let mut values = Vec::with_capacity(counts.len());
+    for (token, count) in counts {
+        indices.push(token);
+        values.push(count);
+    }
+    (indices, values)
+}
+
+fn sample_seed_for_batch_row(step_seed: Option<u64>, history: &[u32]) -> u64 {
+    step_seed.unwrap_or_else(|| {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        let history_hash = history.iter().fold(0xCBF29CE484222325u64, |acc, &token| {
+            (acc ^ token as u64).wrapping_mul(0x100000001B3)
+        });
+        nanos.wrapping_add(history_hash)
+    })
+}
+
 fn run_lm_head_sample_batch_with_contexts(
     backend: &dyn crate::backend::BackendRuntime,
     hidden: &kiln_tensor::Tensor,
@@ -1209,6 +1236,63 @@ fn run_lm_head_sample_batch_with_contexts(
         params.len() == step_seeds.len() && params.len() == generated_tokens.len(),
         "batched decode sampling context length mismatch"
     );
+    let top_k_values: Vec<u32> = params.iter().map(|param| param.top_k).collect();
+    let temperature_values: Vec<f32> = params.iter().map(|param| param.temperature).collect();
+    if backend.supports_linear_decode_sample_batch(&top_k_values, &temperature_values) {
+        let normed = crate::forward::model_forward_final_norm(hidden, weights, config)
+            .context("batched decode final norm for fused sampling")?;
+        let repetition_values: Vec<f32> = params
+            .iter()
+            .map(|param| param.repetition_penalty)
+            .collect();
+        let presence_values: Vec<f32> = params.iter().map(|param| param.presence_penalty).collect();
+        let frequency_values: Vec<f32> =
+            params.iter().map(|param| param.frequency_penalty).collect();
+        let top_p_values: Vec<f32> = params.iter().map(|param| param.top_p).collect();
+        let min_p_values: Vec<f32> = params.iter().map(|param| param.min_p).collect();
+        let seed_values: Vec<u64> = step_seeds
+            .iter()
+            .zip(generated_tokens.iter())
+            .map(|(&seed, history)| sample_seed_for_batch_row(seed, history))
+            .collect();
+        let mut history_rows = Vec::new();
+        let mut history_indices = Vec::new();
+        let mut history_counts = Vec::new();
+        for (row_idx, (param, history)) in params.iter().zip(generated_tokens.iter()).enumerate() {
+            if param.is_effectively_greedy()
+                || param.token_penalties_are_no_op()
+                || history.is_empty()
+            {
+                continue;
+            }
+            let (indices, counts) = unique_history_counts_for_batch_sample(history);
+            for (idx, count) in indices.into_iter().zip(counts.into_iter()) {
+                history_rows.push(row_idx as u32);
+                history_indices.push(idx);
+                history_counts.push(count);
+            }
+        }
+        if let Some(tokens) = backend
+            .linear_decode_sample_batch(
+                &normed,
+                &weights.embed_tokens_t,
+                &history_rows,
+                &history_indices,
+                &history_counts,
+                &repetition_values,
+                &presence_values,
+                &frequency_values,
+                &temperature_values,
+                &top_k_values,
+                &top_p_values,
+                &min_p_values,
+                &seed_values,
+            )
+            .context("fused batched linear_decode_sample failed")?
+        {
+            return Ok(tokens);
+        }
+    }
     let logits = crate::forward::model_forward_head_backend_decode_if(
         Some(backend),
         hidden,

@@ -3267,6 +3267,282 @@ pub fn dispatch_linear_decode_sample_bytes(
         .ok_or_else(|| anyhow::anyhow!("linear_decode_sample readback was empty"))
 }
 
+#[allow(clippy::too_many_arguments)]
+pub fn dispatch_linear_decode_sample_batch_bytes(
+    vk_device: &VulkanDevice,
+    x_data: &[u8],
+    weight_t: &VulkanBuffer,
+    packed_bf16_weights: bool,
+    batch: usize,
+    hidden: usize,
+    out_dim: usize,
+    history_rows: &[u32],
+    history_indices: &[u32],
+    history_counts: &[u32],
+    repetition_penalties: &[f32],
+    presence_penalties: &[f32],
+    frequency_penalties: &[f32],
+    temperatures: &[f32],
+    top_k: &[u32],
+    top_p: &[f32],
+    min_p: &[f32],
+    seeds: &[u64],
+) -> Result<Vec<u32>> {
+    let device = vk_device.device();
+    let device_local_mt = vk_device.device_local_mem_type();
+    let host_visible_mt = vk_device.host_visible_mem_type();
+
+    anyhow::ensure!(batch > 0, "linear_decode_sample_batch: batch must be nonzero");
+    anyhow::ensure!(hidden > 0, "linear_decode_sample_batch: hidden must be nonzero");
+    anyhow::ensure!(out_dim > 0, "linear_decode_sample_batch: out_dim must be nonzero");
+    anyhow::ensure!(
+        x_data.len() == batch * hidden * 4,
+        "linear_decode_sample_batch: x buffer has {} bytes, expected {}",
+        x_data.len(),
+        batch * hidden * 4
+    );
+    anyhow::ensure!(
+        history_rows.len() == history_indices.len() && history_indices.len() == history_counts.len(),
+        "linear_decode_sample_batch: history row/index/count length mismatch"
+    );
+    anyhow::ensure!(
+        history_rows.iter().all(|&row| (row as usize) < batch),
+        "linear_decode_sample_batch: history row out of range"
+    );
+    anyhow::ensure!(
+        repetition_penalties.len() == batch
+            && presence_penalties.len() == batch
+            && frequency_penalties.len() == batch
+            && temperatures.len() == batch
+            && top_k.len() == batch
+            && top_p.len() == batch
+            && min_p.len() == batch
+            && seeds.len() == batch,
+        "linear_decode_sample_batch: per-row parameter length mismatch"
+    );
+    for row in 0..batch {
+        let temp = temperatures[row];
+        let k = top_k[row];
+        let greedy = temp == 0.0 || (k == 1 && temp.is_finite() && temp > 0.0);
+        anyhow::ensure!(
+            greedy || (temp.is_finite() && temp > 0.0),
+            "linear_decode_sample_batch: row {row} has invalid temperature {temp}"
+        );
+        anyhow::ensure!(
+            greedy || (k > 0 && k <= TOPK_SAMPLE_KERNEL_K_MAX),
+            "linear_decode_sample_batch: row {row} top_k {k} out of range (1..={})",
+            TOPK_SAMPLE_KERNEL_K_MAX
+        );
+    }
+
+    let seed_lo: Vec<u32> = seeds.iter().map(|seed| (*seed & 0xFFFF_FFFF) as u32).collect();
+    let seed_hi: Vec<u32> = seeds.iter().map(|seed| (*seed >> 32) as u32).collect();
+
+    let x_buf = VulkanBuffer::create_device_local(device, device_local_mt, x_data.len() as u64)
+        .context("failed to create linear_decode_sample_batch x buffer")?;
+    let logits_buf =
+        VulkanBuffer::create_device_local(device, device_local_mt, (batch * out_dim * 4) as u64)
+            .context("failed to create linear_decode_sample_batch logits buffer")?;
+    let top_k_buf = VulkanBuffer::create_device_local(device, device_local_mt, (batch * 4) as u64)
+        .context("failed to create linear_decode_sample_batch top_k buffer")?;
+    let temperature_buf =
+        VulkanBuffer::create_device_local(device, device_local_mt, (batch * 4) as u64)
+            .context("failed to create linear_decode_sample_batch temperature buffer")?;
+    let top_p_buf = VulkanBuffer::create_device_local(device, device_local_mt, (batch * 4) as u64)
+        .context("failed to create linear_decode_sample_batch top_p buffer")?;
+    let min_p_buf = VulkanBuffer::create_device_local(device, device_local_mt, (batch * 4) as u64)
+        .context("failed to create linear_decode_sample_batch min_p buffer")?;
+    let seed_lo_buf =
+        VulkanBuffer::create_device_local(device, device_local_mt, (batch * 4) as u64)
+            .context("failed to create linear_decode_sample_batch seed_lo buffer")?;
+    let seed_hi_buf =
+        VulkanBuffer::create_device_local(device, device_local_mt, (batch * 4) as u64)
+            .context("failed to create linear_decode_sample_batch seed_hi buffer")?;
+
+    let penalties_active = !history_indices.is_empty();
+    let history_row_buf = if penalties_active {
+        Some(
+            VulkanBuffer::create_device_local(device, device_local_mt, (history_rows.len() * 4) as u64)
+                .context("failed to create batched penalty row buffer")?,
+        )
+    } else {
+        None
+    };
+    let history_idx_buf = if penalties_active {
+        Some(
+            VulkanBuffer::create_device_local(device, device_local_mt, (history_indices.len() * 4) as u64)
+                .context("failed to create batched penalty index buffer")?,
+        )
+    } else {
+        None
+    };
+    let history_cnt_buf = if penalties_active {
+        Some(
+            VulkanBuffer::create_device_local(device, device_local_mt, (history_counts.len() * 4) as u64)
+                .context("failed to create batched penalty count buffer")?,
+        )
+    } else {
+        None
+    };
+    let repetition_buf = if penalties_active {
+        Some(
+            VulkanBuffer::create_device_local(device, device_local_mt, (batch * 4) as u64)
+                .context("failed to create batched repetition buffer")?,
+        )
+    } else {
+        None
+    };
+    let presence_buf = if penalties_active {
+        Some(
+            VulkanBuffer::create_device_local(device, device_local_mt, (batch * 4) as u64)
+                .context("failed to create batched presence buffer")?,
+        )
+    } else {
+        None
+    };
+    let frequency_buf = if penalties_active {
+        Some(
+            VulkanBuffer::create_device_local(device, device_local_mt, (batch * 4) as u64)
+                .context("failed to create batched frequency buffer")?,
+        )
+    } else {
+        None
+    };
+
+    let mut upload_specs: Vec<(&VulkanBuffer, &[u8])> = Vec::with_capacity(16);
+    upload_specs.push((&x_buf, x_data));
+    upload_specs.push((&top_k_buf, bytemuck::cast_slice(top_k)));
+    upload_specs.push((&temperature_buf, bytemuck::cast_slice(temperatures)));
+    upload_specs.push((&top_p_buf, bytemuck::cast_slice(top_p)));
+    upload_specs.push((&min_p_buf, bytemuck::cast_slice(min_p)));
+    upload_specs.push((&seed_lo_buf, bytemuck::cast_slice(&seed_lo)));
+    upload_specs.push((&seed_hi_buf, bytemuck::cast_slice(&seed_hi)));
+    if penalties_active {
+        upload_specs.push((
+            history_idx_buf.as_ref().expect("history index buffer"),
+            bytemuck::cast_slice(history_indices),
+        ));
+        upload_specs.push((
+            history_cnt_buf.as_ref().expect("history count buffer"),
+            bytemuck::cast_slice(history_counts),
+        ));
+        upload_specs.push((
+            history_row_buf.as_ref().expect("history row buffer"),
+            bytemuck::cast_slice(history_rows),
+        ));
+        upload_specs.push((
+            repetition_buf.as_ref().expect("repetition buffer"),
+            bytemuck::cast_slice(repetition_penalties),
+        ));
+        upload_specs.push((
+            presence_buf.as_ref().expect("presence buffer"),
+            bytemuck::cast_slice(presence_penalties),
+        ));
+        upload_specs.push((
+            frequency_buf.as_ref().expect("frequency buffer"),
+            bytemuck::cast_slice(frequency_penalties),
+        ));
+    }
+    let upload_segments: Vec<&[u8]> = upload_specs.iter().map(|(_, bytes)| *bytes).collect();
+    let (upload_stage, upload_offsets) =
+        VulkanBuffer::create_host_visible_with_segments(device, host_visible_mt, &upload_segments)
+            .context("failed to stage linear_decode_sample_batch uploads")?;
+
+    let out_token_buf =
+        VulkanBuffer::create_device_local(device, device_local_mt, (batch * 4) as u64)
+            .context("failed to create linear_decode_sample_batch out-token buffer")?;
+    let out_staging =
+        VulkanBuffer::create_host_visible(device, host_visible_mt, (batch * 4) as u64)
+            .context("failed to create linear_decode_sample_batch output staging buffer")?;
+
+    let rows4 = packed_bf16_weights && batch >= 16 && linear_decode_bf16w_rows4_enabled();
+    let lm_glsl = if packed_bf16_weights {
+        if rows4 {
+            crate::shaders::LINEAR_DECODE_BATCHED_ROWS4_BF16W
+        } else {
+            crate::shaders::LINEAR_DECODE_BATCHED_BF16W
+        }
+    } else {
+        crate::shaders::LINEAR_DECODE_BATCHED
+    };
+    let row_groups = if rows4 { batch.div_ceil(4) } else { batch };
+
+    let mut batch_rec = crate::CommandBatch::new(vk_device)
+        .context("linear_decode_sample_batch: create CommandBatch")?;
+    let upload_copies: Vec<(&VulkanBuffer, &VulkanBuffer, u64, u64, u64)> = upload_specs
+        .iter()
+        .enumerate()
+        .map(|(idx, (dst, bytes))| {
+            (&upload_stage, *dst, upload_offsets[idx], 0, bytes.len() as u64)
+        })
+        .collect();
+    batch_rec
+        .record_upload_buffer_regions(&upload_copies)
+        .context("linear_decode_sample_batch: record uploads")?;
+    batch_rec
+        .record_shader(
+            lm_glsl,
+            &[x_buf.handle(), weight_t.handle(), logits_buf.handle()],
+            &[hidden as u32, out_dim as u32, batch as u32],
+            crate::Workgroups::OneD((row_groups * out_dim.div_ceil(32)) as u32),
+        )
+        .context("linear_decode_sample_batch: record lm_head dispatch")?;
+
+    if penalties_active {
+        batch_rec
+            .record_shader(
+                crate::shaders::APPLY_TOKEN_PENALTIES_BATCHED,
+                &[
+                    logits_buf.handle(),
+                    history_idx_buf.as_ref().expect("history index buffer").handle(),
+                    history_cnt_buf.as_ref().expect("history count buffer").handle(),
+                    history_row_buf.as_ref().expect("history row buffer").handle(),
+                    repetition_buf.as_ref().expect("repetition buffer").handle(),
+                    presence_buf.as_ref().expect("presence buffer").handle(),
+                    frequency_buf.as_ref().expect("frequency buffer").handle(),
+                ],
+                &[history_indices.len() as u32, out_dim as u32, batch as u32],
+                crate::Workgroups::OneD((history_indices.len() as u32).div_ceil(64)),
+            )
+            .context("linear_decode_sample_batch: record batched penalty dispatch")?;
+    }
+
+    batch_rec
+        .record_shader(
+            crate::shaders::TOPK_SAMPLE_BATCHED,
+            &[
+                logits_buf.handle(),
+                out_token_buf.handle(),
+                top_k_buf.handle(),
+                temperature_buf.handle(),
+                top_p_buf.handle(),
+                min_p_buf.handle(),
+                seed_lo_buf.handle(),
+                seed_hi_buf.handle(),
+            ],
+            &[out_dim as u32, batch as u32],
+            crate::Workgroups::ThreeD(1, batch as u32, 1),
+        )
+        .context("linear_decode_sample_batch: record batched sample dispatch")?;
+    batch_rec
+        .record_copy_buffer(&out_token_buf, &out_staging, (batch * 4) as u64)
+        .context("linear_decode_sample_batch: record token readback copy")?;
+    batch_rec
+        .submit_and_wait("linear_decode_sample_batch")
+        .context("linear_decode_sample_batch: submit CommandBatch")?;
+
+    let out_data = out_staging
+        .read_mapped(batch * 4)
+        .context("failed to read mapped linear_decode_sample_batch tokens")?;
+    let tokens: &[u32] = bytemuck::cast_slice(&out_data);
+    anyhow::ensure!(
+        tokens.len() >= batch,
+        "linear_decode_sample_batch readback returned {} tokens, expected {batch}",
+        tokens.len()
+    );
+    Ok(tokens[..batch].to_vec())
+}
+
 /// Dispatch a batched single-token transposed linear projection and return one
 /// argmax token per batch row.
 ///

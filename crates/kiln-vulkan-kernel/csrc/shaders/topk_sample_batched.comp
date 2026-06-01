@@ -1,0 +1,204 @@
+// Batched fused top-K + temperature + softmax + min-p + top-p + categorical
+// sampling. One workgroup handles one row and writes one sampled token id.
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+#define WORKGROUP_SIZE 64
+#define K_MAX          64
+
+layout(local_size_x = WORKGROUP_SIZE, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint vocab_size;
+    uint batch;
+};
+
+layout(binding = 0) readonly buffer LogitsBuf { float logits[]; };
+layout(binding = 1) writeonly buffer OutTokenBuf { uint out_token[]; };
+layout(binding = 2) readonly buffer TopKBuf { uint top_k_by_row[]; };
+layout(binding = 3) readonly buffer TemperatureBuf { float temperatures[]; };
+layout(binding = 4) readonly buffer TopPBuf { float top_p_by_row[]; };
+layout(binding = 5) readonly buffer MinPBuf { float min_p_by_row[]; };
+layout(binding = 6) readonly buffer SeedLoBuf { uint seed_lo_by_row[]; };
+layout(binding = 7) readonly buffer SeedHiBuf { uint seed_hi_by_row[]; };
+
+shared float s_scores[WORKGROUP_SIZE * K_MAX];
+shared uint  s_indices[WORKGROUP_SIZE * K_MAX];
+
+uint xorshift32(inout uint state) {
+    uint x = state;
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    state = x;
+    return x;
+}
+
+void main() {
+    const uint tid = gl_LocalInvocationID.x;
+    const uint row = gl_WorkGroupID.y;
+    if (row >= batch) {
+        return;
+    }
+
+    const float temperature = temperatures[row];
+    const uint requested_k = top_k_by_row[row];
+    const bool greedy = (temperature == 0.0) || (requested_k == 1u);
+    const uint K = greedy ? 1u : requested_k;
+    if (K == 0u || K > K_MAX) {
+        if (tid == 0u) {
+            out_token[row] = 0u;
+        }
+        return;
+    }
+
+    const uint row_base = row * vocab_size;
+
+    float local_scores[K_MAX];
+    uint  local_indices[K_MAX];
+    [[unroll]] for (uint i = 0; i < K_MAX; i++) {
+        local_scores[i]  = -3.4028234663852886e38;
+        local_indices[i] = 0u;
+    }
+
+    for (uint v = tid; v < vocab_size; v += WORKGROUP_SIZE) {
+        float score = logits[row_base + v];
+        if (score > local_scores[K - 1]) {
+            int j = int(K) - 2;
+            while (j >= 0 && local_scores[j] < score) {
+                local_scores[j + 1]  = local_scores[j];
+                local_indices[j + 1] = local_indices[j];
+                j--;
+            }
+            local_scores[j + 1]  = score;
+            local_indices[j + 1] = v;
+        }
+    }
+
+    [[unroll]] for (uint i = 0; i < K_MAX; i++) {
+        s_scores[tid * K_MAX + i]  = local_scores[i];
+        s_indices[tid * K_MAX + i] = local_indices[i];
+    }
+    barrier();
+
+    for (uint stride = WORKGROUP_SIZE / 2; stride > 0; stride >>= 1) {
+        if (tid < stride) {
+            float a_scores[K_MAX];
+            uint  a_indices[K_MAX];
+            float b_scores[K_MAX];
+            uint  b_indices[K_MAX];
+            [[unroll]] for (uint i = 0; i < K_MAX; i++) {
+                a_scores[i]  = s_scores[tid * K_MAX + i];
+                a_indices[i] = s_indices[tid * K_MAX + i];
+                b_scores[i]  = s_scores[(tid + stride) * K_MAX + i];
+                b_indices[i] = s_indices[(tid + stride) * K_MAX + i];
+            }
+            uint ai = 0;
+            uint bi = 0;
+            for (uint out_i = 0; out_i < K; out_i++) {
+                bool take_a = (ai < K) && ((bi >= K) || (a_scores[ai] >= b_scores[bi]));
+                if (take_a) {
+                    s_scores[tid * K_MAX + out_i]  = a_scores[ai];
+                    s_indices[tid * K_MAX + out_i] = a_indices[ai];
+                    ai++;
+                } else {
+                    s_scores[tid * K_MAX + out_i]  = b_scores[bi];
+                    s_indices[tid * K_MAX + out_i] = b_indices[bi];
+                    bi++;
+                }
+            }
+        }
+        barrier();
+    }
+
+    if (tid == 0u) {
+        if (greedy) {
+            out_token[row] = s_indices[0];
+            return;
+        }
+
+        float top_scores[K_MAX];
+        uint  top_indices[K_MAX];
+        for (uint i = 0; i < K; i++) {
+            top_scores[i]  = s_scores[i] / temperature;
+            top_indices[i] = s_indices[i];
+        }
+
+        float max_logit = top_scores[0];
+        float probs[K_MAX];
+        float sum = 0.0;
+        for (uint i = 0; i < K; i++) {
+            float p = exp(top_scores[i] - max_logit);
+            probs[i] = p;
+            sum += p;
+        }
+        if (!(sum > 0.0)) {
+            out_token[row] = top_indices[0];
+            return;
+        }
+        for (uint i = 0; i < K; i++) {
+            probs[i] /= sum;
+        }
+
+        float min_p = min_p_by_row[row];
+        if (min_p > 0.0) {
+            float threshold = min_p * probs[0];
+            float keep_sum = 0.0;
+            for (uint i = 0; i < K; i++) {
+                if (probs[i] < threshold) {
+                    probs[i] = 0.0;
+                } else {
+                    keep_sum += probs[i];
+                }
+            }
+            if (keep_sum > 0.0) {
+                for (uint i = 0; i < K; i++) {
+                    probs[i] /= keep_sum;
+                }
+            }
+        }
+
+        float top_p = top_p_by_row[row];
+        if (top_p > 0.0 && top_p < 1.0) {
+            float cumsum = 0.0;
+            uint cutoff = K;
+            for (uint i = 0; i < K; i++) {
+                cumsum += probs[i];
+                if (cumsum >= top_p) {
+                    cutoff = i + 1;
+                    break;
+                }
+            }
+            float keep_sum = 0.0;
+            for (uint i = 0; i < cutoff; i++) {
+                keep_sum += probs[i];
+            }
+            if (keep_sum > 0.0) {
+                for (uint i = 0; i < cutoff; i++) {
+                    probs[i] /= keep_sum;
+                }
+            }
+            for (uint i = cutoff; i < K; i++) {
+                probs[i] = 0.0;
+            }
+        }
+
+        uint state = seed_lo_by_row[row] ^ (seed_hi_by_row[row] * 2654435761u);
+        if (state == 0u) state = 0x9E3779B9u;
+        uint r_bits = xorshift32(state);
+        float r = float(r_bits) * (1.0 / 4294967295.0);
+
+        float cumsum = 0.0;
+        uint sampled = top_indices[0];
+        for (uint i = 0; i < K; i++) {
+            cumsum += probs[i];
+            if (r < cumsum) {
+                sampled = top_indices[i];
+                break;
+            }
+            sampled = top_indices[i];
+        }
+        out_token[row] = sampled;
+    }
+}

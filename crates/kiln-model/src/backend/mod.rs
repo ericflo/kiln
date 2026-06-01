@@ -1063,6 +1063,34 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
         Ok(None)
     }
 
+    fn supports_linear_decode_sample_batch(&self, _top_k: &[u32], _temperatures: &[f32]) -> bool {
+        false
+    }
+
+    /// Batched fused stochastic decode. `x` is `[batch, 1, hidden]`,
+    /// `weight_t` is `[hidden, out_dim]`, flattened history arrays contain
+    /// unique token counts per row, and every per-row sampler vector has
+    /// length `batch`.
+    #[allow(clippy::too_many_arguments)]
+    fn linear_decode_sample_batch(
+        &self,
+        _x: &kiln_tensor::Tensor,
+        _weight_t: &kiln_tensor::Tensor,
+        _history_rows: &[u32],
+        _history_indices: &[u32],
+        _history_counts: &[u32],
+        _repetition_penalties: &[f32],
+        _presence_penalties: &[f32],
+        _frequency_penalties: &[f32],
+        _temperatures: &[f32],
+        _top_k: &[u32],
+        _top_p: &[f32],
+        _min_p: &[f32],
+        _seeds: &[u64],
+    ) -> Result<Option<Vec<u32>>> {
+        Ok(None)
+    }
+
     /// Batched single-token transposed linear projection with argmax reduction.
     ///
     /// Used by greedy native-batch LM-head decode when logits do not need to be

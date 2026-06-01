@@ -938,6 +938,13 @@ every config"):
   chunks. History 1024 and 256 also showed a small/no-regression edge for 32
   chunks, including 49.3 ms vs 50.0 ms on the paged-only batch-1 history-256
   path.
+  **Update — batched Vulkan sampler path:** multi-row non-greedy resident
+  decode now has a backend hook for final-normed hidden rows that records
+  batched LM-head projection, row-specific token penalties, per-row top-k /
+  top-p / min-p sampling, and token readback in one Vulkan command batch. The
+  path reads back only one `u32` token per row when every active row is within
+  the sampler kernel's top-k limit, with existing logits fallback preserved for
+  unsupported sampler settings.
 
 ## Other follow-ups (perf headroom, not regressions)
 
