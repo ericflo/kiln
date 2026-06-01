@@ -2,9 +2,8 @@
 //!
 //! Phase 1 keeps the actor in `kiln-server` so HTTP request routing, prefix
 //! cache ownership, GPU coordination, and metrics can be wired incrementally.
-//! The production seam still uses the row-loop `model_forward_paged_batched_decode`
-//! API in `kiln-model`; follow-up phases can replace that seam with a true
-//! layer-wise batched CUDA path without changing HTTP routing.
+//! Decode now issues a multi-row forward by default; the rowwise path remains
+//! only as an operator-forced comparison or fallback mode.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, RwLock};
@@ -64,16 +63,24 @@ fn env_prefix_aware_admission() -> bool {
 }
 
 /// Cap how many queued requests the actor prefills before yielding to a decode
-/// step. This preserves the high `max_decode_batch` ceiling for saturation,
-/// but avoids serializing an entire large queue of prompt prefills before the
-/// first active rows can emit a token.
-pub(crate) fn env_prefill_admission_quantum(max_decode_batch: usize) -> usize {
+/// step. Vulkan defaults to filling the resident decode width before the first
+/// decode step, while other backends keep a smaller latency-oriented default.
+pub(crate) fn env_prefill_admission_quantum_for_backend(
+    max_decode_batch: usize,
+    backend_name: Option<&str>,
+) -> usize {
     let max_decode_batch = max_decode_batch.max(1);
     std::env::var("KILN_BATCH_PREFILL_ADMISSION_QUANTUM")
         .ok()
         .and_then(|raw| raw.trim().parse::<usize>().ok())
         .filter(|&n| n > 0)
-        .unwrap_or(DEFAULT_PREFILL_ADMISSION_QUANTUM)
+        .unwrap_or_else(|| {
+            if matches!(backend_name, Some("vulkan")) {
+                max_decode_batch
+            } else {
+                DEFAULT_PREFILL_ADMISSION_QUANTUM
+            }
+        })
         .clamp(1, max_decode_batch)
 }
 
@@ -629,12 +636,20 @@ impl BatchingEngineHandle {
     }
 
     pub fn start_with_options(forward: Arc<dyn DecodeForward>, max_decode_batch: usize) -> Self {
+        Self::start_with_backend_options(forward, max_decode_batch, None)
+    }
+
+    pub fn start_with_backend_options(
+        forward: Arc<dyn DecodeForward>,
+        max_decode_batch: usize,
+        backend_name: Option<&str>,
+    ) -> Self {
         let max_decode_batch = max_decode_batch.max(1);
         Self::start_with_policy(
             forward,
             max_decode_batch,
             env_prefix_aware_admission(),
-            env_prefill_admission_quantum(max_decode_batch),
+            env_prefill_admission_quantum_for_backend(max_decode_batch, backend_name),
         )
     }
 
@@ -1435,25 +1450,49 @@ mod tests {
         unsafe {
             std::env::remove_var("KILN_BATCH_PREFILL_ADMISSION_QUANTUM");
         }
-        assert_eq!(env_prefill_admission_quantum(64), 4);
-        assert_eq!(env_prefill_admission_quantum(2), 2);
-        assert_eq!(env_prefill_admission_quantum(0), 1);
+        assert_eq!(env_prefill_admission_quantum_for_backend(64, None), 4);
+        assert_eq!(
+            env_prefill_admission_quantum_for_backend(64, Some("vulkan")),
+            64
+        );
+        assert_eq!(
+            env_prefill_admission_quantum_for_backend(64, Some("metal")),
+            4
+        );
+        assert_eq!(env_prefill_admission_quantum_for_backend(2, None), 2);
+        assert_eq!(
+            env_prefill_admission_quantum_for_backend(2, Some("vulkan")),
+            2
+        );
+        assert_eq!(env_prefill_admission_quantum_for_backend(0, None), 1);
         unsafe {
             std::env::set_var("KILN_BATCH_PREFILL_ADMISSION_QUANTUM", "24");
         }
-        assert_eq!(env_prefill_admission_quantum(64), 24);
+        assert_eq!(env_prefill_admission_quantum_for_backend(64, None), 24);
+        assert_eq!(
+            env_prefill_admission_quantum_for_backend(64, Some("vulkan")),
+            24
+        );
         unsafe {
             std::env::set_var("KILN_BATCH_PREFILL_ADMISSION_QUANTUM", "999");
         }
-        assert_eq!(env_prefill_admission_quantum(64), 64);
+        assert_eq!(env_prefill_admission_quantum_for_backend(64, None), 64);
         unsafe {
             std::env::set_var("KILN_BATCH_PREFILL_ADMISSION_QUANTUM", "0");
         }
-        assert_eq!(env_prefill_admission_quantum(64), 4);
+        assert_eq!(env_prefill_admission_quantum_for_backend(64, None), 4);
+        assert_eq!(
+            env_prefill_admission_quantum_for_backend(64, Some("vulkan")),
+            64
+        );
         unsafe {
             std::env::set_var("KILN_BATCH_PREFILL_ADMISSION_QUANTUM", "bad");
         }
-        assert_eq!(env_prefill_admission_quantum(64), 4);
+        assert_eq!(env_prefill_admission_quantum_for_backend(64, None), 4);
+        assert_eq!(
+            env_prefill_admission_quantum_for_backend(64, Some("vulkan")),
+            64
+        );
         match prior {
             Some(v) => unsafe { std::env::set_var("KILN_BATCH_PREFILL_ADMISSION_QUANTUM", v) },
             None => unsafe { std::env::remove_var("KILN_BATCH_PREFILL_ADMISSION_QUANTUM") },

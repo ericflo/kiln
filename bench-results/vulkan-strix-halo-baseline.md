@@ -566,11 +566,11 @@ every config"):
   group before issuing the first batched decode step.
   **Update — bounded prefill admission before decode:** the batching actor now
   caps successful queued prefill admissions per scheduler cycle with
-  `KILN_BATCH_PREFILL_ADMISSION_QUANTUM` (default 4, clamped to the effective
-  max decode batch). This keeps the Vulkan `KILN_MAX_DECODE_BATCH` default at
-  64 for saturation, but launches the first decode wave after four cold rows
-  and fills the remaining rows on later cycles. A rebuilt release server on
-  RADV STRIX_HALO with `KILN_NUM_BLOCKS=2048`, startup resident-pool allocation
+  `KILN_BATCH_PREFILL_ADMISSION_QUANTUM` (default 4 on non-Vulkan backends,
+  clamped to the effective max decode batch). This keeps the Vulkan
+  `KILN_MAX_DECODE_BATCH` default at 64 for saturation. A rebuilt release
+  server on RADV STRIX_HALO with `KILN_NUM_BLOCKS=2048`, startup resident-pool
+  allocation
   `max_batch=64 ready=true`, decode-weight prewarm complete at
   `elapsed_ms=26249`, and `KILN_BATCH_PREFILL_ADMISSION_QUANTUM=4` ran an
   8-distinct-prompt `/v1/completions/batch` fixture with `max_tokens=2`. The
@@ -608,6 +608,22 @@ every config"):
   now covers the active-row cap and passes; `cargo check -p kiln-server --bins
   --no-default-features --features vulkan` also passes with the existing
   warning backlog.
+  **Update — Vulkan admission quantum follows decode width:** server startup
+  now passes the selected backend into the batching actor so Vulkan defaults
+  `KILN_BATCH_PREFILL_ADMISSION_QUANTUM` to the effective max decode batch
+  when the env override is unset. With the stock Vulkan decode width of 64, a
+  cold burst can be admitted up to the resident batch width before the first
+  model-decode step instead of being limited to four rows and then growing one
+  row per decode loop. Non-Vulkan backends keep the smaller default, and any
+  explicit `KILN_BATCH_PREFILL_ADMISSION_QUANTUM` value still wins and remains
+  clamped to the active decode width. Focused checks:
+  `cargo test -p kiln-server --features vulkan --lib
+  prefill_admission_quantum_default_and_override -- --nocapture`,
+  `cargo test -p kiln-server --features vulkan --lib
+  enqueue_batches_forward_shape_and_routes_responses -- --nocapture`, and
+  `cargo check -p kiln-server --features vulkan --lib` pass with the existing
+  warning backlog. A package-wide `kiln-server` test compile is still blocked
+  by an unrelated `real_model_integration` match-exhaustiveness error.
   **Update — resident parity test restored for Vulkan profiles:** the
   `vk_resident_decode_parity` integration test now builds against the current kt
   device/cache surface instead of stale test-only APIs. Without

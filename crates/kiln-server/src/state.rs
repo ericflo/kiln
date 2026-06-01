@@ -1927,7 +1927,7 @@ impl AppState {
                 max_decode_batch,
                 "batching engine enabled — routing streaming and non-streaming real completions through batching actor (set KILN_BATCHING_ENGINE=0 to disable)"
             );
-            crate::batching_engine::BatchingEngineHandle::start_with_options(
+            crate::batching_engine::BatchingEngineHandle::start_with_backend_options(
                 Arc::new(crate::batching_engine::RealDecodeForward::new(
                     runner.clone(),
                     block_manager.clone(),
@@ -1936,6 +1936,7 @@ impl AppState {
                     gpu_lock.clone(),
                 )),
                 max_decode_batch,
+                Some(backend_name),
             )
         });
         let decode_batcher = if let Some(config) = decode_batcher_config {
