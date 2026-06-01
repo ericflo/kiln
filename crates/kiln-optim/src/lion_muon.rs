@@ -153,6 +153,8 @@ impl OptimStep for Lion {
         // Write updated master back to the Parameter.
         let new_master = build_master_tensor(policy.master_dtype, master.shape(), &master_f32)?;
         param.replace_backward_storage(Some(new_master));
+        // #1082 Phase 2.7: end-of-optimizer-step epoch bump (see AdamW).
+        param.bump_epoch();
         Ok(())
     }
 
@@ -373,6 +375,8 @@ impl OptimStep for Muon {
 
         let new_master = build_master_tensor(policy.master_dtype, &shape, &master_f32)?;
         param.replace_backward_storage(Some(new_master));
+        // #1082 Phase 2.7: end-of-optimizer-step epoch bump (see AdamW).
+        param.bump_epoch();
         Ok(())
     }
 
