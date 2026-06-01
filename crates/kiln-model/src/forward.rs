@@ -22018,35 +22018,6 @@ pub fn model_forward_paged_decode_contiguous_batch(
 }
 
 #[cfg(feature = "vulkan")]
-fn rotary_tables_host_f32_vk(
-    start_positions: &[usize],
-    rotary_dim: usize,
-    rope_theta: f64,
-) -> Result<(Vec<f32>, Vec<f32>)> {
-    anyhow::ensure!(
-        rotary_dim > 0 && rotary_dim % 2 == 0,
-        "vulkan resident RoPE table build requires a positive even rotary_dim"
-    );
-    let half_rotary = rotary_dim / 2;
-    let inv_freq: Vec<f32> = (0..half_rotary)
-        .map(|pair| {
-            (1.0 / rope_theta.powf((2.0 * pair as f64) / rotary_dim as f64)) as f32
-        })
-        .collect();
-    let mut cos = Vec::with_capacity(start_positions.len() * half_rotary);
-    let mut sin = Vec::with_capacity(start_positions.len() * half_rotary);
-    for &position in start_positions {
-        let position = position as f32;
-        for &inv_freq in &inv_freq {
-            let freq = position * inv_freq;
-            cos.push(freq.cos());
-            sin.push(freq.sin());
-        }
-    }
-    Ok((cos, sin))
-}
-
-#[cfg(feature = "vulkan")]
 #[allow(clippy::too_many_arguments)]
 fn try_vulkan_resident_batched_decode_argmax(
     backend: &dyn BackendRuntime,
@@ -22119,9 +22090,6 @@ fn try_vulkan_resident_batched_decode_argmax(
         (empty_states, empty_states)
     };
 
-    let (rope_cos_rows, rope_sin_rows) =
-        rotary_tables_host_f32_vk(start_positions, config.rotary_dim(), config.rope_theta)?;
-
     let single_unidentified_row = row_ids.is_none() && batch == 1;
     if single_unidentified_row {
         vk_backend.note_resident_session(start_positions[0]);
@@ -22172,8 +22140,6 @@ fn try_vulkan_resident_batched_decode_argmax(
         vk_backend,
         vk_device,
         token_ids,
-        &rope_cos_rows,
-        &rope_sin_rows,
         block_tables,
         start_positions,
         paged_cache.block_size(),
@@ -22258,9 +22224,6 @@ fn try_vulkan_resident_batched_decode_hidden(
         (empty_states, empty_states)
     };
 
-    let (rope_cos_rows, rope_sin_rows) =
-        rotary_tables_host_f32_vk(start_positions, config.rotary_dim(), config.rope_theta)?;
-
     let single_unidentified_row = row_ids.is_none() && batch == 1;
     if single_unidentified_row {
         vk_backend.note_resident_session(start_positions[0]);
@@ -22311,8 +22274,6 @@ fn try_vulkan_resident_batched_decode_hidden(
         vk_backend,
         vk_device,
         token_ids,
-        &rope_cos_rows,
-        &rope_sin_rows,
         block_tables,
         start_positions,
         paged_cache.block_size(),
@@ -22418,9 +22379,6 @@ fn try_vulkan_resident_batched_decode_sample(
         (empty_states, empty_states)
     };
 
-    let (rope_cos_rows, rope_sin_rows) =
-        rotary_tables_host_f32_vk(start_positions, config.rotary_dim(), config.rope_theta)?;
-
     let single_unidentified_row = row_ids.is_none() && batch == 1;
     if single_unidentified_row {
         vk_backend.note_resident_session(start_positions[0]);
@@ -22471,8 +22429,6 @@ fn try_vulkan_resident_batched_decode_sample(
         vk_backend,
         vk_device,
         token_ids,
-        &rope_cos_rows,
-        &rope_sin_rows,
         block_tables,
         start_positions,
         paged_cache.block_size(),
@@ -23549,12 +23505,7 @@ fn model_forward_paged_last_token_resident_native_vk(
     }
     let t_rope = std::time::Instant::now();
 
-    // 2. RoPE tables for this single decode position.
-    let (rope_cos_data, rope_sin_data) = rotary_tables_host_f32_vk(
-        std::slice::from_ref(&start_pos),
-        config.rotary_dim(),
-        config.rope_theta,
-    )?;
+    // 2. RoPE tables are recorded into the main command batch.
     if timing_enabled {
         ROPE_NS.fetch_add(t_rope.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }
@@ -23566,8 +23517,6 @@ fn model_forward_paged_last_token_resident_native_vk(
         vk_backend,
         token_ids,
         hidden_size,
-        &rope_cos_data,
-        &rope_sin_data,
         config.rotary_dim(),
     )?;
     let meta = crate::vk_decode_resident::prepare_batched_resident_decode_meta_buffers(
@@ -27458,46 +27407,6 @@ mod tests {
         let k_max = k_diff.flatten_all()?.max(0)?.flatten_all()?.to_vec1::<f32>()?[0];
         assert!(q_max < 1e-6, "Metal rotary Q max_abs_diff={q_max:e}");
         assert!(k_max < 1e-6, "Metal rotary K max_abs_diff={k_max:e}");
-
-        Ok(())
-    }
-
-    #[cfg(feature = "vulkan")]
-    #[test]
-    fn test_vulkan_resident_host_rope_tables_match_tensor_tables() -> Result<()> {
-        let device = Device::Cpu;
-        let rotary_dim = 64usize;
-        let rope_theta = 10_000.0;
-        let start_positions = [3usize, 17, 1024];
-        let positions: Vec<f32> = start_positions.iter().map(|&p| p as f32).collect();
-        let positions = Tensor::from_vec_on(device, positions, vec![start_positions.len()])?;
-        let inv_freq = compute_rotary_inv_freq(rotary_dim, rope_theta, &device)?;
-        let (tensor_cos, tensor_sin) = rotary_tables_from_tensor(&positions, &inv_freq)?;
-        let (host_cos, host_sin) =
-            rotary_tables_host_f32_vk(&start_positions, rotary_dim, rope_theta)?;
-
-        let tensor_cos = tensor_cos.flatten_all()?.to_vec1::<f32>()?;
-        let tensor_sin = tensor_sin.flatten_all()?.to_vec1::<f32>()?;
-        assert_eq!(host_cos.len(), tensor_cos.len());
-        assert_eq!(host_sin.len(), tensor_sin.len());
-        let max_cos = host_cos
-            .iter()
-            .zip(tensor_cos.iter())
-            .map(|(a, b)| (a - b).abs())
-            .fold(0.0f32, f32::max);
-        let max_sin = host_sin
-            .iter()
-            .zip(tensor_sin.iter())
-            .map(|(a, b)| (a - b).abs())
-            .fold(0.0f32, f32::max);
-        assert!(
-            max_cos < 2e-5,
-            "host RoPE cos table max_abs_diff={max_cos:e}"
-        );
-        assert!(
-            max_sin < 2e-5,
-            "host RoPE sin table max_abs_diff={max_sin:e}"
-        );
 
         Ok(())
     }

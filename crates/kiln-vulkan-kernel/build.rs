@@ -354,6 +354,10 @@ const SHADERS: &[(&str, &str)] = &[
         "vk_permute_hr_to_rh_f32_offset",
         "SPIR_V_VK_PERMUTE_HR_TO_RH_F32_OFFSET",
     ),
+    (
+        "vk_rope_tables_from_seq_lens_f32",
+        "SPIR_V_VK_ROPE_TABLES_FROM_SEQ_LENS_F32",
+    ),
     ("vk_repeat_kv_heads_f32", "SPIR_V_VK_REPEAT_KV_HEADS_F32"),
     (
         "vk_repeat_kv_heads_f32_offset",

@@ -3013,6 +3013,18 @@ pub fn record_transformer_stack_batched_hidden_from_tokens_into(
         return Ok(None);
     };
     ensure_resident_decode_embedding_ids(token_ids, embed.vocab)?;
+    if !record_resident_decode_rope_tables_into(
+        backend,
+        batch,
+        weights,
+        seq_lens_buf,
+        rope_cos_buf,
+        rope_sin_buf,
+        batch_size,
+        config.rotary_dim(),
+    )? {
+        return Ok(None);
+    }
     record_resident_decode_embedding_into(batch, &embed, token_ids_buf, x_in_buf, batch_size)?;
     record_transformer_stack_batched_hidden_into(
         backend,
@@ -3375,8 +3387,6 @@ pub fn submit_transformer_stack_batched_argmax_from_tokens(
     backend: &VulkanBackend,
     vk_device: &VulkanDevice,
     token_ids: &[u32],
-    rope_cos: &[f32],
-    rope_sin: &[f32],
     block_tables: &[&BlockTable],
     start_positions: &[usize],
     block_size: usize,
@@ -3400,8 +3410,6 @@ pub fn submit_transformer_stack_batched_argmax_from_tokens(
         backend,
         token_ids,
         config.hidden_size,
-        rope_cos,
-        rope_sin,
         config.rotary_dim(),
     )?;
     let meta = prepare_batched_resident_decode_meta_buffers(
@@ -3415,6 +3423,18 @@ pub fn submit_transformer_stack_batched_argmax_from_tokens(
         .acquire_resident_scratch_host_visible("native_b_out_tokens_staging", out_bytes)?;
 
     let mut batch = CommandBatch::new(vk_device)?;
+    if !record_resident_decode_rope_tables_into(
+        backend,
+        &mut batch,
+        weights,
+        &meta.seq_lens,
+        &step.rope_cos,
+        &step.rope_sin,
+        batch_size,
+        config.rotary_dim(),
+    )? {
+        return Ok(None);
+    }
     record_resident_decode_embedding_into(
         &mut batch,
         &embed,
@@ -3466,8 +3486,6 @@ pub fn submit_transformer_stack_batched_sample_from_tokens(
     backend: &VulkanBackend,
     vk_device: &VulkanDevice,
     token_ids: &[u32],
-    rope_cos: &[f32],
-    rope_sin: &[f32],
     block_tables: &[&BlockTable],
     start_positions: &[usize],
     block_size: usize,
@@ -3502,8 +3520,6 @@ pub fn submit_transformer_stack_batched_sample_from_tokens(
         backend,
         token_ids,
         config.hidden_size,
-        rope_cos,
-        rope_sin,
         config.rotary_dim(),
     )?;
     let meta = prepare_batched_resident_decode_meta_buffers(
@@ -3532,6 +3548,18 @@ pub fn submit_transformer_stack_batched_sample_from_tokens(
         .acquire_resident_scratch_host_visible("native_b_sample_tokens_staging", out_bytes)?;
 
     let mut batch = CommandBatch::new(vk_device)?;
+    if !record_resident_decode_rope_tables_into(
+        backend,
+        &mut batch,
+        weights,
+        &meta.seq_lens,
+        &step.rope_cos,
+        &step.rope_sin,
+        batch_size,
+        config.rotary_dim(),
+    )? {
+        return Ok(None);
+    }
     record_resident_decode_embedding_into(
         &mut batch,
         &embed,
@@ -3584,8 +3612,6 @@ pub fn submit_transformer_stack_batched_hidden_from_tokens(
     backend: &VulkanBackend,
     vk_device: &VulkanDevice,
     token_ids: &[u32],
-    rope_cos: &[f32],
-    rope_sin: &[f32],
     block_tables: &[&BlockTable],
     start_positions: &[usize],
     block_size: usize,
@@ -3609,8 +3635,6 @@ pub fn submit_transformer_stack_batched_hidden_from_tokens(
         backend,
         token_ids,
         config.hidden_size,
-        rope_cos,
-        rope_sin,
         config.rotary_dim(),
     )?;
     let meta = prepare_batched_resident_decode_meta_buffers(
@@ -3624,6 +3648,18 @@ pub fn submit_transformer_stack_batched_hidden_from_tokens(
         .acquire_resident_scratch_host_visible("native_b_hidden_staging", hidden_bytes)?;
 
     let mut batch = CommandBatch::new(vk_device)?;
+    if !record_resident_decode_rope_tables_into(
+        backend,
+        &mut batch,
+        weights,
+        &meta.seq_lens,
+        &step.rope_cos,
+        &step.rope_sin,
+        batch_size,
+        config.rotary_dim(),
+    )? {
+        return Ok(None);
+    }
     record_resident_decode_embedding_into(
         &mut batch,
         &embed,
@@ -3824,6 +3860,42 @@ fn ensure_resident_decode_embedding_ids(token_ids: &[u32], vocab: usize) -> Resu
     Ok(())
 }
 
+fn record_resident_decode_rope_tables_into(
+    backend: &VulkanBackend,
+    batch: &mut CommandBatch,
+    weights: &crate::forward::GpuWeights,
+    seq_lens_buf: &VulkanBuffer,
+    rope_cos_buf: &VulkanBuffer,
+    rope_sin_buf: &VulkanBuffer,
+    batch_size: usize,
+    rotary_dim: usize,
+) -> Result<bool> {
+    if rotary_dim == 0 || rotary_dim % 2 != 0 {
+        return Ok(false);
+    }
+    let half_rotary = rotary_dim / 2;
+    let expected = [half_rotary];
+    if weights.rotary_inv_freq.dims() != expected.as_slice() {
+        return Ok(false);
+    }
+    let inv_freq_buf = backend.cached_f32_weight_buffer_kt(&weights.rotary_inv_freq)?;
+    let total = batch_size
+        .checked_mul(half_rotary)
+        .context("resident RoPE table build: output element count overflow")?;
+    batch.record_shader(
+        shaders::VK_ROPE_TABLES_FROM_SEQ_LENS_F32,
+        &[
+            seq_lens_buf.handle(),
+            inv_freq_buf.handle(),
+            rope_cos_buf.handle(),
+            rope_sin_buf.handle(),
+        ],
+        &[batch_size as u32, half_rotary as u32],
+        Workgroups::OneD(total.div_ceil(256) as u32),
+    )?;
+    Ok(true)
+}
+
 /// Prepare resident hidden-input and RoPE buffers for a batched decode
 /// step. All slices are f32 and row-major:
 /// - `hidden_rows`: `[batch_size, hidden]`
@@ -3891,8 +3963,6 @@ pub fn prepare_batched_resident_decode_token_step_buffers(
     backend: &VulkanBackend,
     token_ids: &[u32],
     hidden: usize,
-    rope_cos: &[f32],
-    rope_sin: &[f32],
     rotary_dim: usize,
 ) -> Result<BatchedResidentDecodeTokenStepBuffers> {
     let batch_size = token_ids.len();
@@ -3901,34 +3971,22 @@ pub fn prepare_batched_resident_decode_token_step_buffers(
         "batched resident decode token step buffers: batch_size must be > 0"
     );
     anyhow::ensure!(
-        rotary_dim % 2 == 0,
-        "batched resident decode token step buffers: rotary_dim must be even"
+        rotary_dim > 0 && rotary_dim % 2 == 0,
+        "batched resident decode token step buffers: rotary_dim must be positive and even"
     );
     let half_rotary = rotary_dim / 2;
-    anyhow::ensure!(
-        rope_cos.len() == batch_size * half_rotary,
-        "batched resident decode token step buffers: rope_cos length mismatch"
-    );
-    anyhow::ensure!(
-        rope_sin.len() == batch_size * half_rotary,
-        "batched resident decode token step buffers: rope_sin length mismatch"
-    );
 
     let hidden_bytes = (batch_size * hidden).max(1) as u64 * 4;
     let token_bytes = token_ids.len().max(1) as u64 * 4;
-    let rope_bytes = (rope_cos.len().max(1) * 4) as u64;
+    let rope_bytes = (batch_size * half_rotary).max(1) as u64 * 4;
     let input = backend.acquire_resident_scratch("native_b_io_a", hidden_bytes)?;
     let scratch = backend.acquire_resident_scratch("native_b_io_b", hidden_bytes)?;
     let token_ids_buf =
         backend.acquire_resident_scratch_host_visible("native_b_token_ids_hv", token_bytes)?;
-    let rope_cos_buf =
-        backend.acquire_resident_scratch_host_visible("native_b_rope_cos_hv", rope_bytes)?;
-    let rope_sin_buf =
-        backend.acquire_resident_scratch_host_visible("native_b_rope_sin_hv", rope_bytes)?;
+    let rope_cos_buf = backend.acquire_resident_scratch("native_b_rope_cos", rope_bytes)?;
+    let rope_sin_buf = backend.acquire_resident_scratch("native_b_rope_sin", rope_bytes)?;
 
     token_ids_buf.write_mapped(bytemuck::cast_slice(token_ids))?;
-    rope_cos_buf.write_mapped(bytemuck::cast_slice(rope_cos))?;
-    rope_sin_buf.write_mapped(bytemuck::cast_slice(rope_sin))?;
 
     Ok(BatchedResidentDecodeTokenStepBuffers {
         input,

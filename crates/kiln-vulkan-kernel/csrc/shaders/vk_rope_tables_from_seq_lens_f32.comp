@@ -1,0 +1,38 @@
+// Build RoPE cos/sin tables from per-row sequence lengths.
+//
+// seq_lens: [rows] u32, where position = seq_len - 1
+// inv_freq: [half_rotary] F32
+// cos/sin:  [rows, half_rotary] F32
+//
+// Push constants: [rows, half_rotary]
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint rows;
+    uint half_rotary;
+};
+
+layout(binding = 0) readonly  buffer SeqLensBuf { uint  data_seq_lens[]; };
+layout(binding = 1) readonly  buffer InvFreqBuf { float data_inv_freq[]; };
+layout(binding = 2) writeonly buffer CosBuf     { float data_cos[]; };
+layout(binding = 3) writeonly buffer SinBuf     { float data_sin[]; };
+
+void main() {
+    uint linear = gl_GlobalInvocationID.x;
+    uint total = rows * half_rotary;
+    if (linear >= total) return;
+
+    uint pair = linear % half_rotary;
+    uint row = linear / half_rotary;
+    uint seq_len = data_seq_lens[row];
+    uint position = (seq_len == 0u) ? 0u : (seq_len - 1u);
+    float freq = float(position) * data_inv_freq[pair];
+    const float two_pi = 6.2831853071795864769;
+    freq = freq - floor(freq / two_pi) * two_pi;
+    data_cos[linear] = cos(freq);
+    data_sin[linear] = sin(freq);
+}
