@@ -452,7 +452,13 @@ every config"):
   through the forbidden legacy stack before dispatch. Added
   `paged_attn_splitk_check`, a kernel-crate-only Vulkan probe comparing the
   split-K wrapper with the non-split paged wrapper on a non-contiguous
-  multi-row block table; release run measured max abs diff `2.980232e-8`.
+  block table and reporting median wrapper timings. Default small-shape release
+  run measured max abs diff `2.980232e-8`; batch 1, 2048-token history
+  measured non-split 5.241 ms vs. split-K 4.013 ms (1.31x) with max abs diff
+  `1.713634e-7`. Batch 8, 1024-token history measured non-split 16.109 ms vs.
+  split-K 16.574 ms (0.97x), confirming that the shared chunk policy's main
+  generic-path win is the long single-row occupancy case while saturated
+  multi-row resident decode remains the throughput path.
   **Update — multi-row resident paged microbench:** `full_token_resident_paged`
   now uses `paged_kv_write_slots` plus split-K
   `paged_attn_decode_batch_paged_splitk` and reduce over real per-row block
