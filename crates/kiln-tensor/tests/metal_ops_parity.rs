@@ -376,6 +376,76 @@ fn sdpa_steel_prefill_parity() {
     }
 }
 
+/// **GQA-shared-KV decode** parity (#1082). At `q_seq < 16` (decode)
+/// `metal_sdpa_last_axis` routes to the simd_sum/split-K kernel, which the
+/// GQA-shared-KV rewrite restructured: ONE threadgroup handles a whole GQA
+/// group (the `GF = Hq/Hkv` q-heads that share a kv-head), loading each
+/// K[kj]/V[kj] once and reusing it for all GF heads (GF independent
+/// online-softmax states + GF independent split-K combines). This gates the
+/// GF>1 sharing + combine vs the kt CPU SDPA reference across decode shapes:
+/// q_seq=1, GF in {4} (Hq=8/Hkv=2 and Hq=32/Hkv=8), Sk in {8,64,512}, D in
+/// {64,128}, non-causal AND causal. GQA is referenced by expanding kv-heads
+/// to Hq with `repeat_interleave` (query head h uses kv head h/GF), matching
+/// the kernel's group map. tol max|Δ| < 2e-3.
+#[test]
+fn sdpa_gqa_decode_parity() {
+    let Some(dev) = metal() else {
+        eprintln!("no Metal device; skipping");
+        return;
+    };
+    // (label, bs, hq, hkv, k_seq, head_dim, causal) — q_seq is always 1 (decode).
+    let cases: &[(&str, usize, usize, usize, usize, usize, bool)] = &[
+        ("GF4 Hq8 Sk8 D64 nc", 1, 8, 2, 8, 64, false),
+        ("GF4 Hq8 Sk8 D64 causal", 1, 8, 2, 8, 64, true),
+        ("GF4 Hq8 Sk64 D64 nc", 1, 8, 2, 64, 64, false),
+        ("GF4 Hq8 Sk64 D128 causal", 1, 8, 2, 64, 128, true),
+        ("GF4 Hq8 Sk512 D128 nc", 1, 8, 2, 512, 128, false),
+        ("GF4 Hq8 Sk512 D128 causal", 1, 8, 2, 512, 128, true),
+        ("GF4 Hq32 Sk8 D128 nc", 1, 32, 8, 8, 128, false),
+        ("GF4 Hq32 Sk64 D64 causal", 1, 32, 8, 64, 64, true),
+        ("GF4 Hq32 Sk512 D128 nc", 1, 32, 8, 512, 128, false),
+        ("GF4 Hq32 Sk512 D128 causal", 1, 32, 8, 512, 128, true),
+        // batch > 1 to exercise the b dimension of the new grid.
+        ("GF4 Hq8 Sk512 D128 b2 nc", 2, 8, 2, 512, 128, false),
+    ];
+    for &(label, bs, hq, hkv, k_seq, hd, causal) in cases {
+        let gf = hq / hkv;
+        let q_seq = 1usize;
+        let qn = bs * hq * q_seq * hd;
+        let kn = bs * hkv * k_seq * hd;
+        let cpu_q = Tensor::from_vec(pattern(qn, 90), vec![bs, hq, q_seq, hd]).unwrap();
+        let met_q = Tensor::from_vec_on(dev, pattern(qn, 90), vec![bs, hq, q_seq, hd]).unwrap();
+        let cpu_k = Tensor::from_vec(pattern(kn, 91), vec![bs, hkv, k_seq, hd]).unwrap();
+        let met_k = Tensor::from_vec_on(dev, pattern(kn, 91), vec![bs, hkv, k_seq, hd]).unwrap();
+        let cpu_v = Tensor::from_vec(pattern(kn, 92), vec![bs, hkv, k_seq, hd]).unwrap();
+        let met_v = Tensor::from_vec_on(dev, pattern(kn, 92), vec![bs, hkv, k_seq, hd]).unwrap();
+
+        let scale = 1.0f32 / (hd as f32).sqrt();
+        let got = kiln_tensor::metal_sdpa_last_axis(&met_q, &met_k, &met_v, scale, causal)
+            .unwrap()
+            .to_vec::<f32>()
+            .unwrap();
+
+        // CPU reference: expand kv-heads to Hq for GQA, then non-causal SDPA.
+        // For a SINGLE decode query (q_seq=1) the causal limit is
+        //   key_limit = (k_seq + qi + 1) - q_seq = k_seq,
+        // i.e. the one query attends ALL keys — so the causal kernel result
+        // equals the non-causal one (and the CPU causal helper, which
+        // requires q_seq==k_seq, can't be used here anyway). We exercise the
+        // kernel's `causal` branch but reference against the non-causal CPU
+        // SDPA in both cases.
+        let ck = ops::repeat_interleave(&cpu_k, 1, gf).unwrap();
+        let cv = ops::repeat_interleave(&cpu_v, 1, gf).unwrap();
+        let want = ops::scaled_dot_product_attention(&cpu_q, &ck, &cv)
+            .unwrap()
+            .to_vec::<f32>()
+            .unwrap();
+
+        let d = max_abs_diff(&want, &got);
+        assert!(d < 2e-3, "gqa-decode sdpa [{label}] (causal={causal}) max|Δ|={d}");
+    }
+}
+
 /// kiln matrix-core GEMM (`metal_matmul` via `MatmulOp::metal_fwd`) vs the kt
 /// CPU matmul reference, at Qwen3.5-4B shapes + M-tail/edge cases (#1082).
 /// This is the on-M1 correctness gate for the simdgroup_float8x8 GEMM that

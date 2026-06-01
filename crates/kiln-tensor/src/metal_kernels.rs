@@ -785,23 +785,33 @@ struct SdpaParams {
     v_off: u32,
 }
 
-/// Build the flash-attention SDPA MSL for a given dtype + head_dim + split `W`.
+/// Build the flash-attention SDPA MSL for a given dtype + head_dim + split `W`
+/// + GQA-share factor `GF` (= Hq/Hkv).
 ///
-/// **Flash-tiled, simdgroup-cooperative, split-K.** A threadgroup of `W`
-/// simdgroups (W*32 lanes) computes one (qi, head, batch) query. Within a
-/// simdgroup, lane `L` owns head-dim slots `L, L+32, ...` (`NPER=ceil(D/32)`,
-/// register-resident); the per-key `q·k` score is a warp reduction
-/// (`simd_sum`) — **no threadgroup barrier in the hot key loop**. Online
-/// softmax (m, l) + the weighted-V accumulator stay in registers.
+/// **GQA-shared-KV, flash-tiled, simdgroup-cooperative, split-K.** A
+/// threadgroup of `W` simdgroups (W*32 lanes) computes one whole GQA *group*
+/// — the `GF` query heads that all share one kv-head — for one (qi, kv-head,
+/// batch). Grid is `(q_seq, Hkv, B)` with `tgpos.y = kv-head`, so each
+/// K[kj]/V[kj] is loaded **once** by the simdgroup and reused for all `GF`
+/// q-heads, eliminating the `GF×` redundant K/V traffic of the old per-q-head
+/// grid (`(q_seq, Hq, B)`). At Qwen GQA 4:1 that is ~4× less K/V bandwidth on
+/// the memory-bound long-context decode.
+///
+/// Within a simdgroup, lane `L` owns head-dim slots `L, L+32, ...`
+/// (`NPER=ceil(D/32)`, register-resident). Each lane keeps `GF` independent
+/// online-softmax states (`qf[GF][NPER]`, `acc[GF][NPER]`, `m[GF]`, `l[GF]`).
+/// Per key: load `k[kj]` once into NPER registers → `GF` dot products (`GF`
+/// `simd_sum`s) → `GF` score updates; then load `v[kj]` once → update the `GF`
+/// accumulators. No threadgroup barrier in the hot key loop.
 ///
 /// The `W` simdgroups split the key range round-robin (`kj = sg, sg+W, ...`),
-/// each producing a partial online-softmax state; a single threadgroup-memory
-/// combine at the end merges the `W` partials. `W=1` (prefill, where the many
-/// queries already saturate the GPU) skips the combine entirely (compile-time
-/// dead-code). `W>1` (decode, q_seq small → few query-threadgroups) adds
-/// key-parallelism so long-context decode isn't latency-bound on one
-/// simdgroup serially walking all keys. GQA / causal / strided q/k/v as before.
-fn sdpa_src(ty: &str, head_dim: usize, w: usize, entry: &str) -> String {
+/// each producing `GF` partial online-softmax states; a single
+/// threadgroup-memory combine at the end merges the `W` partials **per
+/// q-head** (`GF` independent combines) and writes the `GF` output rows
+/// (q-heads `kv_h*GF .. kv_h*GF+GF-1`). `W=1` skips the combine entirely
+/// (compile-time dead-code). `GF=1` reduces to the previous per-head kernel
+/// (one q-head per threadgroup). GQA / causal / strided q/k/v as before.
+fn sdpa_src(ty: &str, head_dim: usize, w: usize, gf: usize, entry: &str) -> String {
     let nper = head_dim.div_ceil(32);
     format!(
         r#"
@@ -811,6 +821,7 @@ using namespace metal;
 constant constexpr uint D = {head_dim};
 constant constexpr uint NPER = {nper};
 constant constexpr uint W = {w};
+constant constexpr uint GF = {gf};
 
 struct SdpaParams {{
     uint q_seq;
@@ -830,27 +841,34 @@ kernel void {entry}(
     device const {ty}* v     [[buffer(2)]],
     device {ty}* out         [[buffer(3)]],
     constant SdpaParams& p   [[buffer(4)]],
-    threadgroup float* shared [[threadgroup(0)]],   // W*D + 2*W floats (unused if W==1)
-    uint3 tgpos [[threadgroup_position_in_grid]],    // x=qi, y=h, z=b
+    threadgroup float* shared [[threadgroup(0)]],   // W*GF*D + 2*W*GF floats (unused if W==1)
+    uint3 tgpos [[threadgroup_position_in_grid]],    // x=qi, y=kv_h, z=b
     uint sg     [[simdgroup_index_in_threadgroup]],  // 0..W-1
     uint lane   [[thread_index_in_simdgroup]])       // 0..31
 {{
-    const uint qi = tgpos.x;
-    const uint h  = tgpos.y;
-    const uint b  = tgpos.z;
-    if (qi >= p.q_seq || h >= p.hq) return;
-    const uint kv_h = h / p.gqa;
+    const uint qi   = tgpos.x;
+    const uint kv_h = tgpos.y;
+    const uint b    = tgpos.z;
+    if (qi >= p.q_seq) return;
+    // First q-head of this GQA group. (gqa == GF; the param is kept so the
+    // packed struct layout is unchanged, but GF is the baked compile-time
+    // constant used for unrolling.)
+    const uint h0 = kv_h * GF;
 
-    const uint q_base = p.q_off + b * p.q_s0 + h * p.q_s1 + qi * p.q_s2;
     const uint k_base = p.k_off + b * p.k_s0 + kv_h * p.k_s1;
     const uint v_base = p.v_off + b * p.v_s0 + kv_h * p.v_s1;
 
-    // This lane's q components: head-dim slots lane, lane+32, ... (stride 32).
-    float qf[NPER];
+    // This lane's q components for each of the GF group heads: head-dim slots
+    // lane, lane+32, ... (stride 32). qf[g][i] = q-head (h0+g) component d.
+    float qf[GF][NPER];
 #pragma clang loop unroll(full)
-    for (uint i = 0; i < NPER; i++) {{
-        uint d = lane + i * 32u;
-        qf[i] = (d < D) ? (float)q[q_base + d * p.q_s3] : 0.0f;
+    for (uint g = 0; g < GF; g++) {{
+        const uint q_base = p.q_off + b * p.q_s0 + (h0 + g) * p.q_s1 + qi * p.q_s2;
+#pragma clang loop unroll(full)
+        for (uint i = 0; i < NPER; i++) {{
+            uint d = lane + i * 32u;
+            qf[g][i] = (d < D) ? (float)q[q_base + d * p.q_s3] : 0.0f;
+        }}
     }}
 
     // Causal key limit: query qi attends keys 0..=(k_seq - q_seq + qi).
@@ -861,75 +879,110 @@ kernel void {entry}(
         if (key_limit > p.k_seq) key_limit = p.k_seq;
     }}
 
-    // Per-simdgroup partial online-softmax over its key stride (sg, sg+W, ...).
-    float m = -INFINITY;
-    float l = 0.0f;
-    float acc[NPER];
+    // Per-simdgroup partial online-softmax over its key stride (sg, sg+W, ...),
+    // GF independent states (one per group head).
+    float m[GF];
+    float l[GF];
+    float acc[GF][NPER];
 #pragma clang loop unroll(full)
-    for (uint i = 0; i < NPER; i++) acc[i] = 0.0f;
-
-    for (uint kj = sg; kj < key_limit; kj += W) {{
-        const uint k_row = k_base + kj * p.k_s2;
-        float partial = 0.0f;
+    for (uint g = 0; g < GF; g++) {{
+        m[g] = -INFINITY;
+        l[g] = 0.0f;
 #pragma clang loop unroll(full)
-        for (uint i = 0; i < NPER; i++) {{
-            uint d = lane + i * 32u;
-            if (d < D) partial += qf[i] * (float)k[k_row + d * p.k_s3];
-        }}
-        const float score = simd_sum(partial) * p.scale;
-
-        const float m_new = max(m, score);
-        const float corr = exp(m - m_new);
-        const float pj = exp(score - m_new);
-        l = l * corr + pj;
-        const uint v_row = v_base + kj * p.v_s2;
-#pragma clang loop unroll(full)
-        for (uint i = 0; i < NPER; i++) {{
-            uint d = lane + i * 32u;
-            if (d < D) acc[i] = acc[i] * corr + pj * (float)v[v_row + d * p.v_s3];
-        }}
-        m = m_new;
+        for (uint i = 0; i < NPER; i++) acc[g][i] = 0.0f;
     }}
 
-    const uint out_base = ((b * p.hq + h) * p.q_seq + qi) * D;
+    for (uint kj = sg; kj < key_limit; kj += W) {{
+        // Load this key's head-dim slots ONCE, reuse across the GF heads.
+        const uint k_row = k_base + kj * p.k_s2;
+        float kf[NPER];
+#pragma clang loop unroll(full)
+        for (uint i = 0; i < NPER; i++) {{
+            uint d = lane + i * 32u;
+            kf[i] = (d < D) ? (float)k[k_row + d * p.k_s3] : 0.0f;
+        }}
+        // GF dot products (GF simd_sums) → GF scores.
+        float score[GF];
+#pragma clang loop unroll(full)
+        for (uint g = 0; g < GF; g++) {{
+            float partial = 0.0f;
+#pragma clang loop unroll(full)
+            for (uint i = 0; i < NPER; i++) partial += qf[g][i] * kf[i];
+            score[g] = simd_sum(partial) * p.scale;
+        }}
+        // Load this key's V head-dim slots ONCE, reuse across the GF heads.
+        const uint v_row = v_base + kj * p.v_s2;
+        float vf[NPER];
+#pragma clang loop unroll(full)
+        for (uint i = 0; i < NPER; i++) {{
+            uint d = lane + i * 32u;
+            vf[i] = (d < D) ? (float)v[v_row + d * p.v_s3] : 0.0f;
+        }}
+        // GF online-softmax updates.
+#pragma clang loop unroll(full)
+        for (uint g = 0; g < GF; g++) {{
+            const float m_new = max(m[g], score[g]);
+            const float corr = exp(m[g] - m_new);
+            const float pj = exp(score[g] - m_new);
+            l[g] = l[g] * corr + pj;
+#pragma clang loop unroll(full)
+            for (uint i = 0; i < NPER; i++) acc[g][i] = acc[g][i] * corr + pj * vf[i];
+            m[g] = m_new;
+        }}
+    }}
 
     if (W == 1) {{
         // No split: this simdgroup owns the whole row — write directly.
 #pragma clang loop unroll(full)
-        for (uint i = 0; i < NPER; i++) {{
-            uint d = lane + i * 32u;
-            if (d < D) out[out_base + d] = ({ty})(l > 0.0f ? (acc[i] / l) : 0.0f);
+        for (uint g = 0; g < GF; g++) {{
+            const uint out_base = ((b * p.hq + (h0 + g)) * p.q_seq + qi) * D;
+            const float inv = (l[g] > 0.0f) ? (1.0f / l[g]) : 0.0f;
+#pragma clang loop unroll(full)
+            for (uint i = 0; i < NPER; i++) {{
+                uint d = lane + i * 32u;
+                if (d < D) out[out_base + d] = ({ty})(acc[g][i] * inv);
+            }}
         }}
         return;
     }}
 
-    // Split-K combine: stash each simdgroup's partial, then merge in sg 0.
-    threadgroup float* acc_sh = shared;          // [W][D]
-    threadgroup float* m_sh   = shared + W * D;  // [W]
-    threadgroup float* l_sh   = m_sh + W;        // [W]
+    // Split-K combine: stash each simdgroup's GF partials, merge per-head in
+    // sg 0. shared layout: acc_sh[W][GF][D], then m_sh[W][GF], l_sh[W][GF].
+    threadgroup float* acc_sh = shared;                  // [W][GF][D]
+    threadgroup float* m_sh   = shared + W * GF * D;     // [W][GF]
+    threadgroup float* l_sh   = m_sh + W * GF;           // [W][GF]
 #pragma clang loop unroll(full)
-    for (uint i = 0; i < NPER; i++) {{
-        uint d = lane + i * 32u;
-        if (d < D) acc_sh[sg * D + d] = acc[i];
-    }}
-    if (lane == 0) {{ m_sh[sg] = m; l_sh[sg] = l; }}
-    threadgroup_barrier(mem_flags::mem_threadgroup);
-
-    if (sg == 0) {{
-        float gm = -INFINITY;
-#pragma clang loop unroll(full)
-        for (uint w = 0; w < W; w++) gm = max(gm, m_sh[w]);
-        float gl = 0.0f;
-#pragma clang loop unroll(full)
-        for (uint w = 0; w < W; w++) gl += l_sh[w] * exp(m_sh[w] - gm);
+    for (uint g = 0; g < GF; g++) {{
 #pragma clang loop unroll(full)
         for (uint i = 0; i < NPER; i++) {{
             uint d = lane + i * 32u;
-            if (d < D) {{
-                float a = 0.0f;
+            if (d < D) acc_sh[(sg * GF + g) * D + d] = acc[g][i];
+        }}
+        if (lane == 0) {{ m_sh[sg * GF + g] = m[g]; l_sh[sg * GF + g] = l[g]; }}
+    }}
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (sg == 0) {{
 #pragma clang loop unroll(full)
-                for (uint w = 0; w < W; w++) a += acc_sh[w * D + d] * exp(m_sh[w] - gm);
-                out[out_base + d] = ({ty})(gl > 0.0f ? (a / gl) : 0.0f);
+        for (uint g = 0; g < GF; g++) {{
+            float gm = -INFINITY;
+#pragma clang loop unroll(full)
+            for (uint w = 0; w < W; w++) gm = max(gm, m_sh[w * GF + g]);
+            float gl = 0.0f;
+#pragma clang loop unroll(full)
+            for (uint w = 0; w < W; w++) gl += l_sh[w * GF + g] * exp(m_sh[w * GF + g] - gm);
+            const uint out_base = ((b * p.hq + (h0 + g)) * p.q_seq + qi) * D;
+            const float inv = (gl > 0.0f) ? (1.0f / gl) : 0.0f;
+#pragma clang loop unroll(full)
+            for (uint i = 0; i < NPER; i++) {{
+                uint d = lane + i * 32u;
+                if (d < D) {{
+                    float a = 0.0f;
+#pragma clang loop unroll(full)
+                    for (uint w = 0; w < W; w++)
+                        a += acc_sh[(w * GF + g) * D + d] * exp(m_sh[w * GF + g] - gm);
+                    out[out_base + d] = ({ty})(a * inv);
+                }}
             }}
         }}
     }}
@@ -1228,21 +1281,58 @@ kernel void {entry}(
     )
 }
 
-/// Pick the split-K width `W` (simdgroups per query). Prefill (q_seq>8) uses
-/// W=1 — the q_seq*Hq*B queries already saturate the GPU. Decode (small q_seq,
-/// long context) splits the key loop across W simdgroups for parallelism.
-/// Overridable via `KILN_SDPA_SPLIT` (for tuning). Always a power of two.
-fn sdpa_split_w(q_seq: usize, k_seq: usize) -> usize {
+/// Pick the split-K width `W` (simdgroups per threadgroup) for the
+/// GQA-shared-KV decode grid `(q_seq, Hkv, B)`. Because the new grid launches
+/// `q_seq * Hkv * B` threadgroups — `GF×` fewer than the old per-q-head grid
+/// `(q_seq, Hq, B)` — the few decode threadgroups badly under-occupy the GPU;
+/// split-K (W simdgroups each walking a `1/W` slice of the key range) restores
+/// parallelism. We only split for a single decode query (`q_seq<=8`) with a
+/// long enough key range (`k_seq>=256`) to amortize the per-head
+/// threadgroup-memory combine. Empirically (M1, Hq=32/Hkv=8/D=128, GF=4) W=4
+/// wins at `Sk<=512` and W=8 at `Sk>=2048` (crossover ~1K keys); `W` is then
+/// clamped by occupancy headroom and the [1,32] pow2 + threadgroup-memory
+/// budget. `KILN_SDPA_SPLIT` forces a fixed `W` for A/B + tuning.
+fn sdpa_split_w(q_seq: usize, k_seq: usize, hkv: usize, b: usize, gf: usize, d: usize) -> usize {
+    // Threadgroup-memory cap: the split combine stages W*GF*D + 2*W*GF floats.
+    // Keep it under ~28 KiB (M1 limit is 32 KiB; leave slack). Floor to the
+    // largest power-of-two W that fits.
+    let per_w_floats = gf * d + 2 * gf;
+    let mem_cap_raw = (28 * 1024 / 4 / per_w_floats.max(1)).max(1);
+    let mem_cap_w = {
+        // largest power of two <= mem_cap_raw, capped at 32.
+        let mut w = 1usize;
+        while w * 2 <= mem_cap_raw && w < 32 {
+            w *= 2;
+        }
+        w
+    };
     if let Ok(s) = std::env::var("KILN_SDPA_SPLIT") {
         if let Ok(w) = s.parse::<usize>() {
-            return w.clamp(1, 32).next_power_of_two();
+            return w.clamp(1, 32).next_power_of_two().min(mem_cap_w);
         }
     }
+    // Many query-threadgroups (prefill-ish multi-query) or short context →
+    // no split; the grid already has enough work or the keys are too few.
     if q_seq > 8 || k_seq < 256 {
-        1
-    } else {
-        8
+        return 1;
     }
+    // Base groups already launched (one per (qi, kv-head, batch)). The new
+    // GQA-shared-KV grid launches GF× fewer threadgroups than the old
+    // per-q-head grid, so the few decode threadgroups badly under-occupy the
+    // GPU; split-K (W simdgroups slicing the key range) restores parallelism.
+    let base = (q_seq * hkv * b).max(1);
+    // Empirically (M1, Hq=32/Hkv=8/D=128, GF=4) the per-head threadgroup-mem
+    // combine is worth it well before the GPU is "full": W=4 wins at Sk<=512
+    // and W=8 wins at Sk>=2048 (crossover ~1K keys). We pick W by key count —
+    // ~4 splits per 512 keys, min 4 once we split at all — then clamp by
+    // occupancy headroom, the [1,32] pow2 range, and the threadgroup-memory
+    // budget for the GF independent combines.
+    let by_keys = if k_seq >= 2048 { 8 } else { 4 };
+    // Don't launch wildly more simdgroups than needed to fill the GPU.
+    let occ_cap = (256usize.div_ceil(base)).max(1).next_power_of_two();
+    let mut w = by_keys.min(occ_cap);
+    w = w.min(32).min(mem_cap_w);
+    w.max(1)
 }
 
 /// Q-block / K-block / simdgroups-down-Q tiling for the matrix-core prefill
@@ -1382,9 +1472,12 @@ pub(crate) fn sdpa(
         );
     }
 
-    let split_w = sdpa_split_w(sq, sk);
-    let entry = format!("kt_sdpa_{ty}_d{head_dim}_w{split_w}");
-    let src = sdpa_src(ty, head_dim, split_w, &entry);
+    // GQA-shared-KV decode: one threadgroup per GQA *group* — grid is
+    // (q_seq, Hkv, B) (GF× fewer threadgroups than the old per-q-head grid),
+    // each loading K[kj]/V[kj] once and reusing it for the GF=gqa q-heads.
+    let split_w = sdpa_split_w(sq, sk, hkv, b, gqa, head_dim);
+    let entry = format!("kt_sdpa_{ty}_d{head_dim}_w{split_w}_g{gqa}");
+    let src = sdpa_src(ty, head_dim, split_w, gqa, &entry);
     let pipeline = op_pipeline(companion, &src, &entry)?;
 
     let encoder = companion
@@ -1398,13 +1491,14 @@ pub(crate) fn sdpa(
     encoder.set_buffer(3, Some(out), 0);
     encoder.set_bytes(4, &params);
     if split_w > 1 {
-        // shared: W*D acc + 2*W (m,l) floats.
-        let shared_floats = split_w * head_dim + 2 * split_w;
+        // shared: W*GF*D acc + 2*W*GF (m,l) floats (GF independent combines).
+        let shared_floats = split_w * gqa * head_dim + 2 * split_w * gqa;
         encoder.set_threadgroup_memory_length(0, shared_floats * std::mem::size_of::<f32>());
     }
 
-    // W simdgroups (W*32 lanes) per (qi, head, batch).
-    let groups = objc2_metal::MTLSize { width: sq, height: hq, depth: b };
+    // W simdgroups (W*32 lanes) per (qi, kv-head, batch); each handles the GF
+    // q-heads kv_h*GF .. kv_h*GF+GF-1.
+    let groups = objc2_metal::MTLSize { width: sq, height: hkv, depth: b };
     let threads = objc2_metal::MTLSize { width: split_w * 32, height: 1, depth: 1 };
     encoder.dispatch_thread_groups(groups, threads);
     drop(encoder);
