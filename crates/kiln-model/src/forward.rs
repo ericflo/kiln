@@ -14987,10 +14987,14 @@ fn gated_deltanet_forward_decode_if(
         let src = recurrent_state.contiguous()?;
         // (#1082) Vulkan lacks `Tensor::slice_set`; the in-place buffer restore
         // is only needed to preserve the persistent buffer identity on backends
-        // that support it. On Vulkan, assign the updated state directly — the
+        // that support it. Assign the updated state directly when it is on Vulkan
+        // OR when it moved devices vs the persistent slot (#1443: the real-model
+        // GDN state is CPU-initialized but the forward produces a Vulkan state,
+        // so `slice_set` on the CPU `rs_persist` with a Vulkan `src` hit a device
+        // mismatch — gating on `rs_persist.device()` was the wrong tensor). The
         // caller's `LinearAttentionState` holds the tensor by value and adopts
         // the new one, so identity preservation is unnecessary for correctness.
-        if matches!(rs_persist.device(), Device::Vulkan(_)) {
+        if matches!(src.device(), Device::Vulkan(_)) || rs_persist.device() != src.device() {
             *recurrent_state = src;
         } else {
             rs_persist
@@ -15001,7 +15005,7 @@ fn gated_deltanet_forward_decode_if(
     }
     if conv_state.id() != cv_persist.id() {
         let src = conv_state.contiguous()?;
-        if matches!(cv_persist.device(), Device::Vulkan(_)) {
+        if matches!(src.device(), Device::Vulkan(_)) || cv_persist.device() != src.device() {
             *conv_state = src;
         } else {
             cv_persist
