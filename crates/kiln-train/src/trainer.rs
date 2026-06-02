@@ -4420,8 +4420,10 @@ fn jsonl_byte_progress(total_bytes: u64, offset: u64) -> (usize, usize, f32) {
 }
 
 /// Page size used by the GRPO shared-prompt-prefix paged cache. Matches the
-/// production server / bench setting so the same FA fast paths fire.
-const GRPO_REF_PAGED_BLOCK_SIZE: usize = 16;
+/// production server / bench setting so the same FA fast paths fire (#1082:
+/// 16 -> 64 so each FA2 kBlockN=64 tile is one page; keeps parity with
+/// `DEFAULT_BLOCK_SIZE`).
+const GRPO_REF_PAGED_BLOCK_SIZE: usize = 64;
 
 /// Compute the reference-policy log probs for every completion in a GRPO
 /// group, sharing the prompt-prefix forward across all completions.
