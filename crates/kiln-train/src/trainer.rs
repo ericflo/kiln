@@ -11738,13 +11738,13 @@ pub(crate) mod tests {
     }
 
     /// SFT on the GDN-bearing F32 config (3 linear-attention + 1 full-attention
-    /// layer). Characterizes whether the GDN F32 path delivers grads on Vulkan.
-    /// IGNORED by default: the GDN-on-Vulkan tape wiring (conv1d / rms_norm /
-    /// embedding recorders) is `cfg(any(cuda, metal))` only, so this path is a
-    /// known gap. Run explicitly to re-check progress.
+    /// layer). The GDN causal-conv1d input-backward is now device-agnostic
+    /// (CUDA FFI / pure-`kiln_tensor` composite — see
+    /// `kiln_model::tape_forward::causal_depthwise_conv1d_bwd_input_composite`),
+    /// so the GDN tape chain connects through in_proj_qkv on F32 Vulkan and this
+    /// path delivers non-empty finite LoRA grads (#1082).
     #[cfg(feature = "vulkan")]
     #[test]
-    #[ignore = "GDN-on-Vulkan training tape path is a known pre-existing gap (#1082)"]
     fn vk_f32_sft_grads_nonempty_gdn() {
         let test_name = "vk_f32_sft_grads_nonempty_gdn";
         if !vk_validation_enabled(test_name) {

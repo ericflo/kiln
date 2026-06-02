@@ -410,6 +410,18 @@ pub fn linear_with_lora_t(
     lora: Option<&LoraProjectionWeights>,
     scale: f32,
 ) -> Result<KtTensor> {
+    // (#1082) GDN-on-Vulkan: some GDN-block intermediates land on `Device::Cpu`
+    // while the frozen projection weight stays on the accelerator. The kt
+    // `broadcast_matmul` op requires both operands co-located, so align the
+    // weight to the activation device. No-op on the matched-device paths
+    // (CUDA / Metal / full-attn / decode), so they stay byte-identical.
+    let base_weight_aligned;
+    let base_weight_t = if x.device() != base_weight_t.device() {
+        base_weight_aligned = base_weight_t.to_device(x.device())?;
+        &base_weight_aligned
+    } else {
+        base_weight_t
+    };
     let cpu_f32_matmul = cpu_needs_f32_matmul(x, base_weight_t);
     let base_output = if crate::mtp_debug::is_mtp_fp32_head_armed() || cpu_f32_matmul {
         let in_dtype = x.dtype();
