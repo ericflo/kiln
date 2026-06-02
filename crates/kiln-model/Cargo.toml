@@ -20,12 +20,18 @@ memmap2 = { workspace = true }
 # shim + candle-bridge parity-oracle tests); both are gone, so no `cuda` /
 # `metal` / `vulkan` build pulls candle. Tensor math is kt-native
 # (`kiln_tensor`) end to end.
-kiln-conv1d-kernel = { workspace = true, optional = true }
-kiln-flash-attn = { workspace = true, optional = true }
-kiln-gdn-kernel = { workspace = true, optional = true }
-kiln-marlin-gemm = { workspace = true, optional = true }
-kiln-rmsnorm-kernel = { workspace = true, optional = true }
+# Kernel-crate deps: default-features=false so a `--features rocm` build does NOT
+# also pull each crate's default ["cuda"] (which would drag in cudarc). The
+# `cuda` / `rocm` model features activate `<crate>/cuda` or `<crate>/rocm`
+# explicitly. (R.4)
+kiln-conv1d-kernel = { path = "../kiln-conv1d-kernel", optional = true, default-features = false }
+kiln-flash-attn = { path = "../kiln-flash-attn", optional = true, default-features = false }
+kiln-gdn-kernel = { path = "../kiln-gdn-kernel", optional = true, default-features = false }
+kiln-marlin-gemm = { path = "../kiln-marlin-gemm", optional = true, default-features = false }
+kiln-rmsnorm-kernel = { path = "../kiln-rmsnorm-kernel", optional = true, default-features = false }
 kiln-vulkan-kernel = { workspace = true, optional = true }
+# Bounded HIP runtime binding — pulled under the `rocm` feature. (R.4)
+kiln-hip = { workspace = true, optional = true }
 # Phase 6a/CP-4 (#1082): experimental tape-forward path under
 # `KILN_USE_TAPE_FORWARD`. Optional so non-cuda builds don't pull in
 # the autograd substrate; gated on `cuda` since the only kt-tape
@@ -73,7 +79,12 @@ objc2-metal = { version = "0.3", optional = true }
 
 
 [features]
-cuda = ["dep:cudarc", "dep:kiln-conv1d-kernel", "dep:kiln-flash-attn", "dep:kiln-gdn-kernel", "dep:kiln-marlin-gemm", "dep:kiln-rmsnorm-kernel", "dep:kiln-tensor-id", "kiln-kt-bridge/cuda", "kiln-tensor/cuda", "dep:half", "dep:bytemuck", "dep:kiln-autograd"]
+cuda = ["dep:cudarc", "kiln-conv1d-kernel/cuda", "kiln-flash-attn/cuda", "kiln-gdn-kernel/cuda", "kiln-marlin-gemm/cuda", "kiln-rmsnorm-kernel/cuda", "dep:kiln-tensor-id", "kiln-kt-bridge/cuda", "kiln-tensor/cuda", "dep:half", "dep:bytemuck", "dep:kiln-autograd"]
+# ROCm backend (R.4) — mirrors `cuda`, swapping cudarc->kiln-hip and each kernel
+# crate's `/cuda` feature for `/rocm`. The kernel _kt entry points are
+# backend-neutral (dispatch on Device::Rocm); backend/rocm.rs is the model-side
+# backend impl.
+rocm = ["dep:kiln-hip", "kiln-conv1d-kernel/rocm", "kiln-flash-attn/rocm", "kiln-gdn-kernel/rocm", "kiln-marlin-gemm/rocm", "kiln-rmsnorm-kernel/rocm", "dep:kiln-tensor-id", "kiln-kt-bridge/rocm", "kiln-tensor/rocm", "dep:half", "dep:bytemuck", "dep:kiln-autograd"]
 # Metal backend on Apple Silicon — fully candle-free (#1082). Every compute
 # kernel is kiln-owned MSL (kiln-tensor `crate::metal_rt`), production attention
 # runs `metal_sdpa_last_axis`, and the queue sync is the kt-native

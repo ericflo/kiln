@@ -220,7 +220,7 @@ fn cuda_fused_attn_sigmoid_mul_disabled() -> bool {
 /// at once. Set `KILN_USE_KT_API_ALL=1` to exercise the entire
 /// adapter-routed path end-to-end. Each per-family flag also
 /// short-circuits true when this is set.
-#[cfg(feature = "cuda")]
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 fn cuda_use_kt_api_all() -> bool {
     if cuda_kt_api_master_off() {
         return false;
@@ -236,7 +236,7 @@ fn cuda_use_kt_api_all() -> bool {
 /// test to exercise the candle backend-hooks (linear_prefill / FLCE
 /// provider / flash-decline) that the default-on kt-API gates otherwise
 /// route around. Disable value wins over `KILN_USE_KT_API_ALL`.
-#[cfg(feature = "cuda")]
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 fn cuda_kt_api_master_off() -> bool {
     static OFF: OnceLock<bool> = OnceLock::new();
     *OFF.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_ALL").is_ok())
@@ -1547,7 +1547,7 @@ fn cuda_use_kt_api_to_dtype() -> bool {
 /// is freshly-owned; there's no "borrowed candle Tensor" type to
 /// wrap a kt allocation yet). Inputs go zero-copy through the
 /// kt-bridge borrow adapter.
-#[cfg(feature = "cuda")]
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 pub(crate) fn cuda_use_kt_api_matmul() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_MATMUL").is_ok());
@@ -5642,7 +5642,7 @@ fn matmul_no_broadcast_copy(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
 /// through to candle's `Tensor::matmul`. NVTX range `kiln/matmul_kt`
 /// brackets the migrated call so nsys traces separate the path from
 /// the candle baseline.
-#[cfg(feature = "cuda")]
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 pub(crate) fn try_kt_matmul(lhs: &Tensor, rhs: &Tensor) -> Result<Option<Tensor>> {
     kiln_nvtx::range!(c"kiln/matmul_kt");
 
@@ -5664,6 +5664,9 @@ pub(crate) fn try_kt_matmul(lhs: &Tensor, rhs: &Tensor) -> Result<Option<Tensor>
     // CUDA-graph capture window. Decode now falls straight through to the
     // kt-native `cuda_matmul` below.
     // #1082 seam flip: kt-native MatmulBackward recorder — no kt->candle->kt.
+    // The experimental tape_forward path is cuda-gated (R.4); on ROCm we fall
+    // straight through to the device-dispatched dense matmul below.
+    #[cfg(feature = "cuda")]
     if crate::tape_forward::tape_forward_enabled() {
         if let Some(out) = crate::tape_forward::try_tape_matmul_kt(lhs, rhs)
             .context("try_kt_matmul try_tape_matmul_kt")?
@@ -5672,7 +5675,16 @@ pub(crate) fn try_kt_matmul(lhs: &Tensor, rhs: &Tensor) -> Result<Option<Tensor>
         }
     }
 
-    let out_kt = match kiln_tensor::cuda_matmul(lhs, rhs) {
+    // Backend-dispatched dense matmul: cuda_matmul on Device::Cuda,
+    // rocm_matmul on Device::Rocm (each cfg-gated to its backend). (R.4)
+    let matmul_result = match lhs.device() {
+        #[cfg(feature = "cuda")]
+        kiln_tensor::Device::Cuda(_) => kiln_tensor::cuda_matmul(lhs, rhs),
+        #[cfg(feature = "rocm")]
+        kiln_tensor::Device::Rocm(_) => kiln_tensor::rocm_matmul(lhs, rhs),
+        _ => return Ok(None),
+    };
+    let out_kt = match matmul_result {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };

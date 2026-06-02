@@ -79,6 +79,9 @@ pub mod metal;
 #[cfg(feature = "vulkan")]
 pub mod vulkan;
 
+#[cfg(feature = "rocm")]
+pub mod rocm;
+
 // (#1082) backend::vulkan_linear_op + vulkan_lora_op removed: those
 // `candle_core::CustomOp1` / `CustomOp3` wrappers existed only to wire the
 // Vulkan matmul / LoRA-delta dispatch into candle's `.backward()`. With the
@@ -1326,6 +1329,8 @@ pub fn for_device_kt(device: &kiln_tensor::Device) -> Arc<dyn BackendRuntime> {
     match device {
         #[cfg(feature = "cuda")]
         kiln_tensor::Device::Cuda(_) => Arc::new(cuda::CudaBackend::new(*device)),
+        #[cfg(feature = "rocm")]
+        kiln_tensor::Device::Rocm(_) => Arc::new(rocm::RocmBackend::new(*device)),
         #[cfg(feature = "metal")]
         kiln_tensor::Device::Metal(_) => {
             // #1082: MetalBackend is kt-native — pass the kt device directly.
