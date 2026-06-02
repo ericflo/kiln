@@ -10,7 +10,6 @@ use axum::{
     routing::{delete, get, post},
 };
 
-use kiln_core::env_flag::env_tristate;
 use kiln_train::{
     DistillMergeRequest, DistillPumpRequest, DistillRefreshRequest, DistillSelfRequest, GrpoGroup,
     GrpoRequest, OpdRequest, SftRequest, TrainingResponse, TrainingState, TrainingStatus,
@@ -165,33 +164,6 @@ fn enforce_training_preflight(
     Ok(())
 }
 
-fn vk_native_sft_enabled(state: &AppState) -> bool {
-    match env_tristate("KILN_VK_NATIVE_TRAINING") {
-        Some(enabled) => enabled,
-        None => {
-            #[cfg(feature = "vulkan")]
-            {
-                let ModelBackend::Real { runner, .. } = state.backend.as_ref() else {
-                    return false;
-                };
-                runner.read().unwrap().backend_name() == "vulkan"
-            }
-            #[cfg(not(feature = "vulkan"))]
-            {
-                let _ = state;
-                false
-            }
-        }
-    }
-}
-
-fn vk_native_grpo_enabled(state: &AppState) -> bool {
-    match env_tristate("KILN_VK_NATIVE_GRPO") {
-        Some(enabled) => enabled,
-        None => vk_native_sft_enabled(state),
-    }
-}
-
 fn validate_grpo_submission_source(req: &GrpoRequest) -> Result<(), ApiError> {
     if req.dataset_path.is_some() && !req.groups.is_empty() {
         return Err(ApiError::training_invalid_request(
@@ -289,8 +261,10 @@ async fn submit_sft(
             ),
         },
         req.config.lora_rank,
-        vk_native_sft_enabled(&state)
-            && state.model_config.num_full_attention_layers < state.model_config.num_layers,
+        // Vulkan now trains through the shared kt-tape path (segment-
+        // checkpointed), not the deleted vk_native recompute fork, so the
+        // preflight uses the standard segment-checkpoint working-set estimate.
+        false,
     )?;
 
     tracing::info!(
@@ -375,7 +349,6 @@ async fn submit_grpo(
             req.dataset_path = Some(path);
         }
     }
-    let vk_native_grpo = vk_native_grpo_enabled(&state);
     validate_grpo_submission_source(&req)?;
 
     let stats = if let Some(path) = req.dataset_path.as_deref() {
@@ -422,14 +395,16 @@ async fn submit_grpo(
         return Err(ApiError::mock_mode_no_training());
     }
 
-    // Working-set preflight (see submit_sft for rationale).
+    // Working-set preflight (see submit_sft for rationale). Vulkan trains
+    // through the shared kt-tape (segment-checkpointed) path now, not the
+    // deleted vk_native recompute fork, so the standard estimate applies.
     let max_seq_len = stats.max_seq_len;
     enforce_training_preflight(
         &state,
         max_seq_len,
         EstimateOptions::default(),
         req.config.lora_rank,
-        vk_native_grpo,
+        false,
     )?;
 
     // Register the job in the tracking map

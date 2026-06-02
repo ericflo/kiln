@@ -61,8 +61,6 @@ pub mod trainer;
 pub mod trajectory;
 pub mod trajectory_inspect;
 pub mod trajectory_mask;
-#[cfg(feature = "vulkan")]
-pub mod vk_train;
 
 pub use logit_cache::{CacheEntry, CacheStats, CachedLogitSource, LogitCache, hash_prefix};
 pub use receipt::{

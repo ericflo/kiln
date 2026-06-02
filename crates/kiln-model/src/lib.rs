@@ -37,8 +37,6 @@ mod transposed_weight_cache;
 pub mod vk_bwd_adapter;
 #[cfg(feature = "vulkan")]
 pub mod vk_decode_resident;
-#[cfg(feature = "vulkan")]
-pub mod vk_forward;
 pub mod weights;
 
 pub use backend::BackendRuntime;

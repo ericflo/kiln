@@ -89,13 +89,13 @@ use crate::kt_api::opd_top_k_reverse_kl_phase_b_bwd_kt;
 /// helper is the cheap up-front check that lets the production caller
 /// route around the kt-tape path when the kernel envelope doesn't apply.
 fn envelope_ok(hidden: &KtTensor, head_t: &KtTensor, top_k: usize) -> bool {
-    // (#1082 Metal lane) Accept both CUDA and Metal so the kt-native OPD
-    // FORWARD + loss record on Metal storage. The recorded backward
-    // (`CudaOpdTopKReverseKlPhaseBBackward::apply`) is still CUDA-FFI-only —
-    // on Metal it `bail!`s from the `#[cfg(not(feature = "cuda"))]` arm. This
-    // is the deliberate scope boundary: OPD forward + loss are reachable on
-    // Metal, the OPD top-K reverse-KL backward (LoRA grad) is a documented
-    // follow-up pending a Metal kernel (no device-agnostic kt backward exists).
+    // (#1082) Accept both CUDA and Metal: the kt-native OPD FORWARD + loss
+    // record on either storage, and the recorded backward
+    // (`CudaOpdTopKReverseKlPhaseBBackward::apply`) is reachable on both. On
+    // CUDA it dispatches the perf-tuned fused FFI kernel; on CPU/Metal it
+    // routes through the device-agnostic analytic kt-composite
+    // (`opd_top_k_reverse_kl_phase_b_bwd_composite_kt`, FD-validated in
+    // `kt_api`), so the OPD top-K reverse-KL LoRA grad runs on every backend.
     if !matches!(hidden.device(), KtDevice::Cuda(_) | KtDevice::Metal(_)) {
         return false;
     }

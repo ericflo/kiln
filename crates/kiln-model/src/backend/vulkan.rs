@@ -412,15 +412,14 @@ where
 /// (#1082) Shared, storage-decoupled AdamW optimizer seam over raw Vulkan
 /// device buffers.
 ///
-/// This is the single dispatch site for the on-device F32 AdamW step. Both
-/// the kt-`Tensor`-keyed `BackendRuntime::dispatch_adamw_step` (the
-/// CUDA/Metal-style resident-registry path) and the `VkTensor`-native
-/// training path (`vk_train.rs`, which already holds `VulkanBuffer` handles
-/// for the param/grad and the persistent first/second-moment state) route
-/// through here. Because both callers funnel into the *same* SPIR-V
-/// `dispatch_adamw_step_f32` kernel with identical push constants, the
-/// optimizer update is numerically identical regardless of which seam the
-/// caller entered through.
+/// This is the single dispatch site for the on-device F32 AdamW step. The
+/// kt-`Tensor`-keyed `BackendRuntime::dispatch_adamw_step` (the CUDA/Metal-
+/// style resident-registry path) and any `VkTensor`-native caller holding
+/// `VulkanBuffer` handles for the param/grad and the persistent first/second-
+/// moment state both route through here. Because every caller funnels into the
+/// *same* SPIR-V `dispatch_adamw_step_f32` kernel with identical push
+/// constants, the optimizer update is numerically identical regardless of
+/// which seam the caller entered through.
 ///
 /// `step` is 1-indexed (bias correction is `1 - beta^step`); `param`, `m`,
 /// and `v` are updated in place. Storage-decoupled: it needs only a
@@ -1805,7 +1804,7 @@ impl BackendRuntime for VulkanBackend {
             lora_delta_training: "kt-tape-recorded LoRA delta (legacy autograd wrapper removed #1082)",
             sgd_step: "Vulkan in-place registry update when operands are resident",
             adamw_step: "Vulkan in-place registry update when operands are resident",
-            native_training: "shared trainer.rs kt-tape path by default (PR6 #1082); legacy vk_native_* fork is opt-out via KILN_VK_NATIVE_TRAINING=1",
+            native_training: "shared trainer.rs kt-tape path (legacy vk_native_* fork deleted in PR7 #1082)",
         }
     }
 
