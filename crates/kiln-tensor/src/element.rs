@@ -67,10 +67,32 @@ impl Element for half::bf16 {
         out
     }
     fn from_bytes(bytes: &[u8]) -> Vec<Self> {
-        bytes
-            .chunks_exact(2)
-            .map(|c| half::bf16::from_le_bytes([c[0], c[1]]))
-            .collect()
+        // (#1443) Fast path: bf16 is `repr(transparent)` over u16, so on
+        // little-endian targets the input little-endian bytes ARE the in-memory
+        // representation — decode the whole buffer with one bulk memcpy instead
+        // of a per-element `chunks_exact(2).map(from_le_bytes).collect()`. The
+        // scalar version made `to_vec1::<bf16>()` over the model's weights (the
+        // Vulkan decode-weight prewarm) take minutes-to-effectively-forever.
+        #[cfg(target_endian = "little")]
+        {
+            let n = bytes.len() / 2;
+            let mut out: Vec<half::bf16> = Vec::with_capacity(n);
+            // SAFETY: `with_capacity(n)` reserves `n * size_of::<bf16>() == n*2`
+            // bytes; we initialize exactly those bytes via the copy, then set
+            // the length. bf16 is `Copy` with no padding/invalid bit patterns.
+            unsafe {
+                std::ptr::copy_nonoverlapping(bytes.as_ptr(), out.as_mut_ptr() as *mut u8, n * 2);
+                out.set_len(n);
+            }
+            out
+        }
+        #[cfg(not(target_endian = "little"))]
+        {
+            bytes
+                .chunks_exact(2)
+                .map(|c| half::bf16::from_le_bytes([c[0], c[1]]))
+                .collect()
+        }
     }
 }
 
