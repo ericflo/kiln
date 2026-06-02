@@ -82,6 +82,10 @@ kiln-blas = { workspace = true, optional = true, features = ["cublaslt"] }
 # clean, permanent dependency — Phase 7 does NOT replace it.
 kiln-vulkan-kernel = { path = "../kiln-vulkan-kernel", optional = true }
 
+# Optional — pulled in under the `rocm` feature only. kiln-hip is the bounded
+# HIP runtime binding (the cudarc analog); candle-free. Phase R.1/R.3.
+kiln-hip = { workspace = true, optional = true }
+
 [features]
 default = []
 # CUDA storage. #1082 CP-1 CLOSED: the `cuda` feature is candle-free.
@@ -107,6 +111,11 @@ metal = ["dep:objc2", "dep:objc2-metal", "dep:objc2-foundation"]
 # kiln-vulkan-kernel's already-candle-free VulkanBuffer + VulkanDevice.
 # This is a permanent dependency (Phase 7 does not change it).
 vulkan = ["dep:kiln-vulkan-kernel"]
+# Phase R.x — ROCm/HIP storage. Candle-free, mirrors the `cuda` lane: driver
+# types from `kiln-hip` (the cudarc analog), kernels compiled from the same
+# `csrc/*.cu` by hipcc in build.rs::build_rocm() behind the CUDA->HIP compat
+# shim (`csrc/hip_compat`). `kiln-rocblas` (dense GEMM) joins this list in R.6.
+rocm = ["dep:kiln-hip"]
 
 [dev-dependencies]
 # Phase 1.131's `training_full_block` integration test threads
