@@ -65,9 +65,10 @@
 //!   `try_contiguous_batched` branch — before invoking
 //!   `model_forward_paged_batched_decode_hidden`, route through the
 //!   batched graph runner when the bucket is captured.
-//! - **Forward wrapper** — `model_forward_paged_batched_with_graph_inputs`
-//!   in `forward.rs` mirroring the existing single-row
-//!   `model_forward_paged_with_graph_inputs`, consuming
+//! - **Forward wrapper** — `model_forward_paged_batched_hidden_with_graph_inputs`
+//!   in `forward.rs` mirroring the single-row
+//!   `model_forward_paged_hidden_with_graph_inputs` (HiddenOnly; lm_head runs
+//!   eagerly off-graph — #1082 boxes 432/433), consuming
 //!   `BatchedPagedDecodeGraphInputs` for the stable per-row tensors.
 //!
 //! ### Sequencing
@@ -334,42 +335,36 @@ struct CapturedDecodeGraph {
 }
 
 /// Captured graph + stable buffers for a batched (`bs > 1`) decode step.
-/// Reserved for the multi-batch capture path documented at the top of
-/// this file; not yet populated. The fields mirror
-/// [`CapturedDecodeGraph`] but every per-row tensor is shaped for
-/// `[batch, ...]` so one graph replay services the whole batch.
+/// The fields mirror [`CapturedDecodeGraph`] but every per-row tensor is
+/// shaped for `[batch, ...]` so one graph replay services the whole batch.
+///
+/// #1082 boxes 432/433 (STEPS 2-3): the captured graph now records the
+/// `HiddenOnly` batched transformer (no in-graph final_norm / lm_head);
+/// `final_norm` + the large-N (`vocab = 151936`) cublasLt lm_head GEMV run
+/// EAGERLY on [`Self::output_hidden`] after each launch. This is the batched
+/// port of the bs=1 box-102 BUG2 fix — the lm_head GEMV is not
+/// CUDA-graph-replay-deterministic at large N. The former in-graph
+/// `output_logits` + `_lm_head_output_buffer` fields are gone.
 #[cfg(feature = "cuda")]
-#[allow(dead_code)]
 struct CapturedBatchedDecodeGraph {
     /// The instantiated CUDA graph.
     graph: cudarc::driver::CudaGraph,
-    /// `[batch, 1, vocab]` logits — replay writes into this storage.
-    /// #1082: kt-native graph-stable buffer.
-    ///
-    /// NOTE (#1082 boxes 432/433/438, STEP 1): superseded by
-    /// [`Self::output_hidden`] for the box-102 BUG2 fix port. Steps 2-3
-    /// drop this field once the batched capture/replay path moves to the
-    /// HiddenOnly + eager-lm_head contract; kept now so the existing
-    /// capture flow compiles unchanged.
-    output_logits: Tensor,
-    /// #1082 box-102 BUG2 fix port (STEP 1): graph-stable PRE-final-norm
+    /// #1082 box-102 BUG2 fix port (STEPS 2-3): graph-stable PRE-final-norm
     /// hidden buffer, shape `[batch, 1, hidden_size]`. The captured
     /// `HiddenOnly` batched forward
     /// ([`crate::forward::model_forward_paged_batched_hidden_with_graph_inputs`])
-    /// writes here; `final_norm` + lm_head then run EAGERLY on this buffer
-    /// (off the graph, via
+    /// writes here via `cuda_slice_set_dim0`; `final_norm` + lm_head then run
+    /// EAGERLY on this buffer (off the graph, via
     /// [`crate::forward::lm_head_from_batched_hidden_eager`]) because the
     /// large-N lm_head cublasLt GEMV is not CUDA-graph-replay-safe (the
     /// BUG2 doubling). Mirrors [`CapturedDecodeGraph::output_hidden`].
-    /// ADDITIVE in STEP 1 — not yet populated by `try_capture_batched`
-    /// (steps 2-3 wire it), hence `#[allow(dead_code)]` on the struct.
     output_hidden: Tensor,
     /// The non-default capture stream the batched graph launches on.
     /// Retained so the replay path can `synchronize()` it after
     /// `graph.launch()` — making the freshly-written `output_hidden`
-    /// visible before the eager batched lm_head reads it. Mirrors
-    /// [`CapturedDecodeGraph::capture_stream`] (#1082 box-102 fix port,
-    /// STEP 1). Not yet populated (steps 2-3).
+    /// visible before the eager batched lm_head reads it on the default
+    /// stream. Mirrors [`CapturedDecodeGraph::capture_stream`] (#1082
+    /// box-102 fix port).
     capture_stream: std::sync::Arc<cudarc::driver::CudaStream>,
     /// Adapter generation when captured (invalidate on mismatch).
     adapter_gen: u64,
@@ -393,11 +388,16 @@ struct CapturedBatchedDecodeGraph {
     _paged_decode_lse: Vec<Tensor>,
     /// Per-GDN-layer fused recurrent outputs, shape `[batch, ...]`.
     _gdn_decode_outputs: Vec<Tensor>,
-    /// Pre-allocated lm-head matmul output buffer, shape `[batch, 1, vocab]`.
-    /// See [`CapturedDecodeGraph::_lm_head_output_buffer`] for the
-    /// rationale. This is the structural Phase 5 #1082 fix that
-    /// unblocks `KILN_CUDA_GRAPHS_BATCHED=1` end-to-end.
-    _lm_head_output_buffer: Tensor,
+    /// #1082 freeze-pointers (Phase 5, batched port): every forward
+    /// intermediate the captured graph touches — Q/K/V projections, per-layer
+    /// activations, the `Flash_fwd_params` backing pointers — is handed to the
+    /// batched forward as a `Borrowed` view into a buffer the capture arena
+    /// owns. Those owned buffers are retained here so their device pointers
+    /// stay mapped for every replay. Mirrors
+    /// [`CapturedDecodeGraph::_capture_arena_buffers`] — the structural fix
+    /// for the `flash_fwd_splitkv_kernel` ILLEGAL_ADDRESS (freed
+    /// Q/activation read on replay).
+    _capture_arena_buffers: Vec<std::sync::Arc<kiln_tensor::CudaStorage>>,
     /// Max K/V length baked into the captured kernel launch shape.
     max_seqlen_k: usize,
     // NOTE: the captured graph reads GDN recurrent/conv state via the
@@ -715,8 +715,9 @@ impl CudaGraphRunner {
         // (3) Refresh every stable input buffer in place via the
         //     batched updater family.
         // (4) Launch the captured graph.
-        // (5) Argmax `output_logits` outside the captured region to
-        //     produce per-row tokens.
+        // (5) #1082 boxes 432/433 (STEPS 2-3): sync the capture stream, run
+        //     `final_norm` + lm_head EAGERLY on the replayed `output_hidden`
+        //     (off the graph — box-102 BUG2 fix), then argmax per row.
         // (6) Scatter the post-step persistent state back into each
         //     per-row `LinearAttentionState` so callers see the
         //     updated GDN history.
@@ -822,14 +823,42 @@ impl CudaGraphRunner {
                 self.captured_batched.remove(&key);
                 return Ok(None);
             }
-            // Step (5): argmax over `output_logits` → per-row tokens.
-            // `output_logits` is already the post-LM-head tensor
-            // (`[batch, 1, vocab]`) — the wrapper does final_norm +
-            // lm_head + slice_set inside the captured region.
-            // #1082: `output_logits` is now a kt-native graph-stable buffer
-            // (its device pointer is baked into the captured graph); feed it
-            // directly to `greedy_sample_rows` — no candle->kt bridge.
-            let tokens = match crate::sampling::greedy_sample_rows(&captured.output_logits) {
+            // Step (5): #1082 boxes 432/433 (STEPS 2-3) — the captured graph
+            // replayed the batched transformer and wrote the PRE-final-norm
+            // hidden into the graph-stable `output_hidden` on its capture
+            // stream. Sync that stream so the write is visible, then run
+            // `final_norm` + lm_head EAGERLY (off the graph) to produce this
+            // step's logits, then argmax per row. The captured lm_head
+            // cublasLt GEMV was the BUG2 source (wrong logits on replay despite
+            // a bit-identical input hidden); the captured transformer win is
+            // preserved. Mirrors the bs=1 `decode_step_paged` replay tail.
+            if let Err(e) = captured.capture_stream.synchronize() {
+                tracing::warn!(
+                    batch_size,
+                    max_seqlen_k = key.max_seqlen_k,
+                    error = %e,
+                    "batched graph replay: capture-stream sync after launch failed, falling back to eager"
+                );
+                return Ok(None);
+            }
+            let replay_logits = match crate::forward::lm_head_from_batched_hidden_eager(
+                backend,
+                &captured.output_hidden,
+                weights,
+                config,
+            ) {
+                Ok(l) => l,
+                Err(e) => {
+                    tracing::warn!(
+                        batch_size,
+                        max_seqlen_k = key.max_seqlen_k,
+                        error = %e,
+                        "batched graph replay: eager lm_head on replayed hidden failed, falling back to eager"
+                    );
+                    return Ok(None);
+                }
+            };
+            let tokens = match crate::sampling::greedy_sample_rows(&replay_logits) {
                 Ok(t) => t,
                 Err(e) => {
                     tracing::warn!(
@@ -1906,14 +1935,35 @@ impl CudaGraphRunner {
     /// `self.captured_batched`; subsequent calls with a matching key
     /// can replay it.
     ///
-    /// This is the heart of step 6 in the multi-batch sequencing plan
-    /// at the top of this file. Buffer allocation uses the
-    /// `new_batched_*_buffer` helpers; the forward is invoked via
-    /// `model_forward_paged_batched_with_graph_inputs` which threads
-    /// the stable device pointers through the bs>1 hidden path.
+    /// #1082 boxes 432/433 (STEPS 2-3): rewritten to mirror the bs=1
+    /// [`Self::try_capture`] discipline exactly — the box-102 BUG2 fix port:
+    ///
+    /// 1. Allocate every `new_batched_*` device buffer + the step-1
+    ///    `output_hidden` BEFORE capture.
+    /// 2. Build [`crate::forward::BatchedPagedDecodeGraphInputs`] over those
+    ///    buffers + the persistent batched-state slot.
+    /// 3. Freeze-pointers Pass-1 WARM RECORD: run the HiddenOnly batched
+    ///    forward ONCE through a recording [`kiln_tensor::CaptureArena`] to
+    ///    allocate+retain every transient Q/K/V/activation buffer. The GDN
+    ///    recurrent/conv state in the persistent slot is non-idempotent, so
+    ///    snapshot it before the warm pass and restore it IN PLACE (preserving
+    ///    the slot's stable device pointers) after. The paged-KV write is
+    ///    idempotent (same token→slot→same K/V) so it needs no restore.
+    /// 4. `arena.begin_replay()`.
+    /// 5. `begin_capture(...RELAXED)` on the FRESH non-default capture stream.
+    /// 6. Inside `with_capture_arena` + `with_active_cuda_stream`, run the
+    ///    HiddenOnly batched forward (`Borrowed` arena views) then
+    ///    `cuda_slice_set_dim0` the hidden into `output_hidden`.
+    /// 7. `end_capture(AUTO_FREE_ON_LAUNCH)` (the bs=1 flag — the in-graph
+    ///    lm_head that forced the bs>1 `NO_FLAGS` workaround is gone, so the
+    ///    pinned arena buffers + AUTO_FREE behave exactly as bs=1).
+    /// 8. First `graph.launch()` + sync, then eager
+    ///    [`crate::forward::lm_head_from_batched_hidden_eager`] on the
+    ///    first-launch hidden to produce this step's logits.
+    /// 9. Store `output_hidden` + `capture_stream` +
+    ///    `_capture_arena_buffers` on [`CapturedBatchedDecodeGraph`].
     #[cfg(feature = "cuda")]
     #[allow(clippy::too_many_arguments)]
-    #[allow(dead_code)]
     fn try_capture_batched(
         &mut self,
         backend: &dyn BackendRuntime,
@@ -1941,9 +1991,10 @@ impl CudaGraphRunner {
 
         // #1082: the batched graph-stable buffers are kt-native and
         // allocated directly on the kt device — no candle alloc, no
-        // per-buffer candle->kt bridge. (#1082) The capture stream is the kt
-        // context's default stream (the one the captured kt forward runs on);
-        // capture-control FFI (begin/end_capture, synchronize) drives it directly.
+        // per-buffer candle->kt bridge. The capture runs on a FRESH non-default
+        // stream (see below) so `with_active_cuda_stream` can route the captured
+        // kt forward onto it; capture-control FFI (begin/end_capture,
+        // synchronize) drives that stream directly.
         let device = weights.embed_tokens.device();
         let dtype = weights.embed_tokens.dtype();
         let device_idx = match device {
@@ -1983,36 +2034,40 @@ impl CudaGraphRunner {
         let seqused_k_buffer = Self::new_batched_seqused_k_buffer(device, sequence_lengths)?;
         let kv_slot_buffer =
             Self::new_batched_kv_slot_buffer(block_tables, paged_cache, sequence_lengths, device)?;
-        let output_logits = Self::new_batched_output_logits(config, device, dtype, batch_size)?;
         let (paged_decode_outputs, paged_decode_lse) =
             Self::new_batched_paged_decode_outputs(config, device, dtype, batch_size)?;
         let gdn_decode_outputs = Self::new_batched_gdn_decode_outputs(config, device, batch_size)?;
-        // Phase 5 #1082 — pre-allocate the lm-head matmul output buffer
-        // OUTSIDE the capture window. Installed via
-        // `crate::forward::with_lm_head_output_buffer` below so the
-        // kt-typed lm_head matmul writes directly into a graph-stable kt
-        // `Tensor` (the buffer here). Without this, the captured
-        // `slice_set(&logits, …)` would record a memcpy whose source is
-        // a transient tensor freed at end-of-capture and dangling on
-        // replay, triggering `CUDA_ERROR_ILLEGAL_ADDRESS` at
-        // `greedy_sample_rows(captured.output_logits)`. The bs=1 path
-        // works in production by luck (allocator determinism at
-        // small shapes); the bs>1 path doubles the lm-head output
-        // size which churns the pool. This is the structural fix
-        // documented in bench-results/cuda-graph-status.md
-        // (2026-05-26 entry recommending the
-        // `with_lm_head_output_buffer` thread-local approach).
-        let lm_head_output_buffer =
-            Self::new_lm_head_output_buffer(config, device, dtype, batch_size)?;
-        // #1082 boxes 432/433/438 (STEP 1) — pre-allocate the batched
-        // PRE-final-norm hidden buffer that the box-102 BUG2 fix port
-        // (`model_forward_paged_batched_hidden_with_graph_inputs`) will
-        // write into. ADDITIVE only: this constructor still drives the
-        // existing logits flow below; the hidden buffer is allocated so
-        // the new `BatchedPagedDecodeGraphInputs::output_hidden` field
-        // has a stable backing tensor. Steps 2-3 switch the captured
-        // forward to consume it (and drop `output_logits`).
+        // #1082 boxes 432/433 (STEPS 2-3) — graph-stable PRE-final-norm hidden
+        // buffer (`[batch, 1, hidden]`). The captured HiddenOnly batched forward
+        // (`model_forward_paged_batched_hidden_with_graph_inputs`) writes the
+        // transformer-stack output here via `cuda_slice_set_dim0`; `final_norm`
+        // + lm_head run EAGERLY on it after launch via
+        // `lm_head_from_batched_hidden_eager` (the large-N lm_head cublasLt GEMV
+        // is not graph-replay-safe — the box-102 BUG2 doubling). The former
+        // in-graph `output_logits` + `lm_head_output_buffer` allocations are
+        // gone; with the lm_head out of the captured region the bs>1 path no
+        // longer needs the `NO_FLAGS` AUTO_FREE workaround.
+        // `mut` because `graph_inputs.output_hidden` takes `&mut output_hidden`.
         let mut output_hidden = Self::new_batched_output_hidden(config, device, dtype, batch_size)?;
+
+        // #1082 freeze-pointers (batched port of the bs=1 capture arena).
+        // Allocate the recording arena + take a GDN snapshot of the persistent
+        // batched slot BEFORE we move the `&mut` slot borrow into
+        // `graph_inputs`. The warm pass advances the GDN recurrent/conv state
+        // by exactly one step (non-idempotent), so we restore the slot's
+        // CONTENTS in place afterward (preserving its stable device pointers
+        // for the captured Pass-2). The paged-KV write is idempotent (same
+        // token→slot→same K/V), so it needs no restore — mirrors bs=1.
+        let arena_device_index = device.index().ok_or_else(|| {
+            anyhow::anyhow!(
+                "freeze-pointers (batched): CUDA-graph capture requires a CUDA device index"
+            )
+        })?;
+        let arena_ctx = kiln_tensor::primary_cuda_context(arena_device_index)
+            .context("freeze-pointers (batched): primary_cuda_context for capture arena")?;
+        let arena = std::rc::Rc::new(std::cell::RefCell::new(
+            kiln_tensor::CaptureArena::new_record(arena_ctx, arena_device_index),
+        ));
 
         // Capture + forward inside a scope so the `&mut` borrow on
         // `self.batched_state_pool` (taken by `persistent_batched_state`)
@@ -2024,6 +2079,10 @@ impl CudaGraphRunner {
                 .persistent_batched_state(batch_size, config, &device)?
                 .context("persistent batched state required for capture")?;
             Self::prepare_gdn_recurrent_state_for_capture(persistent_state)?;
+            // Snapshot the persistent GDN slot before the warm pass advances it.
+            let gdn_snapshot = persistent_state.snapshot().context(
+                "freeze-pointers (batched): snapshot persistent GDN state before warm pass",
+            )?;
             let mut graph_inputs = crate::forward::BatchedPagedDecodeGraphInputs {
                 token_ids: &token_buffer,
                 positions: &position_buffer,
@@ -2035,17 +2094,75 @@ impl CudaGraphRunner {
                 rotary_sin: &rotary_sin_buffer,
                 attn_out: &paged_decode_outputs[..],
                 softmax_lse: &paged_decode_lse[..],
-                output_logits: &output_logits,
-                // #1082 STEP 1 — additive field; the existing capture
-                // flow below still writes through `output_logits`. Steps
-                // 2-3 flip the forward to write `output_hidden` instead.
+                // #1082 boxes 432/433 (STEPS 2-3): the captured HiddenOnly
+                // batched forward writes the transformer-stack output here.
                 output_hidden: &mut output_hidden,
                 linear_state: persistent_state,
             };
 
+            // === #1082 freeze-pointers Pass 1 (Record / warm) — batched ===
+            // Run the SAME HiddenOnly batched forward ONCE through the recording
+            // arena BEFORE `begin_capture` so every transient Q/K/V/activation
+            // + `Flash_fwd_params` backing buffer is allocated and retained;
+            // Pass 2 (the captured run below) hands out `Borrowed` views of
+            // them so every recorded device pointer stays mapped for the
+            // graph's lifetime. Without this the captured
+            // `flash_fwd_splitkv_kernel` dereferences a freed Q/activation
+            // pointer on replay (compute-sanitizer ILLEGAL_ADDRESS). Mirrors
+            // the bs=1 `try_capture` warm pass exactly.
+            let warm_result = kiln_tensor::with_capture_arena(arena.clone(), || {
+                crate::forward::model_forward_paged_batched_hidden_with_graph_inputs(
+                    backend,
+                    token_ids,
+                    weights,
+                    config,
+                    paged_cache,
+                    block_tables,
+                    sequence_lengths,
+                    lora,
+                    &mut graph_inputs,
+                )
+            });
+            warm_result.context("freeze-pointers (batched) warm (Record) pass failed")?;
+            // Restore the persistent GDN slot's CONTENTS in place so the
+            // captured Pass-2 advances it exactly once (KV writes are
+            // idempotent and need no restore). In-place `slice_set` preserves
+            // the slot's canonical device pointers — `*slot = snapshot` would
+            // swap in NEW pointers and break the stable-pointer invariant the
+            // captured graph (and `refresh_batched_state_from_rows_in_place`)
+            // relies on.
+            {
+                // `slice_set` takes `&self` (in-place write through the kt
+                // buffer's device pointer), so a shared borrow of the slot
+                // suffices and keeps the slot's tensors' pointers intact.
+                let ls = &*graph_inputs.linear_state;
+                anyhow::ensure!(
+                    ls.recurrent_states.len() == gdn_snapshot.recurrent_states.len()
+                        && ls.conv_states.len() == gdn_snapshot.conv_states.len(),
+                    "freeze-pointers (batched): GDN snapshot layer-count mismatch on restore"
+                );
+                for (dst, src) in ls
+                    .recurrent_states
+                    .iter()
+                    .zip(gdn_snapshot.recurrent_states.iter())
+                {
+                    dst.slice_set(src, 0, 0).context(
+                        "freeze-pointers (batched): restore recurrent state in place",
+                    )?;
+                }
+                for (dst, src) in ls.conv_states.iter().zip(gdn_snapshot.conv_states.iter()) {
+                    dst.slice_set(src, 0, 0)
+                        .context("freeze-pointers (batched): restore conv state in place")?;
+                }
+            }
+            // Flip the arena to Replay: Pass 2 hands out Borrowed views of the
+            // recorded buffers instead of allocating fresh ones.
+            arena.borrow_mut().begin_replay();
+
             // #1082: the kt buffer allocs filled their contents via an H2D
             // on the kt DEFAULT stream; sync it before capture so those
-            // fills are visible to the captured forward.
+            // fills (and the in-place GDN restore above) are visible to the
+            // captured forward.
             if let Some(idx) = device.index() {
                 kiln_tensor::cuda_synchronize_default_stream(idx).context(
                     "batched CUDA graph capture: sync kt default stream before capture",
@@ -2077,69 +2194,42 @@ impl CudaGraphRunner {
             // `CUDA_ERROR_ILLEGAL_ADDRESS` at bs>=16. The kt path
             // sidesteps that by owning its allocations end-to-end.)
             let _ = &gdn_decode_outputs;
-            // #1082: engage the capture stream for the whole batched
-            // capture window so every kt op (alloc + the captured
-            // forward + the lm-head `slice_set` into `output_logits`)
-            // resolves to THIS stream via `active_cuda_stream` — same
-            // contract as the bs=1 path.
-            let forward_result =
+            // #1082 boxes 432/433 (STEPS 2-3): engage the capture arena AND the
+            // capture stream for the whole batched capture window — identical
+            // to the bs=1 `try_capture` Pass-2 scope. The arena hands out
+            // `Borrowed` views of the warm-pass buffers; `with_active_cuda_stream`
+            // routes every kt op (alloc + the captured HiddenOnly forward + the
+            // `cuda_slice_set_dim0` of the hidden into `output_hidden`) onto
+            // THIS capture stream. The lm_head is OUT of the captured region
+            // now (eager after launch), so there is no `with_lm_head_output_buffer`.
+            let forward_result = kiln_tensor::with_capture_arena(arena.clone(), || {
                 kiln_tensor::with_active_cuda_stream(stream.clone(), || {
-                    crate::forward::with_lm_head_output_buffer(
-                        lm_head_output_buffer.clone(),
-                        || {
-                            crate::forward::model_forward_paged_batched_with_graph_inputs(
-                                backend,
-                                token_ids,
-                                weights,
-                                config,
-                                paged_cache,
-                                block_tables,
-                                sequence_lengths,
-                                lora,
-                                &mut graph_inputs,
-                            )
-                        },
+                    crate::forward::model_forward_paged_batched_hidden_with_graph_inputs(
+                        backend,
+                        token_ids,
+                        weights,
+                        config,
+                        paged_cache,
+                        block_tables,
+                        sequence_lengths,
+                        lora,
+                        &mut graph_inputs,
                     )
-                });
+                })
+            });
 
-            // NOTE: We deliberately do NOT pass
-            // `CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH` for the
-            // bs>1 batched-capture path. Instead we pass the CUDA
-            // "no flags" value (0). cudarc's
-            // `CUgraphInstantiate_flags_enum` does not expose a `_NONE`
-            // variant, so we transmute `0u32` — `cuGraphInstantiate`
-            // accepts 0 as "no flags" (this is the official
-            // `CUDA_GRAPH_INSTANTIATE_FLAG_NONE` value in the CUDA C
-            // headers), and the safe wrapper passes the enum through
-            // as `flags as u32 as u64` to the FFI call.
-            //
-            // Root cause this avoids (see bench-results/cuda-graph-status.md
-            // 2026-05-26 section): the captured region contains
-            // intermediate tensor allocations (notably the lm-head matmul
-            // output) that Candle's matmul pool returns from a host-side
-            // allocator. AUTO_FREE_ON_LAUNCH frees device allocations
-            // recorded as `cudaMemAllocNode` between replays, and the
-            // captured `slice_set` source pointer ends up dangling on the
-            // next replay → `CUDA_ERROR_ILLEGAL_ADDRESS` at
-            // `greedy_sample_rows(captured.output_logits)`.
-            //
-            // Trading memory for correctness: each batched-graph bucket
-            // keeps its intermediate buffers alive for the lifetime of
-            // the captured graph. For a fixed workload with a small
-            // number of `(batch_size, max_seqlen_k)` buckets, this cost
-            // is acceptable. If memory growth becomes a concern, the
-            // structural fix is to pre-allocate the lm-head output
-            // buffer outside the capture window via a `matmul_into(dst)`
-            // variant (see status doc for design notes).
-            //
-            // The bs=1 path at line ~1438 still uses
-            // AUTO_FREE_ON_LAUNCH unchanged — it has shipped in
-            // production for over a year and the matmul output for
-            // shape `[1, 1, vocab]` lands at a deterministic pool
-            // address in practice.
-            let no_flags: cudarc::driver::sys::CUgraphInstantiate_flags =
-                unsafe { std::mem::transmute::<u32, _>(0u32) };
-            let graph_result = stream.end_capture(no_flags);
+            // #1082 boxes 432/433 (STEPS 2-3): with the lm_head out of the
+            // captured region, the bs>1 path uses the SAME
+            // `AUTO_FREE_ON_LAUNCH` flag as bs=1. The former `NO_FLAGS`
+            // workaround existed only because the in-graph lm-head matmul
+            // output (a transient pool allocation) was freed by AUTO_FREE
+            // between replays, dangling the captured `slice_set` source. The
+            // HiddenOnly capture has no such in-graph matmul output, and every
+            // other transient is pinned by the freeze-pointers arena above —
+            // so AUTO_FREE is correct and reclaims the per-replay scratch.
+            let graph_result = stream.end_capture(
+                cudarc::driver::sys::CUgraphInstantiate_flags_enum::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
+            );
 
             forward_result.context("batched forward failed during graph capture")?;
             let graph = match graph_result {
@@ -2151,24 +2241,17 @@ impl CudaGraphRunner {
             tracing::info!(
                 batch_size,
                 max_seqlen_k = key.max_seqlen_k,
-                "CUDA graph captured for batched decode"
+                "CUDA graph captured for batched decode (HiddenOnly + eager lm_head)"
             );
 
             // #1082: `graph_inputs` borrows the owned kt buffers
-            // (`token_buffer`, `output_logits`, …) and `persistent_state`;
+            // (`token_buffer`, `output_hidden`, …) and `persistent_state`;
             // drop it so those buffers can be moved into
             // `CapturedBatchedDecodeGraph` below.
             drop(graph_inputs);
 
             let captured = CapturedBatchedDecodeGraph {
                 graph,
-                output_logits,
-                // #1082 STEP 1 — additive fields. The existing capture
-                // flow above still writes through `output_logits`; these
-                // carry the pre-allocated batched hidden buffer + the
-                // capture stream so the struct compiles. Steps 2-3 flip
-                // the captured forward to write `output_hidden` and run
-                // the eager batched lm_head on it (mirroring bs=1).
                 output_hidden,
                 capture_stream: stream.clone(),
                 adapter_gen,
@@ -2182,15 +2265,18 @@ impl CudaGraphRunner {
                 _paged_decode_outputs: paged_decode_outputs,
                 _paged_decode_lse: paged_decode_lse,
                 _gdn_decode_outputs: gdn_decode_outputs,
-                _lm_head_output_buffer: lm_head_output_buffer,
+                _capture_arena_buffers: arena.borrow_mut().take_retained(),
                 max_seqlen_k: key.max_seqlen_k,
             };
             captured
         };
         // (#1082 Phase 5) Stream capture only RECORDED the batched forward — it
-        // did NOT execute. Launch the instantiated graph once now so
-        // output_logits holds real results (and the recurrent/KV state is
-        // advanced) before we sample, then sync.
+        // did NOT execute, so `output_hidden` is still the uninitialized
+        // capture-time buffer and the in-place recurrent/KV state was not
+        // advanced. Launch the instantiated graph once now (the token /
+        // position / rotary / metadata buffers already hold THIS step's inputs)
+        // to actually compute this step + advance state, then sync so
+        // `output_hidden` is valid before we read it. Mirrors bs=1 try_capture.
         captured
             .graph
             .launch()
@@ -2198,12 +2284,21 @@ impl CudaGraphRunner {
         stream
             .synchronize()
             .map_err(|e| anyhow::anyhow!("sync after first batched captured-graph launch: {e}"))?;
-        // Argmax + DtoH happens OUTSIDE the capture window — `output_logits`
-        // holds the captured forward's final-norm + LM-head result.
-        // #1082: `output_logits` is now a kt-native graph-stable buffer;
-        // feed it directly to `greedy_sample_rows` — no candle->kt bridge.
-        let tokens = crate::sampling::greedy_sample_rows(&captured.output_logits)
-            .context("argmax over captured output_logits failed")?;
+        // #1082 boxes 432/433 (STEPS 2-3): run `final_norm` + lm_head EAGERLY on
+        // the capture-step hidden to produce this step's logits — the large-N
+        // lm_head cublasLt GEMV is OUT of the captured graph (box-102 BUG2 fix).
+        // `output_hidden` now holds the first-launch hidden (synced above).
+        // Argmax + DtoH then run OUTSIDE the captured region. Mirrors the bs=1
+        // try_capture tail (eager `lm_head_from_hidden_eager` → logits).
+        let logits = crate::forward::lm_head_from_batched_hidden_eager(
+            backend,
+            &captured.output_hidden,
+            weights,
+            config,
+        )
+        .context("box-102 fix (batched): eager lm_head on captured hidden (first launch)")?;
+        let tokens = crate::sampling::greedy_sample_rows(&logits)
+            .context("argmax over batched eager-lm_head logits failed")?;
         self.captured_batched.insert(key, captured);
         Ok(tokens)
     }
@@ -2532,27 +2627,11 @@ impl CudaGraphRunner {
             .context("create CUDA graph output hidden")
     }
 
-    /// `[batch, 1, vocab_size]` lm-head matmul output buffer. Used as
-    /// the destination tensor for the captured-graph lm-head matmul
-    /// via [`crate::forward::with_lm_head_output_buffer`]. Phase 5
-    /// #1082 — see the comment block on
-    /// `CapturedBatchedDecodeGraph::_lm_head_output_buffer` for the
-    /// full rationale (graph-stable source pointer for the
-    /// downstream `slice_set` into `output_logits`).
-    #[cfg(feature = "cuda")]
-    fn new_lm_head_output_buffer(
-        config: &ModelConfig,
-        device: Device,
-        dtype: kiln_tensor::DType,
-        batch: usize,
-    ) -> Result<Tensor> {
-        anyhow::ensure!(
-            batch > 0,
-            "lm-head output buffer requires batch > 0"
-        );
-        Tensor::zeros_on(device, vec![batch, 1, config.vocab_size], dtype)
-            .context("create CUDA graph lm-head output buffer")
-    }
+    // #1082 boxes 432/433 (STEPS 2-3): `new_lm_head_output_buffer` (the
+    // `[batch, 1, vocab]` in-graph lm-head matmul destination) was deleted —
+    // the batched capture path no longer records the lm_head; `final_norm` +
+    // lm_head run eagerly on `output_hidden` after launch (box-102 BUG2 fix),
+    // so there is no in-graph matmul output to pin.
 
     #[cfg(feature = "cuda")]
     fn new_paged_decode_outputs(
@@ -2653,34 +2732,19 @@ impl CudaGraphRunner {
             .context("create CUDA graph batched rotary sin buffer")
     }
 
-    /// `[batch, 1, vocab]` output-logits buffer for batched capture.
-    /// (The batched argmax then reduces this to per-row tokens — the
-    /// caller of the captured graph either reads the tokens out via
-    /// the same in-place mechanism the bs=1 path uses, or runs the LM
-    /// head as the post-capture stage on every replay.)
-    #[cfg(feature = "cuda")]
-    #[allow(dead_code)]
-    fn new_batched_output_logits(
-        config: &ModelConfig,
-        device: Device,
-        dtype: kiln_tensor::DType,
-        batch: usize,
-    ) -> Result<Tensor> {
-        anyhow::ensure!(batch > 0, "batched output logits require batch > 0");
-        Tensor::zeros_on(device, vec![batch, 1, config.vocab_size], dtype)
-            .context("create CUDA graph batched output logits")
-    }
+    // #1082 boxes 432/433 (STEPS 2-3): `new_batched_output_logits` (the
+    // `[batch, 1, vocab]` in-graph output-logits buffer) was deleted — the
+    // batched capture path is now HiddenOnly; the runner samples per-row tokens
+    // from the eager-lm_head logits (`lm_head_from_batched_hidden_eager`) off
+    // the captured `output_hidden`, so there is no in-graph logits buffer.
 
     /// `[batch, 1, hidden_size]` PRE-final-norm hidden buffer for batched
-    /// capture (#1082 boxes 432/433/438, STEP 1). Batched twin of
+    /// capture (#1082 boxes 432/433, STEPS 2-3). Batched twin of
     /// [`new_output_hidden`] (which is `[1, 1, hidden_size]`). The captured
     /// `HiddenOnly` batched forward writes the transformer-stack output here
-    /// via `slice_set`; `final_norm` + lm_head run EAGERLY on it off the
-    /// graph (see [`CapturedBatchedDecodeGraph::output_hidden`]). ADDITIVE
-    /// in STEP 1 — not yet wired into `try_capture_batched`/replay (steps
-    /// 2-3), hence `#[allow(dead_code)]`.
+    /// via `cuda_slice_set_dim0`; `final_norm` + lm_head run EAGERLY on it off
+    /// the graph (see [`CapturedBatchedDecodeGraph::output_hidden`]).
     #[cfg(feature = "cuda")]
-    #[allow(dead_code)]
     fn new_batched_output_hidden(
         config: &ModelConfig,
         device: Device,
