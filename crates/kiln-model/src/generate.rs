@@ -79,12 +79,15 @@ fn paged_cache_kt_dtype(dtype: kiln_core::config::DType) -> kiln_tensor::DType {
     }
 }
 
-/// (#1082) Extract the CUDA device index the kt paged cache allocates on.
-/// kiln is single-GPU, so the device index is the only placement input the
-/// kt cache needs. Non-CUDA devices have no paged-cache support today.
-fn paged_cache_device_index(device: &kiln_tensor::Device) -> Result<usize> {
+/// (#1082) Validate + return the device the kt paged cache allocates its
+/// pools on. The cache now allocates per-arm on the model's *runtime* device
+/// (`PagedKvCacheKt::new_with_fp8` matches on the `Device`), so we hand it the
+/// `Device` directly instead of a bare index. Non-CUDA devices have no
+/// paged-cache support in this generation path today, so this still bails for
+/// anything but CUDA — preserving the prior gating.
+fn paged_cache_device(device: &kiln_tensor::Device) -> Result<kiln_tensor::Device> {
     match device {
-        kiln_tensor::Device::Cuda(idx) => Ok(*idx),
+        kiln_tensor::Device::Cuda(idx) => Ok(kiln_tensor::Device::Cuda(*idx)),
         other => anyhow::bail!("paged kv cache requires a CUDA device, got {other:?}"),
     }
 }
@@ -5391,9 +5394,9 @@ impl ModelRunner {
         const BLOCK_SIZE: usize = 16;
 
         let max_total = prompt_tokens.len() + params.max_tokens;
-        // (#1082) kt-native paged cache — `PagedKvCacheKt::new` takes a kt
-        // `DType` + a CUDA `device_index: usize` (kiln is single-GPU).
-        let device_index = paged_cache_device_index(&self.weights.embed_tokens.device())?;
+        // (#1082) kt-native paged cache — `PagedKvCacheKt::new` allocates pools
+        // on the model's runtime `Device` (kiln is single-GPU).
+        let cache_device = paged_cache_device(&self.weights.embed_tokens.device())?;
         let dtype = paged_cache_kt_dtype(self.config.dtype);
 
         // Two independent paged caches:
@@ -5408,7 +5411,7 @@ impl ModelRunner {
             self.config.num_kv_heads,
             self.config.head_dim,
             dtype,
-            device_index,
+            cache_device,
         )?;
         let mtp_cache = PagedKvCache::new(
             1,
@@ -5417,7 +5420,7 @@ impl ModelRunner {
             self.config.num_kv_heads,
             self.config.head_dim,
             dtype,
-            device_index,
+            cache_device,
         )?;
         let mut base_block_table = BlockTable::new();
         let mut mtp_block_table = BlockTable::new();
@@ -5845,8 +5848,8 @@ impl ModelRunner {
         const BLOCK_SIZE: usize = 16;
 
         let max_total = prompt_tokens.len() + params.max_tokens;
-        // (#1082) kt-native paged cache — kt `DType` + CUDA `device_index`.
-        let device_index = paged_cache_device_index(&self.weights.embed_tokens.device())?;
+        // (#1082) kt-native paged cache — kt `DType` + runtime `Device`.
+        let cache_device = paged_cache_device(&self.weights.embed_tokens.device())?;
         let dtype = paged_cache_kt_dtype(self.config.dtype);
 
         let num_blocks = Self::blocks_needed(max_total, BLOCK_SIZE);
@@ -5857,7 +5860,7 @@ impl ModelRunner {
             self.config.num_kv_heads,
             self.config.head_dim,
             dtype,
-            device_index,
+            cache_device,
         )?;
         let mtp_cache = PagedKvCache::new(
             1,
@@ -5866,7 +5869,7 @@ impl ModelRunner {
             self.config.num_kv_heads,
             self.config.head_dim,
             dtype,
-            device_index,
+            cache_device,
         )?;
         let mut base_block_table = BlockTable::new();
         let mut mtp_block_table = BlockTable::new();

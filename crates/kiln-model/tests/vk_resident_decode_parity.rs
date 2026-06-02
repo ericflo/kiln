@@ -190,7 +190,7 @@ fn run(model_dir: &std::path::Path) -> Result<()> {
 
 fn build_cache(
     config: &ModelConfig,
-    _device: &Device,
+    device: &Device,
     num_blocks: usize,
     block_size: usize,
 ) -> Result<PagedKvCache> {
@@ -199,6 +199,9 @@ fn build_cache(
         kiln_core::config::DType::FP16 => DType::F16,
         kiln_core::config::DType::FP32 => DType::F32,
     };
+    // (#1082) Allocate pools on the runtime `Device`. The Vulkan resident-decode
+    // path keeps its kt pools CPU-resident (the real KV bytes live in
+    // `VkPagedKvCache`), so a Vulkan device routes to the host-resident default.
     PagedKvCache::new(
         config.num_full_attention_layers,
         num_blocks,
@@ -206,6 +209,6 @@ fn build_cache(
         config.num_kv_heads,
         config.head_dim,
         dtype,
-        0,
+        *device,
     )
 }

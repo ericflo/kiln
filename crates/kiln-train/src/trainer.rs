@@ -4482,9 +4482,9 @@ fn compute_ref_log_probs_shared_prefix(
 
     let num_blocks = (max_total + GRPO_REF_PAGED_BLOCK_SIZE - 1) / GRPO_REF_PAGED_BLOCK_SIZE;
     // (#1082) The candle `PagedKvCache::new` took a candle device; its kt twin
-    // `PagedKvCacheKt::new` takes a `device_index: usize`. `device` is a kt
-    // `Device` (Copy); single-GPU prod → `Cuda(idx)`, so use its index (CPU /
-    // unindexed → 0).
+    // `PagedKvCacheKt::new` allocates its pools on the model's runtime `Device`.
+    // `device` is a kt `Device` (Copy) — pass it through so the pools land on
+    // the same device as the model's tensors (CPU model → CPU pools, etc.).
     let paged_cache = PagedKvCacheKt::new(
         model_config.num_full_attention_layers,
         num_blocks,
@@ -4492,7 +4492,7 @@ fn compute_ref_log_probs_shared_prefix(
         model_config.num_kv_heads,
         model_config.head_dim,
         dtype,
-        device.index().unwrap_or(0),
+        *device,
     )
     .context("GRPO shared-prefix: build PagedKvCacheKt")?;
     let mut block_table = BlockTable::new();

@@ -1655,10 +1655,12 @@ pub fn try_kt_paged_kv_cache_new(
         return Ok(None);
     }
 
-    // #1082: `device`/`dtype` are kt now and `PagedKvCacheKt::new` takes a plain
-    // `device_index: usize` — no candle device arc bridge.
-    let device_index = match device {
-        Device::Cuda(idx) => *idx,
+    // #1082: this fn deliberately only supports CUDA — return `None` for any
+    // other device so callers fall through to their non-kt path. The kt cache
+    // now allocates on the runtime `Device`, so pass the CUDA device through
+    // directly (preserving the non-CUDA → `None` gating).
+    let cache_device = match device {
+        Device::Cuda(idx) => Device::Cuda(*idx),
         _ => return Ok(None),
     };
     // `dtype` is already a kt DType — no candle→kt conversion needed.
@@ -1671,7 +1673,7 @@ pub fn try_kt_paged_kv_cache_new(
         num_kv_heads,
         head_dim,
         kt_dtype,
-        device_index,
+        cache_device,
     )
     .context("try_kt_paged_kv_cache_new: PagedKvCacheKt::new failed")?;
     Ok(Some(cache))
@@ -28327,7 +28329,7 @@ mod tests {
             num_kv_heads,
             head_dim,
             kiln_tensor::DType::BF16,
-            device_kt.index().unwrap_or(0),
+            device_kt,
         )?;
         for (row, block_table) in block_tables.iter().enumerate() {
             let row_k = prefix_k.narrow(0, row, 1)?.contiguous()?;
@@ -28378,7 +28380,7 @@ mod tests {
                 num_kv_heads,
                 head_dim,
                 kiln_tensor::DType::BF16,
-                device_kt.index().unwrap_or(0),
+                device_kt,
             )?;
             let row_table = BlockTable { blocks: vec![0] };
             let row_k = prefix_k.narrow(0, row, 1)?.contiguous()?;
@@ -28506,7 +28508,7 @@ mod tests {
             num_kv_heads,
             head_dim,
             kiln_tensor::DType::BF16,
-            device_kt.index().unwrap_or(0),
+            device_kt,
         )?;
         for (row, block_table) in block_tables.iter().enumerate() {
             let row_k = prefix_k.narrow(0, row, 1)?.contiguous()?;
@@ -28553,7 +28555,7 @@ mod tests {
                 num_kv_heads,
                 head_dim,
                 kiln_tensor::DType::BF16,
-                device_kt.index().unwrap_or(0),
+                device_kt,
             )?;
             let row_table = BlockTable { blocks: vec![0] };
             let row_k = prefix_k.narrow(0, row, 1)?.contiguous()?;
@@ -28678,7 +28680,7 @@ mod tests {
             num_kv_heads,
             head_dim,
             kiln_tensor::DType::BF16,
-            device_kt.index().unwrap_or(0),
+            device_kt,
         )?;
         for (row, block_table) in block_tables.iter().enumerate() {
             let row_k = prefix_k.narrow(0, row, 1)?.contiguous()?;
@@ -28716,7 +28718,7 @@ mod tests {
                 num_kv_heads,
                 head_dim,
                 kiln_tensor::DType::BF16,
-                device_kt.index().unwrap_or(0),
+                device_kt,
             )?;
             let row_table = BlockTable { blocks: vec![0] };
             let row_k = prefix_k.narrow(0, row, 1)?.contiguous()?;
@@ -28882,7 +28884,7 @@ mod tests {
             num_kv_heads,
             head_dim,
             kiln_tensor::DType::BF16,
-            device_kt.index().unwrap_or(0),
+            device_kt,
         )?;
         // Phase 7 #1082: parallel-allocate a kt twin via the constructor
         // stub `try_kt_paged_kv_cache_new` (commit 638bc441). When the
@@ -28957,7 +28959,7 @@ mod tests {
                 num_kv_heads,
                 head_dim,
                 kiln_tensor::DType::BF16,
-                device_kt.index().unwrap_or(0),
+                device_kt,
             )?;
             let row_table = BlockTable { blocks: vec![0] };
             let (row_k, row_v) = if row == 0 {
@@ -29165,7 +29167,7 @@ mod tests {
             num_kv_heads,
             head_dim,
             kiln_tensor::DType::BF16,
-            device_kt.index().unwrap_or(0),
+            device_kt,
         )?;
         assert!(ref_cache.write_token_major_native(0, &block_table, 0, &prefix_k, &prefix_v)?);
         let eager_logits = model_forward_paged(
@@ -29208,7 +29210,7 @@ mod tests {
                 num_kv_heads,
                 head_dim,
                 kiln_tensor::DType::BF16,
-                device_kt.index().unwrap_or(0),
+                device_kt,
             )?;
             assert!(graph_cache.write_token_major_native(
                 0,
@@ -29429,7 +29431,7 @@ mod tests {
             config.num_kv_heads,
             config.head_dim,
             kiln_tensor::DType::BF16,
-            device_kt.index().unwrap_or(0),
+            device_kt,
         )?;
         for (row, block_table) in block_tables.iter().enumerate() {
             let row_k = prefix_k.narrow(0, row, 1)?.contiguous()?;
@@ -29473,7 +29475,7 @@ mod tests {
                 config.num_kv_heads,
                 config.head_dim,
                 kiln_tensor::DType::BF16,
-                device_kt.index().unwrap_or(0),
+                device_kt,
             )?;
             let row_table = BlockTable { blocks: vec![0] };
             let row_k = prefix_k.narrow(0, row, 1)?.contiguous()?;
@@ -32506,7 +32508,7 @@ mod tests {
             config.num_kv_heads,
             config.head_dim,
             kiln_tensor::DType::F32,
-            device_kt.index().unwrap_or(0),
+            device_kt,
         )?;
         let mut block_table = BlockTable::new();
         for i in 0..num_blocks as u32 {
