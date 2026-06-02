@@ -353,11 +353,25 @@ pub fn try_tape_rms_norm_kt(
     {
         return Ok(None);
     }
+    // (#1443 step 3) Mixed-precision RMSNorm on Vulkan: F32 ACTIVATION `x` × a
+    // BF16 NORM WEIGHT (production BF16 checkpoints store BF16 norms). The forward
+    // already casts `weight` to `x.dtype()` (F32) internally, and
+    // `RmsNormKtBackward::apply` casts x/weight/grad to F32 throughout, so the
+    // composite handles F32-x/BF16-weight cleanly. The norm weight is FROZEN in
+    // LoRA training (only `dL/dx` matters), so the dw-dtype is irrelevant. Relax
+    // the strict `x.dtype() == weight.dtype()` gate for this Vulkan case ONLY —
+    // CUDA/Metal run x==weight==BF16 end-to-end and keep the strict equality.
+    #[cfg(feature = "vulkan")]
+    let vk_f32x_bf16w = matches!(x.device(), kiln_tensor::Device::Vulkan(_))
+        && x.dtype() == kiln_tensor::DType::F32
+        && weight.dtype() == kiln_tensor::DType::BF16;
+    #[cfg(not(feature = "vulkan"))]
+    let vk_f32x_bf16w = false;
     if weight.rank() != 1
         || x.rank() == 0
         || *x.shape().last().unwrap() != weight.shape()[0]
         || !matches!(x.dtype(), kiln_tensor::DType::BF16 | kiln_tensor::DType::F32)
-        || x.dtype() != weight.dtype()
+        || (x.dtype() != weight.dtype() && !vk_f32x_bf16w)
         || !x.is_contiguous()
         || !weight.is_contiguous()
     {
@@ -1278,7 +1292,21 @@ pub fn try_tape_lora_linear_kt(
     ) {
         return Ok(None);
     }
-    if weight_t.dtype() != x.dtype() {
+    // (#1443 step 2) Mixed-precision base projection on Vulkan: F32 activations ×
+    // a frozen BF16 base weight. The base linear runs through the dedicated
+    // `vk_matmul_bf16w` kernel (recorded with a `MatmulBf16wBackward` dx-only
+    // adjoint) instead of the equal-dtype `MatmulBackward`. Keeping the base
+    // weight BF16 is the VRAM win #1443 buys; the LoRA delta + activations stay
+    // F32 (so the F32-only Vulkan rmsnorm/softmax kernels are untouched). This
+    // branch is Vulkan-only — CUDA/Metal carry their own BF16-base paths and run
+    // BF16 activations end-to-end, so they keep the strict `weight_t == x` gate.
+    #[cfg(feature = "vulkan")]
+    let vk_bf16_base = matches!(x.device(), kiln_tensor::Device::Vulkan(_))
+        && x.dtype() == kiln_tensor::DType::F32
+        && weight_t.dtype() == kiln_tensor::DType::BF16;
+    #[cfg(not(feature = "vulkan"))]
+    let vk_bf16_base = false;
+    if weight_t.dtype() != x.dtype() && !vk_bf16_base {
         return Ok(None);
     }
     let Ok((wk, n)) = weight_t.dims2() else {
@@ -1331,16 +1359,58 @@ pub fn try_tape_lora_linear_kt(
                 input_shape: x.shape().to_vec(),
             }),
         );
-        let base2d = kiln_tensor::ops::matmul(&x2d, weight_t)
-            .map_err(|e| anyhow::anyhow!("kt matmul x2d@w: {e}"))?;
-        tape.record(
-            &base2d,
-            &[&x2d, weight_t],
-            Box::new(MatmulBackward {
-                a: x2d.clone(),
-                b: weight_t.clone(),
-            }),
-        );
+        // (#1443 step 2) Base projection. On the Vulkan mixed-precision path
+        // (`vk_bf16_base`) the frozen base weight is BF16 while `x2d` is F32 — the
+        // equal-dtype kt `matmul` can't run, so route the base linear through the
+        // dedicated `vk_matmul_bf16w` kernel and record a `MatmulBf16wBackward`
+        // (dx only; the weight is frozen, no `dW` edge). Output `base2d` is F32,
+        // so the LoRA delta / residual adds below stay F32-vs-F32. Every other
+        // backend (CUDA/Metal, and the equal-dtype F32/BF16 Vulkan path) keeps
+        // the device-agnostic `MatmulBackward` exactly as before.
+        //
+        // LAYOUT: the production base `weight_t` reaching this recorder is
+        // `[K, N]` = `[in, out]` (the pre-transposed layout `matmul(x2d, weight_t)`
+        // consumes for `x @ W`). The `vk_matmul_bf16w` kernel
+        // (`vk_matmul_bf16w_fwd_rows` / `_bwd_rows`) instead expects the weight in
+        // `[N, K]` = `[out, in]` row-major and computes `x @ W.T`. So transpose
+        // `weight_t` `[K,N]` → `[N,K]` and materialize contiguous before dispatch.
+        // The transient is BF16 (HALF the F32 size) and the RESIDENT base weight
+        // stays BF16 — the #1443 VRAM win is preserved (the only F32 buffers are
+        // the activations, which are F32 on Vulkan by design). The same `[N,K]`
+        // weight is stored in the backward op so `dx = grad_out @ W` is computed
+        // against the matching layout.
+        let base2d = if vk_bf16_base {
+            #[cfg(feature = "vulkan")]
+            {
+                let w_nk = weight_t
+                    .transpose(0, 1)
+                    .map_err(|e| anyhow::anyhow!("kt weight_t.transpose [K,N]->[N,K]: {e}"))?
+                    .contiguous()
+                    .map_err(|e| anyhow::anyhow!("kt weight_nk.contiguous: {e}"))?;
+                let y = kiln_tensor::vulkan_matmul_bf16w(&x2d, &w_nk)
+                    .map_err(|e| anyhow::anyhow!("kt vulkan_matmul_bf16w x2d@w: {e}"))?;
+                tape.record(
+                    &y,
+                    &[&x2d],
+                    Box::new(MatmulBf16wBackward { weight_t: w_nk }),
+                );
+                y
+            }
+            #[cfg(not(feature = "vulkan"))]
+            unreachable!("vk_bf16_base is false without the vulkan feature")
+        } else {
+            let base2d = kiln_tensor::ops::matmul(&x2d, weight_t)
+                .map_err(|e| anyhow::anyhow!("kt matmul x2d@w: {e}"))?;
+            tape.record(
+                &base2d,
+                &[&x2d, weight_t],
+                Box::new(MatmulBackward {
+                    a: x2d.clone(),
+                    b: weight_t.clone(),
+                }),
+            );
+            base2d
+        };
         let out2d = match (lora, a_kt.as_ref(), b_kt.as_ref()) {
             (Some(_proj), Some(a_kt), Some(b_kt)) => {
                 let a_t_kt = a_kt

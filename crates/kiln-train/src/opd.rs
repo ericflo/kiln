@@ -4337,4 +4337,155 @@ mod tests {
              did not connect through the F32 model to any LoRA leaf"
         );
     }
+
+    /// (#1443 step 4) OPD on a BF16 BASE on Vulkan through the REAL
+    /// `opd_step_forward_backward_tape_authoritative` entry point must produce a
+    /// non-empty, finite F32 LoRA grad store, with the base projection weights
+    /// staying BF16 (the VRAM win). Mixed precision: BF16 base weights, F32
+    /// activations — the base linear runs `vk_matmul_bf16w`, the embedding is
+    /// cast BF16→F32 at the head of the forward, and LoRA A/B are F32. Uses the
+    /// GDN-bearing BF16 `tiny_config_bf16` so the GDN BF16-weight path is driven.
+    ///
+    /// HOST-SAFETY: ONE forward+loss+backward over the tiny 4-layer model.
+    /// Self-skips unless `KILN_TENSOR_VULKAN_TEST=1` AND a Vulkan device is
+    /// present. Run single-shot, one at a time.
+    #[cfg(feature = "vulkan")]
+    #[test]
+    fn vk_bf16_opd_grads_nonempty() {
+        use crate::trainer::tests::{tiny_config_bf16, tiny_weights_bf16};
+        use crate::trainer::TrainableLoraParams;
+
+        let test_name = "vk_bf16_opd_grads_nonempty";
+        if std::env::var("KILN_TENSOR_VULKAN_TEST").ok().as_deref() != Some("1") {
+            eprintln!("skip {test_name}: KILN_TENSOR_VULKAN_TEST unset");
+            return;
+        }
+        if !kiln_model::backend::vulkan::vulkan_is_available() {
+            eprintln!("skip {test_name}: no Vulkan device");
+            return;
+        }
+        unsafe {
+            std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
+            std::env::set_var("KILN_USE_TAPE_LORA_ADD", "1");
+            std::env::set_var("KILN_USE_TAPE_FLASH_ATTN", "1");
+            std::env::set_var("KILN_USE_TAPE_SDPA", "1");
+            std::env::set_var("KILN_USE_TAPE_GDN", "1");
+            std::env::set_var("KILN_USE_TAPE_GDN_GATED_NORM", "1");
+            std::env::set_var("KILN_USE_TAPE_GDN_QK_NORM", "1");
+            std::env::set_var("KILN_USE_TAPE_GDN_CONV", "1");
+        }
+
+        let device = Device::Vulkan(0);
+        let config = tiny_config_bf16(); // BF16 base, GDN-bearing
+        let weights = tiny_weights_bf16(&config, &device).expect("bf16 tiny weights on Vulkan");
+        assert_eq!(
+            weights.embed_tokens.dtype(),
+            DType::BF16,
+            "OPD BF16 Vulkan: config must be BF16"
+        );
+        // Base projection weights stay BF16 (the #1443 VRAM win).
+        assert_eq!(
+            weights.embed_tokens_t.dtype(),
+            DType::BF16,
+            "lm_head (embed_tokens_t) base weight must stay BF16 (the #1443 VRAM win)"
+        );
+
+        let params =
+            TrainableLoraParams::initialize_seeded(&config, &weights, 4, 8.0, &device, Some(7))
+                .expect("LoRA params");
+        // Mixed precision: LoRA is F32 on Vulkan even on a BF16 base.
+        assert_eq!(
+            params.all_params()[0]
+                .forward_storage()
+                .primary_tensor()
+                .dtype(),
+            kiln_tensor::DType::F32,
+            "LoRA param dtype must be F32 on Vulkan even on a BF16 base (mixed precision)"
+        );
+
+        // head_t = tied BF16 LM head; the OPD scalar loss consumes F32 activations
+        // (post embed BF16→F32 cast) and the BF16 head via `vk_matmul_bf16w`.
+        let head_t = weights.embed_tokens_t.clone();
+        assert_eq!(head_t.dtype(), DType::BF16, "head_t must be BF16 here");
+
+        let input_ids: Vec<u32> = vec![1, 5, 10, 3, 7, 2, 8];
+        let active_positions: Vec<usize> = vec![2, 3, 4, 5];
+        let top_k = 16usize; // in the kt backward envelope {16,32}, <= vocab=32
+        let teacher: Arc<dyn LogitSource> = Arc::new(
+            crate::logit_source::DeterministicUniformLogitSource::new(
+                "vk-opd-bf16-test",
+                config.vocab_size,
+                top_k,
+            ),
+        );
+
+        let backend = kiln_model::backend::for_device_kt(&device);
+        let (loss_val, active_count, grads) = opd_step_forward_backward_tape_authoritative(
+            &*backend,
+            &input_ids,
+            &weights,
+            &config,
+            &params,
+            &device,
+            &head_t,
+            teacher,
+            &active_positions,
+            OpdLossGranularity::TeacherTopK,
+            top_k,
+            None,
+            None,
+        )
+        .expect("opd_step_forward_backward_tape_authoritative (BF16 Vulkan OPD)");
+
+        assert_eq!(active_count, active_positions.len());
+        assert!(
+            loss_val.is_finite(),
+            "OPD BF16 Vulkan loss {loss_val} is not finite"
+        );
+
+        // Per-module coverage bisection + finite-F32 grad check.
+        let mut present = 0usize;
+        let mut max_norm = 0.0_f32;
+        let mut missing = 0usize;
+        for p in params.all_params() {
+            match grads.get(p.tensor_id()) {
+                Some(g) => {
+                    assert_eq!(
+                        g.dtype(),
+                        kiln_tensor::DType::F32,
+                        "OPD BF16 Vulkan LoRA grad must be F32 (mixed precision)"
+                    );
+                    let host = g
+                        .to_device(kiln_tensor::Device::Cpu)
+                        .and_then(|t| t.to_dtype(kiln_tensor::DType::F32))
+                        .and_then(|t| t.to_vec::<f32>())
+                        .unwrap_or_default();
+                    assert!(
+                        host.iter().all(|v| v.is_finite()),
+                        "OPD BF16 Vulkan LoRA grad non-finite"
+                    );
+                    let norm = host.iter().map(|x| x * x).sum::<f32>().sqrt();
+                    max_norm = max_norm.max(norm);
+                    present += 1;
+                }
+                None => missing += 1,
+            }
+        }
+        eprintln!(
+            "[OPD BF16 Vulkan] loss={loss_val:.6} store.len()={} present={present} \
+             absent={missing} max_norm={max_norm:.6} (base BF16, LoRA F32)",
+            grads.len()
+        );
+        assert!(
+            !grads.is_empty() && present > 0 && max_norm > 0.0,
+            "BF16 Vulkan OPD produced EMPTY/zero LoRA grads — the OPD-KL tape root \
+             did not connect through the BF16 model to any LoRA leaf"
+        );
+        // Re-confirm the base weight is STILL BF16 after the step.
+        assert_eq!(
+            weights.embed_tokens_t.dtype(),
+            DType::BF16,
+            "lm_head base weight must stay BF16 after the OPD step (the #1443 VRAM win)"
+        );
+    }
 }

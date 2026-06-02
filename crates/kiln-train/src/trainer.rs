@@ -652,13 +652,26 @@ impl TrainableLoraParams {
         let hidden = config.hidden_size;
         let intermediate = config.intermediate_size;
 
-        // (#1082) LoRA-param dtype FOLLOWS the base/activation dtype. On a BF16
-        // base (CUDA/Metal, and the default Vulkan path) this resolves to BF16
-        // — a byte-for-byte no-op vs. the old hardcoded `DType::BF16`. On an F32
-        // base (Vulkan-only, user-approved) the LoRA A/B now match the F32
-        // activations so `try_tape_lora_linear_kt` fires instead of declining on
-        // a dtype mismatch (`proj.a.dtype() != x.dtype()` → `Ok(None)`).
-        let lora_dtype = weights.embed_tokens.dtype();
+        // (#1082) LoRA-param dtype FOLLOWS the base/activation dtype on
+        // CUDA/Metal: BF16 base ⇒ BF16 LoRA (byte-for-byte no-op vs. the old
+        // hardcoded `DType::BF16`). On an F32 Vulkan base the LoRA A/B match the
+        // F32 activations so `try_tape_lora_linear_kt` fires instead of
+        // declining on a dtype mismatch (`proj.a.dtype() != x.dtype()`).
+        //
+        // (#1443 step 2) On Vulkan the ACTIVATION dtype is F32 regardless of the
+        // base WEIGHT dtype — the mixed-precision design keeps base projection
+        // weights BF16 (the VRAM win) but runs F32 activations through the
+        // F32-only Vulkan rmsnorm/softmax kernels, and the embedding output is
+        // cast BF16→F32 at the head of the forward. So on Vulkan LoRA A/B are
+        // ALWAYS F32 (matching the F32 activations / LoRA delta path) even on a
+        // BF16 base; otherwise a BF16 LoRA on a BF16 base would mismatch the F32
+        // `x2d` in `try_tape_lora_linear_kt`'s LoRA branch and decline. CUDA/Metal
+        // keep `embed_tokens.dtype()` (BF16 activations end-to-end) unchanged.
+        let lora_dtype = if is_vulkan_device(device) {
+            kiln_tensor::DType::F32
+        } else {
+            weights.embed_tokens.dtype()
+        };
 
         // Kaiming uniform bound: sqrt(1 / in_features) for A
         let bound_hidden = (1.0 / hidden as f64).sqrt();
@@ -9731,6 +9744,21 @@ pub(crate) mod tests {
         }
     }
 
+    /// Full-attention-only BF16 config (`full_attention_interval = 1`, no GDN
+    /// layers). (#1443 step 4) The primary bar for the BF16-base mixed-precision
+    /// Vulkan tests: exercises SFT/GRPO/OPD grad delivery through the
+    /// q/k/v/o_proj + MLP LoRA modules on a BF16 base independently of the GDN
+    /// tape wiring. `pub(crate)` so `opd.rs`'s BF16 OPD test can reuse it.
+    // Only the `vulkan`-gated BF16 validation tests consume this today; the
+    // CUDA/Metal BF16 coverage uses the GDN-bearing `tiny_config_bf16`.
+    #[cfg_attr(not(feature = "vulkan"), allow(dead_code))]
+    pub(crate) fn tiny_config_full_attn_bf16() -> ModelConfig {
+        ModelConfig {
+            dtype: kiln_core::config::DType::BF16,
+            ..tiny_config_full_attn()
+        }
+    }
+
     /// BF16 twin of [`tiny_weights`]. Builds the F32 fixture via
     /// `tiny_weights_with_seed` (so the seeded init / shape logic stays in one
     /// place) then casts every candle `Tensor` in the `GpuWeights` to BF16 —
@@ -11826,5 +11854,246 @@ pub(crate) mod tests {
              root did not connect through the F32 model to any LoRA leaf"
         );
         eprintln!("[GRPO F32 Vulkan] loss={loss_val:.6} grad_leaves={present}");
+    }
+
+    // ====================================================================
+    // (#1443 step 4) BF16-base MIXED-PRECISION Vulkan validation.
+    //
+    // The bar: SFT/GRPO/OPD on a BF16 base on Vulkan must produce non-empty,
+    // finite F32 LoRA grads, AND the base projection weights must STAY BF16
+    // (the VRAM win). Mixed precision: BF16 base weights, F32 activations — the
+    // base linear runs `vk_matmul_bf16w(x_f32, weight_bf16)`; LoRA A/B + the
+    // delta + activations are F32; the embedding output is cast BF16→F32 at the
+    // head of the forward.
+    //
+    // Same host-safety contract as the F32 tests: ONE bounded forward+backward
+    // over the tiny 4-layer model, self-skips unless KILN_TENSOR_VULKAN_TEST=1,
+    // run single-shot one at a time.
+    // ====================================================================
+
+    /// Assert a representative BASE projection weight is still BF16 (the VRAM
+    /// win) — the whole point of #1443. Checks a full-attention layer's q_proj_t
+    /// (or in_proj_qkv_t on a GDN layer) plus the tied lm_head (embed_tokens_t).
+    #[cfg(feature = "vulkan")]
+    fn assert_base_weights_bf16(weights: &GpuWeights) {
+        assert_eq!(
+            weights.embed_tokens_t.dtype(),
+            kiln_tensor::DType::BF16,
+            "lm_head (embed_tokens_t) base weight must stay BF16 (the #1443 VRAM win)"
+        );
+        let mut checked_a_projection = false;
+        for layer in &weights.layers {
+            match &layer.attention {
+                kiln_model::forward::GpuAttentionWeights::Full(full) => {
+                    assert_eq!(
+                        full.q_proj_t.dtype(),
+                        kiln_tensor::DType::BF16,
+                        "q_proj_t base weight must stay BF16 (the #1443 VRAM win)"
+                    );
+                    checked_a_projection = true;
+                    break;
+                }
+                kiln_model::forward::GpuAttentionWeights::Linear(lin) => {
+                    assert_eq!(
+                        lin.in_proj_qkv_t.dtype(),
+                        kiln_tensor::DType::BF16,
+                        "in_proj_qkv_t base weight must stay BF16 (the #1443 VRAM win)"
+                    );
+                    assert_eq!(
+                        lin.in_proj_a_t.dtype(),
+                        kiln_tensor::DType::BF16,
+                        "GDN in_proj_a_t base weight must stay BF16 (the #1443 VRAM win)"
+                    );
+                    checked_a_projection = true;
+                    break;
+                }
+            }
+        }
+        assert!(checked_a_projection, "no projection weight found to verify BF16");
+    }
+
+    /// Run ONE SFT forward+backward through `standard_forward_backward` on a
+    /// BF16 base on Vulkan, asserting: (1) LoRA params are F32 (the
+    /// mixed-precision rule — activations are F32 even on a BF16 base), (2) the
+    /// base projection weights stay BF16, (3) a non-empty, finite F32 grad store.
+    #[cfg(feature = "vulkan")]
+    fn run_vk_bf16_sft(label: &str, config: &ModelConfig, device: &Device) -> usize {
+        let weights = tiny_weights_bf16(config, device).expect("bf16 tiny weights on Vulkan");
+        assert_eq!(
+            weights.embed_tokens.dtype(),
+            kiln_tensor::DType::BF16,
+            "config must be BF16 to exercise the BF16-base mixed-precision path"
+        );
+        // The base projection weights are BF16 (the VRAM win we must preserve).
+        assert_base_weights_bf16(&weights);
+
+        let params =
+            TrainableLoraParams::initialize_seeded(config, &weights, 4, 8.0, device, Some(7))
+                .expect("LoRA params");
+        // The mixed-precision rule under test: on Vulkan the LoRA dtype is F32
+        // (matching the F32 activations) even on a BF16 base.
+        assert_eq!(
+            params.all_params()[0]
+                .forward_storage()
+                .primary_tensor()
+                .dtype(),
+            kiln_tensor::DType::F32,
+            "LoRA param dtype must be F32 on Vulkan even on a BF16 base (mixed precision)"
+        );
+
+        let input_ids: Vec<u32> = vec![1, 5, 10, 3, 7, 2, 8];
+        let label_mask = vec![false, false, true, true, true, true, false];
+        let backend = backend::for_device_kt(device);
+
+        let (loss_val, grad_src) = standard_forward_backward(
+            &*backend,
+            &input_ids,
+            &weights,
+            config,
+            &params,
+            &label_mask,
+            device,
+        )
+        .expect("standard_forward_backward (BF16 Vulkan SFT)");
+
+        assert!(loss_val.is_finite(), "SFT loss not finite: {loss_val}");
+        let grads = grad_src.kt();
+        let present = vk_report_grad_coverage(label, &params, grads);
+        // Every delivered grad must be finite F32.
+        for p in params.all_params() {
+            if let Some(g) = grads.get(p.tensor_id()) {
+                assert_eq!(
+                    g.dtype(),
+                    kiln_tensor::DType::F32,
+                    "LoRA grad on a BF16 base must be F32 (mixed precision)"
+                );
+            }
+        }
+        assert!(
+            !grads.is_empty() && present > 0,
+            "BF16 Vulkan SFT ({label}) produced EMPTY/zero LoRA grads — the tape \
+             chain did not connect through the BF16 model to any LoRA leaf"
+        );
+        // Re-confirm the base weights are STILL BF16 after the step (no path
+        // silently up-cast them to F32 — that cast is the VRAM waste #1443 kills).
+        assert_base_weights_bf16(&weights);
+        eprintln!("[{label}] loss={loss_val:.6} grad_leaves={present} (base BF16, LoRA F32)");
+        present
+    }
+
+    /// SFT on a BF16 base on Vulkan (full-attention-only) — the primary bar.
+    /// Non-empty finite F32 LoRA grads, base projections stay BF16.
+    #[cfg(feature = "vulkan")]
+    #[test]
+    fn vk_bf16_sft_grads_nonempty() {
+        let test_name = "vk_bf16_sft_grads_nonempty";
+        if !vk_validation_enabled(test_name) {
+            return;
+        }
+        vk_set_all_tape_gates();
+        let device = Device::Vulkan(0);
+        run_vk_bf16_sft("SFT/full-attn BF16", &tiny_config_full_attn_bf16(), &device);
+    }
+
+    /// SFT on the GDN-bearing BF16 config (3 linear-attention + 1 full-attention
+    /// layer) — exercises the GDN in_proj_a/b BF16-weight matmuls routed through
+    /// `vk_matmul_bf16w` in addition to the qkv/z/out projections.
+    #[cfg(feature = "vulkan")]
+    #[test]
+    fn vk_bf16_sft_grads_nonempty_gdn() {
+        let test_name = "vk_bf16_sft_grads_nonempty_gdn";
+        if !vk_validation_enabled(test_name) {
+            return;
+        }
+        vk_set_all_tape_gates();
+        let device = Device::Vulkan(0);
+        run_vk_bf16_sft("SFT/gdn BF16", &tiny_config_bf16(), &device);
+    }
+
+    /// GRPO on a BF16 base on Vulkan through the REAL
+    /// `grpo_step_forward_backward_tape_authoritative_kt` step producer.
+    /// Non-empty finite F32 LoRA grads, base projections stay BF16.
+    #[cfg(feature = "vulkan")]
+    #[test]
+    fn vk_bf16_grpo_grads_nonempty() {
+        let test_name = "vk_bf16_grpo_grads_nonempty";
+        if !vk_validation_enabled(test_name) {
+            return;
+        }
+        vk_set_all_tape_gates();
+
+        let device = Device::Vulkan(0);
+        let config = tiny_config_full_attn_bf16(); // BF16 base, full-attn-only
+        let weights = tiny_weights_bf16(&config, &device).expect("bf16 tiny weights on Vulkan");
+        assert_base_weights_bf16(&weights);
+        let params =
+            TrainableLoraParams::initialize_seeded(&config, &weights, 4, 8.0, &device, Some(7))
+                .expect("LoRA params");
+        assert_eq!(
+            params.all_params()[0]
+                .forward_storage()
+                .primary_tensor()
+                .dtype(),
+            kiln_tensor::DType::F32,
+            "LoRA param dtype must be F32 on Vulkan even on a BF16 base (mixed precision)"
+        );
+
+        let input_ids: Vec<u32> = vec![1, 5, 10, 3, 7, 2, 8];
+        let action_mask = vec![false, false, true, true, true, true, true];
+        let num_active = action_mask[1..].iter().filter(|&&m| m).count();
+
+        let ref_log_probs = zeros_f32_on(num_active, &device)
+            .expect("ref_log_probs placeholder")
+            .detach();
+        let loss_params = GrpoLossParams {
+            advantage: 1.0,
+            clip_low: 0.8,
+            clip_high: 1.2,
+            kl_coeff: 0.0,
+            kl_estimator: KlEstimator::None,
+            loss_normalizer: 1.0 / (num_active.max(1) as f64),
+            is_level: IsLevel::Token,
+            reinforce: true,
+            entropy_aware_kl_quantile: None,
+        };
+
+        let backend = backend::for_device_kt(&device);
+        let (loss_val, grads) = grpo_step_forward_backward_tape_authoritative_kt(
+            &*backend,
+            &input_ids,
+            &weights,
+            &config,
+            &params,
+            &action_mask,
+            &ref_log_probs,
+            loss_params,
+            &device,
+            0,
+            num_active,
+            0,
+            0,
+            0,
+            None,
+        )
+        .expect("grpo_step_forward_backward_tape_authoritative_kt (BF16 Vulkan GRPO)");
+
+        assert!(loss_val.is_finite(), "GRPO loss not finite: {loss_val}");
+        let present = vk_report_grad_coverage("GRPO BF16", &params, &grads);
+        for p in params.all_params() {
+            if let Some(g) = grads.get(p.tensor_id()) {
+                assert_eq!(
+                    g.dtype(),
+                    kiln_tensor::DType::F32,
+                    "LoRA grad on a BF16 base must be F32 (mixed precision)"
+                );
+            }
+        }
+        assert!(
+            !grads.is_empty() && present > 0,
+            "BF16 Vulkan GRPO produced EMPTY/zero LoRA grads — the PG-loss tape \
+             root did not connect through the BF16 model to any LoRA leaf"
+        );
+        assert_base_weights_bf16(&weights);
+        eprintln!("[GRPO BF16 Vulkan] loss={loss_val:.6} grad_leaves={present} (base BF16, LoRA F32)");
     }
 }

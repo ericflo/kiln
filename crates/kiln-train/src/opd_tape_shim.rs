@@ -113,6 +113,34 @@ pub fn try_tape_opd_scalar_mean_cuda_kt(
         return Ok(None);
     }
 
+    // (#1443 step 3/5) Mixed-precision OPD on Vulkan: the model activations are
+    // F32 (post embed BF16→F32 cast) so `hidden` is F32, but the tied lm_head
+    // `head_t` is BF16 on a BF16 base. The OPD top-K reverse-KL kernel's envelope
+    // requires `hidden.dtype() == head_t.dtype()` (it runs an internal
+    // `hidden @ head_t` and the fused/composite backward assumes one dtype). The
+    // kernel has no bf16w-style mixed path, so cast the FROZEN `head_t` to F32 for
+    // this OPD-loss compute. The RESIDENT `embed_tokens_t` stays BF16 (the #1443
+    // VRAM win for SFT/GRPO via the bf16w lm_head); this is only a per-step
+    // transient F32 head used by the OPD loss — which already reads the full head
+    // for its matmul. Vulkan-only + F32-hidden/BF16-head only; CUDA/Metal (BF16
+    // hidden == BF16 head) and the F32-base Vulkan path are untouched.
+    #[cfg(feature = "vulkan")]
+    let head_owned;
+    #[cfg(feature = "vulkan")]
+    let head_t: &kiln_tensor::Tensor = if matches!(
+        hidden.device(),
+        kiln_tensor::Device::Vulkan(_)
+    ) && hidden.dtype() == kiln_tensor::DType::F32
+        && head_t.dtype() == kiln_tensor::DType::BF16
+    {
+        head_owned = head_t
+            .to_dtype(kiln_tensor::DType::F32)
+            .context("opd shim: cast BF16 head_t -> F32 for the OPD loss (Vulkan mixed precision)")?;
+        &head_owned
+    } else {
+        head_t
+    };
+
     // Record the SCALAR-mean OPD loss onto the active tape. The kt `hidden` is
     // the final-RMSNorm tape node output (passed straight through by
     // `opd_step_forward_backward_tape_authoritative`), so the recorded node's
