@@ -152,6 +152,42 @@ impl DeviceOp1 for ScalarOp {
         Ok(Some(crate::cuda_scalar_op(x, self.kind.cuda_tag(), self.c)?))
     }
 
+    #[cfg(feature = "vulkan")]
+    fn vulkan_fwd(&self, x: &Tensor) -> Result<Option<Tensor>> {
+        // Mirror the softmax.rs vulkan_fwd exemplar:
+        //   - F32 only (the `vk_scale` kernel is F32-only; BF16/F16 fall
+        //     through to the CPU host-fallback)
+        //   - contiguous, start_offset == 0 (VkTensor is whole-buffer)
+        //   - storage must be Vulkan-backed (else the CPU path runs)
+        //
+        // Only `mul_scalar` (out = x * c) and `div_scalar` (out = x *
+        // 1/c) map onto the production `vk_ops::mask::vk_scale_no_grad`
+        // shader. `add_scalar` / `sub_scalar` have no scalar-bias kernel,
+        // so they return Ok(None) and the dispatch host-fallback (PR3a)
+        // covers them. Validated correct already; this is a perf port.
+        if !matches!(x.dtype(), DType::F32) {
+            return Ok(None);
+        }
+        if !x.is_contiguous() || x.layout().start_offset() != 0 {
+            return Ok(None);
+        }
+        if x.storage()
+            .as_any()
+            .downcast_ref::<crate::VulkanStorage>()
+            .is_none()
+        {
+            return Ok(None);
+        }
+        let scale = match self.kind {
+            ScalarKind::MulScalar => self.c,
+            // div_scalar's public entry point already rejects c == 0.
+            ScalarKind::DivScalar => 1.0 / self.c,
+            // No scalar-bias kernel — host-fallback owns these.
+            ScalarKind::AddScalar | ScalarKind::SubScalar => return Ok(None),
+        };
+        Ok(Some(crate::vulkan_scale(x, scale)?))
+    }
+
     fn bwd(&self) -> Option<Box<dyn BackwardOp>> {
         None
     }
@@ -261,5 +297,67 @@ mod tests {
         assert!((op.scalar() - 0.25).abs() < f32::EPSILON);
         assert_eq!(op.name(), "mul_scalar");
         assert!(matches!(op.determinism(), Determinism::Constructive));
+    }
+
+    // ------------------------------------------------------------------
+    // PR3c (#1082): zero-copy Vulkan scalar-mul parity vs CPU reference.
+    //
+    // Bounded validation: tiny F32 vector, single-shot, gated on
+    // KILN_TENSOR_VULKAN_TEST + actual device presence. Skips silently
+    // when the gate is off or no Vulkan device exists.
+    // ------------------------------------------------------------------
+
+    #[cfg(feature = "vulkan")]
+    fn vulkan_test_enabled() -> bool {
+        std::env::var("KILN_TENSOR_VULKAN_TEST").ok().as_deref() == Some("1")
+    }
+
+    #[cfg(feature = "vulkan")]
+    #[test]
+    fn mul_scalar_vulkan_f32_parity() {
+        if !vulkan_test_enabled() {
+            eprintln!("skip: KILN_TENSOR_VULKAN_TEST unset");
+            return;
+        }
+        if crate::primary_vulkan_device(0).is_err() {
+            eprintln!("skip: no Vulkan device");
+            return;
+        }
+        let dev = crate::Device::Vulkan(0);
+        let data: Vec<f32> = (0..12).map(|i| (i as f32) * 0.37 - 2.1).collect();
+
+        // CPU reference.
+        let x_cpu = Tensor::from_slice(&data, vec![3, 4]).unwrap();
+        let ref_mul = read_f32(&mul_scalar(&x_cpu, 0.5).unwrap());
+        let ref_div = read_f32(&div_scalar(&x_cpu, 4.0).unwrap());
+
+        // Vulkan path (vulkan_fwd -> vulkan_scale -> zero-copy bridge ->
+        // vk_scale_no_grad -> bridge back).
+        let x_vk = Tensor::from_vec_on(dev, data.clone(), vec![3, 4]).unwrap();
+        let y_mul = mul_scalar(&x_vk, 0.5).unwrap();
+        assert_eq!(y_mul.device(), dev, "mul result must stay on Vulkan");
+        let y_div = div_scalar(&x_vk, 4.0).unwrap();
+        assert_eq!(y_div.device(), dev, "div result must stay on Vulkan");
+
+        let got_mul = y_mul
+            .to_device(crate::Device::Cpu)
+            .unwrap()
+            .to_vec::<f32>()
+            .unwrap();
+        let got_div = y_div
+            .to_device(crate::Device::Cpu)
+            .unwrap()
+            .to_vec::<f32>()
+            .unwrap();
+
+        let mut max_abs_err = 0.0f32;
+        for (g, r) in got_mul.iter().zip(ref_mul.iter()) {
+            max_abs_err = max_abs_err.max((g - r).abs());
+        }
+        for (g, r) in got_div.iter().zip(ref_div.iter()) {
+            max_abs_err = max_abs_err.max((g - r).abs());
+        }
+        eprintln!("mul/div_scalar vulkan max_abs_err = {max_abs_err:e}");
+        assert!(max_abs_err < 1e-4, "max_abs_err {max_abs_err} >= 1e-4");
     }
 }

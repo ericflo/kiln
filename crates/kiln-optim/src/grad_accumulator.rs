@@ -4,11 +4,10 @@
 //! Per the Phase 6.5 issue bullet:
 //!
 //! > **Gradient accumulation across micro-batches.** Trainer
-//! > accumulates over N micro-batches before stepping
-//! > (`accumulate_grad` / `accumulate_grads_except` in
-//! > `vk_train.rs:808,823`; `opd.rs:2767`). The grad buffer lives in
-//! > `Parameter` and accumulates atomically across micro-batches;
-//! > `optimizer.step()` consumes-and-zeros.
+//! > accumulates over N micro-batches before stepping (`accumulate_grad`
+//! > / `accumulate_grads_except`; cf. `opd.rs:2767`). The grad buffer
+//! > lives in `Parameter` and accumulates atomically across micro-
+//! > batches; `optimizer.step()` consumes-and-zeros.
 //!
 //! This CPU reference impl owns one `Tensor` per `TensorId` and
 //! exposes `accumulate(id, grad)` plus `take_and_clear(id)` for the

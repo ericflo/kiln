@@ -766,12 +766,11 @@ pub struct PreparedOffPolicyDistillation {
     pub summary: OffPolicyDistillationSummary,
 }
 
-/// Shared OPD tokenization output used by `opd_train` and `vk_native_opd_train`.
+/// Shared OPD tokenization output used by the `opd_train` kt-tape path.
 ///
-/// `pub(crate)` so the VK-native OPD trainer (`crate::vk_train::vk_native_opd_train`)
-/// can reuse exactly the same tokenization + ECHO env-mask plumbing that the
-/// candle path uses, avoiding two divergent definitions of "what does an OPD
-/// step's active mask mean."
+/// `pub(crate)` so the tokenization + ECHO env-mask plumbing has a single
+/// definition of "what does an OPD step's active mask mean" reused across the
+/// OPD trainer's internals.
 pub(crate) struct TokenizedOpdPrompt {
     pub(crate) input_ids: Vec<u32>,
     pub(crate) action_mask: Vec<bool>,
@@ -2721,7 +2720,7 @@ pub fn opd_train(
                 // guardrails, and the progress callback) still type-checks on
                 // both builds.
                 let (loss_val, active_count): (f64, usize) = {
-                    #[cfg(any(feature = "cuda", feature = "metal"))]
+                    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
                     {
                         let (loss_val, active_count, kt_grads) =
                             opd_step_forward_backward_tape_authoritative(
@@ -2768,7 +2767,7 @@ pub fn opd_train(
 
                         (loss_val, active_count)
                     }
-                    #[cfg(not(any(feature = "cuda", feature = "metal")))]
+                    #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan")))]
                     {
                         anyhow::bail!(
                             "opd_train: OPD training requires a CUDA or Metal build — the \
@@ -2940,12 +2939,12 @@ pub fn opd_train(
 ///
 /// CUDA + Metal: the tape adapters record kt GPU ops + bridge kt<->candle GPU
 /// tensors. The caller device-gates this via
-/// `#[cfg(any(feature = "cuda", feature = "metal"))]`. (#1082 Metal lane) On
+/// `#[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]`. (#1082 Metal lane) On
 /// Metal the FORWARD + scalar OPD loss record onto the tape; the recorded OPD
 /// backward (`CudaOpdTopKReverseKlPhaseBBackward::apply`) is CUDA-FFI-only and
 /// `bail!`s during the tape walk — so on Metal this returns the backward error
 /// (OPD Metal backward is a documented follow-up pending a Metal kernel).
-#[cfg(any(feature = "cuda", feature = "metal"))]
+#[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
 #[allow(clippy::too_many_arguments)]
 fn opd_step_forward_backward_tape_authoritative(
     backend_rt: &dyn kiln_model::backend::BackendRuntime,
@@ -4212,6 +4211,130 @@ mod tests {
             "tape-authoritative OPD routed grads to {} LoRA Vars but ALL were \
              zero (max_norm={max_norm}) — backward carried no signal",
             grads.len()
+        );
+    }
+
+    /// (#1082) OPD on F32 Vulkan through the REAL
+    /// `opd_step_forward_backward_tape_authoritative` entry point must produce
+    /// a non-empty, finite kt grad store. The OPD top-K reverse-KL envelope now
+    /// admits Vulkan (`kt_tape::envelope_ok`) and the backward routes through
+    /// the device-agnostic analytic kt-composite, so F32-on-Vulkan OPD records
+    /// + backprops. Uses the GDN-bearing F32 `tiny_config` so the GDN F32 path
+    /// is driven.
+    ///
+    /// HOST-SAFETY: ONE forward+loss+backward over the tiny 4-layer model.
+    /// Self-skips unless `KILN_TENSOR_VULKAN_TEST=1` AND a Vulkan device is
+    /// present. Run single-shot, one at a time.
+    #[cfg(feature = "vulkan")]
+    #[test]
+    fn vk_f32_opd_grads_nonempty() {
+        use crate::trainer::tests::{tiny_config_full_attn, tiny_weights};
+        use crate::trainer::TrainableLoraParams;
+
+        let test_name = "vk_f32_opd_grads_nonempty";
+        if std::env::var("KILN_TENSOR_VULKAN_TEST").ok().as_deref() != Some("1") {
+            eprintln!("skip {test_name}: KILN_TENSOR_VULKAN_TEST unset");
+            return;
+        }
+        if !kiln_model::backend::vulkan::vulkan_is_available() {
+            eprintln!("skip {test_name}: no Vulkan device");
+            return;
+        }
+        unsafe {
+            std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
+            std::env::set_var("KILN_USE_TAPE_LORA_ADD", "1");
+            std::env::set_var("KILN_USE_TAPE_FLASH_ATTN", "1");
+            std::env::set_var("KILN_USE_TAPE_SDPA", "1");
+            std::env::set_var("KILN_USE_TAPE_GDN", "1");
+            std::env::set_var("KILN_USE_TAPE_GDN_GATED_NORM", "1");
+            std::env::set_var("KILN_USE_TAPE_GDN_QK_NORM", "1");
+            std::env::set_var("KILN_USE_TAPE_GDN_CONV", "1");
+        }
+
+        let device = Device::Vulkan(0);
+        let config = tiny_config_full_attn(); // F32 base, full-attn-only
+        let weights = tiny_weights(&config, &device).expect("f32 tiny weights on Vulkan");
+        assert_eq!(
+            weights.embed_tokens.dtype(),
+            DType::F32,
+            "OPD F32 Vulkan: config must be F32"
+        );
+        let params =
+            TrainableLoraParams::initialize_seeded(&config, &weights, 4, 8.0, &device, Some(7))
+                .expect("LoRA params");
+
+        // head_t = tied F32 LM head; matches the F32 hidden so the OPD envelope
+        // `hidden.dtype() == head_t.dtype()` passes (both F32 on Vulkan).
+        let head_t = weights.embed_tokens_t.clone();
+        assert_eq!(head_t.dtype(), DType::F32, "head_t must be F32 here");
+
+        let input_ids: Vec<u32> = vec![1, 5, 10, 3, 7, 2, 8];
+        let active_positions: Vec<usize> = vec![2, 3, 4, 5];
+        let top_k = 16usize; // in the kt backward envelope {16,32}, <= vocab=32
+        let teacher: Arc<dyn LogitSource> = Arc::new(
+            crate::logit_source::DeterministicUniformLogitSource::new(
+                "vk-opd-test",
+                config.vocab_size,
+                top_k,
+            ),
+        );
+
+        let backend = kiln_model::backend::for_device_kt(&device);
+        let (loss_val, active_count, grads) = opd_step_forward_backward_tape_authoritative(
+            &*backend,
+            &input_ids,
+            &weights,
+            &config,
+            &params,
+            &device,
+            &head_t,
+            teacher,
+            &active_positions,
+            OpdLossGranularity::TeacherTopK,
+            top_k,
+            None,
+            None,
+        )
+        .expect("opd_step_forward_backward_tape_authoritative (F32 Vulkan OPD)");
+
+        assert_eq!(active_count, active_positions.len());
+        assert!(
+            loss_val.is_finite(),
+            "OPD F32 Vulkan loss {loss_val} is not finite"
+        );
+
+        // Per-module coverage bisection.
+        let mut present = 0usize;
+        let mut max_norm = 0.0_f32;
+        let mut missing = 0usize;
+        for p in params.all_params() {
+            match grads.get(p.tensor_id()) {
+                Some(g) => {
+                    let host = g
+                        .to_device(kiln_tensor::Device::Cpu)
+                        .and_then(|t| t.to_dtype(kiln_tensor::DType::F32))
+                        .and_then(|t| t.to_vec::<f32>())
+                        .unwrap_or_default();
+                    assert!(
+                        host.iter().all(|v| v.is_finite()),
+                        "OPD F32 Vulkan LoRA grad non-finite"
+                    );
+                    let norm = host.iter().map(|x| x * x).sum::<f32>().sqrt();
+                    max_norm = max_norm.max(norm);
+                    present += 1;
+                }
+                None => missing += 1,
+            }
+        }
+        eprintln!(
+            "[OPD F32 Vulkan] loss={loss_val:.6} store.len()={} present={present} \
+             absent={missing} max_norm={max_norm:.6}",
+            grads.len()
+        );
+        assert!(
+            !grads.is_empty() && present > 0 && max_norm > 0.0,
+            "F32 Vulkan OPD produced EMPTY/zero LoRA grads — the OPD-KL tape root \
+             did not connect through the F32 model to any LoRA leaf"
         );
     }
 }

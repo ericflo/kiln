@@ -389,6 +389,15 @@ fn is_metal_device(device: &Device) -> bool {
 fn is_cuda_device(device: &Device) -> bool {
     matches!(device, Device::Cuda(_))
 }
+
+/// Check whether `device` is a kt Vulkan device. Mirrors [`is_metal_device`].
+/// (#1082) Used to gate F32-base tape training to the Vulkan backend only:
+/// Vulkan's kt tape adapters accept `BF16 | F32` activations, whereas CUDA/Metal
+/// record genuinely BF16-only fused kernels (FFI / MSL).
+#[inline]
+fn is_vulkan_device(device: &Device) -> bool {
+    matches!(device, Device::Vulkan(_))
+}
 // ---------------------------------------------------------------------------
 // (#1082) The candle facade — type aliases, generic constructor helpers,
 // safetensors I/O shims, and the `cd_bail!` macro — has been extracted to
@@ -643,6 +652,14 @@ impl TrainableLoraParams {
         let hidden = config.hidden_size;
         let intermediate = config.intermediate_size;
 
+        // (#1082) LoRA-param dtype FOLLOWS the base/activation dtype. On a BF16
+        // base (CUDA/Metal, and the default Vulkan path) this resolves to BF16
+        // — a byte-for-byte no-op vs. the old hardcoded `DType::BF16`. On an F32
+        // base (Vulkan-only, user-approved) the LoRA A/B now match the F32
+        // activations so `try_tape_lora_linear_kt` fires instead of declining on
+        // a dtype mismatch (`proj.a.dtype() != x.dtype()` → `Ok(None)`).
+        let lora_dtype = weights.embed_tokens.dtype();
+
         // Kaiming uniform bound: sqrt(1 / in_features) for A
         let bound_hidden = (1.0 / hidden as f64).sqrt();
         let bound_intermediate = (1.0 / intermediate as f64).sqrt();
@@ -722,18 +739,21 @@ impl TrainableLoraParams {
 
                 // A: [rank, in_features] — Kaiming uniform
                 // Phase 10: BF16 storage + FP32-accumulate via tensor cores (audit
-                // docs/audits/PHASE10_LORA_PRECISION_STUDY.md §5).
+                // docs/audits/PHASE10_LORA_PRECISION_STUDY.md §5). (#1082) The
+                // dtype now follows the base (`lora_dtype`): BF16 base ⇒ BF16
+                // (unchanged); F32 base (Vulkan-only) ⇒ F32 so the tape recorder
+                // matches the F32 activations.
                 let a = kaiming_uniform_a(
                     rng.as_mut(),
                     bound,
                     (rank, in_features),
-                    DType::BF16,
+                    lora_dtype,
                     device,
                 )
                 .with_context(|| format!("init LoRA A for layer {layer_idx} {module}"))?;
 
                 // B: [out_features, rank] — zeros
-                let b = lora_param_zeros((out_features, rank), DType::BF16, device)
+                let b = lora_param_zeros((out_features, rank), lora_dtype, device)
                     .with_context(|| format!("init LoRA B for layer {layer_idx} {module}"))?;
 
                 match module {
@@ -2475,7 +2495,7 @@ pub fn sft_train(
                 // `checkpointed_forward_backward_tape_authoritative_kt` both return
                 // `GradSource::Kt`, consumed kt-native by the dispatchers.
                 let grads: GradSource = if let Some(ref segs) = segments {
-                    #[cfg(any(feature = "cuda", feature = "metal"))]
+                    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
                     {
                         let (lv, kt_grads) = checkpointed_forward_backward_tape_authoritative_kt(
                             &*backend,
@@ -2490,18 +2510,19 @@ pub fn sft_train(
                         loss_val = lv;
                         GradSource::Kt(kt_grads)
                     }
-                    #[cfg(not(any(feature = "cuda", feature = "metal")))]
+                    #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan")))]
                     {
-                        // Non-CUDA build: the kt tape adapters don't record on a
+                        // Non-GPU build: the kt tape adapters don't record on a
                         // CPU candle device, so checkpointed kt-tape backward is a
-                        // CUDA-only path. The CPU smoke test uses the
-                        // non-checkpointed `standard_forward_backward` path; reaching
-                        // here means a CPU run requested checkpointing, which the
-                        // candle-drop endgame does not support yet.
+                        // GPU-only path (CUDA/Metal/Vulkan). The CPU smoke test uses
+                        // the non-checkpointed `standard_forward_backward` path;
+                        // reaching here means a CPU run requested checkpointing, which
+                        // the candle-drop endgame does not support yet.
                         let _ = segs;
                         anyhow::bail!(
-                            "gradient checkpointing requires the `cuda` feature (kt-tape \
-                             checkpointed reverse is CUDA-only post candle-drop)"
+                            "gradient checkpointing requires a GPU feature (`cuda`, \
+                             `metal`, or `vulkan`); the kt-tape checkpointed reverse \
+                             is GPU-only post candle-drop)"
                         );
                     }
                 } else {
@@ -4866,18 +4887,28 @@ fn train_tokenized_grpo_group_with_grad_norms(
         // (`active_segments` below) and the non-checkpointed-branch dispatch read
         // it. Kept local + cfg-split so the non-cuda build doesn't reference the
         // cuda-only gate fn.
-        #[cfg(any(feature = "cuda", feature = "metal"))]
+        //
+        // (#1082) Vulkan was MISSING from the runtime device match (PR6 missed
+        // this gate), so GRPO silently never tape-authored on Vulkan. Add
+        // `Vulkan(_)`, and add `base_dtype_supports_tape(weights, device)` so the
+        // gate stays consistent with SFT: BF16 base on any GPU, F32 base on
+        // Vulkan only. For a BF16 base this is a no-op; it newly-permits F32 on
+        // Vulkan and explicitly bails F32 on CUDA/Metal (silently-empty before).
+        #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
         let tape_auth_eligible = tape_authoritative_enabled()
             && matches!(
                 device,
-                kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_)
+                kiln_tensor::Device::Cuda(_)
+                    | kiln_tensor::Device::Metal(_)
+                    | kiln_tensor::Device::Vulkan(_)
             )
+            && base_dtype_supports_tape(weights, device)
             && !(config.loss.echo.is_some()
                 && config.loss.echo_enabled()
                 && comp_env_count > 0
                 && comp.total_obs_len > 0)
             && !config.loss.no_policy_loss;
-        #[cfg(not(any(feature = "cuda", feature = "metal")))]
+        #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan")))]
         let tape_auth_eligible = false;
 
         let ref_log_probs = if skip_reference {
@@ -4998,7 +5029,7 @@ fn train_tokenized_grpo_group_with_grad_norms(
         // reverse-segment loop. Keep the binding silenced.
         let _ = segments;
         let grads: GradSource = {
-            #[cfg(any(feature = "cuda", feature = "metal"))]
+            #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
             {
                 let (lv, kt_grads) = grpo_step_forward_backward_tape_authoritative_kt(
                     backend,
@@ -5021,7 +5052,7 @@ fn train_tokenized_grpo_group_with_grad_norms(
                 comp_echo_env_ce = None;
                 GradSource::Kt(kt_grads)
             }
-            #[cfg(not(any(feature = "cuda", feature = "metal")))]
+            #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan")))]
             {
                 // `tape_auth_eligible` is a const `false` without the cuda or
                 // metal feature, so the ensure! above already bailed; this arm
@@ -5987,7 +6018,7 @@ fn has_supervised_shifted_labels(label_mask: &[bool]) -> bool {
 /// CE math itself is covered by `tape_forward_parity`
 /// (`tape_forward_cross_entropy_matches_reference`,
 /// `tape_backward_cross_entropy_matches_analytic_gradient`).
-#[cfg(any(feature = "cuda", feature = "metal"))]
+#[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
 fn cross_entropy_loss(
     logits: &KtTensor,
     input_ids: &[u32],
@@ -7214,30 +7245,36 @@ fn exact_gdn_backward_tile_tokens_for(device: &Device) -> usize {
 // `pub(crate)` so the OPD trainer (`opd.rs`) can reuse the EXACT same gate
 // for its tape-authoritative dispatch — single source of truth for the
 // `KILN_USE_TAPE_AUTHORITATIVE` env semantics (#1082 CP-4 endgame).
-#[cfg(any(feature = "cuda", feature = "metal"))]
+#[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
 pub(crate) fn tape_authoritative_enabled() -> bool {
     std::env::var("KILN_USE_TAPE_AUTHORITATIVE")
         .map(|v| !matches!(v.trim(), "" | "0" | "false" | "no" | "off"))
         .unwrap_or(true)
 }
 
-/// (#1082 Inc-0 PR4) The kt tape adapters are **BF16-only** — the fused kernels
-/// they record (`gdn_gates_bf16`, rms_norm, silu, rotary, ...) require BF16 and
-/// the LoRA projection adapter skips when `proj.a.dtype() != x.dtype()`. The
-/// decisive dtype is the **activation** dtype, which follows the BASE model
-/// weights — NOT the LoRA Vars, which `TrainableLoraParams::initialize` always
-/// makes BF16 even on an F32 base. So on an F32 base model every adapter
-/// declines and the tape produces ZERO LoRA grads. Pre-PR4 the candle
-/// `loss.backward()` overlay silently covered F32; the kt producer (PR2) has no
-/// overlay, so routing F32 through it would yield an empty grad store = broken
-/// F32 training. Gate the kt grad-delivery on a **BF16 base model**
-/// (`embed_tokens` dtype = the activation dtype); an F32 base (e.g. the
-/// `tiny_config` F32 test model) falls through to the candle path below, which
-/// trains F32 correctly. Production (Qwen3.5-4B) is BF16 → kt path.
-#[cfg(any(feature = "cuda", feature = "metal"))]
-fn base_dtype_supports_tape(weights: &GpuWeights) -> bool {
+/// (#1082) Whether the kt tape grad-delivery path supports this base model's
+/// dtype on this device. The decisive dtype is the **activation** dtype, which
+/// follows the BASE model weights (`embed_tokens` dtype) — NOT the LoRA Vars,
+/// which now FOLLOW the base dtype (see `initialize_seeded`).
+///
+/// - `BF16` base ⇒ always supported. CUDA/Metal/Vulkan all record BF16-only
+///   fused kernels (`gdn_gates_bf16`, rms_norm, silu, rotary, …); production
+///   (Qwen3.5-4B) is BF16 → kt path. (Unchanged.)
+/// - `F32` base ⇒ supported **only on Vulkan** (user-approved, #1082). Vulkan's
+///   kt tape adapters accept `BF16 | F32` activations, and with the LoRA Vars
+///   now matching the F32 base (`initialize_seeded`), `try_tape_lora_linear_kt`
+///   fires and delivers real grads. On CUDA/Metal the fused FFI/MSL kernels are
+///   genuinely BF16-only, so F32 falls through to the candle path (or bails),
+///   exactly as before — this gate NEVER newly-permits F32 on CUDA/Metal.
+/// - anything else ⇒ unsupported.
+#[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+fn base_dtype_supports_tape(weights: &GpuWeights, device: &Device) -> bool {
     // (#1082) `embed_tokens.dtype()` is now kt `DType`.
-    matches!(weights.embed_tokens.dtype(), kiln_tensor::DType::BF16)
+    match weights.embed_tokens.dtype() {
+        kiln_tensor::DType::BF16 => true,
+        kiln_tensor::DType::F32 => is_vulkan_device(device),
+        _ => false,
+    }
 }
 
 
@@ -7264,7 +7301,7 @@ fn base_dtype_supports_tape(weights: &GpuWeights) -> bool {
 /// same key. (#1082 Inc-0 PR4) NOW WIRED IN: `standard_forward_backward`'s
 /// tape-authoritative CUDA branch calls this and returns `GradSource::Kt`, so
 /// the SFT loop + the CP-4 gates exercise this kt-native path.
-#[cfg(any(feature = "cuda", feature = "metal"))]
+#[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
 fn standard_forward_backward_tape_authoritative_kt(
     backend: &dyn BackendRuntime,
     input_ids: &[u32],
@@ -7377,7 +7414,7 @@ fn standard_forward_backward_tape_authoritative_kt(
 /// record only on CUDA, so a CPU checkpointing-tape path would need them
 /// un-gated first (the deeper #1082 endgame). The dispatch below keeps the
 /// candle path for F32/CPU/ECHO.
-#[cfg(any(feature = "cuda", feature = "metal"))]
+#[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
 #[allow(clippy::too_many_arguments)]
 fn checkpointed_forward_backward_tape_authoritative_kt(
     backend: &dyn BackendRuntime,
@@ -7586,19 +7623,25 @@ pub fn standard_forward_backward(
     // `loss.backward()` path) are all DELETED. F32/CPU training is dropped
     // (the kt fused tape adapters are BF16-only; see
     // `base_dtype_supports_tape` + note `kiln-cp4-tape-adapters-bf16-only`).
-    #[cfg(any(feature = "cuda", feature = "metal"))]
+    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
     {
         anyhow::ensure!(
-            matches!(device, kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_)),
-            "standard_forward_backward: kt tape-authoritative SFT requires a CUDA \
-             device post candle-drop (the candle CPU `loss.backward()` path was \
-             removed in #1082)."
+            matches!(
+                device,
+                kiln_tensor::Device::Cuda(_)
+                    | kiln_tensor::Device::Metal(_)
+                    | kiln_tensor::Device::Vulkan(_)
+            ),
+            "standard_forward_backward: kt tape-authoritative SFT requires a GPU \
+             device (CUDA/Metal/Vulkan) post candle-drop (the candle CPU \
+             `loss.backward()` path was removed in #1082)."
         );
         anyhow::ensure!(
-            base_dtype_supports_tape(weights),
+            base_dtype_supports_tape(weights, device),
             "standard_forward_backward: kt tape-authoritative SFT requires a BF16 \
-             base model (the kt fused tape adapters are BF16-only; F32 training \
-             was dropped in the #1082 candle drop)."
+             base model on CUDA/Metal, or a BF16/F32 base on Vulkan (the kt fused \
+             tape adapters are BF16-only on CUDA/Metal; F32 base trains on Vulkan \
+             only, #1082)."
         );
         let (loss_val, kt_grads) = standard_forward_backward_tape_authoritative_kt(
             backend,
@@ -7611,7 +7654,7 @@ pub fn standard_forward_backward(
         )?;
         Ok((loss_val, GradSource::Kt(kt_grads)))
     }
-    #[cfg(not(any(feature = "cuda", feature = "metal")))]
+    #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan")))]
     {
         let _ = (
             backend,
@@ -7659,7 +7702,7 @@ pub fn standard_forward_backward(
 ///
 /// ECHO is NOT handled here (same as the candle-hack producer): the dispatch
 /// keeps any ECHO-active step on the candle path, so this is non-ECHO GRPO only.
-#[cfg(any(feature = "cuda", feature = "metal"))]
+#[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
 #[allow(clippy::too_many_arguments)]
 fn grpo_step_forward_backward_tape_authoritative_kt(
     backend: &dyn BackendRuntime,
@@ -9346,7 +9389,10 @@ pub(crate) mod tests {
 
 
     /// Create a tiny ModelConfig for testing (4 layers, small dims).
-    fn tiny_config() -> ModelConfig {
+    // (#1082) `pub(crate)` so `opd.rs`'s F32-on-Vulkan OPD test can reuse this
+    // F32 GDN-bearing fixture (the SFT/GRPO Vulkan tests in this module use it
+    // directly).
+    pub(crate) fn tiny_config() -> ModelConfig {
         ModelConfig {
             hidden_size: 32,
             num_layers: 4,
@@ -9368,6 +9414,21 @@ pub(crate) mod tests {
             linear_value_head_dim: 16,
             linear_conv_kernel_dim: 4,
             partial_rotary_factor: 0.5,
+        }
+    }
+
+    /// Like [`tiny_config`] but with EVERY layer a full-attention layer
+    /// (`full_attention_interval = 1`), so there are no GDN/linear-attention
+    /// layers. (#1082) Used by the F32-on-Vulkan validation tests to exercise
+    /// the SFT/GRPO/OPD grad-delivery path through the full-attention +
+    /// MLP LoRA modules independently of the GDN-on-Vulkan tape wiring (which
+    /// has a separate, pre-existing gap — the conv1d/rms_norm/embedding tape
+    /// recorders are still `cfg(any(cuda, metal))` only).
+    pub(crate) fn tiny_config_full_attn() -> ModelConfig {
+        ModelConfig {
+            num_full_attention_layers: 4,
+            full_attention_interval: 1, // every layer is full attention
+            ..tiny_config()
         }
     }
 
@@ -9424,7 +9485,9 @@ pub(crate) mod tests {
     /// Create tiny random GpuWeights on CPU for the given config, using a
     /// fixed deterministic seed. Equivalent to
     /// `tiny_weights_with_seed(config, device, TINY_WEIGHTS_DEFAULT_SEED)`.
-    fn tiny_weights(config: &ModelConfig, device: &Device) -> Result<GpuWeights> {
+    // (#1082) `pub(crate)` so `opd.rs`'s F32-on-Vulkan OPD test can reuse this
+    // F32 GDN-bearing fixture.
+    pub(crate) fn tiny_weights(config: &ModelConfig, device: &Device) -> Result<GpuWeights> {
         tiny_weights_with_seed(config, device, TINY_WEIGHTS_DEFAULT_SEED)
     }
 
@@ -11485,5 +11548,283 @@ pub(crate) mod tests {
         restore_env("KILN_GRAD_CHECKPOINT_SEGMENTS", prev_segs);
         restore_env("KILN_NO_GRAD_CHECKPOINT", prev_disable);
         Ok(())
+    }
+
+    // ====================================================================
+    // (#1082) F32-on-Vulkan SFT + GRPO grad-delivery validation.
+    //
+    // The bar: a SINGLE bounded forward+backward through the REAL entry
+    // points on `Device::Vulkan(0)`, with an F32 base + GDN-bearing
+    // `tiny_config`/`tiny_weights`, must produce a NON-EMPTY, finite
+    // `kiln_autograd::GradStore`. The LoRA params now follow the base dtype
+    // (F32 here), so `try_tape_lora_linear_kt` fires instead of declining on
+    // the dtype mismatch that previously emptied the grad store.
+    //
+    // HOST-SAFETY: each test is ONE forward+loss+backward over the tiny
+    // 4-layer model (seq=7, hidden=32). NO training loop, NO multi-step
+    // iteration. Self-skips unless `KILN_TENSOR_VULKAN_TEST=1` AND a Vulkan
+    // device is present. Run named, single-shot, one at a time:
+    //
+    //   KILN_TENSOR_VULKAN_TEST=1 KILN_USE_TAPE_FORWARD=1 ... \
+    //     CARGO_TARGET_DIR=.../target cargo test -p kiln-train --features vulkan \
+    //     vk_f32_sft_grads_nonempty -- --nocapture --test-threads=1
+    // ====================================================================
+
+    /// Bounded GPU run is opt-in: `KILN_TENSOR_VULKAN_TEST=1` AND a device
+    /// present. Mirrors the gate in `crates/kiln-model/tests/vk_sft_step_proof.rs`.
+    #[cfg(feature = "vulkan")]
+    fn vk_validation_enabled(test_name: &str) -> bool {
+        if std::env::var("KILN_TENSOR_VULKAN_TEST").ok().as_deref() != Some("1") {
+            eprintln!("skip {test_name}: KILN_TENSOR_VULKAN_TEST unset");
+            return false;
+        }
+        if !kiln_model::backend::vulkan::vulkan_is_available() {
+            eprintln!("skip {test_name}: no Vulkan device");
+            return false;
+        }
+        true
+    }
+
+    /// Turn on every tape gate so the authoritative walk records the full
+    /// wired chain (mirrors the BF16 CUDA coverage tests). `OnceLock`-cached
+    /// for the process — these tests are single-shot, one-at-a-time.
+    #[cfg(feature = "vulkan")]
+    fn vk_set_all_tape_gates() {
+        unsafe {
+            std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
+            std::env::set_var("KILN_USE_TAPE_LORA_ADD", "1");
+            std::env::set_var("KILN_USE_TAPE_FLASH_ATTN", "1");
+            std::env::set_var("KILN_USE_TAPE_SDPA", "1");
+            std::env::set_var("KILN_USE_TAPE_GDN", "1");
+            std::env::set_var("KILN_USE_TAPE_GDN_GATED_NORM", "1");
+            std::env::set_var("KILN_USE_TAPE_GDN_QK_NORM", "1");
+            std::env::set_var("KILN_USE_TAPE_GDN_CONV", "1");
+            std::env::set_var("KILN_USE_TAPE_AUTHORITATIVE", "1");
+        }
+    }
+
+    /// Print a per-LoRA-module breakdown of which params received a grad —
+    /// the bisection the task asks for when a mode declines. Returns the set
+    /// of params that DID receive a finite, present grad.
+    #[cfg(feature = "vulkan")]
+    fn vk_report_grad_coverage(
+        label: &str,
+        params: &TrainableLoraParams,
+        grads: &kiln_autograd::GradStore,
+    ) -> usize {
+        let mut present = 0usize;
+        let mut missing: Vec<String> = Vec::new();
+        for (li, layer) in params.layers.iter().enumerate() {
+            let modules: [(&str, &Option<(Parameter, Parameter)>); 9] = [
+                ("q_proj", &layer.q_proj),
+                ("k_proj", &layer.k_proj),
+                ("v_proj", &layer.v_proj),
+                ("o_proj", &layer.o_proj),
+                ("in_proj_qkv", &layer.in_proj_qkv),
+                ("in_proj_z", &layer.in_proj_z),
+                ("gdn_out_proj", &layer.gdn_out_proj),
+                ("gate_proj", &layer.gate_proj),
+                ("up_proj", &layer.up_proj),
+            ];
+            // down_proj handled separately (the array above caps at 9; add it).
+            for (name, slot) in modules.into_iter().chain(std::iter::once((
+                "down_proj",
+                &layer.down_proj,
+            ))) {
+                if let Some((a, b)) = slot {
+                    for (tag, p) in [("A", a), ("B", b)] {
+                        match grads.get(p.tensor_id()) {
+                            Some(g) => {
+                                let host = g
+                                    .to_device(kiln_tensor::Device::Cpu)
+                                    .and_then(|t| t.to_dtype(kiln_tensor::DType::F32))
+                                    .and_then(|t| t.to_vec::<f32>())
+                                    .unwrap_or_default();
+                                if host.iter().all(|v| v.is_finite()) && !host.is_empty() {
+                                    present += 1;
+                                } else {
+                                    missing.push(format!("L{li}/{name}.{tag}(non-finite/empty)"));
+                                }
+                            }
+                            None => missing.push(format!("L{li}/{name}.{tag}(absent)")),
+                        }
+                    }
+                }
+            }
+        }
+        eprintln!(
+            "[{label}] grad coverage on F32 Vulkan: store.len()={} | {present} LoRA leaves got finite grads",
+            grads.len()
+        );
+        if !missing.is_empty() {
+            eprintln!(
+                "[{label}] {} LoRA leaves WITHOUT grad (bisect): {:?}",
+                missing.len(),
+                missing
+            );
+        }
+        present
+    }
+
+    /// Run ONE SFT forward+backward through the REAL `standard_forward_backward`
+    /// entry point on F32 Vulkan for `config`/`weights`, asserting a non-empty,
+    /// finite kt grad store. Factored so the same path runs on both the
+    /// full-attention-only config (the primary bar) and the GDN config.
+    #[cfg(feature = "vulkan")]
+    fn run_vk_f32_sft(label: &str, config: &ModelConfig, device: &Device) -> usize {
+        let weights = tiny_weights(config, device).expect("f32 tiny weights on Vulkan");
+        assert_eq!(
+            weights.embed_tokens.dtype(),
+            kiln_tensor::DType::F32,
+            "config must be F32 to exercise the F32-on-Vulkan path"
+        );
+        let params =
+            TrainableLoraParams::initialize_seeded(config, &weights, 4, 8.0, device, Some(7))
+                .expect("LoRA params");
+        // The fix under test: LoRA dtype must now follow the F32 base.
+        assert_eq!(
+            params.all_params()[0]
+                .forward_storage()
+                .primary_tensor()
+                .dtype(),
+            kiln_tensor::DType::F32,
+            "LoRA param dtype did not follow the F32 base (the fix regressed)"
+        );
+
+        let input_ids: Vec<u32> = vec![1, 5, 10, 3, 7, 2, 8];
+        let label_mask = vec![false, false, true, true, true, true, false];
+        let backend = backend::for_device_kt(device);
+
+        // The real public SFT entry point. The device-aware
+        // `base_dtype_supports_tape(weights, device)` gate now admits F32 on
+        // Vulkan, so this routes through the kt tape producer.
+        let (loss_val, grad_src) = standard_forward_backward(
+            &*backend,
+            &input_ids,
+            &weights,
+            config,
+            &params,
+            &label_mask,
+            device,
+        )
+        .expect("standard_forward_backward (F32 Vulkan SFT)");
+
+        assert!(loss_val.is_finite(), "SFT loss not finite: {loss_val}");
+        let grads = grad_src.kt();
+        let present = vk_report_grad_coverage(label, &params, grads);
+        assert!(
+            !grads.is_empty() && present > 0,
+            "F32 Vulkan SFT ({label}) produced EMPTY/zero LoRA grads — the tape \
+             chain did not connect through the F32 model to any LoRA leaf"
+        );
+        eprintln!("[{label}] loss={loss_val:.6} grad_leaves={present}");
+        present
+    }
+
+    /// SFT on F32 Vulkan through the REAL `standard_forward_backward` entry
+    /// point must produce a non-empty, finite kt grad store. Primary bar runs
+    /// on the full-attention-only F32 config (`q/k/v/o_proj` + MLP LoRA
+    /// modules).
+    #[cfg(feature = "vulkan")]
+    #[test]
+    fn vk_f32_sft_grads_nonempty() {
+        let test_name = "vk_f32_sft_grads_nonempty";
+        if !vk_validation_enabled(test_name) {
+            return;
+        }
+        vk_set_all_tape_gates();
+        let device = Device::Vulkan(0);
+        run_vk_f32_sft("SFT/full-attn", &tiny_config_full_attn(), &device);
+    }
+
+    /// SFT on the GDN-bearing F32 config (3 linear-attention + 1 full-attention
+    /// layer). The GDN causal-conv1d input-backward is now device-agnostic
+    /// (CUDA FFI / pure-`kiln_tensor` composite — see
+    /// `kiln_model::tape_forward::causal_depthwise_conv1d_bwd_input_composite`),
+    /// so the GDN tape chain connects through in_proj_qkv on F32 Vulkan and this
+    /// path delivers non-empty finite LoRA grads (#1082).
+    #[cfg(feature = "vulkan")]
+    #[test]
+    fn vk_f32_sft_grads_nonempty_gdn() {
+        let test_name = "vk_f32_sft_grads_nonempty_gdn";
+        if !vk_validation_enabled(test_name) {
+            return;
+        }
+        vk_set_all_tape_gates();
+        let device = Device::Vulkan(0);
+        run_vk_f32_sft("SFT/gdn", &tiny_config(), &device);
+    }
+
+    /// GRPO on F32 Vulkan through the REAL
+    /// `grpo_step_forward_backward_tape_authoritative_kt` step producer must
+    /// produce a non-empty, finite kt grad store. REINFORCE objective
+    /// (`reinforce=true`) so no reference forward is needed.
+    #[cfg(feature = "vulkan")]
+    #[test]
+    fn vk_f32_grpo_grads_nonempty() {
+        let test_name = "vk_f32_grpo_grads_nonempty";
+        if !vk_validation_enabled(test_name) {
+            return;
+        }
+        vk_set_all_tape_gates();
+
+        let device = Device::Vulkan(0);
+        let config = tiny_config_full_attn(); // F32 base, full-attn-only
+        let weights = tiny_weights(&config, &device).expect("f32 tiny weights on Vulkan");
+        let params =
+            TrainableLoraParams::initialize_seeded(&config, &weights, 4, 8.0, &device, Some(7))
+                .expect("LoRA params");
+
+        let input_ids: Vec<u32> = vec![1, 5, 10, 3, 7, 2, 8];
+        // action_mask: supervise the trailing action tokens.
+        let action_mask = vec![false, false, true, true, true, true, true];
+        // active (shifted) tokens => positions 1..T where action_mask[i] is true.
+        let num_active = action_mask[1..].iter().filter(|&&m| m).count();
+
+        // REINFORCE: the IS ratio is forced to 1.0; ref_log_probs is a detached
+        // constant placeholder (never read by the math when reinforce=true).
+        let ref_log_probs = zeros_f32_on(num_active, &device)
+            .expect("ref_log_probs placeholder")
+            .detach();
+        let loss_params = GrpoLossParams {
+            advantage: 1.0,
+            clip_low: 0.8,
+            clip_high: 1.2,
+            kl_coeff: 0.0,
+            kl_estimator: KlEstimator::None,
+            loss_normalizer: 1.0 / (num_active.max(1) as f64),
+            is_level: IsLevel::Token,
+            reinforce: true,
+            entropy_aware_kl_quantile: None,
+        };
+
+        let backend = backend::for_device_kt(&device);
+        let (loss_val, grads) = grpo_step_forward_backward_tape_authoritative_kt(
+            &*backend,
+            &input_ids,
+            &weights,
+            &config,
+            &params,
+            &action_mask,
+            &ref_log_probs,
+            loss_params,
+            &device,
+            0,           // comp_idx
+            num_active,  // num_active
+            0,           // comp_env_count
+            0,           // streaming_tile_tokens (no streaming)
+            0,           // checkpoint_segments (no checkpointing)
+            None,        // timings
+        )
+        .expect("grpo_step_forward_backward_tape_authoritative_kt (F32 Vulkan GRPO)");
+
+        assert!(loss_val.is_finite(), "GRPO loss not finite: {loss_val}");
+        let present = vk_report_grad_coverage("GRPO", &params, &grads);
+        assert!(
+            !grads.is_empty() && present > 0,
+            "F32 Vulkan GRPO produced EMPTY/zero LoRA grads — the PG-loss tape \
+             root did not connect through the F32 model to any LoRA leaf"
+        );
+        eprintln!("[GRPO F32 Vulkan] loss={loss_val:.6} grad_leaves={present}");
     }
 }

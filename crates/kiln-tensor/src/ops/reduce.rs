@@ -186,6 +186,50 @@ impl DeviceOp1 for ReduceOp {
         }
     }
 
+    #[cfg(feature = "vulkan")]
+    fn vulkan_fwd(&self, x: &Tensor) -> Result<Option<Tensor>> {
+        // Mirror the softmax.rs vulkan_fwd exemplar:
+        //   - F32 only (the reduce kernel is F32-only; BF16/F16 fall
+        //     through to the CPU host-fallback)
+        //   - contiguous, start_offset == 0 (VkTensor is whole-buffer)
+        //   - storage must be Vulkan-backed (else the CPU path runs)
+        //
+        // Only the `All` reduction scope (sum_all / mean_all → rank-0
+        // scalar) maps onto the production
+        // `vk_ops::reduce::{vk_sum_all_no_grad, vk_mean_all}` two-pass
+        // tree reduction. `sum_axis` / `mean_axis` (single-axis,
+        // keepdim=false) have NO axis-reduce Vulkan shader, so they
+        // return Ok(None) and the dispatch host-fallback (PR3a) covers
+        // them. This is a perf port; correctness is already guaranteed.
+        if !matches!(x.dtype(), DType::F32) {
+            return Ok(None);
+        }
+        if !x.is_contiguous() || x.layout().start_offset() != 0 {
+            return Ok(None);
+        }
+        if x.element_count() == 0 {
+            // mean-of-empty errors on the CPU path; defer there for a
+            // consistent message rather than tripping the kernel's
+            // empty-tensor guard.
+            return Ok(None);
+        }
+        if x.storage()
+            .as_any()
+            .downcast_ref::<crate::VulkanStorage>()
+            .is_none()
+        {
+            return Ok(None);
+        }
+        match self.scope {
+            ReductionScope::All => match self.kind {
+                ReductionKind::Sum => Ok(Some(crate::vulkan_sum_all(x)?)),
+                ReductionKind::Mean => Ok(Some(crate::vulkan_mean_all(x)?)),
+            },
+            // No axis-reduce kernel — host-fallback owns sum_axis/mean_axis.
+            ReductionScope::Axis(_) => Ok(None),
+        }
+    }
+
     fn bwd(&self) -> Option<Box<dyn BackwardOp>> {
         None
     }
@@ -478,5 +522,70 @@ mod tests {
     fn reduction_kind_name_strings() {
         assert_eq!(ReductionKind::Sum.name(), "sum");
         assert_eq!(ReductionKind::Mean.name(), "mean");
+    }
+
+    // ------------------------------------------------------------------
+    // PR3c (#1082): zero-copy Vulkan all-reduce parity vs CPU reference.
+    //
+    // Bounded validation: tiny F32 vector, single-shot, gated on
+    // KILN_TENSOR_VULKAN_TEST + actual device presence. Skips silently
+    // when the gate is off or no Vulkan device exists. sum_axis/mean_axis
+    // have no Vulkan kernel and are covered by the host-fallback; this
+    // exercises only the All scope that vulkan_fwd actually ports.
+    // ------------------------------------------------------------------
+
+    #[cfg(feature = "vulkan")]
+    fn vulkan_test_enabled() -> bool {
+        std::env::var("KILN_TENSOR_VULKAN_TEST").ok().as_deref() == Some("1")
+    }
+
+    #[cfg(feature = "vulkan")]
+    #[test]
+    fn sum_mean_all_vulkan_f32_parity() {
+        if !vulkan_test_enabled() {
+            eprintln!("skip: KILN_TENSOR_VULKAN_TEST unset");
+            return;
+        }
+        if crate::primary_vulkan_device(0).is_err() {
+            eprintln!("skip: no Vulkan device");
+            return;
+        }
+        let dev = crate::Device::Vulkan(0);
+        let data: Vec<f32> = (0..20).map(|i| (i as f32) * 0.13 - 1.0).collect();
+
+        // CPU reference.
+        let x_cpu = Tensor::from_slice(&data, vec![4, 5]).unwrap();
+        let ref_sum = read_f32_scalar(&sum_all(&x_cpu).unwrap());
+        let ref_mean = read_f32_scalar(&mean_all(&x_cpu).unwrap());
+
+        // Vulkan path (vulkan_fwd -> vulkan_sum_all/mean_all -> zero-copy
+        // bridge -> vk_sum_all_no_grad/vk_mean_all -> bridge back ->
+        // reshape to rank-0).
+        let x_vk = Tensor::from_vec_on(dev, data.clone(), vec![4, 5]).unwrap();
+        let s_vk = sum_all(&x_vk).unwrap();
+        assert_eq!(s_vk.rank(), 0, "sum_all must be rank-0 scalar");
+        assert_eq!(s_vk.device(), dev, "sum result must stay on Vulkan");
+        let m_vk = mean_all(&x_vk).unwrap();
+        assert_eq!(m_vk.rank(), 0, "mean_all must be rank-0 scalar");
+        assert_eq!(m_vk.device(), dev, "mean result must stay on Vulkan");
+
+        let got_sum = s_vk
+            .to_device(crate::Device::Cpu)
+            .unwrap()
+            .to_vec::<f32>()
+            .unwrap()[0];
+        let got_mean = m_vk
+            .to_device(crate::Device::Cpu)
+            .unwrap()
+            .to_vec::<f32>()
+            .unwrap()[0];
+
+        let err_sum = (got_sum - ref_sum).abs();
+        let err_mean = (got_mean - ref_mean).abs();
+        let max_abs_err = err_sum.max(err_mean);
+        eprintln!(
+            "sum_all/mean_all vulkan max_abs_err = {max_abs_err:e} (sum {err_sum:e}, mean {err_mean:e})"
+        );
+        assert!(max_abs_err < 1e-4, "max_abs_err {max_abs_err} >= 1e-4");
     }
 }

@@ -168,10 +168,15 @@ pub fn dispatch1<Op: DeviceOp1 + ?Sized>(op: &Op, input: &Tensor) -> Result<Tens
     // Fallthrough: the GPU backend has no native kernel for this op.
     let dev = input.device();
     match dev {
-        // Metal correctness-first host fallback (#1082): no native kernel —
-        // stage on host (UMA memcpy), run the CPU reference, move back.
-        // Scoped to Metal on purpose (the backend this PR brings up); a silent
-        // host round-trip is the intended transitional behavior here.
+        // Metal + Vulkan correctness-first host fallback (#1082): no native
+        // kernel — stage on host (UMA memcpy), run the CPU reference, move
+        // back. Vulkan joins Metal here (PR2 wired `to_device` Cpu<->Vulkan):
+        // a silent host round-trip is the intended transitional behavior so
+        // EVERY op the backward composites call (sum_axis, *_scalar,
+        // log_softmax_last_dim, scatter_add, broadcast, ...) runs correctly on
+        // Device::Vulkan instead of hard-erroring at tape.backward(). PR3's
+        // hot-op ports + future `vulkan_fwd` kernels remove the bounce on the
+        // hot path.
         #[cfg(feature = "metal")]
         Device::Metal(_) => {
             let cpu_in = input.to_device(Device::Cpu)?;
@@ -179,10 +184,18 @@ pub fn dispatch1<Op: DeviceOp1 + ?Sized>(op: &Op, input: &Tensor) -> Result<Tens
                 return t.to_device(dev);
             }
         }
-        // CUDA / Vulkan: preserve the original behavior — call cpu_fwd
-        // directly (errors on GPU storage). A missing `*_fwd` surfaces loudly
-        // rather than being masked by a silent host round-trip, so the
-        // CUDA/Vulkan tracks keep their "implement the kernel" signal.
+        #[cfg(feature = "vulkan")]
+        Device::Vulkan(_) => {
+            let cpu_in = input.to_device(Device::Cpu)?;
+            if let Some(t) = op.cpu_fwd(&cpu_in)? {
+                return t.to_device(dev);
+            }
+        }
+        // CUDA: preserve the original behavior — call cpu_fwd directly
+        // (errors on GPU storage). A missing `*_fwd` surfaces loudly rather
+        // than being masked by a silent host round-trip, so the CUDA track
+        // keeps its "implement the kernel" signal. (When the `vulkan` feature
+        // is off, a Vulkan device also falls here and stays loud.)
         _ if !dev.is_cpu() => {
             if let Some(t) = op.cpu_fwd(input)? {
                 return Ok(t);
@@ -219,12 +232,20 @@ pub fn dispatch2<Op: DeviceOp2 + ?Sized>(op: &Op, a: &Tensor, b: &Tensor) -> Res
     if let Some(t) = result {
         return Ok(t);
     }
-    // Metal-scoped host fallback (#1082) — see `dispatch1`. CUDA/Vulkan keep
-    // the original loud behavior so missing `*_fwd` kernels aren't masked.
+    // Metal + Vulkan host fallback (#1082) — see `dispatch1`. CUDA keeps the
+    // original loud behavior so missing `*_fwd` kernels aren't masked.
     let dev = a.device();
     match dev {
         #[cfg(feature = "metal")]
         Device::Metal(_) => {
+            let cpu_a = a.to_device(Device::Cpu)?;
+            let cpu_b = b.to_device(Device::Cpu)?;
+            if let Some(t) = op.cpu_fwd(&cpu_a, &cpu_b)? {
+                return t.to_device(dev);
+            }
+        }
+        #[cfg(feature = "vulkan")]
+        Device::Vulkan(_) => {
             let cpu_a = a.to_device(Device::Cpu)?;
             let cpu_b = b.to_device(Device::Cpu)?;
             if let Some(t) = op.cpu_fwd(&cpu_a, &cpu_b)? {
@@ -270,12 +291,21 @@ pub fn dispatch3<Op: DeviceOp3 + ?Sized>(
     if let Some(t) = result {
         return Ok(t);
     }
-    // Metal-scoped host fallback (#1082) — see `dispatch1`. CUDA/Vulkan keep
-    // the original loud behavior so missing `*_fwd` kernels aren't masked.
+    // Metal + Vulkan host fallback (#1082) — see `dispatch1`. CUDA keeps the
+    // original loud behavior so missing `*_fwd` kernels aren't masked.
     let dev = a.device();
     match dev {
         #[cfg(feature = "metal")]
         Device::Metal(_) => {
+            let cpu_a = a.to_device(Device::Cpu)?;
+            let cpu_b = b.to_device(Device::Cpu)?;
+            let cpu_c = c.to_device(Device::Cpu)?;
+            if let Some(t) = op.cpu_fwd(&cpu_a, &cpu_b, &cpu_c)? {
+                return t.to_device(dev);
+            }
+        }
+        #[cfg(feature = "vulkan")]
+        Device::Vulkan(_) => {
             let cpu_a = a.to_device(Device::Cpu)?;
             let cpu_b = b.to_device(Device::Cpu)?;
             let cpu_c = c.to_device(Device::Cpu)?;
@@ -432,5 +462,63 @@ mod tests {
         let op = IdentityOp;
         assert!(op.determinism().is_constructive());
         assert_eq!(op.name(), "test/identity");
+    }
+
+    /// PR3a keystone (#1082): an op that has NO `vulkan_fwd` (so its
+    /// default returns `Ok(None)`) must now SUCCEED on `Device::Vulkan`
+    /// storage via the dispatch1 correctness host-fallback, and the
+    /// result must match the CPU reference bit-for-bit.
+    ///
+    /// `sum_axis` (`reduce::ReduceOp`) is exactly such an op: it
+    /// implements `cpu_fwd` + `cuda_fwd` but no `vulkan_fwd`, so on a
+    /// Vulkan tensor the dispatcher stages to host, runs `cpu_fwd`, and
+    /// moves the result back. Before PR3a this hard-errored with
+    /// "no backend produced output for device Vulkan(0)".
+    ///
+    /// Bounded validation: tiny F32 tensor, single-shot. Skips when
+    /// `KILN_TENSOR_VULKAN_TEST != 1` or no Vulkan device is present
+    /// (mirrors the PR2 `vulkan_storage` tests).
+    #[cfg(feature = "vulkan")]
+    #[test]
+    fn vulkan_host_fallback_matches_cpu_for_op_without_vulkan_fwd() {
+        if std::env::var("KILN_TENSOR_VULKAN_TEST").ok().as_deref() != Some("1")
+            || kiln_vulkan_kernel::device::VulkanDevice::new().is_err()
+        {
+            eprintln!("skip: KILN_TENSOR_VULKAN_TEST unset or no Vulkan device");
+            return;
+        }
+
+        // Tiny 2x3 F32 input; reduce over axis 0 -> shape [3].
+        let data: Vec<f32> = vec![-2.5, 0.0, 1.0, 3.5, 42.0, -0.125];
+        let shape = vec![2usize, 3usize];
+
+        // CPU reference.
+        let cpu_in = Tensor::from_vec_on(Device::Cpu, data.clone(), shape.clone())
+            .expect("cpu from_vec_on");
+        let cpu_out = crate::ops::sum_axis(&cpu_in, 0).expect("cpu sum_axis");
+        let cpu_vals: Vec<f32> = cpu_out.to_vec().expect("cpu readback");
+
+        // Vulkan input -> must NOT hard-error; routes through the host
+        // fallback added in PR3a (ReduceOp has no vulkan_fwd).
+        let vk_in = Tensor::from_vec_on(Device::Vulkan(0), data.clone(), shape.clone())
+            .expect("vulkan from_vec_on");
+        assert_eq!(vk_in.device(), Device::Vulkan(0));
+
+        let vk_out = crate::ops::sum_axis(&vk_in, 0)
+            .expect("PR3a: sum_axis must succeed on Vulkan via host fallback");
+        // Result must land back on the originating Vulkan device.
+        assert_eq!(
+            vk_out.device(),
+            Device::Vulkan(0),
+            "host-fallback result must move back to the source Vulkan device"
+        );
+        assert_eq!(vk_out.shape(), &[3usize]);
+
+        let vk_vals: Vec<f32> = vk_out.to_vec().expect("vulkan readback");
+        assert_eq!(
+            vk_vals, cpu_vals,
+            "Vulkan host-fallback sum_axis must match CPU bit-for-bit: \
+             vk={vk_vals:?} cpu={cpu_vals:?}"
+        );
     }
 }

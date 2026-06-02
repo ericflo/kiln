@@ -313,18 +313,17 @@ pub fn gc_tracked_jobs(state: &AppState) -> usize {
     removed
 }
 
-/// Dispatch one SFT job to either the default in-process kt-tape trainer, the CUDA-native trainer,
-/// or the vk-native trainer.
+/// Dispatch one SFT job to either the default in-process kt-tape trainer or
+/// the CUDA-native trainer.
 ///
-/// The candle path takes a `replay_ctx` (request_body + lineage
-/// tracking); native paths don't yet plumb replay so they drop the context.
-/// When the binary is built without an explicitly requested backend feature,
-/// the native flag falls through to the candle path with a warning. Vulkan SFT
-/// also auto-engages on the Vulkan backend when the flag is unset.
+/// The shared kt-tape path takes a `replay_ctx` (request_body + lineage
+/// tracking); the CUDA-native path doesn't yet plumb replay so it drops the
+/// context. When the binary is built without `--features cuda`, the
+/// `cuda_native` flag falls through to the shared kt-tape path with a warning.
+/// Vulkan now runs through the shared kt-tape path like every other backend.
 #[allow(clippy::too_many_arguments)]
 fn run_sft(
     cuda_native: bool,
-    vk_native: bool,
     req: &SftRequest,
     model_config: &kiln_core::config::ModelConfig,
     weights: &kiln_model::forward::GpuWeights,
@@ -335,9 +334,6 @@ fn run_sft(
     replay_ctx: trainer::ReplayContext,
     job_id: &str,
 ) -> std::result::Result<PathBuf, String> {
-    #[cfg(not(feature = "vulkan"))]
-    let _ = job_id;
-
     if cuda_native {
         #[cfg(feature = "cuda")]
         {
@@ -366,34 +362,6 @@ fn run_sft(
             );
         }
     }
-    if vk_native {
-        #[cfg(feature = "vulkan")]
-        {
-            tracing::info!(
-                job_id = %job_id,
-                "KILN_VK_NATIVE_TRAINING=1 — routing to vk_native_sft_train"
-            );
-            return kiln_train::vk_train::vk_native_sft_train(
-                &req.examples,
-                &req.config,
-                model_config,
-                weights,
-                tokenizer,
-                adapter_dir,
-                adapter_name,
-                Some(progress_cb),
-            )
-            .map_err(|e| format!("{e:#}"));
-        }
-        #[cfg(not(feature = "vulkan"))]
-        {
-            tracing::warn!(
-                job_id = %job_id,
-                "KILN_VK_NATIVE_TRAINING=1 set but kiln-server was built without \
-                 --features vulkan — falling back to the default in-process SFT trainer (kt-tape)"
-            );
-        }
-    }
     trainer::sft_train(
         &req.examples,
         &req.config,
@@ -412,48 +380,9 @@ fn native_training_env_enabled(name: &str) -> bool {
     env_tristate(name).unwrap_or(false)
 }
 
-fn vk_native_sft_enabled(backend_name: &str) -> bool {
-    match env_tristate("KILN_VK_NATIVE_TRAINING") {
-        Some(enabled) => enabled,
-        None => {
-            #[cfg(feature = "vulkan")]
-            {
-                backend_name == "vulkan"
-            }
-            #[cfg(not(feature = "vulkan"))]
-            {
-                let _ = backend_name;
-                false
-            }
-        }
-    }
-}
-
-fn vk_native_grpo_enabled(backend_name: &str) -> bool {
-    match env_tristate("KILN_VK_NATIVE_GRPO") {
-        Some(enabled) => enabled,
-        None => vk_native_sft_enabled(backend_name),
-    }
-}
-
-/// Whether the OPD job should route through `vk_native_opd_train` instead
-/// of the candle `opd_train` path.
-///
-/// Mirrors `vk_native_grpo_enabled`'s shape (#1075). The explicit
-/// `KILN_VK_NATIVE_OPD` env wins; otherwise we fall back to
-/// `KILN_VK_NATIVE_TRAINING`, so users who set the parent flag get a
-/// uniformly vk-native experience across SFT, GRPO, and OPD.
-fn vk_native_opd_enabled(backend_name: &str) -> bool {
-    match env_tristate("KILN_VK_NATIVE_OPD") {
-        Some(enabled) => enabled,
-        None => vk_native_sft_enabled(backend_name),
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 fn run_grpo(
     cuda_native: bool,
-    vk_native: bool,
     req: &GrpoRequest,
     model_config: &kiln_core::config::ModelConfig,
     weights: &kiln_model::forward::GpuWeights,
@@ -464,9 +393,6 @@ fn run_grpo(
     replay_ctx: trainer::ReplayContext,
     job_id: &str,
 ) -> std::result::Result<PathBuf, String> {
-    #[cfg(not(feature = "vulkan"))]
-    let _ = job_id;
-
     if let Some(dataset_path) = req.dataset_path.as_deref() {
         if dataset_path.trim().is_empty() {
             return Err("GRPO dataset_path streaming requires a non-empty path".to_string());
@@ -503,35 +429,6 @@ fn run_grpo(
                     job_id = %job_id,
                     "KILN_CUDA_NATIVE_TRAINING=1 set but kiln-server was built without \
                      --features cuda - falling back to the default in-process GRPO trainer (kt-tape)"
-                );
-            }
-        }
-        if vk_native {
-            #[cfg(feature = "vulkan")]
-            {
-                tracing::info!(
-                    job_id = %job_id,
-                    dataset_path,
-                    "routing streamed GRPO dataset to vk_native_grpo_train_jsonl"
-                );
-                return kiln_train::vk_train::vk_native_grpo_train_jsonl(
-                    std::path::Path::new(dataset_path),
-                    &req.config,
-                    model_config,
-                    weights,
-                    tokenizer,
-                    adapter_dir,
-                    adapter_name,
-                    Some(progress_cb),
-                )
-                .map_err(|e| format!("{e:#}"));
-            }
-            #[cfg(not(feature = "vulkan"))]
-            {
-                return Err(
-                    "GRPO dataset_path streaming requested but kiln-server was built without \
-                     --features vulkan"
-                        .to_string(),
                 );
             }
         }
@@ -583,34 +480,6 @@ fn run_grpo(
             );
         }
     }
-    if vk_native {
-        #[cfg(feature = "vulkan")]
-        {
-            tracing::info!(
-                job_id = %job_id,
-                "routing GRPO to vk_native_grpo_train"
-            );
-            return kiln_train::vk_train::vk_native_grpo_train(
-                &req.groups,
-                &req.config,
-                model_config,
-                weights,
-                tokenizer,
-                adapter_dir,
-                adapter_name,
-                Some(progress_cb),
-            )
-            .map_err(|e| format!("{e:#}"));
-        }
-        #[cfg(not(feature = "vulkan"))]
-        {
-            return Err(
-                "Vulkan-native GRPO requested but kiln-server was built without \
-                 --features vulkan"
-                    .to_string(),
-            );
-        }
-    }
     trainer::grpo_train(
         &req.groups,
         &req.config,
@@ -652,7 +521,6 @@ fn run_grpo(
 /// produce a much larger PR than this milestone wants.
 #[allow(clippy::too_many_arguments)]
 fn run_opd(
-    vk_native: bool,
     req: &OpdRequest,
     model_config: &kiln_core::config::ModelConfig,
     weights: &kiln_model::forward::GpuWeights,
@@ -663,8 +531,6 @@ fn run_opd(
     teacher_registry: &crate::api::teachers::TeacherRegistry,
     job_id: &str,
 ) -> std::result::Result<PathBuf, String> {
-    #[cfg(not(feature = "vulkan"))]
-    let _ = vk_native;
     if req.prompts.is_empty() && req.dataset_path.is_none() {
         return Err("OPD request must include at least one prompt or a dataset_path".into());
     }
@@ -802,60 +668,18 @@ fn run_opd(
 
     let trainer_progress_cb: trainer::ProgressCallback = progress_cb;
 
-    let output_dir = if vk_native {
-        #[cfg(feature = "vulkan")]
-        {
-            tracing::info!(
-                job_id = %job_id,
-                "KILN_VK_NATIVE_OPD=1 - routing to vk_native_opd_train"
-            );
-            kiln_train::vk_train::vk_native_opd_train(
-                prompts,
-                &req.config,
-                model_config,
-                weights,
-                tokenizer,
-                teacher,
-                adapter_dir,
-                adapter_name,
-                Some(trainer_progress_cb),
-            )
-            .map_err(|e| format!("vk_native_opd_train failed: {e:#}"))?
-        }
-        #[cfg(not(feature = "vulkan"))]
-        {
-            tracing::warn!(
-                job_id = %job_id,
-                "KILN_VK_NATIVE_OPD=1 set but kiln-server was built without \
-                 --features vulkan - falling back to the default in-process OPD trainer (kt-tape)"
-            );
-            kiln_train::opd::opd_train(
-                prompts,
-                &req.config,
-                model_config,
-                weights,
-                tokenizer,
-                teacher,
-                adapter_dir,
-                adapter_name,
-                Some(trainer_progress_cb),
-            )
-            .map_err(|e| format!("opd_train failed: {e:#}"))?
-        }
-    } else {
-        kiln_train::opd::opd_train(
-            prompts,
-            &req.config,
-            model_config,
-            weights,
-            tokenizer,
-            teacher,
-            adapter_dir,
-            adapter_name,
-            Some(trainer_progress_cb),
-        )
-        .map_err(|e| format!("opd_train failed: {e:#}"))?
-    };
+    let output_dir = kiln_train::opd::opd_train(
+        prompts,
+        &req.config,
+        model_config,
+        weights,
+        tokenizer,
+        teacher,
+        adapter_dir,
+        adapter_name,
+        Some(trainer_progress_cb),
+    )
+    .map_err(|e| format!("opd_train failed: {e:#}"))?;
 
     if let Some(path) = req.dataset_path.as_deref() {
         match kiln_train::TrainReceipt::read_from_adapter_dir(&output_dir) {
@@ -2162,15 +1986,13 @@ fn execute_job(state: AppState, entry: QueueEntry) {
             };
             let _gpu_guard = gpu_coordination_write_guard(&state.gpu_lock);
             let guard = runner_arc.read().unwrap();
-            let backend_name = guard.backend_name();
-            // Native CUDA/Vulkan training keeps forward intermediates and
-            // grads in backend memory. Replay context is candle-trainer-specific,
-            // so native paths drop it until that integration is added.
+            // CUDA-native training keeps forward intermediates and grads in
+            // backend memory. Replay context is kt-trainer-specific, so the
+            // native path drops it until that integration is added. Vulkan
+            // runs through the shared kt-tape path like every other backend.
             let cuda_native = native_training_env_enabled("KILN_CUDA_NATIVE_TRAINING");
-            let vk_native = vk_native_sft_enabled(backend_name);
             run_sft(
                 cuda_native,
-                vk_native,
                 &req,
                 &state.model_config,
                 &guard.weights,
@@ -2197,12 +2019,9 @@ fn execute_job(state: AppState, entry: QueueEntry) {
             };
             let _gpu_guard = gpu_coordination_write_guard(&state.gpu_lock);
             let guard = runner_arc.read().unwrap();
-            let backend_name = guard.backend_name();
             let cuda_native = native_training_env_enabled("KILN_CUDA_NATIVE_TRAINING");
-            let vk_native = vk_native_grpo_enabled(backend_name);
             run_grpo(
                 cuda_native,
-                vk_native,
                 &req,
                 &state.model_config,
                 &guard.weights,
@@ -2220,10 +2039,7 @@ fn execute_job(state: AppState, entry: QueueEntry) {
             }
             let _gpu_guard = gpu_coordination_write_guard(&state.gpu_lock);
             let guard = runner_arc.read().unwrap();
-            let backend_name = guard.backend_name();
-            let vk_native = vk_native_opd_enabled(backend_name);
             run_opd(
-                vk_native,
                 &req,
                 &state.model_config,
                 &guard.weights,
@@ -2565,34 +2381,6 @@ mod tests {
 
         unsafe {
             std::env::remove_var(VAR);
-        }
-    }
-
-    #[test]
-    fn vk_native_grpo_defaults_to_vulkan_backend_and_honors_override() {
-        let _env_guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-
-        unsafe {
-            std::env::remove_var("KILN_VK_NATIVE_TRAINING");
-            std::env::remove_var("KILN_VK_NATIVE_GRPO");
-        }
-
-        #[cfg(feature = "vulkan")]
-        assert!(vk_native_grpo_enabled("vulkan"));
-        assert!(!vk_native_grpo_enabled("cpu"));
-
-        unsafe {
-            std::env::set_var("KILN_VK_NATIVE_GRPO", "0");
-        }
-        assert!(!vk_native_grpo_enabled("vulkan"));
-
-        unsafe {
-            std::env::set_var("KILN_VK_NATIVE_GRPO", "1");
-        }
-        assert!(vk_native_grpo_enabled("cpu"));
-
-        unsafe {
-            std::env::remove_var("KILN_VK_NATIVE_GRPO");
         }
     }
 

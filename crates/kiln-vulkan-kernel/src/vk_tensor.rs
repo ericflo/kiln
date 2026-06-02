@@ -370,10 +370,10 @@ impl VkTensor {
     /// 2 bytes/element LE u16 bits) and we round the device allocation
     /// up to the BF16 word-pair size where needed. This is the canonical
     /// upload boundary for code that already has a flat byte buffer in
-    /// the right shape — including the candle bridge in
-    /// `kiln-model::vk_forward`, which extracts bytes from candle CPU
-    /// storage and hands them to this constructor instead of going
-    /// through a now-deleted `VkTensor::from_candle` round-trip. (#1082)
+    /// the right shape — the kt host→Vulkan staging path
+    /// (`kiln-tensor::host_to_vulkan_copy`) hands a packed byte image to
+    /// this constructor. (The former candle bridge that also used it was
+    /// deleted with `kiln-model::vk_forward` in PR7.) (#1082)
     pub fn from_bytes(
         bytes: &[u8],
         shape: Vec<usize>,

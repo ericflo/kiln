@@ -37,6 +37,27 @@ pub fn log_softmax_last_dim(x: &Tensor) -> Result<Tensor> {
         return crate::metal_log_softmax_last_axis(x);
     }
 
+    // Vulkan host-fallback (#1082 PR3c): there is no Vulkan log-softmax
+    // (or standalone `log` activation) kernel in `vk_ops` today — only a
+    // forward softmax (`vk_softmax_lastdim_no_grad`), which can't be
+    // composed into a numerically-stable log-softmax without a `log`
+    // shader. Until such a kernel lands, stage to host, run the CPU
+    // reference below, and move the result back to the Vulkan device.
+    //
+    // Unlike `sum_axis` / `*_scalar` (DeviceOp1s whose `dispatch1`
+    // host-fallback in `device_op.rs` owns the bounce), `log_softmax` is
+    // a free function, so the round-trip is wired explicitly here. This
+    // is correctness-first / perf-wrong; the residual TODO is to author a
+    // `vk_ops::softmax::vk_log_softmax_lastdim` shader and route through
+    // it (analogous to the CUDA softmax+log compose above).
+    #[cfg(feature = "vulkan")]
+    if matches!(x.device(), crate::Device::Vulkan(_)) {
+        let dev = x.device();
+        let cpu_in = x.to_device(crate::Device::Cpu)?;
+        let cpu_out = log_softmax_last_dim(&cpu_in)?;
+        return cpu_out.to_device(dev);
+    }
+
     if !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16) {
         bail!(
             "log_softmax_last_dim: dtype must be F32/BF16/F16, got {}",
@@ -174,5 +195,56 @@ mod tests {
         let x = Tensor::from_slice(&bf, vec![1, 3]).unwrap();
         let y = log_softmax_last_dim(&x).unwrap();
         assert_eq!(y.dtype(), DType::BF16);
+    }
+
+    // ------------------------------------------------------------------
+    // PR3c (#1082): Vulkan host-fallback parity vs CPU reference.
+    //
+    // No Vulkan log-softmax kernel exists; log_softmax_last_dim stages to
+    // host, runs the CPU reference, and moves the result back. This
+    // validates that round-trip is numerically identical (bytes are not
+    // touched on the GPU) and stays on the Vulkan device. Bounded:
+    // tiny F32 input, single-shot, gated on KILN_TENSOR_VULKAN_TEST.
+    // ------------------------------------------------------------------
+
+    #[cfg(feature = "vulkan")]
+    fn vulkan_test_enabled() -> bool {
+        std::env::var("KILN_TENSOR_VULKAN_TEST").ok().as_deref() == Some("1")
+    }
+
+    #[cfg(feature = "vulkan")]
+    #[test]
+    fn log_softmax_vulkan_host_fallback_parity() {
+        if !vulkan_test_enabled() {
+            eprintln!("skip: KILN_TENSOR_VULKAN_TEST unset");
+            return;
+        }
+        if crate::primary_vulkan_device(0).is_err() {
+            eprintln!("skip: no Vulkan device");
+            return;
+        }
+        let dev = crate::Device::Vulkan(0);
+        let data: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 0.5, 1.5];
+
+        // CPU reference.
+        let x_cpu = Tensor::from_slice(&data, vec![2, 3]).unwrap();
+        let ref_vals = read_f32(&log_softmax_last_dim(&x_cpu).unwrap());
+
+        // Vulkan input -> host-fallback round-trip.
+        let x_vk = Tensor::from_vec_on(dev, data.clone(), vec![2, 3]).unwrap();
+        let y_vk = log_softmax_last_dim(&x_vk).unwrap();
+        assert_eq!(y_vk.device(), dev, "result must stay on Vulkan");
+
+        let got = y_vk
+            .to_device(crate::Device::Cpu)
+            .unwrap()
+            .to_vec::<f32>()
+            .unwrap();
+        let mut max_abs_err = 0.0f32;
+        for (g, r) in got.iter().zip(ref_vals.iter()) {
+            max_abs_err = max_abs_err.max((g - r).abs());
+        }
+        eprintln!("log_softmax vulkan host-fallback max_abs_err = {max_abs_err:e}");
+        assert!(max_abs_err < 1e-4, "max_abs_err {max_abs_err} >= 1e-4");
     }
 }

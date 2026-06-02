@@ -294,6 +294,14 @@ fn per_position_forward_kt(
             KtDevice::Metal(_) => KtTensor::from_vec(vals.to_vec(), shape)
                 .and_then(|t| t.to_device(dev))
                 .map_err(OpdLossError::Kt),
+            // (#1082) Vulkan mirrors Metal: build the host index/scratch tensor
+            // on CPU and move it to the Vulkan device via `to_device`
+            // (`host_to_vulkan_copy`). Needed so the F32-on-Vulkan OPD forward
+            // can materialize the teacher top-K index tensor.
+            #[cfg(feature = "vulkan")]
+            KtDevice::Vulkan(_) => KtTensor::from_vec(vals.to_vec(), shape)
+                .and_then(|t| t.to_device(dev))
+                .map_err(OpdLossError::Kt),
             #[allow(unreachable_patterns)]
             other => Err(OpdLossError::msg(format!(
                 "kt-opd-loss: unsupported device for index tensor {other}"
@@ -309,6 +317,11 @@ fn per_position_forward_kt(
             }
             #[cfg(feature = "metal")]
             KtDevice::Metal(_) => KtTensor::from_vec(vals.to_vec(), shape)
+                .and_then(|t| t.to_device(dev))
+                .map_err(OpdLossError::Kt),
+            // (#1082) Vulkan mirrors Metal (host CPU build -> to_device).
+            #[cfg(feature = "vulkan")]
+            KtDevice::Vulkan(_) => KtTensor::from_vec(vals.to_vec(), shape)
                 .and_then(|t| t.to_device(dev))
                 .map_err(OpdLossError::Kt),
             #[allow(unreachable_patterns)]
@@ -796,6 +809,11 @@ pub fn opd_top_k_reverse_kl_phase_b_bwd_composite_kt(
             KtDevice::Metal(_) => KtTensor::from_vec(vals.to_vec(), shape)
                 .and_then(|t| t.to_device(dev))
                 .map_err(OpdLossError::Kt),
+            // (#1082) Vulkan mirrors Metal (host CPU build -> to_device).
+            #[cfg(feature = "vulkan")]
+            KtDevice::Vulkan(_) => KtTensor::from_vec(vals.to_vec(), shape)
+                .and_then(|t| t.to_device(dev))
+                .map_err(OpdLossError::Kt),
             #[allow(unreachable_patterns)]
             other => Err(OpdLossError::msg(format!(
                 "kt-opd-loss bwd composite: unsupported device for index tensor {other}"
@@ -811,6 +829,11 @@ pub fn opd_top_k_reverse_kl_phase_b_bwd_composite_kt(
             }
             #[cfg(feature = "metal")]
             KtDevice::Metal(_) => KtTensor::from_vec(vals.to_vec(), shape)
+                .and_then(|t| t.to_device(dev))
+                .map_err(OpdLossError::Kt),
+            // (#1082) Vulkan mirrors Metal (host CPU build -> to_device).
+            #[cfg(feature = "vulkan")]
+            KtDevice::Vulkan(_) => KtTensor::from_vec(vals.to_vec(), shape)
                 .and_then(|t| t.to_device(dev))
                 .map_err(OpdLossError::Kt),
             #[allow(unreachable_patterns)]

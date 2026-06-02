@@ -100,7 +100,7 @@
 //! * Tape-routing for rotary / layernorm / fused-attn — non-trivial
 //!   substrate decisions about which kernels carry their own backward.
 
-#![cfg(any(feature = "cuda", feature = "metal"))]
+#![cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
 
 use anyhow::{Context, Result};
 use kiln_autograd::{
@@ -126,6 +126,18 @@ use crate::lora_loader::LoraProjectionWeights;
 // back-compat — every existing call site (the parity test, the
 // `forward.rs:7178` adapter call) keeps compiling unchanged.
 pub use kiln_autograd::{tape_forward_enabled, with_active_tape, with_thread_local_tape};
+
+/// (#1082) True iff a tape-recording scope is currently active on this thread.
+///
+/// Used by `forward.rs` to skip leaf, non-tape-recording backend kernels (e.g.
+/// the Vulkan flash-attn prefill kernel, which also materializes a CPU-host
+/// output at the kt<->vk seam) during a tape-authoritative training step, so the
+/// forward falls through to the device-resident, tape-recording composite
+/// (`try_tape_sdpa_fallback_kt`) instead. No-op outside a tape scope (inference
+/// keeps the fast leaf kernel).
+pub fn tape_scope_active() -> bool {
+    with_active_tape(|_| ()).is_some()
+}
 
 
 /// kt-native SiLU tape recorder (#1082 seam flip) — the kt-native SiLU tape recorder. Takes the kt activation directly and records a
@@ -336,8 +348,8 @@ pub fn try_tape_rms_norm_kt(
     if !tape_forward_enabled() {
         return Ok(None);
     }
-    if !matches!(x.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_))
-        || !matches!(weight.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_))
+    if !matches!(x.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_))
+        || !matches!(weight.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_))
     {
         return Ok(None);
     }
@@ -505,7 +517,7 @@ pub fn try_tape_transpose_kt(
     if !tape_forward_enabled() {
         return Ok(None);
     }
-    if !matches!(x.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_)) {
+    if !matches!(x.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_)) {
         return Ok(None);
     }
     let rank = x.rank();
@@ -540,7 +552,7 @@ pub fn try_tape_reshape_kt(
     if !tape_forward_enabled() {
         return Ok(None);
     }
-    if !matches!(x.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_)) {
+    if !matches!(x.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_)) {
         return Ok(None);
     }
     let input_shape = x.shape().to_vec();
@@ -746,7 +758,7 @@ pub fn try_tape_cross_entropy_from_logits_kt(
         || dims[0] != 1
         || dims[1] != input_ids.len()
         || label_mask.len() != input_ids.len()
-        || !matches!(logits.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_))
+        || !matches!(logits.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_))
     {
         return Ok(None);
     }
@@ -932,10 +944,10 @@ pub fn try_tape_lora_add_kt(
     if !tape_forward_enabled() || !tape_lora_add_enabled() {
         return Ok(None);
     }
-    if !matches!(base.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_))
-        || !matches!(x.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_))
-        || !matches!(proj.a.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_))
-        || !matches!(proj.b.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_))
+    if !matches!(base.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_))
+        || !matches!(x.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_))
+        || !matches!(proj.a.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_))
+        || !matches!(proj.b.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_))
     {
         return Ok(None);
     }
@@ -1143,8 +1155,8 @@ pub fn try_tape_lora_linear_kt(
     if !tape_forward_enabled() || !tape_lora_add_enabled() {
         return Ok(None);
     }
-    if !matches!(x.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_))
-        || !matches!(weight_t.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_))
+    if !matches!(x.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_))
+        || !matches!(weight_t.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_))
     {
         return Ok(None);
     }
@@ -1675,26 +1687,62 @@ impl BackwardOp for GdnRecurrentBackward {
         // `gdn_recurrent_backward_no_grad` is kt-typed (kt inputs, kt-grad
         // outputs) — no candle bridge at all. `for_device_kt` reconstructs the
         // backend straight from the stored kt `Device` (candle-free).
-        let backend = crate::backend::for_device_kt(&self.device);
+        //
+        // (#1082) GDN-on-Vulkan: `gdn_recurrent_backward_no_grad` uses CPU-only kt
+        // ops (`cumsum`, `where_cond`) that error on Vulkan storage. Mirror the
+        // forward's CPU offload (`gdn_chunkwise_recurrence`): run the analytic
+        // backward on CPU, then move the per-input grads back to the activation
+        // device so they chain to the (Vulkan) q/k/v projection nodes. CUDA/Metal
+        // keep their native device path.
+        let on_vulkan = matches!(self.device, kiln_tensor::Device::Vulkan(_));
+        let compute_dev = if on_vulkan {
+            kiln_tensor::Device::Cpu
+        } else {
+            self.device
+        };
+        let backend = crate::backend::for_device_kt(&compute_dev);
+        let mv = |t: &kiln_tensor::Tensor| -> kiln_tensor::Result<kiln_tensor::Tensor> {
+            if on_vulkan {
+                t.to_device(kiln_tensor::Device::Cpu)
+            } else {
+                Ok(t.clone())
+            }
+        };
+        let (q_c, k_c, v_c, beta_c, g_c, entry_c, grad_c) = (
+            mv(&self.q)?,
+            mv(&self.k)?,
+            mv(&self.v)?,
+            mv(&self.beta)?,
+            mv(&self.g)?,
+            mv(&self.entry_state)?,
+            mv(&grad_out_kt)?,
+        );
         let grads = gdn_recurrent_backward_no_grad(
             &*backend,
-            &self.q,
-            &self.k,
-            &self.v,
-            &self.beta,
-            &self.g,
-            &self.entry_state,
-            &grad_out_kt,
+            &q_c,
+            &k_c,
+            &v_c,
+            &beta_c,
+            &g_c,
+            &entry_c,
+            &grad_c,
             None,
             self.chunk_size,
         )
         .map_err(|e| kiln_tensor::Error::Msg(format!("GdnRecurrentBackward: gdn bwd: {e}")))?;
         // grads.* are kt; the backward can return non-contiguous grads
-        // (internal transposes/narrows) — materialise contiguous.
+        // (internal transposes/narrows) — materialise contiguous and restore the
+        // activation device (the CPU offload above ran on `Device::Cpu`).
+        let dev = self.device;
         let to_kt = |t: &kiln_tensor::Tensor| -> kiln_tensor::Result<kiln_tensor::Tensor> {
-            t.contiguous().map_err(|e| {
+            let c = t.contiguous().map_err(|e| {
                 kiln_tensor::Error::Msg(format!("GdnRecurrentBackward: grad contiguous: {e}"))
-            })
+            })?;
+            if on_vulkan {
+                c.to_device(dev)
+            } else {
+                Ok(c)
+            }
         };
         Ok(vec![
             Some(to_kt(&grads.dq)?),
@@ -1733,7 +1781,7 @@ pub fn try_tape_gdn_recurrent_kt(
     // production recurrence `gdn_recurrent_forward_from_parts`) and the record
     // adapter (`tape_record_gdn_recurrent_kt`) is now kt-native — no kt->candle
     // bridge on the saved inputs.
-    if !matches!(q.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_)) {
+    if !matches!(q.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_)) {
         return Ok(None);
     }
 
@@ -1806,7 +1854,7 @@ pub fn tape_record_gdn_recurrent_kt(
     if !tape_forward_enabled() || !tape_gdn_enabled() {
         return Ok(false);
     }
-    if !matches!(device, kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_)) {
+    if !matches!(device, kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_)) {
         return Ok(false);
     }
 
@@ -1947,28 +1995,156 @@ pub fn tape_gdn_gated_norm_enabled() -> bool {
 /// training shape) so flattening never mixes batches across a row boundary;
 /// declines (`apply` errors only on a true kernel failure — the adapter's
 /// `Ok(None)` envelope guard below keeps `batch>1` off this path entirely).
-#[cfg(any(feature = "cuda", feature = "metal"))]
+///
+/// Device-agnostic kt-composite for the GDN causal-depthwise-conv1d
+/// input-backward — the analytic input-grad derived directly from the CUDA
+/// kernel's math (`crates/kiln-rmsnorm-kernel/csrc/causal_conv1d_f32.cu`,
+/// `causal_depthwise_conv1d_bwd_input_f32_kernel`), expressed purely in
+/// `kiln_tensor` host arithmetic so it runs on CPU / Metal / Vulkan with no
+/// FFI, no cudarc, and no candle.
+///
+/// This is the conv1d analogue of the OPD reverse-KL backward composite
+/// (`kiln_opd_loss_kernel::kt_api::opd_top_k_reverse_kl_phase_b_bwd_composite_kt`):
+/// the `Cuda(_)` arm keeps the validated/perf FFI kernel; every other device
+/// routes here.
+///
+/// # Forward convention (verified against the CUDA kernel)
+///
+/// The forward (`causal_depthwise_conv1d_f32_kernel`) with `state_rows = K-1`
+/// computes the left-zero-padded causal depthwise conv
+///
+///   `out[r,c] = Σ_{j=0..K-1} weight[c,j] · x_pad[r+j, c]`
+///
+/// where `x_pad[p,c] = state[p,c]` for `p < K-1` else `input[p-(K-1), c]`.
+///
+/// # Input gradient (matches `causal_depthwise_conv1d_bwd_input_f32_kernel`)
+///
+/// The kernel computes, for `state_rows = K-1`,
+///
+///   `grad_input[i,c] = Σ_{j: out_row = (K-1)+i-j ∈ [0,rows)} grad_out[out_row,c] · weight[c,j]`.
+///
+/// Substituting `m = K-1-j` (`out_row = i+m`) gives the equivalent
+/// right-zero-padded anti-causal correlation
+///
+///   `grad_x[s,c] = Σ_{m=0..K-1, (s+m)<rows} weight[c, K-1-m] · grad_out[s+m, c]`,
+///
+/// which this function evaluates exactly. `grad_out` and `weight` are read to
+/// the host (both are small F32 tensors — `[rows, channels]` and
+/// `[channels, kernel]`), the correlation is accumulated in F32, and the result
+/// is uploaded back to `grad_out`'s device. FD-validated against a central
+/// finite difference of the forward in `tests` below.
+pub(crate) fn causal_depthwise_conv1d_bwd_input_composite(
+    grad_out: &kiln_tensor::Tensor,
+    weight: &kiln_tensor::Tensor,
+    kernel: usize,
+) -> kiln_tensor::Result<kiln_tensor::Tensor> {
+    use kiln_tensor::{DType, Error};
+    let go_shape = grad_out.shape();
+    if go_shape.len() != 2 {
+        return Err(Error::Msg(format!(
+            "conv1d-bwd-input composite: grad_out must be [rows, channels], got {go_shape:?}"
+        )));
+    }
+    let (rows, channels) = (go_shape[0], go_shape[1]);
+    if weight.shape() != [channels, kernel] {
+        return Err(Error::Msg(format!(
+            "conv1d-bwd-input composite: weight {:?} != [{channels}, {kernel}]",
+            weight.shape()
+        )));
+    }
+    if kernel < 2 {
+        return Err(Error::Msg(format!(
+            "conv1d-bwd-input composite: kernel {kernel} must be >= 2"
+        )));
+    }
+    let dev = grad_out.device();
+
+    // Host-read both operands in F32 (cast then to_vec, which D2H's). Both are
+    // small: grad_out is [rows, channels], weight is [channels, kernel].
+    let grad_f32 = if grad_out.dtype() == DType::F32 {
+        grad_out.contiguous()?
+    } else {
+        grad_out.to_dtype(DType::F32)?.contiguous()?
+    };
+    let weight_f32 = if weight.dtype() == DType::F32 {
+        weight.contiguous()?
+    } else {
+        weight.to_dtype(DType::F32)?.contiguous()?
+    };
+    let go: Vec<f32> = grad_f32.to_vec::<f32>()?; // row-major [rows, channels]
+    let w: Vec<f32> = weight_f32.to_vec::<f32>()?; // row-major [channels, kernel]
+
+    // grad_x[s,c] = Σ_{m=0..K-1, (s+m)<rows} weight[c, K-1-m] * grad_out[s+m, c]
+    let mut gi = vec![0.0f32; rows * channels];
+    for s in 0..rows {
+        for c in 0..channels {
+            let mut acc = 0.0f32;
+            for m in 0..kernel {
+                let sr = s + m;
+                if sr < rows {
+                    // weight[c, K-1-m]
+                    acc += w[c * kernel + (kernel - 1 - m)] * go[sr * channels + c];
+                }
+            }
+            gi[s * channels + c] = acc;
+        }
+    }
+
+    // Build the F32 result on host, then move to grad_out's device.
+    let out = kiln_tensor::Tensor::from_vec(gi, vec![rows, channels])?;
+    if dev.is_cpu() {
+        Ok(out)
+    } else {
+        out.to_device(dev)
+    }
+}
+
+/// Device-routed `[rows, channels]` conv1d input-backward used by
+/// [`CausalConv1dPrefillInputBackward`]. `Cuda(_)` keeps the validated/perf
+/// FFI kernel (`kiln_rmsnorm_kernel::causal_depthwise_conv1d_bwd_input_kt`,
+/// only present on `cuda` builds where that optional crate links); every other
+/// device (CPU / Metal / Vulkan) routes through the device-agnostic
+/// [`causal_depthwise_conv1d_bwd_input_composite`]. Mirrors the OPD kt-tape
+/// `Cuda(_)` → FFI / composite-fallthrough dispatch exactly.
+fn conv1d_bwd_input_rows_dispatch(
+    grad_rows: &kiln_tensor::Tensor,
+    weight: &kiln_tensor::Tensor,
+    kernel: usize,
+) -> kiln_tensor::Result<kiln_tensor::Tensor> {
+    #[cfg(feature = "cuda")]
+    if matches!(grad_rows.device(), kiln_tensor::Device::Cuda(_)) {
+        return kiln_rmsnorm_kernel::causal_depthwise_conv1d_bwd_input_kt(
+            grad_rows, weight, kernel,
+        )
+        .map_err(|e| {
+            kiln_tensor::Error::Msg(format!(
+                "CausalConv1dPrefillInputBackward: bwd_input (cuda ffi): {e}"
+            ))
+        });
+    }
+    // CPU / Metal / Vulkan device-agnostic composite path.
+    causal_depthwise_conv1d_bwd_input_composite(grad_rows, weight, kernel)
+}
+
 #[derive(Debug)]
 pub(crate) struct CausalConv1dPrefillInputBackward {
-    /// Saved F32 conv weight `[channels, kernel]` (#1082: candle->kt; both the
-    /// CUDA bwd kernel `causal_depthwise_conv1d_bwd_input_kt` and the kt
-    /// composite are kt-native).
+    /// Saved F32 conv weight `[channels, kernel]` (#1082: candle->kt; the bwd is
+    /// kt-native — CUDA via FFI, every other device via the kt composite).
     weight: kiln_tensor::Tensor,
     batch: usize,
     channels: usize,
     seq_len: usize,
-    /// The conv INPUT's candle dtype. The bwd kernel is F32, so it computes a
-    /// F32 input-grad; we cast it back to this dtype before returning so the
-    /// grad-dtype-follows-tensor invariant holds at the F32↔BF16 conv boundary
-    /// (the conv input `mixed_qkv_ct` is BF16 from in_proj_qkv on a BF16 model,
-    /// but the conv computes/outputs F32). Without this cast the F32 grad flows
-    /// up through the dtype-preserving conv-in transpose to in_proj_qkv's
-    /// `MatmulBackward`, which then runs `cuda_matmul(grad_f32, weight_bf16)` →
-    /// `dtype mismatch a=f32 b=bf16`. (#1082 CP-4)
+    /// The conv INPUT's dtype. The bwd is F32, so it computes a F32 input-grad;
+    /// we cast it back to this dtype before returning so the grad-dtype-follows-
+    /// tensor invariant holds at the F32↔BF16 conv boundary (the conv input
+    /// `mixed_qkv_ct` is BF16 from in_proj_qkv on a BF16 model, but the conv
+    /// computes/outputs F32). Without this cast the F32 grad flows up through the
+    /// dtype-preserving conv-in transpose to in_proj_qkv's `MatmulBackward`,
+    /// which then runs `matmul(grad_f32, weight_bf16)` → `dtype mismatch
+    /// a=f32 b=bf16`. (#1082 CP-4)
     input_dtype: kiln_tensor::DType,
 }
 
-#[cfg(any(feature = "cuda", feature = "metal"))]
 impl BackwardOp for CausalConv1dPrefillInputBackward {
     fn name(&self) -> &'static str {
         "gdn_causal_conv1d_prefill_input_backward"
@@ -1981,7 +2157,8 @@ impl BackwardOp for CausalConv1dPrefillInputBackward {
         grad_output: &kiln_tensor::Tensor,
     ) -> kiln_tensor::Result<Vec<Option<kiln_tensor::Tensor>>> {
         // #1082 kt-native: grad + the saved weight are kt. Upstream grad is
-        // [B, C, T] (conv output layout).
+        // [B, C, T] (conv output layout). The row-block bwd is dispatched by
+        // device (CUDA FFI / kt composite) in `conv1d_bwd_input_rows_dispatch`.
         let grad_f32 = if grad_output.dtype() == kiln_tensor::DType::F32 {
             grad_output.clone()
         } else {
@@ -1995,36 +2172,14 @@ impl BackwardOp for CausalConv1dPrefillInputBackward {
             .and_then(|t| t.reshape(vec![rows, self.channels]))?;
         // weight is [channels, kernel]; the bwd takes the kernel size.
         let kernel = self.weight.dims()[1];
-        // Device-agnostic bwd routing (#1082): CUDA -> the perf-tuned kernel
-        // (unchanged); CPU/Metal -> the FD-validated kt composite. Both compute
-        // din[s,c] = sum_k weight[c,k] * grad_out[s+(K-1)-k, c] (state clamped).
-        let din_rows = match grad_rows.device() {
-            #[cfg(feature = "cuda")]
-            kiln_tensor::Device::Cuda(_) => {
-                kiln_rmsnorm_kernel::causal_depthwise_conv1d_bwd_input_kt(
-                    &grad_rows,
-                    &self.weight,
-                    kernel,
-                )
-                .map_err(|e| {
-                    kiln_tensor::Error::Msg(format!(
-                        "CausalConv1dPrefillInputBackward: bwd_input: {e}"
-                    ))
-                })?
-            }
-            _ => kiln_tensor::ops::causal_depthwise_conv1d_bwd_input_composite(
-                &grad_rows,
-                &self.weight,
-                kernel,
-            )?,
-        };
+        let din_rows = conv1d_bwd_input_rows_dispatch(&grad_rows, &self.weight, kernel)?;
         // [B*T, C] -> [B, T, C] -> [B, C, T] (back to the conv input layout).
         let din = din_rows
             .reshape(vec![self.batch, self.seq_len, self.channels])
             .and_then(|t| t.transpose(1, 2))
             .and_then(|t| t.contiguous())?;
-        // Cast the F32 kernel grad back to the conv input's dtype (grad-dtype-
-        // follows-tensor across the F32↔BF16 conv boundary). No-op when F32.
+        // Cast the F32 grad back to the conv input's dtype (grad-dtype-follows-
+        // tensor across the F32↔BF16 conv boundary). No-op when F32.
         let din = if din.dtype() == self.input_dtype {
             din
         } else {
@@ -2047,15 +2202,18 @@ impl BackwardOp for CausalConv1dPrefillInputBackward {
 ///
 /// Reuses the existing `KILN_USE_TAPE_GDN_CONV` gate (mirroring
 /// `try_tape_causal_conv1d_cuda`). `Ok(None)` (caller's production output
-/// unchanged) when the gate is off, no tape scope is active, the inputs aren't
-/// CUDA/Metal, `batch != 1`, shapes disagree, or a kt borrow fails — NEVER an
-/// error. kt-native GDN prefill causal-depthwise-conv1d tape recorder (#1082
-/// seam flip). Record-only: builds the F32 `[channels, kernel]` weight view in
-/// kt + records the (now kt-native) `CausalConv1dPrefillInputBackward` linking
-/// kt `out` back to kt `input`. The recorded backward routes per device:
-/// CUDA -> `causal_depthwise_conv1d_bwd_input_kt`; CPU/Metal -> the
-/// FD-validated `causal_depthwise_conv1d_bwd_input_composite` — both kt, no
-/// candle bridge. The Metal path unblocks GDN-layer LoRA training (#1082).
+/// unchanged) when the gate is off, no tape scope is active, the inputs are on
+/// an unsupported device, `batch != 1`, shapes disagree, or a kt borrow fails
+/// — NEVER an error.
+/// kt-native GDN prefill causal-depthwise-conv1d tape recorder (#1082 seam flip).
+/// Record-only: builds the F32 `[channels, kernel]` weight view in kt + records
+/// the device-agnostic `CausalConv1dPrefillInputBackward` linking kt `out` back to
+/// kt `input`. The recorded backward dispatches the row-block input-grad by device
+/// — `Cuda(_)` → the validated FFI kernel
+/// (`kiln_rmsnorm_kernel::causal_depthwise_conv1d_bwd_input_kt`), CPU / Metal /
+/// Vulkan → the pure-`kiln_tensor` [`causal_depthwise_conv1d_bwd_input_composite`].
+/// This un-gates GDN-on-Vulkan training (the last production blocker for the
+/// GDN-heavy Qwen3.5-4B Vulkan path); no candle bridge.
 pub fn try_tape_causal_conv1d_prefill_kt(
     input: &kiln_tensor::Tensor,
     weight: &kiln_tensor::Tensor,
@@ -2065,19 +2223,28 @@ pub fn try_tape_causal_conv1d_prefill_kt(
     if !tape_forward_enabled() || !tape_gdn_conv_enabled() {
         return Ok(None);
     }
-    // The bwd is only available with a GPU-training backend (CUDA kernel or the
-    // Metal-capable kt composite); declines when neither feature is on.
-    #[cfg(not(any(feature = "cuda", feature = "metal")))]
+    // The bwd is available with any GPU-training backend: CUDA FFI kernel, or the
+    // device-agnostic kt composite for Metal/Vulkan. Declines when none is on.
+    #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan")))]
     {
         let _ = (input, weight, out, kernel);
         return Ok(None);
     }
-    #[cfg(any(feature = "cuda", feature = "metal"))]
+    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
     {
-    if !matches!(input.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_))
-        || !matches!(out.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_))
-        || !matches!(weight.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_))
-    {
+    // The recorded backward is device-agnostic (CUDA FFI / kt composite), so the
+    // recorder admits CUDA, Metal, and Vulkan. CPU is excluded here only because
+    // the production GDN forward this hooks runs on an accelerator device.
+    if !matches!(
+        input.device(),
+        kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_)
+    ) || !matches!(
+        out.device(),
+        kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_)
+    ) || !matches!(
+        weight.device(),
+        kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_)
+    ) {
         return Ok(None);
     }
     if kernel < 2 {
@@ -2201,7 +2368,7 @@ pub fn try_tape_gdn_l2_norm_scale_kt(
     if !tape_forward_enabled() || !tape_gdn_qk_norm_enabled() {
         return Ok(None);
     }
-    if !matches!(x.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_)) {
+    if !matches!(x.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_)) {
         return Ok(None);
     }
     if x.dims() != out.dims() {
@@ -2302,7 +2469,7 @@ pub fn try_tape_gdn_gated_rms_norm_kt(
     if !tape_forward_enabled() || !tape_gdn_gated_norm_enabled() {
         return Ok(None);
     }
-    if !matches!(x.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_)) {
+    if !matches!(x.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_)) {
         return Ok(None);
     }
     if x.dims() != z.dims() || x.dims() != out.dims() {
@@ -2416,8 +2583,8 @@ pub fn try_tape_cast_kt(
     if !tape_forward_enabled() {
         return Ok(None);
     }
-    if !matches!(x.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_))
-        || !matches!(out.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_))
+    if !matches!(x.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_))
+        || !matches!(out.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_))
     {
         return Ok(None);
     }
@@ -2536,8 +2703,8 @@ pub fn try_tape_narrow_kt(
     if !tape_forward_enabled() {
         return Ok(None);
     }
-    if !matches!(x.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_))
-        || !matches!(out.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_))
+    if !matches!(x.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_))
+        || !matches!(out.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_))
     {
         return Ok(None);
     }
@@ -2646,8 +2813,8 @@ pub fn try_tape_gqa_expand_kt(
     if !tape_forward_enabled() {
         return Ok(None);
     }
-    if !matches!(x.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_))
-        || !matches!(out.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_))
+    if !matches!(x.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_))
+        || !matches!(out.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_))
     {
         return Ok(None);
     }
@@ -2831,10 +2998,10 @@ pub fn try_tape_sdpa_fallback_kt(
     if !tape_forward_enabled() || !tape_sdpa_enabled() {
         return Ok(None);
     }
-    if !matches!(q.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_))
-        || !matches!(k.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_))
-        || !matches!(v.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_))
-        || !matches!(out.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_))
+    if !matches!(q.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_))
+        || !matches!(k.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_))
+        || !matches!(v.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_))
+        || !matches!(out.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_))
     {
         return Ok(None);
     }
@@ -2913,3 +3080,113 @@ pub fn tape_lora_add_enabled() -> bool {
 // lora_add}_cuda` round-trips) live in the
 // `kiln-model/tests/tape_forward_parity.rs` integration test because they
 // require the `kiln_kt_bridge` + `kiln_rmsnorm_kernel` cuda surface.
+
+#[cfg(test)]
+mod conv1d_bwd_input_composite_tests {
+    use super::causal_depthwise_conv1d_bwd_input_composite;
+    use kiln_tensor::{DType, Tensor};
+
+    /// Reference forward of the GDN causal depthwise conv1d w.r.t. the input,
+    /// with ZERO conv-state (the state contribution is a separate gradient; the
+    /// input-grad kernel assumes the input-only left-zero pad). Matches
+    /// `causal_depthwise_conv1d_f32_kernel` with `state = 0`:
+    ///   out[r,c] = Σ_{j: r+j >= K-1} weight[c,j] * input[r+j-(K-1), c]
+    fn ref_forward(input: &[f32], weight: &[f32], rows: usize, channels: usize, k: usize) -> Vec<f32> {
+        let state_rows = k - 1;
+        let mut out = vec![0.0f32; rows * channels];
+        for r in 0..rows {
+            for c in 0..channels {
+                let mut acc = 0.0f32;
+                for j in 0..k {
+                    let padded = r + j;
+                    if padded >= state_rows {
+                        let ir = padded - state_rows;
+                        if ir < rows {
+                            acc += weight[c * k + j] * input[ir * channels + c];
+                        }
+                    }
+                }
+                out[r * channels + c] = acc;
+            }
+        }
+        out
+    }
+
+    /// A scalar loss `L = Σ_{r,c} grad_out[r,c] * out[r,c]` so that
+    /// `dL/d input[i,c] = composite(grad_out, weight)[i,c]` exactly — that is
+    /// the very quantity the input-backward returns. Central-difference each
+    /// input element against this loss and compare to the composite output.
+    #[test]
+    fn fd_input_grad_matches_central_difference() {
+        let rows = 5usize;
+        let channels = 3usize;
+        let k = 4usize;
+
+        // Deterministic pseudo-random-but-fixed inputs.
+        let input: Vec<f32> = (0..rows * channels)
+            .map(|i| ((i as f32) * 0.37 - 0.9).sin() * 0.8)
+            .collect();
+        let weight: Vec<f32> = (0..channels * k)
+            .map(|i| ((i as f32) * 0.71 + 0.2).cos() * 0.5)
+            .collect();
+        // Upstream grad (the cotangent of `out`); arbitrary fixed values.
+        let grad_out: Vec<f32> = (0..rows * channels)
+            .map(|i| ((i as f32) * 0.13 + 0.4).cos() * 0.6 + 0.1)
+            .collect();
+
+        // Analytic grad via the composite (CPU, deterministic).
+        let go_t = Tensor::from_vec(grad_out.clone(), vec![rows, channels]).unwrap();
+        let w_t = Tensor::from_vec(weight.clone(), vec![channels, k]).unwrap();
+        let gi_t = causal_depthwise_conv1d_bwd_input_composite(&go_t, &w_t, k).unwrap();
+        assert_eq!(gi_t.shape(), [rows, channels]);
+        assert_eq!(gi_t.dtype(), DType::F32);
+        let analytic: Vec<f32> = gi_t.to_vec::<f32>().unwrap();
+        assert_eq!(analytic.len(), rows * channels);
+        assert!(analytic.iter().all(|v| v.is_finite()), "analytic grad non-finite");
+
+        // Central-difference dL/d input[i,c] where L = Σ grad_out·out.
+        let loss = |inp: &[f32]| -> f32 {
+            let out = ref_forward(inp, &weight, rows, channels, k);
+            out.iter().zip(grad_out.iter()).map(|(o, g)| o * g).sum()
+        };
+        let eps = 1e-3f32;
+        let mut max_abs_err = 0.0f32;
+        for idx in 0..rows * channels {
+            let mut plus = input.clone();
+            let mut minus = input.clone();
+            plus[idx] += eps;
+            minus[idx] -= eps;
+            let fd = (loss(&plus) - loss(&minus)) / (2.0 * eps);
+            let err = (fd - analytic[idx]).abs();
+            if err > max_abs_err {
+                max_abs_err = err;
+            }
+        }
+        eprintln!("conv1d bwd-input composite FD max_abs_err = {max_abs_err:.3e}");
+        assert!(
+            max_abs_err < 1e-2,
+            "conv1d bwd-input composite FD max_abs_err {max_abs_err:.3e} exceeds tol 1e-2"
+        );
+    }
+
+    /// The composite must accept a non-F32 upstream grad (it casts internally)
+    /// and return F32 — the dtype the conv-boundary expects before the op casts
+    /// back to the input dtype.
+    #[test]
+    fn accepts_bf16_grad_out_returns_f32() {
+        let rows = 3usize;
+        let channels = 2usize;
+        let k = 3usize;
+        let grad_out: Vec<f32> = (0..rows * channels).map(|i| (i as f32) * 0.1 - 0.2).collect();
+        let weight: Vec<f32> = (0..channels * k).map(|i| (i as f32) * 0.05 + 0.1).collect();
+        let go_t = Tensor::from_vec(grad_out, vec![rows, channels])
+            .unwrap()
+            .to_dtype(DType::BF16)
+            .unwrap();
+        let w_t = Tensor::from_vec(weight, vec![channels, k]).unwrap();
+        let gi = causal_depthwise_conv1d_bwd_input_composite(&go_t, &w_t, k).unwrap();
+        assert_eq!(gi.dtype(), DType::F32);
+        assert_eq!(gi.shape(), [rows, channels]);
+        assert!(gi.to_vec::<f32>().unwrap().iter().all(|v| v.is_finite()));
+    }
+}

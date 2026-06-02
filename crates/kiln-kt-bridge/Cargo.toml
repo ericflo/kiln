@@ -21,6 +21,12 @@ cuda = ["kiln-tensor/cuda"]
 # Enables the device-agnostic `tape_bridge` scopes on the metal build.
 metal = ["kiln-tensor/metal"]
 
+# Forwards `kiln-tensor/vulkan` only — mirrors the metal lane. Enables the
+# device-agnostic `tape_bridge` scopes on the vulkan build so the harmonized
+# `model_forward_kt` + `try_tape_*_kt` recorders can record on
+# `Device::Vulkan` (#1082 PR5).
+vulkan = ["kiln-tensor/vulkan"]
+
 [dependencies]
 kiln-tensor = { workspace = true }
 # CP-4 (#1082): the `tape_bridge` module owns the kt-native tape scopes

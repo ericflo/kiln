@@ -147,8 +147,8 @@ mod tests {
 
     // (#1082) `from_bytes` must not panic on an empty slice (dangling,
     // 1-aligned ptr) or an unaligned subslice — the cast_slice family panics
-    // there. Regression for the empty-`rotary_inv_freq` -> to_vec1 panic that
-    // broke vk_train_smoke after the candle->kt GpuWeights flip.
+    // there. Regression for the empty-`rotary_inv_freq` -> to_vec1 panic
+    // surfaced during the candle->kt GpuWeights flip.
     #[test]
     fn from_bytes_empty_returns_empty_no_panic() {
         assert_eq!(<f32 as Element>::from_bytes(&[]), Vec::<f32>::new());

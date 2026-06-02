@@ -409,6 +409,74 @@ where
     f(&mut guard)
 }
 
+/// (#1082) Shared, storage-decoupled AdamW optimizer seam over raw Vulkan
+/// device buffers.
+///
+/// This is the single dispatch site for the on-device F32 AdamW step. The
+/// kt-`Tensor`-keyed `BackendRuntime::dispatch_adamw_step` (the CUDA/Metal-
+/// style resident-registry path) and any `VkTensor`-native caller holding
+/// `VulkanBuffer` handles for the param/grad and the persistent first/second-
+/// moment state both route through here. Because every caller funnels into the
+/// *same* SPIR-V `dispatch_adamw_step_f32` kernel with identical push
+/// constants, the optimizer update is numerically identical regardless of
+/// which seam the caller entered through.
+///
+/// `step` is 1-indexed (bias correction is `1 - beta^step`); `param`, `m`,
+/// and `v` are updated in place. Storage-decoupled: it needs only a
+/// `VulkanDevice` plus the four device buffers — no `kiln_tensor::Tensor`
+/// on `Device::Vulkan` is required, so it ships ahead of the storage
+/// keystone (PR2).
+#[allow(clippy::too_many_arguments)]
+pub fn dispatch_adamw_step_buffers(
+    vk_device: &kiln_vulkan_kernel::VulkanDevice,
+    param_buffer: &kiln_vulkan_kernel::VulkanBuffer,
+    grad_buffer: &kiln_vulkan_kernel::VulkanBuffer,
+    first_moment_buffer: &kiln_vulkan_kernel::VulkanBuffer,
+    second_moment_buffer: &kiln_vulkan_kernel::VulkanBuffer,
+    n_elements: usize,
+    lr: f32,
+    beta1: f32,
+    beta2: f32,
+    eps: f32,
+    weight_decay: f32,
+    step: u32,
+) -> Result<()> {
+    kiln_vulkan_kernel::kernels::dispatch_adamw_step_f32(
+        vk_device,
+        param_buffer,
+        grad_buffer,
+        first_moment_buffer,
+        second_moment_buffer,
+        n_elements,
+        lr,
+        beta1,
+        beta2,
+        eps,
+        weight_decay,
+        step,
+    )
+}
+
+/// (#1082) Shared, storage-decoupled SGD optimizer seam over raw Vulkan
+/// device buffers. Counterpart to [`dispatch_adamw_step_buffers`] for the
+/// `Optimizer::Sgd` path; updates `param` in place via the shared SPIR-V
+/// `dispatch_sgd_step_f32` kernel.
+pub fn dispatch_sgd_step_buffers(
+    vk_device: &kiln_vulkan_kernel::VulkanDevice,
+    param_buffer: &kiln_vulkan_kernel::VulkanBuffer,
+    grad_buffer: &kiln_vulkan_kernel::VulkanBuffer,
+    n_elements: usize,
+    lr: f32,
+) -> Result<()> {
+    kiln_vulkan_kernel::kernels::dispatch_sgd_step_f32(
+        vk_device,
+        param_buffer,
+        grad_buffer,
+        n_elements,
+        lr,
+    )
+}
+
 fn recurrent_state_resident_scope_active() -> bool {
     RECURRENT_STATE_RESIDENT_SCOPE_DEPTH.with(|depth| depth.get() > 0)
 }
@@ -1736,7 +1804,7 @@ impl BackendRuntime for VulkanBackend {
             lora_delta_training: "kt-tape-recorded LoRA delta (legacy autograd wrapper removed #1082)",
             sgd_step: "Vulkan in-place registry update when operands are resident",
             adamw_step: "Vulkan in-place registry update when operands are resident",
-            native_training: "vk_native_sft_train/vk_native_grpo_train enabled by default on Vulkan",
+            native_training: "shared trainer.rs kt-tape path (legacy vk_native_* fork deleted in PR7 #1082)",
         }
     }
 
@@ -2129,9 +2197,8 @@ impl BackendRuntime for VulkanBackend {
         });
         match param.dtype() {
             kiln_tensor::DType::F32 => {
-                kiln_vulkan_kernel::kernels::dispatch_sgd_step_f32(
-                    vk_device, &param_buf, &grad_buf, n_elements, lr,
-                )?;
+                // (#1082) Shared buffer-level SGD seam (see dispatch_adamw_step).
+                dispatch_sgd_step_buffers(vk_device, &param_buf, &grad_buf, n_elements, lr)?;
                 Ok(true)
             }
             kiln_tensor::DType::BF16 => {
@@ -2220,7 +2287,10 @@ impl BackendRuntime for VulkanBackend {
         });
         match param.dtype() {
             kiln_tensor::DType::F32 => {
-                kiln_vulkan_kernel::kernels::dispatch_adamw_step_f32(
+                // (#1082) Route through the shared buffer-level seam so the
+                // kt-`Tensor` resident path and the `VkTensor`-native training
+                // path dispatch the identical AdamW kernel.
+                dispatch_adamw_step_buffers(
                     vk_device,
                     &param_buf,
                     &grad_buf,
