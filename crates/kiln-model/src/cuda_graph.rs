@@ -903,7 +903,15 @@ impl CudaGraphRunner {
         // attempt runs the forward pass once and returns its tokens;
         // a captured graph is then stored under `key` for the future
         // replay path to consume.
-        let _ = linear_states; // refresh path lands with replay
+        //
+        // #1082 bs>1 greedy-coherence fix: thread the caller's per-row
+        // `linear_states` into the capture path. The captured transformer
+        // is recorded on the PERSISTENT pool slot (zeros for a fresh
+        // bucket, stale for a reused one), so without seeding the slot from
+        // these rows first the captured first token is computed on the
+        // wrong GDN recurrent/conv history. `try_capture_batched` now seeds
+        // (and scatters back) exactly like the replay path above
+        // (refresh_batched_state_from_rows_in_place / scatter back).
         match self.try_capture_batched(
             backend,
             token_ids,
@@ -912,6 +920,7 @@ impl CudaGraphRunner {
             paged_cache,
             block_tables,
             sequence_lengths,
+            linear_states,
             lora,
         ) {
             Ok(tokens) => {
@@ -1973,6 +1982,13 @@ impl CudaGraphRunner {
         paged_cache: &PagedKvCacheKt,
         block_tables: &[&BlockTable],
         sequence_lengths: &[usize],
+        // #1082 bs>1 greedy-coherence fix: caller's per-row post-prefill GDN
+        // states. The capture seeds the persistent pool slot from these
+        // (refresh_batched_state_from_rows_in_place) BEFORE the warm/capture
+        // passes, then scatters the post-step slot back into them — exactly
+        // mirroring the replay path so the captured first token runs on the
+        // correct recurrent/conv history (not the slot's zeros/stale state).
+        linear_states: &mut [&mut LinearAttentionState],
         lora: Option<&LoraWeights>,
     ) -> Result<Vec<u32>> {
         use cudarc::driver::sys::CUstreamCaptureMode_enum::CU_STREAM_CAPTURE_MODE_RELAXED;
@@ -1983,7 +1999,9 @@ impl CudaGraphRunner {
             "try_capture_batched requires a non-empty batch"
         );
         anyhow::ensure!(
-            block_tables.len() == batch_size && sequence_lengths.len() == batch_size,
+            block_tables.len() == batch_size
+                && sequence_lengths.len() == batch_size
+                && linear_states.len() == batch_size,
             "try_capture_batched: row count mismatch"
         );
         let max_seq_len = *sequence_lengths.iter().max().expect("non-empty batch");
@@ -2078,6 +2096,29 @@ impl CudaGraphRunner {
             let persistent_state = self
                 .persistent_batched_state(batch_size, config, &device)?
                 .context("persistent batched state required for capture")?;
+            // #1082 bs>1 greedy-coherence fix: SEED the persistent pool slot
+            // from the caller's per-row post-prefill states IN PLACE before
+            // anything reads it. The slot is zeros for a fresh bucket or stale
+            // for a reused one; the captured transformer below records on this
+            // slot, so without this seed the captured first token is computed
+            // on wrong GDN recurrent/conv history (full-attn KV + MLP are
+            // unaffected). This mirrors the replay path's Step-(2) seed at the
+            // top of `decode_step_paged_batched` EXACTLY (same `row_refs`
+            // construction, same `refresh_batched_state_from_rows_in_place`
+            // call). It must run BEFORE the snapshot below so the snapshot
+            // captures the SEEDED contents — the warm pass then perturbs the
+            // seeded slot and the in-place restore returns it to the seeded
+            // state before capture (same as bs=1 which snapshots the caller's
+            // live state).
+            {
+                let row_refs: Vec<&crate::forward::LinearAttentionState> =
+                    linear_states.iter().map(|s| &**s).collect();
+                persistent_state
+                    .refresh_batched_state_from_rows_in_place(&row_refs)
+                    .context(
+                        "bs>1 capture: seed persistent GDN slot from caller per-row states",
+                    )?;
+            }
             Self::prepare_gdn_recurrent_state_for_capture(persistent_state)?;
             // Snapshot the persistent GDN slot before the warm pass advances it.
             let gdn_snapshot = persistent_state.snapshot().context(
@@ -2284,6 +2325,28 @@ impl CudaGraphRunner {
         stream
             .synchronize()
             .map_err(|e| anyhow::anyhow!("sync after first batched captured-graph launch: {e}"))?;
+        // #1082 bs>1 greedy-coherence fix: scatter the post-step persistent GDN
+        // slot back into the caller's per-row `linear_states` so this capture
+        // step advances them by exactly one token — same as the replay path's
+        // Step-(6) scatter (cuda_graph.rs scatter tail). The first launch above
+        // advanced the seeded slot in place; mirror the replay re-borrow of
+        // `self.batched_state_pool` (the capture-scope `&mut` borrow already
+        // ended when `graph_inputs` was dropped) and call
+        // `scatter_batch_rows_replace_with_backend(backend, linear_states)`
+        // EXACTLY as the replay tail does (same arg-borrow forms). Without this,
+        // the caller's per-row states stay at their pre-capture (post-prefill)
+        // values and the NEXT decode step seeds the slot from stale history.
+        {
+            let persistent = self
+                .batched_state_pool
+                .get_mut(&batch_size)
+                .context("missing persistent batched state slot at capture scatter time")?;
+            persistent
+                .scatter_batch_rows_replace_with_backend(backend, linear_states)
+                .context(
+                    "bs>1 capture: scatter post-step GDN slot back into caller per-row states",
+                )?;
+        }
         // #1082 boxes 432/433 (STEPS 2-3): run `final_norm` + lm_head EAGERLY on
         // the capture-step hidden to produce this step's logits — the large-N
         // lm_head cublasLt GEMV is OUT of the captured graph (box-102 BUG2 fix).
