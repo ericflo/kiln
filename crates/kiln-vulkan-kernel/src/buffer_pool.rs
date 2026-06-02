@@ -36,6 +36,16 @@ struct PoolInner {
     /// VulkanDevice is never reused on another (e.g., across tests
     /// that each construct their own device).
     by_device_bytes: HashMap<(vk::Device, u64), Vec<Arc<VulkanBuffer>>>,
+    /// Per-(device, host-mem-type, byte-size) FIFO of recycled
+    /// *host-visible* staging buffers. Kept separate from
+    /// `by_device_bytes` because these carry different memory
+    /// properties (HOST_VISIBLE) and must never be handed to a
+    /// device-local request (or vice versa). Recycling these kills the
+    /// per-`read_back` `vkAllocateMemory` (`amdgpu_bo_alloc` kernel
+    /// ioctl, tens-to-hundreds of MB each) that dominated the Vulkan
+    /// decode-weight prewarm — hundreds of weights × one fresh staging
+    /// BO apiece.
+    host_by_device_bytes: HashMap<(vk::Device, u32, u64), Vec<Arc<VulkanBuffer>>>,
 }
 
 static POOL: OnceLock<Mutex<PoolInner>> = OnceLock::new();
@@ -86,6 +96,67 @@ pub fn pool_alloc_device_local(
     Ok(arc)
 }
 
+/// Allocate (or recycle) a **host-visible** staging buffer of `bytes`
+/// bytes for D2H read-back (and small H2D staging).
+///
+/// Mirrors [`pool_alloc_device_local`] but keys on the host memory
+/// type as well, and takes the raw `ash::Device` + memory-type index
+/// directly (what `VulkanBuffer::read_back` already has in hand) so it
+/// needs no `VulkanDevice`. The returned `Arc<VulkanBuffer>` is
+/// recycled when the caller's last clone drops — so a `read_back` that
+/// grabs one, maps/copies, and returns hands it straight back to the
+/// pool for the next call. The returned buffer may be *larger* than
+/// `bytes` (bucket-rounded); callers must copy/read only the bytes
+/// they need (`read_back` already does — it copies `src.size` and maps
+/// `WHOLE_SIZE` but reads only `src.size`).
+pub fn pool_alloc_host_visible(
+    device: &Arc<ash::Device>,
+    host_mem_type: u32,
+    bytes: u64,
+) -> Result<Arc<VulkanBuffer>> {
+    // `bucket_for` always rounds UP (and floors at 4 bytes), so the buffer
+    // we hand back is always >= `bytes`. Callers (`read_back`) rely on this:
+    // they copy/read only the logical bytes, so a bucket-larger buffer is
+    // fine, but a SMALLER one would truncate the D2H copy. The debug_asserts
+    // below pin that invariant against any future `bucket_for` change.
+    let bucket = bucket_for(bytes);
+    let dev_handle = device.handle();
+    let key = (dev_handle, host_mem_type, bucket);
+    let mut inner = pool().lock().unwrap();
+    if let Some(slots) = inner.host_by_device_bytes.get_mut(&key) {
+        for slot in slots.iter() {
+            // Each caller gets a DISTINCT Arc (a free slot here, or a fresh
+            // alloc below), so concurrent `read_back`s never map/unmap the
+            // same VkDeviceMemory at once. The host memory type is
+            // HOST_COHERENT (see `VulkanDevice` mem-type selection), so the
+            // mapped read after `queue_wait_idle` needs no explicit
+            // vkInvalidateMappedMemoryRanges.
+            if Arc::strong_count(slot) == 1 {
+                debug_assert!(
+                    slot.size() >= bytes,
+                    "pooled host buffer {} < requested {bytes}",
+                    slot.size()
+                );
+                return Ok(Arc::clone(slot));
+            }
+        }
+    }
+    drop(inner); // release lock before vkAllocateMemory
+
+    let buf = VulkanBuffer::create_host_visible(device, host_mem_type, bucket)
+        .context("pool_alloc_host_visible: vkAllocateMemory")?;
+    debug_assert!(buf.size() >= bytes, "fresh host buffer {} < requested {bytes}", buf.size());
+    let arc = Arc::new(buf);
+
+    let mut inner = pool().lock().unwrap();
+    inner
+        .host_by_device_bytes
+        .entry(key)
+        .or_default()
+        .push(Arc::clone(&arc));
+    Ok(arc)
+}
+
 fn bucket_for(bytes: u64) -> u64 {
     let bytes = bytes.max(4);
     if bytes <= 65_536 {
@@ -107,6 +178,7 @@ pub fn pool_alloc_f32(device: &Arc<VulkanDevice>, n: usize) -> Result<Arc<Vulkan
 }
 
 /// Stats for diagnostics: returns (num_buckets, total_buffers, total_bytes).
+/// Counts both the device-local and host-visible staging pools.
 pub fn pool_stats() -> (usize, usize, u64) {
     let inner = pool().lock().unwrap();
     let mut total_bufs = 0usize;
@@ -115,7 +187,12 @@ pub fn pool_stats() -> (usize, usize, u64) {
         total_bufs += slots.len();
         total_bytes += size * (slots.len() as u64);
     }
-    (inner.by_device_bytes.len(), total_bufs, total_bytes)
+    for ((_dev, _mt, size), slots) in inner.host_by_device_bytes.iter() {
+        total_bufs += slots.len();
+        total_bytes += size * (slots.len() as u64);
+    }
+    let buckets = inner.by_device_bytes.len() + inner.host_by_device_bytes.len();
+    (buckets, total_bufs, total_bytes)
 }
 
 /// Drop all pooled buffers. Calls vkFreeMemory on each via the
@@ -123,6 +200,7 @@ pub fn pool_stats() -> (usize, usize, u64) {
 pub fn pool_drain() {
     let mut inner = pool().lock().unwrap();
     inner.by_device_bytes.clear();
+    inner.host_by_device_bytes.clear();
 }
 
 /// Drop all pooled buffers belonging to a specific Vulkan device.
@@ -134,4 +212,5 @@ pub fn pool_drain() {
 pub fn pool_drop_for_device(dev: vk::Device) {
     let mut inner = pool().lock().unwrap();
     inner.by_device_bytes.retain(|(d, _), _| *d != dev);
+    inner.host_by_device_bytes.retain(|(d, _, _), _| *d != dev);
 }

@@ -562,7 +562,13 @@ impl VulkanBuffer {
         queue_family_index: u32,
         src: &VulkanBuffer,
     ) -> Result<Vec<u8>> {
-        let staging = VulkanBuffer::create_host_visible(device, host_mem_type, src.size)?;
+        // Recycle the host-visible staging buffer instead of a fresh
+        // `amdgpu_bo_alloc` per call. The pooled buffer may be
+        // bucket-larger than `src.size`; we copy and read exactly
+        // `src.size` bytes below, so behaviour is unchanged. When this
+        // `Arc` drops at function end the buffer returns to the pool.
+        let staging =
+            crate::buffer_pool::pool_alloc_host_visible(device, host_mem_type, src.size)?;
 
         // Create command buffer
         let pool_info = make_pool_info(queue_family_index);
@@ -659,8 +665,11 @@ impl VulkanBuffer {
         }
         let total_len = usize::try_from(total_staging_bytes)
             .context("read_back_batch: staging size exceeds usize")?;
+        // Recycle the host-visible staging buffer (see `read_back`). The
+        // pooled buffer may exceed `total_staging_bytes`; we copy into
+        // `[0, total_staging_bytes)` and read only `total_len` bytes.
         let staging =
-            VulkanBuffer::create_host_visible(device, host_mem_type, total_staging_bytes)?;
+            crate::buffer_pool::pool_alloc_host_visible(device, host_mem_type, total_staging_bytes)?;
 
         let pool_info = make_pool_info(queue_family_index);
         let pool = unsafe {
