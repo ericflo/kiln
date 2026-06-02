@@ -202,6 +202,213 @@ pub fn vulkan_zeros(
 }
 
 // ----------------------------------------------------------------------
+// Zero-copy VulkanStorage <-> VkTensor bridge (#1082 PR3b)
+// ----------------------------------------------------------------------
+//
+// These two helpers replace the documented D2H + H2D host bounce in the
+// `vulkan_*_last_axis` wrappers above with an `Arc<VulkanBuffer>` refcount
+// bump in each direction. The kernel layer (`VkTensor`) and kt storage
+// (`VulkanStorage`) both hold the buffer behind an `Arc`, so handing the
+// buffer across the boundary is a pointer share, not a copy — the device
+// memory is never staged through the host.
+//
+// (Types referenced by fully-qualified path so this module-level code does
+// not clash with the function-local `use ...VkTensor` imports below.)
+
+/// Map a kt [`DType`] to the kernel's `VkDType`. Returns `None` for
+/// dtypes the Vulkan kernel layer cannot represent (anything but F32 /
+/// BF16 today); callers gate on this and fall through to the host path.
+fn kt_dtype_to_vk(dtype: DType) -> Option<kiln_vulkan_kernel::vk_tensor::VkDType> {
+    use kiln_vulkan_kernel::vk_tensor::VkDType;
+    match dtype {
+        DType::F32 => Some(VkDType::F32),
+        DType::BF16 => Some(VkDType::Bf16),
+        _ => None,
+    }
+}
+
+/// Map a kernel `VkDType` back to the kt [`DType`].
+fn vk_dtype_to_kt(dtype: kiln_vulkan_kernel::vk_tensor::VkDType) -> DType {
+    use kiln_vulkan_kernel::vk_tensor::VkDType;
+    match dtype {
+        VkDType::F32 => DType::F32,
+        VkDType::Bf16 => DType::BF16,
+    }
+}
+
+/// Zero-copy bridge: view a Vulkan-backed kt [`crate::Tensor`] as a
+/// `VkTensor` for the kernel layer, sharing the underlying
+/// `vk::DeviceMemory` (no D2H/H2D). The `Arc<VulkanBuffer>` refcount is
+/// bumped; the device memory is freed exactly once when the last handle
+/// on either side drops.
+///
+/// # Requirements
+///
+/// - `t` must be backed by [`VulkanStorage`]
+/// - `t.is_contiguous()` and `t.layout().start_offset() == 0` (the
+///   `VkTensor` model is always whole-buffer C-contiguous; a strided or
+///   offset view does not share a clean buffer image)
+/// - `t.dtype()` must map to a `VkDType` (F32/BF16)
+///
+/// Shape and dtype are preserved exactly. The `VulkanBuffer`'s physical
+/// allocation may be pool-bucket-rounded larger than the logical element
+/// range; the kernel only addresses `shape * dtype` elements, so the
+/// rounding is harmless here.
+///
+/// # Errors
+///
+/// Returns [`Error::Msg`] on non-Vulkan storage, non-contiguous / offset
+/// layout, or unsupported dtype.
+pub fn vk_tensor_from_kt(
+    t: &crate::Tensor,
+) -> Result<kiln_vulkan_kernel::vk_tensor::VkTensor> {
+    use kiln_vulkan_kernel::vk_tensor::VkTensor;
+    let kt_vk = t
+        .storage()
+        .as_any()
+        .downcast_ref::<VulkanStorage>()
+        .ok_or_else(|| {
+            Error::Msg("vk_tensor_from_kt: tensor must be Vulkan-backed".to_string())
+        })?;
+    if !t.is_contiguous() {
+        return Err(Error::Msg(
+            "vk_tensor_from_kt: tensor must be contiguous".to_string(),
+        ));
+    }
+    if t.layout().start_offset() != 0 {
+        return Err(Error::Msg(
+            "vk_tensor_from_kt: tensor must have start_offset == 0 (VkTensor is whole-buffer)"
+                .to_string(),
+        ));
+    }
+    let vk_dtype = kt_dtype_to_vk(t.dtype()).ok_or_else(|| {
+        Error::Msg(format!(
+            "vk_tensor_from_kt: dtype {} has no VkDType mapping (F32/BF16 only)",
+            t.dtype()
+        ))
+    })?;
+    // Zero-copy: clone the Arc handle (refcount bump, no device copy).
+    let buffer = kt_vk.buffer_arc();
+    let device = Arc::clone(kt_vk.vulkan_device());
+    Ok(VkTensor::from_buffer(
+        buffer,
+        t.shape().to_vec(),
+        vk_dtype,
+        device,
+    ))
+}
+
+/// Zero-copy bridge: wrap a kernel `VkTensor` result as a Vulkan-backed kt
+/// [`crate::Tensor`], sharing the underlying `vk::DeviceMemory` (no
+/// D2H/H2D).
+///
+/// CRITICAL: the kt-side logical byte length recorded on the
+/// [`VulkanStorage`] is `n_elements * dtype.size_in_bytes()`, computed
+/// from the `VkTensor`'s shape + dtype — **not** the `VulkanBuffer`'s
+/// physical allocation size, which the kernel buffer pool bucket-rounds
+/// up (to >= 64 KiB). Recording the rounded size would mis-report
+/// `byte_len()` and corrupt any downstream byte-range slice / readback.
+///
+/// `device_index` is the [`Device::Vulkan`] ordinal to stamp on the
+/// resulting storage (the `VkTensor` does not carry one; callers pass the
+/// ordinal of the inputs they bridged from).
+///
+/// # Errors
+///
+/// Returns [`Error::Msg`] if the resulting [`crate::Tensor`] cannot be
+/// assembled.
+pub fn kt_tensor_from_vk(
+    vk: &kiln_vulkan_kernel::vk_tensor::VkTensor,
+    device_index: usize,
+) -> Result<crate::Tensor> {
+    let dtype = vk_dtype_to_kt(vk.dtype());
+    let shape = vk.shape().to_vec();
+    let n_elements: usize = shape.iter().product();
+    // Logical byte length — NOT VulkanBuffer::size() (pool-rounded).
+    let byte_len = n_elements * dtype.size_in_bytes();
+    let device = Arc::clone(vk.device());
+    // Zero-copy: clone the Arc handle (refcount bump, no device copy).
+    let buffer = Arc::clone(vk.buffer());
+    let storage = VulkanStorage::from_arc_buffer(
+        device,
+        device_index,
+        dtype,
+        buffer,
+        byte_len as u64,
+    )?;
+    let storage_arc: crate::Storage = Arc::new(storage);
+    crate::Tensor::from_parts(
+        storage_arc,
+        crate::Layout::contiguous(shape),
+        crate::TensorId::next(),
+    )
+}
+
+// ----------------------------------------------------------------------
+// vulkan_matmul — Phase 3b perf-critical GEMM (#1082)
+// ----------------------------------------------------------------------
+
+/// Vulkan rank-2 F32 GEMM `[M, K] @ [K, N] = [M, N]`. Mirrors the role of
+/// [`crate::cuda_matmul`] / [`crate::metal_matmul`] for the Vulkan backend.
+///
+/// Bridges both inputs to `VkTensor` zero-copy (see [`vk_tensor_from_kt`]),
+/// dispatches the production
+/// `kiln_vulkan_kernel::vk_ops::matmul::vk_matmul_no_grad` shader, and
+/// bridges the result back zero-copy (see [`kt_tensor_from_vk`]). No D2H /
+/// H2D round-trip — the data stays GPU-resident end to end.
+///
+/// # Requirements
+///
+/// - `a` and `b` both backed by [`VulkanStorage`] (same device)
+/// - `a.dtype() == b.dtype() == F32` (the kernel is F32-only today)
+/// - both rank-2 and contiguous, with matching contraction dim
+///
+/// Callers (`MatmulOp::vulkan_fwd`) gate these preconditions and return
+/// `Ok(None)` (host fallback) for anything this kernel does not cover
+/// (batched / higher-rank, BF16/F16, non-contiguous). This function still
+/// validates and errors loudly if called with an unsupported shape.
+///
+/// # Errors
+///
+/// Returns [`Error::Msg`] on non-Vulkan storage, dtype/shape violations,
+/// or kernel dispatch failure.
+pub fn vulkan_matmul(a: &crate::Tensor, b: &crate::Tensor) -> Result<crate::Tensor> {
+    use kiln_vulkan_kernel::vk_ops::matmul::vk_matmul_no_grad;
+
+    if a.dtype() != DType::F32 || b.dtype() != DType::F32 {
+        return Err(Error::Msg(format!(
+            "vulkan_matmul: F32-only kernel (got a={}, b={})",
+            a.dtype(),
+            b.dtype()
+        )));
+    }
+    if a.rank() != 2 || b.rank() != 2 {
+        return Err(Error::Msg(format!(
+            "vulkan_matmul: rank-2 only (got a.rank={}, b.rank={})",
+            a.rank(),
+            b.rank()
+        )));
+    }
+
+    let device_index = match a
+        .storage()
+        .as_any()
+        .downcast_ref::<VulkanStorage>()
+        .ok_or_else(|| Error::Msg("vulkan_matmul: a must be Vulkan-backed".to_string()))?
+        .device()
+    {
+        Device::Vulkan(i) => i,
+        _ => unreachable!("VulkanStorage::device() returns Device::Vulkan"),
+    };
+
+    let vk_a = vk_tensor_from_kt(a)?;
+    let vk_b = vk_tensor_from_kt(b)?;
+    let vk_out = vk_matmul_no_grad(&vk_a, &vk_b)
+        .map_err(|e| Error::Msg(format!("vulkan_matmul: kernel dispatch failed: {e}")))?;
+    kt_tensor_from_vk(&vk_out, device_index)
+}
+
+// ----------------------------------------------------------------------
 // Host ↔ Vulkan I/O — candle-free device staging (#1082 PR2)
 // ----------------------------------------------------------------------
 //
