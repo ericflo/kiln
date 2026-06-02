@@ -74,6 +74,12 @@ mod vulkan_allocator;
 mod vulkan_storage;
 #[cfg(feature = "vulkan")]
 pub mod vk_shaders;
+#[cfg(feature = "rocm")]
+mod active_rocm_stream;
+#[cfg(feature = "rocm")]
+mod rocm_allocator;
+#[cfg(feature = "rocm")]
+mod rocm_storage;
 
 pub use activation_registry::{
     selective_recompute_recommendation, Activation, ActivationId, ActivationKind, ActivationRef,
@@ -164,4 +170,14 @@ pub use vulkan_storage::{
     vulkan_rmsnorm_last_axis,
     vulkan_scale, vulkan_slice_set_dim0, vulkan_softmax_last_axis, vulkan_unary_math,
     vulkan_sum_all, vulkan_to_host_copy, vulkan_zeros, vk_tensor_from_kt, VulkanStorage,
+};
+#[cfg(feature = "rocm")]
+pub use active_rocm_stream::{active_rocm_stream, with_active_rocm_stream};
+#[cfg(feature = "rocm")]
+pub use rocm_allocator::RocmAllocator;
+#[cfg(feature = "rocm")]
+pub use rocm_storage::{
+    host_to_rocm_copy, host_to_rocm_copy_ctx, primary_rocm_context, rocm_contiguous,
+    rocm_is_available, rocm_synchronize_default_stream, rocm_to_host_copy, rocm_zeros_ctx,
+    RocmStorage,
 };

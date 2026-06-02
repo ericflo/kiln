@@ -1,0 +1,479 @@
+//! ROCm/HIP storage impl behind the `rocm` feature flag (Phase R.3).
+//!
+//! The candle-free ROCm analog of [`crate::cuda_storage`]: wraps a
+//! `kiln_hip::RocmSlice` (the device buffer) + dtype + `Arc<RocmContext>` for
+//! stream affinity. `RocmStorage` is the `StorageBackend` impl that makes
+//! `Device::Rocm` tensors allocatable; the math ops that consume it land in
+//! Phase R.5 (the hipcc-compiled `csrc/*.cu` kernels).
+//!
+//! This file mirrors `cuda_storage.rs`'s storage core 1:1, swapping
+//! `cudarc::driver::{CudaContext, CudaStream, CudaSlice}` for
+//! `kiln_hip::{RocmContext, RocmStream, RocmSlice}` and routing every stream
+//! resolution through [`crate::active_rocm_stream`]. The capture-arena fast
+//! path (CUDA-graph freeze-pointers) is deferred to Phase R.9.
+
+use std::any::Any;
+use std::sync::Arc;
+
+use kiln_hip::{RocmContext, RocmSlice};
+
+use crate::{DType, Device, Error, Result, StorageBackend};
+
+// The ROCm-side kernel launchers live in `csrc/*.cu`, compiled by
+// `build.rs::build_rocm()` into `libkiln_tensor_rocm_ops.a` (same stable C ABI
+// as the CUDA build). Phase R.3 uses only the contiguity-copy launcher; the
+// rest join as their kernels gain the Phase R.5 wave-size fix.
+unsafe extern "C" {
+    fn kiln_contiguous_copy_async(
+        src: *const core::ffi::c_void,
+        dst: *mut core::ffi::c_void,
+        shape: *const i64,
+        strides_e: *const i64,
+        rank: i32,
+        bytes_per_elem: i32,
+        n_elements: i64,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
+}
+
+/// Owner of a ROCm byte buffer — either kt owns the allocation (`Owned`) or kt
+/// shares a buffer owned elsewhere (`Borrowed`, kept alive by an opaque Arc).
+/// The Borrowed variant is the foundation for the zero-copy kt-bridge adapter
+/// (Phase R.4): dropping it just decrements the keep-alive Arc, never freeing
+/// device memory directly.
+pub(crate) enum SliceOwner {
+    Owned(RocmSlice),
+    /// Borrowed view over an externally-owned HIP buffer. `ptr` is the raw
+    /// device address (`hipDeviceptr_t` normalized to a `u64`). `_keep_alive`
+    /// must outlive every read from `ptr`.
+    Borrowed {
+        ptr: u64,
+        byte_len: usize,
+        _keep_alive: Arc<dyn Any + Send + Sync>,
+    },
+}
+
+impl std::fmt::Debug for SliceOwner {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Owned(s) => f.debug_struct("Owned").field("len", &s.len()).finish(),
+            Self::Borrowed { ptr, byte_len, .. } => f
+                .debug_struct("Borrowed")
+                .field("ptr", &format_args!("0x{ptr:x}"))
+                .field("byte_len", byte_len)
+                .finish(),
+        }
+    }
+}
+
+/// ROCm-backed storage. Byte-typed; dtype carried alongside for dispatch.
+///
+/// Either owns its `RocmSlice` allocation or borrows an external HIP buffer via
+/// a keep-alive Arc (see [`SliceOwner`]). Holds an `Arc<RocmContext>` for stream
+/// affinity — every kernel-launch path resolves
+/// `crate::active_rocm_stream(&self.ctx)` to get the live stream handle.
+#[derive(Debug)]
+pub struct RocmStorage {
+    device: Device,
+    dtype: DType,
+    slice: SliceOwner,
+    ctx: Arc<RocmContext>,
+}
+
+impl RocmStorage {
+    /// Allocate `n_elements` of `dtype`, zero-initialized, on `ctx`. Routes
+    /// through the thread-local active stream so the alloc is captured on the
+    /// capture stream during HIP-graph capture (Phase R.9); outside capture
+    /// this is exactly `ctx.default_stream()`.
+    pub fn zeros_ctx(
+        ctx: &Arc<RocmContext>,
+        device_index: usize,
+        dtype: DType,
+        n_elements: usize,
+    ) -> Result<Self> {
+        let byte_len = dtype.packed_buffer_bytes(n_elements);
+        let slice = crate::active_rocm_stream(ctx)
+            .alloc_zeros(byte_len)
+            .map_err(|e| {
+                Error::Msg(format!(
+                    "RocmStorage::zeros_ctx: active_rocm_stream(ctx).alloc_zeros({byte_len}) \
+                     failed: {e:?}"
+                ))
+            })?;
+        Ok(RocmStorage {
+            device: Device::Rocm(device_index),
+            dtype,
+            slice: SliceOwner::Owned(slice),
+            ctx: ctx.clone(),
+        })
+    }
+
+    /// Allocate `n_elements` of `dtype` **UNINITIALIZED** on `ctx` — skips the
+    /// zero-fill. The caller MUST fully overwrite the buffer before any read
+    /// (use [`Self::zeros_ctx`] for read-before-write / accumulation outputs).
+    pub fn alloc_uninit_ctx(
+        ctx: &Arc<RocmContext>,
+        device_index: usize,
+        dtype: DType,
+        n_elements: usize,
+    ) -> Result<Self> {
+        let byte_len = dtype.packed_buffer_bytes(n_elements);
+        let slice = crate::active_rocm_stream(ctx).alloc(byte_len).map_err(|e| {
+            Error::Msg(format!(
+                "RocmStorage::alloc_uninit_ctx: active_rocm_stream(ctx).alloc({byte_len}) \
+                 failed: {e:?}"
+            ))
+        })?;
+        Ok(RocmStorage {
+            device: Device::Rocm(device_index),
+            dtype,
+            slice: SliceOwner::Owned(slice),
+            ctx: ctx.clone(),
+        })
+    }
+
+    /// Wrap an existing `RocmSlice` allocated by the caller. Validates length
+    /// against `dtype.size_in_bytes()` for non-packed dtypes.
+    pub fn from_slice_ctx(
+        ctx: &Arc<RocmContext>,
+        device_index: usize,
+        dtype: DType,
+        slice: RocmSlice,
+    ) -> Result<Self> {
+        if !dtype.is_packed() {
+            let per = dtype.size_in_bytes();
+            if per > 0 && !slice.len().is_multiple_of(per) {
+                return Err(Error::Msg(format!(
+                    "RocmStorage::from_slice_ctx: slice len {} is not a multiple of \
+                     size_in_bytes({:?}) = {}",
+                    slice.len(),
+                    dtype,
+                    per
+                )));
+            }
+        }
+        Ok(RocmStorage {
+            device: Device::Rocm(device_index),
+            dtype,
+            slice: SliceOwner::Owned(slice),
+            ctx: ctx.clone(),
+        })
+    }
+
+    /// Wrap an externally-owned HIP buffer as a kt `RocmStorage` without
+    /// copying. `keep_alive` must outlive every read from `device_ptr`.
+    pub fn from_borrowed_ctx(
+        ctx: &Arc<RocmContext>,
+        device_index: usize,
+        dtype: DType,
+        device_ptr: u64,
+        byte_len: usize,
+        keep_alive: Arc<dyn Any + Send + Sync>,
+    ) -> Result<Self> {
+        if !dtype.is_packed() {
+            let per = dtype.size_in_bytes();
+            if per > 0 && !byte_len.is_multiple_of(per) {
+                return Err(Error::Msg(format!(
+                    "RocmStorage::from_borrowed_ctx: byte_len {byte_len} is not a multiple of \
+                     size_in_bytes({dtype:?}) = {per}"
+                )));
+            }
+        }
+        Ok(RocmStorage {
+            device: Device::Rocm(device_index),
+            dtype,
+            slice: SliceOwner::Borrowed {
+                ptr: device_ptr,
+                byte_len,
+                _keep_alive: keep_alive,
+            },
+            ctx: ctx.clone(),
+        })
+    }
+
+    /// Whether this storage owns its underlying HIP buffer.
+    pub fn is_owned(&self) -> bool {
+        matches!(self.slice, SliceOwner::Owned(_))
+    }
+
+    /// Whether this storage borrows its buffer from an external owner.
+    pub fn is_borrowed(&self) -> bool {
+        matches!(self.slice, SliceOwner::Borrowed { .. })
+    }
+
+    /// Borrow the underlying `RocmSlice`. **Panics** on a `Borrowed` storage —
+    /// use [`Self::device_ptr_raw`] for the owner-agnostic raw pointer.
+    pub fn slice(&self) -> &RocmSlice {
+        match &self.slice {
+            SliceOwner::Owned(s) => s,
+            SliceOwner::Borrowed { .. } => panic!(
+                "RocmStorage::slice() called on Borrowed storage; use device_ptr_raw() which \
+                 supports both owners"
+            ),
+        }
+    }
+
+    /// Mutable borrow for in-place ops. **Panics** on a `Borrowed` storage —
+    /// borrowed buffers are read-only through kt.
+    pub fn slice_mut(&mut self) -> &mut RocmSlice {
+        match &mut self.slice {
+            SliceOwner::Owned(s) => s,
+            SliceOwner::Borrowed { .. } => panic!(
+                "RocmStorage::slice_mut() called on Borrowed storage; borrowed buffers are \
+                 read-only through kt"
+            ),
+        }
+    }
+
+    /// Raw device pointer (`hipDeviceptr_t` as `u64`) + byte length, for both
+    /// `Owned` and `Borrowed` variants. Callers add the kt-Tensor's
+    /// `layout.start_offset() * dtype.size_in_bytes()` to reach the live region.
+    pub fn device_ptr_raw(&self) -> (u64, usize) {
+        match &self.slice {
+            SliceOwner::Owned(s) => (s.device_ptr() as u64, s.len()),
+            SliceOwner::Borrowed { ptr, byte_len, .. } => (*ptr, *byte_len),
+        }
+    }
+
+    /// The `RocmContext` this storage was allocated on — cheap Arc clone.
+    pub fn context(&self) -> Arc<RocmContext> {
+        self.ctx.clone()
+    }
+
+    /// Raw HIP stream pointer for FFI dispatch — the `stream` argument every
+    /// kernel-crate FFI declaration expects (`*mut c_void`). Resolves through
+    /// the thread-local active stream (capture stream during HIP-graph capture;
+    /// `ctx.default_stream()` otherwise).
+    pub fn rocm_stream_raw(&self) -> *mut core::ffi::c_void {
+        crate::active_rocm_stream(&self.ctx).hip_stream() as *mut core::ffi::c_void
+    }
+
+    /// Crate-internal accessor for the slice owner.
+    pub(crate) fn slice_owner(&self) -> &SliceOwner {
+        &self.slice
+    }
+}
+
+/// Construct the primary `Arc<RocmContext>` for `device_index` — the ROCm analog
+/// of `primary_cuda_context`. `Err` if the device isn't available.
+pub fn primary_rocm_context(device_index: usize) -> Result<Arc<RocmContext>> {
+    RocmContext::new(device_index)
+        .map_err(|e| Error::Msg(format!("primary_rocm_context({device_index}): {e}")))
+}
+
+/// Whether a HIP runtime + at least one AMD device is present. The ROCm analog
+/// of `cuda_is_available`; swallows driver errors into `false`.
+pub fn rocm_is_available() -> bool {
+    kiln_hip::is_available()
+}
+
+impl StorageBackend for RocmStorage {
+    fn device(&self) -> Device {
+        self.device
+    }
+
+    fn dtype(&self) -> DType {
+        self.dtype
+    }
+
+    fn byte_len(&self) -> usize {
+        match &self.slice {
+            SliceOwner::Owned(s) => s.len(),
+            SliceOwner::Borrowed { byte_len, .. } => *byte_len,
+        }
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+/// Construct a fresh [`crate::Storage`] holding a zeroed [`RocmStorage`].
+/// The ROCm analog of `cuda_zeros_ctx`.
+pub fn rocm_zeros_ctx(device_index: usize, dtype: DType, n_elements: usize) -> Result<crate::Storage> {
+    let ctx = primary_rocm_context(device_index)?;
+    let storage = RocmStorage::zeros_ctx(&ctx, device_index, dtype, n_elements)?;
+    Ok(Arc::new(storage))
+}
+
+/// Block until all work on `device_index`'s device completes. ROCm analog of
+/// `cuda_synchronize_default_stream`.
+pub fn rocm_synchronize_default_stream(device_index: usize) -> Result<()> {
+    let ctx = primary_rocm_context(device_index)?;
+    ctx.synchronize()
+        .map_err(|e| Error::Msg(format!("rocm_synchronize_default_stream({device_index}): {e:?}")))
+}
+
+// ----------------------------------------------------------------------
+// ROCm-side Tensor::contiguous — the first storage→kernel op, proving the
+// hipcc FFI path end-to-end (contiguous.cu is compiled in build_rocm()).
+// ----------------------------------------------------------------------
+
+/// Stride-aware copy of a (possibly non-contiguous) ROCm storage into a fresh
+/// contiguous output. ROCm analog of `cuda_contiguous`.
+pub fn rocm_contiguous(src: &crate::Tensor) -> Result<crate::Tensor> {
+    if src.dtype().is_packed() {
+        return Err(Error::Msg(
+            "rocm_contiguous: packed dtype not supported".to_string(),
+        ));
+    }
+
+    let layout = src.layout();
+    let shape = src.shape();
+    let strides_elems = src.strides();
+    let rank = shape.len();
+    if rank > 8 {
+        return Err(Error::Msg(format!(
+            "rocm_contiguous: rank {rank} exceeds kernel MAX_RANK=8"
+        )));
+    }
+    let n_elements = src.element_count();
+    let bpe = src.dtype().size_in_bytes();
+
+    let src_storage = src
+        .storage()
+        .as_any()
+        .downcast_ref::<RocmStorage>()
+        .ok_or_else(|| Error::Msg("rocm_contiguous: source must be ROCm storage".to_string()))?;
+
+    let ctx = src_storage.context();
+    let device_index = match src_storage.device {
+        Device::Rocm(i) => i,
+        _ => unreachable!("RocmStorage::device is always Rocm"),
+    };
+    let dst_storage = RocmStorage::zeros_ctx(&ctx, device_index, src.dtype(), n_elements)?;
+
+    let raw_stream = src_storage.rocm_stream_raw();
+
+    let (src_base, _) = src_storage.device_ptr_raw();
+    let (dst_base, _) = dst_storage.device_ptr_raw();
+
+    let src_byte_off = (layout.start_offset() * bpe) as u64;
+    let src_ptr = (src_base + src_byte_off) as *const core::ffi::c_void;
+    let dst_ptr = dst_base as *mut core::ffi::c_void;
+
+    let shape_i64: Vec<i64> = shape.iter().map(|&d| d as i64).collect();
+    let strides_i64: Vec<i64> = strides_elems.iter().map(|&s| s as i64).collect();
+
+    let status = unsafe {
+        kiln_contiguous_copy_async(
+            src_ptr,
+            dst_ptr,
+            shape_i64.as_ptr(),
+            strides_i64.as_ptr(),
+            rank as i32,
+            bpe as i32,
+            n_elements as i64,
+            raw_stream,
+        )
+    };
+    if status != 0 {
+        return Err(Error::Msg(format!(
+            "rocm_contiguous: kiln_contiguous_copy_async returned status {status}"
+        )));
+    }
+
+    let storage_arc: crate::Storage = Arc::new(dst_storage);
+    crate::Tensor::from_parts(
+        storage_arc,
+        crate::Layout::contiguous(shape.to_vec()),
+        crate::TensorId::next(),
+    )
+    .map_err(|e| Error::Msg(format!("rocm_contiguous: wrap: {e}")))
+}
+
+/// Copy a ROCm-resident tensor back to host (CPU) storage. ROCm analog of
+/// `cuda_to_host_copy`.
+pub fn rocm_to_host_copy(src: &crate::Tensor) -> Result<crate::Tensor> {
+    if src.dtype().is_packed() {
+        return Err(Error::Msg(format!(
+            "rocm_to_host_copy: packed dtype {} not supported",
+            src.dtype()
+        )));
+    }
+
+    // Force a contiguous, start_offset=0 device buffer first (Owned output with
+    // a usable `slice()`).
+    let contig = rocm_contiguous(src)?;
+    let contig_storage = contig
+        .storage()
+        .as_any()
+        .downcast_ref::<RocmStorage>()
+        .ok_or_else(|| {
+            Error::Msg("rocm_to_host_copy: contiguous'd storage must be RocmStorage".to_string())
+        })?;
+
+    let dtype = src.dtype();
+    let ctx = contig_storage.context();
+    let stream = crate::active_rocm_stream(&ctx);
+    let host_bytes = stream
+        .memcpy_dtoh(contig_storage.slice())
+        .map_err(|e| Error::Msg(format!("rocm_to_host_copy: memcpy_dtoh failed: {e:?}")))?;
+
+    let cpu_storage = crate::CpuStorage::from_bytes(dtype, host_bytes)?;
+    let storage_arc: crate::Storage = Arc::new(cpu_storage);
+    crate::Tensor::from_parts(
+        storage_arc,
+        crate::Layout::contiguous(src.shape().to_vec()),
+        crate::TensorId::next(),
+    )
+}
+
+/// Copy a contiguous host (CPU) tensor up to a fresh ROCm buffer on
+/// `device_index`. ROCm analog of `host_to_cuda_copy`.
+pub fn host_to_rocm_copy(src: &crate::Tensor, device_index: usize) -> Result<crate::Tensor> {
+    if src.dtype().is_packed() {
+        return Err(Error::Msg(format!(
+            "host_to_rocm_copy: packed dtype {} not supported",
+            src.dtype()
+        )));
+    }
+    let _cpu_storage = src
+        .storage()
+        .as_any()
+        .downcast_ref::<crate::CpuStorage>()
+        .ok_or_else(|| Error::Msg("host_to_rocm_copy: source must be CPU storage".to_string()))?;
+
+    let dtype = src.dtype();
+    let n_elements = src.element_count();
+    let byte_len = dtype.packed_buffer_bytes(n_elements);
+
+    let contig_src = if src.is_contiguous() && src.layout().start_offset() == 0 {
+        src.clone()
+    } else {
+        src.contiguous()?
+    };
+    let contig_cpu = contig_src
+        .storage()
+        .as_any()
+        .downcast_ref::<crate::CpuStorage>()
+        .ok_or_else(|| Error::Msg("host_to_rocm_copy: contig src must be CPU storage".to_string()))?;
+    let bytes = contig_cpu.as_bytes();
+    if bytes.len() != byte_len {
+        return Err(Error::Msg(format!(
+            "host_to_rocm_copy: src byte_len {} != expected {}",
+            bytes.len(),
+            byte_len
+        )));
+    }
+
+    let ctx = primary_rocm_context(device_index)?;
+    let stream = crate::active_rocm_stream(&ctx);
+    let device_slice = stream
+        .clone_htod(bytes)
+        .map_err(|e| Error::Msg(format!("host_to_rocm_copy: clone_htod failed: {e:?}")))?;
+    let rocm_storage = RocmStorage::from_slice_ctx(&ctx, device_index, dtype, device_slice)?;
+
+    let storage_arc: crate::Storage = Arc::new(rocm_storage);
+    crate::Tensor::from_parts(
+        storage_arc,
+        crate::Layout::contiguous(src.shape().to_vec()),
+        crate::TensorId::next(),
+    )
+}
+
+/// Host → ROCm copy — back-compat alias for [`host_to_rocm_copy`], mirroring
+/// `host_to_cuda_copy_ctx`.
+pub fn host_to_rocm_copy_ctx(src: &crate::Tensor, device_index: usize) -> Result<crate::Tensor> {
+    host_to_rocm_copy(src, device_index)
+}

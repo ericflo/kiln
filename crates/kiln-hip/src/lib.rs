@@ -333,6 +333,15 @@ impl RocmStream {
         self.synchronize()
     }
 
+    /// Allocate a device buffer of `src.len()` bytes and copy `src` into it
+    /// (H2D), synchronizing before return. The one-shot analog of cudarc's
+    /// `CudaStream::clone_htod`.
+    pub fn clone_htod(self: &Arc<Self>, src: &[u8]) -> Result<RocmSlice> {
+        let mut slice = self.alloc(src.len())?;
+        self.memcpy_htod(&mut slice, src)?;
+        Ok(slice)
+    }
+
     /// Copy a device slice back to a freshly allocated host `Vec`, synchronizing
     /// before returning.
     pub fn memcpy_dtoh(&self, src: &RocmSlice) -> Result<Vec<u8>> {
