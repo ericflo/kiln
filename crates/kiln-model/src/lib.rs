@@ -34,6 +34,8 @@ pub mod speculative;
 pub mod tape_forward;
 mod transposed_weight_cache;
 #[cfg(feature = "vulkan")]
+pub mod vk_bwd_adapter;
+#[cfg(feature = "vulkan")]
 pub mod vk_decode_resident;
 #[cfg(feature = "vulkan")]
 pub mod vk_forward;
