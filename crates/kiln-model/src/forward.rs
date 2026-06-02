@@ -2603,7 +2603,8 @@ fn add_lora_delta_to_base(
     // CP-4 (#1082) seam flip: kt-native tape-routed LoRA add — records a
     // `LoraDeltaAddBackward` emitting grads for proj.a/proj.b (kt-keyed on their Var
     // ids), no kt->candle->kt round-trip.
-    #[cfg(any(feature = "cuda", feature = "metal"))]
+    // (#1082) Vulkan added: device-agnostic pure-kt recorder.
+    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
     if let Some(out) = crate::tape_forward::try_tape_lora_add_kt(&base, x, proj, lora_scale)
         .context("add_lora_delta_to_base try_tape_lora_add_kt")?
     {
@@ -2726,7 +2727,12 @@ fn linear_with_lora_t_backend_decode_if(
         // this branch; decode falls straight through to the kt-native
         // `backend.linear_decode`.
         // #1082 seam flip: kt-native linear+LoRA recorder — no kt->candle->kt.
-        #[cfg(any(feature = "cuda", feature = "metal"))]
+        // (#1082) Vulkan added: `try_tape_lora_linear_kt` is a device-agnostic
+        // pure-kt recorder (proven on Vulkan by `vk_sft_step_proof`), and it is
+        // the SOLE producer of the LoRA A/B backward. PR6 wired Vulkan into the
+        // `tape_forward.rs` device-matches but missed this `cfg` gate, so LoRA
+        // grads were never recorded on Vulkan → empty grad store.
+        #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
         if crate::tape_forward::tape_forward_enabled() {
             if let Some(out) =
                 crate::tape_forward::try_tape_lora_linear_kt(x, weight_t, lora, lora_scale)
@@ -6525,7 +6531,8 @@ pub fn embedding_lookup(token_ids: &[u32], embed_weights: &Tensor) -> Result<Ten
     // the bridge scope makes decode fall straight through to the kt-native
     // `try_kt_embedding_lookup` below.
     // #1082 seam flip: kt-native EmbeddingBackward recorder — no kt->candle->kt.
-    #[cfg(any(feature = "cuda", feature = "metal"))]
+    // (#1082) Vulkan added: device-agnostic pure-kt recorder.
+    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
     if crate::tape_forward::tape_forward_enabled() {
         if let Some(out) = crate::tape_forward::try_tape_embedding_kt(embed_weights, &index)
             .context("embedding_lookup try_tape_embedding_kt")?
@@ -6916,6 +6923,23 @@ pub fn rms_norm(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor> {
         {
             return crate::backend::metal::metal_rms_norm_bf16(x, weight, eps as f32)
                 .context("metal rms_norm kernel failed");
+        }
+    }
+    // (#1082) Vulkan training/tape path: the CUDA `fused_rmsnorm_via_kt_tape`
+    // and Metal `try_tape_rms_norm_kt` recorders above both compile out on a
+    // Vulkan-only build, so route the tape-recording RMSNorm through the
+    // device-agnostic kt adapter (`try_tape_rms_norm_kt` — pure `kiln_tensor`
+    // ops + `RmsNormKtBackward`) when a tape scope is active. Without this the
+    // pre-attn / pre-mlp / final RMSNorm would sever the tape and every in-block
+    // LoRA grad comes back empty (constant SFT loss). No-ops (returns None)
+    // outside a tape scope — Vulkan inference falls through to the leaf kernel
+    // below.
+    #[cfg(feature = "vulkan")]
+    if crate::tape_forward::tape_forward_enabled() {
+        if let Some(out) = crate::tape_forward::try_tape_rms_norm_kt(x, weight, eps as f32)
+            .context("rms_norm try_tape_rms_norm_kt (vulkan)")?
+        {
+            return Ok(out);
         }
     }
     // Vulkan inference path: leaf-fast forward kernel. Skipped for
@@ -7508,6 +7532,14 @@ pub fn rotary_embedding(
 ) -> Result<(Tensor, Tensor)> {
     let device = q.device();
 
+    // (#1082) Align `inv_freq` to the ACTIVATION device. On Vulkan the loader
+    // keeps `inv_freq` CPU-host (`loader_kt_device`), but the training-time q/k
+    // are Vulkan-resident, so `pos.broadcast_mul(&inv_freq)` would mix a
+    // Vulkan `pos` with a CPU `inv_freq` and the kt DeviceOp2 "mul" errors with
+    // "inputs on different devices". The `[rotary_dim/2]` table is tiny; on
+    // CUDA/Metal it is already on `device` so `to_device` is a no-op.
+    let inv_freq = inv_freq.to_device(device)?;
+
     // Position tensor
     // #1082: kt has no `Tensor::new(slice, &Device)`; build a 1-D kt tensor on
     // the source device via `from_vec_on`, then unsqueeze to [seq_len, 1].
@@ -7554,6 +7586,17 @@ pub fn rotary_embedding_from_tensor(
     rotary_dim: usize,
     inv_freq: &Tensor,
 ) -> Result<(Tensor, Tensor)> {
+    // (#1082) Align the rotary tables to the ACTIVATION device. On Vulkan the
+    // loader keeps `inv_freq` (and the position ramp) CPU-host
+    // (`loader_kt_device`), but the training-time q/k activations are
+    // Vulkan-resident — so `pos.broadcast_mul(&inv_freq)` (and the downstream
+    // `apply_rope` muls) would otherwise mix CPU + Vulkan operands and the kt
+    // DeviceOp2 errors with "inputs on different devices". The `[seq_len]` ramp
+    // and `[rotary_dim/2]` table are tiny, so this H2D is negligible. On
+    // CUDA/Metal both are already on `q.device()` so `to_device` is a no-op.
+    let dev = q.device();
+    let positions_tensor = positions_tensor.to_device(dev)?;
+    let inv_freq = inv_freq.to_device(dev)?;
     // positions_tensor is [seq_len], unsqueeze to [seq_len, 1]
     let pos = positions_tensor.unsqueeze(1)?;
 
@@ -7684,7 +7727,11 @@ fn rotary_embedding_from_tables(
 /// `AddBackward` node (CP-4 shadow-tape adapter #7); otherwise it is the
 /// plain candle add, bit-identical to the prior `(a + b)?` expression.
 fn residual_add(a: Tensor, b: Tensor) -> Result<Tensor> {
-    #[cfg(any(feature = "cuda", feature = "metal"))]
+    // (#1082) Vulkan added: device-agnostic pure-kt AddBackward recorder. The
+    // residual add is on the critical path between every attn/MLP subblock and
+    // the residual stream; without recording it on Vulkan the tape severs at the
+    // residual and the in-block LoRA grads never reach the loss.
+    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
     {
         // #1082 seam flip: kt-native AddBackward recorder — no kt->candle->kt
         // round-trip (decode: tape off -> Ok(None) -> falls to the plain add below).
@@ -7712,7 +7759,11 @@ fn apply_rope(
     head_dim: usize,
     rotary_dim: usize,
 ) -> Result<Tensor> {
-    #[cfg(any(feature = "cuda", feature = "metal"))]
+    // (#1082) Vulkan added: `try_tape_rope_kt` is a device-agnostic pure-kt
+    // recorder (`rope_split_half` + `RopeSplitHalfBackward`). Without it on
+    // Vulkan the q/k RoPE severs the tape and `q_proj`/`k_proj` LoRA grads
+    // never reach the loss.
+    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
     {
         // CP-4 (#1082): route split-half RoPE through the kt Tape when
         // KILN_USE_TAPE_FORWARD is set and a tape scope is active. No-ops
@@ -9350,6 +9401,20 @@ pub fn swiglu_ffn_gated_hidden(
             }
         }
     }
+    // (#1082) Vulkan training/tape path: the CUDA/Metal SwiGLU recorders above
+    // compile out on a Vulkan-only build, so route `silu(gate) * up` through the
+    // device-agnostic `try_tape_swiglu_kt` (`mul_sigmoid_gate` +
+    // `MulSigmoidGateBackward`) when a tape scope is active. Without it the
+    // gate/up LoRA grads sever at the SwiGLU activation. No-ops (returns None)
+    // outside a tape scope.
+    #[cfg(feature = "vulkan")]
+    if crate::tape_forward::tape_forward_enabled() {
+        if let Some(out) = crate::tape_forward::try_tape_swiglu_kt(&gate, &up)
+            .context("swiglu_ffn_gated_hidden try_tape_swiglu_kt (vulkan)")?
+        {
+            return Ok(out);
+        }
+    }
     let gate = cuda_silu(&gate)?;
     (gate * up).map_err(Into::into)
 }
@@ -10146,6 +10211,31 @@ fn swiglu_ffn_impl_no_chunk(
             }
             #[cfg(not(feature = "cuda"))]
             {
+                // (#1082) Vulkan training/tape path: record the FUSED SwiGLU
+                // `silu(gate) * up` via the device-agnostic `try_tape_swiglu_kt`
+                // (`mul_sigmoid_gate` + `MulSigmoidGateBackward`, which emits
+                // grads for BOTH gate and up). Without it the unfused
+                // `cuda_silu(gate)` (whose tape recorder is cuda/metal-only) + a
+                // plain `(gate * up)` would sever the gate_proj/up_proj LoRA
+                // grads (they would be islands). No-op (returns None) outside a
+                // tape scope — Vulkan inference falls through to the plain
+                // composite below.
+                #[cfg(feature = "vulkan")]
+                if crate::tape_forward::tape_forward_enabled() {
+                    if let Some(hidden) = crate::tape_forward::try_tape_swiglu_kt(&gate, &up)
+                        .context("swiglu_ffn_impl_no_chunk try_tape_swiglu_kt (vulkan)")?
+                    {
+                        return mlp_proj_forward_decode_if(
+                            backend,
+                            use_metal_decode_gemv,
+                            &hidden,
+                            &mlp.down_proj_t,
+                            mlp.down_proj_marlin.as_ref(),
+                            lora_layer.and_then(|l| l.down_proj.as_ref()),
+                            lora_scale,
+                        );
+                    }
+                }
                 // SiLU activation: x * sigmoid(x)
                 let stage_profile = start_mlp_stage_profile(profile_device, profile_context)?;
                 let gate = cuda_silu(&gate)?;
@@ -11003,7 +11093,10 @@ fn lm_head_forward_backend_decode_if(
     // #1082: only the kt-tape adapter (`try_tape_lora_linear_cuda`, candle-typed
     // cross-file seam) needs a candle bridge; the BackendRuntime trait is
     // kt-typed (item 4) so `linear_prefill_apply`/`linear_decode` take/return kt.
-    #[cfg(any(feature = "cuda", feature = "metal"))]
+    // (#1082) Vulkan added: `try_tape_lora_linear_kt` is device-agnostic and is
+    // the producer that connects the CE loss back through the lm_head into the
+    // model — without it on Vulkan the tape root dead-ends at the logits.
+    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
     {
         // #1082 H4: `tape_forward_enabled()` DEFAULTS ON, but DECODE has no
         // active bridge scope, so the kt->candle copy of `x` + the full frozen
@@ -11015,6 +11108,7 @@ fn lm_head_forward_backend_decode_if(
         // #1082 seam flip: kt-native lm_head linear recorder — no kt->candle->kt.
         // The twin returns the RECORDED kt tape node directly (it IS the lm_head
         // output), so cross_entropy chains to it with no id-remapping.
+        // NB: the enclosing cfg below is widened to include vulkan.
         if crate::tape_forward::tape_forward_enabled() {
             if let Some(out) =
                 crate::tape_forward::try_tape_lora_linear_kt(x, embed_tokens_t, None, 0.0)
@@ -16999,10 +17093,26 @@ pub fn gqa_attention_core_prefill(
         // (#1082) Deleted the dead candle-CustomOp `cuda_flash_attention_training_bf16`
         // branch: the kt tape's `try_tape_flash_attn_cuda` above is the sole
         // flash-attention autograd producer.
-        if let Some(attn_output) =
-            flash_attention_forward(backend, &q, &k, &v, num_heads, num_kv_heads, head_dim)?
-        {
-            return Ok(attn_output);
+        //
+        // (#1082) SKIP the leaf `flash_attention_forward` kernel when a tape
+        // scope is active: it neither records a backward NOR (on Vulkan)
+        // preserves device residency — the Vulkan flash-attn prefill kernel
+        // returns a CPU-host kt tensor at the kt<->vk seam, which then breaks
+        // the very next op (o_proj matmul: a=cpu, b=vulkan). During training we
+        // fall through to the device-resident, tape-recording SDPA composite +
+        // `try_tape_sdpa_fallback_kt` below. Inference (no tape scope) keeps the
+        // fast leaf kernel unchanged on every backend. On a default build
+        // (no tape-feature) `tape_forward` is cfg'd out, so the leaf always runs.
+        #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+        let skip_leaf_flash = crate::tape_forward::tape_scope_active();
+        #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan")))]
+        let skip_leaf_flash = false;
+        if !skip_leaf_flash {
+            if let Some(attn_output) =
+                flash_attention_forward(backend, &q, &k, &v, num_heads, num_kv_heads, head_dim)?
+            {
+                return Ok(attn_output);
+            }
         }
     }
 
@@ -17079,7 +17189,11 @@ pub fn gqa_attention_core_prefill(
     // #1082 seam flip: kt-native SDPA-fallback + transpose + reshape recorders — no
     // kt->candle->kt at the SDPA seam (q/k/v + attn output stay kt; the downstream
     // transpose->reshape chains kt-native to o_proj).
-    #[cfg(any(feature = "cuda", feature = "metal"))]
+    // (#1082) Vulkan added: the flash-attn path (CUDA FFI) declines on Vulkan,
+    // so the device-agnostic `try_tape_sdpa_fallback_kt` is the attention
+    // backward producer on Vulkan; without it, grads sever between v_proj and
+    // o_proj.
+    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
     if crate::tape_forward::tape_forward_enabled() {
         if let Some(tape_attn) = crate::tape_forward::try_tape_sdpa_fallback_kt(
             &q, &k_he, &v_he, head_dim, &attn_output,
@@ -17289,7 +17403,8 @@ pub fn gqa_attention_pre_o_chunked_prefill(
 /// input's element count before recording.
 fn tape_reshape_full_attn(x: &Tensor, dims: &[ReshapeArg]) -> Result<Tensor> {
     // #1082 seam flip: kt-native reshape recorder — no kt->candle->kt.
-    #[cfg(any(feature = "cuda", feature = "metal"))]
+    // (#1082) Vulkan added: device-agnostic pure-kt recorder.
+    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
     {
         if let Some(concrete) = resolve_reshape_dims(x.elem_count(), dims) {
             if let Some(out) = crate::tape_forward::try_tape_reshape_kt(x, concrete)
@@ -17310,7 +17425,8 @@ fn tape_reshape_full_attn(x: &Tensor, dims: &[ReshapeArg]) -> Result<Tensor> {
 /// candle `transpose().contiguous()` otherwise.
 fn tape_transpose_contig_full_attn(x: &Tensor, axis_a: usize, axis_b: usize) -> Result<Tensor> {
     // #1082 seam flip: kt-native transpose recorder — no kt->candle->kt.
-    #[cfg(any(feature = "cuda", feature = "metal"))]
+    // (#1082) Vulkan added: device-agnostic pure-kt recorder.
+    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
     {
         if let Some(out) = crate::tape_forward::try_tape_transpose_kt(x, axis_a, axis_b)
             .context("tape_transpose_contig_full_attn try_tape_transpose_kt")?
@@ -17667,11 +17783,28 @@ pub fn gqa_attention_pre_o(
         // (#1082) Deleted the dead candle-CustomOp `cuda_flash_attention_training_bf16`
         // branch: `try_tape_flash_attn_cuda` above is the sole flash-attn autograd
         // producer.
-        if let Some(attn_output) =
-            flash_attention_forward(backend, &q, &k, &v, num_heads, num_kv_heads, head_dim)?
-        {
-            let attn_output = attention_output_gate_decode_if(false, attn_output, gate.as_ref())?;
-            return Ok(attn_output);
+        //
+        // (#1082) SKIP the leaf `flash_attention_forward` kernel when a tape
+        // scope is active: it neither records a backward NOR (on Vulkan)
+        // preserves device residency — the Vulkan flash-attn prefill kernel
+        // returns a CPU-host kt tensor at the kt<->vk seam, which then breaks
+        // the very next op (o_proj matmul: a=cpu, b=vulkan). During training we
+        // fall through to the device-resident, tape-recording SDPA composite +
+        // `try_tape_sdpa_fallback_kt` below. Inference (no tape scope) keeps the
+        // fast leaf kernel unchanged on every backend. On a default build
+        // (no tape-feature) `tape_forward` is cfg'd out, so the leaf always runs.
+        #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+        let skip_leaf_flash = crate::tape_forward::tape_scope_active();
+        #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan")))]
+        let skip_leaf_flash = false;
+        if !skip_leaf_flash {
+            if let Some(attn_output) =
+                flash_attention_forward(backend, &q, &k, &v, num_heads, num_kv_heads, head_dim)?
+            {
+                let attn_output =
+                    attention_output_gate_decode_if(false, attn_output, gate.as_ref())?;
+                return Ok(attn_output);
+            }
         }
     }
 
@@ -17710,7 +17843,9 @@ pub fn gqa_attention_pre_o(
     // `gqa_attention_core_prefill`, which records on the pre-expand tensors and
     // GQA-collapses dk/dv back to nkv. Only meaningful when there's no KV cache
     // (the tape-authoritative SFT path), so capture before the cache update.
-    #[cfg(any(feature = "cuda", feature = "metal"))]
+    // (#1082) Vulkan added: the SDPA fallback is the attention backward producer
+    // on Vulkan (the flash leaf is skipped under a tape scope above).
+    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
     let sdpa_pre_expand = if kv_cache.is_none() {
         Some((q.clone(), k.clone(), v.clone()))
     } else {
@@ -17866,7 +18001,9 @@ pub fn gqa_attention_pre_o(
     // `SdpaBackward` adjoint GQA-collapses dk/dv back to nkv), then chains the
     // transpose-back + reshape so the chain reaches o_proj. No-ops (returns
     // None) in every other configuration; mirrors `gqa_attention_core_prefill`.
-    #[cfg(any(feature = "cuda", feature = "metal"))]
+    // (#1082) Vulkan added: device-agnostic SDPA-fallback + transpose + reshape
+    // recorders — the attention backward producer on Vulkan.
+    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
     // #1082 seam flip: kt-native SDPA-fallback + transpose + reshape recorders.
     if crate::tape_forward::tape_forward_enabled() {
         if let Some((q_pe, k_pe, v_pe)) = sdpa_pre_expand.as_ref() {

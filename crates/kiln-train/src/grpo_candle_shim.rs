@@ -507,7 +507,11 @@ pub(crate) fn try_tape_grpo_pg_loss_from_logits_kt(
 
     // Full model logits only: [1, T, V] on a GPU device. Defer any other
     // shape/device to the caller (the dispatch keeps non-GPU on the candle path
-    // anyway).
+    // anyway). (#1082) Vulkan added: the GRPO backward
+    // (`grpo_pg_loss_from_logits_grad_kt`) is a device-agnostic pure-kt
+    // composite reachable on Vulkan, so the adapter must not decline Vulkan
+    // logits here (declining would yield an empty grad store on F32 Vulkan
+    // GRPO — the silent-empty bug PR6 left behind).
     let dims = logits_kt.dims().to_vec();
     if dims.len() != 3
         || dims[0] != 1
@@ -515,7 +519,9 @@ pub(crate) fn try_tape_grpo_pg_loss_from_logits_kt(
         || action_mask.len() != input_ids.len()
         || !matches!(
             logits_kt.device(),
-            kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_)
+            kiln_tensor::Device::Cuda(_)
+                | kiln_tensor::Device::Metal(_)
+                | kiln_tensor::Device::Vulkan(_)
         )
     {
         return Ok(None);

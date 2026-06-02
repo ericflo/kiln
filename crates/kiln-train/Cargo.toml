@@ -83,7 +83,7 @@ tracing-subscriber = { workspace = true }
 [features]
 cuda = ["kiln-model/cuda", "kiln-flce-kernel/cuda", "kiln-opd-loss-kernel/cuda", "kiln-kt-bridge/cuda"]
 metal = ["kiln-model/metal", "kiln-kt-bridge/metal", "kiln-opd-loss-kernel/metal"]
-vulkan = ["kiln-model/vulkan", "dep:kiln-vulkan-kernel"]
+vulkan = ["kiln-model/vulkan", "dep:kiln-vulkan-kernel", "kiln-opd-loss-kernel/vulkan", "kiln-kt-bridge/vulkan"]
 
 [dependencies.kiln-vulkan-kernel]
 workspace = true

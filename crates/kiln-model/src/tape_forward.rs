@@ -127,6 +127,18 @@ use crate::lora_loader::LoraProjectionWeights;
 // `forward.rs:7178` adapter call) keeps compiling unchanged.
 pub use kiln_autograd::{tape_forward_enabled, with_active_tape, with_thread_local_tape};
 
+/// (#1082) True iff a tape-recording scope is currently active on this thread.
+///
+/// Used by `forward.rs` to skip leaf, non-tape-recording backend kernels (e.g.
+/// the Vulkan flash-attn prefill kernel, which also materializes a CPU-host
+/// output at the kt<->vk seam) during a tape-authoritative training step, so the
+/// forward falls through to the device-resident, tape-recording composite
+/// (`try_tape_sdpa_fallback_kt`) instead. No-op outside a tape scope (inference
+/// keeps the fast leaf kernel).
+pub fn tape_scope_active() -> bool {
+    with_active_tape(|_| ()).is_some()
+}
+
 
 /// kt-native SiLU tape recorder (#1082 seam flip) — the kt-native SiLU tape recorder. Takes the kt activation directly and records a
 /// `SiluBackward` onto the active tape with **no candle round-trip** (no

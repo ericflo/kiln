@@ -81,3 +81,13 @@ cuda = ["kiln-tensor/cuda", "dep:kiln-kt-bridge", "kiln-kt-bridge?/cuda"]
 # `dep:kiln-kt-bridge` is NOT enabled here — the bridge is only used
 # inside the `cuda`-gated backward, so the Metal surface needs none of it.
 metal = ["kiln-tensor/metal"]
+
+# (#1082 Vulkan lane) Compiles the kt-native OPD forward / loss surface
+# (`kt_api`, `kt_tape`) on Vulkan storage, and — unlike Metal — the
+# Vulkan OPD BACKWARD is fully reachable: the kt-tape backward `apply()`
+# routes Vulkan storage through the device-agnostic analytic kt-composite
+# (`opd_top_k_reverse_kl_phase_b_bwd_composite_kt`, pure `kiln_tensor`
+# ops, FD-validated in `kt_api`), NOT the CUDA FFI kernel. So OPD forward
+# + loss + LoRA-grad backward all run on F32 Vulkan. Forwards
+# `kiln-tensor/vulkan` only; the `cuda`-gated FFI dispatch stays gated out.
+vulkan = ["kiln-tensor/vulkan"]
