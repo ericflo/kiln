@@ -161,6 +161,9 @@ pub fn dispatch1<Op: DeviceOp1 + ?Sized>(op: &Op, input: &Tensor) -> Result<Tens
         Device::Cuda(_) => op.cuda_fwd(input)?,
         Device::Metal(_) => op.metal_fwd(input)?,
         Device::Vulkan(_) => op.vulkan_fwd(input)?,
+        // ROCm has no native kernels yet (Phase R.5); fall through to the
+        // host/CPU path below, mirroring a backend with no native kernel.
+        Device::Rocm(_) => None,
     };
     if let Some(t) = result {
         return Ok(t);
@@ -228,6 +231,8 @@ pub fn dispatch2<Op: DeviceOp2 + ?Sized>(op: &Op, a: &Tensor, b: &Tensor) -> Res
         Device::Cuda(_) => op.cuda_fwd(a, b)?,
         Device::Metal(_) => op.metal_fwd(a, b)?,
         Device::Vulkan(_) => op.vulkan_fwd(a, b)?,
+        // ROCm: no native kernel yet (Phase R.5) — fall through (see dispatch1).
+        Device::Rocm(_) => None,
     };
     if let Some(t) = result {
         return Ok(t);
@@ -287,6 +292,8 @@ pub fn dispatch3<Op: DeviceOp3 + ?Sized>(
         Device::Cuda(_) => op.cuda_fwd(a, b, c)?,
         Device::Metal(_) => op.metal_fwd(a, b, c)?,
         Device::Vulkan(_) => op.vulkan_fwd(a, b, c)?,
+        // ROCm: no native kernel yet (Phase R.5) — fall through (see dispatch1).
+        Device::Rocm(_) => None,
     };
     if let Some(t) = result {
         return Ok(t);

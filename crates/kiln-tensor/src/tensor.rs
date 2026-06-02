@@ -249,6 +249,11 @@ impl Tensor {
             other @ Device::Vulkan(_) => Err(Error::Msg(format!(
                 "Tensor::zeros_on: device {other} requested but `vulkan` feature is not enabled"
             ))),
+            // ROCm storage lands in Phase R.3; until then, requesting a ROCm
+            // device is a loud error (mirrors the not-enabled GPU arms above).
+            other @ Device::Rocm(_) => Err(Error::Msg(format!(
+                "Tensor::zeros_on: device {other} requested but `rocm` feature is not enabled"
+            ))),
         }
     }
 
@@ -304,6 +309,10 @@ impl Tensor {
             #[cfg(not(feature = "vulkan"))]
             other @ Device::Vulkan(_) => Err(Error::Msg(format!(
                 "Tensor::from_vec_on: device {other} requested but `vulkan` feature is not enabled"
+            ))),
+            // ROCm host-staging copy lands in Phase R.3.
+            other @ Device::Rocm(_) => Err(Error::Msg(format!(
+                "Tensor::from_vec_on: device {other} requested but `rocm` feature is not enabled"
             ))),
         }
     }
@@ -371,6 +380,10 @@ impl Tensor {
             #[cfg(not(feature = "vulkan"))]
             other @ Device::Vulkan(_) => Err(Error::Msg(format!(
                 "Tensor::from_raw_bytes_on: device {other} requested but `vulkan` feature is not enabled"
+            ))),
+            // ROCm host-staging upload lands in Phase R.3.
+            other @ Device::Rocm(_) => Err(Error::Msg(format!(
+                "Tensor::from_raw_bytes_on: device {other} requested but `rocm` feature is not enabled"
             ))),
         }
     }
