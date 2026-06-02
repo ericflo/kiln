@@ -1351,6 +1351,35 @@ pub fn vulkan_activation_unary(x: &crate::Tensor, kind_tag: i32) -> Result<crate
     kt_tensor_from_vk(&vk_out, device_index)
 }
 
+/// Generic unary elementwise math on Vulkan (neg/exp/ln/sqrt/abs/recip/
+/// sign/floor/.../sin/cos/tan/tanh/gelu/relu and scalar add/mul). `op`
+/// selects the function (see
+/// `kiln_vulkan_kernel::vk_ops::unary_elementwise::op`); `param0` is the
+/// scalar operand for ADD_SCALAR/MUL_SCALAR and ignored otherwise.
+///
+/// Zero-copy: bridges through `vk_tensor_from_kt` / `kt_tensor_from_vk`
+/// (no host bounce), so the kt `DeviceOp1` impls that route here stay
+/// fully GPU-resident. F32-only and contiguous (enforced by the bridge);
+/// callers (the `vulkan_fwd` impls) gate on those before dispatching.
+pub fn vulkan_unary_math(x: &crate::Tensor, op: u32, param0: f32) -> Result<crate::Tensor> {
+    use kiln_vulkan_kernel::vk_ops::unary_elementwise::vk_unary_elementwise_f32;
+
+    let dtype = x.dtype();
+    if !matches!(dtype, DType::F32) {
+        return Err(Error::Msg(format!(
+            "vulkan_unary_math: unsupported dtype {dtype} (F32-only today)"
+        )));
+    }
+    let device_index = vulkan_device_index(x, "vulkan_unary_math")?;
+    let vk_in = vk_tensor_from_kt(x)?;
+    let vk_out = vk_unary_elementwise_f32(&vk_in, op, param0).map_err(|e| {
+        Error::Msg(format!(
+            "vulkan_unary_math: kernel dispatch (op={op}) failed: {e}"
+        ))
+    })?;
+    kt_tensor_from_vk(&vk_out, device_index)
+}
+
 // ----------------------------------------------------------------------
 // vulkan_index_select_dim0 — Phase 4 Vulkan substrate op (#1082)
 // ----------------------------------------------------------------------

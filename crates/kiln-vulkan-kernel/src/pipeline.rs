@@ -357,6 +357,14 @@ const SHADER_SPIRVS: &[(&str, &[u8])] = &[
     ),
     ("vk_silu_f32", SPIR_V_VK_SILU_F32),
     ("vk_silu_f32_offset", SPIR_V_VK_SILU_F32_OFFSET),
+    (
+        "vk_unary_elementwise_f32",
+        SPIR_V_VK_UNARY_ELEMENTWISE_F32,
+    ),
+    (
+        "vk_unary_elementwise_f32_offset",
+        SPIR_V_VK_UNARY_ELEMENTWISE_F32_OFFSET,
+    ),
     ("vk_silu_bwd_f32", SPIR_V_VK_SILU_BWD_F32),
     ("vk_silu_bwd_f32_offset", SPIR_V_VK_SILU_BWD_F32_OFFSET),
     ("vk_rope_f32", SPIR_V_VK_ROPE_F32),

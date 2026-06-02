@@ -41,6 +41,7 @@ pub mod sigmoid;
 pub mod silu;
 pub mod softmax;
 pub mod solve_tri;
+pub mod unary_elementwise;
 
 use crate::VulkanDevice;
 use anyhow::{Context, Result};

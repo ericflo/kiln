@@ -151,17 +151,30 @@ impl DeviceOp1 for SignRoundOp {
     #[cfg(feature = "vulkan")]
     fn vulkan_fwd(&self, x: &Tensor) -> Result<Option<Tensor>> {
         validate(x, self.kind.name())?;
-        if !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16) {
+        // F32-only generic unary kernel on contiguous Vulkan storage.
+        if !matches!(x.dtype(), DType::F32) {
             return Ok(None);
         }
         if !x.is_contiguous() {
             return Ok(None);
         }
-        // TODO(#1082, phase 4 Vulkan): once a Vulkan sign/round
-        // kernel ships, dispatch via the kind tag and route through
-        // `crate::vulkan_activation_unary`. Until then, fall
-        // through to CPU.
-        Ok(None)
+        if x.storage()
+            .as_any()
+            .downcast_ref::<crate::VulkanStorage>()
+            .is_none()
+        {
+            return Ok(None);
+        }
+        use kiln_vulkan_kernel::vk_ops::unary_elementwise::op;
+        let code = match self.kind {
+            SignRoundKind::Sign => op::SIGN,
+            SignRoundKind::Floor => op::FLOOR,
+            SignRoundKind::Ceil => op::CEIL,
+            SignRoundKind::Round => op::ROUND,
+            SignRoundKind::Trunc => op::TRUNC,
+            SignRoundKind::Reciprocal => op::RECIP,
+        };
+        Ok(Some(crate::vulkan_unary_math(x, code, 0.0)?))
     }
 
     fn bwd(&self) -> Option<Box<dyn BackwardOp>> {

@@ -1,0 +1,70 @@
+// Generic unary elementwise: y = f_op(x), F32.
+//
+// One shader for the whole family of elementwise math ops so the kt
+// DeviceOp1 layer (neg/exp/ln/sqrt/abs/recip/sign/floor/.../sin/cos/...)
+// and scalar add/sub stay fully GPU-resident on Vulkan instead of
+// bouncing to the CPU host-fallback. `op` selects the function; `param0`
+// is the scalar operand for add_scalar/mul_scalar (ignored otherwise).
+//
+// Push constants: [n_elements, op, param0]
+// Bindings: in (readonly), out (writeonly)
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint n_elements;
+    uint op;
+    float param0;
+};
+
+layout(binding = 0) readonly  buffer InBuf  { float data_in[]; };
+layout(binding = 1) writeonly buffer OutBuf { float data_out[]; };
+
+// Op codes — keep in sync with UnaryVkOp in
+// kiln-vulkan-kernel/src/vk_ops/unary_elementwise.rs and the kt wiring.
+float apply_op(float x) {
+    switch (op) {
+        case 0u:  return -x;                  // neg
+        case 1u:  return exp(x);              // exp
+        case 2u:  return log(x);              // ln
+        case 3u:  return sqrt(x);             // sqrt
+        case 4u:  return abs(x);              // abs
+        case 5u:  return 1.0 / x;             // recip
+        case 6u:  return sign(x);             // sign
+        case 7u:  return floor(x);            // floor
+        case 8u:  return ceil(x);             // ceil
+        case 9u:  return sign(x) * floor(abs(x) + 0.5); // round (half away from zero, matches f32::round)
+        case 10u: return trunc(x);            // trunc
+        case 11u: return sin(x);              // sin
+        case 12u: return cos(x);              // cos
+        case 13u: return tan(x);              // tan
+        case 14u: return x + param0;          // add_scalar
+        case 15u: return tanh(x);             // tanh
+        case 16u: {                            // gelu (tanh approximation)
+            float x3 = x * x * x;
+            return 0.5 * x * (1.0 + tanh(0.7978845608028654 * (x + 0.044715 * x3)));
+        }
+        case 17u: return max(x, 0.0);         // relu
+        case 18u: return exp2(x);             // exp2
+        case 19u: return log2(x);             // log2
+        case 20u: return exp(x) - 1.0;        // expm1
+        case 21u: return log(1.0 + x);        // log1p
+        case 22u: return sinh(x);             // sinh
+        case 23u: return cosh(x);             // cosh
+        case 24u: return asin(x);             // asin
+        case 25u: return acos(x);             // acos
+        case 26u: return atan(x);             // atan
+        case 27u: return x * param0;          // mul_scalar
+        case 28u: return log(x) * 0.4342944819032518; // log10 (1/ln(10))
+        default:  return x;                   // identity (unknown op)
+    }
+}
+
+void main() {
+    uint idx = gl_GlobalInvocationID.x;
+    if (idx >= n_elements) return;
+    data_out[idx] = apply_op(data_in[idx]);
+}
