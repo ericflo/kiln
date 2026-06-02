@@ -92,7 +92,7 @@ regex = "1"
 [features]
 cuda = ["kiln-model/cuda", "kiln-tensor/cuda", "kiln-train/cuda", "kiln-kt-bridge/cuda"]
 metal = ["kiln-model/metal", "kiln-tensor/metal", "kiln-kt-bridge/metal", "kiln-train/metal"]
-vulkan = ["kiln-model/vulkan", "kiln-train/vulkan"]
+vulkan = ["kiln-model/vulkan", "kiln-tensor/vulkan", "kiln-train/vulkan", "kiln-kt-bridge/vulkan"]
 # Forward kiln-model's NVTX feature so kiln-bench / kiln binaries emit ranges
 # under nsys for per-call-site attribution. No effect without --features cuda.
 nvtx = ["kiln-model/nvtx"]
