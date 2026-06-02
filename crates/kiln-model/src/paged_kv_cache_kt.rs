@@ -212,9 +212,33 @@ impl PagedKvCacheKt {
                     })?;
                     (k, v)
                 }
+                #[cfg(feature = "vulkan")]
+                kiln_tensor::Device::Vulkan(i) => {
+                    // Vulkan-resident KV pools so the prefill paged-KV write
+                    // (Vulkan slice_set, device-to-device) and the decode
+                    // reads stay on-device — no host bounce. BF16 pools are
+                    // supported by `vulkan_zeros`.
+                    let _ = n_elements;
+                    let k = KtTensor::zeros_on(
+                        kiln_tensor::Device::Vulkan(i),
+                        shape.clone(),
+                        storage_dtype,
+                    )
+                    .map_err(|e| {
+                        anyhow::anyhow!("kt paged-kv: alloc k_pool (vulkan) layer {_i}: {e}")
+                    })?;
+                    let v = KtTensor::zeros_on(
+                        kiln_tensor::Device::Vulkan(i),
+                        shape.clone(),
+                        storage_dtype,
+                    )
+                    .map_err(|e| {
+                        anyhow::anyhow!("kt paged-kv: alloc v_pool (vulkan) layer {_i}: {e}")
+                    })?;
+                    (k, v)
+                }
                 other => {
-                    // Vulkan (kt vulkan tensors are CPU-resident) + any GPU
-                    // device whose backend feature isn't compiled in →
+                    // Any GPU device whose backend feature isn't compiled in →
                     // host-resident CPU pools (matches the prior
                     // non-cuda/non-metal default).
                     let _ = other;
