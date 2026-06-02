@@ -18375,12 +18375,14 @@ pub(crate) struct BatchedPagedDecodeGraphInputs<'a> {
 /// materializing slow path).
 ///
 /// ### Preconditions checked here
-///   * `block_size` divides `kBlockN = 128`
+///   * `block_size` divides `kBlockN` (`FA2_KBLOCK_N` = 64 for the hdim256
+///     model — see its doc in generate.rs)
 ///   * Within each `kBlockN`-wide chunk of the block table, the underlying
 ///     physical pages are contiguous in the pool. The FA2 splitkv paged kernel
 ///     reads only one block-table entry per kBlockN chunk and assumes the next
 ///     `kBlockN / block_size` pages are physically contiguous (see
-///     `flash_fwd_kernel.h` lines 587-596 and 770-779).
+///     `flash_fwd_kernel.h` lines 587-596 and 770-779). With the #1082 default
+///     `block_size = 64` this is one page per chunk → vacuously satisfied.
 ///
 /// ### Output
 /// `[batch, 1, num_heads * head_dim]` after o_proj (matches the slow path).
@@ -18413,7 +18415,8 @@ fn try_flash_attn_paged_decode(
         &crate::paged_kv_cache_kt::PagedKvCacheKt,
     >,
 ) -> Result<Option<Tensor>> {
-    const K_BLOCK_N: usize = 128;
+    // #1082: the real FA2 tile width for hdim256 (was a conservative 128).
+    const K_BLOCK_N: usize = crate::generate::FA2_KBLOCK_N;
 
     #[cfg(feature = "cuda")]
     let block_size =

@@ -145,11 +145,25 @@ fn profile_decode_batcher_stages_enabled() -> bool {
 /// intervening entries). When a fragmented free list hands the kernel
 /// non-adjacent pages it reads a foreign page / off the pool →
 /// CUDA_ERROR_ILLEGAL_ADDRESS. Mirrors the bs=1 check in
-/// `forward.rs::try_flash_attn_paged_decode` (~18605). Uses the CONSERVATIVE
-/// 128-token chunk (pages_per_chunk = 128/block_size): the hdim256 model uses
-/// kBlockN=64 (4 pages) and hdim128 uses kBlockN=128 (8 pages), and 128-token
-/// contiguity is a superset of both, so this never under-checks. Returns true
-/// → caller must route to the contiguity-safe per-row decode.
+/// `forward.rs::try_flash_attn_paged_decode`.
+///
+/// Chunk = `FA2_KBLOCK_N` tokens. Qwen3.5-4B's GQA full-attn is head_dim=256
+/// only, so kBlockN = 64 (`flash_fwd_launch_template.h:170`: hd>128 → 64). A
+/// 64-token tile spans `64/block_size` pages, which is the run that must be
+/// physically adjacent. With the #1082 default `block_size = 64` this is ONE
+/// page per tile → every block_table is trivially "contiguous" → no row ever
+/// routes to the slow per-row loop for FA2 reasons (the n=64 fix). At the old
+/// `block_size = 16` it is 4 pages/tile. (If a head_dim=128 model is ever
+/// served — kiln is Qwen3.5-4B-only today — kBlockN would be 128; bump
+/// `FA2_KBLOCK_N` or thread head_dim before then.) Returns true → caller must
+/// route to the contiguity-safe per-row decode.
+/// FA2 split-KV decode tile width (tokens) for Qwen3.5-4B's head_dim=256 GQA
+/// full-attn (`flash_fwd_launch_template.h:170`: hd>128 → 64). The K/V pages
+/// backing one tile must be physically adjacent; with `block_size >= 64` a tile
+/// is one page so the requirement is vacuous. kiln is Qwen3.5-4B-only (hd=256);
+/// a head_dim=128 model would need 128 here (or head_dim threaded through).
+pub(crate) const FA2_KBLOCK_N: usize = 64;
+
 pub(crate) fn batch_has_noncontiguous_kv_tiles(
     block_tables: &[&BlockTable],
     seq_lens: &[usize],
@@ -177,7 +191,7 @@ pub(crate) fn row_has_noncontiguous_kv_tiles(
     if block_size == 0 {
         return false;
     }
-    let pages_per_chunk = (128 / block_size).max(1);
+    let pages_per_chunk = (FA2_KBLOCK_N / block_size).max(1);
     // Only the pages actually covering live tokens are read by the kernel.
     let n_pages = seqlen.div_ceil(block_size).min(blocks.len());
     let mut c = 0usize;
@@ -5554,8 +5568,9 @@ impl ModelRunner {
             "generate_mtp_speculative currently only supports greedy decoding (temperature == 0)"
         );
 
-        // Block size matches the kiln-core default + the bench convention.
-        const BLOCK_SIZE: usize = 16;
+        // Block size matches the kiln-core default + the bench convention
+        // (#1082: 16 -> 64 so each FA2 kBlockN=64 tile is one physical page).
+        const BLOCK_SIZE: usize = 64;
 
         let max_total = prompt_tokens.len() + params.max_tokens;
         // (#1082) kt-native paged cache — `PagedKvCacheKt::new` allocates pools
@@ -6009,7 +6024,8 @@ impl ModelRunner {
              (temperature == 0)"
         );
 
-        const BLOCK_SIZE: usize = 16;
+        // #1082: 16 -> 64 so each FA2 kBlockN=64 tile is one physical page.
+        const BLOCK_SIZE: usize = 64;
 
         let max_total = prompt_tokens.len() + params.max_tokens;
         // (#1082) kt-native paged cache — kt `DType` + runtime `Device`.
@@ -7690,24 +7706,25 @@ mod tests {
 
     #[test]
     fn noncontiguous_kv_tiles_detection() {
-        // #1082 crasher fix: block_size=16 → pages_per_chunk = 128/16 = 8.
-        // CONTIGUOUS within each 8-page chunk → safe (false).
+        // #1082: FA2_KBLOCK_N=64 (hdim256). At block_size=16 → pages_per_chunk
+        // = 64/16 = 4. CONTIGUOUS within each 4-page chunk → safe (false).
         let bt_contig = block_table_with(&[100, 101, 102, 103, 104, 105, 106, 107, 200, 201]);
         assert!(
             !batch_has_noncontiguous_kv_tiles(&[&bt_contig], &[160], 16),
             "physically-contiguous pages within a tile must NOT force the row-loop"
         );
-        // A gap INSIDE the first 8-page chunk (104 -> 999) → non-contiguous (true).
+        // A gap (999) starting the 2nd 4-page chunk: base=999 then 105 != 1000
+        // → non-contiguous (true).
         let bt_frag = block_table_with(&[100, 101, 102, 103, 999, 105, 106, 107]);
         assert!(
             batch_has_noncontiguous_kv_tiles(&[&bt_frag], &[128], 16),
             "a fragmented page inside a tile must force the contiguity-safe row-loop"
         );
-        // Chunk BOUNDARY discontinuity (idx 8 starts a new chunk) is allowed —
-        // the kernel re-reads block_table at chunk starts (200 != 107+1 is fine).
+        // Chunk BOUNDARY discontinuity (idx 8 starts a new 4-page chunk) is
+        // allowed — the kernel re-reads block_table at chunk starts.
         assert!(
             !batch_has_noncontiguous_kv_tiles(&[&bt_contig], &[144], 16),
-            "discontinuity at a chunk boundary (every 8 pages) is allowed"
+            "discontinuity at a chunk boundary (every 4 pages) is allowed"
         );
         // bs=1 short row (1 page) is trivially contiguous.
         let bt_one = block_table_with(&[42]);
@@ -7724,6 +7741,16 @@ mod tests {
         assert!(
             !batch_has_noncontiguous_kv_tiles(&[&bt_tail_frag], &[20], 16),
             "fragmentation beyond the live window (seqlen=20 → 2 pages) is not read"
+        );
+        // #1082 KEY: at the new default block_size=64, pages_per_chunk =
+        // FA2_KBLOCK_N/64 = 1, so each FA2 tile is exactly one page and the
+        // kernel looks it up independently. Arbitrarily strided (non-adjacent)
+        // blocks that WOULD trip at block_size=16 are safe at 64 → the row-loop
+        // never fires for FA2 reasons (this is what restores bs=64 concurrent).
+        let bt_strided = block_table_with(&[5, 7, 9, 11]);
+        assert!(
+            !batch_has_noncontiguous_kv_tiles(&[&bt_strided], &[256], 64),
+            "block_size>=kBlockN makes every FA2 tile one page → no fragmentation trips"
         );
     }
 

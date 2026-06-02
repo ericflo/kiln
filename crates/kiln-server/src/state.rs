@@ -25,7 +25,13 @@ use crate::metrics::Metrics;
 use crate::recent_requests::{DEFAULT_CAPACITY as RECENT_REQUESTS_CAPACITY, RecentRequestsRing};
 use crate::training_queue::{SharedTrainingQueue, ShutdownFlag};
 
-const DEFAULT_BLOCK_SIZE: usize = 16;
+// #1082: 64 (was 16) so each FA2 split-KV decode tile (kBlockN=64 for the
+// hdim256 GQA full-attn — flash_fwd_launch_template.h:170) maps to exactly ONE
+// physical page. That makes the kernel's per-tile block_table lookup
+// per-page-correct and removes the intra-tile physical-contiguity requirement
+// entirely — so concurrent decode no longer fragments into the slow per-row
+// loop (the n=64 cliff). 64 >= max kBlockN and divides cleanly everywhere.
+const DEFAULT_BLOCK_SIZE: usize = 64;
 const MIN_AUTO_KV_BLOCKS: usize = 64;
 const METAL_AUTO_MAX_KV_BLOCKS_LOW_MEM: usize = 512; // 8K tokens at block_size=16.
 const METAL_AUTO_MAX_KV_BLOCKS_MID_MEM: usize = 1024; // 16K tokens at block_size=16.

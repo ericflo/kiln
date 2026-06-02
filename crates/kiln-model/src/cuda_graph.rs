@@ -138,9 +138,15 @@ impl CudaGraphKey {
     fn new(block_table: &BlockTable, paged_cache: &PagedKvCacheKt, seq_len: usize) -> Self {
         let stable_metadata = Self::stable_paged_metadata_enabled();
         let attention_len = seq_len + 1;
-        let max_seqlen_k = attention_len.div_ceil(128) * 128;
-        let pages_per_chunk = 128 / paged_cache.block_size();
-        let max_blocks_per_seq = (max_seqlen_k / 128) * pages_per_chunk;
+        // #1082: bucket + size by FA2_KBLOCK_N (=64 for hdim256), NOT a hardcoded
+        // 128. Must match `forward.rs::try_flash_attn_paged_decode`'s K_BLOCK_N
+        // exactly — otherwise the captured graph's block-table buffer is sized
+        // differently from the table the forward actually builds, and replay
+        // reads OOB → CUDA_ERROR_ILLEGAL_ADDRESS (the block_size=64 graph crash).
+        let kblock_n = crate::generate::FA2_KBLOCK_N;
+        let max_seqlen_k = attention_len.div_ceil(kblock_n) * kblock_n;
+        let pages_per_chunk = kblock_n / paged_cache.block_size();
+        let max_blocks_per_seq = (max_seqlen_k / kblock_n) * pages_per_chunk;
         Self {
             stable_metadata,
             seq_len: if stable_metadata { 0 } else { seq_len },
@@ -256,9 +262,15 @@ impl CudaBatchedGraphKey {
     ) -> Self {
         let stable_metadata = CudaGraphKey::stable_paged_metadata_enabled();
         let attention_len = max_seq_len + 1;
-        let max_seqlen_k = attention_len.div_ceil(128) * 128;
-        let pages_per_chunk = 128 / paged_cache.block_size();
-        let max_blocks_per_seq = (max_seqlen_k / 128) * pages_per_chunk;
+        // #1082: bucket + size by FA2_KBLOCK_N (=64 for hdim256), NOT a hardcoded
+        // 128. Must match `forward.rs::try_flash_attn_paged_decode`'s K_BLOCK_N
+        // exactly — otherwise the captured graph's block-table buffer is sized
+        // differently from the table the forward actually builds, and replay
+        // reads OOB → CUDA_ERROR_ILLEGAL_ADDRESS (the block_size=64 graph crash).
+        let kblock_n = crate::generate::FA2_KBLOCK_N;
+        let max_seqlen_k = attention_len.div_ceil(kblock_n) * kblock_n;
+        let pages_per_chunk = kblock_n / paged_cache.block_size();
+        let max_blocks_per_seq = (max_seqlen_k / kblock_n) * pages_per_chunk;
         Self {
             stable_metadata,
             batch_size,
@@ -2551,8 +2563,12 @@ impl CudaGraphRunner {
         max_seqlen_k: usize,
     ) -> Result<Vec<u32>> {
         let block_size = paged_cache.block_size();
-        let pages_per_chunk = 128 / block_size;
-        let max_blocks_per_seq = (max_seqlen_k / 128) * pages_per_chunk;
+        // #1082: FA2_KBLOCK_N (=64 hdim256), matching the CudaGraphKey sizing
+        // above + forward.rs's K_BLOCK_N. `max_seqlen_k` arrives already bucketed
+        // to a multiple of FA2_KBLOCK_N by the key, so this divides cleanly.
+        let kblock_n = crate::generate::FA2_KBLOCK_N;
+        let pages_per_chunk = kblock_n / block_size;
+        let max_blocks_per_seq = (max_seqlen_k / kblock_n) * pages_per_chunk;
         let take = max_blocks_per_seq.min(block_table.blocks.len());
         let mut padded = Vec::with_capacity(max_blocks_per_seq);
         padded.extend_from_slice(&block_table.blocks[..take]);
