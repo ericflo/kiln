@@ -138,6 +138,47 @@ fn profile_decode_batcher_stages_enabled() -> bool {
     *ENABLED.get_or_init(|| env_truthy_for_profile("KILN_PROFILE_DECODE_BATCHER_STAGES"))
 }
 
+/// #1082 CRASHER FIX: detect whether any row's KV pages are NOT physically
+/// contiguous within a kBlockN-token tile — the contract the vendored FA2
+/// split-KV paged-decode kernel silently assumes (it reads each tile as one
+/// contiguous gather from `block_table[base_idx]`, never consulting the
+/// intervening entries). When a fragmented free list hands the kernel
+/// non-adjacent pages it reads a foreign page / off the pool →
+/// CUDA_ERROR_ILLEGAL_ADDRESS. Mirrors the bs=1 check in
+/// `forward.rs::try_flash_attn_paged_decode` (~18605). Uses the CONSERVATIVE
+/// 128-token chunk (pages_per_chunk = 128/block_size): the hdim256 model uses
+/// kBlockN=64 (4 pages) and hdim128 uses kBlockN=128 (8 pages), and 128-token
+/// contiguity is a superset of both, so this never under-checks. Returns true
+/// → caller must route to the contiguity-safe per-row decode.
+pub(crate) fn batch_has_noncontiguous_kv_tiles(
+    block_tables: &[&BlockTable],
+    seq_lens: &[usize],
+    block_size: usize,
+) -> bool {
+    if block_size == 0 {
+        return false;
+    }
+    let pages_per_chunk = (128 / block_size).max(1);
+    for (row, bt) in block_tables.iter().enumerate() {
+        let blocks = bt.blocks.as_slice();
+        let seqlen = seq_lens.get(row).copied().unwrap_or(0);
+        // Only the pages actually covering live tokens are read by the kernel.
+        let n_pages = seqlen.div_ceil(block_size).min(blocks.len());
+        let mut c = 0usize;
+        while c < n_pages {
+            let base = blocks[c];
+            let end = (c + pages_per_chunk).min(n_pages);
+            for (k, &phys) in blocks[c..end].iter().enumerate() {
+                if phys != base.wrapping_add(k as u32) {
+                    return true;
+                }
+            }
+            c += pages_per_chunk;
+        }
+    }
+    false
+}
+
 fn cuda_gdn_batched_decode_row_loop_enabled() -> bool {
     // Flipped to false-by-default after the matmul broadcast-copy fix made
     // the true-batched contiguous-batch path strictly faster than the
@@ -3650,9 +3691,24 @@ impl ModelRunner {
             return Ok(vec![token]);
         }
 
+        // #1082 CRASHER FIX: the vendored FA2 split-KV paged-decode kernel reads
+        // each kBlockN-token K/V tile as ONE physically-contiguous run of pages
+        // from a single block_table entry (it never consults the intervening
+        // entries — see flash_fwd_kernel.h block_table_idx stride). The bs=1 path
+        // (forward.rs try_flash_attn_paged_decode) verifies intra-tile contiguity
+        // and declines when violated; the eager batched contiguous path did NOT,
+        // so a fragmented BlockManager free list (concurrent finish->free->re-admit
+        // on a large block pool) fed NON-ADJACENT pages straight to the kernel ->
+        // CUDA_ERROR_ILLEGAL_ADDRESS (Ampere/large-pool only; masks under any
+        // slowdown because the membership churn stops). Route such batches to the
+        // contiguity-safe per-row decode below (each row goes through the
+        // single-row paged path, which gathers correctly). Contiguous batches
+        // (the common case) keep the fast contiguous-batch path — no perf impact.
+        let force_row_loop_for_contiguity =
+            batch_has_noncontiguous_kv_tiles(block_tables, seq_lens, paged_cache.block_size());
         if self.backend.name() == "cuda"
             && has_linear_layers
-            && cuda_gdn_batched_decode_row_loop_enabled()
+            && (cuda_gdn_batched_decode_row_loop_enabled() || force_row_loop_for_contiguity)
         {
             let stage_start = profile_stages.then(std::time::Instant::now);
             let mut tokens = Vec::with_capacity(batch);
@@ -7522,6 +7578,45 @@ mod tests {
             recurrent_states: Vec::new(),
             conv_states: Vec::new(),
         }
+    }
+
+    #[test]
+    fn noncontiguous_kv_tiles_detection() {
+        // #1082 crasher fix: block_size=16 → pages_per_chunk = 128/16 = 8.
+        // CONTIGUOUS within each 8-page chunk → safe (false).
+        let bt_contig = block_table_with(&[100, 101, 102, 103, 104, 105, 106, 107, 200, 201]);
+        assert!(
+            !batch_has_noncontiguous_kv_tiles(&[&bt_contig], &[160], 16),
+            "physically-contiguous pages within a tile must NOT force the row-loop"
+        );
+        // A gap INSIDE the first 8-page chunk (104 -> 999) → non-contiguous (true).
+        let bt_frag = block_table_with(&[100, 101, 102, 103, 999, 105, 106, 107]);
+        assert!(
+            batch_has_noncontiguous_kv_tiles(&[&bt_frag], &[128], 16),
+            "a fragmented page inside a tile must force the contiguity-safe row-loop"
+        );
+        // Chunk BOUNDARY discontinuity (idx 8 starts a new chunk) is allowed —
+        // the kernel re-reads block_table at chunk starts (200 != 107+1 is fine).
+        assert!(
+            !batch_has_noncontiguous_kv_tiles(&[&bt_contig], &[144], 16),
+            "discontinuity at a chunk boundary (every 8 pages) is allowed"
+        );
+        // bs=1 short row (1 page) is trivially contiguous.
+        let bt_one = block_table_with(&[42]);
+        assert!(!batch_has_noncontiguous_kv_tiles(&[&bt_one], &[5], 16));
+        // Mixed batch: one bad row anywhere → true.
+        assert!(batch_has_noncontiguous_kv_tiles(
+            &[&bt_contig, &bt_frag],
+            &[160, 128],
+            16
+        ));
+        // Only check pages covering live tokens: a fragmented page BEYOND
+        // seqused_k is not read by the kernel → not flagged.
+        let bt_tail_frag = block_table_with(&[100, 101, 999]);
+        assert!(
+            !batch_has_noncontiguous_kv_tiles(&[&bt_tail_frag], &[20], 16),
+            "fragmentation beyond the live window (seqlen=20 → 2 pages) is not read"
+        );
     }
 
     #[test]
