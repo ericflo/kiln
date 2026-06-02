@@ -382,6 +382,134 @@ kernel void {entry}(
 }
 
 // ----------------------------------------------------------------------
+// compare — kiln-owned MSL elementwise comparison (mirrors csrc/compare.cu)
+// ----------------------------------------------------------------------
+
+/// Contiguous element-wise comparison `out[i] = (uchar)(a[i] <cmp> b[i])`
+/// over the float triple, same-shape / same-dtype inputs. Both operands are
+/// loaded to `float`, the comparison evaluated in `float` (matching the kt CPU
+/// reference `CmpKind::apply_f32` and `csrc/compare.cu`), and the boolean
+/// result stored to a `uchar` (U8) output buffer (1 = true, 0 = false).
+///
+/// `kind_tag` follows `CmpKind::as_i32` (0=Eq, 1=Ne, 2=Lt, 3=Le, 4=Gt, 5=Ge).
+/// Non-differentiable. One pipeline per (op, input dtype).
+pub(crate) fn compare(
+    companion: &MetalCompanion,
+    left: &MetalBuffer,
+    right: &MetalBuffer,
+    output: &MetalBuffer,
+    dtype: DType,
+    kind_tag: i32,
+    n: usize,
+) -> Result<()> {
+    let ty = msl_ty(dtype)?;
+    let (op_prefix, expr) = match kind_tag {
+        0 => ("eq", "a == b"),
+        1 => ("ne", "a != b"),
+        2 => ("lt", "a < b"),
+        3 => ("le", "a <= b"),
+        4 => ("gt", "a > b"),
+        5 => ("ge", "a >= b"),
+        other => {
+            return Err(Error::Msg(format!(
+                "metal_kernels::compare: kind_tag {other} not supported \
+                 (only 0=Eq, 1=Ne, 2=Lt, 3=Le, 4=Gt, 5=Ge)"
+            )));
+        }
+    };
+    let entry = format!("kt_compare_{op_prefix}_{ty}");
+    let src = format!(
+        r#"
+#include <metal_stdlib>
+using namespace metal;
+kernel void {entry}(
+    device const {ty}* left  [[buffer(0)]],
+    device const {ty}* right [[buffer(1)]],
+    device uchar* output     [[buffer(2)]],
+    constant uint& n         [[buffer(3)]],
+    uint gid [[thread_position_in_grid]])
+{{
+    if (gid < n) {{
+        float a = (float)left[gid];
+        float b = (float)right[gid];
+        output[gid] = ({expr}) ? (uchar)1 : (uchar)0;
+    }}
+}}
+"#
+    );
+    let pipeline = op_pipeline(companion, &src, &entry)?;
+    let encoder = companion
+        .command_encoder()
+        .map_err(|e| Error::Msg(format!("metal_kernels::compare: encoder: {e:?}")))?;
+    encoder.set_label("kt_compare");
+    encoder.set_compute_pipeline_state(&pipeline);
+    encoder.set_buffer(0, Some(left), 0);
+    encoder.set_buffer(1, Some(right), 0);
+    encoder.set_buffer(2, Some(output), 0);
+    let n_u = n as u32;
+    encoder.set_bytes(3, &n_u);
+    dispatch_1d(&encoder, n);
+    drop(encoder);
+    Ok(())
+}
+
+// ----------------------------------------------------------------------
+// where_select — kiln-owned MSL ternary select (mirrors csrc/where_select.cu)
+// ----------------------------------------------------------------------
+
+/// Contiguous element-wise ternary select `out[i] = mask[i] != 0 ? t[i] : f[i]`
+/// over the float triple, same-shape inputs. `mask` is a `uchar` (U8) buffer;
+/// `t`/`f`/`out` share the element dtype. A byte-wise select (no float
+/// arithmetic) so the chosen operand is copied bit-for-bit, matching the CPU
+/// reference (`ops::where_select`) and `csrc/where_select.cu`. One pipeline
+/// per dtype.
+pub(crate) fn where_select(
+    companion: &MetalCompanion,
+    mask: &MetalBuffer,
+    t: &MetalBuffer,
+    f: &MetalBuffer,
+    output: &MetalBuffer,
+    dtype: DType,
+    n: usize,
+) -> Result<()> {
+    let ty = msl_ty(dtype)?;
+    let entry = format!("kt_where_select_{ty}");
+    let src = format!(
+        r#"
+#include <metal_stdlib>
+using namespace metal;
+kernel void {entry}(
+    device const uchar* mask [[buffer(0)]],
+    device const {ty}* t     [[buffer(1)]],
+    device const {ty}* f     [[buffer(2)]],
+    device {ty}* output      [[buffer(3)]],
+    constant uint& n         [[buffer(4)]],
+    uint gid [[thread_position_in_grid]])
+{{
+    if (gid < n) {{
+        output[gid] = (mask[gid] != 0) ? t[gid] : f[gid];
+    }}
+}}
+"#
+    );
+    let pipeline = op_pipeline(companion, &src, &entry)?;
+    let encoder = companion
+        .command_encoder()
+        .map_err(|e| Error::Msg(format!("metal_kernels::where_select: encoder: {e:?}")))?;
+    encoder.set_label("kt_where_select");
+    encoder.set_compute_pipeline_state(&pipeline);
+    encoder.set_buffer(0, Some(mask), 0);
+    encoder.set_buffer(1, Some(t), 0);
+    encoder.set_buffer(2, Some(f), 0);
+    encoder.set_buffer(3, Some(output), 0);
+    let n_u = n as u32;
+    encoder.set_bytes(4, &n_u);
+    dispatch_1d(&encoder, n);
+    drop(encoder);
+    Ok(())
+}
+
+// ----------------------------------------------------------------------
 // softmax (last axis) — replaces candle_metal_kernels::call_last_softmax
 // ----------------------------------------------------------------------
 

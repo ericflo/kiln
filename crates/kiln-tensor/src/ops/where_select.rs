@@ -56,6 +56,23 @@ pub fn where_select(mask: &Tensor, t: &Tensor, f: &Tensor) -> Result<Tensor> {
         }
     }
 
+    // Metal fast path: kiln-owned MSL ternary select (one thread per element,
+    // byte-wise select of t/f by the U8 mask — mirroring the CPU loop below).
+    // No host round-trip. (#1082)
+    #[cfg(feature = "metal")]
+    if matches!(mask.device(), crate::Device::Metal(_))
+        && matches!(t.device(), crate::Device::Metal(_))
+        && matches!(f.device(), crate::Device::Metal(_))
+        && mask.device() == t.device()
+        && t.device() == f.device()
+        && mask.is_contiguous()
+        && t.is_contiguous()
+        && f.is_contiguous()
+        && matches!(t.dtype(), DType::F32 | DType::BF16 | DType::F16)
+    {
+        return crate::metal_where_select(mask, t, f);
+    }
+
     let dtype = t.dtype();
     let per = dtype.size_in_bytes();
     let n = t.element_count();

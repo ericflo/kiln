@@ -1045,23 +1045,16 @@ fn tiny_gdn_weights_bf16(config: &ModelConfig, device: &Device) -> GpuWeights {
 /// steps on `Device::Metal(0)`, asserting LoRA grads flowed (a non-empty,
 /// non-zero `lora_grad_norms` receipt).
 ///
-/// # `#[ignore]`d: blocked on a SEPARATE Metal GDN-forward gap, not the conv1d
+/// # Enabled: the Metal GDN forward + backward now run end-to-end
 ///
-/// Running this surfaces the NEXT unhandled Metal GDN op: the chunkwise GDN
-/// forward (`forward.rs` `gdn_chunkwise_recurrence`) calls
-/// `kiln_tensor::ops::cumsum`, which is still CPU-only
-/// (`cumsum: storage must be CpuStorage`), so the GDN forward itself cannot
-/// complete on `Device::Metal(0)` yet — the failure is upstream of, and
-/// unrelated to, the conv1d backward this PR delivers. The conv1d-bwd-input
-/// composite is independently validated by the deterministic CPU finite-
-/// difference + explicit-index-loop unit tests in
-/// `kiln_tensor::ops::causal_conv1d_bwd`. This test is kept (compiled, behind
-/// `#[ignore]`) as a ready-to-enable end-to-end GDN-training smoke for once the
-/// remaining Metal GDN-forward ops (starting with `cumsum`) land.
+/// The chunkwise GDN forward (`forward.rs` `gdn_chunkwise_recurrence`) reaches
+/// `kiln_tensor::ops::{cumsum, compare, where_select}`, all of which now have
+/// kiln-owned native MSL kernels (no host round-trip), so the GDN forward
+/// completes on `Device::Metal(0)`; the conv1d backward closes the
+/// `in_proj_qkv` LoRA grad path. This test runs by default as the end-to-end
+/// GDN-training smoke and asserts LoRA grads flowed.
 #[cfg(feature = "metal")]
 #[test]
-#[ignore = "blocked on Metal cumsum in the GDN forward (gdn_chunkwise_recurrence); \
-            conv1d backward — this PR's scope — is FD-validated in kiln_tensor unit tests"]
 fn test_real_model_gdn_sft_metal() {
     if kiln_model::backend::metal::try_new_metal().is_none() {
         eprintln!("No Metal device — skipping GDN-SFT-on-Metal smoke");
