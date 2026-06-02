@@ -21,6 +21,14 @@
 /// kiln-tensor-typed kt-API surface. All callers route through this
 /// module; the crate no longer exposes a candle-typed parallel API.
 mod kt_api;
+
+/// ROCm composite SDPA (Phase R.8). On ROCm there is no CUTLASS
+/// flash-attention kernel, so the `*_kt` entry points dispatch
+/// `Device::Rocm` operands here — a fully on-device composite built from
+/// the parity-tested `kiln_tensor` ROCm primitives. CUDA operands are
+/// untouched (this module is cfg-gated).
+#[cfg(feature = "rocm")]
+mod rocm_sdpa;
 pub use kt_api::{
     flash_attn_bwd_kt, flash_attn_fwd_kt, flash_attn_paged_decode_dyn_seqlen_kt,
     flash_attn_paged_decode_dyn_seqlen_kt_with_graph_outputs, flash_attn_paged_decode_kt,
@@ -29,7 +37,12 @@ pub use kt_api::{
 };
 
 // FFI declarations matching flash_api_c.h. Re-exported as `pub(crate)` so the
-// kt-typed shells in `kt_api.rs` can dispatch them.
+// kt-typed shells in `kt_api.rs` can dispatch them. CUDA-only: these symbols are
+// provided by the vendored flash-attention `.cu` kernels compiled by `build.rs`
+// when the `cuda` feature is on. Under `--features rocm` no `.cu` is compiled
+// (no CUTLASS on ROCm) and the `*_kt` shells dispatch into the on-device
+// `rocm_sdpa` composite instead, so these declarations are gated out.
+#[cfg(feature = "cuda")]
 unsafe extern "C" {
     pub(crate) fn kiln_flash_attn_fwd(
         q: *const core::ffi::c_void,
@@ -146,6 +159,7 @@ unsafe extern "C" {
     ) -> i32;
 }
 
+#[cfg(feature = "cuda")]
 pub(crate) fn round_up(x: usize, m: usize) -> usize {
     x.div_ceil(m) * m
 }

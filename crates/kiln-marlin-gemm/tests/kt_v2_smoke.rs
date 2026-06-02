@@ -8,6 +8,11 @@
 //! The legacy "BORROW adapter" smoke moved to
 //! `crates/kiln-kt-bridge/tests/` where the adapter actually lives.
 //! This file tests the kt API in isolation.
+//!
+//! CUDA-only: it builds tensors through `Tensor::cuda_from_slice` /
+//! `primary_cuda_context`, which exist only under the `cuda` feature. The ROCm
+//! lane is covered by `tests/rocm_marlin_parity.rs`.
+#![cfg(feature = "cuda")]
 
 use half::f16;
 

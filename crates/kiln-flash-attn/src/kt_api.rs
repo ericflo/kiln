@@ -19,8 +19,18 @@
 //! (`kiln_flash_attn_*` / `kiln_paged_kv_write_*`) declared in `lib.rs`.
 
 use kiln_kt_bridge::BridgeError;
-use kiln_tensor::{CudaStorage, DType as KtDType, Tensor as KtTensor};
+#[cfg(feature = "rocm")]
+use kiln_tensor::Device as KtDevice;
+use kiln_tensor::{DType as KtDType, Tensor as KtTensor};
 
+// CUDA-only imports: the FFI symbols + the `CudaStorage` downcast helper are
+// only reached on the CUDA path. When building `--no-default-features --features
+// rocm` (no `cuda`), every `*_kt` body dispatches into `crate::rocm_sdpa` before
+// touching these, so they would be dead — gate them on `cuda` to keep the ROCm
+// build warning-clean and CUDA-feature byte-identical.
+#[cfg(feature = "cuda")]
+use kiln_tensor::CudaStorage;
+#[cfg(feature = "cuda")]
 use crate::{
     kiln_flash_attn_bwd, kiln_flash_attn_fwd, kiln_flash_attn_fwd_paged_decode,
     kiln_flash_attn_fwd_paged_decode_dyn_seqlen, kiln_paged_kv_write_token_major_bf16,
@@ -66,6 +76,9 @@ impl From<BridgeError> for FlashAttnError {
 /// - Operand type is `kiln_tensor::Tensor` instead of `candle_core::Tensor`.
 /// - Output + softmax_lse are allocated through `kiln_tensor`'s
 ///   `cuda_zeros` rather than `candle_core::Tensor::zeros`.
+// Some validation locals are only consumed by the CUDA FFI tail; on a rocm-only
+// build the ROCm composite dispatch returns first, so they are unused there.
+#[cfg_attr(not(feature = "cuda"), allow(unused_variables))]
 pub fn flash_attn_fwd_kt(
     q: &KtTensor,
     k: &KtTensor,
@@ -101,51 +114,71 @@ pub fn flash_attn_fwd_kt(
         )));
     }
 
-    // Owner-agnostic input pointers (Phase 7 v2).
-    let q_ptr = kiln_kt_bridge::cuda_input_device_ptr(q, KtDType::BF16, "q")?;
-    let k_ptr = kiln_kt_bridge::cuda_input_device_ptr(k, KtDType::BF16, "k")?;
-    let v_ptr = kiln_kt_bridge::cuda_input_device_ptr(v, KtDType::BF16, "v")?;
-    let (q_st, _) = cuda_storage_and_byte_offset(q, KtDType::BF16, "q")?;
-
-    // Output + softmax_lse allocated through the shared bridge.
-    let out_t = alloc_cuda_tensor(q_st, KtDType::BF16, vec![b, seqlen_q, num_heads, head_dim])?;
-    let lse_t = alloc_cuda_tensor(q_st, KtDType::F32, vec![b, num_heads, seqlen_q])?;
-    let out_ptr = kiln_kt_bridge::cuda_output_device_ptr(&out_t);
-    let lse_ptr = kiln_kt_bridge::cuda_output_device_ptr(&lse_t);
-
-    let raw_stream = q_st.cuda_stream_raw();
-
-    let status = unsafe {
-        kiln_flash_attn_fwd(
-            q_ptr as *const _,
-            k_ptr as *const _,
-            v_ptr as *const _,
-            out_ptr as *mut _,
-            lse_ptr as *mut _,
-            b as i32,
-            seqlen_q as i32,
-            seqlen_k as i32,
-            num_heads as i32,
-            num_heads_k as i32,
-            head_dim as i32,
-            softmax_scale,
-            if causal { 1 } else { 0 },
-            raw_stream,
-        )
-    };
-    if status != 0 {
-        return Err(FlashAttnError::Msg(format!(
-            "kt-flash-attn: kiln_flash_attn_fwd returned status {status}"
-        )));
+    // ROCm composite SDPA dispatch (Phase R.8) — no CUTLASS on ROCm, so the
+    // attention path runs through the fully on-device kiln_tensor composite.
+    #[cfg(feature = "rocm")]
+    if matches!(q.device(), KtDevice::Rocm(_)) {
+        return crate::rocm_sdpa::flash_attn_fwd_rocm(q, k, v, softmax_scale, causal);
     }
 
-    Ok((out_t, lse_t))
+    #[cfg(feature = "cuda")]
+    {
+        // Owner-agnostic input pointers (Phase 7 v2).
+        let q_ptr = kiln_kt_bridge::cuda_input_device_ptr(q, KtDType::BF16, "q")?;
+        let k_ptr = kiln_kt_bridge::cuda_input_device_ptr(k, KtDType::BF16, "k")?;
+        let v_ptr = kiln_kt_bridge::cuda_input_device_ptr(v, KtDType::BF16, "v")?;
+        let (q_st, _) = cuda_storage_and_byte_offset(q, KtDType::BF16, "q")?;
+
+        // Output + softmax_lse allocated through the shared bridge.
+        let out_t = alloc_cuda_tensor(q_st, KtDType::BF16, vec![b, seqlen_q, num_heads, head_dim])?;
+        let lse_t = alloc_cuda_tensor(q_st, KtDType::F32, vec![b, num_heads, seqlen_q])?;
+        let out_ptr = kiln_kt_bridge::cuda_output_device_ptr(&out_t);
+        let lse_ptr = kiln_kt_bridge::cuda_output_device_ptr(&lse_t);
+
+        let raw_stream = q_st.cuda_stream_raw();
+
+        let status = unsafe {
+            kiln_flash_attn_fwd(
+                q_ptr as *const _,
+                k_ptr as *const _,
+                v_ptr as *const _,
+                out_ptr as *mut _,
+                lse_ptr as *mut _,
+                b as i32,
+                seqlen_q as i32,
+                seqlen_k as i32,
+                num_heads as i32,
+                num_heads_k as i32,
+                head_dim as i32,
+                softmax_scale,
+                if causal { 1 } else { 0 },
+                raw_stream,
+            )
+        };
+        if status != 0 {
+            return Err(FlashAttnError::Msg(format!(
+                "kt-flash-attn: kiln_flash_attn_fwd returned status {status}"
+            )));
+        }
+
+        return Ok((out_t, lse_t));
+    }
+
+    // Neither a ROCm device (handled above) nor a CUDA build: no backend can
+    // service this operand.
+    #[cfg(not(feature = "cuda"))]
+    Err(FlashAttnError::Msg(format!(
+        "kt-flash-attn: flash_attn_fwd_kt has no backend for device {:?} \
+         (cuda feature off; only Device::Rocm is supported in this build)",
+        q.device()
+    )))
 }
 
 // ============================================================================
 // Internal helpers — delegate to kiln-kt-bridge
 // ============================================================================
 
+#[cfg(feature = "cuda")]
 fn cuda_storage_and_byte_offset<'a>(
     t: &'a KtTensor,
     expected_dtype: KtDType,
@@ -154,6 +187,7 @@ fn cuda_storage_and_byte_offset<'a>(
     Ok(kiln_kt_bridge::cuda_storage_and_byte_offset(t, expected_dtype, name)?)
 }
 
+#[cfg(feature = "cuda")]
 fn alloc_cuda_tensor(
     device_source: &CudaStorage,
     dtype: KtDType,
@@ -168,6 +202,7 @@ fn alloc_cuda_tensor(
 
 /// `flash_attn_paged_decode` over `kiln_tensor::Tensor` operands.
 /// Mirrors [`crate::flash_attn_paged_decode`] one-for-one.
+#[cfg_attr(not(feature = "cuda"), allow(unused_variables))]
 pub fn flash_attn_paged_decode_kt(
     q: &KtTensor,
     k_pool: &KtTensor,
@@ -241,46 +276,64 @@ pub fn flash_attn_paged_decode_kt(
         )));
     }
 
-    // Owner-agnostic input pointers (Phase 7 v2).
-    let q_ptr = kiln_kt_bridge::cuda_input_device_ptr(q, KtDType::BF16, "q")?;
-    let k_ptr = kiln_kt_bridge::cuda_input_device_ptr(k_pool, KtDType::BF16, "k_pool")?;
-    let v_ptr = kiln_kt_bridge::cuda_input_device_ptr(v_pool, KtDType::BF16, "v_pool")?;
-    let bt_ptr = kiln_kt_bridge::cuda_input_device_ptr(block_table, KtDType::U32, "block_table")?;
-    let (q_st, _) = cuda_storage_and_byte_offset(q, KtDType::BF16, "q")?;
-
-    let out_t = alloc_cuda_tensor(q_st, KtDType::BF16, vec![b, 1, num_heads, head_dim])?;
-    let lse_t = alloc_cuda_tensor(q_st, KtDType::F32, vec![b, num_heads, 1])?;
-    let out_ptr = kiln_kt_bridge::cuda_output_device_ptr(&out_t);
-    let lse_ptr = kiln_kt_bridge::cuda_output_device_ptr(&lse_t);
-
-    let raw_stream = q_st.cuda_stream_raw();
-
-    let status = unsafe {
-        kiln_flash_attn_fwd_paged_decode(
-            q_ptr as *const _,
-            k_ptr as *const _,
-            v_ptr as *const _,
-            bt_ptr as *const i32,
-            out_ptr as *mut _,
-            lse_ptr as *mut _,
-            b as i32,
-            num_heads as i32,
-            num_heads_k as i32,
-            head_dim as i32,
-            seqlen_k as i32,
-            max_blocks_per_seq as i32,
-            page_block_size as i32,
-            softmax_scale,
-            if causal { 1 } else { 0 },
-            raw_stream,
-        )
-    };
-    if status != 0 {
-        return Err(FlashAttnError::Msg(format!(
-            "kt-flash-attn: paged_decode FFI returned {status}"
-        )));
+    // ROCm composite paged-decode dispatch (Phase R.8).
+    #[cfg(feature = "rocm")]
+    if matches!(q.device(), KtDevice::Rocm(_)) {
+        return crate::rocm_sdpa::flash_attn_paged_decode_rocm(
+            q, k_pool, v_pool, block_table, seqlen_k, page_block_size, softmax_scale, causal,
+        );
     }
-    Ok(out_t)
+
+    #[cfg(feature = "cuda")]
+    {
+        // Owner-agnostic input pointers (Phase 7 v2).
+        let q_ptr = kiln_kt_bridge::cuda_input_device_ptr(q, KtDType::BF16, "q")?;
+        let k_ptr = kiln_kt_bridge::cuda_input_device_ptr(k_pool, KtDType::BF16, "k_pool")?;
+        let v_ptr = kiln_kt_bridge::cuda_input_device_ptr(v_pool, KtDType::BF16, "v_pool")?;
+        let bt_ptr = kiln_kt_bridge::cuda_input_device_ptr(block_table, KtDType::U32, "block_table")?;
+        let (q_st, _) = cuda_storage_and_byte_offset(q, KtDType::BF16, "q")?;
+
+        let out_t = alloc_cuda_tensor(q_st, KtDType::BF16, vec![b, 1, num_heads, head_dim])?;
+        let lse_t = alloc_cuda_tensor(q_st, KtDType::F32, vec![b, num_heads, 1])?;
+        let out_ptr = kiln_kt_bridge::cuda_output_device_ptr(&out_t);
+        let lse_ptr = kiln_kt_bridge::cuda_output_device_ptr(&lse_t);
+
+        let raw_stream = q_st.cuda_stream_raw();
+
+        let status = unsafe {
+            kiln_flash_attn_fwd_paged_decode(
+                q_ptr as *const _,
+                k_ptr as *const _,
+                v_ptr as *const _,
+                bt_ptr as *const i32,
+                out_ptr as *mut _,
+                lse_ptr as *mut _,
+                b as i32,
+                num_heads as i32,
+                num_heads_k as i32,
+                head_dim as i32,
+                seqlen_k as i32,
+                max_blocks_per_seq as i32,
+                page_block_size as i32,
+                softmax_scale,
+                if causal { 1 } else { 0 },
+                raw_stream,
+            )
+        };
+        if status != 0 {
+            return Err(FlashAttnError::Msg(format!(
+                "kt-flash-attn: paged_decode FFI returned {status}"
+            )));
+        }
+        return Ok(out_t);
+    }
+
+    #[cfg(not(feature = "cuda"))]
+    Err(FlashAttnError::Msg(format!(
+        "kt-flash-attn: flash_attn_paged_decode_kt has no backend for device {:?} \
+         (cuda feature off; only Device::Rocm is supported in this build)",
+        q.device()
+    )))
 }
 
 // ============================================================================
@@ -290,6 +343,7 @@ pub fn flash_attn_paged_decode_kt(
 /// `flash_attn_paged_decode_dyn_seqlen` over `kiln_tensor::Tensor`
 /// operands. Mirrors [`crate::flash_attn_paged_decode_dyn_seqlen`].
 /// `seqused_k` is a per-batch u32 tensor of effective K/V lengths.
+#[cfg_attr(not(feature = "cuda"), allow(unused_variables))]
 pub fn flash_attn_paged_decode_dyn_seqlen_kt(
     q: &KtTensor,
     k_pool: &KtTensor,
@@ -351,48 +405,68 @@ pub fn flash_attn_paged_decode_dyn_seqlen_kt(
         )));
     }
 
-    // Owner-agnostic input pointers (Phase 7 v2).
-    let q_ptr = kiln_kt_bridge::cuda_input_device_ptr(q, KtDType::BF16, "q")?;
-    let k_ptr = kiln_kt_bridge::cuda_input_device_ptr(k_pool, KtDType::BF16, "k_pool")?;
-    let v_ptr = kiln_kt_bridge::cuda_input_device_ptr(v_pool, KtDType::BF16, "v_pool")?;
-    let bt_ptr = kiln_kt_bridge::cuda_input_device_ptr(block_table, KtDType::U32, "block_table")?;
-    let sk_ptr = kiln_kt_bridge::cuda_input_device_ptr(seqused_k, KtDType::U32, "seqused_k")?;
-    let (q_st, _) = cuda_storage_and_byte_offset(q, KtDType::BF16, "q")?;
-
-    let out_t = alloc_cuda_tensor(q_st, KtDType::BF16, vec![b, 1, num_heads, head_dim])?;
-    let lse_t = alloc_cuda_tensor(q_st, KtDType::F32, vec![b, num_heads, 1])?;
-    let out_ptr = kiln_kt_bridge::cuda_output_device_ptr(&out_t);
-    let lse_ptr = kiln_kt_bridge::cuda_output_device_ptr(&lse_t);
-
-    let raw_stream = q_st.cuda_stream_raw();
-
-    let status = unsafe {
-        kiln_flash_attn_fwd_paged_decode_dyn_seqlen(
-            q_ptr as *const _,
-            k_ptr as *const _,
-            v_ptr as *const _,
-            bt_ptr as *const i32,
-            sk_ptr as *const i32,
-            out_ptr as *mut _,
-            lse_ptr as *mut _,
-            b as i32,
-            num_heads as i32,
-            num_heads_k as i32,
-            head_dim as i32,
-            max_seqlen_k as i32,
-            max_blocks_per_seq as i32,
-            page_block_size as i32,
-            softmax_scale,
-            if causal { 1 } else { 0 },
-            raw_stream,
-        )
-    };
-    if status != 0 {
-        return Err(FlashAttnError::Msg(format!(
-            "kt-flash-attn: paged_decode_dyn_seqlen FFI returned {status}"
-        )));
+    // ROCm composite dyn-seqlen paged-decode dispatch (Phase R.8).
+    #[cfg(feature = "rocm")]
+    if matches!(q.device(), KtDevice::Rocm(_)) {
+        return crate::rocm_sdpa::flash_attn_paged_decode_dyn_seqlen_rocm(
+            q, k_pool, v_pool, block_table, seqused_k, max_seqlen_k, page_block_size,
+            softmax_scale, causal,
+        );
     }
-    Ok(out_t)
+
+    #[cfg(feature = "cuda")]
+    {
+        // Owner-agnostic input pointers (Phase 7 v2).
+        let q_ptr = kiln_kt_bridge::cuda_input_device_ptr(q, KtDType::BF16, "q")?;
+        let k_ptr = kiln_kt_bridge::cuda_input_device_ptr(k_pool, KtDType::BF16, "k_pool")?;
+        let v_ptr = kiln_kt_bridge::cuda_input_device_ptr(v_pool, KtDType::BF16, "v_pool")?;
+        let bt_ptr =
+            kiln_kt_bridge::cuda_input_device_ptr(block_table, KtDType::U32, "block_table")?;
+        let sk_ptr = kiln_kt_bridge::cuda_input_device_ptr(seqused_k, KtDType::U32, "seqused_k")?;
+        let (q_st, _) = cuda_storage_and_byte_offset(q, KtDType::BF16, "q")?;
+
+        let out_t = alloc_cuda_tensor(q_st, KtDType::BF16, vec![b, 1, num_heads, head_dim])?;
+        let lse_t = alloc_cuda_tensor(q_st, KtDType::F32, vec![b, num_heads, 1])?;
+        let out_ptr = kiln_kt_bridge::cuda_output_device_ptr(&out_t);
+        let lse_ptr = kiln_kt_bridge::cuda_output_device_ptr(&lse_t);
+
+        let raw_stream = q_st.cuda_stream_raw();
+
+        let status = unsafe {
+            kiln_flash_attn_fwd_paged_decode_dyn_seqlen(
+                q_ptr as *const _,
+                k_ptr as *const _,
+                v_ptr as *const _,
+                bt_ptr as *const i32,
+                sk_ptr as *const i32,
+                out_ptr as *mut _,
+                lse_ptr as *mut _,
+                b as i32,
+                num_heads as i32,
+                num_heads_k as i32,
+                head_dim as i32,
+                max_seqlen_k as i32,
+                max_blocks_per_seq as i32,
+                page_block_size as i32,
+                softmax_scale,
+                if causal { 1 } else { 0 },
+                raw_stream,
+            )
+        };
+        if status != 0 {
+            return Err(FlashAttnError::Msg(format!(
+                "kt-flash-attn: paged_decode_dyn_seqlen FFI returned {status}"
+            )));
+        }
+        return Ok(out_t);
+    }
+
+    #[cfg(not(feature = "cuda"))]
+    Err(FlashAttnError::Msg(format!(
+        "kt-flash-attn: flash_attn_paged_decode_dyn_seqlen_kt has no backend for device {:?} \
+         (cuda feature off; only Device::Rocm is supported in this build)",
+        q.device()
+    )))
 }
 
 /// `flash_attn_paged_decode_dyn_seqlen` over `kiln_tensor::Tensor`
@@ -417,6 +491,7 @@ pub fn flash_attn_paged_decode_dyn_seqlen_kt(
 /// batch_dyn_seqlen_with_graph_outputs`. Bit-exact by construction —
 /// bottoms out in the same `kiln_flash_attn_fwd_paged_decode_dyn_
 /// seqlen` FFI symbol as the candle path.
+#[cfg_attr(not(feature = "cuda"), allow(unused_variables))]
 pub fn flash_attn_paged_decode_dyn_seqlen_kt_with_graph_outputs(
     q: &KtTensor,
     k_pool: &KtTensor,
@@ -500,49 +575,76 @@ pub fn flash_attn_paged_decode_dyn_seqlen_kt_with_graph_outputs(
         )));
     }
 
-    // Owner-agnostic input pointers (same pattern as the non-graph variant).
-    let q_ptr = kiln_kt_bridge::cuda_input_device_ptr(q, KtDType::BF16, "q")?;
-    let k_ptr = kiln_kt_bridge::cuda_input_device_ptr(k_pool, KtDType::BF16, "k_pool")?;
-    let v_ptr = kiln_kt_bridge::cuda_input_device_ptr(v_pool, KtDType::BF16, "v_pool")?;
-    let bt_ptr = kiln_kt_bridge::cuda_input_device_ptr(block_table, KtDType::U32, "block_table")?;
-    let sk_ptr = kiln_kt_bridge::cuda_input_device_ptr(seqused_k, KtDType::U32, "seqused_k")?;
-    // Caller-owned output pointers — the kernel writes through these
-    // addresses. They must outlive every replay of any captured CUDA
-    // graph that records this dispatch (kt-graph capture lifetime
-    // contract from `kiln-graph::CaptureSession::pin`).
-    let out_ptr = kiln_kt_bridge::cuda_input_device_ptr(out, KtDType::BF16, "out")?;
-    let lse_ptr = kiln_kt_bridge::cuda_input_device_ptr(lse, KtDType::F32, "lse")?;
-    let (q_st, _) = cuda_storage_and_byte_offset(q, KtDType::BF16, "q")?;
-
-    let raw_stream = q_st.cuda_stream_raw();
-
-    let status = unsafe {
-        kiln_flash_attn_fwd_paged_decode_dyn_seqlen(
-            q_ptr as *const _,
-            k_ptr as *const _,
-            v_ptr as *const _,
-            bt_ptr as *const i32,
-            sk_ptr as *const i32,
-            out_ptr as *mut _,
-            lse_ptr as *mut _,
-            b as i32,
-            num_heads as i32,
-            num_heads_k as i32,
-            head_dim as i32,
-            max_seqlen_k as i32,
-            max_blocks_per_seq as i32,
-            page_block_size as i32,
-            softmax_scale,
-            if causal { 1 } else { 0 },
-            raw_stream,
-        )
-    };
-    if status != 0 {
-        return Err(FlashAttnError::Msg(format!(
-            "kt-flash-attn: with_graph_outputs FFI returned {status}"
-        )));
+    // ROCm composite dispatch (Phase R.8). There is no CUDA-graph capture on the
+    // ROCm composite path; we compute the same result and copy it into the
+    // caller-owned `out` buffer device-to-device so the contract (result lands
+    // in `out`) holds. `lse` is left as-is (the composite decode path does not
+    // surface lse, and no ROCm caller reads it back from this entry point).
+    #[cfg(feature = "rocm")]
+    if matches!(q.device(), KtDevice::Rocm(_)) {
+        let computed = crate::rocm_sdpa::flash_attn_paged_decode_dyn_seqlen_rocm(
+            q, k_pool, v_pool, block_table, seqused_k, max_seqlen_k, page_block_size,
+            softmax_scale, causal,
+        )?;
+        crate::rocm_sdpa::rocm_copy_into(&computed, out)?;
+        let _ = lse;
+        return Ok(());
     }
-    Ok(())
+
+    #[cfg(feature = "cuda")]
+    {
+        // Owner-agnostic input pointers (same pattern as the non-graph variant).
+        let q_ptr = kiln_kt_bridge::cuda_input_device_ptr(q, KtDType::BF16, "q")?;
+        let k_ptr = kiln_kt_bridge::cuda_input_device_ptr(k_pool, KtDType::BF16, "k_pool")?;
+        let v_ptr = kiln_kt_bridge::cuda_input_device_ptr(v_pool, KtDType::BF16, "v_pool")?;
+        let bt_ptr =
+            kiln_kt_bridge::cuda_input_device_ptr(block_table, KtDType::U32, "block_table")?;
+        let sk_ptr = kiln_kt_bridge::cuda_input_device_ptr(seqused_k, KtDType::U32, "seqused_k")?;
+        // Caller-owned output pointers — the kernel writes through these
+        // addresses. They must outlive every replay of any captured CUDA
+        // graph that records this dispatch (kt-graph capture lifetime
+        // contract from `kiln-graph::CaptureSession::pin`).
+        let out_ptr = kiln_kt_bridge::cuda_input_device_ptr(out, KtDType::BF16, "out")?;
+        let lse_ptr = kiln_kt_bridge::cuda_input_device_ptr(lse, KtDType::F32, "lse")?;
+        let (q_st, _) = cuda_storage_and_byte_offset(q, KtDType::BF16, "q")?;
+
+        let raw_stream = q_st.cuda_stream_raw();
+
+        let status = unsafe {
+            kiln_flash_attn_fwd_paged_decode_dyn_seqlen(
+                q_ptr as *const _,
+                k_ptr as *const _,
+                v_ptr as *const _,
+                bt_ptr as *const i32,
+                sk_ptr as *const i32,
+                out_ptr as *mut _,
+                lse_ptr as *mut _,
+                b as i32,
+                num_heads as i32,
+                num_heads_k as i32,
+                head_dim as i32,
+                max_seqlen_k as i32,
+                max_blocks_per_seq as i32,
+                page_block_size as i32,
+                softmax_scale,
+                if causal { 1 } else { 0 },
+                raw_stream,
+            )
+        };
+        if status != 0 {
+            return Err(FlashAttnError::Msg(format!(
+                "kt-flash-attn: with_graph_outputs FFI returned {status}"
+            )));
+        }
+        return Ok(());
+    }
+
+    #[cfg(not(feature = "cuda"))]
+    Err(FlashAttnError::Msg(format!(
+        "kt-flash-attn: with_graph_outputs has no backend for device {:?} \
+         (cuda feature off; only Device::Rocm is supported in this build)",
+        q.device()
+    )))
 }
 
 // ============================================================================
@@ -582,41 +684,61 @@ pub fn paged_kv_write_token_major_bf16_kt(
             v.element_count()
         )));
     }
-    let slot_u32 = u32::try_from(slot)
-        .map_err(|_| FlashAttnError::Msg(format!("kt-flash-attn: slot {slot} exceeds u32")))?;
-    let num_kv_heads_i32 = i32::try_from(num_kv_heads).map_err(|_| {
-        FlashAttnError::Msg(format!("kt-flash-attn: num_kv_heads {num_kv_heads} exceeds i32"))
-    })?;
-    let head_dim_i32 = i32::try_from(head_dim)
-        .map_err(|_| FlashAttnError::Msg(format!("kt-flash-attn: head_dim {head_dim} exceeds i32")))?;
-
-    // Owner-agnostic input pointers (Phase 7 v2). k_pool/v_pool are
-    // written in place; caller convention: pass Owned for the pools.
-    let k_ptr = kiln_kt_bridge::cuda_input_device_ptr(k, KtDType::BF16, "k")?;
-    let v_ptr = kiln_kt_bridge::cuda_input_device_ptr(v, KtDType::BF16, "v")?;
-    let kp_ptr = kiln_kt_bridge::cuda_input_device_ptr(k_pool, KtDType::BF16, "k_pool")?;
-    let vp_ptr = kiln_kt_bridge::cuda_input_device_ptr(v_pool, KtDType::BF16, "v_pool")?;
-    let (k_st, _) = cuda_storage_and_byte_offset(k, KtDType::BF16, "k")?;
-
-    let raw_stream = k_st.cuda_stream_raw();
-    let status = unsafe {
-        kiln_paged_kv_write_token_major_bf16(
-            kp_ptr as *mut _,
-            vp_ptr as *mut _,
-            k_ptr as *const _,
-            v_ptr as *const _,
-            slot_u32,
-            num_kv_heads_i32,
-            head_dim_i32,
-            raw_stream,
-        )
-    };
-    if status != 0 {
-        return Err(FlashAttnError::Msg(format!(
-            "kt-flash-attn: kv_write FFI returned {status}"
-        )));
+    // ROCm composite KV-write dispatch (Phase R.8): in-place device-to-device
+    // copy of the token row into the pool at `slot`.
+    #[cfg(feature = "rocm")]
+    if matches!(k_pool.device(), KtDevice::Rocm(_)) {
+        return crate::rocm_sdpa::paged_kv_write_token_major_bf16_rocm(
+            k_pool, v_pool, k, v, slot, num_kv_heads, head_dim,
+        );
     }
-    Ok(())
+
+    #[cfg(feature = "cuda")]
+    {
+        let slot_u32 = u32::try_from(slot)
+            .map_err(|_| FlashAttnError::Msg(format!("kt-flash-attn: slot {slot} exceeds u32")))?;
+        let num_kv_heads_i32 = i32::try_from(num_kv_heads).map_err(|_| {
+            FlashAttnError::Msg(format!("kt-flash-attn: num_kv_heads {num_kv_heads} exceeds i32"))
+        })?;
+        let head_dim_i32 = i32::try_from(head_dim).map_err(|_| {
+            FlashAttnError::Msg(format!("kt-flash-attn: head_dim {head_dim} exceeds i32"))
+        })?;
+
+        // Owner-agnostic input pointers (Phase 7 v2). k_pool/v_pool are
+        // written in place; caller convention: pass Owned for the pools.
+        let k_ptr = kiln_kt_bridge::cuda_input_device_ptr(k, KtDType::BF16, "k")?;
+        let v_ptr = kiln_kt_bridge::cuda_input_device_ptr(v, KtDType::BF16, "v")?;
+        let kp_ptr = kiln_kt_bridge::cuda_input_device_ptr(k_pool, KtDType::BF16, "k_pool")?;
+        let vp_ptr = kiln_kt_bridge::cuda_input_device_ptr(v_pool, KtDType::BF16, "v_pool")?;
+        let (k_st, _) = cuda_storage_and_byte_offset(k, KtDType::BF16, "k")?;
+
+        let raw_stream = k_st.cuda_stream_raw();
+        let status = unsafe {
+            kiln_paged_kv_write_token_major_bf16(
+                kp_ptr as *mut _,
+                vp_ptr as *mut _,
+                k_ptr as *const _,
+                v_ptr as *const _,
+                slot_u32,
+                num_kv_heads_i32,
+                head_dim_i32,
+                raw_stream,
+            )
+        };
+        if status != 0 {
+            return Err(FlashAttnError::Msg(format!(
+                "kt-flash-attn: kv_write FFI returned {status}"
+            )));
+        }
+        return Ok(());
+    }
+
+    #[cfg(not(feature = "cuda"))]
+    Err(FlashAttnError::Msg(format!(
+        "kt-flash-attn: paged_kv_write_token_major_bf16_kt has no backend for device {:?} \
+         (cuda feature off; only Device::Rocm is supported in this build)",
+        k_pool.device()
+    )))
 }
 
 // ============================================================================
@@ -650,37 +772,56 @@ pub fn paged_kv_write_token_major_bf16_slot_kt(
             slot.shape()
         )));
     }
-    let num_kv_heads_i32 = i32::try_from(num_kv_heads)
-        .map_err(|_| FlashAttnError::Msg(format!("num_kv_heads {num_kv_heads} > i32")))?;
-    let head_dim_i32 = i32::try_from(head_dim)
-        .map_err(|_| FlashAttnError::Msg(format!("head_dim {head_dim} > i32")))?;
 
-    let k_ptr = kiln_kt_bridge::cuda_input_device_ptr(k, KtDType::BF16, "k")?;
-    let v_ptr = kiln_kt_bridge::cuda_input_device_ptr(v, KtDType::BF16, "v")?;
-    let kp_ptr = kiln_kt_bridge::cuda_input_device_ptr(k_pool, KtDType::BF16, "k_pool")?;
-    let vp_ptr = kiln_kt_bridge::cuda_input_device_ptr(v_pool, KtDType::BF16, "v_pool")?;
-    let sl_ptr = kiln_kt_bridge::cuda_input_device_ptr(slot, KtDType::U32, "slot")?;
-    let (k_st, _) = cuda_storage_and_byte_offset(k, KtDType::BF16, "k")?;
-
-    let raw_stream = k_st.cuda_stream_raw();
-    let status = unsafe {
-        kiln_paged_kv_write_token_major_bf16_slot(
-            kp_ptr as *mut _,
-            vp_ptr as *mut _,
-            k_ptr as *const _,
-            v_ptr as *const _,
-            sl_ptr as *const u32,
-            num_kv_heads_i32,
-            head_dim_i32,
-            raw_stream,
-        )
-    };
-    if status != 0 {
-        return Err(FlashAttnError::Msg(format!(
-            "kt-flash-attn: kv_write_slot FFI returned {status}"
-        )));
+    // ROCm composite KV-write (device-slot) dispatch (Phase R.8).
+    #[cfg(feature = "rocm")]
+    if matches!(k_pool.device(), KtDevice::Rocm(_)) {
+        return crate::rocm_sdpa::paged_kv_write_token_major_bf16_slot_rocm(
+            k_pool, v_pool, k, v, slot, num_kv_heads, head_dim,
+        );
     }
-    Ok(())
+
+    #[cfg(feature = "cuda")]
+    {
+        let num_kv_heads_i32 = i32::try_from(num_kv_heads)
+            .map_err(|_| FlashAttnError::Msg(format!("num_kv_heads {num_kv_heads} > i32")))?;
+        let head_dim_i32 = i32::try_from(head_dim)
+            .map_err(|_| FlashAttnError::Msg(format!("head_dim {head_dim} > i32")))?;
+
+        let k_ptr = kiln_kt_bridge::cuda_input_device_ptr(k, KtDType::BF16, "k")?;
+        let v_ptr = kiln_kt_bridge::cuda_input_device_ptr(v, KtDType::BF16, "v")?;
+        let kp_ptr = kiln_kt_bridge::cuda_input_device_ptr(k_pool, KtDType::BF16, "k_pool")?;
+        let vp_ptr = kiln_kt_bridge::cuda_input_device_ptr(v_pool, KtDType::BF16, "v_pool")?;
+        let sl_ptr = kiln_kt_bridge::cuda_input_device_ptr(slot, KtDType::U32, "slot")?;
+        let (k_st, _) = cuda_storage_and_byte_offset(k, KtDType::BF16, "k")?;
+
+        let raw_stream = k_st.cuda_stream_raw();
+        let status = unsafe {
+            kiln_paged_kv_write_token_major_bf16_slot(
+                kp_ptr as *mut _,
+                vp_ptr as *mut _,
+                k_ptr as *const _,
+                v_ptr as *const _,
+                sl_ptr as *const u32,
+                num_kv_heads_i32,
+                head_dim_i32,
+                raw_stream,
+            )
+        };
+        if status != 0 {
+            return Err(FlashAttnError::Msg(format!(
+                "kt-flash-attn: kv_write_slot FFI returned {status}"
+            )));
+        }
+        return Ok(());
+    }
+
+    #[cfg(not(feature = "cuda"))]
+    Err(FlashAttnError::Msg(format!(
+        "kt-flash-attn: paged_kv_write_token_major_bf16_slot_kt has no backend for device {:?} \
+         (cuda feature off; only Device::Rocm is supported in this build)",
+        k_pool.device()
+    )))
 }
 
 // ============================================================================
@@ -745,42 +886,60 @@ pub fn paged_kv_write_token_major_bf16_batch_slot_kt(
             v.element_count()
         )));
     }
-    let batch_i32 = i32::try_from(batch)
-        .map_err(|_| FlashAttnError::Msg(format!("batch {batch} > i32")))?;
-    let num_kv_heads_i32 = i32::try_from(num_kv_heads)
-        .map_err(|_| FlashAttnError::Msg(format!("num_kv_heads {num_kv_heads} > i32")))?;
-    let head_dim_i32 = i32::try_from(head_dim)
-        .map_err(|_| FlashAttnError::Msg(format!("head_dim {head_dim} > i32")))?;
-
-    // Owner-agnostic input pointers (Phase 7 v2). k_pool/v_pool are
-    // written in place; caller convention: pass Owned for the pools.
-    let k_ptr = kiln_kt_bridge::cuda_input_device_ptr(k, KtDType::BF16, "k")?;
-    let v_ptr = kiln_kt_bridge::cuda_input_device_ptr(v, KtDType::BF16, "v")?;
-    let kp_ptr = kiln_kt_bridge::cuda_input_device_ptr(k_pool, KtDType::BF16, "k_pool")?;
-    let vp_ptr = kiln_kt_bridge::cuda_input_device_ptr(v_pool, KtDType::BF16, "v_pool")?;
-    let sl_ptr = kiln_kt_bridge::cuda_input_device_ptr(slots, KtDType::U32, "slots")?;
-    let (k_st, _) = cuda_storage_and_byte_offset(k, KtDType::BF16, "k")?;
-
-    let raw_stream = k_st.cuda_stream_raw();
-    let status = unsafe {
-        kiln_paged_kv_write_token_major_bf16_batch_slot(
-            kp_ptr as *mut _,
-            vp_ptr as *mut _,
-            k_ptr as *const _,
-            v_ptr as *const _,
-            sl_ptr as *const u32,
-            batch_i32,
-            num_kv_heads_i32,
-            head_dim_i32,
-            raw_stream,
-        )
-    };
-    if status != 0 {
-        return Err(FlashAttnError::Msg(format!(
-            "kt-flash-attn: kv_write_batch_slot FFI returned {status}"
-        )));
+    // ROCm composite KV-write (batched device-slot) dispatch (Phase R.8).
+    #[cfg(feature = "rocm")]
+    if matches!(k_pool.device(), KtDevice::Rocm(_)) {
+        return crate::rocm_sdpa::paged_kv_write_token_major_bf16_batch_slot_rocm(
+            k_pool, v_pool, k, v, slots, batch, num_kv_heads, head_dim,
+        );
     }
-    Ok(())
+
+    #[cfg(feature = "cuda")]
+    {
+        let batch_i32 =
+            i32::try_from(batch).map_err(|_| FlashAttnError::Msg(format!("batch {batch} > i32")))?;
+        let num_kv_heads_i32 = i32::try_from(num_kv_heads)
+            .map_err(|_| FlashAttnError::Msg(format!("num_kv_heads {num_kv_heads} > i32")))?;
+        let head_dim_i32 = i32::try_from(head_dim)
+            .map_err(|_| FlashAttnError::Msg(format!("head_dim {head_dim} > i32")))?;
+
+        // Owner-agnostic input pointers (Phase 7 v2). k_pool/v_pool are
+        // written in place; caller convention: pass Owned for the pools.
+        let k_ptr = kiln_kt_bridge::cuda_input_device_ptr(k, KtDType::BF16, "k")?;
+        let v_ptr = kiln_kt_bridge::cuda_input_device_ptr(v, KtDType::BF16, "v")?;
+        let kp_ptr = kiln_kt_bridge::cuda_input_device_ptr(k_pool, KtDType::BF16, "k_pool")?;
+        let vp_ptr = kiln_kt_bridge::cuda_input_device_ptr(v_pool, KtDType::BF16, "v_pool")?;
+        let sl_ptr = kiln_kt_bridge::cuda_input_device_ptr(slots, KtDType::U32, "slots")?;
+        let (k_st, _) = cuda_storage_and_byte_offset(k, KtDType::BF16, "k")?;
+
+        let raw_stream = k_st.cuda_stream_raw();
+        let status = unsafe {
+            kiln_paged_kv_write_token_major_bf16_batch_slot(
+                kp_ptr as *mut _,
+                vp_ptr as *mut _,
+                k_ptr as *const _,
+                v_ptr as *const _,
+                sl_ptr as *const u32,
+                batch_i32,
+                num_kv_heads_i32,
+                head_dim_i32,
+                raw_stream,
+            )
+        };
+        if status != 0 {
+            return Err(FlashAttnError::Msg(format!(
+                "kt-flash-attn: kv_write_batch_slot FFI returned {status}"
+            )));
+        }
+        return Ok(());
+    }
+
+    #[cfg(not(feature = "cuda"))]
+    Err(FlashAttnError::Msg(format!(
+        "kt-flash-attn: paged_kv_write_token_major_bf16_batch_slot_kt has no backend for \
+         device {:?} (cuda feature off; only Device::Rocm is supported in this build)",
+        k_pool.device()
+    )))
 }
 
 // ============================================================================
@@ -793,6 +952,7 @@ pub fn paged_kv_write_token_major_bf16_batch_slot_kt(
 /// function only allocates expanded buffers matching the FFI's
 /// shape contract.
 #[allow(clippy::too_many_arguments)]
+#[cfg_attr(not(feature = "cuda"), allow(unused_variables))]
 pub fn flash_attn_bwd_kt(
     dout: &KtTensor,
     q: &KtTensor,
@@ -823,67 +983,86 @@ pub fn flash_attn_bwd_kt(
         )));
     }
 
-    let seqlen_q_rounded = round_up(seqlen_q, 128);
-    let head_dim_rounded = round_up(head_dim, 32);
-
-    // Owner-agnostic input pointers (Phase 7 v2).
-    let dout_ptr = kiln_kt_bridge::cuda_input_device_ptr(dout, KtDType::BF16, "dout")?;
-    let q_ptr = kiln_kt_bridge::cuda_input_device_ptr(q, KtDType::BF16, "q")?;
-    let k_ptr = kiln_kt_bridge::cuda_input_device_ptr(k, KtDType::BF16, "k")?;
-    let v_ptr = kiln_kt_bridge::cuda_input_device_ptr(v, KtDType::BF16, "v")?;
-    let out_ptr = kiln_kt_bridge::cuda_input_device_ptr(out, KtDType::BF16, "out")?;
-    let lse_ptr = kiln_kt_bridge::cuda_input_device_ptr(softmax_lse, KtDType::F32, "softmax_lse")?;
-    let (q_st, _) = cuda_storage_and_byte_offset(q, KtDType::BF16, "q")?;
-
-    let dq = alloc_cuda_tensor(q_st, KtDType::BF16, vec![b, seqlen_q, num_heads, head_dim])?;
-    let dk = alloc_cuda_tensor(q_st, KtDType::BF16, vec![b, seqlen_k, num_heads, head_dim])?;
-    let dv = alloc_cuda_tensor(q_st, KtDType::BF16, vec![b, seqlen_k, num_heads, head_dim])?;
-    let softmax_d =
-        alloc_cuda_tensor(q_st, KtDType::F32, vec![b, num_heads, seqlen_q_rounded])?;
-    let dq_accum = alloc_cuda_tensor(
-        q_st,
-        KtDType::F32,
-        vec![b, seqlen_q_rounded, num_heads, head_dim_rounded],
-    )?;
-    let dq_ptr = kiln_kt_bridge::cuda_output_device_ptr(&dq);
-    let dk_ptr = kiln_kt_bridge::cuda_output_device_ptr(&dk);
-    let dv_ptr = kiln_kt_bridge::cuda_output_device_ptr(&dv);
-    let sd_ptr = kiln_kt_bridge::cuda_output_device_ptr(&softmax_d);
-    let da_ptr = kiln_kt_bridge::cuda_output_device_ptr(&dq_accum);
-
-    let raw_stream = q_st.cuda_stream_raw();
-
-    let status = unsafe {
-        kiln_flash_attn_bwd(
-            dout_ptr as *const _,
-            q_ptr as *const _,
-            k_ptr as *const _,
-            v_ptr as *const _,
-            out_ptr as *const _,
-            lse_ptr as *const _,
-            dq_ptr as *mut _,
-            dk_ptr as *mut _,
-            dv_ptr as *mut _,
-            sd_ptr as *mut _,
-            da_ptr as *mut _,
-            b as i32,
-            seqlen_q as i32,
-            seqlen_k as i32,
-            num_heads as i32,
-            num_heads_k as i32,
-            head_dim as i32,
-            softmax_scale,
-            if causal { 1 } else { 0 },
-            /* deterministic */ 1,
-            raw_stream,
-        )
-    };
-    if status != 0 {
-        return Err(FlashAttnError::Msg(format!(
-            "kt-flash-attn: bwd FFI returned {status}"
-        )));
+    // ROCm composite backward dispatch (Phase R.8).
+    #[cfg(feature = "rocm")]
+    if matches!(q.device(), KtDevice::Rocm(_)) {
+        return crate::rocm_sdpa::flash_attn_bwd_rocm(
+            dout, q, k, v, softmax_lse, softmax_scale, causal,
+        );
     }
-    Ok((dq, dk, dv))
+
+    #[cfg(feature = "cuda")]
+    {
+        let seqlen_q_rounded = round_up(seqlen_q, 128);
+        let head_dim_rounded = round_up(head_dim, 32);
+
+        // Owner-agnostic input pointers (Phase 7 v2).
+        let dout_ptr = kiln_kt_bridge::cuda_input_device_ptr(dout, KtDType::BF16, "dout")?;
+        let q_ptr = kiln_kt_bridge::cuda_input_device_ptr(q, KtDType::BF16, "q")?;
+        let k_ptr = kiln_kt_bridge::cuda_input_device_ptr(k, KtDType::BF16, "k")?;
+        let v_ptr = kiln_kt_bridge::cuda_input_device_ptr(v, KtDType::BF16, "v")?;
+        let out_ptr = kiln_kt_bridge::cuda_input_device_ptr(out, KtDType::BF16, "out")?;
+        let lse_ptr =
+            kiln_kt_bridge::cuda_input_device_ptr(softmax_lse, KtDType::F32, "softmax_lse")?;
+        let (q_st, _) = cuda_storage_and_byte_offset(q, KtDType::BF16, "q")?;
+
+        let dq = alloc_cuda_tensor(q_st, KtDType::BF16, vec![b, seqlen_q, num_heads, head_dim])?;
+        let dk = alloc_cuda_tensor(q_st, KtDType::BF16, vec![b, seqlen_k, num_heads, head_dim])?;
+        let dv = alloc_cuda_tensor(q_st, KtDType::BF16, vec![b, seqlen_k, num_heads, head_dim])?;
+        let softmax_d =
+            alloc_cuda_tensor(q_st, KtDType::F32, vec![b, num_heads, seqlen_q_rounded])?;
+        let dq_accum = alloc_cuda_tensor(
+            q_st,
+            KtDType::F32,
+            vec![b, seqlen_q_rounded, num_heads, head_dim_rounded],
+        )?;
+        let dq_ptr = kiln_kt_bridge::cuda_output_device_ptr(&dq);
+        let dk_ptr = kiln_kt_bridge::cuda_output_device_ptr(&dk);
+        let dv_ptr = kiln_kt_bridge::cuda_output_device_ptr(&dv);
+        let sd_ptr = kiln_kt_bridge::cuda_output_device_ptr(&softmax_d);
+        let da_ptr = kiln_kt_bridge::cuda_output_device_ptr(&dq_accum);
+
+        let raw_stream = q_st.cuda_stream_raw();
+
+        let status = unsafe {
+            kiln_flash_attn_bwd(
+                dout_ptr as *const _,
+                q_ptr as *const _,
+                k_ptr as *const _,
+                v_ptr as *const _,
+                out_ptr as *const _,
+                lse_ptr as *const _,
+                dq_ptr as *mut _,
+                dk_ptr as *mut _,
+                dv_ptr as *mut _,
+                sd_ptr as *mut _,
+                da_ptr as *mut _,
+                b as i32,
+                seqlen_q as i32,
+                seqlen_k as i32,
+                num_heads as i32,
+                num_heads_k as i32,
+                head_dim as i32,
+                softmax_scale,
+                if causal { 1 } else { 0 },
+                /* deterministic */ 1,
+                raw_stream,
+            )
+        };
+        if status != 0 {
+            return Err(FlashAttnError::Msg(format!(
+                "kt-flash-attn: bwd FFI returned {status}"
+            )));
+        }
+        return Ok((dq, dk, dv));
+    }
+
+    #[cfg(not(feature = "cuda"))]
+    Err(FlashAttnError::Msg(format!(
+        "kt-flash-attn: flash_attn_bwd_kt has no backend for device {:?} \
+         (cuda feature off; only Device::Rocm is supported in this build)",
+        q.device()
+    )))
 }
 
 // Note: the previous `kt_flash_attn_regression` parity tests against the

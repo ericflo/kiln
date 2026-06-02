@@ -2,6 +2,21 @@ use std::env;
 use std::path::PathBuf;
 
 fn main() {
+    // Phase R.8: the CUDA flash-attention `.cu` kernels are only compiled for
+    // the `cuda` feature. Under `--no-default-features --features rocm` there is
+    // no CUTLASS on ROCm — the attention path runs through the on-device
+    // `rocm_sdpa` composite (pure `kiln_tensor` ROCm primitives, no `.cu`), so
+    // build.rs does nothing. Mirrors how the rocm-only kernel crates carry no
+    // CUDA build step.
+    println!("cargo:rerun-if-env-changed=CARGO_FEATURE_CUDA");
+    if std::env::var_os("CARGO_FEATURE_CUDA").is_none() {
+        println!(
+            "cargo:warning=kiln-flash-attn: `cuda` feature off — skipping CUDA kernel build \
+             (ROCm composite SDPA path, no .cu compiled)"
+        );
+        return;
+    }
+
     // Only build when CUDA is available
     let cuda_root = find_cuda_root();
     let cuda_root = match cuda_root {
