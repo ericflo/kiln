@@ -147,10 +147,11 @@ pub use metal_matmul::{
 };
 #[cfg(feature = "metal")]
 pub use metal_storage::{
-    host_to_metal_copy, metal_activation_unary, metal_cast, metal_elementwise_binary,
-    metal_deep_copy, metal_index_select_dim0, metal_layernorm_last_axis,
-    metal_log_softmax_last_axis, metal_rmsnorm_last_axis, metal_sdpa_last_axis,
-    metal_softmax_last_axis, metal_to_host_copy, primary_metal_companion, MetalStorage,
+    host_to_metal_copy, metal_activation_unary, metal_cast, metal_cumsum_axis,
+    metal_elementwise_binary, metal_deep_copy, metal_index_select_dim0,
+    metal_layernorm_last_axis, metal_log_softmax_last_axis, metal_rmsnorm_last_axis,
+    metal_sdpa_last_axis, metal_softmax_last_axis, metal_to_host_copy,
+    primary_metal_companion, MetalStorage,
 };
 #[cfg(feature = "vulkan")]
 pub use vulkan_allocator::VulkanAllocator;

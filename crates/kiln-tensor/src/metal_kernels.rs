@@ -134,6 +134,67 @@ kernel void {entry}(
 }
 
 // ----------------------------------------------------------------------
+// cumsum — kiln-owned MSL prefix-sum along an axis (mirrors csrc/scan_axis.cu)
+// ----------------------------------------------------------------------
+
+/// Inclusive prefix-sum along `axis` of a contiguous tensor, decomposed as
+/// `(outer, axis_dim, inner)`. One thread per `(outer, inner)` lane runs a
+/// sequential scan over `axis_dim` with F32 accumulation (bit-matching the CPU
+/// reference and the CUDA scan kernel). Output dtype == input dtype.
+pub(crate) fn cumsum_axis(
+    companion: &MetalCompanion,
+    input: &MetalBuffer,
+    output: &MetalBuffer,
+    dtype: DType,
+    outer: usize,
+    axis_dim: usize,
+    inner: usize,
+) -> Result<()> {
+    let ty = msl_ty(dtype)?;
+    let entry = format!("kt_cumsum_{ty}");
+    let src = format!(
+        r#"
+#include <metal_stdlib>
+using namespace metal;
+kernel void {entry}(
+    device const {ty}* inp  [[buffer(0)]],
+    device {ty}* outp       [[buffer(1)]],
+    constant uint& outer    [[buffer(2)]],
+    constant uint& axis_dim [[buffer(3)]],
+    constant uint& inner    [[buffer(4)]],
+    uint gid [[thread_position_in_grid]])
+{{
+    uint lanes = outer * inner;
+    if (gid >= lanes) return;
+    uint o = gid / inner;
+    uint i = gid % inner;
+    float acc = 0.0f;
+    for (uint a = 0; a < axis_dim; a++) {{
+        uint idx = (o * axis_dim + a) * inner + i;
+        acc += (float)inp[idx];
+        outp[idx] = ({ty})acc;
+    }}
+}}
+"#
+    );
+    let pipeline = op_pipeline(companion, &src, &entry)?;
+    let encoder = companion
+        .command_encoder()
+        .map_err(|e| Error::Msg(format!("metal_kernels::cumsum_axis: encoder: {e:?}")))?;
+    encoder.set_label("kt_cumsum_axis");
+    encoder.set_compute_pipeline_state(&pipeline);
+    encoder.set_buffer(0, Some(input), 0);
+    encoder.set_buffer(1, Some(output), 0);
+    let (outer_u, axis_u, inner_u) = (outer as u32, axis_dim as u32, inner as u32);
+    encoder.set_bytes(2, &outer_u);
+    encoder.set_bytes(3, &axis_u);
+    encoder.set_bytes(4, &inner_u);
+    dispatch_1d(&encoder, outer * inner);
+    drop(encoder);
+    Ok(())
+}
+
+// ----------------------------------------------------------------------
 // activation_unary — replaces candle_metal_kernels::call_unary_contiguous
 // ----------------------------------------------------------------------
 

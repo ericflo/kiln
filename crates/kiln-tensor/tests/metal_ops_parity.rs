@@ -188,6 +188,31 @@ fn log_softmax_last_axis_bf16() {
 }
 
 #[test]
+fn cumsum_axis_f32() {
+    let Some(dev) = metal() else {
+        eprintln!("no Metal device; skipping");
+        return;
+    };
+    // (rows, cols, axis, seed): trailing-axis scan, outer-axis scan, single row.
+    for (rows, cols, axis, seed) in [
+        (8usize, 128usize, 1usize, 21u64),
+        (8, 128, 0, 22),
+        (1, 2560, 1, 23),
+        (64, 4, 0, 24),
+    ] {
+        let data = pattern(rows * cols, seed);
+        let (cpu, met) = pair(&data, &[rows, cols], dev);
+        // CPU reference vs the Metal kernel through the same op entry point
+        // (`ops::cumsum` routes Metal storage to the kiln-owned MSL scan).
+        let want = ops::cumsum(&cpu, axis).unwrap().to_vec::<f32>().unwrap();
+        let got = ops::cumsum(&met, axis).unwrap().to_vec::<f32>().unwrap();
+        let d = max_abs_diff(&want, &got);
+        // Identical sequential F32 accumulation on both sides ⇒ ~bit-exact.
+        assert!(d < 1e-3, "cumsum f32 [{rows},{cols}] axis {axis} max|Δ|={d}");
+    }
+}
+
+#[test]
 fn rmsnorm_last_axis_f32() {
     let Some(dev) = metal() else {
         eprintln!("no Metal device; skipping");

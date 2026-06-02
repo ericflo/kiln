@@ -922,6 +922,69 @@ pub fn metal_log_softmax_last_axis(x: &crate::Tensor) -> Result<crate::Tensor> {
     )
 }
 
+/// Inclusive prefix-sum (`cumsum`) along `axis` on the Metal backend — kt-native
+/// MSL scan (`metal_kernels::cumsum_axis`), no host round-trip. Output dtype ==
+/// input dtype, F32 accumulation (bit-matching the CPU + CUDA references). The
+/// caller (`ops::cumsum`) validates rank/dtype/contiguity.
+pub fn metal_cumsum_axis(x: &crate::Tensor, axis: usize) -> Result<crate::Tensor> {
+    use crate::metal_rt::MTLResourceOptions;
+
+    let dtype = x.dtype();
+    let dtype_size: usize = match dtype {
+        DType::F32 => 4,
+        DType::BF16 | DType::F16 => 2,
+        other => {
+            return Err(Error::Msg(format!(
+                "metal_cumsum_axis: unsupported dtype {other}"
+            )));
+        }
+    };
+    let kt_metal = x
+        .storage()
+        .as_any()
+        .downcast_ref::<MetalStorage>()
+        .ok_or_else(|| Error::Msg("metal_cumsum_axis: input must be Metal-backed".to_string()))?;
+    let companion = kt_metal.companion()?;
+    let device_index = match kt_metal.device() {
+        Device::Metal(i) => i,
+        _ => unreachable!("MetalStorage::device() returns Device::Metal"),
+    };
+
+    let shape: Vec<usize> = x.shape().to_vec();
+    let outer: usize = shape[..axis].iter().product::<usize>().max(1);
+    let axis_dim: usize = shape[axis];
+    let inner: usize = shape[axis + 1..].iter().product::<usize>().max(1);
+
+    let byte_len = x.element_count() * dtype_size;
+    let raw_device = companion.device();
+    let out_buffer = raw_device
+        .new_buffer(byte_len.max(1), MTLResourceOptions::StorageModeShared)
+        .map_err(|e| {
+            Error::Msg(format!(
+                "metal_cumsum_axis: new_buffer({byte_len}) failed: {e:?}"
+            ))
+        })?;
+    let out_buffer_arc: Arc<MetalBuffer> = Arc::new(out_buffer);
+
+    crate::metal_kernels::cumsum_axis(
+        &companion,
+        kt_metal.buffer().as_ref(),
+        out_buffer_arc.as_ref(),
+        dtype,
+        outer,
+        axis_dim,
+        inner,
+    )?;
+
+    let out_storage = MetalStorage::from_buffer_kt(raw_device, device_index, dtype, out_buffer_arc)?;
+    let out_storage_arc: crate::Storage = Arc::new(out_storage);
+    crate::Tensor::from_parts(
+        out_storage_arc,
+        crate::Layout::contiguous(shape),
+        crate::TensorId::next(),
+    )
+}
+
 // ----------------------------------------------------------------------
 // metal_sdpa_last_axis — Phase 7 Metal substrate op (#1082)
 // ----------------------------------------------------------------------

@@ -36,6 +36,14 @@ pub fn cumsum(x: &Tensor, axis: usize) -> Result<Tensor> {
         return crate::cuda_cumsum_axis(x, axis);
     }
 
+    // Metal fast path: kiln-owned MSL scan (one thread per (outer,inner) lane,
+    // sequential scan over the axis with F32 accumulation — same decomposition
+    // the CPU loop below mirrors). No host round-trip. (#1082)
+    #[cfg(feature = "metal")]
+    if matches!(x.device(), crate::Device::Metal(_)) {
+        return crate::metal_cumsum_axis(x, axis);
+    }
+
     let dtype = x.dtype();
     let shape = x.shape().to_vec();
     let outer: usize = shape[..axis].iter().product::<usize>().max(1);
