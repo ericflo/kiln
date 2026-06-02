@@ -79,6 +79,8 @@ mod active_rocm_stream;
 #[cfg(feature = "rocm")]
 mod rocm_allocator;
 #[cfg(feature = "rocm")]
+mod rocm_ops;
+#[cfg(feature = "rocm")]
 mod rocm_storage;
 
 pub use activation_registry::{
@@ -181,3 +183,5 @@ pub use rocm_storage::{
     rocm_is_available, rocm_softmax_last_axis, rocm_synchronize_default_stream, rocm_to_host_copy,
     rocm_zeros_ctx, RocmStorage,
 };
+#[cfg(feature = "rocm")]
+pub use rocm_ops::*;

@@ -253,7 +253,34 @@ fn build_rocm() {
     // `KILN_FULL_MASK` — HIP 7.x static_asserts a 64-bit shuffle mask). The
     // remaining reduction family joins as each kernel is wave-audited +
     // parity-swept on real wave64 hardware.
-    const ROCM_KERNELS: &[&str] = &["contiguous.cu", "elementwise.cu", "softmax.cu"];
+    const ROCM_KERNELS: &[&str] = &[
+        // R.2 baseline
+        "contiguous.cu",
+        "elementwise.cu",
+        // R.5 — reductions (wave-size fixed via kiln_block_reduce_*)
+        "softmax.cu",
+        "reduce_last_axis.cu",
+        "reduce_arbitrary_axis.cu",
+        "argmax_last_axis.cu",
+        "cross_entropy.cu",
+        "rmsnorm.cu",
+        "layernorm.cu",
+        "is_finite_reduce.cu",
+        // R.5 — hipify-clean elementwise / map kernels
+        "cast.cu",
+        "activation.cu",
+        "index_select.cu",
+        "scalar_op.cu",
+        "rope.cu",
+        "masked_fill.cu",
+        "where_select.cu",
+        "compare.cu",
+        "concat.cu",
+        "binary_minmax.cu",
+        "clamp_pow.cu",
+        "lerp.cu",
+        "diag.cu",
+    ];
 
     let mut objects = Vec::new();
     for kernel in ROCM_KERNELS {
