@@ -183,9 +183,25 @@ pub fn cuda_input_device_ptr(
 ) -> Result<u64, BridgeError> {
     let (st, byte_off) = cuda_storage_and_byte_offset(t, expected, name)?;
     let (base_ptr, byte_len) = st.device_ptr_raw();
-    if byte_off > byte_len {
+    // #1082 illegal-address localizer: check BOTH ends of the addressable span,
+    // not just the start. A kernel input whose declared shape over-runs its
+    // backing storage (e.g. a batched [batch,...] state cat-assembled to the
+    // wrong batch, or a mis-sized paged-KV/GDN buffer after the candle->kt
+    // migration) otherwise sails past this bridge with a valid start pointer
+    // and faults INSIDE the kernel as an async, sticky CUDA_ERROR_ILLEGAL_ADDRESS
+    // that only surfaces (with a misleading context string) at the next stream
+    // sync — making it nearly impossible to attribute. The end check converts
+    // that into a clean, named Rust error naming the exact input + shape BEFORE
+    // the launch. The tensor is contiguous here (verified in
+    // cuda_storage_and_byte_offset), so addressable_byte_size == element_count *
+    // bytes_per_element. Strictly tighter precondition: a no-op for correctly
+    // sized tensors (the bs=1 and last-known-good paths).
+    let addressable = t.layout().addressable_byte_size(expected.size_in_bytes());
+    if byte_off + addressable > byte_len {
         return Err(BridgeError::new(format!(
-            "kt-bridge: {name} byte_off {byte_off} > storage byte_len {byte_len}"
+            "kt-bridge: {name} OOB: start_offset_bytes {byte_off} + addressable {addressable} \
+             > storage byte_len {byte_len} (shape {:?}, dtype {expected})",
+            t.dims()
         )));
     }
     Ok(base_ptr + byte_off as u64)
