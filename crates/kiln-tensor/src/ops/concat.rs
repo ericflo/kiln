@@ -239,20 +239,32 @@ pub fn concat(inputs: &[&Tensor], axis: usize) -> Result<Tensor> {
         }
     }
 
-    // Non-CPU host fallback (Metal, and any backend without a native
-    // concat kernel): stage every input on the host, concat there, then
-    // move the result back to the source device. Correctness-first
-    // (#1082) — a Metal blit-encoder concat is a Phase-4 perf follow-up.
-    // On UMA the staging copies are plain memcpys.
-    let src_device = inputs[0].device();
-    if !src_device.is_cpu() {
+    // Non-CPU host fallback (Metal/Vulkan, and any backend without a native
+    // concat kernel), robust to MIXED-device inputs: if ANY input is non-CPU,
+    // stage every input on the host, concat there, then move the result to the
+    // GPU device (the first non-CPU input's device). Correctness-first
+    // (#1082) — a native blit/compute concat is a perf follow-up; on UMA the
+    // staging copies are plain memcpys.
+    //
+    // (#1443) Previously this only checked `inputs[0].device()`, so a
+    // mixed-device batch — e.g. the GDN `in_proj` `cat([mixed_qkv, z, b, a])`
+    // where `mixed_qkv` was CPU-resident but `z`/`b`/`a` were Vulkan — skipped
+    // the fallback and hit the `CpuStorage` downcast below ("concat: storage
+    // must be CpuStorage"), failing the real-model prefill. Unifying on the host
+    // whenever ANY operand is non-CPU fixes that.
+    let target_device = inputs
+        .iter()
+        .map(|t| t.device())
+        .find(|d| !d.is_cpu())
+        .unwrap_or(crate::Device::Cpu);
+    if !target_device.is_cpu() {
         let cpu_inputs: Vec<Tensor> = inputs
             .iter()
             .map(|t| t.to_device(crate::Device::Cpu))
             .collect::<Result<_>>()?;
         let cpu_refs: Vec<&Tensor> = cpu_inputs.iter().collect();
         let out = concat(&cpu_refs, axis)?;
-        return out.to_device(src_device);
+        return out.to_device(target_device);
     }
 
     // Output shape: input 0's shape with axis dim = sum.
