@@ -984,13 +984,19 @@ pub fn vulkan_softmax_last_axis(x: &crate::Tensor) -> Result<crate::Tensor> {
             "vulkan_softmax_last_axis: device-local alloc for kt output failed: {e}"
         ))
     })?;
+    // GPUVM write-fault fix (see vulkan_rmsnorm_last_axis): `out_bytes` is the
+    // full `read_back` of the pooled (`pool_alloc_f32`, bucket-rounded) kernel
+    // output, so `out_bytes.len()` can exceed the logical `byte_len`. `out_buffer`
+    // is sized at `byte_len`; upload only the logical bytes to avoid overrunning
+    // the destination (RADV PERMISSION_FAULTS, RW=1).
+    let out_logical = byte_len.min(out_bytes.len());
     kiln_vulkan_kernel::buffer::VulkanBuffer::upload_data(
         vulkan_device.device(),
         vulkan_device.host_visible_mem_type(),
         vulkan_device.queue(),
         vulkan_device.queue_family_index(),
         &out_buffer,
-        &out_bytes,
+        &out_bytes[..out_logical],
     )
     .map_err(|e| {
         Error::Msg(format!(
@@ -1463,13 +1469,19 @@ pub fn vulkan_l2norm_last_axis(x: &crate::Tensor, eps: f32) -> Result<crate::Ten
             "vulkan_l2norm_last_axis: device-local alloc for kt output failed: {e}"
         ))
     })?;
+    // GPUVM write-fault fix (see vulkan_rmsnorm_last_axis): `out_bytes` is the
+    // full `read_back` of the pooled (`pool_alloc_f32`, bucket-rounded) kernel
+    // output, so `out_bytes.len()` can exceed the logical `byte_len`. `out_buffer`
+    // is sized at `byte_len`; upload only the logical bytes to avoid overrunning
+    // the destination (RADV PERMISSION_FAULTS, RW=1).
+    let out_logical = byte_len.min(out_bytes.len());
     kiln_vulkan_kernel::buffer::VulkanBuffer::upload_data(
         vulkan_device.device(),
         vulkan_device.host_visible_mem_type(),
         vulkan_device.queue(),
         vulkan_device.queue_family_index(),
         &out_buffer,
-        &out_bytes,
+        &out_bytes[..out_logical],
     )
     .map_err(|e| {
         Error::Msg(format!(
@@ -1651,13 +1663,19 @@ pub fn vulkan_activation_unary(x: &crate::Tensor, kind_tag: i32) -> Result<crate
             "vulkan_activation_unary: device-local alloc for kt output failed: {e}"
         ))
     })?;
+    // GPUVM write-fault fix (see vulkan_rmsnorm_last_axis): `out_bytes` is the
+    // full `read_back` of the pooled (`pool_alloc_f32`, bucket-rounded) kernel
+    // output, so `out_bytes.len()` can exceed the logical `byte_len`. `out_buffer`
+    // is sized at `byte_len`; upload only the logical bytes to avoid overrunning
+    // the destination (RADV PERMISSION_FAULTS, RW=1).
+    let out_logical = byte_len.min(out_bytes.len());
     kiln_vulkan_kernel::buffer::VulkanBuffer::upload_data(
         vulkan_device.device(),
         vulkan_device.host_visible_mem_type(),
         vulkan_device.queue(),
         vulkan_device.queue_family_index(),
         &out_buffer,
-        &out_bytes,
+        &out_bytes[..out_logical],
     )
     .map_err(|e| {
         Error::Msg(format!(
@@ -2369,13 +2387,19 @@ pub fn vulkan_elementwise_binary(
             "vulkan_elementwise_binary: device-local alloc for kt output failed: {e}"
         ))
     })?;
+    // GPUVM write-fault fix (see vulkan_rmsnorm_last_axis): `out_bytes` is the
+    // full `read_back` of the pooled (`pool_alloc_f32`, bucket-rounded) kernel
+    // output, so `out_bytes.len()` can exceed the logical `a_byte_len`. `out_buffer`
+    // is sized at `a_byte_len`; upload only the logical bytes to avoid overrunning
+    // the destination (RADV PERMISSION_FAULTS, RW=1).
+    let out_logical = a_byte_len.min(out_bytes.len());
     kiln_vulkan_kernel::buffer::VulkanBuffer::upload_data(
         vulkan_device.device(),
         vulkan_device.host_visible_mem_type(),
         vulkan_device.queue(),
         vulkan_device.queue_family_index(),
         &out_buffer,
-        &out_bytes,
+        &out_bytes[..out_logical],
     )
     .map_err(|e| {
         Error::Msg(format!(
@@ -2883,5 +2907,138 @@ mod tests {
             bf16_bytes.as_slice(),
             "BF16 host→Vulkan→host must be byte-identical"
         );
+    }
+
+    // ---- PR5e: pool-size GPUVM write-fault regression guards ----
+    //
+    // Each of the bounce wrappers below read their kernel output back from
+    // a `pool_alloc_f32` buffer, whose `.size` is bucket-rounded UP (64 KB
+    // granularity at small sizes). The destination kt `out_buffer` is sized
+    // at the *logical* byte length. Before the fix, the full bucket-sized
+    // `out_bytes` was uploaded into the logical-sized buffer, overrunning it
+    // and raising a RADV GPUVM write fault. Tiny tensors are the WORST case
+    // (logical ~32 B vs. a 64 KB bucket), so a tiny [rows, hidden] F32 tensor
+    // is the strongest single-shot reproducer. Each test asserts the readback
+    // is finite and matches the CPU reference within a small tolerance.
+    //
+    // Bounded validation only: single op, single shot, tiny tensors. Skips
+    // when KILN_TENSOR_VULKAN_TEST != 1 or no Vulkan device is present.
+
+    fn vk_f32(data: Vec<f32>, shape: Vec<usize>) -> crate::Tensor {
+        crate::Tensor::from_vec_on(Device::Vulkan(0), data, shape)
+            .expect("from_vec_on(Vulkan, F32)")
+    }
+
+    fn read_vk_f32(t: &crate::Tensor) -> Vec<f32> {
+        t.to_device(Device::Cpu)
+            .expect("to_device(Cpu)")
+            .to_vec()
+            .expect("to_vec F32")
+    }
+
+    fn max_abs_err(got: &[f32], want: &[f32]) -> f32 {
+        got.iter()
+            .zip(want.iter())
+            .map(|(g, w)| (g - w).abs())
+            .fold(0.0f32, f32::max)
+    }
+
+    #[test]
+    fn vulkan_softmax_pool_overflow_parity() {
+        if maybe_vulkan_device().is_none() {
+            eprintln!("skip: KILN_TENSOR_VULKAN_TEST unset or no Vulkan device");
+            return;
+        }
+        let rows = 2usize;
+        let hidden = 4usize;
+        let data: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, -1.0, 0.0, 0.5, 2.5];
+        let x = vk_f32(data.clone(), vec![rows, hidden]);
+        let out = super::vulkan_softmax_last_axis(&x).expect("vulkan_softmax_last_axis");
+        let got = read_vk_f32(&out);
+        // CPU reference: row-wise softmax over the trailing axis.
+        let mut want = vec![0.0f32; rows * hidden];
+        for r in 0..rows {
+            let row = &data[r * hidden..(r + 1) * hidden];
+            let m = row.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+            let exps: Vec<f32> = row.iter().map(|v| (v - m).exp()).collect();
+            let sum: f32 = exps.iter().sum();
+            for i in 0..hidden {
+                want[r * hidden + i] = exps[i] / sum;
+            }
+        }
+        assert!(got.iter().all(|v| v.is_finite()), "softmax output not finite: {got:?}");
+        let err = max_abs_err(&got, &want);
+        eprintln!("vulkan_softmax_pool_overflow_parity: max_abs_err = {err:e}");
+        assert!(err < 1e-5, "softmax max_abs_err {err} too large; got={got:?} want={want:?}");
+    }
+
+    #[test]
+    fn vulkan_l2norm_pool_overflow_parity() {
+        if maybe_vulkan_device().is_none() {
+            eprintln!("skip: KILN_TENSOR_VULKAN_TEST unset or no Vulkan device");
+            return;
+        }
+        let rows = 2usize;
+        let hidden = 4usize;
+        let eps = 1e-6f32;
+        let data: Vec<f32> = vec![3.0, 4.0, 0.0, 0.0, 1.0, 2.0, 2.0, 4.0];
+        let x = vk_f32(data.clone(), vec![rows, hidden]);
+        let out = super::vulkan_l2norm_last_axis(&x, eps).expect("vulkan_l2norm_last_axis");
+        let got = read_vk_f32(&out);
+        // CPU reference matches the shader convention exactly (vk_ops/l2norm.rs):
+        //   y = scale * x / sqrt(sum(x^2) + eps),  scale = 1.0 (true L2, no /hidden).
+        let mut want = vec![0.0f32; rows * hidden];
+        for r in 0..rows {
+            let row = &data[r * hidden..(r + 1) * hidden];
+            let ss: f32 = row.iter().map(|v| v * v).sum();
+            let inv = 1.0f32 / (ss + eps).sqrt();
+            for i in 0..hidden {
+                want[r * hidden + i] = row[i] * inv;
+            }
+        }
+        assert!(got.iter().all(|v| v.is_finite()), "l2norm output not finite: {got:?}");
+        let err = max_abs_err(&got, &want);
+        eprintln!("vulkan_l2norm_pool_overflow_parity: max_abs_err = {err:e}");
+        assert!(err < 1e-5, "l2norm max_abs_err {err} too large; got={got:?} want={want:?}");
+    }
+
+    #[test]
+    fn vulkan_activation_silu_pool_overflow_parity() {
+        if maybe_vulkan_device().is_none() {
+            eprintln!("skip: KILN_TENSOR_VULKAN_TEST unset or no Vulkan device");
+            return;
+        }
+        let data: Vec<f32> = vec![-2.0, -0.5, 0.0, 0.5, 1.0, 3.0];
+        let x = vk_f32(data.clone(), vec![2, 3]);
+        // kind_tag 0 = Silu
+        let out = super::vulkan_activation_unary(&x, 0).expect("vulkan_activation_unary(silu)");
+        let got = read_vk_f32(&out);
+        // CPU reference: silu(x) = x * sigmoid(x).
+        let want: Vec<f32> = data.iter().map(|&v| v / (1.0 + (-v).exp())).collect();
+        assert!(got.iter().all(|v| v.is_finite()), "silu output not finite: {got:?}");
+        let err = max_abs_err(&got, &want);
+        eprintln!("vulkan_activation_silu_pool_overflow_parity: max_abs_err = {err:e}");
+        assert!(err < 1e-5, "silu max_abs_err {err} too large; got={got:?} want={want:?}");
+    }
+
+    #[test]
+    fn vulkan_elementwise_add_pool_overflow_parity() {
+        if maybe_vulkan_device().is_none() {
+            eprintln!("skip: KILN_TENSOR_VULKAN_TEST unset or no Vulkan device");
+            return;
+        }
+        let a_data: Vec<f32> = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0];
+        let b_data: Vec<f32> = vec![10.0, 20.0, 30.0, -1.0, -2.0, -3.0];
+        let a = vk_f32(a_data.clone(), vec![2, 3]);
+        let b = vk_f32(b_data.clone(), vec![2, 3]);
+        // kind_tag 0 = Add
+        let out = super::vulkan_elementwise_binary(&a, &b, 0)
+            .expect("vulkan_elementwise_binary(add)");
+        let got = read_vk_f32(&out);
+        let want: Vec<f32> = a_data.iter().zip(b_data.iter()).map(|(x, y)| x + y).collect();
+        assert!(got.iter().all(|v| v.is_finite()), "add output not finite: {got:?}");
+        let err = max_abs_err(&got, &want);
+        eprintln!("vulkan_elementwise_add_pool_overflow_parity: max_abs_err = {err:e}");
+        assert!(err < 1e-5, "add max_abs_err {err} too large; got={got:?} want={want:?}");
     }
 }
