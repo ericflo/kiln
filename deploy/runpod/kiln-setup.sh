@@ -152,7 +152,12 @@ export RUSTC_WRAPPER="sccache"
 sccache --stop-server >/dev/null 2>&1 || true
 sccache --start-server
 echo "sccache server started"
-sccache --show-stats | head -8
+# `| head` closes the pipe early → SIGPIPE to `sccache --show-stats`; under
+# `set -euo pipefail` that aborted kiln-setup BEFORE writing
+# /root/.kiln-build-env (line ~203), so every fresh pod built COLD with no
+# sccache. `|| true` swallows the SIGPIPE so setup finishes + the env file
+# (RUSTC_WRAPPER=sccache + B2 creds) lands. (#1082 build-cache fix)
+sccache --show-stats 2>/dev/null | head -8 || true
 
 echo ""
 echo "=== pod resources ==="
