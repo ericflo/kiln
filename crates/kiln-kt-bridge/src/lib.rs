@@ -47,7 +47,7 @@
 /// backward machinery used by the `_kt` training adapters. Device-agnostic
 /// scope plumbing; the CUDA-specific kt helpers stay
 /// `#[cfg(feature = "cuda")]` inside this crate's other modules.
-#[cfg(any(feature = "cuda", feature = "metal"))]
+#[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
 pub mod tape_bridge;
 
 // `KtDType` is used by the candle-free CUDA helpers

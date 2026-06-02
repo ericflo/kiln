@@ -100,7 +100,7 @@
 //! * Tape-routing for rotary / layernorm / fused-attn — non-trivial
 //!   substrate decisions about which kernels carry their own backward.
 
-#![cfg(any(feature = "cuda", feature = "metal"))]
+#![cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
 
 use anyhow::{Context, Result};
 use kiln_autograd::{
@@ -336,8 +336,8 @@ pub fn try_tape_rms_norm_kt(
     if !tape_forward_enabled() {
         return Ok(None);
     }
-    if !matches!(x.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_))
-        || !matches!(weight.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_))
+    if !matches!(x.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_))
+        || !matches!(weight.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_))
     {
         return Ok(None);
     }
@@ -505,7 +505,7 @@ pub fn try_tape_transpose_kt(
     if !tape_forward_enabled() {
         return Ok(None);
     }
-    if !matches!(x.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_)) {
+    if !matches!(x.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_)) {
         return Ok(None);
     }
     let rank = x.rank();
@@ -540,7 +540,7 @@ pub fn try_tape_reshape_kt(
     if !tape_forward_enabled() {
         return Ok(None);
     }
-    if !matches!(x.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_)) {
+    if !matches!(x.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_)) {
         return Ok(None);
     }
     let input_shape = x.shape().to_vec();
@@ -746,7 +746,7 @@ pub fn try_tape_cross_entropy_from_logits_kt(
         || dims[0] != 1
         || dims[1] != input_ids.len()
         || label_mask.len() != input_ids.len()
-        || !matches!(logits.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_))
+        || !matches!(logits.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_))
     {
         return Ok(None);
     }
@@ -932,10 +932,10 @@ pub fn try_tape_lora_add_kt(
     if !tape_forward_enabled() || !tape_lora_add_enabled() {
         return Ok(None);
     }
-    if !matches!(base.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_))
-        || !matches!(x.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_))
-        || !matches!(proj.a.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_))
-        || !matches!(proj.b.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_))
+    if !matches!(base.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_))
+        || !matches!(x.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_))
+        || !matches!(proj.a.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_))
+        || !matches!(proj.b.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_))
     {
         return Ok(None);
     }
@@ -1143,8 +1143,8 @@ pub fn try_tape_lora_linear_kt(
     if !tape_forward_enabled() || !tape_lora_add_enabled() {
         return Ok(None);
     }
-    if !matches!(x.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_))
-        || !matches!(weight_t.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_))
+    if !matches!(x.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_))
+        || !matches!(weight_t.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_))
     {
         return Ok(None);
     }
@@ -1733,7 +1733,7 @@ pub fn try_tape_gdn_recurrent_kt(
     // production recurrence `gdn_recurrent_forward_from_parts`) and the record
     // adapter (`tape_record_gdn_recurrent_kt`) is now kt-native — no kt->candle
     // bridge on the saved inputs.
-    if !matches!(q.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_)) {
+    if !matches!(q.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_)) {
         return Ok(None);
     }
 
@@ -1806,7 +1806,7 @@ pub fn tape_record_gdn_recurrent_kt(
     if !tape_forward_enabled() || !tape_gdn_enabled() {
         return Ok(false);
     }
-    if !matches!(device, kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_)) {
+    if !matches!(device, kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_)) {
         return Ok(false);
     }
 
@@ -2173,7 +2173,7 @@ pub fn try_tape_gdn_l2_norm_scale_kt(
     if !tape_forward_enabled() || !tape_gdn_qk_norm_enabled() {
         return Ok(None);
     }
-    if !matches!(x.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_)) {
+    if !matches!(x.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_)) {
         return Ok(None);
     }
     if x.dims() != out.dims() {
@@ -2274,7 +2274,7 @@ pub fn try_tape_gdn_gated_rms_norm_kt(
     if !tape_forward_enabled() || !tape_gdn_gated_norm_enabled() {
         return Ok(None);
     }
-    if !matches!(x.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_)) {
+    if !matches!(x.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_)) {
         return Ok(None);
     }
     if x.dims() != z.dims() || x.dims() != out.dims() {
@@ -2388,8 +2388,8 @@ pub fn try_tape_cast_kt(
     if !tape_forward_enabled() {
         return Ok(None);
     }
-    if !matches!(x.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_))
-        || !matches!(out.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_))
+    if !matches!(x.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_))
+        || !matches!(out.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_))
     {
         return Ok(None);
     }
@@ -2508,8 +2508,8 @@ pub fn try_tape_narrow_kt(
     if !tape_forward_enabled() {
         return Ok(None);
     }
-    if !matches!(x.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_))
-        || !matches!(out.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_))
+    if !matches!(x.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_))
+        || !matches!(out.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_))
     {
         return Ok(None);
     }
@@ -2618,8 +2618,8 @@ pub fn try_tape_gqa_expand_kt(
     if !tape_forward_enabled() {
         return Ok(None);
     }
-    if !matches!(x.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_))
-        || !matches!(out.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_))
+    if !matches!(x.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_))
+        || !matches!(out.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_))
     {
         return Ok(None);
     }
@@ -2803,10 +2803,10 @@ pub fn try_tape_sdpa_fallback_kt(
     if !tape_forward_enabled() || !tape_sdpa_enabled() {
         return Ok(None);
     }
-    if !matches!(q.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_))
-        || !matches!(k.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_))
-        || !matches!(v.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_))
-        || !matches!(out.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_))
+    if !matches!(q.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_))
+        || !matches!(k.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_))
+        || !matches!(v.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_))
+        || !matches!(out.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_))
     {
         return Ok(None);
     }
