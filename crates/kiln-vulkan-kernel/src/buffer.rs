@@ -554,6 +554,70 @@ impl VulkanBuffer {
         Ok(())
     }
 
+    /// Device-to-device copy of `size` bytes from `src[src_byte_offset]`
+    /// into `dst[dst_byte_offset]`. Both buffers live on `device`. Used by
+    /// the Vulkan `slice_set` (paged-KV scatter / GDN state write) so a
+    /// device-resident in-place write never bounces through the host.
+    /// dtype-agnostic — operates on raw bytes.
+    #[allow(clippy::too_many_arguments)]
+    pub fn copy_buffer_region(
+        device: &Arc<ash::Device>,
+        queue: vk::Queue,
+        queue_family_index: u32,
+        src: &VulkanBuffer,
+        src_byte_offset: u64,
+        dst: &VulkanBuffer,
+        dst_byte_offset: u64,
+        size: u64,
+    ) -> Result<()> {
+        if size == 0 {
+            return Ok(());
+        }
+        anyhow::ensure!(
+            src_byte_offset + size <= src.size,
+            "copy_buffer_region: src range {}+{} exceeds buffer {}",
+            src_byte_offset, size, src.size
+        );
+        anyhow::ensure!(
+            dst_byte_offset + size <= dst.size,
+            "copy_buffer_region: dst range {}+{} exceeds buffer {}",
+            dst_byte_offset, size, dst.size
+        );
+        let pool_info = make_pool_info(queue_family_index);
+        let pool = unsafe {
+            device
+                .create_command_pool(&pool_info, None)
+                .context("copy_buffer_region: create_command_pool")?
+        };
+        let alloc_info = make_alloc_info(pool);
+        let command_buffers =
+            crate::vk_raw::allocate_command_buffers(device.handle(), &alloc_info, 1)
+                .context("copy_buffer_region: allocate_command_buffer")?;
+        let cmd = command_buffers[0];
+        let copy = vk::BufferCopy::default()
+            .src_offset(src_byte_offset)
+            .dst_offset(dst_byte_offset)
+            .size(size);
+        unsafe {
+            device
+                .begin_command_buffer(cmd, &make_begin_info())
+                .context("copy_buffer_region: begin")?;
+            device.cmd_copy_buffer(cmd, src.buffer, dst.buffer, &[copy]);
+            device
+                .end_command_buffer(cmd)
+                .context("copy_buffer_region: end")?;
+            device
+                .queue_submit(queue, &[make_submit_info(&[cmd])], vk::Fence::null())
+                .context("copy_buffer_region: submit")?;
+            device
+                .queue_wait_idle(queue)
+                .context("copy_buffer_region: wait")?;
+            device.free_command_buffers(pool, &command_buffers);
+            device.destroy_command_pool(pool, None);
+        }
+        Ok(())
+    }
+
     /// Read data back from this buffer to CPU.
     pub fn read_back(
         device: &Arc<ash::Device>,

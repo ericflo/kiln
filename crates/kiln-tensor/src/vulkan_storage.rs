@@ -1380,6 +1380,50 @@ pub fn vulkan_unary_math(x: &crate::Tensor, op: u32, param0: f32) -> Result<crat
     kt_tensor_from_vk(&vk_out, device_index)
 }
 
+/// Vulkan in-place slice-set along dim 0: `dst[offset .. offset+src.dim0] = src`.
+///
+/// The Vulkan arm of [`crate::Tensor::slice_set`]. Both tensors are
+/// Vulkan-backed and contiguous (the dim-0 slice-set contract), so this is a
+/// pure device-to-device `vkCmdCopyBuffer` of the contiguous row range at the
+/// computed byte offset — no host bounce. dtype-agnostic via raw
+/// `VulkanStorage::buffer()` access, so it serves the BF16 paged-KV pool write
+/// as well as F32 callers.
+pub fn vulkan_slice_set_dim0(
+    dst: &crate::Tensor,
+    src: &crate::Tensor,
+    offset: usize,
+) -> Result<()> {
+    let dst_vk = dst
+        .storage()
+        .as_any()
+        .downcast_ref::<VulkanStorage>()
+        .ok_or_else(|| Error::Msg("vulkan_slice_set_dim0: dst must be Vulkan-backed".to_string()))?;
+    let src_vk = src
+        .storage()
+        .as_any()
+        .downcast_ref::<VulkanStorage>()
+        .ok_or_else(|| Error::Msg("vulkan_slice_set_dim0: src must be Vulkan-backed".to_string()))?;
+    let vulkan_device = dst_vk.vulkan_device();
+    let bpe = dst.dtype().size_in_bytes() as u64;
+    // `inner` = product of all dims except dim 0 (row size in elements).
+    let inner: u64 = dst.dims().iter().skip(1).product::<usize>() as u64;
+    let n_bytes = (src.element_count() as u64) * bpe;
+    let dst_byte_off = (offset as u64) * inner * bpe;
+    let src_byte_off = (src.layout().start_offset() as u64) * bpe;
+    kiln_vulkan_kernel::buffer::VulkanBuffer::copy_buffer_region(
+        vulkan_device.device(),
+        vulkan_device.queue(),
+        vulkan_device.queue_family_index(),
+        src_vk.buffer(),
+        src_byte_off,
+        dst_vk.buffer(),
+        dst_byte_off,
+        n_bytes,
+    )
+    .map_err(|e| Error::Msg(format!("vulkan_slice_set_dim0: device copy failed: {e}")))?;
+    Ok(())
+}
+
 // ----------------------------------------------------------------------
 // vulkan_index_select_dim0 — Phase 4 Vulkan substrate op (#1082)
 // ----------------------------------------------------------------------

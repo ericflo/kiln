@@ -981,6 +981,13 @@ impl Tensor {
                     std::ptr::copy_nonoverlapping(src_ptr, dst_ptr, n_bytes);
                 }
             }
+            #[cfg(feature = "vulkan")]
+            Device::Vulkan(_) => {
+                // Device-to-device dim-0 scatter (paged-KV pool write / GDN
+                // resident-state row write) — a vkCmdCopyBuffer at the row
+                // byte offset, no host bounce. dtype-agnostic (BF16 pool ok).
+                crate::vulkan_slice_set_dim0(self, src, offset)?;
+            }
             other => {
                 return Err(crate::Error::Msg(format!(
                     "Tensor::slice_set: backend {other} not supported (#1082)"
