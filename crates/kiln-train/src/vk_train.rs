@@ -15,8 +15,9 @@
 //!     loss = vk_model_forward_loss(weights, lora, ids)
 //!     grads = vk_step_backward(loss)
 //!     for (param_id, grad) in grads:
-//!       lookup VkAdamWState by param_id
-//!       dispatch_adamw_step_f32 in place
+//!       lookup VkAdamWState (persistent on-device m/v) by param_id
+//!       dispatch via the shared backend seam
+//!         (kiln_model::backend::vulkan::dispatch_adamw_step_buffers)
 //! at end:
 //!   for each lora pair: VkTensor readback → direct safetensors save
 //! ```
@@ -34,7 +35,13 @@ use kiln_model::vk_forward::{
     vk_linear_with_lora, vk_model_forward_final_norm_with_state,
     vk_model_forward_loss_masked_with_state, vk_model_forward_loss_with_state, vk_step_backward,
 };
-use kiln_vulkan_kernel::kernels::{dispatch_adamw_step_f32, dispatch_sgd_step_f32};
+// (#1082) PR1: the on-device optimizer dispatch now routes through the
+// SHARED backend seam (`kiln_model::backend::vulkan::dispatch_*_buffers`),
+// the same source-level entry the kt-`Tensor` resident AdamW path uses, so
+// both funnel into the identical SPIR-V kernel. The direct
+// `kiln_vulkan_kernel::kernels::dispatch_{adamw,sgd}_step_f32` imports are
+// retired from this module.
+use kiln_model::backend::vulkan::{dispatch_adamw_step_buffers, dispatch_sgd_step_buffers};
 use kiln_vulkan_kernel::vk_ops::gdn_state::VkLinearAttentionState;
 use kiln_vulkan_kernel::vk_ops::index_select::vk_index_select_rows;
 use kiln_vulkan_kernel::{VkDType, VkTensor, VulkanBuffer, VulkanDevice};
@@ -619,6 +626,16 @@ fn validate_vk_grpo_tokenized_group_context(
 }
 
 /// Per-parameter AdamW state held entirely on the GPU.
+///
+/// (#1082) PR1 TODO: the optimizer *dispatch* now routes through the shared
+/// backend seam (`kiln_model::backend::vulkan::dispatch_adamw_step_buffers`),
+/// the same source-level entry the kt-`Tensor` resident AdamW path uses.
+/// `VkAdamWState`/`VkAdamWBook` is retained only to own the persistent
+/// on-device first/second-moment (`m`/`v`) buffers, because the kt-`Tensor`
+/// resident-registry alternative requires a `kiln_tensor::Tensor` on
+/// `Device::Vulkan` — the storage keystone that lands in PR2. Once PR2 lands,
+/// the moments move into `OptimizerState.moments` keyed by the shared
+/// `TensorId` and this book is deleted.
 pub struct VkAdamWState {
     pub m: Arc<VulkanBuffer>,
     pub v: Arc<VulkanBuffer>,
@@ -724,6 +741,23 @@ impl Default for VkAdamWConfig {
     }
 }
 
+impl VkAdamWConfig {
+    /// (#1082) PR1: build the `Optimizer::AdamW` variant carrying this
+    /// config's hyperparameters so AdamW-only call sites can route through
+    /// the shared `vk_optimizer_step_from_grads` chokepoint. `lr` is passed
+    /// separately to that helper (matching the historical inline sites,
+    /// which read `cfg.lr` directly), so it is intentionally not duplicated
+    /// here; `beta1`/`beta2`/`eps`/`weight_decay` are preserved exactly.
+    fn as_optimizer(&self) -> Optimizer {
+        Optimizer::AdamW {
+            beta1: self.beta1,
+            beta2: self.beta2,
+            eps: self.eps,
+            weight_decay: self.weight_decay,
+        }
+    }
+}
+
 fn lora_pairs<'a>(layers: &'a [VkLoraLayer]) -> impl Iterator<Item = &'a VkLoraPair> + 'a {
     layers.iter().flat_map(|l| {
         [
@@ -741,6 +775,19 @@ fn lora_pairs<'a>(layers: &'a [VkLoraLayer]) -> impl Iterator<Item = &'a VkLoraP
         .into_iter()
         .flatten()
     })
+}
+
+/// (#1082) PR1: materialize a `VkGradStore` (the output of `vk_step_backward`)
+/// into the `HashMap<TensorId, VkTensor>` shape that the shared
+/// `vk_optimizer_step_from_grads` chokepoint consumes. `VkTensor` clones are
+/// `Arc`-of-buffer handle copies, so this does not copy device memory.
+fn vk_grad_store_to_map(
+    grads: &kiln_vulkan_kernel::vk_autograd::VkGradStore,
+) -> HashMap<TensorId, VkTensor> {
+    grads
+        .iter()
+        .map(|(id, grad)| (*id, grad.clone()))
+        .collect()
 }
 
 fn detach_lora_pair(pair: &VkLoraPair) -> VkLoraPair {
@@ -875,14 +922,14 @@ fn vk_optimizer_step_from_grads(
             );
             match optimizer {
                 Optimizer::Sgd => {
-                    dispatch_sgd_step_f32(
+                    dispatch_sgd_step_buffers(
                         device,
                         param.buffer(),
                         grad.buffer(),
                         param.num_elements(),
                         lr,
                     )
-                    .with_context(|| format!("dispatch_sgd_step_f32 ({context})"))?;
+                    .with_context(|| format!("dispatch_sgd_step_buffers ({context})"))?;
                 }
                 Optimizer::AdamW {
                     beta1,
@@ -893,7 +940,7 @@ fn vk_optimizer_step_from_grads(
                     let state = adamw_state
                         .get(&pid)
                         .with_context(|| format!("missing AdamW state for param {:?}", pid))?;
-                    dispatch_adamw_step_f32(
+                    dispatch_adamw_step_buffers(
                         device,
                         param.buffer(),
                         grad.buffer(),
@@ -907,7 +954,7 @@ fn vk_optimizer_step_from_grads(
                         weight_decay,
                         step,
                     )
-                    .with_context(|| format!("dispatch_adamw_step_f32 ({context})"))?;
+                    .with_context(|| format!("dispatch_adamw_step_buffers ({context})"))?;
                 }
             }
         }
@@ -2167,36 +2214,17 @@ pub fn vk_checkpointed_train_step(
         }
     }
 
-    // Optimizer step from accumulated grads
-    for pair in lora_pairs(lora_layers) {
-        for (param, pid) in [(&pair.a, pair.a_id), (&pair.b, pair.b_id)] {
-            let Some(grad) = shared_grads.get(&pid) else {
-                continue;
-            };
-            anyhow::ensure!(
-                param.dtype() == VkDType::F32 && grad.dtype() == VkDType::F32,
-                "vk_checkpointed_train_step: AdamW F32 only"
-            );
-            let s = adamw_state
-                .get(&pid)
-                .with_context(|| format!("missing AdamW state for {:?}", pid))?;
-            dispatch_adamw_step_f32(
-                weights.embed_tokens.device(),
-                param.buffer(),
-                grad.buffer(),
-                &s.m,
-                &s.v,
-                param.num_elements(),
-                cfg.lr,
-                cfg.beta1,
-                cfg.beta2,
-                cfg.eps,
-                cfg.weight_decay,
-                step,
-            )
-            .context("dispatch_adamw_step_f32 (checkpointed)")?;
-        }
-    }
+    // Optimizer step from accumulated grads — through the shared seam.
+    vk_optimizer_step_from_grads(
+        weights.embed_tokens.device(),
+        lora_layers,
+        &shared_grads,
+        adamw_state,
+        cfg.lr,
+        cfg.as_optimizer(),
+        step,
+        "vk_checkpointed_train_step",
+    )?;
 
     Ok(loss_val)
 }
@@ -2661,39 +2689,16 @@ pub fn vk_recompute_train_step_with_state_masked(
         }
     }
 
-    for pair in lora_pairs(lora_layers) {
-        for (param, pid) in [(&pair.a, pair.a_id), (&pair.b, pair.b_id)] {
-            let Some(grad) = shared_grads.get(&pid) else {
-                continue;
-            };
-            anyhow::ensure!(
-                param.dtype() == VkDType::F32 && grad.dtype() == VkDType::F32,
-                "vk_recompute_train_step: AdamW F32 only"
-            );
-            anyhow::ensure!(
-                param.num_elements() == grad.num_elements(),
-                "vk_recompute_train_step: param/grad element-count mismatch"
-            );
-            let state = adamw_state
-                .get(&pid)
-                .with_context(|| format!("missing AdamW state for param {:?}", pid))?;
-            dispatch_adamw_step_f32(
-                weights.embed_tokens.device(),
-                param.buffer(),
-                grad.buffer(),
-                &state.m,
-                &state.v,
-                param.num_elements(),
-                cfg.lr,
-                cfg.beta1,
-                cfg.beta2,
-                cfg.eps,
-                cfg.weight_decay,
-                step,
-            )
-            .context("dispatch_adamw_step_f32 (recompute)")?;
-        }
-    }
+    vk_optimizer_step_from_grads(
+        weights.embed_tokens.device(),
+        lora_layers,
+        &shared_grads,
+        adamw_state,
+        cfg.lr,
+        cfg.as_optimizer(),
+        step,
+        "vk_recompute_train_step",
+    )?;
 
     Ok(loss_val)
 }
@@ -3673,45 +3678,19 @@ pub fn vk_train_step_with_state(
     let loss_val = loss.to_vec_f32()?[0];
     let grads = vk_step_backward(&loss)?;
 
-    // Dispatch AdamW per parameter. We assume F32 storage; BF16
-    // variant just swaps the kernel name.
-    for pair in lora_pairs(lora_layers) {
-        for (param, pid) in [(&pair.a, pair.a_id), (&pair.b, pair.b_id)] {
-            let Some(grad) = grads.get(pid) else { continue };
-            anyhow::ensure!(
-                param.dtype() == VkDType::F32 && grad.dtype() == VkDType::F32,
-                "vk_train_step: AdamW F32 only for Phase F (got {:?}/{:?})",
-                param.dtype(),
-                grad.dtype()
-            );
-            anyhow::ensure!(
-                param.num_elements() == grad.num_elements(),
-                "vk_train_step: param/grad element-count mismatch"
-            );
-            let state = adamw_state
-                .get(&pid)
-                .with_context(|| format!("missing AdamW state for param {:?}", pid))?;
-            anyhow::ensure!(
-                state.n_elements == param.num_elements(),
-                "AdamW state size mismatch"
-            );
-            dispatch_adamw_step_f32(
-                weights.embed_tokens.device(),
-                param.buffer(),
-                grad.buffer(),
-                &state.m,
-                &state.v,
-                param.num_elements(),
-                cfg.lr,
-                cfg.beta1,
-                cfg.beta2,
-                cfg.eps,
-                cfg.weight_decay,
-                step,
-            )
-            .context("dispatch_adamw_step_f32")?;
-        }
-    }
+    // (#1082) PR1: route the AdamW update through the shared
+    // `vk_optimizer_step_from_grads` chokepoint → shared backend seam.
+    let grad_map = vk_grad_store_to_map(&grads);
+    vk_optimizer_step_from_grads(
+        weights.embed_tokens.device(),
+        lora_layers,
+        &grad_map,
+        adamw_state,
+        cfg.lr,
+        cfg.as_optimizer(),
+        step,
+        "vk_train_step",
+    )?;
 
     Ok(loss_val)
 }
@@ -3738,45 +3717,18 @@ pub fn vk_train_step_with_state_masked(
     let loss_val = loss.to_vec_f32()?[0];
     let grads = vk_step_backward(&loss)?;
 
-    for pair in lora_pairs(lora_layers) {
-        for (param, pid) in [(&pair.a, pair.a_id), (&pair.b, pair.b_id)] {
-            let Some(grad) = grads.get(pid) else {
-                continue;
-            };
-            anyhow::ensure!(
-                param.dtype() == VkDType::F32 && grad.dtype() == VkDType::F32,
-                "vk_train_step_masked: AdamW F32 only for Phase F (got {:?}/{:?})",
-                param.dtype(),
-                grad.dtype()
-            );
-            anyhow::ensure!(
-                param.num_elements() == grad.num_elements(),
-                "vk_train_step_masked: param/grad element-count mismatch"
-            );
-            let state = adamw_state
-                .get(&pid)
-                .with_context(|| format!("missing AdamW state for param {:?}", pid))?;
-            anyhow::ensure!(
-                state.n_elements == param.num_elements(),
-                "AdamW state size mismatch"
-            );
-            dispatch_adamw_step_f32(
-                weights.embed_tokens.device(),
-                param.buffer(),
-                grad.buffer(),
-                &state.m,
-                &state.v,
-                param.num_elements(),
-                cfg.lr,
-                cfg.beta1,
-                cfg.beta2,
-                cfg.eps,
-                cfg.weight_decay,
-                step,
-            )
-            .context("dispatch_adamw_step_f32 (masked)")?;
-        }
-    }
+    // (#1082) PR1: shared optimizer chokepoint (see vk_train_step_with_state).
+    let grad_map = vk_grad_store_to_map(&grads);
+    vk_optimizer_step_from_grads(
+        weights.embed_tokens.device(),
+        lora_layers,
+        &grad_map,
+        adamw_state,
+        cfg.lr,
+        cfg.as_optimizer(),
+        step,
+        "vk_train_step_masked",
+    )?;
 
     Ok(loss_val)
 }
