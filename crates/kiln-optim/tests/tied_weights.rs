@@ -11,7 +11,7 @@
 //! > grad buffer or determinism collapses.
 //!
 //! Qwen3.5-4B specifically ties `lm_head ← embed_tokens` (weights.rs:243,
-//! forward.rs:6014, vk_forward.rs:1503) and `mtp_head ← embed_tokens`
+//! forward.rs:6014) and `mtp_head ← embed_tokens`
 //! (loader.rs:675). This test verifies that two consumers of the same
 //! `kiln_tensor::Tensor` produce ONE accumulated gradient in the
 //! GradStore — not two separate entries that the optimizer might double-

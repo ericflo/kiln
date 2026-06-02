@@ -22862,47 +22862,11 @@ pub fn model_forward_kt(
 //   returns kt logits directly now — no candle bridge.
 
 
-/// (#1082) kt seam passthrough — the former kt→candle copy-bridge.
-///
-/// Under `--features vulkan` the kiln-model crate no longer links `candle-core`
-/// (the vulkan feature does not pull in `dep:candle-core` or
-/// `kiln-kt-bridge/candle`), so this helper can no longer mint a
-/// `candle_core::Tensor`. The vulkan lane is fully kt-native and CPU-resident
-/// at the kt<->vk seam, so the bridge collapses to an identity passthrough: it
-/// normalizes contiguity (callers downstream consume a contiguous tensor) and
-/// returns the kt tensor directly. No copy, no candle round-trip.
-///
-/// Kept `pub(crate)` because the sibling vulkan seams (`vk_forward.rs`,
-/// `backend/vulkan.rs`) still call it; those call sites pass kt tensors and
-/// consume the kt result through the identical `kiln_tensor::Tensor` method
-/// surface, so the passthrough is behavior-preserving there. (#1082)
-#[cfg(feature = "vulkan")]
-pub(crate) fn kt_logits_to_candle(logits: &Tensor) -> Result<Tensor> {
-    if logits.is_contiguous() {
-        Ok(logits.clone())
-    } else {
-        Ok(logits.contiguous()?)
-    }
-}
-
-
-/// (#1082) kt seam passthrough — the former candle→kt copy-bridge, inverse of
-/// [`kt_logits_to_candle`].
-///
-/// Under `--features vulkan` candle is gone (see [`kt_logits_to_candle`]), so
-/// the input is already a kt `kiln_tensor::Tensor`. The bridge collapses to an
-/// identity passthrough: normalize contiguity and return the kt tensor
-/// directly. The former CP-4 `tape_bridge` re-entry was `#[cfg(feature =
-/// "cuda")]`-only and never compiled in the vulkan lane, so dropping it is a
-/// no-op here. (#1082)
-#[cfg(feature = "vulkan")]
-pub(crate) fn candle_to_kt_activation(t: &Tensor) -> Result<Tensor> {
-    if t.is_contiguous() {
-        Ok(t.clone())
-    } else {
-        Ok(t.contiguous()?)
-    }
-}
+// (#1082, PR7 cleanup) Deleted the dead `kt_logits_to_candle` /
+//   `candle_to_kt_activation` kt-seam passthroughs. Their only caller was the
+//   legacy `vk_forward.rs`, deleted in PR7; the vulkan lane is now fully
+//   kt-native (no candle round-trip), so both helpers were unreferenced
+//   dead code (dead-code warnings since PR7).
 
 
 /// kt has no infer-from-hole reshape (candle's `((), d1, d2)`). These
