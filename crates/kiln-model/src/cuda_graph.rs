@@ -599,7 +599,21 @@ impl CudaGraphRunner {
     /// back without re-flipping `KILN_CUDA_GRAPHS`.
     #[cfg(feature = "cuda")]
     pub fn is_batched_enabled(&self) -> bool {
-        self.enabled && batched_graph_enabled()
+        // #1082 Phase 5: the batched path REQUIRES stable paged metadata.
+        // Unlike `CudaGraphKey`, `CudaBatchedGraphKey` never encodes
+        // seq_len/block_table, so a captured batched graph always replays
+        // within a 128-token K/V bucket — which is only correct when the
+        // paged-decode kernel reads block_table/seqused_k from the
+        // refreshed graph-stable buffers (stable-metadata semantics). With
+        // stable metadata OFF the kernel bakes a step-0 block table and the
+        // replay reads a STALE table as decode appends KV (observed: greedy
+        // divergence that `KILN_CUDA_GRAPH_STABLE_PAGED_METADATA=1` fixes).
+        // Gate batched on it so the feature only activates in its correct
+        // configuration; without it we fall back to the eager batched path
+        // (correct, just no graph). Leaves the bs=1 default untouched.
+        self.enabled
+            && batched_graph_enabled()
+            && CudaGraphKey::stable_paged_metadata_enabled()
     }
 
     #[cfg(not(feature = "cuda"))]
