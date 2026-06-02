@@ -841,6 +841,7 @@ impl CudaGraphRunner {
                 );
                 return Ok(None);
             }
+            Self::debug_dump_batched_hidden("replay", sequence_lengths, &captured.output_hidden);
             let replay_logits = match crate::forward::lm_head_from_batched_hidden_eager(
                 backend,
                 &captured.output_hidden,
@@ -2325,6 +2326,7 @@ impl CudaGraphRunner {
         stream
             .synchronize()
             .map_err(|e| anyhow::anyhow!("sync after first batched captured-graph launch: {e}"))?;
+        Self::debug_dump_batched_hidden("capture", sequence_lengths, &captured.output_hidden);
         // #1082 bs>1 greedy-coherence fix: scatter the post-step persistent GDN
         // slot back into the caller's per-row `linear_states` so this capture
         // step advances them by exactly one token — same as the replay path's
@@ -2435,6 +2437,37 @@ impl CudaGraphRunner {
             let shown: Vec<String> = norms.iter().take(32).map(|x| format!("{x:.3}")).collect();
             eprintln!("LAYERNORM [{tag}] step={seq_len} [{}]", shown.join(","));
         }
+    }
+
+    /// #1082 Phase 5 bs>1 coherence localization (gated by
+    /// `KILN_DEBUG_BATCHED_HIDDEN=1`): dump the per-row sum-of-squares of the
+    /// post-transformer `output_hidden` ([batch,1,hidden]) right after the
+    /// graph launch + sync, BEFORE the eager lm_head. Called from BOTH the
+    /// replay tail and the capture first-launch tail. Diffing the per-step
+    /// fingerprints of a NO_REPLAY=0 (reuse) run vs a NO_REPLAY=1 (fresh
+    /// capture) run localizes the FIRST decode step where a reused graph
+    /// launch diverges from a fresh capture for identical input — the steps
+    /// before that first divergence have byte-identical tokens (hence identical
+    /// per-row state), so that step isolates graph-reuse-vs-fresh on identical
+    /// input. Off by default; zero cost on the production path.
+    #[cfg(feature = "cuda")]
+    fn debug_dump_batched_hidden(tag: &str, sequence_lengths: &[usize], output_hidden: &Tensor) {
+        if std::env::var("KILN_DEBUG_BATCHED_HIDDEN").ok().as_deref() != Some("1") {
+            return;
+        }
+        let batch = output_hidden.dims().first().copied().unwrap_or(0);
+        let mut parts: Vec<String> = Vec::with_capacity(batch);
+        for i in 0..batch {
+            let ss = output_hidden
+                .narrow(0, i, 1)
+                .and_then(|r| r.to_dtype(kiln_tensor::DType::F32))
+                .and_then(|r| r.to_vec::<f32>())
+                .map(|v| v.iter().map(|x| (*x as f64) * (*x as f64)).sum::<f64>())
+                .unwrap_or(-1.0);
+            let sl = sequence_lengths.get(i).copied().unwrap_or(0);
+            parts.push(format!("r{i}@{sl}={ss:.5}"));
+        }
+        eprintln!("BHID [{tag}] [{}]", parts.join(" "));
     }
 
     #[cfg(feature = "cuda")]
