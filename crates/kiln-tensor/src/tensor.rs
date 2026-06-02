@@ -234,8 +234,20 @@ impl Tensor {
             other @ Device::Metal(_) => Err(Error::Msg(format!(
                 "Tensor::zeros_on: device {other} requested but `metal` feature is not enabled"
             ))),
+            #[cfg(feature = "vulkan")]
+            Device::Vulkan(i) => {
+                let n: usize = shape.iter().product();
+                let vulkan_device = crate::primary_vulkan_device(i)?;
+                let storage = crate::VulkanStorage::zeros(vulkan_device, i, dtype, n)?;
+                Self::from_parts(
+                    std::sync::Arc::new(storage),
+                    Layout::contiguous(shape),
+                    TensorId::next(),
+                )
+            }
+            #[cfg(not(feature = "vulkan"))]
             other @ Device::Vulkan(_) => Err(Error::Msg(format!(
-                "Tensor::zeros_on: device {other} is not yet implemented (issue #1082)"
+                "Tensor::zeros_on: device {other} requested but `vulkan` feature is not enabled"
             ))),
         }
     }
@@ -284,8 +296,14 @@ impl Tensor {
             other @ Device::Metal(_) => Err(Error::Msg(format!(
                 "Tensor::from_vec_on: device {other} requested but `metal` feature is not enabled"
             ))),
+            #[cfg(feature = "vulkan")]
+            Device::Vulkan(i) => {
+                let cpu = Self::from_vec(values, shape)?;
+                crate::host_to_vulkan_copy(&cpu, i)
+            }
+            #[cfg(not(feature = "vulkan"))]
             other @ Device::Vulkan(_) => Err(Error::Msg(format!(
-                "Tensor::from_vec_on: device {other} is not yet implemented (issue #1082)"
+                "Tensor::from_vec_on: device {other} requested but `vulkan` feature is not enabled"
             ))),
         }
     }
@@ -348,8 +366,11 @@ impl Tensor {
             other @ Device::Metal(_) => Err(Error::Msg(format!(
                 "Tensor::from_raw_bytes_on: device {other} requested but `metal` feature is not enabled"
             ))),
+            #[cfg(feature = "vulkan")]
+            Device::Vulkan(i) => crate::host_to_vulkan_copy(&cpu_tensor, i),
+            #[cfg(not(feature = "vulkan"))]
             other @ Device::Vulkan(_) => Err(Error::Msg(format!(
-                "Tensor::from_raw_bytes_on: device {other} is not yet implemented (issue #1082)"
+                "Tensor::from_raw_bytes_on: device {other} requested but `vulkan` feature is not enabled"
             ))),
         }
     }
@@ -896,6 +917,10 @@ impl Tensor {
             (Device::Cpu, Device::Metal(i)) => crate::host_to_metal_copy(self, i),
             #[cfg(feature = "metal")]
             (Device::Metal(_), Device::Cpu) => crate::metal_to_host_copy(self),
+            #[cfg(feature = "vulkan")]
+            (Device::Cpu, Device::Vulkan(i)) => crate::host_to_vulkan_copy(self, i),
+            #[cfg(feature = "vulkan")]
+            (Device::Vulkan(_), Device::Cpu) => crate::vulkan_to_host_copy(self),
             _ => Err(Error::Msg(format!(
                 "Tensor::to_device: transition {src}→{target} is not yet implemented                  (issue #1082)"
             ))),
@@ -915,6 +940,12 @@ impl Tensor {
         match (src, target) {
             (Device::Cpu, Device::Metal(i)) => return crate::host_to_metal_copy(self, i),
             (Device::Metal(_), Device::Cpu) => return crate::metal_to_host_copy(self),
+            _ => {}
+        }
+        #[cfg(feature = "vulkan")]
+        match (src, target) {
+            (Device::Cpu, Device::Vulkan(i)) => return crate::host_to_vulkan_copy(self, i),
+            (Device::Vulkan(_), Device::Cpu) => return crate::vulkan_to_host_copy(self),
             _ => {}
         }
         Err(Error::Msg(format!(
@@ -1482,22 +1513,30 @@ mod tests {
 
     #[test]
     fn zeros_on_metal_errors_until_substrate_lands() {
-        // Per-backend Metal/Vulkan branches stay Err until #1082
-        // substrate work picks them up; callers that hit these today
-        // should see an explicit error instead of a silent CPU
-        // fallback that would later trip a device-mismatch assert.
+        // Per-backend Metal branch stays Err in a no-feature build;
+        // callers that hit it should see an explicit error instead of a
+        // silent CPU fallback that would later trip a device-mismatch
+        // assert.
         let e = Tensor::zeros_on(Device::Metal(0), vec![2], DType::F32).unwrap_err();
         assert!(e.to_string().contains("metal:0"));
-        let e = Tensor::zeros_on(Device::Vulkan(0), vec![2], DType::F32).unwrap_err();
-        assert!(e.to_string().contains("vulkan:0"));
+        // Vulkan is first-class once the `vulkan` feature lands (PR2,
+        // #1082); without the feature it errors with the device name.
+        #[cfg(not(feature = "vulkan"))]
+        {
+            let e = Tensor::zeros_on(Device::Vulkan(0), vec![2], DType::F32).unwrap_err();
+            assert!(e.to_string().contains("vulkan:0"));
+        }
     }
 
     #[test]
     fn from_vec_on_metal_errors_until_substrate_lands() {
         let e = Tensor::from_vec_on(Device::Metal(0), vec![1.0f32], vec![1]).unwrap_err();
         assert!(e.to_string().contains("metal:0"));
-        let e = Tensor::from_vec_on(Device::Vulkan(0), vec![1.0f32], vec![1]).unwrap_err();
-        assert!(e.to_string().contains("vulkan:0"));
+        #[cfg(not(feature = "vulkan"))]
+        {
+            let e = Tensor::from_vec_on(Device::Vulkan(0), vec![1.0f32], vec![1]).unwrap_err();
+            assert!(e.to_string().contains("vulkan:0"));
+        }
     }
 
     #[cfg(not(feature = "cuda"))]

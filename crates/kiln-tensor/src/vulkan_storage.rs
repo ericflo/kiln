@@ -40,13 +40,18 @@ use crate::{DType, Device, Error, Result, StorageBackend};
 /// dispatch.
 ///
 /// `VulkanBuffer` is **not** `Clone` — Drop frees the underlying
-/// `vk::DeviceMemory`. The expected handle is `Arc<dyn StorageBackend>`
-/// from the [`crate::Storage`] alias.
+/// `vk::DeviceMemory`. We therefore hold it behind an `Arc` so the
+/// buffer's `Drop` (which frees the `vk::DeviceMemory` exactly once)
+/// fires when the last handle is gone, and so a kernel result's
+/// `Arc<VulkanBuffer>` can be wrapped directly via
+/// [`VulkanStorage::from_arc_buffer`] with no D2H/H2D bounce. The
+/// outer handle is `Arc<dyn StorageBackend>` from the [`crate::Storage`]
+/// alias.
 #[derive(Debug)]
 pub struct VulkanStorage {
     device: Device,
     dtype: DType,
-    buffer: VulkanBuffer,
+    buffer: Arc<VulkanBuffer>,
     /// Cached byte length. We re-record this on construction because
     /// `VulkanBuffer`'s `size: u64` field is private upstream; we know
     /// the value at allocate time and store it to avoid an upstream
@@ -86,7 +91,7 @@ impl VulkanStorage {
         Ok(VulkanStorage {
             device: Device::Vulkan(device_index),
             dtype,
-            buffer,
+            buffer: Arc::new(buffer),
             byte_len,
             vulkan_device,
         })
@@ -103,12 +108,38 @@ impl VulkanStorage {
         buffer: VulkanBuffer,
         size_bytes: u64,
     ) -> Result<Self> {
+        Self::from_arc_buffer(
+            vulkan_device,
+            device_index,
+            dtype,
+            Arc::new(buffer),
+            size_bytes,
+        )
+    }
+
+    /// Wrap an existing `Arc<VulkanBuffer>` (e.g. a kernel result that
+    /// already lives behind an `Arc`) **without** copying the device
+    /// memory. The `Arc` refcount is bumped; the underlying
+    /// `vk::DeviceMemory` is freed exactly once when the last clone of
+    /// this `Arc` is dropped.
+    ///
+    /// This is the zero-copy bridge between the kernel layer
+    /// (`VkTensor` holds `Arc<VulkanBuffer>`) and kt storage referenced
+    /// by the `vulkan_softmax_last_axis` TODO. Validates the buffer
+    /// length against `dtype.size_in_bytes()` for non-packed dtypes.
+    pub fn from_arc_buffer(
+        vulkan_device: Arc<VulkanDevice>,
+        device_index: usize,
+        dtype: DType,
+        buffer: Arc<VulkanBuffer>,
+        size_bytes: u64,
+    ) -> Result<Self> {
         let len = size_bytes as usize;
         if !dtype.is_packed() {
             let per = dtype.size_in_bytes();
             if per > 0 && !len.is_multiple_of(per) {
                 return Err(Error::Msg(format!(
-                    "VulkanStorage::from_buffer: buffer len {len} is not a multiple of \
+                    "VulkanStorage::from_arc_buffer: buffer len {len} is not a multiple of \
                      size_in_bytes({:?}) = {per}",
                     dtype
                 )));
@@ -126,6 +157,12 @@ impl VulkanStorage {
     /// Borrow the underlying VulkanBuffer.
     pub fn buffer(&self) -> &VulkanBuffer {
         &self.buffer
+    }
+
+    /// Clone the underlying `Arc<VulkanBuffer>` handle (refcount bump,
+    /// no device copy) — for zero-copy bridges into the kernel layer.
+    pub fn buffer_arc(&self) -> Arc<VulkanBuffer> {
+        Arc::clone(&self.buffer)
     }
 
     /// Borrow the VulkanDevice — the queue/dispatch handle the existing
@@ -162,6 +199,268 @@ pub fn vulkan_zeros(
 ) -> Result<crate::Storage> {
     let storage = VulkanStorage::zeros(vulkan_device, device_index, dtype, n_elements)?;
     Ok(Arc::new(storage))
+}
+
+// ----------------------------------------------------------------------
+// Host ↔ Vulkan I/O — candle-free device staging (#1082 PR2)
+// ----------------------------------------------------------------------
+//
+// These are the Vulkan arms of `Tensor::{from_vec_on, from_raw_bytes_on,
+// zeros_on}` (host→Vulkan) and `Tensor::to_device(Cpu)` / `Tensor::to_vec`
+// (Vulkan→host) — the exact counterparts of `host_to_metal_copy` /
+// `metal_to_host_copy`. They are the storage keystone every Vulkan
+// parity test needs (you cannot A/B a Vulkan op against the CPU
+// reference without constructing a Vulkan input from host data and
+// reading the Vulkan output back).
+//
+// Unlike Apple-Silicon UMA, a Vulkan `DEVICE_LOCAL` buffer is **not**
+// CPU-addressable, so the "copy" is a real H2D / D2H transfer through a
+// host-visible staging buffer — exactly what
+// `VulkanBuffer::{upload_data, read_back}` already implement. Those
+// primitives are pure byte-blob movers; this layer owns the
+// dtype / packed-byte / contiguity contract (mirrors
+// `host_to_metal_copy`: CPU-backed source, materialized contiguous,
+// byte-range checks).
+
+use std::sync::{Mutex, OnceLock};
+
+/// Process-global cache of one logical [`VulkanDevice`] per device
+/// ordinal — the Vulkan analogue of [`crate::primary_metal_companion`].
+///
+/// Logical-device creation (`VulkanDevice::new`) is tens of
+/// milliseconds and allocates queues, so the host↔device copy helpers
+/// and the `Device::Vulkan(i)` tensor constructors share a single
+/// cached device rather than spinning up a fresh one per call.
+///
+/// Note: `VulkanDevice::new` performs its own best-GPU / env-driven
+/// physical-device selection and does not currently take an explicit
+/// ordinal, so all ordinals presently resolve to the same selected
+/// physical device; we still key the cache by `device_index` so the
+/// `Device::Vulkan(idx)` recorded on the storage matches what the
+/// caller asked for and a future multi-GPU selector slots in cleanly.
+///
+/// # Errors
+///
+/// Returns [`Error::Msg`] if no Vulkan device can be created.
+pub fn primary_vulkan_device(device_index: usize) -> Result<Arc<VulkanDevice>> {
+    static DEVICES: OnceLock<Mutex<std::collections::HashMap<usize, Arc<VulkanDevice>>>> =
+        OnceLock::new();
+    let map_mutex = DEVICES.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
+    let mut map = map_mutex
+        .lock()
+        .map_err(|_| Error::Msg("primary_vulkan_device: device cache mutex poisoned".to_string()))?;
+    if let Some(dev) = map.get(&device_index) {
+        return Ok(Arc::clone(dev));
+    }
+    let dev = Arc::new(VulkanDevice::new().map_err(|e| {
+        Error::Msg(format!(
+            "primary_vulkan_device({device_index}): VulkanDevice::new() failed: {e}"
+        ))
+    })?);
+    map.insert(device_index, Arc::clone(&dev));
+    Ok(dev)
+}
+
+/// Upload a host (CPU-resident) tensor to a fresh `DEVICE_LOCAL`
+/// Vulkan buffer on `device_index`. **Candle-core-free.**
+///
+/// The result is a contiguous, `start_offset == 0` Vulkan tensor in
+/// logical row-major order. The source is materialized contiguous on
+/// the host first (cheap when already contiguous), so any input layout
+/// is accepted. Mirrors [`crate::host_to_metal_copy`].
+///
+/// # Errors
+///
+/// Returns [`Error::Msg`] if `cpu` is not [`crate::CpuStorage`]-backed,
+/// no Vulkan device exists at `device_index`, or buffer allocation /
+/// upload fails.
+pub fn host_to_vulkan_copy(cpu: &crate::Tensor, device_index: usize) -> Result<crate::Tensor> {
+    use crate::CpuStorage;
+
+    // Materialize a packed, logical-row-major byte image on the host.
+    let contig = cpu.contiguous()?;
+    let dtype = contig.dtype();
+    let cpu_storage = contig
+        .storage()
+        .as_any()
+        .downcast_ref::<CpuStorage>()
+        .ok_or_else(|| {
+            Error::Msg("host_to_vulkan_copy: source tensor must be CPU-backed".to_string())
+        })?;
+    let all_bytes = cpu_storage.as_bytes();
+    // A contiguous tensor may still carry a non-zero start_offset (a
+    // narrowed-but-contiguous view shares the parent buffer); slice to
+    // the logical element range so the Vulkan buffer holds exactly this
+    // tensor.
+    let n_elems = contig.element_count();
+    let per = dtype.size_in_bytes();
+    let byte_len = if dtype.is_packed() {
+        all_bytes.len()
+    } else {
+        n_elems * per
+    };
+    let start_bytes = contig.layout().start_offset() * per;
+    let end_bytes = start_bytes + byte_len;
+    if end_bytes > all_bytes.len() {
+        return Err(Error::Msg(format!(
+            "host_to_vulkan_copy: byte range {start_bytes}..{end_bytes} exceeds CPU storage \
+             length {}",
+            all_bytes.len()
+        )));
+    }
+    let src = &all_bytes[start_bytes..end_bytes];
+
+    let vulkan_device = primary_vulkan_device(device_index)?;
+    // Allocate at least 1 byte: a zero-length Vulkan buffer is invalid.
+    let alloc_len = byte_len.max(1) as u64;
+    let buffer = VulkanBuffer::create_device_local(
+        vulkan_device.device(),
+        vulkan_device.device_local_mem_type(),
+        alloc_len,
+    )
+    .map_err(|e| {
+        Error::Msg(format!(
+            "host_to_vulkan_copy: create_device_local({alloc_len}) failed: {e}"
+        ))
+    })?;
+    // H2D: stage `src` and copy into the device-local buffer. `src` may
+    // be empty (a zero-element tensor); skip the transfer in that case
+    // since the buffer was allocated at the 1-byte floor purely to be
+    // a valid handle.
+    if !src.is_empty() {
+        VulkanBuffer::upload_data(
+            vulkan_device.device(),
+            vulkan_device.host_visible_mem_type(),
+            vulkan_device.queue(),
+            vulkan_device.queue_family_index(),
+            &buffer,
+            src,
+        )
+        .map_err(|e| {
+            Error::Msg(format!("host_to_vulkan_copy: H2D upload failed: {e}"))
+        })?;
+    }
+
+    let storage = VulkanStorage::from_buffer(
+        vulkan_device,
+        device_index,
+        dtype,
+        buffer,
+        byte_len as u64,
+    )?;
+    crate::Tensor::from_parts(
+        Arc::new(storage),
+        crate::Layout::contiguous(contig.shape().to_vec()),
+        crate::TensorId::next(),
+    )
+}
+
+/// Read a Vulkan tensor back to a fresh CPU tensor, packed contiguous in
+/// logical row-major order. **Candle-core-free.** Mirrors
+/// [`crate::metal_to_host_copy`].
+///
+/// D2H-reads the whole device buffer through a host-visible staging
+/// buffer (`VulkanBuffer::read_back`, which submits + waits on the
+/// queue, so prior GPU writes are visible), then gathers the logical
+/// elements — handling any strided / offset view via a host-side
+/// gather, exactly as the Metal readback does.
+///
+/// # Errors
+///
+/// Returns [`Error::Msg`] if the tensor is not [`VulkanStorage`]-backed
+/// or the read-back fails.
+pub fn vulkan_to_host_copy(t: &crate::Tensor) -> Result<crate::Tensor> {
+    use crate::CpuStorage;
+
+    let vk = t
+        .storage()
+        .as_any()
+        .downcast_ref::<VulkanStorage>()
+        .ok_or_else(|| {
+            Error::Msg("vulkan_to_host_copy: tensor must be Vulkan-backed".to_string())
+        })?;
+    let vulkan_device = vk.vulkan_device();
+
+    // D2H: pull the device buffer's bytes back to the host. read_back
+    // submits and waits on the queue, so GPU writes are visible.
+    let backing = VulkanBuffer::read_back(
+        vulkan_device.device(),
+        vulkan_device.host_visible_mem_type(),
+        vulkan_device.queue(),
+        vulkan_device.queue_family_index(),
+        vk.buffer(),
+    )
+    .map_err(|e| {
+        Error::Msg(format!("vulkan_to_host_copy: D2H read_back failed: {e}"))
+    })?;
+    let buf_len = backing.len();
+
+    let dtype = t.dtype();
+    let layout = t.layout();
+    let n_elems = t.element_count();
+
+    if dtype.is_packed() {
+        // Packed dtypes have no per-element stride math; copy the
+        // addressed byte image directly (Vulkan packed-dtype tensors are
+        // always whole contiguous buffers in the current code paths).
+        let storage = CpuStorage::from_bytes(dtype, backing)?;
+        return crate::Tensor::from_parts(
+            Arc::new(storage),
+            crate::Layout::contiguous(t.shape().to_vec()),
+            crate::TensorId::next(),
+        );
+    }
+
+    let per = dtype.size_in_bytes();
+    let start = layout.start_offset();
+    let mut out = vec![0u8; n_elems * per];
+    if layout.is_contiguous() {
+        let s = start * per;
+        let e = s + n_elems * per;
+        if e > buf_len {
+            return Err(Error::Msg(format!(
+                "vulkan_to_host_copy: contiguous range {s}..{e} exceeds buffer length {buf_len}"
+            )));
+        }
+        out.copy_from_slice(&backing[s..e]);
+    } else {
+        // Strided / permuted view: gather each logical element by
+        // walking the multi-dimensional index against the layout
+        // strides (host readback is rare; per-element gather is fine).
+        let dims = layout.shape();
+        let strides = layout.strides();
+        let rank = dims.len();
+        let mut idx = vec![0usize; rank];
+        for logical in 0..n_elems {
+            let mut phys = start;
+            for d in 0..rank {
+                phys += idx[d] * strides[d];
+            }
+            let s = phys * per;
+            let d_off = logical * per;
+            if s + per > buf_len {
+                return Err(Error::Msg(format!(
+                    "vulkan_to_host_copy: element offset {s}..{} exceeds buffer length {buf_len}",
+                    s + per
+                )));
+            }
+            out[d_off..d_off + per].copy_from_slice(&backing[s..s + per]);
+            for d in (0..rank).rev() {
+                idx[d] += 1;
+                if idx[d] < dims[d] {
+                    break;
+                }
+                idx[d] = 0;
+            }
+        }
+    }
+
+    let storage = CpuStorage::from_bytes(dtype, out)?;
+    crate::Tensor::from_parts(
+        Arc::new(storage),
+        crate::Layout::contiguous(t.shape().to_vec()),
+        crate::TensorId::next(),
+    )
 }
 
 // ----------------------------------------------------------------------
@@ -2171,5 +2470,69 @@ mod tests {
         let storage = VulkanStorage::zeros(dev, 0, DType::BF16, 64).unwrap();
         assert_eq!(storage.device(), Device::Vulkan(0));
         assert_eq!(storage.dtype(), DType::BF16);
+    }
+
+    /// PR2 keystone (#1082): a host→Vulkan→host round-trip must preserve
+    /// the exact bytes, shape, and dtype for an F32 tensor — and the
+    /// intermediate tensor must actually live on `Device::Vulkan`.
+    ///
+    /// Skips when `KILN_TENSOR_VULKAN_TEST != 1` or no Vulkan device is
+    /// present (CI has no GPU). Tiny tensors only — bounded validation,
+    /// no training. Exercises the public constructor / `to_device` path
+    /// (`from_vec_on` → `host_to_vulkan_copy`, then `to_device(Cpu)` →
+    /// `vulkan_to_host_copy`) plus the raw-bytes BF16 path.
+    #[test]
+    fn host_vulkan_host_roundtrip_preserves_bytes() {
+        if maybe_vulkan_device().is_none() {
+            eprintln!("skip: KILN_TENSOR_VULKAN_TEST unset or no Vulkan device");
+            return;
+        }
+
+        // ---- F32 round-trip via from_vec_on / to_device ----
+        let data: Vec<f32> = vec![-2.5, 0.0, 1.0, 3.5, 42.0, -0.125];
+        let shape = vec![2usize, 3usize];
+        let dev = Device::Vulkan(0);
+
+        let vk = crate::Tensor::from_vec_on(dev, data.clone(), shape.clone())
+            .expect("from_vec_on(Vulkan) should construct a Vulkan tensor");
+        assert_eq!(vk.device(), dev, "intermediate tensor must be on Vulkan");
+        assert_eq!(vk.dtype(), DType::F32);
+        assert_eq!(vk.shape(), shape.as_slice());
+
+        let host = vk
+            .to_device(Device::Cpu)
+            .expect("to_device(Cpu) should D2H-copy the Vulkan tensor");
+        assert_eq!(host.device(), Device::Cpu);
+        assert_eq!(host.dtype(), DType::F32);
+        assert_eq!(host.shape(), shape.as_slice());
+
+        let got: Vec<f32> = host.to_vec().expect("read F32 tensor back to host Vec");
+        assert_eq!(got, data, "F32 host→Vulkan→host must be byte-identical");
+
+        // ---- BF16 round-trip via from_raw_bytes_on (raw LE bytes) ----
+        // Two bf16 elements: 1.0 = 0x3F80, -2.0 = 0xC000 (LE byte order).
+        let bf16_bytes: Vec<u8> = vec![0x80, 0x3F, 0x00, 0xC0];
+        let bf16_shape = vec![2usize];
+        let vk_bf16 =
+            crate::Tensor::from_raw_bytes_on(dev, DType::BF16, bf16_bytes.clone(), bf16_shape.clone())
+                .expect("from_raw_bytes_on(Vulkan, BF16) should construct a Vulkan tensor");
+        assert_eq!(vk_bf16.device(), dev);
+        assert_eq!(vk_bf16.dtype(), DType::BF16);
+        assert_eq!(vk_bf16.shape(), bf16_shape.as_slice());
+
+        let host_bf16 = crate::vulkan_to_host_copy(&vk_bf16)
+            .expect("vulkan_to_host_copy should D2H-copy the BF16 tensor");
+        assert_eq!(host_bf16.device(), Device::Cpu);
+        assert_eq!(host_bf16.dtype(), DType::BF16);
+        let host_bf16_cpu = host_bf16
+            .storage()
+            .as_any()
+            .downcast_ref::<crate::CpuStorage>()
+            .expect("BF16 readback must be CPU-backed");
+        assert_eq!(
+            host_bf16_cpu.as_bytes(),
+            bf16_bytes.as_slice(),
+            "BF16 host→Vulkan→host must be byte-identical"
+        );
     }
 }

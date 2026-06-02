@@ -156,8 +156,9 @@ pub use metal_storage::{
 pub use vulkan_allocator::VulkanAllocator;
 #[cfg(feature = "vulkan")]
 pub use vulkan_storage::{
-    vulkan_activation_unary, vulkan_argmax_last_axis, vulkan_cast,
-    vulkan_elementwise_binary, vulkan_index_select_dim0, vulkan_l2norm_last_axis,
-    vulkan_masked_fill, vulkan_rmsnorm_last_axis, vulkan_softmax_last_axis, vulkan_zeros,
+    host_to_vulkan_copy, primary_vulkan_device, vulkan_activation_unary,
+    vulkan_argmax_last_axis, vulkan_cast, vulkan_elementwise_binary,
+    vulkan_index_select_dim0, vulkan_l2norm_last_axis, vulkan_masked_fill,
+    vulkan_rmsnorm_last_axis, vulkan_softmax_last_axis, vulkan_to_host_copy, vulkan_zeros,
     VulkanStorage,
 };
