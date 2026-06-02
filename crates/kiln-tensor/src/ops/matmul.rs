@@ -153,23 +153,21 @@ impl DeviceOp2 for MatmulOp {
 
     #[cfg(feature = "vulkan")]
     fn vulkan_fwd(&self, a: &Tensor, b: &Tensor) -> Result<Option<Tensor>> {
-        // #1082 PR3b: route the rank-2 F32 GEMM through the production
-        // Vulkan compute shader (`kiln_vulkan_kernel::vk_ops::matmul::
-        // vk_matmul_no_grad`) via the zero-copy VulkanStorage<->VkTensor
-        // bridge (`crate::vulkan_matmul`). No D2H/H2D round-trip — both
-        // inputs and the result stay GPU-resident.
+        // #1082 PR3b: route the F32 GEMM through the production Vulkan
+        // compute shaders via the zero-copy VulkanStorage<->VkTensor bridge.
+        // No D2H/H2D round-trip — inputs and result stay GPU-resident.
         //
-        // The underlying kernel covers ONLY the rank-2 F32 contiguous
-        // case (`check_matmul_shapes` is rank-2/F32-only). Everything else
-        // — BF16/F16, batched/higher-rank, non-contiguous, or non-Vulkan
-        // storage — returns Ok(None) so `dispatch2` runs the CPU
-        // reference and copies the result back to Vulkan (correct, slower).
+        //   - rank-2 → `crate::vulkan_matmul` (`vk_ops::matmul::vk_matmul_no_grad`)
+        //   - rank≥3 → `crate::vulkan_matmul_batched` (flattens the leading
+        //     batch axes onto `vk_ops::matmul_batched::vk_matmul_batched_no_grad`).
+        //     This is the attention-core path (`Q·Kᵀ`, `scores·V`, rank-4)
+        //     that previously returned `Ok(None)` and ran the GEMM on the CPU.
+        //
+        // Anything the kernels don't cover — BF16/F16, non-contiguous,
+        // unequal/sub-matrix ranks, or non-Vulkan storage — returns Ok(None)
+        // so `dispatch2` runs the CPU reference and copies the result back to
+        // Vulkan (correct, slower).
         if a.dtype() != DType::F32 || b.dtype() != DType::F32 {
-            return Ok(None);
-        }
-        if a.rank() != 2 || b.rank() != 2 {
-            // Batched / higher-rank matmul has no rank-2 GEMM coverage
-            // here; host fallback handles it.
             return Ok(None);
         }
         if !a.is_contiguous() || !b.is_contiguous() {
@@ -188,11 +186,21 @@ impl DeviceOp2 for MatmulOp {
         {
             return Ok(None);
         }
+        let (ar, br) = (a.rank(), b.rank());
+        if ar < 2 || ar != br {
+            // Sub-matrix or unequal ranks: `validate()` would bail; let the
+            // host reference report the error instead.
+            return Ok(None);
+        }
         // Re-validate the full shape/dtype contract (contraction dim,
-        // equal dtypes) before touching device memory — mirrors cuda_fwd /
-        // metal_fwd.
+        // equal ranks/dtypes, contiguity) before touching device memory —
+        // mirrors cuda_fwd / metal_fwd.
         validate(a, b)?;
-        Ok(Some(crate::vulkan_matmul(a, b)?))
+        if ar == 2 {
+            Ok(Some(crate::vulkan_matmul(a, b)?))
+        } else {
+            Ok(Some(crate::vulkan_matmul_batched(a, b)?))
+        }
     }
 
     fn bwd(&self) -> Option<Box<dyn BackwardOp>> {
@@ -524,11 +532,13 @@ mod tests {
         );
     }
 
-    /// An UNSUPPORTED case (batched rank-3) must take the host fallback
-    /// (vulkan_fwd returns Ok(None)) and STILL produce the correct answer.
+    /// Batched (rank-3) F32 matmul now runs RESIDENT on Vulkan
+    /// (`vulkan_fwd` -> `vulkan_matmul_batched` -> rank-3 kernel) and must
+    /// match the CPU reference while keeping the result on-device — no host
+    /// round-trip for the attention-core / GDN batched GEMMs.
     #[cfg(feature = "vulkan")]
     #[test]
-    fn matmul_vulkan_batched_host_fallback_correct() {
+    fn matmul_vulkan_batched_f32_parity_rank3() {
         if !vulkan_test_enabled() {
             eprintln!("skip: KILN_TENSOR_VULKAN_TEST unset");
             return;
@@ -539,9 +549,7 @@ mod tests {
         }
         let dev = crate::Device::Vulkan(0);
 
-        // [2, 3, 4] @ [2, 4, 5] = [2, 3, 5] — rank-3 batched, which the
-        // rank-2 kernel does not cover. vulkan_fwd returns Ok(None); the
-        // dispatcher runs cpu_fwd and copies the result back to Vulkan.
+        // [2, 3, 4] @ [2, 4, 5] = [2, 3, 5] — rank-3 batched.
         let (bsz, m, k, n) = (2usize, 3usize, 4usize, 5usize);
         let a_data: Vec<f32> = (0..bsz * m * k).map(|i| (i as f32) * 0.05 - 0.7).collect();
         let b_data: Vec<f32> = (0..bsz * k * n).map(|i| ((i % 5) as f32) * 0.3 - 0.6).collect();
@@ -550,30 +558,74 @@ mod tests {
         let b_cpu = Tensor::from_slice(&b_data, vec![bsz, k, n]).unwrap();
         let ref_vals = read_f32(&matmul(&a_cpu, &b_cpu).unwrap());
 
-        // Directly assert vulkan_fwd declines the batched case.
+        // vulkan_fwd must now ACCEPT the batched case (return Some).
         let a_vk = Tensor::from_vec_on(dev, a_data.clone(), vec![bsz, m, k]).unwrap();
         let b_vk = Tensor::from_vec_on(dev, b_data.clone(), vec![bsz, k, n]).unwrap();
-        let declined = MatmulOp.vulkan_fwd(&a_vk, &b_vk).unwrap();
+        let accepted = MatmulOp.vulkan_fwd(&a_vk, &b_vk).unwrap();
         assert!(
-            declined.is_none(),
-            "batched matmul must return Ok(None) so the host fallback runs"
+            accepted.is_some(),
+            "batched matmul must run resident on Vulkan (return Some)"
         );
 
-        // End-to-end via dispatch (host fallback) still yields the right
-        // answer on a Vulkan-resident result.
+        // End-to-end via dispatch: correct AND Vulkan-resident.
         let c_vk = matmul(&a_vk, &b_vk).unwrap();
         assert_eq!(c_vk.shape(), &[bsz, m, n]);
+        assert_eq!(c_vk.device(), dev, "batched result must stay on Vulkan");
+        let got = c_vk.to_device(crate::Device::Cpu).unwrap().to_vec::<f32>().unwrap();
+        let mut max_abs_err = 0.0f32;
+        for (g, r) in got.iter().zip(ref_vals.iter()) {
+            max_abs_err = max_abs_err.max((g - r).abs());
+        }
+        eprintln!("matmul_vulkan_batched_f32_parity_rank3: max_abs_err = {max_abs_err:e}");
+        assert!(
+            max_abs_err < 1e-4,
+            "resident batched matmul diverges from CPU ref: max_abs_err={max_abs_err}"
+        );
+    }
+
+    /// Rank-4 batched matmul = the attention-core shape `[B, H, S, D]`. The
+    /// leading two axes must flatten correctly onto the rank-3 kernel and the
+    /// result must reshape back to rank-4, matching the CPU reference.
+    #[cfg(feature = "vulkan")]
+    #[test]
+    fn matmul_vulkan_batched_f32_parity_rank4_attention() {
+        if !vulkan_test_enabled() {
+            eprintln!("skip: KILN_TENSOR_VULKAN_TEST unset");
+            return;
+        }
+        if crate::primary_vulkan_device(0).is_err() {
+            eprintln!("skip: no Vulkan device");
+            return;
+        }
+        let dev = crate::Device::Vulkan(0);
+
+        // Q·Kᵀ-like: [B=2, H=3, S=5, D=4] @ [2, 3, 4, 6] = [2, 3, 5, 6].
+        let (b_, h, s, d, n) = (2usize, 3usize, 5usize, 4usize, 6usize);
+        let a_data: Vec<f32> =
+            (0..b_ * h * s * d).map(|i| ((i % 11) as f32) * 0.07 - 0.4).collect();
+        let b_data: Vec<f32> =
+            (0..b_ * h * d * n).map(|i| ((i % 9) as f32) * 0.13 - 0.55).collect();
+
+        let a_cpu = Tensor::from_slice(&a_data, vec![b_, h, s, d]).unwrap();
+        let b_cpu = Tensor::from_slice(&b_data, vec![b_, h, d, n]).unwrap();
+        let ref_vals = read_f32(&matmul(&a_cpu, &b_cpu).unwrap());
+
+        let a_vk = Tensor::from_vec_on(dev, a_data.clone(), vec![b_, h, s, d]).unwrap();
+        let b_vk = Tensor::from_vec_on(dev, b_data.clone(), vec![b_, h, d, n]).unwrap();
+        let c_vk = matmul(&a_vk, &b_vk).unwrap();
+        assert_eq!(c_vk.shape(), &[b_, h, s, n]);
+        assert_eq!(c_vk.device(), dev, "rank-4 result must stay on Vulkan");
         let got = c_vk.to_device(crate::Device::Cpu).unwrap().to_vec::<f32>().unwrap();
         let mut max_abs_err = 0.0f32;
         for (g, r) in got.iter().zip(ref_vals.iter()) {
             max_abs_err = max_abs_err.max((g - r).abs());
         }
         eprintln!(
-            "matmul_vulkan_batched_host_fallback_correct: max_abs_err = {max_abs_err:e}"
+            "matmul_vulkan_batched_f32_parity_rank4_attention: max_abs_err = {max_abs_err:e}"
         );
         assert!(
             max_abs_err < 1e-4,
-            "host-fallback batched matmul diverges from CPU ref: max_abs_err={max_abs_err}"
+            "rank-4 batched matmul diverges from CPU ref: max_abs_err={max_abs_err}"
         );
     }
 }

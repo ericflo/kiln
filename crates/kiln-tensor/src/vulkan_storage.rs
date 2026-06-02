@@ -425,6 +425,129 @@ pub fn vulkan_matmul(a: &crate::Tensor, b: &crate::Tensor) -> Result<crate::Tens
 }
 
 // ----------------------------------------------------------------------
+// vulkan_matmul_batched — batched (rank ≥ 3) F32 GEMM, fully resident
+// ----------------------------------------------------------------------
+
+/// Vulkan batched F32 GEMM: `a:[..., M, K] @ b:[..., K, N] = [..., M, N]`,
+/// where the leading axes (everything but the trailing two) form the batch.
+///
+/// This is the rank ≥ 3 companion to [`vulkan_matmul`]. The attention core
+/// (`Q·Kᵀ` and `scores·V`, typically rank-4 `[B, H, S, D]`) and several GDN
+/// composites issue batched matmuls; without this the kt
+/// [`crate::ops::matmul::MatmulOp::vulkan_fwd`] returned `Ok(None)` for
+/// rank > 2 and `dispatch2` ran the GEMM on the **CPU**, then copied the
+/// result back to Vulkan — a host round-trip on the inference hot path.
+///
+/// The leading batch axes are flattened to a single dim so the underlying
+/// rank-3 kernel (`vk_ops::matmul_batched::vk_matmul_batched_no_grad`,
+/// already proven in the GDN chunkwise paths) can run every batch slice
+/// independently; the result is reshaped back to the caller's leading dims.
+/// Both bridge legs are zero-copy (shared `vk::DeviceMemory`); no D2H/H2D.
+///
+/// # Requirements
+///
+/// - `a`, `b` both [`VulkanStorage`]-backed on the same device, F32,
+///   contiguous, `start_offset == 0`, equal rank ≥ 3
+/// - matching leading (batch) axes and contraction dim
+///
+/// Callers ([`MatmulOp::vulkan_fwd`]) gate these and fall back to the host
+/// reference otherwise. This function re-validates and errors loudly on a
+/// shape/dtype violation.
+///
+/// # Errors
+///
+/// Returns [`Error::Msg`] on non-Vulkan storage, dtype/rank/shape
+/// violations, or kernel dispatch failure.
+pub fn vulkan_matmul_batched(a: &crate::Tensor, b: &crate::Tensor) -> Result<crate::Tensor> {
+    use kiln_vulkan_kernel::vk_ops::matmul_batched::vk_matmul_batched_no_grad;
+    use kiln_vulkan_kernel::vk_tensor::{VkDType, VkTensor};
+
+    if a.dtype() != DType::F32 || b.dtype() != DType::F32 {
+        return Err(Error::Msg(format!(
+            "vulkan_matmul_batched: F32-only kernel (got a={}, b={})",
+            a.dtype(),
+            b.dtype()
+        )));
+    }
+    let (ar, br) = (a.rank(), b.rank());
+    if ar < 3 || br != ar {
+        return Err(Error::Msg(format!(
+            "vulkan_matmul_batched: rank ≥ 3 and equal ranks required (a.rank={ar}, b.rank={br})"
+        )));
+    }
+    if !a.is_contiguous() || !b.is_contiguous() {
+        return Err(Error::Msg(
+            "vulkan_matmul_batched: both inputs must be contiguous".to_string(),
+        ));
+    }
+    if a.layout().start_offset() != 0 || b.layout().start_offset() != 0 {
+        return Err(Error::Msg(
+            "vulkan_matmul_batched: both inputs must have start_offset == 0 (whole-buffer)"
+                .to_string(),
+        ));
+    }
+
+    let a_vk = a
+        .storage()
+        .as_any()
+        .downcast_ref::<VulkanStorage>()
+        .ok_or_else(|| Error::Msg("vulkan_matmul_batched: a must be Vulkan-backed".to_string()))?;
+    let b_vk = b
+        .storage()
+        .as_any()
+        .downcast_ref::<VulkanStorage>()
+        .ok_or_else(|| Error::Msg("vulkan_matmul_batched: b must be Vulkan-backed".to_string()))?;
+
+    let a_shape = a.shape();
+    let b_shape = b.shape();
+    let m = a_shape[ar - 2];
+    let k = a_shape[ar - 1];
+    let kk = b_shape[br - 2];
+    let n = b_shape[br - 1];
+    if k != kk {
+        return Err(Error::Msg(format!(
+            "vulkan_matmul_batched: contraction-dim mismatch (a K={k} vs b K={kk})"
+        )));
+    }
+    let batch_a: usize = a_shape[..ar - 2].iter().product::<usize>().max(1);
+    let batch_b: usize = b_shape[..br - 2].iter().product::<usize>().max(1);
+    if batch_a != batch_b {
+        return Err(Error::Msg(format!(
+            "vulkan_matmul_batched: batch mismatch (a={batch_a} vs b={batch_b}) for shapes {a_shape:?} / {b_shape:?}"
+        )));
+    }
+
+    let device_index = match a_vk.device() {
+        Device::Vulkan(i) => i,
+        _ => unreachable!("VulkanStorage::device() returns Device::Vulkan"),
+    };
+
+    // Zero-copy: wrap each kt buffer as a rank-3 VkTensor with the batch
+    // axes flattened. Contiguous + start_offset==0 (checked above) makes the
+    // flattened view exact — same bytes, different logical shape.
+    let vk_a = VkTensor::from_buffer(
+        a_vk.buffer_arc(),
+        vec![batch_a, m, k],
+        VkDType::F32,
+        Arc::clone(a_vk.vulkan_device()),
+    );
+    let vk_b = VkTensor::from_buffer(
+        b_vk.buffer_arc(),
+        vec![batch_b, kk, n],
+        VkDType::F32,
+        Arc::clone(b_vk.vulkan_device()),
+    );
+    let vk_out = vk_matmul_batched_no_grad(&vk_a, &vk_b)
+        .map_err(|e| Error::Msg(format!("vulkan_matmul_batched: kernel dispatch failed: {e}")))?;
+    // vk_out is [batch, m, n]; restore the caller's leading axes.
+    let mut out_shape: Vec<usize> = a_shape[..ar - 2].to_vec();
+    out_shape.push(m);
+    out_shape.push(n);
+    let out = kt_tensor_from_vk(&vk_out, device_index)?;
+    out.reshape(out_shape)
+}
+
+// ----------------------------------------------------------------------
 // vulkan_matmul_bf16w — #1443 step1: F32-act × BF16-weight mixed-precision GEMM
 // ----------------------------------------------------------------------
 
