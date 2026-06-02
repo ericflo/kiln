@@ -1,9 +1,32 @@
 # Vulkan kt-tape harmonization — status & human-soak handoff (#1082)
 
 Branch `feat/vk-tape-harmonization` (worktree `kiln-vk-harmonize`, **not pushed**).
+
+> ## ⨠ UPDATE 2026-06-01 (constraint relaxed, user at console): FRONTIER CLEARED + CAPSTONE REACHED
+> The "host hard-crash" risk turned out to be a **recoverable, fixable** bug, not a hard hang:
+> the RADV GPUVM fault on rmsnorm-backward surfaces as a recoverable `"failed to submit
+> transfer"` (queue wedged for that process only; fresh process = clean; MemAvailable steady).
+> Root cause (PR5d/PR5e/PR5f): the `vulkan_*_last_axis` D2H/H2D **bounce wrappers** uploaded a
+> pool-bucket-rounded `read_back` byte image into a *logical*-sized device buffer → vkCmdCopyBuffer
+> overran it. Fixed everywhere (output + input sides) with `&bytes[..logical.min(len)]`.
+> **Now proven on the GPU, host stable:**
+> - PR5d `7…0cdf5875`: gated `rms_norm` recorder backprops end-to-end (closes the PR5b add-only [major]).
+> - PR5e `4d03b54b`: same fix on softmax/l2norm/activation/elementwise (+4 GPU parity tests, ~1e-7).
+> - **PR5f `7b01b273` — CAPSTONE: a complete single SFT step runs end-to-end on `Device::Vulkan`**
+>   through the kt-tape substrate (`tests/vk_sft_step_proof.rs`, 3 tiers, independently re-verified):
+>   lora_linear records → CE loss 1.451142 → `Tape::backward` finite LoRA grads → one
+>   `dispatch_adamw_step_buffers` step moves LoRA A/B in place by max|Δ|=1e-2. Also fixed
+>   `Tensor::contiguous()` for Vulkan (PR3 gap #2).
+> **Technique that cracked it (reusable):** bisect a GPU fault with an isolated single-op test + a
+> post-op H2D queue-health probe; faults here are recoverable, so iterate freely with bounded
+> single-shot tests. **Still genuinely held for soak:** PR6 = *multi-step* persistent-state training
+> at realistic shapes (the original crash scenario); CPU-vs-Vulkan numerical parity oracles; PR7.
+> The "frontier to chase" section below is now largely DONE for the single-step case — read it as
+> the multi-step soak plan.
+
 Everything below was implemented + bounded-validated autonomously; **PR6/PR7 and
-the rmsnorm-backward frontier are explicitly held for human GPU soak** (host has
-hard-crashed on long GPU runs — bounded/observable validation only).
+*multi-step* training are held for human GPU soak** (host historically hard-crashed on long
+multi-step GPU runs — bounded/observable validation only; single-step is now proven).
 
 ## What landed (all green, real-GPU-validated on RADV Strix Halo unless noted)
 
