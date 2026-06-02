@@ -548,6 +548,69 @@ pub fn vulkan_matmul_batched(a: &crate::Tensor, b: &crate::Tensor) -> Result<cra
 }
 
 // ----------------------------------------------------------------------
+// vulkan_contiguous — on-device strided gather (kills the contiguous() bounce)
+// ----------------------------------------------------------------------
+
+/// Materialize a non-contiguous F32 Vulkan tensor into a fresh contiguous
+/// Vulkan tensor entirely on-device, via the `vk_gather_contiguous_f32`
+/// kernel. This replaces the correctness-first host bounce in
+/// [`crate::Tensor::contiguous`] (D2H per-element gather + H2D re-upload) for
+/// the F32 case — the single most common CPU round-trip on the Vulkan
+/// inference path (every `transpose().contiguous()`, `narrow().contiguous()`,
+/// GQA expand, …).
+///
+/// The input may be any strided/offset layout; its raw `shape` / element
+/// `strides` / element `start_offset` are passed straight to the gather
+/// kernel, which reads from the **whole** underlying buffer.
+///
+/// # Requirements / fallback
+///
+/// - F32, Vulkan-backed, `rank <= vk_ops::contiguous_gather::MAX_RANK` (8).
+///   The caller ([`crate::Tensor::contiguous`]) gates these and keeps the
+///   host path for anything outside the envelope (BF16, packed, rank > 8).
+///
+/// # Errors
+///
+/// Returns [`Error::Msg`] on non-Vulkan storage, non-F32 dtype, over-rank
+/// input, or kernel dispatch failure.
+pub fn vulkan_contiguous(t: &crate::Tensor) -> Result<crate::Tensor> {
+    use kiln_vulkan_kernel::vk_ops::contiguous_gather::{vk_gather_contiguous_f32, MAX_RANK};
+
+    if t.dtype() != DType::F32 {
+        return Err(Error::Msg(format!(
+            "vulkan_contiguous: F32-only kernel (got {})",
+            t.dtype()
+        )));
+    }
+    let rank = t.rank();
+    if rank > MAX_RANK {
+        return Err(Error::Msg(format!(
+            "vulkan_contiguous: rank {rank} exceeds gather MAX_RANK {MAX_RANK}"
+        )));
+    }
+    let vk = t
+        .storage()
+        .as_any()
+        .downcast_ref::<VulkanStorage>()
+        .ok_or_else(|| Error::Msg("vulkan_contiguous: tensor must be Vulkan-backed".to_string()))?;
+    let device_index = match vk.device() {
+        Device::Vulkan(i) => i,
+        _ => unreachable!("VulkanStorage::device() returns Device::Vulkan"),
+    };
+
+    let device = vk.vulkan_device();
+    // The whole underlying buffer; `strides`/`start_offset` index into it.
+    let src = vk.buffer_arc();
+    let shape = t.shape().to_vec();
+    let strides = t.strides().to_vec();
+    let start_offset = t.layout().start_offset();
+
+    let vk_out = vk_gather_contiguous_f32(device, &src, &shape, &strides, start_offset)
+        .map_err(|e| Error::Msg(format!("vulkan_contiguous: kernel dispatch failed: {e}")))?;
+    kt_tensor_from_vk(&vk_out, device_index)
+}
+
+// ----------------------------------------------------------------------
 // vulkan_matmul_bf16w — #1443 step1: F32-act × BF16-weight mixed-precision GEMM
 // ----------------------------------------------------------------------
 
@@ -2883,5 +2946,74 @@ mod tests {
             err < 2e-2,
             "bf16w dx diverges from finite-difference: max_abs_err={err}; analytic={dx_v:?} fd={fd:?}"
         );
+    }
+
+    /// On-device `contiguous()` (the `vk_gather_contiguous_f32` strided
+    /// gather) must byte-match the CPU reference for the layouts that show up
+    /// on the inference path: last-two-axis transpose (rank-2 and rank-4 =
+    /// attention `k.t()`), a strided `narrow` (non-zero start_offset), and a
+    /// broadcast-expand (stride-0 axis). The result must stay on Vulkan — no
+    /// host bounce.
+    #[test]
+    fn vulkan_contiguous_gather_parity() {
+        if maybe_vulkan_device().is_none() {
+            eprintln!("skip: KILN_TENSOR_VULKAN_TEST unset or no Vulkan device");
+            return;
+        }
+        let dev = Device::Vulkan(0);
+
+        // Build a CPU tensor + the identical Vulkan tensor, apply `view` to
+        // both, and check the on-device contiguous() matches the CPU ref AND
+        // stays resident.
+        fn check(
+            dev: Device,
+            data: &[f32],
+            shape: &[usize],
+            label: &str,
+            view: impl Fn(&crate::Tensor) -> crate::Tensor,
+        ) {
+            let cpu = crate::Tensor::from_slice(data, shape.to_vec()).unwrap();
+            let cpu_ref: Vec<f32> = view(&cpu).contiguous().unwrap().to_vec().unwrap();
+
+            let vk = crate::Tensor::from_vec_on(dev, data.to_vec(), shape.to_vec()).unwrap();
+            let vk_view = view(&vk);
+            assert!(
+                !vk_view.is_contiguous(),
+                "{label}: view should be non-contiguous to exercise the gather"
+            );
+            let vk_contig = vk_view.contiguous().unwrap();
+            assert_eq!(vk_contig.device(), dev, "{label}: result must stay on Vulkan");
+            assert!(vk_contig.is_contiguous(), "{label}: result must be contiguous");
+            let got: Vec<f32> = vk_contig.to_device(Device::Cpu).unwrap().to_vec().unwrap();
+            assert_eq!(got.len(), cpu_ref.len(), "{label}: element count mismatch");
+            let mut max_abs = 0.0f32;
+            for (g, r) in got.iter().zip(cpu_ref.iter()) {
+                max_abs = max_abs.max((g - r).abs());
+            }
+            eprintln!("vulkan_contiguous[{label}]: max_abs_err = {max_abs:e}");
+            assert!(max_abs == 0.0, "{label}: gather diverges from CPU ref (max_abs={max_abs})");
+        }
+
+        // rank-2 transpose: [3,4] -> view [4,3]
+        let d2: Vec<f32> = (0..12).map(|i| i as f32 * 0.5 - 1.0).collect();
+        check(dev, &d2, &[3, 4], "transpose_2d", |t| t.t().unwrap());
+
+        // rank-4 attention k.t(): [2,3,5,4] -> [2,3,4,5]
+        let d4: Vec<f32> = (0..2 * 3 * 5 * 4).map(|i| (i % 13) as f32 * 0.25 - 1.0).collect();
+        check(dev, &d4, &[2, 3, 5, 4], "transpose_last2_rank4", |t| {
+            t.transpose(2, 3).unwrap()
+        });
+
+        // strided narrow (non-zero start_offset): [4,6] -> narrow axis1 [4,3]@2
+        let dn: Vec<f32> = (0..24).map(|i| i as f32).collect();
+        check(dev, &dn, &[4, 6], "narrow_offset", |t| {
+            t.narrow(1, 2, 3).unwrap()
+        });
+
+        // broadcast-expand (stride-0 axis): [1,5] -> [3,5]
+        let db: Vec<f32> = (0..5).map(|i| i as f32 * 2.0 - 3.0).collect();
+        check(dev, &db, &[1, 5], "broadcast_expand", |t| {
+            t.broadcast_as(vec![3usize, 5usize]).unwrap()
+        });
     }
 }

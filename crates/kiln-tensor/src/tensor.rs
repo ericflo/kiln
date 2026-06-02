@@ -642,19 +642,25 @@ impl Tensor {
         }
         #[cfg(feature = "vulkan")]
         if let crate::Device::Vulkan(i) = self.device() {
-            // Same correctness-first gather-then-reupload as the Metal branch
-            // (#1082 vk-tape harmonization, PR3 frontier gap #2). `contiguous()`
-            // is required by the LoRA-linear tape recorder
-            // (`try_tape_lora_linear_kt` materializes `a.transpose(..).contiguous()`)
-            // and by `MatmulBackward`'s saved transposed input, so on-device LoRA
-            // SFT cannot record/backprop on Vulkan without it.
+            // Resident strided gather: `vulkan_contiguous` runs the
+            // `vk_gather_contiguous_f32` kernel (one invocation per output
+            // element, decompose row-major index → physical source offset),
+            // keeping the materialize fully on-device. This is the resident
+            // replacement for the D2H-gather + H2D-reupload below — the single
+            // most common CPU bounce on the Vulkan inference path (every
+            // `transpose().contiguous()`, `narrow().contiguous()`, GQA expand).
             //
-            // `vulkan_to_host_copy` already walks the layout strides to produce a
-            // PACKED, contiguous host image (its non-contiguous gather branch);
-            // re-uploading that yields a fresh contiguous device buffer. No fused
-            // on-device gather kernel yet — that is a perf follow-up, not a
-            // correctness gap. On the Strix Halo UMA the D2H/H2D bounce is a host
-            // memcpy, not a PCIe hop.
+            // F32 + rank ≤ 8 only (the kernel's envelope). BF16 / packed /
+            // over-rank tensors still take the correctness-first host gather:
+            // `vulkan_to_host_copy` walks the layout strides to a PACKED host
+            // image; re-uploading yields a fresh contiguous device buffer. On
+            // the Strix Halo UMA that bounce is a host memcpy, not a PCIe hop.
+            // A BF16 gather kernel is the obvious follow-up.
+            if self.dtype() == crate::DType::F32
+                && self.rank() <= kiln_vulkan_kernel::vk_ops::contiguous_gather::MAX_RANK
+            {
+                return crate::vulkan_contiguous(self);
+            }
             let host = crate::vulkan_to_host_copy(self)?;
             return crate::host_to_vulkan_copy(&host, i);
         }
