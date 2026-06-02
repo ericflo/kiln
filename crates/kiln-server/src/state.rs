@@ -1651,7 +1651,17 @@ impl AppState {
         let post_load_used_vram = post_load_used_vram_info
             .map(|info| info.used_bytes)
             .unwrap_or(0);
-        let sizing_residency_bytes = post_load_used_vram.max(estimated_model_bytes);
+        let mut sizing_residency_bytes = post_load_used_vram.max(estimated_model_bytes);
+        // Vulkan keeps BOTH the paged KV pool AND the resident-decode weight
+        // prewarm caches (f32 decode weights + bf16-packed, empirically ~1.85x
+        // the model) in VRAM. The post-load snapshot is taken BEFORE the prewarm
+        // allocates, so without reserving for it the KV auto-sizer over-budgets
+        // and the prewarm OOMs (KV pool + model + prewarm > VRAM). Reserve ~2x
+        // the model here so the KV sizer leaves headroom for the prewarm.
+        if matches!(device_kt, kiln_tensor::Device::Vulkan(_)) {
+            sizing_residency_bytes =
+                sizing_residency_bytes.saturating_add(estimated_model_bytes.saturating_mul(2));
+        }
         if post_load_used_vram > 0 {
             tracing::info!(
                 post_load_used_vram_gb = post_load_used_vram as f64 / 1e9,
