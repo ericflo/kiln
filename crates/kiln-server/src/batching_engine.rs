@@ -690,6 +690,9 @@ impl BatchingEngineHandle {
             max_decode_batch,
             env_prefix_aware_admission(),
             env_prefill_admission_quantum_for_backend(max_decode_batch, backend_name),
+            // #1082: CUDA restores the LKG burst-fill admission; Vulkan/Metal
+            // keep their tuned yield-to-ready-rows behavior.
+            matches!(backend_name, Some("cuda")),
         )
     }
 
@@ -698,6 +701,7 @@ impl BatchingEngineHandle {
         max_decode_batch: usize,
         prefix_aware_admission: bool,
         prefill_admission_quantum: usize,
+        burst_refill: bool,
     ) -> Self {
         let (tx, rx) = mpsc::channel(DEFAULT_ENGINE_CHANNEL);
         let actor = BatchingEngineActor::new(
@@ -706,6 +710,7 @@ impl BatchingEngineHandle {
             max_decode_batch.max(1),
             prefix_aware_admission,
             prefill_admission_quantum,
+            burst_refill,
         );
         thread::Builder::new()
             .name("kiln-batching-engine".to_string())
@@ -801,6 +806,16 @@ struct BatchingEngineActor {
     max_decode_batch: usize,
     prefix_aware_admission: bool,
     max_prefill_admissions_per_cycle: usize,
+    // #1082 CUDA concurrency regression: when true, admit_waiting refills the
+    // decode batch toward `max_decode_batch` every cycle (the LKG 2d9d4fc4
+    // burst-fill that scaled CUDA to ~498 tok/s @ bs=64) instead of yielding to
+    // ready decode rows by admitting only 1 prefill/cycle. The `has_ready_decode_row`
+    // 1/cycle yield (added for Vulkan by 2c52565d) starves the SUSTAINED batch
+    // width on CUDA (max_decode_batch=8): inline prefills interleave into every
+    // decode cycle so a wide batch never forms, producing the measured
+    // anti-scaling (n=32 slower than n=8). Set only for CUDA; Vulkan/Metal keep
+    // their tuned yield behavior.
+    burst_refill: bool,
     snapshot: BatchingEngineSnapshot,
 }
 
@@ -811,6 +826,7 @@ impl BatchingEngineActor {
         max_decode_batch: usize,
         prefix_aware_admission: bool,
         prefill_admission_quantum: usize,
+        burst_refill: bool,
     ) -> Self {
         let max_decode_batch = max_decode_batch.max(1);
         let max_prefill_admissions_per_cycle = prefill_admission_quantum.clamp(1, max_decode_batch);
@@ -824,6 +840,7 @@ impl BatchingEngineActor {
             max_decode_batch,
             prefix_aware_admission,
             max_prefill_admissions_per_cycle,
+            burst_refill,
             snapshot: BatchingEngineSnapshot {
                 accepting: true,
                 max_prefill_admission_quantum: max_prefill_admissions_per_cycle,
@@ -937,7 +954,14 @@ impl BatchingEngineActor {
 
     fn admit_waiting(&mut self) {
         let mut admitted = 0usize;
-        let admission_limit = if self.has_ready_decode_row() {
+        // #1082 CUDA concurrency regression fix: CUDA (burst_refill) refills the
+        // batch toward max_decode_batch every cycle — the LKG 2d9d4fc4 burst-fill
+        // that sustained a wide decode batch and scaled to ~498 tok/s @ bs=64.
+        // Vulkan/Metal keep yielding to ready decode rows (admit 1 prefill/cycle
+        // once any row is decoding) — their tuned latency behavior. The while
+        // loop below still caps total active at max_decode_batch, so burst_refill
+        // only ever fills the deficit, never over-admits.
+        let admission_limit = if self.has_ready_decode_row() && !self.burst_refill {
             1
         } else {
             self.max_prefill_admissions_per_cycle
@@ -1606,7 +1630,7 @@ mod tests {
     fn prefill_admission_quantum_limits_each_actor_cycle() {
         let (_tx, rx) = mpsc::channel(DEFAULT_ENGINE_CHANNEL);
         let forward = Arc::new(MockForward::default());
-        let mut actor = BatchingEngineActor::new(rx, forward, 8, false, 3);
+        let mut actor = BatchingEngineActor::new(rx, forward, 8, false, 3, false);
         for idx in 0..8 {
             let (response_tx, _response_rx) = mpsc::channel(DEFAULT_RESPONSE_CHANNEL);
             actor.waiting.push_back(QueuedRequest {
@@ -1636,7 +1660,7 @@ mod tests {
     fn ready_decode_rows_limit_followup_prefill_admission_to_one() {
         let (_tx, rx) = mpsc::channel(DEFAULT_ENGINE_CHANNEL);
         let forward = Arc::new(PendingFirstTokenForward::default());
-        let mut actor = BatchingEngineActor::new(rx, forward.clone(), 8, false, 3);
+        let mut actor = BatchingEngineActor::new(rx, forward.clone(), 8, false, 3, false);
         let mut receivers = Vec::new();
         for idx in 0..6 {
             let (response_tx, response_rx) = mpsc::channel(DEFAULT_RESPONSE_CHANNEL);
@@ -1675,7 +1699,7 @@ mod tests {
     fn admission_emits_prefill_first_tokens_without_model_decode() {
         let (_tx, rx) = mpsc::channel(DEFAULT_ENGINE_CHANNEL);
         let forward = Arc::new(PendingFirstTokenForward::default());
-        let mut actor = BatchingEngineActor::new(rx, forward.clone(), 8, false, 3);
+        let mut actor = BatchingEngineActor::new(rx, forward.clone(), 8, false, 3, false);
         let mut receivers = Vec::new();
         for idx in 0..4 {
             let (response_tx, response_rx) = mpsc::channel(DEFAULT_RESPONSE_CHANNEL);
@@ -1765,7 +1789,7 @@ mod tests {
             reusable_prefixes: true,
             ..MockForward::default()
         });
-        let handle = BatchingEngineHandle::start_with_policy(forward.clone(), 8, true, 8);
+        let handle = BatchingEngineHandle::start_with_policy(forward.clone(), 8, true, 8, false);
 
         let mut prefix_rx = handle
             .enqueue(request_with_tokens(vec![1, 2], 1))
