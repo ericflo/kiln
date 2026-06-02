@@ -34,6 +34,15 @@ unsafe extern "C" {
         n_elements: i64,
         stream: *mut core::ffi::c_void,
     ) -> i32;
+
+    fn kiln_softmax_last_axis_async(
+        x: *const core::ffi::c_void,
+        out: *mut core::ffi::c_void,
+        n_rows: i64,
+        n_cols: i64,
+        dtype_tag: i32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
 }
 
 /// Owner of a ROCm byte buffer — either kt owns the allocation (`Owned`) or kt
@@ -476,4 +485,71 @@ pub fn host_to_rocm_copy(src: &crate::Tensor, device_index: usize) -> Result<cra
 /// `host_to_cuda_copy_ctx`.
 pub fn host_to_rocm_copy_ctx(src: &crate::Tensor, device_index: usize) -> Result<crate::Tensor> {
     host_to_rocm_copy(src, device_index)
+}
+
+/// Softmax over the last axis of a contiguous ROCm tensor. ROCm analog of
+/// `cuda_softmax_last_axis`, routing through the wave-size-fixed `softmax.cu`
+/// kernel (Phase R.5). F32 / BF16 / F16; F32 accumulation throughout.
+pub fn rocm_softmax_last_axis(x: &crate::Tensor) -> Result<crate::Tensor> {
+    let dtype = x.dtype();
+    let dtype_tag: i32 = match dtype {
+        DType::F32 => 0,
+        DType::BF16 => 1,
+        DType::F16 => 2,
+        other => {
+            return Err(Error::Msg(format!(
+                "rocm_softmax_last_axis: unsupported dtype {other}"
+            )));
+        }
+    };
+    if !x.is_contiguous() {
+        return Err(Error::Msg(
+            "rocm_softmax_last_axis: input must be contiguous".to_string(),
+        ));
+    }
+    let rank = x.rank();
+    if rank == 0 {
+        return Err(Error::Msg(
+            "rocm_softmax_last_axis: input must have rank >= 1".to_string(),
+        ));
+    }
+    let shape = x.shape();
+    let n_cols = shape[rank - 1] as i64;
+    let n_rows = (x.element_count() / shape[rank - 1]) as i64;
+
+    let x_storage = x
+        .storage()
+        .as_any()
+        .downcast_ref::<RocmStorage>()
+        .ok_or_else(|| Error::Msg("rocm_softmax_last_axis: input must be ROCm".to_string()))?;
+    let ctx = x_storage.context();
+    let device_index = match x_storage.device {
+        Device::Rocm(i) => i,
+        _ => unreachable!("RocmStorage::device is always Rocm"),
+    };
+    // Softmax writes every output element (Pass 3), so skip the zero-fill.
+    let out_storage = RocmStorage::alloc_uninit_ctx(&ctx, device_index, dtype, x.element_count())?;
+
+    let raw_stream = x_storage.rocm_stream_raw();
+    let (x_base, _) = x_storage.device_ptr_raw();
+    let (out_base, _) = out_storage.device_ptr_raw();
+    let x_off = (x.layout().start_offset() * dtype.size_in_bytes()) as u64;
+    let x_ptr = (x_base + x_off) as *const core::ffi::c_void;
+    let out_ptr = out_base as *mut core::ffi::c_void;
+
+    let status = unsafe {
+        kiln_softmax_last_axis_async(x_ptr, out_ptr, n_rows, n_cols, dtype_tag, raw_stream)
+    };
+    if status != 0 {
+        return Err(Error::Msg(format!(
+            "rocm_softmax_last_axis: FFI returned status {status}"
+        )));
+    }
+
+    let storage_arc: crate::Storage = Arc::new(out_storage);
+    crate::Tensor::from_parts(
+        storage_arc,
+        crate::Layout::contiguous(shape.to_vec()),
+        crate::TensorId::next(),
+    )
 }

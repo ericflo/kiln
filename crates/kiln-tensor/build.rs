@@ -248,13 +248,12 @@ fn build_rocm() {
     let archs =
         env::var("KILN_ROCM_ARCHS").unwrap_or_else(|_| "gfx942;gfx90a;gfx1100;gfx1151".to_string());
 
-    // Phase R.2 wires only the hipify-clean kernels. The reduction family
-    // (softmax, reduce_last/arbitrary_axis, argmax, topk, cross_entropy,
-    // rmsnorm, layernorm) needs the Phase R.5 wave-size fix — HIP 7.x
-    // static_asserts that the `__shfl_*_sync` mask is 64-bit, rejecting the
-    // hardcoded `0xFFFFFFFF` — and joins this list there, routed through
-    // `kt_gpu_compat.cuh`'s `kiln_warp_reduce_*` / `KILN_FULL_MASK`.
-    const ROCM_KERNELS: &[&str] = &["contiguous.cu", "elementwise.cu"];
+    // Hipify-clean kernels (R.2) + reduction kernels that have taken the
+    // Phase R.5 wave-size fix (routed through `kt_gpu_compat.cuh`'s
+    // `KILN_FULL_MASK` — HIP 7.x static_asserts a 64-bit shuffle mask). The
+    // remaining reduction family joins as each kernel is wave-audited +
+    // parity-swept on real wave64 hardware.
+    const ROCM_KERNELS: &[&str] = &["contiguous.cu", "elementwise.cu", "softmax.cu"];
 
     let mut objects = Vec::new();
     for kernel in ROCM_KERNELS {
@@ -267,6 +266,14 @@ fn build_rocm() {
             if !a.is_empty() {
                 cmd.arg(format!("--offload-arch={a}"));
             }
+        }
+        // KILN_ROCM_WAVE64: force 64-lane wavefronts. CDNA (gfx9xx) is always
+        // wave64; RDNA (gfx10/11) defaults to wave32 but can run wave64. The
+        // parity oracle sets this to validate the wave-size-fixed reductions
+        // under real wave64 execution even on an RDNA dev box, de-risking CDNA
+        // deployment without CDNA hardware.
+        if env::var("KILN_ROCM_WAVE64").is_ok() {
+            cmd.arg("-mwavefrontsize64");
         }
         cmd.arg("-I").arg(&compat_dir).arg("-I").arg(&csrc_dir);
         cmd.arg(&src).arg("-o").arg(&obj);
@@ -307,6 +314,7 @@ fn build_rocm() {
     println!("cargo:rerun-if-env-changed=HIP_PATH");
     println!("cargo:rerun-if-env-changed=HIPCC");
     println!("cargo:rerun-if-env-changed=KILN_ROCM_ARCHS");
+    println!("cargo:rerun-if-env-changed=KILN_ROCM_WAVE64");
 }
 
 /// Locate a ROCm install root containing `bin/hipcc`. Honours `ROCM_PATH` /

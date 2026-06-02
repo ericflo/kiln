@@ -48,14 +48,31 @@
 #endif
 #endif
 
-// Portable full-wavefront reductions. The loop bound is the *runtime* warpSize,
-// so a single call reduces all 32 OR 64 lanes correctly — replacing the
-// hardcoded `for (offset = 16; ...)` idiom. Result is valid in lane 0 (and,
-// because xor-shuffle is a butterfly, in every lane).
+// Butterfly xor-shuffle across one lane. CRITICAL wave64 detail: HIP's
+// `__shfl_xor_sync` compat shim defaults its `width` argument to 32, so an
+// offset of 32 on a 64-lane wave is out of range and SELF-references (a single
+// 1.0 reduces to 2.0, lanes 32-63 never participate). HIP's NATIVE
+// `__shfl_xor(v, off, warpSize)` takes an explicit width and is correct on
+// wave32/64; CUDA keeps the masked `_sync` form. Verified on real gfx1151
+// wave64.
+template <typename T>
+__device__ __forceinline__ T kiln_shfl_xor(T v, int offset) {
+#if KILN_IS_HIP
+    return __shfl_xor(v, offset, warpSize);
+#else
+    return __shfl_xor_sync(KILN_FULL_MASK, v, offset);
+#endif
+}
+
+// Intra-wavefront xor-butterfly reductions. CORRECT on NVIDIA and AMD wave32,
+// but NOT SAFE on AMD wave64 (RDNA wave64 mangles cross-32-lane shuffles; see
+// kiln_shfl_xor). For reductions that must be correct across the whole AMD
+// fleet, use kiln_block_reduce_* below. These remain for single-warp / wave32 /
+// CUDA-only use sites. Result is valid in every lane (butterfly).
 template <typename T>
 __device__ __forceinline__ T kiln_warp_reduce_sum(T v) {
     for (int offset = warpSize >> 1; offset > 0; offset >>= 1) {
-        v += __shfl_xor_sync(KILN_FULL_MASK, v, offset);
+        v += kiln_shfl_xor(v, offset);
     }
     return v;
 }
@@ -63,8 +80,49 @@ __device__ __forceinline__ T kiln_warp_reduce_sum(T v) {
 template <typename T>
 __device__ __forceinline__ T kiln_warp_reduce_max(T v) {
     for (int offset = warpSize >> 1; offset > 0; offset >>= 1) {
-        T other = __shfl_xor_sync(KILN_FULL_MASK, v, offset);
+        T other = kiln_shfl_xor(v, offset);
         v = other > v ? other : v;
     }
     return v;
+}
+
+// Wave-size-AGNOSTIC block reductions via shared memory — no cross-lane ops, so
+// they are correct on NVIDIA, AMD wave32, AND AMD wave64 (CDNA + RDNA-wave64).
+// This matters because RDNA's wave64 mode does NOT perform cross-32-lane
+// shuffles correctly (verified on gfx1151: __shfl_xor/__shfl_down at offset 32
+// self-reference), so warp-shuffle reductions are unsafe across the AMD fleet.
+// `smem` must hold >= blockDim.x elements; blockDim.x MUST be a power of two
+// (kiln's reduction launchers guarantee this). Result is returned to every
+// thread; a trailing __syncthreads() makes `smem` immediately reusable.
+template <typename T>
+__device__ __forceinline__ T kiln_block_reduce_sum(T val, T* smem) {
+    const int tid = threadIdx.x;
+    const int blk = blockDim.x;
+    smem[tid] = val;
+    __syncthreads();
+    for (int s = blk >> 1; s > 0; s >>= 1) {
+        if (tid < s) smem[tid] += smem[tid + s];
+        __syncthreads();
+    }
+    T result = smem[0];
+    __syncthreads();
+    return result;
+}
+
+template <typename T>
+__device__ __forceinline__ T kiln_block_reduce_max(T val, T* smem) {
+    const int tid = threadIdx.x;
+    const int blk = blockDim.x;
+    smem[tid] = val;
+    __syncthreads();
+    for (int s = blk >> 1; s > 0; s >>= 1) {
+        if (tid < s) {
+            T other = smem[tid + s];
+            if (other > smem[tid]) smem[tid] = other;
+        }
+        __syncthreads();
+    }
+    T result = smem[0];
+    __syncthreads();
+    return result;
 }
