@@ -161,9 +161,16 @@ impl CudaGraphKey {
     }
 
     fn stable_paged_metadata_enabled() -> bool {
+        // #1082: default ON. The persistent block-table buffer (refreshed in
+        // place per replay) reads the CURRENT block table, so it does NOT race
+        // with concurrent block recycling — required for correctness with the
+        // #1082 default block_size=64 (the old transient captured table races
+        // → CUDA_ERROR_ILLEGAL_ADDRESS under concurrent decode) and strictly
+        // more correct for capture/replay at any block_size. Opt out with
+        // KILN_CUDA_GRAPH_STABLE_PAGED_METADATA=0.
         std::env::var("KILN_CUDA_GRAPH_STABLE_PAGED_METADATA")
-            .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "on"))
-            .unwrap_or(false)
+            .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "on" | "ON"))
+            .unwrap_or(true)
     }
 }
 
