@@ -75,7 +75,20 @@ pub(crate) fn env_prefill_admission_quantum_for_backend(
         .and_then(|raw| raw.trim().parse::<usize>().ok())
         .filter(|&n| n > 0)
         .unwrap_or_else(|| {
-            if matches!(backend_name, Some("vulkan")) {
+            // #1082 CUDA concurrency regression: this quantum governs how many
+            // waiting requests are prompt-prefilled per actor cycle before the
+            // decode width is reached. At LKG 2d9d4fc4 `admit_waiting`
+            // burst-filled the whole decode width in one cycle and CUDA scaled
+            // ~5.9x to ~498 tok/s @ bs=64. The Vulkan admission-tuning commits
+            // (568d82a4 / 07607d5d) restored that full-width burst ONLY for
+            // Vulkan, leaving CUDA pinned at the latency default (4): the 64
+            // prompt prefills then drained ~1/decode-cycle on the single actor
+            // thread, ballooning TTFT to ~38s and collapsing aggregate
+            // throughput to ~22 tok/s. GPU backends saturate via wide decode
+            // batches, so give CUDA the same full-width quantum as Vulkan; CPU
+            // keeps the latency-oriented default. Per-deploy override:
+            // KILN_BATCH_PREFILL_ADMISSION_QUANTUM.
+            if matches!(backend_name, Some("vulkan") | Some("cuda")) {
                 max_decode_batch
             } else {
                 DEFAULT_PREFILL_ADMISSION_QUANTUM
@@ -1482,9 +1495,20 @@ mod tests {
             env_prefill_admission_quantum_for_backend(64, Some("vulkan")),
             64
         );
+        // #1082: CUDA gets the same full-width quantum as Vulkan (regression fix).
+        assert_eq!(
+            env_prefill_admission_quantum_for_backend(64, Some("cuda")),
+            64
+        );
+        // Metal stays at the latency default (the Metal lane can opt in separately).
         assert_eq!(
             env_prefill_admission_quantum_for_backend(64, Some("metal")),
             4
+        );
+        // CUDA still clamps to demand when the decode width is small.
+        assert_eq!(
+            env_prefill_admission_quantum_for_backend(2, Some("cuda")),
+            2
         );
         assert_eq!(env_prefill_admission_quantum_for_backend(2, None), 2);
         assert_eq!(
