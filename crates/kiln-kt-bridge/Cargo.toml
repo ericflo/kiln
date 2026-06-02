@@ -27,6 +27,11 @@ metal = ["kiln-tensor/metal"]
 # `Device::Vulkan` (#1082 PR5).
 vulkan = ["kiln-tensor/vulkan"]
 
+# Forwards `kiln-tensor/rocm` — mirrors the cuda lane. Enables the ROCm
+# device-pointer seam (rocm_input_device_ptr / alloc_rocm_tensor / ...) + the
+# backend-neutral dispatchers + the device-agnostic tape_bridge scopes. (R.4)
+rocm = ["kiln-tensor/rocm"]
+
 [dependencies]
 kiln-tensor = { workspace = true }
 # CP-4 (#1082): the `tape_bridge` module owns the kt-native tape scopes
