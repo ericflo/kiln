@@ -345,6 +345,40 @@ pub fn precompile_custom_kernels(device: &kiln_tensor::Device) -> Result<()> {
     Ok(())
 }
 
+/// Resident-activation registry for the Metal backend (#1082), the Metal
+/// analog of Vulkan's `RESIDENT_ACTIVATION_REGISTRY`. Process-global so worker
+/// threads (rayon, etc.) see the same set the registering thread wrote.
+///
+/// Unlike Vulkan — which uploads tensor bytes to a *fresh* device-local
+/// `VulkanBuffer` and keys the registry on `TensorId → VulkanBuffer` — Metal
+/// tensors already carry their GPU buffer (`MetalStorage` in UMA
+/// `StorageModeShared`). There is nothing to upload, so the registry only
+/// tracks *membership*: which kt `TensorId`s are registered for the on-device
+/// optimizer path. `dispatch_adamw_step` reads each operand's `MetalBuffer`
+/// straight off the kt tensor passed in. This keeps the same Ok(true)/Ok(false)
+/// dispatch contract and the same register/has/update/evict/resolve semantics
+/// as Vulkan, without the byte round-trips.
+static METAL_RESIDENT_ACTIVATION_REGISTRY: OnceLock<
+    Mutex<std::collections::HashSet<kiln_tensor::TensorId>>,
+> = OnceLock::new();
+
+fn metal_resident_registry() -> &'static Mutex<std::collections::HashSet<kiln_tensor::TensorId>> {
+    METAL_RESIDENT_ACTIVATION_REGISTRY.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+}
+
+/// Short, self-recovering accessor over the registry mutex (poison recovery
+/// returns the inner data so a panicking caller can't wedge the registry).
+/// Mirrors Vulkan's `with_resident_registry`.
+fn with_metal_resident_registry<F, R>(f: F) -> R
+where
+    F: FnOnce(&mut std::collections::HashSet<kiln_tensor::TensorId>) -> R,
+{
+    let mut guard = metal_resident_registry()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    f(&mut guard)
+}
+
 // #1082 DoD-101/102: BackendRuntime decode methods flipped to kt; metal/vulkan impls need matching flip when their builds are restored.
 impl BackendRuntime for MetalBackend {
     fn name(&self) -> &'static str {
@@ -353,6 +387,190 @@ impl BackendRuntime for MetalBackend {
 
     fn device(&self) -> kiln_tensor::Device {
         self.device_kt
+    }
+
+    // ------------------------------------------------------------------
+    // Resident-activation hooks (#1082) — Metal analog of the Vulkan
+    // registry. The registry tracks membership only (the kt tensor already
+    // owns its GPU buffer); `dispatch_adamw_step` runs a fused on-device
+    // AdamW that updates param/m/v in place. Same Ok(true)/Ok(false) and
+    // register/has/update/evict/resolve semantics as Vulkan.
+    // ------------------------------------------------------------------
+
+    fn supports_resident_activation(&self) -> bool {
+        // Metal implements all the residency hooks against
+        // METAL_RESIDENT_ACTIVATION_REGISTRY. Mirrors Vulkan's "true even
+        // when conditions short-circuit a register to Ok(())" capability
+        // semantics.
+        true
+    }
+
+    fn register_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> Result<()> {
+        // Metal tensors already carry their GPU buffer; registration only
+        // records membership. Decline (silently, like Vulkan's empty-buffer
+        // bail) any tensor that isn't Metal-backed — `has_resident_activation`
+        // then returns false and the caller falls through to its host path.
+        if kt_metal(tensor).is_err() {
+            return Ok(());
+        }
+        // Mirror Vulkan: a zero-element tensor has no use as a registry entry.
+        if tensor.element_count() == 0 {
+            return Ok(());
+        }
+        let id = tensor.id();
+        with_metal_resident_registry(|set| {
+            set.insert(id);
+        });
+        Ok(())
+    }
+
+    fn has_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> bool {
+        let id = tensor.id();
+        with_metal_resident_registry(|set| set.contains(&id))
+    }
+
+    fn update_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> Result<()> {
+        // No-op when registered: the registry holds no separate copy, so the
+        // tensor's own UMA buffer (which the AdamW kernel mutated in place) is
+        // already the source of truth. Matches Vulkan's "no-op when not
+        // registered" contract; here it's a no-op either way.
+        let _ = tensor;
+        Ok(())
+    }
+
+    fn evict_resident_activation(&self, tensor: &kiln_tensor::Tensor) {
+        let id = tensor.id();
+        with_metal_resident_registry(|set| {
+            set.remove(&id);
+        });
+    }
+
+    fn resolve_resident_activation(
+        &self,
+        tensor: &kiln_tensor::Tensor,
+        shape: &[usize],
+        dtype: kiln_tensor::DType,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        // Inverse of register: when the tensor is resident, its current value
+        // IS its UMA buffer (the AdamW kernel updated it in place). Deep-copy
+        // the live buffer to a fresh tensor (the copy waits for outstanding GPU
+        // work first, so it reflects the latest step). Return None when not
+        // registered — matching Vulkan so `sync_to_master` skips it.
+        let id = tensor.id();
+        let resident = with_metal_resident_registry(|set| set.contains(&id));
+        if !resident {
+            return Ok(None);
+        }
+        let resolved = kiln_tensor::metal_deep_copy(tensor)
+            .context("resolve_resident_activation: metal_deep_copy")?;
+        // The registered param's own dims/dtype are what the trainer passes;
+        // assert they line up rather than reshaping silently.
+        if resolved.dims() != shape || resolved.dtype() != dtype {
+            anyhow::bail!(
+                "resolve_resident_activation: registry tensor shape/dtype ({:?},{:?}) \
+                 != requested ({:?},{:?})",
+                resolved.dims(),
+                resolved.dtype(),
+                shape,
+                dtype,
+            );
+        }
+        Ok(Some(resolved))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch_adamw_step(
+        &self,
+        param: &kiln_tensor::Tensor,
+        grad: &kiln_tensor::Tensor,
+        first_moment: &kiln_tensor::Tensor,
+        second_moment: &kiln_tensor::Tensor,
+        lr: f32,
+        beta1: f32,
+        beta2: f32,
+        eps: f32,
+        weight_decay: f32,
+        step: u32,
+    ) -> Result<bool> {
+        if step < 1 {
+            anyhow::bail!("dispatch_adamw_step: step must be 1-indexed (>=1), got {step}");
+        }
+        // All four operands must be resident — no mixed resident/host (that
+        // would need a per-call upload that defeats the on-device update).
+        let p_id = param.id();
+        let g_id = grad.id();
+        let m_id = first_moment.id();
+        let v_id = second_moment.id();
+        let all_resident = with_metal_resident_registry(|set| {
+            set.contains(&p_id)
+                && set.contains(&g_id)
+                && set.contains(&m_id)
+                && set.contains(&v_id)
+        });
+        if !all_resident {
+            return Ok(false);
+        }
+        // Match Vulkan's dtype/element-count gates.
+        if param.dtype() != grad.dtype()
+            || param.dtype() != first_moment.dtype()
+            || param.dtype() != second_moment.dtype()
+        {
+            anyhow::bail!(
+                "dispatch_adamw_step: dtype mismatch (param={:?}, grad={:?}, m={:?}, v={:?})",
+                param.dtype(),
+                grad.dtype(),
+                first_moment.dtype(),
+                second_moment.dtype(),
+            );
+        }
+        let n_elements = param.element_count();
+        if n_elements != grad.element_count()
+            || n_elements != first_moment.element_count()
+            || n_elements != second_moment.element_count()
+        {
+            anyhow::bail!(
+                "dispatch_adamw_step: element count mismatch (param={}, grad={}, m={}, v={})",
+                n_elements,
+                grad.element_count(),
+                first_moment.element_count(),
+                second_moment.element_count(),
+            );
+        }
+        // BF16 master: decline to the host AdamW so its stochastic-rounding
+        // path is preserved (the kt kernel only does round-to-nearest F32).
+        // The metal kernel wrapper itself rejects non-F32, so this also
+        // covers F16; declining keeps parity with the host reference.
+        if param.dtype() != kiln_tensor::DType::F32 {
+            return Ok(false);
+        }
+        static FIRST_ADAMW_LOGGED: OnceLock<()> = OnceLock::new();
+        FIRST_ADAMW_LOGGED.get_or_init(|| {
+            tracing::info!(
+                n_elements,
+                lr,
+                beta1,
+                beta2,
+                eps,
+                weight_decay,
+                step,
+                dtype = ?param.dtype(),
+                "MetalBackend::dispatch_adamw_step first call"
+            );
+        });
+        kiln_tensor::metal_adamw_step(
+            param,
+            grad,
+            first_moment,
+            second_moment,
+            lr,
+            beta1,
+            beta2,
+            eps,
+            weight_decay,
+            step,
+        )
+        .context("dispatch_adamw_step: metal_adamw_step")?;
+        Ok(true)
     }
 
     fn supports_flash_attn_prefill(&self) -> bool {
@@ -19072,6 +19290,204 @@ mod tests {
         let out =
             backend.flash_attn_paged_decode(&q, &k_pool, &v_pool, &block_table, 4, 4, 1.0, true)?;
         assert!(out.is_none(), "should decline unsupported head_dim");
+        Ok(())
+    }
+}
+
+// ----------------------------------------------------------------------
+// On-device AdamW parity (#1082) — the optimizer oracle. A wrong optimizer
+// silently corrupts training, so this gate compares the fused Metal
+// `dispatch_adamw_step` (registry-resident, in-place) against the host
+// reference math (a bit-faithful copy of `kiln_optim::AdamW::step`,
+// adamw.rs ~165-181) over several steps, asserting param/m/v match to F32
+// tolerance. Lives in a LIVE test module (not the candle-era `cfg(any())`
+// block above) so it actually runs on the M1 validator.
+#[cfg(test)]
+mod adamw_kt_tests {
+    use super::*;
+    use kiln_tensor::{DType, Device, Tensor};
+
+    /// `Device::Metal(0)` if a Metal device is reachable, else `None`.
+    fn metal_device() -> Option<Device> {
+        kiln_tensor::primary_metal_companion(0)
+            .ok()
+            .map(|_| Device::Metal(0))
+    }
+
+    /// One in-place AdamW step over f32 host buffers — the reference the
+    /// kernel must match. Identical arithmetic + order to
+    /// `kiln_optim::AdamW::step`.
+    #[allow(clippy::too_many_arguments)]
+    fn host_adamw_step(
+        param: &mut [f32],
+        m: &mut [f32],
+        v: &mut [f32],
+        grad: &[f32],
+        lr: f32,
+        beta1: f32,
+        beta2: f32,
+        eps: f32,
+        weight_decay: f32,
+        step: u32,
+    ) {
+        let stepf = step as f32;
+        let bc1 = 1.0 - beta1.powf(stepf);
+        let bc2 = 1.0 - beta2.powf(stepf);
+        for i in 0..param.len() {
+            let g = grad[i];
+            m[i] = beta1 * m[i] + (1.0 - beta1) * g;
+            v[i] = beta2 * v[i] + (1.0 - beta2) * g * g;
+            let m_hat = m[i] / bc1;
+            let v_hat = v[i] / bc2;
+            let update = lr * (m_hat / (v_hat.sqrt() + eps));
+            param[i] -= lr * weight_decay * param[i];
+            param[i] -= update;
+        }
+    }
+
+    fn max_abs_diff(a: &[f32], b: &[f32]) -> f32 {
+        a.iter()
+            .zip(b.iter())
+            .map(|(x, y)| (x - y).abs())
+            .fold(0.0f32, f32::max)
+    }
+
+    #[test]
+    fn dispatch_adamw_step_matches_host_reference_f32() -> anyhow::Result<()> {
+        let Some(dev) = metal_device() else {
+            eprintln!("Metal unavailable, skipping dispatch_adamw_step_matches_host_reference_f32");
+            return Ok(());
+        };
+
+        let n = 257usize; // non-multiple of 256 → exercises the tail thread
+        let lr = 0.013f32;
+        let beta1 = 0.9f32;
+        let beta2 = 0.999f32;
+        let eps = 1e-8f32;
+        let weight_decay = 0.02f32;
+        let steps = 5u32;
+
+        // Deterministic, mildly varied data.
+        let param0: Vec<f32> = (0..n).map(|i| ((i as f32 * 0.017) - 2.1).sin() * 0.5).collect();
+        // A fresh grad per step keeps the moments moving.
+        let grads: Vec<Vec<f32>> = (1..=steps)
+            .map(|s| {
+                (0..n)
+                    .map(|i| ((i as f32 + s as f32 * 1.7) * 0.031).cos() * 0.08)
+                    .collect::<Vec<f32>>()
+            })
+            .collect();
+
+        // Host reference state.
+        let mut h_param = param0.clone();
+        let mut h_m = vec![0.0f32; n];
+        let mut h_v = vec![0.0f32; n];
+
+        // Metal state: param + m + v are persistent across steps (the kernel
+        // mutates them in place), so build them once and register them.
+        let met_param = Tensor::from_vec_on(dev, param0.clone(), vec![n])?;
+        let met_m = Tensor::from_vec_on(dev, vec![0.0f32; n], vec![n])?;
+        let met_v = Tensor::from_vec_on(dev, vec![0.0f32; n], vec![n])?;
+
+        let backend = MetalBackend::new(dev);
+        assert!(backend.supports_resident_activation());
+        backend.register_resident_activation(&met_param)?;
+        backend.register_resident_activation(&met_m)?;
+        backend.register_resident_activation(&met_v)?;
+        assert!(backend.has_resident_activation(&met_param));
+        assert!(backend.has_resident_activation(&met_m));
+        assert!(backend.has_resident_activation(&met_v));
+
+        for s in 1..=steps {
+            let g = &grads[(s - 1) as usize];
+            host_adamw_step(
+                &mut h_param,
+                &mut h_m,
+                &mut h_v,
+                g,
+                lr,
+                beta1,
+                beta2,
+                eps,
+                weight_decay,
+                s,
+            );
+
+            // Fresh grad tensor each step (distinct TensorId), mirroring the
+            // trainer registering the grad on the fly.
+            let met_grad = Tensor::from_vec_on(dev, g.clone(), vec![n])?;
+            backend.register_resident_activation(&met_grad)?;
+
+            let dispatched = backend.dispatch_adamw_step(
+                &met_param,
+                &met_grad,
+                &met_m,
+                &met_v,
+                lr,
+                beta1,
+                beta2,
+                eps,
+                weight_decay,
+                s,
+            )?;
+            assert!(
+                dispatched,
+                "dispatch_adamw_step must take the on-device path (step {s})"
+            );
+            backend.evict_resident_activation(&met_grad);
+        }
+
+        // Read the device results back to host.
+        let g_param: Vec<f32> = met_param.to_device(Device::Cpu)?.to_vec::<f32>()?;
+        let g_m: Vec<f32> = met_m.to_device(Device::Cpu)?.to_vec::<f32>()?;
+        let g_v: Vec<f32> = met_v.to_device(Device::Cpu)?.to_vec::<f32>()?;
+
+        let tol = 1e-5f32;
+        let dp = max_abs_diff(&g_param, &h_param);
+        let dm = max_abs_diff(&g_m, &h_m);
+        let dv = max_abs_diff(&g_v, &h_v);
+        eprintln!(
+            "adamw parity over {steps} steps (n={n}): max|Δparam|={dp:e} max|Δm|={dm:e} max|Δv|={dv:e} (tol={tol:e})"
+        );
+        assert!(dp < tol, "param diverged: max|Δ|={dp:e} >= {tol:e}");
+        assert!(dm < tol, "m diverged: max|Δ|={dm:e} >= {tol:e}");
+        assert!(dv < tol, "v diverged: max|Δ|={dv:e} >= {tol:e}");
+
+        // resolve_resident_activation must round-trip the in-place-updated
+        // buffer (what `sync_to_master` relies on).
+        let resolved = backend
+            .resolve_resident_activation(&met_param, &[n], DType::F32)?
+            .expect("param is resident, resolve must return Some");
+        let r_param: Vec<f32> = resolved.to_device(Device::Cpu)?.to_vec::<f32>()?;
+        assert!(
+            max_abs_diff(&r_param, &g_param) < 1e-6,
+            "resolve_resident_activation must reflect the in-place update"
+        );
+
+        backend.evict_resident_activation(&met_param);
+        backend.evict_resident_activation(&met_m);
+        backend.evict_resident_activation(&met_v);
+        assert!(!backend.has_resident_activation(&met_param));
+        Ok(())
+    }
+
+    /// dispatch_adamw_step must decline (Ok(false)) when an operand isn't
+    /// resident, so the trainer falls through to the host AdamW.
+    #[test]
+    fn dispatch_adamw_step_declines_when_not_resident() -> anyhow::Result<()> {
+        let Some(dev) = metal_device() else {
+            return Ok(());
+        };
+        let n = 8usize;
+        let p = Tensor::from_vec_on(dev, vec![0.1f32; n], vec![n])?;
+        let g = Tensor::from_vec_on(dev, vec![0.2f32; n], vec![n])?;
+        let m = Tensor::from_vec_on(dev, vec![0.0f32; n], vec![n])?;
+        let v = Tensor::from_vec_on(dev, vec![0.0f32; n], vec![n])?;
+        let backend = MetalBackend::new(dev);
+        // Nothing registered → decline.
+        let dispatched =
+            backend.dispatch_adamw_step(&p, &g, &m, &v, 0.01, 0.9, 0.999, 1e-8, 0.0, 1)?;
+        assert!(!dispatched, "must decline when operands aren't resident");
         Ok(())
     }
 }

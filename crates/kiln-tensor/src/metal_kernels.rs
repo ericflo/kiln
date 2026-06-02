@@ -510,6 +510,110 @@ kernel void {entry}(
 }
 
 // ----------------------------------------------------------------------
+// adamw_step — kiln-owned fused on-device AdamW (mirrors kiln_optim::AdamW
+// + csrc adamw + the Vulkan `dispatch_adamw_step_f32` kernel)
+// ----------------------------------------------------------------------
+
+/// Fused in-place AdamW step over `n` contiguous elements. Updates `param`,
+/// `first_moment` (m), and `second_moment` (v) IN PLACE; reads `grad` (g).
+///
+/// All four buffers share `dtype` (the float triple). Each lane is promoted
+/// to `float`, the moving averages + bias-corrected update are computed in
+/// `float`, and the results are written back as `dtype`. The math is a
+/// bit-faithful port of `kiln_optim::AdamW::step` (adamw.rs ~165-181):
+///
+///   m = beta1*m + (1-beta1)*g;  v = beta2*v + (1-beta2)*g*g;
+///   m_hat = m/bc1;  v_hat = v/bc2;  update = lr * m_hat/(sqrt(v_hat)+eps);
+///   param -= lr*weight_decay*param;  param -= update;
+///
+/// `bc1 = 1 - beta1^step` and `bc2 = 1 - beta2^step` are computed on the host
+/// (in f64, like the reference's `powf` on f32, then narrowed) and passed in,
+/// so the kernel needs no `pow`. One thread per element.
+///
+/// NOTE: F32 master/moments only here (the LoRA case). BF16 masters need the
+/// host stochastic-rounding path; callers decline BF16 to the host AdamW.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn adamw_step(
+    companion: &MetalCompanion,
+    param: &MetalBuffer,
+    grad: &MetalBuffer,
+    first_moment: &MetalBuffer,
+    second_moment: &MetalBuffer,
+    dtype: DType,
+    n: usize,
+    lr: f32,
+    beta1: f32,
+    beta2: f32,
+    eps: f32,
+    weight_decay: f32,
+    bc1: f32,
+    bc2: f32,
+) -> Result<()> {
+    let ty = msl_ty(dtype)?;
+    let entry = format!("kt_adamw_step_{ty}");
+    let src = format!(
+        r#"
+#include <metal_stdlib>
+using namespace metal;
+kernel void {entry}(
+    device {ty}* param        [[buffer(0)]],
+    device const {ty}* grad   [[buffer(1)]],
+    device {ty}* m            [[buffer(2)]],
+    device {ty}* v            [[buffer(3)]],
+    constant uint& n          [[buffer(4)]],
+    constant float& lr        [[buffer(5)]],
+    constant float& beta1     [[buffer(6)]],
+    constant float& beta2     [[buffer(7)]],
+    constant float& eps       [[buffer(8)]],
+    constant float& wd        [[buffer(9)]],
+    constant float& bc1       [[buffer(10)]],
+    constant float& bc2       [[buffer(11)]],
+    uint gid [[thread_position_in_grid]])
+{{
+    if (gid < n) {{
+        float g  = (float)grad[gid];
+        float mm = (float)m[gid];
+        float vv = (float)v[gid];
+        float p  = (float)param[gid];
+        mm = beta1 * mm + (1.0f - beta1) * g;
+        vv = beta2 * vv + (1.0f - beta2) * g * g;
+        float m_hat = mm / bc1;
+        float v_hat = vv / bc2;
+        float update = lr * (m_hat / (sqrt(v_hat) + eps));
+        p -= lr * wd * p;
+        p -= update;
+        m[gid]     = ({ty})mm;
+        v[gid]     = ({ty})vv;
+        param[gid] = ({ty})p;
+    }}
+}}
+"#
+    );
+    let pipeline = op_pipeline(companion, &src, &entry)?;
+    let encoder = companion
+        .command_encoder()
+        .map_err(|e| Error::Msg(format!("metal_kernels::adamw_step: encoder: {e:?}")))?;
+    encoder.set_label("kt_adamw_step");
+    encoder.set_compute_pipeline_state(&pipeline);
+    encoder.set_buffer(0, Some(param), 0);
+    encoder.set_buffer(1, Some(grad), 0);
+    encoder.set_buffer(2, Some(first_moment), 0);
+    encoder.set_buffer(3, Some(second_moment), 0);
+    let n_u = n as u32;
+    encoder.set_bytes(4, &n_u);
+    encoder.set_bytes(5, &lr);
+    encoder.set_bytes(6, &beta1);
+    encoder.set_bytes(7, &beta2);
+    encoder.set_bytes(8, &eps);
+    encoder.set_bytes(9, &weight_decay);
+    encoder.set_bytes(10, &bc1);
+    encoder.set_bytes(11, &bc2);
+    dispatch_1d(&encoder, n);
+    drop(encoder);
+    Ok(())
+}
+
+// ----------------------------------------------------------------------
 // softmax (last axis) — replaces candle_metal_kernels::call_last_softmax
 // ----------------------------------------------------------------------
 

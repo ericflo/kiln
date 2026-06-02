@@ -2111,6 +2111,117 @@ pub fn metal_where_select(
 }
 
 // ----------------------------------------------------------------------
+// metal_adamw_step — fused on-device AdamW (#1082)
+// ----------------------------------------------------------------------
+
+/// Fused in-place AdamW step on Metal. Updates `param`, `m` (first moment),
+/// and `v` (second moment) IN PLACE in their `MetalStorage` buffers; reads
+/// `grad`. No host round-trip — the buffers are `StorageModeShared` UMA and
+/// the kernel mutates them directly. The Metal analog of the Vulkan
+/// `dispatch_adamw_step_f32` path; the math is a bit-faithful port of
+/// [`kiln_optim::AdamW::step`].
+///
+/// All four tensors must be Metal-backed, contiguous, share `dtype`, and have
+/// the same element count. `step` is 1-indexed (>= 1). `bc1`/`bc2` bias
+/// corrections are computed here (`1 - beta^step`) so the kernel needs no
+/// `pow`.
+///
+/// Currently restricted to `DType::F32` (the LoRA master case). BF16 masters
+/// need the host stochastic-rounding path; this function rejects non-F32 so
+/// callers fall back to the host AdamW.
+#[allow(clippy::too_many_arguments)]
+pub fn metal_adamw_step(
+    param: &crate::Tensor,
+    grad: &crate::Tensor,
+    m: &crate::Tensor,
+    v: &crate::Tensor,
+    lr: f32,
+    beta1: f32,
+    beta2: f32,
+    eps: f32,
+    weight_decay: f32,
+    step: u32,
+) -> Result<()> {
+    if step < 1 {
+        return Err(Error::Msg(format!(
+            "metal_adamw_step: step must be 1-indexed (>=1), got {step}"
+        )));
+    }
+    let dtype = param.dtype();
+    if dtype != DType::F32 {
+        return Err(Error::Msg(format!(
+            "metal_adamw_step: only F32 master/moments supported, got {dtype}"
+        )));
+    }
+    if grad.dtype() != dtype || m.dtype() != dtype || v.dtype() != dtype {
+        return Err(Error::Msg(format!(
+            "metal_adamw_step: dtype mismatch (param={dtype}, grad={}, m={}, v={})",
+            grad.dtype(),
+            m.dtype(),
+            v.dtype()
+        )));
+    }
+    let n = param.element_count();
+    if grad.element_count() != n || m.element_count() != n || v.element_count() != n {
+        return Err(Error::Msg(format!(
+            "metal_adamw_step: element count mismatch (param={n}, grad={}, m={}, v={})",
+            grad.element_count(),
+            m.element_count(),
+            v.element_count()
+        )));
+    }
+    if !param.is_contiguous()
+        || !grad.is_contiguous()
+        || !m.is_contiguous()
+        || !v.is_contiguous()
+    {
+        return Err(Error::Msg(
+            "metal_adamw_step: all operands must be contiguous".to_string(),
+        ));
+    }
+
+    fn downcast<'a>(t: &'a crate::Tensor, name: &str) -> Result<&'a MetalStorage> {
+        t.storage()
+            .as_any()
+            .downcast_ref::<MetalStorage>()
+            .ok_or_else(|| Error::Msg(format!("metal_adamw_step: {name} must be Metal-backed")))
+    }
+    let kt_param = downcast(param, "param")?;
+    let kt_grad = downcast(grad, "grad")?;
+    let kt_m = downcast(m, "m")?;
+    let kt_v = downcast(v, "v")?;
+
+    let companion = kt_param.companion()?;
+
+    // Bias corrections — match the host reference EXACTLY: `kiln_optim::AdamW`
+    // computes `1.0 - beta.powf(step as f32)` in f32. Reproducing that here
+    // (same op, same precision) makes bc1/bc2 bit-identical to the host path,
+    // so the only source of parity drift is the f32 elementwise math the
+    // kernel and reference share.
+    let step_f = step as f32;
+    let bc1 = 1.0 - beta1.powf(step_f);
+    let bc2 = 1.0 - beta2.powf(step_f);
+
+    crate::metal_kernels::adamw_step(
+        &companion,
+        kt_param.buffer().as_ref(),
+        kt_grad.buffer().as_ref(),
+        kt_m.buffer().as_ref(),
+        kt_v.buffer().as_ref(),
+        dtype,
+        n,
+        lr,
+        beta1,
+        beta2,
+        eps,
+        weight_decay,
+        bc1,
+        bc2,
+    )?;
+    Ok(())
+}
+
+// ----------------------------------------------------------------------
 // metal_activation_unary — Phase 4 Metal substrate op (#1082)
 // ----------------------------------------------------------------------
 
