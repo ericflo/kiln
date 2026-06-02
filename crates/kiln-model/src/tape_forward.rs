@@ -1901,22 +1901,33 @@ pub fn tape_gdn_gated_norm_enabled() -> bool {
 
 
 
-/// Candle-composite tape backward for the GDN PREFILL causal depthwise conv1d
-/// (`forward::causal_conv1d_prefill`, the `[B, C, T]` candle path the training
-/// forward takes when `gdn_forward_only_fastpaths` is OFF). Wraps the proven
-/// CUDA bwd-input kernel `causal_depthwise_conv1d_f32_bwd_input` (the kt kernel
-/// in `kiln-rmsnorm-kernel`, the SAME kernel the eager `cuda_train.rs` GDN
-/// backward uses), handling the
+/// Tape backward (w.r.t. input) for the GDN PREFILL causal depthwise conv1d
+/// (`forward::causal_conv1d_prefill`, the `[B, C, T]` path the training forward
+/// takes when `gdn_forward_only_fastpaths` is OFF), handling the
 /// `[B, C, T]` ↔ `[rows, channels]` layout transform.
 ///
-/// # Why a candle composite (not the existing `try_tape_causal_conv1d_cuda`)
+/// # Device-agnostic bwd routing (#1082 Metal GDN)
+///
+/// The `[rows, channels]` input gradient is computed two ways, both numerically
+/// identical (FD-gradient-checked + an explicit-index-loop equality test in
+/// `kiln_tensor::ops::causal_conv1d_bwd`):
+///
+/// - `Device::Cuda(_)`: the proven CUDA bwd-input kernel
+///   `causal_depthwise_conv1d_bwd_input_kt` (the SAME kernel the eager
+///   `cuda_train.rs` GDN backward uses), unchanged. CUDA path is byte-identical.
+/// - `Device::Cpu` / `Device::Metal(_)`: the device-agnostic kt composite
+///   `causal_depthwise_conv1d_bwd_input_composite` (pure `kiln_tensor` ops:
+///   pad / narrow / broadcast-mul / add — no FFI), which unblocks GDN-layer
+///   LoRA training on Metal.
+///
+/// # Why a dedicated op (not the existing `try_tape_causal_conv1d_cuda`)
 ///
 /// The existing `try_tape_causal_conv1d_cuda` / `CausalConv1dInputBackward`
 /// wraps the `[rows, channels]` DECODE/UPDATE kernel
 /// (`causal_depthwise_conv1d_kt`) — a DIFFERENT kernel with a different layout
 /// contract than the `[B, C, T]` prefill path. Reusing it here would compute
-/// the wrong forward. This composite wraps the prefill bwd-input kernel
-/// instead, on the `[B, C, T]` layout the production prefill forward uses.
+/// the wrong forward. This op wraps the prefill bwd-input on the `[B, C, T]`
+/// layout the production prefill forward uses.
 ///
 /// # Saved tensors / inputs
 ///
@@ -1936,11 +1947,12 @@ pub fn tape_gdn_gated_norm_enabled() -> bool {
 /// training shape) so flattening never mixes batches across a row boundary;
 /// declines (`apply` errors only on a true kernel failure — the adapter's
 /// `Ok(None)` envelope guard below keeps `batch>1` off this path entirely).
-#[cfg(feature = "cuda")]
+#[cfg(any(feature = "cuda", feature = "metal"))]
 #[derive(Debug)]
 pub(crate) struct CausalConv1dPrefillInputBackward {
-    /// Saved F32 CUDA conv weight `[channels, kernel]` (#1082: candle->kt; the
-    /// bwd kernel `causal_depthwise_conv1d_bwd_input_kt` is already kt-native).
+    /// Saved F32 conv weight `[channels, kernel]` (#1082: candle->kt; both the
+    /// CUDA bwd kernel `causal_depthwise_conv1d_bwd_input_kt` and the kt
+    /// composite are kt-native).
     weight: kiln_tensor::Tensor,
     batch: usize,
     channels: usize,
@@ -1956,7 +1968,7 @@ pub(crate) struct CausalConv1dPrefillInputBackward {
     input_dtype: kiln_tensor::DType,
 }
 
-#[cfg(feature = "cuda")]
+#[cfg(any(feature = "cuda", feature = "metal"))]
 impl BackwardOp for CausalConv1dPrefillInputBackward {
     fn name(&self) -> &'static str {
         "gdn_causal_conv1d_prefill_input_backward"
@@ -1968,9 +1980,8 @@ impl BackwardOp for CausalConv1dPrefillInputBackward {
         &self,
         grad_output: &kiln_tensor::Tensor,
     ) -> kiln_tensor::Result<Vec<Option<kiln_tensor::Tensor>>> {
-        // #1082 kt-native: grad + the saved weight are kt; the bwd kernel
-        // (`causal_depthwise_conv1d_bwd_input_kt`) is already kt-typed — no
-        // kt->candle->kt bridge. Upstream grad is [B, C, T] (conv output layout).
+        // #1082 kt-native: grad + the saved weight are kt. Upstream grad is
+        // [B, C, T] (conv output layout).
         let grad_f32 = if grad_output.dtype() == kiln_tensor::DType::F32 {
             grad_output.clone()
         } else {
@@ -1982,16 +1993,31 @@ impl BackwardOp for CausalConv1dPrefillInputBackward {
             .transpose(1, 2)
             .and_then(|t| t.contiguous())
             .and_then(|t| t.reshape(vec![rows, self.channels]))?;
-        // weight is [channels, kernel]; the kt bwd kernel takes the kernel size.
+        // weight is [channels, kernel]; the bwd takes the kernel size.
         let kernel = self.weight.dims()[1];
-        let din_rows = kiln_rmsnorm_kernel::causal_depthwise_conv1d_bwd_input_kt(
-            &grad_rows,
-            &self.weight,
-            kernel,
-        )
-        .map_err(|e| {
-            kiln_tensor::Error::Msg(format!("CausalConv1dPrefillInputBackward: bwd_input: {e}"))
-        })?;
+        // Device-agnostic bwd routing (#1082): CUDA -> the perf-tuned kernel
+        // (unchanged); CPU/Metal -> the FD-validated kt composite. Both compute
+        // din[s,c] = sum_k weight[c,k] * grad_out[s+(K-1)-k, c] (state clamped).
+        let din_rows = match grad_rows.device() {
+            #[cfg(feature = "cuda")]
+            kiln_tensor::Device::Cuda(_) => {
+                kiln_rmsnorm_kernel::causal_depthwise_conv1d_bwd_input_kt(
+                    &grad_rows,
+                    &self.weight,
+                    kernel,
+                )
+                .map_err(|e| {
+                    kiln_tensor::Error::Msg(format!(
+                        "CausalConv1dPrefillInputBackward: bwd_input: {e}"
+                    ))
+                })?
+            }
+            _ => kiln_tensor::ops::causal_depthwise_conv1d_bwd_input_composite(
+                &grad_rows,
+                &self.weight,
+                kernel,
+            )?,
+        };
         // [B*T, C] -> [B, T, C] -> [B, C, T] (back to the conv input layout).
         let din = din_rows
             .reshape(vec![self.batch, self.seq_len, self.channels])
@@ -2022,12 +2048,14 @@ impl BackwardOp for CausalConv1dPrefillInputBackward {
 /// Reuses the existing `KILN_USE_TAPE_GDN_CONV` gate (mirroring
 /// `try_tape_causal_conv1d_cuda`). `Ok(None)` (caller's production output
 /// unchanged) when the gate is off, no tape scope is active, the inputs aren't
-/// CUDA, `batch != 1`, shapes disagree, or a kt borrow fails — NEVER an error.
-/// kt-native GDN prefill causal-depthwise-conv1d tape recorder (#1082 seam flip)
-/// — kt-only twin of [`try_tape_causal_conv1d_prefill_cuda`]. Record-only: builds
-/// the F32 `[channels, kernel]` weight view in kt + records the (now kt-native)
-/// `CausalConv1dPrefillInputBackward` linking kt `out` back to kt `input`. The bwd
-/// kernel (`causal_depthwise_conv1d_bwd_input_kt`) is already kt — no candle bridge.
+/// CUDA/Metal, `batch != 1`, shapes disagree, or a kt borrow fails — NEVER an
+/// error. kt-native GDN prefill causal-depthwise-conv1d tape recorder (#1082
+/// seam flip). Record-only: builds the F32 `[channels, kernel]` weight view in
+/// kt + records the (now kt-native) `CausalConv1dPrefillInputBackward` linking
+/// kt `out` back to kt `input`. The recorded backward routes per device:
+/// CUDA -> `causal_depthwise_conv1d_bwd_input_kt`; CPU/Metal -> the
+/// FD-validated `causal_depthwise_conv1d_bwd_input_composite` — both kt, no
+/// candle bridge. The Metal path unblocks GDN-layer LoRA training (#1082).
 pub fn try_tape_causal_conv1d_prefill_kt(
     input: &kiln_tensor::Tensor,
     weight: &kiln_tensor::Tensor,
@@ -2037,14 +2065,14 @@ pub fn try_tape_causal_conv1d_prefill_kt(
     if !tape_forward_enabled() || !tape_gdn_conv_enabled() {
         return Ok(None);
     }
-    // GDN causal-conv1d backward kernel is CUDA-only; declines on Metal — GDN
-    // training on Metal is not yet supported.
-    #[cfg(not(feature = "cuda"))]
+    // The bwd is only available with a GPU-training backend (CUDA kernel or the
+    // Metal-capable kt composite); declines when neither feature is on.
+    #[cfg(not(any(feature = "cuda", feature = "metal")))]
     {
         let _ = (input, weight, out, kernel);
         return Ok(None);
     }
-    #[cfg(feature = "cuda")]
+    #[cfg(any(feature = "cuda", feature = "metal"))]
     {
     if !matches!(input.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_))
         || !matches!(out.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_))
