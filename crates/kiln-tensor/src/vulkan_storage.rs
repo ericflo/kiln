@@ -425,6 +425,140 @@ pub fn vulkan_matmul(a: &crate::Tensor, b: &crate::Tensor) -> Result<crate::Tens
 }
 
 // ----------------------------------------------------------------------
+// vulkan_matmul_bf16w — #1443 step1: F32-act × BF16-weight mixed-precision GEMM
+// ----------------------------------------------------------------------
+
+/// Vulkan mixed-precision linear `out = x @ W.T` where `x` is an F32
+/// activation `[rows, K]` and `W` is a **frozen** BF16-packed weight in the
+/// transposed `[N, K]` layout (`N = out_dim`, `K = hidden`). Returns an F32
+/// `[rows, N]` tensor.
+///
+/// This is the foundational kt-level op for #1443 (store frozen base weights
+/// in BF16 on Vulkan to halve base VRAM, keeping activations/LoRA/grads F32).
+/// The kt [`crate::ops::matmul`] requires equal input dtypes, so F32-act ×
+/// BF16-weight cannot run through it; this bridge fills that gap by calling the
+/// dedicated `vk_matmul_bf16w` kernels.
+///
+/// Bridges both inputs to `VkTensor` zero-copy ([`vk_tensor_from_kt`]) — the
+/// BF16 weight bridges cleanly because the PR3b bridge already gates F32|BF16 —
+/// dispatches `kiln_vulkan_kernel::vk_ops::matmul_bf16w::vk_matmul_bf16w_no_grad`
+/// (which tiles general PREFILL row counts internally via the
+/// `vk_matmul_bf16w_fwd_rows` shader), and bridges the F32 result back zero-copy
+/// ([`kt_tensor_from_vk`], which records the **logical** byte length, not the
+/// pool-rounded physical allocation). No D2H/H2D round-trip.
+///
+/// # Requirements
+///
+/// - `x` and `weight_t` both backed by [`VulkanStorage`] (same device)
+/// - `x.dtype() == F32`, `weight_t.dtype() == BF16`
+/// - both rank-2 and contiguous (`start_offset == 0`), with
+///   `x.shape()[1] == weight_t.shape()[1]` (shared contraction dim `K`)
+///
+/// # Errors
+///
+/// Returns [`Error::Msg`] on non-Vulkan storage, dtype/shape violations, or
+/// kernel dispatch failure.
+pub fn vulkan_matmul_bf16w(x: &crate::Tensor, weight_t: &crate::Tensor) -> Result<crate::Tensor> {
+    use kiln_vulkan_kernel::vk_ops::matmul_bf16w::vk_matmul_bf16w_no_grad;
+
+    if x.dtype() != DType::F32 {
+        return Err(Error::Msg(format!(
+            "vulkan_matmul_bf16w: x must be F32 (got {})",
+            x.dtype()
+        )));
+    }
+    if weight_t.dtype() != DType::BF16 {
+        return Err(Error::Msg(format!(
+            "vulkan_matmul_bf16w: weight must be BF16 (got {})",
+            weight_t.dtype()
+        )));
+    }
+    if x.rank() != 2 || weight_t.rank() != 2 {
+        return Err(Error::Msg(format!(
+            "vulkan_matmul_bf16w: rank-2 only (got x.rank={}, weight.rank={})",
+            x.rank(),
+            weight_t.rank()
+        )));
+    }
+    if x.shape()[1] != weight_t.shape()[1] {
+        return Err(Error::Msg(format!(
+            "vulkan_matmul_bf16w: contraction dim mismatch: x.shape[1]={} vs weight.shape[1]={}",
+            x.shape()[1],
+            weight_t.shape()[1]
+        )));
+    }
+    let device_index = vulkan_device_index(x, "vulkan_matmul_bf16w")?;
+
+    let vk_x = vk_tensor_from_kt(x)?;
+    let vk_w = vk_tensor_from_kt(weight_t)?;
+    let vk_out = vk_matmul_bf16w_no_grad(&vk_x, &vk_w)
+        .map_err(|e| Error::Msg(format!("vulkan_matmul_bf16w: kernel dispatch failed: {e}")))?;
+    kt_tensor_from_vk(&vk_out, device_index)
+}
+
+/// Vulkan mixed-precision linear backward `dx = grad_out @ W` for the frozen
+/// BF16 weight `W` shaped `[N, K]`. Companion to [`vulkan_matmul_bf16w`]: given
+/// the upstream F32 gradient `grad_out` `[rows, N]`, returns `dx` `[rows, K]`
+/// F32. The weight is FROZEN — there is **no** `dW` (the recorder returns
+/// `None` for the weight slot).
+///
+/// Bridges both inputs to `VkTensor` zero-copy, dispatches
+/// `vk_matmul_bf16w_bwd_no_grad` (tiled over prefill rows internally), and
+/// bridges `dx` back zero-copy.
+///
+/// # Requirements
+///
+/// - `grad_out` and `weight_t` both [`VulkanStorage`]-backed (same device)
+/// - `grad_out.dtype() == F32`, `weight_t.dtype() == BF16`
+/// - both rank-2 and contiguous (`start_offset == 0`), with
+///   `grad_out.shape()[1] == weight_t.shape()[0]` (shared `N = out_dim`)
+///
+/// # Errors
+///
+/// Returns [`Error::Msg`] on non-Vulkan storage, dtype/shape violations, or
+/// kernel dispatch failure.
+pub fn vulkan_matmul_bf16w_bwd(
+    grad_out: &crate::Tensor,
+    weight_t: &crate::Tensor,
+) -> Result<crate::Tensor> {
+    use kiln_vulkan_kernel::vk_ops::matmul_bf16w::vk_matmul_bf16w_bwd_no_grad;
+
+    if grad_out.dtype() != DType::F32 {
+        return Err(Error::Msg(format!(
+            "vulkan_matmul_bf16w_bwd: grad_out must be F32 (got {})",
+            grad_out.dtype()
+        )));
+    }
+    if weight_t.dtype() != DType::BF16 {
+        return Err(Error::Msg(format!(
+            "vulkan_matmul_bf16w_bwd: weight must be BF16 (got {})",
+            weight_t.dtype()
+        )));
+    }
+    if grad_out.rank() != 2 || weight_t.rank() != 2 {
+        return Err(Error::Msg(format!(
+            "vulkan_matmul_bf16w_bwd: rank-2 only (got grad_out.rank={}, weight.rank={})",
+            grad_out.rank(),
+            weight_t.rank()
+        )));
+    }
+    if grad_out.shape()[1] != weight_t.shape()[0] {
+        return Err(Error::Msg(format!(
+            "vulkan_matmul_bf16w_bwd: dim mismatch: grad_out.shape[1]={} vs weight.shape[0]={}",
+            grad_out.shape()[1],
+            weight_t.shape()[0]
+        )));
+    }
+    let device_index = vulkan_device_index(grad_out, "vulkan_matmul_bf16w_bwd")?;
+
+    let vk_grad = vk_tensor_from_kt(grad_out)?;
+    let vk_w = vk_tensor_from_kt(weight_t)?;
+    let vk_dx = vk_matmul_bf16w_bwd_no_grad(&vk_grad, &vk_w)
+        .map_err(|e| Error::Msg(format!("vulkan_matmul_bf16w_bwd: kernel dispatch failed: {e}")))?;
+    kt_tensor_from_vk(&vk_dx, device_index)
+}
+
+// ----------------------------------------------------------------------
 // vulkan_scale — Phase 3c hot-op port: tensor * scalar (#1082)
 // ----------------------------------------------------------------------
 
@@ -2445,5 +2579,113 @@ mod tests {
         let err = max_abs_err(&got, &want);
         eprintln!("vulkan_elementwise_add_pool_overflow_parity: max_abs_err = {err:e}");
         assert!(err < 1e-5, "add max_abs_err {err} too large; got={got:?} want={want:?}");
+    }
+
+    // ------------------------------------------------------------------
+    // #1443 step1: F32-act × BF16-weight mixed-precision matmul.
+    //
+    // `vulkan_matmul_bf16w(x, W)` computes `out = x @ W.T` for an F32
+    // activation `x [rows, K]` and a frozen BF16 weight `W [N, K]`. The
+    // reference is the SAME BF16 weight cast back to F32 (so both paths see
+    // the same BF16-rounded weight values), transposed to `[K, N]`, then run
+    // through the F32 `vulkan_matmul` (PR3b). Tolerance ~2e-2 covers the BF16
+    // weight precision. Bounded, single-shot tiny GPU test.
+    // ------------------------------------------------------------------
+
+    /// Build a BF16 Vulkan weight from F32 host data of shape `[n, k]`.
+    fn vk_bf16_weight(data: Vec<f32>, n: usize, k: usize) -> crate::Tensor {
+        let w_f32 = vk_f32(data, vec![n, k]);
+        super::vulkan_cast(&w_f32, DType::BF16).expect("vulkan_cast f32->bf16 weight")
+    }
+
+    #[test]
+    fn vulkan_matmul_bf16w_parity_2d() {
+        if maybe_vulkan_device().is_none() {
+            eprintln!("skip: KILN_TENSOR_VULKAN_TEST unset or no Vulkan device");
+            return;
+        }
+        // x [rows=4, K=8] F32, W [N=6, K=8] BF16. out = x @ W.T = [4, 6].
+        let (rows, k, n) = (4usize, 8usize, 6usize);
+        let x_data: Vec<f32> = (0..rows * k).map(|i| (i as f32) * 0.1 - 1.3).collect();
+        let w_data: Vec<f32> = (0..n * k).map(|i| ((i % 7) as f32) * 0.25 - 0.5).collect();
+
+        let x = vk_f32(x_data.clone(), vec![rows, k]);
+        let w_bf16 = vk_bf16_weight(w_data.clone(), n, k);
+        assert_eq!(w_bf16.dtype(), DType::BF16);
+
+        // Mixed-precision path under test.
+        let out = super::vulkan_matmul_bf16w(&x, &w_bf16).expect("vulkan_matmul_bf16w");
+        assert_eq!(out.shape(), &[rows, n]);
+        assert_eq!(out.dtype(), DType::F32);
+        assert_eq!(out.device(), Device::Vulkan(0), "result must stay on Vulkan");
+        let got = read_vk_f32(&out);
+
+        // Reference: same BF16 weight cast back to F32, transposed to [K, N],
+        // then F32 vulkan_matmul (PR3b). This sees the identical BF16-rounded
+        // weight, so any residual error is the bf16w kernel's accumulation.
+        let w_f32_ref = super::vulkan_cast(&w_bf16, DType::F32).expect("vulkan_cast bf16->f32 ref");
+        let w_t_ref = w_f32_ref
+            .transpose(0, 1)
+            .expect("transpose [N,K]->[K,N]")
+            .contiguous()
+            .expect("contiguous w_t");
+        let ref_out = super::vulkan_matmul(&x, &w_t_ref).expect("vulkan_matmul reference");
+        let want = read_vk_f32(&ref_out);
+
+        assert!(got.iter().all(|v| v.is_finite()), "bf16w out not finite: {got:?}");
+        let err = max_abs_err(&got, &want);
+        eprintln!("vulkan_matmul_bf16w_parity_2d: max_abs_err = {err:e}");
+        assert!(
+            err < 2e-2,
+            "bf16w matmul diverges from F32-cast reference: max_abs_err={err}; got={got:?} want={want:?}"
+        );
+    }
+
+    /// FD gradient check: central-difference `dL/dx` (loss = sum(out)) vs the
+    /// `vulkan_matmul_bf16w_bwd` adjoint `dx = grad_out @ W` (grad_out = ones).
+    /// Confirms the recorded backward's dx is correct. The weight is frozen —
+    /// there is no `dW` to check (the recorder returns `None` for it).
+    #[test]
+    fn vulkan_matmul_bf16w_fd_dx() {
+        if maybe_vulkan_device().is_none() {
+            eprintln!("skip: KILN_TENSOR_VULKAN_TEST unset or no Vulkan device");
+            return;
+        }
+        let (rows, k, n) = (4usize, 8usize, 6usize);
+        let x_data: Vec<f32> = (0..rows * k).map(|i| (i as f32) * 0.07 - 0.9).collect();
+        let w_data: Vec<f32> = (0..n * k).map(|i| ((i % 5) as f32) * 0.2 - 0.3).collect();
+
+        let w_bf16 = vk_bf16_weight(w_data.clone(), n, k);
+
+        // Analytic dx via the backward kernel. loss = sum(out) => grad_out = ones.
+        let grad_out = vk_f32(vec![1.0f32; rows * n], vec![rows, n]);
+        let dx = super::vulkan_matmul_bf16w_bwd(&grad_out, &w_bf16).expect("vulkan_matmul_bf16w_bwd");
+        assert_eq!(dx.shape(), &[rows, k]);
+        assert_eq!(dx.device(), Device::Vulkan(0));
+        let dx_v = read_vk_f32(&dx);
+
+        // Central-difference each x element through the forward.
+        let eps = 1e-2f32;
+        let loss_at = |xd: &[f32]| -> f32 {
+            let x = vk_f32(xd.to_vec(), vec![rows, k]);
+            let out = super::vulkan_matmul_bf16w(&x, &w_bf16).expect("fd forward");
+            read_vk_f32(&out).iter().sum()
+        };
+        let mut fd = vec![0.0f32; rows * k];
+        for i in 0..rows * k {
+            let mut xp = x_data.clone();
+            let mut xm = x_data.clone();
+            xp[i] += eps;
+            xm[i] -= eps;
+            fd[i] = (loss_at(&xp) - loss_at(&xm)) / (2.0 * eps);
+        }
+
+        let err = max_abs_err(&dx_v, &fd);
+        eprintln!("vulkan_matmul_bf16w_fd_dx: max_abs_err = {err:e}");
+        assert!(dx_v.iter().all(|v| v.is_finite()), "dx not finite: {dx_v:?}");
+        assert!(
+            err < 2e-2,
+            "bf16w dx diverges from finite-difference: max_abs_err={err}; analytic={dx_v:?} fd={fd:?}"
+        );
     }
 }

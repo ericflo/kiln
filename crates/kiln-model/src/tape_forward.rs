@@ -417,6 +417,118 @@ pub fn try_tape_matmul_kt(
     }
 }
 
+/// Tape backward for the Vulkan F32-act × BF16-weight mixed-precision matmul
+/// (#1443 step1). The frozen base weight is in the transposed `[N, K]` BF16
+/// layout; forward computed `out = x @ W.T` (`x` F32 `[rows, K]`). Backward
+/// produces only `dx = grad_out @ W` (F32 `[rows, K]`) via the dedicated
+/// `vk_matmul_bf16w_bwd` kernel — **there is no `dW`**, the weight is frozen.
+///
+/// # Why a bespoke `BackwardOp` (not the device-agnostic `MatmulBackward`)
+///
+/// `kiln_autograd::MatmulBackward` expresses `da`/`db` as
+/// `kiln_tensor::ops::matmul`, which requires **equal input dtypes**. With an
+/// F32 `grad_out` and a BF16 weight that op cannot run; we route `dx` through
+/// the mixed-precision `vk_matmul_bf16w` kernel instead. `input_count() == 1`
+/// because only `x` is differentiable (the weight is not recorded as an input).
+#[cfg(feature = "vulkan")]
+#[derive(Debug)]
+pub(crate) struct MatmulBf16wBackward {
+    /// Frozen BF16 base weight in transposed `[N, K]` layout. FROZEN — no `dW`.
+    pub weight_t: kiln_tensor::Tensor,
+}
+
+#[cfg(feature = "vulkan")]
+impl BackwardOp for MatmulBf16wBackward {
+    fn name(&self) -> &'static str {
+        "matmul_bf16w_backward"
+    }
+    fn input_count(&self) -> usize {
+        1
+    }
+    fn requires_input(&self, _idx: usize) -> bool {
+        // dx needs only grad_out + the (saved) weight; the forward `x`
+        // activation is not read by the backward.
+        false
+    }
+    fn apply(
+        &self,
+        grad_output: &kiln_tensor::Tensor,
+    ) -> kiln_tensor::Result<Vec<Option<kiln_tensor::Tensor>>> {
+        // grad_output may arrive non-contiguous / non-F32 from upstream; the
+        // kernel bridge requires contiguous F32. Materialize before dispatch.
+        let go = if grad_output.dtype() == kiln_tensor::DType::F32 {
+            grad_output.clone()
+        } else {
+            kiln_tensor::ops::cast(grad_output, kiln_tensor::DType::F32)?
+        };
+        let go = if go.is_contiguous() {
+            go
+        } else {
+            go.contiguous()?
+        };
+        let dx = kiln_tensor::vulkan_matmul_bf16w_bwd(&go, &self.weight_t)?;
+        Ok(vec![Some(dx)])
+    }
+}
+
+/// kt-native Vulkan F32-act × BF16-weight matmul tape recorder (#1443 step1).
+///
+/// Records the mixed-precision base projection `out = x @ W.T` (F32 activation
+/// × frozen BF16 weight in transposed `[N, K]` layout) onto the active kt
+/// [`Tape`] with a [`MatmulBf16wBackward`] adjoint (`dx` only — the weight is
+/// frozen). The forward runs on-device via
+/// [`kiln_tensor::vulkan_matmul_bf16w`] (the `vk_matmul_bf16w` kernel bridge),
+/// keeping the data GPU-resident.
+///
+/// This is the recorder the integration step (#1443 step2) routes the base
+/// projection through when `x` is F32 and the base weight is BF16 on Vulkan —
+/// the case the equal-dtype [`try_tape_lora_linear_kt`] base matmul declines
+/// today (its `weight_t.dtype() == x.dtype()` gate). Only `x` is recorded as a
+/// tape input (the weight is frozen, no grad edge).
+///
+/// `Ok(None)` (caller falls through) when tape-forward is off, no tape scope is
+/// active, or the inputs are outside the envelope: Vulkan-resident, `x` rank-2
+/// F32, `weight_t` rank-2 BF16, matching contraction dim `K`.
+#[cfg(feature = "vulkan")]
+pub fn try_tape_matmul_bf16w_kt(
+    x: &kiln_tensor::Tensor,
+    weight_t: &kiln_tensor::Tensor,
+) -> Result<Option<kiln_tensor::Tensor>> {
+    if !tape_forward_enabled() {
+        return Ok(None);
+    }
+    // Vulkan-only: CUDA/Metal carry their own BF16 base-weight paths.
+    if !matches!(x.device(), kiln_tensor::Device::Vulkan(_))
+        || !matches!(weight_t.device(), kiln_tensor::Device::Vulkan(_))
+    {
+        return Ok(None);
+    }
+    if x.dtype() != kiln_tensor::DType::F32 || weight_t.dtype() != kiln_tensor::DType::BF16 {
+        return Ok(None);
+    }
+    if x.rank() != 2 || weight_t.rank() != 2 {
+        return Ok(None);
+    }
+    if x.shape()[1] != weight_t.shape()[1] {
+        return Ok(None);
+    }
+    match with_active_tape(|tape: &mut Tape| -> Result<_> {
+        let y = kiln_tensor::vulkan_matmul_bf16w(x, weight_t)
+            .map_err(|e| anyhow::anyhow!("kt vulkan_matmul_bf16w: {e}"))?;
+        tape.record(
+            &y,
+            &[x],
+            Box::new(MatmulBf16wBackward {
+                weight_t: weight_t.clone(),
+            }),
+        );
+        Ok(y)
+    }) {
+        Some(result) => Ok(Some(result?)),
+        None => Ok(None),
+    }
+}
+
 /// kt-native embedding tape recorder (#1082 seam flip) — the kt-native embedding tape recorder. Records `EmbeddingBackward` directly from kt
 /// inputs. `Ok(None)` outside the rank-2-weights envelope.
 pub fn try_tape_embedding_kt(
