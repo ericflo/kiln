@@ -5696,6 +5696,25 @@ fn gdn_in_proj_matmul(
     x: &Tensor,
     weight_t: &Tensor,
 ) -> Result<Tensor> {
+    // (#1443 step 5) GDN `in_proj_a` / `in_proj_b` are FROZEN base projections
+    // (no LoRA adapter — they are not in DEFAULT_TARGET_MODULES). On Vulkan the
+    // activation `x` is F32 while these base weights are BF16, so the plain
+    // equal-dtype kt `matmul` in `broadcast_matmul_cpu_compatible` cannot run.
+    // Route through the same `try_tape_lora_linear_kt` recorder the qkv/z/out
+    // projections use (with `lora=None`): on Vulkan it dispatches the base
+    // matmul through `vk_matmul_bf16w` (F32 act × BF16 weight) and records the
+    // dx-only `MatmulBf16wBackward`, so dx flows back to `x`/`normed` while the
+    // weight stays frozen BF16. No-op (returns None) off the tape path or on the
+    // equal-dtype path, falling through to the existing dispatch below.
+    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+    if crate::tape_forward::tape_forward_enabled() {
+        if let Some(out) =
+            crate::tape_forward::try_tape_lora_linear_kt(x, weight_t, None, 0.0)
+                .context("gdn_in_proj_matmul try_tape_lora_linear_kt")?
+        {
+            return Ok(out);
+        }
+    }
     // #1082 item 4: `linear_prefill_apply` is kt-typed — pass kt directly.
     #[cfg(feature = "cuda")]
     {
@@ -6767,6 +6786,28 @@ fn embedding_lookup_from_weights(token_ids: &[u32], weights: &GpuWeights) -> Res
         }
     }
     embedding_lookup(token_ids, &weights.embed_tokens)
+}
+
+/// (#1443 step 3) Vulkan mixed-precision activation cast. The embedding table
+/// (`embed_tokens`) is BF16 on a production BF16 base, so the embedding-lookup
+/// output is BF16. On Vulkan the ACTIVATION dtype is F32 throughout (the
+/// rmsnorm/softmax kernels are F32-only and the base projections consume BF16
+/// weights × F32 activations via `vk_matmul_bf16w`), so the first hidden state
+/// must be cast BF16→F32 before it enters the transformer layers. This is the
+/// single "cast at the start" the mixed-precision design calls for.
+///
+/// No-op (returns the tensor unchanged) unless the tensor is on Vulkan AND BF16:
+///   - CUDA/Metal run BF16 activations end-to-end → untouched.
+///   - An already-F32 Vulkan base (the prior F32-on-Vulkan path) → untouched.
+/// Cheap and idempotent; safe to call on every forward entry point.
+fn vulkan_cast_activation_to_f32(hidden: Tensor) -> Result<Tensor> {
+    #[cfg(feature = "vulkan")]
+    {
+        if matches!(hidden.device(), Device::Vulkan(_)) && hidden.dtype() == DType::BF16 {
+            return Ok(hidden.to_dtype(DType::F32)?);
+        }
+    }
+    Ok(hidden)
 }
 
 fn embedding_lookup_from_weights_with_index(
@@ -23020,7 +23061,10 @@ pub fn model_forward_kt(
     let seq_len = token_ids.len();
 
     // 1. Embedding lookup: [seq_len, hidden_size]
-    let mut hidden = embedding_lookup_from_weights(token_ids, weights)?;
+    // (#1443 step 3) On Vulkan the BF16 embedding output is cast BF16→F32 so the
+    // activation dtype is F32 throughout (base projections consume the BF16 base
+    // weights via `vk_matmul_bf16w`). No-op on CUDA/Metal and on an F32 base.
+    let mut hidden = vulkan_cast_activation_to_f32(embedding_lookup_from_weights(token_ids, weights)?)?;
 
     // Add batch dimension: [1, seq_len, hidden_size]
     hidden = hidden.unsqueeze(0)?;
@@ -23177,7 +23221,7 @@ fn reshape_hole0_4(t: &Tensor, d1: usize, d2: usize, d3: usize) -> Result<Tensor
 /// Returns: [1, seq_len, hidden_size] — output hidden state.
 pub fn model_forward_segment(
     backend: &dyn BackendRuntime,
-    mut hidden: Tensor,
+    hidden: Tensor,
     weights: &GpuWeights,
     config: &kiln_core::config::ModelConfig,
     positions: &[u32],
@@ -23186,6 +23230,11 @@ pub fn model_forward_segment(
     mut linear_state: Option<&mut LinearAttentionState>,
     lora: Option<&LoraWeights>,
 ) -> Result<Tensor> {
+    // (#1443 step 3) Defensive Vulkan BF16→F32 activation cast for direct
+    // callers (gradient-checkpointing recompute) that may hand in a BF16 hidden.
+    // Idempotent no-op when `hidden` is already F32 (the normal path, since
+    // `model_forward_embed` casts) or on CUDA/Metal.
+    let mut hidden = vulkan_cast_activation_to_f32(hidden)?;
     // Count full-attention and linear-attention layers before start_layer
     // so we index into the right KV cache / linear state slots.
     let mut full_attn_idx: usize = (0..start_layer)
@@ -23309,7 +23358,10 @@ pub fn model_forward_segment(
 /// and position indices for RoPE (starting from position 0, no KV cache offset).
 pub fn model_forward_embed(token_ids: &[u32], weights: &GpuWeights) -> Result<(Tensor, Vec<u32>)> {
     let seq_len = token_ids.len();
-    let mut hidden = embedding_lookup_from_weights(token_ids, weights)?;
+    // (#1443 step 3) Cast the BF16 embedding output to F32 on Vulkan so the
+    // transformer-layer activations are F32 (mixed precision: BF16 base weights,
+    // F32 activations). No-op on CUDA/Metal and on an F32 base.
+    let mut hidden = vulkan_cast_activation_to_f32(embedding_lookup_from_weights(token_ids, weights)?)?;
     hidden = hidden.unsqueeze(0)?;
     let positions: Vec<u32> = (0..seq_len).map(|p| p as u32).collect();
     Ok((hidden, positions))

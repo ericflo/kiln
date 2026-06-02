@@ -53,9 +53,9 @@
 #![cfg(feature = "vulkan")]
 
 use kiln_model::tape_forward::{
-    try_tape_add_kt, try_tape_rms_norm_kt, with_thread_local_tape,
+    try_tape_add_kt, try_tape_matmul_bf16w_kt, try_tape_rms_norm_kt, with_thread_local_tape,
 };
-use kiln_tensor::{ops, Device, Tensor};
+use kiln_tensor::{ops, DType, Device, Tensor};
 use kiln_vulkan_kernel::VulkanDevice;
 
 // ----------------------------------------------------------------------------
@@ -188,6 +188,96 @@ fn vk_tape_add_records_and_backprops() {
         bwd_err,
         da_err,
         db_err
+    );
+}
+
+// ----------------------------------------------------------------------------
+// #1443 step1 — F32-act × BF16-weight matmul recorder + recorded dx backward.
+// ----------------------------------------------------------------------------
+
+/// #1443 step1 proof: `try_tape_matmul_bf16w_kt` on `Device::Vulkan(0)` RECORDS
+/// the mixed-precision base projection (`out = x @ W.T`, F32 activation × frozen
+/// BF16 weight) onto the kt `Tape` as exactly ONE node, its forward matches a
+/// BF16-cast F32 reference (`vulkan_matmul`) to BF16 tolerance, and
+/// `Tape::backward` produces the correct `dL/dx` over Vulkan storage via the
+/// recorded `MatmulBf16wBackward`. Critically: the WEIGHT IS FROZEN — it is not
+/// recorded as a tape input, so `grads` carries a key for `x` but NOT for the
+/// weight (`input_count() == 1`, no `dW`).
+///
+/// Single-shot, tiny (rows=4, K=8, N=6), GPU-gated.
+#[test]
+fn vk_tape_matmul_bf16w_records_and_backprops() {
+    let test_name = "vk_tape_matmul_bf16w_records_and_backprops";
+    if !vk_enabled(test_name) {
+        return;
+    }
+    let (rows, k, n) = (4usize, 8usize, 6usize);
+    let x_data: Vec<f32> = (0..rows * k).map(|i| (i as f32) * 0.07 - 0.9).collect();
+    let w_data: Vec<f32> = (0..n * k).map(|i| ((i % 5) as f32) * 0.2 - 0.3).collect();
+
+    let x = Tensor::from_vec_on(Device::Vulkan(0), x_data.clone(), vec![rows, k])
+        .expect("build x on Vulkan");
+    // Frozen BF16 base weight [N, K] (transposed-weight layout).
+    let w_f32 = Tensor::from_vec_on(Device::Vulkan(0), w_data.clone(), vec![n, k])
+        .expect("build weight on Vulkan");
+    let w_bf16 = kiln_tensor::vulkan_cast(&w_f32, DType::BF16).expect("cast weight -> BF16");
+
+    let ((y, x_id, w_id), tape) = with_thread_local_tape(|| {
+        let y = try_tape_matmul_bf16w_kt(&x, &w_bf16)
+            .expect("try_tape_matmul_bf16w_kt errored")
+            .expect("try_tape_matmul_bf16w_kt returned None — recorder did NOT record on Vulkan");
+        (y, x.id(), w_bf16.id())
+    });
+
+    // (1) ANTI-SILENT-DROP: exactly one node recorded.
+    assert_eq!(tape.len(), 1, "bf16w recorder recorded {} nodes, expected 1", tape.len());
+    assert_eq!(y.device(), Device::Vulkan(0), "forward output left Vulkan");
+    assert_eq!(y.shape(), &[rows, n]);
+    assert_eq!(y.dtype(), DType::F32);
+
+    // (2) FORWARD PARITY: vs the same BF16 weight cast back to F32 then F32 matmul.
+    let w_f32_ref = kiln_tensor::vulkan_cast(&w_bf16, DType::F32).expect("bf16->f32 ref");
+    let w_t_ref = w_f32_ref.transpose(0, 1).unwrap().contiguous().unwrap();
+    let ref_fwd = read_host_f32(&kiln_tensor::vulkan_matmul(&x, &w_t_ref).expect("ref matmul"));
+    let vk_fwd = read_host_f32(&y);
+    let fwd_err = max_abs_err(&vk_fwd, &ref_fwd);
+    assert!(fwd_err < 2e-2, "forward parity FAILED: max_abs_err={fwd_err}");
+
+    // (3) BACKWARD: seed dL/dy = ones. dx = grad_out @ W (frozen weight).
+    let seed = Tensor::from_vec_on(Device::Vulkan(0), vec![1.0_f32; rows * n], vec![rows, n])
+        .expect("seed on Vulkan");
+    let grads = tape
+        .backward(y.id(), seed, |g, z| ops::add(g, z))
+        .expect("Tape::backward errored on bf16w Vulkan graph");
+
+    // dx is keyed on x.id(); the FROZEN weight has NO grad key (not a tape input).
+    let dx = grads.get(x_id).expect("no grad keyed on x.id()");
+    assert_eq!(dx.shape(), &[rows, k], "dL/dx wrong shape");
+    assert!(
+        grads.get(w_id).is_none(),
+        "FROZEN weight must have NO gradient, but a dW was recorded"
+    );
+
+    // Analytic dx straight from the kernel bridge: must match the recorded one.
+    let dx_v = read_host_f32(dx);
+    let analytic = read_host_f32(
+        &kiln_tensor::vulkan_matmul_bf16w_bwd(
+            &Tensor::from_vec_on(Device::Vulkan(0), vec![1.0_f32; rows * n], vec![rows, n]).unwrap(),
+            &w_bf16,
+        )
+        .expect("analytic dx"),
+    );
+    assert!(dx_v.iter().all(|v| v.is_finite()), "non-finite dx: {dx_v:?}");
+    let dx_err = max_abs_err(&dx_v, &analytic);
+    assert!(dx_err < 2e-2, "recorded dx != analytic dx: max_abs_err={dx_err}");
+
+    eprintln!(
+        "[#1443 step1 PROOF] Device::Vulkan(0): tape.len()={} | fwd max_abs_err vs F32-cast ref={:.3e} | \
+         dx max_abs_err vs analytic={:.3e} | weight FROZEN (no dW): {}",
+        tape.len(),
+        fwd_err,
+        dx_err,
+        grads.get(w_id).is_none()
     );
 }
 
