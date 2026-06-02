@@ -36,7 +36,7 @@
 use std::sync::Arc;
 
 use kiln_autograd::BackwardOp;
-use kiln_tensor::{Error, Result, Tensor};
+use kiln_tensor::{Device, Error, Result, Tensor};
 use kiln_vulkan_kernel::vk_tensor::VkBackwardOp;
 
 /// Presents a leaf [`VkBackwardOp`] to the shared `kiln_autograd::Tape`.
@@ -77,12 +77,21 @@ impl BackwardOp for VkBwdAdapter {
         // flow back on the same device the grad_output arrived on; derive it
         // from grad_output so this generic adapter needs no construction-time
         // plumbing (and matches the required single-field tuple shape).
-        let device_index = grad_output.device().index().ok_or_else(|| {
-            Error::Msg(format!(
-                "VkBwdAdapter[{}]: grad_output is not on a Vulkan device",
-                self.0.op_name()
-            ))
-        })?;
+        //
+        // Match `Device::Vulkan(i)` SPECIFICALLY: `Device::index()` also returns
+        // `Some` for Cuda/Metal, which would make a non-Vulkan grad slip past
+        // here only to fail less clearly inside `vk_tensor_from_kt`. (In practice
+        // `vk_tensor_from_kt` above already rejects non-Vulkan storage, but the
+        // ordinal we stamp must come from a *Vulkan* device or it is meaningless.)
+        let device_index = match grad_output.device() {
+            Device::Vulkan(i) => i,
+            other => {
+                return Err(Error::Msg(format!(
+                    "VkBwdAdapter[{}]: grad_output is not on a Vulkan device (got {other})",
+                    self.0.op_name()
+                )))
+            }
+        };
 
         let vk_grads = self.0.backward(&vk_grad).map_err(|e| {
             Error::Msg(format!(
@@ -117,14 +126,29 @@ impl BackwardOp for VkBwdAdapter {
 /// recorders. Nothing calls this yet.
 ///
 /// `op_name` is the `VkBackwardOp::op_name()` literal (re-verified against the
-/// `fn op_name` returns: `"matmul"`, `"matmul_bf16w"`, `"rms_norm"`, `"rope"`,
+/// `fn op_name` returns: `"matmul"`, `"rms_norm"`, `"rope"`,
 /// `"softmax_lastdim"`). Extended op-family-by-op-family as each family's FD
 /// parity (PR4b) lands.
+///
+/// Every family listed here is validated by a *finite-difference* grad test in
+/// `tests/vk_bwd_adapter_parity.rs` (FD oracle vs the adapter-produced analytic
+/// grad), not merely an exact-vs-direct identity — an FD test is what catches a
+/// wrong backward *kernel*. PR5 will record these families onto the kt tape, so
+/// an entry here is a correctness assertion.
+///
+/// `matmul_bf16w` is DELIBERATELY ABSENT: BF16 matmul has no grad-validation
+/// test yet. Its kt<->vk bridge also needs care — the logical `byte_len` the
+/// bridge records on the VulkanStorage must equal the BF16 *logical* byte size
+/// (`n_elements * 2`), NOT the pool-padded device allocation (spec R5) — so a
+/// BF16 grad round-trip can readback the wrong range if mis-bridged. Re-add
+/// `"matmul_bf16w"` to this list only once a BF16 FD test in the parity suite
+/// goes green.
 pub fn family_ported(op_name: &str) -> bool {
     matches!(
         op_name,
-        // Wave 1 — the core training path.
-        "matmul" | "matmul_bf16w" | "rms_norm" | "rope" | "softmax_lastdim"
+        // Wave 1 — the core training path. F32-only families, FD-validated.
+        "matmul" | "rms_norm" | "rope" | "softmax_lastdim"
+        // Pending BF16 grad-validation (see doc above): "matmul_bf16w"
         // Wave 2 appended here as each family's FD test goes green:
         // | "flce" | "grpo" | "gdn_chunkwise" | "opd_topk_kl"
     )

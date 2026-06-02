@@ -18,10 +18,18 @@
 //!      PR3b kt<->vk bridge round-trip from kernel correctness, and proves the
 //!      `None`-slot / input-order contract.
 //!
-//!   2. **FD sanity** (matmul). Central finite-difference of the forward vs the
+//!   2. **FD oracle** (matmul / rms_norm / rope / softmax_lastdim — all four
+//!      ported families). Central finite-difference of the forward vs the
 //!      adapter-produced analytic grad on a TINY F32 tensor; `max_abs_err <
-//!      1e-2` (FD is coarse). Confirms the gradient is actually *correct*, not
-//!      merely consistent between the two call paths.
+//!      1e-2` (FD is coarse). Confirms the backward KERNEL is actually
+//!      *correct*, not merely consistent between the two call paths — an
+//!      exact-vs-direct identity cannot catch a wrong-but-self-consistent
+//!      kernel. The analytic side always comes through `VkBwdAdapter::apply`;
+//!      the perturbed forward evals use a CPU oracle that mirrors the shader.
+//!
+//! Plus bounded contract tests: zero-copy buffer sharing (Arc strong_count > 1
+//! + pointer identity), non-float-dtype rejection (I64 grad), input_count vs
+//! backward() Vec length, and non-Vulkan-grad rejection.
 //!
 //! HOST-SAFETY: every test is a SINGLE bounded GPU dispatch over tiny shapes
 //! (<= [4,5]@[5,3]). NO training loop, NO multi-step iteration. Each test
@@ -355,8 +363,64 @@ fn vk_bwd_adapter_rmsnorm_fd() -> Result<()> {
     Ok(())
 }
 
+/// CPU oracle of the `vk_rope_f32` forward (must match the shader exactly —
+/// see csrc/shaders/vk_rope_f32.comp). Input `[rows, heads, head_dim]`; cos/sin
+/// `[rows, half]`. Per rotary pair (i, i+half):
+///   x0' = x0*cos - x1*sin ;  x1' = x0*sin + x1*cos ; tail (d >= rotary_dim) copies.
+fn cpu_rope(
+    x: &[f32],
+    cos: &[f32],
+    sin: &[f32],
+    rows: usize,
+    heads: usize,
+    head_dim: usize,
+    rotary_dim: usize,
+) -> Vec<f32> {
+    let half = rotary_dim / 2;
+    let mut out = vec![0.0_f32; rows * heads * head_dim];
+    for r in 0..rows {
+        for h in 0..heads {
+            let base = (r * heads + h) * head_dim;
+            for d in 0..head_dim {
+                let lin = base + d;
+                if d >= rotary_dim {
+                    out[lin] = x[lin];
+                    continue;
+                }
+                let (pair, is_low) = if d < half { (d, true) } else { (d - half, false) };
+                let low = x[base + pair];
+                let high = x[base + pair + half];
+                let c = cos[r * half + pair];
+                let s = sin[r * half + pair];
+                out[lin] = if is_low { low * c - high * s } else { low * s + high * c };
+            }
+        }
+    }
+    out
+}
+
+/// CPU oracle of `vk_softmax_lastdim_f32` (numerically stable: max → exp → sum →
+/// divide), matching csrc/shaders/vk_softmax_lastdim_f32.comp.
+fn cpu_softmax_lastdim(x: &[f32], rows: usize, cols: usize) -> Vec<f32> {
+    let mut out = vec![0.0_f32; rows * cols];
+    for r in 0..rows {
+        let row = &x[r * cols..(r + 1) * cols];
+        let m = row.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        let mut sum = 0.0_f32;
+        for (j, &v) in row.iter().enumerate() {
+            let e = (v - m).exp();
+            out[r * cols + j] = e;
+            sum += e;
+        }
+        for j in 0..cols {
+            out[r * cols + j] /= sum;
+        }
+    }
+    out
+}
+
 // ============================================================================
-// rope — exact-vs-direct (single input).
+// rope — exact-vs-direct (single input) + central FD on dx.
 // ============================================================================
 
 #[test]
@@ -386,8 +450,48 @@ fn vk_bwd_adapter_rope_exact_vs_direct() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn vk_bwd_adapter_rope_fd() -> Result<()> {
+    let Some(dev) = vk_dev("vk_bwd_adapter_rope_fd") else {
+        return Ok(());
+    };
+    let (rows, heads, head_dim) = (2usize, 1usize, 4usize);
+    let rotary_dim = 4usize;
+    let half = rotary_dim / 2;
+    let total = rows * heads * head_dim;
+    let x_data: Vec<f32> = (0..total).map(|i| (i as f32) * 0.2 - 0.4).collect();
+    let cos_data: Vec<f32> = (0..(rows * half)).map(|i| (0.3 * i as f32).cos()).collect();
+    let sin_data: Vec<f32> = (0..(rows * half)).map(|i| (0.3 * i as f32).sin()).collect();
+
+    let x = vk_param_f32(&x_data, &[rows, heads, head_dim], &dev)?;
+    let cos = vk_leaf_f32(&cos_data, &[rows, half], &dev)?;
+    let sin = vk_leaf_f32(&sin_data, &[rows, half], &dev)?;
+    let out = kiln_vulkan_kernel::vk_ops::rope::vk_rope(&x, &cos, &sin, rotary_dim)?;
+    let grad_fn = out.grad_fn().expect("rope grad_fn").clone();
+
+    // Analytic dx via the adapter. Loss = sum(w_i * y_i) with a non-uniform
+    // linear combo w (= dy), so the gradient is non-trivial in every slot.
+    let dy_data: Vec<f32> = (0..total).map(|i| (i as f32) * 0.05 - 0.1).collect();
+    let adapter = VkBwdAdapter(Arc::clone(&grad_fn));
+    let grads = adapter.apply(&kt_vk_f32(&dy_data, &[rows, heads, head_dim])?)?;
+    let dx = kt_to_host(grads[0].as_ref().expect("rope dx"))?;
+
+    // Central FD of the SAME scalar loss on the CPU rope oracle.
+    let loss = |xp: &[f32]| -> f32 {
+        let y = cpu_rope(xp, &cos_data, &sin_data, rows, heads, head_dim, rotary_dim);
+        y.iter().zip(dy_data.iter()).map(|(yi, wi)| yi * wi).sum::<f32>()
+    };
+    let mut x_mut = x_data.clone();
+    let fd_dx = fd_grad(&mut x_mut, 1e-3, loss);
+
+    let err = max_abs_diff(&dx, &fd_dx);
+    eprintln!("rope FD: dx max_abs_err = {err:e}");
+    assert!(err < 1e-2, "rope dx FD mismatch {err:e} >= 1e-2");
+    Ok(())
+}
+
 // ============================================================================
-// softmax_lastdim — exact-vs-direct (single input).
+// softmax_lastdim — exact-vs-direct (single input) + central FD on dx.
 // ============================================================================
 
 #[test]
@@ -406,6 +510,137 @@ fn vk_bwd_adapter_softmax_exact_vs_direct() -> Result<()> {
     let grads = exact_vs_direct(&grad_fn, &dy_data, &[rows, cols])?;
     assert_eq!(grads.len(), 1, "softmax backward returns 1 slot");
     assert!(grads[0].is_some(), "softmax dx present");
+    Ok(())
+}
+
+#[test]
+fn vk_bwd_adapter_softmax_fd() -> Result<()> {
+    let Some(dev) = vk_dev("vk_bwd_adapter_softmax_fd") else {
+        return Ok(());
+    };
+    let (rows, cols) = (3usize, 4usize);
+    let x_data: Vec<f32> = (0..(rows * cols)).map(|i| (i as f32) * 0.17 - 0.6).collect();
+
+    let x = vk_param_f32(&x_data, &[rows, cols], &dev)?;
+    let out = kiln_vulkan_kernel::vk_ops::softmax::vk_softmax_lastdim(&x)?;
+    let grad_fn = out.grad_fn().expect("softmax grad_fn").clone();
+
+    // Analytic dx via the adapter. Loss = sum(w_i * y_i) with a NON-uniform w
+    // (= dy): a uniform dy would give a zero gradient (softmax rows sum to 1),
+    // so the linear combo must vary across columns to exercise the kernel.
+    let dy_data: Vec<f32> = (0..(rows * cols)).map(|i| (i as f32) * 0.05 - 0.1).collect();
+    let adapter = VkBwdAdapter(Arc::clone(&grad_fn));
+    let grads = adapter.apply(&kt_vk_f32(&dy_data, &[rows, cols])?)?;
+    let dx = kt_to_host(grads[0].as_ref().expect("softmax dx"))?;
+
+    // Central FD of the SAME scalar loss on the CPU softmax oracle.
+    let loss = |xp: &[f32]| -> f32 {
+        let y = cpu_softmax_lastdim(xp, rows, cols);
+        y.iter().zip(dy_data.iter()).map(|(yi, wi)| yi * wi).sum::<f32>()
+    };
+    let mut x_mut = x_data.clone();
+    let fd_dx = fd_grad(&mut x_mut, 1e-3, loss);
+
+    let err = max_abs_diff(&dx, &fd_dx);
+    eprintln!("softmax FD: dx max_abs_err = {err:e}");
+    assert!(err < 1e-2, "softmax dx FD mismatch {err:e} >= 1e-2");
+    Ok(())
+}
+
+// ============================================================================
+// Zero-copy: bridging a kt Vulkan grad to a VkTensor SHARES the underlying
+// VulkanBuffer (Arc refcount bump, no host copy). Proven by strong_count > 1
+// while the source kt Tensor is still alive, and by pointer identity.
+// ============================================================================
+
+#[test]
+fn vk_bwd_adapter_zero_copy_shares_buffer() -> Result<()> {
+    let Some(_dev) = vk_dev("vk_bwd_adapter_zero_copy_shares_buffer") else {
+        return Ok(());
+    };
+    // A kt Vulkan-resident grad tensor (the kind apply() consumes).
+    let grad = kt_vk_f32(&[1.0, 2.0, 3.0, 4.0], &[2, 2])?;
+
+    // The kt storage's own Arc<VulkanBuffer> (one strong ref lives in `grad`).
+    let kt_storage = grad
+        .storage()
+        .as_any()
+        .downcast_ref::<kiln_tensor::VulkanStorage>()
+        .expect("grad must be Vulkan-backed");
+    let kt_buf_ptr = std::sync::Arc::as_ptr(&kt_storage.buffer_arc());
+
+    // Bridge to a VkTensor — this must Arc::clone the SAME buffer, not copy.
+    let vk_grad = kiln_tensor::vk_tensor_from_kt(&grad)?;
+    let vk_buf = vk_grad.buffer();
+
+    // Same allocation (pointer identity) → genuinely zero-copy.
+    assert_eq!(
+        std::sync::Arc::as_ptr(vk_buf),
+        kt_buf_ptr,
+        "vk_tensor_from_kt must share the kt storage's VulkanBuffer (zero-copy)"
+    );
+    // strong_count > 1: the kt storage holds one ref, the bridged VkTensor
+    // holds another. (>=2; other transient clones may push it higher.)
+    let count = std::sync::Arc::strong_count(vk_buf);
+    eprintln!("zero_copy: Arc::strong_count(buffer) = {count}");
+    assert!(
+        count > 1,
+        "bridged VkTensor must share (not copy) the buffer: strong_count={count} (expected > 1)"
+    );
+    drop(grad);
+    Ok(())
+}
+
+// ============================================================================
+// dtype rejection: a non-F32/BF16 (I64 index-style) Vulkan grad must be
+// rejected by the bridge, never silently mis-bridged as F32.
+// ============================================================================
+
+#[test]
+fn vk_bwd_adapter_rejects_non_float_dtype() -> Result<()> {
+    let Some(_dev) = vk_dev("vk_bwd_adapter_rejects_non_float_dtype") else {
+        return Ok(());
+    };
+    // An I64 (index/id) tensor placed on the Vulkan device: kt_dtype_to_vk
+    // returns None for I64, so vk_tensor_from_kt must error rather than
+    // reinterpret the 8-byte ints as F32.
+    let idx_grad = Tensor::from_vec_on(Device::Vulkan(DEV_IDX), vec![1_i64, 2, 3, 4], vec![2, 2])?;
+    let res = kiln_tensor::vk_tensor_from_kt(&idx_grad);
+    assert!(
+        res.is_err(),
+        "I64 Vulkan grad must be rejected by vk_tensor_from_kt (F32/BF16 only)"
+    );
+    Ok(())
+}
+
+// ============================================================================
+// input_count() contract: the adapter's input_count matches the Vec length the
+// underlying family's backward() returns (so the tape walker binds every slot).
+// ============================================================================
+
+#[test]
+fn vk_bwd_adapter_input_count_matches_backward_len() -> Result<()> {
+    let Some(dev) = vk_dev("vk_bwd_adapter_input_count_matches_backward_len") else {
+        return Ok(());
+    };
+    // matmul: 2 inputs (a, b) → backward returns 2 grad slots.
+    let (m, k, n) = (2usize, 2usize, 2usize);
+    let a = vk_param_f32(&[1.0, 2.0, 3.0, 4.0], &[m, k], &dev)?;
+    let b = vk_param_f32(&[1.0, 0.0, 0.0, 1.0], &[k, n], &dev)?;
+    let out = kiln_vulkan_kernel::vk_ops::matmul::vk_matmul(&a, &b)?;
+    let grad_fn = out.grad_fn().expect("matmul grad_fn").clone();
+    let adapter = VkBwdAdapter(Arc::clone(&grad_fn));
+
+    let dc = kt_vk_f32(&vec![1.0_f32 / (m * n) as f32; m * n], &[m, n])?;
+    let grads = adapter.apply(&dc)?;
+    assert_eq!(
+        adapter.input_count(),
+        grads.len(),
+        "input_count {} must equal backward() Vec length {}",
+        adapter.input_count(),
+        grads.len()
+    );
+    assert_eq!(adapter.input_count(), 2, "matmul has 2 inputs");
     Ok(())
 }
 
