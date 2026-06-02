@@ -940,6 +940,17 @@ fn vk_optimizer_step_from_grads(
                     let state = adamw_state
                         .get(&pid)
                         .with_context(|| format!("missing AdamW state for param {:?}", pid))?;
+                    // Restore the pre-PR1 early guard (adversarial-review fix):
+                    // the four inline AdamW sites this chokepoint replaced asserted
+                    // the persistent m/v state matched the param element count, so a
+                    // stale `VkAdamWState` errors on the host instead of indexing
+                    // out of bounds inside the SPIR-V kernel.
+                    anyhow::ensure!(
+                        state.n_elements == param.num_elements(),
+                        "{context}: AdamW state size mismatch ({} != {})",
+                        state.n_elements,
+                        param.num_elements()
+                    );
                     dispatch_adamw_step_buffers(
                         device,
                         param.buffer(),
