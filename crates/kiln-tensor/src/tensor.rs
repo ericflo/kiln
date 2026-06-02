@@ -650,13 +650,13 @@ impl Tensor {
             // most common CPU bounce on the Vulkan inference path (every
             // `transpose().contiguous()`, `narrow().contiguous()`, GQA expand).
             //
-            // F32 + rank ≤ 8 only (the kernel's envelope). BF16 / packed /
-            // over-rank tensors still take the correctness-first host gather:
-            // `vulkan_to_host_copy` walks the layout strides to a PACKED host
-            // image; re-uploading yields a fresh contiguous device buffer. On
-            // the Strix Halo UMA that bounce is a host memcpy, not a PCIe hop.
-            // A BF16 gather kernel is the obvious follow-up.
-            if self.dtype() == crate::DType::F32
+            // F32 + BF16 (the gather kernels' envelope), rank ≤ 8. Other
+            // dtypes / packed / over-rank tensors still take the
+            // correctness-first host gather: `vulkan_to_host_copy` walks the
+            // layout strides to a PACKED host image; re-uploading yields a
+            // fresh contiguous device buffer. On the Strix Halo UMA that
+            // bounce is a host memcpy, not a PCIe hop.
+            if matches!(self.dtype(), crate::DType::F32 | crate::DType::BF16)
                 && self.rank() <= kiln_vulkan_kernel::vk_ops::contiguous_gather::MAX_RANK
             {
                 return crate::vulkan_contiguous(self);

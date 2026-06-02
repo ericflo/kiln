@@ -551,13 +551,12 @@ pub fn vulkan_matmul_batched(a: &crate::Tensor, b: &crate::Tensor) -> Result<cra
 // vulkan_contiguous — on-device strided gather (kills the contiguous() bounce)
 // ----------------------------------------------------------------------
 
-/// Materialize a non-contiguous F32 Vulkan tensor into a fresh contiguous
-/// Vulkan tensor entirely on-device, via the `vk_gather_contiguous_f32`
-/// kernel. This replaces the correctness-first host bounce in
-/// [`crate::Tensor::contiguous`] (D2H per-element gather + H2D re-upload) for
-/// the F32 case — the single most common CPU round-trip on the Vulkan
-/// inference path (every `transpose().contiguous()`, `narrow().contiguous()`,
-/// GQA expand, …).
+/// Materialize a non-contiguous Vulkan tensor into a fresh contiguous Vulkan
+/// tensor entirely on-device, via the `vk_gather_contiguous_{f32,bf16}`
+/// kernels. This replaces the correctness-first host bounce in
+/// [`crate::Tensor::contiguous`] (D2H per-element gather + H2D re-upload) —
+/// the single most common CPU round-trip on the Vulkan inference path (every
+/// `transpose().contiguous()`, `narrow().contiguous()`, GQA expand, …).
 ///
 /// The input may be any strided/offset layout; its raw `shape` / element
 /// `strides` / element `start_offset` are passed straight to the gather
@@ -565,20 +564,22 @@ pub fn vulkan_matmul_batched(a: &crate::Tensor, b: &crate::Tensor) -> Result<cra
 ///
 /// # Requirements / fallback
 ///
-/// - F32, Vulkan-backed, `rank <= vk_ops::contiguous_gather::MAX_RANK` (8).
-///   The caller ([`crate::Tensor::contiguous`]) gates these and keeps the
-///   host path for anything outside the envelope (BF16, packed, rank > 8).
+/// - F32 or BF16, Vulkan-backed, `rank <= vk_ops::contiguous_gather::MAX_RANK`
+///   (8). The caller ([`crate::Tensor::contiguous`]) gates these and keeps the
+///   host path for anything outside the envelope (other dtypes, rank > 8).
 ///
 /// # Errors
 ///
-/// Returns [`Error::Msg`] on non-Vulkan storage, non-F32 dtype, over-rank
+/// Returns [`Error::Msg`] on non-Vulkan storage, unsupported dtype, over-rank
 /// input, or kernel dispatch failure.
 pub fn vulkan_contiguous(t: &crate::Tensor) -> Result<crate::Tensor> {
-    use kiln_vulkan_kernel::vk_ops::contiguous_gather::{vk_gather_contiguous_f32, MAX_RANK};
+    use kiln_vulkan_kernel::vk_ops::contiguous_gather::{
+        vk_gather_contiguous_bf16, vk_gather_contiguous_f32, MAX_RANK,
+    };
 
-    if t.dtype() != DType::F32 {
+    if !matches!(t.dtype(), DType::F32 | DType::BF16) {
         return Err(Error::Msg(format!(
-            "vulkan_contiguous: F32-only kernel (got {})",
+            "vulkan_contiguous: F32/BF16-only gather (got {})",
             t.dtype()
         )));
     }
@@ -605,8 +606,12 @@ pub fn vulkan_contiguous(t: &crate::Tensor) -> Result<crate::Tensor> {
     let strides = t.strides().to_vec();
     let start_offset = t.layout().start_offset();
 
-    let vk_out = vk_gather_contiguous_f32(device, &src, &shape, &strides, start_offset)
-        .map_err(|e| Error::Msg(format!("vulkan_contiguous: kernel dispatch failed: {e}")))?;
+    let vk_out = match t.dtype() {
+        DType::F32 => vk_gather_contiguous_f32(device, &src, &shape, &strides, start_offset),
+        DType::BF16 => vk_gather_contiguous_bf16(device, &src, &shape, &strides, start_offset),
+        _ => unreachable!("dtype gated to F32/BF16 above"),
+    }
+    .map_err(|e| Error::Msg(format!("vulkan_contiguous: kernel dispatch failed: {e}")))?;
     kt_tensor_from_vk(&vk_out, device_index)
 }
 
@@ -3014,6 +3019,87 @@ mod tests {
         let db: Vec<f32> = (0..5).map(|i| i as f32 * 2.0 - 3.0).collect();
         check(dev, &db, &[1, 5], "broadcast_expand", |t| {
             t.broadcast_as(vec![3usize, 5usize]).unwrap()
+        });
+    }
+
+    /// BF16 on-device `contiguous()` (the `vk_gather_contiguous_bf16` packed
+    /// gather) must match the CPU reference. BF16 elements are packed into
+    /// u32 words (one writer per output word) — this exercises the lane
+    /// pack/unpack on transpose / narrow / odd-length-row layouts. Values are
+    /// chosen exactly representable in BF16 so the comparison is byte-exact.
+    #[test]
+    fn vulkan_contiguous_gather_bf16_parity() {
+        if maybe_vulkan_device().is_none() {
+            eprintln!("skip: KILN_TENSOR_VULKAN_TEST unset or no Vulkan device");
+            return;
+        }
+        let dev = Device::Vulkan(0);
+
+        fn check_bf16(
+            dev: Device,
+            data: &[f32],
+            shape: &[usize],
+            label: &str,
+            view: impl Fn(&crate::Tensor) -> crate::Tensor,
+        ) {
+            // Build BF16 tensors on both devices from the same F32 source.
+            let cpu = crate::Tensor::from_slice(data, shape.to_vec())
+                .unwrap()
+                .to_dtype(DType::BF16)
+                .unwrap();
+            let cpu_ref: Vec<f32> = view(&cpu)
+                .contiguous()
+                .unwrap()
+                .to_dtype(DType::F32)
+                .unwrap()
+                .to_vec()
+                .unwrap();
+
+            let vk = crate::Tensor::from_vec_on(dev, data.to_vec(), shape.to_vec())
+                .unwrap()
+                .to_dtype(DType::BF16)
+                .unwrap();
+            assert_eq!(vk.device(), dev, "{label}: bf16 cast must stay on Vulkan");
+            let vk_view = view(&vk);
+            assert!(
+                !vk_view.is_contiguous(),
+                "{label}: view should be non-contiguous to exercise the gather"
+            );
+            let vk_contig = vk_view.contiguous().unwrap();
+            assert_eq!(vk_contig.device(), dev, "{label}: result must stay on Vulkan");
+            assert_eq!(vk_contig.dtype(), DType::BF16, "{label}: dtype must be BF16");
+            assert!(vk_contig.is_contiguous(), "{label}: result must be contiguous");
+            let got: Vec<f32> = vk_contig
+                .to_device(Device::Cpu)
+                .unwrap()
+                .to_dtype(DType::F32)
+                .unwrap()
+                .to_vec()
+                .unwrap();
+            assert_eq!(got.len(), cpu_ref.len(), "{label}: element count mismatch");
+            let mut max_abs = 0.0f32;
+            for (g, r) in got.iter().zip(cpu_ref.iter()) {
+                max_abs = max_abs.max((g - r).abs());
+            }
+            eprintln!("vulkan_contiguous_bf16[{label}]: max_abs_err = {max_abs:e}");
+            assert!(max_abs == 0.0, "{label}: bf16 gather diverges from CPU ref (max_abs={max_abs})");
+        }
+
+        // BF16-exact integer values.
+        // rank-2 transpose with ODD element count per word boundary: [3,5]->[5,3]
+        let d2: Vec<f32> = (0..15).map(|i| i as f32).collect();
+        check_bf16(dev, &d2, &[3, 5], "bf16_transpose_2d_odd", |t| t.t().unwrap());
+
+        // rank-4 last-two transpose (attention k.t()): [2,3,5,4]->[2,3,4,5]
+        let d4: Vec<f32> = (0..2 * 3 * 5 * 4).map(|i| (i % 64) as f32).collect();
+        check_bf16(dev, &d4, &[2, 3, 5, 4], "bf16_transpose_last2_rank4", |t| {
+            t.transpose(2, 3).unwrap()
+        });
+
+        // strided narrow (non-zero start_offset): [4,6]->[4,3]@2
+        let dn: Vec<f32> = (0..24).map(|i| i as f32).collect();
+        check_bf16(dev, &dn, &[4, 6], "bf16_narrow_offset", |t| {
+            t.narrow(1, 2, 3).unwrap()
         });
     }
 }

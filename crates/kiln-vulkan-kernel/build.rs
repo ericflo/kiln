@@ -385,6 +385,10 @@ const SHADERS: &[(&str, &str)] = &[
         "vk_gather_contiguous_f32",
         "SPIR_V_VK_GATHER_CONTIGUOUS_F32",
     ),
+    (
+        "vk_gather_contiguous_bf16",
+        "SPIR_V_VK_GATHER_CONTIGUOUS_BF16",
+    ),
     ("vk_permute_rh_to_hr_f32", "SPIR_V_VK_PERMUTE_RH_TO_HR_F32"),
     (
         "vk_permute_rh_to_hr_f32_offset",
