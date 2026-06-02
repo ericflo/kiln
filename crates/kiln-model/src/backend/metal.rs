@@ -536,12 +536,25 @@ impl BackendRuntime for MetalBackend {
                 second_moment.element_count(),
             );
         }
-        // BF16 master: decline to the host AdamW so its stochastic-rounding
-        // path is preserved (the kt kernel only does round-to-nearest F32).
-        // The metal kernel wrapper itself rejects non-F32, so this also
-        // covers F16; declining keeps parity with the host reference.
-        if param.dtype() != kiln_tensor::DType::F32 {
+        // F32 + BF16 run on-device (BF16 with round-to-nearest, matching
+        // Vulkan's BF16 dispatch_adamw_step arm + the default round-to-nearest
+        // host policy). BF16 declines to the host AdamW ONLY when stochastic
+        // rounding is opt-in (`KILN_BF16_STOCHASTIC_ROUND=1|true|yes`), so the
+        // host's stochastic-rounding master update is preserved — strictly more
+        // correct than Vulkan, which ignores stochastic rounding on-device.
+        // F16 isn't a production master dtype; decline it.
+        let dt = param.dtype();
+        if dt == kiln_tensor::DType::F16 {
             return Ok(false);
+        }
+        if dt == kiln_tensor::DType::BF16 {
+            let stochastic = std::env::var("KILN_BF16_STOCHASTIC_ROUND")
+                .ok()
+                .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+                .unwrap_or(false);
+            if stochastic {
+                return Ok(false);
+            }
         }
         static FIRST_ADAMW_LOGGED: OnceLock<()> = OnceLock::new();
         FIRST_ADAMW_LOGGED.get_or_init(|| {
@@ -19468,6 +19481,116 @@ mod adamw_kt_tests {
         backend.evict_resident_activation(&met_m);
         backend.evict_resident_activation(&met_v);
         assert!(!backend.has_resident_activation(&met_param));
+        Ok(())
+    }
+
+    /// BF16-master reference: mirrors the Metal kernel exactly — read each
+    /// operand BF16→f32, run the AdamW math in f32, write the moments + master
+    /// back as round-to-nearest BF16 (so the *stored* moments are lossy, the
+    /// on-device convention shared with CUDA/Vulkan). Round-to-nearest-even
+    /// matches MSL's `(bfloat)` conversion.
+    #[allow(clippy::too_many_arguments)]
+    fn host_adamw_step_bf16(
+        param: &mut [half::bf16],
+        m: &mut [half::bf16],
+        v: &mut [half::bf16],
+        grad: &[half::bf16],
+        lr: f32,
+        beta1: f32,
+        beta2: f32,
+        eps: f32,
+        weight_decay: f32,
+        step: u32,
+    ) {
+        let stepf = step as f32;
+        let bc1 = 1.0 - beta1.powf(stepf);
+        let bc2 = 1.0 - beta2.powf(stepf);
+        for i in 0..param.len() {
+            let g = grad[i].to_f32();
+            let mf = beta1 * m[i].to_f32() + (1.0 - beta1) * g;
+            let vf = beta2 * v[i].to_f32() + (1.0 - beta2) * g * g;
+            let m_hat = mf / bc1;
+            let v_hat = vf / bc2;
+            let update = lr * (m_hat / (v_hat.sqrt() + eps));
+            let mut pf = param[i].to_f32();
+            pf -= lr * weight_decay * pf;
+            pf -= update;
+            m[i] = half::bf16::from_f32(mf);
+            v[i] = half::bf16::from_f32(vf);
+            param[i] = half::bf16::from_f32(pf);
+        }
+    }
+
+    /// On-device BF16 AdamW (the real LoRA-training dtype) must match the BF16
+    /// reference bit-for-bit: same f32 math, same round-to-nearest BF16 store.
+    /// This is the on-device path actually exercised by the SFT/GRPO/OPD/GDN
+    /// training smokes (their masters are BF16).
+    #[test]
+    fn dispatch_adamw_step_matches_bf16_reference() -> anyhow::Result<()> {
+        let Some(dev) = metal_device() else {
+            eprintln!("Metal unavailable, skipping dispatch_adamw_step_matches_bf16_reference");
+            return Ok(());
+        };
+        let n = 257usize;
+        let (lr, beta1, beta2, eps, weight_decay) = (0.013f32, 0.9f32, 0.999f32, 1e-8f32, 0.02f32);
+        let steps = 5u32;
+
+        let to_bf16 = |xs: &[f32]| -> Vec<half::bf16> {
+            xs.iter().map(|&x| half::bf16::from_f32(x)).collect()
+        };
+        let param0: Vec<half::bf16> =
+            to_bf16(&(0..n).map(|i| ((i as f32 * 0.017) - 2.1).sin() * 0.5).collect::<Vec<_>>());
+        let grads: Vec<Vec<half::bf16>> = (1..=steps)
+            .map(|s| {
+                to_bf16(
+                    &(0..n)
+                        .map(|i| ((i as f32 + s as f32 * 1.7) * 0.031).cos() * 0.08)
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect();
+
+        let mut h_param = param0.clone();
+        let mut h_m = vec![half::bf16::ZERO; n];
+        let mut h_v = vec![half::bf16::ZERO; n];
+
+        let met_param = Tensor::from_vec_on(dev, param0.clone(), vec![n])?;
+        let met_m = Tensor::from_vec_on(dev, vec![half::bf16::ZERO; n], vec![n])?;
+        let met_v = Tensor::from_vec_on(dev, vec![half::bf16::ZERO; n], vec![n])?;
+        assert_eq!(met_param.dtype(), DType::BF16);
+
+        let backend = MetalBackend::new(dev);
+        backend.register_resident_activation(&met_param)?;
+        backend.register_resident_activation(&met_m)?;
+        backend.register_resident_activation(&met_v)?;
+
+        for s in 1..=steps {
+            let g = &grads[(s - 1) as usize];
+            host_adamw_step_bf16(
+                &mut h_param, &mut h_m, &mut h_v, g, lr, beta1, beta2, eps, weight_decay, s,
+            );
+            let met_grad = Tensor::from_vec_on(dev, g.clone(), vec![n])?;
+            backend.register_resident_activation(&met_grad)?;
+            let dispatched = backend.dispatch_adamw_step(
+                &met_param, &met_grad, &met_m, &met_v, lr, beta1, beta2, eps, weight_decay, s,
+            )?;
+            assert!(dispatched, "BF16 dispatch_adamw_step must take the on-device path (step {s})");
+            backend.evict_resident_activation(&met_grad);
+        }
+
+        let g_param = met_param.to_device(Device::Cpu)?.to_vec::<half::bf16>()?;
+        let g_m = met_m.to_device(Device::Cpu)?.to_vec::<half::bf16>()?;
+        let g_v = met_v.to_device(Device::Cpu)?.to_vec::<half::bf16>()?;
+        // Bit-exact expected (identical f32 math + round-to-nearest store); allow
+        // a hair for any MSL-vs-Rust sqrt/div last-bit nuance.
+        let f = |a: &[half::bf16]| a.iter().map(|x| x.to_f32()).collect::<Vec<_>>();
+        let dp = max_abs_diff(&f(&g_param), &f(&h_param));
+        let dm = max_abs_diff(&f(&g_m), &f(&h_m));
+        let dv = max_abs_diff(&f(&g_v), &f(&h_v));
+        eprintln!("adamw bf16 parity (n={n}, {steps} steps): max|Δp|={dp:e} max|Δm|={dm:e} max|Δv|={dv:e}");
+        assert!(dp < 1e-2, "bf16 param diverged: {dp:e}");
+        assert!(dm < 1e-3, "bf16 m diverged: {dm:e}");
+        assert!(dv < 1e-4, "bf16 v diverged: {dv:e}");
         Ok(())
     }
 

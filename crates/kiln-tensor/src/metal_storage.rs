@@ -2148,9 +2148,13 @@ pub fn metal_adamw_step(
         )));
     }
     let dtype = param.dtype();
-    if dtype != DType::F32 {
+    // F32/BF16/F16 master+moments — the kernel reads each as its dtype, computes
+    // in float, and writes back as the dtype (round-to-nearest for BF16/F16,
+    // matching Vulkan's BF16 AdamW arm). BF16 moments are the on-device
+    // master-dtype convention (`allocate_adamw_state`), as on CUDA/Vulkan.
+    if !matches!(dtype, DType::F32 | DType::BF16 | DType::F16) {
         return Err(Error::Msg(format!(
-            "metal_adamw_step: only F32 master/moments supported, got {dtype}"
+            "metal_adamw_step: unsupported dtype {dtype} (expected F32/BF16/F16)"
         )));
     }
     if grad.dtype() != dtype || m.dtype() != dtype || v.dtype() != dtype {
