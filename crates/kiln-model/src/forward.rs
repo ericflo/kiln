@@ -32060,13 +32060,25 @@ mod tests {
 
         let x_f32 = Tensor::from_slice(&x_data, (batch, channels, 1))?.to_device(device)?;
         let w_f32 = Tensor::from_slice(&w_data, (channels, 1, kernel_size))?.to_device(device)?;
-        let s_init = Tensor::from_slice(&s_data, (batch, channels, kernel_size - 1))?.to_device(device)?;
 
         let x = x_f32.to_dtype(DType::BF16)?;
         let w = w_f32.to_dtype(DType::BF16)?;
 
-        // Fallback path: candle decode + silu in F32.
-        let mut s_fb = s_init.clone();
+        // IMPORTANT: `causal_conv1d_decode` (the fallback) updates the conv-state
+        // *truly in place* (`conv_state.slice_set(...)`, kept stable for CUDA-graph
+        // pointer capture), and `Tensor::clone()` shares the underlying storage Arc
+        // (cheap view-clone, NOT a deep copy). So the fallback and the fused kernel
+        // MUST run on independent state buffers — a single `s_init.clone()` for both
+        // would let the fallback's in-place update corrupt the shared buffer before
+        // the kernel reads it, feeding the kernel the post-update state and producing
+        // a spurious ~5.6e-2 "mismatch" that is purely a harness aliasing artifact
+        // (the state-parity assert would also trivially pass, comparing the buffer to
+        // itself). Build each from the host `s_data` so neither aliases. (Mirrors the
+        // `_metal` sibling fix; prefill tests are exempt because `causal_conv1d_prefill*`
+        // rebinds `*conv_state` to a fresh tensor instead of mutating in place.)
+        // Fallback path: portable decode + silu in F32.
+        let mut s_fb =
+            Tensor::from_slice(&s_data, (batch, channels, kernel_size - 1))?.to_device(device)?;
         let out_fb = causal_conv1d_decode(&x, &w, &mut s_fb, kernel_size)?;
         let out_fb = cuda_silu(&out_fb.to_dtype(DType::F32)?)?;
 
@@ -32078,7 +32090,8 @@ mod tests {
             );
             return Ok(());
         }
-        let mut s_k = s_init.clone();
+        let mut s_k =
+            Tensor::from_slice(&s_data, (batch, channels, kernel_size - 1))?.to_device(device)?;
         let out_k = match backend.causal_conv1d_update(&x, &w, &mut s_k, kernel_size)? {
             Some(t) => t,
             None => {
