@@ -212,31 +212,14 @@ impl PagedKvCacheKt {
                     })?;
                     (k, v)
                 }
-                #[cfg(feature = "vulkan")]
-                kiln_tensor::Device::Vulkan(i) => {
-                    // Vulkan-resident KV pools so the prefill paged-KV write
-                    // (Vulkan slice_set, device-to-device) and the decode
-                    // reads stay on-device — no host bounce. BF16 pools are
-                    // supported by `vulkan_zeros`.
-                    let _ = n_elements;
-                    let k = KtTensor::zeros_on(
-                        kiln_tensor::Device::Vulkan(i),
-                        shape.clone(),
-                        storage_dtype,
-                    )
-                    .map_err(|e| {
-                        anyhow::anyhow!("kt paged-kv: alloc k_pool (vulkan) layer {_i}: {e}")
-                    })?;
-                    let v = KtTensor::zeros_on(
-                        kiln_tensor::Device::Vulkan(i),
-                        shape.clone(),
-                        storage_dtype,
-                    )
-                    .map_err(|e| {
-                        anyhow::anyhow!("kt paged-kv: alloc v_pool (vulkan) layer {_i}: {e}")
-                    })?;
-                    (k, v)
-                }
+                // Vulkan: keep the kt KV pool HOST-resident (CPU). It is the
+                // seed cache that the resident decode path mirrors into the
+                // device-local VkPagedKvCache; allocating the kt pool ALSO on
+                // VRAM made the two ~24GB KV caches collide and OOM'd the
+                // VkPagedKvCache (resident decode then declined). The prefill
+                // write moves its small K/V rows to this CPU pool via the
+                // device-aligned slice_set in write_native. (Unifying prefill
+                // + decode on one VkPagedKvCache is the perf follow-up.)
                 other => {
                     // Any GPU device whose backend feature isn't compiled in →
                     // host-resident CPU pools (matches the prior
@@ -1118,6 +1101,30 @@ impl PagedKvCacheKt {
                 .to_dtype(v_pool.dtype())
                 .map_err(|e| anyhow::anyhow!("kt pkv write_native: cast v to pool dtype: {e}"))?;
             &v_cast
+        } else {
+            v
+        };
+
+        // Align K/V to the pool's device so the dim-0 `slice_set` scatter runs
+        // on one device. The pool is the CPU seed cache that resident decode
+        // mirrors into VkPagedKvCache, while the Vulkan attention path produced
+        // K/V on-device — move the small per-token K/V rows to the pool device.
+        // No-op when already co-located.
+        let k_dev;
+        let k = if k.device() != k_pool.device() {
+            k_dev = k
+                .to_device(k_pool.device())
+                .map_err(|e| anyhow::anyhow!("kt pkv write_native: move k to pool device: {e}"))?;
+            &k_dev
+        } else {
+            k
+        };
+        let v_dev;
+        let v = if v.device() != v_pool.device() {
+            v_dev = v
+                .to_device(v_pool.device())
+                .map_err(|e| anyhow::anyhow!("kt pkv write_native: move v to pool device: {e}"))?;
+            &v_dev
         } else {
             v
         };
