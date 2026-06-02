@@ -18688,9 +18688,20 @@ fn try_flash_attn_paged_decode(
     if padded.is_empty() {
         return Ok(None);
     }
+    // #1082: pad the tail by REPEATING the last real block id, never `last + 1`.
+    // At block_size >= kBlockN (the #1082 default 64) pages_per_chunk = 1, so the
+    // FA2 split-KV kernel reads EVERY block_table entry [0..n_block_max-1] as a
+    // raw physical page id. An incrementing pad off the last real page can exceed
+    // num_blocks (~12174 at block_size=64) — harmless when rebuilt eagerly each
+    // step, but FATAL once baked into a captured CUDA graph (CUDA_ERROR_ILLEGAL_
+    // ADDRESS on the first replay under concurrency, where blocks.len() <
+    // max_blocks_per_seq so padding is actually appended). Repeat-last keeps every
+    // entry a valid in-pool page; the padded tail is beyond actual_seqlen_k so it
+    // is masked and never semantically read. Matches the box-102 fix in
+    // cuda_graph.rs::padded_block_table.
+    let pad_block = *padded.last().expect("padded is non-empty (checked above)");
     while padded.len() < max_blocks_per_seq {
-        let next = padded.last().copied().unwrap_or(0).wrapping_add(1);
-        padded.push(next);
+        padded.push(pad_block);
     }
 
     let device = q.device();
