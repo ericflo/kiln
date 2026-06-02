@@ -90,7 +90,7 @@ use anyhow::{Context, Result, anyhow};
 /// On Metal the FORWARD + loss record onto the tape; the recorded backward
 /// (`CudaOpdTopKReverseKlPhaseBBackward::apply`) is CUDA-FFI-only and `bail!`s
 /// on Metal — the OPD Metal backward is a documented follow-up.
-#[cfg(any(feature = "cuda", feature = "metal"))]
+#[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
 pub fn try_tape_opd_scalar_mean_cuda_kt(
     hidden: &kiln_tensor::Tensor,
     head_t: &kiln_tensor::Tensor,

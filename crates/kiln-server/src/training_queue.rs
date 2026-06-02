@@ -412,21 +412,12 @@ fn native_training_env_enabled(name: &str) -> bool {
     env_tristate(name).unwrap_or(false)
 }
 
-fn vk_native_sft_enabled(backend_name: &str) -> bool {
-    match env_tristate("KILN_VK_NATIVE_TRAINING") {
-        Some(enabled) => enabled,
-        None => {
-            #[cfg(feature = "vulkan")]
-            {
-                backend_name == "vulkan"
-            }
-            #[cfg(not(feature = "vulkan"))]
-            {
-                let _ = backend_name;
-                false
-            }
-        }
-    }
+fn vk_native_sft_enabled(_backend_name: &str) -> bool {
+    // PR6 (#1082): Vulkan training now defaults to the SHARED trainer.rs
+    // kt-tape path (like CUDA/Metal), not the legacy vk_train.rs fork.
+    // `KILN_VK_NATIVE_TRAINING=1` is the explicit opt-OUT that re-selects the
+    // fork for one release (the fork is deleted in PR7). Unset => shared path.
+    env_tristate("KILN_VK_NATIVE_TRAINING").unwrap_or(false)
 }
 
 fn vk_native_grpo_enabled(backend_name: &str) -> bool {

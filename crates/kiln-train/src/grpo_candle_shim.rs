@@ -82,15 +82,15 @@
 //!   derivation handles every variant uniformly because it just re-runs
 //!   `grpo_loss`.
 
-#[cfg(any(feature = "cuda", feature = "metal"))]
+#[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
 use crate::cd_types::CdDevice;
-#[cfg(any(feature = "cuda", feature = "metal"))]
+#[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
 use crate::trainer::{grpo_loss, token_log_probs, GrpoLossParams};
-#[cfg(any(feature = "cuda", feature = "metal"))]
+#[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
 use anyhow::{Context, Result};
 // (#1082) candle Tensor import removed — the GRPO PG loss adapter returns
 // `kiln_tensor::Tensor` (kt-native); no candle type remains in this module.
-#[cfg(any(feature = "cuda", feature = "metal"))]
+#[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
 use kiln_autograd::{tape_forward_enabled, with_active_tape, BackwardOp, Tape};
 
 /// Fused backward for the GRPO scalar PG (+ KL) loss taken from the full
@@ -105,7 +105,7 @@ use kiln_autograd::{tape_forward_enabled, with_active_tape, BackwardOp, Tape};
 /// `requires_input` returns `false`: the backward recomputes the forward gather
 /// from the SAVED `logits`, so the tape walker need not re-materialise the input
 /// activation (mirrors `CrossEntropyFromLogitsBackward`).
-#[cfg(any(feature = "cuda", feature = "metal"))]
+#[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
 #[derive(Debug)]
 struct GrpoPgLossFromLogitsBackward {
     /// FULL forward logits `[1, T, V]` as a kt tensor (an `Arc` bump on the kt
@@ -127,7 +127,7 @@ struct GrpoPgLossFromLogitsBackward {
     device: CdDevice,
 }
 
-#[cfg(any(feature = "cuda", feature = "metal"))]
+#[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
 impl BackwardOp for GrpoPgLossFromLogitsBackward {
     fn name(&self) -> &'static str {
         "grpo_pg_loss_from_logits_backward"
@@ -195,7 +195,7 @@ impl BackwardOp for GrpoPgLossFromLogitsBackward {
 /// the CISPO analytic coeff (the KL grad it adds must respect the same gate).
 ///
 /// ⚠ DRIFT COUPLING with `grpo_loss`'s entropy-quantile block — keep in lockstep.
-#[cfg(any(feature = "cuda", feature = "metal"))]
+#[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
 fn cispo_entropy_kl_mask(plp_host: &[f32], loss_params: &GrpoLossParams) -> Vec<f64> {
     let n = plp_host.len();
     match loss_params.entropy_aware_kl_quantile {
@@ -226,7 +226,7 @@ fn cispo_entropy_kl_mask(plp_host: &[f32], loss_params: &GrpoLossParams) -> Vec<
 /// * `ref_log_probs_kt` — `[num_active]` detached reference log-probs.
 /// * `loss_params` — the GRPO surrogate / KL params.
 /// * `grad_scalar` — the upstream scalar seed `dL/dloss` (backward is linear).
-#[cfg(any(feature = "cuda", feature = "metal"))]
+#[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
 fn grpo_pg_loss_from_logits_grad_kt(
     logits_kt: &kiln_tensor::Tensor,
     input_ids: &[u32],
@@ -492,7 +492,7 @@ fn grpo_pg_loss_from_logits_grad_kt(
 ///   path if the envelope is unmet (the dispatch device-/ECHO-gates it); this
 ///   surfaces a clean `None` so a misdispatch is caught.
 /// * `Err(...)` — an unexpected forward or kt -> candle copy-back failure.
-#[cfg(any(feature = "cuda", feature = "metal"))]
+#[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
 pub(crate) fn try_tape_grpo_pg_loss_from_logits_kt(
     logits_kt: &kiln_tensor::Tensor,
     input_ids: &[u32],

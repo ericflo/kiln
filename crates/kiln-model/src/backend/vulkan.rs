@@ -1805,7 +1805,7 @@ impl BackendRuntime for VulkanBackend {
             lora_delta_training: "kt-tape-recorded LoRA delta (legacy autograd wrapper removed #1082)",
             sgd_step: "Vulkan in-place registry update when operands are resident",
             adamw_step: "Vulkan in-place registry update when operands are resident",
-            native_training: "vk_native_sft_train/vk_native_grpo_train enabled by default on Vulkan",
+            native_training: "shared trainer.rs kt-tape path by default (PR6 #1082); legacy vk_native_* fork is opt-out via KILN_VK_NATIVE_TRAINING=1",
         }
     }
 
