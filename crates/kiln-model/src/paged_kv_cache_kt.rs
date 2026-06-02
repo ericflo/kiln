@@ -55,9 +55,11 @@ use anyhow::Context;
 // so this drops two candle imports without changing runtime behavior.
 // Pattern lifted from kiln-tensor commit 4ee1b7f9 and kiln-blas commit
 // 0d201199. As of the candle-drop (#1082), the public `PagedKvCacheKt::new*`
-// surface takes a `device_index: usize` instead of an
-// `Arc<candle_core::cuda_backend::CudaDevice>` — allocation routes through
-// `cuda_zeros_ctx(device_index, ..)` — so this file carries no candle import.
+// surface takes a `device: kiln_tensor::Device` instead of an
+// `Arc<candle_core::cuda_backend::CudaDevice>`; allocation routes on the
+// model's *runtime* device (CPU → `zeros_cpu`, `Cuda(i)` → `cuda_zeros_ctx(i,
+// ..)`, `Metal(i)` → `zeros_on(Device::Metal(i), ..)`) — so this file carries
+// no candle import.
 #[cfg(feature = "cuda")]
 use cudarc::driver::result as cudarc_result;
 
@@ -101,10 +103,14 @@ impl PagedKvCacheKt {
     /// Create a new paged KV cache with zero-filled pre-allocated pool
     /// tensors. Replaces the candle `PagedKvCache::new` (#1082 candle-drop).
     ///
-    /// `device_index` selects the CUDA device the pools are allocated on
-    /// (allocation routes through [`cuda_zeros_ctx`]). The candle
-    /// `Arc<CudaDevice>` parameter the old surface carried is gone — kiln
-    /// is single-GPU, so the device index is the only placement input.
+    /// `device` selects the device the pools are allocated on. The pools
+    /// MUST live on the model's *runtime* device (not a compile-time
+    /// feature-gated default) so the per-layer K/V `slice_set` writes match
+    /// the model's tensors and don't trip `Tensor::slice_set: device
+    /// mismatch`. CUDA routes through [`cuda_zeros_ctx`]; Metal through
+    /// `zeros_on(Device::Metal, ..)`; CPU (and any GPU backend whose feature
+    /// isn't compiled in, e.g. Vulkan whose kt pools are CPU-resident)
+    /// through host-resident `zeros_cpu`.
     pub fn new(
         num_full_attn_layers: usize,
         num_blocks: usize,
@@ -112,7 +118,7 @@ impl PagedKvCacheKt {
         num_kv_heads: usize,
         head_dim: usize,
         dtype: KtDType,
-        device_index: usize,
+        device: kiln_tensor::Device,
     ) -> Result<Self> {
         Self::new_with_fp8(
             num_full_attn_layers,
@@ -121,7 +127,7 @@ impl PagedKvCacheKt {
             num_kv_heads,
             head_dim,
             dtype,
-            device_index,
+            device,
             false,
         )
     }
@@ -137,7 +143,7 @@ impl PagedKvCacheKt {
         num_kv_heads: usize,
         head_dim: usize,
         dtype: KtDType,
-        device_index: usize,
+        device: kiln_tensor::Device,
         fp8: bool,
     ) -> Result<Self> {
         let storage_dtype = if fp8 { KtDType::U8 } else { dtype };
@@ -147,58 +153,76 @@ impl PagedKvCacheKt {
 
         let mut layers = Vec::with_capacity(num_full_attn_layers);
         for _i in 0..num_full_attn_layers {
-            // #1082 all-hardware: CUDA allocates the pools on the selected
-            // device via `cuda_zeros_ctx`; the Vulkan/CPU build allocates
-            // host-resident kt pools via `Tensor::zeros_cpu` — exactly what
-            // the deleted candle cache did for the Vulkan backend (it held
-            // CPU candle tensors). `device_index` is unused on the CPU path.
-            #[cfg(feature = "cuda")]
-            let (k, v) = {
-                let k_storage = cuda_zeros_ctx(device_index, storage_dtype, n_elements)
-                    .with_context(|| format!("kt paged-kv: alloc k_pool layer {_i}"))?;
-                let v_storage = cuda_zeros_ctx(device_index, storage_dtype, n_elements)
-                    .with_context(|| format!("kt paged-kv: alloc v_pool layer {_i}"))?;
-                let k = KtTensor::from_parts(
-                    k_storage,
-                    Layout::contiguous(shape.clone()),
-                    TensorId::next(),
-                )
-                .with_context(|| format!("kt paged-kv: wrap k_pool layer {_i}"))?;
-                let v = KtTensor::from_parts(
-                    v_storage,
-                    Layout::contiguous(shape.clone()),
-                    TensorId::next(),
-                )
-                .with_context(|| format!("kt paged-kv: wrap v_pool layer {_i}"))?;
-                (k, v)
-            };
-            // #1082 Metal: the paged-KV pools must live on the Metal device so
-            // the Metal paged-attention kernels read them and `slice_set` writes
-            // Metal K/V into them without a cross-device mismatch. Allocated via
-            // the kt `zeros_on(Device::Metal, ..)` UMA path.
-            #[cfg(all(not(feature = "cuda"), feature = "metal"))]
-            let (k, v) = {
-                let _ = n_elements;
-                let k = KtTensor::zeros_on(
-                    kiln_tensor::Device::Metal(device_index),
-                    shape.clone(),
-                    storage_dtype,
-                )
-                .map_err(|e| anyhow::anyhow!("kt paged-kv: alloc k_pool (metal) layer {_i}: {e}"))?;
-                let v = KtTensor::zeros_on(
-                    kiln_tensor::Device::Metal(device_index),
-                    shape.clone(),
-                    storage_dtype,
-                )
-                .map_err(|e| anyhow::anyhow!("kt paged-kv: alloc v_pool (metal) layer {_i}: {e}"))?;
-                (k, v)
-            };
-            #[cfg(all(not(feature = "cuda"), not(feature = "metal")))]
-            let (k, v) = {
-                let _ = (device_index, n_elements);
-                let k = KtTensor::zeros_cpu(shape.clone(), storage_dtype);
-                let v = KtTensor::zeros_cpu(shape.clone(), storage_dtype);
-                (k, v)
+            // #1082 device-routing fix: allocate the pools on the model's
+            // *runtime* device, matched at runtime (NOT a compile-time
+            // feature-gated default). Each arm keeps its `#[cfg]` so only the
+            // compiled-in backends' allocators are referenced. CPU pools are
+            // `zeros_cpu`; CUDA pools route through `cuda_zeros_ctx(i, ..)`;
+            // Metal pools through the kt `zeros_on(Device::Metal(i), ..)` UMA
+            // path. Vulkan (kt vulkan tensors are CPU-resident) and any GPU
+            // device whose backend feature isn't compiled in fall to the
+            // host-resident `zeros_cpu` default — matching the prior
+            // non-cuda/non-metal behavior, and exactly what the deleted candle
+            // cache did for the Vulkan backend (it held CPU candle tensors).
+            let (k, v) = match device {
+                kiln_tensor::Device::Cpu => {
+                    let _ = n_elements;
+                    let k = KtTensor::zeros_cpu(shape.clone(), storage_dtype);
+                    let v = KtTensor::zeros_cpu(shape.clone(), storage_dtype);
+                    (k, v)
+                }
+                #[cfg(feature = "cuda")]
+                kiln_tensor::Device::Cuda(i) => {
+                    let k_storage = cuda_zeros_ctx(i, storage_dtype, n_elements)
+                        .with_context(|| format!("kt paged-kv: alloc k_pool layer {_i}"))?;
+                    let v_storage = cuda_zeros_ctx(i, storage_dtype, n_elements)
+                        .with_context(|| format!("kt paged-kv: alloc v_pool layer {_i}"))?;
+                    let k = KtTensor::from_parts(
+                        k_storage,
+                        Layout::contiguous(shape.clone()),
+                        TensorId::next(),
+                    )
+                    .with_context(|| format!("kt paged-kv: wrap k_pool layer {_i}"))?;
+                    let v = KtTensor::from_parts(
+                        v_storage,
+                        Layout::contiguous(shape.clone()),
+                        TensorId::next(),
+                    )
+                    .with_context(|| format!("kt paged-kv: wrap v_pool layer {_i}"))?;
+                    (k, v)
+                }
+                #[cfg(feature = "metal")]
+                kiln_tensor::Device::Metal(i) => {
+                    let _ = n_elements;
+                    let k = KtTensor::zeros_on(
+                        kiln_tensor::Device::Metal(i),
+                        shape.clone(),
+                        storage_dtype,
+                    )
+                    .map_err(|e| {
+                        anyhow::anyhow!("kt paged-kv: alloc k_pool (metal) layer {_i}: {e}")
+                    })?;
+                    let v = KtTensor::zeros_on(
+                        kiln_tensor::Device::Metal(i),
+                        shape.clone(),
+                        storage_dtype,
+                    )
+                    .map_err(|e| {
+                        anyhow::anyhow!("kt paged-kv: alloc v_pool (metal) layer {_i}: {e}")
+                    })?;
+                    (k, v)
+                }
+                other => {
+                    // Vulkan (kt vulkan tensors are CPU-resident) + any GPU
+                    // device whose backend feature isn't compiled in →
+                    // host-resident CPU pools (matches the prior
+                    // non-cuda/non-metal default).
+                    let _ = other;
+                    let _ = n_elements;
+                    let k = KtTensor::zeros_cpu(shape.clone(), storage_dtype);
+                    let v = KtTensor::zeros_cpu(shape.clone(), storage_dtype);
+                    (k, v)
+                }
             };
             layers.push((k, v));
         }

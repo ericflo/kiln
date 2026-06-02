@@ -1949,22 +1949,33 @@ pub fn tape_gdn_gated_norm_enabled() -> bool {
 
 
 
-/// Candle-composite tape backward for the GDN PREFILL causal depthwise conv1d
-/// (`forward::causal_conv1d_prefill`, the `[B, C, T]` candle path the training
-/// forward takes when `gdn_forward_only_fastpaths` is OFF). Wraps the proven
-/// CUDA bwd-input kernel `causal_depthwise_conv1d_f32_bwd_input` (the kt kernel
-/// in `kiln-rmsnorm-kernel`, the SAME kernel the eager `cuda_train.rs` GDN
-/// backward uses), handling the
+/// Tape backward (w.r.t. input) for the GDN PREFILL causal depthwise conv1d
+/// (`forward::causal_conv1d_prefill`, the `[B, C, T]` path the training forward
+/// takes when `gdn_forward_only_fastpaths` is OFF), handling the
 /// `[B, C, T]` ↔ `[rows, channels]` layout transform.
 ///
-/// # Why a candle composite (not the existing `try_tape_causal_conv1d_cuda`)
+/// # Device-agnostic bwd routing (#1082 Metal GDN)
+///
+/// The `[rows, channels]` input gradient is computed two ways, both numerically
+/// identical (FD-gradient-checked + an explicit-index-loop equality test in
+/// `kiln_tensor::ops::causal_conv1d_bwd`):
+///
+/// - `Device::Cuda(_)`: the proven CUDA bwd-input kernel
+///   `causal_depthwise_conv1d_bwd_input_kt` (the SAME kernel the eager
+///   `cuda_train.rs` GDN backward uses), unchanged. CUDA path is byte-identical.
+/// - `Device::Cpu` / `Device::Metal(_)`: the device-agnostic kt composite
+///   `causal_depthwise_conv1d_bwd_input_composite` (pure `kiln_tensor` ops:
+///   pad / narrow / broadcast-mul / add — no FFI), which unblocks GDN-layer
+///   LoRA training on Metal.
+///
+/// # Why a dedicated op (not the existing `try_tape_causal_conv1d_cuda`)
 ///
 /// The existing `try_tape_causal_conv1d_cuda` / `CausalConv1dInputBackward`
 /// wraps the `[rows, channels]` DECODE/UPDATE kernel
 /// (`causal_depthwise_conv1d_kt`) — a DIFFERENT kernel with a different layout
 /// contract than the `[B, C, T]` prefill path. Reusing it here would compute
-/// the wrong forward. This composite wraps the prefill bwd-input kernel
-/// instead, on the `[B, C, T]` layout the production prefill forward uses.
+/// the wrong forward. This op wraps the prefill bwd-input on the `[B, C, T]`
+/// layout the production prefill forward uses.
 ///
 /// # Saved tensors / inputs
 ///
@@ -2212,6 +2223,14 @@ pub fn try_tape_causal_conv1d_prefill_kt(
     if !tape_forward_enabled() || !tape_gdn_conv_enabled() {
         return Ok(None);
     }
+    // The bwd is available with any GPU-training backend: CUDA FFI kernel, or the
+    // device-agnostic kt composite for Metal/Vulkan. Declines when none is on.
+    #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan")))]
+    {
+        let _ = (input, weight, out, kernel);
+        return Ok(None);
+    }
+    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
     {
     // The recorded backward is device-agnostic (CUDA FFI / kt composite), so the
     // recorder admits CUDA, Metal, and Vulkan. CPU is excluded here only because

@@ -922,6 +922,69 @@ pub fn metal_log_softmax_last_axis(x: &crate::Tensor) -> Result<crate::Tensor> {
     )
 }
 
+/// Inclusive prefix-sum (`cumsum`) along `axis` on the Metal backend — kt-native
+/// MSL scan (`metal_kernels::cumsum_axis`), no host round-trip. Output dtype ==
+/// input dtype, F32 accumulation (bit-matching the CPU + CUDA references). The
+/// caller (`ops::cumsum`) validates rank/dtype/contiguity.
+pub fn metal_cumsum_axis(x: &crate::Tensor, axis: usize) -> Result<crate::Tensor> {
+    use crate::metal_rt::MTLResourceOptions;
+
+    let dtype = x.dtype();
+    let dtype_size: usize = match dtype {
+        DType::F32 => 4,
+        DType::BF16 | DType::F16 => 2,
+        other => {
+            return Err(Error::Msg(format!(
+                "metal_cumsum_axis: unsupported dtype {other}"
+            )));
+        }
+    };
+    let kt_metal = x
+        .storage()
+        .as_any()
+        .downcast_ref::<MetalStorage>()
+        .ok_or_else(|| Error::Msg("metal_cumsum_axis: input must be Metal-backed".to_string()))?;
+    let companion = kt_metal.companion()?;
+    let device_index = match kt_metal.device() {
+        Device::Metal(i) => i,
+        _ => unreachable!("MetalStorage::device() returns Device::Metal"),
+    };
+
+    let shape: Vec<usize> = x.shape().to_vec();
+    let outer: usize = shape[..axis].iter().product::<usize>().max(1);
+    let axis_dim: usize = shape[axis];
+    let inner: usize = shape[axis + 1..].iter().product::<usize>().max(1);
+
+    let byte_len = x.element_count() * dtype_size;
+    let raw_device = companion.device();
+    let out_buffer = raw_device
+        .new_buffer(byte_len.max(1), MTLResourceOptions::StorageModeShared)
+        .map_err(|e| {
+            Error::Msg(format!(
+                "metal_cumsum_axis: new_buffer({byte_len}) failed: {e:?}"
+            ))
+        })?;
+    let out_buffer_arc: Arc<MetalBuffer> = Arc::new(out_buffer);
+
+    crate::metal_kernels::cumsum_axis(
+        &companion,
+        kt_metal.buffer().as_ref(),
+        out_buffer_arc.as_ref(),
+        dtype,
+        outer,
+        axis_dim,
+        inner,
+    )?;
+
+    let out_storage = MetalStorage::from_buffer_kt(raw_device, device_index, dtype, out_buffer_arc)?;
+    let out_storage_arc: crate::Storage = Arc::new(out_storage);
+    crate::Tensor::from_parts(
+        out_storage_arc,
+        crate::Layout::contiguous(shape),
+        crate::TensorId::next(),
+    )
+}
+
 // ----------------------------------------------------------------------
 // metal_sdpa_last_axis — Phase 7 Metal substrate op (#1082)
 // ----------------------------------------------------------------------
@@ -1644,21 +1707,22 @@ pub fn metal_cast(x: &crate::Tensor, to: DType) -> Result<crate::Tensor> {
     use crate::metal_rt::MTLResourceOptions;
 
     let from = x.dtype();
-    // Float triple only; integer round-trips stay on the CPU fallback
-    // (callers' metal_fwd falls through). `metal_kernels::msl_ty` gates
-    // the supported dtypes.
+    // Float triple + U8 (boolean masks). U32↔I64 integer round-trips stay on
+    // the CPU fallback (callers' metal_fwd falls through).
+    // `metal_kernels::cast_msl_ty` gates the supported dtypes.
     let to_dtype_size: usize = match to {
         DType::F32 => 4,
         DType::BF16 | DType::F16 => 2,
+        DType::U8 => 1,
         other => {
             return Err(Error::Msg(format!(
-                "metal_cast: unsupported target dtype {other} (float triple only)"
+                "metal_cast: unsupported target dtype {other} (float triple + U8 only)"
             )));
         }
     };
-    // Reject unsupported source dtypes up front (mirror of the old match).
-    crate::metal_kernels::msl_ty(from)?;
-    crate::metal_kernels::msl_ty(to)?;
+    // Reject unsupported source/target dtypes up front (mirror of the old match).
+    crate::metal_kernels::cast_msl_ty(from)?;
+    crate::metal_kernels::cast_msl_ty(to)?;
 
     if !x.is_contiguous() {
         return Err(Error::Msg(
@@ -1841,6 +1905,325 @@ pub fn metal_elementwise_binary(
         crate::Layout::contiguous(shape),
         crate::TensorId::next(),
     )
+}
+
+// ----------------------------------------------------------------------
+// metal_compare — kiln-owned elementwise comparison (#1082)
+// ----------------------------------------------------------------------
+
+/// Metal element-wise comparison (eq/ne/lt/le/gt/ge) producing a **U8 mask** —
+/// the Metal analog of [`crate::cuda_compare`]. Both inputs must be
+/// Metal-backed, same shape, same dtype (F32/BF16/F16), contiguous. The output
+/// is a fresh contiguous U8 tensor (1 = comparison held, 0 = it did not),
+/// matching the CPU reference in `ops::compare`. No host round-trip — a
+/// kiln-owned MSL kernel (`metal_kernels::compare`) keeps the data on-GPU.
+///
+/// `kind_tag` follows `CmpKind::as_i32` (0=Eq, 1=Ne, 2=Lt, 3=Le, 4=Gt, 5=Ge).
+pub fn metal_compare(
+    a: &crate::Tensor,
+    b: &crate::Tensor,
+    kind_tag: i32,
+) -> Result<crate::Tensor> {
+    use crate::metal_rt::MTLResourceOptions;
+
+    if !matches!(kind_tag, 0..=5) {
+        return Err(Error::Msg(format!(
+            "metal_compare: kind_tag {kind_tag} not supported \
+             (only 0=Eq, 1=Ne, 2=Lt, 3=Le, 4=Gt, 5=Ge)"
+        )));
+    }
+    let dtype = a.dtype();
+    if !matches!(dtype, DType::F32 | DType::BF16 | DType::F16) {
+        return Err(Error::Msg(format!(
+            "metal_compare: unsupported dtype {dtype} (expected F32/BF16/F16)"
+        )));
+    }
+    if b.dtype() != dtype {
+        return Err(Error::Msg(format!(
+            "metal_compare: dtype mismatch a={dtype} b={}",
+            b.dtype()
+        )));
+    }
+    if a.shape() != b.shape() {
+        return Err(Error::Msg(format!(
+            "metal_compare: shape mismatch a={:?} b={:?}",
+            a.shape(),
+            b.shape()
+        )));
+    }
+    if !a.is_contiguous() || !b.is_contiguous() {
+        return Err(Error::Msg(
+            "metal_compare: inputs must be contiguous".to_string(),
+        ));
+    }
+
+    let kt_metal_a = a
+        .storage()
+        .as_any()
+        .downcast_ref::<MetalStorage>()
+        .ok_or_else(|| Error::Msg("metal_compare: a must be Metal-backed".to_string()))?;
+    let kt_metal_b = b
+        .storage()
+        .as_any()
+        .downcast_ref::<MetalStorage>()
+        .ok_or_else(|| Error::Msg("metal_compare: b must be Metal-backed".to_string()))?;
+
+    let companion = kt_metal_a.companion()?;
+    let device_index = match kt_metal_a.device() {
+        Device::Metal(i) => i,
+        _ => unreachable!("MetalStorage::device() returns Device::Metal"),
+    };
+    let shape: Vec<usize> = a.shape().to_vec();
+    let element_count: usize = a.element_count();
+
+    // Output is a U8 mask: 1 byte per element (NOT the input dtype size).
+    let byte_len = element_count; // DType::U8.size_in_bytes() == 1
+    let raw_device = companion.device();
+    let out_buffer = raw_device
+        .new_buffer(byte_len.max(1), MTLResourceOptions::StorageModeShared)
+        .map_err(|e| Error::Msg(format!("metal_compare: new_buffer({byte_len}) failed: {e:?}")))?;
+    let out_buffer_arc: Arc<MetalBuffer> = Arc::new(out_buffer);
+
+    crate::metal_kernels::compare(
+        &companion,
+        kt_metal_a.buffer().as_ref(),
+        kt_metal_b.buffer().as_ref(),
+        out_buffer_arc.as_ref(),
+        dtype,
+        kind_tag,
+        element_count,
+    )?;
+
+    let out_storage =
+        MetalStorage::from_buffer_kt(raw_device, device_index, DType::U8, out_buffer_arc)?;
+    let out_storage_arc: crate::Storage = Arc::new(out_storage);
+
+    crate::Tensor::from_parts(
+        out_storage_arc,
+        crate::Layout::contiguous(shape),
+        crate::TensorId::next(),
+    )
+}
+
+// ----------------------------------------------------------------------
+// metal_where_select — kiln-owned ternary mask-based select (#1082)
+// ----------------------------------------------------------------------
+
+/// Metal ternary select `out[i] = mask[i] != 0 ? t[i] : f[i]` — the Metal
+/// analog of [`crate::cuda_where_select`]. `mask` is a U8 tensor; `t`/`f` share
+/// shape and dtype (F32/BF16/F16); the output is a fresh contiguous tensor with
+/// `t`'s dtype. All three inputs must be Metal-backed and contiguous. No host
+/// round-trip — a kiln-owned MSL kernel (`metal_kernels::where_select`) keeps
+/// the data on-GPU (byte-wise select, so the chosen operand copies bit-exact).
+pub fn metal_where_select(
+    mask: &crate::Tensor,
+    t: &crate::Tensor,
+    f: &crate::Tensor,
+) -> Result<crate::Tensor> {
+    use crate::metal_rt::MTLResourceOptions;
+
+    let dtype = t.dtype();
+    let dtype_size: usize = match dtype {
+        DType::F32 => 4,
+        DType::BF16 | DType::F16 => 2,
+        other => {
+            return Err(Error::Msg(format!(
+                "metal_where_select: unsupported dtype {other} (expected F32/BF16/F16)"
+            )));
+        }
+    };
+    if mask.dtype() != DType::U8 {
+        return Err(Error::Msg(format!(
+            "metal_where_select: mask dtype must be U8, got {}",
+            mask.dtype()
+        )));
+    }
+    if t.dtype() != f.dtype() {
+        return Err(Error::Msg(format!(
+            "metal_where_select: t/f dtype mismatch t={} f={}",
+            t.dtype(),
+            f.dtype()
+        )));
+    }
+    if mask.shape() != t.shape() || t.shape() != f.shape() {
+        return Err(Error::Msg(format!(
+            "metal_where_select: shape mismatch mask={:?} t={:?} f={:?}",
+            mask.shape(),
+            t.shape(),
+            f.shape()
+        )));
+    }
+    if !mask.is_contiguous() || !t.is_contiguous() || !f.is_contiguous() {
+        return Err(Error::Msg(
+            "metal_where_select: all inputs must be contiguous".to_string(),
+        ));
+    }
+
+    let kt_mask = mask
+        .storage()
+        .as_any()
+        .downcast_ref::<MetalStorage>()
+        .ok_or_else(|| Error::Msg("metal_where_select: mask must be Metal-backed".to_string()))?;
+    let kt_t = t
+        .storage()
+        .as_any()
+        .downcast_ref::<MetalStorage>()
+        .ok_or_else(|| Error::Msg("metal_where_select: t must be Metal-backed".to_string()))?;
+    let kt_f = f
+        .storage()
+        .as_any()
+        .downcast_ref::<MetalStorage>()
+        .ok_or_else(|| Error::Msg("metal_where_select: f must be Metal-backed".to_string()))?;
+
+    let companion = kt_t.companion()?;
+    let device_index = match kt_t.device() {
+        Device::Metal(i) => i,
+        _ => unreachable!("MetalStorage::device() returns Device::Metal"),
+    };
+    let shape: Vec<usize> = t.shape().to_vec();
+    let element_count: usize = t.element_count();
+
+    let byte_len = element_count * dtype_size;
+    let raw_device = companion.device();
+    let out_buffer = raw_device
+        .new_buffer(byte_len.max(1), MTLResourceOptions::StorageModeShared)
+        .map_err(|e| Error::Msg(format!("metal_where_select: new_buffer({byte_len}) failed: {e:?}")))?;
+    let out_buffer_arc: Arc<MetalBuffer> = Arc::new(out_buffer);
+
+    crate::metal_kernels::where_select(
+        &companion,
+        kt_mask.buffer().as_ref(),
+        kt_t.buffer().as_ref(),
+        kt_f.buffer().as_ref(),
+        out_buffer_arc.as_ref(),
+        dtype,
+        element_count,
+    )?;
+
+    let out_storage =
+        MetalStorage::from_buffer_kt(raw_device, device_index, dtype, out_buffer_arc)?;
+    let out_storage_arc: crate::Storage = Arc::new(out_storage);
+
+    crate::Tensor::from_parts(
+        out_storage_arc,
+        crate::Layout::contiguous(shape),
+        crate::TensorId::next(),
+    )
+}
+
+// ----------------------------------------------------------------------
+// metal_adamw_step — fused on-device AdamW (#1082)
+// ----------------------------------------------------------------------
+
+/// Fused in-place AdamW step on Metal. Updates `param`, `m` (first moment),
+/// and `v` (second moment) IN PLACE in their `MetalStorage` buffers; reads
+/// `grad`. No host round-trip — the buffers are `StorageModeShared` UMA and
+/// the kernel mutates them directly. The Metal analog of the Vulkan
+/// `dispatch_adamw_step_f32` path; the math is a bit-faithful port of
+/// [`kiln_optim::AdamW::step`].
+///
+/// All four tensors must be Metal-backed, contiguous, share `dtype`, and have
+/// the same element count. `step` is 1-indexed (>= 1). `bc1`/`bc2` bias
+/// corrections are computed here (`1 - beta^step`) so the kernel needs no
+/// `pow`.
+///
+/// Currently restricted to `DType::F32` (the LoRA master case). BF16 masters
+/// need the host stochastic-rounding path; this function rejects non-F32 so
+/// callers fall back to the host AdamW.
+#[allow(clippy::too_many_arguments)]
+pub fn metal_adamw_step(
+    param: &crate::Tensor,
+    grad: &crate::Tensor,
+    m: &crate::Tensor,
+    v: &crate::Tensor,
+    lr: f32,
+    beta1: f32,
+    beta2: f32,
+    eps: f32,
+    weight_decay: f32,
+    step: u32,
+) -> Result<()> {
+    if step < 1 {
+        return Err(Error::Msg(format!(
+            "metal_adamw_step: step must be 1-indexed (>=1), got {step}"
+        )));
+    }
+    let dtype = param.dtype();
+    // F32/BF16/F16 master+moments — the kernel reads each as its dtype, computes
+    // in float, and writes back as the dtype (round-to-nearest for BF16/F16,
+    // matching Vulkan's BF16 AdamW arm). BF16 moments are the on-device
+    // master-dtype convention (`allocate_adamw_state`), as on CUDA/Vulkan.
+    if !matches!(dtype, DType::F32 | DType::BF16 | DType::F16) {
+        return Err(Error::Msg(format!(
+            "metal_adamw_step: unsupported dtype {dtype} (expected F32/BF16/F16)"
+        )));
+    }
+    if grad.dtype() != dtype || m.dtype() != dtype || v.dtype() != dtype {
+        return Err(Error::Msg(format!(
+            "metal_adamw_step: dtype mismatch (param={dtype}, grad={}, m={}, v={})",
+            grad.dtype(),
+            m.dtype(),
+            v.dtype()
+        )));
+    }
+    let n = param.element_count();
+    if grad.element_count() != n || m.element_count() != n || v.element_count() != n {
+        return Err(Error::Msg(format!(
+            "metal_adamw_step: element count mismatch (param={n}, grad={}, m={}, v={})",
+            grad.element_count(),
+            m.element_count(),
+            v.element_count()
+        )));
+    }
+    if !param.is_contiguous()
+        || !grad.is_contiguous()
+        || !m.is_contiguous()
+        || !v.is_contiguous()
+    {
+        return Err(Error::Msg(
+            "metal_adamw_step: all operands must be contiguous".to_string(),
+        ));
+    }
+
+    fn downcast<'a>(t: &'a crate::Tensor, name: &str) -> Result<&'a MetalStorage> {
+        t.storage()
+            .as_any()
+            .downcast_ref::<MetalStorage>()
+            .ok_or_else(|| Error::Msg(format!("metal_adamw_step: {name} must be Metal-backed")))
+    }
+    let kt_param = downcast(param, "param")?;
+    let kt_grad = downcast(grad, "grad")?;
+    let kt_m = downcast(m, "m")?;
+    let kt_v = downcast(v, "v")?;
+
+    let companion = kt_param.companion()?;
+
+    // Bias corrections — match the host reference EXACTLY: `kiln_optim::AdamW`
+    // computes `1.0 - beta.powf(step as f32)` in f32. Reproducing that here
+    // (same op, same precision) makes bc1/bc2 bit-identical to the host path,
+    // so the only source of parity drift is the f32 elementwise math the
+    // kernel and reference share.
+    let step_f = step as f32;
+    let bc1 = 1.0 - beta1.powf(step_f);
+    let bc2 = 1.0 - beta2.powf(step_f);
+
+    crate::metal_kernels::adamw_step(
+        &companion,
+        kt_param.buffer().as_ref(),
+        kt_grad.buffer().as_ref(),
+        kt_m.buffer().as_ref(),
+        kt_v.buffer().as_ref(),
+        dtype,
+        n,
+        lr,
+        beta1,
+        beta2,
+        eps,
+        weight_decay,
+        bc1,
+        bc2,
+    )?;
+    Ok(())
 }
 
 // ----------------------------------------------------------------------

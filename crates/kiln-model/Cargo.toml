@@ -82,7 +82,7 @@ cuda = ["dep:cudarc", "dep:kiln-conv1d-kernel", "dep:kiln-flash-attn", "dep:kiln
 # candle-parity opt-in feature (#1082), so `--features metal` pulls no candle.
 # `dep:kiln-autograd` is pulled for the kt-tape-authoritative training path —
 # SFT/GRPO/OPD on Metal record on the kt autograd tape (#1082 metal-training).
-metal = ["kiln-kt-bridge/metal", "dep:objc2", "dep:objc2-metal", "kiln-tensor/metal", "dep:kiln-autograd"]
+metal = ["kiln-kt-bridge/metal", "dep:objc2", "dep:objc2-metal", "kiln-tensor/metal", "dep:kiln-autograd", "dep:half"]
 # Emit NVTX ranges around the hot paths in `forward.rs` so nsys can attribute
 # kernel time per call site. Off by default; pulls in kiln-nvtx's libnvToolsExt
 # link line. Pair with `--features cuda,nvtx`.

@@ -100,6 +100,19 @@ fn apply(kind: CmpKind, a: &Tensor, b: &Tensor) -> Result<Tensor> {
         }
     }
 
+    // Metal fast path: kiln-owned MSL comparison kernel (one thread per element,
+    // F32-promoted compare → U8 mask, mirroring the CPU loop below). No host
+    // round-trip. (#1082)
+    #[cfg(feature = "metal")]
+    if matches!(a.device(), crate::Device::Metal(_))
+        && matches!(b.device(), crate::Device::Metal(_))
+        && a.device() == b.device()
+        && a.is_contiguous()
+        && b.is_contiguous()
+    {
+        return crate::metal_compare(a, b, kind.as_i32());
+    }
+
     if !a.is_contiguous() || !b.is_contiguous() {
         bail!("{}: inputs must be contiguous", kind.name());
     }

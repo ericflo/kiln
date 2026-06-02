@@ -9,7 +9,7 @@
 //! "kernel-crate kt-API ports").
 //!
 //! Like kiln-flce-kernel, the (#1082) candle-drop moved this crate's
-//! candle-typed glue UP into `kiln-train::opd_candle_shim`: the Phase A
+//! candle-typed glue UP into `kiln-train::opd_tape_shim`: the Phase A
 //! reference path (`candle_core::Tensor` gather + matmul + log-softmax)
 //! and the candle `CustomOp1` kt-forward-op shim that wraps this kt
 //! surface for candle autograd. The raw CUDA FFI in `phase_b.rs` is only
@@ -32,7 +32,7 @@
 //!    entry point. Re-implements the gather + matmul + log-softmax
 //!    + reverse-KL reduction over [`kiln_tensor`] ops; mirrors the
 //!    Phase A candle reference (the per-position variant
-//!    `kiln_train::opd_candle_shim::opd_top_k_reverse_kl_phase_a_per_position`
+//!    `kiln_train::opd_tape_shim::opd_top_k_reverse_kl_phase_a_per_position`
 //!    — the scalar-mean phase_a entry was deleted in #1082 since the
 //!    only callers were internal dead code).
 //! 3. [`opd_top_k_reverse_kl_per_position_kt`] — kt-typed per-
@@ -44,7 +44,7 @@
 //!
 //! Forward only — backward is still TBD via the same kiln-autograd
 //! hooks the FLCE kt-typed backward is waiting on; the candle
-//! kt-shim (`kiln_train::opd_candle_shim::opd_top_k_reverse_kl_per_position_via_kt_forward_op`)
+//! kt-shim (`kiln_train::opd_tape_shim::opd_top_k_reverse_kl_per_position_via_kt_forward_op`)
 //! continues to own production gradient flow until that lands.
 //! Historical: pre-`#1082`-2026-05-28 the candle `CustomOp1`
 //! `OpdLossCustomOp` (in `phase_b.rs`) wrapped the backward; that
@@ -395,7 +395,7 @@ fn per_position_forward_kt(
 /// surface that wrapped this via `OpdLossCustomOp` was also deleted in
 /// (#1082, 2026-05-28) along with the rest of `phase_b.rs`'s candle
 /// surface — production callers run the kt-shim per-position entry
-/// `kiln_train::opd_candle_shim::opd_top_k_reverse_kl_per_position_via_kt_forward_op`
+/// `kiln_train::opd_tape_shim::opd_top_k_reverse_kl_per_position_via_kt_forward_op`
 /// + `mean_all` instead.)
 ///
 /// - `hidden`: `[1, T, H]` student hidden states.
@@ -427,7 +427,7 @@ fn per_position_forward_kt(
 /// mean wrapper around it would need a `mean_all` autograd recorder
 /// that we haven't yet implemented in `kiln_autograd`. Production
 /// callers go through the candle kt-shim
-/// `kiln_train::opd_candle_shim::opd_top_k_reverse_kl_per_position_via_kt_forward_op`
+/// `kiln_train::opd_tape_shim::opd_top_k_reverse_kl_per_position_via_kt_forward_op`
 /// (per-position) + `mean_all` instead. (Historical: pre-`#1082`
 /// 2026-05-28 the candle `CustomOp1` `OpdLossCustomOp` owned this
 /// entry's backward via `apply_op1`; that wrapper was deleted with

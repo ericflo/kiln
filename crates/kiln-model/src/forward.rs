@@ -1655,10 +1655,12 @@ pub fn try_kt_paged_kv_cache_new(
         return Ok(None);
     }
 
-    // #1082: `device`/`dtype` are kt now and `PagedKvCacheKt::new` takes a plain
-    // `device_index: usize` — no candle device arc bridge.
-    let device_index = match device {
-        Device::Cuda(idx) => *idx,
+    // #1082: this fn deliberately only supports CUDA — return `None` for any
+    // other device so callers fall through to their non-kt path. The kt cache
+    // now allocates on the runtime `Device`, so pass the CUDA device through
+    // directly (preserving the non-CUDA → `None` gating).
+    let cache_device = match device {
+        Device::Cuda(idx) => Device::Cuda(*idx),
         _ => return Ok(None),
     };
     // `dtype` is already a kt DType — no candle→kt conversion needed.
@@ -1671,7 +1673,7 @@ pub fn try_kt_paged_kv_cache_new(
         num_kv_heads,
         head_dim,
         kt_dtype,
-        device_index,
+        cache_device,
     )
     .context("try_kt_paged_kv_cache_new: PagedKvCacheKt::new failed")?;
     Ok(Some(cache))
@@ -18273,7 +18275,8 @@ pub(crate) struct PagedDecodeGraphInputs<'a> {
 /// these on the device once per `batch_size` bucket; per-step updates
 /// rewrite their contents in place via `cudaMemcpyHtoDAsync` so the
 /// captured kernels read from the same device pointers on every replay.
-/// Not consumed yet — kept for the upcoming batched forward wrapper.
+/// Consumed by [`model_forward_paged_batched_hidden_with_graph_inputs`]
+/// (the HiddenOnly batched capture forward — #1082 boxes 432/433).
 #[cfg(feature = "cuda")]
 #[allow(dead_code)]
 pub(crate) struct BatchedPagedDecodeGraphInputs<'a> {
@@ -18299,12 +18302,21 @@ pub(crate) struct BatchedPagedDecodeGraphInputs<'a> {
     /// Per-full-attention-layer paged decode LSE scratch, shape
     /// `[batch, n_heads, 1]`.
     pub softmax_lse: &'a [Tensor],
-    /// `[batch, 1, vocab]` stable output-logits buffer. The captured
-    /// forward writes the final logits into this storage via
-    /// `slice_set` so replay always reads from the same device
-    /// pointer; the runner argmax-reduces and DtoH-transfers tokens
-    /// outside the captured region.
-    pub output_logits: &'a Tensor,
+    /// `[batch, 1, hidden_size]` stable PRE-final-norm hidden buffer
+    /// (#1082 box-102 BUG2 fix port — STEPS 2-3). The
+    /// [`model_forward_paged_batched_hidden_with_graph_inputs`] HiddenOnly
+    /// forward writes the transformer-stack output here via `slice_set` and
+    /// returns WITHOUT running `final_norm` / lm_head. `final_norm` + the
+    /// large-N (`vocab = 151936`) cublasLt lm_head GEMV then run EAGERLY off
+    /// the captured graph via [`lm_head_from_batched_hidden_eager`],
+    /// mirroring the bs=1 `HiddenOnly` contract ([`PagedDecodeGraphInputs`]
+    /// has no logits buffer; the bs=1 hidden lives on
+    /// [`crate::cuda_graph::CapturedDecodeGraph::output_hidden`]). This is the
+    /// structural fix for the lm_head replay-nondeterminism ("BUG2"
+    /// token-doubling). STEPS 2-3 dropped the former in-graph `output_logits`
+    /// buffer (and the in-graph lm_head twin) — the batched capture/replay
+    /// path is now HiddenOnly + eager-lm_head.
+    pub output_hidden: &'a mut Tensor,
     /// Persistent batched [`LinearAttentionState`] slot used by the
     /// captured forward. Lifetime is the graph runner's; the captured
     /// graph reads recurrent/conv state from these device pointers.
@@ -24439,30 +24451,29 @@ pub(crate) fn model_forward_paged_with_graph_inputs(
     Ok(logits.expect("LmHeadMode::Full always produces logits"))
 }
 
-/// Batched paged decode forward + LM head argmax with the stable
-/// graph inputs threaded through. Lives next to
-/// [`model_forward_paged_with_graph_inputs`] but specialized for the
-/// `bs > 1` contiguous-batched hot path (the one
-/// `ModelRunner::decode_next_tokens_paged_contiguous_batch_greedy_with_ids`
-/// drives).
+/// #1082 boxes 432/433 (STEPS 2-3) — the batched HiddenOnly forward the
+/// captured `bs > 1` decode graph records.
 ///
-/// Today this is a thin stub: it ignores `graph_inputs` and delegates
-/// to the eager `model_forward_paged_decode_contiguous_batch_greedy`,
-/// which is the same function the existing hot path calls. The
-/// captured-batched graph this would feed is not wired in yet. Step 6
-/// of the multi-batch capture sequence (see top of `cuda_graph.rs`)
-/// replaces the body with a stable-pointer-aware variant that reads
-/// from `graph_inputs.token_ids` / `.positions` / etc. and threads
-/// the persistent `graph_inputs.linear_state` slot through every
-/// GDN layer.
+/// Stops BEFORE the final RMSNorm + lm_head: it writes the PRE-final-norm
+/// transformer-stack hidden (`[batch, 1, hidden_size]`) into the caller-owned
+/// stable [`BatchedPagedDecodeGraphInputs::output_hidden`] buffer via
+/// `slice_set` and returns `Ok(())`. NO `rms_norm`, NO
+/// `lm_head_forward_backend_decode_if` inside — `final_norm` + the large-N
+/// (`vocab = 151936`) cublasLt lm_head GEMV run EAGERLY off the captured graph
+/// via [`lm_head_from_batched_hidden_eager`].
 ///
-/// Returns the per-row next-token IDs (`[batch] u32`), matching the
-/// hot path's return shape so the runner's
-/// `decode_step_paged_batched` can return `Ok(Some(tokens))`.
+/// This mirrors the bs=1 `HiddenOnly` contract
+/// ([`model_forward_paged_hidden_with_graph_inputs`] →
+/// `model_forward_paged_inner(..., LmHeadMode::HiddenOnly)`): the lm_head GEMV
+/// is not CUDA-graph-replay-deterministic at large N, so moving it out of the
+/// captured region is the structural fix for the "BUG2" token-doubling.
+///
+/// STEPS 2-3 wire this into
+/// [`crate::cuda_graph::CudaGraphRunner::try_capture_batched`] /
+/// `decode_step_paged_batched`, replacing the former in-graph logits twin.
 #[cfg(feature = "cuda")]
 #[allow(clippy::too_many_arguments)]
-#[allow(dead_code)]
-pub(crate) fn model_forward_paged_batched_with_graph_inputs(
+pub(crate) fn model_forward_paged_batched_hidden_with_graph_inputs(
     backend: &dyn BackendRuntime,
     input_tokens: &[u32],
     weights: &GpuWeights,
@@ -24473,38 +24484,25 @@ pub(crate) fn model_forward_paged_batched_with_graph_inputs(
     lora: Option<&LoraWeights>,
     graph_inputs: &mut BatchedPagedDecodeGraphInputs<'_>,
 ) -> Result<()> {
-    // Run the bs>1 hidden path with the persistent linear-state slot
-    // and the graph-stable token-id / position / block_table /
-    // seqused_k / per-layer paged-decode scratch device buffers. The
-    // captured graph reads the per-step paged-decode metadata from
+    // Run the bs>1 hidden path with the persistent linear-state slot and the
+    // graph-stable token-id / position / block_table / seqused_k / per-layer
+    // paged-decode scratch / rotary / kv_slot device buffers threaded through.
+    // The captured graph reads the per-step paged-decode metadata from
     // caller-owned device tensors (`graph_inputs.block_table` +
-    // `graph_inputs.seqused_k`) and now also writes/reads the
-    // per-layer flash-attn paged-decode `attn_out` + `softmax_lse`
-    // through caller-owned tensors (`graph_inputs.attn_out[layer]` +
-    // `graph_inputs.softmax_lse[layer]`). The RoPE step now reads
-    // its cos/sin tables from `graph_inputs.rotary_cos` /
-    // `.rotary_sin` (refreshed via
-    // `CudaGraphRunner::update_batched_rotary_buffers` before each
-    // replay) instead of allocating fresh `freqs/cos/sin` tensors
-    // inside the captured region via `rotary_embedding_from_tensor`.
-    // All of these allocations would otherwise `cudaFree` their
-    // storage at end of capture, leaving the graph with dangling
-    // pointers (the `ILLEGAL_ADDRESS` fault documented in
-    // `bench-results/cuda-graph-bs2-memcheck.md` and the matching
-    // entries for suspects 2, 3, and 4 in
-    // `bench-results/cuda-graph-bs2-secondary-audit.md`, #1082).
-    //
-    // FUTURE WORK (also part of #1082): the per-step KV-slot writer
-    // is still built inside the captured region today (suspect 1).
-    // That one needs a new batched-slot kernel in `kiln-flash-attn`
-    // (it's a baked-immediate correctness bug under graph replay
-    // across `start_pos` values, not a dangling-pointer fault) — see
-    // the audit doc for the full plan. The bs=1 forward
-    // (`model_forward_paged_with_graph_inputs` →
-    // `model_forward_paged_inner`) already threads its
-    // `PagedDecodeGraphInputs` through to every per-layer call site
-    // — mirror that discipline here as additional fault shapes
-    // surface under `KILN_CUDA_GRAPHS_BATCHED=1` runs.
+    // `graph_inputs.seqused_k`), writes/reads the per-layer flash-attn
+    // paged-decode `attn_out` + `softmax_lse` through caller-owned tensors,
+    // reads its RoPE cos/sin tables from `graph_inputs.rotary_cos` /
+    // `.rotary_sin` (refreshed before each replay via
+    // `CudaGraphRunner::update_batched_rotary_buffers`), and dispatches the
+    // fused batched-slot KV writer from `graph_inputs.kv_slot`. Any of these
+    // allocated *inside* the captured region would otherwise `cudaFree` their
+    // storage at end of capture, leaving the graph with dangling pointers (the
+    // `ILLEGAL_ADDRESS` faults documented in
+    // `bench-results/cuda-graph-bs2-memcheck.md` and suspects 1-4 in
+    // `bench-results/cuda-graph-bs2-secondary-audit.md`, #1082). This twin
+    // diverges from the eager batched forward ONLY in what it does with the
+    // resulting `hidden`: it stops before final_norm + lm_head and writes the
+    // hidden to the stable `output_hidden` buffer.
     let hidden = model_forward_paged_decode_contiguous_batch_hidden_inner(
         backend,
         input_tokens,
@@ -24519,49 +24517,64 @@ pub(crate) fn model_forward_paged_batched_with_graph_inputs(
         Some(graph_inputs.token_ids),
         Some(graph_inputs.block_table),
         Some(graph_inputs.seqused_k),
-        // Thread the per-full-attn-layer stable paged-decode scratch
-        // through so the captured kernel writes/reads runner-owned
-        // `attn_out` / `softmax_lse` instead of building fresh
-        // `Tensor::zeros` inside the captured region (#1082 suspects
-        // 3+4 — see `bench-results/cuda-graph-bs2-secondary-audit.md`).
         Some(graph_inputs.attn_out),
         Some(graph_inputs.softmax_lse),
-        // Thread the runner-owned `[batch, rotary_dim/2]` cos/sin
-        // tables through so the captured RoPE step reads from stable
-        // device pointers via `rotary_embedding_from_tables` instead
-        // of allocating fresh `freqs/cos/sin` `cudaMalloc` tensors
-        // inside the captured region (#1082 suspect 2).
         Some(graph_inputs.rotary_cos),
         Some(graph_inputs.rotary_sin),
-        // Thread the runner-owned `[batch]` u32 KV-slot buffer
-        // through so the captured KV-write step dispatches the fused
-        // batched-slot kernel instead of baking host-immediate slots
-        // into per-row kernel args (#1082 suspect 1).
         Some(graph_inputs.kv_slot),
     )?;
-    // Compute logits and slice them into the caller-owned stable
-    // `output_logits` buffer (`[batch, 1, vocab]`). The captured graph
-    // records the matmul + slice_set, so on replay the runner can
-    // argmax-reduce the *same* device pointer without re-running any
-    // model kernels.
-    //
-    // CRITICAL: nothing in this function is allowed to do a device→host
-    // transfer (e.g. `to_vec1`, `to_scalar`, host-side argmax). Such
-    // calls would force a synchronous DtoH during CUDA stream
-    // capture, which the driver does not record cleanly — symptom
-    // observed in the first wiring attempt was `CUDA_ERROR_ILLEGAL_ADDRESS`
-    // on the second decode step. Argmax + DtoH is the caller's job
-    // (`CudaGraphRunner::try_capture_batched` /
-    // `decode_step_paged_batched`), which runs them *outside* the
-    // captured region.
-    let normed = rms_norm(&hidden, &weights.final_norm, config.rms_norm_eps)?;
-    let logits = lm_head_forward_backend_decode_if(Some(backend), &normed, &weights.embed_tokens_t)
-        .context("graph-wrapper LM head forward")?;
+    // #1082 box-102 BUG2 fix (batched): write the PRE-final-norm hidden into
+    // the caller-owned stable `output_hidden` buffer (`[batch, 1, hidden]`)
+    // and return. `final_norm` + lm_head run EAGERLY later via
+    // `lm_head_from_batched_hidden_eager` — mirrors the bs=1 contract
+    // (`lm_head_from_hidden_eager`). CRITICAL: nothing here may do a
+    // device→host transfer (e.g. `to_vec1`, `to_scalar`, host-side argmax) —
+    // a synchronous DtoH during CUDA stream capture is not recorded cleanly by
+    // the driver (the first wiring attempt hit `CUDA_ERROR_ILLEGAL_ADDRESS` on
+    // step 2). Argmax + DtoH is the caller's job, run outside the captured
+    // region.
     graph_inputs
-        .output_logits
-        .slice_set(&logits, 0, 0)
-        .context("copy graph-wrapper logits into stable output_logits buffer")?;
+        .output_hidden
+        .slice_set(&hidden, 0, 0)
+        .context("copy graph-wrapper hidden into stable output_hidden buffer")?;
     Ok(())
+}
+
+/// #1082 boxes 432/433 (STEPS 2-3) — batched twin of
+/// [`lm_head_from_hidden_eager`].
+///
+/// Runs the final RMSNorm + lm_head projection EAGERLY (outside any captured
+/// CUDA graph) on the **pre-final-norm** batched hidden state the captured
+/// batched decode graph produced into
+/// [`BatchedPagedDecodeGraphInputs::output_hidden`] (via
+/// [`model_forward_paged_batched_hidden_with_graph_inputs`]).
+///
+/// `output_hidden` is `[batch, 1, hidden_size]`; the returned logits are
+/// `[batch, 1, vocab_size]`. The runner argmax-reduces per row to produce the
+/// `[batch]` next-token IDs. Numerically identical to the eager batched
+/// forward's tail (`rms_norm` + `lm_head_forward_backend_decode_if` on the same
+/// `final_norm` / `embed_tokens_t`) — only the lm_head cublasLt GEMV now runs
+/// eagerly off the graph, sidestepping the replay-nondeterminism that doubled
+/// output ("BUG2"). Cost is one extra eager batched vocab GEMV + one RMSNorm
+/// per decode step.
+#[cfg(feature = "cuda")]
+pub(crate) fn lm_head_from_batched_hidden_eager(
+    backend: &dyn BackendRuntime,
+    output_hidden: &Tensor,
+    weights: &GpuWeights,
+    config: &kiln_core::config::ModelConfig,
+) -> Result<Tensor> {
+    kiln_nvtx::range!(c"kiln/lm_head_eager_batched");
+    // Same `final_norm` RMSNorm + lm_head as the bs=1 eager twin, but the
+    // input/output carry the leading `batch` dim ([batch, 1, hidden] →
+    // [batch, 1, vocab]). `rms_norm` normalizes over the last (hidden) axis
+    // and `lm_head_forward_backend_decode_if` projects the last axis to
+    // vocab, both of which are rank-agnostic over the leading dims, so no
+    // reshape is needed (mirrors how the eager batched forward feeds its
+    // `[batch, 1, hidden]` `hidden` straight through `rms_norm` +
+    // `lm_head_forward_backend_decode_if`).
+    let normed = rms_norm(output_hidden, &weights.final_norm, config.rms_norm_eps)?;
+    lm_head_forward_backend_decode_if(Some(backend), &normed, &weights.embed_tokens_t)
 }
 
 /// Batched paged decode API for real continuous-batching work.
@@ -27695,9 +27708,22 @@ mod tests {
         let max = abs.flatten_all()?.max(0)?.flatten_all()?.to_vec1::<f32>()?[0];
         let mean = abs.flatten_all()?.mean(0)?.flatten_all()?.to_vec1::<f32>()?[0];
         eprintln!("rms_norm metal vs fallback: max_abs_diff={max:e} mean_abs_diff={mean:e}");
+        // The Metal kernel computes the *identical* F32 math as the fallback
+        // (F32 sum-of-squares, F32 rsqrt, F32 `(1+w)*x*rms_inv`, BF16 cast at
+        // the very end). Both `fused` and `fallback` are then rounded to BF16
+        // before comparison. The only divergence is the FMA accumulation order
+        // in the sum-of-squares reduction, which perturbs `rms_inv` sub-ULP and
+        // occasionally flips the final BF16 rounding by exactly one ULP. At
+        // magnitude ~1 one BF16 ULP is 2^-7 = 7.8125e-3, so a 5e-3 max
+        // tolerance is below the dtype floor and rejects a numerically correct
+        // kernel. Verified on M1: of 24576 elements only 12 differ and every
+        // one is within a single BF16 ULP (mean_abs_diff ~ 2.4e-6 ≈ 0). Use a
+        // 2-BF16-ULP bound so the test passes for the right reason.
+        const BF16_ULP_AT_1: f32 = 7.8125e-3; // 2^-7
         assert!(
-            max < 5e-3,
-            "Metal rms_norm max_abs_diff={max:e} exceeds 5e-3"
+            max < 2.0 * BF16_ULP_AT_1,
+            "Metal rms_norm max_abs_diff={max:e} exceeds 2 BF16 ULP ({:e})",
+            2.0 * BF16_ULP_AT_1
         );
         assert!(
             mean < 5e-4,
@@ -28542,7 +28568,7 @@ mod tests {
             num_kv_heads,
             head_dim,
             kiln_tensor::DType::BF16,
-            device_kt.index().unwrap_or(0),
+            device_kt,
         )?;
         for (row, block_table) in block_tables.iter().enumerate() {
             let row_k = prefix_k.narrow(0, row, 1)?.contiguous()?;
@@ -28593,7 +28619,7 @@ mod tests {
                 num_kv_heads,
                 head_dim,
                 kiln_tensor::DType::BF16,
-                device_kt.index().unwrap_or(0),
+                device_kt,
             )?;
             let row_table = BlockTable { blocks: vec![0] };
             let row_k = prefix_k.narrow(0, row, 1)?.contiguous()?;
@@ -28721,7 +28747,7 @@ mod tests {
             num_kv_heads,
             head_dim,
             kiln_tensor::DType::BF16,
-            device_kt.index().unwrap_or(0),
+            device_kt,
         )?;
         for (row, block_table) in block_tables.iter().enumerate() {
             let row_k = prefix_k.narrow(0, row, 1)?.contiguous()?;
@@ -28768,7 +28794,7 @@ mod tests {
                 num_kv_heads,
                 head_dim,
                 kiln_tensor::DType::BF16,
-                device_kt.index().unwrap_or(0),
+                device_kt,
             )?;
             let row_table = BlockTable { blocks: vec![0] };
             let row_k = prefix_k.narrow(0, row, 1)?.contiguous()?;
@@ -28893,7 +28919,7 @@ mod tests {
             num_kv_heads,
             head_dim,
             kiln_tensor::DType::BF16,
-            device_kt.index().unwrap_or(0),
+            device_kt,
         )?;
         for (row, block_table) in block_tables.iter().enumerate() {
             let row_k = prefix_k.narrow(0, row, 1)?.contiguous()?;
@@ -28931,7 +28957,7 @@ mod tests {
                 num_kv_heads,
                 head_dim,
                 kiln_tensor::DType::BF16,
-                device_kt.index().unwrap_or(0),
+                device_kt,
             )?;
             let row_table = BlockTable { blocks: vec![0] };
             let row_k = prefix_k.narrow(0, row, 1)?.contiguous()?;
@@ -29097,7 +29123,7 @@ mod tests {
             num_kv_heads,
             head_dim,
             kiln_tensor::DType::BF16,
-            device_kt.index().unwrap_or(0),
+            device_kt,
         )?;
         // Phase 7 #1082: parallel-allocate a kt twin via the constructor
         // stub `try_kt_paged_kv_cache_new` (commit 638bc441). When the
@@ -29172,7 +29198,7 @@ mod tests {
                 num_kv_heads,
                 head_dim,
                 kiln_tensor::DType::BF16,
-                device_kt.index().unwrap_or(0),
+                device_kt,
             )?;
             let row_table = BlockTable { blocks: vec![0] };
             let (row_k, row_v) = if row == 0 {
@@ -29380,7 +29406,7 @@ mod tests {
             num_kv_heads,
             head_dim,
             kiln_tensor::DType::BF16,
-            device_kt.index().unwrap_or(0),
+            device_kt,
         )?;
         assert!(ref_cache.write_token_major_native(0, &block_table, 0, &prefix_k, &prefix_v)?);
         let eager_logits = model_forward_paged(
@@ -29423,7 +29449,7 @@ mod tests {
                 num_kv_heads,
                 head_dim,
                 kiln_tensor::DType::BF16,
-                device_kt.index().unwrap_or(0),
+                device_kt,
             )?;
             assert!(graph_cache.write_token_major_native(
                 0,
@@ -29644,7 +29670,7 @@ mod tests {
             config.num_kv_heads,
             config.head_dim,
             kiln_tensor::DType::BF16,
-            device_kt.index().unwrap_or(0),
+            device_kt,
         )?;
         for (row, block_table) in block_tables.iter().enumerate() {
             let row_k = prefix_k.narrow(0, row, 1)?.contiguous()?;
@@ -29688,7 +29714,7 @@ mod tests {
                 config.num_kv_heads,
                 config.head_dim,
                 kiln_tensor::DType::BF16,
-                device_kt.index().unwrap_or(0),
+                device_kt,
             )?;
             let row_table = BlockTable { blocks: vec![0] };
             let row_k = prefix_k.narrow(0, row, 1)?.contiguous()?;
@@ -32260,13 +32286,25 @@ mod tests {
 
         let x_f32 = Tensor::from_slice(&x_data, (batch, channels, 1))?.to_device(device)?;
         let w_f32 = Tensor::from_slice(&w_data, (channels, 1, kernel_size))?.to_device(device)?;
-        let s_init = Tensor::from_slice(&s_data, (batch, channels, kernel_size - 1))?.to_device(device)?;
 
         let x = x_f32.to_dtype(DType::BF16)?;
         let w = w_f32.to_dtype(DType::BF16)?;
 
-        // Fallback path: candle decode + silu in F32.
-        let mut s_fb = s_init.clone();
+        // IMPORTANT: `causal_conv1d_decode` (the fallback) updates the conv-state
+        // *truly in place* (`conv_state.slice_set(...)`, kept stable for CUDA-graph
+        // pointer capture), and `Tensor::clone()` shares the underlying storage Arc
+        // (cheap view-clone, NOT a deep copy). So the fallback and the fused kernel
+        // MUST run on independent state buffers — a single `s_init.clone()` for both
+        // would let the fallback's in-place update corrupt the shared buffer before
+        // the kernel reads it, feeding the kernel the post-update state and producing
+        // a spurious ~5.6e-2 "mismatch" that is purely a harness aliasing artifact
+        // (the state-parity assert would also trivially pass, comparing the buffer to
+        // itself). Build each from the host `s_data` so neither aliases. (Mirrors the
+        // `_metal` sibling fix; prefill tests are exempt because `causal_conv1d_prefill*`
+        // rebinds `*conv_state` to a fresh tensor instead of mutating in place.)
+        // Fallback path: portable decode + silu in F32.
+        let mut s_fb =
+            Tensor::from_slice(&s_data, (batch, channels, kernel_size - 1))?.to_device(device)?;
         let out_fb = causal_conv1d_decode(&x, &w, &mut s_fb, kernel_size)?;
         let out_fb = cuda_silu(&out_fb.to_dtype(DType::F32)?)?;
 
@@ -32278,7 +32316,8 @@ mod tests {
             );
             return Ok(());
         }
-        let mut s_k = s_init.clone();
+        let mut s_k =
+            Tensor::from_slice(&s_data, (batch, channels, kernel_size - 1))?.to_device(device)?;
         let out_k = match backend.causal_conv1d_update(&x, &w, &mut s_k, kernel_size)? {
             Some(t) => t,
             None => {
@@ -32441,12 +32480,21 @@ mod tests {
 
         let x_f32 = Tensor::from_slice(&x_data, (batch, channels, 1))?.to_device(device)?;
         let w_f32 = Tensor::from_slice(&w_data, (channels, 1, kernel_size))?.to_device(device)?;
-        let s_init = Tensor::from_slice(&s_data, (batch, channels, kernel_size - 1))?.to_device(device)?;
 
         let x = x_f32.to_dtype(DType::BF16)?;
         let w = w_f32.to_dtype(DType::BF16)?;
 
-        let mut s_fb = s_init.clone();
+        // IMPORTANT: `Tensor::clone()` shares the underlying storage Arc (it is a
+        // cheap view-clone, NOT a deep copy), and both `causal_conv1d_decode`
+        // (the fallback) and the fused kernel update the conv-state buffer
+        // *in place*. So the fallback and kernel paths MUST run on independent
+        // state buffers — otherwise the fallback's in-place state update
+        // corrupts the shared `s_init` before the kernel reads its clone,
+        // feeding the kernel the post-update state and producing a spurious
+        // ~5.6e-2 "mismatch" that is purely a harness aliasing artifact, not a
+        // kernel error. Build each from the host `s_data` so neither aliases.
+        let mut s_fb =
+            Tensor::from_slice(&s_data, (batch, channels, kernel_size - 1))?.to_device(device)?;
         let out_fb = causal_conv1d_decode(&x, &w, &mut s_fb, kernel_size)?;
         let out_fb = cuda_silu(&out_fb.to_dtype(DType::F32)?)?;
 
@@ -32457,7 +32505,8 @@ mod tests {
             );
             return Ok(());
         }
-        let mut s_k = s_init.clone();
+        let mut s_k =
+            Tensor::from_slice(&s_data, (batch, channels, kernel_size - 1))?.to_device(device)?;
         let out_k = match backend.causal_conv1d_update(&x, &w, &mut s_k, kernel_size)? {
             Some(t) => t,
             None => {
@@ -32721,7 +32770,7 @@ mod tests {
             config.num_kv_heads,
             config.head_dim,
             kiln_tensor::DType::F32,
-            device_kt.index().unwrap_or(0),
+            device_kt,
         )?;
         let mut block_table = BlockTable::new();
         for i in 0..num_blocks as u32 {

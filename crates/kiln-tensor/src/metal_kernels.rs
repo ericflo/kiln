@@ -76,6 +76,21 @@ pub(crate) fn msl_ty(dt: DType) -> Result<&'static str> {
     }
 }
 
+/// MSL scalar type name for the `cast` kernel — the float triple plus `U8`
+/// (boolean masks). Wider than [`msl_ty`] because `cast` is the one op that
+/// bridges U8 comparison masks to/from the float triple.
+pub(crate) fn cast_msl_ty(dt: DType) -> Result<&'static str> {
+    match dt {
+        DType::F32 => Ok("float"),
+        DType::BF16 => Ok("bfloat"),
+        DType::F16 => Ok("half"),
+        DType::U8 => Ok("uchar"),
+        other => Err(Error::Msg(format!(
+            "metal_kernels::cast: unsupported dtype {other}"
+        ))),
+    }
+}
+
 /// 1-D dispatch covering exactly `n` threads (non-uniform threadgroups —
 /// Apple4+; the M1 is Apple7).
 fn dispatch_1d(
@@ -102,8 +117,17 @@ pub(crate) fn cast(
     to: DType,
     n: usize,
 ) -> Result<()> {
-    let (fty, tty) = (msl_ty(from)?, msl_ty(to)?);
+    let (fty, tty) = (cast_msl_ty(from)?, cast_msl_ty(to)?);
     let entry = format!("kt_cast_{fty}_{tty}");
+    // For float -> U8 (uchar) targets, clamp+truncate to match the CPU
+    // `f32_to_u8_sat` (saturate to [0,255], NaN -> 0). All other pairs are a
+    // direct value cast. The boolean-mask round-trip only ever carries {0,1}
+    // so the clamp is a correctness guard for arbitrary inputs.
+    let store_expr = if to == DType::U8 && from != DType::U8 {
+        format!("({tty})clamp((float)inp[gid], 0.0f, 255.0f)")
+    } else {
+        format!("({tty})inp[gid]")
+    };
     let src = format!(
         r#"
 #include <metal_stdlib>
@@ -114,7 +138,7 @@ kernel void {entry}(
     constant uint& n        [[buffer(2)]],
     uint gid [[thread_position_in_grid]])
 {{
-    if (gid < n) outp[gid] = ({tty})inp[gid];
+    if (gid < n) outp[gid] = {store_expr};
 }}
 "#
     );
@@ -129,6 +153,67 @@ kernel void {entry}(
     let n_u = n as u32;
     encoder.set_bytes(2, &n_u);
     dispatch_1d(&encoder, n);
+    drop(encoder);
+    Ok(())
+}
+
+// ----------------------------------------------------------------------
+// cumsum — kiln-owned MSL prefix-sum along an axis (mirrors csrc/scan_axis.cu)
+// ----------------------------------------------------------------------
+
+/// Inclusive prefix-sum along `axis` of a contiguous tensor, decomposed as
+/// `(outer, axis_dim, inner)`. One thread per `(outer, inner)` lane runs a
+/// sequential scan over `axis_dim` with F32 accumulation (bit-matching the CPU
+/// reference and the CUDA scan kernel). Output dtype == input dtype.
+pub(crate) fn cumsum_axis(
+    companion: &MetalCompanion,
+    input: &MetalBuffer,
+    output: &MetalBuffer,
+    dtype: DType,
+    outer: usize,
+    axis_dim: usize,
+    inner: usize,
+) -> Result<()> {
+    let ty = msl_ty(dtype)?;
+    let entry = format!("kt_cumsum_{ty}");
+    let src = format!(
+        r#"
+#include <metal_stdlib>
+using namespace metal;
+kernel void {entry}(
+    device const {ty}* inp  [[buffer(0)]],
+    device {ty}* outp       [[buffer(1)]],
+    constant uint& outer    [[buffer(2)]],
+    constant uint& axis_dim [[buffer(3)]],
+    constant uint& inner    [[buffer(4)]],
+    uint gid [[thread_position_in_grid]])
+{{
+    uint lanes = outer * inner;
+    if (gid >= lanes) return;
+    uint o = gid / inner;
+    uint i = gid % inner;
+    float acc = 0.0f;
+    for (uint a = 0; a < axis_dim; a++) {{
+        uint idx = (o * axis_dim + a) * inner + i;
+        acc += (float)inp[idx];
+        outp[idx] = ({ty})acc;
+    }}
+}}
+"#
+    );
+    let pipeline = op_pipeline(companion, &src, &entry)?;
+    let encoder = companion
+        .command_encoder()
+        .map_err(|e| Error::Msg(format!("metal_kernels::cumsum_axis: encoder: {e:?}")))?;
+    encoder.set_label("kt_cumsum_axis");
+    encoder.set_compute_pipeline_state(&pipeline);
+    encoder.set_buffer(0, Some(input), 0);
+    encoder.set_buffer(1, Some(output), 0);
+    let (outer_u, axis_u, inner_u) = (outer as u32, axis_dim as u32, inner as u32);
+    encoder.set_bytes(2, &outer_u);
+    encoder.set_bytes(3, &axis_u);
+    encoder.set_bytes(4, &inner_u);
+    dispatch_1d(&encoder, outer * inner);
     drop(encoder);
     Ok(())
 }
@@ -315,6 +400,238 @@ kernel void {entry}(
     encoder.set_buffer(2, Some(output), 0);
     let n_u = n as u32;
     encoder.set_bytes(3, &n_u);
+    dispatch_1d(&encoder, n);
+    drop(encoder);
+    Ok(())
+}
+
+// ----------------------------------------------------------------------
+// compare — kiln-owned MSL elementwise comparison (mirrors csrc/compare.cu)
+// ----------------------------------------------------------------------
+
+/// Contiguous element-wise comparison `out[i] = (uchar)(a[i] <cmp> b[i])`
+/// over the float triple, same-shape / same-dtype inputs. Both operands are
+/// loaded to `float`, the comparison evaluated in `float` (matching the kt CPU
+/// reference `CmpKind::apply_f32` and `csrc/compare.cu`), and the boolean
+/// result stored to a `uchar` (U8) output buffer (1 = true, 0 = false).
+///
+/// `kind_tag` follows `CmpKind::as_i32` (0=Eq, 1=Ne, 2=Lt, 3=Le, 4=Gt, 5=Ge).
+/// Non-differentiable. One pipeline per (op, input dtype).
+pub(crate) fn compare(
+    companion: &MetalCompanion,
+    left: &MetalBuffer,
+    right: &MetalBuffer,
+    output: &MetalBuffer,
+    dtype: DType,
+    kind_tag: i32,
+    n: usize,
+) -> Result<()> {
+    let ty = msl_ty(dtype)?;
+    let (op_prefix, expr) = match kind_tag {
+        0 => ("eq", "a == b"),
+        1 => ("ne", "a != b"),
+        2 => ("lt", "a < b"),
+        3 => ("le", "a <= b"),
+        4 => ("gt", "a > b"),
+        5 => ("ge", "a >= b"),
+        other => {
+            return Err(Error::Msg(format!(
+                "metal_kernels::compare: kind_tag {other} not supported \
+                 (only 0=Eq, 1=Ne, 2=Lt, 3=Le, 4=Gt, 5=Ge)"
+            )));
+        }
+    };
+    let entry = format!("kt_compare_{op_prefix}_{ty}");
+    let src = format!(
+        r#"
+#include <metal_stdlib>
+using namespace metal;
+kernel void {entry}(
+    device const {ty}* left  [[buffer(0)]],
+    device const {ty}* right [[buffer(1)]],
+    device uchar* output     [[buffer(2)]],
+    constant uint& n         [[buffer(3)]],
+    uint gid [[thread_position_in_grid]])
+{{
+    if (gid < n) {{
+        float a = (float)left[gid];
+        float b = (float)right[gid];
+        output[gid] = ({expr}) ? (uchar)1 : (uchar)0;
+    }}
+}}
+"#
+    );
+    let pipeline = op_pipeline(companion, &src, &entry)?;
+    let encoder = companion
+        .command_encoder()
+        .map_err(|e| Error::Msg(format!("metal_kernels::compare: encoder: {e:?}")))?;
+    encoder.set_label("kt_compare");
+    encoder.set_compute_pipeline_state(&pipeline);
+    encoder.set_buffer(0, Some(left), 0);
+    encoder.set_buffer(1, Some(right), 0);
+    encoder.set_buffer(2, Some(output), 0);
+    let n_u = n as u32;
+    encoder.set_bytes(3, &n_u);
+    dispatch_1d(&encoder, n);
+    drop(encoder);
+    Ok(())
+}
+
+// ----------------------------------------------------------------------
+// where_select — kiln-owned MSL ternary select (mirrors csrc/where_select.cu)
+// ----------------------------------------------------------------------
+
+/// Contiguous element-wise ternary select `out[i] = mask[i] != 0 ? t[i] : f[i]`
+/// over the float triple, same-shape inputs. `mask` is a `uchar` (U8) buffer;
+/// `t`/`f`/`out` share the element dtype. A byte-wise select (no float
+/// arithmetic) so the chosen operand is copied bit-for-bit, matching the CPU
+/// reference (`ops::where_select`) and `csrc/where_select.cu`. One pipeline
+/// per dtype.
+pub(crate) fn where_select(
+    companion: &MetalCompanion,
+    mask: &MetalBuffer,
+    t: &MetalBuffer,
+    f: &MetalBuffer,
+    output: &MetalBuffer,
+    dtype: DType,
+    n: usize,
+) -> Result<()> {
+    let ty = msl_ty(dtype)?;
+    let entry = format!("kt_where_select_{ty}");
+    let src = format!(
+        r#"
+#include <metal_stdlib>
+using namespace metal;
+kernel void {entry}(
+    device const uchar* mask [[buffer(0)]],
+    device const {ty}* t     [[buffer(1)]],
+    device const {ty}* f     [[buffer(2)]],
+    device {ty}* output      [[buffer(3)]],
+    constant uint& n         [[buffer(4)]],
+    uint gid [[thread_position_in_grid]])
+{{
+    if (gid < n) {{
+        output[gid] = (mask[gid] != 0) ? t[gid] : f[gid];
+    }}
+}}
+"#
+    );
+    let pipeline = op_pipeline(companion, &src, &entry)?;
+    let encoder = companion
+        .command_encoder()
+        .map_err(|e| Error::Msg(format!("metal_kernels::where_select: encoder: {e:?}")))?;
+    encoder.set_label("kt_where_select");
+    encoder.set_compute_pipeline_state(&pipeline);
+    encoder.set_buffer(0, Some(mask), 0);
+    encoder.set_buffer(1, Some(t), 0);
+    encoder.set_buffer(2, Some(f), 0);
+    encoder.set_buffer(3, Some(output), 0);
+    let n_u = n as u32;
+    encoder.set_bytes(4, &n_u);
+    dispatch_1d(&encoder, n);
+    drop(encoder);
+    Ok(())
+}
+
+// ----------------------------------------------------------------------
+// adamw_step — kiln-owned fused on-device AdamW (mirrors kiln_optim::AdamW
+// + csrc adamw + the Vulkan `dispatch_adamw_step_f32` kernel)
+// ----------------------------------------------------------------------
+
+/// Fused in-place AdamW step over `n` contiguous elements. Updates `param`,
+/// `first_moment` (m), and `second_moment` (v) IN PLACE; reads `grad` (g).
+///
+/// All four buffers share `dtype` (the float triple). Each lane is promoted
+/// to `float`, the moving averages + bias-corrected update are computed in
+/// `float`, and the results are written back as `dtype`. The math is a
+/// bit-faithful port of `kiln_optim::AdamW::step` (adamw.rs ~165-181):
+///
+///   m = beta1*m + (1-beta1)*g;  v = beta2*v + (1-beta2)*g*g;
+///   m_hat = m/bc1;  v_hat = v/bc2;  update = lr * m_hat/(sqrt(v_hat)+eps);
+///   param -= lr*weight_decay*param;  param -= update;
+///
+/// `bc1 = 1 - beta1^step` and `bc2 = 1 - beta2^step` are computed on the host
+/// (in f64, like the reference's `powf` on f32, then narrowed) and passed in,
+/// so the kernel needs no `pow`. One thread per element.
+///
+/// NOTE: F32 master/moments only here (the LoRA case). BF16 masters need the
+/// host stochastic-rounding path; callers decline BF16 to the host AdamW.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn adamw_step(
+    companion: &MetalCompanion,
+    param: &MetalBuffer,
+    grad: &MetalBuffer,
+    first_moment: &MetalBuffer,
+    second_moment: &MetalBuffer,
+    dtype: DType,
+    n: usize,
+    lr: f32,
+    beta1: f32,
+    beta2: f32,
+    eps: f32,
+    weight_decay: f32,
+    bc1: f32,
+    bc2: f32,
+) -> Result<()> {
+    let ty = msl_ty(dtype)?;
+    let entry = format!("kt_adamw_step_{ty}");
+    let src = format!(
+        r#"
+#include <metal_stdlib>
+using namespace metal;
+kernel void {entry}(
+    device {ty}* param        [[buffer(0)]],
+    device const {ty}* grad   [[buffer(1)]],
+    device {ty}* m            [[buffer(2)]],
+    device {ty}* v            [[buffer(3)]],
+    constant uint& n          [[buffer(4)]],
+    constant float& lr        [[buffer(5)]],
+    constant float& beta1     [[buffer(6)]],
+    constant float& beta2     [[buffer(7)]],
+    constant float& eps       [[buffer(8)]],
+    constant float& wd        [[buffer(9)]],
+    constant float& bc1       [[buffer(10)]],
+    constant float& bc2       [[buffer(11)]],
+    uint gid [[thread_position_in_grid]])
+{{
+    if (gid < n) {{
+        float g  = (float)grad[gid];
+        float mm = (float)m[gid];
+        float vv = (float)v[gid];
+        float p  = (float)param[gid];
+        mm = beta1 * mm + (1.0f - beta1) * g;
+        vv = beta2 * vv + (1.0f - beta2) * g * g;
+        float m_hat = mm / bc1;
+        float v_hat = vv / bc2;
+        float update = lr * (m_hat / (sqrt(v_hat) + eps));
+        p -= lr * wd * p;
+        p -= update;
+        m[gid]     = ({ty})mm;
+        v[gid]     = ({ty})vv;
+        param[gid] = ({ty})p;
+    }}
+}}
+"#
+    );
+    let pipeline = op_pipeline(companion, &src, &entry)?;
+    let encoder = companion
+        .command_encoder()
+        .map_err(|e| Error::Msg(format!("metal_kernels::adamw_step: encoder: {e:?}")))?;
+    encoder.set_label("kt_adamw_step");
+    encoder.set_compute_pipeline_state(&pipeline);
+    encoder.set_buffer(0, Some(param), 0);
+    encoder.set_buffer(1, Some(grad), 0);
+    encoder.set_buffer(2, Some(first_moment), 0);
+    encoder.set_buffer(3, Some(second_moment), 0);
+    let n_u = n as u32;
+    encoder.set_bytes(4, &n_u);
+    encoder.set_bytes(5, &lr);
+    encoder.set_bytes(6, &beta1);
+    encoder.set_bytes(7, &beta2);
+    encoder.set_bytes(8, &eps);
+    encoder.set_bytes(9, &weight_decay);
+    encoder.set_bytes(10, &bc1);
+    encoder.set_bytes(11, &bc2);
     dispatch_1d(&encoder, n);
     drop(encoder);
     Ok(())

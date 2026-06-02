@@ -34,8 +34,8 @@ pub mod diagnostics;
 // producing the scalar PG (+ optional KL) loss, whose backward recomputes
 // the candle GRPO forward with autograd ON to yield `dL/dlogits`. Mirrors
 // `kiln_model::tape_forward::try_tape_cross_entropy_from_logits_cuda` (the
-// SFT loss root) and `opd_candle_shim::try_tape_opd_scalar_mean_cuda` (OPD).
-pub mod grpo_candle_shim;
+// SFT loss root) and `opd_tape_shim::try_tape_opd_scalar_mean_cuda` (OPD).
+pub mod grpo_tape_shim;
 pub mod logit_cache;
 pub mod logit_source;
 pub mod long_context_fixture;
@@ -46,7 +46,7 @@ pub mod opd;
 // (the first kernel-crate candle drop). Holds the pure-candle Phase A
 // reference path, the candle `CustomOp1`-based kt-forward-op shim, and
 // the kt-tape production-caller adapters. See module docstring. (#1082)
-pub mod opd_candle_shim;
+pub mod opd_tape_shim;
 pub mod pi_trajectory;
 pub mod receipt;
 pub mod remote_teacher;

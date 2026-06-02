@@ -92,6 +92,18 @@ impl DeviceOp1 for CastOp {
             // Integer round-trip — exact in range.
             (DType::U32, DType::I64) => u32_to_i64(bytes, n),
             (DType::I64, DType::U32) => i64_to_u32(bytes, n)?,
+            // U8 (boolean masks from compare ops) <-> float triple. The
+            // forward direction is the load-bearing one: turning a U8
+            // comparison mask into a {0.0, 1.0} float multiplier (e.g. the
+            // strictly-lower-triangular GDN mask). The reverse is exact for
+            // the {0.0, 1.0} masks it round-trips and saturates/truncates
+            // otherwise so the conversion is total.
+            (DType::U8, DType::F32) => u8_to_f32(bytes, n),
+            (DType::U8, DType::BF16) => u8_to_bf16(bytes, n),
+            (DType::U8, DType::F16) => u8_to_f16(bytes, n),
+            (DType::F32, DType::U8) => f32_to_u8(bytes, n),
+            (DType::BF16, DType::U8) => bf16_to_u8(bytes, n),
+            (DType::F16, DType::U8) => f16_to_u8(bytes, n),
             // Anything else: deliberately not supported here.
             _ => bail!(
                 "CastOp: conversion {from} -> {to} is not supported \
@@ -161,6 +173,14 @@ impl DeviceOp1 for CastOp {
                 | (DType::BF16, DType::F16)
                 | (DType::F16, DType::F32)
                 | (DType::F16, DType::BF16)
+                // U8 boolean masks <-> float triple (e.g. GDN triangular mask
+                // -> float multiplier). Mirrors the CPU pairs above.
+                | (DType::U8, DType::F32)
+                | (DType::U8, DType::BF16)
+                | (DType::U8, DType::F16)
+                | (DType::F32, DType::U8)
+                | (DType::BF16, DType::U8)
+                | (DType::F16, DType::U8)
         );
         if !metal_supported {
             return Ok(None);
@@ -316,6 +336,72 @@ fn i64_to_u32(bytes: &[u8], n: usize) -> Result<Vec<u8>> {
     Ok(out)
 }
 
+// --- U8 (boolean masks) <-> float triple ---
+// U8 is 1 byte per element; the float targets are width 4 (F32) or 2 (BF16/F16).
+
+fn u8_to_f32(bytes: &[u8], n: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(n * 4);
+    for i in 0..n {
+        out.extend_from_slice(&(bytes[i] as f32).to_le_bytes());
+    }
+    out
+}
+
+fn u8_to_bf16(bytes: &[u8], n: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(n * 2);
+    for i in 0..n {
+        out.extend_from_slice(&half::bf16::from_f32(bytes[i] as f32).to_le_bytes());
+    }
+    out
+}
+
+fn u8_to_f16(bytes: &[u8], n: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(n * 2);
+    for i in 0..n {
+        out.extend_from_slice(&half::f16::from_f32(bytes[i] as f32).to_le_bytes());
+    }
+    out
+}
+
+/// Clamp a finite-or-NaN `f32` to a `u8`, truncating toward zero and
+/// saturating at 0/255 (matches the C/CUDA `(unsigned char)` cast guard rails
+/// used elsewhere; NaN -> 0).
+#[inline]
+fn f32_to_u8_sat(v: f32) -> u8 {
+    if v.is_nan() {
+        0
+    } else {
+        v.clamp(0.0, 255.0) as u8
+    }
+}
+
+fn f32_to_u8(bytes: &[u8], n: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let v = f32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap());
+        out.push(f32_to_u8_sat(v));
+    }
+    out
+}
+
+fn bf16_to_u8(bytes: &[u8], n: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let v = half::bf16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap()).to_f32();
+        out.push(f32_to_u8_sat(v));
+    }
+    out
+}
+
+fn f16_to_u8(bytes: &[u8], n: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let v = half::f16::from_le_bytes(bytes[i * 2..i * 2 + 2].try_into().unwrap()).to_f32();
+        out.push(f32_to_u8_sat(v));
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -395,6 +481,41 @@ mod tests {
         let x = Tensor::from_slice(&[-1i64], vec![1]).unwrap();
         let e = cast(&x, DType::U32).unwrap_err();
         assert!(e.to_string().contains("out of range"));
+    }
+
+    #[test]
+    fn cast_u8_mask_to_f32() {
+        // Boolean comparison masks (from `gt`/`ge`) are U8; converting them to
+        // a {0.0, 1.0} float multiplier is the load-bearing case.
+        let x = Tensor::from_slice(&[0u8, 1, 0, 1, 1], vec![5]).unwrap();
+        let y = cast(&x, DType::F32).unwrap();
+        assert_eq!(y.dtype(), DType::F32);
+        assert_eq!(read_f32(&y), vec![0.0, 1.0, 0.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn cast_u8_mask_to_bf16_and_f16() {
+        let x = Tensor::from_slice(&[0u8, 1, 1, 0], vec![4]).unwrap();
+        let yb = cast(&x, DType::BF16).unwrap();
+        assert_eq!(yb.dtype(), DType::BF16);
+        let cpu = yb.storage().as_any().downcast_ref::<CpuStorage>().unwrap();
+        for (i, &e) in [0.0f32, 1.0, 1.0, 0.0].iter().enumerate() {
+            let v = half::bf16::from_le_bytes(cpu.as_bytes()[i * 2..i * 2 + 2].try_into().unwrap()).to_f32();
+            assert_eq!(v, e);
+        }
+        let yf = cast(&x, DType::F16).unwrap();
+        assert_eq!(yf.dtype(), DType::F16);
+    }
+
+    #[test]
+    fn cast_f32_to_u8_roundtrips_mask_and_saturates() {
+        // Exact {0,1} round-trip plus saturation/truncation guard rails.
+        let x = Tensor::from_slice(&[0.0f32, 1.0, 2.9, -3.0, 300.0, f32::NAN], vec![6]).unwrap();
+        let y = cast(&x, DType::U8).unwrap();
+        assert_eq!(y.dtype(), DType::U8);
+        let cpu = y.storage().as_any().downcast_ref::<CpuStorage>().unwrap();
+        // truncate toward zero, clamp to [0,255], NaN -> 0.
+        assert_eq!(cpu.as_bytes(), &[0u8, 1, 2, 0, 255, 0]);
     }
 
     #[test]

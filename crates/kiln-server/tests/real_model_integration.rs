@@ -17,7 +17,8 @@ use kiln_core::config::ModelConfig;
 use kiln_core::tokenizer::KilnTokenizer;
 use kiln_model::ModelRunner;
 use kiln_model::forward::{
-    GpuAttentionWeights, GpuFfnWeights, GpuFullAttentionWeights, GpuLayerWeights, GpuWeights,
+    GpuAttentionWeights, GpuFfnWeights, GpuFullAttentionWeights, GpuLayerWeights,
+    GpuLinearAttentionWeights, GpuWeights,
 };
 use kiln_server::api;
 use kiln_server::state::AppState;
@@ -626,7 +627,6 @@ async fn test_real_model_chat_completion_metal() {
     if kiln_model::backend::metal::try_new_metal().is_none() {
         return;
     }
-    let _gpu = metal_gpu_guard();
     let device = Device::Metal(0);
 
     let config = tiny_config();
@@ -693,7 +693,6 @@ async fn test_real_model_chat_completion_metal_bf16_fused() {
     if kiln_model::backend::metal::try_new_metal().is_none() {
         return;
     }
-    let _gpu = metal_gpu_guard();
     let device = Device::Metal(0);
 
     let mut config = tiny_config();
@@ -793,21 +792,14 @@ fn metal_chat_msg(role: &str, content: &str) -> kiln_train::ChatMessage {
     }
 }
 
-/// Serialize GPU-heavy Metal tests in this binary. The process-global
-/// `MetalCompanion` command pool is shared across all threads; concurrent
-/// submission from cargo's parallel test threads perturbs BF16 numerics
-/// (different reduction ordering), which the marginal training-loss-decrease
-/// assertions are sensitive to. Holding this lock makes each GPU test run in
-/// isolation (matching the deterministic single-run behavior). NOTE: the
-/// underlying concurrency sensitivity of the shared Metal companion is a real
-/// follow-up beyond these smokes.
-#[cfg(feature = "metal")]
-fn metal_gpu_guard() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
-    LOCK.get_or_init(|| std::sync::Mutex::new(()))
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
+// The former `metal_gpu_guard()` process-global serialization mutex was
+// removed (#1082): the shared `MetalCompanion` command-buffer stream is now
+// correct under cross-thread concurrency (the deferred-commit pool no longer
+// reorders data-dependent ops across command buffers — see the re-architected
+// `kiln_tensor::metal_rt::commands`). These GPU-heavy Metal smokes now run
+// concurrently with cargo's parallel test threads and remain deterministic,
+// which is exactly the production guarantee (server inference races a training
+// job on the same GPU).
 
 #[cfg(feature = "metal")]
 fn assert_adapter_written(out: &std::path::Path) {
@@ -887,6 +879,265 @@ fn assert_loss_decreases(losses: &[f64]) {
     );
 }
 
+/// Tiny HYBRID config with ONE GDN (linear-attention) layer + one full-attn
+/// layer, for the GDN-on-Metal training smoke. `full_attention_interval = 2`
+/// makes layer 0 linear/GDN and layer 1 full (`(idx+1) % 2`). The GDN dims are
+/// the smallest that still exercise every GDN sub-op: 1 key/value head, head_dim
+/// 4, conv kernel 4. The conv channels = `linear_qkv_dim = 2*qk + v = 12`.
+#[cfg(feature = "metal")]
+fn tiny_gdn_config() -> ModelConfig {
+    ModelConfig {
+        hidden_size: 8,
+        num_layers: 2,
+        num_attention_heads: 2,
+        num_kv_heads: 1,
+        head_dim: 4,
+        intermediate_size: 16,
+        vocab_size: 32,
+        max_position_embeddings: 128,
+        rms_norm_eps: 1e-6,
+        rope_theta: 10_000.0,
+        dtype: kiln_core::config::DType::BF16,
+        // Layer 0 -> linear (GDN), layer 1 -> full attention.
+        num_full_attention_layers: 1,
+        full_attention_interval: 2,
+        attn_output_gate: false,
+        linear_num_key_heads: 1,
+        linear_key_head_dim: 4,
+        linear_num_value_heads: 1,
+        linear_value_head_dim: 4,
+        linear_conv_kernel_dim: 4,
+        partial_rotary_factor: 1.0,
+    }
+}
+
+/// BF16 GpuWeights for [`tiny_gdn_config`]: layer 0 is a GDN
+/// (`GpuAttentionWeights::Linear`) layer, layer 1 is full attention. Mirrors the
+/// GDN weight literal in `kiln_model::forward` / `kiln_train::trainer` test
+/// fixtures (all `*_t` transposes materialized, `a_log_gates`/`dt_bias`/`norm`
+/// populated). The GDN layer's `in_proj_qkv` LoRA grad path runs through the
+/// depthwise causal conv1d, so a non-empty grad-norm receipt proves the conv
+/// backward (the composite on Metal) did not sever.
+#[cfg(feature = "metal")]
+fn tiny_gdn_weights_bf16(config: &ModelConfig, device: &Device) -> GpuWeights {
+    let h = config.hidden_size;
+    let inter = config.intermediate_size;
+    let vocab = config.vocab_size;
+    let num_heads = config.num_attention_heads;
+    let num_kv_heads = config.num_kv_heads;
+    let head_dim = config.head_dim;
+
+    let bf16 = |t: &Tensor| kiln_tensor::ops::cast(t, DType::BF16).expect("cast bf16");
+    let rnd =
+        |shape: &[usize]| bf16(&Tensor::randn(0.0_f32, 0.02, shape, device).unwrap());
+    let rnd_t = |shape: &[usize]| {
+        let w = Tensor::randn(0.0_f32, 0.02, shape, device).unwrap();
+        let wt = w.t().unwrap().contiguous().unwrap();
+        (bf16(&w), bf16(&wt))
+    };
+
+    let embed = Tensor::randn(0.0_f32, 0.02, (vocab, h), device).unwrap();
+    let embed_t = embed.t().unwrap().contiguous().unwrap();
+    let embed = bf16(&embed);
+    let embed_t = bf16(&embed_t);
+    let final_norm = bf16(&Tensor::zeros((h,), DType::F32, device).unwrap());
+
+    let mk_mlp = || {
+        let (gate_proj, gate_proj_t) = rnd_t(&[inter, h]);
+        let (up_proj, up_proj_t) = rnd_t(&[inter, h]);
+        let (down_proj, down_proj_t) = rnd_t(&[h, inter]);
+        GpuFfnWeights {
+            gate_proj,
+            up_proj,
+            down_proj,
+            gate_proj_t,
+            up_proj_t,
+            down_proj_t,
+            gate_up_proj_t: None,
+            gate_proj_marlin: None,
+            up_proj_marlin: None,
+            down_proj_marlin: None,
+        }
+    };
+
+    // --- Layer 0: GDN (linear attention). ---
+    let qkv_dim = config.linear_qkv_dim();
+    let v_dim = config.linear_v_dim();
+    let nv = config.linear_num_value_heads;
+    let (in_proj_qkv, in_proj_qkv_t) = rnd_t(&[qkv_dim, h]);
+    let (in_proj_z, in_proj_z_t) = rnd_t(&[v_dim, h]);
+    let (out_proj, out_proj_t) = rnd_t(&[h, v_dim]);
+    let (in_proj_a, in_proj_a_t) = rnd_t(&[nv, h]);
+    let (in_proj_b, in_proj_b_t) = rnd_t(&[nv, h]);
+    let a_log = bf16(&Tensor::randn(0.0_f32, 0.5, (nv,), device).unwrap());
+    let gdn_layer = GpuLayerWeights {
+        input_layernorm: bf16(&Tensor::zeros((h,), DType::F32, device).unwrap()),
+        post_attention_layernorm: bf16(&Tensor::zeros((h,), DType::F32, device).unwrap()),
+        attention: GpuAttentionWeights::Linear(GpuLinearAttentionWeights {
+            in_proj_qkv,
+            in_proj_z,
+            out_proj,
+            in_proj_a,
+            in_proj_b,
+            conv1d: rnd(&[qkv_dim, 1, config.linear_conv_kernel_dim]),
+            norm: Tensor::ones((config.linear_value_head_dim,), DType::F32, device).unwrap(),
+            a_log: a_log.clone(),
+            a_log_gates: a_log,
+            dt_bias: bf16(&Tensor::zeros((nv,), DType::F32, device).unwrap()),
+            in_proj_qkv_t,
+            in_proj_z_t,
+            in_proj_a_t,
+            in_proj_b_t,
+            in_proj_ab_t: None,
+            out_proj_t,
+            out_proj_marlin: None,
+        }),
+        mlp: mk_mlp(),
+    };
+
+    // --- Layer 1: full attention. ---
+    let (q_proj, q_proj_t) = rnd_t(&[num_heads * head_dim, h]);
+    let (k_proj, k_proj_t) = rnd_t(&[num_kv_heads * head_dim, h]);
+    let (v_proj, v_proj_t) = rnd_t(&[num_kv_heads * head_dim, h]);
+    let (o_proj, o_proj_t) = rnd_t(&[h, num_heads * head_dim]);
+    let full_layer = GpuLayerWeights {
+        input_layernorm: bf16(&Tensor::zeros((h,), DType::F32, device).unwrap()),
+        post_attention_layernorm: bf16(&Tensor::zeros((h,), DType::F32, device).unwrap()),
+        attention: GpuAttentionWeights::Full(GpuFullAttentionWeights {
+            q_proj,
+            k_proj,
+            v_proj,
+            o_proj,
+            q_norm: bf16(&Tensor::zeros((head_dim,), DType::F32, device).unwrap()),
+            k_norm: bf16(&Tensor::zeros((head_dim,), DType::F32, device).unwrap()),
+            q_proj_t,
+            k_proj_t,
+            v_proj_t,
+            qkv_proj_t: None,
+            o_proj_t,
+            q_proj_marlin: None,
+        }),
+        mlp: mk_mlp(),
+    };
+
+    let rotary_inv_freq = kiln_model::forward::compute_rotary_inv_freq(
+        config.rotary_dim(),
+        config.rope_theta,
+        device,
+    )
+    .unwrap();
+
+    GpuWeights {
+        embed_tokens: embed,
+        embed_tokens_t: embed_t,
+        layers: vec![gdn_layer, full_layer],
+        final_norm,
+        rotary_inv_freq,
+        mtp: None,
+    }
+}
+
+/// GDN-layer LoRA SFT on Metal smoke (#1082). The conv1d-backward gap this PR
+/// closes was one of several Metal GDN-training gaps; with the conv1d-bwd-input
+/// composite wired, the `in_proj_qkv` LoRA grad path no longer severs at the
+/// depthwise causal conv1d. This builds a tiny hybrid model with ONE GDN layer
+/// (`GpuAttentionWeights::Linear`) + one full-attention layer and runs a few SFT
+/// steps on `Device::Metal(0)`, asserting LoRA grads flowed (a non-empty,
+/// non-zero `lora_grad_norms` receipt).
+///
+/// # Enabled: the Metal GDN forward + backward now run end-to-end
+///
+/// The chunkwise GDN forward (`forward.rs` `gdn_chunkwise_recurrence`) reaches
+/// `kiln_tensor::ops::{cumsum, compare, where_select}`, all of which now have
+/// kiln-owned native MSL kernels (no host round-trip), so the GDN forward
+/// completes on `Device::Metal(0)`; the conv1d backward closes the
+/// `in_proj_qkv` LoRA grad path. This test runs by default as the end-to-end
+/// GDN-training smoke and asserts LoRA grads flowed.
+#[cfg(feature = "metal")]
+#[test]
+fn test_real_model_gdn_sft_metal() {
+    if kiln_model::backend::metal::try_new_metal().is_none() {
+        eprintln!("No Metal device — skipping GDN-SFT-on-Metal smoke");
+        return;
+    }
+    let device = Device::Metal(0);
+    let config = tiny_gdn_config();
+    let weights = tiny_gdn_weights_bf16(&config, &device);
+    let tokenizer = test_tokenizer();
+
+    let examples = vec![
+        kiln_train::SftExample {
+            messages: vec![
+                metal_chat_msg("user", "t1 t2 t3"),
+                metal_chat_msg("assistant", "t2 t3 t1"),
+            ],
+        },
+        kiln_train::SftExample {
+            messages: vec![
+                metal_chat_msg("user", "t3 t1"),
+                metal_chat_msg("assistant", "t1 t2 t3"),
+            ],
+        },
+    ];
+    let sft_config = kiln_train::SftConfig {
+        epochs: 3,
+        learning_rate: 1e-3,
+        lora_rank: 2,
+        lora_alpha: 4.0,
+        auto_load: false,
+        seed: Some(0),
+        ..Default::default()
+    };
+
+    let (losses, cb) = loss_capture_cb();
+    let adapter_dir = tempfile::tempdir().unwrap();
+    let out = kiln_train::trainer::sft_train(
+        &examples,
+        &sft_config,
+        &config,
+        &weights,
+        &tokenizer,
+        adapter_dir.path(),
+        "gdn-sft-metal-smoke",
+        Some(cb),
+        None,
+    )
+    .expect("GDN SFT training on Device::Metal(0) should complete");
+    assert_adapter_written(&out);
+
+    let losses = losses.lock().unwrap();
+    assert!(
+        !losses.is_empty(),
+        "GDN SFT progress callback recorded no losses"
+    );
+    assert!(
+        losses.iter().all(|l| l.is_finite()),
+        "all GDN SFT training losses must be finite, got {losses:?}"
+    );
+
+    // The decisive assertion: LoRA grads must have flowed. With the conv1d
+    // backward severed (the pre-#1082 Metal behavior), the GDN layer's
+    // in_proj_qkv path records no gradient and the receipt's grad-norm list is
+    // empty / all-zero. A non-empty list with a strictly-positive max mean-norm
+    // proves the conv1d-bwd-input composite carried the GDN gradient on Metal.
+    let (grad_norm_modules, max_mean_norm) = receipt_lora_grad_norms(&out);
+    assert!(
+        grad_norm_modules > 0,
+        "GDN SFT step recorded no LoRA grad norms — gradients did not flow \
+         through the GDN layer on Metal (the conv1d backward severed). \
+         losses={losses:?}"
+    );
+    assert!(
+        max_mean_norm > 0.0,
+        "GDN SFT LoRA grad norms are all zero — the tape walked but deposited \
+         no signal (modules={grad_norm_modules}, losses={losses:?})"
+    );
+    eprintln!(
+        "[GDN-SFT-METAL] losses={losses:?} lora_grad_norm_modules={grad_norm_modules} \
+         max_mean_norm={max_mean_norm:.3e}"
+    );
+}
+
 #[cfg(feature = "metal")]
 #[test]
 fn test_real_model_sft_metal() {
@@ -894,7 +1145,6 @@ fn test_real_model_sft_metal() {
         eprintln!("No Metal device — skipping SFT-on-Metal smoke");
         return;
     }
-    let _gpu = metal_gpu_guard();
     let device = Device::Metal(0);
     let mut config = tiny_config();
     config.dtype = kiln_core::config::DType::BF16;
@@ -965,7 +1215,7 @@ fn receipt_lora_grad_norms(out: &std::path::Path) -> (usize, f64) {
 
 /// GRPO on Metal smoke. Exercises the kt tape-authoritative GRPO producer
 /// (`grpo_step_forward_backward_tape_authoritative_kt` + the
-/// `grpo_candle_shim` scalar-loss tape root) on a real BF16 tiny model on
+/// `grpo_tape_shim` scalar-loss tape root) on a real BF16 tiny model on
 /// `Device::Metal(0)`. One group with VARIED rewards (1.0 / 0.0) so the
 /// group-relative advantage is non-zero and a genuine policy gradient flows.
 /// KL is off (`kl_coeff = 0`) and ECHO is disabled so the per-completion step
@@ -977,7 +1227,6 @@ fn test_real_model_grpo_metal() {
         eprintln!("No Metal device — skipping GRPO-on-Metal smoke");
         return;
     }
-    let _gpu = metal_gpu_guard();
     let device = Device::Metal(0);
     let mut config = tiny_config();
     config.dtype = kiln_core::config::DType::BF16;
@@ -1083,7 +1332,7 @@ fn test_real_model_grpo_metal() {
 /// Exercises the kt-native OPD producer path on a real BF16 tiny model on
 /// `Device::Metal(0)`: `opd_train` -> `opd_step_forward_backward_tape_authoritative`
 /// -> the full Metal forward (`model_forward_no_head`) -> the kt-native OPD
-/// scalar-loss tape root (`opd_candle_shim::try_tape_opd_scalar_mean_cuda_kt` ->
+/// scalar-loss tape root (`opd_tape_shim::try_tape_opd_scalar_mean_cuda_kt` ->
 /// `kiln_opd_loss_kernel::opd_top_k_reverse_kl_phase_b_via_kt_tape`).
 ///
 /// # End-to-end on Metal (#1082 Metal lane)
@@ -1116,7 +1365,6 @@ fn test_real_model_opd_metal() {
         eprintln!("No Metal device — skipping OPD-on-Metal smoke");
         return;
     }
-    let _gpu = metal_gpu_guard();
     let device = Device::Metal(0);
     let mut config = tiny_config();
     config.dtype = kiln_core::config::DType::BF16;

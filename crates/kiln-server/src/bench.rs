@@ -918,9 +918,8 @@ fn bench_latency_paged(
     let num_blocks = (max_total + PAGED_BLOCK_SIZE - 1) / PAGED_BLOCK_SIZE;
 
     // #1082 candle-drop: candle `PagedKvCache::new_kt(&device_kt, ...)` ->
-    // kt `PagedKvCacheKt::new(..., device_index)`. The trailing `&Device`
-    // arg becomes a plain `device_index: usize` (single-GPU -> 0; multi-GPU
-    // index comes from the kt `Device`).
+    // kt `PagedKvCacheKt::new(..., device)`. Pools are allocated on the
+    // model's runtime `Device` so the per-layer K/V writes match it.
     let paged_cache = PagedKvCacheKt::new(
         config.num_full_attention_layers,
         num_blocks,
@@ -928,7 +927,7 @@ fn bench_latency_paged(
         config.num_kv_heads,
         config.head_dim,
         dtype,
-        device_kt.index().unwrap_or(0),
+        device_kt,
     )?;
 
     // Phase 7 #1082: first end-to-end PagedKvCacheKt production wiring.
@@ -1765,7 +1764,7 @@ fn bench_latency_paged_skiplayer(
     let num_blocks = (max_total + PAGED_BLOCK_SIZE - 1) / PAGED_BLOCK_SIZE;
 
     // #1082 candle-drop: `PagedKvCache::new_kt(&device_kt, ...)` ->
-    // `PagedKvCacheKt::new(..., device_index)`.
+    // `PagedKvCacheKt::new(..., device)` — pools on the runtime `Device`.
     let paged_cache = PagedKvCacheKt::new(
         config.num_full_attention_layers,
         num_blocks,
@@ -1773,7 +1772,7 @@ fn bench_latency_paged_skiplayer(
         config.num_kv_heads,
         config.head_dim,
         dtype,
-        device_kt.index().unwrap_or(0),
+        device_kt,
     )?;
     let backend = runtime_backend_for_bench(&device_kt, weights)?;
     // #1082 forward-flip: `LinearAttentionState::new_with_batch_for_inference_backend`
@@ -2039,7 +2038,8 @@ fn bench_latency_paged_mtp(
     let num_blocks = (max_total_base + PAGED_BLOCK_SIZE - 1) / PAGED_BLOCK_SIZE;
 
     // #1082 candle-drop: `PagedKvCache::new_kt(&device_kt, ...)` ->
-    // `PagedKvCacheKt::new(..., device_index)` for both base + MTP caches.
+    // `PagedKvCacheKt::new(..., device)` for both base + MTP caches (pools
+    // on the runtime `Device`).
     let base_cache = PagedKvCacheKt::new(
         config.num_full_attention_layers,
         num_blocks,
@@ -2047,7 +2047,7 @@ fn bench_latency_paged_mtp(
         config.num_kv_heads,
         config.head_dim,
         dtype,
-        device_kt.index().unwrap_or(0),
+        device_kt,
     )?;
     let mtp_cache = PagedKvCacheKt::new(
         1,
@@ -2056,7 +2056,7 @@ fn bench_latency_paged_mtp(
         config.num_kv_heads,
         config.head_dim,
         dtype,
-        device_kt.index().unwrap_or(0),
+        device_kt,
     )?;
     let backend = runtime_backend_for_bench(&device_kt, weights)?;
     // #1082 forward-flip: `LinearAttentionState::new_with_batch_for_inference_backend`

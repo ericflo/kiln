@@ -188,6 +188,107 @@ fn log_softmax_last_axis_bf16() {
 }
 
 #[test]
+fn cumsum_axis_f32() {
+    let Some(dev) = metal() else {
+        eprintln!("no Metal device; skipping");
+        return;
+    };
+    // (rows, cols, axis, seed): trailing-axis scan, outer-axis scan, single row.
+    for (rows, cols, axis, seed) in [
+        (8usize, 128usize, 1usize, 21u64),
+        (8, 128, 0, 22),
+        (1, 2560, 1, 23),
+        (64, 4, 0, 24),
+    ] {
+        let data = pattern(rows * cols, seed);
+        let (cpu, met) = pair(&data, &[rows, cols], dev);
+        // CPU reference vs the Metal kernel through the same op entry point
+        // (`ops::cumsum` routes Metal storage to the kiln-owned MSL scan).
+        let want = ops::cumsum(&cpu, axis).unwrap().to_vec::<f32>().unwrap();
+        let got = ops::cumsum(&met, axis).unwrap().to_vec::<f32>().unwrap();
+        let d = max_abs_diff(&want, &got);
+        // Identical sequential F32 accumulation on both sides ⇒ ~bit-exact.
+        assert!(d < 1e-3, "cumsum f32 [{rows},{cols}] axis {axis} max|Δ|={d}");
+    }
+}
+
+#[test]
+fn compare_all_kinds_f32() {
+    let Some(dev) = metal() else {
+        eprintln!("no Metal device; skipping");
+        return;
+    };
+    let (rows, cols) = (8usize, 96usize);
+    // `a` ranges over [-1,1]; `b` is a quantized copy so eq/ne hit both
+    // branches and lt/le/gt/ge cover all orderings.
+    let a = pattern(rows * cols, 31);
+    let b: Vec<f32> = a
+        .iter()
+        .enumerate()
+        .map(|(i, &v)| if i % 3 == 0 { v } else { (v * 4.0).round() / 4.0 })
+        .collect();
+    let (cpu_a, met_a) = pair(&a, &[rows, cols], dev);
+    let (cpu_b, met_b) = pair(&b, &[rows, cols], dev);
+    // Each closure routes Metal storage to the kiln-owned MSL compare kernel
+    // (U8 mask output) through the same `ops::` entry point as the CPU side.
+    type CmpFn = fn(&Tensor, &Tensor) -> kiln_tensor::Result<Tensor>;
+    let kinds: [(&str, CmpFn); 6] = [
+        ("eq", ops::eq),
+        ("ne", ops::ne),
+        ("lt", ops::lt),
+        ("le", ops::le),
+        ("gt", ops::gt),
+        ("ge", ops::ge),
+    ];
+    for (name, f) in kinds {
+        let want = f(&cpu_a, &cpu_b).unwrap();
+        let got = f(&met_a, &met_b).unwrap();
+        assert_eq!(got.dtype(), DType::U8, "compare {name}: output dtype");
+        assert_eq!(got.shape(), &[rows, cols], "compare {name}: output shape");
+        let want_u8 = want.to_vec::<u8>().unwrap();
+        let got_u8 = got.to_vec::<u8>().unwrap();
+        // Exact U8-mask equality — the boolean op is computed identically
+        // (F32-promoted compare) on both sides.
+        let mismatches = want_u8.iter().zip(&got_u8).filter(|(x, y)| x != y).count();
+        assert_eq!(
+            mismatches, 0,
+            "compare {name} [{rows},{cols}] mask mismatch count={mismatches}"
+        );
+        // Sanity: the test data exercises both 0 and 1 outcomes.
+        assert!(
+            want_u8.iter().any(|&v| v == 1) && want_u8.iter().any(|&v| v == 0),
+            "compare {name}: test data should hit both true and false"
+        );
+    }
+}
+
+#[test]
+fn where_select_f32() {
+    let Some(dev) = metal() else {
+        eprintln!("no Metal device; skipping");
+        return;
+    };
+    let (rows, cols) = (8usize, 96usize);
+    let t = pattern(rows * cols, 41);
+    let f = pattern(rows * cols, 42);
+    // Deterministic U8 mask exercising both branches (some 0, some 1).
+    let mask: Vec<u8> = (0..rows * cols).map(|i| if (i * 7 + 3) % 5 < 2 { 1 } else { 0 }).collect();
+    let (cpu_t, met_t) = pair(&t, &[rows, cols], dev);
+    let (cpu_f, met_f) = pair(&f, &[rows, cols], dev);
+    let cpu_m = Tensor::from_vec(mask.clone(), vec![rows, cols]).unwrap();
+    let met_m = Tensor::from_vec_on(dev, mask.clone(), vec![rows, cols]).unwrap();
+    // CPU reference vs the Metal kernel through the same `ops::where_select`
+    // entry point (Metal storage → kiln-owned MSL byte-wise select).
+    let want = ops::where_select(&cpu_m, &cpu_t, &cpu_f).unwrap().to_vec::<f32>().unwrap();
+    let got = ops::where_select(&met_m, &met_t, &met_f).unwrap().to_vec::<f32>().unwrap();
+    let d = max_abs_diff(&want, &got);
+    // Byte-wise select copies the chosen operand bit-for-bit ⇒ exact.
+    assert!(d == 0.0, "where_select f32 [{rows},{cols}] max|Δ|={d}");
+    // Sanity: the mask hit both branches.
+    assert!(mask.iter().any(|&m| m == 1) && mask.iter().any(|&m| m == 0));
+}
+
+#[test]
 fn rmsnorm_last_axis_f32() {
     let Some(dev) = metal() else {
         eprintln!("no Metal device; skipping");
@@ -251,6 +352,62 @@ fn cast_f32_to_bf16() {
         .to_vec::<half::bf16>()
         .unwrap();
     assert_eq!(want, got, "cast f32→bf16 must match CPU bit-for-bit");
+}
+
+#[test]
+fn cast_u8_mask_to_float_triple_and_back() {
+    let Some(dev) = metal() else {
+        eprintln!("no Metal device; skipping");
+        return;
+    };
+    // Boolean-style mask (the GDN triangular mask shape): some 0, some 1.
+    let n = 1024usize;
+    let mask: Vec<u8> = (0..n).map(|i| if (i * 7 + 3) % 5 < 2 { 1 } else { 0 }).collect();
+    let cpu_u8 = Tensor::from_vec(mask.clone(), vec![n]).unwrap();
+    let met_u8 = Tensor::from_vec_on(dev, mask.clone(), vec![n]).unwrap();
+    assert_eq!(met_u8.dtype(), DType::U8);
+
+    // U8 -> F32 / BF16 / F16: every backend value must equal the CPU cast.
+    for to in [DType::F32, DType::BF16, DType::F16] {
+        let want = ops::cast(&cpu_u8, to).unwrap();
+        let got = kiln_tensor::metal_cast(&met_u8, to).unwrap();
+        assert_eq!(got.dtype(), to, "cast u8→{to}: output dtype");
+        let want_f = want.to_device(Device::Cpu).unwrap();
+        let got_f = got.to_device(Device::Cpu).unwrap();
+        let (w, g): (Vec<f32>, Vec<f32>) = match to {
+            DType::F32 => (
+                want_f.to_vec::<f32>().unwrap(),
+                got_f.to_vec::<f32>().unwrap(),
+            ),
+            DType::BF16 => (
+                want_f.to_vec::<half::bf16>().unwrap().into_iter().map(|v| v.to_f32()).collect(),
+                got_f.to_vec::<half::bf16>().unwrap().into_iter().map(|v| v.to_f32()).collect(),
+            ),
+            DType::F16 => (
+                want_f.to_vec::<half::f16>().unwrap().into_iter().map(|v| v.to_f32()).collect(),
+                got_f.to_vec::<half::f16>().unwrap().into_iter().map(|v| v.to_f32()).collect(),
+            ),
+            _ => unreachable!(),
+        };
+        assert_eq!(w, g, "cast u8→{to} must match CPU bit-for-bit");
+        // Mask semantics preserved: value 1.0 where mask==1, 0.0 elsewhere.
+        for (i, &m) in mask.iter().enumerate() {
+            assert_eq!(g[i], m as f32, "cast u8→{to} value at {i}");
+        }
+    }
+
+    // F32 -> U8 round-trip: the {0,1} mask must come back exactly.
+    let f32_mask = ops::cast(&cpu_u8, DType::F32).unwrap();
+    let met_f32 = f32_mask.to_device(dev).unwrap();
+    let want_back = ops::cast(&f32_mask, DType::U8).unwrap().to_vec::<u8>().unwrap();
+    let got_back = kiln_tensor::metal_cast(&met_f32, DType::U8)
+        .unwrap()
+        .to_device(Device::Cpu)
+        .unwrap()
+        .to_vec::<u8>()
+        .unwrap();
+    assert_eq!(want_back, mask, "f32→u8 must restore the mask");
+    assert_eq!(got_back, want_back, "metal f32→u8 must match CPU");
 }
 
 #[test]

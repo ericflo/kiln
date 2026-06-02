@@ -1709,12 +1709,13 @@ impl AppState {
         // budget instead of panicking on the first failure.
         //
         // #1082 candle-drop: candle `PagedKvCache::new_uninit_with_fp8_kt(..,
-        // &device_kt, ..)` -> kt `PagedKvCacheKt::new_with_fp8(.., device_index,
-        // fp8)`. The trailing `&Device` becomes `device_index: usize`
-        // (single-GPU -> 0). NOTE: the kt constructor zero-fills the pools;
-        // the old `new_uninit_*` left them uninitialized — a one-time startup
-        // memset, not a correctness change (paged writes overwrite slots
-        // before they are read).
+        // &device_kt, ..)` -> kt `PagedKvCacheKt::new_with_fp8(.., device, fp8)`.
+        // The kt cache now allocates its pools on the model's *runtime* device,
+        // so pass `device_kt` through (a Metal model gets Metal pools, a CPU
+        // model gets CPU pools) — this is the device-routing fix. NOTE: the kt
+        // constructor zero-fills the pools; the old `new_uninit_*` left them
+        // uninitialized — a one-time startup memset, not a correctness change
+        // (paged writes overwrite slots before they are read).
         let allocate_cache = |n: usize| -> anyhow::Result<PagedKvCacheKt> {
             PagedKvCacheKt::new_with_fp8(
                 model_config.num_full_attention_layers,
@@ -1723,7 +1724,7 @@ impl AppState {
                 model_config.num_kv_heads,
                 model_config.head_dim,
                 kv_dtype,
-                device_kt.index().unwrap_or(0),
+                device_kt,
                 fp8_enabled,
             )
         };
@@ -3426,11 +3427,10 @@ mod tests {
     /// logic.
     ///
     /// #1082 candle-drop: `PagedKvCache::new_uninit_with_fp8_kt(&Device, ..)`
-    /// -> `PagedKvCacheKt::new_with_fp8(.., device_index, fp8)`.
-    /// WARNING: `PagedKvCacheKt::new_with_fp8` zero-fills via the CUDA
-    /// allocator (`cuda_zeros_ctx`), so this helper now requires a CUDA
-    /// device at index 0 — it will fail on a CPU-only test host. See the
-    /// "non-mechanical issues" note returned with this change.
+    /// -> `PagedKvCacheKt::new_with_fp8(.., device, fp8)`. Now that the kt
+    /// cache allocates on the runtime `Device`, this dummy passes
+    /// `Device::Cpu` so it builds host-resident pools and runs on any test
+    /// host (no CUDA/Metal device required).
     fn dummy_cpu_cache() -> PagedKvCacheKt {
         PagedKvCacheKt::new_with_fp8(
             1,  // num_full_attn_layers
@@ -3439,7 +3439,7 @@ mod tests {
             1,  // num_kv_heads
             4,  // head_dim
             DType::F32,
-            0, // device_index (single-GPU)
+            kiln_tensor::Device::Cpu,
             false,
         )
         .expect("PagedKvCacheKt allocation never fails for tiny shape")
