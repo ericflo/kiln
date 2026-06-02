@@ -9,7 +9,7 @@
 //! candle's `loss.backward()`. The SFT path roots the tape at
 //! `kiln_model::tape_forward::try_tape_cross_entropy_from_logits_cuda` (a fused
 //! "scalar CE from full logits" node); OPD roots it at
-//! `crate::opd_candle_shim::try_tape_opd_scalar_mean_cuda` (the OPD reverse-KL
+//! `crate::opd_tape_shim::try_tape_opd_scalar_mean_cuda` (the OPD reverse-KL
 //! scalar node). GRPO needs the same: a single tape node that takes the FULL
 //! `[1, T, V]` policy logits (the tape-connected lm_head output) and produces
 //! the scalar GRPO policy-gradient (+ optional KL) loss, so one `Tape::backward`
@@ -83,7 +83,7 @@
 //!   `grpo_loss`.
 
 #[cfg(any(feature = "cuda", feature = "metal"))]
-use crate::cd_types::CdDevice;
+use crate::cd_types::Device;
 #[cfg(any(feature = "cuda", feature = "metal"))]
 use crate::trainer::{grpo_loss, token_log_probs, GrpoLossParams};
 #[cfg(any(feature = "cuda", feature = "metal"))]
@@ -122,9 +122,9 @@ struct GrpoPgLossFromLogitsBackward {
     /// GRPO surrogate / KL parameters (advantage, clip bounds, KL estimator,
     /// loss normalizer, IS level, reinforce flag, entropy-aware quantile).
     loss_params: GrpoLossParams,
-    /// kt device for the analytic backward (#1082 step 8: `CdDevice` is the kt
+    /// kt device for the analytic backward (#1082 step 8: `Device` is the kt
     /// `Device` alias; was a candle device bridged per-call).
-    device: CdDevice,
+    device: Device,
 }
 
 #[cfg(any(feature = "cuda", feature = "metal"))]
@@ -234,7 +234,7 @@ fn grpo_pg_loss_from_logits_grad_kt(
     ref_log_probs_kt: &kiln_tensor::Tensor,
     loss_params: GrpoLossParams,
     grad_scalar: f64,
-    device: &CdDevice,
+    device: &Device,
 ) -> Result<kiln_tensor::Tensor> {
     use kiln_tensor::{DType as KtDType, Tensor as KtTensor};
 
@@ -477,7 +477,7 @@ fn grpo_pg_loss_from_logits_grad_kt(
 /// node taking the FULL `[1, T, V]` policy logits.
 ///
 /// Mirrors `kiln_model::tape_forward::try_tape_cross_entropy_from_logits_cuda`
-/// (SFT) and `crate::opd_candle_shim::try_tape_opd_scalar_mean_cuda` (OPD): the
+/// (SFT) and `crate::opd_tape_shim::try_tape_opd_scalar_mean_cuda` (OPD): the
 /// returned candle scalar is a DETACHED, lineage-free value-copy of the loss
 /// (so the tape-authoritative caller's `loss.backward()` is unconditionally
 /// `{loss: ones}` and the recorded node is the sole backward root); the
@@ -499,7 +499,7 @@ pub(crate) fn try_tape_grpo_pg_loss_from_logits_kt(
     action_mask: &[bool],
     ref_log_probs_kt: &kiln_tensor::Tensor,
     loss_params: GrpoLossParams,
-    device: &CdDevice,
+    device: &Device,
 ) -> Result<Option<kiln_tensor::Tensor>> {
     if !tape_forward_enabled() {
         return Ok(None);

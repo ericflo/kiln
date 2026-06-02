@@ -8,7 +8,7 @@
 //! `candle_core::*` islands bridged via `kiln_kt_bridge`. This module
 //! used to alias those bare names to `candle_core::*` so `trainer.rs`
 //! could keep candle types under a facade. Wave E4 flips the
-//! load-bearing aliases (`Tensor`, `CdDevice`, `DType`, `TensorId`) to
+//! load-bearing aliases (`Tensor`, `Device`, `DType`, `TensorId`) to
 //! **kt** types, in lockstep with the `trainer.rs` / `opd.rs`
 //! Var→`kiln_param::Parameter` + candle-grad-removal migration (Wave
 //! E1/E2). The remaining candle-API-specific aliases (`Shape`, `D`,
@@ -42,7 +42,7 @@
 // ---------------------------------------------------------------------------
 
 pub(crate) type Tensor = kiln_tensor::Tensor;
-pub(crate) type CdDevice = kiln_tensor::Device;
+pub(crate) type Device = kiln_tensor::Device;
 pub(crate) type DType = kiln_tensor::DType;
 pub(crate) type TensorId = kiln_tensor::TensorId;
 

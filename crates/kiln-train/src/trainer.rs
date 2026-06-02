@@ -15,7 +15,7 @@ use anyhow::{Context, Result};
 // on stable Rust without `trait_alias`). Every other candle reference
 // resolves through
 // `crate::cd_types`, the per-crate candle facade that holds the type
-// aliases (`Tensor` / `Var` / `CdDevice` / `DType` / `Shape` /
+// aliases (`Tensor` / `Var` / `Device` / `DType` / `Shape` /
 // `GradStore` / `TensorId` / `D` / `CdResult`), the `cd_bail!` macro,
 // the safetensors I/O shims (`safetensors_load_file` /
 // `safetensors_save_file`), and the generic constructor helpers
@@ -277,7 +277,7 @@ impl TensorCastExt for Tensor {
 #[inline]
 fn zeros_f32_on<S: Into<Shape>>(
     shape: S,
-    device: &CdDevice,
+    device: &Device,
 ) -> Result<Tensor> {
     Ok(Tensor::zeros(shape, DType::F32, device)?)
 }
@@ -286,8 +286,8 @@ fn zeros_f32_on<S: Into<Shape>>(
 /// (~70 sites pre-consolidation, mostly `let device = Device::Cpu;`
 /// in `#[cfg(test)]` blocks).
 #[inline]
-fn cpu_device() -> CdDevice {
-    CdDevice::Cpu
+fn cpu_device() -> Device {
+    Device::Cpu
 }
 
 /// The reduction-axis marker for "the last dimension" — passed to
@@ -340,7 +340,7 @@ fn cat_tensors(refs: &[&Tensor], dim: usize) -> Result<Tensor> {
 fn zeros_dtype_on<S: Into<Shape>>(
     shape: S,
     dtype: DType,
-    device: &CdDevice,
+    device: &Device,
 ) -> Result<Tensor> {
     Ok(Tensor::zeros(shape, dtype, device)?)
 }
@@ -352,7 +352,7 @@ fn zeros_dtype_on<S: Into<Shape>>(
 fn ones_dtype_on<S: Into<Shape>>(
     shape: S,
     dtype: DType,
-    device: &CdDevice,
+    device: &Device,
 ) -> Result<Tensor> {
     Ok(Tensor::ones(shape, dtype, device)?)
 }
@@ -365,7 +365,7 @@ fn ones_dtype_on<S: Into<Shape>>(
 fn lora_param_zeros(
     shape: (usize, usize),
     dtype: DType,
-    device: &CdDevice,
+    device: &Device,
 ) -> Result<Parameter> {
     let n = shape.0 * shape.1;
     let data = vec![0.0f32; n];
@@ -378,16 +378,16 @@ fn lora_param_zeros(
 /// `matches!(device, Device::Metal(_))` pattern (~6 sites in
 /// the GDN training tile / streaming-prefill / Metal-specific code paths).
 #[inline]
-fn is_metal_device(device: &CdDevice) -> bool {
-    matches!(device, CdDevice::Metal(_))
+fn is_metal_device(device: &Device) -> bool {
+    matches!(device, Device::Metal(_))
 }
 
 /// Check whether `device` is a candle CUDA device. Consolidates the
 /// `matches!(device, Device::Cuda(_))` pattern (~2 sites in
 /// the spool-checkpoint / exact-GDN-backward-tile path).
 #[inline]
-fn is_cuda_device(device: &CdDevice) -> bool {
-    matches!(device, CdDevice::Cuda(_))
+fn is_cuda_device(device: &Device) -> bool {
+    matches!(device, Device::Cuda(_))
 }
 // ---------------------------------------------------------------------------
 // (#1082) The candle facade — type aliases, generic constructor helpers,
@@ -397,7 +397,7 @@ fn is_cuda_device(device: &CdDevice) -> bool {
 // whose trait impl must live next to its struct).
 //
 // The wildcard re-import below brings every `pub(crate)` item from
-// `cd_types` (type aliases like `Tensor` / `Var` / `CdDevice` / `DType`
+// `cd_types` (type aliases like `Tensor` / `Var` / `Device` / `DType`
 // / `Shape` / `GradStore` / `TensorId` / `D` / `CdResult`; the
 // constructor helpers `tensor_new` and `tensor_from_vec`; and the
 // safetensors shims) into scope so the ~16k call sites in this file
@@ -476,7 +476,7 @@ fn kaiming_uniform_a(
     bound: f64,
     shape: (usize, usize),
     dtype: DType,
-    device: &CdDevice,
+    device: &Device,
 ) -> Result<Parameter> {
     let bound_f32 = bound as f32;
     let n = shape.0 * shape.1;
@@ -511,7 +511,7 @@ fn build_lora_master_kt(
     data: &[f32],
     shape: &[usize],
     dtype: DType,
-    device: &CdDevice,
+    device: &Device,
 ) -> Result<KtTensor> {
     // Land the f32 host data on `device` (CPU direct, CUDA via H2D copy),
     // then cast to the requested dtype (BF16 in production).
@@ -611,7 +611,7 @@ impl TrainableLoraParams {
         weights: &GpuWeights,
         rank: usize,
         alpha: f32,
-        device: &CdDevice,
+        device: &Device,
     ) -> Result<Self> {
         Self::initialize_seeded(config, weights, rank, alpha, device, None)
     }
@@ -629,7 +629,7 @@ impl TrainableLoraParams {
         weights: &GpuWeights,
         rank: usize,
         alpha: f32,
-        device: &CdDevice,
+        device: &Device,
         seed: Option<u64>,
     ) -> Result<Self> {
         // (#1082) kt `Device` has no `set_seed` (candle's was a no-op on CPU
@@ -875,7 +875,7 @@ impl TrainableLoraParams {
         beta2: f32,
         eps: f32,
         weight_decay: f32,
-        _device: &CdDevice,
+        _device: &Device,
     ) -> Result<OptimizerState> {
         let hp = KtAdamWHyperparameters {
             lr: lr as f32,
@@ -990,7 +990,7 @@ fn make_opt_state(
     params: &TrainableLoraParams,
     optimizer: Optimizer,
     lr: f64,
-    device: &CdDevice,
+    device: &Device,
 ) -> Result<Option<OptimizerState>> {
     match optimizer {
         Optimizer::Sgd => Ok(None),
@@ -1135,7 +1135,7 @@ impl TrainableLoraParams {
     pub fn load_from_safetensors(
         &mut self,
         adapter_dir: &Path,
-        device: &CdDevice,
+        device: &Device,
     ) -> Result<usize> {
         let st_path = adapter_dir.join("adapter_model.safetensors");
         // (#1082) kt-native safetensors load — `kiln_tensor::safetensors::load_cpu`
@@ -4239,7 +4239,7 @@ pub fn grpo_benchmark_training_step(
     params: &mut TrainableLoraParams,
     config: &GrpoConfig,
     segments: Option<&[(usize, usize)]>,
-    device: &CdDevice,
+    device: &Device,
     tokenizer: &KilnTokenizer,
     opt_state: Option<&mut OptimizerState>,
 ) -> Result<GrpoBenchmarkReport> {
@@ -4421,7 +4421,7 @@ fn compute_ref_log_probs_shared_prefix(
     weights: &GpuWeights,
     model_config: &ModelConfig,
     ema_ref_lora: Option<&LoraWeights>,
-    device: &CdDevice,
+    device: &Device,
 ) -> Result<Vec<Tensor>> {
     if tgroup.completions.is_empty() {
         return Ok(Vec::new());
@@ -4631,7 +4631,7 @@ fn chunked_log_probs_for_completion(
     head_t: &Tensor,
     target_ids: &[u32],
     chunk_size: usize,
-    device: &CdDevice,
+    device: &Device,
 ) -> Result<Tensor> {
     let n_targets = target_ids.len();
     if n_targets == 0 {
@@ -4734,7 +4734,7 @@ fn train_tokenized_grpo_group_with_grad_norms(
     params: &mut TrainableLoraParams,
     config: &GrpoConfig,
     segments: Option<&[(usize, usize)]>,
-    device: &CdDevice,
+    device: &Device,
     opt_state: Option<&mut OptimizerState>,
     grad_norms: &mut crate::train_receipt::LoraGradNormAccumulator,
     lora_grad_index: &LoraGradNormIndex,
@@ -5584,13 +5584,13 @@ fn compute_advantages(rewards: &[f64], mode: AdvantageMode) -> Vec<f64> {
 /// Returns a 1-D tensor of log-probs for only the masked (completion) positions.
 /// Uses the next-token prediction convention: logits[i] predicts token[i+1].
 // `pub(crate)` so the GRPO tape-authoritative loss-root shim
-// (`crate::grpo_candle_shim`) can recompute the EXACT same policy log-probs
+// (`crate::grpo_tape_shim`) can recompute the EXACT same policy log-probs
 // inside its candle-autograd backward composite (#1082 CP-4).
 pub(crate) fn token_log_probs(
     logits: &Tensor,
     input_ids: &[u32],
     mask: &[bool],
-    device: &CdDevice,
+    device: &Device,
 ) -> Result<Tensor> {
     let seq_len = input_ids.len();
     let logits = logits.squeeze(0)?; // [seq_len, vocab_size]
@@ -5992,7 +5992,7 @@ fn cross_entropy_loss(
     logits: &KtTensor,
     input_ids: &[u32],
     label_mask: &[bool],
-    _device: &CdDevice,
+    _device: &Device,
 ) -> Result<f64> {
     let loss_kt = kiln_model::tape_forward::try_tape_cross_entropy_from_logits_kt(
         logits,
@@ -6015,7 +6015,7 @@ fn cross_entropy_loss(
 /// chunking over vocab so the full `[T, V]` logits tensor is never
 /// materialized. The returned tensor is F32 with shape `[1, T, H]`; inactive
 /// shifted-label rows and the final sequence row are zero.
-fn synchronize_metal_tail_chunk(device: &CdDevice, _context: &'static str) -> Result<()> {
+fn synchronize_metal_tail_chunk(device: &Device, _context: &'static str) -> Result<()> {
     // (#1082) kt `Device` has no per-device `synchronize()` (candle-only API);
     // the candle-drop training path is CUDA-only (the kt tape adapters are
     // BF16/CUDA), so the Metal chunk-tail sync that candle needed is a no-op
@@ -6267,7 +6267,7 @@ impl SpooledCheckpointBoundaries {
         })
     }
 
-    fn load(&self, boundary_idx: usize, device: &CdDevice) -> Result<Tensor> {
+    fn load(&self, boundary_idx: usize, device: &Device) -> Result<Tensor> {
         let path = self.paths.get(boundary_idx).ok_or_else(|| {
             anyhow::anyhow!("checkpoint boundary index {boundary_idx} out of spool range")
         })?;
@@ -7077,7 +7077,7 @@ fn partition_segment_layers_by_attn_type(
 #[allow(dead_code)]
 fn tiled_training_tile_size(
     weights: &GpuWeights,
-    device: &CdDevice,
+    device: &Device,
     seq_len: usize,
 ) -> Option<usize> {
     let _ = weights; // signature retained for callers; gating moved to the dispatcher.
@@ -7093,7 +7093,7 @@ fn tiled_training_tile_size(
 
 fn exact_gdn_reverse_tile_size(
     weights: &GpuWeights,
-    device: &CdDevice,
+    device: &Device,
     seq_len: usize,
     seg_start: usize,
     seg_end: usize,
@@ -7120,8 +7120,8 @@ fn exact_gdn_reverse_tile_size(
     Some(tile)
 }
 
-fn exact_gdn_backward_tile_tokens_for(device: &CdDevice) -> usize {
-    fn fallback_tile(device: &CdDevice) -> usize {
+fn exact_gdn_backward_tile_tokens_for(device: &Device) -> usize {
+    fn fallback_tile(device: &Device) -> usize {
         if is_cuda_device(device) {
             1024
         } else {
@@ -7272,7 +7272,7 @@ fn standard_forward_backward_tape_authoritative_kt(
     model_config: &ModelConfig,
     params: &TrainableLoraParams,
     label_mask: &[bool],
-    device: &CdDevice,
+    device: &Device,
 ) -> Result<(f64, kiln_autograd::GradStore)> {
     let lora_weights = params.as_lora_weights();
     let mut linear_state = LinearAttentionState::new(model_config, device)?;
@@ -7387,7 +7387,7 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
     params: &TrainableLoraParams,
     label_mask: &[bool],
     segments: &[(usize, usize)],
-    device: &CdDevice,
+    device: &Device,
 ) -> Result<(f64, kiln_autograd::GradStore)> {
     let num_segments = segments.len();
     anyhow::ensure!(
@@ -7577,7 +7577,7 @@ pub fn standard_forward_backward(
     model_config: &ModelConfig,
     params: &TrainableLoraParams,
     label_mask: &[bool],
-    device: &CdDevice,
+    device: &Device,
 ) -> Result<(f64, GradSource)> {
     // (#1082 candle-drop) The SFT forward/backward is now UNCONDITIONALLY
     // kt tape-authoritative on CUDA + BF16 base. The candle producers
@@ -7670,7 +7670,7 @@ fn grpo_step_forward_backward_tape_authoritative_kt(
     action_mask: &[bool],
     ref_log_probs: &Tensor,
     loss_params: GrpoLossParams,
-    device: &CdDevice,
+    device: &Device,
     comp_idx: usize,
     num_active: usize,
     comp_env_count: usize,
@@ -7710,7 +7710,7 @@ fn grpo_step_forward_backward_tape_authoritative_kt(
             // tape-authoritative seeding still reads a candle loss; flipping that is
             // step 14.)
             // Record the SCALAR GRPO PG (+ KL) loss as the tape root.
-            let loss = match crate::grpo_candle_shim::try_tape_grpo_pg_loss_from_logits_kt(
+            let loss = match crate::grpo_tape_shim::try_tape_grpo_pg_loss_from_logits_kt(
                 &policy_logits,
                 input_ids,
                 action_mask,
@@ -7891,13 +7891,13 @@ impl GrpoLossParams {
 ///     factor `stop_grad(clip(r))·A` multiplies `log π_θ`, so every token
 ///     contributes a gradient even when the IS ratio is out of clip range.
 // `pub(crate)` so the GRPO tape-authoritative loss-root shim
-// (`crate::grpo_candle_shim`) can recompute the EXACT same scalar PG (+ KL)
+// (`crate::grpo_tape_shim`) can recompute the EXACT same scalar PG (+ KL)
 // loss inside its candle-autograd backward composite (#1082 CP-4).
 pub(crate) fn grpo_loss(
     policy_log_probs: &Tensor,
     ref_log_probs: &Tensor,
     params: GrpoLossParams,
-    device: &CdDevice,
+    device: &Device,
 ) -> Result<Tensor> {
     let num_active = policy_log_probs.elem_count();
     if num_active == 0 {
@@ -9307,7 +9307,7 @@ pub(crate) mod tests {
     #[derive(Debug)]
     struct NamedTestBackend {
         name: &'static str,
-        device: CdDevice,
+        device: Device,
     }
 
     impl NamedTestBackend {
@@ -9331,8 +9331,8 @@ pub(crate) mod tests {
             // the dep edge to `kiln-train` unchanged for this trait
             // signature migration. (#1082)
             debug_assert!(
-                matches!(self.device, CdDevice::Cpu),
-                "NamedTestBackend mock only constructs with CdDevice::Cpu"
+                matches!(self.device, Device::Cpu),
+                "NamedTestBackend mock only constructs with Device::Cpu"
             );
             kiln_tensor::Device::Cpu
         }
@@ -9390,13 +9390,13 @@ pub(crate) mod tests {
     // (`zeros_f32_on`/`ones_dtype_on`/`zeros_dtype_on`, which return
     // `cd_types::Tensor` = candle) at the kt-field assignment sites. They build
     // on CPU via the kt `from_slice`/`zeros`/`ones` façade and move to a kt
-    // device bridged from the candle `CdDevice` param.
-    fn kt_zeros_f32_on(shape: &[usize], device: &CdDevice) -> Result<kiln_tensor::Tensor> {
+    // device bridged from the candle `Device` param.
+    fn kt_zeros_f32_on(shape: &[usize], device: &Device) -> Result<kiln_tensor::Tensor> {
         kiln_tensor::Tensor::zeros(shape.to_vec(), kiln_tensor::DType::F32, device)
             .map_err(Into::into)
     }
 
-    fn kt_ones_f32_on(shape: &[usize], device: &CdDevice) -> Result<kiln_tensor::Tensor> {
+    fn kt_ones_f32_on(shape: &[usize], device: &Device) -> Result<kiln_tensor::Tensor> {
         kiln_tensor::Tensor::ones(shape.to_vec(), kiln_tensor::DType::F32, device)
             .map_err(Into::into)
     }
@@ -9409,7 +9409,7 @@ pub(crate) mod tests {
         rng: &mut StdRng,
         std: f32,
         shape: &[usize],
-        device: &CdDevice,
+        device: &Device,
     ) -> Result<kiln_tensor::Tensor> {
         // 3.0_f32.sqrt() — stable equivalent of unstable `f32::consts::SQRT_3`.
         let a = std * 1.732_050_8_f32;
@@ -9424,7 +9424,7 @@ pub(crate) mod tests {
     /// Create tiny random GpuWeights on CPU for the given config, using a
     /// fixed deterministic seed. Equivalent to
     /// `tiny_weights_with_seed(config, device, TINY_WEIGHTS_DEFAULT_SEED)`.
-    fn tiny_weights(config: &ModelConfig, device: &CdDevice) -> Result<GpuWeights> {
+    fn tiny_weights(config: &ModelConfig, device: &Device) -> Result<GpuWeights> {
         tiny_weights_with_seed(config, device, TINY_WEIGHTS_DEFAULT_SEED)
     }
 
@@ -9438,7 +9438,7 @@ pub(crate) mod tests {
     /// passes; this seeded variant pins the init so tests are deterministic.
     fn tiny_weights_with_seed(
         config: &ModelConfig,
-        device: &CdDevice,
+        device: &Device,
         seed: u64,
     ) -> Result<GpuWeights> {
         let h = config.hidden_size;
@@ -9682,7 +9682,7 @@ pub(crate) mod tests {
     /// `mtp` is `None` in the tiny fixtures, so there is no MTP slot to cast.
     // (#1082 CP-4) `pub(crate)` so `opd.rs`'s tape-authoritative OPD test can
     // reuse this BF16 fixture (the kt fused adapters are BF16-only).
-    pub(crate) fn tiny_weights_bf16(config: &ModelConfig, device: &CdDevice) -> Result<GpuWeights> {
+    pub(crate) fn tiny_weights_bf16(config: &ModelConfig, device: &Device) -> Result<GpuWeights> {
         let f32_weights = tiny_weights_with_seed(config, device, TINY_WEIGHTS_DEFAULT_SEED)?;
         let layers = f32_weights
             .layers
@@ -9751,7 +9751,7 @@ pub(crate) mod tests {
             eprintln!("[FD-CHECK] no CUDA device — skipping");
             return;
         }
-        let device = CdDevice::Cuda(0);
+        let device = Device::Cuda(0);
         let config = tiny_config_bf16();
         let weights = tiny_weights_bf16(&config, &device).expect("bf16 tiny weights on cuda");
         // #1082: seed the LoRA init so this test is DETERMINISTIC. `initialize`
@@ -10247,7 +10247,7 @@ pub(crate) mod tests {
             eprintln!("tape-authoritative convergence (bf16): no CUDA device — skipping");
             return;
         }
-        let device = CdDevice::Cuda(0);
+        let device = Device::Cuda(0);
         let config = tiny_config_bf16();
         let weights = tiny_weights_bf16(&config, &device).expect("bf16 tiny weights on cuda");
         // #1082: seed the LoRA init so this test is DETERMINISTIC. `initialize`
@@ -11237,7 +11237,7 @@ pub(crate) mod tests {
     /// (#1082) Only the engine-gated sft_train smokes use it now (CPU-only
     /// training dropped), so gate it to match and avoid a dead-code warning on
     /// the no-backend default build.
-    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+    #[cfg(any(feature = "cuda", feature = "vulkan"))]
     fn build_perf_regression_cpu_fixture()
     -> Result<(ModelConfig, GpuWeights, KilnTokenizer, Vec<crate::SftExample>)> {
         let config = tiny_config();
@@ -11280,7 +11280,7 @@ pub(crate) mod tests {
     // backend-gated — CPU-only (no engine) training is dropped. This smoke runs
     // on any of the three engines; it must pass on at least one (CUDA today).
     // The no-backend default build excludes it (CPU training is gone).
-    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+    #[cfg(any(feature = "cuda", feature = "vulkan"))]
     #[test]
     fn perf_regression_sft_train_cpu_smoke_completes_under_30s() -> Result<()> {
         let (config, weights, tokenizer, examples) = build_perf_regression_cpu_fixture()?;
@@ -11355,7 +11355,7 @@ pub(crate) mod tests {
     // (#1082) runs sft_train end-to-end → backend-gated post candle-drop (CPU-only
     // training dropped). Gate to the three engines (CUDA today); excluded on the
     // no-backend default build.
-    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+    #[cfg(any(feature = "cuda", feature = "vulkan"))]
     #[test]
     fn perf_regression_sft_train_emits_auto_tune_log_line() -> Result<()> {
         // RAII guard so the env override is scrubbed even if a later

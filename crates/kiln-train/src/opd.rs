@@ -82,17 +82,17 @@ use anyhow::{Context, Result, anyhow};
 // (#1082 candle-drop) `Var` + `TensorId` dropped from the facade import:
 // the OPD candle grad path that used candle `Var`s + a `HashMap<TensorId,
 // Tensor>` grad map was deleted. The production tape-authoritative scalar path
-// is now kt-native (`opd_candle_shim::try_tape_opd_scalar_mean_cuda_kt` takes kt
+// is now kt-native (`opd_tape_shim::try_tape_opd_scalar_mean_cuda_kt` takes kt
 // `hidden`/`head_t` directly). The candle `Tensor` / `DType` facade aliases stay
 // for the remaining candle seam in `opd_step_loss` (the per-position candle
 // shim path, used by `opd_step_loss_simple` + parity tests) and the OPD-loss
 // test fixtures.
 use crate::cd_types::{DType, Tensor};
-// (#1082) `CdDevice` is only referenced from test-mode helpers
+// (#1082) `Device` is only referenced from test-mode helpers
 // (`opd_train_synthetic_validation`, `mod tests`); gating the import
 // keeps the non-test build free of dead-code warnings.
 #[cfg(test)]
-use crate::cd_types::CdDevice;
+use crate::cd_types::Device;
 use serde::{Deserialize, Serialize};
 
 use crate::logit_source::{LogitSource, LogprobBatch};
@@ -3018,7 +3018,7 @@ fn opd_step_forward_backward_tape_authoritative(
             // connected kt logits id). Returns a detached candle scalar (value
             // only, registered for the scope to seed); the gradient lives on the
             // tape.
-            let loss = match crate::opd_candle_shim::try_tape_opd_scalar_mean_cuda_kt(
+            let loss = match crate::opd_tape_shim::try_tape_opd_scalar_mean_cuda_kt(
                 &normed,
                 head_t,
                 &prepared.teacher_topk_indices,
@@ -3271,7 +3271,7 @@ mod tests {
     fn opd_step_loss_matches_kernel_directly() -> Result<()> {
         // (#1082) kt `from_vec` is CPU-only and takes no device arg, so the
         // explicit binding is unused now.
-        let _device = CdDevice::Cpu;
+        let _device = Device::Cpu;
         let seq_len = 8;
         let hidden_size = 8;
         let vocab_size = 64;
@@ -3337,7 +3337,7 @@ mod tests {
 
     #[test]
     fn opd_step_loss_rejects_empty_positions() {
-        let device = CdDevice::Cpu;
+        let device = Device::Cpu;
         let student_hidden = Tensor::zeros((1, 4, 8), DType::F32, &device).unwrap();
         let head_t = Tensor::zeros((8, 16), DType::F32, &device).unwrap();
         let fixture = FixtureLogitSource::uniform_topk("test", 16, 4);
@@ -3361,7 +3361,7 @@ mod tests {
         // set, the kernel queries the teacher at the SHIFTED positions
         // and pairs them back to the student's active positions by index.
         // (#1082) kt `from_vec` is CPU-only and takes no device arg.
-        let _device = CdDevice::Cpu;
+        let _device = Device::Cpu;
         let vocab_size = 16usize;
         let hidden_size = 8usize;
         let top_k = 4usize;
@@ -3440,7 +3440,7 @@ mod tests {
 
     #[test]
     fn opd_step_loss_rejects_mismatched_asymmetric_lengths() {
-        let device = CdDevice::Cpu;
+        let device = Device::Cpu;
         let student_hidden = Tensor::zeros((1, 4, 8), DType::F32, &device).unwrap();
         let head_t = Tensor::zeros((8, 16), DType::F32, &device).unwrap();
         let fixture = FixtureLogitSource::uniform_topk("test", 16, 4);
@@ -3662,7 +3662,7 @@ mod tests {
     #[test]
     fn stable_opd_loss_composition_matches_paper_formula() -> Result<()> {
         // (#1082) kt `from_vec` is CPU-only and takes no device arg.
-        let _device = CdDevice::Cpu;
+        let _device = Device::Cpu;
         // OPD per-position: 5 active positions, values 0.1..0.5
         // (#1082) kt `from_vec` is 2-arg (CPU-only); dropped candle `&device`.
         let kl = Tensor::from_vec(vec![0.1f32, 0.2, 0.3, 0.4, 0.5], 5)?;
@@ -3695,7 +3695,7 @@ mod tests {
     #[test]
     fn stable_opd_loss_omits_optional_terms_when_none() -> Result<()> {
         // (#1082) kt `from_vec` is CPU-only and takes no device arg.
-        let _device = CdDevice::Cpu;
+        let _device = Device::Cpu;
         // (#1082) kt `from_vec` is 2-arg (CPU-only); dropped candle `&device`.
         let kl = Tensor::from_vec(vec![0.1f32, 0.2, 0.3], 3)?;
         let coeffs = StableOpdCoefficients::off();
@@ -3989,7 +3989,7 @@ mod tests {
     #[test]
     fn stable_opd_doubled_changes_loss_when_ref_present() -> Result<()> {
         // (#1082) kt `from_vec` is CPU-only and takes no device arg.
-        let _device = CdDevice::Cpu;
+        let _device = Device::Cpu;
         // (#1082) kt `from_vec` is 2-arg (CPU-only); dropped candle `&device`.
         let kl = Tensor::from_vec(vec![0.1_f32; 4], 4)?;
         let kl_ref = Tensor::from_vec(vec![1.0_f32; 4], 4)?;
@@ -4050,13 +4050,13 @@ mod tests {
         use crate::trainer::tests::{tiny_config_bf16, tiny_weights_bf16};
         use crate::trainer::TrainableLoraParams;
 
-        // `CdDevice` is the per-crate candle facade alias (= candle_core::Device);
+        // `Device` is the per-crate candle facade alias (= candle_core::Device);
         // opd.rs keeps its `candle_core::` ref count at 0 by going through it.
         if !kiln_tensor::probe::cuda_is_available() {
             eprintln!("opd tape-authoritative grads (bf16): no CUDA device — skipping");
             return;
         }
-        let device = CdDevice::Cuda(0);
+        let device = Device::Cuda(0);
 
         // The tape adapters fire only inside a tape scope AND with the tape
         // gates on. These are `OnceLock`-cached for the process, so set them

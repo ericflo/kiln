@@ -113,7 +113,7 @@
 // (`opd_top_k_reverse_kl_per_position_via_kt_forward_op`,
 // `kt_forward_op.rs`), and the kt-tape production-caller adapters
 // (`try_tape_opd_per_position_cuda` / `try_tape_opd_scalar_mean_cuda`,
-// `tape_forward.rs`) — moved UP into `kiln-train::opd_candle_shim`
+// `tape_forward.rs`) — moved UP into `kiln-train::opd_tape_shim`
 // (which legitimately keeps candle). They call the kt-typed building
 // blocks below (`kt_api`, `kt_tape`) across the crate boundary.
 mod phase_b;
@@ -162,7 +162,7 @@ pub fn kernel_disabled() -> bool {
 // (#1082) candle-drop: the pure-candle Phase A reference path
 // (`validate_inputs`, `opd_top_k_reverse_kl_phase_a_per_position`,
 // `per_position_phase_a`, `gather_head_columns`, `log_softmax_last`)
-// moved UP into `kiln-train::opd_candle_shim` so this crate could drop
+// moved UP into `kiln-train::opd_tape_shim` so this crate could drop
 // its `candle-core` dependency. The kt-typed forward + backward
 // (`kt_api`, `kt_tape`) — which the relocated shim now calls across the
 // crate boundary — stay here.

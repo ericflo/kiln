@@ -1,23 +1,21 @@
-//! Candle-typed OPD top-K reverse-KL boundary for the `kiln-train` OPD
-//! trainer ((#1082) — relocated out of `kiln-opd-loss-kernel`).
+//! kt-native OPD top-K reverse-KL scalar-loss tape boundary for the
+//! `kiln-train` OPD trainer ((#1082) — relocated out of `kiln-opd-loss-kernel`).
+//! (Formerly `opd_candle_shim`; fully kt-native — candle was removed
+//! workspace-wide in the #1082 finale. The vestigial `_cuda` suffixes on the
+//! producer fn names are historical, not a candle/CUDA dependency.)
 //!
 //! # Why this module lives in `kiln-train` and not the kernel crate
 //!
-//! The first kernel-crate candle drop ((#1082)): `kiln-opd-loss-kernel`
-//! is now 100% candle-free (pure `kiln_tensor` + `kiln_autograd`). The
-//! candle-typed glue that the OPD trainer needs — the pure-candle Phase
-//! A reference path, the candle `CustomOp1`-based kt-forward-op shim,
-//! and the kt-tape production-caller adapters — moved UP into
-//! `kiln-train`, which legitimately keeps `candle-core` (and already
-//! depends on `kiln-kt-bridge`) for now. The kernel crate keeps the
-//! kt-typed building blocks (`kt_api`, `kt_tape`) that this module
-//! calls; this module is the candle↔kt boundary.
+//! `kiln-opd-loss-kernel` is candle-free (pure `kiln_tensor` + `kiln_autograd`)
+//! and holds the kt-typed building blocks (`kt_api`, `kt_tape`). The trainer-side
+//! glue — the Phase A reference path and the kt-tape production-caller adapters
+//! that root the OPD reverse-KL scalar on the `kiln_autograd::Tape` — lives here
+//! next to the rest of the trainer. This module is the OPD tape-loss boundary:
+//! it produces the single scalar node whose `Tape::backward` drives `dL/d(logits)`
+//! back through the model chain into every LoRA parameter.
 //!
-//! Nothing in the OPD math changed in the move: the Phase A composite,
-//! the shim closures, and the tape adapters are byte-identical in logic
-//! to their previous homes (`kiln-opd-loss-kernel/src/lib.rs`,
-//! `kt_forward_op.rs`, `tape_forward.rs`). Only the crate location and
-//! the `crate::` → `kiln_opd_loss_kernel::` call paths changed.
+//! The OPD math is byte-identical to its previous home; only the crate location
+//! and the `crate::` → `kiln_opd_loss_kernel::` call paths changed.
 //!
 //! # Layout
 //!

@@ -955,7 +955,7 @@ fn receipt_lora_grad_norms(out: &std::path::Path) -> (usize, f64) {
 
 /// GRPO on Metal smoke. Exercises the kt tape-authoritative GRPO producer
 /// (`grpo_step_forward_backward_tape_authoritative_kt` + the
-/// `grpo_candle_shim` scalar-loss tape root) on a real BF16 tiny model on
+/// `grpo_tape_shim` scalar-loss tape root) on a real BF16 tiny model on
 /// `Device::Metal(0)`. One group with VARIED rewards (1.0 / 0.0) so the
 /// group-relative advantage is non-zero and a genuine policy gradient flows.
 /// KL is off (`kl_coeff = 0`) and ECHO is disabled so the per-completion step
@@ -1072,7 +1072,7 @@ fn test_real_model_grpo_metal() {
 /// Exercises the kt-native OPD producer path on a real BF16 tiny model on
 /// `Device::Metal(0)`: `opd_train` -> `opd_step_forward_backward_tape_authoritative`
 /// -> the full Metal forward (`model_forward_no_head`) -> the kt-native OPD
-/// scalar-loss tape root (`opd_candle_shim::try_tape_opd_scalar_mean_cuda_kt` ->
+/// scalar-loss tape root (`opd_tape_shim::try_tape_opd_scalar_mean_cuda_kt` ->
 /// `kiln_opd_loss_kernel::opd_top_k_reverse_kl_phase_b_via_kt_tape`).
 ///
 /// # End-to-end on Metal (#1082 Metal lane)

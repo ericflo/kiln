@@ -6,9 +6,9 @@
 //! diagnostics. After Wave-9 (`0c1be227`) wired the candle `CustomOp::bwd`
 //! through the kt bridge, then Wave-12 (`#1082`) flipped the production
 //! caller in `kiln-train::opd::opd_step_loss` onto the kt-shim
-//! `kiln_train::opd_candle_shim::opd_top_k_reverse_kl_per_position_via_kt_forward_op`
+//! `kiln_train::opd_tape_shim::opd_top_k_reverse_kl_per_position_via_kt_forward_op`
 //! (and Wave-13 added the tape-gated short-circuit
-//! `kiln_train::opd_candle_shim::try_tape_opd_per_position_cuda`), the
+//! `kiln_train::opd_tape_shim::try_tape_opd_per_position_cuda`), the
 //! candle CustomOp1 became dead in production — used only by the smoke
 //! `kiln-train::opd::opd_train_synthetic_validation` and the
 //! `kiln-train/tests/vk_cuda_opd_parity.rs` parity gate. Both were
@@ -26,7 +26,7 @@
 //!   powers both the kt-tape pilot
 //!   ([`crate::opd_top_k_reverse_kl_phase_b_per_position_via_kt_tape`])
 //!   and the candle kt-forward-op shim
-//!   (`kiln_train::opd_candle_shim::opd_top_k_reverse_kl_per_position_via_kt_forward_op`).
+//!   (`kiln_train::opd_tape_shim::opd_top_k_reverse_kl_per_position_via_kt_forward_op`).
 //! * [`cuda_kernel_supports`] — the `(K ∈ {16, 32}, dtype ∈ {F32, BF16})`
 //!   envelope used by both call sites above.
 //!
