@@ -155,26 +155,41 @@ pub(crate) fn batch_has_noncontiguous_kv_tiles(
     seq_lens: &[usize],
     block_size: usize,
 ) -> bool {
+    block_tables.iter().enumerate().any(|(row, bt)| {
+        row_has_noncontiguous_kv_tiles(
+            bt.blocks.as_slice(),
+            seq_lens.get(row).copied().unwrap_or(0),
+            block_size,
+        )
+    })
+}
+
+/// Per-row sibling of [`batch_has_noncontiguous_kv_tiles`]: true when THIS row's
+/// live KV pages violate the intra-tile physical-contiguity contract the FA2
+/// split-KV kernel assumes. Lets the batched-decode partition row-loop only the
+/// genuinely-fragmented rows instead of the #1445 all-or-nothing whole-batch
+/// serialization that caused the concurrent n=64 cliff (366s p50 -> 43s).
+pub(crate) fn row_has_noncontiguous_kv_tiles(
+    blocks: &[u32],
+    seqlen: usize,
+    block_size: usize,
+) -> bool {
     if block_size == 0 {
         return false;
     }
     let pages_per_chunk = (128 / block_size).max(1);
-    for (row, bt) in block_tables.iter().enumerate() {
-        let blocks = bt.blocks.as_slice();
-        let seqlen = seq_lens.get(row).copied().unwrap_or(0);
-        // Only the pages actually covering live tokens are read by the kernel.
-        let n_pages = seqlen.div_ceil(block_size).min(blocks.len());
-        let mut c = 0usize;
-        while c < n_pages {
-            let base = blocks[c];
-            let end = (c + pages_per_chunk).min(n_pages);
-            for (k, &phys) in blocks[c..end].iter().enumerate() {
-                if phys != base.wrapping_add(k as u32) {
-                    return true;
-                }
+    // Only the pages actually covering live tokens are read by the kernel.
+    let n_pages = seqlen.div_ceil(block_size).min(blocks.len());
+    let mut c = 0usize;
+    while c < n_pages {
+        let base = blocks[c];
+        let end = (c + pages_per_chunk).min(n_pages);
+        for (k, &phys) in blocks[c..end].iter().enumerate() {
+            if phys != base.wrapping_add(k as u32) {
+                return true;
             }
-            c += pages_per_chunk;
         }
+        c += pages_per_chunk;
     }
     false
 }
@@ -3691,54 +3706,147 @@ impl ModelRunner {
             return Ok(vec![token]);
         }
 
-        // #1082 CRASHER FIX: the vendored FA2 split-KV paged-decode kernel reads
-        // each kBlockN-token K/V tile as ONE physically-contiguous run of pages
-        // from a single block_table entry (it never consults the intervening
-        // entries — see flash_fwd_kernel.h block_table_idx stride). The bs=1 path
-        // (forward.rs try_flash_attn_paged_decode) verifies intra-tile contiguity
-        // and declines when violated; the eager batched contiguous path did NOT,
-        // so a fragmented BlockManager free list (concurrent finish->free->re-admit
-        // on a large block pool) fed NON-ADJACENT pages straight to the kernel ->
-        // CUDA_ERROR_ILLEGAL_ADDRESS (Ampere/large-pool only; masks under any
-        // slowdown because the membership churn stops). Route such batches to the
-        // contiguity-safe per-row decode below (each row goes through the
-        // single-row paged path, which gathers correctly). Contiguous batches
-        // (the common case) keep the fast contiguous-batch path — no perf impact.
-        let force_row_loop_for_contiguity =
-            batch_has_noncontiguous_kv_tiles(block_tables, seq_lens, paged_cache.block_size());
-        if self.backend.name() == "cuda"
-            && has_linear_layers
-            && (cuda_gdn_batched_decode_row_loop_enabled() || force_row_loop_for_contiguity)
-        {
-            let stage_start = profile_stages.then(std::time::Instant::now);
-            let mut tokens = Vec::with_capacity(batch);
-            for row in 0..batch {
-                let linear_state = Some(&mut **linear_states.get_mut(row).with_context(|| {
-                    format!("missing linear state for CUDA row-loop decode row {row}")
-                })?);
-                let token = {
-                    let pc_guard = lock_paged_cache(paged_cache)?;
-                    model_forward_paged_next_token_greedy(
-                        &*self.backend,
-                        input_tokens[row],
-                        &self.weights,
-                        &self.config,
-                        pc_guard,
-                        block_tables[row],
-                        seq_lens[row],
-                        linear_state,
-                        self.active_lora.as_ref(),
-                        None,
+        // #1082 PERF + CRASHER FIX (per-row contiguity partition).
+        // The vendored FA2 split-KV paged-decode kernel reads each kBlockN-token
+        // K/V tile as ONE physically-contiguous run of pages from a single
+        // block_table entry (it never consults the intervening entries — see
+        // flash_fwd_kernel.h block_table_idx stride). A fragmented BlockManager
+        // free list (concurrent finish->free->re-admit) hands the kernel
+        // NON-ADJACENT pages -> CUDA_ERROR_ILLEGAL_ADDRESS / wrong KV. #1445
+        // guarded this by forcing the WHOLE batch onto the per-row loop when ANY
+        // row was fragmented — but under concurrency the detector fires on the
+        // whole batch nearly every step, serializing bs=N into N single-row
+        // forwards (the n=64 cliff: 366s p50, 11 tok/s). PARTITION instead:
+        // row-loop ONLY the genuinely-fragmented rows and batch the contiguous
+        // majority through the fast path. Crash-safe (no non-adjacent pages ever
+        // reach the kernel) and a strict superset of #1445's correctness.
+        if self.backend.name() == "cuda" && has_linear_layers {
+            let row_loop_all = cuda_gdn_batched_decode_row_loop_enabled();
+            let block_size = paged_cache.block_size();
+            let noncontig: Vec<bool> = (0..batch)
+                .map(|row| {
+                    row_loop_all
+                        || row_has_noncontiguous_kv_tiles(
+                            block_tables[row].blocks.as_slice(),
+                            seq_lens[row],
+                            block_size,
+                        )
+                })
+                .collect();
+            let n_noncontig = noncontig.iter().filter(|&&x| x).count();
+
+            if n_noncontig == batch {
+                // Every row fragmented (or debug row-loop-all): the original
+                // contiguity-safe per-row loop, unchanged.
+                let stage_start = profile_stages.then(std::time::Instant::now);
+                let mut tokens = Vec::with_capacity(batch);
+                for row in 0..batch {
+                    let linear_state = Some(&mut **linear_states.get_mut(row).with_context(
+                        || format!("missing linear state for CUDA row-loop decode row {row}"),
+                    )?);
+                    let token = {
+                        let pc_guard = lock_paged_cache(paged_cache)?;
+                        model_forward_paged_next_token_greedy(
+                            &*self.backend,
+                            input_tokens[row],
+                            &self.weights,
+                            &self.config,
+                            pc_guard,
+                            block_tables[row],
+                            seq_lens[row],
+                            linear_state,
+                            self.active_lora.as_ref(),
+                            None,
+                        )
+                        .with_context(|| {
+                            format!(
+                                "CUDA row-loop greedy decode row {row} forward pass (paged) failed"
+                            )
+                        })?
+                    };
+                    tokens.push(token);
+                }
+                finish_decode_batcher_stage_profile(
+                    "cuda_gdn_row_loop_forward",
+                    batch,
+                    stage_start,
+                );
+                finish_decode_batcher_stage_profile("decode_total", batch, total_start);
+                return Ok(tokens);
+            } else if n_noncontig > 0 {
+                // MIXED: row-loop only the fragmented rows; batch the contiguous
+                // majority through the fast path (recurse on the all-contiguous
+                // subset, which falls straight through to it). Scatter back to
+                // input order. This is what keeps the fast path alive at n=64 when
+                // only a handful of rows hold freshly-recycled pages.
+                let stage_start = profile_stages.then(std::time::Instant::now);
+                let mut out = vec![0u32; batch];
+                // Disjoint partition of the &mut linear states in one pass.
+                let mut contig_idx: Vec<usize> = Vec::new();
+                let mut contig_states: Vec<&mut LinearAttentionState> = Vec::new();
+                let mut noncontig_rows: Vec<(usize, &mut LinearAttentionState)> = Vec::new();
+                for (row, ls) in linear_states.iter_mut().enumerate() {
+                    if noncontig[row] {
+                        noncontig_rows.push((row, &mut **ls));
+                    } else {
+                        contig_idx.push(row);
+                        contig_states.push(&mut **ls);
+                    }
+                }
+                // Fragmented rows: contiguity-safe single-row path.
+                for (row, ls) in noncontig_rows.iter_mut() {
+                    let token = {
+                        let pc_guard = lock_paged_cache(paged_cache)?;
+                        model_forward_paged_next_token_greedy(
+                            &*self.backend,
+                            input_tokens[*row],
+                            &self.weights,
+                            &self.config,
+                            pc_guard,
+                            block_tables[*row],
+                            seq_lens[*row],
+                            Some(&mut **ls),
+                            self.active_lora.as_ref(),
+                            None,
+                        )
+                        .with_context(|| {
+                            format!("CUDA mixed-batch fragmented-row greedy decode row {row} failed")
+                        })?
+                    };
+                    out[*row] = token;
+                }
+                // Contiguous majority: one fast batched forward via recursion (the
+                // all-contiguous subset hits n_noncontig==0 and falls through).
+                let contig_tokens: Vec<TokenId> =
+                    contig_idx.iter().map(|&i| input_tokens[i]).collect();
+                let contig_bts: Vec<&BlockTable> =
+                    contig_idx.iter().map(|&i| block_tables[i]).collect();
+                let contig_seqlens: Vec<usize> =
+                    contig_idx.iter().map(|&i| seq_lens[i]).collect();
+                let contig_row_ids: Option<Vec<u64>> =
+                    row_ids.map(|r| contig_idx.iter().map(|&i| r[i]).collect());
+                let contig_out = self
+                    .decode_next_tokens_paged_contiguous_batch_greedy_with_ids(
+                        &contig_tokens,
+                        paged_cache,
+                        &contig_bts,
+                        &contig_seqlens,
+                        &mut contig_states,
+                        contig_row_ids.as_deref(),
                     )
-                    .with_context(|| {
-                        format!("CUDA row-loop greedy decode row {row} forward pass (paged) failed")
-                    })?
-                };
-                tokens.push(token);
+                    .context("CUDA mixed-batch contiguous-subset batched decode failed")?;
+                for (k, &row) in contig_idx.iter().enumerate() {
+                    out[row] = contig_out[k];
+                }
+                finish_decode_batcher_stage_profile(
+                    "cuda_gdn_partition_forward",
+                    batch,
+                    stage_start,
+                );
+                finish_decode_batcher_stage_profile("decode_total", batch, total_start);
+                return Ok(out);
             }
-            finish_decode_batcher_stage_profile("cuda_gdn_row_loop_forward", batch, stage_start);
-            finish_decode_batcher_stage_profile("decode_total", batch, total_start);
-            return Ok(tokens);
+            // n_noncontig == 0: all rows contiguous -> fall through to fast path.
         }
 
         let stage_start = profile_stages.then(std::time::Instant::now);
@@ -7616,6 +7724,36 @@ mod tests {
         assert!(
             !batch_has_noncontiguous_kv_tiles(&[&bt_tail_frag], &[20], 16),
             "fragmentation beyond the live window (seqlen=20 → 2 pages) is not read"
+        );
+    }
+
+    #[test]
+    fn per_row_contiguity_mask_partitions_mixed_batch() {
+        // #1082 partition fix: the batched-decode partition routes ONLY the
+        // genuinely-fragmented rows to the per-row loop and batches the
+        // contiguous majority through the fast path (vs #1445's all-or-nothing
+        // whole-batch serialization). Validate the per-row mask it is built on.
+        let bt_contig = block_table_with(&[100, 101, 102, 103, 104, 105, 106, 107]);
+        let bt_frag = block_table_with(&[100, 101, 102, 103, 999, 105, 106, 107]);
+        let bt_short = block_table_with(&[42]);
+        // Per-row helper agrees with the batch wrapper, row by row.
+        assert!(!row_has_noncontiguous_kv_tiles(bt_contig.blocks.as_slice(), 128, 16));
+        assert!(row_has_noncontiguous_kv_tiles(bt_frag.blocks.as_slice(), 128, 16));
+        assert!(!row_has_noncontiguous_kv_tiles(bt_short.blocks.as_slice(), 5, 16));
+        // A mixed batch yields a mask that picks out exactly the fragmented row;
+        // the partition batches rows 0,2 (fast path) and row-loops only row 1.
+        let bts = [&bt_contig, &bt_frag, &bt_short];
+        let seqlens = [128usize, 128, 5];
+        let mask: Vec<bool> = (0..3)
+            .map(|r| row_has_noncontiguous_kv_tiles(bts[r].blocks.as_slice(), seqlens[r], 16))
+            .collect();
+        assert_eq!(mask, vec![false, true, false]);
+        // The batch wrapper is exactly the OR of the per-row mask — so #1445's
+        // detector fired on the WHOLE batch for a single bad row; the partition
+        // resolves that per-row instead of serializing all of it.
+        assert_eq!(
+            batch_has_noncontiguous_kv_tiles(&bts, &seqlens, 16),
+            mask.iter().any(|&x| x)
         );
     }
 
