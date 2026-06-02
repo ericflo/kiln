@@ -2298,13 +2298,18 @@ pub fn vulkan_elementwise_binary(
             "vulkan_elementwise_binary: device-local alloc for VkTensor a failed: {e}"
         ))
     })?;
+    // PR5d/PR5e pool-size-overflow guard: `read_back` returns the
+    // buffer's *physical* (pool-bucket-rounded) byte image, which is >=
+    // the logical `byte_len` we allocated `vk_a_buffer` for. Uploading the
+    // full physical slice would write past the device-local allocation and
+    // RADV would GPUVM-fault. Clamp the upload to the logical size.
     kiln_vulkan_kernel::buffer::VulkanBuffer::upload_data(
         vulkan_device.device(),
         vulkan_device.host_visible_mem_type(),
         vulkan_device.queue(),
         vulkan_device.queue_family_index(),
         &vk_a_buffer,
-        &a_bytes,
+        &a_bytes[..a_byte_len.min(a_bytes.len())],
     )
     .map_err(|e| {
         Error::Msg(format!(
@@ -2328,13 +2333,14 @@ pub fn vulkan_elementwise_binary(
             "vulkan_elementwise_binary: device-local alloc for VkTensor b failed: {e}"
         ))
     })?;
+    // Same pool-size-overflow clamp as VkTensor a above.
     kiln_vulkan_kernel::buffer::VulkanBuffer::upload_data(
         vulkan_device.device(),
         vulkan_device.host_visible_mem_type(),
         vulkan_device.queue(),
         vulkan_device.queue_family_index(),
         &vk_b_buffer,
-        &b_bytes,
+        &b_bytes[..b_byte_len.min(b_bytes.len())],
     )
     .map_err(|e| {
         Error::Msg(format!(

@@ -640,6 +640,24 @@ impl Tensor {
             let host = crate::metal_to_host_copy(self)?;
             return crate::host_to_metal_copy(&host, i);
         }
+        #[cfg(feature = "vulkan")]
+        if let crate::Device::Vulkan(i) = self.device() {
+            // Same correctness-first gather-then-reupload as the Metal branch
+            // (#1082 vk-tape harmonization, PR3 frontier gap #2). `contiguous()`
+            // is required by the LoRA-linear tape recorder
+            // (`try_tape_lora_linear_kt` materializes `a.transpose(..).contiguous()`)
+            // and by `MatmulBackward`'s saved transposed input, so on-device LoRA
+            // SFT cannot record/backprop on Vulkan without it.
+            //
+            // `vulkan_to_host_copy` already walks the layout strides to produce a
+            // PACKED, contiguous host image (its non-contiguous gather branch);
+            // re-uploading that yields a fresh contiguous device buffer. No fused
+            // on-device gather kernel yet — that is a perf follow-up, not a
+            // correctness gap. On the Strix Halo UMA the D2H/H2D bounce is a host
+            // memcpy, not a PCIe hop.
+            let host = crate::vulkan_to_host_copy(self)?;
+            return crate::host_to_vulkan_copy(&host, i);
+        }
         if !self.device().is_cpu() {
             return Err(Error::Msg(format!(
                 "Tensor::contiguous: only CPU + CUDA contiguous is implemented; \
