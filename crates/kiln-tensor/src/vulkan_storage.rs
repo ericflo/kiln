@@ -1264,13 +1264,23 @@ pub fn vulkan_rmsnorm_last_axis(
             "vulkan_rmsnorm_last_axis: device-local alloc for kt output failed: {e}"
         ))
     })?;
+    // CRITICAL (GPUVM write-fault fix): `out_bytes` is `read_back(vk_out)`, whose
+    // length is the kernel output buffer's *allocated* size. `vk_out` comes from
+    // `pool_alloc_f32`, which bucket-rounds, so `out_bytes.len()` can EXCEED the
+    // logical `x_byte_len`. `out_buffer` is allocated at the logical `x_byte_len`,
+    // so uploading the full bucket-sized `out_bytes` overran the destination and
+    // raised a RADV GPUVM write fault (PERMISSION_FAULTS, RW=1) that wedged the
+    // queue. Upload exactly the logical bytes. (Inputs don't hit this: kt
+    // host-created buffers are exact-sized; only the pooled kernel output is
+    // bucket-rounded.)
+    let out_logical = x_byte_len.min(out_bytes.len());
     kiln_vulkan_kernel::buffer::VulkanBuffer::upload_data(
         vulkan_device.device(),
         vulkan_device.host_visible_mem_type(),
         vulkan_device.queue(),
         vulkan_device.queue_family_index(),
         &out_buffer,
-        &out_bytes,
+        &out_bytes[..out_logical],
     )
     .map_err(|e| {
         Error::Msg(format!(

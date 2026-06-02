@@ -243,3 +243,90 @@ fn vk_tape_rms_norm_records_on_vulkan() {
     );
     assert_eq!(tape.len(), 1, "rms_norm did not record exactly 1 node on Vulkan");
 }
+
+/// BISECT PROBE: isolate `ops::rms_norm` on Vulkan (no recorder, no cast, no
+/// add_scalar) + a post-op queue-health H2D probe. If THIS faults, the rms_norm
+/// kt path (vulkan_rmsnorm_last_axis bounce / kernel) wedges the queue; if it
+/// passes, the culprit is upstream (cast / add_scalar host-fallback). Single-shot.
+#[test]
+fn vk_isolated_rms_norm_forward() {
+    if !vk_enabled("vk_isolated_rms_norm_forward") {
+        return;
+    }
+    let x = Tensor::from_vec_on(
+        Device::Vulkan(0),
+        (0..32).map(|i| (i as f32) * 0.1 - 1.0).collect(),
+        vec![4, 8],
+    )
+    .unwrap();
+    let w = Tensor::from_vec_on(Device::Vulkan(0), vec![0.5_f32; 8], vec![8]).unwrap();
+    let y = ops::rms_norm(&x, &w, 1e-6).expect("ops::rms_norm errored");
+    let yv = read_host_f32(&y); // forces a D2H submit — surfaces any async fault
+    eprintln!("[BISECT] ops::rms_norm completed, y[0..4]={:?}", &yv[..4]);
+    // Queue-health probe: a fresh H2D after rms_norm. If the queue is wedged by
+    // an async GPUVM fault from rms_norm, THIS submit fails (as the seed did).
+    let _probe = Tensor::from_vec_on(Device::Vulkan(0), vec![1.0_f32; 8], vec![8])
+        .expect("post-rms_norm H2D probe failed — rms_norm wedged the queue");
+    eprintln!("[BISECT] post-rms_norm H2D probe OK — queue healthy after rms_norm");
+}
+
+/// FRONTIER PROBE (2026-06-01, host-safety constraint relaxed with the user at
+/// the console): drive `Tape::backward` on the rms_norm graph on
+/// `Device::Vulkan(0)` and confirm it COMPLETES — no RADV GPUVM write-fault, no
+/// context loss — with finite, correctly-shaped leaf grads. This is the smallest
+/// single-shot payload (4x8) that resolves the open rmsnorm-backward GPUVM-fault
+/// question (the PR5b soak frontier). Numerical parity is a deliberate follow-up:
+/// the goal of THIS run is the binary "does the backward composite fault on
+/// Vulkan storage?". GPU-gated; self-skips without KILN_TENSOR_VULKAN_TEST=1.
+#[test]
+fn vk_tape_rms_norm_backprops_on_vulkan() {
+    let test_name = "vk_tape_rms_norm_backprops_on_vulkan";
+    if !vk_enabled(test_name) {
+        return;
+    }
+    const HIDDEN: usize = 8;
+    let rows = 4;
+    let x_data: Vec<f32> = (0..rows * HIDDEN)
+        .map(|i| ((i as f32) * 0.37 - 2.0).sin() * 1.5 + 0.25)
+        .collect();
+    let w_data: Vec<f32> = (0..HIDDEN).map(|j| 0.1 * (j as f32) - 0.3).collect();
+
+    let x = Tensor::from_vec_on(Device::Vulkan(0), x_data, vec![rows, HIDDEN]).unwrap();
+    let weight = Tensor::from_vec_on(Device::Vulkan(0), w_data, vec![HIDDEN]).unwrap();
+
+    let ((y, x_id, w_id), tape) = with_thread_local_tape(|| {
+        let y = try_tape_rms_norm_kt(&x, &weight, 1e-6)
+            .expect("recorder errored")
+            .expect("try_tape_rms_norm_kt returned None on Vulkan");
+        (y, x.id(), weight.id())
+    });
+    assert_eq!(tape.len(), 1, "rms_norm did not record exactly 1 node on Vulkan");
+    assert_eq!(y.device(), Device::Vulkan(0), "forward output left Vulkan");
+
+    // The frontier: walk the tape (seed dL/dy = ones). If the native rmsnorm
+    // backward composite GPUVM-faults on Vulkan storage, this is where it hangs.
+    let seed =
+        Tensor::from_vec_on(Device::Vulkan(0), vec![1.0_f32; rows * HIDDEN], vec![rows, HIDDEN])
+            .expect("seed on Vulkan");
+    let grads = tape
+        .backward(y.id(), seed, |g, z| ops::add(g, z))
+        .expect("Tape::backward errored on the rms_norm Vulkan graph");
+
+    let dx = grads.get(x_id).expect("no grad keyed on x.id()");
+    let dw = grads.get(w_id).expect("no grad keyed on weight.id()");
+    assert_eq!(dx.shape(), &[rows, HIDDEN], "dL/dx wrong shape");
+    assert_eq!(dw.shape(), &[HIDDEN], "dL/dweight wrong shape");
+
+    let dx_v = read_host_f32(dx);
+    let dw_v = read_host_f32(dw);
+    assert!(
+        dx_v.iter().chain(dw_v.iter()).all(|v| v.is_finite()),
+        "non-finite rms_norm grads: dx={dx_v:?} dw={dw_v:?}"
+    );
+    eprintln!(
+        "[FRONTIER PASS] rms_norm Tape::backward COMPLETED on Device::Vulkan(0) \
+         (no GPUVM fault): dx[0..3]={:?} dw={:?}",
+        &dx_v[..3.min(dx_v.len())],
+        dw_v
+    );
+}
