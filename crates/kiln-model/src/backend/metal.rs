@@ -2157,7 +2157,14 @@ fn metal_gated_rms_norm_supports(x: &kiln_tensor::Tensor, z: &kiln_tensor::Tenso
     {
         return false;
     }
-    if x.dtype() != kiln_tensor::DType::BF16 || z.dtype() != kiln_tensor::DType::BF16 || weight.dtype() != kiln_tensor::DType::F32 {
+    // x/z are BF16 activations. The norm weight follows the model dtype, which
+    // for Qwen3.5 GDN is BF16 (same as the CUDA `gdn_gated_rms_norm_supports_kt`
+    // contract). Accept F32 too for callers that pre-promote — the kernel casts
+    // the weight to F32 internally either way.
+    if x.dtype() != kiln_tensor::DType::BF16
+        || z.dtype() != kiln_tensor::DType::BF16
+        || !matches!(weight.dtype(), kiln_tensor::DType::BF16 | kiln_tensor::DType::F32)
+    {
         return false;
     }
     let Ok((batch, seq_len, heads, hidden)) = x.dims4() else {
@@ -11090,7 +11097,10 @@ fn metal_gated_rms_norm_bf16(x: &kiln_tensor::Tensor, z: &kiln_tensor::Tensor, w
 
     let x = x.contiguous()?;
     let z = z.contiguous()?;
-    let weight = weight.contiguous()?;
+    // The kernel binds `weight` as a `device const float*`. The norm weight is
+    // BF16 for Qwen3.5 (matches the CUDA path); promote to F32 here so the
+    // kernel's buffer type is satisfied. F32 weights pass through unchanged.
+    let weight = weight.contiguous()?.to_dtype(kiln_tensor::DType::F32)?;
     let x_metal = kt_metal(&x)?;
     // The kernel writes every hidden element for every row.
     let out = kt_metal_alloc(x_metal, kiln_tensor::DType::BF16, &[batch, seq_len, heads, hidden])?;

@@ -1707,21 +1707,22 @@ pub fn metal_cast(x: &crate::Tensor, to: DType) -> Result<crate::Tensor> {
     use crate::metal_rt::MTLResourceOptions;
 
     let from = x.dtype();
-    // Float triple only; integer round-trips stay on the CPU fallback
-    // (callers' metal_fwd falls through). `metal_kernels::msl_ty` gates
-    // the supported dtypes.
+    // Float triple + U8 (boolean masks). U32↔I64 integer round-trips stay on
+    // the CPU fallback (callers' metal_fwd falls through).
+    // `metal_kernels::cast_msl_ty` gates the supported dtypes.
     let to_dtype_size: usize = match to {
         DType::F32 => 4,
         DType::BF16 | DType::F16 => 2,
+        DType::U8 => 1,
         other => {
             return Err(Error::Msg(format!(
-                "metal_cast: unsupported target dtype {other} (float triple only)"
+                "metal_cast: unsupported target dtype {other} (float triple + U8 only)"
             )));
         }
     };
-    // Reject unsupported source dtypes up front (mirror of the old match).
-    crate::metal_kernels::msl_ty(from)?;
-    crate::metal_kernels::msl_ty(to)?;
+    // Reject unsupported source/target dtypes up front (mirror of the old match).
+    crate::metal_kernels::cast_msl_ty(from)?;
+    crate::metal_kernels::cast_msl_ty(to)?;
 
     if !x.is_contiguous() {
         return Err(Error::Msg(

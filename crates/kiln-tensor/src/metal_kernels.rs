@@ -76,6 +76,21 @@ pub(crate) fn msl_ty(dt: DType) -> Result<&'static str> {
     }
 }
 
+/// MSL scalar type name for the `cast` kernel — the float triple plus `U8`
+/// (boolean masks). Wider than [`msl_ty`] because `cast` is the one op that
+/// bridges U8 comparison masks to/from the float triple.
+pub(crate) fn cast_msl_ty(dt: DType) -> Result<&'static str> {
+    match dt {
+        DType::F32 => Ok("float"),
+        DType::BF16 => Ok("bfloat"),
+        DType::F16 => Ok("half"),
+        DType::U8 => Ok("uchar"),
+        other => Err(Error::Msg(format!(
+            "metal_kernels::cast: unsupported dtype {other}"
+        ))),
+    }
+}
+
 /// 1-D dispatch covering exactly `n` threads (non-uniform threadgroups —
 /// Apple4+; the M1 is Apple7).
 fn dispatch_1d(
@@ -102,8 +117,17 @@ pub(crate) fn cast(
     to: DType,
     n: usize,
 ) -> Result<()> {
-    let (fty, tty) = (msl_ty(from)?, msl_ty(to)?);
+    let (fty, tty) = (cast_msl_ty(from)?, cast_msl_ty(to)?);
     let entry = format!("kt_cast_{fty}_{tty}");
+    // For float -> U8 (uchar) targets, clamp+truncate to match the CPU
+    // `f32_to_u8_sat` (saturate to [0,255], NaN -> 0). All other pairs are a
+    // direct value cast. The boolean-mask round-trip only ever carries {0,1}
+    // so the clamp is a correctness guard for arbitrary inputs.
+    let store_expr = if to == DType::U8 && from != DType::U8 {
+        format!("({tty})clamp((float)inp[gid], 0.0f, 255.0f)")
+    } else {
+        format!("({tty})inp[gid]")
+    };
     let src = format!(
         r#"
 #include <metal_stdlib>
@@ -114,7 +138,7 @@ kernel void {entry}(
     constant uint& n        [[buffer(2)]],
     uint gid [[thread_position_in_grid]])
 {{
-    if (gid < n) outp[gid] = ({tty})inp[gid];
+    if (gid < n) outp[gid] = {store_expr};
 }}
 "#
     );

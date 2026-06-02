@@ -355,6 +355,62 @@ fn cast_f32_to_bf16() {
 }
 
 #[test]
+fn cast_u8_mask_to_float_triple_and_back() {
+    let Some(dev) = metal() else {
+        eprintln!("no Metal device; skipping");
+        return;
+    };
+    // Boolean-style mask (the GDN triangular mask shape): some 0, some 1.
+    let n = 1024usize;
+    let mask: Vec<u8> = (0..n).map(|i| if (i * 7 + 3) % 5 < 2 { 1 } else { 0 }).collect();
+    let cpu_u8 = Tensor::from_vec(mask.clone(), vec![n]).unwrap();
+    let met_u8 = Tensor::from_vec_on(dev, mask.clone(), vec![n]).unwrap();
+    assert_eq!(met_u8.dtype(), DType::U8);
+
+    // U8 -> F32 / BF16 / F16: every backend value must equal the CPU cast.
+    for to in [DType::F32, DType::BF16, DType::F16] {
+        let want = ops::cast(&cpu_u8, to).unwrap();
+        let got = kiln_tensor::metal_cast(&met_u8, to).unwrap();
+        assert_eq!(got.dtype(), to, "cast u8→{to}: output dtype");
+        let want_f = want.to_device(Device::Cpu).unwrap();
+        let got_f = got.to_device(Device::Cpu).unwrap();
+        let (w, g): (Vec<f32>, Vec<f32>) = match to {
+            DType::F32 => (
+                want_f.to_vec::<f32>().unwrap(),
+                got_f.to_vec::<f32>().unwrap(),
+            ),
+            DType::BF16 => (
+                want_f.to_vec::<half::bf16>().unwrap().into_iter().map(|v| v.to_f32()).collect(),
+                got_f.to_vec::<half::bf16>().unwrap().into_iter().map(|v| v.to_f32()).collect(),
+            ),
+            DType::F16 => (
+                want_f.to_vec::<half::f16>().unwrap().into_iter().map(|v| v.to_f32()).collect(),
+                got_f.to_vec::<half::f16>().unwrap().into_iter().map(|v| v.to_f32()).collect(),
+            ),
+            _ => unreachable!(),
+        };
+        assert_eq!(w, g, "cast u8→{to} must match CPU bit-for-bit");
+        // Mask semantics preserved: value 1.0 where mask==1, 0.0 elsewhere.
+        for (i, &m) in mask.iter().enumerate() {
+            assert_eq!(g[i], m as f32, "cast u8→{to} value at {i}");
+        }
+    }
+
+    // F32 -> U8 round-trip: the {0,1} mask must come back exactly.
+    let f32_mask = ops::cast(&cpu_u8, DType::F32).unwrap();
+    let met_f32 = f32_mask.to_device(dev).unwrap();
+    let want_back = ops::cast(&f32_mask, DType::U8).unwrap().to_vec::<u8>().unwrap();
+    let got_back = kiln_tensor::metal_cast(&met_f32, DType::U8)
+        .unwrap()
+        .to_device(Device::Cpu)
+        .unwrap()
+        .to_vec::<u8>()
+        .unwrap();
+    assert_eq!(want_back, mask, "f32→u8 must restore the mask");
+    assert_eq!(got_back, want_back, "metal f32→u8 must match CPU");
+}
+
+#[test]
 fn elementwise_add_mul_sub_div_f32() {
     let Some(dev) = metal() else {
         eprintln!("no Metal device; skipping");
