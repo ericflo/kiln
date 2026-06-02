@@ -360,6 +360,65 @@ pub fn device_output_ptr(t: &KtTensor) -> u64 {
     }
 }
 
+/// Backend-neutral allocation of a fresh, zeroed GPU tensor of `dtype`/`shape`
+/// on the SAME device as `source`. Dispatches to `cuda_zeros_ctx` /
+/// `rocm_zeros_ctx` by the source tensor's backend.
+#[cfg(any(feature = "cuda", feature = "rocm"))]
+pub fn alloc_device_tensor_like(
+    source: &KtTensor,
+    dtype: KtDType,
+    shape: Vec<usize>,
+) -> Result<KtTensor, BridgeError> {
+    use kiln_tensor::Backend;
+    let device = source.device();
+    let idx = device.index().unwrap_or(0);
+    let n: usize = shape.iter().product();
+    let storage = match device.backend() {
+        #[cfg(feature = "cuda")]
+        Backend::Cuda => kiln_tensor::cuda_zeros_ctx(idx, dtype, n),
+        #[cfg(feature = "rocm")]
+        Backend::Rocm => kiln_tensor::rocm_zeros_ctx(idx, dtype, n),
+        other => {
+            return Err(BridgeError::new(format!(
+                "kt-bridge: alloc_device_tensor_like on unsupported backend {other:?}"
+            )));
+        }
+    }
+    .map_err(|e| BridgeError::new(format!("kt-bridge alloc: {e}")))?;
+    KtTensor::from_parts(
+        storage,
+        kiln_tensor::Layout::contiguous(shape),
+        kiln_tensor::TensorId::next(),
+    )
+    .map_err(|e| BridgeError::new(format!("kt-bridge alloc wrap: {e}")))
+}
+
+/// Backend-neutral raw GPU stream pointer for a kt-Tensor's storage — the FFI
+/// `stream` argument kernel launchers expect.
+#[cfg(any(feature = "cuda", feature = "rocm"))]
+pub fn device_stream_raw_of(
+    t: &KtTensor,
+    name: &'static str,
+) -> Result<*mut core::ffi::c_void, BridgeError> {
+    use kiln_tensor::Backend;
+    match t.device().backend() {
+        #[cfg(feature = "cuda")]
+        Backend::Cuda => {
+            let st = t
+                .storage()
+                .as_any()
+                .downcast_ref::<CudaStorage>()
+                .ok_or_else(|| BridgeError::new(format!("kt-bridge: {name} must be CUDA")))?;
+            Ok(st.cuda_stream_raw())
+        }
+        #[cfg(feature = "rocm")]
+        Backend::Rocm => rocm_stream_raw_of(t, name),
+        other => Err(BridgeError::new(format!(
+            "kt-bridge: device_stream_raw_of {name} on unsupported backend {other:?}"
+        ))),
+    }
+}
+
 
 #[cfg(test)]
 mod tests {
