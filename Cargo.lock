@@ -1478,6 +1478,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "kiln-rocblas"
+version = "0.2.19"
+dependencies = [
+ "cc",
+ "half",
+ "kiln-hip",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "kiln-scheduler"
 version = "0.2.19"
 dependencies = [
@@ -1539,6 +1550,7 @@ dependencies = [
  "kiln-autograd",
  "kiln-blas",
  "kiln-hip",
+ "kiln-rocblas",
  "kiln-tensor-id",
  "kiln-vulkan-kernel",
  "memmap2",

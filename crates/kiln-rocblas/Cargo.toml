@@ -1,0 +1,38 @@
+[package]
+name = "kiln-rocblas"
+version.workspace = true
+publish = false
+edition.workspace = true
+license.workspace = true
+description = "kiln-tensor's ROCm BLAS layer (hipBLASLt) — the ROCm analog of kiln-blas. Reuses the backend-agnostic AlgoCache/WorkspacePool/BackendMatmul types and ports the cublasLt executor to hipBLASLt."
+build = "build.rs"
+
+[features]
+default = []
+# Builds the hipBLASLt probe binary. Pulls kiln-hip (driver types) +
+# triggers the build.rs hipBLASLt link.
+probe = ["dep:kiln-hip"]
+# Builds the production `HipblasLtMatmulHandle` (hipBLASLt context + matmul
+# executor). Pulls kiln-hip for the driver types (RocmContext / RocmSlice).
+hipblaslt = ["dep:kiln-hip"]
+# Convenience alias matching kiln-tensor's `rocm` feature edge.
+rocm = ["hipblaslt"]
+
+[dependencies]
+# Bounded HIP runtime bindings — the sole ROCm substrate dependency, pinned by
+# the workspace so the compiled crate unifies with every kiln crate holding a
+# RocmContext / RocmSlice.
+kiln-hip = { workspace = true, optional = true }
+half = "2"
+
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[build-dependencies]
+cc = "1"
+
+# The probe example needs the probe FFI; gate it so default `cargo build` /
+# `cargo test` (which auto-discover examples/) don't try to compile it.
+[[example]]
+name = "hipblaslt_mlp_probe"
+required-features = ["probe"]

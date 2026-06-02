@@ -79,6 +79,8 @@ mod active_rocm_stream;
 #[cfg(feature = "rocm")]
 mod rocm_allocator;
 #[cfg(feature = "rocm")]
+mod rocm_matmul;
+#[cfg(feature = "rocm")]
 mod rocm_ops;
 #[cfg(feature = "rocm")]
 mod rocm_storage;
@@ -185,3 +187,9 @@ pub use rocm_storage::{
 };
 #[cfg(feature = "rocm")]
 pub use rocm_ops::*;
+#[cfg(feature = "rocm")]
+pub use rocm_matmul::{
+    hipblaslt_cache_path, rocm_flush_algo_cache_to_disk, rocm_load_algo_cache_from_disk,
+    rocm_matmul, rocm_matmul_into, rocm_matmul_with_bias, rocm_restore_into_shared_cache,
+    rocm_snapshot_algo_cache,
+};
