@@ -201,10 +201,22 @@ fn vk_tape_add_records_and_backprops() {
 // ----------------------------------------------------------------------------
 
 #[test]
-#[ignore = "PR3 frontier: native rmsnorm vulkan_fwd GPUVM-faults via the kt bridge on Strix Halo \
-            (radv GPUVM write fault + context loss). PR5a's gate IS widened (recorder admits \
-            Vulkan); the fault is a PR3 op-coverage follow-up. Do NOT run autonomously — host \
-            crash risk."]
+// UPDATE (2026-06-01, post-review): the FORWARD-RECORD path below was re-run
+// standalone on Strix Halo (RADV) and PASSED cleanly — `try_tape_rms_norm_kt`
+// records exactly 1 node on Device::Vulkan(0), tape.len()==1, no GPUVM fault,
+// no context loss (2.12s). So PR5a's gate genuinely works for a real GATED
+// recorder (not just the device-agnostic `add` recorder), which closes the
+// PR5b "add-only proof" review finding for the FORWARD direction.
+//
+// Still `#[ignore]`d (runs only when explicitly named) because: (a) the
+// implementing agent observed a RADV GPUVM write fault + context loss on the
+// NATIVE rmsnorm path under back-to-back GPU load, and (b) this test does not
+// yet drive Tape::backward on rmsnorm — the backward composite + the native
+// rmsnorm fault are the human-GPU-soak frontier (recovering from a context
+// loss needs a human at the console). Extend to backward+CPU-parity during the
+// PR6 soak, not autonomously. See docs/vk-harmonization/STATUS-AND-SOAK-HANDOFF.md.
+#[ignore = "human-soak only: forward-record verified PASS standalone; backward on native \
+            rmsnorm is the GPUVM-fault soak frontier — do not run autonomously (host crash risk)"]
 fn vk_tape_rms_norm_records_on_vulkan() {
     let test_name = "vk_tape_rms_norm_records_on_vulkan";
     if !vk_enabled(test_name) {
