@@ -72,7 +72,7 @@ use crate::kt_api::{
     opd_top_k_reverse_kl_phase_b_bwd_composite_kt, OpdLossError, OpdLossOutputKt,
 };
 
-#[cfg(feature = "cuda")]
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 use crate::kt_api::opd_top_k_reverse_kl_phase_b_bwd_kt;
 
 /// Returns `true` when `(hidden, head_t, top_k)` is inside the kt-tape
@@ -100,9 +100,12 @@ fn envelope_ok(hidden: &KtTensor, head_t: &KtTensor, top_k: usize) -> bool {
     // tape path off Vulkan (`try_tape_opd_scalar_mean_cuda_kt` -> None ->
     // empty grad store); F32-on-Vulkan OPD now records + backprops via the
     // composite.
+    // (Phase R.7) ROCm joins CUDA on the fused FFI fast path: the
+    // `kiln_opd_topk_kl_bwd_*` symbols are emitted by the hipcc build and the
+    // backward routes through the backend-neutral kt-bridge seam.
     if !matches!(
         hidden.device(),
-        KtDevice::Cuda(_) | KtDevice::Metal(_) | KtDevice::Vulkan(_)
+        KtDevice::Cuda(_) | KtDevice::Metal(_) | KtDevice::Vulkan(_) | KtDevice::Rocm(_)
     ) {
         return false;
     }
@@ -201,8 +204,16 @@ impl BackwardOp for CudaOpdTopKReverseKlPhaseBBackward {
         // The composite is correct on CUDA too (pure kt), but the FFI
         // kernel stays the CUDA path to preserve its validated numerics
         // and performance.
-        #[cfg(feature = "cuda")]
-        if matches!(self.hidden.device(), KtDevice::Cuda(_)) {
+        // (Phase R.7) ROCm shares the fused FFI fast path with CUDA — the
+        // `kiln_opd_topk_kl_bwd_*` symbols come from the hipcc build and the
+        // backward routes through the backend-neutral kt-bridge seam, so both
+        // GPU backends dispatch here. CPU / Metal / Vulkan fall through to the
+        // device-agnostic analytic composite below.
+        #[cfg(any(feature = "cuda", feature = "rocm"))]
+        if matches!(
+            self.hidden.device(),
+            KtDevice::Cuda(_) | KtDevice::Rocm(_)
+        ) {
             // Shape + device + dtype checks happen inside
             // `opd_top_k_reverse_kl_phase_b_bwd_kt` (it validates
             // grad_loss against output_mode + active_count); we

@@ -32,6 +32,7 @@
 #include <cuda_bf16.h>
 #include <stdint.h>
 
+#include "kt_gpu_compat.cuh"
 #include "recurrent_gdn_fwd.h"
 
 namespace {
@@ -153,33 +154,15 @@ __device__ __forceinline__ float silu(float x) {
     return x / (1.0f + expf(-x));
 }
 
-__device__ __forceinline__ float warp_reduce_sum(float v) {
-    #pragma unroll
-    for (int offset = 16; offset > 0; offset >>= 1) {
-        v += __shfl_xor_sync(0xffffffffu, v, offset);
-    }
-    return v;
-}
-
+// Wave-size-agnostic block sum over the full thread block. The launchers in
+// this TU always use a power-of-two blockDim.x == 128 (>= 64), so the
+// shared-memory tree reduction in `kiln_block_reduce_sum` is correct on NVIDIA,
+// AMD wave32, AND AMD wave64. (The previous two-level __shfl reduction hardcoded
+// a 32-lane warp — `lane = tid & 31`, `warp = tid >> 5` — which silently
+// corrupts on AMD wave64, where cross-32-lane shuffles self-reference.) `smem`
+// must hold >= blockDim.x floats; callers pass a 128-element shared buffer.
 __device__ __forceinline__ float block_reduce_sum_128(float v, float *smem) {
-    const int lane = threadIdx.x & 31;
-    const int warp = threadIdx.x >> 5;
-
-    v = warp_reduce_sum(v);
-    if (lane == 0) {
-        smem[warp] = v;
-    }
-    __syncthreads();
-
-    if (warp == 0) {
-        float w = lane < 4 ? smem[lane] : 0.0f;
-        w = warp_reduce_sum(w);
-        if (lane == 0) {
-            smem[0] = w;
-        }
-    }
-    __syncthreads();
-    return smem[0];
+    return kiln_block_reduce_sum<float>(v, smem);
 }
 
 __device__ __forceinline__ float to_f32(float x) {
@@ -279,7 +262,7 @@ __global__ void gdn_decode_qk_norm_gates_recurrent_bf16_kernel(
 ) {
     __shared__ float q_smem[128];
     __shared__ float k_smem[128];
-    __shared__ float reduce_smem[4];
+    __shared__ float reduce_smem[128];  // wave-agnostic block reduce needs >= blockDim.x
     __shared__ float scalars[4];  // [decay, beta, inv_q, inv_k]
 
     const int bh = blockIdx.x;
@@ -366,7 +349,7 @@ __global__ void gdn_decode_qk_norm_gates_recurrent_rmsnorm_bf16_kernel(
 ) {
     __shared__ float q_smem[128];
     __shared__ float k_smem[128];
-    __shared__ float reduce_smem[4];
+    __shared__ float reduce_smem[128];  // wave-agnostic block reduce needs >= blockDim.x
     __shared__ float scalars[5];  // [decay, beta, inv_q, inv_k, rms_inv]
 
     const int bh = blockIdx.x;

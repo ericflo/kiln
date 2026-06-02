@@ -10,6 +10,13 @@
 //! `Tensor::cuda_from_slice`; the reference path is a pure-Rust F32
 //! host loop (the kernel's documented algorithm). Outputs are pulled
 //! back via `cuda_to_host_copy` and compared element-wise in F32.
+//!
+//! CUDA-only: `Tensor::cuda_from_slice` / `cuda_to_host_copy` /
+//! `primary_cuda_context` are the cuda-storage substrate helpers and
+//! don't exist on the ROCm build. The backend-neutral ROCm parity
+//! coverage lives in `rocm_gdn_parity.rs` (gated on `feature = "rocm"`),
+//! which exercises the same fused gated-RMSNorm kernel.
+#![cfg(feature = "cuda")]
 
 use half::bf16;
 

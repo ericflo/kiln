@@ -124,7 +124,7 @@ pub use kt_api::{
     opd_top_k_reverse_kl_kt, opd_top_k_reverse_kl_per_position_kt,
 };
 
-#[cfg(feature = "cuda")]
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 pub use kt_api::opd_top_k_reverse_kl_phase_b_bwd_kt;
 
 /// Phase 6a/CP-4 (#1082): parallel kt-tape entry that drops the candle

@@ -8,11 +8,25 @@ repository.workspace = true
 description = "Vendored mamba-ssm causal_conv1d_update CUDA kernel (decode-only, bf16, kernel_size=4) with C-ABI wrapper"
 build = "build.rs"
 
+[features]
+# Default to the historical CUDA build so existing `cargo build -p
+# kiln-conv1d-kernel` invocations keep their behavior.
+default = ["cuda"]
+# CUDA backend — compiles csrc/*.cu with nvcc and routes the _kt wrappers
+# through kiln-tensor/kiln-kt-bridge's cuda device-pointer seam.
+cuda = ["kiln-tensor/cuda", "kiln-kt-bridge/cuda"]
+# ROCm backend (Phase R.7) — compiles csrc/*.cu with hipcc and routes the _kt
+# wrappers through the backend-neutral device-pointer seam, which dispatches to
+# kiln-tensor/kiln-kt-bridge's rocm storage for Device::Rocm tensors.
+rocm = ["kiln-tensor/rocm", "kiln-kt-bridge/rocm"]
+
 [dependencies]
 half = "2"
-# Phase 7 (#1082) — kt-only crate, no candle dep.
-kiln-tensor = { workspace = true, features = ["cuda"] }
-kiln-kt-bridge = { path = "../kiln-kt-bridge", default-features = false, features = ["cuda"] }
+# Phase 7 (#1082) — kt-only crate, no candle dep. The backend (cuda/rocm) is
+# selected via this crate's matching feature so a single source tree builds on
+# either GPU stack.
+kiln-tensor = { workspace = true }
+kiln-kt-bridge = { path = "../kiln-kt-bridge", default-features = false }
 
 [build-dependencies]
 cc = "1"

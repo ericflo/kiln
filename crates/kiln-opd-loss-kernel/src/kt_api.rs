@@ -75,13 +75,15 @@ use kiln_tensor::{
 // again locally.
 use kiln_tensor::DType as KtDType;
 
-// `scatter_add` is the CUDA fused backward's d_hidden scatter; the
+// `scatter_add` is the GPU fused backward's d_hidden scatter; the
 // composite imports it locally inside its body. Gating the top-level
-// import keeps the non-CUDA lib build warning-clean.
-#[cfg(feature = "cuda")]
+// import keeps the non-GPU lib build warning-clean. (Phase R.7) The
+// ROCm backward (`rocm` feature) shares the same FFI dispatch as CUDA,
+// so the gate widens to `any(cuda, rocm)`.
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 use kiln_tensor::ops::scatter_add;
 
-#[cfg(feature = "cuda")]
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 use kiln_kt_bridge::BridgeError;
 
 /// Error type for the kiln-tensor-typed OPD loss surface.
@@ -134,7 +136,7 @@ impl From<KtError> for OpdLossError {
     }
 }
 
-#[cfg(feature = "cuda")]
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 impl From<BridgeError> for OpdLossError {
     fn from(e: BridgeError) -> Self {
         OpdLossError::Msg(format!("kt-opd-loss bridge: {}", e.message))
@@ -302,6 +304,15 @@ fn per_position_forward_kt(
             KtDevice::Vulkan(_) => KtTensor::from_vec(vals.to_vec(), shape)
                 .and_then(|t| t.to_device(dev))
                 .map_err(OpdLossError::Kt),
+            // (Phase R.7) ROCm builds the host index tensor on CPU and uploads
+            // via `from_vec_on(Device::Rocm(i), ...)` (-> `host_to_rocm_copy`),
+            // so the F32/BF16-on-ROCm OPD forward + backward can materialize the
+            // teacher top-K index tensor on device.
+            #[cfg(feature = "rocm")]
+            KtDevice::Rocm(i) => {
+                KtTensor::from_vec_on(KtDevice::Rocm(i), vals.to_vec(), shape)
+                    .map_err(OpdLossError::Kt)
+            }
             #[allow(unreachable_patterns)]
             other => Err(OpdLossError::msg(format!(
                 "kt-opd-loss: unsupported device for index tensor {other}"
@@ -324,6 +335,13 @@ fn per_position_forward_kt(
             KtDevice::Vulkan(_) => KtTensor::from_vec(vals.to_vec(), shape)
                 .and_then(|t| t.to_device(dev))
                 .map_err(OpdLossError::Kt),
+            // (Phase R.7) ROCm mirrors the index path (host CPU build ->
+            // `from_vec_on(Device::Rocm(i), ...)`).
+            #[cfg(feature = "rocm")]
+            KtDevice::Rocm(i) => {
+                KtTensor::from_vec_on(KtDevice::Rocm(i), vals.to_vec(), shape)
+                    .map_err(OpdLossError::Kt)
+            }
             #[allow(unreachable_patterns)]
             other => Err(OpdLossError::msg(format!(
                 "kt-opd-loss: unsupported device for q_logprobs {other}"
@@ -814,6 +832,12 @@ pub fn opd_top_k_reverse_kl_phase_b_bwd_composite_kt(
             KtDevice::Vulkan(_) => KtTensor::from_vec(vals.to_vec(), shape)
                 .and_then(|t| t.to_device(dev))
                 .map_err(OpdLossError::Kt),
+            // (Phase R.7) ROCm host upload (-> `host_to_rocm_copy`).
+            #[cfg(feature = "rocm")]
+            KtDevice::Rocm(i) => {
+                KtTensor::from_vec_on(KtDevice::Rocm(i), vals.to_vec(), shape)
+                    .map_err(OpdLossError::Kt)
+            }
             #[allow(unreachable_patterns)]
             other => Err(OpdLossError::msg(format!(
                 "kt-opd-loss bwd composite: unsupported device for index tensor {other}"
@@ -836,6 +860,12 @@ pub fn opd_top_k_reverse_kl_phase_b_bwd_composite_kt(
             KtDevice::Vulkan(_) => KtTensor::from_vec(vals.to_vec(), shape)
                 .and_then(|t| t.to_device(dev))
                 .map_err(OpdLossError::Kt),
+            // (Phase R.7) ROCm host upload (-> `host_to_rocm_copy`).
+            #[cfg(feature = "rocm")]
+            KtDevice::Rocm(i) => {
+                KtTensor::from_vec_on(KtDevice::Rocm(i), vals.to_vec(), shape)
+                    .map_err(OpdLossError::Kt)
+            }
             #[allow(unreachable_patterns)]
             other => Err(OpdLossError::msg(format!(
                 "kt-opd-loss bwd composite: unsupported device for f32 tensor {other}"
@@ -1003,7 +1033,14 @@ pub fn opd_top_k_reverse_kl_phase_b_bwd_composite_kt(
 /// - any input is non-contiguous / non-CUDA / wrong dtype.
 /// - `grad_loss` shape disagrees with `output_mode`.
 /// - the FFI kernel returns a non-zero status.
-#[cfg(feature = "cuda")]
+// (Phase R.7) The fused backward is now reachable on BOTH CUDA and ROCm:
+// `build.rs` compiles `csrc/opd_topk_kl.cu` with hipcc for the `rocm` feature
+// (emitting the same `kiln_opd_topk_kl_bwd_*` symbols), and the body routes
+// through the backend-neutral kt-bridge seam (`device_input_ptr` /
+// `device_output_ptr` / `alloc_device_tensor_like` / `device_stream_raw_of`),
+// which dispatches to either the CUDA or ROCm helper by the tensor's backend.
+// CUDA behavior is unchanged.
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 pub fn opd_top_k_reverse_kl_phase_b_bwd_kt(
     hidden: &KtTensor,
     head_t: &KtTensor,
@@ -1015,9 +1052,9 @@ pub fn opd_top_k_reverse_kl_phase_b_bwd_kt(
     output_mode: OpdLossOutputKt,
 ) -> Result<KtTensor, OpdLossError> {
     use kiln_kt_bridge::{
-        alloc_cuda_tensor, cuda_input_device_ptr, cuda_output_device_ptr,
-        cuda_storage_and_byte_offset,
+        alloc_device_tensor_like, device_input_ptr, device_output_ptr, device_stream_raw_of,
     };
+    use kiln_tensor::Backend;
     use kiln_tensor::Device as KtDevice;
 
     // -- 1. Validate shapes / dtype envelope ----------------------------
@@ -1054,12 +1091,53 @@ pub fn opd_top_k_reverse_kl_phase_b_bwd_kt(
     let vocab_size = head_t.shape()[1];
 
     // -- 2. Resolve device + active rows --------------------------------
-    let device_index = match hidden.device() {
-        KtDevice::Cuda(i) => i,
+    //
+    // (Phase R.7) Accept CUDA OR ROCm. `dev` carries the index so the
+    // host-side teacher/scatter tensors land on the SAME device as `hidden`
+    // via the backend-neutral `from_vec_on` constructor below.
+    let dev = hidden.device();
+    match dev.backend() {
+        #[cfg(feature = "cuda")]
+        Backend::Cuda => {}
+        #[cfg(feature = "rocm")]
+        Backend::Rocm => {}
         other => {
             return Err(OpdLossError::msg(format!(
-                "kt-opd-loss bwd: hidden must be on CUDA, got {other}",
+                "kt-opd-loss bwd: hidden must be on a GPU (CUDA/ROCm), got backend {other:?}",
             )));
+        }
+    }
+
+    // Backend-neutral host->device upload of a typed slice onto `dev`. CUDA
+    // routes through `cuda_from_slice` (host->cuda); ROCm through
+    // `from_vec_on(Device::Rocm(i), ...)` (-> `host_to_rocm_copy`). Both keep
+    // the result on `hidden`'s device so the FFI kernel's pointers are valid.
+    let upload_slice = |vals_u32: Option<&[u32]>,
+                        vals_f32: Option<&[f32]>,
+                        shape: Vec<usize>|
+     -> Result<KtTensor, OpdLossError> {
+        match (vals_u32, vals_f32, dev) {
+            #[cfg(feature = "cuda")]
+            (Some(u), None, KtDevice::Cuda(i)) => {
+                KtTensor::cuda_from_slice(u, shape, i).map_err(OpdLossError::Kt)
+            }
+            #[cfg(feature = "cuda")]
+            (None, Some(f), KtDevice::Cuda(i)) => {
+                KtTensor::cuda_from_slice(f, shape, i).map_err(OpdLossError::Kt)
+            }
+            #[cfg(feature = "rocm")]
+            (Some(u), None, KtDevice::Rocm(i)) => {
+                KtTensor::from_vec_on(KtDevice::Rocm(i), u.to_vec(), shape)
+                    .map_err(OpdLossError::Kt)
+            }
+            #[cfg(feature = "rocm")]
+            (None, Some(f), KtDevice::Rocm(i)) => {
+                KtTensor::from_vec_on(KtDevice::Rocm(i), f.to_vec(), shape)
+                    .map_err(OpdLossError::Kt)
+            }
+            _ => Err(OpdLossError::msg(
+                "kt-opd-loss bwd: unsupported device/dtype for host upload",
+            )),
         }
     };
 
@@ -1074,8 +1152,7 @@ pub fn opd_top_k_reverse_kl_phase_b_bwd_kt(
     // input dtype on the input device. Skip the kernel entirely; this
     // matches `cuda_kernel_backward`'s early return.
     if active_count == 0 {
-        let (h_st, _) = cuda_storage_and_byte_offset(hidden, dtype, "hidden")?;
-        let zeros = alloc_cuda_tensor(h_st, dtype, vec![1, seq_len, hidden_size])?;
+        let zeros = alloc_device_tensor_like(hidden, dtype, vec![1, seq_len, hidden_size])?;
         return Ok(zeros);
     }
 
@@ -1083,15 +1160,43 @@ pub fn opd_top_k_reverse_kl_phase_b_bwd_kt(
     //
     // active_indices (U32, [T_active]) — both the gather of hidden rows
     // and the scatter of d_hidden rows use the same index buffer.
-    let active_indices = KtTensor::cuda_from_slice(
-        active_positions.as_slice(),
+    let active_indices = upload_slice(
+        Some(active_positions.as_slice()),
+        None,
         vec![active_count],
-        device_index,
     )?;
 
-    // Gather active hidden rows on device, then take contiguous.
+    // Gather active hidden rows, then take contiguous.
+    //
+    // (Phase R.7) `index_select` has a native `cuda_fwd` but NO `rocm_fwd`;
+    // on ROCm `dispatch2` therefore falls back to `cpu_fwd`, which reads its
+    // index + data tensors via `downcast_ref::<CpuStorage>()` and so rejects
+    // ROCm-backed storage ("indices storage must be CpuStorage"). The ROCm
+    // fallback in `dispatch2` does NOT relocate operands to CPU first (unlike
+    // Metal/Vulkan). So on ROCm we route the gather through the host: pull the
+    // (tiny) active-row selection on CPU, then upload the result back to the
+    // ROCm device for the FFI kernel. CUDA keeps the native device gather
+    // (byte-identical to the pre-R.7 path).
     let hidden_2d = hidden.squeeze(0)?;
-    let active_hidden = index_select(&hidden_2d, 0, &active_indices)?.contiguous()?;
+    let active_hidden = match dev.backend() {
+        #[cfg(feature = "rocm")]
+        Backend::Rocm => {
+            let rocm_idx = match dev {
+                KtDevice::Rocm(i) => i,
+                _ => 0,
+            };
+            // hidden_2d is a ROCm view; copy to host, gather on CPU with a
+            // CPU index tensor, then upload the [T_active, H] result back.
+            let hidden_2d_host = kiln_tensor::rocm_to_host_copy(&hidden_2d)?;
+            let active_idx_host =
+                KtTensor::from_vec(active_positions.clone(), vec![active_count])?;
+            let gathered_host =
+                index_select(&hidden_2d_host, 0, &active_idx_host)?.contiguous()?;
+            kiln_tensor::host_to_rocm_copy(&gathered_host, rocm_idx)?
+        }
+        #[allow(unreachable_patterns)]
+        _ => index_select(&hidden_2d, 0, &active_indices)?.contiguous()?,
+    };
 
     // Ensure head_t is contiguous; the kernel reads from start_offset 0.
     let head_t_contig = if head_t.is_contiguous() {
@@ -1101,15 +1206,15 @@ pub fn opd_top_k_reverse_kl_phase_b_bwd_kt(
     };
 
     // Upload teacher tensors as 2-D for the FFI (`[T_active, K]`).
-    let topk_idx_dev = KtTensor::cuda_from_slice(
-        teacher_topk_indices,
+    let topk_idx_dev = upload_slice(
+        Some(teacher_topk_indices),
+        None,
         vec![active_count, top_k],
-        device_index,
     )?;
-    let topk_lp_q_dev = KtTensor::cuda_from_slice(
-        teacher_topk_logprobs,
+    let topk_lp_q_dev = upload_slice(
+        None,
+        Some(teacher_topk_logprobs),
         vec![active_count, top_k],
-        device_index,
     )?;
 
     // Normalise grad_loss to a 1-D contiguous F32 tensor on device,
@@ -1156,30 +1261,29 @@ pub fn opd_top_k_reverse_kl_phase_b_bwd_kt(
     };
 
     // -- 4. Allocate output buffer [T_active, H] on device --------------
-    let (h_st, _) = cuda_storage_and_byte_offset(hidden, dtype, "hidden")?;
     let d_hidden_active =
-        alloc_cuda_tensor(h_st, dtype, vec![active_count, hidden_size])?;
+        alloc_device_tensor_like(hidden, dtype, vec![active_count, hidden_size])?;
 
     // -- 5. Pull device pointers ----------------------------------------
     //
     // active_hidden / head_t_contig are typed in hidden's dtype
     // (F32 or BF16); the K indices are U32; logprobs and grad_loss
     // are F32.
-    let h_ptr = cuda_input_device_ptr(&active_hidden, dtype, "active_hidden")?;
-    let head_ptr = cuda_input_device_ptr(&head_t_contig, dtype, "head_t")?;
-    let i_ptr = cuda_input_device_ptr(&topk_idx_dev, KtDType::U32, "topk_idx")?;
+    let h_ptr = device_input_ptr(&active_hidden, dtype, "active_hidden")?;
+    let head_ptr = device_input_ptr(&head_t_contig, dtype, "head_t")?;
+    let i_ptr = device_input_ptr(&topk_idx_dev, KtDType::U32, "topk_idx")?;
     let l_ptr =
-        cuda_input_device_ptr(&topk_lp_q_dev, KtDType::F32, "topk_lp_q")?;
+        device_input_ptr(&topk_lp_q_dev, KtDType::F32, "topk_lp_q")?;
     let g_ptr =
-        cuda_input_device_ptr(&grad_loss_dev, KtDType::F32, "grad_loss")?;
-    let d_ptr = cuda_output_device_ptr(&d_hidden_active);
-    let raw_stream = h_st.cuda_stream_raw();
+        device_input_ptr(&grad_loss_dev, KtDType::F32, "grad_loss")?;
+    let d_ptr = device_output_ptr(&d_hidden_active);
+    let raw_stream = device_stream_raw_of(hidden, "stream")?;
 
     // -- 6. Dispatch the FFI --------------------------------------------
     //
     // Same kernel symbols the candle path uses; bit-exact by
     // construction. The output buffer is freshly zero-allocated via
-    // `alloc_cuda_tensor`, so the kernel's writes land in a clean
+    // `alloc_device_tensor_like`, so the kernel's writes land in a clean
     // F32/BF16 tile of the expected size.
     let status = unsafe {
         match dtype {
@@ -1230,7 +1334,30 @@ pub fn opd_top_k_reverse_kl_phase_b_bwd_kt(
     //       `[1, T, H]`. `scatter_add` on CUDA supports axis=0 + 1-D
     //       U32 indices + F32/BF16 values + contiguous inputs — the
     //       exact envelope we built above.
-    let d_hidden_2d = scatter_add(&d_hidden_active, 0, &active_indices, seq_len)?;
+    //
+    // (Phase R.7) Like `index_select`, `scatter_add` has no `rocm_fwd`, so on
+    // ROCm `dispatch2` falls back to `cpu_fwd` without relocating operands to
+    // CPU — which then rejects the ROCm-backed values/indices ("storage must
+    // be CpuStorage"). Route the scatter through the host on ROCm (pull the
+    // [T_active, H] result, scatter on CPU into [T, H], upload back). CUDA
+    // keeps the native device scatter (byte-identical to the pre-R.7 path).
+    let d_hidden_2d = match dev.backend() {
+        #[cfg(feature = "rocm")]
+        Backend::Rocm => {
+            let rocm_idx = match dev {
+                KtDevice::Rocm(i) => i,
+                _ => 0,
+            };
+            let d_active_host = kiln_tensor::rocm_to_host_copy(&d_hidden_active)?;
+            let active_idx_host =
+                KtTensor::from_vec(active_positions.clone(), vec![active_count])?;
+            let scattered_host =
+                scatter_add(&d_active_host, 0, &active_idx_host, seq_len)?.contiguous()?;
+            kiln_tensor::host_to_rocm_copy(&scattered_host, rocm_idx)?
+        }
+        #[allow(unreachable_patterns)]
+        _ => scatter_add(&d_hidden_active, 0, &active_indices, seq_len)?,
+    };
     let d_hidden_3d = d_hidden_2d.reshape(vec![1, seq_len, hidden_size])?;
     Ok(d_hidden_3d)
 }

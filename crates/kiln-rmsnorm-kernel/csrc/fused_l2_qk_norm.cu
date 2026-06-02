@@ -33,41 +33,16 @@
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 
+// Wave-size shim (Phase R.7). Both kernels reduce per-row sums of squares for Q
+// and K. The reductions go through the wave-agnostic shared-memory
+// kiln_block_reduce_sum (no cross-32-lane shuffle, so correct on AMD wave64).
+// `s_inv_q` / `s_inv_k` remain separate shared slots that survive across the
+// two reductions. blockDim.x = 256 (power of two >= 64).
+#include "kt_gpu_compat.cuh"
+
 namespace {
 
 constexpr int kThreadsPerBlock = 256;
-constexpr int kMaxWarps = kThreadsPerBlock / 32;  // 8
-
-__device__ __forceinline__ float warp_reduce_sum(float v) {
-    #pragma unroll
-    for (int offset = 16; offset > 0; offset /= 2) {
-        v += __shfl_xor_sync(0xffffffffu, v, offset);
-    }
-    return v;
-}
-
-__device__ __forceinline__ float block_reduce_sum(float v, float *smem) {
-    int lane = threadIdx.x & 31;
-    int warp = threadIdx.x >> 5;
-
-    v = warp_reduce_sum(v);
-    if (lane == 0) {
-        smem[warp] = v;
-    }
-    __syncthreads();
-
-    // First warp reduces the per-warp partial sums.
-    if (warp == 0) {
-        int num_warps = blockDim.x >> 5;
-        float w = (lane < num_warps) ? smem[lane] : 0.0f;
-        w = warp_reduce_sum(w);
-        if (lane == 0) {
-            smem[0] = w;
-        }
-    }
-    __syncthreads();
-    return smem[0];
-}
 
 __global__ void fused_l2_qk_norm_kernel(
     const __nv_bfloat16 *__restrict__ q_in,
@@ -84,7 +59,7 @@ __global__ void fused_l2_qk_norm_kernel(
     __nv_bfloat16 *q_out_row = q_out + static_cast<size_t>(row) * hidden;
     __nv_bfloat16 *k_out_row = k_out + static_cast<size_t>(row) * hidden;
 
-    __shared__ float smem[kMaxWarps];
+    __shared__ float smem[kThreadsPerBlock];
     __shared__ float s_inv_q;
     __shared__ float s_inv_k;
 
@@ -100,16 +75,17 @@ __global__ void fused_l2_qk_norm_kernel(
 
     // Reduce Q sum-of-squares; broadcast `inv_q` (already premultiplied by
     // `q_scale`) to every thread.
-    float q_total = block_reduce_sum(q_sum_sq, smem);
+    float q_total = kiln_block_reduce_sum(q_sum_sq, smem);
     if (threadIdx.x == 0) {
         s_inv_q = q_scale * rsqrtf(q_total + eps);
     }
     __syncthreads();
 
     // Reduce K sum-of-squares; broadcast `inv_k` to every thread.
-    // `block_reduce_sum` overwrites `smem[*]` but `s_inv_q` lives in a
-    // separate shared-memory slot and survives the second reduction.
-    float k_total = block_reduce_sum(k_sum_sq, smem);
+    // `kiln_block_reduce_sum` reuses `smem[*]` (its trailing barrier makes it
+    // safe to reuse), but `s_inv_q` lives in a separate shared-memory slot and
+    // survives the second reduction.
+    float k_total = kiln_block_reduce_sum(k_sum_sq, smem);
     if (threadIdx.x == 0) {
         s_inv_k = rsqrtf(k_total + eps);
     }
@@ -156,12 +132,12 @@ __global__ void fused_l2_qk_norm_gqa_kernel(
         k_ss += kj * kj;
     }
 
-    __shared__ float smem[kMaxWarps];
+    __shared__ float smem[kThreadsPerBlock];
     __shared__ float s_inv_q;
     __shared__ float s_inv_k;
 
-    float q_sum = block_reduce_sum(q_ss, smem);
-    float k_sum = block_reduce_sum(k_ss, smem);
+    float q_sum = kiln_block_reduce_sum(q_ss, smem);
+    float k_sum = kiln_block_reduce_sum(k_ss, smem);
 
     if (threadIdx.x == 0) {
         s_inv_q = q_scale * rsqrtf(q_sum + eps);

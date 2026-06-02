@@ -13,7 +13,8 @@
 //! path (CUDA-graph freeze-pointers) is deferred to Phase R.9.
 
 use std::any::Any;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use kiln_hip::{RocmContext, RocmSlice};
 
@@ -263,11 +264,31 @@ impl RocmStorage {
     }
 }
 
-/// Construct the primary `Arc<RocmContext>` for `device_index` — the ROCm analog
-/// of `primary_cuda_context`. `Err` if the device isn't available.
+/// The primary `Arc<RocmContext>` for `device_index` — the ROCm analog of
+/// `primary_cuda_context`. **Cached per device** (process-global): every caller
+/// for a given ordinal shares ONE context and therefore ONE default stream.
+///
+/// This caching is load-bearing for correctness, not just perf: HIP's runtime
+/// API has no implicit primary-context retain like cudarc's, so without the
+/// cache each allocation would mint a fresh context + stream. An output
+/// tensor's async zeroing memset and the kernel that writes it would then run on
+/// unordered streams and race (nondeterministically zeroing valid results).
+/// One cached context per device serializes alloc/memset/kernel/readback on the
+/// shared default stream, matching the CUDA backend's single-primary-stream
+/// behavior. `Err` if the device isn't available.
 pub fn primary_rocm_context(device_index: usize) -> Result<Arc<RocmContext>> {
-    RocmContext::new(device_index)
-        .map_err(|e| Error::Msg(format!("primary_rocm_context({device_index}): {e}")))
+    static CACHE: OnceLock<Mutex<HashMap<usize, Arc<RocmContext>>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut map = cache
+        .lock()
+        .map_err(|_| Error::Msg("primary_rocm_context: cache mutex poisoned".to_string()))?;
+    if let Some(ctx) = map.get(&device_index) {
+        return Ok(Arc::clone(ctx));
+    }
+    let ctx = RocmContext::new(device_index)
+        .map_err(|e| Error::Msg(format!("primary_rocm_context({device_index}): {e}")))?;
+    map.insert(device_index, Arc::clone(&ctx));
+    Ok(ctx)
 }
 
 /// Whether a HIP runtime + at least one AMD device is present. The ROCm analog

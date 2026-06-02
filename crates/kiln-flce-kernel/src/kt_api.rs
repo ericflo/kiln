@@ -179,6 +179,33 @@ pub fn fused_linear_cross_entropy_phase_b_kt(
     label_mask: &[bool],
     chunk_size: usize,
 ) -> Result<KtTensor, FlceError> {
+    // ROCm host-staging (Phase R.7): this crate is a PURE-KT COMPOSITE built
+    // out of generic `kiln_tensor` ops (`matmul`, `index_select`,
+    // `scatter_add`, `max_axis`, `sum_axis`, ...). Those generic `DeviceOp*`
+    // entries have native `cuda_fwd` arms (so the CUDA path runs on-device,
+    // untouched) but NO `rocm_fwd` — the ROCm parity-green surface lives in
+    // the standalone `rocm_*` functions, which the composite does not call.
+    // `dispatch*` for a ROCm device falls through to `cpu_fwd` *without* the
+    // host round-trip Metal/Vulkan get, so every op here would hard-error on
+    // `RocmStorage` ("... storage must be CpuStorage"). Mirror the Metal/Vulkan
+    // host fallback at the composite boundary instead: stage the device inputs
+    // down to host, run the identical CPU composite, then upload the scalar
+    // loss back to the originating ROCm device so the result's device matches
+    // the inputs' (the established kiln-tensor ROCm-parity helper pattern).
+    #[cfg(feature = "rocm")]
+    if let KtDevice::Rocm(dev_idx) = hidden.device() {
+        let hidden_host = rocm_stage_to_host(hidden)?;
+        let head_host = rocm_stage_to_host(head_t)?;
+        let loss_host = fused_linear_cross_entropy_phase_b_kt(
+            &hidden_host,
+            &head_host,
+            input_ids,
+            label_mask,
+            chunk_size,
+        )?;
+        return rocm_upload_from_host(&loss_host, dev_idx);
+    }
+
     let seq_len = input_ids.len();
     if label_mask.len() != seq_len {
         return Err(FlceError::msg(format!(
@@ -479,6 +506,28 @@ pub fn fused_linear_cross_entropy_phase_b_backward_kt(
     chunk_size: usize,
     grad_loss: &KtTensor,
 ) -> Result<KtTensor, FlceError> {
+    // ROCm host-staging — same rationale as the forward entry point above:
+    // the generic-op composite has no `rocm_fwd` arm, so stage the device
+    // inputs (hidden, head_t, AND the seed grad — the backward's
+    // broadcast-mul folds it in, and it lives on the same ROCm device) down
+    // to host, run the identical CPU composite, then upload `dhidden` back to
+    // the originating ROCm device so it stays single-device for downstream use.
+    #[cfg(feature = "rocm")]
+    if let KtDevice::Rocm(dev_idx) = hidden.device() {
+        let hidden_host = rocm_stage_to_host(hidden)?;
+        let head_host = rocm_stage_to_host(head_t)?;
+        let grad_host = rocm_stage_to_host(grad_loss)?;
+        let dhidden_host = fused_linear_cross_entropy_phase_b_backward_kt(
+            &hidden_host,
+            &head_host,
+            input_ids,
+            label_mask,
+            chunk_size,
+            &grad_host,
+        )?;
+        return rocm_upload_from_host(&dhidden_host, dev_idx);
+    }
+
     let seq_len = input_ids.len();
     if label_mask.len() != seq_len {
         return Err(FlceError::msg(format!(
@@ -767,6 +816,33 @@ fn zero_scalar() -> Result<KtTensor, FlceError> {
 /// the public re-export to keep imports tight.
 fn elementwise_max(a: &KtTensor, b: &KtTensor) -> Result<KtTensor, FlceError> {
     kiln_tensor::ops::maximum(a, b).map_err(FlceError::Kt)
+}
+
+/// ROCm → host stage for the pure-kt-composite host fallback (Phase R.7).
+///
+/// Copies a `Device::Rocm` tensor down to a CPU tensor via the established
+/// `rocm_to_host_copy` helper (the same one the kiln-tensor ROCm parity tests
+/// use). A CPU tensor passes straight through — keeps the call sites in the
+/// `Rocm` branch uniform.
+#[cfg(feature = "rocm")]
+fn rocm_stage_to_host(t: &KtTensor) -> Result<KtTensor, FlceError> {
+    match t.device() {
+        KtDevice::Rocm(_) => kiln_tensor::rocm_to_host_copy(t).map_err(FlceError::Kt),
+        _ => Ok(t.clone()),
+    }
+}
+
+/// Host → ROCm upload for the pure-kt-composite host fallback (Phase R.7).
+///
+/// Uploads a CPU result tensor back to `Device::Rocm(dev_idx)` via
+/// `host_to_rocm_copy` so the composite's output device matches its ROCm
+/// inputs (single-device contract for downstream consumers). `host_to_rocm_copy`
+/// requires a contiguous, non-packed CPU source; the composite's scalar loss /
+/// `dhidden` are both contiguous F32, so this holds.
+#[cfg(feature = "rocm")]
+fn rocm_upload_from_host(t: &KtTensor, dev_idx: usize) -> Result<KtTensor, FlceError> {
+    let contig = t.contiguous().map_err(FlceError::Kt)?;
+    kiln_tensor::host_to_rocm_copy(&contig, dev_idx).map_err(FlceError::Kt)
 }
 
 #[cfg(test)]

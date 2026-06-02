@@ -22,41 +22,17 @@
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 
+// Wave-size shim (Phase R.7). The block reduction below MUST be wave-agnostic:
+// on AMD wave64 the old `tid/32` warp_id + `__shfl_xor_sync(0xffffffff,...)`
+// cross-32-lane shuffle silently corrupts (lanes 32-63 self-reference; HIP 7.x
+// also static_asserts a 64-bit mask). Routing through kiln_block_reduce_sum
+// (shared-memory, no cross-lane ops) is correct on NVIDIA, AMD wave32, AND AMD
+// wave64. blockDim.x = 256 is a power of two >= 64, as the helper requires.
+#include "kt_gpu_compat.cuh"
+
 namespace {
 
 constexpr int kThreadsPerBlock = 256;
-constexpr int kMaxWarps = kThreadsPerBlock / 32;  // 8
-
-__device__ __forceinline__ float warp_reduce_sum(float v) {
-    #pragma unroll
-    for (int offset = 16; offset > 0; offset /= 2) {
-        v += __shfl_xor_sync(0xffffffffu, v, offset);
-    }
-    return v;
-}
-
-__device__ __forceinline__ float block_reduce_sum(float v, float *smem) {
-    int lane = threadIdx.x & 31;
-    int warp = threadIdx.x >> 5;
-
-    v = warp_reduce_sum(v);
-    if (lane == 0) {
-        smem[warp] = v;
-    }
-    __syncthreads();
-
-    // First warp reduces the per-warp partial sums.
-    if (warp == 0) {
-        int num_warps = blockDim.x >> 5;
-        float w = (lane < num_warps) ? smem[lane] : 0.0f;
-        w = warp_reduce_sum(w);
-        if (lane == 0) {
-            smem[0] = w;
-        }
-    }
-    __syncthreads();
-    return smem[0];
-}
 
 __global__ void fused_rmsnorm_kernel(
     const __nv_bfloat16 *__restrict__ x,
@@ -69,7 +45,7 @@ __global__ void fused_rmsnorm_kernel(
     const __nv_bfloat16 *x_row = x + static_cast<size_t>(row) * hidden;
     __nv_bfloat16 *out_row = out + static_cast<size_t>(row) * hidden;
 
-    __shared__ float smem[kMaxWarps];
+    __shared__ float smem[kThreadsPerBlock];
 
     // Pass 1: per-thread partial sum of x^2 in F32.
     float local_sum_sq = 0.0f;
@@ -78,7 +54,7 @@ __global__ void fused_rmsnorm_kernel(
         local_sum_sq += xj * xj;
     }
 
-    float total_sum_sq = block_reduce_sum(local_sum_sq, smem);
+    float total_sum_sq = kiln_block_reduce_sum(local_sum_sq, smem);
 
     // `smem[0]` now holds the row-wide sum_sq. Derive rms_inv once per block
     // and broadcast through shared memory.

@@ -11,8 +11,11 @@
 //! full_chunk_forward, etc.) follow the same template.
 
 use kiln_kt_bridge::BridgeError;
-use kiln_tensor::{CudaStorage, DType as KtDType, Device as KtDevice, Tensor as KtTensor};
+use kiln_tensor::{DType as KtDType, Device as KtDevice, Tensor as KtTensor};
 
+// The FFI symbols are only declared (in lib.rs) under a GPU backend, so this
+// import — and every `_kt` wrapper that calls them — is gated to match.
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 use crate::{
     kiln_gdn_decode_gates_recurrent_bf16, kiln_gdn_decode_gates_recurrent_vf32_bf16,
     kiln_gdn_decode_qk_norm_gates_recurrent_bf16,
@@ -49,20 +52,95 @@ impl From<BridgeError> for GdnError {
     }
 }
 
+// Backend-neutral seam (Phase R.7). The `_kt` wrapper bodies historically held
+// a `&CudaStorage` "anchor" obtained from `cuda_storage_and_byte_offset`, then
+// fed it to `alloc_cuda_tensor(st, ...)` and `st.cuda_stream_raw()`. The neutral
+// `kiln_kt_bridge::device_*` seam takes the SOURCE TENSOR directly and
+// dispatches on its backend (Cuda OR Rocm), so we keep the exact call shape by
+// having the local helpers operate on `&KtTensor` instead of `&CudaStorage`. The
+// CUDA path is unchanged — the dispatchers route `Device::Cuda` tensors to the
+// same cuda helpers.
+
+/// Validates that `t` is a GPU tensor of `expected` dtype and returns the tensor
+/// itself as the allocation/stream "anchor" (offset is always 0 — kt inputs are
+/// dense, and the old offset return was always discarded). Backend + dtype
+/// validation is also performed by `device_input_ptr` at each call site.
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 fn cuda_storage_and_byte_offset<'a>(
     t: &'a KtTensor,
     expected: KtDType,
     name: &'static str,
-) -> Result<(&'a CudaStorage, usize), GdnError> {
-    Ok(kiln_kt_bridge::cuda_storage_and_byte_offset(t, expected, name)?)
+) -> Result<(&'a KtTensor, usize), GdnError> {
+    if t.dtype() != expected {
+        return Err(GdnError::Msg(format!(
+            "kt-gdn: {name} expected dtype {expected:?}, got {:?}",
+            t.dtype()
+        )));
+    }
+    if !is_cuda(t) {
+        return Err(GdnError::Msg(format!(
+            "kt-gdn: {name} must be on a GPU (Cuda/Rocm), got {:?}",
+            t.device()
+        )));
+    }
+    Ok((t, 0))
 }
 
+/// Allocate a fresh zeroed output tensor of `dtype`/`shape` on the SAME device
+/// as `source` (replaces `alloc_cuda_tensor` + the
+/// storage-then-`cuda_zeros_ctx` pattern). `source` is a `&KtTensor`.
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 fn alloc_cuda_tensor(
-    source: &CudaStorage,
+    source: &KtTensor,
     dtype: KtDType,
     shape: Vec<usize>,
 ) -> Result<KtTensor, GdnError> {
-    Ok(kiln_kt_bridge::alloc_cuda_tensor(source, dtype, shape)?)
+    Ok(kiln_kt_bridge::alloc_device_tensor_like(source, dtype, shape)?)
+}
+
+/// Raw GPU stream pointer for `t`'s storage (replaces `st.cuda_stream_raw()`).
+#[cfg(any(feature = "cuda", feature = "rocm"))]
+fn device_stream_raw(t: &KtTensor, name: &'static str) -> Result<*mut core::ffi::c_void, GdnError> {
+    Ok(kiln_kt_bridge::device_stream_raw_of(t, name)?)
+}
+
+/// Resolve the HIP stream the kernel must launch on, on the ROCm backend:
+/// the OUTPUT tensor's own stream.
+///
+/// On the kt ROCm substrate every tensor (each input upload, the output
+/// `alloc_device_tensor_like`, and the `rocm_to_host_copy` readback) is minted
+/// through its own freshly-constructed `RocmContext`, hence its own HIP stream
+/// — there is no shared default stream. The output buffer is zero-initialized
+/// with an *async* `hipMemsetD8Async` queued on the OUTPUT's stream (S_out) and
+/// is NOT synchronized. If the kernel launches on the INPUT's stream (Sx), the
+/// kernel write (Sx) and the zero-memset (S_out) touch the same buffer on two
+/// unordered streams; under concurrent test threads the memset can land *after*
+/// the kernel write and zero out the result — the "got 0 at row 0" parity
+/// failure that only appears with `--test-threads>1`.
+///
+/// Launching the kernel on S_out makes the zero-memset and the kernel write
+/// same-stream-ordered (memset first, then write), so the kernel never races
+/// its own output's initialization. Inputs uploaded on other streams are still
+/// visible because `clone_htod` fully synchronizes each upload before return.
+/// CUDA is untouched: it keeps the input-stream launch (its single cached
+/// context/stream already orders memset→kernel→readback), and this helper plus
+/// every call to it is `cfg(feature = "rocm")`-only.
+#[cfg(feature = "rocm")]
+fn output_stream_raw(out: &KtTensor) -> Result<*mut core::ffi::c_void, GdnError> {
+    Ok(kiln_kt_bridge::device_stream_raw_of(out, "rocm_output")?)
+}
+
+/// Block until the just-launched kernel finishes, on the ROCm backend, so the
+/// `rocm_to_host_copy` readback (which synchronizes only its OWN stream) cannot
+/// observe the output before the kernel — the readback runs on a different
+/// freshly-minted context/stream than the launch (see [`output_stream_raw`]).
+/// A device-wide `hipDeviceSynchronize` drains the launch stream too. CUDA keeps
+/// its byte-identical path (`cfg(feature = "rocm")`-only, compiled out on CUDA).
+#[cfg(feature = "rocm")]
+fn device_synchronize_after_launch(t: &KtTensor) -> Result<(), GdnError> {
+    let device_index = t.device().index().unwrap_or(0);
+    kiln_tensor::rocm_synchronize_default_stream(device_index)
+        .map_err(|e| GdnError::Msg(format!("kt-gdn: rocm device sync failed: {e}")))
 }
 
 /// `gdn_forward_substitution` over `kiln_tensor::Tensor` operands.
@@ -73,6 +151,7 @@ fn alloc_cuda_tensor(
 /// - `beta`:     BF16 `[B, H, C]`
 ///
 /// Returns BF16 `W` of shape `[B, H, C, dv]`.
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 pub fn gdn_forward_substitution_kt(
     a_strict: &KtTensor,
     v_prime: &KtTensor,
@@ -119,18 +198,21 @@ pub fn gdn_forward_substitution_kt(
         )));
     }
 
-    let a_ptr = kiln_kt_bridge::cuda_input_device_ptr(a_strict, KtDType::BF16, "a_strict")?;
+    let a_ptr = kiln_kt_bridge::device_input_ptr(a_strict, KtDType::BF16, "a_strict")?;
     let (a_st, _) = cuda_storage_and_byte_offset(a_strict, KtDType::BF16, "a_strict")?;
-    let vp_ptr = kiln_kt_bridge::cuda_input_device_ptr(v_prime, KtDType::BF16, "v_prime")?;
+    let vp_ptr = kiln_kt_bridge::device_input_ptr(v_prime, KtDType::BF16, "v_prime")?;
     let _ = cuda_storage_and_byte_offset(v_prime, KtDType::BF16, "v_prime")?;
-    let bt_ptr = kiln_kt_bridge::cuda_input_device_ptr(beta, KtDType::BF16, "beta")?;
+    let bt_ptr = kiln_kt_bridge::device_input_ptr(beta, KtDType::BF16, "beta")?;
     let _ = cuda_storage_and_byte_offset(beta, KtDType::BF16, "beta")?;
 
     let w_out = alloc_cuda_tensor(a_st, KtDType::BF16, vec![b, h, c, dv])?;
-    let w_ptr = kiln_kt_bridge::cuda_output_device_ptr(&w_out);
+    let w_ptr = kiln_kt_bridge::device_output_ptr(&w_out);
     
 
-    let raw_stream = a_st.cuda_stream_raw();
+    #[cfg(feature = "cuda")]
+    let raw_stream = device_stream_raw(a_st, "a_st")?;
+    #[cfg(feature = "rocm")]
+    let raw_stream = output_stream_raw(&w_out)?;
     let status = unsafe {        kiln_gdn_forward_substitution(
             a_ptr as *const _,
             vp_ptr as *const _,
@@ -145,6 +227,8 @@ pub fn gdn_forward_substitution_kt(
     if status != 0 {
         return Err(GdnError::Msg(format!("kt-gdn: FFI returned {status}")));
     }
+    #[cfg(feature = "rocm")]
+    device_synchronize_after_launch(&w_out)?;
     Ok(w_out)
 }
 
@@ -156,6 +240,7 @@ pub fn gdn_forward_substitution_kt(
 /// `state` is borrowed `&KtTensor`; the FFI mutates its underlying
 /// CUDA buffer through the raw device pointer (same idiom as the
 /// candle-typed wrapper which takes `&mut Tensor`).
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 pub fn gdn_recurrent_forward_kt(
     q: &KtTensor,
     k: &KtTensor,
@@ -210,24 +295,27 @@ pub fn gdn_recurrent_forward_kt(
         return Err(GdnError::Msg(format!("kt-gdn: dv must be <= 1024, got {dv}")));
     }
 
-    let q_ptr = kiln_kt_bridge::cuda_input_device_ptr(q, KtDType::BF16, "q")?;
+    let q_ptr = kiln_kt_bridge::device_input_ptr(q, KtDType::BF16, "q")?;
     let (q_st, _) = cuda_storage_and_byte_offset(q, KtDType::BF16, "q")?;
-    let k_ptr = kiln_kt_bridge::cuda_input_device_ptr(k, KtDType::BF16, "k")?;
+    let k_ptr = kiln_kt_bridge::device_input_ptr(k, KtDType::BF16, "k")?;
     let _ = cuda_storage_and_byte_offset(k, KtDType::BF16, "k")?;
-    let v_ptr = kiln_kt_bridge::cuda_input_device_ptr(v, KtDType::BF16, "v")?;
+    let v_ptr = kiln_kt_bridge::device_input_ptr(v, KtDType::BF16, "v")?;
     let _ = cuda_storage_and_byte_offset(v, KtDType::BF16, "v")?;
-    let bt_ptr = kiln_kt_bridge::cuda_input_device_ptr(beta, KtDType::BF16, "beta")?;
+    let bt_ptr = kiln_kt_bridge::device_input_ptr(beta, KtDType::BF16, "beta")?;
     let _ = cuda_storage_and_byte_offset(beta, KtDType::BF16, "beta")?;
-    let g_ptr = kiln_kt_bridge::cuda_input_device_ptr(g, KtDType::BF16, "g")?;
+    let g_ptr = kiln_kt_bridge::device_input_ptr(g, KtDType::BF16, "g")?;
     let _ = cuda_storage_and_byte_offset(g, KtDType::BF16, "g")?;
-    let s_ptr = kiln_kt_bridge::cuda_input_device_ptr(state, KtDType::BF16, "state")?;
+    let s_ptr = kiln_kt_bridge::device_input_ptr(state, KtDType::BF16, "state")?;
     let _ = cuda_storage_and_byte_offset(state, KtDType::BF16, "state")?;
 
     let out = alloc_cuda_tensor(q_st, KtDType::BF16, vec![b, h, dv])?;
-    let o_ptr = kiln_kt_bridge::cuda_output_device_ptr(&out);
+    let o_ptr = kiln_kt_bridge::device_output_ptr(&out);
     
 
-    let raw_stream = q_st.cuda_stream_raw();
+    #[cfg(feature = "cuda")]
+    let raw_stream = device_stream_raw(q_st, "q_st")?;
+    #[cfg(feature = "rocm")]
+    let raw_stream = output_stream_raw(&out)?;
     let status = unsafe {        kiln_gdn_recurrent_forward(
             q_ptr as *const _,
             k_ptr as *const _,
@@ -245,6 +333,8 @@ pub fn gdn_recurrent_forward_kt(
     if status != 0 {
         return Err(GdnError::Msg(format!("kt-gdn: recurrent FFI returned {status}")));
     }
+    #[cfg(feature = "rocm")]
+    device_synchronize_after_launch(&out)?;
     Ok(out)
 }
 
@@ -266,6 +356,7 @@ pub fn gdn_recurrent_forward_kt(
 ///
 /// Returns BF16 `[B, value_heads, dv]`.
 #[allow(clippy::too_many_arguments)]
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 pub fn gdn_decode_qk_norm_gates_recurrent_rmsnorm_bf16_kt(
     q: &KtTensor,
     k: &KtTensor,
@@ -303,32 +394,35 @@ pub fn gdn_decode_qk_norm_gates_recurrent_rmsnorm_bf16_kt(
     let value_heads = v_shape[1];
     let dv = v_shape[2];
 
-    let q_ptr = kiln_kt_bridge::cuda_input_device_ptr(q, KtDType::BF16, "q")?;
+    let q_ptr = kiln_kt_bridge::device_input_ptr(q, KtDType::BF16, "q")?;
     let (q_st, _) = cuda_storage_and_byte_offset(q, KtDType::BF16, "q")?;
-    let k_ptr = kiln_kt_bridge::cuda_input_device_ptr(k, KtDType::BF16, "k")?;
+    let k_ptr = kiln_kt_bridge::device_input_ptr(k, KtDType::BF16, "k")?;
     let _ = cuda_storage_and_byte_offset(k, KtDType::BF16, "k")?;
-    let v_ptr = kiln_kt_bridge::cuda_input_device_ptr(v, KtDType::BF16, "v")?;
+    let v_ptr = kiln_kt_bridge::device_input_ptr(v, KtDType::BF16, "v")?;
     let _ = cuda_storage_and_byte_offset(v, KtDType::BF16, "v")?;
-    let a_ptr = kiln_kt_bridge::cuda_input_device_ptr(a, KtDType::BF16, "a")?;
+    let a_ptr = kiln_kt_bridge::device_input_ptr(a, KtDType::BF16, "a")?;
     let _ = cuda_storage_and_byte_offset(a, KtDType::BF16, "a")?;
-    let bp_ptr = kiln_kt_bridge::cuda_input_device_ptr(b_param, KtDType::BF16, "b")?;
+    let bp_ptr = kiln_kt_bridge::device_input_ptr(b_param, KtDType::BF16, "b")?;
     let _ = cuda_storage_and_byte_offset(b_param, KtDType::BF16, "b")?;
-    let al_ptr = kiln_kt_bridge::cuda_input_device_ptr(a_log, KtDType::BF16, "a_log")?;
+    let al_ptr = kiln_kt_bridge::device_input_ptr(a_log, KtDType::BF16, "a_log")?;
     let _ = cuda_storage_and_byte_offset(a_log, KtDType::BF16, "a_log")?;
-    let dt_ptr = kiln_kt_bridge::cuda_input_device_ptr(dt_bias, KtDType::BF16, "dt_bias")?;
+    let dt_ptr = kiln_kt_bridge::device_input_ptr(dt_bias, KtDType::BF16, "dt_bias")?;
     let _ = cuda_storage_and_byte_offset(dt_bias, KtDType::BF16, "dt_bias")?;
-    let s_ptr = kiln_kt_bridge::cuda_input_device_ptr(state, KtDType::BF16, "state")?;
+    let s_ptr = kiln_kt_bridge::device_input_ptr(state, KtDType::BF16, "state")?;
     let _ = cuda_storage_and_byte_offset(state, KtDType::BF16, "state")?;
-    let z_ptr = kiln_kt_bridge::cuda_input_device_ptr(z, KtDType::BF16, "z")?;
+    let z_ptr = kiln_kt_bridge::device_input_ptr(z, KtDType::BF16, "z")?;
     let _ = cuda_storage_and_byte_offset(z, KtDType::BF16, "z")?;
-    let w_ptr = kiln_kt_bridge::cuda_input_device_ptr(weight, KtDType::F32, "weight")?;
+    let w_ptr = kiln_kt_bridge::device_input_ptr(weight, KtDType::F32, "weight")?;
     let _ = cuda_storage_and_byte_offset(weight, KtDType::F32, "weight")?;
 
     let out = alloc_cuda_tensor(q_st, KtDType::BF16, vec![batch, value_heads, dv])?;
-    let o_ptr = kiln_kt_bridge::cuda_output_device_ptr(&out);
+    let o_ptr = kiln_kt_bridge::device_output_ptr(&out);
     
 
-    let raw_stream = q_st.cuda_stream_raw();
+    #[cfg(feature = "cuda")]
+    let raw_stream = device_stream_raw(q_st, "q_st")?;
+    #[cfg(feature = "rocm")]
+    let raw_stream = output_stream_raw(&out)?;
     let status = unsafe {        kiln_gdn_decode_qk_norm_gates_recurrent_rmsnorm_bf16(
             q_ptr as *const _,
             k_ptr as *const _,
@@ -357,6 +451,8 @@ pub fn gdn_decode_qk_norm_gates_recurrent_rmsnorm_bf16_kt(
             "kt-gdn: decode_qk_norm_rmsnorm FFI returned {status}"
         )));
     }
+    #[cfg(feature = "rocm")]
+    device_synchronize_after_launch(&out)?;
     Ok(out)
 }
 
@@ -377,6 +473,7 @@ pub fn gdn_decode_qk_norm_gates_recurrent_rmsnorm_bf16_kt(
 ///
 /// Returns BF16 `[B, H, C, dv]`.
 #[allow(clippy::too_many_arguments)]
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 pub fn gdn_full_chunk_forward_kt(
     g: &KtTensor,
     v: &KtTensor,
@@ -454,30 +551,33 @@ pub fn gdn_full_chunk_forward_kt(
         )));
     }
 
-    let g_ptr = kiln_kt_bridge::cuda_input_device_ptr(g, KtDType::BF16, "g")?;
+    let g_ptr = kiln_kt_bridge::device_input_ptr(g, KtDType::BF16, "g")?;
     let (g_st, _) = cuda_storage_and_byte_offset(g, KtDType::BF16, "g")?;
-    let v_ptr = kiln_kt_bridge::cuda_input_device_ptr(v, KtDType::BF16, "v")?;
+    let v_ptr = kiln_kt_bridge::device_input_ptr(v, KtDType::BF16, "v")?;
     let _ = cuda_storage_and_byte_offset(v, KtDType::BF16, "v")?;
-    let kkt_ptr = kiln_kt_bridge::cuda_input_device_ptr(kkt, KtDType::BF16, "kkt")?;
+    let kkt_ptr = kiln_kt_bridge::device_input_ptr(kkt, KtDType::BF16, "kkt")?;
     let _ = cuda_storage_and_byte_offset(kkt, KtDType::BF16, "kkt")?;
-    let qkt_ptr = kiln_kt_bridge::cuda_input_device_ptr(qkt, KtDType::BF16, "qkt")?;
+    let qkt_ptr = kiln_kt_bridge::device_input_ptr(qkt, KtDType::BF16, "qkt")?;
     let _ = cuda_storage_and_byte_offset(qkt, KtDType::BF16, "qkt")?;
-    let ks_ptr = kiln_kt_bridge::cuda_input_device_ptr(ks_entry, KtDType::BF16, "ks_entry")?;
+    let ks_ptr = kiln_kt_bridge::device_input_ptr(ks_entry, KtDType::BF16, "ks_entry")?;
     let _ = cuda_storage_and_byte_offset(ks_entry, KtDType::BF16, "ks_entry")?;
-    let qs_ptr = kiln_kt_bridge::cuda_input_device_ptr(q_s, KtDType::BF16, "q_s")?;
+    let qs_ptr = kiln_kt_bridge::device_input_ptr(q_s, KtDType::BF16, "q_s")?;
     let _ = cuda_storage_and_byte_offset(q_s, KtDType::BF16, "q_s")?;
-    let bt_ptr = kiln_kt_bridge::cuda_input_device_ptr(beta, KtDType::BF16, "beta")?;
+    let bt_ptr = kiln_kt_bridge::device_input_ptr(beta, KtDType::BF16, "beta")?;
     let _ = cuda_storage_and_byte_offset(beta, KtDType::BF16, "beta")?;
-    let kt_ptr = kiln_kt_bridge::cuda_input_device_ptr(k_t, KtDType::BF16, "k_t")?;
+    let kt_ptr = kiln_kt_bridge::device_input_ptr(k_t, KtDType::BF16, "k_t")?;
     let _ = cuda_storage_and_byte_offset(k_t, KtDType::BF16, "k_t")?;
-    let s_ptr = kiln_kt_bridge::cuda_input_device_ptr(state, KtDType::BF16, "state")?;
+    let s_ptr = kiln_kt_bridge::device_input_ptr(state, KtDType::BF16, "state")?;
     let _ = cuda_storage_and_byte_offset(state, KtDType::BF16, "state")?;
 
     let out = alloc_cuda_tensor(g_st, KtDType::BF16, vec![b, h, c, dv])?;
-    let o_ptr = kiln_kt_bridge::cuda_output_device_ptr(&out);
+    let o_ptr = kiln_kt_bridge::device_output_ptr(&out);
     
 
-    let raw_stream = g_st.cuda_stream_raw();
+    #[cfg(feature = "cuda")]
+    let raw_stream = device_stream_raw(g_st, "g_st")?;
+    #[cfg(feature = "rocm")]
+    let raw_stream = output_stream_raw(&out)?;
     let status = unsafe {        kiln_gdn_full_chunk_forward(
             g_ptr as *const _,
             v_ptr as *const _,
@@ -501,6 +601,8 @@ pub fn gdn_full_chunk_forward_kt(
             "kt-gdn: full_chunk_forward FFI returned {status}"
         )));
     }
+    #[cfg(feature = "rocm")]
+    device_synchronize_after_launch(&out)?;
     Ok(out)
 }
 
@@ -510,6 +612,7 @@ pub fn gdn_full_chunk_forward_kt(
 /// shape contract as decode_qk_norm_*_rmsnorm but takes a single
 /// `eps` and a `weight` for the value norm.
 #[allow(clippy::too_many_arguments)]
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 pub fn gdn_decode_gates_recurrent_bf16_kt(
     q: &KtTensor,
     k: &KtTensor,
@@ -539,32 +642,35 @@ pub fn gdn_decode_gates_recurrent_bf16_kt(
     let value_heads = v_shape[1];
     let dv = v_shape[2];
 
-    let q_ptr = kiln_kt_bridge::cuda_input_device_ptr(q, KtDType::BF16, "q")?;
+    let q_ptr = kiln_kt_bridge::device_input_ptr(q, KtDType::BF16, "q")?;
     let (q_st, _) = cuda_storage_and_byte_offset(q, KtDType::BF16, "q")?;
-    let k_ptr = kiln_kt_bridge::cuda_input_device_ptr(k, KtDType::BF16, "k")?;
+    let k_ptr = kiln_kt_bridge::device_input_ptr(k, KtDType::BF16, "k")?;
     let _ = cuda_storage_and_byte_offset(k, KtDType::BF16, "k")?;
-    let v_ptr = kiln_kt_bridge::cuda_input_device_ptr(v, KtDType::BF16, "v")?;
+    let v_ptr = kiln_kt_bridge::device_input_ptr(v, KtDType::BF16, "v")?;
     let _ = cuda_storage_and_byte_offset(v, KtDType::BF16, "v")?;
-    let a_ptr = kiln_kt_bridge::cuda_input_device_ptr(a, KtDType::BF16, "a")?;
+    let a_ptr = kiln_kt_bridge::device_input_ptr(a, KtDType::BF16, "a")?;
     let _ = cuda_storage_and_byte_offset(a, KtDType::BF16, "a")?;
-    let bp_ptr = kiln_kt_bridge::cuda_input_device_ptr(b_param, KtDType::BF16, "b")?;
+    let bp_ptr = kiln_kt_bridge::device_input_ptr(b_param, KtDType::BF16, "b")?;
     let _ = cuda_storage_and_byte_offset(b_param, KtDType::BF16, "b")?;
-    let al_ptr = kiln_kt_bridge::cuda_input_device_ptr(a_log, KtDType::BF16, "a_log")?;
+    let al_ptr = kiln_kt_bridge::device_input_ptr(a_log, KtDType::BF16, "a_log")?;
     let _ = cuda_storage_and_byte_offset(a_log, KtDType::BF16, "a_log")?;
-    let dt_ptr = kiln_kt_bridge::cuda_input_device_ptr(dt_bias, KtDType::BF16, "dt_bias")?;
+    let dt_ptr = kiln_kt_bridge::device_input_ptr(dt_bias, KtDType::BF16, "dt_bias")?;
     let _ = cuda_storage_and_byte_offset(dt_bias, KtDType::BF16, "dt_bias")?;
-    let s_ptr = kiln_kt_bridge::cuda_input_device_ptr(state, KtDType::BF16, "state")?;
+    let s_ptr = kiln_kt_bridge::device_input_ptr(state, KtDType::BF16, "state")?;
     let _ = cuda_storage_and_byte_offset(state, KtDType::BF16, "state")?;
-    let z_ptr = kiln_kt_bridge::cuda_input_device_ptr(z, KtDType::BF16, "z")?;
+    let z_ptr = kiln_kt_bridge::device_input_ptr(z, KtDType::BF16, "z")?;
     let _ = cuda_storage_and_byte_offset(z, KtDType::BF16, "z")?;
-    let w_ptr = kiln_kt_bridge::cuda_input_device_ptr(weight, KtDType::F32, "weight")?;
+    let w_ptr = kiln_kt_bridge::device_input_ptr(weight, KtDType::F32, "weight")?;
     let _ = cuda_storage_and_byte_offset(weight, KtDType::F32, "weight")?;
 
     let out = alloc_cuda_tensor(q_st, KtDType::BF16, vec![batch, value_heads, dv])?;
-    let o_ptr = kiln_kt_bridge::cuda_output_device_ptr(&out);
+    let o_ptr = kiln_kt_bridge::device_output_ptr(&out);
     
 
-    let raw_stream = q_st.cuda_stream_raw();
+    #[cfg(feature = "cuda")]
+    let raw_stream = device_stream_raw(q_st, "q_st")?;
+    #[cfg(feature = "rocm")]
+    let raw_stream = output_stream_raw(&out)?;
     let status = unsafe {        kiln_gdn_decode_gates_recurrent_bf16(
             q_ptr as *const _,
             k_ptr as *const _,
@@ -591,6 +697,8 @@ pub fn gdn_decode_gates_recurrent_bf16_kt(
             "kt-gdn: decode_gates_recurrent FFI returned {status}"
         )));
     }
+    #[cfg(feature = "rocm")]
+    device_synchronize_after_launch(&out)?;
     Ok(out)
 }
 
@@ -600,6 +708,7 @@ pub fn gdn_decode_gates_recurrent_bf16_kt(
 /// `(q_scale, qk_eps)` instead of `(q_scale, qk_eps, rms_eps)` +
 /// `weight`. Returns BF16 `[B, value_heads, dv]`.
 #[allow(clippy::too_many_arguments)]
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 pub fn gdn_decode_qk_norm_gates_recurrent_bf16_kt(
     q: &KtTensor,
     k: &KtTensor,
@@ -628,28 +737,31 @@ pub fn gdn_decode_qk_norm_gates_recurrent_bf16_kt(
     let value_heads = v_shape[1];
     let dv = v_shape[2];
 
-    let q_ptr = kiln_kt_bridge::cuda_input_device_ptr(q, KtDType::BF16, "q")?;
+    let q_ptr = kiln_kt_bridge::device_input_ptr(q, KtDType::BF16, "q")?;
     let (q_st, _) = cuda_storage_and_byte_offset(q, KtDType::BF16, "q")?;
-    let k_ptr = kiln_kt_bridge::cuda_input_device_ptr(k, KtDType::BF16, "k")?;
+    let k_ptr = kiln_kt_bridge::device_input_ptr(k, KtDType::BF16, "k")?;
     let _ = cuda_storage_and_byte_offset(k, KtDType::BF16, "k")?;
-    let v_ptr = kiln_kt_bridge::cuda_input_device_ptr(v, KtDType::BF16, "v")?;
+    let v_ptr = kiln_kt_bridge::device_input_ptr(v, KtDType::BF16, "v")?;
     let _ = cuda_storage_and_byte_offset(v, KtDType::BF16, "v")?;
-    let a_ptr = kiln_kt_bridge::cuda_input_device_ptr(a, KtDType::BF16, "a")?;
+    let a_ptr = kiln_kt_bridge::device_input_ptr(a, KtDType::BF16, "a")?;
     let _ = cuda_storage_and_byte_offset(a, KtDType::BF16, "a")?;
-    let bp_ptr = kiln_kt_bridge::cuda_input_device_ptr(b_param, KtDType::BF16, "b")?;
+    let bp_ptr = kiln_kt_bridge::device_input_ptr(b_param, KtDType::BF16, "b")?;
     let _ = cuda_storage_and_byte_offset(b_param, KtDType::BF16, "b")?;
-    let al_ptr = kiln_kt_bridge::cuda_input_device_ptr(a_log, KtDType::BF16, "a_log")?;
+    let al_ptr = kiln_kt_bridge::device_input_ptr(a_log, KtDType::BF16, "a_log")?;
     let _ = cuda_storage_and_byte_offset(a_log, KtDType::BF16, "a_log")?;
-    let dt_ptr = kiln_kt_bridge::cuda_input_device_ptr(dt_bias, KtDType::BF16, "dt_bias")?;
+    let dt_ptr = kiln_kt_bridge::device_input_ptr(dt_bias, KtDType::BF16, "dt_bias")?;
     let _ = cuda_storage_and_byte_offset(dt_bias, KtDType::BF16, "dt_bias")?;
-    let s_ptr = kiln_kt_bridge::cuda_input_device_ptr(state, KtDType::BF16, "state")?;
+    let s_ptr = kiln_kt_bridge::device_input_ptr(state, KtDType::BF16, "state")?;
     let _ = cuda_storage_and_byte_offset(state, KtDType::BF16, "state")?;
 
     let out = alloc_cuda_tensor(q_st, KtDType::BF16, vec![batch, value_heads, dv])?;
-    let o_ptr = kiln_kt_bridge::cuda_output_device_ptr(&out);
+    let o_ptr = kiln_kt_bridge::device_output_ptr(&out);
     
 
-    let raw_stream = q_st.cuda_stream_raw();
+    #[cfg(feature = "cuda")]
+    let raw_stream = device_stream_raw(q_st, "q_st")?;
+    #[cfg(feature = "rocm")]
+    let raw_stream = output_stream_raw(&out)?;
     let status = unsafe {        kiln_gdn_decode_qk_norm_gates_recurrent_bf16(
             q_ptr as *const _,
             k_ptr as *const _,
@@ -675,6 +787,8 @@ pub fn gdn_decode_qk_norm_gates_recurrent_bf16_kt(
             "kt-gdn: decode_qk_norm_gates_recurrent FFI returned {status}"
         )));
     }
+    #[cfg(feature = "rocm")]
+    device_synchronize_after_launch(&out)?;
     Ok(out)
 }
 
@@ -684,6 +798,7 @@ pub fn gdn_decode_qk_norm_gates_recurrent_bf16_kt(
 /// Returns BF16 `[B, value_heads, dv]`. Useful when v-cache or
 /// projection runs at higher precision while q/k stay BF16.
 #[allow(clippy::too_many_arguments)]
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 pub fn gdn_decode_gates_recurrent_vf32_bf16_kt(
     q: &KtTensor,
     k: &KtTensor,
@@ -713,32 +828,35 @@ pub fn gdn_decode_gates_recurrent_vf32_bf16_kt(
     let value_heads = v_shape[1];
     let dv = v_shape[2];
 
-    let q_ptr = kiln_kt_bridge::cuda_input_device_ptr(q, KtDType::BF16, "q")?;
+    let q_ptr = kiln_kt_bridge::device_input_ptr(q, KtDType::BF16, "q")?;
     let (q_st, _) = cuda_storage_and_byte_offset(q, KtDType::BF16, "q")?;
-    let k_ptr = kiln_kt_bridge::cuda_input_device_ptr(k, KtDType::BF16, "k")?;
+    let k_ptr = kiln_kt_bridge::device_input_ptr(k, KtDType::BF16, "k")?;
     let _ = cuda_storage_and_byte_offset(k, KtDType::BF16, "k")?;
-    let v_ptr = kiln_kt_bridge::cuda_input_device_ptr(v, KtDType::F32, "v")?;
+    let v_ptr = kiln_kt_bridge::device_input_ptr(v, KtDType::F32, "v")?;
     let _ = cuda_storage_and_byte_offset(v, KtDType::F32, "v")?;
-    let a_ptr = kiln_kt_bridge::cuda_input_device_ptr(a, KtDType::BF16, "a")?;
+    let a_ptr = kiln_kt_bridge::device_input_ptr(a, KtDType::BF16, "a")?;
     let _ = cuda_storage_and_byte_offset(a, KtDType::BF16, "a")?;
-    let bp_ptr = kiln_kt_bridge::cuda_input_device_ptr(b_param, KtDType::BF16, "b")?;
+    let bp_ptr = kiln_kt_bridge::device_input_ptr(b_param, KtDType::BF16, "b")?;
     let _ = cuda_storage_and_byte_offset(b_param, KtDType::BF16, "b")?;
-    let al_ptr = kiln_kt_bridge::cuda_input_device_ptr(a_log, KtDType::BF16, "a_log")?;
+    let al_ptr = kiln_kt_bridge::device_input_ptr(a_log, KtDType::BF16, "a_log")?;
     let _ = cuda_storage_and_byte_offset(a_log, KtDType::BF16, "a_log")?;
-    let dt_ptr = kiln_kt_bridge::cuda_input_device_ptr(dt_bias, KtDType::BF16, "dt_bias")?;
+    let dt_ptr = kiln_kt_bridge::device_input_ptr(dt_bias, KtDType::BF16, "dt_bias")?;
     let _ = cuda_storage_and_byte_offset(dt_bias, KtDType::BF16, "dt_bias")?;
-    let s_ptr = kiln_kt_bridge::cuda_input_device_ptr(state, KtDType::BF16, "state")?;
+    let s_ptr = kiln_kt_bridge::device_input_ptr(state, KtDType::BF16, "state")?;
     let _ = cuda_storage_and_byte_offset(state, KtDType::BF16, "state")?;
-    let z_ptr = kiln_kt_bridge::cuda_input_device_ptr(z, KtDType::BF16, "z")?;
+    let z_ptr = kiln_kt_bridge::device_input_ptr(z, KtDType::BF16, "z")?;
     let _ = cuda_storage_and_byte_offset(z, KtDType::BF16, "z")?;
-    let w_ptr = kiln_kt_bridge::cuda_input_device_ptr(weight, KtDType::F32, "weight")?;
+    let w_ptr = kiln_kt_bridge::device_input_ptr(weight, KtDType::F32, "weight")?;
     let _ = cuda_storage_and_byte_offset(weight, KtDType::F32, "weight")?;
 
     let out = alloc_cuda_tensor(q_st, KtDType::BF16, vec![batch, value_heads, dv])?;
-    let o_ptr = kiln_kt_bridge::cuda_output_device_ptr(&out);
+    let o_ptr = kiln_kt_bridge::device_output_ptr(&out);
     
 
-    let raw_stream = q_st.cuda_stream_raw();
+    #[cfg(feature = "cuda")]
+    let raw_stream = device_stream_raw(q_st, "q_st")?;
+    #[cfg(feature = "rocm")]
+    let raw_stream = output_stream_raw(&out)?;
     let status = unsafe {        kiln_gdn_decode_gates_recurrent_vf32_bf16(
             q_ptr as *const _,
             k_ptr as *const _,
@@ -765,11 +883,14 @@ pub fn gdn_decode_gates_recurrent_vf32_bf16_kt(
             "kt-gdn: decode_gates_recurrent_vf32 FFI returned {status}"
         )));
     }
+    #[cfg(feature = "rocm")]
+    device_synchronize_after_launch(&out)?;
     Ok(out)
 }
 
 /// `kiln_gdn_decode_qk_norm_gates_recurrent_vf32_bf16` — qk-norm + vf32.
 #[allow(clippy::too_many_arguments)]
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 pub fn gdn_decode_qk_norm_gates_recurrent_vf32_bf16_kt(
     q: &KtTensor,
     k: &KtTensor,
@@ -798,28 +919,31 @@ pub fn gdn_decode_qk_norm_gates_recurrent_vf32_bf16_kt(
     let value_heads = v_shape[1];
     let dv = v_shape[2];
 
-    let q_ptr = kiln_kt_bridge::cuda_input_device_ptr(q, KtDType::BF16, "q")?;
+    let q_ptr = kiln_kt_bridge::device_input_ptr(q, KtDType::BF16, "q")?;
     let (q_st, _) = cuda_storage_and_byte_offset(q, KtDType::BF16, "q")?;
-    let k_ptr = kiln_kt_bridge::cuda_input_device_ptr(k, KtDType::BF16, "k")?;
+    let k_ptr = kiln_kt_bridge::device_input_ptr(k, KtDType::BF16, "k")?;
     let _ = cuda_storage_and_byte_offset(k, KtDType::BF16, "k")?;
-    let v_ptr = kiln_kt_bridge::cuda_input_device_ptr(v, KtDType::F32, "v")?;
+    let v_ptr = kiln_kt_bridge::device_input_ptr(v, KtDType::F32, "v")?;
     let _ = cuda_storage_and_byte_offset(v, KtDType::F32, "v")?;
-    let a_ptr = kiln_kt_bridge::cuda_input_device_ptr(a, KtDType::BF16, "a")?;
+    let a_ptr = kiln_kt_bridge::device_input_ptr(a, KtDType::BF16, "a")?;
     let _ = cuda_storage_and_byte_offset(a, KtDType::BF16, "a")?;
-    let bp_ptr = kiln_kt_bridge::cuda_input_device_ptr(b_param, KtDType::BF16, "b")?;
+    let bp_ptr = kiln_kt_bridge::device_input_ptr(b_param, KtDType::BF16, "b")?;
     let _ = cuda_storage_and_byte_offset(b_param, KtDType::BF16, "b")?;
-    let al_ptr = kiln_kt_bridge::cuda_input_device_ptr(a_log, KtDType::BF16, "a_log")?;
+    let al_ptr = kiln_kt_bridge::device_input_ptr(a_log, KtDType::BF16, "a_log")?;
     let _ = cuda_storage_and_byte_offset(a_log, KtDType::BF16, "a_log")?;
-    let dt_ptr = kiln_kt_bridge::cuda_input_device_ptr(dt_bias, KtDType::BF16, "dt_bias")?;
+    let dt_ptr = kiln_kt_bridge::device_input_ptr(dt_bias, KtDType::BF16, "dt_bias")?;
     let _ = cuda_storage_and_byte_offset(dt_bias, KtDType::BF16, "dt_bias")?;
-    let s_ptr = kiln_kt_bridge::cuda_input_device_ptr(state, KtDType::BF16, "state")?;
+    let s_ptr = kiln_kt_bridge::device_input_ptr(state, KtDType::BF16, "state")?;
     let _ = cuda_storage_and_byte_offset(state, KtDType::BF16, "state")?;
 
     let out = alloc_cuda_tensor(q_st, KtDType::BF16, vec![batch, value_heads, dv])?;
-    let o_ptr = kiln_kt_bridge::cuda_output_device_ptr(&out);
+    let o_ptr = kiln_kt_bridge::device_output_ptr(&out);
     
 
-    let raw_stream = q_st.cuda_stream_raw();
+    #[cfg(feature = "cuda")]
+    let raw_stream = device_stream_raw(q_st, "q_st")?;
+    #[cfg(feature = "rocm")]
+    let raw_stream = output_stream_raw(&out)?;
     let status = unsafe {        kiln_gdn_decode_qk_norm_gates_recurrent_vf32_bf16(
             q_ptr as *const _,
             k_ptr as *const _,
@@ -845,11 +969,14 @@ pub fn gdn_decode_qk_norm_gates_recurrent_vf32_bf16_kt(
             "kt-gdn: decode_qk_norm_gates_recurrent_vf32 FFI returned {status}"
         )));
     }
+    #[cfg(feature = "rocm")]
+    device_synchronize_after_launch(&out)?;
     Ok(out)
 }
 
 /// `kiln_gdn_decode_qk_norm_gates_recurrent_qf32_vf32_bf16` — qk-norm with q+v in F32.
 #[allow(clippy::too_many_arguments)]
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 pub fn gdn_decode_qk_norm_gates_recurrent_qf32_vf32_bf16_kt(
     q: &KtTensor,
     k: &KtTensor,
@@ -878,28 +1005,31 @@ pub fn gdn_decode_qk_norm_gates_recurrent_qf32_vf32_bf16_kt(
     let value_heads = v_shape[1];
     let dv = v_shape[2];
 
-    let q_ptr = kiln_kt_bridge::cuda_input_device_ptr(q, KtDType::F32, "q")?;
+    let q_ptr = kiln_kt_bridge::device_input_ptr(q, KtDType::F32, "q")?;
     let (q_st, _) = cuda_storage_and_byte_offset(q, KtDType::F32, "q")?;
-    let k_ptr = kiln_kt_bridge::cuda_input_device_ptr(k, KtDType::BF16, "k")?;
+    let k_ptr = kiln_kt_bridge::device_input_ptr(k, KtDType::BF16, "k")?;
     let _ = cuda_storage_and_byte_offset(k, KtDType::BF16, "k")?;
-    let v_ptr = kiln_kt_bridge::cuda_input_device_ptr(v, KtDType::F32, "v")?;
+    let v_ptr = kiln_kt_bridge::device_input_ptr(v, KtDType::F32, "v")?;
     let _ = cuda_storage_and_byte_offset(v, KtDType::F32, "v")?;
-    let a_ptr = kiln_kt_bridge::cuda_input_device_ptr(a, KtDType::BF16, "a")?;
+    let a_ptr = kiln_kt_bridge::device_input_ptr(a, KtDType::BF16, "a")?;
     let _ = cuda_storage_and_byte_offset(a, KtDType::BF16, "a")?;
-    let bp_ptr = kiln_kt_bridge::cuda_input_device_ptr(b_param, KtDType::BF16, "b")?;
+    let bp_ptr = kiln_kt_bridge::device_input_ptr(b_param, KtDType::BF16, "b")?;
     let _ = cuda_storage_and_byte_offset(b_param, KtDType::BF16, "b")?;
-    let al_ptr = kiln_kt_bridge::cuda_input_device_ptr(a_log, KtDType::BF16, "a_log")?;
+    let al_ptr = kiln_kt_bridge::device_input_ptr(a_log, KtDType::BF16, "a_log")?;
     let _ = cuda_storage_and_byte_offset(a_log, KtDType::BF16, "a_log")?;
-    let dt_ptr = kiln_kt_bridge::cuda_input_device_ptr(dt_bias, KtDType::BF16, "dt_bias")?;
+    let dt_ptr = kiln_kt_bridge::device_input_ptr(dt_bias, KtDType::BF16, "dt_bias")?;
     let _ = cuda_storage_and_byte_offset(dt_bias, KtDType::BF16, "dt_bias")?;
-    let s_ptr = kiln_kt_bridge::cuda_input_device_ptr(state, KtDType::BF16, "state")?;
+    let s_ptr = kiln_kt_bridge::device_input_ptr(state, KtDType::BF16, "state")?;
     let _ = cuda_storage_and_byte_offset(state, KtDType::BF16, "state")?;
 
     let out = alloc_cuda_tensor(q_st, KtDType::BF16, vec![batch, value_heads, dv])?;
-    let o_ptr = kiln_kt_bridge::cuda_output_device_ptr(&out);
+    let o_ptr = kiln_kt_bridge::device_output_ptr(&out);
     
 
-    let raw_stream = q_st.cuda_stream_raw();
+    #[cfg(feature = "cuda")]
+    let raw_stream = device_stream_raw(q_st, "q_st")?;
+    #[cfg(feature = "rocm")]
+    let raw_stream = output_stream_raw(&out)?;
     let status = unsafe {        kiln_gdn_decode_qk_norm_gates_recurrent_qf32_vf32_bf16(
             q_ptr as *const _,
             k_ptr as *const _,
@@ -925,11 +1055,14 @@ pub fn gdn_decode_qk_norm_gates_recurrent_qf32_vf32_bf16_kt(
             "kt-gdn: decode_qk_norm_gates_recurrent_qf32_vf32 FFI returned {status}"
         )));
     }
+    #[cfg(feature = "rocm")]
+    device_synchronize_after_launch(&out)?;
     Ok(out)
 }
 
 /// `kiln_gdn_decode_qk_norm_gates_recurrent_qf32_vbf16_bf16` — qk-norm with q in F32, v in BF16.
 #[allow(clippy::too_many_arguments)]
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 pub fn gdn_decode_qk_norm_gates_recurrent_qf32_vbf16_bf16_kt(
     q: &KtTensor,
     k: &KtTensor,
@@ -958,28 +1091,31 @@ pub fn gdn_decode_qk_norm_gates_recurrent_qf32_vbf16_bf16_kt(
     let value_heads = v_shape[1];
     let dv = v_shape[2];
 
-    let q_ptr = kiln_kt_bridge::cuda_input_device_ptr(q, KtDType::F32, "q")?;
+    let q_ptr = kiln_kt_bridge::device_input_ptr(q, KtDType::F32, "q")?;
     let (q_st, _) = cuda_storage_and_byte_offset(q, KtDType::F32, "q")?;
-    let k_ptr = kiln_kt_bridge::cuda_input_device_ptr(k, KtDType::BF16, "k")?;
+    let k_ptr = kiln_kt_bridge::device_input_ptr(k, KtDType::BF16, "k")?;
     let _ = cuda_storage_and_byte_offset(k, KtDType::BF16, "k")?;
-    let v_ptr = kiln_kt_bridge::cuda_input_device_ptr(v, KtDType::BF16, "v")?;
+    let v_ptr = kiln_kt_bridge::device_input_ptr(v, KtDType::BF16, "v")?;
     let _ = cuda_storage_and_byte_offset(v, KtDType::BF16, "v")?;
-    let a_ptr = kiln_kt_bridge::cuda_input_device_ptr(a, KtDType::BF16, "a")?;
+    let a_ptr = kiln_kt_bridge::device_input_ptr(a, KtDType::BF16, "a")?;
     let _ = cuda_storage_and_byte_offset(a, KtDType::BF16, "a")?;
-    let bp_ptr = kiln_kt_bridge::cuda_input_device_ptr(b_param, KtDType::BF16, "b")?;
+    let bp_ptr = kiln_kt_bridge::device_input_ptr(b_param, KtDType::BF16, "b")?;
     let _ = cuda_storage_and_byte_offset(b_param, KtDType::BF16, "b")?;
-    let al_ptr = kiln_kt_bridge::cuda_input_device_ptr(a_log, KtDType::BF16, "a_log")?;
+    let al_ptr = kiln_kt_bridge::device_input_ptr(a_log, KtDType::BF16, "a_log")?;
     let _ = cuda_storage_and_byte_offset(a_log, KtDType::BF16, "a_log")?;
-    let dt_ptr = kiln_kt_bridge::cuda_input_device_ptr(dt_bias, KtDType::BF16, "dt_bias")?;
+    let dt_ptr = kiln_kt_bridge::device_input_ptr(dt_bias, KtDType::BF16, "dt_bias")?;
     let _ = cuda_storage_and_byte_offset(dt_bias, KtDType::BF16, "dt_bias")?;
-    let s_ptr = kiln_kt_bridge::cuda_input_device_ptr(state, KtDType::BF16, "state")?;
+    let s_ptr = kiln_kt_bridge::device_input_ptr(state, KtDType::BF16, "state")?;
     let _ = cuda_storage_and_byte_offset(state, KtDType::BF16, "state")?;
 
     let out = alloc_cuda_tensor(q_st, KtDType::BF16, vec![batch, value_heads, dv])?;
-    let o_ptr = kiln_kt_bridge::cuda_output_device_ptr(&out);
+    let o_ptr = kiln_kt_bridge::device_output_ptr(&out);
     
 
-    let raw_stream = q_st.cuda_stream_raw();
+    #[cfg(feature = "cuda")]
+    let raw_stream = device_stream_raw(q_st, "q_st")?;
+    #[cfg(feature = "rocm")]
+    let raw_stream = output_stream_raw(&out)?;
     let status = unsafe {        kiln_gdn_decode_qk_norm_gates_recurrent_qf32_vbf16_bf16(
             q_ptr as *const _,
             k_ptr as *const _,
@@ -1005,11 +1141,14 @@ pub fn gdn_decode_qk_norm_gates_recurrent_qf32_vbf16_bf16_kt(
             "kt-gdn: decode_qk_norm_gates_recurrent_qf32_vbf16 FFI returned {status}"
         )));
     }
+    #[cfg(feature = "rocm")]
+    device_synchronize_after_launch(&out)?;
     Ok(out)
 }
 
 /// `kiln_gdn_decode_qk_norm_gates_recurrent_rmsnorm_vf32_bf16` — qk-norm + rmsnorm + vf32.
 #[allow(clippy::too_many_arguments)]
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 pub fn gdn_decode_qk_norm_gates_recurrent_rmsnorm_vf32_bf16_kt(
     q: &KtTensor,
     k: &KtTensor,
@@ -1041,32 +1180,35 @@ pub fn gdn_decode_qk_norm_gates_recurrent_rmsnorm_vf32_bf16_kt(
     let value_heads = v_shape[1];
     let dv = v_shape[2];
 
-    let q_ptr = kiln_kt_bridge::cuda_input_device_ptr(q, KtDType::BF16, "q")?;
+    let q_ptr = kiln_kt_bridge::device_input_ptr(q, KtDType::BF16, "q")?;
     let (q_st, _) = cuda_storage_and_byte_offset(q, KtDType::BF16, "q")?;
-    let k_ptr = kiln_kt_bridge::cuda_input_device_ptr(k, KtDType::BF16, "k")?;
+    let k_ptr = kiln_kt_bridge::device_input_ptr(k, KtDType::BF16, "k")?;
     let _ = cuda_storage_and_byte_offset(k, KtDType::BF16, "k")?;
-    let v_ptr = kiln_kt_bridge::cuda_input_device_ptr(v, KtDType::F32, "v")?;
+    let v_ptr = kiln_kt_bridge::device_input_ptr(v, KtDType::F32, "v")?;
     let _ = cuda_storage_and_byte_offset(v, KtDType::F32, "v")?;
-    let a_ptr = kiln_kt_bridge::cuda_input_device_ptr(a, KtDType::BF16, "a")?;
+    let a_ptr = kiln_kt_bridge::device_input_ptr(a, KtDType::BF16, "a")?;
     let _ = cuda_storage_and_byte_offset(a, KtDType::BF16, "a")?;
-    let bp_ptr = kiln_kt_bridge::cuda_input_device_ptr(b_param, KtDType::BF16, "b")?;
+    let bp_ptr = kiln_kt_bridge::device_input_ptr(b_param, KtDType::BF16, "b")?;
     let _ = cuda_storage_and_byte_offset(b_param, KtDType::BF16, "b")?;
-    let al_ptr = kiln_kt_bridge::cuda_input_device_ptr(a_log, KtDType::BF16, "a_log")?;
+    let al_ptr = kiln_kt_bridge::device_input_ptr(a_log, KtDType::BF16, "a_log")?;
     let _ = cuda_storage_and_byte_offset(a_log, KtDType::BF16, "a_log")?;
-    let dt_ptr = kiln_kt_bridge::cuda_input_device_ptr(dt_bias, KtDType::BF16, "dt_bias")?;
+    let dt_ptr = kiln_kt_bridge::device_input_ptr(dt_bias, KtDType::BF16, "dt_bias")?;
     let _ = cuda_storage_and_byte_offset(dt_bias, KtDType::BF16, "dt_bias")?;
-    let s_ptr = kiln_kt_bridge::cuda_input_device_ptr(state, KtDType::BF16, "state")?;
+    let s_ptr = kiln_kt_bridge::device_input_ptr(state, KtDType::BF16, "state")?;
     let _ = cuda_storage_and_byte_offset(state, KtDType::BF16, "state")?;
-    let z_ptr = kiln_kt_bridge::cuda_input_device_ptr(z, KtDType::BF16, "z")?;
+    let z_ptr = kiln_kt_bridge::device_input_ptr(z, KtDType::BF16, "z")?;
     let _ = cuda_storage_and_byte_offset(z, KtDType::BF16, "z")?;
-    let w_ptr = kiln_kt_bridge::cuda_input_device_ptr(weight, KtDType::F32, "weight")?;
+    let w_ptr = kiln_kt_bridge::device_input_ptr(weight, KtDType::F32, "weight")?;
     let _ = cuda_storage_and_byte_offset(weight, KtDType::F32, "weight")?;
 
     let out = alloc_cuda_tensor(q_st, KtDType::BF16, vec![batch, value_heads, dv])?;
-    let o_ptr = kiln_kt_bridge::cuda_output_device_ptr(&out);
+    let o_ptr = kiln_kt_bridge::device_output_ptr(&out);
     
 
-    let raw_stream = q_st.cuda_stream_raw();
+    #[cfg(feature = "cuda")]
+    let raw_stream = device_stream_raw(q_st, "q_st")?;
+    #[cfg(feature = "rocm")]
+    let raw_stream = output_stream_raw(&out)?;
     let status = unsafe {        kiln_gdn_decode_qk_norm_gates_recurrent_rmsnorm_vf32_bf16(
             q_ptr as *const _,
             k_ptr as *const _,
@@ -1095,11 +1237,14 @@ pub fn gdn_decode_qk_norm_gates_recurrent_rmsnorm_vf32_bf16_kt(
             "kt-gdn: decode_rmsnorm_vf32 FFI returned {status}"
         )));
     }
+    #[cfg(feature = "rocm")]
+    device_synchronize_after_launch(&out)?;
     Ok(out)
 }
 
 /// `kiln_gdn_decode_qk_norm_gates_recurrent_rmsnorm_qf32_vf32_bf16` — qk-norm + rmsnorm + qf32 + vf32.
 #[allow(clippy::too_many_arguments)]
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 pub fn gdn_decode_qk_norm_gates_recurrent_rmsnorm_qf32_vf32_bf16_kt(
     q: &KtTensor,
     k: &KtTensor,
@@ -1131,32 +1276,35 @@ pub fn gdn_decode_qk_norm_gates_recurrent_rmsnorm_qf32_vf32_bf16_kt(
     let value_heads = v_shape[1];
     let dv = v_shape[2];
 
-    let q_ptr = kiln_kt_bridge::cuda_input_device_ptr(q, KtDType::F32, "q")?;
+    let q_ptr = kiln_kt_bridge::device_input_ptr(q, KtDType::F32, "q")?;
     let (q_st, _) = cuda_storage_and_byte_offset(q, KtDType::F32, "q")?;
-    let k_ptr = kiln_kt_bridge::cuda_input_device_ptr(k, KtDType::BF16, "k")?;
+    let k_ptr = kiln_kt_bridge::device_input_ptr(k, KtDType::BF16, "k")?;
     let _ = cuda_storage_and_byte_offset(k, KtDType::BF16, "k")?;
-    let v_ptr = kiln_kt_bridge::cuda_input_device_ptr(v, KtDType::F32, "v")?;
+    let v_ptr = kiln_kt_bridge::device_input_ptr(v, KtDType::F32, "v")?;
     let _ = cuda_storage_and_byte_offset(v, KtDType::F32, "v")?;
-    let a_ptr = kiln_kt_bridge::cuda_input_device_ptr(a, KtDType::BF16, "a")?;
+    let a_ptr = kiln_kt_bridge::device_input_ptr(a, KtDType::BF16, "a")?;
     let _ = cuda_storage_and_byte_offset(a, KtDType::BF16, "a")?;
-    let bp_ptr = kiln_kt_bridge::cuda_input_device_ptr(b_param, KtDType::BF16, "b")?;
+    let bp_ptr = kiln_kt_bridge::device_input_ptr(b_param, KtDType::BF16, "b")?;
     let _ = cuda_storage_and_byte_offset(b_param, KtDType::BF16, "b")?;
-    let al_ptr = kiln_kt_bridge::cuda_input_device_ptr(a_log, KtDType::BF16, "a_log")?;
+    let al_ptr = kiln_kt_bridge::device_input_ptr(a_log, KtDType::BF16, "a_log")?;
     let _ = cuda_storage_and_byte_offset(a_log, KtDType::BF16, "a_log")?;
-    let dt_ptr = kiln_kt_bridge::cuda_input_device_ptr(dt_bias, KtDType::BF16, "dt_bias")?;
+    let dt_ptr = kiln_kt_bridge::device_input_ptr(dt_bias, KtDType::BF16, "dt_bias")?;
     let _ = cuda_storage_and_byte_offset(dt_bias, KtDType::BF16, "dt_bias")?;
-    let s_ptr = kiln_kt_bridge::cuda_input_device_ptr(state, KtDType::BF16, "state")?;
+    let s_ptr = kiln_kt_bridge::device_input_ptr(state, KtDType::BF16, "state")?;
     let _ = cuda_storage_and_byte_offset(state, KtDType::BF16, "state")?;
-    let z_ptr = kiln_kt_bridge::cuda_input_device_ptr(z, KtDType::BF16, "z")?;
+    let z_ptr = kiln_kt_bridge::device_input_ptr(z, KtDType::BF16, "z")?;
     let _ = cuda_storage_and_byte_offset(z, KtDType::BF16, "z")?;
-    let w_ptr = kiln_kt_bridge::cuda_input_device_ptr(weight, KtDType::F32, "weight")?;
+    let w_ptr = kiln_kt_bridge::device_input_ptr(weight, KtDType::F32, "weight")?;
     let _ = cuda_storage_and_byte_offset(weight, KtDType::F32, "weight")?;
 
     let out = alloc_cuda_tensor(q_st, KtDType::BF16, vec![batch, value_heads, dv])?;
-    let o_ptr = kiln_kt_bridge::cuda_output_device_ptr(&out);
+    let o_ptr = kiln_kt_bridge::device_output_ptr(&out);
     
 
-    let raw_stream = q_st.cuda_stream_raw();
+    #[cfg(feature = "cuda")]
+    let raw_stream = device_stream_raw(q_st, "q_st")?;
+    #[cfg(feature = "rocm")]
+    let raw_stream = output_stream_raw(&out)?;
     let status = unsafe {        kiln_gdn_decode_qk_norm_gates_recurrent_rmsnorm_qf32_vf32_bf16(
             q_ptr as *const _,
             k_ptr as *const _,
@@ -1185,11 +1333,14 @@ pub fn gdn_decode_qk_norm_gates_recurrent_rmsnorm_qf32_vf32_bf16_kt(
             "kt-gdn: decode_rmsnorm_qf32_vf32 FFI returned {status}"
         )));
     }
+    #[cfg(feature = "rocm")]
+    device_synchronize_after_launch(&out)?;
     Ok(out)
 }
 
 /// `kiln_gdn_decode_qk_norm_gates_recurrent_rmsnorm_qf32_vbf16_bf16` — qk-norm + rmsnorm + qf32 + vbf16.
 #[allow(clippy::too_many_arguments)]
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 pub fn gdn_decode_qk_norm_gates_recurrent_rmsnorm_qf32_vbf16_bf16_kt(
     q: &KtTensor,
     k: &KtTensor,
@@ -1221,32 +1372,35 @@ pub fn gdn_decode_qk_norm_gates_recurrent_rmsnorm_qf32_vbf16_bf16_kt(
     let value_heads = v_shape[1];
     let dv = v_shape[2];
 
-    let q_ptr = kiln_kt_bridge::cuda_input_device_ptr(q, KtDType::F32, "q")?;
+    let q_ptr = kiln_kt_bridge::device_input_ptr(q, KtDType::F32, "q")?;
     let (q_st, _) = cuda_storage_and_byte_offset(q, KtDType::F32, "q")?;
-    let k_ptr = kiln_kt_bridge::cuda_input_device_ptr(k, KtDType::BF16, "k")?;
+    let k_ptr = kiln_kt_bridge::device_input_ptr(k, KtDType::BF16, "k")?;
     let _ = cuda_storage_and_byte_offset(k, KtDType::BF16, "k")?;
-    let v_ptr = kiln_kt_bridge::cuda_input_device_ptr(v, KtDType::BF16, "v")?;
+    let v_ptr = kiln_kt_bridge::device_input_ptr(v, KtDType::BF16, "v")?;
     let _ = cuda_storage_and_byte_offset(v, KtDType::BF16, "v")?;
-    let a_ptr = kiln_kt_bridge::cuda_input_device_ptr(a, KtDType::BF16, "a")?;
+    let a_ptr = kiln_kt_bridge::device_input_ptr(a, KtDType::BF16, "a")?;
     let _ = cuda_storage_and_byte_offset(a, KtDType::BF16, "a")?;
-    let bp_ptr = kiln_kt_bridge::cuda_input_device_ptr(b_param, KtDType::BF16, "b")?;
+    let bp_ptr = kiln_kt_bridge::device_input_ptr(b_param, KtDType::BF16, "b")?;
     let _ = cuda_storage_and_byte_offset(b_param, KtDType::BF16, "b")?;
-    let al_ptr = kiln_kt_bridge::cuda_input_device_ptr(a_log, KtDType::BF16, "a_log")?;
+    let al_ptr = kiln_kt_bridge::device_input_ptr(a_log, KtDType::BF16, "a_log")?;
     let _ = cuda_storage_and_byte_offset(a_log, KtDType::BF16, "a_log")?;
-    let dt_ptr = kiln_kt_bridge::cuda_input_device_ptr(dt_bias, KtDType::BF16, "dt_bias")?;
+    let dt_ptr = kiln_kt_bridge::device_input_ptr(dt_bias, KtDType::BF16, "dt_bias")?;
     let _ = cuda_storage_and_byte_offset(dt_bias, KtDType::BF16, "dt_bias")?;
-    let s_ptr = kiln_kt_bridge::cuda_input_device_ptr(state, KtDType::BF16, "state")?;
+    let s_ptr = kiln_kt_bridge::device_input_ptr(state, KtDType::BF16, "state")?;
     let _ = cuda_storage_and_byte_offset(state, KtDType::BF16, "state")?;
-    let z_ptr = kiln_kt_bridge::cuda_input_device_ptr(z, KtDType::BF16, "z")?;
+    let z_ptr = kiln_kt_bridge::device_input_ptr(z, KtDType::BF16, "z")?;
     let _ = cuda_storage_and_byte_offset(z, KtDType::BF16, "z")?;
-    let w_ptr = kiln_kt_bridge::cuda_input_device_ptr(weight, KtDType::F32, "weight")?;
+    let w_ptr = kiln_kt_bridge::device_input_ptr(weight, KtDType::F32, "weight")?;
     let _ = cuda_storage_and_byte_offset(weight, KtDType::F32, "weight")?;
 
     let out = alloc_cuda_tensor(q_st, KtDType::BF16, vec![batch, value_heads, dv])?;
-    let o_ptr = kiln_kt_bridge::cuda_output_device_ptr(&out);
+    let o_ptr = kiln_kt_bridge::device_output_ptr(&out);
     
 
-    let raw_stream = q_st.cuda_stream_raw();
+    #[cfg(feature = "cuda")]
+    let raw_stream = device_stream_raw(q_st, "q_st")?;
+    #[cfg(feature = "rocm")]
+    let raw_stream = output_stream_raw(&out)?;
     let status = unsafe {        kiln_gdn_decode_qk_norm_gates_recurrent_rmsnorm_qf32_vbf16_bf16(
             q_ptr as *const _,
             k_ptr as *const _,
@@ -1275,6 +1429,8 @@ pub fn gdn_decode_qk_norm_gates_recurrent_rmsnorm_qf32_vbf16_bf16_kt(
             "kt-gdn: decode_rmsnorm_qf32_vbf16 FFI returned {status}"
         )));
     }
+    #[cfg(feature = "rocm")]
+    device_synchronize_after_launch(&out)?;
     Ok(out)
 }
 
@@ -1287,6 +1443,7 @@ pub fn gdn_decode_qk_norm_gates_recurrent_rmsnorm_qf32_vbf16_bf16_kt(
 ///
 /// Returns BF16 `[B, H, C, dv]`.
 #[allow(clippy::too_many_arguments)]
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 pub fn gdn_full_chunk_forward_multiblock_kt(
     g: &KtTensor,
     v: &KtTensor,
@@ -1368,30 +1525,33 @@ pub fn gdn_full_chunk_forward_multiblock_kt(
         )));
     }
 
-    let g_ptr = kiln_kt_bridge::cuda_input_device_ptr(g, KtDType::BF16, "g")?;
+    let g_ptr = kiln_kt_bridge::device_input_ptr(g, KtDType::BF16, "g")?;
     let (g_st, _) = cuda_storage_and_byte_offset(g, KtDType::BF16, "g")?;
-    let v_ptr = kiln_kt_bridge::cuda_input_device_ptr(v, KtDType::BF16, "v")?;
+    let v_ptr = kiln_kt_bridge::device_input_ptr(v, KtDType::BF16, "v")?;
     let _ = cuda_storage_and_byte_offset(v, KtDType::BF16, "v")?;
-    let kkt_ptr = kiln_kt_bridge::cuda_input_device_ptr(kkt, KtDType::BF16, "kkt")?;
+    let kkt_ptr = kiln_kt_bridge::device_input_ptr(kkt, KtDType::BF16, "kkt")?;
     let _ = cuda_storage_and_byte_offset(kkt, KtDType::BF16, "kkt")?;
-    let qkt_ptr = kiln_kt_bridge::cuda_input_device_ptr(qkt, KtDType::BF16, "qkt")?;
+    let qkt_ptr = kiln_kt_bridge::device_input_ptr(qkt, KtDType::BF16, "qkt")?;
     let _ = cuda_storage_and_byte_offset(qkt, KtDType::BF16, "qkt")?;
-    let ks_ptr = kiln_kt_bridge::cuda_input_device_ptr(ks_entry, KtDType::BF16, "ks_entry")?;
+    let ks_ptr = kiln_kt_bridge::device_input_ptr(ks_entry, KtDType::BF16, "ks_entry")?;
     let _ = cuda_storage_and_byte_offset(ks_entry, KtDType::BF16, "ks_entry")?;
-    let qs_ptr = kiln_kt_bridge::cuda_input_device_ptr(q_s, KtDType::BF16, "q_s")?;
+    let qs_ptr = kiln_kt_bridge::device_input_ptr(q_s, KtDType::BF16, "q_s")?;
     let _ = cuda_storage_and_byte_offset(q_s, KtDType::BF16, "q_s")?;
-    let bt_ptr = kiln_kt_bridge::cuda_input_device_ptr(beta, KtDType::BF16, "beta")?;
+    let bt_ptr = kiln_kt_bridge::device_input_ptr(beta, KtDType::BF16, "beta")?;
     let _ = cuda_storage_and_byte_offset(beta, KtDType::BF16, "beta")?;
-    let kt_ptr = kiln_kt_bridge::cuda_input_device_ptr(k_t, KtDType::BF16, "k_t")?;
+    let kt_ptr = kiln_kt_bridge::device_input_ptr(k_t, KtDType::BF16, "k_t")?;
     let _ = cuda_storage_and_byte_offset(k_t, KtDType::BF16, "k_t")?;
-    let s_ptr = kiln_kt_bridge::cuda_input_device_ptr(state, KtDType::BF16, "state")?;
+    let s_ptr = kiln_kt_bridge::device_input_ptr(state, KtDType::BF16, "state")?;
     let _ = cuda_storage_and_byte_offset(state, KtDType::BF16, "state")?;
 
     let out = alloc_cuda_tensor(g_st, KtDType::BF16, vec![b, h, c, dv])?;
-    let o_ptr = kiln_kt_bridge::cuda_output_device_ptr(&out);
+    let o_ptr = kiln_kt_bridge::device_output_ptr(&out);
     
 
-    let raw_stream = g_st.cuda_stream_raw();
+    #[cfg(feature = "cuda")]
+    let raw_stream = device_stream_raw(g_st, "g_st")?;
+    #[cfg(feature = "rocm")]
+    let raw_stream = output_stream_raw(&out)?;
     let status = unsafe {        kiln_gdn_full_chunk_forward_multiblock(
             g_ptr as *const _,
             v_ptr as *const _,
@@ -1416,6 +1576,8 @@ pub fn gdn_full_chunk_forward_multiblock_kt(
             "kt-gdn: full_chunk_forward_multiblock FFI returned {status}"
         )));
     }
+    #[cfg(feature = "rocm")]
+    device_synchronize_after_launch(&out)?;
     Ok(out)
 }
 
@@ -1428,6 +1590,7 @@ pub fn gdn_full_chunk_forward_multiblock_kt(
 ///
 /// Returns BF16 `[rows, hidden]`. Computes
 /// `out = (x / rms(x)) * weight * silu(z)` in one pass.
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 pub fn gdn_gated_rms_norm_bf16_kt(
     x: &KtTensor,
     z: &KtTensor,
@@ -1454,18 +1617,21 @@ pub fn gdn_gated_rms_norm_bf16_kt(
         )));
     }
 
-    let x_ptr = kiln_kt_bridge::cuda_input_device_ptr(x, KtDType::BF16, "x")?;
+    let x_ptr = kiln_kt_bridge::device_input_ptr(x, KtDType::BF16, "x")?;
     let (x_st, _) = cuda_storage_and_byte_offset(x, KtDType::BF16, "x")?;
-    let z_ptr = kiln_kt_bridge::cuda_input_device_ptr(z, KtDType::BF16, "z")?;
+    let z_ptr = kiln_kt_bridge::device_input_ptr(z, KtDType::BF16, "z")?;
     let _ = cuda_storage_and_byte_offset(z, KtDType::BF16, "z")?;
-    let w_ptr = kiln_kt_bridge::cuda_input_device_ptr(weight, KtDType::BF16, "weight")?;
+    let w_ptr = kiln_kt_bridge::device_input_ptr(weight, KtDType::BF16, "weight")?;
     let _ = cuda_storage_and_byte_offset(weight, KtDType::BF16, "weight")?;
 
     let out = alloc_cuda_tensor(x_st, KtDType::BF16, vec![rows, hidden])?;
-    let o_ptr = kiln_kt_bridge::cuda_output_device_ptr(&out);
+    let o_ptr = kiln_kt_bridge::device_output_ptr(&out);
     
 
-    let raw_stream = x_st.cuda_stream_raw();
+    #[cfg(feature = "cuda")]
+    let raw_stream = device_stream_raw(x_st, "x_st")?;
+    #[cfg(feature = "rocm")]
+    let raw_stream = output_stream_raw(&out)?;
     let status = unsafe {        kiln_gdn_gated_rms_norm_bf16(
             x_ptr as *const _,
             z_ptr as *const _,
@@ -1482,6 +1648,8 @@ pub fn gdn_gated_rms_norm_bf16_kt(
             "kt-gdn: gated_rms_norm FFI returned {status}"
         )));
     }
+    #[cfg(feature = "rocm")]
+    device_synchronize_after_launch(&out)?;
     Ok(out)
 }
 
@@ -1562,6 +1730,7 @@ fn gates_validate_inputs(
 /// - `A_log`, `dt_bias`: BF16, `[nv]`.
 ///
 /// Returns `(beta_out, g_out)`, both BF16 with the same shape as `a`.
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 pub fn gdn_gates_bf16_kt(
     a: &KtTensor,
     b: &KtTensor,
@@ -1571,23 +1740,26 @@ pub fn gdn_gates_bf16_kt(
     let (rows, nv, out_shape) =
         gates_validate_inputs(a, b, a_log, dt_bias, KtDType::BF16, KtDType::BF16)?;
 
-    let a_ptr = kiln_kt_bridge::cuda_input_device_ptr(a, KtDType::BF16, "a")?;
+    let a_ptr = kiln_kt_bridge::device_input_ptr(a, KtDType::BF16, "a")?;
     let (a_st, _) = cuda_storage_and_byte_offset(a, KtDType::BF16, "a")?;
-    let b_ptr = kiln_kt_bridge::cuda_input_device_ptr(b, KtDType::BF16, "b")?;
+    let b_ptr = kiln_kt_bridge::device_input_ptr(b, KtDType::BF16, "b")?;
     let _ = cuda_storage_and_byte_offset(b, KtDType::BF16, "b")?;
-    let al_ptr = kiln_kt_bridge::cuda_input_device_ptr(a_log, KtDType::BF16, "a_log")?;
+    let al_ptr = kiln_kt_bridge::device_input_ptr(a_log, KtDType::BF16, "a_log")?;
     let _ = cuda_storage_and_byte_offset(a_log, KtDType::BF16, "a_log")?;
-    let dt_ptr = kiln_kt_bridge::cuda_input_device_ptr(dt_bias, KtDType::BF16, "dt_bias")?;
+    let dt_ptr = kiln_kt_bridge::device_input_ptr(dt_bias, KtDType::BF16, "dt_bias")?;
     let _ = cuda_storage_and_byte_offset(dt_bias, KtDType::BF16, "dt_bias")?;
 
     let beta = alloc_cuda_tensor(a_st, KtDType::BF16, out_shape.clone())?;
-    let beta_ptr = kiln_kt_bridge::cuda_output_device_ptr(&beta);
+    let beta_ptr = kiln_kt_bridge::device_output_ptr(&beta);
     let g = alloc_cuda_tensor(a_st, KtDType::BF16, out_shape)?;
-    let g_ptr = kiln_kt_bridge::cuda_output_device_ptr(&g);
+    let g_ptr = kiln_kt_bridge::device_output_ptr(&g);
     
     
 
-    let raw_stream = a_st.cuda_stream_raw();
+    #[cfg(feature = "cuda")]
+    let raw_stream = device_stream_raw(a_st, "a_st")?;
+    #[cfg(feature = "rocm")]
+    let raw_stream = output_stream_raw(&beta)?;
 
     let status = unsafe {        kiln_gdn_gates_bf16(
             a_ptr as *const _,
@@ -1608,6 +1780,8 @@ pub fn gdn_gates_bf16_kt(
             "kt-gdn: gates_bf16 FFI returned {status}"
         )));
     }
+    #[cfg(feature = "rocm")]
+    device_synchronize_after_launch(&beta)?;
     Ok((beta, g))
 }
 
@@ -1615,6 +1789,7 @@ pub fn gdn_gates_bf16_kt(
 ///
 /// Variant where `A_log` and `dt_bias` are both F32; useful when those
 /// parameters are kept in higher precision (e.g., trained as F32 master).
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 pub fn gdn_gates_bf16_f32_params_kt(
     a: &KtTensor,
     b: &KtTensor,
@@ -1624,23 +1799,26 @@ pub fn gdn_gates_bf16_f32_params_kt(
     let (rows, nv, out_shape) =
         gates_validate_inputs(a, b, a_log, dt_bias, KtDType::F32, KtDType::F32)?;
 
-    let a_ptr = kiln_kt_bridge::cuda_input_device_ptr(a, KtDType::BF16, "a")?;
+    let a_ptr = kiln_kt_bridge::device_input_ptr(a, KtDType::BF16, "a")?;
     let (a_st, _) = cuda_storage_and_byte_offset(a, KtDType::BF16, "a")?;
-    let b_ptr = kiln_kt_bridge::cuda_input_device_ptr(b, KtDType::BF16, "b")?;
+    let b_ptr = kiln_kt_bridge::device_input_ptr(b, KtDType::BF16, "b")?;
     let _ = cuda_storage_and_byte_offset(b, KtDType::BF16, "b")?;
-    let al_ptr = kiln_kt_bridge::cuda_input_device_ptr(a_log, KtDType::F32, "a_log")?;
+    let al_ptr = kiln_kt_bridge::device_input_ptr(a_log, KtDType::F32, "a_log")?;
     let _ = cuda_storage_and_byte_offset(a_log, KtDType::F32, "a_log")?;
-    let dt_ptr = kiln_kt_bridge::cuda_input_device_ptr(dt_bias, KtDType::F32, "dt_bias")?;
+    let dt_ptr = kiln_kt_bridge::device_input_ptr(dt_bias, KtDType::F32, "dt_bias")?;
     let _ = cuda_storage_and_byte_offset(dt_bias, KtDType::F32, "dt_bias")?;
 
     let beta = alloc_cuda_tensor(a_st, KtDType::BF16, out_shape.clone())?;
-    let beta_ptr = kiln_kt_bridge::cuda_output_device_ptr(&beta);
+    let beta_ptr = kiln_kt_bridge::device_output_ptr(&beta);
     let g = alloc_cuda_tensor(a_st, KtDType::BF16, out_shape)?;
-    let g_ptr = kiln_kt_bridge::cuda_output_device_ptr(&g);
+    let g_ptr = kiln_kt_bridge::device_output_ptr(&g);
     
     
 
-    let raw_stream = a_st.cuda_stream_raw();
+    #[cfg(feature = "cuda")]
+    let raw_stream = device_stream_raw(a_st, "a_st")?;
+    #[cfg(feature = "rocm")]
+    let raw_stream = output_stream_raw(&beta)?;
 
     let status = unsafe {        kiln_gdn_gates_bf16_f32_params(
             a_ptr as *const _,
@@ -1661,12 +1839,15 @@ pub fn gdn_gates_bf16_f32_params_kt(
             "kt-gdn: gates_bf16_f32_params FFI returned {status}"
         )));
     }
+    #[cfg(feature = "rocm")]
+    device_synchronize_after_launch(&beta)?;
     Ok((beta, g))
 }
 
 /// `kiln_gdn_gates_bf16_f32_bf16_params` over kt operands.
 ///
 /// Mixed-precision variant: `A_log` is F32, `dt_bias` stays BF16.
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 pub fn gdn_gates_bf16_f32_bf16_params_kt(
     a: &KtTensor,
     b: &KtTensor,
@@ -1676,23 +1857,26 @@ pub fn gdn_gates_bf16_f32_bf16_params_kt(
     let (rows, nv, out_shape) =
         gates_validate_inputs(a, b, a_log, dt_bias, KtDType::F32, KtDType::BF16)?;
 
-    let a_ptr = kiln_kt_bridge::cuda_input_device_ptr(a, KtDType::BF16, "a")?;
+    let a_ptr = kiln_kt_bridge::device_input_ptr(a, KtDType::BF16, "a")?;
     let (a_st, _) = cuda_storage_and_byte_offset(a, KtDType::BF16, "a")?;
-    let b_ptr = kiln_kt_bridge::cuda_input_device_ptr(b, KtDType::BF16, "b")?;
+    let b_ptr = kiln_kt_bridge::device_input_ptr(b, KtDType::BF16, "b")?;
     let _ = cuda_storage_and_byte_offset(b, KtDType::BF16, "b")?;
-    let al_ptr = kiln_kt_bridge::cuda_input_device_ptr(a_log, KtDType::F32, "a_log")?;
+    let al_ptr = kiln_kt_bridge::device_input_ptr(a_log, KtDType::F32, "a_log")?;
     let _ = cuda_storage_and_byte_offset(a_log, KtDType::F32, "a_log")?;
-    let dt_ptr = kiln_kt_bridge::cuda_input_device_ptr(dt_bias, KtDType::BF16, "dt_bias")?;
+    let dt_ptr = kiln_kt_bridge::device_input_ptr(dt_bias, KtDType::BF16, "dt_bias")?;
     let _ = cuda_storage_and_byte_offset(dt_bias, KtDType::BF16, "dt_bias")?;
 
     let beta = alloc_cuda_tensor(a_st, KtDType::BF16, out_shape.clone())?;
-    let beta_ptr = kiln_kt_bridge::cuda_output_device_ptr(&beta);
+    let beta_ptr = kiln_kt_bridge::device_output_ptr(&beta);
     let g = alloc_cuda_tensor(a_st, KtDType::BF16, out_shape)?;
-    let g_ptr = kiln_kt_bridge::cuda_output_device_ptr(&g);
+    let g_ptr = kiln_kt_bridge::device_output_ptr(&g);
     
     
 
-    let raw_stream = a_st.cuda_stream_raw();
+    #[cfg(feature = "cuda")]
+    let raw_stream = device_stream_raw(a_st, "a_st")?;
+    #[cfg(feature = "rocm")]
+    let raw_stream = output_stream_raw(&beta)?;
 
     let status = unsafe {        kiln_gdn_gates_bf16_f32_bf16_params(
             a_ptr as *const _,
@@ -1713,6 +1897,8 @@ pub fn gdn_gates_bf16_f32_bf16_params_kt(
             "kt-gdn: gates_bf16_f32_bf16_params FFI returned {status}"
         )));
     }
+    #[cfg(feature = "rocm")]
+    device_synchronize_after_launch(&beta)?;
     Ok((beta, g))
 }
 
@@ -1734,6 +1920,7 @@ pub fn gdn_gates_bf16_f32_bf16_params_kt(
 /// - `decay_last_col`: `[B, H, C]`
 /// - `p_last`: `[B, H]`
 #[allow(clippy::too_many_arguments)]
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 pub fn gdn_chunk_prep_kt(
     g: &KtTensor,
     v: &KtTensor,
@@ -1783,40 +1970,36 @@ pub fn gdn_chunk_prep_kt(
         )));
     }
 
-    let g_ptr = kiln_kt_bridge::cuda_input_device_ptr(g, KtDType::BF16, "g")?;
+    let g_ptr = kiln_kt_bridge::device_input_ptr(g, KtDType::BF16, "g")?;
     let (g_st, _) = cuda_storage_and_byte_offset(g, KtDType::BF16, "g")?;
-    let v_ptr = kiln_kt_bridge::cuda_input_device_ptr(v, KtDType::BF16, "v")?;
+    let v_ptr = kiln_kt_bridge::device_input_ptr(v, KtDType::BF16, "v")?;
     let _ = cuda_storage_and_byte_offset(v, KtDType::BF16, "v")?;
-    let kkt_ptr = kiln_kt_bridge::cuda_input_device_ptr(kkt, KtDType::BF16, "kkt")?;
+    let kkt_ptr = kiln_kt_bridge::device_input_ptr(kkt, KtDType::BF16, "kkt")?;
     let _ = cuda_storage_and_byte_offset(kkt, KtDType::BF16, "kkt")?;
-    let qkt_ptr = kiln_kt_bridge::cuda_input_device_ptr(qkt, KtDType::BF16, "qkt")?;
+    let qkt_ptr = kiln_kt_bridge::device_input_ptr(qkt, KtDType::BF16, "qkt")?;
     let _ = cuda_storage_and_byte_offset(qkt, KtDType::BF16, "qkt")?;
-    let ks_ptr = kiln_kt_bridge::cuda_input_device_ptr(ks_entry, KtDType::BF16, "ks_entry")?;
+    let ks_ptr = kiln_kt_bridge::device_input_ptr(ks_entry, KtDType::BF16, "ks_entry")?;
     let _ = cuda_storage_and_byte_offset(ks_entry, KtDType::BF16, "ks_entry")?;
-    let qs_ptr = kiln_kt_bridge::cuda_input_device_ptr(q_s, KtDType::BF16, "q_s")?;
+    let qs_ptr = kiln_kt_bridge::device_input_ptr(q_s, KtDType::BF16, "q_s")?;
     let _ = cuda_storage_and_byte_offset(q_s, KtDType::BF16, "q_s")?;
 
     let a_strict = alloc_cuda_tensor(g_st, KtDType::BF16, vec![b, h, c, c])?;
-    let a_ptr = kiln_kt_bridge::cuda_output_device_ptr(&a_strict);
+    let a_ptr = kiln_kt_bridge::device_output_ptr(&a_strict);
     let b_mask = alloc_cuda_tensor(g_st, KtDType::BF16, vec![b, h, c, c])?;
-    let bm_ptr = kiln_kt_bridge::cuda_output_device_ptr(&b_mask);
+    let bm_ptr = kiln_kt_bridge::device_output_ptr(&b_mask);
     let v_prime = alloc_cuda_tensor(g_st, KtDType::BF16, vec![b, h, c, dv])?;
-    let vp_ptr = kiln_kt_bridge::cuda_output_device_ptr(&v_prime);
+    let vp_ptr = kiln_kt_bridge::device_output_ptr(&v_prime);
     let q_s_scaled = alloc_cuda_tensor(g_st, KtDType::BF16, vec![b, h, c, dv])?;
-    let qss_ptr = kiln_kt_bridge::cuda_output_device_ptr(&q_s_scaled);
+    let qss_ptr = kiln_kt_bridge::device_output_ptr(&q_s_scaled);
     let decay_last_col = alloc_cuda_tensor(g_st, KtDType::BF16, vec![b, h, c])?;
-    let dl_ptr = kiln_kt_bridge::cuda_output_device_ptr(&decay_last_col);
+    let dl_ptr = kiln_kt_bridge::device_output_ptr(&decay_last_col);
     let p_last = alloc_cuda_tensor(g_st, KtDType::BF16, vec![b, h])?;
-    let pl_ptr = kiln_kt_bridge::cuda_output_device_ptr(&p_last);
+    let pl_ptr = kiln_kt_bridge::device_output_ptr(&p_last);
 
-    
-    
-    
-    
-    
-    
-
-    let raw_stream = g_st.cuda_stream_raw();
+    #[cfg(feature = "cuda")]
+    let raw_stream = device_stream_raw(g_st, "g_st")?;
+    #[cfg(feature = "rocm")]
+    let raw_stream = output_stream_raw(&a_strict)?;
 
 
 
@@ -1846,6 +2029,8 @@ pub fn gdn_chunk_prep_kt(
             "kt-gdn: chunk_prep FFI returned {status}"
         )));
     }
+    #[cfg(feature = "rocm")]
+    device_synchronize_after_launch(&a_strict)?;
     Ok((a_strict, b_mask, v_prime, q_s_scaled, decay_last_col, p_last))
 }
 
@@ -1862,6 +2047,7 @@ pub fn gdn_chunk_prep_kt(
 ///
 /// Returns `(out_chunk, w_weighted)`, both BF16 `[B, H, C, dv]`.
 #[allow(clippy::too_many_arguments)]
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 pub fn gdn_chunk_scan_kt(
     a_strict: &KtTensor,
     b_mask: &KtTensor,
@@ -1909,27 +2095,30 @@ pub fn gdn_chunk_scan_kt(
         )));
     }
 
-    let a_ptr = kiln_kt_bridge::cuda_input_device_ptr(a_strict, KtDType::BF16, "a_strict")?;
+    let a_ptr = kiln_kt_bridge::device_input_ptr(a_strict, KtDType::BF16, "a_strict")?;
     let (a_st, _) = cuda_storage_and_byte_offset(a_strict, KtDType::BF16, "a_strict")?;
-    let bm_ptr = kiln_kt_bridge::cuda_input_device_ptr(b_mask, KtDType::BF16, "b_mask")?;
+    let bm_ptr = kiln_kt_bridge::device_input_ptr(b_mask, KtDType::BF16, "b_mask")?;
     let _ = cuda_storage_and_byte_offset(b_mask, KtDType::BF16, "b_mask")?;
-    let vp_ptr = kiln_kt_bridge::cuda_input_device_ptr(v_prime, KtDType::BF16, "v_prime")?;
+    let vp_ptr = kiln_kt_bridge::device_input_ptr(v_prime, KtDType::BF16, "v_prime")?;
     let _ = cuda_storage_and_byte_offset(v_prime, KtDType::BF16, "v_prime")?;
-    let qss_ptr = kiln_kt_bridge::cuda_input_device_ptr(q_s_scaled, KtDType::BF16, "q_s_scaled")?;
+    let qss_ptr = kiln_kt_bridge::device_input_ptr(q_s_scaled, KtDType::BF16, "q_s_scaled")?;
     let _ = cuda_storage_and_byte_offset(q_s_scaled, KtDType::BF16, "q_s_scaled")?;
-    let bt_ptr = kiln_kt_bridge::cuda_input_device_ptr(beta, KtDType::BF16, "beta")?;
+    let bt_ptr = kiln_kt_bridge::device_input_ptr(beta, KtDType::BF16, "beta")?;
     let _ = cuda_storage_and_byte_offset(beta, KtDType::BF16, "beta")?;
-    let dl_ptr = kiln_kt_bridge::cuda_input_device_ptr(decay_last_col, KtDType::BF16, "decay_last_col")?;
+    let dl_ptr = kiln_kt_bridge::device_input_ptr(decay_last_col, KtDType::BF16, "decay_last_col")?;
     let _ = cuda_storage_and_byte_offset(decay_last_col, KtDType::BF16, "decay_last_col")?;
 
     let out_chunk = alloc_cuda_tensor(a_st, KtDType::BF16, vec![b, h, c, dv])?;
-    let out_ptr = kiln_kt_bridge::cuda_output_device_ptr(&out_chunk);
+    let out_ptr = kiln_kt_bridge::device_output_ptr(&out_chunk);
     let w_weighted = alloc_cuda_tensor(a_st, KtDType::BF16, vec![b, h, c, dv])?;
-    let ww_ptr = kiln_kt_bridge::cuda_output_device_ptr(&w_weighted);
+    let ww_ptr = kiln_kt_bridge::device_output_ptr(&w_weighted);
     
     
 
-    let raw_stream = a_st.cuda_stream_raw();
+    #[cfg(feature = "cuda")]
+    let raw_stream = device_stream_raw(a_st, "a_st")?;
+    #[cfg(feature = "rocm")]
+    let raw_stream = output_stream_raw(&out_chunk)?;
 
     let status = unsafe {        kiln_gdn_chunk_scan(
             a_ptr as *const _,
@@ -1951,6 +2140,8 @@ pub fn gdn_chunk_scan_kt(
             "kt-gdn: chunk_scan FFI returned {status}"
         )));
     }
+    #[cfg(feature = "rocm")]
+    device_synchronize_after_launch(&out_chunk)?;
     Ok((out_chunk, w_weighted))
 }
 
@@ -1974,8 +2165,12 @@ fn shape_dim_at(t: &KtTensor, axis: usize) -> Option<usize> {
     }
 }
 
+/// True when `t` lives on a GPU backend the GDN FFI can launch on. Phase R.7
+/// widened this from CUDA-only to also accept ROCm (the backend-neutral
+/// `kiln_kt_bridge::device_*` seam dispatches `Device::Rocm` tensors to the same
+/// hipcc-compiled kernels). Named `is_cuda` for call-site stability.
 fn is_cuda(t: &KtTensor) -> bool {
-    matches!(t.device(), KtDevice::Cuda(_))
+    matches!(t.device(), KtDevice::Cuda(_) | KtDevice::Rocm(_))
 }
 
 /// kt-typed mirror of [`crate::gdn_chunk_prep_supports`].

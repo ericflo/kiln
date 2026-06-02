@@ -7,6 +7,12 @@
 //! moved to `crates/kiln-kt-bridge/tests/` where the adapter actually
 //! lives. This file tests the kt API in isolation, mirroring the
 //! `kiln-conv1d-kernel` / `kiln-marlin-gemm` Tier-1 precedent.
+//!
+//! CUDA-only: `Tensor::cuda_from_slice` / `primary_cuda_context` are the
+//! cuda-storage substrate helpers and don't exist on the ROCm build. The
+//! backend-neutral ROCm parity coverage lives in `rocm_gdn_parity.rs`
+//! (gated on `feature = "rocm"`).
+#![cfg(feature = "cuda")]
 
 use half::bf16;
 

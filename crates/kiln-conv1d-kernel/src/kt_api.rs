@@ -8,8 +8,9 @@
 //! remain in place; Phase 7 deletes them when call sites migrate.
 
 use kiln_kt_bridge::BridgeError;
-use kiln_tensor::{CudaStorage, DType as KtDType, Device as KtDevice, Tensor as KtTensor};
+use kiln_tensor::{DType as KtDType, Device as KtDevice, Tensor as KtTensor};
 
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 use crate::{kiln_causal_conv1d_prefill_bf16_f32, kiln_causal_conv1d_update_bf16_f32};
 
 #[derive(Debug)]
@@ -33,22 +34,6 @@ impl From<BridgeError> for Conv1dError {
     }
 }
 
-fn cuda_storage_and_byte_offset<'a>(
-    t: &'a KtTensor,
-    expected: KtDType,
-    name: &'static str,
-) -> Result<(&'a CudaStorage, usize), Conv1dError> {
-    Ok(kiln_kt_bridge::cuda_storage_and_byte_offset(t, expected, name)?)
-}
-
-fn alloc_cuda_tensor(
-    source: &CudaStorage,
-    dtype: KtDType,
-    shape: Vec<usize>,
-) -> Result<KtTensor, Conv1dError> {
-    Ok(kiln_kt_bridge::alloc_cuda_tensor(source, dtype, shape)?)
-}
-
 /// `causal_conv1d_update` over `kiln_tensor::Tensor` operands.
 ///
 /// `x`: BF16 `[B, C, 1]`. `weight`: BF16 `[C, K]` (or `[C, 1, K]`).
@@ -56,9 +41,10 @@ fn alloc_cuda_tensor(
 /// Returns F32 `[B, C, 1]` with SiLU fused inline.
 ///
 /// `conv_state` is borrowed `&KtTensor`; the FFI mutates its
-/// underlying CUDA buffer through the raw device pointer. Anti-
+/// underlying GPU buffer through the raw device pointer. Anti-
 /// pattern 16's version-counter bump happens at the call site when
 /// kiln-autograd integration lands.
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 pub fn causal_conv1d_update_kt(
     x: &KtTensor,
     weight: &KtTensor,
@@ -119,16 +105,16 @@ pub fn causal_conv1d_update_kt(
         )));
     }
 
-    // Owner-agnostic input pointers (Phase 7 v2). conv_state is
-    // mutated in place — caller convention: Owned.
-    let x_ptr = kiln_kt_bridge::cuda_input_device_ptr(x, KtDType::BF16, "x")?;
-    let w_ptr = kiln_kt_bridge::cuda_input_device_ptr(&weight_flat, KtDType::BF16, "weight")?;
-    let s_ptr = kiln_kt_bridge::cuda_input_device_ptr(conv_state, KtDType::F32, "conv_state")?;
-    let (x_st, _) = cuda_storage_and_byte_offset(x, KtDType::BF16, "x")?;
-    let out = alloc_cuda_tensor(x_st, KtDType::F32, vec![batch, channels, 1])?;
-    let o_ptr = kiln_kt_bridge::cuda_output_device_ptr(&out);
+    // Backend-neutral device pointers (Phase R.7). The seam dispatches on each
+    // tensor's backend, so this single body works on Device::Cuda and
+    // Device::Rocm. conv_state is mutated in place — caller convention: Owned.
+    let x_ptr = kiln_kt_bridge::device_input_ptr(x, KtDType::BF16, "x")?;
+    let w_ptr = kiln_kt_bridge::device_input_ptr(&weight_flat, KtDType::BF16, "weight")?;
+    let s_ptr = kiln_kt_bridge::device_input_ptr(conv_state, KtDType::F32, "conv_state")?;
+    let out = kiln_kt_bridge::alloc_device_tensor_like(x, KtDType::F32, vec![batch, channels, 1])?;
+    let o_ptr = kiln_kt_bridge::device_output_ptr(&out);
 
-    let raw_stream = x_st.cuda_stream_raw();
+    let raw_stream = kiln_kt_bridge::device_stream_raw_of(x, "x")?;
 
     let status = unsafe {
         kiln_causal_conv1d_update_bf16_f32(
@@ -156,6 +142,7 @@ pub fn causal_conv1d_update_kt(
 /// `x`: BF16 `[B, C, T]`. `weight`: BF16 `[C, K]`. `conv_state`: F32
 /// `[B, C, K-1]` — populated with the last `K-1` samples of each
 /// sequence by the kernel. Returns F32 `[B, C, T]` with SiLU fused.
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 pub fn causal_conv1d_prefill_kt(
     x: &KtTensor,
     weight: &KtTensor,
@@ -220,14 +207,14 @@ pub fn causal_conv1d_prefill_kt(
         )));
     }
 
-    let x_ptr = kiln_kt_bridge::cuda_input_device_ptr(x, KtDType::BF16, "x")?;
-    let w_ptr = kiln_kt_bridge::cuda_input_device_ptr(&weight_flat, KtDType::BF16, "weight")?;
-    let s_ptr = kiln_kt_bridge::cuda_input_device_ptr(conv_state, KtDType::F32, "conv_state")?;
-    let (x_st, _) = cuda_storage_and_byte_offset(x, KtDType::BF16, "x")?;
-    let out = alloc_cuda_tensor(x_st, KtDType::F32, vec![batch, channels, seq_len])?;
-    let o_ptr = kiln_kt_bridge::cuda_output_device_ptr(&out);
+    let x_ptr = kiln_kt_bridge::device_input_ptr(x, KtDType::BF16, "x")?;
+    let w_ptr = kiln_kt_bridge::device_input_ptr(&weight_flat, KtDType::BF16, "weight")?;
+    let s_ptr = kiln_kt_bridge::device_input_ptr(conv_state, KtDType::F32, "conv_state")?;
+    let out =
+        kiln_kt_bridge::alloc_device_tensor_like(x, KtDType::F32, vec![batch, channels, seq_len])?;
+    let o_ptr = kiln_kt_bridge::device_output_ptr(&out);
 
-    let raw_stream = x_st.cuda_stream_raw();
+    let raw_stream = kiln_kt_bridge::device_stream_raw_of(x, "x")?;
 
     let status = unsafe {
         kiln_causal_conv1d_prefill_bf16_f32(
@@ -281,7 +268,9 @@ pub fn supports_update_kt(
     if kernel_size != 4 {
         return false;
     }
-    if !matches!(x.device(), KtDevice::Cuda(_)) {
+    // The vendored kernel is GPU-only; accept either GPU backend (the FFI
+    // launcher is the same hipcc/nvcc-compiled symbol). (R.7)
+    if !matches!(x.device(), KtDevice::Cuda(_) | KtDevice::Rocm(_)) {
         return false;
     }
     if x.dtype() != KtDType::BF16 || weight.dtype() != KtDType::BF16 {
@@ -316,7 +305,7 @@ pub fn supports_prefill_kt(
     if kernel_size != 4 {
         return false;
     }
-    if !matches!(x.device(), KtDevice::Cuda(_)) {
+    if !matches!(x.device(), KtDevice::Cuda(_) | KtDevice::Rocm(_)) {
         return false;
     }
     if x.dtype() != KtDType::BF16 || weight.dtype() != KtDType::BF16 {

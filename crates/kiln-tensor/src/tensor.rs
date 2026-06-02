@@ -970,6 +970,10 @@ impl Tensor {
             (Device::Cpu, Device::Vulkan(i)) => crate::host_to_vulkan_copy(self, i),
             #[cfg(feature = "vulkan")]
             (Device::Vulkan(_), Device::Cpu) => crate::vulkan_to_host_copy(self),
+            #[cfg(feature = "rocm")]
+            (Device::Cpu, Device::Rocm(i)) => crate::host_to_rocm_copy(self, i),
+            #[cfg(feature = "rocm")]
+            (Device::Rocm(_), Device::Cpu) => crate::rocm_to_host_copy(self),
             _ => Err(Error::Msg(format!(
                 "Tensor::to_device: transition {src}→{target} is not yet implemented                  (issue #1082)"
             ))),
@@ -997,8 +1001,14 @@ impl Tensor {
             (Device::Vulkan(_), Device::Cpu) => return crate::vulkan_to_host_copy(self),
             _ => {}
         }
+        #[cfg(feature = "rocm")]
+        match (src, target) {
+            (Device::Cpu, Device::Rocm(i)) => return crate::host_to_rocm_copy(self, i),
+            (Device::Rocm(_), Device::Cpu) => return crate::rocm_to_host_copy(self),
+            _ => {}
+        }
         Err(Error::Msg(format!(
-            "Tensor::to_device: transition {src}→{target} requires a GPU feature (cuda/metal/vulkan); none is enabled in this build"
+            "Tensor::to_device: transition {src}→{target} requires a GPU feature (cuda/metal/vulkan/rocm); none is enabled in this build"
         )))
     }
 

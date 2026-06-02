@@ -35,6 +35,16 @@ kiln-autograd = { workspace = true }
 # `cargo build --features cuda` activates it.
 cuda = ["kiln-tensor/cuda"]
 
+# Phase R.7 (ROCm port): mirrors `cuda`, swapping `kiln-tensor/cuda` ->
+# `kiln-tensor/rocm`. This crate is a PURE-KT COMPOSITE: the FLCE forward +
+# backward are expressed entirely in `kiln_tensor::Tensor` ops (matmul, exp,
+# index_select, scatter_add, ...), which carry their own backend dispatch, so
+# there is no FFI / build.rs / .cu of its own — the feature only forwards to
+# `kiln-tensor/rocm`, exactly like `cuda` forwards to `kiln-tensor/cuda`.
+# kiln-train re-exports this feature via its own `rocm` feature so
+# `cargo build --features rocm` activates it.
+rocm = ["kiln-tensor/rocm"]
+
 # Note: there is no `[dev-dependencies]` section. The previously-listed
 # `candle-nn = { workspace = true }` dev-dep was unused — no src/, tests/,
 # or benches/ file referenced `candle_nn` — and was dropped as part of

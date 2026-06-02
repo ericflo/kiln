@@ -194,6 +194,18 @@ pub fn dispatch1<Op: DeviceOp1 + ?Sized>(op: &Op, input: &Tensor) -> Result<Tens
                 return t.to_device(dev);
             }
         }
+        // ROCm correctness-first host fallback (R.7): generic DeviceOps have no
+        // rocm_fwd yet, so an op with no native ROCm kernel stages on host (HIP
+        // D2H/H2D), runs the CPU reference, and moves back — exactly like Metal
+        // / Vulkan. The native rocm_* kernels (rocm_softmax, etc.) are reached
+        // directly by the model, not through this generic dispatch.
+        #[cfg(feature = "rocm")]
+        Device::Rocm(_) => {
+            let cpu_in = input.to_device(Device::Cpu)?;
+            if let Some(t) = op.cpu_fwd(&cpu_in)? {
+                return t.to_device(dev);
+            }
+        }
         // CUDA: preserve the original behavior — call cpu_fwd directly
         // (errors on GPU storage). A missing `*_fwd` surfaces loudly rather
         // than being masked by a silent host round-trip, so the CUDA track
@@ -257,6 +269,14 @@ pub fn dispatch2<Op: DeviceOp2 + ?Sized>(op: &Op, a: &Tensor, b: &Tensor) -> Res
                 return t.to_device(dev);
             }
         }
+        #[cfg(feature = "rocm")]
+        Device::Rocm(_) => {
+            let cpu_a = a.to_device(Device::Cpu)?;
+            let cpu_b = b.to_device(Device::Cpu)?;
+            if let Some(t) = op.cpu_fwd(&cpu_a, &cpu_b)? {
+                return t.to_device(dev);
+            }
+        }
         _ if !dev.is_cpu() => {
             if let Some(t) = op.cpu_fwd(a, b)? {
                 return Ok(t);
@@ -313,6 +333,15 @@ pub fn dispatch3<Op: DeviceOp3 + ?Sized>(
         }
         #[cfg(feature = "vulkan")]
         Device::Vulkan(_) => {
+            let cpu_a = a.to_device(Device::Cpu)?;
+            let cpu_b = b.to_device(Device::Cpu)?;
+            let cpu_c = c.to_device(Device::Cpu)?;
+            if let Some(t) = op.cpu_fwd(&cpu_a, &cpu_b, &cpu_c)? {
+                return t.to_device(dev);
+            }
+        }
+        #[cfg(feature = "rocm")]
+        Device::Rocm(_) => {
             let cpu_a = a.to_device(Device::Cpu)?;
             let cpu_b = b.to_device(Device::Cpu)?;
             let cpu_c = c.to_device(Device::Cpu)?;

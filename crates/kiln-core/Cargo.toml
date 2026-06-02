@@ -40,3 +40,7 @@ cuda = ["dep:kiln-tensor", "kiln-tensor/cuda"]
 # type is in scope. The variant carries `Arc<kiln_tensor::MetalStorage>`;
 # the StorageBackend trait provides byte_len/device/dtype.
 metal = ["dep:kiln-tensor", "kiln-tensor/metal"]
+# Phase R.4 — DeviceBuffer's `Rocm` variant. Uses the CUDA SHAPE (pulls
+# kiln-tensor + kiln-tensor/rocm so RocmStorage is in scope), NOT the vulkan
+# shape. The variant carries `Arc<kiln_tensor::RocmStorage>`.
+rocm = ["dep:kiln-tensor", "kiln-tensor/rocm"]

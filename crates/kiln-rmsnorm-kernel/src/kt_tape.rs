@@ -48,15 +48,27 @@ use kiln_tensor::{
 
 use crate::kt_api::{fused_rmsnorm_backward_kt, fused_rmsnorm_kt, RmsNormError};
 
+/// True when `t` lives on a GPU backend the fused RMSNorm kernel runs on.
+/// Phase R.7: accepts `Device::Rocm` (under the `rocm` feature) as well as
+/// `Device::Cuda`; CUDA-only behavior is unchanged when `rocm` is off.
+fn is_gpu(t: &KtTensor) -> bool {
+    match t.device() {
+        KtDevice::Cuda(_) => true,
+        #[cfg(feature = "rocm")]
+        KtDevice::Rocm(_) => true,
+        _ => false,
+    }
+}
+
 /// Returns `true` when `(x, weight)` is inside the kt-tape
 /// forward+backward envelope. Matches [`crate::supports_rmsnorm_kt`]
-/// exactly (CUDA + BF16 + contiguous + rank >= 1 + weight == [hidden] +
+/// exactly (GPU + BF16 + contiguous + rank >= 1 + weight == [hidden] +
 /// hidden <= 8192).
 fn envelope_ok(x: &KtTensor, weight: &KtTensor) -> bool {
-    if !matches!(x.device(), KtDevice::Cuda(_)) {
+    if !is_gpu(x) {
         return false;
     }
-    if !matches!(weight.device(), KtDevice::Cuda(_)) {
+    if !is_gpu(weight) {
         return false;
     }
     if x.dtype() != KtDType::BF16 || weight.dtype() != KtDType::BF16 {
@@ -127,8 +139,8 @@ impl BackwardOp for CudaFusedRmsNormBackward {
                 self.x.shape()
             );
         }
-        if !matches!(grad_output.device(), KtDevice::Cuda(_)) {
-            bail!("rmsnorm kt-tape bwd: grad_output must be CUDA");
+        if !is_gpu(grad_output) {
+            bail!("rmsnorm kt-tape bwd: grad_output must be on a GPU backend");
         }
         if grad_output.dtype() != KtDType::BF16 {
             bail!(
@@ -181,22 +193,25 @@ fn cast_partial_hidden_f32_to_bf16(
     partial: &KtTensor,
     hidden: usize,
 ) -> KtResult<KtTensor> {
-    let partial_ptr = kiln_kt_bridge::cuda_output_device_ptr(partial);
-    let partial_st = kiln_kt_bridge::cuda_storage_of_output(partial);
-    let raw_stream = partial_st.cuda_stream_raw();
-    let dst = kiln_kt_bridge::alloc_cuda_tensor(partial_st, KtDType::BF16, vec![hidden])
+    // Backend-neutral seam (Phase R.7): the `device_*` dispatchers route
+    // `Device::Cuda` tensors to the same CUDA helpers (behavior-identical) and
+    // `Device::Rocm` tensors to the ROCm ones.
+    let partial_ptr = kiln_kt_bridge::device_output_ptr(partial);
+    let raw_stream = kiln_kt_bridge::device_stream_raw_of(partial, "partial")
+        .map_err(|e| kiln_tensor::Error::Msg(format!("rmsnorm kt-tape bwd: stream: {e}")))?;
+    let dst = kiln_kt_bridge::alloc_device_tensor_like(partial, KtDType::BF16, vec![hidden])
         .map_err(|e| {
             kiln_tensor::Error::Msg(format!(
                 "rmsnorm kt-tape bwd: alloc grad_w BF16: {e}"
             ))
         })?;
-    let dst_ptr = kiln_kt_bridge::cuda_output_device_ptr(&dst);
+    let dst_ptr = kiln_kt_bridge::device_output_ptr(&dst);
 
     // SAFETY: `partial_ptr` points to a F32 buffer of at least `hidden`
     // populated elements (the kernel writes the reduced result into the
     // first `hidden` F32 slots — see `csrc/fused_rmsnorm_bwd.cu`).
     // `dst_ptr` points to a BF16 buffer of exactly `hidden` elements we
-    // just allocated. `raw_stream` is the CUDA stream associated with
+    // just allocated. `raw_stream` is the GPU stream associated with
     // `partial`'s storage.
     let status = unsafe {
         crate::kiln_f32_to_bf16(
@@ -285,12 +300,20 @@ pub fn fused_rmsnorm_via_kt_tape(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The CUDA-specific test helpers (`cuda_from_slice`, `primary_cuda_context`)
+    // only exist under the `cuda` feature; gate them so a `rocm`-only build of
+    // the crate's unit tests still compiles. The CPU-only envelope tests below
+    // need none of this.
+    #[cfg(feature = "cuda")]
     use half::bf16;
 
+    #[cfg(feature = "cuda")]
     fn cuda_available() -> bool {
         kiln_tensor::primary_cuda_context(0).is_ok()
     }
 
+    #[cfg(feature = "cuda")]
     fn pattern_bf16(n: usize, seed: u64) -> Vec<bf16> {
         let mut out = Vec::with_capacity(n);
         let mut s = seed.wrapping_mul(0x9E3779B97F4A7C15);
@@ -327,6 +350,7 @@ mod tests {
 
     /// CUDA forward records a tape node tagged with the saved (x, w) ids.
     /// Skips cleanly without CUDA.
+    #[cfg(feature = "cuda")]
     #[test]
     fn forward_records_tape_node_when_cuda_available() {
         if !cuda_available() {
@@ -370,6 +394,7 @@ mod tests {
 
     /// Direct backward apply — exercises the apply() path including the
     /// F32 -> BF16 cast of the partial buffer. Skips cleanly without CUDA.
+    #[cfg(feature = "cuda")]
     #[test]
     fn backward_apply_returns_grads_of_expected_shape() {
         if !cuda_available() {

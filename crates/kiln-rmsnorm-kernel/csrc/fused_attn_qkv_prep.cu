@@ -3,40 +3,15 @@
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 
+// Wave-size shim (Phase R.7). The per-head RMS sum-of-squares reduction goes
+// through the wave-agnostic shared-memory kiln_block_reduce_sum so wave64 (AMD
+// CDNA / RDNA-wave64) is correct (the old `tid/32` + cross-32-lane shuffle is
+// unsafe there). blockDim.x = 256 (power of two >= 64).
+#include "kt_gpu_compat.cuh"
+
 namespace {
 
 constexpr int kThreadsPerBlock = 256;
-constexpr int kMaxWarps = kThreadsPerBlock / 32;
-
-__device__ __forceinline__ float warp_reduce_sum(float v) {
-    #pragma unroll
-    for (int offset = 16; offset > 0; offset /= 2) {
-        v += __shfl_xor_sync(0xffffffffu, v, offset);
-    }
-    return v;
-}
-
-__device__ __forceinline__ float block_reduce_sum(float v, float *smem) {
-    const int lane = threadIdx.x & 31;
-    const int warp = threadIdx.x >> 5;
-
-    v = warp_reduce_sum(v);
-    if (lane == 0) {
-        smem[warp] = v;
-    }
-    __syncthreads();
-
-    if (warp == 0) {
-        const int num_warps = blockDim.x >> 5;
-        float w = (lane < num_warps) ? smem[lane] : 0.0f;
-        w = warp_reduce_sum(w);
-        if (lane == 0) {
-            smem[0] = w;
-        }
-    }
-    __syncthreads();
-    return smem[0];
-}
 
 __device__ __forceinline__ __nv_bfloat16 qwen_rmsnorm_value_bf16(
     const __nv_bfloat16 *__restrict__ row,
@@ -84,14 +59,14 @@ __global__ void attn_decode_qkv_split_qk_norm_rope_kernel(
         ? q_out + (static_cast<size_t>(b) * q_heads + h) * head_dim
         : k_out + (static_cast<size_t>(b) * k_heads + h) * head_dim;
 
-    __shared__ float smem[kMaxWarps];
+    __shared__ float smem[kThreadsPerBlock];
 
     float local_sum_sq = 0.0f;
     for (int d = threadIdx.x; d < head_dim; d += blockDim.x) {
         const float x = __bfloat162float(raw_row[d]);
         local_sum_sq += x * x;
     }
-    const float total_sum_sq = block_reduce_sum(local_sum_sq, smem);
+    const float total_sum_sq = kiln_block_reduce_sum(local_sum_sq, smem);
 
     __shared__ float s_rms_inv;
     if (threadIdx.x == 0) {
