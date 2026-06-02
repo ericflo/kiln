@@ -409,6 +409,138 @@ pub fn vulkan_matmul(a: &crate::Tensor, b: &crate::Tensor) -> Result<crate::Tens
 }
 
 // ----------------------------------------------------------------------
+// vulkan_scale — Phase 3c hot-op port: tensor * scalar (#1082)
+// ----------------------------------------------------------------------
+
+/// Vulkan elementwise scalar-multiply `out = x * scale`. Backs
+/// `ScalarOp`'s `mul_scalar` (scale = c) and `div_scalar` (scale = 1/c)
+/// hot paths that the backward composites call.
+///
+/// Bridges the input to `VkTensor` zero-copy ([`vk_tensor_from_kt`]),
+/// dispatches the production
+/// `kiln_vulkan_kernel::vk_ops::mask::vk_scale_no_grad` shader
+/// (`vk_scale_inplace_f32`), and bridges the result back zero-copy
+/// ([`kt_tensor_from_vk`]). No D2H / H2D round-trip — the data stays
+/// GPU-resident end to end.
+///
+/// `add_scalar` / `sub_scalar` have **no** corresponding scalar-bias
+/// Vulkan kernel today, so `ScalarOp::vulkan_fwd` returns `Ok(None)` for
+/// those and the dispatch host-fallback (PR3a) covers them.
+///
+/// # Requirements
+///
+/// - `x` backed by [`VulkanStorage`]
+/// - `x.dtype() == F32` (the kernel is F32-only today)
+/// - `x` contiguous with `start_offset == 0`
+///
+/// # Errors
+///
+/// Returns [`Error::Msg`] on non-Vulkan storage, dtype/layout violations,
+/// or kernel dispatch failure.
+pub fn vulkan_scale(x: &crate::Tensor, scale: f32) -> Result<crate::Tensor> {
+    use kiln_vulkan_kernel::vk_ops::mask::vk_scale_no_grad;
+
+    if x.dtype() != DType::F32 {
+        return Err(Error::Msg(format!(
+            "vulkan_scale: F32-only kernel (got {})",
+            x.dtype()
+        )));
+    }
+    let device_index = match x
+        .storage()
+        .as_any()
+        .downcast_ref::<VulkanStorage>()
+        .ok_or_else(|| Error::Msg("vulkan_scale: input must be Vulkan-backed".to_string()))?
+        .device()
+    {
+        Device::Vulkan(i) => i,
+        _ => unreachable!("VulkanStorage::device() returns Device::Vulkan"),
+    };
+
+    let vk_in = vk_tensor_from_kt(x)?;
+    let vk_out = vk_scale_no_grad(&vk_in, scale)
+        .map_err(|e| Error::Msg(format!("vulkan_scale: kernel dispatch failed: {e}")))?;
+    kt_tensor_from_vk(&vk_out, device_index)
+}
+
+// ----------------------------------------------------------------------
+// vulkan_sum_all / vulkan_mean_all — Phase 3c hot-op port (#1082)
+// ----------------------------------------------------------------------
+
+/// Vulkan all-elements reduction `out = sum(x)` (or `mean(x)`), producing
+/// a rank-0 (scalar) F32 tensor matching `ReduceOp(All)`'s CPU output
+/// shape.
+///
+/// Bridges the input to `VkTensor` zero-copy ([`vk_tensor_from_kt`]),
+/// dispatches the production two-pass tree reduction
+/// (`kiln_vulkan_kernel::vk_ops::reduce::vk_sum_all_no_grad` /
+/// `vk_mean_all`), and bridges the `[1]`-shaped result back zero-copy,
+/// then reshapes to rank-0 (the kernel emits shape `[1]`; the kt CPU
+/// reference emits a 0-D scalar — the reshape is a metadata-only view, no
+/// device copy).
+///
+/// Only the **All** reduction scope has a Vulkan kernel. `sum_axis` /
+/// `mean_axis` (single-axis, keepdim=false) have no axis-reduce shader, so
+/// `ReduceOp::vulkan_fwd` returns `Ok(None)` for those and the dispatch
+/// host-fallback (PR3a) covers them.
+///
+/// # Requirements
+///
+/// - `x` backed by [`VulkanStorage`], `x.dtype() == F32`, non-empty
+/// - `x` contiguous with `start_offset == 0`
+///
+/// # Errors
+///
+/// Returns [`Error::Msg`] on non-Vulkan storage, dtype violations, empty
+/// input, or kernel dispatch failure.
+fn vulkan_reduce_all(x: &crate::Tensor, mean: bool) -> Result<crate::Tensor> {
+    use kiln_vulkan_kernel::vk_ops::reduce::{vk_mean_all, vk_sum_all_no_grad};
+
+    let op = if mean { "vulkan_mean_all" } else { "vulkan_sum_all" };
+    if x.dtype() != DType::F32 {
+        return Err(Error::Msg(format!("{op}: F32-only kernel (got {})", x.dtype())));
+    }
+    if x.element_count() == 0 {
+        return Err(Error::Msg(format!("{op}: empty tensor")));
+    }
+    let device_index = match x
+        .storage()
+        .as_any()
+        .downcast_ref::<VulkanStorage>()
+        .ok_or_else(|| Error::Msg(format!("{op}: input must be Vulkan-backed")))?
+        .device()
+    {
+        Device::Vulkan(i) => i,
+        _ => unreachable!("VulkanStorage::device() returns Device::Vulkan"),
+    };
+
+    let vk_in = vk_tensor_from_kt(x)?;
+    let vk_out = if mean {
+        vk_mean_all(&vk_in)
+    } else {
+        vk_sum_all_no_grad(&vk_in)
+    }
+    .map_err(|e| Error::Msg(format!("{op}: kernel dispatch failed: {e}")))?;
+
+    // Kernel emits a `[1]`-shaped scalar; reshape to rank-0 to match the
+    // CPU reference's 0-D output. Metadata-only — no device copy.
+    let scalar1 = kt_tensor_from_vk(&vk_out, device_index)?;
+    scalar1.reshape(Vec::<usize>::new())
+}
+
+/// Vulkan `sum(x)` over all elements → rank-0 scalar. See
+/// [`vulkan_reduce_all`].
+pub fn vulkan_sum_all(x: &crate::Tensor) -> Result<crate::Tensor> {
+    vulkan_reduce_all(x, false)
+}
+
+/// Vulkan `mean(x)` over all elements → rank-0 scalar. See
+/// [`vulkan_reduce_all`].
+pub fn vulkan_mean_all(x: &crate::Tensor) -> Result<crate::Tensor> {
+    vulkan_reduce_all(x, true)
+}
+
+// ----------------------------------------------------------------------
 // Host ↔ Vulkan I/O — candle-free device staging (#1082 PR2)
 // ----------------------------------------------------------------------
 //
