@@ -20,6 +20,9 @@
 
 #![cfg(feature = "rocm")]
 
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+
 use half::bf16;
 use kiln_tensor::{DType as KtDType, Device as KtDevice, Tensor as KtTensor};
 
@@ -80,6 +83,31 @@ fn gqa_expand_heads(
     if hk == h {
         return rocm_contig(kv);
     }
+    // The GQA-expand index [0,0,..,1,1,..] depends only on (h, hk) — it is
+    // invariant across every decode step and layer. Cache the *device* tensor
+    // so the steady-state decode pays no H2D (was 2 uploads per attention layer,
+    // K + V). Keyed by (h, hk, device).
+    let idx_t = gqa_expand_index_cached(h, hk, device)?;
+    let src = rocm_contig(kv)?;
+    // index_select along the head axis (axis 2).
+    map_kt(kiln_tensor::rocm_index_select_axis_n(&src, 2, &idx_t))
+}
+
+/// Device-resident, cached GQA head-expand index `[0,0,..,1,1,..]` (each of the
+/// `hk` kv-heads repeated `h/hk` times). Built + uploaded once per (h, hk,
+/// device); reused thereafter with zero host touch.
+fn gqa_expand_index_cached(
+    h: usize,
+    hk: usize,
+    device: KtDevice,
+) -> Result<KtTensor, FlashAttnError> {
+    static CACHE: OnceLock<Mutex<HashMap<(usize, usize, usize), KtTensor>>> = OnceLock::new();
+    let dev_idx = dev_index(device)?;
+    let key = (h, hk, dev_idx);
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Some(t) = cache.lock().unwrap().get(&key) {
+        return Ok(t.clone());
+    }
     let group = h / hk;
     let mut idx: Vec<u32> = Vec::with_capacity(h);
     for head in 0..hk {
@@ -88,9 +116,8 @@ fn gqa_expand_heads(
         }
     }
     let idx_t = map_kt(KtTensor::from_vec_on(device, idx, vec![h]))?;
-    let src = rocm_contig(kv)?;
-    // index_select along the head axis (axis 2).
-    map_kt(kiln_tensor::rocm_index_select_axis_n(&src, 2, &idx_t))
+    cache.lock().unwrap().insert(key, idx_t.clone());
+    Ok(idx_t)
 }
 
 /// Build the additive-causal U8 mask `[b*h, sq, sk]` on host and upload to ROCm
@@ -210,7 +237,11 @@ pub fn sdpa_forward(
     let scores = map_kt(kiln_tensor::rocm_scalar_op(&qk, SCALAR_MUL, scale))?;
 
     // 4. causal mask (additive via masked_fill with -inf above the diagonal).
-    let scores = if causal {
+    //    For sq == 1 (decode) the single query attends ALL keys 0..sk, so the
+    //    causal mask is provably all-zeros (build_causal_mask_u8: offset=sk-1,
+    //    allowed=sk-1, no j>allowed) — a no-op. Skip the host mask build + H2D
+    //    upload ([bh,1,sk] per attention layer per token) and the masked_fill.
+    let scores = if causal && sq > 1 {
         let mask = build_causal_mask_u8(bh, sq, sk, device)?;
         map_kt(kiln_tensor::rocm_masked_fill(&scores, &mask, NEG_FILL))?
     } else {
@@ -275,28 +306,26 @@ pub fn flash_attn_fwd_rocm(
 /// Physical slot for logical position `t` of sequence `b`:
 ///   `block_table[b, t / page_block_size] * page_block_size + t % page_block_size`.
 fn paged_gather(
-    pool: &KtTensor,            // [total_slots, hk, d]
-    block_table_host: &[u32],   // [b * max_blocks_per_seq], row-major
+    pool: &KtTensor,         // [total_slots, hk, d]
+    block_table: &KtTensor,  // device U32 [b, max_blocks_per_seq]
     b: usize,
     seqlen_k: usize,
     max_blocks_per_seq: usize,
     page_block_size: usize,
     hk: usize,
     d: usize,
-    device: KtDevice,
+    _device: KtDevice,
 ) -> Result<KtTensor, FlashAttnError> {
-    // Build the flat gather index [b * seqlen_k] of physical slot rows.
-    let mut idx: Vec<u32> = Vec::with_capacity(b * seqlen_k);
-    for bi in 0..b {
-        for t in 0..seqlen_k {
-            let blk = t / page_block_size;
-            let within = t % page_block_size;
-            let phys_block = block_table_host[bi * max_blocks_per_seq + blk] as usize;
-            let phys_slot = phys_block * page_block_size + within;
-            idx.push(phys_slot as u32);
-        }
-    }
-    let idx_t = map_kt(KtTensor::from_vec_on(device, idx, vec![b * seqlen_k]))?;
+    // Build the flat physical-slot gather index [b*seqlen_k] ON-DEVICE from the
+    // device-resident block_table (no D2H, no host loop, no H2D). The kernel is
+    // bit-identical to the former host loop.
+    let idx_t = map_kt(kiln_tensor::rocm_paged_gather_index(
+        block_table,
+        b,
+        seqlen_k,
+        max_blocks_per_seq,
+        page_block_size,
+    ))?;
     let pool_c = rocm_contig(pool)?;
     // gather rows along axis 0 -> [b*seqlen_k, hk, d], then reshape.
     let gathered = map_kt(kiln_tensor::rocm_index_select_dim0(&pool_c, &idx_t))?;
@@ -322,16 +351,13 @@ pub fn flash_attn_paged_decode_rocm(
     let hk = k_pool.shape()[1];
     let max_blocks_per_seq = block_table.shape()[1];
 
-    // block_table is small (U32 [b, blocks]) — stage to host for the gather-index
-    // math (this is metadata, not the hot K/V tensors which stay on-device).
-    let bt_host_t = map_kt(kiln_tensor::rocm_to_host_copy(block_table))?;
-    let bt_host: Vec<u32> = map_kt(bt_host_t.to_vec::<u32>())?;
-
+    // block_table (U32 [b, blocks]) stays on-device; the gather index is built
+    // on-GPU by paged_gather (no host round-trip).
     let k_gathered = paged_gather(
-        k_pool, &bt_host, b, seqlen_k, max_blocks_per_seq, page_block_size, hk, d, device,
+        k_pool, block_table, b, seqlen_k, max_blocks_per_seq, page_block_size, hk, d, device,
     )?; // [b, seqlen_k, hk, d]
     let v_gathered = paged_gather(
-        v_pool, &bt_host, b, seqlen_k, max_blocks_per_seq, page_block_size, hk, d, device,
+        v_pool, block_table, b, seqlen_k, max_blocks_per_seq, page_block_size, hk, d, device,
     )?; // [b, seqlen_k, hk, d]
 
     // SDPA with sq = 1.
@@ -361,26 +387,21 @@ pub fn flash_attn_paged_decode_dyn_seqlen_rocm(
     let hk = k_pool.shape()[1];
     let max_blocks_per_seq = block_table.shape()[1];
 
-    let bt_host_t = map_kt(kiln_tensor::rocm_to_host_copy(block_table))?;
-    let bt_host: Vec<u32> = map_kt(bt_host_t.to_vec::<u32>())?;
-    let su_host_t = map_kt(kiln_tensor::rocm_to_host_copy(seqused_k))?;
-    let seqused: Vec<u32> = map_kt(su_host_t.to_vec::<u32>())?;
-
-    // Gather up to max_seqlen_k keys per sequence; out-of-range block_table
-    // entries gather slot 0 but are masked below by the seqused_k tail mask, so
-    // they never contribute.
+    // block_table + seqused_k stay on-device: paged_gather builds the gather
+    // index on-GPU, and sdpa_forward_dyn_tail builds the tail mask on-GPU from
+    // the device seqused_k (no D2H/H2D round-trip per attention layer).
     let k_gathered = paged_gather(
-        k_pool, &bt_host, b, max_seqlen_k, max_blocks_per_seq, page_block_size, hk, d, device,
+        k_pool, block_table, b, max_seqlen_k, max_blocks_per_seq, page_block_size, hk, d, device,
     )?; // [b, max_seqlen_k, hk, d]
     let v_gathered = paged_gather(
-        v_pool, &bt_host, b, max_seqlen_k, max_blocks_per_seq, page_block_size, hk, d, device,
+        v_pool, block_table, b, max_seqlen_k, max_blocks_per_seq, page_block_size, hk, d, device,
     )?;
 
     // Run SDPA (sq=1, non-causal core); apply the per-batch tail mask by zeroing
     // the K contribution beyond seqused_k. We fold the tail mask into the scores
     // through a dedicated mask path: compute scores ourselves so we can mask.
     sdpa_forward_dyn_tail(
-        q, &k_gathered, &v_gathered, b, max_seqlen_k, h, hk, d, softmax_scale, causal, &seqused,
+        q, &k_gathered, &v_gathered, b, max_seqlen_k, h, hk, d, softmax_scale, causal, seqused_k,
     )
 }
 
@@ -399,7 +420,7 @@ fn sdpa_forward_dyn_tail(
     d: usize,
     scale: f32,
     causal: bool,
-    seqused_k: &[u32],
+    seqused_k: &KtTensor, // device U32 [b]
 ) -> Result<KtTensor, FlashAttnError> {
     let device = q.device();
     let sq = 1usize;
@@ -424,25 +445,12 @@ fn sdpa_forward_dyn_tail(
     let qk = map_kt(kiln_tensor::rocm_matmul(&q3f, &kt3))?; // [b*h, 1, sk]
     let scores = map_kt(kiln_tensor::rocm_scalar_op(&qk, SCALAR_MUL, scale))?;
 
-    // Build a combined U8 mask [b*h, 1, sk]: future keys (if causal — for sq=1
-    // the last query attends all keys 0..sk, so causal adds nothing) PLUS the
-    // per-batch tail (j >= seqused_k[b]).
-    let mut mask: Vec<u8> = vec![0u8; bh * sq * sk];
-    for bi in 0..b {
-        let used = seqused_k[bi] as usize;
-        for hi in 0..h {
-            let plane = (bi * h + hi) * sk;
-            for j in used..sk {
-                mask[plane + j] = 1;
-            }
-            if causal {
-                // sq=1 decode: query logical index is seqused_k[b]-1 (the newest
-                // token). All keys j > used-1 are future; but those are already
-                // masked by the tail (j >= used). So causal is a no-op here.
-            }
-        }
-    }
-    let mask_t = map_kt(KtTensor::from_vec_on(device, mask, vec![bh, sq, sk]))?;
+    // Build the U8 tail mask [b*h, 1, sk] ON-DEVICE from the device seqused_k:
+    // mask[bi,hi,j] = (j >= seqused_k[bi]). For sq=1 decode the causal constraint
+    // is subsumed by the tail (the newest query attends all keys 0..used-1), so
+    // there is no separate causal term — bit-identical to the former host loop.
+    let _ = causal;
+    let mask_t = map_kt(kiln_tensor::rocm_build_tail_mask(seqused_k, b, h, sk))?;
     let scores = map_kt(kiln_tensor::rocm_masked_fill(&scores, &mask_t, NEG_FILL))?;
 
     let p = map_kt(kiln_tensor::rocm_softmax_last_axis(&scores))?;

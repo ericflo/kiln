@@ -137,6 +137,7 @@ fn build_cuda() {
     build.file(csrc_dir.join("lerp.cu"));
     build.file(csrc_dir.join("fp8.cu"));
     build.file(csrc_dir.join("is_finite_reduce.cu"));
+    build.file(csrc_dir.join("paged_decode_meta.cu"));
     build.compile("kiln_tensor_cuda_ops");
 
     println!(
@@ -289,6 +290,11 @@ fn build_rocm() {
         "scan_axis.cu",
         "scatter_add.cu",
         "dropout.cu",
+        // R.9 prereq — on-device paged-decode metadata (device block_table ->
+        // gather index, device seqused_k -> tail mask); kills the per-attn-layer
+        // D2H/H2D round-trip and unblocks HIP graph capture. Pure index math,
+        // no cross-lane reduction → wave32/64-correct.
+        "paged_decode_meta.cu",
     ];
 
     let mut objects = Vec::new();

@@ -7776,6 +7776,24 @@ pub fn rotary_embedding_from_tensor(
         }
     }
 
+    // ROCm inference: route through the native fused rotary-QK kernel
+    // (`kiln_rmsnorm_kernel::fused_rotary_qk_kt`, R.7 — rocm-capable), mirroring
+    // the CUDA branch above. Without this ROCm ran the ~10-op `apply_rope`
+    // composite (cast/narrow/contiguous/broadcast-mul ×2 for q AND k) every
+    // attention layer — many small kernel launches on the decode hot path. The
+    // fused kernel is one launch and bit-exact (same FFI symbol).
+    // supports_rotary_qk_kt already gates device(Rocm) + BF16 q/k + F32 cos/sin
+    // + contiguous + rank-4 + shape; if any fails it falls to apply_rope.
+    #[cfg(feature = "rocm")]
+    if !q.track_op()
+        && !k.track_op()
+        && kiln_rmsnorm_kernel::supports_rotary_qk_kt(q, k, &cos, &sin, head_dim, rotary_dim)
+    {
+        return kiln_rmsnorm_kernel::fused_rotary_qk_kt(q, k, &cos, &sin, rotary_dim)
+            .map_err(|e| anyhow::anyhow!("rocm kt fused_rotary_qk: {e}"))
+            .context("rotary_embedding_from_tensor rocm fused kernel");
+    }
+
     let rotated_q = apply_rope(q, &cos, &sin, head_dim, rotary_dim)?;
     let rotated_k = apply_rope(k, &cos, &sin, head_dim, rotary_dim)?;
 
