@@ -959,6 +959,45 @@ impl Metrics {
             push_line(&mut out, "kiln_active_adapter{name=\"base\"} 1");
         }
 
+        // --- Live GPU memory (the governor's all-process view) ---
+        // Scrapeable counterpart to /health's `live` block: total / used (ALL
+        // processes, incl. a coexisting llama.cpp / vLLM job) / free / available
+        // / soft-reserved bytes, plus a pressure level (0=Comfortable, 1=Moderate,
+        // 2=Tight, 3=Critical). Lets Prometheus/Grafana alert on memory pressure
+        // and watch coexistence without shelling into nvtop.
+        {
+            let g = kiln_memory::MemoryGovernor::global();
+            let s = g.snapshot();
+            if s.total_bytes > 0 {
+                out.push_str(
+                    "# HELP kiln_gpu_memory_bytes Live GPU memory by kind (all-process driver view).\n",
+                );
+                out.push_str("# TYPE kiln_gpu_memory_bytes gauge\n");
+                push_line(&mut out, &format!("kiln_gpu_memory_bytes{{kind=\"total\"}} {}", s.total_bytes));
+                push_line(&mut out, &format!("kiln_gpu_memory_bytes{{kind=\"used\"}} {}", s.used_bytes));
+                push_line(&mut out, &format!("kiln_gpu_memory_bytes{{kind=\"free\"}} {}", s.free_bytes));
+                push_line(
+                    &mut out,
+                    &format!("kiln_gpu_memory_bytes{{kind=\"available\"}} {}", g.available_bytes()),
+                );
+                push_line(
+                    &mut out,
+                    &format!("kiln_gpu_memory_bytes{{kind=\"soft_reserved\"}} {}", g.soft_reserved_bytes()),
+                );
+                out.push_str(
+                    "# HELP kiln_gpu_memory_pressure GPU memory pressure (0=Comfortable 1=Moderate 2=Tight 3=Critical).\n",
+                );
+                out.push_str("# TYPE kiln_gpu_memory_pressure gauge\n");
+                let level = match g.pressure() {
+                    kiln_memory::MemoryPressure::Comfortable => 0,
+                    kiln_memory::MemoryPressure::Moderate => 1,
+                    kiln_memory::MemoryPressure::Tight => 2,
+                    kiln_memory::MemoryPressure::Critical => 3,
+                };
+                push_line(&mut out, &format!("kiln_gpu_memory_pressure {level}"));
+            }
+        }
+
         out
     }
 }
