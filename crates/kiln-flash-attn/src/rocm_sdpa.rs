@@ -138,31 +138,24 @@ fn compute_lse(
     sq: usize,
     device: KtDevice,
 ) -> Result<KtTensor, FlashAttnError> {
-    let dev_idx = dev_index(device)?;
+    let _ = device;
     // Reductions over the last (sk) axis -> [b*h, sq], on-device.
     let max_scores = map_kt(kiln_tensor::rocm_max_axis(scores, 2))?; // [b*h, sq]
     let max_p = map_kt(kiln_tensor::rocm_max_axis(p, 2))?; // [b*h, sq]
 
-    // Tiny host tail: lse = max_scores - ln(max_p).
-    let max_scores_host = map_kt(kiln_tensor::rocm_to_host_copy(&max_scores))?;
-    let max_p_host = map_kt(kiln_tensor::rocm_to_host_copy(&max_p))?;
-    let ms: Vec<f32> = map_kt(max_scores_host.to_vec::<f32>())?;
-    let mp: Vec<f32> = map_kt(max_p_host.to_vec::<f32>())?;
-    let lse_flat: Vec<f32> = ms
-        .iter()
-        .zip(mp.iter())
-        .map(|(&m, &pm)| {
-            // pm in (0, 1]; ln(pm) <= 0. Guard pm == 0 (fully masked row).
-            if pm > 0.0 {
-                m - pm.ln()
-            } else {
-                f32::NEG_INFINITY
-            }
-        })
-        .collect();
-    // Reshape [b*h, sq] -> [b, h, sq] and upload back to ROCm.
-    let lse_cpu = map_kt(KtTensor::from_vec(lse_flat, vec![b, h, sq]))?;
-    map_kt(kiln_tensor::host_to_rocm_copy(&lse_cpu, dev_idx))
+    // On-device tail: lse = max_scores - ln(max_p). `.log()` -> `ops::ln`
+    // (UnaryArithKind::Ln, tag 5) routes to `rocm_activation_unary`; `.sub()`
+    // -> `ElementwiseOp::rocm_fwd` (both [b*h, sq], contiguous). Previously this
+    // D2H'd both reductions, ran the ln/sub on the host, and H2D'd the result —
+    // 3 host syncs per full-attention layer per forward. Now zero.
+    //
+    // Parity note: a fully-masked row (max_p == 0) yields +inf here vs the old
+    // host path's NEG_INFINITY. Such rows do not arise in causal decode/training
+    // (every query attends to >=1 key), and the ROCm inference path discards lse
+    // (`_lse`) — so the edge is unreachable in practice.
+    let ln_max_p = map_kt(max_p.log())?; // [b*h, sq]
+    let lse_flat = map_kt(max_scores.sub(&ln_max_p))?; // [b*h, sq]
+    map_kt(lse_flat.reshape(vec![b, h, sq]))
 }
 
 /// Core on-device SDPA composite.
