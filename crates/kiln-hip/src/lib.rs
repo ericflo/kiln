@@ -183,6 +183,43 @@ impl RocmContext {
         self.default_stream.clone()
     }
 
+    /// Return pooled-but-unused VRAM to the OS, keeping at least
+    /// `min_keep_bytes` cached for fast reuse. This is how kiln gives memory
+    /// back when a coexisting process needs it (the pool otherwise hoards freed
+    /// blocks via the release-threshold pin, by design, to avoid the async-free
+    /// decode race).
+    ///
+    /// **Synchronizes the device first** so no in-flight kernel is reading a
+    /// block being released — that's what makes the trim race-free, unlike the
+    /// automatic threshold-0 release the pin disables. Best-effort: a no-op if
+    /// the runtime lacks mempools.
+    pub fn trim_pool(&self, min_keep_bytes: usize) -> Result<()> {
+        self.bind_to_thread()?;
+        // Drain in-flight work so freed pages aren't yanked from under a kernel.
+        check(unsafe { sys::hipDeviceSynchronize() }, "hipDeviceSynchronize")?;
+        let mut pool: *mut c_void = ptr::null_mut();
+        if unsafe { sys::hipDeviceGetDefaultMemPool(&mut pool, self.ordinal) } == sys::HIP_SUCCESS
+            && !pool.is_null()
+        {
+            let _ = unsafe { sys::hipMemPoolTrimTo(pool, min_keep_bytes) };
+        }
+        Ok(())
+    }
+
+    /// Device-reported `(free, total)` bytes via `hipMemGetInfo`. On a discrete
+    /// GPU this is the driver's own view; on a unified APU it reflects the GTT
+    /// budget and is best cross-checked against the OS-level `kiln-memory` probe.
+    pub fn mem_get_info(&self) -> Result<(usize, usize)> {
+        self.bind_to_thread()?;
+        let mut free: usize = 0;
+        let mut total: usize = 0;
+        check(
+            unsafe { sys::hipMemGetInfo(&mut free, &mut total) },
+            "hipMemGetInfo",
+        )?;
+        Ok((free, total))
+    }
+
     /// Create a fresh non-blocking stream bound to this device.
     pub fn new_stream(&self) -> Result<Arc<RocmStream>> {
         self.bind_to_thread()?;
