@@ -100,7 +100,7 @@
 //! * Tape-routing for rotary / layernorm / fused-attn — non-trivial
 //!   substrate decisions about which kernels carry their own backward.
 
-#![cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+#![cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
 
 use anyhow::{Context, Result};
 use kiln_autograd::{
@@ -2407,12 +2407,12 @@ pub fn try_tape_causal_conv1d_prefill_kt(
     }
     // The bwd is available with any GPU-training backend: CUDA FFI kernel, or the
     // device-agnostic kt composite for Metal/Vulkan. Declines when none is on.
-    #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan")))]
+    #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm")))]
     {
         let _ = (input, weight, out, kernel);
         return Ok(None);
     }
-    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
     {
     // The recorded backward is device-agnostic (CUDA FFI / kt composite), so the
     // recorder admits CUDA, Metal, and Vulkan. CPU is excluded here only because

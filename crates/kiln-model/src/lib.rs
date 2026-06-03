@@ -31,7 +31,7 @@ pub mod quantized;
 pub mod qwen35_shapes;
 pub mod sampling;
 pub mod speculative;
-#[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+#[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
 pub mod tape_forward;
 mod transposed_weight_cache;
 #[cfg(feature = "vulkan")]

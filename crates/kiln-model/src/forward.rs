@@ -2638,7 +2638,7 @@ fn add_lora_delta_to_base(
     // `LoraDeltaAddBackward` emitting grads for proj.a/proj.b (kt-keyed on their Var
     // ids), no kt->candle->kt round-trip.
     // (#1082) Vulkan added: device-agnostic pure-kt recorder.
-    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
     if let Some(out) = crate::tape_forward::try_tape_lora_add_kt(&base, x, proj, lora_scale)
         .context("add_lora_delta_to_base try_tape_lora_add_kt")?
     {
@@ -2766,7 +2766,7 @@ fn linear_with_lora_t_backend_decode_if(
         // the SOLE producer of the LoRA A/B backward. PR6 wired Vulkan into the
         // `tape_forward.rs` device-matches but missed this `cfg` gate, so LoRA
         // grads were never recorded on Vulkan → empty grad store.
-        #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+        #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
         if crate::tape_forward::tape_forward_enabled() {
             if let Some(out) =
                 crate::tape_forward::try_tape_lora_linear_kt(x, weight_t, lora, lora_scale)
@@ -5736,7 +5736,7 @@ fn gdn_in_proj_matmul(
     // dx-only `MatmulBf16wBackward`, so dx flows back to `x`/`normed` while the
     // weight stays frozen BF16. No-op (returns None) off the tape path or on the
     // equal-dtype path, falling through to the existing dispatch below.
-    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
     if crate::tape_forward::tape_forward_enabled() {
         if let Some(out) =
             crate::tape_forward::try_tape_lora_linear_kt(x, weight_t, None, 0.0)
@@ -6613,7 +6613,7 @@ pub fn embedding_lookup(token_ids: &[u32], embed_weights: &Tensor) -> Result<Ten
     // `try_kt_embedding_lookup` below.
     // #1082 seam flip: kt-native EmbeddingBackward recorder — no kt->candle->kt.
     // (#1082) Vulkan added: device-agnostic pure-kt recorder.
-    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
     if crate::tape_forward::tape_forward_enabled() {
         if let Some(out) = crate::tape_forward::try_tape_embedding_kt(embed_weights, &index)
             .context("embedding_lookup try_tape_embedding_kt")?
@@ -7901,7 +7901,7 @@ fn residual_add(a: Tensor, b: Tensor) -> Result<Tensor> {
     // residual add is on the critical path between every attn/MLP subblock and
     // the residual stream; without recording it on Vulkan the tape severs at the
     // residual and the in-block LoRA grads never reach the loss.
-    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
     {
         // #1082 seam flip: kt-native AddBackward recorder — no kt->candle->kt
         // round-trip (decode: tape off -> Ok(None) -> falls to the plain add below).
@@ -7933,7 +7933,7 @@ fn apply_rope(
     // recorder (`rope_split_half` + `RopeSplitHalfBackward`). Without it on
     // Vulkan the q/k RoPE severs the tape and `q_proj`/`k_proj` LoRA grads
     // never reach the loss.
-    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
     {
         // CP-4 (#1082): route split-half RoPE through the kt Tape when
         // KILN_USE_TAPE_FORWARD is set and a tape scope is active. No-ops
@@ -11283,7 +11283,7 @@ fn lm_head_forward_backend_decode_if(
     // (#1082) Vulkan added: `try_tape_lora_linear_kt` is device-agnostic and is
     // the producer that connects the CE loss back through the lm_head into the
     // model — without it on Vulkan the tape root dead-ends at the logits.
-    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
     {
         // #1082 H4: `tape_forward_enabled()` DEFAULTS ON, but DECODE has no
         // active bridge scope, so the kt->candle copy of `x` + the full frozen
@@ -11823,7 +11823,7 @@ fn gdn_qk_norm(q: &Tensor, k: &Tensor, input_dtype: DType, scale: f64) -> Result
     // Vulkan included: `try_tape_gdn_l2_norm_scale_kt` + `GdnL2NormScaleBackward`
     // are device-agnostic, and without the qk-norm node the recurrence's dq/dk
     // sever before the qkv_split → in_proj_qkv LoRA `Var` on Vulkan.
-    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
     if crate::tape_forward::tape_forward_enabled() {
         let _ = crate::tape_forward::try_tape_gdn_l2_norm_scale_kt(q, scale, &q_out)?;
         let _ = crate::tape_forward::try_tape_gdn_l2_norm_scale_kt(k, 1.0, &k_out)?;
@@ -12059,9 +12059,9 @@ fn gated_rms_norm(
     // `gated_rms_norm_fallback` runs (its kt ops keep the output on the
     // activation device via the Vulkan op host-fallback, and the caller records
     // the analytic `GdnGatedRmsNormBackward`). Default (inference) is unchanged.
-    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
     let tape_recording_active = crate::tape_forward::tape_forward_enabled();
-    #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan")))]
+    #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm")))]
     let tape_recording_active = false;
     if !tape_recording_active
         && !any_kt_tensor_tracks_op(&[x, z, weight])
@@ -12753,9 +12753,9 @@ fn gdn_chunkwise_recurrence(
     // output on the activation device via the Vulkan op host-fallback, and the
     // `GdnRecurrentBackward` recorded by the caller flows dq/dk/dv back). Default
     // (inference, no tape scope) behaviour is unchanged.
-    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
     let tape_recording_active = crate::tape_forward::tape_forward_enabled();
-    #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan")))]
+    #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm")))]
     let tape_recording_active = false;
     if seq_len > 1 && !tape_recording_active && !any_kt_tensor_tracks_op(&[q, k, v, beta, g, state]) {
         if let Some(out) = backend.gdn_chunkwise_forward(q, k, v, beta, g, state, chunk_size)? {
@@ -15177,9 +15177,9 @@ fn gated_deltanet_forward_decode_if_inner(
     // kt-bridge scope (that's a CUDA/Metal candle-bridge construct). Gate purely
     // on the tape-forward flag so the unfused, fully-tape-wired GDN forward runs
     // (and the conv1d-prefill recorder fires) on Vulkan too.
-    #[cfg(all(feature = "vulkan", not(any(feature = "cuda", feature = "metal"))))]
+    #[cfg(all(any(feature = "vulkan", feature = "rocm"), not(any(feature = "cuda", feature = "metal"))))]
     let tape_recording_active = crate::tape_forward::tape_forward_enabled();
-    #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan")))]
+    #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm")))]
     let tape_recording_active = false;
     let gdn_forward_only_fastpaths =
         allow_forward_only_fastpaths && !x.track_op() && !tape_recording_active;
@@ -15260,7 +15260,7 @@ fn gated_deltanet_forward_decode_if_inner(
                 lora_scale,
             )?; // [B, T, v_dim]
             let prefill_ab: Option<(Tensor, Tensor, Tensor)> = {
-                #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+                #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
                 {
                     let mut out = None;
                     if let Some(in_proj_ab_t) = weights.in_proj_ab_t.as_ref() {
@@ -15311,7 +15311,7 @@ fn gated_deltanet_forward_decode_if_inner(
                     }
                     out
                 }
-                #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan")))]
+                #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm")))]
                 {
                     None
                 }
@@ -15525,7 +15525,7 @@ fn gated_deltanet_forward_decode_if_inner(
                     // candle fallback unless the gate is on + a tape scope is
                     // active.
                     // #1082 seam flip: kt-native transpose recorder — no kt->candle->kt.
-                    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+                    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
                     {
                         match crate::tape_forward::try_tape_transpose_kt(&mixed_qkv, 1, 2)
                             .context("gdn conv transpose try_tape_transpose_kt")?
@@ -15534,7 +15534,7 @@ fn gated_deltanet_forward_decode_if_inner(
                             None => mixed_qkv.transpose(1, 2)?.contiguous()?,
                         }
                     }
-                    #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan")))]
+                    #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm")))]
                     {
                         mixed_qkv.transpose(1, 2)?.contiguous()?
                     }
@@ -15590,7 +15590,7 @@ fn gated_deltanet_forward_decode_if_inner(
                             // CP-4 Increment 3 (#1082): wire the prefill conv +
                             // its SiLU onto the kt Tape. See the comment on the
                             // sibling fallback branch below.
-                            #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+                            #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
                             // #1082 seam flip: kt-native conv1d-prefill recorder — no kt->candle->kt.
                             // Device-agnostic backward (CUDA FFI / kt composite), so Vulkan is in.
                             if crate::tape_forward::tape_forward_enabled() {
@@ -15631,7 +15631,7 @@ fn gated_deltanet_forward_decode_if_inner(
                     // fallback unless `KILN_USE_TAPE_GDN_CONV` (+ FORWARD) is set
                     // AND a tape scope is active. This is the training path
                     // (track_op=true -> gdn_forward_only_fastpaths=false).
-                    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+                    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
                     if crate::tape_forward::tape_forward_enabled()
                     {
                         // #1082 seam flip: kt-native conv1d-prefill recorder — no kt->candle->kt.
@@ -15668,7 +15668,7 @@ fn gated_deltanet_forward_decode_if_inner(
             // the conv. No-op + candle fallback unless the gate is on + a tape
             // scope is active.
             // #1082 seam flip: kt-native transpose recorder — no kt->candle->kt.
-            #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+            #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
             {
                 match crate::tape_forward::try_tape_transpose_kt(&post_silu, 1, 2)
                     .context("gdn conv-out transpose try_tape_transpose_kt")?
@@ -15677,7 +15677,7 @@ fn gated_deltanet_forward_decode_if_inner(
                     None => post_silu.transpose(1, 2)?,
                 }
             }
-            #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan")))]
+            #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm")))]
             {
                 post_silu.transpose(1, 2)?
             }
@@ -15712,7 +15712,7 @@ fn gated_deltanet_forward_decode_if_inner(
             // The z reshape connects the in_proj_z keystone output to the
             // gated-RMSNorm gate input. No-op + candle fallback unless the gate is
             // on + a tape scope is active.
-            #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+            #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
             let narrow_then_reshape =
                 |src: &Tensor, offset: usize, length: usize, shape: (usize, usize, usize, usize)| -> Result<Tensor> {
                     // Materialise contiguous: `narrow` returns a strided view, but
@@ -15743,7 +15743,7 @@ fn gated_deltanet_forward_decode_if_inner(
                         None => Ok(resh),
                     }
                 };
-            #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan")))]
+            #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm")))]
             let narrow_then_reshape =
                 |src: &Tensor, offset: usize, length: usize, shape: (usize, usize, usize, usize)| -> Result<Tensor> {
                     Ok(src.narrow(2, offset, length)?.reshape(shape)?)
@@ -15753,7 +15753,7 @@ fn gated_deltanet_forward_decode_if_inner(
             let v = narrow_then_reshape(&mixed_qkv, 2 * qk_dim, v_dim, (batch, seq_len, nv, dv))?;
             let z_reshaped = z.reshape((batch, seq_len, nv, dv))?;
             // #1082 seam flip: kt-native reshape recorder — no kt->candle->kt.
-            #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+            #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
             let z_reshaped = match crate::tape_forward::try_tape_reshape_kt(
                 &z,
                 vec![batch, seq_len, nv, dv],
@@ -15943,7 +15943,7 @@ fn gated_deltanet_forward_decode_if_inner(
                             // candle fallback unless the gate is on + a tape
                             // scope is active.
                             // #1082 seam flip: kt-native GqaExpandBackward recorder — no kt->candle->kt.
-                            #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+                            #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
                             let q_exp = match crate::tape_forward::try_tape_gqa_expand_kt(
                                 &q, gqa_ratio, &q_exp,
                             )
@@ -15952,7 +15952,7 @@ fn gated_deltanet_forward_decode_if_inner(
                                 Some(t) => t,
                                 None => q_exp,
                             };
-                            #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+                            #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
                             let k_exp = match crate::tape_forward::try_tape_gqa_expand_kt(
                                 &k, gqa_ratio, &k_exp,
                             )
@@ -16348,14 +16348,14 @@ fn gated_deltanet_forward_decode_if_inner(
             // training path (which sets qk_expanded == true) but wired for
             // parity across configs.
             // #1082 seam flip: kt-native GqaExpandBackward recorder — no kt->candle->kt.
-            #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+            #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
             let q_exp = match crate::tape_forward::try_tape_gqa_expand_kt(&q, gqa_ratio, &q_exp)
                 .context("gdn gqa-expand-recur try_tape_gqa_expand_kt q")?
             {
                 Some(t) => t,
                 None => q_exp,
             };
-            #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+            #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
             let k_exp = match crate::tape_forward::try_tape_gqa_expand_kt(&k, gqa_ratio, &k_exp)
                 .context("gdn gqa-expand-recur try_tape_gqa_expand_kt k")?
             {
@@ -16482,7 +16482,7 @@ fn gated_deltanet_forward_decode_if_inner(
             // needs the entry state. Cheap clone (a Tensor handle); only the
             // CUDA tape path reads it, but we take it unconditionally so the
             // wiring stays a single no-op call below.
-            #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+            #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
             let gdn_entry_state = recurrent_state.clone();
 
             // Cast v back to input_dtype so the recurrence stays in bf16. The
@@ -16505,7 +16505,7 @@ fn gated_deltanet_forward_decode_if_inner(
                 // chained id on every input.
                 let v_cast = v.to_dtype(input_dtype)?;
                 // #1082 seam flip: kt-native CastCompositeBackward recorder — no kt->candle->kt.
-                #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+                #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
                 let v_cast = match crate::tape_forward::try_tape_cast_kt(&v, &v_cast)
                     .context("gdn recur v-cast try_tape_cast_kt")?
                 {
@@ -16516,7 +16516,7 @@ fn gated_deltanet_forward_decode_if_inner(
 
                 // Transpose to [B, nv, T, dim] for per-head processing.
                 // #1082 seam flip: kt-native transpose recorder — no kt->candle->kt.
-                #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+                #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
                 let transpose12 = |t: &Tensor| -> Result<Tensor> {
                     match crate::tape_forward::try_tape_transpose_kt(t, 1, 2)
                         .context("gdn recur transpose try_tape_transpose_kt")?
@@ -16525,7 +16525,7 @@ fn gated_deltanet_forward_decode_if_inner(
                         None => Ok(t.transpose(1, 2)?),
                     }
                 };
-                #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan")))]
+                #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm")))]
                 let transpose12 = |t: &Tensor| -> Result<Tensor> { Ok(t.transpose(1, 2)?) };
 
                 let q = transpose12(&q)?; // [B, nv, T, dk]
@@ -16595,7 +16595,7 @@ fn gated_deltanet_forward_decode_if_inner(
             // output that flows downstream (the post-transpose's
             // `kt_logits_to_candle` retains it for chaining), so recording it
             // as the node output keeps the recurrence→transpose seam connected.
-            #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+            #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
             if crate::tape_forward::tape_forward_enabled() {
                 crate::tape_forward::tape_record_gdn_recurrent_kt(
                     &recurrent_result.0,
@@ -16645,7 +16645,7 @@ fn gated_deltanet_forward_decode_if_inner(
             // transpose unless `KILN_USE_TAPE_FORWARD` is set AND a tape scope is
             // active.
             // #1082 seam flip: kt-native transpose recorder — no kt->candle->kt.
-            #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+            #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
             {
                 match crate::tape_forward::try_tape_transpose_kt(&attn_out, 1, 2)
                     .context("gdn attn_out transpose try_tape_transpose_kt")?
@@ -16654,7 +16654,7 @@ fn gated_deltanet_forward_decode_if_inner(
                     None => attn_out.transpose(1, 2)?,
                 }
             }
-            #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan")))]
+            #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm")))]
             {
                 attn_out.transpose(1, 2)?
             }
@@ -16696,7 +16696,7 @@ fn gated_deltanet_forward_decode_if_inner(
             // `KILN_USE_TAPE_GDN_GATED_NORM` are set AND a tape scope is active;
             // the production output (`gated`) is untouched either way.
             // #1082 seam flip: kt-native GdnGatedRmsNormBackward recorder — no kt->candle->kt.
-            #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+            #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
             if crate::tape_forward::tape_forward_enabled() {
                 let _ = crate::tape_forward::try_tape_gdn_gated_rms_norm_kt(
                     &attn_out,
@@ -16719,7 +16719,7 @@ fn gated_deltanet_forward_decode_if_inner(
         // is active.
         let reshaped = attn_out.reshape((batch, seq_len, v_dim))?;
         // #1082 seam flip: kt-native reshape recorder — no kt->candle->kt.
-        #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+        #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
         let reshaped = match crate::tape_forward::try_tape_reshape_kt(
             &attn_out,
             vec![batch, seq_len, v_dim],
@@ -16741,7 +16741,7 @@ fn gated_deltanet_forward_decode_if_inner(
         } else {
             let casted = reshaped.to_dtype(input_dtype)?;
             // #1082 seam flip: kt-native CastCompositeBackward recorder — no kt->candle->kt.
-            #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+            #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
             let casted = match crate::tape_forward::try_tape_cast_kt(&reshaped, &casted)
                 .context("gdn gated-norm cast try_tape_cast_kt")?
             {
@@ -17389,9 +17389,9 @@ pub fn gqa_attention_core_prefill(
         // `try_tape_sdpa_fallback_kt` below. Inference (no tape scope) keeps the
         // fast leaf kernel unchanged on every backend. On a default build
         // (no tape-feature) `tape_forward` is cfg'd out, so the leaf always runs.
-        #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+        #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
         let skip_leaf_flash = crate::tape_forward::tape_scope_active();
-        #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan")))]
+        #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm")))]
         let skip_leaf_flash = false;
         if !skip_leaf_flash {
             if let Some(attn_output) =
@@ -17479,7 +17479,7 @@ pub fn gqa_attention_core_prefill(
     // so the device-agnostic `try_tape_sdpa_fallback_kt` is the attention
     // backward producer on Vulkan; without it, grads sever between v_proj and
     // o_proj.
-    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
     if crate::tape_forward::tape_forward_enabled() {
         if let Some(tape_attn) = crate::tape_forward::try_tape_sdpa_fallback_kt(
             &q, &k_he, &v_he, head_dim, &attn_output,
@@ -17690,7 +17690,7 @@ pub fn gqa_attention_pre_o_chunked_prefill(
 fn tape_reshape_full_attn(x: &Tensor, dims: &[ReshapeArg]) -> Result<Tensor> {
     // #1082 seam flip: kt-native reshape recorder — no kt->candle->kt.
     // (#1082) Vulkan added: device-agnostic pure-kt recorder.
-    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
     {
         if let Some(concrete) = resolve_reshape_dims(x.elem_count(), dims) {
             if let Some(out) = crate::tape_forward::try_tape_reshape_kt(x, concrete)
@@ -17712,7 +17712,7 @@ fn tape_reshape_full_attn(x: &Tensor, dims: &[ReshapeArg]) -> Result<Tensor> {
 fn tape_transpose_contig_full_attn(x: &Tensor, axis_a: usize, axis_b: usize) -> Result<Tensor> {
     // #1082 seam flip: kt-native transpose recorder — no kt->candle->kt.
     // (#1082) Vulkan added: device-agnostic pure-kt recorder.
-    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
     {
         if let Some(out) = crate::tape_forward::try_tape_transpose_kt(x, axis_a, axis_b)
             .context("tape_transpose_contig_full_attn try_tape_transpose_kt")?
@@ -18079,9 +18079,9 @@ pub fn gqa_attention_pre_o(
         // `try_tape_sdpa_fallback_kt` below. Inference (no tape scope) keeps the
         // fast leaf kernel unchanged on every backend. On a default build
         // (no tape-feature) `tape_forward` is cfg'd out, so the leaf always runs.
-        #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+        #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
         let skip_leaf_flash = crate::tape_forward::tape_scope_active();
-        #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan")))]
+        #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm")))]
         let skip_leaf_flash = false;
         if !skip_leaf_flash {
             if let Some(attn_output) =
@@ -18131,7 +18131,7 @@ pub fn gqa_attention_pre_o(
     // (the tape-authoritative SFT path), so capture before the cache update.
     // (#1082) Vulkan added: the SDPA fallback is the attention backward producer
     // on Vulkan (the flash leaf is skipped under a tape scope above).
-    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
     let sdpa_pre_expand = if kv_cache.is_none() {
         Some((q.clone(), k.clone(), v.clone()))
     } else {
@@ -18289,7 +18289,7 @@ pub fn gqa_attention_pre_o(
     // None) in every other configuration; mirrors `gqa_attention_core_prefill`.
     // (#1082) Vulkan added: device-agnostic SDPA-fallback + transpose + reshape
     // recorders — the attention backward producer on Vulkan.
-    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
     // #1082 seam flip: kt-native SDPA-fallback + transpose + reshape recorders.
     if crate::tape_forward::tape_forward_enabled() {
         if let Some((q_pe, k_pe, v_pe)) = sdpa_pre_expand.as_ref() {

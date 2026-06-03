@@ -89,7 +89,7 @@ use anyhow::{Context, Result, anyhow};
 /// (`CudaOpdTopKReverseKlPhaseBBackward::apply`) run on either device: CUDA
 /// uses the fused FFI kernel, CPU/Metal the device-agnostic analytic
 /// kt-composite backward.
-#[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+#[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
 pub fn try_tape_opd_scalar_mean_cuda_kt(
     hidden: &kiln_tensor::Tensor,
     head_t: &kiln_tensor::Tensor,
