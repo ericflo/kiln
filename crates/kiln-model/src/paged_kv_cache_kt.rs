@@ -1106,10 +1106,11 @@ impl PagedKvCacheKt {
         };
 
         // Align K/V to the pool's device so the dim-0 `slice_set` scatter runs
-        // on one device. The pool is the CPU seed cache that resident decode
-        // mirrors into VkPagedKvCache, while the Vulkan attention path produced
-        // K/V on-device — move the small per-token K/V rows to the pool device.
-        // No-op when already co-located.
+        // on one device. On the non-CUDA paths a host-staged cast/op can land
+        // K/V on CPU while the pool is on-device (Vulkan mirrors a CPU seed cache
+        // into VkPagedKvCache; ROCm produces K/V on-device) — move the small
+        // per-token K/V rows to the pool device. No-op when already co-located.
+        // (R.4 E2E)
         let k_dev;
         let k = if k.device() != k_pool.device() {
             k_dev = k

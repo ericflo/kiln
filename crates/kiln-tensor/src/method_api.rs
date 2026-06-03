@@ -771,6 +771,8 @@ impl Tensor {
         match self.device() {
             #[cfg(feature = "cuda")]
             Device::Cuda(_) => crate::cuda_storage::cuda_contiguous(self),
+            #[cfg(feature = "rocm")]
+            Device::Rocm(_) => crate::rocm_contiguous(self),
             #[cfg(feature = "metal")]
             Device::Metal(_) => crate::metal_deep_copy(self),
             Device::Cpu => {

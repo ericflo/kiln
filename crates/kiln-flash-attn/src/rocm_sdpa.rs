@@ -251,6 +251,21 @@ pub fn flash_attn_fwd_rocm(
     softmax_scale: f32,
     causal: bool,
 ) -> Result<(KtTensor, KtTensor), FlashAttnError> {
+    // Coerce all operands onto one ROCm device: a decode caller may hand us an
+    // operand that drifted to CPU via a host-staged op, and the composite (QK^T
+    // / softmax / PV) requires every operand on-device. No-op when co-located.
+    // (R.4 E2E)
+    let dev = [q.device(), k.device(), v.device()]
+        .into_iter()
+        .find(|d| !d.is_cpu())
+        .unwrap_or_else(|| q.device());
+    let qc;
+    let q = if q.device() != dev { qc = map_kt(q.to_device(dev))?; &qc } else { q };
+    let kc;
+    let k = if k.device() != dev { kc = map_kt(k.to_device(dev))?; &kc } else { k };
+    let vc;
+    let v = if v.device() != dev { vc = map_kt(v.to_device(dev))?; &vc } else { v };
+
     let (b, sq, h, d) = (q.shape()[0], q.shape()[1], q.shape()[2], q.shape()[3]);
     let (sk, hk) = (k.shape()[1], k.shape()[2]);
     sdpa_forward(q, k, v, b, sq, sk, h, hk, d, softmax_scale, causal)
