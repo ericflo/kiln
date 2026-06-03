@@ -1667,12 +1667,12 @@ impl AppState {
                 post_load_used_vram_gb = post_load_used_vram as f64 / 1e9,
                 estimated_model_gb = estimated_model_bytes as f64 / 1e9,
                 source = %post_load_used_vram_info.unwrap().source,
-                "post-load CUDA residency snapshot for KV sizing"
+                "post-load device residency snapshot for KV sizing"
             );
         } else {
             tracing::warn!(
                 estimated_model_gb = estimated_model_bytes as f64 / 1e9,
-                "post-load CUDA residency unavailable; falling back to static model memory estimate for KV sizing"
+                "post-load device residency unavailable; falling back to static model memory estimate for KV sizing"
             );
         }
 
@@ -2259,21 +2259,22 @@ fn device_needs_inference_prewarm(device: &kiln_tensor::Device) -> bool {
 fn runtime_used_vram_for_device(
     device: &kiln_tensor::Device,
 ) -> Option<kiln_core::vram::GpuMemoryUsedInfo> {
-    // Migrated to take `&kt::Device` directly. The cuda-only used VRAM
-    // probe is still gated on `feature = "cuda"`, matching the previous
-    // cfg-gated behavior. (#1082)
-    #[cfg(feature = "cuda")]
-    {
-        if device.backend() == kiln_tensor::Backend::Cuda {
-            let info = kiln_core::vram::detect_used_vram();
-            return (info.used_bytes > 0).then_some(info);
-        }
+    // The live used-memory probe is OS-level (nvidia-smi / AMD+Intel DRM sysfs /
+    // unified-APU MemAvailable, see `kiln_core::vram::current_memory_snapshot`),
+    // so it is BACKEND-AGNOSTIC — it works for CUDA, ROCm, Vulkan, and Metal,
+    // not just CUDA. Previously this was `#[cfg(feature = "cuda")]`-gated, so on
+    // every other backend the KV-cache sizer fell back to a STATIC model-size
+    // estimate that is blind to live residency and to coexisting GPU workloads.
+    // Wiring it for all GPU backends makes the sizer mindful of the actual VRAM
+    // on whatever device the user is running. CPU has no device memory to probe.
+    if device.backend() == kiln_tensor::Backend::Cpu {
+        return None;
     }
-    #[cfg(not(feature = "cuda"))]
-    {
-        let _ = device;
-    }
-    None
+    let snap = kiln_core::vram::current_memory_snapshot();
+    (snap.used_bytes > 0).then_some(kiln_core::vram::GpuMemoryUsedInfo {
+        used_bytes: snap.used_bytes,
+        source: snap.source,
+    })
 }
 
 fn detected_gpu_total_memory(

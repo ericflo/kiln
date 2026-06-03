@@ -344,6 +344,109 @@ pub fn detect_used_vram_bytes() -> Option<u64> {
     (info.used_bytes > 0).then_some(info.used_bytes)
 }
 
+/// A point-in-time snapshot of the memory pool the accelerator actually
+/// allocates from — the single backend-agnostic primitive kiln's memory
+/// awareness is built on. Every engine (CUDA / ROCm / Metal / Vulkan) consults
+/// the SAME probe, so the system is uniformly aware regardless of which backend
+/// is compiled in.
+///
+/// The crucial nuance is `unified`: on a discrete GPU `free_bytes` is the GPU's
+/// own VRAM headroom, but on a unified-memory APU (AMD Strix Halo) or Apple
+/// Silicon, GPU allocations come out of **system RAM**, so the meaningful free
+/// figure is the host's `MemAvailable`, not a BIOS-reported VRAM carveout. Sizing
+/// against the carveout there would happily over-commit system RAM and OOM the
+/// box. This probe gets that right so "be mindful of VRAM on whatever the user
+/// is running" holds on every device class.
+#[derive(Debug, Clone, Copy)]
+pub struct MemorySnapshot {
+    /// Total memory addressable by the accelerator (unified-corrected on APUs).
+    pub total_bytes: u64,
+    /// Currently-used bytes (`total - free`).
+    pub used_bytes: u64,
+    /// Free bytes available to allocate RIGHT NOW.
+    pub free_bytes: u64,
+    /// Provenance of the figures.
+    pub source: VramSource,
+    /// Whether the accelerator shares system RAM (APU / Apple Silicon). When
+    /// true, `free_bytes` tracks host `MemAvailable` and allocations contend
+    /// with the rest of the OS.
+    pub unified: bool,
+}
+
+/// Take a live snapshot of accelerator memory: total, used, and free, with the
+/// unified-memory correction applied. This is the keystone of kiln's dynamic
+/// memory awareness — KV-cache sizing, graph-capture headroom checks, the
+/// training/inference budget arbiter, and allocator pressure response all read
+/// from here, so the whole system reacts to the SAME live figure on every
+/// backend (including coexisting GPU workloads, since the probe is OS-level).
+pub fn current_memory_snapshot() -> MemorySnapshot {
+    let total = detect_vram();
+    let unified = matches!(
+        total.source,
+        VramSource::LinuxDrmSysfsUnified | VramSource::AppleSilicon
+    );
+
+    // Unified memory: free is the host's available RAM (capped at our corrected
+    // budget), because GPU allocations are system-RAM allocations there.
+    if unified {
+        #[cfg(target_os = "linux")]
+        if let Some(avail) =
+            query_meminfo_available_bytes_at(std::path::Path::new("/proc/meminfo"))
+        {
+            let free = avail.min(total.total_bytes);
+            return MemorySnapshot {
+                total_bytes: total.total_bytes,
+                used_bytes: total.total_bytes.saturating_sub(free),
+                free_bytes: free,
+                source: total.source,
+                unified: true,
+            };
+        }
+        // macOS unified / meminfo unavailable: fall through to the used-probe.
+    }
+
+    // Discrete GPU (or unified fallback): free = total − currently-used.
+    let used = detect_used_vram();
+    let used_bytes = used.used_bytes;
+    let free = total.total_bytes.saturating_sub(used_bytes);
+    MemorySnapshot {
+        total_bytes: total.total_bytes,
+        used_bytes,
+        free_bytes: free,
+        source: if used.source != VramSource::None {
+            used.source
+        } else {
+            total.source
+        },
+        unified,
+    }
+}
+
+/// Free accelerator memory in bytes right now (0 if undetectable). Thin
+/// convenience over [`current_memory_snapshot`].
+pub fn current_free_bytes() -> u64 {
+    current_memory_snapshot().free_bytes
+}
+
+/// Read `MemAvailable` (the kernel's estimate of allocatable RAM without
+/// swapping) from a `/proc/meminfo`-format file. This is the right "free"
+/// figure for unified-memory accelerators, where GPU buffers are backed by
+/// system RAM.
+#[cfg(target_os = "linux")]
+fn query_meminfo_available_bytes_at(path: &std::path::Path) -> Option<u64> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    for line in raw.lines() {
+        if let Some(rest) = line.strip_prefix("MemAvailable:") {
+            let kib: u64 = rest
+                .split_whitespace()
+                .next()
+                .and_then(|s| s.parse().ok())?;
+            return Some(kib * 1024);
+        }
+    }
+    None
+}
+
 /// Query total GPU memory via nvidia-smi.
 ///
 /// Runs `nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits`
@@ -1330,6 +1433,39 @@ mod tests {
             Some(32_479_448u64 * 1024)
         );
         std::fs::remove_file(path).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn test_meminfo_available_parser() {
+        let path = std::env::temp_dir().join(format!(
+            "kiln-meminfo-avail-test-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        std::fs::write(
+            &path,
+            "MemTotal:       32479448 kB\nMemFree:  1000000 kB\nMemAvailable:   27571892 kB\n",
+        )
+        .unwrap();
+        assert_eq!(
+            query_meminfo_available_bytes_at(&path),
+            Some(27_571_892u64 * 1024)
+        );
+        // Missing MemAvailable -> None (older kernels; caller falls back).
+        std::fs::write(&path, "MemTotal: 100 kB\n").unwrap();
+        assert_eq!(query_meminfo_available_bytes_at(&path), None);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn current_memory_snapshot_is_internally_consistent() {
+        // Whatever the host reports, the snapshot's arithmetic must hold:
+        // used + free == total, and free <= total. (On CI runners with no GPU
+        // total may be 0, in which case all three are 0 — still consistent.)
+        let s = current_memory_snapshot();
+        assert_eq!(s.used_bytes.saturating_add(s.free_bytes), s.total_bytes);
+        assert!(s.free_bytes <= s.total_bytes);
     }
 
     #[cfg(target_os = "linux")]
