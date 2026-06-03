@@ -459,16 +459,24 @@ pub fn vulkan_matmul(a: &crate::Tensor, b: &crate::Tensor) -> Result<crate::Tens
 /// Returns [`Error::Msg`] on non-Vulkan storage, dtype/rank/shape
 /// violations, or kernel dispatch failure.
 pub fn vulkan_matmul_batched(a: &crate::Tensor, b: &crate::Tensor) -> Result<crate::Tensor> {
-    use kiln_vulkan_kernel::vk_ops::matmul_batched::vk_matmul_batched_no_grad;
+    use kiln_vulkan_kernel::vk_ops::matmul_batched::{
+        vk_matmul_batched_bf16_no_grad, vk_matmul_batched_no_grad,
+    };
     use kiln_vulkan_kernel::vk_tensor::{VkDType, VkTensor};
 
-    if a.dtype() != DType::F32 || b.dtype() != DType::F32 {
+    let dtype = a.dtype();
+    if !matches!(dtype, DType::F32 | DType::BF16) || b.dtype() != dtype {
         return Err(Error::Msg(format!(
-            "vulkan_matmul_batched: F32-only kernel (got a={}, b={})",
+            "vulkan_matmul_batched: F32/BF16 equal-dtype kernel (got a={}, b={})",
             a.dtype(),
             b.dtype()
         )));
     }
+    let vk_dtype = match dtype {
+        DType::F32 => VkDType::F32,
+        DType::BF16 => VkDType::Bf16,
+        _ => unreachable!("dtype gated to F32/BF16 above"),
+    };
     let (ar, br) = (a.rank(), b.rank());
     if ar < 3 || br != ar {
         return Err(Error::Msg(format!(
@@ -528,23 +536,34 @@ pub fn vulkan_matmul_batched(a: &crate::Tensor, b: &crate::Tensor) -> Result<cra
     let vk_a = VkTensor::from_buffer(
         a_vk.buffer_arc(),
         vec![batch_a, m, k],
-        VkDType::F32,
+        vk_dtype,
         Arc::clone(a_vk.vulkan_device()),
     );
     let vk_b = VkTensor::from_buffer(
         b_vk.buffer_arc(),
         vec![batch_b, kk, n],
-        VkDType::F32,
+        vk_dtype,
         Arc::clone(b_vk.vulkan_device()),
     );
-    let vk_out = vk_matmul_batched_no_grad(&vk_a, &vk_b)
-        .map_err(|e| Error::Msg(format!("vulkan_matmul_batched: kernel dispatch failed: {e}")))?;
-    // vk_out is [batch, m, n]; restore the caller's leading axes.
+    // Both kernels accumulate in F32 and return an F32 [batch, m, n] result;
+    // the BF16 kernel reads bf16-packed inputs and writes F32 (no write race).
+    let vk_out = match dtype {
+        DType::F32 => vk_matmul_batched_no_grad(&vk_a, &vk_b),
+        DType::BF16 => vk_matmul_batched_bf16_no_grad(&vk_a, &vk_b),
+        _ => unreachable!("dtype gated to F32/BF16 above"),
+    }
+    .map_err(|e| Error::Msg(format!("vulkan_matmul_batched: kernel dispatch failed: {e}")))?;
+    // vk_out is F32 [batch, m, n]; restore the caller's leading axes.
     let mut out_shape: Vec<usize> = a_shape[..ar - 2].to_vec();
     out_shape.push(m);
     out_shape.push(n);
-    let out = kt_tensor_from_vk(&vk_out, device_index)?;
-    out.reshape(out_shape)
+    let out_f32 = kt_tensor_from_vk(&vk_out, device_index)?.reshape(out_shape)?;
+    // Match the input dtype: BF16 inputs → BF16 output (resident vulkan_cast).
+    match dtype {
+        DType::F32 => Ok(out_f32),
+        DType::BF16 => out_f32.to_dtype(DType::BF16),
+        _ => unreachable!("dtype gated to F32/BF16 above"),
+    }
 }
 
 // ----------------------------------------------------------------------
