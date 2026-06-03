@@ -415,6 +415,16 @@ pub fn rocm_synchronize_default_stream(device_index: usize) -> Result<()> {
         .map_err(|e| Error::Msg(format!("rocm_synchronize_default_stream({device_index}): {e:?}")))
 }
 
+/// `(reserved, used)` bytes of device `device_index`'s stream-ordered memory
+/// pool — PROCESS-ISOLATED (only kiln's pool), unlike the all-process DRM
+/// counters. `reserved` is kiln's VRAM high-water mark; `used` is what's live.
+/// The right signal for "is freed KV being reused vs growing our footprint."
+pub fn rocm_pool_stats(device_index: usize) -> Result<(u64, u64)> {
+    let ctx = primary_rocm_context(device_index)?;
+    ctx.pool_stats()
+        .map_err(|e| Error::Msg(format!("rocm_pool_stats({device_index}): {e:?}")))
+}
+
 /// Device-reported `(free, total)` ROCm memory via `hipMemGetInfo`. This is the
 /// most accurate "free VRAM on the active GPU" signal — it reports the actual
 /// pool the GPU allocates from (a discrete card's VRAM, or an APU's GART/UMA

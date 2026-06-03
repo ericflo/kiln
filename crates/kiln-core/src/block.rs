@@ -85,26 +85,109 @@ impl BlockManager {
         let in_circulation = self.num_blocks - self.retired_blocks.len();
         if in_circulation > target {
             // Shrink: retire free blocks (in-use ones retire on free in free_one).
+            // Retire the HIGHEST free block IDs first so the pool's tail clears,
+            // making a subsequent physical truncate (#26 `physical_truncate`)
+            // possible — the dead region we hand back to the OS must be the tail
+            // `[new_num_blocks, num_blocks)`, never a hole in the middle.
             let to_retire = (in_circulation - target).min(self.free_blocks.len());
-            for _ in 0..to_retire {
-                if let Some(id) = self.free_blocks.pop_front() {
+            if to_retire > 0 {
+                let mut ids: Vec<u32> = self.free_blocks.iter().copied().collect();
+                ids.sort_unstable();
+                let keep = ids.len() - to_retire;
+                for &id in &ids[keep..] {
                     self.retired_blocks.push_back(id);
                 }
+                // Keep the free list low-ID-biased so allocation reuses low
+                // blocks first, which also helps keep the tail clear.
+                self.free_blocks = ids[..keep].iter().copied().collect();
             }
         } else if in_circulation < target {
-            // Grow: bring retired blocks back into circulation.
+            // Grow: bring retired blocks back into circulation, lowest IDs first
+            // so the usable range extends contiguously up from the live region.
             let to_restore = target - in_circulation;
-            for _ in 0..to_restore {
-                if let Some(id) = self.retired_blocks.pop_front() {
+            if to_restore > 0 && !self.retired_blocks.is_empty() {
+                let mut ids: Vec<u32> = self.retired_blocks.iter().copied().collect();
+                ids.sort_unstable();
+                let restore = to_restore.min(ids.len());
+                for &id in &ids[..restore] {
                     self.free_blocks.push_back(id);
-                } else {
-                    break;
                 }
+                self.retired_blocks = ids[restore..].iter().copied().collect();
             }
         }
         // After a shrink that couldn't fully complete (in-use > target), the
         // effective ceiling is what's actually in circulation.
         (self.num_blocks - self.retired_blocks.len()).max(in_use)
+    }
+
+    /// Highest physical block ID currently held by a live request (in-use),
+    /// or `None` if nothing is in use. In-use blocks are those neither free nor
+    /// retired. This is the high-water mark that bounds how far the physical
+    /// pool may be truncated — the tensor tail above this ID holds no live KV.
+    pub fn highest_in_use_block(&self) -> Option<u32> {
+        if self.num_used() == 0 {
+            return None;
+        }
+        let free: std::collections::HashSet<u32> = self.free_blocks.iter().copied().collect();
+        let retired: std::collections::HashSet<u32> =
+            self.retired_blocks.iter().copied().collect();
+        (0..self.num_blocks as u32)
+            .rev()
+            .find(|id| !free.contains(id) && !retired.contains(id))
+    }
+
+    /// Smallest `num_blocks` the physical pool could shrink to RIGHT NOW without
+    /// dropping any live KV: `highest_in_use_block + 1` (0 if nothing is in use).
+    /// A physical truncate to any value `>=` this floor is sound; below it would
+    /// orphan a live request's blocks. Distinct from `target_usable` (logical).
+    pub fn physical_floor(&self) -> usize {
+        self.highest_in_use_block().map_or(0, |id| id as usize + 1)
+    }
+
+    /// Physically shrink the manager's block space to `new_num_blocks`, dropping
+    /// the tail `[new_num_blocks, num_blocks)` from the free/retired lists. The
+    /// CALLER must realloc the backing KV pool tensor to match in lockstep
+    /// ([`PagedKvCacheKt::physical_resize_to`]).
+    ///
+    /// Sound only when the tail holds no live request — fails with `OutOfMemory`
+    /// (repurposed: "tail still in use") if `physical_floor() > new_num_blocks`.
+    /// Drive a logical [`set_target_usable`] shrink first and let it drain, then
+    /// truncate once `physical_floor()` has dropped to the target.
+    pub fn physical_truncate(&mut self, new_num_blocks: usize) -> Result<(), BlockError> {
+        if new_num_blocks >= self.num_blocks {
+            return Ok(());
+        }
+        let floor = self.physical_floor();
+        if floor > new_num_blocks {
+            return Err(BlockError::OutOfMemory {
+                needed: floor,
+                available: new_num_blocks,
+            });
+        }
+        let cap = new_num_blocks as u32;
+        self.free_blocks.retain(|&id| id < cap);
+        self.retired_blocks.retain(|&id| id < cap);
+        self.num_blocks = new_num_blocks;
+        self.target_usable = self.target_usable.min(new_num_blocks);
+        Ok(())
+    }
+
+    /// Physically grow the block space to `new_num_blocks`, adding the new tail
+    /// `[num_blocks, new_num_blocks)` as free (or retired, if above the current
+    /// `target_usable` ceiling). The CALLER must realloc the KV pool tensor to
+    /// match in lockstep. No-op if `new_num_blocks <= num_blocks`.
+    pub fn physical_grow(&mut self, new_num_blocks: usize) {
+        if new_num_blocks <= self.num_blocks {
+            return;
+        }
+        for id in self.num_blocks as u32..new_num_blocks as u32 {
+            if (id as usize) < self.target_usable {
+                self.free_blocks.push_back(id);
+            } else {
+                self.retired_blocks.push_back(id);
+            }
+        }
+        self.num_blocks = new_num_blocks;
     }
 
     /// Allocate a single block. Returns the physical block ID.
@@ -357,6 +440,61 @@ mod tests {
         assert_eq!(bm.num_retired(), 6);
         assert_eq!(bm.num_free(), 4);
         assert_eq!(bm.num_used(), 0);
+    }
+
+    #[test]
+    fn shrink_retires_highest_ids_so_tail_clears() {
+        let mut bm = BlockManager::new(10, 16);
+        // All 10 free. Shrink to 6 must retire the HIGHEST 4 ids (6,7,8,9) so
+        // the pool tail clears and a physical truncate to 6 becomes sound.
+        bm.set_target_usable(6);
+        assert_eq!(bm.num_retired(), 4);
+        // Nothing in use, so the physical floor is 0 and we can truncate to 6.
+        assert_eq!(bm.physical_floor(), 0);
+        bm.physical_truncate(6).expect("tail is clear");
+        assert_eq!(bm.num_blocks(), 6);
+        assert_eq!(bm.num_retired(), 0); // retired ids 6..10 dropped with the tail
+        assert_eq!(bm.num_free(), 6);
+        // Every surviving id is < 6 — no orphaned high block.
+        for _ in 0..6 {
+            assert!(bm.allocate_one().unwrap() < 6);
+        }
+    }
+
+    #[test]
+    fn physical_truncate_blocked_by_live_tail_then_succeeds_after_drain() {
+        let mut bm = BlockManager::new(8, 16);
+        // Hold ids 0..6 (front-pop), leaving 6,7 free.
+        let held = bm.allocate(6).unwrap();
+        // Logical shrink to 4: retire the highest free ids (6,7).
+        bm.set_target_usable(4);
+        assert_eq!(bm.num_retired(), 2);
+        // A live block still sits at id 5 → floor is 6, can't truncate to 4 yet.
+        assert_eq!(bm.physical_floor(), 6);
+        assert!(bm.physical_truncate(4).is_err());
+        // Drain the high holders (ids 4,5) — they retire (target not yet met).
+        bm.free_all(&held[4..6]);
+        assert_eq!(bm.physical_floor(), 4); // ids 0..4 still live
+        bm.physical_truncate(4).expect("tail clear after drain");
+        assert_eq!(bm.num_blocks(), 4);
+        assert_eq!(bm.num_used(), 4);
+    }
+
+    #[test]
+    fn physical_grow_restores_capacity_and_round_trips() {
+        let mut bm = BlockManager::new(6, 16);
+        bm.set_target_usable(4);
+        bm.physical_truncate(4).unwrap();
+        assert_eq!(bm.num_blocks(), 4);
+        // Grow back to 10: add physical capacity FIRST (set_target_usable is
+        // clamped to num_blocks), then raise the logical ceiling to make the new
+        // blocks usable. The new ids 4..10 land retired (above the old ceiling),
+        // then the ceiling-raise un-retires them into the free list.
+        bm.physical_grow(10);
+        assert_eq!(bm.num_blocks(), 10);
+        bm.set_target_usable(10);
+        assert_eq!(bm.num_retired(), 0);
+        assert!(bm.can_allocate(10));
     }
 
     #[test]

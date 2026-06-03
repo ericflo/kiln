@@ -206,6 +206,46 @@ impl RocmContext {
         Ok(())
     }
 
+    /// `(reserved, used)` bytes of THIS device's default stream-ordered memory
+    /// pool: `reserved` = total VRAM the pool currently holds from the OS (its
+    /// high-water mark, since we pin the release threshold), `used` = bytes
+    /// actively allocated out of it right now. `reserved - used` is pooled-free
+    /// memory available for reuse WITHOUT a new OS reservation.
+    ///
+    /// Unlike the DRM/`hipMemGetInfo` counters, these are PROCESS-ISOLATED — they
+    /// measure only kiln's pool, immune to a coexisting llama-server etc. This is
+    /// the right signal for "did a freed KV pool get reused vs grow our
+    /// footprint": a reuse leaves `reserved` flat; a leak grows it. Returns
+    /// `(0,0)` if the runtime lacks mempools.
+    pub fn pool_stats(&self) -> Result<(u64, u64)> {
+        self.bind_to_thread()?;
+        const HIP_MEM_POOL_ATTR_RESERVED_MEM_CURRENT: c_uint = 5;
+        const HIP_MEM_POOL_ATTR_USED_MEM_CURRENT: c_uint = 7;
+        let mut pool: *mut c_void = ptr::null_mut();
+        if unsafe { sys::hipDeviceGetDefaultMemPool(&mut pool, self.ordinal) } != sys::HIP_SUCCESS
+            || pool.is_null()
+        {
+            return Ok((0, 0));
+        }
+        let mut reserved: u64 = 0;
+        let mut used: u64 = 0;
+        let _ = unsafe {
+            sys::hipMemPoolGetAttribute(
+                pool,
+                HIP_MEM_POOL_ATTR_RESERVED_MEM_CURRENT,
+                &mut reserved as *mut u64 as *mut c_void,
+            )
+        };
+        let _ = unsafe {
+            sys::hipMemPoolGetAttribute(
+                pool,
+                HIP_MEM_POOL_ATTR_USED_MEM_CURRENT,
+                &mut used as *mut u64 as *mut c_void,
+            )
+        };
+        Ok((reserved, used))
+    }
+
     /// Device-reported `(free, total)` bytes via `hipMemGetInfo`. On a discrete
     /// GPU this is the driver's own view; on a unified APU it reflects the GTT
     /// budget and is best cross-checked against the OS-level `kiln-memory` probe.
