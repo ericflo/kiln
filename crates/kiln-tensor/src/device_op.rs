@@ -72,6 +72,13 @@ pub trait DeviceOp1: Send + Sync + core::fmt::Debug {
         Ok(None)
     }
 
+    /// ROCm forward. Default: returns `None` (backend fallthrough → the
+    /// dispatch host round-trip). Ops with a native ROCm kernel override this
+    /// to stay on-device. (R.10)
+    fn rocm_fwd(&self, _input: &Tensor) -> Result<Option<Tensor>> {
+        Ok(None)
+    }
+
     /// Backward closure registration. `None` for forward-only ops.
     fn bwd(&self) -> Option<Box<dyn BackwardOp>> {
         None
@@ -94,6 +101,10 @@ pub trait DeviceOp2: Send + Sync + core::fmt::Debug {
         Ok(None)
     }
     fn vulkan_fwd(&self, _a: &Tensor, _b: &Tensor) -> Result<Option<Tensor>> {
+        Ok(None)
+    }
+    /// ROCm forward. Default `None`; native-kernel ops override. (R.10)
+    fn rocm_fwd(&self, _a: &Tensor, _b: &Tensor) -> Result<Option<Tensor>> {
         Ok(None)
     }
     fn bwd(&self) -> Option<Box<dyn BackwardOp>> {
@@ -119,6 +130,10 @@ pub trait DeviceOp3: Send + Sync + core::fmt::Debug {
         Ok(None)
     }
     fn vulkan_fwd(&self, _a: &Tensor, _b: &Tensor, _c: &Tensor) -> Result<Option<Tensor>> {
+        Ok(None)
+    }
+    /// ROCm forward. Default `None`; native-kernel ops override. (R.10)
+    fn rocm_fwd(&self, _a: &Tensor, _b: &Tensor, _c: &Tensor) -> Result<Option<Tensor>> {
         Ok(None)
     }
     fn bwd(&self) -> Option<Box<dyn BackwardOp>> {
@@ -161,9 +176,9 @@ pub fn dispatch1<Op: DeviceOp1 + ?Sized>(op: &Op, input: &Tensor) -> Result<Tens
         Device::Cuda(_) => op.cuda_fwd(input)?,
         Device::Metal(_) => op.metal_fwd(input)?,
         Device::Vulkan(_) => op.vulkan_fwd(input)?,
-        // ROCm has no native kernels yet (Phase R.5); fall through to the
-        // host/CPU path below, mirroring a backend with no native kernel.
-        Device::Rocm(_) => None,
+        // ROCm: try a native rocm_fwd; None falls through to the host
+        // round-trip below (R.10 on-device routing).
+        Device::Rocm(_) => op.rocm_fwd(input)?,
     };
     if let Some(t) = result {
         return Ok(t);
@@ -243,8 +258,8 @@ pub fn dispatch2<Op: DeviceOp2 + ?Sized>(op: &Op, a: &Tensor, b: &Tensor) -> Res
         Device::Cuda(_) => op.cuda_fwd(a, b)?,
         Device::Metal(_) => op.metal_fwd(a, b)?,
         Device::Vulkan(_) => op.vulkan_fwd(a, b)?,
-        // ROCm: no native kernel yet (Phase R.5) — fall through (see dispatch1).
-        Device::Rocm(_) => None,
+        // ROCm: native rocm_fwd; None -> host round-trip (R.10).
+        Device::Rocm(_) => op.rocm_fwd(a, b)?,
     };
     if let Some(t) = result {
         return Ok(t);
@@ -312,8 +327,8 @@ pub fn dispatch3<Op: DeviceOp3 + ?Sized>(
         Device::Cuda(_) => op.cuda_fwd(a, b, c)?,
         Device::Metal(_) => op.metal_fwd(a, b, c)?,
         Device::Vulkan(_) => op.vulkan_fwd(a, b, c)?,
-        // ROCm: no native kernel yet (Phase R.5) — fall through (see dispatch1).
-        Device::Rocm(_) => None,
+        // ROCm: native rocm_fwd; None -> host round-trip (R.10).
+        Device::Rocm(_) => op.rocm_fwd(a, b, c)?,
     };
     if let Some(t) = result {
         return Ok(t);
