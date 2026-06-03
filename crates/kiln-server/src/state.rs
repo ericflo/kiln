@@ -1720,8 +1720,9 @@ impl AppState {
 
         // Compute num_blocks for a given fraction. Used both for the explicit
         // `memory_cfg.num_blocks` path and the auto-sizer retry loop below.
+        let governor_backend = device_kt.backend();
         let compute_blocks_for_fraction = |fraction: f64| -> usize {
-            auto_num_blocks_for_fraction(
+            let n = auto_num_blocks_for_fraction(
                 total_vram,
                 sizing_residency_bytes,
                 bytes_per_block,
@@ -1729,7 +1730,20 @@ impl AppState {
                 model_config.max_position_embeddings,
                 block_size,
                 is_metal,
-            )
+            );
+            // Additionally clamp so the KV pool fits within the governor's LIVE
+            // available budget = free − floor − soft reservations. This is the
+            // inference side of the training/inference arbiter: when a training
+            // run reserves its working set with the governor, inference's KV pool
+            // automatically leaves room for it (and for any coexisting GPU job,
+            // since `free` is the all-process driver figure).
+            if governor_backend != kiln_tensor::Backend::Cpu && bytes_per_block > 0 {
+                let avail = kiln_memory::MemoryGovernor::global().available_bytes();
+                let max_blocks = (avail / bytes_per_block) as usize;
+                n.min(max_blocks)
+            } else {
+                n
+            }
         };
 
         // FP8 (E4M3FN) packing currently uses a CPU round-trip on every
