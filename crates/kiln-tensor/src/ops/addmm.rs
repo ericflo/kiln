@@ -60,6 +60,25 @@ pub fn addmm(c: &Tensor, a: &Tensor, b: &Tensor, alpha: f32, beta: f32) -> Resul
         return crate::cuda_matmul_with_bias(a, b, c);
     }
 
+    // ROCm fast path: fused matmul+bias epilogue via hipBLASLt (mirror of CUDA).
+    #[cfg(feature = "rocm")]
+    if (alpha - 1.0).abs() < f32::EPSILON
+        && (beta - 1.0).abs() < f32::EPSILON
+        && c.rank() == 1
+        && c.shape()[0] == n
+        && matches!(a.device(), crate::Device::Rocm(_))
+        && matches!(b.device(), crate::Device::Rocm(_))
+        && matches!(c.device(), crate::Device::Rocm(_))
+        && matches!(a.dtype(), crate::DType::F32 | crate::DType::BF16 | crate::DType::F16)
+        && a.dtype() == b.dtype()
+        && a.dtype() == c.dtype()
+        && a.is_contiguous()
+        && b.is_contiguous()
+        && c.is_contiguous()
+    {
+        return crate::rocm_matmul_with_bias(a, b, c);
+    }
+
     // Compute the product first.
     let ab = matmul(a, b)?;
     let ab_scaled = if (alpha - 1.0).abs() < f32::EPSILON {

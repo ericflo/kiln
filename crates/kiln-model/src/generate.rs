@@ -21,6 +21,7 @@ use kiln_core::tokenizer::KilnTokenizer;
 use crate::backend::{self, BackendRuntime};
 use crate::cancel::CancelHandle;
 use crate::cuda_graph::CudaGraphRunner;
+use crate::rocm_graph::RocmGraphRunner;
 use crate::decode_buffers::{DecodeBufferConfig, DecodeBuffers, DecodeElementType};
 use crate::forward::lm_head_sample_backend_decode_if;
 use crate::forward::{
@@ -266,6 +267,10 @@ pub struct ModelRunner {
     /// CUDA graph runner for accelerated decode steps.
     /// Uses Mutex for interior mutability (graph state changes during &self generation).
     cuda_graph: Mutex<CudaGraphRunner>,
+    /// ROCm HIP-graph runner for accelerated decode steps (R.9). Independent of
+    /// `cuda_graph`; active only on a Rocm device with `KILN_ROCM_GRAPHS` set,
+    /// inert otherwise. Same per-step interior-mutability pattern.
+    rocm_graph: Mutex<RocmGraphRunner>,
     /// Phase A explicit decode weight registry. Decode kernels address weights
     /// by enum keys instead of safetensors/Candle names.
     /// Phase A.5: lazily built on first hot-path access via `packed_weight_registry()`.
@@ -1502,6 +1507,10 @@ impl ModelRunner {
         let kt_device = weights.embed_tokens.device();
         let backend = backend::for_device_kt(&kt_device);
         let cuda_graph = CudaGraphRunner::new(&kt_device, cuda_graphs);
+        // R.9: the ROCm graph runner gates itself on `KILN_ROCM_GRAPHS` (default
+        // off) and a Rocm device, so pass `true` here — it is inert on every
+        // other backend and when the env var is unset.
+        let rocm_graph = RocmGraphRunner::new(&kt_device, true);
         let training_caps = backend.training_capabilities();
         tracing::info!(
             backend = backend.name(),
@@ -1526,6 +1535,7 @@ impl ModelRunner {
             eos_token_ids,
             active_lora: None,
             cuda_graph: Mutex::new(cuda_graph),
+            rocm_graph: Mutex::new(rocm_graph),
             packed_weight_registry: OnceLock::new(),
             decode_buffers: OnceLock::new(),
             decode_buffer_config: OnceLock::new(),
@@ -1594,6 +1604,9 @@ impl ModelRunner {
         if let Ok(mut graph) = self.cuda_graph.lock() {
             graph.invalidate();
         }
+        if let Ok(mut graph) = self.rocm_graph.lock() {
+            graph.invalidate();
+        }
         // Adapter swap rewires the matmul weights; any cached batched
         // LinearAttentionState is per-request data (independent of weights)
         // but the cache lifecycle follows the same conservative
@@ -1613,6 +1626,9 @@ impl ModelRunner {
             prev.evict_from_backend(&*self.backend);
         }
         if let Ok(mut graph) = self.cuda_graph.lock() {
+            graph.invalidate();
+        }
+        if let Ok(mut graph) = self.rocm_graph.lock() {
             graph.invalidate();
         }
         if let Ok(mut cache) = self.batched_state_cache.lock() {
@@ -1679,6 +1695,9 @@ impl ModelRunner {
     pub fn swap_lora(&mut self, lora: Option<LoraWeights>) {
         self.active_lora = lora;
         if let Ok(mut graph) = self.cuda_graph.lock() {
+            graph.invalidate();
+        }
+        if let Ok(mut graph) = self.rocm_graph.lock() {
             graph.invalidate();
         }
         if let Ok(mut cache) = self.batched_state_cache.lock() {
@@ -3306,6 +3325,43 @@ impl ModelRunner {
             }
         }
 
+        // R.9: ROCm HIP-graph single-row GREEDY decode for the batched/batching-
+        // engine path. Gated by KILN_ROCM_GRAPHS (default off) inside the runner,
+        // so when disabled `sampled` stays as set above and the cuda/eager block
+        // below runs unchanged — zero behavior change for the default path. Only
+        // the greedy (temperature==0) case is handled here (the bs=1 graph
+        // contract); sampled rows fall through to the eager path below. Greedy
+        // sampling needs no `states[0]` access, avoiding the linear_states alias.
+        if sampled.is_none()
+            && row_count == 1
+            && params[0].temperature == 0.0
+            && matches!(self.backend.device(), kiln_tensor::Device::Rocm(_))
+            && self
+                .rocm_graph
+                .lock()
+                .map(|g| g.is_enabled())
+                .unwrap_or(false)
+        {
+            let pc_guard = lock_paged_cache(paged_cache)?;
+            let row = self
+                .rocm_graph
+                .lock()
+                .map_err(|e| anyhow::anyhow!("failed to lock ROCm graph runner: {e}"))?
+                .decode_step_paged(
+                    &*self.backend,
+                    input_tokens[0],
+                    &self.weights,
+                    &self.config,
+                    pc_guard,
+                    &block_tables[0],
+                    sequence_lengths[0],
+                    &mut *linear_states[0],
+                    self.active_lora.as_ref(),
+                )
+                .context("batched decode ROCm graph row failed")?;
+            sampled = Some(vec![greedy_sample(&row)?]);
+        }
+
         let sampled = if let Some(tokens) = sampled {
             tokens
         } else {
@@ -4472,6 +4528,51 @@ impl ModelRunner {
                 linear_state.evict_gdn_recurrent_resident_states(&*self.backend);
             }
             return Ok(token);
+        }
+
+        // R.9: ROCm HIP-graph decode. On a Rocm device with `KILN_ROCM_GRAPHS`
+        // set, route the step through the graph runner (capture/replay, with
+        // eager fallback). When the runner is disabled — the default — this is
+        // skipped entirely and the eager path below runs unchanged, so the
+        // graph path is a transparent no-op until enabled.
+        if matches!(self.backend.device(), kiln_tensor::Device::Rocm(_)) {
+            let maybe_logits = {
+                let mut runner = self
+                    .rocm_graph
+                    .lock()
+                    .map_err(|e| anyhow::anyhow!("failed to lock ROCm graph runner: {e}"))?;
+                if runner.is_enabled() {
+                    let pc_guard = lock_paged_cache(paged_cache)?;
+                    Some(
+                        runner
+                            .decode_step_paged(
+                                &*self.backend,
+                                input_token,
+                                &self.weights,
+                                &self.config,
+                                pc_guard,
+                                block_table,
+                                seq_len,
+                                linear_state,
+                                self.active_lora.as_ref(),
+                            )
+                            .context("ROCm graph decode step failed")?,
+                    )
+                } else {
+                    None
+                }
+            };
+            if let Some(logits) = maybe_logits {
+                let token = if params.is_effectively_greedy() {
+                    greedy_sample(&logits)
+                } else {
+                    sample_step(&logits, params, step_seed, &[])
+                }?;
+                if skip_gdn_state_readback {
+                    linear_state.evict_gdn_recurrent_resident_states(&*self.backend);
+                }
+                return Ok(token);
+            }
         }
 
         let logits = {

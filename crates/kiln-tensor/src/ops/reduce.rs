@@ -186,6 +186,53 @@ impl DeviceOp1 for ReduceOp {
         }
     }
 
+    #[cfg(feature = "rocm")]
+    fn rocm_fwd(&self, x: &Tensor) -> Result<Option<Tensor>> {
+        // Mirrors `cuda_fwd`: native ROCm sum/mean over any single axis,
+        // plus an `All` path (flatten-to-1-D then reduce axis 0). Other
+        // dtypes / zero-element tensors fall through to the host path.
+        if !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16) {
+            return Ok(None);
+        }
+        if !x.is_contiguous() {
+            return Ok(None);
+        }
+        let rank = x.rank();
+        if rank == 0 {
+            return Ok(None);
+        }
+        match self.scope {
+            ReductionScope::Axis(axis) => {
+                if axis >= rank {
+                    return Ok(None);
+                }
+                let axis_dim = x.shape()[axis];
+                if axis_dim == 0 {
+                    return Ok(None);
+                }
+                let out = match self.kind {
+                    ReductionKind::Sum => crate::rocm_sum_axis(x, axis)?,
+                    ReductionKind::Mean => crate::rocm_mean_axis(x, axis)?,
+                };
+                Ok(Some(out))
+            }
+            ReductionScope::All => {
+                let n = x.element_count();
+                if n == 0 {
+                    // mean-of-empty errors on the CPU path; defer there.
+                    return Ok(None);
+                }
+                let flat = x.reshape(vec![n])?;
+                let reduced = match self.kind {
+                    ReductionKind::Sum => crate::rocm_sum_axis(&flat, 0)?,
+                    ReductionKind::Mean => crate::rocm_mean_axis(&flat, 0)?,
+                };
+                let scalar = reduced.reshape(Vec::<usize>::new())?;
+                Ok(Some(scalar))
+            }
+        }
+    }
+
     #[cfg(feature = "vulkan")]
     fn vulkan_fwd(&self, x: &Tensor) -> Result<Option<Tensor>> {
         // Mirror the softmax.rs vulkan_fwd exemplar:

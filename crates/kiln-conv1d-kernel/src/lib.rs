@@ -45,11 +45,14 @@
 /// kiln-tensor-typed kt-API surface. All callers route through this
 /// module; the crate no longer exposes a candle-typed parallel API.
 mod kt_api;
-pub use kt_api::{
-    causal_conv1d_prefill_kt, causal_conv1d_update_kt, supports_kt, supports_prefill_kt,
-    supports_update_kt, Conv1dError,
-};
+// The device-launching entry points need a GPU backend (cuda or rocm) for the
+// FFI symbols below. The pure shape/dtype predicates have no FFI and compile on
+// any configuration.
+#[cfg(any(feature = "cuda", feature = "rocm"))]
+pub use kt_api::{causal_conv1d_prefill_kt, causal_conv1d_update_kt};
+pub use kt_api::{supports_kt, supports_prefill_kt, supports_update_kt, Conv1dError};
 
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 unsafe extern "C" {
     pub(crate) fn kiln_causal_conv1d_update_bf16_f32(
         x: *const core::ffi::c_void,

@@ -2508,7 +2508,7 @@ pub fn sft_train(
                 // `checkpointed_forward_backward_tape_authoritative_kt` both return
                 // `GradSource::Kt`, consumed kt-native by the dispatchers.
                 let grads: GradSource = if let Some(ref segs) = segments {
-                    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+                    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
                     {
                         let (lv, kt_grads) = checkpointed_forward_backward_tape_authoritative_kt(
                             &*backend,
@@ -2523,7 +2523,7 @@ pub fn sft_train(
                         loss_val = lv;
                         GradSource::Kt(kt_grads)
                     }
-                    #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan")))]
+                    #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm")))]
                     {
                         // Non-GPU build: the kt tape adapters don't record on a
                         // CPU candle device, so checkpointed kt-tape backward is a
@@ -4909,7 +4909,7 @@ fn train_tokenized_grpo_group_with_grad_norms(
         // gate stays consistent with SFT: BF16 base on any GPU, F32 base on
         // Vulkan only. For a BF16 base this is a no-op; it newly-permits F32 on
         // Vulkan and explicitly bails F32 on CUDA/Metal (silently-empty before).
-        #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+        #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
         let tape_auth_eligible = tape_authoritative_enabled()
             && matches!(
                 device,
@@ -4923,7 +4923,7 @@ fn train_tokenized_grpo_group_with_grad_norms(
                 && comp_env_count > 0
                 && comp.total_obs_len > 0)
             && !config.loss.no_policy_loss;
-        #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan")))]
+        #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm")))]
         let tape_auth_eligible = false;
 
         let ref_log_probs = if skip_reference {
@@ -5044,7 +5044,7 @@ fn train_tokenized_grpo_group_with_grad_norms(
         // reverse-segment loop. Keep the binding silenced.
         let _ = segments;
         let grads: GradSource = {
-            #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+            #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
             {
                 let (lv, kt_grads) = grpo_step_forward_backward_tape_authoritative_kt(
                     backend,
@@ -5067,7 +5067,7 @@ fn train_tokenized_grpo_group_with_grad_norms(
                 comp_echo_env_ce = None;
                 GradSource::Kt(kt_grads)
             }
-            #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan")))]
+            #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm")))]
             {
                 // `tape_auth_eligible` is a const `false` without the cuda or
                 // metal feature, so the ensure! above already bailed; this arm
@@ -6033,7 +6033,7 @@ fn has_supervised_shifted_labels(label_mask: &[bool]) -> bool {
 /// CE math itself is covered by `tape_forward_parity`
 /// (`tape_forward_cross_entropy_matches_reference`,
 /// `tape_backward_cross_entropy_matches_analytic_gradient`).
-#[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+#[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
 fn cross_entropy_loss(
     logits: &KtTensor,
     input_ids: &[u32],
@@ -7260,7 +7260,7 @@ fn exact_gdn_backward_tile_tokens_for(device: &Device) -> usize {
 // `pub(crate)` so the OPD trainer (`opd.rs`) can reuse the EXACT same gate
 // for its tape-authoritative dispatch — single source of truth for the
 // `KILN_USE_TAPE_AUTHORITATIVE` env semantics (#1082 CP-4 endgame).
-#[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+#[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
 pub(crate) fn tape_authoritative_enabled() -> bool {
     std::env::var("KILN_USE_TAPE_AUTHORITATIVE")
         .map(|v| !matches!(v.trim(), "" | "0" | "false" | "no" | "off"))
@@ -7282,7 +7282,7 @@ pub(crate) fn tape_authoritative_enabled() -> bool {
 ///   genuinely BF16-only, so F32 falls through to the candle path (or bails),
 ///   exactly as before — this gate NEVER newly-permits F32 on CUDA/Metal.
 /// - anything else ⇒ unsupported.
-#[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+#[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
 fn base_dtype_supports_tape(weights: &GpuWeights, device: &Device) -> bool {
     // (#1082) `embed_tokens.dtype()` is now kt `DType`.
     match weights.embed_tokens.dtype() {
@@ -7316,7 +7316,7 @@ fn base_dtype_supports_tape(weights: &GpuWeights, device: &Device) -> bool {
 /// same key. (#1082 Inc-0 PR4) NOW WIRED IN: `standard_forward_backward`'s
 /// tape-authoritative CUDA branch calls this and returns `GradSource::Kt`, so
 /// the SFT loop + the CP-4 gates exercise this kt-native path.
-#[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+#[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
 fn standard_forward_backward_tape_authoritative_kt(
     backend: &dyn BackendRuntime,
     input_ids: &[u32],
@@ -7429,7 +7429,7 @@ fn standard_forward_backward_tape_authoritative_kt(
 /// record only on CUDA, so a CPU checkpointing-tape path would need them
 /// un-gated first (the deeper #1082 endgame). The dispatch below keeps the
 /// candle path for F32/CPU/ECHO.
-#[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+#[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
 #[allow(clippy::too_many_arguments)]
 fn checkpointed_forward_backward_tape_authoritative_kt(
     backend: &dyn BackendRuntime,
@@ -7638,7 +7638,7 @@ pub fn standard_forward_backward(
     // `loss.backward()` path) are all DELETED. F32/CPU training is dropped
     // (the kt fused tape adapters are BF16-only; see
     // `base_dtype_supports_tape` + note `kiln-cp4-tape-adapters-bf16-only`).
-    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
     {
         anyhow::ensure!(
             matches!(
@@ -7669,7 +7669,7 @@ pub fn standard_forward_backward(
         )?;
         Ok((loss_val, GradSource::Kt(kt_grads)))
     }
-    #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan")))]
+    #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm")))]
     {
         let _ = (
             backend,
@@ -7717,7 +7717,7 @@ pub fn standard_forward_backward(
 ///
 /// ECHO is NOT handled here (same as the candle-hack producer): the dispatch
 /// keeps any ECHO-active step on the candle path, so this is non-ECHO GRPO only.
-#[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+#[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
 #[allow(clippy::too_many_arguments)]
 fn grpo_step_forward_backward_tape_authoritative_kt(
     backend: &dyn BackendRuntime,

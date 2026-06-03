@@ -207,6 +207,71 @@ jobs:
       - name: Test Vulkan kernel crate
         run: cargo test --locked -p kiln-vulkan-kernel --test gdn_parity -- --nocapture
 
+  linux-rocm:
+    name: Linux / ROCm (build)
+    # Compile-only gate for the ROCm/HIP backend. GitHub offers no AMD-GPU
+    # runner, but hipcc cross-compiles the csrc/*.cu kernels to the gfx ISA
+    # OFFLINE (no GPU needed) and the HIP SDK supplies libamdhip64 / hipBLASLt
+    # for the link — so this catches Rust/cfg AND kernel-compile AND link
+    # regressions in `--features rocm`, which nothing else in CI does today.
+    # On-hardware parity (wave64 sweep, e2e decode) is left to the self-hosted
+    # gfx1151 runner; this job needs no GPU.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Free disk space for the ROCm toolchain
+        # GitHub-hosted runners ship ~14 GB free on /; the ROCm HIP SDK needs
+        # more. Drop preinstalled toolchains we never use to reclaim ~25 GB.
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc \
+            /usr/local/.ghcup /usr/share/swift /opt/hostedtoolcache/CodeQL \
+            /usr/local/lib/node_modules || true
+          df -h /
+
+      - name: Install Rust stable
+        # Bundled rustup (see the other jobs) — no third-party action to drift.
+        run: |
+          rustup set profile minimal
+          rustup default stable
+          rustc --version
+
+      - name: Install ROCm 7.2.4 HIP SDK (compile toolchain, no GPU driver)
+        # Matches the dev box (ROCm 7.2.4 at /opt/rocm). The `rocm-hip-sdk`
+        # metapackage is the HIP application-development subset: hipcc + HIP
+        # headers + libamdhip64 + the rocm math libs (rocBLAS/hipBLASLt) —
+        # NOT amdgpu-dkms, so no kernel driver / GPU is required. The
+        # `amdgpu-install` .deb only wires up the apt repos; we then install the
+        # SDK packages directly to keep the footprint small.
+        run: |
+          set -euxo pipefail
+          DEB=amdgpu-install_7.2.4.70204-1_all.deb
+          wget -q "https://repo.radeon.com/amdgpu-install/7.2.4/ubuntu/jammy/${DEB}"
+          sudo apt-get update
+          sudo apt-get install -y "./${DEB}"
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends rocm-hip-sdk hipblaslt-dev
+          echo "/opt/rocm/bin" >> "$GITHUB_PATH"
+          /opt/rocm/bin/hipcc --version
+          df -h /
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+
+      - name: Fetch dependencies
+        run: cargo fetch
+
+      - name: Build (ROCm)
+        # One gfx target keeps the per-kernel hipcc time down; the kernel SOURCE
+        # is arch-agnostic for compile purposes (wave-size correctness is an
+        # on-hardware concern, validated by the self-hosted runner). Building the
+        # server bin links libamdhip64 + hipBLASLt, so link regressions surface
+        # here too — not just typecheck/cfg.
+        env:
+          ROCM_PATH: /opt/rocm
+          KILN_ROCM_ARCHS: gfx1100
+        run: cargo build --locked --bin kiln -p kiln-server --no-default-features --features rocm
+
   cargo-deny:
     name: cargo-deny (license / source / bans policy)
     runs-on: ubuntu-22.04

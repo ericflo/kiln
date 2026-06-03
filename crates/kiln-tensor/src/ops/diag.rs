@@ -39,6 +39,14 @@ pub fn diagonal(t: &Tensor) -> Result<Tensor> {
         }
     }
 
+    // ROCm fast path: square rank-2, contiguous, F32/BF16/F16 (all validated
+    // above). Routes through the native `diag.cu` extract kernel (Phase R.5) —
+    // no host round-trip.
+    #[cfg(feature = "rocm")]
+    if matches!(t.device(), crate::Device::Rocm(_)) {
+        return crate::rocm_diagonal_extract(t);
+    }
+
     let dtype = t.dtype();
     let per = dtype.size_in_bytes();
     let bytes = t
@@ -76,6 +84,14 @@ pub fn diag(v: &Tensor) -> Result<Tensor> {
         if matches!(v.device(), crate::Device::Cuda(_)) {
             return crate::cuda_diag_build(v);
         }
+    }
+
+    // ROCm fast path: rank-1, contiguous, F32/BF16/F16 (all validated above).
+    // Routes through the native `diag.cu` build kernel (Phase R.5) — no host
+    // round-trip.
+    #[cfg(feature = "rocm")]
+    if matches!(v.device(), crate::Device::Rocm(_)) {
+        return crate::rocm_diag_build(v);
     }
 
     let dtype = v.dtype();

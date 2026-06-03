@@ -8,11 +8,29 @@ repository.workspace = true
 description = "Vendored Gated DeltaNet (GDN) chunk forward-substitution CUDA kernel with C-ABI wrapper"
 build = "build.rs"
 
+[features]
+# Default to the historical CUDA build so existing
+# `cargo build -p kiln-gdn-kernel` invocations keep their behavior.
+default = ["cuda"]
+# CUDA backend — nvcc-compiles `csrc/*.cu` (build.rs::build_cuda) and routes the
+# `_kt` wrappers through kiln-tensor/kiln-kt-bridge's CUDA device-pointer seam.
+cuda = ["kiln-tensor/cuda", "kiln-kt-bridge/cuda"]
+# ROCm backend (Phase R.7) — mirrors `cuda`, swapping each `<dep>/cuda` ->
+# `<dep>/rocm`. Drives build.rs::build_rocm (hipcc-compiles the same `csrc/*.cu`
+# via the kiln-tensor hip_compat shim + this crate's `csrc/hip_compat/cuda.h`,
+# with `recurrent_gdn_fwd.cu`'s block reduction routed through
+# `kt_gpu_compat.cuh`'s wave-agnostic `kiln_block_reduce_sum`) and routes the
+# `_kt` wrappers through the backend-neutral `kiln_kt_bridge::device_*` seam,
+# which dispatches to the ROCm storage for `Device::Rocm` tensors.
+rocm = ["kiln-tensor/rocm", "kiln-kt-bridge/rocm"]
+
 [dependencies]
 half = "2"
-# Phase 7 closeout (#1082) — kiln-tensor-typed surface is the only path.
-kiln-tensor = { workspace = true, features = ["cuda"] }
-kiln-kt-bridge = { path = "../kiln-kt-bridge", default-features = false, features = ["cuda"] }
+# Phase 7 closeout (#1082) — kiln-tensor-typed surface is the only path. The
+# backend feature (`cuda` / `rocm`) is forwarded from THIS crate's matching
+# feature above so the dep doesn't hardwire CUDA.
+kiln-tensor = { workspace = true }
+kiln-kt-bridge = { path = "../kiln-kt-bridge", default-features = false }
 
 [build-dependencies]
 cc = "1"

@@ -25,6 +25,12 @@ fn to_cpu(t: &Tensor) -> Result<Tensor> {
             return crate::cuda_to_host_copy(t);
         }
     }
+    #[cfg(feature = "rocm")]
+    {
+        if matches!(t.device(), crate::Device::Rocm(_)) {
+            return crate::rocm_to_host_copy(t);
+        }
+    }
     #[cfg(feature = "metal")]
     {
         if matches!(t.device(), crate::Device::Metal(_)) {

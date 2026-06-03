@@ -9,6 +9,13 @@
 //! The legacy "BORROW adapter" smoke (zero-copy candle→kt round-trip)
 //! moved to `crates/kiln-kt-bridge/tests/` where the adapter actually
 //! lives. This file tests the kt API in isolation.
+//!
+//! CUDA-only: `Tensor::cuda_from_slice` / `primary_cuda_context` are the
+//! cuda-storage substrate helpers and don't exist on the ROCm build. The
+//! backend-neutral ROCm parity coverage lives in `rocm_conv1d_parity.rs`
+//! (gated on `feature = "rocm"`), which constructs inputs via
+//! `Tensor::from_vec_on(Device::Rocm(0), ...)`.
+#![cfg(feature = "cuda")]
 
 use half::bf16;
 

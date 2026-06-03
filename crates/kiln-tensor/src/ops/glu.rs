@@ -60,6 +60,18 @@ fn cuda_activation_kind(kind: GluKind) -> i32 {
     }
 }
 
+/// ROCm activation kind tag — same `csrc/activation.cu`, shared C ABI, so the
+/// tags are identical to the CUDA path.
+#[cfg(feature = "rocm")]
+fn rocm_activation_kind(kind: GluKind) -> i32 {
+    match kind {
+        GluKind::Glu => 1,    // KIND_SIGMOID
+        GluKind::SwiGLU => 0, // KIND_SILU
+        GluKind::GeGLU => 2,  // KIND_GELU
+        GluKind::ReGLU => 4,  // KIND_RELU
+    }
+}
+
 fn apply(kind: GluKind, x: &Tensor) -> Result<Tensor> {
     if x.rank() == 0 {
         bail!("{}: input must have rank ≥ 1", kind.name());
@@ -111,6 +123,34 @@ fn apply(kind: GluKind, x: &Tensor) -> Result<Tensor> {
         let activated = crate::cuda_activation_unary(&b, act_kind)?;
         // KIND_MUL = 2 per csrc/elementwise.cu.
         let out = crate::cuda_elementwise_binary(&a, &activated, 2)?;
+        return Ok(out);
+    }
+
+    // ROCm fast path (#1082): mirror the CUDA compose on-device — split the
+    // trailing axis in half, contiguify each half, apply the per-kind native
+    // activation kernel to `b`, then multiply by `a` via the native
+    // element-wise binary kernel (KIND_MUL=2). Each piece is a parity-validated
+    // R.5 kernel; the composition skips the host download + per-element loop.
+    #[cfg(feature = "rocm")]
+    if matches!(x.device(), crate::Device::Rocm(_)) {
+        let axis = x.rank() - 1;
+        let parts = crate::ops::chunk(x, 2, axis)?;
+        if parts.len() != 2 {
+            bail!(
+                "{}: chunk produced {} parts (expected 2)",
+                kind.name(),
+                parts.len()
+            );
+        }
+        // `chunk` returns narrow views (non-contiguous along the split axis
+        // when axis is innermost). The native activation + elementwise kernels
+        // require contiguous storage.
+        let a = crate::rocm_contiguous(&parts[0])?;
+        let b = crate::rocm_contiguous(&parts[1])?;
+        let act_kind = rocm_activation_kind(kind);
+        let activated = crate::rocm_activation_unary(&b, act_kind)?;
+        // KIND_MUL = 2 per csrc/elementwise.cu.
+        let out = crate::rocm_elementwise_binary(&a, &activated, 2)?;
         return Ok(out);
     }
 

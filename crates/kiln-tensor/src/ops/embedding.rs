@@ -292,6 +292,48 @@ impl DeviceOp2 for EmbeddingOp {
         }
     }
 
+    #[cfg(feature = "rocm")]
+    fn rocm_fwd(&self, weights: &Tensor, token_ids: &Tensor) -> Result<Option<Tensor>> {
+        // Mirrors `cuda_fwd`: flatten multi-dim token_ids -> gather along
+        // dim0 -> reshape. U32 token_ids only; I64 / packed weights fall
+        // through to CPU.
+        validate_inputs(weights, token_ids)?;
+        if weights.dtype().is_packed() {
+            return Ok(None);
+        }
+        if !weights.is_contiguous() {
+            return Ok(None);
+        }
+        if !token_ids.is_contiguous() {
+            return Ok(None);
+        }
+        let n_indices = token_ids.element_count();
+        let hidden = weights.shape()[1];
+
+        let ids_u32 = if token_ids.dtype() == DType::U32 {
+            if token_ids.rank() == 1 {
+                token_ids.clone()
+            } else {
+                token_ids.reshape(vec![n_indices])?
+            }
+        } else if token_ids.dtype() == DType::I64 {
+            // I64 -> U32 cast path not on the ROCm gather kernel; defer to CPU.
+            return Ok(None);
+        } else {
+            return Ok(None);
+        };
+
+        let gathered = crate::rocm_index_select_dim0(weights, &ids_u32)?;
+
+        if token_ids.rank() == 1 {
+            Ok(Some(gathered))
+        } else {
+            let mut out_shape = token_ids.shape().to_vec();
+            out_shape.push(hidden);
+            Ok(Some(gathered.reshape(out_shape)?))
+        }
+    }
+
     fn bwd(&self) -> Option<Box<dyn BackwardOp>> {
         // See module doc — wired up under kiln-autograd in a follow-up.
         None

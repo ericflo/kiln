@@ -183,6 +183,24 @@ fn cuda_direct_paged_decode_disabled() -> bool {
     *DISABLED.get_or_init(|| std::env::var("KILN_DISABLE_CUDA_DIRECT_PAGED_DECODE").is_ok())
 }
 
+/// ROCm device-resident KV pools + the native sq=1 O(n) paged-decode path
+/// (correct + faster at every context length: ~13 tok/s @32, ~12 @128, ~11 @256
+/// vs the contiguous O(n^2) prefill recompute's 10.5 degrading to ~8). DEFAULT
+/// ON; set `KILN_ROCM_PAGED_DECODE=0` to fall back to the contiguous path. Read
+/// by both `use_direct_paged_decode` here AND the KV-pool device-routing in
+/// `PagedKvCacheKt::new` (they must agree).
+pub(crate) fn rocm_paged_decode_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("KILN_ROCM_PAGED_DECODE")
+            .map(|v| {
+                let v = v.trim().to_ascii_lowercase();
+                !(v == "0" || v == "false" || v == "no" || v == "off")
+            })
+            .unwrap_or(true)
+    })
+}
+
 #[cfg(feature = "cuda")]
 fn cuda_fused_rotary_qk_disabled() -> bool {
     static DISABLED: OnceLock<bool> = OnceLock::new();
@@ -220,7 +238,7 @@ fn cuda_fused_attn_sigmoid_mul_disabled() -> bool {
 /// at once. Set `KILN_USE_KT_API_ALL=1` to exercise the entire
 /// adapter-routed path end-to-end. Each per-family flag also
 /// short-circuits true when this is set.
-#[cfg(feature = "cuda")]
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 fn cuda_use_kt_api_all() -> bool {
     if cuda_kt_api_master_off() {
         return false;
@@ -236,7 +254,7 @@ fn cuda_use_kt_api_all() -> bool {
 /// test to exercise the candle backend-hooks (linear_prefill / FLCE
 /// provider / flash-decline) that the default-on kt-API gates otherwise
 /// route around. Disable value wins over `KILN_USE_KT_API_ALL`.
-#[cfg(feature = "cuda")]
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 fn cuda_kt_api_master_off() -> bool {
     static OFF: OnceLock<bool> = OnceLock::new();
     *OFF.get_or_init(|| std::env::var("KILN_DISABLE_KT_API_ALL").is_ok())
@@ -1547,7 +1565,7 @@ fn cuda_use_kt_api_to_dtype() -> bool {
 /// is freshly-owned; there's no "borrowed candle Tensor" type to
 /// wrap a kt allocation yet). Inputs go zero-copy through the
 /// kt-bridge borrow adapter.
-#[cfg(feature = "cuda")]
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 pub(crate) fn cuda_use_kt_api_matmul() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     let direct = *ENABLED.get_or_init(|| std::env::var("KILN_USE_KT_API_MATMUL").is_ok());
@@ -2620,7 +2638,7 @@ fn add_lora_delta_to_base(
     // `LoraDeltaAddBackward` emitting grads for proj.a/proj.b (kt-keyed on their Var
     // ids), no kt->candle->kt round-trip.
     // (#1082) Vulkan added: device-agnostic pure-kt recorder.
-    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
     if let Some(out) = crate::tape_forward::try_tape_lora_add_kt(&base, x, proj, lora_scale)
         .context("add_lora_delta_to_base try_tape_lora_add_kt")?
     {
@@ -2748,7 +2766,7 @@ fn linear_with_lora_t_backend_decode_if(
         // the SOLE producer of the LoRA A/B backward. PR6 wired Vulkan into the
         // `tape_forward.rs` device-matches but missed this `cfg` gate, so LoRA
         // grads were never recorded on Vulkan → empty grad store.
-        #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+        #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
         if crate::tape_forward::tape_forward_enabled() {
             if let Some(out) =
                 crate::tape_forward::try_tape_lora_linear_kt(x, weight_t, lora, lora_scale)
@@ -2989,6 +3007,24 @@ fn cuda_softmax_last_dim(x: &Tensor) -> Result<Tensor> {
         && !x.track_op()
     {
         if let Some(out) = try_kt_softmax_last_dim(x)? {
+            return Ok(out);
+        }
+    }
+    // ROCm: route through the native `rocm_softmax_last_axis` kernel (on-device,
+    // device_ptr-based) instead of the `max_keepdim`-composite below. The
+    // composite's `max_keepdim` -> `max_axis` has no `rocm_fwd`, so it host-falls
+    // -back (`to_device(Cpu)` -> `rocm_to_host_copy` -> `RocmStorage::slice()`),
+    // which is both a per-token host round-trip on the FP8 eager-attention decode
+    // path AND a hard panic under HIP-graph capture (slice() on a Borrowed
+    // freeze-pointer arena buffer). `!track_op()` keeps the training tape on the
+    // differentiable composite, matching the CUDA guard above.
+    #[cfg(feature = "rocm")]
+    if matches!(x.device(), Device::Rocm(_))
+        && matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16)
+        && x.is_contiguous()
+        && !x.track_op()
+    {
+        if let Ok(out) = kiln_tensor::rocm_softmax_last_axis(x) {
             return Ok(out);
         }
     }
@@ -5642,7 +5678,7 @@ fn matmul_no_broadcast_copy(lhs: &Tensor, rhs: &Tensor) -> Result<Tensor> {
 /// through to candle's `Tensor::matmul`. NVTX range `kiln/matmul_kt`
 /// brackets the migrated call so nsys traces separate the path from
 /// the candle baseline.
-#[cfg(feature = "cuda")]
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 pub(crate) fn try_kt_matmul(lhs: &Tensor, rhs: &Tensor) -> Result<Option<Tensor>> {
     kiln_nvtx::range!(c"kiln/matmul_kt");
 
@@ -5664,6 +5700,9 @@ pub(crate) fn try_kt_matmul(lhs: &Tensor, rhs: &Tensor) -> Result<Option<Tensor>
     // CUDA-graph capture window. Decode now falls straight through to the
     // kt-native `cuda_matmul` below.
     // #1082 seam flip: kt-native MatmulBackward recorder — no kt->candle->kt.
+    // The experimental tape_forward path is cuda-gated (R.4); on ROCm we fall
+    // straight through to the device-dispatched dense matmul below.
+    #[cfg(feature = "cuda")]
     if crate::tape_forward::tape_forward_enabled() {
         if let Some(out) = crate::tape_forward::try_tape_matmul_kt(lhs, rhs)
             .context("try_kt_matmul try_tape_matmul_kt")?
@@ -5672,7 +5711,16 @@ pub(crate) fn try_kt_matmul(lhs: &Tensor, rhs: &Tensor) -> Result<Option<Tensor>
         }
     }
 
-    let out_kt = match kiln_tensor::cuda_matmul(lhs, rhs) {
+    // Backend-dispatched dense matmul: cuda_matmul on Device::Cuda,
+    // rocm_matmul on Device::Rocm (each cfg-gated to its backend). (R.4)
+    let matmul_result = match lhs.device() {
+        #[cfg(feature = "cuda")]
+        kiln_tensor::Device::Cuda(_) => kiln_tensor::cuda_matmul(lhs, rhs),
+        #[cfg(feature = "rocm")]
+        kiln_tensor::Device::Rocm(_) => kiln_tensor::rocm_matmul(lhs, rhs),
+        _ => return Ok(None),
+    };
+    let out_kt = match matmul_result {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
@@ -5706,7 +5754,7 @@ fn gdn_in_proj_matmul(
     // dx-only `MatmulBf16wBackward`, so dx flows back to `x`/`normed` while the
     // weight stays frozen BF16. No-op (returns None) off the tape path or on the
     // equal-dtype path, falling through to the existing dispatch below.
-    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
     if crate::tape_forward::tape_forward_enabled() {
         if let Some(out) =
             crate::tape_forward::try_tape_lora_linear_kt(x, weight_t, None, 0.0)
@@ -6583,7 +6631,7 @@ pub fn embedding_lookup(token_ids: &[u32], embed_weights: &Tensor) -> Result<Ten
     // `try_kt_embedding_lookup` below.
     // #1082 seam flip: kt-native EmbeddingBackward recorder — no kt->candle->kt.
     // (#1082) Vulkan added: device-agnostic pure-kt recorder.
-    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
     if crate::tape_forward::tape_forward_enabled() {
         if let Some(out) = crate::tape_forward::try_tape_embedding_kt(embed_weights, &index)
             .context("embedding_lookup try_tape_embedding_kt")?
@@ -7064,6 +7112,26 @@ pub fn rms_norm(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor> {
         } else {
             Ok(out32.to_dtype(in_dtype)?)
         };
+    }
+    // ROCm inference path: route through the native fused RMSNorm kernel
+    // (`kiln_rmsnorm_kernel::fused_rmsnorm_kt`, R.7) — same FFI shape as the
+    // CUDA kt-only branch above. Without this ROCm fell through to
+    // `rms_norm_fallback`, whose `ones_like(weight)` builds a [hidden] CPU
+    // tensor and `to_device`s it on EVERY call: ~2 H2D syncs per layer
+    // (input + post-attn norm), which was the dominant remaining per-token
+    // host round-trip (`[2560]` was ~60% of all H2D in the decode profile).
+    // Forward-only (gated on !track_op); training stays CUDA-BF16/kt-tape.
+    #[cfg(feature = "rocm")]
+    if !x.track_op()
+        && !weight.track_op()
+        && matches!(x.device(), Device::Rocm(_))
+        && x.is_contiguous()
+        && weight.is_contiguous()
+        && kiln_rmsnorm_kernel::supports_rmsnorm_kt(x, weight)
+    {
+        return kiln_rmsnorm_kernel::fused_rmsnorm_kt(x, weight, eps as f32)
+            .map_err(|e| anyhow::anyhow!("rocm kt fused_rmsnorm: {e}"))
+            .context("rms_norm rocm kernel failed");
     }
     rms_norm_fallback(x, weight, eps)
 }
@@ -7744,6 +7812,24 @@ pub fn rotary_embedding_from_tensor(
         }
     }
 
+    // ROCm inference: route through the native fused rotary-QK kernel
+    // (`kiln_rmsnorm_kernel::fused_rotary_qk_kt`, R.7 — rocm-capable), mirroring
+    // the CUDA branch above. Without this ROCm ran the ~10-op `apply_rope`
+    // composite (cast/narrow/contiguous/broadcast-mul ×2 for q AND k) every
+    // attention layer — many small kernel launches on the decode hot path. The
+    // fused kernel is one launch and bit-exact (same FFI symbol).
+    // supports_rotary_qk_kt already gates device(Rocm) + BF16 q/k + F32 cos/sin
+    // + contiguous + rank-4 + shape; if any fails it falls to apply_rope.
+    #[cfg(feature = "rocm")]
+    if !q.track_op()
+        && !k.track_op()
+        && kiln_rmsnorm_kernel::supports_rotary_qk_kt(q, k, &cos, &sin, head_dim, rotary_dim)
+    {
+        return kiln_rmsnorm_kernel::fused_rotary_qk_kt(q, k, &cos, &sin, rotary_dim)
+            .map_err(|e| anyhow::anyhow!("rocm kt fused_rotary_qk: {e}"))
+            .context("rotary_embedding_from_tensor rocm fused kernel");
+    }
+
     let rotated_q = apply_rope(q, &cos, &sin, head_dim, rotary_dim)?;
     let rotated_k = apply_rope(k, &cos, &sin, head_dim, rotary_dim)?;
 
@@ -7833,7 +7919,7 @@ fn residual_add(a: Tensor, b: Tensor) -> Result<Tensor> {
     // residual add is on the critical path between every attn/MLP subblock and
     // the residual stream; without recording it on Vulkan the tape severs at the
     // residual and the in-block LoRA grads never reach the loss.
-    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
     {
         // #1082 seam flip: kt-native AddBackward recorder — no kt->candle->kt
         // round-trip (decode: tape off -> Ok(None) -> falls to the plain add below).
@@ -7865,7 +7951,7 @@ fn apply_rope(
     // recorder (`rope_split_half` + `RopeSplitHalfBackward`). Without it on
     // Vulkan the q/k RoPE severs the tape and `q_proj`/`k_proj` LoRA grads
     // never reach the loss.
-    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
     {
         // CP-4 (#1082): route split-half RoPE through the kt Tape when
         // KILN_USE_TAPE_FORWARD is set and a tape scope is active. No-ops
@@ -11215,7 +11301,7 @@ fn lm_head_forward_backend_decode_if(
     // (#1082) Vulkan added: `try_tape_lora_linear_kt` is device-agnostic and is
     // the producer that connects the CE loss back through the lm_head into the
     // model — without it on Vulkan the tape root dead-ends at the logits.
-    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
     {
         // #1082 H4: `tape_forward_enabled()` DEFAULTS ON, but DECODE has no
         // active bridge scope, so the kt->candle copy of `x` + the full frozen
@@ -11755,7 +11841,7 @@ fn gdn_qk_norm(q: &Tensor, k: &Tensor, input_dtype: DType, scale: f64) -> Result
     // Vulkan included: `try_tape_gdn_l2_norm_scale_kt` + `GdnL2NormScaleBackward`
     // are device-agnostic, and without the qk-norm node the recurrence's dq/dk
     // sever before the qkv_split → in_proj_qkv LoRA `Var` on Vulkan.
-    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
     if crate::tape_forward::tape_forward_enabled() {
         let _ = crate::tape_forward::try_tape_gdn_l2_norm_scale_kt(q, scale, &q_out)?;
         let _ = crate::tape_forward::try_tape_gdn_l2_norm_scale_kt(k, 1.0, &k_out)?;
@@ -11991,9 +12077,9 @@ fn gated_rms_norm(
     // `gated_rms_norm_fallback` runs (its kt ops keep the output on the
     // activation device via the Vulkan op host-fallback, and the caller records
     // the analytic `GdnGatedRmsNormBackward`). Default (inference) is unchanged.
-    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
     let tape_recording_active = crate::tape_forward::tape_forward_enabled();
-    #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan")))]
+    #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm")))]
     let tape_recording_active = false;
     if !tape_recording_active
         && !any_kt_tensor_tracks_op(&[x, z, weight])
@@ -12685,9 +12771,9 @@ fn gdn_chunkwise_recurrence(
     // output on the activation device via the Vulkan op host-fallback, and the
     // `GdnRecurrentBackward` recorded by the caller flows dq/dk/dv back). Default
     // (inference, no tape scope) behaviour is unchanged.
-    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
     let tape_recording_active = crate::tape_forward::tape_forward_enabled();
-    #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan")))]
+    #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm")))]
     let tape_recording_active = false;
     if seq_len > 1 && !tape_recording_active && !any_kt_tensor_tracks_op(&[q, k, v, beta, g, state]) {
         if let Some(out) = backend.gdn_chunkwise_forward(q, k, v, beta, g, state, chunk_size)? {
@@ -15109,9 +15195,9 @@ fn gated_deltanet_forward_decode_if_inner(
     // kt-bridge scope (that's a CUDA/Metal candle-bridge construct). Gate purely
     // on the tape-forward flag so the unfused, fully-tape-wired GDN forward runs
     // (and the conv1d-prefill recorder fires) on Vulkan too.
-    #[cfg(all(feature = "vulkan", not(any(feature = "cuda", feature = "metal"))))]
+    #[cfg(all(any(feature = "vulkan", feature = "rocm"), not(any(feature = "cuda", feature = "metal"))))]
     let tape_recording_active = crate::tape_forward::tape_forward_enabled();
-    #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan")))]
+    #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm")))]
     let tape_recording_active = false;
     let gdn_forward_only_fastpaths =
         allow_forward_only_fastpaths && !x.track_op() && !tape_recording_active;
@@ -15192,7 +15278,7 @@ fn gated_deltanet_forward_decode_if_inner(
                 lora_scale,
             )?; // [B, T, v_dim]
             let prefill_ab: Option<(Tensor, Tensor, Tensor)> = {
-                #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+                #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
                 {
                     let mut out = None;
                     if let Some(in_proj_ab_t) = weights.in_proj_ab_t.as_ref() {
@@ -15243,7 +15329,7 @@ fn gated_deltanet_forward_decode_if_inner(
                     }
                     out
                 }
-                #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan")))]
+                #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm")))]
                 {
                     None
                 }
@@ -15457,7 +15543,7 @@ fn gated_deltanet_forward_decode_if_inner(
                     // candle fallback unless the gate is on + a tape scope is
                     // active.
                     // #1082 seam flip: kt-native transpose recorder — no kt->candle->kt.
-                    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+                    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
                     {
                         match crate::tape_forward::try_tape_transpose_kt(&mixed_qkv, 1, 2)
                             .context("gdn conv transpose try_tape_transpose_kt")?
@@ -15466,7 +15552,7 @@ fn gated_deltanet_forward_decode_if_inner(
                             None => mixed_qkv.transpose(1, 2)?.contiguous()?,
                         }
                     }
-                    #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan")))]
+                    #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm")))]
                     {
                         mixed_qkv.transpose(1, 2)?.contiguous()?
                     }
@@ -15522,7 +15608,7 @@ fn gated_deltanet_forward_decode_if_inner(
                             // CP-4 Increment 3 (#1082): wire the prefill conv +
                             // its SiLU onto the kt Tape. See the comment on the
                             // sibling fallback branch below.
-                            #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+                            #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
                             // #1082 seam flip: kt-native conv1d-prefill recorder — no kt->candle->kt.
                             // Device-agnostic backward (CUDA FFI / kt composite), so Vulkan is in.
                             if crate::tape_forward::tape_forward_enabled() {
@@ -15563,7 +15649,7 @@ fn gated_deltanet_forward_decode_if_inner(
                     // fallback unless `KILN_USE_TAPE_GDN_CONV` (+ FORWARD) is set
                     // AND a tape scope is active. This is the training path
                     // (track_op=true -> gdn_forward_only_fastpaths=false).
-                    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+                    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
                     if crate::tape_forward::tape_forward_enabled()
                     {
                         // #1082 seam flip: kt-native conv1d-prefill recorder — no kt->candle->kt.
@@ -15600,7 +15686,7 @@ fn gated_deltanet_forward_decode_if_inner(
             // the conv. No-op + candle fallback unless the gate is on + a tape
             // scope is active.
             // #1082 seam flip: kt-native transpose recorder — no kt->candle->kt.
-            #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+            #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
             {
                 match crate::tape_forward::try_tape_transpose_kt(&post_silu, 1, 2)
                     .context("gdn conv-out transpose try_tape_transpose_kt")?
@@ -15609,7 +15695,7 @@ fn gated_deltanet_forward_decode_if_inner(
                     None => post_silu.transpose(1, 2)?,
                 }
             }
-            #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan")))]
+            #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm")))]
             {
                 post_silu.transpose(1, 2)?
             }
@@ -15644,7 +15730,7 @@ fn gated_deltanet_forward_decode_if_inner(
             // The z reshape connects the in_proj_z keystone output to the
             // gated-RMSNorm gate input. No-op + candle fallback unless the gate is
             // on + a tape scope is active.
-            #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+            #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
             let narrow_then_reshape =
                 |src: &Tensor, offset: usize, length: usize, shape: (usize, usize, usize, usize)| -> Result<Tensor> {
                     // Materialise contiguous: `narrow` returns a strided view, but
@@ -15675,7 +15761,7 @@ fn gated_deltanet_forward_decode_if_inner(
                         None => Ok(resh),
                     }
                 };
-            #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan")))]
+            #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm")))]
             let narrow_then_reshape =
                 |src: &Tensor, offset: usize, length: usize, shape: (usize, usize, usize, usize)| -> Result<Tensor> {
                     Ok(src.narrow(2, offset, length)?.reshape(shape)?)
@@ -15685,7 +15771,7 @@ fn gated_deltanet_forward_decode_if_inner(
             let v = narrow_then_reshape(&mixed_qkv, 2 * qk_dim, v_dim, (batch, seq_len, nv, dv))?;
             let z_reshaped = z.reshape((batch, seq_len, nv, dv))?;
             // #1082 seam flip: kt-native reshape recorder — no kt->candle->kt.
-            #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+            #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
             let z_reshaped = match crate::tape_forward::try_tape_reshape_kt(
                 &z,
                 vec![batch, seq_len, nv, dv],
@@ -15875,7 +15961,7 @@ fn gated_deltanet_forward_decode_if_inner(
                             // candle fallback unless the gate is on + a tape
                             // scope is active.
                             // #1082 seam flip: kt-native GqaExpandBackward recorder — no kt->candle->kt.
-                            #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+                            #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
                             let q_exp = match crate::tape_forward::try_tape_gqa_expand_kt(
                                 &q, gqa_ratio, &q_exp,
                             )
@@ -15884,7 +15970,7 @@ fn gated_deltanet_forward_decode_if_inner(
                                 Some(t) => t,
                                 None => q_exp,
                             };
-                            #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+                            #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
                             let k_exp = match crate::tape_forward::try_tape_gqa_expand_kt(
                                 &k, gqa_ratio, &k_exp,
                             )
@@ -16280,14 +16366,14 @@ fn gated_deltanet_forward_decode_if_inner(
             // training path (which sets qk_expanded == true) but wired for
             // parity across configs.
             // #1082 seam flip: kt-native GqaExpandBackward recorder — no kt->candle->kt.
-            #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+            #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
             let q_exp = match crate::tape_forward::try_tape_gqa_expand_kt(&q, gqa_ratio, &q_exp)
                 .context("gdn gqa-expand-recur try_tape_gqa_expand_kt q")?
             {
                 Some(t) => t,
                 None => q_exp,
             };
-            #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+            #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
             let k_exp = match crate::tape_forward::try_tape_gqa_expand_kt(&k, gqa_ratio, &k_exp)
                 .context("gdn gqa-expand-recur try_tape_gqa_expand_kt k")?
             {
@@ -16414,7 +16500,7 @@ fn gated_deltanet_forward_decode_if_inner(
             // needs the entry state. Cheap clone (a Tensor handle); only the
             // CUDA tape path reads it, but we take it unconditionally so the
             // wiring stays a single no-op call below.
-            #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+            #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
             let gdn_entry_state = recurrent_state.clone();
 
             // Cast v back to input_dtype so the recurrence stays in bf16. The
@@ -16437,7 +16523,7 @@ fn gated_deltanet_forward_decode_if_inner(
                 // chained id on every input.
                 let v_cast = v.to_dtype(input_dtype)?;
                 // #1082 seam flip: kt-native CastCompositeBackward recorder — no kt->candle->kt.
-                #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+                #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
                 let v_cast = match crate::tape_forward::try_tape_cast_kt(&v, &v_cast)
                     .context("gdn recur v-cast try_tape_cast_kt")?
                 {
@@ -16448,7 +16534,7 @@ fn gated_deltanet_forward_decode_if_inner(
 
                 // Transpose to [B, nv, T, dim] for per-head processing.
                 // #1082 seam flip: kt-native transpose recorder — no kt->candle->kt.
-                #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+                #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
                 let transpose12 = |t: &Tensor| -> Result<Tensor> {
                     match crate::tape_forward::try_tape_transpose_kt(t, 1, 2)
                         .context("gdn recur transpose try_tape_transpose_kt")?
@@ -16457,7 +16543,7 @@ fn gated_deltanet_forward_decode_if_inner(
                         None => Ok(t.transpose(1, 2)?),
                     }
                 };
-                #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan")))]
+                #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm")))]
                 let transpose12 = |t: &Tensor| -> Result<Tensor> { Ok(t.transpose(1, 2)?) };
 
                 let q = transpose12(&q)?; // [B, nv, T, dk]
@@ -16527,7 +16613,7 @@ fn gated_deltanet_forward_decode_if_inner(
             // output that flows downstream (the post-transpose's
             // `kt_logits_to_candle` retains it for chaining), so recording it
             // as the node output keeps the recurrence→transpose seam connected.
-            #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+            #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
             if crate::tape_forward::tape_forward_enabled() {
                 crate::tape_forward::tape_record_gdn_recurrent_kt(
                     &recurrent_result.0,
@@ -16577,7 +16663,7 @@ fn gated_deltanet_forward_decode_if_inner(
             // transpose unless `KILN_USE_TAPE_FORWARD` is set AND a tape scope is
             // active.
             // #1082 seam flip: kt-native transpose recorder — no kt->candle->kt.
-            #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+            #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
             {
                 match crate::tape_forward::try_tape_transpose_kt(&attn_out, 1, 2)
                     .context("gdn attn_out transpose try_tape_transpose_kt")?
@@ -16586,7 +16672,7 @@ fn gated_deltanet_forward_decode_if_inner(
                     None => attn_out.transpose(1, 2)?,
                 }
             }
-            #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan")))]
+            #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm")))]
             {
                 attn_out.transpose(1, 2)?
             }
@@ -16628,7 +16714,7 @@ fn gated_deltanet_forward_decode_if_inner(
             // `KILN_USE_TAPE_GDN_GATED_NORM` are set AND a tape scope is active;
             // the production output (`gated`) is untouched either way.
             // #1082 seam flip: kt-native GdnGatedRmsNormBackward recorder — no kt->candle->kt.
-            #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+            #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
             if crate::tape_forward::tape_forward_enabled() {
                 let _ = crate::tape_forward::try_tape_gdn_gated_rms_norm_kt(
                     &attn_out,
@@ -16651,7 +16737,7 @@ fn gated_deltanet_forward_decode_if_inner(
         // is active.
         let reshaped = attn_out.reshape((batch, seq_len, v_dim))?;
         // #1082 seam flip: kt-native reshape recorder — no kt->candle->kt.
-        #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+        #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
         let reshaped = match crate::tape_forward::try_tape_reshape_kt(
             &attn_out,
             vec![batch, seq_len, v_dim],
@@ -16673,7 +16759,7 @@ fn gated_deltanet_forward_decode_if_inner(
         } else {
             let casted = reshaped.to_dtype(input_dtype)?;
             // #1082 seam flip: kt-native CastCompositeBackward recorder — no kt->candle->kt.
-            #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+            #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
             let casted = match crate::tape_forward::try_tape_cast_kt(&reshaped, &casted)
                 .context("gdn gated-norm cast try_tape_cast_kt")?
             {
@@ -17321,9 +17407,9 @@ pub fn gqa_attention_core_prefill(
         // `try_tape_sdpa_fallback_kt` below. Inference (no tape scope) keeps the
         // fast leaf kernel unchanged on every backend. On a default build
         // (no tape-feature) `tape_forward` is cfg'd out, so the leaf always runs.
-        #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+        #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
         let skip_leaf_flash = crate::tape_forward::tape_scope_active();
-        #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan")))]
+        #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm")))]
         let skip_leaf_flash = false;
         if !skip_leaf_flash {
             if let Some(attn_output) =
@@ -17411,7 +17497,7 @@ pub fn gqa_attention_core_prefill(
     // so the device-agnostic `try_tape_sdpa_fallback_kt` is the attention
     // backward producer on Vulkan; without it, grads sever between v_proj and
     // o_proj.
-    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
     if crate::tape_forward::tape_forward_enabled() {
         if let Some(tape_attn) = crate::tape_forward::try_tape_sdpa_fallback_kt(
             &q, &k_he, &v_he, head_dim, &attn_output,
@@ -17622,7 +17708,7 @@ pub fn gqa_attention_pre_o_chunked_prefill(
 fn tape_reshape_full_attn(x: &Tensor, dims: &[ReshapeArg]) -> Result<Tensor> {
     // #1082 seam flip: kt-native reshape recorder — no kt->candle->kt.
     // (#1082) Vulkan added: device-agnostic pure-kt recorder.
-    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
     {
         if let Some(concrete) = resolve_reshape_dims(x.elem_count(), dims) {
             if let Some(out) = crate::tape_forward::try_tape_reshape_kt(x, concrete)
@@ -17644,7 +17730,7 @@ fn tape_reshape_full_attn(x: &Tensor, dims: &[ReshapeArg]) -> Result<Tensor> {
 fn tape_transpose_contig_full_attn(x: &Tensor, axis_a: usize, axis_b: usize) -> Result<Tensor> {
     // #1082 seam flip: kt-native transpose recorder — no kt->candle->kt.
     // (#1082) Vulkan added: device-agnostic pure-kt recorder.
-    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
     {
         if let Some(out) = crate::tape_forward::try_tape_transpose_kt(x, axis_a, axis_b)
             .context("tape_transpose_contig_full_attn try_tape_transpose_kt")?
@@ -18011,9 +18097,9 @@ pub fn gqa_attention_pre_o(
         // `try_tape_sdpa_fallback_kt` below. Inference (no tape scope) keeps the
         // fast leaf kernel unchanged on every backend. On a default build
         // (no tape-feature) `tape_forward` is cfg'd out, so the leaf always runs.
-        #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+        #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
         let skip_leaf_flash = crate::tape_forward::tape_scope_active();
-        #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan")))]
+        #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm")))]
         let skip_leaf_flash = false;
         if !skip_leaf_flash {
             if let Some(attn_output) =
@@ -18063,7 +18149,7 @@ pub fn gqa_attention_pre_o(
     // (the tape-authoritative SFT path), so capture before the cache update.
     // (#1082) Vulkan added: the SDPA fallback is the attention backward producer
     // on Vulkan (the flash leaf is skipped under a tape scope above).
-    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
     let sdpa_pre_expand = if kv_cache.is_none() {
         Some((q.clone(), k.clone(), v.clone()))
     } else {
@@ -18221,7 +18307,7 @@ pub fn gqa_attention_pre_o(
     // None) in every other configuration; mirrors `gqa_attention_core_prefill`.
     // (#1082) Vulkan added: device-agnostic SDPA-fallback + transpose + reshape
     // recorders — the attention backward producer on Vulkan.
-    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
     // #1082 seam flip: kt-native SDPA-fallback + transpose + reshape recorders.
     if crate::tape_forward::tape_forward_enabled() {
         if let Some((q_pe, k_pe, v_pe)) = sdpa_pre_expand.as_ref() {
@@ -18348,7 +18434,7 @@ pub fn gqa_attention(
     )
 }
 
-#[cfg(feature = "cuda")]
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 pub(crate) struct PagedDecodeGraphInputs<'a> {
     pub block_table: &'a Tensor,
     pub seqused_k: &'a Tensor,
@@ -18448,7 +18534,7 @@ fn try_flash_attn_paged_decode(
     attn_weights: &GpuFullAttentionWeights,
     lora_layer: Option<&LoraLayerWeights>,
     lora_scale: f32,
-    #[cfg(feature = "cuda")] graph_inputs: Option<&PagedDecodeGraphInputs<'_>>,
+    #[cfg(any(feature = "cuda", feature = "rocm"))] graph_inputs: Option<&PagedDecodeGraphInputs<'_>>,
     profile_context: Option<(usize, usize)>,
     // Phase 7 #1082: kt twin of `paged_cache` for parity-checked
     // accessor reads. When `Some` AND the env gate is on,
@@ -18514,7 +18600,12 @@ fn try_flash_attn_paged_decode(
     // real paged path.
     let use_direct_paged_decode =
         (backend.name() == "cuda" && !cuda_direct_paged_decode_disabled())
-            || backend.name() == "vulkan";
+            || backend.name() == "vulkan"
+            // ROCm: device-resident KV pools + native sq=1 O(n) paged decode
+            // (flat ~14 tok/s vs the contiguous block's O(n^2) prefill recompute).
+            // Behind KILN_ROCM_PAGED_DECODE (default off) pending the KV-cache
+            // correctness fix — see rocm_paged_decode_enabled().
+            || (backend.name() == "rocm" && rocm_paged_decode_enabled());
     #[cfg(feature = "cuda")]
     let is_fp8 = try_kt_paged_kv_is_fp8(paged_cache.is_fp8(), kt_paged_cache);
     #[cfg(not(feature = "cuda"))]
@@ -18753,7 +18844,7 @@ fn try_flash_attn_paged_decode(
     let device = q.device();
     let bt_tensor_owned;
     let bt_tensor = {
-        #[cfg(feature = "cuda")]
+        #[cfg(any(feature = "cuda", feature = "rocm"))]
         {
             if let Some(inputs) = graph_inputs {
                 inputs.block_table
@@ -18763,7 +18854,7 @@ fn try_flash_attn_paged_decode(
                 &bt_tensor_owned
             }
         }
-        #[cfg(not(feature = "cuda"))]
+        #[cfg(not(any(feature = "cuda", feature = "rocm")))]
         {
             bt_tensor_owned =
                 Tensor::new(padded.as_slice(), device)?.reshape((1usize, max_blocks_per_seq))?;
@@ -18792,17 +18883,17 @@ fn try_flash_attn_paged_decode(
 
     let stage_profile = start_full_attn_stage_profile(&q.device(), profile_context)?;
     let attn_out = {
-        #[cfg(feature = "cuda")]
+        #[cfg(any(feature = "cuda", feature = "rocm"))]
         {
             if let Some(inputs) = graph_inputs {
                 let attn_out = inputs.attn_out.get(full_attn_layer_idx).ok_or_else(|| {
                     anyhow::anyhow!(
-                        "missing CUDA graph paged decode output buffer for full-attention layer {full_attn_layer_idx}"
+                        "missing graph paged decode output buffer for full-attention layer {full_attn_layer_idx}"
                     )
                 })?;
                 let softmax_lse = inputs.softmax_lse.get(full_attn_layer_idx).ok_or_else(|| {
                     anyhow::anyhow!(
-                        "missing CUDA graph paged decode LSE buffer for full-attention layer {full_attn_layer_idx}"
+                        "missing graph paged decode LSE buffer for full-attention layer {full_attn_layer_idx}"
                     )
                 })?;
                 // Phase 7 (#1082): route through the new kt-typed
@@ -18854,7 +18945,7 @@ fn try_flash_attn_paged_decode(
                 }
             }
         }
-        #[cfg(not(feature = "cuda"))]
+        #[cfg(not(any(feature = "cuda", feature = "rocm")))]
         {
             match backend.flash_attn_paged_decode(
                 &q_fa,
@@ -18878,6 +18969,34 @@ fn try_flash_attn_paged_decode(
         q_len,
         stage_profile,
     )?;
+
+    // ROCm device-pool paged decode: order the per-layer async work before the
+    // downstream read. The async KV-write d2d + stream-ordered allocator let a
+    // later consumer race ahead of the writes, corrupting decode after a few
+    // tokens (the attention output itself is bit-exact — verified maxdiff=0 — so
+    // this is purely an ordering race, which a device sync resolves). One sync
+    // per full-attention layer; the GDN-heavy bulk of the model stays async.
+    // TODO(perf): replace with a scoped stream event once the racing streams are
+    // pinned, to avoid draining the whole device.
+    // The async KV-write d2d + stream-ordered allocator could let a downstream
+    // consumer race the writes, corrupting decode after a few tokens. The real
+    // fix is pinning the hipMallocAsync pool's release threshold to never-release
+    // (kiln-hip RocmContext::new) — freed blocks stay pooled instead of being
+    // handed back to the OS mid-flight. With that, NO per-layer sync is needed
+    // (validated: long gen, thinking on/off, concurrent batch all coherent), and
+    // the decode region is sync-free — required for HIP graph capture (R.9).
+    // Opt-in fallbacks if a future arch/runtime still races: KILN_ROCM_PD_SYNC=1
+    // (compute-stream sync) / KILN_ROCM_PD_DEVSYNC=1 (device-wide drain).
+    #[cfg(feature = "rocm")]
+    if let Device::Rocm(di) = q.device() {
+        if std::env::var("KILN_ROCM_PD_DEVSYNC").is_ok() {
+            kiln_tensor::rocm_synchronize_default_stream(di)
+                .map_err(|e| anyhow::anyhow!("rocm paged-decode order sync: {e:?}"))?;
+        } else if std::env::var("KILN_ROCM_PD_SYNC").is_ok() {
+            kiln_tensor::rocm_synchronize_compute_stream(di)
+                .map_err(|e| anyhow::anyhow!("rocm paged-decode order sync: {e:?}"))?;
+        }
+    }
 
     // attn_out is [batch, 1, num_heads, head_dim] bf16. Reshape to
     // [batch, 1, num_heads * head_dim] for the gate / o_proj path.
@@ -19930,7 +20049,7 @@ pub fn gqa_attention_paged(
         full_attn_layer_idx,
         attn_output_gate,
         lora,
-        #[cfg(feature = "cuda")]
+        #[cfg(any(feature = "cuda", feature = "rocm"))]
         None,
         // Phase 7 #1082: no kt twin plumbed through this wrapper yet
         // — the cache-owning struct migration that allocates one via
@@ -19960,7 +20079,7 @@ fn gqa_attention_paged_with_rope_tables(
     full_attn_layer_idx: usize,
     attn_output_gate: bool,
     lora: Option<(&LoraLayerWeights, f32)>,
-    #[cfg(feature = "cuda")] graph_inputs: Option<&PagedDecodeGraphInputs<'_>>,
+    #[cfg(any(feature = "cuda", feature = "rocm"))] graph_inputs: Option<&PagedDecodeGraphInputs<'_>>,
     // Phase 7 #1082: kt twin of `paged_cache` used to mirror the
     // CUDA-graph paged-KV write to the kt cache when the env gate
     // `KILN_USE_KT_PAGED_KV_CACHE` is on. `None` means "gate off,
@@ -20467,19 +20586,21 @@ fn gqa_attention_paged_with_rope_tables(
         let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
         kiln_nvtx::range!(c"kiln/kv/copy");
         let graph_write_done = {
-            #[cfg(feature = "cuda")]
+            #[cfg(any(feature = "cuda", feature = "rocm"))]
             {
                 if let Some(inputs) = graph_inputs {
                     // #1082: `PagedKvCacheKt::write_token_major_native_graph_slot`
                     // takes kt tensors; `k_cache_token_major`/`v_cache_token_major`
                     // and `inputs.kv_slot` are already kt, so pass them with no
-                    // candle bridge.
+                    // candle bridge. ROCm: the primary cache is already a
+                    // `PagedKvCacheKt`, so the kt-twin mirror below is CUDA-only.
                     let done = paged_cache.write_token_major_native_graph_slot(
                         full_attn_layer_idx,
                         &k_cache_token_major,
                         &v_cache_token_major,
                         inputs.kv_slot,
                     )?;
+                    #[cfg(feature = "cuda")]
                     // Phase 7 #1082: when the legacy PagedKvCache writer
                     // succeeded and a kt twin cache is plumbed through (i.e. the
                     // `KILN_USE_KT_PAGED_KV_CACHE` gate is on and the
@@ -20509,7 +20630,7 @@ fn gqa_attention_paged_with_rope_tables(
                     false
                 }
             }
-            #[cfg(not(feature = "cuda"))]
+            #[cfg(not(any(feature = "cuda", feature = "rocm")))]
             {
                 false
             }
@@ -20592,7 +20713,14 @@ fn gqa_attention_paged_with_rope_tables(
         && {
             #[cfg(feature = "cuda")]
             { !try_kt_paged_kv_is_fp8(paged_cache.is_fp8(), kt_paged_cache) }
-            #[cfg(not(feature = "cuda"))]
+            // ROCm: the rocm SDPA paged-decode dequantizes U8 (FP8 E4M3FN) pool
+            // slots to BF16 right after the gather, so FP8 caches take the fused
+            // fast path here too — which is bucketed (max_seqlen_k) and therefore
+            // HIP-graph-capturable, unlike the eager fallback's seq-len-dependent
+            // broadcast attention. Other non-CUDA backends still exclude FP8.
+            #[cfg(all(feature = "rocm", not(feature = "cuda")))]
+            { let _ = paged_cache.is_fp8(); true }
+            #[cfg(not(any(feature = "cuda", feature = "rocm")))]
             { !paged_cache.is_fp8() }
         }
         && (num_heads / num_kv_heads) > 1
@@ -20622,7 +20750,7 @@ fn gqa_attention_paged_with_rope_tables(
                 attn_weights,
                 lora_layer,
                 lora_scale,
-                #[cfg(feature = "cuda")]
+                #[cfg(any(feature = "cuda", feature = "rocm"))]
                 graph_inputs,
                 profile_context,
                 #[cfg(feature = "cuda")]
@@ -21672,7 +21800,7 @@ pub fn transformer_block_paged(
         block_table,
         full_attn_layer_idx,
         lora,
-        #[cfg(feature = "cuda")]
+        #[cfg(any(feature = "cuda", feature = "rocm"))]
         None,
         None,
         // Phase 7 #1082: no kt twin plumbed through this wrapper yet —
@@ -21703,7 +21831,7 @@ fn transformer_block_paged_with_rope_tables(
     block_table: &BlockTable,
     full_attn_layer_idx: usize,
     lora: Option<(&LoraLayerWeights, f32)>,
-    #[cfg(feature = "cuda")] graph_inputs: Option<&PagedDecodeGraphInputs<'_>>,
+    #[cfg(any(feature = "cuda", feature = "rocm"))] graph_inputs: Option<&PagedDecodeGraphInputs<'_>>,
     profile_mlp_context: Option<(usize, usize)>,
     // Phase 7 #1082: kt twin of `paged_cache`, plumbed through to the
     // GQA paged-attention call below so the kt cache can mirror the
@@ -21802,7 +21930,7 @@ fn transformer_block_paged_with_rope_tables(
         full_attn_layer_idx,
         config.attn_output_gate,
         lora,
-        #[cfg(feature = "cuda")]
+        #[cfg(any(feature = "cuda", feature = "rocm"))]
         graph_inputs,
         // Phase 7 #1082: forward the kt twin through to the GQA
         // attention call. None on this path until the cache-owning
@@ -23594,7 +23722,7 @@ pub fn model_forward_paged(
         lora,
         None,
         positions_gpu,
-        #[cfg(feature = "cuda")]
+        #[cfg(any(feature = "cuda", feature = "rocm"))]
         None,
         // Phase 7 #1082: no kt twin from this caller — forward
         // `None` so the candle writer remains authoritative.
@@ -23667,7 +23795,7 @@ pub fn model_forward_paged_with_kt(
         lora,
         None,
         positions_gpu,
-        #[cfg(feature = "cuda")]
+        #[cfg(any(feature = "cuda", feature = "rocm"))]
         None,
         #[cfg(feature = "cuda")]
         kt_paged_cache,
@@ -23711,7 +23839,7 @@ pub fn model_forward_paged_normed_hidden(
         lora,
         None,
         None,
-        #[cfg(feature = "cuda")]
+        #[cfg(any(feature = "cuda", feature = "rocm"))]
         None,
         // Phase 7 #1082: no kt twin from this caller — forward
         // `None` so the candle writer remains authoritative.
@@ -23807,7 +23935,7 @@ pub fn model_forward_paged_last_token(
         lora,
         None,
         positions_gpu,
-        #[cfg(feature = "cuda")]
+        #[cfg(any(feature = "cuda", feature = "rocm"))]
         None,
         // Phase 7 #1082: no kt twin from this caller — forward
         // `None` so the candle writer remains authoritative.
@@ -24403,7 +24531,7 @@ pub fn model_forward_paged_last_token_greedy(
         lora,
         None,
         positions_gpu,
-        #[cfg(feature = "cuda")]
+        #[cfg(any(feature = "cuda", feature = "rocm"))]
         None,
         // Phase 7 #1082: no kt twin from this caller — forward
         // `None` so the candle writer remains authoritative.
@@ -24465,7 +24593,7 @@ pub fn model_forward_paged_next_token_greedy(
 /// small per-layer matmuls are. Moving final_norm + lm_head out of the captured
 /// region is the structural fix — the captured 32-layer transformer (the actual
 /// decode win) is preserved.
-#[cfg(feature = "cuda")]
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn model_forward_paged_hidden_with_graph_inputs(
     backend: &dyn BackendRuntime,
@@ -24496,6 +24624,7 @@ pub(crate) fn model_forward_paged_hidden_with_graph_inputs(
         graph_inputs,
         // Phase 7 #1082: no kt twin from this caller — forward `None` so the
         // candle writer remains authoritative (mirrors the logits twin).
+        #[cfg(feature = "cuda")]
         None,
         LmHeadMode::HiddenOnly,
     )?;
@@ -24513,7 +24642,7 @@ pub(crate) fn model_forward_paged_hidden_with_graph_inputs(
 /// sidestepping the replay-nondeterminism that doubled output ("BUG2"). Cost is
 /// one extra eager vocab GEMV + one RMSNorm per decode token — negligible next
 /// to the captured 32-layer transformer.
-#[cfg(feature = "cuda")]
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 pub(crate) fn lm_head_from_hidden_eager(
     backend: &dyn BackendRuntime,
     hidden: &Tensor,
@@ -24525,6 +24654,8 @@ pub(crate) fn lm_head_from_hidden_eager(
     // Mirror the `Full` arm's slot-40 record (final_norm output / lm_head
     // input) so the box-102 SAMESTEP probe observes the replay-path value here
     // — the captured graph no longer records slot 40 under `HiddenOnly`.
+    // (CUDA-only debug probe.)
+    #[cfg(feature = "cuda")]
     record_layer_norm_debug(&normed, 40);
     lm_head_forward_backend_decode_if(Some(backend), &normed, &weights.embed_tokens_t)
 }
@@ -24542,7 +24673,7 @@ pub(crate) fn model_forward_paged_with_graph_inputs(
     lora: Option<&LoraWeights>,
     token_ids_gpu: &Tensor,
     positions_gpu: &Tensor,
-    #[cfg(feature = "cuda")] graph_inputs: Option<&PagedDecodeGraphInputs<'_>>,
+    #[cfg(any(feature = "cuda", feature = "rocm"))] graph_inputs: Option<&PagedDecodeGraphInputs<'_>>,
 ) -> Result<Tensor> {
     let (logits, _hidden, _token) = model_forward_paged_inner(
         backend,
@@ -24556,7 +24687,7 @@ pub(crate) fn model_forward_paged_with_graph_inputs(
         lora,
         Some(token_ids_gpu),
         Some(positions_gpu),
-        #[cfg(feature = "cuda")]
+        #[cfg(any(feature = "cuda", feature = "rocm"))]
         graph_inputs,
         // Phase 7 #1082: no kt twin from this caller — forward
         // `None` so the candle writer remains authoritative.
@@ -24781,7 +24912,7 @@ pub fn model_forward_paged_batched_decode_hidden(
             lora,
             None,
             None,
-            #[cfg(feature = "cuda")]
+            #[cfg(any(feature = "cuda", feature = "rocm"))]
             None,
             // Phase 7 #1082: no kt twin from this caller — forward
             // `None` so the candle writer remains authoritative.
@@ -25091,7 +25222,7 @@ pub fn model_forward_paged_with_last_hidden(
         lora,
         None,
         positions_gpu,
-        #[cfg(feature = "cuda")]
+        #[cfg(any(feature = "cuda", feature = "rocm"))]
         None,
         // Phase 7 #1082: no kt twin from this caller — forward
         // `None` so the candle writer remains authoritative.
@@ -25143,7 +25274,7 @@ pub fn model_forward_paged_last_token_with_last_hidden(
         lora,
         None,
         positions_gpu,
-        #[cfg(feature = "cuda")]
+        #[cfg(any(feature = "cuda", feature = "rocm"))]
         None,
         // Phase 7 #1082: no kt twin from this caller — forward
         // `None` so the candle writer remains authoritative.
@@ -25769,7 +25900,7 @@ fn model_forward_paged_inner(
     lora: Option<&LoraWeights>,
     token_ids_gpu: Option<&Tensor>,
     positions_gpu: Option<&Tensor>,
-    #[cfg(feature = "cuda")] graph_inputs: Option<&PagedDecodeGraphInputs<'_>>,
+    #[cfg(any(feature = "cuda", feature = "rocm"))] graph_inputs: Option<&PagedDecodeGraphInputs<'_>>,
     // Phase 7 #1082: kt twin of `paged_cache` plumbed through to the
     // per-layer `transformer_block_paged_with_rope_tables` so the kt
     // cache can mirror the CUDA-graph paged-KV write performed inside
@@ -25817,11 +25948,11 @@ fn model_forward_paged_inner(
         }
     };
     let graph_rope_tables = {
-        #[cfg(feature = "cuda")]
+        #[cfg(any(feature = "cuda", feature = "rocm"))]
         {
             graph_inputs.map(|inputs| (inputs.rotary_cos, inputs.rotary_sin))
         }
-        #[cfg(not(feature = "cuda"))]
+        #[cfg(not(any(feature = "cuda", feature = "rocm")))]
         {
             Option::<(&Tensor, &Tensor)>::None
         }
@@ -25897,7 +26028,7 @@ fn model_forward_paged_inner(
                     block_table,
                     full_attn_idx,
                     layer_lora,
-                    #[cfg(feature = "cuda")]
+                    #[cfg(any(feature = "cuda", feature = "rocm"))]
                     graph_inputs,
                     profile_mlp_stages.then_some((i, start_pos)),
                     // Phase 7 #1082: forward the inner-fn kt twin
@@ -26407,7 +26538,7 @@ pub fn model_forward_paged_streaming_last_token_with_last_hidden_with(
             lora,
             None,
             None,
-            #[cfg(feature = "cuda")]
+            #[cfg(any(feature = "cuda", feature = "rocm"))]
             None,
             // Phase 7 #1082: no kt twin from this caller — forward
             // `None` so the candle writer remains authoritative.
@@ -26497,7 +26628,7 @@ pub fn model_forward_paged_streaming_with(
             lora,
             None,
             None,
-            #[cfg(feature = "cuda")]
+            #[cfg(any(feature = "cuda", feature = "rocm"))]
             None,
             // Phase 7 #1082: no kt twin from this caller — forward
             // `None` so the candle writer remains authoritative.

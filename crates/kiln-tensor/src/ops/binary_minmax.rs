@@ -38,6 +38,18 @@ fn apply(f: impl Fn(f32, f32) -> f32, a: &Tensor, b: &Tensor, name: &str) -> Res
         }
     }
 
+    // ROCm fast path: when both inputs live on ROCm, route through the native
+    // `csrc/binary_minmax.cu` kernel instead of the host round-trip below.
+    #[cfg(feature = "rocm")]
+    {
+        let a_on_rocm = a.storage().as_any().is::<crate::RocmStorage>();
+        let b_on_rocm = b.storage().as_any().is::<crate::RocmStorage>();
+        if a_on_rocm && b_on_rocm {
+            let kind: i32 = if name == "minimum" { 0 } else { 1 };
+            return crate::rocm_binary_minmax(a, b, kind);
+        }
+    }
+
     // Device parity: the byte-wise apply below runs on CPU images. When the
     // inputs live on a non-CPU device with no dedicated kernel (e.g. Metal —
     // no kt min/max Metal kernel yet), round-trip through the host: copy both

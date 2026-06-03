@@ -1363,6 +1363,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "kiln-hip"
+version = "0.2.19"
+
+[[package]]
 name = "kiln-kt-bridge"
 version = "0.2.19"
 dependencies = [
@@ -1395,6 +1399,7 @@ dependencies = [
  "kiln-core",
  "kiln-flash-attn",
  "kiln-gdn-kernel",
+ "kiln-hip",
  "kiln-kt-bridge",
  "kiln-marlin-gemm",
  "kiln-nvtx",
@@ -1474,6 +1479,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "kiln-rocblas"
+version = "0.2.19"
+dependencies = [
+ "cc",
+ "half",
+ "kiln-hip",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "kiln-scheduler"
 version = "0.2.19"
 dependencies = [
@@ -1534,6 +1550,8 @@ dependencies = [
  "half",
  "kiln-autograd",
  "kiln-blas",
+ "kiln-hip",
+ "kiln-rocblas",
  "kiln-tensor-id",
  "kiln-vulkan-kernel",
  "memmap2",

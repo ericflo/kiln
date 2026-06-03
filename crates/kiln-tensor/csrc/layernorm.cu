@@ -39,6 +39,17 @@
 
 #include <cstdint>
 
+// Wave-size shim (Phase R.5). The two-level reduction below MUST NOT use the
+// old hardcoded `tid / 32` / `tid & 31` / `__shfl_xor_sync(0xFFFFFFFF, ...)`
+// warp tree: on AMD wave64 those cross-32-lane shuffles self-reference (offset
+// 32 is out of the default width-32 shim), corrupting the sum/sum_sq and, for a
+// half-filled "warp 0", touching inactive lanes 32-63 — a hardware exception
+// (HSA 0x1016). The fix routes the per-row sum and sum-of-squares through
+// kiln_block_reduce_sum (a shared-memory tree with no cross-lane ops), which is
+// correct on NVIDIA, AMD wave32, AND AMD wave64. The launcher picks a
+// power-of-two blockDim in [64,1024] so every wavefront is fully populated.
+#include "kt_gpu_compat.cuh"
+
 namespace {
 
 constexpr int MAX_THREADS = 1024;
@@ -85,43 +96,28 @@ __global__ void layernorm_last_axis_kernel(
         local_sum_sq += v * v;
     }
 
-    // Warp-level reductions (sum + sum_sq).
-    __shared__ float shared_sum[32];
-    __shared__ float shared_sum_sq[32];
-    for (int offset = 16; offset > 0; offset /= 2) {
-        local_sum += __shfl_xor_sync(0xFFFFFFFF, local_sum, offset);
-        local_sum_sq += __shfl_xor_sync(0xFFFFFFFF, local_sum_sq, offset);
-    }
-    int warp_id = tid / 32;
-    int lane = tid & 31;
-    if (lane == 0) {
-        shared_sum[warp_id] = local_sum;
-        shared_sum_sq[warp_id] = local_sum_sq;
-    }
-    __syncthreads();
+    // Wave-size-agnostic block reductions via shared memory (no cross-lane ops
+    // — correct on AMD wave32/wave64 and NVIDIA). The sum and sum-of-squares are
+    // reduced sequentially; each kiln_block_reduce_sum ends with a barrier so
+    // the single `smem` buffer is reusable for the second reduction. blockDim is
+    // a power of two in [64,1024] (launcher invariant).
+    __shared__ float smem[MAX_THREADS];
+    float s = kiln_block_reduce_sum(local_sum, smem);
+    float ss = kiln_block_reduce_sum(local_sum_sq, smem);
 
-    // Cross-warp reduction in warp 0.
+    // Broadcast mean + inv_std to every thread via shared memory.
     __shared__ float mean;
     __shared__ float inv_std;
-    if (warp_id == 0) {
-        int warp_count = (blk + 31) / 32;
-        float s = lane < warp_count ? shared_sum[lane] : 0.0f;
-        float ss = lane < warp_count ? shared_sum_sq[lane] : 0.0f;
-        for (int offset = 16; offset > 0; offset /= 2) {
-            s += __shfl_xor_sync(0xFFFFFFFF, s, offset);
-            ss += __shfl_xor_sync(0xFFFFFFFF, ss, offset);
-        }
-        if (lane == 0) {
-            float inv_n = 1.0f / static_cast<float>(n_cols);
-            float m = s * inv_n;
-            // var = E[X^2] - E[X]^2; clamp to >= 0 in case of round-off
-            // noise (theoretically nonneg but FP arithmetic can dip slightly).
-            float var = ss * inv_n - m * m;
-            if (var < 0.0f) var = 0.0f;
-            float denom = var + eps;
-            mean = m;
-            inv_std = (denom > 0.0f) ? rsqrtf(denom) : 0.0f;
-        }
+    if (tid == 0) {
+        float inv_n = 1.0f / static_cast<float>(n_cols);
+        float m = s * inv_n;
+        // var = E[X^2] - E[X]^2; clamp to >= 0 in case of round-off
+        // noise (theoretically nonneg but FP arithmetic can dip slightly).
+        float var = ss * inv_n - m * m;
+        if (var < 0.0f) var = 0.0f;
+        float denom = var + eps;
+        mean = m;
+        inv_std = (denom > 0.0f) ? rsqrtf(denom) : 0.0f;
     }
     __syncthreads();
 
@@ -150,11 +146,16 @@ extern "C" int kiln_layernorm_last_axis_async(
     if (n_rows == 0 || n_cols == 0) return 0;
     cudaStream_t stream = static_cast<cudaStream_t>(stream_raw);
 
-    int threads = MAX_THREADS;
-    while (threads > n_cols && threads > 32) {
-        threads /= 2;
+    // Block size: smallest power of two that covers n_cols, clamped to
+    // [64, MAX_THREADS]. Min 64 (not 32) so every wavefront is FULLY populated
+    // on AMD wave64 — kiln_block_reduce_sum requires a power-of-two blockDim and
+    // a half-filled final wave would leave garbage in the upper smem lanes.
+    // Threads past n_cols contribute the reduction identity (0) via the strided
+    // accumulation loop.
+    int threads = 64;
+    while (threads < n_cols && threads < MAX_THREADS) {
+        threads *= 2;
     }
-    if (threads < 32) threads = 32;
     dim3 grid((unsigned int)n_rows);
     dim3 block(threads);
 

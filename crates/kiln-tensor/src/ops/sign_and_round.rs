@@ -68,7 +68,7 @@ impl SignRoundKind {
     /// Metal path reuses the same tags via `metal_activation_unary`
     /// (candle covers 22..=26; trunc=27 falls through to CPU since
     /// candle has no `UnaryOp::Trunc`).
-    #[cfg(any(feature = "cuda", feature = "metal"))]
+    #[cfg(any(feature = "cuda", feature = "metal", feature = "rocm"))]
     const fn cuda_kind_tag(self) -> i32 {
         match self {
             SignRoundKind::Reciprocal => 22,
@@ -111,6 +111,21 @@ impl DeviceOp1 for SignRoundOp {
             return Ok(None);
         }
         Ok(Some(crate::cuda_activation_unary(x, self.kind.cuda_kind_tag())?))
+    }
+
+    #[cfg(feature = "rocm")]
+    fn rocm_fwd(&self, x: &Tensor) -> Result<Option<Tensor>> {
+        // Mirror of cuda_fwd: native ROCm activation kernel
+        // (csrc/activation.cu). recip/sign/floor/ceil/round/trunc map to tags
+        // 22/23/24/25/26/27 — all six handled by the shared kernel.
+        validate(x, self.kind.name())?;
+        if !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16) {
+            return Ok(None);
+        }
+        if !x.is_contiguous() {
+            return Ok(None);
+        }
+        Ok(Some(crate::rocm_activation_unary(x, self.kind.cuda_kind_tag())?))
     }
 
     #[cfg(feature = "metal")]

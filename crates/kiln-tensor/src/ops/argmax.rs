@@ -107,6 +107,22 @@ impl DeviceOp1 for ArgmaxLastDimOp {
         Ok(Some(crate::cuda_argmax_last_axis(x)?))
     }
 
+    #[cfg(feature = "rocm")]
+    fn rocm_fwd(&self, x: &Tensor) -> Result<Option<Tensor>> {
+        // Mirrors `cuda_fwd`: contiguous F32/BF16/F16 rows route through
+        // the native ROCm argmax kernel (lowest-index tie-break, I64 out).
+        if !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16) {
+            return Ok(None);
+        }
+        if x.rank() == 0 {
+            return Ok(None);
+        }
+        if !x.is_contiguous() {
+            return Ok(None);
+        }
+        Ok(Some(crate::rocm_argmax_last_axis(x)?))
+    }
+
     #[cfg(feature = "metal")]
     fn metal_fwd(&self, x: &Tensor) -> Result<Option<Tensor>> {
         // Same precondition gates as cuda_fwd so the dispatch surface

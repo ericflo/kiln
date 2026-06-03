@@ -26,6 +26,17 @@ fn clip_one(g: &Tensor, c: f32) -> Result<Tensor> {
         return crate::cuda_clamp_pow(g, 0, -c, c);
     }
 
+    // ROCm: correctness-first host round-trip. Stage the device input to host,
+    // run the CPU clamp loop below via recursion, then move the result tensor
+    // back to the input's device.
+    #[cfg(feature = "rocm")]
+    if matches!(g.device(), crate::Device::Rocm(_)) {
+        let dev = g.device();
+        let host = crate::rocm_to_host_copy(g)?;
+        let out_host = clip_one(&host, c)?;
+        return out_host.to_device(dev);
+    }
+
     let n = g.element_count();
     let cpu = g
         .storage()

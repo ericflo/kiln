@@ -2,6 +2,24 @@ use std::env;
 use std::path::PathBuf;
 
 fn main() {
+    // CUDA path: only compile the vendored Marlin kernel when `--features cuda`
+    // is active (the crate's default). Marlin's GEMM is inline `mma.sync` PTX,
+    // so this arm requires an nvcc toolchain.
+    if env::var("CARGO_FEATURE_CUDA").is_ok() {
+        build_cuda();
+    }
+
+    // ROCm path (Phase R.8): no `.cu` is compiled. Marlin's CUDA kernel is
+    // inline `mma.sync` PTX that cannot be hipified; the ROCm lane is a
+    // host-side dequant composite (see src/kt_api.rs) that ends in
+    // `kiln_tensor::rocm_matmul`, so there is nothing for hipcc to build here.
+    if env::var("CARGO_FEATURE_ROCM").is_ok() {
+        // Intentionally empty — the dequant + de-permute is pure host Rust.
+        println!("cargo:rerun-if-env-changed=KILN_ROCM_WAVE64");
+    }
+}
+
+fn build_cuda() {
     let cuda_root = match find_cuda_root() {
         Some(p) => p,
         None => {

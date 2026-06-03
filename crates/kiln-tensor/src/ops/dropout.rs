@@ -60,6 +60,13 @@ pub fn dropout(x: &Tensor, p: f32, seed: u64) -> Result<(Tensor, Tensor)> {
     // Route on device.
     match x.device() {
         crate::Device::Cpu => dropout_cpu(x, p, seed),
+        // ROCm fast path: native dropout kernel (`rocm_dropout` →
+        // `csrc/dropout.cu`). Per-element counter-based splitmix64 RNG (no
+        // curand/hiprand dependency), inverted-dropout scaling + U8 mask. Same
+        // distribution + scale as the CPU path; NOT bit-identical (the CPU op
+        // uses a sequential RNG chain). (R.5b)
+        #[cfg(feature = "rocm")]
+        crate::Device::Rocm(_) => crate::rocm_dropout(x, p, seed),
         #[cfg(feature = "cuda")]
         crate::Device::Cuda(_) => crate::cuda_dropout(x, p, seed),
         #[cfg(not(feature = "cuda"))]

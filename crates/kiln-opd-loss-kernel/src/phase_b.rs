@@ -65,7 +65,10 @@ use kiln_tensor::DType;
 // (`crate::kt_api::per_position_forward_kt`) on CUDA storage instead.
 // The metrics symbols `kiln_opd_topk_metrics_{bf16,f32}` were retired
 // at the same time (no external callers).
-#[cfg(feature = "cuda")]
+// (Phase R.7) The same fused backward symbols are emitted by the ROCm
+// build (`build.rs::build_rocm` compiles `csrc/opd_topk_kl.cu` with hipcc),
+// so the FFI declaration is shared between the `cuda` and `rocm` features.
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 unsafe extern "C" {
     // crate-visible so `kt_api::opd_top_k_reverse_kl_phase_b_bwd_kt`
     // can call the same FFI symbols the (removed) candle path used.
@@ -110,13 +113,13 @@ unsafe extern "C" {
 /// with 1024 threads per block, the Ampere max). Both kt-shim and
 /// kt-tape call sites pre-check via this helper before borrowing
 /// into the kt bridge and dispatching the fused backward.
-#[cfg(feature = "cuda")]
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 pub(crate) fn cuda_kernel_supports(top_k: usize, dtype: DType) -> bool {
     let dtype_ok = matches!(dtype, DType::F32 | DType::BF16);
     dtype_ok && (top_k == 16 || top_k == 32)
 }
 
-#[cfg(not(feature = "cuda"))]
+#[cfg(not(any(feature = "cuda", feature = "rocm")))]
 #[allow(dead_code)]
 pub(crate) fn cuda_kernel_supports(_top_k: usize, _dtype: DType) -> bool {
     false

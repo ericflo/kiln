@@ -60,7 +60,7 @@ impl LogExpKind {
     /// CUDA kernel kind tag matching the `KIND_*` constants in
     /// `csrc/activation.cu` (#1082). `Exp2` and `Expm1` are CPU-only
     /// today — they don't have kind tags in the shared kernel.
-    #[cfg(feature = "cuda")]
+    #[cfg(any(feature = "cuda", feature = "rocm"))]
     const fn cuda_kind_tag(self) -> Option<i32> {
         match self {
             LogExpKind::Log2 => Some(15),
@@ -105,6 +105,24 @@ impl DeviceOp1 for LogExpOp {
         }
         match self.kind.cuda_kind_tag() {
             Some(tag) => Ok(Some(crate::cuda_activation_unary(x, tag)?)),
+            None => Ok(None),
+        }
+    }
+
+    #[cfg(feature = "rocm")]
+    fn rocm_fwd(&self, x: &Tensor) -> Result<Option<Tensor>> {
+        // Mirror of cuda_fwd: native ROCm activation kernel
+        // (csrc/activation.cu). log2/log10/log1p map to tags 15/16/17; exp2 /
+        // expm1 have no kernel tag (None) and fall through to the host path.
+        validate(x, self.kind.name())?;
+        if !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16) {
+            return Ok(None);
+        }
+        if !x.is_contiguous() {
+            return Ok(None);
+        }
+        match self.kind.cuda_kind_tag() {
+            Some(tag) => Ok(Some(crate::rocm_activation_unary(x, tag)?)),
             None => Ok(None),
         }
     }

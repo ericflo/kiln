@@ -27,6 +27,15 @@ fn to_cpu(t: &Tensor) -> Result<Tensor> {
             return crate::cuda_to_host_copy(t);
         }
     }
+    // ROCm: D2H-copy so the byte-reading loops below see a host image. The
+    // scalar loss is built fresh on CPU; each public loss fn moves it back to
+    // the input device. See `#1082`.
+    #[cfg(feature = "rocm")]
+    {
+        if matches!(t.device(), crate::Device::Rocm(_)) {
+            return crate::rocm_to_host_copy(t);
+        }
+    }
     Ok(t.clone())
 }
 
@@ -113,7 +122,37 @@ fn scalar_tensor(dtype: DType, v: f32) -> Result<Tensor> {
     Tensor::from_parts(storage, Layout::contiguous(Vec::<usize>::new()), TensorId::next())
 }
 
+/// ROCm: correctness-first host round-trip for a two-input scalar loss.
+/// Stage both inputs to host, run `f` on the host tensors (recurses into the
+/// CPU path), and move the rank-0 scalar back to the input device. Returns
+/// `None` for non-ROCm inputs. Validation is intentionally left to the
+/// recursive call so the original mixed-device / shape error messages still
+/// surface unchanged. See `#1082`.
+#[cfg(feature = "rocm")]
+fn rocm_pair_roundtrip(
+    a: &Tensor,
+    b: &Tensor,
+    f: impl Fn(&Tensor, &Tensor) -> Result<Tensor>,
+) -> Result<Option<Tensor>> {
+    // Only round-trip when BOTH inputs are on the SAME ROCm device. A
+    // mixed-device pair (e.g. one CPU, one ROCm) is left to fall through to the
+    // existing `validate_pair` device-equality check, which must error rather
+    // than be silently masked by staging both sides to host.
+    if matches!(a.device(), crate::Device::Rocm(_)) && a.device() == b.device() {
+        let dev = a.device();
+        let a_host = a.to_device(crate::Device::Cpu)?;
+        let b_host = b.to_device(crate::Device::Cpu)?;
+        let out_host = f(&a_host, &b_host)?;
+        return Ok(Some(out_host.to_device(dev)?));
+    }
+    Ok(None)
+}
+
 pub fn mse_loss(pred: &Tensor, target: &Tensor) -> Result<Tensor> {
+    #[cfg(feature = "rocm")]
+    if let Some(out) = rocm_pair_roundtrip(pred, target, mse_loss)? {
+        return Ok(out);
+    }
     validate_pair(pred, target, "mse_loss")?;
     let (p, t) = load_pair_f32(pred, target)?;
     let n = p.len() as f32;
@@ -126,6 +165,10 @@ pub fn mse_loss(pred: &Tensor, target: &Tensor) -> Result<Tensor> {
 }
 
 pub fn l1_loss(pred: &Tensor, target: &Tensor) -> Result<Tensor> {
+    #[cfg(feature = "rocm")]
+    if let Some(out) = rocm_pair_roundtrip(pred, target, l1_loss)? {
+        return Ok(out);
+    }
     validate_pair(pred, target, "l1_loss")?;
     let (p, t) = load_pair_f32(pred, target)?;
     let n = p.len() as f32;
@@ -138,6 +181,10 @@ pub fn l1_loss(pred: &Tensor, target: &Tensor) -> Result<Tensor> {
 pub fn huber_loss(pred: &Tensor, target: &Tensor, delta: f32) -> Result<Tensor> {
     if delta <= 0.0 {
         bail!("huber_loss: delta must be > 0, got {delta}");
+    }
+    #[cfg(feature = "rocm")]
+    if let Some(out) = rocm_pair_roundtrip(pred, target, |p, t| huber_loss(p, t, delta))? {
+        return Ok(out);
     }
     validate_pair(pred, target, "huber_loss")?;
     let (p, t) = load_pair_f32(pred, target)?;
@@ -161,6 +208,21 @@ pub fn huber_loss(pred: &Tensor, target: &Tensor, delta: f32) -> Result<Tensor> 
 /// `y ∈ {-1, 1}` indicates whether `a` should rank higher (1) or
 /// lower (-1) than `b`.
 pub fn margin_ranking(a: &Tensor, b: &Tensor, y: &Tensor, margin: f32) -> Result<Tensor> {
+    // ROCm host round-trip: stage all three inputs to host and recurse when
+    // they all live on the SAME ROCm device. Mismatched devices fall through to
+    // `validate_pair`, which errors instead of being masked.
+    #[cfg(feature = "rocm")]
+    if matches!(a.device(), crate::Device::Rocm(_))
+        && a.device() == b.device()
+        && a.device() == y.device()
+    {
+        let dev = a.device();
+        let a_host = a.to_device(crate::Device::Cpu)?;
+        let b_host = b.to_device(crate::Device::Cpu)?;
+        let y_host = y.to_device(crate::Device::Cpu)?;
+        let out_host = margin_ranking(&a_host, &b_host, &y_host, margin)?;
+        return out_host.to_device(dev);
+    }
     validate_pair(a, b, "margin_ranking")?;
     validate_pair(a, y, "margin_ranking")?;
     let (av, bv) = load_pair_f32(a, b)?;
@@ -178,6 +240,10 @@ pub fn margin_ranking(a: &Tensor, b: &Tensor, y: &Tensor, margin: f32) -> Result
 /// Hinge loss for SVM-style binary classification:
 /// `loss = mean(max(0, 1 - y * pred))` where `y ∈ {-1, 1}`.
 pub fn hinge_loss(pred: &Tensor, y: &Tensor) -> Result<Tensor> {
+    #[cfg(feature = "rocm")]
+    if let Some(out) = rocm_pair_roundtrip(pred, y, hinge_loss)? {
+        return Ok(out);
+    }
     validate_pair(pred, y, "hinge_loss")?;
     let (p, t) = load_pair_f32(pred, y)?;
     let n = p.len() as f32;
@@ -198,6 +264,17 @@ pub fn hinge_loss(pred: &Tensor, y: &Tensor) -> Result<Tensor> {
 /// call. Typical SimCLR pipeline: cosine_similarity → mul_scalar
 /// (1/τ) → info_nce.
 pub fn info_nce(sim: &Tensor, targets: &Tensor) -> Result<Tensor> {
+    // ROCm host round-trip: stage both inputs to host and recurse so the inner
+    // `cross_entropy` runs on CPU tensors, then move the scalar back. Only when
+    // both inputs share the same ROCm device. (#1082)
+    #[cfg(feature = "rocm")]
+    if matches!(sim.device(), crate::Device::Rocm(_)) && sim.device() == targets.device() {
+        let dev = sim.device();
+        let sim_host = sim.to_device(crate::Device::Cpu)?;
+        let targets_host = targets.to_device(crate::Device::Cpu)?;
+        let out_host = info_nce(&sim_host, &targets_host)?;
+        return out_host.to_device(dev);
+    }
     if sim.rank() != 2 {
         bail!("info_nce: sim must be rank-2, got {:?}", sim.shape());
     }
@@ -220,6 +297,10 @@ pub fn info_nce(sim: &Tensor, targets: &Tensor) -> Result<Tensor> {
 /// log-probabilities (output of `log_softmax_last_dim`). Returns
 /// a per-row scalar (axis removed), then averaged across rows.
 pub fn kl_div_log_probs(p_log: &Tensor, q_log: &Tensor) -> Result<Tensor> {
+    #[cfg(feature = "rocm")]
+    if let Some(out) = rocm_pair_roundtrip(p_log, q_log, kl_div_log_probs)? {
+        return Ok(out);
+    }
     validate_pair(p_log, q_log, "kl_div_log_probs")?;
     if p_log.rank() < 1 {
         bail!("kl_div_log_probs: input must have rank ≥ 1");
@@ -249,6 +330,10 @@ pub fn kl_div_log_probs(p_log: &Tensor, q_log: &Tensor) -> Result<Tensor> {
 ///
 /// Returns the mean.
 pub fn bce_with_logits(logits: &Tensor, target: &Tensor) -> Result<Tensor> {
+    #[cfg(feature = "rocm")]
+    if let Some(out) = rocm_pair_roundtrip(logits, target, bce_with_logits)? {
+        return Ok(out);
+    }
     validate_pair(logits, target, "bce_with_logits")?;
     let (lg, t) = load_pair_f32(logits, target)?;
     let n = lg.len() as f32;
@@ -267,6 +352,19 @@ pub fn bce_with_logits(logits: &Tensor, target: &Tensor) -> Result<Tensor> {
 /// `log_probs: [B, V]`, `targets: [B]` (I64/U32). Returns -mean of
 /// log_probs at the target indices.
 pub fn nll_loss(log_probs: &Tensor, targets: &Tensor) -> Result<Tensor> {
+    // ROCm host round-trip: stage both inputs to host and recurse when they
+    // share the same ROCm device, then move the scalar back. Mismatched devices
+    // fall through to the device-equality check below, which must error. (#1082)
+    #[cfg(feature = "rocm")]
+    if matches!(log_probs.device(), crate::Device::Rocm(_))
+        && log_probs.device() == targets.device()
+    {
+        let dev = log_probs.device();
+        let lp_host = log_probs.to_device(crate::Device::Cpu)?;
+        let t_host = targets.to_device(crate::Device::Cpu)?;
+        let out_host = nll_loss(&lp_host, &t_host)?;
+        return out_host.to_device(dev);
+    }
     if log_probs.rank() != 2 {
         bail!(
             "nll_loss: log_probs must be rank-2 [B, V], got {:?}",

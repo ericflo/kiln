@@ -67,6 +67,16 @@ fn to_cpu(t: &Tensor) -> Result<Tensor> {
             return crate::cuda_to_host_copy(t);
         }
     }
+    // ROCm: correctness-first host round-trip. The Gumbel-max argmax runs
+    // host-side (splitmix64 RNG in `self.rng`), so stage the device-resident
+    // logit bytes to host; the I64 token ids are produced on CPU and returned
+    // as-is (sampling indices, not a device tensor). See `#1082`.
+    #[cfg(feature = "rocm")]
+    {
+        if matches!(t.device(), crate::Device::Rocm(_)) {
+            return crate::rocm_to_host_copy(t);
+        }
+    }
     Ok(t.clone())
 }
 

@@ -33,6 +33,16 @@
 
 #include <cstdint>
 
+// Wave-size shim (Phase R.5). The two-level reduction below MUST NOT use a
+// hardcoded `tid/32` warp_id + 32-lane `__shfl_xor_sync`: on AMD wave64 that
+// makes "warp 0" only half a wavefront and the cross-warp shuffle at offset 16
+// over a 64-lane wave touches inactive/self lanes — corrupt sums on RDNA wave64
+// (verified on real gfx1151). The fix is the wave-size-AGNOSTIC shared-memory
+// block reduction kiln_block_reduce_sum (no cross-lane ops), with the launcher
+// choosing a power-of-two blockDim in [64,1024] so every wavefront is full.
+// On nvcc this is behavior-identical to the old shared-mem tree (warpSize=32).
+#include "kt_gpu_compat.cuh"
+
 namespace {
 
 constexpr int MAX_THREADS = 1024;
@@ -76,32 +86,16 @@ __global__ void rmsnorm_last_axis_kernel(
         local_sum += v * v;
     }
 
-    // Warp-level reduction (sum).
-    __shared__ float shared_sum[32];
-    for (int offset = 16; offset > 0; offset /= 2) {
-        local_sum += __shfl_xor_sync(0xFFFFFFFF, local_sum, offset);
-    }
-    int warp_id = tid / 32;
-    int lane = tid & 31;
-    if (lane == 0) shared_sum[warp_id] = local_sum;
-    __syncthreads();
+    // Wave-size-agnostic block reduction via shared memory (no cross-lane ops
+    // — correct on AMD wave32/wave64 and NVIDIA). The full sum is returned to
+    // every thread, so each computes inv_rms locally (no shared broadcast).
+    __shared__ float smem[MAX_THREADS];
+    float total_sum = kiln_block_reduce_sum(local_sum, smem);
 
-    // Cross-warp reduction in warp 0.
-    __shared__ float inv_rms;
-    if (warp_id == 0) {
-        float v = lane < (blk + 31) / 32 ? shared_sum[lane] : 0.0f;
-        for (int offset = 16; offset > 0; offset /= 2) {
-            v += __shfl_xor_sync(0xFFFFFFFF, v, offset);
-        }
-        if (lane == 0) {
-            // mean_sq = sum / n_cols
-            float mean_sq = v / static_cast<float>(n_cols);
-            float denom = mean_sq + eps;
-            // rsqrtf for inv_rms; guard against degenerate cases.
-            inv_rms = (denom > 0.0f) ? rsqrtf(denom) : 0.0f;
-        }
-    }
-    __syncthreads();
+    // mean_sq = sum / n_cols; rsqrtf for inv_rms; guard degenerate cases.
+    float mean_sq = total_sum / static_cast<float>(n_cols);
+    float denom = mean_sq + eps;
+    float inv_rms = (denom > 0.0f) ? rsqrtf(denom) : 0.0f;
 
     // ----- Pass 2: per-element scale + multiply by weight. -----
     for (int64_t c = tid; c < n_cols; c += blk) {
@@ -126,11 +120,17 @@ extern "C" int kiln_rmsnorm_last_axis_async(
     if (n_rows == 0 || n_cols == 0) return 0;
     cudaStream_t stream = static_cast<cudaStream_t>(stream_raw);
 
-    int threads = MAX_THREADS;
-    while (threads > n_cols && threads > 32) {
-        threads /= 2;
+    // Block size: smallest power of two that covers n_cols, clamped to
+    // [64, MAX_THREADS]. Min 64 (not 32) so every wavefront is FULLY populated
+    // on AMD wave64 (a half-filled wave breaks shared-mem-tree assumptions and
+    // the strided accumulation must cover every lane). Powers of two >= 64 are
+    // multiples of both 32 and 64; kiln_block_reduce_sum requires a power of
+    // two. Threads past n_cols contribute the reduction identity (0) via the
+    // strided accumulation loop.
+    int threads = 64;
+    while (threads < n_cols && threads < MAX_THREADS) {
+        threads *= 2;
     }
-    if (threads < 32) threads = 32;
     dim3 grid((unsigned int)n_rows);
     dim3 block(threads);
 

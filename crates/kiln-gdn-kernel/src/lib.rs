@@ -62,26 +62,44 @@
 
 /// kiln-tensor-typed surface. Same FFI used by the kernels.
 mod kt_api;
+
+// Pure shape/dtype predicates + the error type carry no FFI and compile on any
+// configuration (including with neither GPU backend enabled).
 pub use kt_api::{
-    gdn_chunk_prep_kt, gdn_chunk_prep_supports_kt, gdn_chunk_scan_kt, gdn_chunk_scan_supports_kt,
-    gdn_decode_gates_recurrent_bf16_kt, gdn_decode_gates_recurrent_supports_kt,
+    gdn_chunk_prep_supports_kt, gdn_chunk_scan_supports_kt,
+    gdn_decode_gates_recurrent_supports_kt,
+    gdn_decode_qk_norm_gates_recurrent_rmsnorm_supports_kt,
+    gdn_decode_qk_norm_gates_recurrent_supports_kt, gdn_full_chunk_forward_multiblock_supports_kt,
+    gdn_full_chunk_forward_supports_kt, gdn_gated_rms_norm_supports_kt, gdn_gates_supports_kt,
+    GdnError,
+};
+
+// The device-launching `_kt` entry points bottom out in the FFI symbols and the
+// backend-neutral `kiln_kt_bridge::device_*` seam, so they need a GPU backend
+// (cuda or rocm). Phase R.7: the ROCm path reuses these byte-for-byte via the
+// neutral seam (the seam dispatches `Device::Rocm` tensors to the hipcc-built
+// kernels).
+#[cfg(any(feature = "cuda", feature = "rocm"))]
+pub use kt_api::{
+    gdn_chunk_prep_kt, gdn_chunk_scan_kt, gdn_decode_gates_recurrent_bf16_kt,
     gdn_decode_gates_recurrent_vf32_bf16_kt, gdn_decode_qk_norm_gates_recurrent_bf16_kt,
     gdn_decode_qk_norm_gates_recurrent_qf32_vbf16_bf16_kt,
     gdn_decode_qk_norm_gates_recurrent_qf32_vf32_bf16_kt,
     gdn_decode_qk_norm_gates_recurrent_rmsnorm_bf16_kt,
     gdn_decode_qk_norm_gates_recurrent_rmsnorm_qf32_vbf16_bf16_kt,
     gdn_decode_qk_norm_gates_recurrent_rmsnorm_qf32_vf32_bf16_kt,
-    gdn_decode_qk_norm_gates_recurrent_rmsnorm_supports_kt,
     gdn_decode_qk_norm_gates_recurrent_rmsnorm_vf32_bf16_kt,
-    gdn_decode_qk_norm_gates_recurrent_supports_kt,
     gdn_decode_qk_norm_gates_recurrent_vf32_bf16_kt, gdn_forward_substitution_kt,
-    gdn_full_chunk_forward_kt, gdn_full_chunk_forward_multiblock_kt,
-    gdn_full_chunk_forward_multiblock_supports_kt, gdn_full_chunk_forward_supports_kt,
-    gdn_gated_rms_norm_bf16_kt, gdn_gated_rms_norm_supports_kt, gdn_gates_bf16_f32_bf16_params_kt,
-    gdn_gates_bf16_f32_params_kt, gdn_gates_bf16_kt, gdn_gates_supports_kt,
-    gdn_recurrent_forward_kt, GdnError,
+    gdn_full_chunk_forward_kt, gdn_full_chunk_forward_multiblock_kt, gdn_gated_rms_norm_bf16_kt,
+    gdn_gates_bf16_f32_bf16_params_kt, gdn_gates_bf16_f32_params_kt, gdn_gates_bf16_kt,
+    gdn_recurrent_forward_kt,
 };
 
+// The device-launching FFI symbols are provided by build.rs (nvcc under
+// `--features cuda`, hipcc under `--features rocm`). Gate the declarations so the
+// crate still type-checks with neither GPU backend enabled (only the pure
+// shape/dtype predicates remain in that configuration).
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 unsafe extern "C" {
     fn kiln_gdn_forward_substitution(
         a_strict: *const core::ffi::c_void,
@@ -405,6 +423,7 @@ unsafe extern "C" {
 // entries own their own allocations end-to-end. Same closeout
 // pattern as conv1d (commit 2ebcfb08) and marlin (0841c266).
 
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 unsafe extern "C" {
     fn kiln_gdn_gates_bf16(
         a: *const core::ffi::c_void,
@@ -450,6 +469,7 @@ unsafe extern "C" {
 
 }
 
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 unsafe extern "C" {
     fn kiln_gdn_gated_rms_norm_bf16(
         x: *const core::ffi::c_void,

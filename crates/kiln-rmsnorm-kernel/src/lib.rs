@@ -94,14 +94,23 @@
 
 /// kiln-tensor-typed surface. Same FFI symbols as the (now-relocated)
 /// candle-typed surface.
+///
+/// Gated on a GPU backend (Phase R.7): the `_kt` wrappers call the fused FFI
+/// kernels, which only exist when a backend is compiled in. With `cuda` they
+/// drive the nvcc-built lib; with `rocm` the hipcc-built lib; the wrapper
+/// bodies are backend-neutral (they route through `kiln_kt_bridge::device_*`).
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 mod kt_api;
 
 /// Phase 6a/CP-4 (#1082): parallel kt-tape entry that drops the candle
 /// CustomOp2 wrapper in favour of recording onto a `kiln_autograd::Tape`
 /// directly. Same FFI symbols, same envelope. See `kt_tape.rs` for the
 /// pilot port rationale.
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 mod kt_tape;
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 pub use kt_tape::{fused_rmsnorm_via_kt_tape, CudaFusedRmsNormBackward};
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 pub use kt_api::{
     adamw_step_bf16_kt, adamw_step_f32_kt, attn_decode_qkv_split_qk_norm_rope_kt,
     causal_depthwise_conv1d_bwd_input_kt, causal_depthwise_conv1d_bwd_state_kt,
@@ -117,6 +126,11 @@ pub use kt_api::{
     supports_rmsnorm_kt, supports_rotary_qk_kt, supports_sigmoid_mul_kt, RmsNormError,
 };
 
+// The fused-kernel FFI symbols are provided by the backend lib built in
+// build.rs: nvcc-built under `cuda`, hipcc-built under `rocm`. Gate the
+// declarations on a backend so a no-backend build of the crate doesn't
+// reference symbols that won't be linked.
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 unsafe extern "C" {
     fn kiln_fused_rmsnorm(
         x: *const core::ffi::c_void,

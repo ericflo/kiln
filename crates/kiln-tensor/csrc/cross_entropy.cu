@@ -40,6 +40,16 @@
 
 #include <cstdint>
 
+// Wave-size shim (Phase R.5). The two-level reductions below (row max, row
+// log-sum-exp, and the finalize batch-sum) MUST NOT use the old hardcoded
+// `tid/32` warp_id + `__shfl_xor_sync` butterfly: on AMD wave64 "warp 0" is
+// only half a wavefront, so the cross-warp shuffle syncs inactive lanes 32-63
+// — a hardware exception (HSA 0x1016), verified on real wave64. Routing through
+// kiln_block_reduce_max/sum (shared-memory tree reductions, no cross-lane ops)
+// is the correct, wave32/64-portable fix. On nvcc this header is inert and the
+// math is behavior-identical.
+#include "kt_gpu_compat.cuh"
+
 namespace {
 
 constexpr int MAX_THREADS = 1024;
@@ -87,26 +97,11 @@ __global__ void cross_entropy_row_kernel(
         if (v > local_max) local_max = v;
     }
 
-    __shared__ float shared_max[32];
-    for (int offset = 16; offset > 0; offset /= 2) {
-        float other = __shfl_xor_sync(0xFFFFFFFF, local_max, offset);
-        if (other > local_max) local_max = other;
-    }
-    int warp_id = tid / 32;
-    int lane = tid & 31;
-    if (lane == 0) shared_max[warp_id] = local_max;
-    __syncthreads();
-
-    if (warp_id == 0) {
-        float v = lane < (blk + 31) / 32 ? shared_max[lane] : -INFINITY;
-        for (int offset = 16; offset > 0; offset /= 2) {
-            float other = __shfl_xor_sync(0xFFFFFFFF, v, offset);
-            if (other > v) v = other;
-        }
-        if (lane == 0) shared_max[0] = v;
-    }
-    __syncthreads();
-    float row_max = shared_max[0];
+    // Wave-size-agnostic block reduction via shared memory (no cross-lane ops —
+    // correct on AMD wave32/wave64 and NVIDIA). One smem buffer is reused for
+    // the max and sum passes (each block-reduce ends with a barrier).
+    __shared__ float smem[MAX_THREADS];
+    float row_max = kiln_block_reduce_max(local_max, smem);
 
     // Signal undefined loss if all logits are -inf.
     if (!isfinite(row_max)) {
@@ -124,24 +119,9 @@ __global__ void cross_entropy_row_kernel(
         local_sum += __expf(v - row_max);
     }
 
-    __shared__ float shared_sum[32];
-    for (int offset = 16; offset > 0; offset /= 2) {
-        local_sum += __shfl_xor_sync(0xFFFFFFFF, local_sum, offset);
-    }
-    if (lane == 0) shared_sum[warp_id] = local_sum;
-    __syncthreads();
-
-    if (warp_id == 0) {
-        float v = lane < (blk + 31) / 32 ? shared_sum[lane] : 0.0f;
-        for (int offset = 16; offset > 0; offset /= 2) {
-            v += __shfl_xor_sync(0xFFFFFFFF, v, offset);
-        }
-        if (lane == 0) shared_sum[0] = v;
-    }
-    __syncthreads();
+    float row_sum = kiln_block_reduce_sum(local_sum, smem);
 
     if (tid == 0) {
-        float row_sum = shared_sum[0];
         float log_sum_exp = row_max + __logf(row_sum);
 
         // Look up the target index and validate it.
@@ -172,24 +152,14 @@ __global__ void cross_entropy_finalize_kernel(
         local_sum += row_loss[r];
     }
 
-    __shared__ float shared_sum[32];
-    for (int offset = 16; offset > 0; offset /= 2) {
-        local_sum += __shfl_xor_sync(0xFFFFFFFF, local_sum, offset);
-    }
-    int warp_id = tid / 32;
-    int lane = tid & 31;
-    if (lane == 0) shared_sum[warp_id] = local_sum;
-    __syncthreads();
+    // Wave-size-agnostic block reduction (shared-memory tree, no cross-lane
+    // shuffles) — correct on AMD wave32/wave64 and NVIDIA.
+    __shared__ float smem[MAX_THREADS];
+    float total = kiln_block_reduce_sum(local_sum, smem);
 
-    if (warp_id == 0) {
-        float v = lane < (blk + 31) / 32 ? shared_sum[lane] : 0.0f;
-        for (int offset = 16; offset > 0; offset /= 2) {
-            v += __shfl_xor_sync(0xFFFFFFFF, v, offset);
-        }
-        if (lane == 0) {
-            float mean = v / (float)n_rows;
-            out[0] = from_f32<T>(mean);
-        }
+    if (tid == 0) {
+        float mean = total / (float)n_rows;
+        out[0] = from_f32<T>(mean);
     }
 }
 
@@ -231,11 +201,15 @@ extern "C" int kiln_cross_entropy_loss_async(
     if (n_rows == 0 || n_cols == 0) return -3;
     cudaStream_t stream = static_cast<cudaStream_t>(stream_raw);
 
-    int threads = MAX_THREADS;
-    while (threads > n_cols && threads > 32) {
-        threads /= 2;
+    // Block size: smallest power of two that covers n_cols, clamped to
+    // [64, MAX_THREADS]. Min 64 (not 32) so every wavefront is FULLY populated
+    // on AMD wave64 — kiln_block_reduce_* requires a power-of-two blockDim, and
+    // a half-filled wave would leave dead lanes in the tree reduction. Threads
+    // past n_cols contribute the reduction identity via the strided loop.
+    int threads = 64;
+    while (threads < n_cols && threads < MAX_THREADS) {
+        threads *= 2;
     }
-    if (threads < 32) threads = 32;
     dim3 grid((unsigned int)n_rows);
     dim3 block(threads);
 
@@ -276,11 +250,12 @@ extern "C" int kiln_cross_entropy_loss_async(
 
     // Finalize: sum + divide-by-N + cast back. One block, up to
     // MAX_THREADS threads (clamped to n_rows).
-    int fin_threads = MAX_THREADS;
-    while (fin_threads > n_rows && fin_threads > 32) {
-        fin_threads /= 2;
+    // Same power-of-two, [64, MAX_THREADS] block sizing as the row kernel so the
+    // finalize block-reduce sees full wavefronts on wave64.
+    int fin_threads = 64;
+    while (fin_threads < n_rows && fin_threads < MAX_THREADS) {
+        fin_threads *= 2;
     }
-    if (fin_threads < 32) fin_threads = 32;
     dim3 fin_grid(1);
     dim3 fin_block(fin_threads);
 

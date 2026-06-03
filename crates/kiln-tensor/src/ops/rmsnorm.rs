@@ -131,6 +131,28 @@ impl DeviceOp2 for RmsNormOp {
         Ok(Some(crate::cuda_rmsnorm_last_axis(x, weight, self.eps)?))
     }
 
+    #[cfg(feature = "rocm")]
+    fn rocm_fwd(&self, x: &Tensor, weight: &Tensor) -> Result<Option<Tensor>> {
+        // Mirrors `cuda_fwd`: same precondition gates, then route through
+        // the native ROCm RMSNorm kernel (F32-promoted reduction).
+        if !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16) {
+            return Ok(None);
+        }
+        if x.rank() == 0 || weight.rank() != 1 {
+            return Ok(None);
+        }
+        if x.dtype() != weight.dtype() {
+            return Ok(None);
+        }
+        if !x.is_contiguous() || !weight.is_contiguous() {
+            return Ok(None);
+        }
+        if *x.shape().last().unwrap() != weight.shape()[0] {
+            return Ok(None);
+        }
+        Ok(Some(crate::rocm_rmsnorm_last_axis(x, weight, self.eps)?))
+    }
+
     #[cfg(feature = "metal")]
     fn metal_fwd(&self, x: &Tensor, weight: &Tensor) -> Result<Option<Tensor>> {
         // Gate on the same preconditions as cuda_fwd / cpu_fwd so the

@@ -53,11 +53,12 @@ pub fn one_hot(indices: &Tensor, depth: usize, dtype: DType) -> Result<Tensor> {
     // transparently because upstream `argmax` / sampler outputs
     // already live on the device that produced them. See
     // `#1082`.
-    #[cfg(feature = "cuda")]
+    #[cfg(any(feature = "cuda", feature = "rocm"))]
     let _indices_host;
-    #[cfg(feature = "cuda")]
-    let indices = if matches!(indices.device(), crate::Device::Cuda(_)) {
-        _indices_host = crate::cuda_to_host_copy(indices)?;
+    #[cfg(any(feature = "cuda", feature = "rocm"))]
+    let indices = if !indices.device().is_cpu() {
+        // to_device(Cpu) routes to cuda_to_host_copy / rocm_to_host_copy. (R.4)
+        _indices_host = indices.to_device(crate::Device::Cpu)?;
         &_indices_host
     } else {
         indices

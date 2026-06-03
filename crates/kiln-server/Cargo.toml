@@ -91,6 +91,9 @@ regex = "1"
 
 [features]
 cuda = ["kiln-model/cuda", "kiln-tensor/cuda", "kiln-train/cuda", "kiln-kt-bridge/cuda"]
+# ROCm backend (R.4) — mirrors `cuda`. Adds Device::Rocm selection in
+# kiln-server's device.rs (R.9 wires the runtime probe).
+rocm = ["kiln-model/rocm", "kiln-tensor/rocm", "kiln-train/rocm", "kiln-kt-bridge/rocm"]
 metal = ["kiln-model/metal", "kiln-tensor/metal", "kiln-kt-bridge/metal", "kiln-train/metal"]
 vulkan = ["kiln-model/vulkan", "kiln-tensor/vulkan", "kiln-train/vulkan", "kiln-kt-bridge/vulkan"]
 # Forward kiln-model's NVTX feature so kiln-bench / kiln binaries emit ranges

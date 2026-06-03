@@ -18,7 +18,7 @@
 
 use std::sync::Arc;
 
-#[cfg(feature = "cuda")]
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 use crate::DeviceOp3;
 use crate::{bail, CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId};
 
@@ -36,7 +36,7 @@ impl LayerNormOp {
     }
 }
 
-#[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+#[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
 impl crate::DeviceOp3 for LayerNormOp {
     fn name(&self) -> &'static str {
         "layernorm"
@@ -71,6 +71,31 @@ impl crate::DeviceOp3 for LayerNormOp {
             return Ok(None);
         }
         Ok(Some(crate::cuda_layernorm_last_axis(
+            x, weight, bias, self.eps,
+        )?))
+    }
+
+    #[cfg(feature = "rocm")]
+    fn rocm_fwd(&self, x: &Tensor, weight: &Tensor, bias: &Tensor) -> Result<Option<Tensor>> {
+        // Mirrors `cuda_fwd`: same precondition gates, then route through
+        // the native ROCm LayerNorm kernel (F32-promoted mean/var).
+        if !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16) {
+            return Ok(None);
+        }
+        if x.rank() == 0 || weight.rank() != 1 || bias.rank() != 1 {
+            return Ok(None);
+        }
+        if x.dtype() != weight.dtype() || x.dtype() != bias.dtype() {
+            return Ok(None);
+        }
+        if !x.is_contiguous() || !weight.is_contiguous() || !bias.is_contiguous() {
+            return Ok(None);
+        }
+        let d = *x.shape().last().unwrap();
+        if weight.shape()[0] != d || bias.shape()[0] != d {
+            return Ok(None);
+        }
+        Ok(Some(crate::rocm_layernorm_last_axis(
             x, weight, bias, self.eps,
         )?))
     }
@@ -181,14 +206,14 @@ impl crate::DeviceOp3 for LayerNormOp {
 ///
 /// `x: [..., D]`, `weight: [D]`, `bias: [D]`. All F32/BF16/F16; dtypes
 /// must match across the three inputs.
-#[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+#[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
 pub fn layer_norm(x: &Tensor, weight: &Tensor, bias: &Tensor, eps: f32) -> Result<Tensor> {
     crate::dispatch3(&LayerNormOp::new(eps), x, weight, bias)
 }
 
 /// CPU-only build: no DeviceOp3 dispatch needed; `layer_norm` lowers
 /// directly to the CPU path.
-#[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan")))]
+#[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm")))]
 pub fn layer_norm(x: &Tensor, weight: &Tensor, bias: &Tensor, eps: f32) -> Result<Tensor> {
     layer_norm_cpu(x, weight, bias, eps)
 }

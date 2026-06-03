@@ -86,7 +86,14 @@ use crate::kt_api::{
 /// in {F32, BF16} + matching head_t dtype + 3-D hidden + 2-D head_t
 /// + matching hidden_size.
 fn envelope_ok(hidden: &KtTensor, head_t: &KtTensor) -> bool {
-    if !matches!(hidden.device(), KtDevice::Cuda(_)) {
+    // Phase R.7: accept both CUDA and ROCm device tensors. The FLCE
+    // forward/backward are pure kt-tensor ops (matmul, exp, index_select,
+    // scatter_add, ...) which dispatch on the tensor's backend, so the
+    // ROCm path rides the same `_kt` kernels with no FFI of its own. The
+    // neutral device check replaces the CUDA-only `matches!` so the kt-tape
+    // entry stops short-circuiting to the out-of-envelope error on
+    // `Device::Rocm` inputs.
+    if !matches!(hidden.device(), KtDevice::Cuda(_) | KtDevice::Rocm(_)) {
         return false;
     }
     let h_dt = hidden.dtype();

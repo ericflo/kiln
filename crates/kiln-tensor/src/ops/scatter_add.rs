@@ -205,6 +205,59 @@ impl DeviceOp2 for ScatterAddOp {
         Ok(Some(out))
     }
 
+    #[cfg(feature = "rocm")]
+    fn rocm_fwd(&self, values: &Tensor, indices: &Tensor) -> Result<Option<Tensor>> {
+        // Native ROCm scatter-add (R.5b). Same axis=0 / 1-D U32 / contiguous
+        // gating as cuda_fwd. F32 uses native atomicAdd; BF16 routes through the
+        // CAS-on-dword bf16 atomic helper in scatter_add.cu (HIP has no native
+        // bf16 atomicAdd). F16 has no native kernel path → fall through to host.
+        if self.axis != 0 {
+            return Ok(None);
+        }
+        if indices.rank() != 1 {
+            return Ok(None);
+        }
+        if indices.dtype() != DType::U32 {
+            return Ok(None);
+        }
+        if values.dtype().is_packed() {
+            return Ok(None);
+        }
+        // Kernel supports F32 + BF16 only; F16 falls through to the host path.
+        if !matches!(values.dtype(), DType::F32 | DType::BF16) {
+            return Ok(None);
+        }
+        if !values.is_contiguous() || !indices.is_contiguous() {
+            return Ok(None);
+        }
+
+        validate(values, indices, self.axis, self.target_dim)?;
+
+        let device_index = match values.device() {
+            crate::Device::Rocm(i) => i,
+            other => {
+                return Err(crate::Error::Msg(format!(
+                    "ScatterAddOp::rocm_fwd: expected ROCm device, got {other}"
+                )));
+            }
+        };
+
+        // Output shape: [target_dim, ...values.shape[1..]] (axis==0 +
+        // indices.rank()==1 means the prefix is empty).
+        let mut out_shape: Vec<usize> = Vec::with_capacity(values.rank());
+        out_shape.push(self.target_dim);
+        out_shape.extend_from_slice(&values.shape()[1..]);
+        let n_out_elements: usize = out_shape.iter().product();
+
+        // scatter-add accumulates into a PRE-ZEROED buffer (read-before-write).
+        let storage = crate::rocm_zeros_ctx(device_index, values.dtype(), n_out_elements)?;
+        let out = Tensor::from_parts(storage, Layout::contiguous(out_shape), TensorId::next())?;
+
+        // In-place atomic scatter-add into the zero-filled output.
+        crate::rocm_scatter_add_dim0(&out, indices, values)?;
+        Ok(Some(out))
+    }
+
     #[cfg(feature = "metal")]
     fn metal_fwd(&self, values: &Tensor, indices: &Tensor) -> Result<Option<Tensor>> {
         // Gate on the same preconditions as cuda_fwd so future MSL

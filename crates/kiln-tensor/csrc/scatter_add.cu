@@ -41,6 +41,45 @@
 
 namespace {
 
+// ---------------------------------------------------------------------------
+// BF16 atomic-add (ROCm port, R.5b).
+//
+// HIP exposes a native `atomicAdd(float*)` but NO native
+// `atomicAdd(__hip_bfloat16*)` (ROCm 7.x). The CUDA kernel's `__CUDA_ARCH__ >=
+// 800` guard is FALSE under hipcc (hipcc never defines `__CUDA_ARCH__`), so the
+// stock `#else` branch is a non-atomic read-modify-write — silently WRONG under
+// the index collisions that are the norm for embedding-backward.
+//
+// This helper restores atomic correctness on AMD by CAS-looping on the aligned
+// 32-bit word that contains the target bf16 (bf16 is 2 bytes, so it occupies
+// either the low or high half of the enclosing dword). The accumulation is done
+// in F32 (matching the kt "F32 accumulation always" convention), then narrowed
+// back to bf16 on store. `__bfloat16_as_ushort` / `__ushort_as_bfloat16` are the
+// portable bit-reinterpret intrinsics (same names on CUDA and HIP).
+//
+// Only compiled on the HIP device pass; the nvcc build keeps its native
+// `atomicAdd(__nv_bfloat16*)` path below byte-for-byte unchanged.
+#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
+__device__ __forceinline__ void kiln_atomic_add_bf16(__nv_bfloat16* addr, float val) {
+    uintptr_t a = reinterpret_cast<uintptr_t>(addr);
+    uint32_t* base = reinterpret_cast<uint32_t*>(a & ~uintptr_t(0x3));
+    bool is_high = (a & 0x2) != 0;  // bf16 lives in the high 16 bits of the dword
+    uint32_t old = *base;
+    uint32_t assumed;
+    do {
+        assumed = old;
+        unsigned short cur_bits = is_high ? static_cast<unsigned short>(assumed >> 16)
+                                          : static_cast<unsigned short>(assumed & 0xFFFFu);
+        float sum = __bfloat162float(__ushort_as_bfloat16(cur_bits)) + val;
+        unsigned short res_bits = __bfloat16_as_ushort(__float2bfloat16(sum));
+        uint32_t newval = is_high
+            ? ((assumed & 0x0000FFFFu) | (static_cast<uint32_t>(res_bits) << 16))
+            : ((assumed & 0xFFFF0000u) | static_cast<uint32_t>(res_bits));
+        old = atomicCAS(base, assumed, newval);
+    } while (assumed != old);
+}
+#endif
+
 __global__ void kiln_scatter_add_dim0_kernel_f32(const float* __restrict__ updates,
                                                  float* __restrict__ out,
                                                  const uint32_t* __restrict__ indices,
@@ -82,7 +121,12 @@ __global__ void kiln_scatter_add_dim0_kernel_bf16(const __nv_bfloat16* __restric
     int64_t src_off = idx_pos * row_inner + col;
     int64_t dst_off = static_cast<int64_t>(target) * row_inner + col;
 
-#if __CUDA_ARCH__ >= 800
+#if defined(__HIP_PLATFORM_AMD__) || defined(__HIPCC__)
+    // ROCm (R.5b): HIP has no native bf16 atomicAdd, so route through the
+    // CAS-on-dword helper above — atomic-correct under index collisions, F32
+    // accumulation, matches the CPU/CUDA scatter-add tolerance band.
+    kiln_atomic_add_bf16(&out[dst_off], __bfloat162float(updates[src_off]));
+#elif __CUDA_ARCH__ >= 800
     atomicAdd(&out[dst_off], updates[src_off]);
 #else
     // Fallback for pre-Ampere: read-modify-write via F32. Not

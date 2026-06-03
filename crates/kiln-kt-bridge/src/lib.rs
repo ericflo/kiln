@@ -47,16 +47,20 @@
 /// backward machinery used by the `_kt` training adapters. Device-agnostic
 /// scope plumbing; the CUDA-specific kt helpers stay
 /// `#[cfg(feature = "cuda")]` inside this crate's other modules.
-#[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+#[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
 pub mod tape_bridge;
 
-// `KtDType` is used by the candle-free CUDA helpers
-// (`cuda_storage_and_byte_offset`, `alloc_cuda_tensor`,
-// `cuda_input_device_ptr`). (#1082)
-#[cfg(feature = "cuda")]
+// `KtDType` + the kt-Tensor/StorageBackend types are shared by the CUDA and
+// ROCm device-pointer helpers. `CudaStorage` / `RocmStorage` are each gated to
+// their own backend feature. (#1082 / R.4)
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 use kiln_tensor::DType as KtDType;
+#[cfg(any(feature = "cuda", feature = "rocm"))]
+use kiln_tensor::{StorageBackend, Tensor as KtTensor};
 #[cfg(feature = "cuda")]
-use kiln_tensor::{CudaStorage, StorageBackend, Tensor as KtTensor};
+use kiln_tensor::CudaStorage;
+#[cfg(feature = "rocm")]
+use kiln_tensor::RocmStorage;
 
 /// Generic error for kt-API bridge operations.
 ///
@@ -214,6 +218,205 @@ pub fn cuda_input_device_ptr(
 pub fn cuda_output_device_ptr(t: &KtTensor) -> u64 {
     let st = cuda_storage_of_output(t);
     st.device_ptr_raw().0
+}
+
+// ----------------------------------------------------------------------
+// ROCm device-pointer seam (Phase R.4) — the exact analogs of the CUDA
+// helpers above, swapping CudaStorage -> RocmStorage and cuda_zeros_ctx ->
+// rocm_zeros_ctx. The kernel-crate kt-APIs reach these (or the backend-neutral
+// dispatchers below) under `--features rocm`.
+// ----------------------------------------------------------------------
+
+/// ROCm analog of [`cuda_storage_and_byte_offset`].
+#[cfg(feature = "rocm")]
+pub fn rocm_storage_and_byte_offset<'a>(
+    t: &'a KtTensor,
+    expected: KtDType,
+    name: &'static str,
+) -> Result<(&'a RocmStorage, usize), BridgeError> {
+    if t.dtype() != expected {
+        return Err(BridgeError::new(format!(
+            "kt-bridge: {name} must be {expected}, got {}",
+            t.dtype()
+        )));
+    }
+    if !t.is_contiguous() {
+        return Err(BridgeError::new(format!("kt-bridge: {name} must be contiguous")));
+    }
+    let st = t
+        .storage()
+        .as_any()
+        .downcast_ref::<RocmStorage>()
+        .ok_or_else(|| BridgeError::new(format!("kt-bridge: {name} must be ROCm")))?;
+    let off = t.layout().start_offset() * expected.size_in_bytes();
+    Ok((st, off))
+}
+
+/// ROCm analog of [`alloc_cuda_tensor`].
+#[cfg(feature = "rocm")]
+pub fn alloc_rocm_tensor(
+    source: &RocmStorage,
+    dtype: KtDType,
+    shape: Vec<usize>,
+) -> Result<KtTensor, BridgeError> {
+    let device_index = source.device().index().unwrap_or(0);
+    let n: usize = shape.iter().product();
+    let storage = kiln_tensor::rocm_zeros_ctx(device_index, dtype, n)
+        .map_err(|e| BridgeError::new(format!("kt-bridge alloc: {e}")))?;
+    KtTensor::from_parts(
+        storage,
+        kiln_tensor::Layout::contiguous(shape),
+        kiln_tensor::TensorId::next(),
+    )
+    .map_err(|e| BridgeError::new(format!("kt-bridge alloc wrap: {e}")))
+}
+
+/// ROCm analog of [`cuda_storage_of_output`].
+#[cfg(feature = "rocm")]
+pub fn rocm_storage_of_output(t: &KtTensor) -> &RocmStorage {
+    t.storage()
+        .as_any()
+        .downcast_ref::<RocmStorage>()
+        .expect("kt-bridge: alloc_rocm_tensor output must be ROCm")
+}
+
+/// ROCm analog of [`cuda_input_device_ptr`] — owner-agnostic input pointer with
+/// the same OOB span check.
+#[cfg(feature = "rocm")]
+pub fn rocm_input_device_ptr(
+    t: &KtTensor,
+    expected: KtDType,
+    name: &'static str,
+) -> Result<u64, BridgeError> {
+    let (st, byte_off) = rocm_storage_and_byte_offset(t, expected, name)?;
+    let (base_ptr, byte_len) = st.device_ptr_raw();
+    let addressable = t.layout().addressable_byte_size(expected.size_in_bytes());
+    if byte_off + addressable > byte_len {
+        return Err(BridgeError::new(format!(
+            "kt-bridge: {name} OOB: start_offset_bytes {byte_off} + addressable {addressable} \
+             > storage byte_len {byte_len} (shape {:?}, dtype {expected})",
+            t.dims()
+        )));
+    }
+    Ok(base_ptr + byte_off as u64)
+}
+
+/// ROCm analog of [`cuda_output_device_ptr`].
+#[cfg(feature = "rocm")]
+pub fn rocm_output_device_ptr(t: &KtTensor) -> u64 {
+    rocm_storage_of_output(t).device_ptr_raw().0
+}
+
+/// Raw HIP stream pointer (`*mut c_void`) for an input kt-Tensor's ROCm storage
+/// — the FFI `stream` argument kernel launchers expect. Mirrors how the CUDA
+/// kt-APIs reach `CudaStorage::cuda_stream_raw`.
+#[cfg(feature = "rocm")]
+pub fn rocm_stream_raw_of(t: &KtTensor, name: &'static str) -> Result<*mut core::ffi::c_void, BridgeError> {
+    let st = t
+        .storage()
+        .as_any()
+        .downcast_ref::<RocmStorage>()
+        .ok_or_else(|| BridgeError::new(format!("kt-bridge: {name} must be ROCm")))?;
+    Ok(st.rocm_stream_raw())
+}
+
+// ----------------------------------------------------------------------
+// Backend-neutral device-pointer dispatchers (Phase R.4). Let a kernel crate's
+// single `_kt` wrapper body work on either Device::Cuda or Device::Rocm without
+// per-call `cfg`. Each dispatches on the tensor's backend; with only one GPU
+// feature active the inactive arm is compiled out.
+// ----------------------------------------------------------------------
+
+/// Backend-neutral input device pointer — dispatches to the CUDA or ROCm helper
+/// by the tensor's backend.
+#[cfg(any(feature = "cuda", feature = "rocm"))]
+pub fn device_input_ptr(
+    t: &KtTensor,
+    expected: KtDType,
+    name: &'static str,
+) -> Result<u64, BridgeError> {
+    use kiln_tensor::Backend;
+    match t.device().backend() {
+        #[cfg(feature = "cuda")]
+        Backend::Cuda => cuda_input_device_ptr(t, expected, name),
+        #[cfg(feature = "rocm")]
+        Backend::Rocm => rocm_input_device_ptr(t, expected, name),
+        other => Err(BridgeError::new(format!(
+            "kt-bridge: {name} on unsupported backend {other:?}"
+        ))),
+    }
+}
+
+/// Backend-neutral output device pointer.
+#[cfg(any(feature = "cuda", feature = "rocm"))]
+pub fn device_output_ptr(t: &KtTensor) -> u64 {
+    use kiln_tensor::Backend;
+    match t.device().backend() {
+        #[cfg(feature = "cuda")]
+        Backend::Cuda => cuda_output_device_ptr(t),
+        #[cfg(feature = "rocm")]
+        Backend::Rocm => rocm_output_device_ptr(t),
+        _ => panic!("kt-bridge: device_output_ptr on unsupported backend"),
+    }
+}
+
+/// Backend-neutral allocation of a fresh, zeroed GPU tensor of `dtype`/`shape`
+/// on the SAME device as `source`. Dispatches to `cuda_zeros_ctx` /
+/// `rocm_zeros_ctx` by the source tensor's backend.
+#[cfg(any(feature = "cuda", feature = "rocm"))]
+pub fn alloc_device_tensor_like(
+    source: &KtTensor,
+    dtype: KtDType,
+    shape: Vec<usize>,
+) -> Result<KtTensor, BridgeError> {
+    use kiln_tensor::Backend;
+    let device = source.device();
+    let idx = device.index().unwrap_or(0);
+    let n: usize = shape.iter().product();
+    let storage = match device.backend() {
+        #[cfg(feature = "cuda")]
+        Backend::Cuda => kiln_tensor::cuda_zeros_ctx(idx, dtype, n),
+        #[cfg(feature = "rocm")]
+        Backend::Rocm => kiln_tensor::rocm_zeros_ctx(idx, dtype, n),
+        other => {
+            return Err(BridgeError::new(format!(
+                "kt-bridge: alloc_device_tensor_like on unsupported backend {other:?}"
+            )));
+        }
+    }
+    .map_err(|e| BridgeError::new(format!("kt-bridge alloc: {e}")))?;
+    KtTensor::from_parts(
+        storage,
+        kiln_tensor::Layout::contiguous(shape),
+        kiln_tensor::TensorId::next(),
+    )
+    .map_err(|e| BridgeError::new(format!("kt-bridge alloc wrap: {e}")))
+}
+
+/// Backend-neutral raw GPU stream pointer for a kt-Tensor's storage — the FFI
+/// `stream` argument kernel launchers expect.
+#[cfg(any(feature = "cuda", feature = "rocm"))]
+pub fn device_stream_raw_of(
+    t: &KtTensor,
+    name: &'static str,
+) -> Result<*mut core::ffi::c_void, BridgeError> {
+    use kiln_tensor::Backend;
+    match t.device().backend() {
+        #[cfg(feature = "cuda")]
+        Backend::Cuda => {
+            let st = t
+                .storage()
+                .as_any()
+                .downcast_ref::<CudaStorage>()
+                .ok_or_else(|| BridgeError::new(format!("kt-bridge: {name} must be CUDA")))?;
+            Ok(st.cuda_stream_raw())
+        }
+        #[cfg(feature = "rocm")]
+        Backend::Rocm => rocm_stream_raw_of(t, name),
+        other => Err(BridgeError::new(format!(
+            "kt-bridge: device_stream_raw_of {name} on unsupported backend {other:?}"
+        ))),
+    }
 }
 
 

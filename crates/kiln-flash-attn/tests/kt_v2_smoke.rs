@@ -1,5 +1,12 @@
 //! Candle-free smoke tests for the kt-API flash-attn paged-KV-write entries.
 //!
+//! CUDA-only: constructs CUDA tensors via `Tensor::cuda_from_slice` and reaches
+//! `primary_cuda_context`, both gated on `kiln-tensor/cuda`. Under
+//! `--no-default-features --features rocm` there is no CUDA substrate, so this
+//! whole file compiles out (the ROCm path is covered by
+//! `tests/rocm_flash_attn_parity.rs`).
+#![cfg(feature = "cuda")]
+//!
 //! Constructs CUDA tensors directly via the `Tensor::cuda_from_slice`
 //! substrate helper (#1082 / `a5da6152`) — no `candle_core` import
 //! required. Exercises the `paged_kv_write_token_major_bf16_slot_kt` and

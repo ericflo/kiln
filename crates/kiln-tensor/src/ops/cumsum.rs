@@ -36,6 +36,15 @@ pub fn cumsum(x: &Tensor, axis: usize) -> Result<Tensor> {
         return crate::cuda_cumsum_axis(x, axis);
     }
 
+    // ROCm fast path: native scan kernel (`rocm_cumsum_axis` → `csrc/scan_axis.cu`
+    // with kind=0), the GDN cumsum hot path. F32 accumulation, matches the CPU
+    // reference. Last-axis only; the validators above already require contiguous
+    // F32/BF16/F16 input. (R.5b)
+    #[cfg(feature = "rocm")]
+    if matches!(x.device(), crate::Device::Rocm(_)) {
+        return crate::rocm_cumsum_axis(x, axis);
+    }
+
     // Metal fast path: kiln-owned MSL scan (one thread per (outer,inner) lane,
     // sequential scan over the axis with F32 accumulation — same decomposition
     // the CPU loop below mirrors). No host round-trip. (#1082)

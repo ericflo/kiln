@@ -72,6 +72,13 @@ pub trait DeviceOp1: Send + Sync + core::fmt::Debug {
         Ok(None)
     }
 
+    /// ROCm forward. Default: returns `None` (backend fallthrough → the
+    /// dispatch host round-trip). Ops with a native ROCm kernel override this
+    /// to stay on-device. (R.10)
+    fn rocm_fwd(&self, _input: &Tensor) -> Result<Option<Tensor>> {
+        Ok(None)
+    }
+
     /// Backward closure registration. `None` for forward-only ops.
     fn bwd(&self) -> Option<Box<dyn BackwardOp>> {
         None
@@ -94,6 +101,10 @@ pub trait DeviceOp2: Send + Sync + core::fmt::Debug {
         Ok(None)
     }
     fn vulkan_fwd(&self, _a: &Tensor, _b: &Tensor) -> Result<Option<Tensor>> {
+        Ok(None)
+    }
+    /// ROCm forward. Default `None`; native-kernel ops override. (R.10)
+    fn rocm_fwd(&self, _a: &Tensor, _b: &Tensor) -> Result<Option<Tensor>> {
         Ok(None)
     }
     fn bwd(&self) -> Option<Box<dyn BackwardOp>> {
@@ -119,6 +130,10 @@ pub trait DeviceOp3: Send + Sync + core::fmt::Debug {
         Ok(None)
     }
     fn vulkan_fwd(&self, _a: &Tensor, _b: &Tensor, _c: &Tensor) -> Result<Option<Tensor>> {
+        Ok(None)
+    }
+    /// ROCm forward. Default `None`; native-kernel ops override. (R.10)
+    fn rocm_fwd(&self, _a: &Tensor, _b: &Tensor, _c: &Tensor) -> Result<Option<Tensor>> {
         Ok(None)
     }
     fn bwd(&self) -> Option<Box<dyn BackwardOp>> {
@@ -161,6 +176,9 @@ pub fn dispatch1<Op: DeviceOp1 + ?Sized>(op: &Op, input: &Tensor) -> Result<Tens
         Device::Cuda(_) => op.cuda_fwd(input)?,
         Device::Metal(_) => op.metal_fwd(input)?,
         Device::Vulkan(_) => op.vulkan_fwd(input)?,
+        // ROCm: try a native rocm_fwd; None falls through to the host
+        // round-trip below (R.10 on-device routing).
+        Device::Rocm(_) => op.rocm_fwd(input)?,
     };
     if let Some(t) = result {
         return Ok(t);
@@ -186,6 +204,19 @@ pub fn dispatch1<Op: DeviceOp1 + ?Sized>(op: &Op, input: &Tensor) -> Result<Tens
         }
         #[cfg(feature = "vulkan")]
         Device::Vulkan(_) => {
+            let cpu_in = input.to_device(Device::Cpu)?;
+            if let Some(t) = op.cpu_fwd(&cpu_in)? {
+                return t.to_device(dev);
+            }
+        }
+        // ROCm correctness-first host fallback (R.7): generic DeviceOps have no
+        // rocm_fwd yet, so an op with no native ROCm kernel stages on host (HIP
+        // D2H/H2D), runs the CPU reference, and moves back — exactly like Metal
+        // / Vulkan. The native rocm_* kernels (rocm_softmax, etc.) are reached
+        // directly by the model, not through this generic dispatch.
+        #[cfg(feature = "rocm")]
+        Device::Rocm(_) => {
+            crate::rocm_storage::rocm_log_host_fallback(op.name(), input.shape());
             let cpu_in = input.to_device(Device::Cpu)?;
             if let Some(t) = op.cpu_fwd(&cpu_in)? {
                 return t.to_device(dev);
@@ -228,6 +259,8 @@ pub fn dispatch2<Op: DeviceOp2 + ?Sized>(op: &Op, a: &Tensor, b: &Tensor) -> Res
         Device::Cuda(_) => op.cuda_fwd(a, b)?,
         Device::Metal(_) => op.metal_fwd(a, b)?,
         Device::Vulkan(_) => op.vulkan_fwd(a, b)?,
+        // ROCm: native rocm_fwd; None -> host round-trip (R.10).
+        Device::Rocm(_) => op.rocm_fwd(a, b)?,
     };
     if let Some(t) = result {
         return Ok(t);
@@ -246,6 +279,15 @@ pub fn dispatch2<Op: DeviceOp2 + ?Sized>(op: &Op, a: &Tensor, b: &Tensor) -> Res
         }
         #[cfg(feature = "vulkan")]
         Device::Vulkan(_) => {
+            let cpu_a = a.to_device(Device::Cpu)?;
+            let cpu_b = b.to_device(Device::Cpu)?;
+            if let Some(t) = op.cpu_fwd(&cpu_a, &cpu_b)? {
+                return t.to_device(dev);
+            }
+        }
+        #[cfg(feature = "rocm")]
+        Device::Rocm(_) => {
+            crate::rocm_storage::rocm_log_host_fallback(op.name(), a.shape());
             let cpu_a = a.to_device(Device::Cpu)?;
             let cpu_b = b.to_device(Device::Cpu)?;
             if let Some(t) = op.cpu_fwd(&cpu_a, &cpu_b)? {
@@ -287,6 +329,8 @@ pub fn dispatch3<Op: DeviceOp3 + ?Sized>(
         Device::Cuda(_) => op.cuda_fwd(a, b, c)?,
         Device::Metal(_) => op.metal_fwd(a, b, c)?,
         Device::Vulkan(_) => op.vulkan_fwd(a, b, c)?,
+        // ROCm: native rocm_fwd; None -> host round-trip (R.10).
+        Device::Rocm(_) => op.rocm_fwd(a, b, c)?,
     };
     if let Some(t) = result {
         return Ok(t);
@@ -306,6 +350,16 @@ pub fn dispatch3<Op: DeviceOp3 + ?Sized>(
         }
         #[cfg(feature = "vulkan")]
         Device::Vulkan(_) => {
+            let cpu_a = a.to_device(Device::Cpu)?;
+            let cpu_b = b.to_device(Device::Cpu)?;
+            let cpu_c = c.to_device(Device::Cpu)?;
+            if let Some(t) = op.cpu_fwd(&cpu_a, &cpu_b, &cpu_c)? {
+                return t.to_device(dev);
+            }
+        }
+        #[cfg(feature = "rocm")]
+        Device::Rocm(_) => {
+            crate::rocm_storage::rocm_log_host_fallback(op.name(), a.shape());
             let cpu_a = a.to_device(Device::Cpu)?;
             let cpu_b = b.to_device(Device::Cpu)?;
             let cpu_c = c.to_device(Device::Cpu)?;

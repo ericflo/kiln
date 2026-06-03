@@ -18,6 +18,12 @@
 #include <cuda_fp16.h>
 #include <cstdint>
 
+// Wave-size shim (Phase R.5b). Dropout is a pure elementwise map with a
+// counter-based splitmix64 RNG (per-element hash of (seed, idx)) — NO curand /
+// hiprand dependency and NO cross-lane reduction, so it is wave32/wave64-correct
+// as-is. Header included only for ROCm-family uniformity.
+#include "kt_gpu_compat.cuh"
+
 #define BLOCK_SIZE 256
 
 // Dtype tags — match `DType` indices for the supported subset.

@@ -56,6 +56,44 @@ pub fn where_select(mask: &Tensor, t: &Tensor, f: &Tensor) -> Result<Tensor> {
         }
     }
 
+    // ROCm fast path: all three inputs on the same ROCm device, contiguous
+    // (enforced by `validate`), and t/f dtype is F32/BF16/F16. Routes through
+    // the native `where_select.cu` kernel (Phase R.5) — no host round-trip.
+    #[cfg(feature = "rocm")]
+    {
+        if matches!(mask.device(), crate::Device::Rocm(_))
+            && matches!(t.device(), crate::Device::Rocm(_))
+            && matches!(f.device(), crate::Device::Rocm(_))
+            && mask.device() == t.device()
+            && t.device() == f.device()
+            && mask.is_contiguous()
+            && t.is_contiguous()
+            && f.is_contiguous()
+            && matches!(t.dtype(), DType::F32 | DType::BF16 | DType::F16)
+        {
+            return crate::rocm_where_select(mask, t, f);
+        }
+    }
+
+    // ROCm correctness fallback: any remaining ROCm operand (mixed-device,
+    // which the native kernel doesn't accept). Stage all three operands to
+    // host, run the CPU select below, move the result back to the input device.
+    #[cfg(feature = "rocm")]
+    if matches!(mask.device(), crate::Device::Rocm(_))
+        || matches!(t.device(), crate::Device::Rocm(_))
+        || matches!(f.device(), crate::Device::Rocm(_))
+    {
+        let dev = [mask.device(), t.device(), f.device()]
+            .into_iter()
+            .find(|d| !d.is_cpu())
+            .unwrap_or(crate::Device::Cpu);
+        let mask_host = mask.to_device(crate::Device::Cpu)?;
+        let t_host = t.to_device(crate::Device::Cpu)?;
+        let f_host = f.to_device(crate::Device::Cpu)?;
+        let out_host = where_select(&mask_host, &t_host, &f_host)?;
+        return out_host.to_device(dev);
+    }
+
     // Metal fast path: kiln-owned MSL ternary select (one thread per element,
     // byte-wise select of t/f by the U8 mask — mirroring the CPU loop below).
     // No host round-trip. (#1082)

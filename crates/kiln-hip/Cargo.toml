@@ -1,0 +1,14 @@
+[package]
+name = "kiln-hip"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Bounded Rust bindings to the AMD ROCm/HIP runtime — the cudarc analog for kiln's ROCm backend (Phase R.1)."
+
+# Pure hand-written FFI: no bindgen, so `cargo check` works on hosts with no
+# ROCm toolchain. build.rs links `amdhip64` only when a ROCm root is found;
+# `cargo check` never links, so the toolchain-less invariant holds regardless.
+[dependencies]
+
+[lib]
+doctest = false

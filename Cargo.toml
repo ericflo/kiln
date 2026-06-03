@@ -17,11 +17,13 @@ members = [
     "crates/kiln-graph-cuda",
     "crates/kiln-graph-metal",
     "crates/kiln-graph-vulkan",
+    "crates/kiln-hip",
     "crates/kiln-mps",
     "crates/kiln-opd-loss-kernel",
     "crates/kiln-optim",
     "crates/kiln-param",
     "crates/kiln-rmsnorm-kernel",
+    "crates/kiln-rocblas",
     "crates/kiln-scheduler",
     "crates/kiln-server",
     "crates/kiln-tensor",
@@ -31,10 +33,13 @@ members = [
     "crates/kiln-vulkan-kernel",
 ]
 # kiln-conv1d-kernel, kiln-flash-attn, kiln-gdn-kernel, kiln-marlin-gemm,
-# kiln-rmsnorm-kernel, and kiln-vulkan-kernel unconditionally depend on
-# platform-specific GPU runtimes (cudarc, vulkan-rs) which fail to link
-# on hosts without the matching GPU stack. They're only compiled when a
-# downstream crate opts in via --features cuda or --features vulkan.
+# kiln-rmsnorm-kernel, kiln-vulkan-kernel, and kiln-hip unconditionally depend
+# on platform-specific GPU runtimes (cudarc, vulkan-rs, amdhip64) which fail to
+# link on hosts without the matching GPU stack. They're only compiled when a
+# downstream crate opts in via --features cuda / --features vulkan /
+# --features rocm. (kiln-hip's FFI itself compiles fine on any host — `cargo
+# check` never links — but its tests link amdhip64, so it stays out of
+# default-members like the other GPU-only crates.)
 # Excluding them from default-members lets `cargo check`, `cargo build`,
 # and `cargo test` work on any host; Linux+CUDA/Vulkan builds still pull
 # them via feature activation on the real binary target.
@@ -148,6 +153,10 @@ kiln-conv1d-kernel = { path = "crates/kiln-conv1d-kernel" }
 kiln-flash-attn = { path = "crates/kiln-flash-attn" }
 kiln-flce-kernel = { path = "crates/kiln-flce-kernel" }
 kiln-gdn-kernel = { path = "crates/kiln-gdn-kernel" }
+# kiln-hip — bounded ROCm/HIP runtime bindings (the cudarc analog) for the
+# ROCm backend. Pulled in by kiln-tensor's `rocm` feature in Phase R.3.
+kiln-hip = { path = "crates/kiln-hip" }
+kiln-rocblas = { path = "crates/kiln-rocblas" }
 kiln-kt-bridge = { path = "crates/kiln-kt-bridge" }
 kiln-marlin-gemm = { path = "crates/kiln-marlin-gemm" }
 kiln-nvtx = { path = "crates/kiln-nvtx" }

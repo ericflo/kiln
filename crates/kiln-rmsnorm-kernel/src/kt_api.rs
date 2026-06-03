@@ -6,7 +6,7 @@
 //! candle-typed surface remains as the fallback/reference during migration.
 
 use kiln_kt_bridge::BridgeError;
-use kiln_tensor::{CudaStorage, DType as KtDType, Device as KtDevice, Tensor as KtTensor};
+use kiln_tensor::{DType as KtDType, Device as KtDevice, Tensor as KtTensor};
 
 use crate::{
     kiln_adamw_step_bf16, kiln_adamw_step_f32, kiln_attn_decode_qkv_split_qk_norm_rope_bf16,
@@ -41,20 +41,25 @@ impl From<BridgeError> for RmsNormError {
     }
 }
 
-fn cuda_storage_and_byte_offset<'a>(
-    t: &'a KtTensor,
-    expected: KtDType,
-    name: &'static str,
-) -> Result<(&'a CudaStorage, usize), RmsNormError> {
-    Ok(kiln_kt_bridge::cuda_storage_and_byte_offset(t, expected, name)?)
-}
+// Backend-neutral seam (Phase R.7). These bottom out in
+// `kiln_kt_bridge::device_*`, which dispatch on the tensor's backend and work
+// for BOTH `Device::Cuda` and `Device::Rocm`. The CUDA path is unchanged (the
+// neutral dispatchers route `Device::Cuda` tensors to the same cuda helpers).
 
-fn alloc_cuda_tensor(
-    source: &CudaStorage,
+/// Allocate a fresh zeroed output tensor of `dtype`/`shape` on the SAME device
+/// as `source` (replaces `alloc_cuda_tensor` + the
+/// storage-then-`cuda_zeros_ctx` pattern).
+fn alloc_like(
+    source: &KtTensor,
     dtype: KtDType,
     shape: Vec<usize>,
 ) -> Result<KtTensor, RmsNormError> {
-    Ok(kiln_kt_bridge::alloc_cuda_tensor(source, dtype, shape)?)
+    Ok(kiln_kt_bridge::alloc_device_tensor_like(source, dtype, shape)?)
+}
+
+/// Raw GPU stream pointer for `t`'s storage (replaces `device_stream_raw(st, "st")?`).
+fn device_stream_raw(t: &KtTensor, name: &'static str) -> Result<*mut core::ffi::c_void, RmsNormError> {
+    Ok(kiln_kt_bridge::device_stream_raw_of(t, name)?)
 }
 
 /// `fused_rmsnorm` over `kiln_tensor::Tensor` operands.
@@ -86,16 +91,28 @@ pub fn fused_rmsnorm_kt(
 
     // Owner-agnostic input pointers — accepts both Owned and
     // Borrowed kt storage (Phase 7 v2).
-    let x_ptr = kiln_kt_bridge::cuda_input_device_ptr(x, KtDType::BF16, "x")?;
-    let w_ptr = kiln_kt_bridge::cuda_input_device_ptr(weight, KtDType::BF16, "weight")?;
-    let (x_st, _) = cuda_storage_and_byte_offset(x, KtDType::BF16, "x")?;
-    let out = alloc_cuda_tensor(x_st, KtDType::BF16, x_shape.clone())?;
+    let x_ptr = kiln_kt_bridge::device_input_ptr(x, KtDType::BF16, "x")?;
+    let w_ptr = kiln_kt_bridge::device_input_ptr(weight, KtDType::BF16, "weight")?;
+    let x_st = x;
+    let out = alloc_like(x_st, KtDType::BF16, x_shape.clone())?;
     if rows == 0 {
         return Ok(out);
     }
-    let o_ptr = kiln_kt_bridge::cuda_output_device_ptr(&out);
+    let o_ptr = kiln_kt_bridge::device_output_ptr(&out);
 
-    let raw_stream = x_st.cuda_stream_raw();
+    // Run the kernel on the OUTPUT tensor's stream, not the input's. On ROCm
+    // each fresh allocation (`alloc_like` -> `rocm_zeros_ctx`) creates a NEW
+    // RocmContext with its OWN default stream, and the output's zeroing memset
+    // is enqueued (async, unsynchronized) on THAT stream. The readback
+    // (`rocm_to_host_copy`) also syncs the output's stream. If the kernel ran on
+    // the input's (different) stream, the output-zeroing memset could land AFTER
+    // the kernel's writes with no cross-stream ordering, nondeterministically
+    // zeroing valid results ("got 0"). Launching on the output's stream
+    // serializes memset -> kernel -> readback on one stream. `x`/`weight` were
+    // uploaded with a synchronizing H2D copy, so their data is fully resident
+    // regardless of which stream the kernel reads them on. (CUDA is unaffected:
+    // `device_stream_raw` resolves to the single shared default stream there.)
+    let raw_stream = device_stream_raw(&out, "out")?;
 
     let status = unsafe {
         kiln_fused_rmsnorm(
@@ -157,22 +174,36 @@ pub fn fused_rmsnorm_backward_kt(
     }
 
     // Owner-agnostic input pointers (Phase 7 v2).
-    let x_ptr = kiln_kt_bridge::cuda_input_device_ptr(x, KtDType::BF16, "x")?;
-    let w_ptr = kiln_kt_bridge::cuda_input_device_ptr(weight, KtDType::BF16, "weight")?;
-    let g_ptr = kiln_kt_bridge::cuda_input_device_ptr(grad_out, KtDType::BF16, "grad_out")?;
-    let (x_st, _) = cuda_storage_and_byte_offset(x, KtDType::BF16, "x")?;
+    let x_ptr = kiln_kt_bridge::device_input_ptr(x, KtDType::BF16, "x")?;
+    let w_ptr = kiln_kt_bridge::device_input_ptr(weight, KtDType::BF16, "weight")?;
+    let g_ptr = kiln_kt_bridge::device_input_ptr(grad_out, KtDType::BF16, "grad_out")?;
+    let x_st = x;
 
-    let grad_x = alloc_cuda_tensor(x_st, KtDType::BF16, x_shape.clone())?;
+    let grad_x = alloc_like(x_st, KtDType::BF16, x_shape.clone())?;
     // grad_w_partial: the kernel writes one row of partials per warp
     // of rows; the caller sums. For the kt-API we mirror the candle
     // shape: [rows, hidden] (the full per-row form). The kernel
     // expects a contiguous F32 buffer of `rows * hidden`.
-    let grad_w_partial = alloc_cuda_tensor(x_st, KtDType::F32, vec![rows, hidden])?;
+    let grad_w_partial = alloc_like(x_st, KtDType::F32, vec![rows, hidden])?;
 
-    let gx_ptr = kiln_kt_bridge::cuda_output_device_ptr(&grad_x);
-    let gw_ptr = kiln_kt_bridge::cuda_output_device_ptr(&grad_w_partial);
+    let gx_ptr = kiln_kt_bridge::device_output_ptr(&grad_x);
+    let gw_ptr = kiln_kt_bridge::device_output_ptr(&grad_w_partial);
 
-    let raw_stream = x_st.cuda_stream_raw();
+    // Launch on `grad_x`'s stream (see `fused_rmsnorm_kt` for the full rationale):
+    // on ROCm each fresh allocation gets its OWN context+stream, and `grad_x` is
+    // overwritten in full by the kernel, so co-locating the kernel with grad_x's
+    // zeroing memset serializes them. On CUDA `device_stream_raw` resolves to the
+    // single shared default stream, so this is identical to the previous behavior.
+    let raw_stream = device_stream_raw(&grad_x, "grad_x")?;
+
+    // ROCm-only cross-stream ordering (no-op concept on CUDA's single stream):
+    // `grad_w_partial` is *accumulated* into via atomicAdd, so its zeroing memset
+    // (enqueued on grad_w_partial's OWN stream at alloc time) MUST complete before
+    // the kernel's atomicAdds. Those are on different streams with no implicit
+    // ordering, so flush all pending device work before launching.
+    // R.10 perf: no pre-launch device sync needed — grad_w_partial's zeroing
+    // memset and the kernel's atomicAdd are on the one cached per-device stream
+    // (FIFO: memset before kernel). The old hipDeviceSynchronize was a stall.
 
     let status = unsafe {
         kiln_fused_rmsnorm_bwd(
@@ -192,6 +223,11 @@ pub fn fused_rmsnorm_backward_kt(
             "kt-rmsnorm bwd: FFI returned {status}"
         )));
     }
+
+    // R.10 perf: no post-launch device sync — grad_x / grad_w_partial readbacks
+    // run on the same cached per-device stream as the kernel (FIFO), and each
+    // rocm_to_host_copy syncs that stream itself.
+
     Ok((grad_x, grad_w_partial))
 }
 
@@ -257,18 +293,18 @@ pub fn fused_rotary_qk_kt(
     }
 
     // Owner-agnostic input pointers (Phase 7 v2).
-    let q_ptr = kiln_kt_bridge::cuda_input_device_ptr(q, KtDType::BF16, "q")?;
-    let k_ptr = kiln_kt_bridge::cuda_input_device_ptr(k, KtDType::BF16, "k")?;
-    let cos_ptr = kiln_kt_bridge::cuda_input_device_ptr(cos, KtDType::F32, "cos")?;
-    let sin_ptr = kiln_kt_bridge::cuda_input_device_ptr(sin, KtDType::F32, "sin")?;
-    let (q_st, _) = cuda_storage_and_byte_offset(q, KtDType::BF16, "q")?;
+    let q_ptr = kiln_kt_bridge::device_input_ptr(q, KtDType::BF16, "q")?;
+    let k_ptr = kiln_kt_bridge::device_input_ptr(k, KtDType::BF16, "k")?;
+    let cos_ptr = kiln_kt_bridge::device_input_ptr(cos, KtDType::F32, "cos")?;
+    let sin_ptr = kiln_kt_bridge::device_input_ptr(sin, KtDType::F32, "sin")?;
+    let q_st = q;
 
-    let q_out = alloc_cuda_tensor(q_st, KtDType::BF16, vec![batch, seq_len, q_heads, head_dim])?;
-    let k_out = alloc_cuda_tensor(q_st, KtDType::BF16, vec![batch, seq_len, k_heads, head_dim])?;
-    let qo_ptr = kiln_kt_bridge::cuda_output_device_ptr(&q_out);
-    let ko_ptr = kiln_kt_bridge::cuda_output_device_ptr(&k_out);
+    let q_out = alloc_like(q_st, KtDType::BF16, vec![batch, seq_len, q_heads, head_dim])?;
+    let k_out = alloc_like(q_st, KtDType::BF16, vec![batch, seq_len, k_heads, head_dim])?;
+    let qo_ptr = kiln_kt_bridge::device_output_ptr(&q_out);
+    let ko_ptr = kiln_kt_bridge::device_output_ptr(&k_out);
 
-    let raw_stream = q_st.cuda_stream_raw();
+    let raw_stream = device_stream_raw(q_st, "q_st")?;
 
     let status = unsafe {
         kiln_fused_rotary_qk(
@@ -315,13 +351,13 @@ pub fn fused_mlp_silu_mul_kt(
     let shape = gate.shape().to_vec();
 
     // Owner-agnostic input pointers (Phase 7 v2).
-    let g_ptr = kiln_kt_bridge::cuda_input_device_ptr(gate, KtDType::BF16, "gate")?;
-    let u_ptr = kiln_kt_bridge::cuda_input_device_ptr(up, KtDType::BF16, "up")?;
-    let (g_st, _) = cuda_storage_and_byte_offset(gate, KtDType::BF16, "gate")?;
-    let out = alloc_cuda_tensor(g_st, KtDType::BF16, shape)?;
-    let o_ptr = kiln_kt_bridge::cuda_output_device_ptr(&out);
+    let g_ptr = kiln_kt_bridge::device_input_ptr(gate, KtDType::BF16, "gate")?;
+    let u_ptr = kiln_kt_bridge::device_input_ptr(up, KtDType::BF16, "up")?;
+    let g_st = gate;
+    let out = alloc_like(g_st, KtDType::BF16, shape)?;
+    let o_ptr = kiln_kt_bridge::device_output_ptr(&out);
 
-    let raw_stream = g_st.cuda_stream_raw();
+    let raw_stream = device_stream_raw(g_st, "g_st")?;
 
     let status = unsafe {
         kiln_fused_mlp_silu_mul_bf16(
@@ -364,11 +400,11 @@ pub fn sgd_step_f32_kt(
     // the FFI mutates through the pointer. Borrowed inputs would
     // silently mutate the external owner's buffer (UB from kt's
     // perspective). Caller convention: pass Owned for `param`.
-    let p_ptr = kiln_kt_bridge::cuda_input_device_ptr(param, KtDType::F32, "param")?;
-    let g_ptr = kiln_kt_bridge::cuda_input_device_ptr(grad, KtDType::F32, "grad")?;
-    let (p_st, _) = cuda_storage_and_byte_offset(param, KtDType::F32, "param")?;
+    let p_ptr = kiln_kt_bridge::device_input_ptr(param, KtDType::F32, "param")?;
+    let g_ptr = kiln_kt_bridge::device_input_ptr(grad, KtDType::F32, "grad")?;
+    let p_st = param;
 
-    let raw_stream = p_st.cuda_stream_raw();
+    let raw_stream = device_stream_raw(p_st, "p_st")?;
 
     let status = unsafe {
         kiln_sgd_step_f32(p_ptr as *mut f32, g_ptr as *const f32, lr, n, raw_stream)
@@ -417,15 +453,15 @@ pub fn adamw_step_f32_kt(
 
     // Owner-agnostic pointers. In-place ops require Owned mutable
     // operands (param, first_moment, second_moment).
-    let p_ptr = kiln_kt_bridge::cuda_input_device_ptr(param, KtDType::F32, "param")?;
-    let g_ptr = kiln_kt_bridge::cuda_input_device_ptr(grad, KtDType::F32, "grad")?;
+    let p_ptr = kiln_kt_bridge::device_input_ptr(param, KtDType::F32, "param")?;
+    let g_ptr = kiln_kt_bridge::device_input_ptr(grad, KtDType::F32, "grad")?;
     let m1_ptr =
-        kiln_kt_bridge::cuda_input_device_ptr(first_moment, KtDType::F32, "first_moment")?;
+        kiln_kt_bridge::device_input_ptr(first_moment, KtDType::F32, "first_moment")?;
     let m2_ptr =
-        kiln_kt_bridge::cuda_input_device_ptr(second_moment, KtDType::F32, "second_moment")?;
-    let (p_st, _) = cuda_storage_and_byte_offset(param, KtDType::F32, "param")?;
+        kiln_kt_bridge::device_input_ptr(second_moment, KtDType::F32, "second_moment")?;
+    let p_st = param;
 
-    let raw_stream = p_st.cuda_stream_raw();
+    let raw_stream = device_stream_raw(p_st, "p_st")?;
 
     let status = unsafe {
         kiln_adamw_step_f32(
@@ -481,13 +517,13 @@ pub fn lora_decode_hidden_kt(
     }
     let rank = a_shape[0];
 
-    let x_ptr = kiln_kt_bridge::cuda_input_device_ptr(x, KtDType::BF16, "x")?;
-    let a_ptr = kiln_kt_bridge::cuda_input_device_ptr(a, KtDType::BF16, "a")?;
-    let (x_st, _) = cuda_storage_and_byte_offset(x, KtDType::BF16, "x")?;
-    let hidden = alloc_cuda_tensor(x_st, KtDType::F32, vec![batch, rank])?;
-    let h_ptr = kiln_kt_bridge::cuda_output_device_ptr(&hidden);
+    let x_ptr = kiln_kt_bridge::device_input_ptr(x, KtDType::BF16, "x")?;
+    let a_ptr = kiln_kt_bridge::device_input_ptr(a, KtDType::BF16, "a")?;
+    let x_st = x;
+    let hidden = alloc_like(x_st, KtDType::F32, vec![batch, rank])?;
+    let h_ptr = kiln_kt_bridge::device_output_ptr(&hidden);
 
-    let raw_stream = x_st.cuda_stream_raw();
+    let raw_stream = device_stream_raw(x_st, "x_st")?;
 
     let status = unsafe {
         kiln_lora_decode_hidden_bf16(
@@ -545,14 +581,14 @@ pub fn lora_decode_add_kt(
         )));
     }
 
-    let base_ptr = kiln_kt_bridge::cuda_input_device_ptr(base, KtDType::BF16, "base")?;
-    let h_ptr = kiln_kt_bridge::cuda_input_device_ptr(hidden, KtDType::F32, "hidden")?;
-    let b_ptr = kiln_kt_bridge::cuda_input_device_ptr(b, KtDType::BF16, "b")?;
-    let (base_st, _) = cuda_storage_and_byte_offset(base, KtDType::BF16, "base")?;
-    let out = alloc_cuda_tensor(base_st, KtDType::BF16, vec![batch, out_dim])?;
-    let o_ptr = kiln_kt_bridge::cuda_output_device_ptr(&out);
+    let base_ptr = kiln_kt_bridge::device_input_ptr(base, KtDType::BF16, "base")?;
+    let h_ptr = kiln_kt_bridge::device_input_ptr(hidden, KtDType::F32, "hidden")?;
+    let b_ptr = kiln_kt_bridge::device_input_ptr(b, KtDType::BF16, "b")?;
+    let base_st = base;
+    let out = alloc_like(base_st, KtDType::BF16, vec![batch, out_dim])?;
+    let o_ptr = kiln_kt_bridge::device_output_ptr(&out);
 
-    let raw_stream = base_st.cuda_stream_raw();
+    let raw_stream = device_stream_raw(base_st, "base_st")?;
 
     let status = unsafe {
         kiln_lora_decode_add_bf16(
@@ -643,15 +679,15 @@ pub fn fused_l2_qk_norm_kt(
     let (rows, hidden) = (q_shape[0], q_shape[1]);
 
     // Owner-agnostic input pointers (Phase 7 v2).
-    let q_ptr = kiln_kt_bridge::cuda_input_device_ptr(q_in, KtDType::BF16, "q_in")?;
-    let k_ptr = kiln_kt_bridge::cuda_input_device_ptr(k_in, KtDType::BF16, "k_in")?;
-    let (q_st, _) = cuda_storage_and_byte_offset(q_in, KtDType::BF16, "q_in")?;
-    let q_out = alloc_cuda_tensor(q_st, KtDType::BF16, q_shape.clone())?;
-    let k_out = alloc_cuda_tensor(q_st, KtDType::BF16, q_shape)?;
-    let qo_ptr = kiln_kt_bridge::cuda_output_device_ptr(&q_out);
-    let ko_ptr = kiln_kt_bridge::cuda_output_device_ptr(&k_out);
+    let q_ptr = kiln_kt_bridge::device_input_ptr(q_in, KtDType::BF16, "q_in")?;
+    let k_ptr = kiln_kt_bridge::device_input_ptr(k_in, KtDType::BF16, "k_in")?;
+    let q_st = q_in;
+    let q_out = alloc_like(q_st, KtDType::BF16, q_shape.clone())?;
+    let k_out = alloc_like(q_st, KtDType::BF16, q_shape)?;
+    let qo_ptr = kiln_kt_bridge::device_output_ptr(&q_out);
+    let ko_ptr = kiln_kt_bridge::device_output_ptr(&k_out);
 
-    let raw_stream = q_st.cuda_stream_raw();
+    let raw_stream = device_stream_raw(q_st, "q_st")?;
 
     let status = unsafe {
         kiln_fused_l2_qk_norm(
@@ -712,16 +748,16 @@ pub fn fused_l2_qk_norm_gqa_kt(
     let k_contig = k_in
         .contiguous()
         .map_err(|e| RmsNormError::Msg(format!("kt-l2-qk-norm-gqa: k contiguous: {e}")))?;
-    let q_ptr = kiln_kt_bridge::cuda_input_device_ptr(&q_contig, KtDType::BF16, "q_in")?;
-    let k_ptr = kiln_kt_bridge::cuda_input_device_ptr(&k_contig, KtDType::BF16, "k_in")?;
-    let (q_st, _) = cuda_storage_and_byte_offset(&q_contig, KtDType::BF16, "q_in")?;
+    let q_ptr = kiln_kt_bridge::device_input_ptr(&q_contig, KtDType::BF16, "q_in")?;
+    let k_ptr = kiln_kt_bridge::device_input_ptr(&k_contig, KtDType::BF16, "k_in")?;
+    let q_st = &q_contig;
     let out_shape = vec![batch, seq, nv, head_dim];
-    let q_out = alloc_cuda_tensor(q_st, KtDType::BF16, out_shape.clone())?;
-    let k_out = alloc_cuda_tensor(q_st, KtDType::BF16, out_shape)?;
-    let qo_ptr = kiln_kt_bridge::cuda_output_device_ptr(&q_out);
-    let ko_ptr = kiln_kt_bridge::cuda_output_device_ptr(&k_out);
+    let q_out = alloc_like(q_st, KtDType::BF16, out_shape.clone())?;
+    let k_out = alloc_like(q_st, KtDType::BF16, out_shape)?;
+    let qo_ptr = kiln_kt_bridge::device_output_ptr(&q_out);
+    let ko_ptr = kiln_kt_bridge::device_output_ptr(&k_out);
 
-    let raw_stream = q_st.cuda_stream_raw();
+    let raw_stream = device_stream_raw(q_st, "q_st")?;
 
     let status = unsafe {
         kiln_fused_l2_qk_norm_gqa(
@@ -783,15 +819,15 @@ pub fn fused_rotary_one_kt(
     }
 
     // Owner-agnostic input pointers (Phase 7 v2).
-    let x_ptr = kiln_kt_bridge::cuda_input_device_ptr(x, KtDType::BF16, "x")?;
-    let cos_ptr = kiln_kt_bridge::cuda_input_device_ptr(cos, KtDType::F32, "cos")?;
-    let sin_ptr = kiln_kt_bridge::cuda_input_device_ptr(sin, KtDType::F32, "sin")?;
-    let (x_st, _) = cuda_storage_and_byte_offset(x, KtDType::BF16, "x")?;
+    let x_ptr = kiln_kt_bridge::device_input_ptr(x, KtDType::BF16, "x")?;
+    let cos_ptr = kiln_kt_bridge::device_input_ptr(cos, KtDType::F32, "cos")?;
+    let sin_ptr = kiln_kt_bridge::device_input_ptr(sin, KtDType::F32, "sin")?;
+    let x_st = x;
 
-    let out = alloc_cuda_tensor(x_st, KtDType::BF16, vec![batch, seq_len, heads, head_dim])?;
-    let o_ptr = kiln_kt_bridge::cuda_output_device_ptr(&out);
+    let out = alloc_like(x_st, KtDType::BF16, vec![batch, seq_len, heads, head_dim])?;
+    let o_ptr = kiln_kt_bridge::device_output_ptr(&out);
 
-    let raw_stream = x_st.cuda_stream_raw();
+    let raw_stream = device_stream_raw(x_st, "x_st")?;
 
     let status = unsafe {
         kiln_fused_rotary_one(
@@ -838,16 +874,16 @@ pub fn fused_sigmoid_mul_kt(
     // Borrowed kt storage (Phase 7 v2 — accepts kt-Tensors built via
     // `kt_tensor_from_candle_cuda_borrow`). This is the migration
     // template for the rest of the kt-API surface.
-    let x_ptr = kiln_kt_bridge::cuda_input_device_ptr(x, KtDType::BF16, "x")?;
-    let g_ptr = kiln_kt_bridge::cuda_input_device_ptr(gate, KtDType::BF16, "gate")?;
+    let x_ptr = kiln_kt_bridge::device_input_ptr(x, KtDType::BF16, "x")?;
+    let g_ptr = kiln_kt_bridge::device_input_ptr(gate, KtDType::BF16, "gate")?;
 
     // Output is always Owned (alloc_cuda_tensor produces owned storage),
     // so we can reach for the raw pointer the same way.
-    let (x_st, _) = cuda_storage_and_byte_offset(x, KtDType::BF16, "x")?;
-    let out = alloc_cuda_tensor(x_st, KtDType::BF16, shape)?;
-    let o_ptr = kiln_kt_bridge::cuda_output_device_ptr(&out);
+    let x_st = x;
+    let out = alloc_like(x_st, KtDType::BF16, shape)?;
+    let o_ptr = kiln_kt_bridge::device_output_ptr(&out);
 
-    let raw_stream = x_st.cuda_stream_raw();
+    let raw_stream = device_stream_raw(x_st, "x_st")?;
 
     let status = unsafe {
         kiln_fused_sigmoid_mul_bf16(
@@ -908,18 +944,18 @@ pub fn attn_decode_qkv_split_qk_norm_rope_kt(
     let batch = qr_shape[0];
 
     // Owner-agnostic input pointers (Phase 7 v2).
-    let qr_ptr = kiln_kt_bridge::cuda_input_device_ptr(q_raw, KtDType::BF16, "q_raw")?;
-    let kr_ptr = kiln_kt_bridge::cuda_input_device_ptr(k_raw, KtDType::BF16, "k_raw")?;
-    let qw_ptr = kiln_kt_bridge::cuda_input_device_ptr(q_weight, KtDType::BF16, "q_weight")?;
-    let kw_ptr = kiln_kt_bridge::cuda_input_device_ptr(k_weight, KtDType::BF16, "k_weight")?;
-    let cos_ptr = kiln_kt_bridge::cuda_input_device_ptr(cos, KtDType::F32, "cos")?;
-    let sin_ptr = kiln_kt_bridge::cuda_input_device_ptr(sin, KtDType::F32, "sin")?;
-    let (qr_st, _) = cuda_storage_and_byte_offset(q_raw, KtDType::BF16, "q_raw")?;
+    let qr_ptr = kiln_kt_bridge::device_input_ptr(q_raw, KtDType::BF16, "q_raw")?;
+    let kr_ptr = kiln_kt_bridge::device_input_ptr(k_raw, KtDType::BF16, "k_raw")?;
+    let qw_ptr = kiln_kt_bridge::device_input_ptr(q_weight, KtDType::BF16, "q_weight")?;
+    let kw_ptr = kiln_kt_bridge::device_input_ptr(k_weight, KtDType::BF16, "k_weight")?;
+    let cos_ptr = kiln_kt_bridge::device_input_ptr(cos, KtDType::F32, "cos")?;
+    let sin_ptr = kiln_kt_bridge::device_input_ptr(sin, KtDType::F32, "sin")?;
+    let qr_st = q_raw;
 
-    let q_out = alloc_cuda_tensor(qr_st, KtDType::BF16, vec![batch, 1, q_heads, head_dim])?;
-    let k_out = alloc_cuda_tensor(qr_st, KtDType::BF16, vec![batch, 1, k_heads, head_dim])?;
+    let q_out = alloc_like(qr_st, KtDType::BF16, vec![batch, 1, q_heads, head_dim])?;
+    let k_out = alloc_like(qr_st, KtDType::BF16, vec![batch, 1, k_heads, head_dim])?;
     let gate_out = if has_gate {
-        Some(alloc_cuda_tensor(
+        Some(alloc_like(
             qr_st,
             KtDType::BF16,
             vec![batch, 1, q_heads * head_dim],
@@ -927,14 +963,14 @@ pub fn attn_decode_qkv_split_qk_norm_rope_kt(
     } else {
         None
     };
-    let qo_ptr = kiln_kt_bridge::cuda_output_device_ptr(&q_out);
-    let ko_ptr = kiln_kt_bridge::cuda_output_device_ptr(&k_out);
+    let qo_ptr = kiln_kt_bridge::device_output_ptr(&q_out);
+    let ko_ptr = kiln_kt_bridge::device_output_ptr(&k_out);
     let go_ptr = gate_out
         .as_ref()
-        .map(|go| kiln_kt_bridge::cuda_output_device_ptr(go) as *mut _)
+        .map(|go| kiln_kt_bridge::device_output_ptr(go) as *mut _)
         .unwrap_or(core::ptr::null_mut());
 
-    let raw_stream = qr_st.cuda_stream_raw();
+    let raw_stream = device_stream_raw(qr_st, "qr_st")?;
 
     let status = unsafe {
         kiln_attn_decode_qkv_split_qk_norm_rope_bf16(
@@ -1001,14 +1037,14 @@ pub fn causal_depthwise_conv1d_kt(
         )));
     }
     // Owner-agnostic input pointers (Phase 7 v2).
-    let i_ptr = kiln_kt_bridge::cuda_input_device_ptr(input, KtDType::F32, "input")?;
-    let w_ptr = kiln_kt_bridge::cuda_input_device_ptr(weight, KtDType::F32, "weight")?;
-    let s_ptr = kiln_kt_bridge::cuda_input_device_ptr(state, KtDType::F32, "state")?;
-    let (i_st, _) = cuda_storage_and_byte_offset(input, KtDType::F32, "input")?;
-    let out = alloc_cuda_tensor(i_st, KtDType::F32, vec![rows, channels])?;
-    let o_ptr = kiln_kt_bridge::cuda_output_device_ptr(&out);
+    let i_ptr = kiln_kt_bridge::device_input_ptr(input, KtDType::F32, "input")?;
+    let w_ptr = kiln_kt_bridge::device_input_ptr(weight, KtDType::F32, "weight")?;
+    let s_ptr = kiln_kt_bridge::device_input_ptr(state, KtDType::F32, "state")?;
+    let i_st = input;
+    let out = alloc_like(i_st, KtDType::F32, vec![rows, channels])?;
+    let o_ptr = kiln_kt_bridge::device_output_ptr(&out);
 
-    let raw_stream = i_st.cuda_stream_raw();
+    let raw_stream = device_stream_raw(i_st, "i_st")?;
     let status = unsafe {
         kiln_causal_depthwise_conv1d_f32(
             i_ptr as *const f32,
@@ -1058,11 +1094,11 @@ pub fn causal_depthwise_conv1d_inplace_kt(
         )));
     }
     // In-place op — `input_out` is mutated. Caller convention: pass Owned.
-    let i_ptr = kiln_kt_bridge::cuda_input_device_ptr(input_out, KtDType::F32, "input_out")?;
-    let w_ptr = kiln_kt_bridge::cuda_input_device_ptr(weight, KtDType::F32, "weight")?;
-    let s_ptr = kiln_kt_bridge::cuda_input_device_ptr(state, KtDType::F32, "state")?;
-    let (i_st, _) = cuda_storage_and_byte_offset(input_out, KtDType::F32, "input_out")?;
-    let raw_stream = i_st.cuda_stream_raw();
+    let i_ptr = kiln_kt_bridge::device_input_ptr(input_out, KtDType::F32, "input_out")?;
+    let w_ptr = kiln_kt_bridge::device_input_ptr(weight, KtDType::F32, "weight")?;
+    let s_ptr = kiln_kt_bridge::device_input_ptr(state, KtDType::F32, "state")?;
+    let i_st = input_out;
+    let raw_stream = device_stream_raw(i_st, "i_st")?;
     let status = unsafe {
         kiln_causal_depthwise_conv1d_inplace_f32(
             i_ptr as *mut f32,
@@ -1101,12 +1137,12 @@ pub fn causal_depthwise_conv1d_bwd_input_kt(
             weight.shape()
         )));
     }
-    let g_ptr = kiln_kt_bridge::cuda_input_device_ptr(grad_out, KtDType::F32, "grad_out")?;
-    let w_ptr = kiln_kt_bridge::cuda_input_device_ptr(weight, KtDType::F32, "weight")?;
-    let (g_st, _) = cuda_storage_and_byte_offset(grad_out, KtDType::F32, "grad_out")?;
-    let gi = alloc_cuda_tensor(g_st, KtDType::F32, vec![rows, channels])?;
-    let gi_ptr = kiln_kt_bridge::cuda_output_device_ptr(&gi);
-    let raw_stream = g_st.cuda_stream_raw();
+    let g_ptr = kiln_kt_bridge::device_input_ptr(grad_out, KtDType::F32, "grad_out")?;
+    let w_ptr = kiln_kt_bridge::device_input_ptr(weight, KtDType::F32, "weight")?;
+    let g_st = grad_out;
+    let gi = alloc_like(g_st, KtDType::F32, vec![rows, channels])?;
+    let gi_ptr = kiln_kt_bridge::device_output_ptr(&gi);
+    let raw_stream = device_stream_raw(g_st, "g_st")?;
     let status = unsafe {
         kiln_causal_depthwise_conv1d_bwd_input_f32(
             g_ptr as *const f32,
@@ -1153,13 +1189,13 @@ pub fn causal_depthwise_conv1d_bwd_weight_kt(
             kernel - 1
         )));
     }
-    let g_ptr = kiln_kt_bridge::cuda_input_device_ptr(grad_out, KtDType::F32, "grad_out")?;
-    let i_ptr = kiln_kt_bridge::cuda_input_device_ptr(input, KtDType::F32, "input")?;
-    let s_ptr = kiln_kt_bridge::cuda_input_device_ptr(state, KtDType::F32, "state")?;
-    let (g_st, _) = cuda_storage_and_byte_offset(grad_out, KtDType::F32, "grad_out")?;
-    let gw = alloc_cuda_tensor(g_st, KtDType::F32, vec![channels, kernel])?;
-    let gw_ptr = kiln_kt_bridge::cuda_output_device_ptr(&gw);
-    let raw_stream = g_st.cuda_stream_raw();
+    let g_ptr = kiln_kt_bridge::device_input_ptr(grad_out, KtDType::F32, "grad_out")?;
+    let i_ptr = kiln_kt_bridge::device_input_ptr(input, KtDType::F32, "input")?;
+    let s_ptr = kiln_kt_bridge::device_input_ptr(state, KtDType::F32, "state")?;
+    let g_st = grad_out;
+    let gw = alloc_like(g_st, KtDType::F32, vec![channels, kernel])?;
+    let gw_ptr = kiln_kt_bridge::device_output_ptr(&gw);
+    let raw_stream = device_stream_raw(g_st, "g_st")?;
     let status = unsafe {
         kiln_causal_depthwise_conv1d_bwd_weight_f32(
             g_ptr as *const f32,
@@ -1199,12 +1235,12 @@ pub fn causal_depthwise_conv1d_bwd_state_kt(
             weight.shape()
         )));
     }
-    let g_ptr = kiln_kt_bridge::cuda_input_device_ptr(grad_out, KtDType::F32, "grad_out")?;
-    let w_ptr = kiln_kt_bridge::cuda_input_device_ptr(weight, KtDType::F32, "weight")?;
-    let (g_st, _) = cuda_storage_and_byte_offset(grad_out, KtDType::F32, "grad_out")?;
-    let gs = alloc_cuda_tensor(g_st, KtDType::F32, vec![channels, kernel - 1])?;
-    let gs_ptr = kiln_kt_bridge::cuda_output_device_ptr(&gs);
-    let raw_stream = g_st.cuda_stream_raw();
+    let g_ptr = kiln_kt_bridge::device_input_ptr(grad_out, KtDType::F32, "grad_out")?;
+    let w_ptr = kiln_kt_bridge::device_input_ptr(weight, KtDType::F32, "weight")?;
+    let g_st = grad_out;
+    let gs = alloc_like(g_st, KtDType::F32, vec![channels, kernel - 1])?;
+    let gs_ptr = kiln_kt_bridge::device_output_ptr(&gs);
+    let raw_stream = device_stream_raw(g_st, "g_st")?;
     let status = unsafe {
         kiln_causal_depthwise_conv1d_bwd_state_f32(
             g_ptr as *const f32,
@@ -1240,12 +1276,12 @@ fn _unused_imports_keep() {
 pub fn f32_to_bf16_kt(src: &KtTensor) -> Result<KtTensor, RmsNormError> {
     let shape = src.shape().to_vec();
     let n = src.element_count();
-    let s_ptr = kiln_kt_bridge::cuda_input_device_ptr(src, KtDType::F32, "src")?;
-    let (s_st, _) = cuda_storage_and_byte_offset(src, KtDType::F32, "src")?;
-    let out = alloc_cuda_tensor(s_st, KtDType::BF16, shape)?;
-    let o_ptr = kiln_kt_bridge::cuda_output_device_ptr(&out);
+    let s_ptr = kiln_kt_bridge::device_input_ptr(src, KtDType::F32, "src")?;
+    let s_st = src;
+    let out = alloc_like(s_st, KtDType::BF16, shape)?;
+    let o_ptr = kiln_kt_bridge::device_output_ptr(&out);
 
-    let raw_stream = s_st.cuda_stream_raw();
+    let raw_stream = device_stream_raw(s_st, "s_st")?;
 
     let status = unsafe {
         kiln_f32_to_bf16(s_ptr as *const f32, o_ptr as *mut _, n as i32, raw_stream)
@@ -1275,11 +1311,11 @@ pub fn sgd_step_bf16_kt(
         )));
     }
     let n = param.element_count() as i64;
-    let p_ptr = kiln_kt_bridge::cuda_input_device_ptr(param, KtDType::BF16, "param")?;
-    let g_ptr = kiln_kt_bridge::cuda_input_device_ptr(grad, KtDType::BF16, "grad")?;
-    let (p_st, _) = cuda_storage_and_byte_offset(param, KtDType::BF16, "param")?;
+    let p_ptr = kiln_kt_bridge::device_input_ptr(param, KtDType::BF16, "param")?;
+    let g_ptr = kiln_kt_bridge::device_input_ptr(grad, KtDType::BF16, "grad")?;
+    let p_st = param;
 
-    let raw_stream = p_st.cuda_stream_raw();
+    let raw_stream = device_stream_raw(p_st, "p_st")?;
 
     let status = unsafe {
         kiln_sgd_step_bf16(p_ptr as *mut _, g_ptr as *const _, lr, n, raw_stream)
@@ -1325,15 +1361,15 @@ pub fn adamw_step_bf16_kt(
     }
     let n = param.element_count() as i64;
 
-    let p_ptr = kiln_kt_bridge::cuda_input_device_ptr(param, KtDType::BF16, "param")?;
-    let g_ptr = kiln_kt_bridge::cuda_input_device_ptr(grad, KtDType::BF16, "grad")?;
+    let p_ptr = kiln_kt_bridge::device_input_ptr(param, KtDType::BF16, "param")?;
+    let g_ptr = kiln_kt_bridge::device_input_ptr(grad, KtDType::BF16, "grad")?;
     let m1_ptr =
-        kiln_kt_bridge::cuda_input_device_ptr(first_moment, KtDType::BF16, "first_moment")?;
+        kiln_kt_bridge::device_input_ptr(first_moment, KtDType::BF16, "first_moment")?;
     let m2_ptr =
-        kiln_kt_bridge::cuda_input_device_ptr(second_moment, KtDType::BF16, "second_moment")?;
-    let (p_st, _) = cuda_storage_and_byte_offset(param, KtDType::BF16, "param")?;
+        kiln_kt_bridge::device_input_ptr(second_moment, KtDType::BF16, "second_moment")?;
+    let p_st = param;
 
-    let raw_stream = p_st.cuda_stream_raw();
+    let raw_stream = device_stream_raw(p_st, "p_st")?;
 
     let status = unsafe {
         kiln_adamw_step_bf16(
@@ -1395,15 +1431,15 @@ pub fn fused_rotary_one_bwd_kt(
         )));
     }
 
-    let y_ptr = kiln_kt_bridge::cuda_input_device_ptr(grad_y, KtDType::BF16, "grad_y")?;
-    let cos_ptr = kiln_kt_bridge::cuda_input_device_ptr(cos, KtDType::F32, "cos")?;
-    let sin_ptr = kiln_kt_bridge::cuda_input_device_ptr(sin, KtDType::F32, "sin")?;
-    let (y_st, _) = cuda_storage_and_byte_offset(grad_y, KtDType::BF16, "grad_y")?;
+    let y_ptr = kiln_kt_bridge::device_input_ptr(grad_y, KtDType::BF16, "grad_y")?;
+    let cos_ptr = kiln_kt_bridge::device_input_ptr(cos, KtDType::F32, "cos")?;
+    let sin_ptr = kiln_kt_bridge::device_input_ptr(sin, KtDType::F32, "sin")?;
+    let y_st = grad_y;
 
-    let out = alloc_cuda_tensor(y_st, KtDType::BF16, vec![batch, seq_len, heads, head_dim])?;
-    let o_ptr = kiln_kt_bridge::cuda_output_device_ptr(&out);
+    let out = alloc_like(y_st, KtDType::BF16, vec![batch, seq_len, heads, head_dim])?;
+    let o_ptr = kiln_kt_bridge::device_output_ptr(&out);
 
-    let raw_stream = y_st.cuda_stream_raw();
+    let raw_stream = device_stream_raw(y_st, "y_st")?;
 
     let status = unsafe {
         kiln_fused_rotary_one_bwd(
@@ -1448,16 +1484,15 @@ pub fn fused_mlp_silu_mul_packed_kt(
     out_dims.push(cols);
 
     let gu_ptr =
-        kiln_kt_bridge::cuda_input_device_ptr(gate_up_packed, KtDType::BF16, "gate_up_packed")?;
-    let (gu_st, _) =
-        cuda_storage_and_byte_offset(gate_up_packed, KtDType::BF16, "gate_up_packed")?;
-    let out = alloc_cuda_tensor(gu_st, KtDType::BF16, out_dims)?;
+        kiln_kt_bridge::device_input_ptr(gate_up_packed, KtDType::BF16, "gate_up_packed")?;
+    let gu_st = gate_up_packed;
+    let out = alloc_like(gu_st, KtDType::BF16, out_dims)?;
     if rows == 0 {
         return Ok(out);
     }
-    let o_ptr = kiln_kt_bridge::cuda_output_device_ptr(&out);
+    let o_ptr = kiln_kt_bridge::device_output_ptr(&out);
 
-    let raw_stream = gu_st.cuda_stream_raw();
+    let raw_stream = device_stream_raw(gu_st, "gu_st")?;
 
     let status = unsafe {
         kiln_fused_mlp_silu_mul_packed_bf16(
@@ -1522,12 +1557,12 @@ pub fn lora_add_inplace_f32_kt(
     }
 
     // In-place op: `base` is mutated through its CUDA storage.
-    let base_ptr = kiln_kt_bridge::cuda_input_device_ptr(base, KtDType::F32, "base")?;
-    let h_ptr = kiln_kt_bridge::cuda_input_device_ptr(hidden, KtDType::F32, "hidden")?;
-    let b_ptr = kiln_kt_bridge::cuda_input_device_ptr(b, KtDType::F32, "b")?;
-    let (base_st, _) = cuda_storage_and_byte_offset(base, KtDType::F32, "base")?;
+    let base_ptr = kiln_kt_bridge::device_input_ptr(base, KtDType::F32, "base")?;
+    let h_ptr = kiln_kt_bridge::device_input_ptr(hidden, KtDType::F32, "hidden")?;
+    let b_ptr = kiln_kt_bridge::device_input_ptr(b, KtDType::F32, "b")?;
+    let base_st = base;
 
-    let raw_stream = base_st.cuda_stream_raw();
+    let raw_stream = device_stream_raw(base_st, "base_st")?;
 
     let status = unsafe {
         kiln_lora_add_inplace_f32(
@@ -1575,11 +1610,11 @@ pub fn silu_inplace_save_sigmoid_f32_kt(
     }
     let elems = elem_count as i64;
     // Both buffers are mutated in place through their CUDA storage.
-    let i_ptr = kiln_kt_bridge::cuda_input_device_ptr(input_out, KtDType::F32, "input_out")?;
-    let s_ptr = kiln_kt_bridge::cuda_input_device_ptr(sigmoid_out, KtDType::F32, "sigmoid_out")?;
-    let (i_st, _) = cuda_storage_and_byte_offset(input_out, KtDType::F32, "input_out")?;
+    let i_ptr = kiln_kt_bridge::device_input_ptr(input_out, KtDType::F32, "input_out")?;
+    let s_ptr = kiln_kt_bridge::device_input_ptr(sigmoid_out, KtDType::F32, "sigmoid_out")?;
+    let i_st = input_out;
 
-    let raw_stream = i_st.cuda_stream_raw();
+    let raw_stream = device_stream_raw(i_st, "i_st")?;
 
     let status = unsafe {
         kiln_silu_inplace_save_sigmoid_f32(
@@ -1611,8 +1646,18 @@ pub fn silu_inplace_save_sigmoid_f32_kt(
 // any rejection — callers fall through to the candle/composite path.
 // ============================================================================
 
+/// True when `t` lives on a GPU backend this crate's fused kernels run on.
+/// Phase R.7: accepts `Device::Rocm` (under the `rocm` feature) in addition to
+/// `Device::Cuda`, so the `supports_*` predicates gate the kernels in on both
+/// backends. Kept named `kt_is_cuda` to avoid churning the many call sites; the
+/// CUDA-only behavior is unchanged when `rocm` is off.
 fn kt_is_cuda(t: &KtTensor) -> bool {
-    matches!(t.device(), KtDevice::Cuda(_))
+    match t.device() {
+        KtDevice::Cuda(_) => true,
+        #[cfg(feature = "rocm")]
+        KtDevice::Rocm(_) => true,
+        _ => false,
+    }
 }
 
 /// kt twin of [`crate::supports`].

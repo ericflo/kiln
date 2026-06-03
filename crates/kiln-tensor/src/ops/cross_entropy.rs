@@ -59,6 +59,21 @@ impl DeviceOp2 for CrossEntropyOp {
         Ok(Some(crate::cuda_cross_entropy_loss(logits, targets)?))
     }
 
+    #[cfg(feature = "rocm")]
+    fn rocm_fwd(&self, logits: &Tensor, targets: &Tensor) -> Result<Option<Tensor>> {
+        // Mirrors `cuda_fwd`: validate shape / dtype first so contract
+        // errors surface as Errs, then route through the native ROCm CE
+        // kernel. Soft-fall through to CPU if either input is not
+        // ROCm-resident.
+        validate(logits, targets)?;
+        if !matches!(logits.device(), crate::Device::Rocm(_))
+            || !matches!(targets.device(), crate::Device::Rocm(_))
+        {
+            return Ok(None);
+        }
+        Ok(Some(crate::rocm_cross_entropy_loss(logits, targets)?))
+    }
+
     #[cfg(feature = "vulkan")]
     fn vulkan_fwd(&self, logits: &Tensor, targets: &Tensor) -> Result<Option<Tensor>> {
         // Same precondition gates as cuda_fwd: validate shape / dtype

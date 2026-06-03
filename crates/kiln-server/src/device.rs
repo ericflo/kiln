@@ -61,6 +61,14 @@ pub fn select_device_with_options_kt(cuda_graphs: bool) -> Result<kiln_tensor::D
         return Ok(kiln_tensor::Device::Cuda(0));
     }
 
+    // ROCm is probed BEFORE Vulkan: on an AMD GPU the native ROCm/HIP path
+    // (hipBLASLt GEMM, HIP kernels, lower overhead) beats Vulkan compute. (R.9)
+    #[cfg(feature = "rocm")]
+    if kiln_tensor::rocm_is_available() {
+        tracing::info!("ROCm available — using AMD GPU device 0 (hipBLASLt + HIP kernels)");
+        return Ok(kiln_tensor::Device::Rocm(0));
+    }
+
     #[cfg(feature = "vulkan")]
     {
         // Vulkan: candle-core has no native Vulkan device, so we detect
@@ -83,10 +91,10 @@ pub fn select_device_with_options_kt(cuda_graphs: bool) -> Result<kiln_tensor::D
         return Ok(kiln_tensor::Device::Metal(0));
     }
 
-    #[cfg(any(feature = "cuda", feature = "vulkan", feature = "metal"))]
+    #[cfg(any(feature = "cuda", feature = "vulkan", feature = "metal", feature = "rocm"))]
     tracing::info!("no compiled GPU backend found an available device — using CPU");
 
-    #[cfg(not(any(feature = "cuda", feature = "vulkan", feature = "metal")))]
+    #[cfg(not(any(feature = "cuda", feature = "vulkan", feature = "metal", feature = "rocm")))]
     tracing::info!("no GPU feature active — using CPU");
     Ok(kiln_tensor::Device::Cpu)
 }

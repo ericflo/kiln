@@ -2720,7 +2720,7 @@ pub fn opd_train(
                 // guardrails, and the progress callback) still type-checks on
                 // both builds.
                 let (loss_val, active_count): (f64, usize) = {
-                    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+                    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
                     {
                         let (loss_val, active_count, kt_grads) =
                             opd_step_forward_backward_tape_authoritative(
@@ -2767,7 +2767,7 @@ pub fn opd_train(
 
                         (loss_val, active_count)
                     }
-                    #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan")))]
+                    #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm")))]
                     {
                         anyhow::bail!(
                             "opd_train: OPD training requires a CUDA or Metal build — the \
@@ -2939,12 +2939,12 @@ pub fn opd_train(
 ///
 /// CUDA + Metal: the tape adapters record kt GPU ops + bridge kt<->candle GPU
 /// tensors. The caller device-gates this via
-/// `#[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]`. (#1082 Metal lane) On
+/// `#[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]`. (#1082 Metal lane) On
 /// Metal the FORWARD + scalar OPD loss record onto the tape; the recorded OPD
 /// backward (`CudaOpdTopKReverseKlPhaseBBackward::apply`) is CUDA-FFI-only and
 /// `bail!`s during the tape walk — so on Metal this returns the backward error
 /// (OPD Metal backward is a documented follow-up pending a Metal kernel).
-#[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+#[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
 #[allow(clippy::too_many_arguments)]
 fn opd_step_forward_backward_tape_authoritative(
     backend_rt: &dyn kiln_model::backend::BackendRuntime,

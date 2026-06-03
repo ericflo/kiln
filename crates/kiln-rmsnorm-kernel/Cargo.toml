@@ -19,20 +19,34 @@ build = "build.rs"
 # symbols they need (same single linker symbol in
 # `libkiln_rmsnorm_kernel.a`).
 half = "2"
-# kiln-tensor-typed surface (`kt_api`, `kt_tape`) over the same CUDA FFI.
-kiln-tensor = { workspace = true, features = ["cuda"] }
+# kiln-tensor-typed surface (`kt_api`, `kt_tape`) over the same GPU FFI. The
+# backend feature (`cuda` / `rocm`) is forwarded from THIS crate's matching
+# feature below (mirrors kiln-flce-kernel) so the dep doesn't hardwire CUDA.
+kiln-tensor = { workspace = true }
 # (#1082) candle-drop: `default-features = false` opts OUT of kt-bridge's
 # now-optional `candle` feature. This crate uses ONLY the kt-native bridge
-# surface (BridgeError + alloc_cuda_tensor + cuda_input_device_ptr +
-# cuda_output_device_ptr + cuda_storage_and_byte_offset +
-# cuda_storage_of_output), none of which touch candle. With this opt-out,
+# surface (BridgeError + the backend-neutral device_* seam + the cuda_*/rocm_*
+# helpers it dispatches to), none of which touch candle. With this opt-out,
 # `cargo tree -p kiln-rmsnorm-kernel --features cuda` is candle-free.
 # NOTE: declared as a DIRECT path dep (not `workspace = true`) because Cargo
 # forbids a member overriding `default-features = false` on a
 # workspace-inherited dependency (same as kiln-opd-loss-kernel).
-kiln-kt-bridge = { path = "../kiln-kt-bridge", default-features = false, features = ["cuda"] }
+kiln-kt-bridge = { path = "../kiln-kt-bridge", default-features = false }
 # Phase 6a/CP-4 (#1082): kt-tape RMSNorm shim records onto kiln_autograd::Tape.
 kiln-autograd = { workspace = true }
+
+[features]
+# Activates the CUDA-backed `kiln-tensor` / `kiln-kt-bridge` surfaces behind the
+# kt entries, and drives build.rs to nvcc-compile `csrc/*.cu`.
+cuda = ["kiln-tensor/cuda", "kiln-kt-bridge/cuda"]
+
+# Phase R.7 (ROCm port): mirrors `cuda`, swapping each `<dep>/cuda` ->
+# `<dep>/rocm`. Drives build.rs's `build_rocm()` arm (hipcc-compiles the same
+# `csrc/*.cu` via the kiln-tensor hip_compat shim) and routes the kt wrappers
+# through the backend-neutral `kiln_kt_bridge::device_*` seam, which dispatches
+# to the ROCm helpers for `Device::Rocm` tensors. kiln-model/kiln-train
+# re-export this via their own `rocm` feature.
+rocm = ["kiln-tensor/rocm", "kiln-kt-bridge/rocm"]
 
 [build-dependencies]
 cc = "1"

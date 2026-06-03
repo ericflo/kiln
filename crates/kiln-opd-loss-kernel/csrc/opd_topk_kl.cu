@@ -57,39 +57,58 @@
 #include <cstdint>
 #include <climits>
 
+// Wave-size shim (Phase R.7). The two cross-lane reductions below (the
+// per-logit dot product and the length-K max/sum that feeds log_softmax)
+// historically used 32-lane `__shfl_xor_sync(0xffffffff, ...)` butterflies.
+// On AMD wave64 that is BROKEN: HIP's `__shfl_*_sync` static_asserts a
+// 64-bit mask (a 32-bit `0xffffffff` is rejected because it would silently
+// drop lanes 32-63), and even the native shuffle mangles cross-32-lane
+// offsets in wave64 mode (verified on gfx1151). So both reductions are
+// re-expressed as wave-agnostic shared-memory block reductions
+// (`kiln_block_reduce_sum/max`) over a power-of-two blockDim >= 64 — correct
+// on NVIDIA, AMD wave32, AND AMD wave64, and numerically equivalent to the
+// old warp-shuffle path up to F32 reduction-order associativity (covered by
+// the parity tolerance). The CUDA path takes the identical code.
+#include "kt_gpu_compat.cuh"
+
 namespace {
 
 constexpr int kWarpSize = 32;
 
-// Reduce a length-K float array `src` in shared memory to a single
-// scalar via the supplied operator, broadcast via `bcast[0]`. `K` must
-// be ≤ 64. Only lane 0..K-1 of warp 0 participate.
+// Upper bound on threads per block: K_max (32) * 32 = 1024, the Ampere /
+// CDNA max. The block-reduce scratch is sized to this.
+constexpr int kMaxThreads = 1024;
+
+// Reduce a length-K float array `src` (held in shared memory) to a single
+// scalar via the supplied operator, broadcasting the result via `bcast[0]`.
+// `K` must be <= 64. Wave-size-AGNOSTIC: every thread of the block loads
+// `(tid < K) ? src[tid] : identity` and the reduction runs through the
+// shared-memory tree `kiln_block_reduce_*` (no cross-lane shuffles), so it
+// is correct on NVIDIA + AMD wave32 + AMD wave64. `scratch` must hold >=
+// blockDim.x floats and blockDim.x must be a power of two (the launcher
+// guarantees both).
 //
-// Caller guarantees `__syncthreads()` was called before invoking us
-// (so `src` writes by other warps are visible). We `__syncthreads()`
-// at the end so callers see `bcast[0]`.
+// Caller guarantees `__syncthreads()` was called before invoking us (so
+// `src` writes by other threads are visible). `kiln_block_reduce_*` ends
+// with a barrier, and we `__syncthreads()` after writing `bcast` so callers
+// see `bcast[0]`.
 enum class ReduceOp { Max, Sum };
 
 template <int K, ReduceOp Op>
 __device__ __forceinline__ void block_reduce_k(
-    const float* __restrict__ src, float* bcast
+    const float* __restrict__ src, float* bcast, float* scratch
 ) {
-    if (threadIdx.x < kWarpSize) {
-        const float identity = (Op == ReduceOp::Max) ? -INFINITY : 0.0f;
-        float v = (threadIdx.x < K) ? src[threadIdx.x] : identity;
-        if constexpr (K > kWarpSize) {
-            float v2 = (threadIdx.x + kWarpSize < K)
-                ? src[threadIdx.x + kWarpSize]
-                : identity;
-            v = (Op == ReduceOp::Max) ? fmaxf(v, v2) : (v + v2);
-        }
-        for (int o = kWarpSize / 2; o > 0; o >>= 1) {
-            float other = __shfl_xor_sync(0xffffffff, v, o);
-            v = (Op == ReduceOp::Max) ? fmaxf(v, other) : (v + other);
-        }
-        if (threadIdx.x == 0) {
-            bcast[0] = v;
-        }
+    const int tid = threadIdx.x;
+    const float identity = (Op == ReduceOp::Max) ? -INFINITY : 0.0f;
+    const float v = (tid < K) ? src[tid] : identity;
+    float r;
+    if (Op == ReduceOp::Max) {
+        r = kiln_block_reduce_max(v, scratch);
+    } else {
+        r = kiln_block_reduce_sum(v, scratch);
+    }
+    if (tid == 0) {
+        bcast[0] = r;
     }
     __syncthreads();
 }
@@ -137,8 +156,7 @@ __global__ void opd_topk_kl_bwd_kernel(
     if (t >= t_active) return;
 
     const int tid = threadIdx.x;
-    const int warp_id = tid / kWarpSize;
-    const int lane = tid & (kWarpSize - 1);
+    const int blk = blockDim.x;
 
     __shared__ float s_logits[64];
     __shared__ float s_lp_q[64];
@@ -146,58 +164,67 @@ __global__ void opd_topk_kl_bwd_kernel(
     __shared__ float exp_q[64];
     __shared__ float d_s_logits[64];
     __shared__ float bcast[1];
+    // Wave-agnostic block-reduce scratch — one float per thread (the launcher
+    // caps blockDim at kMaxThreads and guarantees it is a power of two).
+    __shared__ float scratch[kMaxThreads];
 
     // ---- recompute forward state to recover p_hat, log_p_hat, log_q_hat, KL_t ----
-    if (warp_id < K) {
-        if (lane == 0) {
-            s_lp_q[warp_id] = topk_lp_q[t * K + warp_id];
-        }
-        const uint32_t col = topk_idx[t * K + warp_id];
-        float acc = 0.0f;
-        for (int h = lane; h < hidden_size; h += kWarpSize) {
+    //
+    // Per-logit dot product s_logits[k] = sum_h hidden[t,h] * head_t[h, idx[t,k]].
+    // Wave-size fix (R.7): instead of one warp per logit with an intra-warp
+    // shuffle (broken on AMD wave64), ALL blockDim.x threads cooperate on one
+    // logit at a time, striding over h and reducing through the shared-memory
+    // block reduction. K block-reductions total — wave32/64-correct on AMD and
+    // NVIDIA, and behavior-identical on CUDA up to F32 reduction-order.
+    if (tid < K) {
+        s_lp_q[tid] = topk_lp_q[t * K + tid];
+    }
+    __syncthreads();
+    for (int k = 0; k < K; ++k) {
+        const uint32_t col = topk_idx[t * K + k];
+        float partial = 0.0f;
+        for (int h = tid; h < hidden_size; h += blk) {
             const float a = static_cast<float>(hidden[t * hidden_size + h]);
             const float b = static_cast<float>(head_t[h * vocab_size + col]);
-            acc += a * b;
+            partial += a * b;
         }
-        for (int o = kWarpSize / 2; o > 0; o >>= 1) {
-            acc += __shfl_xor_sync(0xffffffff, acc, o);
+        const float dot = kiln_block_reduce_sum(partial, scratch);
+        if (tid == 0) {
+            s_logits[k] = dot;
         }
-        if (lane == 0) {
-            s_logits[warp_id] = acc;
-        }
+        __syncthreads();
     }
-    __syncthreads();
 
-    block_reduce_k<K, ReduceOp::Max>(s_logits, bcast);
+    block_reduce_k<K, ReduceOp::Max>(s_logits, bcast, scratch);
     const float m_p = bcast[0];
-    if (warp_id < K && lane == 0) {
-        exp_p[warp_id] = expf(s_logits[warp_id] - m_p);
+    if (tid < K) {
+        exp_p[tid] = expf(s_logits[tid] - m_p);
     }
     __syncthreads();
-    block_reduce_k<K, ReduceOp::Sum>(exp_p, bcast);
+    block_reduce_k<K, ReduceOp::Sum>(exp_p, bcast, scratch);
     const float z_p = bcast[0];
     const float log_z_p = logf(z_p);
 
-    block_reduce_k<K, ReduceOp::Max>(s_lp_q, bcast);
+    block_reduce_k<K, ReduceOp::Max>(s_lp_q, bcast, scratch);
     const float m_q = bcast[0];
-    if (warp_id < K && lane == 0) {
-        exp_q[warp_id] = expf(s_lp_q[warp_id] - m_q);
+    if (tid < K) {
+        exp_q[tid] = expf(s_lp_q[tid] - m_q);
     }
     __syncthreads();
-    block_reduce_k<K, ReduceOp::Sum>(exp_q, bcast);
+    block_reduce_k<K, ReduceOp::Sum>(exp_q, bcast, scratch);
     const float z_q = bcast[0];
     const float log_z_q = logf(z_q);
 
     // KL_t — needed below in the d_s_logits formula.
     __shared__ float kl_partial[64];
-    if (warp_id < K && lane == 0) {
-        const float log_p = (s_logits[warp_id] - m_p) - log_z_p;
-        const float log_q = (s_lp_q[warp_id] - m_q) - log_z_q;
-        const float p_hat = exp_p[warp_id] / z_p;
-        kl_partial[warp_id] = p_hat * (log_p - log_q);
+    if (tid < K) {
+        const float log_p = (s_logits[tid] - m_p) - log_z_p;
+        const float log_q = (s_lp_q[tid] - m_q) - log_z_q;
+        const float p_hat = exp_p[tid] / z_p;
+        kl_partial[tid] = p_hat * (log_p - log_q);
     }
     __syncthreads();
-    block_reduce_k<K, ReduceOp::Sum>(kl_partial, bcast);
+    block_reduce_k<K, ReduceOp::Sum>(kl_partial, bcast, scratch);
     const float kl_t = bcast[0];
 
     // Decide the per-position upstream gradient.
@@ -209,11 +236,11 @@ __global__ void opd_topk_kl_bwd_kernel(
     }
 
     // ---- d_s_logits[k] = p_hat[k] * (log_p_hat[k] - log_q_hat[k] - KL_t) * upstream ----
-    if (warp_id < K && lane == 0) {
-        const float log_p = (s_logits[warp_id] - m_p) - log_z_p;
-        const float log_q = (s_lp_q[warp_id] - m_q) - log_z_q;
-        const float p_hat = exp_p[warp_id] / z_p;
-        d_s_logits[warp_id] = p_hat * (log_p - log_q - kl_t) * upstream;
+    if (tid < K) {
+        const float log_p = (s_logits[tid] - m_p) - log_z_p;
+        const float log_q = (s_lp_q[tid] - m_q) - log_z_q;
+        const float p_hat = exp_p[tid] / z_p;
+        d_s_logits[tid] = p_hat * (log_p - log_q - kl_t) * upstream;
     }
     __syncthreads();
 
@@ -285,6 +312,24 @@ static int launch_bwd_for_k(
     }
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) return static_cast<int>(err);
+#if KILN_IS_HIP
+    // (Phase R.7) Make the ROCm backward SYNCHRONOUS before returning to Rust.
+    //
+    // Unlike CUDA's cached primary context, kiln's `primary_rocm_context()`
+    // mints a FRESH RocmContext — and thus a fresh default stream — for every
+    // device tensor (hidden, head_t, the freshly-allocated d_hidden output,
+    // ...). So this kernel launches on `hidden`'s stream while the Rust
+    // read-back (`rocm_to_host_copy(d_hidden)`) drains a DIFFERENT stream; with
+    // no cross-stream ordering the host read races the kernel and returns the
+    // zero-initialised output buffer ("got 0"). A device-wide sync here is the
+    // only point that guarantees the kernel has completed regardless of which
+    // per-tensor stream it ran on, so the caller's read is correct. Also
+    // surfaces any synchronous launch fault that the post-launch
+    // cudaGetLastError() above cannot see. HIP-only — CUDA stays fully async
+    // and byte-identical.
+    hipError_t serr = hipDeviceSynchronize();
+    if (serr != hipSuccess) return 1000 + static_cast<int>(serr);
+#endif
     return 0;
 }
 

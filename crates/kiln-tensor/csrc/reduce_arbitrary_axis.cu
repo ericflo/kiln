@@ -42,9 +42,30 @@
 
 #include <cstdint>
 
+// Wave-size shim (Phase R.5). The two-level reductions below MUST NOT use the
+// hardcoded `tid/32` warp / `__shfl_xor_sync(0xFFFFFFFF, ..)` butterfly: on AMD
+// wave64 the offset-32 shuffle self-references (lanes 32-63 never participate)
+// and the half-filled "warp 0" syncs inactive lanes — a hardware exception
+// (HSA 0x1016), verified on real wave64. Routing the cross-block reductions
+// through kiln_block_reduce_sum/max (shared-memory tree, no cross-lane ops) is
+// the correct, wave32/64-portable fix; on nvcc it is behaviour-identical.
+#include "kt_gpu_compat.cuh"
+
 namespace {
 
 constexpr int MAX_THREADS = 1024;
+
+// Smallest power of two in [64, MAX_THREADS] that covers `axis_dim`. Min 64
+// (not 32) so every wavefront is FULLY populated on AMD wave64; powers of two
+// >= 64 are multiples of both 32 and 64. kiln_block_reduce_* require a
+// power-of-two blockDim, which this guarantees.
+inline int reduce_block_threads(int64_t axis_dim) {
+    int threads = 64;
+    while ((int64_t)threads < axis_dim && threads < MAX_THREADS) {
+        threads *= 2;
+    }
+    return threads;
+}
 
 template <typename T>
 __device__ inline float to_f32(T v);
@@ -90,25 +111,13 @@ __global__ void reduce_arbitrary_axis_sum_kernel(
         local_sum += to_f32<T>(x[base + r * inner]);
     }
 
-    // Warp reduction
-    __shared__ float shared_sum[32];
-    for (int offset = 16; offset > 0; offset /= 2) {
-        local_sum += __shfl_xor_sync(0xFFFFFFFF, local_sum, offset);
-    }
-    int warp_id = tid / 32;
-    int lane = tid & 31;
-    if (lane == 0) shared_sum[warp_id] = local_sum;
-    __syncthreads();
-
-    // Cross-warp reduction in warp 0
-    if (warp_id == 0) {
-        float v = lane < (blk + 31) / 32 ? shared_sum[lane] : 0.0f;
-        for (int offset = 16; offset > 0; offset /= 2) {
-            v += __shfl_xor_sync(0xFFFFFFFF, v, offset);
-        }
-        if (lane == 0) {
-            out[outer_idx * inner + inner_idx] = cast_from_f32<T>(v * divisor);
-        }
+    // Wave-size-agnostic block reduction via shared memory (no cross-lane ops
+    // — correct on AMD wave32/wave64 and NVIDIA). blockDim is a power of two
+    // in [64, MAX_THREADS] (see reduce_block_threads).
+    __shared__ float smem[MAX_THREADS];
+    float v = kiln_block_reduce_sum(local_sum, smem);
+    if (tid == 0) {
+        out[outer_idx * inner + inner_idx] = cast_from_f32<T>(v * divisor);
     }
 }
 
@@ -126,11 +135,9 @@ extern "C" int kiln_sum_arbitrary_axis_async(
     if (outer == 0 || axis_dim == 0 || inner == 0) return 0;
     cudaStream_t stream = static_cast<cudaStream_t>(stream_raw);
 
-    int threads = MAX_THREADS;
-    while ((int64_t)threads > axis_dim && threads > 32) {
-        threads /= 2;
-    }
-    if (threads < 32) threads = 32;
+    // Power-of-two block in [64, MAX_THREADS] so every wavefront is full on
+    // wave64 and kiln_block_reduce_* (power-of-two requirement) is satisfied.
+    int threads = reduce_block_threads(axis_dim);
 
     // grid.x = inner, grid.y = outer. Bounded by CUDA limits (2^31 - 1
     // each dimension; for kt's typical shapes this is fine).
@@ -190,56 +197,43 @@ __global__ void bool_reduce_arbitrary_axis_kernel(
 
     int64_t base = outer_idx * axis_dim * inner + inner_idx;
 
-    // Use 0/1 integers in the reduction; ALL uses AND (init=1), ANY
-    // uses OR (init=0).
-    int local;
+    // Map AND/OR over 0/1 values onto a single wave-size-agnostic block-MAX
+    // (kiln_block_reduce_max; no cross-lane ops). The boolean reductions are:
+    //   ANY (OR)  -> max(local)        == 1  iff any element is true
+    //   ALL (AND) -> min(local)        == 1  iff every element is true
+    // and min(local) = -max(-local), so we feed `-local` for the ALL case.
+    // Threads past axis_dim contribute the reduction identity:
+    //   ANY: 0   (won't raise the max)
+    //   ALL: 1   (won't lower the min)  -> fed as -1 to the max.
+    float local;
     if constexpr (Kind == 0) {
-        local = 1;  // ALL: identity = 1
+        local = -1.0f;  // ALL identity 1, negated for the max-of-negatives
     } else {
-        local = 0;  // ANY: identity = 0
+        local = 0.0f;   // ANY identity 0
     }
-
     for (int64_t r = tid; r < axis_dim; r += blk) {
-        int v = mask[base + r * inner] != 0 ? 1 : 0;
+        int b = mask[base + r * inner] != 0 ? 1 : 0;
         if constexpr (Kind == 0) {
-            local &= v;
+            float nv = (float)(-b);
+            local = nv > local ? nv : local;  // max of -b == -min(b)
         } else {
-            local |= v;
+            float v = (float)b;
+            local = v > local ? v : local;     // max of b
         }
     }
 
-    __shared__ int shared_v[32];
-    for (int offset = 16; offset > 0; offset /= 2) {
-        int other = __shfl_xor_sync(0xFFFFFFFF, local, offset);
+    __shared__ float smem[MAX_THREADS];
+    float r = kiln_block_reduce_max(local, smem);
+    if (tid == 0) {
+        unsigned char res;
         if constexpr (Kind == 0) {
-            local &= other;
+            // ALL: min(b) == -r; true iff min == 1.
+            res = (-r >= 0.5f) ? 1 : 0;
         } else {
-            local |= other;
+            // ANY: max(b) == r; true iff max == 1.
+            res = (r >= 0.5f) ? 1 : 0;
         }
-    }
-    int warp_id = tid / 32;
-    int lane = tid & 31;
-    if (lane == 0) shared_v[warp_id] = local;
-    __syncthreads();
-
-    if (warp_id == 0) {
-        int v;
-        if (lane < (blk + 31) / 32) {
-            v = shared_v[lane];
-        } else {
-            v = (Kind == 0) ? 1 : 0;
-        }
-        for (int offset = 16; offset > 0; offset /= 2) {
-            int other = __shfl_xor_sync(0xFFFFFFFF, v, offset);
-            if constexpr (Kind == 0) {
-                v &= other;
-            } else {
-                v |= other;
-            }
-        }
-        if (lane == 0) {
-            out[outer_idx * inner + inner_idx] = v ? 1 : 0;
-        }
+        out[outer_idx * inner + inner_idx] = res;
     }
 }
 
@@ -256,11 +250,9 @@ extern "C" int kiln_bool_reduce_arbitrary_axis_async(
     if (outer == 0 || axis_dim == 0 || inner == 0) return 0;
     cudaStream_t stream = static_cast<cudaStream_t>(stream_raw);
 
-    int threads = MAX_THREADS;
-    while ((int64_t)threads > axis_dim && threads > 32) {
-        threads /= 2;
-    }
-    if (threads < 32) threads = 32;
+    // Power-of-two block in [64, MAX_THREADS] so every wavefront is full on
+    // wave64 and kiln_block_reduce_* (power-of-two requirement) is satisfied.
+    int threads = reduce_block_threads(axis_dim);
 
     dim3 grid((unsigned int)inner, (unsigned int)outer);
     dim3 block(threads);
@@ -330,38 +322,19 @@ __global__ void reduce_arbitrary_axis_minmax_kernel(
         }
     }
 
-    __shared__ float shared_v[32];
-    for (int offset = 16; offset > 0; offset /= 2) {
-        float other = __shfl_xor_sync(0xFFFFFFFF, local, offset);
-        if constexpr (Kind == 0) {
-            local = fminf(local, other);
-        } else {
-            local = fmaxf(local, other);
-        }
+    // Wave-size-agnostic block reduction via shared memory. kiln_block_reduce_max
+    // computes the block MAX; MIN is derived as -max(-local). Threads past
+    // axis_dim already hold the correct identity (+INF for MIN -> -INF when
+    // negated; -INF for MAX), so they never contaminate the result.
+    __shared__ float smem[MAX_THREADS];
+    float v;
+    if constexpr (Kind == 0) {
+        v = -kiln_block_reduce_max(-local, smem);  // MIN = -max(-x)
+    } else {
+        v = kiln_block_reduce_max(local, smem);    // MAX
     }
-    int warp_id = tid / 32;
-    int lane = tid & 31;
-    if (lane == 0) shared_v[warp_id] = local;
-    __syncthreads();
-
-    if (warp_id == 0) {
-        float v;
-        if (lane < (blk + 31) / 32) {
-            v = shared_v[lane];
-        } else {
-            v = (Kind == 0) ? INFINITY : -INFINITY;
-        }
-        for (int offset = 16; offset > 0; offset /= 2) {
-            float other = __shfl_xor_sync(0xFFFFFFFF, v, offset);
-            if constexpr (Kind == 0) {
-                v = fminf(v, other);
-            } else {
-                v = fmaxf(v, other);
-            }
-        }
-        if (lane == 0) {
-            out[outer_idx * inner + inner_idx] = cast_from_f32<T>(v);
-        }
+    if (tid == 0) {
+        out[outer_idx * inner + inner_idx] = cast_from_f32<T>(v);
     }
 }
 
@@ -379,11 +352,9 @@ extern "C" int kiln_minmax_arbitrary_axis_async(
     if (outer == 0 || axis_dim == 0 || inner == 0) return 0;
     cudaStream_t stream = static_cast<cudaStream_t>(stream_raw);
 
-    int threads = MAX_THREADS;
-    while ((int64_t)threads > axis_dim && threads > 32) {
-        threads /= 2;
-    }
-    if (threads < 32) threads = 32;
+    // Power-of-two block in [64, MAX_THREADS] so every wavefront is full on
+    // wave64 and kiln_block_reduce_* (power-of-two requirement) is satisfied.
+    int threads = reduce_block_threads(axis_dim);
 
     dim3 grid((unsigned int)inner, (unsigned int)outer);
     dim3 block(threads);

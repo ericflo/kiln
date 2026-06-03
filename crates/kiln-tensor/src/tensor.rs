@@ -249,6 +249,16 @@ impl Tensor {
             other @ Device::Vulkan(_) => Err(Error::Msg(format!(
                 "Tensor::zeros_on: device {other} requested but `vulkan` feature is not enabled"
             ))),
+            #[cfg(feature = "rocm")]
+            Device::Rocm(i) => {
+                let n: usize = shape.iter().product();
+                let storage = crate::rocm_zeros_ctx(i, dtype, n)?;
+                Self::from_parts(storage, Layout::contiguous(shape), TensorId::next())
+            }
+            #[cfg(not(feature = "rocm"))]
+            other @ Device::Rocm(_) => Err(Error::Msg(format!(
+                "Tensor::zeros_on: device {other} requested but `rocm` feature is not enabled"
+            ))),
         }
     }
 
@@ -304,6 +314,15 @@ impl Tensor {
             #[cfg(not(feature = "vulkan"))]
             other @ Device::Vulkan(_) => Err(Error::Msg(format!(
                 "Tensor::from_vec_on: device {other} requested but `vulkan` feature is not enabled"
+            ))),
+            #[cfg(feature = "rocm")]
+            Device::Rocm(i) => {
+                let cpu = Self::from_vec(values, shape)?;
+                crate::host_to_rocm_copy(&cpu, i)
+            }
+            #[cfg(not(feature = "rocm"))]
+            other @ Device::Rocm(_) => Err(Error::Msg(format!(
+                "Tensor::from_vec_on: device {other} requested but `rocm` feature is not enabled"
             ))),
         }
     }
@@ -371,6 +390,12 @@ impl Tensor {
             #[cfg(not(feature = "vulkan"))]
             other @ Device::Vulkan(_) => Err(Error::Msg(format!(
                 "Tensor::from_raw_bytes_on: device {other} requested but `vulkan` feature is not enabled"
+            ))),
+            #[cfg(feature = "rocm")]
+            Device::Rocm(i) => crate::host_to_rocm_copy(&cpu_tensor, i),
+            #[cfg(not(feature = "rocm"))]
+            other @ Device::Rocm(_) => Err(Error::Msg(format!(
+                "Tensor::from_raw_bytes_on: device {other} requested but `rocm` feature is not enabled"
             ))),
         }
     }
@@ -630,6 +655,10 @@ impl Tensor {
         if matches!(self.device(), crate::Device::Cuda(_)) {
             return crate::cuda_storage::cuda_contiguous(self);
         }
+        #[cfg(feature = "rocm")]
+        if matches!(self.device(), crate::Device::Rocm(_)) {
+            return crate::rocm_contiguous(self);
+        }
         #[cfg(feature = "metal")]
         if let crate::Device::Metal(i) = self.device() {
             // Apple Silicon UMA: gather the strided/offset view to a packed
@@ -813,6 +842,20 @@ impl Tensor {
                     return cpu_view.all_finite();
                 }
             }
+            #[cfg(feature = "rocm")]
+            {
+                if matches!(self.device(), crate::Device::Rocm(_)) {
+                    let supported = matches!(
+                        self.dtype(),
+                        DType::F32 | DType::BF16 | DType::F16 | DType::F8E4M3 | DType::F8E5M2
+                    );
+                    if supported {
+                        return crate::rocm_is_finite(self);
+                    }
+                    let cpu_view = crate::rocm_to_host_copy(self)?;
+                    return cpu_view.all_finite();
+                }
+            }
             return Err(Error::Msg(format!(
                 "Tensor::all_finite: device {} support lands with the \
                  per-backend is_finite reduction kernel",
@@ -945,6 +988,10 @@ impl Tensor {
             (Device::Cpu, Device::Vulkan(i)) => crate::host_to_vulkan_copy(self, i),
             #[cfg(feature = "vulkan")]
             (Device::Vulkan(_), Device::Cpu) => crate::vulkan_to_host_copy(self),
+            #[cfg(feature = "rocm")]
+            (Device::Cpu, Device::Rocm(i)) => crate::host_to_rocm_copy(self, i),
+            #[cfg(feature = "rocm")]
+            (Device::Rocm(_), Device::Cpu) => crate::rocm_to_host_copy(self),
             _ => Err(Error::Msg(format!(
                 "Tensor::to_device: transition {src}→{target} is not yet implemented                  (issue #1082)"
             ))),
@@ -972,8 +1019,14 @@ impl Tensor {
             (Device::Vulkan(_), Device::Cpu) => return crate::vulkan_to_host_copy(self),
             _ => {}
         }
+        #[cfg(feature = "rocm")]
+        match (src, target) {
+            (Device::Cpu, Device::Rocm(i)) => return crate::host_to_rocm_copy(self, i),
+            (Device::Rocm(_), Device::Cpu) => return crate::rocm_to_host_copy(self),
+            _ => {}
+        }
         Err(Error::Msg(format!(
-            "Tensor::to_device: transition {src}→{target} requires a GPU feature (cuda/metal/vulkan); none is enabled in this build"
+            "Tensor::to_device: transition {src}→{target} requires a GPU feature (cuda/metal/vulkan/rocm); none is enabled in this build"
         )))
     }
 

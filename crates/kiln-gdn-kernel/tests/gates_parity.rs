@@ -24,6 +24,12 @@
 //! kt-typed surface (`gdn_gates_bf16_kt` / `gdn_gates_supports_kt`).
 //! Inputs are constructed via `Tensor::cuda_from_slice`; outputs are
 //! pulled back via `cuda_to_host_copy`.
+//!
+//! CUDA-only: `Tensor::cuda_from_slice` / `cuda_to_host_copy` /
+//! `primary_cuda_context` are the cuda-storage substrate helpers and
+//! don't exist on the ROCm build. The backend-neutral ROCm parity
+//! coverage lives in `rocm_gdn_parity.rs` (gated on `feature = "rocm"`).
+#![cfg(feature = "cuda")]
 
 use half::bf16;
 

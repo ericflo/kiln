@@ -160,6 +160,28 @@ impl DeviceOp2 for ElementwiseOp {
         Ok(Some(crate::cuda_elementwise_binary(a, b, kind_tag)?))
     }
 
+    #[cfg(feature = "rocm")]
+    fn rocm_fwd(&self, a: &Tensor, b: &Tensor) -> Result<Option<Tensor>> {
+        // Mirror of cuda_fwd: native ROCm elementwise-binary kernel
+        // (csrc/elementwise.cu). Same preconditions (validate, F32/BF16/F16,
+        // contiguous inputs); None falls through to the host round-trip.
+        validate(a, b, self.kind)?;
+        let dtype = a.dtype();
+        if !a.is_contiguous() || !b.is_contiguous() {
+            return Ok(None);
+        }
+        if !matches!(dtype, DType::F32 | DType::BF16 | DType::F16) {
+            return Ok(None);
+        }
+        let kind_tag: i32 = match self.kind {
+            BinaryKind::Add => 0,
+            BinaryKind::Sub => 1,
+            BinaryKind::Mul => 2,
+            BinaryKind::Div => 3,
+        };
+        Ok(Some(crate::rocm_elementwise_binary(a, b, kind_tag)?))
+    }
+
     #[cfg(feature = "metal")]
     fn metal_fwd(&self, a: &Tensor, b: &Tensor) -> Result<Option<Tensor>> {
         // Phase 4 substrate-op landing: dispatch through

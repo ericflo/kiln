@@ -1,0 +1,135 @@
+//! Phase R.6 — hipBLASLt dense GEMM parity vs a CPU reference, on a real AMD
+//! GPU. Covers F32 + BF16, decode-skinny (M=1), square, tall, and batched
+//! shapes, plus the fused-bias epilogue. Skips when no ROCm device is present.
+//!
+//! Run: `cargo test -p kiln-tensor --features rocm --test rocm_matmul_parity`
+#![cfg(feature = "rocm")]
+
+use kiln_tensor::{DType, Device, Tensor};
+
+fn no_rocm() -> bool {
+    if !kiln_tensor::rocm_is_available() {
+        eprintln!("no ROCm device available; skipping R.6 matmul parity test");
+        true
+    } else {
+        false
+    }
+}
+
+/// Reference row-major matmul C[m,n] = sum_k A[m,k] * B[k,n], f32 accumulate.
+fn cpu_matmul(a: &[f32], b: &[f32], m: usize, k: usize, n: usize) -> Vec<f32> {
+    let mut c = vec![0.0f32; m * n];
+    for i in 0..m {
+        for j in 0..n {
+            let mut acc = 0.0f32;
+            for p in 0..k {
+                acc += a[i * k + p] * b[p * n + j];
+            }
+            c[i * n + j] = acc;
+        }
+    }
+    c
+}
+
+fn val(i: usize, scale: f32) -> f32 {
+    (((i * 37 + 11) % 97) as f32 / 97.0 - 0.5) * scale
+}
+
+fn check_close(got: &[f32], want: &[f32], rtol: f32, atol: f32, label: &str) {
+    assert_eq!(got.len(), want.len(), "{label}: length mismatch");
+    for (i, (&g, &w)) in got.iter().zip(want.iter()).enumerate() {
+        let diff = (g - w).abs();
+        assert!(
+            diff <= atol + rtol * w.abs(),
+            "{label}: idx {i} got {g} want {w} diff {diff}"
+        );
+    }
+}
+
+#[test]
+fn matmul_f32_shapes() {
+    if no_rocm() {
+        return;
+    }
+    // (m, k, n) — decode-skinny M=1, square, tall, wide-K.
+    for &(m, k, n) in &[(1, 64, 64), (1, 2560, 4096), (16, 16, 16), (32, 128, 64), (128, 256, 512), (7, 65, 33)] {
+        let a: Vec<f32> = (0..m * k).map(|i| val(i, 1.0)).collect();
+        let b: Vec<f32> = (0..k * n).map(|i| val(i + 5, 1.0)).collect();
+        let want = cpu_matmul(&a, &b, m, k, n);
+
+        let ta = Tensor::from_vec_on(Device::Rocm(0), a, vec![m, k]).expect("a");
+        let tb = Tensor::from_vec_on(Device::Rocm(0), b, vec![k, n]).expect("b");
+        let tc = kiln_tensor::rocm_matmul(&ta, &tb).unwrap_or_else(|e| panic!("matmul {m}x{k}x{n}: {e}"));
+        let got = kiln_tensor::rocm_to_host_copy(&tc).unwrap().to_vec::<f32>().unwrap();
+        check_close(&got, &want, 1e-4, 1e-4, &format!("f32 {m}x{k}x{n}"));
+    }
+}
+
+#[test]
+fn matmul_bf16_shapes() {
+    if no_rocm() {
+        return;
+    }
+    use half::bf16;
+    for &(m, k, n) in &[(1, 2560, 4096), (32, 256, 256), (64, 128, 512)] {
+        let a_f: Vec<f32> = (0..m * k).map(|i| val(i, 1.0)).collect();
+        let b_f: Vec<f32> = (0..k * n).map(|i| val(i + 5, 1.0)).collect();
+        // Reference computed from the bf16-rounded inputs (matches device precision).
+        let a_bf: Vec<bf16> = a_f.iter().map(|&x| bf16::from_f32(x)).collect();
+        let b_bf: Vec<bf16> = b_f.iter().map(|&x| bf16::from_f32(x)).collect();
+        let a_r: Vec<f32> = a_bf.iter().map(|x| x.to_f32()).collect();
+        let b_r: Vec<f32> = b_bf.iter().map(|x| x.to_f32()).collect();
+        let want = cpu_matmul(&a_r, &b_r, m, k, n);
+
+        let ta = Tensor::from_vec_on(Device::Rocm(0), a_bf, vec![m, k]).expect("a");
+        let tb = Tensor::from_vec_on(Device::Rocm(0), b_bf, vec![k, n]).expect("b");
+        let tc = kiln_tensor::rocm_matmul(&ta, &tb).unwrap_or_else(|e| panic!("bf16 matmul {m}x{k}x{n}: {e}"));
+        let got_bf = kiln_tensor::rocm_to_host_copy(&tc).unwrap().to_vec::<bf16>().unwrap();
+        let got: Vec<f32> = got_bf.iter().map(|x| x.to_f32()).collect();
+        // bf16 GEMM tolerance scales with K (accumulation rounding).
+        check_close(&got, &want, 3e-2, (k as f32) * 1e-3, &format!("bf16 {m}x{k}x{n}"));
+    }
+}
+
+#[test]
+fn matmul_with_bias_f32() {
+    if no_rocm() {
+        return;
+    }
+    let (m, k, n) = (8, 64, 32);
+    let a: Vec<f32> = (0..m * k).map(|i| val(i, 1.0)).collect();
+    let b: Vec<f32> = (0..k * n).map(|i| val(i + 5, 1.0)).collect();
+    let bias: Vec<f32> = (0..n).map(|i| val(i + 3, 2.0)).collect();
+    let mut want = cpu_matmul(&a, &b, m, k, n);
+    for i in 0..m {
+        for j in 0..n {
+            want[i * n + j] += bias[j];
+        }
+    }
+    let ta = Tensor::from_vec_on(Device::Rocm(0), a, vec![m, k]).expect("a");
+    let tb = Tensor::from_vec_on(Device::Rocm(0), b, vec![k, n]).expect("b");
+    let tbias = Tensor::from_vec_on(Device::Rocm(0), bias, vec![n]).expect("bias");
+    let tc = kiln_tensor::rocm_matmul_with_bias(&ta, &tb, &tbias).expect("matmul_with_bias");
+    let got = kiln_tensor::rocm_to_host_copy(&tc).unwrap().to_vec::<f32>().unwrap();
+    check_close(&got, &want, 1e-4, 1e-4, "f32 matmul+bias");
+}
+
+#[test]
+fn matmul_batched_f32() {
+    if no_rocm() {
+        return;
+    }
+    let (batch, m, k, n) = (3, 4, 16, 8);
+    let a: Vec<f32> = (0..batch * m * k).map(|i| val(i, 1.0)).collect();
+    let b: Vec<f32> = (0..batch * k * n).map(|i| val(i + 5, 1.0)).collect();
+    let mut want = vec![0.0f32; batch * m * n];
+    for bi in 0..batch {
+        let ca = cpu_matmul(&a[bi * m * k..(bi + 1) * m * k], &b[bi * k * n..(bi + 1) * k * n], m, k, n);
+        want[bi * m * n..(bi + 1) * m * n].copy_from_slice(&ca);
+    }
+    let ta = Tensor::from_vec_on(Device::Rocm(0), a, vec![batch, m, k]).expect("a");
+    let tb = Tensor::from_vec_on(Device::Rocm(0), b, vec![batch, k, n]).expect("b");
+    let tc = kiln_tensor::rocm_matmul(&ta, &tb).expect("batched matmul");
+    let got = kiln_tensor::rocm_to_host_copy(&tc).unwrap().to_vec::<f32>().unwrap();
+    check_close(&got, &want, 1e-4, 1e-4, "f32 batched");
+}

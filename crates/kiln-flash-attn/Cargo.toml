@@ -8,14 +8,36 @@ repository.workspace = true
 description = "Vendored flash-attention-2 CUDA kernels with C-ABI wrapper for forward AND backward pass"
 build = "build.rs"
 
+[features]
+# Default keeps the historical CUDA build (the vendored flash-attention .cu
+# kernels + the cuda-typed kt-tensor surface). Building with
+# `--no-default-features --features rocm` swaps in the ROCm composite SDPA and
+# compiles NO .cu (there is no CUTLASS on ROCm).
+default = ["cuda"]
+
+# CUDA: vendored flash-attention-2 kernels (compiled by build.rs) + the
+# cuda-typed kt-tensor / kt-bridge surfaces.
+cuda = ["kiln-tensor/cuda", "kiln-kt-bridge/cuda"]
+
+# Phase R.8 (ROCm port): the attention path runs through a FULLY ON-DEVICE
+# composite SDPA built from the parity-tested `kiln_tensor` ROCm primitives
+# (rocm_matmul / rocm_softmax_last_axis / rocm_index_select / ...). No .cu is
+# compiled — the build.rs CUDA arm is skipped when `cuda` is off. Forwards the
+# ROCm features of kiln-tensor + kiln-kt-bridge (the device-pointer seam the
+# paged-KV writers reach).
+rocm = ["kiln-tensor/rocm", "kiln-kt-bridge/rocm"]
+
 [dependencies]
 half = "2"
 # Phase 7 (#1082) — kt-only crate, no candle dep. All public entry
 # points operate on `kiln_tensor::Tensor`; the candle-typed parallel
 # surface was deleted after every `kiln-model` production caller
-# migrated to the `*_kt` wrappers.
-kiln-tensor = { workspace = true, features = ["cuda"] }
-kiln-kt-bridge = { path = "../kiln-kt-bridge", default-features = false, features = ["cuda"] }
+# migrated to the `*_kt` wrappers. The cuda/rocm backend is selected by
+# this crate's feature flags (default = cuda) which forward to
+# `kiln-tensor/{cuda,rocm}` + `kiln-kt-bridge/{cuda,rocm}` (the same
+# workspace-dep + feature-forward pattern as the other kernel crates).
+kiln-tensor = { workspace = true }
+kiln-kt-bridge = { path = "../kiln-kt-bridge", default-features = false }
 
 [build-dependencies]
 cc = "1"

@@ -152,6 +152,21 @@ impl DeviceOp1 for ScalarOp {
         Ok(Some(crate::cuda_scalar_op(x, self.kind.cuda_tag(), self.c)?))
     }
 
+    #[cfg(feature = "rocm")]
+    fn rocm_fwd(&self, x: &Tensor) -> Result<Option<Tensor>> {
+        // Mirror of cuda_fwd: native ROCm scalar kernel (csrc/scalar_op.cu).
+        // add/sub/mul/div_scalar map to tags 0..=3.
+        validate(x, self.kind)?;
+        let dtype = x.dtype();
+        if !x.is_contiguous() {
+            return Ok(None);
+        }
+        if !matches!(dtype, DType::F32 | DType::BF16 | DType::F16) {
+            return Ok(None);
+        }
+        Ok(Some(crate::rocm_scalar_op(x, self.kind.cuda_tag(), self.c)?))
+    }
+
     #[cfg(feature = "vulkan")]
     fn vulkan_fwd(&self, x: &Tensor) -> Result<Option<Tensor>> {
         // Mirror the softmax.rs vulkan_fwd exemplar:

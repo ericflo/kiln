@@ -38,6 +38,9 @@ pub enum Device {
     /// Vulkan device at the given index. Created via ash in Phase 1.7;
     /// lifts the existing `kiln-vulkan-kernel` VulkanDevice.
     Vulkan(usize),
+    /// AMD ROCm/HIP device at the given index. Created via the `kiln-hip`
+    /// binding (Phase R.1); storage in `rocm_storage.rs` (Phase R.3).
+    Rocm(usize),
 }
 
 impl Device {
@@ -48,12 +51,14 @@ impl Device {
     /// - `Cuda(0)` → `"cuda:0"`
     /// - `Metal(0)` → `"metal:0"`
     /// - `Vulkan(0)` → `"vulkan:0"`
+    /// - `Rocm(0)` → `"rocm:0"`
     pub fn short_name(self) -> String {
         match self {
             Device::Cpu => "cpu".to_string(),
             Device::Cuda(i) => format!("cuda:{i}"),
             Device::Metal(i) => format!("metal:{i}"),
             Device::Vulkan(i) => format!("vulkan:{i}"),
+            Device::Rocm(i) => format!("rocm:{i}"),
         }
     }
 
@@ -71,7 +76,7 @@ impl Device {
     pub const fn index(self) -> Option<usize> {
         match self {
             Device::Cpu => None,
-            Device::Cuda(i) | Device::Metal(i) | Device::Vulkan(i) => Some(i),
+            Device::Cuda(i) | Device::Metal(i) | Device::Vulkan(i) | Device::Rocm(i) => Some(i),
         }
     }
 
@@ -84,6 +89,7 @@ impl Device {
             Device::Cuda(_) => Backend::Cuda,
             Device::Metal(_) => Backend::Metal,
             Device::Vulkan(_) => Backend::Vulkan,
+            Device::Rocm(_) => Backend::Rocm,
         }
     }
 
@@ -108,6 +114,7 @@ impl Device {
             Device::Cuda(gpu_id) => DeviceLocation::Cuda { gpu_id },
             Device::Metal(gpu_id) => DeviceLocation::Metal { gpu_id },
             Device::Vulkan(gpu_id) => DeviceLocation::Vulkan { gpu_id },
+            Device::Rocm(gpu_id) => DeviceLocation::Rocm { gpu_id },
         }
     }
 }
@@ -140,6 +147,12 @@ pub enum DeviceLocation {
         /// The Vulkan device index.
         gpu_id: usize,
     },
+    /// An AMD ROCm/HIP device, identified by its GPU index (kt-only —
+    /// candle has no ROCm backend).
+    Rocm {
+        /// The ROCm device index.
+        gpu_id: usize,
+    },
 }
 
 impl fmt::Display for Device {
@@ -160,21 +173,31 @@ pub enum Backend {
     Cuda,
     Metal,
     Vulkan,
+    Rocm,
 }
 
 impl Backend {
-    /// All four backends in canonical iteration order (matches the
-    /// `bench-results/parity-tolerance.csv` column order).
-    pub const ALL: [Backend; 4] = [Backend::Cpu, Backend::Cuda, Backend::Metal, Backend::Vulkan];
+    /// All backends in canonical iteration order (matches the
+    /// `bench-results/parity-tolerance.csv` column order). `Rocm` is
+    /// appended last so existing column indices are unchanged.
+    pub const ALL: [Backend; 5] = [
+        Backend::Cpu,
+        Backend::Cuda,
+        Backend::Metal,
+        Backend::Vulkan,
+        Backend::Rocm,
+    ];
 
-    /// Stable short name — `"cpu"`, `"cuda"`, `"metal"`, `"vulkan"`.
-    /// Identical to [`Device::short_name`] minus the `:<index>` suffix.
+    /// Stable short name — `"cpu"`, `"cuda"`, `"metal"`, `"vulkan"`,
+    /// `"rocm"`. Identical to [`Device::short_name`] minus the `:<index>`
+    /// suffix.
     pub const fn short_name(self) -> &'static str {
         match self {
             Backend::Cpu => "cpu",
             Backend::Cuda => "cuda",
             Backend::Metal => "metal",
             Backend::Vulkan => "vulkan",
+            Backend::Rocm => "rocm",
         }
     }
 }
@@ -196,13 +219,15 @@ mod tests {
         assert_eq!(Device::Cuda(3).short_name(), "cuda:3");
         assert_eq!(Device::Metal(1).short_name(), "metal:1");
         assert_eq!(Device::Vulkan(2).short_name(), "vulkan:2");
+        assert_eq!(Device::Rocm(0).short_name(), "rocm:0");
+        assert_eq!(Device::Rocm(4).short_name(), "rocm:4");
     }
 
     #[test]
     fn is_cpu_is_gpu() {
         assert!(Device::Cpu.is_cpu());
         assert!(!Device::Cpu.is_gpu());
-        for d in [Device::Cuda(0), Device::Metal(0), Device::Vulkan(0)] {
+        for d in [Device::Cuda(0), Device::Metal(0), Device::Vulkan(0), Device::Rocm(0)] {
             assert!(!d.is_cpu());
             assert!(d.is_gpu());
         }
@@ -215,6 +240,7 @@ mod tests {
         assert_eq!(Device::Cuda(5).index(), Some(5));
         assert_eq!(Device::Metal(2).index(), Some(2));
         assert_eq!(Device::Vulkan(1).index(), Some(1));
+        assert_eq!(Device::Rocm(3).index(), Some(3));
     }
 
     #[test]
@@ -224,12 +250,13 @@ mod tests {
         assert_eq!(Device::Cuda(3).backend(), Backend::Cuda);
         assert_eq!(Device::Metal(0).backend(), Backend::Metal);
         assert_eq!(Device::Vulkan(2).backend(), Backend::Vulkan);
+        assert_eq!(Device::Rocm(0).backend(), Backend::Rocm);
     }
 
     #[test]
     fn backend_all_order() {
         let names: Vec<&str> = Backend::ALL.iter().map(|b| b.short_name()).collect();
-        assert_eq!(names, ["cpu", "cuda", "metal", "vulkan"]);
+        assert_eq!(names, ["cpu", "cuda", "metal", "vulkan", "rocm"]);
     }
 
     #[test]
@@ -250,6 +277,7 @@ mod tests {
             Device::Vulkan(2).location(),
             DeviceLocation::Vulkan { gpu_id: 2 }
         );
+        assert_eq!(Device::Rocm(1).location(), DeviceLocation::Rocm { gpu_id: 1 });
     }
 
     #[test]

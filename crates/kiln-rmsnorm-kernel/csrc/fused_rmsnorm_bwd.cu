@@ -25,40 +25,15 @@
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 
+// Wave-size shim (Phase R.7). See fused_rmsnorm.cu: the per-row F32 sums are
+// reduced via the wave-agnostic shared-memory kiln_block_reduce_sum so wave64
+// (AMD CDNA / RDNA-wave64) is correct. The cross-row grad_w atomicAdd is on F32
+// (hipify-clean) and unchanged. blockDim.x = 256 (power of two >= 64).
+#include "kt_gpu_compat.cuh"
+
 namespace {
 
 constexpr int kThreadsPerBlock = 256;
-constexpr int kMaxWarps = kThreadsPerBlock / 32;  // 8
-
-__device__ __forceinline__ float warp_reduce_sum(float v) {
-    #pragma unroll
-    for (int offset = 16; offset > 0; offset /= 2) {
-        v += __shfl_xor_sync(0xffffffffu, v, offset);
-    }
-    return v;
-}
-
-__device__ __forceinline__ float block_reduce_sum(float v, float *smem) {
-    int lane = threadIdx.x & 31;
-    int warp = threadIdx.x >> 5;
-
-    v = warp_reduce_sum(v);
-    if (lane == 0) {
-        smem[warp] = v;
-    }
-    __syncthreads();
-
-    if (warp == 0) {
-        int num_warps = blockDim.x >> 5;
-        float w = (lane < num_warps) ? smem[lane] : 0.0f;
-        w = warp_reduce_sum(w);
-        if (lane == 0) {
-            smem[0] = w;
-        }
-    }
-    __syncthreads();
-    return smem[0];
-}
 
 __global__ void fused_rmsnorm_bwd_kernel(
     const __nv_bfloat16 *__restrict__ x,
@@ -74,7 +49,7 @@ __global__ void fused_rmsnorm_bwd_kernel(
     const __nv_bfloat16 *g_row = grad_out + static_cast<size_t>(row) * hidden;
     __nv_bfloat16 *dx_row = grad_x + static_cast<size_t>(row) * hidden;
 
-    __shared__ float smem[kMaxWarps];
+    __shared__ float smem[kThreadsPerBlock];
 
     // Pass 1: per-thread partial sum of x^2 in F32.
     float local_sum_sq = 0.0f;
@@ -82,7 +57,7 @@ __global__ void fused_rmsnorm_bwd_kernel(
         float xj = __bfloat162float(x_row[j]);
         local_sum_sq += xj * xj;
     }
-    float total_sum_sq = block_reduce_sum(local_sum_sq, smem);
+    float total_sum_sq = kiln_block_reduce_sum(local_sum_sq, smem);
 
     __shared__ float s_rms_inv;
     if (threadIdx.x == 0) {
@@ -100,7 +75,7 @@ __global__ void fused_rmsnorm_bwd_kernel(
         float gj = __bfloat162float(g_row[j]);
         local_sum_xgw += (1.0f + wj) * xj * gj;
     }
-    float total_sum_xgw = block_reduce_sum(local_sum_xgw, smem);
+    float total_sum_xgw = kiln_block_reduce_sum(local_sum_xgw, smem);
 
     __shared__ float s_c;
     if (threadIdx.x == 0) {

@@ -112,6 +112,22 @@ impl DeviceOp1 for L2NormOp {
         Ok(Some(crate::cuda_l2norm_last_axis(x, self.eps)?))
     }
 
+    #[cfg(feature = "rocm")]
+    fn rocm_fwd(&self, x: &Tensor) -> Result<Option<Tensor>> {
+        // Mirrors `cuda_fwd`: contiguous F32/BF16/F16 rows route through
+        // the native ROCm L2-norm kernel (F32-promoted reduction).
+        if !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16) {
+            return Ok(None);
+        }
+        if x.rank() == 0 {
+            return Ok(None);
+        }
+        if !x.is_contiguous() {
+            return Ok(None);
+        }
+        Ok(Some(crate::rocm_l2norm_last_axis(x, self.eps)?))
+    }
+
     #[cfg(feature = "vulkan")]
     fn vulkan_fwd(&self, x: &Tensor) -> Result<Option<Tensor>> {
         // Gate on the same preconditions as the CUDA path:

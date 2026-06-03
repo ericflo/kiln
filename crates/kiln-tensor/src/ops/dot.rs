@@ -53,6 +53,17 @@ pub fn dot(a: &Tensor, b: &Tensor) -> Result<Tensor> {
         return Ok(scalar);
     }
 
+    // ROCm: correctness-first host round-trip. Stage both device inputs to
+    // host and run the CPU reduction below. `dot` produces a rank-0 scalar
+    // built host-side; return it as-is (no device move-back). See `#1082`.
+    #[cfg(feature = "rocm")]
+    if matches!(a.device(), crate::Device::Rocm(_)) || matches!(b.device(), crate::Device::Rocm(_))
+    {
+        let a_host = a.to_device(crate::Device::Cpu)?;
+        let b_host = b.to_device(crate::Device::Cpu)?;
+        return dot(&a_host, &b_host);
+    }
+
     let dtype = a.dtype();
     let n = a.element_count();
     let a_bytes = a

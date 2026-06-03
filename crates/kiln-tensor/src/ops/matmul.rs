@@ -134,6 +134,25 @@ impl DeviceOp2 for MatmulOp {
         Ok(Some(crate::cuda_matmul(a, b)?))
     }
 
+    #[cfg(feature = "rocm")]
+    fn rocm_fwd(&self, a: &Tensor, b: &Tensor) -> Result<Option<Tensor>> {
+        // Mirror of cuda_fwd: route the contracted dispatch to kiln-rocblas's
+        // hipBLASLt handle via `crate::rocm_matmul` (R.6). Without this the
+        // generic `matmul()` path (GDN delta-rule chunk products, attention
+        // score/context GEMMs, lm-head) silently host-staged to the CPU
+        // reference — the dominant prefill bottleneck. Same preconditions as
+        // cuda_fwd: F32/BF16/F16, contiguous inputs; None falls through to the
+        // host round-trip for anything unsupported.
+        let dtype = a.dtype();
+        if !matches!(dtype, DType::BF16 | DType::F16 | DType::F32) {
+            return Ok(None);
+        }
+        if !a.is_contiguous() || !b.is_contiguous() {
+            return Ok(None);
+        }
+        Ok(Some(crate::rocm_matmul(a, b)?))
+    }
+
     #[cfg(feature = "metal")]
     fn metal_fwd(&self, a: &Tensor, b: &Tensor) -> Result<Option<Tensor>> {
         // #1082: route compute-bound Metal matmul through the kiln-owned

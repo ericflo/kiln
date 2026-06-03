@@ -62,7 +62,7 @@ impl UnaryArithKind {
     /// Kind tag matching the `KIND_*` constants in `csrc/activation.cu`.
     /// CUDA path routes through `cuda_activation_unary` per #1082.
     /// Metal path reuses the same tags via `metal_activation_unary`.
-    #[cfg(any(feature = "cuda", feature = "metal"))]
+    #[cfg(any(feature = "cuda", feature = "metal", feature = "rocm"))]
     const fn cuda_kind_tag(self) -> i32 {
         match self {
             // 0..=4 reserved for activation.rs (silu/sigmoid/gelu/tanh/relu).
@@ -108,6 +108,20 @@ impl DeviceOp1 for UnaryArithOp {
             return Ok(None);
         }
         Ok(Some(crate::cuda_activation_unary(x, self.kind.cuda_kind_tag())?))
+    }
+
+    #[cfg(feature = "rocm")]
+    fn rocm_fwd(&self, x: &Tensor) -> Result<Option<Tensor>> {
+        // Mirror of cuda_fwd: native ROCm activation kernel
+        // (csrc/activation.cu). abs/neg/exp/ln/sqrt map to tags 13/12/6/5/14.
+        validate(x, self.kind.name())?;
+        if !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16) {
+            return Ok(None);
+        }
+        if !x.is_contiguous() {
+            return Ok(None);
+        }
+        Ok(Some(crate::rocm_activation_unary(x, self.kind.cuda_kind_tag())?))
     }
 
     #[cfg(feature = "metal")]

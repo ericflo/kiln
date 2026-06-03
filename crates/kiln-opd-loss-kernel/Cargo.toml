@@ -68,6 +68,15 @@ half = "2"
 # pulled in here stays candle-free.
 cuda = ["kiln-tensor/cuda", "dep:kiln-kt-bridge", "kiln-kt-bridge?/cuda"]
 
+# (Phase R.7) ROCm mirror of `cuda`: drives the same fused OPD top-K
+# reverse-KL backward kernel (`csrc/opd_topk_kl.cu`, wave-size-fixed) via
+# hipcc + links it through the backend-neutral kt-bridge device-pointer
+# seam (`device_input_ptr` / `device_output_ptr` / `alloc_device_tensor_like`
+# / `device_stream_raw_of`). Each `<dep>/cuda` is swapped to `<dep>/rocm`.
+# Enables `kiln-kt-bridge?/rocm` (the candle-free ROCm helpers) but NOT
+# `kiln-kt-bridge?/candle`, so the kt-bridge pulled in here stays candle-free.
+rocm = ["kiln-tensor/rocm", "dep:kiln-kt-bridge", "kiln-kt-bridge?/rocm"]
+
 # (#1082 Metal lane) Compiles the kt-native OPD forward / loss surface
 # (`kt_api`, `kt_tape`) on Metal storage. Forwards `kiln-tensor/metal`
 # ONLY — the fused backward kernel (`kiln_opd_topk_kl_bwd_{f32,bf16}` in

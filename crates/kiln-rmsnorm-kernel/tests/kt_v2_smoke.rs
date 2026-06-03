@@ -7,6 +7,10 @@
 //! moved to `crates/kiln-kt-bridge/tests/` where the adapter actually
 //! lives. This file tests the kt API in isolation, mirroring the
 //! `kiln-conv1d-kernel` / `kiln-marlin-gemm` Tier-1 precedent.
+//!
+//! CUDA-specific (`cuda_from_slice` is `cfg(feature = "cuda")`). The ROCm
+//! parity sweep lives in `tests/rocm_rmsnorm_parity.rs`.
+#![cfg(feature = "cuda")]
 
 use half::bf16;
 

@@ -24,7 +24,7 @@
 //! deposits are tagged with [`KT_PARAM_DEPOSIT_TAG`] (see [`register_input_mapping_kt`])
 //! so producers can distinguish them via [`decode_kt_param_deposit`].
 
-#![cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
+#![cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
 
 use std::cell::RefCell;
 use std::collections::HashMap;

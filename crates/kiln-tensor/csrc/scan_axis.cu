@@ -42,6 +42,14 @@
 
 #include <cstdint>
 
+// Wave-size shim (Phase R.5b). The three-phase scan reduces ONLY through shared
+// memory + __syncthreads() (Hillis-Steele over per-thread totals) — there are NO
+// cross-lane shuffles, so the scan is already correct on AMD wave32 AND wave64
+// without any kiln_warp_reduce_* change. We still include the compat header to
+// keep the ROCm kernel family uniform and to pin KILN_WARP/KILN_MAX_WARP in case
+// a future variant adds a warp-level fast path.
+#include "kt_gpu_compat.cuh"
+
 namespace {
 
 constexpr int MAX_THREADS = 1024;

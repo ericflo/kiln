@@ -32,6 +32,16 @@
 
 #include <cstdint>
 
+// Wave-size shim (Phase R.5). The two-level reductions below (per-thread
+// strided partial -> reduce across the block) hardcoded a 32-lane warp
+// (`__shfl_xor_sync(0xFFFFFFFF, v, 16)`, `tid / 32`, `(blk + 31) / 32`). On AMD
+// wave64 that "warp 0" cross-warp shuffle self-references lanes 32-63 and faults
+// (HSA 0x1016) — exactly the softmax.cu hazard. Route the reductions through
+// kiln_block_reduce_sum (shared-memory tree, wave-size agnostic) and have the
+// launchers pick a power-of-two blockDim in [64, 1024] so every wavefront is
+// fully populated. On nvcc this is behavior-identical (the include is inert).
+#include "kt_gpu_compat.cuh"
+
 namespace {
 
 constexpr int MAX_THREADS = 1024;
@@ -63,25 +73,13 @@ __global__ void sum_squared_last_axis_kernel(
         local_sum += v * v;
     }
 
-    // Warp-level reduction (sum).
-    __shared__ float shared_sum[32];
-    for (int offset = 16; offset > 0; offset /= 2) {
-        local_sum += __shfl_xor_sync(0xFFFFFFFF, local_sum, offset);
-    }
-    int warp_id = tid / 32;
-    int lane = tid & 31;
-    if (lane == 0) shared_sum[warp_id] = local_sum;
-    __syncthreads();
-
-    // Cross-warp reduction in warp 0.
-    if (warp_id == 0) {
-        float v = lane < (blk + 31) / 32 ? shared_sum[lane] : 0.0f;
-        for (int offset = 16; offset > 0; offset /= 2) {
-            v += __shfl_xor_sync(0xFFFFFFFF, v, offset);
-        }
-        if (lane == 0) {
-            out[row] = v;
-        }
+    // Wave-size-agnostic block reduction via shared memory (no cross-lane ops —
+    // correct on NVIDIA, AMD wave32, AND AMD wave64). blockDim is a power of two
+    // in [64, 1024] (guaranteed by the launcher).
+    __shared__ float smem[MAX_THREADS];
+    float total = kiln_block_reduce_sum(local_sum, smem);
+    if (tid == 0) {
+        out[row] = total;
     }
 }
 
@@ -97,11 +95,15 @@ extern "C" int kiln_sum_squared_last_axis_async(
     if (n_rows == 0 || n_cols == 0) return 0;
     cudaStream_t stream = static_cast<cudaStream_t>(stream_raw);
 
-    int threads = MAX_THREADS;
-    while (threads > n_cols && threads > 32) {
-        threads /= 2;
+    // Block size: smallest power of two that covers n_cols, clamped to
+    // [64, MAX_THREADS]. Min 64 (not 32) so every wavefront is FULLY populated
+    // on AMD wave64 (kiln_block_reduce_sum requires a power-of-two blockDim;
+    // a half-filled wave would corrupt the shared-mem tree). Threads past
+    // n_cols contribute the additive identity via the strided loop.
+    int threads = 64;
+    while (threads < n_cols && threads < MAX_THREADS) {
+        threads *= 2;
     }
-    if (threads < 32) threads = 32;
     dim3 grid((unsigned int)n_rows);
     dim3 block(threads);
 
@@ -274,23 +276,13 @@ __global__ void reduce_last_axis_sum_kernel(
         local_sum += to_f32<T>(row_in[c]);
     }
 
-    __shared__ float shared_sum[32];
-    for (int offset = 16; offset > 0; offset /= 2) {
-        local_sum += __shfl_xor_sync(0xFFFFFFFF, local_sum, offset);
-    }
-    int warp_id = tid / 32;
-    int lane = tid & 31;
-    if (lane == 0) shared_sum[warp_id] = local_sum;
-    __syncthreads();
-
-    if (warp_id == 0) {
-        float v = lane < (blk + 31) / 32 ? shared_sum[lane] : 0.0f;
-        for (int offset = 16; offset > 0; offset /= 2) {
-            v += __shfl_xor_sync(0xFFFFFFFF, v, offset);
-        }
-        if (lane == 0) {
-            out[row] = cast_from_f32<T>(v * divisor);
-        }
+    // Wave-size-agnostic block reduction via shared memory (no cross-lane ops —
+    // correct on NVIDIA, AMD wave32, AND AMD wave64). blockDim is a power of two
+    // in [64, 1024] (guaranteed by the launcher).
+    __shared__ float smem[MAX_THREADS];
+    float total = kiln_block_reduce_sum(local_sum, smem);
+    if (tid == 0) {
+        out[row] = cast_from_f32<T>(total * divisor);
     }
 }
 
@@ -307,11 +299,15 @@ extern "C" int kiln_sum_last_axis_async(
     if (n_rows == 0 || n_cols == 0) return 0;
     cudaStream_t stream = static_cast<cudaStream_t>(stream_raw);
 
-    int threads = MAX_THREADS;
-    while (threads > n_cols && threads > 32) {
-        threads /= 2;
+    // Block size: smallest power of two that covers n_cols, clamped to
+    // [64, MAX_THREADS]. Min 64 (not 32) so every wavefront is FULLY populated
+    // on AMD wave64 (kiln_block_reduce_sum requires a power-of-two blockDim;
+    // a half-filled wave would corrupt the shared-mem tree). Threads past
+    // n_cols contribute the additive identity via the strided loop.
+    int threads = 64;
+    while (threads < n_cols && threads < MAX_THREADS) {
+        threads *= 2;
     }
-    if (threads < 32) threads = 32;
     dim3 grid((unsigned int)n_rows);
     dim3 block(threads);
 

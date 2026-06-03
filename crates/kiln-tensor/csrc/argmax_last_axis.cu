@@ -43,6 +43,19 @@
 
 #include <cstdint>
 
+// Wave-size shim (Phase R.5). The original two-level reduction used
+// `__shfl_xor_sync(0xFFFFFFFF, ..., 16)` + a hardcoded `tid/32` warp_id, which
+// is BROKEN on AMD wave64: a 32-bit full-mask drops lanes 32-63, an offset of
+// 16 only butterflies within a half-wave, and "warp 0" (`tid/32==0`) is just
+// half a wavefront — so the cross-warp shuffle syncs inactive lanes 32-63 (an
+// HSA hardware exception, verified on real gfx1151 wave64). argmax reduces a
+// PAIR (val, idx) with a lowest-index tie-break, which `kiln_block_reduce_*`
+// (single-value) cannot express, so we hand-roll a wave-size-AGNOSTIC paired
+// shared-memory tree reduction: no cross-lane ops, correct on NVIDIA + AMD
+// wave32 + AMD wave64. The launcher picks a power-of-two blockDim in
+// [64, MAX_THREADS] so the tree reduction is exact.
+#include "kt_gpu_compat.cuh"
+
 namespace {
 
 constexpr int MAX_THREADS = 1024;
@@ -56,20 +69,38 @@ __device__ inline float to_f32<__nv_bfloat16>(__nv_bfloat16 v) { return __bfloat
 template <>
 __device__ inline float to_f32<__half>(__half v) { return __half2float(v); }
 
-// Warp-level argmax reduction. Pairs (val, idx) reduce together;
-// strict `>` on val preserves the lowest-index tie-break.
-__device__ inline void warp_argmax_reduce(float& val, int64_t& idx) {
-    for (int offset = 16; offset > 0; offset /= 2) {
-        float other_val = __shfl_xor_sync(0xFFFFFFFF, val, offset);
-        int64_t other_idx = __shfl_xor_sync(0xFFFFFFFF, idx, offset);
-        // Strict `>` keeps current pair on ties. To break ties to
-        // the lowest index, also accept the other pair when values
-        // are equal AND its index is lower.
-        if (other_val > val || (other_val == val && other_idx < idx)) {
-            val = other_val;
-            idx = other_idx;
+// Wave-size-AGNOSTIC block-level argmax reduction over a (val, idx) pair via
+// shared memory — no cross-lane shuffles, so it is correct on NVIDIA, AMD
+// wave32, AND AMD wave64. `blockDim.x` MUST be a power of two (the launcher
+// guarantees this). The pair reduces with a strict `>` on val plus a
+// lower-index tie-break, matching the CPU reference's lowest-index convention.
+// Returns the winning index in thread 0 (other threads' return value is
+// unspecified). A trailing __syncthreads() makes the smem buffers reusable.
+__device__ inline int64_t block_argmax_reduce(
+    float val, int64_t idx, float* smem_val, int64_t* smem_idx) {
+    const int tid = threadIdx.x;
+    const int blk = blockDim.x;
+    smem_val[tid] = val;
+    smem_idx[tid] = idx;
+    __syncthreads();
+    for (int s = blk >> 1; s > 0; s >>= 1) {
+        if (tid < s) {
+            float ov = smem_val[tid + s];
+            int64_t oi = smem_idx[tid + s];
+            float cv = smem_val[tid];
+            int64_t ci = smem_idx[tid];
+            // Accept the other pair if its value is strictly greater, or
+            // equal with a lower index (lowest-index tie-break).
+            if (ov > cv || (ov == cv && oi < ci)) {
+                smem_val[tid] = ov;
+                smem_idx[tid] = oi;
+            }
         }
+        __syncthreads();
     }
+    int64_t result = smem_idx[0];
+    __syncthreads();
+    return result;
 }
 
 template <typename T>
@@ -98,28 +129,13 @@ __global__ void argmax_last_axis_kernel(
         // already lowest-index for this thread).
     }
 
-    // Warp-level reduction.
-    warp_argmax_reduce(local_val, local_idx);
+    // Wave-size-agnostic block reduction over the (val, idx) pair.
+    __shared__ float smem_val[MAX_THREADS];
+    __shared__ int64_t smem_idx[MAX_THREADS];
+    int64_t best_idx = block_argmax_reduce(local_val, local_idx, smem_val, smem_idx);
 
-    __shared__ float shared_val[32];
-    __shared__ int64_t shared_idx[32];
-    int warp_id = tid / 32;
-    int lane = tid & 31;
-    if (lane == 0) {
-        shared_val[warp_id] = local_val;
-        shared_idx[warp_id] = local_idx;
-    }
-    __syncthreads();
-
-    // Cross-warp reduction in warp 0.
-    if (warp_id == 0) {
-        int n_warps = (blk + 31) / 32;
-        float v = lane < n_warps ? shared_val[lane] : -INFINITY;
-        int64_t i = lane < n_warps ? shared_idx[lane] : 0;
-        warp_argmax_reduce(v, i);
-        if (lane == 0) {
-            out[row] = i;
-        }
+    if (tid == 0) {
+        out[row] = best_idx;
     }
 }
 
@@ -135,11 +151,15 @@ extern "C" int kiln_argmax_last_axis_async(
     if (n_rows == 0 || n_cols == 0) return 0;
     cudaStream_t stream = static_cast<cudaStream_t>(stream_raw);
 
-    int threads = MAX_THREADS;
-    while (threads > n_cols && threads > 32) {
-        threads /= 2;
+    // Block size: smallest power of two that covers n_cols, clamped to
+    // [64, MAX_THREADS]. Min 64 (not 32) so every wavefront is FULLY populated
+    // on AMD wave64, and a power of two so the shared-memory tree reduction in
+    // block_argmax_reduce is exact. Threads past n_cols contribute the
+    // reduction identity (-INFINITY, idx 0) via the strided scan loop.
+    int threads = 64;
+    while (threads < n_cols && threads < MAX_THREADS) {
+        threads *= 2;
     }
-    if (threads < 32) threads = 32;
     dim3 grid((unsigned int)n_rows);
     dim3 block(threads);
 

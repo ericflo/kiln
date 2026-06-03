@@ -149,6 +149,33 @@ impl DeviceOp1 for CastOp {
         Ok(Some(crate::cuda_cast(x, to)?))
     }
 
+    #[cfg(feature = "rocm")]
+    fn rocm_fwd(&self, x: &Tensor) -> Result<Option<Tensor>> {
+        let from = x.dtype();
+        let to = self.target;
+        // ROCm path covers F32 ↔ BF16 ↔ F16, mirroring `cuda_fwd`.
+        // Integer round-trips stay on the CPU fallback.
+        let rocm_supported = matches!(
+            (from, to),
+            (DType::F32, DType::BF16)
+                | (DType::F32, DType::F16)
+                | (DType::BF16, DType::F32)
+                | (DType::BF16, DType::F16)
+                | (DType::F16, DType::F32)
+                | (DType::F16, DType::BF16)
+                | (DType::F32, DType::F32)
+                | (DType::BF16, DType::BF16)
+                | (DType::F16, DType::F16)
+        );
+        if !rocm_supported {
+            return Ok(None);
+        }
+        if !x.is_contiguous() {
+            return Ok(None);
+        }
+        Ok(Some(crate::rocm_cast(x, to)?))
+    }
+
     #[cfg(feature = "metal")]
     fn metal_fwd(&self, x: &Tensor) -> Result<Option<Tensor>> {
         // Phase 4 substrate-op landing: dispatch through

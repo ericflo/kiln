@@ -40,6 +40,12 @@ pub enum DeviceBuffer {
     /// copy round-trip on Mac.
     #[cfg(feature = "metal")]
     Metal(Arc<kiln_tensor::MetalStorage>),
+    /// ROCm/HIP-native storage. Available with `--features rocm`. Wraps
+    /// `kiln-tensor`'s `RocmStorage`, which owns a HIP device allocation —
+    /// the same primitive the kt-API kernel crates pull device pointers from
+    /// on AMD. (Phase R.4)
+    #[cfg(feature = "rocm")]
+    Rocm(Arc<kiln_tensor::RocmStorage>),
     /// CPU-side fallback buffer. Carries an `Arc<[u8]>` so the same
     /// type-erased flow works when no GPU backend is selected.
     Cpu(Arc<[u8]>),
@@ -61,6 +67,11 @@ impl DeviceBuffer {
                 use kiln_tensor::StorageBackend;
                 st.byte_len() as u64
             }
+            #[cfg(feature = "rocm")]
+            Self::Rocm(st) => {
+                use kiln_tensor::StorageBackend;
+                st.byte_len() as u64
+            }
             Self::Cpu(bytes) => bytes.len() as u64,
         }
     }
@@ -74,6 +85,8 @@ impl DeviceBuffer {
             Self::Cuda(_) => "cuda",
             #[cfg(feature = "metal")]
             Self::Metal(_) => "metal",
+            #[cfg(feature = "rocm")]
+            Self::Rocm(_) => "rocm",
             Self::Cpu(_) => "cpu",
         }
     }
@@ -113,6 +126,17 @@ impl DeviceBuffer {
         }
     }
 
+    /// Borrow the inner ROCm storage, if this variant is Rocm.
+    ///
+    /// Returns `None` for any other variant.
+    #[cfg(feature = "rocm")]
+    pub fn as_rocm(&self) -> Option<&Arc<kiln_tensor::RocmStorage>> {
+        match self {
+            Self::Rocm(st) => Some(st),
+            _ => None,
+        }
+    }
+
     /// Borrow the CPU bytes, if this variant is Cpu.
     pub fn as_cpu(&self) -> Option<&Arc<[u8]>> {
         match self {
@@ -123,6 +147,8 @@ impl DeviceBuffer {
             Self::Cuda(_) => None,
             #[cfg(feature = "metal")]
             Self::Metal(_) => None,
+            #[cfg(feature = "rocm")]
+            Self::Rocm(_) => None,
         }
     }
 
@@ -142,6 +168,12 @@ impl DeviceBuffer {
     #[cfg(feature = "metal")]
     pub fn from_metal(st: Arc<kiln_tensor::MetalStorage>) -> Self {
         Self::Metal(st)
+    }
+
+    /// Construct a ROCm-backed device buffer from an existing Arc.
+    #[cfg(feature = "rocm")]
+    pub fn from_rocm(st: Arc<kiln_tensor::RocmStorage>) -> Self {
+        Self::Rocm(st)
     }
 
     /// Construct a CPU-backed device buffer.

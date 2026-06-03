@@ -55,6 +55,17 @@ pub fn interpolate_1d(x: &Tensor, target_len: usize, align: AlignCorners) -> Res
         x
     };
 
+    // ROCm: correctness-first host round-trip. Stage the device input to host,
+    // run the CPU resampling loop below via recursion, then move the result
+    // tensor back to the input's device.
+    #[cfg(feature = "rocm")]
+    if matches!(x.device(), crate::Device::Rocm(_)) {
+        let dev = x.device();
+        let host = crate::rocm_to_host_copy(x)?;
+        let out_host = interpolate_1d(&host, target_len, align)?;
+        return out_host.to_device(dev);
+    }
+
     let mut out_shape: Vec<usize> = x.shape().to_vec();
     let last = *out_shape.last().unwrap();
     if last == 0 {
