@@ -42,9 +42,11 @@
 // `kiln_vulkan_kernel::VkPagedKvCache`), mirroring how the deleted candle
 // `PagedKvCache` held CPU-resident tensors for the Vulkan backend.
 //
-// The CUDA graph and FP8 KV methods remain CUDA-only. Native BF16 writes and
-// reads are device-parametric kt paths now; Metal also has a batched decode
-// writer wired through `backend::metal`.
+// The CUDA graph methods remain CUDA-only. The FP8 KV write/read methods are
+// now CUDA + ROCm (both route their on-device E4M3 quantize/dequantize through
+// the shared `csrc/fp8.cu` via `fp8_quantize_direct_dev` / `..dequantize..`).
+// Native BF16 writes and reads are device-parametric kt paths; Metal also has a
+// batched decode writer wired through `backend::metal`.
 use anyhow::Result;
 #[cfg(feature = "cuda")]
 use anyhow::Context;
@@ -73,6 +75,39 @@ use kiln_tensor::{
     cuda_fp8_dequantize_direct, cuda_fp8_quantize_direct, cuda_zeros_ctx, CudaStorage,
 };
 use kiln_tensor::{DType as KtDType, Layout, Tensor as KtTensor, TensorId};
+
+/// Device-dispatched FP8 (E4M3FN, scale=1.0 "direct") quantize for the paged-KV
+/// write path. CUDA and ROCm both route to their on-device kernel (the shared
+/// `csrc/fp8.cu`); this is the seam that makes the FP8 KV cache work on ROCm at
+/// the same on-device parity CUDA has (rather than the host round-trip the
+/// generic `kiln_model::fp8` fallback would take).
+#[cfg(any(feature = "cuda", feature = "rocm"))]
+fn fp8_quantize_direct_dev(t: &KtTensor) -> Result<KtTensor> {
+    match t.device() {
+        #[cfg(feature = "cuda")]
+        kiln_tensor::Device::Cuda(_) => kiln_tensor::cuda_fp8_quantize_direct(t)
+            .map_err(|e| anyhow::anyhow!("fp8 paged-KV quantize (cuda): {e}")),
+        #[cfg(feature = "rocm")]
+        kiln_tensor::Device::Rocm(_) => kiln_tensor::rocm_fp8_quantize_direct(t)
+            .map_err(|e| anyhow::anyhow!("fp8 paged-KV quantize (rocm): {e}")),
+        other => anyhow::bail!("fp8 paged-KV quantize: unsupported device {other:?}"),
+    }
+}
+
+/// Device-dispatched FP8 (E4M3FN, scale=1.0 "direct") dequantize for the
+/// paged-KV read path. Twin of [`fp8_quantize_direct_dev`].
+#[cfg(any(feature = "cuda", feature = "rocm"))]
+fn fp8_dequantize_direct_dev(t: &KtTensor, target: KtDType) -> Result<KtTensor> {
+    match t.device() {
+        #[cfg(feature = "cuda")]
+        kiln_tensor::Device::Cuda(_) => kiln_tensor::cuda_fp8_dequantize_direct(t, target)
+            .map_err(|e| anyhow::anyhow!("fp8 paged-KV dequantize (cuda): {e}")),
+        #[cfg(feature = "rocm")]
+        kiln_tensor::Device::Rocm(_) => kiln_tensor::rocm_fp8_dequantize_direct(t, target)
+            .map_err(|e| anyhow::anyhow!("fp8 paged-KV dequantize (rocm): {e}")),
+        other => anyhow::bail!("fp8 paged-KV dequantize: unsupported device {other:?}"),
+    }
+}
 
 /// Paged KV cache backed by `kiln_tensor::Tensor`. Twin of
 /// the deleted candle `PagedKvCache` (#1082 candle-drop).
@@ -382,9 +417,9 @@ impl PagedKvCacheKt {
                 .map_err(|e| anyhow::anyhow!("kt pkv fp8 graph_slot: squeeze v: {e}"))?
                 .contiguous()
                 .map_err(|e| anyhow::anyhow!("kt pkv fp8 graph_slot: contiguous v: {e}"))?;
-            let k_q = cuda_fp8_quantize_direct(&k_sq)
+            let k_q = fp8_quantize_direct_dev(&k_sq)
                 .map_err(|e| anyhow::anyhow!("kt pkv fp8 graph_slot: quantize k: {e}"))?;
-            let v_q = cuda_fp8_quantize_direct(&v_sq)
+            let v_q = fp8_quantize_direct_dev(&v_sq)
                 .map_err(|e| anyhow::anyhow!("kt pkv fp8 graph_slot: quantize v: {e}"))?;
             k_pool
                 .slice_set(&k_q, 0, slot_idx)
@@ -665,9 +700,9 @@ impl PagedKvCacheKt {
         // materialize through `.contiguous()` first; the dequant kernel
         // is contiguous-only.
         let (k_slice, v_slice) = if self.fp8 {
-            // FP8 dequant uses the CUDA E4M3 kernel; the non-CUDA path supports
-            // native BF16 paged-KV only (#1082 DoD-100).
-            #[cfg(feature = "cuda")]
+            // FP8 dequant uses the on-device E4M3 kernel (shared csrc/fp8.cu) on
+            // CUDA and ROCm; other backends support native BF16 paged-KV only.
+            #[cfg(any(feature = "cuda", feature = "rocm"))]
             {
                 let k_c = k_slice
                     .contiguous()
@@ -675,17 +710,17 @@ impl PagedKvCacheKt {
                 let v_c = v_slice
                     .contiguous()
                     .map_err(|e| anyhow::anyhow!("kt pkv fp8 read: contiguous v: {e}"))?;
-                let k_deq = cuda_fp8_dequantize_direct(&k_c, self.compute_dtype)
+                let k_deq = fp8_dequantize_direct_dev(&k_c, self.compute_dtype)
                     .map_err(|e| anyhow::anyhow!("kt pkv fp8 read: dequantize k: {e}"))?;
-                let v_deq = cuda_fp8_dequantize_direct(&v_c, self.compute_dtype)
+                let v_deq = fp8_dequantize_direct_dev(&v_c, self.compute_dtype)
                     .map_err(|e| anyhow::anyhow!("kt pkv fp8 read: dequantize v: {e}"))?;
                 (k_deq, v_deq)
             }
-            #[cfg(not(feature = "cuda"))]
+            #[cfg(not(any(feature = "cuda", feature = "rocm")))]
             {
                 anyhow::bail!(
-                    "fp8 paged-KV read dequant is CUDA-only; the non-CUDA path \
-                     supports the native BF16 paged-KV read only"
+                    "fp8 paged-KV read dequant is CUDA/ROCm-only; the other backends \
+                     support the native BF16 paged-KV read only"
                 )
             }
         } else {
@@ -1118,16 +1153,16 @@ impl PagedKvCacheKt {
         v: &KtTensor,
     ) -> Result<()> {
         if self.fp8 {
-            #[cfg(feature = "cuda")]
+            #[cfg(any(feature = "cuda", feature = "rocm"))]
             {
                 self.write_fp8(layer_idx, block_table, start_pos, k, v)
             }
-            #[cfg(not(feature = "cuda"))]
+            #[cfg(not(any(feature = "cuda", feature = "rocm")))]
             {
                 let _ = (layer_idx, block_table, start_pos, k, v);
                 anyhow::bail!(
-                    "fp8 paged-KV write is CUDA-only (cuda_fp8_quantize_direct); the \
-                     non-CUDA path supports the native BF16 paged-KV write only"
+                    "fp8 paged-KV write is CUDA/ROCm-only (on-device fp8 quantize); the \
+                     other backends support the native BF16 paged-KV write only"
                 )
             }
         } else {
@@ -1262,7 +1297,7 @@ impl PagedKvCacheKt {
         Ok(())
     }
 
-    #[cfg(feature = "cuda")]
+    #[cfg(any(feature = "cuda", feature = "rocm"))]
     fn write_fp8(
         &self,
         layer_idx: usize,
@@ -1292,9 +1327,9 @@ impl PagedKvCacheKt {
                 .map_err(|e| anyhow::anyhow!("kt pkv write_fp8: squeeze v: {e}"))?
                 .contiguous()
                 .map_err(|e| anyhow::anyhow!("kt pkv write_fp8: contiguous v: {e}"))?;
-            let k_q = cuda_fp8_quantize_direct(&k_sq)
+            let k_q = fp8_quantize_direct_dev(&k_sq)
                 .map_err(|e| anyhow::anyhow!("kt pkv write_fp8: quantize k: {e}"))?;
-            let v_q = cuda_fp8_quantize_direct(&v_sq)
+            let v_q = fp8_quantize_direct_dev(&v_sq)
                 .map_err(|e| anyhow::anyhow!("kt pkv write_fp8: quantize v: {e}"))?;
             let (k_pool, v_pool) = &self.layers[layer_idx];
             k_pool
@@ -1311,9 +1346,9 @@ impl PagedKvCacheKt {
         // carry per-write scales (read dequantizes uniformly). E4M3FN's ±448
         // range covers normalized attention K/V (typically ±10).
         let (k_flat, v_flat) = self.head_major_to_token_major(k, v, "write_fp8")?;
-        let k_q = cuda_fp8_quantize_direct(&k_flat)
+        let k_q = fp8_quantize_direct_dev(&k_flat)
             .map_err(|e| anyhow::anyhow!("kt pkv write_fp8: quantize k block: {e}"))?;
-        let v_q = cuda_fp8_quantize_direct(&v_flat)
+        let v_q = fp8_quantize_direct_dev(&v_flat)
             .map_err(|e| anyhow::anyhow!("kt pkv write_fp8: quantize v block: {e}"))?;
 
         let (k_pool, v_pool) = &self.layers[layer_idx];

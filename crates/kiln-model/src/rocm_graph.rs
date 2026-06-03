@@ -282,6 +282,21 @@ impl RocmGraphRunner {
 
         #[cfg(feature = "rocm")]
         {
+            // FP8 paged KV cache is incompatible with HIP graph capture: the
+            // per-step on-device quantize allocates its U8 output from the
+            // capture arena (a Borrowed, pointer-stable view), and the
+            // subsequent `slice_set` into the pool calls `RocmStorage::slice()`
+            // on it, which panics on Borrowed storage. CUDA has the same
+            // limitation (its FP8 graph-slot write reads the slot index
+            // host-side, forcing a sync). Run eager whenever the cache is FP8 —
+            // graceful, no capture attempt, parity with CUDA.
+            if paged_cache.is_fp8() {
+                return Self::eager_forward(
+                    backend, token_id, weights, config, paged_cache, block_table, seq_len,
+                    linear_state, lora,
+                );
+            }
+
             // Request-boundary eviction (BUG-B): within a bs=1 greedy request
             // seq_len increases by 1 each step and the first KV block is fixed;
             // a new request breaks both. On a boundary, evict so the new request
