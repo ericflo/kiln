@@ -342,6 +342,15 @@ impl RocmGraphRunner {
                 Err(e) => {
                     tracing::warn!("ROCm graph capture failed: {e:#}, disabling graphs (eager)");
                     self.enabled = false;
+                    // A failed capture can leave pending/poisoned device work (an
+                    // aborted capture stream, a half-issued kernel). Synchronize
+                    // the device before the eager fallback so it runs from a clean
+                    // state rather than cascading into a second failure.
+                    if let Some(idx) = weights.embed_tokens.device().index() {
+                        if let Err(sync_err) = kiln_tensor::rocm_synchronize_default_stream(idx) {
+                            tracing::warn!("post-capfail device sync failed: {sync_err:#}");
+                        }
+                    }
                     return Self::eager_forward(
                         backend, token_id, weights, config, paged_cache, block_table, seq_len,
                         linear_state, lora,
