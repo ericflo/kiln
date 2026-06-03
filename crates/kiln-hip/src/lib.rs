@@ -607,18 +607,17 @@ impl RocmStream {
 }
 
 impl RocmGraph {
-    /// Instantiate into an executable graph with auto-free-on-launch (matches
-    /// the CUDA `AUTO_FREE_ON_LAUNCH` flag).
+    /// Instantiate into an executable graph.
+    ///
+    /// Uses `flags = 0` (plain instantiation). The R.9 decode graph
+    /// pre-allocates every buffer it touches OUTSIDE the capture window (the
+    /// freeze-pointers arena), so the captured graph contains NO stream-ordered
+    /// alloc nodes — `AUTO_FREE_ON_LAUNCH` (the CUDA discipline) has nothing to
+    /// free and was rejected with `hipErrorInvalidValue` on gfx1151 / ROCm 7.2.4.
     pub fn instantiate(&self) -> Result<RocmGraphExec> {
         let mut exec: sys::hipGraphExec_t = ptr::null_mut();
         check(
-            unsafe {
-                sys::hipGraphInstantiateWithFlags(
-                    &mut exec,
-                    self.graph,
-                    sys::HIP_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
-                )
-            },
+            unsafe { sys::hipGraphInstantiateWithFlags(&mut exec, self.graph, 0) },
             "hipGraphInstantiateWithFlags",
         )?;
         Ok(RocmGraphExec { exec })

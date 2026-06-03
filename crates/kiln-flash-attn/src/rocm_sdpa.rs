@@ -555,9 +555,23 @@ pub fn paged_kv_write_token_major_bf16_slot_rocm(
     num_kv_heads: usize,
     head_dim: usize,
 ) -> Result<(), FlashAttnError> {
-    let slot_host = map_kt(kiln_tensor::rocm_to_host_copy(slot))?;
-    let slot_idx = map_kt(slot_host.to_vec::<u32>())?[0] as usize;
-    paged_kv_write_token_major_bf16_rocm(k_pool, v_pool, k, v, slot_idx, num_kv_heads, head_dim)
+    // R.9: on-device scatter-copy of the current token's K/V row into
+    // `pool[*slot]` using the DEVICE slot index — NO host readback, so this
+    // records cleanly into a captured HIP decode graph (and is safe on the
+    // Borrowed freeze-pointer arena buffers, since it writes through
+    // device_ptr_raw, not slice()). Reshape pool -> [n_rows, row_elems] and the
+    // token row -> [1, row_elems], then `dst[*slot] = row` via index_copy_dim0.
+    let row_elems = num_kv_heads * head_dim;
+    let kp_rows = k_pool.element_count() / row_elems;
+    let vp_rows = v_pool.element_count() / row_elems;
+    let k_pool2 = map_kt(k_pool.reshape(vec![kp_rows, row_elems]))?;
+    let v_pool2 = map_kt(v_pool.reshape(vec![vp_rows, row_elems]))?;
+    let k_row = map_kt(rocm_contig(k)?.reshape(vec![1, row_elems]))?;
+    let v_row = map_kt(rocm_contig(v)?.reshape(vec![1, row_elems]))?;
+    let slot1 = map_kt(rocm_contig(slot)?.reshape(vec![1]))?;
+    map_kt(kiln_tensor::rocm_index_copy_dim0(&k_pool2, &slot1, &k_row))?;
+    map_kt(kiln_tensor::rocm_index_copy_dim0(&v_pool2, &slot1, &v_row))?;
+    Ok(())
 }
 
 /// ROCm composite of `paged_kv_write_token_major_bf16_batch_slot_kt` (batched

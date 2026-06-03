@@ -271,6 +271,9 @@ fn build_rocm() {
         "cast.cu",
         "activation.cu",
         "index_select.cu",
+        // R.9 — on-device scatter-copy (inverse of index_select); the device-slot
+        // paged-KV write that lets the K/V store record into a HIP graph.
+        "index_copy.cu",
         "scalar_op.cu",
         "rope.cu",
         "masked_fill.cu",
