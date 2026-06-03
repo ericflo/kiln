@@ -14,9 +14,47 @@
 
 use std::any::Any;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use kiln_hip::{RocmContext, RocmSlice};
+
+/// Diagnostic: counts host<->device round-trips (each one synchronizes its
+/// stream via `memcpy_dtoh`/`memcpy_htod`). When `KILN_ROCM_PROFILE` is set,
+/// `rocm_to_host_copy` / `host_to_rocm_copy` bump these and emit a periodic
+/// line so we can see whether the prefill hot path is host-bound.
+pub static ROCM_DTOH_COUNT: AtomicU64 = AtomicU64::new(0);
+pub static ROCM_HTOD_COUNT: AtomicU64 = AtomicU64::new(0);
+
+#[inline]
+fn rocm_profile_on() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("KILN_ROCM_PROFILE").is_ok())
+}
+
+/// Diagnostic: tallies how often each generic `DeviceOp` falls through to the
+/// CPU host-fallback path (a full D2H→cpu_fwd→H2D round-trip per call). When
+/// `KILN_ROCM_PROFILE` is set, the running tally per op-name is printed every
+/// 100 fallbacks so we can see which ops dominate the host-bound prefill.
+pub fn rocm_log_host_fallback(op_name: &str, shape: &[usize]) {
+    if !rocm_profile_on() {
+        return;
+    }
+    static TALLY: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
+    static TOTAL: AtomicU64 = AtomicU64::new(0);
+    let n = TOTAL.fetch_add(1, Ordering::Relaxed) + 1;
+    let mut map = TALLY.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap();
+    *map.entry(op_name.to_string()).or_insert(0) += 1;
+    if n % 100 == 0 {
+        let mut v: Vec<(String, u64)> = map.iter().map(|(k, c)| (k.clone(), *c)).collect();
+        v.sort_by(|a, b| b.1.cmp(&a.1));
+        let top: Vec<String> = v.iter().take(12).map(|(k, c)| format!("{k}={c}")).collect();
+        eprintln!(
+            "[rocm-fallback] total={n} last={op_name}{shape:?} top: {}",
+            top.join(" ")
+        );
+    }
+}
 
 use crate::{DType, Device, Error, Result, StorageBackend};
 
@@ -496,6 +534,18 @@ pub fn rocm_to_host_copy(src: &crate::Tensor) -> Result<crate::Tensor> {
         .memcpy_dtoh(contig_storage.slice())
         .map_err(|e| Error::Msg(format!("rocm_to_host_copy: memcpy_dtoh failed: {e:?}")))?;
 
+    if rocm_profile_on() {
+        let n = ROCM_DTOH_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+        if n % 200 == 0 {
+            eprintln!(
+                "[rocm-profile] dtoh={} htod={} (last shape {:?})",
+                n,
+                ROCM_HTOD_COUNT.load(Ordering::Relaxed),
+                src.shape()
+            );
+        }
+    }
+
     let cpu_storage = crate::CpuStorage::from_bytes(dtype, host_bytes)?;
     let storage_arc: crate::Storage = Arc::new(cpu_storage);
     crate::Tensor::from_parts(
@@ -548,6 +598,19 @@ pub fn host_to_rocm_copy(src: &crate::Tensor, device_index: usize) -> Result<cra
     let device_slice = stream
         .clone_htod(bytes)
         .map_err(|e| Error::Msg(format!("host_to_rocm_copy: clone_htod failed: {e:?}")))?;
+
+    if rocm_profile_on() {
+        let n = ROCM_HTOD_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+        if n % 200 == 0 {
+            eprintln!(
+                "[rocm-profile] htod={} dtoh={} (last shape {:?})",
+                n,
+                ROCM_DTOH_COUNT.load(Ordering::Relaxed),
+                src.shape()
+            );
+        }
+    }
+
     let rocm_storage = RocmStorage::from_slice_ctx(&ctx, device_index, dtype, device_slice)?;
 
     let storage_arc: crate::Storage = Arc::new(rocm_storage);

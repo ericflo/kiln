@@ -137,10 +137,15 @@ fn output_stream_raw(out: &KtTensor) -> Result<*mut core::ffi::c_void, GdnError>
 /// A device-wide `hipDeviceSynchronize` drains the launch stream too. CUDA keeps
 /// its byte-identical path (`cfg(feature = "rocm")`-only, compiled out on CUDA).
 #[cfg(feature = "rocm")]
-fn device_synchronize_after_launch(t: &KtTensor) -> Result<(), GdnError> {
-    let device_index = t.device().index().unwrap_or(0);
-    kiln_tensor::rocm_synchronize_default_stream(device_index)
-        .map_err(|e| GdnError::Msg(format!("kt-gdn: rocm device sync failed: {e}")))
+fn device_synchronize_after_launch(_t: &KtTensor) -> Result<(), GdnError> {
+    // R.10 perf: now a no-op. `primary_rocm_context` is CACHED per device (one
+    // shared context + default stream), so the kernel launch, the output's
+    // zeroing memset, and the `rocm_to_host_copy` readback all serialize on ONE
+    // stream — the readback's own `hipStreamSynchronize` already orders them.
+    // The old per-call `hipDeviceSynchronize` (added when each tensor minted its
+    // own stream, pre-cache) drained the whole GPU pipeline every GDN call — the
+    // dominant `kfd_wait_on_events` stall on the decode hot path.
+    Ok(())
 }
 
 /// `gdn_forward_substitution` over `kiln_tensor::Tensor` operands.

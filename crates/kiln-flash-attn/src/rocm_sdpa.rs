@@ -500,7 +500,10 @@ fn rocm_d2d_copy(
             "rocm-sdpa: hipMemcpyDtoDAsync returned status {status}"
         )));
     }
-    map_kt(kiln_tensor::rocm_synchronize_default_stream(dev_idx))?;
+    // R.10 perf: no device sync needed — the d2d write and any later read of the
+    // pool serialize on the one cached per-device stream (FIFO). The old
+    // hipDeviceSynchronize stalled the decode pipeline every KV write.
+    let _ = dev_idx;
     Ok(())
 }
 

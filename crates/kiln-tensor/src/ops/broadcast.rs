@@ -227,6 +227,45 @@ impl DeviceOp1 for BroadcastOp {
         Ok(Some(gathered.reshape(self.target_shape.clone())?))
     }
 
+    #[cfg(feature = "rocm")]
+    fn rocm_fwd(&self, x: &Tensor) -> Result<Option<Tensor>> {
+        // Mirror of cuda_fwd: gather-via-`rocm_index_select_dim0` on a
+        // flattened view, keeping the broadcast on-device. Without this every
+        // broadcast (bias/residual/rope/gate expansion) host-staged: D2H the
+        // input, CPU-expand, H2D the (larger) output — the #1 host round-trip
+        // in the prefill tally. The only host touch left is the tiny gather-
+        // index buffer (target_total u32s), shipped once per call.
+        let in_shape = x.shape();
+        let _bf = self.broadcast_factors(in_shape)?;
+        let dtype = x.dtype();
+        if dtype.is_packed() {
+            return Ok(None);
+        }
+        if !x.is_contiguous() {
+            return Ok(None);
+        }
+        // Fast path: shapes already match — no data movement.
+        if in_shape == self.target_shape.as_slice() {
+            return Ok(Some(x.reshape(x.shape().to_vec())?));
+        }
+        let target_total: usize = self.target_shape.iter().product();
+        if target_total == 0 {
+            return Ok(None);
+        }
+        let in_total: usize = in_shape.iter().product();
+        let device_index = match x.device() {
+            crate::Device::Rocm(i) => i,
+            _ => return Ok(None),
+        };
+        // Flatten to 1D, build the gather indices on CPU, ship them up, gather.
+        let x_flat = x.reshape(vec![in_total])?;
+        let indices_host = self.gather_indices(in_shape);
+        let indices_cpu = Tensor::from_slice(&indices_host, vec![target_total])?;
+        let indices_rocm = crate::host_to_rocm_copy_ctx(&indices_cpu, device_index)?;
+        let gathered = crate::rocm_index_select_dim0(&x_flat, &indices_rocm)?;
+        Ok(Some(gathered.reshape(self.target_shape.clone())?))
+    }
+
     #[cfg(feature = "metal")]
     fn metal_fwd(&self, x: &Tensor) -> Result<Option<Tensor>> {
         // Gate on the same preconditions as cuda_fwd so future MSL

@@ -201,12 +201,9 @@ pub fn fused_rmsnorm_backward_kt(
     // (enqueued on grad_w_partial's OWN stream at alloc time) MUST complete before
     // the kernel's atomicAdds. Those are on different streams with no implicit
     // ordering, so flush all pending device work before launching.
-    #[cfg(feature = "rocm")]
-    {
-        let idx = grad_x.device().index().unwrap_or(0);
-        kiln_tensor::rocm_synchronize_default_stream(idx)
-            .map_err(|e| RmsNormError::Msg(format!("kt-rmsnorm bwd: pre-launch sync: {e}")))?;
-    }
+    // R.10 perf: no pre-launch device sync needed — grad_w_partial's zeroing
+    // memset and the kernel's atomicAdd are on the one cached per-device stream
+    // (FIFO: memset before kernel). The old hipDeviceSynchronize was a stall.
 
     let status = unsafe {
         kiln_fused_rmsnorm_bwd(
@@ -227,15 +224,9 @@ pub fn fused_rmsnorm_backward_kt(
         )));
     }
 
-    // ROCm-only: the kernel ran on grad_x's stream, but `grad_w_partial` is read
-    // back via its OWN (different) stream — whose sync would not observe the
-    // kernel. Flush the device so both outputs are complete before return.
-    #[cfg(feature = "rocm")]
-    {
-        let idx = grad_x.device().index().unwrap_or(0);
-        kiln_tensor::rocm_synchronize_default_stream(idx)
-            .map_err(|e| RmsNormError::Msg(format!("kt-rmsnorm bwd: post-launch sync: {e}")))?;
-    }
+    // R.10 perf: no post-launch device sync — grad_x / grad_w_partial readbacks
+    // run on the same cached per-device stream as the kernel (FIFO), and each
+    // rocm_to_host_copy syncs that stream itself.
 
     Ok((grad_x, grad_w_partial))
 }
