@@ -173,6 +173,53 @@ impl DeviceOp2 for IndexSelectOp {
         }
     }
 
+    #[cfg(feature = "rocm")]
+    fn rocm_fwd(&self, input: &Tensor, indices: &Tensor) -> Result<Option<Tensor>> {
+        // Mirrors `cuda_fwd`: dim0 fast path + generic axis-N gather.
+        // Both require U32 indices and contiguous, non-packed inputs.
+        // I64 indices and packed dtypes fall through to CPU.
+        if input.dtype().is_packed() {
+            return Ok(None);
+        }
+        if !input.is_contiguous() || !indices.is_contiguous() {
+            return Ok(None);
+        }
+        if indices.dtype() != DType::U32 {
+            return Ok(None);
+        }
+        if input
+            .storage()
+            .as_any()
+            .downcast_ref::<crate::RocmStorage>()
+            .is_none()
+            || indices
+                .storage()
+                .as_any()
+                .downcast_ref::<crate::RocmStorage>()
+                .is_none()
+        {
+            return Ok(None);
+        }
+        if self.axis == 0 {
+            if indices.rank() == 1 {
+                Ok(Some(crate::rocm_index_select_dim0(input, indices)?))
+            } else {
+                let n_indices = indices.element_count();
+                let flat_ids = indices.reshape(vec![n_indices])?;
+                let gathered = crate::rocm_index_select_dim0(input, &flat_ids)?;
+                let mut out_shape = indices.shape().to_vec();
+                out_shape.extend_from_slice(&input.shape()[1..]);
+                Ok(Some(gathered.reshape(out_shape)?))
+            }
+        } else {
+            Ok(Some(crate::rocm_index_select_axis_n(
+                input,
+                self.axis,
+                indices,
+            )?))
+        }
+    }
+
     #[cfg(feature = "metal")]
     fn metal_fwd(&self, input: &Tensor, indices: &Tensor) -> Result<Option<Tensor>> {
         // Gate on the same preconditions as cuda_fwd so future MSL

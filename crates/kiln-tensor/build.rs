@@ -280,6 +280,15 @@ fn build_rocm() {
         "clamp_pow.cu",
         "lerp.cu",
         "diag.cu",
+        // R.5b — deferred GDN/sampling/training hot-path kernels.
+        // scan_axis: cumsum/cumprod (GDN cumsum hot path); smem-only scan, no
+        //   cross-lane reduction → wave32/64-correct as-is.
+        // scatter_add: dim0 atomic scatter (embedding-bwd); F32 native atomicAdd,
+        //   BF16 via CAS-on-dword (HIP has no native bf16 atomicAdd).
+        // dropout: counter-based splitmix64 RNG (no curand/hiprand dependency).
+        "scan_axis.cu",
+        "scatter_add.cu",
+        "dropout.cu",
     ];
 
     let mut objects = Vec::new();

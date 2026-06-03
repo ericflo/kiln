@@ -157,6 +157,29 @@ impl DeviceOp1 for ActivationOp {
         Ok(Some(crate::cuda_activation_unary(x, kind_tag)?))
     }
 
+    #[cfg(feature = "rocm")]
+    fn rocm_fwd(&self, x: &Tensor) -> Result<Option<Tensor>> {
+        // Mirror of cuda_fwd: native ROCm activation kernel
+        // (csrc/activation.cu). All five kinds (silu/sigmoid/gelu/tanh/relu)
+        // map to tags 0..=4 in the shared kernel.
+        validate(x, self.kind)?;
+        let dtype = x.dtype();
+        if !x.is_contiguous() {
+            return Ok(None);
+        }
+        if !matches!(dtype, DType::F32 | DType::BF16 | DType::F16) {
+            return Ok(None);
+        }
+        let kind_tag: i32 = match self.kind {
+            UnaryKind::Silu => 0,
+            UnaryKind::Sigmoid => 1,
+            UnaryKind::Gelu => 2,
+            UnaryKind::Tanh => 3,
+            UnaryKind::Relu => 4,
+        };
+        Ok(Some(crate::rocm_activation_unary(x, kind_tag)?))
+    }
+
     #[cfg(feature = "metal")]
     fn metal_fwd(&self, x: &Tensor) -> Result<Option<Tensor>> {
         // Gate on the same preconditions as cuda_fwd so future MSL

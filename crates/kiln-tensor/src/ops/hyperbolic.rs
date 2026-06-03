@@ -48,7 +48,7 @@ impl HyperKind {
 
     /// CUDA kernel kind tag matching `KIND_SINH`/`KIND_COSH`/
     /// `KIND_ATANH` in `csrc/activation.cu` (#1082).
-    #[cfg(feature = "cuda")]
+    #[cfg(any(feature = "cuda", feature = "rocm"))]
     const fn cuda_kind_tag(self) -> i32 {
         match self {
             HyperKind::Sinh => 10,
@@ -88,6 +88,20 @@ impl DeviceOp1 for HyperOp {
             return Ok(None);
         }
         Ok(Some(crate::cuda_activation_unary(x, self.kind.cuda_kind_tag())?))
+    }
+
+    #[cfg(feature = "rocm")]
+    fn rocm_fwd(&self, x: &Tensor) -> Result<Option<Tensor>> {
+        // Mirror of cuda_fwd: native ROCm activation kernel
+        // (csrc/activation.cu). sinh/cosh/atanh map to tags 10/11/21.
+        validate(x, self.kind.name())?;
+        if !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16) {
+            return Ok(None);
+        }
+        if !x.is_contiguous() {
+            return Ok(None);
+        }
+        Ok(Some(crate::rocm_activation_unary(x, self.kind.cuda_kind_tag())?))
     }
 
     #[cfg(feature = "metal")]

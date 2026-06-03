@@ -171,6 +171,39 @@ impl DeviceOp2 for MaskedFillOp {
         Ok(Some(out))
     }
 
+    #[cfg(feature = "rocm")]
+    fn rocm_fwd(&self, x: &Tensor, mask: &Tensor) -> Result<Option<Tensor>> {
+        // Mirrors `cuda_fwd`: hard-error on shape mismatch / non-U8 mask
+        // (those also fail CPU dispatch); soft-fall through on
+        // unsupported value dtypes / non-contiguous / non-ROCm-resident
+        // storage so the dispatcher routes through the host fallback.
+        if x.shape() != mask.shape() {
+            bail!(
+                "MaskedFillOp: shape mismatch {:?} vs mask {:?}",
+                x.shape(),
+                mask.shape()
+            );
+        }
+        if mask.dtype() != DType::U8 {
+            bail!(
+                "MaskedFillOp: mask dtype must be U8, got {}",
+                mask.dtype()
+            );
+        }
+        if !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16) {
+            return Ok(None);
+        }
+        if !x.is_contiguous() || !mask.is_contiguous() {
+            return Ok(None);
+        }
+        if !matches!(x.device(), crate::Device::Rocm(_))
+            || !matches!(mask.device(), crate::Device::Rocm(_))
+        {
+            return Ok(None);
+        }
+        Ok(Some(crate::rocm_masked_fill(x, mask, self.fill_value)?))
+    }
+
     #[cfg(feature = "vulkan")]
     fn vulkan_fwd(&self, x: &Tensor, mask: &Tensor) -> Result<Option<Tensor>> {
         // Same precondition gates as cuda_fwd. Hard-error on shape

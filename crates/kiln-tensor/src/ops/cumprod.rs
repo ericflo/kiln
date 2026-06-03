@@ -34,13 +34,13 @@ pub fn cumprod(x: &Tensor, axis: usize) -> Result<Tensor> {
         return crate::cuda_cumprod_axis(x, axis);
     }
 
-    // ROCm: correctness-first host round-trip (deferred R.5b native scan).
+    // ROCm fast path: native scan kernel (`rocm_cumprod_axis` →
+    // `csrc/scan_axis.cu` with kind=1). F32 accumulation, matches the CPU
+    // reference. Last-axis only; validators above require contiguous
+    // F32/BF16/F16 input. (R.5b)
     #[cfg(feature = "rocm")]
     if matches!(x.device(), crate::Device::Rocm(_)) {
-        let dev = x.device();
-        let host = crate::rocm_to_host_copy(x)?;
-        let out_host = cumprod(&host, axis)?;
-        return out_host.to_device(dev);
+        return crate::rocm_cumprod_axis(x, axis);
     }
 
     let dtype = x.dtype();

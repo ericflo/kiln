@@ -239,6 +239,21 @@ pub fn concat(inputs: &[&Tensor], axis: usize) -> Result<Tensor> {
         }
     }
 
+    // ROCm fast path: if all inputs are ROCm-backed (and within the substrate's
+    // MAX_INPUTS=32), route through the native `concat.cu` kernel (Phase R.5)
+    // instead of the non-CPU host staging fallback below. Mixed-device or >32
+    // batches still fall through to the host path. Mirrors the CUDA fast path.
+    #[cfg(feature = "rocm")]
+    {
+        let all_rocm = inputs.len() <= 32
+            && inputs
+                .iter()
+                .all(|t| matches!(t.device(), crate::Device::Rocm(_)));
+        if all_rocm {
+            return crate::rocm_concat(inputs, axis);
+        }
+    }
+
     // Non-CPU host fallback (Metal/Vulkan, and any backend without a native
     // concat kernel), robust to MIXED-device inputs: if ANY input is non-CPU,
     // stage every input on the host, concat there, then move the result to the

@@ -39,14 +39,12 @@ pub fn diagonal(t: &Tensor) -> Result<Tensor> {
         }
     }
 
-    // ROCm: correctness-first host round-trip. Stage to host, run the CPU
-    // diagonal extract below, move the rank-1 result back to the input device.
+    // ROCm fast path: square rank-2, contiguous, F32/BF16/F16 (all validated
+    // above). Routes through the native `diag.cu` extract kernel (Phase R.5) —
+    // no host round-trip.
     #[cfg(feature = "rocm")]
     if matches!(t.device(), crate::Device::Rocm(_)) {
-        let dev = t.device();
-        let host = crate::rocm_to_host_copy(t)?;
-        let out_host = diagonal(&host)?;
-        return out_host.to_device(dev);
+        return crate::rocm_diagonal_extract(t);
     }
 
     let dtype = t.dtype();
@@ -88,14 +86,12 @@ pub fn diag(v: &Tensor) -> Result<Tensor> {
         }
     }
 
-    // ROCm: correctness-first host round-trip. Stage to host, run the CPU
-    // diag-build below, move the [n, n] result back to the input device.
+    // ROCm fast path: rank-1, contiguous, F32/BF16/F16 (all validated above).
+    // Routes through the native `diag.cu` build kernel (Phase R.5) — no host
+    // round-trip.
     #[cfg(feature = "rocm")]
     if matches!(v.device(), crate::Device::Rocm(_)) {
-        let dev = v.device();
-        let host = crate::rocm_to_host_copy(v)?;
-        let out_host = diag(&host)?;
-        return out_host.to_device(dev);
+        return crate::rocm_diag_build(v);
     }
 
     let dtype = v.dtype();

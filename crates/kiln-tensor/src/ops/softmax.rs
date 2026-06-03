@@ -119,6 +119,22 @@ impl DeviceOp1 for SoftmaxLastDimOp {
         Ok(Some(crate::cuda_softmax_last_axis(x)?))
     }
 
+    #[cfg(feature = "rocm")]
+    fn rocm_fwd(&self, x: &Tensor) -> Result<Option<Tensor>> {
+        // Mirrors `cuda_fwd`: contiguous F32/BF16/F16 rows route through
+        // the native ROCm softmax kernel (wave32/wave64 parity-validated).
+        if !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16) {
+            return Ok(None);
+        }
+        if x.rank() == 0 {
+            return Ok(None);
+        }
+        if !x.is_contiguous() {
+            return Ok(None);
+        }
+        Ok(Some(crate::rocm_softmax_last_axis(x)?))
+    }
+
     #[cfg(feature = "metal")]
     fn metal_fwd(&self, x: &Tensor) -> Result<Option<Tensor>> {
         // Gate on the same preconditions as the CUDA path so future MSL

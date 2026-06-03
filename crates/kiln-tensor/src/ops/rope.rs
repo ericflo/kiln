@@ -146,6 +146,29 @@ impl DeviceOp3 for RopeOp {
         Ok(Some(crate::cuda_rope(x, cos, sin, self.rotary_dim)?))
     }
 
+    #[cfg(feature = "rocm")]
+    fn rocm_fwd(&self, x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Option<Tensor>> {
+        // Mirrors `cuda_fwd`: validate up front, then route contiguous
+        // F32/BF16/F16 inputs through the native ROCm RoPE kernel.
+        validate(x, cos, sin, self.rotary_dim)?;
+        if !x.is_contiguous() || !cos.is_contiguous() || !sin.is_contiguous() {
+            return Ok(None);
+        }
+        if !matches!(
+            x.dtype(),
+            crate::DType::F32 | crate::DType::BF16 | crate::DType::F16
+        ) {
+            return Ok(None);
+        }
+        if !matches!(
+            cos.dtype(),
+            crate::DType::F32 | crate::DType::BF16 | crate::DType::F16
+        ) {
+            return Ok(None);
+        }
+        Ok(Some(crate::rocm_rope(x, cos, sin, self.rotary_dim)?))
+    }
+
     #[cfg(feature = "metal")]
     fn metal_fwd(&self, x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Option<Tensor>> {
         // Gate on the same preconditions as cuda_fwd so future MSL

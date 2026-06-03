@@ -28,6 +28,12 @@ const KIND_CLAMP: i32 = 0;
 #[cfg(feature = "cuda")]
 const KIND_POW: i32 = 1;
 
+/// Kind tag for the ROCm kernel (same `csrc/clamp_pow.cu`, shared C ABI).
+#[cfg(feature = "rocm")]
+const ROCM_KIND_CLAMP: i32 = 0;
+#[cfg(feature = "rocm")]
+const ROCM_KIND_POW: i32 = 1;
+
 pub fn clamp(x: &Tensor, lo: f32, hi: f32) -> Result<Tensor> {
     if lo > hi {
         bail!("clamp: lo ({lo}) > hi ({hi})");
@@ -39,6 +45,17 @@ pub fn clamp(x: &Tensor, lo: f32, hi: f32) -> Result<Tensor> {
             && x.is_contiguous()
         {
             return crate::cuda_clamp_pow(x, KIND_CLAMP, lo, hi);
+        }
+    }
+    // ROCm fast path: native `clamp_pow.cu` kernel (Phase R.5) for contiguous
+    // F32/BF16/F16 ROCm inputs — no host round-trip.
+    #[cfg(feature = "rocm")]
+    {
+        if matches!(x.device(), crate::Device::Rocm(_))
+            && matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16)
+            && x.is_contiguous()
+        {
+            return crate::rocm_clamp_pow(x, ROCM_KIND_CLAMP, lo, hi);
         }
     }
     apply_unary(x, |v| v.clamp(lo, hi), "clamp")
@@ -53,6 +70,17 @@ pub fn pow(x: &Tensor, p: f32) -> Result<Tensor> {
         {
             // `b` is ignored by the POW kind; pass 0.0 for clarity.
             return crate::cuda_clamp_pow(x, KIND_POW, p, 0.0);
+        }
+    }
+    // ROCm fast path: native `clamp_pow.cu` kernel (Phase R.5) for contiguous
+    // F32/BF16/F16 ROCm inputs — no host round-trip. `b` is ignored by POW.
+    #[cfg(feature = "rocm")]
+    {
+        if matches!(x.device(), crate::Device::Rocm(_))
+            && matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16)
+            && x.is_contiguous()
+        {
+            return crate::rocm_clamp_pow(x, ROCM_KIND_POW, p, 0.0);
         }
     }
     apply_unary(x, |v| v.powf(p), "pow")

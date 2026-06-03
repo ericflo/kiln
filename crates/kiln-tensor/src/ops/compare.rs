@@ -100,9 +100,24 @@ fn apply(kind: CmpKind, a: &Tensor, b: &Tensor) -> Result<Tensor> {
         }
     }
 
-    // ROCm: correctness-first host round-trip (compare.cu is a deferred R.5b
-    // native kernel). Stage both operands to host, run the CPU compare below,
-    // move the U8 mask back to the input device.
+    // ROCm fast path: both inputs on the same ROCm device, contiguous, and
+    // F32/BF16/F16 (validated above). Routes through the native `compare.cu`
+    // kernel (Phase R.5) and returns a U8 mask — no host round-trip.
+    #[cfg(feature = "rocm")]
+    {
+        if matches!(a.device(), crate::Device::Rocm(_))
+            && matches!(b.device(), crate::Device::Rocm(_))
+            && a.device() == b.device()
+            && a.is_contiguous()
+            && b.is_contiguous()
+        {
+            return crate::rocm_compare(a, b, kind.as_i32());
+        }
+    }
+
+    // ROCm correctness fallback: any remaining ROCm operand (mixed-device or
+    // non-contiguous, which the native kernel doesn't accept). Stage both
+    // operands to host, run the CPU compare below, move the U8 mask back.
     #[cfg(feature = "rocm")]
     if matches!(a.device(), crate::Device::Rocm(_)) || matches!(b.device(), crate::Device::Rocm(_))
     {

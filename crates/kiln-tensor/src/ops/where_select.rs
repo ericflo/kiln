@@ -56,9 +56,28 @@ pub fn where_select(mask: &Tensor, t: &Tensor, f: &Tensor) -> Result<Tensor> {
         }
     }
 
-    // ROCm: correctness-first host round-trip (where_select.cu is a deferred
-    // R.5b native kernel). Stage all three operands to host, run the CPU
-    // select below, move the result back to the input device.
+    // ROCm fast path: all three inputs on the same ROCm device, contiguous
+    // (enforced by `validate`), and t/f dtype is F32/BF16/F16. Routes through
+    // the native `where_select.cu` kernel (Phase R.5) — no host round-trip.
+    #[cfg(feature = "rocm")]
+    {
+        if matches!(mask.device(), crate::Device::Rocm(_))
+            && matches!(t.device(), crate::Device::Rocm(_))
+            && matches!(f.device(), crate::Device::Rocm(_))
+            && mask.device() == t.device()
+            && t.device() == f.device()
+            && mask.is_contiguous()
+            && t.is_contiguous()
+            && f.is_contiguous()
+            && matches!(t.dtype(), DType::F32 | DType::BF16 | DType::F16)
+        {
+            return crate::rocm_where_select(mask, t, f);
+        }
+    }
+
+    // ROCm correctness fallback: any remaining ROCm operand (mixed-device,
+    // which the native kernel doesn't accept). Stage all three operands to
+    // host, run the CPU select below, move the result back to the input device.
     #[cfg(feature = "rocm")]
     if matches!(mask.device(), crate::Device::Rocm(_))
         || matches!(t.device(), crate::Device::Rocm(_))

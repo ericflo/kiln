@@ -56,7 +56,7 @@ impl TrigKind {
     /// (candle covers only sin=7 and cos=8 today; the other four —
     /// tan, asin, acos, atan — have no candle `UnaryOp` and fall
     /// through to CPU until matching Metal kernels land).
-    #[cfg(any(feature = "cuda", feature = "metal"))]
+    #[cfg(any(feature = "cuda", feature = "metal", feature = "rocm"))]
     fn cuda_kind_tag(self) -> Option<i32> {
         match self {
             TrigKind::Sin => Some(7),
@@ -104,6 +104,24 @@ impl DeviceOp1 for TrigOp {
         }
         match self.kind.cuda_kind_tag() {
             Some(tag) => Ok(Some(crate::cuda_activation_unary(x, tag)?)),
+            None => Ok(None),
+        }
+    }
+
+    #[cfg(feature = "rocm")]
+    fn rocm_fwd(&self, x: &Tensor) -> Result<Option<Tensor>> {
+        // Mirror of cuda_fwd: native ROCm activation kernel
+        // (csrc/activation.cu). sin/cos/tan map to tags 7/8/9 and
+        // asin/acos/atan to 18/19/20.
+        validate(x, self.kind.name())?;
+        if !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16) {
+            return Ok(None);
+        }
+        if !x.is_contiguous() {
+            return Ok(None);
+        }
+        match self.kind.cuda_kind_tag() {
+            Some(tag) => Ok(Some(crate::rocm_activation_unary(x, tag)?)),
             None => Ok(None),
         }
     }

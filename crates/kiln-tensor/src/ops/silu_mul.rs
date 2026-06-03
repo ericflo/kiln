@@ -154,6 +154,38 @@ impl DeviceOp2 for MulSigmoidGateOp {
         Ok(Some(out))
     }
 
+    #[cfg(feature = "rocm")]
+    fn rocm_fwd(&self, gate: &Tensor, up: &Tensor) -> Result<Option<Tensor>> {
+        // Mirror of cuda_fwd: compose native ROCm substrate ops.
+        if gate.shape() != up.shape() {
+            bail!(
+                "MulSigmoidGateOp: shape mismatch {:?} vs {:?}",
+                gate.shape(),
+                up.shape()
+            );
+        }
+        if gate.dtype() != up.dtype() {
+            bail!(
+                "MulSigmoidGateOp: dtype mismatch {} vs {}",
+                gate.dtype(),
+                up.dtype()
+            );
+        }
+        if !matches!(gate.dtype(), DType::F32 | DType::BF16 | DType::F16) {
+            return Ok(None);
+        }
+        if !gate.is_contiguous() || !up.is_contiguous() {
+            return Ok(None);
+        }
+
+        // Compose substrate ops:
+        //   silu_gate = silu(gate)   via rocm_activation_unary(kind=0)
+        //   out       = silu_gate * up via rocm_elementwise_binary(kind=2)
+        let silu_gate = crate::rocm_activation_unary(gate, 0)?;
+        let out = crate::rocm_elementwise_binary(&silu_gate, up, 2)?;
+        Ok(Some(out))
+    }
+
     fn bwd(&self) -> Option<Box<dyn BackwardOp>> {
         None
     }
