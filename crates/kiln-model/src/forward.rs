@@ -3010,6 +3010,24 @@ fn cuda_softmax_last_dim(x: &Tensor) -> Result<Tensor> {
             return Ok(out);
         }
     }
+    // ROCm: route through the native `rocm_softmax_last_axis` kernel (on-device,
+    // device_ptr-based) instead of the `max_keepdim`-composite below. The
+    // composite's `max_keepdim` -> `max_axis` has no `rocm_fwd`, so it host-falls
+    // -back (`to_device(Cpu)` -> `rocm_to_host_copy` -> `RocmStorage::slice()`),
+    // which is both a per-token host round-trip on the FP8 eager-attention decode
+    // path AND a hard panic under HIP-graph capture (slice() on a Borrowed
+    // freeze-pointer arena buffer). `!track_op()` keeps the training tape on the
+    // differentiable composite, matching the CUDA guard above.
+    #[cfg(feature = "rocm")]
+    if matches!(x.device(), Device::Rocm(_))
+        && matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16)
+        && x.is_contiguous()
+        && !x.track_op()
+    {
+        if let Ok(out) = kiln_tensor::rocm_softmax_last_axis(x) {
+            return Ok(out);
+        }
+    }
     // Phase 7 (#1082): when `KILN_USE_KT_API_MAX_LAST_DIM=1` (or
     // `KILN_USE_KT_API_ALL=1`) is set AND `x` is a contiguous CUDA
     // tensor of {F32, BF16, F16}, route the
@@ -20695,7 +20713,14 @@ fn gqa_attention_paged_with_rope_tables(
         && {
             #[cfg(feature = "cuda")]
             { !try_kt_paged_kv_is_fp8(paged_cache.is_fp8(), kt_paged_cache) }
-            #[cfg(not(feature = "cuda"))]
+            // ROCm: the rocm SDPA paged-decode dequantizes U8 (FP8 E4M3FN) pool
+            // slots to BF16 right after the gather, so FP8 caches take the fused
+            // fast path here too — which is bucketed (max_seqlen_k) and therefore
+            // HIP-graph-capturable, unlike the eager fallback's seq-len-dependent
+            // broadcast attention. Other non-CUDA backends still exclude FP8.
+            #[cfg(all(feature = "rocm", not(feature = "cuda")))]
+            { let _ = paged_cache.is_fp8(); true }
+            #[cfg(not(any(feature = "cuda", feature = "rocm")))]
             { !paged_cache.is_fp8() }
         }
         && (num_heads / num_kv_heads) > 1

@@ -365,15 +365,14 @@ impl PagedKvCacheKt {
     /// reads the destination slot from the `slot` device tensor (the
     /// CUDA-graph replay-safe contract).
     ///
-    /// The FP8 path (#1082 candle-drop) reads the single `[1]` U32
-    /// `slot` device tensor back to a host index (one D2H of 4 bytes),
-    /// quantizes the BF16 K/V into U8 via `cuda_fp8_quantize_direct`,
-    /// and `slice_set`s the U8 rows into the U8 pool at that slot.
-    /// Scale = 1.0 ("direct" mode) — matches the candle FP8 KV write
-    /// story (per-slot scaling is not practical for a shared pool).
-    /// This is NOT capturable under a CUDA graph (the D2H read forces a
-    /// sync), so FP8 caches must run with graph capture disabled — the
-    /// same constraint the candle path imposed by declining FP8 here.
+    /// The FP8 path quantizes the BF16 K/V into U8 (E4M3FN, scale = 1.0
+    /// "direct" — per-slot scaling is not practical for a shared pool) and
+    /// writes the rows into the U8 pool at `slot`. CUDA reads the `[1]` U32
+    /// `slot` host-side (a 4-byte D2H) and `slice_set`s — which forces a sync,
+    /// so FP8 + CUDA-graph capture is unsupported there. ROCm instead consumes
+    /// the slot ON-DEVICE and scatters via `rocm_index_copy_dim0` (device_ptr,
+    /// never `slice()`), so the FP8 graph-slot write records into a captured HIP
+    /// decode graph — FP8 caches ARE capturable on ROCm (see the `rocm` arm).
     #[cfg(any(feature = "cuda", feature = "rocm"))]
     pub fn write_token_major_native_graph_slot(
         &self,
@@ -392,42 +391,89 @@ impl PagedKvCacheKt {
         let (k_pool, v_pool) = &self.layers[layer_idx];
 
         if self.fp8 {
-            // FP8 graph-slot quantized write is CUDA-only (cuda_fp8_quantize_direct).
-            // On other backends signal "not done" so the caller falls back to the
-            // non-graph KV write path.
-            #[cfg(not(feature = "cuda"))]
-            return Ok(false);
+            // CUDA: read the device slot index host-side (one 4-byte D2H), then
+            // quantize + slice_set into the U8 pool. The host slot read forces a
+            // sync, so on CUDA this path is NOT HIP/CUDA-graph-recordable (FP8 +
+            // capture is unsupported there).
             #[cfg(feature = "cuda")]
             {
-            // Read the device slot index host-side (one 4-byte D2H), then
-            // quantize + slice_set into the U8 pool. Squeeze the seq_len=1
-            // dim so the quantized rows are [num_kv_heads, head_dim]-shaped
-            // (rank matches the pool rows for slice_set's inner-dim check).
-            let slot_idx = slot
-                .to_scalar::<u32>()
-                .map_err(|e| anyhow::anyhow!("kt pkv fp8 graph_slot: read slot: {e}"))?
-                as usize;
-            let k_sq = k
-                .squeeze(1)
-                .map_err(|e| anyhow::anyhow!("kt pkv fp8 graph_slot: squeeze k: {e}"))?
-                .contiguous()
-                .map_err(|e| anyhow::anyhow!("kt pkv fp8 graph_slot: contiguous k: {e}"))?;
-            let v_sq = v
-                .squeeze(1)
-                .map_err(|e| anyhow::anyhow!("kt pkv fp8 graph_slot: squeeze v: {e}"))?
-                .contiguous()
-                .map_err(|e| anyhow::anyhow!("kt pkv fp8 graph_slot: contiguous v: {e}"))?;
-            let k_q = fp8_quantize_direct_dev(&k_sq)
-                .map_err(|e| anyhow::anyhow!("kt pkv fp8 graph_slot: quantize k: {e}"))?;
-            let v_q = fp8_quantize_direct_dev(&v_sq)
-                .map_err(|e| anyhow::anyhow!("kt pkv fp8 graph_slot: quantize v: {e}"))?;
-            k_pool
-                .slice_set(&k_q, 0, slot_idx)
-                .map_err(|e| anyhow::anyhow!("kt pkv fp8 graph_slot: slice_set k: {e}"))?;
-            v_pool
-                .slice_set(&v_q, 0, slot_idx)
-                .map_err(|e| anyhow::anyhow!("kt pkv fp8 graph_slot: slice_set v: {e}"))?;
-            return Ok(true);
+                let slot_idx = slot
+                    .to_scalar::<u32>()
+                    .map_err(|e| anyhow::anyhow!("kt pkv fp8 graph_slot: read slot: {e}"))?
+                    as usize;
+                let k_sq = k
+                    .squeeze(1)
+                    .map_err(|e| anyhow::anyhow!("kt pkv fp8 graph_slot: squeeze k: {e}"))?
+                    .contiguous()
+                    .map_err(|e| anyhow::anyhow!("kt pkv fp8 graph_slot: contiguous k: {e}"))?;
+                let v_sq = v
+                    .squeeze(1)
+                    .map_err(|e| anyhow::anyhow!("kt pkv fp8 graph_slot: squeeze v: {e}"))?
+                    .contiguous()
+                    .map_err(|e| anyhow::anyhow!("kt pkv fp8 graph_slot: contiguous v: {e}"))?;
+                let k_q = fp8_quantize_direct_dev(&k_sq)
+                    .map_err(|e| anyhow::anyhow!("kt pkv fp8 graph_slot: quantize k: {e}"))?;
+                let v_q = fp8_quantize_direct_dev(&v_sq)
+                    .map_err(|e| anyhow::anyhow!("kt pkv fp8 graph_slot: quantize v: {e}"))?;
+                k_pool
+                    .slice_set(&k_q, 0, slot_idx)
+                    .map_err(|e| anyhow::anyhow!("kt pkv fp8 graph_slot: slice_set k: {e}"))?;
+                v_pool
+                    .slice_set(&v_q, 0, slot_idx)
+                    .map_err(|e| anyhow::anyhow!("kt pkv fp8 graph_slot: slice_set v: {e}"))?;
+                return Ok(true);
+            }
+            // ROCm: CAPTURE-SAFE FP8 graph-slot write. Unlike CUDA, the slot index
+            // is consumed ON-DEVICE (no host read), and the quantized U8 rows are
+            // scattered into the pool via `rocm_index_copy_dim0` (writes through
+            // device_ptr_raw, never `slice()`) — so the whole write records into a
+            // captured HIP decode graph and is safe on the Borrowed freeze-pointer
+            // arena buffers that `rocm_fp8_quantize_direct` mints under capture.
+            // This is the seam that makes FP8 + HIP graph capture work on ROCm
+            // where it can't on CUDA. Mirrors the BF16 device-slot scatter.
+            #[cfg(all(feature = "rocm", not(feature = "cuda")))]
+            {
+                let k_sq = k
+                    .squeeze(1)
+                    .map_err(|e| anyhow::anyhow!("kt pkv fp8 graph_slot: squeeze k: {e}"))?
+                    .contiguous()
+                    .map_err(|e| anyhow::anyhow!("kt pkv fp8 graph_slot: contiguous k: {e}"))?;
+                let v_sq = v
+                    .squeeze(1)
+                    .map_err(|e| anyhow::anyhow!("kt pkv fp8 graph_slot: squeeze v: {e}"))?
+                    .contiguous()
+                    .map_err(|e| anyhow::anyhow!("kt pkv fp8 graph_slot: contiguous v: {e}"))?;
+                let k_q = fp8_quantize_direct_dev(&k_sq)
+                    .map_err(|e| anyhow::anyhow!("kt pkv fp8 graph_slot: quantize k: {e}"))?;
+                let v_q = fp8_quantize_direct_dev(&v_sq)
+                    .map_err(|e| anyhow::anyhow!("kt pkv fp8 graph_slot: quantize v: {e}"))?;
+                // Flatten pool -> [n_rows, row_elems] and each quantized U8 row ->
+                // [1, row_elems], then `pool[*slot] = row` with the DEVICE slot.
+                let row_elems = k_q.element_count();
+                let kp_rows = k_pool.element_count() / row_elems;
+                let vp_rows = v_pool.element_count() / row_elems;
+                let k_pool2 = k_pool
+                    .reshape(vec![kp_rows, row_elems])
+                    .map_err(|e| anyhow::anyhow!("kt pkv fp8 graph_slot: reshape k_pool: {e}"))?;
+                let v_pool2 = v_pool
+                    .reshape(vec![vp_rows, row_elems])
+                    .map_err(|e| anyhow::anyhow!("kt pkv fp8 graph_slot: reshape v_pool: {e}"))?;
+                let k_row = k_q
+                    .reshape(vec![1, row_elems])
+                    .map_err(|e| anyhow::anyhow!("kt pkv fp8 graph_slot: reshape k_q: {e}"))?;
+                let v_row = v_q
+                    .reshape(vec![1, row_elems])
+                    .map_err(|e| anyhow::anyhow!("kt pkv fp8 graph_slot: reshape v_q: {e}"))?;
+                let slot1 = slot
+                    .contiguous()
+                    .map_err(|e| anyhow::anyhow!("kt pkv fp8 graph_slot: contiguous slot: {e}"))?
+                    .reshape(vec![1])
+                    .map_err(|e| anyhow::anyhow!("kt pkv fp8 graph_slot: reshape slot: {e}"))?;
+                kiln_tensor::rocm_index_copy_dim0(&k_pool2, &slot1, &k_row)
+                    .map_err(|e| anyhow::anyhow!("kt pkv fp8 graph_slot: scatter k: {e}"))?;
+                kiln_tensor::rocm_index_copy_dim0(&v_pool2, &slot1, &v_row)
+                    .map_err(|e| anyhow::anyhow!("kt pkv fp8 graph_slot: scatter v: {e}"))?;
+                return Ok(true);
             }
         }
 

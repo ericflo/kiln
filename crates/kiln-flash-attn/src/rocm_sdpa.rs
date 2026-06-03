@@ -309,6 +309,22 @@ fn paged_gather(
     map_kt(gathered.reshape(vec![b, seqlen_k, hk, d]))
 }
 
+/// If the gathered KV is U8 (FP8 E4M3FN pool slots), dequantize to BF16 on-device
+/// (scale=1.0 "direct" — the paged KV cache uses unscaled direct quantization).
+/// This lets an FP8 cache take the bucketed, capture-safe SDPA fast path instead
+/// of the eager attention (whose seq-len-dependent broadcast indices are both
+/// host-bound and not HIP-graph-capturable). No-op for BF16 pools. `rocm_index_
+/// select_dim0` is dtype-agnostic, so the gather above already produced the U8
+/// rows; this just decodes them in place of a fresh BF16 buffer.
+fn dequant_gathered_if_fp8(g: KtTensor) -> Result<KtTensor, FlashAttnError> {
+    if g.dtype() == KtDType::U8 {
+        let c = rocm_contig(&g)?;
+        map_kt(kiln_tensor::rocm_fp8_dequantize_direct(&c, KtDType::BF16))
+    } else {
+        Ok(g)
+    }
+}
+
 /// ROCm composite of `flash_attn_paged_decode_kt`. `q` is `[b, 1, h, d]`; K/V
 /// are gathered from `k_pool`/`v_pool` `[total_slots, hk, d]` via `block_table`.
 /// Returns `out[b, 1, h, d]` BF16 on `Device::Rocm`.
@@ -342,6 +358,9 @@ pub fn flash_attn_paged_decode_rocm(
     let v_gathered = paged_gather(
         v_pool, block_table, b, seqlen_k, max_blocks_per_seq, page_block_size, hk, d, device,
     )?; // [b, seqlen_k, hk, d]
+    // FP8 pools gather as U8 (E4M3FN); decode to BF16 before the flash math.
+    let k_gathered = dequant_gathered_if_fp8(k_gathered)?;
+    let v_gathered = dequant_gathered_if_fp8(v_gathered)?;
 
     let (out, _lse) = sdpa_forward(
         q, &k_gathered, &v_gathered, b, sq, seqlen_k, h, hk, d, softmax_scale, causal,
@@ -378,6 +397,9 @@ pub fn flash_attn_paged_decode_dyn_seqlen_rocm(
     let v_gathered = paged_gather(
         v_pool, block_table, b, max_seqlen_k, max_blocks_per_seq, page_block_size, hk, d, device,
     )?;
+    // FP8 pools gather as U8 (E4M3FN); decode to BF16 before the flash math.
+    let k_gathered = dequant_gathered_if_fp8(k_gathered)?;
+    let v_gathered = dequant_gathered_if_fp8(v_gathered)?;
 
     // Run SDPA (sq=1, non-causal core); apply the per-batch tail mask by zeroing
     // the K contribution beyond seqused_k. We fold the tail mask into the scores
