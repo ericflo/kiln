@@ -183,16 +183,22 @@ fn cuda_direct_paged_decode_disabled() -> bool {
     *DISABLED.get_or_init(|| std::env::var("KILN_DISABLE_CUDA_DIRECT_PAGED_DECODE").is_ok())
 }
 
-/// `KILN_ROCM_PAGED_DECODE=1` opts ROCm into device-resident KV pools + the
-/// native sq=1 O(n) paged-decode path (flat ~14 tok/s vs the default contiguous
-/// O(n^2) prefill recompute). DEFAULT OFF: the O(n) path is perf-validated but
-/// has a KV-cache correctness bug (decode degrades to garbage after ~12 tokens)
-/// still under debug, so production stays on the correct contiguous path until
-/// that lands. Read by both `use_direct_paged_decode` here AND the KV-pool
-/// device-routing in `PagedKvCacheKt::new` (they must agree).
+/// ROCm device-resident KV pools + the native sq=1 O(n) paged-decode path
+/// (correct + faster at every context length: ~13 tok/s @32, ~12 @128, ~11 @256
+/// vs the contiguous O(n^2) prefill recompute's 10.5 degrading to ~8). DEFAULT
+/// ON; set `KILN_ROCM_PAGED_DECODE=0` to fall back to the contiguous path. Read
+/// by both `use_direct_paged_decode` here AND the KV-pool device-routing in
+/// `PagedKvCacheKt::new` (they must agree).
 pub(crate) fn rocm_paged_decode_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("KILN_ROCM_PAGED_DECODE").is_ok())
+    *ENABLED.get_or_init(|| {
+        std::env::var("KILN_ROCM_PAGED_DECODE")
+            .map(|v| {
+                let v = v.trim().to_ascii_lowercase();
+                !(v == "0" || v == "false" || v == "no" || v == "off")
+            })
+            .unwrap_or(true)
+    })
 }
 
 #[cfg(feature = "cuda")]
@@ -18945,6 +18951,20 @@ fn try_flash_attn_paged_decode(
         q_len,
         stage_profile,
     )?;
+
+    // ROCm device-pool paged decode: order the per-layer async work before the
+    // downstream read. The async KV-write d2d + stream-ordered allocator let a
+    // later consumer race ahead of the writes, corrupting decode after a few
+    // tokens (the attention output itself is bit-exact — verified maxdiff=0 — so
+    // this is purely an ordering race, which a device sync resolves). One sync
+    // per full-attention layer; the GDN-heavy bulk of the model stays async.
+    // TODO(perf): replace with a scoped stream event once the racing streams are
+    // pinned, to avoid draining the whole device.
+    #[cfg(feature = "rocm")]
+    if let Device::Rocm(di) = q.device() {
+        kiln_tensor::rocm_synchronize_default_stream(di)
+            .map_err(|e| anyhow::anyhow!("rocm paged-decode order sync: {e:?}"))?;
+    }
 
     // attn_out is [batch, 1, num_heads, head_dim] bf16. Reshape to
     // [batch, 1, num_heads * head_dim] for the gate / o_proj path.

@@ -20,9 +20,6 @@
 
 #![cfg(feature = "rocm")]
 
-use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
-
 use half::bf16;
 use kiln_tensor::{DType as KtDType, Device as KtDevice, Tensor as KtTensor};
 
@@ -83,41 +80,21 @@ fn gqa_expand_heads(
     if hk == h {
         return rocm_contig(kv);
     }
-    // The GQA-expand index [0,0,..,1,1,..] depends only on (h, hk) — it is
-    // invariant across every decode step and layer. Cache the *device* tensor
-    // so the steady-state decode pays no H2D (was 2 uploads per attention layer,
-    // K + V). Keyed by (h, hk, device).
-    let idx_t = gqa_expand_index_cached(h, hk, device)?;
-    let src = rocm_contig(kv)?;
-    // index_select along the head axis (axis 2).
-    map_kt(kiln_tensor::rocm_index_select_axis_n(&src, 2, &idx_t))
-}
-
-/// Device-resident, cached GQA head-expand index `[0,0,..,1,1,..]` (each of the
-/// `hk` kv-heads repeated `h/hk` times). Built + uploaded once per (h, hk,
-/// device); reused thereafter with zero host touch.
-fn gqa_expand_index_cached(
-    h: usize,
-    hk: usize,
-    device: KtDevice,
-) -> Result<KtTensor, FlashAttnError> {
-    static CACHE: OnceLock<Mutex<HashMap<(usize, usize, usize), KtTensor>>> = OnceLock::new();
-    let dev_idx = dev_index(device)?;
-    let key = (h, hk, dev_idx);
-    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
-    if let Some(t) = cache.lock().unwrap().get(&key) {
-        return Ok(t.clone());
-    }
+    let _ = device;
+    // Expand [b, sk, hk, d] -> [b, sk, h, d] by repeating each kv-head `group`
+    // times, via unsqueeze+expand+reshape — IDENTICAL to the contiguous path's
+    // GQA expand in forward.rs::flash_attention_forward. (Was an index_select
+    // over a cached [0,0,1,1,..] index, which is the only thing unique to the
+    // paged path vs the working contiguous path — suspected as the decode
+    // garbage source.) out head `kv*group + g` maps to kv head `kv`.
+    let s = kv.shape();
+    let (bb, sk, dd) = (s[0], s[1], s[3]);
     let group = h / hk;
-    let mut idx: Vec<u32> = Vec::with_capacity(h);
-    for head in 0..hk {
-        for _ in 0..group {
-            idx.push(head as u32);
-        }
-    }
-    let idx_t = map_kt(KtTensor::from_vec_on(device, idx, vec![h]))?;
-    cache.lock().unwrap().insert(key, idx_t.clone());
-    Ok(idx_t)
+    let src = rocm_contig(kv)?; // [b, sk, hk, d]
+    let e = map_kt(src.unsqueeze(3))?; // [b, sk, hk, 1, d]
+    let e = map_kt(e.expand(vec![bb, sk, hk, group, dd]))?; // [b, sk, hk, group, d]
+    let e = rocm_contig(&e)?;
+    map_kt(e.reshape(vec![bb, sk, h, dd])) // [b, sk, h, d]
 }
 
 /// Build the additive-causal U8 mask `[b*h, sq, sk]` on host and upload to ROCm
@@ -347,7 +324,13 @@ pub fn flash_attn_paged_decode_rocm(
     causal: bool,
 ) -> Result<KtTensor, FlashAttnError> {
     let device = q.device();
-    let (b, h, d) = (q.shape()[0], q.shape()[2], q.shape()[3]);
+    // Read sq from the query (q is [b, sq, h, d]) — do NOT hardcode sq=1. With
+    // multi-token decode (MTP / speculative drafting, sq>1) hardcoding sq=1
+    // computed attention for only the first query row and left the rest garbage,
+    // which compounded into incoherent output after a few accepted tokens. The
+    // working prefill path (flash_attn_fwd_rocm) reads sq the same way; for sq>1
+    // sdpa_forward's causal mask masks each query to its own position.
+    let (b, sq, h, d) = (q.shape()[0], q.shape()[1], q.shape()[2], q.shape()[3]);
     let hk = k_pool.shape()[1];
     let max_blocks_per_seq = block_table.shape()[1];
 
@@ -360,9 +343,8 @@ pub fn flash_attn_paged_decode_rocm(
         v_pool, block_table, b, seqlen_k, max_blocks_per_seq, page_block_size, hk, d, device,
     )?; // [b, seqlen_k, hk, d]
 
-    // SDPA with sq = 1.
     let (out, _lse) = sdpa_forward(
-        q, &k_gathered, &v_gathered, b, 1, seqlen_k, h, hk, d, softmax_scale, causal,
+        q, &k_gathered, &v_gathered, b, sq, seqlen_k, h, hk, d, softmax_scale, causal,
     )?;
     Ok(out)
 }
