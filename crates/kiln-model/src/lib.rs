@@ -18,6 +18,7 @@ pub mod lora_loader;
 pub mod marlin_proj;
 pub mod mtp_debug;
 pub mod packed_weight_registry;
+pub mod rocm_graph;
 // (#1082 all-hardware) `paged_kv_cache_kt` compiles on every backend now: the
 // struct, metadata accessors, and `new`/`new_with_fp8` constructors are
 // available everywhere (CPU-resident pools on the Vulkan/CPU build), while the
