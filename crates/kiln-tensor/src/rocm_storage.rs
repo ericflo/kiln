@@ -430,12 +430,18 @@ pub fn rocm_synchronize_compute_stream(device_index: usize) -> Result<()> {
 ///
 /// `dst` must be ROCm-backed, contiguous, `start_offset == 0`, and own exactly
 /// `host.len()` elements whose element type `E` matches `dst`'s dtype byte
-/// width. The copy runs on the kt active stream — inside a
-/// [`crate::with_active_rocm_stream`] scope it lands on the capture/replay
-/// stream, otherwise the context default stream. A stream synchronize follows
-/// (mirroring the CUDA twin) so the write completes before a subsequent graph
-/// launch reads it; the replay path additionally syncs the default stream
-/// before launch, which is the actual cross-stream ordering guarantee.
+/// width. The copy runs on the kt active stream (the default stream on the
+/// replay path) and is issued WITHOUT a trailing synchronize — the per-token
+/// replay refreshes ~7 of these buffers, and a sync after each one dominated the
+/// replay cost (decode dropped to ~5 tok/s). Ordering is instead provided by the
+/// single `rocm_synchronize_default_stream` the replay path issues before the
+/// graph launch, which is the actual cross-stream guarantee.
+///
+/// Host-buffer safety: the staged `Vec<u8>` is pageable, and
+/// `hipMemcpyHtoDAsync` copies pageable host memory into a pinned staging buffer
+/// SYNCHRONOUSLY before returning (it cannot DMA pageable memory directly), so
+/// the local buffer is fully consumed by the time this function returns — only
+/// the device-side write remains queued. No dangling host read.
 #[cfg(feature = "rocm")]
 pub fn rocm_write_host_in_place<E: crate::Element>(
     dst: &crate::Tensor,
@@ -495,11 +501,8 @@ pub fn rocm_write_host_in_place<E: crate::Element>(
                 ))
             })?;
     }
-    stream.synchronize().map_err(|e| {
-        Error::Msg(format!(
-            "rocm_write_host_in_place: stream sync after write: {e:?}"
-        ))
-    })?;
+    // No trailing synchronize — see the doc comment. The replay path syncs the
+    // default stream once before the graph launch.
     Ok(())
 }
 
