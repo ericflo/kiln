@@ -1789,16 +1789,37 @@ impl AppState {
         // uninitialized — a one-time startup memset, not a correctness change
         // (paged writes overwrite slots before they are read).
         let allocate_cache = |n: usize| -> anyhow::Result<PagedKvCacheKt> {
-            PagedKvCacheKt::new_with_fp8(
-                model_config.num_full_attention_layers,
-                n,
-                block_size,
-                model_config.num_kv_heads,
-                model_config.head_dim,
-                kv_dtype,
-                device_kt,
-                fp8_enabled,
-            )
+            let attempt = || {
+                PagedKvCacheKt::new_with_fp8(
+                    model_config.num_full_attention_layers,
+                    n,
+                    block_size,
+                    model_config.num_kv_heads,
+                    model_config.head_dim,
+                    kv_dtype,
+                    device_kt,
+                    fp8_enabled,
+                )
+            };
+            match attempt() {
+                Ok(c) => Ok(c),
+                // OOM recovery (the "never OOM" path): before falling back to a
+                // smaller fraction, ask the governor to return pooled-but-unused
+                // VRAM to the OS and retry once at the SAME size — the alloc may
+                // have failed only because freed blocks were still pooled (or a
+                // coexisting job briefly spiked). Cheaper than shrinking the KV
+                // cache if the memory is genuinely reclaimable.
+                Err(first) if governor_backend != kiln_tensor::Backend::Cpu => {
+                    let freed = kiln_memory::MemoryGovernor::global().reclaim(u64::MAX);
+                    tracing::warn!(
+                        num_blocks = n,
+                        reclaimed_mb = freed / (1024 * 1024),
+                        "KV cache allocation failed; reclaimed pooled VRAM and retrying at same size"
+                    );
+                    attempt().map_err(|_| first)
+                }
+                Err(e) => Err(e),
+            }
         };
 
         // Determine num_blocks + paged cache:
