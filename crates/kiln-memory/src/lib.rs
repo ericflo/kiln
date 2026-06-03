@@ -21,7 +21,11 @@
 //! `vram` and land in this crate as they're implemented, so memory governance
 //! stays in one place rather than scattered across the server and model crates.
 
+pub mod governor;
 pub mod vram;
+
+pub use governor::{GovernorConfig, MemoryGovernor, MemoryPressure, MemorySource, OsProbe, Reservation};
+pub use vram::{current_free_bytes, current_memory_snapshot, MemorySnapshot};
 
 /// Process-wide lock serializing tests that mutate environment variables that
 /// the memory probes read (e.g. `KILN_GPU_MEMORY_GB`,
