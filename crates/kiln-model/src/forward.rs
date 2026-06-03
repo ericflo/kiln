@@ -18960,10 +18960,24 @@ fn try_flash_attn_paged_decode(
     // per full-attention layer; the GDN-heavy bulk of the model stays async.
     // TODO(perf): replace with a scoped stream event once the racing streams are
     // pinned, to avoid draining the whole device.
+    // The async KV-write d2d + stream-ordered allocator could let a downstream
+    // consumer race the writes, corrupting decode after a few tokens. The real
+    // fix is pinning the hipMallocAsync pool's release threshold to never-release
+    // (kiln-hip RocmContext::new) — freed blocks stay pooled instead of being
+    // handed back to the OS mid-flight. With that, NO per-layer sync is needed
+    // (validated: long gen, thinking on/off, concurrent batch all coherent), and
+    // the decode region is sync-free — required for HIP graph capture (R.9).
+    // Opt-in fallbacks if a future arch/runtime still races: KILN_ROCM_PD_SYNC=1
+    // (compute-stream sync) / KILN_ROCM_PD_DEVSYNC=1 (device-wide drain).
     #[cfg(feature = "rocm")]
     if let Device::Rocm(di) = q.device() {
-        kiln_tensor::rocm_synchronize_default_stream(di)
-            .map_err(|e| anyhow::anyhow!("rocm paged-decode order sync: {e:?}"))?;
+        if std::env::var("KILN_ROCM_PD_DEVSYNC").is_ok() {
+            kiln_tensor::rocm_synchronize_default_stream(di)
+                .map_err(|e| anyhow::anyhow!("rocm paged-decode order sync: {e:?}"))?;
+        } else if std::env::var("KILN_ROCM_PD_SYNC").is_ok() {
+            kiln_tensor::rocm_synchronize_compute_stream(di)
+                .map_err(|e| anyhow::anyhow!("rocm paged-decode order sync: {e:?}"))?;
+        }
     }
 
     // attn_out is [batch, 1, num_heads, head_dim] bf16. Reshape to

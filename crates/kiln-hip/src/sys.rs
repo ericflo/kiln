@@ -61,6 +61,13 @@ unsafe extern "C" {
     pub fn hipFree(ptr: *mut c_void) -> hipError_t;
     pub fn hipMallocAsync(ptr: *mut *mut c_void, size: usize, stream: hipStream_t) -> hipError_t;
     pub fn hipFreeAsync(ptr: *mut c_void, stream: hipStream_t) -> hipError_t;
+    // Stream-ordered memory-pool config. `hipMemPool_t` is an opaque pointer.
+    pub fn hipDeviceGetDefaultMemPool(pool: *mut *mut c_void, device: c_int) -> hipError_t;
+    pub fn hipMemPoolSetAttribute(
+        pool: *mut c_void,
+        attr: c_uint,
+        value: *mut c_void,
+    ) -> hipError_t;
     pub fn hipMemcpyHtoDAsync(
         dst: *mut c_void,
         src: *mut c_void,

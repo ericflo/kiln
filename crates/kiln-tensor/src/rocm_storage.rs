@@ -395,6 +395,17 @@ pub fn rocm_synchronize_default_stream(device_index: usize) -> Result<()> {
         .map_err(|e| Error::Msg(format!("rocm_synchronize_default_stream({device_index}): {e:?}")))
 }
 
+/// Block until all work on the ACTIVE compute stream completes
+/// (`hipStreamSynchronize`, not the device-wide `hipDeviceSynchronize`). Cheaper
+/// than [`rocm_synchronize_default_stream`] when other (e.g. hipBLASLt-internal)
+/// streams have pending work we don't need to wait on.
+pub fn rocm_synchronize_compute_stream(device_index: usize) -> Result<()> {
+    let ctx = primary_rocm_context(device_index)?;
+    crate::active_rocm_stream(&ctx)
+        .synchronize()
+        .map_err(|e| Error::Msg(format!("rocm_synchronize_compute_stream({device_index}): {e:?}")))
+}
+
 // ----------------------------------------------------------------------
 // ROCm-side Tensor::contiguous — the first storage→kernel op, proving the
 // hipcc FFI path end-to-end (contiguous.cu is compiled in build_rocm()).

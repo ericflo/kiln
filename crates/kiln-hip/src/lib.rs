@@ -142,6 +142,27 @@ impl RocmContext {
             });
         }
         check(unsafe { sys::hipSetDevice(ordinal) }, "hipSetDevice")?;
+        // Pin the stream-ordered allocator's pool to NEVER release freed memory
+        // back to the OS (hipMemPoolAttrReleaseThreshold = u64::MAX). The default
+        // threshold (0) makes hipMallocAsync hand freed pages back aggressively;
+        // under the decode alloc/free churn that races in-flight kernels and
+        // corrupts output (it's what the paged-decode order-sync was masking).
+        // Keeping freed blocks pooled removes the hazard AND avoids OS-roundtrip
+        // alloc latency. Best-effort: ignore if the runtime lacks mempools.
+        const HIP_MEM_POOL_ATTR_RELEASE_THRESHOLD: c_uint = 4;
+        let mut pool: *mut c_void = ptr::null_mut();
+        if unsafe { sys::hipDeviceGetDefaultMemPool(&mut pool, ordinal) } == sys::HIP_SUCCESS
+            && !pool.is_null()
+        {
+            let mut threshold: u64 = u64::MAX;
+            let _ = unsafe {
+                sys::hipMemPoolSetAttribute(
+                    pool,
+                    HIP_MEM_POOL_ATTR_RELEASE_THRESHOLD,
+                    &mut threshold as *mut u64 as *mut c_void,
+                )
+            };
+        }
         let default_stream = RocmStream::create(ordinal, None)?;
         Ok(Arc::new(RocmContext { ordinal, default_stream }))
     }
