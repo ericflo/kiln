@@ -17,6 +17,14 @@ pub struct BlockManager {
     block_size: usize,
     num_blocks: usize,
     free_blocks: VecDeque<u32>,
+    /// Blocks taken OUT of circulation by a dynamic shrink (the memory governor
+    /// lowering the inference KV footprint so a coexisting job / training run can
+    /// use that VRAM). They are neither free nor in-use — `set_target_usable`
+    /// restores them when memory pressure eases. Empty in steady state.
+    retired_blocks: VecDeque<u32>,
+    /// The dynamic logical capacity: at most this many blocks may be in
+    /// circulation (free + in-use). `<= num_blocks`; defaults to `num_blocks`.
+    target_usable: usize,
 }
 
 impl BlockManager {
@@ -26,6 +34,8 @@ impl BlockManager {
             block_size,
             num_blocks,
             free_blocks,
+            retired_blocks: VecDeque::new(),
+            target_usable: num_blocks,
         }
     }
 
@@ -42,7 +52,59 @@ impl BlockManager {
     }
 
     pub fn num_used(&self) -> usize {
-        self.num_blocks - self.free_blocks.len()
+        self.num_blocks - self.free_blocks.len() - self.retired_blocks.len()
+    }
+
+    /// Blocks currently retired (out of circulation) by a dynamic shrink.
+    pub fn num_retired(&self) -> usize {
+        self.retired_blocks.len()
+    }
+
+    /// Current dynamic capacity (free + in-use ceiling). `<= num_blocks`.
+    pub fn target_usable(&self) -> usize {
+        self.target_usable
+    }
+
+    /// Dynamically resize the inference KV footprint to `target` usable blocks
+    /// (clamped to `[blocks_in_use, num_blocks]` — we never retire a block a live
+    /// request still holds). SHRINK retires free blocks immediately; any excess
+    /// in-use blocks retire automatically as their request frees them. GROW
+    /// returns retired blocks to the free list. Returns the achieved
+    /// `target_usable` (may exceed `target` if in-use blocks block a full shrink).
+    ///
+    /// This is the actuator the memory governor drives: under pressure it shrinks
+    /// so kiln hands VRAM back; when pressure eases it grows again. Safe to call
+    /// concurrently with serving — in-flight requests are never disrupted.
+    pub fn set_target_usable(&mut self, target: usize) -> usize {
+        let in_use = self.num_used();
+        // Store the REQUESTED target (only bounded by num_blocks) so a shrink
+        // below the current in-use count keeps retiring blocks as requests drain,
+        // via free_one/free_all — rather than being lost to an up-front clamp.
+        let target = target.min(self.num_blocks);
+        self.target_usable = target;
+        let in_circulation = self.num_blocks - self.retired_blocks.len();
+        if in_circulation > target {
+            // Shrink: retire free blocks (in-use ones retire on free in free_one).
+            let to_retire = (in_circulation - target).min(self.free_blocks.len());
+            for _ in 0..to_retire {
+                if let Some(id) = self.free_blocks.pop_front() {
+                    self.retired_blocks.push_back(id);
+                }
+            }
+        } else if in_circulation < target {
+            // Grow: bring retired blocks back into circulation.
+            let to_restore = target - in_circulation;
+            for _ in 0..to_restore {
+                if let Some(id) = self.retired_blocks.pop_front() {
+                    self.free_blocks.push_back(id);
+                } else {
+                    break;
+                }
+            }
+        }
+        // After a shrink that couldn't fully complete (in-use > target), the
+        // effective ceiling is what's actually in circulation.
+        (self.num_blocks - self.retired_blocks.len()).max(in_use)
     }
 
     /// Allocate a single block. Returns the physical block ID.
@@ -67,9 +129,16 @@ impl BlockManager {
             .collect())
     }
 
-    /// Free a single block, returning it to the free list.
+    /// Free a single block. Normally returns it to the free list, but if a
+    /// pending dynamic shrink left circulation above `target_usable`, the block
+    /// is RETIRED instead (this is how an in-use-blocked shrink completes as
+    /// requests drain).
     pub fn free_one(&mut self, block_id: u32) {
-        self.free_blocks.push_back(block_id);
+        if self.num_blocks - self.retired_blocks.len() > self.target_usable {
+            self.retired_blocks.push_back(block_id);
+        } else {
+            self.free_blocks.push_back(block_id);
+        }
     }
 
     /// Free multiple blocks.
@@ -94,7 +163,13 @@ impl BlockManager {
             "BlockManager::free_all called with block IDs already on the free list: incoming={block_ids:?}",
         );
         for &id in block_ids {
-            self.free_blocks.push_back(id);
+            // Retire instead of free while a pending shrink keeps circulation
+            // above the target (see free_one).
+            if self.num_blocks - self.retired_blocks.len() > self.target_usable {
+                self.retired_blocks.push_back(id);
+            } else {
+                self.free_blocks.push_back(id);
+            }
         }
     }
 
@@ -243,6 +318,45 @@ mod tests {
 
         bm.free_all(&blocks);
         assert_eq!(bm.num_free(), 10);
+    }
+
+    #[test]
+    fn dynamic_shrink_retires_free_blocks_and_grow_restores() {
+        let mut bm = BlockManager::new(10, 16);
+        // Shrink to 6 usable: 4 free blocks retired, only 6 allocatable.
+        let achieved = bm.set_target_usable(6);
+        assert_eq!(achieved, 6);
+        assert_eq!(bm.num_retired(), 4);
+        assert_eq!(bm.num_free(), 6);
+        assert!(!bm.can_allocate(7));
+        assert!(bm.can_allocate(6));
+        // Grow back to 10: retired blocks return to free.
+        let achieved = bm.set_target_usable(10);
+        assert_eq!(achieved, 10);
+        assert_eq!(bm.num_retired(), 0);
+        assert_eq!(bm.num_free(), 10);
+    }
+
+    #[test]
+    fn dynamic_shrink_blocked_by_in_use_completes_as_requests_drain() {
+        let mut bm = BlockManager::new(10, 16);
+        // 8 blocks in use, 2 free. Ask to shrink to 4 — we can only retire the
+        // 2 free now; the in-use blocks retire as they free (never yanked).
+        let held = bm.allocate(8).unwrap();
+        let achieved = bm.set_target_usable(4);
+        assert_eq!(achieved, 8, "can't go below in-use count yet");
+        assert_eq!(bm.num_retired(), 2); // the 2 free blocks retired immediately
+        assert_eq!(bm.num_free(), 0);
+        // Drain 4 of the held blocks -> they retire (not freed) until target met.
+        bm.free_all(&held[0..4]);
+        assert_eq!(bm.num_retired(), 6); // 2 + 4 retired -> circulation now 4
+        assert_eq!(bm.num_used(), 4);
+        assert_eq!(bm.num_free(), 0);
+        // Freeing the rest now returns to the free list (target reached).
+        bm.free_all(&held[4..8]);
+        assert_eq!(bm.num_retired(), 6);
+        assert_eq!(bm.num_free(), 4);
+        assert_eq!(bm.num_used(), 0);
     }
 
     #[test]
