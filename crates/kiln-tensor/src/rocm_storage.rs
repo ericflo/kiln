@@ -26,6 +26,14 @@ use kiln_hip::{RocmContext, RocmSlice};
 pub static ROCM_DTOH_COUNT: AtomicU64 = AtomicU64::new(0);
 pub static ROCM_HTOD_COUNT: AtomicU64 = AtomicU64::new(0);
 
+/// Current host→device copy count. The HIP-graph capture path snapshots this
+/// across the warm forward to detect a host round-trip (`host_to_rocm_copy`),
+/// which is illegal inside `hipStreamBeginCapture` — so any forward that does
+/// one is not capture-safe and the capture is skipped for that geometry.
+pub fn rocm_htod_count() -> u64 {
+    ROCM_HTOD_COUNT.load(Ordering::Relaxed)
+}
+
 #[inline]
 fn rocm_profile_on() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();

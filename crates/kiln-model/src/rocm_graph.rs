@@ -156,6 +156,13 @@ pub struct RocmGraphRunner {
     warmup_done: bool,
     #[cfg(feature = "rocm")]
     captured: HashMap<RocmGraphKey, CapturedDecodeGraphRocm>,
+    /// Geometries whose decode forward does a host round-trip (a non-capture-safe
+    /// fallback, e.g. GDN gates softplus) and so cannot be captured. Cached so we
+    /// skip the warm pass + capture attempt for them on every subsequent step and
+    /// go straight to eager — without disabling capture for OTHER (capture-safe)
+    /// geometries.
+    #[cfg(feature = "rocm")]
+    non_capture_safe: std::collections::HashSet<RocmGraphKey>,
     #[cfg(feature = "rocm")]
     cache_full_warned: bool,
     /// #1082 box-102 BUG-B: request-boundary detection. The captured bs=1 graph
@@ -187,6 +194,8 @@ impl RocmGraphRunner {
             #[cfg(feature = "rocm")]
             captured: HashMap::new(),
             #[cfg(feature = "rocm")]
+            non_capture_safe: std::collections::HashSet::new(),
+            #[cfg(feature = "rocm")]
             cache_full_warned: false,
             #[cfg(feature = "rocm")]
             last_decode_seq_len: None,
@@ -208,6 +217,7 @@ impl RocmGraphRunner {
         #[cfg(feature = "rocm")]
         {
             self.captured.clear();
+            self.non_capture_safe.clear();
             self.cache_full_warned = false;
         }
     }
@@ -296,6 +306,15 @@ impl RocmGraphRunner {
             }
 
             let requested_key = RocmGraphKey::new(block_table, paged_cache, seq_len);
+
+            // Geometry previously found non-capture-safe (host round-trip in its
+            // forward) — skip the warm pass + capture attempt and run eager.
+            if self.non_capture_safe.contains(&requested_key) {
+                return Self::eager_forward(
+                    backend, token_id, weights, config, paged_cache, block_table, seq_len,
+                    linear_state, lora,
+                );
+            }
 
             // Replay if we have a valid captured graph for this geometry.
             if let Some(captured) = self.captured.get(&requested_key) {
@@ -756,6 +775,16 @@ impl RocmGraphRunner {
         let gdn_snapshot = linear_state
             .snapshot()
             .context("freeze-pointers: snapshot GDN recurrent state before warm pass")?;
+        // Snapshot the host→device copy count across the warm forward. Any
+        // host_to_rocm_copy issued by the forward (e.g. a GDN-gates/softplus or
+        // KV-write FALLBACK path that allocates a device tensor from host) does a
+        // hipStreamSynchronize, which is ILLEGAL inside begin_capture and ABORTS
+        // the capture — poisoning the device so even the eager fallback then
+        // fails (an empty response under load). The warm pass runs the SAME
+        // forward OUTSIDE capture, so if it did a host round-trip the captured
+        // pass would too: skip capture for this geometry and fall back to eager
+        // BEFORE begin_capture, leaving the device clean.
+        let htod_before = kiln_tensor::rocm_htod_count();
         let warm_result = kiln_tensor::with_rocm_capture_arena(arena.clone(), || {
             let hidden = model_forward_paged_hidden_with_graph_inputs(
                 backend, &[token_id], weights, config, paged_cache, block_table, seq_len,
@@ -768,6 +797,25 @@ impl RocmGraphRunner {
         warm_result.context("freeze-pointers warm (Record) pass failed")?;
         // Restore the GDN recurrent state so the captured pass advances it once.
         *linear_state = gdn_snapshot;
+        let htod_after = kiln_tensor::rocm_htod_count();
+        if htod_after > htod_before {
+            // Not capture-safe: cache the geometry so future steps skip straight
+            // to eager (no warm-pass waste), and return eager logits for THIS step
+            // — graphs stay enabled for other, capture-safe geometries. The warm
+            // pass advanced the recurrent state then restored it, so eager_forward
+            // runs from the correct state. begin_capture was never called, so the
+            // device stays clean (no capture abort / poison).
+            tracing::debug!(
+                htod = htod_after - htod_before,
+                "ROCm graph: geometry not capture-safe (forward did a host round-trip); \
+                 caching skip + running eager"
+            );
+            self.non_capture_safe.insert(key.clone());
+            return Self::eager_forward(
+                backend, token_id, weights, config, paged_cache, block_table, seq_len,
+                linear_state, lora,
+            );
+        }
         arena.borrow_mut().begin_replay();
 
         // The buffer allocs filled their contents via H2D on the kt DEFAULT
