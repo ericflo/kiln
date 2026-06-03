@@ -1409,6 +1409,7 @@ dependencies = [
  "kiln-hip",
  "kiln-kt-bridge",
  "kiln-marlin-gemm",
+ "kiln-memory",
  "kiln-nvtx",
  "kiln-rmsnorm-kernel",
  "kiln-tensor",
