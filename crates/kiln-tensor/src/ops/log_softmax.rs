@@ -25,6 +25,17 @@ pub fn log_softmax_last_dim(x: &Tensor) -> Result<Tensor> {
         return Ok(logged);
     }
 
+    // ROCm fast path: mirror the CUDA composition (rocm_softmax + log activation).
+    #[cfg(feature = "rocm")]
+    if matches!(x.device(), crate::Device::Rocm(_))
+        && matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16)
+        && x.is_contiguous()
+    {
+        let softmax = crate::rocm_softmax_last_axis(x)?;
+        let logged = crate::rocm_activation_unary(&softmax, 5)?;
+        return Ok(logged);
+    }
+
     // Metal fast path: kiln-owned MSL log-softmax kernel (numerically
     // stable y_i = x_i - logsumexp(row)). Mirrors the CUDA fast path and
     // the CPU reference below; required by the OPD forward composite

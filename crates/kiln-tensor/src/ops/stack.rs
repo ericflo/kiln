@@ -89,6 +89,24 @@ pub fn stack(inputs: &[&Tensor], axis: usize) -> Result<Tensor> {
         }
     }
 
+    // ROCm: correctness-first host round-trip. Stage every input to the host,
+    // run the SAME stack fn (now sees Device::Cpu tensors so the byte-copy CPU
+    // path below runs), then move the stacked result back to the input device.
+    #[cfg(feature = "rocm")]
+    if inputs
+        .iter()
+        .any(|t| matches!(t.device(), crate::Device::Rocm(_)))
+    {
+        let dev = inputs[0].device();
+        let hosts: Vec<Tensor> = inputs
+            .iter()
+            .map(|t| t.to_device(crate::Device::Cpu))
+            .collect::<Result<Vec<_>>>()?;
+        let refs: Vec<&Tensor> = hosts.iter().collect();
+        let out_host = stack(&refs, axis)?;
+        return out_host.to_device(dev);
+    }
+
     let n = inputs.len();
     let per = dtype.size_in_bytes();
     let outer: usize = shape[..axis].iter().product::<usize>().max(1);

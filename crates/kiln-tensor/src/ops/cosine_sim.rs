@@ -28,6 +28,16 @@ fn to_cpu(t: &Tensor) -> Result<Tensor> {
             return crate::cuda_to_host_copy(t);
         }
     }
+    // ROCm: correctness-first host round-trip. The per-row reduction runs
+    // host-side, so stage the device-resident bytes to host (mirroring the
+    // CUDA arm, whose `cosine_similarity` output also stays on CPU). See
+    // `#1082`.
+    #[cfg(feature = "rocm")]
+    {
+        if matches!(t.device(), crate::Device::Rocm(_)) {
+            return crate::rocm_to_host_copy(t);
+        }
+    }
     Ok(t.clone())
 }
 

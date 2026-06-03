@@ -114,6 +114,17 @@ fn apply(kind: GluKind, x: &Tensor) -> Result<Tensor> {
         return Ok(out);
     }
 
+    // ROCm: correctness-first host round-trip (activation.cu is a deferred R.5b
+    // native kernel). Stage to host, run the CPU split-gate-multiply below,
+    // move the result back to the input device.
+    #[cfg(feature = "rocm")]
+    if matches!(x.device(), crate::Device::Rocm(_)) {
+        let dev = x.device();
+        let host = crate::rocm_to_host_copy(x)?;
+        let out_host = apply(kind, &host)?;
+        return out_host.to_device(dev);
+    }
+
     let half = last / 2;
     let outer: usize = shape[..shape.len() - 1].iter().product::<usize>().max(1);
     let dtype = x.dtype();

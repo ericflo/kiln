@@ -36,6 +36,16 @@ pub fn cumsum(x: &Tensor, axis: usize) -> Result<Tensor> {
         return crate::cuda_cumsum_axis(x, axis);
     }
 
+    // ROCm: correctness-first host round-trip (scan_axis.cu is a deferred R.5b
+    // native kernel). Stage to host, run the CPU scan below, move back.
+    #[cfg(feature = "rocm")]
+    if matches!(x.device(), crate::Device::Rocm(_)) {
+        let dev = x.device();
+        let host = crate::rocm_to_host_copy(x)?;
+        let out_host = cumsum(&host, axis)?;
+        return out_host.to_device(dev);
+    }
+
     // Metal fast path: kiln-owned MSL scan (one thread per (outer,inner) lane,
     // sequential scan over the axis with F32 accumulation — same decomposition
     // the CPU loop below mirrors). No host round-trip. (#1082)

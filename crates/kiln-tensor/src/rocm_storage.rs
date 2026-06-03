@@ -412,6 +412,62 @@ pub fn rocm_contiguous(src: &crate::Tensor) -> Result<crate::Tensor> {
     .map_err(|e| Error::Msg(format!("rocm_contiguous: wrap: {e}")))
 }
 
+/// In-place `slice_set` along dim 0 on a ROCm tensor: flat-copy `src` into
+/// `dst`'s existing device buffer starting at outer-axis `offset`. ROCm analog
+/// of `cuda_slice_set_dim0` (reuses the contiguity-copy kernel for the d2d write
+/// at the computed byte offset). The GDN decode resident-state restore is the
+/// production caller.
+pub fn rocm_slice_set_dim0(dst: &crate::Tensor, src: &crate::Tensor, offset: usize) -> Result<()> {
+    if dst.dtype().is_packed() {
+        return Err(Error::Msg(
+            "rocm_slice_set: packed dtype not supported".to_string(),
+        ));
+    }
+    let bpe = dst.dtype().size_in_bytes();
+    let inner: usize = dst.dims().iter().skip(1).product();
+    let src_n = src.element_count();
+
+    let dst_storage = dst
+        .storage()
+        .as_any()
+        .downcast_ref::<RocmStorage>()
+        .ok_or_else(|| Error::Msg("rocm_slice_set: dst must be ROCm storage".to_string()))?;
+    let src_storage = src
+        .storage()
+        .as_any()
+        .downcast_ref::<RocmStorage>()
+        .ok_or_else(|| Error::Msg("rocm_slice_set: src must be ROCm storage".to_string()))?;
+
+    let raw_stream = dst_storage.rocm_stream_raw();
+    let (src_base, _) = src_storage.device_ptr_raw();
+    let (dst_base, _) = dst_storage.device_ptr_raw();
+    let src_byte_off = (src.layout().start_offset() * bpe) as u64;
+    let dst_byte_off = ((offset * inner) * bpe) as u64;
+    let src_ptr = (src_base + src_byte_off) as *const core::ffi::c_void;
+    let dst_ptr = (dst_base + dst_byte_off) as *mut core::ffi::c_void;
+
+    let shape_i64 = [src_n as i64];
+    let strides_i64 = [1i64];
+    let status = unsafe {
+        kiln_contiguous_copy_async(
+            src_ptr,
+            dst_ptr,
+            shape_i64.as_ptr(),
+            strides_i64.as_ptr(),
+            1,
+            bpe as i32,
+            src_n as i64,
+            raw_stream,
+        )
+    };
+    if status != 0 {
+        return Err(Error::Msg(format!(
+            "rocm_slice_set: kiln_contiguous_copy_async returned status {status}"
+        )));
+    }
+    Ok(())
+}
+
 /// Copy a ROCm-resident tensor back to host (CPU) storage. ROCm analog of
 /// `cuda_to_host_copy`.
 pub fn rocm_to_host_copy(src: &crate::Tensor) -> Result<crate::Tensor> {

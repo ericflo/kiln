@@ -35,6 +35,18 @@ pub fn bincount(x: &Tensor, min_length: usize) -> Result<Tensor> {
         x
     };
 
+    // ROCm: correctness-first host round-trip. Stage the integer input to host
+    // and recurse — the recursive call sees a Device::Cpu tensor and runs the
+    // CPU histogram below. The I64 histogram output should live on the input's
+    // device, so move it back.
+    #[cfg(feature = "rocm")]
+    if matches!(x.device(), crate::Device::Rocm(_)) {
+        let dev = x.device();
+        let host = crate::rocm_to_host_copy(x)?;
+        let out_host = bincount(&host, min_length)?;
+        return out_host.to_device(dev);
+    }
+
     let n = x.element_count();
     let cpu = x
         .storage()

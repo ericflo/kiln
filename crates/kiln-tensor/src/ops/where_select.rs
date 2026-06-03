@@ -56,6 +56,25 @@ pub fn where_select(mask: &Tensor, t: &Tensor, f: &Tensor) -> Result<Tensor> {
         }
     }
 
+    // ROCm: correctness-first host round-trip (where_select.cu is a deferred
+    // R.5b native kernel). Stage all three operands to host, run the CPU
+    // select below, move the result back to the input device.
+    #[cfg(feature = "rocm")]
+    if matches!(mask.device(), crate::Device::Rocm(_))
+        || matches!(t.device(), crate::Device::Rocm(_))
+        || matches!(f.device(), crate::Device::Rocm(_))
+    {
+        let dev = [mask.device(), t.device(), f.device()]
+            .into_iter()
+            .find(|d| !d.is_cpu())
+            .unwrap_or(crate::Device::Cpu);
+        let mask_host = mask.to_device(crate::Device::Cpu)?;
+        let t_host = t.to_device(crate::Device::Cpu)?;
+        let f_host = f.to_device(crate::Device::Cpu)?;
+        let out_host = where_select(&mask_host, &t_host, &f_host)?;
+        return out_host.to_device(dev);
+    }
+
     // Metal fast path: kiln-owned MSL ternary select (one thread per element,
     // byte-wise select of t/f by the U8 mask — mirroring the CPU loop below).
     // No host round-trip. (#1082)

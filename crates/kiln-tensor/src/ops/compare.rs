@@ -100,6 +100,19 @@ fn apply(kind: CmpKind, a: &Tensor, b: &Tensor) -> Result<Tensor> {
         }
     }
 
+    // ROCm: correctness-first host round-trip (compare.cu is a deferred R.5b
+    // native kernel). Stage both operands to host, run the CPU compare below,
+    // move the U8 mask back to the input device.
+    #[cfg(feature = "rocm")]
+    if matches!(a.device(), crate::Device::Rocm(_)) || matches!(b.device(), crate::Device::Rocm(_))
+    {
+        let dev = if a.device().is_cpu() { b.device() } else { a.device() };
+        let a_host = a.to_device(crate::Device::Cpu)?;
+        let b_host = b.to_device(crate::Device::Cpu)?;
+        let out_host = apply(kind, &a_host, &b_host)?;
+        return out_host.to_device(dev);
+    }
+
     // Metal fast path: kiln-owned MSL comparison kernel (one thread per element,
     // F32-promoted compare → U8 mask, mirroring the CPU loop below). No host
     // round-trip. (#1082)

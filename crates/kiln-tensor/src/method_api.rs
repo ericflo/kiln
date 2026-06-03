@@ -881,6 +881,8 @@ impl Tensor {
         match self.device() {
             #[cfg(feature = "cuda")]
             Device::Cuda(_) => crate::cuda_storage::cuda_slice_set_dim0(self, src, offset)?,
+            #[cfg(feature = "rocm")]
+            Device::Rocm(_) => crate::rocm_storage::rocm_slice_set_dim0(self, src, offset)?,
             Device::Cpu => {
                 // #1082: CPU in-place slice-set (dim 0). kt `CpuStorage` has no
                 // interior lock, so we mirror the CUDA path — which writes

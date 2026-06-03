@@ -182,8 +182,8 @@ pub use rocm_allocator::RocmAllocator;
 #[cfg(feature = "rocm")]
 pub use rocm_storage::{
     host_to_rocm_copy, host_to_rocm_copy_ctx, primary_rocm_context, rocm_contiguous,
-    rocm_is_available, rocm_softmax_last_axis, rocm_synchronize_default_stream, rocm_to_host_copy,
-    rocm_zeros_ctx, RocmStorage,
+    rocm_is_available, rocm_slice_set_dim0, rocm_softmax_last_axis,
+    rocm_synchronize_default_stream, rocm_to_host_copy, rocm_zeros_ctx, RocmStorage,
 };
 #[cfg(feature = "rocm")]
 pub use rocm_ops::*;

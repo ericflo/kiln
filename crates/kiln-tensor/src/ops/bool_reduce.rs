@@ -127,16 +127,50 @@ fn apply_all_axes(kind: BoolReduce, mask: &Tensor) -> Result<Tensor> {
     Tensor::from_parts(storage, Layout::contiguous(Vec::<usize>::new()), TensorId::next())
 }
 
+/// ROCm: correctness-first host round-trip for a boolean reduction. Stage the
+/// mask to host, run `f` (the recursive CPU path), and move the U8 result back
+/// to the input device so the op is transparent to ROCm callers. No-op (returns
+/// `None`) for non-ROCm inputs.
+#[cfg(feature = "rocm")]
+fn rocm_roundtrip(
+    mask: &Tensor,
+    f: impl Fn(&Tensor) -> Result<Tensor>,
+) -> Result<Option<Tensor>> {
+    if matches!(mask.device(), crate::Device::Rocm(_)) {
+        let dev = mask.device();
+        let host = crate::rocm_to_host_copy(mask)?;
+        let out_host = f(&host)?;
+        return Ok(Some(out_host.to_device(dev)?));
+    }
+    Ok(None)
+}
+
 pub fn all_axis(mask: &Tensor, axis: usize) -> Result<Tensor> {
+    #[cfg(feature = "rocm")]
+    if let Some(out) = rocm_roundtrip(mask, |m| all_axis(m, axis))? {
+        return Ok(out);
+    }
     apply_axis(BoolReduce::All, mask, axis)
 }
 pub fn any_axis(mask: &Tensor, axis: usize) -> Result<Tensor> {
+    #[cfg(feature = "rocm")]
+    if let Some(out) = rocm_roundtrip(mask, |m| any_axis(m, axis))? {
+        return Ok(out);
+    }
     apply_axis(BoolReduce::Any, mask, axis)
 }
 pub fn all_reduce(mask: &Tensor) -> Result<Tensor> {
+    #[cfg(feature = "rocm")]
+    if let Some(out) = rocm_roundtrip(mask, all_reduce)? {
+        return Ok(out);
+    }
     apply_all_axes(BoolReduce::All, mask)
 }
 pub fn any_reduce(mask: &Tensor) -> Result<Tensor> {
+    #[cfg(feature = "rocm")]
+    if let Some(out) = rocm_roundtrip(mask, any_reduce)? {
+        return Ok(out);
+    }
     apply_all_axes(BoolReduce::Any, mask)
 }
 

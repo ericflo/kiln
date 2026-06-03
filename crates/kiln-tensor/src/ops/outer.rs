@@ -47,6 +47,23 @@ pub fn outer(a: &Tensor, b: &Tensor) -> Result<Tensor> {
         return crate::cuda_matmul(&a_col, &b_row);
     }
 
+    // ROCm: correctness-first host round-trip. Stage both device inputs to
+    // host, run the CPU outer-product below, then move the `[M, N]` result
+    // back to the input's device. See `#1082`.
+    #[cfg(feature = "rocm")]
+    if matches!(a.device(), crate::Device::Rocm(_)) || matches!(b.device(), crate::Device::Rocm(_))
+    {
+        let dev = if matches!(a.device(), crate::Device::Rocm(_)) {
+            a.device()
+        } else {
+            b.device()
+        };
+        let a_host = a.to_device(crate::Device::Cpu)?;
+        let b_host = b.to_device(crate::Device::Cpu)?;
+        let out_host = outer(&a_host, &b_host)?;
+        return out_host.to_device(dev);
+    }
+
     let dtype = a.dtype();
     let per = dtype.size_in_bytes();
     let m = a.element_count();

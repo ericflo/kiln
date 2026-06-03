@@ -78,6 +78,36 @@ pub fn clip_grad_norm(grads: &[&Tensor], max_norm: f32) -> Result<(f32, Vec<Tens
     #[cfg(feature = "cuda")]
     let grads: &[&Tensor] = &grads_storage;
 
+    // ROCm: correctness-first host round-trip. Stage every device-resident grad
+    // to host, run the CPU norm + rescale path below via recursion, then move
+    // each clipped tensor back to its source grad's device. `total_norm` is a
+    // host scalar and is returned as-is.
+    #[cfg(feature = "rocm")]
+    if grads
+        .iter()
+        .any(|g| matches!(g.device(), crate::Device::Rocm(_)))
+    {
+        let devices: Vec<crate::Device> = grads.iter().map(|g| g.device()).collect();
+        let hosts = grads
+            .iter()
+            .map(|g| {
+                if matches!(g.device(), crate::Device::Rocm(_)) {
+                    crate::rocm_to_host_copy(g)
+                } else {
+                    g.to_device(crate::Device::Cpu)
+                }
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let host_refs: Vec<&Tensor> = hosts.iter().collect();
+        let (total_norm, out_host) = clip_grad_norm(&host_refs, max_norm)?;
+        let out = out_host
+            .into_iter()
+            .zip(devices)
+            .map(|(t, dev)| t.to_device(dev))
+            .collect::<Result<Vec<_>>>()?;
+        return Ok((total_norm, out));
+    }
+
     // 1. Compute joint L2 norm.
     let mut sq_sum = 0.0_f32;
     for g in grads {

@@ -655,6 +655,10 @@ impl Tensor {
         if matches!(self.device(), crate::Device::Cuda(_)) {
             return crate::cuda_storage::cuda_contiguous(self);
         }
+        #[cfg(feature = "rocm")]
+        if matches!(self.device(), crate::Device::Rocm(_)) {
+            return crate::rocm_contiguous(self);
+        }
         #[cfg(feature = "metal")]
         if let crate::Device::Metal(i) = self.device() {
             // Apple Silicon UMA: gather the strided/offset view to a packed
@@ -835,6 +839,20 @@ impl Tensor {
                     // land on CUDA without a corresponding
                     // is_finite_reduce.cu branch).
                     let cpu_view = crate::cuda_to_host_copy(self)?;
+                    return cpu_view.all_finite();
+                }
+            }
+            #[cfg(feature = "rocm")]
+            {
+                if matches!(self.device(), crate::Device::Rocm(_)) {
+                    let supported = matches!(
+                        self.dtype(),
+                        DType::F32 | DType::BF16 | DType::F16 | DType::F8E4M3 | DType::F8E5M2
+                    );
+                    if supported {
+                        return crate::rocm_is_finite(self);
+                    }
+                    let cpu_view = crate::rocm_to_host_copy(self)?;
                     return cpu_view.all_finite();
                 }
             }

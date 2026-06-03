@@ -30,6 +30,18 @@ pub fn trace(t: &Tensor) -> Result<Tensor> {
         return crate::cuda_sum_last_axis(&diag);
     }
 
+    // ROCm: correctness-first host round-trip. Stage the device input to host,
+    // run the CPU diagonal-sum below, then move the rank-0 scalar back to the
+    // input's device (mirroring the CUDA fast-path, which keeps the scalar on
+    // device). See `#1082`.
+    #[cfg(feature = "rocm")]
+    if matches!(t.device(), crate::Device::Rocm(_)) {
+        let dev = t.device();
+        let host = crate::rocm_to_host_copy(t)?;
+        let out_host = trace(&host)?;
+        return out_host.to_device(dev);
+    }
+
     let dtype = t.dtype();
     let bytes = t
         .storage()

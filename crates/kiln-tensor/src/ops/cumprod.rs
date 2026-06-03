@@ -34,6 +34,15 @@ pub fn cumprod(x: &Tensor, axis: usize) -> Result<Tensor> {
         return crate::cuda_cumprod_axis(x, axis);
     }
 
+    // ROCm: correctness-first host round-trip (deferred R.5b native scan).
+    #[cfg(feature = "rocm")]
+    if matches!(x.device(), crate::Device::Rocm(_)) {
+        let dev = x.device();
+        let host = crate::rocm_to_host_copy(x)?;
+        let out_host = cumprod(&host, axis)?;
+        return out_host.to_device(dev);
+    }
+
     let dtype = x.dtype();
     let shape = x.shape().to_vec();
     let outer: usize = shape[..axis].iter().product::<usize>().max(1);
