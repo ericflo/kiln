@@ -61,6 +61,34 @@ pub fn full_like(t: &Tensor, value: f32) -> Result<Tensor> {
         return crate::host_to_cuda_copy_ctx(&cpu_t, device_index);
     }
 
+    // ROCm fast path: build the placeholder ON-DEVICE (no host round-trip).
+    // The generic path below stages a CPU tensor and `to_device`-uploads it,
+    // which does an `host_to_rocm_copy` (htod). That htod is ILLEGAL inside a
+    // HIP-graph capture region and ABORTS it — softplus/relu build a
+    // `zeros_like` placeholder per GDN layer *inside* the captured decode
+    // forward, so the upload there was the dominant capture blocker (24 GDN
+    // layers => 24 aborting htods/step). `rocm_zeros_ctx` is capture-arena-
+    // aware: under an active arena it mints a frozen-pointer buffer and
+    // memsets it on-device, keeping the region sync- and host-copy-free.
+    // For value == 0.0 the zeros buffer is the answer directly; nonzero fills
+    // (`ones_like` etc.) add the scalar on-device via the ScalarOp rocm_fwd,
+    // staying capture-safe.
+    #[cfg(feature = "rocm")]
+    if let crate::Device::Rocm(device_index) = t.device() {
+        let dtype = t.dtype();
+        let n = t.element_count();
+        let storage = crate::rocm_zeros_ctx(device_index, dtype, n)?;
+        let zeros = Tensor::from_parts(
+            storage,
+            Layout::contiguous(t.shape().to_vec()),
+            TensorId::next(),
+        )?;
+        if value == 0.0 {
+            return Ok(zeros);
+        }
+        return crate::ops::scalar::add_scalar(&zeros, value);
+    }
+
     let dtype = t.dtype();
     let n = t.element_count();
     let per = dtype.size_in_bytes();

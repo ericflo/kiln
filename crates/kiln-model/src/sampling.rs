@@ -64,6 +64,17 @@ pub fn greedy_sample(logits: &Tensor) -> Result<u32> {
             return Ok(idx);
         }
     }
+    // ROCm fast path: `argmax` runs on-device (ArgmaxOp::rocm_fwd) and yields an
+    // I64 scalar; read it back directly. The generic `.to_dtype(U32)` path below
+    // would cast I64->U32, which is NOT in the ROCm cast matrix (F32<->BF16<->F16
+    // only), so it host-round-trips every token (D2H I64 -> CPU cast -> H2D U32 ->
+    // D2H U32 for the scalar read — an upload we immediately re-download).
+    // Reading the I64 scalar directly is a single D2H, no upload.
+    #[cfg(feature = "rocm")]
+    if matches!(flat.device(), kiln_tensor::Device::Rocm(_)) {
+        let idx_i64 = flat.argmax(0)?.flatten_all()?.to_vec1::<i64>()?;
+        return Ok(idx_i64[0] as u32);
+    }
     // Argmax stays on device; only the scalar token ID is transferred to
     // host. kt `argmax` yields an I64 index tensor (no implicit cast on
     // readback), so cast to U32 before the `to_scalar::<u32>()` host read.
@@ -94,6 +105,15 @@ pub fn greedy_sample_rows(logits: &Tensor) -> Result<Vec<u32>> {
         }
     }
     let vocab_dim = dims.len() - 1;
+    // ROCm fast path: read the on-device I64 argmax indices directly. The
+    // generic `.to_dtype(U32)` below isn't in the ROCm cast matrix and would
+    // host-round-trip (upload-then-download) per call. Read I64 and convert
+    // host-side instead.
+    #[cfg(feature = "rocm")]
+    if matches!(logits.device(), kiln_tensor::Device::Rocm(_)) {
+        let ids_i64 = logits.argmax(vocab_dim)?.flatten_all()?.to_vec1::<i64>()?;
+        return Ok(ids_i64.into_iter().map(|v| v as u32).collect());
+    }
     // kt `argmax` yields an I64 index tensor; cast to U32 to preserve the
     // `to_vec1::<u32>()` host read path (candle's `argmax` returned U32).
     let ids = logits.argmax(vocab_dim)?.flatten_all()?.to_dtype(DType::U32)?;
