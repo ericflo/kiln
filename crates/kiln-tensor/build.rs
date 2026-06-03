@@ -293,6 +293,12 @@ fn build_rocm() {
         "scan_axis.cu",
         "scatter_add.cu",
         "dropout.cu",
+        // R.5b — on-device sampling top-k (keeps the full [V] logits row
+        // resident, returns only k (value,index) pairs — vs the host-sort
+        // fallback's full-[V] D2H every sampled token). The per-pass argmax
+        // reduction uses 32-lane subgroups explicitly (warp_id=tid/32,
+        // shfl offset<=16), so it is wave32/64-correct as-is.
+        "topk_last_axis.cu",
         // R.9 prereq — on-device paged-decode metadata (device block_table ->
         // gather index, device seqused_k -> tail mask); kills the per-attn-layer
         // D2H/H2D round-trip and unblocks HIP graph capture. Pure index math,

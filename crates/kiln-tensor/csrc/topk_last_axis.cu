@@ -74,6 +74,16 @@
 
 #include <cstdint>
 
+// Wave-size-portable shuffle (`kiln_shfl_xor`): on HIP it uses the native
+// `__shfl_xor(v, offset, warpSize)` (explicit width — correct on wave32/64 and,
+// unlike the bare `__shfl_xor_sync(0xFFFFFFFF,...)`, it both compiles under
+// ROCm 7.x's 64-bit-mask static_assert and reduces the right lanes); on CUDA it
+// is the masked `_sync` form. The reduction below caps the xor offset at 16, so
+// it never crosses 32 lanes via shuffle (it crosses 32-lane subgroups through
+// shared memory), which is exactly the regime `kiln_shfl_xor` is safe in on
+// RDNA wave64.
+#include "kt_gpu_compat.cuh"
+
 namespace {
 
 constexpr int MAX_THREADS = 1024;
@@ -107,8 +117,8 @@ __device__ inline bool rank_lt(float cv, int64_t ci, float sv, int64_t si) {
 // Warp-level argmax reduction over (val, idx) pairs under rank_gt.
 __device__ inline void warp_rank_reduce(float& val, int64_t& idx) {
     for (int offset = 16; offset > 0; offset /= 2) {
-        float other_val = __shfl_xor_sync(0xFFFFFFFF, val, offset);
-        int64_t other_idx = __shfl_xor_sync(0xFFFFFFFF, idx, offset);
+        float other_val = kiln_shfl_xor(val, offset);
+        int64_t other_idx = kiln_shfl_xor(idx, offset);
         if (rank_gt(other_val, other_idx, val, idx)) {
             val = other_val;
             idx = other_idx;

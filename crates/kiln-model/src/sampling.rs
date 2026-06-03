@@ -739,6 +739,23 @@ fn try_topk_on_device(scaled: &Tensor, top_k: usize) -> Result<Vec<(u32, f32)>> 
             return Ok(pairs);
         }
     }
+    // ROCm: same on-device top-k as CUDA — keep the full [V] row resident and
+    // transfer only the k (value, index) pairs, instead of the host-sort
+    // fallback's full-[V] D2H every sampled token. Ranking is bit-identical to
+    // `topk_via_host_sort` (descending value, ties → lower index).
+    #[cfg(feature = "rocm")]
+    {
+        if matches!(scaled.device(), Device::Rocm(_))
+            && scaled.is_contiguous()
+            && scaled.rank() == 1
+            && matches!(scaled.dtype(), DType::F32 | DType::BF16 | DType::F16)
+        {
+            let (values, indices) = kiln_tensor::rocm_topk_last_axis(scaled, top_k)?;
+            let pairs: Vec<(u32, f32)> =
+                indices.into_iter().zip(values).map(|(i, v)| (i, v)).collect();
+            return Ok(pairs);
+        }
+    }
     let _ = (scaled, top_k);
     anyhow::bail!(
         "try_topk_on_device: no on-device top-k for this backend; falling back to host sort (#1082)"
