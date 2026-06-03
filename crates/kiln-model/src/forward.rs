@@ -24568,7 +24568,7 @@ pub fn model_forward_paged_next_token_greedy(
 /// small per-layer matmuls are. Moving final_norm + lm_head out of the captured
 /// region is the structural fix — the captured 32-layer transformer (the actual
 /// decode win) is preserved.
-#[cfg(feature = "cuda")]
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn model_forward_paged_hidden_with_graph_inputs(
     backend: &dyn BackendRuntime,
@@ -24599,6 +24599,7 @@ pub(crate) fn model_forward_paged_hidden_with_graph_inputs(
         graph_inputs,
         // Phase 7 #1082: no kt twin from this caller — forward `None` so the
         // candle writer remains authoritative (mirrors the logits twin).
+        #[cfg(feature = "cuda")]
         None,
         LmHeadMode::HiddenOnly,
     )?;
