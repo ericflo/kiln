@@ -361,6 +361,31 @@ impl PagedKvCacheKt {
         self.num_blocks.load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// The device the pools live on (layer 0's k pool), or `None` if the cache
+    /// has no layers. Needed by [`Self::physical_resize_to`] callers that don't
+    /// otherwise carry the device.
+    pub fn device(&self) -> Option<kiln_tensor::Device> {
+        self.layers_read().first().map(|(k, _)| k.device())
+    }
+
+    /// Storage bytes one block occupies across ALL layers and both K and V pools:
+    /// `num_layers * 2 * block_size * num_kv_heads * head_dim * storage_dtype_size`.
+    /// The memory governor's resize policy uses this to translate a VRAM target
+    /// into a block-count target. `0` if the cache has no layers.
+    pub fn bytes_per_block(&self) -> usize {
+        let layers = self.layers_read();
+        let Some((k, _)) = layers.first() else {
+            return 0;
+        };
+        let dims = k.dims();
+        if dims.len() != 3 {
+            return 0;
+        }
+        let per_slot = dims[1] * dims[2]; // num_kv_heads * head_dim
+        let dtype_size = k.dtype().size_in_bytes().max(1);
+        layers.len() * 2 * self.block_size * per_slot * dtype_size
+    }
+
     pub fn num_layers(&self) -> usize {
         self.layers_read().len()
     }

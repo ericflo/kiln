@@ -2057,6 +2057,22 @@ impl AppState {
                 Some(backend_name),
             )
         });
+        // #24/#26: drive dynamic KV resize from live memory pressure on GPU
+        // backends whose KV pools are device-resident (CUDA/ROCm) — that's where
+        // inference and a coexisting training run / process actually contend for
+        // VRAM. Host-resident pools (CPU/Vulkan) don't, so there's nothing to
+        // arbitrate. The autoscaler shrinks KV when VRAM gets tight and grows it
+        // back when headroom returns; the resize itself runs on the engine actor
+        // at its barrier under exclusive GPU access.
+        if let Some(engine) = batching_engine.clone() {
+            let device_resident = matches!(
+                paged_cache.device(),
+                Some(kiln_tensor::Device::Rocm(_)) | Some(kiln_tensor::Device::Cuda(_))
+            );
+            if device_resident {
+                crate::kv_autoscaler::spawn(engine, paged_cache.clone());
+            }
+        }
         let decode_batcher = if let Some(config) = decode_batcher_config {
             tracing::info!(
                 backend = backend_name,
