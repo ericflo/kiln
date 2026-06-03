@@ -47,18 +47,20 @@ fn rocm_graphs_env_on() -> bool {
         .unwrap_or(false)
 }
 
-/// Whether to ATTEMPT capture/replay (vs. eager past warmup). Default OFF.
+/// Whether to ATTEMPT capture/replay (vs. eager past warmup). Default OFF
+/// pending tok/s benchmarking on an idle GPU.
 ///
-/// Capture is not yet viable on ROCm: the paged-KV slot write
-/// (`paged_kv_write_token_major_bf16_slot_rocm`) reads the slot index host-side
-/// (`rocm_to_host_copy`), which forces a sync and is not recordable into a HIP
-/// graph (and panics on the Borrowed freeze-pointer arena buffer). Completing
-/// capture needs an ON-DEVICE paged-KV slot write (read the slot from the device
-/// buffer, write K/V via a kernel) — and an audit of the rest of the captured
-/// forward for other host-readback ops. Until then `KILN_ROCM_GRAPHS=1` runs the
-/// runner's warmup + eager steady-state (a transparent no-op vs. plain decode);
-/// `KILN_ROCM_GRAPH_CAPTURE=1` opts into the (not-yet-working) capture path for
-/// development of that kernel.
+/// Capture is fully working: the paged-KV slot write is on-device
+/// (`index_copy.cu` scatter with a DEVICE slot index), the freeze-pointer arena
+/// keeps every activation pointer stable across capture→replay, and the warm
+/// pass's host-round-trip detector condemns only geometries with a PERSISTENT
+/// host copy (cold shape-cache fills are retried, see `CAPTURE_RETRY_LIMIT`).
+/// With stable paged metadata (default on) one graph is captured per
+/// `max_seqlen_k` bucket and replayed for every step in it; captured-graph
+/// greedy decode is byte-identical to eager (gfx1151). `KILN_ROCM_GRAPHS=1`
+/// enables the runner (eager past warmup); `+KILN_ROCM_GRAPH_CAPTURE=1` opts
+/// into real capture/replay. The default stays off only until the launch-
+/// overhead win is measured on a contention-free GPU.
 #[cfg(feature = "rocm")]
 fn rocm_graph_capture_supported() -> bool {
     std::env::var("KILN_ROCM_GRAPH_CAPTURE")
@@ -163,6 +165,16 @@ pub struct RocmGraphRunner {
     /// geometries.
     #[cfg(feature = "rocm")]
     non_capture_safe: std::collections::HashSet<RocmGraphKey>,
+    /// Per-geometry count of consecutive capture attempts whose warm pass did a
+    /// host round-trip. The first attempt in a `max_seqlen_k` bucket fills the
+    /// shape-keyed global caches (broadcast gather indices, gqa-expand indices)
+    /// with a one-time host upload; the NEXT attempt in the same (bucket-stable)
+    /// geometry finds them warm and captures cleanly. So we don't condemn a
+    /// geometry to `non_capture_safe` on the first htod bump — we retry up to
+    /// `CAPTURE_RETRY_LIMIT` times and only give up if the round-trip persists
+    /// (a genuine per-step fallback, not a cold cache).
+    #[cfg(feature = "rocm")]
+    capture_retry: std::collections::HashMap<RocmGraphKey, u32>,
     #[cfg(feature = "rocm")]
     cache_full_warned: bool,
     /// #1082 box-102 BUG-B: request-boundary detection. The captured bs=1 graph
@@ -196,6 +208,8 @@ impl RocmGraphRunner {
             #[cfg(feature = "rocm")]
             non_capture_safe: std::collections::HashSet::new(),
             #[cfg(feature = "rocm")]
+            capture_retry: std::collections::HashMap::new(),
+            #[cfg(feature = "rocm")]
             cache_full_warned: false,
             #[cfg(feature = "rocm")]
             last_decode_seq_len: None,
@@ -203,6 +217,14 @@ impl RocmGraphRunner {
             last_decode_block0: None,
         }
     }
+
+    /// Max consecutive capture attempts (per bucket-stable geometry) whose warm
+    /// pass may do a host round-trip before the geometry is condemned to
+    /// `non_capture_safe`. A cold shape-cache fill clears in one pass, so the
+    /// 2nd attempt normally captures; the budget gives margin for multiple
+    /// distinct caches warming across a step or two.
+    #[cfg(feature = "rocm")]
+    const CAPTURE_RETRY_LIMIT: u32 = 3;
 
     /// Whether captured-graph decode is active.
     pub fn is_enabled(&self) -> bool {
@@ -218,6 +240,7 @@ impl RocmGraphRunner {
         {
             self.captured.clear();
             self.non_capture_safe.clear();
+            self.capture_retry.clear();
             self.cache_full_warned = false;
         }
     }
@@ -323,7 +346,10 @@ impl RocmGraphRunner {
                         &requested_key, token_id, backend, weights, config, paged_cache,
                         block_table, seq_len,
                     ) {
-                        Ok(logits) => return Ok(logits),
+                        Ok(logits) => {
+                            tracing::trace!(seq_len, "ROCm graph: replayed captured decode graph");
+                            return Ok(logits);
+                        }
                         Err(e) => {
                             tracing::warn!("ROCm graph replay failed: {e:#}, falling back to eager");
                             self.captured.remove(&requested_key);
@@ -799,23 +825,43 @@ impl RocmGraphRunner {
         *linear_state = gdn_snapshot;
         let htod_after = kiln_tensor::rocm_htod_count();
         if htod_after > htod_before {
-            // Not capture-safe: cache the geometry so future steps skip straight
-            // to eager (no warm-pass waste), and return eager logits for THIS step
-            // — graphs stay enabled for other, capture-safe geometries. The warm
-            // pass advanced the recurrent state then restored it, so eager_forward
-            // runs from the correct state. begin_capture was never called, so the
-            // device stays clean (no capture abort / poison).
-            tracing::debug!(
-                htod = htod_after - htod_before,
-                "ROCm graph: geometry not capture-safe (forward did a host round-trip); \
-                 caching skip + running eager"
-            );
-            self.non_capture_safe.insert(key.clone());
+            // The warm forward did a host round-trip. This is EITHER a one-time
+            // cold-cache fill (shape-keyed broadcast/gqa-expand gather indices
+            // upload once per `max_seqlen_k` bucket, then every step + replay in
+            // that bucket reuses the device buffer) OR a genuine per-step fallback
+            // (e.g. a GDN-gates/softplus path that rebuilds host data every step).
+            // The two are indistinguishable from a single warm pass, so retry: a
+            // cold fill is absorbed by THIS pass and the next attempt for the same
+            // (bucket-stable) geometry sees htod==0 and captures; a real per-step
+            // round-trip keeps bumping htod and exhausts the retry budget. The warm
+            // pass advanced then restored the recurrent state, and begin_capture was
+            // never called, so the device stays clean either way.
+            let attempts = self.capture_retry.entry(key.clone()).or_insert(0);
+            *attempts += 1;
+            if *attempts >= Self::CAPTURE_RETRY_LIMIT {
+                tracing::debug!(
+                    htod = htod_after - htod_before,
+                    attempts = *attempts,
+                    "ROCm graph: geometry not capture-safe (persistent host round-trip); \
+                     caching skip + running eager"
+                );
+                self.non_capture_safe.insert(key.clone());
+                self.capture_retry.remove(&key);
+            } else {
+                tracing::debug!(
+                    htod = htod_after - htod_before,
+                    attempts = *attempts,
+                    "ROCm graph: warm pass did a host round-trip (likely cold cache fill); \
+                     running eager, will retry capture next step"
+                );
+            }
             return Self::eager_forward(
                 backend, token_id, weights, config, paged_cache, block_table, seq_len,
                 linear_state, lora,
             );
         }
+        // Capture-safe: clear any retry bookkeeping for this geometry.
+        self.capture_retry.remove(&key);
         arena.borrow_mut().begin_replay();
 
         // The buffer allocs filled their contents via H2D on the kt DEFAULT
