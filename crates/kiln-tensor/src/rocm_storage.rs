@@ -406,6 +406,91 @@ pub fn rocm_synchronize_compute_stream(device_index: usize) -> Result<()> {
         .map_err(|e| Error::Msg(format!("rocm_synchronize_compute_stream({device_index}): {e:?}")))
 }
 
+/// Refresh `dst`'s contents in place from a host slice WITHOUT reallocating —
+/// the ROCm analog of [`crate::cuda_write_host_in_place`].
+///
+/// The HIP-graph replay path (R.9) bakes `dst`'s device pointer into the
+/// captured graph; replay refreshes the per-step inputs (token id, position,
+/// rotary tables, paged-KV metadata) through THIS function so the pointer
+/// never changes and the recorded kernels read the new values. Unlike
+/// [`host_to_rocm_copy`] (which mints a fresh device buffer with a NEW
+/// pointer), this writes through `dst`'s already-allocated storage.
+///
+/// `dst` must be ROCm-backed, contiguous, `start_offset == 0`, and own exactly
+/// `host.len()` elements whose element type `E` matches `dst`'s dtype byte
+/// width. The copy runs on the kt active stream — inside a
+/// [`crate::with_active_rocm_stream`] scope it lands on the capture/replay
+/// stream, otherwise the context default stream. A stream synchronize follows
+/// (mirroring the CUDA twin) so the write completes before a subsequent graph
+/// launch reads it; the replay path additionally syncs the default stream
+/// before launch, which is the actual cross-stream ordering guarantee.
+#[cfg(feature = "rocm")]
+pub fn rocm_write_host_in_place<E: crate::Element>(
+    dst: &crate::Tensor,
+    host: &[E],
+) -> Result<()> {
+    if dst.dtype().is_packed() {
+        return Err(Error::Msg(
+            "rocm_write_host_in_place: packed dtype not supported".to_string(),
+        ));
+    }
+    if E::DTYPE.size_in_bytes() != dst.dtype().size_in_bytes() {
+        return Err(Error::Msg(format!(
+            "rocm_write_host_in_place: element byte width {} != dst dtype {} byte width {}",
+            E::DTYPE.size_in_bytes(),
+            dst.dtype(),
+            dst.dtype().size_in_bytes()
+        )));
+    }
+    if !dst.is_contiguous() || dst.layout().start_offset() != 0 {
+        return Err(Error::Msg(
+            "rocm_write_host_in_place: dst must be contiguous with start_offset == 0".to_string(),
+        ));
+    }
+    let n = dst.element_count();
+    if host.len() != n {
+        return Err(Error::Msg(format!(
+            "rocm_write_host_in_place: host len {} != dst element count {n}",
+            host.len()
+        )));
+    }
+
+    let dst_storage = dst
+        .storage()
+        .as_any()
+        .downcast_ref::<RocmStorage>()
+        .ok_or_else(|| {
+            Error::Msg("rocm_write_host_in_place: dst must be ROCm storage".to_string())
+        })?;
+
+    let ctx = dst_storage.context();
+    let stream = crate::active_rocm_stream(&ctx);
+    let (dst_base, _byte_len) = dst_storage.device_ptr_raw();
+    let bytes = E::to_bytes(host);
+
+    // SAFETY: `dst_base` is the start of `dst`'s contiguous device buffer
+    // (validated start_offset == 0); `bytes` is exactly `n * size_in_bytes`
+    // bytes, matching the destination region, so the copy stays inside the
+    // allocation. The copy is issued on the kt active stream — the same stream
+    // the captured graph runs on during replay — and is not synchronized here
+    // beyond the explicit stream sync below.
+    unsafe {
+        stream
+            .memcpy_htod_raw_async(dst_base as *mut core::ffi::c_void, &bytes)
+            .map_err(|e| {
+                Error::Msg(format!(
+                    "rocm_write_host_in_place: memcpy_htod_raw_async: {e:?}"
+                ))
+            })?;
+    }
+    stream.synchronize().map_err(|e| {
+        Error::Msg(format!(
+            "rocm_write_host_in_place: stream sync after write: {e:?}"
+        ))
+    })?;
+    Ok(())
+}
+
 // ----------------------------------------------------------------------
 // ROCm-side Tensor::contiguous — the first storage→kernel op, proving the
 // hipcc FFI path end-to-end (contiguous.cu is compiled in build_rocm()).

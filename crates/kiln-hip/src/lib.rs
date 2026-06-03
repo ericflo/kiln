@@ -354,6 +354,36 @@ impl RocmStream {
         self.synchronize()
     }
 
+    /// Async H2D copy into a caller-supplied raw device pointer, WITHOUT a
+    /// trailing synchronize. The HIP-graph replay path (R.9) uses this to
+    /// refresh a graph-stable buffer's contents *in place*: the destination
+    /// pointer is the one baked into the captured graph, so it must not change
+    /// (no realloc). The copy is queued on this stream and is ordered before
+    /// any subsequent launch on the same stream.
+    ///
+    /// Unlike [`Self::memcpy_htod`], this does NOT synchronize — the caller is
+    /// responsible for (a) keeping `src` alive until the copy completes and
+    /// (b) synchronizing (this stream, or the launch's stream after an event)
+    /// before the host or another stream reads the destination.
+    ///
+    /// # Safety
+    /// `dst` must point to at least `src.len()` bytes of a live device
+    /// allocation reachable from this stream's device.
+    pub unsafe fn memcpy_htod_raw_async(&self, dst: *mut c_void, src: &[u8]) -> Result<()> {
+        if src.is_empty() {
+            return Ok(());
+        }
+        self.bind()?;
+        // SAFETY: caller guarantees `dst` addresses >= src.len() live device
+        // bytes; `src` is a valid host slice of the same length.
+        check(
+            unsafe {
+                sys::hipMemcpyHtoDAsync(dst, src.as_ptr() as *mut c_void, src.len(), self.handle)
+            },
+            "hipMemcpyHtoDAsync",
+        )
+    }
+
     /// Allocate a device buffer of `src.len()` bytes and copy `src` into it
     /// (H2D), synchronizing before return. The one-shot analog of cudarc's
     /// `CudaStream::clone_htod`.
