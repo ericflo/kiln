@@ -3325,6 +3325,43 @@ impl ModelRunner {
             }
         }
 
+        // R.9: ROCm HIP-graph single-row GREEDY decode for the batched/batching-
+        // engine path. Gated by KILN_ROCM_GRAPHS (default off) inside the runner,
+        // so when disabled `sampled` stays as set above and the cuda/eager block
+        // below runs unchanged — zero behavior change for the default path. Only
+        // the greedy (temperature==0) case is handled here (the bs=1 graph
+        // contract); sampled rows fall through to the eager path below. Greedy
+        // sampling needs no `states[0]` access, avoiding the linear_states alias.
+        if sampled.is_none()
+            && row_count == 1
+            && params[0].temperature == 0.0
+            && matches!(self.backend.device(), kiln_tensor::Device::Rocm(_))
+            && self
+                .rocm_graph
+                .lock()
+                .map(|g| g.is_enabled())
+                .unwrap_or(false)
+        {
+            let pc_guard = lock_paged_cache(paged_cache)?;
+            let row = self
+                .rocm_graph
+                .lock()
+                .map_err(|e| anyhow::anyhow!("failed to lock ROCm graph runner: {e}"))?
+                .decode_step_paged(
+                    &*self.backend,
+                    input_tokens[0],
+                    &self.weights,
+                    &self.config,
+                    pc_guard,
+                    &block_tables[0],
+                    sequence_lengths[0],
+                    &mut *linear_states[0],
+                    self.active_lora.as_ref(),
+                )
+                .context("batched decode ROCm graph row failed")?;
+            sampled = Some(vec![greedy_sample(&row)?]);
+        }
+
         let sampled = if let Some(tokens) = sampled {
             tokens
         } else {
