@@ -742,8 +742,11 @@ pub fn host_to_rocm_copy(src: &crate::Tensor, device_index: usize) -> Result<cra
         .clone_htod(bytes)
         .map_err(|e| Error::Msg(format!("host_to_rocm_copy: clone_htod failed: {e:?}")))?;
 
+    // Always count (cheap atomic) — the HIP-graph capture-safety check reads this
+    // via `rocm_htod_count()` to detect a host round-trip during the warm pass.
+    // The profiling OUTPUT below stays gated behind KILN_ROCM_PROFILE.
+    let n = ROCM_HTOD_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
     if rocm_profile_on() {
-        let n = ROCM_HTOD_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
         rocm_bt_once("htod", src.shape(), n);
         if n % 200 == 0 {
             eprintln!(
