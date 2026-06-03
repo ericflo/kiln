@@ -350,69 +350,87 @@ pub fn detect_used_vram_bytes() -> Option<u64> {
 /// the SAME probe, so the system is uniformly aware regardless of which backend
 /// is compiled in.
 ///
-/// The crucial nuance is `unified`: on a discrete GPU `free_bytes` is the GPU's
-/// own VRAM headroom, but on a unified-memory APU (AMD Strix Halo) or Apple
-/// Silicon, GPU allocations come out of **system RAM**, so the meaningful free
-/// figure is the host's `MemAvailable`, not a BIOS-reported VRAM carveout. Sizing
-/// against the carveout there would happily over-commit system RAM and OOM the
-/// box. This probe gets that right so "be mindful of VRAM on whatever the user
-/// is running" holds on every device class.
+/// Figures come from the GPU DRIVER's authoritative, ALL-PROCESS counters
+/// (nvidia-smi on NVIDIA; AMD/Intel `mem_info_{vram,gtt}_{total,used}` DRM sysfs,
+/// the same source `nvtop`/`rocm-smi` show). Because they are all-process, a
+/// coexisting GPU job — llama.cpp, vLLM, another kiln — is reflected by
+/// construction: `free` already has its footprint subtracted. On a unified APU
+/// (AMD Strix Halo) these are the real combined VRAM+GTT pool the GPU can use,
+/// NOT a BIOS carveout and NOT a sandbox-/cgroup-limited `/proc/meminfo`.
 #[derive(Debug, Clone, Copy)]
 pub struct MemorySnapshot {
-    /// Total memory addressable by the accelerator (unified-corrected on APUs).
+    /// Total accelerator memory (driver-reported; VRAM+GTT on an AMD APU).
     pub total_bytes: u64,
-    /// Currently-used bytes (`total - free`).
+    /// Currently-used bytes across ALL processes (`total - free`). Includes any
+    /// coexisting GPU workload — kiln never assumes it owns the device.
     pub used_bytes: u64,
-    /// Free bytes available to allocate RIGHT NOW.
+    /// Free bytes available to allocate RIGHT NOW (driver-reported).
     pub free_bytes: u64,
     /// Provenance of the figures.
     pub source: VramSource,
-    /// Whether the accelerator shares system RAM (APU / Apple Silicon). When
-    /// true, `free_bytes` tracks host `MemAvailable` and allocations contend
-    /// with the rest of the OS.
+    /// Whether the accelerator shares system RAM with the CPU (APU / Apple
+    /// Silicon). Informational — the figures are correct either way.
     pub unified: bool,
 }
 
-/// Take a live snapshot of accelerator memory: total, used, and free, with the
-/// unified-memory correction applied. This is the keystone of kiln's dynamic
+/// Take a live snapshot of accelerator memory: total, used, and free, from the
+/// GPU driver's all-process counters. This is the keystone of kiln's dynamic
 /// memory awareness — KV-cache sizing, graph-capture headroom checks, the
 /// training/inference budget arbiter, and allocator pressure response all read
-/// from here, so the whole system reacts to the SAME live figure on every
-/// backend (including coexisting GPU workloads, since the probe is OS-level).
+/// from here, so the whole system reacts to the SAME live figure (and the same
+/// view of any coexisting GPU workload) on every backend.
 pub fn current_memory_snapshot() -> MemorySnapshot {
+    // 1. NVIDIA: nvidia-smi reports authoritative, all-process total + used.
+    if let Some(total) = query_nvidia_smi() {
+        let used = query_nvidia_smi_field("memory.used").unwrap_or(0).min(total);
+        return MemorySnapshot {
+            total_bytes: total,
+            used_bytes: used,
+            free_bytes: total.saturating_sub(used),
+            source: VramSource::NvidiaSmi,
+            unified: false,
+        };
+    }
+
+    // 2. AMD / Intel via DRM sysfs: combined VRAM+GTT total/used — the driver's
+    //    authoritative, ALL-PROCESS view (what nvtop / rocm-smi report). On an
+    //    integrated APU this is the real unified pool, correctly sized.
+    #[cfg(target_os = "linux")]
+    if let Some((total, used)) = query_linux_drm_total_used() {
+        return MemorySnapshot {
+            total_bytes: total,
+            used_bytes: used.min(total),
+            free_bytes: total.saturating_sub(used),
+            source: VramSource::LinuxDrmSysfs,
+            unified: drm_is_integrated_unified(),
+        };
+    }
+
+    // 3. Apple Silicon / fallback: total from detect_vram (sysctl + the unified
+    //    correction + env override), free from host MemAvailable. No discrete
+    //    driver counter is available there.
     let total = detect_vram();
     let unified = matches!(
         total.source,
         VramSource::LinuxDrmSysfsUnified | VramSource::AppleSilicon
     );
-
-    // Unified memory: free is the host's available RAM (capped at our corrected
-    // budget), because GPU allocations are system-RAM allocations there.
-    if unified {
-        #[cfg(target_os = "linux")]
-        if let Some(avail) =
-            query_meminfo_available_bytes_at(std::path::Path::new("/proc/meminfo"))
-        {
-            let free = avail.min(total.total_bytes);
-            return MemorySnapshot {
-                total_bytes: total.total_bytes,
-                used_bytes: total.total_bytes.saturating_sub(free),
-                free_bytes: free,
-                source: total.source,
-                unified: true,
-            };
-        }
-        // macOS unified / meminfo unavailable: fall through to the used-probe.
+    #[cfg(target_os = "linux")]
+    if let Some(avail) = query_meminfo_available_bytes_at(std::path::Path::new("/proc/meminfo")) {
+        let free = avail.min(total.total_bytes);
+        return MemorySnapshot {
+            total_bytes: total.total_bytes,
+            used_bytes: total.total_bytes.saturating_sub(free),
+            free_bytes: free,
+            source: total.source,
+            unified,
+        };
     }
-
-    // Discrete GPU (or unified fallback): free = total − currently-used.
     let used = detect_used_vram();
-    let used_bytes = used.used_bytes;
-    let free = total.total_bytes.saturating_sub(used_bytes);
+    let used_bytes = used.used_bytes.min(total.total_bytes);
     MemorySnapshot {
         total_bytes: total.total_bytes,
         used_bytes,
-        free_bytes: free,
+        free_bytes: total.total_bytes.saturating_sub(used_bytes),
         source: if used.source != VramSource::None {
             used.source
         } else {
@@ -420,6 +438,42 @@ pub fn current_memory_snapshot() -> MemorySnapshot {
         },
         unified,
     }
+}
+
+/// Combined VRAM+GTT `(total, used)` from AMD/Intel DRM sysfs — the all-process
+/// driver counters `nvtop` sums. `used` defaults to 0 when idle; a `total` of 0
+/// (no GPU node) returns `None`.
+#[cfg(target_os = "linux")]
+fn query_linux_drm_total_used() -> Option<(u64, u64)> {
+    // Max-within-field-list avoids double-counting vram vs vis_vram (vis is a
+    // subset); max-across-nodes ignores 0-valued connector entries.
+    let vram_total =
+        query_linux_drm_memory_fields(&["mem_info_vram_total", "mem_info_vis_vram_total"])
+            .unwrap_or(0);
+    let gtt_total = query_linux_drm_memory_fields(&["mem_info_gtt_total"]).unwrap_or(0);
+    let total = vram_total.saturating_add(gtt_total);
+    if total == 0 {
+        return None;
+    }
+    let vram_used =
+        query_linux_drm_memory_fields(&["mem_info_vram_used", "mem_info_vis_vram_used"])
+            .unwrap_or(0);
+    let gtt_used = query_linux_drm_memory_fields(&["mem_info_gtt_used"]).unwrap_or(0);
+    Some((total, vram_used.saturating_add(gtt_used)))
+}
+
+/// Whether the primary DRM GPU is an integrated/unified-memory part (AMD/Intel
+/// display controller with a non-trivial GTT). Informational for the snapshot's
+/// `unified` flag; does not affect the byte figures.
+#[cfg(target_os = "linux")]
+fn drm_is_integrated_unified() -> bool {
+    let Some(dev) = collect_linux_drm_device_info_at(std::path::Path::new("/sys/class/drm")) else {
+        return false;
+    };
+    let integrated_vendor = matches!(dev.vendor, 0x1002 | 0x8086);
+    let display_controller = (dev.class >> 16) == 0x03;
+    let non_trivial_gtt = dev.gtt_total >= 1024 * 1024 * 1024;
+    integrated_vendor && display_controller && non_trivial_gtt
 }
 
 /// Free accelerator memory in bytes right now (0 if undetectable). Thin
@@ -484,7 +538,17 @@ fn query_nvidia_smi_field(field: &str) -> Option<u64> {
 /// entries do not add the same GPU multiple times.
 #[cfg(target_os = "linux")]
 fn query_linux_drm_used_vram() -> Option<u64> {
-    query_linux_drm_memory_fields(&["mem_info_vram_used", "mem_info_vis_vram_used"])
+    // VRAM + GTT: on an integrated/APU part a coexisting job's footprint spills
+    // into GTT (system-RAM-backed GPU memory) past the VRAM carveout, so
+    // counting VRAM alone undercounts it badly (e.g. a 40 GB llama.cpp model
+    // shows ~0 in `mem_info_vram_used` if it lives in GTT). Summing both matches
+    // what nvtop/rocm-smi report. `max` within each field-list avoids
+    // double-counting vram vs vis_vram.
+    let vram = query_linux_drm_memory_fields(&["mem_info_vram_used", "mem_info_vis_vram_used"])
+        .unwrap_or(0);
+    let gtt = query_linux_drm_memory_fields(&["mem_info_gtt_used"]).unwrap_or(0);
+    let total = vram.saturating_add(gtt);
+    (total > 0).then_some(total)
 }
 
 #[cfg(target_os = "linux")]

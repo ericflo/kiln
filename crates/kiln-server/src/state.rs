@@ -1642,14 +1642,29 @@ impl AppState {
         // Detect VRAM once and reuse it for both auto-sizing and reporting so
         // startup doesn't repeat the same probe/logging path.
         let vram_info = kiln_memory::vram::detect_vram();
-        // `device_kt` is the (already kt-typed) device param after #1082;
-        // the previous candle->kt bridge that lived here is gone.
-        let total_vram = detected_gpu_total_memory(&device_kt, &vram_info);
         let is_metal = is_metal_device(&device_kt);
 
+        // Total AND used come from the SAME live, all-process driver snapshot
+        // (VRAM+GTT on AMD, nvidia-smi on NVIDIA) so they're mutually consistent
+        // and both account for any coexisting GPU workload (e.g. a llama.cpp
+        // server). Falling back to the static `detected_gpu_total_memory` only
+        // when the driver snapshot is unavailable (e.g. Apple Metal). Without
+        // this, total came from the carveout heuristic while used came from the
+        // snapshot — and `used` could exceed `total`.
+        let snap = if device_kt.backend() != kiln_tensor::Backend::Cpu {
+            let s = kiln_memory::vram::current_memory_snapshot();
+            (s.total_bytes > 0).then_some(s)
+        } else {
+            None
+        };
+        let total_vram = snap
+            .map(|s| s.total_bytes)
+            .unwrap_or_else(|| detected_gpu_total_memory(&device_kt, &vram_info));
+
         let post_load_used_vram_info = runtime_used_vram_for_device(&device_kt);
-        let post_load_used_vram = post_load_used_vram_info
-            .map(|info| info.used_bytes)
+        let post_load_used_vram = snap
+            .map(|s| s.used_bytes)
+            .or_else(|| post_load_used_vram_info.map(|info| info.used_bytes))
             .unwrap_or(0);
         let mut sizing_residency_bytes = post_load_used_vram.max(estimated_model_bytes);
         // Vulkan keeps BOTH the paged KV pool AND the resident-decode weight
@@ -1663,10 +1678,15 @@ impl AppState {
                 sizing_residency_bytes.saturating_add(estimated_model_bytes.saturating_mul(2));
         }
         if post_load_used_vram > 0 {
+            let used_source = snap
+                .map(|s| s.source)
+                .or_else(|| post_load_used_vram_info.map(|i| i.source))
+                .unwrap_or(kiln_memory::vram::VramSource::None);
             tracing::info!(
                 post_load_used_vram_gb = post_load_used_vram as f64 / 1e9,
+                total_vram_gb = total_vram as f64 / 1e9,
                 estimated_model_gb = estimated_model_bytes as f64 / 1e9,
-                source = %post_load_used_vram_info.unwrap().source,
+                source = %used_source,
                 "post-load device residency snapshot for KV sizing"
             );
         } else {
