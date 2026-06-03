@@ -79,6 +79,8 @@ mod active_rocm_stream;
 #[cfg(feature = "rocm")]
 mod rocm_allocator;
 #[cfg(feature = "rocm")]
+mod rocm_capture_alloc;
+#[cfg(feature = "rocm")]
 mod rocm_matmul;
 #[cfg(feature = "rocm")]
 mod rocm_ops;
@@ -179,6 +181,10 @@ pub use vulkan_storage::{
 pub use active_rocm_stream::{active_rocm_stream, with_active_rocm_stream};
 #[cfg(feature = "rocm")]
 pub use rocm_allocator::RocmAllocator;
+#[cfg(feature = "rocm")]
+pub use rocm_capture_alloc::{
+    rocm_capture_arena_active, rocm_capture_arena_alloc, with_rocm_capture_arena, RocmCaptureArena,
+};
 #[cfg(feature = "rocm")]
 pub use rocm_storage::{
     host_to_rocm_copy, host_to_rocm_copy_ctx, primary_rocm_context, rocm_contiguous,

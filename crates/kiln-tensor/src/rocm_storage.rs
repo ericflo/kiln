@@ -162,6 +162,12 @@ impl RocmStorage {
         dtype: DType,
         n_elements: usize,
     ) -> Result<Self> {
+        // HIP-graph freeze-pointers (R.9): while a capture arena is active on
+        // this thread, route through it (Borrowed view into a pre-allocated,
+        // pointer-stable arena buffer) instead of a fresh hipMallocAsync.
+        if let Some(result) = crate::rocm_capture_arena_alloc(dtype, n_elements, true) {
+            return result;
+        }
         let byte_len = dtype.packed_buffer_bytes(n_elements);
         let slice = crate::active_rocm_stream(ctx)
             .alloc_zeros(byte_len)
@@ -188,6 +194,12 @@ impl RocmStorage {
         dtype: DType,
         n_elements: usize,
     ) -> Result<Self> {
+        // HIP-graph freeze-pointers (R.9): see `zeros_ctx`. `zero = false` here
+        // — the arena hands out an uninitialized Borrowed view on Record, and on
+        // Replay re-zeros only under KILN_ARENA_FORCE_ZERO.
+        if let Some(result) = crate::rocm_capture_arena_alloc(dtype, n_elements, false) {
+            return result;
+        }
         let byte_len = dtype.packed_buffer_bytes(n_elements);
         let slice = crate::active_rocm_stream(ctx).alloc(byte_len).map_err(|e| {
             Error::Msg(format!(

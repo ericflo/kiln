@@ -384,6 +384,27 @@ impl RocmStream {
         )
     }
 
+    /// Zero `len` bytes at a caller-supplied raw device pointer on this stream,
+    /// WITHOUT synchronizing. The HIP-graph capture arena (R.9) uses this during
+    /// the replay (capture) pass: issued on the active capture stream it is
+    /// RECORDED into the graph, so every replay re-zeros the read-before-write
+    /// arena buffers. The ROCm analog of cudarc's `result::memset_d8_async`.
+    ///
+    /// # Safety
+    /// `dst` must point to at least `len` bytes of a live device allocation
+    /// reachable from this stream's device.
+    pub unsafe fn memset_zero_async(&self, dst: *mut c_void, len: usize) -> Result<()> {
+        if len == 0 {
+            return Ok(());
+        }
+        self.bind()?;
+        // SAFETY: caller guarantees `dst` addresses >= len live device bytes.
+        check(
+            unsafe { sys::hipMemsetD8Async(dst, 0, len, self.handle) },
+            "hipMemsetD8Async",
+        )
+    }
+
     /// Allocate a device buffer of `src.len()` bytes and copy `src` into it
     /// (H2D), synchronizing before return. The one-shot analog of cudarc's
     /// `CudaStream::clone_htod`.
