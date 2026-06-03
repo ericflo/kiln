@@ -18583,11 +18583,11 @@ fn try_flash_attn_paged_decode(
         Some(p) => p,
         None => return Ok(None),
     };
-    // #1082: `PagedKvCacheKt::pool_tensors` already returns kt pool references
-    // (`&KtTensor`), and every downstream consumer (kt `.narrow`, the kt backend
-    // decode methods, the kt flash-attn FFI) is kt now. The legacy candle→kt
-    // borrow/`candle_to_kt_activation` bridges are gone — use the kt pools
-    // directly.
+    // #26: `pool_tensors` now returns OWNED clones (cheap Arc bumps; the pools
+    // live behind an RwLock for live resize). Re-borrow as `&KtTensor` so every
+    // downstream consumer below is unchanged — the owned tensors stay alive in
+    // this scope and keep the pool storage pinned for the whole decode step.
+    let (k_pool, v_pool) = (&k_pool, &v_pool);
 
     // Common macOS/desktop case: a single sequence receives freshly-allocated
     // blocks, so its whole live KV window is already one contiguous run in the
@@ -19798,6 +19798,9 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
     let (k_pool, v_pool) = paged_cache
         .pool_tensors(full_attn_layer_idx)
         .context("batched contiguous paged attention layer index out of range")?;
+    // #26: pool_tensors returns owned clones now — re-borrow so downstream is
+    // unchanged (owned tensors stay alive for this scope, pinning the storage).
+    let (k_pool, v_pool) = (&k_pool, &v_pool);
     // Prefer the once-per-step cached tensors when the caller built them;
     // otherwise use the per-layer ones we built above.
     let block_table_tensor: &Tensor = match (cached_meta, own_block_table_tensor.as_ref()) {
@@ -20826,8 +20829,8 @@ fn gqa_attention_paged_with_rope_tables(
                     // #1082: `PagedKvCacheKt::pool_tensors` already yields kt pool
                     // references; pass them straight to the kt backend read.
                     backend.paged_kv_head_major_read_append_token_major(
-                        k_pool,
-                        v_pool,
+                        &k_pool,
+                        &v_pool,
                         start_slot,
                         start_pos,
                         &k_cache_token_major,
@@ -20875,8 +20878,8 @@ fn gqa_attention_paged_with_rope_tables(
                     // #1082: `PagedKvCacheKt::pool_tensors` already yields kt pool
                     // references; pass them straight to the kt backend read.
                     backend.paged_kv_head_major_read(
-                        k_pool,
-                        v_pool,
+                        &k_pool,
+                        &v_pool,
                         start_slot,
                         fast_read_len,
                     )
