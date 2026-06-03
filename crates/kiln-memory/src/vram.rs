@@ -160,23 +160,28 @@ fn detect_linux_drm_vram_at(
 ) -> Option<GpuVramInfo> {
     let device = collect_linux_drm_device_info_at(drm_base)?;
     let mem_total = query_meminfo_total_bytes_at(meminfo_path);
+    let unified = mem_total
+        .map(|mt| is_unified_memory_drm(&device, mt))
+        .unwrap_or(false);
 
-    if let Some(mem_total_bytes) = mem_total
-        && is_unified_memory_drm(&device, mem_total_bytes)
-    {
-        let reserve = unified_memory_reserve_bytes(mem_total_bytes);
-        let corrected = device
-            .vram_total
-            .min(mem_total_bytes.saturating_sub(reserve));
-        return Some(GpuVramInfo {
-            total_bytes: corrected,
-            source: VramSource::LinuxDrmSysfsUnified,
-        });
-    }
-
+    // The honest GPU-addressable total is the driver's VRAM + GTT — exactly what
+    // nvtop / rocm-smi report. On an integrated APU the GTT is the system-RAM-
+    // backed budget the GPU can actually use (often far larger than the BIOS
+    // VRAM carveout); on a discrete card the GTT is a small staging area, so
+    // vram+gtt ≈ vram. We deliberately DON'T cap this against /proc/meminfo
+    // anymore: inside a cgroup/sandbox `MemTotal` reads a fake-small limit (e.g.
+    // 32 GB on a 128 GB box), which wrongly slashed the budget. Safety headroom
+    // is the consumer's job (KV `inference_fraction`, the training reserve) and
+    // they should size against live FREE (`current_memory_snapshot`) so a
+    // coexisting GPU job is accounted for — total here is just the ceiling.
+    let total = device.vram_total.saturating_add(device.gtt_total);
     Some(GpuVramInfo {
-        total_bytes: device.vram_total,
-        source: VramSource::LinuxDrmSysfs,
+        total_bytes: total,
+        source: if unified {
+            VramSource::LinuxDrmSysfsUnified
+        } else {
+            VramSource::LinuxDrmSysfs
+        },
     })
 }
 
@@ -277,6 +282,7 @@ fn is_unified_memory_drm(device: &LinuxDrmDeviceInfo, mem_total_bytes: u64) -> b
 ///
 /// Matches the Apple Silicon path: `max(6 GB, MemTotal / 4)`. Override
 /// with `KILN_TRAINING_MEMORY_RESERVE_GB` (parsed as f64).
+#[cfg_attr(not(test), allow(dead_code))]
 fn unified_memory_reserve_bytes(mem_total_bytes: u64) -> u64 {
     if let Ok(val) = std::env::var("KILN_TRAINING_MEMORY_RESERVE_GB") {
         if let Ok(gb) = val.parse::<f64>() {
@@ -1415,24 +1421,16 @@ mod tests {
         )
         .unwrap();
 
+        // The device is still RECOGNIZED as unified (so the source flag is set),
+        // but we no longer CAP the total against /proc/meminfo — that cap was the
+        // bug: on a big-RAM APU (and inside a memory-limited cgroup/sandbox) it
+        // slashed the real budget. The honest total is the driver's VRAM+GTT,
+        // which the GPU can genuinely address.
         assert!(is_unified_memory_drm(&device, mem_total));
-
-        // KILN_TRAINING_MEMORY_RESERVE_GB may leak from a parent test
-        // process; clear it so the assertion is deterministic. SAFETY:
-        // env mutation is safe under nextest's per-test process isolation.
-        unsafe { std::env::remove_var("KILN_TRAINING_MEMORY_RESERVE_GB") };
-        let reserve = unified_memory_reserve_bytes(mem_total);
-        // Default reserve = max(6 GB, MemTotal/4) = max(6, 7.5) = 7.5 GB.
-        assert_eq!(reserve, mem_total / 4);
-
         let info = detect_linux_drm_vram_at(&root, &meminfo_path).unwrap();
         assert_eq!(info.source, VramSource::LinuxDrmSysfsUnified);
-        // Corrected = min(carveout, MemTotal − reserve) = MemTotal − reserve.
-        assert_eq!(info.total_bytes, mem_total - reserve);
-        // Sanity-check the order of magnitude — corrected budget must
-        // sit between 14 and 24 GB on a 30 GB box.
-        let gb = info.total_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
-        assert!((14.0..=24.0).contains(&gb), "corrected budget = {gb} GB");
+        // total = vram_total + gtt_total (NOT capped to MemTotal − reserve).
+        assert_eq!(info.total_bytes, 103_079_215_104 + 16_629_477_376);
 
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -1474,7 +1472,8 @@ mod tests {
 
         let info = detect_linux_drm_vram_at(&root, &meminfo_path).unwrap();
         assert_eq!(info.source, VramSource::LinuxDrmSysfs);
-        assert_eq!(info.total_bytes, 17_179_869_184);
+        // total = vram (16 GiB) + gtt (256 MiB staging) on a discrete card.
+        assert_eq!(info.total_bytes, 17_179_869_184 + 268_435_456);
 
         std::fs::remove_dir_all(root).unwrap();
     }
