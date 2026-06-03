@@ -110,6 +110,69 @@ pub fn vk_matmul_batched_no_grad(a: &VkTensor, b: &VkTensor) -> Result<VkTensor>
     ))
 }
 
+fn dispatch_matmul_batched_bf16(
+    device: &VulkanDevice,
+    a: &VulkanBuffer,
+    b: &VulkanBuffer,
+    out: &VulkanBuffer,
+    batch: usize,
+    m: usize,
+    n: usize,
+    k: usize,
+) -> Result<()> {
+    let wg_x = ((n + 15) / 16) as u32;
+    let wg_y = ((m + 15) / 16) as u32;
+    let wg_z = batch as u32;
+    let push = [batch as u32, m as u32, n as u32, k as u32];
+    dispatch_3d(
+        device,
+        "vk_matmul_batched_bf16",
+        &[a.handle(), b.handle(), out.handle()],
+        &push,
+        (wg_x, wg_y, wg_z),
+    )
+}
+
+fn check_batched_matmul_bf16(a: &VkTensor, b: &VkTensor) -> Result<(usize, usize, usize, usize)> {
+    anyhow::ensure!(
+        a.shape().len() == 3 && b.shape().len() == 3,
+        "vk_matmul_batched_bf16: rank-3 required, got {:?}/{:?}",
+        a.shape(),
+        b.shape()
+    );
+    anyhow::ensure!(
+        a.dtype() == VkDType::Bf16 && b.dtype() == VkDType::Bf16,
+        "vk_matmul_batched_bf16: BF16-only"
+    );
+    let ba = a.shape()[0];
+    let m = a.shape()[1];
+    let k = a.shape()[2];
+    let bb = b.shape()[0];
+    let kk = b.shape()[1];
+    let n = b.shape()[2];
+    anyhow::ensure!(ba == bb, "batch mismatch: {ba} vs {bb}");
+    anyhow::ensure!(k == kk, "inner-dim mismatch: {k} vs {kk}");
+    Ok((ba, m, n, k))
+}
+
+/// Batched BF16 GEMM: `a`,`b` BF16 `[B,M,K]@[B,K,N]`, returns an **F32**
+/// `[B,M,N]`. BF16 inputs are read (and accumulated) as F32 in-shader; the
+/// output is F32 to avoid an inter-lane write race on the packed BF16 words.
+/// The caller casts F32→BF16 resident (`vulkan_cast`) when a BF16 result is
+/// required — keeping the attention-core GEMM off the host for the BF16
+/// inference model.
+pub fn vk_matmul_batched_bf16_no_grad(a: &VkTensor, b: &VkTensor) -> Result<VkTensor> {
+    let (batch, m, n, k) = check_batched_matmul_bf16(a, b)?;
+    let out = alloc_f32(a.device(), batch * m * n)?;
+    dispatch_matmul_batched_bf16(a.device(), a.buffer(), b.buffer(), &out, batch, m, n, k)?;
+    Ok(VkTensor::from_buffer(
+        out,
+        vec![batch, m, n],
+        VkDType::F32,
+        Arc::clone(a.device()),
+    ))
+}
+
 pub fn vk_transpose_batched_2d_no_grad(t: &VkTensor) -> Result<VkTensor> {
     anyhow::ensure!(
         t.shape().len() == 3,

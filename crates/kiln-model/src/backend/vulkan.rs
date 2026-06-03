@@ -684,6 +684,56 @@ fn kt_tensor_to_f32_bytes_with_shape(
     Ok((bytemuck::cast_slice(&f32_data).to_vec(), shape))
 }
 
+/// Resident single-sequence (batch==1) causal prefill SDPA — the buffer-based,
+/// fully on-device replacement for the bytes path in `flash_attn_prefill_vulkan`.
+///
+/// q/k/v arrive `[1, seq_len, num_heads, head_dim]` (k/v already GQA-expanded
+/// to `num_heads` by the caller). Squeeze the batch axis to the rank-3
+/// `[seq, heads, head_dim]` layout `vk_sdpa_prefill` consumes, bridge zero-copy
+/// (F32, contiguous, whole-buffer), run the fused on-device SDPA, bridge the
+/// result back, and restore the `[1, seq, heads, head_dim]` shape + input
+/// dtype. No D2H/H2D round-trip.
+#[allow(clippy::too_many_arguments)]
+fn resident_sdpa_prefill_b1(
+    q: &kiln_tensor::Tensor,
+    k: &kiln_tensor::Tensor,
+    v: &kiln_tensor::Tensor,
+    seq_len: usize,
+    num_heads: usize,
+    head_dim: usize,
+    scale: f32,
+) -> Result<kiln_tensor::Tensor> {
+    use kiln_tensor::{kt_tensor_from_vk, vk_tensor_from_kt, DType, Device};
+
+    // F32, [seq, heads, head_dim], contiguous, start_offset==0 (the bridge
+    // contract). `to_dtype`/`contiguous` are resident on Vulkan (no host hop);
+    // both are no-ops when the activation is already F32 + contiguous.
+    let prep = |t: &kiln_tensor::Tensor| -> Result<kiln_tensor::Tensor> {
+        Ok(t.to_dtype(DType::F32)?
+            .reshape((seq_len, num_heads, head_dim))?
+            .contiguous()?)
+    };
+    let qf = prep(q)?;
+    let kf = prep(k)?;
+    let vf = prep(v)?;
+    let device_index = match qf.device() {
+        Device::Vulkan(i) => i,
+        _ => anyhow::bail!("resident_sdpa_prefill_b1: not Vulkan-resident after prep"),
+    };
+
+    let vk_q = vk_tensor_from_kt(&qf)?;
+    let vk_k = vk_tensor_from_kt(&kf)?;
+    let vk_v = vk_tensor_from_kt(&vf)?;
+    let vk_out = kiln_vulkan_kernel::vk_ops::attention::vk_sdpa_prefill(&vk_q, &vk_k, &vk_v, scale)?;
+    let out =
+        kt_tensor_from_vk(&vk_out, device_index)?.reshape((1usize, seq_len, num_heads, head_dim))?;
+    Ok(if q.dtype() == DType::F32 {
+        out
+    } else {
+        out.to_dtype(q.dtype())?
+    })
+}
+
 /// kt-native: wrap f32 bytes as a kt tensor
 /// (CPU-host, the Vulkan activation residency), no candle bridge. (#1082)
 #[inline]
@@ -1733,6 +1783,28 @@ impl VulkanBackend {
             || v_head_dim != head_dim
         {
             return Ok(None);
+        }
+
+        // Resident buffer-based SDPA for the common single-sequence causal
+        // case: zero-copy bridge q/k/v → fused on-device `vk_sdpa_prefill`
+        // (permute → batched matmul → scale → causal-mask → softmax → matmul,
+        // all resident) → bridge back. No host round-trip. batch>1 (the kernel
+        // flattens query rows to one sequence, so cross-batch attention would
+        // be wrong) and non-causal fall through to the bytes path below.
+        if causal
+            && batch == 1
+            && matches!(q.device(), kiln_tensor::Device::Vulkan(_))
+            && matches!(k.device(), kiln_tensor::Device::Vulkan(_))
+            && matches!(v.device(), kiln_tensor::Device::Vulkan(_))
+        {
+            match resident_sdpa_prefill_b1(q, k, v, seq_len, num_heads, head_dim, softmax_scale) {
+                Ok(out) => return Ok(Some(out)),
+                Err(e) => {
+                    if std::env::var("KILN_VK_TRACE").is_ok() {
+                        eprintln!("[vk] resident sdpa_prefill fell back to bytes: {e}");
+                    }
+                }
+            }
         }
 
         let in_dtype = q.dtype();

@@ -167,7 +167,8 @@ impl DeviceOp2 for MatmulOp {
         // unequal/sub-matrix ranks, or non-Vulkan storage — returns Ok(None)
         // so `dispatch2` runs the CPU reference and copies the result back to
         // Vulkan (correct, slower).
-        if a.dtype() != DType::F32 || b.dtype() != DType::F32 {
+        let dt = a.dtype();
+        if !matches!(dt, DType::F32 | DType::BF16) || b.dtype() != dt {
             return Ok(None);
         }
         if !a.is_contiguous() || !b.is_contiguous() {
@@ -190,6 +191,13 @@ impl DeviceOp2 for MatmulOp {
         if ar < 2 || ar != br {
             // Sub-matrix or unequal ranks: `validate()` would bail; let the
             // host reference report the error instead.
+            return Ok(None);
+        }
+        // The rank-2 GEMM (`vulkan_matmul`) is F32-only; BF16 rank-2 has no
+        // resident kernel here, so fall back to the host reference. BF16
+        // rank≥3 (the attention-core / GDN batched GEMMs for the BF16 model)
+        // routes through the batched kernel.
+        if dt == DType::BF16 && ar == 2 {
             return Ok(None);
         }
         // Re-validate the full shape/dtype contract (contraction dim,
@@ -626,6 +634,73 @@ mod tests {
         assert!(
             max_abs_err < 1e-4,
             "rank-4 batched matmul diverges from CPU ref: max_abs_err={max_abs_err}"
+        );
+    }
+
+    /// Batched BF16 matmul (the attention-core path for the BF16 model) must
+    /// match the CPU BF16 reference and stay Vulkan-resident. Inputs are
+    /// small integers exactly representable in BF16, with the accumulation
+    /// kept small enough that the result is exact in BF16 — so the on-device
+    /// (bf16-read, F32-accumulate, F32-out → cast BF16) path is byte-exact
+    /// with the host (F32-accumulate → cast BF16) reference.
+    #[cfg(feature = "vulkan")]
+    #[test]
+    fn matmul_vulkan_batched_bf16_parity_rank4() {
+        if !vulkan_test_enabled() {
+            eprintln!("skip: KILN_TENSOR_VULKAN_TEST unset");
+            return;
+        }
+        if crate::primary_vulkan_device(0).is_err() {
+            eprintln!("skip: no Vulkan device");
+            return;
+        }
+        let dev = crate::Device::Vulkan(0);
+
+        // [B=2, H=2, S=3, D=4] @ [2,2,4,5] = [2,2,3,5]. Small ints (0..3).
+        let (b_, h, s, d, n) = (2usize, 2usize, 3usize, 4usize, 5usize);
+        let a_data: Vec<f32> = (0..b_ * h * s * d).map(|i| (i % 4) as f32).collect();
+        let b_data: Vec<f32> = (0..b_ * h * d * n).map(|i| (i % 3) as f32).collect();
+
+        let a_cpu = Tensor::from_slice(&a_data, vec![b_, h, s, d])
+            .unwrap()
+            .to_dtype(DType::BF16)
+            .unwrap();
+        let b_cpu = Tensor::from_slice(&b_data, vec![b_, h, d, n])
+            .unwrap()
+            .to_dtype(DType::BF16)
+            .unwrap();
+        let ref_vals = read_f32(&matmul(&a_cpu, &b_cpu).unwrap().to_dtype(DType::F32).unwrap());
+
+        let a_vk = Tensor::from_vec_on(dev, a_data.clone(), vec![b_, h, s, d])
+            .unwrap()
+            .to_dtype(DType::BF16)
+            .unwrap();
+        let b_vk = Tensor::from_vec_on(dev, b_data.clone(), vec![b_, h, d, n])
+            .unwrap()
+            .to_dtype(DType::BF16)
+            .unwrap();
+        let accepted = MatmulOp.vulkan_fwd(&a_vk, &b_vk).unwrap();
+        assert!(accepted.is_some(), "BF16 batched matmul must run resident");
+
+        let c_vk = matmul(&a_vk, &b_vk).unwrap();
+        assert_eq!(c_vk.shape(), &[b_, h, s, n]);
+        assert_eq!(c_vk.device(), dev, "BF16 result must stay on Vulkan");
+        assert_eq!(c_vk.dtype(), DType::BF16, "BF16 in → BF16 out");
+        let got = c_vk
+            .to_device(crate::Device::Cpu)
+            .unwrap()
+            .to_dtype(DType::F32)
+            .unwrap()
+            .to_vec::<f32>()
+            .unwrap();
+        let mut max_abs_err = 0.0f32;
+        for (g, r) in got.iter().zip(ref_vals.iter()) {
+            max_abs_err = max_abs_err.max((g - r).abs());
+        }
+        eprintln!("matmul_vulkan_batched_bf16_parity_rank4: max_abs_err = {max_abs_err:e}");
+        assert!(
+            max_abs_err < 0.5,
+            "BF16 batched matmul diverges from CPU ref: max_abs_err={max_abs_err}"
         );
     }
 }

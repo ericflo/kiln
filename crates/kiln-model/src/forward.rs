@@ -7036,6 +7036,35 @@ pub fn rms_norm(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor> {
         // training branch: training is CUDA-BF16 / kt-tape only now; Vulkan is
         // inference-only.
     }
+    // Resident Vulkan RMSNorm: when the activation `x` is already
+    // Vulkan-backed (the resident inference path — activations are F32 via
+    // `vulkan_cast_activation_to_f32`), run the fused `qwen_rmsnorm_forward`
+    // kernel zero-copy via `vulkan_rmsnorm_last_axis` instead of the
+    // multi-dispatch `rms_norm_fallback` (mean/rsqrt/mul) or the CPU-input
+    // bytes path above. Identical `(1+w)*x*rsqrt(mean(x^2)+eps)` Qwen
+    // semantics (same shader). The kernel is F32-only, so cast x/weight to F32
+    // (a no-op on the F32 activation path) and back — keeping BF16 supported
+    // for free. The weight is a small `[hidden]` vector; aligning it to the
+    // device is a no-op once the model is resident.
+    #[cfg(feature = "vulkan")]
+    if crate::backend::vulkan_active()
+        && matches!(x.device(), Device::Vulkan(_))
+        && !x.track_op()
+        && !weight.track_op()
+    {
+        let in_dtype = x.dtype();
+        let x32 = x.contiguous()?.to_dtype(DType::F32)?;
+        let w32 = weight
+            .to_device(x.device())?
+            .contiguous()?
+            .to_dtype(DType::F32)?;
+        let out32 = kiln_tensor::vulkan_rmsnorm_last_axis(&x32, &w32, eps as f32)?;
+        return if in_dtype == DType::F32 {
+            Ok(out32)
+        } else {
+            Ok(out32.to_dtype(in_dtype)?)
+        };
+    }
     rms_norm_fallback(x, weight, eps)
 }
 
