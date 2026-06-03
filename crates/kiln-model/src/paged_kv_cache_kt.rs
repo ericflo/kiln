@@ -339,7 +339,7 @@ impl PagedKvCacheKt {
     /// This is NOT capturable under a CUDA graph (the D2H read forces a
     /// sync), so FP8 caches must run with graph capture disabled — the
     /// same constraint the candle path imposed by declining FP8 here.
-    #[cfg(feature = "cuda")]
+    #[cfg(any(feature = "cuda", feature = "rocm"))]
     pub fn write_token_major_native_graph_slot(
         &self,
         layer_idx: usize,
@@ -357,6 +357,13 @@ impl PagedKvCacheKt {
         let (k_pool, v_pool) = &self.layers[layer_idx];
 
         if self.fp8 {
+            // FP8 graph-slot quantized write is CUDA-only (cuda_fp8_quantize_direct).
+            // On other backends signal "not done" so the caller falls back to the
+            // non-graph KV write path.
+            #[cfg(not(feature = "cuda"))]
+            return Ok(false);
+            #[cfg(feature = "cuda")]
+            {
             // Read the device slot index host-side (one 4-byte D2H), then
             // quantize + slice_set into the U8 pool. Squeeze the seq_len=1
             // dim so the quantized rows are [num_kv_heads, head_dim]-shaped
@@ -386,6 +393,7 @@ impl PagedKvCacheKt {
                 .slice_set(&v_q, 0, slot_idx)
                 .map_err(|e| anyhow::anyhow!("kt pkv fp8 graph_slot: slice_set v: {e}"))?;
             return Ok(true);
+            }
         }
 
         kiln_flash_attn::paged_kv_write_token_major_bf16_slot_kt(k_pool, v_pool, k, v, slot)

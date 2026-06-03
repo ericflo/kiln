@@ -18416,7 +18416,7 @@ pub fn gqa_attention(
     )
 }
 
-#[cfg(feature = "cuda")]
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 pub(crate) struct PagedDecodeGraphInputs<'a> {
     pub block_table: &'a Tensor,
     pub seqused_k: &'a Tensor,
@@ -18516,7 +18516,7 @@ fn try_flash_attn_paged_decode(
     attn_weights: &GpuFullAttentionWeights,
     lora_layer: Option<&LoraLayerWeights>,
     lora_scale: f32,
-    #[cfg(feature = "cuda")] graph_inputs: Option<&PagedDecodeGraphInputs<'_>>,
+    #[cfg(any(feature = "cuda", feature = "rocm"))] graph_inputs: Option<&PagedDecodeGraphInputs<'_>>,
     profile_context: Option<(usize, usize)>,
     // Phase 7 #1082: kt twin of `paged_cache` for parity-checked
     // accessor reads. When `Some` AND the env gate is on,
@@ -18826,7 +18826,7 @@ fn try_flash_attn_paged_decode(
     let device = q.device();
     let bt_tensor_owned;
     let bt_tensor = {
-        #[cfg(feature = "cuda")]
+        #[cfg(any(feature = "cuda", feature = "rocm"))]
         {
             if let Some(inputs) = graph_inputs {
                 inputs.block_table
@@ -18836,7 +18836,7 @@ fn try_flash_attn_paged_decode(
                 &bt_tensor_owned
             }
         }
-        #[cfg(not(feature = "cuda"))]
+        #[cfg(not(any(feature = "cuda", feature = "rocm")))]
         {
             bt_tensor_owned =
                 Tensor::new(padded.as_slice(), device)?.reshape((1usize, max_blocks_per_seq))?;
@@ -18865,17 +18865,17 @@ fn try_flash_attn_paged_decode(
 
     let stage_profile = start_full_attn_stage_profile(&q.device(), profile_context)?;
     let attn_out = {
-        #[cfg(feature = "cuda")]
+        #[cfg(any(feature = "cuda", feature = "rocm"))]
         {
             if let Some(inputs) = graph_inputs {
                 let attn_out = inputs.attn_out.get(full_attn_layer_idx).ok_or_else(|| {
                     anyhow::anyhow!(
-                        "missing CUDA graph paged decode output buffer for full-attention layer {full_attn_layer_idx}"
+                        "missing graph paged decode output buffer for full-attention layer {full_attn_layer_idx}"
                     )
                 })?;
                 let softmax_lse = inputs.softmax_lse.get(full_attn_layer_idx).ok_or_else(|| {
                     anyhow::anyhow!(
-                        "missing CUDA graph paged decode LSE buffer for full-attention layer {full_attn_layer_idx}"
+                        "missing graph paged decode LSE buffer for full-attention layer {full_attn_layer_idx}"
                     )
                 })?;
                 // Phase 7 (#1082): route through the new kt-typed
@@ -18927,7 +18927,7 @@ fn try_flash_attn_paged_decode(
                 }
             }
         }
-        #[cfg(not(feature = "cuda"))]
+        #[cfg(not(any(feature = "cuda", feature = "rocm")))]
         {
             match backend.flash_attn_paged_decode(
                 &q_fa,
@@ -20031,7 +20031,7 @@ pub fn gqa_attention_paged(
         full_attn_layer_idx,
         attn_output_gate,
         lora,
-        #[cfg(feature = "cuda")]
+        #[cfg(any(feature = "cuda", feature = "rocm"))]
         None,
         // Phase 7 #1082: no kt twin plumbed through this wrapper yet
         // — the cache-owning struct migration that allocates one via
@@ -20061,7 +20061,7 @@ fn gqa_attention_paged_with_rope_tables(
     full_attn_layer_idx: usize,
     attn_output_gate: bool,
     lora: Option<(&LoraLayerWeights, f32)>,
-    #[cfg(feature = "cuda")] graph_inputs: Option<&PagedDecodeGraphInputs<'_>>,
+    #[cfg(any(feature = "cuda", feature = "rocm"))] graph_inputs: Option<&PagedDecodeGraphInputs<'_>>,
     // Phase 7 #1082: kt twin of `paged_cache` used to mirror the
     // CUDA-graph paged-KV write to the kt cache when the env gate
     // `KILN_USE_KT_PAGED_KV_CACHE` is on. `None` means "gate off,
@@ -20568,19 +20568,21 @@ fn gqa_attention_paged_with_rope_tables(
         let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
         kiln_nvtx::range!(c"kiln/kv/copy");
         let graph_write_done = {
-            #[cfg(feature = "cuda")]
+            #[cfg(any(feature = "cuda", feature = "rocm"))]
             {
                 if let Some(inputs) = graph_inputs {
                     // #1082: `PagedKvCacheKt::write_token_major_native_graph_slot`
                     // takes kt tensors; `k_cache_token_major`/`v_cache_token_major`
                     // and `inputs.kv_slot` are already kt, so pass them with no
-                    // candle bridge.
+                    // candle bridge. ROCm: the primary cache is already a
+                    // `PagedKvCacheKt`, so the kt-twin mirror below is CUDA-only.
                     let done = paged_cache.write_token_major_native_graph_slot(
                         full_attn_layer_idx,
                         &k_cache_token_major,
                         &v_cache_token_major,
                         inputs.kv_slot,
                     )?;
+                    #[cfg(feature = "cuda")]
                     // Phase 7 #1082: when the legacy PagedKvCache writer
                     // succeeded and a kt twin cache is plumbed through (i.e. the
                     // `KILN_USE_KT_PAGED_KV_CACHE` gate is on and the
@@ -20610,7 +20612,7 @@ fn gqa_attention_paged_with_rope_tables(
                     false
                 }
             }
-            #[cfg(not(feature = "cuda"))]
+            #[cfg(not(any(feature = "cuda", feature = "rocm")))]
             {
                 false
             }
@@ -20723,7 +20725,7 @@ fn gqa_attention_paged_with_rope_tables(
                 attn_weights,
                 lora_layer,
                 lora_scale,
-                #[cfg(feature = "cuda")]
+                #[cfg(any(feature = "cuda", feature = "rocm"))]
                 graph_inputs,
                 profile_context,
                 #[cfg(feature = "cuda")]
@@ -21773,7 +21775,7 @@ pub fn transformer_block_paged(
         block_table,
         full_attn_layer_idx,
         lora,
-        #[cfg(feature = "cuda")]
+        #[cfg(any(feature = "cuda", feature = "rocm"))]
         None,
         None,
         // Phase 7 #1082: no kt twin plumbed through this wrapper yet —
@@ -21804,7 +21806,7 @@ fn transformer_block_paged_with_rope_tables(
     block_table: &BlockTable,
     full_attn_layer_idx: usize,
     lora: Option<(&LoraLayerWeights, f32)>,
-    #[cfg(feature = "cuda")] graph_inputs: Option<&PagedDecodeGraphInputs<'_>>,
+    #[cfg(any(feature = "cuda", feature = "rocm"))] graph_inputs: Option<&PagedDecodeGraphInputs<'_>>,
     profile_mlp_context: Option<(usize, usize)>,
     // Phase 7 #1082: kt twin of `paged_cache`, plumbed through to the
     // GQA paged-attention call below so the kt cache can mirror the
@@ -21903,7 +21905,7 @@ fn transformer_block_paged_with_rope_tables(
         full_attn_layer_idx,
         config.attn_output_gate,
         lora,
-        #[cfg(feature = "cuda")]
+        #[cfg(any(feature = "cuda", feature = "rocm"))]
         graph_inputs,
         // Phase 7 #1082: forward the kt twin through to the GQA
         // attention call. None on this path until the cache-owning
@@ -23695,7 +23697,7 @@ pub fn model_forward_paged(
         lora,
         None,
         positions_gpu,
-        #[cfg(feature = "cuda")]
+        #[cfg(any(feature = "cuda", feature = "rocm"))]
         None,
         // Phase 7 #1082: no kt twin from this caller — forward
         // `None` so the candle writer remains authoritative.
@@ -23768,7 +23770,7 @@ pub fn model_forward_paged_with_kt(
         lora,
         None,
         positions_gpu,
-        #[cfg(feature = "cuda")]
+        #[cfg(any(feature = "cuda", feature = "rocm"))]
         None,
         #[cfg(feature = "cuda")]
         kt_paged_cache,
@@ -23812,7 +23814,7 @@ pub fn model_forward_paged_normed_hidden(
         lora,
         None,
         None,
-        #[cfg(feature = "cuda")]
+        #[cfg(any(feature = "cuda", feature = "rocm"))]
         None,
         // Phase 7 #1082: no kt twin from this caller — forward
         // `None` so the candle writer remains authoritative.
@@ -23908,7 +23910,7 @@ pub fn model_forward_paged_last_token(
         lora,
         None,
         positions_gpu,
-        #[cfg(feature = "cuda")]
+        #[cfg(any(feature = "cuda", feature = "rocm"))]
         None,
         // Phase 7 #1082: no kt twin from this caller — forward
         // `None` so the candle writer remains authoritative.
@@ -24504,7 +24506,7 @@ pub fn model_forward_paged_last_token_greedy(
         lora,
         None,
         positions_gpu,
-        #[cfg(feature = "cuda")]
+        #[cfg(any(feature = "cuda", feature = "rocm"))]
         None,
         // Phase 7 #1082: no kt twin from this caller — forward
         // `None` so the candle writer remains authoritative.
@@ -24614,7 +24616,7 @@ pub(crate) fn model_forward_paged_hidden_with_graph_inputs(
 /// sidestepping the replay-nondeterminism that doubled output ("BUG2"). Cost is
 /// one extra eager vocab GEMV + one RMSNorm per decode token — negligible next
 /// to the captured 32-layer transformer.
-#[cfg(feature = "cuda")]
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 pub(crate) fn lm_head_from_hidden_eager(
     backend: &dyn BackendRuntime,
     hidden: &Tensor,
@@ -24626,6 +24628,8 @@ pub(crate) fn lm_head_from_hidden_eager(
     // Mirror the `Full` arm's slot-40 record (final_norm output / lm_head
     // input) so the box-102 SAMESTEP probe observes the replay-path value here
     // — the captured graph no longer records slot 40 under `HiddenOnly`.
+    // (CUDA-only debug probe.)
+    #[cfg(feature = "cuda")]
     record_layer_norm_debug(&normed, 40);
     lm_head_forward_backend_decode_if(Some(backend), &normed, &weights.embed_tokens_t)
 }
@@ -24643,7 +24647,7 @@ pub(crate) fn model_forward_paged_with_graph_inputs(
     lora: Option<&LoraWeights>,
     token_ids_gpu: &Tensor,
     positions_gpu: &Tensor,
-    #[cfg(feature = "cuda")] graph_inputs: Option<&PagedDecodeGraphInputs<'_>>,
+    #[cfg(any(feature = "cuda", feature = "rocm"))] graph_inputs: Option<&PagedDecodeGraphInputs<'_>>,
 ) -> Result<Tensor> {
     let (logits, _hidden, _token) = model_forward_paged_inner(
         backend,
@@ -24657,7 +24661,7 @@ pub(crate) fn model_forward_paged_with_graph_inputs(
         lora,
         Some(token_ids_gpu),
         Some(positions_gpu),
-        #[cfg(feature = "cuda")]
+        #[cfg(any(feature = "cuda", feature = "rocm"))]
         graph_inputs,
         // Phase 7 #1082: no kt twin from this caller — forward
         // `None` so the candle writer remains authoritative.
@@ -24882,7 +24886,7 @@ pub fn model_forward_paged_batched_decode_hidden(
             lora,
             None,
             None,
-            #[cfg(feature = "cuda")]
+            #[cfg(any(feature = "cuda", feature = "rocm"))]
             None,
             // Phase 7 #1082: no kt twin from this caller — forward
             // `None` so the candle writer remains authoritative.
@@ -25192,7 +25196,7 @@ pub fn model_forward_paged_with_last_hidden(
         lora,
         None,
         positions_gpu,
-        #[cfg(feature = "cuda")]
+        #[cfg(any(feature = "cuda", feature = "rocm"))]
         None,
         // Phase 7 #1082: no kt twin from this caller — forward
         // `None` so the candle writer remains authoritative.
@@ -25244,7 +25248,7 @@ pub fn model_forward_paged_last_token_with_last_hidden(
         lora,
         None,
         positions_gpu,
-        #[cfg(feature = "cuda")]
+        #[cfg(any(feature = "cuda", feature = "rocm"))]
         None,
         // Phase 7 #1082: no kt twin from this caller — forward
         // `None` so the candle writer remains authoritative.
@@ -25870,7 +25874,7 @@ fn model_forward_paged_inner(
     lora: Option<&LoraWeights>,
     token_ids_gpu: Option<&Tensor>,
     positions_gpu: Option<&Tensor>,
-    #[cfg(feature = "cuda")] graph_inputs: Option<&PagedDecodeGraphInputs<'_>>,
+    #[cfg(any(feature = "cuda", feature = "rocm"))] graph_inputs: Option<&PagedDecodeGraphInputs<'_>>,
     // Phase 7 #1082: kt twin of `paged_cache` plumbed through to the
     // per-layer `transformer_block_paged_with_rope_tables` so the kt
     // cache can mirror the CUDA-graph paged-KV write performed inside
@@ -25918,11 +25922,11 @@ fn model_forward_paged_inner(
         }
     };
     let graph_rope_tables = {
-        #[cfg(feature = "cuda")]
+        #[cfg(any(feature = "cuda", feature = "rocm"))]
         {
             graph_inputs.map(|inputs| (inputs.rotary_cos, inputs.rotary_sin))
         }
-        #[cfg(not(feature = "cuda"))]
+        #[cfg(not(any(feature = "cuda", feature = "rocm")))]
         {
             Option::<(&Tensor, &Tensor)>::None
         }
@@ -25998,7 +26002,7 @@ fn model_forward_paged_inner(
                     block_table,
                     full_attn_idx,
                     layer_lora,
-                    #[cfg(feature = "cuda")]
+                    #[cfg(any(feature = "cuda", feature = "rocm"))]
                     graph_inputs,
                     profile_mlp_stages.then_some((i, start_pos)),
                     // Phase 7 #1082: forward the inner-fn kt twin
@@ -26508,7 +26512,7 @@ pub fn model_forward_paged_streaming_last_token_with_last_hidden_with(
             lora,
             None,
             None,
-            #[cfg(feature = "cuda")]
+            #[cfg(any(feature = "cuda", feature = "rocm"))]
             None,
             // Phase 7 #1082: no kt twin from this caller — forward
             // `None` so the candle writer remains authoritative.
@@ -26598,7 +26602,7 @@ pub fn model_forward_paged_streaming_with(
             lora,
             None,
             None,
-            #[cfg(feature = "cuda")]
+            #[cfg(any(feature = "cuda", feature = "rocm"))]
             None,
             // Phase 7 #1082: no kt twin from this caller — forward
             // `None` so the candle writer remains authoritative.
