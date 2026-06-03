@@ -7,7 +7,9 @@ edition.workspace = true
 license.workspace = true
 
 # Deliberately dependency-light: the memory probes are pure std (sysfs /
-# nvidia-smi / sysctl), so this crate sits at the very bottom of the workspace
-# graph and can be depended on by kiln-tensor / kiln-model / kiln-train /
-# kiln-server without cycles.
+# nvidia-smi / sysctl). `tracing` is the one dep (ubiquitous, no kiln edges) so
+# the governor's background pressure monitor can log reclaim events. The crate
+# still sits at the bottom of the workspace graph — depended on by kiln-tensor /
+# kiln-model / kiln-train / kiln-server without cycles.
 [dependencies]
+tracing = { workspace = true }

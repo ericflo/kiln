@@ -18,9 +18,14 @@
 //! is available via [`MemoryGovernor::global`] so the allocator and other
 //! deep-in-the-stack callers can consult it without threading an `Arc` around.
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
+
+/// A reclaim hook: "release up to `target` bytes of pooled/cached device memory
+/// back to the OS; return how much you freed (0 if unknown/none)." Registered by
+/// the allocator layer; invoked by the governor under memory pressure.
+pub type Reclaimer = Box<dyn Fn(u64) -> u64 + Send + Sync>;
 
 use crate::vram::{current_memory_snapshot, MemorySnapshot};
 
@@ -130,6 +135,11 @@ pub struct MemoryGovernor {
     /// subtracted from `available_bytes` so two consumers can't both plan to
     /// use the same free bytes. Released via the [`Reservation`] guard.
     soft_reserved: AtomicU64,
+    /// Reclaim hooks registered by the allocator layer (return pooled VRAM to
+    /// the OS). Invoked under pressure by [`Self::reclaim`] / the monitor.
+    reclaimers: Mutex<Vec<Reclaimer>>,
+    /// Guards [`Self::start_monitor`] against spawning more than one thread.
+    monitor_started: AtomicBool,
 }
 
 impl MemoryGovernor {
@@ -145,6 +155,8 @@ impl MemoryGovernor {
                 sampled_at: Instant::now(),
             }),
             soft_reserved: AtomicU64::new(0),
+            reclaimers: Mutex::new(Vec::new()),
+            monitor_started: AtomicBool::new(false),
         }
     }
 
@@ -231,6 +243,80 @@ impl MemoryGovernor {
 
     pub fn config(&self) -> &GovernorConfig {
         &self.cfg
+    }
+
+    /// Register a reclaim hook (the allocator layer's "return pooled VRAM to the
+    /// OS" function). Invoked under memory pressure so kiln gives memory back to
+    /// a coexisting process instead of hoarding it. Multiple hooks may register
+    /// (e.g. one per device pool); they're called in registration order.
+    pub fn register_reclaimer<F: Fn(u64) -> u64 + Send + Sync + 'static>(&self, f: F) {
+        self.reclaimers
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .push(Box::new(f));
+    }
+
+    /// Invoke registered reclaimers to free up to `target_bytes`, then re-probe.
+    /// Returns total bytes freed (best-effort; a hook may report 0 if it can't
+    /// measure). A no-op with no reclaimers registered.
+    pub fn reclaim(&self, target_bytes: u64) -> u64 {
+        let mut freed = 0u64;
+        {
+            let hooks = self.reclaimers.lock().unwrap_or_else(|e| e.into_inner());
+            for hook in hooks.iter() {
+                if freed >= target_bytes {
+                    break;
+                }
+                freed = freed.saturating_add(hook(target_bytes.saturating_sub(freed)));
+            }
+        }
+        if freed > 0 {
+            self.refresh(); // ground truth after returning memory to the OS
+        }
+        freed
+    }
+
+    /// Reclaim only if under memory pressure (Tight/Critical) — the policy the
+    /// background monitor applies. Targets enough to climb back to the
+    /// comfortable free fraction. Returns bytes freed (0 if not needed).
+    pub fn maybe_reclaim(&self) -> u64 {
+        if !self.pressure().should_reclaim() {
+            return 0;
+        }
+        let s = self.snapshot();
+        let want_free = ((s.total_bytes as f64) * self.cfg.comfortable_frac) as u64;
+        let target = want_free.saturating_sub(s.free_bytes).max(1);
+        self.reclaim(target)
+    }
+
+    /// Spawn a background thread that watches pressure and auto-reclaims, turning
+    /// the one-shot probe into *continuous* self-adjustment: if a coexisting job
+    /// (or kiln itself) drives memory tight, kiln returns pooled VRAM to the OS
+    /// without anyone asking. Idempotent — starts at most one thread. Requires a
+    /// `'static` governor (use [`MemoryGovernor::global`]).
+    pub fn start_monitor(&'static self) {
+        if self.monitor_started.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let interval = self.cfg.ttl.max(Duration::from_secs(2));
+        std::thread::Builder::new()
+            .name("kiln-mem-governor".into())
+            .spawn(move || loop {
+                std::thread::sleep(interval);
+                let pressure = self.pressure();
+                if pressure.should_reclaim() {
+                    let freed = self.maybe_reclaim();
+                    let s = self.snapshot();
+                    tracing::info!(
+                        ?pressure,
+                        freed_mb = freed / (1024 * 1024),
+                        free_gb = s.free_bytes as f64 / 1e9,
+                        total_gb = s.total_bytes as f64 / 1e9,
+                        "memory governor: reclaimed under pressure"
+                    );
+                }
+            })
+            .ok();
     }
 }
 
@@ -401,6 +487,44 @@ mod tests {
         assert_eq!(g.pressure(), MemoryPressure::Tight); // 2/24 = 8.3% <= 10%
         assert!(g.pressure().should_reclaim());
         assert!(!g.can_fit(5 * GB));
+    }
+
+    #[test]
+    fn reclaim_invokes_hooks_under_pressure_and_recovers() {
+        let src = std::sync::Arc::new(Fixed::new(24 * GB, GB)); // 1/24 ≈ 4% -> Critical
+        struct Shared(std::sync::Arc<Fixed>);
+        impl MemorySource for Shared {
+            fn probe(&self) -> MemorySnapshot {
+                self.0.probe()
+            }
+        }
+        let cfg = GovernorConfig {
+            ttl: Duration::from_millis(0),
+            ..GovernorConfig::default()
+        };
+        let g = MemoryGovernor::with_source(Box::new(Shared(src.clone())), cfg);
+        assert!(g.pressure().should_reclaim());
+
+        // A reclaimer that "returns memory to the OS" — modelled as free jumping
+        // back up — and reports the bytes it freed.
+        let calls = std::sync::Arc::new(AtomicU64::new(0));
+        let (src2, calls2) = (src.clone(), calls.clone());
+        g.register_reclaimer(move |target| {
+            calls2.fetch_add(1, Ordering::SeqCst);
+            src2.set_free(12 * GB);
+            target
+        });
+
+        let freed = g.maybe_reclaim();
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "reclaimer must be invoked");
+        assert!(freed > 0);
+        // The post-reclaim re-probe sees the freed memory -> back to comfortable.
+        assert_eq!(g.pressure(), MemoryPressure::Comfortable);
+
+        // No pressure -> reclaimer NOT called again.
+        let freed2 = g.maybe_reclaim();
+        assert_eq!(freed2, 0);
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]

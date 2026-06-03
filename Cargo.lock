@@ -1387,6 +1387,9 @@ dependencies = [
 [[package]]
 name = "kiln-memory"
 version = "0.2.19"
+dependencies = [
+ "tracing",
+]
 
 [[package]]
 name = "kiln-model"

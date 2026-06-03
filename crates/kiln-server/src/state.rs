@@ -1661,6 +1661,28 @@ impl AppState {
             .map(|s| s.total_bytes)
             .unwrap_or_else(|| detected_gpu_total_memory(&device_kt, &vram_info));
 
+        // Wire the device's memory-reclaim hook into the governor and start its
+        // continuous pressure monitor (once per process). Under memory pressure
+        // — e.g. a coexisting llama.cpp / vLLM job, or a training run, grabbing
+        // VRAM — the governor returns kiln's pooled-but-unused VRAM to the OS
+        // instead of hoarding it. Idempotent via the OnceLock guard.
+        {
+            static GOVERNOR_WIRED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+            GOVERNOR_WIRED.get_or_init(|| {
+                #[cfg(feature = "rocm")]
+                if let kiln_tensor::Device::Rocm(idx) = device_kt {
+                    kiln_memory::MemoryGovernor::global().register_reclaimer(move |_target| {
+                        // Best-effort: return all pooled-but-unused VRAM (keep 0).
+                        // Device-synced inside, so it's race-free; HIP doesn't
+                        // surface bytes freed, so report 0.
+                        let _ = kiln_tensor::rocm_trim_pool(idx, 0);
+                        0
+                    });
+                }
+                kiln_memory::MemoryGovernor::global().start_monitor();
+            });
+        }
+
         let post_load_used_vram_info = runtime_used_vram_for_device(&device_kt);
         let post_load_used_vram = snap
             .map(|s| s.used_bytes)
