@@ -1004,7 +1004,7 @@ mod tests {
 
     #[test]
     fn recommended_checkpoint_plan_respects_user_override() {
-        let _g = crate::env_flag::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         unsafe {
             std::env::set_var("KILN_GRAD_CHECKPOINT_SEGMENTS", "12");
         }
@@ -1023,7 +1023,7 @@ mod tests {
 
     #[test]
     fn recommended_checkpoint_plan_respects_disable_env() {
-        let _g = crate::env_flag::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         unsafe {
             std::env::set_var("KILN_NO_GRAD_CHECKPOINT", "1");
         }
@@ -1046,7 +1046,7 @@ mod tests {
         // parallel test that's mid-`set_var` can't make us return
         // UserOverride via env before we reach the VRAM check. macOS CI
         // reproducibly hit this on the parallel test interleave.
-        let _g = crate::env_flag::TEST_ENV_LOCK
+        let _g = crate::TEST_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         unsafe {
@@ -1071,7 +1071,7 @@ mod tests {
         // Same env isolation as the test above — scrub the overrides so
         // a parallel test can't make us return UserOverride via env
         // before we reach the headroom check.
-        let _g = crate::env_flag::TEST_ENV_LOCK
+        let _g = crate::TEST_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         unsafe {
@@ -1103,7 +1103,7 @@ mod tests {
         // recommended_checkpoint_plan reads KILN_GRAD_CHECKPOINT_SEGMENTS
         // and KILN_NO_GRAD_CHECKPOINT — take the env lock + scrub so a
         // parallel env-mutating test can't flip our cells to UserOverride.
-        let _g = crate::env_flag::TEST_ENV_LOCK
+        let _g = crate::TEST_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         unsafe {
@@ -1188,7 +1188,7 @@ mod tests {
     /// linearly with hidden, so the Disable→Enable boundary shifts.
     #[test]
     fn perf_regression_llama_8b_plan_matrix() {
-        let _g = crate::env_flag::TEST_ENV_LOCK
+        let _g = crate::TEST_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         unsafe {
@@ -1254,7 +1254,7 @@ mod tests {
     /// constant-factor change in the reported `max_act_gib`.
     #[test]
     fn perf_regression_disabled_plan_reports_sane_act_tape() {
-        let _g = crate::env_flag::TEST_ENV_LOCK
+        let _g = crate::TEST_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         unsafe {
@@ -1311,7 +1311,7 @@ mod tests {
         // `test_unified_memory_reserve_env_override` doesn't race
         // with this test's reads of the same env var via
         // `unified_memory_reserve_bytes`.
-        let _env_guard = crate::env_flag::TEST_ENV_LOCK.lock().unwrap();
+        let _env_guard = crate::TEST_ENV_LOCK.lock().unwrap();
         // Synthesize the user's hardware: AMD Strix Halo APU. DRM
         // reports a 103 GB VRAM carveout on a 30 GB host. The corrected
         // budget must be MemTotal − reserve, not the carveout.
@@ -1473,7 +1473,7 @@ mod tests {
     fn test_unified_memory_reserve_env_override() {
         // Hold the shared env-mutation lock — see
         // test_unified_memory_apu_corrects_oversized_carveout.
-        let _env_guard = crate::env_flag::TEST_ENV_LOCK.lock().unwrap();
+        let _env_guard = crate::TEST_ENV_LOCK.lock().unwrap();
         // SAFETY: env mutation is safe under nextest's per-test process
         // isolation; this test must run via `cargo nextest run`.
         unsafe { std::env::set_var("KILN_TRAINING_MEMORY_RESERVE_GB", "10.0") };

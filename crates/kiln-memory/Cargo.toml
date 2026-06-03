@@ -1,0 +1,13 @@
+[package]
+name = "kiln-memory"
+description = "Kiln's cross-engine memory awareness — VRAM/RAM probing, the memory governor, pressure signals, and the training/inference budget arbiter. Backend-agnostic by design (OS-level probes), so every engine reads the same live figures."
+version.workspace = true
+publish = false
+edition.workspace = true
+license.workspace = true
+
+# Deliberately dependency-light: the memory probes are pure std (sysfs /
+# nvidia-smi / sysctl), so this crate sits at the very bottom of the workspace
+# graph and can be depended on by kiln-tensor / kiln-model / kiln-train /
+# kiln-server without cycles.
+[dependencies]

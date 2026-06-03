@@ -1305,7 +1305,7 @@ pub struct AppState {
     /// `teacher: alias` request field.
     pub teacher_registry: crate::api::teachers::SharedTeacherRegistry,
     /// Detected VRAM info for config/debug reporting.
-    pub vram_info: kiln_core::vram::GpuVramInfo,
+    pub vram_info: kiln_memory::vram::GpuVramInfo,
     /// Shutdown flag — set to true when the server is shutting down.
     pub shutdown: ShutdownFlag,
     /// Per-request timeout duration. Configurable via KILN_REQUEST_TIMEOUT_SECS (default 600).
@@ -1512,9 +1512,9 @@ impl AppState {
             gpu_lock: Arc::new(std::sync::RwLock::new(())),
             training_queue: crate::training_queue::new_shared_queue(),
             teacher_registry: Arc::new(crate::api::teachers::TeacherRegistry::new()),
-            vram_info: kiln_core::vram::GpuVramInfo {
+            vram_info: kiln_memory::vram::GpuVramInfo {
                 total_bytes: 0,
-                source: kiln_core::vram::VramSource::None,
+                source: kiln_memory::vram::VramSource::None,
             },
             shutdown: crate::training_queue::new_shutdown_flag(),
             request_timeout: std::time::Duration::from_secs(request_timeout_secs),
@@ -1641,7 +1641,7 @@ impl AppState {
 
         // Detect VRAM once and reuse it for both auto-sizing and reporting so
         // startup doesn't repeat the same probe/logging path.
-        let vram_info = kiln_core::vram::detect_vram();
+        let vram_info = kiln_memory::vram::detect_vram();
         // `device_kt` is the (already kt-typed) device param after #1082;
         // the previous candle->kt bridge that lived here is gone.
         let total_vram = detected_gpu_total_memory(&device_kt, &vram_info);
@@ -1864,8 +1864,8 @@ impl AppState {
         // at-a-glance instead of diff'ing env vars against the docs.
         // Only logged when there's an actual Vulkan device — on CPU
         // or non-Vulkan backends these flags are irrelevant.
-        if vram_info.source == kiln_core::vram::VramSource::LinuxDrmSysfs
-            || vram_info.source == kiln_core::vram::VramSource::LinuxDrmSysfsUnified
+        if vram_info.source == kiln_memory::vram::VramSource::LinuxDrmSysfs
+            || vram_info.source == kiln_memory::vram::VramSource::LinuxDrmSysfsUnified
         {
             // Same truthy/falsy semantics as kiln_core::env_flag::env_flag,
             // but we want to surface whether the value came from the env
@@ -2258,9 +2258,9 @@ fn device_needs_inference_prewarm(device: &kiln_tensor::Device) -> bool {
 
 fn runtime_used_vram_for_device(
     device: &kiln_tensor::Device,
-) -> Option<kiln_core::vram::GpuMemoryUsedInfo> {
+) -> Option<kiln_memory::vram::GpuMemoryUsedInfo> {
     // The live used-memory probe is OS-level (nvidia-smi / AMD+Intel DRM sysfs /
-    // unified-APU MemAvailable, see `kiln_core::vram::current_memory_snapshot`),
+    // unified-APU MemAvailable, see `kiln_memory::vram::current_memory_snapshot`),
     // so it is BACKEND-AGNOSTIC — it works for CUDA, ROCm, Vulkan, and Metal,
     // not just CUDA. Previously this was `#[cfg(feature = "cuda")]`-gated, so on
     // every other backend the KV-cache sizer fell back to a STATIC model-size
@@ -2270,8 +2270,8 @@ fn runtime_used_vram_for_device(
     if device.backend() == kiln_tensor::Backend::Cpu {
         return None;
     }
-    let snap = kiln_core::vram::current_memory_snapshot();
-    (snap.used_bytes > 0).then_some(kiln_core::vram::GpuMemoryUsedInfo {
+    let snap = kiln_memory::vram::current_memory_snapshot();
+    (snap.used_bytes > 0).then_some(kiln_memory::vram::GpuMemoryUsedInfo {
         used_bytes: snap.used_bytes,
         source: snap.source,
     })
@@ -2279,7 +2279,7 @@ fn runtime_used_vram_for_device(
 
 fn detected_gpu_total_memory(
     device: &kiln_tensor::Device,
-    vram: &kiln_core::vram::GpuVramInfo,
+    vram: &kiln_memory::vram::GpuVramInfo,
 ) -> u64 {
     // Migrated to take `&kt::Device` directly. The cuda and metal arms
     // remain feature-gated to preserve the previous cfg-gated behavior
@@ -2438,7 +2438,7 @@ fn format_oom_remediation_message(
     bytes_per_block: u64,
     suggested_blocks: usize,
     configured_fraction: f64,
-    vram_source: kiln_core::vram::VramSource,
+    vram_source: kiln_memory::vram::VramSource,
 ) -> String {
     let mut buf = String::new();
     buf.push_str(
@@ -3654,7 +3654,7 @@ mod tests {
             bytes_per_block,
             suggested,
             0.85,
-            kiln_core::vram::VramSource::NvidiaSmi,
+            kiln_memory::vram::VramSource::NvidiaSmi,
         );
         assert!(
             msg.contains("KILN_NUM_BLOCKS=8192"),
@@ -3706,7 +3706,7 @@ mod tests {
             1024,
             64,
             0.85,
-            kiln_core::vram::VramSource::None,
+            kiln_memory::vram::VramSource::None,
         );
         assert!(msg.contains("KILN_NUM_BLOCKS=64"), "message: {msg}");
         assert!(

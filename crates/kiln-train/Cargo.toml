@@ -17,6 +17,7 @@ license.workspace = true
 # for the full CP-4 rationale. (#1082)
 kiln-autograd = { workspace = true }
 kiln-core = { workspace = true }
+kiln-memory = { workspace = true }
 kiln-eval = { workspace = true }
 kiln-flce-kernel = { workspace = true }
 # CP-4 (#1082): the `kiln_kt_bridge::tape_bridge` module owns the

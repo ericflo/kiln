@@ -19,7 +19,7 @@ use kiln_core::config::ModelConfig;
 use kiln_core::sampling::SamplingParams;
 use kiln_core::token::TokenId;
 use kiln_core::tokenizer::{ChatMessage, KilnTokenizer};
-use kiln_core::vram::{detect_used_vram_bytes, detect_vram};
+use kiln_memory::vram::{detect_used_vram_bytes, detect_vram};
 use kiln_model::ModelRunner;
 use kiln_model::backend as runtime_backend;
 use kiln_model::forward::{

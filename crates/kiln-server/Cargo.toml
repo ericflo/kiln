@@ -44,6 +44,7 @@ required-features = ["cuda"]
 
 [dependencies]
 kiln-core = { workspace = true }
+kiln-memory = { workspace = true }
 kiln-eval = { workspace = true }
 kiln-model = { workspace = true }
 kiln-scheduler = { workspace = true }

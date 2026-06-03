@@ -1385,6 +1385,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "kiln-memory"
+version = "0.2.19"
+
+[[package]]
 name = "kiln-model"
 version = "0.2.19"
 dependencies = [
@@ -1514,6 +1518,7 @@ dependencies = [
  "kiln-core",
  "kiln-eval",
  "kiln-kt-bridge",
+ "kiln-memory",
  "kiln-model",
  "kiln-scheduler",
  "kiln-tensor",
@@ -1581,6 +1586,7 @@ dependencies = [
  "kiln-eval",
  "kiln-flce-kernel",
  "kiln-kt-bridge",
+ "kiln-memory",
  "kiln-model",
  "kiln-opd-loss-kernel",
  "kiln-optim",
