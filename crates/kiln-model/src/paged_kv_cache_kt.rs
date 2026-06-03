@@ -720,7 +720,7 @@ impl PagedKvCacheKt {
     /// `[new_len, num_kv_heads, head_dim]` block is `slice_set` into the
     /// pool — as one contiguous run when the block table resolves to a
     /// contiguous slot range, else row-by-row.
-    #[cfg(feature = "cuda")]
+    #[cfg(any(feature = "cuda", feature = "rocm"))]
     pub fn write_token_major_native(
         &self,
         layer_idx: usize,
@@ -925,6 +925,42 @@ impl PagedKvCacheKt {
                 )?;
             }
 
+            return Ok(true);
+        }
+
+        // ROCm: use the same fast per-row token-major writer as CUDA
+        // (`write_token_major_native` -> `paged_kv_write_token_major_bf16_rocm`,
+        // an in-place device-to-device copy at the host-resolved slot). Without
+        // this, ROCm fell through to the generic head-major `self.write` scatter
+        // below, which transposes K/V to [b,hk,1,d] and host-stages them
+        // ([1,4,1,256] was the dominant decode H2D, one per attention layer).
+        // The transpose(1,2) on the sq==1 dim is a data no-op, so the pool bytes
+        // are identical to the generic path — just no host round-trip.
+        #[cfg(feature = "rocm")]
+        if matches!(k.device(), kiln_tensor::Device::Rocm(_)) {
+            // write_token_major_native resolves each row's slot independently
+            // (block_table.slot_for), so no contiguous-run precheck is needed —
+            // any slot layout is handled. (The CUDA branch above keeps the
+            // precheck for parity with its host-slot kernel contract.)
+            for idx in 0..batch {
+                let k_row = k
+                    .narrow(0, idx, 1)
+                    .map_err(|e| anyhow::anyhow!("kt pkv rocm batch: narrow k row {idx}: {e}"))?
+                    .contiguous()
+                    .map_err(|e| anyhow::anyhow!("kt pkv rocm batch: contiguous k row {idx}: {e}"))?;
+                let v_row = v
+                    .narrow(0, idx, 1)
+                    .map_err(|e| anyhow::anyhow!("kt pkv rocm batch: narrow v row {idx}: {e}"))?
+                    .contiguous()
+                    .map_err(|e| anyhow::anyhow!("kt pkv rocm batch: contiguous v row {idx}: {e}"))?;
+                self.write_token_major_native(
+                    layer_idx,
+                    block_tables[idx],
+                    start_positions[idx],
+                    &k_row,
+                    &v_row,
+                )?;
+            }
             return Ok(true);
         }
 
