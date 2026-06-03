@@ -1,0 +1,55 @@
+// Generic strided gather → contiguous (F32).
+//
+// Materializes an arbitrary strided/offset view of a buffer into a packed,
+// C-contiguous output — the on-device equivalent of kt's host gather loop
+// (`Tensor::contiguous`'s per-element stride walk). One invocation per
+// OUTPUT element: decompose its linear (row-major) index into a logical
+// multi-index, dot with the source strides + start_offset to find the
+// physical source element, copy.
+//
+// This is the resident replacement for the D2H-gather + H2D-reupload that
+// `contiguous()` used for non-contiguous Vulkan tensors — the single most
+// common CPU bounce on the inference path (every `transpose().contiguous()`,
+// `narrow().contiguous()`, GQA expand, etc.).
+//
+// Push constants: [rank, n_elements, start_offset, shape[8], strides[8]]
+//   - rank          logical rank (<= 8)
+//   - n_elements    number of output elements (product of shape)
+//   - start_offset  source start offset, in ELEMENTS
+//   - shape[i]      logical extent of axis i (i < rank; padding undefined)
+//   - strides[i]    source stride of axis i, in ELEMENTS (i < rank)
+// Bindings: in (readonly whole source buffer), out (writeonly contiguous)
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint rank;
+    uint n_elements;
+    uint start_offset;
+    uint shape[8];
+    uint strides[8];
+};
+
+layout(binding = 0) readonly  buffer InBuf  { float data_in[]; };
+layout(binding = 1) writeonly buffer OutBuf { float data_out[]; };
+
+void main() {
+    uint out_idx = gl_GlobalInvocationID.x;
+    if (out_idx >= n_elements) return;
+
+    // Decompose `out_idx` into its row-major multi-index (last axis fastest)
+    // and accumulate the physical source offset. Identical iteration order to
+    // the kt CPU reference gather.
+    uint phys = start_offset;
+    uint rem = out_idx;
+    for (int ax = int(rank) - 1; ax >= 0; --ax) {
+        uint dim = shape[ax];
+        uint i = rem % dim;
+        rem = rem / dim;
+        phys += i * strides[ax];
+    }
+    data_out[out_idx] = data_in[phys];
+}

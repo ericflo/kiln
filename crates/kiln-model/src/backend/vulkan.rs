@@ -1762,6 +1762,18 @@ impl VulkanBackend {
         } else {
             out_f32.to_dtype(in_dtype)?
         };
+        // The SDPA result is currently materialized host-side (the bytes-based
+        // kernel dispatch). Keep `attn_output` on q's compute device so the
+        // downstream gate / o-proj run on-device instead of mismatching
+        // (vulkan gate × cpu attn_output). NOTE: the q/k/v inputs are still
+        // bounced to host bytes above — a buffer-resident SDPA dispatch
+        // (zero-copy q/k/v + device-resident output) is the perf follow-up to
+        // remove the host round-trip entirely.
+        let out = if out.device() != q.device() {
+            out.to_device(q.device())?
+        } else {
+            out
+        };
         Ok(Some(out))
     }
 }

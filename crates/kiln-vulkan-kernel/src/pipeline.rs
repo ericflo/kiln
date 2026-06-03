@@ -357,6 +357,14 @@ const SHADER_SPIRVS: &[(&str, &[u8])] = &[
     ),
     ("vk_silu_f32", SPIR_V_VK_SILU_F32),
     ("vk_silu_f32_offset", SPIR_V_VK_SILU_F32_OFFSET),
+    (
+        "vk_unary_elementwise_f32",
+        SPIR_V_VK_UNARY_ELEMENTWISE_F32,
+    ),
+    (
+        "vk_unary_elementwise_f32_offset",
+        SPIR_V_VK_UNARY_ELEMENTWISE_F32_OFFSET,
+    ),
     ("vk_silu_bwd_f32", SPIR_V_VK_SILU_BWD_F32),
     ("vk_silu_bwd_f32_offset", SPIR_V_VK_SILU_BWD_F32_OFFSET),
     ("vk_rope_f32", SPIR_V_VK_ROPE_F32),
@@ -374,6 +382,8 @@ const SHADER_SPIRVS: &[(&str, &[u8])] = &[
     ),
     ("vk_matmul_batched_f32", SPIR_V_VK_MATMUL_BATCHED_F32),
     ("vk_transpose_3d_f32", SPIR_V_VK_TRANSPOSE_3D_F32),
+    ("vk_gather_contiguous_f32", SPIR_V_VK_GATHER_CONTIGUOUS_F32),
+    ("vk_gather_contiguous_bf16", SPIR_V_VK_GATHER_CONTIGUOUS_BF16),
     ("vk_permute_rh_to_hr_f32", SPIR_V_VK_PERMUTE_RH_TO_HR_F32),
     (
         "vk_permute_rh_to_hr_f32_offset",

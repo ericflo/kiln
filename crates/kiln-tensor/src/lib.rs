@@ -158,9 +158,10 @@ pub use vulkan_allocator::VulkanAllocator;
 #[cfg(feature = "vulkan")]
 pub use vulkan_storage::{
     host_to_vulkan_copy, kt_tensor_from_vk, primary_vulkan_device, vulkan_activation_unary,
-    vulkan_argmax_last_axis, vulkan_cast, vulkan_elementwise_binary,
+    vulkan_argmax_last_axis, vulkan_cast, vulkan_contiguous, vulkan_elementwise_binary,
     vulkan_index_select_dim0, vulkan_l2norm_last_axis, vulkan_masked_fill, vulkan_matmul,
-    vulkan_matmul_bf16w, vulkan_matmul_bf16w_bwd, vulkan_mean_all, vulkan_rmsnorm_last_axis,
-    vulkan_scale, vulkan_softmax_last_axis,
+    vulkan_matmul_batched, vulkan_matmul_bf16w, vulkan_matmul_bf16w_bwd, vulkan_mean_all,
+    vulkan_rmsnorm_last_axis,
+    vulkan_scale, vulkan_slice_set_dim0, vulkan_softmax_last_axis, vulkan_unary_math,
     vulkan_sum_all, vulkan_to_host_copy, vulkan_zeros, vk_tensor_from_kt, VulkanStorage,
 };

@@ -7893,6 +7893,23 @@ fn apply_rope(
     let cos = cos.to_dtype(DType::F32)?.unsqueeze(0)?.unsqueeze(2)?.contiguous()?;
     let sin = sin.to_dtype(DType::F32)?.unsqueeze(0)?.unsqueeze(2)?.contiguous()?;
 
+    // The cos/sin tables are built from the request's CPU `positions`, so on a
+    // GPU backend they arrive on CPU while `x` (q/k) is device-resident. Align
+    // them to `x`'s device so the rotation multiplies run entirely on-device
+    // (a ~KB-scale constant table, shared across the rotation — not activation
+    // paging). No-op when already co-located (CPU inference, or CUDA/Metal
+    // which build tables on-device).
+    let cos = if cos.device() != x.device() {
+        cos.to_device(x.device())?
+    } else {
+        cos
+    };
+    let sin = if sin.device() != x.device() {
+        sin.to_device(x.device())?
+    } else {
+        sin
+    };
+
     // Standard RoPE rotation: [x1*cos - x2*sin, x1*sin + x2*cos]
     let r1 = (x1.broadcast_mul(&cos)? - x2.broadcast_mul(&sin)?)?;
     let r2 = (x1.broadcast_mul(&sin)? + x2.broadcast_mul(&cos)?)?;

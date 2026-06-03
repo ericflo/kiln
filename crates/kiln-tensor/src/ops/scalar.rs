@@ -178,14 +178,24 @@ impl DeviceOp1 for ScalarOp {
         {
             return Ok(None);
         }
-        let scale = match self.kind {
-            ScalarKind::MulScalar => self.c,
+        // mul/div route through the dedicated `vk_scale` kernel;
+        // add/sub through the generic unary kernel's ADD_SCALAR op
+        // (sub = add of the negated bias). All stay GPU-resident.
+        match self.kind {
+            ScalarKind::MulScalar => Ok(Some(crate::vulkan_scale(x, self.c)?)),
             // div_scalar's public entry point already rejects c == 0.
-            ScalarKind::DivScalar => 1.0 / self.c,
-            // No scalar-bias kernel — host-fallback owns these.
-            ScalarKind::AddScalar | ScalarKind::SubScalar => return Ok(None),
-        };
-        Ok(Some(crate::vulkan_scale(x, scale)?))
+            ScalarKind::DivScalar => Ok(Some(crate::vulkan_scale(x, 1.0 / self.c)?)),
+            ScalarKind::AddScalar => Ok(Some(crate::vulkan_unary_math(
+                x,
+                kiln_vulkan_kernel::vk_ops::unary_elementwise::op::ADD_SCALAR,
+                self.c,
+            )?)),
+            ScalarKind::SubScalar => Ok(Some(crate::vulkan_unary_math(
+                x,
+                kiln_vulkan_kernel::vk_ops::unary_elementwise::op::ADD_SCALAR,
+                -self.c,
+            )?)),
+        }
     }
 
     fn bwd(&self) -> Option<Box<dyn BackwardOp>> {

@@ -146,30 +146,33 @@ impl DeviceOp1 for UnaryArithOp {
 
     #[cfg(feature = "vulkan")]
     fn vulkan_fwd(&self, x: &Tensor) -> Result<Option<Tensor>> {
-        // Gate on the same preconditions as cuda_fwd / metal_fwd.
         validate(x, self.kind.name())?;
-        if !matches!(x.dtype(), DType::F32 | DType::BF16 | DType::F16) {
+        // The generic unary-elementwise Vulkan kernel is F32-only and
+        // operates on contiguous, Vulkan-backed storage. Anything else
+        // falls through to the CPU reference (BF16/F16, strided, or a
+        // non-Vulkan storage that somehow reached here).
+        if !matches!(x.dtype(), DType::F32) {
             return Ok(None);
         }
         if !x.is_contiguous() {
             return Ok(None);
         }
-        // TODO(#1082, phase 4 Vulkan): once a Vulkan unary-arith
-        // kernel ships, dispatch via `self.kind.cuda_kind_tag()` and
-        // route through `crate::vulkan_activation_unary`. Until
-        // then, fall through to CPU (numerics-correct,
-        // performance-wrong).
-        // Candidate implementations:
-        //   1. SPIR-V compute shader: per-element pointwise; switch
-        //      on `kind_tag` (push-constant or pipeline-specialized)
-        //      selecting neg / abs / sqrt / rsqrt / reciprocal /
-        //      square. All map to GLSL builtins directly.
-        //   2. Reuse `kiln-vulkan-kernel::vk_ops::elementwise`
-        //      primitives where the unary op already has a kernel.
-        //   3. Dtype matrix gap: `VkDType` exposes F32 / BF16 today;
-        //      F16 needs widening or a cast wrapper at the dispatch
-        //      boundary.
-        Ok(None)
+        if x.storage()
+            .as_any()
+            .downcast_ref::<crate::VulkanStorage>()
+            .is_none()
+        {
+            return Ok(None);
+        }
+        use kiln_vulkan_kernel::vk_ops::unary_elementwise::op;
+        let code = match self.kind {
+            UnaryArithKind::Neg => op::NEG,
+            UnaryArithKind::Exp => op::EXP,
+            UnaryArithKind::Ln => op::LN,
+            UnaryArithKind::Sqrt => op::SQRT,
+            UnaryArithKind::Abs => op::ABS,
+        };
+        Ok(Some(crate::vulkan_unary_math(x, code, 0.0)?))
     }
 
     fn bwd(&self) -> Option<Box<dyn BackwardOp>> {

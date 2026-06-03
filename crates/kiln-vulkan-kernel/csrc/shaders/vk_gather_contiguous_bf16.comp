@@ -1,0 +1,73 @@
+// Generic strided gather → contiguous (BF16).
+//
+// BF16 twin of vk_gather_contiguous_f32. BF16 storage is a logical u16
+// sequence packed into u32 words (low lane = even logical index, high lane =
+// odd). One invocation writes ONE output word (two logical elements) so there
+// are no read/modify/write races between lanes — same packing convention as
+// vk_transpose_2d_bf16.
+//
+// For each of the (up to) two output elements covered by this word: decompose
+// its linear (row-major) index into a logical multi-index, dot with the
+// source strides + start_offset to find the physical source element, load its
+// 16 bits, pack into the output word.
+//
+// Push constants: [rank, n_elements, start_offset, shape[8], strides[8]]
+//   (extents/strides/offset in ELEMENTS; same layout as the F32 variant)
+// Bindings:
+//   0: in  (readonly whole source buffer, BF16 packed as u32[])
+//   1: out (writeonly contiguous, BF16 packed as u32[])
+
+#version 450
+#extension GL_EXT_control_flow_attributes : enable
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout(push_constant) uniform Parameters {
+    uint rank;
+    uint n_elements;
+    uint start_offset;
+    uint shape[8];
+    uint strides[8];
+};
+
+layout(binding = 0) readonly  buffer InBuf  { uint data_in[]; };
+layout(binding = 1) writeonly buffer OutBuf { uint data_out[]; };
+
+uint load_bf16_lane(uint logical_idx) {
+    uint word = data_in[logical_idx >> 1u];
+    return ((logical_idx & 1u) == 0u) ? (word & 0xffffu) : (word >> 16u);
+}
+
+// Physical source element index for output element `out_idx` (row-major
+// decomposition · strides + start_offset). Mirrors the kt CPU gather loop.
+uint src_phys(uint out_idx) {
+    uint phys = start_offset;
+    uint rem = out_idx;
+    for (int ax = int(rank) - 1; ax >= 0; --ax) {
+        uint dim = shape[ax];
+        uint i = rem % dim;
+        rem = rem / dim;
+        phys += i * strides[ax];
+    }
+    return phys;
+}
+
+void main() {
+    uint word_idx = gl_GlobalInvocationID.x;
+    uint total_words = (n_elements + 1u) / 2u;
+    if (word_idx >= total_words) return;
+
+    uint out_base = word_idx * 2u;
+    uint packed = 0u;
+
+    [[unroll]]
+    for (uint lane = 0u; lane < 2u; lane++) {
+        uint out_idx = out_base + lane;
+        if (out_idx >= n_elements) break;
+        uint phys = src_phys(out_idx);
+        uint bits = load_bf16_lane(phys) & 0xffffu;
+        packed |= bits << (16u * lane);
+    }
+
+    data_out[word_idx] = packed;
+}
