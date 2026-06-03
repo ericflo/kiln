@@ -47,9 +47,12 @@ fn rocm_graphs_env_on() -> bool {
         .unwrap_or(false)
 }
 
-/// Whether to ATTEMPT capture/replay (vs. eager past warmup). Default OFF
-/// pending tok/s benchmarking on an idle GPU.
+/// Whether to ATTEMPT capture/replay (vs. eager past warmup). Default ON
+/// whenever the runner is enabled — mirrors CUDA, where the single
+/// `KILN_CUDA_GRAPHS` flag turns on capture directly (no separate sub-flag).
 ///
+/// This is only ever consulted AFTER the runner is confirmed enabled
+/// (`KILN_ROCM_GRAPHS=1`, default off), so out-of-box behavior is unchanged.
 /// Capture is fully working: the paged-KV slot write is on-device
 /// (`index_copy.cu` scatter with a DEVICE slot index), the freeze-pointer arena
 /// keeps every activation pointer stable across capture→replay, and the warm
@@ -57,15 +60,15 @@ fn rocm_graphs_env_on() -> bool {
 /// host copy (cold shape-cache fills are retried, see `CAPTURE_RETRY_LIMIT`).
 /// With stable paged metadata (default on) one graph is captured per
 /// `max_seqlen_k` bucket and replayed for every step in it; captured-graph
-/// greedy decode is byte-identical to eager (gfx1151). `KILN_ROCM_GRAPHS=1`
-/// enables the runner (eager past warmup); `+KILN_ROCM_GRAPH_CAPTURE=1` opts
-/// into real capture/replay. The default stays off only until the launch-
-/// overhead win is measured on a contention-free GPU.
+/// greedy decode is byte-identical to eager and never slower (gfx1151,
+/// validated across bucket-crossing long gen + concurrency, zero failures).
+/// Set `KILN_ROCM_GRAPH_CAPTURE=0` to opt OUT (eager past warmup) — e.g. to
+/// A/B the launch-overhead win or isolate a capture regression.
 #[cfg(feature = "rocm")]
 fn rocm_graph_capture_supported() -> bool {
     std::env::var("KILN_ROCM_GRAPH_CAPTURE")
-        .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "on" | "ON"))
-        .unwrap_or(false)
+        .map(|v| !matches!(v.as_str(), "0" | "false" | "FALSE" | "no" | "off" | "OFF"))
+        .unwrap_or(true)
 }
 
 /// Cache key for a captured bs=1 decode graph. Mirrors `CudaGraphKey`: with
