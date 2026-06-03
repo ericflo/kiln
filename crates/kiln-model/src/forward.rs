@@ -183,6 +183,18 @@ fn cuda_direct_paged_decode_disabled() -> bool {
     *DISABLED.get_or_init(|| std::env::var("KILN_DISABLE_CUDA_DIRECT_PAGED_DECODE").is_ok())
 }
 
+/// `KILN_ROCM_PAGED_DECODE=1` opts ROCm into device-resident KV pools + the
+/// native sq=1 O(n) paged-decode path (flat ~14 tok/s vs the default contiguous
+/// O(n^2) prefill recompute). DEFAULT OFF: the O(n) path is perf-validated but
+/// has a KV-cache correctness bug (decode degrades to garbage after ~12 tokens)
+/// still under debug, so production stays on the correct contiguous path until
+/// that lands. Read by both `use_direct_paged_decode` here AND the KV-pool
+/// device-routing in `PagedKvCacheKt::new` (they must agree).
+pub(crate) fn rocm_paged_decode_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("KILN_ROCM_PAGED_DECODE").is_ok())
+}
+
 #[cfg(feature = "cuda")]
 fn cuda_fused_rotary_qk_disabled() -> bool {
     static DISABLED: OnceLock<bool> = OnceLock::new();
@@ -18564,7 +18576,12 @@ fn try_flash_attn_paged_decode(
     // real paged path.
     let use_direct_paged_decode =
         (backend.name() == "cuda" && !cuda_direct_paged_decode_disabled())
-            || backend.name() == "vulkan";
+            || backend.name() == "vulkan"
+            // ROCm: device-resident KV pools + native sq=1 O(n) paged decode
+            // (flat ~14 tok/s vs the contiguous block's O(n^2) prefill recompute).
+            // Behind KILN_ROCM_PAGED_DECODE (default off) pending the KV-cache
+            // correctness fix — see rocm_paged_decode_enabled().
+            || (backend.name() == "rocm" && rocm_paged_decode_enabled());
     #[cfg(feature = "cuda")]
     let is_fp8 = try_kt_paged_kv_is_fp8(paged_cache.is_fp8(), kt_paged_cache);
     #[cfg(not(feature = "cuda"))]

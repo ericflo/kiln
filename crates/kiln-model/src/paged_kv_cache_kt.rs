@@ -191,6 +191,31 @@ impl PagedKvCacheKt {
                     .with_context(|| format!("kt paged-kv: wrap v_pool layer {_i}"))?;
                     (k, v)
                 }
+                // #1082 ROCm: device-resident KV pools (mirror the CUDA arm),
+                // gated on KILN_ROCM_PAGED_DECODE so it pairs with the native
+                // sq=1 paged-decode routing in forward.rs (both default off until
+                // the KV-cache correctness fix lands). When off, ROCm falls to the
+                // `other` => CPU pool + the correct contiguous-decode path.
+                #[cfg(feature = "rocm")]
+                kiln_tensor::Device::Rocm(i) if crate::forward::rocm_paged_decode_enabled() => {
+                    let k_storage = kiln_tensor::rocm_zeros_ctx(i, storage_dtype, n_elements)
+                        .map_err(|e| anyhow::anyhow!("kt paged-kv: alloc k_pool (rocm) layer {_i}: {e}"))?;
+                    let v_storage = kiln_tensor::rocm_zeros_ctx(i, storage_dtype, n_elements)
+                        .map_err(|e| anyhow::anyhow!("kt paged-kv: alloc v_pool (rocm) layer {_i}: {e}"))?;
+                    let k = KtTensor::from_parts(
+                        k_storage,
+                        Layout::contiguous(shape.clone()),
+                        TensorId::next(),
+                    )
+                    .map_err(|e| anyhow::anyhow!("kt paged-kv: wrap k_pool (rocm) layer {_i}: {e}"))?;
+                    let v = KtTensor::from_parts(
+                        v_storage,
+                        Layout::contiguous(shape.clone()),
+                        TensorId::next(),
+                    )
+                    .map_err(|e| anyhow::anyhow!("kt paged-kv: wrap v_pool (rocm) layer {_i}: {e}"))?;
+                    (k, v)
+                }
                 #[cfg(feature = "metal")]
                 kiln_tensor::Device::Metal(i) => {
                     let _ = n_elements;

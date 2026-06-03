@@ -32,6 +32,29 @@ fn rocm_profile_on() -> bool {
     *ON.get_or_init(|| std::env::var("KILN_ROCM_PROFILE").is_ok())
 }
 
+/// Diagnostic (KILN_ROCM_BT=1): print a symbolized backtrace the FIRST time each
+/// distinct (direction, shape) host round-trip happens past warmup, so we can
+/// localize every remaining decode-region sync (the hard prerequisite for HIP
+/// graph capture). Build with `RUSTFLAGS=-Cdebuginfo=1` so frames symbolize.
+fn rocm_bt_once(dir: &str, shape: &[usize], total: u64) {
+    if total < 1000 {
+        return; // skip weight-load / warmup
+    }
+    static ON: OnceLock<bool> = OnceLock::new();
+    if !*ON.get_or_init(|| std::env::var("KILN_ROCM_BT").is_ok()) {
+        return;
+    }
+    static SEEN: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+    let key = format!("{dir}{shape:?}");
+    let mut seen = SEEN.get_or_init(|| Mutex::new(std::collections::HashSet::new())).lock().unwrap();
+    if seen.len() < 16 && seen.insert(key) {
+        eprintln!(
+            "[rocm-bt] {dir} {shape:?}:\n{}",
+            std::backtrace::Backtrace::force_capture()
+        );
+    }
+}
+
 /// Diagnostic: tallies how often each generic `DeviceOp` falls through to the
 /// CPU host-fallback path (a full D2H→cpu_fwd→H2D round-trip per call). When
 /// `KILN_ROCM_PROFILE` is set, the running tally per op-name is printed every
@@ -536,6 +559,7 @@ pub fn rocm_to_host_copy(src: &crate::Tensor) -> Result<crate::Tensor> {
 
     if rocm_profile_on() {
         let n = ROCM_DTOH_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+        rocm_bt_once("dtoh", src.shape(), n);
         if n % 200 == 0 {
             eprintln!(
                 "[rocm-profile] dtoh={} htod={} (last shape {:?})",
@@ -601,6 +625,7 @@ pub fn host_to_rocm_copy(src: &crate::Tensor, device_index: usize) -> Result<cra
 
     if rocm_profile_on() {
         let n = ROCM_HTOD_COUNT.fetch_add(1, Ordering::Relaxed) + 1;
+        rocm_bt_once("htod", src.shape(), n);
         if n % 200 == 0 {
             eprintln!(
                 "[rocm-profile] htod={} dtoh={} (last shape {:?})",
