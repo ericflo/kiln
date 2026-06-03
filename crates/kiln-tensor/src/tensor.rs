@@ -1540,9 +1540,14 @@ mod tests {
         // Per-backend Metal branch stays Err in a no-feature build;
         // callers that hit it should see an explicit error instead of a
         // silent CPU fallback that would later trip a device-mismatch
-        // assert.
-        let e = Tensor::zeros_on(Device::Metal(0), vec![2], DType::F32).unwrap_err();
-        assert!(e.to_string().contains("metal:0"));
+        // assert. With the `metal` feature the substrate has landed and the
+        // branch builds a real `MetalStorage` — so the NYI-error contract
+        // only holds WITHOUT the feature (mirrors the `vulkan` gating below).
+        #[cfg(not(feature = "metal"))]
+        {
+            let e = Tensor::zeros_on(Device::Metal(0), vec![2], DType::F32).unwrap_err();
+            assert!(e.to_string().contains("metal:0"));
+        }
         // Vulkan is first-class once the `vulkan` feature lands (PR2,
         // #1082); without the feature it errors with the device name.
         #[cfg(not(feature = "vulkan"))]
@@ -1554,8 +1559,11 @@ mod tests {
 
     #[test]
     fn from_vec_on_metal_errors_until_substrate_lands() {
-        let e = Tensor::from_vec_on(Device::Metal(0), vec![1.0f32], vec![1]).unwrap_err();
-        assert!(e.to_string().contains("metal:0"));
+        #[cfg(not(feature = "metal"))]
+        {
+            let e = Tensor::from_vec_on(Device::Metal(0), vec![1.0f32], vec![1]).unwrap_err();
+            assert!(e.to_string().contains("metal:0"));
+        }
         #[cfg(not(feature = "vulkan"))]
         {
             let e = Tensor::from_vec_on(Device::Vulkan(0), vec![1.0f32], vec![1]).unwrap_err();
