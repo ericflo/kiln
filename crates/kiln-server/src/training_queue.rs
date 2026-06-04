@@ -153,6 +153,11 @@ pub enum QueuedJob {
 /// Entry in the training queue.
 pub struct QueueEntry {
     pub job_id: String,
+    /// Estimated per-step working-set bytes from the submit-time preflight
+    /// (#24). `execute_job` holds a governor reservation of this size across the
+    /// job so the KV autoscaler proactively shrinks inference KV before training
+    /// allocates. `0` when no estimate was available (skips the reservation).
+    pub reserved_bytes: u64,
     pub job: QueuedJob,
 }
 
@@ -1971,6 +1976,28 @@ fn execute_job(state: AppState, entry: QueueEntry) {
         _ => None,
     };
 
+    // #24: hold a governor soft-reservation for this job's estimated working set
+    // across its entire execution. This lowers `MemoryGovernor::available_bytes()`
+    // so the KV autoscaler proactively shrinks inference KV BEFORE the trainer
+    // allocates — the training/inference VRAM arbiter. Capped at total VRAM so a
+    // bad over-estimate degrades gracefully (it can never starve inference below
+    // the autoscaler's floor). RAII: drops at the end of this function scope —
+    // after the match AND finalize — releasing the budget back to inference.
+    // Read `reserved_bytes` (Copy) here, before `match entry.job` moves the job.
+    let _mem_reservation = (entry.reserved_bytes > 0).then(|| {
+        let total = kiln_memory::vram::detect_vram().total_bytes;
+        let bytes = if total > 0 {
+            entry.reserved_bytes.min(total)
+        } else {
+            entry.reserved_bytes
+        };
+        tracing::info!(
+            reserved_mb = bytes / (1024 * 1024),
+            "training job holding governor memory reservation (inference KV will shrink to fit)"
+        );
+        kiln_memory::MemoryGovernor::global().reserve(bytes)
+    });
+
     let result: std::result::Result<PathBuf, String> = match entry.job {
         QueuedJob::Sft(mut req) => {
             if req.config.checkpoint_interval.is_none() {
@@ -2389,6 +2416,7 @@ mod tests {
         let mut q = TrainingQueue::new();
         q.push(QueueEntry {
             job_id: "job-1".into(),
+            reserved_bytes: 0,
             job: QueuedJob::Sft(SftRequest {
                 examples: vec![],
                 config: Default::default(),
@@ -2397,6 +2425,7 @@ mod tests {
         });
         q.push(QueueEntry {
             job_id: "job-2".into(),
+            reserved_bytes: 0,
             job: QueuedJob::Sft(SftRequest {
                 examples: vec![],
                 config: Default::default(),
@@ -2405,6 +2434,7 @@ mod tests {
         });
         q.push(QueueEntry {
             job_id: "job-3".into(),
+            reserved_bytes: 0,
             job: QueuedJob::Sft(SftRequest {
                 examples: vec![],
                 config: Default::default(),
@@ -2424,6 +2454,7 @@ mod tests {
         let mut q = TrainingQueue::new();
         q.push(QueueEntry {
             job_id: "job-1".into(),
+            reserved_bytes: 0,
             job: QueuedJob::Sft(SftRequest {
                 examples: vec![],
                 config: Default::default(),
@@ -2432,6 +2463,7 @@ mod tests {
         });
         q.push(QueueEntry {
             job_id: "job-2".into(),
+            reserved_bytes: 0,
             job: QueuedJob::Sft(SftRequest {
                 examples: vec![],
                 config: Default::default(),
@@ -2440,6 +2472,7 @@ mod tests {
         });
         q.push(QueueEntry {
             job_id: "job-3".into(),
+            reserved_bytes: 0,
             job: QueuedJob::Sft(SftRequest {
                 examples: vec![],
                 config: Default::default(),

@@ -133,8 +133,8 @@ pub use cuda_storage::{
     cuda_diag_build, cuda_diagonal_extract, cuda_softmax_last_axis, cuda_sum_last_axis,
     cuda_is_finite, cuda_sum_squared_last_axis, cuda_to_host_copy, cuda_topk_last_axis,
     cuda_where_select,
-    cuda_zeros_ctx, host_to_cuda_copy, host_to_cuda_copy_ctx, primary_cuda_context,
-    CudaStorage,
+    cuda_mem_get_info, cuda_trim_pool, cuda_zeros_ctx, host_to_cuda_copy, host_to_cuda_copy_ctx,
+    primary_cuda_context, CudaStorage,
 };
 #[cfg(feature = "cuda")]
 pub use cuda_matmul::{
