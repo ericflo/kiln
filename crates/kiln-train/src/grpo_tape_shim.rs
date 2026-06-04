@@ -221,8 +221,9 @@ impl BackwardOp for GrpoPgLossFromLogitsBackward {
 
 /// Per-active-token entropy-aware KL gate (1.0 / 0.0) mirroring the detached
 /// mask `crate::trainer::grpo_loss` applies to the KL penalty. Returns an
-/// all-ones mask when no quantile is configured (the common case). Used only by
-/// the CISPO analytic coeff (the KL grad it adds must respect the same gate).
+/// all-ones mask when no quantile is configured (the common case). Used by the
+/// analytic coeff path so the KL grad respects the same detached gate for every
+/// IS mode.
 ///
 /// ⚠ DRIFT COUPLING with `grpo_loss`'s entropy-quantile block — keep in lockstep.
 #[cfg(any(
@@ -231,7 +232,7 @@ impl BackwardOp for GrpoPgLossFromLogitsBackward {
     feature = "vulkan",
     feature = "rocm"
 ))]
-fn cispo_entropy_kl_mask(plp_host: &[f32], loss_params: &GrpoLossParams) -> Vec<f64> {
+fn entropy_aware_kl_mask(plp_host: &[f32], loss_params: &GrpoLossParams) -> Vec<f64> {
     let n = plp_host.len();
     match loss_params.entropy_aware_kl_quantile {
         Some(q) if q.is_finite() && (0.0..1.0).contains(&q) => {
@@ -290,7 +291,7 @@ fn grpo_loss_coeff_from_policy_log_probs_kt(
     loss_params: GrpoLossParams,
     num_active: usize,
 ) -> Result<Vec<f32>> {
-    use kiln_tensor::{DType as KtDType, Tensor as KtTensor};
+    use kiln_tensor::DType as KtDType;
 
     if num_active == 0 {
         return Ok(Vec::new());
@@ -301,89 +302,103 @@ fn grpo_loss_coeff_from_policy_log_probs_kt(
         policy_log_probs.elem_count(),
         ref_log_probs_kt.elem_count()
     );
-    let device = policy_log_probs.device();
 
     let coeff: Vec<f32> = if loss_params.reinforce {
         let c = (-loss_params.advantage * loss_params.loss_normalizer) as f32;
         vec![c; num_active]
-    } else if matches!(loss_params.is_level, crate::IsLevel::Cispo) {
+    } else {
         let plp_host: Vec<f32> = policy_log_probs
             .to_dtype(KtDType::F32)
             .and_then(|t| t.flatten_all())
             .and_then(|t| t.to_vec1::<f32>())
             .map_err(|e| {
-                anyhow::anyhow!("grpo_loss_coeff_from_policy_log_probs_kt: cispo plp host: {e}")
+                anyhow::anyhow!("grpo_loss_coeff_from_policy_log_probs_kt: plp host: {e}")
             })?;
         let ref_host: Vec<f32> = ref_log_probs_kt
             .to_dtype(KtDType::F32)
             .and_then(|t| t.flatten_all())
             .and_then(|t| t.to_vec1::<f32>())
             .map_err(|e| {
-                anyhow::anyhow!("grpo_loss_coeff_from_policy_log_probs_kt: cispo ref host: {e}")
+                anyhow::anyhow!("grpo_loss_coeff_from_policy_log_probs_kt: ref host: {e}")
             })?;
         anyhow::ensure!(
             plp_host.len() == num_active && ref_host.len() == num_active,
-            "grpo_loss_coeff_from_policy_log_probs_kt: cispo plp/ref len mismatch ({} / {} vs {num_active})",
+            "grpo_loss_coeff_from_policy_log_probs_kt: plp/ref len mismatch ({} / {} vs {num_active})",
             plp_host.len(),
             ref_host.len()
         );
-        let kl_mask = cispo_entropy_kl_mask(&plp_host, &loss_params);
         let lo = 1.0 - loss_params.clip_low;
         let hi = 1.0 + loss_params.clip_high;
-        (0..num_active)
-            .map(|a| {
-                let log_ratio = (plp_host[a] - ref_host[a]) as f64;
-                let ratio = log_ratio.exp();
-                let clipped = ratio.clamp(lo, hi);
-                let weight = clipped * loss_params.advantage;
-                let kl_grad = match loss_params.kl_estimator {
-                    crate::KlEstimator::None => 0.0,
-                    crate::KlEstimator::K1 => loss_params.kl_coeff,
-                    crate::KlEstimator::K3 => loss_params.kl_coeff * (1.0 - (-log_ratio).exp()),
-                };
-                let per_token = -weight + kl_mask[a] * kl_grad;
-                (loss_params.loss_normalizer * per_token) as f32
-            })
-            .collect()
-    } else {
-        let plp_f32 = policy_log_probs.to_dtype(KtDType::F32).map_err(|e| {
-            anyhow::anyhow!("grpo_loss_coeff_from_policy_log_probs_kt: plp to_f32: {e}")
-        })?;
-        let eps: f64 = 1e-3;
-        let read_scalar = |t: &KtTensor, ctx: &str| -> Result<f64> {
-            let v = t
-                .to_dtype(KtDType::F32)
-                .and_then(|t| t.flatten_all())
-                .and_then(|t| t.to_vec1::<f32>())
-                .map_err(|e| {
-                    anyhow::anyhow!("grpo_loss_coeff_from_policy_log_probs_kt: {ctx}: {e}")
-                })?;
-            v.first().copied().map(|x| x as f64).ok_or_else(|| {
-                anyhow::anyhow!("grpo_loss_coeff_from_policy_log_probs_kt: {ctx}: empty scalar")
-            })
+        let log_ratios: Vec<f64> = plp_host
+            .iter()
+            .zip(ref_host.iter())
+            .map(|(&p, &r)| (p - r) as f64)
+            .collect();
+        let kl_mask = entropy_aware_kl_mask(&plp_host, &loss_params);
+        let kl_grad = |log_ratio: f64| -> f64 {
+            match loss_params.kl_estimator {
+                crate::KlEstimator::None => 0.0,
+                crate::KlEstimator::K1 => loss_params.kl_coeff,
+                crate::KlEstimator::K3 => loss_params.kl_coeff * (1.0 - (-log_ratio).exp()),
+            }
         };
-        let mut coeff: Vec<f32> = Vec::with_capacity(num_active);
-        for a in 0..num_active {
-            let mut e_host = vec![0f32; num_active];
-            e_host[a] = 1.0;
-            let e_a = KtTensor::from_vec_on(device, e_host, vec![num_active]).map_err(|err| {
-                anyhow::anyhow!("grpo_loss_coeff_from_policy_log_probs_kt: e_a: {err}")
-            })?;
-            let plp_plus = plp_f32.add(&e_a.affine(eps, 0.0)?).map_err(|e| {
-                anyhow::anyhow!("grpo_loss_coeff_from_policy_log_probs_kt: plp+: {e}")
-            })?;
-            let plp_minus = plp_f32.add(&e_a.affine(-eps, 0.0)?).map_err(|e| {
-                anyhow::anyhow!("grpo_loss_coeff_from_policy_log_probs_kt: plp-: {e}")
-            })?;
-            let l_plus = grpo_loss(&plp_plus, ref_log_probs_kt, loss_params, &device)
-                .context("grpo_loss_coeff_from_policy_log_probs_kt: grpo_loss(+)")?;
-            let l_minus = grpo_loss(&plp_minus, ref_log_probs_kt, loss_params, &device)
-                .context("grpo_loss_coeff_from_policy_log_probs_kt: grpo_loss(-)")?;
-            let lp = read_scalar(&l_plus, "loss(+) read")?;
-            let lm = read_scalar(&l_minus, "loss(-) read")?;
-            coeff.push(((lp - lm) / (2.0 * eps)) as f32);
+
+        match loss_params.is_level {
+            crate::IsLevel::Token => log_ratios
+                .iter()
+                .enumerate()
+                .map(|(a, &log_ratio)| {
+                    let ratio = log_ratio.exp();
+                    let pg_grad = if loss_params.advantage >= 0.0 {
+                        if ratio <= hi {
+                            -loss_params.advantage * ratio
+                        } else {
+                            0.0
+                        }
+                    } else if ratio >= lo {
+                        -loss_params.advantage * ratio
+                    } else {
+                        0.0
+                    };
+                    let per_token = pg_grad + kl_mask[a] * kl_grad(log_ratio);
+                    (loss_params.loss_normalizer * per_token) as f32
+                })
+                .collect(),
+            crate::IsLevel::Sequence => {
+                let mean_log_ratio = log_ratios.iter().sum::<f64>() / num_active as f64;
+                let seq_ratio = mean_log_ratio.exp();
+                let pg_grad = if loss_params.advantage >= 0.0 {
+                    if seq_ratio <= hi {
+                        -loss_params.advantage * seq_ratio / num_active as f64
+                    } else {
+                        0.0
+                    }
+                } else if seq_ratio >= lo {
+                    -loss_params.advantage * seq_ratio / num_active as f64
+                } else {
+                    0.0
+                };
+                log_ratios
+                    .iter()
+                    .enumerate()
+                    .map(|(a, &log_ratio)| {
+                        let per_token = pg_grad + kl_mask[a] * kl_grad(log_ratio);
+                        (loss_params.loss_normalizer * per_token) as f32
+                    })
+                    .collect()
+            }
+            crate::IsLevel::Cispo => log_ratios
+                .iter()
+                .enumerate()
+                .map(|(a, &log_ratio)| {
+                    let ratio = log_ratio.exp();
+                    let clipped = ratio.clamp(lo, hi);
+                    let weight = clipped * loss_params.advantage;
+                    let per_token = -weight + kl_mask[a] * kl_grad(log_ratio);
+                    (loss_params.loss_normalizer * per_token) as f32
+                })
+                .collect(),
         }
-        coeff
     };
 
     Ok(coeff)
@@ -1275,6 +1290,119 @@ mod tests {
                 assert!(
                     (e - a).abs() <= tol,
                     "{name}: hidden grad drift at flat {i}: expected={e} actual={a} tol={tol}"
+                );
+            }
+        }
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn grpo_loss_coeff_matches_finite_difference_cpu() {
+        let device = kiln_tensor::Device::Cpu;
+        let ratios = [0.5f64, 1.05, 1.4, 0.95];
+        let plp_host = vec![-1.20f32, -0.40, -2.00, -0.90];
+        let ref_host: Vec<f32> = plp_host
+            .iter()
+            .zip(ratios.iter())
+            .map(|(&p, &r)| (p as f64 - r.ln()) as f32)
+            .collect();
+        let num_active = plp_host.len();
+        let plp = KtTensor::from_vec_on(device, plp_host.clone(), vec![num_active]).unwrap();
+        let ref_kt = KtTensor::from_vec_on(device, ref_host, vec![num_active]).unwrap();
+        let variants: Vec<(&str, GrpoLossParams)> = vec![
+            (
+                "token-positive-k3",
+                GrpoLossParams {
+                    advantage: 0.7,
+                    clip_low: 0.2,
+                    clip_high: 0.2,
+                    kl_coeff: 0.11,
+                    kl_estimator: KlEstimator::K3,
+                    loss_normalizer: 0.25,
+                    is_level: IsLevel::Token,
+                    reinforce: false,
+                    entropy_aware_kl_quantile: None,
+                },
+            ),
+            (
+                "token-negative-k1",
+                GrpoLossParams {
+                    advantage: -0.8,
+                    clip_low: 0.2,
+                    clip_high: 0.2,
+                    kl_coeff: 0.07,
+                    kl_estimator: KlEstimator::K1,
+                    loss_normalizer: 0.5,
+                    is_level: IsLevel::Token,
+                    reinforce: false,
+                    entropy_aware_kl_quantile: None,
+                },
+            ),
+            (
+                "sequence-positive-k3",
+                GrpoLossParams {
+                    advantage: 0.6,
+                    clip_low: 0.2,
+                    clip_high: 0.2,
+                    kl_coeff: 0.05,
+                    kl_estimator: KlEstimator::K3,
+                    loss_normalizer: 0.75,
+                    is_level: IsLevel::Sequence,
+                    reinforce: false,
+                    entropy_aware_kl_quantile: None,
+                },
+            ),
+            (
+                "sequence-negative-none",
+                GrpoLossParams {
+                    advantage: -0.9,
+                    clip_low: 0.2,
+                    clip_high: 0.2,
+                    kl_coeff: 0.0,
+                    kl_estimator: KlEstimator::None,
+                    loss_normalizer: 0.4,
+                    is_level: IsLevel::Sequence,
+                    reinforce: false,
+                    entropy_aware_kl_quantile: None,
+                },
+            ),
+        ];
+
+        let read_scalar = |t: &KtTensor| -> f64 {
+            t.to_dtype(KtDType::F32)
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap()[0] as f64
+        };
+        let loss_of = |host: &[f32], params: GrpoLossParams| -> f64 {
+            let p = KtTensor::from_vec_on(device, host.to_vec(), vec![num_active]).unwrap();
+            let loss = grpo_loss(&p, &ref_kt, params, &device).unwrap();
+            read_scalar(&loss)
+        };
+
+        const EPS: f32 = 1e-2;
+        for (name, params) in variants {
+            let coeff = super::grpo_loss_coeff_from_policy_log_probs_kt(
+                &plp,
+                &ref_kt,
+                params,
+                num_active,
+            )
+            .unwrap();
+            assert_eq!(coeff.len(), num_active, "{name}: coeff len");
+            for a in 0..num_active {
+                let mut plus = plp_host.clone();
+                let mut minus = plp_host.clone();
+                plus[a] += EPS;
+                minus[a] -= EPS;
+                let fd = (loss_of(&plus, params) - loss_of(&minus, params)) / (2.0 * EPS as f64);
+                let got = coeff[a] as f64;
+                let tol = 5e-3_f64.max(3e-2 * fd.abs());
+                assert!(
+                    (got - fd).abs() <= tol,
+                    "{name}: coeff[{a}] got={got:+.6} fd={fd:+.6} tol={tol:.3e}"
                 );
             }
         }
