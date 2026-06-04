@@ -40,6 +40,17 @@ fn build_cuda() {
     configure_nvcc_from_cuda_root(&cuda_root);
 
     build.include(&csrc_dir);
+    // The shared `kt_gpu_compat.cuh` lives in the sibling kiln-tensor crate's
+    // csrc; `recurrent_gdn_fwd.cu` #includes it unconditionally, so the CUDA
+    // (nvcc) build needs that dir on the include path too — the ROCm arm already
+    // adds it. Without this a fresh-clone `cargo build --features cuda` fails with
+    // "kt_gpu_compat.cuh: No such file or directory". Mirrors kiln-opd-loss-kernel.
+    let kt_csrc = manifest_dir
+        .parent()
+        .expect("CARGO_MANIFEST_DIR has a parent (crates/)")
+        .join("kiln-tensor")
+        .join("csrc");
+    build.include(&kt_csrc);
     build.include(cuda_root.join("include"));
 
     build.flag("-std=c++17");
