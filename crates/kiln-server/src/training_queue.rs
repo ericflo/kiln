@@ -632,16 +632,15 @@ fn run_opd(
                     resolved_max_top_k.max(req.config.top_k),
                 ))
             }
-            crate::api::teachers::TeacherKind::Local => {
-                std::sync::Arc::new(build_local_teacher_for(
-                    &spec,
-                    prompts,
-                    tokenizer,
-                    weights,
-                    model_config,
-                    req.config.top_k,
-                )?)
-            }
+            crate::api::teachers::TeacherKind::Local => build_local_teacher_for(
+                &spec,
+                prompts,
+                tokenizer,
+                weights,
+                model_config,
+                req.config.top_k,
+                req.config.training_mode,
+            )?,
             crate::api::teachers::TeacherKind::Remote => {
                 let url = spec.url.clone().ok_or_else(|| {
                         format!(
@@ -1052,7 +1051,25 @@ fn build_local_teacher_for(
     weights: &kiln_model::forward::GpuWeights,
     model_config: &kiln_core::config::ModelConfig,
     top_k: usize,
-) -> std::result::Result<kiln_train::logit_source::FixtureLogitSource, String> {
+    training_mode: kiln_train::opd::OpdTrainingMode,
+) -> std::result::Result<std::sync::Arc<dyn kiln_train::logit_source::LogitSource>, String> {
+    // ON-POLICY self-distillation (#31): the student generates fresh rollouts, so
+    // the teacher must score ARBITRARY token sequences live — a prompt-hash
+    // fixture would miss every rollout. Return a LiveLocalTeacher that holds a
+    // cheap (Arc-backed) clone of the loaded model and runs a detached forward on
+    // demand. Base-model teacher (no LoRA), per the behavioural-recovery recipe.
+    if matches!(training_mode, kiln_train::opd::OpdTrainingMode::OnPolicy) {
+        return Ok(std::sync::Arc::new(kiln_train::opd::LiveLocalTeacher::new(
+            spec.alias.clone(),
+            weights.clone(),
+            model_config.clone(),
+            None,
+            top_k,
+        )));
+    }
+
+    // OFF-POLICY: the assistant turns are fixed, so pre-compute the fixture keyed
+    // by tokens_hash (cheaper — one forward per prompt up front).
     let mut prompts_and_active: Vec<(Vec<u32>, Vec<usize>)> = Vec::with_capacity(prompts.len());
     for prompt in prompts {
         let ex = kiln_train::SftExample {
@@ -1077,7 +1094,7 @@ fn build_local_teacher_for(
     if prompts_and_active.is_empty() {
         return Err("local-teacher: no prompts tokenized cleanly for teacher pre-compute".into());
     }
-    kiln_train::opd::build_local_teacher_fixture(
+    let fixture = kiln_train::opd::build_local_teacher_fixture(
         spec.alias.clone(),
         &prompts_and_active,
         weights,
@@ -1086,7 +1103,8 @@ fn build_local_teacher_for(
         top_k,
         spec.tokenizer_hash.clone(),
     )
-    .map_err(|e| format!("build_local_teacher_fixture failed: {e:#}"))
+    .map_err(|e| format!("build_local_teacher_fixture failed: {e:#}"))?;
+    Ok(std::sync::Arc::new(fixture))
 }
 
 /// §6 / §8.6 — default per-job hard cap on remote-teacher $ spend
@@ -1260,17 +1278,17 @@ fn run_distill_refresh(
                 resolved_max_top_k.max(req.config.top_k),
             ))
         }
-        crate::api::teachers::TeacherKind::Local => std::sync::Arc::new(
-            build_local_teacher_for(
-                &spec,
-                &prompts,
-                tokenizer,
-                weights,
-                model_config,
-                req.config.top_k,
-            )
-            .map_err(|e| format!("distill_refresh phase 2 local-teacher build: {e}"))?,
-        ),
+        crate::api::teachers::TeacherKind::Local => build_local_teacher_for(
+            &spec,
+            &prompts,
+            tokenizer,
+            weights,
+            model_config,
+            req.config.top_k,
+            // Distill refresh phase 2 scores fixed teacher turns — fixture path.
+            kiln_train::opd::OpdTrainingMode::OffPolicy,
+        )
+        .map_err(|e| format!("distill_refresh phase 2 local-teacher build: {e}"))?,
         crate::api::teachers::TeacherKind::Remote => {
             let url = spec.url.clone().ok_or_else(|| {
                 format!("teacher {:?} is Remote but has no `url` field", spec.alias)
@@ -1616,17 +1634,17 @@ fn run_distill_pump(
                 resolved_max_top_k.max(req.config.top_k),
             ))
         }
-        crate::api::teachers::TeacherKind::Local => std::sync::Arc::new(
-            build_local_teacher_for(
-                &spec,
-                &prompts,
-                tokenizer,
-                weights,
-                model_config,
-                req.config.top_k,
-            )
-            .map_err(|e| format!("distill_pump local-teacher build: {e}"))?,
-        ),
+        crate::api::teachers::TeacherKind::Local => build_local_teacher_for(
+            &spec,
+            &prompts,
+            tokenizer,
+            weights,
+            model_config,
+            req.config.top_k,
+            // Distill pump pre-computes against fixed teacher turns — fixture path.
+            kiln_train::opd::OpdTrainingMode::OffPolicy,
+        )
+        .map_err(|e| format!("distill_pump local-teacher build: {e}"))?,
         crate::api::teachers::TeacherKind::Remote => {
             let url = spec.url.clone().ok_or_else(|| {
                 format!("teacher {:?} is Remote but has no `url` field", spec.alias)
