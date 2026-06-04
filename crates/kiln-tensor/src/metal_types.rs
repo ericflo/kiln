@@ -27,10 +27,21 @@
 
 #![cfg(feature = "metal")]
 
+pub use crate::metal_rt::Buffer;
 /// MSL compute-pipeline-state handle. Kiln-owned objc2 wrapper
 /// ([`crate::metal_rt::ComputePipeline`]) over
 /// `Retained<ProtocolObject<dyn MTLComputePipelineState>>`.
 pub use crate::metal_rt::ComputePipeline;
+pub use crate::metal_rt::{
+    IndirectCommandBuffer, IndirectCommandBufferDescriptor, IndirectComputeCommand,
+    IndirectDispatchKind,
+};
+
+/// Resource usage flags for Metal command encoders.
+pub use objc2_metal::MTLResourceUsage;
+
+/// Metal resource allocation options.
+pub use crate::metal_rt::MTLResourceOptions;
 
 /// MSL library handle. Kiln-owned objc2 wrapper
 /// ([`crate::metal_rt::Library`]) over
@@ -79,9 +90,8 @@ pub fn buffer_o_kt<'a>(
 
 /// MSL compute-pipeline-state handle as a raw `objc2-metal` protocol
 /// object.
-pub type RawComputePipelineState = objc2::rc::Retained<
-    objc2::runtime::ProtocolObject<dyn objc2_metal::MTLComputePipelineState>,
->;
+pub type RawComputePipelineState =
+    objc2::rc::Retained<objc2::runtime::ProtocolObject<dyn objc2_metal::MTLComputePipelineState>>;
 
 /// MSL library handle as a raw `objc2-metal` protocol object.
 pub type RawLibrary =
@@ -193,9 +203,7 @@ impl MetalCompanion {
     /// The returned encoder ends encoding on drop (the
     /// [`crate::metal_rt::ComputeCommandEncoder`] `Drop` impl calls
     /// `end_encoding()`), so callers don't need to manage it manually.
-    pub fn command_encoder(
-        &self,
-    ) -> crate::Result<crate::metal_rt::ComputeCommandEncoder> {
+    pub fn command_encoder(&self) -> crate::Result<crate::metal_rt::ComputeCommandEncoder> {
         let commands = self.commands.write().map_err(|e| {
             crate::Error::Msg(format!(
                 "MetalCompanion::command_encoder: commands.write() poisoned: {e}"
@@ -209,6 +217,22 @@ impl MetalCompanion {
         // The `flush` bool from the pool signals when the pool recycled a
         // command buffer; the in-crate ops don't act on it (they wait via
         // `wait_until_completed` on the host-read path), so it's discarded.
+        Ok(encoder)
+    }
+
+    /// Materialize a fresh `BlitCommandEncoder` from the same ordered command
+    /// stream as [`Self::command_encoder`].
+    pub fn blit_encoder(&self) -> crate::Result<crate::metal_rt::BlitCommandEncoder> {
+        let commands = self.commands.write().map_err(|e| {
+            crate::Error::Msg(format!(
+                "MetalCompanion::blit_encoder: commands.write() poisoned: {e}"
+            ))
+        })?;
+        let (_flush, encoder) = commands.blit_command_encoder().map_err(|e| {
+            crate::Error::Msg(format!(
+                "MetalCompanion::blit_encoder: Commands::blit_command_encoder failed: {e:?}"
+            ))
+        })?;
         Ok(encoder)
     }
 

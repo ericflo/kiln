@@ -4,11 +4,15 @@
 //! classification. Only crate-internal paths are renamed. (#1082)
 
 use super::{
-    Buffer, CommandQueue, ComputePipeline, Function, Library, MTLResourceOptions, MetalRtError,
+    Buffer, CommandQueue, ComputePipeline, Function, IndirectCommandBuffer,
+    IndirectCommandBufferDescriptor, Library, MTLResourceOptions, MetalRtError,
 };
 use objc2::{rc::Retained, runtime::AnyObject, runtime::ProtocolObject};
 use objc2_foundation::NSString;
-use objc2_metal::{MTLCompileOptions, MTLCreateSystemDefaultDevice, MTLDevice};
+use objc2_metal::{
+    MTLCompileOptions, MTLComputePipelineDescriptor, MTLCreateSystemDefaultDevice, MTLDevice,
+    MTLPipelineOption,
+};
 use std::{ffi::c_void, ptr};
 
 /// Metal device type classification based on Apple Silicon architecture.
@@ -71,9 +75,7 @@ impl Device {
         self.as_ref()
             .newBufferWithLength_options(length, options)
             .map(Buffer::new)
-            .ok_or(MetalRtError::FailedToCreateResource(
-                "Buffer".to_string(),
-            ))
+            .ok_or(MetalRtError::FailedToCreateResource("Buffer".to_string()))
     }
 
     pub fn new_buffer_with_data(
@@ -87,9 +89,7 @@ impl Device {
             self.as_ref()
                 .newBufferWithBytes_length_options(pointer, length, options)
                 .map(Buffer::new)
-                .ok_or(MetalRtError::FailedToCreateResource(
-                    "Buffer".to_string(),
-                ))
+                .ok_or(MetalRtError::FailedToCreateResource("Buffer".to_string()))
         }
     }
 
@@ -119,9 +119,52 @@ impl Device {
         Ok(ComputePipeline::new(raw))
     }
 
+    pub fn new_compute_pipeline_state_with_function_for_indirect_commands(
+        &self,
+        function: &Function,
+    ) -> Result<ComputePipeline, MetalRtError> {
+        let descriptor = MTLComputePipelineDescriptor::new();
+        descriptor.setComputeFunction(Some(function.as_ref()));
+        descriptor.setSupportIndirectCommandBuffers(true);
+        let raw = self
+            .as_ref()
+            .newComputePipelineStateWithDescriptor_options_reflection_error(
+                &descriptor,
+                MTLPipelineOption::None,
+                None,
+            )
+            .map_err(|e| {
+                MetalRtError::FailedToCreateResource(format!(
+                    "ComputePipelineState(indirect): {e:?}"
+                ))
+            })?;
+        Ok(ComputePipeline::new(raw))
+    }
+
     pub fn new_command_queue(&self) -> Result<CommandQueue, MetalRtError> {
         let raw = self.as_ref().newCommandQueue().unwrap();
         Ok(raw)
+    }
+
+    pub fn new_indirect_command_buffer(
+        &self,
+        descriptor: IndirectCommandBufferDescriptor,
+        max_command_count: usize,
+        options: MTLResourceOptions,
+    ) -> Result<IndirectCommandBuffer, MetalRtError> {
+        let raw_descriptor = descriptor.to_raw();
+        let raw = unsafe {
+            self.as_ref()
+                .newIndirectCommandBufferWithDescriptor_maxCommandCount_options(
+                    &raw_descriptor,
+                    max_command_count,
+                    options,
+                )
+        };
+        raw.map(|raw| IndirectCommandBuffer::new(raw, max_command_count))
+            .ok_or(MetalRtError::FailedToCreateResource(
+                "IndirectCommandBuffer".to_string(),
+            ))
     }
 
     pub fn recommended_max_working_set_size(&self) -> usize {

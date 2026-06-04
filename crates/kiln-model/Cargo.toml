@@ -33,6 +33,7 @@ kiln-rmsnorm-kernel = { path = "../kiln-rmsnorm-kernel", optional = true, defaul
 kiln-vulkan-kernel = { workspace = true, optional = true }
 # Bounded HIP runtime binding — pulled under the `rocm` feature. (R.4)
 kiln-hip = { workspace = true, optional = true }
+kiln-graph-metal = { workspace = true, optional = true }
 # Phase 6a/CP-4 (#1082): experimental tape-forward path under
 # `KILN_USE_TAPE_FORWARD`. Optional so non-cuda builds don't pull in
 # the autograd substrate; gated on `cuda` since the only kt-tape
@@ -94,7 +95,7 @@ rocm = ["dep:kiln-hip", "kiln-conv1d-kernel/rocm", "kiln-flash-attn/rocm", "kiln
 # candle-parity opt-in feature (#1082), so `--features metal` pulls no candle.
 # `dep:kiln-autograd` is pulled for the kt-tape-authoritative training path —
 # SFT/GRPO/OPD on Metal record on the kt autograd tape (#1082 metal-training).
-metal = ["kiln-kt-bridge/metal", "dep:objc2", "dep:objc2-metal", "kiln-tensor/metal", "dep:kiln-autograd", "dep:half"]
+metal = ["kiln-kt-bridge/metal", "dep:objc2", "dep:objc2-metal", "kiln-tensor/metal", "dep:kiln-autograd", "dep:half", "dep:kiln-graph-metal", "kiln-graph-metal/metal"]
 # Emit NVTX ranges around the hot paths in `forward.rs` so nsys can attribute
 # kernel time per call site. Off by default; pulls in kiln-nvtx's libnvToolsExt
 # link line. Pair with `--features cuda,nvtx`.

@@ -40,6 +40,7 @@ pub mod commands;
 pub mod compute_pipeline;
 pub mod device;
 pub mod encoder;
+pub mod indirect_command_buffer;
 pub mod library;
 
 pub use buffer::*;
@@ -48,6 +49,7 @@ pub use commands::*;
 pub use compute_pipeline::*;
 pub use device::*;
 pub use encoder::*;
+pub use indirect_command_buffer::*;
 pub use library::*;
 
 /// Substrate-level error for the vendored objc2-metal wrapper.

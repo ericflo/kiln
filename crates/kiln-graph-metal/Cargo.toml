@@ -22,4 +22,4 @@ thiserror = { workspace = true }
 [features]
 # Compiles the real metal-rs-backed capture pipeline. Without this
 # feature the crate exposes only the scaffold types.
-metal = []
+metal = ["kiln-tensor/metal"]

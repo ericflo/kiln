@@ -97,6 +97,154 @@ pub struct MetalStorage {
     metal_handle: MetalRawDevice,
 }
 
+/// Rewrite an existing contiguous Metal tensor's contents from host data.
+///
+/// Metal graph replay needs the same stable-buffer refresh primitive CUDA and
+/// ROCm use before each graph launch. Kiln's Metal storage is
+/// `MTLStorageModeShared`, so the update is a direct CPU write into the
+/// buffer's UMA `contents()` pointer; no blit encoder or fresh allocation is
+/// involved.
+#[cfg(feature = "metal")]
+pub fn metal_write_host_in_place<E: crate::Element>(dst: &crate::Tensor, host: &[E]) -> Result<()> {
+    if dst.dtype().is_packed() {
+        return Err(Error::Msg(
+            "metal_write_host_in_place: packed dtype not supported".to_string(),
+        ));
+    }
+    if E::DTYPE.size_in_bytes() != dst.dtype().size_in_bytes() {
+        return Err(Error::Msg(format!(
+            "metal_write_host_in_place: element byte width {} != dst dtype {} byte width {}",
+            E::DTYPE.size_in_bytes(),
+            dst.dtype(),
+            dst.dtype().size_in_bytes()
+        )));
+    }
+    if !dst.is_contiguous() || dst.layout().start_offset() != 0 {
+        return Err(Error::Msg(
+            "metal_write_host_in_place: dst must be contiguous with start_offset == 0".to_string(),
+        ));
+    }
+    let n = dst.element_count();
+    if host.len() != n {
+        return Err(Error::Msg(format!(
+            "metal_write_host_in_place: host len {} != dst element count {n}",
+            host.len()
+        )));
+    }
+
+    let dst_storage = dst
+        .storage()
+        .as_any()
+        .downcast_ref::<MetalStorage>()
+        .ok_or_else(|| {
+            Error::Msg("metal_write_host_in_place: dst must be Metal storage".to_string())
+        })?;
+
+    let bytes = E::to_bytes(host);
+    let buffer = dst_storage.buffer();
+    if bytes.len() > buffer.length() {
+        return Err(Error::Msg(format!(
+            "metal_write_host_in_place: host byte len {} exceeds buffer length {}",
+            bytes.len(),
+            buffer.length()
+        )));
+    }
+
+    unsafe {
+        std::ptr::copy_nonoverlapping(bytes.as_ptr(), buffer.contents(), bytes.len());
+    }
+    buffer.did_modify_range(objc2_foundation::NSRange {
+        location: 0,
+        length: bytes.len(),
+    });
+    Ok(())
+}
+
+/// Copy one contiguous Metal tensor into an existing contiguous Metal tensor.
+///
+/// Metal graph replay binds stable input buffers, so callers that produce
+/// transient activation tensors can refresh runner-owned buffers without
+/// allocating new storage. This conservative path waits for queued GPU writes
+/// and then copies between `MTLStorageModeShared` buffers through UMA.
+#[cfg(feature = "metal")]
+pub fn metal_copy_in_place(src: &crate::Tensor, dst: &crate::Tensor) -> Result<()> {
+    if src.dtype() != dst.dtype() {
+        return Err(Error::Msg(format!(
+            "metal_copy_in_place: dtype mismatch {} vs {}",
+            src.dtype(),
+            dst.dtype()
+        )));
+    }
+    if src.shape() != dst.shape() {
+        return Err(Error::Msg(format!(
+            "metal_copy_in_place: shape mismatch {:?} vs {:?}",
+            src.shape(),
+            dst.shape()
+        )));
+    }
+    if src.dtype().is_packed() {
+        return Err(Error::Msg(
+            "metal_copy_in_place: packed dtype not supported".to_string(),
+        ));
+    }
+    if !src.is_contiguous() || !dst.is_contiguous() {
+        return Err(Error::Msg(
+            "metal_copy_in_place: src and dst must be contiguous".to_string(),
+        ));
+    }
+
+    let src_storage = src
+        .storage()
+        .as_any()
+        .downcast_ref::<MetalStorage>()
+        .ok_or_else(|| Error::Msg("metal_copy_in_place: src must be Metal storage".to_string()))?;
+    let dst_storage = dst
+        .storage()
+        .as_any()
+        .downcast_ref::<MetalStorage>()
+        .ok_or_else(|| Error::Msg("metal_copy_in_place: dst must be Metal storage".to_string()))?;
+    if src_storage.device_index() != dst_storage.device_index() {
+        return Err(Error::Msg(format!(
+            "metal_copy_in_place: device mismatch {} vs {}",
+            src_storage.device_index(),
+            dst_storage.device_index()
+        )));
+    }
+
+    let per = src.dtype().size_in_bytes();
+    let byte_len = src.element_count() * per;
+    let src_offset = src.layout().start_offset() * per;
+    let dst_offset = dst.layout().start_offset() * per;
+    let src_buffer = src_storage.buffer();
+    let dst_buffer = dst_storage.buffer();
+    let src_end = src_offset + byte_len;
+    let dst_end = dst_offset + byte_len;
+    if src_end > src_buffer.length() as usize {
+        return Err(Error::Msg(format!(
+            "metal_copy_in_place: src byte range {src_offset}..{src_end} exceeds buffer length {}",
+            src_buffer.length()
+        )));
+    }
+    if dst_end > dst_buffer.length() as usize {
+        return Err(Error::Msg(format!(
+            "metal_copy_in_place: dst byte range {dst_offset}..{dst_end} exceeds buffer length {}",
+            dst_buffer.length()
+        )));
+    }
+
+    src_storage.companion()?.wait_until_completed()?;
+    unsafe {
+        let src_ptr = (src_buffer.contents() as *const u8).add(src_offset);
+        let dst_ptr = (dst_buffer.contents() as *mut u8).add(dst_offset);
+        std::ptr::copy(src_ptr, dst_ptr, byte_len);
+    }
+    dst_buffer.did_modify_range(objc2_foundation::NSRange {
+        location: dst_offset,
+        length: byte_len,
+    });
+    Ok(())
+}
+
 impl MetalStorage {
     /// Allocate `n_elements` worth of bytes for `dtype` on the metal-rs
     /// `device`, **candle-free** in the allocation path.
@@ -396,7 +544,9 @@ impl StorageBackend for MetalStorage {
 
 use std::sync::OnceLock;
 
-static METAL_COMPANIONS: OnceLock<std::sync::Mutex<std::collections::HashMap<usize, Arc<crate::metal_types::MetalCompanion>>>> = OnceLock::new();
+static METAL_COMPANIONS: OnceLock<
+    std::sync::Mutex<std::collections::HashMap<usize, Arc<crate::metal_types::MetalCompanion>>>,
+> = OnceLock::new();
 
 /// Resolve (or lazily construct) the process-wide kt-native
 /// `MetalCompanion` for the given Metal device ordinal.
@@ -423,7 +573,8 @@ static METAL_COMPANIONS: OnceLock<std::sync::Mutex<std::collections::HashMap<usi
 pub fn primary_metal_companion(
     device_index: usize,
 ) -> Result<Arc<crate::metal_types::MetalCompanion>> {
-    let map = METAL_COMPANIONS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    let map =
+        METAL_COMPANIONS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
     let mut map = map.lock().map_err(|e| {
         Error::Msg(format!(
             "primary_metal_companion({device_index}): METAL_COMPANIONS lock poisoned: {e}"
@@ -449,7 +600,6 @@ pub fn primary_metal_companion(
     map.insert(device_index, companion.clone());
     Ok(companion)
 }
-
 
 // ----------------------------------------------------------------------
 // Host ↔ Metal I/O — candle-core-free UMA staging (#1082 Phase 1)
@@ -557,9 +707,7 @@ pub fn metal_to_host_copy(t: &crate::Tensor) -> Result<crate::Tensor> {
         .storage()
         .as_any()
         .downcast_ref::<MetalStorage>()
-        .ok_or_else(|| {
-            Error::Msg("metal_to_host_copy: tensor must be Metal-backed".to_string())
-        })?;
+        .ok_or_else(|| Error::Msg("metal_to_host_copy: tensor must be Metal-backed".to_string()))?;
     // Host-read synchronization point: make GPU writes visible.
     metal.companion()?.wait_until_completed()?;
 
@@ -569,9 +717,8 @@ pub fn metal_to_host_copy(t: &crate::Tensor) -> Result<crate::Tensor> {
     let buf_len = buffer.length() as usize;
     // SAFETY: Shared-mode buffer `contents()` is CPU-addressable and valid
     // for `buf_len` bytes; we only read within `[0, buf_len)`.
-    let backing: &[u8] = unsafe {
-        core::slice::from_raw_parts(buffer.contents() as *const u8, buf_len)
-    };
+    let backing: &[u8] =
+        unsafe { core::slice::from_raw_parts(buffer.contents() as *const u8, buf_len) };
 
     let layout = t.layout();
     let n_elems = t.element_count();
@@ -703,7 +850,6 @@ pub fn metal_deep_copy(t: &crate::Tensor) -> Result<crate::Tensor> {
     )
 }
 
-
 // ----------------------------------------------------------------------
 // metal_softmax_last_axis — Phase 4 Metal substrate op (#1082)
 // ----------------------------------------------------------------------
@@ -805,12 +951,8 @@ pub fn metal_softmax_last_axis(x: &crate::Tensor) -> Result<crate::Tensor> {
         last_dim,
     )?;
 
-    let out_storage = MetalStorage::from_buffer_kt(
-        raw_device,
-        device_index,
-        dtype,
-        out_buffer_arc,
-    )?;
+    let out_storage =
+        MetalStorage::from_buffer_kt(raw_device, device_index, dtype, out_buffer_arc)?;
     let out_storage_arc: crate::Storage = Arc::new(out_storage);
 
     crate::Tensor::from_parts(
@@ -907,12 +1049,8 @@ pub fn metal_log_softmax_last_axis(x: &crate::Tensor) -> Result<crate::Tensor> {
         last_dim,
     )?;
 
-    let out_storage = MetalStorage::from_buffer_kt(
-        raw_device,
-        device_index,
-        dtype,
-        out_buffer_arc,
-    )?;
+    let out_storage =
+        MetalStorage::from_buffer_kt(raw_device, device_index, dtype, out_buffer_arc)?;
     let out_storage_arc: crate::Storage = Arc::new(out_storage);
 
     crate::Tensor::from_parts(
@@ -976,7 +1114,8 @@ pub fn metal_cumsum_axis(x: &crate::Tensor, axis: usize) -> Result<crate::Tensor
         inner,
     )?;
 
-    let out_storage = MetalStorage::from_buffer_kt(raw_device, device_index, dtype, out_buffer_arc)?;
+    let out_storage =
+        MetalStorage::from_buffer_kt(raw_device, device_index, dtype, out_buffer_arc)?;
     let out_storage_arc: crate::Storage = Arc::new(out_storage);
     crate::Tensor::from_parts(
         out_storage_arc,
@@ -1146,23 +1285,17 @@ pub fn metal_sdpa_last_axis(
         .storage()
         .as_any()
         .downcast_ref::<MetalStorage>()
-        .ok_or_else(|| {
-            Error::Msg("metal_sdpa_last_axis: q must be Metal-backed".to_string())
-        })?;
+        .ok_or_else(|| Error::Msg("metal_sdpa_last_axis: q must be Metal-backed".to_string()))?;
     let k_metal = k
         .storage()
         .as_any()
         .downcast_ref::<MetalStorage>()
-        .ok_or_else(|| {
-            Error::Msg("metal_sdpa_last_axis: k must be Metal-backed".to_string())
-        })?;
+        .ok_or_else(|| Error::Msg("metal_sdpa_last_axis: k must be Metal-backed".to_string()))?;
     let v_metal = v
         .storage()
         .as_any()
         .downcast_ref::<MetalStorage>()
-        .ok_or_else(|| {
-            Error::Msg("metal_sdpa_last_axis: v must be Metal-backed".to_string())
-        })?;
+        .ok_or_else(|| Error::Msg("metal_sdpa_last_axis: v must be Metal-backed".to_string()))?;
 
     // Device-affinity contract: companions resolved via
     // `MetalStorage::companion()` route through the same Device::all()
@@ -1223,19 +1356,11 @@ pub fn metal_sdpa_last_axis(
         v.layout().start_offset(),
     )?;
 
-    let out_storage = MetalStorage::from_buffer_kt(
-        raw_device,
-        device_index,
-        dtype,
-        out_buffer_arc,
-    )?;
+    let out_storage =
+        MetalStorage::from_buffer_kt(raw_device, device_index, dtype, out_buffer_arc)?;
     let out_storage_arc: crate::Storage = Arc::new(out_storage);
 
-    crate::Tensor::from_parts(
-        out_storage_arc,
-        out_layout,
-        crate::TensorId::next(),
-    )
+    crate::Tensor::from_parts(out_storage_arc, out_layout, crate::TensorId::next())
 }
 
 // ----------------------------------------------------------------------
@@ -1318,9 +1443,7 @@ pub fn metal_rmsnorm_last_axis(
         .storage()
         .as_any()
         .downcast_ref::<MetalStorage>()
-        .ok_or_else(|| {
-            Error::Msg("metal_rmsnorm_last_axis: x must be Metal-backed".to_string())
-        })?;
+        .ok_or_else(|| Error::Msg("metal_rmsnorm_last_axis: x must be Metal-backed".to_string()))?;
     let kt_metal_w = weight
         .storage()
         .as_any()
@@ -1749,11 +1872,7 @@ pub fn metal_cast(x: &crate::Tensor, to: DType) -> Result<crate::Tensor> {
     let raw_device = companion.device();
     let out_buffer = raw_device
         .new_buffer(byte_len.max(1), MTLResourceOptions::StorageModeShared)
-        .map_err(|e| {
-            Error::Msg(format!(
-                "metal_cast: new_buffer({byte_len}) failed: {e:?}"
-            ))
-        })?;
+        .map_err(|e| Error::Msg(format!("metal_cast: new_buffer({byte_len}) failed: {e:?}")))?;
     let out_buffer_arc: Arc<MetalBuffer> = Arc::new(out_buffer);
 
     // Kiln-owned MSL cast (replaces candle's call_cast_contiguous).
@@ -1858,12 +1977,16 @@ pub fn metal_elementwise_binary(
         .storage()
         .as_any()
         .downcast_ref::<MetalStorage>()
-        .ok_or_else(|| Error::Msg("metal_elementwise_binary: a must be Metal-backed".to_string()))?;
+        .ok_or_else(|| {
+            Error::Msg("metal_elementwise_binary: a must be Metal-backed".to_string())
+        })?;
     let kt_metal_b = b
         .storage()
         .as_any()
         .downcast_ref::<MetalStorage>()
-        .ok_or_else(|| Error::Msg("metal_elementwise_binary: b must be Metal-backed".to_string()))?;
+        .ok_or_else(|| {
+            Error::Msg("metal_elementwise_binary: b must be Metal-backed".to_string())
+        })?;
 
     let companion = kt_metal_a.companion()?;
     let device_index = match kt_metal_a.device() {
@@ -1919,11 +2042,7 @@ pub fn metal_elementwise_binary(
 /// kiln-owned MSL kernel (`metal_kernels::compare`) keeps the data on-GPU.
 ///
 /// `kind_tag` follows `CmpKind::as_i32` (0=Eq, 1=Ne, 2=Lt, 3=Le, 4=Gt, 5=Ge).
-pub fn metal_compare(
-    a: &crate::Tensor,
-    b: &crate::Tensor,
-    kind_tag: i32,
-) -> Result<crate::Tensor> {
+pub fn metal_compare(a: &crate::Tensor, b: &crate::Tensor, kind_tag: i32) -> Result<crate::Tensor> {
     use crate::metal_rt::MTLResourceOptions;
 
     if !matches!(kind_tag, 0..=5) {
@@ -1981,7 +2100,11 @@ pub fn metal_compare(
     let raw_device = companion.device();
     let out_buffer = raw_device
         .new_buffer(byte_len.max(1), MTLResourceOptions::StorageModeShared)
-        .map_err(|e| Error::Msg(format!("metal_compare: new_buffer({byte_len}) failed: {e:?}")))?;
+        .map_err(|e| {
+            Error::Msg(format!(
+                "metal_compare: new_buffer({byte_len}) failed: {e:?}"
+            ))
+        })?;
     let out_buffer_arc: Arc<MetalBuffer> = Arc::new(out_buffer);
 
     crate::metal_kernels::compare(
@@ -2087,7 +2210,11 @@ pub fn metal_where_select(
     let raw_device = companion.device();
     let out_buffer = raw_device
         .new_buffer(byte_len.max(1), MTLResourceOptions::StorageModeShared)
-        .map_err(|e| Error::Msg(format!("metal_where_select: new_buffer({byte_len}) failed: {e:?}")))?;
+        .map_err(|e| {
+            Error::Msg(format!(
+                "metal_where_select: new_buffer({byte_len}) failed: {e:?}"
+            ))
+        })?;
     let out_buffer_arc: Arc<MetalBuffer> = Arc::new(out_buffer);
 
     crate::metal_kernels::where_select(
@@ -2175,11 +2302,7 @@ pub fn metal_adamw_step(
             v.element_count()
         )));
     }
-    if !param.is_contiguous()
-        || !grad.is_contiguous()
-        || !m.is_contiguous()
-        || !v.is_contiguous()
-    {
+    if !param.is_contiguous() || !grad.is_contiguous() || !m.is_contiguous() || !v.is_contiguous() {
         return Err(Error::Msg(
             "metal_adamw_step: all operands must be contiguous".to_string(),
         ));
@@ -2466,5 +2589,40 @@ mod tests {
             .downcast_ref::<MetalStorage>()
             .unwrap();
         assert!(!Arc::ptr_eq(src.buffer(), dst.buffer()));
+    }
+
+    #[test]
+    fn metal_copy_in_place_reuses_destination_buffer() {
+        let Some(_dev) = maybe_metal_raw_device() else {
+            eprintln!("skip: KILN_TENSOR_METAL_TEST unset or no Metal device");
+            return;
+        };
+
+        let src_values = vec![7.0f32, 8.0, 9.5, 10.25];
+        let dst_values = vec![0.0f32; 4];
+        let src_cpu = crate::Tensor::from_slice(&src_values, vec![2, 2]).unwrap();
+        let dst_cpu = crate::Tensor::from_slice(&dst_values, vec![2, 2]).unwrap();
+        let src = host_to_metal_copy(&src_cpu, 0).unwrap();
+        let dst = host_to_metal_copy(&dst_cpu, 0).unwrap();
+        let dst_buffer_before = dst
+            .storage()
+            .as_any()
+            .downcast_ref::<MetalStorage>()
+            .unwrap()
+            .buffer()
+            .clone();
+
+        metal_copy_in_place(&src, &dst).unwrap();
+
+        let roundtrip = dst.to_device(Device::Cpu).unwrap();
+        assert_eq!(roundtrip.to_vec::<f32>().unwrap(), src_values);
+        let dst_buffer_after = dst
+            .storage()
+            .as_any()
+            .downcast_ref::<MetalStorage>()
+            .unwrap()
+            .buffer()
+            .clone();
+        assert!(Arc::ptr_eq(&dst_buffer_before, &dst_buffer_after));
     }
 }

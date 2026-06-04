@@ -16,6 +16,7 @@ pub mod loader;
 pub mod lora;
 pub mod lora_loader;
 pub mod marlin_proj;
+pub mod metal_graph;
 pub mod mtp_debug;
 pub mod packed_weight_registry;
 pub mod rocm_graph;
@@ -31,7 +32,12 @@ pub mod quantized;
 pub mod qwen35_shapes;
 pub mod sampling;
 pub mod speculative;
-#[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
+#[cfg(any(
+    feature = "cuda",
+    feature = "metal",
+    feature = "vulkan",
+    feature = "rocm"
+))]
 pub mod tape_forward;
 mod transposed_weight_cache;
 #[cfg(feature = "vulkan")]

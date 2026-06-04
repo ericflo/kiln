@@ -1361,7 +1361,7 @@ impl PagedKvCacheKt {
         Ok(true)
     }
 
-    /// Batched graph-slot variant — one fused CUDA kernel launch writes
+    /// Batched graph-slot variant — one fused device kernel launch writes
     /// every row. Replaces the candle
     /// `PagedKvCache::write_token_major_native_batch_graph_slot`
     /// (#1082 candle-drop).
@@ -1369,11 +1369,11 @@ impl PagedKvCacheKt {
     /// - `k`, `v`: `[batch, 1, num_kv_heads, head_dim]` BF16
     /// - `slots`: `[batch]` U32 device tensor (per-row destination slots)
     ///
-    /// Safe under CUDA graph capture: the only per-replay-varying input
-    /// is `slots`, refreshed via `update_cuda_scalar` outside the
-    /// captured region. Returns `Ok(false)` when preconditions aren't met
-    /// (FP8 pool, non-BF16 K/V, seq_len != 1, wrong `slots` shape/dtype)
-    /// so callers fall back to the slower per-row path.
+    /// Safe under graph replay: the only per-replay-varying input is
+    /// `slots`, refreshed in place outside the captured region. Returns
+    /// `Ok(false)` when preconditions aren't met (FP8 pool, non-BF16 K/V,
+    /// seq_len != 1, wrong `slots` shape/dtype) so callers fall back to the
+    /// slower per-row path.
     ///
     /// LIVE prod path (forward.rs batched contiguous paged decode, the
     /// `kv_fused_batched_enabled()` branch). Routes through
@@ -1381,7 +1381,7 @@ impl PagedKvCacheKt {
     /// which writes a contiguous `[batch, num_kv_heads, head_dim]` block —
     /// so the seq_len=1 dim is squeezed before dispatch (the kernel's
     /// `element_count == batch * kv_heads * head_dim` check is then exact).
-    #[cfg(feature = "cuda")]
+    #[cfg(any(feature = "cuda", feature = "metal"))]
     pub fn write_token_major_native_batch_graph_slot(
         &self,
         layer_idx: usize,
@@ -1408,6 +1408,44 @@ impl PagedKvCacheKt {
         }
         let pools = self.layers_read();
         let (k_pool, v_pool) = &pools[layer_idx];
+
+        #[cfg(feature = "metal")]
+        if matches!(k.device(), kiln_tensor::Device::Metal(_)) {
+            let k_c = k
+                .contiguous()
+                .map_err(|e| anyhow::anyhow!("kt pkv metal batch_slot: contiguous k: {e}"))?;
+            let v_c = v
+                .contiguous()
+                .map_err(|e| anyhow::anyhow!("kt pkv metal batch_slot: contiguous v: {e}"))?;
+            let slots_c = slots
+                .contiguous()
+                .map_err(|e| anyhow::anyhow!("kt pkv metal batch_slot: contiguous slots: {e}"))?;
+            if !crate::backend::metal::metal_paged_kv_write_token_major_batch_supports(
+                k_pool, v_pool, &slots_c, &k_c, &v_c,
+            ) {
+                return Ok(false);
+            }
+            crate::backend::metal::metal_paged_kv_write_token_major_batch_bf16(
+                k_pool, v_pool, &slots_c, &k_c, &v_c,
+            )
+            .map_err(|e| {
+                anyhow::anyhow!("kt paged_kv_write_token_major_bf16_batch_slot_metal: {e}")
+            })?;
+            return Ok(true);
+        }
+
+        #[cfg(not(feature = "cuda"))]
+        {
+            let _ = (k_pool, v_pool, slots);
+            return Ok(false);
+        }
+
+        #[cfg(feature = "cuda")]
+        {
+            if !matches!(k.device(), kiln_tensor::Device::Cuda(_)) {
+                return Ok(false);
+            }
+
         // Collapse the seq_len=1 dim before dispatching so the fused
         // kernel sees a contiguous [batch, num_kv_heads, head_dim] block.
         let k_sq = k
@@ -1425,6 +1463,7 @@ impl PagedKvCacheKt {
         )
         .map_err(|e| anyhow::anyhow!("kt paged_kv_write_token_major_bf16_batch_slot: {e}"))?;
         Ok(true)
+        }
     }
 
     /// Head-major generic write. Replaces the candle
@@ -1810,5 +1849,65 @@ mod tests {
         // No-op resize returns Ok and changes nothing.
         cache.physical_resize_to(5, dev).expect("noop");
         assert_eq!(cache.num_blocks(), 5);
+    }
+
+    #[cfg(feature = "metal")]
+    #[test]
+    fn metal_batch_graph_slot_writer_uses_device_slots() -> Result<()> {
+        let Some(dev) = crate::backend::metal::try_new_metal() else {
+            eprintln!("Metal unavailable, skipping metal_batch_graph_slot_writer_uses_device_slots");
+            return Ok(());
+        };
+
+        let block_size = 4usize;
+        let kv_heads = 2usize;
+        let head_dim = 4usize;
+        let cache =
+            PagedKvCacheKt::new(1, 4, block_size, kv_heads, head_dim, KtDType::BF16, dev)?;
+
+        let mk = |v: f32| half::bf16::from_f32(v);
+        let row_elems = kv_heads * head_dim;
+        let mut k_vals = Vec::with_capacity(2 * row_elems);
+        let mut v_vals = Vec::with_capacity(2 * row_elems);
+        for row in 0..2 {
+            for col in 0..row_elems {
+                k_vals.push(mk(10.0 * row as f32 + col as f32 + 1.0));
+                v_vals.push(mk(100.0 + 10.0 * row as f32 + col as f32 + 1.0));
+            }
+        }
+        let k = KtTensor::from_vec_on(dev, k_vals.clone(), vec![2, 1, kv_heads, head_dim])?;
+        let v = KtTensor::from_vec_on(dev, v_vals.clone(), vec![2, 1, kv_heads, head_dim])?;
+        let slots = KtTensor::from_vec_on(dev, vec![2u32, 7u32], vec![2])?;
+
+        assert!(cache.write_token_major_native_batch_graph_slot(0, &k, &v, &slots)?);
+
+        let (k_pool, v_pool) = cache.pool_tensors(0).expect("layer 0 pools");
+        let k_host = k_pool.to_device(kiln_tensor::Device::Cpu)?;
+        let v_host = v_pool.to_device(kiln_tensor::Device::Cpu)?;
+        let k_flat = k_host.flatten_all()?.to_vec1::<half::bf16>()?;
+        let v_flat = v_host.flatten_all()?.to_vec1::<half::bf16>()?;
+
+        let row = |slot: usize| slot * row_elems;
+        assert_eq!(
+            &k_flat[row(2)..row(2) + row_elems],
+            &k_vals[..row_elems],
+            "row 0 K must land at slot 2 from the Metal slot tensor"
+        );
+        assert_eq!(
+            &v_flat[row(2)..row(2) + row_elems],
+            &v_vals[..row_elems],
+            "row 0 V must land at slot 2 from the Metal slot tensor"
+        );
+        assert_eq!(
+            &k_flat[row(7)..row(7) + row_elems],
+            &k_vals[row_elems..],
+            "row 1 K must land at slot 7 from the Metal slot tensor"
+        );
+        assert_eq!(
+            &v_flat[row(7)..row(7) + row_elems],
+            &v_vals[row_elems..],
+            "row 1 V must land at slot 7 from the Metal slot tensor"
+        );
+        Ok(())
     }
 }

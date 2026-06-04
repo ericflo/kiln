@@ -53,6 +53,24 @@ use kiln_tensor::Tensor as KtTensor;
 /// any behavioral change.
 const LAST_DIM: D = D::Minus1;
 
+#[cfg(feature = "metal")]
+#[derive(Debug)]
+pub(crate) struct MetalPagedDecodeIcbInputs<'a> {
+    pub(crate) q: &'a [Tensor],
+    pub(crate) k: &'a [Tensor],
+    pub(crate) v: &'a [Tensor],
+    pub(crate) graphs: &'a mut [Option<crate::backend::metal::MetalPagedDecodeIcbGraph>],
+}
+
+#[cfg(feature = "metal")]
+#[derive(Debug)]
+pub struct MetalPagedDecodeIcbLayer<'a> {
+    q: &'a Tensor,
+    k: &'a Tensor,
+    v: &'a Tensor,
+    graph: &'a mut Option<crate::backend::metal::MetalPagedDecodeIcbGraph>,
+}
+
 // NVTX is always linked: when the `nvtx` cargo feature is off the
 // `kiln_nvtx::range!` macro expands to a zero-sized RAII guard whose drop is
 // a no-op (verified by the optimizer in release). This keeps the call sites
@@ -19197,9 +19215,9 @@ impl CachedPagedDecodeMeta {
     ///
     /// Shape contract (the caller is responsible for upholding it):
     ///   * `stable_block_table_gpu` must be
-    ///     `[batch, (bucket_max_seqlen_k / 128) * (128 / paged_cache.block_size())]` u32
+    ///     `[batch, (bucket_max_seqlen_k / kBlockN) * (kBlockN / paged_cache.block_size())]` u32
     ///   * `stable_seqused_k_gpu` must be `[batch]` i32
-    /// where `bucket_max_seqlen_k = ((max(start_positions) + 1).div_ceil(128)) * 128`
+    /// where `bucket_max_seqlen_k = ceil((max(start_positions) + 1) / kBlockN) * kBlockN`
     /// — the K/V chunk-bucketed value, identical to
     /// `CudaBatchedGraphKey::new`'s formula in `cuda_graph.rs`. The bucket
     /// ensures one captured graph can serve every decode step within
@@ -19259,17 +19277,14 @@ impl CachedPagedDecodeMeta {
         let max_blocks_per_seq =
             ((max_seqlen_k + page_block_size - 1) / page_block_size).max(1);
 
-        // #1082 Phase 5 graph-capture fix (2026-05-26): the stable
-        // buffer was sized via the *bucketed* formula in
-        // `CudaBatchedGraphKey::new` (`cuda_graph.rs:~243`) +
-        // `CapturedBatchedDecodeGraph::padded_block_table`
-        // (`cuda_graph.rs:~1748`):
-        //   `bucket_max_seqlen_k = ceil(max_seqlen_k/128) * 128`
-        //   `stable_max_blocks_per_seq = (bucket_max_seqlen_k / 128)
-        //                                * (128 / page_block_size)`
+        // The stable buffer is sized via the same bucketed formula as the
+        // graph keys (`CudaBatchedGraphKey` / MetalGraphKey):
+        //   `bucket_max_seqlen_k = ceil(max_seqlen_k/kBlockN) * kBlockN`
+        //   `stable_max_blocks_per_seq = (bucket_max_seqlen_k / kBlockN)
+        //                                * (kBlockN / page_block_size)`
         // Prior to this commit the assert below used `max_blocks_per_seq`
         // (exact ceil), which mismatched the bucketed stable buffer
-        // shape on every step except the final one of each 128-token
+        // shape on every step except the final one of each kBlockN-token
         // bucket. The `anyhow::ensure!` failure was silently swallowed
         // by `cuda_graph.rs:1617` (`.context("batched forward failed
         // during graph capture")`), causing every concurrent decode
@@ -19283,10 +19298,12 @@ impl CachedPagedDecodeMeta {
         // actual exact value (see comment on `max_blocks_per_seq`
         // above + the `flash_attn_paged_decode_contiguous_batch` use
         // at `forward.rs:~18265`).
-        let stable_bucket_max_seqlen_k = max_seqlen_k.div_ceil(128) * 128;
-        let stable_pages_per_chunk = 128 / page_block_size;
+        let stable_kblock_n = crate::generate::FA2_KBLOCK_N;
+        let stable_bucket_max_seqlen_k =
+            max_seqlen_k.div_ceil(stable_kblock_n) * stable_kblock_n;
+        let stable_pages_per_chunk = stable_kblock_n / page_block_size;
         let stable_max_blocks_per_seq =
-            ((stable_bucket_max_seqlen_k / 128) * stable_pages_per_chunk).max(1);
+            ((stable_bucket_max_seqlen_k / stable_kblock_n) * stable_pages_per_chunk).max(1);
 
         // Verify per-row block-table coverage matches the regular build path
         // even though we don't materialize the device tensors here. This
@@ -19306,7 +19323,7 @@ impl CachedPagedDecodeMeta {
         // Validate the stable buffer shapes match what the captured kernels
         // expect. The stable buffer is sized to the BUCKETED width (the
         // captured graph key is bucketed so one captured graph can
-        // serve every step within the 128-token bucket without
+        // serve every step within the kBlockN-token bucket without
         // re-capture). A shape mismatch here is what was rejecting
         // every bs≥2 step prior to the bucketed-formula fix above.
         let block_table_dims = stable_block_table_gpu.dims();
@@ -19436,6 +19453,7 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
     // closing suspect 1 in `bench-results/cuda-graph-bs2-secondary-audit.md`
     // for #1082. `None` reproduces the legacy per-row writer.
     kv_slot: Option<&Tensor>,
+    #[cfg(feature = "metal")] mut metal_icb_layer: Option<MetalPagedDecodeIcbLayer<'_>>,
     // Phase 7 #1082: kt twin of `paged_cache` for parity-checked
     // accessor reads. When `Some` AND the env gate is on, accessor
     // calls (`is_fp8`, `num_layers`) are mirrored through
@@ -19732,21 +19750,95 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
     // strict fallback below transposes lazily into the head-major layout it
     // requires.
 
-    {
+    // #1082: `PagedKvCacheKt::pool_tensors` returns kt pool references already;
+    // the candle borrow/bridge dance is gone — bind the kt pools directly.
+    let (k_pool, v_pool) = paged_cache
+        .pool_tensors(full_attn_layer_idx)
+        .context("batched contiguous paged attention layer index out of range")?;
+    // #26: pool_tensors returns owned clones now — re-borrow so downstream is
+    // unchanged (owned tensors stay alive for this scope, pinning the storage).
+    let (k_pool, v_pool) = (&k_pool, &v_pool);
+    #[cfg(feature = "cuda")]
+    let page_block_size =
+        try_kt_paged_kv_block_size(paged_cache.block_size(), kt_paged_cache);
+    #[cfg(not(feature = "cuda"))]
+    let page_block_size = paged_cache.block_size();
+    let softmax_scale = 1.0f32 / (head_dim as f32).sqrt();
+
+    // Prefer the once-per-step cached tensors when the caller built them;
+    // otherwise use the per-layer ones we built above.
+    let block_table_tensor: &Tensor = match (cached_meta, own_block_table_tensor.as_ref()) {
+        (Some(meta), _) => &meta.block_table_tensor,
+        (None, Some(t)) => t,
+        (None, None) => unreachable!("cached_meta=None branch must build the block_table tensor"),
+    };
+    let seqused_k_tensor: &Tensor = match (cached_meta, own_seqused_k_tensor.as_ref()) {
+        (Some(meta), _) => &meta.seqused_k_tensor,
+        (None, Some(t)) => t,
+        (None, None) => unreachable!("cached_meta=None branch must build the seqused_k tensor"),
+    };
+
+    #[cfg(feature = "metal")]
+    let mut metal_icb_attn_output: Option<Tensor> = None;
+    #[cfg(feature = "metal")]
+    if let Some(layer) = metal_icb_layer.as_mut() {
+        match try_metal_paged_decode_icb_attention(
+            &q,
+            &k,
+            &v,
+            layer,
+            graph_outputs,
+            kv_slot,
+            k_pool,
+            v_pool,
+            block_table_tensor,
+            seqused_k_tensor,
+            block_tables,
+            start_positions,
+            max_seqlen_k,
+            page_block_size,
+            softmax_scale,
+        ) {
+            Ok(Some(out)) => metal_icb_attn_output = Some(out),
+            Ok(None) => {}
+            Err(err) => {
+                tracing::warn!(
+                    layer = full_attn_layer_idx,
+                    error = %err,
+                    "Metal paged decode ICB attention failed; using eager attention path"
+                );
+                if let Some(layer) = metal_icb_layer.as_mut() {
+                    *layer.graph = None;
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "metal")]
+    let run_eager_kv_and_attention = metal_icb_attn_output.is_none();
+    #[cfg(not(feature = "metal"))]
+    let run_eager_kv_and_attention = true;
+    if run_eager_kv_and_attention {
         let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
         let kv_write_done = {
-            #[cfg(feature = "cuda")]
+            #[cfg(any(feature = "cuda", feature = "metal"))]
             {
                 // #1082 suspect 1: when the runner has wired the
                 // `[batch] u32` per-row slot device buffer through
-                // `BatchedPagedDecodeGraphInputs.kv_slot` and the
-                // `KILN_CUDA_GRAPHS_BATCHED_KV_FUSED` gate is on, write
-                // via the fused batched-slot kernel so the captured
-                // graph re-reads fresh slots on every replay. Otherwise
-                // fall back to the legacy per-row writer that bakes
-                // host-immediate slots into kernel args.
+                // `BatchedPagedDecodeGraphInputs.kv_slot`/Metal graph inputs,
+                // write via the fused batched-slot kernel so the captured graph
+                // re-reads fresh slots on every replay. CUDA keeps its
+                // historical opt-in gate; Metal uses the slot-buffer writer
+                // whenever the runner supplies it.
                 if let Some(slot_tensor) = kv_slot {
-                    if kv_fused_batched_enabled() {
+                    let use_graph_slot_writer = match k.device() {
+                        #[cfg(feature = "cuda")]
+                        Device::Cuda(_) => kv_fused_batched_enabled(),
+                        #[cfg(feature = "metal")]
+                        Device::Metal(_) => true,
+                        _ => false,
+                    };
+                    if use_graph_slot_writer {
                         // #1082: `PagedKvCacheKt::write_token_major_native_batch_graph_slot`
                         // takes kt tensors; `k`/`v`/`slot_tensor` are already kt, so
                         // pass them through with no candle bridge.
@@ -19763,7 +19855,7 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
                     false
                 }
             }
-            #[cfg(not(feature = "cuda"))]
+            #[cfg(not(any(feature = "cuda", feature = "metal")))]
             {
                 false
             }
@@ -19793,38 +19885,12 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
         )?;
     }
 
-    // #1082: `PagedKvCacheKt::pool_tensors` returns kt pool references already;
-    // the candle borrow/bridge dance is gone — bind the kt pools directly.
-    let (k_pool, v_pool) = paged_cache
-        .pool_tensors(full_attn_layer_idx)
-        .context("batched contiguous paged attention layer index out of range")?;
-    // #26: pool_tensors returns owned clones now — re-borrow so downstream is
-    // unchanged (owned tensors stay alive for this scope, pinning the storage).
-    let (k_pool, v_pool) = (&k_pool, &v_pool);
-    // Prefer the once-per-step cached tensors when the caller built them;
-    // otherwise use the per-layer ones we built above.
-    let block_table_tensor: &Tensor = match (cached_meta, own_block_table_tensor.as_ref()) {
-        (Some(meta), _) => &meta.block_table_tensor,
-        (None, Some(t)) => t,
-        (None, None) => unreachable!("cached_meta=None branch must build the block_table tensor"),
-    };
-    let seqused_k_tensor: &Tensor = match (cached_meta, own_seqused_k_tensor.as_ref()) {
-        (Some(meta), _) => &meta.seqused_k_tensor,
-        (None, Some(t)) => t,
-        (None, None) => unreachable!("cached_meta=None branch must build the seqused_k tensor"),
-    };
     let strict_start_slots: Option<&[u32]> = match (cached_meta, own_strict_start_slots.as_ref()) {
         (Some(meta), _) => meta.strict_start_slots.as_deref(),
         (None, Some(v)) => Some(v.as_slice()),
         (None, None) => None,
     };
-    #[cfg(feature = "cuda")]
-    let page_block_size =
-        try_kt_paged_kv_block_size(paged_cache.block_size(), kt_paged_cache);
-    #[cfg(not(feature = "cuda"))]
-    let page_block_size = paged_cache.block_size();
-    let softmax_scale = 1.0f32 / (head_dim as f32).sqrt();
-    let attn_output = {
+    let run_eager_paged_decode_attention = || -> Result<Tensor> {
         let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
         // Phase 12-B-prime perf gate: dyn_seqlen handles divergent per-row
         // start_pos correctly but regressed synthetic c=8 throughput by ~61%
@@ -19959,7 +20025,21 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
             seq_len,
             stage_profile,
         )?;
-        out.context("backend declined batched contiguous paged attention")?
+        out.context("backend declined batched contiguous paged attention")
+    };
+    let attn_output = {
+        #[cfg(feature = "metal")]
+        {
+            if let Some(out) = metal_icb_attn_output {
+                out
+            } else {
+                run_eager_paged_decode_attention()?
+            }
+        }
+        #[cfg(not(feature = "metal"))]
+        {
+            run_eager_paged_decode_attention()?
+        }
     };
 
     // Both kernels feed o_proj a row-major [batch, 1, num_heads * head_dim].
@@ -20006,6 +20086,82 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
         out
     };
     Ok(out)
+}
+
+#[cfg(feature = "metal")]
+#[allow(clippy::too_many_arguments)]
+fn try_metal_paged_decode_icb_attention(
+    q: &Tensor,
+    k: &Tensor,
+    v: &Tensor,
+    layer: &mut MetalPagedDecodeIcbLayer<'_>,
+    graph_outputs: Option<(&Tensor, &Tensor)>,
+    kv_slot: Option<&Tensor>,
+    k_pool: &Tensor,
+    v_pool: &Tensor,
+    block_table_tensor: &Tensor,
+    seqused_k_tensor: &Tensor,
+    block_tables: &[&BlockTable],
+    start_positions: &[usize],
+    max_seqlen_k: usize,
+    page_block_size: usize,
+    softmax_scale: f32,
+) -> Result<Option<Tensor>> {
+    let Ok((batch, q_len, q_heads, head_dim)) = q.dims4() else {
+        return Ok(None);
+    };
+    if batch == 0 || q_len != 1 || q_heads != 16 || head_dim != 256 {
+        return Ok(None);
+    }
+    if block_tables.len() != batch || start_positions.len() != batch {
+        return Ok(None);
+    }
+    let Some((attn_out, _softmax_lse)) = graph_outputs else {
+        return Ok(None);
+    };
+    let Some(slots) = kv_slot else {
+        return Ok(None);
+    };
+    if !matches!(q.device(), Device::Metal(_))
+        || !matches!(k.device(), Device::Metal(_))
+        || !matches!(v.device(), Device::Metal(_))
+        || !matches!(attn_out.device(), Device::Metal(_))
+        || !matches!(slots.device(), Device::Metal(_))
+    {
+        return Ok(None);
+    }
+
+    kiln_tensor::metal_copy_in_place(q, layer.q).context("refresh Metal ICB stable Q")?;
+    kiln_tensor::metal_copy_in_place(k, layer.k).context("refresh Metal ICB stable K")?;
+    kiln_tensor::metal_copy_in_place(v, layer.v).context("refresh Metal ICB stable V")?;
+
+    if layer.graph.is_none() {
+        *layer.graph = Some(
+            crate::backend::metal::metal_record_paged_decode_icb_graph(
+                layer.q,
+                k_pool,
+                v_pool,
+                block_table_tensor,
+                seqused_k_tensor,
+                attn_out,
+                layer.k,
+                layer.v,
+                slots,
+                max_seqlen_k,
+                page_block_size,
+                softmax_scale,
+            )
+            .context("record Metal paged decode ICB graph")?,
+        );
+    }
+    let graph = layer
+        .graph
+        .as_ref()
+        .context("Metal ICB graph missing after record")?;
+    graph
+        .replay(max_seqlen_k as u32, softmax_scale)
+        .context("replay Metal paged decode ICB graph")?;
+    Ok(Some(attn_out.clone()))
 }
 
 /// Grouped-query attention using a paged KV cache.
@@ -22042,6 +22198,7 @@ pub fn transformer_block_paged_decode_contiguous_batch(
     // Forwarded as-is to `gqa_attention_paged_decode_contiguous_batch`
     // (#1082 suspect 1).
     kv_slot: Option<&Tensor>,
+    #[cfg(feature = "metal")] metal_icb_layer: Option<MetalPagedDecodeIcbLayer<'_>>,
     // Phase 7 #1082: kt twin of `paged_cache` forwarded as-is to the
     // GQA layer. `None` (default) keeps the candle accessor path.
     #[cfg(feature = "cuda")] kt_paged_cache: Option<
@@ -22096,6 +22253,8 @@ pub fn transformer_block_paged_decode_contiguous_batch(
         graph_outputs,
         rope_tables,
         kv_slot,
+        #[cfg(feature = "metal")]
+        metal_icb_layer,
         #[cfg(feature = "cuda")]
         kt_paged_cache,
     )?;
@@ -22226,7 +22385,107 @@ pub fn model_forward_paged_decode_contiguous_batch_hidden_with_ids(
         None,
         None,
         None,
+        #[cfg(feature = "metal")]
+        None,
     )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn model_forward_paged_decode_contiguous_batch_hidden_with_stable_buffers(
+    backend: &dyn BackendRuntime,
+    token_ids: &[u32],
+    weights: &GpuWeights,
+    config: &kiln_core::config::ModelConfig,
+    paged_cache: &PagedKvCache,
+    block_tables: &[&BlockTable],
+    start_positions: &[usize],
+    mut linear_state: Option<&mut LinearAttentionState>,
+    lora: Option<&LoraWeights>,
+    stable_positions_gpu: &Tensor,
+    stable_token_ids_gpu: &Tensor,
+    stable_block_table_gpu: &Tensor,
+    stable_seqused_k_gpu: &Tensor,
+    stable_attn_out_gpu: &[Tensor],
+    stable_softmax_lse_gpu: &[Tensor],
+    stable_rotary_cos_gpu: &Tensor,
+    stable_rotary_sin_gpu: &Tensor,
+    stable_kv_slot_gpu: &Tensor,
+    #[cfg(feature = "metal")] metal_icb_inputs: Option<MetalPagedDecodeIcbInputs<'_>>,
+) -> Result<Tensor> {
+    model_forward_paged_decode_contiguous_batch_hidden_inner(
+        backend,
+        token_ids,
+        weights,
+        config,
+        paged_cache,
+        block_tables,
+        start_positions,
+        linear_state.as_deref_mut(),
+        lora,
+        Some(stable_positions_gpu),
+        Some(stable_token_ids_gpu),
+        Some(stable_block_table_gpu),
+        Some(stable_seqused_k_gpu),
+        Some(stable_attn_out_gpu),
+        Some(stable_softmax_lse_gpu),
+        Some(stable_rotary_cos_gpu),
+        Some(stable_rotary_sin_gpu),
+        Some(stable_kv_slot_gpu),
+        #[cfg(feature = "metal")]
+        metal_icb_inputs,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn model_forward_paged_decode_contiguous_batch_greedy_with_stable_buffers(
+    backend: &dyn BackendRuntime,
+    token_ids: &[u32],
+    weights: &GpuWeights,
+    config: &kiln_core::config::ModelConfig,
+    paged_cache: &PagedKvCache,
+    block_tables: &[&BlockTable],
+    start_positions: &[usize],
+    linear_state: Option<&mut LinearAttentionState>,
+    lora: Option<&LoraWeights>,
+    stable_positions_gpu: &Tensor,
+    stable_token_ids_gpu: &Tensor,
+    stable_block_table_gpu: &Tensor,
+    stable_seqused_k_gpu: &Tensor,
+    stable_attn_out_gpu: &[Tensor],
+    stable_softmax_lse_gpu: &[Tensor],
+    stable_rotary_cos_gpu: &Tensor,
+    stable_rotary_sin_gpu: &Tensor,
+    stable_kv_slot_gpu: &Tensor,
+    #[cfg(feature = "metal")] metal_icb_inputs: Option<MetalPagedDecodeIcbInputs<'_>>,
+) -> Result<Vec<u32>> {
+    let hidden = model_forward_paged_decode_contiguous_batch_hidden_with_stable_buffers(
+        backend,
+        token_ids,
+        weights,
+        config,
+        paged_cache,
+        block_tables,
+        start_positions,
+        linear_state,
+        lora,
+        stable_positions_gpu,
+        stable_token_ids_gpu,
+        stable_block_table_gpu,
+        stable_seqused_k_gpu,
+        stable_attn_out_gpu,
+        stable_softmax_lse_gpu,
+        stable_rotary_cos_gpu,
+        stable_rotary_sin_gpu,
+        stable_kv_slot_gpu,
+        #[cfg(feature = "metal")]
+        metal_icb_inputs,
+    )?;
+    let token_ids = {
+        kiln_nvtx::range!(c"kiln/lm_head_batch_argmax_decode_stable_buffers");
+        let normed = rms_norm(&hidden, &weights.final_norm, config.rms_norm_eps)?;
+        lm_head_argmax_rows_backend_decode_if(Some(backend), &normed, &weights.embed_tokens_t)?
+    };
+    Ok(token_ids)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -22373,6 +22632,7 @@ fn model_forward_paged_decode_contiguous_batch_hidden_inner(
     // runner-owned device tensor instead of baking host-immediate
     // slots into the captured kernel args. Closes #1082 suspect 1.
     stable_kv_slot_gpu: Option<&Tensor>,
+    #[cfg(feature = "metal")] mut metal_icb_inputs: Option<MetalPagedDecodeIcbInputs<'_>>,
 ) -> Result<Tensor> {
     let batch = token_ids.len();
     anyhow::ensure!(batch > 0, "batched paged decode requires a non-empty batch");
@@ -22544,6 +22804,25 @@ fn model_forward_paged_decode_contiguous_batch_hidden_inner(
                         (Some(cos), Some(sin)) => Some((cos, sin)),
                         _ => None,
                     };
+                #[cfg(feature = "metal")]
+                let layer_metal_icb = match metal_icb_inputs.as_mut() {
+                    Some(inputs) => {
+                        let q = inputs.q.get(full_attn_idx).with_context(|| {
+                            format!("Metal ICB stable Q missing for full-attn layer {full_attn_idx}")
+                        })?;
+                        let k = inputs.k.get(full_attn_idx).with_context(|| {
+                            format!("Metal ICB stable K missing for full-attn layer {full_attn_idx}")
+                        })?;
+                        let v = inputs.v.get(full_attn_idx).with_context(|| {
+                            format!("Metal ICB stable V missing for full-attn layer {full_attn_idx}")
+                        })?;
+                        let graph = inputs.graphs.get_mut(full_attn_idx).with_context(|| {
+                            format!("Metal ICB graph slot missing for full-attn layer {full_attn_idx}")
+                        })?;
+                        Some(MetalPagedDecodeIcbLayer { q, k, v, graph })
+                    }
+                    None => None,
+                };
                 hidden = transformer_block_paged_decode_contiguous_batch(
                     backend,
                     &hidden,
@@ -22562,6 +22841,8 @@ fn model_forward_paged_decode_contiguous_batch_hidden_inner(
                     layer_graph_outputs,
                     layer_rope_tables,
                     stable_kv_slot_gpu,
+                    #[cfg(feature = "metal")]
+                    layer_metal_icb,
                     #[cfg(feature = "cuda")]
                     None,
                 )
@@ -24772,6 +25053,8 @@ pub(crate) fn model_forward_paged_batched_hidden_with_graph_inputs(
         Some(graph_inputs.rotary_cos),
         Some(graph_inputs.rotary_sin),
         Some(graph_inputs.kv_slot),
+        #[cfg(feature = "metal")]
+        None,
     )?;
     // #1082 box-102 BUG2 fix (batched): write the PRE-final-norm hidden into
     // the caller-owned stable `output_hidden` buffer (`[batch, 1, hidden]`)
@@ -25084,6 +25367,8 @@ pub fn model_forward_paged_batched_decode_hidden(
                     None,
                     None,
                     None,
+                    None,
+                    #[cfg(feature = "metal")]
                     None,
                     #[cfg(feature = "cuda")]
                     None,
@@ -28626,6 +28911,103 @@ mod tests {
     }
 
     #[cfg(feature = "metal")]
+    fn make_metal_graph_test_config(
+        vocab: usize,
+        hidden: usize,
+        intermediate: usize,
+        num_heads: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+    ) -> kiln_core::config::ModelConfig {
+        kiln_core::config::ModelConfig {
+            hidden_size: hidden,
+            num_layers: 1,
+            num_attention_heads: num_heads,
+            num_kv_heads,
+            head_dim,
+            intermediate_size: intermediate,
+            vocab_size: vocab,
+            max_position_embeddings: 1024,
+            rms_norm_eps: 1e-6,
+            rope_theta: 10_000.0,
+            dtype: kiln_core::config::DType::BF16,
+            num_full_attention_layers: 1,
+            full_attention_interval: 1,
+            attn_output_gate: false,
+            linear_num_key_heads: num_kv_heads,
+            linear_key_head_dim: head_dim,
+            linear_num_value_heads: num_heads,
+            linear_value_head_dim: head_dim,
+            linear_conv_kernel_dim: 4,
+            partial_rotary_factor: 1.0,
+        }
+    }
+
+    #[cfg(feature = "metal")]
+    fn make_metal_graph_test_weights(
+        config: &kiln_core::config::ModelConfig,
+        device: &Device,
+    ) -> Result<GpuWeights> {
+        let mut weights = make_bf16_full_attention_gpu_weights(
+            config.vocab_size,
+            config.hidden_size,
+            config.intermediate_size,
+            config.num_attention_heads,
+            config.num_kv_heads,
+            config.head_dim,
+            config.num_layers,
+            device,
+        )?;
+        weights.final_norm = Tensor::ones(config.hidden_size, DType::F32, device)?;
+        for layer in weights.layers.iter_mut() {
+            layer.input_layernorm = Tensor::ones(config.hidden_size, DType::F32, device)?;
+            layer.post_attention_layernorm =
+                Tensor::ones(config.hidden_size, DType::F32, device)?;
+            if let GpuAttentionWeights::Full(attn) = &mut layer.attention {
+                attn.q_norm = Tensor::ones(config.head_dim, DType::F32, device)?;
+                attn.k_norm = Tensor::ones(config.head_dim, DType::F32, device)?;
+            }
+        }
+        Ok(weights)
+    }
+
+    #[cfg(feature = "metal")]
+    fn seed_metal_graph_prefix_for_test(
+        cache: &mut crate::PagedKvCacheKt,
+        block_table: &BlockTable,
+        start_pos: usize,
+        num_kv_heads: usize,
+        head_dim: usize,
+        k_scale: f32,
+        v_scale: f32,
+        device: &Device,
+    ) -> Result<()> {
+        let prefix_k = patterned_bf16(&[1, start_pos, num_kv_heads, head_dim], k_scale, device)?;
+        let prefix_v = patterned_bf16(&[1, start_pos, num_kv_heads, head_dim], v_scale, device)?;
+        write_token_major_prefix_for_test(cache, 0, block_table, 0, &prefix_k, &prefix_v)
+    }
+
+    #[cfg(feature = "metal")]
+    fn assert_metal_graph_cache_matches_eager(
+        graph_cache: &crate::PagedKvCacheKt,
+        eager_cache: &crate::PagedKvCacheKt,
+    ) -> Result<()> {
+        let (graph_k, graph_v) = graph_cache
+            .pool_tensors(0)
+            .context("graph cache layer 0 pool missing")?;
+        let (eager_k, eager_v) = eager_cache
+            .pool_tensors(0)
+            .context("eager cache layer 0 pool missing")?;
+        let (k_max, k_mean) = tensor_abs_diff_stats(&graph_k, &eager_k)?;
+        let (v_max, v_mean) = tensor_abs_diff_stats(&graph_v, &eager_v)?;
+        assert!(
+            k_max <= 2e-2 && k_mean <= 1e-5 && v_max <= 2e-2 && v_mean <= 1e-5,
+            "Metal graph and eager KV pools diverged: k_max={k_max:e} k_mean={k_mean:e} v_max={v_max:e} v_mean={v_mean:e}"
+        );
+        Ok(())
+    }
+
+    #[cfg(feature = "metal")]
     fn make_bf16_hybrid_gpu_weights(
         config: &kiln_core::config::ModelConfig,
         device: &Device,
@@ -28855,7 +29237,9 @@ mod tests {
             None,
             None,
             None,
-        #[cfg(feature = "cuda")]
+            #[cfg(feature = "metal")]
+            None,
+            #[cfg(feature = "cuda")]
             None,
         )?;
         synchronize_for_profile(&device)?;
@@ -29029,6 +29413,8 @@ mod tests {
             None,
             None,
             None,
+            None,
+            #[cfg(feature = "metal")]
             None,
             #[cfg(feature = "cuda")]
             None,
@@ -29533,6 +29919,543 @@ mod tests {
         }
 
         Ok(())
+    }
+
+    #[cfg(feature = "metal")]
+    #[test]
+    fn test_metal_graph_bs1_decode_matches_eager_across_boundaries_and_buckets() -> Result<()> {
+        let Some(device) = crate::backend::metal::try_new_metal() else {
+            return Ok(());
+        };
+        if std::env::var("KILN_DISABLE_FUSED_PAGED_DECODE").is_ok()
+            || std::env::var("KILN_DISABLE_METAL_PAGED_ATTN_DECODE_CONTIGUOUS").is_ok()
+            || std::env::var("KILN_DISABLE_METAL_PAGED_KV_WRITE_TOKEN_MAJOR").is_ok()
+        {
+            eprintln!("Metal paged decode disabled; skipping Metal graph bs=1 parity test");
+            return Ok(());
+        }
+
+        let _guard = RESIDENCY_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev_graphs = std::env::var("KILN_METAL_GRAPHS").ok();
+        let prev_force_eager = std::env::var("KILN_FORCE_EAGER_DECODE").ok();
+        let prev_stable_meta = std::env::var("KILN_METAL_GRAPH_STABLE_PAGED_METADATA").ok();
+        unsafe {
+            std::env::set_var("KILN_METAL_GRAPHS", "1");
+            std::env::remove_var("KILN_FORCE_EAGER_DECODE");
+            std::env::set_var("KILN_METAL_GRAPH_STABLE_PAGED_METADATA", "1");
+        }
+
+        let result = (|| -> Result<()> {
+            let backend = crate::backend::for_device_kt(&device);
+            let vocab = 64usize;
+            let hidden = 512usize;
+            let intermediate = 768usize;
+            let num_heads = 16usize;
+            let num_kv_heads = 4usize;
+            let head_dim = 256usize;
+            let block_size = 16usize;
+            let config = make_metal_graph_test_config(
+                vocab,
+                hidden,
+                intermediate,
+                num_heads,
+                num_kv_heads,
+                head_dim,
+            );
+            let weights = make_metal_graph_test_weights(&config, &device)?;
+            let mut runner = crate::metal_graph::MetalGraphRunner::new(&device, true);
+            assert!(
+                runner.is_enabled(),
+                "Metal graph runner must be enabled on a Metal device"
+            );
+
+            let mut graph_cache = crate::PagedKvCacheKt::new(
+                1,
+                12,
+                block_size,
+                num_kv_heads,
+                head_dim,
+                kiln_tensor::DType::BF16,
+                device,
+            )?;
+            let mut eager_cache = crate::PagedKvCacheKt::new(
+                1,
+                12,
+                block_size,
+                num_kv_heads,
+                head_dim,
+                kiln_tensor::DType::BF16,
+                device,
+            )?;
+            let mut graph_state = LinearAttentionState::new(&config, &device)?;
+            let mut eager_state = LinearAttentionState::new(&config, &device)?;
+
+            #[allow(clippy::too_many_arguments)]
+            fn run_bs1_pair(
+                runner: &mut crate::metal_graph::MetalGraphRunner,
+                backend: &dyn BackendRuntime,
+                token_id: u32,
+                weights: &GpuWeights,
+                config: &kiln_core::config::ModelConfig,
+                graph_cache: &crate::PagedKvCacheKt,
+                eager_cache: &crate::PagedKvCacheKt,
+                block_table: &BlockTable,
+                seq_len: usize,
+                graph_state: &mut LinearAttentionState,
+                eager_state: &mut LinearAttentionState,
+                device: &Device,
+            ) -> Result<()> {
+                let eager = model_forward_paged_next_token_greedy(
+                    backend,
+                    token_id,
+                    weights,
+                    config,
+                    eager_cache,
+                    block_table,
+                    seq_len,
+                    Some(eager_state),
+                    None,
+                    None,
+                )?;
+                let graph = runner.decode_step_paged_greedy(
+                    backend,
+                    token_id,
+                    weights,
+                    config,
+                    graph_cache,
+                    block_table,
+                    seq_len,
+                    graph_state,
+                    None,
+                )?;
+                synchronize_for_profile(device)?;
+                assert_eq!(
+                    graph, eager,
+                    "Metal graph bs=1 token mismatch at seq_len={seq_len}"
+                );
+                assert_metal_graph_cache_matches_eager(graph_cache, eager_cache)?;
+                Ok(())
+            }
+
+            let bt0 = BlockTable { blocks: vec![0] };
+            seed_metal_graph_prefix_for_test(
+                &mut graph_cache,
+                &bt0,
+                3,
+                num_kv_heads,
+                head_dim,
+                0.0020,
+                0.0030,
+                &device,
+            )?;
+            seed_metal_graph_prefix_for_test(
+                &mut eager_cache,
+                &bt0,
+                3,
+                num_kv_heads,
+                head_dim,
+                0.0020,
+                0.0030,
+                &device,
+            )?;
+            run_bs1_pair(
+                &mut runner,
+                &*backend,
+                7,
+                &weights,
+                &config,
+                &graph_cache,
+                &eager_cache,
+                &bt0,
+                3,
+                &mut graph_state,
+                &mut eager_state,
+                &device,
+            )?;
+            assert_eq!(runner.stable_buffer_count(), 1);
+            assert_eq!(runner.captured_graph_count(), 1);
+            assert_eq!(runner.captured_graph_replay_count_sum(), 1);
+            run_bs1_pair(
+                &mut runner,
+                &*backend,
+                11,
+                &weights,
+                &config,
+                &graph_cache,
+                &eager_cache,
+                &bt0,
+                4,
+                &mut graph_state,
+                &mut eager_state,
+                &device,
+            )?;
+            assert_eq!(runner.stable_buffer_count(), 1);
+            assert_eq!(runner.captured_graph_count(), 1);
+            assert_eq!(
+                runner.captured_graph_replay_count_sum(),
+                2,
+                "same-bucket bs=1 step should replay the captured Metal ICB graph"
+            );
+
+            let bt1 = BlockTable { blocks: vec![1] };
+            seed_metal_graph_prefix_for_test(
+                &mut graph_cache,
+                &bt1,
+                3,
+                num_kv_heads,
+                head_dim,
+                0.0021,
+                0.0031,
+                &device,
+            )?;
+            seed_metal_graph_prefix_for_test(
+                &mut eager_cache,
+                &bt1,
+                3,
+                num_kv_heads,
+                head_dim,
+                0.0021,
+                0.0031,
+                &device,
+            )?;
+            run_bs1_pair(
+                &mut runner,
+                &*backend,
+                13,
+                &weights,
+                &config,
+                &graph_cache,
+                &eager_cache,
+                &bt1,
+                3,
+                &mut graph_state,
+                &mut eager_state,
+                &device,
+            )?;
+            assert_eq!(
+                runner.stable_buffer_count(),
+                1,
+                "new request/block table should evict old bs=1 stable buffers"
+            );
+            assert_eq!(runner.captured_graph_count(), 1);
+            assert_eq!(runner.captured_graph_replay_count_sum(), 1);
+
+            let bt_long = BlockTable {
+                blocks: vec![2, 3, 4, 5, 6],
+            };
+            seed_metal_graph_prefix_for_test(
+                &mut graph_cache,
+                &bt_long,
+                63,
+                num_kv_heads,
+                head_dim,
+                0.0022,
+                0.0032,
+                &device,
+            )?;
+            seed_metal_graph_prefix_for_test(
+                &mut eager_cache,
+                &bt_long,
+                63,
+                num_kv_heads,
+                head_dim,
+                0.0022,
+                0.0032,
+                &device,
+            )?;
+            for (token, seq_len) in [(17u32, 63usize), (19u32, 64usize), (23u32, 65usize)] {
+                run_bs1_pair(
+                    &mut runner,
+                    &*backend,
+                    token,
+                    &weights,
+                    &config,
+                    &graph_cache,
+                    &eager_cache,
+                    &bt_long,
+                    seq_len,
+                    &mut graph_state,
+                    &mut eager_state,
+                    &device,
+                )?;
+            }
+            assert_eq!(
+                runner.stable_buffer_count(),
+                2,
+                "crossing the FA2 K/V bucket should keep one stable buffer per live bucket"
+            );
+            assert_eq!(runner.captured_graph_count(), 2);
+            assert_eq!(
+                runner.captured_graph_replay_count_sum(),
+                3,
+                "third long bs=1 step should replay the second bucket's captured graph"
+            );
+            Ok(())
+        })();
+
+        match prev_graphs {
+            Some(v) => unsafe { std::env::set_var("KILN_METAL_GRAPHS", v) },
+            None => unsafe { std::env::remove_var("KILN_METAL_GRAPHS") },
+        }
+        match prev_force_eager {
+            Some(v) => unsafe { std::env::set_var("KILN_FORCE_EAGER_DECODE", v) },
+            None => unsafe { std::env::remove_var("KILN_FORCE_EAGER_DECODE") },
+        }
+        match prev_stable_meta {
+            Some(v) => unsafe { std::env::set_var("KILN_METAL_GRAPH_STABLE_PAGED_METADATA", v) },
+            None => unsafe { std::env::remove_var("KILN_METAL_GRAPH_STABLE_PAGED_METADATA") },
+        }
+        result
+    }
+
+    #[cfg(feature = "metal")]
+    #[test]
+    fn test_metal_graph_batched_decode_matches_eager_and_replays_bucket() -> Result<()> {
+        let Some(device) = crate::backend::metal::try_new_metal() else {
+            return Ok(());
+        };
+        if std::env::var("KILN_DISABLE_FUSED_PAGED_DECODE").is_ok()
+            || std::env::var("KILN_DISABLE_METAL_PAGED_ATTN_DECODE_CONTIGUOUS").is_ok()
+            || std::env::var("KILN_DISABLE_METAL_PAGED_KV_WRITE_TOKEN_MAJOR").is_ok()
+        {
+            eprintln!("Metal paged decode disabled; skipping Metal graph batched parity test");
+            return Ok(());
+        }
+
+        let _guard = RESIDENCY_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let prev_graphs = std::env::var("KILN_METAL_GRAPHS").ok();
+        let prev_force_eager = std::env::var("KILN_FORCE_EAGER_DECODE").ok();
+        let prev_stable_meta = std::env::var("KILN_METAL_GRAPH_STABLE_PAGED_METADATA").ok();
+        unsafe {
+            std::env::set_var("KILN_METAL_GRAPHS", "1");
+            std::env::remove_var("KILN_FORCE_EAGER_DECODE");
+            std::env::set_var("KILN_METAL_GRAPH_STABLE_PAGED_METADATA", "1");
+        }
+
+        let result = (|| -> Result<()> {
+            let backend = crate::backend::for_device_kt(&device);
+            let vocab = 64usize;
+            let hidden = 512usize;
+            let intermediate = 768usize;
+            let num_heads = 16usize;
+            let num_kv_heads = 4usize;
+            let head_dim = 256usize;
+            let block_size = 16usize;
+            let config = make_metal_graph_test_config(
+                vocab,
+                hidden,
+                intermediate,
+                num_heads,
+                num_kv_heads,
+                head_dim,
+            );
+            let weights = make_metal_graph_test_weights(&config, &device)?;
+            let mut runner = crate::metal_graph::MetalGraphRunner::new(&device, true);
+            assert!(
+                runner.is_enabled(),
+                "Metal graph runner must be enabled on a Metal device"
+            );
+
+            let mut graph_cache = crate::PagedKvCacheKt::new(
+                1,
+                12,
+                block_size,
+                num_kv_heads,
+                head_dim,
+                kiln_tensor::DType::BF16,
+                device,
+            )?;
+            let mut eager_cache = crate::PagedKvCacheKt::new(
+                1,
+                12,
+                block_size,
+                num_kv_heads,
+                head_dim,
+                kiln_tensor::DType::BF16,
+                device,
+            )?;
+
+            #[allow(clippy::too_many_arguments)]
+            fn run_batch_pair(
+                runner: &mut crate::metal_graph::MetalGraphRunner,
+                backend: &dyn BackendRuntime,
+                token_ids: &[u32],
+                weights: &GpuWeights,
+                config: &kiln_core::config::ModelConfig,
+                graph_cache: &crate::PagedKvCacheKt,
+                eager_cache: &crate::PagedKvCacheKt,
+                block_tables: &[&BlockTable],
+                seq_lens: &[usize],
+                device: &Device,
+            ) -> Result<()> {
+                let eager = model_forward_paged_decode_contiguous_batch_greedy_with_ids(
+                    backend,
+                    token_ids,
+                    weights,
+                    config,
+                    eager_cache,
+                    block_tables,
+                    seq_lens,
+                    None,
+                    None,
+                    None,
+                )?;
+                let graph = runner
+                    .decode_step_paged_greedy_batch(
+                        backend,
+                        token_ids,
+                        weights,
+                        config,
+                        graph_cache,
+                        block_tables,
+                        seq_lens,
+                        None,
+                        None,
+                    )?
+                    .context("Metal graph batched decode unexpectedly declined")?;
+                synchronize_for_profile(device)?;
+                assert_eq!(
+                    graph, eager,
+                    "Metal graph batched token mismatch at seq_lens={seq_lens:?}"
+                );
+                assert_metal_graph_cache_matches_eager(graph_cache, eager_cache)?;
+                Ok(())
+            }
+
+            let bt0 = BlockTable { blocks: vec![0] };
+            let bt1 = BlockTable { blocks: vec![1] };
+            for (bt, k_scale, v_scale) in [(&bt0, 0.0020, 0.0030), (&bt1, 0.0021, 0.0031)] {
+                seed_metal_graph_prefix_for_test(
+                    &mut graph_cache,
+                    bt,
+                    3,
+                    num_kv_heads,
+                    head_dim,
+                    k_scale,
+                    v_scale,
+                    &device,
+                )?;
+                seed_metal_graph_prefix_for_test(
+                    &mut eager_cache,
+                    bt,
+                    3,
+                    num_kv_heads,
+                    head_dim,
+                    k_scale,
+                    v_scale,
+                    &device,
+                )?;
+            }
+            let block_tables = [&bt0, &bt1];
+            run_batch_pair(
+                &mut runner,
+                &*backend,
+                &[7, 11],
+                &weights,
+                &config,
+                &graph_cache,
+                &eager_cache,
+                &block_tables,
+                &[3, 3],
+                &device,
+            )?;
+            assert_eq!(runner.stable_buffer_count(), 1);
+            assert_eq!(runner.captured_graph_count(), 1);
+            assert_eq!(runner.captured_graph_replay_count_sum(), 1);
+            run_batch_pair(
+                &mut runner,
+                &*backend,
+                &[13, 17],
+                &weights,
+                &config,
+                &graph_cache,
+                &eager_cache,
+                &block_tables,
+                &[4, 4],
+                &device,
+            )?;
+            assert_eq!(runner.stable_buffer_count(), 1);
+            assert_eq!(runner.captured_graph_count(), 1);
+            assert_eq!(
+                runner.captured_graph_replay_count_sum(),
+                2,
+                "same-bucket batched step should replay the captured Metal ICB graph"
+            );
+
+            let bt2 = BlockTable {
+                blocks: vec![2, 3, 4, 5, 6],
+            };
+            let bt7 = BlockTable {
+                blocks: vec![7, 8, 9, 10, 11],
+            };
+            for (bt, k_scale, v_scale) in [(&bt2, 0.0022, 0.0032), (&bt7, 0.0023, 0.0033)] {
+                seed_metal_graph_prefix_for_test(
+                    &mut graph_cache,
+                    bt,
+                    63,
+                    num_kv_heads,
+                    head_dim,
+                    k_scale,
+                    v_scale,
+                    &device,
+                )?;
+                seed_metal_graph_prefix_for_test(
+                    &mut eager_cache,
+                    bt,
+                    63,
+                    num_kv_heads,
+                    head_dim,
+                    k_scale,
+                    v_scale,
+                    &device,
+                )?;
+            }
+            let long_tables = [&bt2, &bt7];
+            for (tokens, seq_lens) in [
+                ([19u32, 23u32], [63usize, 63usize]),
+                ([29u32, 31u32], [64usize, 64usize]),
+                ([37u32, 41u32], [65usize, 65usize]),
+            ] {
+                run_batch_pair(
+                    &mut runner,
+                    &*backend,
+                    &tokens,
+                    &weights,
+                    &config,
+                    &graph_cache,
+                    &eager_cache,
+                    &long_tables,
+                    &seq_lens,
+                    &device,
+                )?;
+            }
+            assert_eq!(
+                runner.stable_buffer_count(),
+                2,
+                "batched graph runner should reuse the short request's 64-token bucket and add the 128-token bucket"
+            );
+            assert_eq!(runner.captured_graph_count(), 2);
+            assert_eq!(
+                runner.captured_graph_replay_count_sum(),
+                5,
+                "third long batched step should replay the second long bucket"
+            );
+            Ok(())
+        })();
+
+        match prev_graphs {
+            Some(v) => unsafe { std::env::set_var("KILN_METAL_GRAPHS", v) },
+            None => unsafe { std::env::remove_var("KILN_METAL_GRAPHS") },
+        }
+        match prev_force_eager {
+            Some(v) => unsafe { std::env::set_var("KILN_FORCE_EAGER_DECODE", v) },
+            None => unsafe { std::env::remove_var("KILN_FORCE_EAGER_DECODE") },
+        }
+        match prev_stable_meta {
+            Some(v) => unsafe { std::env::set_var("KILN_METAL_GRAPH_STABLE_PAGED_METADATA", v) },
+            None => unsafe { std::env::remove_var("KILN_METAL_GRAPH_STABLE_PAGED_METADATA") },
+        }
+        result
     }
 
     /// bs=1 CUDA-graph-capture+replay vs. eager decode parity.

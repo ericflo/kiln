@@ -20,6 +20,10 @@ impl ComputePipeline {
     pub fn max_total_threads_per_threadgroup(&self) -> usize {
         self.raw.maxTotalThreadsPerThreadgroup()
     }
+
+    pub fn supports_indirect_command_buffers(&self) -> bool {
+        self.raw.supportIndirectCommandBuffers()
+    }
 }
 
 impl AsRef<ProtocolObject<dyn MTLComputePipelineState>> for ComputePipeline {

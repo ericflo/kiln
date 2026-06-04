@@ -4,7 +4,9 @@
 //! owning command buffer's semaphore — the lifecycle hinge the `Commands`
 //! pool relies on. Only crate-internal paths are renamed. (#1082)
 
-use super::{Buffer, CommandSemaphore, CommandStatus, ComputePipeline, MetalResource};
+use super::{
+    Buffer, CommandSemaphore, CommandStatus, ComputePipeline, IndirectCommandBuffer, MetalResource,
+};
 use objc2::{rc::Retained, runtime::ProtocolObject};
 use objc2_foundation::{NSRange, NSString};
 use objc2_metal::{
@@ -61,6 +63,28 @@ impl ComputeCommandEncoder {
             threadgroups_per_grid,
             threads_per_threadgroup,
         )
+    }
+
+    pub fn execute_commands_in_buffer(
+        &self,
+        indirect_command_buffer: &IndirectCommandBuffer,
+        start: usize,
+        count: usize,
+    ) {
+        assert!(
+            start <= indirect_command_buffer.max_command_count()
+                && count <= indirect_command_buffer.max_command_count() - start,
+            "indirect command execution range out of bounds"
+        );
+        unsafe {
+            self.raw.executeCommandsInBuffer_withRange(
+                indirect_command_buffer.as_ref(),
+                NSRange {
+                    location: start,
+                    length: count,
+                },
+            );
+        }
     }
 
     pub fn set_buffer(&self, index: usize, buffer: Option<&Buffer>, offset: usize) {

@@ -21,20 +21,21 @@ use kiln_core::tokenizer::KilnTokenizer;
 use crate::backend::{self, BackendRuntime};
 use crate::cancel::CancelHandle;
 use crate::cuda_graph::CudaGraphRunner;
-use crate::rocm_graph::RocmGraphRunner;
 use crate::decode_buffers::{DecodeBufferConfig, DecodeBuffers, DecodeElementType};
 use crate::forward::lm_head_sample_backend_decode_if;
 use crate::forward::{
     GpuWeights, LinearAttentionState, model_forward_kt, model_forward_paged,
     model_forward_paged_batched_decode_hidden,
-    model_forward_paged_decode_contiguous_batch_hidden_with_ids,
     model_forward_paged_decode_contiguous_batch_greedy_with_ids,
+    model_forward_paged_decode_contiguous_batch_hidden_with_ids,
     model_forward_paged_decode_contiguous_batch_sample_with_ids, model_forward_paged_last_token,
-    model_forward_paged_last_token_greedy,
-    model_forward_paged_last_token_with_last_hidden, model_forward_paged_next_token_greedy,
-    model_forward_paged_streaming, model_forward_paged_streaming_last_token_with_last_hidden,
+    model_forward_paged_last_token_greedy, model_forward_paged_last_token_with_last_hidden,
+    model_forward_paged_next_token_greedy, model_forward_paged_streaming,
+    model_forward_paged_streaming_last_token_with_last_hidden,
     model_forward_paged_streaming_with_progress, streaming_prefill_enabled_for,
 };
+use crate::metal_graph::MetalGraphRunner;
+use crate::rocm_graph::RocmGraphRunner;
 // (#1082) Native single-submit Vulkan-resident decode entry — only referenced
 // from the `#[cfg(feature = "vulkan")]` single-row fast path below.
 #[cfg(feature = "vulkan")]
@@ -271,6 +272,10 @@ pub struct ModelRunner {
     /// `cuda_graph`; active only on a Rocm device with `KILN_ROCM_GRAPHS` set,
     /// inert otherwise. Same per-step interior-mutability pattern.
     rocm_graph: Mutex<RocmGraphRunner>,
+    /// Metal ICB graph runner for accelerated decode steps. Active only on a
+    /// Metal device with `KILN_METAL_GRAPHS` set; otherwise eager Metal decode
+    /// is preserved.
+    metal_graph: Mutex<MetalGraphRunner>,
     /// Phase A explicit decode weight registry. Decode kernels address weights
     /// by enum keys instead of safetensors/Candle names.
     /// Phase A.5: lazily built on first hot-path access via `packed_weight_registry()`.
@@ -1511,6 +1516,7 @@ impl ModelRunner {
         // off) and a Rocm device, so pass `true` here — it is inert on every
         // other backend and when the env var is unset.
         let rocm_graph = RocmGraphRunner::new(&kt_device, true);
+        let metal_graph = MetalGraphRunner::new(&kt_device, true);
         let training_caps = backend.training_capabilities();
         tracing::info!(
             backend = backend.name(),
@@ -1536,6 +1542,7 @@ impl ModelRunner {
             active_lora: None,
             cuda_graph: Mutex::new(cuda_graph),
             rocm_graph: Mutex::new(rocm_graph),
+            metal_graph: Mutex::new(metal_graph),
             packed_weight_registry: OnceLock::new(),
             decode_buffers: OnceLock::new(),
             decode_buffer_config: OnceLock::new(),
@@ -1607,6 +1614,9 @@ impl ModelRunner {
         if let Ok(mut graph) = self.rocm_graph.lock() {
             graph.invalidate();
         }
+        if let Ok(mut graph) = self.metal_graph.lock() {
+            graph.invalidate();
+        }
         // Adapter swap rewires the matmul weights; any cached batched
         // LinearAttentionState is per-request data (independent of weights)
         // but the cache lifecycle follows the same conservative
@@ -1629,6 +1639,9 @@ impl ModelRunner {
             graph.invalidate();
         }
         if let Ok(mut graph) = self.rocm_graph.lock() {
+            graph.invalidate();
+        }
+        if let Ok(mut graph) = self.metal_graph.lock() {
             graph.invalidate();
         }
         if let Ok(mut cache) = self.batched_state_cache.lock() {
@@ -1698,6 +1711,9 @@ impl ModelRunner {
             graph.invalidate();
         }
         if let Ok(mut graph) = self.rocm_graph.lock() {
+            graph.invalidate();
+        }
+        if let Ok(mut graph) = self.metal_graph.lock() {
             graph.invalidate();
         }
         if let Ok(mut cache) = self.batched_state_cache.lock() {
@@ -1791,6 +1807,14 @@ impl ModelRunner {
             .cuda_graph
             .lock()
             .map_err(|e| anyhow::anyhow!("failed to lock CUDA graph runner: {e}"))?
+            .is_enabled())
+    }
+
+    pub fn metal_graph_enabled(&self) -> Result<bool> {
+        Ok(self
+            .metal_graph
+            .lock()
+            .map_err(|e| anyhow::anyhow!("failed to lock Metal graph runner: {e}"))?
             .is_enabled())
     }
 
@@ -2546,14 +2570,20 @@ impl ModelRunner {
 
         let use_greedy_prefill_token = params.is_effectively_greedy()
             && matches!(self.backend.device(), kiln_tensor::Device::Metal(_))
-            && !streaming_prefill_enabled_for(&self.weights.embed_tokens.device(), prefill_tokens.len());
+            && !streaming_prefill_enabled_for(
+                &self.weights.embed_tokens.device(),
+                prefill_tokens.len(),
+            );
         let split_pos =
             strict_prompt_prefix_split_pos(prompt_tokens.len(), cached_tokens, block_size);
         let mut prefill_split_snapshot: Option<RollingPrefixSnapshot> = None;
         let prefill_start = std::time::Instant::now();
         let prefill_source = {
             let pc_guard = lock_paged_cache(paged_cache)?;
-            if streaming_prefill_enabled_for(&self.weights.embed_tokens.device(), prefill_tokens.len()) {
+            if streaming_prefill_enabled_for(
+                &self.weights.embed_tokens.device(),
+                prefill_tokens.len(),
+            ) {
                 if let Some(split_pos) = split_pos {
                     let head_tokens = &prompt_tokens[cached_tokens..split_pos];
                     let _ = model_forward_paged_streaming_with_progress(
@@ -2779,7 +2809,10 @@ impl ModelRunner {
         let prefill_start = std::time::Instant::now();
         let logits = {
             let pc_guard = lock_paged_cache(paged_cache)?;
-            if streaming_prefill_enabled_for(&self.weights.embed_tokens.device(), prefill_tokens.len()) {
+            if streaming_prefill_enabled_for(
+                &self.weights.embed_tokens.device(),
+                prefill_tokens.len(),
+            ) {
                 if let Some(split_pos) = split_pos {
                     let head_tokens = &prompt_tokens[cached_tokens..split_pos];
                     let _ = model_forward_paged_streaming_with_progress(
@@ -3811,9 +3844,10 @@ impl ModelRunner {
                 let stage_start = profile_stages.then(std::time::Instant::now);
                 let mut tokens = Vec::with_capacity(batch);
                 for row in 0..batch {
-                    let linear_state = Some(&mut **linear_states.get_mut(row).with_context(
-                        || format!("missing linear state for CUDA row-loop decode row {row}"),
-                    )?);
+                    let linear_state =
+                        Some(&mut **linear_states.get_mut(row).with_context(|| {
+                            format!("missing linear state for CUDA row-loop decode row {row}")
+                        })?);
                     let token = {
                         let pc_guard = lock_paged_cache(paged_cache)?;
                         model_forward_paged_next_token_greedy(
@@ -3880,7 +3914,9 @@ impl ModelRunner {
                             None,
                         )
                         .with_context(|| {
-                            format!("CUDA mixed-batch fragmented-row greedy decode row {row} failed")
+                            format!(
+                                "CUDA mixed-batch fragmented-row greedy decode row {row} failed"
+                            )
                         })?
                     };
                     out[*row] = token;
@@ -3891,8 +3927,7 @@ impl ModelRunner {
                     contig_idx.iter().map(|&i| input_tokens[i]).collect();
                 let contig_bts: Vec<&BlockTable> =
                     contig_idx.iter().map(|&i| block_tables[i]).collect();
-                let contig_seqlens: Vec<usize> =
-                    contig_idx.iter().map(|&i| seq_lens[i]).collect();
+                let contig_seqlens: Vec<usize> = contig_idx.iter().map(|&i| seq_lens[i]).collect();
                 let contig_row_ids: Option<Vec<u64>> =
                     row_ids.map(|r| contig_idx.iter().map(|&i| r[i]).collect());
                 let contig_out = self
@@ -3990,8 +4025,7 @@ impl ModelRunner {
                     linear_states.iter().map(|state| &**state).collect();
                 let state = LinearAttentionState::from_batch_rows(&state_refs)?;
                 if all_rows_resident {
-                    state
-                        .assemble_gdn_state_resident_batch_rows_kt(&*self.backend, &state_refs)?;
+                    state.assemble_gdn_state_resident_batch_rows_kt(&*self.backend, &state_refs)?;
                 }
                 Some(state)
             }
@@ -4011,19 +4045,46 @@ impl ModelRunner {
         let stage_start = profile_stages.then(std::time::Instant::now);
         let tokens = {
             let pc_guard = lock_paged_cache(paged_cache)?;
-            model_forward_paged_decode_contiguous_batch_greedy_with_ids(
-                &*self.backend,
-                input_tokens,
-                &self.weights,
-                &self.config,
-                pc_guard,
-                block_tables,
-                seq_lens,
-                batch_state.as_mut(),
-                self.active_lora.as_ref(),
-                row_ids,
-            )
-            .context("batched greedy decode forward pass (paged) failed")?
+            let graph_tokens =
+                if matches!(self.backend.device(), kiln_tensor::Device::Metal(_)) {
+                    let mut runner = self
+                        .metal_graph
+                        .lock()
+                        .map_err(|e| anyhow::anyhow!("failed to lock Metal graph runner: {e}"))?;
+                    if runner.is_enabled() {
+                        runner.decode_step_paged_greedy_batch(
+                            &*self.backend,
+                            input_tokens,
+                            &self.weights,
+                            &self.config,
+                            pc_guard,
+                            block_tables,
+                            seq_lens,
+                            batch_state.as_mut(),
+                            self.active_lora.as_ref(),
+                        )?
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+            match graph_tokens {
+                Some(tokens) => tokens,
+                None => model_forward_paged_decode_contiguous_batch_greedy_with_ids(
+                    &*self.backend,
+                    input_tokens,
+                    &self.weights,
+                    &self.config,
+                    pc_guard,
+                    block_tables,
+                    seq_lens,
+                    batch_state.as_mut(),
+                    self.active_lora.as_ref(),
+                    row_ids,
+                )
+                .context("batched greedy decode forward pass (paged) failed")?,
+            }
         };
         finish_decode_batcher_stage_profile("batched_forward", batch, stage_start);
 
@@ -4216,8 +4277,7 @@ impl ModelRunner {
                     linear_states.iter().map(|state| &**state).collect();
                 let state = LinearAttentionState::from_batch_rows(&state_refs)?;
                 if all_rows_resident {
-                    state
-                        .assemble_gdn_state_resident_batch_rows_kt(&*self.backend, &state_refs)?;
+                    state.assemble_gdn_state_resident_batch_rows_kt(&*self.backend, &state_refs)?;
                 }
                 Some(state)
             }
@@ -4411,8 +4471,7 @@ impl ModelRunner {
                     linear_states.iter().map(|state| &**state).collect();
                 let state = LinearAttentionState::from_batch_rows(&state_refs)?;
                 if all_rows_resident {
-                    state
-                        .assemble_gdn_state_resident_batch_rows_kt(&*self.backend, &state_refs)?;
+                    state.assemble_gdn_state_resident_batch_rows_kt(&*self.backend, &state_refs)?;
                 }
                 Some(state)
             }
@@ -4511,19 +4570,39 @@ impl ModelRunner {
             && matches!(self.backend.device(), kiln_tensor::Device::Metal(_))
         {
             let pc_guard = lock_paged_cache(paged_cache)?;
-            let token = model_forward_paged_next_token_greedy(
-                &*self.backend,
-                input_token,
-                &self.weights,
-                &self.config,
-                pc_guard,
-                block_table,
-                seq_len,
-                Some(linear_state),
-                self.active_lora.as_ref(),
-                None,
-            )
-            .context("greedy decode forward pass (paged) failed")?;
+            let token = {
+                let mut runner = self
+                    .metal_graph
+                    .lock()
+                    .map_err(|e| anyhow::anyhow!("failed to lock Metal graph runner: {e}"))?;
+                if runner.is_enabled() {
+                    runner.decode_step_paged_greedy(
+                        &*self.backend,
+                        input_token,
+                        &self.weights,
+                        &self.config,
+                        pc_guard,
+                        block_table,
+                        seq_len,
+                        linear_state,
+                        self.active_lora.as_ref(),
+                    )
+                } else {
+                    model_forward_paged_next_token_greedy(
+                        &*self.backend,
+                        input_token,
+                        &self.weights,
+                        &self.config,
+                        pc_guard,
+                        block_table,
+                        seq_len,
+                        Some(linear_state),
+                        self.active_lora.as_ref(),
+                        None,
+                    )
+                }
+            }
+            .context("greedy Metal decode forward pass (paged) failed")?;
             if skip_gdn_state_readback {
                 linear_state.evict_gdn_recurrent_resident_states(&*self.backend);
             }
@@ -4721,7 +4800,10 @@ impl ModelRunner {
 
         let logits = {
             let pc_guard = lock_paged_cache(paged_cache)?;
-            if streaming_prefill_enabled_for(&self.weights.embed_tokens.device(), prompt_tokens.len()) {
+            if streaming_prefill_enabled_for(
+                &self.weights.embed_tokens.device(),
+                prompt_tokens.len(),
+            ) {
                 model_forward_paged_streaming_with_progress(
                     &*self.backend,
                     prompt_tokens,
@@ -5036,7 +5118,10 @@ impl ModelRunner {
 
         let logits = {
             let pc_guard = lock_paged_cache(paged_cache)?;
-            if streaming_prefill_enabled_for(&self.weights.embed_tokens.device(), prompt_tokens.len()) {
+            if streaming_prefill_enabled_for(
+                &self.weights.embed_tokens.device(),
+                prompt_tokens.len(),
+            ) {
                 model_forward_paged_streaming(
                     &*self.backend,
                     prompt_tokens,
@@ -5713,35 +5798,37 @@ impl ModelRunner {
 
         // Prefill: feed the prompt through the base model and capture the
         // post-final-norm last hidden row as the seed `h_prev`.
-        let (prefill_logits_kt, h_prev_kt) =
-            if streaming_prefill_enabled_for(&self.weights.embed_tokens.device(), prompt_tokens.len()) {
-                model_forward_paged_streaming_last_token_with_last_hidden(
-                    &*self.backend,
-                    prompt_tokens,
-                    &self.weights,
-                    &self.config,
-                    &base_cache,
-                    &base_block_table,
-                    0,
-                    Some(&mut linear_state),
-                    self.active_lora.as_ref(),
-                )
-                .context("mtp streaming prefill forward pass failed")?
-            } else {
-                model_forward_paged_last_token_with_last_hidden(
-                    &*self.backend,
-                    prompt_tokens,
-                    &self.weights,
-                    &self.config,
-                    &base_cache,
-                    &base_block_table,
-                    0,
-                    Some(&mut linear_state),
-                    self.active_lora.as_ref(),
-                    None,
-                )
-                .context("mtp prefill forward pass failed")?
-            };
+        let (prefill_logits_kt, h_prev_kt) = if streaming_prefill_enabled_for(
+            &self.weights.embed_tokens.device(),
+            prompt_tokens.len(),
+        ) {
+            model_forward_paged_streaming_last_token_with_last_hidden(
+                &*self.backend,
+                prompt_tokens,
+                &self.weights,
+                &self.config,
+                &base_cache,
+                &base_block_table,
+                0,
+                Some(&mut linear_state),
+                self.active_lora.as_ref(),
+            )
+            .context("mtp streaming prefill forward pass failed")?
+        } else {
+            model_forward_paged_last_token_with_last_hidden(
+                &*self.backend,
+                prompt_tokens,
+                &self.weights,
+                &self.config,
+                &base_cache,
+                &base_block_table,
+                0,
+                Some(&mut linear_state),
+                self.active_lora.as_ref(),
+                None,
+            )
+            .context("mtp prefill forward pass failed")?
+        };
         // (#1082) MTP speculative step + speculative.rs are fully kt now —
         // `h_prev`/`prefill_logits` stay kt; no candle bridge.
         let prefill_logits = prefill_logits_kt;
@@ -6162,35 +6249,37 @@ impl ModelRunner {
         let (tx, rx) = mpsc::channel();
         let mut linear_state = self.new_linear_state()?;
 
-        let (prefill_logits_kt, h_prev_kt) =
-            if streaming_prefill_enabled_for(&self.weights.embed_tokens.device(), prompt_tokens.len()) {
-                model_forward_paged_streaming_last_token_with_last_hidden(
-                    &*self.backend,
-                    &prompt_tokens,
-                    &self.weights,
-                    &self.config,
-                    &base_cache,
-                    &base_block_table,
-                    0,
-                    Some(&mut linear_state),
-                    self.active_lora.as_ref(),
-                )
-                .context("mtp streaming prefill forward pass failed")?
-            } else {
-                model_forward_paged_last_token_with_last_hidden(
-                    &*self.backend,
-                    &prompt_tokens,
-                    &self.weights,
-                    &self.config,
-                    &base_cache,
-                    &base_block_table,
-                    0,
-                    Some(&mut linear_state),
-                    self.active_lora.as_ref(),
-                    None,
-                )
-                .context("mtp prefill forward pass failed")?
-            };
+        let (prefill_logits_kt, h_prev_kt) = if streaming_prefill_enabled_for(
+            &self.weights.embed_tokens.device(),
+            prompt_tokens.len(),
+        ) {
+            model_forward_paged_streaming_last_token_with_last_hidden(
+                &*self.backend,
+                &prompt_tokens,
+                &self.weights,
+                &self.config,
+                &base_cache,
+                &base_block_table,
+                0,
+                Some(&mut linear_state),
+                self.active_lora.as_ref(),
+            )
+            .context("mtp streaming prefill forward pass failed")?
+        } else {
+            model_forward_paged_last_token_with_last_hidden(
+                &*self.backend,
+                &prompt_tokens,
+                &self.weights,
+                &self.config,
+                &base_cache,
+                &base_block_table,
+                0,
+                Some(&mut linear_state),
+                self.active_lora.as_ref(),
+                None,
+            )
+            .context("mtp prefill forward pass failed")?
+        };
         // (#1082) MTP speculative step + speculative.rs are fully kt now —
         // `h_prev`/`prefill_logits` stay kt; no candle bridge.
         let prefill_logits = prefill_logits_kt;
@@ -6441,8 +6530,10 @@ impl ModelRunner {
             let mut linear_state = runner_guard.new_linear_state()?;
             let logits = {
                 let pc_guard = lock_paged_cache(paged_cache.as_ref())?;
-                if streaming_prefill_enabled_for(&runner_guard.weights.embed_tokens.device(), prompt_tokens.len())
-                {
+                if streaming_prefill_enabled_for(
+                    &runner_guard.weights.embed_tokens.device(),
+                    prompt_tokens.len(),
+                ) {
                     model_forward_paged_streaming(
                         &*runner_guard.backend,
                         &prompt_tokens,
@@ -6471,7 +6562,7 @@ impl ModelRunner {
                     .context("prefill forward pass (paged) failed")?
                 }
             };
-        // (#1082) forward returns kt logits; sampler is kt — no bridge.
+            // (#1082) forward returns kt logits; sampler is kt — no bridge.
             (logits, linear_state)
         };
 
@@ -7059,7 +7150,10 @@ impl ModelRunner {
         let mut prefill_split_snapshot: Option<RollingPrefixSnapshot> = None;
         let logits = {
             let pc_guard = lock_paged_cache(paged_cache)?;
-            if streaming_prefill_enabled_for(&self.weights.embed_tokens.device(), prompt_tokens.len()) {
+            if streaming_prefill_enabled_for(
+                &self.weights.embed_tokens.device(),
+                prompt_tokens.len(),
+            ) {
                 if let Some(split_pos) = split_pos {
                     let head_tokens = &prompt_tokens[cached_tokens..split_pos];
                     let _ = model_forward_paged_streaming(
@@ -7177,7 +7271,10 @@ impl ModelRunner {
 
         let logits = {
             let pc_guard = lock_paged_cache(paged_cache)?;
-            if streaming_prefill_enabled_for(&self.weights.embed_tokens.device(), prompt_tokens.len()) {
+            if streaming_prefill_enabled_for(
+                &self.weights.embed_tokens.device(),
+                prompt_tokens.len(),
+            ) {
                 model_forward_paged_streaming(
                     &*self.backend,
                     prompt_tokens,
@@ -7335,7 +7432,10 @@ impl ModelRunner {
 
         let logits = {
             let pc_guard = lock_paged_cache(paged_cache)?;
-            if streaming_prefill_enabled_for(&self.weights.embed_tokens.device(), prompt_tokens.len()) {
+            if streaming_prefill_enabled_for(
+                &self.weights.embed_tokens.device(),
+                prompt_tokens.len(),
+            ) {
                 model_forward_paged_streaming(
                     &*self.backend,
                     prompt_tokens,
@@ -7533,33 +7633,35 @@ impl ModelRunner {
 
         // Prefill. Long Metal prompts use tiled streaming prefill by default;
         // env overrides can force either path.
-        let prefill_result =
-            if streaming_prefill_enabled_for(&self.weights.embed_tokens.device(), prompt_tokens.len()) {
-                model_forward_paged_streaming(
-                    &*self.backend,
-                    &prompt_tokens,
-                    &self.weights,
-                    &self.config,
-                    paged_cache,
-                    &block_table,
-                    0,
-                    Some(&mut linear_state),
-                    self.active_lora.as_ref(),
-                )
-            } else {
-                model_forward_paged_last_token(
-                    &*self.backend,
-                    &prompt_tokens,
-                    &self.weights,
-                    &self.config,
-                    paged_cache,
-                    &block_table,
-                    0,
-                    Some(&mut linear_state),
-                    self.active_lora.as_ref(),
-                    None,
-                )
-            };
+        let prefill_result = if streaming_prefill_enabled_for(
+            &self.weights.embed_tokens.device(),
+            prompt_tokens.len(),
+        ) {
+            model_forward_paged_streaming(
+                &*self.backend,
+                &prompt_tokens,
+                &self.weights,
+                &self.config,
+                paged_cache,
+                &block_table,
+                0,
+                Some(&mut linear_state),
+                self.active_lora.as_ref(),
+            )
+        } else {
+            model_forward_paged_last_token(
+                &*self.backend,
+                &prompt_tokens,
+                &self.weights,
+                &self.config,
+                paged_cache,
+                &block_table,
+                0,
+                Some(&mut linear_state),
+                self.active_lora.as_ref(),
+                None,
+            )
+        };
         let logits = match prefill_result {
             Ok(l) => l,
             Err(e) => {
@@ -7865,9 +7967,21 @@ mod tests {
         let bt_frag = block_table_with(&[100, 101, 102, 103, 999, 105, 106, 107]);
         let bt_short = block_table_with(&[42]);
         // Per-row helper agrees with the batch wrapper, row by row.
-        assert!(!row_has_noncontiguous_kv_tiles(bt_contig.blocks.as_slice(), 128, 16));
-        assert!(row_has_noncontiguous_kv_tiles(bt_frag.blocks.as_slice(), 128, 16));
-        assert!(!row_has_noncontiguous_kv_tiles(bt_short.blocks.as_slice(), 5, 16));
+        assert!(!row_has_noncontiguous_kv_tiles(
+            bt_contig.blocks.as_slice(),
+            128,
+            16
+        ));
+        assert!(row_has_noncontiguous_kv_tiles(
+            bt_frag.blocks.as_slice(),
+            128,
+            16
+        ));
+        assert!(!row_has_noncontiguous_kv_tiles(
+            bt_short.blocks.as_slice(),
+            5,
+            16
+        ));
         // A mixed batch yields a mask that picks out exactly the fragmented row;
         // the partition batches rows 0,2 (fast path) and row-loops only row 1.
         let bts = [&bt_contig, &bt_frag, &bt_short];

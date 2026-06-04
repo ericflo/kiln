@@ -1406,6 +1406,7 @@ dependencies = [
  "kiln-core",
  "kiln-flash-attn",
  "kiln-gdn-kernel",
+ "kiln-graph-metal",
  "kiln-hip",
  "kiln-kt-bridge",
  "kiln-marlin-gemm",
