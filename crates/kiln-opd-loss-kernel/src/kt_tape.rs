@@ -308,7 +308,7 @@ pub fn opd_top_k_reverse_kl_phase_b_per_position_via_kt_tape(
     if !envelope_ok(hidden, head_t, top_k) {
         bail!(
             "opd_top_k_reverse_kl_phase_b_per_position_via_kt_tape: inputs \
-             outside kt envelope (CUDA + matching F32/BF16 + \
+             outside kt envelope (CUDA/Metal/Vulkan/ROCm + matching F32/BF16 + \
              top_k ∈ {{16, 32}} required). Callers must filter via the \
              same envelope check the kt-typed backward applies."
         );
@@ -375,7 +375,7 @@ pub fn opd_top_k_reverse_kl_phase_b_via_kt_tape(
     if !envelope_ok(hidden, head_t, top_k) {
         bail!(
             "opd_top_k_reverse_kl_phase_b_via_kt_tape: inputs outside kt envelope \
-             (CUDA + matching F32/BF16 + top_k ∈ {{16, 32}} required). \
+             (CUDA/Metal/Vulkan/ROCm + matching F32/BF16 + top_k ∈ {{16, 32}} required). \
              Callers must filter via the same envelope check the kt-typed \
              backward applies."
         );
