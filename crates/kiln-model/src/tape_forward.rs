@@ -1533,7 +1533,7 @@ pub fn tape_flash_attn_enabled() -> bool {
 /// `CudaFlashAttentionTrainingBf16::bwd` candle path exactly. The collapse
 /// runs in F32 (cast → sum → cast back to BF16) so the group reduction
 /// doesn't lose precision in BF16.
-#[cfg(feature = "cuda")]
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 #[derive(Debug)]
 pub(crate) struct FlashAttnBackward {
     q: kiln_tensor::Tensor,
@@ -1547,7 +1547,7 @@ pub(crate) struct FlashAttnBackward {
     heads_kv: usize,
 }
 
-#[cfg(feature = "cuda")]
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 impl BackwardOp for FlashAttnBackward {
     fn name(&self) -> &'static str {
         "flash_attn_backward"
@@ -1668,22 +1668,25 @@ pub fn try_tape_flash_attn_kt(
     if !tape_forward_enabled() || !tape_flash_attn_enabled() {
         return Ok(None);
     }
-    // Fused FlashAttention-2 is a CUDA kernel; on Metal/CPU the kt-native
-    // unfused SDPA fallback (`try_tape_sdpa_fallback_kt`) records attention
-    // backward instead.
-    #[cfg(not(feature = "cuda"))]
+    // Fused FlashAttention-2 is a CUDA kernel; ROCm (gfx, Phase R.8) records the
+    // same kt-native `FlashAttnBackward`, whose backward dispatches the ROCm
+    // composite flash-attn fwd/bwd (`flash_attn_{fwd,bwd}_rocm`). On Metal/CPU/
+    // Vulkan the kt-native unfused SDPA fallback (`try_tape_sdpa_fallback_kt`)
+    // records attention backward instead. (#37) ROCm dq/dk/dv are gradchecked
+    // against an independent F32 analytic reference (rocm_flash_attn_bwd_gradcheck).
+    #[cfg(not(any(feature = "cuda", feature = "rocm")))]
     {
         let _ = (q, k, v, num_heads, num_kv_heads, head_dim);
         return Ok(None);
     }
-    #[cfg(feature = "cuda")]
+    #[cfg(any(feature = "cuda", feature = "rocm"))]
     {
     if q.dtype() != kiln_tensor::DType::BF16
         || k.dtype() != kiln_tensor::DType::BF16
         || v.dtype() != kiln_tensor::DType::BF16
-        || !matches!(q.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_))
-        || !matches!(k.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_))
-        || !matches!(v.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_))
+        || !matches!(q.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Rocm(_))
+        || !matches!(k.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Rocm(_))
+        || !matches!(v.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Rocm(_))
         || !q.is_contiguous()
         || !k.is_contiguous()
         || !v.is_contiguous()
