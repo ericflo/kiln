@@ -642,6 +642,7 @@ const DISABLE_METAL_LM_HEAD_ARGMAX: &str = "KILN_DISABLE_METAL_LM_HEAD_ARGMAX";
 const DISABLE_METAL_LM_HEAD_ARGMAX_ROWS: &str = "KILN_DISABLE_METAL_LM_HEAD_ARGMAX_ROWS";
 const DISABLE_METAL_LM_HEAD_ARGMAX_GPU_REDUCE: &str =
     "KILN_DISABLE_METAL_LM_HEAD_ARGMAX_GPU_REDUCE";
+const DISABLE_METAL_LM_HEAD_SAMPLE: &str = "KILN_DISABLE_METAL_LM_HEAD_SAMPLE";
 const DISABLE_METAL_PAGED_ATTN_DECODE_CONTIGUOUS: &str =
     "KILN_DISABLE_METAL_PAGED_ATTN_DECODE_CONTIGUOUS";
 const DISABLE_METAL_PAGED_KV_WRITE_TOKEN_MAJOR: &str =
@@ -664,6 +665,7 @@ const METAL_TRANSPOSED_COOP_GEMV_TILE8_COLS: usize = 8;
 const METAL_TRANSPOSED_COOP_GEMV_TILE16_COLS: usize = 16;
 const METAL_TRANSPOSED_COOP_GEMV_SIMDGROUPS: usize = 4;
 const METAL_TRANSPOSED_COOP_GEMV_THREADS: usize = 32 * METAL_TRANSPOSED_COOP_GEMV_SIMDGROUPS;
+const METAL_LM_HEAD_SAMPLE_TOP_K_MAX: u32 = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum MetalTransposedCoopGemvTile {
@@ -792,6 +794,10 @@ pub fn precompile_custom_kernels(device: &kiln_tensor::Device) -> Result<()> {
         if !metal_lm_head_argmax_gpu_reduce_disabled() {
             metal_lm_head_argmax_reduce_batch_pipeline(metal_device)?;
         }
+    }
+    if !metal_lm_head_sample_disabled() {
+        metal_lm_head_sample_pipeline(metal_device)?;
+        metal_lm_head_sample_reduce_pipeline(metal_device)?;
     }
     if !metal_mlp_gate_up_fusion_disabled() {
         metal_mlp_gate_up_pipeline(metal_device)?;
@@ -1077,6 +1083,199 @@ impl BackendRuntime for MetalBackend {
         )
         .context("dispatch_adamw_step: metal_adamw_step")?;
         Ok(true)
+    }
+
+    fn supports_linear_decode_sample(&self, top_k: u32) -> bool {
+        top_k > 0 && top_k <= METAL_LM_HEAD_SAMPLE_TOP_K_MAX && !metal_lm_head_sample_disabled()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn linear_decode_sample(
+        &self,
+        x: &kiln_tensor::Tensor,
+        weight_t: &kiln_tensor::Tensor,
+        history_indices: &[u32],
+        history_counts: &[u32],
+        repetition_penalty: f32,
+        presence_penalty: f32,
+        frequency_penalty: f32,
+        temperature: f32,
+        top_k: u32,
+        top_p: f32,
+        min_p: f32,
+        seed: u64,
+    ) -> Result<Option<u32>> {
+        if !self.supports_linear_decode_sample(top_k) {
+            return Ok(None);
+        }
+        if !metal_lm_head_sample_supports(x, weight_t, top_k, temperature, history_indices.len()) {
+            return Ok(None);
+        }
+        let greedy =
+            kiln_core::sampling::SamplingParams::values_are_effectively_greedy(temperature, top_k);
+        let (
+            history_indices,
+            history_counts,
+            repetition_penalty,
+            presence_penalty,
+            frequency_penalty,
+        ) = if greedy {
+            (&[][..], &[][..], 1.0f32, 0.0f32, 0.0f32)
+        } else {
+            (
+                history_indices,
+                history_counts,
+                repetition_penalty,
+                presence_penalty,
+                frequency_penalty,
+            )
+        };
+        let token = metal_lm_head_sample_bf16(
+            x,
+            weight_t,
+            history_indices,
+            history_counts,
+            repetition_penalty,
+            presence_penalty,
+            frequency_penalty,
+            temperature.max(f32::MIN_POSITIVE),
+            if greedy { 1 } else { top_k },
+            top_p,
+            min_p,
+            seed,
+        )
+        .context("metal fused linear_decode_sample")?;
+        Ok(Some(token))
+    }
+
+    fn supports_linear_decode_sample_batch(&self, top_k: &[u32], temperatures: &[f32]) -> bool {
+        if top_k.len() != temperatures.len() || top_k.is_empty() || metal_lm_head_sample_disabled()
+        {
+            return false;
+        }
+        let mut has_sampled_row = false;
+        for (&k, &temp) in top_k.iter().zip(temperatures.iter()) {
+            let greedy = temp == 0.0 || (k == 1 && temp.is_finite() && temp > 0.0);
+            if greedy {
+                continue;
+            }
+            if !(temp.is_finite() && temp > 0.0 && k > 0 && k <= METAL_LM_HEAD_SAMPLE_TOP_K_MAX) {
+                return false;
+            }
+            has_sampled_row = true;
+        }
+        has_sampled_row
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn linear_decode_sample_batch(
+        &self,
+        x: &kiln_tensor::Tensor,
+        weight_t: &kiln_tensor::Tensor,
+        history_rows: &[u32],
+        history_indices: &[u32],
+        history_counts: &[u32],
+        repetition_penalties: &[f32],
+        presence_penalties: &[f32],
+        frequency_penalties: &[f32],
+        temperatures: &[f32],
+        top_k: &[u32],
+        top_p: &[f32],
+        min_p: &[f32],
+        seeds: &[u64],
+    ) -> Result<Option<Vec<u32>>> {
+        if !self.supports_linear_decode_sample_batch(top_k, temperatures) {
+            return Ok(None);
+        }
+        let Ok((batch, seq_len, _hidden)) = x.dims3() else {
+            return Ok(None);
+        };
+        if batch == 0 || seq_len != 1 {
+            return Ok(None);
+        }
+        if repetition_penalties.len() != batch
+            || presence_penalties.len() != batch
+            || frequency_penalties.len() != batch
+            || temperatures.len() != batch
+            || top_k.len() != batch
+            || top_p.len() != batch
+            || min_p.len() != batch
+            || seeds.len() != batch
+            || history_rows.len() != history_indices.len()
+            || history_rows.len() != history_counts.len()
+        {
+            return Ok(None);
+        }
+
+        let mut histories = vec![Vec::<(u32, u32)>::new(); batch];
+        for ((&row, &idx), &count) in history_rows
+            .iter()
+            .zip(history_indices.iter())
+            .zip(history_counts.iter())
+        {
+            let row = row as usize;
+            if row >= batch {
+                return Ok(None);
+            }
+            histories[row].push((idx, count));
+        }
+        for row_history in histories.iter_mut() {
+            row_history.sort_by_key(|&(idx, _)| idx);
+        }
+
+        let mut tokens = Vec::with_capacity(batch);
+        for row in 0..batch {
+            let row_x = x.narrow(0, row, 1)?.contiguous()?;
+            let greedy = kiln_core::sampling::SamplingParams::values_are_effectively_greedy(
+                temperatures[row],
+                top_k[row],
+            );
+            let (row_indices, row_counts): (Vec<u32>, Vec<u32>) = if greedy {
+                (Vec::new(), Vec::new())
+            } else {
+                histories[row].iter().copied().unzip()
+            };
+            let row_temperature = if temperatures[row] == 0.0 {
+                1.0
+            } else {
+                temperatures[row]
+            };
+            let row_top_k = if greedy { 1 } else { top_k[row] };
+            if !metal_lm_head_sample_supports(
+                &row_x,
+                weight_t,
+                row_top_k,
+                row_temperature,
+                row_indices.len(),
+            ) {
+                return Ok(None);
+            }
+            let token = metal_lm_head_sample_bf16(
+                &row_x,
+                weight_t,
+                &row_indices,
+                &row_counts,
+                if greedy {
+                    1.0
+                } else {
+                    repetition_penalties[row]
+                },
+                if greedy { 0.0 } else { presence_penalties[row] },
+                if greedy {
+                    0.0
+                } else {
+                    frequency_penalties[row]
+                },
+                row_temperature,
+                row_top_k,
+                top_p[row],
+                min_p[row],
+                seeds[row],
+            )
+            .context("metal fused batched linear_decode_sample row")?;
+            tokens.push(token);
+        }
+        Ok(Some(tokens))
     }
 
     fn supports_flash_attn_prefill(&self) -> bool {
@@ -1937,6 +2136,10 @@ fn metal_lm_head_argmax_rows_disabled() -> bool {
 
 fn metal_lm_head_argmax_gpu_reduce_disabled() -> bool {
     env_truthy(DISABLE_METAL_LM_HEAD_ARGMAX_GPU_REDUCE)
+}
+
+fn metal_lm_head_sample_disabled() -> bool {
+    env_truthy(DISABLE_METAL_LM_HEAD_SAMPLE)
 }
 
 fn metal_paged_attn_decode_contiguous_disabled() -> bool {
@@ -3513,6 +3716,284 @@ kernel void kiln_lm_head_argmax_reduce_batch_f32(
     if (tid == 0) {
         final_indices[row] = indices[0];
     }
+}
+
+#define KILN_SAMPLE_TOPK_MAX 64
+
+inline bool kiln_score_better(float score, float index, float best_score, float best_index) {
+    return score > best_score || (score == best_score && index < best_index);
+}
+
+inline bool kiln_history_count_for_token(
+    device const uint* history_indices,
+    device const uint* history_counts,
+    uint history_len,
+    uint token,
+    thread uint& count
+) {
+    uint lo = 0;
+    uint hi = history_len;
+    while (lo < hi) {
+        const uint mid = lo + ((hi - lo) >> 1);
+        const uint value = history_indices[mid];
+        if (value < token) {
+            lo = mid + 1;
+        } else {
+            hi = mid;
+        }
+    }
+    if (lo < history_len && history_indices[lo] == token) {
+        count = history_counts[lo];
+        return true;
+    }
+    count = 0;
+    return false;
+}
+
+inline float kiln_apply_sample_penalties(
+    float score,
+    uint token,
+    device const uint* history_indices,
+    device const uint* history_counts,
+    uint history_len,
+    float repetition_penalty,
+    float presence_penalty,
+    float frequency_penalty
+) {
+    uint count = 0;
+    if (!kiln_history_count_for_token(history_indices, history_counts, history_len, token, count)) {
+        return score;
+    }
+    if (isfinite(repetition_penalty) && repetition_penalty > 0.0f &&
+        fabs(repetition_penalty - 1.0f) > 0.00000011920929f) {
+        score = score > 0.0f ? score / repetition_penalty : score * repetition_penalty;
+    }
+    if (isfinite(presence_penalty) && presence_penalty != 0.0f) {
+        score -= presence_penalty;
+    }
+    if (isfinite(frequency_penalty) && frequency_penalty != 0.0f) {
+        score -= frequency_penalty * static_cast<float>(count);
+    }
+    return score;
+}
+
+inline ulong kiln_splitmix64_next(thread ulong& state) {
+    state += 0x9E3779B97F4A7C15ul;
+    ulong z = state;
+    z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ul;
+    z = (z ^ (z >> 27)) * 0x94D049BB133111EBul;
+    return z ^ (z >> 31);
+}
+
+inline float kiln_uniform01_from_seed(uint seed_lo, uint seed_hi) {
+    ulong state = (static_cast<ulong>(seed_hi) << 32) | static_cast<ulong>(seed_lo);
+    const ulong bits = kiln_splitmix64_next(state);
+    const uint mantissa = static_cast<uint>((bits >> 40) & 0xFFFFFFul);
+    return static_cast<float>(mantissa) / 16777216.0f;
+}
+
+kernel void kiln_lm_head_sample_topk_chunks_bf16(
+    device const bfloat* x [[buffer(0)]],
+    device const bfloat* weight_t [[buffer(1)]],
+    device const uint* history_indices [[buffer(2)]],
+    device const uint* history_counts [[buffer(3)]],
+    device float* partial_scores [[buffer(4)]],
+    device float* partial_indices [[buffer(5)]],
+    constant uint& hidden [[buffer(6)]],
+    constant uint& vocab [[buffer(7)]],
+    constant uint& history_len [[buffer(8)]],
+    constant float& repetition_penalty [[buffer(9)]],
+    constant float& presence_penalty [[buffer(10)]],
+    constant float& frequency_penalty [[buffer(11)]],
+    constant float& inv_temperature [[buffer(12)]],
+    constant uint& top_k [[buffer(13)]],
+    uint tid [[thread_index_in_threadgroup]],
+    uint group [[threadgroup_position_in_grid]]
+) {
+    threadgroup float scores[256];
+    threadgroup float indices[256];
+
+    const uint col = group * 256 + tid;
+    float score = -INFINITY;
+    float index = 0.0f;
+    if (col < vocab) {
+        float acc = 0.0f;
+        for (uint i = 0; i < hidden; ++i) {
+            acc += static_cast<float>(x[i]) * static_cast<float>(weight_t[i * vocab + col]);
+        }
+        score = static_cast<float>(static_cast<bfloat>(acc));
+        score = kiln_apply_sample_penalties(
+            score,
+            col,
+            history_indices,
+            history_counts,
+            history_len,
+            repetition_penalty,
+            presence_penalty,
+            frequency_penalty
+        );
+        score *= inv_temperature;
+        index = static_cast<float>(col);
+    }
+    scores[tid] = score;
+    indices[tid] = index;
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    if (tid == 0) {
+        const uint out_base = group * top_k;
+        const uint k_limit = min(top_k, static_cast<uint>(KILN_SAMPLE_TOPK_MAX));
+        for (uint k = 0; k < k_limit; ++k) {
+            float best_score = -INFINITY;
+            float best_index = 0.0f;
+            uint best_pos = 0;
+            for (uint i = 0; i < 256; ++i) {
+                const float candidate_score = scores[i];
+                const float candidate_index = indices[i];
+                if (kiln_score_better(candidate_score, candidate_index, best_score, best_index)) {
+                    best_score = candidate_score;
+                    best_index = candidate_index;
+                    best_pos = i;
+                }
+            }
+            partial_scores[out_base + k] = best_score;
+            partial_indices[out_base + k] = best_index;
+            scores[best_pos] = -INFINITY;
+        }
+    }
+}
+
+kernel void kiln_lm_head_sample_reduce_f32(
+    device const float* partial_scores [[buffer(0)]],
+    device const float* partial_indices [[buffer(1)]],
+    device float* final_index [[buffer(2)]],
+    constant uint& num_groups [[buffer(3)]],
+    constant uint& top_k [[buffer(4)]],
+    constant float& top_p [[buffer(5)]],
+    constant float& min_p [[buffer(6)]],
+    constant uint& seed_lo [[buffer(7)]],
+    constant uint& seed_hi [[buffer(8)]],
+    uint tid [[thread_index_in_threadgroup]]
+) {
+    if (tid != 0) {
+        return;
+    }
+
+    float top_scores[KILN_SAMPLE_TOPK_MAX];
+    float top_indices[KILN_SAMPLE_TOPK_MAX];
+    float probs[KILN_SAMPLE_TOPK_MAX];
+    const uint k_limit = min(top_k, static_cast<uint>(KILN_SAMPLE_TOPK_MAX));
+    for (uint i = 0; i < KILN_SAMPLE_TOPK_MAX; ++i) {
+        top_scores[i] = -INFINITY;
+        top_indices[i] = 0.0f;
+        probs[i] = 0.0f;
+    }
+
+    const uint candidate_count = num_groups * k_limit;
+    for (uint c = 0; c < candidate_count; ++c) {
+        const float score = partial_scores[c];
+        const float index = partial_indices[c];
+        if (!isfinite(score)) {
+            continue;
+        }
+        for (uint pos = 0; pos < k_limit; ++pos) {
+            if (kiln_score_better(score, index, top_scores[pos], top_indices[pos])) {
+                for (uint shift = k_limit - 1; shift > pos; --shift) {
+                    top_scores[shift] = top_scores[shift - 1];
+                    top_indices[shift] = top_indices[shift - 1];
+                }
+                top_scores[pos] = score;
+                top_indices[pos] = index;
+                break;
+            }
+        }
+    }
+
+    if (k_limit == 0 || !isfinite(top_scores[0])) {
+        final_index[0] = 0.0f;
+        return;
+    }
+    if (k_limit == 1) {
+        final_index[0] = top_indices[0];
+        return;
+    }
+
+    const float max_score = top_scores[0];
+    float sum = 0.0f;
+    for (uint i = 0; i < k_limit; ++i) {
+        if (isfinite(top_scores[i])) {
+            const float p = exp(top_scores[i] - max_score);
+            probs[i] = p;
+            sum += p;
+        }
+    }
+    if (!isfinite(sum) || sum <= 0.0f) {
+        final_index[0] = top_indices[0];
+        return;
+    }
+    for (uint i = 0; i < k_limit; ++i) {
+        probs[i] /= sum;
+    }
+
+    if (isfinite(min_p) && min_p > 0.0f) {
+        const float threshold = min_p * probs[0];
+        float filtered_sum = 0.0f;
+        for (uint i = 0; i < k_limit; ++i) {
+            if (probs[i] < threshold) {
+                probs[i] = 0.0f;
+            }
+            filtered_sum += probs[i];
+        }
+        if (filtered_sum <= 0.0f || !isfinite(filtered_sum)) {
+            final_index[0] = top_indices[0];
+            return;
+        }
+        for (uint i = 0; i < k_limit; ++i) {
+            probs[i] /= filtered_sum;
+        }
+    }
+
+    if (top_p > 0.0f && top_p < 1.0f) {
+        float cumsum = 0.0f;
+        uint cutoff = k_limit;
+        for (uint i = 0; i < k_limit; ++i) {
+            cumsum += probs[i];
+            if (cumsum >= top_p) {
+                cutoff = i + 1;
+                break;
+            }
+        }
+        float filtered_sum = 0.0f;
+        for (uint i = 0; i < k_limit; ++i) {
+            if (i >= cutoff) {
+                probs[i] = 0.0f;
+            }
+            filtered_sum += probs[i];
+        }
+        if (filtered_sum <= 0.0f || !isfinite(filtered_sum)) {
+            final_index[0] = top_indices[0];
+            return;
+        }
+        for (uint i = 0; i < k_limit; ++i) {
+            probs[i] /= filtered_sum;
+        }
+    }
+
+    const float r = kiln_uniform01_from_seed(seed_lo, seed_hi);
+    float cumsum = 0.0f;
+    for (uint i = 0; i < k_limit; ++i) {
+        cumsum += probs[i];
+        if (r < cumsum) {
+            final_index[0] = top_indices[i];
+            return;
+        }
+    }
+    for (uint i = k_limit; i > 0; --i) {
+        if (probs[i - 1] > 0.0f) {
+            final_index[0] = top_indices[i - 1];
+            return;
+        }
+    }
+    final_index[0] = top_indices[0];
 }
 "#;
 
@@ -6950,6 +7431,50 @@ fn metal_lm_head_argmax_reduce_batch_pipeline(
     Ok(pipeline)
 }
 
+fn metal_lm_head_sample_pipeline(device: &dyn MetalPipelineHost) -> Result<ComputePipeline> {
+    static PIPELINES: OnceLock<Mutex<HashMap<u64, ComputePipeline>>> = OnceLock::new();
+    let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache
+        .lock()
+        .map_err(|_| anyhow::anyhow!("metal lm head sample pipeline cache poisoned"))?;
+    if let Some(pipeline) = cache.get(&device.pipeline_cache_key()) {
+        return Ok(pipeline.clone());
+    }
+
+    let library = metal_shared_library(device)?;
+    let function = library
+        .get_function("kiln_lm_head_sample_topk_chunks_bf16", None)
+        .map_err(|e| anyhow::anyhow!("load metal lm head sample function: {e:?}"))?;
+    let pipeline = device
+        .pipeline_raw_device()
+        .new_compute_pipeline_state_with_function(&function)
+        .map_err(|e| anyhow::anyhow!("build metal lm head sample pipeline: {e:?}"))?;
+    cache.insert(device.pipeline_cache_key(), pipeline.clone());
+    Ok(pipeline)
+}
+
+fn metal_lm_head_sample_reduce_pipeline(device: &dyn MetalPipelineHost) -> Result<ComputePipeline> {
+    static PIPELINES: OnceLock<Mutex<HashMap<u64, ComputePipeline>>> = OnceLock::new();
+    let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut cache = cache
+        .lock()
+        .map_err(|_| anyhow::anyhow!("metal lm head sample reduce pipeline cache poisoned"))?;
+    if let Some(pipeline) = cache.get(&device.pipeline_cache_key()) {
+        return Ok(pipeline.clone());
+    }
+
+    let library = metal_shared_library(device)?;
+    let function = library
+        .get_function("kiln_lm_head_sample_reduce_f32", None)
+        .map_err(|e| anyhow::anyhow!("load metal lm head sample reduce function: {e:?}"))?;
+    let pipeline = device
+        .pipeline_raw_device()
+        .new_compute_pipeline_state_with_function(&function)
+        .map_err(|e| anyhow::anyhow!("build metal lm head sample reduce pipeline: {e:?}"))?;
+    cache.insert(device.pipeline_cache_key(), pipeline.clone());
+    Ok(pipeline)
+}
+
 fn metal_mlp_gate_up_pipeline(device: &dyn MetalPipelineHost) -> Result<ComputePipeline> {
     static PIPELINES: OnceLock<Mutex<HashMap<u64, ComputePipeline>>> = OnceLock::new();
     let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
@@ -7493,9 +8018,9 @@ fn metal_paged_kv_write_token_major_batch_pipeline_indirect(
 ) -> Result<ComputePipeline> {
     static PIPELINES: OnceLock<Mutex<HashMap<u64, ComputePipeline>>> = OnceLock::new();
     let cache = PIPELINES.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut cache = cache.lock().map_err(|_| {
-        anyhow::anyhow!("metal paged kv batch write ICB pipeline cache poisoned")
-    })?;
+    let mut cache = cache
+        .lock()
+        .map_err(|_| anyhow::anyhow!("metal paged kv batch write ICB pipeline cache poisoned"))?;
     if let Some(pipeline) = cache.get(&device.pipeline_cache_key()) {
         return Ok(pipeline.clone());
     }
@@ -7599,6 +8124,32 @@ pub(crate) fn metal_lm_head_argmax_rows_supports(
         && vocab <= u32::MAX as usize
         && num_groups > 0
         && num_groups <= 1024
+}
+
+pub(crate) fn metal_lm_head_sample_supports(
+    x: &kiln_tensor::Tensor,
+    weight_t: &kiln_tensor::Tensor,
+    top_k: u32,
+    temperature: f32,
+    history_len: usize,
+) -> bool {
+    if metal_lm_head_sample_disabled()
+        || top_k == 0
+        || top_k > METAL_LM_HEAD_SAMPLE_TOP_K_MAX
+        || !temperature.is_finite()
+        || temperature <= 0.0
+        || history_len > u32::MAX as usize
+    {
+        return false;
+    }
+    if !metal_lm_head_supports(x, weight_t) {
+        return false;
+    }
+    let Ok((_, vocab)) = weight_t.dims2() else {
+        return false;
+    };
+    let num_groups = vocab.div_ceil(256);
+    num_groups > 0 && num_groups <= 1024
 }
 
 pub(crate) fn metal_lm_head_bf16(
@@ -7808,6 +8359,195 @@ pub(crate) fn metal_lm_head_argmax_bf16(
         }
     }
     Ok(best_idx)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn metal_lm_head_sample_bf16(
+    x: &kiln_tensor::Tensor,
+    weight_t: &kiln_tensor::Tensor,
+    history_indices: &[u32],
+    history_counts: &[u32],
+    repetition_penalty: f32,
+    presence_penalty: f32,
+    frequency_penalty: f32,
+    temperature: f32,
+    top_k: u32,
+    top_p: f32,
+    min_p: f32,
+    seed: u64,
+) -> Result<u32> {
+    anyhow::ensure!(
+        history_indices.len() == history_counts.len(),
+        "metal lm head sample history index/count length mismatch ({} vs {})",
+        history_indices.len(),
+        history_counts.len()
+    );
+    anyhow::ensure!(
+        metal_lm_head_sample_supports(x, weight_t, top_k, temperature, history_indices.len()),
+        "metal lm head sample supports BF16 [1,1,H] x [H,V] on Metal with top_k in 1..={}",
+        METAL_LM_HEAD_SAMPLE_TOP_K_MAX
+    );
+    let (_, _, hidden) = x.dims3()?;
+    let (_, vocab) = weight_t.dims2()?;
+
+    let effective_top_k = (top_k as usize).min(vocab).max(1);
+    let chunk_width = 256usize;
+    let num_groups = vocab.div_ceil(chunk_width);
+    let x_metal = kt_metal(x)?;
+    let partial_scores = kt_metal_alloc(
+        x_metal,
+        kiln_tensor::DType::F32,
+        &[num_groups, effective_top_k],
+    )?;
+    let partial_indices = kt_metal_alloc(
+        x_metal,
+        kiln_tensor::DType::F32,
+        &[num_groups, effective_top_k],
+    )?;
+    let final_index = kt_metal_alloc(x_metal, kiln_tensor::DType::F32, &[1usize])?;
+
+    let device = x.device();
+    let history_indices_tensor = if history_indices.is_empty() {
+        kiln_tensor::Tensor::from_vec_on(device, vec![0u32], vec![1])?
+    } else {
+        kiln_tensor::Tensor::from_vec_on(
+            device,
+            history_indices.to_vec(),
+            vec![history_indices.len()],
+        )?
+    };
+    let history_counts_tensor = if history_counts.is_empty() {
+        kiln_tensor::Tensor::from_vec_on(device, vec![0u32], vec![1])?
+    } else {
+        kiln_tensor::Tensor::from_vec_on(
+            device,
+            history_counts.to_vec(),
+            vec![history_counts.len()],
+        )?
+    };
+
+    let companion = x_metal.companion()?;
+    let pipeline = metal_lm_head_sample_pipeline(&*companion)?;
+    let reduce_pipeline = metal_lm_head_sample_reduce_pipeline(&*companion)?;
+    let encoder = companion.command_encoder()?;
+    encoder.set_label("kiln_lm_head_sample_topk_chunks_bf16");
+    encoder.set_compute_pipeline_state(&pipeline);
+
+    {
+        let w_metal = kt_metal(weight_t)?;
+        let hist_idx_metal = kt_metal(&history_indices_tensor)?;
+        let hist_count_metal = kt_metal(&history_counts_tensor)?;
+        let ps_metal = kt_metal(&partial_scores)?;
+        let pi_metal = kt_metal(&partial_indices)?;
+        let final_metal = kt_metal(&final_index)?;
+
+        let x_buf = buffer_o_kt(x_metal.buffer().as_ref(), x.layout(), x.dtype());
+        let w_buf = buffer_o_kt(
+            w_metal.buffer().as_ref(),
+            weight_t.layout(),
+            weight_t.dtype(),
+        );
+        let hist_idx_buf = buffer_o_kt(
+            hist_idx_metal.buffer().as_ref(),
+            history_indices_tensor.layout(),
+            history_indices_tensor.dtype(),
+        );
+        let hist_count_buf = buffer_o_kt(
+            hist_count_metal.buffer().as_ref(),
+            history_counts_tensor.layout(),
+            history_counts_tensor.dtype(),
+        );
+        let ps_buf = buffer_o_kt(
+            ps_metal.buffer().as_ref(),
+            partial_scores.layout(),
+            partial_scores.dtype(),
+        );
+        let pi_buf = buffer_o_kt(
+            pi_metal.buffer().as_ref(),
+            partial_indices.layout(),
+            partial_indices.dtype(),
+        );
+        let final_buf = buffer_o_kt(
+            final_metal.buffer().as_ref(),
+            final_index.layout(),
+            final_index.dtype(),
+        );
+
+        encoder.set_buffer(0, Some(x_buf.buffer), x_buf.offset_in_bytes);
+        encoder.set_buffer(1, Some(w_buf.buffer), w_buf.offset_in_bytes);
+        encoder.set_buffer(2, Some(hist_idx_buf.buffer), hist_idx_buf.offset_in_bytes);
+        encoder.set_buffer(
+            3,
+            Some(hist_count_buf.buffer),
+            hist_count_buf.offset_in_bytes,
+        );
+        encoder.set_buffer(4, Some(ps_buf.buffer), ps_buf.offset_in_bytes);
+        encoder.set_buffer(5, Some(pi_buf.buffer), pi_buf.offset_in_bytes);
+
+        let hidden_u32 = hidden as u32;
+        let vocab_u32 = vocab as u32;
+        let history_len_u32 = history_indices.len() as u32;
+        let inv_temperature = 1.0f32 / temperature;
+        let effective_top_k_u32 = effective_top_k as u32;
+        encoder.set_bytes(6, &hidden_u32);
+        encoder.set_bytes(7, &vocab_u32);
+        encoder.set_bytes(8, &history_len_u32);
+        encoder.set_bytes(9, &repetition_penalty);
+        encoder.set_bytes(10, &presence_penalty);
+        encoder.set_bytes(11, &frequency_penalty);
+        encoder.set_bytes(12, &inv_temperature);
+        encoder.set_bytes(13, &effective_top_k_u32);
+
+        let threadgroups_per_grid = objc2_metal::MTLSize {
+            width: num_groups,
+            height: 1,
+            depth: 1,
+        };
+        let threads_per_threadgroup = objc2_metal::MTLSize {
+            width: chunk_width,
+            height: 1,
+            depth: 1,
+        };
+        encoder.dispatch_thread_groups(threadgroups_per_grid, threads_per_threadgroup);
+
+        encoder.set_label("kiln_lm_head_sample_reduce_f32");
+        encoder.set_compute_pipeline_state(&reduce_pipeline);
+        encoder.set_buffer(0, Some(ps_buf.buffer), ps_buf.offset_in_bytes);
+        encoder.set_buffer(1, Some(pi_buf.buffer), pi_buf.offset_in_bytes);
+        encoder.set_buffer(2, Some(final_buf.buffer), final_buf.offset_in_bytes);
+
+        let num_groups_u32 = num_groups as u32;
+        let seed_lo = seed as u32;
+        let seed_hi = (seed >> 32) as u32;
+        encoder.set_bytes(3, &num_groups_u32);
+        encoder.set_bytes(4, &effective_top_k_u32);
+        encoder.set_bytes(5, &top_p);
+        encoder.set_bytes(6, &min_p);
+        encoder.set_bytes(7, &seed_lo);
+        encoder.set_bytes(8, &seed_hi);
+
+        let reduce_threadgroups = objc2_metal::MTLSize {
+            width: 1,
+            height: 1,
+            depth: 1,
+        };
+        let reduce_threads = objc2_metal::MTLSize {
+            width: 1,
+            height: 1,
+            depth: 1,
+        };
+        encoder.dispatch_thread_groups(reduce_threadgroups, reduce_threads);
+    }
+
+    drop(encoder);
+
+    let token = final_index
+        .to_vec1::<f32>()
+        .context("read metal lm head sampled final index")?
+        .into_iter()
+        .next()
+        .context("metal lm head sampled final index missing")?;
+    Ok(token as u32)
 }
 
 pub(crate) fn metal_lm_head_argmax_rows_bf16(
@@ -14231,6 +14971,403 @@ pub fn try_new_metal() -> Option<kiln_tensor::Device> {
 }
 
 #[cfg(test)]
+mod metal_lm_head_sample_tests {
+    use super::*;
+    use crate::backend::BackendRuntime;
+    use kiln_tensor::{Device, Tensor};
+    use std::cmp::Ordering;
+
+    fn metal_device() -> Option<Device> {
+        super::try_new_metal()
+    }
+
+    fn pattern_bf16(n: usize, seed: u64) -> Vec<half::bf16> {
+        let mut out = Vec::with_capacity(n);
+        let mut s = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        for i in 0..n {
+            s = s
+                .wrapping_add(0xA076_1D64_78BD_642F)
+                .wrapping_mul(0xE703_7ED1_A0B4_28DB);
+            let raw = ((s >> 40) as u32 % 4096) as f32 / 1024.0 - 2.0;
+            let trend = (i % 19) as f32 * 0.011;
+            out.push(half::bf16::from_f32(raw + trend));
+        }
+        out
+    }
+
+    fn lm_head_logits_for_row(
+        x: &[half::bf16],
+        weight_t: &[half::bf16],
+        row: usize,
+        hidden: usize,
+        vocab: usize,
+    ) -> Vec<f32> {
+        let mut logits = Vec::with_capacity(vocab);
+        let row_base = row * hidden;
+        for col in 0..vocab {
+            let mut acc = 0.0f32;
+            for i in 0..hidden {
+                acc += x[row_base + i].to_f32() * weight_t[i * vocab + col].to_f32();
+            }
+            logits.push(half::bf16::from_f32(acc).to_f32());
+        }
+        logits
+    }
+
+    fn raw_argmax(logits: &[f32]) -> u32 {
+        let mut best_score = f32::NEG_INFINITY;
+        let mut best_idx = 0u32;
+        for (idx, &score) in logits.iter().enumerate() {
+            let idx = idx as u32;
+            if score > best_score || (score == best_score && idx < best_idx) {
+                best_score = score;
+                best_idx = idx;
+            }
+        }
+        best_idx
+    }
+
+    fn splitmix_uniform(seed: u64) -> f32 {
+        let state = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        let bits = z ^ (z >> 31);
+        let mantissa = ((bits >> 40) & 0xFF_FFFF) as u32;
+        mantissa as f32 / 16_777_216.0
+    }
+
+    fn unseeded_style_seed(history: &[u32]) -> u64 {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        let history_hash = history.iter().fold(0xCBF29CE484222325u64, |acc, &token| {
+            (acc ^ token as u64).wrapping_mul(0x100000001B3)
+        });
+        nanos.wrapping_add(history_hash)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn reference_sample(
+        raw_logits: &[f32],
+        history_indices: &[u32],
+        history_counts: &[u32],
+        repetition_penalty: f32,
+        presence_penalty: f32,
+        frequency_penalty: f32,
+        temperature: f32,
+        top_k: u32,
+        top_p: f32,
+        min_p: f32,
+        seed: u64,
+    ) -> u32 {
+        if kiln_core::sampling::SamplingParams::values_are_effectively_greedy(temperature, top_k) {
+            return raw_argmax(raw_logits);
+        }
+
+        let mut logits = raw_logits.to_vec();
+        let rep_active = repetition_penalty.is_finite()
+            && repetition_penalty > 0.0
+            && (repetition_penalty - 1.0).abs() > f32::EPSILON;
+        for (&idx, &count) in history_indices.iter().zip(history_counts.iter()) {
+            let Some(score) = logits.get_mut(idx as usize) else {
+                continue;
+            };
+            if rep_active {
+                *score = if *score > 0.0 {
+                    *score / repetition_penalty
+                } else {
+                    *score * repetition_penalty
+                };
+            }
+            if presence_penalty.is_finite() && presence_penalty != 0.0 {
+                *score -= presence_penalty;
+            }
+            if frequency_penalty.is_finite() && frequency_penalty != 0.0 {
+                *score -= frequency_penalty * count as f32;
+            }
+        }
+
+        let mut indexed: Vec<(u32, f32)> = logits
+            .iter()
+            .enumerate()
+            .map(|(idx, &score)| (idx as u32, score / temperature))
+            .collect();
+        indexed.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(Ordering::Equal)
+                .then_with(|| a.0.cmp(&b.0))
+        });
+        indexed.truncate((top_k as usize).min(indexed.len()).max(1));
+
+        let max_score = indexed[0].1;
+        let mut probs: Vec<(u32, f32)> = indexed
+            .iter()
+            .map(|&(idx, score)| (idx, (score - max_score).exp()))
+            .collect();
+        let mut sum: f32 = probs.iter().map(|(_, p)| *p).sum();
+        if !sum.is_finite() || sum <= 0.0 {
+            return indexed[0].0;
+        }
+        for (_, p) in probs.iter_mut() {
+            *p /= sum;
+        }
+
+        if min_p.is_finite() && min_p > 0.0 {
+            let threshold = min_p * probs[0].1;
+            probs.retain(|&(_, p)| p >= threshold);
+            if probs.is_empty() {
+                return indexed[0].0;
+            }
+            sum = probs.iter().map(|(_, p)| *p).sum();
+            if sum > 0.0 {
+                for (_, p) in probs.iter_mut() {
+                    *p /= sum;
+                }
+            }
+        }
+
+        if top_p > 0.0 && top_p < 1.0 {
+            let mut cumsum = 0.0f32;
+            let mut cutoff = probs.len();
+            for (i, (_, p)) in probs.iter().enumerate() {
+                cumsum += *p;
+                if cumsum >= top_p {
+                    cutoff = i + 1;
+                    break;
+                }
+            }
+            probs.truncate(cutoff);
+            sum = probs.iter().map(|(_, p)| *p).sum();
+            if sum > 0.0 {
+                for (_, p) in probs.iter_mut() {
+                    *p /= sum;
+                }
+            }
+        }
+
+        let r = splitmix_uniform(seed);
+        let mut cumsum = 0.0f32;
+        for &(idx, p) in &probs {
+            cumsum += p;
+            if r < cumsum {
+                return idx;
+            }
+        }
+        probs.last().map(|&(idx, _)| idx).unwrap_or(indexed[0].0)
+    }
+
+    #[test]
+    fn linear_decode_sample_top_k_one_ignores_penalties_and_matches_raw_argmax() -> Result<()> {
+        let Some(dev) = metal_device() else {
+            eprintln!("Metal unavailable, skipping Metal lm-head top_k=1 sample test");
+            return Ok(());
+        };
+        let hidden = 8usize;
+        let vocab = 17usize;
+        let x_data = pattern_bf16(hidden, 1);
+        let weight_data = pattern_bf16(hidden * vocab, 2);
+        let x = Tensor::from_vec_on(dev, x_data.clone(), vec![1, 1, hidden])?;
+        let weight_t = Tensor::from_vec_on(dev, weight_data.clone(), vec![hidden, vocab])?;
+        let backend = MetalBackend::new(dev);
+        let logits = lm_head_logits_for_row(&x_data, &weight_data, 0, hidden, vocab);
+        let want = raw_argmax(&logits);
+
+        let got = backend
+            .linear_decode_sample(
+                &x,
+                &weight_t,
+                &[want],
+                &[100],
+                1.4,
+                3.0,
+                0.2,
+                0.7,
+                1,
+                0.5,
+                0.1,
+                0xCAFE_F00D_DEAD_BEEF,
+            )?
+            .context("Metal backend declined top_k=1 sampled decode")?;
+        assert_eq!(got, want);
+        Ok(())
+    }
+
+    #[test]
+    fn metal_lm_head_sample_matches_reference_top_p_min_p_penalties_seeded() -> Result<()> {
+        let Some(dev) = metal_device() else {
+            eprintln!("Metal unavailable, skipping Metal lm-head seeded sample test");
+            return Ok(());
+        };
+        let hidden = 9usize;
+        let vocab = 37usize;
+        let x_data = pattern_bf16(hidden, 3);
+        let weight_data = pattern_bf16(hidden * vocab, 4);
+        let x = Tensor::from_vec_on(dev, x_data.clone(), vec![1, 1, hidden])?;
+        let weight_t = Tensor::from_vec_on(dev, weight_data.clone(), vec![hidden, vocab])?;
+        let history_indices = [2u32, 5, 11, 23];
+        let history_counts = [1u32, 3, 2, 4];
+        let seed = 0x1234_5678_90AB_CDEF;
+        let got = metal_lm_head_sample_bf16(
+            &x,
+            &weight_t,
+            &history_indices,
+            &history_counts,
+            1.2,
+            0.4,
+            0.15,
+            0.8,
+            7,
+            0.82,
+            0.03,
+            seed,
+        )?;
+        let again = metal_lm_head_sample_bf16(
+            &x,
+            &weight_t,
+            &history_indices,
+            &history_counts,
+            1.2,
+            0.4,
+            0.15,
+            0.8,
+            7,
+            0.82,
+            0.03,
+            seed,
+        )?;
+        let logits = lm_head_logits_for_row(&x_data, &weight_data, 0, hidden, vocab);
+        let want = reference_sample(
+            &logits,
+            &history_indices,
+            &history_counts,
+            1.2,
+            0.4,
+            0.15,
+            0.8,
+            7,
+            0.82,
+            0.03,
+            seed,
+        );
+        assert_eq!(got, want);
+        assert_eq!(again, want, "same seed must be deterministic");
+        Ok(())
+    }
+
+    #[test]
+    fn metal_lm_head_sample_matches_reference_top_k_top_p_unseeded_style_seed() -> Result<()> {
+        let Some(dev) = metal_device() else {
+            eprintln!("Metal unavailable, skipping Metal lm-head unseeded-style sample test");
+            return Ok(());
+        };
+        let hidden = 11usize;
+        let vocab = 43usize;
+        let x_data = pattern_bf16(hidden, 7);
+        let weight_data = pattern_bf16(hidden * vocab, 8);
+        let x = Tensor::from_vec_on(dev, x_data.clone(), vec![1, 1, hidden])?;
+        let weight_t = Tensor::from_vec_on(dev, weight_data.clone(), vec![hidden, vocab])?;
+        let history = [3u32, 5, 3, 17, 5, 29];
+        let (history_indices, history_counts): (Vec<u32>, Vec<u32>) =
+            [(3u32, 2u32), (5, 2), (17, 1), (29, 1)].into_iter().unzip();
+        let seed = unseeded_style_seed(&history);
+        let got = metal_lm_head_sample_bf16(
+            &x,
+            &weight_t,
+            &history_indices,
+            &history_counts,
+            1.0,
+            0.0,
+            0.0,
+            0.95,
+            11,
+            0.7,
+            0.0,
+            seed,
+        )?;
+        let logits = lm_head_logits_for_row(&x_data, &weight_data, 0, hidden, vocab);
+        let want = reference_sample(
+            &logits,
+            &history_indices,
+            &history_counts,
+            1.0,
+            0.0,
+            0.0,
+            0.95,
+            11,
+            0.7,
+            0.0,
+            seed,
+        );
+        assert_eq!(got, want);
+        Ok(())
+    }
+
+    #[test]
+    fn linear_decode_sample_batch_handles_mixed_greedy_and_sampled_rows() -> Result<()> {
+        let Some(dev) = metal_device() else {
+            eprintln!("Metal unavailable, skipping Metal lm-head batched sample test");
+            return Ok(());
+        };
+        let batch = 2usize;
+        let hidden = 10usize;
+        let vocab = 41usize;
+        let x_data = pattern_bf16(batch * hidden, 5);
+        let weight_data = pattern_bf16(hidden * vocab, 6);
+        let x = Tensor::from_vec_on(dev, x_data.clone(), vec![batch, 1, hidden])?;
+        let weight_t = Tensor::from_vec_on(dev, weight_data.clone(), vec![hidden, vocab])?;
+        let backend = MetalBackend::new(dev);
+
+        let tokens = backend
+            .linear_decode_sample_batch(
+                &x,
+                &weight_t,
+                &[1, 1, 1],
+                &[3, 7, 19],
+                &[2, 1, 4],
+                &[1.0, 1.15],
+                &[0.0, 0.35],
+                &[0.0, 0.08],
+                &[0.0, 0.9],
+                &[0, 6],
+                &[1.0, 0.74],
+                &[0.0, 0.02],
+                &[0xABCD, 0x1234_0000_5678_9999],
+            )?
+            .context("Metal backend declined batched sampled decode")?;
+        assert_eq!(tokens.len(), batch);
+
+        let row0_logits = lm_head_logits_for_row(&x_data, &weight_data, 0, hidden, vocab);
+        let row1_logits = lm_head_logits_for_row(&x_data, &weight_data, 1, hidden, vocab);
+        let want0 = raw_argmax(&row0_logits);
+        let want1 = reference_sample(
+            &row1_logits,
+            &[3, 7, 19],
+            &[2, 1, 4],
+            1.15,
+            0.35,
+            0.08,
+            0.9,
+            6,
+            0.74,
+            0.02,
+            0x1234_0000_5678_9999,
+        );
+        assert_eq!(tokens, vec![want0, want1]);
+        Ok(())
+    }
+
+    #[test]
+    fn sample_batch_support_does_not_claim_pure_greedy_batches() {
+        let backend = MetalBackend::new(Device::Metal(0));
+        assert!(!backend.supports_linear_decode_sample_batch(&[20], &[0.0]));
+        assert!(!backend.supports_linear_decode_sample_batch(&[1, 1], &[0.7, 0.8]));
+        assert!(backend.supports_linear_decode_sample_batch(&[20, 1], &[0.8, 0.0]));
+    }
+}
+
+#[cfg(test)]
 mod metal_icb_decode_tests {
     use super::*;
     use kiln_tensor::{Device, Tensor};
@@ -14430,10 +15567,8 @@ mod metal_icb_decode_tests {
                 let slot = block_base + prefix_idx;
                 let dst = slot * pool_row;
                 let seed = 100 + (row * 10 + prefix_idx) as u64;
-                k_pool_host[dst..dst + pool_row]
-                    .copy_from_slice(&pattern_bf16(pool_row, seed));
-                v_pool_host[dst..dst + pool_row]
-                    .copy_from_slice(&pattern_bf16(pool_row, seed + 1));
+                k_pool_host[dst..dst + pool_row].copy_from_slice(&pattern_bf16(pool_row, seed));
+                v_pool_host[dst..dst + pool_row].copy_from_slice(&pattern_bf16(pool_row, seed + 1));
             }
         }
 
@@ -14469,11 +15604,8 @@ mod metal_icb_decode_tests {
         let block_table = Tensor::from_vec_on(dev, vec![0u32, 1, 2, 4, 5, 6], vec![batch, 3])?;
         let seqused_k = Tensor::from_vec_on(dev, vec![3u32, 3], vec![batch])?;
         let slots = Tensor::from_vec_on(dev, vec![2u32, 6], vec![batch])?;
-        let out_icb = Tensor::from_vec_on(
-            dev,
-            zeroed_bf16(q_elems),
-            vec![batch, 1, q_heads, head_dim],
-        )?;
+        let out_icb =
+            Tensor::from_vec_on(dev, zeroed_bf16(q_elems), vec![batch, 1, q_heads, head_dim])?;
 
         let graph = metal_record_paged_decode_icb_graph(
             &q,
@@ -14490,13 +15622,7 @@ mod metal_icb_decode_tests {
             scale,
         )?;
 
-        metal_paged_kv_write_token_major_batch_bf16(
-            &k_pool_eager,
-            &v_pool_eager,
-            &slots,
-            &k,
-            &v,
-        )?;
+        metal_paged_kv_write_token_major_batch_bf16(&k_pool_eager, &v_pool_eager, &slots, &k, &v)?;
         let eager = metal_paged_attn_decode_contiguous_batch_dyn_seqlen_bf16_d256(
             &q,
             &k_pool_eager,
@@ -14523,13 +15649,7 @@ mod metal_icb_decode_tests {
         kiln_tensor::metal_write_host_in_place(&block_table, &[0u32, 1, 3, 4, 5, 7])?;
         kiln_tensor::metal_write_host_in_place(&slots, &[3u32, 7])?;
 
-        metal_paged_kv_write_token_major_batch_bf16(
-            &k_pool_eager,
-            &v_pool_eager,
-            &slots,
-            &k,
-            &v,
-        )?;
+        metal_paged_kv_write_token_major_batch_bf16(&k_pool_eager, &v_pool_eager, &slots, &k, &v)?;
         let eager = metal_paged_attn_decode_contiguous_batch_dyn_seqlen_bf16_d256(
             &q,
             &k_pool_eager,

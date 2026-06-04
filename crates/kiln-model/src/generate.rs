@@ -1240,11 +1240,9 @@ pub fn append_prefix_block_table(cached_blocks: &[u32], allocated_blocks: &[u32]
 }
 
 /// Legacy "lm_head → host sampler" batched path. Used when the backend
-/// doesn't expose the fused on-device sampler (CUDA / Metal use this
-/// path because their `linear_decode_sample` is not implemented yet;
-/// CPU + Vulkan with `top_k > kernel max` also fall through here),
-/// or for the batch > 1 case where the fused single-row kernel
-/// doesn't apply.
+/// doesn't expose the fused on-device sampler, when the sampling request is
+/// outside the backend kernel's supported envelope, or as the final fallback
+/// for mixed shapes that cannot take a greedy or fused sampled path.
 fn run_legacy_lm_head_sample_batch(
     backend: &dyn crate::backend::BackendRuntime,
     hidden: &kiln_tensor::Tensor,
@@ -3035,6 +3033,18 @@ impl ModelRunner {
             } else {
                 None
             };
+        let batch_sampling_contexts: Option<(Vec<Option<u64>>, Vec<Vec<TokenId>>)> = if !all_greedy
+        {
+            Some((
+                states.iter().map(|state| state.step_seed).collect(),
+                states
+                    .iter()
+                    .map(|state| state.generated_tokens.clone())
+                    .collect(),
+            ))
+        } else {
+            None
+        };
         let mut linear_states: Vec<&mut LinearAttentionState> = states
             .iter_mut()
             .map(|state| &mut state.linear_state)
@@ -3042,8 +3052,8 @@ impl ModelRunner {
 
         let started = std::time::Instant::now();
 
-        // Fast path: when row_count > 1, all rows are greedy and the cache is
-        // non-FP8, route compatible rows through the contiguous-batched
+        // Fast path: when all rows are greedy and the cache is non-FP8, route
+        // compatible rows through the contiguous-batched
         // primitive. Uniform-position full-attention batches use a single
         // forward pass with fused argmax. CUDA GDN batches may also enter with
         // mixed sequence lengths because their implementation row-loops through
@@ -3067,11 +3077,11 @@ impl ModelRunner {
         // narrow + argmax loop).
         let _ = positions_uniform;
         let _ = cuda_gdn_row_loop_candidate;
-        let try_contiguous_batched = row_count > 1 && all_greedy && !cache_is_fp8;
+        let try_contiguous_batched = all_greedy && !cache_is_fp8;
 
         let mut sampled: Option<Vec<TokenId>> = None;
         // Multi-batch CUDA graph fast path.
-        if try_contiguous_batched && has_linear_layers {
+        if row_count > 1 && try_contiguous_batched && has_linear_layers {
             let block_table_refs: Vec<&BlockTable> = block_tables.iter().collect();
             let mut linear_state_refs: Vec<&mut LinearAttentionState> =
                 linear_states.iter_mut().map(|s| &mut **s).collect();
@@ -3358,6 +3368,58 @@ impl ModelRunner {
             }
         }
 
+        #[cfg(feature = "metal")]
+        if sampled.is_none()
+            && !all_greedy
+            && !cache_is_fp8
+            && matches!(self.backend.device(), kiln_tensor::Device::Metal(_))
+            && self.active_lora.is_none()
+        {
+            let block_table_refs: Vec<&BlockTable> = block_tables.iter().collect();
+            let (step_seeds, generated_tokens) = batch_sampling_contexts
+                .as_ref()
+                .expect("batch_sampling_contexts captured for non-greedy Metal decode");
+            let sample_result = if has_linear_layers {
+                let mut linear_state_refs: Vec<&mut LinearAttentionState> =
+                    linear_states.iter_mut().map(|s| &mut **s).collect();
+                self.decode_sample_paged_contiguous_batch_with_ids(
+                    &input_tokens,
+                    paged_cache,
+                    &block_table_refs,
+                    &sequence_lengths,
+                    &mut linear_state_refs,
+                    Some(&row_ids),
+                    params,
+                    step_seeds,
+                    generated_tokens,
+                )
+            } else {
+                let mut no_linear_states: [&mut LinearAttentionState; 0] = [];
+                self.decode_sample_paged_contiguous_batch_with_ids(
+                    &input_tokens,
+                    paged_cache,
+                    &block_table_refs,
+                    &sequence_lengths,
+                    &mut no_linear_states,
+                    Some(&row_ids),
+                    params,
+                    step_seeds,
+                    generated_tokens,
+                )
+            };
+            match sample_result {
+                Ok(Some(tokens)) => sampled = Some(tokens),
+                Ok(None) => {}
+                Err(err) => {
+                    tracing::warn!(
+                        batch = row_count,
+                        error = %err,
+                        "Metal sampled decode declined; falling back to eager hidden sample path"
+                    );
+                }
+            }
+        }
+
         // R.9: ROCm HIP-graph single-row GREEDY decode for the batched/batching-
         // engine path. Gated by KILN_ROCM_GRAPHS (default off) inside the runner,
         // so when disabled `sampled` stays as set above and the cuda/eager block
@@ -3477,13 +3539,20 @@ impl ModelRunner {
                         )?
                     }
                 } else {
-                    run_legacy_lm_head_sample_batch(
+                    let step_seeds: Vec<Option<u64>> =
+                        states.iter().map(|state| state.step_seed).collect();
+                    let generated_tokens: Vec<Vec<TokenId>> = states
+                        .iter()
+                        .map(|state| state.generated_tokens.clone())
+                        .collect();
+                    run_lm_head_sample_batch_with_contexts(
                         &*self.backend,
                         &hidden,
                         &self.weights,
                         &self.config,
                         params,
-                        states,
+                        &step_seeds,
+                        &generated_tokens,
                     )?
                 }
             }
@@ -3704,6 +3773,7 @@ impl ModelRunner {
                 seq_len,
                 linear_state,
                 step_seed,
+                &generated_tokens,
                 skip_gdn_state_readback,
             )?;
             seq_len += 1;
@@ -3786,23 +3856,71 @@ impl ModelRunner {
         if batch == 1 {
             let stage_start = profile_stages.then(std::time::Instant::now);
             let pc_guard = lock_paged_cache(paged_cache)?;
-            let linear_state = if has_linear_layers {
-                Some(&mut *linear_states[0])
-            } else {
-                None
-            };
-            let token = model_forward_paged_next_token_greedy(
-                &*self.backend,
-                input_tokens[0],
-                &self.weights,
-                &self.config,
-                pc_guard,
-                block_tables[0],
-                seq_lens[0],
-                linear_state,
-                self.active_lora.as_ref(),
-                None,
-            )
+            let mut token = None;
+            #[cfg(feature = "metal")]
+            if matches!(self.backend.device(), kiln_tensor::Device::Metal(_))
+                && self.active_lora.is_none()
+            {
+                let graph_tokens = {
+                    let one_tokens = [input_tokens[0]];
+                    let one_block_tables = [block_tables[0]];
+                    let one_seq_lens = [seq_lens[0]];
+                    let linear_state_for_graph = if has_linear_layers {
+                        Some(&mut *linear_states[0])
+                    } else {
+                        None
+                    };
+                    let mut runner = self
+                        .metal_graph
+                        .lock()
+                        .map_err(|e| anyhow::anyhow!("failed to lock Metal graph runner: {e}"))?;
+                    if runner.is_enabled() {
+                        runner.decode_step_paged_greedy_batch(
+                            &*self.backend,
+                            &one_tokens,
+                            &self.weights,
+                            &self.config,
+                            pc_guard,
+                            &one_block_tables,
+                            &one_seq_lens,
+                            linear_state_for_graph,
+                            self.active_lora.as_ref(),
+                        )?
+                    } else {
+                        None
+                    }
+                };
+                if let Some(graph_tokens) = graph_tokens {
+                    anyhow::ensure!(
+                        graph_tokens.len() == 1,
+                        "Metal graph single-row greedy returned {} tokens",
+                        graph_tokens.len()
+                    );
+                    token = graph_tokens.first().copied();
+                }
+            }
+            let token = (match token {
+                Some(token) => Ok(token),
+                None => {
+                    let linear_state = if has_linear_layers {
+                        Some(&mut *linear_states[0])
+                    } else {
+                        None
+                    };
+                    model_forward_paged_next_token_greedy(
+                        &*self.backend,
+                        input_tokens[0],
+                        &self.weights,
+                        &self.config,
+                        pc_guard,
+                        block_tables[0],
+                        seq_lens[0],
+                        linear_state,
+                        self.active_lora.as_ref(),
+                        None,
+                    )
+                }
+            })
             .context("single-row greedy decode forward pass (paged) failed")?;
             finish_decode_batcher_stage_profile("single_forward", batch, stage_start);
             finish_decode_batcher_stage_profile("decode_total", batch, total_start);
@@ -4045,30 +4163,29 @@ impl ModelRunner {
         let stage_start = profile_stages.then(std::time::Instant::now);
         let tokens = {
             let pc_guard = lock_paged_cache(paged_cache)?;
-            let graph_tokens =
-                if matches!(self.backend.device(), kiln_tensor::Device::Metal(_)) {
-                    let mut runner = self
-                        .metal_graph
-                        .lock()
-                        .map_err(|e| anyhow::anyhow!("failed to lock Metal graph runner: {e}"))?;
-                    if runner.is_enabled() {
-                        runner.decode_step_paged_greedy_batch(
-                            &*self.backend,
-                            input_tokens,
-                            &self.weights,
-                            &self.config,
-                            pc_guard,
-                            block_tables,
-                            seq_lens,
-                            batch_state.as_mut(),
-                            self.active_lora.as_ref(),
-                        )?
-                    } else {
-                        None
-                    }
+            let graph_tokens = if matches!(self.backend.device(), kiln_tensor::Device::Metal(_)) {
+                let mut runner = self
+                    .metal_graph
+                    .lock()
+                    .map_err(|e| anyhow::anyhow!("failed to lock Metal graph runner: {e}"))?;
+                if runner.is_enabled() {
+                    runner.decode_step_paged_greedy_batch(
+                        &*self.backend,
+                        input_tokens,
+                        &self.weights,
+                        &self.config,
+                        pc_guard,
+                        block_tables,
+                        seq_lens,
+                        batch_state.as_mut(),
+                        self.active_lora.as_ref(),
+                    )?
                 } else {
                     None
-                };
+                }
+            } else {
+                None
+            };
             match graph_tokens {
                 Some(tokens) => tokens,
                 None => model_forward_paged_decode_contiguous_batch_greedy_with_ids(
@@ -4301,14 +4418,69 @@ impl ModelRunner {
         }
 
         let stage_start = profile_stages.then(std::time::Instant::now);
-        let tokens = {
+        let mut tokens = None;
+        #[cfg(feature = "metal")]
+        if matches!(self.backend.device(), kiln_tensor::Device::Metal(_))
+            && self.active_lora.is_none()
+        {
+            let pc_guard = lock_paged_cache(paged_cache)?;
+            let linear_state_for_graph = if has_linear_layers {
+                if single_row_direct_state {
+                    Some(&mut *linear_states[0])
+                } else {
+                    batch_state.as_mut()
+                }
+            } else {
+                None
+            };
+            let graph_result = {
+                let mut runner = self
+                    .metal_graph
+                    .lock()
+                    .map_err(|e| anyhow::anyhow!("failed to lock Metal graph runner: {e}"))?;
+                runner.decode_step_paged_sample_batch(
+                    &*self.backend,
+                    input_tokens,
+                    &self.weights,
+                    &self.config,
+                    pc_guard,
+                    block_tables,
+                    seq_lens,
+                    linear_state_for_graph,
+                    self.active_lora.as_ref(),
+                    &history_rows,
+                    &history_indices,
+                    &history_counts,
+                    &repetition_values,
+                    &presence_values,
+                    &frequency_values,
+                    &temperature_values,
+                    &top_k_values,
+                    &top_p_values,
+                    &min_p_values,
+                    &seed_values,
+                )
+            };
+            match graph_result {
+                Ok(Some(graph_tokens)) => tokens = Some(graph_tokens),
+                Ok(None) => {}
+                Err(err) => {
+                    tracing::warn!(
+                        batch,
+                        error = %err,
+                        "Metal graph sampled decode declined; falling back to eager sample decode"
+                    );
+                }
+            }
+        }
+        if tokens.is_none() {
             let pc_guard = lock_paged_cache(paged_cache)?;
             let linear_state_for_forward = if single_row_direct_state {
                 Some(&*linear_states[0])
             } else {
                 batch_state.as_ref()
             };
-            model_forward_paged_decode_contiguous_batch_sample_with_ids(
+            tokens = model_forward_paged_decode_contiguous_batch_sample_with_ids(
                 &*self.backend,
                 input_tokens,
                 &self.weights,
@@ -4331,8 +4503,8 @@ impl ModelRunner {
                 &min_p_values,
                 &seed_values,
             )
-            .context("batched sample decode forward pass (paged) failed")?
-        };
+            .context("batched sample decode forward pass (paged) failed")?;
+        }
         let Some(tokens) = tokens else {
             return Ok(None);
         };
@@ -4552,6 +4724,174 @@ impl ModelRunner {
         Ok(hidden)
     }
 
+    fn decode_next_token_paged_greedy_metal_graph(
+        &self,
+        input_token: TokenId,
+        paged_cache: &PagedKvCache,
+        block_table: &BlockTable,
+        seq_len: usize,
+        linear_state: Option<&mut LinearAttentionState>,
+    ) -> Result<Option<TokenId>> {
+        #[cfg(feature = "metal")]
+        {
+            if !matches!(self.backend.device(), kiln_tensor::Device::Metal(_))
+                || self.active_lora.is_some()
+            {
+                return Ok(None);
+            }
+
+            let pc_guard = lock_paged_cache(paged_cache)?;
+            let token_ids = [input_token];
+            let block_tables = [block_table];
+            let seq_lens = [seq_len];
+            let graph_tokens = {
+                let mut runner = self
+                    .metal_graph
+                    .lock()
+                    .map_err(|e| anyhow::anyhow!("failed to lock Metal graph runner: {e}"))?;
+                if !runner.is_enabled() {
+                    return Ok(None);
+                }
+                runner.decode_step_paged_greedy_batch(
+                    &*self.backend,
+                    &token_ids,
+                    &self.weights,
+                    &self.config,
+                    pc_guard,
+                    &block_tables,
+                    &seq_lens,
+                    linear_state,
+                    self.active_lora.as_ref(),
+                )?
+            };
+
+            if let Some(tokens) = graph_tokens {
+                anyhow::ensure!(
+                    tokens.len() == 1,
+                    "Metal graph single-row greedy returned {} tokens",
+                    tokens.len()
+                );
+                return Ok(tokens.first().copied());
+            }
+            Ok(None)
+        }
+
+        #[cfg(not(feature = "metal"))]
+        {
+            let _ = (input_token, paged_cache, block_table, seq_len, linear_state);
+            Ok(None)
+        }
+    }
+
+    fn decode_next_token_paged_sample_metal_graph(
+        &self,
+        params: &SamplingParams,
+        input_token: TokenId,
+        paged_cache: &PagedKvCache,
+        block_table: &BlockTable,
+        seq_len: usize,
+        linear_state: Option<&mut LinearAttentionState>,
+        step_seed: Option<u64>,
+        history: &[TokenId],
+    ) -> Result<Option<TokenId>> {
+        #[cfg(feature = "metal")]
+        {
+            if params.is_effectively_greedy()
+                || !matches!(self.backend.device(), kiln_tensor::Device::Metal(_))
+                || self.active_lora.is_some()
+            {
+                return Ok(None);
+            }
+            let top_k = [params.top_k];
+            let temperatures = [params.temperature];
+            if !self
+                .backend
+                .supports_linear_decode_sample_batch(&top_k, &temperatures)
+            {
+                return Ok(None);
+            }
+
+            let mut history_rows = Vec::new();
+            let mut history_indices = Vec::new();
+            let mut history_counts = Vec::new();
+            if !params.token_penalties_are_no_op() && !history.is_empty() {
+                let (indices, counts) = unique_history_counts_for_batch_sample(history);
+                for (idx, count) in indices.into_iter().zip(counts.into_iter()) {
+                    history_rows.push(0);
+                    history_indices.push(idx);
+                    history_counts.push(count);
+                }
+            }
+
+            let pc_guard = lock_paged_cache(paged_cache)?;
+            let token_ids = [input_token];
+            let block_tables = [block_table];
+            let seq_lens = [seq_len];
+            let repetition_penalties = [params.repetition_penalty];
+            let presence_penalties = [params.presence_penalty];
+            let frequency_penalties = [params.frequency_penalty];
+            let top_p = [params.top_p];
+            let min_p = [params.min_p];
+            let seeds = [sample_seed_for_batch_row(step_seed, history)];
+            let graph_tokens = {
+                let mut runner = self
+                    .metal_graph
+                    .lock()
+                    .map_err(|e| anyhow::anyhow!("failed to lock Metal graph runner: {e}"))?;
+                if !runner.is_enabled() {
+                    return Ok(None);
+                }
+                runner.decode_step_paged_sample_batch(
+                    &*self.backend,
+                    &token_ids,
+                    &self.weights,
+                    &self.config,
+                    pc_guard,
+                    &block_tables,
+                    &seq_lens,
+                    linear_state,
+                    self.active_lora.as_ref(),
+                    &history_rows,
+                    &history_indices,
+                    &history_counts,
+                    &repetition_penalties,
+                    &presence_penalties,
+                    &frequency_penalties,
+                    &temperatures,
+                    &top_k,
+                    &top_p,
+                    &min_p,
+                    &seeds,
+                )?
+            };
+
+            if let Some(tokens) = graph_tokens {
+                anyhow::ensure!(
+                    tokens.len() == 1,
+                    "Metal graph single-row sampled decode returned {} tokens",
+                    tokens.len()
+                );
+                return Ok(tokens.first().copied());
+            }
+            Ok(None)
+        }
+
+        #[cfg(not(feature = "metal"))]
+        {
+            let _ = (
+                params,
+                input_token,
+                paged_cache,
+                block_table,
+                seq_len,
+                linear_state,
+                step_seed,
+                history,
+            );
+            Ok(None)
+        }
+    }
+
     fn decode_next_token_paged_interleaved(
         &self,
         params: &SamplingParams,
@@ -4561,6 +4901,7 @@ impl ModelRunner {
         seq_len: usize,
         linear_state: &mut LinearAttentionState,
         step_seed: Option<u64>,
+        history: &[TokenId],
         skip_gdn_state_readback: bool,
     ) -> Result<TokenId> {
         let _resident_scope = GdnRecurrentResidentStateScope::new(&*self.backend);
@@ -4569,6 +4910,26 @@ impl ModelRunner {
         if params.is_effectively_greedy()
             && matches!(self.backend.device(), kiln_tensor::Device::Metal(_))
         {
+            let linear_state_for_graph = if self.has_linear_attention_layers() {
+                Some(&mut *linear_state)
+            } else {
+                None
+            };
+            if let Some(token) = self
+                .decode_next_token_paged_greedy_metal_graph(
+                    input_token,
+                    paged_cache,
+                    block_table,
+                    seq_len,
+                    linear_state_for_graph,
+                )
+                .context("greedy Metal graph decode forward pass (paged) failed")?
+            {
+                if skip_gdn_state_readback {
+                    linear_state.evict_gdn_recurrent_resident_states(&*self.backend);
+                }
+                return Ok(token);
+            }
             let pc_guard = lock_paged_cache(paged_cache)?;
             let token = {
                 let mut runner = self
@@ -4609,6 +4970,34 @@ impl ModelRunner {
             return Ok(token);
         }
 
+        if !params.is_effectively_greedy()
+            && matches!(self.backend.device(), kiln_tensor::Device::Metal(_))
+        {
+            let linear_state_for_graph = if self.has_linear_attention_layers() {
+                Some(&mut *linear_state)
+            } else {
+                None
+            };
+            if let Some(token) = self
+                .decode_next_token_paged_sample_metal_graph(
+                    params,
+                    input_token,
+                    paged_cache,
+                    block_table,
+                    seq_len,
+                    linear_state_for_graph,
+                    step_seed,
+                    history,
+                )
+                .context("sampled Metal graph decode forward pass (paged) failed")?
+            {
+                if skip_gdn_state_readback {
+                    linear_state.evict_gdn_recurrent_resident_states(&*self.backend);
+                }
+                return Ok(token);
+            }
+        }
+
         // R.9: ROCm HIP-graph decode. On a Rocm device with `KILN_ROCM_GRAPHS`
         // set, route the step through the graph runner (capture/replay, with
         // eager fallback). When the runner is disabled — the default — this is
@@ -4645,7 +5034,7 @@ impl ModelRunner {
                 let token = if params.is_effectively_greedy() {
                     greedy_sample(&logits)
                 } else {
-                    sample_step(&logits, params, step_seed, &[])
+                    sample_step(&logits, params, step_seed, history)
                 }?;
                 if skip_gdn_state_readback {
                     linear_state.evict_gdn_recurrent_resident_states(&*self.backend);
@@ -4675,7 +5064,7 @@ impl ModelRunner {
         let token = if params.is_effectively_greedy() {
             greedy_sample(&logits)
         } else {
-            sample_step(&logits, params, step_seed, &[])
+            sample_step(&logits, params, step_seed, history)
         }?;
         if skip_gdn_state_readback {
             linear_state.evict_gdn_recurrent_resident_states(&*self.backend);
@@ -4693,6 +5082,7 @@ impl ModelRunner {
         linear_state: &mut LinearAttentionState,
         step_seed: Option<u64>,
         decode_batcher: Option<&DecodeBatcher>,
+        history: &[TokenId],
         skip_gdn_state_readback: bool,
     ) -> Result<TokenId> {
         if params.is_effectively_greedy()
@@ -4718,6 +5108,7 @@ impl ModelRunner {
             seq_len,
             linear_state,
             step_seed,
+            history,
             skip_gdn_state_readback,
         )
     }
@@ -4898,6 +5289,7 @@ impl ModelRunner {
                 seq_len,
                 &mut linear_state,
                 step_seed,
+                &generated_tokens,
                 skip_gdn_state_readback,
             )?;
             seq_len += 1;
@@ -5051,22 +5443,40 @@ impl ModelRunner {
             next_token = if params.is_effectively_greedy()
                 && matches!(self.backend.device(), kiln_tensor::Device::Metal(_))
             {
-                // Metal greedy path bypasses the CUDA graph runner entirely.
-                let pc_guard = lock_paged_cache(paged_cache)?;
-                let token = model_forward_paged_next_token_greedy(
-                    &*self.backend,
-                    next_token,
-                    &self.weights,
-                    &self.config,
-                    pc_guard,
-                    block_table,
-                    seq_len,
-                    Some(&mut linear_state),
-                    self.active_lora.as_ref(),
-                    None,
-                )?;
-                seq_len += 1;
-                token
+                let linear_state_for_graph = if self.has_linear_attention_layers() {
+                    Some(&mut linear_state)
+                } else {
+                    None
+                };
+                if let Some(token) = self
+                    .decode_next_token_paged_greedy_metal_graph(
+                        next_token,
+                        paged_cache,
+                        block_table,
+                        seq_len,
+                        linear_state_for_graph,
+                    )
+                    .context("greedy Metal graph decode forward pass (paged) failed")?
+                {
+                    seq_len += 1;
+                    token
+                } else {
+                    let pc_guard = lock_paged_cache(paged_cache)?;
+                    let token = model_forward_paged_next_token_greedy(
+                        &*self.backend,
+                        next_token,
+                        &self.weights,
+                        &self.config,
+                        pc_guard,
+                        block_table,
+                        seq_len,
+                        Some(&mut linear_state),
+                        self.active_lora.as_ref(),
+                        None,
+                    )?;
+                    seq_len += 1;
+                    token
+                }
             } else {
                 // CUDA graph decode step: acquire the graph runner and the
                 // paged cache for one step, then drop both before sampling so
@@ -5422,20 +5832,39 @@ impl ModelRunner {
             next_token = if params.is_effectively_greedy()
                 && matches!(self.backend.device(), kiln_tensor::Device::Metal(_))
             {
-                let token = model_forward_paged_next_token_greedy(
-                    &*self.backend,
-                    next_token,
-                    &self.weights,
-                    &self.config,
-                    paged_cache,
-                    block_table,
-                    seq_len,
-                    Some(&mut linear_state),
-                    self.active_lora.as_ref(),
-                    None,
-                )?;
-                seq_len += 1;
-                token
+                let linear_state_for_graph = if self.has_linear_attention_layers() {
+                    Some(&mut linear_state)
+                } else {
+                    None
+                };
+                if let Some(token) = self
+                    .decode_next_token_paged_greedy_metal_graph(
+                        next_token,
+                        paged_cache,
+                        block_table,
+                        seq_len,
+                        linear_state_for_graph,
+                    )
+                    .context("greedy Metal graph decode forward pass (paged) failed")?
+                {
+                    seq_len += 1;
+                    token
+                } else {
+                    let token = model_forward_paged_next_token_greedy(
+                        &*self.backend,
+                        next_token,
+                        &self.weights,
+                        &self.config,
+                        paged_cache,
+                        block_table,
+                        seq_len,
+                        Some(&mut linear_state),
+                        self.active_lora.as_ref(),
+                        None,
+                    )?;
+                    seq_len += 1;
+                    token
+                }
             } else {
                 // Decode step: use CUDA graph runner (captures/replays when enabled)
                 let logits = graph_runner.decode_step_paged(
@@ -7406,6 +7835,7 @@ impl ModelRunner {
                 linear_state,
                 step_seed,
                 decode_batcher,
+                &generated_tokens,
                 skip_gdn_state_readback,
             )?;
             seq_len += 1;
@@ -7742,26 +8172,51 @@ impl ModelRunner {
             next_token = if params.is_effectively_greedy()
                 && matches!(self.backend.device(), kiln_tensor::Device::Metal(_))
             {
-                let token = match model_forward_paged_next_token_greedy(
-                    &*self.backend,
+                let linear_state_for_graph = if self.has_linear_attention_layers() {
+                    Some(&mut linear_state)
+                } else {
+                    None
+                };
+                match self.decode_next_token_paged_greedy_metal_graph(
                     next_token,
-                    &self.weights,
-                    &self.config,
                     paged_cache,
                     &block_table,
                     seq_len,
-                    Some(&mut linear_state),
-                    self.active_lora.as_ref(),
-                    None,
+                    linear_state_for_graph,
                 ) {
-                    Ok(token) => token,
+                    Ok(Some(token)) => {
+                        seq_len += 1;
+                        token
+                    }
+                    Ok(None) => {
+                        let token = match model_forward_paged_next_token_greedy(
+                            &*self.backend,
+                            next_token,
+                            &self.weights,
+                            &self.config,
+                            paged_cache,
+                            &block_table,
+                            seq_len,
+                            Some(&mut linear_state),
+                            self.active_lora.as_ref(),
+                            None,
+                        ) {
+                            Ok(token) => token,
+                            Err(e) => {
+                                block_manager.free_all(&allocated_blocks);
+                                return Err(e.context("decode forward pass (paged greedy) failed"));
+                            }
+                        };
+                        seq_len += 1;
+                        token
+                    }
                     Err(e) => {
                         block_manager.free_all(&allocated_blocks);
-                        return Err(e.context("decode forward pass (paged greedy) failed"));
+                        return Err(
+                            e.context("greedy Metal graph decode forward pass (paged) failed")
+                        );
                     }
-                };
-                seq_len += 1;
-                token
+                }
             } else {
                 // Decode step: use CUDA graph runner
                 let logits = match graph_runner.decode_step_paged(

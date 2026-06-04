@@ -108,14 +108,8 @@ async fn main() -> Result<()> {
                 adapter_smoke_test,
                 url,
             } => {
-                return cli::run_train_grpo(
-                    url,
-                    file,
-                    adapter,
-                    *lora_rank,
-                    *adapter_smoke_test,
-                )
-                .await;
+                return cli::run_train_grpo(url, file, adapter, *lora_rank, *adapter_smoke_test)
+                    .await;
             }
             TrainCommands::Status { job_id, url } => {
                 return cli::run_train_status(url, job_id.as_deref()).await;
@@ -480,7 +474,8 @@ async fn main() -> Result<()> {
         if !archived.is_empty() {
             let mut jobs = state.training_jobs.write().unwrap();
             for job in archived.iter() {
-                jobs.entry(job.job_id.clone()).or_insert_with(|| job.clone());
+                jobs.entry(job.job_id.clone())
+                    .or_insert_with(|| job.clone());
             }
             tracing::info!(
                 count = archived.len(),
@@ -497,7 +492,8 @@ async fn main() -> Result<()> {
         if !archived.is_empty() {
             let mut jobs = state.eval_jobs.write().unwrap();
             for job in archived.iter() {
-                jobs.entry(job.job_id.clone()).or_insert_with(|| job.clone());
+                jobs.entry(job.job_id.clone())
+                    .or_insert_with(|| job.clone());
             }
             tracing::info!(
                 count = archived.len(),
@@ -612,7 +608,10 @@ async fn main() -> Result<()> {
     {
         let restored = kiln_tensor::load_algo_cache_from_disk(0);
         if restored > 0 {
-            tracing::info!(entries = restored, "cublaslt autotune cache restored from disk");
+            tracing::info!(
+                entries = restored,
+                "cublaslt autotune cache restored from disk"
+            );
         }
     }
     spawn_backend_prewarm(prewarm_state);
@@ -757,25 +756,28 @@ fn spawn_backend_prewarm(state: AppState) {
                 seed: Some(42),
                 ..SamplingParams::default()
             };
-            // Warm several paged blocks plus a decode step. Short one-block
-            // prewarm misses the multi-block prompt shapes that desktop chat
-            // and batch traffic commonly hits, leaving Metal/Candle kernels to
-            // compile on the first live request.
-            let prompt_tokens: Vec<u32> = (1..=64).collect();
-            // Warm the base paged path used by every desktop request. The
-            // previous speculative-first prewarm made readiness wait on
-            // skip-layer draft/verify work; live greedy requests can still
-            // compile speculative kernels on demand without blocking startup.
-            let prewarm_result = runner_guard.generate_paged_shared_tokens(
-                &prompt_tokens,
-                &params,
-                &block_manager,
-                &paged_cache,
-                None,
-            );
+            // Warm the base paged path used by every desktop request. We cover
+            // two common Metal decode buckets: 32 prompt tokens warms the
+            // 64-token paged-attention bucket used by short chat requests,
+            // while 64 prompt tokens warms the 128-token bucket. A single
+            // longer prewarm leaves short prompts paying graph-stable buffer
+            // allocation/capture on the first live decode step.
+            let prewarm_prompts: [Vec<u32>; 2] = [
+                (1..=32).collect::<Vec<u32>>(),
+                (1..=64).collect::<Vec<u32>>(),
+            ];
+            for prompt_tokens in prewarm_prompts {
+                let prewarm_result = runner_guard.generate_paged_shared_tokens(
+                    &prompt_tokens,
+                    &params,
+                    &block_manager,
+                    &paged_cache,
+                    None,
+                );
 
-            if let Err(err) = prewarm_result {
-                anyhow::bail!("base paged inference prewarm failed: {err}");
+                if let Err(err) = prewarm_result {
+                    anyhow::bail!("base paged inference prewarm failed: {err}");
+                }
             }
             Ok(())
         })

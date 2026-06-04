@@ -18,21 +18,38 @@ use kiln_core::token::TokenId;
 
 use crate::PagedKvCacheKt;
 use crate::backend::BackendRuntime;
+#[cfg(feature = "metal")]
+use crate::forward::MetalPagedDecodeIcbInputs;
 use crate::forward::{
     GpuAttentionWeights, GpuWeights, LinearAttentionState,
     model_forward_paged_decode_contiguous_batch_greedy_with_stable_buffers,
-    model_forward_paged_next_token_greedy,
+    model_forward_paged_decode_contiguous_batch_hidden_with_stable_buffers,
+    model_forward_paged_next_token_greedy, rms_norm,
 };
-#[cfg(feature = "metal")]
-use crate::forward::MetalPagedDecodeIcbInputs;
 use crate::lora_loader::LoraWeights;
 
-/// Whether Metal ICB decode replay is requested. Default OFF until the bs=1
-/// capture path has parity coverage against eager Metal decode.
+/// Whether Metal ICB decode replay is requested. Default ON for Metal decode;
+/// set `KILN_METAL_GRAPHS=0`/`false`/`off` to force eager decode.
 fn metal_graphs_env_on() -> bool {
     std::env::var("KILN_METAL_GRAPHS")
-        .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "on" | "ON"))
-        .unwrap_or(false)
+        .map(|v| !matches!(v.trim(), "0" | "false" | "FALSE" | "no" | "off" | "OFF"))
+        .unwrap_or(true)
+}
+
+#[cfg(feature = "metal")]
+fn profile_metal_graph_stages_enabled() -> bool {
+    std::env::var("KILN_PROFILE_METAL_GRAPH_STAGES").is_ok()
+}
+
+#[cfg(feature = "metal")]
+fn finish_metal_graph_stage_profile(stage: &str, batch: usize, start: Option<std::time::Instant>) {
+    let Some(start) = start else {
+        return;
+    };
+    eprintln!(
+        "kiln_profile_metal_graph_stage stage={stage} batch={batch} elapsed_ms={:.3}",
+        start.elapsed().as_secs_f64() * 1000.0
+    );
 }
 
 #[cfg(feature = "metal")]
@@ -97,6 +114,7 @@ pub struct MetalGraphRunner {
     enabled: bool,
     adapter_generation: u64,
     stable_path_warned: bool,
+    sampled_stable_path_warned: bool,
     #[cfg(feature = "metal")]
     stable_buffers: HashMap<MetalGraphKey, MetalStableDecodeBuffers>,
     #[cfg(feature = "metal")]
@@ -132,16 +150,17 @@ impl MetalGraphRunner {
         let is_metal = matches!(device, kiln_tensor::Device::Metal(_));
         let actually_enabled = enabled && is_metal && metal_graphs_env_on();
         if actually_enabled {
-            tracing::info!("Metal ICB graphs enabled for decode (KILN_METAL_GRAPHS)");
+            tracing::info!("Metal ICB graphs enabled for decode");
         } else if enabled && is_metal {
             tracing::debug!(
-                "Metal device present but KILN_METAL_GRAPHS not set; using eager decode"
+                "Metal device present but Metal ICB graphs are disabled by KILN_METAL_GRAPHS"
             );
         }
         Self {
             enabled: actually_enabled,
             adapter_generation: 0,
             stable_path_warned: false,
+            sampled_stable_path_warned: false,
             #[cfg(feature = "metal")]
             stable_buffers: HashMap::new(),
             #[cfg(feature = "metal")]
@@ -164,6 +183,7 @@ impl MetalGraphRunner {
     pub fn invalidate(&mut self) {
         self.adapter_generation += 1;
         self.stable_path_warned = false;
+        self.sampled_stable_path_warned = false;
         #[cfg(feature = "metal")]
         {
             self.stable_buffers.clear();
@@ -182,7 +202,13 @@ impl MetalGraphRunner {
     pub(crate) fn captured_graph_count(&self) -> usize {
         self.stable_buffers
             .values()
-            .map(|buffers| buffers.icb_graphs.iter().filter(|graph| graph.is_some()).count())
+            .map(|buffers| {
+                buffers
+                    .icb_graphs
+                    .iter()
+                    .filter(|graph| graph.is_some())
+                    .count()
+            })
             .sum()
     }
 
@@ -329,6 +355,92 @@ impl MetalGraphRunner {
     }
 
     #[allow(clippy::too_many_arguments)]
+    pub fn decode_step_paged_sample_batch(
+        &mut self,
+        backend: &dyn BackendRuntime,
+        token_ids: &[u32],
+        weights: &GpuWeights,
+        config: &ModelConfig,
+        paged_cache: &PagedKvCacheKt,
+        block_tables: &[&BlockTable],
+        seq_lens: &[usize],
+        linear_state: Option<&mut LinearAttentionState>,
+        lora: Option<&LoraWeights>,
+        history_rows: &[u32],
+        history_indices: &[u32],
+        history_counts: &[u32],
+        repetition_penalties: &[f32],
+        presence_penalties: &[f32],
+        frequency_penalties: &[f32],
+        temperatures: &[f32],
+        top_k: &[u32],
+        top_p: &[f32],
+        min_p: &[f32],
+        seeds: &[u64],
+    ) -> Result<Option<Vec<TokenId>>> {
+        if !self.enabled {
+            return Ok(None);
+        }
+
+        #[cfg(feature = "metal")]
+        {
+            if std::env::var("KILN_FORCE_EAGER_DECODE").ok().as_deref() == Some("1") {
+                return Ok(None);
+            }
+            self.invalidate_if_weights_changed(weights);
+            return self.try_decode_step_paged_sample_batch_stable(
+                backend,
+                token_ids,
+                weights,
+                config,
+                paged_cache,
+                block_tables,
+                seq_lens,
+                linear_state,
+                lora,
+                history_rows,
+                history_indices,
+                history_counts,
+                repetition_penalties,
+                presence_penalties,
+                frequency_penalties,
+                temperatures,
+                top_k,
+                top_p,
+                min_p,
+                seeds,
+            );
+        }
+
+        #[cfg(not(feature = "metal"))]
+        {
+            let _ = (
+                backend,
+                token_ids,
+                weights,
+                config,
+                paged_cache,
+                block_tables,
+                seq_lens,
+                linear_state,
+                lora,
+                history_rows,
+                history_indices,
+                history_counts,
+                repetition_penalties,
+                presence_penalties,
+                frequency_penalties,
+                temperatures,
+                top_k,
+                top_p,
+                min_p,
+                seeds,
+            );
+            Ok(None)
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn eager_greedy(
         backend: &dyn BackendRuntime,
         token_id: u32,
@@ -363,7 +475,9 @@ impl MetalGraphRunner {
             .last_weight_fingerprint
             .is_some_and(|previous| previous != fingerprint)
         {
-            tracing::debug!("Metal graph: weight tensor identity changed - evicting stable decode buffers");
+            tracing::debug!(
+                "Metal graph: weight tensor identity changed - evicting stable decode buffers"
+            );
             self.invalidate();
         }
         self.last_weight_fingerprint = Some(fingerprint);
@@ -544,6 +658,86 @@ impl MetalGraphRunner {
         }
         buffers.refresh_batch(token_ids, config, paged_cache, block_tables, seq_lens)?;
 
+        if batch == 1 && lora.is_none() && backend.supports_linear_decode_sample(1) {
+            let metal_icb_inputs = MetalPagedDecodeIcbInputs {
+                q: buffers.stable_q.as_slice(),
+                k: buffers.stable_k.as_slice(),
+                v: buffers.stable_v.as_slice(),
+                graphs: buffers.icb_graphs.as_mut_slice(),
+            };
+            let profile_stages = profile_metal_graph_stages_enabled();
+            let sample_result = (|| -> Result<Vec<TokenId>> {
+                let stage_start = profile_stages.then(std::time::Instant::now);
+                let hidden =
+                    model_forward_paged_decode_contiguous_batch_hidden_with_stable_buffers(
+                        backend,
+                        token_ids,
+                        weights,
+                        config,
+                        paged_cache,
+                        block_tables,
+                        seq_lens,
+                        linear_state,
+                        lora,
+                        &buffers.positions,
+                        &buffers.token_ids,
+                        &buffers.block_table,
+                        &buffers.seqused_k,
+                        &buffers.attn_out,
+                        &buffers.softmax_lse,
+                        &buffers.rotary_cos,
+                        &buffers.rotary_sin,
+                        &buffers.kv_slot,
+                        Some(metal_icb_inputs),
+                    )?;
+                finish_metal_graph_stage_profile("greedy_hidden", batch, stage_start);
+                let stage_start = profile_stages.then(std::time::Instant::now);
+                let normed = rms_norm(&hidden, &weights.final_norm, config.rms_norm_eps)?;
+                finish_metal_graph_stage_profile("greedy_final_norm", batch, stage_start);
+                let stage_start = profile_stages.then(std::time::Instant::now);
+                let token = backend
+                    .linear_decode_sample(
+                        &normed,
+                        &weights.embed_tokens_t,
+                        &[],
+                        &[],
+                        1.0,
+                        0.0,
+                        0.0,
+                        1.0,
+                        1,
+                        1.0,
+                        0.0,
+                        0,
+                    )?
+                    .context("Metal graph greedy sampler tail declined top-k=1")?;
+                finish_metal_graph_stage_profile("greedy_sample_tail", batch, stage_start);
+                Ok(vec![token])
+            })();
+            match sample_result {
+                Ok(tokens) => {
+                    if !self.stable_path_warned {
+                        tracing::info!(
+                            batch,
+                            max_seqlen_k = buffers.max_seqlen_k,
+                            "Metal graph runner using graph-stable batched decode buffers"
+                        );
+                        self.stable_path_warned = true;
+                    }
+                    return Ok(Some(tokens));
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        batch,
+                        error = %err,
+                        "Metal graph-stable greedy sampler tail failed; falling back to eager Metal decode"
+                    );
+                    self.stable_buffers.remove(&key);
+                    return Ok(None);
+                }
+            }
+        }
+
         let metal_icb_inputs = MetalPagedDecodeIcbInputs {
             q: buffers.stable_q.as_slice(),
             k: buffers.stable_k.as_slice(),
@@ -587,6 +781,168 @@ impl MetalGraphRunner {
                     batch,
                     error = %err,
                     "Metal graph-stable batched decode path failed; falling back to eager Metal decode"
+                );
+                self.stable_buffers.remove(&key);
+                Ok(None)
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn try_decode_step_paged_sample_batch_stable(
+        &mut self,
+        backend: &dyn BackendRuntime,
+        token_ids: &[u32],
+        weights: &GpuWeights,
+        config: &ModelConfig,
+        paged_cache: &PagedKvCacheKt,
+        block_tables: &[&BlockTable],
+        seq_lens: &[usize],
+        linear_state: Option<&mut LinearAttentionState>,
+        lora: Option<&LoraWeights>,
+        history_rows: &[u32],
+        history_indices: &[u32],
+        history_counts: &[u32],
+        repetition_penalties: &[f32],
+        presence_penalties: &[f32],
+        frequency_penalties: &[f32],
+        temperatures: &[f32],
+        top_k: &[u32],
+        top_p: &[f32],
+        min_p: &[f32],
+        seeds: &[u64],
+    ) -> Result<Option<Vec<TokenId>>> {
+        if !matches!(weights.embed_tokens.device(), kiln_tensor::Device::Metal(_)) {
+            return Ok(None);
+        }
+        let batch = token_ids.len();
+        if batch == 0
+            || block_tables.len() != batch
+            || seq_lens.len() != batch
+            || repetition_penalties.len() != batch
+            || presence_penalties.len() != batch
+            || frequency_penalties.len() != batch
+            || temperatures.len() != batch
+            || top_k.len() != batch
+            || top_p.len() != batch
+            || min_p.len() != batch
+            || seeds.len() != batch
+            || history_rows.len() != history_indices.len()
+            || history_rows.len() != history_counts.len()
+        {
+            return Ok(None);
+        }
+        if lora.is_some() || !backend.supports_linear_decode_sample_batch(top_k, temperatures) {
+            return Ok(None);
+        }
+
+        let key = MetalGraphKey::new_batch(block_tables, paged_cache, seq_lens);
+        if key.max_blocks_per_seq == 0 {
+            return Ok(None);
+        }
+
+        if !self.stable_buffers.contains_key(&key) {
+            let buffers = MetalStableDecodeBuffers::new_batch(
+                self.adapter_generation,
+                weights,
+                config,
+                paged_cache,
+                block_tables,
+                seq_lens,
+                &key,
+            )?;
+            self.stable_buffers.insert(key.clone(), buffers);
+        }
+
+        let buffers = self
+            .stable_buffers
+            .get_mut(&key)
+            .context("Metal stable sampled decode buffers vanished after allocation")?;
+        if buffers.adapter_gen != self.adapter_generation {
+            *buffers = MetalStableDecodeBuffers::new_batch(
+                self.adapter_generation,
+                weights,
+                config,
+                paged_cache,
+                block_tables,
+                seq_lens,
+                &key,
+            )?;
+        }
+        buffers.refresh_batch(token_ids, config, paged_cache, block_tables, seq_lens)?;
+
+        let metal_icb_inputs = MetalPagedDecodeIcbInputs {
+            q: buffers.stable_q.as_slice(),
+            k: buffers.stable_k.as_slice(),
+            v: buffers.stable_v.as_slice(),
+            graphs: buffers.icb_graphs.as_mut_slice(),
+        };
+        let profile_stages = profile_metal_graph_stages_enabled();
+        let sample_result = (|| -> Result<Option<Vec<TokenId>>> {
+            let stage_start = profile_stages.then(std::time::Instant::now);
+            let hidden = model_forward_paged_decode_contiguous_batch_hidden_with_stable_buffers(
+                backend,
+                token_ids,
+                weights,
+                config,
+                paged_cache,
+                block_tables,
+                seq_lens,
+                linear_state,
+                lora,
+                &buffers.positions,
+                &buffers.token_ids,
+                &buffers.block_table,
+                &buffers.seqused_k,
+                &buffers.attn_out,
+                &buffers.softmax_lse,
+                &buffers.rotary_cos,
+                &buffers.rotary_sin,
+                &buffers.kv_slot,
+                Some(metal_icb_inputs),
+            )?;
+            finish_metal_graph_stage_profile("sample_hidden", batch, stage_start);
+            let stage_start = profile_stages.then(std::time::Instant::now);
+            let normed = rms_norm(&hidden, &weights.final_norm, config.rms_norm_eps)?;
+            finish_metal_graph_stage_profile("sample_final_norm", batch, stage_start);
+            let stage_start = profile_stages.then(std::time::Instant::now);
+            let tokens = backend.linear_decode_sample_batch(
+                &normed,
+                &weights.embed_tokens_t,
+                history_rows,
+                history_indices,
+                history_counts,
+                repetition_penalties,
+                presence_penalties,
+                frequency_penalties,
+                temperatures,
+                top_k,
+                top_p,
+                min_p,
+                seeds,
+            )?;
+            finish_metal_graph_stage_profile("sample_tail", batch, stage_start);
+            Ok(tokens)
+        })();
+
+        match sample_result {
+            Ok(Some(tokens)) => {
+                if !self.sampled_stable_path_warned {
+                    tracing::info!(
+                        batch,
+                        max_seqlen_k = buffers.max_seqlen_k,
+                        "Metal graph runner using graph-stable sampled decode buffers"
+                    );
+                    self.sampled_stable_path_warned = true;
+                }
+                Ok(Some(tokens))
+            }
+            Ok(None) => Ok(None),
+            Err(err) => {
+                tracing::warn!(
+                    batch,
+                    error = %err,
+                    "Metal graph-stable sampled decode path failed; falling back to eager Metal decode"
                 );
                 self.stable_buffers.remove(&key);
                 Ok(None)
@@ -783,7 +1139,13 @@ impl MetalStableDecodeBuffers {
             icb_graphs: (0..full_layers).map(|_| None).collect(),
             max_seqlen_k: key.max_seqlen_k,
         };
-        buffers.refresh_batch(&vec![0u32; batch], config, paged_cache, block_tables, seq_lens)?;
+        buffers.refresh_batch(
+            &vec![0u32; batch],
+            config,
+            paged_cache,
+            block_tables,
+            seq_lens,
+        )?;
         Ok(buffers)
     }
 
@@ -827,8 +1189,7 @@ impl MetalStableDecodeBuffers {
         let seqused_k: Result<Vec<u32>> = seq_lens
             .iter()
             .map(|&seq_len| {
-                u32::try_from(seq_len + 1)
-                    .context("Metal graph seqused_k exceeds u32 range")
+                u32::try_from(seq_len + 1).context("Metal graph seqused_k exceeds u32 range")
             })
             .collect();
         let seqused_k = seqused_k?;

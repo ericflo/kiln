@@ -1,10 +1,9 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
-use std::sync::{Arc, RwLockReadGuard, RwLockWriteGuard};
 use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, RwLockReadGuard, RwLockWriteGuard};
 use tokio::sync::{Mutex, watch};
 
-use kiln_tensor::DType;
 use kiln_core::block::BlockManager;
 use kiln_core::config::ModelConfig;
 use kiln_core::config_hashes::ConfigHashes;
@@ -17,6 +16,7 @@ use kiln_model::{
     PagedPrefixNextToken, PagedPrefixRegistration,
 };
 use kiln_scheduler::{PrefixCacheStats, Scheduler};
+use kiln_tensor::DType;
 use kiln_train::TrainingState;
 use serde::Serialize;
 
@@ -1725,7 +1725,9 @@ impl AppState {
                     kiln_memory::MemoryGovernor::global().register_reclaimer(|_target| {
                         static LOGGED: std::sync::Once = std::sync::Once::new();
                         LOGGED.call_once(|| {
-                            tracing::info!("vulkan reclaimer: cache-drain not yet implemented (no-op)")
+                            tracing::info!(
+                                "vulkan reclaimer: cache-drain not yet implemented (no-op)"
+                            )
                         });
                         0
                     });
@@ -2067,8 +2069,11 @@ impl AppState {
         let decode_batcher_config = DecodeBatcherConfig::enabled_for_device_kt(&device_kt)
             .then(|| DecodeBatcherConfig::from_env_for_backend_kt(&device_kt, backend_name));
         if backend_name == "vulkan" {
-            let resident_max_batch = max_decode_batch
-                .max(decode_batcher_config.map(|config| config.max_batch).unwrap_or(1));
+            let resident_max_batch = max_decode_batch.max(
+                decode_batcher_config
+                    .map(|config| config.max_batch)
+                    .unwrap_or(1),
+            );
             let ready = runner
                 .read()
                 .unwrap()
@@ -2079,17 +2084,23 @@ impl AppState {
                 "Vulkan resident decode pool startup allocation"
             );
         }
-        // Batching engine is on by default — the eval system, the judgment
-        // flywheel, and the high-throughput chat/completion paths all
-        // depend on it, and starting up with it disabled means the first
-        // /v1/eval/run a user hits errors with "batching engine not
-        // initialized" before they even know the env var exists. Opt-out
-        // via `KILN_BATCHING_ENGINE=0` for the rare debug case where you
-        // want to bisect the batching actor itself.
-        let batching_engine_disabled = matches!(
-            std::env::var("KILN_BATCHING_ENGINE").as_deref(),
-            Ok("0") | Ok("false") | Ok("FALSE") | Ok("off") | Ok("OFF")
-        );
+        // Batching engine is on by default for backends where the batching
+        // actor is the fast path. Metal currently regresses bs=1 Qwen decode
+        // by paying the GDN state-copy path on every generated token, while the
+        // direct loop can stay on the graph-backed Metal sampler. Keep Metal
+        // direct by default until its batching path has resident/in-place GDN
+        // state parity; operators can still opt in with KILN_BATCHING_ENGINE=1.
+        let batching_engine_env = std::env::var("KILN_BATCHING_ENGINE").ok();
+        let batching_engine_disabled = match batching_engine_env.as_deref() {
+            Some("0" | "false" | "FALSE" | "off" | "OFF") => true,
+            Some("1" | "true" | "TRUE" | "on" | "ON") => false,
+            _ => backend_name == "metal",
+        };
+        if batching_engine_disabled && backend_name == "metal" {
+            tracing::info!(
+                "batching engine disabled by default for Metal; set KILN_BATCHING_ENGINE=1 to opt in"
+            );
+        }
         let batching_engine = (!batching_engine_disabled).then(|| {
             tracing::info!(
                 backend = backend_name,
