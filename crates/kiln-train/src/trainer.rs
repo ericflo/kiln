@@ -7403,7 +7403,7 @@ fn standard_forward_backward_tape_authoritative_kt(
 
     let (loss_val, _loss_kt, grads_by_candle_raw) =
         kiln_kt_bridge::tape_bridge::with_tape_authoritative_scope_kt(|| {
-            let loss_kt = if use_flce() {
+            let loss_kt = if use_flce() && is_cuda_device(device) {
                 let normed = model_forward_no_head(
                     backend,
                     input_ids,
@@ -7608,7 +7608,7 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
     // recorded on any tape — this block runs outside the per-segment tape
     // scopes). So FLCE only has to compute the scalar loss, not a tape-connected
     // backward.
-    let loss_val = if use_flce() {
+    let loss_val = if use_flce() && is_cuda_device(device) {
         // (#1082 H-FLCE / candle-drop) FLCE loss-VALUE via the kt-native forward
         // `fused_linear_cross_entropy_phase_b_kt` — taking the kt `normed` hidden
         // and the kt `embed_tokens_t` head DIRECTLY (no candle `cd_out` copy, no
