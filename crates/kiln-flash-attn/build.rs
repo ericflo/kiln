@@ -42,6 +42,15 @@ fn main() {
     // Use nvcc as the compiler
     build.cuda(true);
     build.cpp(true);
+    // Never emit device debug info (`-G`) for these kernels, even in a debug
+    // (`cargo build`) profile. cc-rs adds `-G` when the cargo profile is debug,
+    // but `-G` on the cutlass FlashAttention template instantiations balloons
+    // nvcc's peak memory to tens of GB per source file — enough to get a single
+    // compile OOM-SIGKILLed (exit 137) inside a typical container cgroup, so a
+    // plain `cargo build --features cuda` of kiln-model fails on flash-attn. The
+    // kernels are always `-O3` (set below) and are never gdb'd, so dropping the
+    // debug flags is free. (`debug(false)` also drops host `-g`.)
+    build.debug(false);
     configure_nvcc_from_cuda_root(&cuda_root);
 
     // Include paths

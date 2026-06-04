@@ -60,6 +60,16 @@ fn build_cuda() {
     configure_nvcc_from_cuda_root(&cuda_root);
 
     build.include(&csrc_dir);
+    // Shared `kt_gpu_compat.cuh` lives in the sibling kiln-tensor crate's csrc
+    // (the reduction kernels #include it); add it to the nvcc include path so a
+    // fresh-clone `cargo build --features cuda` finds it. The ROCm arm already
+    // adds it. Mirrors kiln-opd-loss-kernel / kiln-gdn-kernel.
+    let kt_csrc = manifest_dir
+        .parent()
+        .expect("CARGO_MANIFEST_DIR has a parent (crates/)")
+        .join("kiln-tensor")
+        .join("csrc");
+    build.include(&kt_csrc);
     build.include(cuda_root.join("include"));
 
     build.flag("-std=c++17");
