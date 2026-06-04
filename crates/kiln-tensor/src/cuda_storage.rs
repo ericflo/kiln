@@ -501,6 +501,48 @@ pub fn cuda_trim_pool(device_index: usize, min_keep_bytes: usize) -> Result<()> 
     Ok(())
 }
 
+/// Make the device's default stream-ordered mempool HOARD freed allocations
+/// instead of returning them to the OS at every stream sync.
+///
+/// cudarc allocates via `cuMemAllocAsync` (the default mempool) and frees via
+/// `cuMemFreeAsync`. The pool's `RELEASE_THRESHOLD` defaults to 0, which means
+/// the driver releases all unused pages back to the OS on each synchronize — so
+/// every alloc/free churn pays an OS round-trip AND [`cuda_trim_pool`] has
+/// nothing left to reclaim (the governor's CUDA reclaimer is a redundant no-op).
+///
+/// Raising the threshold (to `u64::MAX` here) makes the pool keep freed pages
+/// for fast reuse (the perf win), and turns [`cuda_trim_pool`] into the real,
+/// governor-driven release valve: under memory pressure the reclaimer trims the
+/// hoarded pool back to the OS for a coexisting process. This is the same
+/// hoard-then-reclaim-under-pressure model the ROCm path targets.
+///
+/// Idempotent and best-effort: a failure (no mempool support) leaves the default
+/// behaviour, which is still correct (just less perf-y / reclaimer redundant).
+pub fn cuda_set_pool_release_threshold(device_index: usize, threshold_bytes: u64) -> Result<()> {
+    use cudarc::driver::sys;
+    let ctx = primary_cuda_context(device_index)?;
+    ctx.bind_to_thread().map_err(|e| {
+        Error::Msg(format!("cuda_set_pool_release_threshold bind({device_index}): {e}"))
+    })?;
+    let dev = ctx.cu_device();
+    let mut pool: sys::CUmemoryPool = std::ptr::null_mut();
+    let mut threshold = threshold_bytes;
+    // SAFETY: `dev` is a valid CUdevice from the live context; `pool` is an
+    // out-param; `&mut threshold` outlives the SetAttribute call. Best-effort.
+    unsafe {
+        if sys::cuDeviceGetDefaultMemPool(&mut pool, dev) == sys::CUresult::CUDA_SUCCESS
+            && !pool.is_null()
+        {
+            let _ = sys::cuMemPoolSetAttribute(
+                pool,
+                sys::CUmemPool_attribute::CU_MEMPOOL_ATTR_RELEASE_THRESHOLD,
+                &mut threshold as *mut u64 as *mut std::ffi::c_void,
+            );
+        }
+    }
+    Ok(())
+}
+
 impl StorageBackend for CudaStorage {
     fn device(&self) -> Device {
         self.device

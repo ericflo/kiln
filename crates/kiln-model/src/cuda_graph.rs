@@ -1889,10 +1889,23 @@ impl CudaGraphRunner {
             })
         });
 
-        // End capture — instantiates the graph
-        let graph_result = stream.end_capture(
-            cudarc::driver::sys::CUgraphInstantiate_flags_enum::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
-        );
+        // End capture — instantiates the graph.
+        //
+        // (BUG2 fix) Instantiate with NO flags (0), NOT AUTO_FREE_ON_LAUNCH.
+        // AUTO_FREE_ON_LAUNCH frees the graph's per-launch async allocations at
+        // the start of every replay and re-allocates them — so the GDN
+        // recurrent/conv-state kernels write their new state into freshly-
+        // allocated scratch that the persistent recurrent_states[i]/conv_states[i]
+        // device pointer no longer aliases. The state therefore never advances
+        // across bare graph.launch() replays, freezing the decode and re-emitting
+        // the same token (the "token-doubling" symptom). The ROCm HIP-graph path
+        // instantiates with flags=0 (rocm_graph.rs) and is bit-identical to eager;
+        // this matches it. cudarc's CUgraphInstantiate_flags enum has no NONE
+        // variant, so build the 0 value directly (it is FFI-bound to
+        // cuGraphInstantiate as the flags word).
+        let no_flags: cudarc::driver::sys::CUgraphInstantiate_flags =
+            unsafe { std::mem::transmute(0u32) };
+        let graph_result = stream.end_capture(no_flags);
 
         // Check forward pass success first
         capture_result.context("forward pass failed during graph capture")?;
@@ -2293,18 +2306,19 @@ impl CudaGraphRunner {
                 })
             });
 
-            // #1082 boxes 432/433 (STEPS 2-3): with the lm_head out of the
-            // captured region, the bs>1 path uses the SAME
-            // `AUTO_FREE_ON_LAUNCH` flag as bs=1. The former `NO_FLAGS`
-            // workaround existed only because the in-graph lm-head matmul
-            // output (a transient pool allocation) was freed by AUTO_FREE
-            // between replays, dangling the captured `slice_set` source. The
-            // HiddenOnly capture has no such in-graph matmul output, and every
-            // other transient is pinned by the freeze-pointers arena above —
-            // so AUTO_FREE is correct and reclaims the per-replay scratch.
-            let graph_result = stream.end_capture(
-                cudarc::driver::sys::CUgraphInstantiate_flags_enum::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
-            );
+            // (BUG2 fix) Instantiate the bs>1 graph with NO flags (0), matching
+            // the bs=1 path and the ROCm HIP-graph path. The former NO_FLAGS
+            // workaround was about the (now-removed) in-graph lm-head matmul
+            // transient — but the GDN recurrent/conv STATE buffers are a SEPARATE
+            // concern AUTO_FREE_ON_LAUNCH breaks identically: it re-allocates the
+            // per-launch async buffers each replay, so the GDN kernels' in-place
+            // state write lands in scratch the persistent state pointer no longer
+            // aliases → state freezes across replays → token-doubling. The same
+            // GDN kernels run in batched decode, so the batched graph needs flags=0
+            // too. (cudarc's enum has no NONE variant; 0 = no flags, FFI-bound.)
+            let no_flags: cudarc::driver::sys::CUgraphInstantiate_flags =
+                unsafe { std::mem::transmute(0u32) };
+            let graph_result = stream.end_capture(no_flags);
 
             forward_result.context("batched forward failed during graph capture")?;
             let graph = match graph_result {
