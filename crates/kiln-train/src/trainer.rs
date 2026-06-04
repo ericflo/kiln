@@ -6147,127 +6147,21 @@ fn analytic_sft_tail_grad_pre_final_norm(
         );
     }
 
-    let active_positions: Vec<u32> = label_mask[1..]
-        .iter()
-        .enumerate()
-        .filter_map(|(i, &m)| if m { Some(i as u32) } else { None })
-        .collect();
-    if active_positions.is_empty() {
-        return Ok(zeros_f32_on(hidden.dims(), &device)?);
-    }
-
-    let active_labels: Vec<u32> = active_positions
-        .iter()
-        .map(|&i| input_ids[i as usize + 1])
-        .collect();
-    let num_active = active_positions.len();
-
-    let hidden_2d = hidden.squeeze(0)?;
-    let shift_hidden = hidden_2d.narrow(0, 0, seq_len - 1)?;
-    let active_indices =
-        Tensor::from_vec_on(device, active_positions.clone(), vec![num_active])?;
-    let active_hidden = shift_hidden
-        .index_select(&active_indices, 0)?
-        .to_f32_dtype()?;
-
-    let variance = active_hidden.sqr()?.mean_keepdim(LAST_DIM)?;
-    let rms_inv = (variance + rms_norm_eps)?.sqrt()?.recip()?;
-    let norm_weight = final_norm_weight.to_f32_dtype()?;
-    let norm_weight_plus_one = (norm_weight.ones_like()? + norm_weight)?;
-    let active_normed = active_hidden
-        .broadcast_mul(&rms_inv)?
-        .broadcast_mul(&norm_weight_plus_one)?;
-
-    let head_t_f32 = head_t.to_f32_dtype()?;
-    let vocab_size = head_t_f32.dim(1)?;
-    if vocab_size == 0 {
-        anyhow::bail!("head_t vocab dimension is zero");
-    }
-
-    // Pass 1: global row-wise softmax normalizers over vocab chunks.
-    let mut running_max: Option<Tensor> = None;
-    let mut running_sumexp: Option<Tensor> = None;
-    let mut chunk_start = 0usize;
-    while chunk_start < vocab_size {
-        let chunk_len = chunk_size.min(vocab_size - chunk_start);
-        {
-            let head_chunk = head_t_f32.narrow(1, chunk_start, chunk_len)?.contiguous()?;
-            let logits_chunk = active_normed.matmul(&head_chunk)?;
-            let chunk_max = logits_chunk.max_keepdim(LAST_DIM)?;
-            let (new_max, new_sumexp) = match (running_max.as_ref(), running_sumexp.as_ref()) {
-                (None, None) => {
-                    let shifted =
-                        (&logits_chunk - chunk_max.broadcast_as(logits_chunk.shape())?)?;
-                    let chunk_sumexp = shifted.exp()?.sum_keepdim(LAST_DIM)?;
-                    (chunk_max.detach(), chunk_sumexp.detach())
-                }
-                (Some(prev_max), Some(prev_sumexp)) => {
-                    let new_max = prev_max.maximum(&chunk_max)?;
-                    let prev_scale = (prev_max - &new_max)?.exp()?;
-                    let scaled_prev = prev_sumexp.broadcast_mul(&prev_scale)?;
-                    let shifted = (&logits_chunk - new_max.broadcast_as(logits_chunk.shape())?)?;
-                    let chunk_sumexp = shifted.exp()?.sum_keepdim(LAST_DIM)?;
-                    let new_sumexp = (scaled_prev + chunk_sumexp)?;
-                    (new_max.detach(), new_sumexp.detach())
-                }
-                _ => unreachable!("running max/sumexp are set together"),
-            };
-            running_max = Some(new_max);
-            running_sumexp = Some(new_sumexp);
-        }
-        synchronize_metal_tail_chunk(&device, "synchronize analytic SFT tail normalizer chunk")?;
-        chunk_start += chunk_len;
-    }
-    let running_max = running_max.context("vocab_size was zero")?;
-    let running_sumexp = running_sumexp.context("vocab_size was zero")?;
-
-    // Pass 2: accumulate d(loss)/d(post-final-norm hidden) by vocab chunk.
-    let inv_n = 1.0f64 / num_active as f64;
-    let mut grad_normed = zeros_f32_on((num_active, hidden_size), &device)?;
-    let mut chunk_start = 0usize;
-    while chunk_start < vocab_size {
-        let chunk_len = chunk_size.min(vocab_size - chunk_start);
-        let chunk_end = chunk_start + chunk_len;
-        {
-            let head_chunk = head_t_f32.narrow(1, chunk_start, chunk_len)?.contiguous()?;
-            let logits_chunk = active_normed.matmul(&head_chunk)?;
-            let shifted = (&logits_chunk - running_max.broadcast_as(logits_chunk.shape())?)?;
-            let exp_chunk = shifted.exp()?;
-            let softmax_chunk =
-                exp_chunk.broadcast_div(&running_sumexp.broadcast_as(logits_chunk.shape())?)?;
-
-            let mut one_hot_data = vec![0.0f32; num_active * chunk_len];
-            for (row_idx, &label) in active_labels.iter().enumerate() {
-                let label = label as usize;
-                if label >= chunk_start && label < chunk_end {
-                    one_hot_data[row_idx * chunk_len + (label - chunk_start)] = 1.0;
-                } else if label >= vocab_size {
-                    anyhow::bail!("label {} is outside vocab size {}", label, vocab_size);
-                }
-            }
-            let one_hot = Tensor::from_vec_on(device, one_hot_data, vec![num_active, chunk_len])?;
-            let grad_logits = (softmax_chunk - one_hot)?.affine(inv_n, 0.0)?;
-            let head_chunk_t = head_chunk.t()?.contiguous()?;
-            let chunk_contrib = grad_logits.matmul(&head_chunk_t)?;
-            grad_normed = (&grad_normed + chunk_contrib)?.detach();
-        }
-        synchronize_metal_tail_chunk(&device, "synchronize analytic SFT tail gradient chunk")?;
-
-        chunk_start = chunk_end;
-    }
-
-    // Backprop through Qwen3.5 RMSNorm: y = x * inv_rms * (1 + w).
-    let u = grad_normed.broadcast_mul(&norm_weight_plus_one)?;
-    let dot = (&u * &active_hidden)?.sum_keepdim(LAST_DIM)?;
-    let rms_inv_sq = rms_inv.sqr()?;
-    let rms_inv_cubed = rms_inv_sq.broadcast_mul(&rms_inv)?;
-    let correction_scale = rms_inv_cubed.affine(1.0f64 / hidden_size as f64, 0.0)?;
-    let correction = active_hidden.broadcast_mul(&dot.broadcast_mul(&correction_scale)?)?;
-    let grad_active_hidden = (u.broadcast_mul(&rms_inv)? - correction)?.detach();
-
-    let mut grad_hidden_2d = zeros_f32_on((seq_len, hidden_size), &device)?;
-    grad_hidden_2d = grad_hidden_2d.index_add(&active_indices, &grad_active_hidden, 0)?;
-    Ok(grad_hidden_2d.unsqueeze(0)?)
+    let normed = rms_norm(hidden, final_norm_weight, rms_norm_eps)
+        .context("analytic SFT tail final RMSNorm")?;
+    let grad_loss = Tensor::from_vec_on(device, vec![1.0f32], vec![])
+        .context("analytic SFT tail FLCE grad_loss seed")?;
+    let grad_normed = kiln_flce_kernel::kt_api::fused_linear_cross_entropy_phase_b_backward_kt(
+        &normed,
+        head_t,
+        input_ids,
+        label_mask,
+        chunk_size,
+        &grad_loss,
+    )
+    .map_err(|e| anyhow::anyhow!("analytic SFT tail FLCE hidden gradient: {e}"))?;
+    rms_norm_backward_pre_final_norm(hidden, final_norm_weight, &grad_normed, rms_norm_eps)
+        .context("analytic SFT tail final RMSNorm backward")
 }
 
 pub(crate) fn rms_norm_backward_pre_final_norm(
@@ -7599,22 +7493,21 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
         .context("ckpt-kt: missing final checkpoint boundary")?
         .clone();
 
-    // Step 2: real loss at the final boundary + the exact analytic tail seed.
-    // `analytic_sft_tail_grad_pre_final_norm` is kt-native and returns
-    // d(loss)/d(pre-final-norm hidden) as kt F32 [1, T, H] — exactly the
-    // upstream grad to seed the LAST segment's backward (its output IS that
-    // hidden). The loss value here is ONLY consumed as a scalar `loss_val`; the
-    // gradient comes entirely from the analytic tail (the FLCE node is NOT
-    // recorded on any tape — this block runs outside the per-segment tape
-    // scopes). So FLCE only has to compute the scalar loss, not a tape-connected
-    // backward.
+    // Step 2: real loss at the final boundary + the exact FLCE/RMSNorm tail
+    // seed. `analytic_sft_tail_grad_pre_final_norm` calls the crate-level FLCE
+    // kt backward to get d(loss)/d(final_norm_output), then applies the shared
+    // final-RMSNorm backward to return d(loss)/d(pre-final-norm hidden) as kt
+    // F32 [1, T, H] — exactly the upstream grad to seed the LAST segment's
+    // backward (its output IS that hidden). The loss value here is ONLY
+    // consumed as a scalar `loss_val`; the gradient comes entirely from this
+    // tail seed, outside the per-segment tape scopes.
     let loss_val = if use_flce() && is_cuda_device(device) {
         // (#1082 H-FLCE / candle-drop) FLCE loss-VALUE via the kt-native forward
         // `fused_linear_cross_entropy_phase_b_kt` — taking the kt `normed` hidden
         // and the kt `embed_tokens_t` head DIRECTLY (no candle `cd_out` copy, no
         // ~780MB/step `embed_tokens_t` kt->candle copy, no candle device bridge).
         // Only the resulting scalar crosses back to host. The gradient comes
-        // entirely from the analytic tail (this FLCE node is not tape-recorded).
+        // entirely from the FLCE/RMSNorm tail seed below.
         // The candle FLCE provider opt-in (`KILN_CUDA_FLCE`) was removed in the
         // candle drop — this is now the sole FLCE path.
         let normed = model_forward_final_norm(&final_hidden_kt, weights, model_config)?;
@@ -7642,7 +7535,7 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
         model_config.rms_norm_eps,
         DEFAULT_CHUNK_SIZE,
     )
-    .context("ckpt-kt analytic SFT tail gradient")?
+    .context("ckpt-kt FLCE/RMSNorm SFT tail gradient")?
     .detach();
 
     // Step 3: reverse pass over segments via the kt tape. Each segment is
@@ -11551,6 +11444,109 @@ pub(crate) mod tests {
         // With very few layers, segments clamped to num_layers
         let cfg = CheckpointConfig::from_env(2);
         assert!(cfg.num_segments <= 2);
+    }
+
+    fn sft_tail_loss_value(
+        hidden_data: &[f32],
+        seq_len: usize,
+        hidden_size: usize,
+        final_norm_weight: &Tensor,
+        head_t: &Tensor,
+        input_ids: &[u32],
+        label_mask: &[bool],
+        eps: f64,
+        chunk_size: usize,
+    ) -> Result<f32> {
+        let device = cpu_device();
+        let hidden =
+            Tensor::from_vec_on(device, hidden_data.to_vec(), vec![1, seq_len, hidden_size])?;
+        let normed = rms_norm(&hidden, final_norm_weight, eps)?;
+        let loss = kiln_flce_kernel::kt_api::fused_linear_cross_entropy_phase_b_kt(
+            &normed,
+            head_t,
+            input_ids,
+            label_mask,
+            chunk_size,
+        )
+        .map_err(|e| anyhow::anyhow!("test FLCE loss: {e}"))?;
+        Ok(loss.to_scalar::<f32>()?)
+    }
+
+    #[test]
+    fn analytic_sft_tail_grad_matches_finite_difference() -> Result<()> {
+        let device = cpu_device();
+        let seq_len = 4;
+        let hidden_size = 3;
+        let vocab_size = 5;
+        let chunk_size = 3;
+        let eps = 1e-5;
+        let hidden_data: Vec<f32> = (0..seq_len * hidden_size)
+            .map(|i| ((i as f32 + 1.0) * 0.13).sin() * 0.4)
+            .collect();
+        let head_data: Vec<f32> = (0..hidden_size * vocab_size)
+            .map(|i| ((i as f32 + 3.0) * 0.17).cos() * 0.3)
+            .collect();
+        let norm_data = vec![0.08f32, -0.12, 0.05];
+        let input_ids = vec![0u32, 1, 3, 4];
+        let label_mask = vec![false, true, false, true];
+
+        let hidden =
+            Tensor::from_vec_on(device, hidden_data.clone(), vec![1, seq_len, hidden_size])?;
+        let final_norm_weight = Tensor::from_vec_on(device, norm_data, vec![hidden_size])?;
+        let head_t = Tensor::from_vec_on(device, head_data, vec![hidden_size, vocab_size])?;
+
+        let grad = analytic_sft_tail_grad_pre_final_norm(
+            &hidden,
+            &final_norm_weight,
+            &head_t,
+            &input_ids,
+            &label_mask,
+            eps,
+            chunk_size,
+        )?;
+        let grad_host = grad
+            .to_device(Device::Cpu)?
+            .to_dtype(DType::F32)?
+            .to_vec::<f32>()?;
+
+        let finite_diff_indices = [0usize, 2, 6, 8];
+        let fd_eps = 1e-3f32;
+        for idx in finite_diff_indices {
+            let mut plus = hidden_data.clone();
+            plus[idx] += fd_eps;
+            let mut minus = hidden_data.clone();
+            minus[idx] -= fd_eps;
+            let lp = sft_tail_loss_value(
+                &plus,
+                seq_len,
+                hidden_size,
+                &final_norm_weight,
+                &head_t,
+                &input_ids,
+                &label_mask,
+                eps,
+                chunk_size,
+            )?;
+            let lm = sft_tail_loss_value(
+                &minus,
+                seq_len,
+                hidden_size,
+                &final_norm_weight,
+                &head_t,
+                &input_ids,
+                &label_mask,
+                eps,
+                chunk_size,
+            )?;
+            let fd = (lp - lm) / (2.0 * fd_eps);
+            let got = grad_host[idx];
+            assert!(
+                (got - fd).abs() < 2.5e-2,
+                "tail grad[{idx}] analytic {got:+.6} != finite-diff {fd:+.6}",
+            );
+        }
+
+        Ok(())
     }
 
 
