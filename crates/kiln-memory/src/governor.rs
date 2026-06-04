@@ -19,7 +19,7 @@
 //! deep-in-the-stack callers can consult it without threading an `Arc` around.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 /// A reclaim hook: "release up to `target` bytes of pooled/cached device memory
@@ -140,6 +140,15 @@ pub struct MemoryGovernor {
     reclaimers: Mutex<Vec<Reclaimer>>,
     /// Guards [`Self::start_monitor`] against spawning more than one thread.
     monitor_started: AtomicBool,
+    /// Event wake-up for budget-change consumers (the KV autoscaler). The
+    /// `u64` is a monotonically-increasing generation bumped on every
+    /// [`notify_change`](Self::notify_change); waiters block on the `Condvar`
+    /// until the generation advances or their timeout fires. This makes
+    /// grow-back EVENT-DRIVEN: when a training reservation drops (job ends),
+    /// the autoscaler wakes immediately to reclaim KV instead of waiting out
+    /// its poll tick. The timeout still backstops EXTERNAL changes (a
+    /// coexisting process freeing VRAM) that only the periodic probe sees.
+    wake: (Mutex<u64>, Condvar),
 }
 
 impl MemoryGovernor {
@@ -157,7 +166,36 @@ impl MemoryGovernor {
             soft_reserved: AtomicU64::new(0),
             reclaimers: Mutex::new(Vec::new()),
             monitor_started: AtomicBool::new(false),
+            wake: (Mutex::new(0), Condvar::new()),
         }
+    }
+
+    /// Wake any consumers blocked in [`Self::wait_for_change`] — the budget or
+    /// pressure just changed (a reservation taken/released, or the monitor saw a
+    /// pressure transition). Cheap; safe to over-call (waiters re-evaluate).
+    pub fn notify_change(&self) {
+        {
+            let mut wake_gen = self.wake.0.lock().unwrap_or_else(|e| e.into_inner());
+            *wake_gen = wake_gen.wrapping_add(1);
+        }
+        self.wake.1.notify_all();
+    }
+
+    /// Block until the memory budget/pressure changes (via [`Self::notify_change`])
+    /// or `timeout` elapses, whichever comes first. The KV autoscaler uses this
+    /// in place of a fixed sleep so it reacts PROMPTLY to a training job ending
+    /// (reservation drop → grow KV back) while still polling every `timeout` for
+    /// external changes the event path can't see.
+    pub fn wait_for_change(&self, timeout: Duration) {
+        let wake_gen = self.wake.0.lock().unwrap_or_else(|e| e.into_inner());
+        let start = *wake_gen;
+        // wait_timeout_while re-checks the predicate across spurious wakeups.
+        // The returned guard drops at the end of this scope (we don't read it).
+        let (_guard, _timed_out) = self
+            .wake
+            .1
+            .wait_timeout_while(wake_gen, timeout, |g| *g == start)
+            .unwrap_or_else(|e| e.into_inner());
     }
 
     /// The default governor: OS probe + env-tuned config.
@@ -230,6 +268,8 @@ impl MemoryGovernor {
     /// consumers see an honest budget. This does NOT itself allocate.
     pub fn reserve(&self, bytes: u64) -> Reservation<'_> {
         self.soft_reserved.fetch_add(bytes, Ordering::Relaxed);
+        // Budget dropped — wake the autoscaler so it can shrink KV promptly.
+        self.notify_change();
         Reservation {
             governor: self,
             bytes,
@@ -356,6 +396,9 @@ impl Drop for Reservation<'_> {
         self.governor
             .soft_reserved
             .fetch_sub(self.bytes, Ordering::Relaxed);
+        // Budget freed (e.g. a training job ended) — wake the autoscaler so KV
+        // grows back immediately instead of on the next poll tick.
+        self.governor.notify_change();
     }
 }
 
@@ -434,6 +477,35 @@ mod tests {
         // Guard dropped -> reservation released.
         assert_eq!(g.soft_reserved_bytes(), 0);
         assert_eq!(g.available_bytes(), 15 * GB);
+    }
+
+    #[test]
+    fn reservation_change_wakes_waiter_for_growback() {
+        use std::sync::Arc;
+        let g = Arc::new(gov(24 * GB, 16 * GB));
+        let res = g.reserve(4 * GB);
+        let g2 = g.clone();
+        let start = Instant::now();
+        // A waiter that would block the full 10s timeout absent an event.
+        let waiter = std::thread::spawn(move || g2.wait_for_change(Duration::from_secs(10)));
+        std::thread::sleep(Duration::from_millis(50));
+        drop(res); // Reservation::drop -> notify_change -> waiter must wake.
+        waiter.join().unwrap();
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "autoscaler waiter did NOT wake on reservation drop — grow-back would be late"
+        );
+        assert_eq!(g.soft_reserved_bytes(), 0);
+    }
+
+    #[test]
+    fn wait_for_change_times_out_without_event() {
+        let g = gov(24 * GB, 16 * GB);
+        let start = Instant::now();
+        g.wait_for_change(Duration::from_millis(120)); // no notify -> returns ~timeout
+        let waited = start.elapsed();
+        assert!(waited >= Duration::from_millis(100), "returned too early: {waited:?}");
+        assert!(waited < Duration::from_secs(2), "timeout overshot: {waited:?}");
     }
 
     /// Manual on-hardware smoke (`cargo test -p kiln-memory --
