@@ -78,16 +78,29 @@ impl VulkanStorage {
         n_elements: usize,
     ) -> Result<Self> {
         let byte_len = dtype.packed_buffer_bytes(n_elements);
+        let alloc_len = byte_len.max(1);
         let buffer = VulkanBuffer::create_device_local(
             vulkan_device.device(),
             vulkan_device.device_local_mem_type(),
-            byte_len as u64,
+            alloc_len as u64,
         )
         .map_err(|e| {
             Error::Msg(format!(
-                "VulkanStorage::zeros: create_device_local({byte_len}) failed: {e}"
+                "VulkanStorage::zeros: create_device_local({alloc_len}) failed: {e}"
             ))
         })?;
+        if byte_len > 0 {
+            let zeros = vec![0u8; byte_len];
+            VulkanBuffer::upload_data(
+                vulkan_device.device(),
+                vulkan_device.host_visible_mem_type(),
+                vulkan_device.queue(),
+                vulkan_device.queue_family_index(),
+                &buffer,
+                &zeros,
+            )
+            .map_err(|e| Error::Msg(format!("VulkanStorage::zeros: H2D zero upload failed: {e}")))?;
+        }
         Ok(VulkanStorage {
             device: Device::Vulkan(device_index),
             dtype,
@@ -2614,6 +2627,21 @@ mod tests {
         let storage = VulkanStorage::zeros(dev, 0, DType::BF16, 64).unwrap();
         assert_eq!(storage.device(), Device::Vulkan(0));
         assert_eq!(storage.dtype(), DType::BF16);
+    }
+
+    #[test]
+    fn zeros_read_back_as_zero_f32() {
+        if !vulkan_test_enabled() {
+            eprintln!("skip: KILN_TENSOR_VULKAN_TEST unset");
+            return;
+        }
+        if primary_vulkan_device(0).is_err() {
+            eprintln!("skip: no Vulkan device");
+            return;
+        }
+        let t = crate::Tensor::zeros_on(Device::Vulkan(0), vec![32], DType::F32).unwrap();
+        let got = t.to_device(Device::Cpu).unwrap().to_vec::<f32>().unwrap();
+        assert_eq!(got, vec![0.0; 32]);
     }
 
     /// PR2 keystone (#1082): a host→Vulkan→host round-trip must preserve

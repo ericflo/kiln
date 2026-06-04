@@ -7128,16 +7128,12 @@ pub fn rms_norm(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor> {
         // training branch: training is CUDA-BF16 / kt-tape only now; Vulkan is
         // inference-only.
     }
-    // Resident Vulkan RMSNorm: when the activation `x` is already
-    // Vulkan-backed (the resident inference path — activations are F32 via
-    // `vulkan_cast_activation_to_f32`), run the fused `qwen_rmsnorm_forward`
-    // kernel zero-copy via `vulkan_rmsnorm_last_axis` instead of the
-    // multi-dispatch `rms_norm_fallback` (mean/rsqrt/mul) or the CPU-input
-    // bytes path above. Identical `(1+w)*x*rsqrt(mean(x^2)+eps)` Qwen
-    // semantics (same shader). The kernel is F32-only, so cast x/weight to F32
-    // (a no-op on the F32 activation path) and back — keeping BF16 supported
-    // for free. The weight is a small `[hidden]` vector; aligning it to the
-    // device is a no-op once the model is resident.
+    // Resident Vulkan RMSNorm: opt-in only. The raw `qwen_rmsnorm_forward`
+    // shader passes its narrow kernel parity test, but the kt wrapper path has
+    // produced non-finite rows on real model tensors under lavapipe/RADV soak
+    // setups. Keep correctness as the default by falling through to
+    // `rms_norm_fallback`; set `KILN_ENABLE_NATIVE_VULKAN_RMSNORM=1` to
+    // exercise the native leaf while debugging that backend path.
     #[cfg(feature = "vulkan")]
     if crate::backend::vulkan_active()
         && matches!(x.device(), Device::Vulkan(_))
@@ -7150,7 +7146,14 @@ pub fn rms_norm(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor> {
             .to_device(x.device())?
             .contiguous()?
             .to_dtype(DType::F32)?;
-        let out32 = kiln_tensor::vulkan_rmsnorm_last_axis(&x32, &w32, eps as f32)?;
+        // `vulkan_rmsnorm_last_axis` is the kt substrate op for standard
+        // RMSNorm (`x * w / rms`) and adapts that to the Qwen shader by
+        // staging `w - 1`. The model-level RMSNorm contract is Qwen's
+        // unit-offset form, so pass the effective scale (`1 + weight`) into
+        // the substrate wrapper to preserve the same math as
+        // `rms_norm_fallback` and `try_tape_rms_norm_kt`.
+        let w_plus_one = (w32.ones_like()? + w32)?;
+        let out32 = kiln_tensor::vulkan_rmsnorm_last_axis(&x32, &w_plus_one, eps as f32)?;
         return if in_dtype == DType::F32 {
             Ok(out32)
         } else {
@@ -7180,18 +7183,18 @@ pub fn rms_norm(x: &Tensor, weight: &Tensor, eps: f64) -> Result<Tensor> {
     rms_norm_fallback(x, weight, eps)
 }
 
-/// `KILN_VULKAN_RMSNORM=0` opts the inference RMSNorm Vulkan path off.
-/// Default: enabled.
+/// `KILN_ENABLE_NATIVE_VULKAN_RMSNORM=1` opts into the native Vulkan RMSNorm
+/// leaf. Default: disabled, so Vulkan uses the composite fallback.
 #[cfg(feature = "vulkan")]
 fn vulkan_rmsnorm_forward_inference_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ENABLED.get_or_init(|| {
-        std::env::var("KILN_VULKAN_RMSNORM")
+        std::env::var("KILN_ENABLE_NATIVE_VULKAN_RMSNORM")
             .map(|v| {
                 let v = v.trim().to_lowercase();
-                !(v == "0" || v == "false" || v == "no")
+                v == "1" || v == "true" || v == "yes" || v == "on"
             })
-            .unwrap_or(true)
+            .unwrap_or(false)
     })
 }
 
