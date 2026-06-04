@@ -1255,6 +1255,61 @@ fn prepare_opd_kernel_inputs(
     })
 }
 
+fn opd_checkpoint_segments_for_step(
+    vram: &kiln_memory::vram::GpuVramInfo,
+    base_model_bytes: u64,
+    model_config: &kiln_core::config::ModelConfig,
+    seq_len: usize,
+) -> Option<Vec<(usize, usize)>> {
+    let env_override = std::env::var("KILN_GRAD_CHECKPOINT_SEGMENTS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .is_some()
+        || std::env::var("KILN_NO_GRAD_CHECKPOINT")
+            .as_deref()
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+
+    let cfg = if env_override {
+        crate::trainer::CheckpointConfig::from_env(model_config.num_layers)
+    } else {
+        match kiln_memory::vram::recommended_checkpoint_plan(
+            vram,
+            model_config.num_layers,
+            seq_len,
+            model_config.hidden_size,
+            base_model_bytes,
+        ) {
+            None | Some(kiln_memory::vram::CheckpointPlan::UserOverride) => {
+                crate::trainer::CheckpointConfig::from_env(model_config.num_layers)
+            }
+            Some(kiln_memory::vram::CheckpointPlan::Disabled { .. }) => {
+                crate::trainer::CheckpointConfig {
+                    num_segments: 1,
+                    enabled: false,
+                    auto_configured: true,
+                }
+            }
+            Some(kiln_memory::vram::CheckpointPlan::Enabled { num_segments, .. }) => {
+                crate::trainer::CheckpointConfig {
+                    num_segments: num_segments.min(model_config.num_layers).max(1),
+                    enabled: true,
+                    auto_configured: true,
+                }
+            }
+        }
+    };
+
+    if cfg.enabled {
+        Some(crate::trainer::compute_segment_boundaries(
+            model_config.num_layers,
+            cfg.num_segments,
+        ))
+    } else {
+        None
+    }
+}
+
 pub fn opd_step_loss(inputs: OpdStepInputs<'_>) -> Result<OpdStepOutputs> {
     let OpdStepInputs {
         tokens,
@@ -2864,6 +2919,13 @@ pub fn opd_train(
                 // kt-tape ECHO adapter lands). `env_mask` / `env_count` /
                 // `total_obs_len` stay computed above for the receipt token-count
                 // bookkeeping but no longer steer dispatch.
+                let opd_segments = opd_checkpoint_segments_for_step(
+                    &opd_vram_cache,
+                    opd_base_model_bytes,
+                    model_config,
+                    input_ids.len(),
+                );
+                let checkpoint_segments = opd_segments.as_ref().map_or(0, |segs| segs.len());
 
                 // === Forward + backward dispatch (#1082 candle-drop) ===
                 //
@@ -2902,22 +2964,52 @@ pub fn opd_train(
                 let (loss_val, active_count): (f64, usize) = {
                     #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
                     {
+                        let step_started = std::time::Instant::now();
                         let (loss_val, active_count, kt_grads) =
-                            opd_step_forward_backward_tape_authoritative(
-                                &*backend_rt,
-                                input_ids,
-                                weights,
-                                model_config,
-                                &params,
-                                &device_kt,
-                                &head_t,
-                                teacher.clone(),
-                                &active_positions,
-                                config.loss,
-                                config.top_k,
-                                teacher_tokens_opt,
-                                teacher_active_opt,
-                            )?;
+                            if let Some(segs) = opd_segments.as_deref() {
+                                checkpointed_opd_step_forward_backward_tape_authoritative(
+                                    &*backend_rt,
+                                    input_ids,
+                                    weights,
+                                    model_config,
+                                    &params,
+                                    &device_kt,
+                                    &head_t,
+                                    teacher.clone(),
+                                    &active_positions,
+                                    config.loss,
+                                    config.top_k,
+                                    teacher_tokens_opt,
+                                    teacher_active_opt,
+                                    segs,
+                                )?
+                            } else {
+                                opd_step_forward_backward_tape_authoritative(
+                                    &*backend_rt,
+                                    input_ids,
+                                    weights,
+                                    model_config,
+                                    &params,
+                                    &device_kt,
+                                    &head_t,
+                                    teacher.clone(),
+                                    &active_positions,
+                                    config.loss,
+                                    config.top_k,
+                                    teacher_tokens_opt,
+                                    teacher_active_opt,
+                                )?
+                            };
+                        tracing::info!(
+                            prompt_idx,
+                            sample_idx,
+                            seq_len = input_ids.len(),
+                            action_tokens = active_positions.len(),
+                            env_tokens = env_count,
+                            checkpoint_segments,
+                            elapsed_ms = step_started.elapsed().as_millis() as u64,
+                            "OPD step end (tape-authoritative kt)"
+                        );
 
                         // Observe per-module LoRA grad norms from the kt-native
                         // grad store BEFORE the optimizer consumes it — same
@@ -3287,6 +3379,225 @@ fn opd_step_forward_backward_tape_authoritative(
             // grad. Mirrors SFT's
             // `standard_forward_backward_tape_authoritative_kt`.
             grads.insert(kiln_tensor_id::TensorId::from_raw(param_raw), kt_grad);
+        }
+    }
+
+    Ok((loss_val, active_count, grads))
+}
+
+#[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
+#[allow(clippy::too_many_arguments)]
+fn checkpointed_opd_step_forward_backward_tape_authoritative(
+    backend_rt: &dyn kiln_model::backend::BackendRuntime,
+    input_ids: &[u32],
+    weights: &kiln_model::forward::GpuWeights,
+    model_config: &kiln_core::config::ModelConfig,
+    params: &crate::trainer::TrainableLoraParams,
+    device: &kiln_tensor::Device,
+    head_t: &kiln_tensor::Tensor,
+    teacher: Arc<dyn LogitSource>,
+    active_positions: &[usize],
+    loss_granularity: OpdLossGranularity,
+    top_k: usize,
+    teacher_tokens: Option<&[u32]>,
+    teacher_active_positions: Option<&[usize]>,
+    segments: &[(usize, usize)],
+) -> Result<(f64, usize, kiln_autograd::GradStore)> {
+    use kiln_model::forward::{
+        LinearAttentionState, model_forward_embed, model_forward_final_norm, model_forward_segment,
+    };
+
+    let num_segments = segments.len();
+    anyhow::ensure!(
+        num_segments > 0,
+        "checkpointed OPD requires at least one segment"
+    );
+    let prepared = prepare_opd_kernel_inputs(
+        input_ids,
+        active_positions,
+        teacher,
+        loss_granularity,
+        top_k,
+        teacher_tokens,
+        teacher_active_positions,
+    )?;
+    let active_count = prepared.active_count;
+    let positions: Vec<u32> = (0..input_ids.len()).map(|p| p as u32).collect();
+    let lora_detached = crate::trainer::lora_weights_detached(params);
+    let lora_weights = params.as_lora_weights();
+
+    let (embed_hidden, _) = model_forward_embed(input_ids, weights)?;
+    let mut boundaries: Vec<kiln_tensor::Tensor> = Vec::with_capacity(num_segments + 1);
+    let mut current = embed_hidden.detach();
+    boundaries.push(current.clone());
+    {
+        let mut linear_state = LinearAttentionState::new(model_config, device)?;
+        for &(start, end) in segments {
+            current = model_forward_segment(
+                backend_rt,
+                current,
+                weights,
+                model_config,
+                &positions,
+                start,
+                end,
+                Some(&mut linear_state),
+                Some(&lora_detached),
+            )?
+            .detach();
+            boundaries.push(current.clone());
+        }
+    }
+    let final_hidden = boundaries
+        .last()
+        .context("checkpointed OPD: missing final checkpoint boundary")?
+        .clone();
+    let normed = model_forward_final_norm(&final_hidden, weights, model_config)
+        .context("checkpointed OPD final norm")?;
+
+    #[cfg(feature = "vulkan")]
+    let head_owned;
+    #[cfg(feature = "vulkan")]
+    let head_for_loss: &kiln_tensor::Tensor = if matches!(normed.device(), kiln_tensor::Device::Vulkan(_))
+        && normed.dtype() == kiln_tensor::DType::F32
+        && head_t.dtype() == kiln_tensor::DType::BF16
+    {
+        head_owned = head_t
+            .to_dtype(kiln_tensor::DType::F32)
+            .context("checkpointed OPD: cast BF16 head_t -> F32 for Vulkan OPD loss")?;
+        &head_owned
+    } else {
+        head_t
+    };
+    #[cfg(not(feature = "vulkan"))]
+    let head_for_loss: &kiln_tensor::Tensor = head_t;
+
+    let loss = kiln_opd_loss_kernel::opd_top_k_reverse_kl_kt(
+        &normed,
+        head_for_loss,
+        &prepared.teacher_topk_indices,
+        &prepared.teacher_topk_logprobs,
+        &prepared.label_mask,
+        prepared.resolved_top_k,
+    )
+    .map_err(|e| anyhow!("checkpointed OPD scalar loss: {e}"))?;
+    let loss_val = loss.to_scalar::<f32>()? as f64;
+
+    let grad_loss = kiln_tensor::Tensor::from_vec_on(*device, vec![1.0f32], vec![])
+        .context("checkpointed OPD grad_loss seed")?;
+    let grad_normed = {
+        #[cfg(any(feature = "cuda", feature = "rocm"))]
+        if matches!(
+            normed.device(),
+            kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Rocm(_)
+        ) {
+            kiln_opd_loss_kernel::opd_top_k_reverse_kl_phase_b_bwd_kt(
+                &normed,
+                head_for_loss,
+                &prepared.teacher_topk_indices,
+                &prepared.teacher_topk_logprobs,
+                &prepared.label_mask,
+                &grad_loss,
+                prepared.resolved_top_k,
+                kiln_opd_loss_kernel::OpdLossOutputKt::ScalarMean,
+            )
+            .map_err(|e| anyhow!("checkpointed OPD fused hidden gradient: {e}"))?
+        } else {
+            kiln_opd_loss_kernel::kt_api::opd_top_k_reverse_kl_phase_b_bwd_composite_kt(
+                &normed,
+                head_for_loss,
+                &prepared.teacher_topk_indices,
+                &prepared.teacher_topk_logprobs,
+                &prepared.label_mask,
+                &grad_loss,
+                prepared.resolved_top_k,
+                kiln_opd_loss_kernel::OpdLossOutputKt::ScalarMean,
+            )
+            .map_err(|e| anyhow!("checkpointed OPD composite hidden gradient: {e}"))?
+        }
+        #[cfg(not(any(feature = "cuda", feature = "rocm")))]
+        {
+            kiln_opd_loss_kernel::kt_api::opd_top_k_reverse_kl_phase_b_bwd_composite_kt(
+                &normed,
+                head_for_loss,
+                &prepared.teacher_topk_indices,
+                &prepared.teacher_topk_logprobs,
+                &prepared.label_mask,
+                &grad_loss,
+                prepared.resolved_top_k,
+                kiln_opd_loss_kernel::OpdLossOutputKt::ScalarMean,
+            )
+            .map_err(|e| anyhow!("checkpointed OPD composite hidden gradient: {e}"))?
+        }
+    };
+    let mut upstream_grad = crate::trainer::rms_norm_backward_pre_final_norm(
+        &final_hidden,
+        &weights.final_norm,
+        &grad_normed,
+        model_config.rms_norm_eps,
+    )
+    .context("checkpointed OPD final RMSNorm backward")?
+    .detach();
+
+    let param_raw_ids: std::collections::HashSet<u64> = params
+        .all_params()
+        .iter()
+        .map(|p| p.tensor_id().as_raw())
+        .collect();
+    let mut grads = kiln_autograd::GradStore::new();
+    for seg_idx in (0..num_segments).rev() {
+        let (start, end) = segments[seg_idx];
+        let seg_input = boundaries[seg_idx].clone();
+        let seg_input_id = seg_input.id();
+        let seed = upstream_grad
+            .to_dtype(boundaries[seg_idx + 1].dtype())
+            .map_err(|e| anyhow!("checkpointed OPD: seed dtype cast (segment {seg_idx}): {e}"))?;
+        let positions_ref = &positions;
+        let lora_ref = &lora_weights;
+        let (kt_grads, candle_grads) =
+            kiln_kt_bridge::tape_bridge::with_tape_segment_backward_scope(seed, || {
+                let mut seg_ls = LinearAttentionState::new(model_config, device)
+                    .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?;
+                model_forward_segment(
+                    backend_rt,
+                    seg_input,
+                    weights,
+                    model_config,
+                    positions_ref,
+                    start,
+                    end,
+                    Some(&mut seg_ls),
+                    Some(lora_ref),
+                )
+                .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))
+            })
+            .map_err(|e| anyhow!("checkpointed OPD: segment {seg_idx} tape backward: {e}"))?;
+
+        for (candle_raw, g) in candle_grads {
+            let Some(param_raw) =
+                kiln_kt_bridge::tape_bridge::decode_kt_param_deposit(candle_raw as u64)
+            else {
+                continue;
+            };
+            if param_raw_ids.contains(&param_raw) {
+                let key = kiln_tensor_id::TensorId::from_raw(param_raw);
+                match grads.remove(key) {
+                    Some(prev) => grads.insert(
+                        key,
+                        kiln_tensor::ops::add(&prev, &g)
+                            .map_err(|e| anyhow!("checkpointed OPD: grad accumulate: {e}"))?,
+                    ),
+                    None => grads.insert(key, g),
+                }
+            }
+        }
+
+        if seg_idx > 0 {
+            upstream_grad = kt_grads.get(seg_input_id).cloned().ok_or_else(|| {
+                anyhow!(
+                    "checkpointed OPD: tape backward produced no input gradient for segment {seg_idx}"
+                )
+            })?;
         }
     }
 
@@ -4392,6 +4703,102 @@ mod tests {
             "tape-authoritative OPD routed grads to {} LoRA Vars but ALL were \
              zero (max_norm={max_norm}) — backward carried no signal",
             grads.len()
+        );
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn checkpointed_opd_tape_authoritative_grads_reach_lora_bf16() {
+        use crate::trainer::TrainableLoraParams;
+        use crate::trainer::tests::{CUDA_TEST_LOCK, tiny_config_bf16, tiny_weights_bf16};
+
+        let _cuda_guard = CUDA_TEST_LOCK.lock().expect("cuda test lock poisoned");
+        if !kiln_tensor::probe::cuda_is_available() {
+            eprintln!("checkpointed OPD tape grads (bf16): no CUDA device — skipping");
+            return;
+        }
+        let device = Device::Cuda(0);
+        unsafe {
+            std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
+            std::env::set_var("KILN_USE_TAPE_LORA_ADD", "1");
+            std::env::set_var("KILN_USE_TAPE_FLASH_ATTN", "1");
+            std::env::set_var("KILN_USE_TAPE_SDPA", "1");
+            std::env::set_var("KILN_USE_TAPE_GDN", "1");
+            std::env::set_var("KILN_USE_TAPE_GDN_GATED_NORM", "1");
+            std::env::set_var("KILN_USE_TAPE_GDN_QK_NORM", "1");
+            std::env::set_var("KILN_USE_TAPE_GDN_CONV", "1");
+        }
+
+        let config = tiny_config_bf16();
+        let weights = tiny_weights_bf16(&config, &device).expect("bf16 tiny weights on cuda");
+        let params =
+            TrainableLoraParams::initialize(&config, &weights, 4, 8.0, &device).expect("params");
+        let input_ids: Vec<u32> = vec![1, 5, 10, 3, 7, 2, 8];
+        let active_positions: Vec<usize> = vec![2, 3, 4, 5];
+        let top_k = 16usize;
+        let teacher: Arc<dyn LogitSource> = Arc::new(
+            crate::logit_source::DeterministicUniformLogitSource::new(
+                "checkpointed-opd-test",
+                config.vocab_size,
+                top_k,
+            ),
+        );
+        let backend = kiln_model::backend::for_device_kt(&device);
+        let segments = crate::trainer::compute_segment_boundaries(config.num_layers, 2);
+
+        let (loss_val, active_count, grads) =
+            checkpointed_opd_step_forward_backward_tape_authoritative(
+                &*backend,
+                &input_ids,
+                &weights,
+                &config,
+                &params,
+                &device,
+                &weights.embed_tokens_t,
+                teacher,
+                &active_positions,
+                OpdLossGranularity::TeacherTopK,
+                top_k,
+                None,
+                None,
+                &segments,
+            )
+            .expect("checkpointed tape-authoritative OPD step");
+
+        assert_eq!(active_count, active_positions.len());
+        assert!(
+            loss_val.is_finite() && loss_val > 0.0,
+            "checkpointed OPD loss {loss_val} is not finite-positive"
+        );
+        assert!(
+            !grads.is_empty(),
+            "checkpointed OPD produced no LoRA grads"
+        );
+        let var_kt_ids: std::collections::HashSet<kiln_tensor_id::TensorId> = params
+            .all_params()
+            .iter()
+            .map(|p| p.tensor_id())
+            .collect();
+        let mut nonzero_lora_grads = 0usize;
+        for (tid, g) in grads.iter() {
+            assert!(
+                var_kt_ids.contains(tid),
+                "grad key {tid:?} is not a LoRA Var id"
+            );
+            let flat = g
+                .to_dtype(kiln_tensor::DType::F32)
+                .expect("grad -> f32")
+                .flatten_all()
+                .expect("flatten grad")
+                .to_vec1::<f32>()
+                .expect("grad to vec");
+            if flat.iter().map(|x| x * x).sum::<f32>().sqrt() > 0.0 {
+                nonzero_lora_grads += 1;
+            }
+        }
+        assert!(
+            nonzero_lora_grads > 0,
+            "all checkpointed OPD LoRA grads were zero"
         );
     }
 

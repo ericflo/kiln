@@ -5040,30 +5040,58 @@ fn train_tokenized_grpo_group_with_grad_norms(
              `loss.backward()` / ECHO / candle-checkpointed GRPO producers were \
              removed in #1082."
         );
-        // `segments` (gradient checkpointing) is unused on the kt-only GRPO
-        // path: the tape IS the activation store, so there is no candle
-        // reverse-segment loop. Keep the binding silenced.
-        let _ = segments;
         let grads: GradSource = {
             #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
             {
-                let (lv, kt_grads) = grpo_step_forward_backward_tape_authoritative_kt(
-                    backend,
-                    &comp.input_ids,
-                    weights,
-                    model_config,
-                    params,
-                    &comp.action_mask,
-                    &ref_log_probs,
-                    loss_params,
-                    device,
-                    comp_idx,
-                    num_active,
-                    comp_env_count,
-                    streaming_tile_tokens,
-                    checkpoint_segments,
-                    timings.as_deref_mut(),
-                )?;
+                let (lv, kt_grads) = if let Some(segs) = segments {
+                    let step_started = Instant::now();
+                    let out = checkpointed_grpo_forward_backward_tape_authoritative_kt(
+                        backend,
+                        &comp.input_ids,
+                        weights,
+                        model_config,
+                        params,
+                        &comp.action_mask,
+                        &ref_log_probs,
+                        loss_params,
+                        segs,
+                        device,
+                    )?;
+                    let step_elapsed = step_started.elapsed();
+                    if let Some(t) = timings.as_deref_mut() {
+                        t.add_backward(step_elapsed);
+                    }
+                    tracing::info!(
+                        comp_idx,
+                        seq_len = comp.input_ids.len(),
+                        action_tokens = num_active,
+                        env_tokens = comp_env_count,
+                        checkpoint_segments,
+                        streaming_prefill = streaming_prefill_enabled_for(device, comp.input_ids.len()),
+                        streaming_tile_tokens,
+                        elapsed_ms = step_elapsed.as_millis() as u64,
+                        "GRPO step end (checkpointed tape-authoritative kt)"
+                    );
+                    out
+                } else {
+                    grpo_step_forward_backward_tape_authoritative_kt(
+                        backend,
+                        &comp.input_ids,
+                        weights,
+                        model_config,
+                        params,
+                        &comp.action_mask,
+                        &ref_log_probs,
+                        loss_params,
+                        device,
+                        comp_idx,
+                        num_active,
+                        comp_env_count,
+                        streaming_tile_tokens,
+                        checkpoint_segments,
+                        timings.as_deref_mut(),
+                    )?
+                };
                 loss_val = lv;
                 comp_echo_env_ce = None;
                 GradSource::Kt(kt_grads)
@@ -6242,6 +6270,49 @@ fn analytic_sft_tail_grad_pre_final_norm(
     Ok(grad_hidden_2d.unsqueeze(0)?)
 }
 
+pub(crate) fn rms_norm_backward_pre_final_norm(
+    hidden: &Tensor,
+    final_norm_weight: &Tensor,
+    grad_normed: &Tensor,
+    rms_norm_eps: f64,
+) -> Result<Tensor> {
+    let dims = hidden.dims().to_vec();
+    anyhow::ensure!(
+        dims.len() == 3,
+        "rms_norm_backward_pre_final_norm: hidden must be [batch, seq, hidden], got {dims:?}"
+    );
+    anyhow::ensure!(
+        grad_normed.dims() == hidden.dims(),
+        "rms_norm_backward_pre_final_norm: grad_normed shape {:?} != hidden shape {:?}",
+        grad_normed.dims(),
+        hidden.dims()
+    );
+    let hidden_size = dims[2];
+    anyhow::ensure!(
+        final_norm_weight.dims() == [hidden_size],
+        "rms_norm_backward_pre_final_norm: final_norm_weight shape {:?} != hidden size {hidden_size}",
+        final_norm_weight.dims()
+    );
+
+    let hidden_f32 = hidden.to_f32_dtype()?;
+    let grad_normed_f32 = grad_normed.to_f32_dtype()?;
+    let norm_weight = final_norm_weight.to_f32_dtype()?;
+    let norm_weight_plus_one = (norm_weight.ones_like()? + norm_weight)?;
+    let variance = hidden_f32.sqr()?.mean_keepdim(LAST_DIM)?;
+    let rms_inv = (variance + rms_norm_eps)?.sqrt()?.recip()?;
+
+    // Qwen RMSNorm: y = x * rsqrt(mean(x^2) + eps) * (1 + w).
+    // Given dL/dy, the pre-norm gradient is:
+    // u * r - x * r^3 / H * sum(u * x), where u = dL/dy * (1 + w).
+    let u = grad_normed_f32.broadcast_mul(&norm_weight_plus_one)?;
+    let dot = (&u * &hidden_f32)?.sum_keepdim(LAST_DIM)?;
+    let rms_inv_sq = rms_inv.sqr()?;
+    let rms_inv_cubed = rms_inv_sq.broadcast_mul(&rms_inv)?;
+    let correction_scale = rms_inv_cubed.affine(1.0f64 / hidden_size as f64, 0.0)?;
+    let correction = hidden_f32.broadcast_mul(&dot.broadcast_mul(&correction_scale)?)?;
+    Ok((u.broadcast_mul(&rms_inv)? - correction)?.detach())
+}
+
 
 
 /// Read `KILN_USE_FLCE` env var. When enabled, SFT training takes the
@@ -7332,34 +7403,68 @@ fn standard_forward_backward_tape_authoritative_kt(
 
     let (loss_val, _loss_kt, grads_by_candle_raw) =
         kiln_kt_bridge::tape_bridge::with_tape_authoritative_scope_kt(|| {
-            let logits = model_forward_kt(
-                backend,
-                input_ids,
-                weights,
-                model_config,
-                None,
-                Some(&mut linear_state),
-                Some(&lora_weights),
-            )
-            .context("tape-authoritative(kt) forward")
-            .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?;
-            // (#1082 keystone) Record the kt CE-from-logits tape root DIRECTLY and
-            // return the kt loss (no kt->candle scalar copy). `_kt` scope seeds the
-            // kt loss node directly — the candle round-trip is gone.
-            let loss_kt = kiln_model::tape_forward::try_tape_cross_entropy_from_logits_kt(
-                &logits,
-                input_ids,
-                label_mask,
-            )
-            .context("tape-authoritative(kt) cross_entropy_from_logits_kt")
-            .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?
-            .ok_or_else(|| {
-                kiln_kt_bridge::BridgeError::new(
-                    "tape-authoritative(kt) SFT: cross_entropy_from_logits_kt returned None \
-                     (kt CE envelope declined — expected [1, T, V] CUDA logits)"
-                        .to_string(),
+            let loss_kt = if use_flce() {
+                let normed = model_forward_no_head(
+                    backend,
+                    input_ids,
+                    weights,
+                    model_config,
+                    Some(&mut linear_state),
+                    Some(&lora_weights),
                 )
-            })?;
+                .context("tape-authoritative(kt) no-head forward")
+                .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?;
+                // Default SFT records the kt FLCE loss root against final normed hidden
+                // instead of materializing `[1, T, V]` logits. The frozen tied head
+                // receives no gradient; the FLCE tape node returns `dhidden`, keeping
+                // the LoRA path connected through `model_forward_no_head`.
+                kiln_autograd::with_active_tape(|tape| {
+                    kiln_flce_kernel::fused_linear_cross_entropy_phase_b_via_kt_tape(
+                        &normed,
+                        &weights.embed_tokens_t,
+                        input_ids,
+                        label_mask,
+                        DEFAULT_CHUNK_SIZE,
+                        tape,
+                    )
+                })
+                .ok_or_else(|| {
+                    kiln_kt_bridge::BridgeError::new(
+                        "tape-authoritative(kt) SFT FLCE: no active kt tape".to_string(),
+                    )
+                })?
+                .map_err(|e| {
+                    kiln_kt_bridge::BridgeError::new(format!(
+                        "tape-authoritative(kt) SFT FLCE kt-tape: {e}"
+                    ))
+                })?
+            } else {
+                let logits = model_forward_kt(
+                    backend,
+                    input_ids,
+                    weights,
+                    model_config,
+                    None,
+                    Some(&mut linear_state),
+                    Some(&lora_weights),
+                )
+                .context("tape-authoritative(kt) fallback full forward")
+                .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?;
+                kiln_model::tape_forward::try_tape_cross_entropy_from_logits_kt(
+                    &logits,
+                    input_ids,
+                    label_mask,
+                )
+                .context("tape-authoritative(kt) cross_entropy_from_logits_kt")
+                .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?
+                .ok_or_else(|| {
+                    kiln_kt_bridge::BridgeError::new(
+                        "tape-authoritative(kt) SFT: cross_entropy_from_logits_kt returned None \
+                         (kt CE envelope declined — expected [1, T, V] CUDA logits)"
+                            .to_string(),
+                    )
+                })?
+            };
             let loss_val = loss_kt
                 .to_scalar::<f32>()
                 .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("loss_kt.to_scalar: {e}")))?
@@ -7744,39 +7849,29 @@ fn grpo_step_forward_backward_tape_authoritative_kt(
 
     let (loss_val, _loss_kt, grads_by_candle_raw) =
         kiln_kt_bridge::tape_bridge::with_tape_authoritative_scope_kt(|| {
-            // Single policy forward (embed -> layers -> final RMSNorm -> lm_head).
-            // The LoRA adapters inside record onto the active tape; the lm_head
-            // output (logits) is retained so the GRPO loss root can thread it.
-            let policy_logits = model_forward_kt(
+            // Single policy forward through final RMSNorm, without materializing
+            // `[1, T, V]` logits. The GRPO loss root chunks the frozen tied head
+            // internally and records `dL/d(normed_hidden)` directly.
+            let policy_hidden = model_forward_no_head(
                 backend,
                 input_ids,
                 weights,
                 model_config,
-                None,
                 Some(&mut linear_state),
                 Some(&lora_weights),
             )
-            .context("GRPO tape-authoritative(kt) policy forward")
+            .context("GRPO tape-authoritative(kt) no-head policy forward")
             .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?;
 
-            // (#1082 DoD-100 step 8) `model_forward_kt` returns kt logits, and the
-            // GRPO scalar-loss adapter is now kt-native
-            // (`try_tape_grpo_pg_loss_from_logits_kt`): it takes the kt logits
-            // DIRECTLY — no [1, T, V] kt->candle copy. Recording against
-            // `policy_logits` (the lm_head kt tape output) keeps the tape CONNECTED
-            // back through the LoRA forward (consumer input id == producer output
-            // id). `ref_log_probs` is a detached constant denominator, passed kt
-            // as-is. (The adapter still RETURNS a detached candle scalar loss — the
-            // tape-authoritative seeding still reads a candle loss; flipping that is
-            // step 14.)
-            // Record the SCALAR GRPO PG (+ KL) loss as the tape root.
-            let loss = match crate::grpo_tape_shim::try_tape_grpo_pg_loss_from_logits_kt(
-                &policy_logits,
+            let loss = match crate::grpo_tape_shim::try_tape_grpo_pg_loss_from_normed_hidden_kt(
+                &policy_hidden,
+                &weights.embed_tokens_t,
                 input_ids,
                 action_mask,
                 &ref_log_probs,
                 loss_params,
                 device,
+                DEFAULT_CHUNK_SIZE,
             )
             .context("GRPO tape-authoritative(kt) scalar loss")
             .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?
@@ -7784,9 +7879,9 @@ fn grpo_step_forward_backward_tape_authoritative_kt(
                 Some(l) => l,
                 None => {
                     return Err(kiln_kt_bridge::BridgeError::new(
-                        "GRPO tape-authoritative(kt): try_tape_grpo_pg_loss_from_logits_kt \
+                        "GRPO tape-authoritative(kt): try_tape_grpo_pg_loss_from_normed_hidden_kt \
                          returned None (KILN_USE_TAPE_FORWARD off, empty active set, or \
-                         non-CUDA logits). The dispatch should keep this step on the candle \
+                         unsupported hidden/head tensors). The dispatch should keep this step on the candle \
                          path.",
                     ));
                 }
@@ -7864,6 +7959,170 @@ fn grpo_step_forward_backward_tape_authoritative_kt(
         elapsed_ms = step_elapsed.as_millis() as u64,
         "GRPO step end (tape-authoritative kt)"
     );
+
+    Ok((loss_val, grads))
+}
+
+#[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
+#[allow(clippy::too_many_arguments)]
+fn checkpointed_grpo_forward_backward_tape_authoritative_kt(
+    backend: &dyn BackendRuntime,
+    input_ids: &[u32],
+    weights: &GpuWeights,
+    model_config: &ModelConfig,
+    params: &TrainableLoraParams,
+    action_mask: &[bool],
+    ref_log_probs: &Tensor,
+    loss_params: GrpoLossParams,
+    segments: &[(usize, usize)],
+    device: &Device,
+) -> Result<(f64, kiln_autograd::GradStore)> {
+    let num_segments = segments.len();
+    anyhow::ensure!(
+        num_segments > 0,
+        "checkpointed GRPO requires at least one segment"
+    );
+    anyhow::ensure!(
+        input_ids.len() == action_mask.len(),
+        "input_ids/action_mask length mismatch: {} vs {}",
+        input_ids.len(),
+        action_mask.len()
+    );
+    anyhow::ensure!(
+        action_mask.get(1..).is_some_and(|m| m.iter().any(|&v| v)),
+        "checkpointed GRPO called with no active shifted action positions"
+    );
+
+    let positions: Vec<u32> = (0..input_ids.len()).map(|p| p as u32).collect();
+    let lora_detached = lora_weights_detached(params);
+    let lora_weights = params.as_lora_weights();
+
+    let (embed_hidden, _) = model_forward_embed(input_ids, weights)?;
+    let mut boundaries: Vec<Tensor> = Vec::with_capacity(num_segments + 1);
+    let mut current = embed_hidden.detach();
+    boundaries.push(current.clone());
+    {
+        let mut linear_state = LinearAttentionState::new(model_config, device)?;
+        for &(start, end) in segments {
+            current = model_forward_segment(
+                backend,
+                current,
+                weights,
+                model_config,
+                &positions,
+                start,
+                end,
+                Some(&mut linear_state),
+                Some(&lora_detached),
+            )?
+            .detach();
+            boundaries.push(current.clone());
+        }
+    }
+    let final_hidden = boundaries
+        .last()
+        .context("checkpointed GRPO: missing final checkpoint boundary")?
+        .clone();
+
+    let normed = model_forward_final_norm(&final_hidden, weights, model_config)
+        .context("checkpointed GRPO final norm")?;
+    let policy_log_probs = crate::grpo_tape_shim::selected_log_probs_from_normed_hidden_chunked_kt(
+        &normed,
+        &weights.embed_tokens_t,
+        input_ids,
+        action_mask,
+        DEFAULT_CHUNK_SIZE,
+        device,
+    )
+    .context("checkpointed GRPO selected policy log-probs")?;
+    let loss_kt =
+        grpo_loss(&policy_log_probs, ref_log_probs, loss_params, device).context("checkpointed GRPO loss")?;
+    let loss_val = loss_kt.to_scalar::<f32>()? as f64;
+    let grad_normed = crate::grpo_tape_shim::grpo_pg_loss_from_normed_hidden_grad_kt(
+        &normed,
+        &weights.embed_tokens_t,
+        input_ids,
+        action_mask,
+        &policy_log_probs,
+        ref_log_probs,
+        loss_params,
+        1.0,
+        device,
+        DEFAULT_CHUNK_SIZE,
+    )
+    .context("checkpointed GRPO hidden tail gradient")?;
+    let mut upstream_grad = rms_norm_backward_pre_final_norm(
+        &final_hidden,
+        &weights.final_norm,
+        &grad_normed,
+        model_config.rms_norm_eps,
+    )
+    .context("checkpointed GRPO final RMSNorm backward")?
+    .detach();
+
+    let param_raw_ids: std::collections::HashSet<u64> = params
+        .all_params()
+        .iter()
+        .map(|p| p.tensor_id().as_raw())
+        .collect();
+    let mut grads = kiln_autograd::GradStore::new();
+    for seg_idx in (0..num_segments).rev() {
+        let (start, end) = segments[seg_idx];
+        let seg_input = boundaries[seg_idx].clone();
+        let seg_input_id = seg_input.id();
+        let seg_output_dtype = boundaries[seg_idx + 1].dtype();
+        let seed = upstream_grad.to_dtype(seg_output_dtype).map_err(|e| {
+            anyhow::anyhow!("checkpointed GRPO: seed dtype cast (segment {seg_idx}): {e}")
+        })?;
+        let positions_ref = &positions;
+        let lora_ref = &lora_weights;
+        let (kt_grads, candle_grads) =
+            kiln_kt_bridge::tape_bridge::with_tape_segment_backward_scope(seed, || {
+                let mut seg_ls = LinearAttentionState::new(model_config, device)
+                    .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?;
+                model_forward_segment(
+                    backend,
+                    seg_input,
+                    weights,
+                    model_config,
+                    positions_ref,
+                    start,
+                    end,
+                    Some(&mut seg_ls),
+                    Some(lora_ref),
+                )
+                .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))
+            })
+            .map_err(|e| anyhow::anyhow!("checkpointed GRPO: segment {seg_idx} tape backward: {e}"))?;
+
+        for (candle_raw, g) in candle_grads {
+            let Some(param_raw) =
+                kiln_kt_bridge::tape_bridge::decode_kt_param_deposit(candle_raw as u64)
+            else {
+                continue;
+            };
+            if param_raw_ids.contains(&param_raw) {
+                let key = KtTensorId::from_raw(param_raw);
+                match grads.remove(key) {
+                    Some(prev) => grads.insert(
+                        key,
+                        kiln_tensor::ops::add(&prev, &g).map_err(|e| {
+                            anyhow::anyhow!("checkpointed GRPO: grad accumulate: {e}")
+                        })?,
+                    ),
+                    None => grads.insert(key, g),
+                }
+            }
+        }
+
+        if seg_idx > 0 {
+            upstream_grad = kt_grads.get(seg_input_id).cloned().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "checkpointed GRPO: tape backward produced no input gradient for segment {seg_idx}"
+                )
+            })?;
+        }
+    }
 
     Ok((loss_val, grads))
 }
@@ -8124,6 +8383,8 @@ pub(crate) mod tests {
     /// "monolithic baseline" forward pass. `cargo nextest run` runs each
     /// test in its own process, so this mutex is a no-op there.
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    #[cfg(feature = "cuda")]
+    pub(crate) static CUDA_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn restore_env(key: &str, prior: Option<String>) {
         unsafe {
@@ -10850,7 +11111,6 @@ pub(crate) mod tests {
     #[ignore = "#1082: candle-autograd oracle severed by kt rms_norm_fallback; \
                 port to kt-tape/finite-diff oracle (CP-4)"]
 
-    #[test]
     fn test_segment_boundaries() {
         // 32 layers, 4 segments → 8 each
         let segs = compute_segment_boundaries(32, 4);
@@ -11580,6 +11840,98 @@ pub(crate) mod tests {
         restore_env("KILN_GRAD_CHECKPOINT_SEGMENTS", prev_segs);
         restore_env("KILN_NO_GRAD_CHECKPOINT", prev_disable);
         Ok(())
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn checkpointed_grpo_tape_authoritative_grads_reach_lora_bf16() {
+        let _cuda_guard = CUDA_TEST_LOCK.lock().expect("cuda test lock poisoned");
+        if !kiln_tensor::probe::cuda_is_available() {
+            eprintln!("checkpointed GRPO tape grads (bf16): no CUDA device — skipping");
+            return;
+        }
+        let device = Device::Cuda(0);
+        unsafe {
+            std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
+            std::env::set_var("KILN_USE_TAPE_LORA_ADD", "1");
+            std::env::set_var("KILN_USE_TAPE_FLASH_ATTN", "1");
+            std::env::set_var("KILN_USE_TAPE_SDPA", "1");
+            std::env::set_var("KILN_USE_TAPE_GDN", "1");
+            std::env::set_var("KILN_USE_TAPE_GDN_GATED_NORM", "1");
+            std::env::set_var("KILN_USE_TAPE_GDN_QK_NORM", "1");
+            std::env::set_var("KILN_USE_TAPE_GDN_CONV", "1");
+            std::env::set_var("KILN_USE_TAPE_AUTHORITATIVE", "1");
+        }
+
+        let config = tiny_config_bf16();
+        let weights = tiny_weights_bf16(&config, &device).expect("bf16 tiny weights on cuda");
+        let params = TrainableLoraParams::initialize_seeded(
+            &config,
+            &weights,
+            4,
+            8.0,
+            &device,
+            Some(0xC4_EC_7E_D0_u64),
+        )
+        .expect("params");
+        let input_ids: Vec<u32> = vec![1, 5, 10, 3, 7, 2, 8];
+        let action_mask = vec![false, false, false, true, true, true, true];
+        let num_active = action_mask[1..].iter().filter(|&&m| m).count();
+        let ref_log_probs = zeros_f32_on(num_active, &device)
+            .expect("ref_log_probs")
+            .detach();
+        let loss_params = GrpoLossParams {
+            advantage: 1.0,
+            clip_low: 0.8,
+            clip_high: 1.2,
+            kl_coeff: 0.0,
+            kl_estimator: KlEstimator::None,
+            loss_normalizer: 1.0 / (num_active.max(1) as f64),
+            is_level: IsLevel::Token,
+            reinforce: true,
+            entropy_aware_kl_quantile: None,
+        };
+        let backend = backend::for_device_kt(&device);
+        let segments = compute_segment_boundaries(config.num_layers, 2);
+        let (loss_val, grads) = checkpointed_grpo_forward_backward_tape_authoritative_kt(
+            &*backend,
+            &input_ids,
+            &weights,
+            &config,
+            &params,
+            &action_mask,
+            &ref_log_probs,
+            loss_params,
+            &segments,
+            &device,
+        )
+        .expect("checkpointed GRPO tape-authoritative step");
+
+        assert!(loss_val.is_finite(), "GRPO loss not finite: {loss_val}");
+        assert!(!grads.is_empty(), "checkpointed GRPO produced no LoRA grads");
+        let var_kt_ids: std::collections::HashSet<KtTensorId> =
+            params.all_params().iter().map(|p| p.tensor_id()).collect();
+        let mut nonzero_lora_grads = 0usize;
+        for (tid, g) in grads.iter() {
+            assert!(
+                var_kt_ids.contains(tid),
+                "grad key {tid:?} is not a LoRA Var id"
+            );
+            let flat = g
+                .to_dtype(kiln_tensor::DType::F32)
+                .expect("grad -> f32")
+                .flatten_all()
+                .expect("flatten grad")
+                .to_vec1::<f32>()
+                .expect("grad to vec");
+            if flat.iter().map(|x| x * x).sum::<f32>().sqrt() > 0.0 {
+                nonzero_lora_grads += 1;
+            }
+        }
+        assert!(
+            nonzero_lora_grads > 0,
+            "all checkpointed GRPO LoRA grads were zero"
+        );
     }
 
     // ====================================================================
