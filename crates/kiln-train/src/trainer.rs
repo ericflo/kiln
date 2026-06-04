@@ -7919,31 +7919,20 @@ fn checkpointed_grpo_forward_backward_tape_authoritative_kt(
 
     let normed = model_forward_final_norm(&final_hidden, weights, model_config)
         .context("checkpointed GRPO final norm")?;
-    let policy_log_probs = crate::grpo_tape_shim::selected_log_probs_from_normed_hidden_chunked_kt(
-        &normed,
-        &weights.embed_tokens_t,
-        input_ids,
-        action_mask,
-        DEFAULT_CHUNK_SIZE,
-        device,
-    )
-    .context("checkpointed GRPO selected policy log-probs")?;
-    let loss_kt =
-        grpo_loss(&policy_log_probs, ref_log_probs, loss_params, device).context("checkpointed GRPO loss")?;
+    let (loss_kt, grad_normed) =
+        crate::grpo_tape_shim::grpo_pg_loss_from_normed_hidden_loss_and_grad_kt(
+            &normed,
+            &weights.embed_tokens_t,
+            input_ids,
+            action_mask,
+            ref_log_probs,
+            loss_params,
+            1.0,
+            device,
+            DEFAULT_CHUNK_SIZE,
+        )
+        .context("checkpointed GRPO tail loss/gradient")?;
     let loss_val = loss_kt.to_scalar::<f32>()? as f64;
-    let grad_normed = crate::grpo_tape_shim::grpo_pg_loss_from_normed_hidden_grad_kt(
-        &normed,
-        &weights.embed_tokens_t,
-        input_ids,
-        action_mask,
-        &policy_log_probs,
-        ref_log_probs,
-        loss_params,
-        1.0,
-        device,
-        DEFAULT_CHUNK_SIZE,
-    )
-    .context("checkpointed GRPO hidden tail gradient")?;
     let mut upstream_grad = rms_norm_backward_pre_final_norm(
         &final_hidden,
         &weights.final_norm,
