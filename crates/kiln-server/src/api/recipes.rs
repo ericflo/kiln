@@ -539,6 +539,7 @@ fn register_step_job(
         .insert(job_id.to_string(), info);
     state.training_queue.lock().unwrap().push(QueueEntry {
         job_id: job_id.to_string(),
+        reserved_bytes: 0,
         job: queued,
     });
 }

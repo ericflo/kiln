@@ -176,6 +176,7 @@ async fn submit_front_door(
         .insert(job_id.clone(), info);
     state.training_queue.lock().unwrap().push(QueueEntry {
         job_id: job_id.clone(),
+        reserved_bytes: 0,
         job: queued,
     });
 

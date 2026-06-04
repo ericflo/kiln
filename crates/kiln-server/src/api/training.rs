@@ -91,15 +91,19 @@ fn validate_grpo_jsonl_submission_head(
 /// `max_seq_len` is approximated upstream by the request-specific
 /// helper (`approximate_max_seq_len_sft` / `_grpo`) so this helper
 /// stays SFT/GRPO-agnostic.
+/// Validate a training submission fits in VRAM AND return the estimated per-step
+/// working-set bytes (so the caller can stash it on the queue entry and hold a
+/// governor reservation across the job — #24). Returns `Ok(0)` when no estimate
+/// is available (no memory signal / zero-length); callers skip the reservation.
 fn enforce_training_preflight(
     state: &AppState,
     max_seq_len: usize,
     options: EstimateOptions,
     lora_rank: usize,
     vk_native_recompute: bool,
-) -> Result<(), ApiError> {
+) -> Result<u64, ApiError> {
     if max_seq_len == 0 {
-        return Ok(());
+        return Ok(0);
     }
     let vram = kiln_memory::vram::detect_vram();
     let available = available_for_training_bytes(&vram);
@@ -107,7 +111,7 @@ fn enforce_training_preflight(
         // No memory signal at all — let the trainer be the line of
         // defense. Better than rejecting every submission on machines
         // where detection is misconfigured.
-        return Ok(());
+        return Ok(0);
     }
     let num_segments =
         kiln_train::CheckpointConfig::from_env(state.model_config.num_layers).num_segments;
@@ -161,7 +165,7 @@ fn enforce_training_preflight(
         );
         return Err(ApiError::training_will_not_fit(msg));
     }
-    Ok(())
+    Ok(estimate.total_bytes)
 }
 
 fn validate_grpo_submission_source(req: &GrpoRequest) -> Result<(), ApiError> {
@@ -251,7 +255,7 @@ async fn submit_sft(
         &req.examples,
         Some(state.tokenizer.as_ref()),
     );
-    enforce_training_preflight(
+    let reserved_bytes = enforce_training_preflight(
         &state,
         max_seq_len,
         EstimateOptions {
@@ -304,6 +308,7 @@ async fn submit_sft(
         let mut q = state.training_queue.lock().unwrap();
         q.push(QueueEntry {
             job_id: job_id.clone(),
+            reserved_bytes,
             job: QueuedJob::Sft(req),
         });
         q.len() // position = queue length after push (1-indexed)
@@ -399,7 +404,7 @@ async fn submit_grpo(
     // through the shared kt-tape (segment-checkpointed) path now, not the
     // deleted vk_native recompute fork, so the standard estimate applies.
     let max_seq_len = stats.max_seq_len;
-    enforce_training_preflight(
+    let reserved_bytes = enforce_training_preflight(
         &state,
         max_seq_len,
         EstimateOptions::default(),
@@ -436,6 +441,7 @@ async fn submit_grpo(
         let mut q = state.training_queue.lock().unwrap();
         q.push(QueueEntry {
             job_id: job_id.clone(),
+            reserved_bytes,
             job: QueuedJob::Grpo(req),
         });
         q.len()
@@ -578,6 +584,7 @@ async fn submit_opd(
         let mut q = state.training_queue.lock().unwrap();
         q.push(QueueEntry {
             job_id: job_id.clone(),
+            reserved_bytes: 0, // no preflight estimate for OPD
             job: QueuedJob::Opd(req),
         });
         q.len()
@@ -679,6 +686,7 @@ async fn submit_distill_refresh(
         let mut q = state.training_queue.lock().unwrap();
         q.push(QueueEntry {
             job_id: job_id.clone(),
+            reserved_bytes: 0, // no preflight estimate for distill refresh
             job: QueuedJob::DistillRefresh(req),
         });
         q.len()
@@ -840,6 +848,7 @@ fn register_and_enqueue_distill(
     let mut q = state.training_queue.lock().unwrap();
     q.push(QueueEntry {
         job_id: job_id.to_string(),
+        reserved_bytes: 0,
         job,
     });
 }
