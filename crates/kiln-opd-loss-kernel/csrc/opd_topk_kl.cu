@@ -1,10 +1,10 @@
 // Fused OPD top-K reverse-KL CUDA backward kernel.
 //
 // See `docs/plans/grand-plan-for-extraordinarily-great-on-policy-distillation-for-everyone.md`
-// §9.2 for the design. One launch produces d_hidden[t, h] for the
-// per-token reverse KL between the student's distribution (gathered
-// from `hidden @ head_t`) and the teacher's top-K distribution, both
-// renormalised over the K support.
+// §9.2 for the design. One launch writes active-row d_hidden entries into
+// a zero-filled full-sequence `[T, H]` output for the per-token reverse KL
+// between the student's distribution (gathered from `hidden @ head_t`) and
+// the teacher's top-K distribution, both renormalised over the K support.
 //
 // # Memory & arithmetic intensity
 //
@@ -128,14 +128,16 @@ __device__ __forceinline__ void block_reduce_k(
 //   ScalarMean   : upstream[t] = grad_loss / T_active
 //   PerPosition  : upstream[t] = grad_loss[t]
 //
-// Then d_hidden[t, h] = sum_k d_s_logits[t, k] * head_t[h, idx[t, k]].
+// Then d_hidden[active_pos[t], h] = sum_k d_s_logits[t, k] *
+// head_t[h, idx[t, k]].
 //
 // Implementation: same block layout as forward (one block per token, K
 // warps × 32 threads). We reproduce forward steps 1–3 to recover p_hat,
 // log_p_hat, log_q_hat, KL_t in shared memory; one warp lane writes
 // d_s_logits[k]; then ALL blockDim.x threads cooperatively stride over h
-// to compute d_hidden[t, h]. The per-h work is K mults + K adds + an
-// indexed read from head_t — small and well-balanced across threads.
+// to compute d_hidden[active_pos[t], h]. The per-h work is K mults +
+// K adds + an indexed read from head_t — small and well-balanced across
+// threads.
 //
 // OutputMode: 0 = ScalarMean, 1 = PerPosition.
 
@@ -145,9 +147,10 @@ __global__ void opd_topk_kl_bwd_kernel(
     const T* __restrict__ head_t,
     const uint32_t* __restrict__ topk_idx,
     const float* __restrict__ topk_lp_q,
+    const uint32_t* __restrict__ active_pos,
     const float* __restrict__ grad_loss,    // scalar (mode 0) or [T_active] (mode 1)
     float scale_factor,                      // (1/T_active) for ScalarMean, 1.0 for PerPosition
-    T* __restrict__ d_hidden,                // [T_active, H]
+    T* __restrict__ d_hidden,                // zero-filled [T, H]
     int hidden_size,
     int vocab_size,
     int t_active
@@ -244,9 +247,10 @@ __global__ void opd_topk_kl_bwd_kernel(
     }
     __syncthreads();
 
-    // ---- d_hidden[t, h] = sum_k d_s_logits[k] * head_t[h, idx[t, k]] ----
+    // ---- d_hidden[active_pos[t], h] = sum_k d_s_logits[k] * head_t[h, idx[t, k]] ----
     // All blockDim.x threads stride over h. For K=32 the inner loop is 32
     // gather-mul-adds with a known-small K; the compiler can unroll.
+    const uint32_t out_t = active_pos[t];
     const int stride = blockDim.x;
     for (int h = tid; h < hidden_size; h += stride) {
         float acc = 0.0f;
@@ -256,7 +260,7 @@ __global__ void opd_topk_kl_bwd_kernel(
             const float head_v = static_cast<float>(head_t[h * vocab_size + col]);
             acc += d_s_logits[k] * head_v;
         }
-        d_hidden[t * hidden_size + h] = static_cast<T>(acc);
+        d_hidden[out_t * hidden_size + h] = static_cast<T>(acc);
     }
 }
 
@@ -267,6 +271,7 @@ static int launch_bwd_for_k(
     const void* head_t,
     const void* topk_idx,
     const void* topk_lp_q,
+    const void* active_pos,
     const void* grad_loss,
     float scale_factor,
     void* d_hidden,
@@ -281,6 +286,7 @@ static int launch_bwd_for_k(
     const T* head_t_t = reinterpret_cast<const T*>(head_t);
     const uint32_t* idx = reinterpret_cast<const uint32_t*>(topk_idx);
     const float* lp_q = reinterpret_cast<const float*>(topk_lp_q);
+    const uint32_t* active = reinterpret_cast<const uint32_t*>(active_pos);
     const float* gl = reinterpret_cast<const float*>(grad_loss);
     T* dh = reinterpret_cast<T*>(d_hidden);
 
@@ -289,22 +295,22 @@ static int launch_bwd_for_k(
         dim3 block(16 * kWarpSize);
         if (output_mode == 0) {
             opd_topk_kl_bwd_kernel<T, 16, 0><<<grid, block, 0, stream>>>(
-                hidden_t, head_t_t, idx, lp_q, gl, scale_factor, dh,
+                hidden_t, head_t_t, idx, lp_q, active, gl, scale_factor, dh,
                 hidden_size, vocab_size, t_active);
         } else {
             opd_topk_kl_bwd_kernel<T, 16, 1><<<grid, block, 0, stream>>>(
-                hidden_t, head_t_t, idx, lp_q, gl, scale_factor, dh,
+                hidden_t, head_t_t, idx, lp_q, active, gl, scale_factor, dh,
                 hidden_size, vocab_size, t_active);
         }
     } else if (top_k == 32) {
         dim3 block(32 * kWarpSize);
         if (output_mode == 0) {
             opd_topk_kl_bwd_kernel<T, 32, 0><<<grid, block, 0, stream>>>(
-                hidden_t, head_t_t, idx, lp_q, gl, scale_factor, dh,
+                hidden_t, head_t_t, idx, lp_q, active, gl, scale_factor, dh,
                 hidden_size, vocab_size, t_active);
         } else {
             opd_topk_kl_bwd_kernel<T, 32, 1><<<grid, block, 0, stream>>>(
-                hidden_t, head_t_t, idx, lp_q, gl, scale_factor, dh,
+                hidden_t, head_t_t, idx, lp_q, active, gl, scale_factor, dh,
                 hidden_size, vocab_size, t_active);
         }
     } else {
@@ -349,6 +355,7 @@ extern "C" int32_t kiln_opd_topk_kl_bwd_bf16(
     const void* head_t,
     const void* topk_indices,
     const void* topk_lp_q,
+    const void* active_pos,
     const void* grad_loss,
     float scale_factor,
     void* d_hidden,
@@ -364,7 +371,7 @@ extern "C" int32_t kiln_opd_topk_kl_bwd_bf16(
     if (output_mode != 0 && output_mode != 1) return -2;
     cudaStream_t s = reinterpret_cast<cudaStream_t>(stream);
     return launch_bwd_for_k<__nv_bfloat16>(
-        hidden, head_t, topk_indices, topk_lp_q, grad_loss, scale_factor,
+        hidden, head_t, topk_indices, topk_lp_q, active_pos, grad_loss, scale_factor,
         d_hidden, hidden_size, vocab_size, t_active, top_k, output_mode, s);
 }
 
@@ -373,6 +380,7 @@ extern "C" int32_t kiln_opd_topk_kl_bwd_f32(
     const void* head_t,
     const void* topk_indices,
     const void* topk_lp_q,
+    const void* active_pos,
     const void* grad_loss,
     float scale_factor,
     void* d_hidden,
@@ -388,7 +396,7 @@ extern "C" int32_t kiln_opd_topk_kl_bwd_f32(
     if (output_mode != 0 && output_mode != 1) return -2;
     cudaStream_t s = reinterpret_cast<cudaStream_t>(stream);
     return launch_bwd_for_k<float>(
-        hidden, head_t, topk_indices, topk_lp_q, grad_loss, scale_factor,
+        hidden, head_t, topk_indices, topk_lp_q, active_pos, grad_loss, scale_factor,
         d_hidden, hidden_size, vocab_size, t_active, top_k, output_mode, s);
 }
 

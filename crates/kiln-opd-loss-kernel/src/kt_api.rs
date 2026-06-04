@@ -75,14 +75,6 @@ use kiln_tensor::{
 // again locally.
 use kiln_tensor::DType as KtDType;
 
-// `scatter_add` is the GPU fused backward's d_hidden scatter; the
-// composite imports it locally inside its body. Gating the top-level
-// import keeps the non-GPU lib build warning-clean. (Phase R.7) The
-// ROCm backward (`rocm` feature) shares the same FFI dispatch as CUDA,
-// so the gate widens to `any(cuda, rocm)`.
-#[cfg(any(feature = "cuda", feature = "rocm"))]
-use kiln_tensor::ops::scatter_add;
-
 #[cfg(any(feature = "cuda", feature = "rocm"))]
 use kiln_kt_bridge::BridgeError;
 
@@ -1022,9 +1014,8 @@ pub fn opd_top_k_reverse_kl_phase_b_bwd_composite_kt(
 /// # Returns
 ///
 /// `d_hidden` of shape `[1, T, H]` in the same dtype as `hidden`. The
-/// active-row gradients are computed by the fused kernel; non-active
-/// positions are zero (via `scatter_add` into a zero buffer along
-/// axis 0).
+/// active-row gradients are computed by the fused kernel directly into
+/// a zero-filled full-sequence output; non-active positions stay zero.
 ///
 /// # Errors
 ///
@@ -1156,10 +1147,11 @@ pub fn opd_top_k_reverse_kl_phase_b_bwd_kt(
         return Ok(zeros);
     }
 
-    // -- 3. Upload host-side teacher tensors + scatter inputs -----------
+    // -- 3. Upload host-side teacher tensors + row-map inputs ----------
     //
     // active_indices (U32, [T_active]) — both the gather of hidden rows
-    // and the scatter of d_hidden rows use the same index buffer.
+    // and the fused kernel's full-output row mapping use the same index
+    // buffer.
     let active_indices = upload_slice(
         Some(active_positions.as_slice()),
         None,
@@ -1260,9 +1252,13 @@ pub fn opd_top_k_reverse_kl_phase_b_bwd_kt(
         }
     };
 
-    // -- 4. Allocate output buffer [T_active, H] on device --------------
-    let d_hidden_active =
-        alloc_device_tensor_like(hidden, dtype, vec![active_count, hidden_size])?;
+    // -- 4. Allocate full output buffer [T, H] on device ----------------
+    //
+    // The fused kernel writes each active row directly at
+    // active_indices[t]. Because the allocation is zero-filled, inactive
+    // rows already have the correct gradient and no post-kernel scatter is
+    // needed.
+    let d_hidden_2d = alloc_device_tensor_like(hidden, dtype, vec![seq_len, hidden_size])?;
 
     // -- 5. Pull device pointers ----------------------------------------
     //
@@ -1274,9 +1270,10 @@ pub fn opd_top_k_reverse_kl_phase_b_bwd_kt(
     let i_ptr = device_input_ptr(&topk_idx_dev, KtDType::U32, "topk_idx")?;
     let l_ptr =
         device_input_ptr(&topk_lp_q_dev, KtDType::F32, "topk_lp_q")?;
+    let a_ptr = device_input_ptr(&active_indices, KtDType::U32, "active_indices")?;
     let g_ptr =
         device_input_ptr(&grad_loss_dev, KtDType::F32, "grad_loss")?;
-    let d_ptr = device_output_ptr(&d_hidden_active);
+    let d_ptr = device_output_ptr(&d_hidden_2d);
     let raw_stream = device_stream_raw_of(hidden, "stream")?;
 
     // -- 6. Dispatch the FFI --------------------------------------------
@@ -1292,6 +1289,7 @@ pub fn opd_top_k_reverse_kl_phase_b_bwd_kt(
                 head_ptr as *const _,
                 i_ptr as *const _,
                 l_ptr as *const _,
+                a_ptr as *const _,
                 g_ptr as *const _,
                 scale_factor,
                 d_ptr as *mut _,
@@ -1307,6 +1305,7 @@ pub fn opd_top_k_reverse_kl_phase_b_bwd_kt(
                 head_ptr as *const _,
                 i_ptr as *const _,
                 l_ptr as *const _,
+                a_ptr as *const _,
                 g_ptr as *const _,
                 scale_factor,
                 d_ptr as *mut _,
@@ -1330,34 +1329,7 @@ pub fn opd_top_k_reverse_kl_phase_b_bwd_kt(
         )));
     }
 
-    // -- 7. Scatter `[T_active, H]` back into `[T, H]`, unsqueeze to ---
-    //       `[1, T, H]`. `scatter_add` on CUDA supports axis=0 + 1-D
-    //       U32 indices + F32/BF16 values + contiguous inputs — the
-    //       exact envelope we built above.
-    //
-    // (Phase R.7) Like `index_select`, `scatter_add` has no `rocm_fwd`, so on
-    // ROCm `dispatch2` falls back to `cpu_fwd` without relocating operands to
-    // CPU — which then rejects the ROCm-backed values/indices ("storage must
-    // be CpuStorage"). Route the scatter through the host on ROCm (pull the
-    // [T_active, H] result, scatter on CPU into [T, H], upload back). CUDA
-    // keeps the native device scatter (byte-identical to the pre-R.7 path).
-    let d_hidden_2d = match dev.backend() {
-        #[cfg(feature = "rocm")]
-        Backend::Rocm => {
-            let rocm_idx = match dev {
-                KtDevice::Rocm(i) => i,
-                _ => 0,
-            };
-            let d_active_host = kiln_tensor::rocm_to_host_copy(&d_hidden_active)?;
-            let active_idx_host =
-                KtTensor::from_vec(active_positions.clone(), vec![active_count])?;
-            let scattered_host =
-                scatter_add(&d_active_host, 0, &active_idx_host, seq_len)?.contiguous()?;
-            kiln_tensor::host_to_rocm_copy(&scattered_host, rocm_idx)?
-        }
-        #[allow(unreachable_patterns)]
-        _ => scatter_add(&d_hidden_active, 0, &active_indices, seq_len)?,
-    };
+    // -- 7. Unsqueeze full `[T, H]` gradient to `[1, T, H]`. ------------
     let d_hidden_3d = d_hidden_2d.reshape(vec![1, seq_len, hidden_size])?;
     Ok(d_hidden_3d)
 }
@@ -1525,10 +1497,11 @@ mod tests {
         );
     }
 
-    /// Read a 1-D or 0-D F32 [`KtTensor`] into a Vec for assertions.
+    /// Read a F32 [`KtTensor`] into a Vec for assertions.
     fn read_f32(t: &KtTensor) -> Vec<f32> {
-        use kiln_tensor::CpuStorage;
-        let cpu = t
+        use kiln_tensor::{CpuStorage, Device as KtDevice};
+        let on_cpu = t.to_device(KtDevice::Cpu).expect("move tensor to CPU");
+        let cpu = on_cpu
             .storage()
             .as_any()
             .downcast_ref::<CpuStorage>()
@@ -1979,6 +1952,99 @@ mod tests {
         assert_eq!(out.shape(), &[1, 4, 8]);
         for v in read_f32(&out) {
             assert_eq!(v, 0.0);
+        }
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn cuda_bwd_matches_composite_with_sparse_active_rows() {
+        if kiln_tensor::primary_cuda_context(0).is_err() {
+            eprintln!("CUDA not available; skipping cuda_bwd_matches_composite");
+            return;
+        }
+
+        let seq_len = 6usize;
+        let hidden_size = 128usize;
+        let vocab = 256usize;
+        let top_k = 16usize;
+        let mask = vec![false, true, false, true, true, false];
+        let active_count = mask.iter().filter(|&&m| m).count();
+
+        let hidden_flat: Vec<f32> = (0..seq_len * hidden_size)
+            .map(|i| ((i as f32) * 0.13).sin() * 0.25 + (((i % 7) as f32) - 3.0) * 0.01)
+            .collect();
+        let head_flat: Vec<f32> = (0..hidden_size * vocab)
+            .map(|i| ((i as f32) * 0.07).cos() * 0.18 + (((i % 11) as f32) - 5.0) * 0.005)
+            .collect();
+
+        let mut idx: Vec<u32> = Vec::with_capacity(active_count * top_k);
+        for r in 0..active_count {
+            let base = r * 37 + 5;
+            for k in 0..top_k {
+                idx.push(((base + k * 11) % vocab) as u32);
+            }
+        }
+        let lp: Vec<f32> = (0..active_count * top_k)
+            .map(|i| -0.2 - ((i as f32) * 0.31).cos().abs())
+            .collect();
+        let grad_host = vec![0.25f32, -0.5, 0.75];
+
+        let hidden_cpu =
+            KtTensor::from_vec(hidden_flat.clone(), vec![1, seq_len, hidden_size]).unwrap();
+        let head_cpu = KtTensor::from_vec(head_flat.clone(), vec![hidden_size, vocab]).unwrap();
+        let grad_cpu = KtTensor::from_vec(grad_host.clone(), vec![active_count]).unwrap();
+        let expected = opd_top_k_reverse_kl_phase_b_bwd_composite_kt(
+            &hidden_cpu,
+            &head_cpu,
+            &idx,
+            &lp,
+            &mask,
+            &grad_cpu,
+            top_k,
+            OpdLossOutputKt::PerPosition,
+        )
+        .expect("composite backward");
+
+        let hidden_cuda =
+            KtTensor::cuda_from_slice(&hidden_flat, vec![1, seq_len, hidden_size], 0)
+                .expect("hidden cuda");
+        let head_cuda =
+            KtTensor::cuda_from_slice(&head_flat, vec![hidden_size, vocab], 0)
+                .expect("head cuda");
+        let grad_cuda =
+            KtTensor::cuda_from_slice(&grad_host, vec![active_count], 0).expect("grad cuda");
+        let got = opd_top_k_reverse_kl_phase_b_bwd_kt(
+            &hidden_cuda,
+            &head_cuda,
+            &idx,
+            &lp,
+            &mask,
+            &grad_cuda,
+            top_k,
+            OpdLossOutputKt::PerPosition,
+        )
+        .expect("cuda backward");
+
+        assert_eq!(got.shape(), &[1, seq_len, hidden_size]);
+        let expected_v = read_f32(&expected);
+        let got_v = read_f32(&got);
+        let mut max_abs = 0.0f32;
+        for (&a, &b) in expected_v.iter().zip(got_v.iter()) {
+            max_abs = max_abs.max((a - b).abs());
+        }
+        assert!(
+            max_abs < 5e-3,
+            "CUDA fused OPD backward mismatch: max_abs={max_abs:.3e}"
+        );
+
+        for (t, active) in mask.iter().copied().enumerate() {
+            if !active {
+                let row = &got_v[t * hidden_size..(t + 1) * hidden_size];
+                assert!(
+                    row.iter().all(|v| v.abs() < 1e-7),
+                    "inactive row {t} should stay zero"
+                );
+            }
         }
     }
 }
