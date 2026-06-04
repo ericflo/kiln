@@ -1684,9 +1684,24 @@ impl AppState {
                 // gets headroom under pressure. Device-synced inside (race-free).
                 #[cfg(feature = "cuda")]
                 if let kiln_tensor::Device::Cuda(idx) = device_kt {
+                    // (#32) cudarc allocates from the stream-ordered mempool
+                    // (cuMemAllocAsync). Its RELEASE_THRESHOLD defaults to 0, so
+                    // the pool returns every freed page to the OS at each sync —
+                    // perf-churny AND it leaves cuda_trim_pool nothing to reclaim
+                    // (the governor's CUDA reclaimer was a redundant no-op). Raise
+                    // the threshold so the pool HOARDS freed pages for fast reuse,
+                    // turning the reclaimer below into the real release valve that
+                    // trims the hoard back to the OS under memory pressure.
+                    let _ = kiln_tensor::cuda_set_pool_release_threshold(idx, u64::MAX);
                     kiln_memory::MemoryGovernor::global().register_reclaimer(move |_target| {
+                        // Measure bytes actually returned to the OS via the live
+                        // free-VRAM delta (the driver doesn't report trim yield).
+                        let before =
+                            kiln_tensor::cuda_mem_get_info(idx).map(|(f, _)| f).unwrap_or(0);
                         let _ = kiln_tensor::cuda_trim_pool(idx, 0);
-                        0 // driver doesn't surface bytes freed; mirror ROCm, report 0
+                        let after =
+                            kiln_tensor::cuda_mem_get_info(idx).map(|(f, _)| f).unwrap_or(0);
+                        after.saturating_sub(before) as u64
                     });
                 }
                 // Metal: UMA — shared-mode buffers are CPU-addressable, there is no
