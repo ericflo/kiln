@@ -534,12 +534,56 @@ impl PagedKvCacheKt {
                 staged.push(make_resized(&layers, layer_idx)?);
             }
             *layers = staged;
-        } else {
-            // SHRINK: in-place per layer so each old pool frees before the next
-            // alloc (bounded VRAM). Effectively atomic — see method doc.
+        } else if copy_slots == 0 {
+            // Degenerate shrink-to-zero (no surviving KV): just allocate the new
+            // (empty/tiny) pools per layer.
             for layer_idx in 0..layers.len() {
-                let resized = make_resized(&layers, layer_idx)?;
-                layers[layer_idx] = resized;
+                layers[layer_idx] = make_resized(&layers, layer_idx)?;
+            }
+        } else {
+            // SHRINK — HOST-STAGED so device VRAM is STRICTLY NON-INCREASING (#38).
+            // For a shrink the surviving prefix `[0, copy_slots)` IS the entire new
+            // pool (copy_slots == new_total_slots), so per layer we: (1) D2H the
+            // K/V prefix into host RAM, (2) DROP the old pool — freeing its VRAM
+            // NOW, (3) H2D the prefix back as the new, smaller device pool. Peak
+            // device VRAM per layer never exceeds the OLD layer size — no one-layer
+            // overshoot, unlike the D2D alloc-then-drop which transiently held
+            // `old + new`. Cost: one D2H + H2D per layer; resize is rare.
+            debug_assert_eq!(
+                copy_slots, new_total_slots,
+                "shrink: surviving prefix must be the whole new pool"
+            );
+            let cpu = kiln_tensor::Device::Cpu;
+            for layer_idx in 0..layers.len() {
+                sync_device_for_resize(device)?;
+                // 1. D2H the surviving K/V prefix (independent host copies).
+                let host_k = layers[layer_idx]
+                    .0
+                    .narrow(0, 0, copy_slots)
+                    .and_then(|p| p.contiguous())
+                    .and_then(|p| p.to_device(cpu))
+                    .map_err(|e| anyhow::anyhow!("physical_resize_to: D2H k l{layer_idx}: {e}"))?;
+                let host_v = layers[layer_idx]
+                    .1
+                    .narrow(0, 0, copy_slots)
+                    .and_then(|p| p.contiguous())
+                    .and_then(|p| p.to_device(cpu))
+                    .map_err(|e| anyhow::anyhow!("physical_resize_to: D2H v l{layer_idx}: {e}"))?;
+                // 2. Drop the old layer's VRAM by overwriting with the host copies.
+                layers[layer_idx] = (host_k, host_v);
+                sync_device_for_resize(device)?;
+                // 3. H2D the prefix back as the new (smaller) device pool.
+                let new_k = layers[layer_idx]
+                    .0
+                    .to_device(device)
+                    .and_then(|t| t.contiguous())
+                    .map_err(|e| anyhow::anyhow!("physical_resize_to: H2D k l{layer_idx}: {e}"))?;
+                let new_v = layers[layer_idx]
+                    .1
+                    .to_device(device)
+                    .and_then(|t| t.contiguous())
+                    .map_err(|e| anyhow::anyhow!("physical_resize_to: H2D v l{layer_idx}: {e}"))?;
+                layers[layer_idx] = (new_k, new_v);
             }
         }
         self.num_blocks
