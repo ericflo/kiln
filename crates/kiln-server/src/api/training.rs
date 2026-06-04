@@ -557,6 +557,28 @@ async fn submit_opd(
     // replay / hot-swap / receipt semantics as SFT and GRPO. Wiring
     // OPD into the SFT/GRPO working-set preflight (so the §8.5
     // capacity calc applies) is a follow-up.
+    // Working-set reservation (#36): OPD previously skipped the preflight
+    // entirely (no VRAM check, no governor reservation). Estimate its footprint
+    // — longest prompt + rollout budget — and reserve it like SFT/GRPO, so the
+    // KV autoscaler accounts for OPD and a too-large job is rejected instead of
+    // OOMing mid-run.
+    let opd_max_seq_len = training_preflight::approximate_max_seq_len_opd(
+        &req.prompts,
+        req.config.max_tokens,
+        Some(state.tokenizer.as_ref()),
+    );
+    let reserved_bytes = enforce_training_preflight(
+        &state,
+        opd_max_seq_len,
+        EstimateOptions {
+            max_supervised_tokens: None,
+            recompute_boundaries:
+                training_preflight::recompute_checkpoint_boundaries_for_seq_len(opd_max_seq_len),
+        },
+        req.config.lora_rank,
+        false,
+    )?;
+
     let info = TrainingJobInfo {
         job_id: job_id.clone(),
         adapter_name: adapter_name.clone(),
@@ -584,7 +606,7 @@ async fn submit_opd(
         let mut q = state.training_queue.lock().unwrap();
         q.push(QueueEntry {
             job_id: job_id.clone(),
-            reserved_bytes: 0, // no preflight estimate for OPD
+            reserved_bytes, // #36: OPD working-set reservation (preflight estimate)
             job: QueuedJob::Opd(req),
         });
         q.len()

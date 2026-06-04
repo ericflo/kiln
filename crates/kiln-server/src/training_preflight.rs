@@ -567,6 +567,24 @@ pub fn approximate_max_seq_len_grpo(
         .unwrap_or(0)
 }
 
+/// Approximate the longest training sequence an OPD job builds: the longest
+/// chat-templated prompt plus the rollout budget (`max_tokens`). Off-policy
+/// dataset jobs (empty `prompts`, fed by `dataset_path`) fall back to the
+/// rollout budget alone — an under-estimate the trainer's own guard backstops,
+/// but enough to give the governor a non-zero working-set reservation.
+pub fn approximate_max_seq_len_opd(
+    prompts: &[kiln_train::opd::OpdPrompt],
+    max_tokens: usize,
+    tokenizer: Option<&KilnTokenizer>,
+) -> usize {
+    let longest_prompt = prompts
+        .iter()
+        .map(|p| approximate_tokens_for_messages(&p.messages, tokenizer))
+        .max()
+        .unwrap_or(0);
+    longest_prompt + max_tokens
+}
+
 pub fn approximate_max_seq_len_grpo_group(
     group: &GrpoGroup,
     tokenizer: Option<&KilnTokenizer>,

@@ -459,6 +459,91 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // ROCm regression lock (#33) — the OPD tape envelope + scalar backward must
+    // stay open on ROCm. A future refactor that drops `Device::Rocm(_)` from
+    // `envelope_ok` (kt_tape.rs:106) would silently route ROCm OPD back to an
+    // Ok(None) decline → empty grads; this catches that.
+    // -----------------------------------------------------------------------
+    #[cfg(feature = "rocm")]
+    mod rocm {
+        use super::*;
+
+        fn rocm_f32(shape: Vec<usize>, seed: u64) -> KtTensor {
+            let n: usize = shape.iter().product();
+            let mut s = seed.wrapping_mul(0x9E3779B97F4A7C15);
+            let data: Vec<f32> = (0..n)
+                .map(|_| {
+                    s ^= s << 13;
+                    s ^= s >> 7;
+                    s ^= s << 17;
+                    ((s >> 40) as f32 / (1u64 << 24) as f32) - 0.5
+                })
+                .collect();
+            KtTensor::from_vec_on(kiln_tensor::Device::Rocm(0), data, shape).expect("rocm tensor")
+        }
+
+        #[test]
+        fn rocm_opd_tape_envelope_open_and_backward_finite() {
+            if !kiln_tensor::rocm_is_available() {
+                eprintln!("skip rocm_opd_tape: no ROCm device");
+                return;
+            }
+            let (seq_len, hidden_size, vocab_size, top_k) = (4usize, 128usize, 256usize, 16usize);
+            let h = rocm_f32(vec![1, seq_len, hidden_size], 1);
+            let w = rocm_f32(vec![hidden_size, vocab_size], 2);
+            // Minimal teacher top-k metadata: alternating active rows; per active
+            // row, K distinct indices < vocab + K teacher logprobs.
+            let label_mask: Vec<bool> = (0..seq_len).map(|i| i % 2 == 0).collect();
+            let active = label_mask.iter().filter(|m| **m).count();
+            let mut indices: Vec<u32> = Vec::with_capacity(active * top_k);
+            let mut logprobs: Vec<f32> = Vec::with_capacity(active * top_k);
+            for r in 0..active {
+                for j in 0..top_k {
+                    indices.push((((r * 7 + j * 3) % vocab_size) as u32).min(vocab_size as u32 - 1));
+                    logprobs.push(-((j as f32) * 0.3 + 0.5));
+                }
+            }
+
+            // Locks the envelope's ROCm device arm + the top_k ∈ {16,32} gate.
+            assert!(
+                envelope_ok(&h, &w, top_k),
+                "OPD envelope_ok must accept ROCm F32 + K=16 (regression: #1454 gate)"
+            );
+
+            let mut tape = Tape::new();
+            let loss = opd_top_k_reverse_kl_phase_b_via_kt_tape(
+                &h,
+                &w,
+                &indices,
+                &logprobs,
+                &label_mask,
+                top_k,
+                &mut tape,
+            )
+            .expect("via_kt_tape must record on ROCm (envelope open)");
+            assert_eq!(tape.len(), 1, "OPD records exactly one tape node on ROCm");
+
+            // Scalar-loss backward → finite d_hidden through flash_attn-free path.
+            let seed = KtTensor::from_vec_on(kiln_tensor::Device::Rocm(0), vec![1.0f32], vec![])
+                .expect("scalar seed");
+            let grads = tape
+                .backward(loss.id(), seed, |a, b| kiln_tensor::ops::add(a, b))
+                .expect("OPD tape backward on ROCm");
+            let dh = grads.get(h.id()).expect("d_hidden present");
+            let dh_v: Vec<f32> = dh
+                .to_dtype(KtDType::F32)
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .to_vec()
+                .unwrap();
+            assert!(dh_v.iter().all(|x| x.is_finite()), "non-finite OPD d_hidden on ROCm");
+            assert!(dh_v.iter().any(|&x| x != 0.0), "OPD d_hidden all-zero on ROCm (dead backward)");
+            eprintln!("[rocm-opd-tape] OK: envelope open, 1 node, finite non-zero d_hidden");
+        }
+    }
+
+    // -----------------------------------------------------------------------
     // CUDA-gated E2E tests — record + backward.apply round-trip.
     // -----------------------------------------------------------------------
 

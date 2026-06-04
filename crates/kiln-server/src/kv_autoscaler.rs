@@ -112,7 +112,12 @@ fn run(
     }
 
     loop {
-        std::thread::sleep(TICK);
+        // Event-driven (#35): wake immediately when the budget changes (a
+        // training reservation taken → shrink; a job ends/reservation drops →
+        // grow KV back) rather than always waiting out the poll tick. The TICK
+        // timeout still backstops EXTERNAL changes (a coexisting process) that
+        // only the periodic probe sees.
+        gov.wait_for_change(TICK);
         if last_resize.elapsed() < COOLDOWN {
             continue;
         }
