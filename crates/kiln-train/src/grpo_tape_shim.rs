@@ -600,6 +600,94 @@ mod tests {
     #[cfg(feature = "cuda")]
     use rand::{RngExt, SeedableRng};
 
+    /// ROCm regression lock (#33): the GRPO tape-authoritative PG-loss recorder
+    /// must STAY OPEN on ROCm. A refactor that drops `Device::Rocm(_)` from the
+    /// device gate (grpo_tape_shim.rs:520) or `tape_auth_eligible`
+    /// (trainer.rs:4919) would make this return Ok(None) → fall to the dead
+    /// post-#1082 candle path → EMPTY grad store (silent broken GRPO). This
+    /// catches that: it must record a node and emit a finite, non-zero d_logits.
+    #[cfg(feature = "rocm")]
+    #[test]
+    fn rocm_grpo_pg_loss_records_and_backprops() {
+        use crate::trainer::{token_log_probs, GrpoLossParams};
+        use crate::{IsLevel, KlEstimator};
+        use kiln_tensor::{DType as KtDType, Tensor as KtTensor};
+
+        if !kiln_tensor::rocm_is_available() {
+            eprintln!("[GRPO-ROCm] no ROCm device — skipping");
+            return;
+        }
+        unsafe {
+            std::env::set_var("KILN_USE_TAPE_FORWARD", "1");
+        }
+        let device = kiln_tensor::Device::Rocm(0);
+        let (seq_len, vocab) = (6usize, 16usize);
+        let input_ids: Vec<u32> = vec![1, 5, 10, 3, 7, 2];
+        let action_mask = vec![false, false, true, true, false, true];
+        let num_active = action_mask[1..].iter().filter(|m| **m).count();
+        // Deterministic BF16 logits [1, T, V] on ROCm (the server path is BF16).
+        let logits_host: Vec<f32> = (0..seq_len * vocab)
+            .map(|i| (((i * 31) % 19) as f32 - 9.0) * 0.07)
+            .collect();
+        let logits = KtTensor::from_vec_on(device, logits_host, vec![1, seq_len, vocab])
+            .unwrap()
+            .to_dtype(KtDType::BF16)
+            .unwrap();
+        // ref_log_probs = the fixture's own policy log-probs minus 0.1 (in-range ratio).
+        let plp: Vec<f32> = token_log_probs(&logits, &input_ids, &action_mask, &device)
+            .unwrap()
+            .to_dtype(KtDType::F32)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec()
+            .unwrap();
+        let ref_host: Vec<f32> = plp.iter().map(|&p| p - 0.1).collect();
+        let ref_kt = KtTensor::from_vec_on(device, ref_host, vec![num_active]).unwrap();
+        let params = GrpoLossParams {
+            advantage: -0.7,
+            clip_low: 0.2,
+            clip_high: 0.2,
+            kl_coeff: 0.1,
+            kl_estimator: KlEstimator::K1,
+            loss_normalizer: 1.0,
+            is_level: IsLevel::Token,
+            reinforce: false,
+            entropy_aware_kl_quantile: None,
+        };
+
+        let (res, tape) = kiln_autograd::with_thread_local_tape(|| {
+            super::try_tape_grpo_pg_loss_from_logits_kt(
+                &logits,
+                &input_ids,
+                &action_mask,
+                &ref_kt,
+                params,
+                &device,
+            )
+        });
+        let loss = res
+            .expect("try_tape_grpo_pg_loss_from_logits_kt errored")
+            .expect("returned None on ROCm — GRPO tape gate REJECTED Rocm (regression #1454)");
+        assert!(tape.len() >= 1, "GRPO must record a tape node on ROCm");
+
+        let seed = KtTensor::from_vec_on(device, vec![1.0f32], vec![]).unwrap();
+        let grads = tape
+            .backward(loss.id(), seed, |a, b| kiln_tensor::ops::add(a, b))
+            .expect("GRPO tape backward on ROCm");
+        let dl = grads.get(logits.id()).expect("d_logits present");
+        let dl_v: Vec<f32> = dl
+            .to_dtype(KtDType::F32)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec()
+            .unwrap();
+        assert!(dl_v.iter().all(|x| x.is_finite()), "non-finite GRPO d_logits on ROCm");
+        assert!(dl_v.iter().any(|&x| x != 0.0), "GRPO d_logits all-zero on ROCm (empty grads)");
+        eprintln!("[GRPO-ROCm] OK: recorded {} node(s), finite non-zero d_logits", tape.len());
+    }
+
     /// Validate the analytic kt-native GRPO logit-grad
     /// (`grpo_pg_loss_from_logits_grad_kt`, with `grad_scalar = 1.0`) against
     /// an INDEPENDENT central finite-difference of the FULL GRPO loss composite
