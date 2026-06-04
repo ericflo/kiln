@@ -2770,10 +2770,11 @@ pub fn opd_train(
                     #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm")))]
                     {
                         anyhow::bail!(
-                            "opd_train: OPD training requires a CUDA or Metal build — the \
-                             kt tape-authoritative grad path (the sole grad producer \
-                             after the #1082 candle-drop) records kt GPU ops and \
-                             is gated behind `feature = \"cuda\"` / `feature = \"metal\"`"
+                            "opd_train: OPD training requires a CUDA / Metal / Vulkan / ROCm \
+                             build — the kt tape-authoritative grad path (the sole grad \
+                             producer after the #1082 candle-drop) records kt GPU ops and is \
+                             gated behind `feature = \"cuda\"` / `\"metal\"` / `\"vulkan\"` / \
+                             `\"rocm\"`"
                         );
                     }
                 };
