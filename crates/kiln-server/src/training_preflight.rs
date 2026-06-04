@@ -10,7 +10,7 @@
 
 use kiln_core::config::{DType, ModelConfig};
 use kiln_core::tokenizer::KilnTokenizer;
-use kiln_core::vram::{GpuVramInfo, VramSource};
+use kiln_memory::vram::{GpuVramInfo, VramSource};
 use kiln_train::{GrpoGroup, SftExample};
 
 /// What the trainer can rely on being deduplicated across CPU and GPU.
@@ -642,7 +642,7 @@ pub fn format_oom_message_with_source(
     available_bytes: u64,
     lora_rank: usize,
     num_segments: usize,
-    vram_source: Option<kiln_core::vram::VramSource>,
+    vram_source: Option<kiln_memory::vram::VramSource>,
 ) -> String {
     let est_gb = estimate.total_bytes as f64 / BYTES_PER_GB as f64;
     let avail_gb = available_bytes as f64 / BYTES_PER_GB as f64;
@@ -672,7 +672,7 @@ pub fn format_oom_message_with_source(
 mod tests {
     use super::*;
     use kiln_core::config::ModelConfig;
-    use kiln_core::vram::{GpuVramInfo, VramSource};
+    use kiln_memory::vram::{GpuVramInfo, VramSource};
     use std::sync::Mutex;
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());

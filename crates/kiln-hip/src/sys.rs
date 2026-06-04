@@ -68,6 +68,23 @@ unsafe extern "C" {
         attr: c_uint,
         value: *mut c_void,
     ) -> hipError_t;
+    // Read a pool attribute (e.g. ReservedMemCurrent / UsedMemCurrent). The
+    // process-isolated way to measure how much VRAM kiln's own pool reserves vs
+    // actively uses — immune to coexisting processes (unlike the DRM counters).
+    pub fn hipMemPoolGetAttribute(
+        pool: *mut c_void,
+        attr: c_uint,
+        value: *mut c_void,
+    ) -> hipError_t;
+    // Release pooled-but-unused memory back to the OS, keeping at least
+    // `min_bytes_to_hold` cached. Safe to call only when no in-flight work is
+    // touching the freed blocks (i.e. after a device/stream sync) — that's how
+    // we return VRAM to the OS / a coexisting process without re-introducing the
+    // async-free decode race that the release-threshold pin prevents.
+    pub fn hipMemPoolTrimTo(pool: *mut c_void, min_bytes_to_hold: usize) -> hipError_t;
+    // Free/total device memory (the device-API counterpart to the OS-level
+    // sysfs probe). Useful for a discrete-GPU cross-check.
+    pub fn hipMemGetInfo(free: *mut usize, total: *mut usize) -> hipError_t;
     pub fn hipMemcpyHtoDAsync(
         dst: *mut c_void,
         src: *mut c_void,

@@ -1385,6 +1385,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "kiln-memory"
+version = "0.2.19"
+dependencies = [
+ "tracing",
+]
+
+[[package]]
 name = "kiln-model"
 version = "0.2.19"
 dependencies = [
@@ -1402,6 +1409,7 @@ dependencies = [
  "kiln-hip",
  "kiln-kt-bridge",
  "kiln-marlin-gemm",
+ "kiln-memory",
  "kiln-nvtx",
  "kiln-rmsnorm-kernel",
  "kiln-tensor",
@@ -1514,6 +1522,7 @@ dependencies = [
  "kiln-core",
  "kiln-eval",
  "kiln-kt-bridge",
+ "kiln-memory",
  "kiln-model",
  "kiln-scheduler",
  "kiln-tensor",
@@ -1551,6 +1560,7 @@ dependencies = [
  "kiln-autograd",
  "kiln-blas",
  "kiln-hip",
+ "kiln-memory",
  "kiln-rocblas",
  "kiln-tensor-id",
  "kiln-vulkan-kernel",
@@ -1581,6 +1591,7 @@ dependencies = [
  "kiln-eval",
  "kiln-flce-kernel",
  "kiln-kt-bridge",
+ "kiln-memory",
  "kiln-model",
  "kiln-opd-loss-kernel",
  "kiln-optim",

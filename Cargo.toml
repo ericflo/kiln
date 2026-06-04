@@ -10,6 +10,7 @@ members = [
     "crates/kiln-gdn-kernel",
     "crates/kiln-kt-bridge",
     "crates/kiln-marlin-gemm",
+    "crates/kiln-memory",
     "crates/kiln-model",
     "crates/kiln-nvtx",
     "crates/kiln-autograd",
@@ -65,6 +66,7 @@ default-members = [
     # now an optional (default-on) feature so candle-free consumers can
     # opt out with `default-features = false`. (#1082)
     "crates/kiln-kt-bridge",
+    "crates/kiln-memory",
     "crates/kiln-model",
     "crates/kiln-mps",
     "crates/kiln-nvtx",
@@ -159,6 +161,7 @@ kiln-hip = { path = "crates/kiln-hip" }
 kiln-rocblas = { path = "crates/kiln-rocblas" }
 kiln-kt-bridge = { path = "crates/kiln-kt-bridge" }
 kiln-marlin-gemm = { path = "crates/kiln-marlin-gemm" }
+kiln-memory = { path = "crates/kiln-memory" }
 kiln-nvtx = { path = "crates/kiln-nvtx" }
 kiln-opd-loss-kernel = { path = "crates/kiln-opd-loss-kernel" }
 kiln-rmsnorm-kernel = { path = "crates/kiln-rmsnorm-kernel" }

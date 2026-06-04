@@ -101,7 +101,7 @@ fn enforce_training_preflight(
     if max_seq_len == 0 {
         return Ok(());
     }
-    let vram = kiln_core::vram::detect_vram();
+    let vram = kiln_memory::vram::detect_vram();
     let available = available_for_training_bytes(&vram);
     if available == u64::MAX {
         // No memory signal at all — let the trainer be the line of
@@ -128,9 +128,9 @@ fn enforce_training_preflight(
     // process, so treat it as a post-load budget as well.
     let weights_already_resident = matches!(
         vram.source,
-        kiln_core::vram::VramSource::LinuxDrmSysfsUnified
-            | kiln_core::vram::VramSource::AppleSilicon
-            | kiln_core::vram::VramSource::EnvOverride
+        kiln_memory::vram::VramSource::LinuxDrmSysfsUnified
+            | kiln_memory::vram::VramSource::AppleSilicon
+            | kiln_memory::vram::VramSource::EnvOverride
     );
     let estimate = if vk_native_recompute {
         estimate_vk_native_recompute_working_set(

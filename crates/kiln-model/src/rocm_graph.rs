@@ -390,6 +390,21 @@ impl RocmGraphRunner {
                 );
             }
 
+            // Memory-pressure guard: capturing a new graph mints freeze-pointer
+            // arena + per-layer output buffers (a few MB). Under Critical memory
+            // pressure (a coexisting job / training run has the VRAM), skip the
+            // capture and run eager rather than risk the allocation tipping the
+            // box into OOM — the governor sees all-process usage, so this respects
+            // whatever else is on the GPU. Decode stays correct either way.
+            if kiln_memory::MemoryGovernor::global().pressure()
+                == kiln_memory::MemoryPressure::Critical
+            {
+                return Self::eager_forward(
+                    backend, token_id, weights, config, paged_cache, block_table, seq_len,
+                    linear_state, lora,
+                );
+            }
+
             // Capture.
             match self.try_capture(
                 backend, token_id, weights, config, paged_cache, block_table, seq_len,

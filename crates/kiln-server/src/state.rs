@@ -1305,7 +1305,7 @@ pub struct AppState {
     /// `teacher: alias` request field.
     pub teacher_registry: crate::api::teachers::SharedTeacherRegistry,
     /// Detected VRAM info for config/debug reporting.
-    pub vram_info: kiln_core::vram::GpuVramInfo,
+    pub vram_info: kiln_memory::vram::GpuVramInfo,
     /// Shutdown flag — set to true when the server is shutting down.
     pub shutdown: ShutdownFlag,
     /// Per-request timeout duration. Configurable via KILN_REQUEST_TIMEOUT_SECS (default 600).
@@ -1512,9 +1512,9 @@ impl AppState {
             gpu_lock: Arc::new(std::sync::RwLock::new(())),
             training_queue: crate::training_queue::new_shared_queue(),
             teacher_registry: Arc::new(crate::api::teachers::TeacherRegistry::new()),
-            vram_info: kiln_core::vram::GpuVramInfo {
+            vram_info: kiln_memory::vram::GpuVramInfo {
                 total_bytes: 0,
-                source: kiln_core::vram::VramSource::None,
+                source: kiln_memory::vram::VramSource::None,
             },
             shutdown: crate::training_queue::new_shutdown_flag(),
             request_timeout: std::time::Duration::from_secs(request_timeout_secs),
@@ -1641,15 +1641,52 @@ impl AppState {
 
         // Detect VRAM once and reuse it for both auto-sizing and reporting so
         // startup doesn't repeat the same probe/logging path.
-        let vram_info = kiln_core::vram::detect_vram();
-        // `device_kt` is the (already kt-typed) device param after #1082;
-        // the previous candle->kt bridge that lived here is gone.
-        let total_vram = detected_gpu_total_memory(&device_kt, &vram_info);
+        let vram_info = kiln_memory::vram::detect_vram();
         let is_metal = is_metal_device(&device_kt);
 
+        // Total AND used come from the SAME live, all-process driver snapshot
+        // (VRAM+GTT on AMD, nvidia-smi on NVIDIA) so they're mutually consistent
+        // and both account for any coexisting GPU workload (e.g. a llama.cpp
+        // server). Falling back to the static `detected_gpu_total_memory` only
+        // when the driver snapshot is unavailable (e.g. Apple Metal). Without
+        // this, total came from the carveout heuristic while used came from the
+        // snapshot — and `used` could exceed `total`.
+        let snap = if device_kt.backend() != kiln_tensor::Backend::Cpu {
+            let s = kiln_memory::vram::current_memory_snapshot();
+            (s.total_bytes > 0).then_some(s)
+        } else {
+            None
+        };
+        let total_vram = snap
+            .map(|s| s.total_bytes)
+            .unwrap_or_else(|| detected_gpu_total_memory(&device_kt, &vram_info));
+
+        // Wire the device's memory-reclaim hook into the governor and start its
+        // continuous pressure monitor (once per process). Under memory pressure
+        // — e.g. a coexisting llama.cpp / vLLM job, or a training run, grabbing
+        // VRAM — the governor returns kiln's pooled-but-unused VRAM to the OS
+        // instead of hoarding it. Idempotent via the OnceLock guard.
+        {
+            static GOVERNOR_WIRED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+            GOVERNOR_WIRED.get_or_init(|| {
+                #[cfg(feature = "rocm")]
+                if let kiln_tensor::Device::Rocm(idx) = device_kt {
+                    kiln_memory::MemoryGovernor::global().register_reclaimer(move |_target| {
+                        // Best-effort: return all pooled-but-unused VRAM (keep 0).
+                        // Device-synced inside, so it's race-free; HIP doesn't
+                        // surface bytes freed, so report 0.
+                        let _ = kiln_tensor::rocm_trim_pool(idx, 0);
+                        0
+                    });
+                }
+                kiln_memory::MemoryGovernor::global().start_monitor();
+            });
+        }
+
         let post_load_used_vram_info = runtime_used_vram_for_device(&device_kt);
-        let post_load_used_vram = post_load_used_vram_info
-            .map(|info| info.used_bytes)
+        let post_load_used_vram = snap
+            .map(|s| s.used_bytes)
+            .or_else(|| post_load_used_vram_info.map(|info| info.used_bytes))
             .unwrap_or(0);
         let mut sizing_residency_bytes = post_load_used_vram.max(estimated_model_bytes);
         // Vulkan keeps BOTH the paged KV pool AND the resident-decode weight
@@ -1663,23 +1700,29 @@ impl AppState {
                 sizing_residency_bytes.saturating_add(estimated_model_bytes.saturating_mul(2));
         }
         if post_load_used_vram > 0 {
+            let used_source = snap
+                .map(|s| s.source)
+                .or_else(|| post_load_used_vram_info.map(|i| i.source))
+                .unwrap_or(kiln_memory::vram::VramSource::None);
             tracing::info!(
                 post_load_used_vram_gb = post_load_used_vram as f64 / 1e9,
+                total_vram_gb = total_vram as f64 / 1e9,
                 estimated_model_gb = estimated_model_bytes as f64 / 1e9,
-                source = %post_load_used_vram_info.unwrap().source,
-                "post-load CUDA residency snapshot for KV sizing"
+                source = %used_source,
+                "post-load device residency snapshot for KV sizing"
             );
         } else {
             tracing::warn!(
                 estimated_model_gb = estimated_model_bytes as f64 / 1e9,
-                "post-load CUDA residency unavailable; falling back to static model memory estimate for KV sizing"
+                "post-load device residency unavailable; falling back to static model memory estimate for KV sizing"
             );
         }
 
         // Compute num_blocks for a given fraction. Used both for the explicit
         // `memory_cfg.num_blocks` path and the auto-sizer retry loop below.
+        let governor_backend = device_kt.backend();
         let compute_blocks_for_fraction = |fraction: f64| -> usize {
-            auto_num_blocks_for_fraction(
+            let n = auto_num_blocks_for_fraction(
                 total_vram,
                 sizing_residency_bytes,
                 bytes_per_block,
@@ -1687,7 +1730,20 @@ impl AppState {
                 model_config.max_position_embeddings,
                 block_size,
                 is_metal,
-            )
+            );
+            // Additionally clamp so the KV pool fits within the governor's LIVE
+            // available budget = free − floor − soft reservations. This is the
+            // inference side of the training/inference arbiter: when a training
+            // run reserves its working set with the governor, inference's KV pool
+            // automatically leaves room for it (and for any coexisting GPU job,
+            // since `free` is the all-process driver figure).
+            if governor_backend != kiln_tensor::Backend::Cpu && bytes_per_block > 0 {
+                let avail = kiln_memory::MemoryGovernor::global().available_bytes();
+                let max_blocks = (avail / bytes_per_block) as usize;
+                n.min(max_blocks)
+            } else {
+                n
+            }
         };
 
         // FP8 (E4M3FN) packing currently uses a CPU round-trip on every
@@ -1733,16 +1789,37 @@ impl AppState {
         // uninitialized — a one-time startup memset, not a correctness change
         // (paged writes overwrite slots before they are read).
         let allocate_cache = |n: usize| -> anyhow::Result<PagedKvCacheKt> {
-            PagedKvCacheKt::new_with_fp8(
-                model_config.num_full_attention_layers,
-                n,
-                block_size,
-                model_config.num_kv_heads,
-                model_config.head_dim,
-                kv_dtype,
-                device_kt,
-                fp8_enabled,
-            )
+            let attempt = || {
+                PagedKvCacheKt::new_with_fp8(
+                    model_config.num_full_attention_layers,
+                    n,
+                    block_size,
+                    model_config.num_kv_heads,
+                    model_config.head_dim,
+                    kv_dtype,
+                    device_kt,
+                    fp8_enabled,
+                )
+            };
+            match attempt() {
+                Ok(c) => Ok(c),
+                // OOM recovery (the "never OOM" path): before falling back to a
+                // smaller fraction, ask the governor to return pooled-but-unused
+                // VRAM to the OS and retry once at the SAME size — the alloc may
+                // have failed only because freed blocks were still pooled (or a
+                // coexisting job briefly spiked). Cheaper than shrinking the KV
+                // cache if the memory is genuinely reclaimable.
+                Err(first) if governor_backend != kiln_tensor::Backend::Cpu => {
+                    let freed = kiln_memory::MemoryGovernor::global().reclaim(u64::MAX);
+                    tracing::warn!(
+                        num_blocks = n,
+                        reclaimed_mb = freed / (1024 * 1024),
+                        "KV cache allocation failed; reclaimed pooled VRAM and retrying at same size"
+                    );
+                    attempt().map_err(|_| first)
+                }
+                Err(e) => Err(e),
+            }
         };
 
         // Determine num_blocks + paged cache:
@@ -1864,8 +1941,8 @@ impl AppState {
         // at-a-glance instead of diff'ing env vars against the docs.
         // Only logged when there's an actual Vulkan device — on CPU
         // or non-Vulkan backends these flags are irrelevant.
-        if vram_info.source == kiln_core::vram::VramSource::LinuxDrmSysfs
-            || vram_info.source == kiln_core::vram::VramSource::LinuxDrmSysfsUnified
+        if vram_info.source == kiln_memory::vram::VramSource::LinuxDrmSysfs
+            || vram_info.source == kiln_memory::vram::VramSource::LinuxDrmSysfsUnified
         {
             // Same truthy/falsy semantics as kiln_core::env_flag::env_flag,
             // but we want to surface whether the value came from the env
@@ -1980,6 +2057,22 @@ impl AppState {
                 Some(backend_name),
             )
         });
+        // #24/#26: drive dynamic KV resize from live memory pressure on GPU
+        // backends whose KV pools are device-resident (CUDA/ROCm) — that's where
+        // inference and a coexisting training run / process actually contend for
+        // VRAM. Host-resident pools (CPU/Vulkan) don't, so there's nothing to
+        // arbitrate. The autoscaler shrinks KV when VRAM gets tight and grows it
+        // back when headroom returns; the resize itself runs on the engine actor
+        // at its barrier under exclusive GPU access.
+        if let Some(engine) = batching_engine.clone() {
+            let device_resident = matches!(
+                paged_cache.device(),
+                Some(kiln_tensor::Device::Rocm(_)) | Some(kiln_tensor::Device::Cuda(_))
+            );
+            if device_resident {
+                crate::kv_autoscaler::spawn(engine, paged_cache.clone());
+            }
+        }
         let decode_batcher = if let Some(config) = decode_batcher_config {
             tracing::info!(
                 backend = backend_name,
@@ -2258,27 +2351,28 @@ fn device_needs_inference_prewarm(device: &kiln_tensor::Device) -> bool {
 
 fn runtime_used_vram_for_device(
     device: &kiln_tensor::Device,
-) -> Option<kiln_core::vram::GpuMemoryUsedInfo> {
-    // Migrated to take `&kt::Device` directly. The cuda-only used VRAM
-    // probe is still gated on `feature = "cuda"`, matching the previous
-    // cfg-gated behavior. (#1082)
-    #[cfg(feature = "cuda")]
-    {
-        if device.backend() == kiln_tensor::Backend::Cuda {
-            let info = kiln_core::vram::detect_used_vram();
-            return (info.used_bytes > 0).then_some(info);
-        }
+) -> Option<kiln_memory::vram::GpuMemoryUsedInfo> {
+    // The live used-memory probe is OS-level (nvidia-smi / AMD+Intel DRM sysfs /
+    // unified-APU MemAvailable, see `kiln_memory::vram::current_memory_snapshot`),
+    // so it is BACKEND-AGNOSTIC — it works for CUDA, ROCm, Vulkan, and Metal,
+    // not just CUDA. Previously this was `#[cfg(feature = "cuda")]`-gated, so on
+    // every other backend the KV-cache sizer fell back to a STATIC model-size
+    // estimate that is blind to live residency and to coexisting GPU workloads.
+    // Wiring it for all GPU backends makes the sizer mindful of the actual VRAM
+    // on whatever device the user is running. CPU has no device memory to probe.
+    if device.backend() == kiln_tensor::Backend::Cpu {
+        return None;
     }
-    #[cfg(not(feature = "cuda"))]
-    {
-        let _ = device;
-    }
-    None
+    let snap = kiln_memory::vram::current_memory_snapshot();
+    (snap.used_bytes > 0).then_some(kiln_memory::vram::GpuMemoryUsedInfo {
+        used_bytes: snap.used_bytes,
+        source: snap.source,
+    })
 }
 
 fn detected_gpu_total_memory(
     device: &kiln_tensor::Device,
-    vram: &kiln_core::vram::GpuVramInfo,
+    vram: &kiln_memory::vram::GpuVramInfo,
 ) -> u64 {
     // Migrated to take `&kt::Device` directly. The cuda and metal arms
     // remain feature-gated to preserve the previous cfg-gated behavior
@@ -2437,7 +2531,7 @@ fn format_oom_remediation_message(
     bytes_per_block: u64,
     suggested_blocks: usize,
     configured_fraction: f64,
-    vram_source: kiln_core::vram::VramSource,
+    vram_source: kiln_memory::vram::VramSource,
 ) -> String {
     let mut buf = String::new();
     buf.push_str(
@@ -3653,7 +3747,7 @@ mod tests {
             bytes_per_block,
             suggested,
             0.85,
-            kiln_core::vram::VramSource::NvidiaSmi,
+            kiln_memory::vram::VramSource::NvidiaSmi,
         );
         assert!(
             msg.contains("KILN_NUM_BLOCKS=8192"),
@@ -3705,7 +3799,7 @@ mod tests {
             1024,
             64,
             0.85,
-            kiln_core::vram::VramSource::None,
+            kiln_memory::vram::VramSource::None,
         );
         assert!(msg.contains("KILN_NUM_BLOCKS=64"), "message: {msg}");
         assert!(

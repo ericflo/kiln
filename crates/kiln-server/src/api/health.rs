@@ -71,6 +71,29 @@ struct GpuMemoryInfo {
     allocated_gb: f64,
     reserved_gb: f64,
     inference_memory_fraction: f64,
+    /// The memory governor's LIVE, all-process view right now (driver counters /
+    /// MemAvailable) — what kiln actually sees, including any coexisting GPU job.
+    /// Distinct from the static startup budget above. `None` on CPU / when
+    /// undetectable.
+    live: Option<LiveMemory>,
+}
+
+#[derive(Serialize)]
+struct LiveMemory {
+    total_gb: f64,
+    /// Used by ALL processes right now (includes coexisting GPU jobs).
+    used_gb: f64,
+    free_gb: f64,
+    /// Free − safety floor − soft reservations: what kiln may allocate now.
+    available_gb: f64,
+    /// Soft reservations announced by training/other planned allocations.
+    soft_reserved_gb: f64,
+    /// Comfortable | Moderate | Tight | Critical.
+    pressure: String,
+    /// Probe provenance (e.g. linux-drm-sysfs, nvidia-smi).
+    source: String,
+    /// True when GPU shares system RAM (APU / Apple Silicon).
+    unified: bool,
 }
 
 #[derive(Serialize)]
@@ -321,6 +344,22 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
         let peak_prefill_used_bytes = b.peak_prefill_used_vram_bytes();
         let allocated_bytes = b.model_memory_bytes.saturating_add(b.kv_cache_bytes);
         let reserved_bytes = allocated_bytes.saturating_add(b.training_budget_bytes);
+        // The governor's LIVE view right now — what kiln actually sees, including
+        // a coexisting llama.cpp / vLLM / training job (the probe is all-process).
+        let live = {
+            let g = kiln_memory::MemoryGovernor::global();
+            let s = g.snapshot();
+            (s.total_bytes > 0).then(|| LiveMemory {
+                total_gb: s.total_bytes as f64 / 1e9,
+                used_gb: s.used_bytes as f64 / 1e9,
+                free_gb: s.free_bytes as f64 / 1e9,
+                available_gb: g.available_bytes() as f64 / 1e9,
+                soft_reserved_gb: g.soft_reserved_bytes() as f64 / 1e9,
+                pressure: format!("{:?}", g.pressure()),
+                source: s.source.to_string(),
+                unified: s.unified,
+            })
+        };
         Some(GpuMemoryInfo {
             total_vram_bytes: b.total_vram_bytes,
             model_bytes: b.model_memory_bytes,
@@ -341,6 +380,7 @@ async fn health(State(state): State<AppState>) -> impl IntoResponse {
             allocated_gb: allocated_bytes as f64 / 1e9,
             reserved_gb: reserved_bytes as f64 / 1e9,
             inference_memory_fraction: b.inference_memory_fraction,
+            live,
         })
     } else {
         None

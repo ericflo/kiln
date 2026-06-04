@@ -109,6 +109,113 @@ fn fp8_dequantize_direct_dev(t: &KtTensor, target: KtDType) -> Result<KtTensor> 
     }
 }
 
+/// Allocate one zero-filled `(k_pool, v_pool)` pair of shape `shape`
+/// (`= [total_slots, num_kv_heads, head_dim]`, `n_elements` elements total) on
+/// `device`, using the exact per-backend routing the cache constructor uses.
+/// Shared by [`PagedKvCacheKt::new_with_fp8`] and
+/// [`PagedKvCacheKt::physical_resize_to`] so the device matrix lives in ONE
+/// place — a divergence between construct-time and resize-time allocation would
+/// silently put the resized pool on the wrong device and trip the per-layer
+/// `slice_set` device-mismatch guard.
+fn alloc_pool_pair(
+    device: kiln_tensor::Device,
+    shape: &[usize],
+    n_elements: usize,
+    storage_dtype: KtDType,
+    layer_idx: usize,
+) -> Result<(KtTensor, KtTensor)> {
+    let _i = layer_idx;
+    let shape = shape.to_vec();
+    let (k, v) = match device {
+        kiln_tensor::Device::Cpu => {
+            let _ = n_elements;
+            let k = KtTensor::zeros_cpu(shape.clone(), storage_dtype);
+            let v = KtTensor::zeros_cpu(shape.clone(), storage_dtype);
+            (k, v)
+        }
+        #[cfg(feature = "cuda")]
+        kiln_tensor::Device::Cuda(i) => {
+            let k_storage = cuda_zeros_ctx(i, storage_dtype, n_elements)
+                .with_context(|| format!("kt paged-kv: alloc k_pool layer {_i}"))?;
+            let v_storage = cuda_zeros_ctx(i, storage_dtype, n_elements)
+                .with_context(|| format!("kt paged-kv: alloc v_pool layer {_i}"))?;
+            let k = KtTensor::from_parts(
+                k_storage,
+                Layout::contiguous(shape.clone()),
+                TensorId::next(),
+            )
+            .with_context(|| format!("kt paged-kv: wrap k_pool layer {_i}"))?;
+            let v = KtTensor::from_parts(
+                v_storage,
+                Layout::contiguous(shape.clone()),
+                TensorId::next(),
+            )
+            .with_context(|| format!("kt paged-kv: wrap v_pool layer {_i}"))?;
+            (k, v)
+        }
+        // #1082 ROCm: device-resident KV pools (mirror the CUDA arm),
+        // gated on KILN_ROCM_PAGED_DECODE so it pairs with the native
+        // sq=1 paged-decode routing in forward.rs (both default off until
+        // the KV-cache correctness fix lands). When off, ROCm falls to the
+        // `other` => CPU pool + the correct contiguous-decode path.
+        #[cfg(feature = "rocm")]
+        kiln_tensor::Device::Rocm(i) if crate::forward::rocm_paged_decode_enabled() => {
+            let k_storage = kiln_tensor::rocm_zeros_ctx(i, storage_dtype, n_elements)
+                .map_err(|e| anyhow::anyhow!("kt paged-kv: alloc k_pool (rocm) layer {_i}: {e}"))?;
+            let v_storage = kiln_tensor::rocm_zeros_ctx(i, storage_dtype, n_elements)
+                .map_err(|e| anyhow::anyhow!("kt paged-kv: alloc v_pool (rocm) layer {_i}: {e}"))?;
+            let k = KtTensor::from_parts(
+                k_storage,
+                Layout::contiguous(shape.clone()),
+                TensorId::next(),
+            )
+            .map_err(|e| anyhow::anyhow!("kt paged-kv: wrap k_pool (rocm) layer {_i}: {e}"))?;
+            let v = KtTensor::from_parts(
+                v_storage,
+                Layout::contiguous(shape.clone()),
+                TensorId::next(),
+            )
+            .map_err(|e| anyhow::anyhow!("kt paged-kv: wrap v_pool (rocm) layer {_i}: {e}"))?;
+            (k, v)
+        }
+        #[cfg(feature = "metal")]
+        kiln_tensor::Device::Metal(i) => {
+            let _ = n_elements;
+            let k = KtTensor::zeros_on(kiln_tensor::Device::Metal(i), shape.clone(), storage_dtype)
+                .map_err(|e| anyhow::anyhow!("kt paged-kv: alloc k_pool (metal) layer {_i}: {e}"))?;
+            let v = KtTensor::zeros_on(kiln_tensor::Device::Metal(i), shape.clone(), storage_dtype)
+                .map_err(|e| anyhow::anyhow!("kt paged-kv: alloc v_pool (metal) layer {_i}: {e}"))?;
+            (k, v)
+        }
+        // Vulkan and any backend whose feature isn't compiled in → host-resident
+        // CPU pools (matches the cache constructor's `other` arm exactly).
+        other => {
+            let _ = other;
+            let _ = n_elements;
+            let k = KtTensor::zeros_cpu(shape.clone(), storage_dtype);
+            let v = KtTensor::zeros_cpu(shape.clone(), storage_dtype);
+            (k, v)
+        }
+    };
+    Ok((k, v))
+}
+
+/// Block until all device work completes, so a subsequent pool drop can't free
+/// storage a still-running kernel reads. No-op on CPU (synchronous) and on
+/// backends whose feature isn't compiled in. Used by
+/// [`PagedKvCacheKt::physical_resize_to`] (#26) as the C2 use-after-free guard.
+fn sync_device_for_resize(device: kiln_tensor::Device) -> Result<()> {
+    match device {
+        #[cfg(feature = "cuda")]
+        kiln_tensor::Device::Cuda(i) => kiln_tensor::cuda_synchronize_default_stream(i)
+            .map_err(|e| anyhow::anyhow!("physical_resize_to: cuda sync: {e}")),
+        #[cfg(feature = "rocm")]
+        kiln_tensor::Device::Rocm(i) => kiln_tensor::rocm_synchronize_default_stream(i)
+            .map_err(|e| anyhow::anyhow!("physical_resize_to: rocm sync: {e}")),
+        _ => Ok(()),
+    }
+}
+
 /// Paged KV cache backed by `kiln_tensor::Tensor`. Twin of
 /// the deleted candle `PagedKvCache` (#1082 candle-drop).
 ///
@@ -120,9 +227,20 @@ fn fp8_dequantize_direct_dev(t: &KtTensor, target: KtDType) -> Result<KtTensor> 
 /// factors; the compute dtype is preserved separately for dequant.
 pub struct PagedKvCacheKt {
     /// Per full-attention layer: `(k_pool, v_pool)`.
-    layers: Vec<(KtTensor, KtTensor)>,
+    ///
+    /// Behind an `RwLock` so [`Self::physical_resize_to`] can swap the pools
+    /// through `&self` (#26) — the cache is held as a shared `Arc` cloned into
+    /// the decode paths, so a `&mut self` resizer would be unreachable during
+    /// serving. The decode read path takes the (uncontended) READ lock briefly
+    /// per access; the resizer takes the WRITE lock, and the caller guarantees
+    /// no forward is in flight while it does (the actor barrier), so the write
+    /// lock is never actually contended against a live kernel.
+    layers: std::sync::RwLock<Vec<(KtTensor, KtTensor)>>,
     block_size: usize,
-    num_blocks: usize,
+    /// Logical block count = `layers[i]` slot count / `block_size`. Atomic so
+    /// `physical_resize_to` can update it through `&self` in lockstep with the
+    /// `layers` swap. Read relaxed in the decode path.
+    num_blocks: std::sync::atomic::AtomicUsize,
     /// Whether FP8 quantization is enabled. When true, pool dtype is U8.
     fp8: bool,
     /// Per-layer FP8 scale factors `(k_scale, v_scale)`. Updated on
@@ -199,109 +317,25 @@ impl PagedKvCacheKt {
             // host-resident `zeros_cpu` default — matching the prior
             // non-cuda/non-metal behavior, and exactly what the deleted candle
             // cache did for the Vulkan backend (it held CPU candle tensors).
-            let (k, v) = match device {
-                kiln_tensor::Device::Cpu => {
-                    let _ = n_elements;
-                    let k = KtTensor::zeros_cpu(shape.clone(), storage_dtype);
-                    let v = KtTensor::zeros_cpu(shape.clone(), storage_dtype);
-                    (k, v)
-                }
-                #[cfg(feature = "cuda")]
-                kiln_tensor::Device::Cuda(i) => {
-                    let k_storage = cuda_zeros_ctx(i, storage_dtype, n_elements)
-                        .with_context(|| format!("kt paged-kv: alloc k_pool layer {_i}"))?;
-                    let v_storage = cuda_zeros_ctx(i, storage_dtype, n_elements)
-                        .with_context(|| format!("kt paged-kv: alloc v_pool layer {_i}"))?;
-                    let k = KtTensor::from_parts(
-                        k_storage,
-                        Layout::contiguous(shape.clone()),
-                        TensorId::next(),
-                    )
-                    .with_context(|| format!("kt paged-kv: wrap k_pool layer {_i}"))?;
-                    let v = KtTensor::from_parts(
-                        v_storage,
-                        Layout::contiguous(shape.clone()),
-                        TensorId::next(),
-                    )
-                    .with_context(|| format!("kt paged-kv: wrap v_pool layer {_i}"))?;
-                    (k, v)
-                }
-                // #1082 ROCm: device-resident KV pools (mirror the CUDA arm),
-                // gated on KILN_ROCM_PAGED_DECODE so it pairs with the native
-                // sq=1 paged-decode routing in forward.rs (both default off until
-                // the KV-cache correctness fix lands). When off, ROCm falls to the
-                // `other` => CPU pool + the correct contiguous-decode path.
-                #[cfg(feature = "rocm")]
-                kiln_tensor::Device::Rocm(i) if crate::forward::rocm_paged_decode_enabled() => {
-                    let k_storage = kiln_tensor::rocm_zeros_ctx(i, storage_dtype, n_elements)
-                        .map_err(|e| anyhow::anyhow!("kt paged-kv: alloc k_pool (rocm) layer {_i}: {e}"))?;
-                    let v_storage = kiln_tensor::rocm_zeros_ctx(i, storage_dtype, n_elements)
-                        .map_err(|e| anyhow::anyhow!("kt paged-kv: alloc v_pool (rocm) layer {_i}: {e}"))?;
-                    let k = KtTensor::from_parts(
-                        k_storage,
-                        Layout::contiguous(shape.clone()),
-                        TensorId::next(),
-                    )
-                    .map_err(|e| anyhow::anyhow!("kt paged-kv: wrap k_pool (rocm) layer {_i}: {e}"))?;
-                    let v = KtTensor::from_parts(
-                        v_storage,
-                        Layout::contiguous(shape.clone()),
-                        TensorId::next(),
-                    )
-                    .map_err(|e| anyhow::anyhow!("kt paged-kv: wrap v_pool (rocm) layer {_i}: {e}"))?;
-                    (k, v)
-                }
-                #[cfg(feature = "metal")]
-                kiln_tensor::Device::Metal(i) => {
-                    let _ = n_elements;
-                    let k = KtTensor::zeros_on(
-                        kiln_tensor::Device::Metal(i),
-                        shape.clone(),
-                        storage_dtype,
-                    )
-                    .map_err(|e| {
-                        anyhow::anyhow!("kt paged-kv: alloc k_pool (metal) layer {_i}: {e}")
-                    })?;
-                    let v = KtTensor::zeros_on(
-                        kiln_tensor::Device::Metal(i),
-                        shape.clone(),
-                        storage_dtype,
-                    )
-                    .map_err(|e| {
-                        anyhow::anyhow!("kt paged-kv: alloc v_pool (metal) layer {_i}: {e}")
-                    })?;
-                    (k, v)
-                }
-                // Vulkan: keep the kt KV pool HOST-resident (CPU). It is the
-                // seed cache that the resident decode path mirrors into the
-                // device-local VkPagedKvCache; allocating the kt pool ALSO on
-                // VRAM made the two ~24GB KV caches collide and OOM'd the
-                // VkPagedKvCache (resident decode then declined). The prefill
-                // write moves its small K/V rows to this CPU pool via the
-                // device-aligned slice_set in write_native. (Unifying prefill
-                // + decode on one VkPagedKvCache is the perf follow-up.)
-                other => {
-                    // Any GPU device whose backend feature isn't compiled in →
-                    // host-resident CPU pools (matches the prior
-                    // non-cuda/non-metal default).
-                    let _ = other;
-                    let _ = n_elements;
-                    let k = KtTensor::zeros_cpu(shape.clone(), storage_dtype);
-                    let v = KtTensor::zeros_cpu(shape.clone(), storage_dtype);
-                    (k, v)
-                }
-            };
+            let (k, v) = alloc_pool_pair(device, &shape, n_elements, storage_dtype, _i)?;
             layers.push((k, v));
         }
         let fp8_scales = vec![(1.0_f32, 1.0_f32); num_full_attn_layers];
         Ok(Self {
-            layers,
+            layers: std::sync::RwLock::new(layers),
             block_size,
-            num_blocks,
+            num_blocks: std::sync::atomic::AtomicUsize::new(num_blocks),
             fp8,
             fp8_scales,
             compute_dtype: dtype,
         })
+    }
+
+    /// Read-borrow the per-layer pools. Recovers from lock poisoning (a panic
+    /// while reading leaves the data intact — reads don't mutate).
+    #[inline]
+    fn layers_read(&self) -> std::sync::RwLockReadGuard<'_, Vec<(KtTensor, KtTensor)>> {
+        self.layers.read().unwrap_or_else(|e| e.into_inner())
     }
 
     pub fn block_size(&self) -> usize {
@@ -324,11 +358,36 @@ impl PagedKvCacheKt {
     }
 
     pub fn num_blocks(&self) -> usize {
-        self.num_blocks
+        self.num_blocks.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// The device the pools live on (layer 0's k pool), or `None` if the cache
+    /// has no layers. Needed by [`Self::physical_resize_to`] callers that don't
+    /// otherwise carry the device.
+    pub fn device(&self) -> Option<kiln_tensor::Device> {
+        self.layers_read().first().map(|(k, _)| k.device())
+    }
+
+    /// Storage bytes one block occupies across ALL layers and both K and V pools:
+    /// `num_layers * 2 * block_size * num_kv_heads * head_dim * storage_dtype_size`.
+    /// The memory governor's resize policy uses this to translate a VRAM target
+    /// into a block-count target. `0` if the cache has no layers.
+    pub fn bytes_per_block(&self) -> usize {
+        let layers = self.layers_read();
+        let Some((k, _)) = layers.first() else {
+            return 0;
+        };
+        let dims = k.dims();
+        if dims.len() != 3 {
+            return 0;
+        }
+        let per_slot = dims[1] * dims[2]; // num_kv_heads * head_dim
+        let dtype_size = k.dtype().size_in_bytes().max(1);
+        layers.len() * 2 * self.block_size * per_slot * dtype_size
     }
 
     pub fn num_layers(&self) -> usize {
-        self.layers.len()
+        self.layers_read().len()
     }
 
     pub fn is_fp8(&self) -> bool {
@@ -342,9 +401,150 @@ impl PagedKvCacheKt {
         self.compute_dtype
     }
 
-    /// Borrow the raw `(k_pool, v_pool)` kt-Tensors for `layer_idx`.
-    pub fn pool_tensors(&self, layer_idx: usize) -> Option<(&KtTensor, &KtTensor)> {
-        self.layers.get(layer_idx).map(|(k, v)| (k, v))
+    /// Cheap owned clones of the `(k_pool, v_pool)` kt-Tensors for `layer_idx`
+    /// (an `Arc` bump each — the device buffers are shared, not copied).
+    ///
+    /// Returns OWNED tensors rather than borrows because the pools live behind a
+    /// `RwLock` (#26 resize): a borrow couldn't outlive the read guard. Holding
+    /// the clone keeps that pool's storage alive even across a concurrent
+    /// `physical_resize_to` swap — though the caller (decode) is barrier-ordered
+    /// against resize anyway.
+    pub fn pool_tensors(&self, layer_idx: usize) -> Option<(KtTensor, KtTensor)> {
+        self.layers_read()
+            .get(layer_idx)
+            .map(|(k, v)| (k.clone(), v.clone()))
+    }
+
+    /// Physically reallocate every layer's `(k_pool, v_pool)` to back
+    /// `new_num_blocks` blocks, copying the surviving prefix and dropping the old
+    /// pools. This is the elastic actuator that lets inference physically
+    /// surrender KV VRAM and reclaim it — the physical half of the dynamic
+    /// resize whose logical half is [`kiln_core::block::BlockManager`].
+    ///
+    /// WHY THIS RECLAIMS (same-process arbitration): kiln runs inference AND
+    /// training in ONE process / ONE device memory pool. Dropping the old pool
+    /// returns its bytes to that pool, where the NEXT allocation (e.g. a training
+    /// run, or a regrown KV pool) REUSES them — verified on gfx1151: a 2 GB
+    /// alloc → drop → 2 GB realloc grows peak VRAM by 0 MB. It does NOT depend on
+    /// returning memory to the OS (`hipMemPoolTrimTo` is a measured no-op on
+    /// gfx1151/ROCm 7.2.4 — so is the sync `hipFree`); cross-process return is a
+    /// platform limitation we don't rely on. Reuse within the pool is what makes
+    /// "training and inference share VRAM, never OOM" work.
+    ///
+    /// SAFETY CONTRACT — the caller MUST guarantee that NO forward/decode pass is
+    /// in flight (the pool tensors are swapped; a kernel reading the old pool
+    /// would use freed storage). We additionally device-synchronize at entry to
+    /// flush any already-submitted kernel before the first drop (defends against
+    /// off-stream HIP-graph-replay kernels). On SHRINK the caller must have run
+    /// the paired `BlockManager::physical_truncate(new_num_blocks)` first, so no
+    /// live block sits in the truncated tail. Surviving KV (slots
+    /// `[0, copy_slots)`) is copied verbatim; the slot mapping
+    /// `slot = block_id*block_size + off` is preserved, so existing `BlockTable`s
+    /// stay valid with NO remapping.
+    ///
+    /// SHRINK vs GROW commit strategy:
+    /// - SHRINK swaps pools ONE LAYER AT A TIME, dropping each old pool the
+    ///   instant its data is copied so the next layer's (smaller) alloc reuses
+    ///   the freed bytes. Peak transient VRAM is bounded to `old + one_layer`,
+    ///   NOT `old + new` — a SHRINK runs when memory is tight, so a
+    ///   build-all-then-swap would spike VRAM exactly when we can least afford
+    ///   it. SHRINK is effectively atomic: only the layer-0 alloc can fail, and
+    ///   it fails before any mutation (every later, smaller alloc reuses freed
+    ///   bytes), so `self` is untouched on `Err`.
+    /// - GROW stages all new pools into a local vec and swaps them in only after
+    ///   every layer succeeds (ATOMIC: `Err` leaves `self` wholly on the old
+    ///   pools). A growing per-layer swap could fail mid-loop and leave the cache
+    ///   with mixed-size layers — corrupting the slot mapping. GROW peak is
+    ///   `old + new`, which is fine: GROW only runs when memory is NOT tight (the
+    ///   caller pre-checks `available_bytes`).
+    ///
+    /// No-op (returns `Ok`) when `new_num_blocks == num_blocks`.
+    pub fn physical_resize_to(
+        &self,
+        new_num_blocks: usize,
+        device: kiln_tensor::Device,
+    ) -> Result<()> {
+        let cur = self.num_blocks();
+        if new_num_blocks == cur {
+            return Ok(());
+        }
+        // C2: flush any in-flight kernel before we drop the old pools. The caller
+        // guarantees no NEW launches during the resize (actor barrier); this
+        // covers a kernel already submitted on another stream (graph replay).
+        sync_device_for_resize(device)?;
+
+        let storage_dtype = if self.fp8 {
+            KtDType::U8
+        } else {
+            self.compute_dtype
+        };
+        let new_total_slots = new_num_blocks * self.block_size;
+        let old_total_slots = cur * self.block_size;
+        let copy_slots = new_total_slots.min(old_total_slots);
+        let growing = new_num_blocks > cur;
+
+        // Exclusive access for the structural swap. The caller's barrier (no
+        // forward in flight) guarantees this write lock is never contended
+        // against a live decode read, and that no kernel is mid-read of a pool we
+        // are about to drop.
+        let mut layers = self.layers.write().unwrap_or_else(|e| e.into_inner());
+
+        // Allocate the new pool for layer `i` and copy its surviving prefix from
+        // the current (old) pool at `pools[i]`. Pure: does not mutate `pools`.
+        let make_resized =
+            |pools: &Vec<(KtTensor, KtTensor)>, layer_idx: usize| -> Result<(KtTensor, KtTensor)> {
+                let dims = pools[layer_idx].0.dims().to_vec();
+                anyhow::ensure!(
+                    dims.len() == 3,
+                    "physical_resize_to: layer {layer_idx} pool has rank {} (want 3)",
+                    dims.len()
+                );
+                let shape = vec![new_total_slots, dims[1], dims[2]];
+                let n_elements = new_total_slots * dims[1] * dims[2];
+                let (new_k, new_v) =
+                    alloc_pool_pair(device, &shape, n_elements, storage_dtype, layer_idx)?;
+                // The new pool's async zero-fill must COMPLETE before we copy the
+                // surviving prefix over it — otherwise a large (grow) zero-fill
+                // can land AFTER the copy and wipe it. Same-stream ordering is not
+                // sufficient in practice here, so synchronize explicitly. Resize
+                // is rare, so this is cheap relative to the multi-layer realloc.
+                if copy_slots > 0 {
+                    sync_device_for_resize(device)?;
+                    let (old_k, old_v) = &pools[layer_idx];
+                    let src_k = old_k.narrow(0, 0, copy_slots).map_err(|e| {
+                        anyhow::anyhow!("physical_resize_to: narrow k l{layer_idx}: {e}")
+                    })?;
+                    let src_v = old_v.narrow(0, 0, copy_slots).map_err(|e| {
+                        anyhow::anyhow!("physical_resize_to: narrow v l{layer_idx}: {e}")
+                    })?;
+                    new_k.slice_set(&src_k, 0, 0).map_err(|e| {
+                        anyhow::anyhow!("physical_resize_to: copy k l{layer_idx}: {e}")
+                    })?;
+                    new_v.slice_set(&src_v, 0, 0).map_err(|e| {
+                        anyhow::anyhow!("physical_resize_to: copy v l{layer_idx}: {e}")
+                    })?;
+                }
+                Ok((new_k, new_v))
+            };
+
+        if growing {
+            // ATOMIC: stage all, then commit. `?` on any layer leaves self intact.
+            let mut staged: Vec<(KtTensor, KtTensor)> = Vec::with_capacity(layers.len());
+            for layer_idx in 0..layers.len() {
+                staged.push(make_resized(&layers, layer_idx)?);
+            }
+            *layers = staged;
+        } else {
+            // SHRINK: in-place per layer so each old pool frees before the next
+            // alloc (bounded VRAM). Effectively atomic — see method doc.
+            for layer_idx in 0..layers.len() {
+                let resized = make_resized(&layers, layer_idx)?;
+                layers[layer_idx] = resized;
+            }
+        }
+        self.num_blocks
+            .store(new_num_blocks, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
     }
 
     /// Slot-based decode-token writer — the CUDA-graph contract entry
@@ -388,7 +588,8 @@ impl PagedKvCacheKt {
         if k_shape.len() < 2 || k_shape[1] != 1 {
             return Ok(false);
         }
-        let (k_pool, v_pool) = &self.layers[layer_idx];
+        let pools = self.layers_read();
+        let (k_pool, v_pool) = &pools[layer_idx];
 
         if self.fp8 {
             // CUDA: read the device slot index host-side (one 4-byte D2H), then
@@ -519,7 +720,8 @@ impl PagedKvCacheKt {
                 "kt PagedKvCacheKt::write_contiguous_slot_run requires BF16 inputs"
             );
         }
-        let (k_pool, v_pool) = &self.layers[layer_idx];
+        let pools = self.layers_read();
+        let (k_pool, v_pool) = &pools[layer_idx];
         let pool_shape = k_pool.shape();
         anyhow::ensure!(
             pool_shape.len() == 3,
@@ -697,7 +899,8 @@ impl PagedKvCacheKt {
         block_table: &BlockTable,
         seq_len: usize,
     ) -> Result<(KtTensor, KtTensor)> {
-        let (k_pool, v_pool) = &self.layers[layer_idx];
+        let pools = self.layers_read();
+        let (k_pool, v_pool) = &pools[layer_idx];
 
         let (k_slice, v_slice) = if let Some(start_slot) =
             contiguous_slot_run_start(block_table, self.block_size, 0, seq_len)
@@ -815,7 +1018,8 @@ impl PagedKvCacheKt {
         if self.fp8 || k.dtype() != KtDType::BF16 || v.dtype() != KtDType::BF16 {
             return Ok(false);
         }
-        let (k_pool, v_pool) = &self.layers[layer_idx];
+        let pools = self.layers_read();
+        let (k_pool, v_pool) = &pools[layer_idx];
         kiln_flash_attn::paged_kv_write_token_major_bf16_kt(k_pool, v_pool, k, v, slot)
             .map_err(|e| anyhow::anyhow!("kt paged_kv_write_token_major_bf16: {e}"))?;
         Ok(true)
@@ -853,7 +1057,8 @@ impl PagedKvCacheKt {
         let new_len = k
             .dim(1)
             .map_err(|e| anyhow::anyhow!("kt pkv token_major: k.dim(1): {e}"))?;
-        let (k_pool, v_pool) = &self.layers[layer_idx];
+        let pools = self.layers_read();
+        let (k_pool, v_pool) = &pools[layer_idx];
 
         if new_len == 1 {
             let slot = block_table
@@ -980,7 +1185,8 @@ impl PagedKvCacheKt {
 
         #[cfg(feature = "metal")]
         if matches!(k.device(), kiln_tensor::Device::Metal(_)) {
-            let (k_pool, v_pool) = &self.layers[layer_idx];
+            let pools = self.layers_read();
+            let (k_pool, v_pool) = &pools[layer_idx];
             let slots_tensor = KtTensor::from_vec_on(k.device(), slots, vec![batch])
                 .map_err(|e| anyhow::anyhow!("kt pkv metal batch: build slots: {e}"))?;
             let k_c = k
@@ -1156,7 +1362,8 @@ impl PagedKvCacheKt {
         if slots.dtype() != KtDType::U32 || slots_shape.len() != 1 || slots_shape[0] != batch {
             return Ok(false);
         }
-        let (k_pool, v_pool) = &self.layers[layer_idx];
+        let pools = self.layers_read();
+        let (k_pool, v_pool) = &pools[layer_idx];
         // Collapse the seq_len=1 dim before dispatching so the fused
         // kernel sees a contiguous [batch, num_kv_heads, head_dim] block.
         let k_sq = k
@@ -1227,7 +1434,8 @@ impl PagedKvCacheKt {
         let new_len = k
             .dim(2)
             .map_err(|e| anyhow::anyhow!("kt pkv write_native: k.dim(2): {e}"))?;
-        let (k_pool, v_pool) = &self.layers[layer_idx];
+        let pools = self.layers_read();
+        let (k_pool, v_pool) = &pools[layer_idx];
 
         // (#1082 Vulkan/non-CUDA) The pool is allocated in the cache's storage
         // dtype (BF16 for Qwen3.5-4B — matches the CUDA cache + the memory
@@ -1377,7 +1585,8 @@ impl PagedKvCacheKt {
                 .map_err(|e| anyhow::anyhow!("kt pkv write_fp8: quantize k: {e}"))?;
             let v_q = fp8_quantize_direct_dev(&v_sq)
                 .map_err(|e| anyhow::anyhow!("kt pkv write_fp8: quantize v: {e}"))?;
-            let (k_pool, v_pool) = &self.layers[layer_idx];
+            let pools = self.layers_read();
+            let (k_pool, v_pool) = &pools[layer_idx];
             k_pool
                 .slice_set(&k_q, 0, slot)
                 .map_err(|e| anyhow::anyhow!("kt pkv write_fp8: slice_set k: {e}"))?;
@@ -1397,7 +1606,8 @@ impl PagedKvCacheKt {
         let v_q = fp8_quantize_direct_dev(&v_flat)
             .map_err(|e| anyhow::anyhow!("kt pkv write_fp8: quantize v block: {e}"))?;
 
-        let (k_pool, v_pool) = &self.layers[layer_idx];
+        let pools = self.layers_read();
+        let (k_pool, v_pool) = &pools[layer_idx];
 
         if let Some(start_slot) =
             contiguous_slot_run_start(block_table, self.block_size, start_pos, new_len)
@@ -1476,9 +1686,9 @@ mod tests {
         // cache via the field-fill pattern and confirm the accessors
         // surface the expected values.
         let cache = PagedKvCacheKt {
-            layers: Vec::new(),
+            layers: std::sync::RwLock::new(Vec::new()),
             block_size: 16,
-            num_blocks: 1024,
+            num_blocks: std::sync::atomic::AtomicUsize::new(1024),
             fp8: true,
             fp8_scales: Vec::new(),
             compute_dtype: KtDType::BF16,
@@ -1489,5 +1699,72 @@ mod tests {
         assert!(cache.is_fp8());
         assert_eq!(cache.compute_dtype(), KtDType::BF16);
         assert!(cache.pool_tensors(0).is_none());
+    }
+
+    // Physical resize correctness on CPU pools (device-agnostic copy logic; the
+    // ROCm/CUDA paths reuse the SAME narrow+slice_set, validated on-box). Proves
+    // the elastic actuator (#26) preserves live KV byte-for-byte across a
+    // shrink and a grow, with the grown tail zero-filled.
+    #[test]
+    fn physical_resize_preserves_surviving_kv_and_zeros_grown_tail() {
+        let block_size = 2usize;
+        let kv_heads = 1usize;
+        let head_dim = 2usize;
+        let per_slot = kv_heads * head_dim; // 2 f32 per slot
+        let dev = kiln_tensor::Device::Cpu;
+
+        // 4 blocks * 2 = 8 slots; 1 full-attn layer; F32 so values round-trip exact.
+        let mut cache = PagedKvCacheKt::new(1, 4, block_size, kv_heads, head_dim, KtDType::F32, dev)
+            .expect("construct cpu cache");
+        assert_eq!(cache.num_blocks(), 4);
+
+        // Write a known pattern into the first 6 slots of layer 0's K and V pools
+        // (slots 6,7 stay zero). Pattern: k[slot,i] = slot*10 + i ; v = k + 100.
+        let n_known_slots = 6usize;
+        let mut k_vals = Vec::with_capacity(n_known_slots * per_slot);
+        let mut v_vals = Vec::with_capacity(n_known_slots * per_slot);
+        for slot in 0..n_known_slots {
+            for i in 0..per_slot {
+                let base = (slot * 10 + i) as f32;
+                k_vals.push(base);
+                v_vals.push(base + 100.0);
+            }
+        }
+        let k_src =
+            KtTensor::from_vec(k_vals.clone(), vec![n_known_slots, kv_heads, head_dim]).unwrap();
+        let v_src =
+            KtTensor::from_vec(v_vals.clone(), vec![n_known_slots, kv_heads, head_dim]).unwrap();
+        {
+            let (k_pool, v_pool) = cache.pool_tensors(0).unwrap();
+            k_pool.slice_set(&k_src, 0, 0).unwrap();
+            v_pool.slice_set(&v_src, 0, 0).unwrap();
+        }
+
+        // SHRINK 4 -> 3 blocks (8 -> 6 slots). copy_slots = 6, so all known KV
+        // survives verbatim and the (zero) tail is dropped.
+        cache.physical_resize_to(3, dev).expect("shrink");
+        assert_eq!(cache.num_blocks(), 3);
+        let (k_pool, v_pool) = cache.pool_tensors(0).unwrap();
+        assert_eq!(k_pool.dims(), &[6, kv_heads, head_dim]);
+        let k_after: Vec<f32> = k_pool.to_vec().unwrap();
+        let v_after: Vec<f32> = v_pool.to_vec().unwrap();
+        assert_eq!(k_after, k_vals, "shrink must preserve K slots 0..6");
+        assert_eq!(v_after, v_vals, "shrink must preserve V slots 0..6");
+
+        // GROW 3 -> 5 blocks (6 -> 10 slots). Prefix preserved, new tail zeroed.
+        cache.physical_resize_to(5, dev).expect("grow");
+        assert_eq!(cache.num_blocks(), 5);
+        let (k_pool, _) = cache.pool_tensors(0).unwrap();
+        assert_eq!(k_pool.dims(), &[10, kv_heads, head_dim]);
+        let k_grown: Vec<f32> = k_pool.to_vec().unwrap();
+        assert_eq!(&k_grown[..k_vals.len()], &k_vals[..], "grow preserves prefix");
+        assert!(
+            k_grown[k_vals.len()..].iter().all(|&x| x == 0.0),
+            "grown tail must be zero-filled"
+        );
+
+        // No-op resize returns Ok and changes nothing.
+        cache.physical_resize_to(5, dev).expect("noop");
+        assert_eq!(cache.num_blocks(), 5);
     }
 }

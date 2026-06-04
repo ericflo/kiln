@@ -2130,8 +2130,8 @@ pub fn opd_train(
     // single segment count up front like SFT/GRPO do. Detection is
     // cheap (env var or one nvidia-smi spawn) but no reason to
     // re-detect on every step.
-    let opd_vram_cache = kiln_core::vram::detect_vram();
-    let opd_base_model_bytes = kiln_core::vram::estimate_base_model_bytes(
+    let opd_vram_cache = kiln_memory::vram::detect_vram();
+    let opd_base_model_bytes = kiln_memory::vram::estimate_base_model_bytes(
         model_config.num_layers,
         model_config.hidden_size,
         model_config.intermediate_size,

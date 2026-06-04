@@ -21,7 +21,10 @@ use kiln_model::{
 use tokio::sync::{mpsc, oneshot};
 use uuid::Uuid;
 
-use crate::state::{GpuCoordinationLock, RealPrefixCache, gpu_coordination_read_guard};
+use crate::state::{
+    GpuCoordinationLock, RealPrefixCache, gpu_coordination_read_guard,
+    gpu_coordination_write_guard,
+};
 
 const DEFAULT_ENGINE_CHANNEL: usize = 1024;
 const DEFAULT_RESPONSE_CHANNEL: usize = 64;
@@ -251,6 +254,24 @@ pub trait DecodeForward: Send + Sync + 'static {
         finish_reason: FinishReason,
     ) -> Result<DecodeForwardOutput>;
     fn discard_request(&self, _slot: DecodeSlot) {}
+
+    /// Physically resize the KV cache to `target_blocks` usable blocks — the
+    /// memory-governor actuator (#26/#24). SHRINK hands KV VRAM back to the pool
+    /// for a coexisting training run to reuse; GROW reclaims it when pressure
+    /// eases. Called ONLY from the engine actor between decode steps (the
+    /// barrier), and takes exclusive GPU access internally so the other decode
+    /// actor / training are excluded while the pools swap. Returns the achieved
+    /// block count (a shrink may stop above `target_blocks` if live requests
+    /// still hold high blocks). Default: no-op (mock/non-paged backends).
+    fn resize_kv(&self, _target_blocks: usize) -> Result<usize> {
+        Ok(0)
+    }
+
+    /// Current usable KV block count, for the governor's resize policy. `None`
+    /// if this forward has no paged cache. Default: `None`.
+    fn kv_num_blocks(&self) -> Option<usize> {
+        None
+    }
 }
 
 pub struct RealDecodeForward {
@@ -663,6 +684,61 @@ impl DecodeForward for RealDecodeForward {
             }
         }
     }
+
+    fn kv_num_blocks(&self) -> Option<usize> {
+        Some(self.paged_cache.num_blocks())
+    }
+
+    fn resize_kv(&self, target_blocks: usize) -> Result<usize> {
+        let device = match self.paged_cache.device() {
+            Some(d) => d,
+            None => return Ok(0),
+        };
+        let cur = self.paged_cache.num_blocks();
+        if target_blocks == cur || target_blocks == 0 {
+            return Ok(cur);
+        }
+        // EXCLUSIVE GPU access for the pool swap: the write guard blocks BOTH
+        // decode actors (they hold the read guard) and any training step (also a
+        // write guard) until the resize completes — so no kernel is reading a
+        // pool we are about to drop. Combined with the device-sync inside
+        // `physical_resize_to`, the swap is race-free. Resize is rare
+        // (governor-driven under pressure), so the brief decode stall is fine.
+        let _gpu = gpu_coordination_write_guard(&self.gpu_lock);
+        if target_blocks < cur {
+            // SHRINK. Logical first: lower the ceiling + retire free high blocks.
+            // We can only physically drop to the live high-water mark right now;
+            // if requests still hold high blocks the shrink stops there, and a
+            // later resize finishes it once they drain.
+            let achievable = {
+                let mut bm = self.block_manager_guard()?;
+                bm.set_target_usable(target_blocks);
+                let achievable = target_blocks.max(bm.physical_floor());
+                bm.physical_truncate(achievable)
+                    .map_err(|e| anyhow::anyhow!("kv shrink truncate to {achievable}: {e}"))?;
+                achievable
+            };
+            self.paged_cache.physical_resize_to(achievable, device)?;
+            tracing::info!(
+                from = cur,
+                to = achievable,
+                target = target_blocks,
+                "KV cache physically shrunk (VRAM returned to pool for reuse)"
+            );
+            Ok(achievable)
+        } else {
+            // GROW. Physical first (alloc bigger, copy existing KV), then publish
+            // the new blocks to the manager and raise the ceiling.
+            self.paged_cache.physical_resize_to(target_blocks, device)?;
+            {
+                let mut bm = self.block_manager_guard()?;
+                bm.physical_grow(target_blocks);
+                bm.set_target_usable(target_blocks);
+            }
+            tracing::info!(from = cur, to = target_blocks, "KV cache physically grown");
+            Ok(target_blocks)
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -764,6 +840,37 @@ impl BatchingEngineHandle {
         rx.await
             .map_err(|_| anyhow::anyhow!("batching engine stopped before snapshot"))
     }
+
+    /// Physically resize the KV cache to `target_blocks` (#26). Returns the
+    /// achieved block count. Async variant for request-handler / API callers.
+    pub async fn resize_kv(&self, target_blocks: usize) -> Result<usize> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .send(EngineCommand::ResizeKv {
+                target_blocks,
+                reply,
+            })
+            .await
+            .map_err(|_| anyhow::anyhow!("batching engine stopped"))?;
+        rx.await
+            .map_err(|_| anyhow::anyhow!("batching engine stopped before resize ack"))?
+            .map_err(|e| anyhow::anyhow!(e))
+    }
+
+    /// Blocking variant of [`Self::resize_kv`] for the memory governor's
+    /// (non-async) monitor thread.
+    pub fn resize_kv_blocking(&self, target_blocks: usize) -> Result<usize> {
+        let (reply, rx) = oneshot::channel();
+        self.tx
+            .blocking_send(EngineCommand::ResizeKv {
+                target_blocks,
+                reply,
+            })
+            .map_err(|_| anyhow::anyhow!("batching engine stopped"))?;
+        rx.blocking_recv()
+            .map_err(|_| anyhow::anyhow!("batching engine stopped before resize ack"))?
+            .map_err(|e| anyhow::anyhow!(e))
+    }
 }
 
 enum EngineCommand {
@@ -782,6 +889,12 @@ enum EngineCommand {
     },
     Snapshot {
         reply: oneshot::Sender<BatchingEngineSnapshot>,
+    },
+    /// Physically resize the KV cache to `target_blocks` usable blocks (#26).
+    /// Handled at the between-steps barrier so no forward is in flight.
+    ResizeKv {
+        target_blocks: usize,
+        reply: oneshot::Sender<std::result::Result<usize, String>>,
     },
 }
 
@@ -921,6 +1034,20 @@ impl BatchingEngineActor {
             EngineCommand::Snapshot { reply } => {
                 self.refresh_snapshot();
                 let _ = reply.send(self.snapshot.clone());
+            }
+            EngineCommand::ResizeKv {
+                target_blocks,
+                reply,
+            } => {
+                // Runs at the barrier (drain_commands, between decode steps): the
+                // previous step's `run_decode_batch` has returned, so no forward
+                // is in flight in THIS actor. `resize_kv` additionally takes the
+                // GPU write lock to exclude the other decode actor / training.
+                let result = self
+                    .forward
+                    .resize_kv(target_blocks)
+                    .map_err(|e| format!("{e:#}"));
+                let _ = reply.send(result);
             }
         }
     }

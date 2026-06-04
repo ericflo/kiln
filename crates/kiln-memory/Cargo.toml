@@ -1,0 +1,15 @@
+[package]
+name = "kiln-memory"
+description = "Kiln's cross-engine memory awareness — VRAM/RAM probing, the memory governor, pressure signals, and the training/inference budget arbiter. Backend-agnostic by design (OS-level probes), so every engine reads the same live figures."
+version.workspace = true
+publish = false
+edition.workspace = true
+license.workspace = true
+
+# Deliberately dependency-light: the memory probes are pure std (sysfs /
+# nvidia-smi / sysctl). `tracing` is the one dep (ubiquitous, no kiln edges) so
+# the governor's background pressure monitor can log reclaim events. The crate
+# still sits at the bottom of the workspace graph — depended on by kiln-tensor /
+# kiln-model / kiln-train / kiln-server without cycles.
+[dependencies]
+tracing = { workspace = true }

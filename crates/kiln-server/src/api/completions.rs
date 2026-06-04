@@ -52,7 +52,7 @@ const QWEN_TOOL_CALL_OPEN_TAG: &str = "<tool_call>";
 const QWEN_TOOL_CALL_CLOSE_TAG: &str = "</tool_call>";
 
 fn observe_post_prefill_vram(memory_budget: &std::sync::Arc<crate::state::GpuMemoryBudget>) {
-    if let Some(bytes) = kiln_core::vram::detect_used_vram_bytes() {
+    if let Some(bytes) = kiln_memory::vram::detect_used_vram_bytes() {
         memory_budget.observe_prefill_used_vram_bytes(bytes);
     }
 }

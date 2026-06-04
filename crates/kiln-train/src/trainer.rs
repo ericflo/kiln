@@ -6816,7 +6816,7 @@ impl CheckpointConfig {
     ///
     /// Priority for num_segments:
     /// 1. `KILN_GRAD_CHECKPOINT_SEGMENTS` env var (user override)
-    /// 2. Auto-detect from GPU VRAM via `kiln_core::vram`
+    /// 2. Auto-detect from GPU VRAM via `kiln_memory::vram`
     /// 3. Fallback to 4 segments
     ///
     /// This is the *VRAM-only* path. Callers that know the workload's
@@ -6842,13 +6842,13 @@ impl CheckpointConfig {
         }
 
         // VRAM-aware auto-configuration
-        let vram = kiln_core::vram::detect_vram();
-        let num_segments = kiln_core::vram::recommended_checkpoint_segments(&vram)
+        let vram = kiln_memory::vram::detect_vram();
+        let num_segments = kiln_memory::vram::recommended_checkpoint_segments(&vram)
             .unwrap_or(4) // fallback if env var was set (shouldn't happen here)
             .min(num_layers)
             .max(1);
 
-        let auto_configured = vram.source != kiln_core::vram::VramSource::None;
+        let auto_configured = vram.source != kiln_memory::vram::VramSource::None;
 
         if auto_configured {
             tracing::info!(
@@ -6873,7 +6873,7 @@ impl CheckpointConfig {
     /// Behavior:
     /// * `KILN_GRAD_CHECKPOINT_SEGMENTS` / `KILN_NO_GRAD_CHECKPOINT` env
     ///   overrides are honored unchanged (falls through to `from_env`).
-    /// * Otherwise calls [`kiln_core::vram::recommended_checkpoint_plan`]
+    /// * Otherwise calls [`kiln_memory::vram::recommended_checkpoint_plan`]
     ///   which can *disable* checkpointing entirely when the activation tape
     ///   comfortably fits in available VRAM. On A6000 + Qwen3.5-4B, this
     ///   skips checkpointing for sequences up to ~12K tokens and only
@@ -6903,8 +6903,8 @@ impl CheckpointConfig {
             return Self::from_env(num_layers);
         }
 
-        let vram = kiln_core::vram::detect_vram();
-        let base_bytes = kiln_core::vram::estimate_base_model_bytes(
+        let vram = kiln_memory::vram::detect_vram();
+        let base_bytes = kiln_memory::vram::estimate_base_model_bytes(
             num_layers,
             hidden_size,
             intermediate_size,
@@ -6912,19 +6912,19 @@ impl CheckpointConfig {
             bytes_per_base_param,
         );
 
-        match kiln_core::vram::recommended_checkpoint_plan(
+        match kiln_memory::vram::recommended_checkpoint_plan(
             &vram,
             num_layers,
             max_seq_len_tokens,
             hidden_size,
             base_bytes,
         ) {
-            None | Some(kiln_core::vram::CheckpointPlan::UserOverride) => {
+            None | Some(kiln_memory::vram::CheckpointPlan::UserOverride) => {
                 // VRAM detection failed or env override is set — fall back
                 // to the existing VRAM-only path.
                 Self::from_env(num_layers)
             }
-            Some(kiln_core::vram::CheckpointPlan::Disabled {
+            Some(kiln_memory::vram::CheckpointPlan::Disabled {
                 max_act_gib,
                 available_gib,
             }) => {
@@ -6942,7 +6942,7 @@ impl CheckpointConfig {
                     auto_configured: true,
                 }
             }
-            Some(kiln_core::vram::CheckpointPlan::Enabled {
+            Some(kiln_memory::vram::CheckpointPlan::Enabled {
                 num_segments,
                 max_act_gib,
                 per_segment_gib,
@@ -11519,7 +11519,7 @@ pub(crate) mod tests {
     /// known VRAM number via env, then assert `auto_for_workload` returns
     /// the expected `enabled / num_segments` for a representative
     /// (vram, seq_len) cell. The pure `recommended_checkpoint_plan` matrix
-    /// is already exhaustive (`kiln_core::vram::tests::perf_regression_*_plan_matrix`);
+    /// is already exhaustive (`kiln_memory::vram::tests::perf_regression_*_plan_matrix`);
     /// this just proves the wrapper is wired to it and propagates the
     /// decision through the `CheckpointConfig` shape correctly.
     #[test]

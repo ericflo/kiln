@@ -160,23 +160,28 @@ fn detect_linux_drm_vram_at(
 ) -> Option<GpuVramInfo> {
     let device = collect_linux_drm_device_info_at(drm_base)?;
     let mem_total = query_meminfo_total_bytes_at(meminfo_path);
+    let unified = mem_total
+        .map(|mt| is_unified_memory_drm(&device, mt))
+        .unwrap_or(false);
 
-    if let Some(mem_total_bytes) = mem_total
-        && is_unified_memory_drm(&device, mem_total_bytes)
-    {
-        let reserve = unified_memory_reserve_bytes(mem_total_bytes);
-        let corrected = device
-            .vram_total
-            .min(mem_total_bytes.saturating_sub(reserve));
-        return Some(GpuVramInfo {
-            total_bytes: corrected,
-            source: VramSource::LinuxDrmSysfsUnified,
-        });
-    }
-
+    // The honest GPU-addressable total is the driver's VRAM + GTT — exactly what
+    // nvtop / rocm-smi report. On an integrated APU the GTT is the system-RAM-
+    // backed budget the GPU can actually use (often far larger than the BIOS
+    // VRAM carveout); on a discrete card the GTT is a small staging area, so
+    // vram+gtt ≈ vram. We deliberately DON'T cap this against /proc/meminfo
+    // anymore: inside a cgroup/sandbox `MemTotal` reads a fake-small limit (e.g.
+    // 32 GB on a 128 GB box), which wrongly slashed the budget. Safety headroom
+    // is the consumer's job (KV `inference_fraction`, the training reserve) and
+    // they should size against live FREE (`current_memory_snapshot`) so a
+    // coexisting GPU job is accounted for — total here is just the ceiling.
+    let total = device.vram_total.saturating_add(device.gtt_total);
     Some(GpuVramInfo {
-        total_bytes: device.vram_total,
-        source: VramSource::LinuxDrmSysfs,
+        total_bytes: total,
+        source: if unified {
+            VramSource::LinuxDrmSysfsUnified
+        } else {
+            VramSource::LinuxDrmSysfs
+        },
     })
 }
 
@@ -277,6 +282,7 @@ fn is_unified_memory_drm(device: &LinuxDrmDeviceInfo, mem_total_bytes: u64) -> b
 ///
 /// Matches the Apple Silicon path: `max(6 GB, MemTotal / 4)`. Override
 /// with `KILN_TRAINING_MEMORY_RESERVE_GB` (parsed as f64).
+#[cfg_attr(not(test), allow(dead_code))]
 fn unified_memory_reserve_bytes(mem_total_bytes: u64) -> u64 {
     if let Ok(val) = std::env::var("KILN_TRAINING_MEMORY_RESERVE_GB") {
         if let Ok(gb) = val.parse::<f64>() {
@@ -344,6 +350,163 @@ pub fn detect_used_vram_bytes() -> Option<u64> {
     (info.used_bytes > 0).then_some(info.used_bytes)
 }
 
+/// A point-in-time snapshot of the memory pool the accelerator actually
+/// allocates from — the single backend-agnostic primitive kiln's memory
+/// awareness is built on. Every engine (CUDA / ROCm / Metal / Vulkan) consults
+/// the SAME probe, so the system is uniformly aware regardless of which backend
+/// is compiled in.
+///
+/// Figures come from the GPU DRIVER's authoritative, ALL-PROCESS counters
+/// (nvidia-smi on NVIDIA; AMD/Intel `mem_info_{vram,gtt}_{total,used}` DRM sysfs,
+/// the same source `nvtop`/`rocm-smi` show). Because they are all-process, a
+/// coexisting GPU job — llama.cpp, vLLM, another kiln — is reflected by
+/// construction: `free` already has its footprint subtracted. On a unified APU
+/// (AMD Strix Halo) these are the real combined VRAM+GTT pool the GPU can use,
+/// NOT a BIOS carveout and NOT a sandbox-/cgroup-limited `/proc/meminfo`.
+#[derive(Debug, Clone, Copy)]
+pub struct MemorySnapshot {
+    /// Total accelerator memory (driver-reported; VRAM+GTT on an AMD APU).
+    pub total_bytes: u64,
+    /// Currently-used bytes across ALL processes (`total - free`). Includes any
+    /// coexisting GPU workload — kiln never assumes it owns the device.
+    pub used_bytes: u64,
+    /// Free bytes available to allocate RIGHT NOW (driver-reported).
+    pub free_bytes: u64,
+    /// Provenance of the figures.
+    pub source: VramSource,
+    /// Whether the accelerator shares system RAM with the CPU (APU / Apple
+    /// Silicon). Informational — the figures are correct either way.
+    pub unified: bool,
+}
+
+/// Take a live snapshot of accelerator memory: total, used, and free, from the
+/// GPU driver's all-process counters. This is the keystone of kiln's dynamic
+/// memory awareness — KV-cache sizing, graph-capture headroom checks, the
+/// training/inference budget arbiter, and allocator pressure response all read
+/// from here, so the whole system reacts to the SAME live figure (and the same
+/// view of any coexisting GPU workload) on every backend.
+pub fn current_memory_snapshot() -> MemorySnapshot {
+    // 1. NVIDIA: nvidia-smi reports authoritative, all-process total + used.
+    if let Some(total) = query_nvidia_smi() {
+        let used = query_nvidia_smi_field("memory.used").unwrap_or(0).min(total);
+        return MemorySnapshot {
+            total_bytes: total,
+            used_bytes: used,
+            free_bytes: total.saturating_sub(used),
+            source: VramSource::NvidiaSmi,
+            unified: false,
+        };
+    }
+
+    // 2. AMD / Intel via DRM sysfs: combined VRAM+GTT total/used — the driver's
+    //    authoritative, ALL-PROCESS view (what nvtop / rocm-smi report). On an
+    //    integrated APU this is the real unified pool, correctly sized.
+    #[cfg(target_os = "linux")]
+    if let Some((total, used)) = query_linux_drm_total_used() {
+        return MemorySnapshot {
+            total_bytes: total,
+            used_bytes: used.min(total),
+            free_bytes: total.saturating_sub(used),
+            source: VramSource::LinuxDrmSysfs,
+            unified: drm_is_integrated_unified(),
+        };
+    }
+
+    // 3. Apple Silicon / fallback: total from detect_vram (sysctl + the unified
+    //    correction + env override), free from host MemAvailable. No discrete
+    //    driver counter is available there.
+    let total = detect_vram();
+    let unified = matches!(
+        total.source,
+        VramSource::LinuxDrmSysfsUnified | VramSource::AppleSilicon
+    );
+    #[cfg(target_os = "linux")]
+    if let Some(avail) = query_meminfo_available_bytes_at(std::path::Path::new("/proc/meminfo")) {
+        let free = avail.min(total.total_bytes);
+        return MemorySnapshot {
+            total_bytes: total.total_bytes,
+            used_bytes: total.total_bytes.saturating_sub(free),
+            free_bytes: free,
+            source: total.source,
+            unified,
+        };
+    }
+    let used = detect_used_vram();
+    let used_bytes = used.used_bytes.min(total.total_bytes);
+    MemorySnapshot {
+        total_bytes: total.total_bytes,
+        used_bytes,
+        free_bytes: total.total_bytes.saturating_sub(used_bytes),
+        source: if used.source != VramSource::None {
+            used.source
+        } else {
+            total.source
+        },
+        unified,
+    }
+}
+
+/// Combined VRAM+GTT `(total, used)` from AMD/Intel DRM sysfs — the all-process
+/// driver counters `nvtop` sums. `used` defaults to 0 when idle; a `total` of 0
+/// (no GPU node) returns `None`.
+#[cfg(target_os = "linux")]
+fn query_linux_drm_total_used() -> Option<(u64, u64)> {
+    // Max-within-field-list avoids double-counting vram vs vis_vram (vis is a
+    // subset); max-across-nodes ignores 0-valued connector entries.
+    let vram_total =
+        query_linux_drm_memory_fields(&["mem_info_vram_total", "mem_info_vis_vram_total"])
+            .unwrap_or(0);
+    let gtt_total = query_linux_drm_memory_fields(&["mem_info_gtt_total"]).unwrap_or(0);
+    let total = vram_total.saturating_add(gtt_total);
+    if total == 0 {
+        return None;
+    }
+    let vram_used =
+        query_linux_drm_memory_fields(&["mem_info_vram_used", "mem_info_vis_vram_used"])
+            .unwrap_or(0);
+    let gtt_used = query_linux_drm_memory_fields(&["mem_info_gtt_used"]).unwrap_or(0);
+    Some((total, vram_used.saturating_add(gtt_used)))
+}
+
+/// Whether the primary DRM GPU is an integrated/unified-memory part (AMD/Intel
+/// display controller with a non-trivial GTT). Informational for the snapshot's
+/// `unified` flag; does not affect the byte figures.
+#[cfg(target_os = "linux")]
+fn drm_is_integrated_unified() -> bool {
+    let Some(dev) = collect_linux_drm_device_info_at(std::path::Path::new("/sys/class/drm")) else {
+        return false;
+    };
+    let integrated_vendor = matches!(dev.vendor, 0x1002 | 0x8086);
+    let display_controller = (dev.class >> 16) == 0x03;
+    let non_trivial_gtt = dev.gtt_total >= 1024 * 1024 * 1024;
+    integrated_vendor && display_controller && non_trivial_gtt
+}
+
+/// Free accelerator memory in bytes right now (0 if undetectable). Thin
+/// convenience over [`current_memory_snapshot`].
+pub fn current_free_bytes() -> u64 {
+    current_memory_snapshot().free_bytes
+}
+
+/// Read `MemAvailable` (the kernel's estimate of allocatable RAM without
+/// swapping) from a `/proc/meminfo`-format file. This is the right "free"
+/// figure for unified-memory accelerators, where GPU buffers are backed by
+/// system RAM.
+#[cfg(target_os = "linux")]
+fn query_meminfo_available_bytes_at(path: &std::path::Path) -> Option<u64> {
+    let raw = std::fs::read_to_string(path).ok()?;
+    for line in raw.lines() {
+        if let Some(rest) = line.strip_prefix("MemAvailable:") {
+            let kib: u64 = rest
+                .split_whitespace()
+                .next()
+                .and_then(|s| s.parse().ok())?;
+            return Some(kib * 1024);
+        }
+    }
+    None
+}
+
 /// Query total GPU memory via nvidia-smi.
 ///
 /// Runs `nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits`
@@ -381,7 +544,17 @@ fn query_nvidia_smi_field(field: &str) -> Option<u64> {
 /// entries do not add the same GPU multiple times.
 #[cfg(target_os = "linux")]
 fn query_linux_drm_used_vram() -> Option<u64> {
-    query_linux_drm_memory_fields(&["mem_info_vram_used", "mem_info_vis_vram_used"])
+    // VRAM + GTT: on an integrated/APU part a coexisting job's footprint spills
+    // into GTT (system-RAM-backed GPU memory) past the VRAM carveout, so
+    // counting VRAM alone undercounts it badly (e.g. a 40 GB llama.cpp model
+    // shows ~0 in `mem_info_vram_used` if it lives in GTT). Summing both matches
+    // what nvtop/rocm-smi report. `max` within each field-list avoids
+    // double-counting vram vs vis_vram.
+    let vram = query_linux_drm_memory_fields(&["mem_info_vram_used", "mem_info_vis_vram_used"])
+        .unwrap_or(0);
+    let gtt = query_linux_drm_memory_fields(&["mem_info_gtt_used"]).unwrap_or(0);
+    let total = vram.saturating_add(gtt);
+    (total > 0).then_some(total)
 }
 
 #[cfg(target_os = "linux")]
@@ -901,7 +1074,7 @@ mod tests {
 
     #[test]
     fn recommended_checkpoint_plan_respects_user_override() {
-        let _g = crate::env_flag::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         unsafe {
             std::env::set_var("KILN_GRAD_CHECKPOINT_SEGMENTS", "12");
         }
@@ -920,7 +1093,7 @@ mod tests {
 
     #[test]
     fn recommended_checkpoint_plan_respects_disable_env() {
-        let _g = crate::env_flag::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _g = crate::TEST_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         unsafe {
             std::env::set_var("KILN_NO_GRAD_CHECKPOINT", "1");
         }
@@ -943,7 +1116,7 @@ mod tests {
         // parallel test that's mid-`set_var` can't make us return
         // UserOverride via env before we reach the VRAM check. macOS CI
         // reproducibly hit this on the parallel test interleave.
-        let _g = crate::env_flag::TEST_ENV_LOCK
+        let _g = crate::TEST_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         unsafe {
@@ -968,7 +1141,7 @@ mod tests {
         // Same env isolation as the test above — scrub the overrides so
         // a parallel test can't make us return UserOverride via env
         // before we reach the headroom check.
-        let _g = crate::env_flag::TEST_ENV_LOCK
+        let _g = crate::TEST_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         unsafe {
@@ -1000,7 +1173,7 @@ mod tests {
         // recommended_checkpoint_plan reads KILN_GRAD_CHECKPOINT_SEGMENTS
         // and KILN_NO_GRAD_CHECKPOINT — take the env lock + scrub so a
         // parallel env-mutating test can't flip our cells to UserOverride.
-        let _g = crate::env_flag::TEST_ENV_LOCK
+        let _g = crate::TEST_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         unsafe {
@@ -1085,7 +1258,7 @@ mod tests {
     /// linearly with hidden, so the Disable→Enable boundary shifts.
     #[test]
     fn perf_regression_llama_8b_plan_matrix() {
-        let _g = crate::env_flag::TEST_ENV_LOCK
+        let _g = crate::TEST_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         unsafe {
@@ -1151,7 +1324,7 @@ mod tests {
     /// constant-factor change in the reported `max_act_gib`.
     #[test]
     fn perf_regression_disabled_plan_reports_sane_act_tape() {
-        let _g = crate::env_flag::TEST_ENV_LOCK
+        let _g = crate::TEST_ENV_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
         unsafe {
@@ -1208,7 +1381,7 @@ mod tests {
         // `test_unified_memory_reserve_env_override` doesn't race
         // with this test's reads of the same env var via
         // `unified_memory_reserve_bytes`.
-        let _env_guard = crate::env_flag::TEST_ENV_LOCK.lock().unwrap();
+        let _env_guard = crate::TEST_ENV_LOCK.lock().unwrap();
         // Synthesize the user's hardware: AMD Strix Halo APU. DRM
         // reports a 103 GB VRAM carveout on a 30 GB host. The corrected
         // budget must be MemTotal − reserve, not the carveout.
@@ -1248,24 +1421,16 @@ mod tests {
         )
         .unwrap();
 
+        // The device is still RECOGNIZED as unified (so the source flag is set),
+        // but we no longer CAP the total against /proc/meminfo — that cap was the
+        // bug: on a big-RAM APU (and inside a memory-limited cgroup/sandbox) it
+        // slashed the real budget. The honest total is the driver's VRAM+GTT,
+        // which the GPU can genuinely address.
         assert!(is_unified_memory_drm(&device, mem_total));
-
-        // KILN_TRAINING_MEMORY_RESERVE_GB may leak from a parent test
-        // process; clear it so the assertion is deterministic. SAFETY:
-        // env mutation is safe under nextest's per-test process isolation.
-        unsafe { std::env::remove_var("KILN_TRAINING_MEMORY_RESERVE_GB") };
-        let reserve = unified_memory_reserve_bytes(mem_total);
-        // Default reserve = max(6 GB, MemTotal/4) = max(6, 7.5) = 7.5 GB.
-        assert_eq!(reserve, mem_total / 4);
-
         let info = detect_linux_drm_vram_at(&root, &meminfo_path).unwrap();
         assert_eq!(info.source, VramSource::LinuxDrmSysfsUnified);
-        // Corrected = min(carveout, MemTotal − reserve) = MemTotal − reserve.
-        assert_eq!(info.total_bytes, mem_total - reserve);
-        // Sanity-check the order of magnitude — corrected budget must
-        // sit between 14 and 24 GB on a 30 GB box.
-        let gb = info.total_bytes as f64 / (1024.0 * 1024.0 * 1024.0);
-        assert!((14.0..=24.0).contains(&gb), "corrected budget = {gb} GB");
+        // total = vram_total + gtt_total (NOT capped to MemTotal − reserve).
+        assert_eq!(info.total_bytes, 103_079_215_104 + 16_629_477_376);
 
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -1307,7 +1472,8 @@ mod tests {
 
         let info = detect_linux_drm_vram_at(&root, &meminfo_path).unwrap();
         assert_eq!(info.source, VramSource::LinuxDrmSysfs);
-        assert_eq!(info.total_bytes, 17_179_869_184);
+        // total = vram (16 GiB) + gtt (256 MiB staging) on a discrete card.
+        assert_eq!(info.total_bytes, 17_179_869_184 + 268_435_456);
 
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -1334,10 +1500,43 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
+    fn test_meminfo_available_parser() {
+        let path = std::env::temp_dir().join(format!(
+            "kiln-meminfo-avail-test-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        std::fs::write(
+            &path,
+            "MemTotal:       32479448 kB\nMemFree:  1000000 kB\nMemAvailable:   27571892 kB\n",
+        )
+        .unwrap();
+        assert_eq!(
+            query_meminfo_available_bytes_at(&path),
+            Some(27_571_892u64 * 1024)
+        );
+        // Missing MemAvailable -> None (older kernels; caller falls back).
+        std::fs::write(&path, "MemTotal: 100 kB\n").unwrap();
+        assert_eq!(query_meminfo_available_bytes_at(&path), None);
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn current_memory_snapshot_is_internally_consistent() {
+        // Whatever the host reports, the snapshot's arithmetic must hold:
+        // used + free == total, and free <= total. (On CI runners with no GPU
+        // total may be 0, in which case all three are 0 — still consistent.)
+        let s = current_memory_snapshot();
+        assert_eq!(s.used_bytes.saturating_add(s.free_bytes), s.total_bytes);
+        assert!(s.free_bytes <= s.total_bytes);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
     fn test_unified_memory_reserve_env_override() {
         // Hold the shared env-mutation lock — see
         // test_unified_memory_apu_corrects_oversized_carveout.
-        let _env_guard = crate::env_flag::TEST_ENV_LOCK.lock().unwrap();
+        let _env_guard = crate::TEST_ENV_LOCK.lock().unwrap();
         // SAFETY: env mutation is safe under nextest's per-test process
         // isolation; this test must run via `cargo nextest run`.
         unsafe { std::env::set_var("KILN_TRAINING_MEMORY_RESERVE_GB", "10.0") };
