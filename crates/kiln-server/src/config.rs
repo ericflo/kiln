@@ -485,8 +485,13 @@ impl Default for MemoryConfig {
             inference_memory_fraction: 0.7,
             training_memory_gb: None,
             kv_cache_fp8: false,
-            // Opt in until graph-capturable stream replay matches eager decode.
-            cuda_graphs: false,
+            // Default ON (#34): both bs=1 graph bugs are fixed — BUG1 (dangling
+            // captured block-table) by the default-on stable paged metadata, and
+            // BUG2 (token-doubling on replay) by instantiating the graph with
+            // flags=0 instead of AUTO_FREE_ON_LAUNCH (which re-allocated the GDN
+            // state buffers each replay). Disable with `KILN_CUDA_GRAPHS=0`. The
+            // bs>1 batched path stays opt-in (`KILN_CUDA_GRAPHS_BATCHED`).
+            cuda_graphs: true,
         }
     }
 }
@@ -958,7 +963,7 @@ mod tests {
         assert!(config.memory.num_blocks.is_none());
         assert_eq!(config.memory.inference_memory_fraction, 0.7);
         assert!(!config.memory.kv_cache_fp8);
-        assert!(!config.memory.cuda_graphs);
+        assert!(config.memory.cuda_graphs); // #34: default ON
         assert!(!config.training.no_grad_checkpoint);
         assert!(config.training.checkpoint_interval.is_none());
         assert!(config.training.webhook_url.is_none());
