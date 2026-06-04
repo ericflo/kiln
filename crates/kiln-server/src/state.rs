@@ -1679,6 +1679,42 @@ impl AppState {
                         0
                     });
                 }
+                // CUDA mirror: on a DISCRETE card cuMemPoolTrimTo actually returns
+                // VRAM to the OS, so a coexisting process / training reservation
+                // gets headroom under pressure. Device-synced inside (race-free).
+                #[cfg(feature = "cuda")]
+                if let kiln_tensor::Device::Cuda(idx) = device_kt {
+                    kiln_memory::MemoryGovernor::global().register_reclaimer(move |_target| {
+                        let _ = kiln_tensor::cuda_trim_pool(idx, 0);
+                        0 // driver doesn't surface bytes freed; mirror ROCm, report 0
+                    });
+                }
+                // Metal: UMA — shared-mode buffers are CPU-addressable, there is no
+                // discrete pool to hand back. Register a logged no-op so the
+                // registry is uniform across backends.
+                #[cfg(feature = "metal")]
+                if matches!(device_kt, kiln_tensor::Device::Metal(_)) {
+                    kiln_memory::MemoryGovernor::global().register_reclaimer(|_target| {
+                        static LOGGED: std::sync::Once = std::sync::Once::new();
+                        LOGGED.call_once(|| {
+                            tracing::info!("metal reclaimer: UMA, no pool to trim (no-op)")
+                        });
+                        0
+                    });
+                }
+                // Vulkan: the kt allocator's VkDeviceMemory cache has no
+                // free-to-OS trim wired yet. Logged no-op for now (a cache-drain
+                // reclaimer is a follow-up — see kv-memory notes).
+                #[cfg(feature = "vulkan")]
+                if matches!(device_kt, kiln_tensor::Device::Vulkan(_)) {
+                    kiln_memory::MemoryGovernor::global().register_reclaimer(|_target| {
+                        static LOGGED: std::sync::Once = std::sync::Once::new();
+                        LOGGED.call_once(|| {
+                            tracing::info!("vulkan reclaimer: cache-drain not yet implemented (no-op)")
+                        });
+                        0
+                    });
+                }
                 kiln_memory::MemoryGovernor::global().start_monitor();
             });
         }

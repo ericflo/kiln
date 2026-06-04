@@ -461,6 +461,46 @@ pub fn primary_cuda_context(device_index: usize) -> Result<Arc<CudaContext>> {
         .map_err(|e| Error::Msg(format!("primary_cuda_context({device_index}): {e}")))
 }
 
+/// Device-reported `(free, total)` CUDA memory via `cuMemGetInfo`. The CUDA
+/// analog of [`crate::rocm_mem_get_info`] — driver ground truth for the active
+/// GPU, used to back the memory governor on discrete NVIDIA cards.
+pub fn cuda_mem_get_info(device_index: usize) -> Result<(usize, usize)> {
+    let ctx = primary_cuda_context(device_index)?;
+    ctx.bind_to_thread()
+        .map_err(|e| Error::Msg(format!("cuda_mem_get_info bind({device_index}): {e}")))?;
+    ctx.mem_get_info()
+        .map_err(|e| Error::Msg(format!("cuda_mem_get_info({device_index}): {e}")))
+}
+
+/// Return pooled-but-unused CUDA VRAM to the OS, keeping at least
+/// `min_keep_bytes` cached. The CUDA analog of [`crate::rocm_trim_pool`]: the
+/// governor's reclaim hook for NVIDIA. **Device-synchronizes first** so no
+/// in-flight kernel is reading a block being released (race-free, mirroring the
+/// ROCm path). On a DISCRETE GPU `cuMemPoolTrimTo` actually returns VRAM to the
+/// OS so a coexisting process / training reservation gets headroom; best-effort
+/// no-op when the runtime has no stream-ordered mempool (the pool is empty).
+pub fn cuda_trim_pool(device_index: usize, min_keep_bytes: usize) -> Result<()> {
+    use cudarc::driver::sys;
+    let ctx = primary_cuda_context(device_index)?;
+    ctx.bind_to_thread()
+        .map_err(|e| Error::Msg(format!("cuda_trim_pool bind({device_index}): {e}")))?;
+    // Drain in-flight work before releasing pooled pages (see rocm_trim_pool).
+    ctx.synchronize()
+        .map_err(|e| Error::Msg(format!("cuda_trim_pool sync({device_index}): {e}")))?;
+    let dev = ctx.cu_device();
+    let mut pool: sys::CUmemoryPool = std::ptr::null_mut();
+    // SAFETY: `dev` is a valid CUdevice from the live context; `pool` is an
+    // out-param. Both calls are best-effort — failure is ignored (no mempool).
+    unsafe {
+        if sys::cuDeviceGetDefaultMemPool(&mut pool, dev) == sys::CUresult::CUDA_SUCCESS
+            && !pool.is_null()
+        {
+            let _ = sys::cuMemPoolTrimTo(pool, min_keep_bytes);
+        }
+    }
+    Ok(())
+}
+
 impl StorageBackend for CudaStorage {
     fn device(&self) -> Device {
         self.device
