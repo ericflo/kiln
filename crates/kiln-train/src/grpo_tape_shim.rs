@@ -522,6 +522,7 @@ pub(crate) fn try_tape_grpo_pg_loss_from_logits_kt(
             kiln_tensor::Device::Cuda(_)
                 | kiln_tensor::Device::Metal(_)
                 | kiln_tensor::Device::Vulkan(_)
+                | kiln_tensor::Device::Rocm(_)
         )
     {
         return Ok(None);

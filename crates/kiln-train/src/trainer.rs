@@ -4916,6 +4916,7 @@ fn train_tokenized_grpo_group_with_grad_norms(
                 kiln_tensor::Device::Cuda(_)
                     | kiln_tensor::Device::Metal(_)
                     | kiln_tensor::Device::Vulkan(_)
+                    | kiln_tensor::Device::Rocm(_)
             )
             && base_dtype_supports_tape(weights, device)
             && !(config.loss.echo.is_some()
@@ -7646,9 +7647,10 @@ pub fn standard_forward_backward(
                 kiln_tensor::Device::Cuda(_)
                     | kiln_tensor::Device::Metal(_)
                     | kiln_tensor::Device::Vulkan(_)
+                    | kiln_tensor::Device::Rocm(_)
             ),
             "standard_forward_backward: kt tape-authoritative SFT requires a GPU \
-             device (CUDA/Metal/Vulkan) post candle-drop (the candle CPU \
+             device (CUDA/Metal/Vulkan/ROCm) post candle-drop (the candle CPU \
              `loss.backward()` path was removed in #1082)."
         );
         anyhow::ensure!(
