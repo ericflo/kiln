@@ -1889,23 +1889,21 @@ impl CudaGraphRunner {
             })
         });
 
-        // End capture — instantiates the graph.
+        // End capture — instantiates the graph with AUTO_FREE_ON_LAUNCH.
         //
-        // (BUG2 fix) Instantiate with NO flags (0), NOT AUTO_FREE_ON_LAUNCH.
-        // AUTO_FREE_ON_LAUNCH frees the graph's per-launch async allocations at
-        // the start of every replay and re-allocates them — so the GDN
-        // recurrent/conv-state kernels write their new state into freshly-
-        // allocated scratch that the persistent recurrent_states[i]/conv_states[i]
-        // device pointer no longer aliases. The state therefore never advances
-        // across bare graph.launch() replays, freezing the decode and re-emitting
-        // the same token (the "token-doubling" symptom). The ROCm HIP-graph path
-        // instantiates with flags=0 (rocm_graph.rs) and is bit-identical to eager;
-        // this matches it. cudarc's CUgraphInstantiate_flags enum has no NONE
-        // variant, so build the 0 value directly (it is FFI-bound to
-        // cuGraphInstantiate as the flags word).
-        let no_flags: cudarc::driver::sys::CUgraphInstantiate_flags =
-            unsafe { std::mem::transmute(0u32) };
-        let graph_result = stream.end_capture(no_flags);
+        // NOTE (BUG2): an earlier change (reverted here) flipped this to flags=0
+        // on the theory that AUTO_FREE re-allocated the GDN state buffers each
+        // replay. That theory is WRONG: `bench-results/cuda-graph-box102-findings.md`
+        // (runtime-instrumented on A6000) explicitly tested flags=0 here and saw
+        // IDENTICAL token-doubling (finding #3) — flags=0 is orthogonal to BUG2.
+        // The real divergence is a layer-0/input replay staleness still under
+        // investigation. AUTO_FREE_ON_LAUNCH is restored because it correctly
+        // reclaims the graph's per-launch async scratch (ROCm works for a
+        // different reason — its forward emits no in-graph device-malloc nodes,
+        // so AUTO_FREE has nothing to free there).
+        let graph_result = stream.end_capture(
+            cudarc::driver::sys::CUgraphInstantiate_flags_enum::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
+        );
 
         // Check forward pass success first
         capture_result.context("forward pass failed during graph capture")?;
@@ -2306,19 +2304,15 @@ impl CudaGraphRunner {
                 })
             });
 
-            // (BUG2 fix) Instantiate the bs>1 graph with NO flags (0), matching
-            // the bs=1 path and the ROCm HIP-graph path. The former NO_FLAGS
-            // workaround was about the (now-removed) in-graph lm-head matmul
-            // transient — but the GDN recurrent/conv STATE buffers are a SEPARATE
-            // concern AUTO_FREE_ON_LAUNCH breaks identically: it re-allocates the
-            // per-launch async buffers each replay, so the GDN kernels' in-place
-            // state write lands in scratch the persistent state pointer no longer
-            // aliases → state freezes across replays → token-doubling. The same
-            // GDN kernels run in batched decode, so the batched graph needs flags=0
-            // too. (cudarc's enum has no NONE variant; 0 = no flags, FFI-bound.)
-            let no_flags: cudarc::driver::sys::CUgraphInstantiate_flags =
-                unsafe { std::mem::transmute(0u32) };
-            let graph_result = stream.end_capture(no_flags);
+            // Instantiate the bs>1 graph with AUTO_FREE_ON_LAUNCH (restored).
+            // An earlier change flipped this to flags=0 as a purported BUG2 fix;
+            // box102 disproved that (flags=0 → identical doubling), and on this
+            // batched path AUTO_FREE is deliberate: it reclaims the per-replay
+            // scratch while the freeze-pointers arena pins the persistent buffers.
+            // Leaving it at flags=0 would leak that scratch every replay.
+            let graph_result = stream.end_capture(
+                cudarc::driver::sys::CUgraphInstantiate_flags_enum::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH,
+            );
 
             forward_result.context("batched forward failed during graph capture")?;
             let graph = match graph_result {
