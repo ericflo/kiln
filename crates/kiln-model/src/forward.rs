@@ -3386,6 +3386,12 @@ fn flash_attention_forward_head_major(
 }
 
 /// GPU-ready tensors organized by layer, converted from raw `ModelWeights` bytes.
+///
+/// `Clone` is cheap: every field bottoms out in `Tensor`, which is `Arc`-backed,
+/// so a clone bumps refcounts rather than copying device memory. Used by the
+/// in-process self-distillation teacher (`LiveLocalTeacher`) to hold a shared
+/// handle to the loaded model and score rollouts on demand.
+#[derive(Clone)]
 pub struct GpuWeights {
     /// Token embedding table: [vocab_size, hidden_size]
     pub embed_tokens: Tensor,
@@ -3455,6 +3461,21 @@ pub struct MtpGpuWeightsSlot {
     source: Option<MtpGpuSource>,
     device: Device,
     init_lock: Mutex<()>,
+}
+
+impl Clone for MtpGpuWeightsSlot {
+    /// The slot lazily derives its GPU weights from `source` on first use, so a
+    /// clone carries `source` + `device` and starts with a FRESH (empty) cache
+    /// that re-derives on demand. (The self-distillation teacher that drives
+    /// `GpuWeights: Clone` never touches MTP, so this never re-uploads there.)
+    fn clone(&self) -> Self {
+        Self {
+            weights: OnceLock::new(),
+            source: self.source.clone(),
+            device: self.device.clone(),
+            init_lock: Mutex::new(()),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -3698,6 +3719,7 @@ pub fn compute_rotary_inv_freq(
 }
 
 /// One transformer layer's tensors on device.
+#[derive(Clone)]
 pub struct GpuLayerWeights {
     pub input_layernorm: Tensor,
     pub post_attention_layernorm: Tensor,
@@ -3706,11 +3728,13 @@ pub struct GpuLayerWeights {
 }
 
 /// Attention weights on device.
+#[derive(Clone)]
 pub enum GpuAttentionWeights {
     Full(GpuFullAttentionWeights),
     Linear(GpuLinearAttentionWeights),
 }
 
+#[derive(Clone)]
 pub struct GpuFullAttentionWeights {
     pub q_proj: Tensor,
     pub k_proj: Tensor,
@@ -3859,6 +3883,7 @@ impl GpuFullAttentionWeights {
     }
 }
 
+#[derive(Clone)]
 pub struct GpuLinearAttentionWeights {
     pub in_proj_qkv: Tensor,
     pub in_proj_z: Tensor,
@@ -4197,6 +4222,7 @@ impl GpuLinearAttentionWeights {
     }
 }
 
+#[derive(Clone)]
 pub struct GpuFfnWeights {
     pub gate_proj: Tensor,
     pub up_proj: Tensor,

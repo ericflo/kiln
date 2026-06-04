@@ -1912,6 +1912,186 @@ pub fn build_local_teacher_fixture(
     Ok(fixture)
 }
 
+/// Run `model_forward_kt` on `tokens` and return, for each position in
+/// `positions` (in order), the teacher's top-`top_k` `(indices, logprobs)`.
+/// This is the shared forward+log_softmax+top-K core behind both the
+/// pre-computed [`build_local_teacher_fixture`] and the live
+/// [`LiveLocalTeacher`]. Runs in inference (detached) — no tape recording.
+fn forward_topk_at_positions(
+    tokens: &[u32],
+    positions: &[usize],
+    weights: &kiln_model::forward::GpuWeights,
+    model_config: &kiln_core::config::ModelConfig,
+    teacher_lora: Option<&kiln_model::lora_loader::LoraWeights>,
+    top_k: usize,
+) -> Result<Vec<(Vec<u32>, Vec<f32>)>> {
+    use kiln_model::backend;
+    use kiln_model::forward::{model_forward_kt, LinearAttentionState};
+
+    let device = weights.embed_tokens.device();
+    let backend_rt = backend::for_device_kt(&device);
+    let mut linear_state = LinearAttentionState::new(model_config, &device)?;
+    let logits = model_forward_kt(
+        &*backend_rt,
+        tokens,
+        weights,
+        model_config,
+        None,
+        Some(&mut linear_state),
+        teacher_lora,
+    )
+    .context("live-teacher forward pass")?;
+    let logits = logits.detach();
+    // Numerically-stable log_softmax over the vocab axis (same identity as the
+    // fixture path): xs - log(sum_exp(xs - max(xs))).
+    let log_probs = {
+        let max = logits.max_keepdim(2).context("live-teacher log_softmax max")?;
+        let diff = logits.broadcast_sub(&max).context("live-teacher log_softmax sub")?;
+        let sum_exp = diff
+            .exp()
+            .context("live-teacher log_softmax exp")?
+            .sum_keepdim(2)
+            .context("live-teacher log_softmax sum")?;
+        diff.broadcast_sub(&sum_exp.log().context("live-teacher log_softmax log")?)
+            .context("live-teacher log_softmax final")?
+    };
+    let log_probs_host: Vec<Vec<f32>> = log_probs
+        .squeeze(0)
+        .context("live-teacher squeeze batch")?
+        .to_dtype(DType::F32)
+        .context("live-teacher to f32")?
+        .to_vec2::<f32>()
+        .context("live-teacher logprobs to host")?;
+
+    let mut out = Vec::with_capacity(positions.len());
+    for &pos in positions {
+        if pos >= log_probs_host.len() {
+            return Err(anyhow!(
+                "live-teacher: position {pos} >= seq_len {}",
+                log_probs_host.len()
+            ));
+        }
+        let mut indexed: Vec<(u32, f32)> = log_probs_host[pos]
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(i, lp)| (i as u32, lp))
+            .collect();
+        indexed.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        indexed.truncate(top_k);
+        out.push((
+            indexed.iter().map(|(i, _)| *i).collect(),
+            indexed.iter().map(|(_, lp)| *lp).collect(),
+        ));
+    }
+    Ok(out)
+}
+
+/// In-process self-distillation teacher (#31): holds a shared (cheap, Arc-backed)
+/// handle to the loaded model and computes top-K teacher logprobs **live** for
+/// any token sequence. Unlike the pre-computed [`FixtureLogitSource`] — keyed by
+/// prompt-token hash, which only matches OFF-policy given turns — this scores the
+/// actual ON-policy rollouts the student generates, so `teacher: "self"` works in
+/// on-policy mode. `fetch_logprobs` runs in the OPD data-prep phase, OUTSIDE the
+/// student's tape-authoritative scope (no tape nesting — mirrors the fixture
+/// builder's detached forward).
+pub struct LiveLocalTeacher {
+    weights: kiln_model::forward::GpuWeights,
+    model_config: kiln_core::config::ModelConfig,
+    teacher_lora: Option<kiln_model::lora_loader::LoraWeights>,
+    caps: crate::logit_source::LogitSourceCaps,
+    default_top_k: usize,
+}
+
+impl std::fmt::Debug for LiveLocalTeacher {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LiveLocalTeacher")
+            .field("teacher_id", &self.caps.teacher_id)
+            .field("vocab_size", &self.caps.vocab_size)
+            .field("max_top_k", &self.caps.max_top_k)
+            .field("has_teacher_lora", &self.teacher_lora.is_some())
+            .finish()
+    }
+}
+
+impl LiveLocalTeacher {
+    pub fn new(
+        teacher_id: impl Into<String>,
+        weights: kiln_model::forward::GpuWeights,
+        model_config: kiln_core::config::ModelConfig,
+        teacher_lora: Option<kiln_model::lora_loader::LoraWeights>,
+        top_k: usize,
+    ) -> Self {
+        let vocab_size = model_config.vocab_size;
+        let caps = crate::logit_source::LogitSourceCaps {
+            teacher_id: teacher_id.into(),
+            vocab_size,
+            // Live forward yields full logits, so any K up to vocab is servable.
+            max_top_k: vocab_size,
+            supports_full_vocab: false,
+            supports_batched: false,
+            // Self-distillation: teacher IS the student model — same tokenizer.
+            tokenizer_hash: None,
+        };
+        Self {
+            weights,
+            model_config,
+            teacher_lora,
+            caps,
+            default_top_k: top_k,
+        }
+    }
+}
+
+impl crate::logit_source::LogitSource for LiveLocalTeacher {
+    fn capabilities(&self) -> crate::logit_source::LogitSourceCaps {
+        self.caps.clone()
+    }
+
+    fn fetch_logprobs(
+        &self,
+        tokens: &[u32],
+        positions: &[usize],
+        top_k: Option<usize>,
+    ) -> std::result::Result<crate::logit_source::LogprobBatch, crate::logit_source::LogitSourceError>
+    {
+        use crate::logit_source::{LogitSourceError, LogprobBatch, TopKLogprobs};
+        let teacher_id = self.caps.teacher_id.clone();
+        let requested_k = top_k.unwrap_or(self.default_top_k);
+        if requested_k > self.caps.max_top_k {
+            return Err(LogitSourceError::TopKExceedsCap {
+                requested: requested_k,
+                cap: self.caps.max_top_k,
+                teacher_id,
+            });
+        }
+        if top_k.is_none() && !self.caps.supports_full_vocab {
+            return Err(LogitSourceError::FullVocabUnsupported { teacher_id });
+        }
+        let per_pos = forward_topk_at_positions(
+            tokens,
+            positions,
+            &self.weights,
+            &self.model_config,
+            self.teacher_lora.as_ref(),
+            requested_k,
+        )
+        .map_err(|e| LogitSourceError::invalid(&teacher_id, format!("live teacher forward: {e:#}")))?;
+
+        let mut indices = Vec::with_capacity(positions.len() * requested_k);
+        let mut logprobs = Vec::with_capacity(positions.len() * requested_k);
+        for (idx, lp) in per_pos {
+            indices.extend_from_slice(&idx);
+            logprobs.extend_from_slice(&lp);
+        }
+        Ok(LogprobBatch::TopK(TopKLogprobs {
+            indices,
+            logprobs,
+            top_k: requested_k,
+        }))
+    }
+}
+
 /// Run OPD training on the provided prompts using the already-loaded model.
 ///
 /// This is the §3.1 trainer body. It mirrors `trainer::sft_train`'s
