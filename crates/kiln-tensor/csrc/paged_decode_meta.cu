@@ -981,15 +981,13 @@ __global__ void kiln_paged_attn_decode_bf16_gqa4_d256_split_kernel(
     float scale) {
     constexpr int D = 256;
     constexpr int GROUP = 4;
-    const int tid = threadIdx.x;
-    const int g = tid / D;
-    const int di = tid - g * D;
+    const int di = threadIdx.x;
     const int group_partial = blockIdx.x;
     const int split = group_partial % static_cast<int>(split_count);
     const int group_row = group_partial / static_cast<int>(split_count);
     const int bi = group_row / static_cast<int>(hk);
     const int kvh = group_row - bi * static_cast<int>(hk);
-    const int qh = kvh * GROUP + g;
+    const int qh0 = kvh * GROUP;
 
     int64_t used = max_seqlen_k;
     if (seqused_k != nullptr) {
@@ -1003,17 +1001,26 @@ __global__ void kiln_paged_attn_decode_bf16_gqa4_d256_split_kernel(
     int64_t end = start + chunk;
     if (end > used) end = used;
 
-    __shared__ float k_s[D];
-    __shared__ float v_s[D];
     __shared__ float dot_s[GROUP * D];
 
-    const __nv_bfloat16* q_row =
-        q + ((static_cast<int64_t>(bi) * h + qh) * D);
-    const float q_val = __bfloat162float(q_row[di]);
+    const int64_t q_base = (static_cast<int64_t>(bi) * h + qh0) * D + di;
+    const float q0 = __bfloat162float(q[q_base]);
+    const float q1 = __bfloat162float(q[q_base + D]);
+    const float q2 = __bfloat162float(q[q_base + 2 * D]);
+    const float q3 = __bfloat162float(q[q_base + 3 * D]);
 
-    float m = -3.4028234663852886e38f;
-    float l = 0.0f;
-    float accum = 0.0f;
+    float m0 = -3.4028234663852886e38f;
+    float m1 = -3.4028234663852886e38f;
+    float m2 = -3.4028234663852886e38f;
+    float m3 = -3.4028234663852886e38f;
+    float l0 = 0.0f;
+    float l1 = 0.0f;
+    float l2 = 0.0f;
+    float l3 = 0.0f;
+    float accum0 = 0.0f;
+    float accum1 = 0.0f;
+    float accum2 = 0.0f;
+    float accum3 = 0.0f;
 
     for (int64_t t = start; t < end; ++t) {
         const int64_t blk = t / page_block_size;
@@ -1027,50 +1034,84 @@ __global__ void kiln_paged_attn_decode_bf16_gqa4_d256_split_kernel(
             valid = phys_row >= 0 && phys_row < pool_rows;
         }
 
-        if (g == 0) {
-            if (valid) {
-                const __nv_bfloat16* k_row =
-                    k_pool + (phys_row * hk + kvh) * D;
-                const __nv_bfloat16* v_row =
-                    v_pool + (phys_row * hk + kvh) * D;
-                k_s[di] = __bfloat162float(k_row[di]);
-                v_s[di] = __bfloat162float(v_row[di]);
-            } else {
-                k_s[di] = 0.0f;
-                v_s[di] = 0.0f;
-            }
+        float k_val = 0.0f;
+        float v_val = 0.0f;
+        if (valid) {
+            const int64_t kv_base = (phys_row * hk + kvh) * D + di;
+            k_val = __bfloat162float(k_pool[kv_base]);
+            v_val = __bfloat162float(v_pool[kv_base]);
         }
-        __syncthreads();
 
-        dot_s[tid] = q_val * k_s[di];
+        dot_s[di] = q0 * k_val;
+        dot_s[D + di] = q1 * k_val;
+        dot_s[2 * D + di] = q2 * k_val;
+        dot_s[3 * D + di] = q3 * k_val;
         __syncthreads();
         for (int stride = D >> 1; stride > 0; stride >>= 1) {
             if (di < stride) {
-                dot_s[g * D + di] += dot_s[g * D + di + stride];
+                dot_s[di] += dot_s[di + stride];
+                dot_s[D + di] += dot_s[D + di + stride];
+                dot_s[2 * D + di] += dot_s[2 * D + di + stride];
+                dot_s[3 * D + di] += dot_s[3 * D + di + stride];
             }
             __syncthreads();
         }
-        const float dot = dot_s[g * D];
 
         if (valid) {
-            const float score = dot * scale;
-            const float new_m = score > m ? score : m;
-            const float alpha = expf(m - new_m);
-            const float beta = expf(score - new_m);
-            accum = accum * alpha + beta * v_s[di];
-            l = l * alpha + beta;
-            m = new_m;
+            const float score0 = dot_s[0] * scale;
+            const float new_m0 = score0 > m0 ? score0 : m0;
+            const float alpha0 = expf(m0 - new_m0);
+            const float beta0 = expf(score0 - new_m0);
+            accum0 = accum0 * alpha0 + beta0 * v_val;
+            l0 = l0 * alpha0 + beta0;
+            m0 = new_m0;
+
+            const float score1 = dot_s[D] * scale;
+            const float new_m1 = score1 > m1 ? score1 : m1;
+            const float alpha1 = expf(m1 - new_m1);
+            const float beta1 = expf(score1 - new_m1);
+            accum1 = accum1 * alpha1 + beta1 * v_val;
+            l1 = l1 * alpha1 + beta1;
+            m1 = new_m1;
+
+            const float score2 = dot_s[2 * D] * scale;
+            const float new_m2 = score2 > m2 ? score2 : m2;
+            const float alpha2 = expf(m2 - new_m2);
+            const float beta2 = expf(score2 - new_m2);
+            accum2 = accum2 * alpha2 + beta2 * v_val;
+            l2 = l2 * alpha2 + beta2;
+            m2 = new_m2;
+
+            const float score3 = dot_s[3 * D] * scale;
+            const float new_m3 = score3 > m3 ? score3 : m3;
+            const float alpha3 = expf(m3 - new_m3);
+            const float beta3 = expf(score3 - new_m3);
+            accum3 = accum3 * alpha3 + beta3 * v_val;
+            l3 = l3 * alpha3 + beta3;
+            m3 = new_m3;
         }
         __syncthreads();
     }
 
-    const int row = bi * static_cast<int>(h) + qh;
-    const int64_t partial = static_cast<int64_t>(row) * split_count + split;
+    const int row0 = bi * static_cast<int>(h) + qh0;
+    const int64_t partial0 = static_cast<int64_t>(row0) * split_count + split;
+    const int64_t partial1 = partial0 + split_count;
+    const int64_t partial2 = partial1 + split_count;
+    const int64_t partial3 = partial2 + split_count;
     if (di == 0) {
-        partial_m[partial] = m;
-        partial_l[partial] = l;
+        partial_m[partial0] = m0;
+        partial_l[partial0] = l0;
+        partial_m[partial1] = m1;
+        partial_l[partial1] = l1;
+        partial_m[partial2] = m2;
+        partial_l[partial2] = l2;
+        partial_m[partial3] = m3;
+        partial_l[partial3] = l3;
     }
-    partial_acc[partial * D + di] = accum;
+    partial_acc[partial0 * D + di] = accum0;
+    partial_acc[partial1 * D + di] = accum1;
+    partial_acc[partial2 * D + di] = accum2;
+    partial_acc[partial3 * D + di] = accum3;
 }
 
 } // namespace
@@ -1426,7 +1467,7 @@ extern "C" int kiln_paged_attn_decode_bf16_gqa4_split_async(const void* q_bf16,
         std::getenv("KILN_DISABLE_ROCM_GQA_D128_PARALLEL") == nullptr
         && group == 4 && d == 128;
     if (use_d256_parallel) {
-        kiln_paged_attn_decode_bf16_gqa4_d256_split_kernel<<<static_cast<int>(total_group_partials), 1024, 0, stream>>>(
+        kiln_paged_attn_decode_bf16_gqa4_d256_split_kernel<<<static_cast<int>(total_group_partials), BLOCK_SIZE, 0, stream>>>(
             static_cast<const __nv_bfloat16*>(q_bf16),
             static_cast<const __nv_bfloat16*>(k_pool_bf16),
             static_cast<const __nv_bfloat16*>(v_pool_bf16),
