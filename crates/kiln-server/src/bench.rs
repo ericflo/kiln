@@ -27,8 +27,8 @@ use kiln_model::forward::{
     GpuWeights,
     LinearAttentionState,
     lm_head_sample_backend_decode_if,
-    model_forward_kt,
     model_forward_head_backend_decode_if,
+    model_forward_kt,
     model_forward_paged_batched_decode_hidden,
     model_forward_paged_last_token,
     model_forward_paged_last_token_greedy,
@@ -1047,13 +1047,9 @@ fn bench_latency_paged(
         {
             token
         } else {
-            let logits = model_forward_head_backend_decode_if(
-                Some(&*backend),
-                &hidden,
-                weights,
-                config,
-            )
-            .context("paged sampled prefill lm-head fallback failed")?;
+            let logits =
+                model_forward_head_backend_decode_if(Some(&*backend), &hidden, weights, config)
+                    .context("paged sampled prefill lm-head fallback failed")?;
             sample_step(&logits, &sampling_params, Some(seed), &[])
                 .context("paged sampled prefill host sample failed")?
         }
@@ -1130,20 +1126,37 @@ fn bench_latency_paged(
 
         let step_start = Instant::now();
         next_token = if sampled_decode {
-            let sequence_lengths = [current_pos];
-            let mut linear_states: [&mut LinearAttentionState; 1] = [&mut linear_state];
-            let hidden = model_forward_paged_batched_decode_hidden(
-                &*backend,
-                &[next_token],
-                weights,
-                config,
-                &paged_cache,
-                std::slice::from_ref(&block_table),
-                &sequence_lengths,
-                &mut linear_states,
-                None,
-            )
-            .context("paged sampled decode hidden pass failed")?;
+            let hidden =
+                if matches!(device_kt, kiln_tensor::Device::Rocm(_)) && rocm_graph.is_enabled() {
+                    rocm_graph
+                        .decode_step_paged_hidden(
+                            &*backend,
+                            next_token,
+                            weights,
+                            config,
+                            &paged_cache,
+                            &block_table,
+                            current_pos,
+                            &mut linear_state,
+                            None,
+                        )
+                        .context("paged sampled ROCm graph hidden pass failed")?
+                } else {
+                    let sequence_lengths = [current_pos];
+                    let mut linear_states: [&mut LinearAttentionState; 1] = [&mut linear_state];
+                    model_forward_paged_batched_decode_hidden(
+                        &*backend,
+                        &[next_token],
+                        weights,
+                        config,
+                        &paged_cache,
+                        std::slice::from_ref(&block_table),
+                        &sequence_lengths,
+                        &mut linear_states,
+                        None,
+                    )
+                    .context("paged sampled decode hidden pass failed")?
+                };
             let step_seed = seed.wrapping_add(num_tokens as u64);
             if let Some(token) = lm_head_sample_backend_decode_if(
                 Some(&*backend),
@@ -1158,13 +1171,9 @@ fn bench_latency_paged(
             {
                 token
             } else {
-                let logits = model_forward_head_backend_decode_if(
-                    Some(&*backend),
-                    &hidden,
-                    weights,
-                    config,
-                )
-                .context("paged sampled decode lm-head fallback failed")?;
+                let logits =
+                    model_forward_head_backend_decode_if(Some(&*backend), &hidden, weights, config)
+                        .context("paged sampled decode lm-head fallback failed")?;
                 sample_step(
                     &logits,
                     &sampling_params,
@@ -1173,8 +1182,7 @@ fn bench_latency_paged(
                 )
                 .context("paged sampled decode host sample failed")?
             }
-        } else if matches!(device_kt, kiln_tensor::Device::Rocm(_)) && rocm_graph.is_enabled()
-        {
+        } else if matches!(device_kt, kiln_tensor::Device::Rocm(_)) && rocm_graph.is_enabled() {
             rocm_graph
                 .decode_step_paged_greedy(
                     &*backend,

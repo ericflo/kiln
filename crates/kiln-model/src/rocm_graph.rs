@@ -17,8 +17,8 @@
 //! (`LmHeadMode::HiddenOnly`); `final_norm` + lm_head run EAGERLY off the graph
 //! (`lm_head_from_hidden_eager`) because the lm_head GEMV is not replay-safe.
 //!
-//! Gated on `KILN_ROCM_GRAPHS` (default OFF) and a Rocm device; fully inert
-//! otherwise, with graceful eager fallback on any capture/replay failure.
+//! Enabled by default on Rocm devices; set `KILN_ROCM_GRAPHS=0` to force eager
+//! decode. Capture/replay failures gracefully fall back to eager.
 
 use anyhow::{Context, Result};
 use tracing;
@@ -26,36 +26,36 @@ use tracing;
 use kiln_core::block::BlockTable;
 use kiln_core::config::ModelConfig;
 
+use crate::PagedKvCacheKt;
 use crate::backend::BackendRuntime;
 use crate::forward::{
-    model_forward_paged, model_forward_paged_next_token_greedy, GpuWeights, LinearAttentionState,
+    GpuWeights, LinearAttentionState, model_forward_paged,
+    model_forward_paged_batched_decode_hidden, model_forward_paged_next_token_greedy,
 };
 use crate::lora_loader::LoraWeights;
-use crate::PagedKvCacheKt;
 
 #[cfg(feature = "rocm")]
-use crate::forward::{model_forward_paged_hidden_with_graph_inputs, PagedDecodeGraphInputs};
+use crate::forward::{PagedDecodeGraphInputs, model_forward_paged_hidden_with_graph_inputs};
 #[cfg(feature = "rocm")]
 use std::collections::HashMap;
 
 use kiln_tensor::{Device, Tensor};
 
 /// Whether ROCm HIP-graph decode is requested via `KILN_ROCM_GRAPHS` (default
-/// OFF). The sole runtime gate — unlike the CUDA runner there is no separate
+/// ON). The sole runtime gate — unlike the CUDA runner there is no separate
 /// constructor flag threaded through `new_with_options`.
 fn rocm_graphs_env_on() -> bool {
     std::env::var("KILN_ROCM_GRAPHS")
-        .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "on" | "ON"))
-        .unwrap_or(false)
+        .map(|v| !matches!(v.as_str(), "0" | "false" | "FALSE" | "no" | "off" | "OFF"))
+        .unwrap_or(true)
 }
 
 /// Whether to ATTEMPT capture/replay (vs. eager past warmup). Default ON
 /// whenever the runner is enabled — mirrors CUDA, where the single
 /// `KILN_CUDA_GRAPHS` flag turns on capture directly (no separate sub-flag).
 ///
-/// This is only ever consulted AFTER the runner is confirmed enabled
-/// (`KILN_ROCM_GRAPHS=1`, default off), so out-of-box behavior is unchanged.
-/// Capture is fully working: the paged-KV slot write is on-device
+/// This is only ever consulted AFTER the runner is confirmed enabled. Capture
+/// is fully working: the paged-KV slot write is on-device
 /// (`index_copy.cu` scatter with a DEVICE slot index), the freeze-pointer arena
 /// keeps every activation pointer stable across capture→replay, and the warm
 /// pass's host-round-trip detector condemns only geometries with a PERSISTENT
@@ -206,14 +206,14 @@ pub struct RocmGraphRunner {
 
 impl RocmGraphRunner {
     /// Construct a runner for `device`. Enabled only when `enabled`, the device
-    /// is `Device::Rocm`, AND `KILN_ROCM_GRAPHS` is set — otherwise inert.
+    /// is `Device::Rocm`, and `KILN_ROCM_GRAPHS` is not set to an off value.
     pub fn new(device: &Device, enabled: bool) -> Self {
         let is_rocm = matches!(device, Device::Rocm(_));
         let actually_enabled = enabled && is_rocm && rocm_graphs_env_on();
         if actually_enabled {
-            tracing::info!("ROCm HIP graphs enabled for decode (KILN_ROCM_GRAPHS)");
+            tracing::info!("ROCm HIP graphs enabled for decode");
         } else if enabled && is_rocm {
-            tracing::debug!("ROCm device present but KILN_ROCM_GRAPHS not set — using eager decode");
+            tracing::debug!("ROCm device present but ROCm graphs disabled — using eager decode");
         }
         Self {
             enabled: actually_enabled,
@@ -284,12 +284,17 @@ impl RocmGraphRunner {
         linear_state: &mut LinearAttentionState,
         lora: Option<&LoraWeights>,
     ) -> Result<Tensor> {
-        if !self.enabled
-            || std::env::var("KILN_FORCE_EAGER_DECODE").ok().as_deref() == Some("1")
-        {
+        if !self.enabled || std::env::var("KILN_FORCE_EAGER_DECODE").ok().as_deref() == Some("1") {
             return Self::eager_forward(
-                backend, token_id, weights, config, paged_cache, block_table, seq_len,
-                linear_state, lora,
+                backend,
+                token_id,
+                weights,
+                config,
+                paged_cache,
+                block_table,
+                seq_len,
+                linear_state,
+                lora,
             );
         }
 
@@ -328,17 +333,33 @@ impl RocmGraphRunner {
                 self.warmup_done = true;
                 tracing::info!("ROCm graph runner: warmup decode step (KILN_ROCM_GRAPHS active)");
                 match Self::eager_forward_with_position_buffer(
-                    backend, token_id, weights, config, paged_cache, block_table, seq_len,
-                    linear_state, lora,
+                    backend,
+                    token_id,
+                    weights,
+                    config,
+                    paged_cache,
+                    block_table,
+                    seq_len,
+                    linear_state,
+                    lora,
                 ) {
                     Ok(logits) => return Ok(logits),
                     Err(e) => {
-                        tracing::warn!("ROCm graph-shaped warmup failed: {e:#}, plain eager decode");
+                        tracing::warn!(
+                            "ROCm graph-shaped warmup failed: {e:#}, plain eager decode"
+                        );
                     }
                 }
                 return Self::eager_forward(
-                    backend, token_id, weights, config, paged_cache, block_table, seq_len,
-                    linear_state, lora,
+                    backend,
+                    token_id,
+                    weights,
+                    config,
+                    paged_cache,
+                    block_table,
+                    seq_len,
+                    linear_state,
+                    lora,
                 );
             }
 
@@ -348,8 +369,15 @@ impl RocmGraphRunner {
             // eager steady-state (transparent vs. plain decode).
             if !rocm_graph_capture_supported() {
                 return Self::eager_forward(
-                    backend, token_id, weights, config, paged_cache, block_table, seq_len,
-                    linear_state, lora,
+                    backend,
+                    token_id,
+                    weights,
+                    config,
+                    paged_cache,
+                    block_table,
+                    seq_len,
+                    linear_state,
+                    lora,
                 );
             }
 
@@ -359,8 +387,15 @@ impl RocmGraphRunner {
             // forward) — skip the warm pass + capture attempt and run eager.
             if self.non_capture_safe.contains(&requested_key) {
                 return Self::eager_forward(
-                    backend, token_id, weights, config, paged_cache, block_table, seq_len,
-                    linear_state, lora,
+                    backend,
+                    token_id,
+                    weights,
+                    config,
+                    paged_cache,
+                    block_table,
+                    seq_len,
+                    linear_state,
+                    lora,
                 );
             }
 
@@ -368,19 +403,34 @@ impl RocmGraphRunner {
             if let Some(captured) = self.captured.get(&requested_key) {
                 if captured.adapter_gen == self.adapter_generation {
                     match self.replay(
-                        &requested_key, token_id, backend, weights, config, paged_cache,
-                        block_table, seq_len,
+                        &requested_key,
+                        token_id,
+                        backend,
+                        weights,
+                        config,
+                        paged_cache,
+                        block_table,
+                        seq_len,
                     ) {
                         Ok(logits) => {
                             tracing::trace!(seq_len, "ROCm graph: replayed captured decode graph");
                             return Ok(logits);
                         }
                         Err(e) => {
-                            tracing::warn!("ROCm graph replay failed: {e:#}, falling back to eager");
+                            tracing::warn!(
+                                "ROCm graph replay failed: {e:#}, falling back to eager"
+                            );
                             self.captured.remove(&requested_key);
                             return Self::eager_forward(
-                                backend, token_id, weights, config, paged_cache, block_table,
-                                seq_len, linear_state, lora,
+                                backend,
+                                token_id,
+                                weights,
+                                config,
+                                paged_cache,
+                                block_table,
+                                seq_len,
+                                linear_state,
+                                lora,
                             );
                         }
                     }
@@ -398,8 +448,15 @@ impl RocmGraphRunner {
                     );
                 }
                 return Self::eager_forward(
-                    backend, token_id, weights, config, paged_cache, block_table, seq_len,
-                    linear_state, lora,
+                    backend,
+                    token_id,
+                    weights,
+                    config,
+                    paged_cache,
+                    block_table,
+                    seq_len,
+                    linear_state,
+                    lora,
                 );
             }
 
@@ -413,15 +470,29 @@ impl RocmGraphRunner {
                 == kiln_memory::MemoryPressure::Critical
             {
                 return Self::eager_forward(
-                    backend, token_id, weights, config, paged_cache, block_table, seq_len,
-                    linear_state, lora,
+                    backend,
+                    token_id,
+                    weights,
+                    config,
+                    paged_cache,
+                    block_table,
+                    seq_len,
+                    linear_state,
+                    lora,
                 );
             }
 
             // Capture.
             match self.try_capture(
-                backend, token_id, weights, config, paged_cache, block_table, seq_len,
-                linear_state, lora,
+                backend,
+                token_id,
+                weights,
+                config,
+                paged_cache,
+                block_table,
+                seq_len,
+                linear_state,
+                lora,
             ) {
                 Ok(logits) => return Ok(logits),
                 Err(e) => {
@@ -437,8 +508,15 @@ impl RocmGraphRunner {
                         }
                     }
                     return Self::eager_forward(
-                        backend, token_id, weights, config, paged_cache, block_table, seq_len,
-                        linear_state, lora,
+                        backend,
+                        token_id,
+                        weights,
+                        config,
+                        paged_cache,
+                        block_table,
+                        seq_len,
+                        linear_state,
+                        lora,
                     );
                 }
             }
@@ -448,8 +526,263 @@ impl RocmGraphRunner {
         {
             let _ = linear_state;
             Self::eager_forward(
-                backend, token_id, weights, config, paged_cache, block_table, seq_len,
-                linear_state, lora,
+                backend,
+                token_id,
+                weights,
+                config,
+                paged_cache,
+                block_table,
+                seq_len,
+                linear_state,
+                lora,
+            )
+        }
+    }
+
+    /// Run one bs=1 paged decode step, returning the pre-final-norm hidden
+    /// `[1, 1, hidden]` so callers can keep sampling outside the graph.
+    #[allow(clippy::too_many_arguments)]
+    pub fn decode_step_paged_hidden(
+        &mut self,
+        backend: &dyn BackendRuntime,
+        token_id: u32,
+        weights: &GpuWeights,
+        config: &ModelConfig,
+        paged_cache: &PagedKvCacheKt,
+        block_table: &BlockTable,
+        seq_len: usize,
+        linear_state: &mut LinearAttentionState,
+        lora: Option<&LoraWeights>,
+    ) -> Result<Tensor> {
+        if !self.enabled || std::env::var("KILN_FORCE_EAGER_DECODE").ok().as_deref() == Some("1") {
+            return Self::eager_forward_hidden(
+                backend,
+                token_id,
+                weights,
+                config,
+                paged_cache,
+                block_table,
+                seq_len,
+                linear_state,
+                lora,
+            );
+        }
+
+        #[cfg(feature = "rocm")]
+        {
+            let block0 = block_table.blocks.first().copied();
+            let continues = block0.is_some()
+                && self.last_decode_seq_len == Some(seq_len.wrapping_sub(1))
+                && self.last_decode_block0 == block0;
+            if !continues && !self.captured.is_empty() {
+                tracing::debug!(
+                    seq_len,
+                    "ROCm graph: request boundary — evicting captured bs=1 graph"
+                );
+                self.captured.clear();
+            }
+            self.last_decode_seq_len = Some(seq_len);
+            self.last_decode_block0 = block0;
+
+            if !self.warmup_done {
+                self.warmup_done = true;
+                tracing::info!("ROCm graph runner: warmup decode step (KILN_ROCM_GRAPHS active)");
+                match Self::eager_forward_hidden_with_position_buffer(
+                    backend,
+                    token_id,
+                    weights,
+                    config,
+                    paged_cache,
+                    block_table,
+                    seq_len,
+                    linear_state,
+                    lora,
+                ) {
+                    Ok(hidden) => return Ok(hidden),
+                    Err(e) => {
+                        tracing::warn!(
+                            "ROCm graph-shaped warmup failed: {e:#}, plain eager decode"
+                        );
+                    }
+                }
+                return Self::eager_forward_hidden(
+                    backend,
+                    token_id,
+                    weights,
+                    config,
+                    paged_cache,
+                    block_table,
+                    seq_len,
+                    linear_state,
+                    lora,
+                );
+            }
+
+            if !rocm_graph_capture_supported() {
+                return Self::eager_forward_hidden(
+                    backend,
+                    token_id,
+                    weights,
+                    config,
+                    paged_cache,
+                    block_table,
+                    seq_len,
+                    linear_state,
+                    lora,
+                );
+            }
+
+            let requested_key = RocmGraphKey::new(block_table, paged_cache, seq_len);
+
+            if self.non_capture_safe.contains(&requested_key) {
+                return Self::eager_forward_hidden(
+                    backend,
+                    token_id,
+                    weights,
+                    config,
+                    paged_cache,
+                    block_table,
+                    seq_len,
+                    linear_state,
+                    lora,
+                );
+            }
+
+            if let Some(captured) = self.captured.get(&requested_key) {
+                if captured.adapter_gen == self.adapter_generation {
+                    match self.replay_hidden(
+                        &requested_key,
+                        token_id,
+                        weights,
+                        paged_cache,
+                        block_table,
+                        seq_len,
+                    ) {
+                        Ok(hidden) => {
+                            tracing::trace!(seq_len, "ROCm graph: replayed captured decode graph");
+                            return Ok(hidden);
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                "ROCm graph replay failed: {e:#}, falling back to eager"
+                            );
+                            self.captured.remove(&requested_key);
+                            return Self::eager_forward_hidden(
+                                backend,
+                                token_id,
+                                weights,
+                                config,
+                                paged_cache,
+                                block_table,
+                                seq_len,
+                                linear_state,
+                                lora,
+                            );
+                        }
+                    }
+                } else {
+                    self.captured.clear();
+                }
+            }
+
+            if self.captured.len() >= Self::max_cached_graphs() {
+                if !self.cache_full_warned {
+                    self.cache_full_warned = true;
+                    tracing::warn!(
+                        cached = self.captured.len(),
+                        "ROCm graph capture skipped: paged metadata shape cache full"
+                    );
+                }
+                return Self::eager_forward_hidden(
+                    backend,
+                    token_id,
+                    weights,
+                    config,
+                    paged_cache,
+                    block_table,
+                    seq_len,
+                    linear_state,
+                    lora,
+                );
+            }
+
+            if kiln_memory::MemoryGovernor::global().pressure()
+                == kiln_memory::MemoryPressure::Critical
+            {
+                return Self::eager_forward_hidden(
+                    backend,
+                    token_id,
+                    weights,
+                    config,
+                    paged_cache,
+                    block_table,
+                    seq_len,
+                    linear_state,
+                    lora,
+                );
+            }
+
+            match self.try_capture_hidden(
+                backend,
+                token_id,
+                weights,
+                config,
+                paged_cache,
+                block_table,
+                seq_len,
+                linear_state,
+                lora,
+            ) {
+                Ok(RocmCaptureStep::CapturedHidden(hidden)) => return Ok(hidden),
+                Ok(RocmCaptureStep::FallbackEager) => {
+                    return Self::eager_forward_hidden(
+                        backend,
+                        token_id,
+                        weights,
+                        config,
+                        paged_cache,
+                        block_table,
+                        seq_len,
+                        linear_state,
+                        lora,
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!("ROCm graph capture failed: {e:#}, disabling graphs (eager)");
+                    self.enabled = false;
+                    if let Some(idx) = weights.embed_tokens.device().index() {
+                        if let Err(sync_err) = kiln_tensor::rocm_synchronize_default_stream(idx) {
+                            tracing::warn!("post-capfail device sync failed: {sync_err:#}");
+                        }
+                    }
+                    return Self::eager_forward_hidden(
+                        backend,
+                        token_id,
+                        weights,
+                        config,
+                        paged_cache,
+                        block_table,
+                        seq_len,
+                        linear_state,
+                        lora,
+                    );
+                }
+            }
+        }
+
+        #[cfg(not(feature = "rocm"))]
+        {
+            let _ = linear_state;
+            Self::eager_forward_hidden(
+                backend,
+                token_id,
+                weights,
+                config,
+                paged_cache,
+                block_table,
+                seq_len,
+                linear_state,
+                lora,
             )
         }
     }
@@ -473,12 +806,17 @@ impl RocmGraphRunner {
         linear_state: &mut LinearAttentionState,
         lora: Option<&LoraWeights>,
     ) -> Result<u32> {
-        if !self.enabled
-            || std::env::var("KILN_FORCE_EAGER_DECODE").ok().as_deref() == Some("1")
-        {
+        if !self.enabled || std::env::var("KILN_FORCE_EAGER_DECODE").ok().as_deref() == Some("1") {
             return Self::eager_forward_greedy(
-                backend, token_id, weights, config, paged_cache, block_table, seq_len,
-                linear_state, lora,
+                backend,
+                token_id,
+                weights,
+                config,
+                paged_cache,
+                block_table,
+                seq_len,
+                linear_state,
+                lora,
             );
         }
 
@@ -502,24 +840,47 @@ impl RocmGraphRunner {
                 self.warmup_done = true;
                 tracing::info!("ROCm graph runner: warmup decode step (KILN_ROCM_GRAPHS active)");
                 match Self::eager_forward_greedy_with_position_buffer(
-                    backend, token_id, weights, config, paged_cache, block_table, seq_len,
-                    linear_state, lora,
+                    backend,
+                    token_id,
+                    weights,
+                    config,
+                    paged_cache,
+                    block_table,
+                    seq_len,
+                    linear_state,
+                    lora,
                 ) {
                     Ok(token) => return Ok(token),
                     Err(e) => {
-                        tracing::warn!("ROCm graph-shaped warmup failed: {e:#}, plain eager decode");
+                        tracing::warn!(
+                            "ROCm graph-shaped warmup failed: {e:#}, plain eager decode"
+                        );
                     }
                 }
                 return Self::eager_forward_greedy(
-                    backend, token_id, weights, config, paged_cache, block_table, seq_len,
-                    linear_state, lora,
+                    backend,
+                    token_id,
+                    weights,
+                    config,
+                    paged_cache,
+                    block_table,
+                    seq_len,
+                    linear_state,
+                    lora,
                 );
             }
 
             if !rocm_graph_capture_supported() {
                 return Self::eager_forward_greedy(
-                    backend, token_id, weights, config, paged_cache, block_table, seq_len,
-                    linear_state, lora,
+                    backend,
+                    token_id,
+                    weights,
+                    config,
+                    paged_cache,
+                    block_table,
+                    seq_len,
+                    linear_state,
+                    lora,
                 );
             }
 
@@ -527,27 +888,49 @@ impl RocmGraphRunner {
 
             if self.non_capture_safe.contains(&requested_key) {
                 return Self::eager_forward_greedy(
-                    backend, token_id, weights, config, paged_cache, block_table, seq_len,
-                    linear_state, lora,
+                    backend,
+                    token_id,
+                    weights,
+                    config,
+                    paged_cache,
+                    block_table,
+                    seq_len,
+                    linear_state,
+                    lora,
                 );
             }
 
             if let Some(captured) = self.captured.get(&requested_key) {
                 if captured.adapter_gen == self.adapter_generation {
                     match self.replay_greedy(
-                        &requested_key, token_id, backend, weights, config, paged_cache,
-                        block_table, seq_len,
+                        &requested_key,
+                        token_id,
+                        backend,
+                        weights,
+                        config,
+                        paged_cache,
+                        block_table,
+                        seq_len,
                     ) {
                         Ok(token) => {
                             tracing::trace!(seq_len, "ROCm graph: replayed captured decode graph");
                             return Ok(token);
                         }
                         Err(e) => {
-                            tracing::warn!("ROCm graph replay failed: {e:#}, falling back to eager");
+                            tracing::warn!(
+                                "ROCm graph replay failed: {e:#}, falling back to eager"
+                            );
                             self.captured.remove(&requested_key);
                             return Self::eager_forward_greedy(
-                                backend, token_id, weights, config, paged_cache, block_table,
-                                seq_len, linear_state, lora,
+                                backend,
+                                token_id,
+                                weights,
+                                config,
+                                paged_cache,
+                                block_table,
+                                seq_len,
+                                linear_state,
+                                lora,
                             );
                         }
                     }
@@ -565,8 +948,15 @@ impl RocmGraphRunner {
                     );
                 }
                 return Self::eager_forward_greedy(
-                    backend, token_id, weights, config, paged_cache, block_table, seq_len,
-                    linear_state, lora,
+                    backend,
+                    token_id,
+                    weights,
+                    config,
+                    paged_cache,
+                    block_table,
+                    seq_len,
+                    linear_state,
+                    lora,
                 );
             }
 
@@ -574,14 +964,28 @@ impl RocmGraphRunner {
                 == kiln_memory::MemoryPressure::Critical
             {
                 return Self::eager_forward_greedy(
-                    backend, token_id, weights, config, paged_cache, block_table, seq_len,
-                    linear_state, lora,
+                    backend,
+                    token_id,
+                    weights,
+                    config,
+                    paged_cache,
+                    block_table,
+                    seq_len,
+                    linear_state,
+                    lora,
                 );
             }
 
             match self.try_capture_greedy(
-                backend, token_id, weights, config, paged_cache, block_table, seq_len,
-                linear_state, lora,
+                backend,
+                token_id,
+                weights,
+                config,
+                paged_cache,
+                block_table,
+                seq_len,
+                linear_state,
+                lora,
             ) {
                 Ok(token) => return Ok(token),
                 Err(e) => {
@@ -593,8 +997,15 @@ impl RocmGraphRunner {
                         }
                     }
                     return Self::eager_forward_greedy(
-                        backend, token_id, weights, config, paged_cache, block_table, seq_len,
-                        linear_state, lora,
+                        backend,
+                        token_id,
+                        weights,
+                        config,
+                        paged_cache,
+                        block_table,
+                        seq_len,
+                        linear_state,
+                        lora,
                     );
                 }
             }
@@ -604,8 +1015,15 @@ impl RocmGraphRunner {
         {
             let _ = linear_state;
             Self::eager_forward_greedy(
-                backend, token_id, weights, config, paged_cache, block_table, seq_len,
-                linear_state, lora,
+                backend,
+                token_id,
+                weights,
+                config,
+                paged_cache,
+                block_table,
+                seq_len,
+                linear_state,
+                lora,
             )
         }
     }
@@ -624,8 +1042,16 @@ impl RocmGraphRunner {
         lora: Option<&LoraWeights>,
     ) -> Result<Tensor> {
         model_forward_paged(
-            backend, &[token_id], weights, config, paged_cache, block_table, seq_len,
-            Some(linear_state), lora, None,
+            backend,
+            &[token_id],
+            weights,
+            config,
+            paged_cache,
+            block_table,
+            seq_len,
+            Some(linear_state),
+            lora,
+            None,
         )
         .context("eager decode forward pass failed (rocm)")
     }
@@ -658,6 +1084,35 @@ impl RocmGraphRunner {
         .context("eager greedy decode forward pass failed (rocm)")
     }
 
+    /// Plain eager hidden-only decode.
+    #[allow(clippy::too_many_arguments)]
+    fn eager_forward_hidden(
+        backend: &dyn BackendRuntime,
+        token_id: u32,
+        weights: &GpuWeights,
+        config: &ModelConfig,
+        paged_cache: &PagedKvCacheKt,
+        block_table: &BlockTable,
+        seq_len: usize,
+        linear_state: &mut LinearAttentionState,
+        lora: Option<&LoraWeights>,
+    ) -> Result<Tensor> {
+        let sequence_lengths = [seq_len];
+        let mut linear_states: [&mut LinearAttentionState; 1] = [linear_state];
+        model_forward_paged_batched_decode_hidden(
+            backend,
+            &[token_id],
+            weights,
+            config,
+            paged_cache,
+            std::slice::from_ref(block_table),
+            &sequence_lengths,
+            &mut linear_states,
+            lora,
+        )
+        .context("eager hidden-only decode forward pass failed (rocm)")
+    }
+
     /// Eager decode with a graph-shaped position buffer (warms the allocator
     /// with the capture-shaped allocation sequence).
     #[allow(clippy::too_many_arguments)]
@@ -675,8 +1130,16 @@ impl RocmGraphRunner {
         let device = weights.embed_tokens.device();
         let position_buffer = Self::new_position_buffer(device, seq_len)?;
         model_forward_paged(
-            backend, &[token_id], weights, config, paged_cache, block_table, seq_len,
-            Some(linear_state), lora, Some(&position_buffer),
+            backend,
+            &[token_id],
+            weights,
+            config,
+            paged_cache,
+            block_table,
+            seq_len,
+            Some(linear_state),
+            lora,
+            Some(&position_buffer),
         )
         .context("graph-shaped eager decode forward pass failed (rocm)")
     }
@@ -711,6 +1174,40 @@ impl RocmGraphRunner {
         .context("graph-shaped eager greedy decode forward pass failed (rocm)")
     }
 
+    /// Eager hidden-only decode with a graph-shaped position buffer.
+    #[cfg(feature = "rocm")]
+    #[allow(clippy::too_many_arguments)]
+    fn eager_forward_hidden_with_position_buffer(
+        backend: &dyn BackendRuntime,
+        token_id: u32,
+        weights: &GpuWeights,
+        config: &ModelConfig,
+        paged_cache: &PagedKvCacheKt,
+        block_table: &BlockTable,
+        seq_len: usize,
+        linear_state: &mut LinearAttentionState,
+        lora: Option<&LoraWeights>,
+    ) -> Result<Tensor> {
+        let device = weights.embed_tokens.device();
+        let token_buffer = Self::new_token_buffer(device, token_id)?;
+        let position_buffer = Self::new_position_buffer(device, seq_len)?;
+        model_forward_paged_hidden_with_graph_inputs(
+            backend,
+            &[token_id],
+            weights,
+            config,
+            paged_cache,
+            block_table,
+            seq_len,
+            Some(linear_state),
+            lora,
+            &token_buffer,
+            &position_buffer,
+            None,
+        )
+        .context("graph-shaped eager hidden-only decode forward pass failed (rocm)")
+    }
+
     fn new_position_buffer(device: Device, position: usize) -> Result<Tensor> {
         Tensor::from_vec_on(device, vec![position as f32], vec![1])
             .context("create ROCm graph position buffer")
@@ -737,14 +1234,8 @@ impl RocmGraphRunner {
         block_table: &BlockTable,
         seq_len: usize,
     ) -> Result<Tensor> {
-        let hidden = self.replay_hidden(
-            key,
-            token_id,
-            weights,
-            paged_cache,
-            block_table,
-            seq_len,
-        )?;
+        let hidden =
+            self.replay_hidden(key, token_id, weights, paged_cache, block_table, seq_len)?;
         crate::forward::lm_head_from_hidden_eager(backend, &hidden, weights, config)
             .context("eager lm_head on replayed hidden")
     }
@@ -761,14 +1252,8 @@ impl RocmGraphRunner {
         block_table: &BlockTable,
         seq_len: usize,
     ) -> Result<u32> {
-        let hidden = self.replay_hidden(
-            key,
-            token_id,
-            weights,
-            paged_cache,
-            block_table,
-            seq_len,
-        )?;
+        let hidden =
+            self.replay_hidden(key, token_id, weights, paged_cache, block_table, seq_len)?;
         crate::forward::lm_head_argmax_from_hidden_eager(backend, &hidden, weights, config)
             .context("eager lm_head argmax on replayed hidden")
     }
@@ -802,7 +1287,13 @@ impl RocmGraphRunner {
             captured.kv_slot_buffer.as_ref(),
         ) {
             Self::update_paged_metadata_buffers(
-                bt, sk, slot, block_table, paged_cache, seq_len, captured.max_seqlen_k,
+                bt,
+                sk,
+                slot,
+                block_table,
+                paged_cache,
+                seq_len,
+                captured.max_seqlen_k,
             )?;
         }
 
@@ -926,7 +1417,8 @@ impl RocmGraphRunner {
     ) -> Result<Tensor> {
         let padded = Self::padded_block_table(block_table, paged_cache, max_seqlen_k)?;
         let len = padded.len();
-        Tensor::from_vec_on(device, padded, vec![1, len]).context("create ROCm graph block table buffer")
+        Tensor::from_vec_on(device, padded, vec![1, len])
+            .context("create ROCm graph block table buffer")
     }
 
     fn new_seqused_k_buffer(device: Device, attention_len: usize) -> Result<Tensor> {
@@ -942,14 +1434,22 @@ impl RocmGraphRunner {
     ) -> Result<Tensor> {
         let slot = block_table
             .slot_for(seq_len, paged_cache.block_size())
-            .with_context(|| format!("no slot for decode position {seq_len}"))? as u32;
+            .with_context(|| format!("no slot for decode position {seq_len}"))?
+            as u32;
         Tensor::from_vec_on(device, vec![slot], vec![1]).context("create ROCm graph KV slot buffer")
     }
 
-    fn new_rotary_cos_buffer(config: &ModelConfig, device: Device, position: usize) -> Result<Tensor> {
+    fn new_rotary_cos_buffer(
+        config: &ModelConfig,
+        device: Device,
+        position: usize,
+    ) -> Result<Tensor> {
         // #34 BUG2 FIX: GPU rotary (matches eager + update_rotary_buffers), not host CPU cos.
-        let inv_freq =
-            crate::forward::compute_rotary_inv_freq(config.rotary_dim(), config.rope_theta, &device)?;
+        let inv_freq = crate::forward::compute_rotary_inv_freq(
+            config.rotary_dim(),
+            config.rope_theta,
+            &device,
+        )?;
         let pos = Tensor::from_vec_on(device, vec![position as f32], vec![1])?;
         let (cos, _) = crate::forward::rotary_tables_from_tensor(&pos, &inv_freq)?;
         cos.to_dtype(kiln_tensor::DType::F32)?
@@ -957,10 +1457,17 @@ impl RocmGraphRunner {
             .context("create ROCm graph rotary cos buffer (gpu)")
     }
 
-    fn new_rotary_sin_buffer(config: &ModelConfig, device: Device, position: usize) -> Result<Tensor> {
+    fn new_rotary_sin_buffer(
+        config: &ModelConfig,
+        device: Device,
+        position: usize,
+    ) -> Result<Tensor> {
         // #34 BUG2 FIX: GPU rotary (see new_rotary_cos_buffer).
-        let inv_freq =
-            crate::forward::compute_rotary_inv_freq(config.rotary_dim(), config.rope_theta, &device)?;
+        let inv_freq = crate::forward::compute_rotary_inv_freq(
+            config.rotary_dim(),
+            config.rope_theta,
+            &device,
+        )?;
         let pos = Tensor::from_vec_on(device, vec![position as f32], vec![1])?;
         let (_, sin) = crate::forward::rotary_tables_from_tensor(&pos, &inv_freq)?;
         sin.to_dtype(kiln_tensor::DType::F32)?
@@ -994,14 +1501,20 @@ impl RocmGraphRunner {
                 .context("create ROCm graph paged decode output")?,
             );
             lse.push(
-                Tensor::zeros_on(device, vec![1, config.num_attention_heads, 1], kiln_tensor::DType::F32)
-                    .context("create ROCm graph paged decode LSE")?,
+                Tensor::zeros_on(
+                    device,
+                    vec![1, config.num_attention_heads, 1],
+                    kiln_tensor::DType::F32,
+                )
+                .context("create ROCm graph paged decode LSE")?,
             );
         }
         Ok((outputs, lse))
     }
 
-    fn prepare_gdn_recurrent_state_for_capture(linear_state: &mut LinearAttentionState) -> Result<()> {
+    fn prepare_gdn_recurrent_state_for_capture(
+        linear_state: &mut LinearAttentionState,
+    ) -> Result<()> {
         for state in &mut linear_state.recurrent_states {
             if state.dtype() != kiln_tensor::DType::BF16 {
                 *state = state
@@ -1019,7 +1532,12 @@ impl RocmGraphRunner {
             outputs.push(
                 Tensor::zeros_on(
                     device,
-                    vec![1, 1, config.linear_num_value_heads, config.linear_value_head_dim],
+                    vec![
+                        1,
+                        1,
+                        config.linear_num_value_heads,
+                        config.linear_value_head_dim,
+                    ],
                     kiln_tensor::DType::BF16,
                 )
                 .context("create ROCm graph GDN decode output")?,
@@ -1155,9 +1673,19 @@ impl RocmGraphRunner {
         let key = RocmGraphKey::new(block_table, paged_cache, seq_len);
         let (block_table_buffer, seqused_k_buffer, kv_slot_buffer) = if key.stable_metadata {
             (
-                Some(Self::new_block_table_buffer(block_table, paged_cache, key.max_seqlen_k, device)?),
+                Some(Self::new_block_table_buffer(
+                    block_table,
+                    paged_cache,
+                    key.max_seqlen_k,
+                    device,
+                )?),
                 Some(Self::new_seqused_k_buffer(device, seq_len + 1)?),
-                Some(Self::new_kv_slot_buffer(block_table, paged_cache, seq_len, device)?),
+                Some(Self::new_kv_slot_buffer(
+                    block_table,
+                    paged_cache,
+                    seq_len,
+                    device,
+                )?),
             )
         } else {
             (None, None, None)
@@ -1208,8 +1736,18 @@ impl RocmGraphRunner {
         let htod_before = kiln_tensor::rocm_htod_count();
         let warm_result = kiln_tensor::with_rocm_capture_arena(arena.clone(), || {
             let hidden = model_forward_paged_hidden_with_graph_inputs(
-                backend, &[token_id], weights, config, paged_cache, block_table, seq_len,
-                Some(linear_state), lora, &token_buffer, &position_buffer, graph_inputs.as_ref(),
+                backend,
+                &[token_id],
+                weights,
+                config,
+                paged_cache,
+                block_table,
+                seq_len,
+                Some(linear_state),
+                lora,
+                &token_buffer,
+                &position_buffer,
+                graph_inputs.as_ref(),
             )?;
             kiln_tensor::rocm_slice_set_dim0(&output_hidden, &hidden, 0)
                 .context("freeze-pointers warm pass: copy hidden into stable output")?;
@@ -1272,8 +1810,18 @@ impl RocmGraphRunner {
         let capture_result = kiln_tensor::with_rocm_capture_arena(arena.clone(), || {
             kiln_tensor::with_active_rocm_stream(stream.clone(), || {
                 let hidden = model_forward_paged_hidden_with_graph_inputs(
-                    backend, &[token_id], weights, config, paged_cache, block_table, seq_len,
-                    Some(linear_state), lora, &token_buffer, &position_buffer, graph_inputs.as_ref(),
+                    backend,
+                    &[token_id],
+                    weights,
+                    config,
+                    paged_cache,
+                    block_table,
+                    seq_len,
+                    Some(linear_state),
+                    lora,
+                    &token_buffer,
+                    &position_buffer,
+                    graph_inputs.as_ref(),
                 )?;
                 kiln_tensor::rocm_slice_set_dim0(&output_hidden, &hidden, 0)
                     .context("ROCm graph: copy kt hidden into stable output_hidden")?;
@@ -1288,7 +1836,10 @@ impl RocmGraphRunner {
         let exec = graph
             .instantiate()
             .map_err(|e| anyhow::anyhow!("instantiate captured graph: {e}"))?;
-        tracing::info!("ROCm HIP graph captured for decode ({} layers)", config.num_layers);
+        tracing::info!(
+            "ROCm HIP graph captured for decode ({} layers)",
+            config.num_layers
+        );
 
         // Stream capture only RECORDED the forward; launch once now to actually
         // compute this step + advance state, then sync so output_hidden is valid.
@@ -1327,7 +1878,8 @@ impl RocmGraphRunner {
     }
 
     fn new_token_buffer(device: Device, token_id: u32) -> Result<Tensor> {
-        Tensor::from_vec_on(device, vec![token_id], vec![1]).context("create ROCm graph token buffer")
+        Tensor::from_vec_on(device, vec![token_id], vec![1])
+            .context("create ROCm graph token buffer")
     }
 }
 
