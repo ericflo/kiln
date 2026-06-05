@@ -408,6 +408,30 @@ pub fn matmul_rhs_transposed(a: &Tensor, b: &Tensor) -> Result<Tensor> {
         }
     }
 
+    #[cfg(feature = "metal")]
+    {
+        if matches!(a.device(), crate::Device::Metal(_))
+            && matches!(b.device(), crate::Device::Metal(_))
+            && a.is_contiguous()
+            && b.is_contiguous()
+            && a.dtype() == DType::BF16
+        {
+            return crate::metal_matmul_rhs_transposed(a, b);
+        }
+    }
+
+    #[cfg(feature = "vulkan")]
+    {
+        if matches!(a.device(), crate::Device::Vulkan(_))
+            && matches!(b.device(), crate::Device::Vulkan(_))
+            && a.is_contiguous()
+            && b.is_contiguous()
+            && matches!(a.dtype(), DType::F32 | DType::BF16)
+        {
+            return crate::vulkan_matmul_rhs_transposed(a, b);
+        }
+    }
+
     let b_t = b.transpose(br - 2, br - 1)?.contiguous()?;
     matmul(a, &b_t)
 }

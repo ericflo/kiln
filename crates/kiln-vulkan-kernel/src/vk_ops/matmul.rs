@@ -9,11 +9,12 @@
 //!   dA = dC @ B.T   (shape [M, K])
 //!   dB = A.T @ dC   (shape [K, N])
 //! Each is another matmul, dispatched by this same module. The
-//! transposes are physical via `vk_transpose_2d_no_grad`.
+//! dA/dB use resident transposed-GEMM kernels instead of physical transposes.
 
 use crate::vk_ops::dispatch_simple_2d;
-use crate::vk_ops::matmul_batched::vk_matmul_lhs_t_batched_no_grad;
-use crate::vk_ops::shape::vk_transpose_2d_no_grad;
+use crate::vk_ops::matmul_batched::{
+    vk_matmul_lhs_t_batched_no_grad, vk_matmul_rhs_t_batched_no_grad,
+};
 use crate::vk_tensor::{VkBackwardOp, VkDType, VkTensor};
 use crate::{VulkanBuffer, VulkanDevice};
 use anyhow::Result;
@@ -129,6 +130,48 @@ pub fn vk_matmul_lhs_t_no_grad(a: &VkTensor, b: &VkTensor) -> Result<VkTensor> {
     ))
 }
 
+/// F32 GEMM with a transposed right operand:
+/// `a:[M,K] @ b:[N,K]^T -> [M,N]`.
+pub fn vk_matmul_rhs_t_no_grad(a: &VkTensor, b: &VkTensor) -> Result<VkTensor> {
+    anyhow::ensure!(
+        a.shape().len() == 2 && b.shape().len() == 2,
+        "vk_matmul_rhs_t: both inputs must be rank-2 (got {:?} and {:?})",
+        a.shape(),
+        b.shape()
+    );
+    anyhow::ensure!(
+        a.dtype() == VkDType::F32 && b.dtype() == VkDType::F32,
+        "vk_matmul_rhs_t: F32-only (got {:?} / {:?})",
+        a.dtype(),
+        b.dtype()
+    );
+    let m = a.shape()[0];
+    let k = a.shape()[1];
+    let n = b.shape()[0];
+    let kk = b.shape()[1];
+    anyhow::ensure!(k == kk, "vk_matmul_rhs_t: inner-dim mismatch: a.K={k}, b.K={kk}");
+
+    let a3 = VkTensor::from_buffer(
+        Arc::clone(a.buffer()),
+        vec![1, m, k],
+        VkDType::F32,
+        Arc::clone(a.device()),
+    );
+    let b3 = VkTensor::from_buffer(
+        Arc::clone(b.buffer()),
+        vec![1, n, k],
+        VkDType::F32,
+        Arc::clone(b.device()),
+    );
+    let out3 = vk_matmul_rhs_t_batched_no_grad(&a3, &b3)?;
+    Ok(VkTensor::from_buffer(
+        Arc::clone(out3.buffer()),
+        vec![m, n],
+        VkDType::F32,
+        Arc::clone(out3.device()),
+    ))
+}
+
 #[derive(Debug)]
 pub struct MatmulBackward {
     pub inputs: [VkTensor; 2],
@@ -145,8 +188,7 @@ impl VkBackwardOp for MatmulBackward {
         let a = &self.inputs[0];
         let b = &self.inputs[1];
         // dA = grad_out @ B.T  → shape [M, K]
-        let b_t = vk_transpose_2d_no_grad(b)?;
-        let grad_a = vk_matmul_no_grad(grad_out, &b_t)?;
+        let grad_a = vk_matmul_rhs_t_no_grad(grad_out, b)?;
         // dB = A.T @ grad_out  → shape [K, N]
         let grad_b = vk_matmul_lhs_t_no_grad(a, grad_out)?;
         Ok(vec![Some(grad_a), Some(grad_b)])

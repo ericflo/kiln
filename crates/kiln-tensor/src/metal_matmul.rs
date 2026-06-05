@@ -61,14 +61,15 @@ constant constexpr uint WN = 2;     // simdgroups across N
 constant constexpr uint TM = BM / (8 * WM);  // 4 row-fragments per simd
 constant constexpr uint TN = BN / (8 * WN);  // 4 col-fragments per simd
 
-// C[M,N] = A[M,K] @ B[K,N], or C[M,N] = A[K,M]^T @ B[K,N] when
-// a_transposed != 0. BF16 in/out, f32 accumulate.
+// C[M,N] = A[M,K] @ B[K,N], C[M,N] = A[K,M]^T @ B[K,N] when
+// a_transposed != 0, or C[M,N] = A[M,K] @ B[N,K]^T when b_transposed != 0.
+// BF16 in/out, f32 accumulate.
 // One threadgroup (128 threads = 4 simdgroups) computes a 64x64 C tile.
 // Inputs are staged to threadgroup BF16; simdgroup_load up-converts BF16->F32
 // fragments (there is no simdgroup_matrix<bfloat> MMA). F32 accumulation.
 kernel void kiln_gemm_bf16(
     device const bfloat* A    [[buffer(0)]],   // [batch,M,K] or [batch,K,M] row-major (+offset)
-    device const bfloat* B    [[buffer(1)]],   // [batch,K,N] row-major (+offset)
+    device const bfloat* B    [[buffer(1)]],   // [batch,K,N] or [batch,N,K] row-major (+offset)
     device bfloat* C          [[buffer(2)]],   // [batch,M,N] row-major
     constant uint& M          [[buffer(3)]],
     constant uint& N          [[buffer(4)]],
@@ -77,6 +78,7 @@ kernel void kiln_gemm_bf16(
     constant uint& b_bs       [[buffer(7)]],   // B per-batch element stride
     constant uint& c_bs       [[buffer(8)]],   // C per-batch element stride
     constant uint& a_transposed [[buffer(9)]],
+    constant uint& b_transposed [[buffer(10)]],
     uint3 tg   [[threadgroup_position_in_grid]],   // x=n-tile, y=m-tile, z=batch
     uint  sgid [[simdgroup_index_in_threadgroup]], // 0..3
     uint  lane [[thread_index_in_simdgroup]])      // 0..31
@@ -120,7 +122,11 @@ kernel void kiln_gemm_bf16(
             uint c = idx % BN;
             uint br = k0 + r;
             uint bc = n0 + c;
-            Bs[idx] = (br < K && bc < N) ? Bb[br * N + bc] : (bfloat)0;
+            if (br < K && bc < N) {
+                Bs[idx] = (b_transposed != 0) ? Bb[bc * K + br] : Bb[br * N + bc];
+            } else {
+                Bs[idx] = (bfloat)0;
+            }
         }
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
@@ -351,7 +357,9 @@ pub fn metal_matmul(a: &crate::Tensor, b: &crate::Tensor) -> Result<crate::Tenso
     encoder.set_bytes(8, &c_bs);
     if !use_steel {
         let a_transposed = 0u32;
+        let b_transposed = 0u32;
         encoder.set_bytes(9, &a_transposed);
+        encoder.set_bytes(10, &b_transposed);
     }
 
     let grid = objc2_metal::MTLSize {
@@ -464,6 +472,7 @@ pub fn metal_matmul_lhs_transposed(a: &crate::Tensor, b: &crate::Tensor) -> Resu
     let b_bs = (k * n) as u32;
     let c_bs = (m * n) as u32;
     let a_transposed = 1u32;
+    let b_transposed = 0u32;
     encoder.set_bytes(3, &m_u);
     encoder.set_bytes(4, &n_u);
     encoder.set_bytes(5, &k_u);
@@ -471,6 +480,126 @@ pub fn metal_matmul_lhs_transposed(a: &crate::Tensor, b: &crate::Tensor) -> Resu
     encoder.set_bytes(7, &b_bs);
     encoder.set_bytes(8, &c_bs);
     encoder.set_bytes(9, &a_transposed);
+    encoder.set_bytes(10, &b_transposed);
+
+    let grid = objc2_metal::MTLSize {
+        width: n.div_ceil(TILE),
+        height: m.div_ceil(TILE),
+        depth: batch,
+    };
+    let tg = objc2_metal::MTLSize {
+        width: TG_THREADS,
+        height: 1,
+        depth: 1,
+    };
+    encoder.dispatch_thread_groups(grid, tg);
+    drop(encoder);
+
+    Ok(out)
+}
+
+/// BF16 matrix-core GEMM `a @ b^T` without materialising the transposed right
+/// input on Metal.
+///
+/// `a` is stored as `[..., M, K]`, `b` as `[..., N, K]`, and the output is
+/// `[..., M, N]`. This uses the resident arbitrary-K GEMM kernel with a
+/// transposed-B tile loader.
+pub fn metal_matmul_rhs_transposed(a: &crate::Tensor, b: &crate::Tensor) -> Result<crate::Tensor> {
+    const OP: &str = "metal_matmul_rhs_transposed";
+    let ar = a.rank();
+    let br = b.rank();
+    if ar < 2 || br < 2 {
+        return Err(Error::Msg(format!("{OP}: rank must be >= 2, got a={ar} b={br}")));
+    }
+    if ar != br {
+        return Err(Error::Msg(format!("{OP}: rank mismatch a={ar} b={br}")));
+    }
+    if a.dtype() != DType::BF16 || b.dtype() != DType::BF16 {
+        return Err(Error::Msg(format!(
+            "{OP}: BF16-only kernel (got a={}, b={})",
+            a.dtype(),
+            b.dtype()
+        )));
+    }
+    if !a.is_contiguous() || !b.is_contiguous() {
+        return Err(Error::Msg(format!("{OP}: contiguous inputs required")));
+    }
+
+    let a_shape = a.shape();
+    let b_shape = b.shape();
+    for axis in 0..ar - 2 {
+        if a_shape[axis] != b_shape[axis] {
+            return Err(Error::Msg(format!(
+                "{OP}: batch axis {axis} mismatch: a={} b={}",
+                a_shape[axis], b_shape[axis]
+            )));
+        }
+    }
+    let m = a_shape[ar - 2];
+    let k = a_shape[ar - 1];
+    let n = b_shape[br - 2];
+    let k_b = b_shape[br - 1];
+    if k != k_b {
+        return Err(Error::Msg(format!("{OP}: contraction mismatch a.K={k} vs b.K={k_b}")));
+    }
+    for &d in &[m, n, k] {
+        if d > u32::MAX as usize {
+            return Err(Error::Msg(format!("{OP}: dim {d} exceeds u32")));
+        }
+    }
+
+    let batch_dims: Vec<usize> = a_shape[..ar - 2].to_vec();
+    let batch: usize = batch_dims.iter().product::<usize>().max(1);
+    if batch > u32::MAX as usize {
+        return Err(Error::Msg(format!("{OP}: batch {batch} exceeds u32")));
+    }
+
+    let a_metal = kt_metal(a, "a")?;
+    let b_metal = kt_metal(b, "b")?;
+    let companion = a_metal.companion()?;
+    let device_index = a_metal.device_index();
+
+    let mut out_shape = batch_dims;
+    out_shape.push(m);
+    out_shape.push(n);
+    let out_storage =
+        MetalStorage::zeros_kt(companion.device(), device_index, DType::BF16, batch * m * n)?;
+    let out = crate::Tensor::from_parts(
+        Arc::new(out_storage),
+        crate::Layout::contiguous(out_shape),
+        crate::TensorId::next(),
+    )?;
+    if batch * m * n == 0 {
+        return Ok(out);
+    }
+
+    let pipeline = gemm_pipeline(a_metal)?;
+    let out_metal = kt_metal(&out, "out")?;
+    let encoder = companion.command_encoder()?;
+    encoder.set_label("kiln_gemm_rhs_t_bf16");
+    encoder.set_compute_pipeline_state(&pipeline);
+
+    let a_buf = buffer_o_kt(a_metal.buffer().as_ref(), a.layout(), a.dtype());
+    let b_buf = buffer_o_kt(b_metal.buffer().as_ref(), b.layout(), b.dtype());
+    let out_buf = buffer_o_kt(out_metal.buffer().as_ref(), out.layout(), out.dtype());
+    encoder.set_buffer(0, Some(a_buf.buffer), a_buf.offset_in_bytes);
+    encoder.set_buffer(1, Some(b_buf.buffer), b_buf.offset_in_bytes);
+    encoder.set_buffer(2, Some(out_buf.buffer), out_buf.offset_in_bytes);
+
+    let (m_u, n_u, k_u) = (m as u32, n as u32, k as u32);
+    let a_bs = (m * k) as u32;
+    let b_bs = (n * k) as u32;
+    let c_bs = (m * n) as u32;
+    let a_transposed = 0u32;
+    let b_transposed = 1u32;
+    encoder.set_bytes(3, &m_u);
+    encoder.set_bytes(4, &n_u);
+    encoder.set_bytes(5, &k_u);
+    encoder.set_bytes(6, &a_bs);
+    encoder.set_bytes(7, &b_bs);
+    encoder.set_bytes(8, &c_bs);
+    encoder.set_bytes(9, &a_transposed);
+    encoder.set_bytes(10, &b_transposed);
 
     let grid = objc2_metal::MTLSize {
         width: n.div_ceil(TILE),

@@ -389,6 +389,14 @@ const SHADERS: &[(&str, &str)] = &[
         "vk_matmul_lhs_t_batched_bf16",
         "SPIR_V_VK_MATMUL_LHS_T_BATCHED_BF16",
     ),
+    (
+        "vk_matmul_rhs_t_batched_f32",
+        "SPIR_V_VK_MATMUL_RHS_T_BATCHED_F32",
+    ),
+    (
+        "vk_matmul_rhs_t_batched_bf16",
+        "SPIR_V_VK_MATMUL_RHS_T_BATCHED_BF16",
+    ),
     ("vk_transpose_3d_f32", "SPIR_V_VK_TRANSPOSE_3D_F32"),
     (
         "vk_gather_contiguous_f32",

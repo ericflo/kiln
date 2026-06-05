@@ -38,8 +38,8 @@ use std::sync::Arc;
 
 use kiln_tensor::{
     ops::{
-        broadcast_to, exp, index_select, ln, matmul, max_axis, mean_all, mul, mul_scalar,
-        scatter_add, sub, sum_axis, to_f32,
+        broadcast_to, exp, index_select, ln, matmul, matmul_rhs_transposed, max_axis, mean_all, mul,
+        mul_scalar, scatter_add, sub, sum_axis, to_f32,
     },
     DType as KtDType, Device as KtDevice, Error as KtError, Tensor as KtTensor,
 };
@@ -894,12 +894,8 @@ fn fused_linear_cross_entropy_phase_b_backward_impl_kt(
             )
             .map_err(FlceError::Kt)?;
 
-            let head_chunk_t = head_chunk
-                .t()
-                .map_err(FlceError::Kt)?
-                .contiguous()
-                .map_err(FlceError::Kt)?;
-            let chunk_contrib = matmul(&logits_chunk, &head_chunk_t).map_err(FlceError::Kt)?;
+            let chunk_contrib =
+                matmul_rhs_transposed(&logits_chunk, &head_chunk).map_err(FlceError::Kt)?;
             dhidden_active =
                 kiln_tensor::ops::add(&dhidden_active, &chunk_contrib).map_err(FlceError::Kt)?;
 
@@ -945,13 +941,8 @@ fn fused_linear_cross_entropy_phase_b_backward_impl_kt(
 
         // softmax_contrib = grad_logits_softmax @ head_chunk.T
         // shape [num_active, hidden_size]
-        let head_chunk_t = head_chunk
-            .t()
-            .map_err(FlceError::Kt)?
-            .contiguous()
-            .map_err(FlceError::Kt)?;
         let softmax_contrib =
-            matmul(&grad_logits_softmax, &head_chunk_t).map_err(FlceError::Kt)?;
+            matmul_rhs_transposed(&grad_logits_softmax, &head_chunk).map_err(FlceError::Kt)?;
 
         // one-hot contribution: select the `head_chunk.T` row for each label
         // in this chunk and scatter it into the matching active row.
@@ -972,6 +963,11 @@ fn fused_linear_cross_entropy_phase_b_backward_impl_kt(
                 KtTensor::from_vec_on(device, row_hits, vec![hits]).map_err(FlceError::Kt)?;
             let rel_idx_t =
                 KtTensor::from_vec_on(device, rel_hits, vec![hits]).map_err(FlceError::Kt)?;
+            let head_chunk_t = head_chunk
+                .t()
+                .map_err(FlceError::Kt)?
+                .contiguous()
+                .map_err(FlceError::Kt)?;
             let selected_head_rows =
                 index_select(&head_chunk_t, 0, &rel_idx_t).map_err(FlceError::Kt)?;
             let selected_weighted =

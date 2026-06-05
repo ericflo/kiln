@@ -1195,7 +1195,7 @@ fn grpo_pg_loss_from_normed_hidden_grad_with_logsum_kt(
     running_max: &kiln_tensor::Tensor,
     running_sumexp: &kiln_tensor::Tensor,
 ) -> Result<kiln_tensor::Tensor> {
-    use kiln_tensor::ops::{mul_scalar, scatter_add};
+    use kiln_tensor::ops::{matmul_rhs_transposed, mul_scalar, scatter_add};
     use kiln_tensor::{DType as KtDType, Tensor as KtTensor};
 
     if chunk_size == 0 {
@@ -1329,8 +1329,7 @@ fn grpo_pg_loss_from_normed_hidden_grad_with_logsum_kt(
             )
             .context("grpo_pg_loss_from_normed_hidden_grad_with_logsum_kt: cuda grad logits chunk")?;
 
-            let head_chunk_t = head_chunk.t()?.contiguous()?;
-            let chunk_contrib = logits_chunk.matmul(&head_chunk_t)?;
+            let chunk_contrib = matmul_rhs_transposed(&logits_chunk, &head_chunk)?;
             grad_active_hidden = (&grad_active_hidden + chunk_contrib)?.detach();
             chunk_start = chunk_end;
         }
@@ -1356,9 +1355,8 @@ fn grpo_pg_loss_from_normed_hidden_grad_with_logsum_kt(
         let softmax_chunk =
             exp_chunk.broadcast_div(&running_sumexp.broadcast_as(logits_chunk.shape())?)?;
 
-        let head_chunk_t = head_chunk.t()?.contiguous()?;
         let softmax_rows = softmax_chunk.broadcast_mul(&coeff_col)?;
-        let softmax_contrib = softmax_rows.matmul(&head_chunk_t)?;
+        let softmax_contrib = matmul_rhs_transposed(&softmax_rows, &head_chunk)?;
 
         let mut row_hits = Vec::new();
         let mut rel_hits = Vec::new();
@@ -1375,6 +1373,7 @@ fn grpo_pg_loss_from_normed_hidden_grad_with_logsum_kt(
             let hits = row_hits.len();
             let row_idx = KtTensor::from_vec_on(*device, row_hits, vec![hits])?;
             let rel_idx = KtTensor::from_vec_on(*device, rel_hits, vec![hits])?;
+            let head_chunk_t = head_chunk.t()?.contiguous()?;
             let selected_head_rows = head_chunk_t.index_select(&rel_idx, 0)?;
             let selected_coeff = coeff_col.index_select(&row_idx, 0)?;
             let selected_coeff_b = selected_coeff.broadcast_as(selected_head_rows.shape())?;

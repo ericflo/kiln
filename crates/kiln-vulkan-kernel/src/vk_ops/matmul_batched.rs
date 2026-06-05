@@ -179,6 +179,52 @@ fn dispatch_matmul_lhs_t_batched_bf16(
     )
 }
 
+fn dispatch_matmul_rhs_t_batched(
+    device: &VulkanDevice,
+    a: &VulkanBuffer,
+    b: &VulkanBuffer,
+    out: &VulkanBuffer,
+    batch: usize,
+    m: usize,
+    n: usize,
+    k: usize,
+) -> Result<()> {
+    let wg_x = ((n + 15) / 16) as u32;
+    let wg_y = ((m + 15) / 16) as u32;
+    let wg_z = batch as u32;
+    let push = [batch as u32, m as u32, n as u32, k as u32];
+    dispatch_3d(
+        device,
+        "vk_matmul_rhs_t_batched_f32",
+        &[a.handle(), b.handle(), out.handle()],
+        &push,
+        (wg_x, wg_y, wg_z),
+    )
+}
+
+fn dispatch_matmul_rhs_t_batched_bf16(
+    device: &VulkanDevice,
+    a: &VulkanBuffer,
+    b: &VulkanBuffer,
+    out: &VulkanBuffer,
+    batch: usize,
+    m: usize,
+    n: usize,
+    k: usize,
+) -> Result<()> {
+    let wg_x = ((n + 15) / 16) as u32;
+    let wg_y = ((m + 15) / 16) as u32;
+    let wg_z = batch as u32;
+    let push = [batch as u32, m as u32, n as u32, k as u32];
+    dispatch_3d(
+        device,
+        "vk_matmul_rhs_t_batched_bf16",
+        &[a.handle(), b.handle(), out.handle()],
+        &push,
+        (wg_x, wg_y, wg_z),
+    )
+}
+
 fn check_batched_matmul_bf16(a: &VkTensor, b: &VkTensor) -> Result<(usize, usize, usize, usize)> {
     anyhow::ensure!(
         a.shape().len() == 3 && b.shape().len() == 3,
@@ -221,6 +267,35 @@ fn check_batched_lhs_t(a: &VkTensor, b: &VkTensor, dtype: VkDType) -> Result<(us
     let bb = b.shape()[0];
     let kk = b.shape()[1];
     let n = b.shape()[2];
+    anyhow::ensure!(ba == bb, "batch mismatch: {ba} vs {bb}");
+    anyhow::ensure!(k == kk, "inner-dim mismatch: {k} vs {kk}");
+    Ok((ba, m, n, k))
+}
+
+fn check_batched_rhs_t(
+    a: &VkTensor,
+    b: &VkTensor,
+    dtype: VkDType,
+) -> Result<(usize, usize, usize, usize)> {
+    anyhow::ensure!(
+        a.shape().len() == 3 && b.shape().len() == 3,
+        "vk_matmul_rhs_t_batched: rank-3 required, got {:?}/{:?}",
+        a.shape(),
+        b.shape()
+    );
+    anyhow::ensure!(
+        a.dtype() == dtype && b.dtype() == dtype,
+        "vk_matmul_rhs_t_batched: dtype mismatch/unsupported: {:?}/{:?}, expected {:?}",
+        a.dtype(),
+        b.dtype(),
+        dtype
+    );
+    let ba = a.shape()[0];
+    let m = a.shape()[1];
+    let k = a.shape()[2];
+    let bb = b.shape()[0];
+    let n = b.shape()[1];
+    let kk = b.shape()[2];
     anyhow::ensure!(ba == bb, "batch mismatch: {ba} vs {bb}");
     anyhow::ensure!(k == kk, "inner-dim mismatch: {k} vs {kk}");
     Ok((ba, m, n, k))
@@ -272,6 +347,34 @@ pub fn vk_matmul_lhs_t_batched_bf16_no_grad(a: &VkTensor, b: &VkTensor) -> Resul
     ))
 }
 
+/// Batched F32 GEMM with a transposed right operand:
+/// `a:[B,M,K] @ b:[B,N,K]^T -> [B,M,N]`.
+pub fn vk_matmul_rhs_t_batched_no_grad(a: &VkTensor, b: &VkTensor) -> Result<VkTensor> {
+    let (batch, m, n, k) = check_batched_rhs_t(a, b, VkDType::F32)?;
+    let out = alloc_f32(a.device(), batch * m * n)?;
+    dispatch_matmul_rhs_t_batched(a.device(), a.buffer(), b.buffer(), &out, batch, m, n, k)?;
+    Ok(VkTensor::from_buffer(
+        out,
+        vec![batch, m, n],
+        VkDType::F32,
+        Arc::clone(a.device()),
+    ))
+}
+
+/// Batched BF16 GEMM with a transposed right operand:
+/// `a:[B,M,K] @ b:[B,N,K]^T -> [B,M,N]`, returning F32.
+pub fn vk_matmul_rhs_t_batched_bf16_no_grad(a: &VkTensor, b: &VkTensor) -> Result<VkTensor> {
+    let (batch, m, n, k) = check_batched_rhs_t(a, b, VkDType::Bf16)?;
+    let out = alloc_f32(a.device(), batch * m * n)?;
+    dispatch_matmul_rhs_t_batched_bf16(a.device(), a.buffer(), b.buffer(), &out, batch, m, n, k)?;
+    Ok(VkTensor::from_buffer(
+        out,
+        vec![batch, m, n],
+        VkDType::F32,
+        Arc::clone(a.device()),
+    ))
+}
+
 pub fn vk_transpose_batched_2d_no_grad(t: &VkTensor) -> Result<VkTensor> {
     anyhow::ensure!(
         t.shape().len() == 3,
@@ -311,8 +414,7 @@ impl VkBackwardOp for MatmulBatchedBackward {
         let a = &self.inputs[0];
         let b = &self.inputs[1];
         // dA[b] = grad_out[b] @ B[b].T  (per batch)
-        let b_t = vk_transpose_batched_2d_no_grad(b)?;
-        let grad_a = vk_matmul_batched_no_grad(grad_out, &b_t)?;
+        let grad_a = vk_matmul_rhs_t_batched_no_grad(grad_out, b)?;
         // dB[b] = A[b].T @ grad_out[b]
         let grad_b = vk_matmul_lhs_t_batched_no_grad(a, grad_out)?;
         Ok(vec![Some(grad_a), Some(grad_b)])
