@@ -32,6 +32,22 @@ int32_t kiln_gdn_gated_rms_norm_bf16(
     void* stream_raw     // cudaStream_t (raw)
 );
 
+// Fused GDN gated RMSNorm kernel (bf16 activations, f32 weight).
+//
+// Same algorithm and shape envelope as `kiln_gdn_gated_rms_norm_bf16`, but
+// reads the learned RMSNorm scale as F32. This matches the production
+// Qwen3.5 GDN weight dtype while still writing BF16 activations.
+int32_t kiln_gdn_gated_rms_norm_wf32_bf16(
+    const void* x,       // [rows, hidden] bf16
+    const void* z,       // [rows, hidden] bf16
+    const void* weight,  // [hidden] f32
+    void* out,           // [rows, hidden] bf16
+    int32_t rows,
+    int32_t hidden,
+    float eps,
+    void* stream_raw     // cudaStream_t (raw)
+);
+
 // Backward for the fused GDN gated RMSNorm kernel.
 //
 // Reads bf16 `grad_out`, `x`, `z`, and `weight`. Writes bf16 `d_x`/`d_z` and
@@ -45,6 +61,24 @@ int32_t kiln_gdn_gated_rms_norm_bwd_bf16(
     const void* x,        // [rows, hidden] bf16
     const void* z,        // [rows, hidden] bf16
     const void* weight,   // [hidden] bf16
+    void* d_x,            // [rows, hidden] bf16
+    void* d_z,            // [rows, hidden] bf16
+    void* d_weight,       // [hidden] f32
+    int32_t rows,
+    int32_t hidden,
+    float eps,
+    void* stream_raw      // cudaStream_t (raw)
+);
+
+// Backward for the F32-weight fused GDN gated RMSNorm kernel.
+//
+// Reads bf16 `grad_out`, `x`, `z`, and f32 `weight`. Writes bf16 `d_x`/`d_z`
+// and F32 `d_weight` accumulated across rows.
+int32_t kiln_gdn_gated_rms_norm_bwd_wf32_bf16(
+    const void* grad_out, // [rows, hidden] bf16
+    const void* x,        // [rows, hidden] bf16
+    const void* z,        // [rows, hidden] bf16
+    const void* weight,   // [hidden] f32
     void* d_x,            // [rows, hidden] bf16
     void* d_z,            // [rows, hidden] bf16
     void* d_weight,       // [hidden] f32

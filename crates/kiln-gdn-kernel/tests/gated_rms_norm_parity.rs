@@ -21,9 +21,11 @@
 use half::bf16;
 
 use kiln_gdn_kernel::{
-    gdn_gated_rms_norm_bf16_kt, gdn_gated_rms_norm_bwd_bf16_kt,
-    gdn_gated_rms_norm_bwd_supports_kt, gdn_gated_rms_norm_supports_kt,
-    gdn_l2_norm_scale_bwd_bf16_kt, gdn_l2_norm_scale_bwd_supports_kt,
+    gdn_gated_rms_norm_bf16_f32_weight_kt, gdn_gated_rms_norm_bf16_kt,
+    gdn_gated_rms_norm_bwd_bf16_f32_weight_kt, gdn_gated_rms_norm_bwd_bf16_kt,
+    gdn_gated_rms_norm_bwd_supports_kt, gdn_gated_rms_norm_f32_weight_supports_kt,
+    gdn_gated_rms_norm_supports_kt, gdn_l2_norm_scale_bwd_bf16_kt,
+    gdn_l2_norm_scale_bwd_supports_kt,
 };
 use kiln_tensor::{cuda_to_host_copy, CpuStorage, DType, Tensor};
 
@@ -224,16 +226,25 @@ fn run_case(batch: usize, seq_len: usize, heads: usize, hidden: usize, seed: u64
     let x = Tensor::cuda_from_slice(&x_bf16, vec![rows, hidden], 0).expect("upload x");
     let z = Tensor::cuda_from_slice(&z_bf16, vec![rows, hidden], 0).expect("upload z");
     let weight = Tensor::cuda_from_slice(&w_bf16, vec![hidden], 0).expect("upload weight");
+    let weight_f32 = Tensor::cuda_from_slice(&w_host, vec![hidden], 0).expect("upload f32 weight");
 
     assert!(
         gdn_gated_rms_norm_supports_kt(&x, &z, &weight),
         "{label}: envelope check failed"
     );
+    assert!(
+        gdn_gated_rms_norm_f32_weight_supports_kt(&x, &z, &weight_f32),
+        "{label}: f32-weight envelope check failed"
+    );
 
     let fused = gdn_gated_rms_norm_bf16_kt(&x, &z, &weight, 1e-6).expect("fused gated RMSNorm");
+    let fused_f32_weight = gdn_gated_rms_norm_bf16_f32_weight_kt(&x, &z, &weight_f32, 1e-6)
+        .expect("fused gated RMSNorm f32 weight");
 
     assert_eq!(fused.shape(), &[rows, hidden]);
     assert_eq!(fused.dtype(), DType::BF16);
+    assert_eq!(fused_f32_weight.shape(), &[rows, hidden]);
+    assert_eq!(fused_f32_weight.dtype(), DType::BF16);
 
     // BF16-round-trip the host reference so the comparison sees the
     // same precision the kernel writes.
@@ -264,6 +275,35 @@ fn run_case(batch: usize, seq_len: usize, heads: usize, hidden: usize, seed: u64
         mean < 5e-4,
         "{label}: mean_abs_diff {mean} exceeds tolerance"
     );
+
+    let ref_f32_weight = reference_host(&x_ref, &z_ref, &w_host, rows, hidden, 1e-6);
+    let ref_f32_weight_bf16: Vec<f32> = ref_f32_weight
+        .iter()
+        .map(|&v| bf16::from_f32(v).to_f32())
+        .collect();
+    let got_f32_weight = read_bf16_host_as_f32(&fused_f32_weight);
+    let abs_f32_weight: Vec<f32> = got_f32_weight
+        .iter()
+        .zip(ref_f32_weight_bf16.iter())
+        .map(|(a, b)| (a - b).abs())
+        .collect();
+    let max_f32_weight = abs_f32_weight.iter().cloned().fold(0.0f32, f32::max);
+    let mean_f32_weight = if abs_f32_weight.is_empty() {
+        0.0
+    } else {
+        abs_f32_weight.iter().sum::<f32>() / abs_f32_weight.len() as f32
+    };
+    println!(
+        "[{label} f32-weight] shape=[{batch},{seq_len},{heads},{hidden}] max_abs={max_f32_weight:.3e} mean_abs={mean_f32_weight:.3e}"
+    );
+    assert!(
+        max_f32_weight < 5e-3,
+        "{label}: f32-weight max_abs_diff {max_f32_weight} exceeds tolerance"
+    );
+    assert!(
+        mean_f32_weight < 5e-4,
+        "{label}: f32-weight mean_abs_diff {mean_f32_weight} exceeds tolerance"
+    );
 }
 
 fn run_bwd_case(batch: usize, seq_len: usize, heads: usize, hidden: usize, seed: u64, label: &str) {
@@ -291,14 +331,22 @@ fn run_bwd_case(batch: usize, seq_len: usize, heads: usize, hidden: usize, seed:
     let z = Tensor::cuda_from_slice(&z_bf16, vec![rows, hidden], 0).expect("upload z");
     let dout = Tensor::cuda_from_slice(&dout_bf16, vec![rows, hidden], 0).expect("upload dout");
     let weight = Tensor::cuda_from_slice(&w_bf16, vec![hidden], 0).expect("upload weight");
+    let weight_f32 = Tensor::cuda_from_slice(&w_host, vec![hidden], 0).expect("upload f32 weight");
 
     assert!(
         gdn_gated_rms_norm_bwd_supports_kt(&dout, &x, &z, &weight),
         "{label}: backward envelope check failed"
     );
+    assert!(
+        gdn_gated_rms_norm_bwd_supports_kt(&dout, &x, &z, &weight_f32),
+        "{label}: f32-weight backward envelope check failed"
+    );
 
     let grads =
         gdn_gated_rms_norm_bwd_bf16_kt(&dout, &x, &z, &weight, 1e-6).expect("fused bwd");
+    let grads_f32_weight =
+        gdn_gated_rms_norm_bwd_bf16_f32_weight_kt(&dout, &x, &z, &weight_f32, 1e-6)
+            .expect("fused bwd f32 weight");
 
     let (ref_dx, ref_dz, ref_dw) =
         reference_bwd_host(&dout_ref, &x_ref, &z_ref, &w_ref, rows, hidden, 1e-6);
@@ -325,6 +373,40 @@ fn run_bwd_case(batch: usize, seq_len: usize, heads: usize, hidden: usize, seed:
     assert!(dx_max < 6e-3, "{label}: dx max_abs_diff {dx_max} exceeds tolerance");
     assert!(dz_max < 6e-3, "{label}: dz max_abs_diff {dz_max} exceeds tolerance");
     assert!(dw_max < 2e-2, "{label}: dw max_abs_diff {dw_max} exceeds tolerance");
+
+    let (ref_dx_f32_weight, ref_dz_f32_weight, ref_dw_f32_weight) =
+        reference_bwd_host(&dout_ref, &x_ref, &z_ref, &w_host, rows, hidden, 1e-6);
+    let ref_dx_f32_weight_bf16: Vec<f32> = ref_dx_f32_weight
+        .iter()
+        .map(|&v| bf16::from_f32(v).to_f32())
+        .collect();
+    let ref_dz_f32_weight_bf16: Vec<f32> = ref_dz_f32_weight
+        .iter()
+        .map(|&v| bf16::from_f32(v).to_f32())
+        .collect();
+    let got_dx_f32_weight = read_bf16_host_as_f32(&grads_f32_weight.dx);
+    let got_dz_f32_weight = read_bf16_host_as_f32(&grads_f32_weight.dz);
+    let got_dw_f32_weight = read_f32_host(&grads_f32_weight.dw);
+
+    let dx_f32_weight_max = max_abs(&got_dx_f32_weight, &ref_dx_f32_weight_bf16);
+    let dz_f32_weight_max = max_abs(&got_dz_f32_weight, &ref_dz_f32_weight_bf16);
+    let dw_f32_weight_max = max_abs(&got_dw_f32_weight, &ref_dw_f32_weight);
+
+    println!(
+        "[{label} bwd f32-weight] shape=[{batch},{seq_len},{heads},{hidden}] dx_max={dx_f32_weight_max:.3e} dz_max={dz_f32_weight_max:.3e} dw_max={dw_f32_weight_max:.3e}"
+    );
+    assert!(
+        dx_f32_weight_max < 6e-3,
+        "{label}: f32-weight dx max_abs_diff {dx_f32_weight_max} exceeds tolerance"
+    );
+    assert!(
+        dz_f32_weight_max < 6e-3,
+        "{label}: f32-weight dz max_abs_diff {dz_f32_weight_max} exceeds tolerance"
+    );
+    assert!(
+        dw_f32_weight_max < 2e-2,
+        "{label}: f32-weight dw max_abs_diff {dw_f32_weight_max} exceeds tolerance"
+    );
 }
 
 fn run_l2_bwd_case(

@@ -3285,7 +3285,10 @@ fn try_gdn_gated_rms_norm_backward_fused_cuda_rocm(
         kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Rocm(_)
     ) || x.dtype() != kiln_tensor::DType::BF16
         || z.dtype() != kiln_tensor::DType::BF16
-        || weight.dtype() != kiln_tensor::DType::BF16
+        || !matches!(
+            weight.dtype(),
+            kiln_tensor::DType::BF16 | kiln_tensor::DType::F32
+        )
         || grad_output.dtype() != kiln_tensor::DType::BF16
         || x.dims() != z.dims()
         || x.dims() != grad_output.dims()
@@ -3320,10 +3323,19 @@ fn try_gdn_gated_rms_norm_backward_fused_cuda_rocm(
         return Ok(None);
     }
 
-    let grads = kiln_gdn_kernel::gdn_gated_rms_norm_bwd_bf16_kt(
-        &grad_flat, &x_flat, &z_flat, weight, eps as f32,
-    )
-    .map_err(|e| kiln_tensor::Error::Msg(format!("GdnGatedRmsNormBackward fused bwd: {e}")))?;
+    let grads = match weight.dtype() {
+        kiln_tensor::DType::BF16 => kiln_gdn_kernel::gdn_gated_rms_norm_bwd_bf16_kt(
+            &grad_flat, &x_flat, &z_flat, weight, eps as f32,
+        )
+        .map_err(|e| kiln_tensor::Error::Msg(format!("GdnGatedRmsNormBackward fused bwd: {e}")))?,
+        kiln_tensor::DType::F32 => kiln_gdn_kernel::gdn_gated_rms_norm_bwd_bf16_f32_weight_kt(
+            &grad_flat, &x_flat, &z_flat, weight, eps as f32,
+        )
+        .map_err(|e| {
+            kiln_tensor::Error::Msg(format!("GdnGatedRmsNormBackward fused bwd f32-weight: {e}"))
+        })?,
+        _ => return Ok(None),
+    };
     let dx = grads.dx.reshape(x_dims.clone()).map_err(|e| {
         kiln_tensor::Error::Msg(format!("GdnGatedRmsNormBackward fused dx reshape: {e}"))
     })?;

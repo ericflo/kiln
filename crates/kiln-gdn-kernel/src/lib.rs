@@ -70,8 +70,8 @@ pub use kt_api::{
     gdn_decode_gates_recurrent_supports_kt,
     gdn_decode_qk_norm_gates_recurrent_rmsnorm_supports_kt,
     gdn_decode_qk_norm_gates_recurrent_supports_kt, gdn_full_chunk_forward_multiblock_supports_kt,
-    gdn_full_chunk_forward_supports_kt, gdn_gated_rms_norm_supports_kt, gdn_gates_supports_kt,
-    GdnError,
+    gdn_full_chunk_forward_supports_kt, gdn_gated_rms_norm_f32_weight_supports_kt,
+    gdn_gated_rms_norm_supports_kt, gdn_gates_supports_kt, GdnError,
 };
 
 // The device-launching `_kt` entry points bottom out in the FFI symbols and the
@@ -91,7 +91,8 @@ pub use kt_api::{
     gdn_decode_qk_norm_gates_recurrent_rmsnorm_vf32_bf16_kt,
     gdn_decode_qk_norm_gates_recurrent_vf32_bf16_kt, gdn_forward_substitution_kt,
     gdn_full_chunk_forward_kt, gdn_full_chunk_forward_multiblock_kt, gdn_gated_rms_norm_bf16_kt,
-    gdn_gated_rms_norm_bwd_bf16_kt, gdn_gated_rms_norm_bwd_supports_kt,
+    gdn_gated_rms_norm_bf16_f32_weight_kt, gdn_gated_rms_norm_bwd_bf16_kt,
+    gdn_gated_rms_norm_bwd_bf16_f32_weight_kt, gdn_gated_rms_norm_bwd_supports_kt,
     gdn_gates_bf16_f32_bf16_params_kt, gdn_gates_bf16_f32_params_kt, gdn_gates_bf16_kt,
     gdn_l2_norm_scale_bwd_bf16_kt, gdn_l2_norm_scale_bwd_supports_kt,
     gdn_recurrent_forward_kt, GdnGatedRmsNormBwdKt,
@@ -484,7 +485,32 @@ unsafe extern "C" {
         stream: *mut core::ffi::c_void,
     ) -> i32;
 
+    fn kiln_gdn_gated_rms_norm_wf32_bf16(
+        x: *const core::ffi::c_void,
+        z: *const core::ffi::c_void,
+        weight: *const core::ffi::c_void,
+        out: *mut core::ffi::c_void,
+        rows: i32,
+        hidden: i32,
+        eps: f32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
+
     fn kiln_gdn_gated_rms_norm_bwd_bf16(
+        grad_out: *const core::ffi::c_void,
+        x: *const core::ffi::c_void,
+        z: *const core::ffi::c_void,
+        weight: *const core::ffi::c_void,
+        d_x: *mut core::ffi::c_void,
+        d_z: *mut core::ffi::c_void,
+        d_weight: *mut core::ffi::c_void,
+        rows: i32,
+        hidden: i32,
+        eps: f32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
+
+    fn kiln_gdn_gated_rms_norm_bwd_wf32_bf16(
         grad_out: *const core::ffi::c_void,
         x: *const core::ffi::c_void,
         z: *const core::ffi::c_void,

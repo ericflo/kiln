@@ -1586,18 +1586,19 @@ impl BackendRuntime for CudaBackend {
         if !self.gdn_gated_rms_norm_enabled {
             return Ok(None);
         }
-        // Phase 7 (#1082): kt-typed bf16 surface is now the only path.
-        // Args are already kt (#1082 DoD-101/102), so no candle↔kt
-        // bridge. Non-bf16 inputs (which the kt path declines) return
-        // Ok(None) so the caller's candle fallback engages. bf16 was
-        // the only production envelope for Qwen3.5-4B GDN.
+        // Phase 7 (#1082): kt-typed bf16 activation surface. Qwen3.5 GDN
+        // stores the learned RMSNorm scale as F32 in production, so support
+        // both BF16 and F32 weight while keeping BF16 activations.
         if !(x.dtype() == kiln_tensor::DType::BF16
             && z.dtype() == kiln_tensor::DType::BF16
-            && weight.dtype() == kiln_tensor::DType::BF16)
+            && matches!(
+                weight.dtype(),
+                kiln_tensor::DType::BF16 | kiln_tensor::DType::F32
+            ))
         {
             return Ok(None);
         }
-        kiln_nvtx::range!(c"kiln/gdn_gated_rms_norm_bf16_kt");
+        kiln_nvtx::range!(c"kiln/gdn_gated_rms_norm_kt");
         // The kt variant expects rank-2 [rows, hidden]; flatten higher-rank
         // x/z by folding all leading dims into rows. weight stays [hidden].
         let x_dims = x.dims().to_vec();
@@ -1617,12 +1618,27 @@ impl BackendRuntime for CudaBackend {
             .context("kt-adapter: gdn_gated_rms_norm contiguous z failed")?
             .reshape((rows, hidden))
             .context("kt-adapter: gdn_gated_rms_norm reshape z → [rows, hidden] failed")?;
-        if !kiln_gdn_kernel::gdn_gated_rms_norm_supports_kt(&x_flat, &z_flat, weight) {
-            return Ok(None);
-        }
-        let out_kt =
-            kiln_gdn_kernel::gdn_gated_rms_norm_bf16_kt(&x_flat, &z_flat, weight, eps as f32)
-                .map_err(|e| anyhow::anyhow!("kt gdn_gated_rms_norm_bf16: {e}"))?;
+        let out_kt = match weight.dtype() {
+            kiln_tensor::DType::BF16 => {
+                if !kiln_gdn_kernel::gdn_gated_rms_norm_supports_kt(&x_flat, &z_flat, weight) {
+                    return Ok(None);
+                }
+                kiln_gdn_kernel::gdn_gated_rms_norm_bf16_kt(&x_flat, &z_flat, weight, eps as f32)
+                    .map_err(|e| anyhow::anyhow!("kt gdn_gated_rms_norm_bf16: {e}"))?
+            }
+            kiln_tensor::DType::F32 => {
+                if !kiln_gdn_kernel::gdn_gated_rms_norm_f32_weight_supports_kt(
+                    &x_flat, &z_flat, weight,
+                ) {
+                    return Ok(None);
+                }
+                kiln_gdn_kernel::gdn_gated_rms_norm_bf16_f32_weight_kt(
+                    &x_flat, &z_flat, weight, eps as f32,
+                )
+                .map_err(|e| anyhow::anyhow!("kt gdn_gated_rms_norm_bf16_f32_weight: {e}"))?
+            }
+            _ => return Ok(None),
+        };
         let out = out_kt
             .reshape(x_dims)
             .context("kt-adapter: gdn_gated_rms_norm reshape out → original failed")?;

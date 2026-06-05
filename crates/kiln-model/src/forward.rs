@@ -12598,19 +12598,16 @@ fn gated_rms_norm(
     eps: f64,
 ) -> Result<Tensor> {
     // (#1082) GDN-on-Vulkan training: the Vulkan `gdn_gated_rms_norm` backend
-    // kernel is a forward-only fast path that reads its result back to
-    // `Device::Cpu` (`kt_tensor_from_f32_bytes`), severing the Vulkan tape. It
-    // gates on `!any_kt_tensor_tracks_op`, but tape-authoritative intermediates
-    // are detached (track_op==false), so it would still fire. Skip the backend
-    // kernel whenever a tape scope is active so the device-agnostic
-    // `gated_rms_norm_fallback` runs (its kt ops keep the output on the
-    // activation device via the Vulkan op host-fallback, and the caller records
-    // the analytic `GdnGatedRmsNormBackward`). Default (inference) is unchanged.
+    // kernel reads through host bytes and returns `Device::Cpu`, severing the
+    // Vulkan tape. CUDA/ROCm/Metal return resident kt tensors, so active tape
+    // can still use their fused forward and then record the analytic
+    // `GdnGatedRmsNormBackward` in the caller.
     #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
-    let tape_recording_active = crate::tape_forward::tape_forward_enabled();
+    let skip_backend_for_active_tape = crate::tape_forward::tape_scope_active()
+        && matches!(backend.device(), kiln_tensor::Device::Vulkan(_));
     #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm")))]
-    let tape_recording_active = false;
-    if !tape_recording_active
+    let skip_backend_for_active_tape = false;
+    if !skip_backend_for_active_tape
         && !any_kt_tensor_tracks_op(&[x, z, weight])
         && backend.supports_gdn_gated_rms_norm()
     {
@@ -29270,15 +29267,22 @@ mod tests {
             .to_dtype(DType::BF16)?;
         let z = Tensor::from_slice(&z_data, (batch, seq_len, heads, hidden))?.to_device(device)?
             .to_dtype(DType::BF16)?;
-        let weight = Tensor::from_slice(&w_data, (hidden,))?.to_device(device)?.to_dtype(DType::BF16)?;
+        let weight_f32 = Tensor::from_slice(&w_data, (hidden,))?.to_device(device)?;
+        let weight = weight_f32.to_dtype(DType::BF16)?;
 
         let fallback = gated_rms_norm_fallback(&x, &z, &weight, 1e-6)?;
         let fused = backend
             .gdn_gated_rms_norm(&x, &z, &weight, 1e-6)?
             .context("CUDA backend declined gated RMSNorm test shape")?;
+        let fallback_f32_weight = gated_rms_norm_fallback(&x, &z, &weight_f32, 1e-6)?;
+        let fused_f32_weight = backend
+            .gdn_gated_rms_norm(&x, &z, &weight_f32, 1e-6)?
+            .context("CUDA backend declined gated RMSNorm f32-weight test shape")?;
 
         assert_eq!(fused.dims(), fallback.dims());
         assert_eq!(fused.dtype(), DType::BF16);
+        assert_eq!(fused_f32_weight.dims(), fallback_f32_weight.dims());
+        assert_eq!(fused_f32_weight.dtype(), DType::BF16);
 
         let diff = (fused.to_dtype(DType::F32)?
             - fallback.to_dtype(DType::BF16)?.to_dtype(DType::F32)?)?;
@@ -29293,6 +29297,25 @@ mod tests {
         assert!(
             mean < 5e-4,
             "CUDA gated_rms_norm mean_abs_diff={mean:e} exceeds 5e-4"
+        );
+
+        let diff_f32_weight = (fused_f32_weight.to_dtype(DType::F32)?
+            - fallback_f32_weight
+                .to_dtype(DType::BF16)?
+                .to_dtype(DType::F32)?)?;
+        let abs_f32_weight = diff_f32_weight.abs()?;
+        let max_f32_weight = abs_f32_weight.flatten_all()?.max(0)?.flatten_all()?.to_vec1::<f32>()?[0];
+        let mean_f32_weight = abs_f32_weight.flatten_all()?.mean(0)?.flatten_all()?.to_vec1::<f32>()?[0];
+        eprintln!(
+            "gated_rms_norm cuda f32-weight vs fallback: max_abs_diff={max_f32_weight:e} mean_abs_diff={mean_f32_weight:e}"
+        );
+        assert!(
+            max_f32_weight < 5e-3,
+            "CUDA gated_rms_norm f32-weight max_abs_diff={max_f32_weight:e} exceeds 5e-3"
+        );
+        assert!(
+            mean_f32_weight < 5e-4,
+            "CUDA gated_rms_norm f32-weight mean_abs_diff={mean_f32_weight:e} exceeds 5e-4"
         );
 
         Ok(())
