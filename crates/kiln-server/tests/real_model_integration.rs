@@ -959,9 +959,11 @@ fn tiny_gdn_weights_bf16(config: &ModelConfig, device: &Device) -> GpuWeights {
             up_proj_t,
             down_proj_t,
             gate_up_proj_t: None,
+            gate_up_proj_w8: None,
             gate_proj_marlin: None,
             up_proj_marlin: None,
             down_proj_marlin: None,
+            down_proj_w8: None,
         }
     };
 
@@ -996,6 +998,7 @@ fn tiny_gdn_weights_bf16(config: &ModelConfig, device: &Device) -> GpuWeights {
             in_proj_ab_t: None,
             out_proj_t,
             out_proj_marlin: None,
+            in_proj_qkvzab_w8: None,
         }),
         mlp: mk_mlp(),
     };
@@ -1019,8 +1022,10 @@ fn tiny_gdn_weights_bf16(config: &ModelConfig, device: &Device) -> GpuWeights {
             k_proj_t,
             v_proj_t,
             qkv_proj_t: None,
+            qkv_proj_w8: None,
             o_proj_t,
             q_proj_marlin: None,
+            o_proj_w8: None,
         }),
         mlp: mk_mlp(),
     };
@@ -1039,6 +1044,7 @@ fn tiny_gdn_weights_bf16(config: &ModelConfig, device: &Device) -> GpuWeights {
         final_norm,
         rotary_inv_freq,
         mtp: None,
+        lm_head_w8: None,
     }
 }
 
