@@ -313,6 +313,18 @@ pub fn matmul_lhs_transposed(a: &Tensor, b: &Tensor) -> Result<Tensor> {
         }
     }
 
+    #[cfg(feature = "metal")]
+    {
+        if matches!(a.device(), crate::Device::Metal(_))
+            && matches!(b.device(), crate::Device::Metal(_))
+            && a.is_contiguous()
+            && b.is_contiguous()
+            && a.dtype() == DType::BF16
+        {
+            return crate::metal_matmul_lhs_transposed(a, b);
+        }
+    }
+
     let a_t = a.transpose(ar - 2, ar - 1)?.contiguous()?;
     matmul(&a_t, b)
 }

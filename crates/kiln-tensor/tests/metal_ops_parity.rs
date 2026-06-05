@@ -793,6 +793,50 @@ fn matmul_matrix_core_batched_parity() {
     }
 }
 
+/// Metal resident `a^T @ b` path used by LoRA/matmul backward. This verifies
+/// the transposed-A tile loader against the CPU reference without materializing
+/// `a.transpose(-2, -1).contiguous()` on Metal.
+#[test]
+fn matmul_lhs_transposed_matrix_core_parity() {
+    let Some(dev) = metal() else { eprintln!("no Metal device; skipping"); return; };
+    // (batch dims, K, M, N): 2D, batched, and tail dimensions.
+    let cases = [
+        (vec![], 257usize, 19usize, 23usize),
+        (vec![3usize], 129usize, 17usize, 31usize),
+        (vec![2usize, 2usize], 64usize, 9usize, 13usize),
+    ];
+    for (bdims, k, m, n) in cases {
+        let batch: usize = bdims.iter().product::<usize>().max(1);
+        let a = pattern(batch * k * m, 500 + k as u64);
+        let b = pattern(batch * k * n, 600 + n as u64);
+        let mut a_shape = bdims.clone();
+        a_shape.extend_from_slice(&[k, m]);
+        let mut b_shape = bdims.clone();
+        b_shape.extend_from_slice(&[k, n]);
+
+        let a_cpu = ops::cast(&Tensor::from_vec(a.clone(), a_shape.clone()).unwrap(), DType::BF16).unwrap();
+        let b_cpu = ops::cast(&Tensor::from_vec(b.clone(), b_shape.clone()).unwrap(), DType::BF16).unwrap();
+        let a_met = ops::cast(&Tensor::from_vec_on(dev, a, a_shape).unwrap(), DType::BF16).unwrap();
+        let b_met = ops::cast(&Tensor::from_vec_on(dev, b, b_shape).unwrap(), DType::BF16).unwrap();
+
+        let want_t = ops::matmul_lhs_transposed(&a_cpu, &b_cpu).unwrap();
+        let got_t = ops::matmul_lhs_transposed(&a_met, &b_met).unwrap();
+        assert_eq!(got_t.device(), dev, "metal lhs-transposed matmul must stay on Metal");
+        let mut out_shape = bdims.clone();
+        out_shape.extend_from_slice(&[m, n]);
+        assert_eq!(got_t.shape().to_vec(), out_shape, "lhs-transposed output shape");
+
+        let want: Vec<f32> = ops::cast(&want_t, DType::F32).unwrap().to_vec::<f32>().unwrap();
+        let got: Vec<f32> = ops::cast(&got_t, DType::F32).unwrap().to_vec::<f32>().unwrap();
+        let d = max_abs_diff(&got, &want);
+        let mref = want.iter().fold(0.0f32, |m, &w| m.max(w.abs()));
+        assert!(
+            d < 0.02 * mref.max(1.0),
+            "lhs-transposed matmul {bdims:?} [{k},{m}]^T x [{k},{n}] max|Δ|={d} (ref {mref})"
+        );
+    }
+}
+
 /// index_select dim0 parity — gates the kiln-owned MSL gather kernel
 /// (`metal_kernels::index_select_dim0`, replacing candle's
 /// `call_index_select`). Gather is an exact copy → demand bit-exact equality.

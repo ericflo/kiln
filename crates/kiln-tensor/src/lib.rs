@@ -155,7 +155,7 @@ pub use fp8::{
 #[cfg(feature = "metal")]
 pub use metal_allocator::MetalAllocator;
 #[cfg(feature = "metal")]
-pub use metal_matmul::metal_matmul;
+pub use metal_matmul::{metal_matmul, metal_matmul_lhs_transposed};
 #[doc(hidden)]
 #[cfg(feature = "metal")]
 pub use metal_matmul::{
