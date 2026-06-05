@@ -13,15 +13,11 @@
 //!
 //! # Implementation notes
 //!
-//! `kiln_tensor::ops::matmul` requires **contiguous** inputs (Phase 1.18
-//! constraint). Both `a^T` and `b^T` are zero-copy transposes via
-//! `Tensor::transpose`, so we must call `.contiguous()?` afterwards
-//! to materialize. The `kiln_profile_contiguous_copy` counter
-//! (anti-pattern 2) will fire on every backward pass — the Phase 4
-//! issue bullet calls this out as expected and acceptable for the
-//! Phase 1.x reference path.
+//! `kiln_tensor::ops::matmul` requires **contiguous** inputs. `da` still
+//! materializes `b^T`, but `db` uses `matmul_lhs_transposed` so backends with
+//! transposed-GEMM support can compute `a^T @ dc` without a contiguous copy.
 
-use kiln_tensor::ops::matmul;
+use kiln_tensor::ops::{matmul, matmul_lhs_transposed};
 use kiln_tensor::{bail, Result, Tensor};
 
 use crate::BackwardOp;
@@ -60,9 +56,7 @@ impl BackwardOp for MatmulBackward {
             bail!("MatmulBackward: saved tensors must have rank ≥ 2");
         }
         if ar != br {
-            bail!(
-                "MatmulBackward: rank mismatch between saved a ({ar}) and b ({br})"
-            );
+            bail!("MatmulBackward: rank mismatch between saved a ({ar}) and b ({br})");
         }
         if grad_output.rank() != ar {
             bail!(
@@ -70,11 +64,10 @@ impl BackwardOp for MatmulBackward {
                 grad_output.rank()
             );
         }
-        // Transpose last two axes; materialize to contiguous for matmul.
-        let a_t = a.transpose(ar - 2, ar - 1)?.contiguous()?;
+        // Materialize the RHS transpose for da; db can use a transposed-GEMM.
         let b_t = b.transpose(br - 2, br - 1)?.contiguous()?;
         let da = matmul(grad_output, &b_t)?;
-        let db = matmul(&a_t, grad_output)?;
+        let db = matmul_lhs_transposed(&a, grad_output)?;
         Ok(vec![Some(da), Some(db)])
     }
     fn requires_input(&self, _idx: usize) -> bool {
