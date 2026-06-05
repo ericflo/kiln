@@ -15317,7 +15317,7 @@ pub fn gdn_recurrent_backward_no_grad(
         };
         #[cfg(not(feature = "cuda"))]
         let d_beta = prod_pb.sum(LAST_DIM)?;
-        let dr_w_t = dr.matmul(&w.transpose(2, 3)?.contiguous()?)?;
+        let dr_w_t = kiln_tensor::ops::matmul_rhs_transposed(&dr, &w)?;
         // #1082: build the F32 multiplicative mask via `where_cond` (1.0 where
         // strict-lower, else 0.0), NOT `.to_dtype(F32)` on the U8 bool mask — the
         // kt U8→F32 cast is unsupported (cast covers float↔float + U32↔I64), and
