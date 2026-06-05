@@ -1597,6 +1597,7 @@ dependencies = [
  "kiln-opd-loss-kernel",
  "kiln-optim",
  "kiln-param",
+ "kiln-rmsnorm-kernel",
  "kiln-tensor",
  "kiln-tensor-id",
  "kiln-vulkan-kernel",

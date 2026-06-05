@@ -20,6 +20,7 @@ kiln-core = { workspace = true }
 kiln-memory = { workspace = true }
 kiln-eval = { workspace = true }
 kiln-flce-kernel = { workspace = true }
+kiln-rmsnorm-kernel = { workspace = true }
 # CP-4 (#1082): the `kiln_kt_bridge::tape_bridge` module owns the
 # `with_tape_scope_emit_to_grad_store` wrapper that merges
 # `kiln_autograd::Tape`-recorded backward grads into the candle
@@ -82,9 +83,9 @@ reqwest = { version = "0.12", default-features = false, features = ["blocking", 
 tracing-subscriber = { workspace = true }
 
 [features]
-cuda = ["kiln-model/cuda", "kiln-flce-kernel/cuda", "kiln-opd-loss-kernel/cuda", "kiln-kt-bridge/cuda"]
+cuda = ["kiln-model/cuda", "kiln-flce-kernel/cuda", "kiln-rmsnorm-kernel/cuda", "kiln-opd-loss-kernel/cuda", "kiln-kt-bridge/cuda"]
 # ROCm backend (R.4) — mirrors `cuda`.
-rocm = ["kiln-model/rocm", "kiln-flce-kernel/rocm", "kiln-opd-loss-kernel/rocm", "kiln-kt-bridge/rocm"]
+rocm = ["kiln-model/rocm", "kiln-flce-kernel/rocm", "kiln-rmsnorm-kernel/rocm", "kiln-opd-loss-kernel/rocm", "kiln-kt-bridge/rocm"]
 metal = ["kiln-model/metal", "kiln-kt-bridge/metal", "kiln-opd-loss-kernel/metal"]
 vulkan = ["kiln-model/vulkan", "dep:kiln-vulkan-kernel", "kiln-opd-loss-kernel/vulkan", "kiln-kt-bridge/vulkan"]
 

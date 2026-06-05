@@ -398,6 +398,16 @@ fn is_cuda_device(device: &Device) -> bool {
 fn is_vulkan_device(device: &Device) -> bool {
     matches!(device, Device::Vulkan(_))
 }
+
+#[cfg(any(feature = "cuda", feature = "rocm"))]
+#[inline]
+fn fused_rms_norm_tail_backend_enabled(device: &Device) -> bool {
+    match device {
+        Device::Cuda(_) => cfg!(feature = "cuda"),
+        Device::Rocm(_) => cfg!(feature = "rocm"),
+        _ => false,
+    }
+}
 // ---------------------------------------------------------------------------
 // (#1082) The candle facade — type aliases, generic constructor helpers,
 // safetensors I/O shims, and the `cd_bail!` macro — has been extracted to
@@ -6245,6 +6255,33 @@ pub(crate) fn rms_norm_backward_pre_final_norm(
         final_norm_weight.dims()
     );
 
+    #[cfg(any(feature = "cuda", feature = "rocm"))]
+    {
+        let device = hidden.device();
+        let fused_backend = fused_rms_norm_tail_backend_enabled(&device);
+        let same_device =
+            final_norm_weight.device() == device && grad_normed.device() == device;
+        let non_empty_rows = dims[0] > 0 && dims[1] > 0;
+        let fused_envelope = fused_backend
+            && same_device
+            && non_empty_rows
+            && kiln_rmsnorm_kernel::supports_rmsnorm_kt(hidden, final_norm_weight)
+            && grad_normed.dtype() == KtDType::BF16
+            && grad_normed.is_contiguous();
+
+        if fused_envelope {
+            let (grad_hidden, _grad_weight_partial) =
+                kiln_rmsnorm_kernel::fused_rmsnorm_backward_kt(
+                    hidden,
+                    final_norm_weight,
+                    grad_normed,
+                    rms_norm_eps as f32,
+                )
+                .map_err(|e| anyhow::anyhow!("fused final RMSNorm backward: {e}"))?;
+            return Ok(grad_hidden.detach());
+        }
+    }
+
     let hidden_f32 = hidden.to_f32_dtype()?;
     let grad_normed_f32 = grad_normed.to_f32_dtype()?;
     let norm_weight = final_norm_weight.to_f32_dtype()?;
@@ -7554,10 +7591,11 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
     // seed. `analytic_sft_tail_grad_pre_final_norm` calls the crate-level FLCE
     // kt backward to get d(loss)/d(final_norm_output), then applies the shared
     // final-RMSNorm backward to return d(loss)/d(pre-final-norm hidden) as kt
-    // F32 [1, T, H] — exactly the upstream grad to seed the LAST segment's
-    // backward (its output IS that hidden). The loss value here is ONLY
-    // consumed as a scalar `loss_val`; the gradient comes entirely from this
-    // tail seed, outside the per-segment tape scopes.
+    // [1, T, H] (BF16 on the fused GPU path, F32 on the composite fallback) —
+    // exactly the upstream grad to seed the LAST segment's backward (its output
+    // IS that hidden). The loss value here is ONLY consumed as a scalar
+    // `loss_val`; the gradient comes entirely from this tail seed, outside the
+    // per-segment tape scopes.
     let loss_val = if use_flce() && is_cuda_device(device) {
         // (#1082 H-FLCE / candle-drop) FLCE loss-VALUE via the kt-native forward
         // `fused_linear_cross_entropy_phase_b_kt` — taking the kt `normed` hidden
@@ -11589,6 +11627,96 @@ pub(crate) mod tests {
             assert!(
                 (got - fd).abs() < 2.5e-2,
                 "tail grad[{idx}] analytic {got:+.6} != finite-diff {fd:+.6}",
+            );
+        }
+
+        Ok(())
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn rms_norm_tail_backward_cuda_fused_matches_composite_reference() -> Result<()> {
+        let _cuda_guard = CUDA_TEST_LOCK.lock().expect("cuda test lock poisoned");
+        if !kiln_tensor::probe::cuda_is_available() {
+            eprintln!(
+                "skip rms_norm_tail_backward_cuda_fused_matches_composite_reference: no CUDA device"
+            );
+            return Ok(());
+        }
+
+        let seq_len = 3;
+        let hidden_size = 8;
+        let eps = 1e-5;
+        let hidden_data: Vec<f32> = (0..seq_len * hidden_size)
+            .map(|i| ((i as f32 + 1.0) * 0.19).sin() * 0.45 + 0.03)
+            .collect();
+        let grad_data: Vec<f32> = (0..seq_len * hidden_size)
+            .map(|i| ((i as f32 + 4.0) * 0.13).cos() * 0.35)
+            .collect();
+        let weight_data: Vec<f32> = (0..hidden_size)
+            .map(|i| ((i as f32 + 2.0) * 0.11).sin() * 0.08)
+            .collect();
+
+        let cpu = cpu_device();
+        let hidden_cpu =
+            Tensor::from_vec_on(cpu, hidden_data.clone(), vec![1, seq_len, hidden_size])?
+                .to_dtype(KtDType::BF16)?;
+        let grad_cpu =
+            Tensor::from_vec_on(cpu, grad_data.clone(), vec![1, seq_len, hidden_size])?
+                .to_dtype(KtDType::BF16)?;
+        let weight_cpu = Tensor::from_vec_on(cpu, weight_data.clone(), vec![hidden_size])?
+            .to_dtype(KtDType::BF16)?;
+        let expected = rms_norm_backward_pre_final_norm(
+            &hidden_cpu,
+            &weight_cpu,
+            &grad_cpu,
+            eps,
+        )?
+        .to_vec::<f32>()?;
+
+        let cuda = Device::Cuda(0);
+        let hidden_cuda = Tensor::from_vec_on(
+            cuda,
+            hidden_data,
+            vec![1, seq_len, hidden_size],
+        )?
+        .to_dtype(KtDType::BF16)?
+        .contiguous()?;
+        let grad_cuda = Tensor::from_vec_on(
+            cuda,
+            grad_data,
+            vec![1, seq_len, hidden_size],
+        )?
+        .to_dtype(KtDType::BF16)?
+        .contiguous()?;
+        let weight_cuda = Tensor::from_vec_on(cuda, weight_data, vec![hidden_size])?
+            .to_dtype(KtDType::BF16)?
+            .contiguous()?;
+        assert!(kiln_rmsnorm_kernel::supports_rmsnorm_kt(
+            &hidden_cuda,
+            &weight_cuda
+        ));
+
+        let got = rms_norm_backward_pre_final_norm(
+            &hidden_cuda,
+            &weight_cuda,
+            &grad_cuda,
+            eps,
+        )?;
+        assert_eq!(
+            got.dtype(),
+            KtDType::BF16,
+            "CUDA BF16 envelope should use fused RMSNorm backward, not F32 composite fallback"
+        );
+        let got_host = got
+            .to_device(Device::Cpu)?
+            .to_dtype(KtDType::F32)?
+            .to_vec::<f32>()?;
+
+        for (idx, (got, expected)) in got_host.iter().zip(expected.iter()).enumerate() {
+            assert!(
+                (*got - *expected).abs() < 7.5e-2,
+                "tail grad[{idx}] fused {got:+.6} != composite {expected:+.6}",
             );
         }
 
