@@ -5980,6 +5980,8 @@ pub const STREAMING_PREFILL_DEFAULT_TILE: usize = 8192;
 pub const STREAMING_PREFILL_CUDA_DEFAULT_TILE: usize = 1024;
 pub const STREAMING_PREFILL_CUDA_DEFAULT_THRESHOLD: usize = 2048;
 pub const STREAMING_PREFILL_ROCM_DEFAULT_TILE: usize = STREAMING_PREFILL_CUDA_DEFAULT_TILE;
+pub const STREAMING_PREFILL_ROCM_MEDIUM_TILE: usize = 512;
+pub const STREAMING_PREFILL_ROCM_MEDIUM_TILE_MAX_TOKENS: usize = 20_000;
 pub const STREAMING_PREFILL_ROCM_DEFAULT_THRESHOLD: usize =
     STREAMING_PREFILL_CUDA_DEFAULT_THRESHOLD;
 pub const STREAMING_PREFILL_METAL_DEFAULT_TILE: usize = 2048;
@@ -6124,6 +6126,19 @@ pub fn tape_streaming_tile_tokens_for(device: &Device) -> usize {
             StreamingPrefillDeviceKind::Metal => STREAMING_PREFILL_METAL_TAPE_DEFAULT_TILE,
             StreamingPrefillDeviceKind::Vulkan => STREAMING_PREFILL_VULKAN_TAPE_DEFAULT_TILE,
             StreamingPrefillDeviceKind::Cpu => STREAMING_PREFILL_DEFAULT_TILE,
+        }
+    })
+}
+
+fn streaming_tile_tokens_for_paged_prefill(device: &Device, seq_len: usize) -> usize {
+    streaming_tile_tokens_env_override().unwrap_or_else(|| {
+        match streaming_prefill_device_kind(device) {
+            StreamingPrefillDeviceKind::Rocm
+                if seq_len <= STREAMING_PREFILL_ROCM_MEDIUM_TILE_MAX_TOKENS =>
+            {
+                STREAMING_PREFILL_ROCM_MEDIUM_TILE
+            }
+            _ => streaming_tile_tokens_for(device),
         }
     })
 }
@@ -24943,6 +24958,22 @@ pub fn model_forward_head_backend_decode_if(
 ) -> Result<Tensor> {
     kiln_nvtx::range!(c"kiln/lm_head");
     let normed = rms_norm(hidden, &weights.final_norm, config.rms_norm_eps)?;
+    #[cfg(feature = "rocm")]
+    if let Some(lm_head_w8) = weights.lm_head_w8.as_ref() {
+        let dims = normed.dims();
+        let lead: usize = dims[..dims.len().saturating_sub(1)].iter().product();
+        if lead == 1
+            && normed.dtype() == DType::BF16
+            && !normed.track_op()
+            && matches!(normed.device(), Device::Rocm(_))
+        {
+            let normed = normed
+                .contiguous()
+                .context("rocm w8 sampled lm_head normed contiguous")?;
+            return crate::rocm_w8_proj::matmul_bf16(&normed, lm_head_w8)
+                .context("rocm w8 sampled lm_head");
+        }
+    }
     let logits = lm_head_forward_backend_decode_if(backend, &normed, &weights.embed_tokens_t)?;
     Ok(logits)
 }
@@ -27861,7 +27892,7 @@ pub fn model_forward_paged_streaming_with_progress(
         start_pos,
         linear_state,
         lora,
-        streaming_tile_tokens_for(&weights.embed_tokens.device()),
+        streaming_tile_tokens_for_paged_prefill(&weights.embed_tokens.device(), token_ids.len()),
         streaming_last_token_lm_head(),
         progress,
     )
@@ -27893,7 +27924,7 @@ pub fn model_forward_paged_streaming_last_token_with_last_hidden(
         start_pos,
         linear_state,
         lora,
-        streaming_tile_tokens_for(&weights.embed_tokens.device()),
+        streaming_tile_tokens_for_paged_prefill(&weights.embed_tokens.device(), token_ids.len()),
     )
 }
 

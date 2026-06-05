@@ -420,7 +420,7 @@ impl BackendRuntime for RocmBackend {
     }
 
     fn supports_flash_attn_prefill_head_major(&self) -> bool {
-        kiln_core::env_flag::env_flag("KILN_ROCM_HEAD_MAJOR_PREFILL", false)
+        kiln_core::env_flag::env_flag("KILN_ROCM_HEAD_MAJOR_PREFILL", true)
     }
 
     fn supports_flash_attn_paged_decode(&self) -> bool {
