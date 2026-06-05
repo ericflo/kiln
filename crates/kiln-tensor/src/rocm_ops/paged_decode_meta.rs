@@ -169,12 +169,16 @@ fn paged_attn_split_count(max_seqlen_k: usize) -> usize {
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|&v| v > 0)
-        .unwrap_or(512);
+        .unwrap_or(256);
     let max_splits = std::env::var("KILN_ROCM_PAGED_ATTN_MAX_SPLITS")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .filter(|&v| v > 0)
-        .unwrap_or(64);
+        // Long-context decode on ROCm benefits from more split parallelism:
+        // the default 64 cap leaves 36k-65k contexts with 576-1024 tokens per
+        // split on Qwen3.5-4B. 256 keeps the per-split chunk near the 256-token
+        // target while preserving the env override for smaller/older GPUs.
+        .unwrap_or(256);
     max_seqlen_k
         .div_ceil(target_tokens_per_split)
         .clamp(2, max_splits)
