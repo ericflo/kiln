@@ -1792,7 +1792,19 @@ impl AppState {
             // since `free` is the all-process driver figure).
             if governor_backend != kiln_tensor::Backend::Cpu && bytes_per_block > 0 {
                 let avail = kiln_memory::MemoryGovernor::global().available_bytes();
-                let max_blocks = (avail / bytes_per_block) as usize;
+                let mut max_blocks = (avail / bytes_per_block) as usize;
+                // #34 (never-OOM / dynamic reallocation): the HIP VRAM allocator
+                // can't use GTT, so the governor's vram+gtt budget over-states what
+                // a KV allocation can actually take. Clamp to FREE VRAM (92% margin)
+                // so a coexisting GPU job that fills VRAM DEGRADES the KV pool to
+                // what fits and still serves, instead of either over-committing into
+                // an unrecoverable rocclr `vmheap` abort or panicking the auto-sizer.
+                // No-op off AMD/Linux-DRM (returns None).
+                if let Some(free_vram) = kiln_memory::vram::current_free_vram_bytes() {
+                    let vram_blocks =
+                        ((free_vram / 100).saturating_mul(92) / bytes_per_block) as usize;
+                    max_blocks = max_blocks.min(vram_blocks);
+                }
                 n.min(max_blocks)
             } else {
                 n
