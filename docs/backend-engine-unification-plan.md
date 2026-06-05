@@ -113,9 +113,12 @@ The backend storage implementations are:
 - CUDA: `cuda_storage.rs`, `cuda_allocator.rs`, `active_stream.rs`,
   `capture_alloc.rs`, `cuda_matmul.rs`, and `fp8.rs`.
 - ROCm: `rocm_storage.rs`, `rocm_allocator.rs`, `active_rocm_stream.rs`,
-  `rocm_capture_alloc.rs`, `rocm_matmul.rs`, and `rocm_ops.rs`.
-- Metal: `metal_storage.rs`, `metal_allocator.rs`, `metal_rt.rs`,
-  `metal_kernels.rs`, `metal_matmul.rs`, and `metal_types.rs`.
+  `rocm_capture_alloc.rs`, `rocm_matmul.rs`, and the `rocm_ops/` module
+  directory (`mod.rs` plus per-op submodules).
+- Metal: `metal_storage.rs`, `metal_allocator.rs`, the `metal_rt/` module
+  directory (`mod.rs` plus submodules such as `device.rs`, `buffer.rs`,
+  `command_buffer.rs`, `encoder.rs`), `metal_kernels.rs`, `metal_matmul.rs`,
+  and `metal_types.rs`.
 - Vulkan: `vulkan_storage.rs`, `vulkan_allocator.rs`, and `vk_shaders.rs`.
 
 `crates/kiln-tensor/src/device_op.rs` is the key correctness layer. Each
@@ -140,22 +143,29 @@ very broad. It currently mixes:
 - Resident decode pool support.
 - Resident activation registration, update, resolve, readback, and eviction.
 - FlashAttention prefill and paged decode.
-- Paged KV head-major read/write/append.
+- Paged KV head-major read, and head-major read with a token-major tail
+  appended (read and read-append; there is no standalone write method).
 - GDN forward substitution, recurrent state, chunk prep/scan/full-forward, decode
   fusions, gates, and gated RMSNorm.
 - Conv1d prefill/update.
 - Optimizer dispatch for SGD and AdamW.
 - Linear prefill/decode/lm-head/sample paths.
 - LoRA delta and LoRA decode add paths.
-- Graph-output variants for decode replay.
+- A graph-output variant of paged decode
+  (`flash_attn_paged_decode_contiguous_batch_dyn_seqlen_with_graph_outputs`)
+  that threads caller-owned out/softmax_lse buffers for CUDA-graph decode
+  replay.
 
 That breadth is the reason unification feels harder than it should. It is also
 why backend differences are hard to audit: a backend can claim support through a
 `supports_*` method, shape-gate inside the implementation, decline with
 `Ok(None)`, or be disabled by environment variables.
 
-`for_device_kt` chooses the concrete runtime from `kiln_tensor::Device`. The
-current concrete backends are:
+`for_device_kt` chooses the concrete runtime by matching `kiln_tensor::Device`
+(Cuda/Rocm/Metal arms). Vulkan is not keyed off the enum variant: the `_`
+fallthrough probes `vulkan_is_available()` at runtime and, if so, builds
+`VulkanBackend` with a Cpu sentinel device; otherwise it builds `CpuBackend`.
+The current concrete backends are:
 
 - `CpuBackend`: identity only, declines everything else.
 - `CudaBackend`: broad fused model and training path.
@@ -213,13 +223,18 @@ backend-gated fast paths for fused loss roots and optimizer dispatch.
 
 The relevant shims are:
 
-- `sft_tape_shim.rs`: FLCE and SFT loss/tail behavior, with CUDA/ROCm kt paths
-  and Vulkan-specific bridges where needed.
+- `sft_tape_shim.rs`: Vulkan-specific SFT FLCE bridges (kt tensor <->
+  `VkTensor`, fused active-row FLCE loss/backward). The CUDA/ROCm kt FLCE
+  paths are not in this shim; they live in `trainer.rs` (gated on
+  `is_cuda_device`) via `kiln-flce-kernel`'s kt FLCE API.
 - `grpo_tape_shim.rs`: GRPO scalar loss roots and analytic kt backward, with
   CUDA/ROCm fused fast paths and Vulkan-specific loss/grad paths.
-- `opd_tape_shim.rs`: OPD top-K/reverse-KL scalar loss, with CUDA/ROCm fused
-  kernel paths, Metal/CPU analytic kt paths, and Vulkan-specific active-hidden
-  device paths.
+- `opd_tape_shim.rs`: records the OPD top-K/reverse-KL scalar-mean loss root and
+  owns the Vulkan-specific active-hidden fused-shader loss/grad paths. The
+  CUDA/ROCm fused-FFI kernel dispatch and the Metal/CPU/Vulkan device-agnostic
+  analytic kt-composite backward live in the `kiln-opd-loss-kernel` crate (the
+  `kt_tape.rs` `BackwardOp::apply` dispatcher over `kt_api.rs`), which this shim
+  calls.
 
 Vulkan still has a stronger separate low-level identity than CUDA/ROCm/Metal
 because the SPIR-V leaf layer exposes `VkTensor`, explicit buffer operations,
@@ -429,7 +444,11 @@ expected to run native for a specific backend, shape, dtype, and mode.
 ### Graph Layer Split
 
 The `kiln-graph-*` crates are architecturally correct but not authoritative.
-Real CUDA/HIP/Metal replay behavior lives in `kiln-model/src/*graph.rs`.
+Real CUDA/HIP replay behavior lives in `kiln-model/src/cuda_graph.rs` and
+`kiln-model/src/rocm_graph.rs`. Metal replay is split: `metal_graph.rs`
+(`MetalGraphRunner`) orchestrates capture/replay, but the replayable object
+itself is `kiln_graph_metal::MetalCapturedGraph` in the `kiln-graph-metal`
+crate.
 Vulkan replay behavior lives in `kiln-vulkan-kernel::CommandBatch` and
 `vk_decode_resident.rs`.
 
@@ -598,8 +617,13 @@ backend-specific.
 
 ### 4. Common Matmul And Linear Request Surface
 
-The BLAS crates already point in the right direction. The next step is a single
-request/capability layer used by all four backends:
+The BLAS crates already point in the right direction. `kiln-blas` and
+`kiln-rocblas` already define a narrower `MatmulRequest` (an
+`m`/`n`/`k`/dtype/layout/epilogue autotune cache key). The next step is a single
+request/capability layer used by all four backends. Note that the unified
+`MatmulRequest` below reuses that exact name with a different field set, so it
+must reconcile field sets or take a distinct name to avoid colliding with those
+structs:
 
 ```rust
 pub struct MatmulRequest {
@@ -867,8 +891,11 @@ This is what keeps unification from becoming a regression factory.
    Either move real runners into `kiln-graph-*` or document the generic crates
    as scaffolding and create a new production replay layer.
 
-5. Add fallback counters to Metal and Vulkan matching ROCm's profiling spirit.
-   Host fallback should be measurable across all non-CUDA bring-up paths.
+5. Add host-fallback counters to Metal and Vulkan matching ROCm's profiling
+   spirit. ROCm today carries dispatch-success/decline counters (CUDA-named
+   statics in `backend/rocm.rs`), not dedicated host-fallback counters; mirror
+   that profiling approach but count actual host fallbacks, so host fallback is
+   measurable across all non-CUDA bring-up paths.
 
 6. Split `BackendRuntime` without changing behavior.
    The first PR can add focused traits and implement them by forwarding to the
