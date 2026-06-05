@@ -12,8 +12,12 @@
 // `cudaStream_t` hipify cleanly. The same compiled object services both
 // backends, matching the rest of csrc/.
 
+#include <cuda_bf16.h>
 #include <cuda_runtime.h>
 #include <cstdint>
+#include <cmath>
+
+#include "kt_gpu_compat.cuh"
 
 #define BLOCK_SIZE 256
 
@@ -150,6 +154,106 @@ __global__ void kiln_gqa_repeat_heads_kernel(const uint8_t* __restrict__ src,
     }
 }
 
+// Direct BF16 paged decode attention for sq=1:
+//   q[b, 1, h, d], k/v pool[pool_rows, hk, d] -> out[b, 1, h, d].
+//
+// One block owns one (batch, query-head) row. It streams the block-table-backed
+// KV pool directly and uses an online softmax accumulator:
+//   new_m = max(m, score)
+//   acc = acc * exp(m - new_m) + exp(score - new_m) * v
+//   l = l * exp(m - new_m) + exp(score - new_m)
+//
+// This avoids materializing gathered K/V, repeated GQA heads, scores, softmax,
+// and PV intermediates for long-context decode.
+__global__ void kiln_paged_attn_decode_bf16_kernel(
+    const __nv_bfloat16* __restrict__ q,
+    const __nv_bfloat16* __restrict__ k_pool,
+    const __nv_bfloat16* __restrict__ v_pool,
+    const uint32_t* __restrict__ block_table,
+    const uint32_t* __restrict__ seqused_k,
+    __nv_bfloat16* __restrict__ out,
+    int64_t b,
+    int64_t h,
+    int64_t hk,
+    int64_t d,
+    int64_t max_seqlen_k,
+    int64_t max_blocks_per_seq,
+    int64_t page_block_size,
+    int64_t pool_rows,
+    float scale) {
+    const int row = blockIdx.x;
+    const int tid = threadIdx.x;
+    const int bi = row / static_cast<int>(h);
+    const int qh = row - bi * static_cast<int>(h);
+    const int group = static_cast<int>(h / hk);
+    const int kvh = qh / group;
+
+    int64_t used = max_seqlen_k;
+    if (seqused_k != nullptr) {
+        used = static_cast<int64_t>(seqused_k[bi]);
+        if (used > max_seqlen_k) used = max_seqlen_k;
+    }
+    if (used < 0) used = 0;
+
+    const __nv_bfloat16* q_row =
+        q + ((static_cast<int64_t>(bi) * h + qh) * d);
+    __nv_bfloat16* out_row =
+        out + ((static_cast<int64_t>(bi) * h + qh) * d);
+
+    __shared__ float smem[BLOCK_SIZE];
+
+    if (used == 0) {
+        for (int64_t di = tid; di < d; di += blockDim.x) {
+            out_row[di] = __float2bfloat16(0.0f);
+        }
+        return;
+    }
+
+    float m = -3.4028234663852886e38f;
+    float l = 0.0f;
+    float accum = 0.0f;
+    const bool owns_dim = static_cast<int64_t>(tid) < d;
+
+    for (int64_t t = 0; t < used; ++t) {
+        const int64_t blk = t / page_block_size;
+        const int64_t within = t - blk * page_block_size;
+        float local_dot = 0.0f;
+        bool valid = blk < max_blocks_per_seq;
+        int64_t phys_row = 0;
+        if (valid) {
+            const uint32_t phys_block =
+                block_table[static_cast<int64_t>(bi) * max_blocks_per_seq + blk];
+            phys_row = static_cast<int64_t>(phys_block) * page_block_size + within;
+            valid = phys_row >= 0 && phys_row < pool_rows;
+        }
+        if (valid) {
+            const __nv_bfloat16* k_row =
+                k_pool + (phys_row * hk + kvh) * d;
+            for (int64_t di = tid; di < d; di += blockDim.x) {
+                local_dot += __bfloat162float(q_row[di]) * __bfloat162float(k_row[di]);
+            }
+        }
+        const float dot = kiln_block_reduce_sum(local_dot, smem);
+        if (valid) {
+            const __nv_bfloat16* v_row =
+                v_pool + (phys_row * hk + kvh) * d;
+            const float score = dot * scale;
+            const float new_m = score > m ? score : m;
+            const float alpha = expf(m - new_m);
+            const float beta = expf(score - new_m);
+            if (owns_dim) {
+                accum = accum * alpha + beta * __bfloat162float(v_row[tid]);
+            }
+            l = l * alpha + beta;
+            m = new_m;
+        }
+    }
+
+    if (owns_dim) {
+        out_row[tid] = __float2bfloat16(l > 0.0f ? accum / l : 0.0f);
+    }
+}
+
 } // namespace
 
 extern "C" int kiln_paged_gather_index_async(const void* block_table_u32,
@@ -255,6 +359,47 @@ extern "C" int kiln_paged_tail_mask_async(const void* seqused_k_u32,
         static_cast<const uint32_t*>(seqused_k_u32),
         static_cast<uint8_t*>(out_mask_u8),
         b, h, sk);
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) return 100 + static_cast<int>(err);
+    return 0;
+}
+
+extern "C" int kiln_paged_attn_decode_bf16_async(const void* q_bf16,
+                                                 const void* k_pool_bf16,
+                                                 const void* v_pool_bf16,
+                                                 const void* block_table_u32,
+                                                 const void* seqused_k_u32,
+                                                 void* out_bf16,
+                                                 int64_t b,
+                                                 int64_t h,
+                                                 int64_t hk,
+                                                 int64_t d,
+                                                 int64_t max_seqlen_k,
+                                                 int64_t max_blocks_per_seq,
+                                                 int64_t page_block_size,
+                                                 int64_t pool_rows,
+                                                 float scale,
+                                                 cudaStream_t stream) {
+    if (b < 0 || h <= 0 || hk <= 0 || d <= 0 || max_seqlen_k < 0
+        || max_blocks_per_seq < 0 || page_block_size <= 0 || pool_rows < 0) {
+        return 1;
+    }
+    if (h % hk != 0) return 2;
+    if (d > BLOCK_SIZE) return 3;
+    if (max_seqlen_k > max_blocks_per_seq * page_block_size) return 4;
+    int64_t total_rows = b * h;
+    if (total_rows == 0) return 0;
+    if (total_rows > (int64_t)2147483647) return 5;
+
+    kiln_paged_attn_decode_bf16_kernel<<<static_cast<int>(total_rows), BLOCK_SIZE, 0, stream>>>(
+        static_cast<const __nv_bfloat16*>(q_bf16),
+        static_cast<const __nv_bfloat16*>(k_pool_bf16),
+        static_cast<const __nv_bfloat16*>(v_pool_bf16),
+        static_cast<const uint32_t*>(block_table_u32),
+        static_cast<const uint32_t*>(seqused_k_u32),
+        static_cast<__nv_bfloat16*>(out_bf16),
+        b, h, hk, d, max_seqlen_k, max_blocks_per_seq, page_block_size, pool_rows, scale);
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) return 100 + static_cast<int>(err);

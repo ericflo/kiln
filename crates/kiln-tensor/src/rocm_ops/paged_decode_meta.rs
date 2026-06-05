@@ -56,6 +56,25 @@ unsafe extern "C" {
         elem_bytes: i64,
         stream: *mut core::ffi::c_void,
     ) -> i32;
+
+    fn kiln_paged_attn_decode_bf16_async(
+        q_bf16: *const core::ffi::c_void,
+        k_pool_bf16: *const core::ffi::c_void,
+        v_pool_bf16: *const core::ffi::c_void,
+        block_table_u32: *const core::ffi::c_void,
+        seqused_k_u32: *const core::ffi::c_void,
+        out_bf16: *mut core::ffi::c_void,
+        b: i64,
+        h: i64,
+        hk: i64,
+        d: i64,
+        max_seqlen_k: i64,
+        max_blocks_per_seq: i64,
+        page_block_size: i64,
+        pool_rows: i64,
+        scale: f32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
 }
 
 fn rocm_storage<'a>(t: &'a Tensor, who: &str) -> Result<&'a RocmStorage> {
@@ -357,6 +376,213 @@ pub fn rocm_gqa_repeat_heads(src: &Tensor, h: usize) -> Result<Tensor> {
         TensorId::next(),
     )
     .map_err(|e| Error::Msg(format!("rocm_gqa_repeat_heads: wrap: {e}")))
+}
+
+/// Direct BF16 paged decode attention for single-token decode.
+///
+/// `q` is `[b, 1, h, d]`, K/V pools are `[pool_rows, hk, d]`, and
+/// `block_table` is U32 `[b, max_blocks_per_seq]`. When `seqused_k` is present,
+/// it must be U32 `[b]` and bounds each row's usable keys. The output is
+/// `[b, 1, h, d]` BF16.
+pub fn rocm_paged_attn_decode_bf16(
+    q: &Tensor,
+    k_pool: &Tensor,
+    v_pool: &Tensor,
+    block_table: &Tensor,
+    seqused_k: Option<&Tensor>,
+    max_seqlen_k: usize,
+    page_block_size: usize,
+    scale: f32,
+) -> Result<Tensor> {
+    if q.dtype() != DType::BF16 || k_pool.dtype() != DType::BF16 || v_pool.dtype() != DType::BF16 {
+        return Err(Error::Msg(format!(
+            "rocm_paged_attn_decode_bf16: q/k/v must be BF16, got {:?}/{:?}/{:?}",
+            q.dtype(),
+            k_pool.dtype(),
+            v_pool.dtype()
+        )));
+    }
+    if block_table.dtype() != DType::U32 {
+        return Err(Error::Msg(format!(
+            "rocm_paged_attn_decode_bf16: block_table must be U32, got {}",
+            block_table.dtype()
+        )));
+    }
+    if let Some(seqused) = seqused_k {
+        if seqused.dtype() != DType::U32 {
+            return Err(Error::Msg(format!(
+                "rocm_paged_attn_decode_bf16: seqused_k must be U32, got {}",
+                seqused.dtype()
+            )));
+        }
+    }
+    if q.device() != k_pool.device()
+        || q.device() != v_pool.device()
+        || q.device() != block_table.device()
+        || seqused_k.is_some_and(|s| s.device() != q.device())
+    {
+        return Err(Error::Msg(
+            "rocm_paged_attn_decode_bf16: all tensors must be on the same ROCm device".to_string(),
+        ));
+    }
+    if page_block_size == 0 {
+        return Err(Error::Msg(
+            "rocm_paged_attn_decode_bf16: page_block_size must be > 0".to_string(),
+        ));
+    }
+
+    let q_c = if q.is_contiguous() {
+        q.clone()
+    } else {
+        q.contiguous()?
+    };
+    let k_c = if k_pool.is_contiguous() {
+        k_pool.clone()
+    } else {
+        k_pool.contiguous()?
+    };
+    let v_c = if v_pool.is_contiguous() {
+        v_pool.clone()
+    } else {
+        v_pool.contiguous()?
+    };
+    let bt = if block_table.is_contiguous() {
+        block_table.clone()
+    } else {
+        block_table.contiguous()?
+    };
+    let seqused_c = match seqused_k {
+        Some(s) if s.is_contiguous() => Some(s.clone()),
+        Some(s) => Some(s.contiguous()?),
+        None => None,
+    };
+
+    let q_shape = q_c.shape();
+    if q_shape.len() != 4 || q_shape[1] != 1 {
+        return Err(Error::Msg(format!(
+            "rocm_paged_attn_decode_bf16: q must have shape [b, 1, h, d], got {q_shape:?}"
+        )));
+    }
+    let k_shape = k_c.shape();
+    let v_shape = v_c.shape();
+    if k_shape.len() != 3 || v_shape.len() != 3 || k_shape != v_shape {
+        return Err(Error::Msg(format!(
+            "rocm_paged_attn_decode_bf16: k/v pools must share shape [pool_rows, hk, d], got {k_shape:?}/{v_shape:?}"
+        )));
+    }
+    let bt_shape = bt.shape();
+    if bt_shape.len() != 2 {
+        return Err(Error::Msg(format!(
+            "rocm_paged_attn_decode_bf16: block_table must have shape [b, max_blocks], got {bt_shape:?}"
+        )));
+    }
+
+    let (b, h, d) = (q_shape[0], q_shape[2], q_shape[3]);
+    let (pool_rows, hk, kd) = (k_shape[0], k_shape[1], k_shape[2]);
+    if kd != d {
+        return Err(Error::Msg(format!(
+            "rocm_paged_attn_decode_bf16: q head_dim {d} != pool head_dim {kd}"
+        )));
+    }
+    if hk == 0 || h == 0 || h % hk != 0 {
+        return Err(Error::Msg(format!(
+            "rocm_paged_attn_decode_bf16: h={h} must be a non-zero multiple of hk={hk}"
+        )));
+    }
+    if b > bt_shape[0] {
+        return Err(Error::Msg(format!(
+            "rocm_paged_attn_decode_bf16: requested b={b} exceeds block_table shape {bt_shape:?}"
+        )));
+    }
+    let max_blocks_per_seq = bt_shape[1];
+    if max_seqlen_k > max_blocks_per_seq.saturating_mul(page_block_size) {
+        return Err(Error::Msg(format!(
+            "rocm_paged_attn_decode_bf16: max_seqlen_k={max_seqlen_k} exceeds max_blocks*page={}",
+            max_blocks_per_seq.saturating_mul(page_block_size)
+        )));
+    }
+    if let Some(s) = seqused_c.as_ref() {
+        let s_shape = s.shape();
+        if s_shape.len() != 1 || s_shape[0] < b {
+            return Err(Error::Msg(format!(
+                "rocm_paged_attn_decode_bf16: seqused_k must have shape [>=b], got {s_shape:?}"
+            )));
+        }
+    }
+
+    let q_storage = rocm_storage(&q_c, "rocm_paged_attn_decode_bf16")?;
+    let k_storage = rocm_storage(&k_c, "rocm_paged_attn_decode_bf16")?;
+    let v_storage = rocm_storage(&v_c, "rocm_paged_attn_decode_bf16")?;
+    let bt_storage = rocm_storage(&bt, "rocm_paged_attn_decode_bf16")?;
+    let seqused_storage = match seqused_c.as_ref() {
+        Some(s) => Some(rocm_storage(s, "rocm_paged_attn_decode_bf16")?),
+        None => None,
+    };
+    let ctx = q_storage.context();
+    let device_index = match q_c.device() {
+        Device::Rocm(i) => i,
+        _ => {
+            return Err(Error::Msg(
+                "rocm_paged_attn_decode_bf16: tensors must be on a ROCm device".to_string(),
+            ));
+        }
+    };
+
+    let n_out = b * h * d;
+    let out_storage = RocmStorage::alloc_uninit_ctx(&ctx, device_index, DType::BF16, n_out)?;
+
+    let elem_bytes = DType::BF16.size_in_bytes();
+    let (q_base, _) = q_storage.device_ptr_raw();
+    let (k_base, _) = k_storage.device_ptr_raw();
+    let (v_base, _) = v_storage.device_ptr_raw();
+    let (bt_base, _) = bt_storage.device_ptr_raw();
+    let (out_base, _) = out_storage.device_ptr_raw();
+    let q_off = (q_c.layout().start_offset() * elem_bytes) as u64;
+    let k_off = (k_c.layout().start_offset() * elem_bytes) as u64;
+    let v_off = (v_c.layout().start_offset() * elem_bytes) as u64;
+    let bt_off = (bt.layout().start_offset() * DType::U32.size_in_bytes()) as u64;
+    let seqused_ptr = if let Some(s) = seqused_c.as_ref() {
+        let storage = seqused_storage.as_ref().expect("seqused storage");
+        let (base, _) = storage.device_ptr_raw();
+        (base + (s.layout().start_offset() * DType::U32.size_in_bytes()) as u64)
+            as *const core::ffi::c_void
+    } else {
+        core::ptr::null()
+    };
+
+    let status = unsafe {
+        kiln_paged_attn_decode_bf16_async(
+            (q_base + q_off) as *const core::ffi::c_void,
+            (k_base + k_off) as *const core::ffi::c_void,
+            (v_base + v_off) as *const core::ffi::c_void,
+            (bt_base + bt_off) as *const core::ffi::c_void,
+            seqused_ptr,
+            out_base as *mut core::ffi::c_void,
+            b as i64,
+            h as i64,
+            hk as i64,
+            d as i64,
+            max_seqlen_k as i64,
+            max_blocks_per_seq as i64,
+            page_block_size as i64,
+            pool_rows as i64,
+            scale,
+            q_storage.rocm_stream_raw(),
+        )
+    };
+    if status != 0 {
+        return Err(Error::Msg(format!(
+            "rocm_paged_attn_decode_bf16: FFI returned status {status}"
+        )));
+    }
+
+    let storage_arc: crate::Storage = Arc::new(out_storage);
+    Tensor::from_parts(
+        storage_arc,
+        Layout::contiguous(vec![b, 1, h, d]),
+        TensorId::next(),
+    )
+    .map_err(|e| Error::Msg(format!("rocm_paged_attn_decode_bf16: wrap: {e}")))
 }
 
 /// Build the per-batch tail mask `[b*h, 1, sk]` (U8: `1` => masked) on-device

@@ -76,13 +76,24 @@ pub struct MetalPagedDecodeIcbLayer<'a> {
 // a no-op (verified by the optimizer in release). This keeps the call sites
 // below free of `#[cfg(feature = "nvtx")]` noise.
 
-#[cfg(feature = "cuda")]
+#[cfg(any(feature = "cuda", feature = "rocm"))]
+fn cuda_or_rocm_device(device: Device) -> bool {
+    match device {
+        #[cfg(feature = "cuda")]
+        Device::Cuda(_) => true,
+        #[cfg(feature = "rocm")]
+        Device::Rocm(_) => true,
+        _ => false,
+    }
+}
+
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 fn try_borrow_kt_cuda(t: &Tensor) -> Option<kiln_tensor::Tensor> {
     // #1082 forward-flip: `t` is already a kt tensor (the forward compute
     // path is kt-native). The historical candle→kt borrow is a no-op now,
-    // so just clone the handle after re-checking the same CUDA+contiguous
+    // so just clone the handle after re-checking the same GPU+contiguous
     // gate the bridge borrow used to enforce.
-    if matches!(t.device(), Device::Cuda(_)) && t.is_contiguous() {
+    if cuda_or_rocm_device(t.device()) && t.is_contiguous() {
         Some(t.clone())
     } else {
         None
@@ -231,7 +242,7 @@ fn cuda_fused_attn_decode_qkv_prep_disabled() -> bool {
     *DISABLED.get_or_init(|| std::env::var("KILN_DISABLE_CUDA_ATTN_DECODE_QKV_PREP").is_ok())
 }
 
-#[cfg(feature = "cuda")]
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 fn cuda_fused_mlp_silu_mul_disabled() -> bool {
     static DISABLED: OnceLock<bool> = OnceLock::new();
     *DISABLED.get_or_init(|| std::env::var("KILN_DISABLE_FUSED_CUDA_MLP_SILU_MUL").is_ok())
@@ -240,7 +251,7 @@ fn cuda_fused_mlp_silu_mul_disabled() -> bool {
 /// Kill switch for the CUDA prefill fused `[x] @ [gate||up]` GEMM. Set
 /// `KILN_DISABLE_FUSED_MLP_GATE_UP_PREFILL=1` to fall back to the legacy
 /// two-matmul path (used for A/B parity bench-marking).
-#[cfg(feature = "cuda")]
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 fn cuda_fused_mlp_gate_up_prefill_disabled() -> bool {
     static DISABLED: OnceLock<bool> = OnceLock::new();
     *DISABLED.get_or_init(|| std::env::var("KILN_DISABLE_FUSED_MLP_GATE_UP_PREFILL").is_ok())
@@ -416,7 +427,7 @@ fn cuda_use_kt_api_lm_head() -> bool {
 /// preserved). Escape hatch: `KILN_DISABLE_KT_API_SWIGLU_FFN=1`.
 /// NVTX range `kiln/swiglu_ffn_kt` brackets the migrated region so
 /// nsys traces separate it from the candle baseline.
-#[cfg(feature = "cuda")]
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 fn cuda_use_kt_api_swiglu_ffn() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     let direct =
@@ -2361,6 +2372,9 @@ fn synchronize_for_profile(device: &Device) -> Result<()> {
         #[cfg(feature = "cuda")]
         Device::Cuda(idx) => kiln_tensor::cuda_synchronize_default_stream(*idx)
             .map_err(|e| anyhow::anyhow!("synchronize_for_profile: {e}")),
+        #[cfg(feature = "rocm")]
+        Device::Rocm(idx) => kiln_tensor::rocm_synchronize_default_stream(*idx)
+            .map_err(|e| anyhow::anyhow!("synchronize_for_profile: {e}")),
         // (#1082) Metal: kt-native queue drain. Block until the
         // MetalCompanion's command pool — the queue that actually ran the
         // compute — completes. `wait_until_completed` is the same host-read
@@ -4273,11 +4287,11 @@ impl GpuFfnWeights {
     /// CUDA-only and the weight-side candle→kt boundary, mirroring
     /// [`GpuWeights::embed_tokens_t_kt`]. Returns a typed error on
     /// non-CUDA (the caller falls through to the candle MLP path).
-    #[cfg(feature = "cuda")]
+    #[cfg(any(feature = "cuda", feature = "rocm"))]
     pub fn gate_proj_t_kt(&self) -> Result<KtTensor> {
-        if !matches!(self.gate_proj_t.device(), Device::Cuda(_)) {
+        if !cuda_or_rocm_device(self.gate_proj_t.device()) {
             anyhow::bail!(
-                "gate_proj_t_kt: gate_proj_t must be on CUDA for the kt borrow (got {:?})",
+                "gate_proj_t_kt: gate_proj_t must be on CUDA/ROCm for the kt borrow (got {:?})",
                 self.gate_proj_t.device().location()
             );
         }
@@ -4292,11 +4306,11 @@ impl GpuFfnWeights {
     /// (#1082, MLP/FFN region migration — region 2). Same contiguity /
     /// CUDA-only contract as [`GpuFfnWeights::gate_proj_t_kt`]; used for
     /// the `x @ up_proj_t` matmul in [`kt_swiglu_ffn_native`].
-    #[cfg(feature = "cuda")]
+    #[cfg(any(feature = "cuda", feature = "rocm"))]
     pub fn up_proj_t_kt(&self) -> Result<KtTensor> {
-        if !matches!(self.up_proj_t.device(), Device::Cuda(_)) {
+        if !cuda_or_rocm_device(self.up_proj_t.device()) {
             anyhow::bail!(
-                "up_proj_t_kt: up_proj_t must be on CUDA for the kt borrow (got {:?})",
+                "up_proj_t_kt: up_proj_t must be on CUDA/ROCm for the kt borrow (got {:?})",
                 self.up_proj_t.device().location()
             );
         }
@@ -4312,11 +4326,11 @@ impl GpuFfnWeights {
     /// `[intermediate, hidden]`. Same contiguity / CUDA-only contract as
     /// [`GpuFfnWeights::gate_proj_t_kt`]; used for the final
     /// `hidden @ down_proj_t` matmul in [`kt_swiglu_ffn_native`].
-    #[cfg(feature = "cuda")]
+    #[cfg(any(feature = "cuda", feature = "rocm"))]
     pub fn down_proj_t_kt(&self) -> Result<KtTensor> {
-        if !matches!(self.down_proj_t.device(), Device::Cuda(_)) {
+        if !cuda_or_rocm_device(self.down_proj_t.device()) {
             anyhow::bail!(
-                "down_proj_t_kt: down_proj_t must be on CUDA for the kt borrow (got {:?})",
+                "down_proj_t_kt: down_proj_t must be on CUDA/ROCm for the kt borrow (got {:?})",
                 self.down_proj_t.device().location()
             );
         }
@@ -6465,15 +6479,15 @@ impl GpuWeights {
                     kind: MarlinPackKind::DownProj,
                 });
             }
-            // Cache gate/up concatenated along the output dim for CUDA
-            // prefill: one [B*T, hidden] @ [hidden, 2*intermediate] GEMM
-            // replaces two [B*T, hidden] @ [hidden, intermediate] matmuls.
-            // Skipped when KILN_W4A16 is going to Marlin-pack gate/up (the
-            // packed path needs the separate projections).
+            // Cache gate/up concatenated along the output dim for GPU prefill:
+            // one [B*T, hidden] @ [hidden, 2*intermediate] GEMM replaces two
+            // [B*T, hidden] @ [hidden, intermediate] matmuls. Skipped when
+            // KILN_W4A16 is going to Marlin-pack gate/up (the packed path
+            // needs the separate projections).
             let gate_up_proj_t = {
-                #[cfg(feature = "cuda")]
+                #[cfg(any(feature = "cuda", feature = "rocm"))]
                 {
-                    if !w4a16_enabled && matches!(device, Device::Cuda(_)) {
+                    if !w4a16_enabled && cuda_or_rocm_device(*device) {
                         Some(
                             Tensor::cat(&[&gate_proj_t, &up_proj_t], LAST_DIM)?
                                 .contiguous()
@@ -6483,7 +6497,7 @@ impl GpuWeights {
                         None
                     }
                 }
-                #[cfg(not(feature = "cuda"))]
+                #[cfg(not(any(feature = "cuda", feature = "rocm")))]
                 {
                     None
                 }
@@ -9617,7 +9631,7 @@ pub fn swiglu_ffn_gated_hidden(
                 .context("metal mlp silu*mul kernel failed");
         }
     }
-    #[cfg(feature = "cuda")]
+    #[cfg(any(feature = "cuda", feature = "rocm"))]
     {
         if !cuda_fused_mlp_silu_mul_disabled()
             && !gate.track_op()
@@ -9943,7 +9957,20 @@ fn swiglu_ffn_split_gate_up(
 /// [`try_kt_swiglu_ffn`] wrapper, so this core does not open its own to
 /// avoid a nested duplicate. The inner `kiln/mlp/{gate,up,down}` ranges
 /// are preserved so nsys per-stage attribution is unchanged.
-#[cfg(feature = "cuda")]
+#[cfg(any(feature = "cuda", feature = "rocm"))]
+fn gpu_matmul_for_swiglu(lhs: &KtTensor, rhs: &KtTensor) -> Result<KtTensor> {
+    match lhs.device() {
+        #[cfg(feature = "cuda")]
+        Device::Cuda(_) => kiln_tensor::cuda_matmul(lhs, rhs)
+            .map_err(|e| anyhow::anyhow!("gpu_matmul_for_swiglu: cuda matmul: {e}")),
+        #[cfg(feature = "rocm")]
+        Device::Rocm(_) => kiln_tensor::rocm_matmul(lhs, rhs)
+            .map_err(|e| anyhow::anyhow!("gpu_matmul_for_swiglu: rocm matmul: {e}")),
+        other => anyhow::bail!("gpu_matmul_for_swiglu: unsupported device {other:?}"),
+    }
+}
+
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 fn kt_swiglu_ffn_native(
     x2d: &KtTensor,
     gate_t: &KtTensor,
@@ -9952,12 +9979,12 @@ fn kt_swiglu_ffn_native(
 ) -> Result<KtTensor> {
     let gate = {
         kiln_nvtx::range!(c"kiln/mlp/gate");
-        kiln_tensor::cuda_matmul(x2d, gate_t)
+        gpu_matmul_for_swiglu(x2d, gate_t)
             .map_err(|e| anyhow::anyhow!("kt_swiglu_ffn_native: gate matmul: {e}"))?
     };
     let up = {
         kiln_nvtx::range!(c"kiln/mlp/up");
-        kiln_tensor::cuda_matmul(x2d, up_t)
+        gpu_matmul_for_swiglu(x2d, up_t)
             .map_err(|e| anyhow::anyhow!("kt_swiglu_ffn_native: up matmul: {e}"))?
     };
     let hidden = {
@@ -9978,7 +10005,7 @@ fn kt_swiglu_ffn_native(
     };
     let out = {
         kiln_nvtx::range!(c"kiln/mlp/down");
-        kiln_tensor::cuda_matmul(&hidden, down_t)
+        gpu_matmul_for_swiglu(&hidden, down_t)
             .map_err(|e| anyhow::anyhow!("kt_swiglu_ffn_native: down matmul: {e}"))?
     };
     Ok(out)
@@ -10011,7 +10038,7 @@ fn kt_swiglu_ffn_native(
 /// `!has_mlp_lora && !has_marlin` guard in [`swiglu_ffn_impl_no_chunk`])
 /// before this is invoked, because those need the standalone candle
 /// projections + delta application.
-#[cfg(feature = "cuda")]
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 fn try_kt_swiglu_ffn(x: &Tensor, mlp: &GpuFfnWeights) -> Result<Option<Tensor>> {
     if !cuda_use_kt_api_swiglu_ffn() {
         return Ok(None);
@@ -10051,10 +10078,10 @@ fn try_kt_swiglu_ffn(x: &Tensor, mlp: &GpuFfnWeights) -> Result<Option<Tensor>> 
         || mlp.gate_proj_t.dtype() != dtype
         || mlp.up_proj_t.dtype() != dtype
         || mlp.down_proj_t.dtype() != dtype
-        || !matches!(x.device(), Device::Cuda(_))
-        || !matches!(mlp.gate_proj_t.device(), Device::Cuda(_))
-        || !matches!(mlp.up_proj_t.device(), Device::Cuda(_))
-        || !matches!(mlp.down_proj_t.device(), Device::Cuda(_))
+        || !cuda_or_rocm_device(x.device())
+        || !cuda_or_rocm_device(mlp.gate_proj_t.device())
+        || !cuda_or_rocm_device(mlp.up_proj_t.device())
+        || !cuda_or_rocm_device(mlp.down_proj_t.device())
         || !x.is_contiguous()
     {
         return Ok(None);
@@ -10206,7 +10233,7 @@ fn swiglu_ffn_impl_no_chunk(
         return Ok(out);
     }
 
-    // CUDA prefill fast path: single [B*T, hidden] @ [hidden, 2*intermediate]
+    // GPU prefill fast path: single [B*T, hidden] @ [hidden, 2*intermediate]
     // GEMM against the cached `gate_up_proj_t`, then either:
     //   (a) feed the packed result straight into the stride-aware fused
     //       silu*mul kernel and jump to the down projection (preferred —
@@ -10219,16 +10246,16 @@ fn swiglu_ffn_impl_no_chunk(
     // compute roof, because the launch / weight-stream cost was doubled
     // across the pair. Gated identically to the Marlin/LoRA-aware
     // branches above — those callers still need the standalone projections.
-    #[cfg(feature = "cuda")]
+    #[cfg(any(feature = "cuda", feature = "rocm"))]
     {
         if !has_mlp_gate_up_lora && !has_marlin && !cuda_fused_mlp_gate_up_prefill_disabled() {
             if let Some(gate_up_proj_t) = mlp.gate_up_proj_t.as_ref() {
                 if x.dtype() == DType::BF16
                     && !x.track_op()
-                    && matches!(x.device(), Device::Cuda(_))
+                    && cuda_or_rocm_device(x.device())
                     && gate_up_proj_t.dtype() == DType::BF16
                     && !gate_up_proj_t.track_op()
-                    && matches!(gate_up_proj_t.device(), Device::Cuda(_))
+                    && cuda_or_rocm_device(gate_up_proj_t.device())
                     && gate_up_proj_t.is_contiguous()
                 {
                     if let (Ok(g_dim), Ok(u_dim)) =
@@ -10315,7 +10342,7 @@ fn swiglu_ffn_impl_no_chunk(
     // `None` on any incompatibility (tape scope, tracked input, dtype, …)
     // so the legacy path below runs unchanged. Gated default-on with
     // escape hatch `KILN_DISABLE_KT_API_SWIGLU_FFN=1`.
-    #[cfg(feature = "cuda")]
+    #[cfg(any(feature = "cuda", feature = "rocm"))]
     {
         if !has_mlp_lora && !has_marlin {
             if let Some(out) = try_kt_swiglu_ffn(x, mlp)? {
@@ -10373,7 +10400,7 @@ fn swiglu_ffn_impl_no_chunk(
         }
         #[cfg(not(feature = "metal"))]
         {
-            #[cfg(feature = "cuda")]
+            #[cfg(any(feature = "cuda", feature = "rocm"))]
             {
                 // CP-4 (#1082): the fused MLP silu*mul kernel fuses two ops the kt
                 // Tape can't see and gates on !track_op — but the tape-authoritative
@@ -10463,7 +10490,7 @@ fn swiglu_ffn_impl_no_chunk(
                     hidden
                 }
             }
-            #[cfg(not(feature = "cuda"))]
+            #[cfg(not(any(feature = "cuda", feature = "rocm")))]
             {
                 // (#1082) Vulkan training/tape path: record the FUSED SwiGLU
                 // `silu(gate) * up` via the device-agnostic `try_tape_swiglu_kt`

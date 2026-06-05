@@ -354,6 +354,23 @@ pub fn flash_attn_paged_decode_rocm(
     let hk = k_pool.shape()[1];
     let max_blocks_per_seq = block_table.shape()[1];
 
+    if sq == 1
+        && q.dtype() == KtDType::BF16
+        && k_pool.dtype() == KtDType::BF16
+        && v_pool.dtype() == KtDType::BF16
+    {
+        return map_kt(kiln_tensor::rocm_paged_attn_decode_bf16(
+            q,
+            k_pool,
+            v_pool,
+            block_table,
+            None,
+            seqlen_k,
+            page_block_size,
+            softmax_scale,
+        ));
+    }
+
     // block_table (U32 [b, blocks]) stays on-device; the gather index is built
     // on-GPU by paged_gather (no host round-trip).
     let k_gathered = paged_gather(
@@ -414,9 +431,27 @@ pub fn flash_attn_paged_decode_dyn_seqlen_rocm(
     causal: bool,
 ) -> Result<KtTensor, FlashAttnError> {
     let device = q.device();
-    let (b, h, d) = (q.shape()[0], q.shape()[2], q.shape()[3]);
+    let (b, sq, h, d) = (q.shape()[0], q.shape()[1], q.shape()[2], q.shape()[3]);
     let hk = k_pool.shape()[1];
     let max_blocks_per_seq = block_table.shape()[1];
+
+    if sq == 1
+        && q.dtype() == KtDType::BF16
+        && k_pool.dtype() == KtDType::BF16
+        && v_pool.dtype() == KtDType::BF16
+    {
+        let _ = causal;
+        return map_kt(kiln_tensor::rocm_paged_attn_decode_bf16(
+            q,
+            k_pool,
+            v_pool,
+            block_table,
+            Some(seqused_k),
+            max_seqlen_k,
+            page_block_size,
+            softmax_scale,
+        ));
+    }
 
     // block_table + seqused_k stay on-device: paged_gather builds the gather
     // index on-GPU, and sdpa_forward_dyn_tail builds the tail mask on-GPU from
