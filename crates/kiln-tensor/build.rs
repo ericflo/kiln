@@ -122,6 +122,7 @@ fn build_cuda() {
     build.file(csrc_dir.join("masked_fill.cu"));
     build.file(csrc_dir.join("scatter_add.cu"));
     build.file(csrc_dir.join("cross_entropy.cu"));
+    build.file(csrc_dir.join("flce_grad.cu"));
     build.file(csrc_dir.join("concat.cu"));
     build.file(csrc_dir.join("rope.cu"));
     build.file(csrc_dir.join("dropout.cu"));

@@ -866,6 +866,57 @@ fn fused_linear_cross_entropy_phase_b_backward_impl_kt(
     let mut dhidden_active =
         KtTensor::zeros_on(device, vec![num_active, hidden_size], KtDType::F32)
             .map_err(FlceError::Kt)?;
+
+    #[cfg(feature = "cuda")]
+    if matches!(device, KtDevice::Cuda(_)) {
+        let active_labels_t =
+            KtTensor::from_vec_on(device, active_labels.to_vec(), vec![num_active])
+                .map_err(FlceError::Kt)?;
+        let mut chunk_start = 0usize;
+        while chunk_start < vocab_size {
+            let chunk_len = chunk_size.min(vocab_size - chunk_start);
+            let chunk_end = chunk_start + chunk_len;
+
+            let head_chunk = head_t_f32
+                .narrow(1, chunk_start, chunk_len)
+                .map_err(FlceError::Kt)?
+                .contiguous()
+                .map_err(FlceError::Kt)?;
+            let logits_chunk = matmul(&active_hidden_f32, &head_chunk).map_err(FlceError::Kt)?;
+
+            kiln_tensor::cuda_flce_grad_logits_chunk_inplace(
+                &logits_chunk,
+                &active_labels_t,
+                &running_max_1d,
+                &running_sumexp_1d,
+                chunk_start,
+                grad_scale,
+            )
+            .map_err(FlceError::Kt)?;
+
+            let head_chunk_t = head_chunk
+                .t()
+                .map_err(FlceError::Kt)?
+                .contiguous()
+                .map_err(FlceError::Kt)?;
+            let chunk_contrib = matmul(&logits_chunk, &head_chunk_t).map_err(FlceError::Kt)?;
+            dhidden_active =
+                kiln_tensor::ops::add(&dhidden_active, &chunk_contrib).map_err(FlceError::Kt)?;
+
+            chunk_start = chunk_end;
+        }
+
+        let grad_hidden_2d =
+            scatter_add(&dhidden_active, 0, active_idx, seq_len).map_err(FlceError::Kt)?;
+        let grad_hidden_3d = grad_hidden_2d.unsqueeze(0).map_err(FlceError::Kt)?;
+        let out = if original_dtype == KtDType::F32 {
+            grad_hidden_3d
+        } else {
+            kiln_tensor::ops::cast(&grad_hidden_3d, original_dtype).map_err(FlceError::Kt)?
+        };
+        return Ok(out);
+    }
+
     let mut chunk_start = 0usize;
     while chunk_start < vocab_size {
         let chunk_len = chunk_size.min(vocab_size - chunk_start);
