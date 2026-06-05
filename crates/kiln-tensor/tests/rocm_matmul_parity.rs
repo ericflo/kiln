@@ -5,7 +5,7 @@
 //! Run: `cargo test -p kiln-tensor --features rocm --test rocm_matmul_parity`
 #![cfg(feature = "rocm")]
 
-use kiln_tensor::{DType, Device, Tensor};
+use kiln_tensor::{Device, Tensor};
 
 fn no_rocm() -> bool {
     if !kiln_tensor::rocm_is_available() {
@@ -24,6 +24,21 @@ fn cpu_matmul(a: &[f32], b: &[f32], m: usize, k: usize, n: usize) -> Vec<f32> {
             let mut acc = 0.0f32;
             for p in 0..k {
                 acc += a[i * k + p] * b[p * n + j];
+            }
+            c[i * n + j] = acc;
+        }
+    }
+    c
+}
+
+/// Reference row-major matmul C[m,n] = A[k,m]^T * B[k,n], f32 accumulate.
+fn cpu_lhs_t_matmul(a: &[f32], b: &[f32], k: usize, m: usize, n: usize) -> Vec<f32> {
+    let mut c = vec![0.0f32; m * n];
+    for i in 0..m {
+        for j in 0..n {
+            let mut acc = 0.0f32;
+            for p in 0..k {
+                acc += a[p * m + i] * b[p * n + j];
             }
             c[i * n + j] = acc;
         }
@@ -132,4 +147,52 @@ fn matmul_batched_f32() {
     let tc = kiln_tensor::rocm_matmul(&ta, &tb).expect("batched matmul");
     let got = kiln_tensor::rocm_to_host_copy(&tc).unwrap().to_vec::<f32>().unwrap();
     check_close(&got, &want, 1e-4, 1e-4, "f32 batched");
+}
+
+#[test]
+fn matmul_lhs_transposed_f32_and_bf16() {
+    if no_rocm() {
+        return;
+    }
+
+    let (k, m, n) = (257usize, 19usize, 23usize);
+    let a_f: Vec<f32> = (0..k * m).map(|i| val(i, 1.0)).collect();
+    let b_f: Vec<f32> = (0..k * n).map(|i| val(i + 5, 1.0)).collect();
+
+    let want_f32 = cpu_lhs_t_matmul(&a_f, &b_f, k, m, n);
+    let ta = Tensor::from_vec_on(Device::Rocm(0), a_f.clone(), vec![k, m]).expect("a f32");
+    let tb = Tensor::from_vec_on(Device::Rocm(0), b_f.clone(), vec![k, n]).expect("b f32");
+    let tc = kiln_tensor::ops::matmul_lhs_transposed(&ta, &tb)
+        .unwrap_or_else(|e| panic!("lhs-transposed f32 matmul: {e}"));
+    assert_eq!(tc.shape(), &[m, n]);
+    let got = kiln_tensor::rocm_to_host_copy(&tc)
+        .unwrap()
+        .to_vec::<f32>()
+        .unwrap();
+    check_close(&got, &want_f32, 1e-4, 1e-4, "lhs-transposed f32");
+
+    use half::bf16;
+    let a_bf: Vec<bf16> = a_f.iter().map(|&x| bf16::from_f32(x)).collect();
+    let b_bf: Vec<bf16> = b_f.iter().map(|&x| bf16::from_f32(x)).collect();
+    let a_r: Vec<f32> = a_bf.iter().map(|x| x.to_f32()).collect();
+    let b_r: Vec<f32> = b_bf.iter().map(|x| x.to_f32()).collect();
+    let want_bf16 = cpu_lhs_t_matmul(&a_r, &b_r, k, m, n);
+
+    let ta = Tensor::from_vec_on(Device::Rocm(0), a_bf, vec![k, m]).expect("a bf16");
+    let tb = Tensor::from_vec_on(Device::Rocm(0), b_bf, vec![k, n]).expect("b bf16");
+    let tc = kiln_tensor::ops::matmul_lhs_transposed(&ta, &tb)
+        .unwrap_or_else(|e| panic!("lhs-transposed bf16 matmul: {e}"));
+    assert_eq!(tc.shape(), &[m, n]);
+    let got_bf = kiln_tensor::rocm_to_host_copy(&tc)
+        .unwrap()
+        .to_vec::<bf16>()
+        .unwrap();
+    let got: Vec<f32> = got_bf.iter().map(|x| x.to_f32()).collect();
+    check_close(
+        &got,
+        &want_bf16,
+        3e-2,
+        (k as f32) * 1e-3,
+        "lhs-transposed bf16",
+    );
 }

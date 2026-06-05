@@ -301,6 +301,18 @@ pub fn matmul_lhs_transposed(a: &Tensor, b: &Tensor) -> Result<Tensor> {
         }
     }
 
+    #[cfg(feature = "rocm")]
+    {
+        if matches!(a.device(), crate::Device::Rocm(_))
+            && matches!(b.device(), crate::Device::Rocm(_))
+            && a.is_contiguous()
+            && b.is_contiguous()
+            && matches!(a.dtype(), DType::F32 | DType::BF16 | DType::F16)
+        {
+            return crate::rocm_matmul_lhs_transposed(a, b);
+        }
+    }
+
     let a_t = a.transpose(ar - 2, ar - 1)?.contiguous()?;
     matmul(&a_t, b)
 }

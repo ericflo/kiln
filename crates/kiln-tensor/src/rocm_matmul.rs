@@ -190,31 +190,134 @@ pub fn rocm_matmul(a: &Tensor, b: &Tensor) -> Result<Tensor> {
         return Err(crate::Error::Msg(format!("{OP}: contiguous inputs required")));
     }
 
-    let a_storage = rocm_storage(a, OP, "a")?;
-    let b_storage = rocm_storage(b, OP, "b")?;
+    let mut out_shape = a_shape[..a_rank - 2].to_vec();
+    out_shape.push(m);
+    out_shape.push(n);
+    rocm_matmul_dispatch(
+        a,
+        b,
+        m,
+        n,
+        k_a,
+        dtype,
+        ds,
+        out_shape,
+        MatmulLayout::RowMajor,
+        MatmulLayout::RowMajor,
+        OP,
+    )
+}
+
+/// Run `a^T @ b` without materialising `a.transpose(-2, -1).contiguous()`.
+///
+/// `a` is stored row-major with shape `[..., K, M]`, `b` is row-major with
+/// shape `[..., K, N]`, and the result is `[..., M, N]`. This mirrors
+/// [`crate::cuda_matmul_lhs_transposed`] for the ROCm/hipBLASLt backend and is
+/// used by long-context LoRA backward to avoid allocating the giant
+/// `[out_features, rows]` transposed gradient view.
+pub fn rocm_matmul_lhs_transposed(a: &Tensor, b: &Tensor) -> Result<Tensor> {
+    const OP: &str = "rocm_matmul_lhs_transposed";
+    let a_rank = a.rank();
+    let b_rank = b.rank();
+    if a_rank < 2 || b_rank < 2 {
+        return Err(crate::Error::Msg(format!(
+            "{OP}: rank must be >= 2, got a={a_rank} b={b_rank}"
+        )));
+    }
+    if a_rank != b_rank {
+        return Err(crate::Error::Msg(format!(
+            "{OP}: rank mismatch a={a_rank} b={b_rank}"
+        )));
+    }
+    let a_shape = a.shape();
+    let b_shape = b.shape();
+    for axis in 0..a_rank - 2 {
+        if a_shape[axis] != b_shape[axis] {
+            return Err(crate::Error::Msg(format!(
+                "{OP}: batch axis {axis} mismatch: a={} b={}",
+                a_shape[axis], b_shape[axis]
+            )));
+        }
+    }
+    let k_a = a_shape[a_rank - 2];
+    let m = a_shape[a_rank - 1];
+    let k_b = b_shape[b_rank - 2];
+    let n = b_shape[b_rank - 1];
+    if k_a != k_b {
+        return Err(crate::Error::Msg(format!(
+            "{OP}: contraction dim mismatch a.K={k_a} b.K={k_b}"
+        )));
+    }
+    if a.dtype() != b.dtype() {
+        return Err(crate::Error::Msg(format!(
+            "{OP}: dtype mismatch a={} b={}",
+            a.dtype(),
+            b.dtype()
+        )));
+    }
+    let dtype = a.dtype();
+    let ds = dtype_str(dtype, OP)?;
+    if !a.is_contiguous() || !b.is_contiguous() {
+        return Err(crate::Error::Msg(format!("{OP}: contiguous inputs required")));
+    }
+
+    let mut out_shape = a_shape[..a_rank - 2].to_vec();
+    out_shape.push(m);
+    out_shape.push(n);
+    rocm_matmul_dispatch(
+        a,
+        b,
+        m,
+        n,
+        k_a,
+        dtype,
+        ds,
+        out_shape,
+        MatmulLayout::ColMajor,
+        MatmulLayout::RowMajor,
+        OP,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn rocm_matmul_dispatch(
+    a: &Tensor,
+    b: &Tensor,
+    m: usize,
+    n: usize,
+    k: usize,
+    dtype: DType,
+    dtype_str: &'static str,
+    out_shape: Vec<usize>,
+    a_layout: MatmulLayout,
+    b_layout: MatmulLayout,
+    op: &str,
+) -> Result<Tensor> {
+    let a_storage = rocm_storage(a, op, "a")?;
+    let b_storage = rocm_storage(b, op, "b")?;
     use crate::StorageBackend;
     if a_storage.device() != b_storage.device() {
         return Err(crate::Error::Msg(format!(
-            "{OP}: device mismatch a={} b={}",
+            "{op}: device mismatch a={} b={}",
             a_storage.device(),
             b_storage.device()
         )));
     }
-    let device_index = rocm_device_index(a_storage, OP)?;
+    let device_index = rocm_device_index(a_storage, op)?;
 
     let ctx = a_storage.context();
-    let batch: usize = a_shape[..a_rank - 2].iter().product::<usize>().max(1);
-    let mut out_shape = a_shape[..a_rank - 2].to_vec();
-    out_shape.push(m);
-    out_shape.push(n);
+    let batch: usize = out_shape[..out_shape.len() - 2]
+        .iter()
+        .product::<usize>()
+        .max(1);
     let out_n_elements = batch * m * n;
     let out_storage = RocmStorage::alloc_uninit_ctx(&ctx, device_index, dtype, out_n_elements)?;
 
     let handle = get_or_init_handle(device_index, &ctx)?;
 
     let bpe = dtype.size_in_bytes();
-    let a_batch_stride = (m * k_a * bpe) as u64;
-    let b_batch_stride = (k_b * n * bpe) as u64;
+    let a_batch_stride = (m * k * bpe) as u64;
+    let b_batch_stride = (k * n * bpe) as u64;
     let c_batch_stride = (m * n * bpe) as u64;
 
     let raw_stream = a_storage.rocm_stream_raw();
@@ -227,10 +330,10 @@ pub fn rocm_matmul(a: &Tensor, b: &Tensor) -> Result<Tensor> {
     let request = MatmulRequest {
         m: m as u64,
         n: n as u64,
-        k: k_a as u64,
-        dtype: ds.to_string(),
-        a_layout: MatmulLayout::RowMajor,
-        b_layout: MatmulLayout::RowMajor,
+        k: k as u64,
+        dtype: dtype_str.to_string(),
+        a_layout,
+        b_layout,
         c_layout: MatmulLayout::RowMajor,
         epilogue: Epilogue::Identity,
         concurrent_streams: 1,
@@ -246,7 +349,7 @@ pub fn rocm_matmul(a: &Tensor, b: &Tensor) -> Result<Tensor> {
         unsafe {
             handle
                 .matmul(raw_stream, &request, a_ptr, b_ptr, c_ptr, std::ptr::null())
-                .map_err(|e| crate::Error::Msg(format!("{OP}: handle.matmul failed: {e}")))?;
+                .map_err(|e| crate::Error::Msg(format!("{op}: handle.matmul failed: {e}")))?;
         }
     }
 

@@ -180,8 +180,8 @@ pub use rocm_capture_alloc::{
 #[cfg(feature = "rocm")]
 pub use rocm_matmul::{
     hipblaslt_cache_path, rocm_flush_algo_cache_to_disk, rocm_load_algo_cache_from_disk,
-    rocm_matmul, rocm_matmul_into, rocm_matmul_with_bias, rocm_restore_into_shared_cache,
-    rocm_snapshot_algo_cache,
+    rocm_matmul, rocm_matmul_into, rocm_matmul_lhs_transposed, rocm_matmul_with_bias,
+    rocm_restore_into_shared_cache, rocm_snapshot_algo_cache,
 };
 #[cfg(feature = "rocm")]
 pub use rocm_ops::*;
