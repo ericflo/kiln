@@ -1842,6 +1842,30 @@ impl AppState {
         // uninitialized — a one-time startup memset, not a correctness change
         // (paged writes overwrite slots before they are read).
         let allocate_cache = |n: usize| -> anyhow::Result<PagedKvCacheKt> {
+            // Governance / "never OOM": ROCm's HIP allocator `abort()`s (rocclr
+            // `vmheap::MapPhysMemory` assertion) on a VRAM OOM instead of returning
+            // Err — that bypasses the reclaim/shrink retry below and HARD-CRASHES
+            // the process. Seen when a coexisting GPU job fills VRAM, because the
+            // governor's budget counts GTT that the HIP VRAM allocator can't use.
+            // Pre-check against FREE VRAM (not vram+gtt) and return a normal Err so
+            // the auto-sizer shrinks gracefully. No-op off AMD/Linux-DRM (returns
+            // None), where the native allocator surfaces OOM as a catchable Err.
+            if bytes_per_block > 0 {
+                if let Some(free_vram) = kiln_memory::vram::current_free_vram_bytes() {
+                    let need = (n as u64).saturating_mul(bytes_per_block);
+                    // 8% headroom for the allocator's own metadata + fragmentation.
+                    let safe = (free_vram / 100).saturating_mul(92);
+                    if need > safe {
+                        anyhow::bail!(
+                            "KV cache {n} blocks ({} MiB) exceeds free VRAM \
+                             ({} MiB; 92% safe = {} MiB) — shrinking to avoid a HIP vmheap abort",
+                            need / (1 << 20),
+                            free_vram / (1 << 20),
+                            safe / (1 << 20)
+                        );
+                    }
+                }
+            }
             let attempt = || {
                 PagedKvCacheKt::new_with_fp8(
                     model_config.num_full_attention_layers,

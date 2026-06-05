@@ -488,6 +488,35 @@ pub fn current_free_bytes() -> u64 {
     current_memory_snapshot().free_bytes
 }
 
+/// Free *VRAM* (`mem_info_vram_total` − `mem_info_vram_used`) in bytes on a Linux
+/// AMD/DRM GPU, EXCLUDING GTT. `None` on non-DRM platforms (NVIDIA→nvidia-smi,
+/// macOS, Windows) and when the sysfs counters are absent.
+///
+/// Why this exists, separate from [`current_free_bytes`] (which is vram+gtt):
+/// ROCm's HIP allocator `abort()`s (rocclr `vmheap::MapPhysMemory` assertion) on
+/// a VRAM OOM instead of returning an error. A consumer that sizes against the
+/// governor's vram+gtt budget can therefore drive a hard, un-catchable crash
+/// when VRAM is full (e.g. a coexisting GPU job) even though "free" (incl. GTT)
+/// looks ample. Callers pre-check that a VRAM allocation fits in *free VRAM*
+/// before issuing it, turning the abort into a normal `Err` they shrink-retry on.
+pub fn current_free_vram_bytes() -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        let total =
+            query_linux_drm_memory_fields(&["mem_info_vram_total", "mem_info_vis_vram_total"])?;
+        if total == 0 {
+            return None;
+        }
+        let used = query_linux_drm_memory_fields(&["mem_info_vram_used", "mem_info_vis_vram_used"])
+            .unwrap_or(0);
+        Some(total.saturating_sub(used))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        None
+    }
+}
+
 /// Read `MemAvailable` (the kernel's estimate of allocatable RAM without
 /// swapping) from a `/proc/meminfo`-format file. This is the right "free"
 /// figure for unified-memory accelerators, where GPU buffers are backed by

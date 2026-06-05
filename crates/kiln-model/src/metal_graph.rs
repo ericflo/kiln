@@ -1210,37 +1210,34 @@ impl MetalStableDecodeBuffers {
         let slots = slots?;
         kiln_tensor::metal_write_host_in_place(&self.kv_slot, slots.as_slice())
             .context("update Metal graph KV slot buffer")?;
-        let (cos, sin) = rotary_table_values_batch(config, seq_lens);
-        kiln_tensor::metal_write_host_in_place(&self.rotary_cos, cos.as_slice())
-            .context("update Metal graph rotary cos buffer")?;
-        kiln_tensor::metal_write_host_in_place(&self.rotary_sin, sin.as_slice())
-            .context("update Metal graph rotary sin buffer")?;
+        // #34 BUG2 FIX: compute the rotary tables on the GPU via eager's exact
+        // path (`forward::rotary_tables_from_tensor`), one position per batch row,
+        // not host CPU cos/sin. CPU cos != GPU cos perturbs only the RoPE
+        // full-attention layers on replay. Same root cause + fix as CUDA/ROCm.
+        let dev = self.rotary_cos.device();
+        let inv_freq = crate::forward::compute_rotary_inv_freq(
+            config.rotary_dim(),
+            config.rope_theta,
+            &dev,
+        )?;
+        let pos_f32: Vec<f32> = seq_lens.iter().map(|&p| p as f32).collect();
+        let n = pos_f32.len();
+        let pos = kiln_tensor::Tensor::from_vec_on(dev, pos_f32, vec![n])?;
+        let (cos, sin) = crate::forward::rotary_tables_from_tensor(&pos, &inv_freq)?;
+        let cos = cos
+            .to_dtype(self.rotary_cos.dtype())?
+            .reshape(self.rotary_cos.dims().to_vec())?;
+        let sin = sin
+            .to_dtype(self.rotary_sin.dtype())?
+            .reshape(self.rotary_sin.dims().to_vec())?;
+        self.rotary_cos
+            .slice_set(&cos, 0, 0)
+            .context("update Metal graph rotary cos buffer (gpu)")?;
+        self.rotary_sin
+            .slice_set(&sin, 0, 0)
+            .context("update Metal graph rotary sin buffer (gpu)")?;
         Ok(())
     }
-}
-
-#[cfg(feature = "metal")]
-fn rotary_table_values(config: &ModelConfig, position: usize) -> (Vec<f32>, Vec<f32>) {
-    rotary_table_values_batch(config, &[position])
-}
-
-#[cfg(feature = "metal")]
-fn rotary_table_values_batch(config: &ModelConfig, positions: &[usize]) -> (Vec<f32>, Vec<f32>) {
-    let half_rotary = config.rotary_dim() / 2;
-    let mut cos = Vec::with_capacity(positions.len() * half_rotary);
-    let mut sin = Vec::with_capacity(positions.len() * half_rotary);
-    for &position in positions {
-        for i in 0..half_rotary {
-            let inv_freq = 1.0f32
-                / (config
-                    .rope_theta
-                    .powf(2.0 * i as f64 / config.rotary_dim() as f64) as f32);
-            let freq = position as f32 * inv_freq;
-            cos.push(freq.cos());
-            sin.push(freq.sin());
-        }
-    }
-    (cos, sin)
 }
 
 #[cfg(feature = "metal")]
