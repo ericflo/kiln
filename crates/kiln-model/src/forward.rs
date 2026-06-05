@@ -4436,15 +4436,22 @@ impl LinearAttentionState {
     ) -> DType {
         let cuda_bf16_state_disabled =
             std::env::var("KILN_DISABLE_CUDA_BF16_INFERENCE_STATE").is_ok();
+        let rocm_bf16_state_disabled =
+            std::env::var("KILN_DISABLE_ROCM_BF16_INFERENCE_STATE").is_ok();
         let vulkan_bf16_state_disabled =
             std::env::var("KILN_DISABLE_VULKAN_BF16_INFERENCE_STATE").is_ok();
         match (device, config.dtype) {
             (Device::Cuda(_), _) if cuda_bf16_state_disabled => {
                 Self::training_recurrent_dtype(config, device)
             }
+            (Device::Rocm(_), _) if rocm_bf16_state_disabled => {
+                Self::training_recurrent_dtype(config, device)
+            }
             (Device::Cuda(_), kiln_core::config::DType::BF16)
+            | (Device::Rocm(_), kiln_core::config::DType::BF16)
             | (Device::Metal(_), kiln_core::config::DType::BF16) => DType::BF16,
             (Device::Cuda(_), kiln_core::config::DType::FP16)
+            | (Device::Rocm(_), kiln_core::config::DType::FP16)
             | (Device::Metal(_), kiln_core::config::DType::FP16) => DType::F16,
             (_, kiln_core::config::DType::BF16)
                 if backend_name == Some("vulkan") && !vulkan_bf16_state_disabled =>
@@ -15283,12 +15290,12 @@ fn gated_deltanet_forward_decode_if_inner(
     #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan"))]
     let tape_recording_active = crate::tape_forward::tape_forward_enabled()
         && kiln_kt_bridge::tape_bridge::bridge_scope_active();
-    // (#1082) Vulkan: the tape-authoritative GDN training path runs without the
-    // kt-bridge scope (that's a CUDA/Metal candle-bridge construct). Gate purely
-    // on the tape-forward flag so the unfused, fully-tape-wired GDN forward runs
-    // (and the conv1d-prefill recorder fires) on Vulkan too.
+    // (#1082) Vulkan/ROCm: the tape-authoritative GDN training path runs without
+    // the kt-bridge scope (that's a CUDA/Metal candle-bridge construct). Gate on
+    // an active tape scope so inference keeps the forward-only fused kernels even
+    // though tape-forward defaults on.
     #[cfg(all(any(feature = "vulkan", feature = "rocm"), not(any(feature = "cuda", feature = "metal"))))]
-    let tape_recording_active = crate::tape_forward::tape_forward_enabled();
+    let tape_recording_active = crate::tape_forward::tape_scope_active();
     #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm")))]
     let tape_recording_active = false;
     let gdn_forward_only_fastpaths =
@@ -15885,19 +15892,20 @@ fn gated_deltanet_forward_decode_if_inner(
 
         // --- Step 4/5: GQA head repeat (nk → nv), L2 normalize Q/K, scale Q ---
         //
-        // Fast paths: Metal and CUDA default to fused F32->BF16 kernels for
-        // supported bf16 tensors. Both collapse the l2-normalize(Q) + scale(Q) +
+        // Fast paths: Metal/CUDA/ROCm default to fused F32->BF16 kernels for
+        // supported bf16 tensors. These collapse the l2-normalize(Q) + scale(Q) +
         // l2-normalize(K) + dtype-cast chain (~11 candle launches on tiny per-row
-        // tensors at decode shape) into a single launch. CUDA can be forced back
-        // to the candle parity path with `KILN_DISABLE_FUSED_L2_QK_NORM=1`.
+        // tensors at decode shape) into a single launch. CUDA/ROCm can be forced
+        // back to the candle parity path with `KILN_DISABLE_FUSED_L2_QK_NORM=1`
+        // or the GDN decode-specific disable flags.
         //
         // Both paths produce bf16 outputs in `input_dtype`; only the kernel
         // path skips the F32 round-trip through HBM. The candle path is the
         // parity oracle exercised by `kiln-rmsnorm-kernel`'s
         // `parity_l2_qk_norm_*` tests.
         let stage_profile = start_gdn_stage_profile(profile_device, profile_context)?;
-        let defer_cuda_qk_norm_to_recurrent = {
-            #[cfg(feature = "cuda")]
+        let defer_backend_qk_norm_to_recurrent = {
+            #[cfg(any(feature = "cuda", feature = "rocm"))]
             {
                 seq_len == 1
                     && gdn_forward_only_fastpaths
@@ -15907,7 +15915,7 @@ fn gated_deltanet_forward_decode_if_inner(
                     && input_dtype == DType::BF16
                     && backend.supports_gdn_decode_qk_norm_gates_recurrent()
             }
-            #[cfg(not(feature = "cuda"))]
+            #[cfg(not(any(feature = "cuda", feature = "rocm")))]
             {
                 false
             }
@@ -16017,7 +16025,7 @@ fn gated_deltanet_forward_decode_if_inner(
                     }
                 };
 
-                if defer_cuda_qk_norm_to_recurrent {
+                if defer_backend_qk_norm_to_recurrent {
                     kiln_nvtx::range!(c"kiln/gdn/qk_norm_deferred");
                     (q, k, false, true, false)
                 } else if defer_native_qk_norm_to_recurrent {

@@ -2278,11 +2278,23 @@ fn linear_attention_state_bytes(config: &ModelConfig, device: &kiln_tensor::Devi
     let num_linear_layers = config
         .num_layers
         .saturating_sub(config.num_full_attention_layers) as u64;
-    // Metal recurrent path holds bf16/fp16 in 2 bytes/elem; every other
-    // (device, dtype) pair uses the 4-byte fallback. Migrated to take
-    // `&kt::Device` directly so this site no longer threads candle
-    // through the helper (#1082).
-    let recurrent_dtype_bytes = if is_metal_device(device)
+    // Inference recurrent state mirrors `LinearAttentionState`'s compact
+    // backend policy: CUDA/ROCm/Metal/Vulkan use model dtype for bf16/fp16
+    // unless the backend-specific inference-state escape hatch is set.
+    let compact_recurrent_state = match device.backend() {
+        kiln_tensor::Backend::Cuda => {
+            std::env::var("KILN_DISABLE_CUDA_BF16_INFERENCE_STATE").is_err()
+        }
+        kiln_tensor::Backend::Rocm => {
+            std::env::var("KILN_DISABLE_ROCM_BF16_INFERENCE_STATE").is_err()
+        }
+        kiln_tensor::Backend::Metal => true,
+        kiln_tensor::Backend::Vulkan => {
+            std::env::var("KILN_DISABLE_VULKAN_BF16_INFERENCE_STATE").is_err()
+        }
+        _ => false,
+    };
+    let recurrent_dtype_bytes = if compact_recurrent_state
         && matches!(
             config.dtype,
             kiln_core::config::DType::BF16 | kiln_core::config::DType::FP16
