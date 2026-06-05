@@ -52,8 +52,8 @@ use kiln_model::speculative::{
 };
 use kiln_server::config::SpecMethod;
 
-/// Block size used for the paged-path benchmark. Matches the kiln-core default.
-const PAGED_BLOCK_SIZE: usize = 16;
+/// Block size used for the paged-path benchmark. Matches the real server default.
+const PAGED_BLOCK_SIZE: usize = 64;
 
 /// Results from the full benchmark suite.
 #[derive(Debug, Serialize)]
