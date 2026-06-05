@@ -159,7 +159,7 @@ pub use losses::{
 };
 pub use mask::{MaskedFillOp, causal_mask, masked_fill};
 pub use masked_select::masked_select;
-pub use matmul::{MatmulOp, matmul, matmul_lhs_transposed};
+pub use matmul::{MatmulOp, matmul, matmul_lhs_transposed, matmul_rhs_transposed};
 pub use max_min_axis::{MinMaxKind, max_axis, min_axis};
 pub use meshgrid::meshgrid;
 pub use mha::multi_head_attention;

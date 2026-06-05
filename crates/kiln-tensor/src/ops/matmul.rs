@@ -37,8 +37,8 @@
 //! `forward.rs:3454,3517` F32-promotion idiom.
 
 use crate::{
-    BackwardOp, CpuStorage, DType, Determinism, DeviceOp2, Error, Layout, Result, Storage, Tensor,
-    TensorId, bail, dispatch2,
+    bail, dispatch2, BackwardOp, CpuStorage, DType, Determinism, DeviceOp2, Error, Layout, Result,
+    Storage, Tensor, TensorId,
 };
 use std::sync::Arc;
 
@@ -341,6 +341,77 @@ pub fn matmul_lhs_transposed(a: &Tensor, b: &Tensor) -> Result<Tensor> {
     matmul(&a_t, b)
 }
 
+/// Compute `a @ b^T` over the trailing matrix axes.
+///
+/// Input shapes are `[..., M, K]` and `[..., N, K]`; the output shape is
+/// `[..., M, N]`. Backends may consume the transposed right operand directly.
+/// The generic fallback materialises `b.transpose(-2, -1).contiguous()` and
+/// then calls [`matmul`].
+pub fn matmul_rhs_transposed(a: &Tensor, b: &Tensor) -> Result<Tensor> {
+    let ar = a.rank();
+    let br = b.rank();
+    if ar < 2 || br < 2 {
+        bail!(
+            "matmul_rhs_transposed: both inputs must have rank >= 2, got a.rank={ar}, b.rank={br}"
+        );
+    }
+    if ar != br {
+        bail!("matmul_rhs_transposed: rank mismatch: a={ar}, b={br}");
+    }
+    let a_shape = a.shape();
+    let b_shape = b.shape();
+    for axis in 0..ar - 2 {
+        if a_shape[axis] != b_shape[axis] {
+            bail!(
+                "matmul_rhs_transposed: leading axis {axis} mismatch: a={}, b={}",
+                a_shape[axis],
+                b_shape[axis]
+            );
+        }
+    }
+    let k_a = a_shape[ar - 1];
+    let k_b = b_shape[br - 1];
+    if k_a != k_b {
+        bail!(
+            "matmul_rhs_transposed: contraction dim mismatch: a.shape[..,M,K] K={k_a} vs b.shape[..,N,K] K={k_b}"
+        );
+    }
+    if a.dtype() != b.dtype() {
+        bail!(
+            "matmul_rhs_transposed: dtype mismatch: a={} {a_shape:?}, b={} {b_shape:?}",
+            a.dtype(),
+            b.dtype()
+        );
+    }
+
+    #[cfg(feature = "cuda")]
+    {
+        if matches!(a.device(), crate::Device::Cuda(_))
+            && matches!(b.device(), crate::Device::Cuda(_))
+            && a.is_contiguous()
+            && b.is_contiguous()
+            && matches!(a.dtype(), DType::F32 | DType::BF16 | DType::F16)
+        {
+            return crate::cuda_matmul_rhs_transposed(a, b);
+        }
+    }
+
+    #[cfg(feature = "rocm")]
+    {
+        if matches!(a.device(), crate::Device::Rocm(_))
+            && matches!(b.device(), crate::Device::Rocm(_))
+            && a.is_contiguous()
+            && b.is_contiguous()
+            && matches!(a.dtype(), DType::F32 | DType::BF16 | DType::F16)
+        {
+            return crate::rocm_matmul_rhs_transposed(a, b);
+        }
+    }
+
+    let b_t = b.transpose(br - 2, br - 1)?.contiguous()?;
+    matmul(a, &b_t)
+}
+
 // ----------------------------------------------------------------------
 // Helpers
 // ----------------------------------------------------------------------
@@ -486,6 +557,16 @@ mod tests {
         assert_eq!(read_f32(&c), vec![89.0, 98.0, 116.0, 128.0]);
     }
 
+    #[test]
+    fn matmul_rhs_transposed_2d_cpu() {
+        // B stored as [N=2, K=3]; A @ B^T gives [M=2, N=2].
+        let a = Tensor::from_slice(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3]).unwrap();
+        let b = Tensor::from_slice(&[7.0f32, 9.0, 11.0, 8.0, 10.0, 12.0], vec![2, 3]).unwrap();
+        let c = matmul_rhs_transposed(&a, &b).unwrap();
+        assert_eq!(c.shape(), &[2, 2]);
+        assert_eq!(read_f32(&c), vec![58.0, 64.0, 139.0, 154.0]);
+    }
+
     #[cfg(feature = "cuda")]
     #[test]
     fn matmul_lhs_transposed_cuda_bf16_matches_cpu() {
@@ -539,6 +620,62 @@ mod tests {
         assert!(
             max_abs_err <= 0.5,
             "CUDA lhs-transposed BF16 matmul diverged: max_abs_err={max_abs_err}"
+        );
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn matmul_rhs_transposed_cuda_bf16_matches_cpu() {
+        if crate::primary_cuda_context(0).is_err() {
+            eprintln!("skip: no CUDA device");
+            return;
+        }
+        let dev = crate::Device::Cuda(0);
+        let (m, n, k) = (3usize, 4usize, 5usize);
+        let a_data: Vec<f32> = (0..m * k).map(|i| (i as f32) * 0.125 - 0.75).collect();
+        let b_data: Vec<f32> = (0..n * k).map(|i| ((i % 7) as f32) * 0.25 - 0.5).collect();
+
+        let a_cpu = Tensor::from_slice(&a_data, vec![m, k])
+            .unwrap()
+            .to_dtype(DType::BF16)
+            .unwrap();
+        let b_cpu = Tensor::from_slice(&b_data, vec![n, k])
+            .unwrap()
+            .to_dtype(DType::BF16)
+            .unwrap();
+        let expected = matmul_rhs_transposed(&a_cpu, &b_cpu)
+            .unwrap()
+            .to_dtype(DType::F32)
+            .unwrap()
+            .to_vec::<f32>()
+            .unwrap();
+
+        let a_cuda = Tensor::from_vec_on(dev, a_data, vec![m, k])
+            .unwrap()
+            .to_dtype(DType::BF16)
+            .unwrap();
+        let b_cuda = Tensor::from_vec_on(dev, b_data, vec![n, k])
+            .unwrap()
+            .to_dtype(DType::BF16)
+            .unwrap();
+        let got = matmul_rhs_transposed(&a_cuda, &b_cuda)
+            .unwrap()
+            .to_device(crate::Device::Cpu)
+            .unwrap()
+            .to_dtype(DType::F32)
+            .unwrap()
+            .to_vec::<f32>()
+            .unwrap();
+
+        assert_eq!(got.len(), expected.len());
+        let mut max_abs_err = 0.0f32;
+        for (g, e) in got.iter().zip(expected.iter()) {
+            max_abs_err = max_abs_err.max((g - e).abs());
+        }
+        eprintln!("matmul_rhs_transposed_cuda_bf16_matches_cpu: max_abs_err={max_abs_err:e}");
+        assert!(
+            max_abs_err <= 0.5,
+            "CUDA rhs-transposed BF16 matmul diverged: max_abs_err={max_abs_err}"
         );
     }
 

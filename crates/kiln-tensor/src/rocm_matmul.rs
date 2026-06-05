@@ -279,6 +279,76 @@ pub fn rocm_matmul_lhs_transposed(a: &Tensor, b: &Tensor) -> Result<Tensor> {
     )
 }
 
+/// Run `a @ b^T` without materialising `b.transpose(-2, -1).contiguous()`.
+///
+/// `a` is stored row-major with shape `[..., M, K]`, `b` is row-major with
+/// shape `[..., N, K]`, and the result is `[..., M, N]`.
+pub fn rocm_matmul_rhs_transposed(a: &Tensor, b: &Tensor) -> Result<Tensor> {
+    const OP: &str = "rocm_matmul_rhs_transposed";
+    let a_rank = a.rank();
+    let b_rank = b.rank();
+    if a_rank < 2 || b_rank < 2 {
+        return Err(crate::Error::Msg(format!(
+            "{OP}: rank must be >= 2, got a={a_rank} b={b_rank}"
+        )));
+    }
+    if a_rank != b_rank {
+        return Err(crate::Error::Msg(format!(
+            "{OP}: rank mismatch a={a_rank} b={b_rank}"
+        )));
+    }
+    let a_shape = a.shape();
+    let b_shape = b.shape();
+    for axis in 0..a_rank - 2 {
+        if a_shape[axis] != b_shape[axis] {
+            return Err(crate::Error::Msg(format!(
+                "{OP}: batch axis {axis} mismatch: a={} b={}",
+                a_shape[axis], b_shape[axis]
+            )));
+        }
+    }
+    let m = a_shape[a_rank - 2];
+    let k_a = a_shape[a_rank - 1];
+    let n = b_shape[b_rank - 2];
+    let k_b = b_shape[b_rank - 1];
+    if k_a != k_b {
+        return Err(crate::Error::Msg(format!(
+            "{OP}: contraction dim mismatch a.K={k_a} b.K={k_b}"
+        )));
+    }
+    if a.dtype() != b.dtype() {
+        return Err(crate::Error::Msg(format!(
+            "{OP}: dtype mismatch a={} b={}",
+            a.dtype(),
+            b.dtype()
+        )));
+    }
+    let dtype = a.dtype();
+    let ds = dtype_str(dtype, OP)?;
+    if !a.is_contiguous() || !b.is_contiguous() {
+        return Err(crate::Error::Msg(format!(
+            "{OP}: contiguous inputs required"
+        )));
+    }
+
+    let mut out_shape = a_shape[..a_rank - 2].to_vec();
+    out_shape.push(m);
+    out_shape.push(n);
+    rocm_matmul_dispatch(
+        a,
+        b,
+        m,
+        n,
+        k_a,
+        dtype,
+        ds,
+        out_shape,
+        MatmulLayout::RowMajor,
+        MatmulLayout::ColMajor,
+        OP,
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn rocm_matmul_dispatch(
     a: &Tensor,

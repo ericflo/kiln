@@ -13,11 +13,11 @@
 //!
 //! # Implementation notes
 //!
-//! `kiln_tensor::ops::matmul` requires **contiguous** inputs. `da` still
-//! materializes `b^T`, but `db` uses `matmul_lhs_transposed` so backends with
-//! transposed-GEMM support can compute `a^T @ dc` without a contiguous copy.
+//! `da` and `db` both go through transposed-GEMM helpers, so backends with
+//! resident support can consume the saved forward operands without allocating
+//! physical trailing-axis transposes first.
 
-use kiln_tensor::ops::{matmul, matmul_lhs_transposed};
+use kiln_tensor::ops::{matmul_lhs_transposed, matmul_rhs_transposed};
 use kiln_tensor::{bail, Result, Tensor};
 
 use crate::BackwardOp;
@@ -64,9 +64,7 @@ impl BackwardOp for MatmulBackward {
                 grad_output.rank()
             );
         }
-        // Materialize the RHS transpose for da; db can use a transposed-GEMM.
-        let b_t = b.transpose(br - 2, br - 1)?.contiguous()?;
-        let da = matmul(grad_output, &b_t)?;
+        let da = matmul_rhs_transposed(grad_output, &b)?;
         let db = matmul_lhs_transposed(&a, grad_output)?;
         Ok(vec![Some(da), Some(db)])
     }
@@ -78,6 +76,7 @@ impl BackwardOp for MatmulBackward {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use kiln_tensor::ops::matmul;
     use kiln_tensor::CpuStorage;
 
     fn read_f32(t: &Tensor) -> Vec<f32> {

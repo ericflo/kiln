@@ -350,6 +350,84 @@ pub fn cuda_matmul_lhs_transposed(a: &Tensor, b: &Tensor) -> Result<Tensor> {
     )
 }
 
+/// Run `a @ b^T` without materialising `b.transpose(-2, -1).contiguous()`.
+///
+/// `a` is stored row-major with shape `[..., M, K]`, `b` is row-major with
+/// shape `[..., N, K]`, and the result is `[..., M, N]`.
+pub fn cuda_matmul_rhs_transposed(a: &Tensor, b: &Tensor) -> Result<Tensor> {
+    let a_rank = a.rank();
+    let b_rank = b.rank();
+    if a_rank < 2 || b_rank < 2 {
+        return Err(crate::Error::Msg(format!(
+            "cuda_matmul_rhs_transposed: rank must be >= 2, got a={a_rank} b={b_rank}"
+        )));
+    }
+    if a_rank != b_rank {
+        return Err(crate::Error::Msg(format!(
+            "cuda_matmul_rhs_transposed: rank mismatch a={a_rank} b={b_rank}"
+        )));
+    }
+    let a_shape = a.shape();
+    let b_shape = b.shape();
+    for axis in 0..a_rank - 2 {
+        if a_shape[axis] != b_shape[axis] {
+            return Err(crate::Error::Msg(format!(
+                "cuda_matmul_rhs_transposed: batch axis {axis} mismatch: a={} b={}",
+                a_shape[axis], b_shape[axis]
+            )));
+        }
+    }
+    let m = a_shape[a_rank - 2];
+    let k_a = a_shape[a_rank - 1];
+    let n = b_shape[b_rank - 2];
+    let k_b = b_shape[b_rank - 1];
+    if k_a != k_b {
+        return Err(crate::Error::Msg(format!(
+            "cuda_matmul_rhs_transposed: contraction dim mismatch a.K={k_a} b.K={k_b}"
+        )));
+    }
+    if a.dtype() != b.dtype() {
+        return Err(crate::Error::Msg(format!(
+            "cuda_matmul_rhs_transposed: dtype mismatch a={} b={}",
+            a.dtype(),
+            b.dtype()
+        )));
+    }
+    let dtype = a.dtype();
+    let dtype_str = match dtype {
+        DType::F32 => "f32",
+        DType::BF16 => "bf16",
+        DType::F16 => "f16",
+        other => {
+            return Err(crate::Error::Msg(format!(
+                "cuda_matmul_rhs_transposed: unsupported dtype {other}"
+            )));
+        }
+    };
+    if !a.is_contiguous() || !b.is_contiguous() {
+        return Err(crate::Error::Msg(
+            "cuda_matmul_rhs_transposed: contiguous inputs required".to_string(),
+        ));
+    }
+
+    let mut out_shape = a_shape[..a_rank - 2].to_vec();
+    out_shape.push(m);
+    out_shape.push(n);
+    cuda_matmul_dispatch(
+        a,
+        b,
+        m,
+        n,
+        k_a,
+        dtype,
+        dtype_str,
+        out_shape,
+        MatmulLayout::RowMajor,
+        MatmulLayout::ColMajor,
+        "cuda_matmul_rhs_transposed",
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn cuda_matmul_dispatch(
     a: &Tensor,

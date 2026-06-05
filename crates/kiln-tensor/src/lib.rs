@@ -123,6 +123,7 @@ pub use cuda_allocator::CudaAllocator;
 #[cfg(feature = "cuda")]
 pub use cuda_matmul::{
     cublaslt_cache_path, cuda_matmul, cuda_matmul_into, cuda_matmul_lhs_transposed,
+    cuda_matmul_rhs_transposed,
     cuda_matmul_with_bias, flush_algo_cache_to_disk, load_algo_cache_from_disk,
     restore_into_shared_cache, snapshot_algo_cache,
 };
@@ -180,7 +181,8 @@ pub use rocm_capture_alloc::{
 #[cfg(feature = "rocm")]
 pub use rocm_matmul::{
     hipblaslt_cache_path, rocm_flush_algo_cache_to_disk, rocm_load_algo_cache_from_disk,
-    rocm_matmul, rocm_matmul_into, rocm_matmul_lhs_transposed, rocm_matmul_with_bias,
+    rocm_matmul, rocm_matmul_into, rocm_matmul_lhs_transposed, rocm_matmul_rhs_transposed,
+    rocm_matmul_with_bias,
     rocm_restore_into_shared_cache, rocm_snapshot_algo_cache,
 };
 #[cfg(feature = "rocm")]
