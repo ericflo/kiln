@@ -332,7 +332,11 @@ fn safetensor_to_kt(
 /// - `scale`: alpha / rank
 ///
 /// Returns: the LoRA delta tensor (same shape as base_output)
-pub fn compute_lora_delta(x: &KtTensor, proj: &LoraProjectionWeights, scale: f32) -> Result<KtTensor> {
+pub fn compute_lora_delta(
+    x: &KtTensor,
+    proj: &LoraProjectionWeights,
+    scale: f32,
+) -> Result<KtTensor> {
     // x: [..., in_features]
     // A: [rank, in_features] -> A^T: [in_features, rank]
     // B: [out_features, rank] -> B^T: [rank, out_features]
@@ -344,8 +348,8 @@ pub fn compute_lora_delta(x: &KtTensor, proj: &LoraProjectionWeights, scale: f32
     let a = proj.a.to_dtype(x.dtype())?;
     let b = proj.b.to_dtype(x.dtype())?;
 
-    let hidden = x.broadcast_matmul(&a.t()?)?; // [..., rank]
-    let delta = hidden.broadcast_matmul(&b.t()?)?; // [..., out_features]
+    let hidden = matmul_last_dim_rhs_transposed(x, &a)?; // [..., rank]
+    let delta = matmul_last_dim_rhs_transposed(&hidden, &b)?; // [..., out_features]
     let delta = (delta * scale as f64)?;
 
     // Final cast to input dtype (no-op when already matching).
@@ -353,19 +357,37 @@ pub fn compute_lora_delta(x: &KtTensor, proj: &LoraProjectionWeights, scale: f32
     Ok(delta)
 }
 
+fn matmul_last_dim_rhs_transposed(lhs: &KtTensor, rhs: &KtTensor) -> Result<KtTensor> {
+    let lhs_shape = lhs.shape();
+    let rhs_shape = rhs.shape();
+    if lhs_shape.len() < 2 || rhs_shape.len() != 2 {
+        anyhow::bail!(
+            "matmul_last_dim_rhs_transposed: expected lhs rank >= 2 and rhs rank 2, got lhs={lhs_shape:?} rhs={rhs_shape:?}"
+        );
+    }
+    let in_features = *lhs_shape
+        .last()
+        .context("matmul_last_dim_rhs_transposed lhs missing last dim")?;
+    let out_features = rhs_shape[0];
+    if rhs_shape[1] != in_features {
+        anyhow::bail!(
+            "matmul_last_dim_rhs_transposed: inner dim mismatch lhs last dim={in_features} rhs={rhs_shape:?}"
+        );
+    }
+    let rows = lhs_shape[..lhs_shape.len() - 1]
+        .iter()
+        .copied()
+        .product::<usize>();
+    let lhs_2d = lhs.reshape((rows, in_features))?.contiguous()?;
+    let out_2d = kiln_tensor::ops::matmul_rhs_transposed(&lhs_2d, rhs)?;
+    let mut out_shape = lhs_shape[..lhs_shape.len() - 1].to_vec();
+    out_shape.push(out_features);
+    Ok(out_2d.reshape(out_shape)?)
+}
+
 fn cpu_needs_f32_matmul(lhs: &KtTensor, rhs: &KtTensor) -> bool {
     matches!(lhs.device(), kiln_tensor::Device::Cpu)
         && (lhs.dtype() != kiln_tensor::DType::F32 || rhs.dtype() != kiln_tensor::DType::F32)
-}
-
-fn broadcast_matmul_cpu_compatible(lhs: &KtTensor, rhs: &KtTensor) -> Result<KtTensor> {
-    if cpu_needs_f32_matmul(lhs, rhs) {
-        let lhs_f32 = lhs.to_dtype(kiln_tensor::DType::F32)?;
-        let rhs_f32 = rhs.to_dtype(kiln_tensor::DType::F32)?;
-        Ok(lhs_f32.broadcast_matmul(&rhs_f32)?)
-    } else {
-        Ok(lhs.broadcast_matmul(rhs)?)
-    }
 }
 
 /// Apply a LoRA-augmented linear projection.
@@ -379,8 +401,14 @@ pub fn linear_with_lora(
     lora: Option<&LoraProjectionWeights>,
     scale: f32,
 ) -> Result<KtTensor> {
-    let base_weight_t = base_weight.t()?;
-    let base_output = broadcast_matmul_cpu_compatible(x, &base_weight_t)?;
+    let cpu_f32_matmul = cpu_needs_f32_matmul(x, base_weight);
+    let base_output = if cpu_f32_matmul {
+        let x_f32 = x.to_dtype(kiln_tensor::DType::F32)?;
+        let w_f32 = base_weight.to_dtype(kiln_tensor::DType::F32)?;
+        matmul_last_dim_rhs_transposed(&x_f32, &w_f32)?
+    } else {
+        matmul_last_dim_rhs_transposed(x, base_weight)?
+    };
     if let Some(proj) = lora {
         let delta = compute_lora_delta(x, proj, scale)?;
         Ok((base_output + delta)?)
