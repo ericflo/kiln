@@ -963,13 +963,13 @@ fn fused_linear_cross_entropy_phase_b_backward_impl_kt(
                 KtTensor::from_vec_on(device, row_hits, vec![hits]).map_err(FlceError::Kt)?;
             let rel_idx_t =
                 KtTensor::from_vec_on(device, rel_hits, vec![hits]).map_err(FlceError::Kt)?;
-            let head_chunk_t = head_chunk
+            let selected_head_cols =
+                index_select(&head_chunk, 1, &rel_idx_t).map_err(FlceError::Kt)?;
+            let selected_head_rows = selected_head_cols
                 .t()
                 .map_err(FlceError::Kt)?
                 .contiguous()
                 .map_err(FlceError::Kt)?;
-            let selected_head_rows =
-                index_select(&head_chunk_t, 0, &rel_idx_t).map_err(FlceError::Kt)?;
             let selected_weighted =
                 mul_scalar(&selected_head_rows, grad_scale).map_err(FlceError::Kt)?;
             let selected_contrib = scatter_add(&selected_weighted, 0, &row_idx_t, num_active)
