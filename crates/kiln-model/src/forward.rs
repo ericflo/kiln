@@ -2331,22 +2331,22 @@ fn profile_mlp_stages_enabled() -> bool {
     *ENABLED.get_or_init(|| env_truthy_for_profile("KILN_PROFILE_MLP_STAGES"))
 }
 
-#[cfg(feature = "cuda")]
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 fn cuda_gdn_ab_in_proj_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_CUDA_GDN_AB_IN_PROJ").is_err())
 }
 
-#[cfg(feature = "cuda")]
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 fn cuda_gdn_prefill_ab_in_proj_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_CUDA_GDN_PREFILL_AB_IN_PROJ").is_err())
 }
 
-#[cfg(feature = "cuda")]
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 const CUDA_GDN_PREFILL_AB_IN_PROJ_MAX_TOKENS: usize = 128;
 
-#[cfg(feature = "cuda")]
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 fn cuda_full_attn_qkv_in_proj_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var("KILN_DISABLE_CUDA_FULL_ATTN_QKV_IN_PROJ").is_err())
@@ -2939,12 +2939,12 @@ fn full_attn_qkv_proj_decode_if(
         && !crate::mtp_debug::is_mtp_fp32_head_armed()
         && !crate::mtp_debug::is_mtp_single_token_self_attn_armed()
     {
-        #[cfg(feature = "cuda")]
+        #[cfg(any(feature = "cuda", feature = "rocm"))]
         {
             if cuda_full_attn_qkv_in_proj_enabled()
                 && !x.track_op()
                 && x.dtype() == DType::BF16
-                && matches!(x.device(), Device::Cuda(_))
+                && cuda_or_rocm_device(x.device())
             {
                 if let Some(qkv_proj_t) = attn_weights.qkv_proj_t.as_ref() {
                     if let Ok((_, seq_len, hidden)) = x.dims3() {
@@ -2954,12 +2954,12 @@ fn full_attn_qkv_proj_decode_if(
                         if seq_len == 1
                             && qkv_proj_t.dtype() == DType::BF16
                             && !qkv_proj_t.track_op()
-                            && matches!(qkv_proj_t.device(), Device::Cuda(_))
+                            && cuda_or_rocm_device(qkv_proj_t.device())
                             && qkv_proj_t.is_contiguous()
                             && qkv_proj_t.dims() == [hidden, q_dim + k_dim + v_dim]
                         {
                             let qkv = broadcast_matmul_cpu_compatible(x, qkv_proj_t)
-                                .context("cuda full-attn combined Q/K/V projection matmul")?;
+                                .context("gpu full-attn combined Q/K/V projection matmul")?;
                             let q_raw = qkv.narrow(2, 0, q_dim)?;
                             let k_raw = qkv.narrow(2, q_dim, k_dim)?;
                             let v = qkv.narrow(2, q_dim + k_dim, v_dim)?;
@@ -3416,6 +3416,9 @@ pub struct GpuWeights {
     /// Computed once at load to avoid re-transposing the ~778 MiB bf16 matrix on every decode step
     /// (was 48% of ucopy_bf16 / ~43% of GPU time per PR #113 profile).
     pub embed_tokens_t: Tensor,
+    /// Optional ROCm-only row-wise W8A16 tied LM head. Stores the original
+    /// embedding rows `[vocab_size, hidden_size]` for fused greedy argmax.
+    pub lm_head_w8: Option<crate::rocm_w8_proj::RocmW8Proj>,
     /// Per-layer weights
     pub layers: Vec<GpuLayerWeights>,
     /// Final RMSNorm weight: [hidden_size]
@@ -3682,6 +3685,8 @@ fn upload_mtp_gpu_weights(
                 gate_proj_marlin: None,
                 up_proj_marlin: None,
                 down_proj_marlin: None,
+                gate_up_proj_w8: None,
+                down_proj_w8: None,
             },
         }
     };
@@ -3937,6 +3942,9 @@ pub struct GpuLinearAttentionWeights {
     /// quality drift than the in-projections or the MLP, so deployments
     /// opt in only after their own quality A/B passes.
     pub out_proj_marlin: Option<crate::marlin_proj::MarlinPackedProj>,
+    /// Optional ROCm-only row-wise W8A16 fused input projection storing
+    /// `[qkv | z | a | b]` rows. Populated only when `KILN_ROCM_W8A16=1`.
+    pub in_proj_qkvzab_w8: Option<crate::rocm_w8_proj::RocmW8Proj>,
 }
 
 impl GpuLinearAttentionWeights {
@@ -4272,6 +4280,11 @@ pub struct GpuFfnWeights {
     pub gate_proj_marlin: Option<crate::marlin_proj::MarlinPackedProj>,
     pub up_proj_marlin: Option<crate::marlin_proj::MarlinPackedProj>,
     pub down_proj_marlin: Option<crate::marlin_proj::MarlinPackedProj>,
+    /// Optional ROCm-only row-wise W8A16 decode projections. `gate_up_proj_w8`
+    /// stores `[2 * intermediate, hidden]`; `down_proj_w8` stores
+    /// `[hidden, intermediate]`. Populated only when `KILN_ROCM_W8A16=1`.
+    pub gate_up_proj_w8: Option<crate::rocm_w8_proj::RocmW8Proj>,
+    pub down_proj_w8: Option<crate::rocm_w8_proj::RocmW8Proj>,
 }
 
 impl GpuFfnWeights {
@@ -6201,6 +6214,7 @@ impl GpuWeights {
         config: &kiln_core::config::ModelConfig,
         device: &Device,
     ) -> Result<Self> {
+        let w8a16_enabled = crate::rocm_w8_proj::env_enabled();
         // On Metal and on Vulkan-active processes, `embed_tokens` itself
         // is never read past `embedding_lookup_from_weights` (which falls
         // back to `embed_tokens_t` whenever the dims don't match the
@@ -6224,6 +6238,21 @@ impl GpuWeights {
                 cached_transpose_for_weight(&weights.embedding.embed_tokens, &embed_tokens, device)
                     .context("embed_tokens cached transpose")?;
             (embed_tokens, embed_tokens_t)
+        };
+        let lm_head_w8 = {
+            #[cfg(feature = "rocm")]
+            {
+                if w8a16_enabled && matches!(*device, Device::Rocm(_)) {
+                    crate::rocm_w8_proj::pack_from_bf16_rows(&embed_tokens)
+                        .context("w8 lm_head pack")?
+                } else {
+                    None
+                }
+            }
+            #[cfg(not(feature = "rocm"))]
+            {
+                None
+            }
         };
         let final_norm = weight_to_tensor(&weights.final_norm, device).context("final_norm")?;
         let rotary_inv_freq =
@@ -6291,9 +6320,9 @@ impl GpuWeights {
                     let (v_proj, v_proj_t) = attn_proj.next().context(ctx("v_proj missing"))?;
                     let (o_proj, o_proj_t) = attn_proj.next().context(ctx("o_proj missing"))?;
                     let qkv_proj_t = {
-                        #[cfg(feature = "cuda")]
+                        #[cfg(any(feature = "cuda", feature = "rocm"))]
                         {
-                            if matches!(device, Device::Cuda(_)) {
+                            if cuda_or_rocm_device(*device) {
                                 Some(
                                     Tensor::cat(
                                         &[&q_proj_t, &k_proj_t, &v_proj_t],
@@ -6306,7 +6335,7 @@ impl GpuWeights {
                                 None
                             }
                         }
-                        #[cfg(not(feature = "cuda"))]
+                        #[cfg(not(any(feature = "cuda", feature = "rocm")))]
                         {
                             None
                         }
@@ -6405,7 +6434,7 @@ impl GpuWeights {
                     let (in_proj_b, in_proj_b_t) =
                         attn_proj.next().context(ctx("in_proj_b missing"))?;
                     let in_proj_ab_t = {
-                        #[cfg(any(feature = "cuda", feature = "metal"))]
+                        #[cfg(any(feature = "cuda", feature = "metal", feature = "rocm"))]
                         {
                             let mut should_cache = false;
                             #[cfg(feature = "cuda")]
@@ -6415,6 +6444,10 @@ impl GpuWeights {
                             #[cfg(feature = "metal")]
                             {
                                 should_cache |= matches!(device, Device::Metal(_));
+                            }
+                            #[cfg(feature = "rocm")]
+                            {
+                                should_cache |= matches!(device, Device::Rocm(_));
                             }
                             if should_cache {
                                 Some(
@@ -6429,7 +6462,26 @@ impl GpuWeights {
                                 None
                             }
                         }
-                        #[cfg(not(any(feature = "cuda", feature = "metal")))]
+                        #[cfg(not(any(feature = "cuda", feature = "metal", feature = "rocm")))]
+                        {
+                            None
+                        }
+                    };
+                    let in_proj_qkvzab_w8 = {
+                        #[cfg(feature = "rocm")]
+                        {
+                            if w8a16_enabled && matches!(*device, Device::Rocm(_)) {
+                                let rows =
+                                    Tensor::cat(&[&in_proj_qkv, &in_proj_z, &in_proj_a, &in_proj_b], 0)?
+                                        .contiguous()
+                                        .context(ctx("w8 gdn in-proj rows contiguous"))?;
+                                crate::rocm_w8_proj::pack_from_bf16_rows(&rows)
+                                    .context(ctx("w8 gdn in-proj pack"))?
+                            } else {
+                                None
+                            }
+                        }
+                        #[cfg(not(feature = "rocm"))]
                         {
                             None
                         }
@@ -6455,6 +6507,7 @@ impl GpuWeights {
                             in_proj_ab_t,
                             out_proj_t,
                             out_proj_marlin: None,
+                            in_proj_qkvzab_w8,
                         }),
                     )
                 }
@@ -6519,6 +6572,28 @@ impl GpuWeights {
                     None
                 }
             };
+            let (gate_up_proj_w8, down_proj_w8) = {
+                #[cfg(feature = "rocm")]
+                {
+                    if w8a16_enabled && !w4a16_enabled && matches!(*device, Device::Rocm(_)) {
+                        let gate_up_rows = Tensor::cat(&[&gate_proj, &up_proj], 0)?
+                            .contiguous()
+                            .context(ctx("w8 gate_up rows contiguous"))?;
+                        (
+                            crate::rocm_w8_proj::pack_from_bf16_rows(&gate_up_rows)
+                                .context(ctx("w8 gate_up pack"))?,
+                            crate::rocm_w8_proj::pack_from_bf16_rows(&down_proj)
+                                .context(ctx("w8 down pack"))?,
+                        )
+                    } else {
+                        (None, None)
+                    }
+                }
+                #[cfg(not(feature = "rocm"))]
+                {
+                    (None, None)
+                }
+            };
             let mlp = GpuFfnWeights {
                 gate_proj,
                 up_proj,
@@ -6530,6 +6605,8 @@ impl GpuWeights {
                 gate_proj_marlin: None,
                 up_proj_marlin: None,
                 down_proj_marlin: None,
+                gate_up_proj_w8,
+                down_proj_w8,
             };
 
             layers.push(GpuLayerWeights {
@@ -6625,6 +6702,7 @@ impl GpuWeights {
         Ok(Self {
             embed_tokens,
             embed_tokens_t,
+            lm_head_w8,
             layers,
             final_norm,
             rotary_inv_freq,
@@ -10174,6 +10252,61 @@ fn swiglu_ffn_impl_no_chunk(
     let has_marlin = mlp.gate_proj_marlin.is_some()
         || mlp.up_proj_marlin.is_some()
         || mlp.down_proj_marlin.is_some();
+    #[cfg(feature = "rocm")]
+    if !has_mlp_lora
+        && !has_marlin
+        && seq_len == 1
+        && x.dtype() == DType::BF16
+        && !x.track_op()
+        && let (Some(gate_up_w8), Some(down_w8)) =
+            (mlp.gate_up_proj_w8.as_ref(), mlp.down_proj_w8.as_ref())
+    {
+        if gate_up_w8.n % 2 == 0 {
+            let g_dim = gate_up_w8.n / 2;
+            let stage_profile = start_mlp_stage_profile(profile_device, profile_context)?;
+            let gate_up = {
+                kiln_nvtx::range!(c"kiln/mlp/gate_up_w8");
+                crate::rocm_w8_proj::matmul_bf16(x, gate_up_w8)?
+            };
+            finish_mlp_stage_profile(
+                profile_device,
+                profile_context,
+                "gate_up_w8",
+                seq_len,
+                stage_profile,
+            )?;
+            if let Some(gate_up_kt) = try_borrow_kt_cuda(&gate_up)
+                .filter(|t| kiln_rmsnorm_kernel::supports_mlp_silu_mul_packed_kt(t, g_dim))
+            {
+                let stage_profile = start_mlp_stage_profile(profile_device, profile_context)?;
+                let hidden = {
+                    kiln_nvtx::range!(c"kiln/mlp/gate_silu_hidden_mul_packed");
+                    kiln_rmsnorm_kernel::fused_mlp_silu_mul_packed_kt(&gate_up_kt, g_dim)
+                        .map_err(|e| anyhow::anyhow!("kt fused_mlp_silu_mul_packed: {e}"))?
+                };
+                finish_mlp_stage_profile(
+                    profile_device,
+                    profile_context,
+                    "gate_silu_hidden_mul_packed",
+                    seq_len,
+                    stage_profile,
+                )?;
+                let stage_profile = start_mlp_stage_profile(profile_device, profile_context)?;
+                let out = {
+                    kiln_nvtx::range!(c"kiln/mlp/down_w8");
+                    crate::rocm_w8_proj::matmul_bf16(&hidden, down_w8)?
+                };
+                finish_mlp_stage_profile(
+                    profile_device,
+                    profile_context,
+                    "down_proj_w8",
+                    seq_len,
+                    stage_profile,
+                )?;
+                return Ok(out);
+            }
+        }
+    }
     if !has_mlp_lora && !has_marlin {
         if let Some(backend) = backend {
             let stage_profile = start_mlp_stage_profile(profile_device, profile_context)?;
@@ -15297,6 +15430,7 @@ fn gated_deltanet_forward_decode_if_inner(
     let dv = config.linear_value_head_dim;
     let qk_dim = config.linear_qk_dim();
     let v_dim = config.linear_v_dim();
+    let qkv_dim = config.linear_qkv_dim();
     let kernel_size = config.linear_conv_kernel_dim;
     let gqa_ratio = nv / nk;
     // CP-4 (#1082): the GDN forward-only fast paths (fused conv+split, backend
@@ -15370,6 +15504,19 @@ fn gated_deltanet_forward_decode_if_inner(
         kiln_nvtx::range!(c"kiln/gdn/in_proj");
         if !has_gdn_in_lora
             && gdn_forward_only_fastpaths
+            && seq_len == 1
+            && x.dtype() == DType::BF16
+            && !x.track_op()
+            && let Some(w8) = weights.in_proj_qkvzab_w8.as_ref()
+        {
+            let fused = crate::rocm_w8_proj::matmul_bf16(x, w8)?;
+            let mixed_qkv = fused.narrow(2, 0, qkv_dim)?;
+            let z = fused.narrow(2, qkv_dim, v_dim)?;
+            let a = fused.narrow(2, qkv_dim + v_dim, nv)?;
+            let b = fused.narrow(2, qkv_dim + v_dim + nv, nv)?;
+            (mixed_qkv, z, a, b, None::<Tensor>)
+        } else if !has_gdn_in_lora
+            && gdn_forward_only_fastpaths
             && let Some((mixed_qkv, z, a, b)) = backend.gdn_in_proj_decode(
                 x,
                 &weights.in_proj_qkv_t,
@@ -15421,7 +15568,7 @@ fn gated_deltanet_forward_decode_if_inner(
                                 out = Some((ab, a, b));
                             }
                         }
-                        #[cfg(feature = "cuda")]
+                        #[cfg(any(feature = "cuda", feature = "rocm"))]
                         {
                             if out.is_none()
                                 && cuda_gdn_ab_in_proj_enabled()
@@ -15433,13 +15580,13 @@ fn gated_deltanet_forward_decode_if_inner(
                                 && x.dtype() == DType::BF16
                                 && in_proj_ab_t.dtype() == DType::BF16
                                 && !in_proj_ab_t.track_op()
-                                && matches!(x.device(), Device::Cuda(_))
-                                && matches!(in_proj_ab_t.device(), Device::Cuda(_))
+                                && cuda_or_rocm_device(x.device())
+                                && cuda_or_rocm_device(in_proj_ab_t.device())
                                 && in_proj_ab_t.is_contiguous()
                                 && in_proj_ab_t.dims() == [x.dim(2)?, 2 * nv]
                             {
                                 let ab = broadcast_matmul_cpu_compatible(x, in_proj_ab_t)
-                                    .context("cuda gdn combined A/B in-proj matmul")?;
+                                    .context("gpu gdn combined A/B in-proj matmul")?;
                                 let a = ab.narrow(2, 0, nv)?;
                                 let b = ab.narrow(2, nv, nv)?;
                                 out = Some((ab, a, b));
@@ -26728,6 +26875,20 @@ fn model_forward_paged_inner(
                     return Ok((None, None, Some(token)));
                 }
                 let normed = rms_norm(&last, &weights.final_norm, config.rms_norm_eps)?;
+                #[cfg(feature = "rocm")]
+                if let Some(lm_head_w8) = weights.lm_head_w8.as_ref() {
+                    if normed.dtype() == DType::BF16
+                        && !normed.track_op()
+                        && matches!(normed.device(), Device::Rocm(_))
+                    {
+                        let normed = normed
+                            .contiguous()
+                            .context("rocm w8 lm_head argmax normed contiguous")?;
+                        let token = crate::rocm_w8_proj::argmax_bf16(&normed, lm_head_w8)
+                            .context("rocm w8 lm_head argmax")?;
+                        return Ok((None, None, Some(token)));
+                    }
+                }
                 lm_head_argmax_backend_decode_if(Some(backend), &normed, &weights.embed_tokens_t)?
             };
             Ok((None, None, Some(token)))
@@ -27506,6 +27667,8 @@ mod tests {
             gate_proj_marlin: None,
             up_proj_marlin: None,
             down_proj_marlin: None,
+                gate_up_proj_w8: None,
+                down_proj_w8: None,
         };
         let backend = FixedMlpBackend {
             device: device.clone(),
@@ -27574,6 +27737,8 @@ mod tests {
             gate_proj_marlin: None,
             up_proj_marlin: None,
             down_proj_marlin: None,
+                gate_up_proj_w8: None,
+                down_proj_w8: None,
         };
         let backend = FixedMlpBackend {
             device: device.clone(),
@@ -28670,6 +28835,8 @@ mod tests {
             gate_proj_marlin: None,
             up_proj_marlin: None,
             down_proj_marlin: None,
+                gate_up_proj_w8: None,
+                down_proj_w8: None,
         };
         let result = swiglu_ffn(&x, &mlp, None)?;
         assert_eq!(result.dims(), &[batch, seq_len, hidden]);
@@ -28703,6 +28870,8 @@ mod tests {
             gate_proj_marlin: None,
             up_proj_marlin: None,
             down_proj_marlin: None,
+                gate_up_proj_w8: None,
+                down_proj_w8: None,
         };
         let result = swiglu_ffn(&x, &mlp, None)?;
         let vals = result.to_vec3::<f32>()?;
@@ -28822,6 +28991,8 @@ mod tests {
             gate_proj_marlin: None,
             up_proj_marlin: None,
             down_proj_marlin: None,
+                gate_up_proj_w8: None,
+                down_proj_w8: None,
         };
         let mlp_fused = GpuFfnWeights {
             gate_proj: gate,
@@ -28834,6 +29005,8 @@ mod tests {
             gate_proj_marlin: None,
             up_proj_marlin: None,
             down_proj_marlin: None,
+                gate_up_proj_w8: None,
+                down_proj_w8: None,
         };
 
         let legacy = swiglu_ffn(&x, &mlp_legacy, None)?;
@@ -28997,6 +29170,8 @@ mod tests {
             gate_proj_marlin: None,
             up_proj_marlin: None,
             down_proj_marlin: None,
+                gate_up_proj_w8: None,
+                down_proj_w8: None,
         })
     }
 
@@ -29033,6 +29208,7 @@ mod tests {
         Ok(GpuWeights {
             embed_tokens,
             embed_tokens_t,
+            lm_head_w8: None,
             layers,
             final_norm,
             rotary_inv_freq,
@@ -29202,6 +29378,7 @@ mod tests {
                     a_log_gates: Tensor::zeros(nv, DType::F32, device)?,
                     dt_bias: Tensor::zeros(nv, DType::BF16, device)?,
                     out_proj_marlin: None,
+                            in_proj_qkvzab_w8: None,
                 })
             };
 
@@ -29218,6 +29395,7 @@ mod tests {
         Ok(GpuWeights {
             embed_tokens,
             embed_tokens_t,
+            lm_head_w8: None,
             layers,
             final_norm,
             rotary_inv_freq,
@@ -31279,6 +31457,8 @@ mod tests {
                 gate_proj_marlin: None,
                 up_proj_marlin: None,
                 down_proj_marlin: None,
+                gate_up_proj_w8: None,
+                down_proj_w8: None,
             },
         };
 
@@ -31348,6 +31528,8 @@ mod tests {
                 gate_proj_marlin: None,
                 up_proj_marlin: None,
                 down_proj_marlin: None,
+                gate_up_proj_w8: None,
+                down_proj_w8: None,
             },
         };
 
@@ -31412,6 +31594,7 @@ mod tests {
                 in_proj_ab_t: None,
                 out_proj_t: Tensor::zeros((1, 1), DType::F32, &device)?,
                 out_proj_marlin: None,
+                            in_proj_qkvzab_w8: None,
             }),
             mlp: GpuFfnWeights {
                 gate_proj: Tensor::zeros((1, hidden), DType::F32, &device)?,
@@ -31424,6 +31607,8 @@ mod tests {
                 gate_proj_marlin: None,
                 up_proj_marlin: None,
                 down_proj_marlin: None,
+                gate_up_proj_w8: None,
+                down_proj_w8: None,
             },
         };
 
@@ -31715,6 +31900,8 @@ mod tests {
                     gate_proj_marlin: None,
                     up_proj_marlin: None,
                     down_proj_marlin: None,
+                    gate_up_proj_w8: None,
+                    down_proj_w8: None,
                 },
             });
         }
@@ -31726,6 +31913,7 @@ mod tests {
         Ok(GpuWeights {
             embed_tokens,
             embed_tokens_t,
+            lm_head_w8: None,
             layers,
             final_norm,
             rotary_inv_freq,
@@ -32168,6 +32356,7 @@ mod tests {
                     in_proj_ab_t: None,
                     out_proj_t,
                     out_proj_marlin: None,
+                            in_proj_qkvzab_w8: None,
                 })
             };
 
@@ -32192,6 +32381,8 @@ mod tests {
                     gate_proj_marlin: None,
                     up_proj_marlin: None,
                     down_proj_marlin: None,
+                gate_up_proj_w8: None,
+                down_proj_w8: None,
                 },
             });
         }
@@ -32203,6 +32394,7 @@ mod tests {
         Ok(GpuWeights {
             embed_tokens,
             embed_tokens_t,
+            lm_head_w8: None,
             layers,
             final_norm,
             rotary_inv_freq,

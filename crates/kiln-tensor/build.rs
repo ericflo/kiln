@@ -308,6 +308,10 @@ fn build_rocm() {
         // D2H/H2D round-trip and unblocks HIP graph capture. Pure index math,
         // no cross-lane reduction → wave32/64-correct.
         "paged_decode_meta.cu",
+        // Experimental decode-only W8A16 GEMV. One block per output row with a
+        // wave-size-agnostic shared-memory reduction; used behind an opt-in
+        // model-side flag for bandwidth-bound single-token projections.
+        "w8_gemv.cu",
     ];
 
     let mut objects = Vec::new();

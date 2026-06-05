@@ -1406,6 +1406,18 @@ impl BackendRuntime for RocmBackend {
         Ok(Some(out_kt))
     }
 
+    fn supports_linear_decode_argmax(&self) -> bool {
+        true
+    }
+
+    fn linear_decode_argmax(
+        &self,
+        _x: &kiln_tensor::Tensor,
+        _weight_t: &kiln_tensor::Tensor,
+    ) -> Result<Option<u32>> {
+        Ok(None)
+    }
+
     fn linear_prefill_apply(&self, x: &kiln_tensor::Tensor, weight_t: &kiln_tensor::Tensor) -> Result<Option<kiln_tensor::Tensor>> {
         if !matches!(x.device(), kiln_tensor::Device::Rocm(_))
             || !matches!(weight_t.device(), kiln_tensor::Device::Rocm(_))

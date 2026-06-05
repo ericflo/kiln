@@ -1,0 +1,110 @@
+//! Experimental ROCm W8A16 decode projections.
+//!
+//! This is deliberately opt-in (`KILN_ROCM_W8A16=1`) and decode-scoped. It
+//! packs BF16 row-major projection weights `[out, in]` into signed int8 plus
+//! one F32 scale per output row, then uses a ROCm GEMV kernel for single-token
+//! decode.
+
+use anyhow::{Context, Result};
+
+#[derive(Clone, Debug)]
+pub struct RocmW8Proj {
+    pub q_weight: kiln_tensor::Tensor,
+    pub scales: kiln_tensor::Tensor,
+    pub k: usize,
+    pub n: usize,
+}
+
+pub fn env_enabled() -> bool {
+    kiln_core::env_flag::env_flag("KILN_ROCM_W8A16", false)
+}
+
+pub fn pack_from_bf16_rows(weight: &kiln_tensor::Tensor) -> Result<Option<RocmW8Proj>> {
+    if !matches!(weight.device(), kiln_tensor::Device::Rocm(_)) {
+        return Ok(None);
+    }
+    if weight.dtype() != kiln_tensor::DType::BF16 {
+        anyhow::bail!("rocm_w8_proj: weight must be BF16, got {}", weight.dtype());
+    }
+    let dims = weight.dims();
+    if dims.len() != 2 {
+        anyhow::bail!("rocm_w8_proj: weight must be [out, in], got {dims:?}");
+    }
+    let (n, k) = (dims[0], dims[1]);
+    if n == 0 || k == 0 {
+        anyhow::bail!("rocm_w8_proj: empty weight {dims:?}");
+    }
+    let device = weight.device();
+
+    let host = weight
+        .to_dtype(kiln_tensor::DType::F32)
+        .context("rocm_w8_proj: cast weight to f32")?
+        .contiguous()
+        .context("rocm_w8_proj: contiguous f32 weight")?
+        .flatten_all()
+        .context("rocm_w8_proj: flatten weight")?
+        .to_vec1::<f32>()
+        .context("rocm_w8_proj: download weight")?;
+    debug_assert_eq!(host.len(), n * k);
+
+    let mut q = Vec::with_capacity(n * k);
+    let mut scales = Vec::with_capacity(n);
+    for row in host.chunks_exact(k) {
+        let mut max_abs = 0.0f32;
+        for &v in row {
+            max_abs = max_abs.max(v.abs());
+        }
+        let scale = if max_abs <= 1.0e-12 { 1.0 } else { max_abs / 127.0 };
+        scales.push(scale);
+        let inv = 1.0 / scale;
+        for &v in row {
+            let rounded = (v * inv).round().clamp(-127.0, 127.0) as i8;
+            q.push(rounded as u8);
+        }
+    }
+
+    let q_weight = kiln_tensor::Tensor::from_vec(q, (n, k))
+        .context("rocm_w8_proj: build q_weight")?
+        .to_device(device)
+        .context("rocm_w8_proj: upload q_weight")?;
+    let scales = kiln_tensor::Tensor::from_vec(scales, (n,))
+        .context("rocm_w8_proj: build scales")?
+        .to_device(device)
+        .context("rocm_w8_proj: upload scales")?;
+
+    Ok(Some(RocmW8Proj {
+        q_weight,
+        scales,
+        k,
+        n,
+    }))
+}
+
+#[cfg(feature = "rocm")]
+pub fn matmul_bf16(x: &kiln_tensor::Tensor, w: &RocmW8Proj) -> Result<kiln_tensor::Tensor> {
+    let out = kiln_tensor::rocm_w8a16_gemv_bf16(x, &w.q_weight, &w.scales)
+        .map_err(|e| anyhow::anyhow!("rocm_w8_proj: gemv: {e}"))?;
+    Ok(out)
+}
+
+#[cfg(not(feature = "rocm"))]
+pub fn matmul_bf16(_x: &kiln_tensor::Tensor, _w: &RocmW8Proj) -> Result<kiln_tensor::Tensor> {
+    anyhow::bail!("rocm_w8_proj::matmul_bf16 requires the rocm feature")
+}
+
+#[cfg(feature = "rocm")]
+pub fn argmax_bf16(x: &kiln_tensor::Tensor, w: &RocmW8Proj) -> Result<u32> {
+    let idx = kiln_tensor::rocm_w8a16_gemv_argmax_bf16(x, &w.q_weight, &w.scales)
+        .map_err(|e| anyhow::anyhow!("rocm_w8_proj: gemv_argmax: {e}"))?;
+    let values = idx
+        .flatten_all()
+        .context("rocm_w8_proj: flatten argmax")?
+        .to_vec1::<i64>()
+        .context("rocm_w8_proj: read argmax")?;
+    Ok(values[0] as u32)
+}
+
+#[cfg(not(feature = "rocm"))]
+pub fn argmax_bf16(_x: &kiln_tensor::Tensor, _w: &RocmW8Proj) -> Result<u32> {
+    anyhow::bail!("rocm_w8_proj::argmax_bf16 requires the rocm feature")
+}

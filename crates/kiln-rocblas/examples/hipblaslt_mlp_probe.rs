@@ -50,6 +50,9 @@ struct Report {
 fn main() {
     let mut out_path: Option<PathBuf> = None;
     let mut iters: i32 = 32;
+    let mut bt: Option<i32> = None;
+    let mut k: i32 = 2560;
+    let mut n: i32 = 18432;
 
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
@@ -64,9 +67,30 @@ fn main() {
                     }
                 }
             }
+            "--bt" => {
+                if let Some(s) = args.next() {
+                    if let Ok(v) = s.parse::<i32>() {
+                        bt = Some(v);
+                    }
+                }
+            }
+            "--k" => {
+                if let Some(s) = args.next() {
+                    if let Ok(v) = s.parse::<i32>() {
+                        k = v;
+                    }
+                }
+            }
+            "--n" => {
+                if let Some(s) = args.next() {
+                    if let Ok(v) = s.parse::<i32>() {
+                        n = v;
+                    }
+                }
+            }
             "-h" | "--help" => {
                 eprintln!(
-                    "usage: hipblaslt_mlp_probe [--out PATH] [--iters N]\n\
+                    "usage: hipblaslt_mlp_probe [--out PATH] [--iters N] [--bt M --k K --n N]\n\
                      \n\
                      Benchmarks the Qwen3.5-4B MLP gate||up matmul shape\n\
                      [B*T, 2560] @ [2560, 18432] at B*T in {{1024, 2048, 4096, 8192}}\n\
@@ -78,9 +102,10 @@ fn main() {
         }
     }
 
-    let bts = [1024, 2048, 4096, 8192];
-    let k = 2560;
-    let n = 18432;
+    let bts: Vec<i32> = match bt {
+        Some(bt) => vec![bt],
+        None => vec![1024, 2048, 4096, 8192],
+    };
 
     // Best-effort GPU name via `rocm-smi --showproductname`.
     let gpu_query = std::process::Command::new("rocm-smi")

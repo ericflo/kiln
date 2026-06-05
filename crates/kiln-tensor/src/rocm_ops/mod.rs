@@ -31,6 +31,7 @@ pub mod scalar_op;
 pub mod scan_axis;
 pub mod scatter_add;
 pub mod topk_last_axis;
+pub mod w8_gemv;
 pub mod where_select;
 
 pub use activation::*;
@@ -60,4 +61,5 @@ pub use scalar_op::*;
 pub use scan_axis::*;
 pub use scatter_add::*;
 pub use topk_last_axis::*;
+pub use w8_gemv::*;
 pub use where_select::*;

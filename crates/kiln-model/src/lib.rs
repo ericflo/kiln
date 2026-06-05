@@ -30,6 +30,7 @@ pub mod rocm_graph;
 pub mod paged_kv_cache_kt;
 pub mod quantized;
 pub mod qwen35_shapes;
+pub mod rocm_w8_proj;
 pub mod sampling;
 pub mod speculative;
 #[cfg(any(
