@@ -32,7 +32,7 @@ fn swiglu_disabled() -> bool {
 
 #[cfg(feature = "rocm")]
 pub fn swiglu_bf16_enabled(w: &RocmW8Proj) -> bool {
-    !swiglu_disabled() && !a8_enabled() && w.n % 2 == 0
+    !swiglu_disabled() && w.n % 2 == 0
 }
 
 pub fn pack_from_bf16_rows(weight: &kiln_tensor::Tensor) -> Result<Option<RocmW8Proj>> {
@@ -116,8 +116,13 @@ pub fn swiglu_bf16(
     if !swiglu_bf16_enabled(w) {
         return Ok(None);
     }
-    let out = kiln_tensor::rocm_w8a16_swiglu_bf16(x, &w.q_weight, &w.scales)
-        .map_err(|e| anyhow::anyhow!("rocm_w8_proj: swiglu: {e}"))?;
+    let out = if a8_enabled() {
+        kiln_tensor::rocm_w8a8_swiglu_bf16(x, &w.q_weight, &w.scales)
+            .map_err(|e| anyhow::anyhow!("rocm_w8_proj: a8 swiglu: {e}"))?
+    } else {
+        kiln_tensor::rocm_w8a16_swiglu_bf16(x, &w.q_weight, &w.scales)
+            .map_err(|e| anyhow::anyhow!("rocm_w8_proj: swiglu: {e}"))?
+    };
     Ok(Some(out))
 }
 
