@@ -12119,10 +12119,6 @@ pub fn lm_head_sample_backend_decode_if(
     let Some(backend) = backend else {
         return Ok(None);
     };
-    if !backend.supports_linear_decode_sample(params.top_k) {
-        return Ok(None);
-    }
-    let normed = rms_norm(hidden, &weights.final_norm, config.rms_norm_eps)?;
     let (history_indices, history_counts) = unique_history_counts(history);
     let seed = step_seed.unwrap_or_else(|| {
         // PRNG seed for un-seeded requests — derived from nanos +
@@ -12137,6 +12133,52 @@ pub fn lm_head_sample_backend_decode_if(
         });
         nanos.wrapping_add(h)
     });
+
+    #[cfg(feature = "rocm")]
+    {
+        use kiln_core::sampling::SamplingParams as SP;
+
+        if std::env::var("KILN_DISABLE_ROCM_W8_SAMPLED_LM_HEAD").is_err()
+            && params.top_k == 0
+            && SP::top_p_disables_nucleus_filter(params.top_p)
+            && SP::min_p_is_disabled(params.min_p)
+            && params.temperature.is_finite()
+            && params.temperature > 0.0
+        {
+            if let Some(lm_head_w8) = weights.lm_head_w8.as_ref() {
+                let normed = rms_norm(hidden, &weights.final_norm, config.rms_norm_eps)?;
+                let dims = normed.dims();
+                let lead: usize = dims[..dims.len().saturating_sub(1)].iter().product();
+                if lead == 1
+                    && normed.dtype() == DType::BF16
+                    && !normed.track_op()
+                    && matches!(normed.device(), Device::Rocm(_))
+                {
+                    let normed = normed
+                        .contiguous()
+                        .context("rocm w8 sampled lm_head normed contiguous")?;
+                    let token = crate::rocm_w8_proj::gumbel_sample_bf16(
+                        &normed,
+                        lm_head_w8,
+                        &history_indices,
+                        &history_counts,
+                        params.repetition_penalty,
+                        params.presence_penalty,
+                        params.frequency_penalty,
+                        params.temperature,
+                        seed,
+                    )
+                    .context("rocm w8 sampled lm_head gumbel sample")?;
+                    return Ok(Some(token));
+                }
+            }
+        }
+    }
+
+    if !backend.supports_linear_decode_sample(params.top_k) {
+        return Ok(None);
+    }
+    let normed = rms_norm(hidden, &weights.final_norm, config.rms_norm_eps)?;
     backend.linear_decode_sample(
         &normed,
         &weights.embed_tokens_t,
@@ -25273,6 +25315,49 @@ pub fn model_forward_paged_normed_hidden(
     Ok(normed)
 }
 
+/// Paged-KV prefill that returns only the last pre-final-RMSNorm hidden row,
+/// skipping the LM head matmul entirely.
+#[allow(clippy::too_many_arguments)]
+pub fn model_forward_paged_last_token_hidden(
+    backend: &dyn BackendRuntime,
+    token_ids: &[u32],
+    weights: &GpuWeights,
+    config: &kiln_core::config::ModelConfig,
+    paged_cache: &PagedKvCache,
+    block_table: &BlockTable,
+    start_pos: usize,
+    linear_state: Option<&mut LinearAttentionState>,
+    lora: Option<&LoraWeights>,
+) -> Result<Tensor> {
+    let seq_len = token_ids.len();
+    if seq_len == 0 {
+        anyhow::bail!("model_forward_paged_last_token_hidden requires at least one token");
+    }
+    let (_logits, hidden, _token) = model_forward_paged_inner(
+        backend,
+        token_ids,
+        weights,
+        config,
+        paged_cache,
+        block_table,
+        start_pos,
+        linear_state,
+        lora,
+        None,
+        None,
+        #[cfg(any(feature = "cuda", feature = "rocm"))]
+        None,
+        #[cfg(feature = "cuda")]
+        None,
+        LmHeadMode::HiddenOnly,
+    )?;
+    let hidden = hidden.expect("LmHeadMode::HiddenOnly always returns hidden");
+    hidden
+        .narrow(1, seq_len - 1, 1)?
+        .contiguous()
+        .context("paged last-token hidden contiguous")
+}
+
 /// Paged-KV forward pass for generation prefill when only the next-token
 /// distribution is needed.
 ///
@@ -27949,6 +28034,112 @@ pub fn model_forward_paged_streaming_last_token_with_last_hidden(
         lora,
         streaming_tile_tokens_for_paged_prefill(&weights.embed_tokens.device(), token_ids.len()),
     )
+}
+
+/// Streaming/tiled paged prefill that returns only the final pre-final-RMSNorm
+/// hidden row, skipping the LM head matmul entirely.
+#[allow(clippy::too_many_arguments)]
+pub fn model_forward_paged_streaming_last_token_hidden(
+    backend: &dyn BackendRuntime,
+    token_ids: &[u32],
+    weights: &GpuWeights,
+    config: &kiln_core::config::ModelConfig,
+    paged_cache: &PagedKvCache,
+    block_table: &BlockTable,
+    start_pos: usize,
+    linear_state: Option<&mut LinearAttentionState>,
+    lora: Option<&LoraWeights>,
+) -> Result<Tensor> {
+    model_forward_paged_streaming_last_token_hidden_with(
+        backend,
+        token_ids,
+        weights,
+        config,
+        paged_cache,
+        block_table,
+        start_pos,
+        linear_state,
+        lora,
+        streaming_tile_tokens_for_paged_prefill(&weights.embed_tokens.device(), token_ids.len()),
+    )
+}
+
+/// Explicit-tile variant of [`model_forward_paged_streaming_last_token_hidden`].
+#[allow(clippy::too_many_arguments)]
+pub fn model_forward_paged_streaming_last_token_hidden_with(
+    backend: &dyn BackendRuntime,
+    token_ids: &[u32],
+    weights: &GpuWeights,
+    config: &kiln_core::config::ModelConfig,
+    paged_cache: &PagedKvCache,
+    block_table: &BlockTable,
+    start_pos: usize,
+    mut linear_state: Option<&mut LinearAttentionState>,
+    lora: Option<&LoraWeights>,
+    tile_size: usize,
+) -> Result<Tensor> {
+    let total = token_ids.len();
+    if total == 0 {
+        anyhow::bail!("model_forward_paged_streaming_last_token_hidden requires at least one token");
+    }
+    if tile_size == 0 || tile_size % GDN_CHUNK_SIZE != 0 {
+        anyhow::bail!(
+            "streaming tile_size must be a positive multiple of GDN_CHUNK_SIZE ({}), got {tile_size}",
+            GDN_CHUNK_SIZE
+        );
+    }
+
+    let mut last_hidden: Option<Tensor> = None;
+    let mut cursor = 0usize;
+    while cursor < total {
+        let end = (cursor + tile_size).min(total);
+        let is_last_tile = end == total;
+        let mode = if is_last_tile {
+            LmHeadMode::HiddenOnly
+        } else {
+            LmHeadMode::Skip
+        };
+
+        let state_for_tile: Option<&mut LinearAttentionState> = linear_state.as_deref_mut();
+        let (_tile_logits, tile_hidden, _token) = model_forward_paged_inner(
+            backend,
+            &token_ids[cursor..end],
+            weights,
+            config,
+            paged_cache,
+            block_table,
+            start_pos + cursor,
+            state_for_tile,
+            lora,
+            None,
+            None,
+            #[cfg(any(feature = "cuda", feature = "rocm"))]
+            None,
+            #[cfg(feature = "cuda")]
+            None,
+            mode,
+        )
+        .with_context(|| {
+            format!(
+                "streaming hidden prefill tile [{cursor}, {end}) of {total} (start_pos={})",
+                start_pos + cursor
+            )
+        })?;
+
+        if is_last_tile {
+            let tile_hidden = tile_hidden.context("streaming hidden prefill produced no hidden")?;
+            last_hidden = Some(
+                tile_hidden
+                    .narrow(1, end - cursor - 1, 1)?
+                    .contiguous()
+                    .context("streaming last-token hidden contiguous")?,
+            );
+        }
+
+        cursor = end;
+    }
+
+    last_hidden.context("streaming hidden prefill produced no hidden")
 }
 
 /// Explicit-tile variant of

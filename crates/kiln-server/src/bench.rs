@@ -26,12 +26,17 @@ use kiln_model::backend as runtime_backend;
 use kiln_model::forward::{
     GpuWeights,
     LinearAttentionState,
+    lm_head_sample_backend_decode_if,
     model_forward_kt,
+    model_forward_head_backend_decode_if,
+    model_forward_paged_batched_decode_hidden,
     model_forward_paged_last_token,
     model_forward_paged_last_token_greedy,
+    model_forward_paged_last_token_hidden,
     model_forward_paged_last_token_with_last_hidden,
     model_forward_paged_next_token_greedy,
     model_forward_paged_streaming,
+    model_forward_paged_streaming_last_token_hidden,
     model_forward_paged_streaming_last_token_with_last_hidden,
     // Phase 7 #1082: kt twin entry point + allocator stub for the first
     // end-to-end PagedKvCacheKt production wiring (latency bench decode
@@ -40,7 +45,7 @@ use kiln_model::forward::{
     streaming_prefill_enabled_for,
 };
 use kiln_model::kv_cache::KvCache;
-use kiln_model::sampling::greedy_sample;
+use kiln_model::sampling::{greedy_sample, sample_step};
 use kiln_model::speculative::{
     SpeculativeConfig, speculative_decode_step, speculative_decode_step_paged_greedy,
     speculative_mtp_decode_step,
@@ -900,8 +905,10 @@ fn bench_latency_paged(
     tokenizer: &KilnTokenizer,
     prompt_tokens: usize,
     max_output_tokens: usize,
+    seed: u64,
+    temperature: f32,
 ) -> Result<LatencyResult> {
-    let prompt = build_prompt(tokenizer, prompt_tokens, 0);
+    let prompt = build_prompt(tokenizer, prompt_tokens, seed);
     let prompt_token_ids = tokenizer
         .encode(&prompt)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -983,10 +990,15 @@ fn bench_latency_paged(
     }
 
     let eos_token_ids = tokenizer.eos_token_ids();
+    let mut sampling_params = SamplingParams::greedy();
+    sampling_params.temperature = temperature;
+    sampling_params.seed = Some(seed);
+    sampling_params.max_tokens = max_output_tokens;
+    let sampled_decode = temperature.is_finite() && temperature > 0.0;
 
     eprintln!(
         "  Measuring latency [PAGED, block_size={PAGED_BLOCK_SIZE}, blocks={num_blocks}] \
-         ({actual_prompt_tokens} prompt tokens)..."
+         ({actual_prompt_tokens} prompt tokens, temperature={temperature})..."
     );
 
     // Prefill: forward pass on all prompt tokens via paged path. Long Metal
@@ -994,7 +1006,58 @@ fn bench_latency_paged(
     // either path.
     let prefill_start = Instant::now();
     let streaming_prefill = streaming_prefill_enabled_for(&device_kt, actual_prompt_tokens);
-    let mut next_token = if streaming_prefill {
+    let mut next_token = if sampled_decode {
+        let hidden = if streaming_prefill {
+            model_forward_paged_streaming_last_token_hidden(
+                &*backend,
+                &prompt_token_ids,
+                weights,
+                config,
+                &paged_cache,
+                &block_table,
+                0,
+                Some(&mut linear_state),
+                None,
+            )
+            .context("paged sampled prefill hidden pass (streaming) failed")?
+        } else {
+            model_forward_paged_last_token_hidden(
+                &*backend,
+                &prompt_token_ids,
+                weights,
+                config,
+                &paged_cache,
+                &block_table,
+                0,
+                Some(&mut linear_state),
+                None,
+            )
+            .context("paged sampled prefill hidden pass failed")?
+        };
+        if let Some(token) = lm_head_sample_backend_decode_if(
+            Some(&*backend),
+            &hidden,
+            weights,
+            config,
+            &sampling_params,
+            Some(seed),
+            &[],
+        )
+        .context("paged sampled prefill fused lm-head sample failed")?
+        {
+            token
+        } else {
+            let logits = model_forward_head_backend_decode_if(
+                Some(&*backend),
+                &hidden,
+                weights,
+                config,
+            )
+            .context("paged sampled prefill lm-head fallback failed")?;
+            sample_step(&logits, &sampling_params, Some(seed), &[])
+                .context("paged sampled prefill host sample failed")?
+        }
+    } else if streaming_prefill {
         let logits = model_forward_paged_streaming(
             &*backend,
             &prompt_token_ids,
@@ -1054,6 +1117,7 @@ fn bench_latency_paged(
     let log_tokens = std::env::var("KILN_BENCH_LOG_TOKENS").is_ok();
     let log_itl = std::env::var("KILN_BENCH_LOG_ITL").is_ok();
     let mut decoded_tokens: Vec<u32> = Vec::new();
+    let mut generated_tokens: Vec<TokenId> = vec![next_token];
     if log_tokens {
         decoded_tokens.push(next_token);
     }
@@ -1065,7 +1129,51 @@ fn bench_latency_paged(
         }
 
         let step_start = Instant::now();
-        next_token = if matches!(device_kt, kiln_tensor::Device::Rocm(_)) && rocm_graph.is_enabled()
+        next_token = if sampled_decode {
+            let sequence_lengths = [current_pos];
+            let mut linear_states: [&mut LinearAttentionState; 1] = [&mut linear_state];
+            let hidden = model_forward_paged_batched_decode_hidden(
+                &*backend,
+                &[next_token],
+                weights,
+                config,
+                &paged_cache,
+                std::slice::from_ref(&block_table),
+                &sequence_lengths,
+                &mut linear_states,
+                None,
+            )
+            .context("paged sampled decode hidden pass failed")?;
+            let step_seed = seed.wrapping_add(num_tokens as u64);
+            if let Some(token) = lm_head_sample_backend_decode_if(
+                Some(&*backend),
+                &hidden,
+                weights,
+                config,
+                &sampling_params,
+                Some(step_seed),
+                &generated_tokens,
+            )
+            .context("paged sampled decode fused lm-head sample failed")?
+            {
+                token
+            } else {
+                let logits = model_forward_head_backend_decode_if(
+                    Some(&*backend),
+                    &hidden,
+                    weights,
+                    config,
+                )
+                .context("paged sampled decode lm-head fallback failed")?;
+                sample_step(
+                    &logits,
+                    &sampling_params,
+                    Some(step_seed),
+                    &generated_tokens,
+                )
+                .context("paged sampled decode host sample failed")?
+            }
+        } else if matches!(device_kt, kiln_tensor::Device::Rocm(_)) && rocm_graph.is_enabled()
         {
             rocm_graph
                 .decode_step_paged_greedy(
@@ -1138,6 +1246,7 @@ fn bench_latency_paged(
             greedy_sample_kt(&logits)?
         };
         current_pos += 1;
+        generated_tokens.push(next_token);
         let step_time = step_start.elapsed();
 
         let step_ms = step_time.as_secs_f64() * 1000.0;
@@ -2641,6 +2750,8 @@ fn bench_selected_latency(
                     tokenizer,
                     args.prompt_tokens,
                     args.max_output_tokens,
+                    args.seed,
+                    args.temperature,
                 )
                 .context("paged latency benchmark failed")
             } else {

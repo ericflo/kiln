@@ -210,6 +210,67 @@ __global__ void kiln_w8a16_gemv_argmax_reduce_kernel(
     }
 }
 
+__device__ __forceinline__ uint64_t kiln_splitmix64(uint64_t x) {
+    x += 0x9e3779b97f4a7c15ull;
+    x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ull;
+    x = (x ^ (x >> 27)) * 0x94d049bb133111ebull;
+    return x ^ (x >> 31);
+}
+
+__device__ __forceinline__ float kiln_uniform01(uint64_t seed, int64_t idx) {
+    uint64_t x = kiln_splitmix64(seed ^ (static_cast<uint64_t>(idx) * 0xd6e8feb86659fd93ull));
+    float u = (static_cast<float>((x >> 40) & 0x00ffffffu) + 0.5f) * 5.960464477539063e-8f;
+    u = fminf(fmaxf(u, 1.0e-7f), 1.0f - 1.0e-7f);
+    return u;
+}
+
+__global__ void kiln_w8a16_gemv_gumbel_scores_kernel(
+    const __nv_bfloat16* __restrict__ x,
+    const uint8_t* __restrict__ w_q_u8,
+    const float* __restrict__ scales,
+    const uint32_t* __restrict__ history_indices,
+    const uint32_t* __restrict__ history_counts,
+    float* __restrict__ scores,
+    int64_t n,
+    int64_t k,
+    int64_t history_len,
+    float repetition_penalty,
+    float presence_penalty,
+    float frequency_penalty,
+    float inv_temperature,
+    uint64_t seed) {
+    int64_t col = static_cast<int64_t>(blockIdx.x);
+    int tid = threadIdx.x;
+    if (col >= n) return;
+
+    const int8_t* w_row = reinterpret_cast<const int8_t*>(w_q_u8 + col * k);
+
+    float local = 0.0f;
+    for (int64_t c = tid; c < k; c += BLOCK) {
+        float xv = __bfloat162float(x[c]);
+        float wv = static_cast<float>(w_row[c]);
+        local += xv * wv;
+    }
+
+    __shared__ float smem[BLOCK];
+    float score = kiln_block_reduce_sum(local, smem) * scales[col];
+    if (tid == 0) {
+        for (int64_t i = 0; i < history_len; ++i) {
+            if (static_cast<int64_t>(history_indices[i]) == col) {
+                if (repetition_penalty != 1.0f) {
+                    score = score > 0.0f ? score / repetition_penalty : score * repetition_penalty;
+                }
+                score -= presence_penalty;
+                score -= frequency_penalty * static_cast<float>(history_counts[i]);
+                break;
+            }
+        }
+        score *= inv_temperature;
+        const float u = kiln_uniform01(seed, col);
+        scores[col] = score - logf(-logf(u));
+    }
+}
+
 }  // namespace
 
 extern "C" int kiln_w8a16_gemv_bf16_async(
@@ -321,6 +382,60 @@ extern "C" int kiln_w8a16_gemv_argmax_bf16_async(
         static_cast<float*>(scores),
         n,
         k);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) return 1000 + static_cast<int>(err);
+
+    kiln_w8a16_gemv_argmax_reduce_kernel<<<1, ARGMAX_BLOCK, 0, stream>>>(
+        static_cast<const float*>(scores),
+        static_cast<int64_t*>(out_idx),
+        n);
+    err = cudaGetLastError();
+    if (err != cudaSuccess) return 2000 + static_cast<int>(err);
+    return 0;
+}
+
+extern "C" int kiln_w8a16_gemv_gumbel_sample_bf16_async(
+    const void* x,
+    const void* w_q,
+    const void* scales,
+    const void* history_indices,
+    const void* history_counts,
+    void* scores,
+    void* out_idx,
+    int64_t n,
+    int64_t k,
+    int64_t history_len,
+    float repetition_penalty,
+    float presence_penalty,
+    float frequency_penalty,
+    float inv_temperature,
+    uint64_t seed,
+    void* stream_raw) {
+    if (n < 0 || k < 0 || history_len < 0) return 1;
+    if (n == 0 || k == 0) return 2;
+    if (n > static_cast<int64_t>(2147483647)) return 3;
+    if (!(inv_temperature > 0.0f) || inv_temperature != inv_temperature
+        || inv_temperature > 3.4028234663852886e38f) return 4;
+    if (!(repetition_penalty > 0.0f) || repetition_penalty != repetition_penalty
+        || repetition_penalty > 3.4028234663852886e38f) return 5;
+    if (history_len > 0 && (history_indices == nullptr || history_counts == nullptr)) return 6;
+
+    cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_raw);
+    kiln_w8a16_gemv_gumbel_scores_kernel<<<static_cast<unsigned int>(n), BLOCK, 0, stream>>>(
+        static_cast<const __nv_bfloat16*>(x),
+        static_cast<const uint8_t*>(w_q),
+        static_cast<const float*>(scales),
+        static_cast<const uint32_t*>(history_indices),
+        static_cast<const uint32_t*>(history_counts),
+        static_cast<float*>(scores),
+        n,
+        k,
+        history_len,
+        repetition_penalty,
+        presence_penalty,
+        frequency_penalty,
+        inv_temperature,
+        seed);
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) return 1000 + static_cast<int>(err);
 

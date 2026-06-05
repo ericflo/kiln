@@ -114,6 +114,56 @@ pub fn argmax_bf16(x: &kiln_tensor::Tensor, w: &RocmW8Proj) -> Result<u32> {
     Ok(values[0] as u32)
 }
 
+#[cfg(feature = "rocm")]
+#[allow(clippy::too_many_arguments)]
+pub fn gumbel_sample_bf16(
+    x: &kiln_tensor::Tensor,
+    w: &RocmW8Proj,
+    history_indices: &[u32],
+    history_counts: &[u32],
+    repetition_penalty: f32,
+    presence_penalty: f32,
+    frequency_penalty: f32,
+    temperature: f32,
+    seed: u64,
+) -> Result<u32> {
+    let idx = kiln_tensor::rocm_w8a16_gemv_gumbel_sample_bf16(
+        x,
+        &w.q_weight,
+        &w.scales,
+        history_indices,
+        history_counts,
+        repetition_penalty,
+        presence_penalty,
+        frequency_penalty,
+        temperature,
+        seed,
+    )
+    .map_err(|e| anyhow::anyhow!("rocm_w8_proj: gemv_gumbel_sample: {e}"))?;
+    let values = idx
+        .flatten_all()
+        .context("rocm_w8_proj: flatten gumbel sample")?
+        .to_vec1::<i64>()
+        .context("rocm_w8_proj: read gumbel sample")?;
+    Ok(values[0] as u32)
+}
+
+#[cfg(not(feature = "rocm"))]
+#[allow(clippy::too_many_arguments)]
+pub fn gumbel_sample_bf16(
+    _x: &kiln_tensor::Tensor,
+    _w: &RocmW8Proj,
+    _history_indices: &[u32],
+    _history_counts: &[u32],
+    _repetition_penalty: f32,
+    _presence_penalty: f32,
+    _frequency_penalty: f32,
+    _temperature: f32,
+    _seed: u64,
+) -> Result<u32> {
+    anyhow::bail!("rocm_w8_proj::gumbel_sample_bf16 requires the rocm feature")
+}
+
 #[cfg(not(feature = "rocm"))]
 pub fn argmax_bf16(_x: &kiln_tensor::Tensor, _w: &RocmW8Proj) -> Result<u32> {
     anyhow::bail!("rocm_w8_proj::argmax_bf16 requires the rocm feature")
