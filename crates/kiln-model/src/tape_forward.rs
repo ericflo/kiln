@@ -1149,16 +1149,12 @@ pub fn try_tape_cross_entropy_from_logits_kt(
 ///
 /// # Why fused (not 4 chained tape nodes)
 ///
-/// `kiln_tensor::ops::matmul` requires `[..., M, K] @ [..., K, N]`
-/// contiguous. The LoRA delta needs `A^T` and `B^T`, which would change
-/// the kt `TensorId` and the gradient shape on the way out. Mapping
-/// `kt_input_id → candle_id` keyed on a transposed view would deposit
-/// `grad_A^T` (shape `[in_features, rank]`) under the candle id for
-/// `proj.a` (shape `[rank, in_features]`) — a silent shape disagreement
-/// that the bridge surfaces as a `kt -> candle grad copy` failure.
-/// Fusing the four ops into a single `LoraDeltaAddBackward` keeps the
-/// per-input grads in the original Var layouts so the IO mapping is
-/// direct: `(a_kt.id(), proj.a.id())`, `(b_kt.id(), proj.b.id())`.
+/// The LoRA delta needs `A^T` and `B^T`; the kt forward uses
+/// `matmul_rhs_transposed` so it can consume the original `A` and `B`
+/// layouts directly. Fusing the four ops into a single
+/// `LoraDeltaAddBackward` keeps the per-input grads in the original Var
+/// layouts so the IO mapping is direct:
+/// `(a_kt.id(), proj.a.id())`, `(b_kt.id(), proj.b.id())`.
 /// See `kiln_autograd::backwards::lora_delta_add` for the math
 /// derivation.
 #[allow(clippy::too_many_lines)]
@@ -1278,20 +1274,10 @@ pub fn try_tape_lora_add_kt(
                 input_shape: x.shape().to_vec(),
             }),
         );
-        let a_t_kt = a_kt
-            .transpose(0, 1)
-            .map_err(|e| anyhow::anyhow!("kt a.transpose: {e}"))?
-            .contiguous()
-            .map_err(|e| anyhow::anyhow!("kt a_t.contiguous: {e}"))?;
-        let h_kt = kiln_tensor::ops::matmul(&x_2d, &a_t_kt)
-            .map_err(|e| anyhow::anyhow!("kt matmul x@a_t: {e}"))?;
-        let b_t_kt = b_kt
-            .transpose(0, 1)
-            .map_err(|e| anyhow::anyhow!("kt b.transpose: {e}"))?
-            .contiguous()
-            .map_err(|e| anyhow::anyhow!("kt b_t.contiguous: {e}"))?;
-        let d_kt = kiln_tensor::ops::matmul(&h_kt, &b_t_kt)
-            .map_err(|e| anyhow::anyhow!("kt matmul h@b_t: {e}"))?;
+        let h_kt = kiln_tensor::ops::matmul_rhs_transposed(&x_2d, &a_kt)
+            .map_err(|e| anyhow::anyhow!("kt matmul_rhs_transposed x@a_t: {e}"))?;
+        let d_kt = kiln_tensor::ops::matmul_rhs_transposed(&h_kt, &b_kt)
+            .map_err(|e| anyhow::anyhow!("kt matmul_rhs_transposed h@b_t: {e}"))?;
         let delta_kt = kiln_tensor::ops::mul_scalar(&d_kt, lora_scale)
             .map_err(|e| anyhow::anyhow!("kt mul_scalar(scale): {e}"))?;
         let out_2d = kiln_tensor::ops::add(&base_2d, &delta_kt)
@@ -1552,20 +1538,10 @@ pub fn try_tape_lora_linear_kt(
         };
         let out2d = match (lora, a_kt.as_ref(), b_kt.as_ref()) {
             (Some(_proj), Some(a_kt), Some(b_kt)) => {
-                let a_t_kt = a_kt
-                    .transpose(0, 1)
-                    .map_err(|e| anyhow::anyhow!("kt a.transpose: {e}"))?
-                    .contiguous()
-                    .map_err(|e| anyhow::anyhow!("kt a_t.contiguous: {e}"))?;
-                let h_kt = kiln_tensor::ops::matmul(&x2d, &a_t_kt)
-                    .map_err(|e| anyhow::anyhow!("kt matmul x@a_t: {e}"))?;
-                let b_t_kt = b_kt
-                    .transpose(0, 1)
-                    .map_err(|e| anyhow::anyhow!("kt b.transpose: {e}"))?
-                    .contiguous()
-                    .map_err(|e| anyhow::anyhow!("kt b_t.contiguous: {e}"))?;
-                let d_kt = kiln_tensor::ops::matmul(&h_kt, &b_t_kt)
-                    .map_err(|e| anyhow::anyhow!("kt matmul h@b_t: {e}"))?;
+                let h_kt = kiln_tensor::ops::matmul_rhs_transposed(&x2d, a_kt)
+                    .map_err(|e| anyhow::anyhow!("kt matmul_rhs_transposed x@a_t: {e}"))?;
+                let d_kt = kiln_tensor::ops::matmul_rhs_transposed(&h_kt, b_kt)
+                    .map_err(|e| anyhow::anyhow!("kt matmul_rhs_transposed h@b_t: {e}"))?;
                 let delta_kt = kiln_tensor::ops::mul_scalar(&d_kt, lora_scale)
                     .map_err(|e| anyhow::anyhow!("kt mul_scalar(scale): {e}"))?;
                 let out2d = kiln_tensor::ops::add(&base2d, &delta_kt)
