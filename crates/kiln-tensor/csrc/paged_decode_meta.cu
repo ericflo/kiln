@@ -254,6 +254,141 @@ __global__ void kiln_paged_attn_decode_bf16_kernel(
     }
 }
 
+__global__ void kiln_paged_attn_decode_bf16_split_kernel(
+    const __nv_bfloat16* __restrict__ q,
+    const __nv_bfloat16* __restrict__ k_pool,
+    const __nv_bfloat16* __restrict__ v_pool,
+    const uint32_t* __restrict__ block_table,
+    const uint32_t* __restrict__ seqused_k,
+    float* __restrict__ partial_m,
+    float* __restrict__ partial_l,
+    float* __restrict__ partial_acc,
+    int64_t b,
+    int64_t h,
+    int64_t hk,
+    int64_t d,
+    int64_t max_seqlen_k,
+    int64_t max_blocks_per_seq,
+    int64_t page_block_size,
+    int64_t pool_rows,
+    int64_t split_count,
+    float scale) {
+    const int partial = blockIdx.x;
+    const int tid = threadIdx.x;
+    const int row = partial / static_cast<int>(split_count);
+    const int split = partial - row * static_cast<int>(split_count);
+    const int bi = row / static_cast<int>(h);
+    const int qh = row - bi * static_cast<int>(h);
+    const int group = static_cast<int>(h / hk);
+    const int kvh = qh / group;
+
+    int64_t used = max_seqlen_k;
+    if (seqused_k != nullptr) {
+        used = static_cast<int64_t>(seqused_k[bi]);
+        if (used > max_seqlen_k) used = max_seqlen_k;
+    }
+    if (used < 0) used = 0;
+
+    const int64_t chunk = (used + split_count - 1) / split_count;
+    const int64_t start = static_cast<int64_t>(split) * chunk;
+    int64_t end = start + chunk;
+    if (end > used) end = used;
+
+    const __nv_bfloat16* q_row =
+        q + ((static_cast<int64_t>(bi) * h + qh) * d);
+    float* acc_row =
+        partial_acc + (static_cast<int64_t>(partial) * d);
+
+    __shared__ float smem[BLOCK_SIZE];
+
+    float m = -3.4028234663852886e38f;
+    float l = 0.0f;
+    float accum = 0.0f;
+    const bool owns_dim = static_cast<int64_t>(tid) < d;
+
+    for (int64_t t = start; t < end; ++t) {
+        const int64_t blk = t / page_block_size;
+        const int64_t within = t - blk * page_block_size;
+        float local_dot = 0.0f;
+        bool valid = blk < max_blocks_per_seq;
+        int64_t phys_row = 0;
+        if (valid) {
+            const uint32_t phys_block =
+                block_table[static_cast<int64_t>(bi) * max_blocks_per_seq + blk];
+            phys_row = static_cast<int64_t>(phys_block) * page_block_size + within;
+            valid = phys_row >= 0 && phys_row < pool_rows;
+        }
+        if (valid) {
+            const __nv_bfloat16* k_row =
+                k_pool + (phys_row * hk + kvh) * d;
+            for (int64_t di = tid; di < d; di += blockDim.x) {
+                local_dot += __bfloat162float(q_row[di]) * __bfloat162float(k_row[di]);
+            }
+        }
+        const float dot = kiln_block_reduce_sum(local_dot, smem);
+        if (valid) {
+            const __nv_bfloat16* v_row =
+                v_pool + (phys_row * hk + kvh) * d;
+            const float score = dot * scale;
+            const float new_m = score > m ? score : m;
+            const float alpha = expf(m - new_m);
+            const float beta = expf(score - new_m);
+            if (owns_dim) {
+                accum = accum * alpha + beta * __bfloat162float(v_row[tid]);
+            }
+            l = l * alpha + beta;
+            m = new_m;
+        }
+    }
+
+    if (tid == 0) {
+        partial_m[partial] = m;
+        partial_l[partial] = l;
+    }
+    if (owns_dim) {
+        acc_row[tid] = accum;
+    }
+}
+
+__global__ void kiln_paged_attn_decode_bf16_split_reduce_kernel(
+    const float* __restrict__ partial_m,
+    const float* __restrict__ partial_l,
+    const float* __restrict__ partial_acc,
+    __nv_bfloat16* __restrict__ out,
+    int64_t h,
+    int64_t d,
+    int64_t split_count) {
+    const int row = blockIdx.x;
+    const int tid = threadIdx.x;
+    __nv_bfloat16* out_row = out + (static_cast<int64_t>(row) * d);
+
+    float m = -3.4028234663852886e38f;
+    float l = 0.0f;
+    float accum = 0.0f;
+    const bool owns_dim = static_cast<int64_t>(tid) < d;
+
+    for (int64_t split = 0; split < split_count; ++split) {
+        const int64_t partial = static_cast<int64_t>(row) * split_count + split;
+        const float m_s = partial_m[partial];
+        const float l_s = partial_l[partial];
+        if (l_s <= 0.0f) continue;
+
+        const float new_m = m_s > m ? m_s : m;
+        const float alpha = expf(m - new_m);
+        const float beta = expf(m_s - new_m);
+        if (owns_dim) {
+            const float acc_s = partial_acc[partial * d + tid];
+            accum = accum * alpha + beta * acc_s;
+        }
+        l = l * alpha + beta * l_s;
+        m = new_m;
+    }
+
+    if (owns_dim) {
+        out_row[tid] = __float2bfloat16(l > 0.0f ? accum / l : 0.0f);
+    }
+}
+
 } // namespace
 
 extern "C" int kiln_paged_gather_index_async(const void* block_table_u32,
@@ -403,5 +538,66 @@ extern "C" int kiln_paged_attn_decode_bf16_async(const void* q_bf16,
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) return 100 + static_cast<int>(err);
+    return 0;
+}
+
+extern "C" int kiln_paged_attn_decode_bf16_split_async(const void* q_bf16,
+                                                       const void* k_pool_bf16,
+                                                       const void* v_pool_bf16,
+                                                       const void* block_table_u32,
+                                                       const void* seqused_k_u32,
+                                                       void* out_bf16,
+                                                       void* partial_m_f32,
+                                                       void* partial_l_f32,
+                                                       void* partial_acc_f32,
+                                                       int64_t b,
+                                                       int64_t h,
+                                                       int64_t hk,
+                                                       int64_t d,
+                                                       int64_t max_seqlen_k,
+                                                       int64_t max_blocks_per_seq,
+                                                       int64_t page_block_size,
+                                                       int64_t pool_rows,
+                                                       int64_t split_count,
+                                                       float scale,
+                                                       cudaStream_t stream) {
+    if (b < 0 || h <= 0 || hk <= 0 || d <= 0 || max_seqlen_k < 0
+        || max_blocks_per_seq < 0 || page_block_size <= 0 || pool_rows < 0
+        || split_count <= 1) {
+        return 1;
+    }
+    if (h % hk != 0) return 2;
+    if (d > BLOCK_SIZE) return 3;
+    if (max_seqlen_k > max_blocks_per_seq * page_block_size) return 4;
+    int64_t total_rows = b * h;
+    if (total_rows == 0) return 0;
+    if (total_rows > (int64_t)2147483647) return 5;
+    int64_t total_partials = total_rows * split_count;
+    if (total_partials > (int64_t)2147483647) return 6;
+
+    kiln_paged_attn_decode_bf16_split_kernel<<<static_cast<int>(total_partials), BLOCK_SIZE, 0, stream>>>(
+        static_cast<const __nv_bfloat16*>(q_bf16),
+        static_cast<const __nv_bfloat16*>(k_pool_bf16),
+        static_cast<const __nv_bfloat16*>(v_pool_bf16),
+        static_cast<const uint32_t*>(block_table_u32),
+        static_cast<const uint32_t*>(seqused_k_u32),
+        static_cast<float*>(partial_m_f32),
+        static_cast<float*>(partial_l_f32),
+        static_cast<float*>(partial_acc_f32),
+        b, h, hk, d, max_seqlen_k, max_blocks_per_seq, page_block_size,
+        pool_rows, split_count, scale);
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) return 100 + static_cast<int>(err);
+
+    kiln_paged_attn_decode_bf16_split_reduce_kernel<<<static_cast<int>(total_rows), BLOCK_SIZE, 0, stream>>>(
+        static_cast<const float*>(partial_m_f32),
+        static_cast<const float*>(partial_l_f32),
+        static_cast<const float*>(partial_acc_f32),
+        static_cast<__nv_bfloat16*>(out_bf16),
+        h, d, split_count);
+
+    err = cudaGetLastError();
+    if (err != cudaSuccess) return 200 + static_cast<int>(err);
     return 0;
 }

@@ -75,6 +75,29 @@ unsafe extern "C" {
         scale: f32,
         stream: *mut core::ffi::c_void,
     ) -> i32;
+
+    fn kiln_paged_attn_decode_bf16_split_async(
+        q_bf16: *const core::ffi::c_void,
+        k_pool_bf16: *const core::ffi::c_void,
+        v_pool_bf16: *const core::ffi::c_void,
+        block_table_u32: *const core::ffi::c_void,
+        seqused_k_u32: *const core::ffi::c_void,
+        out_bf16: *mut core::ffi::c_void,
+        partial_m_f32: *mut core::ffi::c_void,
+        partial_l_f32: *mut core::ffi::c_void,
+        partial_acc_f32: *mut core::ffi::c_void,
+        b: i64,
+        h: i64,
+        hk: i64,
+        d: i64,
+        max_seqlen_k: i64,
+        max_blocks_per_seq: i64,
+        page_block_size: i64,
+        pool_rows: i64,
+        split_count: i64,
+        scale: f32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
 }
 
 fn rocm_storage<'a>(t: &'a Tensor, who: &str) -> Result<&'a RocmStorage> {
@@ -82,6 +105,13 @@ fn rocm_storage<'a>(t: &'a Tensor, who: &str) -> Result<&'a RocmStorage> {
         .as_any()
         .downcast_ref::<RocmStorage>()
         .ok_or_else(|| Error::Msg(format!("{who}: tensor must be ROCm storage")))
+}
+
+fn paged_attn_split_count(max_seqlen_k: usize) -> usize {
+    if std::env::var("KILN_DISABLE_ROCM_SPLIT_PAGED_ATTN").is_ok() || max_seqlen_k < 2048 {
+        return 1;
+    }
+    max_seqlen_k.div_ceil(512).clamp(2, 16)
 }
 
 /// Compute the flat physical-slot gather index `[b*seqlen_k]` (U32) on-device
@@ -550,25 +580,63 @@ pub fn rocm_paged_attn_decode_bf16(
         core::ptr::null()
     };
 
-    let status = unsafe {
-        kiln_paged_attn_decode_bf16_async(
-            (q_base + q_off) as *const core::ffi::c_void,
-            (k_base + k_off) as *const core::ffi::c_void,
-            (v_base + v_off) as *const core::ffi::c_void,
-            (bt_base + bt_off) as *const core::ffi::c_void,
-            seqused_ptr,
-            out_base as *mut core::ffi::c_void,
-            b as i64,
-            h as i64,
-            hk as i64,
-            d as i64,
-            max_seqlen_k as i64,
-            max_blocks_per_seq as i64,
-            page_block_size as i64,
-            pool_rows as i64,
-            scale,
-            q_storage.rocm_stream_raw(),
-        )
+    let split_count = paged_attn_split_count(max_seqlen_k);
+    let status = if split_count > 1 {
+        let partials = b * h * split_count;
+        let partial_m =
+            RocmStorage::alloc_uninit_ctx(&ctx, device_index, DType::F32, partials)?;
+        let partial_l =
+            RocmStorage::alloc_uninit_ctx(&ctx, device_index, DType::F32, partials)?;
+        let partial_acc =
+            RocmStorage::alloc_uninit_ctx(&ctx, device_index, DType::F32, partials * d)?;
+        let (partial_m_base, _) = partial_m.device_ptr_raw();
+        let (partial_l_base, _) = partial_l.device_ptr_raw();
+        let (partial_acc_base, _) = partial_acc.device_ptr_raw();
+        unsafe {
+            kiln_paged_attn_decode_bf16_split_async(
+                (q_base + q_off) as *const core::ffi::c_void,
+                (k_base + k_off) as *const core::ffi::c_void,
+                (v_base + v_off) as *const core::ffi::c_void,
+                (bt_base + bt_off) as *const core::ffi::c_void,
+                seqused_ptr,
+                out_base as *mut core::ffi::c_void,
+                partial_m_base as *mut core::ffi::c_void,
+                partial_l_base as *mut core::ffi::c_void,
+                partial_acc_base as *mut core::ffi::c_void,
+                b as i64,
+                h as i64,
+                hk as i64,
+                d as i64,
+                max_seqlen_k as i64,
+                max_blocks_per_seq as i64,
+                page_block_size as i64,
+                pool_rows as i64,
+                split_count as i64,
+                scale,
+                q_storage.rocm_stream_raw(),
+            )
+        }
+    } else {
+        unsafe {
+            kiln_paged_attn_decode_bf16_async(
+                (q_base + q_off) as *const core::ffi::c_void,
+                (k_base + k_off) as *const core::ffi::c_void,
+                (v_base + v_off) as *const core::ffi::c_void,
+                (bt_base + bt_off) as *const core::ffi::c_void,
+                seqused_ptr,
+                out_base as *mut core::ffi::c_void,
+                b as i64,
+                h as i64,
+                hk as i64,
+                d as i64,
+                max_seqlen_k as i64,
+                max_blocks_per_seq as i64,
+                page_block_size as i64,
+                pool_rows as i64,
+                scale,
+                q_storage.rocm_stream_raw(),
+            )
+        }
     };
     if status != 0 {
         return Err(Error::Msg(format!(
