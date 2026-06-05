@@ -126,6 +126,7 @@ __device__ __forceinline__ void block_reduce_k(
 //
 // where upstream[t] depends on the output mode:
 //   ScalarMean   : upstream[t] = grad_loss / T_active
+//                  (or 1.0 / T_active when grad_loss == nullptr)
 //   PerPosition  : upstream[t] = grad_loss[t]
 //
 // Then d_hidden[active_pos[t], h] = sum_k d_s_logits[t, k] *
@@ -148,7 +149,7 @@ __global__ void opd_topk_kl_bwd_kernel(
     const uint32_t* __restrict__ topk_idx,
     const float* __restrict__ topk_lp_q,
     const uint32_t* __restrict__ active_pos,
-    const float* __restrict__ grad_loss,    // scalar (mode 0) or [T_active] (mode 1)
+    const float* __restrict__ grad_loss,    // scalar/null (mode 0) or [T_active] (mode 1)
     float scale_factor,                      // (1/T_active) for ScalarMean, 1.0 for PerPosition
     T* __restrict__ d_hidden,                // zero-filled [T, H]
     int hidden_size,
@@ -233,7 +234,7 @@ __global__ void opd_topk_kl_bwd_kernel(
     // Decide the per-position upstream gradient.
     float upstream;
     if (OutputMode == 0) {
-        upstream = grad_loss[0] * scale_factor;
+        upstream = (grad_loss == nullptr ? 1.0f : grad_loss[0]) * scale_factor;
     } else {
         upstream = grad_loss[t] * scale_factor;
     }
@@ -345,7 +346,8 @@ static int launch_bwd_for_k(
 // Backward C-ABI entry points.
 // =====================================================================
 //
-// `output_mode` is 0 for ScalarMean (grad_loss is a single scalar f32)
+// `output_mode` is 0 for ScalarMean (grad_loss is a single scalar f32,
+// or nullptr for an implicit unit seed)
 // and 1 for PerPosition (grad_loss is a length-t_active f32 array).
 // `scale_factor` is (1 / t_active) for ScalarMean and 1.0 for
 // PerPosition — caller computes this once, kernel just multiplies.

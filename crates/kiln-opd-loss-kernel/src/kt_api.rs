@@ -1035,6 +1035,57 @@ pub fn opd_top_k_reverse_kl_phase_b_bwd_kt(
     top_k: usize,
     output_mode: OpdLossOutputKt,
 ) -> Result<KtTensor, OpdLossError> {
+    opd_top_k_reverse_kl_phase_b_bwd_kt_inner(
+        hidden,
+        head_t,
+        teacher_topk_indices,
+        teacher_topk_logprobs,
+        label_mask,
+        Some(grad_loss),
+        top_k,
+        output_mode,
+    )
+}
+
+/// CUDA/ROCm kt-typed backward for a scalar-mean OPD loss with the unit
+/// upstream seed `d(loss)/d(loss) = 1`.
+///
+/// This is equivalent to calling [`opd_top_k_reverse_kl_phase_b_bwd_kt`] with
+/// `OpdLossOutputKt::ScalarMean` and a single-element F32 tensor containing
+/// `1.0`, but avoids allocating/uploading that scalar seed on long-context
+/// checkpointed OPD tails.
+#[cfg(any(feature = "cuda", feature = "rocm"))]
+pub fn opd_top_k_reverse_kl_phase_b_bwd_scalar_mean_unit_grad_kt(
+    hidden: &KtTensor,
+    head_t: &KtTensor,
+    teacher_topk_indices: &[u32],
+    teacher_topk_logprobs: &[f32],
+    label_mask: &[bool],
+    top_k: usize,
+) -> Result<KtTensor, OpdLossError> {
+    opd_top_k_reverse_kl_phase_b_bwd_kt_inner(
+        hidden,
+        head_t,
+        teacher_topk_indices,
+        teacher_topk_logprobs,
+        label_mask,
+        None,
+        top_k,
+        OpdLossOutputKt::ScalarMean,
+    )
+}
+
+#[cfg(any(feature = "cuda", feature = "rocm"))]
+fn opd_top_k_reverse_kl_phase_b_bwd_kt_inner(
+    hidden: &KtTensor,
+    head_t: &KtTensor,
+    teacher_topk_indices: &[u32],
+    teacher_topk_logprobs: &[f32],
+    label_mask: &[bool],
+    grad_loss: Option<&KtTensor>,
+    top_k: usize,
+    output_mode: OpdLossOutputKt,
+) -> Result<KtTensor, OpdLossError> {
     use kiln_kt_bridge::{
         alloc_device_tensor_like, device_input_ptr, device_output_ptr, device_stream_raw_of,
     };
@@ -1203,27 +1254,39 @@ pub fn opd_top_k_reverse_kl_phase_b_bwd_kt(
     )?;
 
     // Normalise grad_loss to a 1-D contiguous F32 tensor on device,
-    // shape {ScalarMean: [1], PerPosition: [active_count]}.
-    let grad_loss_dev: KtTensor;
+    // shape {ScalarMean: [1], PerPosition: [active_count]}. ScalarMean also
+    // accepts `None`, which the FFI kernel interprets as an implicit unit seed
+    // to avoid allocating a device scalar for dloss/dloss = 1.
+    let grad_loss_dev: Option<KtTensor>;
     let (output_mode_i32, scale_factor) = match output_mode {
         OpdLossOutputKt::ScalarMean => {
-            if grad_loss.dtype() != KtDType::F32 {
-                return Err(OpdLossError::msg(format!(
-                    "kt-opd-loss bwd: ScalarMean grad_loss must be F32, got {}",
-                    grad_loss.dtype(),
-                )));
-            }
-            let n: usize = grad_loss.shape().iter().product();
-            if n != 1 {
-                return Err(OpdLossError::msg(format!(
-                    "kt-opd-loss bwd: ScalarMean grad_loss must have 1 element, got shape {:?}",
-                    grad_loss.shape(),
-                )));
-            }
-            grad_loss_dev = grad_loss.reshape(vec![1])?.contiguous()?;
+            grad_loss_dev = match grad_loss {
+                Some(grad_loss) => {
+                    if grad_loss.dtype() != KtDType::F32 {
+                        return Err(OpdLossError::msg(format!(
+                            "kt-opd-loss bwd: ScalarMean grad_loss must be F32, got {}",
+                            grad_loss.dtype(),
+                        )));
+                    }
+                    let n: usize = grad_loss.shape().iter().product();
+                    if n != 1 {
+                        return Err(OpdLossError::msg(format!(
+                            "kt-opd-loss bwd: ScalarMean grad_loss must have 1 element, got shape {:?}",
+                            grad_loss.shape(),
+                        )));
+                    }
+                    Some(grad_loss.reshape(vec![1])?.contiguous()?)
+                }
+                None => None,
+            };
             (0_i32, 1.0_f32 / (active_count as f32))
         }
         OpdLossOutputKt::PerPosition => {
+            let Some(grad_loss) = grad_loss else {
+                return Err(OpdLossError::msg(
+                    "kt-opd-loss bwd: PerPosition requires grad_loss",
+                ));
+            };
             if grad_loss.dtype() != KtDType::F32 {
                 return Err(OpdLossError::msg(format!(
                     "kt-opd-loss bwd: PerPosition grad_loss must be F32, got {}",
@@ -1236,11 +1299,11 @@ pub fn opd_top_k_reverse_kl_phase_b_bwd_kt(
                     "kt-opd-loss bwd: PerPosition grad_loss must have shape [{active_count}], got {s:?}",
                 )));
             }
-            grad_loss_dev = if grad_loss.is_contiguous() {
+            grad_loss_dev = Some(if grad_loss.is_contiguous() {
                 grad_loss.clone()
             } else {
                 grad_loss.contiguous()?
-            };
+            });
             (1_i32, 1.0_f32)
         }
     };
@@ -1264,8 +1327,10 @@ pub fn opd_top_k_reverse_kl_phase_b_bwd_kt(
     let l_ptr =
         device_input_ptr(&topk_lp_q_dev, KtDType::F32, "topk_lp_q")?;
     let a_ptr = device_input_ptr(&active_indices, KtDType::U32, "active_indices")?;
-    let g_ptr =
-        device_input_ptr(&grad_loss_dev, KtDType::F32, "grad_loss")?;
+    let g_ptr = match grad_loss_dev.as_ref() {
+        Some(grad_loss_dev) => device_input_ptr(grad_loss_dev, KtDType::F32, "grad_loss")?,
+        None => 0,
+    };
     let d_ptr = device_output_ptr(&d_hidden_2d);
     let raw_stream = device_stream_raw_of(hidden, "stream")?;
 
@@ -2039,5 +2104,80 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn cuda_bwd_scalar_mean_unit_grad_matches_seed_tensor() {
+        if kiln_tensor::primary_cuda_context(0).is_err() {
+            eprintln!("CUDA not available; skipping cuda_bwd_scalar_mean_unit_grad");
+            return;
+        }
+
+        let seq_len = 6usize;
+        let hidden_size = 128usize;
+        let vocab = 256usize;
+        let top_k = 16usize;
+        let mask = vec![false, true, false, true, true, false];
+        let active_count = mask.iter().filter(|&&m| m).count();
+
+        let hidden_flat: Vec<f32> = (0..seq_len * hidden_size)
+            .map(|i| ((i as f32) * 0.11).sin() * 0.22 + (((i % 5) as f32) - 2.0) * 0.015)
+            .collect();
+        let head_flat: Vec<f32> = (0..hidden_size * vocab)
+            .map(|i| ((i as f32) * 0.09).cos() * 0.16 + (((i % 13) as f32) - 6.0) * 0.004)
+            .collect();
+
+        let mut idx: Vec<u32> = Vec::with_capacity(active_count * top_k);
+        for r in 0..active_count {
+            let base = r * 41 + 7;
+            for k in 0..top_k {
+                idx.push(((base + k * 13) % vocab) as u32);
+            }
+        }
+        let lp: Vec<f32> = (0..active_count * top_k)
+            .map(|i| -0.15 - ((i as f32) * 0.29).cos().abs())
+            .collect();
+
+        let hidden_cuda =
+            KtTensor::cuda_from_slice(&hidden_flat, vec![1, seq_len, hidden_size], 0)
+                .expect("hidden cuda");
+        let head_cuda =
+            KtTensor::cuda_from_slice(&head_flat, vec![hidden_size, vocab], 0)
+                .expect("head cuda");
+        let grad_cuda = KtTensor::cuda_from_slice(&[1.0f32], vec![1], 0).expect("grad cuda");
+
+        let seeded = opd_top_k_reverse_kl_phase_b_bwd_kt(
+            &hidden_cuda,
+            &head_cuda,
+            &idx,
+            &lp,
+            &mask,
+            &grad_cuda,
+            top_k,
+            OpdLossOutputKt::ScalarMean,
+        )
+        .expect("cuda backward with explicit scalar seed");
+        let unit = opd_top_k_reverse_kl_phase_b_bwd_scalar_mean_unit_grad_kt(
+            &hidden_cuda,
+            &head_cuda,
+            &idx,
+            &lp,
+            &mask,
+            top_k,
+        )
+        .expect("cuda backward with implicit unit seed");
+
+        assert_eq!(unit.shape(), &[1, seq_len, hidden_size]);
+        let seeded_v = read_f32(&seeded);
+        let unit_v = read_f32(&unit);
+        let mut max_abs = 0.0f32;
+        for (&a, &b) in seeded_v.iter().zip(unit_v.iter()) {
+            max_abs = max_abs.max((a - b).abs());
+        }
+        assert!(
+            max_abs < 1e-6,
+            "CUDA fused OPD implicit unit seed mismatch: max_abs={max_abs:.3e}"
+        );
     }
 }

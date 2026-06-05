@@ -125,7 +125,10 @@ pub use kt_api::{
 };
 
 #[cfg(any(feature = "cuda", feature = "rocm"))]
-pub use kt_api::opd_top_k_reverse_kl_phase_b_bwd_kt;
+pub use kt_api::{
+    opd_top_k_reverse_kl_phase_b_bwd_kt,
+    opd_top_k_reverse_kl_phase_b_bwd_scalar_mean_unit_grad_kt,
+};
 
 /// Phase 6a/CP-4 (#1082): parallel kt-tape entry that drops the candle
 /// CustomOp1 wrapper in favour of recording onto a `kiln_autograd::Tape`
@@ -211,4 +214,3 @@ impl PerPositionMetricsRow {
         -self.reverse_kl
     }
 }
-

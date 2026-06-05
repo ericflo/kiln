@@ -3483,26 +3483,24 @@ fn checkpointed_opd_step_forward_backward_tape_authoritative(
     .map_err(|e| anyhow!("checkpointed OPD scalar loss: {e}"))?;
     let loss_val = loss.to_scalar::<f32>()? as f64;
 
-    let grad_loss = kiln_tensor::Tensor::from_vec_on(*device, vec![1.0f32], vec![])
-        .context("checkpointed OPD grad_loss seed")?;
     let grad_normed = {
         #[cfg(any(feature = "cuda", feature = "rocm"))]
         if matches!(
             normed.device(),
             kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Rocm(_)
         ) {
-            kiln_opd_loss_kernel::opd_top_k_reverse_kl_phase_b_bwd_kt(
+            kiln_opd_loss_kernel::opd_top_k_reverse_kl_phase_b_bwd_scalar_mean_unit_grad_kt(
                 &normed,
                 head_for_loss,
                 &prepared.teacher_topk_indices,
                 &prepared.teacher_topk_logprobs,
                 &prepared.label_mask,
-                &grad_loss,
                 prepared.resolved_top_k,
-                kiln_opd_loss_kernel::OpdLossOutputKt::ScalarMean,
             )
             .map_err(|e| anyhow!("checkpointed OPD fused hidden gradient: {e}"))?
         } else {
+            let grad_loss = kiln_tensor::Tensor::from_vec_on(*device, vec![1.0f32], vec![])
+                .context("checkpointed OPD grad_loss seed")?;
             kiln_opd_loss_kernel::kt_api::opd_top_k_reverse_kl_phase_b_bwd_composite_kt(
                 &normed,
                 head_for_loss,
@@ -3517,6 +3515,8 @@ fn checkpointed_opd_step_forward_backward_tape_authoritative(
         }
         #[cfg(not(any(feature = "cuda", feature = "rocm")))]
         {
+            let grad_loss = kiln_tensor::Tensor::from_vec_on(*device, vec![1.0f32], vec![])
+                .context("checkpointed OPD grad_loss seed")?;
             kiln_opd_loss_kernel::kt_api::opd_top_k_reverse_kl_phase_b_bwd_composite_kt(
                 &normed,
                 head_for_loss,
