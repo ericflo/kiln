@@ -419,6 +419,10 @@ impl BackendRuntime for RocmBackend {
         true
     }
 
+    fn supports_flash_attn_prefill_head_major(&self) -> bool {
+        kiln_core::env_flag::env_flag("KILN_ROCM_HEAD_MAJOR_PREFILL", false)
+    }
+
     fn supports_flash_attn_paged_decode(&self) -> bool {
         true
     }
@@ -502,6 +506,41 @@ impl BackendRuntime for RocmBackend {
         let (out_kt, _lse_kt) =
             kiln_flash_attn::flash_attn_fwd_kt(&q_c, &k_c, &v_c, softmax_scale, causal)
                 .map_err(|e| anyhow::anyhow!("flash_attn kt: flash_attn_fwd_kt: {e}"))?;
+        Ok(Some(out_kt))
+    }
+
+    fn flash_attn_prefill_head_major(
+        &self,
+        q: &kiln_tensor::Tensor,
+        k: &kiln_tensor::Tensor,
+        v: &kiln_tensor::Tensor,
+        softmax_scale: f32,
+        causal: bool,
+    ) -> Result<Option<kiln_tensor::Tensor>> {
+        if q.track_op() || k.track_op() || v.track_op() {
+            CUDA_FLASH_ATTN_TRACKED_DECLINES.fetch_add(1, Ordering::Relaxed);
+            return Ok(None);
+        }
+        if q.dtype() != kiln_tensor::DType::BF16 {
+            return Ok(None);
+        }
+        if !matches!(q.dims().last(), Some(&128) | Some(&256)) {
+            return Ok(None);
+        }
+        kiln_nvtx::range!(c"kiln/flash_attn_head_major_kt");
+        let q_c = q.contiguous().context("flash_attn head-major kt: q contiguous")?;
+        let k_c = k.contiguous().context("flash_attn head-major kt: k contiguous")?;
+        let v_c = v.contiguous().context("flash_attn head-major kt: v contiguous")?;
+        let (out_kt, _lse_kt) = kiln_flash_attn::flash_attn_fwd_head_major_kt(
+            &q_c,
+            &k_c,
+            &v_c,
+            softmax_scale,
+            causal,
+        )
+        .map_err(|e| {
+            anyhow::anyhow!("flash_attn head-major kt: flash_attn_fwd_head_major_kt: {e}")
+        })?;
         Ok(Some(out_kt))
     }
 

@@ -174,6 +174,73 @@ pub fn flash_attn_fwd_kt(
     )))
 }
 
+#[cfg_attr(not(feature = "rocm"), allow(unused_variables))]
+pub fn flash_attn_fwd_head_major_kt(
+    q: &KtTensor,
+    k: &KtTensor,
+    v: &KtTensor,
+    softmax_scale: f32,
+    causal: bool,
+) -> Result<(KtTensor, KtTensor), FlashAttnError> {
+    let q_shape = q.shape();
+    if q_shape.len() != 4 {
+        return Err(FlashAttnError::Msg(format!(
+            "kt-flash-attn-head-major: q must be rank-4 [batch, heads, seqlen, head_dim], got {q_shape:?}"
+        )));
+    }
+    let k_shape = k.shape();
+    if k_shape.len() != 4 {
+        return Err(FlashAttnError::Msg(format!(
+            "kt-flash-attn-head-major: k must be rank-4, got {k_shape:?}"
+        )));
+    }
+    let v_shape = v.shape();
+    if v_shape.len() != 4 {
+        return Err(FlashAttnError::Msg(format!(
+            "kt-flash-attn-head-major: v must be rank-4, got {v_shape:?}"
+        )));
+    }
+
+    let (b, num_heads, _seqlen_q, head_dim) =
+        (q_shape[0], q_shape[1], q_shape[2], q_shape[3]);
+    let (kb, num_heads_k, _seqlen_k, khd) = (k_shape[0], k_shape[1], k_shape[2], k_shape[3]);
+    if v_shape != k_shape {
+        return Err(FlashAttnError::Msg(format!(
+            "kt-flash-attn-head-major: k/v shape mismatch {k_shape:?}/{v_shape:?}"
+        )));
+    }
+    if kb != b
+        || khd != head_dim
+        || num_heads == 0
+        || num_heads_k == 0
+        || num_heads % num_heads_k != 0
+    {
+        return Err(FlashAttnError::Msg(format!(
+            "kt-flash-attn-head-major: invalid q/k shapes q={q_shape:?} k={k_shape:?}"
+        )));
+    }
+    if head_dim != 128 && head_dim != 256 {
+        return Err(FlashAttnError::Msg(format!(
+            "kt-flash-attn-head-major: only head_dim=128,256 supported, got {head_dim}"
+        )));
+    }
+
+    #[cfg(feature = "rocm")]
+    if matches!(q.device(), KtDevice::Rocm(_)) {
+        return crate::rocm_sdpa::flash_attn_fwd_head_major_rocm(
+            q,
+            k,
+            v,
+            softmax_scale,
+            causal,
+        );
+    }
+
+    Err(FlashAttnError::Msg(
+        "kt-flash-attn-head-major: backend does not support head-major prefill".to_string(),
+    ))
+}
+
 // ============================================================================
 // Internal helpers — delegate to kiln-kt-bridge
 // ============================================================================

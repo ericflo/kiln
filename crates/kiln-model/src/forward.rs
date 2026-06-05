@@ -2946,6 +2946,26 @@ fn full_attn_qkv_proj_decode_if(
                 && x.dtype() == DType::BF16
                 && cuda_or_rocm_device(x.device())
             {
+                #[cfg(feature = "rocm")]
+                if let Some(qkv_w8) = attn_weights.qkv_proj_w8.as_ref() {
+                    if let Ok((_, seq_len, hidden)) = x.dims3() {
+                        let q_dim = attn_weights.q_proj_t.dim(1)?;
+                        let k_dim = attn_weights.k_proj_t.dim(1)?;
+                        let v_dim = attn_weights.v_proj_t.dim(1)?;
+                        if seq_len == 1
+                            && hidden == qkv_w8.k
+                            && qkv_w8.n == q_dim + k_dim + v_dim
+                            && matches!(x.device(), Device::Rocm(_))
+                        {
+                            let qkv = crate::rocm_w8_proj::matmul_bf16(x, qkv_w8)
+                                .context("rocm w8 full-attn Q/K/V projection")?;
+                            let q_raw = qkv.narrow(2, 0, q_dim)?;
+                            let k_raw = qkv.narrow(2, q_dim, k_dim)?;
+                            let v = qkv.narrow(2, q_dim + k_dim, v_dim)?;
+                            return Ok((q_raw, k_raw, v));
+                        }
+                    }
+                }
                 if let Some(qkv_proj_t) = attn_weights.qkv_proj_t.as_ref() {
                     if let Ok((_, seq_len, hidden)) = x.dims3() {
                         let q_dim = attn_weights.q_proj_t.dim(1)?;
@@ -3645,6 +3665,8 @@ fn upload_mtp_gpu_weights(
                     v_proj_t,
                     qkv_proj_t: None,
                     o_proj_t,
+                    qkv_proj_w8: None,
+                    o_proj_w8: None,
                     q_proj_marlin: None,
                 })
             }
@@ -3777,6 +3799,12 @@ pub struct GpuFullAttentionWeights {
     /// transposes used by training, LoRA, Marlin, and debug captures.
     pub qkv_proj_t: Option<Tensor>,
     pub o_proj_t: Tensor,
+    /// Optional ROCm-only row-wise W8A16 full-attention decode projections.
+    /// `qkv_proj_w8` stores `[q_raw | k | v]` rows; `o_proj_w8` stores
+    /// `[hidden, num_heads * head_dim]`. Populated only when
+    /// `KILN_ROCM_W8A16=1`.
+    pub qkv_proj_w8: Option<crate::rocm_w8_proj::RocmW8Proj>,
+    pub o_proj_w8: Option<crate::rocm_w8_proj::RocmW8Proj>,
     /// Optional Marlin W4A16-packed q_proj. Populated at load time when the
     /// `KILN_W4A16=1` env var is set on a CUDA build whose q_proj shape fits
     /// Marlin's tile constraints (k%128 && n%256). When present, the forward
@@ -6352,6 +6380,28 @@ impl GpuWeights {
                             kind: MarlinPackKind::QProj,
                         });
                     }
+                    let (qkv_proj_w8, o_proj_w8) = {
+                        #[cfg(feature = "rocm")]
+                        {
+                            if w8a16_enabled && !w4a16_enabled && matches!(*device, Device::Rocm(_)) {
+                                let qkv_rows = Tensor::cat(&[&q_proj, &k_proj, &v_proj], 0)?
+                                    .contiguous()
+                                    .context(ctx("w8 full-attn qkv rows contiguous"))?;
+                                (
+                                    crate::rocm_w8_proj::pack_from_bf16_rows(&qkv_rows)
+                                        .context(ctx("w8 full-attn qkv pack"))?,
+                                    crate::rocm_w8_proj::pack_from_bf16_rows(&o_proj)
+                                        .context(ctx("w8 full-attn o_proj pack"))?,
+                                )
+                            } else {
+                                (None, None)
+                            }
+                        }
+                        #[cfg(not(feature = "rocm"))]
+                        {
+                            (None, None)
+                        }
+                    };
                     (
                         input_layernorm,
                         post_attention_layernorm,
@@ -6367,6 +6417,8 @@ impl GpuWeights {
                             v_proj_t,
                             qkv_proj_t,
                             o_proj_t,
+                            qkv_proj_w8,
+                            o_proj_w8,
                             q_proj_marlin: None,
                         }),
                     )
@@ -18645,6 +18697,20 @@ pub fn gqa_attention_output_projection(
         None => (None, 0.0),
     };
     kiln_nvtx::range!(c"kiln/proj/o");
+    #[cfg(feature = "rocm")]
+    if lora_layer.is_none()
+        && attn_output.dtype() == DType::BF16
+        && !attn_output.track_op()
+        && matches!(attn_output.device(), Device::Rocm(_))
+        && let Some(o_w8) = attn_weights.o_proj_w8.as_ref()
+    {
+        if let Ok((_, seq_len, hidden)) = attn_output.dims3() {
+            if seq_len == 1 && hidden == o_w8.k {
+                return crate::rocm_w8_proj::matmul_bf16(attn_output, o_w8)
+                    .context("rocm w8 full-attn output projection");
+            }
+        }
+    }
     linear_with_lora_t_backend_decode_if(
         Some(backend),
         use_metal_decode_gemv,
@@ -19017,17 +19083,13 @@ fn try_flash_attn_paged_decode(
                 let _ = crate::mtp_debug::capture_subop("post_attn_gated", &attn_output);
 
                 let stage_profile = start_full_attn_stage_profile(&q.device(), profile_context)?;
-                let out = {
-                    kiln_nvtx::range!(c"kiln/proj/o");
-                    linear_with_lora_t_backend_decode_if(
-                        Some(backend),
-                        use_metal_decode_gemv,
-                        &attn_output,
-                        &attn_weights.o_proj_t,
-                        lora_layer.and_then(|l| l.o_proj.as_ref()),
-                        lora_scale,
-                    )?
-                };
+                let out = gqa_attention_output_projection(
+                    backend,
+                    &attn_output,
+                    attn_weights,
+                    use_metal_decode_gemv,
+                    lora_layer.map(|l| (l, lora_scale)),
+                )?;
                 finish_full_attn_stage_profile(
                     &q.device(),
                     profile_context,
@@ -20318,13 +20380,12 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
     let out = {
         let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
         kiln_nvtx::range!(c"kiln/proj/o_batch_decode");
-        let out = linear_with_lora_t_backend_decode_if(
-            Some(backend),
-            use_metal_decode_gemv,
+        let out = gqa_attention_output_projection(
+            backend,
             &attn_output,
-            &attn_weights.o_proj_t,
-            lora_layer.and_then(|l| l.o_proj.as_ref()),
-            lora_scale,
+            attn_weights,
+            use_metal_decode_gemv,
+            lora_layer.map(|l| (l, lora_scale)),
         )?;
         finish_full_attn_stage_profile(
             profile_device,
@@ -29129,6 +29190,8 @@ mod tests {
             v_proj_t,
             qkv_proj_t: None,
             o_proj_t,
+            qkv_proj_w8: None,
+            o_proj_w8: None,
             q_proj_marlin: None,
         })
     }
@@ -29172,6 +29235,8 @@ mod tests {
             v_proj_t: v_proj.t()?.contiguous()?,
             qkv_proj_t: None,
             o_proj_t: o_proj.t()?.contiguous()?,
+            qkv_proj_w8: None,
+            o_proj_w8: None,
             q_proj,
             k_proj,
             v_proj,
@@ -29371,6 +29436,8 @@ mod tests {
                     v_proj_t: v_proj.t()?.contiguous()?,
                     qkv_proj_t: None,
                     o_proj_t: o_proj.t()?.contiguous()?,
+                    qkv_proj_w8: None,
+                    o_proj_w8: None,
                     q_proj,
                     k_proj,
                     v_proj,
@@ -31919,6 +31986,8 @@ mod tests {
                     v_proj_t,
                     qkv_proj_t: None,
                     o_proj_t,
+                    qkv_proj_w8: None,
+                    o_proj_w8: None,
                     q_proj_marlin: None,
                 }),
                 mlp: GpuFfnWeights {
@@ -32357,6 +32426,8 @@ mod tests {
                     v_proj_t,
                     qkv_proj_t: None,
                     o_proj_t,
+                    qkv_proj_w8: None,
+                    o_proj_w8: None,
                     q_proj_marlin: None,
                 })
             } else {

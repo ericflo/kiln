@@ -57,6 +57,18 @@ unsafe extern "C" {
         stream: *mut core::ffi::c_void,
     ) -> i32;
 
+    fn kiln_gqa_repeat_heads_head_major_async(
+        src: *const core::ffi::c_void,
+        out: *mut core::ffi::c_void,
+        b: i64,
+        sk: i64,
+        hk: i64,
+        h: i64,
+        d: i64,
+        elem_bytes: i64,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
+
     fn kiln_paged_attn_decode_bf16_async(
         q_bf16: *const core::ffi::c_void,
         k_pool_bf16: *const core::ffi::c_void,
@@ -77,6 +89,48 @@ unsafe extern "C" {
     ) -> i32;
 
     fn kiln_paged_attn_decode_bf16_split_async(
+        q_bf16: *const core::ffi::c_void,
+        k_pool_bf16: *const core::ffi::c_void,
+        v_pool_bf16: *const core::ffi::c_void,
+        block_table_u32: *const core::ffi::c_void,
+        seqused_k_u32: *const core::ffi::c_void,
+        out_bf16: *mut core::ffi::c_void,
+        partial_m_f32: *mut core::ffi::c_void,
+        partial_l_f32: *mut core::ffi::c_void,
+        partial_acc_f32: *mut core::ffi::c_void,
+        b: i64,
+        h: i64,
+        hk: i64,
+        d: i64,
+        max_seqlen_k: i64,
+        max_blocks_per_seq: i64,
+        page_block_size: i64,
+        pool_rows: i64,
+        split_count: i64,
+        scale: f32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
+
+    fn kiln_paged_attn_decode_bf16_gqa4_async(
+        q_bf16: *const core::ffi::c_void,
+        k_pool_bf16: *const core::ffi::c_void,
+        v_pool_bf16: *const core::ffi::c_void,
+        block_table_u32: *const core::ffi::c_void,
+        seqused_k_u32: *const core::ffi::c_void,
+        out_bf16: *mut core::ffi::c_void,
+        b: i64,
+        h: i64,
+        hk: i64,
+        d: i64,
+        max_seqlen_k: i64,
+        max_blocks_per_seq: i64,
+        page_block_size: i64,
+        pool_rows: i64,
+        scale: f32,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
+
+    fn kiln_paged_attn_decode_bf16_gqa4_split_async(
         q_bf16: *const core::ffi::c_void,
         k_pool_bf16: *const core::ffi::c_void,
         v_pool_bf16: *const core::ffi::c_void,
@@ -420,6 +474,93 @@ pub fn rocm_gqa_repeat_heads(src: &Tensor, h: usize) -> Result<Tensor> {
     .map_err(|e| Error::Msg(format!("rocm_gqa_repeat_heads: wrap: {e}")))
 }
 
+/// Repeat GQA KV heads directly on ROCm for head-major tensors.
+///
+/// Input is `[b, hk, sk, d]`; output is `[b, h, sk, d]`, with each input head
+/// repeated `h / hk` times. This avoids transposing ROCm streaming-prefill K/V
+/// to token-major solely to use [`rocm_gqa_repeat_heads`].
+pub fn rocm_gqa_repeat_heads_head_major(src: &Tensor, h: usize) -> Result<Tensor> {
+    if src.dtype().is_packed() {
+        return Err(Error::Msg(
+            "rocm_gqa_repeat_heads_head_major: packed dtype not supported".to_string(),
+        ));
+    }
+    let src_c = if src.is_contiguous() {
+        src.clone()
+    } else {
+        src.contiguous()?
+    };
+    let shape = src_c.shape();
+    if shape.len() != 4 {
+        return Err(Error::Msg(format!(
+            "rocm_gqa_repeat_heads_head_major: src must have shape [b, hk, sk, d], got {shape:?}"
+        )));
+    }
+    let (b, hk, sk, d) = (shape[0], shape[1], shape[2], shape[3]);
+    if hk == h {
+        return Ok(src_c);
+    }
+    if hk == 0 || h == 0 || h % hk != 0 {
+        return Err(Error::Msg(format!(
+            "rocm_gqa_repeat_heads_head_major: output heads h={h} must be a non-zero multiple of hk={hk}"
+        )));
+    }
+
+    let dtype = src_c.dtype();
+    let elem_bytes = dtype.size_in_bytes();
+    if elem_bytes == 0 {
+        return Err(Error::Msg(format!(
+            "rocm_gqa_repeat_heads_head_major: unsupported zero-width dtype {dtype}"
+        )));
+    }
+
+    let src_storage = rocm_storage(&src_c, "rocm_gqa_repeat_heads_head_major")?;
+    let ctx = src_storage.context();
+    let device_index = match src_c.device() {
+        Device::Rocm(i) => i,
+        _ => {
+            return Err(Error::Msg(
+                "rocm_gqa_repeat_heads_head_major: src must be on a ROCm device".to_string(),
+            ));
+        }
+    };
+
+    let n_out = b * h * sk * d;
+    let out_storage = RocmStorage::alloc_uninit_ctx(&ctx, device_index, dtype, n_out)?;
+
+    let raw_stream = src_storage.rocm_stream_raw();
+    let (src_base, _) = src_storage.device_ptr_raw();
+    let (out_base, _) = out_storage.device_ptr_raw();
+    let src_off = (src_c.layout().start_offset() * elem_bytes) as u64;
+
+    let status = unsafe {
+        kiln_gqa_repeat_heads_head_major_async(
+            (src_base + src_off) as *const core::ffi::c_void,
+            out_base as *mut core::ffi::c_void,
+            b as i64,
+            sk as i64,
+            hk as i64,
+            h as i64,
+            d as i64,
+            elem_bytes as i64,
+            raw_stream,
+        )
+    };
+    if status != 0 {
+        return Err(Error::Msg(format!(
+            "rocm_gqa_repeat_heads_head_major: FFI returned status {status}"
+        )));
+    }
+
+    let storage_arc: crate::Storage = Arc::new(out_storage);
+    Tensor::from_parts(
+        storage_arc,
+        Layout::contiguous(vec![b, h, sk, d]),
+        TensorId::next(),
+    )
+    .map_err(|e| Error::Msg(format!("rocm_gqa_repeat_heads_head_major: wrap: {e}")))
+}
+
 /// Direct BF16 paged decode attention for single-token decode.
 ///
 /// `q` is `[b, 1, h, d]`, K/V pools are `[pool_rows, hk, d]`, and
@@ -593,6 +734,9 @@ pub fn rocm_paged_attn_decode_bf16(
     };
 
     let split_count = paged_attn_split_count(max_seqlen_k);
+    let group = h / hk;
+    let use_gqa4 = (2..=4).contains(&group)
+        && std::env::var("KILN_DISABLE_ROCM_GQA_PAGED_ATTN").is_err();
     let status = if split_count > 1 {
         let partials = b * h * split_count;
         let partial_m =
@@ -604,17 +748,66 @@ pub fn rocm_paged_attn_decode_bf16(
         let (partial_m_base, _) = partial_m.device_ptr_raw();
         let (partial_l_base, _) = partial_l.device_ptr_raw();
         let (partial_acc_base, _) = partial_acc.device_ptr_raw();
+        if use_gqa4 {
+            unsafe {
+                kiln_paged_attn_decode_bf16_gqa4_split_async(
+                    (q_base + q_off) as *const core::ffi::c_void,
+                    (k_base + k_off) as *const core::ffi::c_void,
+                    (v_base + v_off) as *const core::ffi::c_void,
+                    (bt_base + bt_off) as *const core::ffi::c_void,
+                    seqused_ptr,
+                    out_base as *mut core::ffi::c_void,
+                    partial_m_base as *mut core::ffi::c_void,
+                    partial_l_base as *mut core::ffi::c_void,
+                    partial_acc_base as *mut core::ffi::c_void,
+                    b as i64,
+                    h as i64,
+                    hk as i64,
+                    d as i64,
+                    max_seqlen_k as i64,
+                    max_blocks_per_seq as i64,
+                    page_block_size as i64,
+                    pool_rows as i64,
+                    split_count as i64,
+                    scale,
+                    q_storage.rocm_stream_raw(),
+                )
+            }
+        } else {
+            unsafe {
+                kiln_paged_attn_decode_bf16_split_async(
+                    (q_base + q_off) as *const core::ffi::c_void,
+                    (k_base + k_off) as *const core::ffi::c_void,
+                    (v_base + v_off) as *const core::ffi::c_void,
+                    (bt_base + bt_off) as *const core::ffi::c_void,
+                    seqused_ptr,
+                    out_base as *mut core::ffi::c_void,
+                    partial_m_base as *mut core::ffi::c_void,
+                    partial_l_base as *mut core::ffi::c_void,
+                    partial_acc_base as *mut core::ffi::c_void,
+                    b as i64,
+                    h as i64,
+                    hk as i64,
+                    d as i64,
+                    max_seqlen_k as i64,
+                    max_blocks_per_seq as i64,
+                    page_block_size as i64,
+                    pool_rows as i64,
+                    split_count as i64,
+                    scale,
+                    q_storage.rocm_stream_raw(),
+                )
+            }
+        }
+    } else if use_gqa4 {
         unsafe {
-            kiln_paged_attn_decode_bf16_split_async(
+            kiln_paged_attn_decode_bf16_gqa4_async(
                 (q_base + q_off) as *const core::ffi::c_void,
                 (k_base + k_off) as *const core::ffi::c_void,
                 (v_base + v_off) as *const core::ffi::c_void,
                 (bt_base + bt_off) as *const core::ffi::c_void,
                 seqused_ptr,
                 out_base as *mut core::ffi::c_void,
-                partial_m_base as *mut core::ffi::c_void,
-                partial_l_base as *mut core::ffi::c_void,
-                partial_acc_base as *mut core::ffi::c_void,
                 b as i64,
                 h as i64,
                 hk as i64,
@@ -623,7 +816,6 @@ pub fn rocm_paged_attn_decode_bf16(
                 max_blocks_per_seq as i64,
                 page_block_size as i64,
                 pool_rows as i64,
-                split_count as i64,
                 scale,
                 q_storage.rocm_stream_raw(),
             )

@@ -84,6 +84,20 @@ fn gqa_expand_heads(
     map_kt(kiln_tensor::rocm_gqa_repeat_heads(kv, h))
 }
 
+/// Head-major GQA expand: `[b, hk, sk, d] -> [b, h, sk, d]`.
+fn gqa_expand_heads_head_major(
+    kv: &KtTensor,
+    h: usize,
+    hk: usize,
+    device: KtDevice,
+) -> Result<KtTensor, FlashAttnError> {
+    if hk == h {
+        return rocm_contig(kv);
+    }
+    let _ = device;
+    map_kt(kiln_tensor::rocm_gqa_repeat_heads_head_major(kv, h))
+}
+
 /// Build the additive-causal U8 mask `[b*h, sq, sk]` on host and upload to ROCm
 /// once. `mask[..,i,j] = 1` (→ NEG_FILL) when `j > i + (sk - sq)` (strictly
 /// future), else `0` (keep). Replicated across the `b*h` leading axis so the
@@ -225,6 +239,63 @@ pub fn sdpa_forward(
     Ok((out_bf16, lse))
 }
 
+/// Head-major ROCm SDPA composite.
+///
+/// Inputs:
+/// - `q`: `[b, h, sq, d]`
+/// - `k`, `v`: `[b, hk, sk, d]`
+///
+/// Returns `(out[b, h, sq, d] BF16, lse[b, h, sq] F32)`.
+#[allow(clippy::too_many_arguments)]
+pub fn sdpa_forward_head_major(
+    q: &KtTensor,
+    k: &KtTensor,
+    v: &KtTensor,
+    b: usize,
+    sq: usize,
+    sk: usize,
+    h: usize,
+    hk: usize,
+    d: usize,
+    scale: f32,
+    causal: bool,
+) -> Result<(KtTensor, KtTensor), FlashAttnError> {
+    let device = q.device();
+    let bh = b * h;
+
+    let q_bhsd = rocm_contig(q)?;
+    let k_exp = gqa_expand_heads_head_major(k, h, hk, device)?;
+    let v_exp = gqa_expand_heads_head_major(v, h, hk, device)?;
+
+    let q3 = map_kt(q_bhsd.reshape(vec![bh, sq, d]))?;
+    let k3 = map_kt(k_exp.reshape(vec![bh, sk, d]))?;
+    let v3 = map_kt(v_exp.reshape(vec![bh, sk, d]))?;
+
+    let q3f = rocm_cast_to(&q3, KtDType::F32)?;
+    let k3f = rocm_cast_to(&k3, KtDType::F32)?;
+    let v3f = rocm_cast_to(&v3, KtDType::F32)?;
+
+    let kt3 = rocm_contig(&map_kt(k3f.transpose(1, 2))?)?;
+    let qk = map_kt(kiln_tensor::rocm_matmul(&q3f, &kt3))?;
+    let scores = map_kt(kiln_tensor::rocm_scalar_op(&qk, SCALAR_MUL, scale))?;
+
+    let scores = if causal && sq > 1 {
+        let mask = build_causal_mask_u8(bh, sq, sk, device)?;
+        map_kt(kiln_tensor::rocm_masked_fill(&scores, &mask, NEG_FILL))?
+    } else {
+        scores
+    };
+
+    let p = map_kt(kiln_tensor::rocm_softmax_last_axis(&scores))?;
+    let lse = compute_lse(&scores, &p, b, h, sq, device)?;
+
+    let out3 = map_kt(kiln_tensor::rocm_matmul(&p, &v3f))?;
+    let out_bhsd = map_kt(out3.reshape(vec![b, h, sq, d]))?;
+    let out_bf16 = rocm_cast_to(&out_bhsd, KtDType::BF16)?;
+
+    Ok((out_bf16, lse))
+}
+
 // ============================================================================
 // Forward entry point
 // ============================================================================
@@ -272,6 +343,46 @@ pub fn flash_attn_fwd_rocm(
     let (b, sq, h, d) = (q.shape()[0], q.shape()[1], q.shape()[2], q.shape()[3]);
     let (sk, hk) = (k.shape()[1], k.shape()[2]);
     sdpa_forward(q, k, v, b, sq, sk, h, hk, d, softmax_scale, causal)
+}
+
+/// ROCm composite for head-major SDPA. `q` is `[b, h, sq, d]`; K/V are
+/// `[b, hk, sk, d]`.
+pub fn flash_attn_fwd_head_major_rocm(
+    q: &KtTensor,
+    k: &KtTensor,
+    v: &KtTensor,
+    softmax_scale: f32,
+    causal: bool,
+) -> Result<(KtTensor, KtTensor), FlashAttnError> {
+    let dev = [q.device(), k.device(), v.device()]
+        .into_iter()
+        .find(|d| !d.is_cpu())
+        .unwrap_or_else(|| q.device());
+    let qc;
+    let q = if q.device() != dev {
+        qc = map_kt(q.to_device(dev))?;
+        &qc
+    } else {
+        q
+    };
+    let kc;
+    let k = if k.device() != dev {
+        kc = map_kt(k.to_device(dev))?;
+        &kc
+    } else {
+        k
+    };
+    let vc;
+    let v = if v.device() != dev {
+        vc = map_kt(v.to_device(dev))?;
+        &vc
+    } else {
+        v
+    };
+
+    let (b, h, sq, d) = (q.shape()[0], q.shape()[1], q.shape()[2], q.shape()[3]);
+    let (sk, hk) = (k.shape()[2], k.shape()[1]);
+    sdpa_forward_head_major(q, k, v, b, sq, sk, h, hk, d, softmax_scale, causal)
 }
 
 // ============================================================================

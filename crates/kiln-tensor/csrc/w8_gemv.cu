@@ -17,6 +17,103 @@ namespace {
 
 constexpr int BLOCK = 64;
 constexpr int ARGMAX_BLOCK = 256;
+constexpr int A8_QUANT_BLOCK = 256;
+constexpr int A8_GEMV_BLOCK = 64;
+
+__device__ __forceinline__ int32_t kiln_pack4_i8(const int8_t* p) {
+    uint32_t u = static_cast<uint8_t>(p[0]);
+    u |= static_cast<uint32_t>(static_cast<uint8_t>(p[1])) << 8;
+    u |= static_cast<uint32_t>(static_cast<uint8_t>(p[2])) << 16;
+    u |= static_cast<uint32_t>(static_cast<uint8_t>(p[3])) << 24;
+    return static_cast<int32_t>(u);
+}
+
+__device__ __forceinline__ int kiln_sdot4_i8(int32_t a, int32_t b, int c) {
+#if KILN_IS_HIP && (defined(__gfx90a__) || defined(__gfx942__))
+    return __builtin_amdgcn_sdot4(a, b, c, false);
+#else
+    int acc = c;
+    #pragma unroll
+    for (int i = 0; i < 4; ++i) {
+        int av = static_cast<int8_t>((static_cast<uint32_t>(a) >> (8 * i)) & 0xffu);
+        int bv = static_cast<int8_t>((static_cast<uint32_t>(b) >> (8 * i)) & 0xffu);
+        acc += av * bv;
+    }
+    return acc;
+#endif
+}
+
+__global__ void kiln_w8a8_quantize_bf16_kernel(
+    const __nv_bfloat16* __restrict__ x,
+    uint8_t* __restrict__ x_q_u8,
+    float* __restrict__ x_scales,
+    int64_t m,
+    int64_t k) {
+    int64_t row = static_cast<int64_t>(blockIdx.x);
+    int tid = threadIdx.x;
+    if (row >= m) return;
+
+    const __nv_bfloat16* x_row = x + row * k;
+    uint8_t* q_row_u8 = x_q_u8 + row * k;
+
+    float local_max = 0.0f;
+    for (int64_t c = tid; c < k; c += blockDim.x) {
+        local_max = fmaxf(local_max, fabsf(__bfloat162float(x_row[c])));
+    }
+
+    __shared__ float smem[A8_QUANT_BLOCK];
+    float max_abs = kiln_block_reduce_max(local_max, smem);
+    float scale = max_abs <= 1.0e-12f ? 1.0f : max_abs / 127.0f;
+    float inv_scale = 1.0f / scale;
+    if (tid == 0) {
+        x_scales[row] = scale;
+    }
+
+    int8_t* q_row = reinterpret_cast<int8_t*>(q_row_u8);
+    for (int64_t c = tid; c < k; c += blockDim.x) {
+        float scaled = __bfloat162float(x_row[c]) * inv_scale;
+        int q = __float2int_rn(scaled);
+        q = q > 127 ? 127 : q;
+        q = q < -127 ? -127 : q;
+        q_row[c] = static_cast<int8_t>(q);
+    }
+}
+
+__global__ void kiln_w8a8_gemv_bf16_kernel(
+    const uint8_t* __restrict__ x_q_u8,
+    const uint8_t* __restrict__ w_q_u8,
+    const float* __restrict__ x_scales,
+    const float* __restrict__ w_scales,
+    __nv_bfloat16* __restrict__ out,
+    int64_t m,
+    int64_t n,
+    int64_t k) {
+    int64_t col = static_cast<int64_t>(blockIdx.x);
+    int64_t row = static_cast<int64_t>(blockIdx.y);
+    int tid = threadIdx.x;
+    if (row >= m || col >= n) return;
+
+    const int8_t* x_row = reinterpret_cast<const int8_t*>(x_q_u8 + row * k);
+    const int8_t* w_row = reinterpret_cast<const int8_t*>(w_q_u8 + col * k);
+
+    int local = 0;
+    int64_t k4 = (k / 4) * 4;
+    for (int64_t c = static_cast<int64_t>(tid) * 4; c < k4; c += static_cast<int64_t>(blockDim.x) * 4) {
+        int32_t xv = kiln_pack4_i8(x_row + c);
+        int32_t wv = kiln_pack4_i8(w_row + c);
+        local = kiln_sdot4_i8(xv, wv, local);
+    }
+    for (int64_t c = k4 + tid; c < k; c += blockDim.x) {
+        local += static_cast<int>(x_row[c]) * static_cast<int>(w_row[c]);
+    }
+
+    __shared__ int smem[A8_GEMV_BLOCK];
+    int sum = kiln_block_reduce_sum(local, smem);
+    if (tid == 0) {
+        float scale = x_scales[row] * w_scales[col];
+        out[row * n + col] = __float2bfloat16(static_cast<float>(sum) * scale);
+    }
+}
 
 __global__ void kiln_w8a16_gemv_bf16_kernel(
     const __nv_bfloat16* __restrict__ x,
@@ -136,6 +233,63 @@ extern "C" int kiln_w8a16_gemv_bf16_async(
         static_cast<const __nv_bfloat16*>(x),
         static_cast<const uint8_t*>(w_q),
         static_cast<const float*>(scales),
+        static_cast<__nv_bfloat16*>(out),
+        m,
+        n,
+        k);
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) return 1000 + static_cast<int>(err);
+    return 0;
+}
+
+extern "C" int kiln_w8a8_quantize_bf16_async(
+    const void* x,
+    void* x_q,
+    void* x_scales,
+    int64_t m,
+    int64_t k,
+    void* stream_raw) {
+    if (m < 0 || k < 0) return 1;
+    if (m == 0 || k == 0) return 0;
+    if (m > static_cast<int64_t>(2147483647)) return 2;
+
+    cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_raw);
+    kiln_w8a8_quantize_bf16_kernel<<<static_cast<unsigned int>(m), A8_QUANT_BLOCK, 0, stream>>>(
+        static_cast<const __nv_bfloat16*>(x),
+        static_cast<uint8_t*>(x_q),
+        static_cast<float*>(x_scales),
+        m,
+        k);
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) return 1000 + static_cast<int>(err);
+    return 0;
+}
+
+extern "C" int kiln_w8a8_gemv_bf16_async(
+    const void* x_q,
+    const void* w_q,
+    const void* x_scales,
+    const void* w_scales,
+    void* out,
+    int64_t m,
+    int64_t n,
+    int64_t k,
+    void* stream_raw) {
+    if (m < 0 || n < 0 || k < 0) return 1;
+    if (m == 0 || n == 0 || k == 0) return 0;
+    if (n > static_cast<int64_t>(2147483647) || m > static_cast<int64_t>(65535)) {
+        return 2;
+    }
+
+    dim3 grid(static_cast<unsigned int>(n), static_cast<unsigned int>(m), 1);
+    cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_raw);
+    kiln_w8a8_gemv_bf16_kernel<<<grid, A8_GEMV_BLOCK, 0, stream>>>(
+        static_cast<const uint8_t*>(x_q),
+        static_cast<const uint8_t*>(w_q),
+        static_cast<const float*>(x_scales),
+        static_cast<const float*>(w_scales),
         static_cast<__nv_bfloat16*>(out),
         m,
         n,
