@@ -338,6 +338,13 @@ pub fn matmul_lhs_transposed(a: &Tensor, b: &Tensor) -> Result<Tensor> {
     }
 
     let a_t = a.transpose(ar - 2, ar - 1)?.contiguous()?;
+    let b_contig;
+    let b = if b.is_contiguous() {
+        b
+    } else {
+        b_contig = b.contiguous()?;
+        &b_contig
+    };
     matmul(&a_t, b)
 }
 
@@ -432,6 +439,13 @@ pub fn matmul_rhs_transposed(a: &Tensor, b: &Tensor) -> Result<Tensor> {
         }
     }
 
+    let a_contig;
+    let a = if a.is_contiguous() {
+        a
+    } else {
+        a_contig = a.contiguous()?;
+        &a_contig
+    };
     let b_t = b.transpose(br - 2, br - 1)?.contiguous()?;
     matmul(a, &b_t)
 }
@@ -586,6 +600,29 @@ mod tests {
         // B stored as [N=2, K=3]; A @ B^T gives [M=2, N=2].
         let a = Tensor::from_slice(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3]).unwrap();
         let b = Tensor::from_slice(&[7.0f32, 9.0, 11.0, 8.0, 10.0, 12.0], vec![2, 3]).unwrap();
+        let c = matmul_rhs_transposed(&a, &b).unwrap();
+        assert_eq!(c.shape(), &[2, 2]);
+        assert_eq!(read_f32(&c), vec![58.0, 64.0, 139.0, 154.0]);
+    }
+
+    #[test]
+    fn matmul_lhs_transposed_cpu_contiguifies_rhs_fallback() {
+        let a = Tensor::from_slice(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], vec![3, 2]).unwrap();
+        let b_storage =
+            Tensor::from_slice(&[7.0f32, 9.0, 11.0, 8.0, 10.0, 12.0], vec![2, 3]).unwrap();
+        let b = b_storage.transpose(0, 1).unwrap();
+        assert!(!b.is_contiguous());
+        let c = matmul_lhs_transposed(&a, &b).unwrap();
+        assert_eq!(c.shape(), &[2, 2]);
+        assert_eq!(read_f32(&c), vec![89.0, 98.0, 116.0, 128.0]);
+    }
+
+    #[test]
+    fn matmul_rhs_transposed_cpu_contiguifies_lhs_fallback() {
+        let a_storage = Tensor::from_slice(&[1.0f32, 4.0, 2.0, 5.0, 3.0, 6.0], vec![3, 2]).unwrap();
+        let a = a_storage.transpose(0, 1).unwrap();
+        let b = Tensor::from_slice(&[7.0f32, 9.0, 11.0, 8.0, 10.0, 12.0], vec![2, 3]).unwrap();
+        assert!(!a.is_contiguous());
         let c = matmul_rhs_transposed(&a, &b).unwrap();
         assert_eq!(c.shape(), &[2, 2]);
         assert_eq!(read_f32(&c), vec![58.0, 64.0, 139.0, 154.0]);

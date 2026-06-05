@@ -14743,10 +14743,11 @@ pub fn sdpa_fallback_backward_no_grad(
     };
     let k_exp = expand_heads(&k_f32, head_dim)?; // [B, nq, T, hd]
     let v_exp = expand_heads(&v_f32, head_dim)?; // [B, nq, T, hd]
+    let q_f32_c = q_f32.contiguous()?;
 
     // Recompute the forward scores -> probabilities (the backward needs `p`).
     // scores = (q @ kᵀ) * scale; causal-masked; p = softmax(last).
-    let scores = q_f32.contiguous()?.broadcast_matmul(&k_exp.t()?)?; // [B, nq, T, T]
+    let scores = kiln_tensor::ops::matmul_rhs_transposed(&q_f32_c, &k_exp)?; // [B, nq, T, T]
     let scores = scores.affine(scale, 0.0)?;
     let scores = if causal {
         apply_causal_mask_with_offset(&scores, seq_len, seq_len, 0)?
@@ -14766,10 +14767,10 @@ pub fn sdpa_fallback_backward_no_grad(
     // pᵀ over the (T_q, T_k) axes gives [B, nq, T_k, T_q] @ [B, nq, T_q, hd].
     let p_c = p.contiguous()?;
     let g_c = g_f32.contiguous()?;
-    let dv_exp = p_c.transpose(2, 3)?.contiguous()?.broadcast_matmul(&g_c)?; // [B, nq, T, hd]
+    let dv_exp = kiln_tensor::ops::matmul_lhs_transposed(&p_c, &g_c)?; // [B, nq, T, hd]
 
     // dp = g @ vᵀ. [B, nq, T, hd] @ [B, nq, hd, T] -> [B, nq, T_q, T_k].
-    let dp = g_c.broadcast_matmul(&v_exp.t()?)?; // [B, nq, T, T]
+    let dp = kiln_tensor::ops::matmul_rhs_transposed(&g_c, &v_exp)?; // [B, nq, T, T]
 
     // Softmax adjoint: dscores = p * (dp - Σ_last(p * dp)).
     let sum_pdp = (&p_c * &dp)?.sum_keepdim(LAST_DIM)?; // [B, nq, T, 1]
@@ -14797,10 +14798,7 @@ pub fn sdpa_fallback_backward_no_grad(
 
     // dk_exp = (dscoresᵀ @ q) * scale. dscoresᵀ over (T_q, T_k):
     // [B, nq, T_k, T_q] @ [B, nq, T_q, hd] -> [B, nq, T_k, hd].
-    let dk_exp = dscores
-        .transpose(2, 3)?
-        .contiguous()?
-        .broadcast_matmul(&q_f32.contiguous()?)?
+    let dk_exp = kiln_tensor::ops::matmul_lhs_transposed(&dscores, &q_f32_c)?
         .affine(scale, 0.0)?; // [B, nq, T, hd]
 
     // GQA-collapse dk_exp / dv_exp from num_heads back to num_kv_heads by
@@ -18445,7 +18443,7 @@ pub fn gqa_attention_core_prefill(
             match try_kt_gqa_sdpa_matmuls(&q, &k, &v, seq_len, scale)? {
                 Some(out) => out,
                 None => {
-                    let attn_scores = q.broadcast_matmul(&k.t()?)?;
+                    let attn_scores = kiln_tensor::ops::matmul_rhs_transposed(&q, &k)?;
                     // kt has no `Tensor / f64`; `x / scale == x * (1/scale)`.
                     let attn_scores = attn_scores.affine(1.0 / scale, 0.0)?;
                     let attn_scores =
@@ -18457,7 +18455,7 @@ pub fn gqa_attention_core_prefill(
         }
         #[cfg(not(feature = "cuda"))]
         {
-            let attn_scores = q.broadcast_matmul(&k.t()?)?;
+            let attn_scores = kiln_tensor::ops::matmul_rhs_transposed(&q, &k)?;
             let attn_scores = attn_scores.affine(1.0 / scale, 0.0)?;
             let attn_scores = apply_causal_mask_with_offset(&attn_scores, seq_len, seq_len, 0)?;
             let attn_weights_softmax = cuda_softmax_last_dim(&attn_scores)?;
@@ -19212,7 +19210,7 @@ pub fn gqa_attention_pre_o(
             "score_matmul",
             seq_len,
         )?;
-        let out = q.broadcast_matmul(&k.t()?)?;
+        let out = kiln_tensor::ops::matmul_rhs_transposed(&q, &k)?;
         // kt has no `Tensor / f64`; `x / scale == x * (1/scale)` via affine.
         let out = out.affine(1.0 / scale, 0.0)?;
         finish_full_attn_stage_profile(
@@ -22435,7 +22433,7 @@ fn gqa_attention_paged_with_rope_tables(
     let scale = (head_dim as f64).sqrt();
     let attn_scores = {
         let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
-        let attn_scores = q.broadcast_matmul(&k.t()?)?;
+        let attn_scores = kiln_tensor::ops::matmul_rhs_transposed(&q, &k)?;
         // kt has no `Tensor / f64`; `x / scale == x * (1/scale)` via affine.
         let attn_scores = attn_scores.affine(1.0 / scale, 0.0)?;
         finish_full_attn_stage_profile(
