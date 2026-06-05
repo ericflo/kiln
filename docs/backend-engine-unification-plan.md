@@ -44,9 +44,11 @@ The target architecture should be:
    and training-residency predicates.
 4. A common resident-resource lifecycle that can represent CUDA/ROCm device
    pointers, Metal shared buffers, and Vulkan buffer registries.
-5. A common graph/replay abstraction whose implementations remain CUDA Graph,
+5. A single matmul/linear request surface used by all four backends, reusing
+   the BLAS crates' existing autotune-key direction.
+6. A common graph/replay abstraction whose implementations remain CUDA Graph,
    HIP Graph, Metal ICB, and Vulkan command batching.
-6. A common training contract around kt tape, optimizer dispatch, fused loss
+7. A common training contract around kt tape, optimizer dispatch, fused loss
    roots, and per-backend precision policy.
 
 That gives Metal and Vulkan the same architectural standing as CUDA and ROCm
@@ -111,7 +113,8 @@ mostly implement equivalent behavior through kt-native MSL or SPIR-V paths in
 The backend storage implementations are:
 
 - CUDA: `cuda_storage.rs`, `cuda_allocator.rs`, `active_stream.rs`,
-  `capture_alloc.rs`, `cuda_matmul.rs`, and `fp8.rs`.
+  `capture_alloc.rs`, `cuda_matmul.rs`, `cuda_stream_priority.rs`, and
+  `fp8.rs`.
 - ROCm: `rocm_storage.rs`, `rocm_allocator.rs`, `active_rocm_stream.rs`,
   `rocm_capture_alloc.rs`, `rocm_matmul.rs`, and the `rocm_ops/` module
   directory (`mod.rs` plus per-op submodules).
@@ -129,8 +132,8 @@ currently use correctness-first host fallback for missing native forwards:
 device -> CPU -> CPU reference op -> original device. ROCm additionally logs
 host fallback when profiling is enabled.
 
-This asymmetry matters. It is useful during bring-up, but it is not a long-term
-capability contract. A unified engine should make "native", "host fallback",
+This asymmetry is useful during bring-up but is not a long-term capability
+contract. A unified engine should make "native", "host fallback",
 "decline", and "must be native" explicit per call site.
 
 ### Model Runtime Surface
@@ -156,10 +159,9 @@ very broad. It currently mixes:
   that threads caller-owned out/softmax_lse buffers for CUDA-graph decode
   replay.
 
-That breadth is the reason unification feels harder than it should. It is also
-why backend differences are hard to audit: a backend can claim support through a
-`supports_*` method, shape-gate inside the implementation, decline with
-`Ok(None)`, or be disabled by environment variables.
+That breadth makes backend differences hard to audit: a backend can claim
+support through a `supports_*` method, shape-gate inside the implementation,
+decline with `Ok(None)`, or be disabled by environment variables.
 
 `for_device_kt` chooses the concrete runtime by matching `kiln_tensor::Device`
 (Cuda/Rocm/Metal arms). Vulkan is not keyed off the enum variant: the `_`
@@ -224,9 +226,12 @@ backend-gated fast paths for fused loss roots and optimizer dispatch.
 The relevant shims are:
 
 - `sft_tape_shim.rs`: Vulkan-specific SFT FLCE bridges (kt tensor <->
-  `VkTensor`, fused active-row FLCE loss/backward). The CUDA/ROCm kt FLCE
-  paths are not in this shim; they live in `trainer.rs` (gated on
-  `is_cuda_device`) via `kiln-flce-kernel`'s kt FLCE API.
+  `VkTensor`, fused active-row FLCE loss/backward). The CUDA FLCE fast path is
+  not in this shim; it lives in `trainer.rs` (gated on `is_cuda_device`, which
+  matches `Device::Cuda(_)` only) via `kiln-flce-kernel`'s kt FLCE API. ROCm has
+  no native fused FLCE: the kt composite has no `rocm_fwd`, so ROCm FLCE
+  host-stages down to CPU and back, unlike the OPD path below where ROCm joins
+  CUDA's fused FFI kernel.
 - `grpo_tape_shim.rs`: GRPO scalar loss roots and analytic kt backward, with
   CUDA/ROCm fused fast paths and Vulkan-specific loss/grad paths.
 - `opd_tape_shim.rs`: records the OPD top-K/reverse-KL scalar-mean loss root and
@@ -334,8 +339,9 @@ Capability profile:
   which mixes runtime trait implementation, MSL strings, pipeline setup,
   residency, decode helpers, and tests.
 
-Metal should be unified through resource, capability, replay, and training
-contracts while keeping MSL kernels and UMA assumptions explicit.
+Metal's unification risk is the monolithic `backend/metal.rs`; the shared
+contracts apply cleanly once it is decomposed, with MSL kernels and UMA
+assumptions kept explicit.
 
 ### Vulkan
 
@@ -372,13 +378,14 @@ same resource and replay contracts used by the other backends.
 
 ## Capability Matrix
 
-This table is deliberately architectural. Individual shape gates and environment
-flags still need generated capability reporting.
+This table is architectural, not exhaustive: it consolidates the four
+per-backend capability profiles into one cross-backend view. Individual shape
+gates and environment flags still need generated capability reporting (Phase 0).
 
 | Capability | CUDA | ROCm | Metal | Vulkan |
 |---|---|---|---|---|
 | Device storage | `CudaStorage` / `CudaSlice` / `CudaContext` | `RocmStorage` / `RocmSlice` / `RocmContext` | `MetalStorage` / shared `MTLBuffer` | `VulkanStorage` / `VulkanBuffer` |
-| Host transfer | H2D/D2H helpers; no generic cross-GPU transfer | H2D/D2H helpers; no generic cross-GPU transfer | Shared-buffer host read/write plus sync | Upload/readback through Vulkan buffers |
+| Host transfer | H2D/D2H helpers; no cross-device GPU transfer | H2D/D2H helpers; no cross-device GPU transfer | Shared-buffer host read/write plus sync; no cross-device transfer | Upload/readback through Vulkan buffers; no cross-device transfer |
 | Generic op fallback | Strict/loud on native miss | Host round trip on native miss | Host round trip on native miss | Host round trip on native miss |
 | Dense matmul | cublasLt through `kiln-blas` | hipBLASLt through `kiln-rocblas` | BF16 custom MSL and MPS direction | SPIR-V/VkTensor kernels with rank/dtype gates |
 | Flash attention | Vendored CUDA FA and paged decode | HIP/composite/ROCm variants; head-major gate | Metal SDPA/paged decode variants | Vulkan SDPA/paged decode variants |
@@ -425,6 +432,8 @@ This made backend bring-up easier. It now needs a more formal policy:
 - Correctness tests and rare ops: host fallback allowed and counted.
 - CPU reference: always available for parity.
 
+Phase 2 encodes this as a typed `FallbackPolicy` per operation family and mode.
+
 ### Capability Encoding
 
 Capabilities are currently encoded in at least six places:
@@ -450,11 +459,12 @@ Real CUDA/HIP replay behavior lives in `kiln-model/src/cuda_graph.rs` and
 itself is `kiln_graph_metal::MetalCapturedGraph` in the `kiln-graph-metal`
 crate.
 Vulkan replay behavior lives in `kiln-vulkan-kernel::CommandBatch` and
-`vk_decode_resident.rs`.
+`vk_decode_resident.rs`; the parallel `kiln-graph-vulkan` scaffold
+(`VulkanCapturedGraph`) is non-authoritative, mirroring the Metal split above.
 
 Unification should move the real runner contracts into the graph crates, or
 rename the graph crates as scaffolds and introduce a new authoritative replay
-layer. Leaving both layers with overlapping names will keep causing confusion.
+layer; overlapping names across both layers are a standing source of confusion.
 
 ### Backend File Shapes
 
@@ -715,6 +725,19 @@ Vulkan except through capabilities and policy objects.
 
 ## Migration Plan
 
+Sequencing. Phase 0 (make the current state inspectable) lands first; it needs
+no refactor and de-risks every later phase. Phase 1 (focused traits) is the
+structural prerequisite for Phases 4-7. Phase 2 (fallback policy) supplies the
+hot-path guards that Phases 6 and 8 consume. After Phase 1, three tracks can
+proceed in parallel: residency (Phase 3, which gates Phase 5 because replay
+needs resident-resource identity), matmul/linear (Phase 4), and decomposition
+(Phase 7, mechanical, following the Phase 1 trait boundaries). Phase 6
+(training) needs both Phase 1 and Phase 2. Phase 7 gates nothing. Phase 8
+(conformance) is last and consumes the contracts from Phases 1-6.
+
+Dependency: 0 -> 1 -> {2, 3, 4, 7}; 3 -> 5; {1, 2} -> 6; {1..6} -> 8.
+Critical path: 0 -> 1 -> 3 -> 5 -> 8.
+
 ### Phase 0: Audit And Stabilize Capability Reporting
 
 Deliverables:
@@ -833,9 +856,12 @@ deleting useful backend leaf kernels.
 
 Deliverables:
 
-- Split `backend/metal.rs` by operation family and runtime concern.
-- Split `backend/vulkan.rs` around residency, attention, GDN, linear/sampling,
-  optimizer, and replay.
+- Split `backend/metal.rs` (~16k lines) by operation family and runtime
+  concern; this is the bulk of the phase.
+- Lightly split `backend/vulkan.rs` (~6k lines) only where the explicit-resource
+  world needs clearer `kiln-tensor`/`kiln-autograd`/`BackendRuntime` integration
+  points; it is already better factored than Metal, so prioritize boundaries
+  over a full rewrite.
 - Factor CUDA/ROCm shared code where it is truly identical:
   - support predicates
   - kt bridge helpers
@@ -856,6 +882,8 @@ Deliverables:
 
 - A backend conformance suite:
   - storage round trip
+  - host transfer / `to_device` parity (explicit `Err` on unsupported
+    cross-device cases)
   - `DeviceOp` parity
   - matmul/linear parity
   - attention/GDN/conv parity
@@ -872,6 +900,11 @@ Deliverables:
 This is what keeps unification from becoming a regression factory.
 
 ## Immediate Backlog
+
+These are the first concrete PRs, ordered by readiness. Items 1-4 are Phase 0
+(no refactor, do these first); item 6 begins Phase 1; items 5 and 8 begin Phase
+2; item 7 begins Phase 7 and must wait for item 6. Item 9 is a small audit that
+pairs with the unified optimizer contract (Phase 6).
 
 1. Generate a capability report from the live tree.
    Start with override presence plus explicit support methods for
@@ -908,6 +941,12 @@ This is what keeps unification from becoming a regression factory.
 8. Add hot-path native-required checks.
    Decode and training should fail clearly when a backend silently drops to CPU
    for an operation expected to be resident.
+
+9. Audit Metal optimizer coverage.
+   Metal overrides `dispatch_adamw_step` but not `dispatch_sgd_step`; under a
+   unified optimizer contract, either implement Metal SGD or have its capability
+   predicate report `Declined` so the Capability Matrix ("no SGD override
+   observed") and the generated report agree. Mirrors item 3's argmax audit.
 
 ## Expected End State
 
