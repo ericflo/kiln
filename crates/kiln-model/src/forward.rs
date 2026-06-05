@@ -13392,7 +13392,7 @@ fn gdn_chunkwise_recurrence(
         && !any_kt_tensor_tracks_op(&[q, k, v, beta, g])
         && std::env::var("KILN_DISABLE_GDN_CHUNK_PRE_PERMUTE").is_err();
 
-    let pre_permuted: Option<(Tensor, Tensor, Tensor, Tensor, Tensor, Tensor)> =
+    let pre_permuted: Option<(Tensor, Tensor, Tensor, Tensor, Tensor, Option<Tensor>)> =
         if pre_permute_chunks {
             kiln_nvtx::range!(c"kiln/attn/gdn/chunk_pre_permute");
             let dk = q.dim(3)?;
@@ -13423,8 +13423,15 @@ fn gdn_chunkwise_recurrence(
                 .reshape((batch, heads, full_chunks, chunk_size))?
                 .transpose(1, 2)?
                 .contiguous()?;
-            // K^T (over chunk dims) used by `matmul_prep`. Precompute once.
-            let k_t_pre = k_pre.transpose(3, 4)?.contiguous()?;
+            // K^T is only needed by the fused full-chunk backend API. Matmul
+            // prep uses transposed-GEMM helpers and can consume K in native
+            // chunk layout.
+            let k_t_pre =
+                if chunk_size == 64 && backend.supports_gdn_full_chunk_forward() {
+                    Some(k_pre.transpose(3, 4)?.contiguous()?)
+                } else {
+                    None
+                };
             Some((q_pre, k_pre, v_pre, beta_pre, g_pre, k_t_pre))
         } else {
             None
@@ -13456,8 +13463,11 @@ fn gdn_chunkwise_recurrence(
             let v_c = v_pre.narrow(1, ci, 1)?.squeeze(1)?;
             let beta_c = beta_pre.narrow(1, ci, 1)?.squeeze(1)?;
             let g_c = g_pre.narrow(1, ci, 1)?.squeeze(1)?;
-            let k_t_chunk = k_t_pre.narrow(1, ci, 1)?.squeeze(1)?;
-            (q_c, k_c, v_c, beta_c, g_c, Some(k_t_chunk))
+            let k_t_chunk = k_t_pre
+                .as_ref()
+                .map(|k_t_pre| k_t_pre.narrow(1, ci, 1)?.squeeze(1))
+                .transpose()?;
+            (q_c, k_c, v_c, beta_c, g_c, k_t_chunk)
         } else {
             let t_start = ci * chunk_size;
             (
@@ -13506,13 +13516,13 @@ fn gdn_chunkwise_recurrence(
             && backend.supports_gdn_full_chunk_forward()
             && dtype == DType::BF16
         {
-            let k_t_mat = match k_t_mat_pre.as_ref() {
-                Some(t) => t.clone(),
-                None => k_c.transpose(2, 3)?.contiguous()?,
-            };
             if !any_kt_tensor_tracks_op(&[
-                &g_c, &v_c, &kkt, &qkt, &ks_entry, &q_s, &beta_c, &k_t_mat, state,
+                &g_c, &v_c, &kkt, &qkt, &ks_entry, &q_s, &beta_c, state,
             ]) {
+                let k_t_mat = match k_t_mat_pre.as_ref() {
+                    Some(t) => t.clone(),
+                    None => k_c.transpose(2, 3)?.contiguous()?,
+                };
                 let stage_profile = start_gdn_recurrent_inner_profile(device, profile_inner)?;
                 // #1082 DoD-101/102: `gdn_full_chunk_forward` is now kt-typed and
                 // mutates `state` in place through the kt `&mut` — pass kt tensors
