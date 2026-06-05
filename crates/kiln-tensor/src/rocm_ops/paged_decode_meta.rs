@@ -111,7 +111,19 @@ fn paged_attn_split_count(max_seqlen_k: usize) -> usize {
     if std::env::var("KILN_DISABLE_ROCM_SPLIT_PAGED_ATTN").is_ok() || max_seqlen_k < 2048 {
         return 1;
     }
-    max_seqlen_k.div_ceil(512).clamp(2, 16)
+    let target_tokens_per_split = std::env::var("KILN_ROCM_PAGED_ATTN_SPLIT_TOKENS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(512);
+    let max_splits = std::env::var("KILN_ROCM_PAGED_ATTN_MAX_SPLITS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(64);
+    max_seqlen_k
+        .div_ceil(target_tokens_per_split)
+        .clamp(2, max_splits)
 }
 
 /// Compute the flat physical-slot gather index `[b*seqlen_k]` (U32) on-device

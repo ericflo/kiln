@@ -966,6 +966,7 @@ fn bench_latency_paged(
     }
 
     let backend = runtime_backend_for_bench(&device_kt, weights)?;
+    let mut rocm_graph = kiln_model::rocm_graph::RocmGraphRunner::new(&device_kt, true);
     // #1082 forward-flip: `LinearAttentionState::new_with_batch_for_inference_backend`
     // now takes a kt `&Device`, so pass `&device_kt` directly (no candle bridge).
     let mut linear_state = LinearAttentionState::new_with_batch_for_inference_backend(
@@ -1064,7 +1065,22 @@ fn bench_latency_paged(
         }
 
         let step_start = Instant::now();
-        next_token = if device_is_metal(&device_kt) || backend.supports_linear_decode_argmax() {
+        next_token = if matches!(device_kt, kiln_tensor::Device::Rocm(_)) && rocm_graph.is_enabled()
+        {
+            rocm_graph
+                .decode_step_paged_greedy(
+                    &*backend,
+                    next_token,
+                    weights,
+                    config,
+                    &paged_cache,
+                    &block_table,
+                    current_pos,
+                    &mut linear_state,
+                    None,
+                )
+                .context("paged ROCm graph greedy decode forward pass failed")?
+        } else if device_is_metal(&device_kt) || backend.supports_linear_decode_argmax() {
             model_forward_paged_next_token_greedy(
                 &*backend,
                 next_token,

@@ -25221,6 +25221,38 @@ pub(crate) fn lm_head_from_hidden_eager(
     lm_head_forward_backend_decode_if(Some(backend), &normed, &weights.embed_tokens_t)
 }
 
+#[cfg(any(feature = "cuda", feature = "rocm"))]
+pub(crate) fn lm_head_argmax_from_hidden_eager(
+    backend: &dyn BackendRuntime,
+    hidden: &Tensor,
+    weights: &GpuWeights,
+    config: &kiln_core::config::ModelConfig,
+) -> Result<u32> {
+    kiln_nvtx::range!(c"kiln/lm_head_argmax_eager");
+    if let Some(token) =
+        lm_head_weighted_prep_argmax(hidden, &weights.final_norm, &weights.embed_tokens_t)?
+    {
+        return Ok(token);
+    }
+    let normed = rms_norm(hidden, &weights.final_norm, config.rms_norm_eps)?;
+    #[cfg(feature = "cuda")]
+    record_layer_norm_debug(&normed, 40);
+    #[cfg(feature = "rocm")]
+    if let Some(lm_head_w8) = weights.lm_head_w8.as_ref() {
+        if normed.dtype() == DType::BF16
+            && !normed.track_op()
+            && matches!(normed.device(), Device::Rocm(_))
+        {
+            let normed = normed
+                .contiguous()
+                .context("rocm w8 lm_head argmax normed contiguous")?;
+            return crate::rocm_w8_proj::argmax_bf16(&normed, lm_head_w8)
+                .context("rocm w8 lm_head argmax");
+        }
+    }
+    lm_head_argmax_backend_decode_if(Some(backend), &normed, &weights.embed_tokens_t)
+}
+
 #[allow(clippy::too_many_arguments, dead_code)]
 pub(crate) fn model_forward_paged_with_graph_inputs(
     backend: &dyn BackendRuntime,
