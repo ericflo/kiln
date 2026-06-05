@@ -8,7 +8,9 @@
 //! reference CPU implementation built from existing primitives;
 //! Phase 6.x will fuse into a single GPU kernel (FlashAttention).
 
-use crate::ops::{causal_mask, masked_fill, matmul, mul_scalar, softmax_last_dim};
+use crate::ops::{
+    causal_mask, masked_fill, matmul, matmul_rhs_transposed, mul_scalar, softmax_last_dim,
+};
 use crate::{bail, Result, Tensor};
 
 /// Causal variant of [`scaled_dot_product_attention`]. Applies a
@@ -33,8 +35,7 @@ pub fn causal_scaled_dot_product_attention(
     }
     let head_dim = qs[q_rank - 1];
     let scale = 1.0_f32 / (head_dim as f32).sqrt();
-    let k_t = k.transpose(q_rank - 2, q_rank - 1)?.contiguous()?;
-    let scores_raw = matmul(q, &k_t)?;
+    let scores_raw = matmul_rhs_transposed(q, k)?;
     let scores_scaled = mul_scalar(&scores_raw, scale)?;
 
     // Build causal mask matching the scores' trailing two axes,
@@ -64,18 +65,14 @@ pub fn causal_scaled_dot_product_attention(
         let end = start + seq_q * seq_q;
         full_mask[start..end].copy_from_slice(&mask_bytes);
     }
-    let mut full_mask_shape = scores_shape.to_vec();
-    let _ = full_mask_shape; // shape not directly used; rebuild below
-    let mut new_shape = scores_shape.to_vec();
     // mask shape matches scores shape since both end in [seq_q, seq_k=seq_q].
     let cpu = crate::CpuStorage::from_bytes(crate::DType::U8, full_mask)?;
     let storage: crate::Storage = std::sync::Arc::new(cpu);
     let mask_t = Tensor::from_parts(
         storage,
-        crate::Layout::contiguous(new_shape.clone()),
+        crate::Layout::contiguous(scores_shape.to_vec()),
         crate::TensorId::next(),
     )?;
-    new_shape.clear();
     // The mask is materialized on the host; move it to the scores' device
     // so `masked_fill` sees matching-device operands (#1082 — explicit
     // placement, no implicit cross-device op). Zero-copy/no-op on CPU.
@@ -114,10 +111,8 @@ pub fn scaled_dot_product_attention(q: &Tensor, k: &Tensor, v: &Tensor) -> Resul
     }
     let head_dim = qs[q_rank - 1];
     let scale = 1.0_f32 / (head_dim as f32).sqrt();
-    // K^T: swap last two axes + contiguous.
-    let k_t = k.transpose(q_rank - 2, q_rank - 1)?.contiguous()?;
-    // scores = Q @ K^T
-    let scores_raw = matmul(q, &k_t)?;
+    // scores = Q @ K^T without materialising K^T when a backend supports it.
+    let scores_raw = matmul_rhs_transposed(q, k)?;
     // scale
     let scores_scaled = mul_scalar(&scores_raw, scale)?;
     // softmax over last axis
