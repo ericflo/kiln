@@ -164,12 +164,10 @@ pub struct RocmBackend {
     /// Forward-only CUDA LoRA delta/add for decode. Training declines because
     /// tracked LoRA tensors need autograd.
     lora_decode_add_enabled: bool,
-    /// Multi-block dv-tiled `gdn_full_chunk_forward`. Default ON because the
-    /// single-block kernel only launches `B*H = 32` blocks for Qwen3.5-4B at
-    /// batch=1, leaving ~58% of a 76-SM RTX 4090 Laptop idle. The multi-block
-    /// path is bit-exact with the legacy kernel (same per-output-cell FMA
-    /// chain, same bf16 rounding). Set
-    /// `KILN_DISABLE_GDN_FULL_CHUNK_FORWARD_MULTIBLOCK=1` to fall back.
+    /// Multi-block dv-tiled `gdn_full_chunk_forward`. The CUDA-oriented
+    /// multiblock variant is bit-exact, but is slower on the gfx1151 ROCm
+    /// long-context prefill path. Keep it opt-in for retuning on other GPUs.
+    /// `KILN_DISABLE_GDN_FULL_CHUNK_FORWARD_MULTIBLOCK=1` remains a hard off.
     gdn_full_chunk_forward_multiblock_enabled: bool,
 }
 
@@ -216,6 +214,10 @@ impl RocmBackend {
             && std::env::var("KILN_DISABLE_CUDA_GDN_DECODE_QK_NORM_RECURRENT_RMSNORM").is_err();
         let lora_decode_add_enabled = std::env::var("KILN_DISABLE_CUDA_LORA_DECODE_ADD").is_err();
         let gdn_full_chunk_forward_multiblock_enabled = gdn_enabled
+            && kiln_core::env_flag::env_flag(
+                "KILN_ROCM_GDN_FULL_CHUNK_FORWARD_MULTIBLOCK",
+                false,
+            )
             && std::env::var("KILN_DISABLE_GDN_FULL_CHUNK_FORWARD_MULTIBLOCK").is_err();
         let device_kt = device;
         Self {
