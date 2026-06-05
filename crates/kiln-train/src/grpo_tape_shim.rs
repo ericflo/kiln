@@ -531,6 +531,11 @@ struct ChunkedSelectedLogProbState {
     policy_log_probs: kiln_tensor::Tensor,
     running_max: kiln_tensor::Tensor,
     running_sumexp: kiln_tensor::Tensor,
+    /// Device-resident shifted positions for active tokens. Built once during
+    /// the chunked forward and reused by the analytic backward to avoid a
+    /// second long-context mask scan and H2D upload.
+    active_idx: kiln_tensor::Tensor,
+    active_labels: Vec<u32>,
 }
 
 #[cfg(any(
@@ -571,6 +576,8 @@ fn selected_log_probs_from_normed_hidden_chunked_state_kt(
             policy_log_probs: KtTensor::zeros(vec![1], KtDType::F32, *device)?,
             running_max: KtTensor::zeros(vec![1, 1], KtDType::F32, *device)?,
             running_sumexp: KtTensor::zeros(vec![1, 1], KtDType::F32, *device)?,
+            active_idx: KtTensor::from_vec_on(*device, Vec::<u32>::new(), vec![0])?,
+            active_labels,
         });
     }
 
@@ -647,6 +654,8 @@ fn selected_log_probs_from_normed_hidden_chunked_state_kt(
         policy_log_probs,
         running_max,
         running_sumexp,
+        active_idx,
+        active_labels,
     })
 }
 
@@ -688,11 +697,11 @@ pub(crate) fn selected_log_probs_from_normed_hidden_chunked_kt(
 struct GrpoPgLossFromNormedHiddenBackward {
     normed_hidden: kiln_tensor::Tensor,
     head_t: kiln_tensor::Tensor,
-    input_ids: Vec<u32>,
-    action_mask: Vec<bool>,
     policy_log_probs: kiln_tensor::Tensor,
     running_max: kiln_tensor::Tensor,
     running_sumexp: kiln_tensor::Tensor,
+    active_idx: kiln_tensor::Tensor,
+    active_labels: Vec<u32>,
     ref_log_probs: kiln_tensor::Tensor,
     loss_params: GrpoLossParams,
     device: Device,
@@ -735,8 +744,8 @@ impl BackwardOp for GrpoPgLossFromNormedHiddenBackward {
         let grad_hidden = grpo_pg_loss_from_normed_hidden_grad_with_logsum_kt(
             &self.normed_hidden,
             &self.head_t,
-            &self.input_ids,
-            &self.action_mask,
+            &self.active_idx,
+            &self.active_labels,
             &self.policy_log_probs,
             &self.ref_log_probs,
             self.loss_params,
@@ -790,8 +799,8 @@ pub(crate) fn grpo_pg_loss_from_normed_hidden_grad_kt(
     grpo_pg_loss_from_normed_hidden_grad_with_logsum_kt(
         normed_hidden,
         head_t,
-        input_ids,
-        action_mask,
+        &state.active_idx,
+        &state.active_labels,
         policy_log_probs_kt,
         ref_log_probs_kt,
         loss_params,
@@ -813,8 +822,8 @@ pub(crate) fn grpo_pg_loss_from_normed_hidden_grad_kt(
 fn grpo_pg_loss_from_normed_hidden_grad_with_logsum_kt(
     normed_hidden: &kiln_tensor::Tensor,
     head_t: &kiln_tensor::Tensor,
-    input_ids: &[u32],
-    action_mask: &[bool],
+    active_idx: &kiln_tensor::Tensor,
+    active_labels: &[u32],
     policy_log_probs_kt: &kiln_tensor::Tensor,
     ref_log_probs_kt: &kiln_tensor::Tensor,
     loss_params: GrpoLossParams,
@@ -830,12 +839,12 @@ fn grpo_pg_loss_from_normed_hidden_grad_with_logsum_kt(
     if chunk_size == 0 {
         anyhow::bail!("grpo_pg_loss_from_normed_hidden_grad_with_logsum_kt: chunk_size must be > 0");
     }
-    let seq_len = input_ids.len();
     let dims = normed_hidden.dims().to_vec();
     anyhow::ensure!(
-        dims.len() == 3 && dims[0] == 1 && dims[1] == seq_len,
-        "grpo_pg_loss_from_normed_hidden_grad_with_logsum_kt: hidden must be [1, seq_len, hidden], got {dims:?} for seq_len {seq_len}"
+        dims.len() == 3 && dims[0] == 1,
+        "grpo_pg_loss_from_normed_hidden_grad_with_logsum_kt: hidden must be [1, seq_len, hidden], got {dims:?}"
     );
+    let seq_len = dims[1];
     let hidden_size = dims[2];
     anyhow::ensure!(
         head_t.dims().len() == 2 && head_t.dims()[0] == hidden_size,
@@ -844,8 +853,17 @@ fn grpo_pg_loss_from_normed_hidden_grad_with_logsum_kt(
     );
     let vocab = head_t.dim(1)?;
     let hidden_dtype = normed_hidden.dtype();
-    let (active_positions, active_labels) = active_positions_and_labels(input_ids, action_mask)?;
-    let num_active = active_positions.len();
+    let num_active = active_labels.len();
+    anyhow::ensure!(
+        active_idx.dims() == [num_active],
+        "grpo_pg_loss_from_normed_hidden_grad_with_logsum_kt: active_idx shape {:?} != [{num_active}]",
+        active_idx.dims()
+    );
+    anyhow::ensure!(
+        active_idx.dtype() == KtDType::U32,
+        "grpo_pg_loss_from_normed_hidden_grad_with_logsum_kt: active_idx dtype {:?} != U32",
+        active_idx.dtype()
+    );
     if num_active == 0 {
         return KtTensor::zeros(vec![1, seq_len, hidden_size], KtDType::F32, *device)
             .and_then(|t| t.to_dtype(hidden_dtype))
@@ -861,19 +879,17 @@ fn grpo_pg_loss_from_normed_hidden_grad_with_logsum_kt(
         "grpo_pg_loss_from_normed_hidden_grad_with_logsum_kt: running_sumexp shape {:?} != [{num_active}, 1]",
         running_sumexp.dims()
     );
-    for &label in &active_labels {
+    for &label in active_labels {
         anyhow::ensure!(
             (label as usize) < vocab,
             "grpo_pg_loss_from_normed_hidden_grad_with_logsum_kt: label {label} outside vocab size {vocab}"
         );
     }
 
-    let active_idx_u32: Vec<u32> = active_positions.iter().map(|&i| i as u32).collect();
-    let active_idx = KtTensor::from_vec_on(*device, active_idx_u32, vec![num_active])?;
     let active_hidden = normed_hidden
         .squeeze(0)?
         .narrow(0, 0, seq_len - 1)?
-        .index_select(&active_idx, 0)?
+        .index_select(active_idx, 0)?
         .to_dtype(KtDType::F32)?;
     let head_t_f32 = head_t.to_dtype(KtDType::F32)?;
     anyhow::ensure!(
@@ -966,7 +982,7 @@ fn grpo_pg_loss_from_normed_hidden_grad_with_logsum_kt(
     let grad_hidden_2d = scatter_add(
         &grad_active_hidden.contiguous()?,
         0,
-        &active_idx,
+        active_idx,
         seq_len,
     )?;
     let grad_hidden = grad_hidden_2d.unsqueeze(0)?.to_dtype(hidden_dtype)?;
@@ -1010,8 +1026,8 @@ pub(crate) fn grpo_pg_loss_from_normed_hidden_loss_and_grad_kt(
     let grad_hidden = grpo_pg_loss_from_normed_hidden_grad_with_logsum_kt(
         normed_hidden,
         head_t,
-        input_ids,
-        action_mask,
+        &state.active_idx,
+        &state.active_labels,
         &state.policy_log_probs,
         ref_log_probs_kt,
         loss_params,
@@ -1365,12 +1381,6 @@ pub(crate) fn try_tape_grpo_pg_loss_from_normed_hidden_kt(
     if head_t.dims().len() != 2 || head_t.dims()[0] != hidden_size {
         return Ok(None);
     }
-    let active_count = action_mask
-        .get(1..)
-        .map_or(0, |m| m.iter().filter(|&&v| v).count());
-    if active_count == 0 {
-        return Ok(None);
-    }
     anyhow::ensure!(
         chunk_size > 0,
         "try_tape_grpo_pg_loss_from_normed_hidden_kt: chunk_size must be > 0"
@@ -1385,6 +1395,9 @@ pub(crate) fn try_tape_grpo_pg_loss_from_normed_hidden_kt(
         device,
     )
     .context("try_tape_grpo_pg_loss_from_normed_hidden_kt: selected log-probs")?;
+    if selected_state.active_labels.is_empty() {
+        return Ok(None);
+    }
     let loss_kt_forward = grpo_loss(
         &selected_state.policy_log_probs,
         ref_log_probs_kt,
@@ -1401,11 +1414,11 @@ pub(crate) fn try_tape_grpo_pg_loss_from_normed_hidden_kt(
             Box::new(GrpoPgLossFromNormedHiddenBackward {
                 normed_hidden: normed_hidden.clone(),
                 head_t: head_t.clone(),
-                input_ids: input_ids.to_vec(),
-                action_mask: action_mask.to_vec(),
                 policy_log_probs: selected_state.policy_log_probs.clone(),
                 running_max: selected_state.running_max.clone(),
                 running_sumexp: selected_state.running_sumexp.clone(),
+                active_idx: selected_state.active_idx.clone(),
+                active_labels: selected_state.active_labels.clone(),
                 ref_log_probs: ref_log_probs_kt.clone(),
                 loss_params,
                 device: *device,
