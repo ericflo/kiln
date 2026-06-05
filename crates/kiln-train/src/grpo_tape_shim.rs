@@ -80,7 +80,9 @@
 //!   (already rejected by the candle path); the dispatch keeps it on candle.
 //! * **`KlEstimator` / `IsLevel`** are all SUPPORTED — the numeric-`coeff`
 //!   derivation handles every variant uniformly because it just re-runs
-//!   `grpo_loss`.
+//!   `grpo_loss`. CUDA/ROCm additionally use a device-resident fast path for
+//!   exact token-level coefficient cases and fall back to the uniform host
+//!   derivation for sequence/CISPO/entropy-aware modes.
 
 #[cfg(any(
     feature = "cuda",
@@ -404,6 +406,95 @@ fn grpo_loss_coeff_from_policy_log_probs_kt(
     };
 
     Ok(coeff)
+}
+
+#[cfg(any(
+    feature = "cuda",
+    feature = "metal",
+    feature = "vulkan",
+    feature = "rocm"
+))]
+fn grpo_loss_coeff_col_device_fast_path_kt(
+    policy_log_probs: &kiln_tensor::Tensor,
+    ref_log_probs_kt: &kiln_tensor::Tensor,
+    loss_params: GrpoLossParams,
+    num_active: usize,
+    grad_scalar: f64,
+    device: &Device,
+) -> Result<Option<kiln_tensor::Tensor>> {
+    use kiln_tensor::{DType as KtDType, Tensor as KtTensor};
+
+    if num_active == 0 {
+        return Ok(Some(KtTensor::zeros(vec![0, 1], KtDType::F32, *device)?));
+    }
+    anyhow::ensure!(
+        policy_log_probs.elem_count() == num_active && ref_log_probs_kt.elem_count() == num_active,
+        "grpo_loss_coeff_col_device_fast_path_kt: policy/ref len mismatch ({} / {} vs {num_active})",
+        policy_log_probs.elem_count(),
+        ref_log_probs_kt.elem_count()
+    );
+
+    // Entropy-aware KL intentionally computes a detached quantile over active
+    // policy log-probs. Keep that path on the exact host derivation for now.
+    if loss_params.entropy_aware_kl_quantile.is_some() {
+        return Ok(None);
+    }
+
+    #[cfg(any(feature = "cuda", feature = "rocm"))]
+    let device_supported = matches!(device, Device::Cuda(_) | Device::Rocm(_));
+    #[cfg(not(any(feature = "cuda", feature = "rocm")))]
+    let device_supported = false;
+    if !device_supported || !matches!(loss_params.is_level, crate::IsLevel::Token) {
+        return Ok(None);
+    }
+
+    if loss_params.reinforce {
+        let coeff = -loss_params.advantage * loss_params.loss_normalizer * grad_scalar;
+        return KtTensor::ones(vec![num_active, 1], KtDType::F32, device)
+            .and_then(|t| t.affine(coeff, 0.0))
+            .map(Some)
+            .map_err(Into::into);
+    }
+
+    let policy = policy_log_probs
+        .to_dtype(KtDType::F32)?
+        .flatten_all()?
+        .reshape(vec![num_active])?
+        .contiguous()?;
+    let reference = ref_log_probs_kt
+        .to_dtype(KtDType::F32)?
+        .flatten_all()?
+        .reshape(vec![num_active])?
+        .contiguous()?;
+    let log_ratio = (&policy - &reference)?.contiguous()?;
+    let ratio = log_ratio.exp()?.contiguous()?;
+
+    let kl_grad = match loss_params.kl_estimator {
+        crate::KlEstimator::None => ratio.affine(0.0, 0.0)?,
+        crate::KlEstimator::K1 => ratio.affine(0.0, loss_params.kl_coeff)?,
+        crate::KlEstimator::K3 => {
+            let exp_neg_log_ratio = log_ratio.neg()?.exp()?;
+            exp_neg_log_ratio.affine(-loss_params.kl_coeff, loss_params.kl_coeff)?
+        }
+    };
+
+    let pg_raw = ratio.affine(-loss_params.advantage, 0.0)?.contiguous()?;
+    let zero = ratio.affine(0.0, 0.0)?.contiguous()?;
+    let pg_grad = if loss_params.advantage >= 0.0 {
+        let hi = ratio.affine(0.0, 1.0 + loss_params.clip_high)?.contiguous()?;
+        let unclipped = kiln_tensor::ops::le(&ratio, &hi)?;
+        unclipped.where_cond(&pg_raw, &zero)?
+    } else {
+        let lo = ratio.affine(0.0, 1.0 - loss_params.clip_low)?.contiguous()?;
+        let unclipped = kiln_tensor::ops::ge(&ratio, &lo)?;
+        unclipped.where_cond(&pg_raw, &zero)?
+    };
+
+    let coeff = (&pg_grad + &kl_grad)?
+        .affine(loss_params.loss_normalizer * grad_scalar, 0.0)?
+        .reshape(vec![num_active, 1])?
+        .contiguous()?;
+    Ok(Some(coeff))
 }
 
 #[cfg(any(
@@ -761,19 +852,6 @@ fn grpo_pg_loss_from_normed_hidden_grad_with_logsum_kt(
         );
     }
 
-    let coeff = grpo_loss_coeff_from_policy_log_probs_kt(
-        policy_log_probs_kt,
-        ref_log_probs_kt,
-        loss_params,
-        num_active,
-    )
-    .context("grpo_pg_loss_from_normed_hidden_grad_with_logsum_kt: coeff")?;
-    anyhow::ensure!(
-        coeff.len() == num_active,
-        "grpo_pg_loss_from_normed_hidden_grad_with_logsum_kt: coeff len {} != num_active {num_active}",
-        coeff.len()
-    );
-
     let active_idx_u32: Vec<u32> = active_positions.iter().map(|&i| i as u32).collect();
     let active_idx = KtTensor::from_vec_on(*device, active_idx_u32, vec![num_active])?;
     let active_hidden = normed_hidden
@@ -787,12 +865,38 @@ fn grpo_pg_loss_from_normed_hidden_grad_with_logsum_kt(
         "grpo_pg_loss_from_normed_hidden_grad_with_logsum_kt: empty vocab"
     );
 
-    let coeff_scaled: Vec<f32> = coeff
-        .iter()
-        .map(|c| (*c as f64 * grad_scalar) as f32)
-        .collect();
-    let coeff_col = KtTensor::from_vec_on(*device, coeff_scaled, vec![num_active, 1])
-        .context("grpo_pg_loss_from_normed_hidden_grad_with_logsum_kt: coeff_col")?;
+    let coeff_col = match grpo_loss_coeff_col_device_fast_path_kt(
+        policy_log_probs_kt,
+        ref_log_probs_kt,
+        loss_params,
+        num_active,
+        grad_scalar,
+        device,
+    )
+    .context("grpo_pg_loss_from_normed_hidden_grad_with_logsum_kt: coeff fast path")?
+    {
+        Some(coeff_col) => coeff_col,
+        None => {
+            let coeff = grpo_loss_coeff_from_policy_log_probs_kt(
+                policy_log_probs_kt,
+                ref_log_probs_kt,
+                loss_params,
+                num_active,
+            )
+            .context("grpo_pg_loss_from_normed_hidden_grad_with_logsum_kt: coeff")?;
+            anyhow::ensure!(
+                coeff.len() == num_active,
+                "grpo_pg_loss_from_normed_hidden_grad_with_logsum_kt: coeff len {} != num_active {num_active}",
+                coeff.len()
+            );
+            let coeff_scaled: Vec<f32> = coeff
+                .iter()
+                .map(|c| (*c as f64 * grad_scalar) as f32)
+                .collect();
+            KtTensor::from_vec_on(*device, coeff_scaled, vec![num_active, 1])
+                .context("grpo_pg_loss_from_normed_hidden_grad_with_logsum_kt: coeff_col")?
+        }
+    };
     let mut grad_active_hidden =
         KtTensor::zeros(vec![num_active, hidden_size], KtDType::F32, *device)
             .context("grpo_pg_loss_from_normed_hidden_grad_with_logsum_kt: grad_active_hidden zeros")?;
@@ -984,15 +1088,6 @@ fn grpo_pg_loss_from_logits_grad_kt(
         policy_log_probs.elem_count()
     );
 
-    // --- 2) coeff_a = dL/d(policy_log_prob_a). ---
-    let coeff = grpo_loss_coeff_from_policy_log_probs_kt(
-        &policy_log_probs,
-        ref_log_probs_kt,
-        loss_params,
-        num_active,
-    )
-    .context("grpo_pg_loss_from_logits_grad_kt: coeff")?;
-
     // --- 3) Per-active-position log-softmax JVP rows: coeff_a * (onehot - softmax). ---
     //
     // Mirror `token_log_probs`'s gather: shift_logits = logits[0 .. T-1],
@@ -1015,12 +1110,34 @@ fn grpo_pg_loss_from_logits_grad_kt(
         .softmax_last_dim()
         .map_err(|e| anyhow::anyhow!("grpo_pg_loss_from_logits_grad_kt: softmax: {e}"))?;
 
-    let coeff_scaled: Vec<f32> = coeff
-        .iter()
-        .map(|c| (*c as f64 * grad_scalar) as f32)
-        .collect();
-    let coeff_col = KtTensor::from_vec_on(*device, coeff_scaled.clone(), vec![num_active, 1])
-        .map_err(|e| anyhow::anyhow!("grpo_pg_loss_from_logits_grad_kt: coeff_col: {e}"))?;
+    let coeff_col = match grpo_loss_coeff_col_device_fast_path_kt(
+        &policy_log_probs,
+        ref_log_probs_kt,
+        loss_params,
+        num_active,
+        grad_scalar,
+        device,
+    )
+    .context("grpo_pg_loss_from_logits_grad_kt: coeff fast path")?
+    {
+        Some(coeff_col) => coeff_col,
+        None => {
+            // coeff_a = dL/d(policy_log_prob_a).
+            let coeff = grpo_loss_coeff_from_policy_log_probs_kt(
+                &policy_log_probs,
+                ref_log_probs_kt,
+                loss_params,
+                num_active,
+            )
+            .context("grpo_pg_loss_from_logits_grad_kt: coeff")?;
+            let coeff_scaled: Vec<f32> = coeff
+                .iter()
+                .map(|c| (*c as f64 * grad_scalar) as f32)
+                .collect();
+            KtTensor::from_vec_on(*device, coeff_scaled, vec![num_active, 1])
+                .map_err(|e| anyhow::anyhow!("grpo_pg_loss_from_logits_grad_kt: coeff_col: {e}"))?
+        }
+    };
     let softmax_rows = softmax
         .broadcast_mul(&coeff_col) // [num_active, V]
         .map_err(|e| anyhow::anyhow!("grpo_pg_loss_from_logits_grad_kt: softmax rows: {e}"))?;
@@ -1053,7 +1170,8 @@ fn grpo_pg_loss_from_logits_grad_kt(
         .map_err(|e| anyhow::anyhow!("grpo_pg_loss_from_logits_grad_kt: scatter softmax rows: {e}"))?;
     let label_idx = KtTensor::from_vec_on(*device, label_flat_indices, vec![num_active])
         .map_err(|e| anyhow::anyhow!("grpo_pg_loss_from_logits_grad_kt: label_idx: {e}"))?;
-    let label_coeff = KtTensor::from_vec_on(*device, coeff_scaled, vec![num_active])
+    let label_coeff = coeff_col
+        .squeeze(1)
         .map_err(|e| anyhow::anyhow!("grpo_pg_loss_from_logits_grad_kt: label coeff: {e}"))?;
     let grad_2d = grad_2d_neg_softmax
         .flatten_all()
@@ -1587,6 +1705,149 @@ mod tests {
                 "cuda sparse GRPO bwd drift at {i}: single={a} multi={b} tol={tol}"
             );
         }
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn grpo_loss_coeff_device_fast_path_matches_host_derivation_cuda() {
+        if !kiln_tensor::probe::cuda_is_available() {
+            eprintln!("[GRPO-CUDA] no CUDA device; skipping coeff fast path parity");
+            return;
+        }
+
+        let device = kiln_tensor::Device::Cuda(0);
+        let ratios = [0.5f64, 0.85, 1.05, 1.24, 1.4];
+        let plp_host = vec![-1.20f32, -0.40, -2.00, -0.90, -1.60];
+        let ref_host: Vec<f32> = plp_host
+            .iter()
+            .zip(ratios.iter())
+            .map(|(&p, &r)| (p as f64 - r.ln()) as f32)
+            .collect();
+        let num_active = plp_host.len();
+        let plp = KtTensor::from_vec_on(device, plp_host, vec![num_active]).unwrap();
+        let ref_kt = KtTensor::from_vec_on(device, ref_host, vec![num_active]).unwrap();
+        let variants: Vec<(&str, GrpoLossParams, f64)> = vec![
+            (
+                "token-positive-k1",
+                GrpoLossParams {
+                    advantage: 0.7,
+                    clip_low: 0.2,
+                    clip_high: 0.2,
+                    kl_coeff: 0.11,
+                    kl_estimator: KlEstimator::K1,
+                    loss_normalizer: 0.25,
+                    is_level: IsLevel::Token,
+                    reinforce: false,
+                    entropy_aware_kl_quantile: None,
+                },
+                1.0,
+            ),
+            (
+                "token-negative-k3",
+                GrpoLossParams {
+                    advantage: -0.8,
+                    clip_low: 0.2,
+                    clip_high: 0.2,
+                    kl_coeff: 0.07,
+                    kl_estimator: KlEstimator::K3,
+                    loss_normalizer: 0.5,
+                    is_level: IsLevel::Token,
+                    reinforce: false,
+                    entropy_aware_kl_quantile: None,
+                },
+                0.75,
+            ),
+            (
+                "token-positive-none",
+                GrpoLossParams {
+                    advantage: 0.4,
+                    clip_low: 0.2,
+                    clip_high: 0.2,
+                    kl_coeff: 0.0,
+                    kl_estimator: KlEstimator::None,
+                    loss_normalizer: 0.4,
+                    is_level: IsLevel::Token,
+                    reinforce: false,
+                    entropy_aware_kl_quantile: None,
+                },
+                1.25,
+            ),
+            (
+                "reinforce",
+                GrpoLossParams {
+                    advantage: -0.6,
+                    clip_low: 0.2,
+                    clip_high: 0.2,
+                    kl_coeff: 0.0,
+                    kl_estimator: KlEstimator::None,
+                    loss_normalizer: 0.2,
+                    is_level: IsLevel::Token,
+                    reinforce: true,
+                    entropy_aware_kl_quantile: None,
+                },
+                0.5,
+            ),
+        ];
+
+        for (name, params, grad_scalar) in variants {
+            let host = super::grpo_loss_coeff_from_policy_log_probs_kt(
+                &plp,
+                &ref_kt,
+                params,
+                num_active,
+            )
+            .unwrap();
+            let expected: Vec<f32> = host
+                .iter()
+                .map(|c| (*c as f64 * grad_scalar) as f32)
+                .collect();
+            let got = super::grpo_loss_coeff_col_device_fast_path_kt(
+                &plp,
+                &ref_kt,
+                params,
+                num_active,
+                grad_scalar,
+                &device,
+            )
+            .unwrap()
+            .unwrap_or_else(|| panic!("{name}: fast path declined"));
+            assert_eq!(got.shape(), &[num_active, 1], "{name}: coeff_col shape");
+            let got = got
+                .flatten_all()
+                .unwrap()
+                .to_dtype(KtDType::F32)
+                .unwrap()
+                .to_vec1::<f32>()
+                .unwrap();
+            for (i, (&a, &b)) in expected.iter().zip(got.iter()).enumerate() {
+                let tol = 2e-5f32.max(2e-5 * a.abs());
+                assert!(
+                    (a - b).abs() <= tol,
+                    "{name}: coeff[{i}] host={a} device={b} tol={tol}"
+                );
+            }
+        }
+
+        let declined = super::grpo_loss_coeff_col_device_fast_path_kt(
+            &plp,
+            &ref_kt,
+            GrpoLossParams {
+                advantage: 0.7,
+                clip_low: 0.2,
+                clip_high: 0.2,
+                kl_coeff: 0.11,
+                kl_estimator: KlEstimator::K1,
+                loss_normalizer: 0.25,
+                is_level: IsLevel::Sequence,
+                reinforce: false,
+                entropy_aware_kl_quantile: None,
+            },
+            num_active,
+            1.0,
+            &device,
+        )
+        .unwrap();
+        assert!(declined.is_none(), "sequence IS should keep the host fallback");
     }
 
     #[cfg(feature = "cuda")]
