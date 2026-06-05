@@ -7883,7 +7883,9 @@ pub fn rotary_embedding_from_tensor(
     Ok((rotated_q, rotated_k))
 }
 
-fn rotary_tables_from_tensor(
+// #34: pub(crate) so the CUDA-graph runner fills its rotary buffers via this
+// exact GPU path (kt_cos/kt_sin), matching eager bit-for-bit (BUG2 fix).
+pub(crate) fn rotary_tables_from_tensor(
     positions_tensor: &Tensor,
     inv_freq: &Tensor,
 ) -> Result<(Tensor, Tensor)> {

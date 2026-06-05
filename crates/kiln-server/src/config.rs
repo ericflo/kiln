@@ -485,8 +485,12 @@ impl Default for MemoryConfig {
             inference_memory_fraction: 0.7,
             training_memory_gb: None,
             kv_cache_fp8: false,
-            // Opt in until graph-capturable stream replay matches eager decode.
-            cuda_graphs: false,
+            // Default-ON (#34): CUDA graph capture/replay is now bit-identical to
+            // eager decode. BUG2 (the replay divergence) was the captured graph
+            // filling its RoPE cos/sin tables with host CPU cos/sin while eager
+            // uses GPU kt_cos/kt_sin — now both compute on-device. Verified
+            // bit-identical over 512-token decodes (BF16 + W4A16, multiple prompts).
+            cuda_graphs: true,
         }
     }
 }
@@ -958,7 +962,7 @@ mod tests {
         assert!(config.memory.num_blocks.is_none());
         assert_eq!(config.memory.inference_memory_fraction, 0.7);
         assert!(!config.memory.kv_cache_fp8);
-        assert!(!config.memory.cuda_graphs);
+        assert!(config.memory.cuda_graphs); // #34: default-ON
         assert!(!config.training.no_grad_checkpoint);
         assert!(config.training.checkpoint_interval.is_none());
         assert!(config.training.webhook_url.is_none());
@@ -1262,7 +1266,7 @@ port = 3000
         assert_eq!(config.training.max_tracked_jobs, 9);
         assert_eq!(config.training.tracked_job_ttl_secs, 11);
         assert!(config.memory.kv_cache_fp8);
-        assert!(!config.memory.cuda_graphs);
+        assert!(!config.memory.cuda_graphs); // env sets KILN_CUDA_GRAPHS=false -> override wins
         assert!(!config.prefix_cache.enabled);
         assert_eq!(config.prefix_cache.max_blocks, Some(128));
         assert!(config.prefix_cache.max_entries.is_none());
