@@ -1373,8 +1373,8 @@ fn grpo_pg_loss_from_normed_hidden_grad_with_logsum_kt(
             let hits = row_hits.len();
             let row_idx = KtTensor::from_vec_on(*device, row_hits, vec![hits])?;
             let rel_idx = KtTensor::from_vec_on(*device, rel_hits, vec![hits])?;
-            let head_chunk_t = head_chunk.t()?.contiguous()?;
-            let selected_head_rows = head_chunk_t.index_select(&rel_idx, 0)?;
+            let selected_head_cols = head_chunk.index_select(&rel_idx, 1)?;
+            let selected_head_rows = selected_head_cols.t()?.contiguous()?;
             let selected_coeff = coeff_col.index_select(&row_idx, 0)?;
             let selected_coeff_b = selected_coeff.broadcast_as(selected_head_rows.shape())?;
             let selected_rows = selected_head_rows.broadcast_mul(&selected_coeff_b)?;
@@ -1983,18 +1983,18 @@ pub(crate) fn vulkan_grpo_pg_loss_from_normed_hidden_loss_and_grad_kt(
 #[cfg(test)]
 mod tests {
     // (#1082 C2) Finite-difference ground-truth gate for the kt-native GRPO
-    // logit-grad. The whole module is CUDA-gated because the function under test
-    // (`grpo_pg_loss_from_logits_grad_kt`) is `#[cfg(feature = "cuda")]`.
+    // logit-grad. CPU-only tests are enabled under backend features that expose
+    // the kt GRPO helpers.
 
-    #[cfg(feature = "cuda")]
+    #[cfg(any(feature = "cuda", feature = "vulkan"))]
     use super::grpo_pg_loss_from_logits_grad_kt;
     #[cfg(any(feature = "cuda", feature = "vulkan"))]
     use crate::trainer::GrpoLossParams;
-    #[cfg(feature = "cuda")]
+    #[cfg(any(feature = "cuda", feature = "vulkan"))]
     use crate::trainer::{grpo_loss, token_log_probs};
     #[cfg(any(feature = "cuda", feature = "vulkan"))]
     use crate::{IsLevel, KlEstimator};
-    #[cfg(feature = "cuda")]
+    #[cfg(any(feature = "cuda", feature = "vulkan"))]
     use kiln_tensor::{DType as KtDType, Tensor as KtTensor};
     #[cfg(feature = "cuda")]
     use rand::rngs::StdRng;
@@ -2053,7 +2053,7 @@ mod tests {
         assert!(super::vulkan_grpo_fused_kernel_params(params, num_active).is_some());
     }
 
-    #[cfg(feature = "cuda")]
+    #[cfg(any(feature = "cuda", feature = "vulkan"))]
     #[test]
     fn grpo_normed_hidden_chunked_matches_full_logits_cpu() {
         let device = kiln_tensor::Device::Cpu;
