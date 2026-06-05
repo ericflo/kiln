@@ -753,6 +753,12 @@ fn grpo_pg_loss_from_normed_hidden_grad_with_logsum_kt(
         "grpo_pg_loss_from_normed_hidden_grad_with_logsum_kt: running_sumexp shape {:?} != [{num_active}, 1]",
         running_sumexp.dims()
     );
+    for &label in &active_labels {
+        anyhow::ensure!(
+            (label as usize) < vocab,
+            "grpo_pg_loss_from_normed_hidden_grad_with_logsum_kt: label {label} outside vocab size {vocab}"
+        );
+    }
 
     let coeff = grpo_loss_coeff_from_policy_log_probs_kt(
         policy_log_probs_kt,
@@ -801,22 +807,35 @@ fn grpo_pg_loss_from_normed_hidden_grad_with_logsum_kt(
         let softmax_chunk =
             exp_chunk.broadcast_div(&running_sumexp.broadcast_as(logits_chunk.shape())?)?;
 
-        let mut one_hot_data = vec![0.0f32; num_active * chunk_len];
+        let head_chunk_t = head_chunk.t()?.contiguous()?;
+        let softmax_rows = softmax_chunk.broadcast_mul(&coeff_col)?;
+        let softmax_contrib = softmax_rows.matmul(&head_chunk_t)?;
+
+        let mut row_hits = Vec::new();
+        let mut rel_hits = Vec::new();
         for (row_idx, &label) in active_labels.iter().enumerate() {
             let label = label as usize;
             if label >= chunk_start && label < chunk_end {
-                one_hot_data[row_idx * chunk_len + (label - chunk_start)] = 1.0;
-            } else if label >= vocab {
-                anyhow::bail!(
-                    "grpo_pg_loss_from_normed_hidden_grad_with_logsum_kt: label {label} outside vocab size {vocab}"
-                );
+                row_hits.push(row_idx as u32);
+                rel_hits.push((label - chunk_start) as u32);
             }
         }
-        let one_hot = KtTensor::from_vec_on(*device, one_hot_data, vec![num_active, chunk_len])?;
-        let jac = (one_hot - softmax_chunk)?;
-        let rows = jac.broadcast_mul(&coeff_col)?;
-        let head_chunk_t = head_chunk.t()?.contiguous()?;
-        let chunk_contrib = rows.matmul(&head_chunk_t)?;
+        let chunk_contrib = if row_hits.is_empty() {
+            (KtTensor::zeros(vec![num_active, hidden_size], KtDType::F32, *device)?
+                - softmax_contrib)?
+        } else {
+            let hits = row_hits.len();
+            let row_idx = KtTensor::from_vec_on(*device, row_hits, vec![hits])?;
+            let rel_idx = KtTensor::from_vec_on(*device, rel_hits, vec![hits])?;
+            let selected_head_rows = head_chunk_t.index_select(&rel_idx, 0)?;
+            let selected_coeff = coeff_col.index_select(&row_idx, 0)?;
+            let selected_coeff_b = selected_coeff.broadcast_as(selected_head_rows.shape())?;
+            let selected_rows = selected_head_rows.broadcast_mul(&selected_coeff_b)?;
+            let selected_contrib =
+                KtTensor::zeros(vec![num_active, hidden_size], KtDType::F32, *device)?
+                    .index_add(&row_idx, &selected_rows, 0)?;
+            (selected_contrib - softmax_contrib)?
+        };
         grad_active_hidden = (&grad_active_hidden + chunk_contrib)?.detach();
         chunk_start = chunk_end;
     }
@@ -1454,6 +1473,101 @@ mod tests {
                     "{name}: cached hidden grad drift at flat {i}: expected={a} actual={c} tol={tol}"
                 );
             }
+        }
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn grpo_normed_hidden_sparse_backward_cuda_chunk_runs() {
+        if !kiln_tensor::probe::cuda_is_available() {
+            eprintln!("[GRPO-CUDA] no CUDA device; skipping");
+            return;
+        }
+
+        let device = kiln_tensor::Device::Cuda(0);
+        let (seq_len, hidden_size, vocab) = (6usize, 5usize, 13usize);
+        let input_ids: Vec<u32> = vec![1, 5, 10, 3, 7, 2];
+        let action_mask = vec![false, false, true, true, false, true];
+        let hidden_host: Vec<f32> = (0..seq_len * hidden_size)
+            .map(|i| (((i * 7) % 19) as f32 - 9.0) * 0.041)
+            .collect();
+        let head_host: Vec<f32> = (0..hidden_size * vocab)
+            .map(|i| (((i * 11) % 23) as f32 - 11.0) * 0.037)
+            .collect();
+        let normed_hidden =
+            KtTensor::from_vec_on(device, hidden_host, vec![1, seq_len, hidden_size])
+                .expect("cuda hidden");
+        let head_t =
+            KtTensor::from_vec_on(device, head_host, vec![hidden_size, vocab])
+                .expect("cuda head");
+        let read = |t: &KtTensor| -> Vec<f32> {
+            t.to_dtype(KtDType::F32)
+                .unwrap()
+                .flatten_all()
+                .unwrap()
+                .to_vec()
+                .unwrap()
+        };
+
+        let plp_hidden = super::selected_log_probs_from_normed_hidden_chunked_kt(
+            &normed_hidden,
+            &head_t,
+            &input_ids,
+            &action_mask,
+            3,
+            &device,
+        )
+        .unwrap();
+        let ref_host: Vec<f32> = read(&plp_hidden).iter().map(|&p| p - 0.1).collect();
+        let ref_kt = KtTensor::from_vec_on(device, ref_host, vec![3]).expect("cuda ref");
+        let params = GrpoLossParams {
+            advantage: -0.7,
+            clip_low: 0.2,
+            clip_high: 0.2,
+            kl_coeff: 0.1,
+            kl_estimator: KlEstimator::K1,
+            loss_normalizer: 1.0,
+            is_level: IsLevel::Token,
+            reinforce: false,
+            entropy_aware_kl_quantile: None,
+        };
+
+        let single = super::grpo_pg_loss_from_normed_hidden_grad_kt(
+            &normed_hidden,
+            &head_t,
+            &input_ids,
+            &action_mask,
+            &plp_hidden,
+            &ref_kt,
+            params,
+            1.0,
+            &device,
+            vocab,
+        )
+        .unwrap();
+        let multi = super::grpo_pg_loss_from_normed_hidden_grad_kt(
+            &normed_hidden,
+            &head_t,
+            &input_ids,
+            &action_mask,
+            &plp_hidden,
+            &ref_kt,
+            params,
+            1.0,
+            &device,
+            3,
+        )
+        .unwrap();
+
+        let single = read(&single);
+        let multi = read(&multi);
+        assert_eq!(single.len(), multi.len());
+        for (i, (a, b)) in single.iter().zip(multi.iter()).enumerate() {
+            let tol = 4e-4f32.max(4e-4 * a.abs());
+            assert!(
+                (a - b).abs() <= tol,
+                "cuda sparse GRPO bwd drift at {i}: single={a} multi={b} tol={tol}"
+            );
         }
     }
 

@@ -226,3 +226,43 @@ fn cross_entropy_from_logits_grad_scales_with_seed() {
     let err = max_abs_rel_err_kt(&g2, &two_g1);
     assert!(err < 1e-5, "grad(2.0) != 2*grad(1.0): max rel err {err}");
 }
+
+#[test]
+fn cross_entropy_from_logits_grad_cuda_matches_cpu() {
+    if !kiln_tensor::probe::cuda_is_available() {
+        eprintln!("[CE-CUDA] no CUDA device; skipping");
+        return;
+    }
+
+    let (t, v) = (6usize, 11usize);
+    let logits_data: Vec<f32> = (0..(t * v))
+        .map(|i| ((i as f32 + 2.0) * 0.021).sin() * 0.7)
+        .collect();
+    let input_ids: Vec<u32> = vec![1, 5, 2, 7, 3, 0];
+    let label_mask: Vec<bool> = vec![false, true, false, true, true, false];
+    let cpu_logits = KtTensor::from_vec(logits_data.clone(), vec![1, t, v]).expect("cpu logits");
+    let cuda_logits = KtTensor::from_vec_on(
+        kiln_tensor::Device::Cuda(0),
+        logits_data,
+        vec![1, t, v],
+    )
+    .expect("cuda logits");
+
+    let cpu_grad = kiln_model::forward::cross_entropy_from_logits_grad_candle(
+        &cpu_logits,
+        &input_ids,
+        &label_mask,
+        1.0,
+    )
+    .expect("cpu composite grad");
+    let cuda_grad = kiln_model::forward::cross_entropy_from_logits_grad_candle(
+        &cuda_logits,
+        &input_ids,
+        &label_mask,
+        1.0,
+    )
+    .expect("cuda composite grad");
+
+    let err = max_abs_rel_err_kt(&cuda_grad, &cpu_grad);
+    assert!(err < 1e-5, "cuda CE grad != cpu grad: max rel err {err}");
+}

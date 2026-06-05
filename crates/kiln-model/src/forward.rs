@@ -13942,11 +13942,10 @@ pub fn gdn_gated_rms_norm_backward_no_grad(
 /// loss). Rows of `shift` not in `active_positions` get zero gradient (the
 /// `index_select` adjoint), which the zeros base already provides.
 ///
-/// `g_active` is built with an explicit host-side one-hot `Vec<f32>` (mirroring
-/// `kiln_train::trainer::analytic_sft_tail_grad_pre_final_norm`, lines 6148-6158)
-/// so no uncertain candle scatter/one-hot API is needed. The active rows are
-/// scattered back via `index_add` of `g_active` into a `[T-1, V]` zeros tensor
-/// along dim 0 (the `index_select` adjoint).
+/// The softmax term is scattered back via `index_add` into a `[T-1, V]` zeros
+/// tensor along dim 0 (the `index_select` adjoint). The one-hot label term is
+/// applied as sparse scalar corrections over flat `[T-1, V]` indices, avoiding
+/// an extra dense `[active, vocab]` one-hot allocation.
 pub fn cross_entropy_from_logits_grad_candle(
     logits: &Tensor,
     input_ids: &[u32],
@@ -13992,6 +13991,12 @@ pub fn cross_entropy_from_logits_grad_candle(
         .iter()
         .map(|&i| input_ids[i as usize + 1])
         .collect();
+    for &label in &active_labels {
+        anyhow::ensure!(
+            (label as usize) < vocab_size,
+            "cross_entropy_from_logits_grad_candle: label {label} >= vocab {vocab_size}"
+        );
+    }
 
     // Replicate the forward gather: squeeze(0) -> narrow(0,0,T-1) ->
     // index_select(active) -> to_f32, EXACTLY as `cross_entropy_loss` does.
@@ -14009,26 +14014,37 @@ pub fn cross_entropy_from_logits_grad_candle(
     let sum_exp = exp_shifted.sum_keepdim(LAST_DIM)?; // [A, 1]
     let p = exp_shifted.broadcast_div(&sum_exp)?; // [A, V]
 
-    // g_active = (p - one_hot(label)) * (g / A). The 1/A is the mean reduction;
-    // `g` is the incoming scalar dL/dloss seed. One-hot built host-side.
+    // Softmax term: scatter p * (g / A) back to active shifted rows.
     let inv_n = grad_scalar / num_active as f64;
-    let mut one_hot_data = vec![0.0f32; num_active * vocab_size];
-    for (row_idx, &label) in active_labels.iter().enumerate() {
-        let label = label as usize;
-        anyhow::ensure!(
-            label < vocab_size,
-            "cross_entropy_from_logits_grad_candle: label {label} >= vocab {vocab_size}"
-        );
-        one_hot_data[row_idx * vocab_size + label] = 1.0;
-    }
-    let one_hot = Tensor::from_vec_on(device, one_hot_data, vec![num_active, vocab_size])?;
-    let g_active = (p - one_hot)?.affine(inv_n, 0.0)?; // [A, V]
-
-    // Scatter g_active back into a [T-1, V] zeros tensor at rows
-    // active_positions (the index_select adjoint), then pad a zero row at the
-    // end for the dropped lg[T-1] (the narrow(0,0,T-1) adjoint), -> [T, V].
+    let g_active_softmax = p.affine(inv_n, 0.0)?; // [A, V]
     let grad_shift_base = Tensor::zeros((seq_len - 1, vocab_size), DType::F32, device)?;
-    let grad_shift = grad_shift_base.index_add(&active_indices, &g_active, 0)?; // [T-1, V]
+    let grad_shift_softmax =
+        grad_shift_base.index_add(&active_indices, &g_active_softmax, 0)?; // [T-1, V]
+
+    // Sparse one-hot term: subtract g/A at each active (row, label) cell.
+    let flat_dim = (seq_len - 1)
+        .checked_mul(vocab_size)
+        .ok_or_else(|| anyhow::anyhow!("cross_entropy_from_logits_grad_candle: flat grad size overflow"))?;
+    let mut flat_indices = Vec::with_capacity(num_active);
+    for (&row, &label) in active_positions.iter().zip(active_labels.iter()) {
+        let flat = (row as usize)
+            .checked_mul(vocab_size)
+            .and_then(|base| base.checked_add(label as usize))
+            .ok_or_else(|| anyhow::anyhow!("cross_entropy_from_logits_grad_candle: flat label index overflow"))?;
+        flat_indices.push(u32::try_from(flat).with_context(|| {
+            format!("cross_entropy_from_logits_grad_candle: flat label index {flat} exceeds u32")
+        })?);
+    }
+    let correction_values =
+        Tensor::from_vec_on(device, vec![-(inv_n as f32); num_active], vec![num_active])?;
+    let flat_indices_t = Tensor::from_vec_on(device, flat_indices, vec![num_active])?;
+    let correction_flat =
+        kiln_tensor::ops::scatter_add(&correction_values, 0, &flat_indices_t, flat_dim)?;
+    let correction = correction_flat.reshape(vec![seq_len - 1, vocab_size])?;
+    let grad_shift = (&grad_shift_softmax + &correction)?;
+
+    // Pad a zero row at the end for the dropped lg[T-1] (the narrow(0,0,T-1)
+    // adjoint), -> [T, V].
     let zero_row = Tensor::zeros((1, vocab_size), DType::F32, device)?;
     let grad_lg = Tensor::cat(&[&grad_shift, &zero_row], 0)?; // [T, V]
     let grad_logits = grad_lg.unsqueeze(0)?; // [1, T, V]

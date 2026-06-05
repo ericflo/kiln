@@ -461,9 +461,11 @@ pub fn fused_linear_cross_entropy_phase_b_kt(
 /// 1. **Pass 1**: recompute `running_max` and `running_sumexp` chunk-by-chunk
 ///    (identical to forward, minus the `correct_logit` gather).
 /// 2. **Pass 2**: for each chunk, recompute `softmax = exp(logits - running_max)
-///    / running_sumexp`, build the one-hot label mask for that chunk, and
-///    accumulate `dhidden_active += (softmax - one_hot) @ head_chunk.T *
-///    grad_loss / N`. Finally scatter `dhidden_active` back into the
+///    / running_sumexp`, accumulate the dense softmax term, then subtract the
+///    sparse selected-row correction for labels in that chunk. This computes
+///    `dhidden_active += (softmax - one_hot) @ head_chunk.T * grad_loss / N`
+///    without materializing the `[active, chunk]` one-hot tile. Finally scatter
+///    `dhidden_active` back into the
 ///    `[seq_len, hidden_size]` zero buffer, unsqueeze batch dim, cast to
 ///    the original `hidden` dtype.
 ///
@@ -590,6 +592,13 @@ pub fn fused_linear_cross_entropy_phase_b_backward_kt(
         .iter()
         .map(|&i| shift_labels[i as usize])
         .collect();
+    for &label in &active_labels {
+        if label as usize >= vocab_size {
+            return Err(FlceError::msg(format!(
+                "kt-flce-bwd: label {label} >= vocab_size {vocab_size}"
+            )));
+        }
+    }
 
     // Build active_hidden F32 the same way as forward.
     let hidden_2d = hidden.squeeze(0).map_err(FlceError::Kt)?;
@@ -730,47 +739,58 @@ pub fn fused_linear_cross_entropy_phase_b_backward_kt(
         let softmax_chunk =
             kiln_tensor::ops::div(&exp_chunk, &sumexp_b).map_err(FlceError::Kt)?;
 
-        // Build one_hot mask: 1.0 wherever label == col, else 0.
-        let mut one_hot_data: Vec<f32> = vec![0.0; num_active * chunk_len];
-        for (row_idx, &label) in active_labels.iter().enumerate() {
-            let label = label as usize;
-            if label >= chunk_start && label < chunk_end {
-                let col = label - chunk_start;
-                one_hot_data[row_idx * chunk_len + col] = 1.0;
-            }
-        }
-        // One-hot lives on the same device as `hidden` (and as
-        // `softmax_chunk`, which already lives on-device because all
-        // upstream tensors are derived from `hidden` / `head_t`). The
-        // host-side `one_hot_data` Vec is staged on CPU then uploaded
-        // via `from_vec_on` for CUDA, mirroring how `cuda_from_slice`
-        // would do it manually.
-        let one_hot =
-            KtTensor::from_vec_on(device, one_hot_data, vec![num_active, chunk_len])
-                .map_err(FlceError::Kt)?;
+        // softmax contribution: softmax * (grad_loss / N)
+        let scaled_softmax = mul_scalar(&softmax_chunk, inv_n).map_err(FlceError::Kt)?;
 
-        // diff = softmax - one_hot
-        let diff = sub(&softmax_chunk, &one_hot).map_err(FlceError::Kt)?;
-
-        // scaled = diff * (1/N)
-        let scaled = mul_scalar(&diff, inv_n).map_err(FlceError::Kt)?;
-
-        // grad_logits_chunk = scaled * grad_loss
         //   Broadcast the [1, 1] grad_loss to [num_active, chunk_len]
         //   and multiply elementwise. Equivalent to candle's
         //   `scaled.broadcast_mul(&grad_loss_f32)` on a rank-0 scalar.
         let grad_loss_b = broadcast_to(&grad_loss_2d, &[num_active, chunk_len])
             .map_err(FlceError::Kt)?;
-        let grad_logits_chunk = mul(&scaled, &grad_loss_b).map_err(FlceError::Kt)?;
+        let grad_logits_softmax =
+            mul(&scaled_softmax, &grad_loss_b).map_err(FlceError::Kt)?;
 
-        // chunk_contrib = grad_logits_chunk @ head_chunk.T   shape [num_active, hidden_size]
+        // softmax_contrib = grad_logits_softmax @ head_chunk.T
+        // shape [num_active, hidden_size]
         let head_chunk_t = head_chunk
             .t()
             .map_err(FlceError::Kt)?
             .contiguous()
             .map_err(FlceError::Kt)?;
-        let chunk_contrib =
-            matmul(&grad_logits_chunk, &head_chunk_t).map_err(FlceError::Kt)?;
+        let softmax_contrib =
+            matmul(&grad_logits_softmax, &head_chunk_t).map_err(FlceError::Kt)?;
+
+        // one-hot contribution: select the `head_chunk.T` row for each label
+        // in this chunk and scatter it into the matching active row.
+        let mut row_hits: Vec<u32> = Vec::new();
+        let mut rel_hits: Vec<u32> = Vec::new();
+        for (row_idx, &label) in active_labels.iter().enumerate() {
+            let label = label as usize;
+            if label >= chunk_start && label < chunk_end {
+                row_hits.push(row_idx as u32);
+                rel_hits.push((label - chunk_start) as u32);
+            }
+        }
+        let chunk_contrib = if row_hits.is_empty() {
+            softmax_contrib
+        } else {
+            let hits = row_hits.len();
+            let row_idx_t =
+                KtTensor::from_vec_on(device, row_hits, vec![hits]).map_err(FlceError::Kt)?;
+            let rel_idx_t =
+                KtTensor::from_vec_on(device, rel_hits, vec![hits]).map_err(FlceError::Kt)?;
+            let selected_head_rows =
+                index_select(&head_chunk_t, 0, &rel_idx_t).map_err(FlceError::Kt)?;
+            let selected_scaled =
+                mul_scalar(&selected_head_rows, inv_n).map_err(FlceError::Kt)?;
+            let selected_grad_loss_b = broadcast_to(&grad_loss_2d, &[hits, hidden_size])
+                .map_err(FlceError::Kt)?;
+            let selected_weighted =
+                mul(&selected_scaled, &selected_grad_loss_b).map_err(FlceError::Kt)?;
+            let selected_contrib = scatter_add(&selected_weighted, 0, &row_idx_t, num_active)
+                .map_err(FlceError::Kt)?;
+            sub(&softmax_contrib, &selected_contrib).map_err(FlceError::Kt)?
+        };
 
         dhidden_active =
             kiln_tensor::ops::add(&dhidden_active, &chunk_contrib).map_err(FlceError::Kt)?;
@@ -1044,6 +1064,15 @@ mod tests {
             .collect()
     }
 
+    fn read_f32_vec_any(t: &KtTensor) -> Vec<f32> {
+        t.to_dtype(KtDType::F32)
+            .unwrap()
+            .flatten_all()
+            .unwrap()
+            .to_vec()
+            .unwrap()
+    }
+
     /// Backward smoke: short-seq early-return produces zero grad.
     #[test]
     fn fused_linear_cross_entropy_phase_b_backward_kt_short_seq_returns_zero() {
@@ -1215,5 +1244,64 @@ mod tests {
             max_abs < 1e-4 || rel < 1e-4,
             "chunk parity bwd: max_abs={max_abs:.2e} max_mag={max_mag:.6} rel={rel:.2e}"
         );
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn fused_linear_cross_entropy_phase_b_backward_kt_cuda_sparse_chunk_runs() {
+        if !kiln_tensor::probe::cuda_is_available() {
+            eprintln!("[FLCE-CUDA] no CUDA device; skipping");
+            return;
+        }
+
+        let device = KtDevice::Cuda(0);
+        let seq_len = 7;
+        let hidden_size = 5;
+        let vocab_size = 17;
+        let hidden_vec: Vec<f32> = (0..seq_len * hidden_size)
+            .map(|i| ((i as f32 + 1.0) * 0.019).sin() * 0.25)
+            .collect();
+        let head_vec: Vec<f32> = (0..hidden_size * vocab_size)
+            .map(|i| ((i as f32 + 5.0) * 0.013).cos() * 0.2)
+            .collect();
+        let ids: Vec<u32> = vec![1, 5, 9, 13, 16, 4, 7];
+        let mask: Vec<bool> = vec![false, true, true, false, true, false, true];
+        let hidden = KtTensor::from_vec_on(device, hidden_vec, vec![1, seq_len, hidden_size])
+            .expect("cuda hidden");
+        let head =
+            KtTensor::from_vec_on(device, head_vec, vec![hidden_size, vocab_size])
+                .expect("cuda head");
+        let grad_loss = KtTensor::from_vec_on(device, vec![1.0f32], vec![])
+            .expect("cuda grad_loss");
+
+        let g_single = fused_linear_cross_entropy_phase_b_backward_kt(
+            &hidden,
+            &head,
+            &ids,
+            &mask,
+            vocab_size,
+            &grad_loss,
+        )
+        .expect("single chunk cuda backward");
+        let g_multi = fused_linear_cross_entropy_phase_b_backward_kt(
+            &hidden,
+            &head,
+            &ids,
+            &mask,
+            4,
+            &grad_loss,
+        )
+        .expect("multi chunk cuda backward");
+
+        let single = read_f32_vec_any(&g_single);
+        let multi = read_f32_vec_any(&g_multi);
+        assert_eq!(single.len(), multi.len());
+        for (i, (a, b)) in single.iter().zip(multi.iter()).enumerate() {
+            let tol = 2e-4f32.max(2e-4 * a.abs());
+            assert!(
+                (a - b).abs() <= tol,
+                "cuda sparse FLCE bwd drift at {i}: single={a} multi={b} tol={tol}"
+            );
+        }
     }
 }
