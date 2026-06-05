@@ -102,10 +102,27 @@ fn run(
         .ok()
         .and_then(|v| v.trim().parse::<usize>().ok())
     {
+        let requested = target;
+        let cur = paged_cache.num_blocks();
+        let avail = live_safe_available_bytes(gov, &paged_cache);
+        let target = cap_grow_target_by_available(cur, requested, avail, bytes_per_block);
+        if target < requested {
+            tracing::warn!(
+                requested,
+                capped = target,
+                cur,
+                avail_mb = avail / (1024 * 1024),
+                "KV autoscaler forced grow capped by live allocator memory"
+            );
+        }
         match engine.resize_kv_blocking(target) {
             Ok(achieved) => {
                 last_resize = Instant::now();
-                tracing::info!(requested = target, achieved, "KV autoscaler FORCED resize (KILN_KV_FORCE_BLOCKS)");
+                tracing::info!(
+                    requested = target,
+                    achieved,
+                    "KV autoscaler FORCED resize (KILN_KV_FORCE_BLOCKS)"
+                );
             }
             Err(err) => tracing::warn!(error = %err, "KV autoscaler forced resize failed"),
         }
@@ -122,9 +139,7 @@ fn run(
             continue;
         }
         let cur = paged_cache.num_blocks();
-        // available_bytes is the governor's all-process free-VRAM estimate minus
-        // soft reservations — the honest "how much can we hand out" figure.
-        let avail = gov.available_bytes();
+        let avail = live_safe_available_bytes(gov, &paged_cache);
         let pressure = gov.pressure();
 
         let target = decide_target(cur, avail, bytes_per_block, pressure, bounds);
@@ -150,6 +165,33 @@ fn run(
             }
         }
     }
+}
+
+fn live_safe_available_bytes(gov: &MemoryGovernor, paged_cache: &PagedKvCacheKt) -> u64 {
+    // available_bytes is the governor's all-process free-VRAM estimate minus
+    // soft reservations. CUDA/ROCm also expose the allocator heap the KV tensors
+    // actually grow from; use the stricter signal when present so an optimistic
+    // OS snapshot cannot drive a backend allocation failure.
+    let governor_avail = gov.available_bytes();
+    let allocator_avail = paged_cache
+        .device()
+        .and_then(|device| crate::device_memory::allocator_safe_available_bytes(gov, &device));
+    allocator_avail
+        .map(|allocator| governor_avail.min(allocator))
+        .unwrap_or(governor_avail)
+}
+
+fn cap_grow_target_by_available(
+    cur: usize,
+    target: usize,
+    avail: u64,
+    bytes_per_block: u64,
+) -> usize {
+    if target <= cur || bytes_per_block == 0 {
+        return target;
+    }
+    let grow_blocks = (avail / bytes_per_block) as usize;
+    target.min(cur.saturating_add(grow_blocks))
 }
 
 /// Pure policy: given the current block count, available VRAM, per-block bytes,
@@ -244,5 +286,11 @@ mod tests {
             decide_target(1000, avail, BPB, MemoryPressure::Comfortable, bounds()),
             None
         );
+    }
+
+    #[test]
+    fn forced_grow_target_is_capped_by_available_blocks() {
+        assert_eq!(cap_grow_target_by_available(500, 900, 120 * BPB, BPB), 620);
+        assert_eq!(cap_grow_target_by_available(500, 450, 0, BPB), 450);
     }
 }

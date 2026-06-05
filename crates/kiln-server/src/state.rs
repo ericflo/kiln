@@ -1662,6 +1662,23 @@ impl AppState {
         let total_vram = snap
             .map(|s| s.total_bytes)
             .unwrap_or_else(|| detected_gpu_total_memory(&device_kt, &vram_info));
+        let allocator_memory_snapshot = crate::device_memory::allocator_memory_snapshot(&device_kt);
+        if let Some(allocator) = allocator_memory_snapshot {
+            tracing::info!(
+                allocator_free_gb = allocator.free_bytes as f64 / 1e9,
+                allocator_total_gb = allocator.total_bytes as f64 / 1e9,
+                allocator_pool_reserved_gb = allocator
+                    .pool_reserved_bytes
+                    .map(|bytes| bytes as f64 / 1e9),
+                allocator_pool_used_gb = allocator.pool_used_bytes.map(|bytes| bytes as f64 / 1e9),
+                allocator_pool_spare_gb = allocator
+                    .pool_reserved_bytes
+                    .zip(allocator.pool_used_bytes)
+                    .map(|(reserved, used)| reserved.saturating_sub(used) as f64 / 1e9),
+                source = allocator.source,
+                "backend allocator memory snapshot for KV sizing"
+            );
+        }
 
         // Wire the device's memory-reclaim hook into the governor and start its
         // continuous pressure monitor (once per process). Under memory pressure
@@ -1698,11 +1715,13 @@ impl AppState {
                     kiln_memory::MemoryGovernor::global().register_reclaimer(move |_target| {
                         // Measure bytes actually returned to the OS via the live
                         // free-VRAM delta (the driver doesn't report trim yield).
-                        let before =
-                            kiln_tensor::cuda_mem_get_info(idx).map(|(f, _)| f).unwrap_or(0);
+                        let before = kiln_tensor::cuda_mem_get_info(idx)
+                            .map(|(f, _)| f)
+                            .unwrap_or(0);
                         let _ = kiln_tensor::cuda_trim_pool(idx, 0);
-                        let after =
-                            kiln_tensor::cuda_mem_get_info(idx).map(|(f, _)| f).unwrap_or(0);
+                        let after = kiln_tensor::cuda_mem_get_info(idx)
+                            .map(|(f, _)| f)
+                            .unwrap_or(0);
                         after.saturating_sub(before) as u64
                     });
                 }
@@ -1787,28 +1806,61 @@ impl AppState {
                 is_metal,
                 is_rocm,
             );
-            // Additionally clamp so the KV pool fits within the governor's LIVE
-            // available budget = free − floor − soft reservations. This is the
-            // inference side of the training/inference arbiter: when a training
-            // run reserves its working set with the governor, inference's KV pool
-            // automatically leaves room for it (and for any coexisting GPU job,
-            // since `free` is the all-process driver figure).
+            // Additionally clamp so the KV pool fits within the live budget.
+            // The governor provides the OS/driver-wide pressure view; CUDA/ROCm
+            // also expose the allocator heap that the actual KV tensors will
+            // allocate from. Use the stricter cap when both are available so an
+            // optimistic DRM/nvidia-smi snapshot cannot drive a fatal backend
+            // allocation.
             if governor_backend != kiln_tensor::Backend::Cpu && bytes_per_block > 0 {
-                let avail = kiln_memory::MemoryGovernor::global().available_bytes();
-                let mut max_blocks = (avail / bytes_per_block) as usize;
-                // #34 (never-OOM / dynamic reallocation): the HIP VRAM allocator
-                // can't use GTT, so the governor's vram+gtt budget over-states what
-                // a KV allocation can actually take. Clamp to FREE VRAM (92% margin)
-                // so a coexisting GPU job that fills VRAM DEGRADES the KV pool to
-                // what fits and still serves, instead of either over-committing into
-                // an unrecoverable rocclr `vmheap` abort or panicking the auto-sizer.
-                // No-op off AMD/Linux-DRM (returns None).
-                if let Some(free_vram) = kiln_memory::vram::current_free_vram_bytes() {
-                    let vram_blocks =
-                        ((free_vram / 100).saturating_mul(92) / bytes_per_block) as usize;
-                    max_blocks = max_blocks.min(vram_blocks);
+                let governor = kiln_memory::MemoryGovernor::global();
+                let governor_avail = governor.available_bytes();
+                let allocator_budget =
+                    crate::device_memory::allocator_kv_budget_bytes_for_fraction(
+                        governor, &device_kt, fraction,
+                    )
+                    .unwrap_or(u64::MAX);
+                let budget = governor_avail.min(allocator_budget);
+                let max_blocks = (budget / bytes_per_block) as usize;
+                let capped = if max_blocks >= MIN_AUTO_KV_BLOCKS {
+                    n.min(max_blocks)
+                } else if matches!(device_kt, kiln_tensor::Device::Rocm(_))
+                    && allocator_budget != u64::MAX
+                {
+                    MIN_AUTO_KV_BLOCKS.min(n)
+                } else {
+                    n
+                };
+                if max_blocks < MIN_AUTO_KV_BLOCKS {
+                    tracing::warn!(
+                        fraction,
+                        proposed_blocks = n,
+                        max_live_budget_blocks = max_blocks,
+                        min_auto_blocks = MIN_AUTO_KV_BLOCKS,
+                        governor_available_gb = governor_avail as f64 / 1e9,
+                        allocator_budget_gb = if allocator_budget == u64::MAX {
+                            None
+                        } else {
+                            Some(allocator_budget as f64 / 1e9)
+                        },
+                        "KV cache auto-sizer live budget is below the minimum cache size; using conservative ROCm floor when applicable"
+                    );
+                } else if capped < n {
+                    tracing::warn!(
+                        fraction,
+                        proposed_blocks = n,
+                        capped_blocks = capped,
+                        max_live_budget_blocks = max_blocks,
+                        governor_available_gb = governor_avail as f64 / 1e9,
+                        allocator_budget_gb = if allocator_budget == u64::MAX {
+                            None
+                        } else {
+                            Some(allocator_budget as f64 / 1e9)
+                        },
+                        "KV cache auto-sizer capped by live allocator memory"
+                    );
                 }
-                n.min(max_blocks)
+                capped
             } else {
                 n
             }
@@ -1857,30 +1909,12 @@ impl AppState {
         // uninitialized — a one-time startup memset, not a correctness change
         // (paged writes overwrite slots before they are read).
         let allocate_cache = |n: usize| -> anyhow::Result<PagedKvCacheKt> {
-            // Governance / "never OOM": ROCm's HIP allocator `abort()`s (rocclr
-            // `vmheap::MapPhysMemory` assertion) on a VRAM OOM instead of returning
-            // Err — that bypasses the reclaim/shrink retry below and HARD-CRASHES
-            // the process. Seen when a coexisting GPU job fills VRAM, because the
-            // governor's budget counts GTT that the HIP VRAM allocator can't use.
-            // Pre-check against FREE VRAM (not vram+gtt) and return a normal Err so
-            // the auto-sizer shrinks gracefully. No-op off AMD/Linux-DRM (returns
-            // None), where the native allocator surfaces OOM as a catchable Err.
-            if bytes_per_block > 0 {
-                if let Some(free_vram) = kiln_memory::vram::current_free_vram_bytes() {
-                    let need = (n as u64).saturating_mul(bytes_per_block);
-                    // 8% headroom for the allocator's own metadata + fragmentation.
-                    let safe = (free_vram / 100).saturating_mul(92);
-                    if need > safe {
-                        anyhow::bail!(
-                            "KV cache {n} blocks ({} MiB) exceeds free VRAM \
-                             ({} MiB; 92% safe = {} MiB) — shrinking to avoid a HIP vmheap abort",
-                            need / (1 << 20),
-                            free_vram / (1 << 20),
-                            safe / (1 << 20)
-                        );
-                    }
-                }
-            }
+            validate_kv_allocation_against_live_allocator(
+                &device_kt,
+                n,
+                bytes_per_block,
+                kiln_memory::MemoryGovernor::global(),
+            )?;
             let attempt = || {
                 PagedKvCacheKt::new_with_fp8(
                     model_config.num_full_attention_layers,
@@ -2442,6 +2476,47 @@ fn metal_auto_max_kv_blocks(total_vram_bytes: u64) -> usize {
     } else {
         METAL_AUTO_MAX_KV_BLOCKS_HIGH_MEM
     }
+}
+
+fn validate_kv_allocation_against_live_allocator(
+    device: &kiln_tensor::Device,
+    num_blocks: usize,
+    bytes_per_block: u64,
+    governor: &kiln_memory::MemoryGovernor,
+) -> anyhow::Result<()> {
+    if device.backend() == kiln_tensor::Backend::Cpu || bytes_per_block == 0 {
+        return Ok(());
+    }
+    let Some(allocator_budget) =
+        crate::device_memory::allocator_safe_available_bytes(governor, device)
+    else {
+        return Ok(());
+    };
+    let requested = (num_blocks as u64).saturating_mul(bytes_per_block);
+    if requested <= allocator_budget {
+        return Ok(());
+    }
+    let max_blocks = (allocator_budget / bytes_per_block) as usize;
+    if matches!(device, kiln_tensor::Device::Rocm(_))
+        && max_blocks < MIN_AUTO_KV_BLOCKS
+        && num_blocks <= MIN_AUTO_KV_BLOCKS
+    {
+        tracing::warn!(
+            num_blocks,
+            max_live_budget_blocks = max_blocks,
+            min_auto_blocks = MIN_AUTO_KV_BLOCKS,
+            "ROCm allocator probe reports less than the minimum KV cache budget; allowing conservative allocation attempt"
+        );
+        return Ok(());
+    }
+    anyhow::bail!(
+        "paged KV cache allocation request exceeds live backend allocator memory: \
+         requested num_blocks={num_blocks} (~{requested_gb:.2} GiB) but allocator \
+         budget fits at most num_blocks={max_blocks} (~{budget_gb:.2} GiB). \
+         Lower KILN_NUM_BLOCKS or KILN_INFERENCE_MEMORY_FRACTION.",
+        requested_gb = requested as f64 / (1024.0 * 1024.0 * 1024.0),
+        budget_gb = allocator_budget as f64 / (1024.0 * 1024.0 * 1024.0),
+    )
 }
 
 fn is_metal_device(device: &kiln_tensor::Device) -> bool {

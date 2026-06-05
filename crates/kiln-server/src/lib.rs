@@ -7,6 +7,7 @@ pub mod cli;
 pub mod config;
 pub mod decode_stats;
 pub mod device;
+pub(crate) mod device_memory;
 pub mod error;
 pub mod eval;
 pub mod eval_adapter_cli;
