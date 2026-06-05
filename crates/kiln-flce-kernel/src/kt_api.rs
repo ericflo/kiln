@@ -686,16 +686,14 @@ pub fn fused_linear_cross_entropy_phase_b_backward_kt(
     // Pass 2: accumulate dhidden_active by chunk.
     // -----------------------------------------------------------------
     //
-    // Reshape grad_loss to a 1x1 tensor up front so we can broadcast it
-    // to `[num_active, chunk_len]` per-chunk via `broadcast_to`. The
-    // candle reference uses `broadcast_mul(&grad_loss_f32)` directly on
-    // a rank-0 scalar; kt-tensor's `broadcast_to` requires equal-rank
-    // inputs so we promote the scalar to rank-2 once before the loop.
-    let grad_loss_f32 = to_f32(grad_loss).map_err(FlceError::Kt)?;
-    let grad_loss_2d = grad_loss_f32
-        .reshape(vec![1, 1])
+    // Fold the scalar dL/dloss seed into the per-active-row mean scale once.
+    // This avoids allocating and multiplying dense `[active, chunk]` and
+    // `[hits, hidden]` grad-loss broadcast tensors inside the chunk loop.
+    let grad_loss_scalar = to_f32(grad_loss)
+        .map_err(FlceError::Kt)?
+        .to_scalar::<f32>()
         .map_err(FlceError::Kt)?;
-    let inv_n = 1.0f32 / (num_active as f32);
+    let grad_scale = grad_loss_scalar / (num_active as f32);
 
     // Broadcast running_max / running_sumexp to 2-D once (they don't
     // depend on chunk; we'll re-broadcast to chunk_len inside the loop).
@@ -740,15 +738,8 @@ pub fn fused_linear_cross_entropy_phase_b_backward_kt(
             kiln_tensor::ops::div(&exp_chunk, &sumexp_b).map_err(FlceError::Kt)?;
 
         // softmax contribution: softmax * (grad_loss / N)
-        let scaled_softmax = mul_scalar(&softmax_chunk, inv_n).map_err(FlceError::Kt)?;
-
-        //   Broadcast the [1, 1] grad_loss to [num_active, chunk_len]
-        //   and multiply elementwise. Equivalent to candle's
-        //   `scaled.broadcast_mul(&grad_loss_f32)` on a rank-0 scalar.
-        let grad_loss_b = broadcast_to(&grad_loss_2d, &[num_active, chunk_len])
-            .map_err(FlceError::Kt)?;
         let grad_logits_softmax =
-            mul(&scaled_softmax, &grad_loss_b).map_err(FlceError::Kt)?;
+            mul_scalar(&softmax_chunk, grad_scale).map_err(FlceError::Kt)?;
 
         // softmax_contrib = grad_logits_softmax @ head_chunk.T
         // shape [num_active, hidden_size]
@@ -781,12 +772,8 @@ pub fn fused_linear_cross_entropy_phase_b_backward_kt(
                 KtTensor::from_vec_on(device, rel_hits, vec![hits]).map_err(FlceError::Kt)?;
             let selected_head_rows =
                 index_select(&head_chunk_t, 0, &rel_idx_t).map_err(FlceError::Kt)?;
-            let selected_scaled =
-                mul_scalar(&selected_head_rows, inv_n).map_err(FlceError::Kt)?;
-            let selected_grad_loss_b = broadcast_to(&grad_loss_2d, &[hits, hidden_size])
-                .map_err(FlceError::Kt)?;
             let selected_weighted =
-                mul(&selected_scaled, &selected_grad_loss_b).map_err(FlceError::Kt)?;
+                mul_scalar(&selected_head_rows, grad_scale).map_err(FlceError::Kt)?;
             let selected_contrib = scatter_add(&selected_weighted, 0, &row_idx_t, num_active)
                 .map_err(FlceError::Kt)?;
             sub(&softmax_contrib, &selected_contrib).map_err(FlceError::Kt)?
