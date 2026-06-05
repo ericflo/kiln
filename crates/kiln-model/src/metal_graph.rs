@@ -1222,7 +1222,7 @@ impl MetalStableDecodeBuffers {
         )?;
         let pos_f32: Vec<f32> = seq_lens.iter().map(|&p| p as f32).collect();
         let n = pos_f32.len();
-        let pos = Tensor::from_vec_on(dev, pos_f32, vec![n])?;
+        let pos = kiln_tensor::Tensor::from_vec_on(dev, pos_f32, vec![n])?;
         let (cos, sin) = crate::forward::rotary_tables_from_tensor(&pos, &inv_freq)?;
         let cos = cos
             .to_dtype(self.rotary_cos.dtype())?
