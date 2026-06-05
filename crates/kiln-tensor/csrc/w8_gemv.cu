@@ -145,6 +145,41 @@ __global__ void kiln_w8a16_gemv_bf16_kernel(
     }
 }
 
+__global__ void kiln_w8a16_swiglu_bf16_kernel(
+    const __nv_bfloat16* __restrict__ x,
+    const uint8_t* __restrict__ w_q_u8,
+    const float* __restrict__ scales,
+    __nv_bfloat16* __restrict__ out,
+    int64_t m,
+    int64_t gate_up_n,
+    int64_t k) {
+    int64_t col = static_cast<int64_t>(blockIdx.x);
+    int64_t row = static_cast<int64_t>(blockIdx.y);
+    int tid = threadIdx.x;
+    int64_t g = gate_up_n / 2;
+    if (row >= m || col >= g) return;
+
+    const __nv_bfloat16* x_row = x + row * k;
+    const int8_t* gate_w = reinterpret_cast<const int8_t*>(w_q_u8 + col * k);
+    const int8_t* up_w = reinterpret_cast<const int8_t*>(w_q_u8 + (col + g) * k);
+
+    float gate_local = 0.0f;
+    float up_local = 0.0f;
+    for (int64_t c = tid; c < k; c += BLOCK) {
+        float xv = __bfloat162float(x_row[c]);
+        gate_local += xv * static_cast<float>(gate_w[c]);
+        up_local += xv * static_cast<float>(up_w[c]);
+    }
+
+    __shared__ float smem[BLOCK];
+    float gate = kiln_block_reduce_sum(gate_local, smem) * scales[col];
+    float up = kiln_block_reduce_sum(up_local, smem) * scales[col + g];
+    if (tid == 0) {
+        float silu = gate / (1.0f + expf(-gate));
+        out[row * g + col] = __float2bfloat16(silu * up);
+    }
+}
+
 __global__ void kiln_w8a16_gemv_argmax_scores_kernel(
     const __nv_bfloat16* __restrict__ x,
     const uint8_t* __restrict__ w_q_u8,
@@ -297,6 +332,39 @@ extern "C" int kiln_w8a16_gemv_bf16_async(
         static_cast<__nv_bfloat16*>(out),
         m,
         n,
+        k);
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) return 1000 + static_cast<int>(err);
+    return 0;
+}
+
+extern "C" int kiln_w8a16_swiglu_bf16_async(
+    const void* x,
+    const void* w_q,
+    const void* scales,
+    void* out,
+    int64_t m,
+    int64_t gate_up_n,
+    int64_t k,
+    void* stream_raw) {
+    if (m < 0 || gate_up_n < 0 || k < 0) return 1;
+    if (m == 0 || gate_up_n == 0 || k == 0) return 0;
+    if ((gate_up_n & 1) != 0) return 3;
+    int64_t g = gate_up_n / 2;
+    if (g > static_cast<int64_t>(2147483647) || m > static_cast<int64_t>(65535)) {
+        return 2;
+    }
+
+    dim3 grid(static_cast<unsigned int>(g), static_cast<unsigned int>(m), 1);
+    cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_raw);
+    kiln_w8a16_swiglu_bf16_kernel<<<grid, BLOCK, 0, stream>>>(
+        static_cast<const __nv_bfloat16*>(x),
+        static_cast<const uint8_t*>(w_q),
+        static_cast<const float*>(scales),
+        static_cast<__nv_bfloat16*>(out),
+        m,
+        gate_up_n,
         k);
 
     cudaError_t err = cudaGetLastError();

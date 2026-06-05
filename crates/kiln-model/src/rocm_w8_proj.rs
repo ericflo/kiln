@@ -24,6 +24,16 @@ fn a8_enabled() -> bool {
     kiln_core::env_flag::env_flag("KILN_ROCM_W8A8", false)
 }
 
+#[cfg(feature = "rocm")]
+fn swiglu_disabled() -> bool {
+    kiln_core::env_flag::env_flag("KILN_DISABLE_ROCM_W8_SWIGLU", false)
+}
+
+#[cfg(feature = "rocm")]
+pub fn swiglu_bf16_enabled(w: &RocmW8Proj) -> bool {
+    !swiglu_disabled() && !a8_enabled() && w.n % 2 == 0
+}
+
 pub fn pack_from_bf16_rows(weight: &kiln_tensor::Tensor) -> Result<Option<RocmW8Proj>> {
     if !matches!(weight.device(), kiln_tensor::Device::Rocm(_)) {
         return Ok(None);
@@ -95,6 +105,19 @@ pub fn matmul_bf16(x: &kiln_tensor::Tensor, w: &RocmW8Proj) -> Result<kiln_tenso
             .map_err(|e| anyhow::anyhow!("rocm_w8_proj: gemv: {e}"))?
     };
     Ok(out)
+}
+
+#[cfg(feature = "rocm")]
+pub fn swiglu_bf16(
+    x: &kiln_tensor::Tensor,
+    w: &RocmW8Proj,
+) -> Result<Option<kiln_tensor::Tensor>> {
+    if !swiglu_bf16_enabled(w) {
+        return Ok(None);
+    }
+    let out = kiln_tensor::rocm_w8a16_swiglu_bf16(x, &w.q_weight, &w.scales)
+        .map_err(|e| anyhow::anyhow!("rocm_w8_proj: swiglu: {e}"))?;
+    Ok(Some(out))
 }
 
 #[cfg(not(feature = "rocm"))]

@@ -10556,6 +10556,34 @@ fn swiglu_ffn_impl_no_chunk(
     {
         if gate_up_w8.n % 2 == 0 {
             let g_dim = gate_up_w8.n / 2;
+            if crate::rocm_w8_proj::swiglu_bf16_enabled(gate_up_w8) {
+                let stage_profile = start_mlp_stage_profile(profile_device, profile_context)?;
+                if let Some(hidden) = {
+                    kiln_nvtx::range!(c"kiln/mlp/gate_up_swiglu_w8");
+                    crate::rocm_w8_proj::swiglu_bf16(x, gate_up_w8)?
+                } {
+                    finish_mlp_stage_profile(
+                        profile_device,
+                        profile_context,
+                        "gate_up_swiglu_w8",
+                        seq_len,
+                        stage_profile,
+                    )?;
+                    let stage_profile = start_mlp_stage_profile(profile_device, profile_context)?;
+                    let out = {
+                        kiln_nvtx::range!(c"kiln/mlp/down_w8");
+                        crate::rocm_w8_proj::matmul_bf16(&hidden, down_w8)?
+                    };
+                    finish_mlp_stage_profile(
+                        profile_device,
+                        profile_context,
+                        "down_proj_w8",
+                        seq_len,
+                        stage_profile,
+                    )?;
+                    return Ok(out);
+                }
+            }
             let stage_profile = start_mlp_stage_profile(profile_device, profile_context)?;
             let gate_up = {
                 kiln_nvtx::range!(c"kiln/mlp/gate_up_w8");
