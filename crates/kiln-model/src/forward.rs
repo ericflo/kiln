@@ -16383,8 +16383,21 @@ fn gated_deltanet_forward_decode_if_inner(
                     }
                 }
             } else if seq_len > 1 {
+                #[cfg(any(
+                    feature = "cuda",
+                    feature = "metal",
+                    feature = "vulkan",
+                    feature = "rocm"
+                ))]
                 let tape_fused_prefill_conv =
                     tape_recording_active && crate::tape_forward::tape_gdn_conv_enabled();
+                #[cfg(not(any(
+                    feature = "cuda",
+                    feature = "metal",
+                    feature = "vulkan",
+                    feature = "rocm"
+                )))]
+                let tape_fused_prefill_conv = false;
                 if (gdn_forward_only_fastpaths || tape_fused_prefill_conv)
                     && backend.supports_causal_conv1d_prefill()
                 {
@@ -24672,7 +24685,20 @@ pub fn model_forward_segment(
     let (_, seq_len, _) = hidden.dims3()?;
     let stream_device = hidden.device().clone();
     let streaming = streaming_prefill_enabled_for(&stream_device, seq_len);
+    #[cfg(any(
+        feature = "cuda",
+        feature = "metal",
+        feature = "vulkan",
+        feature = "rocm"
+    ))]
     let tape_scope_active = crate::tape_forward::tape_scope_active();
+    #[cfg(not(any(
+        feature = "cuda",
+        feature = "metal",
+        feature = "vulkan",
+        feature = "rocm"
+    )))]
+    let tape_scope_active = false;
     let stream_tile = if streaming {
         if tape_scope_active {
             tape_streaming_tile_tokens_for(&stream_device)
