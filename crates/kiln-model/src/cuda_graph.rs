@@ -1454,23 +1454,6 @@ impl CudaGraphRunner {
     }
 
     #[cfg(feature = "cuda")]
-    fn rotary_table_values(config: &ModelConfig, position: usize) -> (Vec<f32>, Vec<f32>) {
-        let half_rotary = config.rotary_dim() / 2;
-        let mut cos = Vec::with_capacity(half_rotary);
-        let mut sin = Vec::with_capacity(half_rotary);
-        for i in 0..half_rotary {
-            let inv_freq = 1.0f32
-                / (config
-                    .rope_theta
-                    .powf(2.0 * i as f64 / config.rotary_dim() as f64) as f32);
-            let freq = position as f32 * inv_freq;
-            cos.push(freq.cos());
-            sin.push(freq.sin());
-        }
-        (cos, sin)
-    }
-
-    #[cfg(feature = "cuda")]
     fn update_rotary_buffers(
         rotary_cos_buffer: &Tensor,
         rotary_sin_buffer: &Tensor,

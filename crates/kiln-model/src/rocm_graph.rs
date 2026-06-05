@@ -566,33 +566,37 @@ impl RocmGraphRunner {
             .context("update ROCm graph position buffer")
     }
 
-    fn rotary_table_values(config: &ModelConfig, position: usize) -> (Vec<f32>, Vec<f32>) {
-        let half_rotary = config.rotary_dim() / 2;
-        let mut cos = Vec::with_capacity(half_rotary);
-        let mut sin = Vec::with_capacity(half_rotary);
-        for i in 0..half_rotary {
-            let inv_freq = 1.0f32
-                / (config
-                    .rope_theta
-                    .powf(2.0 * i as f64 / config.rotary_dim() as f64) as f32);
-            let freq = position as f32 * inv_freq;
-            cos.push(freq.cos());
-            sin.push(freq.sin());
-        }
-        (cos, sin)
-    }
-
     fn update_rotary_buffers(
         rotary_cos_buffer: &Tensor,
         rotary_sin_buffer: &Tensor,
         config: &ModelConfig,
         position: usize,
     ) -> Result<()> {
-        let (cos, sin) = Self::rotary_table_values(config, position);
-        kiln_tensor::rocm_write_host_in_place(rotary_cos_buffer, cos.as_slice())
-            .context("update ROCm graph rotary cos buffer")?;
-        kiln_tensor::rocm_write_host_in_place(rotary_sin_buffer, sin.as_slice())
-            .context("update ROCm graph rotary sin buffer")?;
+        // #34 BUG2 FIX: compute the rotary tables on the GPU via eager's exact
+        // path (`forward::rotary_tables_from_tensor` -> device `cos`/`sin`), not
+        // host CPU cos/sin. CPU cos != GPU cos (range reduction) perturbs only the
+        // RoPE full-attention layers on replay -> divergence from eager. Same root
+        // cause + fix as the CUDA path.
+        let dev = rotary_cos_buffer.device();
+        let inv_freq = crate::forward::compute_rotary_inv_freq(
+            config.rotary_dim(),
+            config.rope_theta,
+            &dev,
+        )?;
+        let pos = Tensor::from_vec_on(dev, vec![position as f32], vec![1])?;
+        let (cos, sin) = crate::forward::rotary_tables_from_tensor(&pos, &inv_freq)?;
+        let cos = cos
+            .to_dtype(rotary_cos_buffer.dtype())?
+            .reshape(rotary_cos_buffer.dims().to_vec())?;
+        let sin = sin
+            .to_dtype(rotary_sin_buffer.dtype())?
+            .reshape(rotary_sin_buffer.dims().to_vec())?;
+        rotary_cos_buffer
+            .slice_set(&cos, 0, 0)
+            .context("update ROCm graph rotary cos buffer (gpu)")?;
+        rotary_sin_buffer
+            .slice_set(&sin, 0, 0)
+            .context("update ROCm graph rotary sin buffer (gpu)")?;
         Ok(())
     }
 
@@ -677,15 +681,25 @@ impl RocmGraphRunner {
     }
 
     fn new_rotary_cos_buffer(config: &ModelConfig, device: Device, position: usize) -> Result<Tensor> {
-        let (cos, _) = Self::rotary_table_values(config, position);
-        let len = cos.len();
-        Tensor::from_vec_on(device, cos, vec![1, len]).context("create ROCm graph rotary cos buffer")
+        // #34 BUG2 FIX: GPU rotary (matches eager + update_rotary_buffers), not host CPU cos.
+        let inv_freq =
+            crate::forward::compute_rotary_inv_freq(config.rotary_dim(), config.rope_theta, &device)?;
+        let pos = Tensor::from_vec_on(device, vec![position as f32], vec![1])?;
+        let (cos, _) = crate::forward::rotary_tables_from_tensor(&pos, &inv_freq)?;
+        cos.to_dtype(kiln_tensor::DType::F32)?
+            .contiguous()
+            .context("create ROCm graph rotary cos buffer (gpu)")
     }
 
     fn new_rotary_sin_buffer(config: &ModelConfig, device: Device, position: usize) -> Result<Tensor> {
-        let (_, sin) = Self::rotary_table_values(config, position);
-        let len = sin.len();
-        Tensor::from_vec_on(device, sin, vec![1, len]).context("create ROCm graph rotary sin buffer")
+        // #34 BUG2 FIX: GPU rotary (see new_rotary_cos_buffer).
+        let inv_freq =
+            crate::forward::compute_rotary_inv_freq(config.rotary_dim(), config.rope_theta, &device)?;
+        let pos = Tensor::from_vec_on(device, vec![position as f32], vec![1])?;
+        let (_, sin) = crate::forward::rotary_tables_from_tensor(&pos, &inv_freq)?;
+        sin.to_dtype(kiln_tensor::DType::F32)?
+            .contiguous()
+            .context("create ROCm graph rotary sin buffer (gpu)")
     }
 
     fn new_output_hidden(
