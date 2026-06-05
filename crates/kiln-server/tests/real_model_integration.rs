@@ -94,6 +94,8 @@ fn tiny_weights(config: &ModelConfig, device: &Device) -> GpuWeights {
             v_proj_t,
             qkv_proj_t: None,
             o_proj_t,
+            qkv_proj_w8: None,
+            o_proj_w8: None,
             q_proj_marlin: None,
         }),
         mlp: GpuFfnWeights {
@@ -107,6 +109,8 @@ fn tiny_weights(config: &ModelConfig, device: &Device) -> GpuWeights {
             gate_proj_marlin: None,
             up_proj_marlin: None,
             down_proj_marlin: None,
+            gate_up_proj_w8: None,
+            down_proj_w8: None,
         },
     };
 
@@ -122,6 +126,7 @@ fn tiny_weights(config: &ModelConfig, device: &Device) -> GpuWeights {
         embed_tokens_t: embed_t,
         layers: vec![layer],
         final_norm,
+        lm_head_w8: None,
         rotary_inv_freq,
         mtp: None,
     }
