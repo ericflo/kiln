@@ -38,8 +38,8 @@
 //! ```
 //!
 //! where `coeff_a = dL/d(policy_log_prob_a)`. The `(onehot - softmax)` factor is
-//! the log-softmax Jacobian-vector product — a pure FORWARD computation (softmax
-//! + onehot scatter), which sidesteps the kt-CUDA `index_select` / `gather`
+//! the log-softmax Jacobian-vector product — a pure FORWARD computation
+//! (softmax plus sparse label adds), which sidesteps the kt-CUDA `index_select` / `gather`
 //! backward gaps. `coeff` is obtained by NUMERICALLY differentiating the cheap
 //! `[num_active]`-vector `grpo_loss` scalar w.r.t. `policy_log_probs` — calling
 //! the SAME kt `grpo_loss`, so it is automatically correct for the value-
@@ -931,6 +931,7 @@ fn grpo_pg_loss_from_logits_grad_kt(
     grad_scalar: f64,
     device: &Device,
 ) -> Result<kiln_tensor::Tensor> {
+    use kiln_tensor::ops::mul_scalar;
     use kiln_tensor::{DType as KtDType, Tensor as KtTensor};
 
     let seq_len = input_ids.len();
@@ -995,8 +996,10 @@ fn grpo_pg_loss_from_logits_grad_kt(
     // --- 3) Per-active-position log-softmax JVP rows: coeff_a * (onehot - softmax). ---
     //
     // Mirror `token_log_probs`'s gather: shift_logits = logits[0 .. T-1],
-    // index_select the active positions, cast F32, softmax over vocab. Then
-    // subtract the onehot (built on host from the labels) and scale by coeff.
+    // index_select the active positions, cast F32, softmax over vocab. Build the
+    // dense `-coeff * softmax` rows, then add the sparse `+coeff` label terms by
+    // flattened `index_add` below. This avoids a second dense [num_active, vocab]
+    // host one-hot allocation/upload in the backward.
     let shift_logits = logits_kt
         .squeeze(0) // [T, V]
         .and_then(|t| t.narrow(0, 0, seq_len - 1)) // [T-1, V]
@@ -1012,43 +1015,51 @@ fn grpo_pg_loss_from_logits_grad_kt(
         .softmax_last_dim()
         .map_err(|e| anyhow::anyhow!("grpo_pg_loss_from_logits_grad_kt: softmax: {e}"))?;
 
-    // onehot(y_a) over vocab, y_a = input_ids[active_positions[a] + 1]. Built on
-    // host then uploaded (num_active * vocab is small).
-    let mut onehot_host = vec![0f32; num_active * vocab];
-    for (row, &p) in active_positions.iter().enumerate() {
+    let coeff_scaled: Vec<f32> = coeff
+        .iter()
+        .map(|c| (*c as f64 * grad_scalar) as f32)
+        .collect();
+    let coeff_col = KtTensor::from_vec_on(*device, coeff_scaled.clone(), vec![num_active, 1])
+        .map_err(|e| anyhow::anyhow!("grpo_pg_loss_from_logits_grad_kt: coeff_col: {e}"))?;
+    let softmax_rows = softmax
+        .broadcast_mul(&coeff_col) // [num_active, V]
+        .map_err(|e| anyhow::anyhow!("grpo_pg_loss_from_logits_grad_kt: softmax rows: {e}"))?;
+    let rows = mul_scalar(&softmax_rows, -1.0)
+        .map_err(|e| anyhow::anyhow!("grpo_pg_loss_from_logits_grad_kt: neg softmax rows: {e}"))?;
+
+    let mut label_flat_indices = Vec::with_capacity(num_active);
+    for &p in &active_positions {
         let label = input_ids[p + 1] as usize;
         anyhow::ensure!(
             label < vocab,
             "grpo_pg_loss_from_logits_grad_kt: label {label} (pos {p}) >= vocab {vocab}"
         );
-        onehot_host[row * vocab + label] = 1.0;
+        let flat = p
+            .checked_mul(vocab)
+            .and_then(|base| base.checked_add(label))
+            .ok_or_else(|| {
+                anyhow::anyhow!("grpo_pg_loss_from_logits_grad_kt: flat label index overflow")
+            })?;
+        label_flat_indices.push(u32::try_from(flat).with_context(|| {
+            format!("grpo_pg_loss_from_logits_grad_kt: flat index {flat} exceeds u32 range")
+        })?);
     }
-    let onehot = KtTensor::from_vec_on(*device, onehot_host, vec![num_active, vocab])
-        .map_err(|e| anyhow::anyhow!("grpo_pg_loss_from_logits_grad_kt: onehot: {e}"))?;
-
-    // jac = onehot - softmax  (the log-softmax JVP factor), [num_active, V].
-    let jac = onehot
-        .sub(&softmax)
-        .map_err(|e| anyhow::anyhow!("grpo_pg_loss_from_logits_grad_kt: jac: {e}"))?;
-
-    // rows = coeff[:, None] * jac, scaled by the upstream seed grad_scalar
-    // (backward is linear in the seed). Fold grad_scalar into coeff up front.
-    let coeff_scaled: Vec<f32> = coeff
-        .iter()
-        .map(|c| (*c as f64 * grad_scalar) as f32)
-        .collect();
-    let coeff_col = KtTensor::from_vec_on(*device, coeff_scaled, vec![num_active, 1])
-        .map_err(|e| anyhow::anyhow!("grpo_pg_loss_from_logits_grad_kt: coeff_col: {e}"))?;
-    let rows = jac
-        .broadcast_mul(&coeff_col) // [num_active, V]
-        .map_err(|e| anyhow::anyhow!("grpo_pg_loss_from_logits_grad_kt: rows: {e}"))?;
 
     // --- 4) Scatter rows into a [T, V] zeros at the active seq positions. ---
     let grad_2d = KtTensor::zeros(vec![seq_len, vocab], KtDType::F32, *device)
         .map_err(|e| anyhow::anyhow!("grpo_pg_loss_from_logits_grad_kt: grad zeros: {e}"))?;
-    let grad_2d = grad_2d
+    let grad_2d_neg_softmax = grad_2d
         .index_add(&active_idx, &rows, 0)
-        .map_err(|e| anyhow::anyhow!("grpo_pg_loss_from_logits_grad_kt: scatter: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("grpo_pg_loss_from_logits_grad_kt: scatter softmax rows: {e}"))?;
+    let label_idx = KtTensor::from_vec_on(*device, label_flat_indices, vec![num_active])
+        .map_err(|e| anyhow::anyhow!("grpo_pg_loss_from_logits_grad_kt: label_idx: {e}"))?;
+    let label_coeff = KtTensor::from_vec_on(*device, coeff_scaled, vec![num_active])
+        .map_err(|e| anyhow::anyhow!("grpo_pg_loss_from_logits_grad_kt: label coeff: {e}"))?;
+    let grad_2d = grad_2d_neg_softmax
+        .flatten_all()
+        .and_then(|flat| flat.index_add(&label_idx, &label_coeff, 0usize))
+        .and_then(|flat| flat.reshape(vec![seq_len, vocab]))
+        .map_err(|e| anyhow::anyhow!("grpo_pg_loss_from_logits_grad_kt: scatter label coeffs: {e}"))?;
     let grad_logits = grad_2d
         .unsqueeze(0) // [1, T, V]
         .map_err(|e| anyhow::anyhow!("grpo_pg_loss_from_logits_grad_kt: unsqueeze: {e}"))?;
