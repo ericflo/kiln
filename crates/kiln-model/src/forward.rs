@@ -13155,17 +13155,16 @@ fn gdn_single_token_recurrence(
     };
     let p_u = p.unsqueeze(3)?; // [B, nv, 1, 1]
 
-    let k_t = k.transpose(2, 3)?.contiguous()?; // [B, nv, dk, 1]
     let ks_entry = k.matmul(&*state)?; // [B, nv, 1, dv]
     let q_s = q.matmul(&*state)?; // [B, nv, 1, dv]
 
     let v_prime = (v - ks_entry.broadcast_mul(&p_u)?)?;
     let w = v_prime.broadcast_mul(&beta.unsqueeze(3)?)?; // [B, nv, 1, dv]
-    let qk = q.matmul(&k_t)?; // [B, nv, 1, 1]
+    let qk = kiln_tensor::ops::matmul_rhs_transposed(q, k)?; // [B, nv, 1, 1]
     let out = (q_s.broadcast_mul(&p_u)? + qk.matmul(&w)?)?;
 
     let state_scaled = state.broadcast_mul(&p_u)?;
-    let delta_state = k_t.matmul(&w)?;
+    let delta_state = kiln_tensor::ops::matmul_lhs_transposed(k, &w)?;
     *state = (state_scaled + delta_state)?;
 
     Ok(out)
@@ -13481,19 +13480,15 @@ fn gdn_chunkwise_recurrence(
             stage_profile,
         )?;
 
-        // Matmuls first — these are well-tuned cuBLAS GEMMs and stay on
-        // candle. K^T is reused for KKT (intra-chunk similarities) and the
-        // final outer product into the state update. When the pre-permute
-        // fast path supplied a chunk-aligned K^T, reuse it to skip the
-        // per-chunk transpose+contiguous.
+        // Matmuls first — these are well-tuned GEMMs and stay on kt tensors.
+        // KKT/QKT and the state update use transposed-GEMM helpers so accelerator
+        // backends can avoid materialising K^T. The optional precomputed K^T is
+        // retained only for the fused full-chunk backend path, whose API still
+        // consumes it directly.
         let stage_profile = start_gdn_recurrent_inner_profile(device, profile_inner)?;
-        let k_t_mat = match k_t_mat_pre {
-            Some(t) => t,
-            None => k_c.transpose(2, 3)?.contiguous()?,
-        };
         let ks_entry = k_c.matmul(&*state)?; // [B, nv, C, dv]
-        let kkt = k_c.matmul(&k_t_mat)?; // [B, nv, C, C]
-        let qkt = q_c.matmul(&k_t_mat)?; // [B, nv, C, C]
+        let kkt = kiln_tensor::ops::matmul_rhs_transposed(&k_c, &k_c)?; // [B, nv, C, C]
+        let qkt = kiln_tensor::ops::matmul_rhs_transposed(&q_c, &k_c)?; // [B, nv, C, C]
         let q_s = q_c.matmul(&*state)?; // [B, nv, C, dv]
         finish_gdn_recurrent_inner_profile(
             device,
@@ -13506,35 +13501,45 @@ fn gdn_chunkwise_recurrence(
             stage_profile,
         )?;
 
-        if !is_tail
+        let full_chunk_out = if !is_tail
             && c == 64
-            && !any_kt_tensor_tracks_op(&[
-                &g_c, &v_c, &kkt, &qkt, &ks_entry, &q_s, &beta_c, &k_t_mat, state,
-            ])
             && backend.supports_gdn_full_chunk_forward()
             && dtype == DType::BF16
         {
-            let stage_profile = start_gdn_recurrent_inner_profile(device, profile_inner)?;
-            // #1082 DoD-101/102: `gdn_full_chunk_forward` is now kt-typed and
-            // mutates `state` in place through the kt `&mut` — pass kt tensors
-            // directly, no candle bridge / state write-back.
-            let out_chunk = backend.gdn_full_chunk_forward(
+            let k_t_mat = match k_t_mat_pre.as_ref() {
+                Some(t) => t.clone(),
+                None => k_c.transpose(2, 3)?.contiguous()?,
+            };
+            if !any_kt_tensor_tracks_op(&[
                 &g_c, &v_c, &kkt, &qkt, &ks_entry, &q_s, &beta_c, &k_t_mat, state,
-            )?;
-            finish_gdn_recurrent_inner_profile(
-                device,
-                "full_chunk_forward",
-                batch,
-                heads,
-                seq_len,
-                ci,
-                c,
-                stage_profile,
-            )?;
-            if let Some(out_chunk) = out_chunk {
-                out_chunks.push(out_chunk);
-                continue;
+            ]) {
+                let stage_profile = start_gdn_recurrent_inner_profile(device, profile_inner)?;
+                // #1082 DoD-101/102: `gdn_full_chunk_forward` is now kt-typed and
+                // mutates `state` in place through the kt `&mut` — pass kt tensors
+                // directly, no candle bridge / state write-back.
+                let out_chunk = backend.gdn_full_chunk_forward(
+                    &g_c, &v_c, &kkt, &qkt, &ks_entry, &q_s, &beta_c, &k_t_mat, state,
+                )?;
+                finish_gdn_recurrent_inner_profile(
+                    device,
+                    "full_chunk_forward",
+                    batch,
+                    heads,
+                    seq_len,
+                    ci,
+                    c,
+                    stage_profile,
+                )?;
+                out_chunk
+            } else {
+                None
             }
+        } else {
+            None
+        };
+        if let Some(out_chunk) = full_chunk_out {
+            out_chunks.push(out_chunk);
+            continue;
         }
 
         // Fused prep: cumsum + decay + exp + masked scales + v_prime +
@@ -13765,7 +13770,7 @@ fn gdn_chunkwise_recurrence(
         //         + Σ_i exp(G[C-1] - G[i]) * k[i] ⊗ W[i]
         let stage_profile = start_gdn_recurrent_inner_profile(device, profile_inner)?;
         let state_scaled = state.broadcast_mul(&p_last_u)?; // [B, nv, dk, dv]
-        let delta_state = k_t_mat.matmul(&w_weighted)?; // [B, nv, dk, dv]
+        let delta_state = kiln_tensor::ops::matmul_lhs_transposed(&k_c, &w_weighted)?; // [B, nv, dk, dv]
         *state = (state_scaled + delta_state)?;
         finish_gdn_recurrent_inner_profile(
             device,
@@ -15098,17 +15103,16 @@ pub fn gdn_recurrent_backward_no_grad(
         let v_c = v.narrow(2, t_off, chunk)?.contiguous()?;
         let beta_c = beta.narrow(2, t_off, chunk)?.contiguous()?;
         let g_c = g.narrow(2, t_off, chunk)?.contiguous()?;
-        let k_t = k_c.transpose(2, 3)?.contiguous()?;
         let ks_entry = k_c.matmul(&state)?;
         let q_s = q_c.matmul(&state)?;
-        let kkt = k_c.matmul(&k_t)?;
-        let qkt = q_c.matmul(&k_t)?;
+        let kkt = kiln_tensor::ops::matmul_rhs_transposed(&k_c, &k_c)?;
+        let qkt = kiln_tensor::ops::matmul_rhs_transposed(&q_c, &k_c)?;
         let (a_strict, _b_mask, v_prime, _q_s_scaled, decay_last_col, p_last) =
             gdn_chunk_prep_f32(&g_c, &v_c, &kkt, &qkt, &ks_entry, &q_s)?;
         let w = compute_w_chunk(backend, &a_strict, &v_prime, &beta_c, chunk)?.contiguous()?;
         let state_scaled = state.broadcast_mul(&p_last.unsqueeze(2)?.unsqueeze(3)?)?;
         let w_weighted = w.broadcast_mul(&decay_last_col.unsqueeze(3)?)?;
-        let delta_state = k_t.matmul(&w_weighted)?;
+        let delta_state = kiln_tensor::ops::matmul_lhs_transposed(&k_c, &w_weighted)?;
         state = (state_scaled + delta_state)?;
         finish_gdn_backward_trace(
             trace_enabled,
@@ -15160,11 +15164,10 @@ pub fn gdn_recurrent_backward_no_grad(
         let beta_c = beta.narrow(2, t_off, chunk)?.contiguous()?;
         let g_c = g.narrow(2, t_off, chunk)?.contiguous()?;
         let d_out = grad_out.narrow(2, t_off, chunk)?.contiguous()?;
-        let k_t = k_c.transpose(2, 3)?.contiguous()?;
         let ks_entry = k_c.matmul(s_in)?;
         let q_s = q_c.matmul(s_in)?;
-        let kkt = k_c.matmul(&k_t)?;
-        let qkt = q_c.matmul(&k_t)?;
+        let kkt = kiln_tensor::ops::matmul_rhs_transposed(&k_c, &k_c)?;
+        let qkt = kiln_tensor::ops::matmul_rhs_transposed(&q_c, &k_c)?;
         let (a_strict, b_mask, v_prime, q_s_scaled, decay_last_col, p_last) =
             gdn_chunk_prep_f32(&g_c, &v_c, &kkt, &qkt, &ks_entry, &q_s)?;
         let w = compute_w_chunk(backend, &a_strict, &v_prime, &beta_c, chunk)?.contiguous()?;
@@ -15189,8 +15192,8 @@ pub fn gdn_recurrent_backward_no_grad(
             &trace_device,
         );
         let dq_s_scaled = d_out.clone();
-        let d_w_scan = b_mask.transpose(2, 3)?.contiguous()?.matmul(&d_out)?;
-        let d_b_mask = d_out.matmul(&w.transpose(2, 3)?.contiguous()?)?;
+        let d_w_scan = kiln_tensor::ops::matmul_lhs_transposed(&b_mask, &d_out)?;
+        let d_b_mask = kiln_tensor::ops::matmul_rhs_transposed(&d_out, &w)?;
 
         let mut d_w_acc = d_w_scan;
         let mut d_decay_last_col_acc =
@@ -15250,7 +15253,7 @@ pub fn gdn_recurrent_backward_no_grad(
             }
             let tmp_dw = k_c.matmul(d_s_exit)?;
             d_w_acc = (&d_w_acc + &tmp_dw.broadcast_mul(&decay_last_col.unsqueeze(3)?)?)?;
-            let tmp_dk = w.matmul(&d_s_exit.transpose(2, 3)?.contiguous()?)?;
+            let tmp_dk = kiln_tensor::ops::matmul_rhs_transposed(&w, d_s_exit)?;
             dk_state_extra = Some(tmp_dk.broadcast_mul(&decay_last_col.unsqueeze(3)?)?);
             // Phase 7 (#1082): wire `try_kt_sum_axis` into the
             // `(&k_c * &tmp_dk)?.sum(D::Minus1)?` reduction for
@@ -15630,18 +15633,17 @@ pub fn gdn_recurrent_backward_no_grad(
             chunk,
             &trace_device,
         );
-        let s_t = s_in.transpose(2, 3)?.contiguous()?;
         let d_k_from_kkt =
-            (&d_kkt.matmul(&k_c)? + &d_kkt.transpose(2, 3)?.contiguous()?.matmul(&k_c)?)?;
-        let d_k_from_qkt = d_qkt.transpose(2, 3)?.contiguous()?.matmul(&q_c)?;
-        let d_k_from_ks = d_ks_entry.matmul(&s_t)?;
+            (&d_kkt.matmul(&k_c)? + &kiln_tensor::ops::matmul_lhs_transposed(&d_kkt, &k_c)?)?;
+        let d_k_from_qkt = kiln_tensor::ops::matmul_lhs_transposed(&d_qkt, &q_c)?;
+        let d_k_from_ks = kiln_tensor::ops::matmul_rhs_transposed(&d_ks_entry, s_in)?;
         let mut d_k = (&(&d_k_from_kkt + &d_k_from_qkt)? + &d_k_from_ks)?;
         if let Some(extra) = dk_state_extra.as_ref() {
             d_k = (&d_k + extra)?;
         }
-        let d_q = (&d_qkt.matmul(&k_c)? + &d_q_s.matmul(&s_t)?)?;
-        let d_s_from_ks = k_c.transpose(2, 3)?.contiguous()?.matmul(&d_ks_entry)?;
-        let d_s_from_qs = q_c.transpose(2, 3)?.contiguous()?.matmul(&d_q_s)?;
+        let d_q = (&d_qkt.matmul(&k_c)? + &kiln_tensor::ops::matmul_rhs_transposed(&d_q_s, s_in)?)?;
+        let d_s_from_ks = kiln_tensor::ops::matmul_lhs_transposed(&k_c, &d_ks_entry)?;
+        let d_s_from_qs = kiln_tensor::ops::matmul_lhs_transposed(&q_c, &d_q_s)?;
         let mut d_s_in = (&d_s_from_ks + &d_s_from_qs)?;
         if let Some(extra) = ds_state_extra.as_ref() {
             d_s_in = (&d_s_in + extra)?;
