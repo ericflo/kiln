@@ -6175,6 +6175,88 @@ fn analytic_sft_tail_grad_pre_final_norm(
     rms_norm_eps: f64,
     chunk_size: usize,
 ) -> Result<Tensor> {
+    validate_analytic_sft_tail_grad_inputs(
+        hidden,
+        None,
+        final_norm_weight,
+        head_t,
+        input_ids,
+        label_mask,
+        chunk_size,
+    )?;
+    let normed = rms_norm(hidden, final_norm_weight, rms_norm_eps)
+        .context("analytic SFT tail final RMSNorm")?;
+    analytic_sft_tail_grad_from_validated_normed_pre_final_norm(
+        hidden,
+        &normed,
+        final_norm_weight,
+        head_t,
+        input_ids,
+        label_mask,
+        rms_norm_eps,
+        chunk_size,
+    )
+}
+
+fn analytic_sft_tail_grad_from_normed_pre_final_norm(
+    hidden: &Tensor,
+    normed: &Tensor,
+    final_norm_weight: &Tensor,
+    head_t: &Tensor,
+    input_ids: &[u32],
+    label_mask: &[bool],
+    rms_norm_eps: f64,
+    chunk_size: usize,
+) -> Result<Tensor> {
+    validate_analytic_sft_tail_grad_inputs(
+        hidden,
+        Some(normed),
+        final_norm_weight,
+        head_t,
+        input_ids,
+        label_mask,
+        chunk_size,
+    )?;
+    analytic_sft_tail_grad_from_validated_normed_pre_final_norm(
+        hidden,
+        normed,
+        final_norm_weight,
+        head_t,
+        input_ids,
+        label_mask,
+        rms_norm_eps,
+        chunk_size,
+    )
+}
+
+fn analytic_sft_tail_grad_from_validated_normed_pre_final_norm(
+    hidden: &Tensor,
+    normed: &Tensor,
+    final_norm_weight: &Tensor,
+    head_t: &Tensor,
+    input_ids: &[u32],
+    label_mask: &[bool],
+    rms_norm_eps: f64,
+    chunk_size: usize,
+) -> Result<Tensor> {
+    let grad_normed =
+        kiln_flce_kernel::kt_api::fused_linear_cross_entropy_phase_b_backward_unit_grad_kt(
+            normed, head_t, input_ids, label_mask, chunk_size,
+        )
+        .map_err(|e| anyhow::anyhow!("analytic SFT tail FLCE hidden gradient: {e}"))?;
+    rms_norm_backward_pre_final_norm(hidden, final_norm_weight, &grad_normed, rms_norm_eps)
+        .context("analytic SFT tail final RMSNorm backward")
+}
+
+fn validate_analytic_sft_tail_grad_inputs(
+    hidden: &Tensor,
+    normed: Option<&Tensor>,
+    final_norm_weight: &Tensor,
+    head_t: &Tensor,
+    input_ids: &[u32],
+    label_mask: &[bool],
+    chunk_size: usize,
+) -> Result<()> {
     let seq_len = input_ids.len();
     if seq_len < 2 {
         anyhow::bail!("analytic SFT tail gradient requires at least 2 tokens");
@@ -6198,6 +6280,15 @@ fn analytic_sft_tail_grad_pre_final_norm(
             seq_len
         );
     }
+    if let Some(normed) = normed {
+        if normed.dims() != hidden.dims() {
+            anyhow::bail!(
+                "normed hidden shape {:?} does not match hidden shape {:?}",
+                normed.dims(),
+                hidden.dims()
+            );
+        }
+    }
     let hidden_size = dims[2];
     if final_norm_weight.dims() != [hidden_size] {
         anyhow::bail!(
@@ -6213,15 +6304,7 @@ fn analytic_sft_tail_grad_pre_final_norm(
         );
     }
 
-    let normed = rms_norm(hidden, final_norm_weight, rms_norm_eps)
-        .context("analytic SFT tail final RMSNorm")?;
-    let grad_normed =
-        kiln_flce_kernel::kt_api::fused_linear_cross_entropy_phase_b_backward_unit_grad_kt(
-            &normed, head_t, input_ids, label_mask, chunk_size,
-        )
-        .map_err(|e| anyhow::anyhow!("analytic SFT tail FLCE hidden gradient: {e}"))?;
-    rms_norm_backward_pre_final_norm(hidden, final_norm_weight, &grad_normed, rms_norm_eps)
-        .context("analytic SFT tail final RMSNorm backward")
+    Ok(())
 }
 
 pub(crate) fn rms_norm_backward_pre_final_norm(
@@ -7581,21 +7664,23 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
         .clone();
 
     // Step 2: real loss at the final boundary + the exact FLCE/RMSNorm tail
-    // seed. `analytic_sft_tail_grad_pre_final_norm` calls the crate-level FLCE
-    // kt backward to get d(loss)/d(final_norm_output), then applies the shared
-    // final-RMSNorm backward to return d(loss)/d(pre-final-norm hidden) as kt
-    // [1, T, H] (BF16 on the fused GPU path, F32 on the composite fallback) —
-    // exactly the upstream grad to seed the LAST segment's backward (its output
-    // IS that hidden). The loss value here is ONLY consumed as a scalar
-    // `loss_val`; the gradient comes entirely from this tail seed, outside the
-    // per-segment tape scopes.
+    // seed. When the CUDA FLCE loss-value path computes final-norm output, the
+    // analytic tail reuses that `normed` hidden for the FLCE backward seed
+    // instead of recomputing the same [1, T, H] RMSNorm. The tail then applies
+    // the shared final-RMSNorm backward to return d(loss)/d(pre-final-norm
+    // hidden) as kt [1, T, H] (BF16 on the fused GPU path, F32 on the composite
+    // fallback) — exactly the upstream grad to seed the LAST segment's backward
+    // (its output IS that hidden). The loss value here is ONLY consumed as a
+    // scalar `loss_val`; the gradient comes entirely from this tail seed,
+    // outside the per-segment tape scopes.
+    let mut normed_for_tail = None;
     let loss_val = if use_flce() && is_cuda_device(device) {
         // (#1082 H-FLCE / candle-drop) FLCE loss-VALUE via the kt-native forward
         // `fused_linear_cross_entropy_phase_b_kt` — taking the kt `normed` hidden
         // and the kt `embed_tokens_t` head DIRECTLY (no candle `cd_out` copy, no
         // ~780MB/step `embed_tokens_t` kt->candle copy, no candle device bridge).
-        // Only the resulting scalar crosses back to host. The gradient comes
-        // entirely from the FLCE/RMSNorm tail seed below.
+        // Only the resulting scalar crosses back to host. The same `normed`
+        // tensor is retained for the FLCE/RMSNorm tail seed below.
         // The candle FLCE provider opt-in (`KILN_CUDA_FLCE`) was removed in the
         // candle drop — this is now the sole FLCE path.
         let normed = model_forward_final_norm(&final_hidden_kt, weights, model_config)?;
@@ -7609,20 +7694,35 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
         .map_err(|e| {
             anyhow::anyhow!("ckpt-kt kt-native fused linear cross-entropy (final boundary): {e}")
         })?;
-        loss_kt.to_scalar::<f32>()? as f64
+        let loss_val = loss_kt.to_scalar::<f32>()? as f64;
+        normed_for_tail = Some(normed);
+        loss_val
     } else {
         let logits = model_forward_head(&final_hidden_kt, weights, model_config)?;
         cross_entropy_loss(&logits, input_ids, label_mask, device)?
     };
-    let mut upstream_grad = analytic_sft_tail_grad_pre_final_norm(
-        &final_hidden_kt,
-        &weights.final_norm,
-        &weights.embed_tokens_t,
-        input_ids,
-        label_mask,
-        model_config.rms_norm_eps,
-        DEFAULT_CHUNK_SIZE,
-    )
+    let tail_grad = match normed_for_tail.as_ref() {
+        Some(normed) => analytic_sft_tail_grad_from_normed_pre_final_norm(
+            &final_hidden_kt,
+            normed,
+            &weights.final_norm,
+            &weights.embed_tokens_t,
+            input_ids,
+            label_mask,
+            model_config.rms_norm_eps,
+            DEFAULT_CHUNK_SIZE,
+        ),
+        None => analytic_sft_tail_grad_pre_final_norm(
+            &final_hidden_kt,
+            &weights.final_norm,
+            &weights.embed_tokens_t,
+            input_ids,
+            label_mask,
+            model_config.rms_norm_eps,
+            DEFAULT_CHUNK_SIZE,
+        ),
+    };
+    let mut upstream_grad = tail_grad
     .context("ckpt-kt FLCE/RMSNorm SFT tail gradient")?
     .detach();
 
@@ -11547,6 +11647,69 @@ pub(crate) mod tests {
         )
         .map_err(|e| anyhow::anyhow!("test FLCE loss: {e}"))?;
         Ok(loss.to_scalar::<f32>()?)
+    }
+
+    #[test]
+    fn analytic_sft_tail_grad_from_precomputed_normed_matches_wrapper() -> Result<()> {
+        let device = cpu_device();
+        let seq_len = 4;
+        let hidden_size = 3;
+        let vocab_size = 5;
+        let chunk_size = 3;
+        let eps = 1e-5;
+        let hidden_data: Vec<f32> = (0..seq_len * hidden_size)
+            .map(|i| ((i as f32 + 1.0) * 0.13).sin() * 0.4)
+            .collect();
+        let head_data: Vec<f32> = (0..hidden_size * vocab_size)
+            .map(|i| ((i as f32 + 3.0) * 0.17).cos() * 0.3)
+            .collect();
+        let norm_data = vec![0.08f32, -0.12, 0.05];
+        let input_ids = vec![0u32, 1, 3, 4];
+        let label_mask = vec![false, true, false, true];
+
+        let hidden =
+            Tensor::from_vec_on(device, hidden_data.clone(), vec![1, seq_len, hidden_size])?;
+        let final_norm_weight = Tensor::from_vec_on(device, norm_data, vec![hidden_size])?;
+        let head_t = Tensor::from_vec_on(device, head_data, vec![hidden_size, vocab_size])?;
+        let normed = rms_norm(&hidden, &final_norm_weight, eps)?;
+
+        let wrapper = analytic_sft_tail_grad_pre_final_norm(
+            &hidden,
+            &final_norm_weight,
+            &head_t,
+            &input_ids,
+            &label_mask,
+            eps,
+            chunk_size,
+        )?;
+        let from_normed = analytic_sft_tail_grad_from_normed_pre_final_norm(
+            &hidden,
+            &normed,
+            &final_norm_weight,
+            &head_t,
+            &input_ids,
+            &label_mask,
+            eps,
+            chunk_size,
+        )?;
+
+        let wrapper_host = wrapper
+            .to_device(Device::Cpu)?
+            .to_dtype(DType::F32)?
+            .to_vec::<f32>()?;
+        let from_normed_host = from_normed
+            .to_device(Device::Cpu)?
+            .to_dtype(DType::F32)?
+            .to_vec::<f32>()?;
+        assert_eq!(wrapper_host.len(), from_normed_host.len());
+        for (idx, (a, b)) in wrapper_host.iter().zip(from_normed_host.iter()).enumerate() {
+            assert!(
+                (a - b).abs() < 1e-6,
+                "tail grad[{idx}] wrapper {a:+.8} != reused normed {b:+.8}",
+            );
+        }
+
+        Ok(())
     }
 
     #[test]
