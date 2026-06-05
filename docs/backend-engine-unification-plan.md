@@ -906,4 +906,3 @@ still uses SPIR-V, explicit buffers, and command batching.
 
 That is the right unification boundary for Kiln: one engine contract, four
 native execution models.
-
