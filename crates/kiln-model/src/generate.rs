@@ -84,9 +84,9 @@ fn paged_cache_kt_dtype(dtype: kiln_core::config::DType) -> kiln_tensor::DType {
 /// (#1082) Validate + return the device the kt paged cache allocates its
 /// pools on. The cache now allocates per-arm on the model's *runtime* device
 /// (`PagedKvCacheKt::new_with_fp8` matches on the `Device`), so we hand it the
-/// `Device` directly instead of a bare index. Non-CUDA devices have no
-/// paged-cache support in this generation path today, so this still bails for
-/// anything but CUDA — preserving the prior gating.
+/// `Device` directly instead of a bare index. This native MTP generation path
+/// is only kept open on CUDA for now; ROCm MTP currently benchmarks slower than
+/// normal batching.
 fn paged_cache_device(device: &kiln_tensor::Device) -> Result<kiln_tensor::Device> {
     match device {
         kiln_tensor::Device::Cuda(idx) => Ok(kiln_tensor::Device::Cuda(*idx)),
@@ -2244,6 +2244,7 @@ impl ModelRunner {
         block_manager: &Mutex<BlockManager>,
         paged_cache: &PagedKvCache,
         cached_prefix: Option<PagedPrefixReuse>,
+        capture_prefix_split: bool,
         cancel: Option<&CancelHandle>,
     ) -> Result<PagedBatchedDecodeState> {
         anyhow::ensure!(!prompt_tokens.is_empty(), "prompt must not be empty");
@@ -2302,6 +2303,7 @@ impl ModelRunner {
             cached_prefix,
             block_size,
             allocated_blocks.clone(),
+            capture_prefix_split,
             cancel,
         );
 
@@ -2741,6 +2743,7 @@ impl ModelRunner {
         cached_prefix: Option<PagedPrefixReuse>,
         block_size: usize,
         allocated_blocks: Vec<u32>,
+        capture_prefix_split: bool,
         cancel: Option<&CancelHandle>,
     ) -> Result<PagedBatchedDecodeState> {
         let (cached_tokens, exact_next_token, mut linear_state) = match cached_prefix {
@@ -2800,8 +2803,11 @@ impl ModelRunner {
         // every subsequent turn's prompt does NOT contain — without this
         // snapshot, multi-turn lookups miss because the cached entry's
         // last block contains generation-prompt-only tokens.
-        let split_pos =
-            strict_prompt_prefix_split_pos(prompt_tokens.len(), cached_tokens, block_size);
+        let capture_prefix_split = capture_prefix_split
+            && !matches!(self.weights.embed_tokens.device(), kiln_tensor::Device::Rocm(_));
+        let split_pos = capture_prefix_split
+            .then(|| strict_prompt_prefix_split_pos(prompt_tokens.len(), cached_tokens, block_size))
+            .flatten();
         let mut prefill_split_snapshot: Option<LinearAttentionState> = None;
 
         let prefill_start = std::time::Instant::now();

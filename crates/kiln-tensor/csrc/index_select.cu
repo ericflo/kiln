@@ -101,6 +101,34 @@ __global__ void kiln_index_select_axis_n_kernel(const uint8_t* __restrict__ src,
     }
 }
 
+__global__ void kiln_broadcast_to_kernel(const uint8_t* __restrict__ src,
+                                         uint8_t* __restrict__ dst,
+                                         const int64_t* __restrict__ in_shape,
+                                         const int64_t* __restrict__ target_shape,
+                                         const int64_t* __restrict__ in_strides,
+                                         const int64_t* __restrict__ out_strides,
+                                         int32_t rank,
+                                         int64_t n_out,
+                                         int64_t elem_bytes) {
+    int64_t flat = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    if (flat >= n_out) return;
+
+    int64_t rem = flat;
+    int64_t src_elem = 0;
+    for (int32_t axis = 0; axis < rank; ++axis) {
+        int64_t out_idx = rem / out_strides[axis];
+        rem -= out_idx * out_strides[axis];
+        int64_t in_idx = (in_shape[axis] == 1 && target_shape[axis] != 1) ? 0 : out_idx;
+        src_elem += in_idx * in_strides[axis];
+    }
+
+    int64_t src_off = src_elem * elem_bytes;
+    int64_t dst_off = flat * elem_bytes;
+    for (int64_t b = 0; b < elem_bytes; ++b) {
+        dst[dst_off + b] = src[src_off + b];
+    }
+}
+
 } // namespace
 
 // Legacy entry preserved for callers that go through the dim0 fast
@@ -128,6 +156,39 @@ extern "C" int kiln_index_select_dim0_async(const void* src,
         row_bytes,
         n_indices,
         src_n_rows);
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) return 1000 + static_cast<int>(err);
+    return 0;
+}
+
+extern "C" int kiln_broadcast_to_async(const void* src,
+                                       void* dst,
+                                       const void* in_shape_i64,
+                                       const void* target_shape_i64,
+                                       const void* in_strides_i64,
+                                       const void* out_strides_i64,
+                                       int32_t rank,
+                                       int64_t n_out,
+                                       int64_t elem_bytes,
+                                       cudaStream_t stream) {
+    if (rank < 0 || n_out < 0 || elem_bytes <= 0) return 1;
+    if (rank == 0 || n_out == 0) return 0;
+
+    int64_t blocks_i64 = (n_out + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    if (blocks_i64 > (int64_t)2147483647) return 2;
+    int blocks = static_cast<int>(blocks_i64);
+
+    kiln_broadcast_to_kernel<<<blocks, BLOCK_SIZE, 0, stream>>>(
+        static_cast<const uint8_t*>(src),
+        static_cast<uint8_t*>(dst),
+        static_cast<const int64_t*>(in_shape_i64),
+        static_cast<const int64_t*>(target_shape_i64),
+        static_cast<const int64_t*>(in_strides_i64),
+        static_cast<const int64_t*>(out_strides_i64),
+        rank,
+        n_out,
+        elem_bytes);
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) return 1000 + static_cast<int>(err);

@@ -614,6 +614,16 @@ async fn main() -> Result<()> {
             );
         }
     }
+    #[cfg(feature = "rocm")]
+    {
+        let restored = kiln_tensor::rocm_load_algo_cache_from_disk(0);
+        if restored > 0 {
+            tracing::info!(
+                entries = restored,
+                "hipblaslt autotune cache restored from disk"
+            );
+        }
+    }
     spawn_backend_prewarm(prewarm_state);
     // Graceful shutdown: listen for SIGTERM/SIGINT, cancel in-flight
     // inference via the batching engine (so SSE streams terminate
@@ -690,8 +700,9 @@ fn spawn_backend_prewarm(state: AppState) {
         // (no candle bridge needed).
         let device_kt = runner_guard.weights.embed_tokens.device();
         let is_metal = matches!(device_kt, kiln_tensor::Device::Metal(_));
+        let is_rocm = matches!(device_kt, kiln_tensor::Device::Rocm(_));
         let is_vulkan = runner_guard.backend_name() == "vulkan";
-        (is_metal || is_vulkan, is_vulkan, device_kt)
+        (is_metal || is_rocm || is_vulkan, is_vulkan, device_kt)
     };
     if !is_gpu {
         return;
@@ -748,20 +759,17 @@ fn spawn_backend_prewarm(state: AppState) {
                 top_p: 1.0,
                 top_k: 0,
                 // `max_tokens = 1` only runs prefill and samples the first
-                // token. Use two tokens so Metal also compiles the decode path
-                // before the first live request reaches it.
+                // token. Use two tokens so GPU backends also compile or tune
+                // the decode path before the first live request reaches it.
                 max_tokens: 2,
                 repetition_penalty: 1.0,
                 stop: Vec::new(),
                 seed: Some(42),
                 ..SamplingParams::default()
             };
-            // Warm the base paged path used by every desktop request. We cover
-            // two common Metal decode buckets: 32 prompt tokens warms the
-            // 64-token paged-attention bucket used by short chat requests,
-            // while 64 prompt tokens warms the 128-token bucket. A single
-            // longer prewarm leaves short prompts paying graph-stable buffer
-            // allocation/capture on the first live decode step.
+            // Warm the base paged path used by every desktop request. Two
+            // prompt sizes cover the short-chat decode buckets and populate
+            // backend matmul autotune caches before the first live request.
             let prewarm_prompts: [Vec<u32>; 2] = [
                 (1..=32).collect::<Vec<u32>>(),
                 (1..=64).collect::<Vec<u32>>(),
@@ -790,8 +798,8 @@ fn spawn_backend_prewarm(state: AppState) {
                     "background inference prewarm complete"
                 );
                 // (#1082 Phase 2) Prewarm just exercised every Qwen3.5-4B GEMM
-                // shape, so the autotune cache is fully populated — flush it to
-                // disk so future cold-starts skip the cublasLt heuristic search.
+                // shape, so the autotune cache is populated — flush it to disk
+                // so future cold-starts skip backend heuristic search.
                 #[cfg(feature = "cuda")]
                 match kiln_tensor::flush_algo_cache_to_disk(0) {
                     Ok(n) if n > 0 => {
@@ -800,6 +808,16 @@ fn spawn_backend_prewarm(state: AppState) {
                     Ok(_) => {}
                     Err(e) => {
                         tracing::warn!(error = %e, "cublaslt autotune cache flush failed (continuing)")
+                    }
+                }
+                #[cfg(feature = "rocm")]
+                match kiln_tensor::rocm_flush_algo_cache_to_disk(0) {
+                    Ok(n) if n > 0 => {
+                        tracing::info!(entries = n, "hipblaslt autotune cache flushed to disk")
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::warn!(error = %e, "hipblaslt autotune cache flush failed (continuing)")
                     }
                 }
             }
@@ -989,6 +1007,14 @@ async fn shutdown_signal(
         }
         Ok(_) => {}
         Err(e) => tracing::warn!(error = %e, "cublaslt autotune cache flush failed on shutdown"),
+    }
+    #[cfg(feature = "rocm")]
+    match kiln_tensor::rocm_flush_algo_cache_to_disk(0) {
+        Ok(n) if n > 0 => {
+            tracing::info!(entries = n, "hipblaslt autotune cache flushed on shutdown")
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!(error = %e, "hipblaslt autotune cache flush failed on shutdown"),
     }
 
     // Proactively cancel every in-flight inference request. Without this

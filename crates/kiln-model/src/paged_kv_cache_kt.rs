@@ -958,33 +958,68 @@ impl PagedKvCacheKt {
                 .map_err(|e| anyhow::anyhow!("kt pkv read: narrow v: {e}"))?;
             (k, v)
         } else {
-            // Gather path: build the slot indices directly on the pool
-            // device so `index_select` can stay backend-local. Metal in
-            // particular requires the index tensor to be Metal-resident;
-            // using a CPU index against Metal K/V pools trips dispatch2's
-            // mixed-device guard before its Metal gather kernel can run.
-            let mut idx_data: Vec<u32> = Vec::with_capacity(seq_len);
-            for pos in 0..seq_len {
-                let slot = block_table.slot_for(pos, self.block_size).ok_or_else(|| {
-                    anyhow::anyhow!("kt pkv read: no slot for position {pos} in block table")
-                })?;
-                let slot_u32 = u32::try_from(slot)
-                    .map_err(|_| anyhow::anyhow!("kt pkv read: slot {slot} exceeds u32"))?;
-                idx_data.push(slot_u32);
-            }
-
-            let kt_indices =
-                kiln_tensor::Tensor::from_vec_on(k_pool.device(), idx_data, vec![seq_len])
-                    .map_err(|e| {
-                        anyhow::anyhow!("kt pkv read: build indices on {}: {e}", k_pool.device())
+            #[cfg(feature = "rocm")]
+            if matches!(k_pool.device(), kiln_tensor::Device::Rocm(_)) {
+                let table_width = block_table.blocks.len();
+                let kt_block_table = KtTensor::from_vec_on(
+                    k_pool.device(),
+                    block_table.blocks.clone(),
+                    vec![1, table_width],
+                )
+                .map_err(|e| anyhow::anyhow!("kt pkv read: build ROCm block table: {e}"))?;
+                let k = kiln_tensor::rocm_paged_gather_rows(
+                    k_pool,
+                    &kt_block_table,
+                    1,
+                    seq_len,
+                    table_width,
+                    self.block_size,
+                )
+                .and_then(|t| t.squeeze(0))
+                .map_err(|e| anyhow::anyhow!("kt pkv read: ROCm paged gather k_pool: {e}"))?;
+                let v = kiln_tensor::rocm_paged_gather_rows(
+                    v_pool,
+                    &kt_block_table,
+                    1,
+                    seq_len,
+                    table_width,
+                    self.block_size,
+                )
+                .and_then(|t| t.squeeze(0))
+                .map_err(|e| anyhow::anyhow!("kt pkv read: ROCm paged gather v_pool: {e}"))?;
+                (k, v)
+            } else {
+                // Gather path: build the slot indices directly on the pool
+                // device so `index_select` can stay backend-local. Metal in
+                // particular requires the index tensor to be Metal-resident;
+                // using a CPU index against Metal K/V pools trips dispatch2's
+                // mixed-device guard before its Metal gather kernel can run.
+                let mut idx_data: Vec<u32> = Vec::with_capacity(seq_len);
+                for pos in 0..seq_len {
+                    let slot = block_table.slot_for(pos, self.block_size).ok_or_else(|| {
+                        anyhow::anyhow!("kt pkv read: no slot for position {pos} in block table")
                     })?;
-            let k = k_pool
-                .index_select(&kt_indices, 0)
-                .map_err(|e| anyhow::anyhow!("kt pkv read: index_select k_pool: {e}"))?;
-            let v = v_pool
-                .index_select(&kt_indices, 0)
-                .map_err(|e| anyhow::anyhow!("kt pkv read: index_select v_pool: {e}"))?;
-            (k, v)
+                    let slot_u32 = u32::try_from(slot)
+                        .map_err(|_| anyhow::anyhow!("kt pkv read: slot {slot} exceeds u32"))?;
+                    idx_data.push(slot_u32);
+                }
+
+                let kt_indices =
+                    kiln_tensor::Tensor::from_vec_on(k_pool.device(), idx_data, vec![seq_len])
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "kt pkv read: build indices on {}: {e}",
+                                k_pool.device()
+                            )
+                        })?;
+                let k = k_pool
+                    .index_select(&kt_indices, 0)
+                    .map_err(|e| anyhow::anyhow!("kt pkv read: index_select k_pool: {e}"))?;
+                let v = v_pool
+                    .index_select(&kt_indices, 0)
+                    .map_err(|e| anyhow::anyhow!("kt pkv read: index_select v_pool: {e}"))?;
+                (k, v)
+            }
         };
 
         // FP8 path: the slice is U8 (E4M3FN bit pattern). Dequantize
@@ -1446,23 +1481,23 @@ impl PagedKvCacheKt {
                 return Ok(false);
             }
 
-        // Collapse the seq_len=1 dim before dispatching so the fused
-        // kernel sees a contiguous [batch, num_kv_heads, head_dim] block.
-        let k_sq = k
-            .squeeze(1)
-            .map_err(|e| anyhow::anyhow!("kt pkv batch_slot: squeeze k: {e}"))?
-            .contiguous()
-            .map_err(|e| anyhow::anyhow!("kt pkv batch_slot: contiguous k: {e}"))?;
-        let v_sq = v
-            .squeeze(1)
-            .map_err(|e| anyhow::anyhow!("kt pkv batch_slot: squeeze v: {e}"))?
-            .contiguous()
-            .map_err(|e| anyhow::anyhow!("kt pkv batch_slot: contiguous v: {e}"))?;
-        kiln_flash_attn::paged_kv_write_token_major_bf16_batch_slot_kt(
-            k_pool, v_pool, &k_sq, &v_sq, slots,
-        )
-        .map_err(|e| anyhow::anyhow!("kt paged_kv_write_token_major_bf16_batch_slot: {e}"))?;
-        Ok(true)
+            // Collapse the seq_len=1 dim before dispatching so the fused
+            // kernel sees a contiguous [batch, num_kv_heads, head_dim] block.
+            let k_sq = k
+                .squeeze(1)
+                .map_err(|e| anyhow::anyhow!("kt pkv batch_slot: squeeze k: {e}"))?
+                .contiguous()
+                .map_err(|e| anyhow::anyhow!("kt pkv batch_slot: contiguous k: {e}"))?;
+            let v_sq = v
+                .squeeze(1)
+                .map_err(|e| anyhow::anyhow!("kt pkv batch_slot: squeeze v: {e}"))?
+                .contiguous()
+                .map_err(|e| anyhow::anyhow!("kt pkv batch_slot: contiguous v: {e}"))?;
+            kiln_flash_attn::paged_kv_write_token_major_bf16_batch_slot_kt(
+                k_pool, v_pool, &k_sq, &v_sq, slots,
+            )
+            .map_err(|e| anyhow::anyhow!("kt paged_kv_write_token_major_bf16_batch_slot: {e}"))?;
+            Ok(true)
         }
     }
 

@@ -236,10 +236,13 @@ fn cuda_fused_rotary_qk_disabled() -> bool {
     *DISABLED.get_or_init(|| std::env::var("KILN_DISABLE_FUSED_CUDA_ROTARY_QK").is_ok())
 }
 
-#[cfg(feature = "cuda")]
+#[cfg(any(feature = "cuda", feature = "rocm"))]
 fn cuda_fused_attn_decode_qkv_prep_disabled() -> bool {
     static DISABLED: OnceLock<bool> = OnceLock::new();
-    *DISABLED.get_or_init(|| std::env::var("KILN_DISABLE_CUDA_ATTN_DECODE_QKV_PREP").is_ok())
+    *DISABLED.get_or_init(|| {
+        std::env::var("KILN_DISABLE_CUDA_ATTN_DECODE_QKV_PREP").is_ok()
+            || std::env::var("KILN_DISABLE_ROCM_ATTN_DECODE_QKV_PREP").is_ok()
+    })
 }
 
 #[cfg(any(feature = "cuda", feature = "rocm"))]
@@ -5893,6 +5896,9 @@ fn marlin_bf16_drop_disabled() -> bool {
 pub const STREAMING_PREFILL_DEFAULT_TILE: usize = 8192;
 pub const STREAMING_PREFILL_CUDA_DEFAULT_TILE: usize = 1024;
 pub const STREAMING_PREFILL_CUDA_DEFAULT_THRESHOLD: usize = 2048;
+pub const STREAMING_PREFILL_ROCM_DEFAULT_TILE: usize = STREAMING_PREFILL_CUDA_DEFAULT_TILE;
+pub const STREAMING_PREFILL_ROCM_DEFAULT_THRESHOLD: usize =
+    STREAMING_PREFILL_CUDA_DEFAULT_THRESHOLD;
 pub const STREAMING_PREFILL_METAL_DEFAULT_TILE: usize = 2048;
 pub const STREAMING_PREFILL_METAL_DEFAULT_THRESHOLD: usize = 2048;
 const PAGED_KV_HEAD_MAJOR_READ_MIN_TOKENS: usize = 1024;
@@ -5901,12 +5907,14 @@ const PAGED_KV_HEAD_MAJOR_READ_MIN_TOKENS: usize = 1024;
 enum StreamingPrefillDeviceKind {
     Cpu,
     Cuda,
+    Rocm,
     Metal,
 }
 
 fn streaming_prefill_device_kind(device: &Device) -> StreamingPrefillDeviceKind {
     match device {
         Device::Cuda(_) => StreamingPrefillDeviceKind::Cuda,
+        Device::Rocm(_) => StreamingPrefillDeviceKind::Rocm,
         Device::Metal(_) => StreamingPrefillDeviceKind::Metal,
         _ => StreamingPrefillDeviceKind::Cpu,
     }
@@ -5935,6 +5943,7 @@ pub fn streaming_prefill_enabled() -> bool {
 fn streaming_prefill_default_for(kind: StreamingPrefillDeviceKind, seq_len: usize) -> bool {
     match kind {
         StreamingPrefillDeviceKind::Cuda => seq_len >= STREAMING_PREFILL_CUDA_DEFAULT_THRESHOLD,
+        StreamingPrefillDeviceKind::Rocm => seq_len >= STREAMING_PREFILL_ROCM_DEFAULT_THRESHOLD,
         StreamingPrefillDeviceKind::Metal => seq_len >= streaming_prefill_threshold_tokens(),
         StreamingPrefillDeviceKind::Cpu => false,
     }
@@ -5942,9 +5951,9 @@ fn streaming_prefill_default_for(kind: StreamingPrefillDeviceKind, seq_len: usiz
 
 /// Device-aware streaming prefill policy for production prefill dispatch.
 ///
-/// Env overrides win. Without an override, long CUDA prompts use tiled prefill
+/// Env overrides win. Without an override, long CUDA/ROCm prompts use tiled prefill
 /// by default because it cuts peak GDN activation memory enough to make
-/// production-shaped prefill fit with workers=2 on 48 GiB GPUs; long Metal prompts use the macOS desktop
+/// production-shaped prefill fit; long Metal prompts use the macOS desktop
 /// threshold because it improves TTFT at common chat context sizes.
 pub fn streaming_prefill_enabled_for(device: &Device, seq_len: usize) -> bool {
     if let Some(enabled) = streaming_prefill_env_override() {
@@ -5988,6 +5997,7 @@ pub fn streaming_tile_tokens_for(device: &Device) -> usize {
     streaming_tile_tokens_env_override().unwrap_or_else(|| {
         match streaming_prefill_device_kind(device) {
             StreamingPrefillDeviceKind::Cuda => STREAMING_PREFILL_CUDA_DEFAULT_TILE,
+            StreamingPrefillDeviceKind::Rocm => STREAMING_PREFILL_ROCM_DEFAULT_TILE,
             StreamingPrefillDeviceKind::Metal => STREAMING_PREFILL_METAL_DEFAULT_TILE,
             StreamingPrefillDeviceKind::Cpu => STREAMING_PREFILL_DEFAULT_TILE,
         }
@@ -7961,6 +7971,16 @@ fn rotary_embedding_from_tables(
                 }
             }
         }
+    }
+
+    #[cfg(feature = "rocm")]
+    if !q.track_op()
+        && !k.track_op()
+        && kiln_rmsnorm_kernel::supports_rotary_qk_kt(q, k, cos, sin, head_dim, rotary_dim)
+    {
+        return kiln_rmsnorm_kernel::fused_rotary_qk_kt(q, k, cos, sin, rotary_dim)
+            .map_err(|e| anyhow::anyhow!("rocm kt fused_rotary_qk tables: {e}"))
+            .context("rotary_embedding_from_tables rocm fused kernel");
     }
 
     #[cfg(feature = "metal")]
@@ -19729,7 +19749,8 @@ pub fn gqa_attention_paged_decode_contiguous_batch(
             attn_weights,
             lora_layer,
             lora_scale,
-        )?;
+        )
+        .context("gqa paged qkv projection")?;
         finish_full_attn_stage_profile(
             profile_device,
             profile_context,
@@ -20391,7 +20412,7 @@ fn gqa_attention_paged_with_rope_tables(
     }
 
     let fused_qkv_prep: Option<(Tensor, Tensor, Option<Tensor>)> = {
-        #[cfg(feature = "cuda")]
+        #[cfg(any(feature = "cuda", feature = "rocm"))]
         {
             if seq_len == 1
                 && !cuda_fused_attn_decode_qkv_prep_disabled()
@@ -20435,7 +20456,7 @@ fn gqa_attention_paged_with_rope_tables(
                         ) {
                             let stage_profile =
                                 start_full_attn_stage_profile(profile_device, profile_context)?;
-                            kiln_nvtx::range!(c"kiln/attn/qkv_prep_cuda_fused");
+                            kiln_nvtx::range!(c"kiln/attn/qkv_prep_gpu_fused");
                             let (q_kt, k_kt, gate_kt) =
                                 kiln_rmsnorm_kernel::attn_decode_qkv_split_qk_norm_rope_kt(
                                     &q_raw_kt,
@@ -20481,7 +20502,7 @@ fn gqa_attention_paged_with_rope_tables(
                 None
             }
         }
-        #[cfg(not(feature = "cuda"))]
+        #[cfg(not(any(feature = "cuda", feature = "rocm")))]
         {
             None
         }
@@ -20494,13 +20515,30 @@ fn gqa_attention_paged_with_rope_tables(
             let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
             kiln_nvtx::range!(c"kiln/proj/qkv_split");
             let out = if attn_output_gate {
-                let q_raw = reshape_hole0_4(&q_raw, seq_len, num_heads, head_dim * 2)?;
-                let q = q_raw.narrow(3, 0, head_dim)?;
-                let gate = q_raw.narrow(3, head_dim, head_dim)?;
-                let gate = reshape_hole0_3(&gate.contiguous()?, seq_len, num_heads * head_dim)?;
-                (q.contiguous()?, Some(gate))
+                let q_raw = reshape_hole0_4(&q_raw, seq_len, num_heads, head_dim * 2)
+                    .context("gqa paged q split reshape")?;
+                let q = q_raw
+                    .narrow(3, 0, head_dim)
+                    .context("gqa paged q split value narrow")?;
+                let gate = q_raw
+                    .narrow(3, head_dim, head_dim)
+                    .context("gqa paged q split gate narrow")?;
+                let gate = reshape_hole0_3(
+                    &gate
+                        .contiguous()
+                        .context("gqa paged q split gate contiguous")?,
+                    seq_len,
+                    num_heads * head_dim,
+                )
+                .context("gqa paged q split gate reshape")?;
+                (
+                    q.contiguous()
+                        .context("gqa paged q split value contiguous")?,
+                    Some(gate),
+                )
             } else {
-                let q = reshape_hole0_4(&q_raw, seq_len, num_heads, head_dim)?;
+                let q = reshape_hole0_4(&q_raw, seq_len, num_heads, head_dim)
+                    .context("gqa paged q reshape")?;
                 (q, None)
             };
             finish_full_attn_stage_profile(
@@ -20526,7 +20564,8 @@ fn gqa_attention_paged_with_rope_tables(
             }
         }
 
-        let k = reshape_hole0_4(&k_raw, seq_len, num_kv_heads, head_dim)?;
+        let k = reshape_hole0_4(&k_raw, seq_len, num_kv_heads, head_dim)
+            .context("gqa paged k reshape")?;
 
         // Phase B9 H2 taps: pre_qk_norm_{q,k} are the per-head reshaped tensors
         // immediately before per-head RMSNorm. pre_qk_norm_q is alias of
@@ -20540,8 +20579,10 @@ fn gqa_attention_paged_with_rope_tables(
         let (q, k) = {
             let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
             kiln_nvtx::range!(c"kiln/attn/qk_norm");
-            let q = rms_norm(&q, &attn_weights.q_norm, rms_norm_eps)?;
-            let k = rms_norm(&k, &attn_weights.k_norm, rms_norm_eps)?;
+            let q = rms_norm(&q, &attn_weights.q_norm, rms_norm_eps)
+                .context("gqa paged q norm")?;
+            let k = rms_norm(&k, &attn_weights.k_norm, rms_norm_eps)
+                .context("gqa paged k norm")?;
             let out = (q, k);
             finish_full_attn_stage_profile(
                 profile_device,
@@ -20576,9 +20617,11 @@ fn gqa_attention_paged_with_rope_tables(
             let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
             kiln_nvtx::range!(c"kiln/attn/rope");
             let out = if let Some((cos, sin)) = rope_tables {
-                rotary_embedding_from_tables(&q, &k, cos, sin, head_dim, rotary_dim)?
+                rotary_embedding_from_tables(&q, &k, cos, sin, head_dim, rotary_dim)
+                    .context("gqa paged rope tables")?
             } else {
-                rotary_embedding_from_tensor(&q, &k, positions, head_dim, rotary_dim, inv_freq)?
+                rotary_embedding_from_tensor(&q, &k, positions, head_dim, rotary_dim, inv_freq)
+                    .context("gqa paged rope tensor")?
             };
             finish_full_attn_stage_profile(
                 profile_device,
@@ -20606,7 +20649,8 @@ fn gqa_attention_paged_with_rope_tables(
         (q, k, gate)
     };
 
-    let v = reshape_hole0_4(&v, seq_len, num_kv_heads, head_dim)?;
+    let v = reshape_hole0_4(&v, seq_len, num_kv_heads, head_dim)
+        .context("gqa paged v reshape")?;
 
     // Keep the cache-native token-major K/V views for paged writes. Attention
     // still wants head-major tensors, but the cache pool stores
@@ -20622,7 +20666,11 @@ fn gqa_attention_paged_with_rope_tables(
     let q = {
         let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
         kiln_nvtx::range!(c"kiln/attn/qkv_transpose");
-        let q = q.transpose(1, 2)?.contiguous()?;
+        let q = q
+            .transpose(1, 2)
+            .context("gqa paged q transpose view")?
+            .contiguous()
+            .context("gqa paged q transpose contiguous")?;
         finish_full_attn_stage_profile(
             profile_device,
             profile_context,
@@ -34979,6 +35027,14 @@ mod tests {
             43_814
         ));
         assert!(!streaming_prefill_default_for(
+            StreamingPrefillDeviceKind::Rocm,
+            STREAMING_PREFILL_ROCM_DEFAULT_THRESHOLD - 1
+        ));
+        assert!(streaming_prefill_default_for(
+            StreamingPrefillDeviceKind::Rocm,
+            STREAMING_PREFILL_ROCM_DEFAULT_THRESHOLD
+        ));
+        assert!(!streaming_prefill_default_for(
             StreamingPrefillDeviceKind::Metal,
             STREAMING_PREFILL_METAL_DEFAULT_THRESHOLD - 1
         ));
@@ -34998,6 +35054,10 @@ mod tests {
         assert_eq!(
             streaming_tile_tokens_for(&Device::Cpu),
             STREAMING_PREFILL_DEFAULT_TILE
+        );
+        assert_eq!(
+            streaming_tile_tokens_for(&Device::Rocm(0)),
+            STREAMING_PREFILL_ROCM_DEFAULT_TILE
         );
         assert!(streaming_last_token_lm_head(), "default must be true");
 

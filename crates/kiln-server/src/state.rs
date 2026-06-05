@@ -36,6 +36,7 @@ const MIN_AUTO_KV_BLOCKS: usize = 64;
 const METAL_AUTO_MAX_KV_BLOCKS_LOW_MEM: usize = 512; // 8K tokens at block_size=16.
 const METAL_AUTO_MAX_KV_BLOCKS_MID_MEM: usize = 1024; // 16K tokens at block_size=16.
 const METAL_AUTO_MAX_KV_BLOCKS_HIGH_MEM: usize = 2048; // 32K tokens at block_size=16.
+const ROCM_AUTO_MAX_KV_BLOCKS: usize = 4096; // 262K tokens at block_size=64.
 const DETERMINISTIC_COMPLETION_CACHE_CAPACITY: usize = 128;
 const DETERMINISTIC_CHAT_REQUEST_CACHE_CAPACITY: usize = 128;
 const DETERMINISTIC_CHAT_CHOICES_CACHE_CAPACITY: usize = 64;
@@ -1643,6 +1644,7 @@ impl AppState {
         // startup doesn't repeat the same probe/logging path.
         let vram_info = kiln_memory::vram::detect_vram();
         let is_metal = is_metal_device(&device_kt);
+        let is_rocm = matches!(device_kt, kiln_tensor::Device::Rocm(_));
 
         // Total AND used come from the SAME live, all-process driver snapshot
         // (VRAM+GTT on AMD, nvidia-smi on NVIDIA) so they're mutually consistent
@@ -1783,6 +1785,7 @@ impl AppState {
                 model_config.max_position_embeddings,
                 block_size,
                 is_metal,
+                is_rocm,
             );
             // Additionally clamp so the KV pool fits within the governor's LIVE
             // available budget = free − floor − soft reservations. This is the
@@ -1982,6 +1985,7 @@ impl AppState {
                         block_size,
                         model_config.max_position_embeddings,
                         is_metal,
+                        is_rocm,
                     );
                     let msg = format_oom_remediation_message(
                         &failure,
@@ -2358,6 +2362,7 @@ fn auto_num_blocks_for_fraction(
     max_position_embeddings: usize,
     block_size: usize,
     is_metal: bool,
+    is_rocm: bool,
 ) -> usize {
     if total_vram > 0 && bytes_per_block > 0 {
         let available_for_kv =
@@ -2368,6 +2373,7 @@ fn auto_num_blocks_for_fraction(
             max_position_embeddings,
             block_size,
             is_metal,
+            is_rocm,
             total_vram,
         )
     } else {
@@ -2377,6 +2383,7 @@ fn auto_num_blocks_for_fraction(
             max_position_embeddings,
             block_size,
             is_metal,
+            is_rocm,
             total_vram,
         )
     }
@@ -2387,12 +2394,19 @@ fn cap_auto_num_blocks(
     max_position_embeddings: usize,
     block_size: usize,
     is_metal: bool,
+    is_rocm: bool,
     total_vram_bytes: u64,
 ) -> usize {
     // On Metal (unified memory), an eagerly-zeroed KV cache larger than the
     // model context can dominate memory pressure on the rest of the system,
     // so we keep the historical "≤ one full context, further capped by
     // detected memory tier" behavior.
+    //
+    // ROCm's HIP allocator can abort the process on later long-prefill scratch
+    // OOMs instead of returning a catchable allocation error. Keep the default
+    // KV pool to one Qwen3.5-class full-context pool so long prefill has
+    // workspace headroom; explicit `memory.num_blocks` / `KILN_NUM_BLOCKS`
+    // still opts into larger pools for operators who want them.
     //
     // On CUDA / CPU, memory-aware sizing already drove `raw_blocks` from the
     // available VRAM × `inference_memory_fraction` budget. Capping again at
@@ -2407,6 +2421,11 @@ fn cap_auto_num_blocks(
             .div_ceil(block_size)
             .max(MIN_AUTO_KV_BLOCKS);
         model_cap_blocks.min(metal_auto_max_kv_blocks(total_vram_bytes))
+    } else if is_rocm {
+        let model_cap_blocks = max_position_embeddings
+            .div_ceil(block_size)
+            .max(MIN_AUTO_KV_BLOCKS);
+        model_cap_blocks.min(ROCM_AUTO_MAX_KV_BLOCKS)
     } else {
         usize::MAX
     };
@@ -2606,6 +2625,7 @@ fn suggested_emergency_num_blocks(
     block_size: usize,
     max_position_embeddings: usize,
     is_metal: bool,
+    is_rocm: bool,
 ) -> usize {
     if total_vram == 0 || bytes_per_block == 0 {
         // No VRAM signal — fall back to one model context worth of blocks.
@@ -2622,6 +2642,7 @@ fn suggested_emergency_num_blocks(
         max_position_embeddings,
         block_size,
         is_metal,
+        is_rocm,
         total_vram,
     )
 }
@@ -3499,6 +3520,7 @@ mod tests {
             262_144,
             DEFAULT_BLOCK_SIZE,
             false,
+            false,
         );
         let post_load_blocks = auto_num_blocks_for_fraction(
             total,
@@ -3507,6 +3529,7 @@ mod tests {
             0.7,
             262_144,
             DEFAULT_BLOCK_SIZE,
+            false,
             false,
         );
 
@@ -3533,6 +3556,7 @@ mod tests {
                 262_144,
                 DEFAULT_BLOCK_SIZE,
                 false, // is_metal
+                false, // is_rocm
                 48 * 1024 * 1024 * 1024,
             ),
             50_000
@@ -3544,6 +3568,7 @@ mod tests {
                 4_096,
                 262_144,
                 DEFAULT_BLOCK_SIZE,
+                false,
                 false,
                 10 * 1024 * 1024 * 1024,
             ),
@@ -3557,9 +3582,25 @@ mod tests {
                 262_144,
                 DEFAULT_BLOCK_SIZE,
                 false,
+                false,
                 80 * 1024 * 1024 * 1024,
             ),
             65_000
+        );
+    }
+
+    #[test]
+    fn test_auto_num_blocks_caps_rocm_defaults_to_context_pool() {
+        assert_eq!(
+            cap_auto_num_blocks(
+                50_000,
+                262_144,
+                DEFAULT_BLOCK_SIZE,
+                false,
+                true,
+                120 * 1024 * 1024 * 1024,
+            ),
+            ROCM_AUTO_MAX_KV_BLOCKS
         );
     }
 
@@ -3575,6 +3616,7 @@ mod tests {
                 262_144,
                 DEFAULT_BLOCK_SIZE,
                 true,
+                false,
                 10 * 1024 * 1024 * 1024,
             ),
             METAL_AUTO_MAX_KV_BLOCKS_LOW_MEM
@@ -3585,6 +3627,7 @@ mod tests {
                 262_144,
                 DEFAULT_BLOCK_SIZE,
                 true,
+                false,
                 16 * 1024 * 1024 * 1024,
             ),
             METAL_AUTO_MAX_KV_BLOCKS_MID_MEM
@@ -3595,6 +3638,7 @@ mod tests {
                 262_144,
                 DEFAULT_BLOCK_SIZE,
                 true,
+                false,
                 32 * 1024 * 1024 * 1024,
             ),
             METAL_AUTO_MAX_KV_BLOCKS_HIGH_MEM
@@ -3609,6 +3653,7 @@ mod tests {
                 262_144,
                 DEFAULT_BLOCK_SIZE,
                 true,
+                false,
                 10 * 1024 * 1024 * 1024,
             ),
             512
@@ -3619,6 +3664,7 @@ mod tests {
                 262_144,
                 DEFAULT_BLOCK_SIZE,
                 true,
+                false,
                 10 * 1024 * 1024 * 1024,
             ),
             MIN_AUTO_KV_BLOCKS
@@ -3808,6 +3854,7 @@ mod tests {
             DEFAULT_BLOCK_SIZE,
             262_144,
             false, // CUDA path (Metal cap doesn't apply)
+            false,
         );
         let expected_kv_bytes = ((total - model) as f64 * 0.30) as u64;
         let expected_blocks = (expected_kv_bytes / bytes_per_block) as usize;
@@ -3826,6 +3873,7 @@ mod tests {
             0,
             DEFAULT_BLOCK_SIZE,
             262_144,
+            false,
             false,
         );
         let expected = (262_144_usize).div_ceil(DEFAULT_BLOCK_SIZE);

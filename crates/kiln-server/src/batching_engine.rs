@@ -473,13 +473,15 @@ impl DecodeForward for RealDecodeForward {
 
     fn prepare_request(&self, req: &EngineRequest) -> Result<DecodeSlot> {
         let _gpu_guard = gpu_coordination_read_guard(&self.gpu_lock);
-        let hit = {
+        let (hit, prefix_cache_enabled) = {
             let mut cache = self.prefix_cache_guard()?;
-            if cache.is_enabled() {
+            let enabled = cache.is_enabled();
+            let hit = if enabled {
                 cache.lookup(&req.adapter, &req.prompt_tokens)?
             } else {
                 None
-            }
+            };
+            (hit, enabled)
         };
         let hit_entry_id = hit.as_ref().map(|hit| hit.entry_id);
         let cached_prefix = hit.map(|hit| PagedPrefixReuse {
@@ -497,6 +499,7 @@ impl DecodeForward for RealDecodeForward {
                 self.block_manager.as_ref(),
                 self.paged_cache.as_ref(),
                 cached_prefix,
+                prefix_cache_enabled,
                 Some(&req.cancel),
             );
 

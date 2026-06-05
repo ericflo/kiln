@@ -61,9 +61,7 @@ impl BroadcastOp {
             );
         }
         let mut bf = vec![1usize; in_shape.len()];
-        for (axis, (&in_d, &out_d)) in
-            in_shape.iter().zip(self.target_shape.iter()).enumerate()
-        {
+        for (axis, (&in_d, &out_d)) in in_shape.iter().zip(self.target_shape.iter()).enumerate() {
             if in_d == out_d {
                 bf[axis] = 1;
             } else if in_d == 1 {
@@ -81,8 +79,9 @@ impl BroadcastOp {
 
     /// Compute the flat-output-index → flat-input-index gather map.
     ///
-    /// Used by both `cpu_fwd` (for byte copies) and `cuda_fwd` (as
-    /// indices into a flattened CUDA buffer). Length = target_total.
+    /// Used by `cuda_fwd` as indices into a flattened CUDA buffer.
+    /// Length = target_total.
+    #[cfg(feature = "cuda")]
     fn gather_indices(&self, in_shape: &[usize]) -> Vec<u32> {
         let rank = in_shape.len();
         let target_total: usize = self.target_shape.iter().product();
@@ -108,36 +107,6 @@ impl BroadcastOp {
         }
         indices
     }
-}
-
-/// Resolve the device-resident gather-index buffer for a broadcast, caching by
-/// `(in_shape, target_shape, device)`. The index map is purely a function of the
-/// shapes, so every decode step for the same broadcast reuses one device buffer
-/// and pays no host round-trip after the first occurrence. `build` produces the
-/// CPU `Vec<u32>` only on a cache miss.
-#[cfg(feature = "rocm")]
-fn rocm_cached_gather_indices(
-    in_shape: &[usize],
-    target_shape: &[usize],
-    device_index: usize,
-    build: impl FnOnce() -> Vec<u32>,
-) -> Result<Tensor> {
-    use std::sync::{Mutex, OnceLock};
-    type Key = (Vec<usize>, Vec<usize>, usize);
-    static CACHE: OnceLock<Mutex<std::collections::HashMap<Key, Tensor>>> = OnceLock::new();
-    let key: Key = (in_shape.to_vec(), target_shape.to_vec(), device_index);
-    let cache = CACHE.get_or_init(|| Mutex::new(std::collections::HashMap::new()));
-    if let Some(t) = cache.lock().unwrap().get(&key) {
-        return Ok(t.clone());
-    }
-    let indices_host = build();
-    let indices_cpu = Tensor::from_slice(&indices_host, vec![indices_host.len()])?;
-    let indices_rocm = crate::host_to_rocm_copy_ctx(&indices_cpu, device_index)?;
-    cache
-        .lock()
-        .unwrap()
-        .insert(key, indices_rocm.clone());
-    Ok(indices_rocm)
 }
 
 impl DeviceOp1 for BroadcastOp {
@@ -259,12 +228,9 @@ impl DeviceOp1 for BroadcastOp {
 
     #[cfg(feature = "rocm")]
     fn rocm_fwd(&self, x: &Tensor) -> Result<Option<Tensor>> {
-        // Mirror of cuda_fwd: gather-via-`rocm_index_select_dim0` on a
-        // flattened view, keeping the broadcast on-device. Without this every
-        // broadcast (bias/residual/rope/gate expansion) host-staged: D2H the
-        // input, CPU-expand, H2D the (larger) output — the #1 host round-trip
-        // in the prefill tally. The only host touch left is the tiny gather-
-        // index buffer (target_total u32s), shipped once per call.
+        // ROCm uses a direct strided broadcast kernel. The older flattened
+        // index_select path built one gather id per output element, which is
+        // fragile and expensive for long-context RoPE/gate broadcasts.
         let in_shape = x.shape();
         let _bf = self.broadcast_factors(in_shape)?;
         let dtype = x.dtype();
@@ -278,29 +244,13 @@ impl DeviceOp1 for BroadcastOp {
         if in_shape == self.target_shape.as_slice() {
             return Ok(Some(x.reshape(x.shape().to_vec())?));
         }
-        let target_total: usize = self.target_shape.iter().product();
-        if target_total == 0 {
+        if self.target_shape.contains(&0) {
             return Ok(None);
         }
-        let in_total: usize = in_shape.iter().product();
-        let device_index = match x.device() {
-            crate::Device::Rocm(i) => i,
-            _ => return Ok(None),
-        };
-        // Flatten to 1D and gather. The gather-index map depends only on
-        // (in_shape, target_shape, device) — never the data — so it is
-        // identical on every decode step. Cache the *device* index buffer
-        // keyed by those, so steady-state generation does ZERO host touch
-        // for broadcasts (the H2D ship happens once, on the first occurrence).
-        let x_flat = x.reshape(vec![in_total])?;
-        let indices_rocm = rocm_cached_gather_indices(
-            in_shape,
-            &self.target_shape,
-            device_index,
-            || self.gather_indices(in_shape),
-        )?;
-        let gathered = crate::rocm_index_select_dim0(&x_flat, &indices_rocm)?;
-        Ok(Some(gathered.reshape(self.target_shape.clone())?))
+        if !matches!(x.device(), crate::Device::Rocm(_)) {
+            return Ok(None);
+        }
+        Ok(Some(crate::rocm_broadcast_to(x, &self.target_shape)?))
     }
 
     #[cfg(feature = "metal")]
