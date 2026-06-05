@@ -21,12 +21,18 @@ use kiln_core::token::TokenId;
 use kiln_core::tokenizer::{ChatMessage, KilnTokenizer};
 use kiln_memory::vram::{detect_used_vram_bytes, detect_vram};
 use kiln_model::ModelRunner;
+use kiln_model::PagedKvCacheKt;
 use kiln_model::backend as runtime_backend;
 use kiln_model::forward::{
-    GpuWeights, LinearAttentionState, model_forward_kt,
-    model_forward_paged_last_token, model_forward_paged_last_token_greedy,
-    model_forward_paged_last_token_with_last_hidden, model_forward_paged_next_token_greedy,
-    model_forward_paged_streaming, model_forward_paged_streaming_last_token_with_last_hidden,
+    GpuWeights,
+    LinearAttentionState,
+    model_forward_kt,
+    model_forward_paged_last_token,
+    model_forward_paged_last_token_greedy,
+    model_forward_paged_last_token_with_last_hidden,
+    model_forward_paged_next_token_greedy,
+    model_forward_paged_streaming,
+    model_forward_paged_streaming_last_token_with_last_hidden,
     // Phase 7 #1082: kt twin entry point + allocator stub for the first
     // end-to-end PagedKvCacheKt production wiring (latency bench decode
     // loop). Both are CUDA-only and only kick in when the env gate
@@ -34,7 +40,6 @@ use kiln_model::forward::{
     streaming_prefill_enabled_for,
 };
 use kiln_model::kv_cache::KvCache;
-use kiln_model::PagedKvCacheKt;
 use kiln_model::sampling::greedy_sample;
 use kiln_model::speculative::{
     SpeculativeConfig, speculative_decode_step, speculative_decode_step_paged_greedy,
@@ -142,14 +147,11 @@ fn device_is_metal(device: &kiln_tensor::Device) -> bool {
 
 /// Greedy-sample a single token from kt logits.
 ///
-/// The paged forward entry points (`model_forward_paged_last_token`,
-/// `model_forward_paged_streaming`, `model_forward_paged_with_kt`) now
-/// return kt `Tensor`s, but `kiln_model::sampling::greedy_sample` still
-/// consumes a candle `Tensor`. Mirror kiln-model's crate-private
-/// `kt_logits_to_candle`: CUDA-only copy-bridge then candle greedy sample;
-/// the non-CUDA arm errors at runtime since the bench decode path is
-/// CUDA-only in practice (issue #1082, candle removal).
-#[cfg(feature = "cuda")]
+/// The paged forward entry points now return kt `Tensor`s, and the sampler is
+/// kt-native across GPU backends. Keep this helper as the bench-local
+/// contiguity shim, but do not gate it to CUDA: ROCm/Vulkan/Metal latency
+/// benches need the same scalar argmax path when the backend does not expose a
+/// fused LM-head argmax.
 fn greedy_sample_kt(logits: &kiln_tensor::Tensor) -> Result<u32> {
     let contig;
     let logits = if logits.is_contiguous() {
@@ -158,13 +160,7 @@ fn greedy_sample_kt(logits: &kiln_tensor::Tensor) -> Result<u32> {
         contig = logits.contiguous()?;
         &contig
     };
-    // #1082: greedy_sample is kt-native — no candle bridge.
     greedy_sample(logits)
-}
-
-#[cfg(not(feature = "cuda"))]
-fn greedy_sample_kt(_logits: &kiln_tensor::Tensor) -> Result<u32> {
-    anyhow::bail!("bench greedy_sample_kt requires the `cuda` feature (#1082)")
 }
 
 // (#1082) Deleted `bench_kt_tensor_to_candle`: the MTP bench arm's decode step
@@ -996,8 +992,7 @@ fn bench_latency_paged(
     // prompts use tiled streaming prefill by default; env overrides can force
     // either path.
     let prefill_start = Instant::now();
-    let streaming_prefill =
-        streaming_prefill_enabled_for(&device_kt, actual_prompt_tokens);
+    let streaming_prefill = streaming_prefill_enabled_for(&device_kt, actual_prompt_tokens);
     let mut next_token = if streaming_prefill {
         let logits = model_forward_paged_streaming(
             &*backend,
@@ -2716,9 +2711,8 @@ fn main() -> Result<()> {
         );
     }
 
-    let gpu_weights =
-        GpuWeights::from_model_weights_kt(&model_weights, &model_config, &device_kt)
-            .context("failed to transfer weights to GPU")?;
+    let gpu_weights = GpuWeights::from_model_weights_kt(&model_weights, &model_config, &device_kt)
+        .context("failed to transfer weights to GPU")?;
     drop(model_weights); // Free CPU memory
 
     let load_time = load_start.elapsed();

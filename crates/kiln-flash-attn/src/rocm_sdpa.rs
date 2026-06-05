@@ -81,20 +81,7 @@ fn gqa_expand_heads(
         return rocm_contig(kv);
     }
     let _ = device;
-    // Expand [b, sk, hk, d] -> [b, sk, h, d] by repeating each kv-head `group`
-    // times, via unsqueeze+expand+reshape — IDENTICAL to the contiguous path's
-    // GQA expand in forward.rs::flash_attention_forward. (Was an index_select
-    // over a cached [0,0,1,1,..] index, which is the only thing unique to the
-    // paged path vs the working contiguous path — suspected as the decode
-    // garbage source.) out head `kv*group + g` maps to kv head `kv`.
-    let s = kv.shape();
-    let (bb, sk, dd) = (s[0], s[1], s[3]);
-    let group = h / hk;
-    let src = rocm_contig(kv)?; // [b, sk, hk, d]
-    let e = map_kt(src.unsqueeze(3))?; // [b, sk, hk, 1, d]
-    let e = map_kt(e.expand(vec![bb, sk, hk, group, dd]))?; // [b, sk, hk, group, d]
-    let e = rocm_contig(&e)?;
-    map_kt(e.reshape(vec![bb, sk, h, dd])) // [b, sk, h, d]
+    map_kt(kiln_tensor::rocm_gqa_repeat_heads(kv, h))
 }
 
 /// Build the additive-causal U8 mask `[b*h, sq, sk]` on host and upload to ROCm
@@ -261,11 +248,26 @@ pub fn flash_attn_fwd_rocm(
         .find(|d| !d.is_cpu())
         .unwrap_or_else(|| q.device());
     let qc;
-    let q = if q.device() != dev { qc = map_kt(q.to_device(dev))?; &qc } else { q };
+    let q = if q.device() != dev {
+        qc = map_kt(q.to_device(dev))?;
+        &qc
+    } else {
+        q
+    };
     let kc;
-    let k = if k.device() != dev { kc = map_kt(k.to_device(dev))?; &kc } else { k };
+    let k = if k.device() != dev {
+        kc = map_kt(k.to_device(dev))?;
+        &kc
+    } else {
+        k
+    };
     let vc;
-    let v = if v.device() != dev { vc = map_kt(v.to_device(dev))?; &vc } else { v };
+    let v = if v.device() != dev {
+        vc = map_kt(v.to_device(dev))?;
+        &vc
+    } else {
+        v
+    };
 
     let (b, sq, h, d) = (q.shape()[0], q.shape()[1], q.shape()[2], q.shape()[3]);
     let (sk, hk) = (k.shape()[1], k.shape()[2]);
@@ -283,8 +285,8 @@ pub fn flash_attn_fwd_rocm(
 /// Physical slot for logical position `t` of sequence `b`:
 ///   `block_table[b, t / page_block_size] * page_block_size + t % page_block_size`.
 fn paged_gather(
-    pool: &KtTensor,         // [total_slots, hk, d]
-    block_table: &KtTensor,  // device U32 [b, max_blocks_per_seq]
+    pool: &KtTensor,        // [total_slots, hk, d]
+    block_table: &KtTensor, // device U32 [b, max_blocks_per_seq]
     b: usize,
     seqlen_k: usize,
     max_blocks_per_seq: usize,
@@ -293,20 +295,22 @@ fn paged_gather(
     d: usize,
     _device: KtDevice,
 ) -> Result<KtTensor, FlashAttnError> {
-    // Build the flat physical-slot gather index [b*seqlen_k] ON-DEVICE from the
-    // device-resident block_table (no D2H, no host loop, no H2D). The kernel is
-    // bit-identical to the former host loop.
-    let idx_t = map_kt(kiln_tensor::rocm_paged_gather_index(
+    let gathered = map_kt(kiln_tensor::rocm_paged_gather_rows(
+        pool,
         block_table,
         b,
         seqlen_k,
         max_blocks_per_seq,
         page_block_size,
     ))?;
-    let pool_c = rocm_contig(pool)?;
-    // gather rows along axis 0 -> [b*seqlen_k, hk, d], then reshape.
-    let gathered = map_kt(kiln_tensor::rocm_index_select_dim0(&pool_c, &idx_t))?;
-    map_kt(gathered.reshape(vec![b, seqlen_k, hk, d]))
+    if gathered.shape() != [b, seqlen_k, hk, d] {
+        return Err(FlashAttnError::Msg(format!(
+            "rocm paged gather shape mismatch: got {:?}, expected {:?}",
+            gathered.shape(),
+            [b, seqlen_k, hk, d]
+        )));
+    }
+    Ok(gathered)
 }
 
 /// If the gathered KV is U8 (FP8 E4M3FN pool slots), dequantize to BF16 on-device
@@ -353,17 +357,43 @@ pub fn flash_attn_paged_decode_rocm(
     // block_table (U32 [b, blocks]) stays on-device; the gather index is built
     // on-GPU by paged_gather (no host round-trip).
     let k_gathered = paged_gather(
-        k_pool, block_table, b, seqlen_k, max_blocks_per_seq, page_block_size, hk, d, device,
+        k_pool,
+        block_table,
+        b,
+        seqlen_k,
+        max_blocks_per_seq,
+        page_block_size,
+        hk,
+        d,
+        device,
     )?; // [b, seqlen_k, hk, d]
     let v_gathered = paged_gather(
-        v_pool, block_table, b, seqlen_k, max_blocks_per_seq, page_block_size, hk, d, device,
+        v_pool,
+        block_table,
+        b,
+        seqlen_k,
+        max_blocks_per_seq,
+        page_block_size,
+        hk,
+        d,
+        device,
     )?; // [b, seqlen_k, hk, d]
     // FP8 pools gather as U8 (E4M3FN); decode to BF16 before the flash math.
     let k_gathered = dequant_gathered_if_fp8(k_gathered)?;
     let v_gathered = dequant_gathered_if_fp8(v_gathered)?;
 
     let (out, _lse) = sdpa_forward(
-        q, &k_gathered, &v_gathered, b, sq, seqlen_k, h, hk, d, softmax_scale, causal,
+        q,
+        &k_gathered,
+        &v_gathered,
+        b,
+        sq,
+        seqlen_k,
+        h,
+        hk,
+        d,
+        softmax_scale,
+        causal,
     )?;
     Ok(out)
 }
@@ -392,10 +422,26 @@ pub fn flash_attn_paged_decode_dyn_seqlen_rocm(
     // index on-GPU, and sdpa_forward_dyn_tail builds the tail mask on-GPU from
     // the device seqused_k (no D2H/H2D round-trip per attention layer).
     let k_gathered = paged_gather(
-        k_pool, block_table, b, max_seqlen_k, max_blocks_per_seq, page_block_size, hk, d, device,
+        k_pool,
+        block_table,
+        b,
+        max_seqlen_k,
+        max_blocks_per_seq,
+        page_block_size,
+        hk,
+        d,
+        device,
     )?; // [b, max_seqlen_k, hk, d]
     let v_gathered = paged_gather(
-        v_pool, block_table, b, max_seqlen_k, max_blocks_per_seq, page_block_size, hk, d, device,
+        v_pool,
+        block_table,
+        b,
+        max_seqlen_k,
+        max_blocks_per_seq,
+        page_block_size,
+        hk,
+        d,
+        device,
     )?;
     // FP8 pools gather as U8 (E4M3FN); decode to BF16 before the flash math.
     let k_gathered = dequant_gathered_if_fp8(k_gathered)?;
@@ -405,7 +451,17 @@ pub fn flash_attn_paged_decode_dyn_seqlen_rocm(
     // the K contribution beyond seqused_k. We fold the tail mask into the scores
     // through a dedicated mask path: compute scores ourselves so we can mask.
     sdpa_forward_dyn_tail(
-        q, &k_gathered, &v_gathered, b, max_seqlen_k, h, hk, d, softmax_scale, causal, seqused_k,
+        q,
+        &k_gathered,
+        &v_gathered,
+        b,
+        max_seqlen_k,
+        h,
+        hk,
+        d,
+        softmax_scale,
+        causal,
+        seqused_k,
     )
 }
 
@@ -629,8 +685,20 @@ pub fn paged_kv_write_token_major_bf16_batch_slot_rocm(
     for (r, &slot) in slot_vec.iter().enumerate().take(batch) {
         let src_off = (r * row_elems * bpe) as u64;
         let dst_off = (slot as usize * row_elems * bpe) as u64;
-        rocm_d2d_copy(kp_dst + dst_off, k_src_base + src_off, row_bytes, stream, dev_idx)?;
-        rocm_d2d_copy(vp_dst + dst_off, v_src_base + src_off, row_bytes, stream, dev_idx)?;
+        rocm_d2d_copy(
+            kp_dst + dst_off,
+            k_src_base + src_off,
+            row_bytes,
+            stream,
+            dev_idx,
+        )?;
+        rocm_d2d_copy(
+            vp_dst + dst_off,
+            v_src_base + src_off,
+            row_bytes,
+            stream,
+            dev_idx,
+        )?;
     }
     Ok(())
 }

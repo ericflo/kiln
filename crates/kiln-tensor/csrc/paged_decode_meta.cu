@@ -62,6 +62,94 @@ __global__ void kiln_paged_tail_mask_kernel(const uint32_t* __restrict__ seqused
                                                        : static_cast<uint8_t>(0);
 }
 
+// Directly gather token-major paged KV rows from
+//   pool[pool_rows, hk, d]
+// into
+//   out[b, seqlen_k, hk, d]
+// using block_table[b, max_blocks_per_seq]. One thread copies one logical
+// element (1/2/4 bytes depending on dtype). Invalid physical rows are zeroed,
+// matching index_select_dim0's out-of-range behavior without requiring a
+// separate zero-fill.
+__global__ void kiln_paged_gather_rows_kernel(const uint8_t* __restrict__ pool,
+                                              const uint32_t* __restrict__ block_table,
+                                              uint8_t* __restrict__ out,
+                                              int64_t b,
+                                              int64_t seqlen_k,
+                                              int64_t max_blocks_per_seq,
+                                              int64_t page_block_size,
+                                              int64_t hk,
+                                              int64_t d,
+                                              int64_t pool_rows,
+                                              int64_t elem_bytes) {
+    int64_t gid = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    int64_t inner = hk * d;
+    int64_t total = b * seqlen_k * inner;
+    if (gid >= total) return;
+
+    int64_t out_row = gid / inner;
+    int64_t inner_idx = gid % inner;
+    int64_t bi = out_row / seqlen_k;
+    int64_t t = out_row % seqlen_k;
+    int64_t blk = t / page_block_size;
+    int64_t within = t % page_block_size;
+
+    bool valid = blk < max_blocks_per_seq;
+    int64_t phys_row = 0;
+    if (valid) {
+        uint32_t phys_block = block_table[bi * max_blocks_per_seq + blk];
+        phys_row = static_cast<int64_t>(phys_block) * page_block_size + within;
+        valid = phys_row >= 0 && phys_row < pool_rows;
+    }
+
+    uint8_t* dst = out + gid * elem_bytes;
+    if (valid) {
+        const uint8_t* src = pool + (phys_row * inner + inner_idx) * elem_bytes;
+        for (int64_t i = 0; i < elem_bytes; ++i) {
+            dst[i] = src[i];
+        }
+    } else {
+        for (int64_t i = 0; i < elem_bytes; ++i) {
+            dst[i] = 0;
+        }
+    }
+}
+
+// Repeat GQA KV heads:
+//   src[b, sk, hk, d] -> out[b, sk, h, d]
+// where each kv head is repeated `group = h / hk` times. This replaces the
+// generic broadcast materialization path for ROCm SDPA decode; that generic
+// path flattens the output and calls index_select_dim0 with millions of
+// indices at long context.
+__global__ void kiln_gqa_repeat_heads_kernel(const uint8_t* __restrict__ src,
+                                             uint8_t* __restrict__ out,
+                                             int64_t b,
+                                             int64_t sk,
+                                             int64_t hk,
+                                             int64_t h,
+                                             int64_t d,
+                                             int64_t elem_bytes) {
+    int64_t gid = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    int64_t total = b * sk * h * d;
+    if (gid >= total) return;
+
+    int64_t d_i = gid % d;
+    int64_t tmp = gid / d;
+    int64_t h_i = tmp % h;
+    tmp /= h;
+    int64_t sk_i = tmp % sk;
+    int64_t b_i = tmp / sk;
+
+    int64_t group = h / hk;
+    int64_t hk_i = h_i / group;
+    int64_t src_elem = ((b_i * sk + sk_i) * hk + hk_i) * d + d_i;
+
+    const uint8_t* src_ptr = src + src_elem * elem_bytes;
+    uint8_t* dst_ptr = out + gid * elem_bytes;
+    for (int64_t i = 0; i < elem_bytes; ++i) {
+        dst_ptr[i] = src_ptr[i];
+    }
+}
+
 } // namespace
 
 extern "C" int kiln_paged_gather_index_async(const void* block_table_u32,
@@ -82,6 +170,68 @@ extern "C" int kiln_paged_gather_index_async(const void* block_table_u32,
         static_cast<const uint32_t*>(block_table_u32),
         static_cast<uint32_t*>(out_idx_u32),
         b, seqlen_k, max_blocks_per_seq, page_block_size);
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) return 100 + static_cast<int>(err);
+    return 0;
+}
+
+extern "C" int kiln_gqa_repeat_heads_async(const void* src,
+                                           void* out,
+                                           int64_t b,
+                                           int64_t sk,
+                                           int64_t hk,
+                                           int64_t h,
+                                           int64_t d,
+                                           int64_t elem_bytes,
+                                           cudaStream_t stream) {
+    if (b < 0 || sk < 0 || hk <= 0 || h <= 0 || d < 0) return 1;
+    if (h % hk != 0) return 2;
+    if (!(elem_bytes == 1 || elem_bytes == 2 || elem_bytes == 4 || elem_bytes == 8)) return 3;
+    int64_t total = b * sk * h * d;
+    if (total == 0) return 0;
+    int64_t blocks_i64 = (total + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    if (blocks_i64 > (int64_t)2147483647) return 4;
+    int blocks = static_cast<int>(blocks_i64);
+
+    kiln_gqa_repeat_heads_kernel<<<blocks, BLOCK_SIZE, 0, stream>>>(
+        static_cast<const uint8_t*>(src),
+        static_cast<uint8_t*>(out),
+        b, sk, hk, h, d, elem_bytes);
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) return 100 + static_cast<int>(err);
+    return 0;
+}
+
+extern "C" int kiln_paged_gather_rows_async(const void* pool,
+                                            const void* block_table_u32,
+                                            void* out,
+                                            int64_t b,
+                                            int64_t seqlen_k,
+                                            int64_t max_blocks_per_seq,
+                                            int64_t page_block_size,
+                                            int64_t hk,
+                                            int64_t d,
+                                            int64_t pool_rows,
+                                            int64_t elem_bytes,
+                                            cudaStream_t stream) {
+    if (b < 0 || seqlen_k < 0 || max_blocks_per_seq < 0 || page_block_size <= 0
+        || hk < 0 || d < 0 || pool_rows < 0) {
+        return 1;
+    }
+    if (!(elem_bytes == 1 || elem_bytes == 2 || elem_bytes == 4 || elem_bytes == 8)) return 2;
+    int64_t total = b * seqlen_k * hk * d;
+    if (total == 0) return 0;
+    int64_t blocks_i64 = (total + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    if (blocks_i64 > (int64_t)2147483647) return 3;
+    int blocks = static_cast<int>(blocks_i64);
+
+    kiln_paged_gather_rows_kernel<<<blocks, BLOCK_SIZE, 0, stream>>>(
+        static_cast<const uint8_t*>(pool),
+        static_cast<const uint32_t*>(block_table_u32),
+        static_cast<uint8_t*>(out),
+        b, seqlen_k, max_blocks_per_seq, page_block_size, hk, d, pool_rows, elem_bytes);
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) return 100 + static_cast<int>(err);
