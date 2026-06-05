@@ -1344,11 +1344,11 @@ extern "C" int kiln_paged_attn_decode_bf16_gqa4_async(const void* q_bf16,
     if (total_group_rows > (int64_t)2147483647) return 6;
 
     const bool use_d256_parallel =
-        std::getenv("KILN_ROCM_GQA_D256_PARALLEL") != nullptr
-        && std::getenv("KILN_DISABLE_ROCM_GQA_D256_PARALLEL") == nullptr
+        std::getenv("KILN_DISABLE_ROCM_GQA_D256_PARALLEL") == nullptr
         && group == 4 && d == 256;
     const bool use_d128_parallel =
-        std::getenv("KILN_ROCM_GQA_D128_PARALLEL") != nullptr && group == 4 && d == 128;
+        std::getenv("KILN_DISABLE_ROCM_GQA_D128_PARALLEL") == nullptr
+        && group == 4 && d == 128;
     if (use_d256_parallel) {
         kiln_paged_attn_decode_bf16_gqa4_d256_kernel<<<static_cast<int>(total_group_rows), 1024, 0, stream>>>(
             static_cast<const __nv_bfloat16*>(q_bf16),
@@ -1420,11 +1420,11 @@ extern "C" int kiln_paged_attn_decode_bf16_gqa4_split_async(const void* q_bf16,
     if (total_group_partials > (int64_t)2147483647) return 7;
 
     const bool use_d256_parallel =
-        std::getenv("KILN_ROCM_GQA_D256_PARALLEL") != nullptr
-        && std::getenv("KILN_DISABLE_ROCM_GQA_D256_PARALLEL") == nullptr
+        std::getenv("KILN_DISABLE_ROCM_GQA_D256_PARALLEL") == nullptr
         && group == 4 && d == 256;
     const bool use_d128_parallel =
-        std::getenv("KILN_ROCM_GQA_D128_PARALLEL") != nullptr && group == 4 && d == 128;
+        std::getenv("KILN_DISABLE_ROCM_GQA_D128_PARALLEL") == nullptr
+        && group == 4 && d == 128;
     if (use_d256_parallel) {
         kiln_paged_attn_decode_bf16_gqa4_d256_split_kernel<<<static_cast<int>(total_group_partials), 1024, 0, stream>>>(
             static_cast<const __nv_bfloat16*>(q_bf16),
