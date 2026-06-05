@@ -95,7 +95,9 @@ use crate::cd_types::Device;
     feature = "vulkan",
     feature = "rocm"
 ))]
-use crate::trainer::{GrpoLossParams, grpo_loss, token_log_probs};
+use crate::trainer::{
+    GrpoLossParams, grpo_loss, selected_logits_from_chunk_sparse, token_log_probs,
+};
 #[cfg(any(
     feature = "cuda",
     feature = "metal",
@@ -502,19 +504,15 @@ fn selected_log_probs_from_normed_hidden_chunked_state_kt(
         running_max = Some(new_max);
         running_sumexp = Some(new_sumexp);
 
-        let mut one_hot_data = vec![0.0f32; num_active * chunk_len];
-        for (row_idx, &label) in active_labels.iter().enumerate() {
-            let label = label as usize;
-            if label >= chunk_start && label < chunk_end {
-                one_hot_data[row_idx * chunk_len + (label - chunk_start)] = 1.0;
-            } else if label >= vocab_size {
-                anyhow::bail!(
-                    "selected_log_probs_from_normed_hidden_chunked_kt: label {label} outside vocab size {vocab_size}"
-                );
-            }
-        }
-        let one_hot = KtTensor::from_vec_on(*device, one_hot_data, vec![num_active, chunk_len])?;
-        let chunk_correct = (&logits_chunk * &one_hot)?.sum_keepdim(KtDim::Minus1)?;
+        let chunk_correct = selected_logits_from_chunk_sparse(
+            &logits_chunk,
+            &active_labels,
+            chunk_start,
+            chunk_len,
+            vocab_size,
+            device,
+            "selected_log_probs_from_normed_hidden_chunked_kt",
+        )?;
         correct_logits = Some(match correct_logits.as_ref() {
             Some(prev) => (prev + chunk_correct)?.detach(),
             None => chunk_correct.detach(),

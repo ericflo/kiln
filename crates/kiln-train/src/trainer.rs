@@ -4731,17 +4731,15 @@ fn chunked_log_probs_for_completion(
             running_max = Some(new_max);
             running_sumexp = Some(new_sumexp);
 
-            let mut one_hot_data = vec![0.0f32; n_targets * chunk_len];
-            for (row_idx, &label) in target_ids.iter().enumerate() {
-                let label = label as usize;
-                if label >= chunk_start && label < chunk_end {
-                    one_hot_data[row_idx * chunk_len + (label - chunk_start)] = 1.0;
-                } else if label >= vocab_size {
-                    anyhow::bail!("label {label} is outside vocab size {vocab_size}");
-                }
-            }
-            let one_hot = Tensor::from_vec_on(*device, one_hot_data, vec![n_targets, chunk_len])?;
-            let chunk_correct = (&logits_chunk * &one_hot)?.sum_keepdim(LAST_DIM)?;
+            let chunk_correct = selected_logits_from_chunk_sparse(
+                &logits_chunk,
+                target_ids,
+                chunk_start,
+                chunk_len,
+                vocab_size,
+                device,
+                "chunked_log_probs_for_completion",
+            )?;
             correct_logits = Some(match correct_logits.as_ref() {
                 Some(prev) => (prev + chunk_correct)?.detach(),
                 None => chunk_correct.detach(),
@@ -5729,6 +5727,68 @@ pub(crate) fn token_log_probs(
     Ok(log_probs)
 }
 
+/// Select one logit per row from a chunked `[rows, chunk_len]` logits tile.
+///
+/// This is the chunked analogue of [`token_log_probs`]' flat-index
+/// `index_select`: it avoids materializing a dense `[rows, chunk_len]`
+/// one-hot tensor just to pick sparse target columns. Labels outside this
+/// chunk contribute zero, so summing the returned chunks recovers the selected
+/// full-vocab logits.
+pub(crate) fn selected_logits_from_chunk_sparse(
+    logits_chunk: &Tensor,
+    target_ids: &[u32],
+    chunk_start: usize,
+    chunk_len: usize,
+    vocab_size: usize,
+    device: &Device,
+    caller: &str,
+) -> Result<Tensor> {
+    let num_rows = target_ids.len();
+    let dims = logits_chunk.dims();
+    anyhow::ensure!(
+        dims == [num_rows, chunk_len],
+        "{caller}: logits_chunk shape {dims:?} != [{num_rows}, {chunk_len}]"
+    );
+
+    let mut row_indices = Vec::new();
+    let mut flat_indices = Vec::new();
+    for (row_idx, &label) in target_ids.iter().enumerate() {
+        let label = label as usize;
+        if label >= vocab_size {
+            anyhow::bail!("{caller}: label {label} is outside vocab size {vocab_size}");
+        }
+        if label >= chunk_start && label < chunk_start + chunk_len {
+            let rel = label - chunk_start;
+            let flat = row_idx
+                .checked_mul(chunk_len)
+                .and_then(|base| base.checked_add(rel))
+                .ok_or_else(|| {
+                    anyhow::anyhow!("{caller}: flat selected-logit index overflow")
+                })?;
+            row_indices.push(u32::try_from(row_idx).with_context(|| {
+                format!("{caller}: row index {row_idx} exceeds u32 range")
+            })?);
+            flat_indices.push(u32::try_from(flat).with_context(|| {
+                format!("{caller}: flat index {flat} exceeds u32 range")
+            })?);
+        }
+    }
+
+    if flat_indices.is_empty() {
+        return Tensor::zeros(vec![num_rows, 1], DType::F32, *device).map_err(Into::into);
+    }
+
+    let n_selected = flat_indices.len();
+    let flat_idx = Tensor::from_vec_on(*device, flat_indices, vec![n_selected])?;
+    let selected = logits_chunk
+        .contiguous()?
+        .flatten_all()?
+        .index_select(&flat_idx, 0)?;
+    let row_idx = Tensor::from_vec_on(*device, row_indices, vec![n_selected])?;
+    let selected_rows = kiln_tensor::ops::scatter_add(&selected, 0, &row_idx, num_rows)?;
+    selected_rows.unsqueeze(1).map_err(Into::into)
+}
+
 /// Compute selected next-token log-probs from post-final-RMSNorm hidden states
 /// without materializing the full `[seq_len, vocab_size]` logits tensor.
 fn selected_log_probs_from_normed_hidden_chunked(
@@ -5781,7 +5841,6 @@ fn selected_log_probs_from_normed_hidden_chunked(
         .iter()
         .map(|&i| input_ids[i as usize + 1])
         .collect();
-    let num_active = active_positions.len();
 
     let hidden_2d = normed_hidden.squeeze(0)?;
     let shift_hidden = hidden_2d.narrow(0, 0, seq_len - 1)?;
@@ -5829,17 +5888,15 @@ fn selected_log_probs_from_normed_hidden_chunked(
             running_max = Some(new_max);
             running_sumexp = Some(new_sumexp);
 
-            let mut one_hot_data = vec![0.0f32; num_active * chunk_len];
-            for (row_idx, &label) in active_labels.iter().enumerate() {
-                let label = label as usize;
-                if label >= chunk_start && label < chunk_end {
-                    one_hot_data[row_idx * chunk_len + (label - chunk_start)] = 1.0;
-                } else if label >= vocab_size {
-                    anyhow::bail!("label {} is outside vocab size {}", label, vocab_size);
-                }
-            }
-            let one_hot = Tensor::from_vec_on(device, one_hot_data, vec![num_active, chunk_len])?;
-            let chunk_correct = (&logits_chunk * &one_hot)?.sum_keepdim(LAST_DIM)?;
+            let chunk_correct = selected_logits_from_chunk_sparse(
+                &logits_chunk,
+                &active_labels,
+                chunk_start,
+                chunk_len,
+                vocab_size,
+                &device,
+                "selected_log_probs_from_normed_hidden_chunked",
+            )?;
             correct_logits = Some(match correct_logits.as_ref() {
                 Some(prev) => (prev + chunk_correct)?.detach(),
                 None => chunk_correct.detach(),
