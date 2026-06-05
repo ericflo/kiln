@@ -73,7 +73,10 @@ use crate::kt_api::{
 };
 
 #[cfg(any(feature = "cuda", feature = "rocm"))]
-use crate::kt_api::opd_top_k_reverse_kl_phase_b_bwd_kt;
+use crate::kt_api::{
+    opd_top_k_reverse_kl_phase_b_bwd_kt,
+    opd_top_k_reverse_kl_phase_b_bwd_scalar_mean_unit_grad_kt,
+};
 
 /// Returns `true` when `(hidden, head_t, top_k)` is inside the kt-tape
 /// Phase-B fused backward envelope. Mirrors the dtype + top_k gate inside
@@ -171,6 +174,10 @@ pub struct CudaOpdTopKReverseKlPhaseBBackward {
     /// `grad_loss` shape on backward and the kernel's per-token
     /// `scale_factor`.
     pub output_mode: OpdLossOutputKt,
+    /// The scalar-mean loss is the tape root and receives the implicit unit
+    /// seed `dL/dL = 1`. CUDA/ROCm can dispatch the dedicated unit-seed fused
+    /// backward in this case; other modes/backends keep the generic seeded path.
+    pub scalar_mean_unit_root_grad: bool,
 }
 
 impl BackwardOp for CudaOpdTopKReverseKlPhaseBBackward {
@@ -218,16 +225,35 @@ impl BackwardOp for CudaOpdTopKReverseKlPhaseBBackward {
             // `opd_top_k_reverse_kl_phase_b_bwd_kt` (it validates
             // grad_loss against output_mode + active_count); we
             // surface a thin contextual wrap on its error.
-            let d_hidden = opd_top_k_reverse_kl_phase_b_bwd_kt(
-                &self.hidden,
-                &self.head_t,
-                &self.teacher_topk_indices,
-                &self.teacher_topk_logprobs,
-                &self.label_mask,
-                grad_output,
-                self.top_k,
-                self.output_mode,
-            )
+            let d_hidden = if self.scalar_mean_unit_root_grad
+                && self.output_mode == OpdLossOutputKt::ScalarMean
+            {
+                if grad_output.element_count() != 1 {
+                    return Err(kiln_tensor::Error::Msg(format!(
+                        "opd kt-tape bwd: unit scalar root expected 1-element grad_output, got shape {:?}",
+                        grad_output.shape()
+                    )));
+                }
+                opd_top_k_reverse_kl_phase_b_bwd_scalar_mean_unit_grad_kt(
+                    &self.hidden,
+                    &self.head_t,
+                    &self.teacher_topk_indices,
+                    &self.teacher_topk_logprobs,
+                    &self.label_mask,
+                    self.top_k,
+                )
+            } else {
+                opd_top_k_reverse_kl_phase_b_bwd_kt(
+                    &self.hidden,
+                    &self.head_t,
+                    &self.teacher_topk_indices,
+                    &self.teacher_topk_logprobs,
+                    &self.label_mask,
+                    grad_output,
+                    self.top_k,
+                    self.output_mode,
+                )
+            }
             .map_err(|e: OpdLossError| {
                 kiln_tensor::Error::Msg(format!("opd kt-tape bwd: kt call: {e}"))
             })?;
@@ -340,6 +366,7 @@ pub fn opd_top_k_reverse_kl_phase_b_per_position_via_kt_tape(
         label_mask: label_mask.to_vec(),
         top_k,
         output_mode: OpdLossOutputKt::PerPosition,
+        scalar_mean_unit_root_grad: false,
     };
     tape.record(
         &per_token,
@@ -371,6 +398,57 @@ pub fn opd_top_k_reverse_kl_phase_b_via_kt_tape(
     label_mask: &[bool],
     top_k: usize,
     tape: &mut Tape,
+) -> KtResult<KtTensor> {
+    opd_top_k_reverse_kl_phase_b_via_kt_tape_impl(
+        hidden,
+        head_t,
+        teacher_topk_indices,
+        teacher_topk_logprobs,
+        label_mask,
+        top_k,
+        tape,
+        false,
+    )
+}
+
+/// kt-tape scalar-mean OPD root with implicit unit upstream seed.
+///
+/// Production OPD uses the returned scalar as the tape root inside
+/// `with_tape_authoritative_scope_kt`, which always seeds `dL/dL = 1`.
+/// CUDA/ROCm route this saved backward through
+/// [`opd_top_k_reverse_kl_phase_b_bwd_scalar_mean_unit_grad_kt`]; Metal and
+/// Vulkan keep the generic composite path so their current behavior is
+/// unchanged.
+pub fn opd_top_k_reverse_kl_phase_b_unit_grad_via_kt_tape(
+    hidden: &KtTensor,
+    head_t: &KtTensor,
+    teacher_topk_indices: &[u32],
+    teacher_topk_logprobs: &[f32],
+    label_mask: &[bool],
+    top_k: usize,
+    tape: &mut Tape,
+) -> KtResult<KtTensor> {
+    opd_top_k_reverse_kl_phase_b_via_kt_tape_impl(
+        hidden,
+        head_t,
+        teacher_topk_indices,
+        teacher_topk_logprobs,
+        label_mask,
+        top_k,
+        tape,
+        true,
+    )
+}
+
+fn opd_top_k_reverse_kl_phase_b_via_kt_tape_impl(
+    hidden: &KtTensor,
+    head_t: &KtTensor,
+    teacher_topk_indices: &[u32],
+    teacher_topk_logprobs: &[f32],
+    label_mask: &[bool],
+    top_k: usize,
+    tape: &mut Tape,
+    scalar_mean_unit_root_grad: bool,
 ) -> KtResult<KtTensor> {
     if !envelope_ok(hidden, head_t, top_k) {
         bail!(
@@ -405,6 +483,7 @@ pub fn opd_top_k_reverse_kl_phase_b_via_kt_tape(
         label_mask: label_mask.to_vec(),
         top_k,
         output_mode: OpdLossOutputKt::ScalarMean,
+        scalar_mean_unit_root_grad,
     };
     tape.record(
         &loss,
@@ -723,6 +802,7 @@ mod tests {
                 label_mask,
                 top_k,
                 output_mode: OpdLossOutputKt::PerPosition,
+                scalar_mean_unit_root_grad: false,
             };
             let grads = bwd.apply(&dy).expect("apply backward");
             assert_eq!(grads.len(), 2);
@@ -761,6 +841,7 @@ mod tests {
                 label_mask,
                 top_k,
                 output_mode: OpdLossOutputKt::ScalarMean,
+                scalar_mean_unit_root_grad: false,
             };
             let grads = bwd.apply(&dy).expect("apply backward scalar mean");
             assert_eq!(grads.len(), 2);

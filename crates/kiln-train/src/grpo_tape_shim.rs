@@ -154,6 +154,44 @@ struct GrpoPgLossFromLogitsBackward {
     /// kt device for the analytic backward (#1082 step 8: `Device` is the kt
     /// `Device` alias; was a candle device bridged per-call).
     device: Device,
+    /// This loss is recorded as the tape-authoritative scalar root, so the
+    /// upstream seed is the implicit unit scalar `dL/dL = 1`. Avoid reading
+    /// that scalar back from the device on the production root path.
+    unit_root_grad: bool,
+}
+
+#[cfg(any(
+    feature = "cuda",
+    feature = "metal",
+    feature = "vulkan",
+    feature = "rocm"
+))]
+fn grpo_scalar_seed_or_unit_kt(
+    grad_output: &kiln_tensor::Tensor,
+    op_name: &str,
+    unit_root_grad: bool,
+) -> kiln_tensor::Result<f64> {
+    if unit_root_grad {
+        if grad_output.element_count() != 1 {
+            return Err(kiln_tensor::Error::Msg(format!(
+                "{op_name}: unit scalar root expected 1-element grad_output, got shape {:?}",
+                grad_output.shape()
+            )));
+        }
+        return Ok(1.0);
+    }
+
+    grad_output
+        .to_dtype(kiln_tensor::DType::F32)
+        .and_then(|t| t.flatten_all())
+        .and_then(|t| t.to_vec1::<f32>())
+        .map_err(|e| kiln_tensor::Error::Msg(format!("{op_name}: grad scalar read: {e}")))?
+        .first()
+        .copied()
+        .ok_or_else(|| {
+            kiln_tensor::Error::Msg(format!("{op_name}: empty grad_output"))
+        })
+        .map(|v| v as f64)
 }
 
 #[cfg(any(
@@ -179,26 +217,11 @@ impl BackwardOp for GrpoPgLossFromLogitsBackward {
         &self,
         grad_output: &kiln_tensor::Tensor,
     ) -> kiln_tensor::Result<Vec<Option<kiln_tensor::Tensor>>> {
-        // The upstream grad is the scalar dL/dloss seed (typically 1.0). Read the
-        // scalar directly off the kt grad (no candle round-trip) so the analytic
-        // backward can scale the `dL/d(logits)` it derives (linearity in the seed).
-        // Mirrors `CrossEntropyFromLogitsKtBackward`.
-        let grad_scalar = grad_output
-            .to_dtype(kiln_tensor::DType::F32)
-            .and_then(|t| t.flatten_all())
-            .and_then(|t| t.to_vec1::<f32>())
-            .map_err(|e| {
-                kiln_tensor::Error::Msg(format!(
-                    "GrpoPgLossFromLogitsBackward: grad scalar read: {e}"
-                ))
-            })?
-            .first()
-            .copied()
-            .ok_or_else(|| {
-                kiln_tensor::Error::Msg(
-                    "GrpoPgLossFromLogitsBackward: empty grad_output".to_string(),
-                )
-            })? as f64;
+        let grad_scalar = grpo_scalar_seed_or_unit_kt(
+            grad_output,
+            "GrpoPgLossFromLogitsBackward",
+            self.unit_root_grad,
+        )?;
 
         // kt-native analytic dL/d(logits) — no candle. The kt logits / ref are
         // saved directly on the struct (#1082 step 8);
@@ -674,6 +697,10 @@ struct GrpoPgLossFromNormedHiddenBackward {
     loss_params: GrpoLossParams,
     device: Device,
     chunk_size: usize,
+    /// This loss is recorded as the tape-authoritative scalar root, so the
+    /// upstream seed is the implicit unit scalar `dL/dL = 1`. Avoid reading
+    /// that scalar back from the device on the production long-context path.
+    unit_root_grad: bool,
 }
 
 #[cfg(any(
@@ -699,22 +726,11 @@ impl BackwardOp for GrpoPgLossFromNormedHiddenBackward {
         &self,
         grad_output: &kiln_tensor::Tensor,
     ) -> kiln_tensor::Result<Vec<Option<kiln_tensor::Tensor>>> {
-        let grad_scalar = grad_output
-            .to_dtype(kiln_tensor::DType::F32)
-            .and_then(|t| t.flatten_all())
-            .and_then(|t| t.to_vec1::<f32>())
-            .map_err(|e| {
-                kiln_tensor::Error::Msg(format!(
-                    "GrpoPgLossFromNormedHiddenBackward: grad scalar read: {e}"
-                ))
-            })?
-            .first()
-            .copied()
-            .ok_or_else(|| {
-                kiln_tensor::Error::Msg(
-                    "GrpoPgLossFromNormedHiddenBackward: empty grad_output".to_string(),
-                )
-            })? as f64;
+        let grad_scalar = grpo_scalar_seed_or_unit_kt(
+            grad_output,
+            "GrpoPgLossFromNormedHiddenBackward",
+            self.unit_root_grad,
+        )?;
 
         let grad_hidden = grpo_pg_loss_from_normed_hidden_grad_with_logsum_kt(
             &self.normed_hidden,
@@ -1285,6 +1301,7 @@ pub(crate) fn try_tape_grpo_pg_loss_from_logits_kt(
                 ref_log_probs: ref_log_probs_kt.clone(),
                 loss_params,
                 device: *device,
+                unit_root_grad: true,
             }) as Box<dyn BackwardOp>,
         );
         Ok(loss_kt)
@@ -1393,6 +1410,7 @@ pub(crate) fn try_tape_grpo_pg_loss_from_normed_hidden_kt(
                 loss_params,
                 device: *device,
                 chunk_size,
+                unit_root_grad: true,
             }) as Box<dyn BackwardOp>,
         );
         Ok(loss_kt)

@@ -76,8 +76,9 @@ use kiln_tensor::{
 };
 
 use crate::kt_api::{
-    fused_linear_cross_entropy_phase_b_backward_kt, fused_linear_cross_entropy_phase_b_kt,
-    FlceError,
+    fused_linear_cross_entropy_phase_b_backward_kt,
+    fused_linear_cross_entropy_phase_b_backward_unit_grad_kt,
+    fused_linear_cross_entropy_phase_b_kt, FlceError,
 };
 
 /// Returns `true` when `(hidden, head_t)` is inside the kt-tape FLCE
@@ -157,6 +158,11 @@ pub struct CudaFlcePhaseBBackward {
     pub label_mask: Vec<bool>,
     /// Vocab chunk size used by the forward pass.
     pub chunk_size: usize,
+    /// The recorded loss is used as the tape root, so the upstream seed is the
+    /// implicit unit scalar `dL/dL = 1`. This keeps the production SFT root off
+    /// the scalar D2H path used by the generic seeded backward while preserving
+    /// the public generic tape entry for composed/non-unit seeds.
+    pub unit_root_grad: bool,
 }
 
 impl BackwardOp for CudaFlcePhaseBBackward {
@@ -190,14 +196,24 @@ impl BackwardOp for CudaFlcePhaseBBackward {
             );
         }
 
-        let dhidden = fused_linear_cross_entropy_phase_b_backward_kt(
-            &self.hidden,
-            &self.head_t,
-            &self.input_ids,
-            &self.label_mask,
-            self.chunk_size,
-            grad_output,
-        )
+        let dhidden = if self.unit_root_grad {
+            fused_linear_cross_entropy_phase_b_backward_unit_grad_kt(
+                &self.hidden,
+                &self.head_t,
+                &self.input_ids,
+                &self.label_mask,
+                self.chunk_size,
+            )
+        } else {
+            fused_linear_cross_entropy_phase_b_backward_kt(
+                &self.hidden,
+                &self.head_t,
+                &self.input_ids,
+                &self.label_mask,
+                self.chunk_size,
+                grad_output,
+            )
+        }
         .map_err(|e: FlceError| {
             kiln_tensor::Error::Msg(format!("flce kt-tape bwd: kt call: {e}"))
         })?;
@@ -260,6 +276,41 @@ pub fn fused_linear_cross_entropy_phase_b_via_kt_tape(
     chunk_size: usize,
     tape: &mut Tape,
 ) -> KtResult<KtTensor> {
+    fused_linear_cross_entropy_phase_b_via_kt_tape_impl(
+        hidden, head_t, input_ids, label_mask, chunk_size, tape, false,
+    )
+}
+
+/// kt-tape FLCE Phase B scalar root with an implicit unit upstream seed.
+///
+/// Production SFT uses the returned scalar as the tape root inside
+/// `with_tape_authoritative_scope_kt`, which always seeds `dL/dL = 1`. This
+/// entry records the same forward node as
+/// [`fused_linear_cross_entropy_phase_b_via_kt_tape`] but its backward calls
+/// [`fused_linear_cross_entropy_phase_b_backward_unit_grad_kt`], avoiding the
+/// scalar seed device-to-host read in the long-context root path.
+pub fn fused_linear_cross_entropy_phase_b_unit_grad_via_kt_tape(
+    hidden: &KtTensor,
+    head_t: &KtTensor,
+    input_ids: &[u32],
+    label_mask: &[bool],
+    chunk_size: usize,
+    tape: &mut Tape,
+) -> KtResult<KtTensor> {
+    fused_linear_cross_entropy_phase_b_via_kt_tape_impl(
+        hidden, head_t, input_ids, label_mask, chunk_size, tape, true,
+    )
+}
+
+fn fused_linear_cross_entropy_phase_b_via_kt_tape_impl(
+    hidden: &KtTensor,
+    head_t: &KtTensor,
+    input_ids: &[u32],
+    label_mask: &[bool],
+    chunk_size: usize,
+    tape: &mut Tape,
+    unit_root_grad: bool,
+) -> KtResult<KtTensor> {
     if !envelope_ok(hidden, head_t) {
         bail!(
             "fused_linear_cross_entropy_phase_b_via_kt_tape: inputs outside kt envelope \
@@ -299,6 +350,7 @@ pub fn fused_linear_cross_entropy_phase_b_via_kt_tape(
         input_ids: input_ids.to_vec(),
         label_mask: label_mask.to_vec(),
         chunk_size,
+        unit_root_grad,
     };
     tape.record(&loss, &[hidden, head_t], Box::new(bwd) as Box<dyn BackwardOp>);
 
@@ -492,6 +544,7 @@ mod tests {
             input_ids: ids.clone(),
             label_mask: mask.clone(),
             chunk_size: 4,
+            unit_root_grad: false,
         };
 
         // Seed grad — rank-0 F32 (matches the loss), on the SAME CUDA device as

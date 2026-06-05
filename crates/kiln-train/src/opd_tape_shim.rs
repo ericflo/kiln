@@ -39,7 +39,7 @@
 //!   ([`kiln_opd_loss_kernel::opd_top_k_reverse_kl_phase_b_per_position_via_kt_tape`]
 //!   / [`..._via_kt_tape`]).
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 
 // (#1082 P-OPD) The candle-input scalar-mean adapter
 // `try_tape_opd_scalar_mean_cuda` was removed: it had zero call sites.
@@ -99,7 +99,7 @@ pub fn try_tape_opd_scalar_mean_cuda_kt(
     top_k: usize,
 ) -> Result<Option<kiln_tensor::Tensor>> {
     use kiln_autograd::{tape_forward_enabled, with_active_tape, Tape};
-    use kiln_opd_loss_kernel::opd_top_k_reverse_kl_phase_b_via_kt_tape;
+    use kiln_opd_loss_kernel::opd_top_k_reverse_kl_phase_b_unit_grad_via_kt_tape;
 
     if !tape_forward_enabled() {
         return Ok(None);
@@ -149,7 +149,7 @@ pub fn try_tape_opd_scalar_mean_cuda_kt(
     // CE-from-logits-kt path, which records against the connected kt logits).
     // If no scope is open, fall through.
     let loss_kt = match with_active_tape(|tape: &mut Tape| {
-        opd_top_k_reverse_kl_phase_b_via_kt_tape(
+        opd_top_k_reverse_kl_phase_b_unit_grad_via_kt_tape(
             hidden,
             head_t,
             teacher_topk_indices,

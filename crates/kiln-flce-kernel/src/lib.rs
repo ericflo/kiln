@@ -17,9 +17,10 @@
 //!   ([`kt_api::fused_linear_cross_entropy_phase_b_backward_kt`]) over
 //!   `kiln_tensor::Tensor` ops, plus the kt-typed
 //!   [`kt_api::FlceMatmulProviderKt`] provider trait.
-//! - [`kt_tape`] — the kt-tape entry
-//!   ([`fused_linear_cross_entropy_phase_b_via_kt_tape`]) that records the
-//!   FLCE backward onto a `kiln_autograd::Tape`.
+//! - [`kt_tape`] — the kt-tape entries
+//!   ([`fused_linear_cross_entropy_phase_b_via_kt_tape`] and
+//!   [`fused_linear_cross_entropy_phase_b_unit_grad_via_kt_tape`]) that record
+//!   the FLCE backward onto a `kiln_autograd::Tape`.
 //!
 //! The candle-typed glue that the SFT/FLCE trainer needs — the pure-candle
 //! Phase A reference, the Phase B candle `CustomOp1`, the `KtForwardOp1`
@@ -64,7 +65,10 @@ pub use kt_api::{
 /// wrapper). Same kt-typed forward and backward, same envelope. See
 /// `kt_tape.rs` for the pilot port rationale.
 pub mod kt_tape;
-pub use kt_tape::{fused_linear_cross_entropy_phase_b_via_kt_tape, CudaFlcePhaseBBackward};
+pub use kt_tape::{
+    CudaFlcePhaseBBackward, fused_linear_cross_entropy_phase_b_unit_grad_via_kt_tape,
+    fused_linear_cross_entropy_phase_b_via_kt_tape,
+};
 
 /// Default chunk size along the vocab dimension.
 ///

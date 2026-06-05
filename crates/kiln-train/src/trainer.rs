@@ -7483,7 +7483,7 @@ fn standard_forward_backward_tape_authoritative_kt(
                 // receives no gradient; the FLCE tape node returns `dhidden`, keeping
                 // the LoRA path connected through `model_forward_no_head`.
                 kiln_autograd::with_active_tape(|tape| {
-                    kiln_flce_kernel::fused_linear_cross_entropy_phase_b_via_kt_tape(
+                    kiln_flce_kernel::fused_linear_cross_entropy_phase_b_unit_grad_via_kt_tape(
                         &normed,
                         &weights.embed_tokens_t,
                         input_ids,

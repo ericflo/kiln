@@ -138,6 +138,7 @@ pub use kt_api::{
 mod kt_tape;
 pub use kt_tape::{
     opd_top_k_reverse_kl_phase_b_per_position_via_kt_tape,
+    opd_top_k_reverse_kl_phase_b_unit_grad_via_kt_tape,
     opd_top_k_reverse_kl_phase_b_via_kt_tape, CudaOpdTopKReverseKlPhaseBBackward,
 };
 
