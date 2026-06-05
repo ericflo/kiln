@@ -16,7 +16,8 @@ use half::bf16;
 use kiln_vulkan_kernel::VulkanDevice;
 use kiln_vulkan_kernel::vk_autograd::vk_backward;
 use kiln_vulkan_kernel::vk_ops::elementwise::vk_mul;
-use kiln_vulkan_kernel::vk_ops::matmul::{vk_matmul, vk_matmul_no_grad};
+use kiln_vulkan_kernel::vk_ops::matmul::{vk_matmul, vk_matmul_lhs_t_no_grad, vk_matmul_no_grad};
+use kiln_vulkan_kernel::vk_ops::matmul_batched::vk_matmul_lhs_t_batched_bf16_no_grad;
 use kiln_vulkan_kernel::vk_ops::matmul_bf16w::vk_matmul_bf16w;
 use kiln_vulkan_kernel::vk_ops::reduce::vk_mean_all;
 use kiln_vulkan_kernel::vk_ops::shape::vk_transpose_2d_no_grad;
@@ -61,6 +62,20 @@ fn naive_matmul(a: &[f32], b: &[f32], m: usize, n: usize, k: usize) -> Vec<f32> 
             let mut acc = 0.0_f32;
             for ki in 0..k {
                 acc += a[mi * k + ki] * b[ki * n + ni];
+            }
+            c[mi * n + ni] = acc;
+        }
+    }
+    c
+}
+
+fn naive_lhs_t_matmul(a: &[f32], b: &[f32], k: usize, m: usize, n: usize) -> Vec<f32> {
+    let mut c = vec![0.0; m * n];
+    for mi in 0..m {
+        for ni in 0..n {
+            let mut acc = 0.0_f32;
+            for ki in 0..k {
+                acc += a[ki * m + mi] * b[ki * n + ni];
             }
             c[mi * n + ni] = acc;
         }
@@ -199,6 +214,57 @@ fn vk_matmul_forward_tile_boundary() -> Result<()> {
     let mad = max_abs_diff(&got, &expected);
     // K=33 sums of small products; F32 should be ~1e-5 max
     assert!(mad < 1e-4, "max abs diff {mad}");
+    Ok(())
+}
+
+#[test]
+fn vk_matmul_lhs_t_forward_tile_boundary() -> Result<()> {
+    let Some(dev) = vk_dev() else { return Ok(()) };
+    // A [K, M]^T @ B [K, N] -> [M, N], with non-16-aligned dimensions.
+    let k = 33;
+    let m = 17;
+    let n = 19;
+    let a_data: Vec<f32> = (0..(k * m)).map(|i| ((i as f32) * 0.013).sin()).collect();
+    let b_data: Vec<f32> = (0..(k * n)).map(|i| ((i as f32) * 0.027).cos()).collect();
+    let a = upload_f32(&dev, &a_data, &[k, m])?;
+    let b = upload_f32(&dev, &b_data, &[k, n])?;
+    let c = vk_matmul_lhs_t_no_grad(&a, &b)?;
+    assert_eq!(c.shape(), &[m, n]);
+    let got = c.to_vec_f32()?;
+    let expected = naive_lhs_t_matmul(&a_data, &b_data, k, m, n);
+    let mad = max_abs_diff(&got, &expected);
+    assert!(mad < 1e-4, "lhs_t max abs diff {mad}");
+    Ok(())
+}
+
+#[test]
+fn vk_matmul_lhs_t_batched_bf16_forward() -> Result<()> {
+    let Some(dev) = vk_dev() else { return Ok(()) };
+    let (batch, k, m, n) = (3usize, 21usize, 7usize, 11usize);
+    let a_data: Vec<f32> = (0..(batch * k * m)).map(|i| ((i as f32) * 0.031).sin()).collect();
+    let b_data: Vec<f32> = (0..(batch * k * n)).map(|i| ((i as f32) * 0.017).cos()).collect();
+    let a = upload_bf16(&dev, &a_data, &[batch, k, m])?;
+    let b = upload_bf16(&dev, &b_data, &[batch, k, n])?;
+    let c = vk_matmul_lhs_t_batched_bf16_no_grad(&a, &b)?;
+    assert_eq!(c.shape(), &[batch, m, n]);
+    let got = c.to_vec_f32()?;
+
+    let a_rounded: Vec<f32> = a_data.iter().map(|&v| bf16::from_f32(v).to_f32()).collect();
+    let b_rounded: Vec<f32> = b_data.iter().map(|&v| bf16::from_f32(v).to_f32()).collect();
+    let mut expected = Vec::with_capacity(batch * m * n);
+    for bx in 0..batch {
+        let a0 = bx * k * m;
+        let b0 = bx * k * n;
+        expected.extend(naive_lhs_t_matmul(
+            &a_rounded[a0..a0 + k * m],
+            &b_rounded[b0..b0 + k * n],
+            k,
+            m,
+            n,
+        ));
+    }
+    let mad = max_abs_diff(&got, &expected);
+    assert!(mad < 2e-2, "lhs_t bf16 batched max abs diff {mad}");
     Ok(())
 }
 

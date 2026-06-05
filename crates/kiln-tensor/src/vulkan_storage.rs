@@ -580,6 +580,121 @@ pub fn vulkan_matmul_batched(a: &crate::Tensor, b: &crate::Tensor) -> Result<cra
 }
 
 // ----------------------------------------------------------------------
+// vulkan_matmul_lhs_transposed — resident `a^T @ b` GEMM
+// ----------------------------------------------------------------------
+
+/// Vulkan resident GEMM `a^T @ b`, where `a:[..., K, M]` and
+/// `b:[..., K, N]`, returning `[..., M, N]`.
+///
+/// This is the Vulkan counterpart to `cuda_matmul_lhs_transposed` and avoids
+/// allocating the physical `a.transpose(-2, -1).contiguous()` image in LoRA and
+/// matmul backward. Rank-2 inputs are routed as a batch of one; higher-rank
+/// inputs flatten their leading axes for the batched shader.
+pub fn vulkan_matmul_lhs_transposed(a: &crate::Tensor, b: &crate::Tensor) -> Result<crate::Tensor> {
+    use kiln_vulkan_kernel::vk_ops::matmul_batched::{
+        vk_matmul_lhs_t_batched_bf16_no_grad, vk_matmul_lhs_t_batched_no_grad,
+    };
+    use kiln_vulkan_kernel::vk_tensor::{VkDType, VkTensor};
+
+    let dtype = a.dtype();
+    if !matches!(dtype, DType::F32 | DType::BF16) || b.dtype() != dtype {
+        return Err(Error::Msg(format!(
+            "vulkan_matmul_lhs_transposed: F32/BF16 equal-dtype kernel (got a={}, b={})",
+            a.dtype(),
+            b.dtype()
+        )));
+    }
+    let vk_dtype = match dtype {
+        DType::F32 => VkDType::F32,
+        DType::BF16 => VkDType::Bf16,
+        _ => unreachable!("dtype gated to F32/BF16 above"),
+    };
+    let (ar, br) = (a.rank(), b.rank());
+    if ar < 2 || br != ar {
+        return Err(Error::Msg(format!(
+            "vulkan_matmul_lhs_transposed: rank >= 2 and equal ranks required (a.rank={ar}, b.rank={br})"
+        )));
+    }
+    if !a.is_contiguous() || !b.is_contiguous() {
+        return Err(Error::Msg(
+            "vulkan_matmul_lhs_transposed: both inputs must be contiguous".to_string(),
+        ));
+    }
+    if a.layout().start_offset() != 0 || b.layout().start_offset() != 0 {
+        return Err(Error::Msg(
+            "vulkan_matmul_lhs_transposed: both inputs must have start_offset == 0 (whole-buffer)"
+                .to_string(),
+        ));
+    }
+
+    let a_vk = a
+        .storage()
+        .as_any()
+        .downcast_ref::<VulkanStorage>()
+        .ok_or_else(|| Error::Msg("vulkan_matmul_lhs_transposed: a must be Vulkan-backed".to_string()))?;
+    let b_vk = b
+        .storage()
+        .as_any()
+        .downcast_ref::<VulkanStorage>()
+        .ok_or_else(|| Error::Msg("vulkan_matmul_lhs_transposed: b must be Vulkan-backed".to_string()))?;
+
+    let a_shape = a.shape();
+    let b_shape = b.shape();
+    for axis in 0..ar - 2 {
+        if a_shape[axis] != b_shape[axis] {
+            return Err(Error::Msg(format!(
+                "vulkan_matmul_lhs_transposed: batch axis {axis} mismatch: a={} b={}",
+                a_shape[axis], b_shape[axis]
+            )));
+        }
+    }
+    let k = a_shape[ar - 2];
+    let m = a_shape[ar - 1];
+    let kk = b_shape[br - 2];
+    let n = b_shape[br - 1];
+    if k != kk {
+        return Err(Error::Msg(format!(
+            "vulkan_matmul_lhs_transposed: contraction-dim mismatch (a K={k} vs b K={kk})"
+        )));
+    }
+
+    let batch: usize = a_shape[..ar - 2].iter().product::<usize>().max(1);
+    let device_index = match a_vk.device() {
+        Device::Vulkan(i) => i,
+        _ => unreachable!("VulkanStorage::device() returns Device::Vulkan"),
+    };
+
+    let vk_a = VkTensor::from_buffer(
+        a_vk.buffer_arc(),
+        vec![batch, k, m],
+        vk_dtype,
+        Arc::clone(a_vk.vulkan_device()),
+    );
+    let vk_b = VkTensor::from_buffer(
+        b_vk.buffer_arc(),
+        vec![batch, kk, n],
+        vk_dtype,
+        Arc::clone(b_vk.vulkan_device()),
+    );
+    let vk_out = match dtype {
+        DType::F32 => vk_matmul_lhs_t_batched_no_grad(&vk_a, &vk_b),
+        DType::BF16 => vk_matmul_lhs_t_batched_bf16_no_grad(&vk_a, &vk_b),
+        _ => unreachable!("dtype gated to F32/BF16 above"),
+    }
+    .map_err(|e| Error::Msg(format!("vulkan_matmul_lhs_transposed: kernel dispatch failed: {e}")))?;
+
+    let mut out_shape: Vec<usize> = a_shape[..ar - 2].to_vec();
+    out_shape.push(m);
+    out_shape.push(n);
+    let out_f32 = kt_tensor_from_vk(&vk_out, device_index)?.reshape(out_shape)?;
+    match dtype {
+        DType::F32 => Ok(out_f32),
+        DType::BF16 => out_f32.to_dtype(DType::BF16),
+        _ => unreachable!("dtype gated to F32/BF16 above"),
+    }
+}
+
+// ----------------------------------------------------------------------
 // vulkan_contiguous — on-device strided gather (kills the contiguous() bounce)
 // ----------------------------------------------------------------------
 
@@ -2998,6 +3113,56 @@ mod tests {
             err < 2e-2,
             "bf16w dx diverges from finite-difference: max_abs_err={err}; analytic={dx_v:?} fd={fd:?}"
         );
+    }
+
+    #[test]
+    fn vulkan_matmul_lhs_transposed_parity() {
+        if maybe_vulkan_device().is_none() {
+            eprintln!("skip: KILN_TENSOR_VULKAN_TEST unset or no Vulkan device");
+            return;
+        }
+        let (k, m, n) = (33usize, 17usize, 19usize);
+        let a_data: Vec<f32> = (0..k * m).map(|i| ((i as f32) * 0.013).sin()).collect();
+        let b_data: Vec<f32> = (0..k * n).map(|i| ((i as f32) * 0.027).cos()).collect();
+
+        let a_cpu = crate::Tensor::from_vec(a_data.clone(), vec![k, m]).unwrap();
+        let b_cpu = crate::Tensor::from_vec(b_data.clone(), vec![k, n]).unwrap();
+        let a_vk = vk_f32(a_data.clone(), vec![k, m]);
+        let b_vk = vk_f32(b_data.clone(), vec![k, n]);
+        let want = crate::ops::matmul_lhs_transposed(&a_cpu, &b_cpu)
+            .unwrap()
+            .to_vec::<f32>()
+            .unwrap();
+        let out = crate::ops::matmul_lhs_transposed(&a_vk, &b_vk).expect("vulkan lhs_t f32");
+        assert_eq!(out.device(), Device::Vulkan(0));
+        assert_eq!(out.shape(), &[m, n]);
+        let got = read_vk_f32(&out);
+        let err = max_abs_err(&got, &want);
+        assert!(err < 1e-4, "vulkan lhs_t f32 max_abs_err={err}");
+
+        let a_cpu_bf16 = crate::ops::cast(&a_cpu, DType::BF16).unwrap();
+        let b_cpu_bf16 = crate::ops::cast(&b_cpu, DType::BF16).unwrap();
+        let want_bf16_t = crate::ops::matmul_lhs_transposed(&a_cpu_bf16, &b_cpu_bf16).unwrap();
+        let want_bf16 = crate::ops::cast(&want_bf16_t, DType::F32)
+            .unwrap()
+            .to_vec::<f32>()
+            .unwrap();
+
+        let a_vk_bf16 = super::vulkan_cast(&a_vk, DType::BF16).expect("vulkan cast a bf16");
+        let b_vk_bf16 = super::vulkan_cast(&b_vk, DType::BF16).expect("vulkan cast b bf16");
+        let out_bf16 =
+            crate::ops::matmul_lhs_transposed(&a_vk_bf16, &b_vk_bf16).expect("vulkan lhs_t bf16");
+        assert_eq!(out_bf16.device(), Device::Vulkan(0));
+        assert_eq!(out_bf16.dtype(), DType::BF16);
+        assert_eq!(out_bf16.shape(), &[m, n]);
+        let got_bf16 = super::vulkan_cast(&out_bf16, DType::F32)
+            .expect("vulkan cast lhs_t bf16 out")
+            .to_device(Device::Cpu)
+            .unwrap()
+            .to_vec::<f32>()
+            .unwrap();
+        let err = max_abs_err(&got_bf16, &want_bf16);
+        assert!(err < 3e-2, "vulkan lhs_t bf16 max_abs_err={err}");
     }
 
     /// On-device `contiguous()` (the `vk_gather_contiguous_f32` strided

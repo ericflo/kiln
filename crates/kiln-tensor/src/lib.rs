@@ -200,7 +200,7 @@ pub use vulkan_storage::{
     vk_tensor_from_kt, vulkan_activation_unary, vulkan_argmax_last_axis, vulkan_cast,
     vulkan_contiguous, vulkan_elementwise_binary, vulkan_index_select_dim0,
     vulkan_l2norm_last_axis, vulkan_masked_fill, vulkan_matmul, vulkan_matmul_batched,
-    vulkan_matmul_bf16w, vulkan_matmul_bf16w_bwd, vulkan_mean_all, vulkan_rmsnorm_last_axis,
-    vulkan_scale, vulkan_slice_set_dim0, vulkan_softmax_last_axis, vulkan_sum_all,
-    vulkan_to_host_copy, vulkan_unary_math, vulkan_zeros,
+    vulkan_matmul_bf16w, vulkan_matmul_bf16w_bwd, vulkan_matmul_lhs_transposed, vulkan_mean_all,
+    vulkan_rmsnorm_last_axis, vulkan_scale, vulkan_slice_set_dim0, vulkan_softmax_last_axis,
+    vulkan_sum_all, vulkan_to_host_copy, vulkan_unary_math, vulkan_zeros,
 };

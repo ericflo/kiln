@@ -382,6 +382,14 @@ const SHADER_SPIRVS: &[(&str, &[u8])] = &[
     ),
     ("vk_matmul_batched_f32", SPIR_V_VK_MATMUL_BATCHED_F32),
     ("vk_matmul_batched_bf16", SPIR_V_VK_MATMUL_BATCHED_BF16),
+    (
+        "vk_matmul_lhs_t_batched_f32",
+        SPIR_V_VK_MATMUL_LHS_T_BATCHED_F32,
+    ),
+    (
+        "vk_matmul_lhs_t_batched_bf16",
+        SPIR_V_VK_MATMUL_LHS_T_BATCHED_BF16,
+    ),
     ("vk_transpose_3d_f32", SPIR_V_VK_TRANSPOSE_3D_F32),
     ("vk_gather_contiguous_f32", SPIR_V_VK_GATHER_CONTIGUOUS_F32),
     ("vk_gather_contiguous_bf16", SPIR_V_VK_GATHER_CONTIGUOUS_BF16),

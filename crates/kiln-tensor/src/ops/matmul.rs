@@ -325,6 +325,18 @@ pub fn matmul_lhs_transposed(a: &Tensor, b: &Tensor) -> Result<Tensor> {
         }
     }
 
+    #[cfg(feature = "vulkan")]
+    {
+        if matches!(a.device(), crate::Device::Vulkan(_))
+            && matches!(b.device(), crate::Device::Vulkan(_))
+            && a.is_contiguous()
+            && b.is_contiguous()
+            && matches!(a.dtype(), DType::F32 | DType::BF16)
+        {
+            return crate::vulkan_matmul_lhs_transposed(a, b);
+        }
+    }
+
     let a_t = a.transpose(ar - 2, ar - 1)?.contiguous()?;
     matmul(&a_t, b)
 }

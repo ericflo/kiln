@@ -12,6 +12,7 @@
 //! transposes are physical via `vk_transpose_2d_no_grad`.
 
 use crate::vk_ops::dispatch_simple_2d;
+use crate::vk_ops::matmul_batched::vk_matmul_lhs_t_batched_no_grad;
 use crate::vk_ops::shape::vk_transpose_2d_no_grad;
 use crate::vk_tensor::{VkBackwardOp, VkDType, VkTensor};
 use crate::{VulkanBuffer, VulkanDevice};
@@ -86,6 +87,48 @@ pub fn vk_matmul_no_grad(a: &VkTensor, b: &VkTensor) -> Result<VkTensor> {
     ))
 }
 
+/// F32 GEMM with a transposed left operand:
+/// `a:[K,M]^T @ b:[K,N] -> [M,N]`.
+pub fn vk_matmul_lhs_t_no_grad(a: &VkTensor, b: &VkTensor) -> Result<VkTensor> {
+    anyhow::ensure!(
+        a.shape().len() == 2 && b.shape().len() == 2,
+        "vk_matmul_lhs_t: both inputs must be rank-2 (got {:?} and {:?})",
+        a.shape(),
+        b.shape()
+    );
+    anyhow::ensure!(
+        a.dtype() == VkDType::F32 && b.dtype() == VkDType::F32,
+        "vk_matmul_lhs_t: F32-only (got {:?} / {:?})",
+        a.dtype(),
+        b.dtype()
+    );
+    let k = a.shape()[0];
+    let m = a.shape()[1];
+    let kk = b.shape()[0];
+    let n = b.shape()[1];
+    anyhow::ensure!(k == kk, "vk_matmul_lhs_t: inner-dim mismatch: a.K={k}, b.K={kk}");
+
+    let a3 = VkTensor::from_buffer(
+        Arc::clone(a.buffer()),
+        vec![1, k, m],
+        VkDType::F32,
+        Arc::clone(a.device()),
+    );
+    let b3 = VkTensor::from_buffer(
+        Arc::clone(b.buffer()),
+        vec![1, k, n],
+        VkDType::F32,
+        Arc::clone(b.device()),
+    );
+    let out3 = vk_matmul_lhs_t_batched_no_grad(&a3, &b3)?;
+    Ok(VkTensor::from_buffer(
+        Arc::clone(out3.buffer()),
+        vec![m, n],
+        VkDType::F32,
+        Arc::clone(out3.device()),
+    ))
+}
+
 #[derive(Debug)]
 pub struct MatmulBackward {
     pub inputs: [VkTensor; 2],
@@ -105,8 +148,7 @@ impl VkBackwardOp for MatmulBackward {
         let b_t = vk_transpose_2d_no_grad(b)?;
         let grad_a = vk_matmul_no_grad(grad_out, &b_t)?;
         // dB = A.T @ grad_out  → shape [K, N]
-        let a_t = vk_transpose_2d_no_grad(a)?;
-        let grad_b = vk_matmul_no_grad(&a_t, grad_out)?;
+        let grad_b = vk_matmul_lhs_t_no_grad(a, grad_out)?;
         Ok(vec![Some(grad_a), Some(grad_b)])
     }
 }
