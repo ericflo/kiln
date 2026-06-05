@@ -839,6 +839,18 @@ unsafe extern "C" {
         stream: *mut core::ffi::c_void,
     ) -> i32;
 
+    fn kiln_grpo_grad_logits_chunk_f32_async(
+        logits: *mut core::ffi::c_void,
+        labels: *const core::ffi::c_void,
+        global_max: *const core::ffi::c_void,
+        global_sumexp: *const core::ffi::c_void,
+        coeff: *const core::ffi::c_void,
+        num_active: i64,
+        chunk_len: i64,
+        chunk_start: i64,
+        stream: *mut core::ffi::c_void,
+    ) -> i32;
+
     fn kiln_sum_last_axis_async(
         x: *const core::ffi::c_void,
         out: *mut core::ffi::c_void,
@@ -3841,6 +3853,192 @@ pub fn cuda_flce_grad_logits_chunk_inplace(
     if status != 0 {
         return Err(crate::Error::Msg(format!(
             "cuda_flce_grad_logits_chunk_inplace: FFI returned status {status}"
+        )));
+    }
+    Ok(())
+}
+
+/// CUDA GRPO backward chunk helper.
+///
+/// Mutates a fresh F32 logits chunk `[num_active, chunk_len]` in-place into
+/// `coeff[row] * (one_hot - softmax)`, using per-row global softmax stats saved
+/// by the chunked selected-log-prob forward. This removes the generic
+/// broadcast/exp/div/mul and sparse label-scatter sequence from the long-context
+/// GRPO-family backward before the existing cuBLAS hidden-gradient matmul.
+#[cfg(feature = "cuda")]
+pub fn cuda_grpo_grad_logits_chunk_inplace(
+    logits: &crate::Tensor,
+    labels: &crate::Tensor,
+    global_max: &crate::Tensor,
+    global_sumexp: &crate::Tensor,
+    coeff: &crate::Tensor,
+    chunk_start: usize,
+) -> Result<()> {
+    if logits.dtype() != crate::DType::F32 {
+        return Err(crate::Error::Msg(format!(
+            "cuda_grpo_grad_logits_chunk_inplace: logits dtype must be F32, got {}",
+            logits.dtype()
+        )));
+    }
+    if labels.dtype() != crate::DType::U32 {
+        return Err(crate::Error::Msg(format!(
+            "cuda_grpo_grad_logits_chunk_inplace: labels dtype must be U32, got {}",
+            labels.dtype()
+        )));
+    }
+    if global_max.dtype() != crate::DType::F32
+        || global_sumexp.dtype() != crate::DType::F32
+        || coeff.dtype() != crate::DType::F32
+    {
+        return Err(crate::Error::Msg(format!(
+            "cuda_grpo_grad_logits_chunk_inplace: global stats and coeff must be F32, got max={} sumexp={} coeff={}",
+            global_max.dtype(),
+            global_sumexp.dtype(),
+            coeff.dtype()
+        )));
+    }
+    if logits.rank() != 2 {
+        return Err(crate::Error::Msg(format!(
+            "cuda_grpo_grad_logits_chunk_inplace: logits must be rank-2 [active, chunk], got {:?}",
+            logits.shape()
+        )));
+    }
+    let num_active = logits.shape()[0];
+    let chunk_len = logits.shape()[1];
+    if labels.shape() != [num_active] {
+        return Err(crate::Error::Msg(format!(
+            "cuda_grpo_grad_logits_chunk_inplace: labels shape {:?} != [{num_active}]",
+            labels.shape()
+        )));
+    }
+    if global_max.elem_count() != num_active
+        || global_sumexp.elem_count() != num_active
+        || coeff.elem_count() != num_active
+    {
+        return Err(crate::Error::Msg(format!(
+            "cuda_grpo_grad_logits_chunk_inplace: per-row tensor element counts max={} sumexp={} coeff={} != {num_active}",
+            global_max.elem_count(),
+            global_sumexp.elem_count(),
+            coeff.elem_count()
+        )));
+    }
+    if !logits.is_contiguous()
+        || !labels.is_contiguous()
+        || !global_max.is_contiguous()
+        || !global_sumexp.is_contiguous()
+        || !coeff.is_contiguous()
+    {
+        return Err(crate::Error::Msg(
+            "cuda_grpo_grad_logits_chunk_inplace: inputs must be contiguous".to_string(),
+        ));
+    }
+
+    let logits_storage = logits
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .ok_or_else(|| {
+            crate::Error::Msg(
+                "cuda_grpo_grad_logits_chunk_inplace: logits must be CUDA".to_string(),
+            )
+        })?;
+    let labels_storage = labels
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .ok_or_else(|| {
+            crate::Error::Msg(
+                "cuda_grpo_grad_logits_chunk_inplace: labels must be CUDA".to_string(),
+            )
+        })?;
+    let max_storage = global_max
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .ok_or_else(|| {
+            crate::Error::Msg(
+                "cuda_grpo_grad_logits_chunk_inplace: global_max must be CUDA".to_string(),
+            )
+        })?;
+    let sumexp_storage = global_sumexp
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .ok_or_else(|| {
+            crate::Error::Msg(
+                "cuda_grpo_grad_logits_chunk_inplace: global_sumexp must be CUDA".to_string(),
+            )
+        })?;
+    let coeff_storage = coeff
+        .storage()
+        .as_any()
+        .downcast_ref::<CudaStorage>()
+        .ok_or_else(|| {
+            crate::Error::Msg(
+                "cuda_grpo_grad_logits_chunk_inplace: coeff must be CUDA".to_string(),
+            )
+        })?;
+
+    if matches!(&logits_storage.slice, SliceOwner::Borrowed { .. }) {
+        return Err(crate::Error::Msg(
+            "cuda_grpo_grad_logits_chunk_inplace: borrowed logits storage cannot be mutated"
+                .to_string(),
+        ));
+    }
+    if logits_storage.device != labels_storage.device
+        || logits_storage.device != max_storage.device
+        || logits_storage.device != sumexp_storage.device
+        || logits_storage.device != coeff_storage.device
+    {
+        return Err(crate::Error::Msg(format!(
+            "cuda_grpo_grad_logits_chunk_inplace: device mismatch logits={} labels={} max={} sumexp={} coeff={}",
+            logits_storage.device,
+            labels_storage.device,
+            max_storage.device,
+            sumexp_storage.device,
+            coeff_storage.device
+        )));
+    }
+
+    let ctx = logits_storage.context();
+    let stream = crate::active_cuda_stream(&ctx);
+    let raw_stream = stream.cu_stream() as *mut core::ffi::c_void;
+
+    let (logits_base, _) = logits_storage.device_ptr_raw();
+    let (labels_base, _) = labels_storage.device_ptr_raw();
+    let (max_base, _) = max_storage.device_ptr_raw();
+    let (sumexp_base, _) = sumexp_storage.device_ptr_raw();
+    let (coeff_base, _) = coeff_storage.device_ptr_raw();
+
+    let f32_bpe = crate::DType::F32.size_in_bytes();
+    let logits_ptr = (logits_base + (logits.layout().start_offset() * f32_bpe) as u64)
+        as *mut core::ffi::c_void;
+    let labels_ptr = (labels_base
+        + (labels.layout().start_offset() * crate::DType::U32.size_in_bytes()) as u64)
+        as *const core::ffi::c_void;
+    let max_ptr = (max_base + (global_max.layout().start_offset() * f32_bpe) as u64)
+        as *const core::ffi::c_void;
+    let sumexp_ptr = (sumexp_base + (global_sumexp.layout().start_offset() * f32_bpe) as u64)
+        as *const core::ffi::c_void;
+    let coeff_ptr = (coeff_base + (coeff.layout().start_offset() * f32_bpe) as u64)
+        as *const core::ffi::c_void;
+
+    let status = unsafe {
+        kiln_grpo_grad_logits_chunk_f32_async(
+            logits_ptr,
+            labels_ptr,
+            max_ptr,
+            sumexp_ptr,
+            coeff_ptr,
+            num_active as i64,
+            chunk_len as i64,
+            chunk_start as i64,
+            raw_stream,
+        )
+    };
+    if status != 0 {
+        return Err(crate::Error::Msg(format!(
+            "cuda_grpo_grad_logits_chunk_inplace: FFI returned status {status}"
         )));
     }
     Ok(())

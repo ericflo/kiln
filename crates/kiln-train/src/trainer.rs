@@ -10344,6 +10344,8 @@ pub(crate) mod tests {
                 up_proj_t,
                 down_proj_t,
                 gate_up_proj_t: None,
+                gate_up_proj_w8: None,
+                down_proj_w8: None,
                 gate_proj_marlin: None,
                 up_proj_marlin: None,
                 down_proj_marlin: None,
@@ -10372,7 +10374,9 @@ pub(crate) mod tests {
                     k_proj_t,
                     v_proj_t,
                     qkv_proj_t: None,
+                    qkv_proj_w8: None,
                     o_proj_t,
+                    o_proj_w8: None,
                     q_proj_marlin: None,
                 })
             } else {
@@ -10415,6 +10419,7 @@ pub(crate) mod tests {
                     in_proj_a_t,
                     in_proj_b_t,
                     in_proj_ab_t: None,
+                    in_proj_qkvzab_w8: None,
                     out_proj_t,
                     out_proj_marlin: None,
                 })
@@ -10443,6 +10448,7 @@ pub(crate) mod tests {
             layers,
             final_norm,
             rotary_inv_freq,
+            lm_head_w8: None,
             mtp: None,
         })
     }
@@ -10477,6 +10483,8 @@ pub(crate) mod tests {
                 .as_ref()
                 .map(to_bf16_contig)
                 .transpose()?,
+            gate_up_proj_w8: None,
+            down_proj_w8: None,
             gate_proj_marlin: None,
             up_proj_marlin: None,
             down_proj_marlin: None,
@@ -10499,7 +10507,9 @@ pub(crate) mod tests {
                     k_proj_t: to_bf16_contig(&full.k_proj_t)?,
                     v_proj_t: to_bf16_contig(&full.v_proj_t)?,
                     qkv_proj_t: full.qkv_proj_t.as_ref().map(to_bf16_contig).transpose()?,
+                    qkv_proj_w8: None,
                     o_proj_t: to_bf16_contig(&full.o_proj_t)?,
+                    o_proj_w8: None,
                     q_proj_marlin: None,
                 })
             }
@@ -10520,6 +10530,7 @@ pub(crate) mod tests {
                     in_proj_a_t: to_bf16_contig(&lin.in_proj_a_t)?,
                     in_proj_b_t: to_bf16_contig(&lin.in_proj_b_t)?,
                     in_proj_ab_t: lin.in_proj_ab_t.as_ref().map(to_bf16_contig).transpose()?,
+                    in_proj_qkvzab_w8: None,
                     out_proj_t: to_bf16_contig(&lin.out_proj_t)?,
                     out_proj_marlin: None,
                 })
@@ -10593,6 +10604,7 @@ pub(crate) mod tests {
             final_norm: to_bf16_contig(&f32_weights.final_norm)?,
             // Stays F32 — the rotary kt adapter requires F32 cos/sin tables.
             rotary_inv_freq: f32_weights.rotary_inv_freq,
+            lm_head_w8: None,
             mtp: None,
         })
     }

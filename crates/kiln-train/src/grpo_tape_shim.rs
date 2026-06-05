@@ -1295,6 +1295,56 @@ fn grpo_pg_loss_from_normed_hidden_grad_with_logsum_kt(
         KtTensor::zeros(vec![num_active, hidden_size], KtDType::F32, *device)
             .context("grpo_pg_loss_from_normed_hidden_grad_with_logsum_kt: grad_active_hidden zeros")?;
 
+    #[cfg(feature = "cuda")]
+    if matches!(device, Device::Cuda(_)) {
+        let active_labels_t = KtTensor::from_vec_on(*device, active_labels.to_vec(), vec![num_active])
+            .context("grpo_pg_loss_from_normed_hidden_grad_with_logsum_kt: cuda labels")?;
+        let running_max_f32 = running_max
+            .to_dtype(KtDType::F32)?
+            .contiguous()
+            .context("grpo_pg_loss_from_normed_hidden_grad_with_logsum_kt: cuda running_max")?;
+        let running_sumexp_f32 = running_sumexp
+            .to_dtype(KtDType::F32)?
+            .contiguous()
+            .context("grpo_pg_loss_from_normed_hidden_grad_with_logsum_kt: cuda running_sumexp")?;
+        let coeff_col_f32 = coeff_col
+            .to_dtype(KtDType::F32)?
+            .contiguous()
+            .context("grpo_pg_loss_from_normed_hidden_grad_with_logsum_kt: cuda coeff")?;
+
+        let mut chunk_start = 0usize;
+        while chunk_start < vocab {
+            let chunk_len = chunk_size.min(vocab - chunk_start);
+            let chunk_end = chunk_start + chunk_len;
+            let head_chunk = head_t_f32.narrow(1, chunk_start, chunk_len)?.contiguous()?;
+            let logits_chunk = active_hidden.matmul(&head_chunk)?.contiguous()?;
+
+            kiln_tensor::cuda_grpo_grad_logits_chunk_inplace(
+                &logits_chunk,
+                &active_labels_t,
+                &running_max_f32,
+                &running_sumexp_f32,
+                &coeff_col_f32,
+                chunk_start,
+            )
+            .context("grpo_pg_loss_from_normed_hidden_grad_with_logsum_kt: cuda grad logits chunk")?;
+
+            let head_chunk_t = head_chunk.t()?.contiguous()?;
+            let chunk_contrib = logits_chunk.matmul(&head_chunk_t)?;
+            grad_active_hidden = (&grad_active_hidden + chunk_contrib)?.detach();
+            chunk_start = chunk_end;
+        }
+
+        let grad_hidden_2d = scatter_add(
+            &grad_active_hidden.contiguous()?,
+            0,
+            active_idx,
+            seq_len,
+        )?;
+        let grad_hidden = grad_hidden_2d.unsqueeze(0)?.to_dtype(hidden_dtype)?;
+        return Ok(grad_hidden);
+    }
+
     let mut chunk_start = 0usize;
     while chunk_start < vocab {
         let chunk_len = chunk_size.min(vocab - chunk_start);

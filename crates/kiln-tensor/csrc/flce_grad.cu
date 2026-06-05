@@ -1,4 +1,4 @@
-// CUDA FLCE chunk-gradient helper.
+// CUDA FLCE / GRPO chunk-gradient helpers.
 //
 // Converts a materialized logits chunk [num_active, chunk_len] in-place into:
 //
@@ -44,6 +44,27 @@ __global__ void kiln_flce_grad_logits_chunk_f32_kernel(
     logits[linear] = v * scale;
 }
 
+__global__ void kiln_grpo_grad_logits_chunk_f32_kernel(
+    float* __restrict__ logits,
+    const uint32_t* __restrict__ labels,
+    const float* __restrict__ global_max,
+    const float* __restrict__ global_sumexp,
+    const float* __restrict__ coeff,
+    int64_t num_active,
+    int64_t chunk_len,
+    int64_t chunk_start) {
+    int64_t linear = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+    int64_t total = num_active * chunk_len;
+    if (linear >= total) return;
+
+    int64_t col = linear % chunk_len;
+    int64_t row = linear / chunk_len;
+
+    float softmax = expf(logits[linear] - global_max[row]) / global_sumexp[row];
+    float onehot = (static_cast<int64_t>(labels[row]) == chunk_start + col) ? 1.0f : 0.0f;
+    logits[linear] = coeff[row] * (onehot - softmax);
+}
+
 } // namespace
 
 extern "C" int kiln_flce_grad_logits_chunk_f32_async(
@@ -74,6 +95,40 @@ extern "C" int kiln_flce_grad_logits_chunk_f32_async(
         chunk_len,
         chunk_start,
         scale);
+
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) return 1000 + static_cast<int>(err);
+    return 0;
+}
+
+extern "C" int kiln_grpo_grad_logits_chunk_f32_async(
+    void* logits,
+    const void* labels,
+    const void* global_max,
+    const void* global_sumexp,
+    const void* coeff,
+    int64_t num_active,
+    int64_t chunk_len,
+    int64_t chunk_start,
+    cudaStream_t stream) {
+    if (num_active < 0 || chunk_len < 0 || chunk_start < 0) return 1;
+    int64_t total = num_active * chunk_len;
+    if (total == 0) return 0;
+    if (chunk_len != 0 && total / chunk_len != num_active) return 2;
+
+    int64_t blocks_i64 = (total + BLOCK_SIZE - 1) / BLOCK_SIZE;
+    if (blocks_i64 > static_cast<int64_t>(2147483647)) return 3;
+    int blocks = static_cast<int>(blocks_i64);
+
+    kiln_grpo_grad_logits_chunk_f32_kernel<<<blocks, BLOCK_SIZE, 0, stream>>>(
+        static_cast<float*>(logits),
+        static_cast<const uint32_t*>(labels),
+        static_cast<const float*>(global_max),
+        static_cast<const float*>(global_sumexp),
+        static_cast<const float*>(coeff),
+        num_active,
+        chunk_len,
+        chunk_start);
 
     cudaError_t err = cudaGetLastError();
     if (err != cudaSuccess) return 1000 + static_cast<int>(err);
