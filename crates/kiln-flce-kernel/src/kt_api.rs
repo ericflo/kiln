@@ -508,6 +508,45 @@ pub fn fused_linear_cross_entropy_phase_b_backward_kt(
     chunk_size: usize,
     grad_loss: &KtTensor,
 ) -> Result<KtTensor, FlceError> {
+    fused_linear_cross_entropy_phase_b_backward_impl_kt(
+        hidden,
+        head_t,
+        input_ids,
+        label_mask,
+        chunk_size,
+        Some(grad_loss),
+    )
+}
+
+/// kt-typed FLCE Phase B backward for the common tape-root seed
+/// `d loss / d loss = 1`.
+///
+/// This is equivalent to calling
+/// [`fused_linear_cross_entropy_phase_b_backward_kt`] with a scalar F32 one
+/// tensor, but it avoids allocating that seed tensor and avoids the scalar
+/// device-to-host read used by the generic seeded path. The trainer's analytic
+/// SFT checkpoint tail always uses this unit seed; the generic entry point
+/// remains available for composed tape roots with non-unit upstream gradients.
+pub fn fused_linear_cross_entropy_phase_b_backward_unit_grad_kt(
+    hidden: &KtTensor,
+    head_t: &KtTensor,
+    input_ids: &[u32],
+    label_mask: &[bool],
+    chunk_size: usize,
+) -> Result<KtTensor, FlceError> {
+    fused_linear_cross_entropy_phase_b_backward_impl_kt(
+        hidden, head_t, input_ids, label_mask, chunk_size, None,
+    )
+}
+
+fn fused_linear_cross_entropy_phase_b_backward_impl_kt(
+    hidden: &KtTensor,
+    head_t: &KtTensor,
+    input_ids: &[u32],
+    label_mask: &[bool],
+    chunk_size: usize,
+    grad_loss: Option<&KtTensor>,
+) -> Result<KtTensor, FlceError> {
     // ROCm host-staging — same rationale as the forward entry point above:
     // the generic-op composite has no `rocm_fwd` arm, so stage the device
     // inputs (hidden, head_t, AND the seed grad — the backward's
@@ -518,14 +557,16 @@ pub fn fused_linear_cross_entropy_phase_b_backward_kt(
     if let KtDevice::Rocm(dev_idx) = hidden.device() {
         let hidden_host = rocm_stage_to_host(hidden)?;
         let head_host = rocm_stage_to_host(head_t)?;
-        let grad_host = rocm_stage_to_host(grad_loss)?;
-        let dhidden_host = fused_linear_cross_entropy_phase_b_backward_kt(
+        let grad_host = grad_loss
+            .map(rocm_stage_to_host)
+            .transpose()?;
+        let dhidden_host = fused_linear_cross_entropy_phase_b_backward_impl_kt(
             &hidden_host,
             &head_host,
             input_ids,
             label_mask,
             chunk_size,
-            &grad_host,
+            grad_host.as_ref(),
         )?;
         return rocm_upload_from_host(&dhidden_host, dev_idx);
     }
@@ -689,10 +730,13 @@ pub fn fused_linear_cross_entropy_phase_b_backward_kt(
     // Fold the scalar dL/dloss seed into the per-active-row mean scale once.
     // This avoids allocating and multiplying dense `[active, chunk]` and
     // `[hits, hidden]` grad-loss broadcast tensors inside the chunk loop.
-    let grad_loss_scalar = to_f32(grad_loss)
-        .map_err(FlceError::Kt)?
-        .to_scalar::<f32>()
-        .map_err(FlceError::Kt)?;
+    let grad_loss_scalar = match grad_loss {
+        Some(grad_loss) => to_f32(grad_loss)
+            .map_err(FlceError::Kt)?
+            .to_scalar::<f32>()
+            .map_err(FlceError::Kt)?,
+        None => 1.0,
+    };
     let grad_scale = grad_loss_scalar / (num_active as f32);
 
     // Broadcast running_max / running_sumexp to 2-D once (they don't
@@ -1233,6 +1277,56 @@ mod tests {
         );
     }
 
+    #[test]
+    fn fused_linear_cross_entropy_phase_b_backward_unit_grad_matches_seed_one() {
+        let seq_len = 8;
+        let hidden_size = 4;
+        let vocab_size = 16;
+
+        let hidden_vec: Vec<f32> = (0..seq_len * hidden_size)
+            .map(|i| (i as f32 * 0.017).sin() * 0.2)
+            .collect();
+        let head_vec: Vec<f32> = (0..hidden_size * vocab_size)
+            .map(|i| ((i as f32 + 11.0) * 0.007).cos() * 0.15)
+            .collect();
+        let ids: Vec<u32> = (0..seq_len as u32)
+            .map(|i| (i * 13 + 3) % vocab_size as u32)
+            .collect();
+        let mask: Vec<bool> = (0..seq_len).map(|i| i != 0 && i != 3).collect();
+
+        let hidden = KtTensor::from_vec(hidden_vec, vec![1, seq_len, hidden_size]).unwrap();
+        let head = KtTensor::from_vec(head_vec, vec![hidden_size, vocab_size]).unwrap();
+        let grad_loss = KtTensor::from_vec(vec![1.0f32], vec![]).unwrap();
+
+        let seeded = fused_linear_cross_entropy_phase_b_backward_kt(
+            &hidden,
+            &head,
+            &ids,
+            &mask,
+            4,
+            &grad_loss,
+        )
+        .unwrap();
+        let unit = fused_linear_cross_entropy_phase_b_backward_unit_grad_kt(
+            &hidden,
+            &head,
+            &ids,
+            &mask,
+            4,
+        )
+        .unwrap();
+
+        let seeded = read_f32_vec(&seeded);
+        let unit = read_f32_vec(&unit);
+        assert_eq!(seeded.len(), unit.len());
+        for (i, (a, b)) in seeded.iter().zip(unit.iter()).enumerate() {
+            assert!(
+                (a - b).abs() <= 1e-6,
+                "unit grad mismatch at {i}: seeded={a} unit={b}"
+            );
+        }
+    }
+
     #[cfg(feature = "cuda")]
     #[test]
     fn fused_linear_cross_entropy_phase_b_backward_kt_cuda_sparse_chunk_runs() {
@@ -1279,15 +1373,32 @@ mod tests {
             &grad_loss,
         )
         .expect("multi chunk cuda backward");
+        let g_unit = fused_linear_cross_entropy_phase_b_backward_unit_grad_kt(
+            &hidden,
+            &head,
+            &ids,
+            &mask,
+            4,
+        )
+        .expect("unit-seed cuda backward");
 
         let single = read_f32_vec_any(&g_single);
         let multi = read_f32_vec_any(&g_multi);
+        let unit = read_f32_vec_any(&g_unit);
         assert_eq!(single.len(), multi.len());
+        assert_eq!(multi.len(), unit.len());
         for (i, (a, b)) in single.iter().zip(multi.iter()).enumerate() {
             let tol = 2e-4f32.max(2e-4 * a.abs());
             assert!(
                 (a - b).abs() <= tol,
                 "cuda sparse FLCE bwd drift at {i}: single={a} multi={b} tol={tol}"
+            );
+        }
+        for (i, (a, b)) in multi.iter().zip(unit.iter()).enumerate() {
+            let tol = 2e-4f32.max(2e-4 * a.abs());
+            assert!(
+                (a - b).abs() <= tol,
+                "cuda unit-seed FLCE bwd drift at {i}: seeded={a} unit={b} tol={tol}"
             );
         }
     }

@@ -6175,7 +6175,6 @@ fn analytic_sft_tail_grad_pre_final_norm(
     rms_norm_eps: f64,
     chunk_size: usize,
 ) -> Result<Tensor> {
-    let device = hidden.device();
     let seq_len = input_ids.len();
     if seq_len < 2 {
         anyhow::bail!("analytic SFT tail gradient requires at least 2 tokens");
@@ -6216,17 +6215,11 @@ fn analytic_sft_tail_grad_pre_final_norm(
 
     let normed = rms_norm(hidden, final_norm_weight, rms_norm_eps)
         .context("analytic SFT tail final RMSNorm")?;
-    let grad_loss = Tensor::from_vec_on(device, vec![1.0f32], vec![])
-        .context("analytic SFT tail FLCE grad_loss seed")?;
-    let grad_normed = kiln_flce_kernel::kt_api::fused_linear_cross_entropy_phase_b_backward_kt(
-        &normed,
-        head_t,
-        input_ids,
-        label_mask,
-        chunk_size,
-        &grad_loss,
-    )
-    .map_err(|e| anyhow::anyhow!("analytic SFT tail FLCE hidden gradient: {e}"))?;
+    let grad_normed =
+        kiln_flce_kernel::kt_api::fused_linear_cross_entropy_phase_b_backward_unit_grad_kt(
+            &normed, head_t, input_ids, label_mask, chunk_size,
+        )
+        .map_err(|e| anyhow::anyhow!("analytic SFT tail FLCE hidden gradient: {e}"))?;
     rms_norm_backward_pre_final_norm(hidden, final_norm_weight, &grad_normed, rms_norm_eps)
         .context("analytic SFT tail final RMSNorm backward")
 }

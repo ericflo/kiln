@@ -54,7 +54,9 @@
 
 pub mod kt_api;
 pub use kt_api::{
-    FlceError, FlceMatmulProviderKt, FlceProviderKt, fused_linear_cross_entropy_phase_b_kt,
+    FlceError, FlceMatmulProviderKt, FlceProviderKt,
+    fused_linear_cross_entropy_phase_b_backward_unit_grad_kt,
+    fused_linear_cross_entropy_phase_b_kt,
 };
 
 /// Phase 6a/CP-4 (#1082): parallel kt-tape entry that records the FLCE
