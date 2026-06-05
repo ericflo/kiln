@@ -1477,11 +1477,33 @@ impl CudaGraphRunner {
         config: &ModelConfig,
         position: usize,
     ) -> Result<()> {
-        let (cos, sin) = Self::rotary_table_values(config, position);
-        kiln_tensor::cuda_write_host_in_place(rotary_cos_buffer, cos.as_slice())
-            .context("update CUDA graph rotary cos buffer")?;
-        kiln_tensor::cuda_write_host_in_place(rotary_sin_buffer, sin.as_slice())
-            .context("update CUDA graph rotary sin buffer")?;
+        // #34 BUG2 FIX: compute the rotary tables on the GPU via eager's exact
+        // path (`forward::rotary_tables_from_tensor` -> `kt_cos`/`kt_sin`) rather
+        // than host CPU `f32` cos/sin. Host CPU `cos` and GPU `cos` disagree
+        // (range reduction) by ~0.1% at large position*freq; that perturbed ONLY
+        // the RoPE full-attention layers on every replay (GDN has no RoPE and was
+        // bit-identical), propagating to ~1% logit drift that flipped close-call
+        // tokens. Computing on-device makes graph replay bit-identical to eager.
+        let dev = rotary_cos_buffer.device();
+        let inv_freq = crate::forward::compute_rotary_inv_freq(
+            config.rotary_dim(),
+            config.rope_theta,
+            &dev,
+        )?;
+        let pos = Tensor::from_vec_on(dev, vec![position as f32], vec![1])?;
+        let (cos, sin) = crate::forward::rotary_tables_from_tensor(&pos, &inv_freq)?;
+        let cos = cos
+            .to_dtype(rotary_cos_buffer.dtype())?
+            .reshape(rotary_cos_buffer.dims().to_vec())?;
+        let sin = sin
+            .to_dtype(rotary_sin_buffer.dtype())?
+            .reshape(rotary_sin_buffer.dims().to_vec())?;
+        rotary_cos_buffer
+            .slice_set(&cos, 0, 0)
+            .context("update CUDA graph rotary cos buffer (gpu)")?;
+        rotary_sin_buffer
+            .slice_set(&sin, 0, 0)
+            .context("update CUDA graph rotary sin buffer (gpu)")?;
         Ok(())
     }
 
@@ -2736,10 +2758,19 @@ impl CudaGraphRunner {
         device: Device,
         position: usize,
     ) -> Result<Tensor> {
-        let (cos, _) = Self::rotary_table_values(config, position);
-        let len = cos.len();
-        Tensor::from_vec_on(device, cos, vec![1, len])
-            .context("create CUDA graph rotary cos buffer")
+        // #34 BUG2 FIX: GPU rotary (matches eager + `update_rotary_buffers`), not
+        // host CPU cos. This is the capture-time fill; the per-replay refresh is
+        // in `update_rotary_buffers`. Both must be on-device or replay diverges.
+        let inv_freq = crate::forward::compute_rotary_inv_freq(
+            config.rotary_dim(),
+            config.rope_theta,
+            &device,
+        )?;
+        let pos = Tensor::from_vec_on(device, vec![position as f32], vec![1])?;
+        let (cos, _) = crate::forward::rotary_tables_from_tensor(&pos, &inv_freq)?;
+        cos.to_dtype(kiln_tensor::DType::F32)?
+            .contiguous()
+            .context("create CUDA graph rotary cos buffer (gpu)")
     }
 
     #[cfg(feature = "cuda")]
@@ -2748,10 +2779,17 @@ impl CudaGraphRunner {
         device: Device,
         position: usize,
     ) -> Result<Tensor> {
-        let (_, sin) = Self::rotary_table_values(config, position);
-        let len = sin.len();
-        Tensor::from_vec_on(device, sin, vec![1, len])
-            .context("create CUDA graph rotary sin buffer")
+        // #34 BUG2 FIX: GPU rotary (see `new_rotary_cos_buffer`).
+        let inv_freq = crate::forward::compute_rotary_inv_freq(
+            config.rotary_dim(),
+            config.rope_theta,
+            &device,
+        )?;
+        let pos = Tensor::from_vec_on(device, vec![position as f32], vec![1])?;
+        let (_, sin) = crate::forward::rotary_tables_from_tensor(&pos, &inv_freq)?;
+        sin.to_dtype(kiln_tensor::DType::F32)?
+            .contiguous()
+            .context("create CUDA graph rotary sin buffer (gpu)")
     }
 
     /// #1082 box-102 FIX: graph-stable `[1, 1, hidden_size]` PRE-final-norm
