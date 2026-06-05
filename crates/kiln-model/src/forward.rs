@@ -18239,11 +18239,10 @@ pub fn gqa_attention_prepare_prefill(
 /// - any kt borrow / matmul / copy-back failure (the candle path then runs).
 ///
 /// Bit-exact to the candle fallback by construction: each matmul bottoms out
-/// in the SAME cublasLt GEMM the candle `broadcast_matmul` lowers to on CUDA
-/// (and the SAME `cuda_matmul` entry the validated lm_head / SwiGLU matmul
-/// migrations dispatch to); the intervening scale/mask/softmax ops are
-/// physically unchanged candle tensors. NVTX range `kiln/gqa_sdpa_kt`
-/// brackets the migrated region.
+/// in the same cublasLt GEMM family the candle `broadcast_matmul` lowers to on
+/// CUDA; the score matmul uses the RHS-transposed entry to avoid materialising
+/// `k^T`. The intervening scale/mask/softmax ops are physically unchanged
+/// candle tensors. NVTX range `kiln/gqa_sdpa_kt` brackets the migrated region.
 #[cfg(feature = "cuda")]
 fn try_kt_gqa_sdpa_matmuls(
     q: &Tensor,
@@ -18310,16 +18309,9 @@ fn try_kt_gqa_sdpa_matmuls(
     kiln_nvtx::range!(c"kiln/gqa_sdpa_kt");
 
     // --- Score matmul: scores = q @ kᵀ, [B, nq, T, T] ---
-    // cublasLt needs contiguous operands; kᵀ ([B, nq, hd, T]) is a transpose
-    // view, so materialize it contiguous (same as the candle path's `k.t()`,
-    // which `broadcast_matmul` also makes contiguous internally on CUDA).
     // #1082 forward-flip: q/k/v are already kt; run the GEMMs, scale/mask/
     // softmax all kt-native — no candle borrow / copy-out round-trips.
-    let k_t = match k.transpose(2, 3).and_then(|t| t.contiguous()) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
-    let attn_scores = match kiln_tensor::cuda_matmul(q, &k_t) {
+    let attn_scores = match kiln_tensor::cuda_matmul_rhs_transposed(q, k) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
