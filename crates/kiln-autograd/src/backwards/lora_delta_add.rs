@@ -69,7 +69,7 @@
 //! the tape node. The tape walker pairs each `Some(grad)` with the
 //! corresponding `input_ids[i]` it captured at record time.
 
-use kiln_tensor::ops::{matmul, matmul_lhs_transposed, mul_scalar};
+use kiln_tensor::ops::{matmul, matmul_lhs_transposed, matmul_rhs_transposed, mul_scalar};
 use kiln_tensor::{Result, Tensor, bail};
 
 use crate::BackwardOp;
@@ -191,12 +191,9 @@ impl BackwardOp for LoraDeltaAddBackward {
             }
         };
 
-        // Recompute h = x @ A^T.  (A^T = transpose then contiguous; the
-        // transpose is zero-copy.)
-        let a_t = a.transpose(0, 1)?.contiguous()?; // [in_features, rank]
-        log_stage("a_t_contiguous", &a_t);
-        let h = matmul(&x, &a_t)?; // [rows, rank]
-        log_stage("h_matmul", &h);
+        // Recompute h = x @ A^T without materialising A^T.
+        let h = matmul_rhs_transposed(&x, &a)?; // [rows, rank]
+        log_stage("h_rhs_t_matmul", &h);
 
         // grad_d = scale * grad_out.  Single elementwise pass.
         let g_scaled = mul_scalar(grad_output, self.scale)?; // [rows, out_features]
