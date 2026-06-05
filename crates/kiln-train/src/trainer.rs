@@ -6195,6 +6195,7 @@ fn analytic_sft_tail_grad_pre_final_norm(
         label_mask,
         rms_norm_eps,
         chunk_size,
+        None,
     )
 }
 
@@ -6226,6 +6227,40 @@ fn analytic_sft_tail_grad_from_normed_pre_final_norm(
         label_mask,
         rms_norm_eps,
         chunk_size,
+        None,
+    )
+}
+
+fn analytic_sft_tail_grad_from_normed_pre_final_norm_with_flce_metadata(
+    hidden: &Tensor,
+    normed: &Tensor,
+    final_norm_weight: &Tensor,
+    head_t: &Tensor,
+    input_ids: &[u32],
+    label_mask: &[bool],
+    rms_norm_eps: f64,
+    chunk_size: usize,
+    active_metadata: Option<&kiln_flce_kernel::kt_api::FlceActiveMetadata>,
+) -> Result<Tensor> {
+    validate_analytic_sft_tail_grad_inputs(
+        hidden,
+        Some(normed),
+        final_norm_weight,
+        head_t,
+        input_ids,
+        label_mask,
+        chunk_size,
+    )?;
+    analytic_sft_tail_grad_from_validated_normed_pre_final_norm(
+        hidden,
+        normed,
+        final_norm_weight,
+        head_t,
+        input_ids,
+        label_mask,
+        rms_norm_eps,
+        chunk_size,
+        active_metadata,
     )
 }
 
@@ -6238,12 +6273,18 @@ fn analytic_sft_tail_grad_from_validated_normed_pre_final_norm(
     label_mask: &[bool],
     rms_norm_eps: f64,
     chunk_size: usize,
+    active_metadata: Option<&kiln_flce_kernel::kt_api::FlceActiveMetadata>,
 ) -> Result<Tensor> {
-    let grad_normed =
+    let grad_normed = if let Some(active_metadata) = active_metadata {
+        kiln_flce_kernel::kt_api::fused_linear_cross_entropy_phase_b_backward_unit_grad_with_metadata_kt(
+            normed, head_t, input_ids, label_mask, chunk_size, active_metadata,
+        )
+    } else {
         kiln_flce_kernel::kt_api::fused_linear_cross_entropy_phase_b_backward_unit_grad_kt(
             normed, head_t, input_ids, label_mask, chunk_size,
         )
-        .map_err(|e| anyhow::anyhow!("analytic SFT tail FLCE hidden gradient: {e}"))?;
+    }
+    .map_err(|e| anyhow::anyhow!("analytic SFT tail FLCE hidden gradient: {e}"))?;
     rms_norm_backward_pre_final_norm(hidden, final_norm_weight, &grad_normed, rms_norm_eps)
         .context("analytic SFT tail final RMSNorm backward")
 }
@@ -7674,6 +7715,7 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
     // scalar `loss_val`; the gradient comes entirely from this tail seed,
     // outside the per-segment tape scopes.
     let mut normed_for_tail = None;
+    let mut flce_active_metadata_for_tail = None;
     let loss_val = if use_flce() && is_cuda_device(device) {
         // (#1082 H-FLCE / candle-drop) FLCE loss-VALUE via the kt-native forward
         // `fused_linear_cross_entropy_phase_b_kt` — taking the kt `normed` hidden
@@ -7684,7 +7726,8 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
         // The candle FLCE provider opt-in (`KILN_CUDA_FLCE`) was removed in the
         // candle drop — this is now the sole FLCE path.
         let normed = model_forward_final_norm(&final_hidden_kt, weights, model_config)?;
-        let loss_kt = kiln_flce_kernel::kt_api::fused_linear_cross_entropy_phase_b_kt(
+        let (loss_kt, active_metadata) =
+            kiln_flce_kernel::kt_api::fused_linear_cross_entropy_phase_b_with_metadata_kt(
             &normed,
             &weights.embed_tokens_t,
             input_ids,
@@ -7695,6 +7738,7 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
             anyhow::anyhow!("ckpt-kt kt-native fused linear cross-entropy (final boundary): {e}")
         })?;
         let loss_val = loss_kt.to_scalar::<f32>()? as f64;
+        flce_active_metadata_for_tail = active_metadata;
         normed_for_tail = Some(normed);
         loss_val
     } else {
@@ -7702,7 +7746,7 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
         cross_entropy_loss(&logits, input_ids, label_mask, device)?
     };
     let tail_grad = match normed_for_tail.as_ref() {
-        Some(normed) => analytic_sft_tail_grad_from_normed_pre_final_norm(
+        Some(normed) => analytic_sft_tail_grad_from_normed_pre_final_norm_with_flce_metadata(
             &final_hidden_kt,
             normed,
             &weights.final_norm,
@@ -7711,6 +7755,7 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
             label_mask,
             model_config.rms_norm_eps,
             DEFAULT_CHUNK_SIZE,
+            flce_active_metadata_for_tail.as_ref(),
         ),
         None => analytic_sft_tail_grad_pre_final_norm(
             &final_hidden_kt,

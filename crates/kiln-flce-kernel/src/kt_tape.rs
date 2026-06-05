@@ -78,7 +78,8 @@ use kiln_tensor::{
 use crate::kt_api::{
     fused_linear_cross_entropy_phase_b_backward_kt,
     fused_linear_cross_entropy_phase_b_backward_unit_grad_kt,
-    fused_linear_cross_entropy_phase_b_kt, FlceError,
+    fused_linear_cross_entropy_phase_b_backward_unit_grad_with_metadata_kt,
+    fused_linear_cross_entropy_phase_b_with_metadata_kt, FlceActiveMetadata, FlceError,
 };
 
 /// Returns `true` when `(hidden, head_t)` is inside the kt-tape FLCE
@@ -158,6 +159,10 @@ pub struct CudaFlcePhaseBBackward {
     pub label_mask: Vec<bool>,
     /// Vocab chunk size used by the forward pass.
     pub chunk_size: usize,
+    /// Active shifted-token metadata built by the forward. Unit-root SFT
+    /// backward can reuse this instead of rescanning the long-context mask and
+    /// uploading the same active-index tensor again.
+    pub active_metadata: Option<FlceActiveMetadata>,
     /// The recorded loss is used as the tape root, so the upstream seed is the
     /// implicit unit scalar `dL/dL = 1`. This keeps the production SFT root off
     /// the scalar D2H path used by the generic seeded backward while preserving
@@ -197,13 +202,24 @@ impl BackwardOp for CudaFlcePhaseBBackward {
         }
 
         let dhidden = if self.unit_root_grad {
-            fused_linear_cross_entropy_phase_b_backward_unit_grad_kt(
-                &self.hidden,
-                &self.head_t,
-                &self.input_ids,
-                &self.label_mask,
-                self.chunk_size,
-            )
+            if let Some(active_metadata) = self.active_metadata.as_ref() {
+                fused_linear_cross_entropy_phase_b_backward_unit_grad_with_metadata_kt(
+                    &self.hidden,
+                    &self.head_t,
+                    &self.input_ids,
+                    &self.label_mask,
+                    self.chunk_size,
+                    active_metadata,
+                )
+            } else {
+                fused_linear_cross_entropy_phase_b_backward_unit_grad_kt(
+                    &self.hidden,
+                    &self.head_t,
+                    &self.input_ids,
+                    &self.label_mask,
+                    self.chunk_size,
+                )
+            }
         } else {
             fused_linear_cross_entropy_phase_b_backward_kt(
                 &self.hidden,
@@ -332,8 +348,9 @@ fn fused_linear_cross_entropy_phase_b_via_kt_tape_impl(
     }
 
     // Forward — bit-exact with `fused_linear_cross_entropy_phase_b_kt`
-    // (same kt-typed call).
-    let loss = fused_linear_cross_entropy_phase_b_kt(
+    // (same kt-typed call), while saving the active metadata it already
+    // computes for the unit-root backward.
+    let (loss, active_metadata) = fused_linear_cross_entropy_phase_b_with_metadata_kt(
         hidden, head_t, input_ids, label_mask, chunk_size,
     )
     .map_err(|e: FlceError| {
@@ -350,6 +367,7 @@ fn fused_linear_cross_entropy_phase_b_via_kt_tape_impl(
         input_ids: input_ids.to_vec(),
         label_mask: label_mask.to_vec(),
         chunk_size,
+        active_metadata,
         unit_root_grad,
     };
     tape.record(&loss, &[hidden, head_t], Box::new(bwd) as Box<dyn BackwardOp>);
@@ -544,6 +562,7 @@ mod tests {
             input_ids: ids.clone(),
             label_mask: mask.clone(),
             chunk_size: 4,
+            active_metadata: None,
             unit_root_grad: false,
         };
 

@@ -139,6 +139,18 @@ pub trait FlceMatmulProviderKt: Send + Sync + std::fmt::Debug {
 /// points (analogous to `kiln_train::flce_candle_shim::FlceProvider`).
 pub type FlceProviderKt = Arc<dyn FlceMatmulProviderKt>;
 
+/// Active shifted-token metadata produced by the FLCE forward pass.
+///
+/// The scalar SFT root and the checkpointed SFT tail both run a unit-seed
+/// FLCE backward immediately after computing the loss value. Saving the
+/// shifted active-row index tensor and labels lets that backward skip the
+/// repeated long-context mask scan and device index upload.
+#[derive(Debug, Clone)]
+pub struct FlceActiveMetadata {
+    active_idx: KtTensor,
+    active_labels: Vec<u32>,
+}
+
 /// kt-typed entry point for FLCE Phase B forward.
 ///
 /// Re-implements the candle Phase A chunked log-sum-exp reduction
@@ -168,10 +180,9 @@ pub type FlceProviderKt = Arc<dyn FlceMatmulProviderKt>;
 ///
 /// # Backward
 ///
-/// Backward (`dhidden`) is not yet implemented in the kt-typed path —
-/// it currently lives in the candle Phase B `CustomOp1` and will be
-/// migrated once kt-tensor has the necessary autograd hooks. Until
-/// then this entry point is forward-only.
+/// See [`fused_linear_cross_entropy_phase_b_backward_kt`] and
+/// [`fused_linear_cross_entropy_phase_b_backward_unit_grad_kt`] for the
+/// kt-typed manual backward entries.
 pub fn fused_linear_cross_entropy_phase_b_kt(
     hidden: &KtTensor,
     head_t: &KtTensor,
@@ -179,6 +190,22 @@ pub fn fused_linear_cross_entropy_phase_b_kt(
     label_mask: &[bool],
     chunk_size: usize,
 ) -> Result<KtTensor, FlceError> {
+    let (loss, _) = fused_linear_cross_entropy_phase_b_with_metadata_kt(
+        hidden, head_t, input_ids, label_mask, chunk_size,
+    )?;
+    Ok(loss)
+}
+
+/// Same as [`fused_linear_cross_entropy_phase_b_kt`], plus reusable active
+/// shifted-token metadata for the common unit-root backward that follows.
+#[doc(hidden)]
+pub fn fused_linear_cross_entropy_phase_b_with_metadata_kt(
+    hidden: &KtTensor,
+    head_t: &KtTensor,
+    input_ids: &[u32],
+    label_mask: &[bool],
+    chunk_size: usize,
+) -> Result<(KtTensor, Option<FlceActiveMetadata>), FlceError> {
     // ROCm host-staging (Phase R.7): this crate is a PURE-KT COMPOSITE built
     // out of generic `kiln_tensor` ops (`matmul`, `index_select`,
     // `scatter_add`, `max_axis`, `sum_axis`, ...). Those generic `DeviceOp*`
@@ -196,14 +223,15 @@ pub fn fused_linear_cross_entropy_phase_b_kt(
     if let KtDevice::Rocm(dev_idx) = hidden.device() {
         let hidden_host = rocm_stage_to_host(hidden)?;
         let head_host = rocm_stage_to_host(head_t)?;
-        let loss_host = fused_linear_cross_entropy_phase_b_kt(
+        let (loss_host, _) = fused_linear_cross_entropy_phase_b_with_metadata_kt(
             &hidden_host,
             &head_host,
             input_ids,
             label_mask,
             chunk_size,
         )?;
-        return rocm_upload_from_host(&loss_host, dev_idx);
+        let loss_roc = rocm_upload_from_host(&loss_host, dev_idx)?;
+        return Ok((loss_roc, None));
     }
 
     let seq_len = input_ids.len();
@@ -243,31 +271,18 @@ pub fn fused_linear_cross_entropy_phase_b_kt(
 
     // Sub-2 seq lens have no targets to predict; return scalar 0.
     if seq_len < 2 {
-        return zero_scalar();
+        return Ok((zero_scalar()?, None));
     }
 
     let vocab_size = head_dims[1];
 
-    // Gather active positions: indices into hidden[0, :seq_len-1] that
-    // contribute to the loss (their corresponding shifted label is
-    // unmasked). Mirrors `active_positions` in the candle reference.
-    let shift_mask = &label_mask[1..]; // length seq_len - 1
-    let shift_labels: Vec<u32> = input_ids[1..].to_vec();
-    let active_positions: Vec<u32> = shift_mask
-        .iter()
-        .enumerate()
-        .filter_map(|(i, &m)| if m { Some(i as u32) } else { None })
-        .collect();
-
-    if active_positions.is_empty() {
-        return zero_scalar();
-    }
-
-    let num_active = active_positions.len();
-    let active_labels: Vec<u32> = active_positions
-        .iter()
-        .map(|&i| shift_labels[i as usize])
-        .collect();
+    let Some(active_metadata) =
+        build_flce_active_metadata(hidden, input_ids, label_mask, vocab_size, "kt-flce")?
+    else {
+        return Ok((zero_scalar()?, None));
+    };
+    let num_active = active_metadata.active_labels.len();
+    let active_labels = active_metadata.active_labels.as_slice();
 
     // Build `active_hidden` of shape `[num_active, hidden_size]` in F32.
     //
@@ -291,9 +306,8 @@ pub fn fused_linear_cross_entropy_phase_b_kt(
     // (`fused_linear_cross_entropy_phase_b_backward_kt`) and the H6 CE adapter
     // (`tape_forward::try_tape_cross_entropy_from_logits_kt`) both use.
     let device: KtDevice = hidden.device();
-    let active_idx = KtTensor::from_vec_on(device, active_positions.clone(), vec![num_active])
-        .map_err(FlceError::Kt)?;
-    let active_hidden = index_select(&shift_hidden, 0, &active_idx).map_err(FlceError::Kt)?;
+    let active_hidden =
+        index_select(&shift_hidden, 0, &active_metadata.active_idx).map_err(FlceError::Kt)?;
     let active_hidden_f32 = to_f32(&active_hidden).map_err(FlceError::Kt)?;
     let head_t_f32 = to_f32(head_t).map_err(FlceError::Kt)?;
 
@@ -450,7 +464,7 @@ pub fn fused_linear_cross_entropy_phase_b_kt(
     // Per-token loss = log_sum_exp - correct_logit. Mean over active rows.
     let per_token_loss = sub(&log_sum_exp, &correct_logit_1d).map_err(FlceError::Kt)?;
     let loss = mean_all(&per_token_loss).map_err(FlceError::Kt)?;
-    Ok(loss)
+    Ok((loss, Some(active_metadata)))
 }
 
 /// kt-typed FLCE Phase B backward — compute `dhidden` from `grad_loss`.
@@ -515,6 +529,7 @@ pub fn fused_linear_cross_entropy_phase_b_backward_kt(
         label_mask,
         chunk_size,
         Some(grad_loss),
+        None,
     )
 }
 
@@ -535,7 +550,29 @@ pub fn fused_linear_cross_entropy_phase_b_backward_unit_grad_kt(
     chunk_size: usize,
 ) -> Result<KtTensor, FlceError> {
     fused_linear_cross_entropy_phase_b_backward_impl_kt(
-        hidden, head_t, input_ids, label_mask, chunk_size, None,
+        hidden, head_t, input_ids, label_mask, chunk_size, None, None,
+    )
+}
+
+/// Unit-root FLCE backward that reuses metadata returned by
+/// [`fused_linear_cross_entropy_phase_b_with_metadata_kt`].
+#[doc(hidden)]
+pub fn fused_linear_cross_entropy_phase_b_backward_unit_grad_with_metadata_kt(
+    hidden: &KtTensor,
+    head_t: &KtTensor,
+    input_ids: &[u32],
+    label_mask: &[bool],
+    chunk_size: usize,
+    active_metadata: &FlceActiveMetadata,
+) -> Result<KtTensor, FlceError> {
+    fused_linear_cross_entropy_phase_b_backward_impl_kt(
+        hidden,
+        head_t,
+        input_ids,
+        label_mask,
+        chunk_size,
+        None,
+        Some(active_metadata),
     )
 }
 
@@ -546,6 +583,7 @@ fn fused_linear_cross_entropy_phase_b_backward_impl_kt(
     label_mask: &[bool],
     chunk_size: usize,
     grad_loss: Option<&KtTensor>,
+    active_metadata: Option<&FlceActiveMetadata>,
 ) -> Result<KtTensor, FlceError> {
     // ROCm host-staging — same rationale as the forward entry point above:
     // the generic-op composite has no `rocm_fwd` arm, so stage the device
@@ -567,6 +605,7 @@ fn fused_linear_cross_entropy_phase_b_backward_impl_kt(
             label_mask,
             chunk_size,
             grad_host.as_ref(),
+            None,
         )?;
         return rocm_upload_from_host(&dhidden_host, dev_idx);
     }
@@ -609,37 +648,36 @@ fn fused_linear_cross_entropy_phase_b_backward_impl_kt(
     let hidden_size = hidden_dims[2];
     let vocab_size = head_dims[1];
     let original_dtype = hidden.dtype();
+    let device: KtDevice = hidden.device();
 
     // seq_len < 2: no targets, gradient is zero everywhere.
     if seq_len < 2 {
         return zeros_like_hidden_in_dtype(&hidden_dims, original_dtype);
     }
 
-    // Active row indices in the shifted positions, mirroring forward.
-    let shift_mask = &label_mask[1..]; // length seq_len - 1
-    let shift_labels: Vec<u32> = input_ids[1..].to_vec();
-    let active_positions: Vec<u32> = shift_mask
-        .iter()
-        .enumerate()
-        .filter_map(|(i, &m)| if m { Some(i as u32) } else { None })
-        .collect();
-
-    if active_positions.is_empty() {
-        return zeros_like_hidden_in_dtype(&hidden_dims, original_dtype);
-    }
-
-    let num_active = active_positions.len();
-    let active_labels: Vec<u32> = active_positions
-        .iter()
-        .map(|&i| shift_labels[i as usize])
-        .collect();
-    for &label in &active_labels {
-        if label as usize >= vocab_size {
-            return Err(FlceError::msg(format!(
-                "kt-flce-bwd: label {label} >= vocab_size {vocab_size}"
-            )));
+    let active_metadata_owned;
+    let active_metadata = match active_metadata {
+        Some(metadata) => {
+            validate_flce_active_metadata(metadata, device, vocab_size, "kt-flce-bwd")?;
+            metadata
         }
-    }
+        None => {
+            active_metadata_owned = build_flce_active_metadata(
+                hidden,
+                input_ids,
+                label_mask,
+                vocab_size,
+                "kt-flce-bwd",
+            )?;
+            match active_metadata_owned.as_ref() {
+                Some(metadata) => metadata,
+                None => return zeros_like_hidden_in_dtype(&hidden_dims, original_dtype),
+            }
+        }
+    };
+    let num_active = active_metadata.active_labels.len();
+    let active_labels = active_metadata.active_labels.as_slice();
+    let active_idx = &active_metadata.active_idx;
 
     // Build active_hidden F32 the same way as forward.
     let hidden_2d = hidden.squeeze(0).map_err(FlceError::Kt)?;
@@ -655,10 +693,7 @@ fn fused_linear_cross_entropy_phase_b_backward_impl_kt(
     // CPU-only `from_vec` / `zeros_cpu` constructors would break the
     // chain the moment `hidden` lives on CUDA. `*_on` is the
     // device-parametric companion that routes to the matching backend.
-    let device: KtDevice = hidden.device();
-    let active_idx = KtTensor::from_vec_on(device, active_positions.clone(), vec![num_active])
-        .map_err(FlceError::Kt)?;
-    let active_hidden = index_select(&shift_hidden, 0, &active_idx).map_err(FlceError::Kt)?;
+    let active_hidden = index_select(&shift_hidden, 0, active_idx).map_err(FlceError::Kt)?;
     let active_hidden_f32 = to_f32(&active_hidden).map_err(FlceError::Kt)?;
     let head_t_f32 = to_f32(head_t).map_err(FlceError::Kt)?;
 
@@ -834,7 +869,7 @@ fn fused_linear_cross_entropy_phase_b_backward_impl_kt(
     // never contributed (we used hidden[..seq_len-1]) so its gradient
     // stays zero.
     let grad_hidden_2d =
-        scatter_add(&dhidden_active, 0, &active_idx, seq_len).map_err(FlceError::Kt)?;
+        scatter_add(&dhidden_active, 0, active_idx, seq_len).map_err(FlceError::Kt)?;
 
     // Restore the batch dim.
     let grad_hidden_3d = grad_hidden_2d.unsqueeze(0).map_err(FlceError::Kt)?;
@@ -846,6 +881,88 @@ fn fused_linear_cross_entropy_phase_b_backward_impl_kt(
         kiln_tensor::ops::cast(&grad_hidden_3d, original_dtype).map_err(FlceError::Kt)?
     };
     Ok(out)
+}
+
+fn build_flce_active_metadata(
+    hidden: &KtTensor,
+    input_ids: &[u32],
+    label_mask: &[bool],
+    vocab_size: usize,
+    context: &str,
+) -> Result<Option<FlceActiveMetadata>, FlceError> {
+    if input_ids.len() < 2 {
+        return Ok(None);
+    }
+
+    let mut active_positions = Vec::new();
+    let mut active_labels = Vec::new();
+    for (shift_idx, &is_active) in label_mask[1..].iter().enumerate() {
+        if !is_active {
+            continue;
+        }
+        let label = input_ids[shift_idx + 1];
+        if label as usize >= vocab_size {
+            return Err(FlceError::msg(format!(
+                "{context}: label {label} >= vocab_size {vocab_size}"
+            )));
+        }
+        active_positions.push(shift_idx as u32);
+        active_labels.push(label);
+    }
+
+    if active_positions.is_empty() {
+        return Ok(None);
+    }
+
+    let num_active = active_positions.len();
+    let active_idx =
+        KtTensor::from_vec_on(hidden.device(), active_positions, vec![num_active])
+            .map_err(FlceError::Kt)?;
+    Ok(Some(FlceActiveMetadata {
+        active_idx,
+        active_labels,
+    }))
+}
+
+fn validate_flce_active_metadata(
+    metadata: &FlceActiveMetadata,
+    device: KtDevice,
+    vocab_size: usize,
+    context: &str,
+) -> Result<(), FlceError> {
+    let num_active = metadata.active_labels.len();
+    if num_active == 0 {
+        return Err(FlceError::msg(format!(
+            "{context}: active metadata must contain at least one row"
+        )));
+    }
+    if metadata.active_idx.dtype() != KtDType::U32 {
+        return Err(FlceError::msg(format!(
+            "{context}: active_idx dtype {} != U32",
+            metadata.active_idx.dtype()
+        )));
+    }
+    if metadata.active_idx.device() != device {
+        return Err(FlceError::msg(format!(
+            "{context}: active_idx device {} != hidden device {}",
+            metadata.active_idx.device().short_name(),
+            device.short_name()
+        )));
+    }
+    if metadata.active_idx.shape() != [num_active] {
+        return Err(FlceError::msg(format!(
+            "{context}: active_idx shape {:?} != [{num_active}]",
+            metadata.active_idx.shape()
+        )));
+    }
+    for &label in &metadata.active_labels {
+        if label as usize >= vocab_size {
+            return Err(FlceError::msg(format!(
+                "{context}: label {label} >= vocab_size {vocab_size}"
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Helper: build a zero `[1, seq_len, hidden_size]` tensor in the given
@@ -1323,6 +1440,50 @@ mod tests {
             assert!(
                 (a - b).abs() <= 1e-6,
                 "unit grad mismatch at {i}: seeded={a} unit={b}"
+            );
+        }
+    }
+
+    #[test]
+    fn fused_linear_cross_entropy_phase_b_backward_reuses_forward_metadata() {
+        let seq_len = 8;
+        let hidden_size = 4;
+        let vocab_size = 16;
+
+        let hidden_vec: Vec<f32> = (0..seq_len * hidden_size)
+            .map(|i| (i as f32 * 0.021).sin() * 0.2)
+            .collect();
+        let head_vec: Vec<f32> = (0..hidden_size * vocab_size)
+            .map(|i| ((i as f32 + 7.0) * 0.009).cos() * 0.15)
+            .collect();
+        let ids: Vec<u32> = (0..seq_len as u32)
+            .map(|i| (i * 11 + 5) % vocab_size as u32)
+            .collect();
+        let mask: Vec<bool> = (0..seq_len).map(|i| i != 0 && i != 4).collect();
+
+        let hidden = KtTensor::from_vec(hidden_vec, vec![1, seq_len, hidden_size]).unwrap();
+        let head = KtTensor::from_vec(head_vec, vec![hidden_size, vocab_size]).unwrap();
+
+        let (_loss, metadata) =
+            fused_linear_cross_entropy_phase_b_with_metadata_kt(&hidden, &head, &ids, &mask, 4)
+                .unwrap();
+        let metadata = metadata.expect("active metadata");
+        let regular = fused_linear_cross_entropy_phase_b_backward_unit_grad_kt(
+            &hidden, &head, &ids, &mask, 4,
+        )
+        .unwrap();
+        let reused = fused_linear_cross_entropy_phase_b_backward_unit_grad_with_metadata_kt(
+            &hidden, &head, &ids, &mask, 4, &metadata,
+        )
+        .unwrap();
+
+        let regular = read_f32_vec(&regular);
+        let reused = read_f32_vec(&reused);
+        assert_eq!(regular.len(), reused.len());
+        for (i, (a, b)) in regular.iter().zip(reused.iter()).enumerate() {
+            assert!(
+                (a - b).abs() <= 1e-6,
+                "metadata grad mismatch at {i}: regular={a} reused={b}"
             );
         }
     }
