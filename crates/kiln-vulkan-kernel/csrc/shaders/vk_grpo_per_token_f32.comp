@@ -2,14 +2,23 @@
 //
 // policy_logprob = correct_logit - (log(global_sumexp) + global_max)
 // log_ratio      = policy_logprob - ref_logprob
-// loss_row       = -min(ratio * adv, clamp(ratio, 1-eps, 1+eps) * adv)
-//                  + kl_coeff * log_ratio
+//
+// is_mode:
+//   0 token:     -min(ratio * adv, clamp(ratio, lo, hi) * adv)
+//   1 cispo:     -detach(clamp(ratio, lo, hi) * adv) * policy_logprob
+//   2 reinforce: -adv
+//
+// kl_mode:
+//   0 none
+//   1 k1: kl_coeff * log_ratio
+//   3 k3: kl_coeff * (exp(-log_ratio) - 1 + log_ratio)
 //
 // coeff[row] stores d(loss_row)/d(policy_logprob). The backward shader
 // multiplies it by grad_out / num_active and by d logprob / d logits.
 //
 // Push constants:
-//   [num_active, advantage_bits, clip_epsilon_bits, kl_coeff_bits]
+//   [num_active, advantage_bits, clip_low_bits, clip_high_bits,
+//    kl_coeff_bits, kl_mode, is_mode]
 // Bindings:
 //   global_max, global_sumexp, correct, ref_logprob, out_loss, out_coeff
 
@@ -21,8 +30,11 @@ layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
 layout(push_constant) uniform Parameters {
     uint num_active;
     uint advantage_bits;
-    uint clip_epsilon_bits;
+    uint clip_low_bits;
+    uint clip_high_bits;
     uint kl_coeff_bits;
+    uint kl_mode;
+    uint is_mode;
 };
 
 layout(binding = 0) readonly  buffer GMaxBuf      { float global_max[]; };
@@ -37,25 +49,49 @@ void main() {
     if (row >= num_active) return;
 
     float advantage = uintBitsToFloat(advantage_bits);
-    float clip_eps = uintBitsToFloat(clip_epsilon_bits);
+    float clip_low = uintBitsToFloat(clip_low_bits);
+    float clip_high = uintBitsToFloat(clip_high_bits);
     float kl_coeff = uintBitsToFloat(kl_coeff_bits);
 
     float lse = log(global_sumexp[row]) + global_max[row];
     float policy_logprob = correct[row] - lse;
     float log_ratio = policy_logprob - ref_logprob[row];
     float ratio = exp(log_ratio);
-    float lo = 1.0 - clip_eps;
-    float hi = 1.0 + clip_eps;
+    float lo = 1.0 - clip_low;
+    float hi = 1.0 + clip_high;
     float clipped_ratio = clamp(ratio, lo, hi);
 
-    float surr1 = ratio * advantage;
-    float surr2 = clipped_ratio * advantage;
-    bool take_surr1 = surr1 <= surr2;
-    float surrogate = take_surr1 ? surr1 : surr2;
+    float kl_penalty = 0.0;
+    float kl_grad = 0.0;
+    if (kl_mode == 1u) {
+        kl_penalty = kl_coeff * log_ratio;
+        kl_grad = kl_coeff;
+    } else if (kl_mode == 3u) {
+        float exp_neg = exp(-log_ratio);
+        kl_penalty = kl_coeff * (exp_neg - 1.0 + log_ratio);
+        kl_grad = kl_coeff * (1.0 - exp_neg);
+    }
 
-    float d_clipped = (ratio >= lo && ratio <= hi) ? ratio : 0.0;
-    float d_surrogate = take_surr1 ? (advantage * ratio) : (advantage * d_clipped);
+    float loss = 0.0;
+    float policy_coeff = 0.0;
+    if (is_mode == 1u) {
+        float weight = clipped_ratio * advantage;
+        loss = -weight * policy_logprob;
+        policy_coeff = -weight;
+    } else if (is_mode == 2u) {
+        loss = -advantage;
+        policy_coeff = -advantage;
+    } else {
+        float surr1 = ratio * advantage;
+        float surr2 = clipped_ratio * advantage;
+        bool take_surr1 = surr1 <= surr2;
+        float surrogate = take_surr1 ? surr1 : surr2;
+        float d_clipped = (ratio >= lo && ratio <= hi) ? ratio : 0.0;
+        float d_surrogate = take_surr1 ? (advantage * ratio) : (advantage * d_clipped);
+        loss = -surrogate;
+        policy_coeff = -d_surrogate;
+    }
 
-    per_row_loss[row] = -surrogate + kl_coeff * log_ratio;
-    coeff[row] = -d_surrogate + kl_coeff;
+    per_row_loss[row] = loss + kl_penalty;
+    coeff[row] = policy_coeff + kl_grad;
 }

@@ -64,18 +64,20 @@
 
 use kiln_autograd::{BackwardOp, Tape};
 use kiln_tensor::{
-    bail, DType as KtDType, Device as KtDevice, Result as KtResult, Tensor as KtTensor,
+    DType as KtDType, Device as KtDevice, Result as KtResult, Tensor as KtTensor, bail,
 };
 
 use crate::kt_api::{
-    opd_top_k_reverse_kl_kt, opd_top_k_reverse_kl_per_position_kt,
-    opd_top_k_reverse_kl_phase_b_bwd_composite_kt, OpdLossError, OpdLossOutputKt,
+    OpdActiveMetadata, OpdLossError, OpdLossOutputKt,
+    opd_top_k_reverse_kl_per_position_with_metadata_kt,
+    opd_top_k_reverse_kl_phase_b_bwd_composite_kt, opd_top_k_reverse_kl_with_metadata_kt,
 };
 
 #[cfg(any(feature = "cuda", feature = "rocm"))]
 use crate::kt_api::{
-    opd_top_k_reverse_kl_phase_b_bwd_kt,
-    opd_top_k_reverse_kl_phase_b_bwd_scalar_mean_unit_grad_kt,
+    opd_top_k_reverse_kl_phase_b_bwd_kt, opd_top_k_reverse_kl_phase_b_bwd_scalar_mean_unit_grad_kt,
+    opd_top_k_reverse_kl_phase_b_bwd_scalar_mean_unit_grad_with_metadata_kt,
+    opd_top_k_reverse_kl_phase_b_bwd_with_metadata_kt,
 };
 
 /// Returns `true` when `(hidden, head_t, top_k)` is inside the kt-tape
@@ -178,6 +180,10 @@ pub struct CudaOpdTopKReverseKlPhaseBBackward {
     /// seed `dL/dL = 1`. CUDA/ROCm can dispatch the dedicated unit-seed fused
     /// backward in this case; other modes/backends keep the generic seeded path.
     pub scalar_mean_unit_root_grad: bool,
+    /// Small device-resident row-map/top-K tensors returned by the forward.
+    /// CUDA/ROCm fused backward can reuse them instead of rebuilding and
+    /// reuploading host metadata immediately after the loss root is evaluated.
+    pub active_metadata: Option<OpdActiveMetadata>,
 }
 
 impl BackwardOp for CudaOpdTopKReverseKlPhaseBBackward {
@@ -217,10 +223,7 @@ impl BackwardOp for CudaOpdTopKReverseKlPhaseBBackward {
         // GPU backends dispatch here. CPU / Metal / Vulkan fall through to the
         // device-agnostic analytic composite below.
         #[cfg(any(feature = "cuda", feature = "rocm"))]
-        if matches!(
-            self.hidden.device(),
-            KtDevice::Cuda(_) | KtDevice::Rocm(_)
-        ) {
+        if matches!(self.hidden.device(), KtDevice::Cuda(_) | KtDevice::Rocm(_)) {
             // Shape + device + dtype checks happen inside
             // `opd_top_k_reverse_kl_phase_b_bwd_kt` (it validates
             // grad_loss against output_mode + active_count); we
@@ -234,25 +237,51 @@ impl BackwardOp for CudaOpdTopKReverseKlPhaseBBackward {
                         grad_output.shape()
                     )));
                 }
-                opd_top_k_reverse_kl_phase_b_bwd_scalar_mean_unit_grad_kt(
-                    &self.hidden,
-                    &self.head_t,
-                    &self.teacher_topk_indices,
-                    &self.teacher_topk_logprobs,
-                    &self.label_mask,
-                    self.top_k,
-                )
+                if let Some(active_metadata) = self.active_metadata.as_ref() {
+                    opd_top_k_reverse_kl_phase_b_bwd_scalar_mean_unit_grad_with_metadata_kt(
+                        &self.hidden,
+                        &self.head_t,
+                        &self.teacher_topk_indices,
+                        &self.teacher_topk_logprobs,
+                        &self.label_mask,
+                        self.top_k,
+                        active_metadata,
+                    )
+                } else {
+                    opd_top_k_reverse_kl_phase_b_bwd_scalar_mean_unit_grad_kt(
+                        &self.hidden,
+                        &self.head_t,
+                        &self.teacher_topk_indices,
+                        &self.teacher_topk_logprobs,
+                        &self.label_mask,
+                        self.top_k,
+                    )
+                }
             } else {
-                opd_top_k_reverse_kl_phase_b_bwd_kt(
-                    &self.hidden,
-                    &self.head_t,
-                    &self.teacher_topk_indices,
-                    &self.teacher_topk_logprobs,
-                    &self.label_mask,
-                    grad_output,
-                    self.top_k,
-                    self.output_mode,
-                )
+                if let Some(active_metadata) = self.active_metadata.as_ref() {
+                    opd_top_k_reverse_kl_phase_b_bwd_with_metadata_kt(
+                        &self.hidden,
+                        &self.head_t,
+                        &self.teacher_topk_indices,
+                        &self.teacher_topk_logprobs,
+                        &self.label_mask,
+                        grad_output,
+                        self.top_k,
+                        self.output_mode,
+                        active_metadata,
+                    )
+                } else {
+                    opd_top_k_reverse_kl_phase_b_bwd_kt(
+                        &self.hidden,
+                        &self.head_t,
+                        &self.teacher_topk_indices,
+                        &self.teacher_topk_logprobs,
+                        &self.label_mask,
+                        grad_output,
+                        self.top_k,
+                        self.output_mode,
+                    )
+                }
             }
             .map_err(|e: OpdLossError| {
                 kiln_tensor::Error::Msg(format!("opd kt-tape bwd: kt call: {e}"))
@@ -342,7 +371,7 @@ pub fn opd_top_k_reverse_kl_phase_b_per_position_via_kt_tape(
 
     // Forward — bit-exact with `opd_top_k_reverse_kl_per_position_kt`
     // (same kt-tensor ops, same FFI host uploads).
-    let per_token = opd_top_k_reverse_kl_per_position_kt(
+    let (per_token, active_metadata) = opd_top_k_reverse_kl_per_position_with_metadata_kt(
         hidden,
         head_t,
         teacher_topk_indices,
@@ -367,6 +396,7 @@ pub fn opd_top_k_reverse_kl_phase_b_per_position_via_kt_tape(
         top_k,
         output_mode: OpdLossOutputKt::PerPosition,
         scalar_mean_unit_root_grad: false,
+        active_metadata,
     };
     tape.record(
         &per_token,
@@ -461,7 +491,7 @@ fn opd_top_k_reverse_kl_phase_b_via_kt_tape_impl(
 
     // Forward — bit-exact with `opd_top_k_reverse_kl_kt` (same kt-tensor
     // ops + final `mean_all`).
-    let loss = opd_top_k_reverse_kl_kt(
+    let (loss, active_metadata) = opd_top_k_reverse_kl_with_metadata_kt(
         hidden,
         head_t,
         teacher_topk_indices,
@@ -484,6 +514,7 @@ fn opd_top_k_reverse_kl_phase_b_via_kt_tape_impl(
         top_k,
         output_mode: OpdLossOutputKt::ScalarMean,
         scalar_mean_unit_root_grad,
+        active_metadata,
     };
     tape.record(
         &loss,
@@ -578,7 +609,8 @@ mod tests {
             let mut logprobs: Vec<f32> = Vec::with_capacity(active * top_k);
             for r in 0..active {
                 for j in 0..top_k {
-                    indices.push((((r * 7 + j * 3) % vocab_size) as u32).min(vocab_size as u32 - 1));
+                    indices
+                        .push((((r * 7 + j * 3) % vocab_size) as u32).min(vocab_size as u32 - 1));
                     logprobs.push(-((j as f32) * 0.3 + 0.5));
                 }
             }
@@ -616,8 +648,14 @@ mod tests {
                 .unwrap()
                 .to_vec()
                 .unwrap();
-            assert!(dh_v.iter().all(|x| x.is_finite()), "non-finite OPD d_hidden on ROCm");
-            assert!(dh_v.iter().any(|&x| x != 0.0), "OPD d_hidden all-zero on ROCm (dead backward)");
+            assert!(
+                dh_v.iter().all(|x| x.is_finite()),
+                "non-finite OPD d_hidden on ROCm"
+            );
+            assert!(
+                dh_v.iter().any(|&x| x != 0.0),
+                "OPD d_hidden all-zero on ROCm (dead backward)"
+            );
             eprintln!("[rocm-opd-tape] OK: envelope open, 1 node, finite non-zero d_hidden");
         }
     }
@@ -645,8 +683,7 @@ mod tests {
                     ((s as u32 % 1024) as f32 - 512.0) / 512.0
                 })
                 .collect();
-            KtTensor::cuda_from_slice(&data, vec![1, seq_len, hidden_size], 0)
-                .expect("hidden cuda")
+            KtTensor::cuda_from_slice(&data, vec![1, seq_len, hidden_size], 0).expect("hidden cuda")
         }
 
         fn cuda_head_t_f32(hidden_size: usize, vocab_size: usize, seed: u64) -> KtTensor {
@@ -658,8 +695,7 @@ mod tests {
                     ((s as u32 % 1024) as f32 - 512.0) / 512.0
                 })
                 .collect();
-            KtTensor::cuda_from_slice(&data, vec![hidden_size, vocab_size], 0)
-                .expect("head_t cuda")
+            KtTensor::cuda_from_slice(&data, vec![hidden_size, vocab_size], 0).expect("head_t cuda")
         }
 
         fn cuda_grad_per_position(active_count: usize, seed: u64) -> KtTensor {
@@ -670,8 +706,7 @@ mod tests {
                     ((s as u32 % 1024) as f32 - 512.0) / 512.0
                 })
                 .collect();
-            KtTensor::cuda_from_slice(&data, vec![active_count], 0)
-                .expect("grad_loss cuda")
+            KtTensor::cuda_from_slice(&data, vec![active_count], 0).expect("grad_loss cuda")
         }
 
         fn cuda_grad_scalar(seed: u64) -> KtTensor {
@@ -803,6 +838,7 @@ mod tests {
                 top_k,
                 output_mode: OpdLossOutputKt::PerPosition,
                 scalar_mean_unit_root_grad: false,
+                active_metadata: None,
             };
             let grads = bwd.apply(&dy).expect("apply backward");
             assert_eq!(grads.len(), 2);
@@ -842,6 +878,7 @@ mod tests {
                 top_k,
                 output_mode: OpdLossOutputKt::ScalarMean,
                 scalar_mean_unit_root_grad: false,
+                active_metadata: None,
             };
             let grads = bwd.apply(&dy).expect("apply backward scalar mean");
             assert_eq!(grads.len(), 2);

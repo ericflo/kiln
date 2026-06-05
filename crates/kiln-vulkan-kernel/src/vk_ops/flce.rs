@@ -69,6 +69,46 @@ struct FlceState {
     chunk_len: usize,
 }
 
+/// Opaque reusable forward state for [`vk_flce_backward_with_saved_state`].
+///
+/// The kt training tape stores this after the Vulkan FLCE forward so backward
+/// can reuse the per-row online log-sum-exp state instead of rebuilding it.
+#[derive(Clone, Debug)]
+pub struct FlceSavedState {
+    weight: VkTensor,
+    labels: Vec<u32>,
+    global_max: Arc<VulkanBuffer>,
+    global_sumexp: Arc<VulkanBuffer>,
+    num_active: usize,
+    vocab: usize,
+    hidden_dim: usize,
+    chunk_len: usize,
+}
+
+/// Opaque reusable forward state for [`vk_grpo_backward_with_saved_state`].
+///
+/// kt training stores this after the Vulkan GRPO forward so backward can reuse
+/// the per-row online log-sum-exp state and per-token loss coefficients.
+#[derive(Clone, Debug)]
+pub struct GrpoSavedState {
+    weight: VkTensor,
+    labels: Vec<u32>,
+    global_max: Arc<VulkanBuffer>,
+    global_sumexp: Arc<VulkanBuffer>,
+    coeff: Arc<VulkanBuffer>,
+    num_active: usize,
+    vocab: usize,
+    hidden_dim: usize,
+    chunk_len: usize,
+}
+
+pub const VK_GRPO_IS_MODE_TOKEN: u32 = 0;
+pub const VK_GRPO_IS_MODE_CISPO: u32 = 1;
+pub const VK_GRPO_IS_MODE_REINFORCE: u32 = 2;
+pub const VK_GRPO_KL_MODE_NONE: u32 = 0;
+pub const VK_GRPO_KL_MODE_K1: u32 = 1;
+pub const VK_GRPO_KL_MODE_K3: u32 = 3;
+
 fn run_flce_forward(
     hidden: &VkTensor,
     weight: &VkTensor,
@@ -765,6 +805,81 @@ pub fn vk_grpo_loss(
     kl_coeff: f32,
     chunk_len: usize,
 ) -> Result<VkTensor> {
+    let (loss, saved) = vk_grpo_loss_with_saved_state(
+        hidden,
+        weight,
+        labels,
+        ref_log_probs,
+        advantage,
+        clip_epsilon,
+        kl_coeff,
+        chunk_len,
+    )?;
+    let grad_fn: Option<Arc<dyn VkBackwardOp>> = if hidden.requires_grad() {
+        Some(Arc::new(GrpoBackward {
+            weight: saved.weight,
+            labels: saved.labels,
+            global_max: saved.global_max,
+            global_sumexp: saved.global_sumexp,
+            coeff: saved.coeff,
+            num_active: saved.num_active,
+            vocab: saved.vocab,
+            hidden_dim: saved.hidden_dim,
+            chunk_len: saved.chunk_len,
+            inputs: [hidden.clone()],
+        }))
+    } else {
+        None
+    };
+    Ok(VkTensor::from_op(
+        Arc::clone(loss.buffer()),
+        vec![1],
+        VkDType::F32,
+        Arc::clone(hidden.device()),
+        grad_fn,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn vk_grpo_loss_with_saved_state(
+    hidden: &VkTensor,
+    weight: &VkTensor,
+    labels: &[u32],
+    ref_log_probs: &VkTensor,
+    advantage: f32,
+    clip_epsilon: f32,
+    kl_coeff: f32,
+    chunk_len: usize,
+) -> Result<(VkTensor, GrpoSavedState)> {
+    vk_grpo_loss_with_saved_state_ext(
+        hidden,
+        weight,
+        labels,
+        ref_log_probs,
+        advantage,
+        clip_epsilon,
+        clip_epsilon,
+        kl_coeff,
+        VK_GRPO_KL_MODE_K1,
+        VK_GRPO_IS_MODE_TOKEN,
+        chunk_len,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn vk_grpo_loss_with_saved_state_ext(
+    hidden: &VkTensor,
+    weight: &VkTensor,
+    labels: &[u32],
+    ref_log_probs: &VkTensor,
+    advantage: f32,
+    clip_low: f32,
+    clip_high: f32,
+    kl_coeff: f32,
+    kl_mode: u32,
+    is_mode: u32,
+    chunk_len: usize,
+) -> Result<(VkTensor, GrpoSavedState)> {
     let (num_active, hidden_dim, vocab) = validate_lm_head_inputs(hidden, weight, labels)?;
     let chunk_len = if chunk_len == 0 {
         flce_recommended_chunk_len(hidden.device(), num_active, hidden_dim, vocab)
@@ -779,6 +894,20 @@ pub fn vk_grpo_loss(
     anyhow::ensure!(
         ref_log_probs.dtype() == VkDType::F32,
         "vk_grpo_loss: ref_log_probs must be F32"
+    );
+    anyhow::ensure!(
+        matches!(
+            is_mode,
+            VK_GRPO_IS_MODE_TOKEN | VK_GRPO_IS_MODE_CISPO | VK_GRPO_IS_MODE_REINFORCE
+        ),
+        "vk_grpo_loss: unsupported is_mode {is_mode}"
+    );
+    anyhow::ensure!(
+        matches!(
+            kl_mode,
+            VK_GRPO_KL_MODE_NONE | VK_GRPO_KL_MODE_K1 | VK_GRPO_KL_MODE_K3
+        ),
+        "vk_grpo_loss: unsupported kl_mode {kl_mode}"
     );
 
     let dev = hidden.device();
@@ -798,8 +927,11 @@ pub fn vk_grpo_loss(
     let push = [
         num_active as u32,
         advantage.to_bits(),
-        clip_epsilon.to_bits(),
+        clip_low.to_bits(),
+        clip_high.to_bits(),
         kl_coeff.to_bits(),
+        kl_mode,
+        is_mode,
     ];
     dispatch_simple(
         dev,
@@ -819,8 +951,9 @@ pub fn vk_grpo_loss(
     let per_row_tensor =
         VkTensor::from_buffer(per_row, vec![num_active], VkDType::F32, Arc::clone(dev));
     let loss = vk_mean_all(&per_row_tensor)?;
-    let grad_fn: Option<Arc<dyn VkBackwardOp>> = if hidden.requires_grad() {
-        Some(Arc::new(GrpoBackward {
+    Ok((
+        loss,
+        GrpoSavedState {
             weight: weight.clone(),
             labels: labels.to_vec(),
             global_max,
@@ -830,17 +963,7 @@ pub fn vk_grpo_loss(
             vocab,
             hidden_dim,
             chunk_len,
-            inputs: [hidden.clone()],
-        }))
-    } else {
-        None
-    };
-    Ok(VkTensor::from_op(
-        Arc::clone(loss.buffer()),
-        vec![1],
-        VkDType::F32,
-        Arc::clone(dev),
-        grad_fn,
+        },
     ))
 }
 
@@ -850,6 +973,41 @@ pub fn vk_flce_loss(
     labels: &[u32],
     chunk_len: usize,
 ) -> Result<VkTensor> {
+    let (loss, saved) = vk_flce_loss_with_saved_state(hidden, weight, labels, chunk_len)?;
+    let grad_fn: Option<Arc<dyn VkBackwardOp>> = if hidden.requires_grad() {
+        Some(Arc::new(FlceBackward {
+            weight: saved.weight,
+            labels: saved.labels,
+            global_max: saved.global_max,
+            global_sumexp: saved.global_sumexp,
+            num_active: saved.num_active,
+            vocab: saved.vocab,
+            hidden_dim: saved.hidden_dim,
+            chunk_len: saved.chunk_len,
+            inputs: [hidden.clone()],
+        }))
+    } else {
+        None
+    };
+    // Important: we cannot easily intercept the mean's autograd. So we
+    // return a "scalar wrapper" VkTensor whose grad_fn IS our analytic
+    // FlceBackward. The user calls `vk_backward(&loss)` which seeds
+    // grad=1 and calls our backward directly.
+    Ok(VkTensor::from_op(
+        Arc::clone(loss.buffer()),
+        vec![1],
+        VkDType::F32,
+        Arc::clone(hidden.device()),
+        grad_fn,
+    ))
+}
+
+pub fn vk_flce_loss_with_saved_state(
+    hidden: &VkTensor,
+    weight: &VkTensor,
+    labels: &[u32],
+    chunk_len: usize,
+) -> Result<(VkTensor, FlceSavedState)> {
     let (num_active, hidden_dim, vocab) = validate_lm_head_inputs(hidden, weight, labels)?;
     let chunk_len = if chunk_len == 0 {
         flce_recommended_chunk_len(hidden.device(), num_active, hidden_dim, vocab)
@@ -871,13 +1029,12 @@ pub fn vk_flce_loss(
     )?;
 
     // loss = mean(per_row) — but use vk_mean_all which has its own
-    // backward; we override with our analytic FLCE backward instead.
+    // backward; callers that need autograd wrap the scalar with an analytic
+    // FLCE backward instead.
     let loss = vk_mean_all(&per_row)?;
-    // Build a fresh VkTensor cloning loss buffer but with our
-    // FlceBackward replacing the mean's backward chain. We attach the
-    // backward directly to `hidden` for clarity.
-    let grad_fn: Option<Arc<dyn VkBackwardOp>> = if hidden.requires_grad() {
-        Some(Arc::new(FlceBackward {
+    Ok((
+        loss,
+        FlceSavedState {
             weight: weight.clone(),
             labels: labels.to_vec(),
             global_max,
@@ -886,22 +1043,63 @@ pub fn vk_flce_loss(
             vocab,
             hidden_dim,
             chunk_len,
-            inputs: [hidden.clone()],
-        }))
-    } else {
-        None
-    };
-    // Important: we cannot easily intercept the mean's autograd. So we
-    // return a "scalar wrapper" VkTensor whose grad_fn IS our analytic
-    // FlceBackward. The user calls `vk_backward(&loss)` which seeds
-    // grad=1 and calls our backward directly.
-    Ok(VkTensor::from_op(
-        Arc::clone(loss.buffer()),
-        vec![1],
-        VkDType::F32,
-        Arc::clone(dev),
-        grad_fn,
+        },
     ))
+}
+
+pub fn vk_flce_backward_with_saved_state(
+    hidden: &VkTensor,
+    saved: &FlceSavedState,
+    grad_loss: &VkTensor,
+) -> Result<VkTensor> {
+    let grads = FlceBackward {
+        weight: saved.weight.clone(),
+        labels: saved.labels.clone(),
+        global_max: Arc::clone(&saved.global_max),
+        global_sumexp: Arc::clone(&saved.global_sumexp),
+        num_active: saved.num_active,
+        vocab: saved.vocab,
+        hidden_dim: saved.hidden_dim,
+        chunk_len: saved.chunk_len,
+        inputs: [hidden.clone()],
+    }
+    .backward(grad_loss)?;
+    grads
+        .into_iter()
+        .next()
+        .flatten()
+        .context("vk_flce_backward_with_saved_state: missing hidden gradient")
+}
+
+pub fn vk_grpo_backward_with_saved_state(
+    hidden: &VkTensor,
+    saved: &GrpoSavedState,
+    grad_loss: &VkTensor,
+) -> Result<VkTensor> {
+    anyhow::ensure!(
+        hidden.shape() == [saved.num_active, saved.hidden_dim],
+        "vk_grpo_backward_with_saved_state: hidden shape {:?} != [{}, {}]",
+        hidden.shape(),
+        saved.num_active,
+        saved.hidden_dim
+    );
+    let op = GrpoBackward {
+        weight: saved.weight.clone(),
+        labels: saved.labels.clone(),
+        global_max: Arc::clone(&saved.global_max),
+        global_sumexp: Arc::clone(&saved.global_sumexp),
+        coeff: Arc::clone(&saved.coeff),
+        num_active: saved.num_active,
+        vocab: saved.vocab,
+        hidden_dim: saved.hidden_dim,
+        chunk_len: saved.chunk_len,
+        inputs: [hidden.clone()],
+    };
+    op.backward(grad_loss)?
+        .into_iter()
+        .next()
+        .flatten()
+        .context("vk_grpo_backward_with_saved_state: missing hidden gradient")
 }
 
 #[allow(dead_code)]

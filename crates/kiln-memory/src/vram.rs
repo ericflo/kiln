@@ -836,6 +836,27 @@ pub fn recommended_checkpoint_plan(
     hidden_size: usize,
     base_model_bytes: u64,
 ) -> Option<CheckpointPlan> {
+    recommended_checkpoint_plan_with_activation_bytes(
+        vram,
+        num_layers,
+        max_seq_len_tokens,
+        hidden_size,
+        base_model_bytes,
+        4,
+    )
+}
+
+/// Variant of [`recommended_checkpoint_plan`] for callers that know the
+/// training hidden-activation dtype. CUDA/ROCm BF16 tape paths should pass `2`;
+/// Vulkan BF16 training promotes activations to F32 and should pass `4`.
+pub fn recommended_checkpoint_plan_with_activation_bytes(
+    vram: &GpuVramInfo,
+    num_layers: usize,
+    max_seq_len_tokens: usize,
+    hidden_size: usize,
+    base_model_bytes: u64,
+    activation_bytes_per_elem: usize,
+) -> Option<CheckpointPlan> {
     // Env overrides take absolute precedence — caller should honor them.
     if std::env::var("KILN_GRAD_CHECKPOINT_SEGMENTS")
         .ok()
@@ -857,13 +878,14 @@ pub fn recommended_checkpoint_plan(
         return None;
     }
 
-    // F32 forward activation tape (one element per layer-token pair).
-    // Even on a BF16 model, the trainer keeps activations in F32 for
-    // numerical stability, so this matches what we'd actually allocate.
+    // Forward activation tape (one element per layer-token pair). Most CUDA /
+    // ROCm production paths keep BF16 activations; Vulkan promotes BF16 base
+    // activations to F32. Callers pass the backend-specific width.
+    let activation_bytes_per_elem = activation_bytes_per_elem.max(1) as u64;
     let forward_tape_bytes = (num_layers as u64)
         .saturating_mul(max_seq_len_tokens as u64)
         .saturating_mul(hidden_size as u64)
-        .saturating_mul(4);
+        .saturating_mul(activation_bytes_per_elem);
 
     // Peak training memory for activations + grads + scratch. The forward
     // tape alone under-estimates peak — backward doubles the activation
@@ -1099,6 +1121,41 @@ mod tests {
         );
         // Sanity-check the activation math hasn't drifted.
         assert!((act_gib(32, 16 * 1024, 2560) - 5.0).abs() < 1.0);
+    }
+
+    #[test]
+    fn recommended_checkpoint_plan_respects_activation_width() {
+        let base_bytes = estimate_base_model_bytes(32, 2560, 10240, 151936, 2);
+        let f32_plan = recommended_checkpoint_plan_with_activation_bytes(
+            &vram(16),
+            32,
+            22_484,
+            2560,
+            base_bytes,
+            4,
+        )
+        .expect("f32 plan");
+        let bf16_plan = recommended_checkpoint_plan_with_activation_bytes(
+            &vram(16),
+            32,
+            22_484,
+            2560,
+            base_bytes,
+            2,
+        )
+        .expect("bf16 plan");
+
+        let segments = |plan: CheckpointPlan| match plan {
+            CheckpointPlan::Enabled { num_segments, .. } => num_segments,
+            other => panic!("expected enabled checkpointing, got {other:?}"),
+        };
+        let f32_segments = segments(f32_plan);
+        let bf16_segments = segments(bf16_plan);
+        assert!(
+            bf16_segments < f32_segments,
+            "BF16 activation sizing should reduce checkpoint segments for long-context CUDA: \
+             bf16={bf16_segments} f32={f32_segments}"
+        );
     }
 
     #[test]

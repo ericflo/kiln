@@ -399,6 +399,35 @@ fn is_vulkan_device(device: &Device) -> bool {
     matches!(device, Device::Vulkan(_))
 }
 
+pub(crate) fn training_activation_bytes_per_elem(weights: &GpuWeights, device: &Device) -> usize {
+    const GDN_TAPE_EFFECTIVE_BYTES_PER_ELEM: usize = 10;
+
+    if is_vulkan_device(device) {
+        // Vulkan BF16 training explicitly promotes hidden activations to F32.
+        return 4;
+    }
+    let base = match weights.embed_tokens.dtype() {
+        kiln_tensor::DType::BF16 | kiln_tensor::DType::F16 => 2,
+        kiln_tensor::DType::F32 => 4,
+        _ => 4,
+    };
+    if weights
+        .layers
+        .iter()
+        .any(|layer| matches!(layer.attention, GpuAttentionWeights::Linear(_)))
+    {
+        // GDN replay records q/k/v, gate, recurrent, qk-norm, and gated-norm
+        // tensors in addition to the hidden stream. Use an intentionally
+        // inflated effective width so very long contexts prefer one-layer replay
+        // scopes on tight VRAM. Long-context SFT spools checkpoint boundaries
+        // off-device, so the extra segment count does not pin every boundary on
+        // the GPU.
+        base.max(GDN_TAPE_EFFECTIVE_BYTES_PER_ELEM)
+    } else {
+        base
+    }
+}
+
 #[cfg(any(feature = "cuda", feature = "rocm"))]
 #[inline]
 fn fused_rms_norm_tail_backend_enabled(device: &Device) -> bool {
@@ -2468,13 +2497,15 @@ pub fn sft_train(
         // Auto-tune gradient checkpointing for this workload's actual
         // sequence length, not just VRAM. On a big GPU with short prompts
         // this typically disables checkpointing entirely (~10-30% faster).
-        let ckpt_config = CheckpointConfig::auto_for_workload(
+        let activation_bytes_per_elem = training_activation_bytes_per_elem(weights, &device);
+        let ckpt_config = CheckpointConfig::auto_for_workload_with_activation_bytes(
             model_config.num_layers,
             max_seq_len_tokens,
             model_config.hidden_size,
             model_config.intermediate_size,
             model_config.vocab_size,
             2, // BF16 base weights (canonical kiln inference dtype)
+            activation_bytes_per_elem,
         );
         let segments = if ckpt_config.enabled {
             Some(compute_segment_boundaries(
@@ -3058,13 +3089,15 @@ pub fn grpo_train(
         // Auto-tune gradient checkpointing for this workload's actual
         // sequence length. Same pattern as `sft_train`: skip checkpointing
         // when activation tape comfortably fits in available VRAM.
-        let ckpt_config = CheckpointConfig::auto_for_workload(
+        let activation_bytes_per_elem = training_activation_bytes_per_elem(weights, &device);
+        let ckpt_config = CheckpointConfig::auto_for_workload_with_activation_bytes(
             model_config.num_layers,
             max_seq_len_tokens,
             model_config.hidden_size,
             model_config.intermediate_size,
             model_config.vocab_size,
             2, // BF16 base weights
+            activation_bytes_per_elem,
         );
         let segments = if ckpt_config.enabled {
             Some(compute_segment_boundaries(
@@ -6436,6 +6469,25 @@ fn use_flce() -> bool {
     kiln_core::env_flag::env_flag("KILN_USE_FLCE", true)
 }
 
+fn trace_sft_timings() -> bool {
+    kiln_core::env_flag::env_flag("KILN_TRACE_SFT_TIMINGS", false)
+}
+
+fn debug_sft_reverse_segment_idx(num_segments: usize) -> Option<usize> {
+    let raw = std::env::var("KILN_DEBUG_SFT_REVERSE_SEGMENT_IDX").ok()?;
+    let idx = raw.trim().parse::<usize>().ok()?;
+    (idx < num_segments).then_some(idx)
+}
+
+fn log_sft_timing(enabled: bool, phase: &str, seq_len: usize, segments: usize, elapsed: Duration) {
+    if enabled {
+        eprintln!(
+            "kiln_sft_timing phase={phase} seq_len={seq_len} segments={segments} elapsed_ms={:.3}",
+            elapsed.as_secs_f64() * 1000.0
+        );
+    }
+}
+
 fn recompute_checkpoint_boundaries(seq_len: usize) -> bool {
     if let Some(forced) = kiln_core::env_flag::env_tristate("KILN_RECOMPUTE_CHECKPOINT_BOUNDARIES")
     {
@@ -7067,6 +7119,27 @@ impl CheckpointConfig {
         vocab_size: usize,
         bytes_per_base_param: usize,
     ) -> Self {
+        Self::auto_for_workload_with_activation_bytes(
+            num_layers,
+            max_seq_len_tokens,
+            hidden_size,
+            intermediate_size,
+            vocab_size,
+            bytes_per_base_param,
+            4,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn auto_for_workload_with_activation_bytes(
+        num_layers: usize,
+        max_seq_len_tokens: usize,
+        hidden_size: usize,
+        intermediate_size: usize,
+        vocab_size: usize,
+        bytes_per_base_param: usize,
+        activation_bytes_per_elem: usize,
+    ) -> Self {
         // Env overrides always win and route to from_env's tested code path.
         if std::env::var("KILN_GRAD_CHECKPOINT_SEGMENTS")
             .ok()
@@ -7089,12 +7162,13 @@ impl CheckpointConfig {
             bytes_per_base_param,
         );
 
-        match kiln_memory::vram::recommended_checkpoint_plan(
+        match kiln_memory::vram::recommended_checkpoint_plan_with_activation_bytes(
             &vram,
             num_layers,
             max_seq_len_tokens,
             hidden_size,
             base_bytes,
+            activation_bytes_per_elem,
         ) {
             None | Some(kiln_memory::vram::CheckpointPlan::UserOverride) => {
                 // VRAM detection failed or env override is set — fall back
@@ -7107,6 +7181,7 @@ impl CheckpointConfig {
             }) => {
                 tracing::info!(
                     max_seq_len_tokens,
+                    activation_bytes_per_elem,
                     activation_tape_gib = format!("{max_act_gib:.2}"),
                     available_gib = format!("{available_gib:.2}"),
                     vram_total_gb = vram.total_bytes as f64 / 1e9,
@@ -7128,6 +7203,7 @@ impl CheckpointConfig {
                 tracing::info!(
                     num_segments,
                     max_seq_len_tokens,
+                    activation_bytes_per_elem,
                     activation_tape_gib = format!("{max_act_gib:.2}"),
                     per_segment_gib = format!("{per_segment_gib:.2}"),
                     available_gib = format!("{available_gib:.2}"),
@@ -7508,7 +7584,18 @@ fn standard_forward_backward_tape_authoritative_kt(
 
     let (loss_val, _loss_kt, grads_by_candle_raw) =
         kiln_kt_bridge::tape_bridge::with_tape_authoritative_scope_kt(|| {
-            let loss_kt = if use_flce() && is_cuda_device(device) {
+            let use_sft_flce = use_flce();
+            let use_vulkan_flce = {
+                #[cfg(feature = "vulkan")]
+                {
+                    use_sft_flce && is_vulkan_device(device)
+                }
+                #[cfg(not(feature = "vulkan"))]
+                {
+                    false
+                }
+            };
+            let loss_kt = if use_sft_flce && is_cuda_device(device) {
                 let normed = model_forward_no_head(
                     backend,
                     input_ids,
@@ -7543,6 +7630,40 @@ fn standard_forward_backward_tape_authoritative_kt(
                         "tape-authoritative(kt) SFT FLCE kt-tape: {e}"
                     ))
                 })?
+            } else if use_vulkan_flce {
+                #[cfg(feature = "vulkan")]
+                {
+                    let normed = model_forward_no_head(
+                        backend,
+                        input_ids,
+                        weights,
+                        model_config,
+                        Some(&mut linear_state),
+                        Some(&lora_weights),
+                    )
+                    .context("tape-authoritative(kt) no-head Vulkan forward")
+                    .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?;
+                    // Vulkan has its own fused FLCE shaders over active rows
+                    // and canonical tied weight [V, H], so route the SFT root
+                    // there instead of materializing [1, T, V] logits.
+                    crate::sft_tape_shim::try_tape_sft_flce_vulkan_kt(
+                        &normed,
+                        &weights.embed_tokens,
+                        input_ids,
+                        label_mask,
+                    )
+                    .context("tape-authoritative(kt) Vulkan SFT FLCE")
+                    .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?
+                    .ok_or_else(|| {
+                        kiln_kt_bridge::BridgeError::new(
+                            "tape-authoritative(kt) Vulkan SFT FLCE returned None".to_string(),
+                        )
+                    })?
+                }
+                #[cfg(not(feature = "vulkan"))]
+                {
+                    unreachable!("use_vulkan_flce is false without the vulkan feature")
+                }
             } else {
                 let logits = model_forward_kt(
                     backend,
@@ -7668,6 +7789,16 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
         "checkpointed (kt-tape) SFT called with no supervised shifted-label positions"
     );
 
+    let trace_timings = trace_sft_timings();
+    let total_start = Instant::now();
+    if trace_timings {
+        eprintln!(
+            "kiln_sft_timing phase=start seq_len={} segments={} elapsed_ms=0.000",
+            input_ids.len(),
+            num_segments
+        );
+    }
+
     let positions: Vec<u32> = (0..input_ids.len()).map(|p| p as u32).collect();
     let lora_detached = lora_weights_detached(params);
     let lora_weights = params.as_lora_weights();
@@ -7677,13 +7808,27 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
     // recorded — only the boundary tensors are kept (the checkpointing memory
     // profile). A single threaded `LinearAttentionState` is fine: each GDN
     // layer's recurrence is internal to its own full-sequence pass.
+    let boundary_start = Instant::now();
     let (embed_hidden, _) = model_forward_embed(input_ids, weights)?;
-    let mut boundaries: Vec<kiln_tensor::Tensor> = Vec::with_capacity(num_segments + 1);
+    let spool_boundaries = if recompute_checkpoint_boundaries(input_ids.len()) {
+        Some(SpooledCheckpointBoundaries::new(num_segments)?)
+    } else {
+        None
+    };
+    let mut boundaries: Vec<Option<kiln_tensor::Tensor>> = Vec::with_capacity(num_segments + 1);
+    let mut boundary_dtypes: Vec<DType> = Vec::with_capacity(num_segments + 1);
     let mut current = embed_hidden.detach();
-    boundaries.push(current.clone());
+    boundary_dtypes.push(current.dtype());
+    if let Some(spool) = spool_boundaries.as_ref() {
+        spool.save(0, &current)?;
+        boundaries.push(None);
+    } else {
+        boundaries.push(Some(current.clone()));
+    }
     {
         let mut linear_state = LinearAttentionState::new(model_config, device)?;
-        for &(start, end) in segments.iter() {
+        for (seg_idx, &(start, end)) in segments.iter().enumerate() {
+            let segment_start = Instant::now();
             current = model_forward_segment(
                 backend,
                 current,
@@ -7696,13 +7841,88 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
                 Some(&lora_detached),
             )?
             .detach();
-            boundaries.push(current.clone());
+            boundary_dtypes.push(current.dtype());
+            if let Some(spool) = spool_boundaries.as_ref() {
+                spool.save(seg_idx + 1, &current)?;
+                boundaries.push(None);
+            } else {
+                boundaries.push(Some(current.clone()));
+            }
+            if trace_timings {
+                eprintln!(
+                    "kiln_sft_timing phase=boundary_segment seg_idx={seg_idx} layer_start={start} layer_end={end} seq_len={} segments={} elapsed_ms={:.3}",
+                    input_ids.len(),
+                    num_segments,
+                    segment_start.elapsed().as_secs_f64() * 1000.0
+                );
+            }
         }
     }
-    let final_hidden_kt = boundaries
-        .last()
-        .context("ckpt-kt: missing final checkpoint boundary")?
-        .clone();
+    log_sft_timing(
+        trace_timings,
+        "boundary_forward",
+        input_ids.len(),
+        num_segments,
+        boundary_start.elapsed(),
+    );
+    if let Some(debug_seg_idx) = debug_sft_reverse_segment_idx(num_segments) {
+        let (start, end) = segments[debug_seg_idx];
+        let debug_start = Instant::now();
+        let seg_input = if let Some(spool) = spool_boundaries.as_ref() {
+            spool.load(debug_seg_idx, device)?
+        } else {
+            boundaries[debug_seg_idx]
+                .as_ref()
+                .context("ckpt-kt debug reverse: missing input boundary")?
+                .clone()
+        };
+        let seg_output = if let Some(spool) = spool_boundaries.as_ref() {
+            spool.load(debug_seg_idx + 1, device)?
+        } else {
+            boundaries[debug_seg_idx + 1]
+                .as_ref()
+                .context("ckpt-kt debug reverse: missing output boundary")?
+                .clone()
+        };
+        let seed = seg_output
+            .ones_like()
+            .context("ckpt-kt debug reverse: synthetic seed")?
+            .to_dtype(boundary_dtypes[debug_seg_idx + 1])
+            .context("ckpt-kt debug reverse: seed dtype")?;
+        drop(seg_output);
+
+        let positions_ref = &positions;
+        let lora_ref = &lora_weights;
+        let _ = kiln_kt_bridge::tape_bridge::with_tape_segment_backward_scope(seed, || {
+            let mut seg_ls = LinearAttentionState::new(model_config, device)
+                .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?;
+            model_forward_segment(
+                backend,
+                seg_input,
+                weights,
+                model_config,
+                positions_ref,
+                start,
+                end,
+                Some(&mut seg_ls),
+                Some(lora_ref),
+            )
+            .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))
+        })
+        .map_err(|e| {
+            anyhow::anyhow!("ckpt-kt debug reverse segment {debug_seg_idx}: {e}")
+        })?;
+        if trace_timings {
+            eprintln!(
+                "kiln_sft_timing phase=debug_reverse_segment seg_idx={debug_seg_idx} layer_start={start} layer_end={end} seq_len={} segments={} elapsed_ms={:.3}",
+                input_ids.len(),
+                num_segments,
+                debug_start.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+        return Ok((0.0, kiln_autograd::GradStore::new()));
+    }
+    let final_hidden_kt = current.clone();
 
     // Step 2: real loss at the final boundary + the exact FLCE/RMSNorm tail
     // seed. When the CUDA FLCE loss-value path computes final-norm output, the
@@ -7716,7 +7936,21 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
     // outside the per-segment tape scopes.
     let mut normed_for_tail = None;
     let mut flce_active_metadata_for_tail = None;
-    let loss_val = if use_flce() && is_cuda_device(device) {
+    let tail_grad_override: Option<Tensor>;
+    let use_sft_flce = use_flce();
+    let use_vulkan_flce = {
+        #[cfg(feature = "vulkan")]
+        {
+            use_sft_flce && is_vulkan_device(device)
+        }
+        #[cfg(not(feature = "vulkan"))]
+        {
+            false
+        }
+    };
+    let tail_loss_start = Instant::now();
+    let loss_val = if use_sft_flce && is_cuda_device(device) {
+        tail_grad_override = None;
         // (#1082 H-FLCE / candle-drop) FLCE loss-VALUE via the kt-native forward
         // `fused_linear_cross_entropy_phase_b_kt` — taking the kt `normed` hidden
         // and the kt `embed_tokens_t` head DIRECTLY (no candle `cd_out` copy, no
@@ -7741,35 +7975,85 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
         flce_active_metadata_for_tail = active_metadata;
         normed_for_tail = Some(normed);
         loss_val
+    } else if use_vulkan_flce {
+        #[cfg(feature = "vulkan")]
+        {
+            let normed = model_forward_final_norm(&final_hidden_kt, weights, model_config)?;
+            let (loss_kt, grad_normed) =
+                crate::sft_tape_shim::vulkan_sft_flce_loss_and_grad_kt(
+                    &normed,
+                    &weights.embed_tokens,
+                    input_ids,
+                    label_mask,
+                )
+                .map_err(|e| anyhow::anyhow!("ckpt-kt Vulkan fused SFT FLCE tail: {e}"))?;
+            let loss_val = loss_kt.to_scalar::<f32>()? as f64;
+            tail_grad_override = Some(
+                rms_norm_backward_pre_final_norm(
+                    &final_hidden_kt,
+                    &weights.final_norm,
+                    &grad_normed,
+                    model_config.rms_norm_eps,
+                )
+                .context("ckpt-kt Vulkan final RMSNorm backward")?,
+            );
+            loss_val
+        }
+        #[cfg(not(feature = "vulkan"))]
+        {
+            unreachable!("use_vulkan_flce is false without the vulkan feature")
+        }
     } else {
+        tail_grad_override = None;
         let logits = model_forward_head(&final_hidden_kt, weights, model_config)?;
         cross_entropy_loss(&logits, input_ids, label_mask, device)?
     };
-    let tail_grad = match normed_for_tail.as_ref() {
-        Some(normed) => analytic_sft_tail_grad_from_normed_pre_final_norm_with_flce_metadata(
-            &final_hidden_kt,
-            normed,
-            &weights.final_norm,
-            &weights.embed_tokens_t,
-            input_ids,
-            label_mask,
-            model_config.rms_norm_eps,
-            DEFAULT_CHUNK_SIZE,
-            flce_active_metadata_for_tail.as_ref(),
-        ),
-        None => analytic_sft_tail_grad_pre_final_norm(
-            &final_hidden_kt,
-            &weights.final_norm,
-            &weights.embed_tokens_t,
-            input_ids,
-            label_mask,
-            model_config.rms_norm_eps,
-            DEFAULT_CHUNK_SIZE,
-        ),
+    log_sft_timing(
+        trace_timings,
+        "tail_loss",
+        input_ids.len(),
+        num_segments,
+        tail_loss_start.elapsed(),
+    );
+    let tail_grad_start = Instant::now();
+    let tail_grad = if let Some(tail_grad) = tail_grad_override {
+        Ok(tail_grad)
+    } else {
+        match normed_for_tail.as_ref() {
+            Some(normed) => analytic_sft_tail_grad_from_normed_pre_final_norm_with_flce_metadata(
+                &final_hidden_kt,
+                normed,
+                &weights.final_norm,
+                &weights.embed_tokens_t,
+                input_ids,
+                label_mask,
+                model_config.rms_norm_eps,
+                DEFAULT_CHUNK_SIZE,
+                flce_active_metadata_for_tail.as_ref(),
+            ),
+            None => analytic_sft_tail_grad_pre_final_norm(
+                &final_hidden_kt,
+                &weights.final_norm,
+                &weights.embed_tokens_t,
+                input_ids,
+                label_mask,
+                model_config.rms_norm_eps,
+                DEFAULT_CHUNK_SIZE,
+            ),
+        }
     };
     let mut upstream_grad = tail_grad
-    .context("ckpt-kt FLCE/RMSNorm SFT tail gradient")?
-    .detach();
+        .context("ckpt-kt FLCE/RMSNorm SFT tail gradient")?
+        .detach();
+    drop(final_hidden_kt);
+    drop(current);
+    log_sft_timing(
+        trace_timings,
+        "tail_grad",
+        input_ids.len(),
+        num_segments,
+        tail_grad_start.elapsed(),
+    );
 
     // Step 3: reverse pass over segments via the kt tape. Each segment is
     // re-run under its OWN fresh tape (memory bounded to one segment), seeded at
@@ -7784,11 +8068,19 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
     let mut grads = kiln_autograd::GradStore::new();
     for seg_idx in (0..num_segments).rev() {
         let (start, end) = segments[seg_idx];
-        let seg_input = boundaries[seg_idx].clone();
+        let reverse_start = Instant::now();
+        let seg_input = if let Some(spool) = spool_boundaries.as_ref() {
+            spool.load(seg_idx, device)?
+        } else {
+            boundaries[seg_idx]
+                .as_ref()
+                .context("ckpt-kt: missing in-memory checkpoint boundary")?
+                .clone()
+        };
         let seg_input_id = seg_input.id();
         // Match the seed dtype to the segment output (the model hidden dtype);
         // the analytic tail is F32 and chained grads may differ.
-        let seg_output_dtype = boundaries[seg_idx + 1].dtype();
+        let seg_output_dtype = boundary_dtypes[seg_idx + 1];
         let seed = upstream_grad
             .to_dtype(seg_output_dtype)
             .map_err(|e| anyhow::anyhow!("ckpt-kt: seed dtype cast (segment {seg_idx}): {e}"))?;
@@ -7849,7 +8141,23 @@ fn checkpointed_forward_backward_tape_authoritative_kt(
                 )
             })?;
         }
+        if trace_timings {
+            eprintln!(
+                "kiln_sft_timing phase=reverse_segment seg_idx={seg_idx} layer_start={start} layer_end={end} seq_len={} segments={} elapsed_ms={:.3}",
+                input_ids.len(),
+                num_segments,
+                reverse_start.elapsed().as_secs_f64() * 1000.0
+            );
+        }
     }
+
+    log_sft_timing(
+        trace_timings,
+        "total_checkpointed_step",
+        input_ids.len(),
+        num_segments,
+        total_start.elapsed(),
+    );
 
     Ok((loss_val, grads))
 }
@@ -7989,19 +8297,40 @@ fn grpo_step_forward_backward_tape_authoritative_kt(
             .context("GRPO tape-authoritative(kt) no-head policy forward")
             .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?;
 
-            let loss = match crate::grpo_tape_shim::try_tape_grpo_pg_loss_from_normed_hidden_kt(
-                &policy_hidden,
-                &weights.embed_tokens_t,
-                input_ids,
-                action_mask,
-                &ref_log_probs,
-                loss_params,
-                device,
-                DEFAULT_CHUNK_SIZE,
-            )
-            .context("GRPO tape-authoritative(kt) scalar loss")
-            .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?
-            {
+            #[cfg(feature = "vulkan")]
+            let mut loss_opt = if is_vulkan_device(device) {
+                crate::grpo_tape_shim::try_tape_grpo_pg_loss_from_normed_hidden_vulkan_kt(
+                    &policy_hidden,
+                    &weights.embed_tokens,
+                    input_ids,
+                    action_mask,
+                    &ref_log_probs,
+                    loss_params,
+                )
+                .context("GRPO tape-authoritative(kt) Vulkan fused scalar loss")
+                .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?
+            } else {
+                None
+            };
+            #[cfg(not(feature = "vulkan"))]
+            let mut loss_opt = None;
+            if loss_opt.is_none() {
+                loss_opt =
+                    crate::grpo_tape_shim::try_tape_grpo_pg_loss_from_normed_hidden_kt(
+                        &policy_hidden,
+                        &weights.embed_tokens_t,
+                        input_ids,
+                        action_mask,
+                        &ref_log_probs,
+                        loss_params,
+                        device,
+                        DEFAULT_CHUNK_SIZE,
+                    )
+                    .context("GRPO tape-authoritative(kt) scalar loss")
+                    .map_err(|e| kiln_kt_bridge::BridgeError::new(format!("{e:#}")))?;
+            }
+
+            let loss = match loss_opt {
                 Some(l) => l,
                 None => {
                     return Err(kiln_kt_bridge::BridgeError::new(
@@ -8152,8 +8481,25 @@ fn checkpointed_grpo_forward_backward_tape_authoritative_kt(
 
     let normed = model_forward_final_norm(&final_hidden, weights, model_config)
         .context("checkpointed GRPO final norm")?;
-    let (loss_kt, grad_normed) =
-        crate::grpo_tape_shim::grpo_pg_loss_from_normed_hidden_loss_and_grad_kt(
+    #[cfg(feature = "vulkan")]
+    let fused_vulkan_tail = if is_vulkan_device(device) {
+        crate::grpo_tape_shim::vulkan_grpo_pg_loss_from_normed_hidden_loss_and_grad_kt(
+            &normed,
+            &weights.embed_tokens,
+            input_ids,
+            action_mask,
+            ref_log_probs,
+            loss_params,
+        )
+        .context("checkpointed GRPO Vulkan fused tail loss/gradient")?
+    } else {
+        None
+    };
+    #[cfg(not(feature = "vulkan"))]
+    let fused_vulkan_tail = None;
+    let (loss_kt, grad_normed) = match fused_vulkan_tail {
+        Some(pair) => pair,
+        None => crate::grpo_tape_shim::grpo_pg_loss_from_normed_hidden_loss_and_grad_kt(
             &normed,
             &weights.embed_tokens_t,
             input_ids,
@@ -8164,7 +8510,8 @@ fn checkpointed_grpo_forward_backward_tape_authoritative_kt(
             device,
             DEFAULT_CHUNK_SIZE,
         )
-        .context("checkpointed GRPO tail loss/gradient")?;
+        .context("checkpointed GRPO tail loss/gradient")?,
+    };
     let loss_val = loss_kt.to_scalar::<f32>()? as f64;
     let mut upstream_grad = rms_norm_backward_pre_final_norm(
         &final_hidden,
@@ -8311,6 +8658,91 @@ impl GrpoLossParams {
     }
 }
 
+fn entropy_aware_kl_threshold_from_policy_log_probs(
+    policy_log_probs: &Tensor,
+    q: f32,
+    num_active: usize,
+) -> Result<f32> {
+    anyhow::ensure!(
+        num_active > 0,
+        "entropy-aware KL threshold requires at least one active token"
+    );
+    let idx = ((q as f64) * (num_active.saturating_sub(1)) as f64).round() as usize;
+    let idx = idx.min(num_active.saturating_sub(1));
+
+    // Reuse the inference CUDA top-k kernel when the requested quantile rank is
+    // small. The kernel is intentionally k-pass, so for large ranks a single
+    // host threshold read + CPU sort is less work than asking it for most of the
+    // active-token vector.
+    #[cfg(feature = "cuda")]
+    if matches!(policy_log_probs.device(), Device::Cuda(_)) && idx < 1024 {
+        let flat = policy_log_probs
+            .to_f32_dtype()?
+            .flatten_all()?
+            .reshape(vec![num_active])?
+            .contiguous()?;
+        let (values, _indices) = kiln_tensor::cuda_topk_last_axis(&flat, idx + 1)
+            .map_err(|e| anyhow::anyhow!("entropy-aware KL CUDA top-k threshold: {e}"))?;
+        let threshold = values
+            .get(idx)
+            .copied()
+            .ok_or_else(|| anyhow::anyhow!("entropy-aware KL top-k returned too few values"))?;
+        return Ok(threshold);
+    }
+
+    let plp_host: Vec<f32> = policy_log_probs
+        .flatten_all()?
+        .to_device(cpu_device())?
+        .to_vec1::<f32>()?;
+    anyhow::ensure!(
+        plp_host.len() == num_active,
+        "entropy-aware KL threshold plp len {} != num_active {num_active}",
+        plp_host.len()
+    );
+    let mut neg = plp_host
+        .iter()
+        .map(|p| -(*p as f64))
+        .collect::<Vec<_>>();
+    neg.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let thr = neg[idx];
+    Ok((-thr) as f32)
+}
+
+pub(crate) fn entropy_aware_kl_mask_kt(
+    policy_log_probs: &Tensor,
+    params: GrpoLossParams,
+    device: &Device,
+) -> Result<Option<Tensor>> {
+    let Some(q) = params.entropy_aware_kl_quantile else {
+        return Ok(None);
+    };
+    if !(q.is_finite() && (0.0..1.0).contains(&q)) {
+        return Ok(None);
+    }
+
+    let num_active = policy_log_probs.elem_count();
+    if num_active == 0 {
+        return Ok(Some(zeros_f32_on(policy_log_probs.shape(), device)?));
+    }
+
+    let threshold =
+        entropy_aware_kl_threshold_from_policy_log_probs(policy_log_probs, q, num_active)?;
+    let policy_f32 = policy_log_probs
+        .to_f32_dtype()?
+        .flatten_all()?
+        .reshape(vec![num_active])?
+        .contiguous()?;
+    let threshold_tensor = policy_f32.affine(0.0, threshold as f64)?.contiguous()?;
+    let keep_kl = kiln_tensor::ops::le(&policy_f32, &threshold_tensor)?;
+    let ones = policy_f32.affine(0.0, 1.0)?.contiguous()?;
+    let zeros = policy_f32.affine(0.0, 0.0)?.contiguous()?;
+    let mask = keep_kl.where_cond(&ones, &zeros)?;
+    mask.reshape(policy_log_probs.dims().to_vec())?
+        .contiguous()
+        .map(Some)
+        .map_err(Into::into)
+}
+
 /// Compute the GRPO loss from policy and reference log-probs.
 ///
 /// Returns a scalar loss tensor suitable for backward(). The scalar is
@@ -8383,21 +8815,8 @@ pub(crate) fn grpo_loss(
     // Phase 3c — selective KL gating: zero KL on tokens below the proxy-entropy threshold.
     let kl_penalty = if let Some(q) = params.entropy_aware_kl_quantile {
         if q.is_finite() && (0.0..1.0).contains(&q) {
-            // CPU-side quantile from policy_log_probs.
-            let plp_host: Vec<f32> = policy_log_probs
-                .flatten_all()?
-                .to_device(cpu_device())?
-                .to_vec1::<f32>()?;
-            let mut neg = plp_host.iter().map(|p| -(*p as f64)).collect::<Vec<_>>();
-            neg.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-            let idx = ((q as f64) * (neg.len().saturating_sub(1)) as f64).round() as usize;
-            let thr = neg[idx.min(neg.len().saturating_sub(1))];
-            let mask_host: Vec<f32> = plp_host
-                .iter()
-                .map(|p| if -(*p as f64) >= thr { 1.0 } else { 0.0 })
-                .collect();
-            let mask = Tensor::from_vec_on(*device, mask_host, ratio.dims().to_vec())?
-                .to_f32_dtype()?;
+            let mask = entropy_aware_kl_mask_kt(policy_log_probs, params, device)?
+                .ok_or_else(|| anyhow::anyhow!("entropy-aware KL mask unexpectedly absent"))?;
             (&kl_penalty_raw * &mask)?
         } else {
             kl_penalty_raw
@@ -12210,6 +12629,29 @@ pub(crate) mod tests {
         restore_env("KILN_GPU_MEMORY_GB", prev_gb);
         restore_env("KILN_GRAD_CHECKPOINT_SEGMENTS", prev_segs);
         restore_env("KILN_NO_GRAD_CHECKPOINT", prev_disable);
+        Ok(())
+    }
+
+    #[test]
+    fn training_activation_width_inflates_bf16_gdn_replay_planning() -> Result<()> {
+        let device = cpu_device();
+
+        let gdn_config = tiny_config_bf16();
+        let gdn_weights = tiny_weights_bf16(&gdn_config, &device)?;
+        assert_eq!(
+            training_activation_bytes_per_elem(&gdn_weights, &device),
+            10,
+            "BF16 GDN training should use inflated effective activation planning"
+        );
+
+        let full_attn_config = tiny_config_full_attn_bf16();
+        let full_attn_weights = tiny_weights_bf16(&full_attn_config, &device)?;
+        assert_eq!(
+            training_activation_bytes_per_elem(&full_attn_weights, &device),
+            2,
+            "BF16 full-attention-only training should keep BF16 activation planning"
+        );
+
         Ok(())
     }
 

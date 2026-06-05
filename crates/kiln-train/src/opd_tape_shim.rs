@@ -39,6 +39,12 @@
 //!   ([`kiln_opd_loss_kernel::opd_top_k_reverse_kl_phase_b_per_position_via_kt_tape`]
 //!   / [`..._via_kt_tape`]).
 
+#[cfg(any(
+    feature = "cuda",
+    feature = "metal",
+    feature = "vulkan",
+    feature = "rocm"
+))]
 use anyhow::{Context, Result};
 
 // (#1082 P-OPD) The candle-input scalar-mean adapter
@@ -89,7 +95,12 @@ use anyhow::{Context, Result};
 /// (`CudaOpdTopKReverseKlPhaseBBackward::apply`) run on either device: CUDA
 /// uses the fused FFI kernel, CPU/Metal the device-agnostic analytic
 /// kt-composite backward.
-#[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
+#[cfg(any(
+    feature = "cuda",
+    feature = "metal",
+    feature = "vulkan",
+    feature = "rocm"
+))]
 pub fn try_tape_opd_scalar_mean_cuda_kt(
     hidden: &kiln_tensor::Tensor,
     head_t: &kiln_tensor::Tensor,
@@ -98,7 +109,7 @@ pub fn try_tape_opd_scalar_mean_cuda_kt(
     label_mask: &[bool],
     top_k: usize,
 ) -> Result<Option<kiln_tensor::Tensor>> {
-    use kiln_autograd::{tape_forward_enabled, with_active_tape, Tape};
+    use kiln_autograd::{Tape, tape_forward_enabled, with_active_tape};
     use kiln_opd_loss_kernel::opd_top_k_reverse_kl_phase_b_unit_grad_via_kt_tape;
 
     if !tape_forward_enabled() {
@@ -127,15 +138,13 @@ pub fn try_tape_opd_scalar_mean_cuda_kt(
     #[cfg(feature = "vulkan")]
     let head_owned;
     #[cfg(feature = "vulkan")]
-    let head_t: &kiln_tensor::Tensor = if matches!(
-        hidden.device(),
-        kiln_tensor::Device::Vulkan(_)
-    ) && hidden.dtype() == kiln_tensor::DType::F32
+    let head_t: &kiln_tensor::Tensor = if matches!(hidden.device(), kiln_tensor::Device::Vulkan(_))
+        && hidden.dtype() == kiln_tensor::DType::F32
         && head_t.dtype() == kiln_tensor::DType::BF16
     {
-        head_owned = head_t
-            .to_dtype(kiln_tensor::DType::F32)
-            .context("opd shim: cast BF16 head_t -> F32 for the OPD loss (Vulkan mixed precision)")?;
+        head_owned = head_t.to_dtype(kiln_tensor::DType::F32).context(
+            "opd shim: cast BF16 head_t -> F32 for the OPD loss (Vulkan mixed precision)",
+        )?;
         &head_owned
     } else {
         head_t
@@ -171,5 +180,309 @@ pub fn try_tape_opd_scalar_mean_cuda_kt(
     // the tape root via `with_tape_authoritative_scope_kt` (ones_like at
     // `loss_kt.id()`) — no kt->candle copy, no `register_output_mapping`. The
     // differentiable input (`hidden`) is already a recorded tape node.
+    Ok(Some(loss_kt))
+}
+
+#[cfg(feature = "vulkan")]
+fn tensor_err(msg: impl Into<String>) -> kiln_tensor::Error {
+    kiln_tensor::Error::Msg(msg.into())
+}
+
+#[cfg(feature = "vulkan")]
+fn opd_active_positions(label_mask: &[bool]) -> kiln_tensor::Result<Vec<u32>> {
+    label_mask
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, &active)| active.then_some(idx))
+        .map(|idx| {
+            u32::try_from(idx)
+                .map_err(|_| tensor_err(format!("vulkan OPD: active position {idx} exceeds u32")))
+        })
+        .collect()
+}
+
+#[cfg(feature = "vulkan")]
+fn vulkan_device_index(t: &kiln_tensor::Tensor, context: &str) -> kiln_tensor::Result<usize> {
+    match t.device() {
+        kiln_tensor::Device::Vulkan(i) => Ok(i),
+        other => Err(tensor_err(format!(
+            "{context}: expected Vulkan tensor, got {other}"
+        ))),
+    }
+}
+
+#[cfg(feature = "vulkan")]
+fn prepare_vulkan_opd_active_hidden(
+    hidden: &kiln_tensor::Tensor,
+    label_mask: &[bool],
+) -> kiln_tensor::Result<(
+    kiln_vulkan_kernel::vk_tensor::VkTensor,
+    Vec<u32>,
+    usize,
+    usize,
+    usize,
+)> {
+    let dims = hidden.dims();
+    if dims.len() != 3 || dims[0] != 1 {
+        return Err(tensor_err(format!(
+            "vulkan OPD: hidden must be [1, seq_len, hidden], got {dims:?}"
+        )));
+    }
+    let seq_len = dims[1];
+    let hidden_size = dims[2];
+    if label_mask.len() != seq_len {
+        return Err(tensor_err(format!(
+            "vulkan OPD: label_mask len {} != seq_len {seq_len}",
+            label_mask.len()
+        )));
+    }
+    if hidden.dtype() != kiln_tensor::DType::F32 {
+        return Err(tensor_err(format!(
+            "vulkan OPD: hidden must be F32 for vk_opd_topk_kl, got {}",
+            hidden.dtype()
+        )));
+    }
+    let active_positions = opd_active_positions(label_mask)?;
+    if active_positions.is_empty() {
+        return Err(tensor_err("vulkan OPD: no active positions"));
+    }
+
+    let hidden_2d = hidden.squeeze(0).and_then(|t| {
+        if t.is_contiguous() {
+            Ok(t)
+        } else {
+            t.contiguous()
+        }
+    })?;
+    let hidden_vk = kiln_tensor::vk_tensor_from_kt(&hidden_2d)
+        .map_err(|e| tensor_err(format!("vulkan OPD: bridge hidden: {e}")))?;
+    let active_hidden_vk = kiln_vulkan_kernel::vk_ops::index_select::vk_index_select_rows(
+        &hidden_vk,
+        &active_positions,
+    )
+    .map_err(|e| tensor_err(format!("vulkan OPD: gather active rows: {e}")))?;
+    Ok((
+        active_hidden_vk,
+        active_positions,
+        seq_len,
+        hidden_size,
+        vulkan_device_index(hidden, "vulkan OPD hidden")?,
+    ))
+}
+
+#[cfg(feature = "vulkan")]
+pub(crate) fn vulkan_opd_top_k_reverse_kl_scalar_loss_kt(
+    hidden: &kiln_tensor::Tensor,
+    weight: &kiln_tensor::Tensor,
+    teacher_topk_indices: &[u32],
+    teacher_topk_logprobs: &[f32],
+    label_mask: &[bool],
+    top_k: usize,
+) -> kiln_tensor::Result<kiln_tensor::Tensor> {
+    let (active_hidden_vk, _active_positions, _seq_len, hidden_size, device_index) =
+        prepare_vulkan_opd_active_hidden(hidden, label_mask)?;
+    if weight.dims().len() != 2 || weight.dims()[1] != hidden_size {
+        return Err(tensor_err(format!(
+            "vulkan OPD: weight must be [vocab, hidden={hidden_size}], got {:?}",
+            weight.dims()
+        )));
+    }
+    if !matches!(
+        weight.dtype(),
+        kiln_tensor::DType::F32 | kiln_tensor::DType::BF16
+    ) {
+        return Err(tensor_err(format!(
+            "vulkan OPD: weight must be F32/BF16, got {}",
+            weight.dtype()
+        )));
+    }
+    let weight_vk = kiln_tensor::vk_tensor_from_kt(weight)
+        .map_err(|e| tensor_err(format!("vulkan OPD: bridge weight: {e}")))?;
+    let loss_vk = kiln_vulkan_kernel::vk_ops::opd::vk_opd_top_k_reverse_kl_loss(
+        &active_hidden_vk,
+        &weight_vk,
+        teacher_topk_indices,
+        teacher_topk_logprobs,
+        top_k,
+    )
+    .map_err(|e| tensor_err(format!("vulkan OPD fused loss: {e}")))?;
+    kiln_tensor::kt_tensor_from_vk(&loss_vk, device_index)
+        .map_err(|e| tensor_err(format!("vulkan OPD: bridge loss: {e}")))
+}
+
+#[cfg(feature = "vulkan")]
+pub(crate) fn vulkan_opd_top_k_reverse_kl_scalar_grad_kt(
+    hidden: &kiln_tensor::Tensor,
+    weight: &kiln_tensor::Tensor,
+    teacher_topk_indices: &[u32],
+    teacher_topk_logprobs: &[f32],
+    label_mask: &[bool],
+    top_k: usize,
+    grad_loss: &kiln_tensor::Tensor,
+) -> kiln_tensor::Result<kiln_tensor::Tensor> {
+    let (active_hidden_vk, active_positions, seq_len, hidden_size, device_index) =
+        prepare_vulkan_opd_active_hidden(hidden, label_mask)?;
+    if weight.dims().len() != 2 || weight.dims()[1] != hidden_size {
+        return Err(tensor_err(format!(
+            "vulkan OPD grad: weight must be [vocab, hidden={hidden_size}], got {:?}",
+            weight.dims()
+        )));
+    }
+    let weight_vk = kiln_tensor::vk_tensor_from_kt(weight)
+        .map_err(|e| tensor_err(format!("vulkan OPD grad: bridge weight: {e}")))?;
+    let grad_vk = kiln_tensor::vk_tensor_from_kt(grad_loss)
+        .map_err(|e| tensor_err(format!("vulkan OPD grad: bridge grad_loss: {e}")))?;
+    let grad_active_vk = kiln_vulkan_kernel::vk_ops::opd::vk_opd_top_k_reverse_kl_backward(
+        &active_hidden_vk,
+        &weight_vk,
+        teacher_topk_indices,
+        teacher_topk_logprobs,
+        &grad_vk,
+        top_k,
+        kiln_vulkan_kernel::vk_ops::opd::OpdLossOutputMode::ScalarMean,
+    )
+    .map_err(|e| tensor_err(format!("vulkan OPD fused backward: {e}")))?;
+    let grad_full_vk = kiln_vulkan_kernel::vk_ops::index_select::vk_scatter_rows_to_full(
+        &grad_active_vk,
+        &active_positions,
+        seq_len,
+    )
+    .map_err(|e| tensor_err(format!("vulkan OPD grad: scatter active rows: {e}")))?;
+    let grad_full = kiln_tensor::kt_tensor_from_vk(&grad_full_vk, device_index)
+        .map_err(|e| tensor_err(format!("vulkan OPD grad: bridge full grad: {e}")))?;
+    grad_full
+        .unsqueeze(0)
+        .map_err(|e| tensor_err(format!("vulkan OPD grad: unsqueeze: {e}")))
+}
+
+#[cfg(feature = "vulkan")]
+pub(crate) fn vulkan_opd_top_k_reverse_kl_scalar_loss_and_grad_kt(
+    hidden: &kiln_tensor::Tensor,
+    weight: &kiln_tensor::Tensor,
+    teacher_topk_indices: &[u32],
+    teacher_topk_logprobs: &[f32],
+    label_mask: &[bool],
+    top_k: usize,
+) -> kiln_tensor::Result<(kiln_tensor::Tensor, kiln_tensor::Tensor)> {
+    let loss = vulkan_opd_top_k_reverse_kl_scalar_loss_kt(
+        hidden,
+        weight,
+        teacher_topk_indices,
+        teacher_topk_logprobs,
+        label_mask,
+        top_k,
+    )?;
+    let grad_seed = kiln_tensor::Tensor::from_vec_on(hidden.device(), vec![1.0f32], vec![1])
+        .map_err(|e| tensor_err(format!("vulkan OPD: grad seed: {e}")))?;
+    let grad = vulkan_opd_top_k_reverse_kl_scalar_grad_kt(
+        hidden,
+        weight,
+        teacher_topk_indices,
+        teacher_topk_logprobs,
+        label_mask,
+        top_k,
+        &grad_seed,
+    )?;
+    Ok((loss, grad))
+}
+
+#[cfg(feature = "vulkan")]
+#[derive(Debug)]
+struct VulkanOpdTopKReverseKlBackward {
+    hidden: kiln_tensor::Tensor,
+    weight: kiln_tensor::Tensor,
+    teacher_topk_indices: Vec<u32>,
+    teacher_topk_logprobs: Vec<f32>,
+    label_mask: Vec<bool>,
+    top_k: usize,
+}
+
+#[cfg(feature = "vulkan")]
+impl kiln_autograd::BackwardOp for VulkanOpdTopKReverseKlBackward {
+    fn name(&self) -> &'static str {
+        "vulkan_opd_topk_kl_backward"
+    }
+
+    fn input_count(&self) -> usize {
+        1
+    }
+
+    fn apply(
+        &self,
+        grad_output: &kiln_tensor::Tensor,
+    ) -> kiln_tensor::Result<Vec<Option<kiln_tensor::Tensor>>> {
+        let grad_hidden = vulkan_opd_top_k_reverse_kl_scalar_grad_kt(
+            &self.hidden,
+            &self.weight,
+            &self.teacher_topk_indices,
+            &self.teacher_topk_logprobs,
+            &self.label_mask,
+            self.top_k,
+            grad_output,
+        )?;
+        Ok(vec![Some(grad_hidden)])
+    }
+
+    fn requires_input(&self, _idx: usize) -> bool {
+        false
+    }
+}
+
+/// Vulkan-native OPD scalar loss wrapper using `vk_opd_topk_kl_{fwd,bwd}`.
+///
+/// Unlike [`try_tape_opd_scalar_mean_cuda_kt`], this takes the canonical tied
+/// LM-head weight `[vocab, hidden]` (`weights.embed_tokens`) because the Vulkan
+/// fused OPD shader supports F32 activations with an F32/BF16 row-major weight.
+#[cfg(feature = "vulkan")]
+pub fn try_tape_opd_scalar_mean_vulkan_kt(
+    hidden: &kiln_tensor::Tensor,
+    weight: &kiln_tensor::Tensor,
+    teacher_topk_indices: &[u32],
+    teacher_topk_logprobs: &[f32],
+    label_mask: &[bool],
+    top_k: usize,
+) -> Result<Option<kiln_tensor::Tensor>> {
+    use kiln_autograd::{Tape, tape_forward_enabled, with_active_tape};
+
+    if !tape_forward_enabled() {
+        return Ok(None);
+    }
+    if !matches!(hidden.device(), kiln_tensor::Device::Vulkan(_))
+        || !matches!(weight.device(), kiln_tensor::Device::Vulkan(_))
+    {
+        return Ok(None);
+    }
+    if label_mask.iter().filter(|&&m| m).count() == 0 {
+        return Ok(None);
+    }
+    let loss_kt = vulkan_opd_top_k_reverse_kl_scalar_loss_kt(
+        hidden,
+        weight,
+        teacher_topk_indices,
+        teacher_topk_logprobs,
+        label_mask,
+        top_k,
+    )
+    .map_err(|e| anyhow::anyhow!("vulkan OPD scalar kt loss: {e}"))?;
+
+    let loss_kt = match with_active_tape(|tape: &mut Tape| -> Result<_> {
+        tape.record(
+            &loss_kt,
+            &[hidden],
+            Box::new(VulkanOpdTopKReverseKlBackward {
+                hidden: hidden.clone(),
+                weight: weight.clone(),
+                teacher_topk_indices: teacher_topk_indices.to_vec(),
+                teacher_topk_logprobs: teacher_topk_logprobs.to_vec(),
+                label_mask: label_mask.to_vec(),
+                top_k,
+            }),
+        );
+        Ok(loss_kt)
+    }) {
+        Some(result) => result?,
+        None => return Ok(None),
+    };
+
     Ok(Some(loss_kt))
 }

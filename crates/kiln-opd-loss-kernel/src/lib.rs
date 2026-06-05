@@ -120,14 +120,16 @@ mod phase_b;
 
 pub mod kt_api;
 pub use kt_api::{
-    OpdLossError, OpdLossOutputKt, PerPositionMetricsKt, compute_per_position_metrics_kt,
-    opd_top_k_reverse_kl_kt, opd_top_k_reverse_kl_per_position_kt,
+    OpdActiveMetadata, OpdLossError, OpdLossOutputKt, PerPositionMetricsKt,
+    compute_per_position_metrics_kt, opd_top_k_reverse_kl_kt, opd_top_k_reverse_kl_per_position_kt,
+    opd_top_k_reverse_kl_per_position_with_metadata_kt, opd_top_k_reverse_kl_with_metadata_kt,
 };
 
 #[cfg(any(feature = "cuda", feature = "rocm"))]
 pub use kt_api::{
-    opd_top_k_reverse_kl_phase_b_bwd_kt,
-    opd_top_k_reverse_kl_phase_b_bwd_scalar_mean_unit_grad_kt,
+    opd_top_k_reverse_kl_phase_b_bwd_kt, opd_top_k_reverse_kl_phase_b_bwd_scalar_mean_unit_grad_kt,
+    opd_top_k_reverse_kl_phase_b_bwd_scalar_mean_unit_grad_with_metadata_kt,
+    opd_top_k_reverse_kl_phase_b_bwd_with_metadata_kt,
 };
 
 /// Phase 6a/CP-4 (#1082): parallel kt-tape entry that drops the candle
@@ -137,9 +139,8 @@ pub use kt_api::{
 /// sibling in commit `895162ca`).
 mod kt_tape;
 pub use kt_tape::{
-    opd_top_k_reverse_kl_phase_b_per_position_via_kt_tape,
-    opd_top_k_reverse_kl_phase_b_unit_grad_via_kt_tape,
-    opd_top_k_reverse_kl_phase_b_via_kt_tape, CudaOpdTopKReverseKlPhaseBBackward,
+    CudaOpdTopKReverseKlPhaseBBackward, opd_top_k_reverse_kl_phase_b_per_position_via_kt_tape,
+    opd_top_k_reverse_kl_phase_b_unit_grad_via_kt_tape, opd_top_k_reverse_kl_phase_b_via_kt_tape,
 };
 
 /// Default chunk size when iterating along the active-token dimension. Used

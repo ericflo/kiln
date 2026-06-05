@@ -62,10 +62,10 @@
 //! teacher's support size), so there's no chunked tail.
 
 use kiln_tensor::{
+    Error as KtError, Tensor as KtTensor,
     ops::{
         exp, index_select, log_softmax_last_dim, matmul, mean_all, mul, neg, sub, sum_axis, to_f32,
     },
-    Error as KtError, Tensor as KtTensor,
 };
 
 // `DType` is used by both the CUDA fused backward (the dtype gate) and
@@ -135,6 +135,24 @@ impl From<BridgeError> for OpdLossError {
     }
 }
 
+/// Active OPD metadata produced by the scalar/per-position forward pass.
+///
+/// Checkpointed OPD tails and scalar tape roots compute the OPD loss and then
+/// immediately run a unit-seed hidden-gradient pass. Saving the active row map
+/// and teacher top-K tensors lets that backward skip the repeated long-context
+/// mask scan and host-to-device uploads while keeping the large active-hidden
+/// matrix transient.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub struct OpdActiveMetadata {
+    active_positions: Vec<u32>,
+    active_indices: KtTensor,
+    topk_indices: KtTensor,
+    topk_logprobs: KtTensor,
+    active_count: usize,
+    top_k: usize,
+}
+
 /// Validate the shape / dtype contract on the kt-typed entry points
 /// and return the `(T, H, V, T_active, K)` quintuple for downstream
 /// code. Mirrors the candle-typed `crate::validate_inputs` but uses
@@ -148,6 +166,28 @@ fn validate_inputs_kt(
     teacher_topk_logprobs: &[f32],
     label_mask: &[bool],
     top_k: usize,
+) -> Result<(usize, usize, usize, usize, usize), OpdLossError> {
+    validate_inputs_kt_inner(
+        hidden,
+        head_t,
+        teacher_topk_indices,
+        teacher_topk_logprobs,
+        label_mask,
+        top_k,
+        None,
+        true,
+    )
+}
+
+fn validate_inputs_kt_inner(
+    hidden: &KtTensor,
+    head_t: &KtTensor,
+    teacher_topk_indices: &[u32],
+    teacher_topk_logprobs: &[f32],
+    label_mask: &[bool],
+    top_k: usize,
+    active_count_override: Option<usize>,
+    validate_topk_bounds: bool,
 ) -> Result<(usize, usize, usize, usize, usize), OpdLossError> {
     let hidden_dims = hidden.shape();
     if hidden_dims.len() != 3 {
@@ -187,7 +227,8 @@ fn validate_inputs_kt(
         return Err(OpdLossError::msg("kt-opd-loss: top_k must be > 0"));
     }
 
-    let active_count = label_mask.iter().filter(|&&m| m).count();
+    let active_count =
+        active_count_override.unwrap_or_else(|| label_mask.iter().filter(|&&m| m).count());
     let expected_logits = active_count * top_k;
     if teacher_topk_indices.len() != expected_logits {
         return Err(OpdLossError::msg(format!(
@@ -201,11 +242,13 @@ fn validate_inputs_kt(
             teacher_topk_logprobs.len(),
         )));
     }
-    for (i, &idx) in teacher_topk_indices.iter().enumerate() {
-        if (idx as usize) >= vocab_size {
-            return Err(OpdLossError::msg(format!(
-                "kt-opd-loss: teacher_topk_indices[{i}] = {idx} >= vocab_size {vocab_size}",
-            )));
+    if validate_topk_bounds {
+        for (i, &idx) in teacher_topk_indices.iter().enumerate() {
+            if (idx as usize) >= vocab_size {
+                return Err(OpdLossError::msg(format!(
+                    "kt-opd-loss: teacher_topk_indices[{i}] = {idx} >= vocab_size {vocab_size}",
+                )));
+            }
         }
     }
 
@@ -222,6 +265,202 @@ fn zero_scalar() -> Result<KtTensor, OpdLossError> {
 /// per-position entry point when there are no active positions.
 fn empty_per_position() -> Result<KtTensor, OpdLossError> {
     KtTensor::from_vec(Vec::<f32>::new(), vec![0]).map_err(OpdLossError::Kt)
+}
+
+fn upload_u32_on_device(
+    dev: kiln_tensor::Device,
+    vals: &[u32],
+    shape: Vec<usize>,
+    context: &str,
+) -> Result<KtTensor, OpdLossError> {
+    use kiln_tensor::Device as KtDevice;
+
+    match dev {
+        KtDevice::Cpu => KtTensor::from_vec(vals.to_vec(), shape).map_err(OpdLossError::Kt),
+        #[cfg(feature = "cuda")]
+        KtDevice::Cuda(i) => KtTensor::cuda_from_slice(vals, shape, i).map_err(OpdLossError::Kt),
+        #[cfg(feature = "metal")]
+        KtDevice::Metal(_) => KtTensor::from_vec(vals.to_vec(), shape)
+            .and_then(|t| t.to_device(dev))
+            .map_err(OpdLossError::Kt),
+        #[cfg(feature = "vulkan")]
+        KtDevice::Vulkan(_) => KtTensor::from_vec(vals.to_vec(), shape)
+            .and_then(|t| t.to_device(dev))
+            .map_err(OpdLossError::Kt),
+        #[cfg(feature = "rocm")]
+        KtDevice::Rocm(i) => {
+            KtTensor::from_vec_on(KtDevice::Rocm(i), vals.to_vec(), shape).map_err(OpdLossError::Kt)
+        }
+        #[allow(unreachable_patterns)]
+        other => Err(OpdLossError::msg(format!(
+            "{context}: unsupported device for u32 tensor {other}"
+        ))),
+    }
+}
+
+fn upload_f32_on_device(
+    dev: kiln_tensor::Device,
+    vals: &[f32],
+    shape: Vec<usize>,
+    context: &str,
+) -> Result<KtTensor, OpdLossError> {
+    use kiln_tensor::Device as KtDevice;
+
+    match dev {
+        KtDevice::Cpu => KtTensor::from_vec(vals.to_vec(), shape).map_err(OpdLossError::Kt),
+        #[cfg(feature = "cuda")]
+        KtDevice::Cuda(i) => KtTensor::cuda_from_slice(vals, shape, i).map_err(OpdLossError::Kt),
+        #[cfg(feature = "metal")]
+        KtDevice::Metal(_) => KtTensor::from_vec(vals.to_vec(), shape)
+            .and_then(|t| t.to_device(dev))
+            .map_err(OpdLossError::Kt),
+        #[cfg(feature = "vulkan")]
+        KtDevice::Vulkan(_) => KtTensor::from_vec(vals.to_vec(), shape)
+            .and_then(|t| t.to_device(dev))
+            .map_err(OpdLossError::Kt),
+        #[cfg(feature = "rocm")]
+        KtDevice::Rocm(i) => {
+            KtTensor::from_vec_on(KtDevice::Rocm(i), vals.to_vec(), shape).map_err(OpdLossError::Kt)
+        }
+        #[allow(unreachable_patterns)]
+        other => Err(OpdLossError::msg(format!(
+            "{context}: unsupported device for f32 tensor {other}"
+        ))),
+    }
+}
+
+fn build_opd_active_metadata(
+    hidden: &KtTensor,
+    teacher_topk_indices: &[u32],
+    teacher_topk_logprobs: &[f32],
+    active_positions: Vec<u32>,
+    top_k: usize,
+    context: &str,
+) -> Result<OpdActiveMetadata, OpdLossError> {
+    let active_count = active_positions.len();
+    if active_count == 0 {
+        return Err(OpdLossError::msg(format!(
+            "{context}: active metadata requires at least one row"
+        )));
+    }
+    let dev = hidden.device();
+    let active_indices = upload_u32_on_device(dev, &active_positions, vec![active_count], context)?;
+    let topk_indices = upload_u32_on_device(
+        dev,
+        teacher_topk_indices,
+        vec![active_count * top_k],
+        context,
+    )?;
+    let topk_logprobs = upload_f32_on_device(
+        dev,
+        teacher_topk_logprobs,
+        vec![active_count, top_k],
+        context,
+    )?;
+    Ok(OpdActiveMetadata {
+        active_positions,
+        active_indices,
+        topk_indices,
+        topk_logprobs,
+        active_count,
+        top_k,
+    })
+}
+
+#[cfg(any(feature = "cuda", feature = "rocm"))]
+fn validate_opd_active_metadata(
+    metadata: &OpdActiveMetadata,
+    device: kiln_tensor::Device,
+    seq_len: usize,
+    top_k: usize,
+    context: &str,
+) -> Result<(), OpdLossError> {
+    if metadata.active_count == 0 {
+        return Err(OpdLossError::msg(format!(
+            "{context}: active metadata must contain at least one row"
+        )));
+    }
+    if metadata.top_k != top_k {
+        return Err(OpdLossError::msg(format!(
+            "{context}: metadata top_k {} != requested top_k {top_k}",
+            metadata.top_k
+        )));
+    }
+    if metadata.active_positions.len() != metadata.active_count {
+        return Err(OpdLossError::msg(format!(
+            "{context}: active_positions len {} != active_count {}",
+            metadata.active_positions.len(),
+            metadata.active_count
+        )));
+    }
+    for &pos in &metadata.active_positions {
+        if pos as usize >= seq_len {
+            return Err(OpdLossError::msg(format!(
+                "{context}: active position {pos} >= seq_len {seq_len}"
+            )));
+        }
+    }
+    if metadata.active_indices.dtype() != KtDType::U32 {
+        return Err(OpdLossError::msg(format!(
+            "{context}: active_indices dtype {} != U32",
+            metadata.active_indices.dtype()
+        )));
+    }
+    if metadata.active_indices.device() != device {
+        return Err(OpdLossError::msg(format!(
+            "{context}: active_indices device {} != hidden device {}",
+            metadata.active_indices.device().short_name(),
+            device.short_name()
+        )));
+    }
+    if metadata.active_indices.shape() != [metadata.active_count] {
+        return Err(OpdLossError::msg(format!(
+            "{context}: active_indices shape {:?} != [{}]",
+            metadata.active_indices.shape(),
+            metadata.active_count
+        )));
+    }
+    if metadata.topk_indices.dtype() != KtDType::U32 {
+        return Err(OpdLossError::msg(format!(
+            "{context}: topk_indices dtype {} != U32",
+            metadata.topk_indices.dtype()
+        )));
+    }
+    if metadata.topk_indices.device() != device {
+        return Err(OpdLossError::msg(format!(
+            "{context}: topk_indices device {} != hidden device {}",
+            metadata.topk_indices.device().short_name(),
+            device.short_name()
+        )));
+    }
+    if metadata.topk_indices.element_count() != metadata.active_count * top_k {
+        return Err(OpdLossError::msg(format!(
+            "{context}: topk_indices element_count {} != active_count * top_k = {} * {top_k}",
+            metadata.topk_indices.element_count(),
+            metadata.active_count
+        )));
+    }
+    if metadata.topk_logprobs.dtype() != KtDType::F32 {
+        return Err(OpdLossError::msg(format!(
+            "{context}: topk_logprobs dtype {} != F32",
+            metadata.topk_logprobs.dtype()
+        )));
+    }
+    if metadata.topk_logprobs.device() != device {
+        return Err(OpdLossError::msg(format!(
+            "{context}: topk_logprobs device {} != hidden device {}",
+            metadata.topk_logprobs.device().short_name(),
+            device.short_name()
+        )));
+    }
+    if metadata.topk_logprobs.shape() != [metadata.active_count, top_k] {
+        return Err(OpdLossError::msg(format!(
+            "{context}: topk_logprobs shape {:?} != [{}, {top_k}]",
+            metadata.topk_logprobs.shape(),
+            metadata.active_count
+        )));
+    }
+    Ok(())
 }
 
 /// Forward kernel shared by [`opd_top_k_reverse_kl_kt`],
@@ -259,7 +498,7 @@ fn per_position_forward_kt(
     teacher_topk_logprobs: &[f32],
     active_positions: &[u32],
     top_k: usize,
-) -> Result<(KtTensor, KtTensor, KtTensor), OpdLossError> {
+) -> Result<(KtTensor, KtTensor, KtTensor, OpdActiveMetadata), OpdLossError> {
     let active_count = active_positions.len();
     debug_assert!(active_count > 0, "caller short-circuits empty");
 
@@ -275,79 +514,21 @@ fn per_position_forward_kt(
     // Metal storage (only the fused CUDA backward stays CUDA-only), so
     // the Metal arm builds the host index/scratch tensor on CPU and
     // moves it to the Metal device via `to_device` (`host_to_metal_copy`).
-    use kiln_tensor::Device as KtDevice;
-    let dev = hidden.device();
-    let upload_u32 = |vals: &[u32], shape: Vec<usize>| -> Result<KtTensor, OpdLossError> {
-        match dev {
-            KtDevice::Cpu => KtTensor::from_vec(vals.to_vec(), shape).map_err(OpdLossError::Kt),
-            #[cfg(feature = "cuda")]
-            KtDevice::Cuda(i) => {
-                KtTensor::cuda_from_slice(vals, shape, i).map_err(OpdLossError::Kt)
-            }
-            #[cfg(feature = "metal")]
-            KtDevice::Metal(_) => KtTensor::from_vec(vals.to_vec(), shape)
-                .and_then(|t| t.to_device(dev))
-                .map_err(OpdLossError::Kt),
-            // (#1082) Vulkan mirrors Metal: build the host index/scratch tensor
-            // on CPU and move it to the Vulkan device via `to_device`
-            // (`host_to_vulkan_copy`). Needed so the F32-on-Vulkan OPD forward
-            // can materialize the teacher top-K index tensor.
-            #[cfg(feature = "vulkan")]
-            KtDevice::Vulkan(_) => KtTensor::from_vec(vals.to_vec(), shape)
-                .and_then(|t| t.to_device(dev))
-                .map_err(OpdLossError::Kt),
-            // (Phase R.7) ROCm builds the host index tensor on CPU and uploads
-            // via `from_vec_on(Device::Rocm(i), ...)` (-> `host_to_rocm_copy`),
-            // so the F32/BF16-on-ROCm OPD forward + backward can materialize the
-            // teacher top-K index tensor on device.
-            #[cfg(feature = "rocm")]
-            KtDevice::Rocm(i) => {
-                KtTensor::from_vec_on(KtDevice::Rocm(i), vals.to_vec(), shape)
-                    .map_err(OpdLossError::Kt)
-            }
-            #[allow(unreachable_patterns)]
-            other => Err(OpdLossError::msg(format!(
-                "kt-opd-loss: unsupported device for index tensor {other}"
-            ))),
-        }
-    };
-    let upload_f32 = |vals: &[f32], shape: Vec<usize>| -> Result<KtTensor, OpdLossError> {
-        match dev {
-            KtDevice::Cpu => KtTensor::from_vec(vals.to_vec(), shape).map_err(OpdLossError::Kt),
-            #[cfg(feature = "cuda")]
-            KtDevice::Cuda(i) => {
-                KtTensor::cuda_from_slice(vals, shape, i).map_err(OpdLossError::Kt)
-            }
-            #[cfg(feature = "metal")]
-            KtDevice::Metal(_) => KtTensor::from_vec(vals.to_vec(), shape)
-                .and_then(|t| t.to_device(dev))
-                .map_err(OpdLossError::Kt),
-            // (#1082) Vulkan mirrors Metal (host CPU build -> to_device).
-            #[cfg(feature = "vulkan")]
-            KtDevice::Vulkan(_) => KtTensor::from_vec(vals.to_vec(), shape)
-                .and_then(|t| t.to_device(dev))
-                .map_err(OpdLossError::Kt),
-            // (Phase R.7) ROCm mirrors the index path (host CPU build ->
-            // `from_vec_on(Device::Rocm(i), ...)`).
-            #[cfg(feature = "rocm")]
-            KtDevice::Rocm(i) => {
-                KtTensor::from_vec_on(KtDevice::Rocm(i), vals.to_vec(), shape)
-                    .map_err(OpdLossError::Kt)
-            }
-            #[allow(unreachable_patterns)]
-            other => Err(OpdLossError::msg(format!(
-                "kt-opd-loss: unsupported device for q_logprobs {other}"
-            ))),
-        }
-    };
+    let active_metadata = build_opd_active_metadata(
+        hidden,
+        teacher_topk_indices,
+        teacher_topk_logprobs,
+        active_positions.to_vec(),
+        top_k,
+        "kt-opd-loss",
+    )?;
 
     // Step 1: gather active rows from hidden and cast to F32.
     //
     // hidden is `[1, T, H]`; squeeze batch dim → `[T, H]`. Then
     // index_select(0, active_positions) → `[T_active, H]`.
     let hidden_2d = hidden.squeeze(0)?;
-    let active_idx = upload_u32(active_positions, vec![active_count])?;
-    let active_hidden = index_select(&hidden_2d, 0, &active_idx)?;
+    let active_hidden = index_select(&hidden_2d, 0, &active_metadata.active_indices)?;
     let active_hidden_f32 = to_f32(&active_hidden)?;
     let head_t_f32 = to_f32(head_t)?;
 
@@ -358,8 +539,7 @@ fn per_position_forward_kt(
     // `[H, T_active * K]`. Reshape to `[H, T_active, K]` and
     // permute to `[T_active, H, K]`.
     let hidden_size = head_t.shape()[0];
-    let flat_indices = upload_u32(teacher_topk_indices, vec![active_count * top_k])?;
-    let gathered = index_select(&head_t_f32, 1, &flat_indices)?;
+    let gathered = index_select(&head_t_f32, 1, &active_metadata.topk_indices)?;
     let reshaped = gathered.reshape(vec![hidden_size, active_count, top_k])?;
     let head_gather = reshaped.permute(&[1, 0, 2])?.contiguous()?;
 
@@ -376,9 +556,8 @@ fn per_position_forward_kt(
     // output is contiguous, and we build q_logprobs fresh on the
     // same device as `s_logits` (= hidden's device).
     let s_logits = s_logits.contiguous()?;
-    let q_logprobs = upload_f32(teacher_topk_logprobs, vec![active_count, top_k])?;
     let log_p_hat = log_softmax_last_dim(&s_logits)?;
-    let log_q_hat = log_softmax_last_dim(&q_logprobs)?;
+    let log_q_hat = log_softmax_last_dim(&active_metadata.topk_logprobs)?;
 
     // Step 5: per-position reverse KL.
     //
@@ -390,7 +569,7 @@ fn per_position_forward_kt(
     let prod = mul(&p_hat, &diff)?;
     let per_token = sum_axis(&prod, 1)?;
 
-    Ok((per_token, log_p_hat, log_q_hat))
+    Ok((per_token, log_p_hat, log_q_hat, active_metadata))
 }
 
 /// kt-typed entry point for OPD scalar-mean reverse-KL.
@@ -450,6 +629,28 @@ pub fn opd_top_k_reverse_kl_kt(
     label_mask: &[bool],
     top_k: usize,
 ) -> Result<KtTensor, OpdLossError> {
+    let (loss, _) = opd_top_k_reverse_kl_with_metadata_kt(
+        hidden,
+        head_t,
+        teacher_topk_indices,
+        teacher_topk_logprobs,
+        label_mask,
+        top_k,
+    )?;
+    Ok(loss)
+}
+
+/// Same as [`opd_top_k_reverse_kl_kt`], plus reusable active/top-K
+/// device metadata for a unit-root hidden-gradient pass.
+#[doc(hidden)]
+pub fn opd_top_k_reverse_kl_with_metadata_kt(
+    hidden: &KtTensor,
+    head_t: &KtTensor,
+    teacher_topk_indices: &[u32],
+    teacher_topk_logprobs: &[f32],
+    label_mask: &[bool],
+    top_k: usize,
+) -> Result<(KtTensor, Option<OpdActiveMetadata>), OpdLossError> {
     let (_, _, _, active_count, _) = validate_inputs_kt(
         hidden,
         head_t,
@@ -459,7 +660,7 @@ pub fn opd_top_k_reverse_kl_kt(
         top_k,
     )?;
     if active_count == 0 {
-        return zero_scalar();
+        return Ok((zero_scalar()?, None));
     }
 
     let active_positions: Vec<u32> = label_mask
@@ -468,7 +669,7 @@ pub fn opd_top_k_reverse_kl_kt(
         .filter_map(|(i, &m)| if m { Some(i as u32) } else { None })
         .collect();
 
-    let (per_token, _log_p_hat, _log_q_hat) = per_position_forward_kt(
+    let (per_token, _log_p_hat, _log_q_hat, active_metadata) = per_position_forward_kt(
         hidden,
         head_t,
         teacher_topk_indices,
@@ -477,7 +678,7 @@ pub fn opd_top_k_reverse_kl_kt(
         top_k,
     )?;
     let loss = mean_all(&per_token)?;
-    Ok(loss)
+    Ok((loss, Some(active_metadata)))
 }
 
 /// kt-typed entry point for OPD per-position reverse-KL.
@@ -504,6 +705,28 @@ pub fn opd_top_k_reverse_kl_per_position_kt(
     label_mask: &[bool],
     top_k: usize,
 ) -> Result<KtTensor, OpdLossError> {
+    let (per_token, _) = opd_top_k_reverse_kl_per_position_with_metadata_kt(
+        hidden,
+        head_t,
+        teacher_topk_indices,
+        teacher_topk_logprobs,
+        label_mask,
+        top_k,
+    )?;
+    Ok(per_token)
+}
+
+/// Same as [`opd_top_k_reverse_kl_per_position_kt`], plus reusable
+/// active/top-K device metadata for a subsequent OPD hidden-gradient pass.
+#[doc(hidden)]
+pub fn opd_top_k_reverse_kl_per_position_with_metadata_kt(
+    hidden: &KtTensor,
+    head_t: &KtTensor,
+    teacher_topk_indices: &[u32],
+    teacher_topk_logprobs: &[f32],
+    label_mask: &[bool],
+    top_k: usize,
+) -> Result<(KtTensor, Option<OpdActiveMetadata>), OpdLossError> {
     let (_, _, _, active_count, _) = validate_inputs_kt(
         hidden,
         head_t,
@@ -513,7 +736,7 @@ pub fn opd_top_k_reverse_kl_per_position_kt(
         top_k,
     )?;
     if active_count == 0 {
-        return empty_per_position();
+        return Ok((empty_per_position()?, None));
     }
 
     let active_positions: Vec<u32> = label_mask
@@ -522,7 +745,7 @@ pub fn opd_top_k_reverse_kl_per_position_kt(
         .filter_map(|(i, &m)| if m { Some(i as u32) } else { None })
         .collect();
 
-    let (per_token, _log_p_hat, _log_q_hat) = per_position_forward_kt(
+    let (per_token, _log_p_hat, _log_q_hat, active_metadata) = per_position_forward_kt(
         hidden,
         head_t,
         teacher_topk_indices,
@@ -530,7 +753,7 @@ pub fn opd_top_k_reverse_kl_per_position_kt(
         &active_positions,
         top_k,
     )?;
-    Ok(per_token)
+    Ok((per_token, Some(active_metadata)))
 }
 
 /// kt-typed parallel of [`crate::PerPositionMetrics`].
@@ -666,7 +889,7 @@ pub fn compute_per_position_metrics_kt(
         .filter_map(|(i, &m)| if m { Some(i as u32) } else { None })
         .collect();
 
-    let (per_token, log_p_hat, log_q_hat) = per_position_forward_kt(
+    let (per_token, log_p_hat, log_q_hat, _active_metadata) = per_position_forward_kt(
         hidden,
         head_t,
         teacher_topk_indices,
@@ -782,8 +1005,8 @@ pub fn opd_top_k_reverse_kl_phase_b_bwd_composite_kt(
     top_k: usize,
     output_mode: OpdLossOutputKt,
 ) -> Result<KtTensor, OpdLossError> {
-    use kiln_tensor::ops::{broadcast_to, mul_scalar, scatter_add, sum_axis};
     use kiln_tensor::Device as KtDevice;
+    use kiln_tensor::ops::{broadcast_to, mul_scalar, scatter_add, sum_axis};
 
     // -- 1. Validate shapes (same envelope as the FFI backward). --------
     validate_inputs_kt(
@@ -826,10 +1049,8 @@ pub fn opd_top_k_reverse_kl_phase_b_bwd_composite_kt(
                 .map_err(OpdLossError::Kt),
             // (Phase R.7) ROCm host upload (-> `host_to_rocm_copy`).
             #[cfg(feature = "rocm")]
-            KtDevice::Rocm(i) => {
-                KtTensor::from_vec_on(KtDevice::Rocm(i), vals.to_vec(), shape)
-                    .map_err(OpdLossError::Kt)
-            }
+            KtDevice::Rocm(i) => KtTensor::from_vec_on(KtDevice::Rocm(i), vals.to_vec(), shape)
+                .map_err(OpdLossError::Kt),
             #[allow(unreachable_patterns)]
             other => Err(OpdLossError::msg(format!(
                 "kt-opd-loss bwd composite: unsupported device for index tensor {other}"
@@ -854,10 +1075,8 @@ pub fn opd_top_k_reverse_kl_phase_b_bwd_composite_kt(
                 .map_err(OpdLossError::Kt),
             // (Phase R.7) ROCm host upload (-> `host_to_rocm_copy`).
             #[cfg(feature = "rocm")]
-            KtDevice::Rocm(i) => {
-                KtTensor::from_vec_on(KtDevice::Rocm(i), vals.to_vec(), shape)
-                    .map_err(OpdLossError::Kt)
-            }
+            KtDevice::Rocm(i) => KtTensor::from_vec_on(KtDevice::Rocm(i), vals.to_vec(), shape)
+                .map_err(OpdLossError::Kt),
             #[allow(unreachable_patterns)]
             other => Err(OpdLossError::msg(format!(
                 "kt-opd-loss bwd composite: unsupported device for f32 tensor {other}"
@@ -868,8 +1087,11 @@ pub fn opd_top_k_reverse_kl_phase_b_bwd_composite_kt(
     // Short-circuit: no active rows ⇒ d_hidden is all zeros in the
     // input dtype on the input device.
     if active_count == 0 {
-        let zeros = KtTensor::from_vec(vec![0.0f32; seq_len * hidden_size], vec![1, seq_len, hidden_size])
-            .map_err(OpdLossError::Kt)?;
+        let zeros = KtTensor::from_vec(
+            vec![0.0f32; seq_len * hidden_size],
+            vec![1, seq_len, hidden_size],
+        )
+        .map_err(OpdLossError::Kt)?;
         let zeros = zeros.to_device(dev).map_err(OpdLossError::Kt)?;
         let zeros = if dtype == KtDType::F32 {
             zeros
@@ -1044,6 +1266,35 @@ pub fn opd_top_k_reverse_kl_phase_b_bwd_kt(
         Some(grad_loss),
         top_k,
         output_mode,
+        None,
+    )
+}
+
+/// Same as [`opd_top_k_reverse_kl_phase_b_bwd_kt`], but reuses active/top-K
+/// device metadata returned by the matching forward pass.
+#[cfg(any(feature = "cuda", feature = "rocm"))]
+#[doc(hidden)]
+pub fn opd_top_k_reverse_kl_phase_b_bwd_with_metadata_kt(
+    hidden: &KtTensor,
+    head_t: &KtTensor,
+    teacher_topk_indices: &[u32],
+    teacher_topk_logprobs: &[f32],
+    label_mask: &[bool],
+    grad_loss: &KtTensor,
+    top_k: usize,
+    output_mode: OpdLossOutputKt,
+    active_metadata: &OpdActiveMetadata,
+) -> Result<KtTensor, OpdLossError> {
+    opd_top_k_reverse_kl_phase_b_bwd_kt_inner(
+        hidden,
+        head_t,
+        teacher_topk_indices,
+        teacher_topk_logprobs,
+        label_mask,
+        Some(grad_loss),
+        top_k,
+        output_mode,
+        Some(active_metadata),
     )
 }
 
@@ -1072,6 +1323,33 @@ pub fn opd_top_k_reverse_kl_phase_b_bwd_scalar_mean_unit_grad_kt(
         None,
         top_k,
         OpdLossOutputKt::ScalarMean,
+        None,
+    )
+}
+
+/// Unit-root scalar-mean OPD backward that reuses active/top-K metadata
+/// returned by [`opd_top_k_reverse_kl_with_metadata_kt`].
+#[cfg(any(feature = "cuda", feature = "rocm"))]
+#[doc(hidden)]
+pub fn opd_top_k_reverse_kl_phase_b_bwd_scalar_mean_unit_grad_with_metadata_kt(
+    hidden: &KtTensor,
+    head_t: &KtTensor,
+    teacher_topk_indices: &[u32],
+    teacher_topk_logprobs: &[f32],
+    label_mask: &[bool],
+    top_k: usize,
+    active_metadata: &OpdActiveMetadata,
+) -> Result<KtTensor, OpdLossError> {
+    opd_top_k_reverse_kl_phase_b_bwd_kt_inner(
+        hidden,
+        head_t,
+        teacher_topk_indices,
+        teacher_topk_logprobs,
+        label_mask,
+        None,
+        top_k,
+        OpdLossOutputKt::ScalarMean,
+        Some(active_metadata),
     )
 }
 
@@ -1085,21 +1363,26 @@ fn opd_top_k_reverse_kl_phase_b_bwd_kt_inner(
     grad_loss: Option<&KtTensor>,
     top_k: usize,
     output_mode: OpdLossOutputKt,
+    active_metadata: Option<&OpdActiveMetadata>,
 ) -> Result<KtTensor, OpdLossError> {
     use kiln_kt_bridge::{
         alloc_device_tensor_like, device_input_ptr, device_output_ptr, device_stream_raw_of,
     };
     use kiln_tensor::Backend;
+    #[cfg(feature = "rocm")]
     use kiln_tensor::Device as KtDevice;
 
     // -- 1. Validate shapes / dtype envelope ----------------------------
-    let (_, _, _vocab_size_decl, _, _) = validate_inputs_kt(
+    let active_count_override = active_metadata.map(|metadata| metadata.active_count);
+    let (_, _, _vocab_size_decl, active_count, _) = validate_inputs_kt_inner(
         hidden,
         head_t,
         teacher_topk_indices,
         teacher_topk_logprobs,
         label_mask,
         top_k,
+        active_count_override,
+        active_metadata.is_none(),
     )?;
 
     // K + dtype gate (mirrors `phase_b::cuda_kernel_supports`).
@@ -1143,46 +1426,6 @@ fn opd_top_k_reverse_kl_phase_b_bwd_kt_inner(
         }
     }
 
-    // Backend-neutral host->device upload of a typed slice onto `dev`. CUDA
-    // routes through `cuda_from_slice` (host->cuda); ROCm through
-    // `from_vec_on(Device::Rocm(i), ...)` (-> `host_to_rocm_copy`). Both keep
-    // the result on `hidden`'s device so the FFI kernel's pointers are valid.
-    let upload_slice = |vals_u32: Option<&[u32]>,
-                        vals_f32: Option<&[f32]>,
-                        shape: Vec<usize>|
-     -> Result<KtTensor, OpdLossError> {
-        match (vals_u32, vals_f32, dev) {
-            #[cfg(feature = "cuda")]
-            (Some(u), None, KtDevice::Cuda(i)) => {
-                KtTensor::cuda_from_slice(u, shape, i).map_err(OpdLossError::Kt)
-            }
-            #[cfg(feature = "cuda")]
-            (None, Some(f), KtDevice::Cuda(i)) => {
-                KtTensor::cuda_from_slice(f, shape, i).map_err(OpdLossError::Kt)
-            }
-            #[cfg(feature = "rocm")]
-            (Some(u), None, KtDevice::Rocm(i)) => {
-                KtTensor::from_vec_on(KtDevice::Rocm(i), u.to_vec(), shape)
-                    .map_err(OpdLossError::Kt)
-            }
-            #[cfg(feature = "rocm")]
-            (None, Some(f), KtDevice::Rocm(i)) => {
-                KtTensor::from_vec_on(KtDevice::Rocm(i), f.to_vec(), shape)
-                    .map_err(OpdLossError::Kt)
-            }
-            _ => Err(OpdLossError::msg(
-                "kt-opd-loss bwd: unsupported device/dtype for host upload",
-            )),
-        }
-    };
-
-    let active_positions: Vec<u32> = label_mask
-        .iter()
-        .enumerate()
-        .filter_map(|(i, &m)| if m { Some(i as u32) } else { None })
-        .collect();
-    let active_count = active_positions.len();
-
     // Short-circuit: no active rows ⇒ d_hidden is all zeros in the
     // input dtype on the input device. Skip the kernel entirely; this
     // matches `cuda_kernel_backward`'s early return.
@@ -1191,16 +1434,36 @@ fn opd_top_k_reverse_kl_phase_b_bwd_kt_inner(
         return Ok(zeros);
     }
 
+    let active_metadata_owned;
+    let active_metadata = match active_metadata {
+        Some(metadata) => {
+            validate_opd_active_metadata(metadata, dev, seq_len, top_k, "kt-opd-loss bwd")?;
+            metadata
+        }
+        None => {
+            let active_positions: Vec<u32> = label_mask
+                .iter()
+                .enumerate()
+                .filter_map(|(i, &m)| if m { Some(i as u32) } else { None })
+                .collect();
+            active_metadata_owned = build_opd_active_metadata(
+                hidden,
+                teacher_topk_indices,
+                teacher_topk_logprobs,
+                active_positions,
+                top_k,
+                "kt-opd-loss bwd",
+            )?;
+            &active_metadata_owned
+        }
+    };
+
     // -- 3. Upload host-side teacher tensors + row-map inputs ----------
     //
     // active_indices (U32, [T_active]) — both the gather of hidden rows
     // and the fused kernel's full-output row mapping use the same index
     // buffer.
-    let active_indices = upload_slice(
-        Some(active_positions.as_slice()),
-        None,
-        vec![active_count],
-    )?;
+    let active_indices = active_metadata.active_indices.clone();
 
     // Gather active hidden rows, then take contiguous.
     //
@@ -1225,9 +1488,8 @@ fn opd_top_k_reverse_kl_phase_b_bwd_kt_inner(
             // CPU index tensor, then upload the [T_active, H] result back.
             let hidden_2d_host = kiln_tensor::rocm_to_host_copy(&hidden_2d)?;
             let active_idx_host =
-                KtTensor::from_vec(active_positions.clone(), vec![active_count])?;
-            let gathered_host =
-                index_select(&hidden_2d_host, 0, &active_idx_host)?.contiguous()?;
+                KtTensor::from_vec(active_metadata.active_positions.clone(), vec![active_count])?;
+            let gathered_host = index_select(&hidden_2d_host, 0, &active_idx_host)?.contiguous()?;
             kiln_tensor::host_to_rocm_copy(&gathered_host, rocm_idx)?
         }
         #[allow(unreachable_patterns)]
@@ -1242,16 +1504,8 @@ fn opd_top_k_reverse_kl_phase_b_bwd_kt_inner(
     };
 
     // Upload teacher tensors as 2-D for the FFI (`[T_active, K]`).
-    let topk_idx_dev = upload_slice(
-        Some(teacher_topk_indices),
-        None,
-        vec![active_count, top_k],
-    )?;
-    let topk_lp_q_dev = upload_slice(
-        None,
-        Some(teacher_topk_logprobs),
-        vec![active_count, top_k],
-    )?;
+    let topk_idx_dev = active_metadata.topk_indices.clone();
+    let topk_lp_q_dev = active_metadata.topk_logprobs.clone();
 
     // Normalise grad_loss to a 1-D contiguous F32 tensor on device,
     // shape {ScalarMean: [1], PerPosition: [active_count]}. ScalarMean also
@@ -1324,8 +1578,7 @@ fn opd_top_k_reverse_kl_phase_b_bwd_kt_inner(
     let h_ptr = device_input_ptr(&active_hidden, dtype, "active_hidden")?;
     let head_ptr = device_input_ptr(&head_t_contig, dtype, "head_t")?;
     let i_ptr = device_input_ptr(&topk_idx_dev, KtDType::U32, "topk_idx")?;
-    let l_ptr =
-        device_input_ptr(&topk_lp_q_dev, KtDType::F32, "topk_lp_q")?;
+    let l_ptr = device_input_ptr(&topk_lp_q_dev, KtDType::F32, "topk_lp_q")?;
     let a_ptr = device_input_ptr(&active_indices, KtDType::U32, "active_indices")?;
     let g_ptr = match grad_loss_dev.as_ref() {
         Some(grad_loss_dev) => device_input_ptr(grad_loss_dev, KtDType::F32, "grad_loss")?,
@@ -1436,8 +1689,7 @@ mod tests {
         let idx = vec![0u32; 4];
         let lp = vec![0.0f32; 4];
         let mask = vec![true; 4];
-        let err =
-            opd_top_k_reverse_kl_kt(&h, &w, &idx, &lp, &mask, 1).unwrap_err();
+        let err = opd_top_k_reverse_kl_kt(&h, &w, &idx, &lp, &mask, 1).unwrap_err();
         let s = format!("{err}");
         assert!(s.contains("hidden must be 3-D"), "got: {s}");
     }
@@ -1450,8 +1702,7 @@ mod tests {
         let idx = vec![0u32; 4];
         let lp = vec![0.0f32; 4];
         let mask = vec![true; 4];
-        let err =
-            opd_top_k_reverse_kl_kt(&h, &w, &idx, &lp, &mask, 1).unwrap_err();
+        let err = opd_top_k_reverse_kl_kt(&h, &w, &idx, &lp, &mask, 1).unwrap_err();
         let s = format!("{err}");
         assert!(s.contains("batch dim must be 1"), "got: {s}");
     }
@@ -1464,8 +1715,7 @@ mod tests {
         let idx = vec![0u32; 4];
         let lp = vec![0.0f32; 4];
         let mask = vec![true; 4];
-        let err =
-            opd_top_k_reverse_kl_kt(&h, &w, &idx, &lp, &mask, 1).unwrap_err();
+        let err = opd_top_k_reverse_kl_kt(&h, &w, &idx, &lp, &mask, 1).unwrap_err();
         let s = format!("{err}");
         assert!(s.contains("head_t must be 2-D"), "got: {s}");
     }
@@ -1478,8 +1728,7 @@ mod tests {
         let idx = vec![0u32; 4];
         let lp = vec![0.0f32; 4];
         let mask = vec![true; 4];
-        let err =
-            opd_top_k_reverse_kl_kt(&h, &w, &idx, &lp, &mask, 1).unwrap_err();
+        let err = opd_top_k_reverse_kl_kt(&h, &w, &idx, &lp, &mask, 1).unwrap_err();
         let s = format!("{err}");
         assert!(s.contains("hidden_size mismatch"), "got: {s}");
     }
@@ -1491,8 +1740,7 @@ mod tests {
         let idx = vec![0u32; 4];
         let lp = vec![0.0f32; 4];
         let mask = vec![true; 3]; // wrong length
-        let err =
-            opd_top_k_reverse_kl_kt(&h, &w, &idx, &lp, &mask, 1).unwrap_err();
+        let err = opd_top_k_reverse_kl_kt(&h, &w, &idx, &lp, &mask, 1).unwrap_err();
         let s = format!("{err}");
         assert!(s.contains("label_mask length"), "got: {s}");
     }
@@ -1504,8 +1752,7 @@ mod tests {
         let idx = vec![0u32; 4];
         let lp = vec![0.0f32; 4];
         let mask = vec![true; 4];
-        let err =
-            opd_top_k_reverse_kl_kt(&h, &w, &idx, &lp, &mask, 0).unwrap_err();
+        let err = opd_top_k_reverse_kl_kt(&h, &w, &idx, &lp, &mask, 0).unwrap_err();
         let s = format!("{err}");
         assert!(s.contains("top_k must be > 0"), "got: {s}");
     }
@@ -1518,8 +1765,7 @@ mod tests {
         let idx = vec![0u32; 6];
         let lp = vec![0.0f32; 8];
         let mask = vec![true; 4];
-        let err =
-            opd_top_k_reverse_kl_kt(&h, &w, &idx, &lp, &mask, 2).unwrap_err();
+        let err = opd_top_k_reverse_kl_kt(&h, &w, &idx, &lp, &mask, 2).unwrap_err();
         let s = format!("{err}");
         assert!(s.contains("teacher_topk_indices length"), "got: {s}");
     }
@@ -1532,8 +1778,7 @@ mod tests {
         let idx = vec![0u32; 8];
         let lp = vec![0.0f32; 6];
         let mask = vec![true; 4];
-        let err =
-            opd_top_k_reverse_kl_kt(&h, &w, &idx, &lp, &mask, 2).unwrap_err();
+        let err = opd_top_k_reverse_kl_kt(&h, &w, &idx, &lp, &mask, 2).unwrap_err();
         let s = format!("{err}");
         assert!(s.contains("teacher_topk_logprobs length"), "got: {s}");
     }
@@ -1546,13 +1791,9 @@ mod tests {
         let idx = vec![99u32; 4];
         let lp = vec![0.0f32; 4];
         let mask = vec![true; 4];
-        let err =
-            opd_top_k_reverse_kl_kt(&h, &w, &idx, &lp, &mask, 1).unwrap_err();
+        let err = opd_top_k_reverse_kl_kt(&h, &w, &idx, &lp, &mask, 1).unwrap_err();
         let s = format!("{err}");
-        assert!(
-            s.contains(">= vocab_size") || s.contains("99"),
-            "got: {s}"
-        );
+        assert!(s.contains(">= vocab_size") || s.contains("99"), "got: {s}");
     }
 
     /// Read a F32 [`KtTensor`] into a Vec for assertions.
@@ -1588,6 +1829,42 @@ mod tests {
     }
 
     #[test]
+    fn opd_top_k_reverse_kl_with_metadata_matches_plain_and_shapes() {
+        let h = dummy_hidden(5, 8);
+        let w = dummy_head_t(8, 16);
+        let top_k = 3usize;
+        let mask = vec![true, false, true, true, false];
+        let active_count = mask.iter().filter(|&&m| m).count();
+        let mut idx = Vec::with_capacity(active_count * top_k);
+        for r in 0..active_count {
+            for k in 0..top_k {
+                idx.push(((r * 5 + k * 2) % 16) as u32);
+            }
+        }
+        let lp: Vec<f32> = (0..active_count * top_k)
+            .map(|i| -0.25 - ((i as f32) * 0.19).cos().abs())
+            .collect();
+
+        let plain =
+            opd_top_k_reverse_kl_kt(&h, &w, &idx, &lp, &mask, top_k).expect("plain forward");
+        let (with_metadata, metadata) =
+            opd_top_k_reverse_kl_with_metadata_kt(&h, &w, &idx, &lp, &mask, top_k)
+                .expect("metadata forward");
+        let metadata = metadata.expect("active metadata");
+
+        assert_eq!(read_f32(&plain), read_f32(&with_metadata));
+        assert_eq!(metadata.active_count, active_count);
+        assert_eq!(metadata.top_k, top_k);
+        assert_eq!(metadata.active_positions, vec![0, 2, 3]);
+        assert_eq!(metadata.active_indices.shape(), &[active_count]);
+        assert_eq!(metadata.active_indices.dtype(), KtDType::U32);
+        assert_eq!(metadata.topk_indices.element_count(), active_count * top_k);
+        assert_eq!(metadata.topk_indices.dtype(), KtDType::U32);
+        assert_eq!(metadata.topk_logprobs.shape(), &[active_count, top_k]);
+        assert_eq!(metadata.topk_logprobs.dtype(), KtDType::F32);
+    }
+
+    #[test]
     fn opd_top_k_reverse_kl_per_position_kt_returns_vector_on_valid_shapes() {
         // K=1 ⇒ both renormalised distributions are degenerate
         // singletons ⇒ KL = 0 at every active position.
@@ -1596,8 +1873,8 @@ mod tests {
         let idx = vec![0u32; 4];
         let lp = vec![0.0f32; 4];
         let mask = vec![true; 4];
-        let out = opd_top_k_reverse_kl_per_position_kt(&h, &w, &idx, &lp, &mask, 1)
-            .expect("forward");
+        let out =
+            opd_top_k_reverse_kl_per_position_kt(&h, &w, &idx, &lp, &mask, 1).expect("forward");
         assert_eq!(out.shape(), &[4]);
         let v = read_f32(&out);
         assert_eq!(v.len(), 4);
@@ -1628,8 +1905,8 @@ mod tests {
         let idx: Vec<u32> = vec![];
         let lp: Vec<f32> = vec![];
         let mask = vec![false; 4];
-        let out = opd_top_k_reverse_kl_per_position_kt(&h, &w, &idx, &lp, &mask, 4)
-            .expect("forward");
+        let out =
+            opd_top_k_reverse_kl_per_position_kt(&h, &w, &idx, &lp, &mask, 4).expect("forward");
         assert_eq!(out.shape(), &[0]);
         assert!(read_f32(&out).is_empty());
     }
@@ -1695,12 +1972,10 @@ mod tests {
             .map(|i| -1.0 - ((i as f32) * 0.05).cos())
             .collect();
 
-        let scalar = read_f32(
-            &opd_top_k_reverse_kl_kt(&hidden, &head, &idx, &lp, &mask, k).unwrap(),
-        );
+        let scalar =
+            read_f32(&opd_top_k_reverse_kl_kt(&hidden, &head, &idx, &lp, &mask, k).unwrap());
         let per_pos = read_f32(
-            &opd_top_k_reverse_kl_per_position_kt(&hidden, &head, &idx, &lp, &mask, k)
-                .unwrap(),
+            &opd_top_k_reverse_kl_per_position_kt(&hidden, &head, &idx, &lp, &mask, k).unwrap(),
         );
         assert_eq!(per_pos.len(), active);
         let mean: f32 = per_pos.iter().sum::<f32>() / (active as f32);
@@ -1724,8 +1999,7 @@ mod tests {
         let idx = vec![0u32; 4];
         let lp = vec![0.0f32; 4];
         let mask = vec![true; 4];
-        let err = opd_top_k_reverse_kl_per_position_kt(&h, &w, &idx, &lp, &mask, 1)
-            .unwrap_err();
+        let err = opd_top_k_reverse_kl_per_position_kt(&h, &w, &idx, &lp, &mask, 1).unwrap_err();
         let s = format!("{err}");
         assert!(s.contains("hidden must be 3-D"), "got: {s}");
     }
@@ -1737,8 +2011,7 @@ mod tests {
         let idx = vec![0u32; 4];
         let lp = vec![0.0f32; 4];
         let mask = vec![true; 4];
-        let err =
-            compute_per_position_metrics_kt(&h, &w, &idx, &lp, &mask, 1).unwrap_err();
+        let err = compute_per_position_metrics_kt(&h, &w, &idx, &lp, &mask, 1).unwrap_err();
         let s = format!("{err}");
         assert!(s.contains("hidden must be 3-D"), "got: {s}");
     }
@@ -1752,8 +2025,7 @@ mod tests {
         let idx = vec![0u32; 4];
         let lp = vec![0.0f32; 4];
         let mask = vec![true; 4];
-        let m = compute_per_position_metrics_kt(&h, &w, &idx, &lp, &mask, 1)
-            .expect("metrics");
+        let m = compute_per_position_metrics_kt(&h, &w, &idx, &lp, &mask, 1).expect("metrics");
         assert_eq!(m.student_entropy.len(), 4);
         assert_eq!(m.teacher_entropy.len(), 4);
         assert_eq!(m.reverse_kl.len(), 4);
@@ -1784,14 +2056,19 @@ mod tests {
             }
         }
         let lp = vec![-(top_k as f32).ln(); active * top_k];
-        let m = compute_per_position_metrics_kt(&h, &w, &idx, &lp, &mask, top_k)
-            .expect("metrics");
+        let m = compute_per_position_metrics_kt(&h, &w, &idx, &lp, &mask, top_k).expect("metrics");
         let expect_h = (top_k as f32).ln();
         for &s in &m.student_entropy {
-            assert!((s - expect_h).abs() < 1e-5, "student H = {s}, want {expect_h}");
+            assert!(
+                (s - expect_h).abs() < 1e-5,
+                "student H = {s}, want {expect_h}"
+            );
         }
         for &t in &m.teacher_entropy {
-            assert!((t - expect_h).abs() < 1e-5, "teacher H = {t}, want {expect_h}");
+            assert!(
+                (t - expect_h).abs() < 1e-5,
+                "teacher H = {t}, want {expect_h}"
+            );
         }
         for &kl in &m.reverse_kl {
             assert!(kl.abs() < 1e-5, "KL = {kl}, want 0");
@@ -1805,8 +2082,7 @@ mod tests {
         let idx: Vec<u32> = vec![];
         let lp: Vec<f32> = vec![];
         let mask = vec![false; 4];
-        let m = compute_per_position_metrics_kt(&h, &w, &idx, &lp, &mask, 4)
-            .expect("metrics");
+        let m = compute_per_position_metrics_kt(&h, &w, &idx, &lp, &mask, 4).expect("metrics");
         assert!(m.student_entropy.is_empty());
         assert!(m.teacher_entropy.is_empty());
         assert!(m.reverse_kl.is_empty());
@@ -1876,7 +2152,7 @@ mod tests {
             .enumerate()
             .filter_map(|(i, &m)| if m { Some(i as u32) } else { None })
             .collect();
-        let (per_token, _, _) =
+        let (per_token, _, _, _) =
             per_position_forward_kt(&hidden, head, idx, lp, &active, top_k).unwrap();
         let kl = read_f32(&per_token);
         if scalar_mean {
@@ -1940,7 +2216,8 @@ mod tests {
             )
         };
 
-        let hidden = KtTensor::from_vec(hidden_flat.clone(), vec![1, seq_len, hidden_size]).unwrap();
+        let hidden =
+            KtTensor::from_vec(hidden_flat.clone(), vec![1, seq_len, hidden_size]).unwrap();
         let analytic = opd_top_k_reverse_kl_phase_b_bwd_composite_kt(
             &hidden, &head, &idx, &lp, &mask, &grad_loss, top_k, mode,
         )
@@ -1958,10 +2235,28 @@ mod tests {
             xp[i] += h;
             xm[i] -= h;
             let lp_loss = forward_loss_for_fd(
-                &xp, seq_len, hidden_size, &head, &idx, &lp, &mask, top_k, &grad_w, scalar_mean,
+                &xp,
+                seq_len,
+                hidden_size,
+                &head,
+                &idx,
+                &lp,
+                &mask,
+                top_k,
+                &grad_w,
+                scalar_mean,
             );
             let lm_loss = forward_loss_for_fd(
-                &xm, seq_len, hidden_size, &head, &idx, &lp, &mask, top_k, &grad_w, scalar_mean,
+                &xm,
+                seq_len,
+                hidden_size,
+                &head,
+                &idx,
+                &lp,
+                &mask,
+                top_k,
+                &grad_w,
+                scalar_mean,
             );
             let fd = (lp_loss - lm_loss) / (2.0 * h as f64);
             let an = g_analytic[i] as f64;
@@ -2004,7 +2299,14 @@ mod tests {
         let mask = vec![false; 4];
         let grad = KtTensor::from_vec(vec![1.0f32], vec![1]).unwrap();
         let out = opd_top_k_reverse_kl_phase_b_bwd_composite_kt(
-            &h, &w, &idx, &lp, &mask, &grad, 4, OpdLossOutputKt::ScalarMean,
+            &h,
+            &w,
+            &idx,
+            &lp,
+            &mask,
+            &grad,
+            4,
+            OpdLossOutputKt::ScalarMean,
         )
         .expect("composite backward no-active");
         assert_eq!(out.shape(), &[1, 4, 8]);
@@ -2063,12 +2365,10 @@ mod tests {
         )
         .expect("composite backward");
 
-        let hidden_cuda =
-            KtTensor::cuda_from_slice(&hidden_flat, vec![1, seq_len, hidden_size], 0)
-                .expect("hidden cuda");
+        let hidden_cuda = KtTensor::cuda_from_slice(&hidden_flat, vec![1, seq_len, hidden_size], 0)
+            .expect("hidden cuda");
         let head_cuda =
-            KtTensor::cuda_from_slice(&head_flat, vec![hidden_size, vocab], 0)
-                .expect("head cuda");
+            KtTensor::cuda_from_slice(&head_flat, vec![hidden_size, vocab], 0).expect("head cuda");
         let grad_cuda =
             KtTensor::cuda_from_slice(&grad_host, vec![active_count], 0).expect("grad cuda");
         let got = opd_top_k_reverse_kl_phase_b_bwd_kt(
@@ -2139,12 +2439,10 @@ mod tests {
             .map(|i| -0.15 - ((i as f32) * 0.29).cos().abs())
             .collect();
 
-        let hidden_cuda =
-            KtTensor::cuda_from_slice(&hidden_flat, vec![1, seq_len, hidden_size], 0)
-                .expect("hidden cuda");
+        let hidden_cuda = KtTensor::cuda_from_slice(&hidden_flat, vec![1, seq_len, hidden_size], 0)
+            .expect("hidden cuda");
         let head_cuda =
-            KtTensor::cuda_from_slice(&head_flat, vec![hidden_size, vocab], 0)
-                .expect("head cuda");
+            KtTensor::cuda_from_slice(&head_flat, vec![hidden_size, vocab], 0).expect("head cuda");
         let grad_cuda = KtTensor::cuda_from_slice(&[1.0f32], vec![1], 0).expect("grad cuda");
 
         let seeded = opd_top_k_reverse_kl_phase_b_bwd_kt(
@@ -2178,6 +2476,90 @@ mod tests {
         assert!(
             max_abs < 1e-6,
             "CUDA fused OPD implicit unit seed mismatch: max_abs={max_abs:.3e}"
+        );
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn cuda_bwd_scalar_mean_unit_grad_reuses_forward_metadata() {
+        if kiln_tensor::primary_cuda_context(0).is_err() {
+            eprintln!(
+                "CUDA not available; skipping cuda_bwd_scalar_mean_unit_grad_reuses_forward_metadata"
+            );
+            return;
+        }
+
+        let seq_len = 6usize;
+        let hidden_size = 128usize;
+        let vocab = 256usize;
+        let top_k = 16usize;
+        let mask = vec![false, true, false, true, true, false];
+        let active_count = mask.iter().filter(|&&m| m).count();
+
+        let hidden_flat: Vec<f32> = (0..seq_len * hidden_size)
+            .map(|i| ((i as f32) * 0.17).sin() * 0.19 + (((i % 17) as f32) - 8.0) * 0.003)
+            .collect();
+        let head_flat: Vec<f32> = (0..hidden_size * vocab)
+            .map(|i| ((i as f32) * 0.05).cos() * 0.14 + (((i % 19) as f32) - 9.0) * 0.002)
+            .collect();
+
+        let mut idx: Vec<u32> = Vec::with_capacity(active_count * top_k);
+        for r in 0..active_count {
+            let base = r * 29 + 3;
+            for k in 0..top_k {
+                idx.push(((base + k * 17) % vocab) as u32);
+            }
+        }
+        let lp: Vec<f32> = (0..active_count * top_k)
+            .map(|i| -0.18 - ((i as f32) * 0.23).cos().abs())
+            .collect();
+
+        let hidden_cuda = KtTensor::cuda_from_slice(&hidden_flat, vec![1, seq_len, hidden_size], 0)
+            .expect("hidden cuda");
+        let head_cuda =
+            KtTensor::cuda_from_slice(&head_flat, vec![hidden_size, vocab], 0).expect("head cuda");
+
+        let (_loss, metadata) = opd_top_k_reverse_kl_with_metadata_kt(
+            &hidden_cuda,
+            &head_cuda,
+            &idx,
+            &lp,
+            &mask,
+            top_k,
+        )
+        .expect("cuda forward with metadata");
+        let metadata = metadata.expect("active metadata");
+
+        let regular = opd_top_k_reverse_kl_phase_b_bwd_scalar_mean_unit_grad_kt(
+            &hidden_cuda,
+            &head_cuda,
+            &idx,
+            &lp,
+            &mask,
+            top_k,
+        )
+        .expect("regular unit backward");
+        let reused = opd_top_k_reverse_kl_phase_b_bwd_scalar_mean_unit_grad_with_metadata_kt(
+            &hidden_cuda,
+            &head_cuda,
+            &idx,
+            &lp,
+            &mask,
+            top_k,
+            &metadata,
+        )
+        .expect("metadata unit backward");
+
+        assert_eq!(reused.shape(), &[1, seq_len, hidden_size]);
+        let regular_v = read_f32(&regular);
+        let reused_v = read_f32(&reused);
+        let mut max_abs = 0.0f32;
+        for (&a, &b) in regular_v.iter().zip(reused_v.iter()) {
+            max_abs = max_abs.max((a - b).abs());
+        }
+        assert!(
+            max_abs < 1e-6,
+            "CUDA fused OPD metadata unit seed mismatch: max_abs={max_abs:.3e}"
         );
     }
 }

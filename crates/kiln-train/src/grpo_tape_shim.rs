@@ -81,8 +81,9 @@
 //! * **`KlEstimator` / `IsLevel`** are all SUPPORTED — the numeric-`coeff`
 //!   derivation handles every variant uniformly because it just re-runs
 //!   `grpo_loss`. CUDA/ROCm additionally use a device-resident fast path for
-//!   exact token-level coefficient cases and fall back to the uniform host
-//!   derivation for sequence/CISPO/entropy-aware modes.
+//!   token, sequence, CISPO, and reinforce coefficient cases. Entropy-aware KL
+//!   computes only its scalar threshold off-device when necessary, then applies
+//!   the KL gate and coefficient math on-device.
 
 #[cfg(any(
     feature = "cuda",
@@ -98,7 +99,8 @@ use crate::cd_types::Device;
     feature = "rocm"
 ))]
 use crate::trainer::{
-    GrpoLossParams, grpo_loss, selected_logits_from_chunk_sparse, token_log_probs,
+    GrpoLossParams, entropy_aware_kl_mask_kt, grpo_loss, selected_logits_from_chunk_sparse,
+    token_log_probs,
 };
 #[cfg(any(
     feature = "cuda",
@@ -306,6 +308,330 @@ fn active_positions_and_labels(
     Ok((active_positions, active_labels))
 }
 
+#[cfg(feature = "vulkan")]
+fn vulkan_tensor_err(msg: impl Into<String>) -> kiln_tensor::Error {
+    kiln_tensor::Error::Msg(msg.into())
+}
+
+#[cfg(feature = "vulkan")]
+fn vulkan_device_index(t: &kiln_tensor::Tensor, context: &str) -> kiln_tensor::Result<usize> {
+    match t.device() {
+        kiln_tensor::Device::Vulkan(i) => Ok(i),
+        other => Err(vulkan_tensor_err(format!(
+            "{context}: expected Vulkan tensor, got {other}"
+        ))),
+    }
+}
+
+#[cfg(feature = "vulkan")]
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct VulkanGrpoKernelParams {
+    advantage: f32,
+    clip_low: f32,
+    clip_high: f32,
+    kl_coeff: f32,
+    kl_mode: u32,
+    is_mode: u32,
+}
+
+#[cfg(feature = "vulkan")]
+fn vulkan_grpo_fused_kernel_params(
+    loss_params: GrpoLossParams,
+    num_active: usize,
+) -> Option<VulkanGrpoKernelParams> {
+    if num_active == 0 || loss_params.entropy_aware_kl_quantile.is_some() {
+        return None;
+    }
+
+    let expected_normalizer = 1.0 / num_active as f64;
+    let normalizer_tol = expected_normalizer.abs().mul_add(1e-12, 1e-12);
+    if !loss_params.loss_normalizer.is_finite()
+        || (loss_params.loss_normalizer - expected_normalizer).abs() > normalizer_tol
+    {
+        return None;
+    }
+
+    if !loss_params.clip_low.is_finite() || !loss_params.clip_high.is_finite() {
+        return None;
+    }
+
+    let kl_mode = match loss_params.kl_estimator {
+        crate::KlEstimator::None => kiln_vulkan_kernel::vk_ops::flce::VK_GRPO_KL_MODE_NONE,
+        crate::KlEstimator::K1 => kiln_vulkan_kernel::vk_ops::flce::VK_GRPO_KL_MODE_K1,
+        crate::KlEstimator::K3 => kiln_vulkan_kernel::vk_ops::flce::VK_GRPO_KL_MODE_K3,
+    };
+    let is_mode = if loss_params.reinforce {
+        if !matches!(loss_params.kl_estimator, crate::KlEstimator::None)
+            || loss_params.kl_coeff.abs() > 1e-12
+        {
+            return None;
+        }
+        kiln_vulkan_kernel::vk_ops::flce::VK_GRPO_IS_MODE_REINFORCE
+    } else {
+        match loss_params.is_level {
+            crate::IsLevel::Token => kiln_vulkan_kernel::vk_ops::flce::VK_GRPO_IS_MODE_TOKEN,
+            crate::IsLevel::Cispo => kiln_vulkan_kernel::vk_ops::flce::VK_GRPO_IS_MODE_CISPO,
+            crate::IsLevel::Sequence => return None,
+        }
+    };
+
+    let advantage = loss_params.advantage as f32;
+    let clip_low = loss_params.clip_low as f32;
+    let clip_high = loss_params.clip_high as f32;
+    let kl_coeff = loss_params.kl_coeff as f32;
+    if advantage.is_finite() && clip_low.is_finite() && clip_high.is_finite() && kl_coeff.is_finite()
+    {
+        Some(VulkanGrpoKernelParams {
+            advantage,
+            clip_low,
+            clip_high,
+            kl_coeff,
+            kl_mode,
+            is_mode,
+        })
+    } else {
+        None
+    }
+}
+
+#[cfg(feature = "vulkan")]
+fn prepare_vulkan_grpo_active_hidden(
+    hidden: &kiln_tensor::Tensor,
+    weight: &kiln_tensor::Tensor,
+    input_ids: &[u32],
+    action_mask: &[bool],
+) -> kiln_tensor::Result<(
+    kiln_vulkan_kernel::vk_tensor::VkTensor,
+    Vec<u32>,
+    Vec<u32>,
+    usize,
+    usize,
+    usize,
+)> {
+    let dims = hidden.dims();
+    if dims.len() != 3 || dims[0] != 1 {
+        return Err(vulkan_tensor_err(format!(
+            "vulkan GRPO: hidden must be [1, seq_len, hidden], got {dims:?}"
+        )));
+    }
+    let seq_len = dims[1];
+    let hidden_size = dims[2];
+    if hidden.dtype() != kiln_tensor::DType::F32 {
+        return Err(vulkan_tensor_err(format!(
+            "vulkan GRPO: hidden must be F32, got {}",
+            hidden.dtype()
+        )));
+    }
+    if weight.dims().len() != 2 || weight.dims()[1] != hidden_size {
+        return Err(vulkan_tensor_err(format!(
+            "vulkan GRPO: weight must be [vocab, hidden={hidden_size}], got {:?}",
+            weight.dims()
+        )));
+    }
+    if !matches!(
+        weight.dtype(),
+        kiln_tensor::DType::F32 | kiln_tensor::DType::BF16
+    ) {
+        return Err(vulkan_tensor_err(format!(
+            "vulkan GRPO: weight must be F32/BF16, got {}",
+            weight.dtype()
+        )));
+    }
+    if input_ids.len() != seq_len || action_mask.len() != seq_len {
+        return Err(vulkan_tensor_err(format!(
+            "vulkan GRPO: input/action lengths {}/{} != seq_len {seq_len}",
+            input_ids.len(),
+            action_mask.len()
+        )));
+    }
+
+    let vocab = weight.dims()[0];
+    let (active_positions_usize, active_labels) = active_positions_and_labels(input_ids, action_mask)
+        .map_err(|e| vulkan_tensor_err(format!("vulkan GRPO active positions: {e:#}")))?;
+    if active_positions_usize.is_empty() {
+        return Err(vulkan_tensor_err("vulkan GRPO: no active action tokens"));
+    }
+    for &label in &active_labels {
+        if label as usize >= vocab {
+            return Err(vulkan_tensor_err(format!(
+                "vulkan GRPO: label {label} >= vocab {vocab}"
+            )));
+        }
+    }
+    let active_positions: Vec<u32> = active_positions_usize
+        .iter()
+        .map(|&pos| {
+            u32::try_from(pos)
+                .map_err(|_| vulkan_tensor_err(format!("vulkan GRPO: active position {pos} exceeds u32")))
+        })
+        .collect::<kiln_tensor::Result<_>>()?;
+
+    let hidden_2d = hidden.squeeze(0).and_then(|t| {
+        if t.is_contiguous() {
+            Ok(t)
+        } else {
+            t.contiguous()
+        }
+    })?;
+    let hidden_vk = kiln_tensor::vk_tensor_from_kt(&hidden_2d)
+        .map_err(|e| vulkan_tensor_err(format!("vulkan GRPO: bridge hidden: {e}")))?;
+    let active_hidden_vk = kiln_vulkan_kernel::vk_ops::index_select::vk_index_select_rows(
+        &hidden_vk,
+        &active_positions,
+    )
+    .map_err(|e| vulkan_tensor_err(format!("vulkan GRPO: gather active rows: {e}")))?;
+    Ok((
+        active_hidden_vk,
+        active_positions,
+        active_labels,
+        seq_len,
+        hidden_size,
+        vulkan_device_index(hidden, "vulkan GRPO hidden")?,
+    ))
+}
+
+#[cfg(feature = "vulkan")]
+fn prepare_vulkan_grpo_ref_log_probs(
+    ref_log_probs: &kiln_tensor::Tensor,
+    num_active: usize,
+) -> kiln_tensor::Result<kiln_vulkan_kernel::vk_tensor::VkTensor> {
+    if !matches!(ref_log_probs.device(), kiln_tensor::Device::Vulkan(_)) {
+        return Err(vulkan_tensor_err(format!(
+            "vulkan GRPO: ref_log_probs must be Vulkan-backed, got {}",
+            ref_log_probs.device()
+        )));
+    }
+    if ref_log_probs.elem_count() != num_active {
+        return Err(vulkan_tensor_err(format!(
+            "vulkan GRPO: ref_log_probs len {} != num_active {num_active}",
+            ref_log_probs.elem_count()
+        )));
+    }
+    let ref_f32 = ref_log_probs
+        .to_dtype(kiln_tensor::DType::F32)?
+        .flatten_all()?
+        .reshape(vec![num_active])?;
+    let ref_contig = if ref_f32.is_contiguous() {
+        ref_f32
+    } else {
+        ref_f32.contiguous()?
+    };
+    kiln_tensor::vk_tensor_from_kt(&ref_contig)
+        .map_err(|e| vulkan_tensor_err(format!("vulkan GRPO: bridge ref_log_probs: {e}")))
+}
+
+#[cfg(feature = "vulkan")]
+#[allow(clippy::too_many_arguments)]
+fn vulkan_grpo_loss_kt(
+    hidden: &kiln_tensor::Tensor,
+    weight: &kiln_tensor::Tensor,
+    input_ids: &[u32],
+    action_mask: &[bool],
+    ref_log_probs: &kiln_tensor::Tensor,
+    loss_params: GrpoLossParams,
+) -> Result<
+    Option<(
+        kiln_tensor::Tensor,
+        kiln_vulkan_kernel::vk_ops::flce::GrpoSavedState,
+        Vec<u32>,
+        usize,
+        usize,
+    )>,
+> {
+    let num_active = action_mask
+        .get(1..)
+        .map_or(0, |m| m.iter().filter(|&&v| v).count());
+    let Some(kernel_params) = vulkan_grpo_fused_kernel_params(loss_params, num_active)
+    else {
+        return Ok(None);
+    };
+
+    let (active_hidden_vk, active_positions, active_labels, seq_len, _hidden_size, device_index) =
+        prepare_vulkan_grpo_active_hidden(hidden, weight, input_ids, action_mask)
+            .context("vulkan GRPO fused loss: active hidden")?;
+    let weight_kt = if weight.is_contiguous() {
+        weight.clone()
+    } else {
+        weight.contiguous()?
+    };
+    let weight_vk = kiln_tensor::vk_tensor_from_kt(&weight_kt)
+        .map_err(|e| anyhow::anyhow!("vulkan GRPO fused loss: bridge weight: {e}"))?;
+    let ref_vk = prepare_vulkan_grpo_ref_log_probs(ref_log_probs, active_labels.len())
+        .context("vulkan GRPO fused loss: ref log-probs")?;
+    let (loss_vk, saved) = kiln_vulkan_kernel::vk_ops::flce::vk_grpo_loss_with_saved_state_ext(
+        &active_hidden_vk,
+        &weight_vk,
+        &active_labels,
+        &ref_vk,
+        kernel_params.advantage,
+        kernel_params.clip_low,
+        kernel_params.clip_high,
+        kernel_params.kl_coeff,
+        kernel_params.kl_mode,
+        kernel_params.is_mode,
+        0,
+    )
+    .context("vulkan GRPO fused loss")?;
+    let loss = kiln_tensor::kt_tensor_from_vk(&loss_vk, device_index)
+        .map_err(|e| anyhow::anyhow!("vulkan GRPO fused loss: bridge loss: {e}"))?;
+    Ok(Some((
+        loss,
+        saved,
+        active_positions,
+        seq_len,
+        device_index,
+    )))
+}
+
+#[cfg(feature = "vulkan")]
+fn vulkan_grpo_grad_from_saved_kt(
+    hidden: &kiln_tensor::Tensor,
+    saved: &kiln_vulkan_kernel::vk_ops::flce::GrpoSavedState,
+    active_positions: &[u32],
+    seq_len: usize,
+    device_index: usize,
+    grad_loss: &kiln_tensor::Tensor,
+) -> kiln_tensor::Result<kiln_tensor::Tensor> {
+    let hidden_2d = hidden.squeeze(0).and_then(|t| {
+        if t.is_contiguous() {
+            Ok(t)
+        } else {
+            t.contiguous()
+        }
+    })?;
+    let hidden_vk = kiln_tensor::vk_tensor_from_kt(&hidden_2d)
+        .map_err(|e| vulkan_tensor_err(format!("vulkan GRPO grad: bridge hidden: {e}")))?;
+    let active_hidden_vk = kiln_vulkan_kernel::vk_ops::index_select::vk_index_select_rows(
+        &hidden_vk,
+        active_positions,
+    )
+    .map_err(|e| vulkan_tensor_err(format!("vulkan GRPO grad: gather active rows: {e}")))?;
+    let grad_loss_kt = if grad_loss.is_contiguous() {
+        grad_loss.clone()
+    } else {
+        grad_loss.contiguous()?
+    };
+    let grad_loss_vk = kiln_tensor::vk_tensor_from_kt(&grad_loss_kt)
+        .map_err(|e| vulkan_tensor_err(format!("vulkan GRPO grad: bridge grad_loss: {e}")))?;
+    let grad_active_vk = kiln_vulkan_kernel::vk_ops::flce::vk_grpo_backward_with_saved_state(
+        &active_hidden_vk,
+        saved,
+        &grad_loss_vk,
+    )
+    .map_err(|e| vulkan_tensor_err(format!("vulkan GRPO fused backward: {e}")))?;
+    let grad_full_vk = kiln_vulkan_kernel::vk_ops::index_select::vk_scatter_rows_to_full(
+        &grad_active_vk,
+        active_positions,
+        seq_len,
+    )
+    .map_err(|e| vulkan_tensor_err(format!("vulkan GRPO grad: scatter active rows: {e}")))?;
+    let grad_full = kiln_tensor::kt_tensor_from_vk(&grad_full_vk, device_index)
+        .map_err(|e| vulkan_tensor_err(format!("vulkan GRPO grad: bridge full grad: {e}")))?;
+    grad_full
+        .unsqueeze(0)
+        .map_err(|e| vulkan_tensor_err(format!("vulkan GRPO grad: unsqueeze: {e}")))
+}
+
 #[cfg(any(
     feature = "cuda",
     feature = "metal",
@@ -457,17 +783,11 @@ fn grpo_loss_coeff_col_device_fast_path_kt(
         ref_log_probs_kt.elem_count()
     );
 
-    // Entropy-aware KL intentionally computes a detached quantile over active
-    // policy log-probs. Keep that path on the exact host derivation for now.
-    if loss_params.entropy_aware_kl_quantile.is_some() {
-        return Ok(None);
-    }
-
     #[cfg(any(feature = "cuda", feature = "rocm"))]
     let device_supported = matches!(device, Device::Cuda(_) | Device::Rocm(_));
     #[cfg(not(any(feature = "cuda", feature = "rocm")))]
     let device_supported = false;
-    if !device_supported || !matches!(loss_params.is_level, crate::IsLevel::Token) {
+    if !device_supported {
         return Ok(None);
     }
 
@@ -492,7 +812,7 @@ fn grpo_loss_coeff_col_device_fast_path_kt(
     let log_ratio = (&policy - &reference)?.contiguous()?;
     let ratio = log_ratio.exp()?.contiguous()?;
 
-    let kl_grad = match loss_params.kl_estimator {
+    let kl_grad_raw = match loss_params.kl_estimator {
         crate::KlEstimator::None => ratio.affine(0.0, 0.0)?,
         crate::KlEstimator::K1 => ratio.affine(0.0, loss_params.kl_coeff)?,
         crate::KlEstimator::K3 => {
@@ -500,17 +820,59 @@ fn grpo_loss_coeff_col_device_fast_path_kt(
             exp_neg_log_ratio.affine(-loss_params.kl_coeff, loss_params.kl_coeff)?
         }
     };
-
-    let pg_raw = ratio.affine(-loss_params.advantage, 0.0)?.contiguous()?;
-    let zero = ratio.affine(0.0, 0.0)?.contiguous()?;
-    let pg_grad = if loss_params.advantage >= 0.0 {
-        let hi = ratio.affine(0.0, 1.0 + loss_params.clip_high)?.contiguous()?;
-        let unclipped = kiln_tensor::ops::le(&ratio, &hi)?;
-        unclipped.where_cond(&pg_raw, &zero)?
+    let kl_grad = if loss_params
+        .entropy_aware_kl_quantile
+        .is_some_and(|q| q.is_finite() && (0.0..1.0).contains(&q))
+    {
+        let mask = entropy_aware_kl_mask_kt(&policy, loss_params, device)?
+            .ok_or_else(|| anyhow::anyhow!("GRPO coeff fast path: missing entropy-aware mask"))?
+            .flatten_all()?
+            .reshape(vec![num_active])?
+            .contiguous()?;
+        (&kl_grad_raw * &mask)?
     } else {
-        let lo = ratio.affine(0.0, 1.0 - loss_params.clip_low)?.contiguous()?;
-        let unclipped = kiln_tensor::ops::ge(&ratio, &lo)?;
-        unclipped.where_cond(&pg_raw, &zero)?
+        kl_grad_raw
+    };
+
+    let zero = ratio.affine(0.0, 0.0)?.contiguous()?;
+    let pg_grad = match loss_params.is_level {
+        crate::IsLevel::Token => {
+            let pg_raw = ratio.affine(-loss_params.advantage, 0.0)?.contiguous()?;
+            if loss_params.advantage >= 0.0 {
+                let hi = ratio.affine(0.0, 1.0 + loss_params.clip_high)?.contiguous()?;
+                let unclipped = kiln_tensor::ops::le(&ratio, &hi)?;
+                unclipped.where_cond(&pg_raw, &zero)?
+            } else {
+                let lo = ratio.affine(0.0, 1.0 - loss_params.clip_low)?.contiguous()?;
+                let unclipped = kiln_tensor::ops::ge(&ratio, &lo)?;
+                unclipped.where_cond(&pg_raw, &zero)?
+            }
+        }
+        crate::IsLevel::Sequence => {
+            let seq_ratio = log_ratio.mean_keepdim(0usize)?.exp()?.contiguous()?;
+            let seq_zero = seq_ratio.affine(0.0, 0.0)?.contiguous()?;
+            let seq_pg_raw = seq_ratio
+                .affine(-loss_params.advantage / num_active as f64, 0.0)?
+                .contiguous()?;
+            let seq_pg = if loss_params.advantage >= 0.0 {
+                let hi = seq_ratio
+                    .affine(0.0, 1.0 + loss_params.clip_high)?
+                    .contiguous()?;
+                let unclipped = kiln_tensor::ops::le(&seq_ratio, &hi)?;
+                unclipped.where_cond(&seq_pg_raw, &seq_zero)?
+            } else {
+                let lo = seq_ratio
+                    .affine(0.0, 1.0 - loss_params.clip_low)?
+                    .contiguous()?;
+                let unclipped = kiln_tensor::ops::ge(&seq_ratio, &lo)?;
+                unclipped.where_cond(&seq_pg_raw, &seq_zero)?
+            };
+            seq_pg.broadcast_as(vec![num_active])?.contiguous()?
+        }
+        crate::IsLevel::Cispo => ratio
+            .clamp(1.0 - loss_params.clip_low, 1.0 + loss_params.clip_high)?
+            .affine(-loss_params.advantage, 0.0)?
+            .contiguous()?,
     };
 
     let coeff = (&pg_grad + &kl_grad)?
@@ -1436,6 +1798,139 @@ pub(crate) fn try_tape_grpo_pg_loss_from_normed_hidden_kt(
     Ok(Some(loss_kt))
 }
 
+#[cfg(feature = "vulkan")]
+#[derive(Debug)]
+struct VulkanGrpoPgLossFromNormedHiddenBackward {
+    normed_hidden: kiln_tensor::Tensor,
+    saved: kiln_vulkan_kernel::vk_ops::flce::GrpoSavedState,
+    active_positions: Vec<u32>,
+    seq_len: usize,
+    device_index: usize,
+}
+
+#[cfg(feature = "vulkan")]
+impl BackwardOp for VulkanGrpoPgLossFromNormedHiddenBackward {
+    fn name(&self) -> &'static str {
+        "vulkan_grpo_pg_loss_from_normed_hidden_backward"
+    }
+
+    fn input_count(&self) -> usize {
+        1
+    }
+
+    fn requires_input(&self, _idx: usize) -> bool {
+        false
+    }
+
+    fn apply(
+        &self,
+        grad_output: &kiln_tensor::Tensor,
+    ) -> kiln_tensor::Result<Vec<Option<kiln_tensor::Tensor>>> {
+        let grad_hidden = vulkan_grpo_grad_from_saved_kt(
+            &self.normed_hidden,
+            &self.saved,
+            &self.active_positions,
+            self.seq_len,
+            self.device_index,
+            grad_output,
+        )?;
+        Ok(vec![Some(grad_hidden)])
+    }
+}
+
+#[cfg(feature = "vulkan")]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn try_tape_grpo_pg_loss_from_normed_hidden_vulkan_kt(
+    normed_hidden: &kiln_tensor::Tensor,
+    weight: &kiln_tensor::Tensor,
+    input_ids: &[u32],
+    action_mask: &[bool],
+    ref_log_probs: &kiln_tensor::Tensor,
+    loss_params: GrpoLossParams,
+) -> Result<Option<kiln_tensor::Tensor>> {
+    if !tape_forward_enabled() {
+        return Ok(None);
+    }
+    if !matches!(normed_hidden.device(), kiln_tensor::Device::Vulkan(_))
+        || !matches!(weight.device(), kiln_tensor::Device::Vulkan(_))
+        || !matches!(ref_log_probs.device(), kiln_tensor::Device::Vulkan(_))
+    {
+        return Ok(None);
+    }
+    if input_ids.len() < 2 || !action_mask.get(1..).is_some_and(|m| m.iter().any(|&v| v)) {
+        return Ok(None);
+    }
+
+    let Some((loss_kt, saved, active_positions, seq_len, device_index)) = vulkan_grpo_loss_kt(
+        normed_hidden,
+        weight,
+        input_ids,
+        action_mask,
+        ref_log_probs,
+        loss_params,
+    )
+    .context("vulkan GRPO scalar kt loss")?
+    else {
+        return Ok(None);
+    };
+
+    let loss_kt = match with_active_tape(|tape: &mut Tape| -> Result<_> {
+        tape.record(
+            &loss_kt,
+            &[normed_hidden],
+            Box::new(VulkanGrpoPgLossFromNormedHiddenBackward {
+                normed_hidden: normed_hidden.clone(),
+                saved,
+                active_positions,
+                seq_len,
+                device_index,
+            }),
+        );
+        Ok(loss_kt)
+    }) {
+        Some(result) => result?,
+        None => return Ok(None),
+    };
+
+    Ok(Some(loss_kt))
+}
+
+#[cfg(feature = "vulkan")]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn vulkan_grpo_pg_loss_from_normed_hidden_loss_and_grad_kt(
+    normed_hidden: &kiln_tensor::Tensor,
+    weight: &kiln_tensor::Tensor,
+    input_ids: &[u32],
+    action_mask: &[bool],
+    ref_log_probs: &kiln_tensor::Tensor,
+    loss_params: GrpoLossParams,
+) -> Result<Option<(kiln_tensor::Tensor, kiln_tensor::Tensor)>> {
+    let Some((loss, saved, active_positions, seq_len, device_index)) = vulkan_grpo_loss_kt(
+        normed_hidden,
+        weight,
+        input_ids,
+        action_mask,
+        ref_log_probs,
+        loss_params,
+    )
+    .context("vulkan GRPO tail loss")?
+    else {
+        return Ok(None);
+    };
+    let grad_seed = kiln_tensor::Tensor::from_vec_on(normed_hidden.device(), vec![1.0f32], vec![1])
+        .map_err(|e| anyhow::anyhow!("vulkan GRPO: grad seed: {e}"))?;
+    let grad = vulkan_grpo_grad_from_saved_kt(
+        normed_hidden,
+        &saved,
+        &active_positions,
+        seq_len,
+        device_index,
+        &grad_seed,
+    )
+    .map_err(|e| anyhow::anyhow!("vulkan GRPO tail grad: {e}"))?;
+    Ok(Some((loss, grad)))
+}
+
 #[cfg(test)]
 mod tests {
     // (#1082 C2) Finite-difference ground-truth gate for the kt-native GRPO
@@ -1444,9 +1939,11 @@ mod tests {
 
     #[cfg(feature = "cuda")]
     use super::grpo_pg_loss_from_logits_grad_kt;
+    #[cfg(any(feature = "cuda", feature = "vulkan"))]
+    use crate::trainer::GrpoLossParams;
     #[cfg(feature = "cuda")]
-    use crate::trainer::{GrpoLossParams, grpo_loss, token_log_probs};
-    #[cfg(feature = "cuda")]
+    use crate::trainer::{grpo_loss, token_log_probs};
+    #[cfg(any(feature = "cuda", feature = "vulkan"))]
     use crate::{IsLevel, KlEstimator};
     #[cfg(feature = "cuda")]
     use kiln_tensor::{DType as KtDType, Tensor as KtTensor};
@@ -1454,6 +1951,58 @@ mod tests {
     use rand::rngs::StdRng;
     #[cfg(feature = "cuda")]
     use rand::{RngExt, SeedableRng};
+
+    #[cfg(feature = "vulkan")]
+    #[test]
+    fn vulkan_grpo_fused_kernel_gate_matches_shader_semantics() {
+        let num_active = 4usize;
+        let base = GrpoLossParams {
+            advantage: 0.7,
+            clip_low: 0.2,
+            clip_high: 0.2,
+            kl_coeff: 0.05,
+            kl_estimator: KlEstimator::K1,
+            loss_normalizer: 1.0 / num_active as f64,
+            is_level: IsLevel::Token,
+            reinforce: false,
+            entropy_aware_kl_quantile: None,
+        };
+        assert!(super::vulkan_grpo_fused_kernel_params(base, num_active).is_some());
+
+        let mut params = base;
+        params.loss_normalizer = 1.0 / 8.0;
+        assert!(super::vulkan_grpo_fused_kernel_params(params, num_active).is_none());
+
+        let mut params = base;
+        params.is_level = IsLevel::Cispo;
+        assert!(super::vulkan_grpo_fused_kernel_params(params, num_active).is_some());
+
+        let mut params = base;
+        params.is_level = IsLevel::Sequence;
+        assert!(super::vulkan_grpo_fused_kernel_params(params, num_active).is_none());
+
+        let mut params = base;
+        params.reinforce = true;
+        params.kl_estimator = KlEstimator::None;
+        params.kl_coeff = 0.0;
+        assert!(super::vulkan_grpo_fused_kernel_params(params, num_active).is_some());
+
+        let mut params = base;
+        params.entropy_aware_kl_quantile = Some(0.5);
+        assert!(super::vulkan_grpo_fused_kernel_params(params, num_active).is_none());
+
+        let mut params = base;
+        params.clip_high = 0.3;
+        assert!(super::vulkan_grpo_fused_kernel_params(params, num_active).is_some());
+
+        let mut params = base;
+        params.kl_estimator = KlEstimator::K3;
+        assert!(super::vulkan_grpo_fused_kernel_params(params, num_active).is_some());
+
+        let mut params = base;
+        params.kl_estimator = KlEstimator::None;
+        assert!(super::vulkan_grpo_fused_kernel_params(params, num_active).is_some());
+    }
 
     #[cfg(feature = "cuda")]
     #[test]
@@ -1667,6 +2216,14 @@ mod tests {
         let head_t =
             KtTensor::from_vec_on(device, head_host, vec![hidden_size, vocab])
                 .expect("cuda head");
+        let logits = normed_hidden
+            .squeeze(0)
+            .unwrap()
+            .matmul(&head_t)
+            .unwrap()
+            .unsqueeze(0)
+            .unwrap();
+        let head_t_t = head_t.t().unwrap().contiguous().unwrap();
         let read = |t: &KtTensor| -> Vec<f32> {
             t.to_dtype(KtDType::F32)
                 .unwrap()
@@ -1687,54 +2244,133 @@ mod tests {
         .unwrap();
         let ref_host: Vec<f32> = read(&plp_hidden).iter().map(|&p| p - 0.1).collect();
         let ref_kt = KtTensor::from_vec_on(device, ref_host, vec![3]).expect("cuda ref");
-        let params = GrpoLossParams {
-            advantage: -0.7,
-            clip_low: 0.2,
-            clip_high: 0.2,
-            kl_coeff: 0.1,
-            kl_estimator: KlEstimator::K1,
-            loss_normalizer: 1.0,
-            is_level: IsLevel::Token,
-            reinforce: false,
-            entropy_aware_kl_quantile: None,
-        };
+        let variants: Vec<(&str, GrpoLossParams)> = vec![
+            (
+                "token-k1",
+                GrpoLossParams {
+                    advantage: -0.7,
+                    clip_low: 0.2,
+                    clip_high: 0.2,
+                    kl_coeff: 0.1,
+                    kl_estimator: KlEstimator::K1,
+                    loss_normalizer: 1.0,
+                    is_level: IsLevel::Token,
+                    reinforce: false,
+                    entropy_aware_kl_quantile: None,
+                },
+            ),
+            (
+                "sequence-k3",
+                GrpoLossParams {
+                    advantage: 0.6,
+                    clip_low: 0.2,
+                    clip_high: 0.25,
+                    kl_coeff: 0.05,
+                    kl_estimator: KlEstimator::K3,
+                    loss_normalizer: 0.75,
+                    is_level: IsLevel::Sequence,
+                    reinforce: false,
+                    entropy_aware_kl_quantile: None,
+                },
+            ),
+            (
+                "cispo-k1-asym",
+                GrpoLossParams {
+                    advantage: -0.4,
+                    clip_low: 0.15,
+                    clip_high: 0.25,
+                    kl_coeff: 0.03,
+                    kl_estimator: KlEstimator::K1,
+                    loss_normalizer: 0.75,
+                    is_level: IsLevel::Cispo,
+                    reinforce: false,
+                    entropy_aware_kl_quantile: None,
+                },
+            ),
+            (
+                "reinforce-sequence",
+                GrpoLossParams {
+                    advantage: 0.9,
+                    clip_low: 0.2,
+                    clip_high: 0.2,
+                    kl_coeff: 0.0,
+                    kl_estimator: KlEstimator::None,
+                    loss_normalizer: 1.25,
+                    is_level: IsLevel::Sequence,
+                    reinforce: true,
+                    entropy_aware_kl_quantile: None,
+                },
+            ),
+        ];
 
-        let single = super::grpo_pg_loss_from_normed_hidden_grad_kt(
-            &normed_hidden,
-            &head_t,
-            &input_ids,
-            &action_mask,
-            &plp_hidden,
-            &ref_kt,
-            params,
-            1.0,
-            &device,
-            vocab,
-        )
-        .unwrap();
-        let multi = super::grpo_pg_loss_from_normed_hidden_grad_kt(
-            &normed_hidden,
-            &head_t,
-            &input_ids,
-            &action_mask,
-            &plp_hidden,
-            &ref_kt,
-            params,
-            1.0,
-            &device,
-            3,
-        )
-        .unwrap();
+        for (name, params) in variants {
+            let grad_logits = grpo_pg_loss_from_logits_grad_kt(
+                &logits,
+                &input_ids,
+                &action_mask,
+                &ref_kt,
+                params,
+                1.0,
+                &device,
+            )
+            .unwrap();
+            let expected_hidden = grad_logits
+                .squeeze(0)
+                .unwrap()
+                .to_dtype(KtDType::F32)
+                .unwrap()
+                .matmul(&head_t_t)
+                .unwrap()
+                .unsqueeze(0)
+                .unwrap();
+            let single = super::grpo_pg_loss_from_normed_hidden_grad_kt(
+                &normed_hidden,
+                &head_t,
+                &input_ids,
+                &action_mask,
+                &plp_hidden,
+                &ref_kt,
+                params,
+                1.0,
+                &device,
+                vocab,
+            )
+            .unwrap();
+            let multi = super::grpo_pg_loss_from_normed_hidden_grad_kt(
+                &normed_hidden,
+                &head_t,
+                &input_ids,
+                &action_mask,
+                &plp_hidden,
+                &ref_kt,
+                params,
+                1.0,
+                &device,
+                3,
+            )
+            .unwrap();
 
-        let single = read(&single);
-        let multi = read(&multi);
-        assert_eq!(single.len(), multi.len());
-        for (i, (a, b)) in single.iter().zip(multi.iter()).enumerate() {
-            let tol = 4e-4f32.max(4e-4 * a.abs());
-            assert!(
-                (a - b).abs() <= tol,
-                "cuda sparse GRPO bwd drift at {i}: single={a} multi={b} tol={tol}"
-            );
+            let expected = read(&expected_hidden);
+            let single = read(&single);
+            let multi = read(&multi);
+            assert_eq!(expected.len(), single.len(), "{name}: single grad len");
+            assert_eq!(single.len(), multi.len(), "{name}: multi grad len");
+            for (i, ((e, a), b)) in expected
+                .iter()
+                .zip(single.iter())
+                .zip(multi.iter())
+                .enumerate()
+            {
+                let tol = 4e-4f32.max(4e-4 * e.abs());
+                assert!(
+                    (e - a).abs() <= tol,
+                    "{name}: cuda sparse GRPO bwd drift at {i}: expected={e} single={a} tol={tol}"
+                );
+                assert!(
+                    (a - b).abs() <= tol,
+                    "{name}: cuda sparse GRPO chunk drift at {i}: single={a} multi={b} tol={tol}"
+                );
+            }
         }
     }
 
@@ -1774,6 +2410,21 @@ mod tests {
                 1.0,
             ),
             (
+                "token-positive-k1-entropy",
+                GrpoLossParams {
+                    advantage: 0.7,
+                    clip_low: 0.2,
+                    clip_high: 0.2,
+                    kl_coeff: 0.11,
+                    kl_estimator: KlEstimator::K1,
+                    loss_normalizer: 0.25,
+                    is_level: IsLevel::Token,
+                    reinforce: false,
+                    entropy_aware_kl_quantile: Some(0.5),
+                },
+                0.9,
+            ),
+            (
                 "token-negative-k3",
                 GrpoLossParams {
                     advantage: -0.8,
@@ -1804,6 +2455,81 @@ mod tests {
                 1.25,
             ),
             (
+                "sequence-positive-k3",
+                GrpoLossParams {
+                    advantage: 0.6,
+                    clip_low: 0.2,
+                    clip_high: 0.25,
+                    kl_coeff: 0.05,
+                    kl_estimator: KlEstimator::K3,
+                    loss_normalizer: 0.75,
+                    is_level: IsLevel::Sequence,
+                    reinforce: false,
+                    entropy_aware_kl_quantile: None,
+                },
+                1.5,
+            ),
+            (
+                "sequence-positive-k3-entropy",
+                GrpoLossParams {
+                    advantage: 0.6,
+                    clip_low: 0.2,
+                    clip_high: 0.25,
+                    kl_coeff: 0.05,
+                    kl_estimator: KlEstimator::K3,
+                    loss_normalizer: 0.75,
+                    is_level: IsLevel::Sequence,
+                    reinforce: false,
+                    entropy_aware_kl_quantile: Some(0.5),
+                },
+                0.7,
+            ),
+            (
+                "sequence-negative-none",
+                GrpoLossParams {
+                    advantage: -0.9,
+                    clip_low: 0.15,
+                    clip_high: 0.2,
+                    kl_coeff: 0.0,
+                    kl_estimator: KlEstimator::None,
+                    loss_normalizer: 0.4,
+                    is_level: IsLevel::Sequence,
+                    reinforce: false,
+                    entropy_aware_kl_quantile: None,
+                },
+                0.8,
+            ),
+            (
+                "cispo-negative-k1-asym",
+                GrpoLossParams {
+                    advantage: -0.4,
+                    clip_low: 0.15,
+                    clip_high: 0.25,
+                    kl_coeff: 0.03,
+                    kl_estimator: KlEstimator::K1,
+                    loss_normalizer: 0.75,
+                    is_level: IsLevel::Cispo,
+                    reinforce: false,
+                    entropy_aware_kl_quantile: None,
+                },
+                1.2,
+            ),
+            (
+                "cispo-negative-k1-asym-entropy",
+                GrpoLossParams {
+                    advantage: -0.4,
+                    clip_low: 0.15,
+                    clip_high: 0.25,
+                    kl_coeff: 0.03,
+                    kl_estimator: KlEstimator::K1,
+                    loss_normalizer: 0.75,
+                    is_level: IsLevel::Cispo,
+                    reinforce: false,
+                    entropy_aware_kl_quantile: Some(0.5),
+                },
+                0.6,
+            ),
+            (
                 "reinforce",
                 GrpoLossParams {
                     advantage: -0.6,
@@ -1817,6 +2543,21 @@ mod tests {
                     entropy_aware_kl_quantile: None,
                 },
                 0.5,
+            ),
+            (
+                "reinforce-sequence",
+                GrpoLossParams {
+                    advantage: 0.8,
+                    clip_low: 0.2,
+                    clip_high: 0.2,
+                    kl_coeff: 0.0,
+                    kl_estimator: KlEstimator::None,
+                    loss_normalizer: 0.35,
+                    is_level: IsLevel::Sequence,
+                    reinforce: true,
+                    entropy_aware_kl_quantile: None,
+                },
+                1.1,
             ),
         ];
 
@@ -1858,27 +2599,6 @@ mod tests {
                 );
             }
         }
-
-        let declined = super::grpo_loss_coeff_col_device_fast_path_kt(
-            &plp,
-            &ref_kt,
-            GrpoLossParams {
-                advantage: 0.7,
-                clip_low: 0.2,
-                clip_high: 0.2,
-                kl_coeff: 0.11,
-                kl_estimator: KlEstimator::K1,
-                loss_normalizer: 0.25,
-                is_level: IsLevel::Sequence,
-                reinforce: false,
-                entropy_aware_kl_quantile: None,
-            },
-            num_active,
-            1.0,
-            &device,
-        )
-        .unwrap();
-        assert!(declined.is_none(), "sequence IS should keep the host fallback");
     }
 
     #[cfg(feature = "cuda")]

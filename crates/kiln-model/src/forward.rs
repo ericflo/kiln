@@ -12,6 +12,7 @@ use anyhow::{Context, Result};
 use kiln_tensor::{Tensor, Device, DType, D};
 use std::cell::Cell;
 use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 
 use crate::backend::BackendRuntime;
 use crate::kv_cache::KvCache;
@@ -2321,6 +2322,20 @@ fn profile_gdn_recurrent_inner_stages_enabled() -> bool {
     *ENABLED.get_or_init(|| env_truthy_for_profile("KILN_PROFILE_GDN_RECURRENT_INNER_STAGES"))
 }
 
+fn profile_gdn_segment_layer_enabled(layer_idx: usize) -> bool {
+    if !profile_gdn_stages_enabled() {
+        return false;
+    }
+    match std::env::var("KILN_PROFILE_GDN_STAGE_LAYER") {
+        Ok(value) => value
+            .trim()
+            .parse::<usize>()
+            .map(|target| target == layer_idx)
+            .unwrap_or(true),
+        Err(_) => true,
+    }
+}
+
 fn profile_full_attn_stages_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| env_truthy_for_profile("KILN_PROFILE_FULL_ATTN_STAGES"))
@@ -2460,6 +2475,32 @@ fn finish_gdn_stage_profile(
         start.elapsed().as_secs_f64() * 1000.0
     );
     Ok(())
+}
+
+fn trace_tape_gdn_conv_decisions_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        kiln_core::env_flag::env_flag("KILN_TRACE_TAPE_GDN_CONV_DECISIONS", false)
+    })
+}
+
+fn log_tape_gdn_conv_decision(
+    enabled: bool,
+    context: Option<(usize, usize)>,
+    seq_len: usize,
+    decision: &str,
+) {
+    if !enabled {
+        return;
+    }
+    match context {
+        Some((layer, start_pos)) => {
+            eprintln!(
+                "kiln_tape_gdn_conv_decision layer={layer} start_pos={start_pos} seq_len={seq_len} decision={decision}"
+            );
+        }
+        None => {}
+    }
 }
 
 fn start_gdn_recurrent_inner_profile(
@@ -5923,12 +5964,13 @@ fn marlin_bf16_drop_disabled() -> bool {
 // Phase 7: streaming/tiled GDN prefill — env-derived configuration.
 //
 // Dispatch can be forced on/off via `KILN_STREAMING_PREFILL=1|0`. Without an
-// override, CUDA and Metal enable streaming for long prompts where tiled
+// override, CUDA, ROCm, and Metal enable streaming for long prompts where tiled
 // prefill materially reduces peak activation memory. When enabled, prefill is
 // performed as a sequence of fixed-size tiles so the per-layer materialized GDN
 // intermediates only ever cover one tile at a time. The recurrent state in
 // `LinearAttentionState` already provides the O(1) hand-off required for
-// bit-exact agreement with the monolithic path.
+// bit-exact agreement with the monolithic path. Vulkan remains opt-in here
+// because its GDN training path still has backend-specific residency constraints.
 // ---------------------------------------------------------------------------
 
 /// Fallback tile size for explicit streaming prefill on devices without a
@@ -5942,6 +5984,12 @@ pub const STREAMING_PREFILL_ROCM_DEFAULT_THRESHOLD: usize =
     STREAMING_PREFILL_CUDA_DEFAULT_THRESHOLD;
 pub const STREAMING_PREFILL_METAL_DEFAULT_TILE: usize = 2048;
 pub const STREAMING_PREFILL_METAL_DEFAULT_THRESHOLD: usize = 2048;
+pub const STREAMING_PREFILL_VULKAN_DEFAULT_TILE: usize = STREAMING_PREFILL_METAL_DEFAULT_TILE;
+pub const STREAMING_PREFILL_CUDA_TAPE_DEFAULT_TILE: usize = STREAMING_PREFILL_CUDA_DEFAULT_TILE;
+pub const STREAMING_PREFILL_ROCM_TAPE_DEFAULT_TILE: usize = STREAMING_PREFILL_CUDA_TAPE_DEFAULT_TILE;
+pub const STREAMING_PREFILL_METAL_TAPE_DEFAULT_TILE: usize = STREAMING_PREFILL_METAL_DEFAULT_TILE;
+pub const STREAMING_PREFILL_VULKAN_TAPE_DEFAULT_TILE: usize =
+    STREAMING_PREFILL_VULKAN_DEFAULT_TILE;
 const PAGED_KV_HEAD_MAJOR_READ_MIN_TOKENS: usize = 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -5950,6 +5998,7 @@ enum StreamingPrefillDeviceKind {
     Cuda,
     Rocm,
     Metal,
+    Vulkan,
 }
 
 fn streaming_prefill_device_kind(device: &Device) -> StreamingPrefillDeviceKind {
@@ -5957,6 +6006,7 @@ fn streaming_prefill_device_kind(device: &Device) -> StreamingPrefillDeviceKind 
         Device::Cuda(_) => StreamingPrefillDeviceKind::Cuda,
         Device::Rocm(_) => StreamingPrefillDeviceKind::Rocm,
         Device::Metal(_) => StreamingPrefillDeviceKind::Metal,
+        Device::Vulkan(_) => StreamingPrefillDeviceKind::Vulkan,
         _ => StreamingPrefillDeviceKind::Cpu,
     }
 }
@@ -5986,6 +6036,7 @@ fn streaming_prefill_default_for(kind: StreamingPrefillDeviceKind, seq_len: usiz
         StreamingPrefillDeviceKind::Cuda => seq_len >= STREAMING_PREFILL_CUDA_DEFAULT_THRESHOLD,
         StreamingPrefillDeviceKind::Rocm => seq_len >= STREAMING_PREFILL_ROCM_DEFAULT_THRESHOLD,
         StreamingPrefillDeviceKind::Metal => seq_len >= streaming_prefill_threshold_tokens(),
+        StreamingPrefillDeviceKind::Vulkan => false,
         StreamingPrefillDeviceKind::Cpu => false,
     }
 }
@@ -6018,11 +6069,22 @@ pub fn streaming_prefill_threshold_tokens() -> usize {
         .unwrap_or(STREAMING_PREFILL_METAL_DEFAULT_THRESHOLD)
 }
 
-fn streaming_tile_tokens_env_override() -> Option<usize> {
-    std::env::var("KILN_STREAMING_TILE_TOKENS")
+fn gdn_streaming_tile_env_override(name: &str) -> Option<usize> {
+    std::env::var(name)
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
         .filter(|&n| n > 0 && n % GDN_CHUNK_SIZE == 0)
+}
+
+fn streaming_tile_tokens_env_override() -> Option<usize> {
+    gdn_streaming_tile_env_override("KILN_STREAMING_TILE_TOKENS")
+}
+
+fn tape_streaming_tile_tokens_env_override() -> Option<usize> {
+    gdn_streaming_tile_env_override("KILN_TAPE_STREAMING_TILE_TOKENS")
+        // Compatibility alias for the deleted exact-GDN tiled reverse caller.
+        .or_else(|| gdn_streaming_tile_env_override("KILN_EXACT_GDN_BACKWARD_TILE_TOKENS"))
+        .or_else(streaming_tile_tokens_env_override)
 }
 
 /// Read `KILN_STREAMING_TILE_TOKENS` (positive multiple of `GDN_CHUNK_SIZE`).
@@ -6040,9 +6102,173 @@ pub fn streaming_tile_tokens_for(device: &Device) -> usize {
             StreamingPrefillDeviceKind::Cuda => STREAMING_PREFILL_CUDA_DEFAULT_TILE,
             StreamingPrefillDeviceKind::Rocm => STREAMING_PREFILL_ROCM_DEFAULT_TILE,
             StreamingPrefillDeviceKind::Metal => STREAMING_PREFILL_METAL_DEFAULT_TILE,
+            StreamingPrefillDeviceKind::Vulkan => STREAMING_PREFILL_VULKAN_DEFAULT_TILE,
             StreamingPrefillDeviceKind::Cpu => STREAMING_PREFILL_DEFAULT_TILE,
         }
     })
+}
+
+/// Device-aware tile-size default for active kt-tape replay.
+///
+/// Checkpointed training records each reverse segment under a fresh tape scope.
+/// CUDA/ROCm keep the same tile size as detached boundary forward by default:
+/// halving the tile reduced per-call scratch but increased cumulative tape
+/// residency enough to slow late long-context GDN tiles. Metal and Vulkan also
+/// keep their forward defaults unless `KILN_TAPE_STREAMING_TILE_TOKENS`
+/// overrides them.
+pub fn tape_streaming_tile_tokens_for(device: &Device) -> usize {
+    tape_streaming_tile_tokens_env_override().unwrap_or_else(|| {
+        match streaming_prefill_device_kind(device) {
+            StreamingPrefillDeviceKind::Cuda => STREAMING_PREFILL_CUDA_TAPE_DEFAULT_TILE,
+            StreamingPrefillDeviceKind::Rocm => STREAMING_PREFILL_ROCM_TAPE_DEFAULT_TILE,
+            StreamingPrefillDeviceKind::Metal => STREAMING_PREFILL_METAL_TAPE_DEFAULT_TILE,
+            StreamingPrefillDeviceKind::Vulkan => STREAMING_PREFILL_VULKAN_TAPE_DEFAULT_TILE,
+            StreamingPrefillDeviceKind::Cpu => STREAMING_PREFILL_DEFAULT_TILE,
+        }
+    })
+}
+
+fn trace_model_segment_timings() -> bool {
+    kiln_core::env_flag::env_flag("KILN_TRACE_MODEL_SEGMENT_TIMINGS", false)
+}
+
+fn trace_linear_segment_stages_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        kiln_core::env_flag::env_flag("KILN_TRACE_LINEAR_SEGMENT_STAGES", false)
+            || kiln_core::env_flag::env_flag("KILN_TRACE_LINEAR_LAYER_STAGES", false)
+    })
+}
+
+fn trace_linear_segment_stage_layer_enabled(layer_idx: usize) -> bool {
+    if !trace_linear_segment_stages_enabled() {
+        return false;
+    }
+
+    let filter = std::env::var("KILN_TRACE_LINEAR_SEGMENT_STAGE_LAYER")
+        .or_else(|_| std::env::var("KILN_TRACE_LINEAR_LAYER_STAGE_LAYER"));
+    match filter {
+        Ok(value) => value
+            .trim()
+            .parse::<usize>()
+            .map(|target| target == layer_idx)
+            .unwrap_or(true),
+        Err(_) => true,
+    }
+}
+
+fn start_linear_segment_stage_trace(
+    enabled: bool,
+    seq_len: usize,
+    segment_start: usize,
+    segment_end: usize,
+    layer_idx: usize,
+    stage: &str,
+) -> Option<std::time::Instant> {
+    if !enabled {
+        return None;
+    }
+    eprintln!(
+        "kiln_linear_segment_stage_begin seq_len={seq_len} segment_layers={segment_start}..{segment_end} layer_idx={layer_idx} stage={stage}"
+    );
+    Some(std::time::Instant::now())
+}
+
+fn finish_linear_segment_stage_trace(
+    enabled: bool,
+    seq_len: usize,
+    segment_start: usize,
+    segment_end: usize,
+    layer_idx: usize,
+    stage: &str,
+    start: Option<std::time::Instant>,
+) {
+    if !enabled {
+        return;
+    }
+    let Some(start) = start else {
+        return;
+    };
+    eprintln!(
+        "kiln_linear_segment_stage_end seq_len={seq_len} segment_layers={segment_start}..{segment_end} layer_idx={layer_idx} stage={stage} elapsed_ms={:.3}",
+        start.elapsed().as_secs_f64() * 1000.0
+    );
+}
+
+fn trace_gdn_backward_timings_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        kiln_core::env_flag::env_flag("KILN_TRACE_GDN_BACKWARD_TIMINGS", false)
+    })
+}
+
+fn start_gdn_backward_trace(
+    enabled: bool,
+    phase: &str,
+    seq_len: usize,
+    total_chunks: usize,
+    chunk_idx: Option<usize>,
+    chunk_len: usize,
+    device: &Device,
+) -> Option<std::time::Instant> {
+    if !enabled {
+        return None;
+    }
+    match chunk_idx {
+        Some(chunk_idx) => eprintln!(
+            "kiln_gdn_backward_begin phase={phase} seq_len={seq_len} chunk_idx={chunk_idx} chunk_len={chunk_len} total_chunks={total_chunks} device={device:?}"
+        ),
+        None => eprintln!(
+            "kiln_gdn_backward_begin phase={phase} seq_len={seq_len} chunk_idx=none chunk_len={chunk_len} total_chunks={total_chunks} device={device:?}"
+        ),
+    }
+    Some(std::time::Instant::now())
+}
+
+fn finish_gdn_backward_trace(
+    enabled: bool,
+    phase: &str,
+    seq_len: usize,
+    total_chunks: usize,
+    chunk_idx: Option<usize>,
+    chunk_len: usize,
+    device: &Device,
+    start: Option<std::time::Instant>,
+) {
+    if !enabled {
+        return;
+    }
+    let Some(start) = start else {
+        return;
+    };
+    match chunk_idx {
+        Some(chunk_idx) => eprintln!(
+            "kiln_gdn_backward_end phase={phase} seq_len={seq_len} chunk_idx={chunk_idx} chunk_len={chunk_len} total_chunks={total_chunks} device={device:?} elapsed_ms={:.3}",
+            start.elapsed().as_secs_f64() * 1000.0
+        ),
+        None => eprintln!(
+            "kiln_gdn_backward_end phase={phase} seq_len={seq_len} chunk_idx=none chunk_len={chunk_len} total_chunks={total_chunks} device={device:?} elapsed_ms={:.3}",
+            start.elapsed().as_secs_f64() * 1000.0
+        ),
+    }
+}
+
+fn log_model_segment_timing(
+    enabled: bool,
+    phase: &str,
+    seq_len: usize,
+    segment_start: usize,
+    segment_end: usize,
+    layer_idx: usize,
+    layer_kind: &str,
+    elapsed: Duration,
+) {
+    if enabled {
+        eprintln!(
+            "kiln_model_segment_timing phase={phase} seq_len={seq_len} segment_layers={segment_start}..{segment_end} layer_idx={layer_idx} layer_kind={layer_kind} elapsed_ms={:.3}",
+            elapsed.as_secs_f64() * 1000.0
+        );
+    }
 }
 
 /// Read `KILN_STREAMING_LAST_TOKEN_LM_HEAD`. Defaults to true: in streaming
@@ -14758,6 +14984,17 @@ pub fn gdn_recurrent_backward_no_grad(
     let full_chunks = seq_len / chunk_size;
     let tail = seq_len - full_chunks * chunk_size;
     let total_chunks = full_chunks + if tail > 0 { 1 } else { 0 };
+    let trace_enabled = trace_gdn_backward_timings_enabled();
+    let trace_device = q.device();
+    let total_trace = start_gdn_backward_trace(
+        trace_enabled,
+        "total",
+        seq_len,
+        total_chunks,
+        None,
+        seq_len,
+        &trace_device,
+    );
 
     let q = q.to_dtype(DType::F32)?;
     let k = k.to_dtype(DType::F32)?;
@@ -14771,6 +15008,15 @@ pub fn gdn_recurrent_backward_no_grad(
     for ci in 0..total_chunks {
         let chunk = if ci >= full_chunks { tail } else { chunk_size };
         let t_off = ci * chunk_size;
+        let chunk_trace = start_gdn_backward_trace(
+            trace_enabled,
+            "snapshot_chunk",
+            seq_len,
+            total_chunks,
+            Some(ci),
+            chunk,
+            &trace_device,
+        );
         state_snapshots.push(state.clone());
         let q_c = q.narrow(2, t_off, chunk)?.contiguous()?;
         let k_c = k.narrow(2, t_off, chunk)?.contiguous()?;
@@ -14789,6 +15035,16 @@ pub fn gdn_recurrent_backward_no_grad(
         let w_weighted = w.broadcast_mul(&decay_last_col.unsqueeze(3)?)?;
         let delta_state = k_t.matmul(&w_weighted)?;
         state = (state_scaled + delta_state)?;
+        finish_gdn_backward_trace(
+            trace_enabled,
+            "snapshot_chunk",
+            seq_len,
+            total_chunks,
+            Some(ci),
+            chunk,
+            &trace_device,
+            chunk_trace,
+        );
     }
 
     let mut dq_chunks: Vec<Option<Tensor>> = (0..total_chunks).map(|_| None).collect();
@@ -14804,6 +15060,24 @@ pub fn gdn_recurrent_backward_no_grad(
     for ci in (0..total_chunks).rev() {
         let chunk = if ci >= full_chunks { tail } else { chunk_size };
         let t_off = ci * chunk_size;
+        let reverse_trace = start_gdn_backward_trace(
+            trace_enabled,
+            "reverse_chunk",
+            seq_len,
+            total_chunks,
+            Some(ci),
+            chunk,
+            &trace_device,
+        );
+        let sub_trace = start_gdn_backward_trace(
+            trace_enabled,
+            "reverse_inputs_and_prep",
+            seq_len,
+            total_chunks,
+            Some(ci),
+            chunk,
+            &trace_device,
+        );
         let s_in = &state_snapshots[ci];
         let q_c = q.narrow(2, t_off, chunk)?.contiguous()?;
         let k_c = k.narrow(2, t_off, chunk)?.contiguous()?;
@@ -14819,7 +15093,26 @@ pub fn gdn_recurrent_backward_no_grad(
         let (a_strict, b_mask, v_prime, q_s_scaled, decay_last_col, p_last) =
             gdn_chunk_prep_f32(&g_c, &v_c, &kkt, &qkt, &ks_entry, &q_s)?;
         let w = compute_w_chunk(backend, &a_strict, &v_prime, &beta_c, chunk)?.contiguous()?;
+        finish_gdn_backward_trace(
+            trace_enabled,
+            "reverse_inputs_and_prep",
+            seq_len,
+            total_chunks,
+            Some(ci),
+            chunk,
+            &trace_device,
+            sub_trace,
+        );
 
+        let sub_trace = start_gdn_backward_trace(
+            trace_enabled,
+            "reverse_direct_scan",
+            seq_len,
+            total_chunks,
+            Some(ci),
+            chunk,
+            &trace_device,
+        );
         let dq_s_scaled = d_out.clone();
         let d_w_scan = b_mask.transpose(2, 3)?.contiguous()?.matmul(&d_out)?;
         let d_b_mask = d_out.matmul(&w.transpose(2, 3)?.contiguous()?)?;
@@ -14830,7 +15123,26 @@ pub fn gdn_recurrent_backward_no_grad(
         let mut d_p_last_acc = Tensor::zeros((batch, heads), DType::F32, q.device())?;
         let mut dk_state_extra: Option<Tensor> = None;
         let mut ds_state_extra: Option<Tensor> = None;
+        finish_gdn_backward_trace(
+            trace_enabled,
+            "reverse_direct_scan",
+            seq_len,
+            total_chunks,
+            Some(ci),
+            chunk,
+            &trace_device,
+            sub_trace,
+        );
 
+        let sub_trace = start_gdn_backward_trace(
+            trace_enabled,
+            "reverse_state_carry",
+            seq_len,
+            total_chunks,
+            Some(ci),
+            chunk,
+            &trace_device,
+        );
         if let Some(d_s_exit) = d_s_carry.as_ref() {
             let p_last_u = p_last.unsqueeze(2)?.unsqueeze(3)?;
             ds_state_extra = Some(d_s_exit.broadcast_mul(&p_last_u)?);
@@ -14886,7 +15198,26 @@ pub fn gdn_recurrent_backward_no_grad(
                 d_decay_last_col_acc = prod_kc.sum(LAST_DIM)?;
             }
         }
+        finish_gdn_backward_trace(
+            trace_enabled,
+            "reverse_state_carry",
+            seq_len,
+            total_chunks,
+            Some(ci),
+            chunk,
+            &trace_device,
+            sub_trace,
+        );
 
+        let sub_trace = start_gdn_backward_trace(
+            trace_enabled,
+            "reverse_tri_beta",
+            seq_len,
+            total_chunks,
+            Some(ci),
+            chunk,
+            &trace_device,
+        );
         let dr = solve_tri_transpose_f32(&a_strict, &beta_c, &d_w_acc)?.contiguous()?;
         let a_w = a_strict.matmul(&w)?;
         let pre_beta = (&v_prime - &a_w)?;
@@ -14947,7 +15278,26 @@ pub fn gdn_recurrent_backward_no_grad(
         let d_a_strict = dr_w_t
             .broadcast_mul(&beta_c_neg.unsqueeze(3)?)?
             .broadcast_mul(&strict_mask)?;
+        finish_gdn_backward_trace(
+            trace_enabled,
+            "reverse_tri_beta",
+            seq_len,
+            total_chunks,
+            Some(ci),
+            chunk,
+            &trace_device,
+            sub_trace,
+        );
 
+        let sub_trace = start_gdn_backward_trace(
+            trace_enabled,
+            "reverse_g_acc_initial",
+            seq_len,
+            total_chunks,
+            Some(ci),
+            chunk,
+            &trace_device,
+        );
         let big_g = g_c.cumsum(LAST_DIM)?;
         // Phase 7 (#1082): route the `big_g.exp()` step through
         // `try_kt_exp` when `KILN_USE_KT_API_EXP=1` (or
@@ -15027,7 +15377,26 @@ pub fn gdn_recurrent_backward_no_grad(
         #[cfg(not(feature = "cuda"))]
         let qss_sum = qss_prod.sum(LAST_DIM)?;
         d_g_acc = (&d_g_acc + &qss_sum)?;
+        finish_gdn_backward_trace(
+            trace_enabled,
+            "reverse_g_acc_initial",
+            seq_len,
+            total_chunks,
+            Some(ci),
+            chunk,
+            &trace_device,
+            sub_trace,
+        );
 
+        let sub_trace = start_gdn_backward_trace(
+            trace_enabled,
+            "reverse_decay_masks",
+            seq_len,
+            total_chunks,
+            Some(ci),
+            chunk,
+            &trace_device,
+        );
         let big_g_col = big_g.unsqueeze(3)?;
         let big_g_row = big_g.unsqueeze(2)?;
         let decay_delta = big_g_col.broadcast_sub(&big_g_row)?;
@@ -15166,7 +15535,26 @@ pub fn gdn_recurrent_backward_no_grad(
             .broadcast_mul(&last_mask)?;
         d_g_acc = (&d_g_acc + &p_last_term)?;
         let d_g = reverse_cumsum_time(&d_g_acc)?;
+        finish_gdn_backward_trace(
+            trace_enabled,
+            "reverse_decay_masks",
+            seq_len,
+            total_chunks,
+            Some(ci),
+            chunk,
+            &trace_device,
+            sub_trace,
+        );
 
+        let sub_trace = start_gdn_backward_trace(
+            trace_enabled,
+            "reverse_final_matmuls",
+            seq_len,
+            total_chunks,
+            Some(ci),
+            chunk,
+            &trace_device,
+        );
         let s_t = s_in.transpose(2, 3)?.contiguous()?;
         let d_k_from_kkt =
             (&d_kkt.matmul(&k_c)? + &d_kkt.transpose(2, 3)?.contiguous()?.matmul(&k_c)?)?;
@@ -15183,6 +15571,16 @@ pub fn gdn_recurrent_backward_no_grad(
         if let Some(extra) = ds_state_extra.as_ref() {
             d_s_in = (&d_s_in + extra)?;
         }
+        finish_gdn_backward_trace(
+            trace_enabled,
+            "reverse_final_matmuls",
+            seq_len,
+            total_chunks,
+            Some(ci),
+            chunk,
+            &trace_device,
+            sub_trace,
+        );
 
         dq_chunks[ci] = Some(d_q);
         dk_chunks[ci] = Some(d_k);
@@ -15192,6 +15590,16 @@ pub fn gdn_recurrent_backward_no_grad(
         d_s_carry = Some(d_s_in);
 
         let _ = q_s_scaled;
+        finish_gdn_backward_trace(
+            trace_enabled,
+            "reverse_chunk",
+            seq_len,
+            total_chunks,
+            Some(ci),
+            chunk,
+            &trace_device,
+            reverse_trace,
+        );
     }
 
     // Phase 7 (#1082): when `KILN_USE_KT_API_CAT_DIM2=1` (or
@@ -15223,12 +15631,47 @@ pub fn gdn_recurrent_backward_no_grad(
         Ok(Tensor::cat(&refs, 2)?)
     };
 
+    let collect_trace = start_gdn_backward_trace(
+        trace_enabled,
+        "collect_grads",
+        seq_len,
+        total_chunks,
+        None,
+        seq_len,
+        &trace_device,
+    );
+    let dq = collect(&dq_chunks, "dq")?;
+    let dk = collect(&dk_chunks, "dk")?;
+    let dv = collect(&dv_chunks, "dv")?;
+    let dbeta = collect(&dbeta_chunks, "dbeta")?;
+    let dg = collect(&dg_chunks, "dg")?;
+    finish_gdn_backward_trace(
+        trace_enabled,
+        "collect_grads",
+        seq_len,
+        total_chunks,
+        None,
+        seq_len,
+        &trace_device,
+        collect_trace,
+    );
+    finish_gdn_backward_trace(
+        trace_enabled,
+        "total",
+        seq_len,
+        total_chunks,
+        None,
+        seq_len,
+        &trace_device,
+        total_trace,
+    );
+
     Ok(GdnRecurrentBackwardGrads {
-        dq: collect(&dq_chunks, "dq")?,
-        dk: collect(&dk_chunks, "dk")?,
-        dv: collect(&dv_chunks, "dv")?,
-        dbeta: collect(&dbeta_chunks, "dbeta")?,
-        dg: collect(&dg_chunks, "dg")?,
+        dq,
+        dk,
+        dv,
+        dbeta,
+        dg,
         d_state: d_s_carry,
     })
 }
@@ -15264,6 +15707,7 @@ pub fn gated_deltanet_forward_streaming(
     recurrent_state: &mut Tensor,
     conv_state: &mut Tensor,
     tile_size: usize,
+    profile_context: Option<(usize, usize)>,
     lora: Option<(&LoraLayerWeights, f32)>,
 ) -> Result<Tensor> {
     if tile_size == 0 || tile_size % GDN_CHUNK_SIZE != 0 {
@@ -15279,7 +15723,7 @@ pub fn gated_deltanet_forward_streaming(
     if total <= tile_size {
         // Single tile — no benefit from the cat overhead, defer to the
         // monolithic path so behavior matches the env-off case bit-exactly.
-        return gated_deltanet_forward(
+        return gated_deltanet_forward_decode_if(
             backend,
             x,
             weights,
@@ -15288,6 +15732,11 @@ pub fn gated_deltanet_forward_streaming(
             conv_state,
             false,
             false,
+            true,
+            false,
+            profile_context,
+            true,
+            true,
             lora,
         );
     }
@@ -15302,6 +15751,8 @@ pub fn gated_deltanet_forward_streaming(
         let allow_forward_only_fastpaths =
             streaming_gdn_forward_only_fastpaths_allowed(&tile_device);
         let allow_prefill_recurrent_kernel = allow_forward_only_fastpaths;
+        let tile_profile_context =
+            profile_context.map(|(layer_idx, start_pos)| (layer_idx, start_pos + cursor));
         let mut run_tile = || -> Result<Tensor> {
             let tile_in = x.narrow(1, cursor, len)?;
             gated_deltanet_forward_decode_if(
@@ -15315,7 +15766,7 @@ pub fn gated_deltanet_forward_streaming(
                 false,
                 true,
                 false,
-                None,
+                tile_profile_context,
                 allow_forward_only_fastpaths,
                 allow_prefill_recurrent_kernel,
                 lora,
@@ -15360,15 +15811,31 @@ pub fn gated_deltanet_forward_streaming(
     // `kiln_tensor::cuda_concat(_, 1)` via the kt-bridge borrow
     // adapter. Falls through to the candle composite when any
     // precondition fails.
+    let out = {
     #[cfg(feature = "cuda")]
     {
         if let Some(out) = try_kt_cat_dim1(&tile_refs)
             .context("streaming GDN try_kt_cat_dim1")?
         {
-            return Ok(out);
+            out
+        } else {
+            Tensor::cat(&tile_refs, 1).context("streaming GDN cat tile outputs along T axis")?
         }
     }
-    Tensor::cat(&tile_refs, 1).context("streaming GDN cat tile outputs along T axis")
+    #[cfg(not(feature = "cuda"))]
+    {
+        Tensor::cat(&tile_refs, 1).context("streaming GDN cat tile outputs along T axis")?
+    }
+    };
+    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
+    {
+        if let Some(recorded) = crate::tape_forward::try_tape_concat_kt(&tile_refs, 1, &out)
+            .context("streaming GDN tile concat try_tape_concat_kt")?
+        {
+            return Ok(recorded);
+        }
+    }
+    Ok(out)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -15838,6 +16305,7 @@ fn gated_deltanet_forward_decode_if_inner(
         let stage_profile = start_gdn_stage_profile(profile_device, profile_context)?;
         let mixed_qkv = {
             kiln_nvtx::range!(c"kiln/gdn/conv");
+            let trace_tape_gdn_conv_decisions = trace_tape_gdn_conv_decisions_enabled();
             // Transpose to [B, channels, T] for conv. At seq_len == 1 the
             // [B, 1, C] -> [B, C, 1] axis swap is a no-data-move shape
             // reinterpretation: in row-major, element[b, 0, c] sits at the
@@ -15903,7 +16371,12 @@ fn gated_deltanet_forward_decode_if_inner(
                     }
                 }
             } else if seq_len > 1 {
-                if gdn_forward_only_fastpaths && backend.supports_causal_conv1d_prefill() {
+                let tape_fused_prefill_conv =
+                    tape_recording_active && crate::tape_forward::tape_gdn_conv_enabled();
+                if (gdn_forward_only_fastpaths || tape_fused_prefill_conv)
+                    && backend.supports_causal_conv1d_prefill()
+                {
+                    let conv_entry_state = conv_state.clone();
                     let conv_prefill = {
                         kiln_nvtx::range!(c"kiln/gdn/conv/prefill_update");
                         backend.causal_conv1d_prefill(
@@ -15914,8 +16387,75 @@ fn gated_deltanet_forward_decode_if_inner(
                         )?
                     };
                     match conv_prefill {
-                        Some(out) => out, // F32, SiLU fused into the kernel epilogue
+                        Some(out) => {
+                            // F32, SiLU fused into the kernel epilogue. In a tape
+                            // scope, record a fused conv+SiLU backward that
+                            // recomputes the pre-SiLU conv activation from the
+                            // saved entry state. If the recorder declines, restore
+                            // the state and fall back to the pre-SiLU recorded path.
+                            #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
+                            {
+                                if tape_recording_active {
+                                    let recorded =
+                                        crate::tape_forward::try_tape_causal_conv1d_prefill_silu_kt(
+                                                &mixed_qkv_ct,
+                                                &weights.conv1d,
+                                                &conv_entry_state,
+                                                &out,
+                                                kernel_size,
+                                            )?;
+                                    if let Some(recorded) = recorded {
+                                        log_tape_gdn_conv_decision(
+                                            trace_tape_gdn_conv_decisions,
+                                            profile_context,
+                                            seq_len,
+                                            "fused_prefill_recorded",
+                                        );
+                                        recorded
+                                    } else {
+                                        log_tape_gdn_conv_decision(
+                                            trace_tape_gdn_conv_decisions,
+                                            profile_context,
+                                            seq_len,
+                                            "fused_prefill_recorder_declined_fallback",
+                                        );
+                                        *conv_state = conv_entry_state;
+                                        let y = causal_conv1d_prefill(
+                                            &mixed_qkv_ct,
+                                            &weights.conv1d,
+                                            conv_state,
+                                            kernel_size,
+                                        )?;
+                                        let _ = crate::tape_forward::try_tape_causal_conv1d_prefill_kt(
+                                            &mixed_qkv_ct,
+                                            &weights.conv1d,
+                                            &y,
+                                            kernel_size,
+                                        )?;
+                                        cuda_silu(&y)?
+                                    }
+                                } else {
+                                    log_tape_gdn_conv_decision(
+                                        trace_tape_gdn_conv_decisions,
+                                        profile_context,
+                                        seq_len,
+                                        "fused_prefill_forward_only",
+                                    );
+                                    out
+                                }
+                            }
+                            #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm")))]
+                            {
+                                out
+                            }
+                        }
                         None => {
+                            log_tape_gdn_conv_decision(
+                                trace_tape_gdn_conv_decisions,
+                                profile_context,
+                                seq_len,
+                                "backend_prefill_declined_fallback",
+                            );
                             kiln_nvtx::range!(c"kiln/gdn/conv/fallback_prefill");
                             let y = causal_conv1d_prefill(
                                 &mixed_qkv_ct,
@@ -15950,6 +16490,12 @@ fn gated_deltanet_forward_decode_if_inner(
                         }
                     }
                 } else {
+                    log_tape_gdn_conv_decision(
+                        trace_tape_gdn_conv_decisions,
+                        profile_context,
+                        seq_len,
+                        "prefill_fused_disabled_fallback",
+                    );
                     kiln_nvtx::range!(c"kiln/gdn/conv/fallback_prefill");
                     let y = causal_conv1d_prefill(
                         &mixed_qkv_ct,
@@ -16146,6 +16692,35 @@ fn gated_deltanet_forward_decode_if_inner(
             && recurrent_unexpanded_qk
             && input_dtype == DType::BF16
             && backend.supports_gdn_recurrent_qk_norm_prefill_native_head_last();
+        let normalize_before_gqa_expand_for_tape = tape_recording_active && gqa_ratio > 1;
+        let normalize_then_expand_qk_for_tape =
+            |q_src: &Tensor, k_src: &Tensor| -> Result<(Tensor, Tensor)> {
+                let (q_norm, k_norm) = gdn_qk_norm(q_src, k_src, input_dtype, scale)?;
+                let expand = |src: &Tensor, label: &'static str| -> Result<Tensor> {
+                    let expanded = src
+                        .unsqueeze(3)?
+                        .expand(&[batch, seq_len, nk, gqa_ratio, dk])?
+                        .contiguous()?
+                        .reshape((batch, seq_len, nv, dk))?;
+                    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
+                    {
+                        match crate::tape_forward::try_tape_gqa_expand_kt(
+                            src, gqa_ratio, &expanded,
+                        )
+                        .with_context(|| format!("gdn qk-norm-before-expand tape expand {label}"))?
+                        {
+                            Some(t) => Ok(t),
+                            None => Ok(expanded),
+                        }
+                    }
+                    #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm")))]
+                    {
+                        let _ = label;
+                        Ok(expanded)
+                    }
+                };
+                Ok((expand(&q_norm, "q")?, expand(&k_norm, "k")?))
+            };
         let (q, k, qk_expanded, qk_norm_deferred, qk_norm_deferred_to_native_recurrent) = {
             #[cfg(feature = "metal")]
             {
@@ -16153,6 +16728,10 @@ fn gated_deltanet_forward_decode_if_inner(
                     kiln_nvtx::range!(c"kiln/gdn/qk_norm_unexpanded");
                     let (q, k) = gdn_qk_norm(&q, &k, input_dtype, scale)?;
                     (q, k, false, false, false)
+                } else if normalize_before_gqa_expand_for_tape {
+                    kiln_nvtx::range!(c"kiln/gdn/qk_norm_pre_expand_tape");
+                    let (q, k) = normalize_then_expand_qk_for_tape(&q, &k)?;
+                    (q, k, true, false, false)
                 } else if input_dtype == DType::BF16
                     && gdn_forward_only_fastpaths
                     && gqa_ratio > 1
@@ -16254,6 +16833,10 @@ fn gated_deltanet_forward_decode_if_inner(
                     kiln_nvtx::range!(c"kiln/gdn/qk_norm_unexpanded");
                     let (q, k) = gdn_qk_norm(&q, &k, input_dtype, scale)?;
                     (q, k, false, false, false)
+                } else if normalize_before_gqa_expand_for_tape {
+                    kiln_nvtx::range!(c"kiln/gdn/qk_norm_pre_expand_tape");
+                    let (q, k) = normalize_then_expand_qk_for_tape(&q, &k)?;
+                    (q, k, true, false, false)
                 } else if let Some((q, k)) = fused_gqa {
                     (q, k, true, false, false)
                 } else {
@@ -22081,6 +22664,10 @@ fn transformer_block_detached_cuda_prefill_chunked(
     full_attn_layer_idx: usize,
     lora: Option<(&LoraLayerWeights, f32)>,
 ) -> Result<Option<Tensor>> {
+    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
+    if crate::tape_forward::tape_scope_active() {
+        return Ok(None);
+    }
     if backend.name() != "cuda" || has_kv_cache || x.track_op() {
         return Ok(None);
     }
@@ -24073,17 +24660,39 @@ pub fn model_forward_segment(
     let (_, seq_len, _) = hidden.dims3()?;
     let stream_device = hidden.device().clone();
     let streaming = streaming_prefill_enabled_for(&stream_device, seq_len);
+    let tape_scope_active = crate::tape_forward::tape_scope_active();
     let stream_tile = if streaming {
-        streaming_tile_tokens_for(&stream_device)
+        if tape_scope_active {
+            tape_streaming_tile_tokens_for(&stream_device)
+        } else {
+            streaming_tile_tokens_for(&stream_device)
+        }
     } else {
         0
     };
     let stream_active = streaming && stream_tile > 0 && seq_len > stream_tile;
+    let trace_segment_timings = trace_model_segment_timings();
+    if trace_segment_timings {
+        eprintln!(
+            "kiln_model_segment_streaming seq_len={} segment_layers={}..{} device={} device_kind={:?} streaming={} stream_tile={} stream_active={} tape_scope_active={}",
+            seq_len,
+            start_layer,
+            end_layer,
+            stream_device.short_name(),
+            streaming_prefill_device_kind(&stream_device),
+            streaming,
+            stream_tile,
+            stream_active,
+            tape_scope_active
+        );
+    }
 
     for i in start_layer..end_layer {
+        let layer_start = std::time::Instant::now();
         let layer = &weights.layers[i];
         let layer_lora: Option<(&LoraLayerWeights, f32)> =
             lora.and_then(|lw| lw.layers.get(i).map(|ll| (ll, lw.scale)));
+        let trace_linear_segment_stages = trace_linear_segment_stage_layer_enabled(i);
 
         match &layer.attention {
             GpuAttentionWeights::Full(_) => {
@@ -24106,15 +24715,52 @@ pub fn model_forward_segment(
                 )
                 .with_context(|| format!("segment transformer block {i} (full attention)"))?;
                 full_attn_idx += 1;
+                log_model_segment_timing(
+                    trace_segment_timings,
+                    "layer",
+                    seq_len,
+                    start_layer,
+                    end_layer,
+                    i,
+                    "full_attention",
+                    layer_start.elapsed(),
+                );
             }
             GpuAttentionWeights::Linear(lin_weights) => {
                 let state = linear_state.as_mut().ok_or_else(|| {
                     anyhow::anyhow!("linear attention state required for GDN layers (layer {i})")
                 })?;
                 let normed = {
+                    let stage_trace = start_linear_segment_stage_trace(
+                        trace_linear_segment_stages,
+                        seq_len,
+                        start_layer,
+                        end_layer,
+                        i,
+                        "pre_attn_norm",
+                    );
                     kiln_nvtx::range!(c"kiln/norm/pre_attn");
-                    rms_norm(&hidden, &layer.input_layernorm, config.rms_norm_eps)?
+                    let out = rms_norm(&hidden, &layer.input_layernorm, config.rms_norm_eps)?;
+                    finish_linear_segment_stage_trace(
+                        trace_linear_segment_stages,
+                        seq_len,
+                        start_layer,
+                        end_layer,
+                        i,
+                        "pre_attn_norm",
+                        stage_trace,
+                    );
+                    out
                 };
+                let gdn_profile_context = profile_gdn_segment_layer_enabled(i).then_some((i, 0));
+                let stage_trace = start_linear_segment_stage_trace(
+                    trace_linear_segment_stages,
+                    seq_len,
+                    start_layer,
+                    end_layer,
+                    i,
+                    "gdn_attention",
+                );
                 let attn_out = if stream_active {
                     gated_deltanet_forward_streaming(
                         backend,
@@ -24124,11 +24770,12 @@ pub fn model_forward_segment(
                         &mut state.recurrent_states[linear_attn_idx],
                         &mut state.conv_states[linear_attn_idx],
                         stream_tile,
+                        gdn_profile_context,
                         layer_lora,
                     )
                     .with_context(|| format!("segment streaming gated deltanet layer {i}"))?
                 } else {
-                    gated_deltanet_forward(
+                    gated_deltanet_forward_decode_if(
                         backend,
                         &normed,
                         lin_weights,
@@ -24137,28 +24784,123 @@ pub fn model_forward_segment(
                         &mut state.conv_states[linear_attn_idx],
                         /* capture_b11_taps = */ false,
                         /* capture_c41_taps = */ false,
+                        /* use_fused_gdn_gates = */ true,
+                        /* use_metal_decode_gemv = */ false,
+                        gdn_profile_context,
+                        /* allow_forward_only_fastpaths = */ true,
+                        /* allow_prefill_recurrent_kernel = */ true,
                         layer_lora,
                     )
                     .with_context(|| format!("segment gated deltanet layer {i}"))?
                 };
+                finish_linear_segment_stage_trace(
+                    trace_linear_segment_stages,
+                    seq_len,
+                    start_layer,
+                    end_layer,
+                    i,
+                    "gdn_attention",
+                    stage_trace,
+                );
                 hidden = {
+                    let stage_trace = start_linear_segment_stage_trace(
+                        trace_linear_segment_stages,
+                        seq_len,
+                        start_layer,
+                        end_layer,
+                        i,
+                        "attn_residual",
+                    );
                     kiln_nvtx::range!(c"kiln/residual");
-                    residual_add(hidden, attn_out)?
+                    let out = residual_add(hidden, attn_out)?;
+                    finish_linear_segment_stage_trace(
+                        trace_linear_segment_stages,
+                        seq_len,
+                        start_layer,
+                        end_layer,
+                        i,
+                        "attn_residual",
+                        stage_trace,
+                    );
+                    out
                 };
                 let normed_post = {
+                    let stage_trace = start_linear_segment_stage_trace(
+                        trace_linear_segment_stages,
+                        seq_len,
+                        start_layer,
+                        end_layer,
+                        i,
+                        "pre_mlp_norm",
+                    );
                     kiln_nvtx::range!(c"kiln/norm/pre_mlp");
-                    rms_norm(
+                    let out = rms_norm(
                         &hidden,
                         &layer.post_attention_layernorm,
                         config.rms_norm_eps,
-                    )?
+                    )?;
+                    finish_linear_segment_stage_trace(
+                        trace_linear_segment_stages,
+                        seq_len,
+                        start_layer,
+                        end_layer,
+                        i,
+                        "pre_mlp_norm",
+                        stage_trace,
+                    );
+                    out
                 };
+                let stage_trace = start_linear_segment_stage_trace(
+                    trace_linear_segment_stages,
+                    seq_len,
+                    start_layer,
+                    end_layer,
+                    i,
+                    "mlp",
+                );
                 let ffn_out = swiglu_ffn(&normed_post, &layer.mlp, layer_lora)?;
+                finish_linear_segment_stage_trace(
+                    trace_linear_segment_stages,
+                    seq_len,
+                    start_layer,
+                    end_layer,
+                    i,
+                    "mlp",
+                    stage_trace,
+                );
                 hidden = {
+                    let stage_trace = start_linear_segment_stage_trace(
+                        trace_linear_segment_stages,
+                        seq_len,
+                        start_layer,
+                        end_layer,
+                        i,
+                        "mlp_residual",
+                    );
                     kiln_nvtx::range!(c"kiln/residual");
-                    residual_add(hidden, ffn_out)?
+                    let out = residual_add(hidden, ffn_out)?;
+                    finish_linear_segment_stage_trace(
+                        trace_linear_segment_stages,
+                        seq_len,
+                        start_layer,
+                        end_layer,
+                        i,
+                        "mlp_residual",
+                        stage_trace,
+                    );
+                    out
                 };
                 linear_attn_idx += 1;
+                log_model_segment_timing(
+                    trace_segment_timings,
+                    "layer",
+                    seq_len,
+                    start_layer,
+                    end_layer,
+                    i,
+                    "linear_attention",
+                    layer_start.elapsed(),
+                );
             }
         }
     }
@@ -34960,6 +35702,7 @@ mod tests {
             &mut stream_state.conv_states[0],
             tile,
             None,
+            None,
         )?;
 
         assert_eq!(mono_out.dims(), stream_out.dims());
@@ -35298,6 +36041,8 @@ mod tests {
             std::env::remove_var("KILN_STREAMING_PREFILL");
             std::env::remove_var("KILN_STREAMING_PREFILL_THRESHOLD_TOKENS");
             std::env::remove_var("KILN_STREAMING_TILE_TOKENS");
+            std::env::remove_var("KILN_TAPE_STREAMING_TILE_TOKENS");
+            std::env::remove_var("KILN_EXACT_GDN_BACKWARD_TILE_TOKENS");
             std::env::remove_var("KILN_STREAMING_LAST_TOKEN_LM_HEAD");
         }
         assert!(!streaming_prefill_enabled(), "default must be disabled");
@@ -35337,6 +36082,10 @@ mod tests {
             StreamingPrefillDeviceKind::Metal,
             STREAMING_PREFILL_METAL_DEFAULT_THRESHOLD
         ));
+        assert!(!streaming_prefill_default_for(
+            StreamingPrefillDeviceKind::Vulkan,
+            43_814
+        ));
         assert_eq!(
             streaming_prefill_threshold_tokens(),
             STREAMING_PREFILL_METAL_DEFAULT_THRESHOLD
@@ -35351,8 +36100,32 @@ mod tests {
             STREAMING_PREFILL_DEFAULT_TILE
         );
         assert_eq!(
+            streaming_tile_tokens_for(&Device::Cuda(0)),
+            STREAMING_PREFILL_CUDA_DEFAULT_TILE
+        );
+        assert_eq!(
             streaming_tile_tokens_for(&Device::Rocm(0)),
             STREAMING_PREFILL_ROCM_DEFAULT_TILE
+        );
+        assert_eq!(
+            streaming_tile_tokens_for(&Device::Vulkan(0)),
+            STREAMING_PREFILL_VULKAN_DEFAULT_TILE
+        );
+        assert_eq!(
+            tape_streaming_tile_tokens_for(&Device::Cuda(0)),
+            STREAMING_PREFILL_CUDA_TAPE_DEFAULT_TILE
+        );
+        assert_eq!(
+            tape_streaming_tile_tokens_for(&Device::Rocm(0)),
+            STREAMING_PREFILL_ROCM_TAPE_DEFAULT_TILE
+        );
+        assert_eq!(
+            tape_streaming_tile_tokens_for(&Device::Metal(0)),
+            STREAMING_PREFILL_METAL_TAPE_DEFAULT_TILE
+        );
+        assert_eq!(
+            tape_streaming_tile_tokens_for(&Device::Vulkan(0)),
+            STREAMING_PREFILL_VULKAN_TAPE_DEFAULT_TILE
         );
         assert!(streaming_last_token_lm_head(), "default must be true");
 
@@ -35414,10 +36187,30 @@ mod tests {
         }
         assert_eq!(streaming_tile_tokens(), 256);
         assert_eq!(streaming_tile_tokens_for(&Device::Cpu), 256);
+        assert_eq!(tape_streaming_tile_tokens_for(&Device::Cuda(0)), 256);
+
+        unsafe {
+            std::env::set_var("KILN_TAPE_STREAMING_TILE_TOKENS", "128");
+        }
+        assert_eq!(tape_streaming_tile_tokens_for(&Device::Cuda(0)), 128);
+
+        unsafe {
+            std::env::remove_var("KILN_TAPE_STREAMING_TILE_TOKENS");
+            std::env::set_var("KILN_EXACT_GDN_BACKWARD_TILE_TOKENS", "192");
+        }
+        assert_eq!(tape_streaming_tile_tokens_for(&Device::Cuda(0)), 192);
+
+        unsafe {
+            std::env::set_var("KILN_TAPE_STREAMING_TILE_TOKENS", "130");
+            std::env::set_var("KILN_EXACT_GDN_BACKWARD_TILE_TOKENS", "65");
+        }
+        assert_eq!(tape_streaming_tile_tokens_for(&Device::Cuda(0)), 256);
 
         // Bad value (not a multiple of GDN_CHUNK_SIZE) falls back to default.
         unsafe {
             std::env::set_var("KILN_STREAMING_TILE_TOKENS", "65");
+            std::env::remove_var("KILN_TAPE_STREAMING_TILE_TOKENS");
+            std::env::remove_var("KILN_EXACT_GDN_BACKWARD_TILE_TOKENS");
         }
         assert_eq!(streaming_tile_tokens(), STREAMING_PREFILL_DEFAULT_TILE);
 
@@ -35431,6 +36224,8 @@ mod tests {
         unsafe {
             std::env::remove_var("KILN_STREAMING_PREFILL");
             std::env::remove_var("KILN_STREAMING_TILE_TOKENS");
+            std::env::remove_var("KILN_TAPE_STREAMING_TILE_TOKENS");
+            std::env::remove_var("KILN_EXACT_GDN_BACKWARD_TILE_TOKENS");
             std::env::remove_var("KILN_STREAMING_LAST_TOKEN_LM_HEAD");
         }
     }

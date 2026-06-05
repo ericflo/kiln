@@ -149,6 +149,8 @@ pub type FlceProviderKt = Arc<dyn FlceMatmulProviderKt>;
 pub struct FlceActiveMetadata {
     active_idx: KtTensor,
     active_labels: Vec<u32>,
+    running_max: Option<KtTensor>,
+    running_sumexp: Option<KtTensor>,
 }
 
 /// kt-typed entry point for FLCE Phase B forward.
@@ -276,7 +278,7 @@ pub fn fused_linear_cross_entropy_phase_b_with_metadata_kt(
 
     let vocab_size = head_dims[1];
 
-    let Some(active_metadata) =
+    let Some(mut active_metadata) =
         build_flce_active_metadata(hidden, input_ids, label_mask, vocab_size, "kt-flce")?
     else {
         return Ok((zero_scalar()?, None));
@@ -464,6 +466,8 @@ pub fn fused_linear_cross_entropy_phase_b_with_metadata_kt(
     // Per-token loss = log_sum_exp - correct_logit. Mean over active rows.
     let per_token_loss = sub(&log_sum_exp, &correct_logit_1d).map_err(FlceError::Kt)?;
     let loss = mean_all(&per_token_loss).map_err(FlceError::Kt)?;
+    active_metadata.running_max = Some(running_max_1d);
+    active_metadata.running_sumexp = Some(running_sumexp_1d);
     Ok((loss, Some(active_metadata)))
 }
 
@@ -698,65 +702,133 @@ fn fused_linear_cross_entropy_phase_b_backward_impl_kt(
     let head_t_f32 = to_f32(head_t).map_err(FlceError::Kt)?;
 
     // -----------------------------------------------------------------
-    // Pass 1: recompute running_max + running_sumexp.
+    // Pass 1: use forward softmax stats when available, otherwise
+    // recompute running_max + running_sumexp.
     // -----------------------------------------------------------------
-    let mut running_max: Option<KtTensor> = None; // 1-D [num_active] F32
-    let mut running_sumexp: Option<KtTensor> = None; // 1-D [num_active] F32
-    let mut chunk_start = 0usize;
-    while chunk_start < vocab_size {
-        let chunk_len = chunk_size.min(vocab_size - chunk_start);
-        let head_chunk = head_t_f32
-            .narrow(1, chunk_start, chunk_len)
-            .map_err(FlceError::Kt)?
-            .contiguous()
-            .map_err(FlceError::Kt)?;
-        let logits_chunk = matmul(&active_hidden_f32, &head_chunk).map_err(FlceError::Kt)?;
-        let chunk_max_1d = max_axis(&logits_chunk, 1).map_err(FlceError::Kt)?;
-
-        let (new_max_1d, new_sumexp_1d) = match (running_max.as_ref(), running_sumexp.as_ref()) {
+    let (running_max_1d, running_sumexp_1d) =
+        match (
+            active_metadata.running_max.as_ref(),
+            active_metadata.running_sumexp.as_ref(),
+        ) {
+            (Some(saved_max), Some(saved_sumexp)) => {
+                if saved_max.dtype() != KtDType::F32 {
+                    return Err(FlceError::msg(format!(
+                        "kt-flce-bwd: saved running_max dtype {} != F32",
+                        saved_max.dtype()
+                    )));
+                }
+                if saved_sumexp.dtype() != KtDType::F32 {
+                    return Err(FlceError::msg(format!(
+                        "kt-flce-bwd: saved running_sumexp dtype {} != F32",
+                        saved_sumexp.dtype()
+                    )));
+                }
+                if saved_max.device() != device {
+                    return Err(FlceError::msg(format!(
+                        "kt-flce-bwd: saved running_max device {} != hidden device {}",
+                        saved_max.device().short_name(),
+                        device.short_name()
+                    )));
+                }
+                if saved_sumexp.device() != device {
+                    return Err(FlceError::msg(format!(
+                        "kt-flce-bwd: saved running_sumexp device {} != hidden device {}",
+                        saved_sumexp.device().short_name(),
+                        device.short_name()
+                    )));
+                }
+                if saved_max.shape() != [num_active] {
+                    return Err(FlceError::msg(format!(
+                        "kt-flce-bwd: saved running_max shape {:?} != [{num_active}]",
+                        saved_max.shape()
+                    )));
+                }
+                if saved_sumexp.shape() != [num_active] {
+                    return Err(FlceError::msg(format!(
+                        "kt-flce-bwd: saved running_sumexp shape {:?} != [{num_active}]",
+                        saved_sumexp.shape()
+                    )));
+                }
+                (saved_max.clone(), saved_sumexp.clone())
+            }
             (None, None) => {
-                let chunk_max_2d = chunk_max_1d
-                    .unsqueeze(1)
-                    .map_err(FlceError::Kt)?
-                    .contiguous()
-                    .map_err(FlceError::Kt)?;
-                let chunk_max_b = broadcast_to(&chunk_max_2d, &[num_active, chunk_len])
-                    .map_err(FlceError::Kt)?;
-                let shifted = sub(&logits_chunk, &chunk_max_b).map_err(FlceError::Kt)?;
-                let exped = exp(&shifted).map_err(FlceError::Kt)?;
-                let chunk_sumexp_1d = sum_axis(&exped, 1).map_err(FlceError::Kt)?;
-                (chunk_max_1d, chunk_sumexp_1d)
-            }
-            (Some(prev_max), Some(prev_sumexp)) => {
-                let new_max_1d = elementwise_max(prev_max, &chunk_max_1d)?;
-                let prev_scale_1d = exp(&sub(prev_max, &new_max_1d).map_err(FlceError::Kt)?)
-                    .map_err(FlceError::Kt)?;
-                let scaled_prev_1d = mul(prev_sumexp, &prev_scale_1d).map_err(FlceError::Kt)?;
-                let new_max_2d = new_max_1d
-                    .unsqueeze(1)
-                    .map_err(FlceError::Kt)?
-                    .contiguous()
-                    .map_err(FlceError::Kt)?;
-                let new_max_b = broadcast_to(&new_max_2d, &[num_active, chunk_len])
-                    .map_err(FlceError::Kt)?;
-                let shifted = sub(&logits_chunk, &new_max_b).map_err(FlceError::Kt)?;
-                let exped = exp(&shifted).map_err(FlceError::Kt)?;
-                let chunk_sumexp_1d = sum_axis(&exped, 1).map_err(FlceError::Kt)?;
-                let new_sumexp_1d =
-                    kiln_tensor::ops::add(&scaled_prev_1d, &chunk_sumexp_1d).map_err(FlceError::Kt)?;
-                (new_max_1d, new_sumexp_1d)
-            }
-            _ => unreachable!("running_max and running_sumexp are set together"),
-        };
-        running_max = Some(new_max_1d);
-        running_sumexp = Some(new_sumexp_1d);
-        chunk_start += chunk_len;
-    }
+                let mut running_max: Option<KtTensor> = None; // 1-D [num_active] F32
+                let mut running_sumexp: Option<KtTensor> = None; // 1-D [num_active] F32
+                let mut chunk_start = 0usize;
+                while chunk_start < vocab_size {
+                    let chunk_len = chunk_size.min(vocab_size - chunk_start);
+                    let head_chunk = head_t_f32
+                        .narrow(1, chunk_start, chunk_len)
+                        .map_err(FlceError::Kt)?
+                        .contiguous()
+                        .map_err(FlceError::Kt)?;
+                    let logits_chunk =
+                        matmul(&active_hidden_f32, &head_chunk).map_err(FlceError::Kt)?;
+                    let chunk_max_1d = max_axis(&logits_chunk, 1).map_err(FlceError::Kt)?;
 
-    let running_max_1d = running_max
-        .ok_or_else(|| FlceError::msg("kt-flce-bwd: vocab_size was 0"))?;
-    let running_sumexp_1d = running_sumexp
-        .ok_or_else(|| FlceError::msg("kt-flce-bwd: vocab_size was 0"))?;
+                    let (new_max_1d, new_sumexp_1d) =
+                        match (running_max.as_ref(), running_sumexp.as_ref()) {
+                            (None, None) => {
+                                let chunk_max_2d = chunk_max_1d
+                                    .unsqueeze(1)
+                                    .map_err(FlceError::Kt)?
+                                    .contiguous()
+                                    .map_err(FlceError::Kt)?;
+                                let chunk_max_b =
+                                    broadcast_to(&chunk_max_2d, &[num_active, chunk_len])
+                                        .map_err(FlceError::Kt)?;
+                                let shifted =
+                                    sub(&logits_chunk, &chunk_max_b).map_err(FlceError::Kt)?;
+                                let exped = exp(&shifted).map_err(FlceError::Kt)?;
+                                let chunk_sumexp_1d =
+                                    sum_axis(&exped, 1).map_err(FlceError::Kt)?;
+                                (chunk_max_1d, chunk_sumexp_1d)
+                            }
+                            (Some(prev_max), Some(prev_sumexp)) => {
+                                let new_max_1d = elementwise_max(prev_max, &chunk_max_1d)?;
+                                let prev_scale_1d =
+                                    exp(&sub(prev_max, &new_max_1d).map_err(FlceError::Kt)?)
+                                        .map_err(FlceError::Kt)?;
+                                let scaled_prev_1d =
+                                    mul(prev_sumexp, &prev_scale_1d).map_err(FlceError::Kt)?;
+                                let new_max_2d = new_max_1d
+                                    .unsqueeze(1)
+                                    .map_err(FlceError::Kt)?
+                                    .contiguous()
+                                    .map_err(FlceError::Kt)?;
+                                let new_max_b =
+                                    broadcast_to(&new_max_2d, &[num_active, chunk_len])
+                                        .map_err(FlceError::Kt)?;
+                                let shifted =
+                                    sub(&logits_chunk, &new_max_b).map_err(FlceError::Kt)?;
+                                let exped = exp(&shifted).map_err(FlceError::Kt)?;
+                                let chunk_sumexp_1d =
+                                    sum_axis(&exped, 1).map_err(FlceError::Kt)?;
+                                let new_sumexp_1d =
+                                    kiln_tensor::ops::add(&scaled_prev_1d, &chunk_sumexp_1d)
+                                        .map_err(FlceError::Kt)?;
+                                (new_max_1d, new_sumexp_1d)
+                            }
+                            _ => unreachable!("running_max and running_sumexp are set together"),
+                        };
+                    running_max = Some(new_max_1d);
+                    running_sumexp = Some(new_sumexp_1d);
+                    chunk_start += chunk_len;
+                }
+
+                (
+                    running_max
+                        .ok_or_else(|| FlceError::msg("kt-flce-bwd: vocab_size was 0"))?,
+                    running_sumexp
+                        .ok_or_else(|| FlceError::msg("kt-flce-bwd: vocab_size was 0"))?,
+                )
+            }
+            _ => {
+                return Err(FlceError::msg(
+                    "kt-flce-bwd: active metadata has incomplete saved softmax stats",
+                ));
+            }
+        };
 
     // -----------------------------------------------------------------
     // Pass 2: accumulate dhidden_active by chunk.
@@ -921,6 +993,8 @@ fn build_flce_active_metadata(
     Ok(Some(FlceActiveMetadata {
         active_idx,
         active_labels,
+        running_max: None,
+        running_sumexp: None,
     }))
 }
 
@@ -1468,6 +1542,14 @@ mod tests {
             fused_linear_cross_entropy_phase_b_with_metadata_kt(&hidden, &head, &ids, &mask, 4)
                 .unwrap();
         let metadata = metadata.expect("active metadata");
+        assert!(
+            metadata.running_max.is_some(),
+            "forward metadata should retain running max for unit-root backward"
+        );
+        assert!(
+            metadata.running_sumexp.is_some(),
+            "forward metadata should retain running sumexp for unit-root backward"
+        );
         let regular = fused_linear_cross_entropy_phase_b_backward_unit_grad_kt(
             &hidden, &head, &ids, &mask, 4,
         )

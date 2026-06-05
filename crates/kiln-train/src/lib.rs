@@ -51,6 +51,7 @@ pub mod pi_trajectory;
 pub mod receipt;
 pub mod remote_teacher;
 pub mod replay;
+pub mod sft_tape_shim;
 // CP-4 substrate pilot — `kiln_autograd::Tape`-based parallel training
 // entry. Sits alongside the candle-typed `trainer` module so future PRs
 // can extend it to cover the full per-step graph. See module docstring

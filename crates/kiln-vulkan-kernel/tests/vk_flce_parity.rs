@@ -15,7 +15,9 @@ use half::bf16;
 use kiln_vulkan_kernel::VulkanDevice;
 use kiln_vulkan_kernel::vk_autograd::vk_backward;
 use kiln_vulkan_kernel::vk_ops::flce::{
-    flce_recommended_chunk_len_from_limits, vk_flce_loss, vk_grpo_loss, vk_selected_log_probs,
+    flce_recommended_chunk_len_from_limits, vk_flce_loss,
+    vk_grpo_backward_with_saved_state, vk_grpo_loss, vk_grpo_loss_with_saved_state_ext,
+    vk_selected_log_probs, VK_GRPO_IS_MODE_CISPO, VK_GRPO_KL_MODE_K3,
 };
 use kiln_vulkan_kernel::vk_tensor::VkTensor;
 use std::sync::Arc;
@@ -184,6 +186,97 @@ fn cpu_selected_log_probs_and_grpo(
         }
     }
     (log_probs, loss_sum / num_active as f32, grad_hidden)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cpu_grpo_ext(
+    hidden: &[f32],
+    weight: &[f32],
+    labels: &[u32],
+    ref_log_probs: &[f32],
+    advantage: f32,
+    clip_low: f32,
+    clip_high: f32,
+    kl_coeff: f32,
+    kl_mode: u32,
+    is_mode: u32,
+    num_active: usize,
+    hidden_dim: usize,
+    vocab: usize,
+) -> (f32, Vec<f32>) {
+    let mut loss_sum = 0.0_f32;
+    let mut grad_hidden = vec![0.0_f32; num_active * hidden_dim];
+    for n in 0..num_active {
+        let mut logits = vec![0.0_f32; vocab];
+        for v in 0..vocab {
+            let mut s = 0.0_f32;
+            for d in 0..hidden_dim {
+                s += hidden[n * hidden_dim + d] * weight[v * hidden_dim + d];
+            }
+            logits[v] = s;
+        }
+        let mx = logits.iter().cloned().fold(f32::MIN, f32::max);
+        let mut z = 0.0_f32;
+        for v in 0..vocab {
+            z += (logits[v] - mx).exp();
+        }
+        let lse = mx + z.ln();
+        let label = labels[n] as usize;
+        let policy_logprob = logits[label] - lse;
+        let log_ratio = policy_logprob - ref_log_probs[n];
+        let ratio = log_ratio.exp();
+        let lo = 1.0 - clip_low;
+        let hi = 1.0 + clip_high;
+        let clipped_ratio = ratio.clamp(lo, hi);
+
+        let (kl_penalty, kl_grad) = match kl_mode {
+            1 => (kl_coeff * log_ratio, kl_coeff),
+            3 => {
+                let exp_neg = (-log_ratio).exp();
+                (
+                    kl_coeff * (exp_neg - 1.0 + log_ratio),
+                    kl_coeff * (1.0 - exp_neg),
+                )
+            }
+            _ => (0.0, 0.0),
+        };
+        let (loss, coeff) = match is_mode {
+            1 => {
+                let weight = clipped_ratio * advantage;
+                (-weight * policy_logprob, -weight)
+            }
+            2 => (-advantage, -advantage),
+            _ => {
+                let surr1 = ratio * advantage;
+                let surr2 = clipped_ratio * advantage;
+                let take_surr1 = surr1 <= surr2;
+                let surrogate = if take_surr1 { surr1 } else { surr2 };
+                let d_clipped = if ratio >= lo && ratio <= hi {
+                    ratio
+                } else {
+                    0.0
+                };
+                let d_surrogate = if take_surr1 {
+                    advantage * ratio
+                } else {
+                    advantage * d_clipped
+                };
+                (-surrogate, -d_surrogate)
+            }
+        };
+        loss_sum += loss + kl_penalty;
+
+        let coeff = coeff + kl_grad;
+        for v in 0..vocab {
+            let p = (logits[v] - mx).exp() / z;
+            let onehot = if v == label { 1.0 } else { 0.0 };
+            let g = coeff * (onehot - p) / num_active as f32;
+            for d in 0..hidden_dim {
+                grad_hidden[n * hidden_dim + d] += g * weight[v * hidden_dim + d];
+            }
+        }
+    }
+    (loss_sum / num_active as f32, grad_hidden)
 }
 
 /// Scalar GRPO loss as a pure function of `hidden`, matching the exact
@@ -461,6 +554,76 @@ fn vk_selected_logprob_and_grpo_parity_small() -> Result<()> {
         fd_mad < 2e-3,
         "grpo d_hidden vs finite-difference mad {fd_mad}"
     );
+    Ok(())
+}
+
+#[test]
+fn vk_grpo_ext_cispo_k3_asym_parity_small() -> Result<()> {
+    let Some(dev) = vk_dev() else { return Ok(()) };
+    let num_active = 4;
+    let hidden_dim = 7;
+    let vocab = 19;
+    let chunk = 5;
+    let h_data: Vec<f32> = (0..(num_active * hidden_dim))
+        .map(|i| ((i as f32) * 0.13).sin() * 0.22)
+        .collect();
+    let w_data: Vec<f32> = (0..(vocab * hidden_dim))
+        .map(|i| ((i as f32) * 0.021).cos() * 0.37)
+        .collect();
+    let labels: Vec<u32> = vec![3, 12, 0, 18];
+    let ref_log_probs = vec![-2.8_f32, -3.1, -2.3, -3.4];
+    let advantage = -0.65_f32;
+    let clip_low = 0.15_f32;
+    let clip_high = 0.35_f32;
+    let kl_coeff = 0.04_f32;
+
+    let hidden = upload_f32(&dev, &h_data, &[num_active, hidden_dim])?;
+    let weight = upload_f32(&dev, &w_data, &[vocab, hidden_dim])?;
+    let ref_vk = upload_f32(&dev, &ref_log_probs, &[num_active])?;
+    let (loss, saved) = vk_grpo_loss_with_saved_state_ext(
+        &hidden,
+        &weight,
+        &labels,
+        &ref_vk,
+        advantage,
+        clip_low,
+        clip_high,
+        kl_coeff,
+        VK_GRPO_KL_MODE_K3,
+        VK_GRPO_IS_MODE_CISPO,
+        chunk,
+    )?;
+    let grad_seed = upload_f32(&dev, &[1.0], &[1])?;
+    let grad_h = vk_grpo_backward_with_saved_state(&hidden, &saved, &grad_seed)?.to_vec_f32()?;
+
+    let (exp_loss, exp_dh) = cpu_grpo_ext(
+        &h_data,
+        &w_data,
+        &labels,
+        &ref_log_probs,
+        advantage,
+        clip_low,
+        clip_high,
+        kl_coeff,
+        VK_GRPO_KL_MODE_K3,
+        VK_GRPO_IS_MODE_CISPO,
+        num_active,
+        hidden_dim,
+        vocab,
+    );
+    let got_loss = loss.to_vec_f32()?[0];
+    assert!(
+        (got_loss - exp_loss).abs() < 1e-4,
+        "CISPO/K3 loss {} vs {}",
+        got_loss,
+        exp_loss
+    );
+    let mad = grad_h
+        .iter()
+        .zip(exp_dh.iter())
+        .map(|(g, e)| (g - e).abs())
+        .fold(0.0_f32, f32::max);
+    assert!(mad < 1e-4, "CISPO/K3 d_hidden mad {mad}");
     Ok(())
 }
 

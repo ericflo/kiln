@@ -4,11 +4,7 @@
 //! inputs[i]`. The gradient slices `d_out` along the concat axis back
 //! into per-input contiguous gradients of the original shapes.
 
-use std::sync::Arc;
-
-use kiln_tensor::{
-    bail, CpuStorage, DType, Error, Layout, Result, Storage, Tensor, TensorId,
-};
+use kiln_tensor::{bail, DType, Result, Tensor};
 
 use crate::BackwardOp;
 
@@ -65,7 +61,6 @@ impl BackwardOp for ConcatBackward {
         if !grad_output.is_contiguous() {
             bail!("ConcatBackward: grad must be contiguous");
         }
-        let per = dtype.size_in_bytes();
         let axis_total: usize = self.input_axis_sizes.iter().sum();
         if go_shape[self.axis] != axis_total {
             bail!(
@@ -74,37 +69,10 @@ impl BackwardOp for ConcatBackward {
             );
         }
 
-        let outer: usize = go_shape[..self.axis].iter().product::<usize>().max(1);
-        let inner: usize = go_shape[self.axis + 1..]
-            .iter()
-            .product::<usize>()
-            .max(1);
-
-        let go_cpu = grad_output
-            .storage()
-            .as_any()
-            .downcast_ref::<CpuStorage>()
-            .ok_or_else(|| Error::from_str("ConcatBackward: grad storage must be CpuStorage"))?;
-        let go_bytes = go_cpu.as_bytes();
-
         let mut grads: Vec<Option<Tensor>> = Vec::with_capacity(n);
         let mut axis_offset = 0usize;
-        for (i, &size_i) in self.input_axis_sizes.iter().enumerate() {
-            let mut bytes = vec![0u8; outer * size_i * inner * per];
-            for o in 0..outer {
-                let src_start = (o * axis_total + axis_offset) * inner * per;
-                let src_end = src_start + size_i * inner * per;
-                let dst_start = o * size_i * inner * per;
-                let dst_end = dst_start + size_i * inner * per;
-                bytes[dst_start..dst_end].copy_from_slice(&go_bytes[src_start..src_end]);
-            }
-            let cpu = CpuStorage::from_bytes(dtype, bytes)?;
-            let storage: Storage = Arc::new(cpu);
-            let g = Tensor::from_parts(
-                storage,
-                Layout::contiguous(self.input_shapes[i].clone()),
-                TensorId::next(),
-            )?;
+        for &size_i in &self.input_axis_sizes {
+            let g = grad_output.narrow(self.axis, axis_offset, size_i)?.contiguous()?;
             grads.push(Some(g));
             axis_offset += size_i;
         }
@@ -120,11 +88,7 @@ mod tests {
     use super::*;
 
     fn read_f32(t: &Tensor) -> Vec<f32> {
-        let cpu = t.storage().as_any().downcast_ref::<CpuStorage>().unwrap();
-        cpu.as_bytes()
-            .chunks(4)
-            .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
-            .collect()
+        t.to_vec::<f32>().unwrap()
     }
 
     #[test]

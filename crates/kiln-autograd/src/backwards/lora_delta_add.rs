@@ -107,14 +107,31 @@ impl BackwardOp for LoraDeltaAddBackward {
         4
     }
     fn apply(&self, grad_output: &Tensor) -> Result<Vec<Option<Tensor>>> {
+        let target_device = grad_output.device();
+        let x = if self.x.device() == target_device {
+            self.x.clone()
+        } else {
+            self.x.to_device(target_device)?
+        };
+        let a = if self.a.device() == target_device {
+            self.a.clone()
+        } else {
+            self.a.to_device(target_device)?
+        };
+        let b = if self.b.device() == target_device {
+            self.b.clone()
+        } else {
+            self.b.to_device(target_device)?
+        };
+
         // ---- shape validation ----------------------------------------
-        if self.x.rank() != 2 || self.a.rank() != 2 || self.b.rank() != 2 {
+        if x.rank() != 2 || a.rank() != 2 || b.rank() != 2 {
             bail!(
                 "LoraDeltaAddBackward: x/A/B must all be rank-2; got \
                  x.rank={}, a.rank={}, b.rank={}",
-                self.x.rank(),
-                self.a.rank(),
-                self.b.rank()
+                x.rank(),
+                a.rank(),
+                b.rank()
             );
         }
         if grad_output.rank() != 2 {
@@ -124,9 +141,9 @@ impl BackwardOp for LoraDeltaAddBackward {
                 grad_output.rank()
             );
         }
-        let (rows, in_features) = (self.x.shape()[0], self.x.shape()[1]);
-        let (rank, a_in) = (self.a.shape()[0], self.a.shape()[1]);
-        let (out_features, b_rank) = (self.b.shape()[0], self.b.shape()[1]);
+        let (rows, in_features) = (x.shape()[0], x.shape()[1]);
+        let (rank, a_in) = (a.shape()[0], a.shape()[1]);
+        let (out_features, b_rank) = (b.shape()[0], b.shape()[1]);
         if a_in != in_features {
             bail!(
                 "LoraDeltaAddBackward: A.in_features {a_in} != x.in_features {in_features}"
@@ -149,21 +166,21 @@ impl BackwardOp for LoraDeltaAddBackward {
         //
         // Recompute h = x @ A^T.  (A^T = transpose then contiguous; the
         // transpose is zero-copy.)
-        let a_t = self.a.transpose(0, 1)?.contiguous()?; // [in_features, rank]
-        let h = matmul(&self.x, &a_t)?; // [rows, rank]
+        let a_t = a.transpose(0, 1)?.contiguous()?; // [in_features, rank]
+        let h = matmul(&x, &a_t)?; // [rows, rank]
 
         // grad_d = scale * grad_out.  Single elementwise pass.
         let g_scaled = mul_scalar(grad_output, self.scale)?; // [rows, out_features]
 
         // grad_h = grad_d @ B  (B is [out_features, rank]).
-        let grad_h = matmul(&g_scaled, &self.b)?; // [rows, rank]
+        let grad_h = matmul(&g_scaled, &b)?; // [rows, rank]
 
         // grad_x = grad_h @ A  (A is [rank, in_features]).
-        let grad_x = matmul(&grad_h, &self.a)?; // [rows, in_features]
+        let grad_x = matmul(&grad_h, &a)?; // [rows, in_features]
 
         // grad_A = grad_h^T @ x  (shape [rank, in_features]).
         let grad_h_t = grad_h.transpose(0, 1)?.contiguous()?; // [rank, rows]
-        let grad_a = matmul(&grad_h_t, &self.x)?; // [rank, in_features]
+        let grad_a = matmul(&grad_h_t, &x)?; // [rank, in_features]
 
         // grad_B = grad_d^T @ h  (shape [out_features, rank]).
         let g_scaled_t = g_scaled.transpose(0, 1)?.contiguous()?; // [out_features, rows]

@@ -27,8 +27,10 @@ use crate::{
     kiln_gdn_decode_qk_norm_gates_recurrent_rmsnorm_vf32_bf16,
     kiln_gdn_chunk_prep, kiln_gdn_chunk_scan, kiln_gdn_decode_qk_norm_gates_recurrent_vf32_bf16,
     kiln_gdn_forward_substitution, kiln_gdn_full_chunk_forward,
-    kiln_gdn_full_chunk_forward_multiblock, kiln_gdn_gated_rms_norm_bf16, kiln_gdn_gates_bf16,
-    kiln_gdn_gates_bf16_f32_bf16_params, kiln_gdn_gates_bf16_f32_params, kiln_gdn_recurrent_forward,
+    kiln_gdn_full_chunk_forward_multiblock, kiln_gdn_gated_rms_norm_bf16,
+    kiln_gdn_gated_rms_norm_bwd_bf16, kiln_gdn_gates_bf16,
+    kiln_gdn_gates_bf16_f32_bf16_params, kiln_gdn_gates_bf16_f32_params,
+    kiln_gdn_l2_norm_scale_bwd_bf16, kiln_gdn_recurrent_forward,
 };
 
 #[derive(Debug)]
@@ -1658,6 +1660,155 @@ pub fn gdn_gated_rms_norm_bf16_kt(
     Ok(out)
 }
 
+/// Fused BF16 backward for [`gdn_gated_rms_norm_bf16_kt`].
+///
+/// Inputs are BF16 `[rows, 128]` for `grad_out`, `x`, `z`, and BF16 `[128]`
+/// for `weight`. Returns BF16 `dx`/`dz` and F32 `dw` accumulated across rows.
+#[cfg(any(feature = "cuda", feature = "rocm"))]
+pub struct GdnGatedRmsNormBwdKt {
+    pub dx: KtTensor,
+    pub dz: KtTensor,
+    pub dw: KtTensor,
+}
+
+#[cfg(any(feature = "cuda", feature = "rocm"))]
+pub fn gdn_gated_rms_norm_bwd_bf16_kt(
+    grad_out: &KtTensor,
+    x: &KtTensor,
+    z: &KtTensor,
+    weight: &KtTensor,
+    eps: f32,
+) -> Result<GdnGatedRmsNormBwdKt, GdnError> {
+    let x_shape = x.shape();
+    if x_shape.len() != 2 {
+        return Err(GdnError::Msg(format!(
+            "kt-gdn: gated-rmsnorm-bwd x must be [rows, hidden], got {x_shape:?}"
+        )));
+    }
+    let (rows, hidden) = (x_shape[0], x_shape[1]);
+    if z.shape() != x_shape {
+        return Err(GdnError::Msg(format!(
+            "kt-gdn: gated-rmsnorm-bwd z {:?} != x {x_shape:?}",
+            z.shape()
+        )));
+    }
+    if grad_out.shape() != x_shape {
+        return Err(GdnError::Msg(format!(
+            "kt-gdn: gated-rmsnorm-bwd grad_out {:?} != x {x_shape:?}",
+            grad_out.shape()
+        )));
+    }
+    if weight.shape() != [hidden] {
+        return Err(GdnError::Msg(format!(
+            "kt-gdn: gated-rmsnorm-bwd weight {:?} != [{hidden}]",
+            weight.shape()
+        )));
+    }
+
+    let go_ptr = kiln_kt_bridge::device_input_ptr(grad_out, KtDType::BF16, "grad_out")?;
+    let (go_st, _) = cuda_storage_and_byte_offset(grad_out, KtDType::BF16, "grad_out")?;
+    let x_ptr = kiln_kt_bridge::device_input_ptr(x, KtDType::BF16, "x")?;
+    let _ = cuda_storage_and_byte_offset(x, KtDType::BF16, "x")?;
+    let z_ptr = kiln_kt_bridge::device_input_ptr(z, KtDType::BF16, "z")?;
+    let _ = cuda_storage_and_byte_offset(z, KtDType::BF16, "z")?;
+    let w_ptr = kiln_kt_bridge::device_input_ptr(weight, KtDType::BF16, "weight")?;
+    let _ = cuda_storage_and_byte_offset(weight, KtDType::BF16, "weight")?;
+
+    let dx = alloc_cuda_tensor(go_st, KtDType::BF16, vec![rows, hidden])?;
+    let dz = alloc_cuda_tensor(go_st, KtDType::BF16, vec![rows, hidden])?;
+    let dw = alloc_cuda_tensor(go_st, KtDType::F32, vec![hidden])?;
+    let dx_ptr = kiln_kt_bridge::device_output_ptr(&dx);
+    let dz_ptr = kiln_kt_bridge::device_output_ptr(&dz);
+    let dw_ptr = kiln_kt_bridge::device_output_ptr(&dw);
+
+    #[cfg(feature = "cuda")]
+    let raw_stream = device_stream_raw(go_st, "grad_out")?;
+    #[cfg(feature = "rocm")]
+    let raw_stream = output_stream_raw(&dx)?;
+    let status = unsafe {
+        kiln_gdn_gated_rms_norm_bwd_bf16(
+            go_ptr as *const _,
+            x_ptr as *const _,
+            z_ptr as *const _,
+            w_ptr as *const _,
+            dx_ptr as *mut _,
+            dz_ptr as *mut _,
+            dw_ptr as *mut _,
+            rows as i32,
+            hidden as i32,
+            eps,
+            raw_stream,
+        )
+    };
+    if status != 0 {
+        return Err(GdnError::Msg(format!(
+            "kt-gdn: gated_rms_norm_bwd FFI returned {status}"
+        )));
+    }
+    #[cfg(feature = "rocm")]
+    device_synchronize_after_launch(&dx)?;
+    Ok(GdnGatedRmsNormBwdKt { dx, dz, dw })
+}
+
+/// Fused BF16 backward for the GDN q/k L2 norm scale op.
+///
+/// Inputs are BF16 `[rows, 128]` for `grad_out` and `x`. Returns BF16
+/// `[rows, 128]` for `dx`.
+#[cfg(any(feature = "cuda", feature = "rocm"))]
+pub fn gdn_l2_norm_scale_bwd_bf16_kt(
+    grad_out: &KtTensor,
+    x: &KtTensor,
+    scale: f32,
+    eps: f32,
+) -> Result<KtTensor, GdnError> {
+    let x_shape = x.shape();
+    if x_shape.len() != 2 {
+        return Err(GdnError::Msg(format!(
+            "kt-gdn: l2-norm-scale-bwd x must be [rows, hidden], got {x_shape:?}"
+        )));
+    }
+    let (rows, hidden) = (x_shape[0], x_shape[1]);
+    if grad_out.shape() != x_shape {
+        return Err(GdnError::Msg(format!(
+            "kt-gdn: l2-norm-scale-bwd grad_out {:?} != x {x_shape:?}",
+            grad_out.shape()
+        )));
+    }
+
+    let go_ptr = kiln_kt_bridge::device_input_ptr(grad_out, KtDType::BF16, "grad_out")?;
+    let (go_st, _) = cuda_storage_and_byte_offset(grad_out, KtDType::BF16, "grad_out")?;
+    let x_ptr = kiln_kt_bridge::device_input_ptr(x, KtDType::BF16, "x")?;
+    let _ = cuda_storage_and_byte_offset(x, KtDType::BF16, "x")?;
+
+    let dx = alloc_cuda_tensor(go_st, KtDType::BF16, vec![rows, hidden])?;
+    let dx_ptr = kiln_kt_bridge::device_output_ptr(&dx);
+
+    #[cfg(feature = "cuda")]
+    let raw_stream = device_stream_raw(go_st, "grad_out")?;
+    #[cfg(feature = "rocm")]
+    let raw_stream = output_stream_raw(&dx)?;
+    let status = unsafe {
+        kiln_gdn_l2_norm_scale_bwd_bf16(
+            go_ptr as *const _,
+            x_ptr as *const _,
+            dx_ptr as *mut _,
+            rows as i32,
+            hidden as i32,
+            scale,
+            eps,
+            raw_stream,
+        )
+    };
+    if status != 0 {
+        return Err(GdnError::Msg(format!(
+            "kt-gdn: l2_norm_scale_bwd FFI returned {status}"
+        )));
+    }
+    #[cfg(feature = "rocm")]
+    device_synchronize_after_launch(&dx)?;
+    Ok(dx)
+}
+
 /// Shared shape/dtype check for the gates family. Returns
 /// `(rows, nv, out_shape)`.
 fn gates_validate_inputs(
@@ -2643,6 +2794,30 @@ pub fn gdn_gated_rms_norm_supports_kt(x: &KtTensor, z: &KtTensor, weight: &KtTen
         None => return false,
     };
     hidden == 128 && weight.shape() == [hidden]
+}
+
+#[cfg(any(feature = "cuda", feature = "rocm"))]
+pub fn gdn_gated_rms_norm_bwd_supports_kt(
+    grad_out: &KtTensor,
+    x: &KtTensor,
+    z: &KtTensor,
+    weight: &KtTensor,
+) -> bool {
+    gdn_gated_rms_norm_supports_kt(x, z, weight)
+        && grad_out.dtype() == KtDType::BF16
+        && grad_out.shape() == x.shape()
+        && grad_out.device() == x.device()
+}
+
+#[cfg(any(feature = "cuda", feature = "rocm"))]
+pub fn gdn_l2_norm_scale_bwd_supports_kt(grad_out: &KtTensor, x: &KtTensor) -> bool {
+    let shape = x.shape();
+    x.dtype() == KtDType::BF16
+        && grad_out.dtype() == KtDType::BF16
+        && grad_out.shape() == shape
+        && grad_out.device() == x.device()
+        && shape.len() == 2
+        && shape[1] == 128
 }
 
 #[cfg(test)]

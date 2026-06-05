@@ -958,6 +958,39 @@ impl PagedKvCacheKt {
                 .map_err(|e| anyhow::anyhow!("kt pkv read: narrow v: {e}"))?;
             (k, v)
         } else {
+            let gather_index_select = || -> Result<(KtTensor, KtTensor)> {
+                // Gather path: build the slot indices directly on the pool
+                // device so `index_select` can stay backend-local. Metal in
+                // particular requires the index tensor to be Metal-resident;
+                // using a CPU index against Metal K/V pools trips dispatch2's
+                // mixed-device guard before its Metal gather kernel can run.
+                let mut idx_data: Vec<u32> = Vec::with_capacity(seq_len);
+                for pos in 0..seq_len {
+                    let slot = block_table.slot_for(pos, self.block_size).ok_or_else(|| {
+                        anyhow::anyhow!("kt pkv read: no slot for position {pos} in block table")
+                    })?;
+                    let slot_u32 = u32::try_from(slot)
+                        .map_err(|_| anyhow::anyhow!("kt pkv read: slot {slot} exceeds u32"))?;
+                    idx_data.push(slot_u32);
+                }
+
+                let kt_indices =
+                    kiln_tensor::Tensor::from_vec_on(k_pool.device(), idx_data, vec![seq_len])
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "kt pkv read: build indices on {}: {e}",
+                                k_pool.device()
+                            )
+                        })?;
+                let k = k_pool
+                    .index_select(&kt_indices, 0)
+                    .map_err(|e| anyhow::anyhow!("kt pkv read: index_select k_pool: {e}"))?;
+                let v = v_pool
+                    .index_select(&kt_indices, 0)
+                    .map_err(|e| anyhow::anyhow!("kt pkv read: index_select v_pool: {e}"))?;
+                Ok((k, v))
+            };
+
             #[cfg(feature = "rocm")]
             if matches!(k_pool.device(), kiln_tensor::Device::Rocm(_)) {
                 let table_width = block_table.blocks.len();
@@ -989,36 +1022,11 @@ impl PagedKvCacheKt {
                 .map_err(|e| anyhow::anyhow!("kt pkv read: ROCm paged gather v_pool: {e}"))?;
                 (k, v)
             } else {
-                // Gather path: build the slot indices directly on the pool
-                // device so `index_select` can stay backend-local. Metal in
-                // particular requires the index tensor to be Metal-resident;
-                // using a CPU index against Metal K/V pools trips dispatch2's
-                // mixed-device guard before its Metal gather kernel can run.
-                let mut idx_data: Vec<u32> = Vec::with_capacity(seq_len);
-                for pos in 0..seq_len {
-                    let slot = block_table.slot_for(pos, self.block_size).ok_or_else(|| {
-                        anyhow::anyhow!("kt pkv read: no slot for position {pos} in block table")
-                    })?;
-                    let slot_u32 = u32::try_from(slot)
-                        .map_err(|_| anyhow::anyhow!("kt pkv read: slot {slot} exceeds u32"))?;
-                    idx_data.push(slot_u32);
-                }
-
-                let kt_indices =
-                    kiln_tensor::Tensor::from_vec_on(k_pool.device(), idx_data, vec![seq_len])
-                        .map_err(|e| {
-                            anyhow::anyhow!(
-                                "kt pkv read: build indices on {}: {e}",
-                                k_pool.device()
-                            )
-                        })?;
-                let k = k_pool
-                    .index_select(&kt_indices, 0)
-                    .map_err(|e| anyhow::anyhow!("kt pkv read: index_select k_pool: {e}"))?;
-                let v = v_pool
-                    .index_select(&kt_indices, 0)
-                    .map_err(|e| anyhow::anyhow!("kt pkv read: index_select v_pool: {e}"))?;
-                (k, v)
+                gather_index_select()?
+            }
+            #[cfg(not(feature = "rocm"))]
+            {
+                gather_index_select()?
             }
         };
 

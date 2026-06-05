@@ -104,9 +104,9 @@
 
 use anyhow::{Context, Result};
 use kiln_autograd::{
-    AddBackward, BackwardOp, CrossEntropyKtBackward, EmbeddingBackward, LoraDeltaAddBackward,
-    MatmulBackward, MulBackward, MulSigmoidGateBackward, ReshapeBackward, RopeSplitHalfBackward,
-    SiluBackward, Tape, TransposeBackward,
+    AddBackward, BackwardOp, ConcatBackward, CrossEntropyKtBackward, EmbeddingBackward,
+    LoraDeltaAddBackward, MatmulBackward, MulBackward, MulSigmoidGateBackward, ReshapeBackward,
+    RopeSplitHalfBackward, SiluBackward, Tape, TransposeBackward,
 };
 
 use crate::backend::BackendRuntime;
@@ -188,6 +188,79 @@ pub fn try_tape_add_kt(
         Some(result) => Ok(Some(result?)),
         None => Ok(None),
     }
+}
+
+pub fn try_tape_concat_kt(
+    inputs: &[&kiln_tensor::Tensor],
+    axis: usize,
+    out: &kiln_tensor::Tensor,
+) -> Result<Option<kiln_tensor::Tensor>> {
+    if !tape_forward_enabled() || inputs.is_empty() || axis >= out.rank() {
+        return Ok(None);
+    }
+    if !matches!(
+        out.device(),
+        kiln_tensor::Device::Cuda(_)
+            | kiln_tensor::Device::Metal(_)
+            | kiln_tensor::Device::Vulkan(_)
+            | kiln_tensor::Device::Rocm(_)
+    ) {
+        return Ok(None);
+    }
+
+    let dtype = inputs[0].dtype();
+    if dtype != out.dtype() {
+        return Ok(None);
+    }
+    let rank = out.rank();
+    let mut axis_total = 0usize;
+    let mut input_axis_sizes = Vec::with_capacity(inputs.len());
+    let mut input_shapes = Vec::with_capacity(inputs.len());
+    for input in inputs {
+        if !matches!(
+            input.device(),
+            kiln_tensor::Device::Cuda(_)
+                | kiln_tensor::Device::Metal(_)
+                | kiln_tensor::Device::Vulkan(_)
+                | kiln_tensor::Device::Rocm(_)
+        ) || input.dtype() != dtype
+            || input.rank() != rank
+        {
+            return Ok(None);
+        }
+        let dims = input.dims();
+        if axis >= dims.len() {
+            return Ok(None);
+        }
+        for (dim_idx, (&input_dim, &out_dim)) in dims.iter().zip(out.dims()).enumerate() {
+            if dim_idx != axis && input_dim != out_dim {
+                return Ok(None);
+            }
+        }
+        axis_total = axis_total.saturating_add(dims[axis]);
+        input_axis_sizes.push(dims[axis]);
+        input_shapes.push(dims.to_vec());
+    }
+    if out.dims()[axis] != axis_total {
+        return Ok(None);
+    }
+
+    let recorded = with_active_tape(|tape: &mut Tape| {
+        tape.record(
+            out,
+            inputs,
+            Box::new(ConcatBackward {
+                axis,
+                input_axis_sizes,
+                input_shapes,
+                dtype,
+            }),
+        );
+    });
+    if recorded.is_none() {
+        return Ok(None);
+    }
+    Ok(Some(out.clone()))
 }
 
 /// kt-native split-half RoPE tape recorder (#1082 seam flip) — the kt-native RoPE tape recorder. Records `RopeSplitHalfBackward` directly from kt inputs,
@@ -416,11 +489,13 @@ pub fn try_tape_matmul_kt(
     }
     match with_active_tape(|tape: &mut Tape| -> Result<_> {
         let y = kiln_tensor::ops::matmul(a, b).map_err(|e| anyhow::anyhow!("kt matmul: {e}"))?;
+        let saved_a = maybe_offload_matmul_a_saved_tensor(a)
+            .context("try_tape_matmul_kt: save matmul lhs")?;
         tape.record(
             &y,
             &[a, b],
             Box::new(MatmulBackward {
-                a: a.clone(),
+                a: saved_a,
                 b: b.clone(),
             }),
         );
@@ -1405,7 +1480,8 @@ pub fn try_tape_lora_linear_kt(
                 &base2d,
                 &[&x2d, weight_t],
                 Box::new(MatmulBackward {
-                    a: x2d.clone(),
+                    a: maybe_offload_matmul_a_saved_tensor(&x2d)
+                        .context("try_tape_lora_linear_kt: save base matmul lhs")?,
                     b: weight_t.clone(),
                 }),
             );
@@ -1435,7 +1511,8 @@ pub fn try_tape_lora_linear_kt(
                     &out2d,
                     &[&base2d, &x2d, a_kt, b_kt],
                     Box::new(LoraDeltaAddBackward {
-                        x: x2d.clone(),
+                        x: maybe_offload_matmul_a_saved_tensor(&x2d)
+                            .context("try_tape_lora_linear_kt: save lora input")?,
                         a: a_kt.clone(),
                         b: b_kt.clone(),
                         scale: lora_scale,
@@ -1763,6 +1840,97 @@ pub fn tape_gdn_enabled() -> bool {
     })
 }
 
+/// Offload saved GDN recurrence tensors from the tape node to CPU memory.
+///
+/// The recorded input ids remain the original device tensors, so gradient
+/// chaining is unchanged. Only the values captured by `GdnRecurrentBackward`
+/// are moved off the accelerator and uploaded back one node at a time during
+/// backward. This trades bandwidth for much lower long-context tape residency.
+fn tape_gdn_saved_tensor_offload_enabled(device: &kiln_tensor::Device) -> bool {
+    static OVERRIDE: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
+    if let Some(value) = *OVERRIDE.get_or_init(|| {
+        std::env::var("KILN_TAPE_GDN_OFFLOAD_SAVED_TENSORS")
+            .ok()
+            .map(|v| {
+                let v = v.trim().to_lowercase();
+                !(v.is_empty() || v == "0" || v == "false" || v == "no")
+            })
+    }) {
+        return value;
+    }
+
+    let _ = device;
+    false
+}
+
+fn maybe_offload_gdn_saved_tensor(
+    t: &kiln_tensor::Tensor,
+    offload: bool,
+) -> kiln_tensor::Result<kiln_tensor::Tensor> {
+    if offload && should_offload_saved_tensor(t) {
+        t.to_device(kiln_tensor::Device::Cpu)
+    } else {
+        Ok(t.clone())
+    }
+}
+
+fn saved_tensor_for_device(
+    t: &kiln_tensor::Tensor,
+    device: kiln_tensor::Device,
+) -> kiln_tensor::Result<kiln_tensor::Tensor> {
+    if t.device() == device {
+        Ok(t.clone())
+    } else {
+        t.to_device(device)
+    }
+}
+
+fn tape_saved_tensor_offload_min_bytes() -> usize {
+    static MIN_BYTES: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *MIN_BYTES.get_or_init(|| {
+        std::env::var("KILN_TAPE_OFFLOAD_MIN_BYTES")
+            .ok()
+            .and_then(|s| s.trim().parse::<usize>().ok())
+            .unwrap_or(1 << 20)
+    })
+}
+
+fn saved_tensor_bytes(t: &kiln_tensor::Tensor) -> usize {
+    t.dtype().size_in_bytes().saturating_mul(t.element_count())
+}
+
+fn should_offload_saved_tensor(t: &kiln_tensor::Tensor) -> bool {
+    !matches!(t.device(), kiln_tensor::Device::Cpu)
+        && saved_tensor_bytes(t) >= tape_saved_tensor_offload_min_bytes()
+}
+
+fn tape_matmul_a_offload_enabled(device: &kiln_tensor::Device) -> bool {
+    static OVERRIDE: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
+    if let Some(value) = *OVERRIDE.get_or_init(|| {
+        std::env::var("KILN_TAPE_OFFLOAD_MATMUL_A")
+            .ok()
+            .map(|v| {
+                let v = v.trim().to_lowercase();
+                !(v.is_empty() || v == "0" || v == "false" || v == "no")
+            })
+    }) {
+        return value;
+    }
+
+    let _ = device;
+    false
+}
+
+fn maybe_offload_matmul_a_saved_tensor(
+    t: &kiln_tensor::Tensor,
+) -> kiln_tensor::Result<kiln_tensor::Tensor> {
+    if tape_matmul_a_offload_enabled(&t.device()) && should_offload_saved_tensor(t) {
+        t.to_device(kiln_tensor::Device::Cpu)
+    } else {
+        Ok(t.clone())
+    }
+}
+
 /// Tape backward for the GDN (Gated DeltaNet linear-attention) recurrence.
 ///
 /// # Why a composite wrap (not a kt BackwardOp in kiln-autograd)
@@ -1887,10 +2055,10 @@ impl BackwardOp for GdnRecurrentBackward {
         };
         let backend = crate::backend::for_device_kt(&compute_dev);
         let mv = |t: &kiln_tensor::Tensor| -> kiln_tensor::Result<kiln_tensor::Tensor> {
-            if on_vulkan {
-                t.to_device(kiln_tensor::Device::Cpu)
-            } else {
+            if t.device() == compute_dev {
                 Ok(t.clone())
+            } else {
+                t.to_device(compute_dev)
             }
         };
         let (q_c, k_c, v_c, beta_c, g_c, entry_c, grad_c) = (
@@ -2043,25 +2211,46 @@ pub fn tape_record_gdn_recurrent_kt(
         return Ok(false);
     }
 
-    let recorded = with_active_tape(|tape: &mut Tape| {
+    let recorded = with_active_tape(|tape: &mut Tape| -> Result<()> {
+        let offload_saved = tape_gdn_saved_tensor_offload_enabled(device);
+        let saved_q = maybe_offload_gdn_saved_tensor(q, offload_saved)
+            .context("tape_record_gdn_recurrent_kt: save q")?;
+        let saved_k = maybe_offload_gdn_saved_tensor(k, offload_saved)
+            .context("tape_record_gdn_recurrent_kt: save k")?;
+        let saved_v = maybe_offload_gdn_saved_tensor(v, offload_saved)
+            .context("tape_record_gdn_recurrent_kt: save v")?;
+        let saved_beta = maybe_offload_gdn_saved_tensor(beta, offload_saved)
+            .context("tape_record_gdn_recurrent_kt: save beta")?;
+        let saved_g = maybe_offload_gdn_saved_tensor(g, offload_saved)
+            .context("tape_record_gdn_recurrent_kt: save g")?;
+        let saved_entry_state = maybe_offload_gdn_saved_tensor(entry_state, offload_saved)
+            .context("tape_record_gdn_recurrent_kt: save entry_state")?;
+
         tape.record(
             out_kt,
             &[q, k, v, beta, g],
             Box::new(GdnRecurrentBackward {
-                q: q.clone(),
-                k: k.clone(),
-                v: v.clone(),
-                beta: beta.clone(),
-                g: g.clone(),
-                entry_state: entry_state.clone(),
+                q: saved_q,
+                k: saved_k,
+                v: saved_v,
+                beta: saved_beta,
+                g: saved_g,
+                entry_state: saved_entry_state,
                 device: *device,
                 chunk_size: GDN_CHUNK_SIZE,
                 head_last_output: head_last,
             }),
         );
+        Ok(())
     });
     // `Some(())` => a tape scope was active and the node was recorded.
-    Ok(recorded.is_some())
+    match recorded {
+        Some(result) => {
+            result?;
+            Ok(true)
+        }
+        None => Ok(false),
+    }
 }
 
 // ===========================================================================
@@ -2311,6 +2500,70 @@ fn conv1d_bwd_input_rows_dispatch(
     causal_depthwise_conv1d_bwd_input_composite(grad_rows, weight, kernel)
 }
 
+fn causal_conv1d_prefill_linear_from_state_kt(
+    input: &kiln_tensor::Tensor,
+    weight: &kiln_tensor::Tensor,
+    entry_state: &kiln_tensor::Tensor,
+    kernel: usize,
+) -> kiln_tensor::Result<kiln_tensor::Tensor> {
+    let (batch, channels, seq_len) = input.dims3()?;
+    if kernel < 2 {
+        return Err(kiln_tensor::Error::Msg(format!(
+            "causal_conv1d_prefill_linear_from_state_kt: kernel {kernel} must be >= 2"
+        )));
+    }
+    if entry_state.dims() != [batch, channels, kernel - 1] {
+        return Err(kiln_tensor::Error::Msg(format!(
+            "causal_conv1d_prefill_linear_from_state_kt: entry_state shape {:?} != [{batch}, {channels}, {}]",
+            entry_state.dims(),
+            kernel - 1
+        )));
+    }
+    let weight_2d = match weight.rank() {
+        2 if weight.dims() == [channels, kernel] => weight.clone(),
+        3 if weight.dims() == [channels, 1, kernel] => {
+            weight.reshape(vec![channels, kernel])?
+        }
+        _ => {
+            return Err(kiln_tensor::Error::Msg(format!(
+                "causal_conv1d_prefill_linear_from_state_kt: weight shape {:?} incompatible with [{channels}, {kernel}]",
+                weight.dims()
+            )));
+        }
+    };
+
+    let input_f32 = input.to_dtype(kiln_tensor::DType::F32)?;
+    let state_f32 = entry_state.to_dtype(kiln_tensor::DType::F32)?;
+    let weight_f32 = weight_2d.to_dtype(kiln_tensor::DType::F32)?;
+    let x_padded = kiln_tensor::Tensor::cat(&[&state_f32, &input_f32], 2)?;
+    let mut output = kiln_tensor::Tensor::zeros(
+        vec![batch, channels, seq_len],
+        kiln_tensor::DType::F32,
+        input.device(),
+    )?;
+    for j in 0..kernel {
+        let x_slice = x_padded.narrow(2, j, seq_len)?;
+        let w_j = weight_f32.narrow(1, j, 1)?.unsqueeze(0)?;
+        output = kiln_tensor::ops::add(&output, &x_slice.broadcast_mul(&w_j)?)?;
+    }
+    Ok(output)
+}
+
+fn silu_backward_from_input_kt(
+    x: &kiln_tensor::Tensor,
+    grad_output: &kiln_tensor::Tensor,
+) -> kiln_tensor::Result<kiln_tensor::Tensor> {
+    let x_f32 = x.to_dtype(kiln_tensor::DType::F32)?;
+    let dy_f32 = grad_output.to_dtype(kiln_tensor::DType::F32)?;
+    let sigmoid = kiln_tensor::ops::sigmoid(&x_f32)?;
+    let one_minus_sigmoid =
+        kiln_tensor::ops::add_scalar(&kiln_tensor::ops::mul_scalar(&sigmoid, -1.0)?, 1.0)?;
+    let sigmoid_grad = kiln_tensor::ops::mul(&sigmoid, &one_minus_sigmoid)?;
+    let x_sigmoid_grad = kiln_tensor::ops::mul(&x_f32, &sigmoid_grad)?;
+    let deriv = kiln_tensor::ops::add(&sigmoid, &x_sigmoid_grad)?;
+    kiln_tensor::ops::mul(&dy_f32, &deriv)
+}
+
 #[derive(Debug)]
 pub(crate) struct CausalConv1dPrefillInputBackward {
     /// Saved F32 conv weight `[channels, kernel]` (#1082: candle->kt; the bwd is
@@ -2341,6 +2594,8 @@ impl BackwardOp for CausalConv1dPrefillInputBackward {
         &self,
         grad_output: &kiln_tensor::Tensor,
     ) -> kiln_tensor::Result<Vec<Option<kiln_tensor::Tensor>>> {
+        let compute_device = grad_output.device();
+        let weight = saved_tensor_for_device(&self.weight, compute_device)?;
         // #1082 kt-native: grad + the saved weight are kt. Upstream grad is
         // [B, C, T] (conv output layout). The row-block bwd is dispatched by
         // device (CUDA FFI / kt composite) in `conv1d_bwd_input_rows_dispatch`.
@@ -2356,8 +2611,8 @@ impl BackwardOp for CausalConv1dPrefillInputBackward {
             .and_then(|t| t.contiguous())
             .and_then(|t| t.reshape(vec![rows, self.channels]))?;
         // weight is [channels, kernel]; the bwd takes the kernel size.
-        let kernel = self.weight.dims()[1];
-        let din_rows = conv1d_bwd_input_rows_dispatch(&grad_rows, &self.weight, kernel)?;
+        let kernel = weight.dims()[1];
+        let din_rows = conv1d_bwd_input_rows_dispatch(&grad_rows, &weight, kernel)?;
         // [B*T, C] -> [B, T, C] -> [B, C, T] (back to the conv input layout).
         let din = din_rows
             .reshape(vec![self.batch, self.seq_len, self.channels])
@@ -2365,6 +2620,58 @@ impl BackwardOp for CausalConv1dPrefillInputBackward {
             .and_then(|t| t.contiguous())?;
         // Cast the F32 grad back to the conv input's dtype (grad-dtype-follows-
         // tensor across the F32↔BF16 conv boundary). No-op when F32.
+        let din = if din.dtype() == self.input_dtype {
+            din
+        } else {
+            din.to_dtype(self.input_dtype)?
+        };
+        Ok(vec![Some(din)])
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct CausalConv1dPrefillSiluInputBackward {
+    input: kiln_tensor::Tensor,
+    weight: kiln_tensor::Tensor,
+    entry_state: kiln_tensor::Tensor,
+    batch: usize,
+    channels: usize,
+    seq_len: usize,
+    input_dtype: kiln_tensor::DType,
+}
+
+impl BackwardOp for CausalConv1dPrefillSiluInputBackward {
+    fn name(&self) -> &'static str {
+        "gdn_causal_conv1d_prefill_silu_input_backward"
+    }
+    fn input_count(&self) -> usize {
+        1
+    }
+    fn apply(
+        &self,
+        grad_output: &kiln_tensor::Tensor,
+    ) -> kiln_tensor::Result<Vec<Option<kiln_tensor::Tensor>>> {
+        let compute_device = grad_output.device();
+        let input = saved_tensor_for_device(&self.input, compute_device)?;
+        let weight = saved_tensor_for_device(&self.weight, compute_device)?;
+        let entry_state = saved_tensor_for_device(&self.entry_state, compute_device)?;
+        let pre_silu = causal_conv1d_prefill_linear_from_state_kt(
+            &input,
+            &weight,
+            &entry_state,
+            weight.dims()[1],
+        )?;
+        let grad_conv = silu_backward_from_input_kt(&pre_silu, grad_output)?;
+        let rows = self.batch * self.seq_len;
+        let grad_rows = grad_conv
+            .transpose(1, 2)
+            .and_then(|t| t.contiguous())
+            .and_then(|t| t.reshape(vec![rows, self.channels]))?;
+        let din_rows = conv1d_bwd_input_rows_dispatch(&grad_rows, &weight, weight.dims()[1])?;
+        let din = din_rows
+            .reshape(vec![self.batch, self.seq_len, self.channels])
+            .and_then(|t| t.transpose(1, 2))
+            .and_then(|t| t.contiguous())?;
         let din = if din.dtype() == self.input_dtype {
             din
         } else {
@@ -2471,21 +2778,139 @@ pub fn try_tape_causal_conv1d_prefill_kt(
         Err(_) => return Ok(None),
     };
     let input_dtype = input.dtype();
-    let recorded = with_active_tape(|tape: &mut Tape| {
+    let recorded = with_active_tape(|tape: &mut Tape| -> Result<()> {
+        let offload_saved = tape_gdn_saved_tensor_offload_enabled(&input.device());
         tape.record(
             out,
             &[input],
             Box::new(CausalConv1dPrefillInputBackward {
-                weight: weight_f32.clone(),
+                weight: maybe_offload_gdn_saved_tensor(&weight_f32, offload_saved)
+                    .context("try_tape_causal_conv1d_prefill_kt: save weight")?,
                 batch,
                 channels,
                 seq_len,
                 input_dtype,
             }),
         );
+        Ok(())
     });
-    if recorded.is_none() {
+    match recorded {
+        Some(result) => result?,
+        None => return Ok(None),
+    }
+    Ok(Some(out.clone()))
+    }
+}
+
+pub fn try_tape_causal_conv1d_prefill_silu_kt(
+    input: &kiln_tensor::Tensor,
+    weight: &kiln_tensor::Tensor,
+    entry_state: &kiln_tensor::Tensor,
+    out: &kiln_tensor::Tensor,
+    kernel: usize,
+) -> Result<Option<kiln_tensor::Tensor>> {
+    if !tape_forward_enabled() || !tape_gdn_conv_enabled() {
         return Ok(None);
+    }
+    #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm")))]
+    {
+        let _ = (input, weight, entry_state, out, kernel);
+        return Ok(None);
+    }
+    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
+    {
+    if !matches!(
+        input.device(),
+        kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_) | kiln_tensor::Device::Rocm(_)
+    ) || !matches!(
+        out.device(),
+        kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_) | kiln_tensor::Device::Rocm(_)
+    ) || !matches!(
+        weight.device(),
+        kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_) | kiln_tensor::Device::Rocm(_)
+    ) || !matches!(
+        entry_state.device(),
+        kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_) | kiln_tensor::Device::Rocm(_)
+    ) {
+        return Ok(None);
+    }
+    if kernel < 2 {
+        return Ok(None);
+    }
+    let (batch, channels, seq_len) = match input.dims3() {
+        Ok(d) => d,
+        Err(_) => return Ok(None),
+    };
+    if batch != 1
+        || out.dims() != [batch, channels, seq_len].as_slice()
+        || entry_state.dims() != [batch, channels, kernel - 1]
+    {
+        return Ok(None);
+    }
+    let weight_2d = match weight.rank() {
+        2 => match weight.dims2() {
+            Ok((c, k)) if c == channels && k == kernel => weight.clone(),
+            _ => return Ok(None),
+        },
+        3 => match weight.dims3() {
+            Ok((c, one, k)) if c == channels && one == 1 && k == kernel => {
+                match weight.reshape(vec![channels, kernel]) {
+                    Ok(w) => w,
+                    Err(_) => return Ok(None),
+                }
+            }
+            _ => return Ok(None),
+        },
+        _ => return Ok(None),
+    };
+    let weight_f32 = if weight_2d.dtype() == kiln_tensor::DType::F32 {
+        weight_2d
+    } else {
+        match weight_2d.to_dtype(kiln_tensor::DType::F32) {
+            Ok(w) => w,
+            Err(_) => return Ok(None),
+        }
+    };
+    let weight_f32 = match weight_f32.contiguous() {
+        Ok(w) => w,
+        Err(_) => return Ok(None),
+    };
+    let entry_state_f32 = if entry_state.dtype() == kiln_tensor::DType::F32 {
+        entry_state.clone()
+    } else {
+        match entry_state.to_dtype(kiln_tensor::DType::F32) {
+            Ok(s) => s,
+            Err(_) => return Ok(None),
+        }
+    };
+    let entry_state_f32 = match entry_state_f32.contiguous() {
+        Ok(s) => s,
+        Err(_) => return Ok(None),
+    };
+    let input_dtype = input.dtype();
+    let recorded = with_active_tape(|tape: &mut Tape| -> Result<()> {
+        let offload_saved = tape_gdn_saved_tensor_offload_enabled(&input.device());
+        tape.record(
+            out,
+            &[input],
+            Box::new(CausalConv1dPrefillSiluInputBackward {
+                input: maybe_offload_gdn_saved_tensor(input, offload_saved)
+                    .context("try_tape_causal_conv1d_prefill_silu_kt: save input")?,
+                weight: maybe_offload_gdn_saved_tensor(&weight_f32, offload_saved)
+                    .context("try_tape_causal_conv1d_prefill_silu_kt: save weight")?,
+                entry_state: maybe_offload_gdn_saved_tensor(&entry_state_f32, offload_saved)
+                    .context("try_tape_causal_conv1d_prefill_silu_kt: save entry_state")?,
+                batch,
+                channels,
+                seq_len,
+                input_dtype,
+            }),
+        );
+        Ok(())
+    });
+    match recorded {
+        Some(result) => result?,
+        None => return Ok(None),
     }
     Ok(Some(out.clone()))
     }
@@ -2506,6 +2931,64 @@ pub(crate) struct GdnL2NormScaleBackward {
     eps: f64,
 }
 
+#[cfg(any(feature = "cuda", feature = "rocm"))]
+fn try_gdn_l2_norm_scale_backward_fused_cuda_rocm(
+    x: &kiln_tensor::Tensor,
+    scale: f64,
+    eps: f64,
+    grad_output: &kiln_tensor::Tensor,
+) -> kiln_tensor::Result<Option<kiln_tensor::Tensor>> {
+    if !matches!(
+        x.device(),
+        kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Rocm(_)
+    ) || x.dtype() != kiln_tensor::DType::BF16
+        || grad_output.dtype() != kiln_tensor::DType::BF16
+        || x.dims() != grad_output.dims()
+    {
+        return Ok(None);
+    }
+
+    let x_dims = x.dims().to_vec();
+    let Some(&hidden) = x_dims.last() else {
+        return Ok(None);
+    };
+    let rows = x_dims.iter().take(x_dims.len() - 1).product::<usize>();
+    if rows == 0 {
+        return Ok(None);
+    }
+
+    let flatten = |t: &kiln_tensor::Tensor,
+                   name: &'static str|
+     -> kiln_tensor::Result<kiln_tensor::Tensor> {
+        t.contiguous()
+            .and_then(|t| t.reshape(vec![rows, hidden]))
+            .map_err(|e| {
+                kiln_tensor::Error::Msg(format!(
+                    "GdnL2NormScaleBackward fused {name} flatten: {e}"
+                ))
+            })
+    };
+
+    let x_flat = flatten(x, "x")?;
+    let grad_flat = flatten(grad_output, "grad_output")?;
+    if !kiln_gdn_kernel::gdn_l2_norm_scale_bwd_supports_kt(&grad_flat, &x_flat) {
+        return Ok(None);
+    }
+
+    let dx = kiln_gdn_kernel::gdn_l2_norm_scale_bwd_bf16_kt(
+        &grad_flat,
+        &x_flat,
+        scale as f32,
+        eps as f32,
+    )
+    .map_err(|e| {
+        kiln_tensor::Error::Msg(format!("GdnL2NormScaleBackward fused bwd: {e}"))
+    })?;
+    dx.reshape(x_dims).map(Some).map_err(|e| {
+        kiln_tensor::Error::Msg(format!("GdnL2NormScaleBackward fused dx reshape: {e}"))
+    })
+}
+
 impl BackwardOp for GdnL2NormScaleBackward {
     fn name(&self) -> &'static str {
         "gdn_l2_norm_scale_backward"
@@ -2517,9 +3000,20 @@ impl BackwardOp for GdnL2NormScaleBackward {
         &self,
         grad_output: &kiln_tensor::Tensor,
     ) -> kiln_tensor::Result<Vec<Option<kiln_tensor::Tensor>>> {
+        let x = saved_tensor_for_device(&self.x, grad_output.device())?;
+        #[cfg(any(feature = "cuda", feature = "rocm"))]
+        if let Some(dx) = try_gdn_l2_norm_scale_backward_fused_cuda_rocm(
+            &x,
+            self.scale,
+            self.eps,
+            grad_output,
+        )? {
+            return Ok(vec![Some(dx)]);
+        }
+
         // #1082 kt-native: `x` is stored kt now (no candle bridge); the bwd kernel
         // is already kt-typed.
-        let dx = gdn_l2_norm_scale_backward_no_grad(&self.x, self.scale, self.eps, grad_output)
+        let dx = gdn_l2_norm_scale_backward_no_grad(&x, self.scale, self.eps, grad_output)
             .map_err(|e| {
                 kiln_tensor::Error::Msg(format!("GdnL2NormScaleBackward: bwd: {e}"))
             })?;
@@ -2559,19 +3053,23 @@ pub fn try_tape_gdn_l2_norm_scale_kt(
     if x.dims() != out.dims() {
         return Ok(None);
     }
-    let recorded = with_active_tape(|tape: &mut Tape| {
+    let recorded = with_active_tape(|tape: &mut Tape| -> Result<()> {
+        let offload_saved = tape_gdn_saved_tensor_offload_enabled(&x.device());
         tape.record(
             out,
             &[x],
             Box::new(GdnL2NormScaleBackward {
-                x: x.clone(),
+                x: maybe_offload_gdn_saved_tensor(x, offload_saved)
+                    .context("try_tape_gdn_l2_norm_scale_kt: save x")?,
                 scale,
                 eps: 1e-6,
             }),
         );
+        Ok(())
     });
-    if recorded.is_none() {
-        return Ok(None);
+    match recorded {
+        Some(result) => result?,
+        None => return Ok(None),
     }
     Ok(Some(out.clone()))
 }
@@ -2593,6 +3091,88 @@ pub(crate) struct GdnGatedRmsNormBackward {
     eps: f64,
 }
 
+#[cfg(any(feature = "cuda", feature = "rocm"))]
+fn try_gdn_gated_rms_norm_backward_fused_cuda_rocm(
+    x: &kiln_tensor::Tensor,
+    z: &kiln_tensor::Tensor,
+    weight: &kiln_tensor::Tensor,
+    eps: f64,
+    grad_output: &kiln_tensor::Tensor,
+) -> kiln_tensor::Result<Option<(
+    kiln_tensor::Tensor,
+    kiln_tensor::Tensor,
+    kiln_tensor::Tensor,
+)>> {
+    if !matches!(
+        x.device(),
+        kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Rocm(_)
+    ) || x.dtype() != kiln_tensor::DType::BF16
+        || z.dtype() != kiln_tensor::DType::BF16
+        || weight.dtype() != kiln_tensor::DType::BF16
+        || grad_output.dtype() != kiln_tensor::DType::BF16
+        || x.dims() != z.dims()
+        || x.dims() != grad_output.dims()
+    {
+        return Ok(None);
+    }
+
+    let x_dims = x.dims().to_vec();
+    let Some(&hidden) = x_dims.last() else {
+        return Ok(None);
+    };
+    let rows = x_dims.iter().take(x_dims.len() - 1).product::<usize>();
+    if rows == 0 {
+        return Ok(None);
+    }
+
+    let flatten = |t: &kiln_tensor::Tensor,
+                   name: &'static str|
+     -> kiln_tensor::Result<kiln_tensor::Tensor> {
+        t.contiguous()
+            .and_then(|t| t.reshape(vec![rows, hidden]))
+            .map_err(|e| {
+                kiln_tensor::Error::Msg(format!(
+                    "GdnGatedRmsNormBackward fused {name} flatten: {e}"
+                ))
+            })
+    };
+
+    let x_flat = flatten(x, "x")?;
+    let z_flat = flatten(z, "z")?;
+    let grad_flat = flatten(grad_output, "grad_output")?;
+    if !kiln_gdn_kernel::gdn_gated_rms_norm_bwd_supports_kt(
+        &grad_flat, &x_flat, &z_flat, weight,
+    ) {
+        return Ok(None);
+    }
+
+    let grads = kiln_gdn_kernel::gdn_gated_rms_norm_bwd_bf16_kt(
+        &grad_flat,
+        &x_flat,
+        &z_flat,
+        weight,
+        eps as f32,
+    )
+    .map_err(|e| {
+        kiln_tensor::Error::Msg(format!("GdnGatedRmsNormBackward fused bwd: {e}"))
+    })?;
+    let dx = grads.dx.reshape(x_dims.clone()).map_err(|e| {
+        kiln_tensor::Error::Msg(format!("GdnGatedRmsNormBackward fused dx reshape: {e}"))
+    })?;
+    let dz = grads.dz.reshape(x_dims).map_err(|e| {
+        kiln_tensor::Error::Msg(format!("GdnGatedRmsNormBackward fused dz reshape: {e}"))
+    })?;
+    let dw = if grads.dw.dtype() == weight.dtype() {
+        grads.dw
+    } else {
+        grads.dw.to_dtype(weight.dtype()).map_err(|e| {
+            kiln_tensor::Error::Msg(format!("GdnGatedRmsNormBackward fused dw dtype: {e}"))
+        })?
+    };
+
+    Ok(Some((dx, dz, dw)))
+}
+
 impl BackwardOp for GdnGatedRmsNormBackward {
     fn name(&self) -> &'static str {
         "gdn_gated_rms_norm_backward"
@@ -2605,12 +3185,27 @@ impl BackwardOp for GdnGatedRmsNormBackward {
         &self,
         grad_output: &kiln_tensor::Tensor,
     ) -> kiln_tensor::Result<Vec<Option<kiln_tensor::Tensor>>> {
+        let compute_device = grad_output.device();
+        let x = saved_tensor_for_device(&self.x, compute_device)?;
+        let z = saved_tensor_for_device(&self.z, compute_device)?;
+        let weight = saved_tensor_for_device(&self.weight, compute_device)?;
+        #[cfg(any(feature = "cuda", feature = "rocm"))]
+        if let Some((dx, dz, dw)) = try_gdn_gated_rms_norm_backward_fused_cuda_rocm(
+            &x,
+            &z,
+            &weight,
+            self.eps,
+            grad_output,
+        )? {
+            return Ok(vec![Some(dx), Some(dz), Some(dw)]);
+        }
+
         // #1082 kt-native: x/z/weight are stored kt now (no candle bridge); the bwd
         // kernel is already kt-typed.
         let grads = gdn_gated_rms_norm_backward_no_grad(
-            &self.x,
-            &self.z,
-            &self.weight,
+            &x,
+            &z,
+            &weight,
             self.eps,
             grad_output,
         )
@@ -2663,20 +3258,26 @@ pub fn try_tape_gdn_gated_rms_norm_kt(
     if weight.rank() != 1 || *x.dims().last().unwrap() != weight.dims()[0] {
         return Ok(None);
     }
-    let recorded = with_active_tape(|tape: &mut Tape| {
+    let recorded = with_active_tape(|tape: &mut Tape| -> Result<()> {
+        let offload_saved = tape_gdn_saved_tensor_offload_enabled(&x.device());
         tape.record(
             out,
             &[x, z, weight],
             Box::new(GdnGatedRmsNormBackward {
-                x: x.clone(),
-                z: z.clone(),
-                weight: weight.clone(),
+                x: maybe_offload_gdn_saved_tensor(x, offload_saved)
+                    .context("try_tape_gdn_gated_rms_norm_kt: save x")?,
+                z: maybe_offload_gdn_saved_tensor(z, offload_saved)
+                    .context("try_tape_gdn_gated_rms_norm_kt: save z")?,
+                weight: maybe_offload_gdn_saved_tensor(weight, offload_saved)
+                    .context("try_tape_gdn_gated_rms_norm_kt: save weight")?,
                 eps,
             }),
         );
+        Ok(())
     });
-    if recorded.is_none() {
-        return Ok(None);
+    match recorded {
+        Some(result) => result?,
+        None => return Ok(None),
     }
     Ok(Some(out.clone()))
 }

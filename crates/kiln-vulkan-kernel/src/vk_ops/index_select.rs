@@ -166,3 +166,61 @@ pub fn vk_index_select_rows(t: &VkTensor, indices: &[u32]) -> Result<VkTensor> {
         grad_fn,
     ))
 }
+
+/// Scatter gathered row gradients back to a zero-padded full row matrix.
+///
+/// This is the public explicit backward for [`vk_index_select_rows`]. It is
+/// useful for external tape integrations that call a fused kernel on gathered
+/// rows and need to return a gradient shaped like the original `[rows, dim]`
+/// source tensor without walking Vulkan's eager autograd graph.
+pub fn vk_scatter_rows_to_full(
+    grad_rows: &VkTensor,
+    indices: &[u32],
+    n_rows_in: usize,
+) -> Result<VkTensor> {
+    anyhow::ensure!(
+        grad_rows.dtype() == VkDType::F32,
+        "vk_scatter_rows_to_full: F32-only"
+    );
+    anyhow::ensure!(
+        grad_rows.shape().len() == 2,
+        "vk_scatter_rows_to_full: rank-2 grad rows required"
+    );
+    let n_out = grad_rows.shape()[0];
+    let dim = grad_rows.shape()[1];
+    anyhow::ensure!(
+        indices.len() == n_out,
+        "vk_scatter_rows_to_full: indices.len() {} != grad rows {n_out}",
+        indices.len()
+    );
+    let device = grad_rows.device();
+    let total_in = n_rows_in * dim;
+    let grad_buf = alloc_f32(device, total_in)?;
+
+    let push_zero = [total_in as u32, 0.0_f32.to_bits()];
+    dispatch_simple(
+        device,
+        "vk_fill_f32",
+        &[grad_buf.handle()],
+        &push_zero,
+        ((total_in + 255) / 256) as u32,
+    )?;
+
+    let indices_buf = upload_indices(device, indices)?;
+    dispatch_bwd(
+        device,
+        grad_rows.buffer(),
+        &indices_buf,
+        &grad_buf,
+        n_out,
+        dim,
+        n_rows_in,
+    )?;
+
+    Ok(VkTensor::from_buffer(
+        grad_buf,
+        vec![n_rows_in, dim],
+        VkDType::F32,
+        Arc::clone(device),
+    ))
+}

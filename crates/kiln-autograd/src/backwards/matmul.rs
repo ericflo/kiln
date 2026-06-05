@@ -42,8 +42,20 @@ impl BackwardOp for MatmulBackward {
         2
     }
     fn apply(&self, grad_output: &Tensor) -> Result<Vec<Option<Tensor>>> {
-        let ar = self.a.rank();
-        let br = self.b.rank();
+        let target_device = grad_output.device();
+        let a = if self.a.device() == target_device {
+            self.a.clone()
+        } else {
+            self.a.to_device(target_device)?
+        };
+        let b = if self.b.device() == target_device {
+            self.b.clone()
+        } else {
+            self.b.to_device(target_device)?
+        };
+
+        let ar = a.rank();
+        let br = b.rank();
         if ar < 2 || br < 2 {
             bail!("MatmulBackward: saved tensors must have rank ≥ 2");
         }
@@ -59,8 +71,8 @@ impl BackwardOp for MatmulBackward {
             );
         }
         // Transpose last two axes; materialize to contiguous for matmul.
-        let a_t = self.a.transpose(ar - 2, ar - 1)?.contiguous()?;
-        let b_t = self.b.transpose(br - 2, br - 1)?.contiguous()?;
+        let a_t = a.transpose(ar - 2, ar - 1)?.contiguous()?;
+        let b_t = b.transpose(br - 2, br - 1)?.contiguous()?;
         let da = matmul(grad_output, &b_t)?;
         let db = matmul(&a_t, grad_output)?;
         Ok(vec![Some(da), Some(db)])

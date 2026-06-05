@@ -116,7 +116,10 @@ fn validate_opd_inputs(
         "vk_opd: weight inner-dim {} != hidden_dim {hidden_size}",
         weight.shape()[1]
     );
-    anyhow::ensure!(top_k == 16 || top_k == 32, "vk_opd: top_k must be 16 or 32 (got {top_k})");
+    anyhow::ensure!(
+        top_k == 16 || top_k == 32,
+        "vk_opd: top_k must be 16 or 32 (got {top_k})"
+    );
     let expected = num_active * top_k;
     anyhow::ensure!(
         teacher_topk_indices.len() == expected,
@@ -441,6 +444,89 @@ pub fn vk_opd_top_k_reverse_kl_per_position(
     )
 }
 
+/// Analytic OPD top-K reverse-KL backward.
+///
+/// This is the explicit backward twin of
+/// [`vk_opd_top_k_reverse_kl_loss`] / [`vk_opd_top_k_reverse_kl_per_position`]
+/// for callers that integrate the fused Vulkan kernel into an external tape.
+/// It uploads the host teacher top-K metadata, dispatches the fused backward
+/// shader, and returns `d_hidden` for the active hidden rows.
+pub fn vk_opd_top_k_reverse_kl_backward(
+    hidden: &VkTensor,
+    weight: &VkTensor,
+    teacher_topk_indices: &[u32],
+    teacher_topk_logprobs: &[f32],
+    grad_loss: &VkTensor,
+    top_k: usize,
+    mode: OpdLossOutputMode,
+) -> Result<VkTensor> {
+    let (num_active, hidden_size, vocab) = validate_opd_inputs(
+        hidden,
+        weight,
+        teacher_topk_indices,
+        teacher_topk_logprobs,
+        top_k,
+    )?;
+    anyhow::ensure!(
+        grad_loss.dtype() == VkDType::F32,
+        "vk_opd bwd: grad_loss must be F32"
+    );
+    match mode {
+        OpdLossOutputMode::ScalarMean => anyhow::ensure!(
+            grad_loss.num_elements() == 1,
+            "vk_opd bwd ScalarMean: grad_loss must contain 1 element, got {:?}",
+            grad_loss.shape()
+        ),
+        OpdLossOutputMode::PerPosition => anyhow::ensure!(
+            grad_loss.shape() == [num_active],
+            "vk_opd bwd PerPosition: grad_loss must be [num_active]={num_active}, got {:?}",
+            grad_loss.shape()
+        ),
+    }
+
+    let device = hidden.device();
+    let d_hidden = alloc_f32(device, num_active * hidden_size)?;
+    if num_active == 0 {
+        return Ok(VkTensor::from_buffer(
+            d_hidden,
+            vec![num_active, hidden_size],
+            VkDType::F32,
+            Arc::clone(device),
+        ));
+    }
+
+    let topk_idx_buf = upload_u32(device, teacher_topk_indices)?;
+    let topk_lp_q_buf = upload_f32(device, teacher_topk_logprobs)?;
+    let weight_is_bf16 = weight.dtype() == VkDType::Bf16;
+    let (output_mode, scale_factor) = match mode {
+        OpdLossOutputMode::ScalarMean => (0, 1.0_f32 / (num_active as f32)),
+        OpdLossOutputMode::PerPosition => (1, 1.0_f32),
+    };
+    dispatch_opd_topk_kl_bwd_resident(
+        device,
+        hidden.buffer().handle(),
+        weight.buffer().handle(),
+        weight_is_bf16,
+        topk_idx_buf.handle(),
+        topk_lp_q_buf.handle(),
+        grad_loss.buffer().handle(),
+        d_hidden.handle(),
+        num_active as u32,
+        hidden_size as u32,
+        vocab as u32,
+        top_k as u32,
+        output_mode,
+        scale_factor,
+    )?;
+
+    Ok(VkTensor::from_buffer(
+        d_hidden,
+        vec![num_active, hidden_size],
+        VkDType::F32,
+        Arc::clone(device),
+    ))
+}
+
 fn apply_op(
     hidden: &VkTensor,
     weight: &VkTensor,
@@ -449,8 +535,13 @@ fn apply_op(
     top_k: usize,
     mode: OpdLossOutputMode,
 ) -> Result<VkTensor> {
-    let (num_active, hidden_size, vocab) =
-        validate_opd_inputs(hidden, weight, teacher_topk_indices, teacher_topk_logprobs, top_k)?;
+    let (num_active, hidden_size, vocab) = validate_opd_inputs(
+        hidden,
+        weight,
+        teacher_topk_indices,
+        teacher_topk_logprobs,
+        top_k,
+    )?;
     let device = hidden.device();
     if num_active == 0 {
         // Empty mask: return a zero scalar / empty per-position vector.
@@ -459,11 +550,21 @@ fn apply_op(
                 let buf = alloc_f32(device, 1)?;
                 let push = [1u32, 0.0_f32.to_bits()];
                 dispatch_simple(device, "vk_fill_f32", &[buf.handle()], &push, 1)?;
-                Ok(VkTensor::from_buffer(buf, vec![1], VkDType::F32, Arc::clone(device)))
+                Ok(VkTensor::from_buffer(
+                    buf,
+                    vec![1],
+                    VkDType::F32,
+                    Arc::clone(device),
+                ))
             }
             OpdLossOutputMode::PerPosition => {
                 let buf = alloc_f32(device, 0.max(1))?;
-                Ok(VkTensor::from_buffer(buf, vec![0], VkDType::F32, Arc::clone(device)))
+                Ok(VkTensor::from_buffer(
+                    buf,
+                    vec![0],
+                    VkDType::F32,
+                    Arc::clone(device),
+                ))
             }
         };
     }
@@ -490,8 +591,12 @@ fn apply_op(
         top_k as u32,
     )?;
 
-    let per_pos_tensor =
-        VkTensor::from_buffer(per_pos_buf, vec![num_active], VkDType::F32, Arc::clone(device));
+    let per_pos_tensor = VkTensor::from_buffer(
+        per_pos_buf,
+        vec![num_active],
+        VkDType::F32,
+        Arc::clone(device),
+    );
 
     let state = OpdLossState {
         weight: weight.clone(),
@@ -548,12 +653,22 @@ pub fn vk_opd_top_k_metrics(
     teacher_topk_logprobs: &[f32],
     top_k: usize,
 ) -> Result<VkTensor> {
-    let (num_active, hidden_size, vocab) =
-        validate_opd_inputs(hidden, weight, teacher_topk_indices, teacher_topk_logprobs, top_k)?;
+    let (num_active, hidden_size, vocab) = validate_opd_inputs(
+        hidden,
+        weight,
+        teacher_topk_indices,
+        teacher_topk_logprobs,
+        top_k,
+    )?;
     let device = hidden.device();
     if num_active == 0 {
         let buf = alloc_f32(device, 1)?;
-        return Ok(VkTensor::from_buffer(buf, vec![0, 3], VkDType::F32, Arc::clone(device)));
+        return Ok(VkTensor::from_buffer(
+            buf,
+            vec![0, 3],
+            VkDType::F32,
+            Arc::clone(device),
+        ));
     }
 
     let topk_idx_buf = upload_u32(device, teacher_topk_indices)?;
