@@ -782,7 +782,7 @@ pub fn opd_top_k_reverse_kl_phase_b_bwd_composite_kt(
     top_k: usize,
     output_mode: OpdLossOutputKt,
 ) -> Result<KtTensor, OpdLossError> {
-    use kiln_tensor::ops::{broadcast_to, scatter_add, sum_axis};
+    use kiln_tensor::ops::{broadcast_to, mul_scalar, scatter_add, sum_axis};
     use kiln_tensor::Device as KtDevice;
 
     // -- 1. Validate shapes (same envelope as the FFI backward). --------
@@ -884,49 +884,37 @@ pub fn opd_top_k_reverse_kl_phase_b_bwd_composite_kt(
     // ScalarMean : upstream[t] = grad_loss[0] / T_active
     // PerPosition: upstream[t] = grad_loss[t]
     //
-    // Read grad_loss to the host (it's a tiny [1] or [T_active] F32
-    // tensor) so we can fold the scale uniformly; the result is uploaded
-    // back to `dev` as a `[T_active, 1]` column for broadcasting.
-    let grad_f32 = to_f32(grad_loss)?.contiguous()?;
-    let grad_host = {
-        use kiln_tensor::CpuStorage;
-        let on_cpu = grad_f32.to_device(KtDevice::Cpu).map_err(OpdLossError::Kt)?;
-        let cpu = on_cpu
-            .storage()
-            .as_any()
-            .downcast_ref::<CpuStorage>()
-            .ok_or_else(|| {
-                OpdLossError::msg("kt-opd-loss bwd composite: grad_loss host read failed")
-            })?;
-        cpu.as_bytes()
-            .chunks_exact(4)
-            .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
-            .collect::<Vec<f32>>()
-    };
-    let upstream: Vec<f32> = match output_mode {
+    // Keep the upstream seed on-device where possible. ScalarMean reads the
+    // single seed once and folds it into a scalar multiplier; PerPosition keeps
+    // the `[T_active]` tensor on `dev` and reshapes it to a broadcast column.
+    let (upstream_scalar, upstream_col): (Option<f32>, Option<KtTensor>) = match output_mode {
         OpdLossOutputKt::ScalarMean => {
-            if grad_host.len() != 1 {
+            if grad_loss.element_count() != 1 {
                 return Err(OpdLossError::msg(format!(
-                    "kt-opd-loss bwd composite: ScalarMean grad_loss must have 1 element, got {}",
-                    grad_host.len(),
+                    "kt-opd-loss bwd composite: ScalarMean grad_loss must have 1 element, got shape {:?}",
+                    grad_loss.shape(),
                 )));
             }
-            let s = grad_host[0] / (active_count as f32);
-            vec![s; active_count]
+            let s = to_f32(grad_loss)?
+                .to_scalar::<f32>()
+                .map_err(OpdLossError::Kt)?
+                / (active_count as f32);
+            (Some(s), None)
         }
         OpdLossOutputKt::PerPosition => {
-            if grad_host.len() != active_count {
+            if grad_loss.element_count() != active_count {
                 return Err(OpdLossError::msg(format!(
-                    "kt-opd-loss bwd composite: PerPosition grad_loss must have {active_count} elements, got {}",
-                    grad_host.len(),
+                    "kt-opd-loss bwd composite: PerPosition grad_loss must have {active_count} elements, got shape {:?}",
+                    grad_loss.shape(),
                 )));
             }
-            grad_host
+            let grad_f32 = to_f32(grad_loss)?
+                .contiguous()?
+                .to_device(dev)
+                .map_err(OpdLossError::Kt)?;
+            (None, Some(grad_f32.reshape(vec![active_count, 1])?))
         }
     };
-    // [T_active, 1] column for broadcasting against the [T_active, K]
-    // gradient.
-    let upstream_col = upload_f32(&upstream, vec![active_count, 1])?;
 
     // -- 3. Re-run the forward to recover (s_logits, log_p_hat, ---------
     //       log_q_hat, p_hat, KL_t) and the gather `head_gather`.
@@ -962,8 +950,13 @@ pub fn opd_top_k_reverse_kl_phase_b_bwd_composite_kt(
     // -- 4. d_s_logits[t,k] = p̂ · (diff − KL_t) · upstream[t] ----------
     let inner = sub(&diff, &kl_b)?; // [T_active, K]
     let d_s_logits = mul(&p_hat, &inner)?; // [T_active, K]
-    let upstream_b = broadcast_to(&upstream_col, &[active_count, top_k])?; // [T_active, K]
-    let d_s_logits = mul(&d_s_logits, &upstream_b)?; // [T_active, K]
+    let d_s_logits = if let Some(scale) = upstream_scalar {
+        mul_scalar(&d_s_logits, scale)?
+    } else {
+        let upstream_col = upstream_col.expect("PerPosition upstream column is set");
+        let upstream_b = broadcast_to(&upstream_col, &[active_count, top_k])?; // [T_active, K]
+        mul(&d_s_logits, &upstream_b)?
+    }; // [T_active, K]
 
     // -- 5. d_hidden[t,h] = Σ_k d_s_logits[t,k] · head_gather[t,h,k] ----
     //       = head_gather[t] @ d_s_logits[t] as a batched matmul:

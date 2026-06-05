@@ -717,6 +717,7 @@ fn grpo_pg_loss_from_normed_hidden_grad_with_logsum_kt(
     running_max: &kiln_tensor::Tensor,
     running_sumexp: &kiln_tensor::Tensor,
 ) -> Result<kiln_tensor::Tensor> {
+    use kiln_tensor::ops::{mul_scalar, scatter_add};
     use kiln_tensor::{DType as KtDType, Tensor as KtTensor};
 
     if chunk_size == 0 {
@@ -821,8 +822,7 @@ fn grpo_pg_loss_from_normed_hidden_grad_with_logsum_kt(
             }
         }
         let chunk_contrib = if row_hits.is_empty() {
-            (KtTensor::zeros(vec![num_active, hidden_size], KtDType::F32, *device)?
-                - softmax_contrib)?
+            mul_scalar(&softmax_contrib, -1.0)?
         } else {
             let hits = row_hits.len();
             let row_idx = KtTensor::from_vec_on(*device, row_hits, vec![hits])?;
@@ -831,17 +831,24 @@ fn grpo_pg_loss_from_normed_hidden_grad_with_logsum_kt(
             let selected_coeff = coeff_col.index_select(&row_idx, 0)?;
             let selected_coeff_b = selected_coeff.broadcast_as(selected_head_rows.shape())?;
             let selected_rows = selected_head_rows.broadcast_mul(&selected_coeff_b)?;
-            let selected_contrib =
-                KtTensor::zeros(vec![num_active, hidden_size], KtDType::F32, *device)?
-                    .index_add(&row_idx, &selected_rows, 0)?;
+            let selected_contrib = scatter_add(
+                &selected_rows.contiguous()?,
+                0,
+                &row_idx,
+                num_active,
+            )?;
             (selected_contrib - softmax_contrib)?
         };
         grad_active_hidden = (&grad_active_hidden + chunk_contrib)?.detach();
         chunk_start = chunk_end;
     }
 
-    let grad_hidden_2d = KtTensor::zeros(vec![seq_len, hidden_size], KtDType::F32, *device)?
-        .index_add(&active_idx, &grad_active_hidden, 0)?;
+    let grad_hidden_2d = scatter_add(
+        &grad_active_hidden.contiguous()?,
+        0,
+        &active_idx,
+        seq_len,
+    )?;
     let grad_hidden = grad_hidden_2d.unsqueeze(0)?.to_dtype(hidden_dtype)?;
     Ok(grad_hidden)
 }
