@@ -11582,9 +11582,9 @@ pub(crate) fn try_kt_broadcast_div(a: &Tensor, b: &Tensor) -> Result<Option<Tens
 /// Phase 7 (#1082) — kt-API LoRA delta migration helper. Routes
 /// the `(x @ A^T) @ B^T * scale` three-step composite from
 /// [`crate::lora_loader::compute_lora_delta`] through
-/// `kiln_tensor::cuda_matmul` + `kiln_tensor::cuda_matmul` +
-/// `kiln_tensor::cuda_scalar_op` (kind 2 = MulScalar) directly,
-/// ahead of the candle composite.
+/// `kiln_tensor::cuda_matmul_rhs_transposed` +
+/// `kiln_tensor::cuda_matmul_rhs_transposed` + `kiln_tensor::cuda_scalar_op`
+/// (kind 2 = MulScalar) directly, ahead of the candle composite.
 ///
 /// Flattens any leading dims to a 2D `[lead, in_features]` view
 /// before dispatching to keep the cublasLt entry shape canonical;
@@ -11634,24 +11634,17 @@ fn try_kt_lora_delta(
     if b_rank != rank || x_dims[x_dims.len() - 1] != in_features {
         return Ok(None);
     }
-    // #1082: `proj.a`/`proj.b` are kt — cast/transpose in kt directly.
-    let a = match proj.a.to_dtype(x.dtype()) {
+    // #1082: `proj.a`/`proj.b` are kt — cast in kt directly and keep the
+    // original layouts for transposed-GEMM dispatch.
+    let a = match proj.a.to_dtype(x.dtype()).and_then(|t| t.contiguous()) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    let b = match proj.b.to_dtype(x.dtype()) {
+    let b = match proj.b.to_dtype(x.dtype()).and_then(|t| t.contiguous()) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
-    let a_t = match a.t().and_then(|t| t.contiguous()) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
-    let b_t = match b.t().and_then(|t| t.contiguous()) {
-        Ok(t) => t,
-        Err(_) => return Ok(None),
-    };
-    if !a_t.is_contiguous() || !b_t.is_contiguous() {
+    if !a.is_contiguous() || !b.is_contiguous() {
         return Ok(None);
     }
 
@@ -11666,10 +11659,10 @@ fn try_kt_lora_delta(
 
     kiln_nvtx::range!(c"kiln/lora_delta_kt");
 
-    // #1082: everything is kt now (x2d, a_t, b_t) — keep the whole
+    // #1082: everything is kt now (x2d, a, b) — keep the whole
     // matmul→matmul→scale chain in kt, no candle round-trips (perf mandate).
     // Step 1: hidden = x @ A^T -> shape [lead, rank]
-    let hidden_kt = match kiln_tensor::cuda_matmul(&x2d, &a_t) {
+    let hidden_kt = match kiln_tensor::cuda_matmul_rhs_transposed(&x2d, &a) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
@@ -11678,7 +11671,7 @@ fn try_kt_lora_delta(
     }
 
     // Step 2: delta_pre = hidden @ B^T -> shape [lead, out_features]
-    let delta_pre_kt = match kiln_tensor::cuda_matmul(&hidden_kt, &b_t) {
+    let delta_pre_kt = match kiln_tensor::cuda_matmul_rhs_transposed(&hidden_kt, &b) {
         Ok(t) => t,
         Err(_) => return Ok(None),
     };
