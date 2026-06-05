@@ -22270,7 +22270,10 @@ fn gqa_attention_paged_with_rope_tables(
         // Attention scores: [batch*num_kv_heads, gqa_ratio, 1, kv_len]
         let attn_scores = {
             let stage_profile = start_full_attn_stage_profile(profile_device, profile_context)?;
-            let attn_scores = q_grouped.broadcast_matmul(&k_flat.transpose(2, 3)?.contiguous()?)?;
+            let k_grouped = k_flat
+                .broadcast_as((batch * num_kv_heads, gqa_ratio, kv_len, head_dim))?
+                .contiguous()?;
+            let attn_scores = kiln_tensor::ops::matmul_rhs_transposed(&q_grouped, &k_grouped)?;
             // kt has no `Tensor / f64`; `x / scale == x * (1/scale)` via affine.
             let attn_scores = attn_scores.affine(1.0 / scale, 0.0)?;
             finish_full_attn_stage_profile(
