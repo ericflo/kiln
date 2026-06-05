@@ -1,6 +1,7 @@
 //! Experimental ROCm W8 decode projections.
 //!
-//! This is deliberately opt-in (`KILN_ROCM_W8A16=1`) and decode-scoped. It
+//! This is default-on for ROCm decode (`KILN_ROCM_W8A16=0` disables it) and
+//! decode-scoped. It
 //! packs BF16 row-major projection weights `[out, in]` into signed int8 plus
 //! one F32 scale per output row, then uses a ROCm GEMV kernel for single-token
 //! decode. Runtime projection math defaults to W8A8 for sampled-decode
@@ -17,7 +18,7 @@ pub struct RocmW8Proj {
 }
 
 pub fn env_enabled() -> bool {
-    kiln_core::env_flag::env_flag("KILN_ROCM_W8A16", false)
+    kiln_core::env_flag::env_flag("KILN_ROCM_W8A16", true)
 }
 
 #[cfg(feature = "rocm")]

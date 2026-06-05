@@ -3843,7 +3843,7 @@ pub struct GpuFullAttentionWeights {
     /// Optional ROCm-only row-wise W8A16 full-attention decode projections.
     /// `qkv_proj_w8` stores `[q_raw | k | v]` rows; `o_proj_w8` stores
     /// `[hidden, num_heads * head_dim]`. Populated only when
-    /// `KILN_ROCM_W8A16=1`.
+    /// Enabled by default on ROCm decode; set `KILN_ROCM_W8A16=0` to disable.
     pub qkv_proj_w8: Option<crate::rocm_w8_proj::RocmW8Proj>,
     pub o_proj_w8: Option<crate::rocm_w8_proj::RocmW8Proj>,
     /// Optional Marlin W4A16-packed q_proj. Populated at load time when the
@@ -4012,7 +4012,8 @@ pub struct GpuLinearAttentionWeights {
     /// opt in only after their own quality A/B passes.
     pub out_proj_marlin: Option<crate::marlin_proj::MarlinPackedProj>,
     /// Optional ROCm-only row-wise W8A16 fused input projection storing
-    /// `[qkv | z | a | b]` rows. Populated only when `KILN_ROCM_W8A16=1`.
+    /// `[qkv | z | a | b]` rows. Enabled by default on ROCm decode; set
+    /// `KILN_ROCM_W8A16=0` to disable.
     pub in_proj_qkvzab_w8: Option<crate::rocm_w8_proj::RocmW8Proj>,
 }
 
@@ -4351,7 +4352,8 @@ pub struct GpuFfnWeights {
     pub down_proj_marlin: Option<crate::marlin_proj::MarlinPackedProj>,
     /// Optional ROCm-only row-wise W8A16 decode projections. `gate_up_proj_w8`
     /// stores `[2 * intermediate, hidden]`; `down_proj_w8` stores
-    /// `[hidden, intermediate]`. Populated only when `KILN_ROCM_W8A16=1`.
+    /// `[hidden, intermediate]`. Enabled by default on ROCm decode; set
+    /// `KILN_ROCM_W8A16=0` to disable.
     pub gate_up_proj_w8: Option<crate::rocm_w8_proj::RocmW8Proj>,
     pub down_proj_w8: Option<crate::rocm_w8_proj::RocmW8Proj>,
 }
