@@ -1639,18 +1639,32 @@ impl CudaGraphRunner {
             !start_positions.is_empty(),
             "update_batched_rotary_buffers requires a non-empty batch"
         );
-        let half = config.rotary_dim() / 2;
-        let mut cos_flat: Vec<f32> = Vec::with_capacity(start_positions.len() * half);
-        let mut sin_flat: Vec<f32> = Vec::with_capacity(start_positions.len() * half);
-        for &pos in start_positions {
-            let (cos, sin) = Self::rotary_table_values(config, pos);
-            cos_flat.extend_from_slice(&cos);
-            sin_flat.extend_from_slice(&sin);
-        }
-        kiln_tensor::cuda_write_host_in_place(rotary_cos_buffer, cos_flat.as_slice())
-            .context("update CUDA graph batched rotary cos buffer")?;
-        kiln_tensor::cuda_write_host_in_place(rotary_sin_buffer, sin_flat.as_slice())
-            .context("update CUDA graph batched rotary sin buffer")?;
+        // #34 BUG2 FIX: compute the batched rotary tables on the GPU via eager's
+        // exact path (one position per batch row), not host CPU cos/sin. Same root
+        // cause + fix as the bs=1 path (`update_rotary_buffers`): CPU cos != GPU
+        // cos perturbs only the RoPE full-attention layers on replay.
+        let dev = rotary_cos_buffer.device();
+        let inv_freq = crate::forward::compute_rotary_inv_freq(
+            config.rotary_dim(),
+            config.rope_theta,
+            &dev,
+        )?;
+        let pos_f32: Vec<f32> = start_positions.iter().map(|&p| p as f32).collect();
+        let n = pos_f32.len();
+        let pos = Tensor::from_vec_on(dev, pos_f32, vec![n])?;
+        let (cos, sin) = crate::forward::rotary_tables_from_tensor(&pos, &inv_freq)?;
+        let cos = cos
+            .to_dtype(rotary_cos_buffer.dtype())?
+            .reshape(rotary_cos_buffer.dims().to_vec())?;
+        let sin = sin
+            .to_dtype(rotary_sin_buffer.dtype())?
+            .reshape(rotary_sin_buffer.dims().to_vec())?;
+        rotary_cos_buffer
+            .slice_set(&cos, 0, 0)
+            .context("update CUDA graph batched rotary cos buffer (gpu)")?;
+        rotary_sin_buffer
+            .slice_set(&sin, 0, 0)
+            .context("update CUDA graph batched rotary sin buffer (gpu)")?;
         Ok(())
     }
 
