@@ -8,7 +8,7 @@
 //!
 //! Surface coverage:
 //! - [`flash_attn_fwd_kt`] — dense forward
-//! - [`flash_attn_bwd_kt`] — dense backward (deterministic, expanded GQA dk/dv)
+//! - [`flash_attn_bwd_kt`] — dense backward (expanded GQA dk/dv)
 //! - [`flash_attn_paged_decode_kt`] — single-step paged decode
 //! - [`flash_attn_paged_decode_dyn_seqlen_kt`] — graph-stable dyn-seqlen paged decode
 //! - [`flash_attn_paged_decode_dyn_seqlen_kt_with_graph_outputs`] — caller-owned
@@ -29,14 +29,14 @@ use kiln_tensor::{DType as KtDType, Tensor as KtTensor};
 // touching these, so they would be dead — gate them on `cuda` to keep the ROCm
 // build warning-clean and CUDA-feature byte-identical.
 #[cfg(feature = "cuda")]
-use kiln_tensor::CudaStorage;
-#[cfg(feature = "cuda")]
 use crate::{
     kiln_flash_attn_bwd, kiln_flash_attn_fwd, kiln_flash_attn_fwd_paged_decode,
     kiln_flash_attn_fwd_paged_decode_dyn_seqlen, kiln_paged_kv_write_token_major_bf16,
     kiln_paged_kv_write_token_major_bf16_batch_slot, kiln_paged_kv_write_token_major_bf16_slot,
     round_up,
 };
+#[cfg(feature = "cuda")]
+use kiln_tensor::CudaStorage;
 
 /// Error type for the kiln-tensor-typed flash-attn surface. Stays
 /// independent of candle's error so Phase 7 can delete candle
@@ -201,8 +201,7 @@ pub fn flash_attn_fwd_head_major_kt(
         )));
     }
 
-    let (b, num_heads, _seqlen_q, head_dim) =
-        (q_shape[0], q_shape[1], q_shape[2], q_shape[3]);
+    let (b, num_heads, _seqlen_q, head_dim) = (q_shape[0], q_shape[1], q_shape[2], q_shape[3]);
     let (kb, num_heads_k, _seqlen_k, khd) = (k_shape[0], k_shape[1], k_shape[2], k_shape[3]);
     if v_shape != k_shape {
         return Err(FlashAttnError::Msg(format!(
@@ -227,13 +226,7 @@ pub fn flash_attn_fwd_head_major_kt(
 
     #[cfg(feature = "rocm")]
     if matches!(q.device(), KtDevice::Rocm(_)) {
-        return crate::rocm_sdpa::flash_attn_fwd_head_major_rocm(
-            q,
-            k,
-            v,
-            softmax_scale,
-            causal,
-        );
+        return crate::rocm_sdpa::flash_attn_fwd_head_major_rocm(q, k, v, softmax_scale, causal);
     }
 
     Err(FlashAttnError::Msg(
@@ -251,7 +244,11 @@ fn cuda_storage_and_byte_offset<'a>(
     expected_dtype: KtDType,
     name: &'static str,
 ) -> Result<(&'a CudaStorage, usize), FlashAttnError> {
-    Ok(kiln_kt_bridge::cuda_storage_and_byte_offset(t, expected_dtype, name)?)
+    Ok(kiln_kt_bridge::cuda_storage_and_byte_offset(
+        t,
+        expected_dtype,
+        name,
+    )?)
 }
 
 #[cfg(feature = "cuda")]
@@ -260,7 +257,22 @@ fn alloc_cuda_tensor(
     dtype: KtDType,
     shape: Vec<usize>,
 ) -> Result<KtTensor, FlashAttnError> {
-    Ok(kiln_kt_bridge::alloc_cuda_tensor(device_source, dtype, shape)?)
+    Ok(kiln_kt_bridge::alloc_cuda_tensor(
+        device_source,
+        dtype,
+        shape,
+    )?)
+}
+
+#[cfg(feature = "cuda")]
+fn flash_attn_bwd_deterministic() -> bool {
+    let raw = std::env::var("KILN_FLASH_ATTN_BWD_DETERMINISTIC").ok();
+    let lower = raw.as_deref().map(str::trim).map(str::to_ascii_lowercase);
+    match lower.as_deref() {
+        Some("1") | Some("true") | Some("yes") => true,
+        Some("0") | Some("false") | Some("no") => false,
+        _ => false,
+    }
 }
 
 // ============================================================================
@@ -347,7 +359,14 @@ pub fn flash_attn_paged_decode_kt(
     #[cfg(feature = "rocm")]
     if matches!(q.device(), KtDevice::Rocm(_)) {
         return crate::rocm_sdpa::flash_attn_paged_decode_rocm(
-            q, k_pool, v_pool, block_table, seqlen_k, page_block_size, softmax_scale, causal,
+            q,
+            k_pool,
+            v_pool,
+            block_table,
+            seqlen_k,
+            page_block_size,
+            softmax_scale,
+            causal,
         );
     }
 
@@ -357,7 +376,8 @@ pub fn flash_attn_paged_decode_kt(
         let q_ptr = kiln_kt_bridge::cuda_input_device_ptr(q, KtDType::BF16, "q")?;
         let k_ptr = kiln_kt_bridge::cuda_input_device_ptr(k_pool, KtDType::BF16, "k_pool")?;
         let v_ptr = kiln_kt_bridge::cuda_input_device_ptr(v_pool, KtDType::BF16, "v_pool")?;
-        let bt_ptr = kiln_kt_bridge::cuda_input_device_ptr(block_table, KtDType::U32, "block_table")?;
+        let bt_ptr =
+            kiln_kt_bridge::cuda_input_device_ptr(block_table, KtDType::U32, "block_table")?;
         let (q_st, _) = cuda_storage_and_byte_offset(q, KtDType::BF16, "q")?;
 
         let out_t = alloc_cuda_tensor(q_st, KtDType::BF16, vec![b, 1, num_heads, head_dim])?;
@@ -476,8 +496,15 @@ pub fn flash_attn_paged_decode_dyn_seqlen_kt(
     #[cfg(feature = "rocm")]
     if matches!(q.device(), KtDevice::Rocm(_)) {
         return crate::rocm_sdpa::flash_attn_paged_decode_dyn_seqlen_rocm(
-            q, k_pool, v_pool, block_table, seqused_k, max_seqlen_k, page_block_size,
-            softmax_scale, causal,
+            q,
+            k_pool,
+            v_pool,
+            block_table,
+            seqused_k,
+            max_seqlen_k,
+            page_block_size,
+            softmax_scale,
+            causal,
         );
     }
 
@@ -650,8 +677,15 @@ pub fn flash_attn_paged_decode_dyn_seqlen_kt_with_graph_outputs(
     #[cfg(feature = "rocm")]
     if matches!(q.device(), KtDevice::Rocm(_)) {
         let computed = crate::rocm_sdpa::flash_attn_paged_decode_dyn_seqlen_rocm(
-            q, k_pool, v_pool, block_table, seqused_k, max_seqlen_k, page_block_size,
-            softmax_scale, causal,
+            q,
+            k_pool,
+            v_pool,
+            block_table,
+            seqused_k,
+            max_seqlen_k,
+            page_block_size,
+            softmax_scale,
+            causal,
         )?;
         crate::rocm_sdpa::rocm_copy_into(&computed, out)?;
         let _ = lse;
@@ -756,7 +790,13 @@ pub fn paged_kv_write_token_major_bf16_kt(
     #[cfg(feature = "rocm")]
     if matches!(k_pool.device(), KtDevice::Rocm(_)) {
         return crate::rocm_sdpa::paged_kv_write_token_major_bf16_rocm(
-            k_pool, v_pool, k, v, slot, num_kv_heads, head_dim,
+            k_pool,
+            v_pool,
+            k,
+            v,
+            slot,
+            num_kv_heads,
+            head_dim,
         );
     }
 
@@ -765,7 +805,9 @@ pub fn paged_kv_write_token_major_bf16_kt(
         let slot_u32 = u32::try_from(slot)
             .map_err(|_| FlashAttnError::Msg(format!("kt-flash-attn: slot {slot} exceeds u32")))?;
         let num_kv_heads_i32 = i32::try_from(num_kv_heads).map_err(|_| {
-            FlashAttnError::Msg(format!("kt-flash-attn: num_kv_heads {num_kv_heads} exceeds i32"))
+            FlashAttnError::Msg(format!(
+                "kt-flash-attn: num_kv_heads {num_kv_heads} exceeds i32"
+            ))
         })?;
         let head_dim_i32 = i32::try_from(head_dim).map_err(|_| {
             FlashAttnError::Msg(format!("kt-flash-attn: head_dim {head_dim} exceeds i32"))
@@ -844,7 +886,13 @@ pub fn paged_kv_write_token_major_bf16_slot_kt(
     #[cfg(feature = "rocm")]
     if matches!(k_pool.device(), KtDevice::Rocm(_)) {
         return crate::rocm_sdpa::paged_kv_write_token_major_bf16_slot_rocm(
-            k_pool, v_pool, k, v, slot, num_kv_heads, head_dim,
+            k_pool,
+            v_pool,
+            k,
+            v,
+            slot,
+            num_kv_heads,
+            head_dim,
         );
     }
 
@@ -957,14 +1005,21 @@ pub fn paged_kv_write_token_major_bf16_batch_slot_kt(
     #[cfg(feature = "rocm")]
     if matches!(k_pool.device(), KtDevice::Rocm(_)) {
         return crate::rocm_sdpa::paged_kv_write_token_major_bf16_batch_slot_rocm(
-            k_pool, v_pool, k, v, slots, batch, num_kv_heads, head_dim,
+            k_pool,
+            v_pool,
+            k,
+            v,
+            slots,
+            batch,
+            num_kv_heads,
+            head_dim,
         );
     }
 
     #[cfg(feature = "cuda")]
     {
-        let batch_i32 =
-            i32::try_from(batch).map_err(|_| FlashAttnError::Msg(format!("batch {batch} > i32")))?;
+        let batch_i32 = i32::try_from(batch)
+            .map_err(|_| FlashAttnError::Msg(format!("batch {batch} > i32")))?;
         let num_kv_heads_i32 = i32::try_from(num_kv_heads)
             .map_err(|_| FlashAttnError::Msg(format!("num_kv_heads {num_kv_heads} > i32")))?;
         let head_dim_i32 = i32::try_from(head_dim)
@@ -1018,6 +1073,10 @@ pub fn paged_kv_write_token_major_bf16_batch_slot_kt(
 /// upstream (caller sums dk/dv across groups if needed); this
 /// function only allocates expanded buffers matching the FFI's
 /// shape contract.
+///
+/// CUDA defaults to the fast non-deterministic FA2 backward accumulation path.
+/// Set `KILN_FLASH_ATTN_BWD_DETERMINISTIC=1` to opt into the deterministic
+/// split-accumulation path for exact replay/debug runs.
 #[allow(clippy::too_many_arguments)]
 #[cfg_attr(not(feature = "cuda"), allow(unused_variables))]
 pub fn flash_attn_bwd_kt(
@@ -1054,7 +1113,13 @@ pub fn flash_attn_bwd_kt(
     #[cfg(feature = "rocm")]
     if matches!(q.device(), KtDevice::Rocm(_)) {
         return crate::rocm_sdpa::flash_attn_bwd_rocm(
-            dout, q, k, v, softmax_lse, softmax_scale, causal,
+            dout,
+            q,
+            k,
+            v,
+            softmax_lse,
+            softmax_scale,
+            causal,
         );
     }
 
@@ -1090,6 +1155,7 @@ pub fn flash_attn_bwd_kt(
         let da_ptr = kiln_kt_bridge::cuda_output_device_ptr(&dq_accum);
 
         let raw_stream = q_st.cuda_stream_raw();
+        let deterministic = flash_attn_bwd_deterministic();
 
         let status = unsafe {
             kiln_flash_attn_bwd(
@@ -1112,7 +1178,7 @@ pub fn flash_attn_bwd_kt(
                 head_dim as i32,
                 softmax_scale,
                 if causal { 1 } else { 0 },
-                /* deterministic */ 1,
+                if deterministic { 1 } else { 0 },
                 raw_stream,
             )
         };

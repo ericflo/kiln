@@ -37,8 +37,8 @@
 //! `forward.rs:3454,3517` F32-promotion idiom.
 
 use crate::{
-    bail, dispatch2, BackwardOp, CpuStorage, DType, Determinism, DeviceOp2, Error, Layout, Result,
-    Storage, Tensor, TensorId,
+    BackwardOp, CpuStorage, DType, Determinism, DeviceOp2, Error, Layout, Result, Storage, Tensor,
+    TensorId, bail, dispatch2,
 };
 use std::sync::Arc;
 
@@ -246,6 +246,65 @@ pub fn matmul(a: &Tensor, b: &Tensor) -> Result<Tensor> {
     dispatch2(&MatmulOp, a, b)
 }
 
+/// Compute `a^T @ b` over the trailing matrix axes.
+///
+/// Input shapes are `[..., K, M]` and `[..., K, N]`; the output shape is
+/// `[..., M, N]`. Backends may consume the transposed left operand directly.
+/// The generic fallback materialises `a.transpose(-2, -1).contiguous()` and
+/// then calls [`matmul`].
+pub fn matmul_lhs_transposed(a: &Tensor, b: &Tensor) -> Result<Tensor> {
+    let ar = a.rank();
+    let br = b.rank();
+    if ar < 2 || br < 2 {
+        bail!(
+            "matmul_lhs_transposed: both inputs must have rank >= 2, got a.rank={ar}, b.rank={br}"
+        );
+    }
+    if ar != br {
+        bail!("matmul_lhs_transposed: rank mismatch: a={ar}, b={br}");
+    }
+    let a_shape = a.shape();
+    let b_shape = b.shape();
+    for axis in 0..ar - 2 {
+        if a_shape[axis] != b_shape[axis] {
+            bail!(
+                "matmul_lhs_transposed: leading axis {axis} mismatch: a={}, b={}",
+                a_shape[axis],
+                b_shape[axis]
+            );
+        }
+    }
+    let k_a = a_shape[ar - 2];
+    let k_b = b_shape[br - 2];
+    if k_a != k_b {
+        bail!(
+            "matmul_lhs_transposed: contraction dim mismatch: a.shape[..,K,M] K={k_a} vs b.shape[..,K,N] K={k_b}"
+        );
+    }
+    if a.dtype() != b.dtype() {
+        bail!(
+            "matmul_lhs_transposed: dtype mismatch: a={} {a_shape:?}, b={} {b_shape:?}",
+            a.dtype(),
+            b.dtype()
+        );
+    }
+
+    #[cfg(feature = "cuda")]
+    {
+        if matches!(a.device(), crate::Device::Cuda(_))
+            && matches!(b.device(), crate::Device::Cuda(_))
+            && a.is_contiguous()
+            && b.is_contiguous()
+            && matches!(a.dtype(), DType::F32 | DType::BF16 | DType::F16)
+        {
+            return crate::cuda_matmul_lhs_transposed(a, b);
+        }
+    }
+
+    let a_t = a.transpose(ar - 2, ar - 1)?.contiguous()?;
+    matmul(&a_t, b)
+}
+
 // ----------------------------------------------------------------------
 // Helpers
 // ----------------------------------------------------------------------
@@ -253,14 +312,10 @@ pub fn matmul(a: &Tensor, b: &Tensor) -> Result<Tensor> {
 fn validate(a: &Tensor, b: &Tensor) -> Result<()> {
     let (ar, br) = (a.rank(), b.rank());
     if ar < 2 || br < 2 {
-        bail!(
-            "MatmulOp: both inputs must have rank ≥ 2, got a.rank={ar}, b.rank={br}"
-        );
+        bail!("MatmulOp: both inputs must have rank ≥ 2, got a.rank={ar}, b.rank={br}");
     }
     if ar != br {
-        bail!(
-            "MatmulOp: rank mismatch: a={ar}, b={br} (Phase 1.18 requires equal ranks)"
-        );
+        bail!("MatmulOp: rank mismatch: a={ar}, b={br} (Phase 1.18 requires equal ranks)");
     }
     let a_shape = a.shape();
     let b_shape = b.shape();
@@ -276,9 +331,7 @@ fn validate(a: &Tensor, b: &Tensor) -> Result<()> {
     let k_a = a_shape[ar - 1];
     let k_b = b_shape[br - 2];
     if k_a != k_b {
-        bail!(
-            "MatmulOp: contraction dim mismatch: a.shape[..,K]={k_a} vs b.shape[..,K,N]={k_b}"
-        );
+        bail!("MatmulOp: contraction dim mismatch: a.shape[..,K]={k_a} vs b.shape[..,K,N]={k_b}");
     }
     if a.dtype() != b.dtype() {
         bail!(
@@ -288,10 +341,7 @@ fn validate(a: &Tensor, b: &Tensor) -> Result<()> {
         );
     }
     if !matches!(a.dtype(), DType::F32 | DType::BF16 | DType::F16) {
-        bail!(
-            "MatmulOp: dtype must be F32/BF16/F16, got {}",
-            a.dtype()
-        );
+        bail!("MatmulOp: dtype must be F32/BF16/F16, got {}", a.dtype());
     }
     if !a.is_contiguous() {
         bail!("MatmulOp: a must be contiguous");
@@ -339,14 +389,12 @@ fn matmul_2d_into(
         }
         DType::BF16 => {
             for i in 0..m * n {
-                out[i * 2..i * 2 + 2]
-                    .copy_from_slice(&half::bf16::from_f32(acc[i]).to_le_bytes());
+                out[i * 2..i * 2 + 2].copy_from_slice(&half::bf16::from_f32(acc[i]).to_le_bytes());
             }
         }
         DType::F16 => {
             for i in 0..m * n {
-                out[i * 2..i * 2 + 2]
-                    .copy_from_slice(&half::f16::from_f32(acc[i]).to_le_bytes());
+                out[i * 2..i * 2 + 2].copy_from_slice(&half::f16::from_f32(acc[i]).to_le_bytes());
             }
         }
         _ => unreachable!("validate() rejects non-float dtypes"),
@@ -393,13 +441,75 @@ mod tests {
     }
 
     #[test]
+    fn matmul_lhs_transposed_2d_cpu() {
+        // A stored as [K=3, M=2]; A^T @ B gives [M=2, N=2].
+        let a = Tensor::from_slice(&[1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0], vec![3, 2]).unwrap();
+        let b = Tensor::from_slice(&[7.0f32, 8.0, 9.0, 10.0, 11.0, 12.0], vec![3, 2]).unwrap();
+        let c = matmul_lhs_transposed(&a, &b).unwrap();
+        assert_eq!(c.shape(), &[2, 2]);
+        assert_eq!(read_f32(&c), vec![89.0, 98.0, 116.0, 128.0]);
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn matmul_lhs_transposed_cuda_bf16_matches_cpu() {
+        if crate::primary_cuda_context(0).is_err() {
+            eprintln!("skip: no CUDA device");
+            return;
+        }
+        let dev = crate::Device::Cuda(0);
+        let (k, m, n) = (5usize, 3usize, 4usize);
+        let a_data: Vec<f32> = (0..k * m).map(|i| (i as f32) * 0.125 - 0.75).collect();
+        let b_data: Vec<f32> = (0..k * n).map(|i| ((i % 7) as f32) * 0.25 - 0.5).collect();
+
+        let a_cpu = Tensor::from_slice(&a_data, vec![k, m])
+            .unwrap()
+            .to_dtype(DType::BF16)
+            .unwrap();
+        let b_cpu = Tensor::from_slice(&b_data, vec![k, n])
+            .unwrap()
+            .to_dtype(DType::BF16)
+            .unwrap();
+        let expected = matmul_lhs_transposed(&a_cpu, &b_cpu)
+            .unwrap()
+            .to_dtype(DType::F32)
+            .unwrap()
+            .to_vec::<f32>()
+            .unwrap();
+
+        let a_cuda = Tensor::from_vec_on(dev, a_data, vec![k, m])
+            .unwrap()
+            .to_dtype(DType::BF16)
+            .unwrap();
+        let b_cuda = Tensor::from_vec_on(dev, b_data, vec![k, n])
+            .unwrap()
+            .to_dtype(DType::BF16)
+            .unwrap();
+        let got = matmul_lhs_transposed(&a_cuda, &b_cuda)
+            .unwrap()
+            .to_device(crate::Device::Cpu)
+            .unwrap()
+            .to_dtype(DType::F32)
+            .unwrap()
+            .to_vec::<f32>()
+            .unwrap();
+
+        assert_eq!(got.len(), expected.len());
+        let mut max_abs_err = 0.0f32;
+        for (g, e) in got.iter().zip(expected.iter()) {
+            max_abs_err = max_abs_err.max((g - e).abs());
+        }
+        eprintln!("matmul_lhs_transposed_cuda_bf16_matches_cpu: max_abs_err={max_abs_err:e}");
+        assert!(
+            max_abs_err <= 0.5,
+            "CUDA lhs-transposed BF16 matmul diverged: max_abs_err={max_abs_err}"
+        );
+    }
+
+    #[test]
     fn matmul_identity_left() {
         // I @ B = B for I = identity(M).
-        let identity = Tensor::from_slice(
-            &[1.0f32, 0.0, 0.0, 1.0],
-            vec![2, 2],
-        )
-        .unwrap();
+        let identity = Tensor::from_slice(&[1.0f32, 0.0, 0.0, 1.0], vec![2, 2]).unwrap();
         let b = Tensor::from_slice(&[3.0f32, 7.0, 5.0, 11.0], vec![2, 2]).unwrap();
         let c = matmul(&identity, &b).unwrap();
         assert_eq!(read_f32(&c), vec![3.0, 7.0, 5.0, 11.0]);
@@ -546,7 +656,11 @@ mod tests {
         assert_eq!(c_vk.shape(), &[m, n]);
         assert_eq!(c_vk.device(), dev, "result must stay on Vulkan");
 
-        let got = c_vk.to_device(crate::Device::Cpu).unwrap().to_vec::<f32>().unwrap();
+        let got = c_vk
+            .to_device(crate::Device::Cpu)
+            .unwrap()
+            .to_vec::<f32>()
+            .unwrap();
         assert_eq!(got.len(), ref_vals.len());
         let mut max_abs_err = 0.0f32;
         for (g, r) in got.iter().zip(ref_vals.iter()) {
@@ -579,7 +693,9 @@ mod tests {
         // [2, 3, 4] @ [2, 4, 5] = [2, 3, 5] — rank-3 batched.
         let (bsz, m, k, n) = (2usize, 3usize, 4usize, 5usize);
         let a_data: Vec<f32> = (0..bsz * m * k).map(|i| (i as f32) * 0.05 - 0.7).collect();
-        let b_data: Vec<f32> = (0..bsz * k * n).map(|i| ((i % 5) as f32) * 0.3 - 0.6).collect();
+        let b_data: Vec<f32> = (0..bsz * k * n)
+            .map(|i| ((i % 5) as f32) * 0.3 - 0.6)
+            .collect();
 
         let a_cpu = Tensor::from_slice(&a_data, vec![bsz, m, k]).unwrap();
         let b_cpu = Tensor::from_slice(&b_data, vec![bsz, k, n]).unwrap();
@@ -598,7 +714,11 @@ mod tests {
         let c_vk = matmul(&a_vk, &b_vk).unwrap();
         assert_eq!(c_vk.shape(), &[bsz, m, n]);
         assert_eq!(c_vk.device(), dev, "batched result must stay on Vulkan");
-        let got = c_vk.to_device(crate::Device::Cpu).unwrap().to_vec::<f32>().unwrap();
+        let got = c_vk
+            .to_device(crate::Device::Cpu)
+            .unwrap()
+            .to_vec::<f32>()
+            .unwrap();
         let mut max_abs_err = 0.0f32;
         for (g, r) in got.iter().zip(ref_vals.iter()) {
             max_abs_err = max_abs_err.max((g - r).abs());
@@ -628,10 +748,12 @@ mod tests {
 
         // Q·Kᵀ-like: [B=2, H=3, S=5, D=4] @ [2, 3, 4, 6] = [2, 3, 5, 6].
         let (b_, h, s, d, n) = (2usize, 3usize, 5usize, 4usize, 6usize);
-        let a_data: Vec<f32> =
-            (0..b_ * h * s * d).map(|i| ((i % 11) as f32) * 0.07 - 0.4).collect();
-        let b_data: Vec<f32> =
-            (0..b_ * h * d * n).map(|i| ((i % 9) as f32) * 0.13 - 0.55).collect();
+        let a_data: Vec<f32> = (0..b_ * h * s * d)
+            .map(|i| ((i % 11) as f32) * 0.07 - 0.4)
+            .collect();
+        let b_data: Vec<f32> = (0..b_ * h * d * n)
+            .map(|i| ((i % 9) as f32) * 0.13 - 0.55)
+            .collect();
 
         let a_cpu = Tensor::from_slice(&a_data, vec![b_, h, s, d]).unwrap();
         let b_cpu = Tensor::from_slice(&b_data, vec![b_, h, d, n]).unwrap();
@@ -642,7 +764,11 @@ mod tests {
         let c_vk = matmul(&a_vk, &b_vk).unwrap();
         assert_eq!(c_vk.shape(), &[b_, h, s, n]);
         assert_eq!(c_vk.device(), dev, "rank-4 result must stay on Vulkan");
-        let got = c_vk.to_device(crate::Device::Cpu).unwrap().to_vec::<f32>().unwrap();
+        let got = c_vk
+            .to_device(crate::Device::Cpu)
+            .unwrap()
+            .to_vec::<f32>()
+            .unwrap();
         let mut max_abs_err = 0.0f32;
         for (g, r) in got.iter().zip(ref_vals.iter()) {
             max_abs_err = max_abs_err.max((g - r).abs());
@@ -688,7 +814,12 @@ mod tests {
             .unwrap()
             .to_dtype(DType::BF16)
             .unwrap();
-        let ref_vals = read_f32(&matmul(&a_cpu, &b_cpu).unwrap().to_dtype(DType::F32).unwrap());
+        let ref_vals = read_f32(
+            &matmul(&a_cpu, &b_cpu)
+                .unwrap()
+                .to_dtype(DType::F32)
+                .unwrap(),
+        );
 
         let a_vk = Tensor::from_vec_on(dev, a_data.clone(), vec![b_, h, s, d])
             .unwrap()

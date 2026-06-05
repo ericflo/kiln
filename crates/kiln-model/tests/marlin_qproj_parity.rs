@@ -181,6 +181,8 @@ fn run_parity(device: &Device, m: usize, k: usize, n: usize) {
         v_proj_t: q_proj_t_kt.clone(),
         qkv_proj_t: None,
         o_proj_t: q_proj_t_kt.clone(),
+        qkv_proj_w8: None,
+        o_proj_w8: None,
         q_proj_marlin: None, // KILN_W4A16 unset path
     };
     let marlin_weights = kiln_model::forward::GpuFullAttentionWeights {
@@ -195,6 +197,8 @@ fn run_parity(device: &Device, m: usize, k: usize, n: usize) {
         v_proj_t: q_proj_t_kt.clone(),
         qkv_proj_t: None,
         o_proj_t: q_proj_t_kt.clone(),
+        qkv_proj_w8: None,
+        o_proj_w8: None,
         q_proj_marlin: Some(packed), // KILN_W4A16 set path
     };
 
@@ -229,8 +233,7 @@ fn run_parity(device: &Device, m: usize, k: usize, n: usize) {
 fn q_proj_marlin_parity_qwen35_4b() {
     #[cfg(feature = "cuda")]
     {
-        let device = match (kiln_tensor::primary_cuda_context(0).is_ok())
-            .then_some(Device::Cuda(0))
+        let device = match (kiln_tensor::primary_cuda_context(0).is_ok()).then_some(Device::Cuda(0))
         {
             Some(d) => d,
             None => {

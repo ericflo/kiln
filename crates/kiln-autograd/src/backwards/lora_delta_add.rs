@@ -47,12 +47,14 @@
 //! grad_A    = grad_h^T @ x             shape [rank, in_features]
 //! ```
 //!
-//! The transposes used inside the backward (`grad_d^T`, `grad_h^T`) are
-//! zero-copy views materialised via `.contiguous()` before the matmul,
-//! matching the existing `MatmulBackward` reference. `h` is recomputed
-//! cheaply from saved `x` and `A` rather than carried forward — at the
-//! shapes LoRA exercises (`rank` typically 16..64), the extra matmul is
-//! a fraction of a percent of the layer cost.
+//! The transposed-left products (`grad_h^T @ x`, `grad_d^T @ h`) go
+//! through `matmul_lhs_transposed`, so backends with a transposed-GEMM
+//! path can avoid materialising those views. This is especially important
+//! for `grad_d^T @ h`, where the materialised view is
+//! `[out_features, rows]`. `h` is recomputed cheaply from saved `x` and
+//! `A` rather than carried forward — at the shapes LoRA exercises (`rank`
+//! typically 16..64), the extra matmul is a fraction of a percent of the
+//! layer cost.
 //!
 //! # Saved tensors
 //!
@@ -67,10 +69,19 @@
 //! the tape node. The tape walker pairs each `Some(grad)` with the
 //! corresponding `input_ids[i]` it captured at record time.
 
-use kiln_tensor::ops::{matmul, mul_scalar};
-use kiln_tensor::{bail, Result, Tensor};
+use kiln_tensor::ops::{matmul, matmul_lhs_transposed, mul_scalar};
+use kiln_tensor::{Result, Tensor, bail};
 
 use crate::BackwardOp;
+
+fn trace_enabled(var: &str) -> bool {
+    std::env::var(var)
+        .map(|v| {
+            let v = v.trim().to_ascii_lowercase();
+            !(v.is_empty() || v == "0" || v == "false" || v == "no" || v == "off")
+        })
+        .unwrap_or(false)
+}
 
 /// Fused backward for `out = base + scale * (x @ A^T @ B^T)`.
 ///
@@ -145,14 +156,10 @@ impl BackwardOp for LoraDeltaAddBackward {
         let (rank, a_in) = (a.shape()[0], a.shape()[1]);
         let (out_features, b_rank) = (b.shape()[0], b.shape()[1]);
         if a_in != in_features {
-            bail!(
-                "LoraDeltaAddBackward: A.in_features {a_in} != x.in_features {in_features}"
-            );
+            bail!("LoraDeltaAddBackward: A.in_features {a_in} != x.in_features {in_features}");
         }
         if b_rank != rank {
-            bail!(
-                "LoraDeltaAddBackward: B.rank {b_rank} != A.rank {rank}"
-            );
+            bail!("LoraDeltaAddBackward: B.rank {b_rank} != A.rank {rank}");
         }
         if grad_output.shape()[0] != rows || grad_output.shape()[1] != out_features {
             bail!(
@@ -164,27 +171,52 @@ impl BackwardOp for LoraDeltaAddBackward {
 
         // ---- backward composition ------------------------------------
         //
+        let trace_timings = trace_enabled("KILN_TRACE_LORA_DELTA_BWD_TIMINGS");
+        let mut stage_started = std::time::Instant::now();
+        let mut log_stage = |phase: &str, tensor: &Tensor| {
+            if trace_timings {
+                eprintln!(
+                    "kiln_lora_delta_bwd_timing phase={} rows={} in_features={} \
+                     out_features={} rank={} out_shape={:?} out_dtype={:?} elapsed_ms={:.3}",
+                    phase,
+                    rows,
+                    in_features,
+                    out_features,
+                    rank,
+                    tensor.shape(),
+                    tensor.dtype(),
+                    stage_started.elapsed().as_secs_f64() * 1000.0,
+                );
+                stage_started = std::time::Instant::now();
+            }
+        };
+
         // Recompute h = x @ A^T.  (A^T = transpose then contiguous; the
         // transpose is zero-copy.)
         let a_t = a.transpose(0, 1)?.contiguous()?; // [in_features, rank]
+        log_stage("a_t_contiguous", &a_t);
         let h = matmul(&x, &a_t)?; // [rows, rank]
+        log_stage("h_matmul", &h);
 
         // grad_d = scale * grad_out.  Single elementwise pass.
         let g_scaled = mul_scalar(grad_output, self.scale)?; // [rows, out_features]
+        log_stage("grad_d_scale", &g_scaled);
 
         // grad_h = grad_d @ B  (B is [out_features, rank]).
         let grad_h = matmul(&g_scaled, &b)?; // [rows, rank]
+        log_stage("grad_h_matmul", &grad_h);
 
         // grad_x = grad_h @ A  (A is [rank, in_features]).
         let grad_x = matmul(&grad_h, &a)?; // [rows, in_features]
+        log_stage("grad_x_matmul", &grad_x);
 
         // grad_A = grad_h^T @ x  (shape [rank, in_features]).
-        let grad_h_t = grad_h.transpose(0, 1)?.contiguous()?; // [rank, rows]
-        let grad_a = matmul(&grad_h_t, &x)?; // [rank, in_features]
+        let grad_a = matmul_lhs_transposed(&grad_h, &x)?; // [rank, in_features]
+        log_stage("grad_a_lhs_t_matmul", &grad_a);
 
         // grad_B = grad_d^T @ h  (shape [out_features, rank]).
-        let g_scaled_t = g_scaled.transpose(0, 1)?.contiguous()?; // [out_features, rows]
-        let grad_b = matmul(&g_scaled_t, &h)?; // [out_features, rank]
+        let grad_b = matmul_lhs_transposed(&g_scaled, &h)?; // [out_features, rank]
+        log_stage("grad_b_lhs_t_matmul", &grad_b);
 
         // grad_base = grad_out  (the additive identity passes the
         // upstream grad straight through with no allocation).
@@ -205,8 +237,8 @@ impl BackwardOp for LoraDeltaAddBackward {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use kiln_tensor::ops::{add, matmul as kt_matmul, mul_scalar as kt_mul_scalar};
     use kiln_tensor::CpuStorage;
+    use kiln_tensor::ops::{add, matmul as kt_matmul, mul_scalar as kt_mul_scalar};
 
     fn read_f32(t: &Tensor) -> Vec<f32> {
         let cpu = t.storage().as_any().downcast_ref::<CpuStorage>().unwrap();
@@ -267,7 +299,10 @@ mod tests {
         };
         let dy = t2(&[0.0; 10], (2, 5));
         let e2 = bo2.apply(&dy).unwrap_err().to_string();
-        assert!(e2.contains("in_features"), "expected in_features error: {e2}");
+        assert!(
+            e2.contains("in_features"),
+            "expected in_features error: {e2}"
+        );
     }
 
     /// End-to-end shape and zero-grad-out sanity: with grad_out = 0, all
@@ -382,9 +417,15 @@ mod tests {
         let rank = 2;
         let out_features = 3;
         let scale = 0.75_f32;
-        let x_data: Vec<f32> = (0..rows * in_features).map(|i| (i as f32 + 1.0) * 0.1).collect();
-        let a_data: Vec<f32> = (0..rank * in_features).map(|i| 0.2 - (i as f32) * 0.05).collect();
-        let b_data: Vec<f32> = (0..out_features * rank).map(|i| (i as f32) * 0.04 - 0.1).collect();
+        let x_data: Vec<f32> = (0..rows * in_features)
+            .map(|i| (i as f32 + 1.0) * 0.1)
+            .collect();
+        let a_data: Vec<f32> = (0..rank * in_features)
+            .map(|i| 0.2 - (i as f32) * 0.05)
+            .collect();
+        let b_data: Vec<f32> = (0..out_features * rank)
+            .map(|i| (i as f32) * 0.04 - 0.1)
+            .collect();
         let x = t2(&x_data, (rows, in_features));
         let a = t2(&a_data, (rank, in_features));
         let b = t2(&b_data, (out_features, rank));

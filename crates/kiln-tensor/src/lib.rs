@@ -121,15 +121,10 @@ pub use capture_alloc::{
 #[cfg(feature = "cuda")]
 pub use cuda_allocator::CudaAllocator;
 #[cfg(feature = "cuda")]
-pub use cuda_stream_priority::{
-    PrioritizedCudaStream, StreamPriority, cuda_stream_priority_range,
-    new_cuda_stream_with_priority,
-};
-#[cfg(feature = "cuda")]
 pub use cuda_matmul::{
-    cublaslt_cache_path, cuda_matmul, cuda_matmul_into, cuda_matmul_with_bias,
-    flush_algo_cache_to_disk, load_algo_cache_from_disk, restore_into_shared_cache,
-    snapshot_algo_cache,
+    cublaslt_cache_path, cuda_matmul, cuda_matmul_into, cuda_matmul_lhs_transposed,
+    cuda_matmul_with_bias, flush_algo_cache_to_disk, load_algo_cache_from_disk,
+    restore_into_shared_cache, snapshot_algo_cache,
 };
 #[cfg(feature = "cuda")]
 pub use cuda_storage::{
@@ -140,12 +135,17 @@ pub use cuda_storage::{
     cuda_flce_grad_logits_chunk_inplace, cuda_grpo_grad_logits_chunk_inplace,
     cuda_index_select_axis_n, cuda_index_select_dim0, cuda_is_finite, cuda_l2norm_last_axis,
     cuda_layernorm_last_axis, cuda_lerp, cuda_masked_fill, cuda_max_axis, cuda_mean_axis,
-    cuda_mean_last_axis, cuda_min_axis, cuda_mem_get_info, cuda_rmsnorm_last_axis, cuda_rope,
+    cuda_mean_last_axis, cuda_mem_get_info, cuda_min_axis, cuda_rmsnorm_last_axis, cuda_rope,
     cuda_scalar_op, cuda_scatter_add_dim0, cuda_set_pool_release_threshold, cuda_slice_set_dim0,
-    cuda_softmax_last_axis, cuda_sum_axis, cuda_sum_last_axis,
-    cuda_sum_squared_last_axis, cuda_synchronize_default_stream, cuda_to_host_copy,
-    cuda_topk_last_axis, cuda_trim_pool, cuda_where_select, cuda_write_host_in_place,
-    cuda_zeros_ctx, host_to_cuda_copy, host_to_cuda_copy_ctx, primary_cuda_context,
+    cuda_softmax_last_axis, cuda_sum_axis, cuda_sum_last_axis, cuda_sum_squared_last_axis,
+    cuda_synchronize_default_stream, cuda_to_host_copy, cuda_topk_last_axis, cuda_trim_pool,
+    cuda_where_select, cuda_write_host_in_place, cuda_zeros_ctx, host_to_cuda_copy,
+    host_to_cuda_copy_ctx, primary_cuda_context,
+};
+#[cfg(feature = "cuda")]
+pub use cuda_stream_priority::{
+    PrioritizedCudaStream, StreamPriority, cuda_stream_priority_range,
+    new_cuda_stream_with_priority,
 };
 #[cfg(feature = "cuda")]
 pub use fp8::{
@@ -165,10 +165,11 @@ pub use metal_matmul::{
 #[cfg(feature = "metal")]
 pub use metal_storage::{
     MetalStorage, host_to_metal_copy, metal_activation_unary, metal_adamw_step, metal_cast,
-    metal_compare, metal_copy_in_place, metal_cumsum_axis, metal_deep_copy, metal_elementwise_binary,
-    metal_index_select_dim0, metal_layernorm_last_axis, metal_log_softmax_last_axis,
-    metal_rmsnorm_last_axis, metal_sdpa_last_axis, metal_softmax_last_axis, metal_to_host_copy,
-    metal_where_select, metal_write_host_in_place, primary_metal_companion,
+    metal_compare, metal_copy_in_place, metal_cumsum_axis, metal_deep_copy,
+    metal_elementwise_binary, metal_index_select_dim0, metal_layernorm_last_axis,
+    metal_log_softmax_last_axis, metal_rmsnorm_last_axis, metal_sdpa_last_axis,
+    metal_softmax_last_axis, metal_to_host_copy, metal_where_select, metal_write_host_in_place,
+    primary_metal_companion,
 };
 #[cfg(feature = "rocm")]
 pub use rocm_allocator::RocmAllocator;

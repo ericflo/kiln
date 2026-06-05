@@ -19,8 +19,8 @@
 //! the tape is stale (anti-pattern 16 violation).
 
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use kiln_tensor::{Error, Result, Tensor, TensorId};
 
@@ -181,6 +181,12 @@ impl Tape {
 
         // #1082 CP-4 diagnostic: tape size + per-node processing trace.
         let cp4_dbg = std::env::var("KILN_CP4_DEBUG").is_ok();
+        let trace_node_timings = std::env::var("KILN_TRACE_TAPE_BACKWARD_TIMINGS")
+            .map(|v| {
+                let v = v.trim().to_ascii_lowercase();
+                !(v.is_empty() || v == "0" || v == "false" || v == "no" || v == "off")
+            })
+            .unwrap_or(false);
         if cp4_dbg {
             eprintln!(
                 "[CP4-DEBUG] backward_with_seeds: {} nodes on tape, {} seeds",
@@ -192,7 +198,10 @@ impl Tape {
                     "[CP4-DEBUG]   node[{i}] op={} out={} ins={:?}",
                     node.op.name(),
                     node.output_id.as_raw(),
-                    node.input_ids.iter().map(|id| id.as_raw()).collect::<Vec<_>>(),
+                    node.input_ids
+                        .iter()
+                        .map(|id| id.as_raw())
+                        .collect::<Vec<_>>(),
                 );
             }
         }
@@ -232,7 +241,33 @@ impl Tape {
             };
 
             // 3. Compute per-input grads.
+            let node_started = if trace_node_timings {
+                Some(std::time::Instant::now())
+            } else {
+                None
+            };
+            let grad_shape = if trace_node_timings {
+                Some(grad_output.shape().to_vec())
+            } else {
+                None
+            };
+            let grad_dtype = if trace_node_timings {
+                Some(grad_output.dtype())
+            } else {
+                None
+            };
             let per_input = node.op.apply(&grad_output)?;
+            if let Some(started) = node_started {
+                eprintln!(
+                    "kiln_tape_backward_timing node_index={} op={} grad_shape={:?} \
+                     grad_dtype={:?} elapsed_ms={:.3}",
+                    node_index,
+                    node.op.name(),
+                    grad_shape.unwrap_or_default(),
+                    grad_dtype,
+                    started.elapsed().as_secs_f64() * 1000.0,
+                );
+            }
             if per_input.len() != node.input_count_decl() {
                 return Err(Error::Msg(format!(
                     "kiln_autograd: tape node {} returned {} grads for {} inputs",
@@ -251,7 +286,9 @@ impl Tape {
             //     debug trap stays opt-in instead of breaking backward.
             if anomaly {
                 for (i, maybe_grad) in per_input.iter().enumerate() {
-                    let Some(g) = maybe_grad.as_ref() else { continue };
+                    let Some(g) = maybe_grad.as_ref() else {
+                        continue;
+                    };
                     match g.all_finite() {
                         Ok(true) => {}
                         Ok(false) => {
@@ -335,7 +372,7 @@ mod tests {
     use crate::BackwardOp;
     use kiln_tensor::{DType, Tensor};
     use std::ffi::OsString;
-    use std::panic::{catch_unwind, AssertUnwindSafe};
+    use std::panic::{AssertUnwindSafe, catch_unwind};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -392,7 +429,9 @@ mod tests {
         fn apply(&self, grad_output: &Tensor) -> Result<Vec<Option<Tensor>>> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             // Echo grad_output as each input's gradient.
-            Ok((0..self.input_count).map(|_| Some(grad_output.clone())).collect())
+            Ok((0..self.input_count)
+                .map(|_| Some(grad_output.clone()))
+                .collect())
         }
     }
 

@@ -100,7 +100,12 @@
 //! * Tape-routing for rotary / layernorm / fused-attn — non-trivial
 //!   substrate decisions about which kernels carry their own backward.
 
-#![cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
+#![cfg(any(
+    feature = "cuda",
+    feature = "metal",
+    feature = "vulkan",
+    feature = "rocm"
+))]
 
 use anyhow::{Context, Result};
 use kiln_autograd::{
@@ -111,9 +116,9 @@ use kiln_autograd::{
 
 use crate::backend::BackendRuntime;
 use crate::forward::{
-    gdn_gated_rms_norm_backward_no_grad, gdn_l2_norm_scale_backward_no_grad,
+    GDN_CHUNK_SIZE, gdn_gated_rms_norm_backward_no_grad, gdn_l2_norm_scale_backward_no_grad,
     gdn_recurrent_backward_no_grad, gdn_recurrent_forward_from_parts,
-    sdpa_fallback_backward_no_grad, GDN_CHUNK_SIZE,
+    sdpa_fallback_backward_no_grad,
 };
 use crate::lora_loader::LoraProjectionWeights;
 
@@ -138,7 +143,6 @@ pub use kiln_autograd::{tape_forward_enabled, with_active_tape, with_thread_loca
 pub fn tape_scope_active() -> bool {
     with_active_tape(|_| ()).is_some()
 }
-
 
 /// kt-native SiLU tape recorder (#1082 seam flip) — the kt-native SiLU tape recorder. Takes the kt activation directly and records a
 /// `SiluBackward` onto the active tape with **no candle round-trip** (no
@@ -339,8 +343,8 @@ impl BackwardOp for RmsNormKtBackward {
         &self,
         grad_output: &kiln_tensor::Tensor,
     ) -> kiln_tensor::Result<Vec<Option<kiln_tensor::Tensor>>> {
-        use kiln_tensor::ops::{add_scalar, cast, mul, mul_scalar, sqrt, sum_axis};
         use kiln_tensor::DType;
+        use kiln_tensor::ops::{add_scalar, cast, mul, mul_scalar, sqrt, sum_axis};
 
         let dt = self.x.dtype();
         let shape = self.x.shape().to_vec();
@@ -356,8 +360,7 @@ impl BackwardOp for RmsNormKtBackward {
 
         // r = sqrt(mean(x²)+eps), shape [..., 1] for broadcast.
         let xsq = mul(&xf, &xf).map_err(map)?;
-        let mean_sq =
-            mul_scalar(&sum_axis(&xsq, last).map_err(map)?, d_inv).map_err(map)?;
+        let mean_sq = mul_scalar(&sum_axis(&xsq, last).map_err(map)?, d_inv).map_err(map)?;
         let mut r_shape = shape.clone();
         r_shape[last] = 1;
         let r = sqrt(&add_scalar(&mean_sq, self.eps).map_err(map)?)
@@ -421,9 +424,19 @@ pub fn try_tape_rms_norm_kt(
     if !tape_forward_enabled() {
         return Ok(None);
     }
-    if !matches!(x.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_) | kiln_tensor::Device::Rocm(_))
-        || !matches!(weight.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_) | kiln_tensor::Device::Rocm(_))
-    {
+    if !matches!(
+        x.device(),
+        kiln_tensor::Device::Cuda(_)
+            | kiln_tensor::Device::Metal(_)
+            | kiln_tensor::Device::Vulkan(_)
+            | kiln_tensor::Device::Rocm(_)
+    ) || !matches!(
+        weight.device(),
+        kiln_tensor::Device::Cuda(_)
+            | kiln_tensor::Device::Metal(_)
+            | kiln_tensor::Device::Vulkan(_)
+            | kiln_tensor::Device::Rocm(_)
+    ) {
         return Ok(None);
     }
     // (#1443 step 3) Mixed-precision RMSNorm on Vulkan: F32 ACTIVATION `x` × a
@@ -443,7 +456,10 @@ pub fn try_tape_rms_norm_kt(
     if weight.rank() != 1
         || x.rank() == 0
         || *x.shape().last().unwrap() != weight.shape()[0]
-        || !matches!(x.dtype(), kiln_tensor::DType::BF16 | kiln_tensor::DType::F32)
+        || !matches!(
+            x.dtype(),
+            kiln_tensor::DType::BF16 | kiln_tensor::DType::F32
+        )
         || (x.dtype() != weight.dtype() && !vk_f32x_bf16w)
         || !x.is_contiguous()
         || !weight.is_contiguous()
@@ -718,7 +734,13 @@ pub fn try_tape_transpose_kt(
     if !tape_forward_enabled() {
         return Ok(None);
     }
-    if !matches!(x.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_) | kiln_tensor::Device::Rocm(_)) {
+    if !matches!(
+        x.device(),
+        kiln_tensor::Device::Cuda(_)
+            | kiln_tensor::Device::Metal(_)
+            | kiln_tensor::Device::Vulkan(_)
+            | kiln_tensor::Device::Rocm(_)
+    ) {
         return Ok(None);
     }
     let rank = x.rank();
@@ -753,7 +775,13 @@ pub fn try_tape_reshape_kt(
     if !tape_forward_enabled() {
         return Ok(None);
     }
-    if !matches!(x.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_) | kiln_tensor::Device::Rocm(_)) {
+    if !matches!(
+        x.device(),
+        kiln_tensor::Device::Cuda(_)
+            | kiln_tensor::Device::Metal(_)
+            | kiln_tensor::Device::Vulkan(_)
+            | kiln_tensor::Device::Rocm(_)
+    ) {
         return Ok(None);
     }
     let input_shape = x.shape().to_vec();
@@ -785,7 +813,6 @@ pub fn try_tape_reshape_kt(
         None => Ok(None),
     }
 }
-
 
 /// kt-NATIVE backward for the fused "cross-entropy from full logits" loss node
 /// ([`try_tape_cross_entropy_from_logits_kt`]).
@@ -959,7 +986,13 @@ pub fn try_tape_cross_entropy_from_logits_kt(
         || dims[0] != 1
         || dims[1] != input_ids.len()
         || label_mask.len() != input_ids.len()
-        || !matches!(logits.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_) | kiln_tensor::Device::Rocm(_))
+        || !matches!(
+            logits.device(),
+            kiln_tensor::Device::Cuda(_)
+                | kiln_tensor::Device::Metal(_)
+                | kiln_tensor::Device::Vulkan(_)
+                | kiln_tensor::Device::Rocm(_)
+        )
     {
         return Ok(None);
     }
@@ -1145,11 +1178,31 @@ pub fn try_tape_lora_add_kt(
     if !tape_forward_enabled() || !tape_lora_add_enabled() {
         return Ok(None);
     }
-    if !matches!(base.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_) | kiln_tensor::Device::Rocm(_))
-        || !matches!(x.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_) | kiln_tensor::Device::Rocm(_))
-        || !matches!(proj.a.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_) | kiln_tensor::Device::Rocm(_))
-        || !matches!(proj.b.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_) | kiln_tensor::Device::Rocm(_))
-    {
+    if !matches!(
+        base.device(),
+        kiln_tensor::Device::Cuda(_)
+            | kiln_tensor::Device::Metal(_)
+            | kiln_tensor::Device::Vulkan(_)
+            | kiln_tensor::Device::Rocm(_)
+    ) || !matches!(
+        x.device(),
+        kiln_tensor::Device::Cuda(_)
+            | kiln_tensor::Device::Metal(_)
+            | kiln_tensor::Device::Vulkan(_)
+            | kiln_tensor::Device::Rocm(_)
+    ) || !matches!(
+        proj.a.device(),
+        kiln_tensor::Device::Cuda(_)
+            | kiln_tensor::Device::Metal(_)
+            | kiln_tensor::Device::Vulkan(_)
+            | kiln_tensor::Device::Rocm(_)
+    ) || !matches!(
+        proj.b.device(),
+        kiln_tensor::Device::Cuda(_)
+            | kiln_tensor::Device::Metal(_)
+            | kiln_tensor::Device::Vulkan(_)
+            | kiln_tensor::Device::Rocm(_)
+    ) {
         return Ok(None);
     }
     if base.dtype() != x.dtype() {
@@ -1356,9 +1409,19 @@ pub fn try_tape_lora_linear_kt(
     if !tape_forward_enabled() || !tape_lora_add_enabled() {
         return Ok(None);
     }
-    if !matches!(x.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_) | kiln_tensor::Device::Rocm(_))
-        || !matches!(weight_t.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_) | kiln_tensor::Device::Rocm(_))
-    {
+    if !matches!(
+        x.device(),
+        kiln_tensor::Device::Cuda(_)
+            | kiln_tensor::Device::Metal(_)
+            | kiln_tensor::Device::Vulkan(_)
+            | kiln_tensor::Device::Rocm(_)
+    ) || !matches!(
+        weight_t.device(),
+        kiln_tensor::Device::Cuda(_)
+            | kiln_tensor::Device::Metal(_)
+            | kiln_tensor::Device::Vulkan(_)
+            | kiln_tensor::Device::Rocm(_)
+    ) {
         return Ok(None);
     }
     if !matches!(
@@ -1546,8 +1609,7 @@ pub fn try_tape_lora_linear_kt(
         Some(result) => result,
         None => return Ok(None),
     };
-    let out_kt =
-        out_kt.context("tape_forward::try_tape_lora_linear_kt: kt-tape forward failed")?;
+    let out_kt = out_kt.context("tape_forward::try_tape_lora_linear_kt: kt-tape forward failed")?;
     // LoRA-Var grad mapping (kt-keyed) — ESSENTIAL or dA/dB never reach the optimiser.
     if let (Some(proj), Some(a_kt), Some(b_kt)) = (lora, a_kt.as_ref(), b_kt.as_ref()) {
         kiln_kt_bridge::tape_bridge::register_input_mapping_kt(a_kt.id(), proj.a.id());
@@ -1637,7 +1699,7 @@ impl BackwardOp for FlashAttnBackward {
         &self,
         grad_output: &kiln_tensor::Tensor,
     ) -> kiln_tensor::Result<Vec<Option<kiln_tensor::Tensor>>> {
-        use kiln_tensor::{bail, DType};
+        use kiln_tensor::{DType, bail};
 
         // FA bwd needs a BF16, compact-contiguous dout shaped like `out`.
         let dout = if grad_output.dtype() == DType::BF16 {
@@ -1649,6 +1711,19 @@ impl BackwardOp for FlashAttnBackward {
             dout
         } else {
             dout.contiguous()?
+        };
+
+        #[cfg(feature = "cuda")]
+        let trace_timings =
+            kiln_core::env_flag::env_flag("KILN_TRACE_FLASH_ATTN_BWD_TIMINGS", false);
+        #[cfg(feature = "cuda")]
+        let flash_started = if trace_timings {
+            if let kiln_tensor::Device::Cuda(i) = self.q.device() {
+                kiln_tensor::cuda_synchronize_default_stream(i)?;
+            }
+            Some(std::time::Instant::now())
+        } else {
+            None
         };
 
         let (dq, dk_exp, dv_exp) = kiln_flash_attn::flash_attn_bwd_kt(
@@ -1664,6 +1739,37 @@ impl BackwardOp for FlashAttnBackward {
         .map_err(|e| {
             kiln_tensor::Error::Msg(format!("FlashAttnBackward: flash_attn_bwd_kt: {e:?}"))
         })?;
+
+        #[cfg(feature = "cuda")]
+        if let Some(started) = flash_started {
+            if let kiln_tensor::Device::Cuda(i) = self.q.device() {
+                kiln_tensor::cuda_synchronize_default_stream(i)?;
+                let q_shape = self.q.shape();
+                let k_shape = self.k.shape();
+                eprintln!(
+                    "kiln_flash_attn_bwd_timing phase=ffi batch={} seq_len_q={} seq_len_k={} \
+                     heads_q={} heads_kv={} head_dim={} causal={} elapsed_ms={:.3}",
+                    q_shape[0],
+                    q_shape[1],
+                    k_shape[1],
+                    self.heads_q,
+                    self.heads_kv,
+                    q_shape[3],
+                    self.causal,
+                    started.elapsed().as_secs_f64() * 1000.0,
+                );
+            }
+        }
+
+        #[cfg(feature = "cuda")]
+        let collapse_started = if trace_timings && self.heads_kv != self.heads_q {
+            if let kiln_tensor::Device::Cuda(i) = self.q.device() {
+                kiln_tensor::cuda_synchronize_default_stream(i)?;
+            }
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
 
         // GQA collapse: dk/dv come back expanded to heads_q.
         let (dk, dv) = if self.heads_kv != self.heads_q {
@@ -1706,6 +1812,24 @@ impl BackwardOp for FlashAttnBackward {
         } else {
             (dk_exp, dv_exp)
         };
+
+        #[cfg(feature = "cuda")]
+        if let Some(started) = collapse_started {
+            if let kiln_tensor::Device::Cuda(i) = self.q.device() {
+                kiln_tensor::cuda_synchronize_default_stream(i)?;
+                let k_shape = self.k.shape();
+                eprintln!(
+                    "kiln_flash_attn_bwd_timing phase=gqa_collapse batch={} seq_len_k={} \
+                     heads_q={} heads_kv={} head_dim={} elapsed_ms={:.3}",
+                    k_shape[0],
+                    k_shape[1],
+                    self.heads_q,
+                    self.heads_kv,
+                    k_shape[3],
+                    started.elapsed().as_secs_f64() * 1000.0,
+                );
+            }
+        }
 
         Ok(vec![Some(dq), Some(dk), Some(dv)])
     }
@@ -1758,68 +1882,83 @@ pub fn try_tape_flash_attn_kt(
     }
     #[cfg(any(feature = "cuda", feature = "rocm"))]
     {
-    if q.dtype() != kiln_tensor::DType::BF16
-        || k.dtype() != kiln_tensor::DType::BF16
-        || v.dtype() != kiln_tensor::DType::BF16
-        || !matches!(q.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Rocm(_))
-        || !matches!(k.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Rocm(_))
-        || !matches!(v.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Rocm(_))
-        || !q.is_contiguous()
-        || !k.is_contiguous()
-        || !v.is_contiguous()
-        || !matches!(head_dim, 128 | 256)
-        || num_kv_heads == 0
-        || num_heads % num_kv_heads != 0
-    {
-        return Ok(None);
-    }
-    let Ok((bq, _sq, hq, dq_)) = q.dims4() else {
-        return Ok(None);
-    };
-    let Ok((bk, sk, hk, dk_)) = k.dims4() else {
-        return Ok(None);
-    };
-    let Ok((bv, sv, hv, dv_)) = v.dims4() else {
-        return Ok(None);
-    };
-    if bq != bk
-        || bq != bv
-        || sk != sv
-        || hq != num_heads
-        || hk != num_kv_heads
-        || hv != num_kv_heads
-        || dq_ != head_dim
-        || dk_ != head_dim
-        || dv_ != head_dim
-    {
-        return Ok(None);
-    }
-    let softmax_scale = 1.0 / (head_dim as f32).sqrt();
-    let causal = true;
-    match with_active_tape(|tape: &mut Tape| -> Result<_> {
-        let (out_kt, lse_kt) =
-            kiln_flash_attn::flash_attn_fwd_kt(q, k, v, softmax_scale, causal)
-                .map_err(|e| anyhow::anyhow!("kt flash_attn_fwd_kt: {e:?}"))?;
-        tape.record(
-            &out_kt,
-            &[q, k, v],
-            Box::new(FlashAttnBackward {
-                q: q.clone(),
-                k: k.clone(),
-                v: v.clone(),
-                out: out_kt.clone(),
-                softmax_lse: lse_kt,
-                scale: softmax_scale,
-                causal,
-                heads_q: num_heads,
-                heads_kv: num_kv_heads,
-            }),
-        );
-        Ok(out_kt)
-    }) {
-        Some(result) => Ok(Some(result?)),
-        None => Ok(None),
-    }
+        if q.dtype() != kiln_tensor::DType::BF16
+            || k.dtype() != kiln_tensor::DType::BF16
+            || v.dtype() != kiln_tensor::DType::BF16
+            || !matches!(
+                q.device(),
+                kiln_tensor::Device::Cuda(_)
+                    | kiln_tensor::Device::Metal(_)
+                    | kiln_tensor::Device::Rocm(_)
+            )
+            || !matches!(
+                k.device(),
+                kiln_tensor::Device::Cuda(_)
+                    | kiln_tensor::Device::Metal(_)
+                    | kiln_tensor::Device::Rocm(_)
+            )
+            || !matches!(
+                v.device(),
+                kiln_tensor::Device::Cuda(_)
+                    | kiln_tensor::Device::Metal(_)
+                    | kiln_tensor::Device::Rocm(_)
+            )
+            || !q.is_contiguous()
+            || !k.is_contiguous()
+            || !v.is_contiguous()
+            || !matches!(head_dim, 128 | 256)
+            || num_kv_heads == 0
+            || num_heads % num_kv_heads != 0
+        {
+            return Ok(None);
+        }
+        let Ok((bq, _sq, hq, dq_)) = q.dims4() else {
+            return Ok(None);
+        };
+        let Ok((bk, sk, hk, dk_)) = k.dims4() else {
+            return Ok(None);
+        };
+        let Ok((bv, sv, hv, dv_)) = v.dims4() else {
+            return Ok(None);
+        };
+        if bq != bk
+            || bq != bv
+            || sk != sv
+            || hq != num_heads
+            || hk != num_kv_heads
+            || hv != num_kv_heads
+            || dq_ != head_dim
+            || dk_ != head_dim
+            || dv_ != head_dim
+        {
+            return Ok(None);
+        }
+        let softmax_scale = 1.0 / (head_dim as f32).sqrt();
+        let causal = true;
+        match with_active_tape(|tape: &mut Tape| -> Result<_> {
+            let (out_kt, lse_kt) =
+                kiln_flash_attn::flash_attn_fwd_kt(q, k, v, softmax_scale, causal)
+                    .map_err(|e| anyhow::anyhow!("kt flash_attn_fwd_kt: {e:?}"))?;
+            tape.record(
+                &out_kt,
+                &[q, k, v],
+                Box::new(FlashAttnBackward {
+                    q: q.clone(),
+                    k: k.clone(),
+                    v: v.clone(),
+                    out: out_kt.clone(),
+                    softmax_lse: lse_kt,
+                    scale: softmax_scale,
+                    causal,
+                    heads_q: num_heads,
+                    heads_kv: num_kv_heads,
+                }),
+            );
+            Ok(out_kt)
+        }) {
+            Some(result) => Ok(Some(result?)),
+            None => Ok(None),
+        }
     }
 }
 
@@ -1907,12 +2046,10 @@ fn should_offload_saved_tensor(t: &kiln_tensor::Tensor) -> bool {
 fn tape_matmul_a_offload_enabled(device: &kiln_tensor::Device) -> bool {
     static OVERRIDE: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
     if let Some(value) = *OVERRIDE.get_or_init(|| {
-        std::env::var("KILN_TAPE_OFFLOAD_MATMUL_A")
-            .ok()
-            .map(|v| {
-                let v = v.trim().to_lowercase();
-                !(v.is_empty() || v == "0" || v == "false" || v == "no")
-            })
+        std::env::var("KILN_TAPE_OFFLOAD_MATMUL_A").ok().map(|v| {
+            let v = v.trim().to_lowercase();
+            !(v.is_empty() || v == "0" || v == "false" || v == "no")
+        })
     }) {
         return value;
     }
@@ -2091,11 +2228,7 @@ impl BackwardOp for GdnRecurrentBackward {
             let c = t.contiguous().map_err(|e| {
                 kiln_tensor::Error::Msg(format!("GdnRecurrentBackward: grad contiguous: {e}"))
             })?;
-            if on_vulkan {
-                c.to_device(dev)
-            } else {
-                Ok(c)
-            }
+            if on_vulkan { c.to_device(dev) } else { Ok(c) }
         };
         Ok(vec![
             Some(to_kt(&grads.dq)?),
@@ -2134,7 +2267,13 @@ pub fn try_tape_gdn_recurrent_kt(
     // production recurrence `gdn_recurrent_forward_from_parts`) and the record
     // adapter (`tape_record_gdn_recurrent_kt`) is now kt-native — no kt->candle
     // bridge on the saved inputs.
-    if !matches!(q.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_) | kiln_tensor::Device::Rocm(_)) {
+    if !matches!(
+        q.device(),
+        kiln_tensor::Device::Cuda(_)
+            | kiln_tensor::Device::Metal(_)
+            | kiln_tensor::Device::Vulkan(_)
+            | kiln_tensor::Device::Rocm(_)
+    ) {
         return Ok(None);
     }
 
@@ -2147,19 +2286,15 @@ pub fn try_tape_gdn_recurrent_kt(
     // `gdn_recurrent_forward_from_parts` returns the recurrence output in
     // head-FIRST `[B, nv, T, dv]` layout (the short-seq chunkwise path),
     // hence `head_last = false` below.
-    let out_kt =
-        gdn_recurrent_forward_from_parts(backend, q, k, v, beta, g, recurrent_state)?;
+    let out_kt = gdn_recurrent_forward_from_parts(backend, q, k, v, beta, g, recurrent_state)?;
 
     // Record the node directly from kt (no-op unless a tape scope is active).
-    tape_record_gdn_recurrent_kt(
-        &out_kt, false, q, k, v, beta, g, &entry_state, &device,
-    )?;
+    tape_record_gdn_recurrent_kt(&out_kt, false, q, k, v, beta, g, &entry_state, &device)?;
 
     // #1082: kt-native — the recorded output node id lives on the kt tape;
     // return the kt output directly (no kt->candle bridge).
     Ok(Some(out_kt))
 }
-
 
 /// kt-native recorder for a [`GdnRecurrentBackward`] node (#1082 P4-full).
 ///
@@ -2207,7 +2342,13 @@ pub fn tape_record_gdn_recurrent_kt(
     if !tape_forward_enabled() || !tape_gdn_enabled() {
         return Ok(false);
     }
-    if !matches!(device, kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_) | kiln_tensor::Device::Rocm(_)) {
+    if !matches!(
+        device,
+        kiln_tensor::Device::Cuda(_)
+            | kiln_tensor::Device::Metal(_)
+            | kiln_tensor::Device::Vulkan(_)
+            | kiln_tensor::Device::Rocm(_)
+    ) {
         return Ok(false);
     }
 
@@ -2320,8 +2461,6 @@ pub fn tape_gdn_gated_norm_enabled() -> bool {
             .unwrap_or(true)
     })
 }
-
-
 
 /// Tape backward (w.r.t. input) for the GDN PREFILL causal depthwise conv1d
 /// (`forward::causal_conv1d_prefill`, the `[B, C, T]` path the training forward
@@ -2521,9 +2660,7 @@ fn causal_conv1d_prefill_linear_from_state_kt(
     }
     let weight_2d = match weight.rank() {
         2 if weight.dims() == [channels, kernel] => weight.clone(),
-        3 if weight.dims() == [channels, 1, kernel] => {
-            weight.reshape(vec![channels, kernel])?
-        }
+        3 if weight.dims() == [channels, 1, kernel] => weight.reshape(vec![channels, kernel])?,
         _ => {
             return Err(kiln_tensor::Error::Msg(format!(
                 "causal_conv1d_prefill_linear_from_state_kt: weight shape {:?} incompatible with [{channels}, {kernel}]",
@@ -2717,88 +2854,107 @@ pub fn try_tape_causal_conv1d_prefill_kt(
     }
     // The bwd is available with any GPU-training backend: CUDA FFI kernel, or the
     // device-agnostic kt composite for Metal/Vulkan. Declines when none is on.
-    #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm")))]
+    #[cfg(not(any(
+        feature = "cuda",
+        feature = "metal",
+        feature = "vulkan",
+        feature = "rocm"
+    )))]
     {
         let _ = (input, weight, out, kernel);
         return Ok(None);
     }
-    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
+    #[cfg(any(
+        feature = "cuda",
+        feature = "metal",
+        feature = "vulkan",
+        feature = "rocm"
+    ))]
     {
-    // The recorded backward is device-agnostic (CUDA FFI / kt composite), so the
-    // recorder admits CUDA, Metal, and Vulkan. CPU is excluded here only because
-    // the production GDN forward this hooks runs on an accelerator device.
-    if !matches!(
-        input.device(),
-        kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_) | kiln_tensor::Device::Rocm(_)
-    ) || !matches!(
-        out.device(),
-        kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_) | kiln_tensor::Device::Rocm(_)
-    ) || !matches!(
-        weight.device(),
-        kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_) | kiln_tensor::Device::Rocm(_)
-    ) {
-        return Ok(None);
-    }
-    if kernel < 2 {
-        return Ok(None);
-    }
-    let (batch, channels, seq_len) = match input.dims3() {
-        Ok(d) => d,
-        Err(_) => return Ok(None),
-    };
-    if batch != 1 || out.dims() != [batch, channels, seq_len].as_slice() {
-        return Ok(None);
-    }
-    let weight_2d = match weight.rank() {
-        2 => match weight.dims2() {
-            Ok((c, k)) if c == channels && k == kernel => weight.clone(),
-            _ => return Ok(None),
-        },
-        3 => match weight.dims3() {
-            Ok((c, one, k)) if c == channels && one == 1 && k == kernel => {
-                match weight.reshape(vec![channels, kernel]) {
-                    Ok(w) => w,
-                    Err(_) => return Ok(None),
+        // The recorded backward is device-agnostic (CUDA FFI / kt composite), so the
+        // recorder admits CUDA, Metal, and Vulkan. CPU is excluded here only because
+        // the production GDN forward this hooks runs on an accelerator device.
+        if !matches!(
+            input.device(),
+            kiln_tensor::Device::Cuda(_)
+                | kiln_tensor::Device::Metal(_)
+                | kiln_tensor::Device::Vulkan(_)
+                | kiln_tensor::Device::Rocm(_)
+        ) || !matches!(
+            out.device(),
+            kiln_tensor::Device::Cuda(_)
+                | kiln_tensor::Device::Metal(_)
+                | kiln_tensor::Device::Vulkan(_)
+                | kiln_tensor::Device::Rocm(_)
+        ) || !matches!(
+            weight.device(),
+            kiln_tensor::Device::Cuda(_)
+                | kiln_tensor::Device::Metal(_)
+                | kiln_tensor::Device::Vulkan(_)
+                | kiln_tensor::Device::Rocm(_)
+        ) {
+            return Ok(None);
+        }
+        if kernel < 2 {
+            return Ok(None);
+        }
+        let (batch, channels, seq_len) = match input.dims3() {
+            Ok(d) => d,
+            Err(_) => return Ok(None),
+        };
+        if batch != 1 || out.dims() != [batch, channels, seq_len].as_slice() {
+            return Ok(None);
+        }
+        let weight_2d = match weight.rank() {
+            2 => match weight.dims2() {
+                Ok((c, k)) if c == channels && k == kernel => weight.clone(),
+                _ => return Ok(None),
+            },
+            3 => match weight.dims3() {
+                Ok((c, one, k)) if c == channels && one == 1 && k == kernel => {
+                    match weight.reshape(vec![channels, kernel]) {
+                        Ok(w) => w,
+                        Err(_) => return Ok(None),
+                    }
                 }
-            }
+                _ => return Ok(None),
+            },
             _ => return Ok(None),
-        },
-        _ => return Ok(None),
-    };
-    let weight_f32 = if weight_2d.dtype() == kiln_tensor::DType::F32 {
-        weight_2d
-    } else {
-        match weight_2d.to_dtype(kiln_tensor::DType::F32) {
+        };
+        let weight_f32 = if weight_2d.dtype() == kiln_tensor::DType::F32 {
+            weight_2d
+        } else {
+            match weight_2d.to_dtype(kiln_tensor::DType::F32) {
+                Ok(w) => w,
+                Err(_) => return Ok(None),
+            }
+        };
+        let weight_f32 = match weight_f32.contiguous() {
             Ok(w) => w,
             Err(_) => return Ok(None),
+        };
+        let input_dtype = input.dtype();
+        let recorded = with_active_tape(|tape: &mut Tape| -> Result<()> {
+            let offload_saved = tape_gdn_saved_tensor_offload_enabled(&input.device());
+            tape.record(
+                out,
+                &[input],
+                Box::new(CausalConv1dPrefillInputBackward {
+                    weight: maybe_offload_gdn_saved_tensor(&weight_f32, offload_saved)
+                        .context("try_tape_causal_conv1d_prefill_kt: save weight")?,
+                    batch,
+                    channels,
+                    seq_len,
+                    input_dtype,
+                }),
+            );
+            Ok(())
+        });
+        match recorded {
+            Some(result) => result?,
+            None => return Ok(None),
         }
-    };
-    let weight_f32 = match weight_f32.contiguous() {
-        Ok(w) => w,
-        Err(_) => return Ok(None),
-    };
-    let input_dtype = input.dtype();
-    let recorded = with_active_tape(|tape: &mut Tape| -> Result<()> {
-        let offload_saved = tape_gdn_saved_tensor_offload_enabled(&input.device());
-        tape.record(
-            out,
-            &[input],
-            Box::new(CausalConv1dPrefillInputBackward {
-                weight: maybe_offload_gdn_saved_tensor(&weight_f32, offload_saved)
-                    .context("try_tape_causal_conv1d_prefill_kt: save weight")?,
-                batch,
-                channels,
-                seq_len,
-                input_dtype,
-            }),
-        );
-        Ok(())
-    });
-    match recorded {
-        Some(result) => result?,
-        None => return Ok(None),
-    }
-    Ok(Some(out.clone()))
+        Ok(Some(out.clone()))
     }
 }
 
@@ -2812,107 +2968,129 @@ pub fn try_tape_causal_conv1d_prefill_silu_kt(
     if !tape_forward_enabled() || !tape_gdn_conv_enabled() {
         return Ok(None);
     }
-    #[cfg(not(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm")))]
+    #[cfg(not(any(
+        feature = "cuda",
+        feature = "metal",
+        feature = "vulkan",
+        feature = "rocm"
+    )))]
     {
         let _ = (input, weight, entry_state, out, kernel);
         return Ok(None);
     }
-    #[cfg(any(feature = "cuda", feature = "metal", feature = "vulkan", feature = "rocm"))]
+    #[cfg(any(
+        feature = "cuda",
+        feature = "metal",
+        feature = "vulkan",
+        feature = "rocm"
+    ))]
     {
-    if !matches!(
-        input.device(),
-        kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_) | kiln_tensor::Device::Rocm(_)
-    ) || !matches!(
-        out.device(),
-        kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_) | kiln_tensor::Device::Rocm(_)
-    ) || !matches!(
-        weight.device(),
-        kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_) | kiln_tensor::Device::Rocm(_)
-    ) || !matches!(
-        entry_state.device(),
-        kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_) | kiln_tensor::Device::Rocm(_)
-    ) {
-        return Ok(None);
-    }
-    if kernel < 2 {
-        return Ok(None);
-    }
-    let (batch, channels, seq_len) = match input.dims3() {
-        Ok(d) => d,
-        Err(_) => return Ok(None),
-    };
-    if batch != 1
-        || out.dims() != [batch, channels, seq_len].as_slice()
-        || entry_state.dims() != [batch, channels, kernel - 1]
-    {
-        return Ok(None);
-    }
-    let weight_2d = match weight.rank() {
-        2 => match weight.dims2() {
-            Ok((c, k)) if c == channels && k == kernel => weight.clone(),
-            _ => return Ok(None),
-        },
-        3 => match weight.dims3() {
-            Ok((c, one, k)) if c == channels && one == 1 && k == kernel => {
-                match weight.reshape(vec![channels, kernel]) {
-                    Ok(w) => w,
-                    Err(_) => return Ok(None),
+        if !matches!(
+            input.device(),
+            kiln_tensor::Device::Cuda(_)
+                | kiln_tensor::Device::Metal(_)
+                | kiln_tensor::Device::Vulkan(_)
+                | kiln_tensor::Device::Rocm(_)
+        ) || !matches!(
+            out.device(),
+            kiln_tensor::Device::Cuda(_)
+                | kiln_tensor::Device::Metal(_)
+                | kiln_tensor::Device::Vulkan(_)
+                | kiln_tensor::Device::Rocm(_)
+        ) || !matches!(
+            weight.device(),
+            kiln_tensor::Device::Cuda(_)
+                | kiln_tensor::Device::Metal(_)
+                | kiln_tensor::Device::Vulkan(_)
+                | kiln_tensor::Device::Rocm(_)
+        ) || !matches!(
+            entry_state.device(),
+            kiln_tensor::Device::Cuda(_)
+                | kiln_tensor::Device::Metal(_)
+                | kiln_tensor::Device::Vulkan(_)
+                | kiln_tensor::Device::Rocm(_)
+        ) {
+            return Ok(None);
+        }
+        if kernel < 2 {
+            return Ok(None);
+        }
+        let (batch, channels, seq_len) = match input.dims3() {
+            Ok(d) => d,
+            Err(_) => return Ok(None),
+        };
+        if batch != 1
+            || out.dims() != [batch, channels, seq_len].as_slice()
+            || entry_state.dims() != [batch, channels, kernel - 1]
+        {
+            return Ok(None);
+        }
+        let weight_2d = match weight.rank() {
+            2 => match weight.dims2() {
+                Ok((c, k)) if c == channels && k == kernel => weight.clone(),
+                _ => return Ok(None),
+            },
+            3 => match weight.dims3() {
+                Ok((c, one, k)) if c == channels && one == 1 && k == kernel => {
+                    match weight.reshape(vec![channels, kernel]) {
+                        Ok(w) => w,
+                        Err(_) => return Ok(None),
+                    }
                 }
-            }
+                _ => return Ok(None),
+            },
             _ => return Ok(None),
-        },
-        _ => return Ok(None),
-    };
-    let weight_f32 = if weight_2d.dtype() == kiln_tensor::DType::F32 {
-        weight_2d
-    } else {
-        match weight_2d.to_dtype(kiln_tensor::DType::F32) {
+        };
+        let weight_f32 = if weight_2d.dtype() == kiln_tensor::DType::F32 {
+            weight_2d
+        } else {
+            match weight_2d.to_dtype(kiln_tensor::DType::F32) {
+                Ok(w) => w,
+                Err(_) => return Ok(None),
+            }
+        };
+        let weight_f32 = match weight_f32.contiguous() {
             Ok(w) => w,
             Err(_) => return Ok(None),
-        }
-    };
-    let weight_f32 = match weight_f32.contiguous() {
-        Ok(w) => w,
-        Err(_) => return Ok(None),
-    };
-    let entry_state_f32 = if entry_state.dtype() == kiln_tensor::DType::F32 {
-        entry_state.clone()
-    } else {
-        match entry_state.to_dtype(kiln_tensor::DType::F32) {
+        };
+        let entry_state_f32 = if entry_state.dtype() == kiln_tensor::DType::F32 {
+            entry_state.clone()
+        } else {
+            match entry_state.to_dtype(kiln_tensor::DType::F32) {
+                Ok(s) => s,
+                Err(_) => return Ok(None),
+            }
+        };
+        let entry_state_f32 = match entry_state_f32.contiguous() {
             Ok(s) => s,
             Err(_) => return Ok(None),
+        };
+        let input_dtype = input.dtype();
+        let recorded = with_active_tape(|tape: &mut Tape| -> Result<()> {
+            let offload_saved = tape_gdn_saved_tensor_offload_enabled(&input.device());
+            tape.record(
+                out,
+                &[input],
+                Box::new(CausalConv1dPrefillSiluInputBackward {
+                    input: maybe_offload_gdn_saved_tensor(input, offload_saved)
+                        .context("try_tape_causal_conv1d_prefill_silu_kt: save input")?,
+                    weight: maybe_offload_gdn_saved_tensor(&weight_f32, offload_saved)
+                        .context("try_tape_causal_conv1d_prefill_silu_kt: save weight")?,
+                    entry_state: maybe_offload_gdn_saved_tensor(&entry_state_f32, offload_saved)
+                        .context("try_tape_causal_conv1d_prefill_silu_kt: save entry_state")?,
+                    batch,
+                    channels,
+                    seq_len,
+                    input_dtype,
+                }),
+            );
+            Ok(())
+        });
+        match recorded {
+            Some(result) => result?,
+            None => return Ok(None),
         }
-    };
-    let entry_state_f32 = match entry_state_f32.contiguous() {
-        Ok(s) => s,
-        Err(_) => return Ok(None),
-    };
-    let input_dtype = input.dtype();
-    let recorded = with_active_tape(|tape: &mut Tape| -> Result<()> {
-        let offload_saved = tape_gdn_saved_tensor_offload_enabled(&input.device());
-        tape.record(
-            out,
-            &[input],
-            Box::new(CausalConv1dPrefillSiluInputBackward {
-                input: maybe_offload_gdn_saved_tensor(input, offload_saved)
-                    .context("try_tape_causal_conv1d_prefill_silu_kt: save input")?,
-                weight: maybe_offload_gdn_saved_tensor(&weight_f32, offload_saved)
-                    .context("try_tape_causal_conv1d_prefill_silu_kt: save weight")?,
-                entry_state: maybe_offload_gdn_saved_tensor(&entry_state_f32, offload_saved)
-                    .context("try_tape_causal_conv1d_prefill_silu_kt: save entry_state")?,
-                batch,
-                channels,
-                seq_len,
-                input_dtype,
-            }),
-        );
-        Ok(())
-    });
-    match recorded {
-        Some(result) => result?,
-        None => return Ok(None),
-    }
-    Ok(Some(out.clone()))
+        Ok(Some(out.clone()))
     }
 }
 
@@ -2963,9 +3141,7 @@ fn try_gdn_l2_norm_scale_backward_fused_cuda_rocm(
         t.contiguous()
             .and_then(|t| t.reshape(vec![rows, hidden]))
             .map_err(|e| {
-                kiln_tensor::Error::Msg(format!(
-                    "GdnL2NormScaleBackward fused {name} flatten: {e}"
-                ))
+                kiln_tensor::Error::Msg(format!("GdnL2NormScaleBackward fused {name} flatten: {e}"))
             })
     };
 
@@ -2981,9 +3157,7 @@ fn try_gdn_l2_norm_scale_backward_fused_cuda_rocm(
         scale as f32,
         eps as f32,
     )
-    .map_err(|e| {
-        kiln_tensor::Error::Msg(format!("GdnL2NormScaleBackward fused bwd: {e}"))
-    })?;
+    .map_err(|e| kiln_tensor::Error::Msg(format!("GdnL2NormScaleBackward fused bwd: {e}")))?;
     dx.reshape(x_dims).map(Some).map_err(|e| {
         kiln_tensor::Error::Msg(format!("GdnL2NormScaleBackward fused dx reshape: {e}"))
     })
@@ -3002,21 +3176,16 @@ impl BackwardOp for GdnL2NormScaleBackward {
     ) -> kiln_tensor::Result<Vec<Option<kiln_tensor::Tensor>>> {
         let x = saved_tensor_for_device(&self.x, grad_output.device())?;
         #[cfg(any(feature = "cuda", feature = "rocm"))]
-        if let Some(dx) = try_gdn_l2_norm_scale_backward_fused_cuda_rocm(
-            &x,
-            self.scale,
-            self.eps,
-            grad_output,
-        )? {
+        if let Some(dx) =
+            try_gdn_l2_norm_scale_backward_fused_cuda_rocm(&x, self.scale, self.eps, grad_output)?
+        {
             return Ok(vec![Some(dx)]);
         }
 
         // #1082 kt-native: `x` is stored kt now (no candle bridge); the bwd kernel
         // is already kt-typed.
         let dx = gdn_l2_norm_scale_backward_no_grad(&x, self.scale, self.eps, grad_output)
-            .map_err(|e| {
-                kiln_tensor::Error::Msg(format!("GdnL2NormScaleBackward: bwd: {e}"))
-            })?;
+            .map_err(|e| kiln_tensor::Error::Msg(format!("GdnL2NormScaleBackward: bwd: {e}")))?;
         // Adjoint can be non-contiguous (broadcast_mul views) — contiguify.
         let dx_kt = dx
             .contiguous()
@@ -3047,7 +3216,13 @@ pub fn try_tape_gdn_l2_norm_scale_kt(
     if !tape_forward_enabled() || !tape_gdn_qk_norm_enabled() {
         return Ok(None);
     }
-    if !matches!(x.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_) | kiln_tensor::Device::Rocm(_)) {
+    if !matches!(
+        x.device(),
+        kiln_tensor::Device::Cuda(_)
+            | kiln_tensor::Device::Metal(_)
+            | kiln_tensor::Device::Vulkan(_)
+            | kiln_tensor::Device::Rocm(_)
+    ) {
         return Ok(None);
     }
     if x.dims() != out.dims() {
@@ -3098,11 +3273,13 @@ fn try_gdn_gated_rms_norm_backward_fused_cuda_rocm(
     weight: &kiln_tensor::Tensor,
     eps: f64,
     grad_output: &kiln_tensor::Tensor,
-) -> kiln_tensor::Result<Option<(
-    kiln_tensor::Tensor,
-    kiln_tensor::Tensor,
-    kiln_tensor::Tensor,
-)>> {
+) -> kiln_tensor::Result<
+    Option<(
+        kiln_tensor::Tensor,
+        kiln_tensor::Tensor,
+        kiln_tensor::Tensor,
+    )>,
+> {
     if !matches!(
         x.device(),
         kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Rocm(_)
@@ -3125,37 +3302,28 @@ fn try_gdn_gated_rms_norm_backward_fused_cuda_rocm(
         return Ok(None);
     }
 
-    let flatten = |t: &kiln_tensor::Tensor,
-                   name: &'static str|
-     -> kiln_tensor::Result<kiln_tensor::Tensor> {
-        t.contiguous()
-            .and_then(|t| t.reshape(vec![rows, hidden]))
-            .map_err(|e| {
-                kiln_tensor::Error::Msg(format!(
-                    "GdnGatedRmsNormBackward fused {name} flatten: {e}"
-                ))
-            })
-    };
+    let flatten =
+        |t: &kiln_tensor::Tensor, name: &'static str| -> kiln_tensor::Result<kiln_tensor::Tensor> {
+            t.contiguous()
+                .and_then(|t| t.reshape(vec![rows, hidden]))
+                .map_err(|e| {
+                    kiln_tensor::Error::Msg(format!(
+                        "GdnGatedRmsNormBackward fused {name} flatten: {e}"
+                    ))
+                })
+        };
 
     let x_flat = flatten(x, "x")?;
     let z_flat = flatten(z, "z")?;
     let grad_flat = flatten(grad_output, "grad_output")?;
-    if !kiln_gdn_kernel::gdn_gated_rms_norm_bwd_supports_kt(
-        &grad_flat, &x_flat, &z_flat, weight,
-    ) {
+    if !kiln_gdn_kernel::gdn_gated_rms_norm_bwd_supports_kt(&grad_flat, &x_flat, &z_flat, weight) {
         return Ok(None);
     }
 
     let grads = kiln_gdn_kernel::gdn_gated_rms_norm_bwd_bf16_kt(
-        &grad_flat,
-        &x_flat,
-        &z_flat,
-        weight,
-        eps as f32,
+        &grad_flat, &x_flat, &z_flat, weight, eps as f32,
     )
-    .map_err(|e| {
-        kiln_tensor::Error::Msg(format!("GdnGatedRmsNormBackward fused bwd: {e}"))
-    })?;
+    .map_err(|e| kiln_tensor::Error::Msg(format!("GdnGatedRmsNormBackward fused bwd: {e}")))?;
     let dx = grads.dx.reshape(x_dims.clone()).map_err(|e| {
         kiln_tensor::Error::Msg(format!("GdnGatedRmsNormBackward fused dx reshape: {e}"))
     })?;
@@ -3190,26 +3358,16 @@ impl BackwardOp for GdnGatedRmsNormBackward {
         let z = saved_tensor_for_device(&self.z, compute_device)?;
         let weight = saved_tensor_for_device(&self.weight, compute_device)?;
         #[cfg(any(feature = "cuda", feature = "rocm"))]
-        if let Some((dx, dz, dw)) = try_gdn_gated_rms_norm_backward_fused_cuda_rocm(
-            &x,
-            &z,
-            &weight,
-            self.eps,
-            grad_output,
-        )? {
+        if let Some((dx, dz, dw)) =
+            try_gdn_gated_rms_norm_backward_fused_cuda_rocm(&x, &z, &weight, self.eps, grad_output)?
+        {
             return Ok(vec![Some(dx), Some(dz), Some(dw)]);
         }
 
         // #1082 kt-native: x/z/weight are stored kt now (no candle bridge); the bwd
         // kernel is already kt-typed.
-        let grads = gdn_gated_rms_norm_backward_no_grad(
-            &x,
-            &z,
-            &weight,
-            self.eps,
-            grad_output,
-        )
-        .map_err(|e| kiln_tensor::Error::Msg(format!("GdnGatedRmsNormBackward: bwd: {e}")))?;
+        let grads = gdn_gated_rms_norm_backward_no_grad(&x, &z, &weight, self.eps, grad_output)
+            .map_err(|e| kiln_tensor::Error::Msg(format!("GdnGatedRmsNormBackward: bwd: {e}")))?;
         // Adjoints (kt) can be non-contiguous; contiguify.
         let to_kt = |t: &kiln_tensor::Tensor| -> kiln_tensor::Result<kiln_tensor::Tensor> {
             t.contiguous().map_err(|e| {
@@ -3249,7 +3407,13 @@ pub fn try_tape_gdn_gated_rms_norm_kt(
     if !tape_forward_enabled() || !tape_gdn_gated_norm_enabled() {
         return Ok(None);
     }
-    if !matches!(x.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_) | kiln_tensor::Device::Rocm(_)) {
+    if !matches!(
+        x.device(),
+        kiln_tensor::Device::Cuda(_)
+            | kiln_tensor::Device::Metal(_)
+            | kiln_tensor::Device::Vulkan(_)
+            | kiln_tensor::Device::Rocm(_)
+    ) {
         return Ok(None);
     }
     if x.dims() != z.dims() || x.dims() != out.dims() {
@@ -3369,9 +3533,19 @@ pub fn try_tape_cast_kt(
     if !tape_forward_enabled() {
         return Ok(None);
     }
-    if !matches!(x.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_) | kiln_tensor::Device::Rocm(_))
-        || !matches!(out.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_) | kiln_tensor::Device::Rocm(_))
-    {
+    if !matches!(
+        x.device(),
+        kiln_tensor::Device::Cuda(_)
+            | kiln_tensor::Device::Metal(_)
+            | kiln_tensor::Device::Vulkan(_)
+            | kiln_tensor::Device::Rocm(_)
+    ) || !matches!(
+        out.device(),
+        kiln_tensor::Device::Cuda(_)
+            | kiln_tensor::Device::Metal(_)
+            | kiln_tensor::Device::Vulkan(_)
+            | kiln_tensor::Device::Rocm(_)
+    ) {
         return Ok(None);
     }
     if x.dims() != out.dims() {
@@ -3489,9 +3663,19 @@ pub fn try_tape_narrow_kt(
     if !tape_forward_enabled() {
         return Ok(None);
     }
-    if !matches!(x.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_) | kiln_tensor::Device::Rocm(_))
-        || !matches!(out.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_) | kiln_tensor::Device::Rocm(_))
-    {
+    if !matches!(
+        x.device(),
+        kiln_tensor::Device::Cuda(_)
+            | kiln_tensor::Device::Metal(_)
+            | kiln_tensor::Device::Vulkan(_)
+            | kiln_tensor::Device::Rocm(_)
+    ) || !matches!(
+        out.device(),
+        kiln_tensor::Device::Cuda(_)
+            | kiln_tensor::Device::Metal(_)
+            | kiln_tensor::Device::Vulkan(_)
+            | kiln_tensor::Device::Rocm(_)
+    ) {
         return Ok(None);
     }
     let x_dims = x.dims().to_vec();
@@ -3599,9 +3783,19 @@ pub fn try_tape_gqa_expand_kt(
     if !tape_forward_enabled() {
         return Ok(None);
     }
-    if !matches!(x.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_) | kiln_tensor::Device::Rocm(_))
-        || !matches!(out.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_) | kiln_tensor::Device::Rocm(_))
-    {
+    if !matches!(
+        x.device(),
+        kiln_tensor::Device::Cuda(_)
+            | kiln_tensor::Device::Metal(_)
+            | kiln_tensor::Device::Vulkan(_)
+            | kiln_tensor::Device::Rocm(_)
+    ) || !matches!(
+        out.device(),
+        kiln_tensor::Device::Cuda(_)
+            | kiln_tensor::Device::Metal(_)
+            | kiln_tensor::Device::Vulkan(_)
+            | kiln_tensor::Device::Rocm(_)
+    ) {
         return Ok(None);
     }
     if gqa_ratio <= 1 {
@@ -3728,9 +3922,8 @@ impl BackwardOp for SdpaBackward {
         // Adjoints (kt) can be non-contiguous (broadcast/transpose views);
         // contiguify.
         let to_kt = |t: &kiln_tensor::Tensor| -> kiln_tensor::Result<kiln_tensor::Tensor> {
-            t.contiguous().map_err(|e| {
-                kiln_tensor::Error::Msg(format!("SdpaBackward: grad contiguous: {e}"))
-            })
+            t.contiguous()
+                .map_err(|e| kiln_tensor::Error::Msg(format!("SdpaBackward: grad contiguous: {e}")))
         };
         Ok(vec![
             Some(to_kt(&grads.dq)?),
@@ -3784,11 +3977,31 @@ pub fn try_tape_sdpa_fallback_kt(
     if !tape_forward_enabled() || !tape_sdpa_enabled() {
         return Ok(None);
     }
-    if !matches!(q.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_) | kiln_tensor::Device::Rocm(_))
-        || !matches!(k.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_) | kiln_tensor::Device::Rocm(_))
-        || !matches!(v.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_) | kiln_tensor::Device::Rocm(_))
-        || !matches!(out.device(), kiln_tensor::Device::Cuda(_) | kiln_tensor::Device::Metal(_) | kiln_tensor::Device::Vulkan(_) | kiln_tensor::Device::Rocm(_))
-    {
+    if !matches!(
+        q.device(),
+        kiln_tensor::Device::Cuda(_)
+            | kiln_tensor::Device::Metal(_)
+            | kiln_tensor::Device::Vulkan(_)
+            | kiln_tensor::Device::Rocm(_)
+    ) || !matches!(
+        k.device(),
+        kiln_tensor::Device::Cuda(_)
+            | kiln_tensor::Device::Metal(_)
+            | kiln_tensor::Device::Vulkan(_)
+            | kiln_tensor::Device::Rocm(_)
+    ) || !matches!(
+        v.device(),
+        kiln_tensor::Device::Cuda(_)
+            | kiln_tensor::Device::Metal(_)
+            | kiln_tensor::Device::Vulkan(_)
+            | kiln_tensor::Device::Rocm(_)
+    ) || !matches!(
+        out.device(),
+        kiln_tensor::Device::Cuda(_)
+            | kiln_tensor::Device::Metal(_)
+            | kiln_tensor::Device::Vulkan(_)
+            | kiln_tensor::Device::Rocm(_)
+    ) {
         return Ok(None);
     }
     let (bq, nq, tq, dq_) = match q.dims4() {
@@ -3877,7 +4090,13 @@ mod conv1d_bwd_input_composite_tests {
     /// input-grad kernel assumes the input-only left-zero pad). Matches
     /// `causal_depthwise_conv1d_f32_kernel` with `state = 0`:
     ///   out[r,c] = Σ_{j: r+j >= K-1} weight[c,j] * input[r+j-(K-1), c]
-    fn ref_forward(input: &[f32], weight: &[f32], rows: usize, channels: usize, k: usize) -> Vec<f32> {
+    fn ref_forward(
+        input: &[f32],
+        weight: &[f32],
+        rows: usize,
+        channels: usize,
+        k: usize,
+    ) -> Vec<f32> {
         let state_rows = k - 1;
         let mut out = vec![0.0f32; rows * channels];
         for r in 0..rows {
@@ -3928,7 +4147,10 @@ mod conv1d_bwd_input_composite_tests {
         assert_eq!(gi_t.dtype(), DType::F32);
         let analytic: Vec<f32> = gi_t.to_vec::<f32>().unwrap();
         assert_eq!(analytic.len(), rows * channels);
-        assert!(analytic.iter().all(|v| v.is_finite()), "analytic grad non-finite");
+        assert!(
+            analytic.iter().all(|v| v.is_finite()),
+            "analytic grad non-finite"
+        );
 
         // Central-difference dL/d input[i,c] where L = Σ grad_out·out.
         let loss = |inp: &[f32]| -> f32 {
@@ -3963,7 +4185,9 @@ mod conv1d_bwd_input_composite_tests {
         let rows = 3usize;
         let channels = 2usize;
         let k = 3usize;
-        let grad_out: Vec<f32> = (0..rows * channels).map(|i| (i as f32) * 0.1 - 0.2).collect();
+        let grad_out: Vec<f32> = (0..rows * channels)
+            .map(|i| (i as f32) * 0.1 - 0.2)
+            .collect();
         let weight: Vec<f32> = (0..channels * k).map(|i| (i as f32) * 0.05 + 0.1).collect();
         let go_t = Tensor::from_vec(grad_out, vec![rows, channels])
             .unwrap()

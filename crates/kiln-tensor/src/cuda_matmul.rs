@@ -38,9 +38,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use cudarc::driver::CudaContext;
-use kiln_blas::{
-    AlgoCache, CublasLtMatmulHandle, Epilogue, MatmulLayout, MatmulRequest,
-};
+use kiln_blas::{AlgoCache, CublasLtMatmulHandle, Epilogue, MatmulLayout, MatmulRequest};
 
 use crate::cuda_storage::CudaStorage;
 use crate::{DType, Layout, Result, Storage, Tensor, TensorId};
@@ -84,10 +82,9 @@ fn get_or_init_handle(
     cuda_ctx: &Arc<CudaContext>,
 ) -> Result<Arc<CublasLtMatmulHandle>> {
     let reg = handle_registry();
-    let mut by_device = reg
-        .by_device
-        .lock()
-        .map_err(|_| crate::Error::Msg("cuda_matmul: handle registry mutex poisoned".to_string()))?;
+    let mut by_device = reg.by_device.lock().map_err(|_| {
+        crate::Error::Msg("cuda_matmul: handle registry mutex poisoned".to_string())
+    })?;
     if let Some(h) = by_device.get(&device_index) {
         return Ok(Arc::clone(h));
     }
@@ -254,25 +251,134 @@ pub fn cuda_matmul(a: &Tensor, b: &Tensor) -> Result<Tensor> {
         ));
     }
 
+    let mut out_shape = a_shape[..a_rank - 2].to_vec();
+    out_shape.push(m);
+    out_shape.push(n);
+    cuda_matmul_dispatch(
+        a,
+        b,
+        m,
+        n,
+        k_a,
+        dtype,
+        dtype_str,
+        out_shape,
+        MatmulLayout::RowMajor,
+        MatmulLayout::RowMajor,
+        "cuda_matmul",
+    )
+}
+
+/// Run `a^T @ b` without materialising `a.transpose(-2, -1).contiguous()`.
+///
+/// `a` is stored row-major with shape `[..., K, M]`, `b` is row-major with
+/// shape `[..., K, N]`, and the result is `[..., M, N]`. This is intentionally
+/// narrow: it exists for long-context backward paths that need a transposed
+/// activation/gradient GEMM but cannot afford a full `[K, M] -> [M, K]`
+/// materialisation first.
+pub fn cuda_matmul_lhs_transposed(a: &Tensor, b: &Tensor) -> Result<Tensor> {
+    let a_rank = a.rank();
+    let b_rank = b.rank();
+    if a_rank < 2 || b_rank < 2 {
+        return Err(crate::Error::Msg(format!(
+            "cuda_matmul_lhs_transposed: rank must be >= 2, got a={a_rank} b={b_rank}"
+        )));
+    }
+    if a_rank != b_rank {
+        return Err(crate::Error::Msg(format!(
+            "cuda_matmul_lhs_transposed: rank mismatch a={a_rank} b={b_rank}"
+        )));
+    }
+    let a_shape = a.shape();
+    let b_shape = b.shape();
+    for axis in 0..a_rank - 2 {
+        if a_shape[axis] != b_shape[axis] {
+            return Err(crate::Error::Msg(format!(
+                "cuda_matmul_lhs_transposed: batch axis {axis} mismatch: a={} b={}",
+                a_shape[axis], b_shape[axis]
+            )));
+        }
+    }
+    let k_a = a_shape[a_rank - 2];
+    let m = a_shape[a_rank - 1];
+    let k_b = b_shape[b_rank - 2];
+    let n = b_shape[b_rank - 1];
+    if k_a != k_b {
+        return Err(crate::Error::Msg(format!(
+            "cuda_matmul_lhs_transposed: contraction dim mismatch a.K={k_a} b.K={k_b}"
+        )));
+    }
+    if a.dtype() != b.dtype() {
+        return Err(crate::Error::Msg(format!(
+            "cuda_matmul_lhs_transposed: dtype mismatch a={} b={}",
+            a.dtype(),
+            b.dtype()
+        )));
+    }
+    let dtype = a.dtype();
+    let dtype_str = match dtype {
+        DType::F32 => "f32",
+        DType::BF16 => "bf16",
+        DType::F16 => "f16",
+        other => {
+            return Err(crate::Error::Msg(format!(
+                "cuda_matmul_lhs_transposed: unsupported dtype {other}"
+            )));
+        }
+    };
+    if !a.is_contiguous() || !b.is_contiguous() {
+        return Err(crate::Error::Msg(
+            "cuda_matmul_lhs_transposed: contiguous inputs required".to_string(),
+        ));
+    }
+
+    let mut out_shape = a_shape[..a_rank - 2].to_vec();
+    out_shape.push(m);
+    out_shape.push(n);
+    cuda_matmul_dispatch(
+        a,
+        b,
+        m,
+        n,
+        k_a,
+        dtype,
+        dtype_str,
+        out_shape,
+        MatmulLayout::ColMajor,
+        MatmulLayout::RowMajor,
+        "cuda_matmul_lhs_transposed",
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cuda_matmul_dispatch(
+    a: &Tensor,
+    b: &Tensor,
+    m: usize,
+    n: usize,
+    k: usize,
+    dtype: DType,
+    dtype_str: &'static str,
+    out_shape: Vec<usize>,
+    a_layout: MatmulLayout,
+    b_layout: MatmulLayout,
+    caller: &str,
+) -> Result<Tensor> {
     // ---- resolve CUDA storage + device ----
     let a_storage = a
         .storage()
         .as_any()
         .downcast_ref::<CudaStorage>()
-        .ok_or_else(|| {
-            crate::Error::Msg("cuda_matmul: a's storage must be CudaStorage".to_string())
-        })?;
+        .ok_or_else(|| crate::Error::Msg(format!("{caller}: a's storage must be CudaStorage")))?;
     let b_storage = b
         .storage()
         .as_any()
         .downcast_ref::<CudaStorage>()
-        .ok_or_else(|| {
-            crate::Error::Msg("cuda_matmul: b's storage must be CudaStorage".to_string())
-        })?;
+        .ok_or_else(|| crate::Error::Msg(format!("{caller}: b's storage must be CudaStorage")))?;
     use crate::StorageBackend;
     if a_storage.device() != b_storage.device() {
         return Err(crate::Error::Msg(format!(
-            "cuda_matmul: device mismatch a={} b={}",
+            "{caller}: device mismatch a={} b={}",
             a_storage.device(),
             b_storage.device()
         )));
@@ -281,7 +387,7 @@ pub fn cuda_matmul(a: &Tensor, b: &Tensor) -> Result<Tensor> {
         crate::Device::Cuda(i) => i,
         other => {
             return Err(crate::Error::Msg(format!(
-                "cuda_matmul: expected CUDA device, got {other}"
+                "{caller}: expected CUDA device, got {other}"
             )));
         }
     };
@@ -290,10 +396,10 @@ pub fn cuda_matmul(a: &Tensor, b: &Tensor) -> Result<Tensor> {
     // CudaContext is pulled directly off a_storage.context(), no
     // .candle_device() read.
     let ctx = a_storage.context();
-    let batch: usize = a_shape[..a_rank - 2].iter().product::<usize>().max(1);
-    let mut out_shape = a_shape[..a_rank - 2].to_vec();
-    out_shape.push(m);
-    out_shape.push(n);
+    let batch: usize = out_shape[..out_shape.len() - 2]
+        .iter()
+        .product::<usize>()
+        .max(1);
     let out_n_elements = batch * m * n;
     // #1082 (perf, Pattern A): this GEMM uses Epilogue::Identity (beta = 0,
     // pure C = A@B) and the per-batch loop below covers every batch, so all
@@ -310,8 +416,8 @@ pub fn cuda_matmul(a: &Tensor, b: &Tensor) -> Result<Tensor> {
 
     // ---- per-batch dispatch ----
     let bpe = dtype.size_in_bytes();
-    let a_batch_stride = (m * k_a * bpe) as u64;
-    let b_batch_stride = (k_b * n * bpe) as u64;
+    let a_batch_stride = (m * k * bpe) as u64;
+    let b_batch_stride = (k * n * bpe) as u64;
     let c_batch_stride = (m * n * bpe) as u64;
 
     // #1082 CUDA-graph fix: route through the thread-local active stream
@@ -331,10 +437,10 @@ pub fn cuda_matmul(a: &Tensor, b: &Tensor) -> Result<Tensor> {
     let request = MatmulRequest {
         m: m as u64,
         n: n as u64,
-        k: k_a as u64,
+        k: k as u64,
         dtype: dtype_str.to_string(),
-        a_layout: MatmulLayout::RowMajor,
-        b_layout: MatmulLayout::RowMajor,
+        a_layout,
+        b_layout,
         c_layout: MatmulLayout::RowMajor,
         epilogue: Epilogue::Identity,
         concurrent_streams: 1,
@@ -352,9 +458,7 @@ pub fn cuda_matmul(a: &Tensor, b: &Tensor) -> Result<Tensor> {
         unsafe {
             handle
                 .matmul(raw_stream, &request, a_ptr, b_ptr, c_ptr, std::ptr::null())
-                .map_err(|e| {
-                    crate::Error::Msg(format!("cuda_matmul: handle.matmul failed: {e}"))
-                })?;
+                .map_err(|e| crate::Error::Msg(format!("{caller}: handle.matmul failed: {e}")))?;
         }
     }
 
@@ -486,9 +590,7 @@ pub fn cuda_matmul_into(a: &Tensor, b: &Tensor, dst: &Tensor) -> Result<()> {
         .as_any()
         .downcast_ref::<CudaStorage>()
         .ok_or_else(|| {
-            crate::Error::Msg(
-                "cuda_matmul_into: dst's storage must be CudaStorage".to_string(),
-            )
+            crate::Error::Msg("cuda_matmul_into: dst's storage must be CudaStorage".to_string())
         })?;
     use crate::StorageBackend;
     if a_storage.device() != b_storage.device() || a_storage.device() != dst_storage.device() {
@@ -560,16 +662,13 @@ pub fn cuda_matmul_into(a: &Tensor, b: &Tensor, dst: &Tensor) -> Result<()> {
             handle
                 .matmul(raw_stream, &request, a_ptr, b_ptr, c_ptr, std::ptr::null())
                 .map_err(|e| {
-                    crate::Error::Msg(format!(
-                        "cuda_matmul_into: handle.matmul failed: {e}"
-                    ))
+                    crate::Error::Msg(format!("cuda_matmul_into: handle.matmul failed: {e}"))
                 })?;
         }
     }
 
     Ok(())
 }
-
 
 /// Run a CUDA matmul with a fused per-column bias add.
 ///
@@ -586,11 +685,7 @@ pub fn cuda_matmul_into(a: &Tensor, b: &Tensor, dst: &Tensor) -> Result<()> {
 ///
 /// Bias is broadcast over the last axis of the output (the standard
 /// PyTorch bias semantics).
-pub fn cuda_matmul_with_bias(
-    a: &Tensor,
-    b: &Tensor,
-    bias: &Tensor,
-) -> Result<Tensor> {
+pub fn cuda_matmul_with_bias(a: &Tensor, b: &Tensor, bias: &Tensor) -> Result<Tensor> {
     // ---- validate shapes ----
     let a_rank = a.rank();
     if a_rank < 2 {
@@ -758,9 +853,7 @@ pub fn cuda_matmul_with_bias(
             handle
                 .matmul(raw_stream, &request, a_ptr, b_ptr, c_ptr, bias_ptr)
                 .map_err(|e| {
-                    crate::Error::Msg(format!(
-                        "cuda_matmul_with_bias: handle.matmul failed: {e}"
-                    ))
+                    crate::Error::Msg(format!("cuda_matmul_with_bias: handle.matmul failed: {e}"))
                 })?;
         }
     }
