@@ -168,6 +168,67 @@ fn compact_body(body: &str) -> String {
         .collect()
 }
 
+fn trait_method_names(trait_source: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut offset = 0usize;
+    while let Some(relative_fn) = trait_source[offset..].find("fn ") {
+        let name_start = offset + relative_fn + 3;
+        let Some(name_len) =
+            trait_source[name_start..].find(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+        else {
+            break;
+        };
+        let name = &trait_source[name_start..name_start + name_len];
+        if !name.is_empty() && !names.iter().any(|existing| existing == name) {
+            names.push(name.to_string());
+        }
+        offset = name_start + name_len;
+    }
+    names
+}
+
+fn assert_no_broad_backend_runtime_calls(
+    backend_source: &str,
+    sources: &[(&str, &str)],
+    receiver_prefixes: &[&str],
+) {
+    let runtime_trait_source = source_between(
+        backend_source,
+        "pub trait BackendRuntime",
+        "pub trait BackendIdentity",
+    );
+    let methods = trait_method_names(runtime_trait_source);
+    let mut failures = Vec::new();
+
+    for (label, source) in sources {
+        let compact_source = compact_body(source);
+        for method in &methods {
+            let mut forbidden = Vec::new();
+            for receiver in receiver_prefixes {
+                forbidden.push(format!("{receiver}.{method}("));
+                forbidden.push(format!("{receiver}.as_ref().{method}("));
+            }
+            forbidden.push(format!("BackendRuntime::{method}("));
+            forbidden.push(format!("backend::BackendRuntime::{method}("));
+            forbidden.push(format!("crate::backend::BackendRuntime::{method}("));
+
+            for pattern in forbidden {
+                if compact_source.contains(&pattern) {
+                    failures.push(format!(
+                        "{label} should not call broad facade method {pattern}"
+                    ));
+                }
+            }
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "orchestration call sites should consume focused backend facets:\n{}",
+        failures.join("\n")
+    );
+}
+
 fn support_is_literal_true(body: &str) -> bool {
     compact_body(body) == "true"
 }
@@ -1582,14 +1643,58 @@ fn lora_residency_call_sites_consume_residency_backend_facet() {
 #[test]
 fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
     let root = workspace_root();
+    let backend_source = fs::read_to_string(root.join("crates/kiln-model/src/backend/mod.rs"))
+        .expect("backend/mod.rs should be readable");
     let trainer_source = fs::read_to_string(root.join("crates/kiln-train/src/trainer.rs"))
         .expect("trainer.rs should be readable");
+    let opd_source = fs::read_to_string(root.join("crates/kiln-train/src/opd.rs"))
+        .expect("opd.rs should be readable");
     let generate_source = fs::read_to_string(root.join("crates/kiln-model/src/generate.rs"))
         .expect("generate.rs should be readable");
+    let lora_source = fs::read_to_string(root.join("crates/kiln-model/src/lora_loader.rs"))
+        .expect("lora_loader.rs should be readable");
+    let speculative_source = fs::read_to_string(root.join("crates/kiln-model/src/speculative.rs"))
+        .expect("speculative.rs should be readable");
+    let cuda_graph_source = fs::read_to_string(root.join("crates/kiln-model/src/cuda_graph.rs"))
+        .expect("cuda_graph.rs should be readable");
+    let rocm_graph_source = fs::read_to_string(root.join("crates/kiln-model/src/rocm_graph.rs"))
+        .expect("rocm_graph.rs should be readable");
     let metal_graph_source = fs::read_to_string(root.join("crates/kiln-model/src/metal_graph.rs"))
         .expect("metal_graph.rs should be readable");
+    let tape_forward_source =
+        fs::read_to_string(root.join("crates/kiln-model/src/tape_forward.rs"))
+            .expect("tape_forward.rs should be readable");
     let forward_source = fs::read_to_string(root.join("crates/kiln-model/src/forward.rs"))
         .expect("forward.rs should be readable");
+
+    assert_no_broad_backend_runtime_calls(
+        &backend_source,
+        &[
+            ("crates/kiln-model/src/generate.rs", &generate_source),
+            ("crates/kiln-model/src/lora_loader.rs", &lora_source),
+            ("crates/kiln-model/src/speculative.rs", &speculative_source),
+            ("crates/kiln-model/src/cuda_graph.rs", &cuda_graph_source),
+            ("crates/kiln-model/src/rocm_graph.rs", &rocm_graph_source),
+            ("crates/kiln-model/src/metal_graph.rs", &metal_graph_source),
+            (
+                "crates/kiln-model/src/tape_forward.rs",
+                &tape_forward_source,
+            ),
+            ("crates/kiln-model/src/forward.rs", &forward_source),
+            ("crates/kiln-train/src/trainer.rs", &trainer_source),
+            ("crates/kiln-train/src/opd.rs", &opd_source),
+        ],
+        &[
+            "backend",
+            "_backend",
+            "fallback_backend",
+            "backend_rt",
+            "runtime",
+            "rt",
+            "self.backend",
+            "runner.backend",
+        ],
+    );
 
     assert!(
         trainer_source.contains("BackendCapabilityQueries"),
