@@ -579,3 +579,50 @@ fn generated_capability_report_lists_optimizer_dispatch_policy() {
         );
     }
 }
+
+#[test]
+fn generated_capability_report_gates_replay_contract() {
+    let report_path = workspace_root().join("docs/backend-capability-report.json");
+    let report: Value = serde_json::from_str(
+        &fs::read_to_string(&report_path).expect("capability report json should be readable"),
+    )
+    .expect("capability report json should parse");
+
+    let conformance_gates = report["conformance_gates"]
+        .as_array()
+        .expect("conformance_gates should be an array");
+    let replay_gate = conformance_gates
+        .iter()
+        .find(|gate| gate["gate"] == "replay_parity")
+        .expect("replay parity gate should be present");
+    assert_eq!(replay_gate["status"], "covered");
+    let evidence = replay_gate["evidence_present"]
+        .as_array()
+        .expect("replay parity evidence should be an array")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    for path in [
+        "crates/kiln-graph/src/replay_plan.rs",
+        "crates/kiln-graph/src/captured_graph.rs",
+        "crates/kiln-graph/tests/capture_lifetime.rs",
+        "crates/kiln-model/src/backend/capability.rs",
+        "crates/kiln-model/src/backend/residency.rs",
+        "crates/kiln-model/tests/vk_resident_decode_parity.rs",
+        "crates/kiln-tensor/tests/rocm_capture_arena.rs",
+    ] {
+        assert!(
+            evidence.contains(&path),
+            "replay parity gate should cite {path}"
+        );
+    }
+
+    let request_queries = report["request_capability_queries"]
+        .as_array()
+        .expect("request_capability_queries should be an array")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    assert!(request_queries.contains(&"supports_replay_request"));
+    assert!(request_queries.contains(&"replay_key_for_request"));
+}

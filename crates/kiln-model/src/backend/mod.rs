@@ -3085,7 +3085,7 @@ impl<T: BackendRuntime + ?Sized> ReplayBackend for T {
         &self,
         req: &capability::ReplayRequest,
     ) -> kiln_graph::ReplayKey {
-        req.replay_key(BackendRuntime::device(self).backend())
+        capability::BackendCapabilityQueries::replay_key_for_request(self, req)
     }
 
     fn runtime_flash_attn_paged_decode_contiguous_batch_dyn_seqlen_with_graph_outputs(
@@ -3810,7 +3810,7 @@ mod tests {
         );
         assert_eq!(
             ReplayBackend::runtime_replay_key_for_request(&cpu, &replay_req),
-            replay_req.replay_key(kiln_tensor::Backend::Cpu)
+            capability::BackendCapabilityQueries::replay_key_for_request(&cpu, &replay_req)
         );
 
         assert_eq!(

@@ -585,10 +585,14 @@ def conformance_gate_report() -> list[dict[str, Any]]:
         {
             "gate": "replay_parity",
             "phase8_requirement": "replay parity",
-            "status": "partial",
-            "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-graph replay",
+            "status": "covered",
+            "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-graph replay && /home/ericflo/.cargo/bin/cargo test -p kiln-model --test backend_capability_contract",
             "evidence": [
+                "crates/kiln-graph/src/replay_plan.rs",
+                "crates/kiln-graph/src/captured_graph.rs",
                 "crates/kiln-graph/tests/capture_lifetime.rs",
+                "crates/kiln-model/src/backend/capability.rs",
+                "crates/kiln-model/src/backend/residency.rs",
                 "crates/kiln-model/tests/vk_resident_decode_parity.rs",
                 "crates/kiln-tensor/tests/rocm_capture_arena.rs",
             ],

@@ -922,6 +922,10 @@ pub trait BackendCapabilityQueries: BackendRuntime {
             ReplayRequestKind::PagedDecodeGraphOutputs => self.supports_flash_attn_paged_decode(),
         })
     }
+
+    fn replay_key_for_request(&self, req: &ReplayRequest) -> ReplayKey {
+        req.replay_key(self.device().backend())
+    }
 }
 
 impl<T: BackendRuntime + ?Sized> BackendCapabilityQueries for T {}
