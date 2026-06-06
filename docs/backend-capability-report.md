@@ -98,6 +98,23 @@ Generated from the live source tree by `scripts/generate_backend_capability_repo
 | `vulkan` | `supports_resident_activation` | `literal_true` | `NativeWithConstraints` | `` | no | none |
 | `vulkan` | `supports_resident_decode` | `dynamic` | `NativeWithConstraints` | `decode_resident_pool_ready` | no | none |
 
+## Typed Request Descriptors
+
+| Descriptor | Field Count | DType | Shape | Batch | Replay Safe | Fields |
+|---|---:|---|---|---|---|---|
+| `AttentionRequest` | 8 | yes | no | yes | yes | `kind`, `q_dtype`, `k_dtype`, `v_dtype`, `batch`, `seq_len`, `head_dim`, `replay_safe` |
+| `MatmulRequest` | 12 | yes | yes | yes | yes | `lhs_shape`, `rhs_shape`, `lhs_dtype`, `rhs_dtype`, `out_dtype`, `accumulation`, `lhs_layout`, `rhs_layout`, `out_layout`, `batch`, `epilogue`, `replay_safe` |
+| `LinearRequest` | 8 | yes | no | yes | yes | `kind`, `input_dtype`, `weight_dtype`, `output_dtype`, `batch`, `top_k`, `temperatures`, `replay_safe` |
+| `ReplayRequest` | 6 | yes | no | yes | yes | `kind`, `max_hidden`, `max_intermediate`, `max_batch`, `dtype`, `replay_safe` |
+
+## Request Capability Queries
+
+- `capability_snapshot`
+- `supports_attention_request`
+- `supports_linear_request`
+- `supports_matmul_request`
+- `supports_replay_request`
+
 ## Generic DeviceOp Fallback
 
 | Backend | Policy | Counter | Evidence |

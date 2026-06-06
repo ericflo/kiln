@@ -1610,6 +1610,191 @@
       "sgd_step": "overridden"
     }
   },
+  "request_capability_queries": [
+    "capability_snapshot",
+    "supports_attention_request",
+    "supports_linear_request",
+    "supports_matmul_request",
+    "supports_replay_request"
+  ],
+  "request_descriptors": {
+    "AttentionRequest": {
+      "field_count": 8,
+      "fields": [
+        {
+          "name": "kind",
+          "type": "AttentionRequestKind"
+        },
+        {
+          "name": "q_dtype",
+          "type": "kiln_tensor::DType"
+        },
+        {
+          "name": "k_dtype",
+          "type": "kiln_tensor::DType"
+        },
+        {
+          "name": "v_dtype",
+          "type": "kiln_tensor::DType"
+        },
+        {
+          "name": "batch",
+          "type": "usize"
+        },
+        {
+          "name": "seq_len",
+          "type": "usize"
+        },
+        {
+          "name": "head_dim",
+          "type": "usize"
+        },
+        {
+          "name": "replay_safe",
+          "type": "bool"
+        }
+      ],
+      "has_batch": true,
+      "has_dtype": true,
+      "has_replay_safe": true,
+      "has_shape": false,
+      "source": "crates/kiln-model/src/backend/capability.rs"
+    },
+    "LinearRequest": {
+      "field_count": 8,
+      "fields": [
+        {
+          "name": "kind",
+          "type": "LinearRequestKind"
+        },
+        {
+          "name": "input_dtype",
+          "type": "kiln_tensor::DType"
+        },
+        {
+          "name": "weight_dtype",
+          "type": "kiln_tensor::DType"
+        },
+        {
+          "name": "output_dtype",
+          "type": "kiln_tensor::DType"
+        },
+        {
+          "name": "batch",
+          "type": "usize"
+        },
+        {
+          "name": "top_k",
+          "type": "Vec<u32>"
+        },
+        {
+          "name": "temperatures",
+          "type": "Vec<f32>"
+        },
+        {
+          "name": "replay_safe",
+          "type": "bool"
+        }
+      ],
+      "has_batch": true,
+      "has_dtype": true,
+      "has_replay_safe": true,
+      "has_shape": false,
+      "source": "crates/kiln-model/src/backend/capability.rs"
+    },
+    "MatmulRequest": {
+      "field_count": 12,
+      "fields": [
+        {
+          "name": "lhs_shape",
+          "type": "Vec<usize>"
+        },
+        {
+          "name": "rhs_shape",
+          "type": "Vec<usize>"
+        },
+        {
+          "name": "lhs_dtype",
+          "type": "kiln_tensor::DType"
+        },
+        {
+          "name": "rhs_dtype",
+          "type": "kiln_tensor::DType"
+        },
+        {
+          "name": "out_dtype",
+          "type": "kiln_tensor::DType"
+        },
+        {
+          "name": "accumulation",
+          "type": "MatmulAccumulation"
+        },
+        {
+          "name": "lhs_layout",
+          "type": "MatmulOperandLayout"
+        },
+        {
+          "name": "rhs_layout",
+          "type": "MatmulOperandLayout"
+        },
+        {
+          "name": "out_layout",
+          "type": "MatmulOperandLayout"
+        },
+        {
+          "name": "batch",
+          "type": "MatmulBatchPolicy"
+        },
+        {
+          "name": "epilogue",
+          "type": "MatmulEpilogue"
+        },
+        {
+          "name": "replay_safe",
+          "type": "bool"
+        }
+      ],
+      "has_batch": true,
+      "has_dtype": true,
+      "has_replay_safe": true,
+      "has_shape": true,
+      "source": "crates/kiln-model/src/backend/capability.rs"
+    },
+    "ReplayRequest": {
+      "field_count": 6,
+      "fields": [
+        {
+          "name": "kind",
+          "type": "ReplayRequestKind"
+        },
+        {
+          "name": "max_hidden",
+          "type": "usize"
+        },
+        {
+          "name": "max_intermediate",
+          "type": "usize"
+        },
+        {
+          "name": "max_batch",
+          "type": "usize"
+        },
+        {
+          "name": "dtype",
+          "type": "Option<kiln_tensor::DType>"
+        },
+        {
+          "name": "replay_safe",
+          "type": "bool"
+        }
+      ],
+      "has_batch": true,
+      "has_dtype": true,
+      "has_replay_safe": true,
+      "has_shape": false,
+      "source": "crates/kiln-model/src/backend/capability.rs"
+    }
+  },
   "source": {
     "branch": "unify-engines",
     "script": "scripts/generate_backend_capability_report.py"

@@ -24,6 +24,15 @@ BACKENDS = {
     "vulkan": ROOT / "crates" / "kiln-model" / "src" / "backend" / "vulkan.rs",
 }
 
+CAPABILITY_RS = ROOT / "crates" / "kiln-model" / "src" / "backend" / "capability.rs"
+
+REQUEST_DESCRIPTOR_STRUCTS = [
+    "AttentionRequest",
+    "MatmulRequest",
+    "LinearRequest",
+    "ReplayRequest",
+]
+
 FEATURE_CRATES = [
     ROOT / "crates" / "kiln-server" / "Cargo.toml",
     ROOT / "crates" / "kiln-model" / "Cargo.toml",
@@ -153,6 +162,32 @@ def parse_trait_method_names(path: Path, trait_name: str) -> set[str]:
     return set(re.findall(r"\bfn\s+([A-Za-z_][A-Za-z0-9_]*)\s*[<(]", body))
 
 
+def parse_pub_struct_fields(path: Path, struct_names: list[str]) -> dict[str, list[dict[str, str]]]:
+    text = path.read_text()
+    report: dict[str, list[dict[str, str]]] = {}
+    for struct_name in struct_names:
+        match = re.search(rf"\bpub\s+struct\s+{re.escape(struct_name)}\b", text)
+        if not match:
+            raise ValueError(f"{struct_name} struct not found in {path}")
+        brace = text.find("{", match.end())
+        if brace == -1:
+            raise ValueError(f"{struct_name} body not found in {path}")
+        end = find_matching_brace(text, brace)
+        body = text[brace + 1 : end]
+        fields = []
+        for field_match in re.finditer(
+            r"\bpub\s+([A-Za-z_][A-Za-z0-9_]*)\s*:\s*([^,\n]+)", body
+        ):
+            fields.append(
+                {
+                    "name": field_match.group(1),
+                    "type": field_match.group(2).strip(),
+                }
+            )
+        report[struct_name] = fields
+    return report
+
+
 def body_without_comments(body: str) -> str:
     body = re.sub(r"//.*", "", body)
     body = re.sub(r"/\*.*?\*/", "", body, flags=re.S)
@@ -215,6 +250,22 @@ def feature_report() -> dict[str, Any]:
             if family in features
         }
     return report
+
+
+def request_descriptor_report() -> dict[str, Any]:
+    descriptors: dict[str, Any] = {}
+    for name, fields in parse_pub_struct_fields(CAPABILITY_RS, REQUEST_DESCRIPTOR_STRUCTS).items():
+        field_names = [field["name"] for field in fields]
+        descriptors[name] = {
+            "source": str(CAPABILITY_RS.relative_to(ROOT)),
+            "field_count": len(fields),
+            "fields": fields,
+            "has_dtype": any("dtype" in field_name for field_name in field_names),
+            "has_shape": any("shape" in field_name for field_name in field_names),
+            "has_batch": any("batch" in field_name for field_name in field_names),
+            "has_replay_safe": "replay_safe" in field_names,
+        }
+    return descriptors
 
 
 def backend_report(trait_methods: set[str]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
@@ -402,6 +453,25 @@ def markdown(data: dict[str, Any]) -> str:
                 f"`{entry['support_state']}` | `{pair}` | {declines} | {gates} |"
             )
     lines.append("")
+    lines.append("## Typed Request Descriptors")
+    lines.append("")
+    lines.append("| Descriptor | Field Count | DType | Shape | Batch | Replay Safe | Fields |")
+    lines.append("|---|---:|---|---|---|---|---|")
+    for name, info in data["request_descriptors"].items():
+        fields = ", ".join(f"`{field['name']}`" for field in info["fields"])
+        lines.append(
+            f"| `{name}` | {info['field_count']} | "
+            f"{'yes' if info['has_dtype'] else 'no'} | "
+            f"{'yes' if info['has_shape'] else 'no'} | "
+            f"{'yes' if info['has_batch'] else 'no'} | "
+            f"{'yes' if info['has_replay_safe'] else 'no'} | {fields} |"
+        )
+    lines.append("")
+    lines.append("## Request Capability Queries")
+    lines.append("")
+    for method in data["request_capability_queries"]:
+        lines.append(f"- `{method}`")
+    lines.append("")
     lines.append("## Generic DeviceOp Fallback")
     lines.append("")
     lines.append("| Backend | Policy | Counter | Evidence |")
@@ -478,6 +548,10 @@ def main() -> int:
         },
         "features": feature_report(),
         "trait_method_count": len(trait_methods),
+        "request_descriptors": request_descriptor_report(),
+        "request_capability_queries": sorted(
+            parse_trait_method_names(CAPABILITY_RS, "BackendCapabilityQueries")
+        ),
         "backends": backends,
         "fallback_policy": fallback_policy_report(),
         "decode_hot_path_policy": decode_hot_path_policy_report(),

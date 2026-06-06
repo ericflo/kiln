@@ -262,3 +262,47 @@ fn generated_capability_report_uses_typed_support_states() {
         failures.join("\n")
     );
 }
+
+#[test]
+fn generated_capability_report_lists_request_descriptors() {
+    let report_path = workspace_root().join("docs/backend-capability-report.json");
+    let report: Value = serde_json::from_str(
+        &fs::read_to_string(&report_path).expect("capability report json should be readable"),
+    )
+    .expect("capability report json should parse");
+
+    let descriptors = report["request_descriptors"]
+        .as_object()
+        .expect("request_descriptors should be an object");
+    for name in [
+        "AttentionRequest",
+        "MatmulRequest",
+        "LinearRequest",
+        "ReplayRequest",
+    ] {
+        assert!(
+            descriptors.contains_key(name),
+            "{name} should be present in request_descriptors"
+        );
+    }
+
+    let replay_fields = descriptors["ReplayRequest"]["fields"]
+        .as_array()
+        .expect("ReplayRequest fields should be an array")
+        .iter()
+        .filter_map(|field| field["name"].as_str())
+        .collect::<Vec<_>>();
+    assert!(replay_fields.contains(&"dtype"));
+    assert!(replay_fields.contains(&"replay_safe"));
+
+    let request_queries = report["request_capability_queries"]
+        .as_array()
+        .expect("request_capability_queries should be an array")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    assert!(request_queries.contains(&"supports_attention_request"));
+    assert!(request_queries.contains(&"supports_matmul_request"));
+    assert!(request_queries.contains(&"supports_linear_request"));
+    assert!(request_queries.contains(&"supports_replay_request"));
+}
