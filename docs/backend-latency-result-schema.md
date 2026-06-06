@@ -71,8 +71,27 @@ python3 scripts/write_backend_latency_result_artifact.py \
 ```
 
 By default the script writes the fixture's `result_artifact`; use `--output` for
-a scratch artifact. After reviewing the hardware result, lock numeric
-thresholds in the manifest and run the covered gate:
+a scratch artifact.
+
+## Locking Thresholds
+
+After reviewing the hardware result artifacts, lock numeric thresholds in the
+manifest with explicit headroom:
+
+```sh
+python3 scripts/lock_backend_latency_thresholds.py \
+  docs/backend-latency-fixtures.json \
+  --headroom 0.10
+```
+
+The threshold locker requires every fixture result artifact to exist, have
+`status: "passed"`, match the fixture `id` and `backend`, and contain every
+declared metric. It sets every fixture `threshold_state` to `locked_threshold`,
+sets the manifest `status` to `covered`, and applies the headroom by comparison:
+`<=` thresholds are raised above observed latency, while `>=` thresholds are
+lowered below observed throughput. Use `--check` to validate without writing.
+
+Then run the covered gate:
 
 ```sh
 python3 scripts/check_backend_latency_fixtures.py \
@@ -82,5 +101,7 @@ python3 scripts/check_backend_latency_fixtures.py \
 
 Run `python3 scripts/write_backend_latency_result_artifact.py --self-test` to
 validate the log-line parser and artifact writer without hardware.
+Run `python3 scripts/lock_backend_latency_thresholds.py --self-test` to validate
+the threshold-locking logic without hardware.
 Run `python3 scripts/check_backend_latency_fixtures.py --self-test` to validate
 the artifact-checking logic without hardware.

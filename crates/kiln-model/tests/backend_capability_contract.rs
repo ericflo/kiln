@@ -2460,6 +2460,7 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
         .expect("hardware latency command should be a string");
     assert!(command.contains("check_backend_latency_fixtures.py"));
     assert!(command.contains("write_backend_latency_result_artifact.py"));
+    assert!(command.contains("lock_backend_latency_thresholds.py"));
     assert!(command.contains("--self-test"));
     assert!(command.contains("--require-covered"));
 
@@ -2494,6 +2495,23 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
         );
     }
 
+    let threshold_locker_source =
+        fs::read_to_string(root.join("scripts/lock_backend_latency_thresholds.py"))
+            .expect("latency threshold locker should be readable");
+    for required in [
+        "def lock_manifest_thresholds(",
+        "locked_threshold",
+        "status",
+        "covered",
+        "--headroom",
+        "--self-test",
+    ] {
+        assert!(
+            threshold_locker_source.contains(required),
+            "latency threshold locker should materialize covered fixture manifests: {required}"
+        );
+    }
+
     let evidence_present = hardware_gate["evidence_present"]
         .as_array()
         .expect("hardware latency present evidence should be an array")
@@ -2504,6 +2522,7 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
         "docs/backend-latency-fixtures.json",
         "docs/backend-latency-result-schema.md",
         "scripts/write_backend_latency_result_artifact.py",
+        "scripts/lock_backend_latency_thresholds.py",
         "scripts/check_backend_latency_fixtures.py",
         "crates/kiln-server/examples/flce_preflight_bench.rs",
         "crates/kiln-server/examples/flce_phase_a_validation_bench.rs",
@@ -2527,6 +2546,7 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
         "metrics",
         "KILN_LATENCY_METRIC",
         "write_backend_latency_result_artifact.py",
+        "lock_backend_latency_thresholds.py",
         "--require-covered",
         "--self-test",
     ] {
