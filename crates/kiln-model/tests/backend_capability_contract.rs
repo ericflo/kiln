@@ -941,6 +941,24 @@ fn generated_capability_report_lists_request_descriptors() {
     assert!(replay_fields.contains(&"dtype"));
     assert!(replay_fields.contains(&"replay_safe"));
 
+    let linear = &descriptors["LinearRequest"];
+    assert_eq!(
+        linear["has_shape"], true,
+        "LinearRequest should carry shape metadata for decode/lm-head capability queries"
+    );
+    let linear_fields = linear["fields"]
+        .as_array()
+        .expect("LinearRequest fields should be an array")
+        .iter()
+        .filter_map(|field| field["name"].as_str())
+        .collect::<Vec<_>>();
+    for field in ["input_shape", "weight_shape", "output_shape"] {
+        assert!(
+            linear_fields.contains(&field),
+            "LinearRequest should include {field}"
+        );
+    }
+
     let matmul_blas_fields = descriptors["MatmulBlasRequest"]["fields"]
         .as_array()
         .expect("MatmulBlasRequest fields should be an array")

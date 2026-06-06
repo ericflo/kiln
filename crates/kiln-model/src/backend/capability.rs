@@ -338,6 +338,9 @@ pub enum LinearRequestKind {
 #[derive(Debug, Clone, PartialEq)]
 pub struct LinearRequest {
     pub kind: LinearRequestKind,
+    pub input_shape: Vec<usize>,
+    pub weight_shape: Vec<usize>,
+    pub output_shape: Vec<usize>,
     pub input_dtype: kiln_tensor::DType,
     pub weight_dtype: kiln_tensor::DType,
     pub output_dtype: kiln_tensor::DType,
@@ -361,6 +364,9 @@ impl LinearRequest {
             } else {
                 LinearRequestKind::DecodeArgmax
             },
+            input_shape: Vec::new(),
+            weight_shape: Vec::new(),
+            output_shape: Vec::new(),
             input_dtype,
             weight_dtype,
             output_dtype,
@@ -386,6 +392,9 @@ impl LinearRequest {
             } else {
                 LinearRequestKind::DecodeSample
             },
+            input_shape: Vec::new(),
+            weight_shape: Vec::new(),
+            output_shape: Vec::new(),
             input_dtype,
             weight_dtype,
             output_dtype,
@@ -394,6 +403,26 @@ impl LinearRequest {
             temperatures,
             replay_safe,
         }
+    }
+
+    pub fn with_shapes(
+        mut self,
+        input_shape: Vec<usize>,
+        weight_shape: Vec<usize>,
+        output_shape: Vec<usize>,
+    ) -> Self {
+        self.input_shape = input_shape;
+        self.weight_shape = weight_shape;
+        self.output_shape = output_shape;
+        self
+    }
+
+    pub fn shape_key(&self) -> Vec<Vec<usize>> {
+        vec![
+            self.input_shape.clone(),
+            self.weight_shape.clone(),
+            self.output_shape.clone(),
+        ]
     }
 }
 
@@ -656,14 +685,16 @@ impl BackendCapabilities {
             kiln_tensor::DType::I64,
             1,
             true,
-        );
+        )
+        .with_shapes(vec![1, 4096], vec![32000, 4096], vec![1]);
         let linear_argmax_batch = LinearRequest::decode_argmax(
             kiln_tensor::DType::BF16,
             kiln_tensor::DType::BF16,
             kiln_tensor::DType::I64,
             2,
             true,
-        );
+        )
+        .with_shapes(vec![2, 4096], vec![32000, 4096], vec![2]);
         let linear_sample = LinearRequest::decode_sample(
             kiln_tensor::DType::BF16,
             kiln_tensor::DType::BF16,
@@ -671,7 +702,8 @@ impl BackendCapabilities {
             vec![8],
             vec![1.0],
             true,
-        );
+        )
+        .with_shapes(vec![1, 4096], vec![32000, 4096], vec![1]);
         let linear_sample_batch = LinearRequest::decode_sample(
             kiln_tensor::DType::BF16,
             kiln_tensor::DType::BF16,
@@ -679,7 +711,8 @@ impl BackendCapabilities {
             vec![8, 8],
             vec![1.0, 1.0],
             true,
-        );
+        )
+        .with_shapes(vec![2, 4096], vec![32000, 4096], vec![2]);
         let resident_replay =
             ReplayRequest::resident_decode(8, 16, 2).with_dtype(kiln_tensor::DType::BF16);
         let paged_replay = ReplayRequest::paged_decode_graph_outputs(8, 16, 2)

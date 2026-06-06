@@ -3370,6 +3370,11 @@ mod tests {
             kiln_tensor::DType::I64,
             1,
             false,
+        )
+        .with_shapes(vec![1, 4096], vec![32000, 4096], vec![1]);
+        assert_eq!(
+            linear_req.shape_key(),
+            vec![vec![1, 4096], vec![32000, 4096], vec![1]]
         );
         assert_eq!(
             capability::BackendCapabilityQueries::supports_linear_request(&cpu, &linear_req),
