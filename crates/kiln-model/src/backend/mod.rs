@@ -138,6 +138,9 @@ pub(crate) mod vulkan_config;
 pub(crate) mod vulkan_tensor_bridge;
 
 #[cfg(feature = "vulkan")]
+pub(crate) mod vulkan_attention;
+
+#[cfg(feature = "vulkan")]
 pub(crate) mod vulkan_training;
 
 #[cfg(feature = "vulkan")]

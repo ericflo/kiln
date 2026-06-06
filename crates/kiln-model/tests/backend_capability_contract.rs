@@ -367,6 +367,10 @@ fn generated_capability_report_lists_backend_source_modules() {
         .filter_map(Value::as_str)
         .collect::<Vec<_>>();
     assert!(
+        vulkan_sources.contains(&"crates/kiln-model/src/backend/vulkan_attention.rs"),
+        "Vulkan backend source modules should include the extracted attention module"
+    );
+    assert!(
         vulkan_sources.contains(&"crates/kiln-model/src/backend/vulkan_training.rs"),
         "Vulkan backend source modules should include the extracted training module"
     );
