@@ -39,6 +39,8 @@
 //!
 //! - [`CapturedGraph`] trait — `replay()` + per-backend metadata
 //!   (`backend_name`, `replay_count`).
+//! - [`ReplayPlan`] trait — engine-facing key/input/invalidation
+//!   contract layered above backend-native replay objects.
 //! - [`CaptureSession`] — RAII guard for a capture lifetime. Records
 //!   the set of pinned pointers; verifies on drop that no pointer
 //!   was freed mid-capture.
@@ -69,8 +71,13 @@ mod allocator_mode;
 mod capture_session;
 mod captured_graph;
 mod error;
+mod replay_plan;
 
 pub use allocator_mode::AllocatorMode;
 pub use capture_session::{CaptureSession, PinnedPointer};
 pub use captured_graph::CapturedGraph;
 pub use error::CaptureError;
+pub use replay_plan::{
+    CapturedGraphReplayPlan, InvalidateReason, ReplayInputs, ReplayKey, ReplayOutputs, ReplayPlan,
+    ReplayResourceStability, ReplayState, ResidentResourceRef,
+};
