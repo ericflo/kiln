@@ -370,6 +370,10 @@ fn generated_capability_report_lists_backend_source_modules() {
         vulkan_sources.contains(&"crates/kiln-model/src/backend/vulkan_training.rs"),
         "Vulkan backend source modules should include the extracted training module"
     );
+    assert!(
+        vulkan_sources.contains(&"crates/kiln-model/src/backend/vulkan_residency.rs"),
+        "Vulkan backend source modules should include the extracted residency module"
+    );
 }
 
 #[test]

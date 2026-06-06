@@ -15,6 +15,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 
+use super::vulkan_residency::with_resident_registry;
 use super::{vulkan_training, BackendRuntime, TrainingCapabilities, TrainingPrecisionPolicy};
 use crate::forward::{GpuAttentionWeights, GpuWeights};
 
@@ -370,45 +371,6 @@ thread_local! {
     static RECURRENT_STATE_RESIDENT_SCOPE_DEPTH: Cell<usize> = const { Cell::new(0) };
     static RECURRENT_STATE_RESIDENT_CACHE: RefCell<HashMap<kiln_tensor::TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>> =
         RefCell::new(HashMap::new());
-}
-
-/// General-purpose resident-activation registry keyed by the kt
-/// `kiln_tensor::TensorId`. Process-global (not thread-local) so worker threads
-/// spawned by rayon, etc. see the
-/// same registry as the thread that registered. Phase 3.1 of the
-/// residency plan — the registry the `register_resident_activation`
-/// / `evict_resident_activation` / `has_resident_activation` /
-/// `update_resident_activation` / `resolve_resident_activation`
-/// BackendRuntime hooks read and write.
-///
-/// Held behind a Mutex; per-access lock cost is negligible relative
-/// to the Vulkan dispatches the registry feeds (~50µs+ each).
-///
-/// Separate from `RECURRENT_STATE_RESIDENT_CACHE` so the
-/// GDN-specific hot path can keep its own thread-local
-/// scope-limited lifecycle without growing accidental coupling to
-/// non-recurrent activations.
-static RESIDENT_ACTIVATION_REGISTRY: std::sync::OnceLock<
-    std::sync::Mutex<HashMap<kiln_tensor::TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>>,
-> = std::sync::OnceLock::new();
-
-fn resident_registry()
--> &'static std::sync::Mutex<HashMap<kiln_tensor::TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>> {
-    RESIDENT_ACTIVATION_REGISTRY.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
-}
-
-/// Helper: short, self-recovering accessor that wraps the registry's
-/// mutex. Poison recovery returns the inner data so we never leave
-/// the registry inaccessible just because some panicking code touched
-/// it.
-pub(super) fn with_resident_registry<F, R>(f: F) -> R
-where
-    F: FnOnce(&mut HashMap<kiln_tensor::TensorId, Arc<kiln_vulkan_kernel::VulkanBuffer>>) -> R,
-{
-    let mut guard = resident_registry()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
-    f(&mut guard)
 }
 
 fn recurrent_state_resident_scope_active() -> bool {

@@ -7,7 +7,8 @@
 use anyhow::Result;
 use std::sync::{Arc, OnceLock};
 
-use super::vulkan::{with_resident_registry, VulkanBackend};
+use super::vulkan::VulkanBackend;
+use super::vulkan_residency::with_resident_registry;
 use super::{TrainingCapabilities, TrainingPrecisionPolicy};
 
 pub(super) fn training_capabilities_static() -> TrainingCapabilities {
