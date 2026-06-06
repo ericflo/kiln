@@ -9,7 +9,7 @@
 
 use anyhow::{Context, Result};
 
-use super::{BackendRuntime, TrainingCapabilities, TrainingPrecisionPolicy};
+use super::{metal_training, BackendRuntime, TrainingCapabilities, TrainingPrecisionPolicy};
 
 // Phase 7 #1082: module-level imports for the kt-metal chokepoint types,
 // hoisted from ~92 per-function `use` statements so that the chokepoint
@@ -747,14 +747,7 @@ impl MetalBackend {
     }
 
     pub fn training_capabilities_static() -> TrainingCapabilities {
-        let mut caps = TrainingCapabilities::portable();
-        caps.projection_training = "kt-tape-recorded matmul; Metal decode fusions decline tape-tracked tensors";
-        caps.resident_activation = "Metal TensorId membership registry; kt Metal tensors own UMA buffers";
-        caps.lora_delta_training = "kt-tape-recorded LoRA delta; fused lora_decode_add declines tape-tracked tensors";
-        caps.sgd_step = "declined; portable optimizer fallback";
-        caps.adamw_step = "Metal in-place AdamW for resident F32/BF16 tensors";
-        caps.native_training = "shared trainer.rs kt-tape path with Metal residency/AdamW hooks";
-        caps
+        metal_training::training_capabilities_static()
     }
 }
 
@@ -907,7 +900,7 @@ impl BackendRuntime for MetalBackend {
     }
 
     fn training_precision_policy(&self) -> TrainingPrecisionPolicy {
-        TrainingPrecisionPolicy::metal()
+        metal_training::training_precision_policy()
     }
 
     // ------------------------------------------------------------------
@@ -1013,86 +1006,21 @@ impl BackendRuntime for MetalBackend {
         weight_decay: f32,
         step: u32,
     ) -> Result<bool> {
-        if step < 1 {
-            anyhow::bail!("dispatch_adamw_step: step must be 1-indexed (>=1), got {step}");
-        }
-        // All four operands must be resident — no mixed resident/host (that
-        // would need a per-call upload that defeats the on-device update).
         let p_id = param.id();
         let g_id = grad.id();
         let m_id = first_moment.id();
         let v_id = second_moment.id();
+        // All four operands must be resident: no mixed resident/host update,
+        // since that would need a per-call upload and defeat on-device AdamW.
         let all_resident = with_metal_resident_registry(|set| {
             set.contains(&p_id) && set.contains(&g_id) && set.contains(&m_id) && set.contains(&v_id)
         });
-        if !all_resident {
-            return Ok(false);
-        }
-        // Match Vulkan's dtype/element-count gates.
-        if param.dtype() != grad.dtype()
-            || param.dtype() != first_moment.dtype()
-            || param.dtype() != second_moment.dtype()
-        {
-            anyhow::bail!(
-                "dispatch_adamw_step: dtype mismatch (param={:?}, grad={:?}, m={:?}, v={:?})",
-                param.dtype(),
-                grad.dtype(),
-                first_moment.dtype(),
-                second_moment.dtype(),
-            );
-        }
-        let n_elements = param.element_count();
-        if n_elements != grad.element_count()
-            || n_elements != first_moment.element_count()
-            || n_elements != second_moment.element_count()
-        {
-            anyhow::bail!(
-                "dispatch_adamw_step: element count mismatch (param={}, grad={}, m={}, v={})",
-                n_elements,
-                grad.element_count(),
-                first_moment.element_count(),
-                second_moment.element_count(),
-            );
-        }
-        // F32 + BF16 run on-device (BF16 with round-to-nearest, matching
-        // Vulkan's BF16 dispatch_adamw_step arm + the default round-to-nearest
-        // host policy). BF16 declines to the host AdamW ONLY when stochastic
-        // rounding is opt-in (`KILN_BF16_STOCHASTIC_ROUND=1|true|yes`), so the
-        // host's stochastic-rounding master update is preserved — strictly more
-        // correct than Vulkan, which ignores stochastic rounding on-device.
-        // F16 isn't a production master dtype; decline it.
-        let dt = param.dtype();
-        if dt == kiln_tensor::DType::F16 {
-            return Ok(false);
-        }
-        if dt == kiln_tensor::DType::BF16 {
-            let stochastic = std::env::var("KILN_BF16_STOCHASTIC_ROUND")
-                .ok()
-                .map(|v| matches!(v.trim().to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
-                .unwrap_or(false);
-            if stochastic {
-                return Ok(false);
-            }
-        }
-        static FIRST_ADAMW_LOGGED: OnceLock<()> = OnceLock::new();
-        FIRST_ADAMW_LOGGED.get_or_init(|| {
-            tracing::info!(
-                n_elements,
-                lr,
-                beta1,
-                beta2,
-                eps,
-                weight_decay,
-                step,
-                dtype = ?param.dtype(),
-                "MetalBackend::dispatch_adamw_step first call"
-            );
-        });
-        kiln_tensor::metal_adamw_step(
+        metal_training::dispatch_adamw_step(
             param,
             grad,
             first_moment,
             second_moment,
+            all_resident,
             lr,
             beta1,
             beta2,
@@ -1100,8 +1028,6 @@ impl BackendRuntime for MetalBackend {
             weight_decay,
             step,
         )
-        .context("dispatch_adamw_step: metal_adamw_step")?;
-        Ok(true)
     }
 
     fn supports_linear_decode_sample(&self, top_k: u32) -> bool {

@@ -80,6 +80,9 @@ pub mod cuda;
 #[cfg(feature = "metal")]
 pub mod metal;
 
+#[cfg(feature = "metal")]
+pub(crate) mod metal_training;
+
 #[cfg(feature = "vulkan")]
 pub mod vulkan;
 

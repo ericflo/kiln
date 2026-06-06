@@ -266,6 +266,42 @@ fn generated_capability_report_uses_typed_support_states() {
 }
 
 #[test]
+fn generated_capability_report_lists_backend_source_modules() {
+    let report_path = workspace_root().join("docs/backend-capability-report.json");
+    let report: Value = serde_json::from_str(
+        &fs::read_to_string(&report_path).expect("capability report json should be readable"),
+    )
+    .expect("capability report json should parse");
+
+    let backends = report["backends"]
+        .as_object()
+        .expect("report backends should be an object");
+    for backend in ["cuda", "rocm", "metal", "vulkan"] {
+        let source_modules = backends[backend]["source_modules"]
+            .as_array()
+            .expect("backend source_modules should be an array")
+            .iter()
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>();
+        assert!(
+            !source_modules.is_empty(),
+            "{backend} should list at least one source module"
+        );
+    }
+
+    let metal_sources = backends["metal"]["source_modules"]
+        .as_array()
+        .expect("metal source_modules should be an array")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    assert!(
+        metal_sources.contains(&"crates/kiln-model/src/backend/metal_training.rs"),
+        "Metal backend source modules should include the extracted training module"
+    );
+}
+
+#[test]
 fn generated_capability_report_lists_request_descriptors() {
     let report_path = workspace_root().join("docs/backend-capability-report.json");
     let report: Value = serde_json::from_str(

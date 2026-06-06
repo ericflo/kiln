@@ -24,6 +24,12 @@ BACKENDS = {
     "vulkan": ROOT / "crates" / "kiln-model" / "src" / "backend" / "vulkan.rs",
 }
 
+BACKEND_EXTRA_SOURCES = {
+    "metal": [
+        ROOT / "crates" / "kiln-model" / "src" / "backend" / "metal_training.rs",
+    ],
+}
+
 CAPABILITY_RS = ROOT / "crates" / "kiln-model" / "src" / "backend" / "capability.rs"
 RESIDENCY_RS = ROOT / "crates" / "kiln-model" / "src" / "backend" / "residency.rs"
 
@@ -248,6 +254,14 @@ def env_gates(source: str) -> list[str]:
     return sorted(name for name in names if any(key in name for key in FEATURE_FAMILIES + ["CUDA", "ROCM", "METAL", "VULKAN"]))
 
 
+def backend_source_paths(backend: str, main_path: Path) -> list[Path]:
+    return [main_path, *BACKEND_EXTRA_SOURCES.get(backend, [])]
+
+
+def read_backend_sources(backend: str, main_path: Path) -> str:
+    return "\n".join(path.read_text() for path in backend_source_paths(backend, main_path))
+
+
 def gate_hints(body: str) -> dict[str, bool]:
     return {
         "dtype": ".dtype()" in body or "DType::" in body,
@@ -349,9 +363,11 @@ def backend_report(trait_methods: set[str]) -> tuple[dict[str, Any], list[dict[s
                         "paired_line": paired_fun.line if paired_fun else None,
                     }
                 )
-        source = path.read_text()
+        source_paths = backend_source_paths(backend, path)
+        source = read_backend_sources(backend, path)
         report[backend] = {
             "source": str(path.relative_to(ROOT)),
+            "source_modules": [str(source_path.relative_to(ROOT)) for source_path in source_paths],
             "override_count": len(overrides),
             "overrides": overrides,
             "support_methods": support_methods,
@@ -723,11 +739,12 @@ def markdown(data: dict[str, Any]) -> str:
     lines.append("")
     lines.append("## BackendRuntime Overrides")
     lines.append("")
-    lines.append("| Backend | Source | Override Count | Support Methods | Env Gates |")
+    lines.append("| Backend | Source Modules | Override Count | Support Methods | Env Gates |")
     lines.append("|---|---|---:|---:|---:|")
     for backend, info in data["backends"].items():
+        sources = ", ".join(f"`{source}`" for source in info.get("source_modules", [info["source"]]))
         lines.append(
-            f"| `{backend}` | `{info['source']}` | {info['override_count']} | "
+            f"| `{backend}` | {sources} | {info['override_count']} | "
             f"{len(info['support_methods'])} | {len(info['env_gates'])} |"
         )
     lines.append("")
