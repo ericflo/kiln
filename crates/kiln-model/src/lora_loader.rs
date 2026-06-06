@@ -12,6 +12,7 @@
 //! lands on CPU first, then `.to_device(device)` migrates to GPU — the
 //! same pattern the base-model weights use.
 
+use crate::backend::{BackendRuntime, ResidencyBackend};
 use anyhow::{Context, Result};
 use kiln_tensor::Tensor as KtTensor;
 use serde::Deserialize;
@@ -114,11 +115,8 @@ impl LoraWeights {
     /// Caller invokes this once after [`Self::load`], typically at
     /// adapter-load time. No-op on backends without registry support.
     /// Inverse: [`Self::evict_from_backend`] for cleanup.
-    pub fn register_with_backend(
-        &self,
-        backend: &dyn crate::backend::BackendRuntime,
-    ) -> anyhow::Result<()> {
-        if !backend.supports_resident_activation() {
+    pub fn register_with_backend(&self, backend: &dyn BackendRuntime) -> anyhow::Result<()> {
+        if !ResidencyBackend::runtime_supports_resident_activation(backend) {
             return Ok(());
         }
         for layer in &self.layers {
@@ -132,7 +130,7 @@ impl LoraWeights {
                 // `&kiln_tensor::Tensor`, so pass the kt tensor directly
                 // (no kt -> candle bridge copy).
                 let register = |t: &KtTensor| -> anyhow::Result<()> {
-                    backend.register_resident_activation(t)
+                    ResidencyBackend::runtime_register_resident_activation(backend, t)
                 };
                 if let Err(e) = register(&proj.a) {
                     maybe_err = Some(e);
@@ -150,8 +148,8 @@ impl LoraWeights {
     }
 
     /// Inverse of [`Self::register_with_backend`].
-    pub fn evict_from_backend(&self, backend: &dyn crate::backend::BackendRuntime) {
-        if !backend.supports_resident_activation() {
+    pub fn evict_from_backend(&self, backend: &dyn BackendRuntime) {
+        if !ResidencyBackend::runtime_supports_resident_activation(backend) {
             return;
         }
         for layer in &self.layers {
@@ -161,8 +159,8 @@ impl LoraWeights {
                 // directly (no kt -> candle bridge copy). The resident
                 // registry is GPU-only behind
                 // `supports_resident_activation()`.
-                backend.evict_resident_activation(&proj.a);
-                backend.evict_resident_activation(&proj.b);
+                ResidencyBackend::runtime_evict_resident_activation(backend, &proj.a);
+                ResidencyBackend::runtime_evict_resident_activation(backend, &proj.b);
             });
         }
     }
@@ -183,7 +181,11 @@ impl LoraWeights {
     /// #1082: `device` is a kt [`kiln_tensor::Device`]. The A/B matrices
     /// are loaded to CPU via the kt safetensors helper and then moved to
     /// `device`.
-    pub fn load(adapter_dir: &Path, num_layers: usize, device: kiln_tensor::Device) -> Result<Self> {
+    pub fn load(
+        adapter_dir: &Path,
+        num_layers: usize,
+        device: kiln_tensor::Device,
+    ) -> Result<Self> {
         // Load adapter config
         let config_path = adapter_dir.join("adapter_config.json");
         let config_str = std::fs::read_to_string(&config_path)

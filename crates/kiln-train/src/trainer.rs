@@ -62,7 +62,9 @@ use kiln_core::tokenizer::KilnTokenizer;
 // `FlceProvider`/`fused_linear_cross_entropy*` opt-in (KILN_CUDA_FLCE) is gone —
 // FLCE is kt-native via `kiln_flce_kernel::kt_api::fused_linear_cross_entropy_phase_b_kt`.
 use kiln_flce_kernel::DEFAULT_CHUNK_SIZE;
-use kiln_model::backend::{self, BackendRuntime, FallbackPolicy, OptimizerBackend};
+use kiln_model::backend::{
+    self, BackendRuntime, FallbackPolicy, OptimizerBackend, ResidencyBackend,
+};
 use kiln_model::forward::{
     GDN_CHUNK_SIZE, GpuAttentionWeights, GpuWeights, GqaAttentionPrepared, LinearAttentionState,
     gdn_attention_in_projections, gdn_attention_input_norm, gdn_attention_residual_block,
@@ -862,11 +864,14 @@ impl TrainableLoraParams {
     /// completion to release registry entries before the trainer
     /// returns.
     pub fn register_with_backend(&self, backend: &dyn BackendRuntime) -> Result<()> {
-        if !backend.supports_resident_activation() {
+        if !ResidencyBackend::runtime_supports_resident_activation(backend) {
             return Ok(());
         }
         for param in self.all_params() {
-            backend.register_resident_activation(param.forward_storage().primary_tensor())?;
+            ResidencyBackend::runtime_register_resident_activation(
+                backend,
+                param.forward_storage().primary_tensor(),
+            )?;
         }
         Ok(())
     }
@@ -877,11 +882,14 @@ impl TrainableLoraParams {
     /// step 2 makes the registry the data-of-record and the trainer
     /// re-registers per step).
     pub fn evict_from_backend(&self, backend: &dyn BackendRuntime) {
-        if !backend.supports_resident_activation() {
+        if !ResidencyBackend::runtime_supports_resident_activation(backend) {
             return;
         }
         for param in self.all_params() {
-            backend.evict_resident_activation(param.forward_storage().primary_tensor());
+            ResidencyBackend::runtime_evict_resident_activation(
+                backend,
+                param.forward_storage().primary_tensor(),
+            );
         }
     }
 
@@ -898,18 +906,20 @@ impl TrainableLoraParams {
     /// No-op on backends without resident-activation support. Returns
     /// the number of params synced for telemetry.
     pub fn sync_to_master(&mut self, backend: &dyn BackendRuntime) -> Result<usize> {
-        if !backend.supports_resident_activation() {
+        if !ResidencyBackend::runtime_supports_resident_activation(backend) {
             return Ok(0);
         }
         let mut synced = 0;
         for param in self.all_params_mut() {
             let primary = param.forward_storage().primary_tensor().clone();
-            if !backend.has_resident_activation(&primary) {
+            if !ResidencyBackend::runtime_has_resident_activation(backend, &primary) {
                 continue;
             }
             let dims: Vec<usize> = primary.dims().to_vec();
             let dtype = primary.dtype();
-            if let Some(resolved) = backend.resolve_resident_activation(&primary, &dims, dtype)? {
+            if let Some(resolved) = ResidencyBackend::runtime_resolve_resident_activation(
+                backend, &primary, &dims, dtype,
+            )? {
                 param.replace_forward_storage(KtForwardStorage::Plain(resolved.clone()));
                 param.replace_backward_storage(Some(resolved));
                 synced += 1;
@@ -1031,12 +1041,12 @@ impl OptimizerState {
     /// No-op on backends without resident-activation support (the host
     /// `kiln_optim::AdamW` fallback handles those).
     pub fn register_with_backend(&self, backend: &dyn BackendRuntime) -> Result<()> {
-        if !backend.supports_resident_activation() {
+        if !ResidencyBackend::runtime_supports_resident_activation(backend) {
             return Ok(());
         }
         for moments in self.moments.values() {
-            backend.register_resident_activation(&moments.m)?;
-            backend.register_resident_activation(&moments.v)?;
+            ResidencyBackend::runtime_register_resident_activation(backend, &moments.m)?;
+            ResidencyBackend::runtime_register_resident_activation(backend, &moments.v)?;
         }
         Ok(())
     }
@@ -1044,12 +1054,12 @@ impl OptimizerState {
     /// Inverse of [`Self::register_with_backend`]: release every moment
     /// tensor from the resident registry at training completion.
     pub fn evict_from_backend(&self, backend: &dyn BackendRuntime) {
-        if !backend.supports_resident_activation() {
+        if !ResidencyBackend::runtime_supports_resident_activation(backend) {
             return;
         }
         for moments in self.moments.values() {
-            backend.evict_resident_activation(&moments.m);
-            backend.evict_resident_activation(&moments.v);
+            ResidencyBackend::runtime_evict_resident_activation(backend, &moments.m);
+            ResidencyBackend::runtime_evict_resident_activation(backend, &moments.v);
         }
     }
 }
@@ -6570,7 +6580,7 @@ fn sgd_step(
     grads: &kiln_autograd::GradStore,
     lr: f64,
 ) -> Result<()> {
-    let resident_activation = backend.supports_resident_activation();
+    let resident_activation = ResidencyBackend::runtime_supports_resident_activation(backend);
     for param in params.all_params_mut() {
         if let Some(grad) = grads.get(param.tensor_id()) {
             apply_sgd_update_kt(backend, param, grad, lr, resident_activation)?;
@@ -6761,22 +6771,22 @@ fn apply_sgd_update_kt(
     resident_activation: bool,
 ) -> Result<()> {
     let primary = param.forward_storage().primary_tensor().clone();
-    if resident_activation && backend.has_resident_activation(&primary) {
-        backend.register_resident_activation(grad)?;
+    if resident_activation && ResidencyBackend::runtime_has_resident_activation(backend, &primary) {
+        ResidencyBackend::runtime_register_resident_activation(backend, grad)?;
         let dispatched = match OptimizerBackend::runtime_dispatch_sgd_step(
             backend, &primary, grad, lr as f32,
         ) {
             Ok(b) => b,
             Err(e) => {
-                backend.evict_resident_activation(grad);
+                ResidencyBackend::runtime_evict_resident_activation(backend, grad);
                 return Err(e);
             }
         };
         if dispatched {
-            backend.evict_resident_activation(grad);
+            ResidencyBackend::runtime_evict_resident_activation(backend, grad);
             return Ok(());
         }
-        backend.evict_resident_activation(grad);
+        ResidencyBackend::runtime_evict_resident_activation(backend, grad);
     }
     ensure_training_optimizer_fallback_allowed(backend, primary.device(), "SGD")?;
     // CPU/host fallback: master = master - lr*grad, kt-native (F32
@@ -6798,7 +6808,10 @@ fn apply_sgd_update_kt(
     param.replace_backward_storage(Some(updated.clone()));
     param.replace_forward_storage(KtForwardStorage::Plain(updated));
     if resident_activation {
-        backend.update_resident_activation(param.forward_storage().primary_tensor())?;
+        ResidencyBackend::runtime_update_resident_activation(
+            backend,
+            param.forward_storage().primary_tensor(),
+        )?;
     }
     Ok(())
 }
@@ -6850,11 +6863,11 @@ fn apply_adamw_update_kt(
     // all be resident, then the CUDA kernel updates param/m/v in place.
     if let Some(moments) = moments {
         if resident_activation
-            && backend.has_resident_activation(&primary)
-            && backend.has_resident_activation(&moments.m)
-            && backend.has_resident_activation(&moments.v)
+            && ResidencyBackend::runtime_has_resident_activation(backend, &primary)
+            && ResidencyBackend::runtime_has_resident_activation(backend, &moments.m)
+            && ResidencyBackend::runtime_has_resident_activation(backend, &moments.v)
         {
-            backend.register_resident_activation(grad)?;
+            ResidencyBackend::runtime_register_resident_activation(backend, grad)?;
             let dispatched = match OptimizerBackend::runtime_dispatch_adamw_step(
                 backend,
                 &primary,
@@ -6870,7 +6883,7 @@ fn apply_adamw_update_kt(
             ) {
                 Ok(b) => b,
                 Err(e) => {
-                    backend.evict_resident_activation(grad);
+                    ResidencyBackend::runtime_evict_resident_activation(backend, grad);
                     return Err(e);
                 }
             };
@@ -6878,11 +6891,11 @@ fn apply_adamw_update_kt(
                 // The kernel updated param/m/v in place. Forward primary IS
                 // the master for LoRA params, so the update is already live;
                 // re-assert residency of the param buffer for the next fwd.
-                backend.evict_resident_activation(grad);
-                backend.update_resident_activation(&primary)?;
+                ResidencyBackend::runtime_evict_resident_activation(backend, grad);
+                ResidencyBackend::runtime_update_resident_activation(backend, &primary)?;
                 return Ok(());
             }
-            backend.evict_resident_activation(grad);
+            ResidencyBackend::runtime_evict_resident_activation(backend, grad);
         }
     }
 
@@ -6909,7 +6922,10 @@ fn apply_adamw_update_kt(
         param.replace_forward_storage(KtForwardStorage::Plain(new_master));
     }
     if resident_activation {
-        backend.update_resident_activation(param.forward_storage().primary_tensor())?;
+        ResidencyBackend::runtime_update_resident_activation(
+            backend,
+            param.forward_storage().primary_tensor(),
+        )?;
     }
     Ok(())
 }
@@ -6965,7 +6981,7 @@ fn sgd_step_from_map(
     grads: &GradMap,
     lr: f64,
 ) -> Result<()> {
-    let resident_activation = backend.supports_resident_activation();
+    let resident_activation = ResidencyBackend::runtime_supports_resident_activation(backend);
     for param in params.all_params_mut() {
         if let Some(grad) = grads.get(&param.tensor_id()) {
             apply_sgd_update_kt(backend, param, grad, lr, resident_activation)?;
@@ -7007,7 +7023,8 @@ pub(crate) fn optimizer_step_from_map(
                 step,
             } = state;
             let step = *step;
-            let resident_activation = backend.supports_resident_activation();
+            let resident_activation =
+                ResidencyBackend::runtime_supports_resident_activation(backend);
             for param in params.all_params_mut() {
                 if let Some(grad) = grads.get(&param.tensor_id()) {
                     let m = moments.get(&param.tensor_id());
@@ -7055,7 +7072,8 @@ pub(crate) fn optimizer_step_from_kt_grad_store(
 ) -> Result<()> {
     match optimizer {
         Optimizer::Sgd => {
-            let resident_activation = backend.supports_resident_activation();
+            let resident_activation =
+                ResidencyBackend::runtime_supports_resident_activation(backend);
             for param in params.all_params_mut() {
                 if let Some(kt_grad) = grads.get(param.tensor_id()) {
                     apply_sgd_update_kt(backend, param, kt_grad, lr, resident_activation)?;
@@ -7083,7 +7101,8 @@ pub(crate) fn optimizer_step_from_kt_grad_store(
                 step,
             } = state;
             let step = *step;
-            let resident_activation = backend.supports_resident_activation();
+            let resident_activation =
+                ResidencyBackend::runtime_supports_resident_activation(backend);
             for param in params.all_params_mut() {
                 if let Some(kt_grad) = grads.get(param.tensor_id()) {
                     let m = moments.get(&param.tensor_id());

@@ -22,6 +22,17 @@ fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
+fn source_between<'a>(source: &'a str, start_marker: &str, end_marker: &str) -> &'a str {
+    let start = source
+        .find(start_marker)
+        .unwrap_or_else(|| panic!("source should contain marker {start_marker}"));
+    let rest = &source[start..];
+    let end = rest.find(end_marker).unwrap_or_else(|| {
+        panic!("source should contain marker {end_marker} after {start_marker}")
+    });
+    &rest[..end]
+}
+
 fn find_matching_brace(source: &str, open_idx: usize) -> Option<usize> {
     let bytes = source.as_bytes();
     let mut depth = 0usize;
@@ -1453,17 +1464,6 @@ fn trainer_optimizer_updates_consume_optimizer_backend_facet() {
         "trainer should import the focused optimizer facet"
     );
 
-    fn source_between<'a>(source: &'a str, start_marker: &str, end_marker: &str) -> &'a str {
-        let start = source
-            .find(start_marker)
-            .unwrap_or_else(|| panic!("trainer should contain marker {start_marker}"));
-        let rest = &source[start..];
-        let end = rest.find(end_marker).unwrap_or_else(|| {
-            panic!("trainer should contain marker {end_marker} after {start_marker}")
-        });
-        &rest[..end]
-    }
-
     for (fn_name, fn_body, focused_call, forbidden_call) in [
         (
             "apply_sgd_update_kt",
@@ -1493,6 +1493,87 @@ fn trainer_optimizer_updates_consume_optimizer_backend_facet() {
         assert!(
             !fn_body.contains(forbidden_call),
             "{fn_name} should not call broad BackendRuntime optimizer method {forbidden_call}"
+        );
+    }
+}
+
+#[test]
+fn lora_residency_call_sites_consume_residency_backend_facet() {
+    let root = workspace_root();
+    let trainer_source = fs::read_to_string(root.join("crates/kiln-train/src/trainer.rs"))
+        .expect("trainer.rs should be readable");
+    let lora_source = fs::read_to_string(root.join("crates/kiln-model/src/lora_loader.rs"))
+        .expect("lora_loader.rs should be readable");
+
+    assert!(
+        trainer_source.contains("ResidencyBackend"),
+        "trainer should import the focused residency facet"
+    );
+    assert!(
+        lora_source.contains("ResidencyBackend"),
+        "LoRA loader should import the focused residency facet"
+    );
+
+    let trainer_lora_section = source_between(
+        &trainer_source,
+        "impl TrainableLoraParams",
+        "/// (#1082) Allocate AdamW optimizer state.",
+    );
+    let trainer_optimizer_section = source_between(
+        &trainer_source,
+        "impl OptimizerState",
+        "/// (#1082) Build `Option<OptimizerState>`",
+    );
+    let trainer_optimizer_updates = source_between(
+        &trainer_source,
+        "fn sgd_step(",
+        "/// Gradient checkpointing configuration.",
+    );
+    let lora_loader_section = source_between(
+        &lora_source,
+        "impl LoraWeights {\n    /// Phase 4.1",
+        "impl LoraWeights {\n    /// Load",
+    );
+
+    let trainer_residency_sections =
+        format!("{trainer_lora_section}\n{trainer_optimizer_section}\n{trainer_optimizer_updates}");
+    for required in [
+        "ResidencyBackend::runtime_supports_resident_activation",
+        "ResidencyBackend::runtime_register_resident_activation",
+        "ResidencyBackend::runtime_evict_resident_activation",
+        "ResidencyBackend::runtime_has_resident_activation",
+        "ResidencyBackend::runtime_resolve_resident_activation",
+        "ResidencyBackend::runtime_update_resident_activation",
+    ] {
+        assert!(
+            trainer_residency_sections.contains(required),
+            "trainer LoRA residency paths should consume focused residency facet method {required}"
+        );
+    }
+
+    for required in [
+        "ResidencyBackend::runtime_supports_resident_activation",
+        "ResidencyBackend::runtime_register_resident_activation",
+        "ResidencyBackend::runtime_evict_resident_activation",
+    ] {
+        assert!(
+            lora_loader_section.contains(required),
+            "LoRA loader residency paths should consume focused residency facet method {required}"
+        );
+    }
+
+    let combined = format!("{trainer_residency_sections}\n{lora_loader_section}");
+    for forbidden in [
+        "backend.supports_resident_activation",
+        "backend.register_resident_activation",
+        "backend.evict_resident_activation",
+        "backend.update_resident_activation",
+        "backend.has_resident_activation",
+        "backend.resolve_resident_activation",
+    ] {
+        assert!(
+            !combined.contains(forbidden),
+            "LoRA residency paths should not call broad BackendRuntime method {forbidden}"
         );
     }
 }
