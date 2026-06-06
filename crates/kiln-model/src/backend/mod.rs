@@ -153,6 +153,9 @@ pub(crate) mod vulkan_training;
 pub(crate) mod vulkan_residency;
 
 #[cfg(feature = "vulkan")]
+pub(crate) mod vulkan_resources;
+
+#[cfg(feature = "vulkan")]
 pub(crate) mod vulkan_weights;
 
 #[cfg(feature = "rocm")]

@@ -391,6 +391,10 @@ fn generated_capability_report_lists_backend_source_modules() {
         "Vulkan backend source modules should include the extracted residency module"
     );
     assert!(
+        vulkan_sources.contains(&"crates/kiln-model/src/backend/vulkan_resources.rs"),
+        "Vulkan backend source modules should include the extracted resource cache module"
+    );
+    assert!(
         vulkan_sources.contains(&"crates/kiln-model/src/backend/vulkan_tensor_bridge.rs"),
         "Vulkan backend source modules should include the extracted tensor bridge module"
     );

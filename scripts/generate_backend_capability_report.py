@@ -49,6 +49,7 @@ BACKEND_EXTRA_SOURCES = {
         ROOT / "crates" / "kiln-model" / "src" / "backend" / "vulkan_device.rs",
         ROOT / "crates" / "kiln-model" / "src" / "backend" / "vulkan_linear.rs",
         ROOT / "crates" / "kiln-model" / "src" / "backend" / "vulkan_residency.rs",
+        ROOT / "crates" / "kiln-model" / "src" / "backend" / "vulkan_resources.rs",
         ROOT / "crates" / "kiln-model" / "src" / "backend" / "vulkan_tensor_bridge.rs",
         ROOT / "crates" / "kiln-model" / "src" / "backend" / "vulkan_training.rs",
         ROOT / "crates" / "kiln-model" / "src" / "backend" / "vulkan_weights.rs",

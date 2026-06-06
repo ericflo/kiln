@@ -93,13 +93,14 @@ pub struct VulkanBackend {
     /// feasibility check (Strix Halo near the 16 GiB UMA limit) caches
     /// the `None` and routes every subsequent call to the per-call
     /// kt `kiln_tensor::Tensor` path without re-checking.
-    decode_resident_pool: OnceLock<Option<Arc<kiln_vulkan_kernel::DecodeResidentPool>>>,
+    pub(super) decode_resident_pool:
+        OnceLock<Option<Arc<kiln_vulkan_kernel::DecodeResidentPool>>>,
     /// Lazily constructed Vulkan-resident paged KV cache. Mirrors the
     /// legacy `PagedKvCache` layout in device-local f32 buffers so the
     /// resident decode dispatchers can read/write K/V without crossing
     /// the host boundary. The first resident decode call that needs the
     /// cache constructs it for the active model geometry.
-    vk_paged_kv_cache: OnceLock<Option<Arc<kiln_vulkan_kernel::VkPagedKvCache>>>,
+    pub(super) vk_paged_kv_cache: OnceLock<Option<Arc<kiln_vulkan_kernel::VkPagedKvCache>>>,
     /// Set of full-attention layer indices whose K/V state has already
     /// been seeded into the Vulkan-resident paged cache from the legacy
     /// candle pool. Each full-attention layer is seeded once at the
@@ -132,7 +133,8 @@ pub struct VulkanBackend {
     /// buffers across layers and across tokens). Avoids the
     /// `create_device_local` + `Drop` pair that ran on every call
     /// (≈ 200 µs × 12 buffers × N layers per token).
-    resident_scratch: Mutex<HashMap<&'static str, Arc<kiln_vulkan_kernel::VulkanBuffer>>>,
+    pub(super) resident_scratch:
+        Mutex<HashMap<&'static str, Arc<kiln_vulkan_kernel::VulkanBuffer>>>,
     /// (#1082) kt-native weight caches keyed on the **kt** `TensorId`. The
     /// decode hot path hands weights through as kt tensors whose `TensorId`
     /// is stable for the model's lifetime (one Parameter, one id — issue
@@ -245,92 +247,6 @@ impl VulkanBackend {
     /// that need device-resident work must short-circuit on `None`.
     pub fn vulkan_device(&self) -> Option<&Arc<kiln_vulkan_kernel::VulkanDevice>> {
         self.vulkan_device.as_ref()
-    }
-
-    /// Lazily construct (and cache) the resident-decode buffer ring.
-    ///
-    /// Returns `Some(&pool)` when the ring fits within 1% of the
-    /// device-local heap and every slot allocation succeeds.
-    /// Returns `None` (after a one-time `tracing::warn!`) when the
-    /// device can't fit the minimum 3 slots — e.g. Strix Halo near
-    /// its 16 GiB UMA limit. The `None` outcome is cached so the
-    /// per-call kt `kiln_tensor::Tensor` fallback does not re-probe on every decode
-    /// step.
-    pub fn decode_resident_pool(
-        &self,
-        max_hidden: usize,
-        max_intermediate: usize,
-        max_batch: usize,
-    ) -> Option<&Arc<kiln_vulkan_kernel::DecodeResidentPool>> {
-        let dev = self.vulkan_device.as_ref()?;
-        self.decode_resident_pool
-            .get_or_init(|| {
-                match kiln_vulkan_kernel::DecodeResidentPool::try_new(
-                    dev,
-                    max_hidden,
-                    max_intermediate,
-                    max_batch,
-                ) {
-                    Ok(Some(pool)) => Some(Arc::new(pool)),
-                    Ok(None) => None,
-                    Err(e) => {
-                        tracing::warn!(
-                            error = %e,
-                            "Vulkan-resident decode pool construction errored; \
-                             falling back to per-call kt Tensor path"
-                        );
-                        None
-                    }
-                }
-            })
-            .as_ref()
-    }
-
-    /// Lazily construct (and cache) the Vulkan-resident paged KV cache
-    /// for the given geometry.
-    ///
-    /// `num_full_attn_layers`, `num_blocks`, `block_size`, `num_kv_heads`,
-    /// `head_dim` mirror the legacy `PagedKvCache::new` geometry — the
-    /// resident cache is a device-local sibling laid out element-for-
-    /// element compatible with the existing paged-attn shaders.
-    ///
-    /// Returns `Some(&cache)` when the device allocation succeeds. Returns
-    /// `None` (with a one-time `tracing::warn!`) when the device can't fit
-    /// the geometry; callers fall back to the legacy CPU-backed pool.
-    /// The `None` outcome is cached on the backend so subsequent calls
-    /// don't re-probe.
-    pub fn vk_paged_kv_cache(
-        &self,
-        num_full_attn_layers: usize,
-        num_blocks: usize,
-        block_size: usize,
-        num_kv_heads: usize,
-        head_dim: usize,
-    ) -> Option<&Arc<kiln_vulkan_kernel::VkPagedKvCache>> {
-        let dev = self.vulkan_device.as_ref()?;
-        self.vk_paged_kv_cache
-            .get_or_init(|| {
-                match kiln_vulkan_kernel::VkPagedKvCache::try_new(
-                    dev,
-                    num_full_attn_layers,
-                    num_blocks,
-                    block_size,
-                    num_kv_heads,
-                    head_dim,
-                ) {
-                    Ok(Some(cache)) => Some(Arc::new(cache)),
-                    Ok(None) => None,
-                    Err(e) => {
-                        tracing::warn!(
-                            error = %e,
-                            "Vulkan-resident paged KV cache construction errored; \
-                             falling back to legacy CPU-backed pool"
-                        );
-                        None
-                    }
-                }
-            })
-            .as_ref()
     }
 
     /// Test (without mutating) whether the given full-attention layer
@@ -704,78 +620,6 @@ impl VulkanBackend {
             .map(|g| g.contains_key(&key))
             .unwrap_or(false);
         recurrent_present && conv_present
-    }
-
-    /// Acquire (or lazily create) a persistent scratch
-    /// [`VulkanBuffer`] under the given role key, sized to at least
-    /// `min_bytes`. The same buffer is returned on every subsequent
-    /// call with the same role, so the resident decode block helpers
-    /// pay zero allocation cost on the steady-state hot path.
-    ///
-    /// If a previously-cached buffer for the role is too small for
-    /// the new `min_bytes` it is replaced.
-    pub fn acquire_resident_scratch(
-        &self,
-        role: &'static str,
-        min_bytes: u64,
-    ) -> Result<Arc<kiln_vulkan_kernel::VulkanBuffer>> {
-        let dev = self
-            .vulkan_device
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
-        let mut g = self
-            .resident_scratch
-            .lock()
-            .map_err(|_| anyhow::anyhow!("resident scratch mutex poisoned"))?;
-        if let Some(buf) = g.get(role) {
-            if buf.size() >= min_bytes {
-                return Ok(Arc::clone(buf));
-            }
-        }
-        let buf = kiln_vulkan_kernel::VulkanBuffer::create_device_local(
-            dev.device(),
-            dev.device_local_mem_type(),
-            min_bytes.max(4),
-        )
-        .with_context(|| format!("alloc resident scratch '{role}'"))?;
-        let arc = Arc::new(buf);
-        g.insert(role, Arc::clone(&arc));
-        Ok(arc)
-    }
-
-    /// Host-visible variant of `acquire_resident_scratch`. Used by the
-    /// native decode orchestrator to keep a persistent readback
-    /// staging buffer (for logits) — folding the readback's
-    /// `cmd_copy_buffer` into the main `CommandBatch` so the post-
-    /// submit step is just a `map_memory` rather than a fresh queue
-    /// submission.
-    pub fn acquire_resident_scratch_host_visible(
-        &self,
-        role: &'static str,
-        min_bytes: u64,
-    ) -> Result<Arc<kiln_vulkan_kernel::VulkanBuffer>> {
-        let dev = self
-            .vulkan_device
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
-        let mut g = self
-            .resident_scratch
-            .lock()
-            .map_err(|_| anyhow::anyhow!("resident scratch mutex poisoned"))?;
-        if let Some(buf) = g.get(role) {
-            if buf.size() >= min_bytes {
-                return Ok(Arc::clone(buf));
-            }
-        }
-        let buf = kiln_vulkan_kernel::VulkanBuffer::create_host_visible(
-            dev.device(),
-            dev.host_visible_mem_type(),
-            min_bytes.max(4),
-        )
-        .with_context(|| format!("alloc host-visible resident scratch '{role}'"))?;
-        let arc = Arc::new(buf);
-        g.insert(role, Arc::clone(&arc));
-        Ok(arc)
     }
 
     /// kt-native f32 weight buffer cache: keys the buffer cache on the kt
