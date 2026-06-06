@@ -57,6 +57,24 @@ pub enum ReplayStability {
     StableAcrossReplay,
 }
 
+/// Tensor layout metadata attached to a resident resource descriptor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResidentResourceLayout {
+    pub strides: Vec<usize>,
+    pub start_offset: usize,
+    pub contiguous: bool,
+}
+
+impl ResidentResourceLayout {
+    pub fn from_tensor(tensor: &Tensor) -> Self {
+        Self {
+            strides: tensor.strides().to_vec(),
+            start_offset: tensor.layout().start_offset(),
+            contiguous: tensor.layout().is_contiguous(),
+        }
+    }
+}
+
 /// Metadata for a tensor-like resource known to a backend residency registry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResidentResource {
@@ -64,8 +82,10 @@ pub struct ResidentResource {
     pub device: Device,
     pub dtype: DType,
     pub shape: Vec<usize>,
+    pub layout: ResidentResourceLayout,
     pub element_count: usize,
     pub byte_len: usize,
+    pub addressable_byte_len: usize,
     pub family: ResidentResourceFamily,
     pub ownership: ResidentOwnership,
     pub state: ResidentResourceState,
@@ -80,13 +100,17 @@ impl ResidentResource {
     ) -> Self {
         let dtype = tensor.dtype();
         let element_count = tensor.element_count();
+        let byte_len = dtype.packed_buffer_bytes(element_count);
+        let addressable_elements = tensor.layout().addressable_byte_size(1);
         Self {
             tensor_id: tensor.id(),
             device: tensor.device(),
             dtype,
             shape: tensor.shape().to_vec(),
+            layout: ResidentResourceLayout::from_tensor(tensor),
             element_count,
-            byte_len: dtype.packed_buffer_bytes(element_count),
+            byte_len,
+            addressable_byte_len: dtype.packed_buffer_bytes(addressable_elements),
             family,
             ownership,
             state: ResidentResourceState::RegisteredClean,
@@ -153,8 +177,12 @@ mod tests {
         assert_eq!(resource.device, Device::Cpu);
         assert_eq!(resource.dtype, DType::F32);
         assert_eq!(resource.shape, vec![2, 2]);
+        assert_eq!(resource.layout.strides, vec![2, 1]);
+        assert_eq!(resource.layout.start_offset, 0);
+        assert!(resource.layout.contiguous);
         assert_eq!(resource.element_count, 4);
         assert_eq!(resource.byte_len, 16);
+        assert_eq!(resource.addressable_byte_len, 16);
         assert_eq!(resource.family, ResidentResourceFamily::Activation);
         assert_eq!(resource.ownership, ResidentOwnership::StorageOwned);
         assert_eq!(resource.state, ResidentResourceState::RegisteredClean);
@@ -176,6 +204,25 @@ mod tests {
         assert_eq!(resource.byte_len, 12);
         assert_eq!(resource.state, ResidentResourceState::DirtyDevice);
         assert_eq!(resource.replay_stability, ReplayStability::StableAcrossReplay);
+        Ok(())
+    }
+
+    #[test]
+    fn resident_resource_describes_strided_layout_metadata() -> anyhow::Result<()> {
+        let tensor = Tensor::from_slice(&[1.0_f32, 2.0, 3.0, 4.0, 5.0, 6.0], vec![2, 3])?;
+        let narrowed = tensor.narrow(1, 1, 2)?;
+        let resource = ResidentResource::from_tensor(
+            &narrowed,
+            ResidentResourceFamily::Activation,
+            ResidentOwnership::RegistryOwned,
+        );
+
+        assert_eq!(resource.shape, vec![2, 2]);
+        assert_eq!(resource.layout.strides, vec![3, 1]);
+        assert_eq!(resource.layout.start_offset, 1);
+        assert!(!resource.layout.contiguous);
+        assert_eq!(resource.byte_len, 16);
+        assert_eq!(resource.addressable_byte_len, 24);
         Ok(())
     }
 

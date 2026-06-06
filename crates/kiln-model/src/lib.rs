@@ -53,8 +53,9 @@ pub use backend::{
     SamplingBackend, TrainingLossBackend,
 };
 pub use backend::residency::{
-    ReplayStability, ResidentOwnership, ResidentRegistry, ResidentResource, ResidentResourceFamily,
-    ResidentResourceState, resident_ownership_for_backend,
+    ReplayStability, ResidentOwnership, ResidentRegistry, ResidentResource,
+    ResidentResourceFamily, ResidentResourceLayout, ResidentResourceState,
+    resident_ownership_for_backend,
 };
 // (#1082 candle removal) `backend::for_device` (candle-typed shim) was deleted
 // with the candle-parity opt-in feature; production uses `for_device_kt`.

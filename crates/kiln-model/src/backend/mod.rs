@@ -3109,7 +3109,11 @@ mod tests {
         assert_eq!(resource.state, residency::ResidentResourceState::RegisteredClean);
         assert_eq!(resource.device, kiln_tensor::Device::Cpu);
         assert_eq!(resource.shape, vec![2]);
+        assert_eq!(resource.layout.strides, vec![1]);
+        assert_eq!(resource.layout.start_offset, 0);
+        assert!(resource.layout.contiguous);
         assert_eq!(resource.byte_len, 8);
+        assert_eq!(resource.addressable_byte_len, 8);
         Ok(())
     }
 
