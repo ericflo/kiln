@@ -2484,6 +2484,7 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
         .collect::<Vec<_>>();
     for path in [
         "docs/backend-latency-fixtures.json",
+        "docs/backend-latency-result-schema.md",
         "scripts/check_backend_latency_fixtures.py",
         "crates/kiln-server/examples/flce_preflight_bench.rs",
         "crates/kiln-server/examples/flce_phase_a_validation_bench.rs",
@@ -2495,6 +2496,22 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
         assert!(
             evidence_present.contains(&path),
             "hardware latency gate should cite existing {path}"
+        );
+    }
+
+    let schema_doc = fs::read_to_string(root.join("docs/backend-latency-result-schema.md"))
+        .expect("latency result schema doc should be readable");
+    for required in [
+        "fixture_id",
+        "backend",
+        "status",
+        "metrics",
+        "--require-covered",
+        "--self-test",
+    ] {
+        assert!(
+            schema_doc.contains(required),
+            "latency result schema doc should describe {required}"
         );
     }
 

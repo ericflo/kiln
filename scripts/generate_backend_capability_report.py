@@ -840,6 +840,7 @@ def conformance_gate_report() -> list[dict[str, Any]]:
             "command": "python3 scripts/check_backend_latency_fixtures.py --self-test && hardware runner required; python3 scripts/check_backend_latency_fixtures.py docs/backend-latency-fixtures.json --require-covered",
             "evidence": [
                 "docs/backend-latency-fixtures.json",
+                "docs/backend-latency-result-schema.md",
                 "scripts/check_backend_latency_fixtures.py",
                 "crates/kiln-server/examples/flce_preflight_bench.rs",
                 "crates/kiln-server/examples/flce_phase_a_validation_bench.rs",
