@@ -9,7 +9,7 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
-use super::{BackendRuntime, TrainingCapabilities};
+use super::{BackendRuntime, TrainingCapabilities, TrainingPrecisionPolicy};
 use crate::lora_loader::{LoraProjectionWeights, compute_lora_delta};
 
 /// kt-native `kiln_tensor_id::TensorId` for the resident-activation
@@ -258,6 +258,10 @@ impl BackendRuntime for CudaBackend {
 
     fn training_capabilities(&self) -> TrainingCapabilities {
         Self::training_capabilities_static()
+    }
+
+    fn training_precision_policy(&self) -> TrainingPrecisionPolicy {
+        TrainingPrecisionPolicy::cuda()
     }
 
     fn supports_resident_activation(&self) -> bool {

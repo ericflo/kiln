@@ -15,7 +15,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use super::{BackendRuntime, TrainingCapabilities};
+use super::{BackendRuntime, TrainingCapabilities, TrainingPrecisionPolicy};
 use crate::forward::{GpuAttentionWeights, GpuWeights};
 
 struct F32TensorUpload<'a> {
@@ -1890,6 +1890,10 @@ impl BackendRuntime for VulkanBackend {
             adamw_step: "Vulkan in-place registry update when operands are resident",
             native_training: "shared trainer.rs kt-tape path (legacy vk_native_* fork deleted in PR7 #1082)",
         }
+    }
+
+    fn training_precision_policy(&self) -> TrainingPrecisionPolicy {
+        TrainingPrecisionPolicy::vulkan()
     }
 
     fn decode_resident_pool_ready(

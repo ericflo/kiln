@@ -306,3 +306,43 @@ fn generated_capability_report_lists_request_descriptors() {
     assert!(request_queries.contains(&"supports_linear_request"));
     assert!(request_queries.contains(&"supports_replay_request"));
 }
+
+#[test]
+fn generated_capability_report_lists_training_precision_policy() {
+    let report_path = workspace_root().join("docs/backend-capability-report.json");
+    let report: Value = serde_json::from_str(
+        &fs::read_to_string(&report_path).expect("capability report json should be readable"),
+    )
+    .expect("capability report json should parse");
+
+    let policies = report["training_precision_policy"]
+        .as_object()
+        .expect("training_precision_policy should be an object");
+    for backend in ["cpu", "cuda", "rocm", "metal", "vulkan"] {
+        assert!(
+            policies.contains_key(backend),
+            "{backend} should be present in training_precision_policy"
+        );
+    }
+
+    let vulkan = &policies["vulkan"];
+    assert_eq!(vulkan["name"], "vulkan_mixed_f32_bf16");
+    assert_eq!(vulkan["loss_accumulation_dtype"], "F32");
+    assert_eq!(vulkan["mixed_precision"], true);
+
+    let activation_dtypes = vulkan["activation_dtypes"]
+        .as_array()
+        .expect("vulkan activation_dtypes should be an array")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    assert_eq!(activation_dtypes, ["F32"]);
+
+    let base_weight_dtypes = vulkan["base_weight_dtypes"]
+        .as_array()
+        .expect("vulkan base_weight_dtypes should be an array")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    assert!(base_weight_dtypes.contains(&"BF16"));
+}

@@ -9,7 +9,7 @@
 
 use anyhow::{Context, Result};
 
-use super::{BackendRuntime, TrainingCapabilities};
+use super::{BackendRuntime, TrainingCapabilities, TrainingPrecisionPolicy};
 
 // Phase 7 #1082: module-level imports for the kt-metal chokepoint types,
 // hoisted from ~92 per-function `use` statements so that the chokepoint
@@ -904,6 +904,10 @@ impl BackendRuntime for MetalBackend {
 
     fn training_capabilities(&self) -> TrainingCapabilities {
         Self::training_capabilities_static()
+    }
+
+    fn training_precision_policy(&self) -> TrainingPrecisionPolicy {
+        TrainingPrecisionPolicy::metal()
     }
 
     // ------------------------------------------------------------------

@@ -399,6 +399,61 @@ def training_optimizer_fallback_policy_report() -> dict[str, Any]:
     }
 
 
+def training_precision_policy_report() -> dict[str, Any]:
+    return {
+        "cpu": {
+            "name": "cpu_f32_reference",
+            "activation_dtypes": ["F32"],
+            "base_weight_dtypes": ["F32"],
+            "lora_parameter_dtypes": ["F32"],
+            "loss_accumulation_dtype": "F32",
+            "optimizer_parameter_dtypes": ["F32"],
+            "mixed_precision": False,
+            "notes": "CPU reference training uses F32 tensors and portable optimizer math.",
+        },
+        "cuda": {
+            "name": "cuda_native_float",
+            "activation_dtypes": ["F32", "BF16", "F16"],
+            "base_weight_dtypes": ["F32", "BF16", "F16"],
+            "lora_parameter_dtypes": ["F32", "BF16"],
+            "loss_accumulation_dtype": "F32",
+            "optimizer_parameter_dtypes": ["F32", "BF16"],
+            "mixed_precision": True,
+            "notes": "CUDA keeps kt tape authoritative and routes BF16/F16/F32 leaves through CUDA-native kernels where available.",
+        },
+        "rocm": {
+            "name": "rocm_native_float",
+            "activation_dtypes": ["F32", "BF16", "F16"],
+            "base_weight_dtypes": ["F32", "BF16", "F16"],
+            "lora_parameter_dtypes": ["F32", "BF16"],
+            "loss_accumulation_dtype": "F32",
+            "optimizer_parameter_dtypes": ["F32", "BF16"],
+            "mixed_precision": True,
+            "notes": "ROCm mirrors CUDA's kt-tape dtype envelope while dispatching through HIP/hipBLASLt-native leaves where available.",
+        },
+        "metal": {
+            "name": "metal_bf16_uma",
+            "activation_dtypes": ["BF16"],
+            "base_weight_dtypes": ["BF16"],
+            "lora_parameter_dtypes": ["F32", "BF16"],
+            "loss_accumulation_dtype": "F32",
+            "optimizer_parameter_dtypes": ["F32", "BF16"],
+            "mixed_precision": True,
+            "notes": "Metal training is BF16-focused on UMA buffers, with F32 loss accumulation and F32/BF16 AdamW residency.",
+        },
+        "vulkan": {
+            "name": "vulkan_mixed_f32_bf16",
+            "activation_dtypes": ["F32"],
+            "base_weight_dtypes": ["F32", "BF16"],
+            "lora_parameter_dtypes": ["F32"],
+            "loss_accumulation_dtype": "F32",
+            "optimizer_parameter_dtypes": ["F32", "BF16"],
+            "mixed_precision": True,
+            "notes": "Vulkan keeps training activations and LoRA parameters F32 while allowing BF16 base weights through explicit VkTensor buffer bridges.",
+        },
+    }
+
+
 def optimizer_dispatch_report(backends: dict[str, Any]) -> dict[str, Any]:
     report: dict[str, Any] = {}
     for backend, info in backends.items():
@@ -502,6 +557,21 @@ def markdown(data: dict[str, Any]) -> str:
             f"{info['enforcement']} |"
         )
     lines.append("")
+    lines.append("## Training Precision Policy")
+    lines.append("")
+    lines.append("| Backend | Policy | Activations | Base Weights | LoRA | Loss Accum | Optimizer Params | Mixed |")
+    lines.append("|---|---|---|---|---|---|---|---|")
+    for backend, info in data["training_precision_policy"].items():
+        lines.append(
+            f"| `{backend}` | `{info['name']}` | "
+            f"`{','.join(info['activation_dtypes'])}` | "
+            f"`{','.join(info['base_weight_dtypes'])}` | "
+            f"`{','.join(info['lora_parameter_dtypes'])}` | "
+            f"`{info['loss_accumulation_dtype']}` | "
+            f"`{','.join(info['optimizer_parameter_dtypes'])}` | "
+            f"{'yes' if info['mixed_precision'] else 'no'} |"
+        )
+    lines.append("")
     lines.append("## Optimizer Dispatch")
     lines.append("")
     lines.append("| Backend | SGD Step | AdamW Step |")
@@ -556,6 +626,7 @@ def main() -> int:
         "fallback_policy": fallback_policy_report(),
         "decode_hot_path_policy": decode_hot_path_policy_report(),
         "training_optimizer_fallback_policy": training_optimizer_fallback_policy_report(),
+        "training_precision_policy": training_precision_policy_report(),
         "optimizer_dispatch": optimizer_dispatch_report(backends),
         "mismatches": mismatches,
     }

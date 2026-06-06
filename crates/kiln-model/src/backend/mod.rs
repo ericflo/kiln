@@ -121,6 +121,101 @@ impl TrainingCapabilities {
     }
 }
 
+const TRAINING_DTYPE_F32: &[kiln_tensor::DType] = &[kiln_tensor::DType::F32];
+const TRAINING_DTYPE_F32_BF16: &[kiln_tensor::DType] =
+    &[kiln_tensor::DType::F32, kiln_tensor::DType::BF16];
+const TRAINING_DTYPE_FLOAT_NATIVE: &[kiln_tensor::DType] = &[
+    kiln_tensor::DType::F32,
+    kiln_tensor::DType::BF16,
+    kiln_tensor::DType::F16,
+];
+const TRAINING_DTYPE_BF16_FOCUSED: &[kiln_tensor::DType] = &[kiln_tensor::DType::BF16];
+
+/// Backend precision contract for shared kt-tape training.
+///
+/// This is separate from [`TrainingCapabilities`]: capabilities describe which
+/// hooks are native, while this policy describes the dtype envelope those hooks
+/// expect. Phase 6 uses this to keep SFT/GRPO/OPD orchestration backend-neutral
+/// while preserving Vulkan's mixed F32/BF16 model and Metal's BF16-focused path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TrainingPrecisionPolicy {
+    pub name: &'static str,
+    pub activation_dtypes: &'static [kiln_tensor::DType],
+    pub base_weight_dtypes: &'static [kiln_tensor::DType],
+    pub lora_parameter_dtypes: &'static [kiln_tensor::DType],
+    pub loss_accumulation_dtype: kiln_tensor::DType,
+    pub optimizer_parameter_dtypes: &'static [kiln_tensor::DType],
+    pub mixed_precision: bool,
+    pub notes: &'static str,
+}
+
+impl TrainingPrecisionPolicy {
+    pub const fn portable() -> Self {
+        Self {
+            name: "cpu_f32_reference",
+            activation_dtypes: TRAINING_DTYPE_F32,
+            base_weight_dtypes: TRAINING_DTYPE_F32,
+            lora_parameter_dtypes: TRAINING_DTYPE_F32,
+            loss_accumulation_dtype: kiln_tensor::DType::F32,
+            optimizer_parameter_dtypes: TRAINING_DTYPE_F32,
+            mixed_precision: false,
+            notes: "CPU reference training uses F32 tensors and portable optimizer math.",
+        }
+    }
+
+    pub const fn cuda() -> Self {
+        Self {
+            name: "cuda_native_float",
+            activation_dtypes: TRAINING_DTYPE_FLOAT_NATIVE,
+            base_weight_dtypes: TRAINING_DTYPE_FLOAT_NATIVE,
+            lora_parameter_dtypes: TRAINING_DTYPE_F32_BF16,
+            loss_accumulation_dtype: kiln_tensor::DType::F32,
+            optimizer_parameter_dtypes: TRAINING_DTYPE_F32_BF16,
+            mixed_precision: true,
+            notes: "CUDA keeps kt tape authoritative and routes BF16/F16/F32 leaves through CUDA-native kernels where available.",
+        }
+    }
+
+    pub const fn rocm() -> Self {
+        Self {
+            name: "rocm_native_float",
+            activation_dtypes: TRAINING_DTYPE_FLOAT_NATIVE,
+            base_weight_dtypes: TRAINING_DTYPE_FLOAT_NATIVE,
+            lora_parameter_dtypes: TRAINING_DTYPE_F32_BF16,
+            loss_accumulation_dtype: kiln_tensor::DType::F32,
+            optimizer_parameter_dtypes: TRAINING_DTYPE_F32_BF16,
+            mixed_precision: true,
+            notes: "ROCm mirrors CUDA's kt-tape dtype envelope while dispatching through HIP/hipBLASLt-native leaves where available.",
+        }
+    }
+
+    pub const fn metal() -> Self {
+        Self {
+            name: "metal_bf16_uma",
+            activation_dtypes: TRAINING_DTYPE_BF16_FOCUSED,
+            base_weight_dtypes: TRAINING_DTYPE_BF16_FOCUSED,
+            lora_parameter_dtypes: TRAINING_DTYPE_F32_BF16,
+            loss_accumulation_dtype: kiln_tensor::DType::F32,
+            optimizer_parameter_dtypes: TRAINING_DTYPE_F32_BF16,
+            mixed_precision: true,
+            notes: "Metal training is BF16-focused on UMA buffers, with F32 loss accumulation and F32/BF16 AdamW residency.",
+        }
+    }
+
+    pub const fn vulkan() -> Self {
+        Self {
+            name: "vulkan_mixed_f32_bf16",
+            activation_dtypes: TRAINING_DTYPE_F32,
+            base_weight_dtypes: TRAINING_DTYPE_F32_BF16,
+            lora_parameter_dtypes: TRAINING_DTYPE_F32,
+            loss_accumulation_dtype: kiln_tensor::DType::F32,
+            optimizer_parameter_dtypes: TRAINING_DTYPE_F32_BF16,
+            mixed_precision: true,
+            notes: "Vulkan keeps training activations and LoRA parameters F32 while allowing BF16 base weights through explicit VkTensor buffer bridges.",
+        }
+    }
+}
+
 /// Policy for backend fallbacks that leave the intended native path.
 ///
 /// Phase 2 uses this to make decode/training behavior explicit: correctness
@@ -181,6 +276,10 @@ pub trait BackendRuntime: Send + Sync + std::fmt::Debug {
     /// dispatch methods remain the source of truth for actual behavior.
     fn training_capabilities(&self) -> TrainingCapabilities {
         TrainingCapabilities::portable()
+    }
+
+    fn training_precision_policy(&self) -> TrainingPrecisionPolicy {
+        TrainingPrecisionPolicy::portable()
     }
 
     /// First-use feasibility check for the Vulkan-resident decode pool:
@@ -1963,6 +2062,8 @@ pub trait OptimizerBackend: Send + Sync + std::fmt::Debug {
 #[allow(clippy::too_many_arguments)]
 pub trait TrainingLossBackend: Send + Sync + std::fmt::Debug {
     fn runtime_training_capabilities(&self) -> TrainingCapabilities;
+
+    fn runtime_training_precision_policy(&self) -> TrainingPrecisionPolicy;
 }
 
 /// Focused `ReplayBackend` facet delegated by the current `BackendRuntime` facade.
@@ -2951,6 +3052,10 @@ impl<T: BackendRuntime + ?Sized> TrainingLossBackend for T {
     fn runtime_training_capabilities(&self) -> TrainingCapabilities {
         BackendRuntime::training_capabilities(self)
     }
+
+    fn runtime_training_precision_policy(&self) -> TrainingPrecisionPolicy {
+        BackendRuntime::training_precision_policy(self)
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3097,6 +3202,31 @@ mod tests {
         assert_eq!(caps.resident_activation, "not implemented");
         assert_eq!(caps.native_training, "not implemented");
         assert!(caps.projection_training.contains("candle"));
+
+        let policy = TrainingPrecisionPolicy::portable();
+        assert_eq!(policy.name, "cpu_f32_reference");
+        assert_eq!(policy.activation_dtypes, &[kiln_tensor::DType::F32]);
+        assert_eq!(policy.base_weight_dtypes, &[kiln_tensor::DType::F32]);
+        assert!(!policy.mixed_precision);
+    }
+
+    #[test]
+    fn training_precision_policies_capture_backend_differences() {
+        let cuda = TrainingPrecisionPolicy::cuda();
+        assert!(cuda.activation_dtypes.contains(&kiln_tensor::DType::BF16));
+        assert!(cuda.activation_dtypes.contains(&kiln_tensor::DType::F16));
+        assert!(cuda.mixed_precision);
+
+        let metal = TrainingPrecisionPolicy::metal();
+        assert_eq!(metal.activation_dtypes, &[kiln_tensor::DType::BF16]);
+        assert_eq!(metal.loss_accumulation_dtype, kiln_tensor::DType::F32);
+        assert!(metal.notes.contains("UMA"));
+
+        let vulkan = TrainingPrecisionPolicy::vulkan();
+        assert_eq!(vulkan.activation_dtypes, &[kiln_tensor::DType::F32]);
+        assert_eq!(vulkan.lora_parameter_dtypes, &[kiln_tensor::DType::F32]);
+        assert!(vulkan.base_weight_dtypes.contains(&kiln_tensor::DType::BF16));
+        assert!(vulkan.mixed_precision);
     }
 
     #[test]
@@ -3553,6 +3683,10 @@ mod tests {
         assert_eq!(
             TrainingLossBackend::runtime_training_capabilities(&cpu),
             BackendRuntime::training_capabilities(&cpu)
+        );
+        assert_eq!(
+            TrainingLossBackend::runtime_training_precision_policy(&cpu),
+            BackendRuntime::training_precision_policy(&cpu)
         );
 
         assert_eq!(

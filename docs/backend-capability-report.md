@@ -17,10 +17,10 @@ Generated from the live source tree by `scripts/generate_backend_capability_repo
 
 | Backend | Source | Override Count | Support Methods | Env Gates |
 |---|---|---:|---:|---:|
-| `cuda` | `crates/kiln-model/src/backend/cuda.rs` | 44 | 15 | 4 |
-| `rocm` | `crates/kiln-model/src/backend/rocm.rs` | 48 | 17 | 10 |
-| `metal` | `crates/kiln-model/src/backend/metal.rs` | 51 | 19 | 47 |
-| `vulkan` | `crates/kiln-model/src/backend/vulkan.rs` | 73 | 20 | 32 |
+| `cuda` | `crates/kiln-model/src/backend/cuda.rs` | 45 | 15 | 4 |
+| `rocm` | `crates/kiln-model/src/backend/rocm.rs` | 49 | 17 | 10 |
+| `metal` | `crates/kiln-model/src/backend/metal.rs` | 52 | 19 | 47 |
+| `vulkan` | `crates/kiln-model/src/backend/vulkan.rs` | 74 | 20 | 32 |
 
 ## Support Predicates
 
@@ -143,6 +143,16 @@ Generated from the live source tree by `scripts/generate_backend_capability_repo
 | `rocm` | `NativeRequired` | `KILN_TRAINING_HOT_PATH_DEBUG_FALLBACK=1 or KILN_ROCM_TRAINING_OPTIMIZER_FALLBACK=1` | SGD/AdamW GPU training errors before kt/host fallback when native dispatch declines |
 | `metal` | `NativeRequired` | `KILN_TRAINING_HOT_PATH_DEBUG_FALLBACK=1 or KILN_METAL_TRAINING_OPTIMIZER_FALLBACK=1` | SGD/AdamW GPU training errors before kt/host fallback when native dispatch declines |
 | `vulkan` | `NativeRequired` | `KILN_TRAINING_HOT_PATH_DEBUG_FALLBACK=1 or KILN_VULKAN_TRAINING_OPTIMIZER_FALLBACK=1` | SGD/AdamW GPU training errors before kt/host fallback when native dispatch declines |
+
+## Training Precision Policy
+
+| Backend | Policy | Activations | Base Weights | LoRA | Loss Accum | Optimizer Params | Mixed |
+|---|---|---|---|---|---|---|---|
+| `cpu` | `cpu_f32_reference` | `F32` | `F32` | `F32` | `F32` | `F32` | no |
+| `cuda` | `cuda_native_float` | `F32,BF16,F16` | `F32,BF16,F16` | `F32,BF16` | `F32` | `F32,BF16` | yes |
+| `rocm` | `rocm_native_float` | `F32,BF16,F16` | `F32,BF16,F16` | `F32,BF16` | `F32` | `F32,BF16` | yes |
+| `metal` | `metal_bf16_uma` | `BF16` | `BF16` | `F32,BF16` | `F32` | `F32,BF16` | yes |
+| `vulkan` | `vulkan_mixed_f32_bf16` | `F32` | `F32,BF16` | `F32` | `F32` | `F32,BF16` | yes |
 
 ## Optimizer Dispatch
 

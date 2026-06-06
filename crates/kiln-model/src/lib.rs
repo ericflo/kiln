@@ -50,7 +50,7 @@ pub mod weights;
 pub use backend::{
     AttentionBackend, BackendIdentity, BackendRuntime, ConvBackend, FallbackPolicy,
     GdnBackend, LinearBackend, OptimizerBackend, PagedKvBackend, ReplayBackend,
-    ResidencyBackend, SamplingBackend, TrainingLossBackend,
+    ResidencyBackend, SamplingBackend, TrainingLossBackend, TrainingPrecisionPolicy,
 };
 pub use backend::capability::{
     AttentionRequest, AttentionRequestKind, BackendCapabilityQueries, BackendCapabilitySnapshot,
