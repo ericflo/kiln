@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +16,7 @@ VALID_BACKENDS = {"cuda", "rocm", "metal", "vulkan"}
 VALID_STATUS = {"fixture_required", "covered"}
 VALID_THRESHOLD_STATES = {"pending_fixture_result", "locked_threshold"}
 VALID_COMPARISONS = {"<=", ">="}
+VALID_RESULT_STATUSES = {"passed", "failed"}
 
 
 def is_number(value: Any) -> bool:
@@ -55,6 +57,71 @@ def validate_metric(
         errors.append(f"{context}.max must be numeric for locked_threshold")
     if require_covered and not is_number(max_value):
         errors.append(f"{context}.max must be numeric when --require-covered is set")
+
+
+def metric_threshold_passes(metric: dict[str, Any], observed: float) -> bool:
+    comparison = metric.get("comparison")
+    threshold = metric.get("max")
+    if not is_number(threshold):
+        return False
+    if comparison == "<=":
+        return observed <= threshold
+    if comparison == ">=":
+        return observed >= threshold
+    return False
+
+
+def validate_result_artifact(
+    errors: list[str],
+    fixture: dict[str, Any],
+    result_path: Path,
+    context: str,
+) -> None:
+    try:
+        result = json.loads(result_path.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        errors.append(f"{context}.result_artifact is not readable JSON: {exc}")
+        return
+
+    fixture_id = fixture.get("id")
+    backend = fixture.get("backend")
+    if result.get("fixture_id") != fixture_id:
+        errors.append(
+            f"{context}.result_artifact.fixture_id must be {fixture_id!r}, got {result.get('fixture_id')!r}"
+        )
+    if result.get("backend") != backend:
+        errors.append(
+            f"{context}.result_artifact.backend must be {backend!r}, got {result.get('backend')!r}"
+        )
+    status = result.get("status")
+    if status not in VALID_RESULT_STATUSES:
+        errors.append(
+            f"{context}.result_artifact.status must be one of {sorted(VALID_RESULT_STATUSES)}"
+        )
+    elif status != "passed":
+        errors.append(f"{context}.result_artifact.status must be passed")
+
+    observed_metrics = result.get("metrics")
+    if not isinstance(observed_metrics, dict):
+        errors.append(f"{context}.result_artifact.metrics must be an object")
+        observed_metrics = {}
+
+    for metric_idx, metric in enumerate(fixture.get("metrics", [])):
+        if not isinstance(metric, dict):
+            continue
+        metric_name = metric.get("name")
+        metric_context = f"{context}.metrics[{metric_idx}]"
+        observed = observed_metrics.get(metric_name)
+        if not is_number(observed):
+            errors.append(
+                f"{context}.result_artifact.metrics.{metric_name} must be numeric"
+            )
+            continue
+        if not metric_threshold_passes(metric, observed):
+            errors.append(
+                f"{metric_context} observed value {observed} does not satisfy "
+                f"{metric.get('comparison')} {metric.get('max')}"
+            )
 
 
 def validate_manifest(manifest: dict[str, Any], require_covered: bool) -> list[str]:
@@ -114,7 +181,9 @@ def validate_manifest(manifest: dict[str, Any], require_covered: bool) -> list[s
             errors.append(f"{context}.source does not exist: {source}")
         require_string(errors, fixture, "command", context)
         result_artifact = require_string(errors, fixture, "result_artifact", context)
-        if require_covered and result_artifact and not (ROOT / result_artifact).is_file():
+        result_path = ROOT / result_artifact if result_artifact else None
+        result_exists = result_path is not None and result_path.is_file()
+        if require_covered and result_artifact and not result_exists:
             errors.append(f"{context}.result_artifact does not exist: {result_artifact}")
 
         threshold_state = require_string(errors, fixture, "threshold_state", context)
@@ -142,6 +211,9 @@ def validate_manifest(manifest: dict[str, Any], require_covered: bool) -> list[s
                     threshold_state,
                     require_covered,
                 )
+
+        if require_covered and result_exists:
+            validate_result_artifact(errors, fixture, result_path, context)
 
     missing_fixture_slots = manifest.get("missing_fixture_slots", [])
     if not isinstance(missing_fixture_slots, list):
@@ -175,6 +247,96 @@ def validate_manifest(manifest: dict[str, Any], require_covered: bool) -> list[s
     return errors
 
 
+def self_test() -> int:
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_root = Path(tmp)
+        source = tmp_root / "bench.rs"
+        source.write_text("// fixture source\n")
+        artifact = tmp_root / "result.json"
+        fixture = {
+            "id": "cuda_fixture",
+            "backend": "cuda",
+            "hardware": "fixture",
+            "source": str(source.relative_to(ROOT))
+            if source.is_relative_to(ROOT)
+            else str(source),
+            "command": "cargo bench",
+            "result_artifact": str(artifact.relative_to(ROOT))
+            if artifact.is_relative_to(ROOT)
+            else str(artifact),
+            "threshold_state": "locked_threshold",
+            "metrics": [
+                {"name": "latency_ms", "unit": "ms", "comparison": "<=", "max": 10.0},
+                {"name": "tokens_per_s", "unit": "tok/s", "comparison": ">=", "max": 100.0},
+            ],
+        }
+        artifact.write_text(
+            json.dumps(
+                {
+                    "fixture_id": "cuda_fixture",
+                    "backend": "cuda",
+                    "status": "passed",
+                    "metrics": {"latency_ms": 9.5, "tokens_per_s": 125.0},
+                }
+            )
+        )
+        errors: list[str] = []
+        validate_result_artifact(errors, fixture, artifact, "fixtures[0]")
+        if errors:
+            print(
+                json.dumps(
+                    {"ok": False, "case": "passing artifact", "errors": errors},
+                    indent=2,
+                )
+            )
+            return 1
+
+        artifact.write_text(
+            json.dumps(
+                {
+                    "fixture_id": "cuda_fixture",
+                    "backend": "cuda",
+                    "status": "passed",
+                    "metrics": {"latency_ms": 12.0, "tokens_per_s": 125.0},
+                }
+            )
+        )
+        errors = []
+        validate_result_artifact(errors, fixture, artifact, "fixtures[0]")
+        if not any("does not satisfy <= 10.0" in error for error in errors):
+            print(
+                json.dumps(
+                    {"ok": False, "case": "threshold failure", "errors": errors},
+                    indent=2,
+                )
+            )
+            return 1
+
+        artifact.write_text(
+            json.dumps(
+                {
+                    "fixture_id": "wrong",
+                    "backend": "cuda",
+                    "status": "passed",
+                    "metrics": {"latency_ms": 9.5, "tokens_per_s": 125.0},
+                }
+            )
+        )
+        errors = []
+        validate_result_artifact(errors, fixture, artifact, "fixtures[0]")
+        if not any("fixture_id must be" in error for error in errors):
+            print(
+                json.dumps(
+                    {"ok": False, "case": "fixture id mismatch", "errors": errors},
+                    indent=2,
+                )
+            )
+            return 1
+
+    print(json.dumps({"ok": True, "self_test": "backend latency fixture validator"}))
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -188,7 +350,15 @@ def main() -> int:
         action="store_true",
         help="Require locked thresholds and checked result artifacts for every backend",
     )
+    parser.add_argument(
+        "--self-test",
+        action="store_true",
+        help="Run validator self-tests instead of checking a manifest",
+    )
     args = parser.parse_args()
+
+    if args.self_test:
+        return self_test()
 
     manifest_path = Path(args.manifest)
     if not manifest_path.is_absolute():

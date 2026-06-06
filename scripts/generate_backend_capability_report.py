@@ -837,7 +837,7 @@ def conformance_gate_report() -> list[dict[str, Any]]:
             "gate": "hardware_latency_thresholds",
             "phase8_requirement": "backend-specific latency thresholds on known hardware fixtures",
             "status": "fixture_required",
-            "command": "hardware runner required; python3 scripts/check_backend_latency_fixtures.py docs/backend-latency-fixtures.json --require-covered",
+            "command": "python3 scripts/check_backend_latency_fixtures.py --self-test && hardware runner required; python3 scripts/check_backend_latency_fixtures.py docs/backend-latency-fixtures.json --require-covered",
             "evidence": [
                 "docs/backend-latency-fixtures.json",
                 "scripts/check_backend_latency_fixtures.py",

@@ -2458,7 +2458,23 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
         .as_str()
         .expect("hardware latency command should be a string");
     assert!(command.contains("check_backend_latency_fixtures.py"));
+    assert!(command.contains("--self-test"));
     assert!(command.contains("--require-covered"));
+
+    let checker_source = fs::read_to_string(root.join("scripts/check_backend_latency_fixtures.py"))
+        .expect("latency fixture checker should be readable");
+    for required in [
+        "def validate_result_artifact(",
+        "def metric_threshold_passes(",
+        "fixture_id",
+        "status must be passed",
+        "does not satisfy",
+    ] {
+        assert!(
+            checker_source.contains(required),
+            "latency fixture checker should validate covered artifact contract: {required}"
+        );
+    }
 
     let evidence_present = hardware_gate["evidence_present"]
         .as_array()
