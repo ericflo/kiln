@@ -29,6 +29,162 @@ impl Support {
     }
 }
 
+/// Accumulation precision requested by a matmul.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MatmulAccumulation {
+    F32,
+}
+
+/// Logical storage layout for a matmul operand or output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MatmulOperandLayout {
+    RowMajor,
+    ColMajor,
+}
+
+/// Fused matmul tail requested by the caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MatmulEpilogue {
+    Identity,
+    Bias,
+    Relu,
+    Gelu,
+    Silu,
+    BiasSilu,
+    BiasGelu,
+}
+
+/// Batch shape collapsed into the logical matmul request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MatmulBatchPolicy {
+    Single,
+    Batched { batches: usize },
+}
+
+impl MatmulBatchPolicy {
+    fn from_leading_shape(shape: &[usize]) -> Self {
+        let batches = shape.iter().product::<usize>().max(1);
+        if batches == 1 {
+            Self::Single
+        } else {
+            Self::Batched { batches }
+        }
+    }
+}
+
+/// Engine-facing matmul capability request.
+///
+/// This intentionally carries the richer shape/dtype/layout/replay vocabulary
+/// from the unification plan, while staying compatible with the narrower
+/// BLAS-crate `m/n/k + dtype + layout + epilogue` request direction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MatmulRequest {
+    pub lhs_shape: Vec<usize>,
+    pub rhs_shape: Vec<usize>,
+    pub lhs_dtype: kiln_tensor::DType,
+    pub rhs_dtype: kiln_tensor::DType,
+    pub out_dtype: kiln_tensor::DType,
+    pub accumulation: MatmulAccumulation,
+    pub lhs_layout: MatmulOperandLayout,
+    pub rhs_layout: MatmulOperandLayout,
+    pub out_layout: MatmulOperandLayout,
+    pub batch: MatmulBatchPolicy,
+    pub epilogue: MatmulEpilogue,
+    pub replay_safe: bool,
+}
+
+impl MatmulRequest {
+    pub fn plain(
+        lhs_shape: Vec<usize>,
+        rhs_shape: Vec<usize>,
+        dtype: kiln_tensor::DType,
+        replay_safe: bool,
+    ) -> Self {
+        let batch = lhs_shape
+            .len()
+            .checked_sub(2)
+            .map(|rank_prefix| {
+                MatmulBatchPolicy::from_leading_shape(&lhs_shape[..rank_prefix])
+            })
+            .unwrap_or(MatmulBatchPolicy::Single);
+        Self {
+            lhs_shape,
+            rhs_shape,
+            lhs_dtype: dtype,
+            rhs_dtype: dtype,
+            out_dtype: dtype,
+            accumulation: MatmulAccumulation::F32,
+            lhs_layout: MatmulOperandLayout::RowMajor,
+            rhs_layout: MatmulOperandLayout::RowMajor,
+            out_layout: MatmulOperandLayout::RowMajor,
+            batch,
+            epilogue: MatmulEpilogue::Identity,
+            replay_safe,
+        }
+    }
+
+    pub fn with_epilogue(mut self, epilogue: MatmulEpilogue) -> Self {
+        self.epilogue = epilogue;
+        self
+    }
+
+    pub fn logical_mnk(&self) -> Option<(usize, usize, usize)> {
+        if !self.has_compatible_shapes() {
+            return None;
+        }
+        let rank = self.lhs_shape.len();
+        Some((
+            self.lhs_shape[rank - 2],
+            self.rhs_shape[rank - 1],
+            self.lhs_shape[rank - 1],
+        ))
+    }
+
+    pub fn rank(&self) -> Option<usize> {
+        if self.lhs_shape.len() == self.rhs_shape.len() {
+            Some(self.lhs_shape.len())
+        } else {
+            None
+        }
+    }
+
+    fn has_compatible_shapes(&self) -> bool {
+        let Some(rank) = self.rank() else {
+            return false;
+        };
+        if rank < 2 {
+            return false;
+        }
+        if self.lhs_shape[..rank - 2] != self.rhs_shape[..rank - 2] {
+            return false;
+        }
+        if self.lhs_shape[rank - 1] != self.rhs_shape[rank - 2] {
+            return false;
+        }
+        self.batch
+            == MatmulBatchPolicy::from_leading_shape(&self.lhs_shape[..rank - 2])
+    }
+
+    fn has_supported_dtype_contract(&self) -> bool {
+        self.lhs_dtype == self.rhs_dtype
+            && self.lhs_dtype == self.out_dtype
+            && self.accumulation == MatmulAccumulation::F32
+            && matches!(
+                self.lhs_dtype,
+                kiln_tensor::DType::F32 | kiln_tensor::DType::BF16 | kiln_tensor::DType::F16
+            )
+    }
+
+    fn is_row_major_output(&self) -> bool {
+        self.out_layout == MatmulOperandLayout::RowMajor
+    }
+
+    fn is_row_major_input(&self) -> bool {
+        self.lhs_layout == MatmulOperandLayout::RowMajor
+            && self.rhs_layout == MatmulOperandLayout::RowMajor
+    }
+}
+
 /// Attention operation family being queried.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AttentionRequestKind {
@@ -244,6 +400,45 @@ pub trait BackendCapabilityQueries: BackendRuntime {
             }
             AttentionRequestKind::FlashPagedDecode => self.supports_flash_attn_paged_decode(),
         })
+    }
+
+    fn supports_matmul_request(&self, req: &MatmulRequest) -> Support {
+        if !req.has_compatible_shapes()
+            || !req.has_supported_dtype_contract()
+            || !req.is_row_major_output()
+            || !req.is_row_major_input()
+            || !matches!(req.epilogue, MatmulEpilogue::Identity | MatmulEpilogue::Bias)
+        {
+            return Support::Unsupported;
+        }
+
+        let Some(rank) = req.rank() else {
+            return Support::Unsupported;
+        };
+        let native = match self.name() {
+            "cpu" => matches!(req.epilogue, MatmulEpilogue::Identity | MatmulEpilogue::Bias),
+            "cuda" | "rocm" => match req.epilogue {
+                MatmulEpilogue::Identity => true,
+                MatmulEpilogue::Bias => rank == 2,
+                _ => false,
+            },
+            "metal" => {
+                req.lhs_dtype == kiln_tensor::DType::BF16
+                    && matches!(req.epilogue, MatmulEpilogue::Identity)
+            }
+            "vulkan" => {
+                matches!(req.epilogue, MatmulEpilogue::Identity)
+                    && (req.lhs_dtype == kiln_tensor::DType::F32
+                        || req.lhs_dtype == kiln_tensor::DType::BF16 && rank > 2)
+            }
+            _ => false,
+        };
+
+        if native {
+            Support::NativeWithConstraints
+        } else {
+            Support::HostFallbackAllowed
+        }
     }
 
     fn supports_linear_request(&self, req: &LinearRequest) -> Support {

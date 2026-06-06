@@ -3139,6 +3139,106 @@ mod tests {
     }
 
     #[test]
+    fn matmul_request_capability_is_conservative() {
+        let cpu = cpu::CpuBackend::new(kiln_tensor::Device::Cpu);
+        let plain = capability::MatmulRequest::plain(
+            vec![2, 3],
+            vec![3, 4],
+            kiln_tensor::DType::F32,
+            false,
+        );
+        assert_eq!(plain.logical_mnk(), Some((2, 4, 3)));
+        assert_eq!(
+            capability::BackendCapabilityQueries::supports_matmul_request(&cpu, &plain),
+            capability::Support::NativeWithConstraints
+        );
+
+        let incompatible = capability::MatmulRequest::plain(
+            vec![2, 3],
+            vec![5, 4],
+            kiln_tensor::DType::F32,
+            false,
+        );
+        assert_eq!(
+            capability::BackendCapabilityQueries::supports_matmul_request(
+                &cpu,
+                &incompatible
+            ),
+            capability::Support::Unsupported
+        );
+        let fused_relu = plain
+            .clone()
+            .with_epilogue(capability::MatmulEpilogue::Relu);
+        assert_eq!(
+            capability::BackendCapabilityQueries::supports_matmul_request(&cpu, &fused_relu),
+            capability::Support::Unsupported
+        );
+
+        let cuda = ResidentActivationProbeBackend {
+            name: "cuda",
+            resident: false,
+        };
+        let bias = capability::MatmulRequest::plain(
+            vec![2, 3],
+            vec![3, 4],
+            kiln_tensor::DType::BF16,
+            false,
+        )
+        .with_epilogue(capability::MatmulEpilogue::Bias);
+        assert_eq!(
+            capability::BackendCapabilityQueries::supports_matmul_request(&cuda, &bias),
+            capability::Support::NativeWithConstraints
+        );
+
+        let metal = ResidentActivationProbeBackend {
+            name: "metal",
+            resident: false,
+        };
+        assert_eq!(
+            capability::BackendCapabilityQueries::supports_matmul_request(&metal, &plain),
+            capability::Support::HostFallbackAllowed
+        );
+        let metal_bf16 = capability::MatmulRequest::plain(
+            vec![2, 3],
+            vec![3, 4],
+            kiln_tensor::DType::BF16,
+            false,
+        );
+        assert_eq!(
+            capability::BackendCapabilityQueries::supports_matmul_request(
+                &metal,
+                &metal_bf16
+            ),
+            capability::Support::NativeWithConstraints
+        );
+
+        let vulkan = ResidentActivationProbeBackend {
+            name: "vulkan",
+            resident: false,
+        };
+        assert_eq!(
+            capability::BackendCapabilityQueries::supports_matmul_request(
+                &vulkan,
+                &metal_bf16
+            ),
+            capability::Support::HostFallbackAllowed
+        );
+        let vulkan_batched_bf16 = capability::MatmulRequest::plain(
+            vec![2, 4, 8, 16],
+            vec![2, 4, 16, 32],
+            kiln_tensor::DType::BF16,
+            true,
+        );
+        assert_eq!(
+            capability::BackendCapabilityQueries::supports_matmul_request(
+                &vulkan,
+                &vulkan_batched_bf16
+            ),
+            capability::Support::NativeWithConstraints
+        );
+    }
+
+    #[test]
     fn portable_backend_declines_resident_decode_by_default() {
         // The default trait implementation must return false so that
         // every non-Vulkan backend continues to route through the
