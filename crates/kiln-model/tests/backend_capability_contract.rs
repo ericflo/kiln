@@ -2459,6 +2459,7 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
         .as_str()
         .expect("hardware latency command should be a string");
     assert!(command.contains("check_backend_latency_fixtures.py"));
+    assert!(command.contains("run_backend_latency_fixture.py"));
     assert!(command.contains("write_backend_latency_result_artifact.py"));
     assert!(command.contains("lock_backend_latency_thresholds.py"));
     assert!(command.contains("--self-test"));
@@ -2476,6 +2477,21 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
         assert!(
             checker_source.contains(required),
             "latency fixture checker should validate covered artifact contract: {required}"
+        );
+    }
+
+    let runner_source = fs::read_to_string(root.join("scripts/run_backend_latency_fixture.py"))
+        .expect("latency fixture runner should be readable");
+    for required in [
+        "def run_fixture(",
+        "subprocess.Popen",
+        "KILN_LATENCY_METRIC",
+        "raw_log",
+        "--self-test",
+    ] {
+        assert!(
+            runner_source.contains(required),
+            "latency fixture runner should capture raw fixture logs and materialize artifacts: {required}"
         );
     }
 
@@ -2521,6 +2537,7 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
     for path in [
         "docs/backend-latency-fixtures.json",
         "docs/backend-latency-result-schema.md",
+        "scripts/run_backend_latency_fixture.py",
         "scripts/write_backend_latency_result_artifact.py",
         "scripts/lock_backend_latency_thresholds.py",
         "scripts/check_backend_latency_fixtures.py",
@@ -2545,6 +2562,7 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
         "status",
         "metrics",
         "KILN_LATENCY_METRIC",
+        "run_backend_latency_fixture.py",
         "write_backend_latency_result_artifact.py",
         "lock_backend_latency_thresholds.py",
         "--require-covered",

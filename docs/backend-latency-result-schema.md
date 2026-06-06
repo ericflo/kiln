@@ -60,8 +60,19 @@ KILN_LATENCY_METRIC <metric> <value> <unit>
 ```
 
 The artifact writer extracts the metric names declared by the selected fixture
-and ignores extra metric lines. Capture a hardware fixture run with `tee`, then
-materialize the result artifact:
+and ignores extra metric lines. To run one manifest fixture, capture its raw
+log, and materialize the result artifact in one step:
+
+```sh
+python3 scripts/run_backend_latency_fixture.py \
+  docs/backend-latency-fixtures.json \
+  metal_apple_silicon_matmul_qwen35_4b
+```
+
+The fixture runner executes the selected fixture `command`, writes a timestamped
+raw log under `bench-results/backend-latency/raw`, and then invokes the same
+artifact materialization contract used by the standalone writer. If the fixture
+has already been run manually, materialize the result artifact from the raw log:
 
 ```sh
 python3 scripts/write_backend_latency_result_artifact.py \
@@ -99,6 +110,8 @@ python3 scripts/check_backend_latency_fixtures.py \
   --require-covered
 ```
 
+Run `python3 scripts/run_backend_latency_fixture.py --self-test` to validate the
+fixture-runner capture path without hardware.
 Run `python3 scripts/write_backend_latency_result_artifact.py --self-test` to
 validate the log-line parser and artifact writer without hardware.
 Run `python3 scripts/lock_backend_latency_thresholds.py --self-test` to validate
