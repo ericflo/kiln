@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -210,6 +211,15 @@ def run_git(args: list[str]) -> str:
         return subprocess.check_output(["git", *args], cwd=ROOT, text=True).strip()
     except (subprocess.CalledProcessError, FileNotFoundError):
         return "unknown"
+
+
+def source_branch() -> str:
+    return (
+        os.environ.get("GITHUB_HEAD_REF")
+        or os.environ.get("GITHUB_REF_NAME")
+        or run_git(["branch", "--show-current"])
+        or "unknown"
+    )
 
 
 def load_toml(path: Path) -> dict[str, Any]:
@@ -1555,7 +1565,7 @@ def build_report_data() -> tuple[dict[str, Any], list[dict[str, Any]]]:
     conformance_gates = conformance_gate_report()
     data = {
         "source": {
-            "branch": run_git(["branch", "--show-current"]),
+            "branch": source_branch(),
             "script": str(Path(__file__).relative_to(ROOT)),
         },
         "features": feature_report(),

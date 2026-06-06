@@ -2777,6 +2777,7 @@ fn generated_capability_report_check_mode_is_non_mutating_and_enforced() {
         fs::read_to_string(&script_path).expect("capability report generator should be readable");
     for required in [
         "def load_toml_feature_subset(",
+        "GITHUB_HEAD_REF",
         "def check_report_files(",
         "def run_self_test(",
         "fallback TOML feature self-test failed",
