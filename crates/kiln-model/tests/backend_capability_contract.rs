@@ -1628,6 +1628,10 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         "forward dense decode helpers should import the focused linear facet"
     );
     assert!(
+        forward_source.contains("ConvBackend"),
+        "forward conv decode helpers should import the focused conv facet"
+    );
+    assert!(
         forward_source.contains("SamplingBackend"),
         "forward lm-head decode helpers should import the focused sampling facet"
     );
@@ -1777,6 +1781,29 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         assert!(
             !inference_linear_sources.contains(forbidden),
             "inference dense linear paths should not call broad BackendRuntime method {forbidden}"
+        );
+    }
+
+    for required in [
+        "ConvBackend::runtime_supports_causal_conv1d_update",
+        "ConvBackend::runtime_causal_conv1d_update",
+        "ConvBackend::runtime_supports_causal_conv1d_prefill",
+        "ConvBackend::runtime_causal_conv1d_prefill",
+    ] {
+        assert!(
+            forward_source.contains(required),
+            "forward conv paths should consume focused capability facet method {required}"
+        );
+    }
+    for forbidden in [
+        ".supports_causal_conv1d_update(",
+        ".causal_conv1d_update(",
+        ".supports_causal_conv1d_prefill(",
+        ".causal_conv1d_prefill(",
+    ] {
+        assert!(
+            !forward_source.contains(forbidden),
+            "forward conv paths should not call broad BackendRuntime method {forbidden}"
         );
     }
 }

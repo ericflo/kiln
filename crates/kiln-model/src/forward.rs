@@ -14,7 +14,7 @@ use std::cell::Cell;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
-use crate::backend::{BackendRuntime, LinearBackend, SamplingBackend};
+use crate::backend::{BackendRuntime, ConvBackend, LinearBackend, SamplingBackend};
 use crate::kv_cache::KvCache;
 use crate::lora_loader::{
     LoraLayerWeights, LoraProjectionWeights, LoraWeights, compute_lora_delta, linear_with_lora_t,
@@ -16537,11 +16537,12 @@ fn gated_deltanet_forward_decode_if_inner(
             };
             let post_silu = if seq_len == 1
                 && gdn_forward_only_fastpaths
-                && backend.supports_causal_conv1d_update()
+                && ConvBackend::runtime_supports_causal_conv1d_update(backend)
             {
                 let conv_update = {
                     kiln_nvtx::range!(c"kiln/gdn/conv/update");
-                    backend.causal_conv1d_update(
+                    ConvBackend::runtime_causal_conv1d_update(
+                        backend,
                         &mixed_qkv_ct,
                         &weights.conv1d,
                         conv_state,
@@ -16578,12 +16579,13 @@ fn gated_deltanet_forward_decode_if_inner(
                 )))]
                 let tape_fused_prefill_conv = false;
                 if (gdn_forward_only_fastpaths || tape_fused_prefill_conv)
-                    && backend.supports_causal_conv1d_prefill()
+                    && ConvBackend::runtime_supports_causal_conv1d_prefill(backend)
                 {
                     let conv_entry_state = conv_state.clone();
                     let conv_prefill = {
                         kiln_nvtx::range!(c"kiln/gdn/conv/prefill_update");
-                        backend.causal_conv1d_prefill(
+                        ConvBackend::runtime_causal_conv1d_prefill(
+                            backend,
                             &mixed_qkv_ct,
                             &weights.conv1d,
                             conv_state,
@@ -35053,7 +35055,7 @@ mod tests {
 
         // Fused kernel path via the backend dispatch.
         let backend = crate::backend::for_device_kt(&device);
-        if !backend.supports_causal_conv1d_update() {
+        if !ConvBackend::runtime_supports_causal_conv1d_update(backend.as_ref()) {
             eprintln!(
                 "backend declines causal_conv1d_update (KILN_DISABLE_FUSED_CONV1D?); skipping"
             );
@@ -35061,7 +35063,13 @@ mod tests {
         }
         let mut s_k =
             Tensor::from_slice(&s_data, (batch, channels, kernel_size - 1))?.to_device(device)?;
-        let out_k = match backend.causal_conv1d_update(&x, &w, &mut s_k, kernel_size)? {
+        let out_k = match ConvBackend::runtime_causal_conv1d_update(
+            backend.as_ref(),
+            &x,
+            &w,
+            &mut s_k,
+            kernel_size,
+        )? {
             Some(t) => t,
             None => {
                 eprintln!("backend declined causal_conv1d_update at Qwen3.5 envelope; skipping");
@@ -35146,14 +35154,20 @@ mod tests {
         let out_fb = cuda_silu(&out_fb)?;
 
         let backend = crate::backend::for_device_kt(&device);
-        if !backend.supports_causal_conv1d_prefill() {
+        if !ConvBackend::runtime_supports_causal_conv1d_prefill(backend.as_ref()) {
             eprintln!(
                 "backend declines causal_conv1d_prefill (KILN_DISABLE_FUSED_CONV1D?); skipping"
             );
             return Ok(());
         }
         let mut s_k = s_init.clone();
-        let out_k = match backend.causal_conv1d_prefill(&x, &w, &mut s_k, kernel_size)? {
+        let out_k = match ConvBackend::runtime_causal_conv1d_prefill(
+            backend.as_ref(),
+            &x,
+            &w,
+            &mut s_k,
+            kernel_size,
+        )? {
             Some(t) => t,
             None => {
                 eprintln!("backend declined causal_conv1d_prefill at Qwen3.5 envelope; skipping");
@@ -35186,9 +35200,9 @@ mod tests {
         Ok(())
     }
 
-
-    /// Metal parity check for `backend.causal_conv1d_update` against the same
-    /// portable `causal_conv1d_decode` + `cuda_silu` oracle used by CUDA.
+    /// Metal parity check for `ConvBackend::runtime_causal_conv1d_update`
+    /// against the same portable `causal_conv1d_decode` + `cuda_silu` oracle
+    /// used by CUDA.
     #[cfg(feature = "metal")]
     #[test]
     fn test_causal_conv1d_update_matches_fallback_metal() -> Result<()> {
@@ -35242,7 +35256,7 @@ mod tests {
         let out_fb = cuda_silu(&out_fb.to_dtype(DType::F32)?)?;
 
         let backend = crate::backend::for_device_kt(&device);
-        if !backend.supports_causal_conv1d_update() {
+        if !ConvBackend::runtime_supports_causal_conv1d_update(backend.as_ref()) {
             eprintln!(
                 "backend declines causal_conv1d_update (KILN_DISABLE_FUSED_CONV1D?); skipping"
             );
@@ -35250,7 +35264,13 @@ mod tests {
         }
         let mut s_k =
             Tensor::from_slice(&s_data, (batch, channels, kernel_size - 1))?.to_device(device)?;
-        let out_k = match backend.causal_conv1d_update(&x, &w, &mut s_k, kernel_size)? {
+        let out_k = match ConvBackend::runtime_causal_conv1d_update(
+            backend.as_ref(),
+            &x,
+            &w,
+            &mut s_k,
+            kernel_size,
+        )? {
             Some(t) => t,
             None => {
                 eprintln!("backend declined causal_conv1d_update at Qwen3.5 envelope; skipping");
@@ -35407,9 +35427,17 @@ mod tests {
         let out_ref = cuda_silu(&out_ref)?;
 
         let backend = crate::backend::for_device_kt(&device);
-        assert!(backend.supports_causal_conv1d_prefill());
+        assert!(ConvBackend::runtime_supports_causal_conv1d_prefill(
+            backend.as_ref()
+        ));
         let mut s_kernel = s_init.clone();
-        let out_kernel = match backend.causal_conv1d_prefill(&x, &w, &mut s_kernel, kernel_size)? {
+        let out_kernel = match ConvBackend::runtime_causal_conv1d_prefill(
+            backend.as_ref(),
+            &x,
+            &w,
+            &mut s_kernel,
+            kernel_size,
+        )? {
             Some(out) => out,
             None => {
                 eprintln!("Metal backend declined causal_conv1d_prefill; skipping");
