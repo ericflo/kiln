@@ -29,6 +29,7 @@ CAPABILITY_RS = ROOT / "crates" / "kiln-model" / "src" / "backend" / "capability
 REQUEST_DESCRIPTOR_STRUCTS = [
     "AttentionRequest",
     "MatmulRequest",
+    "MatmulBlasRequest",
     "LinearRequest",
     "ReplayRequest",
 ]
@@ -273,7 +274,8 @@ def request_descriptor_report() -> dict[str, Any]:
             "field_count": len(fields),
             "fields": fields,
             "has_dtype": any("dtype" in field_name for field_name in field_names),
-            "has_shape": any("shape" in field_name for field_name in field_names),
+            "has_shape": any("shape" in field_name for field_name in field_names)
+            or all(dim in field_names for dim in ["m", "n", "k"]),
             "has_batch": any("batch" in field_name for field_name in field_names),
             "has_replay_safe": "replay_safe" in field_names,
         }

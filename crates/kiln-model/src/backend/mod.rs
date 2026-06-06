@@ -3479,6 +3479,67 @@ mod tests {
     }
 
     #[test]
+    fn matmul_request_projects_to_blas_shape_contract() {
+        let bias = capability::MatmulRequest::plain(
+            vec![2, 3],
+            vec![3, 4],
+            kiln_tensor::DType::BF16,
+            true,
+        )
+        .with_epilogue(capability::MatmulEpilogue::Bias);
+
+        let blas = bias.to_blas_request(3).expect("bias request projects");
+        assert_eq!(blas.m, 2);
+        assert_eq!(blas.n, 4);
+        assert_eq!(blas.k, 3);
+        assert_eq!(blas.dtype, kiln_tensor::DType::BF16);
+        assert_eq!(blas.dtype_name(), "bf16");
+        assert_eq!(blas.lhs_layout.blas_name(), "row");
+        assert_eq!(blas.rhs_layout.blas_name(), "row");
+        assert_eq!(blas.out_layout.blas_name(), "row");
+        assert_eq!(blas.epilogue.blas_name(), "bias");
+        assert_eq!(blas.batch, capability::MatmulBatchPolicy::Single);
+        assert_eq!(blas.concurrent_streams, 3);
+
+        let batched = capability::MatmulRequest::plain(
+            vec![2, 4, 8, 16],
+            vec![2, 4, 16, 32],
+            kiln_tensor::DType::F32,
+            true,
+        );
+        let blas_batched = batched.to_blas_request(1).expect("batched request projects");
+        assert_eq!((blas_batched.m, blas_batched.n, blas_batched.k), (8, 32, 16));
+        assert_eq!(
+            blas_batched.batch,
+            capability::MatmulBatchPolicy::Batched { batches: 8 }
+        );
+
+        let incompatible = capability::MatmulRequest::plain(
+            vec![2, 3],
+            vec![5, 4],
+            kiln_tensor::DType::F32,
+            false,
+        );
+        assert_eq!(
+            incompatible.to_blas_request(1),
+            Err(capability::MatmulRequestProjectionError::IncompatibleShape)
+        );
+
+        let mixed = capability::MatmulRequest {
+            rhs_dtype: kiln_tensor::DType::F32,
+            ..bias
+        };
+        assert_eq!(
+            mixed.to_blas_request(1),
+            Err(capability::MatmulRequestProjectionError::MixedDTypes)
+        );
+        assert_eq!(
+            mixed.to_blas_request(0),
+            Err(capability::MatmulRequestProjectionError::InvalidConcurrentStreams)
+        );
+    }
+
+    #[test]
     fn portable_backend_declines_resident_decode_by_default() {
         // The default trait implementation must return false so that
         // every non-Vulkan backend continues to route through the

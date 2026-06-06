@@ -277,6 +277,7 @@ fn generated_capability_report_lists_request_descriptors() {
     for name in [
         "AttentionRequest",
         "MatmulRequest",
+        "MatmulBlasRequest",
         "LinearRequest",
         "ReplayRequest",
     ] {
@@ -294,6 +295,19 @@ fn generated_capability_report_lists_request_descriptors() {
         .collect::<Vec<_>>();
     assert!(replay_fields.contains(&"dtype"));
     assert!(replay_fields.contains(&"replay_safe"));
+
+    let matmul_blas_fields = descriptors["MatmulBlasRequest"]["fields"]
+        .as_array()
+        .expect("MatmulBlasRequest fields should be an array")
+        .iter()
+        .filter_map(|field| field["name"].as_str())
+        .collect::<Vec<_>>();
+    for field in ["m", "n", "k", "dtype", "epilogue", "concurrent_streams"] {
+        assert!(
+            matmul_blas_fields.contains(&field),
+            "MatmulBlasRequest should include {field}"
+        );
+    }
 
     let request_queries = report["request_capability_queries"]
         .as_array()

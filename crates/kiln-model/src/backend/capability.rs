@@ -44,6 +44,16 @@ pub enum MatmulOperandLayout {
     ColMajor,
 }
 
+impl MatmulOperandLayout {
+    /// Stable layout name matching the lower BLAS request descriptors.
+    pub const fn blas_name(self) -> &'static str {
+        match self {
+            Self::RowMajor => "row",
+            Self::ColMajor => "col",
+        }
+    }
+}
+
 /// Fused matmul tail requested by the caller.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum MatmulEpilogue {
@@ -54,6 +64,21 @@ pub enum MatmulEpilogue {
     Silu,
     BiasSilu,
     BiasGelu,
+}
+
+impl MatmulEpilogue {
+    /// Stable epilogue name matching the lower BLAS request descriptors.
+    pub const fn blas_name(self) -> &'static str {
+        match self {
+            Self::Identity => "identity",
+            Self::Bias => "bias",
+            Self::Relu => "relu",
+            Self::Gelu => "gelu",
+            Self::Silu => "silu",
+            Self::BiasSilu => "bias_silu",
+            Self::BiasGelu => "bias_gelu",
+        }
+    }
 }
 
 /// Batch shape collapsed into the logical matmul request.
@@ -71,6 +96,41 @@ impl MatmulBatchPolicy {
         } else {
             Self::Batched { batches }
         }
+    }
+}
+
+/// Error returned when a rich engine request cannot be projected to BLAS shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum MatmulRequestProjectionError {
+    IncompatibleShape,
+    MixedDTypes,
+    UnsupportedAccumulation,
+    UnsupportedDType,
+    InvalidConcurrentStreams,
+}
+
+/// Dependency-free projection of [`MatmulRequest`] onto the lower BLAS request shape.
+///
+/// `kiln-model` intentionally does not depend on `kiln-blas` or `kiln-rocblas`,
+/// so this descriptor mirrors their shared `m/n/k + dtype + layout + epilogue`
+/// vocabulary without importing the concrete crate type.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MatmulBlasRequest {
+    pub m: u64,
+    pub n: u64,
+    pub k: u64,
+    pub dtype: kiln_tensor::DType,
+    pub lhs_layout: MatmulOperandLayout,
+    pub rhs_layout: MatmulOperandLayout,
+    pub out_layout: MatmulOperandLayout,
+    pub epilogue: MatmulEpilogue,
+    pub batch: MatmulBatchPolicy,
+    pub concurrent_streams: u8,
+}
+
+impl MatmulBlasRequest {
+    pub const fn dtype_name(&self) -> &'static str {
+        self.dtype.short_name()
     }
 }
 
@@ -105,9 +165,7 @@ impl MatmulRequest {
         let batch = lhs_shape
             .len()
             .checked_sub(2)
-            .map(|rank_prefix| {
-                MatmulBatchPolicy::from_leading_shape(&lhs_shape[..rank_prefix])
-            })
+            .map(|rank_prefix| MatmulBatchPolicy::from_leading_shape(&lhs_shape[..rank_prefix]))
             .unwrap_or(MatmulBatchPolicy::Single);
         Self {
             lhs_shape,
@@ -128,6 +186,43 @@ impl MatmulRequest {
     pub fn with_epilogue(mut self, epilogue: MatmulEpilogue) -> Self {
         self.epilogue = epilogue;
         self
+    }
+
+    pub fn to_blas_request(
+        &self,
+        concurrent_streams: u8,
+    ) -> Result<MatmulBlasRequest, MatmulRequestProjectionError> {
+        if concurrent_streams == 0 {
+            return Err(MatmulRequestProjectionError::InvalidConcurrentStreams);
+        }
+        let (m, n, k) = self
+            .logical_mnk()
+            .ok_or(MatmulRequestProjectionError::IncompatibleShape)?;
+        if self.lhs_dtype != self.rhs_dtype || self.lhs_dtype != self.out_dtype {
+            return Err(MatmulRequestProjectionError::MixedDTypes);
+        }
+        if self.accumulation != MatmulAccumulation::F32 {
+            return Err(MatmulRequestProjectionError::UnsupportedAccumulation);
+        }
+        if !matches!(
+            self.lhs_dtype,
+            kiln_tensor::DType::F32 | kiln_tensor::DType::BF16 | kiln_tensor::DType::F16
+        ) {
+            return Err(MatmulRequestProjectionError::UnsupportedDType);
+        }
+
+        Ok(MatmulBlasRequest {
+            m: m as u64,
+            n: n as u64,
+            k: k as u64,
+            dtype: self.lhs_dtype,
+            lhs_layout: self.lhs_layout,
+            rhs_layout: self.rhs_layout,
+            out_layout: self.out_layout,
+            epilogue: self.epilogue,
+            batch: self.batch,
+            concurrent_streams,
+        })
     }
 
     pub fn logical_mnk(&self) -> Option<(usize, usize, usize)> {
@@ -163,8 +258,7 @@ impl MatmulRequest {
         if self.lhs_shape[rank - 1] != self.rhs_shape[rank - 2] {
             return false;
         }
-        self.batch
-            == MatmulBatchPolicy::from_leading_shape(&self.lhs_shape[..rank - 2])
+        self.batch == MatmulBatchPolicy::from_leading_shape(&self.lhs_shape[..rank - 2])
     }
 
     fn has_supported_dtype_contract(&self) -> bool {
@@ -413,9 +507,7 @@ impl BackendCapabilitySnapshot {
             backend: backend.name(),
             device: backend.device(),
             training: backend.training_capabilities(),
-            resident_decode: Support::from_supports_predicate(
-                backend.supports_resident_decode(),
-            ),
+            resident_decode: Support::from_supports_predicate(backend.supports_resident_decode()),
             resident_activation: Support::from_supports_predicate(
                 backend.supports_resident_activation(),
             ),
@@ -534,18 +626,10 @@ impl BackendCapabilities {
         let device = backend.device();
         let backend_kind = backend_kind_for_runtime(backend.name(), device);
 
-        let rank2_f32 = MatmulRequest::plain(
-            vec![2, 3],
-            vec![3, 4],
-            kiln_tensor::DType::F32,
-            false,
-        );
-        let batched_bf16 = MatmulRequest::plain(
-            vec![2, 2, 3],
-            vec![2, 3, 4],
-            kiln_tensor::DType::BF16,
-            true,
-        );
+        let rank2_f32 =
+            MatmulRequest::plain(vec![2, 3], vec![3, 4], kiln_tensor::DType::F32, false);
+        let batched_bf16 =
+            MatmulRequest::plain(vec![2, 2, 3], vec![2, 3, 4], kiln_tensor::DType::BF16, true);
         let bias_epilogue = rank2_f32.clone().with_epilogue(MatmulEpilogue::Bias);
         let flash_prefill = AttentionRequest::flash_prefill(
             kiln_tensor::DType::BF16,
@@ -596,8 +680,8 @@ impl BackendCapabilities {
             vec![1.0, 1.0],
             true,
         );
-        let resident_replay = ReplayRequest::resident_decode(8, 16, 2)
-            .with_dtype(kiln_tensor::DType::BF16);
+        let resident_replay =
+            ReplayRequest::resident_decode(8, 16, 2).with_dtype(kiln_tensor::DType::BF16);
         let paged_replay = ReplayRequest::paged_decode_graph_outputs(8, 16, 2)
             .with_dtype(kiln_tensor::DType::BF16);
 
@@ -615,10 +699,7 @@ impl BackendCapabilities {
                 ),
             },
             matmul: MatmulCapabilities {
-                rank2_f32: BackendCapabilityQueries::supports_matmul_request(
-                    backend,
-                    &rank2_f32,
-                ),
+                rank2_f32: BackendCapabilityQueries::supports_matmul_request(backend, &rank2_f32),
                 batched_bf16: BackendCapabilityQueries::supports_matmul_request(
                     backend,
                     &batched_bf16,
@@ -710,10 +791,7 @@ impl BackendFallbackCapabilities {
     }
 }
 
-fn generic_device_op_fallback_policy(
-    name: &str,
-    _device: kiln_tensor::Device,
-) -> FallbackPolicy {
+fn generic_device_op_fallback_policy(name: &str, _device: kiln_tensor::Device) -> FallbackPolicy {
     match name {
         "cpu" => FallbackPolicy::CorrectnessAllowed,
         "cuda" => FallbackPolicy::NativeRequired,
@@ -730,10 +808,7 @@ fn decode_hot_path_fallback_policy(name: &str, _device: kiln_tensor::Device) -> 
     }
 }
 
-fn training_optimizer_fallback_policy(
-    name: &str,
-    _device: kiln_tensor::Device,
-) -> FallbackPolicy {
+fn training_optimizer_fallback_policy(name: &str, _device: kiln_tensor::Device) -> FallbackPolicy {
     match name {
         "cpu" => FallbackPolicy::CorrectnessAllowed,
         "cuda" | "metal" | "vulkan" | "rocm" => FallbackPolicy::NativeRequired,
@@ -781,7 +856,10 @@ pub trait BackendCapabilityQueries: BackendRuntime {
             || !req.has_supported_dtype_contract()
             || !req.is_row_major_output()
             || !req.is_row_major_input()
-            || !matches!(req.epilogue, MatmulEpilogue::Identity | MatmulEpilogue::Bias)
+            || !matches!(
+                req.epilogue,
+                MatmulEpilogue::Identity | MatmulEpilogue::Bias
+            )
         {
             return Support::Unsupported;
         }
@@ -790,7 +868,10 @@ pub trait BackendCapabilityQueries: BackendRuntime {
             return Support::Unsupported;
         };
         let native = match self.name() {
-            "cpu" => matches!(req.epilogue, MatmulEpilogue::Identity | MatmulEpilogue::Bias),
+            "cpu" => matches!(
+                req.epilogue,
+                MatmulEpilogue::Identity | MatmulEpilogue::Bias
+            ),
             "cuda" | "rocm" => match req.epilogue {
                 MatmulEpilogue::Identity => true,
                 MatmulEpilogue::Bias => rank == 2,
