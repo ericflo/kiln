@@ -90,6 +90,9 @@ pub(crate) mod metal_conv1d;
 pub(crate) mod metal_core;
 
 #[cfg(feature = "metal")]
+pub(crate) mod metal_dense;
+
+#[cfg(feature = "metal")]
 pub(crate) mod metal_gdn;
 
 #[cfg(feature = "metal")]
