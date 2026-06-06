@@ -700,22 +700,22 @@ impl MetalGraphRunner {
                 let normed = rms_norm(&hidden, &weights.final_norm, config.rms_norm_eps)?;
                 finish_metal_graph_stage_profile("greedy_final_norm", batch, stage_start);
                 let stage_start = profile_stages.then(std::time::Instant::now);
-                let token = backend
-                    .linear_decode_sample(
-                        &normed,
-                        &weights.embed_tokens_t,
-                        &[],
-                        &[],
-                        1.0,
-                        0.0,
-                        0.0,
-                        1.0,
-                        1,
-                        1.0,
-                        0.0,
-                        0,
-                    )?
-                    .context("Metal graph greedy sampler tail declined top-k=1")?;
+                let token = SamplingBackend::runtime_linear_decode_sample(
+                    backend,
+                    &normed,
+                    &weights.embed_tokens_t,
+                    &[],
+                    &[],
+                    1.0,
+                    0.0,
+                    0.0,
+                    1.0,
+                    1,
+                    1.0,
+                    0.0,
+                    0,
+                )?
+                .context("Metal graph greedy sampler tail declined top-k=1")?;
                 finish_metal_graph_stage_profile("greedy_sample_tail", batch, stage_start);
                 Ok(vec![token])
             })();
@@ -917,7 +917,8 @@ impl MetalGraphRunner {
             let normed = rms_norm(&hidden, &weights.final_norm, config.rms_norm_eps)?;
             finish_metal_graph_stage_profile("sample_final_norm", batch, stage_start);
             let stage_start = profile_stages.then(std::time::Instant::now);
-            let tokens = backend.linear_decode_sample_batch(
+            let tokens = SamplingBackend::runtime_linear_decode_sample_batch(
+                backend,
                 &normed,
                 &weights.embed_tokens_t,
                 history_rows,

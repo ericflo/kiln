@@ -1693,6 +1693,7 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         "ReplayBackend::runtime_supports_resident_decode",
         "ReplayBackend::runtime_decode_resident_pool_ready",
         "SamplingBackend::runtime_supports_linear_decode_sample",
+        "SamplingBackend::runtime_linear_decode_sample",
     ] {
         assert!(
             inference_decode_sources.contains(required),
@@ -1704,6 +1705,8 @@ fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
         ".decode_resident_pool_ready(",
         ".supports_linear_decode_sample(",
         ".supports_linear_decode_sample_batch(",
+        ".linear_decode_sample(",
+        ".linear_decode_sample_batch(",
     ] {
         assert!(
             !inference_decode_sources.contains(forbidden),

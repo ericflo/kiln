@@ -1402,23 +1402,23 @@ fn run_lm_head_sample_batch_with_contexts(
                 history_counts.push(count);
             }
         }
-        if let Some(tokens) = backend
-            .linear_decode_sample_batch(
-                &normed,
-                &weights.embed_tokens_t,
-                &history_rows,
-                &history_indices,
-                &history_counts,
-                &repetition_values,
-                &presence_values,
-                &frequency_values,
-                &temperature_values,
-                &top_k_values,
-                &top_p_values,
-                &min_p_values,
-                &seed_values,
-            )
-            .context("fused batched linear_decode_sample failed")?
+        if let Some(tokens) = SamplingBackend::runtime_linear_decode_sample_batch(
+            backend,
+            &normed,
+            &weights.embed_tokens_t,
+            &history_rows,
+            &history_indices,
+            &history_counts,
+            &repetition_values,
+            &presence_values,
+            &frequency_values,
+            &temperature_values,
+            &top_k_values,
+            &top_p_values,
+            &min_p_values,
+            &seed_values,
+        )
+        .context("fused batched linear_decode_sample failed")?
         {
             return Ok(tokens);
         }
