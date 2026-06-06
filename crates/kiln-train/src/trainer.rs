@@ -62,7 +62,7 @@ use kiln_core::tokenizer::KilnTokenizer;
 // `FlceProvider`/`fused_linear_cross_entropy*` opt-in (KILN_CUDA_FLCE) is gone —
 // FLCE is kt-native via `kiln_flce_kernel::kt_api::fused_linear_cross_entropy_phase_b_kt`.
 use kiln_flce_kernel::DEFAULT_CHUNK_SIZE;
-use kiln_model::backend::{self, BackendRuntime, FallbackPolicy};
+use kiln_model::backend::{self, BackendRuntime, FallbackPolicy, OptimizerBackend};
 use kiln_model::forward::{
     GDN_CHUNK_SIZE, GpuAttentionWeights, GpuWeights, GqaAttentionPrepared, LinearAttentionState,
     gdn_attention_in_projections, gdn_attention_input_norm, gdn_attention_residual_block,
@@ -6746,8 +6746,8 @@ pub fn observe_lora_grad_norms_dispatch(
 /// single LoRA `Parameter`, preferring the on-device registry path when
 /// param + grad are both resident (the backend trait takes kt tensors).
 ///
-/// On-device path: register the kt grad → `dispatch_sgd_step` writes the
-/// param buffer in place → evict the grad. The `Parameter`'s master is
+/// On-device path: register the kt grad → `OptimizerBackend` writes the param
+/// buffer in place → evict the grad. The `Parameter`'s master is
 /// left stale; `sync_to_master` pulls the registry back before save.
 ///
 /// CPU fallback: compute `param - lr*grad` kt-natively and install it via
@@ -6763,7 +6763,9 @@ fn apply_sgd_update_kt(
     let primary = param.forward_storage().primary_tensor().clone();
     if resident_activation && backend.has_resident_activation(&primary) {
         backend.register_resident_activation(grad)?;
-        let dispatched = match backend.dispatch_sgd_step(&primary, grad, lr as f32) {
+        let dispatched = match OptimizerBackend::runtime_dispatch_sgd_step(
+            backend, &primary, grad, lr as f32,
+        ) {
             Ok(b) => b,
             Err(e) => {
                 backend.evict_resident_activation(grad);
@@ -6853,7 +6855,8 @@ fn apply_adamw_update_kt(
             && backend.has_resident_activation(&moments.v)
         {
             backend.register_resident_activation(grad)?;
-            let dispatched = match backend.dispatch_adamw_step(
+            let dispatched = match OptimizerBackend::runtime_dispatch_adamw_step(
+                backend,
                 &primary,
                 grad,
                 &moments.m,

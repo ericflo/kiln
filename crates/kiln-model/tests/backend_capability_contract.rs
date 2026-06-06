@@ -1443,6 +1443,61 @@ fn resident_registry_consumes_focused_residency_facet() {
 }
 
 #[test]
+fn trainer_optimizer_updates_consume_optimizer_backend_facet() {
+    let root = workspace_root();
+    let trainer_source = fs::read_to_string(root.join("crates/kiln-train/src/trainer.rs"))
+        .expect("trainer.rs should be readable");
+
+    assert!(
+        trainer_source.contains("OptimizerBackend"),
+        "trainer should import the focused optimizer facet"
+    );
+
+    fn source_between<'a>(source: &'a str, start_marker: &str, end_marker: &str) -> &'a str {
+        let start = source
+            .find(start_marker)
+            .unwrap_or_else(|| panic!("trainer should contain marker {start_marker}"));
+        let rest = &source[start..];
+        let end = rest.find(end_marker).unwrap_or_else(|| {
+            panic!("trainer should contain marker {end_marker} after {start_marker}")
+        });
+        &rest[..end]
+    }
+
+    for (fn_name, fn_body, focused_call, forbidden_call) in [
+        (
+            "apply_sgd_update_kt",
+            source_between(
+                &trainer_source,
+                "fn apply_sgd_update_kt",
+                "fn apply_adamw_update_kt",
+            ),
+            "OptimizerBackend::runtime_dispatch_sgd_step",
+            "backend.dispatch_sgd_step",
+        ),
+        (
+            "apply_adamw_update_kt",
+            source_between(
+                &trainer_source,
+                "fn apply_adamw_update_kt",
+                "/// (#1082) Accumulate kt gradients",
+            ),
+            "OptimizerBackend::runtime_dispatch_adamw_step",
+            "backend.dispatch_adamw_step",
+        ),
+    ] {
+        assert!(
+            fn_body.contains(focused_call),
+            "{fn_name} should route optimizer dispatch through {focused_call}"
+        );
+        assert!(
+            !fn_body.contains(forbidden_call),
+            "{fn_name} should not call broad BackendRuntime optimizer method {forbidden_call}"
+        );
+    }
+}
+
+#[test]
 fn generated_capability_report_gates_matmul_linear_contract() {
     let report_path = workspace_root().join("docs/backend-capability-report.json");
     let report: Value = serde_json::from_str(
