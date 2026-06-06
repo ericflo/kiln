@@ -140,6 +140,19 @@ def parse_functions(path: Path) -> dict[str, FunctionDef]:
     return functions
 
 
+def parse_trait_method_names(path: Path, trait_name: str) -> set[str]:
+    text = path.read_text()
+    match = re.search(rf"\bpub\s+trait\s+{re.escape(trait_name)}\b", text)
+    if not match:
+        raise ValueError(f"{trait_name} trait not found in {path}")
+    brace = text.find("{", match.end())
+    if brace == -1:
+        raise ValueError(f"{trait_name} trait body not found in {path}")
+    end = find_matching_brace(text, brace)
+    body = text[brace + 1 : end]
+    return set(re.findall(r"\bfn\s+([A-Za-z_][A-Za-z0-9_]*)\s*[<(]", body))
+
+
 def body_without_comments(body: str) -> str:
     body = re.sub(r"//.*", "", body)
     body = re.sub(r"/\*.*?\*/", "", body, flags=re.S)
@@ -339,8 +352,10 @@ def markdown(data: dict[str, Any]) -> str:
 
 
 def main() -> int:
-    trait_functions = parse_functions(ROOT / "crates" / "kiln-model" / "src" / "backend" / "mod.rs")
-    trait_methods = set(trait_functions)
+    trait_methods = parse_trait_method_names(
+        ROOT / "crates" / "kiln-model" / "src" / "backend" / "mod.rs",
+        "BackendRuntime",
+    )
     backends, mismatches = backend_report(trait_methods)
     data = {
         "source": {

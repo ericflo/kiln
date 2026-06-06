@@ -984,7 +984,7 @@
         "KILN_VULKAN_RESIDENT_DECODE",
         "KILN_VULKAN_SDPA"
       ],
-      "override_count": 74,
+      "override_count": 73,
       "overrides": [
         "as_any",
         "assemble_gdn_recurrent_resident_batch_rows",
@@ -995,7 +995,6 @@
         "device",
         "dispatch_adamw_step",
         "dispatch_sgd_step",
-        "drop",
         "drop_uploaded_bf16_weights",
         "enter_gdn_recurrent_resident_state_scope",
         "evict_gdn_recurrent_resident_state",
@@ -1498,5 +1497,5 @@
     "branch": "unify-engines",
     "script": "scripts/generate_backend_capability_report.py"
   },
-  "trait_method_count": 106
+  "trait_method_count": 92
 }
