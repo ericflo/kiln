@@ -3,7 +3,6 @@
 Generated from the live source tree by `scripts/generate_backend_capability_report.py`.
 
 - Branch: `unify-engines`
-- Commit: `78678e8b375f413fc30cb2df9364daedcedc4e8e`
 
 ## Feature Fanout
 
@@ -101,12 +100,12 @@ Generated from the live source tree by `scripts/generate_backend_capability_repo
 
 ## Generic DeviceOp Fallback
 
-| Backend | Policy | Evidence |
-|---|---|---|
-| `cuda` | `strict_native_miss_errors` | crates/kiln-tensor/src/device_op.rs CUDA native miss falls through on CUDA storage and fails loudly |
-| `rocm` | `host_round_trip_correctness_fallback` | crates/kiln-tensor/src/device_op.rs ROCm missing native forward stages through CPU |
-| `metal` | `host_round_trip_correctness_fallback` | crates/kiln-tensor/src/device_op.rs Metal missing native forward stages through CPU |
-| `vulkan` | `host_round_trip_correctness_fallback` | crates/kiln-tensor/src/device_op.rs Vulkan missing native forward stages through CPU |
+| Backend | Policy | Counter | Evidence |
+|---|---|---|---|
+| `cuda` | `strict_native_miss_errors` | `none` | crates/kiln-tensor/src/device_op.rs CUDA native miss falls through on CUDA storage and fails loudly |
+| `rocm` | `host_round_trip_correctness_fallback` | `kiln_tensor::profile::device_op_host_fallback_counts().rocm_op{1,2,3}` | crates/kiln-tensor/src/device_op.rs ROCm missing native forward stages through CPU |
+| `metal` | `host_round_trip_correctness_fallback` | `kiln_tensor::profile::device_op_host_fallback_counts().metal_op{1,2,3}` | crates/kiln-tensor/src/device_op.rs Metal missing native forward stages through CPU |
+| `vulkan` | `host_round_trip_correctness_fallback` | `kiln_tensor::profile::device_op_host_fallback_counts().vulkan_op{1,2,3}` | crates/kiln-tensor/src/device_op.rs Vulkan missing native forward stages through CPU |
 
 ## Mismatch Audit
 

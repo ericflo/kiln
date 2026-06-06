@@ -1350,18 +1350,22 @@
   },
   "fallback_policy": {
     "cuda": {
+      "counter": "none",
       "evidence": "crates/kiln-tensor/src/device_op.rs CUDA native miss falls through on CUDA storage and fails loudly",
       "generic_device_op_fallback": "strict_native_miss_errors"
     },
     "metal": {
+      "counter": "kiln_tensor::profile::device_op_host_fallback_counts().metal_op{1,2,3}",
       "evidence": "crates/kiln-tensor/src/device_op.rs Metal missing native forward stages through CPU",
       "generic_device_op_fallback": "host_round_trip_correctness_fallback"
     },
     "rocm": {
+      "counter": "kiln_tensor::profile::device_op_host_fallback_counts().rocm_op{1,2,3}",
       "evidence": "crates/kiln-tensor/src/device_op.rs ROCm missing native forward stages through CPU",
       "generic_device_op_fallback": "host_round_trip_correctness_fallback"
     },
     "vulkan": {
+      "counter": "kiln_tensor::profile::device_op_host_fallback_counts().vulkan_op{1,2,3}",
       "evidence": "crates/kiln-tensor/src/device_op.rs Vulkan missing native forward stages through CPU",
       "generic_device_op_fallback": "host_round_trip_correctness_fallback"
     }
@@ -1492,7 +1496,6 @@
   "mismatches": [],
   "source": {
     "branch": "unify-engines",
-    "commit": "78678e8b375f413fc30cb2df9364daedcedc4e8e",
     "script": "scripts/generate_backend_capability_report.py"
   },
   "trait_method_count": 106

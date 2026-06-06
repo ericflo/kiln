@@ -242,18 +242,22 @@ def fallback_policy_report() -> dict[str, Any]:
         "cuda": {
             "generic_device_op_fallback": "strict_native_miss_errors",
             "evidence": "crates/kiln-tensor/src/device_op.rs CUDA native miss falls through on CUDA storage and fails loudly",
+            "counter": "none",
         },
         "rocm": {
             "generic_device_op_fallback": "host_round_trip_correctness_fallback",
             "evidence": "crates/kiln-tensor/src/device_op.rs ROCm missing native forward stages through CPU",
+            "counter": "kiln_tensor::profile::device_op_host_fallback_counts().rocm_op{1,2,3}",
         },
         "metal": {
             "generic_device_op_fallback": "host_round_trip_correctness_fallback",
             "evidence": "crates/kiln-tensor/src/device_op.rs Metal missing native forward stages through CPU",
+            "counter": "kiln_tensor::profile::device_op_host_fallback_counts().metal_op{1,2,3}",
         },
         "vulkan": {
             "generic_device_op_fallback": "host_round_trip_correctness_fallback",
             "evidence": "crates/kiln-tensor/src/device_op.rs Vulkan missing native forward stages through CPU",
+            "counter": "kiln_tensor::profile::device_op_host_fallback_counts().vulkan_op{1,2,3}",
         },
     }
 
@@ -265,7 +269,6 @@ def markdown(data: dict[str, Any]) -> str:
     lines.append("Generated from the live source tree by `scripts/generate_backend_capability_report.py`.")
     lines.append("")
     lines.append(f"- Branch: `{data['source']['branch']}`")
-    lines.append(f"- Commit: `{data['source']['commit']}`")
     lines.append("")
     lines.append("## Feature Fanout")
     lines.append("")
@@ -301,10 +304,13 @@ def markdown(data: dict[str, Any]) -> str:
     lines.append("")
     lines.append("## Generic DeviceOp Fallback")
     lines.append("")
-    lines.append("| Backend | Policy | Evidence |")
-    lines.append("|---|---|---|")
+    lines.append("| Backend | Policy | Counter | Evidence |")
+    lines.append("|---|---|---|---|")
     for backend, info in data["fallback_policy"].items():
-        lines.append(f"| `{backend}` | `{info['generic_device_op_fallback']}` | {info['evidence']} |")
+        lines.append(
+            f"| `{backend}` | `{info['generic_device_op_fallback']}` | "
+            f"`{info['counter']}` | {info['evidence']} |"
+        )
     lines.append("")
     lines.append("## Mismatch Audit")
     lines.append("")
@@ -339,7 +345,6 @@ def main() -> int:
     data = {
         "source": {
             "branch": run_git(["branch", "--show-current"]),
-            "commit": run_git(["rev-parse", "HEAD"]),
             "script": str(Path(__file__).relative_to(ROOT)),
         },
         "features": feature_report(),

@@ -23,6 +23,8 @@
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
+use crate::Backend;
+
 #[derive(Debug)]
 struct CopyCounter {
     value: AtomicU64,
@@ -54,6 +56,101 @@ impl CopyCounter {
 /// Bumped by [`emit_contiguous_copy`] and read by
 /// [`contiguous_copy_count`] / [`reset_contiguous_copy_count`].
 static CONTIGUOUS_COPY_COUNTER: CopyCounter = CopyCounter::new();
+
+static METAL_DEVICE_OP1_HOST_FALLBACKS: AtomicU64 = AtomicU64::new(0);
+static METAL_DEVICE_OP2_HOST_FALLBACKS: AtomicU64 = AtomicU64::new(0);
+static METAL_DEVICE_OP3_HOST_FALLBACKS: AtomicU64 = AtomicU64::new(0);
+static VULKAN_DEVICE_OP1_HOST_FALLBACKS: AtomicU64 = AtomicU64::new(0);
+static VULKAN_DEVICE_OP2_HOST_FALLBACKS: AtomicU64 = AtomicU64::new(0);
+static VULKAN_DEVICE_OP3_HOST_FALLBACKS: AtomicU64 = AtomicU64::new(0);
+static ROCM_DEVICE_OP1_HOST_FALLBACKS: AtomicU64 = AtomicU64::new(0);
+static ROCM_DEVICE_OP2_HOST_FALLBACKS: AtomicU64 = AtomicU64::new(0);
+static ROCM_DEVICE_OP3_HOST_FALLBACKS: AtomicU64 = AtomicU64::new(0);
+
+/// Per-backend counts of generic [`DeviceOp`](crate::DeviceOp1) CPU
+/// round trips after a native backend method returned `Ok(None)`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DeviceOpHostFallbackCounts {
+    pub metal_op1: u64,
+    pub metal_op2: u64,
+    pub metal_op3: u64,
+    pub vulkan_op1: u64,
+    pub vulkan_op2: u64,
+    pub vulkan_op3: u64,
+    pub rocm_op1: u64,
+    pub rocm_op2: u64,
+    pub rocm_op3: u64,
+}
+
+impl DeviceOpHostFallbackCounts {
+    /// Sum all backend/arity fallback counters.
+    pub fn total(self) -> u64 {
+        self.metal_op1
+            + self.metal_op2
+            + self.metal_op3
+            + self.vulkan_op1
+            + self.vulkan_op2
+            + self.vulkan_op3
+            + self.rocm_op1
+            + self.rocm_op2
+            + self.rocm_op3
+    }
+}
+
+fn device_op_host_fallback_counter(backend: Backend, arity: u8) -> Option<&'static AtomicU64> {
+    match (backend, arity) {
+        (Backend::Metal, 1) => Some(&METAL_DEVICE_OP1_HOST_FALLBACKS),
+        (Backend::Metal, 2) => Some(&METAL_DEVICE_OP2_HOST_FALLBACKS),
+        (Backend::Metal, 3) => Some(&METAL_DEVICE_OP3_HOST_FALLBACKS),
+        (Backend::Vulkan, 1) => Some(&VULKAN_DEVICE_OP1_HOST_FALLBACKS),
+        (Backend::Vulkan, 2) => Some(&VULKAN_DEVICE_OP2_HOST_FALLBACKS),
+        (Backend::Vulkan, 3) => Some(&VULKAN_DEVICE_OP3_HOST_FALLBACKS),
+        (Backend::Rocm, 1) => Some(&ROCM_DEVICE_OP1_HOST_FALLBACKS),
+        (Backend::Rocm, 2) => Some(&ROCM_DEVICE_OP2_HOST_FALLBACKS),
+        (Backend::Rocm, 3) => Some(&ROCM_DEVICE_OP3_HOST_FALLBACKS),
+        _ => None,
+    }
+}
+
+/// Bump the host-fallback counter for a backend/arity pair.
+///
+/// CPU and CUDA are ignored: CPU has no fallback and CUDA keeps the
+/// strict "missing native kernel errors loudly" contract.
+pub fn emit_device_op_host_fallback(backend: Backend, arity: u8) {
+    if let Some(counter) = device_op_host_fallback_counter(backend, arity) {
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Current generic DeviceOp host-fallback counts.
+pub fn device_op_host_fallback_counts() -> DeviceOpHostFallbackCounts {
+    DeviceOpHostFallbackCounts {
+        metal_op1: METAL_DEVICE_OP1_HOST_FALLBACKS.load(Ordering::Relaxed),
+        metal_op2: METAL_DEVICE_OP2_HOST_FALLBACKS.load(Ordering::Relaxed),
+        metal_op3: METAL_DEVICE_OP3_HOST_FALLBACKS.load(Ordering::Relaxed),
+        vulkan_op1: VULKAN_DEVICE_OP1_HOST_FALLBACKS.load(Ordering::Relaxed),
+        vulkan_op2: VULKAN_DEVICE_OP2_HOST_FALLBACKS.load(Ordering::Relaxed),
+        vulkan_op3: VULKAN_DEVICE_OP3_HOST_FALLBACKS.load(Ordering::Relaxed),
+        rocm_op1: ROCM_DEVICE_OP1_HOST_FALLBACKS.load(Ordering::Relaxed),
+        rocm_op2: ROCM_DEVICE_OP2_HOST_FALLBACKS.load(Ordering::Relaxed),
+        rocm_op3: ROCM_DEVICE_OP3_HOST_FALLBACKS.load(Ordering::Relaxed),
+    }
+}
+
+/// Reset generic DeviceOp host-fallback counters and return previous values.
+pub fn reset_device_op_host_fallback_counts() -> DeviceOpHostFallbackCounts {
+    DeviceOpHostFallbackCounts {
+        metal_op1: METAL_DEVICE_OP1_HOST_FALLBACKS.swap(0, Ordering::Relaxed),
+        metal_op2: METAL_DEVICE_OP2_HOST_FALLBACKS.swap(0, Ordering::Relaxed),
+        metal_op3: METAL_DEVICE_OP3_HOST_FALLBACKS.swap(0, Ordering::Relaxed),
+        vulkan_op1: VULKAN_DEVICE_OP1_HOST_FALLBACKS.swap(0, Ordering::Relaxed),
+        vulkan_op2: VULKAN_DEVICE_OP2_HOST_FALLBACKS.swap(0, Ordering::Relaxed),
+        vulkan_op3: VULKAN_DEVICE_OP3_HOST_FALLBACKS.swap(0, Ordering::Relaxed),
+        rocm_op1: ROCM_DEVICE_OP1_HOST_FALLBACKS.swap(0, Ordering::Relaxed),
+        rocm_op2: ROCM_DEVICE_OP2_HOST_FALLBACKS.swap(0, Ordering::Relaxed),
+        rocm_op3: ROCM_DEVICE_OP3_HOST_FALLBACKS.swap(0, Ordering::Relaxed),
+    }
+}
 
 /// Bump the contiguous-copy counter by one.
 ///
@@ -167,5 +264,39 @@ mod tests {
         let after = contiguous_copy_count();
         assert!(scope.start >= before);
         assert!(scope.start <= after);
+    }
+
+    #[test]
+    fn device_op_host_fallback_counts_are_backend_and_arity_specific() {
+        let _guard = counter_test_lock();
+        reset_device_op_host_fallback_counts();
+
+        emit_device_op_host_fallback(Backend::Metal, 1);
+        emit_device_op_host_fallback(Backend::Metal, 1);
+        emit_device_op_host_fallback(Backend::Metal, 3);
+        emit_device_op_host_fallback(Backend::Vulkan, 2);
+        emit_device_op_host_fallback(Backend::Rocm, 3);
+
+        // CPU, CUDA, and unsupported arities must remain outside this
+        // correctness-fallback signal.
+        emit_device_op_host_fallback(Backend::Cpu, 1);
+        emit_device_op_host_fallback(Backend::Cuda, 1);
+        emit_device_op_host_fallback(Backend::Metal, 4);
+
+        let counts = device_op_host_fallback_counts();
+        assert_eq!(counts.metal_op1, 2);
+        assert_eq!(counts.metal_op2, 0);
+        assert_eq!(counts.metal_op3, 1);
+        assert_eq!(counts.vulkan_op1, 0);
+        assert_eq!(counts.vulkan_op2, 1);
+        assert_eq!(counts.vulkan_op3, 0);
+        assert_eq!(counts.rocm_op1, 0);
+        assert_eq!(counts.rocm_op2, 0);
+        assert_eq!(counts.rocm_op3, 1);
+        assert_eq!(counts.total(), 5);
+
+        let previous = reset_device_op_host_fallback_counts();
+        assert_eq!(previous, counts);
+        assert_eq!(device_op_host_fallback_counts().total(), 0);
     }
 }
