@@ -132,6 +132,9 @@ pub(crate) mod metal_training;
 pub mod vulkan;
 
 #[cfg(feature = "vulkan")]
+pub(crate) mod vulkan_config;
+
+#[cfg(feature = "vulkan")]
 pub(crate) mod vulkan_training;
 
 #[cfg(feature = "vulkan")]

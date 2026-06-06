@@ -44,6 +44,7 @@ BACKEND_EXTRA_SOURCES = {
         ROOT / "crates" / "kiln-model" / "src" / "backend" / "metal_training.rs",
     ],
     "vulkan": [
+        ROOT / "crates" / "kiln-model" / "src" / "backend" / "vulkan_config.rs",
         ROOT / "crates" / "kiln-model" / "src" / "backend" / "vulkan_residency.rs",
         ROOT / "crates" / "kiln-model" / "src" / "backend" / "vulkan_training.rs",
     ],
