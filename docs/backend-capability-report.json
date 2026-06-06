@@ -1,0 +1,1499 @@
+{
+  "backends": {
+    "cuda": {
+      "env_gates": [
+        "KILN_DISABLE_CUDA_GDN_DECODE_QK_NORM_RECURRENT",
+        "KILN_DISABLE_CUDA_GDN_DECODE_QK_NORM_RECURRENT_RMSNORM",
+        "KILN_DISABLE_CUDA_GDN_PREFILL_GATES",
+        "KILN_DISABLE_CUDA_LORA_DECODE_ADD"
+      ],
+      "override_count": 44,
+      "overrides": [
+        "causal_conv1d_prefill",
+        "causal_conv1d_update",
+        "device",
+        "dispatch_adamw_step",
+        "dispatch_sgd_step",
+        "evict_resident_activation",
+        "flash_attn_paged_decode",
+        "flash_attn_paged_decode_contiguous_batch_dyn_seqlen",
+        "flash_attn_paged_decode_contiguous_batch_dyn_seqlen_with_graph_outputs",
+        "flash_attn_prefill",
+        "gdn_chunk_prep",
+        "gdn_chunk_scan",
+        "gdn_decode_gates_recurrent",
+        "gdn_decode_qk_norm_gates_recurrent",
+        "gdn_decode_qk_norm_gates_recurrent_rmsnorm",
+        "gdn_forward_substitution",
+        "gdn_full_chunk_forward",
+        "gdn_gated_rms_norm",
+        "gdn_gates",
+        "gdn_recurrent_step",
+        "has_resident_activation",
+        "linear_prefill_apply",
+        "linear_prefill_apply_offset",
+        "lora_decode_add",
+        "lora_delta_resident",
+        "name",
+        "register_resident_activation",
+        "supports_causal_conv1d_prefill",
+        "supports_causal_conv1d_update",
+        "supports_flash_attn_paged_decode",
+        "supports_flash_attn_prefill",
+        "supports_gdn_chunk_prep",
+        "supports_gdn_chunk_scan",
+        "supports_gdn_decode_gates_recurrent_unexpanded_qk",
+        "supports_gdn_decode_qk_norm_gates_recurrent",
+        "supports_gdn_forward_substitution",
+        "supports_gdn_full_chunk_forward",
+        "supports_gdn_gated_rms_norm",
+        "supports_gdn_gates",
+        "supports_gdn_recurrent_step",
+        "supports_resident_activation",
+        "supports_strict_paged_decode_contiguous_batch",
+        "training_capabilities",
+        "update_resident_activation"
+      ],
+      "source": "crates/kiln-model/src/backend/cuda.rs",
+      "support_methods": {
+        "supports_causal_conv1d_prefill": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 1652,
+          "paired_method": "causal_conv1d_prefill",
+          "paired_method_always_declines": false,
+          "paired_method_line": 1681,
+          "status": "dynamic"
+        },
+        "supports_causal_conv1d_update": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 1648,
+          "paired_method": "causal_conv1d_update",
+          "paired_method_always_declines": false,
+          "paired_method_line": 1656,
+          "status": "dynamic"
+        },
+        "supports_flash_attn_paged_decode": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 422,
+          "paired_method": "flash_attn_paged_decode",
+          "paired_method_always_declines": false,
+          "paired_method_line": 508,
+          "status": "literal_true"
+        },
+        "supports_flash_attn_prefill": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 418,
+          "paired_method": "flash_attn_prefill",
+          "paired_method_always_declines": false,
+          "paired_method_line": 466,
+          "status": "literal_true"
+        },
+        "supports_gdn_chunk_prep": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 446,
+          "paired_method": "gdn_chunk_prep",
+          "paired_method_always_declines": false,
+          "paired_method_line": 709,
+          "status": "dynamic"
+        },
+        "supports_gdn_chunk_scan": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 450,
+          "paired_method": "gdn_chunk_scan",
+          "paired_method_always_declines": false,
+          "paired_method_line": 733,
+          "status": "dynamic"
+        },
+        "supports_gdn_decode_gates_recurrent_unexpanded_qk": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 458,
+          "paired_method": null,
+          "paired_method_always_declines": false,
+          "paired_method_line": null,
+          "status": "dynamic"
+        },
+        "supports_gdn_decode_qk_norm_gates_recurrent": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 462,
+          "paired_method": "gdn_decode_qk_norm_gates_recurrent",
+          "paired_method_always_declines": false,
+          "paired_method_line": 990,
+          "status": "dynamic"
+        },
+        "supports_gdn_forward_substitution": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 438,
+          "paired_method": "gdn_forward_substitution",
+          "paired_method_always_declines": false,
+          "paired_method_line": 667,
+          "status": "dynamic"
+        },
+        "supports_gdn_full_chunk_forward": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 454,
+          "paired_method": "gdn_full_chunk_forward",
+          "paired_method_always_declines": false,
+          "paired_method_line": 757,
+          "status": "dynamic"
+        },
+        "supports_gdn_gated_rms_norm": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 1378,
+          "paired_method": "gdn_gated_rms_norm",
+          "paired_method_always_declines": false,
+          "paired_method_line": 1579,
+          "status": "dynamic"
+        },
+        "supports_gdn_gates": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 1313,
+          "paired_method": "gdn_gates",
+          "paired_method_always_declines": false,
+          "paired_method_line": 1317,
+          "status": "dynamic"
+        },
+        "supports_gdn_recurrent_step": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 442,
+          "paired_method": "gdn_recurrent_step",
+          "paired_method_always_declines": false,
+          "paired_method_line": 687,
+          "status": "dynamic"
+        },
+        "supports_resident_activation": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 263,
+          "paired_method": null,
+          "paired_method_always_declines": false,
+          "paired_method_line": null,
+          "status": "literal_true"
+        },
+        "supports_strict_paged_decode_contiguous_batch": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 434,
+          "paired_method": null,
+          "paired_method_always_declines": false,
+          "paired_method_line": null,
+          "status": "literal_false"
+        }
+      }
+    },
+    "metal": {
+      "env_gates": [
+        "KILN_DISABLE_METAL_ATTN_GATE_FUSION",
+        "KILN_DISABLE_METAL_CONV1D_PREFILL",
+        "KILN_DISABLE_METAL_FUSED_CONV1D",
+        "KILN_DISABLE_METAL_FUSED_QKV_PROJ",
+        "KILN_DISABLE_METAL_GATED_RMSNORM",
+        "KILN_DISABLE_METAL_GDN_DECODE_GATES_RECURRENT",
+        "KILN_DISABLE_METAL_GDN_DECODE_GATES_RECURRENT_RMSNORM",
+        "KILN_DISABLE_METAL_GDN_FORWARD_SUBSTITUTION",
+        "KILN_DISABLE_METAL_GDN_GATES",
+        "KILN_DISABLE_METAL_GDN_IN_PROJ_FUSION",
+        "KILN_DISABLE_METAL_GDN_IN_PROJ_ROW_PAIR",
+        "KILN_DISABLE_METAL_GDN_IN_PROJ_ROW_QUAD",
+        "KILN_DISABLE_METAL_GDN_IN_PROJ_ROW_TRIPLE",
+        "KILN_DISABLE_METAL_GDN_IN_PROJ_SERIAL_VECTOR_LOAD",
+        "KILN_DISABLE_METAL_GDN_IN_PROJ_SERIAL_X2_LOAD",
+        "KILN_DISABLE_METAL_GDN_PREFILL_AB_IN_PROJ",
+        "KILN_DISABLE_METAL_GDN_PREFILL_DECAY_RECURRENT",
+        "KILN_DISABLE_METAL_GDN_PREFILL_QKV_CONV_SPLIT",
+        "KILN_DISABLE_METAL_GDN_QKV_CONV_NORM",
+        "KILN_DISABLE_METAL_GDN_QK_NORM",
+        "KILN_DISABLE_METAL_GDN_RECURRENT",
+        "KILN_DISABLE_METAL_LM_HEAD_ARGMAX",
+        "KILN_DISABLE_METAL_LM_HEAD_ARGMAX_GPU_REDUCE",
+        "KILN_DISABLE_METAL_LM_HEAD_ARGMAX_ROWS",
+        "KILN_DISABLE_METAL_LM_HEAD_SAMPLE",
+        "KILN_DISABLE_METAL_LORA_DELTA_DECODE",
+        "KILN_DISABLE_METAL_MLP_GATE_UP_FUSION",
+        "KILN_DISABLE_METAL_MLP_GATE_UP_ROW_PAIR",
+        "KILN_DISABLE_METAL_MLP_GATE_UP_ROW_QUAD",
+        "KILN_DISABLE_METAL_MLP_GATE_UP_ROW_QUAD_VECTOR_LOAD",
+        "KILN_DISABLE_METAL_MLP_GATE_UP_ROW_TRIPLE",
+        "KILN_DISABLE_METAL_MLP_GATE_UP_SERIAL_DEDICATED",
+        "KILN_DISABLE_METAL_MLP_GATE_UP_SERIAL_VECTOR_LOAD",
+        "KILN_DISABLE_METAL_MLP_SILU_MUL",
+        "KILN_DISABLE_METAL_PAGED_ATTN_DECODE_CONTIGUOUS",
+        "KILN_DISABLE_METAL_PAGED_KV_WRITE_TOKEN_MAJOR",
+        "KILN_DISABLE_METAL_RMSNORM",
+        "KILN_DISABLE_METAL_SDPA",
+        "KILN_DISABLE_METAL_SDPA_FULL",
+        "KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV",
+        "KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_PAIR",
+        "KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_QUAD",
+        "KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_QUAD_TILE8",
+        "KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_ROW_TRIPLE_TILE8",
+        "KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_TILE16",
+        "KILN_DISABLE_METAL_TRANSPOSED_COOP_GEMV_TILE8",
+        "KILN_ENABLE_METAL_LM_HEAD_ARGMAX"
+      ],
+      "override_count": 50,
+      "overrides": [
+        "causal_conv1d_prefill",
+        "causal_conv1d_update",
+        "device",
+        "dispatch_adamw_step",
+        "evict_resident_activation",
+        "flash_attn_paged_decode",
+        "flash_attn_paged_decode_contiguous",
+        "flash_attn_paged_decode_contiguous_batch",
+        "flash_attn_paged_decode_contiguous_batch_dyn_seqlen",
+        "flash_attn_paged_decode_contiguous_batch_dyn_seqlen_with_graph_outputs",
+        "flash_attn_prefill",
+        "flash_attn_prefill_head_major",
+        "gdn_chunk_prep",
+        "gdn_forward_substitution",
+        "gdn_full_chunk_forward",
+        "gdn_full_chunk_forward_head_last_into",
+        "gdn_gated_rms_norm",
+        "gdn_gates",
+        "gdn_in_proj_decode",
+        "gdn_recurrent_prefill_head_last",
+        "gdn_recurrent_prefill_native_head_last",
+        "gdn_recurrent_step",
+        "has_resident_activation",
+        "linear_decode_sample",
+        "linear_decode_sample_batch",
+        "name",
+        "paged_kv_head_major_read",
+        "paged_kv_head_major_read_append_token_major",
+        "register_resident_activation",
+        "resolve_resident_activation",
+        "supports_causal_conv1d_prefill",
+        "supports_causal_conv1d_update",
+        "supports_flash_attn_paged_decode",
+        "supports_flash_attn_prefill",
+        "supports_flash_attn_prefill_head_major",
+        "supports_gdn_chunk_prep",
+        "supports_gdn_forward_substitution",
+        "supports_gdn_full_chunk_forward",
+        "supports_gdn_full_chunk_forward_head_last",
+        "supports_gdn_gated_rms_norm",
+        "supports_gdn_gates",
+        "supports_gdn_recurrent_prefill_head_last",
+        "supports_gdn_recurrent_prefill_native_head_last",
+        "supports_gdn_recurrent_step",
+        "supports_linear_decode_sample",
+        "supports_linear_decode_sample_batch",
+        "supports_paged_kv_head_major_read",
+        "supports_paged_kv_head_major_read_append_token_major",
+        "supports_resident_activation",
+        "update_resident_activation"
+      ],
+      "source": "crates/kiln-model/src/backend/metal.rs",
+      "support_methods": {
+        "supports_causal_conv1d_prefill": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 1464,
+          "paired_method": "causal_conv1d_prefill",
+          "paired_method_always_declines": false,
+          "paired_method_line": 1711,
+          "status": "dynamic"
+        },
+        "supports_causal_conv1d_update": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 1468,
+          "paired_method": "causal_conv1d_update",
+          "paired_method_always_declines": false,
+          "paired_method_line": 1730,
+          "status": "dynamic"
+        },
+        "supports_flash_attn_paged_decode": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 1294,
+          "paired_method": "flash_attn_paged_decode",
+          "paired_method_always_declines": false,
+          "paired_method_line": 1593,
+          "status": "literal_true"
+        },
+        "supports_flash_attn_prefill": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 1281,
+          "paired_method": "flash_attn_prefill",
+          "paired_method_always_declines": false,
+          "paired_method_line": 1508,
+          "status": "env_gated"
+        },
+        "supports_flash_attn_prefill_head_major": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 1285,
+          "paired_method": "flash_attn_prefill_head_major",
+          "paired_method_always_declines": false,
+          "paired_method_line": 1556,
+          "status": "env_gated"
+        },
+        "supports_gdn_chunk_prep": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 1480,
+          "paired_method": "gdn_chunk_prep",
+          "paired_method_always_declines": false,
+          "paired_method_line": 1790,
+          "status": "dynamic"
+        },
+        "supports_gdn_forward_substitution": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 1472,
+          "paired_method": "gdn_forward_substitution",
+          "paired_method_always_declines": false,
+          "paired_method_line": 1749,
+          "status": "dynamic"
+        },
+        "supports_gdn_full_chunk_forward": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 1484,
+          "paired_method": "gdn_full_chunk_forward",
+          "paired_method_always_declines": false,
+          "paired_method_line": 1819,
+          "status": "dynamic"
+        },
+        "supports_gdn_full_chunk_forward_head_last": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 1488,
+          "paired_method": null,
+          "paired_method_always_declines": false,
+          "paired_method_line": null,
+          "status": "dynamic"
+        },
+        "supports_gdn_gated_rms_norm": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 1504,
+          "paired_method": "gdn_gated_rms_norm",
+          "paired_method_always_declines": false,
+          "paired_method_line": 1970,
+          "status": "dynamic"
+        },
+        "supports_gdn_gates": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 1500,
+          "paired_method": "gdn_gates",
+          "paired_method_always_declines": false,
+          "paired_method_line": 1954,
+          "status": "dynamic"
+        },
+        "supports_gdn_recurrent_prefill_head_last": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 1492,
+          "paired_method": "gdn_recurrent_prefill_head_last",
+          "paired_method_always_declines": false,
+          "paired_method_line": 1879,
+          "status": "dynamic"
+        },
+        "supports_gdn_recurrent_prefill_native_head_last": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 1496,
+          "paired_method": "gdn_recurrent_prefill_native_head_last",
+          "paired_method_always_declines": false,
+          "paired_method_line": 1899,
+          "status": "dynamic"
+        },
+        "supports_gdn_recurrent_step": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 1476,
+          "paired_method": "gdn_recurrent_step",
+          "paired_method_always_declines": false,
+          "paired_method_line": 1772,
+          "status": "dynamic"
+        },
+        "supports_linear_decode_sample": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 1088,
+          "paired_method": "linear_decode_sample",
+          "paired_method_always_declines": false,
+          "paired_method_line": 1093,
+          "status": "dynamic"
+        },
+        "supports_linear_decode_sample_batch": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 1151,
+          "paired_method": "linear_decode_sample_batch",
+          "paired_method_always_declines": false,
+          "paired_method_line": 1171,
+          "status": "dynamic"
+        },
+        "supports_paged_kv_head_major_read": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 1456,
+          "paired_method": "paged_kv_head_major_read",
+          "paired_method_always_declines": false,
+          "paired_method_line": 1674,
+          "status": "literal_true"
+        },
+        "supports_paged_kv_head_major_read_append_token_major": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 1460,
+          "paired_method": "paged_kv_head_major_read_append_token_major",
+          "paired_method_always_declines": false,
+          "paired_method_line": 1690,
+          "status": "literal_true"
+        },
+        "supports_resident_activation": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 902,
+          "paired_method": null,
+          "paired_method_always_declines": false,
+          "paired_method_line": null,
+          "status": "literal_true"
+        }
+      }
+    },
+    "rocm": {
+      "env_gates": [
+        "KILN_DISABLE_CUDA_GDN_DECODE_QK_NORM_RECURRENT",
+        "KILN_DISABLE_CUDA_GDN_DECODE_QK_NORM_RECURRENT_RMSNORM",
+        "KILN_DISABLE_CUDA_GDN_PREFILL_GATES",
+        "KILN_DISABLE_CUDA_LORA_DECODE_ADD",
+        "KILN_DISABLE_ROCM_GDN_DECODE_QK_NORM_RECURRENT",
+        "KILN_DISABLE_ROCM_GDN_DECODE_QK_NORM_RECURRENT_RMSNORM",
+        "KILN_DISABLE_ROCM_GDN_PREFILL_GATES",
+        "KILN_DISABLE_ROCM_LORA_DECODE_ADD",
+        "KILN_ROCM_GDN_FULL_CHUNK_FORWARD_MULTIBLOCK",
+        "KILN_ROCM_HEAD_MAJOR_PREFILL"
+      ],
+      "override_count": 48,
+      "overrides": [
+        "causal_conv1d_prefill",
+        "causal_conv1d_update",
+        "device",
+        "dispatch_adamw_step",
+        "dispatch_sgd_step",
+        "evict_resident_activation",
+        "flash_attn_paged_decode",
+        "flash_attn_paged_decode_contiguous_batch_dyn_seqlen",
+        "flash_attn_paged_decode_contiguous_batch_dyn_seqlen_with_graph_outputs",
+        "flash_attn_prefill",
+        "flash_attn_prefill_head_major",
+        "gdn_chunk_prep",
+        "gdn_chunk_scan",
+        "gdn_decode_gates_recurrent",
+        "gdn_decode_qk_norm_gates_recurrent",
+        "gdn_decode_qk_norm_gates_recurrent_rmsnorm",
+        "gdn_forward_substitution",
+        "gdn_full_chunk_forward",
+        "gdn_gated_rms_norm",
+        "gdn_gates",
+        "gdn_recurrent_step",
+        "has_resident_activation",
+        "linear_decode_argmax",
+        "linear_prefill_apply",
+        "linear_prefill_apply_offset",
+        "lora_decode_add",
+        "lora_delta_resident",
+        "name",
+        "register_resident_activation",
+        "supports_causal_conv1d_prefill",
+        "supports_causal_conv1d_update",
+        "supports_flash_attn_paged_decode",
+        "supports_flash_attn_prefill",
+        "supports_flash_attn_prefill_head_major",
+        "supports_gdn_chunk_prep",
+        "supports_gdn_chunk_scan",
+        "supports_gdn_decode_gates_recurrent_unexpanded_qk",
+        "supports_gdn_decode_qk_norm_gates_recurrent",
+        "supports_gdn_forward_substitution",
+        "supports_gdn_full_chunk_forward",
+        "supports_gdn_gated_rms_norm",
+        "supports_gdn_gates",
+        "supports_gdn_recurrent_step",
+        "supports_linear_decode_argmax",
+        "supports_resident_activation",
+        "supports_strict_paged_decode_contiguous_batch",
+        "training_capabilities",
+        "update_resident_activation"
+      ],
+      "source": "crates/kiln-model/src/backend/rocm.rs",
+      "support_methods": {
+        "supports_causal_conv1d_prefill": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 1723,
+          "paired_method": "causal_conv1d_prefill",
+          "paired_method_always_declines": false,
+          "paired_method_line": 1752,
+          "status": "dynamic"
+        },
+        "supports_causal_conv1d_update": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 1719,
+          "paired_method": "causal_conv1d_update",
+          "paired_method_always_declines": false,
+          "paired_method_line": 1727,
+          "status": "dynamic"
+        },
+        "supports_flash_attn_paged_decode": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 441,
+          "paired_method": "flash_attn_paged_decode",
+          "paired_method_always_declines": false,
+          "paired_method_line": 561,
+          "status": "literal_true"
+        },
+        "supports_flash_attn_prefill": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 433,
+          "paired_method": "flash_attn_prefill",
+          "paired_method_always_declines": false,
+          "paired_method_line": 484,
+          "status": "literal_true"
+        },
+        "supports_flash_attn_prefill_head_major": {
+          "env_gates": [
+            "KILN_ROCM_HEAD_MAJOR_PREFILL"
+          ],
+          "gate_hints": {
+            "dtype": false,
+            "env": true,
+            "layout": false,
+            "shape": false
+          },
+          "line": 437,
+          "paired_method": "flash_attn_prefill_head_major",
+          "paired_method_always_declines": false,
+          "paired_method_line": 526,
+          "status": "env_gated"
+        },
+        "supports_gdn_chunk_prep": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 464,
+          "paired_method": "gdn_chunk_prep",
+          "paired_method_always_declines": false,
+          "paired_method_line": 763,
+          "status": "dynamic"
+        },
+        "supports_gdn_chunk_scan": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 468,
+          "paired_method": "gdn_chunk_scan",
+          "paired_method_always_declines": false,
+          "paired_method_line": 787,
+          "status": "dynamic"
+        },
+        "supports_gdn_decode_gates_recurrent_unexpanded_qk": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 476,
+          "paired_method": null,
+          "paired_method_always_declines": false,
+          "paired_method_line": null,
+          "status": "dynamic"
+        },
+        "supports_gdn_decode_qk_norm_gates_recurrent": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 480,
+          "paired_method": "gdn_decode_qk_norm_gates_recurrent",
+          "paired_method_always_declines": false,
+          "paired_method_line": 1044,
+          "status": "dynamic"
+        },
+        "supports_gdn_forward_substitution": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 456,
+          "paired_method": "gdn_forward_substitution",
+          "paired_method_always_declines": false,
+          "paired_method_line": 721,
+          "status": "dynamic"
+        },
+        "supports_gdn_full_chunk_forward": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 472,
+          "paired_method": "gdn_full_chunk_forward",
+          "paired_method_always_declines": false,
+          "paired_method_line": 811,
+          "status": "dynamic"
+        },
+        "supports_gdn_gated_rms_norm": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 1437,
+          "paired_method": "gdn_gated_rms_norm",
+          "paired_method_always_declines": false,
+          "paired_method_line": 1650,
+          "status": "dynamic"
+        },
+        "supports_gdn_gates": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 1367,
+          "paired_method": "gdn_gates",
+          "paired_method_always_declines": false,
+          "paired_method_line": 1371,
+          "status": "dynamic"
+        },
+        "supports_gdn_recurrent_step": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 460,
+          "paired_method": "gdn_recurrent_step",
+          "paired_method_always_declines": false,
+          "paired_method_line": 741,
+          "status": "dynamic"
+        },
+        "supports_linear_decode_argmax": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 1468,
+          "paired_method": "linear_decode_argmax",
+          "paired_method_always_declines": true,
+          "paired_method_line": 1472,
+          "status": "literal_false"
+        },
+        "supports_resident_activation": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 278,
+          "paired_method": null,
+          "paired_method_always_declines": false,
+          "paired_method_line": null,
+          "status": "literal_true"
+        },
+        "supports_strict_paged_decode_contiguous_batch": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 452,
+          "paired_method": null,
+          "paired_method_always_declines": false,
+          "paired_method_line": null,
+          "status": "literal_false"
+        }
+      }
+    },
+    "vulkan": {
+      "env_gates": [
+        "KILN_DISABLE_VULKAN_BF16_PACKED_FULL_ATTN_QKV_WEIGHTS",
+        "KILN_DISABLE_VULKAN_BF16_PACKED_GDN_IN_PROJ_WEIGHTS",
+        "KILN_DISABLE_VULKAN_BF16_PACKED_LINEAR_WEIGHTS",
+        "KILN_DISABLE_VULKAN_BF16_PACKED_MLP_DECODE_WEIGHTS",
+        "KILN_DISABLE_VULKAN_CONV1D_PREFILL_SINGLE_SUBMIT",
+        "KILN_DISABLE_VULKAN_FULL_ATTN_QKV",
+        "KILN_DISABLE_VULKAN_FUSED_CONV1D_PREFILL",
+        "KILN_DISABLE_VULKAN_GDN_CHUNKWISE_FORWARD",
+        "KILN_DISABLE_VULKAN_GDN_CHUNKWISE_SINGLE_SUBMIT",
+        "KILN_DISABLE_VULKAN_GDN_DECODE_FUSED_RESIDENT_STATE",
+        "KILN_DISABLE_VULKAN_GDN_PREFILL_IN_PROJ",
+        "KILN_DISABLE_VULKAN_GDN_RECURRENT_QK_NORM",
+        "KILN_DISABLE_VULKAN_GDN_RECURRENT_RESIDENT_STATE",
+        "KILN_DISABLE_VULKAN_GDN_RECURRENT_UNEXPANDED_QK",
+        "KILN_DISABLE_VULKAN_LINEAR_ARGMAX_BATCH",
+        "KILN_DISABLE_VULKAN_LINEAR_DECODE",
+        "KILN_DISABLE_VULKAN_MLP_BF16_GATE_UP_F32_DOWN",
+        "KILN_DISABLE_VULKAN_MLP_DECODE",
+        "KILN_DISABLE_VULKAN_PAGED_ATTN_DECODE_BATCH",
+        "KILN_DISABLE_VULKAN_PAGED_DECODE_GPU_GATHER",
+        "KILN_DISABLE_VULKAN_WEIGHT_PREWARM",
+        "KILN_ENABLE_VULKAN_FUSED_CONV1D",
+        "KILN_ENABLE_VULKAN_FUSED_CONV1D_UPDATE",
+        "KILN_ENABLE_VULKAN_GDN_DECODE_FUSED",
+        "KILN_ENABLE_VULKAN_GDN_FORWARD_SUB",
+        "KILN_ENABLE_VULKAN_GDN_FULL_CHUNK_FORWARD",
+        "KILN_ENABLE_VULKAN_GDN_RECURRENT_RESIDENT_STATE",
+        "KILN_ENABLE_VULKAN_MLP_GATE_UP",
+        "KILN_VULKAN_GDN_CHUNKWISE_FALLBACK",
+        "KILN_VULKAN_LINEAR_MAX_GFLOP",
+        "KILN_VULKAN_RESIDENT_DECODE",
+        "KILN_VULKAN_SDPA"
+      ],
+      "override_count": 74,
+      "overrides": [
+        "as_any",
+        "assemble_gdn_recurrent_resident_batch_rows",
+        "assemble_linear_attn_gdn_state_batch_kt",
+        "causal_conv1d_prefill",
+        "causal_conv1d_update",
+        "decode_resident_pool_ready",
+        "device",
+        "dispatch_adamw_step",
+        "dispatch_sgd_step",
+        "drop",
+        "drop_uploaded_bf16_weights",
+        "enter_gdn_recurrent_resident_state_scope",
+        "evict_gdn_recurrent_resident_state",
+        "evict_resident_activation",
+        "exit_gdn_recurrent_resident_state_scope",
+        "flash_attn_paged_decode",
+        "flash_attn_paged_decode_contiguous_batch_dyn_seqlen",
+        "flash_attn_prefill",
+        "full_attn_qkv_decode",
+        "gdn_chunk_prep",
+        "gdn_chunk_scan",
+        "gdn_chunkwise_forward",
+        "gdn_decode_gates_recurrent_rmsnorm",
+        "gdn_forward_substitution",
+        "gdn_full_chunk_forward",
+        "gdn_gated_rms_norm",
+        "gdn_gates",
+        "gdn_in_proj_decode",
+        "gdn_recurrent_prefill_native_head_last",
+        "gdn_recurrent_qk_norm_prefill_native_head_last",
+        "gdn_recurrent_step",
+        "has_gdn_recurrent_resident_state",
+        "has_linear_attn_gdn_state_kt",
+        "has_resident_activation",
+        "linear_decode",
+        "linear_decode_argmax",
+        "linear_decode_argmax_batch",
+        "linear_decode_sample",
+        "linear_decode_sample_batch",
+        "linear_prefill_apply",
+        "linear_prefill_apply_offset",
+        "lora_delta_resident",
+        "materialize_gdn_recurrent_resident_state",
+        "mlp_decode",
+        "mlp_gate_up_decode",
+        "name",
+        "prewarm_decode_weights",
+        "register_resident_activation",
+        "resolve_resident_activation",
+        "scatter_gdn_recurrent_resident_batch_rows",
+        "scatter_linear_attn_gdn_state_batch_kt",
+        "seed_linear_attn_gdn_state_kt",
+        "supports_causal_conv1d_prefill",
+        "supports_causal_conv1d_update",
+        "supports_flash_attn_paged_decode",
+        "supports_flash_attn_prefill",
+        "supports_flash_attn_prefill_head_major",
+        "supports_gdn_chunk_prep",
+        "supports_gdn_chunk_scan",
+        "supports_gdn_forward_substitution",
+        "supports_gdn_full_chunk_forward",
+        "supports_gdn_gated_rms_norm",
+        "supports_gdn_gates",
+        "supports_gdn_recurrent_prefill_native_head_last",
+        "supports_gdn_recurrent_qk_norm_prefill_native_head_last",
+        "supports_gdn_recurrent_step",
+        "supports_linear_decode_argmax",
+        "supports_linear_decode_argmax_batch",
+        "supports_linear_decode_sample",
+        "supports_linear_decode_sample_batch",
+        "supports_resident_activation",
+        "supports_resident_decode",
+        "training_capabilities",
+        "update_resident_activation"
+      ],
+      "source": "crates/kiln-model/src/backend/vulkan.rs",
+      "support_methods": {
+        "supports_causal_conv1d_prefill": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 2611,
+          "paired_method": "causal_conv1d_prefill",
+          "paired_method_always_declines": false,
+          "paired_method_line": 5050,
+          "status": "dynamic"
+        },
+        "supports_causal_conv1d_update": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 2606,
+          "paired_method": "causal_conv1d_update",
+          "paired_method_always_declines": false,
+          "paired_method_line": 4995,
+          "status": "dynamic"
+        },
+        "supports_flash_attn_paged_decode": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 1936,
+          "paired_method": "flash_attn_paged_decode",
+          "paired_method_always_declines": false,
+          "paired_method_line": 2634,
+          "status": "dynamic"
+        },
+        "supports_flash_attn_prefill": {
+          "env_gates": [
+            "KILN_VULKAN_SDPA"
+          ],
+          "gate_hints": {
+            "dtype": false,
+            "env": true,
+            "layout": false,
+            "shape": false
+          },
+          "line": 1917,
+          "paired_method": "flash_attn_prefill",
+          "paired_method_always_declines": false,
+          "paired_method_line": 2615,
+          "status": "env_gated"
+        },
+        "supports_flash_attn_prefill_head_major": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 1931,
+          "paired_method": null,
+          "paired_method_always_declines": false,
+          "paired_method_line": null,
+          "status": "literal_false"
+        },
+        "supports_gdn_chunk_prep": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 2586,
+          "paired_method": "gdn_chunk_prep",
+          "paired_method_always_declines": false,
+          "paired_method_line": 4729,
+          "status": "dynamic"
+        },
+        "supports_gdn_chunk_scan": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 2590,
+          "paired_method": "gdn_chunk_scan",
+          "paired_method_always_declines": false,
+          "paired_method_line": 4781,
+          "status": "dynamic"
+        },
+        "supports_gdn_forward_substitution": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 1940,
+          "paired_method": "gdn_forward_substitution",
+          "paired_method_always_declines": false,
+          "paired_method_line": 4198,
+          "status": "dynamic"
+        },
+        "supports_gdn_full_chunk_forward": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 2594,
+          "paired_method": "gdn_full_chunk_forward",
+          "paired_method_always_declines": false,
+          "paired_method_line": 4837,
+          "status": "dynamic"
+        },
+        "supports_gdn_gated_rms_norm": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 2602,
+          "paired_method": "gdn_gated_rms_norm",
+          "paired_method_always_declines": false,
+          "paired_method_line": 4946,
+          "status": "dynamic"
+        },
+        "supports_gdn_gates": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 2598,
+          "paired_method": "gdn_gates",
+          "paired_method_always_declines": false,
+          "paired_method_line": 4897,
+          "status": "dynamic"
+        },
+        "supports_gdn_recurrent_prefill_native_head_last": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 1951,
+          "paired_method": "gdn_recurrent_prefill_native_head_last",
+          "paired_method_always_declines": false,
+          "paired_method_line": 4241,
+          "status": "dynamic"
+        },
+        "supports_gdn_recurrent_qk_norm_prefill_native_head_last": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 1955,
+          "paired_method": "gdn_recurrent_qk_norm_prefill_native_head_last",
+          "paired_method_always_declines": false,
+          "paired_method_line": 4400,
+          "status": "dynamic"
+        },
+        "supports_gdn_recurrent_step": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 1947,
+          "paired_method": "gdn_recurrent_step",
+          "paired_method_always_declines": false,
+          "paired_method_line": 4484,
+          "status": "dynamic"
+        },
+        "supports_linear_decode_argmax": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 3380,
+          "paired_method": "linear_decode_argmax",
+          "paired_method_always_declines": false,
+          "paired_method_line": 3384,
+          "status": "dynamic"
+        },
+        "supports_linear_decode_argmax_batch": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 3436,
+          "paired_method": "linear_decode_argmax_batch",
+          "paired_method_always_declines": false,
+          "paired_method_line": 3607,
+          "status": "dynamic"
+        },
+        "supports_linear_decode_sample": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 3440,
+          "paired_method": "linear_decode_sample",
+          "paired_method_always_declines": false,
+          "paired_method_line": 3449,
+          "status": "dynamic"
+        },
+        "supports_linear_decode_sample_batch": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 3518,
+          "paired_method": "linear_decode_sample_batch",
+          "paired_method_always_declines": false,
+          "paired_method_line": 3533,
+          "status": "dynamic"
+        },
+        "supports_resident_activation": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 2029,
+          "paired_method": null,
+          "paired_method_always_declines": false,
+          "paired_method_line": null,
+          "status": "literal_true"
+        },
+        "supports_resident_decode": {
+          "env_gates": [],
+          "gate_hints": {
+            "dtype": false,
+            "env": false,
+            "layout": false,
+            "shape": false
+          },
+          "line": 1908,
+          "paired_method": "decode_resident_pool_ready",
+          "paired_method_always_declines": false,
+          "paired_method_line": 1895,
+          "status": "dynamic"
+        }
+      }
+    }
+  },
+  "fallback_policy": {
+    "cuda": {
+      "evidence": "crates/kiln-tensor/src/device_op.rs CUDA native miss falls through on CUDA storage and fails loudly",
+      "generic_device_op_fallback": "strict_native_miss_errors"
+    },
+    "metal": {
+      "evidence": "crates/kiln-tensor/src/device_op.rs Metal missing native forward stages through CPU",
+      "generic_device_op_fallback": "host_round_trip_correctness_fallback"
+    },
+    "rocm": {
+      "evidence": "crates/kiln-tensor/src/device_op.rs ROCm missing native forward stages through CPU",
+      "generic_device_op_fallback": "host_round_trip_correctness_fallback"
+    },
+    "vulkan": {
+      "evidence": "crates/kiln-tensor/src/device_op.rs Vulkan missing native forward stages through CPU",
+      "generic_device_op_fallback": "host_round_trip_correctness_fallback"
+    }
+  },
+  "features": {
+    "kiln-model": {
+      "cuda": [
+        "dep:cudarc",
+        "kiln-conv1d-kernel/cuda",
+        "kiln-flash-attn/cuda",
+        "kiln-gdn-kernel/cuda",
+        "kiln-marlin-gemm/cuda",
+        "kiln-rmsnorm-kernel/cuda",
+        "dep:kiln-tensor-id",
+        "kiln-kt-bridge/cuda",
+        "kiln-tensor/cuda",
+        "dep:half",
+        "dep:bytemuck",
+        "dep:kiln-autograd"
+      ],
+      "metal": [
+        "kiln-kt-bridge/metal",
+        "dep:objc2",
+        "dep:objc2-metal",
+        "kiln-tensor/metal",
+        "dep:kiln-autograd",
+        "dep:half",
+        "dep:kiln-graph-metal",
+        "kiln-graph-metal/metal"
+      ],
+      "rocm": [
+        "dep:kiln-hip",
+        "kiln-conv1d-kernel/rocm",
+        "kiln-flash-attn/rocm",
+        "kiln-gdn-kernel/rocm",
+        "kiln-marlin-gemm/rocm",
+        "kiln-rmsnorm-kernel/rocm",
+        "dep:kiln-tensor-id",
+        "kiln-kt-bridge/rocm",
+        "kiln-tensor/rocm",
+        "dep:half",
+        "dep:bytemuck",
+        "dep:kiln-autograd"
+      ],
+      "vulkan": [
+        "dep:kiln-vulkan-kernel",
+        "dep:kiln-tensor-id",
+        "kiln-core/vulkan",
+        "dep:half",
+        "dep:bytemuck",
+        "dep:kiln-autograd",
+        "kiln-tensor/vulkan",
+        "kiln-kt-bridge/vulkan"
+      ]
+    },
+    "kiln-server": {
+      "cuda": [
+        "kiln-model/cuda",
+        "kiln-tensor/cuda",
+        "kiln-train/cuda",
+        "kiln-kt-bridge/cuda"
+      ],
+      "metal": [
+        "kiln-model/metal",
+        "kiln-tensor/metal",
+        "kiln-kt-bridge/metal",
+        "kiln-train/metal"
+      ],
+      "rocm": [
+        "kiln-model/rocm",
+        "kiln-tensor/rocm",
+        "kiln-train/rocm",
+        "kiln-kt-bridge/rocm"
+      ],
+      "vulkan": [
+        "kiln-model/vulkan",
+        "kiln-tensor/vulkan",
+        "kiln-train/vulkan",
+        "kiln-kt-bridge/vulkan"
+      ]
+    },
+    "kiln-tensor": {
+      "cuda": [
+        "dep:cudarc",
+        "dep:kiln-blas"
+      ],
+      "metal": [
+        "dep:objc2",
+        "dep:objc2-metal",
+        "dep:objc2-foundation"
+      ],
+      "rocm": [
+        "dep:kiln-hip",
+        "dep:kiln-rocblas"
+      ],
+      "vulkan": [
+        "dep:kiln-vulkan-kernel"
+      ]
+    },
+    "kiln-train": {
+      "cuda": [
+        "kiln-model/cuda",
+        "kiln-flce-kernel/cuda",
+        "kiln-rmsnorm-kernel/cuda",
+        "kiln-opd-loss-kernel/cuda",
+        "kiln-kt-bridge/cuda"
+      ],
+      "metal": [
+        "kiln-model/metal",
+        "kiln-kt-bridge/metal",
+        "kiln-opd-loss-kernel/metal"
+      ],
+      "rocm": [
+        "kiln-model/rocm",
+        "kiln-flce-kernel/rocm",
+        "kiln-rmsnorm-kernel/rocm",
+        "kiln-opd-loss-kernel/rocm",
+        "kiln-kt-bridge/rocm"
+      ],
+      "vulkan": [
+        "kiln-model/vulkan",
+        "dep:kiln-vulkan-kernel",
+        "kiln-opd-loss-kernel/vulkan",
+        "kiln-kt-bridge/vulkan"
+      ]
+    }
+  },
+  "mismatches": [],
+  "source": {
+    "branch": "unify-engines",
+    "commit": "78678e8b375f413fc30cb2df9364daedcedc4e8e",
+    "script": "scripts/generate_backend_capability_report.py"
+  },
+  "trait_method_count": 106
+}

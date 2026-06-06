@@ -1,5 +1,21 @@
 //! kiln-graph — backend-agnostic command-list / graph capture.
 //!
+//! This crate is the shared replay vocabulary, not the current
+//! production replay authority. Production decode replay still lives in
+//! model-level runners:
+//!
+//! - `crates/kiln-model/src/cuda_graph.rs` for CUDA graphs.
+//! - `crates/kiln-model/src/rocm_graph.rs` for HIP graphs.
+//! - `crates/kiln-model/src/metal_graph.rs` plus
+//!   `kiln_graph_metal::MetalCapturedGraph` for Metal ICB replay.
+//! - `crates/kiln-model/src/vk_decode_resident.rs` and
+//!   `kiln-vulkan-kernel/src/cmd_batch.rs` for Vulkan resident command
+//!   batching.
+//!
+//! The backend `kiln-graph-*` crates are scaffolds and small reusable
+//! replay objects until Phase 5 moves or wraps those production runners
+//! behind one authoritative replay contract.
+//!
 //! Phase 5 of #1082. Per the issue:
 //!
 //! > **kiln-tensor allocator "freeze-pointers" mode.** Active for the

@@ -1,12 +1,13 @@
 //! kiln-graph-cuda — CUDA `CapturedGraph` impl.
 //!
-//! Phase 5.1 of #1082: scaffold.
+//! Phase 5.1 of #1082: scaffold. The production CUDA decode graph
+//! runner is still `crates/kiln-model/src/cuda_graph.rs`; this crate
+//! is not yet the authoritative replay layer.
 //!
-//! Phase 5.x lifts the existing `KILN_CUDA_GRAPHS=true` path in
-//! `crates/kiln-model/src/forward.rs` (which wires
-//! `cudarc::driver::CudaGraph` + `CudaGraphExec` against the
-//! production decode loop) into this crate's
-//! [`CudaCapturedGraph`].
+//! Phase 5.x should move or wrap the existing `KILN_CUDA_GRAPHS=true`
+//! path (which wires `cudarc::driver::CudaGraph` + `CudaGraphExec`
+//! against the production decode loop) behind this crate's
+//! [`CudaCapturedGraph`] or its successor.
 //!
 //! # Today
 //!

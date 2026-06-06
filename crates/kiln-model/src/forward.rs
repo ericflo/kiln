@@ -1605,6 +1605,12 @@ pub(crate) fn cuda_use_kt_api_matmul() -> bool {
     !cuda_kt_api_master_off() && (direct || cuda_use_kt_api_all())
 }
 
+/// ROCm spelling for the shared CUDA/ROCm kt matmul gate.
+#[cfg(feature = "rocm")]
+pub(crate) fn rocm_use_kt_api_matmul() -> bool {
+    cuda_use_kt_api_matmul()
+}
+
 /// Phase 7 opt-in: route the `PagedKvCache` allocation in
 /// `forward.rs` through the `PagedKvCacheKt` (kt-API) twin defined
 /// in [`crate::paged_kv_cache_kt`]. Default off; set

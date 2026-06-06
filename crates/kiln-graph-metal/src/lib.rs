@@ -1,12 +1,15 @@
 //! kiln-graph-metal — Metal `CapturedGraph` impl.
 //!
-//! Phase 5.1 of #1082: scaffold.
+//! Phase 5.1 of #1082: scaffold plus a reusable ICB replay object.
+//! The production Metal replay orchestration still lives in
+//! `crates/kiln-model/src/metal_graph.rs`; this crate is not yet the
+//! authoritative replay layer.
 //!
-//! Phase 5.x wraps `metal::IndirectCommandBuffer` (ICB) for the
-//! production replay path. ICBs are Metal's "graph" equivalent —
-//! pre-encoded compute pipeline state + buffer-binding records that
-//! can be replayed on a `MTLComputeCommandEncoder` with low CPU
-//! overhead.
+//! Phase 5.x should move or wrap the model-level runner behind this
+//! crate's ICB object or its successor. ICBs are Metal's "graph"
+//! equivalent: pre-encoded compute pipeline state plus buffer-binding
+//! records that can be replayed on a `MTLComputeCommandEncoder` with
+//! low CPU overhead.
 
 #![deny(missing_debug_implementations)]
 #![warn(rust_2018_idioms)]

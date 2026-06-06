@@ -1,11 +1,15 @@
 //! kiln-graph-vulkan — Vulkan `CapturedGraph` impl.
 //!
-//! Phase 5.1 of #1082: scaffold.
+//! Phase 5.1 of #1082: scaffold. The production Vulkan replay path is
+//! still the resident decode and command-batch layer in
+//! `crates/kiln-model/src/vk_decode_resident.rs` and
+//! `crates/kiln-vulkan-kernel/src/cmd_batch.rs`; this crate is not yet
+//! the authoritative replay layer.
 //!
-//! Phase 5.x extends `kiln_vulkan_kernel::cmd_batch` (the existing
-//! secondary-command-buffer batcher) to record + resubmit on a
-//! capture/replay boundary aligned with the Phase 5 frozen-allocator
-//! lifetime.
+//! Phase 5.x should move or wrap `kiln_vulkan_kernel::cmd_batch`
+//! behind this crate's object or its successor, while keeping Vulkan's
+//! command-batch/resident-plan model instead of forcing CUDA-style
+//! capture semantics.
 
 #![deny(missing_debug_implementations)]
 #![warn(rust_2018_idioms)]

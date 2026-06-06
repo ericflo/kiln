@@ -20,45 +20,45 @@ fn kt_id(tensor: &kiln_tensor::Tensor) -> TensorId {
     tensor.id()
 }
 
-static CUDA_RESIDENT_TENSOR_IDS: OnceLock<Mutex<HashSet<TensorId>>> = OnceLock::new();
-static CUDA_SGD_DISPATCH_SUCCESSES: AtomicU64 = AtomicU64::new(0);
-static CUDA_ADAMW_DISPATCH_SUCCESSES: AtomicU64 = AtomicU64::new(0);
-static CUDA_LINEAR_PREFILL_SUCCESSES: AtomicU64 = AtomicU64::new(0);
-static CUDA_LINEAR_PREFILL_OFFSET_SUCCESSES: AtomicU64 = AtomicU64::new(0);
-static CUDA_FLASH_ATTN_TRACKED_DECLINES: AtomicU64 = AtomicU64::new(0);
-static CUDA_GDN_FULL_CHUNK_FORWARD_MULTIBLOCK_SUCCESSES: AtomicU64 = AtomicU64::new(0);
-static CUDA_GDN_FULL_CHUNK_FORWARD_SINGLE_SUCCESSES: AtomicU64 = AtomicU64::new(0);
+static ROCM_RESIDENT_TENSOR_IDS: OnceLock<Mutex<HashSet<TensorId>>> = OnceLock::new();
+static ROCM_SGD_DISPATCH_SUCCESSES: AtomicU64 = AtomicU64::new(0);
+static ROCM_ADAMW_DISPATCH_SUCCESSES: AtomicU64 = AtomicU64::new(0);
+static ROCM_LINEAR_PREFILL_SUCCESSES: AtomicU64 = AtomicU64::new(0);
+static ROCM_LINEAR_PREFILL_OFFSET_SUCCESSES: AtomicU64 = AtomicU64::new(0);
+static ROCM_FLASH_ATTN_TRACKED_DECLINES: AtomicU64 = AtomicU64::new(0);
+static ROCM_GDN_FULL_CHUNK_FORWARD_MULTIBLOCK_SUCCESSES: AtomicU64 = AtomicU64::new(0);
+static ROCM_GDN_FULL_CHUNK_FORWARD_SINGLE_SUCCESSES: AtomicU64 = AtomicU64::new(0);
 
 pub fn optimizer_dispatch_success_counts() -> (u64, u64) {
     (
-        CUDA_SGD_DISPATCH_SUCCESSES.load(Ordering::Relaxed),
-        CUDA_ADAMW_DISPATCH_SUCCESSES.load(Ordering::Relaxed),
+        ROCM_SGD_DISPATCH_SUCCESSES.load(Ordering::Relaxed),
+        ROCM_ADAMW_DISPATCH_SUCCESSES.load(Ordering::Relaxed),
     )
 }
 
 pub fn reset_optimizer_dispatch_success_counts() {
-    CUDA_SGD_DISPATCH_SUCCESSES.store(0, Ordering::Relaxed);
-    CUDA_ADAMW_DISPATCH_SUCCESSES.store(0, Ordering::Relaxed);
+    ROCM_SGD_DISPATCH_SUCCESSES.store(0, Ordering::Relaxed);
+    ROCM_ADAMW_DISPATCH_SUCCESSES.store(0, Ordering::Relaxed);
 }
 
 pub fn linear_prefill_success_counts() -> (u64, u64) {
     (
-        CUDA_LINEAR_PREFILL_SUCCESSES.load(Ordering::Relaxed),
-        CUDA_LINEAR_PREFILL_OFFSET_SUCCESSES.load(Ordering::Relaxed),
+        ROCM_LINEAR_PREFILL_SUCCESSES.load(Ordering::Relaxed),
+        ROCM_LINEAR_PREFILL_OFFSET_SUCCESSES.load(Ordering::Relaxed),
     )
 }
 
 pub fn reset_linear_prefill_success_counts() {
-    CUDA_LINEAR_PREFILL_SUCCESSES.store(0, Ordering::Relaxed);
-    CUDA_LINEAR_PREFILL_OFFSET_SUCCESSES.store(0, Ordering::Relaxed);
+    ROCM_LINEAR_PREFILL_SUCCESSES.store(0, Ordering::Relaxed);
+    ROCM_LINEAR_PREFILL_OFFSET_SUCCESSES.store(0, Ordering::Relaxed);
 }
 
 pub fn flash_attn_tracked_decline_count() -> u64 {
-    CUDA_FLASH_ATTN_TRACKED_DECLINES.load(Ordering::Relaxed)
+    ROCM_FLASH_ATTN_TRACKED_DECLINES.load(Ordering::Relaxed)
 }
 
 pub fn reset_flash_attn_tracked_decline_count() {
-    CUDA_FLASH_ATTN_TRACKED_DECLINES.store(0, Ordering::Relaxed);
+    ROCM_FLASH_ATTN_TRACKED_DECLINES.store(0, Ordering::Relaxed);
 }
 
 /// `(multiblock_path_successes, single_block_path_successes)` for
@@ -66,25 +66,29 @@ pub fn reset_flash_attn_tracked_decline_count() {
 /// kernel actually ran under a given env-var configuration.
 pub fn gdn_full_chunk_forward_dispatch_counts() -> (u64, u64) {
     (
-        CUDA_GDN_FULL_CHUNK_FORWARD_MULTIBLOCK_SUCCESSES.load(Ordering::Relaxed),
-        CUDA_GDN_FULL_CHUNK_FORWARD_SINGLE_SUCCESSES.load(Ordering::Relaxed),
+        ROCM_GDN_FULL_CHUNK_FORWARD_MULTIBLOCK_SUCCESSES.load(Ordering::Relaxed),
+        ROCM_GDN_FULL_CHUNK_FORWARD_SINGLE_SUCCESSES.load(Ordering::Relaxed),
     )
 }
 
 pub fn reset_gdn_full_chunk_forward_dispatch_counts() {
-    CUDA_GDN_FULL_CHUNK_FORWARD_MULTIBLOCK_SUCCESSES.store(0, Ordering::Relaxed);
-    CUDA_GDN_FULL_CHUNK_FORWARD_SINGLE_SUCCESSES.store(0, Ordering::Relaxed);
+    ROCM_GDN_FULL_CHUNK_FORWARD_MULTIBLOCK_SUCCESSES.store(0, Ordering::Relaxed);
+    ROCM_GDN_FULL_CHUNK_FORWARD_SINGLE_SUCCESSES.store(0, Ordering::Relaxed);
 }
 
-fn with_cuda_resident_ids<R>(f: impl FnOnce(&mut HashSet<TensorId>) -> R) -> R {
-    let registry = CUDA_RESIDENT_TENSOR_IDS.get_or_init(|| Mutex::new(HashSet::new()));
+fn with_rocm_resident_ids<R>(f: impl FnOnce(&mut HashSet<TensorId>) -> R) -> R {
+    let registry = ROCM_RESIDENT_TENSOR_IDS.get_or_init(|| Mutex::new(HashSet::new()));
     let mut guard = registry
         .lock()
-        .expect("CUDA resident TensorId registry mutex poisoned");
+        .expect("ROCm resident TensorId registry mutex poisoned");
     f(&mut guard)
 }
 
-fn cuda_optimizer_tensors_supported_for_kt(tensors: &[&kiln_tensor::Tensor]) -> bool {
+fn rocm_or_legacy_disable_env_set(rocm_name: &str, legacy_cuda_name: &str) -> bool {
+    std::env::var(rocm_name).is_ok() || std::env::var(legacy_cuda_name).is_ok()
+}
+
+fn rocm_optimizer_tensors_supported_for_kt(tensors: &[&kiln_tensor::Tensor]) -> bool {
     let Some(first) = tensors.first() else {
         return false;
     };
@@ -101,7 +105,7 @@ fn cuda_optimizer_tensors_supported_for_kt(tensors: &[&kiln_tensor::Tensor]) -> 
 
 #[derive(Debug)]
 pub struct RocmBackend {
-    /// The kt CUDA device this backend was constructed for. (#1082 DoD-100
+    /// The kt ROCm device this backend was constructed for. (#1082 DoD-100
     /// step 4: the formerly-cached candle `device` field was dropped — it had
     /// zero reads; `new` now takes a `kiln_tensor::Device` directly.)
     device_kt: kiln_tensor::Device,
@@ -117,27 +121,27 @@ pub struct RocmBackend {
     /// Experimental fused native-MTP decode GDN gates + recurrent update.
     /// Opt-in only until output parity is proven.
     gdn_decode_fused_enabled: bool,
-    /// CUDA fused decode supports native GQA Q/K heads; this avoids expanding
+    /// ROCm fused decode supports native GQA Q/K heads; this avoids expanding
     /// Q/K to value_heads before the fused recurrent decode kernel.
     gdn_decode_unexpanded_qk_enabled: bool,
     /// Fuses GDN decode Q/K L2-normalization into the gates+recurrent kernel,
     /// avoiding the separate tiny qk_norm launch in the single-token path.
     gdn_decode_qk_norm_recurrent_enabled: bool,
     /// Fuses GDN decode Q/K L2-normalization, gates, recurrent update, and
-    /// gated RMSNorm into one single-token CUDA launch.
+    /// gated RMSNorm into one single-token ROCm launch.
     gdn_decode_qk_norm_recurrent_rmsnorm_enabled: bool,
     /// Kill switch for the fused causal_conv1d_update kernel (decode
     /// kiln/gdn/conv region). When off, forward.rs falls back to the
     /// candle to_f32/cat/sum/narrow chain.
     fused_conv1d_enabled: bool,
-    // Phase 7 (#1082): the cuda_use_kt_api_conv1d gate was removed once
+    // Phase 7 (#1082): the rocm_use_kt_api_conv1d gate was removed once
     // the kt-typed surface (causal_conv1d_{update,prefill}_kt +
     // supports{,_prefill}_kt) became the only path. The escape hatch
     // for the conv kernel as a whole is still `fused_conv1d_enabled`
     // (KILN_DISABLE_FUSED_CONV1D), which falls back to forward.rs's
     // candle to_f32/cat/sum/narrow chain — the kt-typed path is bit-
     // exact with the previous kt-API code (same FFI symbol).
-    // Phase 7 (#1082): the cuda_use_kt_api_gdn gate was removed once
+    // Phase 7 (#1082): the rocm_use_kt_api_gdn gate was removed once
     // all 10 GDN dispatch wires (forward_substitution, recurrent_step,
     // chunk_prep, chunk_scan, full_chunk_forward[_multiblock],
     // gates, gated_rms_norm, plus the 4 decode_* wires:
@@ -145,7 +149,7 @@ pub struct RocmBackend {
     // qk_norm_gates_recurrent_rmsnorm) became kt-only. The whole-
     // kernel kill switch `KILN_DISABLE_GDN_KERNEL=1` plus the per-
     // wire decode-fused kill switches (KILN_DISABLE_FUSED_GDN_DECODE,
-    // KILN_DISABLE_CUDA_GDN_DECODE_QK_NORM_RECURRENT[_RMSNORM]) still
+    // KILN_DISABLE_ROCM_GDN_DECODE_QK_NORM_RECURRENT[_RMSNORM]) still
     // fall back to forward.rs's candle reference paths. The kt-typed
     // path is bit-exact with the previous kt-API code (same FFI
     // symbol). All 11 GDN dispatch wires (including the formerly
@@ -155,16 +159,16 @@ pub struct RocmBackend {
     // Phase 7 (#1082): all 4 flash-attn dispatch sites in this
     // backend are now kt-only after `aab07fa7` landed the
     // `flash_attn_paged_decode_dyn_seqlen_kt_with_graph_outputs`
-    // sibling. The `cuda_use_kt_api_flash_attn` gate is gone. The
+    // sibling. The `rocm_use_kt_api_flash_attn` gate is gone. The
     // `_with_graph_outputs` site dispatches both branches through
     // kt: `Some((out, lse))` borrows the caller's candle tensors
     // into kt and writes through them via the new with_graph_outputs
     // entry; `None` calls the existing internally-allocating
     // `flash_attn_paged_decode_dyn_seqlen_kt`.
-    /// Forward-only CUDA LoRA delta/add for decode. Training declines because
+    /// Forward-only ROCm LoRA delta/add for decode. Training declines because
     /// tracked LoRA tensors need autograd.
     lora_decode_add_enabled: bool,
-    /// Multi-block dv-tiled `gdn_full_chunk_forward`. The CUDA-oriented
+    /// Multi-block dv-tiled `gdn_full_chunk_forward`. The CUDA/HIP-oriented
     /// multiblock variant is bit-exact, but is slower on the gfx1151 ROCm
     /// long-context prefill path. Keep it opt-in for retuning on other GPUs.
     /// `KILN_DISABLE_GDN_FULL_CHUNK_FORWARD_MULTIBLOCK=1` remains a hard off.
@@ -175,7 +179,7 @@ impl RocmBackend {
     pub fn new(device: kiln_tensor::Device) -> Self {
         debug_assert!(
             matches!(device, kiln_tensor::Device::Rocm(_)),
-            "RocmBackend created on non-CUDA device"
+            "RocmBackend created on non-ROCm device"
         );
         let gdn_enabled = std::env::var("KILN_DISABLE_GDN_KERNEL").is_err();
         let gdn_gates_enabled =
@@ -209,10 +213,19 @@ impl RocmBackend {
         let gdn_decode_unexpanded_qk_enabled = gdn_decode_fused_enabled
             && std::env::var("KILN_DISABLE_GDN_DECODE_UNEXPANDED_QK").is_err();
         let gdn_decode_qk_norm_recurrent_enabled = gdn_decode_unexpanded_qk_enabled
-            && std::env::var("KILN_DISABLE_CUDA_GDN_DECODE_QK_NORM_RECURRENT").is_err();
+            && !rocm_or_legacy_disable_env_set(
+                "KILN_DISABLE_ROCM_GDN_DECODE_QK_NORM_RECURRENT",
+                "KILN_DISABLE_CUDA_GDN_DECODE_QK_NORM_RECURRENT",
+            );
         let gdn_decode_qk_norm_recurrent_rmsnorm_enabled = gdn_decode_qk_norm_recurrent_enabled
-            && std::env::var("KILN_DISABLE_CUDA_GDN_DECODE_QK_NORM_RECURRENT_RMSNORM").is_err();
-        let lora_decode_add_enabled = std::env::var("KILN_DISABLE_CUDA_LORA_DECODE_ADD").is_err();
+            && !rocm_or_legacy_disable_env_set(
+                "KILN_DISABLE_ROCM_GDN_DECODE_QK_NORM_RECURRENT_RMSNORM",
+                "KILN_DISABLE_CUDA_GDN_DECODE_QK_NORM_RECURRENT_RMSNORM",
+            );
+        let lora_decode_add_enabled = !rocm_or_legacy_disable_env_set(
+            "KILN_DISABLE_ROCM_LORA_DECODE_ADD",
+            "KILN_DISABLE_CUDA_LORA_DECODE_ADD",
+        );
         let gdn_full_chunk_forward_multiblock_enabled = gdn_enabled
             && kiln_core::env_flag::env_flag(
                 "KILN_ROCM_GDN_FULL_CHUNK_FORWARD_MULTIBLOCK",
@@ -237,13 +250,13 @@ impl RocmBackend {
 
     pub fn training_capabilities_static() -> TrainingCapabilities {
         TrainingCapabilities {
-            projection_training: "backend-routed kt cublasLt matmul (tape-recorded) with offset chunk hook",
-            flce_loss: "FLCE analytic backward on CUDA tensors; no full logits by default",
-            rmsnorm_training: "CUDA kt-tape rmsnorm behind 47 GiB autograd VRAM gate",
-            resident_activation: "kt TensorId lifecycle registry; kt CUDA tensors are canonical",
+            projection_training: "backend-routed kt hipBLASLt matmul (tape-recorded) with offset chunk hook",
+            flce_loss: "FLCE analytic backward on ROCm tensors; no full logits by default",
+            rmsnorm_training: "ROCm kt-tape rmsnorm behind 47 GiB autograd VRAM gate",
+            resident_activation: "kt TensorId lifecycle registry; kt ROCm tensors are canonical",
             lora_delta_training: "kt tape-recorded LoRA delta; fused lora_decode_add declines tape-tracked tensors",
-            sgd_step: "CUDA in-place optimizer kernel for resident contiguous F32/BF16 tensors",
-            adamw_step: "CUDA in-place optimizer kernel for resident contiguous F32/BF16 tensors",
+            sgd_step: "ROCm in-place optimizer kernel for resident contiguous F32/BF16 tensors",
+            adamw_step: "ROCm in-place optimizer kernel for resident contiguous F32/BF16 tensors",
             native_training: "not implemented",
         }
     }
@@ -267,34 +280,34 @@ impl BackendRuntime for RocmBackend {
     }
 
     fn register_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> Result<()> {
-        with_cuda_resident_ids(|ids| {
+        with_rocm_resident_ids(|ids| {
             ids.insert(kt_id(tensor));
         });
         Ok(())
     }
 
     fn evict_resident_activation(&self, tensor: &kiln_tensor::Tensor) {
-        with_cuda_resident_ids(|ids| {
+        with_rocm_resident_ids(|ids| {
             ids.remove(&kt_id(tensor));
         });
     }
 
     fn update_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> Result<()> {
-        with_cuda_resident_ids(|ids| {
+        with_rocm_resident_ids(|ids| {
             ids.insert(kt_id(tensor));
         });
         Ok(())
     }
 
     fn has_resident_activation(&self, tensor: &kiln_tensor::Tensor) -> bool {
-        with_cuda_resident_ids(|ids| ids.contains(&kt_id(tensor)))
+        with_rocm_resident_ids(|ids| ids.contains(&kt_id(tensor)))
     }
 
     fn dispatch_sgd_step(&self, param: &kiln_tensor::Tensor, grad: &kiln_tensor::Tensor, lr: f32) -> Result<bool> {
         if !self.has_resident_activation(param) || !self.has_resident_activation(grad) {
             return Ok(false);
         }
-        if !cuda_optimizer_tensors_supported_for_kt(&[param, grad]) {
+        if !rocm_optimizer_tensors_supported_for_kt(&[param, grad]) {
             return Ok(false);
         }
         // #1082: args are already kt (BackendRuntime trait flipped to kt),
@@ -312,9 +325,9 @@ impl BackendRuntime for RocmBackend {
                 .map_err(|e| anyhow::anyhow!("sgd_step kt: sgd_step_bf16_kt: {e}"))?,
             other => anyhow::bail!("sgd_step kt: unsupported dtype {other:?}"),
         }
-        CUDA_SGD_DISPATCH_SUCCESSES.fetch_add(1, Ordering::Relaxed);
-        static FIRST_CUDA_SGD_LOGGED: OnceLock<()> = OnceLock::new();
-        FIRST_CUDA_SGD_LOGGED.get_or_init(|| {
+        ROCM_SGD_DISPATCH_SUCCESSES.fetch_add(1, Ordering::Relaxed);
+        static FIRST_ROCM_SGD_LOGGED: OnceLock<()> = OnceLock::new();
+        FIRST_ROCM_SGD_LOGGED.get_or_init(|| {
             tracing::info!(
                 param_shape = ?param.dims(),
                 grad_shape = ?grad.dims(),
@@ -347,7 +360,7 @@ impl BackendRuntime for RocmBackend {
         {
             return Ok(false);
         }
-        if !cuda_optimizer_tensors_supported_for_kt(&[param, grad, first_moment, second_moment]) {
+        if !rocm_optimizer_tensors_supported_for_kt(&[param, grad, first_moment, second_moment]) {
             return Ok(false);
         }
         // #1082: args are already kt (BackendRuntime trait flipped to kt),
@@ -396,9 +409,9 @@ impl BackendRuntime for RocmBackend {
             .map_err(|e| anyhow::anyhow!("adamw_step kt: adamw_step_bf16_kt: {e}"))?,
             other => anyhow::bail!("adamw_step kt: unsupported dtype {other:?}"),
         }
-        CUDA_ADAMW_DISPATCH_SUCCESSES.fetch_add(1, Ordering::Relaxed);
-        static FIRST_CUDA_ADAMW_LOGGED: OnceLock<()> = OnceLock::new();
-        FIRST_CUDA_ADAMW_LOGGED.get_or_init(|| {
+        ROCM_ADAMW_DISPATCH_SUCCESSES.fetch_add(1, Ordering::Relaxed);
+        static FIRST_ROCM_ADAMW_LOGGED: OnceLock<()> = OnceLock::new();
+        FIRST_ROCM_ADAMW_LOGGED.get_or_init(|| {
             tracing::info!(
                 param_shape = ?param.dims(),
                 grad_shape = ?grad.dims(),
@@ -429,14 +442,13 @@ impl BackendRuntime for RocmBackend {
         true
     }
 
-    /// CUDA has no impl for the strict `flash_attn_paged_decode_contiguous_batch`
+    /// ROCm has no impl for the strict `flash_attn_paged_decode_contiguous_batch`
     /// kernel (the bs>1 head-major uniform-`start_pos` path), so the trait
     /// default `Ok(None)` always declines. Returning `false` here lets the
     /// `try_strict` probe in `gqa_attention_paged_decode_contiguous_batch`
     /// skip the `start_slots = Tensor::from_slice(...)` allocation that
-    /// would otherwise emit a captured `cudaMemcpyHtoDAsync` to a recycled
-    /// VA under CUDA graph capture (suspect 6 in
-    /// `bench-results/cuda-graph-bs2-secondary-audit.md`, #1082).
+    /// would otherwise emit a captured host-to-device copy to a recycled
+    /// allocation under graph capture.
     fn supports_strict_paged_decode_contiguous_batch(&self) -> bool {
         false
     }
@@ -477,11 +489,11 @@ impl BackendRuntime for RocmBackend {
         softmax_scale: f32,
         causal: bool,
     ) -> Result<Option<kiln_tensor::Tensor>> {
-        // The vendored CUDA kernel hard-errors on non-BF16. Decline here so
+        // The vendored CUDA/HIP kernel hard-errors on non-BF16. Decline here so
         // the caller falls back to the portable path instead of bubbling a
         // hard error up for non-BF16 test configs.
         if q.track_op() || k.track_op() || v.track_op() {
-            CUDA_FLASH_ATTN_TRACKED_DECLINES.fetch_add(1, Ordering::Relaxed);
+            ROCM_FLASH_ATTN_TRACKED_DECLINES.fetch_add(1, Ordering::Relaxed);
             return Ok(None);
         }
         if q.dtype() != kiln_tensor::DType::BF16 {
@@ -520,7 +532,7 @@ impl BackendRuntime for RocmBackend {
         causal: bool,
     ) -> Result<Option<kiln_tensor::Tensor>> {
         if q.track_op() || k.track_op() || v.track_op() {
-            CUDA_FLASH_ATTN_TRACKED_DECLINES.fetch_add(1, Ordering::Relaxed);
+            ROCM_FLASH_ATTN_TRACKED_DECLINES.fetch_add(1, Ordering::Relaxed);
             return Ok(None);
         }
         if q.dtype() != kiln_tensor::DType::BF16 {
@@ -645,7 +657,8 @@ impl BackendRuntime for RocmBackend {
         // specifically exists to fix the dangling-pointer hazard
         // documented in
         // `bench-results/cuda-graph-bs2-secondary-audit.md` suspects
-        // 3+4, where the CUDA graph runner re-uses caller-owned
+        // 3+4; the ROCm HIP graph runner follows the same stable-output
+        // contract and re-uses caller-owned
         // tensors across replays. When `graph_outputs == None` (the
         // non-graph-capture path), the kt route is bit-exactly
         // equivalent because both paths bottom out in the same
@@ -655,7 +668,7 @@ impl BackendRuntime for RocmBackend {
         // outputs` sibling exists. Bit-exact: both bottom out in the
         // same `kiln_flash_attn_fwd_paged_decode_dyn_seqlen` FFI
         // symbol. The caller-owned-output path is the
-        // CUDA-graph-capture contract (the kernel writes through the
+        // HIP-graph-capture contract (the kernel writes through the
         // caller's pinned `(out, lse)` pair so graph replays don't
         // dangle on freshly-allocated scratch).
         // Phase 7 (#1082): args are already kt (#1082 DoD-101/102), so
@@ -665,7 +678,7 @@ impl BackendRuntime for RocmBackend {
         if let Some((out, lse)) = graph_outputs {
             // Caller owns `(out, lse)` (kt tensors). The kernel writes
             // in place via the with_graph_outputs kt entry; the
-            // returned `out` is the caller's kt tensor whose CUDA
+            // returned `out` is the caller's kt tensor whose ROCm
             // buffer the kernel mutated.
             kiln_flash_attn::flash_attn_paged_decode_dyn_seqlen_kt_with_graph_outputs(
                 q,
@@ -828,7 +841,7 @@ impl BackendRuntime for RocmBackend {
                 g, v, kkt, qkt, ks_entry, q_s, beta, k_t, state, dv_tile,
             )
             .map_err(|e| anyhow::anyhow!("kt gdn_full_chunk_forward_multiblock: {e}"))?;
-            CUDA_GDN_FULL_CHUNK_FORWARD_MULTIBLOCK_SUCCESSES.fetch_add(1, Ordering::Relaxed);
+            ROCM_GDN_FULL_CHUNK_FORWARD_MULTIBLOCK_SUCCESSES.fetch_add(1, Ordering::Relaxed);
             return Ok(Some(out_kt));
         }
         // Single-block fall-through. The `gdn_full_chunk_forward_kt`
@@ -839,7 +852,7 @@ impl BackendRuntime for RocmBackend {
             g, v, kkt, qkt, ks_entry, q_s, beta, k_t, state,
         )
         .map_err(|e| anyhow::anyhow!("kt gdn_full_chunk_forward: {e}"))?;
-        CUDA_GDN_FULL_CHUNK_FORWARD_SINGLE_SUCCESSES.fetch_add(1, Ordering::Relaxed);
+        ROCM_GDN_FULL_CHUNK_FORWARD_SINGLE_SUCCESSES.fetch_add(1, Ordering::Relaxed);
         Ok(Some(out_kt))
     }
 
@@ -891,7 +904,7 @@ impl BackendRuntime for RocmBackend {
                 state_shape = ?state.shape(), state_dtype = ?state.dtype(), state_contiguous = state.is_contiguous(),
                 z_shape = ?z.shape(), z_dtype = ?z.dtype(),
                 weight_shape = ?weight.shape(), weight_dtype = ?weight.dtype(),
-                "CUDA gdn_decode_gates_recurrent declined (non-bf16 envelope); will retry with cast"
+                "ROCm gdn_decode_gates_recurrent declined (non-bf16 envelope); will retry with cast"
             );
             // Phase 5 fix (#1082): same dtype-tolerance pattern as
             // `gdn_decode_qk_norm_gates_recurrent` above. Cast small
@@ -1068,7 +1081,7 @@ impl BackendRuntime for RocmBackend {
                 a_log_shape = ?a_log.shape(), a_log_dtype = ?a_log.dtype(),
                 dt_bias_shape = ?dt_bias.shape(), dt_bias_dtype = ?dt_bias.dtype(),
                 state_shape = ?state.shape(), state_dtype = ?state.dtype(), state_contiguous = state.is_contiguous(),
-                "CUDA gdn_decode_qk_norm_gates_recurrent declined (non-bf16 envelope); will retry with cast"
+                "ROCm gdn_decode_qk_norm_gates_recurrent declined (non-bf16 envelope); will retry with cast"
             );
             // Phase 5 fix (#1082): Qwen3.5-4B safetensors store
             // `A_log` and `dt_bias` in F32 by default (loader keeps
@@ -1223,7 +1236,7 @@ impl BackendRuntime for RocmBackend {
                 state_shape = ?state.shape(), state_dtype = ?state.dtype(), state_contiguous = state.is_contiguous(),
                 z_shape = ?z.shape(), z_dtype = ?z.dtype(),
                 weight_shape = ?weight.shape(), weight_dtype = ?weight.dtype(),
-                "CUDA gdn_decode_qk_norm_gates_recurrent_rmsnorm declined (non-bf16 envelope); will retry with cast"
+                "ROCm gdn_decode_qk_norm_gates_recurrent_rmsnorm declined (non-bf16 envelope); will retry with cast"
             );
             // Phase 5 fix (#1082): cast small 1-D weight tensors
             // (a_log, dt_bias) to BF16 + group-norm weight to F32
@@ -1300,7 +1313,7 @@ impl BackendRuntime for RocmBackend {
         // already handles it via unconditional `.contiguous()`.
         // Without these calls every concurrent request ≥2 returned
         // HTTP 500 with "tensor must be contiguous" from
-        // `kt_tensor_from_candle_cuda_borrow`. `.contiguous()` is a
+        // the kt backend borrow path. `.contiguous()` is a
         // no-op when the upstream tensor is already contiguous (the
         // rowwise bs=1 path).
         let a_c = a
@@ -1364,12 +1377,17 @@ impl BackendRuntime for RocmBackend {
     ) -> Result<Option<(kiln_tensor::Tensor, kiln_tensor::Tensor)>> {
         let dims = a.dims();
         let is_t1_decode = dims.len() >= 2 && dims[dims.len() - 2] == 1;
-        if !is_t1_decode && std::env::var("KILN_DISABLE_CUDA_GDN_PREFILL_GATES").is_ok() {
+        if !is_t1_decode
+            && rocm_or_legacy_disable_env_set(
+                "KILN_DISABLE_ROCM_GDN_PREFILL_GATES",
+                "KILN_DISABLE_CUDA_GDN_PREFILL_GATES",
+            )
+        {
             tracing::debug!(
                 a_shape = ?a.shape(),
                 a_log_dtype = ?a_log.dtype(),
                 dt_bias_dtype = ?dt_bias.dtype(),
-                "CUDA prefill gdn_gates disabled; using Candle fallback"
+                "ROCm prefill gdn_gates disabled; using Candle fallback"
             );
             return Ok(None);
         }
@@ -1448,7 +1466,7 @@ impl BackendRuntime for RocmBackend {
     }
 
     fn supports_linear_decode_argmax(&self) -> bool {
-        true
+        false
     }
 
     fn linear_decode_argmax(
@@ -1469,13 +1487,13 @@ impl BackendRuntime for RocmBackend {
             return Ok(None);
         }
 
-        static FIRST_CUDA_LINEAR_PREFILL_LOGGED: OnceLock<()> = OnceLock::new();
-        FIRST_CUDA_LINEAR_PREFILL_LOGGED.get_or_init(|| {
+        static FIRST_ROCM_LINEAR_PREFILL_LOGGED: OnceLock<()> = OnceLock::new();
+        FIRST_ROCM_LINEAR_PREFILL_LOGGED.get_or_init(|| {
             tracing::info!(
                 x_shape = ?x.dims(),
                 weight_t_shape = ?weight_t.dims(),
                 tracked = x.track_op() || weight_t.track_op(),
-                "RocmBackend::linear_prefill_apply first call (kt cublasLt; tape records bwd)"
+                "RocmBackend::linear_prefill_apply first call (kt hipBLASLt; tape records bwd)"
             );
         });
 
@@ -1484,9 +1502,9 @@ impl BackendRuntime for RocmBackend {
         // gradient — there is no candle autograd / CustomOp1 anymore.
         //
         // candle's `broadcast_matmul` for `[B, T, K] @ [K, N]` materializes
-        // the broadcasted RHS via `.broadcast_as(...).contiguous()`, which on
-        // CUDA copies the entire (B × K × N) weight tensor across the batch
-        // dim before every matmul. nsys showed that copy at 78 % of total
+        // the broadcasted RHS via `.broadcast_as(...).contiguous()`, copying
+        // the entire (B × K × N) weight tensor across the batch dim before
+        // every matmul. nsys showed that copy at 78 % of total
         // GPU time on the bs > 1 GDN-decode path because GDN runs four
         // in-proj matmuls per layer × 24 layers per step and each pays a
         // ~168 MB BF16 copy at bs=4. Flatten leading dims, do a plain 2D
@@ -1498,11 +1516,11 @@ impl BackendRuntime for RocmBackend {
         let out = if x.is_contiguous() {
             let x2d = x.reshape((lead, k))?;
 
-            // Phase 7 opt-in: route through the kt cublasLt handle
+            // Phase 7 opt-in: route through the kt hipBLASLt handle
             // when KILN_USE_KT_API_MATMUL=1 and the dtype is supported.
             // NVTX range from try_kt_matmul brackets the call as
             // kiln/matmul_kt in nsys.
-            if crate::forward::cuda_use_kt_api_matmul()
+            if crate::forward::rocm_use_kt_api_matmul()
                 && matches!(x2d.dtype(), kiln_tensor::DType::BF16 | kiln_tensor::DType::F16 | kiln_tensor::DType::F32)
                 && x2d.dtype() == weight_t.dtype()
                 && x2d.is_contiguous()
@@ -1511,7 +1529,7 @@ impl BackendRuntime for RocmBackend {
                 if let Some(kt_out2d) = crate::forward::try_kt_matmul(&x2d, weight_t)? {
                     let mut out_shape = l_dims[..l_dims.len() - 1].to_vec();
                     out_shape.push(out_n);
-                    CUDA_LINEAR_PREFILL_SUCCESSES.fetch_add(1, Ordering::Relaxed);
+                    ROCM_LINEAR_PREFILL_SUCCESSES.fetch_add(1, Ordering::Relaxed);
                     return Ok(Some(kt_out2d.reshape(out_shape)?));
                 }
             }
@@ -1524,13 +1542,13 @@ impl BackendRuntime for RocmBackend {
             // Non-contiguous x fallback. broadcast_matmul materializes a
             // broadcasted-RHS copy internally (78 % GPU time at bs=4 due to
             // the per-step RHS copy). When the kt-API matmul gate is on and
-            // dtypes line up, force x contiguous and route through cublasLt —
+            // dtypes line up, force x contiguous and route through hipBLASLt —
             // same 2D kt path as the is_contiguous() branch above, paying one
             // extra dtod for the x.contiguous() up front. That copy is bounded
             // by (B × T × K), whereas broadcast_matmul's implicit copy scales
             // as (B × K × N), typically larger by an order of magnitude on
             // Qwen3.5-4B GDN in-proj shapes. (#1082)
-            if crate::forward::cuda_use_kt_api_matmul()
+            if crate::forward::rocm_use_kt_api_matmul()
                 && matches!(x.dtype(), kiln_tensor::DType::BF16 | kiln_tensor::DType::F16 | kiln_tensor::DType::F32)
                 && x.dtype() == weight_t.dtype()
                 && weight_t.is_contiguous()
@@ -1543,14 +1561,14 @@ impl BackendRuntime for RocmBackend {
                     if let Some(kt_out2d) = crate::forward::try_kt_matmul(&x2d, weight_t)? {
                         let mut out_shape = l_dims[..l_dims.len() - 1].to_vec();
                         out_shape.push(out_n);
-                        CUDA_LINEAR_PREFILL_SUCCESSES.fetch_add(1, Ordering::Relaxed);
+                        ROCM_LINEAR_PREFILL_SUCCESSES.fetch_add(1, Ordering::Relaxed);
                         return Ok(Some(kt_out2d.reshape(out_shape)?));
                     }
                 }
             }
             x.broadcast_matmul(weight_t)?
         };
-        CUDA_LINEAR_PREFILL_SUCCESSES.fetch_add(1, Ordering::Relaxed);
+        ROCM_LINEAR_PREFILL_SUCCESSES.fetch_add(1, Ordering::Relaxed);
         Ok(Some(out))
     }
 
@@ -1572,19 +1590,19 @@ impl BackendRuntime for RocmBackend {
         }
         let chunk = full_weight_t
             .narrow(1, chunk_start, chunk_len)
-            .context("cuda linear_prefill_apply_offset narrow weight chunk")?
+            .context("rocm linear_prefill_apply_offset narrow weight chunk")?
             .contiguous()
-            .context("cuda linear_prefill_apply_offset contiguous weight chunk")?;
+            .context("rocm linear_prefill_apply_offset contiguous weight chunk")?;
         let chunk = if chunk.dtype() == x.dtype() {
             chunk
         } else {
             chunk
                 .to_dtype(x.dtype())
-                .context("cuda linear_prefill_apply_offset cast weight chunk")?
+                .context("rocm linear_prefill_apply_offset cast weight chunk")?
         };
         let out = self.linear_prefill_apply(x, &chunk)?;
         if out.is_some() {
-            CUDA_LINEAR_PREFILL_OFFSET_SUCCESSES.fetch_add(1, Ordering::Relaxed);
+            ROCM_LINEAR_PREFILL_OFFSET_SUCCESSES.fetch_add(1, Ordering::Relaxed);
         }
         Ok(out)
     }
@@ -1613,10 +1631,10 @@ impl BackendRuntime for RocmBackend {
             b: b.clone(),
         };
         let delta = compute_lora_delta(x, &proj, scale)
-            .context("cuda registered LoRA delta (kt tape-recorded) failed")?;
+            .context("rocm registered LoRA delta (kt tape-recorded) failed")?;
 
-        static FIRST_CUDA_LORA_DELTA_LOGGED: OnceLock<()> = OnceLock::new();
-        FIRST_CUDA_LORA_DELTA_LOGGED.get_or_init(|| {
+        static FIRST_ROCM_LORA_DELTA_LOGGED: OnceLock<()> = OnceLock::new();
+        FIRST_ROCM_LORA_DELTA_LOGGED.get_or_init(|| {
             tracing::info!(
                 x_shape = ?x.dims(),
                 a_shape = ?a.dims(),
@@ -1776,7 +1794,7 @@ mod tests {
     }
 
     #[test]
-    fn cuda_resident_activation_registry_lifecycle() -> Result<()> {
+    fn rocm_resident_activation_registry_lifecycle() -> Result<()> {
         // #1082: BackendRuntime residency hooks are kt-typed; the registry
         // keys on the kt TensorId directly.
         use kiln_tensor::{DType as KtDType, Tensor as KtTensor};
@@ -1799,9 +1817,9 @@ mod tests {
     }
 
     #[test]
-    fn cuda_optimizer_dispatch_declines_without_cuda_tensors() -> Result<()> {
+    fn rocm_optimizer_dispatch_declines_without_rocm_tensors() -> Result<()> {
         // #1082: dispatch_{sgd,adamw}_step are kt-typed. CPU kt tensors must
-        // be declined (the kernels only service CUDA-resident tensors).
+        // be declined (the kernels only service ROCm-resident tensors).
         use kiln_tensor::{DType as KtDType, Tensor as KtTensor};
         let backend = test_backend();
         let param = KtTensor::zeros_cpu(vec![2, 3], KtDType::F32);
@@ -1811,11 +1829,11 @@ mod tests {
 
         assert!(
             !backend.dispatch_sgd_step(&param, &grad, 0.01)?,
-            "CUDA must not claim SGD dispatch for non-CUDA tensors"
+            "ROCm must not claim SGD dispatch for non-ROCm tensors"
         );
         assert!(
             !backend.dispatch_adamw_step(&param, &grad, &m, &v, 0.01, 0.9, 0.999, 1e-8, 0.0, 1)?,
-            "CUDA must not claim AdamW dispatch for non-CUDA tensors"
+            "ROCm must not claim AdamW dispatch for non-ROCm tensors"
         );
 
         backend.register_resident_activation(&param)?;
@@ -1825,20 +1843,20 @@ mod tests {
 
         assert!(
             !backend.dispatch_sgd_step(&param, &grad, 0.01)?,
-            "TensorId residency alone is not enough for CUDA to claim SGD ownership"
+            "TensorId residency alone is not enough for ROCm to claim SGD ownership"
         );
         assert!(
             !backend.dispatch_adamw_step(&param, &grad, &m, &v, 0.01, 0.9, 0.999, 1e-8, 0.0, 1)?,
-            "TensorId residency alone is not enough for CUDA to claim AdamW ownership"
+            "TensorId residency alone is not enough for ROCm to claim AdamW ownership"
         );
 
         Ok(())
     }
 
-    /// #1082: build a CUDA-resident kt tensor from host data, or skip the
-    /// test when no CUDA device is available. Returns `Ok(None)` to signal
-    /// skip (mirrors the historical `candle_core::Device::new_cuda` match).
-    fn kt_cuda_f32(values: &[f32]) -> Result<Option<kiln_tensor::Tensor>> {
+    /// #1082: build a ROCm-resident kt tensor from host data, or skip the
+    /// test when no ROCm device is available. Returns `Ok(None)` to signal
+    /// skip (mirrors the historical CUDA helper shape).
+    fn kt_rocm_f32(values: &[f32]) -> Result<Option<kiln_tensor::Tensor>> {
         let host = kiln_tensor::Tensor::from_slice(values, vec![values.len()])?;
         match host.to_device(kiln_tensor::Device::Rocm(0)) {
             Ok(t) => Ok(Some(t)),
@@ -1847,14 +1865,14 @@ mod tests {
     }
 
     #[test]
-    fn cuda_sgd_step_resident_round_trip_f32() -> Result<()> {
+    fn rocm_sgd_step_resident_round_trip_f32() -> Result<()> {
         use kiln_tensor::Device as KtDevice;
-        let backend = RocmBackend::new(kiln_tensor::Device::Cpu);
-        let Some(param) = kt_cuda_f32(&[1.0f32, -2.0, 0.5, 3.0])? else {
-            eprintln!("CUDA unavailable, skipping cuda_sgd_step_resident_round_trip_f32");
+        let backend = RocmBackend::new(kiln_tensor::Device::Rocm(0));
+        let Some(param) = kt_rocm_f32(&[1.0f32, -2.0, 0.5, 3.0])? else {
+            eprintln!("ROCm unavailable, skipping rocm_sgd_step_resident_round_trip_f32");
             return Ok(());
         };
-        let grad = kt_cuda_f32(&[0.1f32, -0.2, 0.5, 1.0])?.expect("cuda grad");
+        let grad = kt_rocm_f32(&[0.1f32, -0.2, 0.5, 1.0])?.expect("rocm grad");
         backend.register_resident_activation(&param)?;
         backend.register_resident_activation(&grad)?;
 
@@ -1871,16 +1889,16 @@ mod tests {
     }
 
     #[test]
-    fn cuda_adamw_step_resident_round_trip_f32() -> Result<()> {
+    fn rocm_adamw_step_resident_round_trip_f32() -> Result<()> {
         use kiln_tensor::Device as KtDevice;
-        let backend = RocmBackend::new(kiln_tensor::Device::Cpu);
-        let Some(param) = kt_cuda_f32(&[1.0f32, -2.0, 0.5, 3.0])? else {
-            eprintln!("CUDA unavailable, skipping cuda_adamw_step_resident_round_trip_f32");
+        let backend = RocmBackend::new(kiln_tensor::Device::Rocm(0));
+        let Some(param) = kt_rocm_f32(&[1.0f32, -2.0, 0.5, 3.0])? else {
+            eprintln!("ROCm unavailable, skipping rocm_adamw_step_resident_round_trip_f32");
             return Ok(());
         };
-        let grad = kt_cuda_f32(&[0.5f32, -0.5, 0.25, -0.25])?.expect("cuda grad");
-        let m = kt_cuda_f32(&[0.0f32, 0.0, 0.0, 0.0])?.expect("cuda m");
-        let v = kt_cuda_f32(&[0.0f32, 0.0, 0.0, 0.0])?.expect("cuda v");
+        let grad = kt_rocm_f32(&[0.5f32, -0.5, 0.25, -0.25])?.expect("rocm grad");
+        let m = kt_rocm_f32(&[0.0f32, 0.0, 0.0, 0.0])?.expect("rocm m");
+        let v = kt_rocm_f32(&[0.0f32, 0.0, 0.0, 0.0])?.expect("rocm v");
         backend.register_resident_activation(&param)?;
         backend.register_resident_activation(&grad)?;
         backend.register_resident_activation(&m)?;
@@ -1922,11 +1940,11 @@ mod tests {
     }
 
     #[test]
-    fn cuda_sgd_and_adamw_resident_round_trip_bf16() -> Result<()> {
+    fn rocm_sgd_and_adamw_resident_round_trip_bf16() -> Result<()> {
         use kiln_tensor::{DType as KtDType, Device as KtDevice};
-        let backend = RocmBackend::new(kiln_tensor::Device::Cpu);
+        let backend = RocmBackend::new(kiln_tensor::Device::Rocm(0));
 
-        // Build host BF16 then move to CUDA; skip when no device.
+        // Build host BF16 then move to ROCm; skip when no device.
         let mk_bf16 = |vals: &[f32]| -> Result<Option<kiln_tensor::Tensor>> {
             let host = kiln_tensor::Tensor::from_slice(vals, vec![vals.len()])?
                 .to_dtype(KtDType::BF16)?;
@@ -1937,10 +1955,10 @@ mod tests {
         };
 
         let Some(param) = mk_bf16(&[1.0f32, -2.0, 0.5, 3.0])? else {
-            eprintln!("CUDA unavailable, skipping cuda_sgd_and_adamw_resident_round_trip_bf16");
+            eprintln!("ROCm unavailable, skipping rocm_sgd_and_adamw_resident_round_trip_bf16");
             return Ok(());
         };
-        let grad = mk_bf16(&[0.25f32, -0.5, 0.5, -0.25])?.expect("cuda grad");
+        let grad = mk_bf16(&[0.25f32, -0.5, 0.5, -0.25])?.expect("rocm grad");
         backend.register_resident_activation(&param)?;
         backend.register_resident_activation(&grad)?;
         assert!(backend.dispatch_sgd_step(&param, &grad, 0.5)?);
@@ -1953,10 +1971,10 @@ mod tests {
             );
         }
 
-        let adam_param = mk_bf16(&[1.0f32, -2.0, 0.5, 3.0])?.expect("cuda adam_param");
-        let adam_grad = mk_bf16(&[0.5f32, -0.5, 0.25, -0.25])?.expect("cuda adam_grad");
-        let m = mk_bf16(&[0.0f32, 0.0, 0.0, 0.0])?.expect("cuda m");
-        let v = mk_bf16(&[0.0f32, 0.0, 0.0, 0.0])?.expect("cuda v");
+        let adam_param = mk_bf16(&[1.0f32, -2.0, 0.5, 3.0])?.expect("rocm adam_param");
+        let adam_grad = mk_bf16(&[0.5f32, -0.5, 0.25, -0.25])?.expect("rocm adam_grad");
+        let m = mk_bf16(&[0.0f32, 0.0, 0.0, 0.0])?.expect("rocm m");
+        let v = mk_bf16(&[0.0f32, 0.0, 0.0, 0.0])?.expect("rocm v");
         backend.register_resident_activation(&adam_param)?;
         backend.register_resident_activation(&adam_grad)?;
         backend.register_resident_activation(&m)?;
@@ -1984,7 +2002,7 @@ mod tests {
     }
 
     #[test]
-    fn cuda_flash_attention_declines_unsupported_dtype() -> Result<()> {
+    fn rocm_flash_attention_declines_unsupported_dtype() -> Result<()> {
         // #1082 DoD-101/102: the FlashAttention BackendRuntime methods
         // are now kt-typed. The kt forward path is detached
         // (track_op() is always false), so the historical
@@ -1993,7 +2011,7 @@ mod tests {
         // the dtype gate: non-BF16 inputs return Ok(None) so the
         // caller falls back to the portable SDPA path. We exercise
         // that with F32 kt tensors here (the CPU test backend can't
-        // dispatch the real CUDA kernel anyway).
+        // dispatch the real ROCm kernel anyway).
         use kiln_tensor::{DType as KtDType, Tensor as KtTensor};
         let backend = test_backend();
 
@@ -2002,7 +2020,7 @@ mod tests {
         let v = KtTensor::zeros_cpu(vec![1, 2, 1, 128], KtDType::F32);
         assert!(
             backend.flash_attn_prefill(&q, &k, &v, 1.0, true)?.is_none(),
-            "CUDA FlashAttention prefill must decline non-BF16 inputs"
+            "ROCm FlashAttention prefill must decline non-BF16 inputs"
         );
 
         let q_decode = KtTensor::zeros_cpu(vec![1, 1, 1, 128], KtDType::F32);
@@ -2024,7 +2042,7 @@ mod tests {
                     true
                 )?
                 .is_none(),
-            "CUDA paged decode attention must decline non-BF16 inputs"
+            "ROCm paged decode attention must decline non-BF16 inputs"
         );
         assert!(
             backend
@@ -2040,15 +2058,15 @@ mod tests {
                     true,
                 )?
                 .is_none(),
-            "CUDA dynamic paged decode attention must decline non-BF16 inputs"
+            "ROCm dynamic paged decode attention must decline non-BF16 inputs"
         );
 
         Ok(())
     }
 
-    /// #1082: build a CUDA-resident 2-D kt tensor from host data, or
-    /// `Ok(None)` to skip when no CUDA device is present.
-    fn kt_cuda_2d(values: &[f32], shape: [usize; 2]) -> Result<Option<kiln_tensor::Tensor>> {
+    /// #1082: build a ROCm-resident 2-D kt tensor from host data, or
+    /// `Ok(None)` to skip when no ROCm device is present.
+    fn kt_rocm_2d(values: &[f32], shape: [usize; 2]) -> Result<Option<kiln_tensor::Tensor>> {
         let host = kiln_tensor::Tensor::from_slice(values, vec![shape[0], shape[1]])?;
         match host.to_device(kiln_tensor::Device::Rocm(0)) {
             Ok(t) => Ok(Some(t)),
@@ -2057,22 +2075,22 @@ mod tests {
     }
 
     #[test]
-    fn cuda_linear_prefill_apply_matches_reference_matmul() -> Result<()> {
-        let backend = RocmBackend::new(kiln_tensor::Device::Cpu);
+    fn rocm_linear_prefill_apply_matches_reference_matmul() -> Result<()> {
+        let backend = RocmBackend::new(kiln_tensor::Device::Rocm(0));
 
-        let Some(x) = kt_cuda_2d(&[1.0f32, -2.0, 0.5, 3.0, 4.0, -1.0], [2, 3])? else {
-            eprintln!("CUDA unavailable, skipping cuda_linear_prefill_apply_matches_reference_matmul");
+        let Some(x) = kt_rocm_2d(&[1.0f32, -2.0, 0.5, 3.0, 4.0, -1.0], [2, 3])? else {
+            eprintln!("ROCm unavailable, skipping rocm_linear_prefill_apply_matches_reference_matmul");
             return Ok(());
         };
-        let w = kt_cuda_2d(
+        let w = kt_rocm_2d(
             &[0.5f32, 1.0, -1.5, 2.0, -0.25, 0.75, 1.25, -0.5, 2.0, -1.0, 0.0, 0.5],
             [3, 4],
         )?
-        .expect("cuda w");
+        .expect("rocm w");
 
         let routed = backend
             .linear_prefill_apply(&x, &w)?
-            .expect("CUDA linear_prefill_apply should accept CUDA tensors");
+            .expect("ROCm linear_prefill_apply should accept ROCm tensors");
         let expected = x.broadcast_matmul(&w)?;
         assert_eq!(
             routed.to_device(kiln_tensor::Device::Cpu)?.to_vec2::<f32>()?,
@@ -2082,25 +2100,25 @@ mod tests {
     }
 
     #[test]
-    fn cuda_linear_prefill_apply_offset_matches_reference_chunk() -> Result<()> {
-        let backend = RocmBackend::new(kiln_tensor::Device::Cpu);
+    fn rocm_linear_prefill_apply_offset_matches_reference_chunk() -> Result<()> {
+        let backend = RocmBackend::new(kiln_tensor::Device::Rocm(0));
 
-        let Some(x) = kt_cuda_2d(&[1.0f32, -2.0, 0.5, 3.0, 4.0, -1.0], [2, 3])? else {
-            eprintln!("CUDA unavailable, skipping cuda_linear_prefill_apply_offset_matches_reference_chunk");
+        let Some(x) = kt_rocm_2d(&[1.0f32, -2.0, 0.5, 3.0, 4.0, -1.0], [2, 3])? else {
+            eprintln!("ROCm unavailable, skipping rocm_linear_prefill_apply_offset_matches_reference_chunk");
             return Ok(());
         };
-        let w = kt_cuda_2d(
+        let w = kt_rocm_2d(
             &[
                 0.5f32, 1.0, -1.5, 2.0, 3.0, -0.25, 0.75, 1.25, -0.5, 0.25, 2.0, -1.0, 0.0, 0.5,
                 -2.0,
             ],
             [3, 5],
         )?
-        .expect("cuda w");
+        .expect("rocm w");
 
         let routed = backend
             .linear_prefill_apply_offset(&x, &w, 1, 3)?
-            .expect("CUDA linear_prefill_apply_offset should accept CUDA tensors");
+            .expect("ROCm linear_prefill_apply_offset should accept ROCm tensors");
         let expected_chunk = w.narrow(1, 1, 3)?.contiguous()?;
         let expected = x.broadcast_matmul(&expected_chunk)?;
         assert_eq!(
@@ -2111,19 +2129,19 @@ mod tests {
     }
 
     #[test]
-    fn cuda_registered_lora_delta_matches_reference() -> Result<()> {
-        let backend = RocmBackend::new(kiln_tensor::Device::Cpu);
+    fn rocm_registered_lora_delta_matches_reference() -> Result<()> {
+        let backend = RocmBackend::new(kiln_tensor::Device::Rocm(0));
 
-        let Some(x) = kt_cuda_2d(&[0.5f32, -1.0, 2.0, 1.5, 0.25, -0.75], [2, 3])? else {
-            eprintln!("CUDA unavailable, skipping cuda_registered_lora_delta_matches_reference");
+        let Some(x) = kt_rocm_2d(&[0.5f32, -1.0, 2.0, 1.5, 0.25, -0.75], [2, 3])? else {
+            eprintln!("ROCm unavailable, skipping rocm_registered_lora_delta_matches_reference");
             return Ok(());
         };
-        let a = kt_cuda_2d(&[0.25f32, -0.5, 1.0, 1.5, 0.0, -1.0], [2, 3])?.expect("cuda a");
-        let b = kt_cuda_2d(
+        let a = kt_rocm_2d(&[0.25f32, -0.5, 1.0, 1.5, 0.0, -1.0], [2, 3])?.expect("rocm a");
+        let b = kt_rocm_2d(
             &[1.0f32, -0.25, 0.5, 0.75, -1.0, 0.25, 0.0, 1.5],
             [4, 2],
         )?
-        .expect("cuda b");
+        .expect("rocm b");
         let scale = 0.5;
 
         assert!(backend.lora_delta_resident(&x, &a, &b, scale)?.is_none());
@@ -2132,7 +2150,7 @@ mod tests {
 
         let routed = backend
             .lora_delta_resident(&x, &a, &b, scale)?
-            .expect("registered CUDA LoRA delta should engage");
+            .expect("registered ROCm LoRA delta should engage");
         let expected = compute_lora_delta(
             &x,
             &LoraProjectionWeights {

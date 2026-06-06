@@ -1,0 +1,211 @@
+use std::collections::HashMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+#[derive(Debug)]
+struct FunctionDef {
+    body: String,
+    line: usize,
+}
+
+fn manifest_dir() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
+
+fn find_matching_brace(source: &str, open_idx: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let mut depth = 0usize;
+    let mut i = open_idx;
+    let mut in_line_comment = false;
+    let mut in_block_comment = false;
+    let mut in_string = false;
+    let mut in_char = false;
+    let mut escape = false;
+    while i < bytes.len() {
+        let ch = bytes[i] as char;
+        let next = bytes.get(i + 1).copied().map(char::from).unwrap_or('\0');
+        if in_line_comment {
+            if ch == '\n' {
+                in_line_comment = false;
+            }
+        } else if in_block_comment {
+            if ch == '*' && next == '/' {
+                in_block_comment = false;
+                i += 1;
+            }
+        } else if in_string {
+            if escape {
+                escape = false;
+            } else if ch == '\\' {
+                escape = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+        } else if in_char {
+            if escape {
+                escape = false;
+            } else if ch == '\\' {
+                escape = true;
+            } else if ch == '\'' {
+                in_char = false;
+            }
+        } else if ch == '/' && next == '/' {
+            in_line_comment = true;
+            i += 1;
+        } else if ch == '/' && next == '*' {
+            in_block_comment = true;
+            i += 1;
+        } else if ch == '"' {
+            in_string = true;
+        } else if ch == '\'' {
+            in_char = true;
+        } else if ch == '{' {
+            depth += 1;
+        } else if ch == '}' {
+            depth -= 1;
+            if depth == 0 {
+                return Some(i);
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+fn parse_functions(path: &Path) -> HashMap<String, FunctionDef> {
+    let source = fs::read_to_string(path).expect("backend source should be readable");
+    let mut out = HashMap::new();
+    let mut offset = 0usize;
+    while let Some(relative_fn) = source[offset..].find("fn ") {
+        let fn_start = offset + relative_fn;
+        let name_start = fn_start + 3;
+        let Some(first_non_name) =
+            source[name_start..].find(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+        else {
+            break;
+        };
+        let name_end = name_start + first_non_name;
+        let name = &source[name_start..name_end];
+        if name.is_empty() {
+            offset = name_end;
+            continue;
+        }
+        let Some(open_relative) = source[name_end..].find('{') else {
+            break;
+        };
+        let open = name_end + open_relative;
+        let Some(close) = find_matching_brace(&source, open) else {
+            break;
+        };
+        let line = source[..fn_start].bytes().filter(|b| *b == b'\n').count() + 1;
+        out.insert(
+            name.to_string(),
+            FunctionDef {
+                body: source[open + 1..close].to_string(),
+                line,
+            },
+        );
+        offset = close + 1;
+    }
+    out
+}
+
+fn body_without_comments(body: &str) -> String {
+    let mut out = String::new();
+    let mut chars = body.chars().peekable();
+    let mut in_line_comment = false;
+    let mut in_block_comment = false;
+    while let Some(ch) = chars.next() {
+        let next = chars.peek().copied().unwrap_or('\0');
+        if in_line_comment {
+            if ch == '\n' {
+                in_line_comment = false;
+                out.push(ch);
+            }
+        } else if in_block_comment {
+            if ch == '*' && next == '/' {
+                in_block_comment = false;
+                chars.next();
+            }
+        } else if ch == '/' && next == '/' {
+            in_line_comment = true;
+            chars.next();
+        } else if ch == '/' && next == '*' {
+            in_block_comment = true;
+            chars.next();
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+fn compact_body(body: &str) -> String {
+    body_without_comments(body)
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect()
+}
+
+fn support_is_literal_true(body: &str) -> bool {
+    compact_body(body) == "true"
+}
+
+fn body_always_declines(body: &str) -> bool {
+    matches!(compact_body(body).as_str(), "Ok(None)" | "returnOk(None);")
+}
+
+fn paired_method_name(support_method: &str) -> Option<&'static str> {
+    match support_method {
+        "supports_flash_attn_prefill" => Some("flash_attn_prefill"),
+        "supports_flash_attn_paged_decode" => Some("flash_attn_paged_decode"),
+        "supports_linear_decode_argmax" => Some("linear_decode_argmax"),
+        "supports_linear_decode_argmax_batch" => Some("linear_decode_argmax_batch"),
+        "supports_gdn_forward_substitution" => Some("gdn_forward_substitution"),
+        "supports_gdn_recurrent_step" => Some("gdn_recurrent_step"),
+        "supports_gdn_chunk_prep" => Some("gdn_chunk_prep"),
+        "supports_gdn_chunk_scan" => Some("gdn_chunk_scan"),
+        "supports_gdn_full_chunk_forward" => Some("gdn_full_chunk_forward"),
+        "supports_gdn_gates" => Some("gdn_gates"),
+        "supports_gdn_gated_rms_norm" => Some("gdn_gated_rms_norm"),
+        _ => None,
+    }
+}
+
+#[test]
+fn literal_true_support_predicates_do_not_pair_with_always_declining_methods() {
+    let backend_dir = manifest_dir().join("src/backend");
+    let backends = ["cuda.rs", "rocm.rs", "metal.rs", "vulkan.rs"];
+    let mut failures = Vec::new();
+
+    for backend in backends {
+        let path = backend_dir.join(backend);
+        let functions = parse_functions(&path);
+        for (name, support_fn) in functions
+            .iter()
+            .filter(|(name, _)| name.starts_with("supports_"))
+        {
+            if !support_is_literal_true(&support_fn.body) {
+                continue;
+            }
+            let Some(pair) = paired_method_name(name) else {
+                continue;
+            };
+            let Some(paired_fn) = functions.get(pair) else {
+                continue;
+            };
+            if body_always_declines(&paired_fn.body) {
+                failures.push(format!(
+                    "{}:{} `{}` returns true but `{}` at line {} always returns Ok(None)",
+                    backend, support_fn.line, name, pair, paired_fn.line
+                ));
+            }
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "backend support predicate mismatches:\n{}",
+        failures.join("\n")
+    );
+}
