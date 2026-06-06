@@ -107,7 +107,7 @@ pub use probe::{cuda_is_available, metal_is_available};
 pub use shape::Shape;
 pub use storage::{CpuStorage, Storage, StorageBackend, cpu_zeros};
 pub use stream_planner::{StreamId, StreamPlanner, StreamRecord};
-pub use tensor::Tensor;
+pub use tensor::{DeviceTransferSupport, Tensor, device_transfer_support};
 pub use tensor_id::TensorId;
 
 #[cfg(feature = "rocm")]

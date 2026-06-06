@@ -519,10 +519,12 @@ def conformance_gate_report() -> list[dict[str, Any]]:
         {
             "gate": "host_transfer_to_device_parity",
             "phase8_requirement": "host transfer / to_device parity with explicit unsupported errors",
-            "status": "partial",
-            "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-tensor cuda_resize_copy_primitives",
+            "status": "covered",
+            "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-tensor device_transfer_support_classifies_explicit_transitions && /home/ericflo/.cargo/bin/cargo test -p kiln-tensor to_device_without_gpu_features_reports_explicit_unsupported_transition && /home/ericflo/.cargo/bin/cargo test -p kiln-tensor cuda_resize_copy_primitives",
             "evidence": [
+                "crates/kiln-tensor/src/tensor.rs",
                 "crates/kiln-tensor/tests/cuda_resize_copy_primitives.rs",
+                "crates/kiln-tensor/tests/metal_ops_parity.rs",
                 "crates/kiln-tensor/tests/rocm_compare_parity.rs",
                 "crates/kiln-vulkan-kernel/tests/vk_tensor_parity.rs",
             ],

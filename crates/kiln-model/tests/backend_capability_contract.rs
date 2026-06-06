@@ -433,6 +433,22 @@ fn generated_capability_report_lists_request_descriptors() {
             "decode submit/replay gate should cite {path}"
         );
     }
+
+    let host_transfer_gate = conformance_gates
+        .iter()
+        .find(|gate| gate["gate"] == "host_transfer_to_device_parity")
+        .expect("host transfer gate should be present");
+    assert_eq!(host_transfer_gate["status"], "covered");
+    let host_transfer_evidence = host_transfer_gate["evidence_present"]
+        .as_array()
+        .expect("host transfer evidence should be an array")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    assert!(
+        host_transfer_evidence.contains(&"crates/kiln-tensor/src/tensor.rs"),
+        "host transfer gate should cite Tensor::to_device support classification"
+    );
 }
 
 #[test]
