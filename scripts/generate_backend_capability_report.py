@@ -38,6 +38,7 @@ BACKEND_EXTRA_SOURCES = {
         ROOT / "crates" / "kiln-model" / "src" / "backend" / "metal_paged.rs",
         ROOT / "crates" / "kiln-model" / "src" / "backend" / "metal_pipeline.rs",
         ROOT / "crates" / "kiln-model" / "src" / "backend" / "metal_residency.rs",
+        ROOT / "crates" / "kiln-model" / "src" / "backend" / "metal_runtime.rs",
         ROOT / "crates" / "kiln-model" / "src" / "backend" / "metal_training.rs",
     ],
 }
@@ -183,6 +184,13 @@ def parse_functions(path: Path) -> dict[str, FunctionDef]:
             continue
         body = text[brace + 1 : end]
         functions[name] = FunctionDef(name=name, body=body, line=text.count("\n", 0, match.start()) + 1)
+    return functions
+
+
+def parse_backend_functions(source_paths: list[Path]) -> dict[str, FunctionDef]:
+    functions: dict[str, FunctionDef] = {}
+    for path in source_paths:
+        functions.update(parse_functions(path))
     return functions
 
 
@@ -344,7 +352,8 @@ def backend_report(trait_methods: set[str]) -> tuple[dict[str, Any], list[dict[s
     report: dict[str, Any] = {}
     mismatches: list[dict[str, Any]] = []
     for backend, path in BACKENDS.items():
-        functions = parse_functions(path)
+        source_paths = backend_source_paths(backend, path)
+        functions = parse_backend_functions(source_paths)
         overrides = sorted(name for name in functions if name in trait_methods)
         support_methods: dict[str, Any] = {}
         for name, fun in sorted(functions.items()):
@@ -375,7 +384,6 @@ def backend_report(trait_methods: set[str]) -> tuple[dict[str, Any], list[dict[s
                         "paired_line": paired_fun.line if paired_fun else None,
                     }
                 )
-        source_paths = backend_source_paths(backend, path)
         source = read_backend_sources(backend, path)
         report[backend] = {
             "source": str(path.relative_to(ROOT)),

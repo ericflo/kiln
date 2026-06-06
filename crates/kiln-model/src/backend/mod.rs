@@ -117,6 +117,9 @@ pub(crate) mod metal_pipeline;
 pub(crate) mod metal_residency;
 
 #[cfg(feature = "metal")]
+pub(crate) mod metal_runtime;
+
+#[cfg(feature = "metal")]
 pub(crate) mod metal_training;
 
 #[cfg(feature = "vulkan")]

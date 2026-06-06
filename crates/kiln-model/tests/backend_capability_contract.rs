@@ -347,6 +347,10 @@ fn generated_capability_report_lists_backend_source_modules() {
         metal_sources.contains(&"crates/kiln-model/src/backend/metal_pipeline.rs"),
         "Metal backend source modules should include the extracted pipeline module"
     );
+    assert!(
+        metal_sources.contains(&"crates/kiln-model/src/backend/metal_runtime.rs"),
+        "Metal backend source modules should include the extracted runtime facade module"
+    );
 }
 
 #[test]
