@@ -19,7 +19,7 @@ Generated from the live source tree by `scripts/generate_backend_capability_repo
 |---|---|---:|---:|---:|
 | `cuda` | `crates/kiln-model/src/backend/cuda.rs` | 45 | 15 | 4 |
 | `rocm` | `crates/kiln-model/src/backend/rocm.rs` | 49 | 17 | 10 |
-| `metal` | `crates/kiln-model/src/backend/metal.rs`, `crates/kiln-model/src/backend/metal_residency.rs`, `crates/kiln-model/src/backend/metal_training.rs` | 52 | 19 | 47 |
+| `metal` | `crates/kiln-model/src/backend/metal.rs`, `crates/kiln-model/src/backend/metal_config.rs`, `crates/kiln-model/src/backend/metal_residency.rs`, `crates/kiln-model/src/backend/metal_training.rs` | 52 | 19 | 47 |
 | `vulkan` | `crates/kiln-model/src/backend/vulkan.rs` | 74 | 20 | 32 |
 
 ## Support Predicates

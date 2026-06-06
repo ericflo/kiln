@@ -81,6 +81,9 @@ pub mod cuda;
 pub mod metal;
 
 #[cfg(feature = "metal")]
+pub(crate) mod metal_config;
+
+#[cfg(feature = "metal")]
 pub(crate) mod metal_residency;
 
 #[cfg(feature = "metal")]
