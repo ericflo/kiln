@@ -3798,139 +3798,243 @@ mod tests {
         assert_eq!(cpu.device(), kiln_tensor::Device::Cpu);
     }
 
+    fn assert_focused_facets_forward_advertised_capabilities<B>(backend: &B, label: &str)
+    where
+        B: BackendRuntime
+            + BackendIdentity
+            + AttentionBackend
+            + PagedKvBackend
+            + GdnBackend
+            + ConvBackend
+            + LinearBackend
+            + SamplingBackend
+            + ResidencyBackend
+            + OptimizerBackend
+            + TrainingLossBackend
+            + ReplayBackend
+            + ?Sized,
+    {
+        macro_rules! assert_forwards {
+            ($focused:expr, $runtime:expr, $method:literal) => {
+                assert_eq!(
+                    $focused, $runtime,
+                    "{} focused facet did not forward {}",
+                    label, $method
+                );
+            };
+        }
+
+        assert_forwards!(
+            BackendIdentity::runtime_name(backend),
+            BackendRuntime::name(backend),
+            "name"
+        );
+        assert_forwards!(
+            BackendIdentity::runtime_device(backend),
+            BackendRuntime::device(backend),
+            "device"
+        );
+        assert_forwards!(
+            BackendIdentity::runtime_as_any(backend).type_id(),
+            BackendRuntime::as_any(backend).type_id(),
+            "as_any"
+        );
+
+        assert_forwards!(
+            AttentionBackend::runtime_supports_flash_attn_prefill(backend),
+            BackendRuntime::supports_flash_attn_prefill(backend),
+            "supports_flash_attn_prefill"
+        );
+        assert_forwards!(
+            AttentionBackend::runtime_supports_flash_attn_prefill_head_major(backend),
+            BackendRuntime::supports_flash_attn_prefill_head_major(backend),
+            "supports_flash_attn_prefill_head_major"
+        );
+        assert_forwards!(
+            AttentionBackend::runtime_supports_flash_attn_paged_decode(backend),
+            BackendRuntime::supports_flash_attn_paged_decode(backend),
+            "supports_flash_attn_paged_decode"
+        );
+        assert_forwards!(
+            AttentionBackend::runtime_supports_strict_paged_decode_contiguous_batch(backend),
+            BackendRuntime::supports_strict_paged_decode_contiguous_batch(backend),
+            "supports_strict_paged_decode_contiguous_batch"
+        );
+
+        assert_forwards!(
+            PagedKvBackend::runtime_supports_paged_kv_head_major_read(backend),
+            BackendRuntime::supports_paged_kv_head_major_read(backend),
+            "supports_paged_kv_head_major_read"
+        );
+        assert_forwards!(
+            PagedKvBackend::runtime_supports_paged_kv_head_major_read_append_token_major(backend),
+            BackendRuntime::supports_paged_kv_head_major_read_append_token_major(backend),
+            "supports_paged_kv_head_major_read_append_token_major"
+        );
+
+        assert_forwards!(
+            GdnBackend::runtime_supports_gdn_forward_substitution(backend),
+            BackendRuntime::supports_gdn_forward_substitution(backend),
+            "supports_gdn_forward_substitution"
+        );
+        assert_forwards!(
+            GdnBackend::runtime_supports_gdn_recurrent_step(backend),
+            BackendRuntime::supports_gdn_recurrent_step(backend),
+            "supports_gdn_recurrent_step"
+        );
+        assert_forwards!(
+            GdnBackend::runtime_supports_gdn_chunk_prep(backend),
+            BackendRuntime::supports_gdn_chunk_prep(backend),
+            "supports_gdn_chunk_prep"
+        );
+        assert_forwards!(
+            GdnBackend::runtime_supports_gdn_chunk_scan(backend),
+            BackendRuntime::supports_gdn_chunk_scan(backend),
+            "supports_gdn_chunk_scan"
+        );
+        assert_forwards!(
+            GdnBackend::runtime_supports_gdn_full_chunk_forward(backend),
+            BackendRuntime::supports_gdn_full_chunk_forward(backend),
+            "supports_gdn_full_chunk_forward"
+        );
+        assert_forwards!(
+            GdnBackend::runtime_supports_gdn_full_chunk_forward_head_last(backend),
+            BackendRuntime::supports_gdn_full_chunk_forward_head_last(backend),
+            "supports_gdn_full_chunk_forward_head_last"
+        );
+        assert_forwards!(
+            GdnBackend::runtime_supports_gdn_recurrent_prefill_head_last(backend),
+            BackendRuntime::supports_gdn_recurrent_prefill_head_last(backend),
+            "supports_gdn_recurrent_prefill_head_last"
+        );
+        assert_forwards!(
+            GdnBackend::runtime_supports_gdn_recurrent_prefill_native_head_last(backend),
+            BackendRuntime::supports_gdn_recurrent_prefill_native_head_last(backend),
+            "supports_gdn_recurrent_prefill_native_head_last"
+        );
+        assert_forwards!(
+            GdnBackend::runtime_supports_gdn_recurrent_qk_norm_prefill_native_head_last(backend),
+            BackendRuntime::supports_gdn_recurrent_qk_norm_prefill_native_head_last(backend),
+            "supports_gdn_recurrent_qk_norm_prefill_native_head_last"
+        );
+        assert_forwards!(
+            GdnBackend::runtime_supports_gdn_decode_gates_recurrent_unexpanded_qk(backend),
+            BackendRuntime::supports_gdn_decode_gates_recurrent_unexpanded_qk(backend),
+            "supports_gdn_decode_gates_recurrent_unexpanded_qk"
+        );
+        assert_forwards!(
+            GdnBackend::runtime_supports_gdn_decode_qk_norm_gates_recurrent(backend),
+            BackendRuntime::supports_gdn_decode_qk_norm_gates_recurrent(backend),
+            "supports_gdn_decode_qk_norm_gates_recurrent"
+        );
+        assert_forwards!(
+            GdnBackend::runtime_supports_gdn_gates(backend),
+            BackendRuntime::supports_gdn_gates(backend),
+            "supports_gdn_gates"
+        );
+        assert_forwards!(
+            GdnBackend::runtime_supports_gdn_gated_rms_norm(backend),
+            BackendRuntime::supports_gdn_gated_rms_norm(backend),
+            "supports_gdn_gated_rms_norm"
+        );
+
+        assert_forwards!(
+            ConvBackend::runtime_supports_causal_conv1d_update(backend),
+            BackendRuntime::supports_causal_conv1d_update(backend),
+            "supports_causal_conv1d_update"
+        );
+        assert_forwards!(
+            ConvBackend::runtime_supports_causal_conv1d_prefill(backend),
+            BackendRuntime::supports_causal_conv1d_prefill(backend),
+            "supports_causal_conv1d_prefill"
+        );
+
+        assert_forwards!(
+            SamplingBackend::runtime_supports_linear_decode_argmax(backend),
+            BackendRuntime::supports_linear_decode_argmax(backend),
+            "supports_linear_decode_argmax"
+        );
+        assert_forwards!(
+            SamplingBackend::runtime_supports_linear_decode_argmax_batch(backend),
+            BackendRuntime::supports_linear_decode_argmax_batch(backend),
+            "supports_linear_decode_argmax_batch"
+        );
+        assert_forwards!(
+            SamplingBackend::runtime_supports_linear_decode_sample(backend, 8),
+            BackendRuntime::supports_linear_decode_sample(backend, 8),
+            "supports_linear_decode_sample"
+        );
+        assert_forwards!(
+            SamplingBackend::runtime_supports_linear_decode_sample_batch(backend, &[8], &[1.0]),
+            BackendRuntime::supports_linear_decode_sample_batch(backend, &[8], &[1.0]),
+            "supports_linear_decode_sample_batch"
+        );
+
+        assert_forwards!(
+            ResidencyBackend::runtime_supports_resident_activation(backend),
+            BackendRuntime::supports_resident_activation(backend),
+            "supports_resident_activation"
+        );
+        let focused_scope =
+            ResidencyBackend::runtime_enter_gdn_recurrent_resident_state_scope(backend);
+        if focused_scope {
+            ResidencyBackend::runtime_exit_gdn_recurrent_resident_state_scope(backend);
+        }
+        let runtime_scope = BackendRuntime::enter_gdn_recurrent_resident_state_scope(backend);
+        if runtime_scope {
+            BackendRuntime::exit_gdn_recurrent_resident_state_scope(backend);
+        }
+        assert_forwards!(
+            focused_scope,
+            runtime_scope,
+            "enter_gdn_recurrent_resident_state_scope"
+        );
+
+        assert_forwards!(
+            ReplayBackend::runtime_decode_resident_pool_ready(backend, 8, 16, 2),
+            BackendRuntime::decode_resident_pool_ready(backend, 8, 16, 2),
+            "decode_resident_pool_ready"
+        );
+        assert_forwards!(
+            ReplayBackend::runtime_supports_resident_decode(backend),
+            BackendRuntime::supports_resident_decode(backend),
+            "supports_resident_decode"
+        );
+        let replay_req = capability::ReplayRequest::paged_decode_graph_outputs(8, 16, 2)
+            .with_dtype(kiln_tensor::DType::BF16);
+        assert_forwards!(
+            ReplayBackend::runtime_supports_replay_request(backend, &replay_req),
+            capability::BackendCapabilityQueries::supports_replay_request(backend, &replay_req),
+            "supports_replay_request"
+        );
+        assert_forwards!(
+            ReplayBackend::runtime_replay_key_for_request(backend, &replay_req),
+            capability::BackendCapabilityQueries::replay_key_for_request(backend, &replay_req),
+            "replay_key_for_request"
+        );
+
+        assert_forwards!(
+            TrainingLossBackend::runtime_training_capabilities(backend),
+            BackendRuntime::training_capabilities(backend),
+            "training_capabilities"
+        );
+        assert_forwards!(
+            TrainingLossBackend::runtime_training_precision_policy(backend),
+            BackendRuntime::training_precision_policy(backend),
+            "training_precision_policy"
+        );
+    }
+
     #[test]
     fn focused_facets_forward_cpu_advertised_capabilities() -> Result<()> {
         let cpu = cpu::CpuBackend::new(kiln_tensor::Device::Cpu);
+        assert_focused_facets_forward_advertised_capabilities(&cpu, "cpu");
 
-        assert_eq!(BackendIdentity::runtime_name(&cpu), BackendRuntime::name(&cpu));
-        assert_eq!(
-            BackendIdentity::runtime_device(&cpu),
-            BackendRuntime::device(&cpu)
-        );
-
-        assert_eq!(
-            AttentionBackend::runtime_supports_flash_attn_prefill(&cpu),
-            BackendRuntime::supports_flash_attn_prefill(&cpu)
-        );
-        assert_eq!(
-            AttentionBackend::runtime_supports_flash_attn_prefill_head_major(&cpu),
-            BackendRuntime::supports_flash_attn_prefill_head_major(&cpu)
-        );
-        assert_eq!(
-            AttentionBackend::runtime_supports_flash_attn_paged_decode(&cpu),
-            BackendRuntime::supports_flash_attn_paged_decode(&cpu)
-        );
-        assert_eq!(
-            AttentionBackend::runtime_supports_strict_paged_decode_contiguous_batch(&cpu),
-            BackendRuntime::supports_strict_paged_decode_contiguous_batch(&cpu)
-        );
-
-        assert_eq!(
-            PagedKvBackend::runtime_supports_paged_kv_head_major_read(&cpu),
-            BackendRuntime::supports_paged_kv_head_major_read(&cpu)
-        );
-        assert_eq!(
-            PagedKvBackend::runtime_supports_paged_kv_head_major_read_append_token_major(&cpu),
-            BackendRuntime::supports_paged_kv_head_major_read_append_token_major(&cpu)
-        );
-
-        assert_eq!(
-            GdnBackend::runtime_supports_gdn_forward_substitution(&cpu),
-            BackendRuntime::supports_gdn_forward_substitution(&cpu)
-        );
-        assert_eq!(
-            GdnBackend::runtime_supports_gdn_recurrent_step(&cpu),
-            BackendRuntime::supports_gdn_recurrent_step(&cpu)
-        );
-        assert_eq!(
-            GdnBackend::runtime_supports_gdn_chunk_prep(&cpu),
-            BackendRuntime::supports_gdn_chunk_prep(&cpu)
-        );
-        assert_eq!(
-            GdnBackend::runtime_supports_gdn_chunk_scan(&cpu),
-            BackendRuntime::supports_gdn_chunk_scan(&cpu)
-        );
-        assert_eq!(
-            GdnBackend::runtime_supports_gdn_full_chunk_forward(&cpu),
-            BackendRuntime::supports_gdn_full_chunk_forward(&cpu)
-        );
-        assert_eq!(
-            GdnBackend::runtime_supports_gdn_gates(&cpu),
-            BackendRuntime::supports_gdn_gates(&cpu)
-        );
-        assert_eq!(
-            GdnBackend::runtime_supports_gdn_gated_rms_norm(&cpu),
-            BackendRuntime::supports_gdn_gated_rms_norm(&cpu)
-        );
-
-        assert_eq!(
-            ConvBackend::runtime_supports_causal_conv1d_update(&cpu),
-            BackendRuntime::supports_causal_conv1d_update(&cpu)
-        );
-        assert_eq!(
-            ConvBackend::runtime_supports_causal_conv1d_prefill(&cpu),
-            BackendRuntime::supports_causal_conv1d_prefill(&cpu)
-        );
-
-        assert_eq!(
-            SamplingBackend::runtime_supports_linear_decode_argmax(&cpu),
-            BackendRuntime::supports_linear_decode_argmax(&cpu)
-        );
-        assert_eq!(
-            SamplingBackend::runtime_supports_linear_decode_argmax_batch(&cpu),
-            BackendRuntime::supports_linear_decode_argmax_batch(&cpu)
-        );
-        assert_eq!(
-            SamplingBackend::runtime_supports_linear_decode_sample(&cpu, 8),
-            BackendRuntime::supports_linear_decode_sample(&cpu, 8)
-        );
-        assert_eq!(
-            SamplingBackend::runtime_supports_linear_decode_sample_batch(&cpu, &[8], &[1.0]),
-            BackendRuntime::supports_linear_decode_sample_batch(&cpu, &[8], &[1.0])
-        );
-
-        assert_eq!(
-            ResidencyBackend::runtime_supports_resident_activation(&cpu),
-            BackendRuntime::supports_resident_activation(&cpu)
-        );
         let t = kiln_tensor::Tensor::zeros_cpu(vec![1], kiln_tensor::DType::F32);
         assert_eq!(
             ResidencyBackend::runtime_resident_activation_resource(&cpu, &t),
             BackendRuntime::resident_activation_resource(&cpu, &t)
         );
-        assert_eq!(
-            ResidencyBackend::runtime_enter_gdn_recurrent_resident_state_scope(&cpu),
-            BackendRuntime::enter_gdn_recurrent_resident_state_scope(&cpu)
-        );
-
-        assert_eq!(
-            ReplayBackend::runtime_decode_resident_pool_ready(&cpu, 8, 16, 2),
-            BackendRuntime::decode_resident_pool_ready(&cpu, 8, 16, 2)
-        );
-        assert_eq!(
-            ReplayBackend::runtime_supports_resident_decode(&cpu),
-            BackendRuntime::supports_resident_decode(&cpu)
-        );
-        let replay_req = capability::ReplayRequest::paged_decode_graph_outputs(8, 16, 2)
-            .with_dtype(kiln_tensor::DType::BF16);
-        assert_eq!(
-            ReplayBackend::runtime_supports_replay_request(&cpu, &replay_req),
-            capability::BackendCapabilityQueries::supports_replay_request(&cpu, &replay_req)
-        );
-        assert_eq!(
-            ReplayBackend::runtime_replay_key_for_request(&cpu, &replay_req),
-            capability::BackendCapabilityQueries::replay_key_for_request(&cpu, &replay_req)
-        );
-
-        assert_eq!(
-            TrainingLossBackend::runtime_training_capabilities(&cpu),
-            BackendRuntime::training_capabilities(&cpu)
-        );
-        assert_eq!(
-            TrainingLossBackend::runtime_training_precision_policy(&cpu),
-            BackendRuntime::training_precision_policy(&cpu)
-        );
-
         assert_eq!(
             OptimizerBackend::runtime_dispatch_sgd_step(&cpu, &t, &t, 0.1)?,
             BackendRuntime::dispatch_sgd_step(&cpu, &t, &t, 0.1)?
@@ -3943,6 +4047,34 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn focused_facets_forward_cuda_advertised_capabilities() {
+        let cuda = cuda::CudaBackend::new(kiln_tensor::Device::Cuda(0));
+        assert_focused_facets_forward_advertised_capabilities(&cuda, "cuda");
+    }
+
+    #[cfg(feature = "rocm")]
+    #[test]
+    fn focused_facets_forward_rocm_advertised_capabilities() {
+        let rocm = rocm::RocmBackend::new(kiln_tensor::Device::Rocm(0));
+        assert_focused_facets_forward_advertised_capabilities(&rocm, "rocm");
+    }
+
+    #[cfg(feature = "metal")]
+    #[test]
+    fn focused_facets_forward_metal_advertised_capabilities() {
+        let metal = metal::MetalBackend::new(kiln_tensor::Device::Metal(0));
+        assert_focused_facets_forward_advertised_capabilities(&metal, "metal");
+    }
+
+    #[cfg(feature = "vulkan")]
+    #[test]
+    fn focused_facets_forward_vulkan_advertised_capabilities() {
+        let vulkan = vulkan::VulkanBackend::new(kiln_tensor::Device::Cpu);
+        assert_focused_facets_forward_advertised_capabilities(&vulkan, "vulkan");
     }
 
     #[cfg(feature = "vulkan")]
