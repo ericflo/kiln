@@ -10,6 +10,7 @@
 use anyhow::{Context, Result};
 
 use super::metal_config::*;
+use super::metal_core::{MetalPipelineHost, kt_metal, kt_metal_alloc};
 use super::metal_icb::{
     MetalGraphResourceRef, MetalPagedAttnDecodeDynSeqlenIcbArgs,
     MetalPagedAttnDecodeDynSeqlenScalars, MetalPagedKvWriteTokenMajorBatchIcbArgs,
@@ -25,85 +26,16 @@ use super::{
 // surface in this file is centralized at a single import location. Future
 // substrate swaps (e.g. candle → objc2-metal) touch this single import
 // block instead of hundreds of scattered fully-qualified references.
-use kiln_tensor::MetalStorage;
 use kiln_tensor::metal_types::{
     BufferOffset, ComputePipeline, IndirectCommandBufferDescriptor, IndirectComputeCommand,
-    IndirectDispatchKind, Library, MTLResourceOptions, MetalCompanion, MetalRawDevice, buffer_o_kt,
+    IndirectDispatchKind, Library, MTLResourceOptions, MetalCompanion, buffer_o_kt,
 };
-
-/// Host abstraction for the per-device MSL pipeline / library caches
-/// (#1082). The `metal_*_pipeline` + `metal_shared_library` helpers take
-/// `&dyn MetalPipelineHost`. The candle-free kt `MetalCompanion` is the
-/// sole implementor now that the substrate is kiln-owned
-/// (`kiln_tensor::metal_rt`); the migration-era candle `MetalDevice` impl
-/// retired alongside the `candle_metal_kernels` dependency drop. It
-/// exposes the raw kt substrate device (for `new_library_with_source` /
-/// `new_compute_pipeline_state_with_function`) and a stable per-device
-/// `registry_id()` cache key so one compiled pipeline is shared per
-/// physical GPU (no double-compile).
-pub(crate) trait MetalPipelineHost {
-    /// The raw substrate device for library / pipeline construction.
-    fn pipeline_raw_device(&self) -> &MetalRawDevice;
-    /// Stable per-device cache key (`MTLDevice::registryID`).
-    fn pipeline_cache_key(&self) -> u64;
-}
-
-impl MetalPipelineHost for MetalCompanion {
-    fn pipeline_raw_device(&self) -> &MetalRawDevice {
-        self.device()
-    }
-    fn pipeline_cache_key(&self) -> u64 {
-        self.device_id()
-    }
-}
 
 // Per-function pipeline-cache helpers reach for these std types; hoisted to
 // module-level so the 46 pipeline-builder helpers below stop repeating the
 // import boilerplate (#1082 cleanup).
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
-
-// Phase 7 #1082 — small bridges from candle Layout / DType to their kt
-// siblings, used by per-call-site migrations to `buffer_o_kt`. Defined
-// locally (not in `kiln-tensor::metal_types`) so each helper-family
-// migration can land without touching the chokepoint module. The Layout
-// bridge clones the shape/stride vectors (typically rank 2-4); the cost
-// is negligible relative to a Metal encoder dispatch and stays well
-// below 100ns per call. Returns a kt Layout that round-trips
-// `start_offset()` exactly, which is what `buffer_o_kt` reads.
-/// Downcast a kt `Tensor`'s storage to `&MetalStorage` — the standard
-/// entry every candle-free Metal kernel helper uses to reach `.buffer()`
-/// + `.companion()`. (#1082)
-#[inline]
-fn kt_metal(t: &kiln_tensor::Tensor) -> Result<&MetalStorage> {
-    t.storage()
-        .as_any()
-        .downcast_ref::<MetalStorage>()
-        .context("expected a Metal-backed kiln_tensor::Tensor")
-}
-
-/// Allocate a fresh contiguous Metal output tensor of `dtype` × `dims` on
-/// the same device as `like`'s companion. Zero-initialized via the UMA
-/// `StorageModeShared` path (`MetalStorage::zeros_kt`); kernels that fully
-/// overwrite their output pay a cheap UMA zero-fill — correctness-first
-/// per #1082 ("ship parity before optimizing"). Replaces the candle
-/// `Tensor::empty(dims, dtype, x.device())` output allocation in the
-/// kt-flipped kernel helpers. (#1082)
-fn kt_metal_alloc(
-    like: &MetalStorage,
-    dtype: kiln_tensor::DType,
-    dims: &[usize],
-) -> Result<kiln_tensor::Tensor> {
-    let companion = like.companion()?;
-    let n: usize = dims.iter().product();
-    let storage = MetalStorage::zeros_kt(companion.device(), like.device_index(), dtype, n)?;
-    kiln_tensor::Tensor::from_parts(
-        std::sync::Arc::new(storage),
-        kiln_tensor::Layout::contiguous(dims.to_vec()),
-        kiln_tensor::TensorId::next(),
-    )
-    .map_err(|e| anyhow::anyhow!("kt_metal_alloc: {e}"))
-}
 
 #[allow(dead_code, clippy::too_many_arguments)]
 pub(crate) fn metal_record_paged_decode_icb_graph(
