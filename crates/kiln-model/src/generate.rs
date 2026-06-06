@@ -18,7 +18,9 @@ use kiln_core::sampling::SamplingParams;
 use kiln_core::token::TokenId;
 use kiln_core::tokenizer::KilnTokenizer;
 
-use crate::backend::{self, BackendRuntime, FallbackPolicy, TrainingLossBackend};
+use crate::backend::{
+    self, BackendRuntime, FallbackPolicy, TrainingLossBackend, capability::BackendCapabilityQueries,
+};
 use crate::cancel::CancelHandle;
 use crate::cuda_graph::CudaGraphRunner;
 use crate::decode_buffers::{DecodeBufferConfig, DecodeBuffers, DecodeElementType};
@@ -761,30 +763,12 @@ fn decode_batch_generic_fallback_enabled(backend: &dyn BackendRuntime) -> bool {
 }
 
 fn decode_hot_path_fallback_policy(backend: &dyn BackendRuntime) -> FallbackPolicy {
-    let debug_fallback_enabled = decode_hot_path_debug_fallback_enabled(backend.name());
-    decode_hot_path_fallback_policy_for(backend.name(), backend.device(), debug_fallback_enabled)
-}
-
-fn decode_hot_path_fallback_policy_for(
-    backend_name: &str,
-    device: kiln_tensor::Device,
-    debug_fallback_enabled: bool,
-) -> FallbackPolicy {
-    if debug_fallback_enabled {
+    if decode_hot_path_debug_fallback_enabled(backend.name()) {
         return FallbackPolicy::WarnAndCount;
     }
-    match device {
-        kiln_tensor::Device::Cpu | kiln_tensor::Device::Cuda(_) => {
-            FallbackPolicy::CorrectnessAllowed
-        }
-        kiln_tensor::Device::Metal(_)
-        | kiln_tensor::Device::Vulkan(_)
-        | kiln_tensor::Device::Rocm(_) => match backend_name {
-            "metal" | "vulkan" | "rocm" => FallbackPolicy::NativeRequired,
-            _ => FallbackPolicy::ErrorInHotPath,
-        },
-        _ => FallbackPolicy::ErrorInHotPath,
-    }
+    BackendCapabilityQueries::backend_capabilities(backend)
+        .fallback
+        .decode_hot_path
 }
 
 fn decode_hot_path_debug_fallback_enabled(backend_name: &str) -> bool {
@@ -8430,6 +8414,61 @@ impl ModelRunner {
 mod tests {
     use super::*;
 
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    const DECODE_FALLBACK_ENV: &[&str] = &[
+        "KILN_DECODE_HOT_PATH_DEBUG_FALLBACK",
+        "KILN_METAL_DECODE_BATCH_GENERIC_FALLBACK",
+        "KILN_VULKAN_DECODE_BATCH_GENERIC_FALLBACK",
+        "KILN_ROCM_DECODE_BATCH_GENERIC_FALLBACK",
+    ];
+
+    struct EnvRestore(Vec<(&'static str, Option<String>)>);
+
+    impl EnvRestore {
+        fn clear(keys: &[&'static str]) -> Self {
+            let prior = keys
+                .iter()
+                .map(|&key| (key, std::env::var(key).ok()))
+                .collect::<Vec<_>>();
+            unsafe {
+                for &key in keys {
+                    std::env::remove_var(key);
+                }
+            }
+            Self(prior)
+        }
+    }
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            unsafe {
+                for (key, value) in &self.0 {
+                    if let Some(value) = value {
+                        std::env::set_var(key, value);
+                    } else {
+                        std::env::remove_var(key);
+                    }
+                }
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    struct NamedTestBackend {
+        name: &'static str,
+        device: kiln_tensor::Device,
+    }
+
+    impl BackendRuntime for NamedTestBackend {
+        fn name(&self) -> &'static str {
+            self.name
+        }
+
+        fn device(&self) -> kiln_tensor::Device {
+            self.device
+        }
+    }
+
     #[test]
     fn decode_batcher_stats_report_runner_calls_per_token() {
         let stats = DecodeBatcherStats {
@@ -8545,36 +8584,74 @@ mod tests {
 
     #[test]
     fn test_decode_hot_path_fallback_policy_defaults() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _env = EnvRestore::clear(DECODE_FALLBACK_ENV);
+        for (backend_name, device, expected) in [
+            (
+                "cpu",
+                kiln_tensor::Device::Cpu,
+                FallbackPolicy::CorrectnessAllowed,
+            ),
+            (
+                "cuda",
+                kiln_tensor::Device::Cuda(0),
+                FallbackPolicy::CorrectnessAllowed,
+            ),
+            (
+                "metal",
+                kiln_tensor::Device::Metal(0),
+                FallbackPolicy::NativeRequired,
+            ),
+            (
+                "vulkan",
+                kiln_tensor::Device::Vulkan(0),
+                FallbackPolicy::NativeRequired,
+            ),
+            (
+                "rocm",
+                kiln_tensor::Device::Rocm(0),
+                FallbackPolicy::NativeRequired,
+            ),
+        ] {
+            assert_eq!(
+                backend::capability::BackendFallbackCapabilities::for_backend(backend_name, device)
+                    .decode_hot_path,
+                expected
+            );
+            let backend = NamedTestBackend {
+                name: backend_name,
+                device,
+            };
+            assert_eq!(decode_hot_path_fallback_policy(&backend), expected);
+        }
+
+        let vulkan_cpu_sentinel = NamedTestBackend {
+            name: "vulkan",
+            device: kiln_tensor::Device::Cpu,
+        };
         assert_eq!(
-            decode_hot_path_fallback_policy_for("cpu", kiln_tensor::Device::Cpu, false),
-            FallbackPolicy::CorrectnessAllowed
-        );
-        assert_eq!(
-            decode_hot_path_fallback_policy_for("cuda", kiln_tensor::Device::Cuda(0), false),
-            FallbackPolicy::CorrectnessAllowed
-        );
-        assert_eq!(
-            decode_hot_path_fallback_policy_for("metal", kiln_tensor::Device::Metal(0), false),
-            FallbackPolicy::NativeRequired
-        );
-        assert_eq!(
-            decode_hot_path_fallback_policy_for("vulkan", kiln_tensor::Device::Vulkan(0), false),
-            FallbackPolicy::NativeRequired
-        );
-        assert_eq!(
-            decode_hot_path_fallback_policy_for("rocm", kiln_tensor::Device::Rocm(0), false),
+            decode_hot_path_fallback_policy(&vulkan_cpu_sentinel),
             FallbackPolicy::NativeRequired
         );
     }
 
     #[test]
     fn test_decode_hot_path_debug_fallback_opt_in_warns_and_counts() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _env = EnvRestore::clear(DECODE_FALLBACK_ENV);
+        unsafe {
+            std::env::set_var("KILN_DECODE_HOT_PATH_DEBUG_FALLBACK", "1");
+        }
         for (backend_name, device) in [
             ("metal", kiln_tensor::Device::Metal(0)),
             ("vulkan", kiln_tensor::Device::Vulkan(0)),
             ("rocm", kiln_tensor::Device::Rocm(0)),
         ] {
-            let policy = decode_hot_path_fallback_policy_for(backend_name, device, true);
+            let backend = NamedTestBackend {
+                name: backend_name,
+                device,
+            };
+            let policy = decode_hot_path_fallback_policy(&backend);
             assert_eq!(policy, FallbackPolicy::WarnAndCount);
             assert!(policy.allows_fallback());
         }

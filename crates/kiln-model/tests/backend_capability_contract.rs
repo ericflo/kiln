@@ -1579,7 +1579,7 @@ fn lora_residency_call_sites_consume_residency_backend_facet() {
 }
 
 #[test]
-fn training_policy_call_sites_consume_focused_capability_surfaces() {
+fn runtime_policy_call_sites_consume_focused_capability_surfaces() {
     let root = workspace_root();
     let trainer_source = fs::read_to_string(root.join("crates/kiln-train/src/trainer.rs"))
         .expect("trainer.rs should be readable");
@@ -1593,6 +1593,28 @@ fn training_policy_call_sites_consume_focused_capability_surfaces() {
     assert!(
         generate_source.contains("TrainingLossBackend"),
         "ModelRunner should import the focused training loss/capability facet"
+    );
+    assert!(
+        generate_source.contains("BackendCapabilityQueries"),
+        "decode fallback policy should import the shared backend capability query surface"
+    );
+
+    let decode_policy_section = source_between(
+        &generate_source,
+        "fn decode_hot_path_fallback_policy(",
+        "fn decode_hot_path_debug_fallback_enabled(",
+    );
+    assert!(
+        decode_policy_section.contains("BackendCapabilityQueries::backend_capabilities"),
+        "decode fallback policy should come from the shared backend capability aggregate"
+    );
+    assert!(
+        !generate_source.contains("fn decode_hot_path_fallback_policy_for"),
+        "generate should not keep a duplicate backend-name/device decode fallback policy table"
+    );
+    assert!(
+        !decode_policy_section.contains("match device"),
+        "decode fallback policy should not branch directly on device kind"
     );
 
     let trainer_policy_section = source_between(
