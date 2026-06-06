@@ -682,3 +682,400 @@ pub(crate) fn metal_lm_head_argmax_rows_bf16(
     }
     Ok(out)
 }
+
+#[cfg(test)]
+mod metal_lm_head_sample_tests {
+    use super::*;
+    use crate::backend::{metal::MetalBackend, BackendRuntime};
+    use kiln_tensor::{Device, Tensor};
+    use std::cmp::Ordering;
+
+    fn metal_device() -> Option<Device> {
+        crate::backend::metal::try_new_metal()
+    }
+
+    fn pattern_bf16(n: usize, seed: u64) -> Vec<half::bf16> {
+        let mut out = Vec::with_capacity(n);
+        let mut s = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        for i in 0..n {
+            s = s
+                .wrapping_add(0xA076_1D64_78BD_642F)
+                .wrapping_mul(0xE703_7ED1_A0B4_28DB);
+            let raw = ((s >> 40) as u32 % 4096) as f32 / 1024.0 - 2.0;
+            let trend = (i % 19) as f32 * 0.011;
+            out.push(half::bf16::from_f32(raw + trend));
+        }
+        out
+    }
+
+    fn lm_head_logits_for_row(
+        x: &[half::bf16],
+        weight_t: &[half::bf16],
+        row: usize,
+        hidden: usize,
+        vocab: usize,
+    ) -> Vec<f32> {
+        let mut logits = Vec::with_capacity(vocab);
+        let row_base = row * hidden;
+        for col in 0..vocab {
+            let mut acc = 0.0f32;
+            for i in 0..hidden {
+                acc += x[row_base + i].to_f32() * weight_t[i * vocab + col].to_f32();
+            }
+            logits.push(half::bf16::from_f32(acc).to_f32());
+        }
+        logits
+    }
+
+    fn raw_argmax(logits: &[f32]) -> u32 {
+        let mut best_score = f32::NEG_INFINITY;
+        let mut best_idx = 0u32;
+        for (idx, &score) in logits.iter().enumerate() {
+            let idx = idx as u32;
+            if score > best_score || (score == best_score && idx < best_idx) {
+                best_score = score;
+                best_idx = idx;
+            }
+        }
+        best_idx
+    }
+
+    fn splitmix_uniform(seed: u64) -> f32 {
+        let state = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        let bits = z ^ (z >> 31);
+        let mantissa = ((bits >> 40) & 0xFF_FFFF) as u32;
+        mantissa as f32 / 16_777_216.0
+    }
+
+    fn unseeded_style_seed(history: &[u32]) -> u64 {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as u64)
+            .unwrap_or(0);
+        let history_hash = history.iter().fold(0xCBF29CE484222325u64, |acc, &token| {
+            (acc ^ token as u64).wrapping_mul(0x100000001B3)
+        });
+        nanos.wrapping_add(history_hash)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn reference_sample(
+        raw_logits: &[f32],
+        history_indices: &[u32],
+        history_counts: &[u32],
+        repetition_penalty: f32,
+        presence_penalty: f32,
+        frequency_penalty: f32,
+        temperature: f32,
+        top_k: u32,
+        top_p: f32,
+        min_p: f32,
+        seed: u64,
+    ) -> u32 {
+        if kiln_core::sampling::SamplingParams::values_are_effectively_greedy(temperature, top_k) {
+            return raw_argmax(raw_logits);
+        }
+
+        let mut logits = raw_logits.to_vec();
+        let rep_active = repetition_penalty.is_finite()
+            && repetition_penalty > 0.0
+            && (repetition_penalty - 1.0).abs() > f32::EPSILON;
+        for (&idx, &count) in history_indices.iter().zip(history_counts.iter()) {
+            let Some(score) = logits.get_mut(idx as usize) else {
+                continue;
+            };
+            if rep_active {
+                *score = if *score > 0.0 {
+                    *score / repetition_penalty
+                } else {
+                    *score * repetition_penalty
+                };
+            }
+            if presence_penalty.is_finite() && presence_penalty != 0.0 {
+                *score -= presence_penalty;
+            }
+            if frequency_penalty.is_finite() && frequency_penalty != 0.0 {
+                *score -= frequency_penalty * count as f32;
+            }
+        }
+
+        let mut indexed: Vec<(u32, f32)> = logits
+            .iter()
+            .enumerate()
+            .map(|(idx, &score)| (idx as u32, score / temperature))
+            .collect();
+        indexed.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(Ordering::Equal)
+                .then_with(|| a.0.cmp(&b.0))
+        });
+        indexed.truncate((top_k as usize).min(indexed.len()).max(1));
+
+        let max_score = indexed[0].1;
+        let mut probs: Vec<(u32, f32)> = indexed
+            .iter()
+            .map(|&(idx, score)| (idx, (score - max_score).exp()))
+            .collect();
+        let mut sum: f32 = probs.iter().map(|(_, p)| *p).sum();
+        if !sum.is_finite() || sum <= 0.0 {
+            return indexed[0].0;
+        }
+        for (_, p) in probs.iter_mut() {
+            *p /= sum;
+        }
+
+        if min_p.is_finite() && min_p > 0.0 {
+            let threshold = min_p * probs[0].1;
+            probs.retain(|&(_, p)| p >= threshold);
+            if probs.is_empty() {
+                return indexed[0].0;
+            }
+            sum = probs.iter().map(|(_, p)| *p).sum();
+            if sum > 0.0 {
+                for (_, p) in probs.iter_mut() {
+                    *p /= sum;
+                }
+            }
+        }
+
+        if top_p > 0.0 && top_p < 1.0 {
+            let mut cumsum = 0.0f32;
+            let mut cutoff = probs.len();
+            for (i, (_, p)) in probs.iter().enumerate() {
+                cumsum += *p;
+                if cumsum >= top_p {
+                    cutoff = i + 1;
+                    break;
+                }
+            }
+            probs.truncate(cutoff);
+            sum = probs.iter().map(|(_, p)| *p).sum();
+            if sum > 0.0 {
+                for (_, p) in probs.iter_mut() {
+                    *p /= sum;
+                }
+            }
+        }
+
+        let r = splitmix_uniform(seed);
+        let mut cumsum = 0.0f32;
+        for &(idx, p) in &probs {
+            cumsum += p;
+            if r < cumsum {
+                return idx;
+            }
+        }
+        probs.last().map(|&(idx, _)| idx).unwrap_or(indexed[0].0)
+    }
+
+    #[test]
+    fn linear_decode_sample_top_k_one_ignores_penalties_and_matches_raw_argmax() -> Result<()> {
+        let Some(dev) = metal_device() else {
+            eprintln!("Metal unavailable, skipping Metal lm-head top_k=1 sample test");
+            return Ok(());
+        };
+        let hidden = 8usize;
+        let vocab = 17usize;
+        let x_data = pattern_bf16(hidden, 1);
+        let weight_data = pattern_bf16(hidden * vocab, 2);
+        let x = Tensor::from_vec_on(dev, x_data.clone(), vec![1, 1, hidden])?;
+        let weight_t = Tensor::from_vec_on(dev, weight_data.clone(), vec![hidden, vocab])?;
+        let backend = MetalBackend::new(dev);
+        let logits = lm_head_logits_for_row(&x_data, &weight_data, 0, hidden, vocab);
+        let want = raw_argmax(&logits);
+
+        let got = backend
+            .linear_decode_sample(
+                &x,
+                &weight_t,
+                &[want],
+                &[100],
+                1.4,
+                3.0,
+                0.2,
+                0.7,
+                1,
+                0.5,
+                0.1,
+                0xCAFE_F00D_DEAD_BEEF,
+            )?
+            .context("Metal backend declined top_k=1 sampled decode")?;
+        assert_eq!(got, want);
+        Ok(())
+    }
+
+    #[test]
+    fn metal_lm_head_sample_matches_reference_top_p_min_p_penalties_seeded() -> Result<()> {
+        let Some(dev) = metal_device() else {
+            eprintln!("Metal unavailable, skipping Metal lm-head seeded sample test");
+            return Ok(());
+        };
+        let hidden = 9usize;
+        let vocab = 37usize;
+        let x_data = pattern_bf16(hidden, 3);
+        let weight_data = pattern_bf16(hidden * vocab, 4);
+        let x = Tensor::from_vec_on(dev, x_data.clone(), vec![1, 1, hidden])?;
+        let weight_t = Tensor::from_vec_on(dev, weight_data.clone(), vec![hidden, vocab])?;
+        let history_indices = [2u32, 5, 11, 23];
+        let history_counts = [1u32, 3, 2, 4];
+        let seed = 0x1234_5678_90AB_CDEF;
+        let got = metal_lm_head_sample_bf16(
+            &x,
+            &weight_t,
+            &history_indices,
+            &history_counts,
+            1.2,
+            0.4,
+            0.15,
+            0.8,
+            7,
+            0.82,
+            0.03,
+            seed,
+        )?;
+        let again = metal_lm_head_sample_bf16(
+            &x,
+            &weight_t,
+            &history_indices,
+            &history_counts,
+            1.2,
+            0.4,
+            0.15,
+            0.8,
+            7,
+            0.82,
+            0.03,
+            seed,
+        )?;
+        let logits = lm_head_logits_for_row(&x_data, &weight_data, 0, hidden, vocab);
+        let want = reference_sample(
+            &logits,
+            &history_indices,
+            &history_counts,
+            1.2,
+            0.4,
+            0.15,
+            0.8,
+            7,
+            0.82,
+            0.03,
+            seed,
+        );
+        assert_eq!(got, want);
+        assert_eq!(again, want, "same seed must be deterministic");
+        Ok(())
+    }
+
+    #[test]
+    fn metal_lm_head_sample_matches_reference_top_k_top_p_unseeded_style_seed() -> Result<()> {
+        let Some(dev) = metal_device() else {
+            eprintln!("Metal unavailable, skipping Metal lm-head unseeded-style sample test");
+            return Ok(());
+        };
+        let hidden = 11usize;
+        let vocab = 43usize;
+        let x_data = pattern_bf16(hidden, 7);
+        let weight_data = pattern_bf16(hidden * vocab, 8);
+        let x = Tensor::from_vec_on(dev, x_data.clone(), vec![1, 1, hidden])?;
+        let weight_t = Tensor::from_vec_on(dev, weight_data.clone(), vec![hidden, vocab])?;
+        let history = [3u32, 5, 3, 17, 5, 29];
+        let (history_indices, history_counts): (Vec<u32>, Vec<u32>) =
+            [(3u32, 2u32), (5, 2), (17, 1), (29, 1)].into_iter().unzip();
+        let seed = unseeded_style_seed(&history);
+        let got = metal_lm_head_sample_bf16(
+            &x,
+            &weight_t,
+            &history_indices,
+            &history_counts,
+            1.0,
+            0.0,
+            0.0,
+            0.95,
+            11,
+            0.7,
+            0.0,
+            seed,
+        )?;
+        let logits = lm_head_logits_for_row(&x_data, &weight_data, 0, hidden, vocab);
+        let want = reference_sample(
+            &logits,
+            &history_indices,
+            &history_counts,
+            1.0,
+            0.0,
+            0.0,
+            0.95,
+            11,
+            0.7,
+            0.0,
+            seed,
+        );
+        assert_eq!(got, want);
+        Ok(())
+    }
+
+    #[test]
+    fn linear_decode_sample_batch_handles_mixed_greedy_and_sampled_rows() -> Result<()> {
+        let Some(dev) = metal_device() else {
+            eprintln!("Metal unavailable, skipping Metal lm-head batched sample test");
+            return Ok(());
+        };
+        let batch = 2usize;
+        let hidden = 10usize;
+        let vocab = 41usize;
+        let x_data = pattern_bf16(batch * hidden, 5);
+        let weight_data = pattern_bf16(hidden * vocab, 6);
+        let x = Tensor::from_vec_on(dev, x_data.clone(), vec![batch, 1, hidden])?;
+        let weight_t = Tensor::from_vec_on(dev, weight_data.clone(), vec![hidden, vocab])?;
+        let backend = MetalBackend::new(dev);
+
+        let tokens = backend
+            .linear_decode_sample_batch(
+                &x,
+                &weight_t,
+                &[1, 1, 1],
+                &[3, 7, 19],
+                &[2, 1, 4],
+                &[1.0, 1.15],
+                &[0.0, 0.35],
+                &[0.0, 0.08],
+                &[0.0, 0.9],
+                &[0, 6],
+                &[1.0, 0.74],
+                &[0.0, 0.02],
+                &[0xABCD, 0x1234_0000_5678_9999],
+            )?
+            .context("Metal backend declined batched sampled decode")?;
+        assert_eq!(tokens.len(), batch);
+
+        let row0_logits = lm_head_logits_for_row(&x_data, &weight_data, 0, hidden, vocab);
+        let row1_logits = lm_head_logits_for_row(&x_data, &weight_data, 1, hidden, vocab);
+        let want0 = raw_argmax(&row0_logits);
+        let want1 = reference_sample(
+            &row1_logits,
+            &[3, 7, 19],
+            &[2, 1, 4],
+            1.15,
+            0.35,
+            0.08,
+            0.9,
+            6,
+            0.74,
+            0.02,
+            0x1234_0000_5678_9999,
+        );
+        assert_eq!(tokens, vec![want0, want1]);
+        Ok(())
+    }
+
+    #[test]
+    fn sample_batch_support_does_not_claim_pure_greedy_batches() {
+        let backend = MetalBackend::new(Device::Metal(0));
+        assert!(!backend.supports_linear_decode_sample_batch(&[20], &[0.0]));
+        assert!(!backend.supports_linear_decode_sample_batch(&[1, 1], &[0.7, 0.8]));
+        assert!(backend.supports_linear_decode_sample_batch(&[20, 1], &[0.8, 0.0]));
+    }
+}

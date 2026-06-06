@@ -1484,3 +1484,314 @@ pub(crate) fn metal_paged_kv_write_token_major_batch_bf16(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod metal_icb_decode_tests {
+    use super::*;
+    use kiln_tensor::{Device, Tensor};
+
+    fn metal_device() -> Option<Device> {
+        kiln_tensor::primary_metal_companion(0)
+            .ok()
+            .map(|_| Device::Metal(0))
+    }
+
+    fn pattern_bf16(n: usize, seed: u64) -> Vec<half::bf16> {
+        let mut out = Vec::with_capacity(n);
+        let mut s = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        for i in 0..n {
+            s = s
+                .wrapping_add(0xA076_1D64_78BD_642F)
+                .wrapping_mul(0xE703_7ED1_A0B4_28DB);
+            let raw = ((s >> 40) as u32 % 1024) as f32 / 4096.0 - 0.125;
+            let trend = (i % 17) as f32 * 0.0007;
+            out.push(half::bf16::from_f32(raw + trend));
+        }
+        out
+    }
+
+    fn zeroed_bf16(n: usize) -> Vec<half::bf16> {
+        vec![half::bf16::ZERO; n]
+    }
+
+    fn max_abs_diff_bf16(a: &[half::bf16], b: &[half::bf16]) -> f32 {
+        assert_eq!(
+            a.len(),
+            b.len(),
+            "length mismatch {} vs {}",
+            a.len(),
+            b.len()
+        );
+        a.iter()
+            .zip(b)
+            .map(|(x, y)| (x.to_f32() - y.to_f32()).abs())
+            .fold(0.0, f32::max)
+    }
+
+    #[test]
+    fn single_token_paged_decode_icb_matches_eager_and_updates_slot() -> Result<()> {
+        let Some(dev) = metal_device() else {
+            eprintln!(
+                "Metal unavailable, skipping single_token_paged_decode_icb_matches_eager_and_updates_slot"
+            );
+            return Ok(());
+        };
+
+        let total_slots = 4usize;
+        let kv_heads = 4usize;
+        let q_heads = 16usize;
+        let head_dim = 256usize;
+        let pool_elems = total_slots * kv_heads * head_dim;
+        let kv_elems = kv_heads * head_dim;
+        let q_elems = q_heads * head_dim;
+        let out_elems = q_heads * head_dim;
+        let scale = 1.0f32 / (head_dim as f32).sqrt();
+
+        let mut k_pool_host = zeroed_bf16(pool_elems);
+        let mut v_pool_host = zeroed_bf16(pool_elems);
+        let prefix_k = pattern_bf16(2 * kv_elems, 10);
+        let prefix_v = pattern_bf16(2 * kv_elems, 11);
+        k_pool_host[..2 * kv_elems].copy_from_slice(&prefix_k);
+        v_pool_host[..2 * kv_elems].copy_from_slice(&prefix_v);
+
+        let q = Tensor::from_vec_on(
+            dev,
+            pattern_bf16(q_elems, 12),
+            vec![1, 1, q_heads, head_dim],
+        )?;
+        let k = Tensor::from_vec_on(
+            dev,
+            pattern_bf16(kv_elems, 13),
+            vec![1, 1, kv_heads, head_dim],
+        )?;
+        let v = Tensor::from_vec_on(
+            dev,
+            pattern_bf16(kv_elems, 14),
+            vec![1, 1, kv_heads, head_dim],
+        )?;
+        let k_pool_eager = Tensor::from_vec_on(
+            dev,
+            k_pool_host.clone(),
+            vec![total_slots, kv_heads, head_dim],
+        )?;
+        let v_pool_eager = Tensor::from_vec_on(
+            dev,
+            v_pool_host.clone(),
+            vec![total_slots, kv_heads, head_dim],
+        )?;
+        let k_pool_icb =
+            Tensor::from_vec_on(dev, k_pool_host, vec![total_slots, kv_heads, head_dim])?;
+        let v_pool_icb =
+            Tensor::from_vec_on(dev, v_pool_host, vec![total_slots, kv_heads, head_dim])?;
+        let block_table = Tensor::from_vec_on(dev, vec![0u32, 1, 2], vec![1, 3])?;
+        let seqused_k = Tensor::from_vec_on(dev, vec![3u32], vec![1])?;
+        let out_icb =
+            Tensor::from_vec_on(dev, zeroed_bf16(out_elems), vec![1, 1, q_heads, head_dim])?;
+
+        let graph = metal_record_single_token_paged_decode_icb_graph(
+            &q,
+            &k_pool_icb,
+            &v_pool_icb,
+            &block_table,
+            &seqused_k,
+            &out_icb,
+            &k,
+            &v,
+            2,
+            3,
+            1,
+            scale,
+        )?;
+
+        metal_paged_kv_write_token_major_bf16(&k_pool_eager, &v_pool_eager, 2, &k, &v)?;
+        let eager = metal_paged_attn_decode_contiguous_batch_dyn_seqlen_bf16_d256(
+            &q,
+            &k_pool_eager,
+            &v_pool_eager,
+            &block_table,
+            &seqused_k,
+            3,
+            1,
+            scale,
+        )?;
+        graph.replay(2, 3, scale)?;
+
+        let eager_0 = eager.to_vec::<half::bf16>()?;
+        let icb_0 = out_icb.to_vec::<half::bf16>()?;
+        assert_eq!(
+            eager_0, icb_0,
+            "first ICB replay must be bit-identical to eager Metal decode"
+        );
+
+        let next_k = pattern_bf16(kv_elems, 20);
+        let next_v = pattern_bf16(kv_elems, 21);
+        kiln_tensor::metal_write_host_in_place(&k, &next_k)?;
+        kiln_tensor::metal_write_host_in_place(&v, &next_v)?;
+        kiln_tensor::metal_write_host_in_place(&block_table, &[0u32, 1, 3])?;
+
+        metal_paged_kv_write_token_major_bf16(&k_pool_eager, &v_pool_eager, 3, &k, &v)?;
+        let eager = metal_paged_attn_decode_contiguous_batch_dyn_seqlen_bf16_d256(
+            &q,
+            &k_pool_eager,
+            &v_pool_eager,
+            &block_table,
+            &seqused_k,
+            3,
+            1,
+            scale,
+        )?;
+        graph.replay(3, 3, scale)?;
+
+        let eager_1 = eager.to_vec::<half::bf16>()?;
+        let icb_1 = out_icb.to_vec::<half::bf16>()?;
+        assert_eq!(
+            eager_1, icb_1,
+            "ICB replay after stable-buffer and slot updates must match eager"
+        );
+        assert_eq!(graph.replay_count(), 2);
+        assert!(
+            max_abs_diff_bf16(&icb_0, &icb_1) > 0.0,
+            "second replay should observe refreshed K/V and metadata"
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn batched_paged_decode_icb_matches_eager_and_updates_slots() -> Result<()> {
+        let Some(dev) = metal_device() else {
+            eprintln!(
+                "Metal unavailable, skipping batched_paged_decode_icb_matches_eager_and_updates_slots"
+            );
+            return Ok(());
+        };
+
+        let batch = 2usize;
+        let total_slots = 8usize;
+        let kv_heads = 4usize;
+        let q_heads = 16usize;
+        let head_dim = 256usize;
+        let pool_row = kv_heads * head_dim;
+        let pool_elems = total_slots * pool_row;
+        let kv_elems = batch * pool_row;
+        let q_elems = batch * q_heads * head_dim;
+        let scale = 1.0f32 / (head_dim as f32).sqrt();
+
+        let mut k_pool_host = zeroed_bf16(pool_elems);
+        let mut v_pool_host = zeroed_bf16(pool_elems);
+        for row in 0..batch {
+            let block_base = row * 4;
+            for prefix_idx in 0..2 {
+                let slot = block_base + prefix_idx;
+                let dst = slot * pool_row;
+                let seed = 100 + (row * 10 + prefix_idx) as u64;
+                k_pool_host[dst..dst + pool_row].copy_from_slice(&pattern_bf16(pool_row, seed));
+                v_pool_host[dst..dst + pool_row].copy_from_slice(&pattern_bf16(pool_row, seed + 1));
+            }
+        }
+
+        let q = Tensor::from_vec_on(
+            dev,
+            pattern_bf16(q_elems, 12),
+            vec![batch, 1, q_heads, head_dim],
+        )?;
+        let k = Tensor::from_vec_on(
+            dev,
+            pattern_bf16(kv_elems, 13),
+            vec![batch, 1, kv_heads, head_dim],
+        )?;
+        let v = Tensor::from_vec_on(
+            dev,
+            pattern_bf16(kv_elems, 14),
+            vec![batch, 1, kv_heads, head_dim],
+        )?;
+        let k_pool_eager = Tensor::from_vec_on(
+            dev,
+            k_pool_host.clone(),
+            vec![total_slots, kv_heads, head_dim],
+        )?;
+        let v_pool_eager = Tensor::from_vec_on(
+            dev,
+            v_pool_host.clone(),
+            vec![total_slots, kv_heads, head_dim],
+        )?;
+        let k_pool_icb =
+            Tensor::from_vec_on(dev, k_pool_host, vec![total_slots, kv_heads, head_dim])?;
+        let v_pool_icb =
+            Tensor::from_vec_on(dev, v_pool_host, vec![total_slots, kv_heads, head_dim])?;
+        let block_table = Tensor::from_vec_on(dev, vec![0u32, 1, 2, 4, 5, 6], vec![batch, 3])?;
+        let seqused_k = Tensor::from_vec_on(dev, vec![3u32, 3], vec![batch])?;
+        let slots = Tensor::from_vec_on(dev, vec![2u32, 6], vec![batch])?;
+        let out_icb =
+            Tensor::from_vec_on(dev, zeroed_bf16(q_elems), vec![batch, 1, q_heads, head_dim])?;
+
+        let graph = metal_record_paged_decode_icb_graph(
+            &q,
+            &k_pool_icb,
+            &v_pool_icb,
+            &block_table,
+            &seqused_k,
+            &out_icb,
+            &k,
+            &v,
+            &slots,
+            3,
+            1,
+            scale,
+        )?;
+
+        metal_paged_kv_write_token_major_batch_bf16(&k_pool_eager, &v_pool_eager, &slots, &k, &v)?;
+        let eager = metal_paged_attn_decode_contiguous_batch_dyn_seqlen_bf16_d256(
+            &q,
+            &k_pool_eager,
+            &v_pool_eager,
+            &block_table,
+            &seqused_k,
+            3,
+            1,
+            scale,
+        )?;
+        graph.replay(3, scale)?;
+
+        let eager_0 = eager.to_vec::<half::bf16>()?;
+        let icb_0 = out_icb.to_vec::<half::bf16>()?;
+        assert_eq!(
+            eager_0, icb_0,
+            "first batched ICB replay must be bit-identical to eager Metal decode"
+        );
+
+        let next_k = pattern_bf16(kv_elems, 20);
+        let next_v = pattern_bf16(kv_elems, 21);
+        kiln_tensor::metal_write_host_in_place(&k, &next_k)?;
+        kiln_tensor::metal_write_host_in_place(&v, &next_v)?;
+        kiln_tensor::metal_write_host_in_place(&block_table, &[0u32, 1, 3, 4, 5, 7])?;
+        kiln_tensor::metal_write_host_in_place(&slots, &[3u32, 7])?;
+
+        metal_paged_kv_write_token_major_batch_bf16(&k_pool_eager, &v_pool_eager, &slots, &k, &v)?;
+        let eager = metal_paged_attn_decode_contiguous_batch_dyn_seqlen_bf16_d256(
+            &q,
+            &k_pool_eager,
+            &v_pool_eager,
+            &block_table,
+            &seqused_k,
+            3,
+            1,
+            scale,
+        )?;
+        graph.replay(3, scale)?;
+
+        let eager_1 = eager.to_vec::<half::bf16>()?;
+        let icb_1 = out_icb.to_vec::<half::bf16>()?;
+        assert_eq!(
+            eager_1, icb_1,
+            "batched ICB replay after stable slot updates must match eager"
+        );
+        assert_eq!(graph.replay_count(), 2);
+        assert!(
+            max_abs_diff_bf16(&icb_0, &icb_1) > 0.0,
+            "second batched replay should observe refreshed K/V and metadata"
+        );
+
+        Ok(())
+    }
+}
