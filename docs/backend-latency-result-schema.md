@@ -66,13 +66,15 @@ Required fields:
 - `hardware`: exactly matches the fixture `hardware`
 - `source`: exactly matches the fixture `source`
 - `command`: exactly matches the fixture `command`
-- `raw_log`: non-empty path or identifier for the captured raw fixture log
+- `raw_log`: non-empty path for the captured raw fixture log; covered fixtures
+  require this file to exist when validated
 - `raw_log_sha256`: lowercase SHA-256 hex digest of the raw fixture log
 - `metrics`: object containing every metric named by the fixture, with finite
   numeric values
 
-When the referenced `raw_log` file is present in the checkout, the validator
-also checks that its SHA-256 digest matches `raw_log_sha256`.
+When `--require-covered` is set, the validator requires the referenced
+`raw_log` file to exist in the checkout and checks that its SHA-256 digest
+matches `raw_log_sha256`.
 
 The fixture digest deliberately excludes metric `max`, `threshold_state`, and
 `result_artifact` so a reviewed artifact remains valid while thresholds are
@@ -134,7 +136,8 @@ The threshold locker requires every fixture result artifact to exist, have
 `status: "passed"`, match the result artifact schema version, include a valid
 UTC creation timestamp, match the fixture `id`, `backend`, manifest schema
 version, stable fixture digest, hardware/source/command provenance, and contain
-every declared metric. It sets every fixture `threshold_state` to
+every declared metric. It also requires the referenced raw log file to exist and
+match `raw_log_sha256`. It sets every fixture `threshold_state` to
 `locked_threshold`, sets the manifest `status` to `covered`, and applies the
 headroom by comparison: `<=` thresholds are raised above observed latency, while
 `>=` thresholds are lowered below observed throughput. Use `--check` to validate

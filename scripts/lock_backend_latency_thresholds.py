@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import re
@@ -47,6 +48,14 @@ def load_json(path: Path, label: str) -> dict[str, Any]:
 def resolve_repo_path(path: str) -> Path:
     candidate = Path(path)
     return candidate if candidate.is_absolute() else ROOT / candidate
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def threshold_from_observed(observed: float, comparison: str, headroom: float) -> float:
@@ -145,10 +154,19 @@ def lock_fixture_thresholds(
     raw_log = result.get("raw_log")
     if not isinstance(raw_log, str) or not raw_log:
         raise ThresholdLockError(f"{fixture_id}.result_artifact.raw_log must be a non-empty string")
+    raw_log_path = resolve_repo_path(raw_log)
+    if not raw_log_path.is_file():
+        raise ThresholdLockError(
+            f"{fixture_id}.result_artifact.raw_log must exist before thresholds can lock: {raw_log}"
+        )
     raw_log_sha256 = result.get("raw_log_sha256")
     if not isinstance(raw_log_sha256, str) or not CHECKSUM_RE.match(raw_log_sha256):
         raise ThresholdLockError(
             f"{fixture_id}.result_artifact.raw_log_sha256 must be a lowercase sha256 hex digest"
+        )
+    if sha256_file(raw_log_path) != raw_log_sha256:
+        raise ThresholdLockError(
+            f"{fixture_id}.result_artifact.raw_log_sha256 does not match raw_log"
         )
 
     observations = result.get("metrics")
@@ -221,6 +239,9 @@ def self_test() -> int:
     with tempfile.TemporaryDirectory() as tmp:
         tmp_root = Path(tmp)
         result_path = tmp_root / "result.json"
+        raw_log_path = tmp_root / "bench.log"
+        raw_log_path.write_text("KILN_LATENCY_METRIC latency_ms 10.0 ms\n")
+        raw_log_sha256 = sha256_file(raw_log_path)
         created_at_utc = "2026-06-06T12:00:00Z"
         result_path.write_text(
             json.dumps(
@@ -235,8 +256,8 @@ def self_test() -> int:
                     "hardware": "fixture hardware",
                     "source": "bench.py",
                     "command": "python bench.py",
-                    "raw_log": "bench.log",
-                    "raw_log_sha256": "0" * 64,
+                    "raw_log": str(raw_log_path),
+                    "raw_log_sha256": raw_log_sha256,
                     "metrics": {"latency_ms": 10.0, "tokens_per_s": 200.0},
                 }
             )
@@ -292,8 +313,8 @@ def self_test() -> int:
                     "hardware": "fixture hardware",
                     "source": "bench.py",
                     "command": "python bench.py",
-                    "raw_log": "bench.log",
-                    "raw_log_sha256": "0" * 64,
+                    "raw_log": str(raw_log_path),
+                    "raw_log_sha256": raw_log_sha256,
                     "metrics": {"latency_ms": 10.0},
                 }
             )
@@ -322,8 +343,8 @@ def self_test() -> int:
                     "hardware": "fixture hardware",
                     "source": "bench.py",
                     "command": "python bench.py",
-                    "raw_log": "bench.log",
-                    "raw_log_sha256": "0" * 64,
+                    "raw_log": str(raw_log_path),
+                    "raw_log_sha256": raw_log_sha256,
                     "metrics": {"latency_ms": 10.0, "tokens_per_s": 200.0},
                 }
             )
@@ -352,8 +373,8 @@ def self_test() -> int:
                     "hardware": "fixture hardware",
                     "source": "bench.py",
                     "command": "python bench.py",
-                    "raw_log": "bench.log",
-                    "raw_log_sha256": "0" * 64,
+                    "raw_log": str(raw_log_path),
+                    "raw_log_sha256": raw_log_sha256,
                     "metrics": {"latency_ms": float("inf"), "tokens_per_s": 200.0},
                 }
             )
@@ -382,8 +403,8 @@ def self_test() -> int:
                     "hardware": "fixture hardware",
                     "source": "bench.py",
                     "command": "python bench.py",
-                    "raw_log": "bench.log",
-                    "raw_log_sha256": "0" * 64,
+                    "raw_log": str(raw_log_path),
+                    "raw_log_sha256": raw_log_sha256,
                     "metrics": {"latency_ms": 10.0, "tokens_per_s": 200.0},
                 }
             )
@@ -396,6 +417,66 @@ def self_test() -> int:
                 return 1
         else:
             print(json.dumps({"ok": False, "case": "artifact timestamp did not fail"}))
+            return 1
+
+        result_path.write_text(
+            json.dumps(
+                {
+                    "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
+                    "created_at_utc": created_at_utc,
+                    "fixture_id": "fixture",
+                    "backend": "cuda",
+                    "status": "passed",
+                    "manifest": "fixtures.json",
+                    "manifest_schema_version": 1,
+                    "fixture_spec_sha256": fixture_spec_sha256(manifest["fixtures"][0]),
+                    "hardware": "fixture hardware",
+                    "source": "bench.py",
+                    "command": "python bench.py",
+                    "raw_log": str(tmp_root / "missing.log"),
+                    "raw_log_sha256": raw_log_sha256,
+                    "metrics": {"latency_ms": 10.0, "tokens_per_s": 200.0},
+                }
+            )
+        )
+        try:
+            lock_manifest_thresholds(manifest, 0.10)
+        except ThresholdLockError as exc:
+            if "raw_log must exist" not in str(exc):
+                print(json.dumps({"ok": False, "case": "missing raw log", "error": str(exc)}))
+                return 1
+        else:
+            print(json.dumps({"ok": False, "case": "missing raw log did not fail"}))
+            return 1
+
+        result_path.write_text(
+            json.dumps(
+                {
+                    "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
+                    "created_at_utc": created_at_utc,
+                    "fixture_id": "fixture",
+                    "backend": "cuda",
+                    "status": "passed",
+                    "manifest": "fixtures.json",
+                    "manifest_schema_version": 1,
+                    "fixture_spec_sha256": fixture_spec_sha256(manifest["fixtures"][0]),
+                    "hardware": "fixture hardware",
+                    "source": "bench.py",
+                    "command": "python bench.py",
+                    "raw_log": str(raw_log_path),
+                    "raw_log_sha256": "1" * 64,
+                    "metrics": {"latency_ms": 10.0, "tokens_per_s": 200.0},
+                }
+            )
+        )
+        try:
+            lock_manifest_thresholds(manifest, 0.10)
+        except ThresholdLockError as exc:
+            if "raw_log_sha256 does not match raw_log" not in str(exc):
+                print(json.dumps({"ok": False, "case": "raw log checksum", "error": str(exc)}))
+                return 1
+        else:
+            print(json.dumps({"ok": False, "case": "raw log checksum did not fail"}))
             return 1
 
     print(json.dumps({"ok": True, "self_test": "backend latency threshold locker"}))

@@ -166,7 +166,7 @@ def fixture_provenance(
     provenance["manifest"] = repo_relative_path(manifest_path)
     provenance["manifest_schema_version"] = manifest_schema_version
     provenance["fixture_spec_sha256"] = fixture_spec_sha256(fixture)
-    provenance["raw_log"] = str(log_path)
+    provenance["raw_log"] = repo_relative_path(log_path)
     provenance["raw_log_sha256"] = sha256_file(log_path)
     return provenance
 

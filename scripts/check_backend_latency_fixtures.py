@@ -92,6 +92,19 @@ def valid_utc_timestamp(value: Any) -> bool:
     return parsed.tzinfo is not None and parsed.utcoffset() == timezone.utc.utcoffset(None)
 
 
+def resolve_artifact_path(path: str) -> Path:
+    candidate = Path(path)
+    return candidate if candidate.is_absolute() else ROOT / candidate
+
+
+def raw_log_digest(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def validate_result_provenance(
     errors: list[str],
     fixture: dict[str, Any],
@@ -99,6 +112,7 @@ def validate_result_provenance(
     context: str,
     manifest_schema_version: Any,
     manifest_path: Path | None,
+    require_raw_log_file: bool,
 ) -> None:
     if result.get("artifact_schema_version") != ARTIFACT_SCHEMA_VERSION:
         errors.append(
@@ -156,18 +170,16 @@ def validate_result_provenance(
         return
 
     if isinstance(raw_log, str) and raw_log:
-        raw_log_path = Path(raw_log)
-        if not raw_log_path.is_absolute():
-            raw_log_path = ROOT / raw_log_path
+        raw_log_path = resolve_artifact_path(raw_log)
         if raw_log_path.is_file():
-            digest = hashlib.sha256()
-            with raw_log_path.open("rb") as handle:
-                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                    digest.update(chunk)
-            if digest.hexdigest() != raw_log_sha256:
+            if raw_log_digest(raw_log_path) != raw_log_sha256:
                 errors.append(
                     f"{context}.result_artifact.raw_log_sha256 does not match raw_log"
                 )
+        elif require_raw_log_file:
+            errors.append(
+                f"{context}.result_artifact.raw_log must exist when --require-covered is set: {raw_log}"
+            )
 
 
 def validate_result_artifact(
@@ -177,6 +189,7 @@ def validate_result_artifact(
     context: str,
     manifest_schema_version: Any,
     manifest_path: Path | None,
+    require_raw_log_file: bool = False,
 ) -> None:
     try:
         result = json.loads(result_path.read_text())
@@ -209,6 +222,7 @@ def validate_result_artifact(
         context,
         manifest_schema_version,
         manifest_path,
+        require_raw_log_file,
     )
 
     observed_metrics = result.get("metrics")
@@ -334,6 +348,7 @@ def validate_manifest(
                 context,
                 manifest.get("schema_version"),
                 manifest_path,
+                require_raw_log_file=require_covered,
             )
 
     missing_fixture_slots = manifest.get("missing_fixture_slots", [])
@@ -418,11 +433,60 @@ def self_test() -> int:
             )
         )
         errors: list[str] = []
-        validate_result_artifact(errors, fixture, artifact, "fixtures[0]", 1, None)
+        validate_result_artifact(
+            errors,
+            fixture,
+            artifact,
+            "fixtures[0]",
+            1,
+            None,
+            require_raw_log_file=True,
+        )
         if errors:
             print(
                 json.dumps(
                     {"ok": False, "case": "passing artifact", "errors": errors},
+                    indent=2,
+                )
+            )
+            return 1
+
+        artifact.write_text(
+            json.dumps(
+                {
+                    "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
+                    "created_at_utc": created_at_utc,
+                    "fixture_id": "cuda_fixture",
+                    "backend": "cuda",
+                    "status": "passed",
+                    "manifest": "fixtures.json",
+                    "manifest_schema_version": 1,
+                    "fixture_spec_sha256": fixture_spec_sha256(fixture),
+                    "hardware": "fixture",
+                    "source": str(source.relative_to(ROOT))
+                    if source.is_relative_to(ROOT)
+                    else str(source),
+                    "command": "cargo bench",
+                    "raw_log": str(tmp_root / "missing.log"),
+                    "raw_log_sha256": raw_log_sha256,
+                    "metrics": {"latency_ms": 9.5, "tokens_per_s": 125.0},
+                }
+            )
+        )
+        errors = []
+        validate_result_artifact(
+            errors,
+            fixture,
+            artifact,
+            "fixtures[0]",
+            1,
+            None,
+            require_raw_log_file=True,
+        )
+        if not any("raw_log must exist" in error for error in errors):
+            print(
+                json.dumps(
+                    {"ok": False, "case": "missing raw log", "errors": errors},
                     indent=2,
                 )
             )
