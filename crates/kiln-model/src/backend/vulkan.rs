@@ -29,8 +29,8 @@ use super::vulkan_tensor_bridge::{
     vk_f32_tensors_to_cpu_tensors_batched_vk,
 };
 use super::{
-    vulkan_attention, vulkan_training, vulkan_weights, BackendRuntime, TrainingCapabilities,
-    TrainingPrecisionPolicy,
+    vulkan_attention, vulkan_linear, vulkan_training, vulkan_weights, BackendRuntime,
+    TrainingCapabilities, TrainingPrecisionPolicy,
 };
 use crate::forward::GpuWeights;
 
@@ -164,84 +164,6 @@ fn fused_gdn_resident_state_enabled() -> bool {
     *ENABLED.get_or_init(|| {
         std::env::var("KILN_DISABLE_VULKAN_GDN_DECODE_FUSED_RESIDENT_STATE").is_err()
     })
-}
-
-/// Read `KILN_VULKAN_LINEAR` env var. When enabled, the autograd-safe
-/// `linear_prefill_apply` path wraps the existing Vulkan linear kernel in
-/// a `CustomOp1` so training projections produce a tracked tensor whose
-/// backward computes a real gradient instead of dropping it at the leaf
-/// returned by the inference-shaped `linear_decode`.
-///
-/// Default: **enabled**. The previous opt-in default reflected the
-/// post-host-crash uncertainty: lm_head forward at the original
-/// `/tmp/sft-data.jsonl` repro shape would queue ~4.36M workgroups
-/// in one submit on a 40-CU APU and hang the box. Mitigations now in
-/// place make the dispatch safe by construction:
-///   - `VulkanLinearOp` chunks oversized BF16 matmuls along the
-///     output dim (fwd) or batch dim (bwd) so each per-chunk submit
-///     stays under the 20 GFLOP per-submit ceiling (commit ca4f53ef);
-///   - FLCE provider auto-engages at `active_count ≥ 16` so the SFT
-///     loss path goes through chunked FLCE rather than the unfused
-///     lm_head dispatch (commit 6182f74);
-///   - `linear_prefill_apply_offset` sub-chunks any FLCE chunk that
-///     would itself exceed the ceiling.
-/// (#1082) Per-dispatch FLOP ceiling for the Vulkan-routed matmul.
-///
-/// Migrated inline from the deleted `backend::vulkan_linear_op` module
-/// (its `candle_core::CustomOp1` training wrapper was removed when the kt
-/// autograd tape became the sole grad producer). The forward-only FLCE
-/// offset path in `linear_prefill_apply_offset` still needs the ceiling to
-/// sub-chunk oversized dispatches: the host hard-hung twice on Strix Halo
-/// when a single oversized submit (~4.36M workgroups) was queued, so the
-/// ceiling caps per-submit FLOP. Tunable via `KILN_VULKAN_LINEAR_MAX_GFLOP`
-/// (parsed once; `0` disables the guard).
-const DEFAULT_MAX_FLOP_PER_DISPATCH: u64 = 20_000_000_000;
-
-/// FLOP estimate for `[batch, hidden] @ [hidden, out_dim]` (one mul + one
-/// add per inner term).
-fn matmul_flop(batch: usize, hidden: usize, out_dim: usize) -> u64 {
-    (batch as u64)
-        .saturating_mul(hidden as u64)
-        .saturating_mul(out_dim as u64)
-        .saturating_mul(2)
-}
-
-fn max_flop_per_dispatch() -> u64 {
-    static CEILING: OnceLock<u64> = OnceLock::new();
-    *CEILING.get_or_init(|| {
-        std::env::var("KILN_VULKAN_LINEAR_MAX_GFLOP")
-            .ok()
-            .as_deref()
-            .map(str::trim)
-            .and_then(|s| s.parse::<f64>().ok())
-            .map(|gflop| {
-                if gflop <= 0.0 {
-                    u64::MAX
-                } else {
-                    (gflop * 1.0e9_f64).round() as u64
-                }
-            })
-            .unwrap_or(DEFAULT_MAX_FLOP_PER_DISPATCH)
-    })
-}
-
-/// True when the requested matmul shape would exceed the per-dispatch FLOP
-/// ceiling; the caller sub-chunks via [`max_chunk_dim_for_flop`].
-fn dispatch_exceeds_safety_ceiling(batch: usize, hidden: usize, out_dim: usize) -> bool {
-    matmul_flop(batch, hidden, out_dim) > max_flop_per_dispatch()
-}
-
-/// Largest `chunk_dim` such that `2 × other_dim_product × chunk_dim ≤
-/// max_flop_per_dispatch()`. Always ≥ 1; returns `usize::MAX` when the
-/// guard is disabled.
-fn max_chunk_dim_for_flop(other_dim_product: usize) -> usize {
-    let max_flop = max_flop_per_dispatch();
-    if max_flop == u64::MAX {
-        return usize::MAX;
-    }
-    let denom = (other_dim_product as u64).saturating_mul(2).max(1);
-    let chunk = (max_flop / denom) as usize;
-    chunk.max(1)
 }
 
 impl VulkanBackend {
@@ -1959,8 +1881,10 @@ impl BackendRuntime for VulkanBackend {
         // each submit fits — that's strictly better than bailing to
         // FLCE's CPU fallback because each sub-chunk still uses the
         // same offset kernel with no re-upload of the weight buffer.
-        let sub_chunk_len = if dispatch_exceeds_safety_ceiling(row_count, hidden_x, chunk_len) {
-            max_chunk_dim_for_flop(row_count.saturating_mul(hidden_x)).min(chunk_len)
+        let sub_chunk_len = if vulkan_linear::dispatch_exceeds_safety_ceiling(
+            row_count, hidden_x, chunk_len,
+        ) {
+            vulkan_linear::max_chunk_dim_for_flop(row_count.saturating_mul(hidden_x)).min(chunk_len)
         } else {
             chunk_len
         };
