@@ -54,7 +54,7 @@ pub struct VulkanBackend {
     /// Cached at construction: reading env vars per decode step × 24 GDN layers
     /// shows up in decode NVTX captures. Env vars don't change at runtime.
     pub(super) gdn_enabled: bool,
-    gdn_prefill_in_proj_enabled: bool,
+    pub(super) gdn_prefill_in_proj_enabled: bool,
     pub(super) gdn_gates_enabled: bool,
     pub(super) gdn_gated_rms_norm_enabled: bool,
     pub(super) gdn_full_chunk_forward_enabled: bool,
@@ -948,81 +948,14 @@ impl BackendRuntime for VulkanBackend {
             kiln_tensor::Tensor,
         )>,
     > {
-        // kt guards read directly off the kt args before the bridge.
-        if !self.has_vulkan() || !self.gdn_enabled || x.dtype() != kiln_tensor::DType::F32 {
-            return Ok(None);
-        }
-        if !matches!(x.device(), kiln_tensor::Device::Cpu)
-            || !matches!(in_proj_qkv_t.device(), kiln_tensor::Device::Cpu)
-            || !matches!(in_proj_z_t.device(), kiln_tensor::Device::Cpu)
-            || !matches!(in_proj_a_t.device(), kiln_tensor::Device::Cpu)
-            || !matches!(in_proj_b_t.device(), kiln_tensor::Device::Cpu)
-        {
-            return Ok(None);
-        }
-        // (#1082) Fully kt-native: shapes off kt, weight buffers keyed on the
-        // stable kt id (upload once), x bytes + outputs straight from/to kt.
-        let Ok((batch, seq_len, hidden)) = x.dims3() else {
-            return Ok(None);
-        };
-        if seq_len != 1 && !self.gdn_prefill_in_proj_enabled {
-            return Ok(None);
-        }
-
-        let Ok((qkv_hidden, qkv_dim)) = in_proj_qkv_t.dims2() else {
-            return Ok(None);
-        };
-        let Ok((z_hidden, z_dim)) = in_proj_z_t.dims2() else {
-            return Ok(None);
-        };
-        let Ok((a_hidden, a_dim)) = in_proj_a_t.dims2() else {
-            return Ok(None);
-        };
-        let Ok((b_hidden, b_dim)) = in_proj_b_t.dims2() else {
-            return Ok(None);
-        };
-        if qkv_hidden != hidden || z_hidden != hidden || a_hidden != hidden || b_hidden != hidden {
-            return Ok(None);
-        }
-
-        let vk_device = self
-            .vulkan_device
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
-        let row_count = batch * seq_len;
-        let x_data = kt_tensor_to_f32_bytes_with_shape(x)?.0;
-        let use_bf16 = self.bf16_packed_gdn_in_proj_weights_enabled
-            && in_proj_qkv_t.dtype() == kiln_tensor::DType::BF16
-            && in_proj_z_t.dtype() == kiln_tensor::DType::BF16
-            && in_proj_a_t.dtype() == kiln_tensor::DType::BF16
-            && in_proj_b_t.dtype() == kiln_tensor::DType::BF16;
-        let (qkv_b, z_b, a_b, b_b) = if use_bf16 {
-            let qkv_buf = self.cached_bf16_packed_weight_buffer_kt(in_proj_qkv_t)?;
-            let z_buf = self.cached_bf16_packed_weight_buffer_kt(in_proj_z_t)?;
-            let a_buf = self.cached_bf16_packed_weight_buffer_kt(in_proj_a_t)?;
-            let b_buf = self.cached_bf16_packed_weight_buffer_kt(in_proj_b_t)?;
-            kiln_vulkan_kernel::kernels::dispatch_gdn_in_proj_decode_cached_bf16_weights_bytes(
-                vk_device, &x_data, row_count, &qkv_buf, &z_buf, &a_buf, &b_buf, hidden, qkv_dim,
-                z_dim, a_dim, b_dim,
-            )
-            .context("gdn_in_proj_decode kernel failed")?
-        } else {
-            let qkv_buf = self.cached_f32_weight_buffer_kt(in_proj_qkv_t)?;
-            let z_buf = self.cached_f32_weight_buffer_kt(in_proj_z_t)?;
-            let a_buf = self.cached_f32_weight_buffer_kt(in_proj_a_t)?;
-            let b_buf = self.cached_f32_weight_buffer_kt(in_proj_b_t)?;
-            kiln_vulkan_kernel::kernels::dispatch_gdn_in_proj_decode_cached_bytes(
-                vk_device, &x_data, row_count, &qkv_buf, &z_buf, &a_buf, &b_buf, hidden, qkv_dim,
-                z_dim, a_dim, b_dim,
-            )
-            .context("gdn_in_proj_decode kernel failed")?
-        };
-        Ok(Some((
-            kt_tensor_from_f32_bytes(&qkv_b, &[batch, seq_len, qkv_dim], kiln_tensor::DType::F32)?,
-            kt_tensor_from_f32_bytes(&z_b, &[batch, seq_len, z_dim], kiln_tensor::DType::F32)?,
-            kt_tensor_from_f32_bytes(&a_b, &[batch, seq_len, a_dim], kiln_tensor::DType::F32)?,
-            kt_tensor_from_f32_bytes(&b_b, &[batch, seq_len, b_dim], kiln_tensor::DType::F32)?,
-        )))
+        vulkan_gdn::gdn_in_proj_decode(
+            self,
+            x,
+            in_proj_qkv_t,
+            in_proj_z_t,
+            in_proj_a_t,
+            in_proj_b_t,
+        )
     }
 
     fn gdn_decode_gates_recurrent_rmsnorm(
