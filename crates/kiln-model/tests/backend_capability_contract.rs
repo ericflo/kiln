@@ -628,6 +628,64 @@ fn generated_capability_report_gates_replay_contract() {
 }
 
 #[test]
+fn generated_capability_report_gates_matmul_linear_contract() {
+    let report_path = workspace_root().join("docs/backend-capability-report.json");
+    let report: Value = serde_json::from_str(
+        &fs::read_to_string(&report_path).expect("capability report json should be readable"),
+    )
+    .expect("capability report json should parse");
+
+    let conformance_gates = report["conformance_gates"]
+        .as_array()
+        .expect("conformance_gates should be an array");
+    let matmul_gate = conformance_gates
+        .iter()
+        .find(|gate| gate["gate"] == "matmul_linear_parity")
+        .expect("matmul/linear parity gate should be present");
+    assert_eq!(matmul_gate["status"], "covered");
+    assert!(
+        matmul_gate["evidence_missing"]
+            .as_array()
+            .expect("matmul/linear missing evidence should be an array")
+            .is_empty(),
+        "covered matmul/linear parity gate should not have missing evidence"
+    );
+
+    let evidence = matmul_gate["evidence_present"]
+        .as_array()
+        .expect("matmul/linear evidence should be an array")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    for path in [
+        "crates/kiln-model/src/backend/capability.rs",
+        "crates/kiln-model/src/backend/mod.rs",
+        "crates/kiln-blas/tests/cublaslt_handle_smoke.rs",
+        "crates/kiln-tensor/tests/rocm_matmul_parity.rs",
+        "crates/kiln-tensor/tests/metal_ops_parity.rs",
+        "crates/kiln-vulkan-kernel/tests/vk_matmul_parity.rs",
+        "crates/kiln-vulkan-kernel/tests/linear_decode_argmax.rs",
+        "crates/kiln-vulkan-kernel/tests/linear_decode_sample.rs",
+        "crates/kiln-model/tests/tape_forward_parity.rs",
+        "crates/kiln-model/tests/marlin_qproj_parity.rs",
+    ] {
+        assert!(
+            evidence.contains(&path),
+            "matmul/linear parity gate should cite {path}"
+        );
+    }
+
+    let request_queries = report["request_capability_queries"]
+        .as_array()
+        .expect("request_capability_queries should be an array")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    assert!(request_queries.contains(&"supports_matmul_request"));
+    assert!(request_queries.contains(&"supports_linear_request"));
+}
+
+#[test]
 fn generated_capability_report_tracks_one_step_training_proof_gap() {
     let report_path = workspace_root().join("docs/backend-capability-report.json");
     let report: Value = serde_json::from_str(
