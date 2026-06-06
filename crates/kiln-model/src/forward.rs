@@ -12142,7 +12142,6 @@ pub fn lm_head_sample_backend_decode_if(
     let Some(backend) = backend else {
         return Ok(None);
     };
-    let (history_indices, history_counts) = unique_history_counts(history);
     let seed = step_seed.unwrap_or_else(|| {
         // PRNG seed for un-seeded requests — derived from nanos +
         // history hash so consecutive un-seeded tokens see distinct
@@ -12156,6 +12155,12 @@ pub fn lm_head_sample_backend_decode_if(
         });
         nanos.wrapping_add(h)
     });
+    let penalty_history: &[u32] = if params.token_penalties_are_no_op() {
+        &[]
+    } else {
+        history
+    };
+    let (history_indices, history_counts) = unique_history_counts(penalty_history);
 
     #[cfg(feature = "rocm")]
     {

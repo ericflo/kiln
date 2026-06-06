@@ -27,6 +27,11 @@ fn a8_enabled() -> bool {
 }
 
 #[cfg(feature = "rocm")]
+fn a8_sample_enabled() -> bool {
+    a8_enabled() && kiln_core::env_flag::env_flag("KILN_ROCM_W8A8_SAMPLED_LM_HEAD", true)
+}
+
+#[cfg(feature = "rocm")]
 fn swiglu_disabled() -> bool {
     kiln_core::env_flag::env_flag("KILN_DISABLE_ROCM_W8_SWIGLU", false)
 }
@@ -157,19 +162,35 @@ pub fn gumbel_sample_bf16(
     temperature: f32,
     seed: u64,
 ) -> Result<u32> {
-    let idx = kiln_tensor::rocm_w8a16_gemv_gumbel_sample_bf16(
-        x,
-        &w.q_weight,
-        &w.scales,
-        history_indices,
-        history_counts,
-        repetition_penalty,
-        presence_penalty,
-        frequency_penalty,
-        temperature,
-        seed,
-    )
-    .map_err(|e| anyhow::anyhow!("rocm_w8_proj: gemv_gumbel_sample: {e}"))?;
+    let idx = if a8_sample_enabled() {
+        kiln_tensor::rocm_w8a8_gemv_gumbel_sample_bf16(
+            x,
+            &w.q_weight,
+            &w.scales,
+            history_indices,
+            history_counts,
+            repetition_penalty,
+            presence_penalty,
+            frequency_penalty,
+            temperature,
+            seed,
+        )
+        .map_err(|e| anyhow::anyhow!("rocm_w8_proj: a8 gemv_gumbel_sample: {e}"))?
+    } else {
+        kiln_tensor::rocm_w8a16_gemv_gumbel_sample_bf16(
+            x,
+            &w.q_weight,
+            &w.scales,
+            history_indices,
+            history_counts,
+            repetition_penalty,
+            presence_penalty,
+            frequency_penalty,
+            temperature,
+            seed,
+        )
+        .map_err(|e| anyhow::anyhow!("rocm_w8_proj: gemv_gumbel_sample: {e}"))?
+    };
     let values = idx
         .flatten_all()
         .context("rocm_w8_proj: flatten gumbel sample")?

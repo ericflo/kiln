@@ -353,6 +353,59 @@ __global__ void kiln_w8a16_gemv_gumbel_scores_kernel(
     }
 }
 
+__global__ void kiln_w8a8_gemv_gumbel_scores_kernel(
+    const uint8_t* __restrict__ x_q_u8,
+    const uint8_t* __restrict__ w_q_u8,
+    const float* __restrict__ x_scales,
+    const float* __restrict__ w_scales,
+    const uint32_t* __restrict__ history_indices,
+    const uint32_t* __restrict__ history_counts,
+    float* __restrict__ scores,
+    int64_t n,
+    int64_t k,
+    int64_t history_len,
+    float repetition_penalty,
+    float presence_penalty,
+    float frequency_penalty,
+    float inv_temperature,
+    uint64_t seed) {
+    int64_t col = static_cast<int64_t>(blockIdx.x);
+    int tid = threadIdx.x;
+    if (col >= n) return;
+
+    const int8_t* x_row = reinterpret_cast<const int8_t*>(x_q_u8);
+    const int8_t* w_row = reinterpret_cast<const int8_t*>(w_q_u8 + col * k);
+
+    int local = 0;
+    int64_t k4 = (k / 4) * 4;
+    for (int64_t c = static_cast<int64_t>(tid) * 4; c < k4; c += static_cast<int64_t>(blockDim.x) * 4) {
+        int32_t xv = kiln_pack4_i8(x_row + c);
+        int32_t wv = kiln_pack4_i8(w_row + c);
+        local = kiln_sdot4_i8(xv, wv, local);
+    }
+    for (int64_t c = k4 + tid; c < k; c += blockDim.x) {
+        local += static_cast<int>(x_row[c]) * static_cast<int>(w_row[c]);
+    }
+
+    __shared__ int smem[A8_GEMV_BLOCK];
+    float score = static_cast<float>(kiln_block_reduce_sum(local, smem)) * x_scales[0] * w_scales[col];
+    if (tid == 0) {
+        for (int64_t i = 0; i < history_len; ++i) {
+            if (static_cast<int64_t>(history_indices[i]) == col) {
+                if (repetition_penalty != 1.0f) {
+                    score = score > 0.0f ? score / repetition_penalty : score * repetition_penalty;
+                }
+                score -= presence_penalty;
+                score -= frequency_penalty * static_cast<float>(history_counts[i]);
+                break;
+            }
+        }
+        score *= inv_temperature;
+        const float u = kiln_uniform01(seed, col);
+        scores[col] = score - logf(-logf(u));
+    }
+}
+
 }  // namespace
 
 extern "C" int kiln_w8a16_gemv_bf16_async(
@@ -575,6 +628,62 @@ extern "C" int kiln_w8a16_gemv_gumbel_sample_bf16_async(
         static_cast<const __nv_bfloat16*>(x),
         static_cast<const uint8_t*>(w_q),
         static_cast<const float*>(scales),
+        static_cast<const uint32_t*>(history_indices),
+        static_cast<const uint32_t*>(history_counts),
+        static_cast<float*>(scores),
+        n,
+        k,
+        history_len,
+        repetition_penalty,
+        presence_penalty,
+        frequency_penalty,
+        inv_temperature,
+        seed);
+    cudaError_t err = cudaGetLastError();
+    if (err != cudaSuccess) return 1000 + static_cast<int>(err);
+
+    kiln_w8a16_gemv_argmax_reduce_kernel<<<1, ARGMAX_BLOCK, 0, stream>>>(
+        static_cast<const float*>(scores),
+        static_cast<int64_t*>(out_idx),
+        n);
+    err = cudaGetLastError();
+    if (err != cudaSuccess) return 2000 + static_cast<int>(err);
+    return 0;
+}
+
+extern "C" int kiln_w8a8_gemv_gumbel_sample_bf16_async(
+    const void* x_q,
+    const void* w_q,
+    const void* x_scales,
+    const void* w_scales,
+    const void* history_indices,
+    const void* history_counts,
+    void* scores,
+    void* out_idx,
+    int64_t n,
+    int64_t k,
+    int64_t history_len,
+    float repetition_penalty,
+    float presence_penalty,
+    float frequency_penalty,
+    float inv_temperature,
+    uint64_t seed,
+    void* stream_raw) {
+    if (n < 0 || k < 0 || history_len < 0) return 1;
+    if (n == 0 || k == 0) return 2;
+    if (n > static_cast<int64_t>(2147483647)) return 3;
+    if (!(inv_temperature > 0.0f) || inv_temperature != inv_temperature
+        || inv_temperature > 3.4028234663852886e38f) return 4;
+    if (!(repetition_penalty > 0.0f) || repetition_penalty != repetition_penalty
+        || repetition_penalty > 3.4028234663852886e38f) return 5;
+    if (history_len > 0 && (history_indices == nullptr || history_counts == nullptr)) return 6;
+
+    cudaStream_t stream = reinterpret_cast<cudaStream_t>(stream_raw);
+    kiln_w8a8_gemv_gumbel_scores_kernel<<<static_cast<unsigned int>(n), A8_GEMV_BLOCK, 0, stream>>>(
+        static_cast<const uint8_t*>(x_q),
+        static_cast<const uint8_t*>(w_q),
+        static_cast<const float*>(x_scales),
+        static_cast<const float*>(w_scales),
         static_cast<const uint32_t*>(history_indices),
         static_cast<const uint32_t*>(history_counts),
         static_cast<float*>(scores),
