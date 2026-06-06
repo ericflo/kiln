@@ -484,6 +484,229 @@ pub(super) fn gdn_recurrent_step(
     Ok(Some(out))
 }
 
+pub(super) fn gdn_recurrent_prefill_native_head_last(
+    backend: &VulkanBackend,
+    q: &kiln_tensor::Tensor,
+    k: &kiln_tensor::Tensor,
+    v: &kiln_tensor::Tensor,
+    beta: &kiln_tensor::Tensor,
+    g: &kiln_tensor::Tensor,
+    state_kt: &mut kiln_tensor::Tensor,
+) -> Result<Option<kiln_tensor::Tensor>> {
+    // kt guards read directly off the kt args before the bridge.
+    if !backend.has_vulkan()
+        || !backend.gdn_recurrent_unexpanded_qk_enabled
+        || !matches!(
+            q.dtype(),
+            kiln_tensor::DType::BF16 | kiln_tensor::DType::F32
+        )
+    {
+        return Ok(None);
+    }
+    if !matches!(q.device(), kiln_tensor::Device::Cpu)
+        || !matches!(k.device(), kiln_tensor::Device::Cpu)
+        || !matches!(v.device(), kiln_tensor::Device::Cpu)
+        || !matches!(beta.device(), kiln_tensor::Device::Cpu)
+        || !matches!(g.device(), kiln_tensor::Device::Cpu)
+        || !matches!(state_kt.device(), kiln_tensor::Device::Cpu)
+    {
+        return Ok(None);
+    }
+    // (#1082) kt-native: all args are already kt; `state_kt` is mutated in
+    // place. The recurrent-state resident cache keys on the kt `TensorId`.
+    let Ok((batch, seq_len, q_heads, dk)) = q.dims4() else {
+        return Ok(None);
+    };
+    let Ok((k_batch, k_seq_len, k_heads, k_dk)) = k.dims4() else {
+        return Ok(None);
+    };
+    let Ok((v_batch, v_seq_len, heads, dv)) = v.dims4() else {
+        return Ok(None);
+    };
+    let Ok((beta_batch, beta_seq_len, beta_heads)) = beta.dims3() else {
+        return Ok(None);
+    };
+    let Ok((g_batch, g_seq_len, g_heads)) = g.dims3() else {
+        return Ok(None);
+    };
+    let Ok((state_batch, state_heads, state_dk, state_dv)) = state_kt.dims4() else {
+        return Ok(None);
+    };
+    if seq_len != 1
+        || k_batch != batch
+        || k_seq_len != seq_len
+        || k_heads != q_heads
+        || k_dk != dk
+        || v_batch != batch
+        || v_seq_len != seq_len
+        || beta_batch != batch
+        || beta_seq_len != seq_len
+        || beta_heads != heads
+        || g_batch != batch
+        || g_seq_len != seq_len
+        || g_heads != heads
+        || state_batch != batch
+        || state_heads != heads
+        || state_dk != dk
+        || state_dv != dv
+        || q_heads == 0
+        || heads % q_heads != 0
+    {
+        return Ok(None);
+    }
+
+    let vk_device = backend
+        .vulkan_device()
+        .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
+    if backend.recurrent_state_residency_enabled
+        && recurrent_state_resident_scope_active()
+        && state_kt.dtype() == q.dtype()
+    {
+        let state_id = state_kt.id();
+        let resident_state = get_recurrent_state_resident_buffer(state_id);
+        let q_data = kt_tensor_to_f32_bytes_with_shape(q)?.0;
+        let k_data = kt_tensor_to_f32_bytes_with_shape(k)?.0;
+        let v_data = kt_tensor_to_f32_bytes_with_shape(v)?.0;
+        let beta_data = kt_tensor_to_f32_bytes_with_shape(beta)?.0;
+        let g_data = kt_tensor_to_f32_bytes_with_shape(g)?.0;
+        let state_data_owned = if resident_state.is_none() {
+            Some(kt_tensor_to_f32_bytes_with_shape(state_kt)?.0)
+        } else {
+            None
+        };
+        let (batch, seq_len, q_heads, dk) = q.dims4()?;
+        let (_, _, heads, dv) = v.dims4()?;
+        let q_dtype = q.dtype();
+        let (out_data, resident_state) =
+            kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_native_head_last_resident_state_bytes(
+                vk_device,
+                &q_data, &k_data, &v_data, &beta_data, &g_data,
+                state_data_owned.as_deref(),
+                batch, seq_len, q_heads, heads, dk, dv,
+                resident_state,
+            )
+            .context("gdn_recurrent_step native-head resident-state Vulkan kernel failed")?;
+        // `out_data` is the un-unsqueezed [batch, heads, dv] layout.
+        // Reconstruct the kt tensor and re-unsqueeze to match prior public shape.
+        let out_no_seq = kt_tensor_from_f32_bytes(&out_data, &[batch, heads, dv], q_dtype)?;
+        let out = out_no_seq.unsqueeze(1)?;
+        insert_recurrent_state_resident_buffer(state_id, resident_state);
+        return Ok(Some(out));
+    }
+    let skip_state_readback = crate::forward::vulkan_skip_gdn_state_readback_active();
+    let (batch, _seq, q_heads, dk) = q.dims4()?;
+    let (_, _, heads, dv) = v.dims4()?;
+    let q_dtype = q.dtype();
+    let state_dtype = state_kt.dtype();
+    let state_dims = state_kt.dims().to_vec();
+    let q_data = kt_tensor_to_f32_bytes_with_shape(q)?.0;
+    let k_data = kt_tensor_to_f32_bytes_with_shape(k)?.0;
+    let v_data = kt_tensor_to_f32_bytes_with_shape(v)?.0;
+    let beta_data = kt_tensor_to_f32_bytes_with_shape(beta)?.0;
+    let g_data = kt_tensor_to_f32_bytes_with_shape(g)?.0;
+    let state_data = kt_tensor_to_f32_bytes_with_shape(state_kt)?.0;
+    let (out_data, new_state_data) =
+        kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_step_native_head_last_with_options_bytes(
+            vk_device,
+            &q_data,
+            &k_data,
+            &v_data,
+            &beta_data,
+            &g_data,
+            &state_data,
+            batch,
+            q_heads,
+            heads,
+            dk,
+            dv,
+            skip_state_readback,
+        )
+        .context("gdn_recurrent_step native-head Vulkan kernel failed")?;
+    let out = kt_tensor_from_f32_bytes(&out_data, &[batch, heads, dv], q_dtype)?.unsqueeze(1)?;
+    if let Some(sd) = new_state_data {
+        *state_kt = kt_tensor_from_f32_bytes(&sd, &state_dims, state_dtype)?;
+    }
+    Ok(Some(out))
+}
+
+pub(super) fn gdn_recurrent_qk_norm_prefill_native_head_last(
+    backend: &VulkanBackend,
+    q: &kiln_tensor::Tensor,
+    k: &kiln_tensor::Tensor,
+    v: &kiln_tensor::Tensor,
+    beta: &kiln_tensor::Tensor,
+    g: &kiln_tensor::Tensor,
+    state_kt: &mut kiln_tensor::Tensor,
+    q_scale: f64,
+    qk_eps: f64,
+) -> Result<Option<kiln_tensor::Tensor>> {
+    // kt guards read directly off the kt args before the bridge.
+    if !backend.has_vulkan()
+        || !backend.gdn_recurrent_qk_norm_unexpanded_enabled
+        || !matches!(
+            q.dtype(),
+            kiln_tensor::DType::F32 | kiln_tensor::DType::BF16
+        )
+    {
+        return Ok(None);
+    }
+    if !matches!(q.device(), kiln_tensor::Device::Cpu)
+        || !matches!(k.device(), kiln_tensor::Device::Cpu)
+        || !matches!(v.device(), kiln_tensor::Device::Cpu)
+        || !matches!(beta.device(), kiln_tensor::Device::Cpu)
+        || !matches!(g.device(), kiln_tensor::Device::Cpu)
+        || !matches!(state_kt.device(), kiln_tensor::Device::Cpu)
+    {
+        return Ok(None);
+    }
+    // (#1082) kt-native: all args are already kt; `state_kt` is mutated in
+    // place at the return below.
+    let Ok((_, _, _, dk)) = q.dims4() else {
+        return Ok(None);
+    };
+    let expected_scale = 1.0 / (dk as f64).sqrt();
+    if (q_scale - expected_scale).abs() > 1e-6 || (qk_eps - 1e-6).abs() > 1e-12 {
+        return Ok(None);
+    }
+    let vk_device = backend
+        .vulkan_device()
+        .ok_or_else(|| anyhow::anyhow!("Vulkan device not available"))?;
+    let skip_state_readback = crate::forward::vulkan_skip_gdn_state_readback_active();
+    let (batch, _seq, q_heads, dk) = q.dims4()?;
+    let (_, _, heads, dv) = v.dims4()?;
+    let state_dtype = state_kt.dtype();
+    let state_dims = state_kt.dims().to_vec();
+    let q_data = kt_tensor_to_f32_bytes_with_shape(q)?.0;
+    let k_data = kt_tensor_to_f32_bytes_with_shape(k)?.0;
+    let v_data = kt_tensor_to_f32_bytes_with_shape(v)?.0;
+    let beta_data = kt_tensor_to_f32_bytes_with_shape(beta)?.0;
+    let g_data = kt_tensor_to_f32_bytes_with_shape(g)?.0;
+    let state_data = kt_tensor_to_f32_bytes_with_shape(state_kt)?.0;
+    let (out_data, new_state_data) =
+        kiln_vulkan_kernel::kernels::dispatch_gdn_recurrent_qk_norm_step_native_head_last_with_options_bytes(
+            vk_device,
+            &q_data,
+            &k_data,
+            &v_data,
+            &beta_data,
+            &g_data,
+            &state_data,
+            batch,
+            q_heads,
+            heads,
+            dk,
+            dv,
+            skip_state_readback,
+        )
+        .context("gdn_recurrent_qk_norm native-head Vulkan kernel failed")?;
+    let out =
+        kt_tensor_from_f32_bytes(&out_data, &[batch, heads, dv], state_dtype)?.unsqueeze(1)?;
+    if let Some(sd) = new_state_data {
+        *state_kt = kt_tensor_from_f32_bytes(&sd, &state_dims, state_dtype)?;
+    }
+    Ok(Some(out))
+}
+
 pub(super) fn gdn_gates(
     backend: &VulkanBackend,
     a: &kiln_tensor::Tensor,
