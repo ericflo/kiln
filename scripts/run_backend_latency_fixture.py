@@ -16,6 +16,7 @@ from typing import Any
 
 from write_backend_latency_result_artifact import (
     ArtifactError,
+    GIT_COMMIT_RE,
     build_result_artifact,
     default_output_path,
     find_fixture,
@@ -188,6 +189,8 @@ def self_test() -> int:
             or result.get("manifest") != str(manifest_path)
             or result.get("manifest_schema_version") != 1
             or not isinstance(result.get("fixture_spec_sha256"), str)
+            or not GIT_COMMIT_RE.match(result.get("git_commit", ""))
+            or not isinstance(result.get("git_tracked_dirty"), bool)
             or result.get("hardware") != "fixture hardware"
             or result.get("source") != str(bench_script)
             or result.get("source_sha256") != source_sha256

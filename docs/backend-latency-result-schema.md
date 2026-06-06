@@ -30,7 +30,7 @@ The result artifact is JSON:
 
 ```json
 {
-  "artifact_schema_version": 2,
+  "artifact_schema_version": 3,
   "created_at_utc": "2026-06-06T12:00:00Z",
   "fixture_id": "metal_apple_silicon_matmul_qwen35_4b",
   "backend": "metal",
@@ -44,6 +44,8 @@ The result artifact is JSON:
   "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-tensor --features metal --test metal_matmul_bench -- --ignored --nocapture",
   "raw_log": "bench-results/backend-latency/raw/metal-apple-silicon-matmul-qwen35-4b-20260606T120000Z.log",
   "raw_log_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "git_commit": "1111111111111111111111111111111111111111",
+  "git_tracked_dirty": false,
   "metrics": {
     "decode_qkv_m1_2560x4096_ms": 1.23
   }
@@ -52,7 +54,7 @@ The result artifact is JSON:
 
 Required fields:
 
-- `artifact_schema_version`: result artifact schema version, currently `2`
+- `artifact_schema_version`: result artifact schema version, currently `3`
 - `created_at_utc`: ISO-8601 UTC timestamp ending in `Z` for when the artifact
   was materialized
 - `fixture_id`: exactly matches the fixture `id`
@@ -74,6 +76,10 @@ Required fields:
   `bench-results/backend-latency/raw`, use a `.log` extension, and exist when
   validated
 - `raw_log_sha256`: lowercase SHA-256 hex digest of the raw fixture log
+- `git_commit`: lowercase 40-character git commit for the checkout that
+  captured the artifact
+- `git_tracked_dirty`: boolean reporting whether tracked files were dirty when
+  the artifact was materialized; covered fixtures require this to be `false`
 - `metrics`: object containing exactly every metric named by the fixture, with
   finite numeric values
 
@@ -88,7 +94,9 @@ live under `bench-results/backend-latency` with a `.json` extension, result
 `raw_log` paths to live under `bench-results/backend-latency/raw` with a `.log`
 extension, and the referenced source and `raw_log` files to exist in the
 checkout and checks that their SHA-256 digests match
-`source_sha256` and `raw_log_sha256`. It then re-parses the raw log
+`source_sha256` and `raw_log_sha256`. It requires `git_commit` to be a
+lowercase 40-character commit and `git_tracked_dirty` to be `false` for covered
+validation. It then re-parses the raw log
 `KILN_LATENCY_METRIC` lines and requires every declared artifact metric value
 and unit to match the raw log. It rejects unknown artifact keys and undeclared
 artifact metrics.
@@ -165,7 +173,9 @@ requires the fixture `source`, result `manifest`, and result `raw_log` paths to
 be repo-relative, result `raw_log` to live under
 `bench-results/backend-latency/raw` with a `.log` extension, and the referenced
 source and raw log files to exist and match `source_sha256`/`raw_log_sha256`.
-It re-parses the raw log and requires each
+It requires `git_commit` to be a lowercase 40-character commit and
+`git_tracked_dirty` to be `false` before thresholds can lock. It re-parses the
+raw log and requires each
 artifact metric value and unit to match before deriving thresholds. It sets every
 fixture `threshold_state` to
 `locked_threshold`, sets the manifest `status` to `covered`, and applies the

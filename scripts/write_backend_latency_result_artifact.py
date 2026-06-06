@@ -8,6 +8,7 @@ import hashlib
 import json
 import math
 import re
+import subprocess
 import sys
 import tempfile
 from datetime import datetime, timezone
@@ -16,12 +17,13 @@ from typing import Any
 
 
 ROOT = Path(__file__).resolve().parents[1]
-ARTIFACT_SCHEMA_VERSION = 2
+ARTIFACT_SCHEMA_VERSION = 3
 LATENCY_RESULT_ARTIFACT_DIR = Path("bench-results/backend-latency")
 LATENCY_RAW_LOG_DIR = LATENCY_RESULT_ARTIFACT_DIR / "raw"
 METRIC_RE = re.compile(r"^\s*KILN_LATENCY_METRIC\s+(\S+)\s+([-+0-9.eE]+)\s+(\S+)\s*$")
 VALID_RESULT_STATUSES = {"passed", "failed"}
 CHECKSUM_RE = re.compile(r"^[0-9a-f]{64}$")
+GIT_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 FIXTURE_DIGEST_METRIC_FIELDS = ["name", "unit", "comparison"]
 RESULT_ARTIFACT_KEYS = {
     "artifact_schema_version",
@@ -30,6 +32,8 @@ RESULT_ARTIFACT_KEYS = {
     "created_at_utc",
     "fixture_id",
     "fixture_spec_sha256",
+    "git_commit",
+    "git_tracked_dirty",
     "hardware",
     "manifest",
     "manifest_schema_version",
@@ -127,6 +131,32 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
+def git_output(args: list[str]) -> str:
+    try:
+        completed = subprocess.run(
+            ["git", *args],
+            cwd=ROOT,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise ArtifactError(f"git {' '.join(args)} failed: {exc}") from exc
+    return completed.stdout.strip()
+
+
+def current_git_commit() -> str:
+    commit = git_output(["rev-parse", "HEAD"])
+    if not GIT_COMMIT_RE.match(commit):
+        raise ArtifactError(f"git rev-parse HEAD returned invalid commit: {commit!r}")
+    return commit
+
+
+def tracked_git_dirty() -> bool:
+    return bool(git_output(["status", "--porcelain", "--untracked-files=no"]))
+
+
 def repo_relative_path(path: Path) -> str:
     try:
         return str(path.resolve().relative_to(ROOT))
@@ -220,6 +250,8 @@ def fixture_provenance(
     provenance["manifest"] = repo_relative_path(manifest_path)
     provenance["manifest_schema_version"] = manifest_schema_version
     provenance["fixture_spec_sha256"] = fixture_spec_sha256(fixture)
+    provenance["git_commit"] = current_git_commit()
+    provenance["git_tracked_dirty"] = tracked_git_dirty()
     provenance["source_sha256"] = sha256_file(source_path)
     provenance["raw_log"] = repo_relative_path(log_path)
     provenance["raw_log_sha256"] = sha256_file(log_path)
@@ -354,6 +386,8 @@ def self_test() -> int:
             or written.get("manifest") != str(manifest_path)
             or written.get("manifest_schema_version") != 1
             or not CHECKSUM_RE.match(written.get("fixture_spec_sha256", ""))
+            or not GIT_COMMIT_RE.match(written.get("git_commit", ""))
+            or not isinstance(written.get("git_tracked_dirty"), bool)
             or written.get("hardware") != "fixture hardware"
             or written.get("source") != str(source_path)
             or written.get("source_sha256") != source_sha256

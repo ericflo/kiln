@@ -18,6 +18,7 @@ from typing import Any
 from write_backend_latency_result_artifact import (
     ARTIFACT_SCHEMA_VERSION,
     ArtifactError,
+    GIT_COMMIT_RE,
     LATENCY_RAW_LOG_DIR,
     LATENCY_RESULT_ARTIFACT_DIR,
     RESULT_ARTIFACT_KEYS,
@@ -160,6 +161,20 @@ def lock_fixture_thresholds(
     if not valid_utc_timestamp(result.get("created_at_utc")):
         raise ThresholdLockError(
             f"{fixture_id}.result_artifact.created_at_utc must be an ISO-8601 UTC timestamp ending in Z"
+        )
+    git_commit = result.get("git_commit")
+    if not isinstance(git_commit, str) or not GIT_COMMIT_RE.match(git_commit):
+        raise ThresholdLockError(
+            f"{fixture_id}.result_artifact.git_commit must be a lowercase 40-character git commit"
+        )
+    git_tracked_dirty = result.get("git_tracked_dirty")
+    if not isinstance(git_tracked_dirty, bool):
+        raise ThresholdLockError(
+            f"{fixture_id}.result_artifact.git_tracked_dirty must be a boolean"
+        )
+    if git_tracked_dirty:
+        raise ThresholdLockError(
+            f"{fixture_id}.result_artifact.git_tracked_dirty must be false before thresholds can lock"
         )
     manifest = result.get("manifest")
     if not isinstance(manifest, str) or not manifest:
@@ -363,6 +378,8 @@ def self_test() -> int:
         raw_log_sha256 = sha256_file(raw_log_path)
         source_sha256 = sha256_file(source_path)
         created_at_utc = "2026-06-06T12:00:00Z"
+        git_commit = "a" * 40
+        git_tracked_dirty = False
         result_artifact_path = repo_relative_path(result_path)
         raw_log_artifact_path = repo_relative_path(raw_log_path)
         source_artifact_path = repo_relative_path(source_path)
@@ -371,6 +388,8 @@ def self_test() -> int:
                 {
                     "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
                     "created_at_utc": created_at_utc,
+                    "git_commit": git_commit,
+                    "git_tracked_dirty": git_tracked_dirty,
                     "fixture_id": "fixture",
                     "backend": "cuda",
                     "status": "passed",
@@ -454,6 +473,8 @@ def self_test() -> int:
                 {
                     "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
                     "created_at_utc": created_at_utc,
+                    "git_commit": git_commit,
+                    "git_tracked_dirty": git_tracked_dirty,
                     "fixture_id": "fixture",
                     "backend": "cuda",
                     "status": "passed",
@@ -485,6 +506,8 @@ def self_test() -> int:
                 {
                     "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
                     "created_at_utc": created_at_utc,
+                    "git_commit": git_commit,
+                    "git_tracked_dirty": git_tracked_dirty,
                     "fixture_id": "fixture",
                     "backend": "cuda",
                     "status": "passed",
@@ -516,6 +539,8 @@ def self_test() -> int:
                 {
                     "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
                     "created_at_utc": created_at_utc,
+                    "git_commit": git_commit,
+                    "git_tracked_dirty": git_tracked_dirty,
                     "fixture_id": "fixture",
                     "backend": "cuda",
                     "status": "passed",
@@ -547,6 +572,8 @@ def self_test() -> int:
                 {
                     "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
                     "created_at_utc": "2026-06-06T12:00:00-07:00",
+                    "git_commit": git_commit,
+                    "git_tracked_dirty": git_tracked_dirty,
                     "fixture_id": "fixture",
                     "backend": "cuda",
                     "status": "passed",
@@ -573,11 +600,27 @@ def self_test() -> int:
             print(json.dumps({"ok": False, "case": "artifact timestamp did not fail"}))
             return 1
 
+        dirty_result = json.loads(result_path.read_text())
+        dirty_result["created_at_utc"] = created_at_utc
+        dirty_result["git_tracked_dirty"] = True
+        result_path.write_text(json.dumps(dirty_result))
+        try:
+            lock_manifest_thresholds(manifest, 0.10)
+        except ThresholdLockError as exc:
+            if "git_tracked_dirty must be false" not in str(exc):
+                print(json.dumps({"ok": False, "case": "dirty git checkout", "error": str(exc)}))
+                return 1
+        else:
+            print(json.dumps({"ok": False, "case": "dirty git checkout did not fail"}))
+            return 1
+
         result_path.write_text(
             json.dumps(
                 {
                     "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
                     "created_at_utc": created_at_utc,
+                    "git_commit": git_commit,
+                    "git_tracked_dirty": git_tracked_dirty,
                     "fixture_id": "fixture",
                     "backend": "cuda",
                     "status": "passed",
@@ -609,6 +652,8 @@ def self_test() -> int:
                 {
                     "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
                     "created_at_utc": created_at_utc,
+                    "git_commit": git_commit,
+                    "git_tracked_dirty": git_tracked_dirty,
                     "fixture_id": "fixture",
                     "backend": "cuda",
                     "status": "passed",
@@ -640,6 +685,8 @@ def self_test() -> int:
                 {
                     "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
                     "created_at_utc": created_at_utc,
+                    "git_commit": git_commit,
+                    "git_tracked_dirty": git_tracked_dirty,
                     "fixture_id": "fixture",
                     "backend": "cuda",
                     "status": "passed",
@@ -671,6 +718,8 @@ def self_test() -> int:
                 {
                     "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
                     "created_at_utc": created_at_utc,
+                    "git_commit": git_commit,
+                    "git_tracked_dirty": git_tracked_dirty,
                     "fixture_id": "fixture",
                     "backend": "cuda",
                     "status": "passed",
@@ -703,6 +752,8 @@ def self_test() -> int:
                 {
                     "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
                     "created_at_utc": created_at_utc,
+                    "git_commit": git_commit,
+                    "git_tracked_dirty": git_tracked_dirty,
                     "fixture_id": "fixture",
                     "backend": "cuda",
                     "status": "passed",
@@ -752,6 +803,8 @@ def self_test() -> int:
                 {
                     "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
                     "created_at_utc": created_at_utc,
+                    "git_commit": git_commit,
+                    "git_tracked_dirty": git_tracked_dirty,
                     "fixture_id": "fixture",
                     "backend": "cuda",
                     "status": "passed",
@@ -807,6 +860,8 @@ def self_test() -> int:
                 {
                     "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
                     "created_at_utc": created_at_utc,
+                    "git_commit": git_commit,
+                    "git_tracked_dirty": git_tracked_dirty,
                     "fixture_id": "fixture",
                     "backend": "cuda",
                     "status": "passed",
