@@ -52,7 +52,10 @@ pub use backend::{
     GdnBackend, LinearBackend, OptimizerBackend, PagedKvBackend, ReplayBackend,
     ResidencyBackend, SamplingBackend, TrainingLossBackend,
 };
-pub use backend::capability::{BackendCapabilitySnapshot, Support};
+pub use backend::capability::{
+    AttentionRequest, AttentionRequestKind, BackendCapabilityQueries, BackendCapabilitySnapshot,
+    LinearRequest, LinearRequestKind, ReplayRequest, ReplayRequestKind, Support,
+};
 pub use backend::residency::{
     ReplayStability, ResidentOwnership, ResidentRegistry, ResidentResource,
     ResidentResourceFamily, ResidentResourceLayout, ResidentResourceState,

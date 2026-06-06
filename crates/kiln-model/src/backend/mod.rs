@@ -3080,6 +3080,10 @@ mod tests {
         let cpu = cpu::CpuBackend::new(kiln_tensor::Device::Cpu);
         let caps = capability::BackendCapabilitySnapshot::from_backend(&cpu);
 
+        assert_eq!(
+            capability::BackendCapabilityQueries::capability_snapshot(&cpu),
+            caps
+        );
         assert_eq!(caps.backend, "cpu");
         assert_eq!(caps.device, kiln_tensor::Device::Cpu);
         assert_eq!(caps.training, TrainingCapabilities::portable());
@@ -3097,6 +3101,41 @@ mod tests {
         assert_eq!(caps.gdn_recurrent_step, capability::Support::Declined);
         assert_eq!(caps.causal_conv1d_update, capability::Support::Declined);
         assert_eq!(caps.linear_decode_argmax, capability::Support::Declined);
+
+        let attention_req = capability::AttentionRequest::flash_prefill(
+            kiln_tensor::DType::BF16,
+            kiln_tensor::DType::BF16,
+            kiln_tensor::DType::BF16,
+            1,
+            16,
+            128,
+            false,
+        );
+        assert_eq!(
+            capability::BackendCapabilityQueries::supports_attention_request(
+                &cpu,
+                &attention_req
+            ),
+            capability::Support::Declined
+        );
+
+        let linear_req = capability::LinearRequest::decode_argmax(
+            kiln_tensor::DType::BF16,
+            kiln_tensor::DType::BF16,
+            kiln_tensor::DType::I64,
+            1,
+            false,
+        );
+        assert_eq!(
+            capability::BackendCapabilityQueries::supports_linear_request(&cpu, &linear_req),
+            capability::Support::Declined
+        );
+
+        let replay_req = capability::ReplayRequest::resident_decode(8, 16, 2);
+        assert_eq!(
+            capability::BackendCapabilityQueries::supports_replay_request(&cpu, &replay_req),
+            capability::Support::Declined
+        );
     }
 
     #[test]
