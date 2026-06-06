@@ -756,7 +756,7 @@ def conformance_gate_report() -> list[dict[str, Any]]:
                 "crates/kiln-optim/tests/integration.rs",
                 "crates/kiln-model/src/backend/cuda.rs",
                 "crates/kiln-model/src/backend/rocm.rs",
-                "crates/kiln-model/src/backend/metal.rs",
+                "crates/kiln-model/src/backend/metal_training.rs",
                 "crates/kiln-model/src/backend/vulkan.rs",
                 "crates/kiln-model/src/backend/vulkan_training.rs",
                 "crates/kiln-model/src/backend/mod.rs",
