@@ -1356,6 +1356,53 @@ fn generated_capability_report_gates_replay_contract() {
 }
 
 #[test]
+fn capability_queries_consume_focused_backend_facets() {
+    let root = workspace_root();
+    let capability_source =
+        fs::read_to_string(root.join("crates/kiln-model/src/backend/capability.rs"))
+            .expect("capability.rs should be readable");
+
+    for required in [
+        "pub trait BackendCapabilityQueries:",
+        "AttentionBackend",
+        "SamplingBackend",
+        "ReplayBackend",
+        "TrainingLossBackend",
+        "AttentionBackend::runtime_supports_flash_attn_prefill",
+        "SamplingBackend::runtime_supports_linear_decode_argmax",
+        "ReplayBackend::runtime_supports_replay_request",
+        "ReplayBackend::runtime_replay_key_for_request",
+    ] {
+        assert!(
+            capability_source.contains(required),
+            "BackendCapabilityQueries should consume focused facet surface {required}"
+        );
+    }
+
+    let backend_source = fs::read_to_string(root.join("crates/kiln-model/src/backend/mod.rs"))
+        .expect("backend/mod.rs should be readable");
+    let replay_impl_start = backend_source
+        .find("impl<T: BackendRuntime + ?Sized> ReplayBackend for T")
+        .expect("ReplayBackend blanket impl should be present");
+    let replay_impl = &backend_source[replay_impl_start..];
+    let replay_support_start = replay_impl
+        .find("fn runtime_supports_replay_request")
+        .expect("ReplayBackend runtime_supports_replay_request should be implemented");
+    let replay_key_start = replay_impl
+        .find("fn runtime_replay_key_for_request")
+        .expect("ReplayBackend runtime_replay_key_for_request should follow support mapping");
+    let replay_support = &replay_impl[replay_support_start..replay_key_start];
+    assert!(
+        !replay_support.contains("BackendCapabilityQueries::supports_replay_request"),
+        "ReplayBackend must own replay request support mapping instead of recursing through BackendCapabilityQueries"
+    );
+    assert!(
+        replay_support.contains("AttentionBackend::runtime_supports_flash_attn_paged_decode"),
+        "paged-decode replay support should be derived from the focused attention facet"
+    );
+}
+
+#[test]
 fn generated_capability_report_gates_matmul_linear_contract() {
     let report_path = workspace_root().join("docs/backend-capability-report.json");
     let report: Value = serde_json::from_str(

@@ -1,13 +1,17 @@
 //! Typed capability descriptors for backend diagnostics.
 //!
 //! This is the Phase 0/1 bridge from bool-only `supports_*` predicates toward
-//! request-shaped capability queries. The snapshot intentionally reads existing
-//! `BackendRuntime` methods; it is descriptive only and does not change
-//! dispatch behavior.
+//! request-shaped capability queries. The snapshot intentionally reads the
+//! focused backend facets that currently forward to `BackendRuntime`; it is
+//! descriptive only and does not change dispatch behavior.
 
 use kiln_graph::ReplayKey;
 
-use super::{BackendRuntime, FallbackPolicy, TrainingCapabilities, TrainingPrecisionPolicy};
+use super::{
+    AttentionBackend, BackendIdentity, BackendRuntime, ConvBackend, FallbackPolicy, GdnBackend,
+    PagedKvBackend, ReplayBackend, ResidencyBackend, SamplingBackend, TrainingCapabilities,
+    TrainingLossBackend, TrainingPrecisionPolicy,
+};
 
 /// Backend answer for a capability query.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -670,32 +674,47 @@ pub struct BackendCapabilitySnapshot {
 }
 
 impl BackendCapabilitySnapshot {
-    pub fn from_backend<T: BackendRuntime + ?Sized>(backend: &T) -> Self {
+    pub fn from_backend<T>(backend: &T) -> Self
+    where
+        T: BackendRuntime
+            + BackendIdentity
+            + AttentionBackend
+            + PagedKvBackend
+            + GdnBackend
+            + ConvBackend
+            + SamplingBackend
+            + ResidencyBackend
+            + TrainingLossBackend
+            + ReplayBackend
+            + ?Sized,
+    {
         Self {
-            backend: backend.name(),
-            device: backend.device(),
-            training: backend.training_capabilities(),
-            resident_decode: Support::from_supports_predicate(backend.supports_resident_decode()),
+            backend: BackendIdentity::runtime_name(backend),
+            device: BackendIdentity::runtime_device(backend),
+            training: TrainingLossBackend::runtime_training_capabilities(backend),
+            resident_decode: Support::from_supports_predicate(
+                ReplayBackend::runtime_supports_resident_decode(backend),
+            ),
             resident_activation: Support::from_supports_predicate(
-                backend.supports_resident_activation(),
+                ResidencyBackend::runtime_supports_resident_activation(backend),
             ),
             flash_attn_prefill: Support::from_supports_predicate(
-                backend.supports_flash_attn_prefill(),
+                AttentionBackend::runtime_supports_flash_attn_prefill(backend),
             ),
             flash_attn_paged_decode: Support::from_supports_predicate(
-                backend.supports_flash_attn_paged_decode(),
+                AttentionBackend::runtime_supports_flash_attn_paged_decode(backend),
             ),
             paged_kv_head_major_read: Support::from_supports_predicate(
-                backend.supports_paged_kv_head_major_read(),
+                PagedKvBackend::runtime_supports_paged_kv_head_major_read(backend),
             ),
             gdn_recurrent_step: Support::from_supports_predicate(
-                backend.supports_gdn_recurrent_step(),
+                GdnBackend::runtime_supports_gdn_recurrent_step(backend),
             ),
             causal_conv1d_update: Support::from_supports_predicate(
-                backend.supports_causal_conv1d_update(),
+                ConvBackend::runtime_supports_causal_conv1d_update(backend),
             ),
             linear_decode_argmax: Support::from_supports_predicate(
-                backend.supports_linear_decode_argmax(),
+                SamplingBackend::runtime_supports_linear_decode_argmax(backend),
             ),
         }
     }
@@ -790,9 +809,23 @@ pub struct BackendCapabilities {
 }
 
 impl BackendCapabilities {
-    pub fn from_backend<T: BackendRuntime + ?Sized>(backend: &T) -> Self {
-        let device = backend.device();
-        let backend_kind = backend_kind_for_runtime(backend.name(), device);
+    pub fn from_backend<T>(backend: &T) -> Self
+    where
+        T: BackendRuntime
+            + BackendIdentity
+            + AttentionBackend
+            + PagedKvBackend
+            + GdnBackend
+            + ConvBackend
+            + SamplingBackend
+            + ResidencyBackend
+            + TrainingLossBackend
+            + ReplayBackend
+            + ?Sized,
+    {
+        let device = BackendIdentity::runtime_device(backend);
+        let name = BackendIdentity::runtime_name(backend);
+        let backend_kind = backend_kind_for_runtime(name, device);
 
         let rank2_f32 =
             MatmulRequest::plain(vec![2, 3], vec![3, 4], kiln_tensor::DType::F32, false);
@@ -856,16 +889,16 @@ impl BackendCapabilities {
             .with_dtype(kiln_tensor::DType::BF16);
 
         Self {
-            backend: backend.name(),
+            backend: name,
             device,
             storage: StorageCapabilities {
                 backend: backend_kind,
                 device,
                 resident_activation: Support::from_supports_predicate(
-                    backend.supports_resident_activation(),
+                    ResidencyBackend::runtime_supports_resident_activation(backend),
                 ),
                 resident_decode: Support::from_supports_predicate(
-                    backend.supports_resident_decode(),
+                    ReplayBackend::runtime_supports_resident_decode(backend),
                 ),
             },
             matmul: MatmulCapabilities {
@@ -895,21 +928,27 @@ impl BackendCapabilities {
             },
             gdn: GdnCapabilities {
                 recurrent_step: Support::from_supports_predicate(
-                    backend.supports_gdn_recurrent_step(),
+                    GdnBackend::runtime_supports_gdn_recurrent_step(backend),
                 ),
-                chunk_prep: Support::from_supports_predicate(backend.supports_gdn_chunk_prep()),
-                chunk_scan: Support::from_supports_predicate(backend.supports_gdn_chunk_scan()),
+                chunk_prep: Support::from_supports_predicate(
+                    GdnBackend::runtime_supports_gdn_chunk_prep(backend),
+                ),
+                chunk_scan: Support::from_supports_predicate(
+                    GdnBackend::runtime_supports_gdn_chunk_scan(backend),
+                ),
                 full_chunk_forward: Support::from_supports_predicate(
-                    backend.supports_gdn_full_chunk_forward(),
+                    GdnBackend::runtime_supports_gdn_full_chunk_forward(backend),
                 ),
-                gates: Support::from_supports_predicate(backend.supports_gdn_gates()),
+                gates: Support::from_supports_predicate(GdnBackend::runtime_supports_gdn_gates(
+                    backend,
+                )),
                 gated_rms_norm: Support::from_supports_predicate(
-                    backend.supports_gdn_gated_rms_norm(),
+                    GdnBackend::runtime_supports_gdn_gated_rms_norm(backend),
                 ),
             },
             decode: DecodeCapabilities {
                 resident_decode: Support::from_supports_predicate(
-                    backend.supports_resident_decode(),
+                    ReplayBackend::runtime_supports_resident_decode(backend),
                 ),
                 paged_decode_graph_outputs: BackendCapabilityQueries::supports_replay_request(
                     backend,
@@ -933,8 +972,8 @@ impl BackendCapabilities {
                 ),
             },
             training: BackendTrainingCapabilities {
-                hooks: backend.training_capabilities(),
-                precision: backend.training_precision_policy(),
+                hooks: TrainingLossBackend::runtime_training_capabilities(backend),
+                precision: TrainingLossBackend::runtime_training_precision_policy(backend),
             },
             graph_replay: ReplayCapabilities {
                 resident_decode: BackendCapabilityQueries::supports_replay_request(
@@ -946,7 +985,7 @@ impl BackendCapabilities {
                     &paged_replay,
                 ),
             },
-            fallback: BackendFallbackCapabilities::for_backend(backend.name(), device),
+            fallback: BackendFallbackCapabilities::for_backend(name, device),
         }
     }
 }
@@ -997,12 +1036,23 @@ fn backend_kind_for_runtime(name: &str, device: kiln_tensor::Device) -> kiln_ten
     }
 }
 
-/// Request-shaped capability query surface backed by the current runtime.
+/// Request-shaped capability query surface backed by the focused runtime facets.
 ///
 /// This is the compatibility bridge for the target architecture: call sites can
 /// start asking request-shaped questions while existing backends keep their
-/// current bool predicates and shape gates.
-pub trait BackendCapabilityQueries: BackendRuntime {
+/// current bool predicates and shape gates behind the focused facets.
+pub trait BackendCapabilityQueries:
+    BackendRuntime
+    + BackendIdentity
+    + AttentionBackend
+    + SamplingBackend
+    + ReplayBackend
+    + PagedKvBackend
+    + GdnBackend
+    + ConvBackend
+    + ResidencyBackend
+    + TrainingLossBackend
+{
     fn capability_snapshot(&self) -> BackendCapabilitySnapshot {
         BackendCapabilitySnapshot::from_backend(self)
     }
@@ -1013,11 +1063,15 @@ pub trait BackendCapabilityQueries: BackendRuntime {
 
     fn supports_attention_request(&self, req: &AttentionRequest) -> Support {
         Support::from_supports_predicate(match req.kind {
-            AttentionRequestKind::FlashPrefill => self.supports_flash_attn_prefill(),
-            AttentionRequestKind::FlashPrefillHeadMajor => {
-                self.supports_flash_attn_prefill_head_major()
+            AttentionRequestKind::FlashPrefill => {
+                AttentionBackend::runtime_supports_flash_attn_prefill(self)
             }
-            AttentionRequestKind::FlashPagedDecode => self.supports_flash_attn_paged_decode(),
+            AttentionRequestKind::FlashPrefillHeadMajor => {
+                AttentionBackend::runtime_supports_flash_attn_prefill_head_major(self)
+            }
+            AttentionRequestKind::FlashPagedDecode => {
+                AttentionBackend::runtime_supports_flash_attn_paged_decode(self)
+            }
         })
     }
 
@@ -1068,16 +1122,24 @@ pub trait BackendCapabilityQueries: BackendRuntime {
 
     fn supports_linear_request(&self, req: &LinearRequest) -> Support {
         Support::from_supports_predicate(match req.kind {
-            LinearRequestKind::DecodeArgmax => self.supports_linear_decode_argmax(),
-            LinearRequestKind::DecodeArgmaxBatch => self.supports_linear_decode_argmax_batch(),
+            LinearRequestKind::DecodeArgmax => {
+                SamplingBackend::runtime_supports_linear_decode_argmax(self)
+            }
+            LinearRequestKind::DecodeArgmaxBatch => {
+                SamplingBackend::runtime_supports_linear_decode_argmax_batch(self)
+            }
             LinearRequestKind::DecodeSample => req
                 .top_k
                 .first()
                 .copied()
-                .map(|top_k| self.supports_linear_decode_sample(top_k))
+                .map(|top_k| SamplingBackend::runtime_supports_linear_decode_sample(self, top_k))
                 .unwrap_or(false),
             LinearRequestKind::DecodeSampleBatch => {
-                self.supports_linear_decode_sample_batch(&req.top_k, &req.temperatures)
+                SamplingBackend::runtime_supports_linear_decode_sample_batch(
+                    self,
+                    &req.top_k,
+                    &req.temperatures,
+                )
             }
         })
     }
@@ -1087,15 +1149,25 @@ pub trait BackendCapabilityQueries: BackendRuntime {
             return Support::Unsupported;
         }
 
-        Support::from_supports_predicate(match req.kind {
-            ReplayRequestKind::ResidentDecode => self.supports_resident_decode(),
-            ReplayRequestKind::PagedDecodeGraphOutputs => self.supports_flash_attn_paged_decode(),
-        })
+        ReplayBackend::runtime_supports_replay_request(self, req)
     }
 
     fn replay_key_for_request(&self, req: &ReplayRequest) -> ReplayKey {
-        req.replay_key(self.device().backend())
+        ReplayBackend::runtime_replay_key_for_request(self, req)
     }
 }
 
-impl<T: BackendRuntime + ?Sized> BackendCapabilityQueries for T {}
+impl<T> BackendCapabilityQueries for T where
+    T: BackendRuntime
+        + BackendIdentity
+        + AttentionBackend
+        + SamplingBackend
+        + ReplayBackend
+        + PagedKvBackend
+        + GdnBackend
+        + ConvBackend
+        + ResidencyBackend
+        + TrainingLossBackend
+        + ?Sized
+{
+}

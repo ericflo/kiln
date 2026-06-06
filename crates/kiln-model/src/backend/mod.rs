@@ -3168,14 +3168,25 @@ impl<T: BackendRuntime + ?Sized> ReplayBackend for T {
         &self,
         req: &capability::ReplayRequest,
     ) -> capability::Support {
-        capability::BackendCapabilityQueries::supports_replay_request(self, req)
+        if !req.replay_safe || !req.has_valid_bounds() {
+            return capability::Support::Unsupported;
+        }
+
+        capability::Support::from_supports_predicate(match req.kind {
+            capability::ReplayRequestKind::ResidentDecode => {
+                ReplayBackend::runtime_supports_resident_decode(self)
+            }
+            capability::ReplayRequestKind::PagedDecodeGraphOutputs => {
+                AttentionBackend::runtime_supports_flash_attn_paged_decode(self)
+            }
+        })
     }
 
     fn runtime_replay_key_for_request(
         &self,
         req: &capability::ReplayRequest,
     ) -> kiln_graph::ReplayKey {
-        capability::BackendCapabilityQueries::replay_key_for_request(self, req)
+        req.replay_key(BackendIdentity::runtime_device(self).backend())
     }
 
     fn runtime_flash_attn_paged_decode_contiguous_batch_dyn_seqlen_with_graph_outputs(
