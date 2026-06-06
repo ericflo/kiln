@@ -407,6 +407,7 @@
         "crates/kiln-model/src/backend/metal_norm.rs",
         "crates/kiln-model/src/backend/metal_paged.rs",
         "crates/kiln-model/src/backend/metal_pipeline.rs",
+        "crates/kiln-model/src/backend/metal_precompile.rs",
         "crates/kiln-model/src/backend/metal_residency.rs",
         "crates/kiln-model/src/backend/metal_runtime.rs",
         "crates/kiln-model/src/backend/metal_training.rs"

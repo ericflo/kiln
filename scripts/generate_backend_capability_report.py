@@ -38,6 +38,7 @@ BACKEND_EXTRA_SOURCES = {
         ROOT / "crates" / "kiln-model" / "src" / "backend" / "metal_norm.rs",
         ROOT / "crates" / "kiln-model" / "src" / "backend" / "metal_paged.rs",
         ROOT / "crates" / "kiln-model" / "src" / "backend" / "metal_pipeline.rs",
+        ROOT / "crates" / "kiln-model" / "src" / "backend" / "metal_precompile.rs",
         ROOT / "crates" / "kiln-model" / "src" / "backend" / "metal_residency.rs",
         ROOT / "crates" / "kiln-model" / "src" / "backend" / "metal_runtime.rs",
         ROOT / "crates" / "kiln-model" / "src" / "backend" / "metal_training.rs",

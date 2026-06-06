@@ -117,6 +117,9 @@ pub(crate) mod metal_paged;
 pub(crate) mod metal_pipeline;
 
 #[cfg(feature = "metal")]
+pub(crate) mod metal_precompile;
+
+#[cfg(feature = "metal")]
 pub(crate) mod metal_residency;
 
 #[cfg(feature = "metal")]
