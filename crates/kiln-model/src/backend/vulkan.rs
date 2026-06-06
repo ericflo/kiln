@@ -29,11 +29,14 @@ use super::vulkan_tensor_bridge::{
     vk_f32_tensors_to_cpu_tensors_batched_vk,
 };
 use super::{
-    vulkan_attention, vulkan_linear, vulkan_training, vulkan_weights, BackendRuntime,
+    vulkan_attention, vulkan_device, vulkan_linear, vulkan_training, vulkan_weights, BackendRuntime,
     TrainingCapabilities, TrainingPrecisionPolicy,
 };
 use crate::forward::GpuWeights;
 
+pub use super::vulkan_device::{
+    precompile_custom_kernels, vulkan_device_name, vulkan_is_available,
+};
 pub use super::vulkan_training::{dispatch_adamw_step_buffers, dispatch_sgd_step_buffers};
 
 /// Vulkan backend for Kiln.
@@ -174,31 +177,7 @@ impl VulkanBackend {
     pub fn new(device: kiln_tensor::Device) -> Self {
         let config = VulkanRuntimeConfig::from_env();
 
-        let vulkan_device = match kiln_vulkan_kernel::VulkanDevice::new() {
-            Ok(dev) => {
-                let prewarm_start = std::time::Instant::now();
-                match kiln_vulkan_kernel::kernels::prewarm_builtin_pipelines(&dev) {
-                    Ok(()) => tracing::info!(
-                        elapsed_ms = prewarm_start.elapsed().as_millis() as u64,
-                        "Vulkan compute pipelines prewarmed"
-                    ),
-                    Err(e) => tracing::warn!(
-                        error = %e,
-                        "Vulkan pipeline prewarm failed; falling back to lazy pipeline creation"
-                    ),
-                }
-                tracing::info!(
-                    vendor = dev.vendor_string(),
-                    device = dev.device_name(),
-                    "Vulkan device initialized"
-                );
-                Some(Arc::new(dev))
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "Vulkan device initialization failed, falling back to CPU");
-                None
-            }
-        };
+        let vulkan_device = vulkan_device::new_backend_device();
 
         // Advertise `kt::Device::Vulkan(0)` when the logical device is up,
         // matching what `for_device_kt` callers would have constructed.
@@ -3510,39 +3489,4 @@ impl BackendRuntime for VulkanBackend {
         *conv_state_kt = new_state;
         Ok(Some(out))
     }
-}
-
-/// Check if Vulkan is available on this system.
-/// Uses a cheap probe (instance + physical-device enumeration only) cached
-/// with OnceLock to avoid repeated checks.
-pub fn vulkan_is_available() -> bool {
-    static VULKAN_AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *VULKAN_AVAILABLE.get_or_init(kiln_vulkan_kernel::VulkanDevice::probe)
-}
-
-/// Return the selected Vulkan device name for diagnostics and benchmark output.
-pub fn vulkan_device_name() -> Option<String> {
-    static VULKAN_DEVICE_NAME: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    VULKAN_DEVICE_NAME
-        .get_or_init(|| {
-            kiln_vulkan_kernel::VulkanDevice::new()
-                .ok()
-                .map(|dev| dev.device_name().to_string())
-        })
-        .clone()
-}
-
-/// Precompile Vulkan custom kernels.
-///
-/// This verifies that the validated built-in SPIR-V modules load correctly and
-/// that compute pipelines can be created. `VulkanBackend::new` warms the real
-/// backend device; this standalone helper is only for background verification.
-pub fn precompile_custom_kernels() -> Result<()> {
-    let vk_device = match kiln_vulkan_kernel::VulkanDevice::new() {
-        Ok(dev) => dev,
-        Err(_) => return Ok(()),
-    };
-    kiln_vulkan_kernel::kernels::prewarm_builtin_pipelines(&vk_device)?;
-    tracing::info!("Vulkan shader and pipeline verification complete");
-    Ok(())
 }
