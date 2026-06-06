@@ -138,6 +138,24 @@ Generated from the live source tree by `scripts/generate_backend_capability_repo
 | `ResidentResource` | 13 | `tensor_id`, `backend`, `device`, `dtype`, `shape`, `layout`, `element_count`, `byte_len`, `addressable_byte_len`, `family`, `ownership`, `state`, `replay_stability` |
 | `ResidentResourceLayout` | 3 | `strides`, `start_offset`, `contiguous` |
 
+## Conformance And Performance Gates
+
+| Gate | Phase 8 Requirement | Status | Command | Evidence | Missing Evidence |
+|---|---|---|---|---|---|
+| `storage_round_trip` | storage round trip | `covered` | `/home/ericflo/.cargo/bin/cargo test -p kiln-tensor rocm_storage_smoke` | `crates/kiln-tensor/tests/rocm_storage_smoke.rs`, `crates/kiln-vulkan-kernel/tests/vk_tensor_parity.rs` | none |
+| `host_transfer_to_device_parity` | host transfer / to_device parity with explicit unsupported errors | `partial` | `/home/ericflo/.cargo/bin/cargo test -p kiln-tensor cuda_resize_copy_primitives` | `crates/kiln-tensor/tests/cuda_resize_copy_primitives.rs`, `crates/kiln-tensor/tests/rocm_compare_parity.rs`, `crates/kiln-vulkan-kernel/tests/vk_tensor_parity.rs` | none |
+| `device_op_parity` | DeviceOp parity | `covered` | `/home/ericflo/.cargo/bin/cargo test -p kiln-tensor device_op::tests` | `crates/kiln-tensor/src/device_op.rs`, `crates/kiln-tensor/tests/rocm_scalar_op_parity.rs`, `crates/kiln-tensor/tests/metal_ops_parity.rs` | none |
+| `matmul_linear_parity` | matmul/linear parity | `partial` | `/home/ericflo/.cargo/bin/cargo test -p kiln-model matmul_request_projects_to_blas_shape_contract` | `crates/kiln-tensor/tests/rocm_matmul_parity.rs`, `crates/kiln-vulkan-kernel/tests/vk_matmul_parity.rs`, `crates/kiln-vulkan-kernel/tests/linear_decode_argmax.rs`, `crates/kiln-vulkan-kernel/tests/linear_decode_sample.rs`, `crates/kiln-model/tests/marlin_qproj_parity.rs` | none |
+| `attention_gdn_conv_parity` | attention/GDN/conv parity | `covered` | `/home/ericflo/.cargo/bin/cargo test -p kiln-model rocm_flash_attn_bwd_gradcheck` | `crates/kiln-flash-attn/tests/rocm_flash_attn_parity.rs`, `crates/kiln-gdn-kernel/tests/rocm_gdn_parity.rs`, `crates/kiln-conv1d-kernel/tests/rocm_conv1d_parity.rs`, `crates/kiln-vulkan-kernel/tests/vk_attention_parity.rs`, `crates/kiln-vulkan-kernel/tests/vk_gdn_foundation_parity.rs` | none |
+| `optimizer_parity` | optimizer parity | `partial` | `/home/ericflo/.cargo/bin/cargo test -p kiln-train training_optimizer` | `crates/kiln-optim/tests/integration.rs`, `crates/kiln-model/src/backend/mod.rs`, `crates/kiln-train/tests/vk_cuda_opd_parity.rs` | none |
+| `replay_parity` | replay parity | `partial` | `/home/ericflo/.cargo/bin/cargo test -p kiln-graph replay` | `crates/kiln-graph/tests/capture_lifetime.rs`, `crates/kiln-model/tests/vk_resident_decode_parity.rs`, `crates/kiln-tensor/tests/rocm_capture_arena.rs` | none |
+| `one_step_training_proof` | one-step training proof | `partial` | `/home/ericflo/.cargo/bin/cargo test -p kiln-model vk_sft_step_proof` | `crates/kiln-model/tests/vk_sft_step_proof.rs`, `crates/kiln-model/tests/rocm_sft_step_proof.rs`, `crates/kiln-optim/tests/end_to_end_training.rs` | none |
+| `no_unexpected_host_fallback` | no unexpected host fallback in decode/training hot paths | `covered` | `/home/ericflo/.cargo/bin/cargo test -p kiln-tensor device_op_host_fallback_counts_are_backend_and_arity_specific` | `crates/kiln-tensor/src/device_op.rs`, `crates/kiln-model/src/generate.rs`, `crates/kiln-train/src/trainer.rs` | none |
+| `decode_submit_or_replay_count` | max submit count or replay count per decode token | `gap` | `none` | none | none |
+| `matmul_algorithm_cache_reporting` | matmul algorithm/cache hit reporting | `partial` | `/home/ericflo/.cargo/bin/cargo test -p kiln-blas cublaslt_handle_smoke` | `crates/kiln-blas/src/algo_cache.rs`, `crates/kiln-blas/tests/cublaslt_handle_smoke.rs`, `crates/kiln-rocblas/src/algo_cache.rs` | none |
+| `hardware_latency_thresholds` | backend-specific latency thresholds on known hardware fixtures | `fixture_required` | `hardware runner required` | `crates/kiln-tensor/tests/metal_matmul_bench.rs`, `crates/kiln-tensor/tests/metal_sdpa_bench.rs`, `crates/kiln-server/examples/flce_phase_a_validation_bench.rs` | none |
+| `generated_capability_dashboard` | generated capability dashboard checked into docs or build artifacts | `covered` | `python3 scripts/generate_backend_capability_report.py --check` | `docs/backend-capability-report.md`, `docs/backend-capability-report.json` | none |
+
 ## Generic DeviceOp Fallback
 
 | Backend | Policy | Counter | Evidence |

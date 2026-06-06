@@ -500,6 +500,165 @@ def training_precision_policy_report() -> dict[str, Any]:
     }
 
 
+def path_exists(path: str) -> bool:
+    return (ROOT / path).exists()
+
+
+def conformance_gate_report() -> list[dict[str, Any]]:
+    gates = [
+        {
+            "gate": "storage_round_trip",
+            "phase8_requirement": "storage round trip",
+            "status": "covered",
+            "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-tensor rocm_storage_smoke",
+            "evidence": [
+                "crates/kiln-tensor/tests/rocm_storage_smoke.rs",
+                "crates/kiln-vulkan-kernel/tests/vk_tensor_parity.rs",
+            ],
+        },
+        {
+            "gate": "host_transfer_to_device_parity",
+            "phase8_requirement": "host transfer / to_device parity with explicit unsupported errors",
+            "status": "partial",
+            "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-tensor cuda_resize_copy_primitives",
+            "evidence": [
+                "crates/kiln-tensor/tests/cuda_resize_copy_primitives.rs",
+                "crates/kiln-tensor/tests/rocm_compare_parity.rs",
+                "crates/kiln-vulkan-kernel/tests/vk_tensor_parity.rs",
+            ],
+        },
+        {
+            "gate": "device_op_parity",
+            "phase8_requirement": "DeviceOp parity",
+            "status": "covered",
+            "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-tensor device_op::tests",
+            "evidence": [
+                "crates/kiln-tensor/src/device_op.rs",
+                "crates/kiln-tensor/tests/rocm_scalar_op_parity.rs",
+                "crates/kiln-tensor/tests/metal_ops_parity.rs",
+            ],
+        },
+        {
+            "gate": "matmul_linear_parity",
+            "phase8_requirement": "matmul/linear parity",
+            "status": "partial",
+            "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-model matmul_request_projects_to_blas_shape_contract",
+            "evidence": [
+                "crates/kiln-tensor/tests/rocm_matmul_parity.rs",
+                "crates/kiln-vulkan-kernel/tests/vk_matmul_parity.rs",
+                "crates/kiln-vulkan-kernel/tests/linear_decode_argmax.rs",
+                "crates/kiln-vulkan-kernel/tests/linear_decode_sample.rs",
+                "crates/kiln-model/tests/marlin_qproj_parity.rs",
+            ],
+        },
+        {
+            "gate": "attention_gdn_conv_parity",
+            "phase8_requirement": "attention/GDN/conv parity",
+            "status": "covered",
+            "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-model rocm_flash_attn_bwd_gradcheck",
+            "evidence": [
+                "crates/kiln-flash-attn/tests/rocm_flash_attn_parity.rs",
+                "crates/kiln-gdn-kernel/tests/rocm_gdn_parity.rs",
+                "crates/kiln-conv1d-kernel/tests/rocm_conv1d_parity.rs",
+                "crates/kiln-vulkan-kernel/tests/vk_attention_parity.rs",
+                "crates/kiln-vulkan-kernel/tests/vk_gdn_foundation_parity.rs",
+            ],
+        },
+        {
+            "gate": "optimizer_parity",
+            "phase8_requirement": "optimizer parity",
+            "status": "partial",
+            "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-train training_optimizer",
+            "evidence": [
+                "crates/kiln-optim/tests/integration.rs",
+                "crates/kiln-model/src/backend/mod.rs",
+                "crates/kiln-train/tests/vk_cuda_opd_parity.rs",
+            ],
+        },
+        {
+            "gate": "replay_parity",
+            "phase8_requirement": "replay parity",
+            "status": "partial",
+            "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-graph replay",
+            "evidence": [
+                "crates/kiln-graph/tests/capture_lifetime.rs",
+                "crates/kiln-model/tests/vk_resident_decode_parity.rs",
+                "crates/kiln-tensor/tests/rocm_capture_arena.rs",
+            ],
+        },
+        {
+            "gate": "one_step_training_proof",
+            "phase8_requirement": "one-step training proof",
+            "status": "partial",
+            "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-model vk_sft_step_proof",
+            "evidence": [
+                "crates/kiln-model/tests/vk_sft_step_proof.rs",
+                "crates/kiln-model/tests/rocm_sft_step_proof.rs",
+                "crates/kiln-optim/tests/end_to_end_training.rs",
+            ],
+        },
+        {
+            "gate": "no_unexpected_host_fallback",
+            "phase8_requirement": "no unexpected host fallback in decode/training hot paths",
+            "status": "covered",
+            "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-tensor device_op_host_fallback_counts_are_backend_and_arity_specific",
+            "evidence": [
+                "crates/kiln-tensor/src/device_op.rs",
+                "crates/kiln-model/src/generate.rs",
+                "crates/kiln-train/src/trainer.rs",
+            ],
+        },
+        {
+            "gate": "decode_submit_or_replay_count",
+            "phase8_requirement": "max submit count or replay count per decode token",
+            "status": "gap",
+            "command": "none",
+            "evidence": [],
+        },
+        {
+            "gate": "matmul_algorithm_cache_reporting",
+            "phase8_requirement": "matmul algorithm/cache hit reporting",
+            "status": "partial",
+            "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-blas cublaslt_handle_smoke",
+            "evidence": [
+                "crates/kiln-blas/src/algo_cache.rs",
+                "crates/kiln-blas/tests/cublaslt_handle_smoke.rs",
+                "crates/kiln-rocblas/src/algo_cache.rs",
+            ],
+        },
+        {
+            "gate": "hardware_latency_thresholds",
+            "phase8_requirement": "backend-specific latency thresholds on known hardware fixtures",
+            "status": "fixture_required",
+            "command": "hardware runner required",
+            "evidence": [
+                "crates/kiln-tensor/tests/metal_matmul_bench.rs",
+                "crates/kiln-tensor/tests/metal_sdpa_bench.rs",
+                "crates/kiln-server/examples/flce_phase_a_validation_bench.rs",
+            ],
+        },
+        {
+            "gate": "generated_capability_dashboard",
+            "phase8_requirement": "generated capability dashboard checked into docs or build artifacts",
+            "status": "covered",
+            "command": "python3 scripts/generate_backend_capability_report.py --check",
+            "evidence": [
+                "docs/backend-capability-report.md",
+                "docs/backend-capability-report.json",
+            ],
+        },
+    ]
+
+    for gate in gates:
+        gate["evidence_present"] = [
+            evidence for evidence in gate["evidence"] if path_exists(evidence)
+        ]
+        gate["evidence_missing"] = [
+            evidence for evidence in gate["evidence"] if not path_exists(evidence)
+        ]
+    return gates
+
+
 def optimizer_dispatch_report(backends: dict[str, Any]) -> dict[str, Any]:
     report: dict[str, Any] = {}
     for backend, info in backends.items():
@@ -588,6 +747,18 @@ def markdown(data: dict[str, Any]) -> str:
     for name, info in data["resident_resource_descriptors"].items():
         fields = ", ".join(f"`{field['name']}`" for field in info["fields"])
         lines.append(f"| `{name}` | {info['field_count']} | {fields} |")
+    lines.append("")
+    lines.append("## Conformance And Performance Gates")
+    lines.append("")
+    lines.append("| Gate | Phase 8 Requirement | Status | Command | Evidence | Missing Evidence |")
+    lines.append("|---|---|---|---|---|---|")
+    for gate in data["conformance_gates"]:
+        evidence = ", ".join(f"`{path}`" for path in gate["evidence_present"]) or "none"
+        missing = ", ".join(f"`{path}`" for path in gate["evidence_missing"]) or "none"
+        lines.append(
+            f"| `{gate['gate']}` | {gate['phase8_requirement']} | "
+            f"`{gate['status']}` | `{gate['command']}` | {evidence} | {missing} |"
+        )
     lines.append("")
     lines.append("## Generic DeviceOp Fallback")
     lines.append("")
@@ -683,6 +854,7 @@ def main() -> int:
         "request_descriptors": request_descriptor_report(),
         "capability_descriptors": capability_descriptor_report(),
         "resident_resource_descriptors": resident_resource_descriptor_report(),
+        "conformance_gates": conformance_gate_report(),
         "request_capability_queries": sorted(
             parse_trait_method_names(CAPABILITY_RS, "BackendCapabilityQueries")
         ),

@@ -363,6 +363,53 @@ fn generated_capability_report_lists_request_descriptors() {
             "ResidentResource should include {field}"
         );
     }
+
+    let conformance_gates = report["conformance_gates"]
+        .as_array()
+        .expect("conformance_gates should be an array");
+    let valid_statuses = ["covered", "partial", "gap", "fixture_required"];
+    let gate_names = conformance_gates
+        .iter()
+        .filter_map(|gate| gate["gate"].as_str())
+        .collect::<Vec<_>>();
+    for name in [
+        "storage_round_trip",
+        "host_transfer_to_device_parity",
+        "device_op_parity",
+        "matmul_linear_parity",
+        "attention_gdn_conv_parity",
+        "optimizer_parity",
+        "replay_parity",
+        "one_step_training_proof",
+        "no_unexpected_host_fallback",
+        "decode_submit_or_replay_count",
+        "matmul_algorithm_cache_reporting",
+        "hardware_latency_thresholds",
+        "generated_capability_dashboard",
+    ] {
+        assert!(
+            gate_names.contains(&name),
+            "conformance_gates should include {name}"
+        );
+    }
+    for gate in conformance_gates {
+        let status = gate["status"]
+            .as_str()
+            .expect("conformance gate status should be a string");
+        assert!(
+            valid_statuses.contains(&status),
+            "invalid conformance gate status {status}"
+        );
+        if status == "covered" {
+            assert!(
+                !gate["evidence_present"]
+                    .as_array()
+                    .expect("evidence_present should be an array")
+                    .is_empty(),
+                "covered conformance gate should have evidence"
+            );
+        }
+    }
 }
 
 #[test]
