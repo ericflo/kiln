@@ -2472,6 +2472,7 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
         "def metric_threshold_passes(",
         "fixture_id",
         "status must be passed",
+        "raw_log_sha256",
         "does not satisfy",
     ] {
         assert!(
@@ -2502,6 +2503,7 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
         "def parse_metric_log(",
         "KILN_LATENCY_METRIC",
         "def build_result_artifact(",
+        "raw_log_sha256",
         "fixture_id",
         "--self-test",
     ] {
@@ -2560,6 +2562,10 @@ fn generated_capability_report_tracks_hardware_latency_fixture_contract() {
         "fixture_id",
         "backend",
         "status",
+        "hardware",
+        "source",
+        "command",
+        "raw_log_sha256",
         "metrics",
         "KILN_LATENCY_METRIC",
         "run_backend_latency_fixture.py",

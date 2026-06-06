@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import tempfile
 from copy import deepcopy
@@ -14,6 +15,7 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 VALID_COMPARISONS = {"<=", ">="}
+CHECKSUM_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 class ThresholdLockError(Exception):
@@ -79,6 +81,19 @@ def lock_fixture_thresholds(fixture: dict[str, Any], headroom: float) -> dict[st
         )
     if result.get("status") != "passed":
         raise ThresholdLockError(f"{fixture_id}.result_artifact.status must be passed")
+    for key in ["hardware", "source", "command"]:
+        if result.get(key) != fixture.get(key):
+            raise ThresholdLockError(
+                f"{fixture_id}.result_artifact.{key} must be {fixture.get(key)!r}, got {result.get(key)!r}"
+            )
+    raw_log = result.get("raw_log")
+    if not isinstance(raw_log, str) or not raw_log:
+        raise ThresholdLockError(f"{fixture_id}.result_artifact.raw_log must be a non-empty string")
+    raw_log_sha256 = result.get("raw_log_sha256")
+    if not isinstance(raw_log_sha256, str) or not CHECKSUM_RE.match(raw_log_sha256):
+        raise ThresholdLockError(
+            f"{fixture_id}.result_artifact.raw_log_sha256 must be a lowercase sha256 hex digest"
+        )
 
     observations = result.get("metrics")
     if not isinstance(observations, dict):
@@ -144,6 +159,11 @@ def self_test() -> int:
                     "fixture_id": "fixture",
                     "backend": "cuda",
                     "status": "passed",
+                    "hardware": "fixture hardware",
+                    "source": "bench.py",
+                    "command": "python bench.py",
+                    "raw_log": "bench.log",
+                    "raw_log_sha256": "0" * 64,
                     "metrics": {"latency_ms": 10.0, "tokens_per_s": 200.0},
                 }
             )
@@ -155,6 +175,9 @@ def self_test() -> int:
                 {
                     "id": "fixture",
                     "backend": "cuda",
+                    "hardware": "fixture hardware",
+                    "source": "bench.py",
+                    "command": "python bench.py",
                     "result_artifact": str(result_path),
                     "threshold_state": "pending_fixture_result",
                     "metrics": [
@@ -185,6 +208,11 @@ def self_test() -> int:
                     "fixture_id": "fixture",
                     "backend": "cuda",
                     "status": "passed",
+                    "hardware": "fixture hardware",
+                    "source": "bench.py",
+                    "command": "python bench.py",
+                    "raw_log": "bench.log",
+                    "raw_log_sha256": "0" * 64,
                     "metrics": {"latency_ms": 10.0},
                 }
             )

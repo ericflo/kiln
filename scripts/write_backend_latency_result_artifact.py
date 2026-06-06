@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -15,6 +16,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 METRIC_RE = re.compile(r"^\s*KILN_LATENCY_METRIC\s+(\S+)\s+([-+0-9.eE]+)\s+(\S+)\s*$")
 VALID_RESULT_STATUSES = {"passed", "failed"}
+CHECKSUM_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 class ArtifactError(Exception):
@@ -86,10 +88,31 @@ def fixture_metric_specs(fixture: dict[str, Any]) -> dict[str, str]:
     return specs
 
 
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def fixture_provenance(fixture: dict[str, Any], log_path: Path) -> dict[str, Any]:
+    provenance: dict[str, Any] = {}
+    for key in ["hardware", "source", "command"]:
+        value = fixture.get(key)
+        if not isinstance(value, str) or not value:
+            raise ArtifactError(f"fixture.{key} must be a non-empty string")
+        provenance[key] = value
+    provenance["raw_log"] = str(log_path)
+    provenance["raw_log_sha256"] = sha256_file(log_path)
+    return provenance
+
+
 def build_result_artifact(
     fixture: dict[str, Any],
     observations: dict[str, tuple[float, str]],
     status: str,
+    log_path: Path,
 ) -> dict[str, Any]:
     if status not in VALID_RESULT_STATUSES:
         raise ArtifactError(f"status must be one of {sorted(VALID_RESULT_STATUSES)}")
@@ -127,6 +150,7 @@ def build_result_artifact(
         "fixture_id": fixture_id,
         "backend": backend,
         "status": status,
+        **fixture_provenance(fixture, log_path),
         "metrics": artifact_metrics,
     }
 
@@ -155,6 +179,9 @@ def self_test() -> int:
                 {
                     "id": "cuda_fixture",
                     "backend": "cuda",
+                    "hardware": "fixture hardware",
+                    "source": "bench.rs",
+                    "command": "python bench.py",
                     "result_artifact": str(output_path),
                     "metrics": [
                         {"name": "latency_ms", "unit": "ms"},
@@ -178,15 +205,21 @@ def self_test() -> int:
         loaded = load_manifest(manifest_path)
         fixture = find_fixture(loaded, "cuda_fixture")
         observations = parse_metric_log(log_path)
-        artifact = build_result_artifact(fixture, observations, "passed")
+        artifact = build_result_artifact(fixture, observations, "passed", log_path)
         write_artifact(output_path, artifact)
         written = json.loads(output_path.read_text())
-        if written != {
-            "fixture_id": "cuda_fixture",
-            "backend": "cuda",
-            "status": "passed",
-            "metrics": {"latency_ms": 9.5, "tokens_per_s": 125.0},
-        }:
+        if (
+            written.get("fixture_id") != "cuda_fixture"
+            or written.get("backend") != "cuda"
+            or written.get("status") != "passed"
+            or written.get("hardware") != "fixture hardware"
+            or written.get("source") != "bench.rs"
+            or written.get("command") != "python bench.py"
+            or written.get("raw_log") != str(log_path)
+            or not isinstance(written.get("raw_log_sha256"), str)
+            or not CHECKSUM_RE.match(written["raw_log_sha256"])
+            or written.get("metrics") != {"latency_ms": 9.5, "tokens_per_s": 125.0}
+        ):
             print(
                 json.dumps(
                     {"ok": False, "case": "write artifact", "artifact": written},
@@ -200,6 +233,7 @@ def self_test() -> int:
                 fixture,
                 {"latency_ms": (9.5, "ms")},
                 "passed",
+                log_path,
             )
         except ArtifactError as exc:
             if "missing required metrics" not in str(exc):
@@ -214,6 +248,7 @@ def self_test() -> int:
                 fixture,
                 {"latency_ms": (9.5, "s"), "tokens_per_s": (125.0, "tok/s")},
                 "passed",
+                log_path,
             )
         except ArtifactError as exc:
             if "metric unit mismatch" not in str(exc):
@@ -271,7 +306,7 @@ def main() -> int:
         manifest = load_manifest(manifest_path)
         fixture = find_fixture(manifest, args.fixture_id)
         observations = parse_metric_log(log_path)
-        artifact = build_result_artifact(fixture, observations, args.status)
+        artifact = build_result_artifact(fixture, observations, args.status, log_path)
         output_path = Path(args.output) if args.output else default_output_path(fixture)
         if not output_path.is_absolute():
             output_path = ROOT / output_path

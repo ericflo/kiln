@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -17,6 +19,7 @@ VALID_STATUS = {"fixture_required", "covered"}
 VALID_THRESHOLD_STATES = {"pending_fixture_result", "locked_threshold"}
 VALID_COMPARISONS = {"<=", ">="}
 VALID_RESULT_STATUSES = {"passed", "failed"}
+CHECKSUM_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 def is_number(value: Any) -> bool:
@@ -71,6 +74,46 @@ def metric_threshold_passes(metric: dict[str, Any], observed: float) -> bool:
     return False
 
 
+def validate_result_provenance(
+    errors: list[str],
+    fixture: dict[str, Any],
+    result: dict[str, Any],
+    context: str,
+) -> None:
+    for key in ["hardware", "source", "command"]:
+        expected = fixture.get(key)
+        observed = result.get(key)
+        if observed != expected:
+            errors.append(
+                f"{context}.result_artifact.{key} must be {expected!r}, got {observed!r}"
+            )
+
+    raw_log = result.get("raw_log")
+    if not isinstance(raw_log, str) or not raw_log:
+        errors.append(f"{context}.result_artifact.raw_log must be a non-empty string")
+
+    raw_log_sha256 = result.get("raw_log_sha256")
+    if not isinstance(raw_log_sha256, str) or not CHECKSUM_RE.match(raw_log_sha256):
+        errors.append(
+            f"{context}.result_artifact.raw_log_sha256 must be a lowercase sha256 hex digest"
+        )
+        return
+
+    if isinstance(raw_log, str) and raw_log:
+        raw_log_path = Path(raw_log)
+        if not raw_log_path.is_absolute():
+            raw_log_path = ROOT / raw_log_path
+        if raw_log_path.is_file():
+            digest = hashlib.sha256()
+            with raw_log_path.open("rb") as handle:
+                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            if digest.hexdigest() != raw_log_sha256:
+                errors.append(
+                    f"{context}.result_artifact.raw_log_sha256 does not match raw_log"
+                )
+
+
 def validate_result_artifact(
     errors: list[str],
     fixture: dict[str, Any],
@@ -100,6 +143,8 @@ def validate_result_artifact(
         )
     elif status != "passed":
         errors.append(f"{context}.result_artifact.status must be passed")
+
+    validate_result_provenance(errors, fixture, result, context)
 
     observed_metrics = result.get("metrics")
     if not isinstance(observed_metrics, dict):
@@ -253,6 +298,9 @@ def self_test() -> int:
         source = tmp_root / "bench.rs"
         source.write_text("// fixture source\n")
         artifact = tmp_root / "result.json"
+        raw_log = tmp_root / "raw.log"
+        raw_log.write_text("KILN_LATENCY_METRIC latency_ms 9.5 ms\n")
+        raw_log_sha256 = hashlib.sha256(raw_log.read_bytes()).hexdigest()
         fixture = {
             "id": "cuda_fixture",
             "backend": "cuda",
@@ -276,6 +324,13 @@ def self_test() -> int:
                     "fixture_id": "cuda_fixture",
                     "backend": "cuda",
                     "status": "passed",
+                    "hardware": "fixture",
+                    "source": str(source.relative_to(ROOT))
+                    if source.is_relative_to(ROOT)
+                    else str(source),
+                    "command": "cargo bench",
+                    "raw_log": str(raw_log),
+                    "raw_log_sha256": raw_log_sha256,
                     "metrics": {"latency_ms": 9.5, "tokens_per_s": 125.0},
                 }
             )
@@ -297,6 +352,13 @@ def self_test() -> int:
                     "fixture_id": "cuda_fixture",
                     "backend": "cuda",
                     "status": "passed",
+                    "hardware": "fixture",
+                    "source": str(source.relative_to(ROOT))
+                    if source.is_relative_to(ROOT)
+                    else str(source),
+                    "command": "cargo bench",
+                    "raw_log": str(raw_log),
+                    "raw_log_sha256": raw_log_sha256,
                     "metrics": {"latency_ms": 12.0, "tokens_per_s": 125.0},
                 }
             )
@@ -318,6 +380,13 @@ def self_test() -> int:
                     "fixture_id": "wrong",
                     "backend": "cuda",
                     "status": "passed",
+                    "hardware": "fixture",
+                    "source": str(source.relative_to(ROOT))
+                    if source.is_relative_to(ROOT)
+                    else str(source),
+                    "command": "cargo bench",
+                    "raw_log": str(raw_log),
+                    "raw_log_sha256": raw_log_sha256,
                     "metrics": {"latency_ms": 9.5, "tokens_per_s": 125.0},
                 }
             )
@@ -328,6 +397,34 @@ def self_test() -> int:
             print(
                 json.dumps(
                     {"ok": False, "case": "fixture id mismatch", "errors": errors},
+                    indent=2,
+                )
+            )
+            return 1
+
+        artifact.write_text(
+            json.dumps(
+                {
+                    "fixture_id": "cuda_fixture",
+                    "backend": "cuda",
+                    "status": "passed",
+                    "hardware": "wrong",
+                    "source": str(source.relative_to(ROOT))
+                    if source.is_relative_to(ROOT)
+                    else str(source),
+                    "command": "cargo bench",
+                    "raw_log": str(raw_log),
+                    "raw_log_sha256": raw_log_sha256,
+                    "metrics": {"latency_ms": 9.5, "tokens_per_s": 125.0},
+                }
+            )
+        )
+        errors = []
+        validate_result_artifact(errors, fixture, artifact, "fixtures[0]")
+        if not any("hardware must be" in error for error in errors):
+            print(
+                json.dumps(
+                    {"ok": False, "case": "provenance mismatch", "errors": errors},
                     indent=2,
                 )
             )

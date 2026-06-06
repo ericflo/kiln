@@ -32,6 +32,11 @@ The result artifact is JSON:
   "fixture_id": "metal_apple_silicon_matmul_qwen35_4b",
   "backend": "metal",
   "status": "passed",
+  "hardware": "Apple Silicon Metal fixture",
+  "source": "crates/kiln-tensor/tests/metal_matmul_bench.rs",
+  "command": "/home/ericflo/.cargo/bin/cargo test -p kiln-tensor --features metal --test metal_matmul_bench -- --ignored --nocapture",
+  "raw_log": "bench-results/backend-latency/raw/metal-apple-silicon-matmul-qwen35-4b-20260606T120000Z.log",
+  "raw_log_sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
   "metrics": {
     "decode_qkv_m1_2560x4096_ms": 1.23
   }
@@ -43,7 +48,15 @@ Required fields:
 - `fixture_id`: exactly matches the fixture `id`
 - `backend`: exactly matches the fixture `backend`
 - `status`: `passed`
+- `hardware`: exactly matches the fixture `hardware`
+- `source`: exactly matches the fixture `source`
+- `command`: exactly matches the fixture `command`
+- `raw_log`: non-empty path or identifier for the captured raw fixture log
+- `raw_log_sha256`: lowercase SHA-256 hex digest of the raw fixture log
 - `metrics`: object containing every metric named by the fixture
+
+When the referenced `raw_log` file is present in the checkout, the validator
+also checks that its SHA-256 digest matches `raw_log_sha256`.
 
 For each fixture metric, the observed value must be numeric and satisfy its
 comparison against `max`. For example, `comparison: "<="` requires observed

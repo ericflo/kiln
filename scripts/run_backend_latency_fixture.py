@@ -83,7 +83,7 @@ def materialize_result_artifact(
     if status not in VALID_RESULT_STATUSES:
         raise FixtureRunError(f"status must be one of {sorted(VALID_RESULT_STATUSES)}")
     observations = parse_metric_log(log_path)
-    artifact = build_result_artifact(fixture, observations, status)
+    artifact = build_result_artifact(fixture, observations, status, log_path)
     output_path = output if output is not None else default_output_path(fixture)
     if not output_path.is_absolute():
         output_path = ROOT / output_path
@@ -140,6 +140,8 @@ def self_test() -> int:
                         {
                             "id": "runner_fixture",
                             "backend": "cuda",
+                            "hardware": "fixture hardware",
+                            "source": str(bench_script),
                             "command": f"{sys.executable} {bench_script}",
                             "result_artifact": str(result_path),
                             "metrics": [
@@ -160,12 +162,16 @@ def self_test() -> int:
             echo=False,
         )
         result = json.loads(result_path.read_text())
-        if result != {
-            "fixture_id": "runner_fixture",
-            "backend": "cuda",
-            "status": "passed",
-            "metrics": {"latency_ms": 9.25, "tokens_per_s": 128.0},
-        }:
+        if (
+            result.get("fixture_id") != "runner_fixture"
+            or result.get("backend") != "cuda"
+            or result.get("status") != "passed"
+            or result.get("hardware") != "fixture hardware"
+            or result.get("source") != str(bench_script)
+            or result.get("command") != f"{sys.executable} {bench_script}"
+            or result.get("metrics") != {"latency_ms": 9.25, "tokens_per_s": 128.0}
+            or not isinstance(result.get("raw_log_sha256"), str)
+        ):
             print(json.dumps({"ok": False, "case": "result artifact", "result": result}))
             return 1
         raw_log = Path(summary["raw_log"])
