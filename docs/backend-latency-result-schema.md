@@ -21,7 +21,7 @@ To cover the gate, each fixture must:
 
 - set `threshold_state` to `locked_threshold`
 - set every metric `max` to a numeric threshold
-- write the referenced `result_artifact`
+- write the referenced repo-relative `result_artifact`
 - set the manifest `status` to `covered`
 - pass `python3 scripts/check_backend_latency_fixtures.py docs/backend-latency-fixtures.json --require-covered`
 
@@ -56,8 +56,8 @@ Required fields:
 - `fixture_id`: exactly matches the fixture `id`
 - `backend`: exactly matches the fixture `backend`
 - `status`: `passed`
-- `manifest`: non-empty manifest path; checked against the validator input path
-  when available
+- `manifest`: non-empty repo-relative manifest path; checked against the
+  validator input path when available
 - `manifest_schema_version`: exactly matches the fixture manifest
   `schema_version`
 - `fixture_spec_sha256`: lowercase SHA-256 hex digest of the stable fixture
@@ -66,15 +66,16 @@ Required fields:
 - `hardware`: exactly matches the fixture `hardware`
 - `source`: exactly matches the fixture `source`
 - `command`: exactly matches the fixture `command`
-- `raw_log`: non-empty path for the captured raw fixture log; covered fixtures
-  require this file to exist when validated
+- `raw_log`: non-empty repo-relative path for the captured raw fixture log;
+  covered fixtures require this file to exist when validated
 - `raw_log_sha256`: lowercase SHA-256 hex digest of the raw fixture log
 - `metrics`: object containing every metric named by the fixture, with finite
   numeric values
 
-When `--require-covered` is set, the validator requires the referenced
-`raw_log` file to exist in the checkout and checks that its SHA-256 digest
-matches `raw_log_sha256`.
+When `--require-covered` is set, the validator requires the fixture
+`result_artifact`, result `manifest`, and result `raw_log` paths to be
+repo-relative. It also requires the referenced `raw_log` file to exist in the
+checkout and checks that its SHA-256 digest matches `raw_log_sha256`.
 
 The fixture digest deliberately excludes metric `max`, `threshold_state`, and
 `result_artifact` so a reviewed artifact remains valid while thresholds are
@@ -109,7 +110,9 @@ python3 scripts/run_backend_latency_fixture.py \
 The fixture runner executes the selected fixture `command`, writes a timestamped
 raw log under `bench-results/backend-latency/raw`, and then invokes the same
 artifact materialization contract used by the standalone writer. If the fixture
-has already been run manually, materialize the result artifact from the raw log:
+has already been run manually, materialize the result artifact from the raw log.
+Covered artifacts should use a raw log checked into the repository, such as one
+captured by the fixture runner under `bench-results/backend-latency/raw`:
 
 ```sh
 python3 scripts/write_backend_latency_result_artifact.py \
@@ -132,12 +135,14 @@ python3 scripts/lock_backend_latency_thresholds.py \
   --headroom 0.10
 ```
 
-The threshold locker requires every fixture result artifact to exist, have
-`status: "passed"`, match the result artifact schema version, include a valid
-UTC creation timestamp, match the fixture `id`, `backend`, manifest schema
-version, stable fixture digest, hardware/source/command provenance, and contain
-every declared metric. It also requires the referenced raw log file to exist and
-match `raw_log_sha256`. It sets every fixture `threshold_state` to
+The threshold locker requires every fixture result artifact path to be
+repo-relative, exist, have `status: "passed"`, match the result artifact schema
+version, include a valid UTC creation timestamp, match the fixture `id`,
+`backend`, manifest schema version, stable fixture digest,
+hardware/source/command provenance, and contain every declared metric. It also
+requires the result `manifest` and `raw_log` paths to be repo-relative, and the
+referenced raw log file to exist and match `raw_log_sha256`. It sets every
+fixture `threshold_state` to
 `locked_threshold`, sets the manifest `status` to `covered`, and applies the
 headroom by comparison: `<=` thresholds are raised above observed latency, while
 `>=` thresholds are lowered below observed throughput. Use `--check` to validate

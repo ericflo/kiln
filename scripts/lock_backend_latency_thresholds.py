@@ -50,6 +50,11 @@ def resolve_repo_path(path: str) -> Path:
     return candidate if candidate.is_absolute() else ROOT / candidate
 
 
+def is_repo_relative_path(path: str) -> bool:
+    candidate = Path(path)
+    return not candidate.is_absolute() and ".." not in candidate.parts
+
+
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as handle:
@@ -98,6 +103,10 @@ def lock_fixture_thresholds(
     result_artifact = fixture.get("result_artifact")
     if not isinstance(result_artifact, str) or not result_artifact:
         raise ThresholdLockError(f"{fixture_id}.result_artifact must be a non-empty string")
+    if not is_repo_relative_path(result_artifact):
+        raise ThresholdLockError(
+            f"{fixture_id}.result_artifact must be repo-relative before thresholds can lock"
+        )
     result_path = resolve_repo_path(result_artifact)
     if not result_path.is_file():
         raise ThresholdLockError(f"{fixture_id}.result_artifact does not exist: {result_artifact}")
@@ -125,6 +134,10 @@ def lock_fixture_thresholds(
     if not isinstance(manifest, str) or not manifest:
         raise ThresholdLockError(
             f"{fixture_id}.result_artifact.manifest must be a non-empty string"
+        )
+    if not is_repo_relative_path(manifest):
+        raise ThresholdLockError(
+            f"{fixture_id}.result_artifact.manifest must be repo-relative before thresholds can lock"
         )
     if manifest_path is not None and manifest != repo_relative_path(manifest_path):
         raise ThresholdLockError(
@@ -154,6 +167,10 @@ def lock_fixture_thresholds(
     raw_log = result.get("raw_log")
     if not isinstance(raw_log, str) or not raw_log:
         raise ThresholdLockError(f"{fixture_id}.result_artifact.raw_log must be a non-empty string")
+    if not is_repo_relative_path(raw_log):
+        raise ThresholdLockError(
+            f"{fixture_id}.result_artifact.raw_log must be repo-relative before thresholds can lock"
+        )
     raw_log_path = resolve_repo_path(raw_log)
     if not raw_log_path.is_file():
         raise ThresholdLockError(
@@ -236,13 +253,17 @@ def write_manifest(path: Path, manifest: dict[str, Any]) -> None:
 
 
 def self_test() -> int:
-    with tempfile.TemporaryDirectory() as tmp:
+    temp_parent = ROOT / "target"
+    temp_parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="backend-latency-locker-", dir=temp_parent) as tmp:
         tmp_root = Path(tmp)
         result_path = tmp_root / "result.json"
         raw_log_path = tmp_root / "bench.log"
         raw_log_path.write_text("KILN_LATENCY_METRIC latency_ms 10.0 ms\n")
         raw_log_sha256 = sha256_file(raw_log_path)
         created_at_utc = "2026-06-06T12:00:00Z"
+        result_artifact_path = repo_relative_path(result_path)
+        raw_log_artifact_path = repo_relative_path(raw_log_path)
         result_path.write_text(
             json.dumps(
                 {
@@ -256,7 +277,7 @@ def self_test() -> int:
                     "hardware": "fixture hardware",
                     "source": "bench.py",
                     "command": "python bench.py",
-                    "raw_log": str(raw_log_path),
+                    "raw_log": raw_log_artifact_path,
                     "raw_log_sha256": raw_log_sha256,
                     "metrics": {"latency_ms": 10.0, "tokens_per_s": 200.0},
                 }
@@ -272,7 +293,7 @@ def self_test() -> int:
                     "hardware": "fixture hardware",
                     "source": "bench.py",
                     "command": "python bench.py",
-                    "result_artifact": str(result_path),
+                    "result_artifact": result_artifact_path,
                     "threshold_state": "pending_fixture_result",
                     "metrics": [
                         {"name": "latency_ms", "unit": "ms", "comparison": "<=", "max": None},
@@ -313,7 +334,7 @@ def self_test() -> int:
                     "hardware": "fixture hardware",
                     "source": "bench.py",
                     "command": "python bench.py",
-                    "raw_log": str(raw_log_path),
+                    "raw_log": raw_log_artifact_path,
                     "raw_log_sha256": raw_log_sha256,
                     "metrics": {"latency_ms": 10.0},
                 }
@@ -343,7 +364,7 @@ def self_test() -> int:
                     "hardware": "fixture hardware",
                     "source": "bench.py",
                     "command": "python bench.py",
-                    "raw_log": str(raw_log_path),
+                    "raw_log": raw_log_artifact_path,
                     "raw_log_sha256": raw_log_sha256,
                     "metrics": {"latency_ms": 10.0, "tokens_per_s": 200.0},
                 }
@@ -373,7 +394,7 @@ def self_test() -> int:
                     "hardware": "fixture hardware",
                     "source": "bench.py",
                     "command": "python bench.py",
-                    "raw_log": str(raw_log_path),
+                    "raw_log": raw_log_artifact_path,
                     "raw_log_sha256": raw_log_sha256,
                     "metrics": {"latency_ms": float("inf"), "tokens_per_s": 200.0},
                 }
@@ -403,7 +424,7 @@ def self_test() -> int:
                     "hardware": "fixture hardware",
                     "source": "bench.py",
                     "command": "python bench.py",
-                    "raw_log": str(raw_log_path),
+                    "raw_log": raw_log_artifact_path,
                     "raw_log_sha256": raw_log_sha256,
                     "metrics": {"latency_ms": 10.0, "tokens_per_s": 200.0},
                 }
@@ -433,7 +454,7 @@ def self_test() -> int:
                     "hardware": "fixture hardware",
                     "source": "bench.py",
                     "command": "python bench.py",
-                    "raw_log": str(tmp_root / "missing.log"),
+                    "raw_log": repo_relative_path(tmp_root / "missing.log"),
                     "raw_log_sha256": raw_log_sha256,
                     "metrics": {"latency_ms": 10.0, "tokens_per_s": 200.0},
                 }
@@ -463,7 +484,7 @@ def self_test() -> int:
                     "hardware": "fixture hardware",
                     "source": "bench.py",
                     "command": "python bench.py",
-                    "raw_log": str(raw_log_path),
+                    "raw_log": raw_log_artifact_path,
                     "raw_log_sha256": "1" * 64,
                     "metrics": {"latency_ms": 10.0, "tokens_per_s": 200.0},
                 }
@@ -477,6 +498,48 @@ def self_test() -> int:
                 return 1
         else:
             print(json.dumps({"ok": False, "case": "raw log checksum did not fail"}))
+            return 1
+
+        absolute_manifest = deepcopy(manifest)
+        absolute_manifest["fixtures"][0]["result_artifact"] = str(result_path)
+        try:
+            lock_manifest_thresholds(absolute_manifest, 0.10)
+        except ThresholdLockError as exc:
+            if "result_artifact must be repo-relative" not in str(exc):
+                print(json.dumps({"ok": False, "case": "absolute artifact", "error": str(exc)}))
+                return 1
+        else:
+            print(json.dumps({"ok": False, "case": "absolute artifact did not fail"}))
+            return 1
+
+        result_path.write_text(
+            json.dumps(
+                {
+                    "artifact_schema_version": ARTIFACT_SCHEMA_VERSION,
+                    "created_at_utc": created_at_utc,
+                    "fixture_id": "fixture",
+                    "backend": "cuda",
+                    "status": "passed",
+                    "manifest": "fixtures.json",
+                    "manifest_schema_version": 1,
+                    "fixture_spec_sha256": fixture_spec_sha256(manifest["fixtures"][0]),
+                    "hardware": "fixture hardware",
+                    "source": "bench.py",
+                    "command": "python bench.py",
+                    "raw_log": str(raw_log_path),
+                    "raw_log_sha256": raw_log_sha256,
+                    "metrics": {"latency_ms": 10.0, "tokens_per_s": 200.0},
+                }
+            )
+        )
+        try:
+            lock_manifest_thresholds(manifest, 0.10)
+        except ThresholdLockError as exc:
+            if "raw_log must be repo-relative" not in str(exc):
+                print(json.dumps({"ok": False, "case": "absolute raw log", "error": str(exc)}))
+                return 1
+        else:
+            print(json.dumps({"ok": False, "case": "absolute raw log did not fail"}))
             return 1
 
     print(json.dumps({"ok": True, "self_test": "backend latency threshold locker"}))
