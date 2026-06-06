@@ -504,6 +504,7 @@ impl ReplayRequestKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplayRequest {
     pub kind: ReplayRequestKind,
+    pub replay_shape: Vec<usize>,
     pub max_hidden: usize,
     pub max_intermediate: usize,
     pub max_batch: usize,
@@ -512,13 +513,11 @@ pub struct ReplayRequest {
 }
 
 impl ReplayRequest {
-    pub const fn resident_decode(
-        max_hidden: usize,
-        max_intermediate: usize,
-        max_batch: usize,
-    ) -> Self {
+    pub fn resident_decode(max_hidden: usize, max_intermediate: usize, max_batch: usize) -> Self {
+        let replay_shape = Self::shape_from_bounds(max_hidden, max_intermediate, max_batch);
         Self {
             kind: ReplayRequestKind::ResidentDecode,
+            replay_shape,
             max_hidden,
             max_intermediate,
             max_batch,
@@ -527,13 +526,15 @@ impl ReplayRequest {
         }
     }
 
-    pub const fn paged_decode_graph_outputs(
+    pub fn paged_decode_graph_outputs(
         max_hidden: usize,
         max_intermediate: usize,
         max_batch: usize,
     ) -> Self {
+        let replay_shape = Self::shape_from_bounds(max_hidden, max_intermediate, max_batch);
         Self {
             kind: ReplayRequestKind::PagedDecodeGraphOutputs,
+            replay_shape,
             max_hidden,
             max_intermediate,
             max_batch,
@@ -552,8 +553,13 @@ impl ReplayRequest {
         self
     }
 
+    pub fn with_replay_shape(mut self, replay_shape: Vec<usize>) -> Self {
+        self.replay_shape = replay_shape;
+        self
+    }
+
     pub fn shape_key(&self) -> Vec<usize> {
-        vec![self.max_hidden, self.max_intermediate, self.max_batch]
+        self.replay_shape.clone()
     }
 
     pub fn replay_key(&self, backend: kiln_tensor::Backend) -> ReplayKey {
@@ -569,6 +575,14 @@ impl ReplayRequest {
 
     pub const fn has_valid_bounds(&self) -> bool {
         self.max_hidden > 0 && self.max_intermediate > 0 && self.max_batch > 0
+    }
+
+    fn shape_from_bounds(
+        max_hidden: usize,
+        max_intermediate: usize,
+        max_batch: usize,
+    ) -> Vec<usize> {
+        vec![max_hidden, max_intermediate, max_batch]
     }
 }
 

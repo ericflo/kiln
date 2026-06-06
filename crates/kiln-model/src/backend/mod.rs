@@ -3392,6 +3392,7 @@ mod tests {
 
         let replay_req = capability::ReplayRequest::resident_decode(8, 16, 2)
             .with_dtype(kiln_tensor::DType::BF16);
+        assert_eq!(replay_req.shape_key(), vec![8, 16, 2]);
         assert_eq!(
             capability::BackendCapabilityQueries::supports_replay_request(&cpu, &replay_req),
             capability::Support::Declined

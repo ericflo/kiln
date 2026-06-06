@@ -106,7 +106,7 @@ Generated from the live source tree by `scripts/generate_backend_capability_repo
 | `MatmulRequest` | 12 | yes | yes | yes | yes | `lhs_shape`, `rhs_shape`, `lhs_dtype`, `rhs_dtype`, `out_dtype`, `accumulation`, `lhs_layout`, `rhs_layout`, `out_layout`, `batch`, `epilogue`, `replay_safe` |
 | `MatmulBlasRequest` | 10 | yes | yes | yes | no | `m`, `n`, `k`, `dtype`, `lhs_layout`, `rhs_layout`, `out_layout`, `epilogue`, `batch`, `concurrent_streams` |
 | `LinearRequest` | 11 | yes | yes | yes | yes | `kind`, `input_shape`, `weight_shape`, `output_shape`, `input_dtype`, `weight_dtype`, `output_dtype`, `batch`, `top_k`, `temperatures`, `replay_safe` |
-| `ReplayRequest` | 6 | yes | no | yes | yes | `kind`, `max_hidden`, `max_intermediate`, `max_batch`, `dtype`, `replay_safe` |
+| `ReplayRequest` | 7 | yes | yes | yes | yes | `kind`, `replay_shape`, `max_hidden`, `max_intermediate`, `max_batch`, `dtype`, `replay_safe` |
 
 ## Request Capability Queries
 

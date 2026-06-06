@@ -2385,11 +2385,15 @@
       "source": "crates/kiln-model/src/backend/capability.rs"
     },
     "ReplayRequest": {
-      "field_count": 6,
+      "field_count": 7,
       "fields": [
         {
           "name": "kind",
           "type": "ReplayRequestKind"
+        },
+        {
+          "name": "replay_shape",
+          "type": "Vec<usize>"
         },
         {
           "name": "max_hidden",
@@ -2415,7 +2419,7 @@
       "has_batch": true,
       "has_dtype": true,
       "has_replay_safe": true,
-      "has_shape": false,
+      "has_shape": true,
       "source": "crates/kiln-model/src/backend/capability.rs"
     }
   },

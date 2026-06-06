@@ -940,6 +940,14 @@ fn generated_capability_report_lists_request_descriptors() {
         .collect::<Vec<_>>();
     assert!(replay_fields.contains(&"dtype"));
     assert!(replay_fields.contains(&"replay_safe"));
+    assert_eq!(
+        descriptors["ReplayRequest"]["has_shape"], true,
+        "ReplayRequest should carry replay shape metadata for replay key derivation"
+    );
+    assert!(
+        replay_fields.contains(&"replay_shape"),
+        "ReplayRequest should include replay_shape"
+    );
 
     let attention = &descriptors["AttentionRequest"];
     assert_eq!(
